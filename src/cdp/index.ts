@@ -1,0 +1,8 @@
+/**
+ * CDP 接入层公共出口（原生 WebSocket，无 Playwright / chrome-remote-interface 依赖）。
+ */
+export * from './client.js';
+export * from './targets.js';
+export * from './dom-provider.js';
+export * from './action-executor.js';
+export * from './session.js';

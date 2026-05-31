@@ -1,0 +1,22 @@
+{
+  "name": "aidcp-edge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AIDCP 边缘端：DOM-first 定位层引擎 + CDP（原生 WebSocket）页面接入（DomProvider / ActionExecutor）。",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/**/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^22.10.0",
+    "jsdom": "^25.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
