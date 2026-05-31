@@ -1,4 +1,4 @@
-/**
+﻿/**
  * DOM 作用域元素抽取。
  *
  * 作用：把页面（或某作用域容器）内的可交互元素抽取成结构化清单，
@@ -57,11 +57,61 @@ const STABLE_ATTRS = [
   'data-type',
 ];
 
+/**
+ * 反混淆"语义 class 白名单"。
+ *
+ * 设计原则（与反混淆设计一致）：**绝不信任任意 class**。混淆构建会把 class
+ * 打成随机串（如 .css-1a2b3c），不可作为定位依据；但少数站点（典型如小红书）
+ * 对核心互动控件保留**人类可读、跨改版稳定的语义 class**（like-wrapper /
+ * comment-wrapper / collect-wrapper / share-wrapper）。这些是手写语义而非
+ * 编译产物，值得作为"稳定属性"参与匹配。
+ *
+ * 只认这里列出的精确语义片段：用单词边界匹配（- _ 或串首尾分隔），既容忍
+ * BEM/前缀（note-footer__like-wrapper、xhs-like-wrapper），又不会把随机串
+ * 里偶然出现的子串误当语义命中。
+ */
+const SEMANTIC_CLASS_PATTERNS = [
+  'like-wrapper',
+  'comment-wrapper',
+  'collect-wrapper',
+  'share-wrapper',
+] as const;
+
+export type SemanticClass = (typeof SEMANTIC_CLASS_PATTERNS)[number];
+
+/**
+ * 从元素 class 中识别"已知语义 class"。命中返回规范化的语义片段，否则 null。
+ * 用单词边界（class token 内以 - _ 或边界分隔）匹配，避免子串误命中。
+ */
+export function matchSemanticClass(el: Element): SemanticClass | null {
+  const raw = el.getAttribute('class');
+  if (!raw) return null;
+  const tokens = raw.split(/\s+/);
+  for (const token of tokens) {
+    const lower = token.toLowerCase();
+    for (const pat of SEMANTIC_CLASS_PATTERNS) {
+      // 边界匹配：pat 必须是整个 token，或被 - _ 包裹（容忍 BEM/前缀）。
+      const re = new RegExp('(^|[-_])' + pat + '($|[-_])');
+      if (re.test(lower)) return pat;
+    }
+  }
+  return null;
+}
+
 export interface ExtractOptions {
   /** 文本裁剪长度上限 */
   maxTextLength?: number;
   /** 可见性判定（默认 best-effort，可注入浏览器精确实现） */
   isVisible?: (el: Element) => boolean;
+  /**
+   * 作用域兜底策略：当指定了 scope 但在 root 内找不到对应容器时的行为。
+   * - 'empty'（默认）：返回空清单（严格作用域，保持既有契约）。
+   * - 'root'：降级为在整个 root 内抽取（best-effort 作用域）。
+   *
+   * 小红书场景下用 'root'：explore 页打开笔记弹层时 scope 命中、只抽弹层内的
+   * 唯一点赞控件；而单条笔记页/无弹层时 scope 落空，则降级整页抽取不致漏抽。
+   */
+  scopeFallback?: 'empty' | 'root';
 }
 
 /** 由标签 + 属性推导角色 */
@@ -139,6 +189,9 @@ export function isInteractive(el: Element): boolean {
   if (el.hasAttribute('onclick')) return true;
   const tabindex = el.getAttribute('tabindex');
   if (tabindex !== null && tabindex !== '-1') return true;
+  // 反混淆白名单：无障碍属性缺失但带"已知语义 class"的控件（如小红书 span.like-wrapper）
+  // 也视为可交互，否则无 aria/role/text 的站点会被整体漏抽。
+  if (matchSemanticClass(el)) return true;
   return false;
 }
 
@@ -186,6 +239,28 @@ export function findScope(
   root: Element | Document,
   scope: ScopeSpec,
 ): Element | null {
+  // CSS 选择器优先：用于无稳定 role/text/属性、仅有特征性容器 class 的场景
+  // （如小红书笔记详情弹层）。selector 可逗号分隔多个候选，querySelector
+  // 天然按文档顺序取首个命中。选择器非法时不抛错，降级到下方 role/text 路径。
+  if (scope.selector) {
+    let hit: Element | null = null;
+    try {
+      hit = root.querySelector(scope.selector);
+    } catch {
+      hit = null; // 非法选择器：忽略，继续走 role/text/attributes 兜底
+    }
+    if (hit) return hit;
+  }
+  // 若只指定了 selector（无 role/text/attributes 约束）且未命中，则视为未找到容器，
+  // 交由上层 scopeFallback 决定降级行为。否则继续走 role/text/attributes 兜底匹配。
+  // 注意：缺这道判断会让无约束的兜底循环命中文档首个元素（如 <html>），误判为命中。
+  if (
+    scope.role === undefined &&
+    scope.containsText === undefined &&
+    scope.attributes === undefined
+  ) {
+    return null;
+  }
   const all = Array.from(root.querySelectorAll('*')) as Element[];
   for (const el of all) {
     if (scope.role) {
@@ -227,8 +302,16 @@ export function extractInteractiveElements(
   let scopeEl: Element | null = null;
   if (scope) {
     scopeEl = findScope(root, scope);
-    if (!scopeEl) return [];
-    container = scopeEl;
+    if (!scopeEl) {
+      // 作用域容器未命中：按兜底策略决定空清单（严格）或整页抽取（best-effort）。
+      if (options.scopeFallback === 'root') {
+        container = root;
+      } else {
+        return [];
+      }
+    } else {
+      container = scopeEl;
+    }
   }
 
   const all = Array.from(container.querySelectorAll('*')) as Element[];
@@ -246,6 +329,8 @@ export function extractInteractiveElements(
       clickable: true,
       path: buildPath(el),
     };
+    const semantic = matchSemanticClass(el);
+    if (semantic) descriptor.classHint = semantic;
     if (scopeEl) descriptor.scopePath = buildPath(scopeEl);
     descriptors.push(descriptor);
   }

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 五层编排引擎：规划(上层给) → 守卫 → 定位 → 执行 → 校验，内含三道闸。
  *
  * 三道闸（决定"自愈"不变"自残"）：
@@ -71,6 +71,8 @@ export function anchorFromElement(
     textMatch: 'contains',
   };
   if (Object.keys(identifying).length > 0) anchor.attributes = identifying;
+  // 语义 class 线索（如 like-wrapper）随锚点回写，便于晋升后按稳定语义 class 命中。
+  if (el.classHint) anchor.classHint = el.classHint;
   if (scope) anchor.scope = scope;
   return anchor;
 }
@@ -121,7 +123,9 @@ export class LocatingEngine {
       // ---- 定位层：缓存优先 ----
       const cached = forceLlm ? undefined : this.deps.cache.get(req.actionId);
       if (cached) {
-        const scopeEls = extractInteractiveElements(root, cached.scope);
+        const scopeEls = extractInteractiveElements(root, cached.scope, {
+          scopeFallback: 'root',
+        });
         const m = matchAnchor(cached, scopeEls, this.thresholds);
         if (m.status === 'hit' && m.element) {
           source = 'cache';
@@ -134,7 +138,9 @@ export class LocatingEngine {
       // ---- 缺口路径：文本 LLM 从清单选 ----
       if (!element) {
         const scope = cached?.scope ?? req.anchorHint?.scope;
-        const els = extractInteractiveElements(root, scope);
+        const els = extractInteractiveElements(root, scope, {
+          scopeFallback: 'root',
+        });
         const sel = await this.deps.selector.select(req.goal, els);
         if (sel.reason.startsWith('llm_error')) {
           return {

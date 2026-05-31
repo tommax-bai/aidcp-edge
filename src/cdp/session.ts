@@ -9,6 +9,7 @@ import { CdpClient, type CdpClientOptions } from './client.js';
 import { CdpDomProvider } from './dom-provider.js';
 import { CdpActionExecutor } from './action-executor.js';
 import { firstPageTarget, type DiscoverOptions } from './targets.js';
+import { CdpStealthInjector, type StealthInjector } from './stealth-injector.js';
 
 export interface EdgeSession {
   cdp: CdpClient;
@@ -23,11 +24,22 @@ export interface AttachOptions extends DiscoverOptions {
   urlIncludes?: string;
   /** 透传给 CdpClient 的选项 */
   client?: CdpClientOptions;
+  /**
+   * 是否注入反检测脚本（默认 true）。
+   * 注入用 Page.addScriptToEvaluateOnNewDocument，持久到 session 结束，
+   * 每次新页面加载自动生效。详见 stealth-injector.ts。
+   */
+  stealth?: boolean;
+  /** 注入器（测试用，默认 CdpStealthInjector） */
+  stealthInjector?: StealthInjector;
 }
 
 /**
  * 附着到本机 Chrome 的一个 page，返回边缘会话。
  * 默认连接 127.0.0.1:9222。
+ *
+ * attach 完成后会立即注入反检测脚本（除非 options.stealth === false），
+ * 确保后续每个新 document 在任何页面脚本之前被打补丁。
  */
 export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSession> {
   const target = await firstPageTarget(options);
@@ -36,6 +48,13 @@ export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSes
   // 启用定位/执行所需的最小域（evaluate 不强制 enable，但启用便于后续扩展）
   await cdp.send('Runtime.enable').catch(() => undefined);
   await cdp.send('Page.enable').catch(() => undefined);
+
+  // attach 后立即注入反检测脚本（在启用 Page 域之后）。
+  if (options.stealth !== false) {
+    const injector = options.stealthInjector ?? new CdpStealthInjector();
+    await injector.inject(cdp);
+  }
+
   return {
     cdp,
     dom: new CdpDomProvider(cdp),

@@ -24,6 +24,11 @@ export const DEFAULT_THRESHOLDS: MatchThresholds = {
 const WEIGHT_ROLE = 1.0;
 const WEIGHT_TEXT = 2.0;
 const WEIGHT_ATTR = 1.0;
+// 语义 class 命中（如 like-wrapper）：在无 aria/role/text 的站点（小红书）里，
+// 这是唯一可用且高度可信的稳定信号。权重取得足够大，使得即便锚点同时指定了
+// role/text（为兼容暴露无障碍属性的站点而保留）但在 XHS 上二者均落空，
+// 仅凭语义 class 命中也能越过 confThreshold(0.6)：5/(1+2+5)=0.625。
+const WEIGHT_CLASS_HINT = 5.0;
 
 interface Scored {
   el: ElementDescriptor;
@@ -57,6 +62,11 @@ function scoreElement(anchor: Anchor, el: ElementDescriptor): number {
       specified += WEIGHT_ATTR;
       if (el.attributes[k] === v) matched += WEIGHT_ATTR;
     }
+  }
+
+  if (anchor.classHint) {
+    specified += WEIGHT_CLASS_HINT;
+    if (el.classHint && el.classHint === anchor.classHint) matched += WEIGHT_CLASS_HINT;
   }
 
   if (specified === 0) return 0;

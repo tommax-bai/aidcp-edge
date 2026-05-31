@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 定位层核心类型定义。
  *
  * 设计要点：
@@ -15,6 +15,13 @@ export type TextMatch = 'exact' | 'contains';
  * 用于消歧——这正是 DOM 优于像素 VL 的关键（包含关系天然区分重复元素）。
  */
 export interface ScopeSpec {
+  /**
+   * 作用域容器的 CSS 选择器（可用逗号分隔多个候选，按先后顺序取首个命中）。
+   * 适用于「无稳定 role/text/属性、但有特征性容器 class/结构」的场景，
+   * 典型如小红书笔记详情弹层（.note-detail-mask / [class*=note-container]）。
+   * 优先级高于 role/containsText/attributes：命中即作为作用域容器。
+   */
+  selector?: string;
   /** 作用域容器的角色（如 article、listitem） */
   role?: string;
   /** 作用域容器需包含的可见文本（如笔记标题），用于锁定具体那一条 */
@@ -37,6 +44,12 @@ export interface Anchor {
   scope?: ScopeSpec;
   /** 稳定属性（如 data-testid），命中加分 */
   attributes?: Record<string, string>;
+  /**
+   * 语义类名线索（反混淆白名单内的稳定 class，如 like-wrapper）。
+   * 用于无 aria/role/text 的站点（如小红书）按"已知语义 class"匹配；
+   * 命中加分但绝不信任任意 class——只认 extractor 白名单识别出的语义 class。
+   */
+  classHint?: string;
   /** 上次成功校验时间戳 */
   lastVerified?: number;
   /** 命中计数 */
@@ -57,6 +70,11 @@ export interface ElementDescriptor {
   text: string;
   /** 选出的稳定属性子集 */
   attributes: Record<string, string>;
+  /**
+   * 语义类名线索：仅当元素 class 命中反混淆白名单（已知语义 class）时存在。
+   * 不输出原始混淆 class，只输出被识别出的语义 class（如 like-wrapper）。
+   */
+  classHint?: string;
   /** 是否可点击/可交互 */
   clickable: boolean;
   /**

@@ -36,7 +36,9 @@ export function renderElementList(elements: ElementDescriptor[]): string {
         .map(([k, v]) => `${k}="${v}"`)
         .join(' ');
       const text = el.text ? ` "${el.text}"` : '';
-      return `[${el.index}] <${el.tag} role=${el.role}${text}${attrs ? ' ' + attrs : ''}>`;
+      // 语义 class 线索（如 like-wrapper）显式标出，便于在无 aria/role/text 时按类名推理。
+      const cls = el.classHint ? ` class~="${el.classHint}"` : '';
+      return `[${el.index}] <${el.tag} role=${el.role}${text}${cls}${attrs ? ' ' + attrs : ''}>`;
     })
     .join('\n');
 }
@@ -45,6 +47,18 @@ export function buildSelectionPrompt(goal: string, elements: ElementDescriptor[]
   return [
     '你是页面元素定位助手。下面是当前页面（或当前作用域）内的可交互元素清单。',
     '请从清单中选出最符合目标的**唯一**元素编号。',
+    '',
+    '清单中每个元素形如：[编号] <标签 role=角色 "可见文本" class~="语义类名" 属性...>。',
+    '理解要点：',
+    '- 优先用无障碍信息（role / 可见文本 / aria-label / title / data-*）判断语义。',
+    '- 部分站点（如小红书）刻意不提供任何无障碍属性：role 多为 generic、',
+    '  无 aria-label、无"点赞"等文字，图标是纯 SVG，计数是裸数字。此时请改用',
+    '  **语义类名** class~="..." 推理：例如 class~="like-wrapper" 表示点赞控件、',
+    '  comment-wrapper 评论、collect-wrapper 收藏、share-wrapper 分享。',
+    '- 类名命中目标语义时，即使没有任何文字/aria 也应大胆选它；',
+    '  但不要凭随机/混淆类名（无语义的乱码）猜测——这些已被上游过滤、不会出现在清单里。',
+    '- 若目标描述里给出了结构路径或类名线索，请据此匹配对应的语义类名。',
+    '',
     '只输出一个整数编号；如果没有任何元素符合目标，输出 -1。不要输出其他文字。',
     '',
     `目标：${goal}`,
