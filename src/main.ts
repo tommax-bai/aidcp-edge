@@ -40,7 +40,7 @@ import {
 } from './browse/index.js';
 
 async function main(): Promise<void> {
-  const cloudUrl = process.env.AIDCP_CLOUD_URL ?? 'ws://127.0.0.1:8787';
+  const cloudUrl = process.env.AIDCP_CLOUD_URL ?? 'ws://121.89.85.150:8787';
   const edgeId = process.env.AIDCP_EDGE_ID ?? 'edge-local';
   const cdpHost = process.env.AIDCP_CDP_HOST ?? '127.0.0.1';
   const cdpPort = Number(process.env.AIDCP_CDP_PORT ?? 9222);
