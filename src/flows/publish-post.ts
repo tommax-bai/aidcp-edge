@@ -122,16 +122,25 @@ function extractPostId(root: Element | Document): string | undefined {
   return undefined;
 }
 
+function isPublishPage(root: Element | Document): boolean {
+  return Boolean(
+    findElementByKeywords(root, ['标题', '填写标题', '输入标题']) ||
+      findElementByKeywords(root, ['正文', '写点什么', '添加正文', '输入正文']) ||
+      findElementByKeywords(root, ['发布笔记', '发图文', '上传图文']) ||
+      findElementByKeywords(root, ['添加标签', '添加话题', '话题']) ||
+      findActionElement(root, XHS_PUBLISH_TITLE_ACTION_ID) ||
+      findActionElement(root, XHS_PUBLISH_CONTENT_ACTION_ID) ||
+      findActionElement(root, XHS_PUBLISH_SUBMIT_ACTION_ID),
+  );
+}
+
 export class PublishStepValidator implements PostValidator {
   constructor(private readonly context: PublishStepContext) {}
 
   validate(_req: ActionRequest, root: Element | Document): boolean {
     switch (this.context.step) {
       case 'enter_publish_page':
-        return Boolean(
-          findElementByKeywords(root, ['标题', '填写标题', '输入标题']) ||
-            findElementByKeywords(root, ['正文', '写点什么', '添加正文']),
-        );
+        return isPublishPage(root);
       case 'input_title': {
         const titleEl =
           findTextEntryByActionId(root, XHS_PUBLISH_TITLE_ACTION_ID) ??

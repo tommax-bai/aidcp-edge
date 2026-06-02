@@ -132,10 +132,9 @@ const XHS_PUBLISH_SCOPE: ScopeSpec = {
 };
 
 export const XHS_PUBLISH_ENTRY_GOAL =
-  '进入笔记发布页：找到页面中的发布入口按钮，常见文本/可访问名可能是「发布」「去发布」「发笔记」「写笔记」「创建」。';
+  '进入笔记发布页：找到页面中的发布/创作入口按钮，常见文本/可访问名可能是「发布」「去发布」「发笔记」「写笔记」「创建」「创作中心」「发布笔记」「发图文」。';
 export const XHS_PUBLISH_ENTRY_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
-  role: 'button',
-  text: '发布',
+  text: '创作',
   textMatch: 'contains',
 };
 
