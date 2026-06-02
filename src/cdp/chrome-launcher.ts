@@ -41,10 +41,28 @@ export interface ChromeLauncherOptions {
   existsImpl?: (p: string) => boolean;
   /** 注入 sleep（默认 setTimeout 包装），便于测试快进 */
   sleepImpl?: (ms: number) => Promise<void>;
-  /** 注入“等待人工登录”逻辑（默认等待 stdin Enter） */
-  waitForLoginImpl?: () => Promise<void>;
+  /** 登录检测轮询间隔（毫秒），默认 2000 */
+  loginPollIntervalMs?: number;
+  /** 登录等待超时（毫秒），默认 5 分钟 */
+  loginTimeoutMs?: number;
+  /** 注入“等待登录完成”逻辑（默认自动检测登录态） */
+  waitForLoginImpl?: (ctx: LoginWaitContext) => Promise<void>;
+  /** 注入登录态探测逻辑（测试用） */
+  probeLoginImpl?: (host: string, port: number, fetchImpl: typeof fetch) => Promise<LoginProbeResult>;
   /** 注入日志输出（默认 console.log） */
   logImpl?: (msg: string) => void;
+}
+
+export interface LoginWaitContext {
+  host: string;
+  port: number;
+  startUrl: string;
+  timeoutMs: number;
+  pollIntervalMs: number;
+  fetchImpl: typeof fetch;
+  sleepImpl: (ms: number) => Promise<void>;
+  logImpl: (msg: string) => void;
+  probeLoginImpl?: (host: string, port: number, fetchImpl: typeof fetch) => Promise<LoginProbeResult>;
 }
 
 export interface ChromeInstance {
@@ -61,6 +79,8 @@ const DEFAULT_PORT = 9222;
 const DEFAULT_PROFILE_DIR = join(homedir(), '.aidcp-chrome-profile');
 const DEFAULT_START_URL = 'https://www.xiaohongshu.com/explore';
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
+const DEFAULT_LOGIN_POLL_INTERVAL_MS = 2_000;
+const DEFAULT_LOGIN_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_CHROME_LOG_DIR = join(homedir(), '.aidcp-edge-logs');
 
 function chromeLogPath(): string {
@@ -137,8 +157,71 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** 默认“等待人工登录”：等待 stdin 收到一行（Enter）。 */
-function defaultWaitForLogin(): Promise<void> {
+async function fetchJson<T>(url: string, fetchImpl: typeof fetch): Promise<T> {
+  const res = await fetchImpl(url);
+  if (!res.ok) {
+    throw new Error(`请求失败: ${url} HTTP ${res.status}`);
+  }
+  return (await res.json()) as T;
+}
+
+interface CdpTargetInfo {
+  id: string;
+  type: string;
+  url?: string;
+  webSocketDebuggerUrl?: string;
+}
+
+interface RuntimeEvaluateResult {
+  result?: { value?: unknown };
+  exceptionDetails?: { text?: string };
+}
+
+interface LoginProbeResult {
+  loggedIn: boolean;
+  reason: string;
+  url: string;
+}
+
+export interface LoginProbeSignals {
+  href: string;
+  hasUserCookie: boolean;
+  hasUserStorage: boolean;
+  hasAvatar: boolean;
+  hasCreatorEntry: boolean;
+  hasLoginPrompt: boolean;
+}
+
+export function deriveLoginProbeResult(signals: LoginProbeSignals): LoginProbeResult {
+  const loggedIn =
+    !/\/login/.test(signals.href) &&
+    !signals.hasLoginPrompt &&
+    (signals.hasUserCookie || signals.hasUserStorage || signals.hasAvatar || signals.hasCreatorEntry);
+  return {
+    loggedIn,
+    reason: loggedIn
+      ? [
+          signals.hasUserCookie ? 'cookie' : '',
+          signals.hasUserStorage ? 'storage' : '',
+          signals.hasAvatar ? 'avatar' : '',
+          signals.hasCreatorEntry ? 'creator-entry' : '',
+        ]
+          .filter(Boolean)
+          .join('+') || 'page-signal'
+      : signals.hasLoginPrompt
+        ? 'login-prompt'
+        : /\/login/.test(signals.href)
+          ? 'login-url'
+          : 'signals-missing',
+    url: signals.href,
+  };
+}
+
+function shouldAllowManualEnterFallback(): boolean {
+  return process.env.AIDCP_LOGIN_WAIT_MODE === 'manual' || process.stdin.isTTY === true;
+}
+
+function waitForManualEnter(): Promise<void> {
   return new Promise((resolve) => {
     const stdin = process.stdin;
     const onData = () => {
@@ -157,6 +240,128 @@ function defaultWaitForLogin(): Promise<void> {
     }
     stdin.once('data', onData);
   });
+}
+
+async function evaluateLoginState(host: string, port: number, fetchImpl: typeof fetch): Promise<LoginProbeResult> {
+  const targets = await fetchJson<CdpTargetInfo[]>(`http://${host}:${port}/json`, fetchImpl);
+  const pageTarget =
+    targets.find((target) => target.type === 'page' && target.url?.includes('xiaohongshu.com')) ??
+    targets.find((target) => target.type === 'page' && target.webSocketDebuggerUrl);
+  if (!pageTarget?.webSocketDebuggerUrl) {
+    throw new Error('未找到可用于检测登录态的 page target');
+  }
+  const ws = new WebSocket(pageTarget.webSocketDebuggerUrl);
+  let nextId = 1;
+  const pending = new Map<number, { resolve: (value: unknown) => void; reject: (err: Error) => void }>();
+  const send = <T>(method: string, params: Record<string, unknown> = {}): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const id = nextId++;
+      pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
+      ws.send(JSON.stringify({ id, method, params }));
+    });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.addEventListener('open', () => resolve(), { once: true });
+      ws.addEventListener('error', () => reject(new Error('browser CDP WebSocket 连接失败')), { once: true });
+      ws.addEventListener('message', (event) => {
+        let payload: { id?: number; result?: unknown; error?: { message?: string } };
+        try {
+          payload = JSON.parse(String(event.data));
+        } catch {
+          return;
+        }
+        if (typeof payload.id !== 'number') return;
+        const waiter = pending.get(payload.id);
+        if (!waiter) return;
+        pending.delete(payload.id);
+        if (payload.error) {
+          waiter.reject(new Error(payload.error.message ?? 'CDP 调用失败'));
+          return;
+        }
+        waiter.resolve(payload.result);
+      });
+    });
+    await send('Runtime.enable');
+    const evalRes = await send<RuntimeEvaluateResult>('Runtime.evaluate', {
+      expression: `(() => {
+        const href = location.href;
+        const hasUserCookie = document.cookie.split(';').some((item) => /^\\s*(web_session|a1|webId)=/.test(item));
+        const hasUserStorage = Boolean(localStorage.getItem('redmoji') || localStorage.getItem('user'));
+        const avatar = document.querySelector('img[class*="avatar"], .user-avatar img, [class*="avatar"] img');
+        const creatorEntry = Array.from(document.querySelectorAll('a,button,div')).some((node) => {
+          const text = (node.textContent || '').trim();
+          return text.includes('创作中心') || text.includes('发布笔记') || text.includes('我');
+        });
+        const loginPrompt = Array.from(document.querySelectorAll('div,span,p')).some((node) => {
+          const text = (node.textContent || '').trim();
+          return text.includes('登录后') || text.includes('立即登录') || text.includes('扫码登录');
+        });
+        return {
+          href,
+          hasUserCookie,
+          hasUserStorage,
+          hasAvatar: Boolean(avatar),
+          hasCreatorEntry: creatorEntry,
+          hasLoginPrompt: loginPrompt,
+        };
+      })()`,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    if (evalRes.exceptionDetails?.text) {
+      throw new Error(`Runtime.evaluate 失败: ${evalRes.exceptionDetails.text}`);
+    }
+    const signals = evalRes.result?.value as LoginProbeSignals | undefined;
+    if (!signals) {
+      return { loggedIn: false, reason: 'empty-result', url: '' };
+    }
+    return deriveLoginProbeResult(signals);
+  } finally {
+    for (const [, waiter] of pending) {
+      waiter.reject(new Error('browser CDP WebSocket 已关闭'));
+    }
+    pending.clear();
+    try {
+      ws.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+async function defaultWaitForLogin(ctx: LoginWaitContext): Promise<void> {
+  const deadline = Date.now() + ctx.timeoutMs;
+  const allowManualEnter = shouldAllowManualEnterFallback();
+  const probeLogin = ctx.probeLoginImpl ?? evaluateLoginState;
+  let manualEnterPromise: Promise<void> | undefined;
+  if (allowManualEnter) {
+    ctx.logImpl('[aidcp-edge] 可在浏览器中登录小红书；若已确认完成，也可按 Enter 手动继续。');
+    manualEnterPromise = waitForManualEnter().then(() => {
+      ctx.logImpl('[aidcp-edge] 收到 Enter，按手动兜底继续启动。');
+    });
+  } else {
+    ctx.logImpl('[aidcp-edge] 请在浏览器中登录小红书，系统将自动检测登录态后继续。');
+  }
+  while (Date.now() < deadline) {
+    const probePromise = probeLogin(ctx.host, ctx.port, ctx.fetchImpl)
+      .then((result) => ({ type: 'probe' as const, result }))
+      .catch((error) => ({ type: 'error' as const, error: error as Error }));
+    const race = manualEnterPromise
+      ? await Promise.race([probePromise, manualEnterPromise.then(() => ({ type: 'manual' as const }))])
+      : await probePromise;
+    if (race.type === 'manual') return;
+    if (race.type === 'probe' && race.result.loggedIn) {
+      ctx.logImpl(`[aidcp-edge] 已检测到登录，继续（signal=${race.result.reason} url=${race.result.url}）`);
+      return;
+    }
+    if (race.type === 'probe') {
+      ctx.logImpl(`[aidcp-edge] 等待小红书登录中（signal=${race.result.reason} url=${race.result.url || ctx.startUrl}）`);
+    } else {
+      ctx.logImpl(`[aidcp-edge] 登录态检测暂不可用：${race.error.message}`);
+    }
+    await ctx.sleepImpl(ctx.pollIntervalMs);
+  }
+  throw new Error(`等待小红书登录超时（${ctx.timeoutMs}ms），请确认已在浏览器完成登录。`);
 }
 
 /** 组装 Chrome 启动参数（CDP 调试 + 独立 profile + 去打扰）。 */
@@ -200,12 +405,15 @@ export async function launchChrome(opts: ChromeLauncherOptions = {}): Promise<Ch
   const headless = opts.headless ?? process.env.AIDCP_CHROME_HEADLESS === 'true';
   const startUrl = opts.startUrl ?? DEFAULT_START_URL;
   const readyTimeoutMs = opts.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+  const loginPollIntervalMs = opts.loginPollIntervalMs ?? DEFAULT_LOGIN_POLL_INTERVAL_MS;
+  const loginTimeoutMs = opts.loginTimeoutMs ?? DEFAULT_LOGIN_TIMEOUT_MS;
 
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
   const spawnImpl = opts.spawnImpl ?? spawn;
   const existsImpl = opts.existsImpl ?? existsSync;
   const sleep = opts.sleepImpl ?? defaultSleep;
   const waitForLogin = opts.waitForLoginImpl ?? defaultWaitForLogin;
+  const probeLogin = opts.probeLoginImpl ?? evaluateLoginState;
   const log = opts.logImpl ?? ((m: string) => console.log(m));
 
   // 1) 复用已有实例
@@ -272,8 +480,17 @@ export async function launchChrome(opts: ChromeLauncherOptions = {}): Promise<Ch
 
   // 4) 首次登录处理
   if (isFirstLaunch) {
-    log('[aidcp-edge] 请在浏览器中登录小红书，登录完成后按 Enter 继续...');
-    await waitForLogin();
+    await waitForLogin({
+      host,
+      port,
+      startUrl,
+      timeoutMs: loginTimeoutMs,
+      pollIntervalMs: loginPollIntervalMs,
+      fetchImpl,
+      sleepImpl: sleep,
+      logImpl: log,
+      probeLoginImpl: probeLogin,
+    });
   }
 
   let killed = false;

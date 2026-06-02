@@ -6,6 +6,7 @@ import {
   discoverChromePath,
   probeCdp,
   buildChromeArgs,
+  deriveLoginProbeResult,
 } from '../../src/cdp/index.js';
 
 /** 构造一个最小可用的假 fetch（按 url -> ok 映射） */
@@ -192,6 +193,7 @@ test('launchChrome 就绪超时时抛错并 kill 子进程', async () => {
 test('launchChrome 首次启动（profile 不存在）等待人工登录', async () => {
   const sp = makeSpawn();
   let waited = false;
+  let ctxHost = '';
   let n = 0;
   const fetchImpl = (async () => ({ ok: n++ > 0 }) as Response) as unknown as typeof fetch;
   await launchChrome({
@@ -203,11 +205,13 @@ test('launchChrome 首次启动（profile 不存在）等待人工登录', async
     existsImpl: (p) => p === 'C:/chrome.exe',
     sleepImpl: noSleep,
     logImpl: noLog,
-    waitForLoginImpl: async () => {
+    waitForLoginImpl: async (ctx) => {
       waited = true;
+      ctxHost = ctx.host;
     },
   });
   assert.equal(waited, true);
+  assert.equal(ctxHost, '127.0.0.1');
 });
 
 test('launchChrome 非首次启动（profile 已存在）不等待登录', async () => {
@@ -228,4 +232,77 @@ test('launchChrome 非首次启动（profile 已存在）不等待登录', async
     },
   });
   assert.equal(waited, false);
+});
+
+test('launchChrome 首次启动时透传登录轮询配置', async () => {
+  const sp = makeSpawn();
+  let capturedTimeout = 0;
+  let capturedInterval = 0;
+  let n = 0;
+  const fetchImpl = (async () => ({ ok: n++ > 0 }) as Response) as unknown as typeof fetch;
+  await launchChrome({
+    chromePath: 'C:/chrome.exe',
+    profileDir: '/data/new-profile',
+    loginTimeoutMs: 12_345,
+    loginPollIntervalMs: 678,
+    fetchImpl,
+    spawnImpl: sp.spawnImpl,
+    existsImpl: (p) => p === 'C:/chrome.exe',
+    sleepImpl: noSleep,
+    logImpl: noLog,
+    waitForLoginImpl: async (ctx) => {
+      capturedTimeout = ctx.timeoutMs;
+      capturedInterval = ctx.pollIntervalMs;
+    },
+  });
+  assert.equal(capturedTimeout, 12_345);
+  assert.equal(capturedInterval, 678);
+});
+
+test('deriveLoginProbeResult: 真实登录信号命中时返回已登录', () => {
+  const result = deriveLoginProbeResult({
+    href: 'https://www.xiaohongshu.com/explore',
+    hasUserCookie: true,
+    hasUserStorage: false,
+    hasAvatar: false,
+    hasCreatorEntry: false,
+    hasLoginPrompt: false,
+  });
+  assert.equal(result.loggedIn, true);
+  assert.equal(result.reason, 'cookie');
+});
+
+test('deriveLoginProbeResult: 登录提示存在时不误判成功', () => {
+  const result = deriveLoginProbeResult({
+    href: 'https://www.xiaohongshu.com/explore',
+    hasUserCookie: true,
+    hasUserStorage: true,
+    hasAvatar: true,
+    hasCreatorEntry: true,
+    hasLoginPrompt: true,
+  });
+  assert.equal(result.loggedIn, false);
+  assert.equal(result.reason, 'login-prompt');
+});
+
+test('launchChrome 首次启动时检测到登录即继续', async () => {
+  const sp = makeSpawn();
+  let n = 0;
+  const logs: string[] = [];
+  const fetchImpl = (async () => ({ ok: n++ > 0 }) as Response) as unknown as typeof fetch;
+  await launchChrome({
+    chromePath: 'C:/chrome.exe',
+    profileDir: '/data/new-profile',
+    fetchImpl,
+    spawnImpl: sp.spawnImpl,
+    existsImpl: (p) => p === 'C:/chrome.exe',
+    sleepImpl: noSleep,
+    logImpl: (msg) => logs.push(msg),
+    probeLoginImpl: async () => ({
+      loggedIn: true,
+      reason: 'cookie+avatar',
+      url: 'https://www.xiaohongshu.com/explore',
+    }),
+  });
+  assert.ok(logs.some((msg) => msg.includes('已检测到登录，继续')));
 });
