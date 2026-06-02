@@ -11,7 +11,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -61,6 +61,13 @@ const DEFAULT_PORT = 9222;
 const DEFAULT_PROFILE_DIR = join(homedir(), '.aidcp-chrome-profile');
 const DEFAULT_START_URL = 'https://www.xiaohongshu.com/explore';
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
+const DEFAULT_CHROME_LOG_DIR = join(homedir(), '.aidcp-edge-logs');
+
+function chromeLogPath(): string {
+  const dir = process.env.AIDCP_CHROME_LOG_DIR ?? DEFAULT_CHROME_LOG_DIR;
+  mkdirSync(dir, { recursive: true });
+  return join(dir, 'chrome-stderr.log');
+}
 
 /** Windows 常见 chrome.exe 安装位置（按优先级） */
 function windowsChromePaths(): string[] {
@@ -213,12 +220,30 @@ export async function launchChrome(opts: ChromeLauncherOptions = {}): Promise<Ch
   const args = buildChromeArgs({ port, profileDir, headless, startUrl });
 
   log(`[aidcp-edge] 启动 Chrome: ${chromePath}`);
+  const stderrLogPath = chromeLogPath();
+  appendFileSync(
+    stderrLogPath,
+    `\n=== ${new Date().toISOString()} spawn chrome pid=pending port=${port} profile=${profileDir} ===\n`,
+  );
   const child: ChildProcess = spawnImpl(chromePath, args, {
     detached: false,
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  child.stderr?.on('data', (chunk) => {
+    const text = chunk instanceof Buffer ? chunk.toString('utf8') : String(chunk);
+    appendFileSync(stderrLogPath, text);
   });
   child.on('error', (err) => {
     log(`[aidcp-edge] Chrome 进程错误: ${(err as Error).message}`);
+    appendFileSync(
+      stderrLogPath,
+      `[${new Date().toISOString()}] child error: ${(err as Error).stack ?? (err as Error).message}\n`,
+    );
+  });
+  child.on('exit', (code, signal) => {
+    const message = `[aidcp-edge] Chrome 进程退出: code=${code ?? 'null'} signal=${signal ?? 'null'} stderrLog=${stderrLogPath}`;
+    log(message);
+    appendFileSync(stderrLogPath, `[${new Date().toISOString()}] exit code=${code ?? 'null'} signal=${signal ?? 'null'}\n`);
   });
 
   // 3) 等待 CDP 就绪
@@ -243,7 +268,7 @@ export async function launchChrome(opts: ChromeLauncherOptions = {}): Promise<Ch
     );
   }
 
-  log(`[aidcp-edge] Chrome 已就绪（pid=${child.pid ?? '?'}），CDP ${host}:${port}`);
+  log(`[aidcp-edge] Chrome 已就绪（pid=${child.pid ?? '?'}），CDP ${host}:${port}，stderr=${stderrLogPath}`);
 
   // 4) 首次登录处理
   if (isFirstLaunch) {
