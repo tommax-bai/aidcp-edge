@@ -112,3 +112,65 @@ export const XHS_LIKE_ANCHOR: Anchor = {
   actionId: XHS_LIKE_ACTION_ID,
   ...XHS_LIKE_ANCHOR_HINT,
 };
+
+/** XHS 发布入口按钮的稳定 actionId。 */
+export const XHS_PUBLISH_ENTRY_ACTION_ID = 'note.publish_entry';
+/** XHS 发布标题输入框的稳定 actionId。 */
+export const XHS_PUBLISH_TITLE_ACTION_ID = 'note.publish_title';
+/** XHS 发布正文输入框的稳定 actionId。 */
+export const XHS_PUBLISH_CONTENT_ACTION_ID = 'note.publish_content';
+/** XHS 发布标签输入框/入口的稳定 actionId。 */
+export const XHS_PUBLISH_TAG_ACTION_ID = 'note.publish_tag';
+/** XHS 提交发布按钮的稳定 actionId。 */
+export const XHS_PUBLISH_SUBMIT_ACTION_ID = 'note.publish_submit';
+
+const XHS_PUBLISH_SCOPE: ScopeSpec = {
+  selector:
+    '.publish-container, [class*="publish-container"], [class*="publishContainer"], ' +
+    '.note-edit-container, [class*="note-edit"], [class*="noteEdit"], ' +
+    '.creator-container, [class*="creator-container"]',
+};
+
+export const XHS_PUBLISH_ENTRY_GOAL =
+  '进入笔记发布页：找到页面中的发布入口按钮，常见文本/可访问名可能是「发布」「去发布」「发笔记」「写笔记」「创建」。';
+export const XHS_PUBLISH_ENTRY_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
+  role: 'button',
+  text: '发布',
+  textMatch: 'contains',
+};
+
+export const XHS_PUBLISH_TITLE_GOAL =
+  '在发布页填写标题：找到标题输入框，常见文本/占位提示可能是「标题」「填写标题」「输入标题」。';
+export const XHS_PUBLISH_TITLE_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
+  role: 'textbox',
+  text: '标题',
+  textMatch: 'contains',
+  scope: XHS_PUBLISH_SCOPE,
+};
+
+export const XHS_PUBLISH_CONTENT_GOAL =
+  '在发布页填写正文：找到正文输入框或内容编辑区，常见文本/占位提示可能是「正文」「输入正文」「添加正文」「写点什么」。';
+export const XHS_PUBLISH_CONTENT_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
+  role: 'textbox',
+  text: '正文',
+  textMatch: 'contains',
+  scope: XHS_PUBLISH_SCOPE,
+};
+
+export const XHS_PUBLISH_TAG_GOAL =
+  '在发布页添加标签：找到标签输入框或添加话题入口，常见文本/可访问名可能是「标签」「话题」「添加标签」「添加话题」。';
+export const XHS_PUBLISH_TAG_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
+  role: 'textbox',
+  text: '标签',
+  textMatch: 'contains',
+  scope: XHS_PUBLISH_SCOPE,
+};
+
+export const XHS_PUBLISH_SUBMIT_GOAL =
+  '提交发布当前笔记：找到最终发布按钮，常见文本/可访问名可能是「发布」「立即发布」「确认发布」。';
+export const XHS_PUBLISH_SUBMIT_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
+  role: 'button',
+  text: '发布',
+  textMatch: 'contains',
+  scope: XHS_PUBLISH_SCOPE,
+};
