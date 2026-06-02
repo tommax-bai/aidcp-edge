@@ -25,6 +25,7 @@ import {
   type AnchorGetResultPayload,
   type RemoteAnchor,
   type NoteContentPayload,
+  type PublishRequestPayload,
 } from '../comm/protocol.js';
 
 /** 最小 WebSocket 抽象（与 cdp/client.ts 同形，便于测试注入） */
@@ -49,6 +50,7 @@ export interface StepRunner {
  * 典型用于 session.end / browse.next 这类云端可主动推送的控制信令。
  */
 export type BrowseCommandHandler = (env: Envelope) => void;
+export type PublishCommandHandler = (env: Envelope<PublishRequestPayload>) => void;
 
 export interface EdgeClientOptions {
   /** 云端 WS 地址，如 ws://127.0.0.1:8787 */
@@ -95,6 +97,7 @@ export class EdgeClient {
   private sessionId?: string;
   private connected = false;
   private browseHandler?: BrowseCommandHandler;
+  private publishHandler?: PublishCommandHandler;
 
   constructor(options: EdgeClientOptions) {
     this.opts = {
@@ -159,6 +162,13 @@ export class EdgeClient {
     this.browseHandler = handler;
     return () => {
       if (this.browseHandler === handler) this.browseHandler = undefined;
+    };
+  }
+
+  onPublishCommand(handler: PublishCommandHandler): () => void {
+    this.publishHandler = handler;
+    return () => {
+      if (this.publishHandler === handler) this.publishHandler = undefined;
     };
   }
 
@@ -241,6 +251,11 @@ export class EdgeClient {
       env.type === 'search.execute'
     ) {
       this.browseHandler?.(env);
+      return;
+    }
+
+    if (env.type === 'publish.request') {
+      this.publishHandler?.(env as Envelope<PublishRequestPayload>);
       return;
     }
 

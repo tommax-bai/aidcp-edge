@@ -1,4 +1,6 @@
 import { LocatingEngine } from '../locating/engine.js';
+export type { PublishRequestPayload, PublishResultPayload } from '../comm/protocol.js';
+import type { PublishRequestPayload, PublishResultPayload } from '../comm/protocol.js';
 import type {
   ActionRequest,
   ActionResult,
@@ -22,19 +24,6 @@ import {
   XHS_PUBLISH_TITLE_ANCHOR_HINT,
   XHS_PUBLISH_TITLE_GOAL,
 } from './anchors.js';
-
-export interface PublishRequestPayload {
-  title: string;
-  content: string;
-  tags: string[];
-  images?: string[];
-}
-
-export interface PublishResultPayload {
-  ok: boolean;
-  postId?: string;
-  error?: string;
-}
 
 type PublishStep =
   | 'enter_publish_page'

@@ -31,6 +31,9 @@ import { attachToPage, launchChrome } from './cdp/index.js';
 import { EdgeClient } from './client/edge-client.js';
 import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
+import { publishPost } from './flows/publish-post.js';
+import { AnchorCache } from './locating/cache.js';
+import type { PublishResultPayload } from './comm/protocol.js';
 import {
   BrowseSession,
   CdpFeedScroller,
@@ -84,9 +87,36 @@ async function main(): Promise<void> {
     executor: session.executor,
     selector,
   });
+  const publishCache = new AnchorCache();
 
   await client.connect();
   console.log(`[aidcp-edge] 已连接云端 ${cloudUrl}，等待命令 ...`);
+
+  client.onPublishCommand((env) => {
+    void (async () => {
+      let result: PublishResultPayload;
+      try {
+        result = await publishPost(
+          {
+            dom: session.dom,
+            executor: session.executor,
+            selector,
+            cache: publishCache,
+          },
+          {},
+          env.payload,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        result = { ok: false, error: `[unknown] ${message}` };
+      }
+      try {
+        client.send('publish.result', result, env.id);
+      } catch (sendErr) {
+        console.error('[aidcp-edge] publish.result 回传失败:', sendErr);
+      }
+    })();
+  });
 
   // —— 自动浏览会话 ——
   let browse: BrowseSession | undefined;

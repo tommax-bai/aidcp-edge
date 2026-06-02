@@ -35,6 +35,8 @@ export type MessageType =
   | 'browse.next' // cloud → edge：跳过/继续，关闭当前笔记看下一条
   | 'search.execute' // cloud → edge：执行一次搜索（keyword）
   | 'session.end' // cloud → edge：结束本次自动浏览会话
+  | 'publish.request' // cloud → edge：请求发布一篇帖子
+  | 'publish.result' // edge → cloud：回传发布结果
   // —— 通用 ——
   | 'error' // 任一方 → 对方：错误信息
   | 'ping'
@@ -202,6 +204,19 @@ export interface SessionEndPayload {
   reason?: string;
 }
 
+export interface PublishRequestPayload {
+  title: string;
+  content: string;
+  tags: string[];
+  images?: string[];
+}
+
+export interface PublishResultPayload {
+  ok: boolean;
+  postId?: string;
+  error?: string;
+}
+
 export interface ErrorPayload {
   code: string;
   message: string;
@@ -223,6 +238,8 @@ export interface PayloadMap {
   'browse.next': BrowseNextPayload;
   'search.execute': SearchExecutePayload;
   'session.end': SessionEndPayload;
+  'publish.request': PublishRequestPayload;
+  'publish.result': PublishResultPayload;
   error: ErrorPayload;
   ping: Record<string, never>;
   pong: Record<string, never>;
