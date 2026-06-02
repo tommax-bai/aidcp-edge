@@ -22,7 +22,7 @@ import type { FeedScroller, NoteCard } from './feed-scroller.js';
 import type { ModalController } from './modal-controller.js';
 import type { NoteContent } from './note-extractor.js';
 import type { extractNoteContent as ExtractFn } from './note-extractor.js';
-// search-handler kept as fallback; primary search uses Page.navigate
+import { executeSearch } from './search-handler.js';
 import { shouldOpenCard } from './card-filter.js';
 import { evalRaw, type RandomFn, type BrowseCdp } from './cdp-util.js';
 import type { DomProvider } from '../locating/engine.js';
@@ -416,16 +416,17 @@ export class BrowseSession {
         this.logger(`[browse] 决策=search「${kw}」`);
         await this.safeCloseModal();
         if (kw) {
-          // 直接导航到搜索结果页（比模拟输入搜索框更可靠）
-          const searchUrl = `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(kw)}&source=web_search_result_note`;
-          this.logger(`[browse] 导航到搜索页: ${searchUrl}`);
           try {
-            await this.deps.cdp.send('Page.navigate', { url: searchUrl });
-            await this.sleep(4000); // 等待搜索结果页加载
+            await executeSearch(kw, {
+              cdp: this.deps.cdp,
+              random: this.random,
+              sleep: this.sleep,
+              logger: this.logger,
+            });
             const href = await evalRaw<string>(this.deps.cdp, '(function(){ return location.href; })()');
             this.logger(`[browse] 搜索页已加载: ${href}`);
           } catch (err) {
-            this.logger(`[browse] 搜索导航失败：${(err as Error).message}`);
+            this.logger(`[browse] 搜索执行失败：${(err as Error).message}`);
           }
         }
         return true;
