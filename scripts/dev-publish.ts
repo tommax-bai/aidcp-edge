@@ -552,6 +552,8 @@ async function probeSubmitButton(
   exactLeave: unknown[];
   textMatches: unknown[];
   selectorCandidates: unknown[];
+  shadowMatches: unknown[];
+  cdpPierceMatches: unknown[];
   sameFooter: boolean;
 }> {
   await session.cdp.send('Emulation.setDeviceMetricsOverride', {
@@ -599,6 +601,49 @@ async function probeSubmitButton(
         const childText = Array.from(el.children).some((child) => normalize(child.textContent));
         return !childText;
       };
+      const cssPath = (el) => {
+        if (!(el instanceof Element)) return null;
+        const parts = [];
+        let cur = el;
+        while (cur && parts.length < 6) {
+          let part = cur.tagName.toLowerCase();
+          if (cur.id) {
+            part += '#' + cur.id;
+            parts.unshift(part);
+            break;
+          }
+          const cls = typeof cur.className === 'string'
+            ? cur.className.trim().split(/\\s+/).filter(Boolean).slice(0, 2)
+            : [];
+          if (cls.length) part += '.' + cls.join('.');
+          parts.unshift(part);
+          cur = cur.parentElement;
+        }
+        return parts.join(' > ');
+      };
+      const deepCollect = () => {
+        const out = [];
+        const walk = (node, hostChain = []) => {
+          if (!node) return;
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            const el = node;
+            out.push({ el, hostChain });
+            if (el.shadowRoot) {
+              walk(el.shadowRoot, hostChain.concat([{
+                tag: el.tagName,
+                className: typeof el.className === 'string' ? el.className : '',
+                selector: cssPath(el),
+              }]));
+            }
+          }
+          const children = node instanceof ShadowRoot || node instanceof Document || node instanceof Element
+            ? Array.from(node.children || [])
+            : [];
+          for (const child of children) walk(child, hostChain);
+        };
+        walk(document, []);
+        return out;
+      };
       const textMatches = Array.from(document.querySelectorAll('*'))
         .map((el) => {
           const text = normalize(el.textContent);
@@ -614,6 +659,25 @@ async function probeSubmitButton(
             rect,
             chain: chainOf(el),
             childTexts: Array.from(el.children).map((child) => normalize(child.textContent)).filter(Boolean),
+          };
+        })
+        .filter(Boolean);
+      const shadowMatches = deepCollect()
+        .map(({ el, hostChain }) => {
+          const text = normalize(el.textContent);
+          if (text !== '发布' && text !== '暂存离开') return null;
+          if (!isLeafText(el)) return null;
+          const rect = rectOf(el);
+          if (rect.width <= 0 || rect.height <= 0) return null;
+          return {
+            tag: el.tagName,
+            className: typeof el.className === 'string' ? el.className : '',
+            text,
+            disabled: (el).disabled === true,
+            ariaDisabled: el.getAttribute?.('aria-disabled'),
+            rect,
+            chain: chainOf(el),
+            hostChain,
           };
         })
         .filter(Boolean);
@@ -677,9 +741,15 @@ async function probeSubmitButton(
         exactPublish.length > 0 &&
         exactLeave.length > 0 &&
         exactPublish[0].chain[1]?.className === exactLeave[0].chain[1]?.className;
-      return { exactPublish, exactLeave, textMatches, selectorCandidates, sameFooter, href: location.href };
+      return { exactPublish, exactLeave, textMatches, selectorCandidates, shadowMatches, sameFooter, href: location.href };
     })()`,
     returnByValue: true,
+  });
+  const pierceTree = await session.cdp.send<{
+    root: Record<string, unknown>;
+  }>('DOM.getDocument', {
+    depth: -1,
+    pierce: true,
   });
   const snapshot = (footerDump.result?.value ?? null) as {
     href: string;
@@ -687,9 +757,39 @@ async function probeSubmitButton(
     exactLeave: unknown[];
     textMatches: unknown[];
     selectorCandidates: unknown[];
+    shadowMatches: unknown[];
     sameFooter: boolean;
   } | null;
+  const cdpPierceMatches: Array<Record<string, unknown>> = [];
+  const walkNode = (node: Record<string, unknown>, chain: string[] = []): void => {
+    const nodeName = String(node.nodeName ?? '');
+    const nodeValue = String(node.nodeValue ?? '').replace(/\s+/g, ' ').trim();
+    const attrs = Array.isArray(node.attributes) ? node.attributes : [];
+    const classIndex = attrs.findIndex((item) => item === 'class');
+    const className =
+      classIndex >= 0 && typeof attrs[classIndex + 1] === 'string' ? String(attrs[classIndex + 1]) : '';
+    const nextChain = nodeName ? chain.concat([`${nodeName}${className ? '.' + className : ''}`]) : chain;
+    if (nodeValue === '发布' || nodeValue === '暂存离开') {
+      cdpPierceMatches.push({
+        nodeName,
+        nodeValue,
+        backendNodeId: node.backendNodeId ?? null,
+        nodeId: node.nodeId ?? null,
+        chain: nextChain,
+      });
+    }
+    const children = Array.isArray(node.children) ? node.children : [];
+    for (const child of children) {
+      walkNode(child as Record<string, unknown>, nextChain);
+    }
+    const shadowRoots = Array.isArray(node.shadowRoots) ? node.shadowRoots : [];
+    for (const shadow of shadowRoots) {
+      walkNode(shadow as Record<string, unknown>, nextChain.concat(['#shadow-root']));
+    }
+  };
+  walkNode(pierceTree.root);
   console.log(JSON.stringify({ step: 'footer_publish_probe', snapshot }, null, 2));
+  console.log(JSON.stringify({ step: 'footer_publish_probe_cdp', snapshot: cdpPierceMatches }, null, 2));
   const screenshot = await session.cdp.send<{ data: string }>('Page.captureScreenshot', {
     format: 'png',
     fromSurface: true,
@@ -702,6 +802,8 @@ async function probeSubmitButton(
     exactLeave: [],
     textMatches: [],
     selectorCandidates: [],
+    shadowMatches: [],
+    cdpPierceMatches: [],
     sameFooter: false,
   };
 }

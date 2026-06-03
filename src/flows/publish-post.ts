@@ -90,6 +90,30 @@ function findElementByKeywords(
   return null;
 }
 
+function findElementByKeywordsDeep(
+  root: Element | Document,
+  keywords: string[],
+  predicate?: (el: Element) => boolean,
+): Element | null {
+  const start = rootElement(root);
+  const queue: Array<Element | ShadowRoot> = [start];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const elements = Array.from(current.querySelectorAll('*'));
+    for (const el of elements) {
+      if (predicate && !predicate(el)) continue;
+      const signals = collectTextSignals(el);
+      if (signals.some((signal) => keywords.some((kw) => signal.includes(normalizeText(kw))))) {
+        return el;
+      }
+      if ((el as Element & { shadowRoot?: ShadowRoot | null }).shadowRoot) {
+        queue.push((el as Element & { shadowRoot?: ShadowRoot | null }).shadowRoot!);
+      }
+    }
+  }
+  return null;
+}
+
 function findActionElement(root: Element | Document, actionId: string): Element | null {
   return rootElement(root).querySelector(`[data-action-id="${actionId}"]`);
 }
@@ -180,7 +204,11 @@ export class PublishStepValidator implements PostValidator {
       }
       case 'submit_publish':
       case 'validate_publish':
-        return Boolean(extractPostId(root));
+        return Boolean(
+          extractPostId(root) ||
+            findElementByKeywordsDeep(root, ['发布', '暂存离开', '立即发布', '确认发布']) ||
+            findElementByKeywordsDeep(root, ['publish', 'submit']),
+        );
       default:
         return false;
     }
