@@ -139,28 +139,28 @@ export const XHS_PUBLISH_ENTRY_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
 };
 
 export const XHS_PUBLISH_TITLE_GOAL =
-  '在发布页填写标题：找到标题输入框，常见文本/占位提示可能是「标题」「填写标题」「输入标题」。';
+  '在发布页填写标题：找到标题输入框，真实控件通常是 placeholder 为「填写标题会有更多赞哦」的输入框。';
 export const XHS_PUBLISH_TITLE_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
   role: 'textbox',
-  text: '标题',
+  text: '填写标题会有更多赞哦',
   textMatch: 'contains',
   scope: XHS_PUBLISH_SCOPE,
 };
 
 export const XHS_PUBLISH_CONTENT_GOAL =
-  '在发布页填写正文：找到正文输入框或内容编辑区，常见文本/占位提示可能是「正文」「输入正文」「添加正文」「写点什么」。';
+  '在发布页填写正文：找到正文输入框或内容编辑区，真实控件通常是 class 含 tiptap ProseMirror 的富文本编辑器。';
 export const XHS_PUBLISH_CONTENT_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
   role: 'textbox',
-  text: '正文',
+  classHint: 'ProseMirror',
   textMatch: 'contains',
   scope: XHS_PUBLISH_SCOPE,
 };
 
 export const XHS_PUBLISH_TAG_GOAL =
-  '在发布页添加标签：找到标签输入框或添加话题入口，常见文本/可访问名可能是「标签」「话题」「添加标签」「添加话题」。';
+  '在发布页添加标签：找到话题入口按钮，真实控件通常是文本为「话题」的按钮。';
 export const XHS_PUBLISH_TAG_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
-  role: 'textbox',
-  text: '标签',
+  role: 'button',
+  text: '话题',
   textMatch: 'contains',
   scope: XHS_PUBLISH_SCOPE,
 };

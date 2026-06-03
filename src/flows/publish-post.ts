@@ -66,7 +66,12 @@ function collectTextSignals(el: Element): string[] {
 
 function isTextEntryElement(el: Element): boolean {
   const tag = el.tagName.toLowerCase();
-  return tag === 'input' || tag === 'textarea' || el.getAttribute('contenteditable') === 'true';
+  return (
+    tag === 'input' ||
+    tag === 'textarea' ||
+    el.getAttribute('contenteditable') === 'true' ||
+    el.getAttribute('role') === 'textbox'
+  );
 }
 
 function findElementByKeywords(
@@ -144,7 +149,7 @@ export class PublishStepValidator implements PostValidator {
       case 'input_title': {
         const titleEl =
           findTextEntryByActionId(root, XHS_PUBLISH_TITLE_ACTION_ID) ??
-          findElementByKeywords(root, ['标题', '填写标题', '输入标题'], (el) =>
+          findElementByKeywords(root, ['填写标题会有更多赞哦', '标题', '填写标题', '输入标题'], (el) =>
             isTextEntryElement(el),
           );
         return normalizeText(readInputValue(titleEl)).includes(normalizeText(this.context.payload.title));
@@ -158,7 +163,7 @@ export class PublishStepValidator implements PostValidator {
         }
         const fallback = findElementByKeywords(
           root,
-          ['正文', '写点什么', '添加正文', '输入正文'],
+          ['正文', '写点什么', '添加正文', '输入正文', 'ProseMirror'],
           (el) => isTextEntryElement(el),
         );
         return normalizeText(readInputValue(fallback)).includes(normalizeText(this.context.payload.content));
