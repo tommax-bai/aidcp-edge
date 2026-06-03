@@ -1,4 +1,5 @@
 import process from 'node:process';
+import { writeFileSync } from 'node:fs';
 
 import { attachToPage } from '../src/cdp/index.js';
 import type { PublishRequestPayload } from '../src/comm/protocol.js';
@@ -18,6 +19,7 @@ import { LocatingEngine } from '../src/locating/engine.js';
 
 const XHS_CREATOR_PUBLISH_URL = 'https://creator.xiaohongshu.com/publish/publish?source=official';
 const DEFAULT_IMAGE_PATH = '/tmp/aidcp-test-image.png';
+const DEFAULT_READY_SCREENSHOT = '/tmp/aidcp-publish-ready2.png';
 
 function readArg(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -52,6 +54,10 @@ function buildPayload(): PublishRequestPayload {
 
 function hasFlag(name: string): boolean {
   return process.argv.includes(`--${name}`);
+}
+
+function shouldRealPublish(): boolean {
+  return process.env.AIDCP_REAL_PUBLISH === 'true';
 }
 
 async function dumpPageDiagnostics(session: Awaited<ReturnType<typeof attachToPage>>): Promise<void> {
@@ -195,6 +201,7 @@ async function clickGraphicEntryAndWaitImageInput(
     returnByValue: true,
   });
   const snapshot = (leafDump.result?.value ?? []) as Array<{ chain: Array<Record<string, unknown>> }>;
+  console.log(JSON.stringify({ step: 'upload_graphic_leaf_dump', snapshot }));
   const visibleGraphic = snapshot
     .flatMap((item) => item.chain)
     .filter((node) => node.tag === 'DIV' && String(node.className ?? '').includes('creator-tab'))
@@ -202,7 +209,7 @@ async function clickGraphicEntryAndWaitImageInput(
     .filter((node) => !/left:\s*-9999px|top:\s*-9999px/.test(String(node.style ?? '')))
     .sort((a, b) => Number(a.width) * Number(a.height) - Number(b.width) * Number(b.height))[0];
   if (!visibleGraphic) {
-    throw new Error('visible upload graphic card not found');
+    throw new Error(`visible upload graphic card not found: ${JSON.stringify(snapshot)}`);
   }
   console.log(JSON.stringify({ step: 'graphic_click_target', target: visibleGraphic }));
   const x = Number(visibleGraphic.x) + Number(visibleGraphic.width) / 2;
@@ -343,6 +350,215 @@ async function uploadImageAndWaitEditor(
       console.log(JSON.stringify({ step: 'click_overlay_button', target: overlayButton, clickPoint: { x, y } }));
     }
   }
+}
+
+async function fillEditorFields(
+  session: Awaited<ReturnType<typeof attachToPage>>,
+  payload: PublishRequestPayload,
+): Promise<void> {
+  const titlePoint = await session.cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+    expression: `(() => {
+      const el = document.querySelector('input.d-text[placeholder="填写标题会有更多赞哦"]');
+      if (!el) return null;
+      const rect = el.getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    })()`,
+    returnByValue: true,
+  });
+  const titleCoords = titlePoint.result?.value as { x: number; y: number } | null;
+  if (!titleCoords) throw new Error('title input not found');
+  await session.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: titleCoords.x, y: titleCoords.y, button: 'none' }).catch(() => undefined);
+  await session.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: titleCoords.x, y: titleCoords.y, button: 'left', clickCount: 1 });
+  await session.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: titleCoords.x, y: titleCoords.y, button: 'left', clickCount: 1 });
+  await session.cdp.send('Input.insertText', { text: payload.title });
+  const titleRead = await session.cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+    expression: `(() => {
+      const el = document.querySelector('input.d-text[placeholder="填写标题会有更多赞哦"]');
+      return el ? { value: el.value, placeholder: el.getAttribute('placeholder'), className: el.className } : null;
+    })()`,
+    returnByValue: true,
+  });
+  console.log(JSON.stringify({ step: 'title_filled', snapshot: titleRead.result?.value ?? null }));
+
+  const contentPoint = await session.cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+    expression: `(() => {
+      const el = document.querySelector('div.tiptap.ProseMirror[contenteditable="true"][role="textbox"]');
+      if (!el) return null;
+      const rect = el.getBoundingClientRect();
+      return { x: rect.x + 20, y: rect.y + 20 };
+    })()`,
+    returnByValue: true,
+  });
+  const contentCoords = contentPoint.result?.value as { x: number; y: number } | null;
+  if (!contentCoords) throw new Error('content editor not found');
+  await session.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: contentCoords.x, y: contentCoords.y, button: 'none' }).catch(() => undefined);
+  await session.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: contentCoords.x, y: contentCoords.y, button: 'left', clickCount: 1 });
+  await session.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: contentCoords.x, y: contentCoords.y, button: 'left', clickCount: 1 });
+  await session.cdp.send('Input.insertText', { text: payload.content }).catch(async () => {
+    const fallback = await session.cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+      expression: `(() => {
+        const el = document.querySelector('div.tiptap.ProseMirror[contenteditable="true"][role="textbox"]');
+        if (!el) return { ok: false };
+        el.focus();
+        document.execCommand('insertText', false, ${JSON.stringify(payload.content)});
+        el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: ${JSON.stringify(payload.content)} }));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return { ok: true, text: (el.textContent || '').replace(/\\s+/g, ' ').trim() };
+      })()`,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    console.log(JSON.stringify({ step: 'content_insert_fallback', snapshot: fallback.result?.value ?? null }));
+  });
+  const contentRead = await session.cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+    expression: `(() => {
+      const el = document.querySelector('div.tiptap.ProseMirror[contenteditable="true"][role="textbox"]');
+      return el ? { textContent: (el.textContent || '').replace(/\\s+/g, ' ').trim(), innerText: (el.innerText || '').replace(/\\s+/g, ' ').trim(), className: el.className } : null;
+    })()`,
+    returnByValue: true,
+  });
+  console.log(JSON.stringify({ step: 'content_filled', snapshot: contentRead.result?.value ?? null }));
+
+  const topicPoint = await session.cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+    expression: `(() => {
+      const el = document.querySelector('button.contentBtn.topic-btn');
+      if (!el) return null;
+      const rect = el.getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    })()`,
+    returnByValue: true,
+  });
+  const topicCoords = topicPoint.result?.value as { x: number; y: number } | null;
+  if (!topicCoords) throw new Error('topic button not found');
+  await session.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: topicCoords.x, y: topicCoords.y, button: 'none' }).catch(() => undefined);
+  await session.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: topicCoords.x, y: topicCoords.y, button: 'left', clickCount: 1 });
+  await session.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: topicCoords.x, y: topicCoords.y, button: 'left', clickCount: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await session.cdp.send('Input.insertText', { text: payload.tags[0] ?? '' });
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  const topicRead = await session.cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+    expression: `(() => ({
+      dropdowns: Array.from(document.querySelectorAll('*')).map((el) => {
+        const text = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+        const rect = el.getBoundingClientRect();
+        if (!text || rect.width <= 0 || rect.height <= 0) return null;
+        if (!/测试|话题|添加话题/.test(text)) return null;
+        return { tag: el.tagName, className: typeof el.className === 'string' ? el.className : '', text: text.slice(0, 160), x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      }).filter(Boolean).slice(0, 20),
+      selectedTopics: Array.from(document.querySelectorAll('*')).map((el) => {
+        const text = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+        const rect = el.getBoundingClientRect();
+        if (!text || rect.width <= 0 || rect.height <= 0) return null;
+        if (!/^#/.test(text) && !/测试/.test(text)) return null;
+        return { tag: el.tagName, className: typeof el.className === 'string' ? el.className : '', text: text.slice(0, 120), x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      }).filter(Boolean).slice(0, 20)
+    }))()`,
+    returnByValue: true,
+  });
+  console.log(JSON.stringify({ step: 'topic_state', snapshot: topicRead.result?.value ?? null }));
+  await session.cdp.send('Input.dispatchKeyEvent', {
+    type: 'keyDown',
+    windowsVirtualKeyCode: 27,
+    nativeVirtualKeyCode: 27,
+    key: 'Escape',
+    code: 'Escape',
+  }).catch(() => undefined);
+  await session.cdp.send('Input.dispatchKeyEvent', {
+    type: 'keyUp',
+    windowsVirtualKeyCode: 27,
+    nativeVirtualKeyCode: 27,
+    key: 'Escape',
+    code: 'Escape',
+  }).catch(() => undefined);
+}
+
+async function probeSubmitButton(
+  session: Awaited<ReturnType<typeof attachToPage>>,
+): Promise<void> {
+  await session.cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 1440,
+    height: 1080,
+    deviceScaleFactor: 1,
+    mobile: false,
+    screenWidth: 1440,
+    screenHeight: 1080,
+  }).catch(() => undefined);
+  console.log(JSON.stringify({ step: 'viewport_override', snapshot: { width: 1440, height: 1080 } }));
+  const footerDump = await session.cdp.send<{
+    result?: { value?: unknown };
+    exceptionDetails?: { text: string };
+  }>('Runtime.evaluate', {
+    expression: `(() => {
+      const footerBand = Array.from(document.querySelectorAll('*')).map((el) => {
+        const text = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return null;
+        if (rect.y < 1000 || rect.y > 1060) return null;
+        if (rect.x < 650 || rect.x > 900) return null;
+        return {
+          tag: el.tagName,
+          className: typeof el.className === 'string' ? el.className : '',
+          role: el.getAttribute('role'),
+          text,
+          disabled: (el).disabled === true,
+          ariaDisabled: el.getAttribute?.('aria-disabled'),
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+          centerX: rect.x + rect.width / 2,
+          centerY: rect.y + rect.height / 2
+        };
+      }).filter(Boolean);
+      const exactPublish = Array.from(document.querySelectorAll('*')).filter((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim() === '发布').map((el) => {
+        const rect = el.getBoundingClientRect();
+        const chain = [];
+        let cur = el;
+        for (let i = 0; i < 6 && cur; i += 1) {
+          chain.push({ tag: cur.tagName, className: typeof cur.className === 'string' ? cur.className : '', text: (cur.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120) });
+          cur = cur.parentElement;
+        }
+        return {
+          tag: el.tagName,
+          className: typeof el.className === 'string' ? el.className : '',
+          text: '发布',
+          disabled: (el).disabled === true,
+          ariaDisabled: el.getAttribute?.('aria-disabled'),
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+          centerX: rect.x + rect.width / 2,
+          centerY: rect.y + rect.height / 2,
+          chain
+        };
+      });
+      const exactLeave = Array.from(document.querySelectorAll('*')).filter((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim() === '暂存离开').map((el) => {
+        const rect = el.getBoundingClientRect();
+        const chain = [];
+        let cur = el;
+        for (let i = 0; i < 6 && cur; i += 1) {
+          chain.push({ tag: cur.tagName, className: typeof cur.className === 'string' ? cur.className : '', text: (cur.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120) });
+          cur = cur.parentElement;
+        }
+        return {
+          tag: el.tagName,
+          className: typeof el.className === 'string' ? el.className : '',
+          text: '暂存离开',
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+          centerX: rect.x + rect.width / 2,
+          centerY: rect.y + rect.height / 2,
+          chain
+        };
+      });
+      return { footerBand, exactPublish, exactLeave, href: location.href };
+    })()`,
+    returnByValue: true,
+  });
+  console.log(JSON.stringify({ step: 'footer_publish_probe', snapshot: footerDump.result?.value ?? null }, null, 2));
 }
 
 async function probeEditorControls(session: Awaited<ReturnType<typeof attachToPage>>): Promise<void> {
@@ -491,6 +707,8 @@ async function main(): Promise<void> {
           await navigateCurrentPageToPublish(session);
           await uploadImageAndWaitEditor(session, payload.images?.[0] ?? DEFAULT_IMAGE_PATH);
           await probeEditorControls(session);
+          await fillEditorFields(session, payload);
+          await probeSubmitButton(session);
           console.log(
             JSON.stringify({
               step: 'enter_publish_page',
@@ -529,6 +747,11 @@ async function main(): Promise<void> {
       {},
       payload,
     );
+    if (!shouldRealPublish()) {
+      console.log(JSON.stringify({ ok: false, error: '[submit_publish] blocked_by_AIDCP_REAL_PUBLISH=false' }));
+      process.exitCode = 1;
+      return;
+    }
     console.log(JSON.stringify(result));
     process.exitCode = result.ok ? 0 : 1;
   } finally {
