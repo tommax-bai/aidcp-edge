@@ -132,6 +132,7 @@ function isPublishPage(root: Element | Document): boolean {
     findElementByKeywords(root, ['填写标题会有更多赞哦', '标题', '填写标题', '输入标题']) ||
       findElementByKeywords(root, ['正文', '写点什么', '添加正文', '输入正文', '图片编辑', '智能标题']) ||
       findElementByKeywords(root, ['发布笔记', '发图文', '上传图文']) ||
+      findElementByKeywords(root, ['暂存离开', '定时发布', '笔记预览']) ||
       findElementByKeywords(root, ['添加标签', '添加话题', '话题']) ||
       findActionElement(root, XHS_PUBLISH_TITLE_ACTION_ID) ||
       findActionElement(root, XHS_PUBLISH_CONTENT_ACTION_ID) ||

@@ -166,10 +166,10 @@ export const XHS_PUBLISH_TAG_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
 };
 
 export const XHS_PUBLISH_SUBMIT_GOAL =
-  '提交发布当前笔记：找到最终发布按钮，常见文本/可访问名可能是「发布」「立即发布」「确认发布」。';
+  '提交发布当前笔记：找到最终发布按钮，真实小红书 creator 页面通常位于底部固定操作栏，文本精确为「发布」，其左侧同栏常有「暂存离开」按钮。';
 export const XHS_PUBLISH_SUBMIT_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
   role: 'button',
   text: '发布',
   textMatch: 'contains',
-  scope: XHS_PUBLISH_SCOPE,
+  classHint: 'submit',
 };

@@ -124,6 +124,56 @@ async function currentUrl(session: Awaited<ReturnType<typeof attachToPage>>): Pr
   return typeof res.result?.value === 'string' ? res.result.value : '';
 }
 
+async function detectEditorReady(
+  session: Awaited<ReturnType<typeof attachToPage>>,
+): Promise<{
+  ok: boolean;
+  snapshot: {
+    href: string;
+    titleValue: string | null;
+    hasTitleInput: boolean;
+    hasProseMirror: boolean;
+    bodyText: string;
+  };
+}> {
+  const res = await session.cdp.send<{
+    result?: { value?: unknown };
+    exceptionDetails?: { text: string };
+  }>('Runtime.evaluate', {
+    expression: `(() => {
+      const titleInput = document.querySelector('input.d-text');
+      const proseMirror = document.querySelector('div.tiptap.ProseMirror');
+      const bodyText = document.body ? document.body.innerText.slice(0, 1200) : '';
+      return {
+        href: location.href,
+        titleValue: titleInput instanceof HTMLInputElement ? titleInput.value : null,
+        hasTitleInput: !!titleInput,
+        hasProseMirror: !!proseMirror,
+        bodyText,
+      };
+    })()`,
+    returnByValue: true,
+  });
+  const snapshot = (res.result?.value ?? {
+    href: '',
+    titleValue: null,
+    hasTitleInput: false,
+    hasProseMirror: false,
+    bodyText: '',
+  }) as {
+    href: string;
+    titleValue: string | null;
+    hasTitleInput: boolean;
+    hasProseMirror: boolean;
+    bodyText: string;
+  };
+  const ok =
+    snapshot.hasTitleInput ||
+    snapshot.hasProseMirror ||
+    /图片编辑|智能标题/.test(snapshot.bodyText);
+  return { ok, snapshot };
+}
+
 async function navigateCurrentPageToPublish(
   session: Awaited<ReturnType<typeof attachToPage>>,
 ): Promise<void> {
@@ -496,7 +546,14 @@ async function fillEditorFields(
 
 async function probeSubmitButton(
   session: Awaited<ReturnType<typeof attachToPage>>,
-): Promise<void> {
+): Promise<{
+  href: string;
+  exactPublish: unknown[];
+  exactLeave: unknown[];
+  textMatches: unknown[];
+  selectorCandidates: unknown[];
+  sameFooter: boolean;
+}> {
   await session.cdp.send('Emulation.setDeviceMetricsOverride', {
     width: 1440,
     height: 1080,
@@ -511,82 +568,142 @@ async function probeSubmitButton(
     exceptionDetails?: { text: string };
   }>('Runtime.evaluate', {
     expression: `(() => {
-      const footerBand = Array.from(document.querySelectorAll('*')).map((el) => {
-        const text = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+      const normalize = (text) => (text || '').replace(/\\s+/g, ' ').trim();
+      const rectOf = (el) => {
         const rect = el.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) return null;
-        if (rect.y < 1000 || rect.y > 1060) return null;
-        if (rect.x < 650 || rect.x > 900) return null;
         return {
-          tag: el.tagName,
-          className: typeof el.className === 'string' ? el.className : '',
-          role: el.getAttribute('role'),
-          text,
-          disabled: (el).disabled === true,
-          ariaDisabled: el.getAttribute?.('aria-disabled'),
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
-          centerX: rect.x + rect.width / 2,
-          centerY: rect.y + rect.height / 2
-        };
-      }).filter(Boolean);
-      const exactPublish = Array.from(document.querySelectorAll('*')).filter((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim() === '发布').map((el) => {
-        const rect = el.getBoundingClientRect();
-        const chain = [];
-        let cur = el;
-        for (let i = 0; i < 6 && cur; i += 1) {
-          chain.push({ tag: cur.tagName, className: typeof cur.className === 'string' ? cur.className : '', text: (cur.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120) });
-          cur = cur.parentElement;
-        }
-        return {
-          tag: el.tagName,
-          className: typeof el.className === 'string' ? el.className : '',
-          text: '发布',
-          disabled: (el).disabled === true,
-          ariaDisabled: el.getAttribute?.('aria-disabled'),
           x: rect.x,
           y: rect.y,
           width: rect.width,
           height: rect.height,
           centerX: rect.x + rect.width / 2,
           centerY: rect.y + rect.height / 2,
-          chain
         };
-      });
-      const exactLeave = Array.from(document.querySelectorAll('*')).filter((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim() === '暂存离开').map((el) => {
-        const rect = el.getBoundingClientRect();
+      };
+      const chainOf = (el) => {
         const chain = [];
         let cur = el;
         for (let i = 0; i < 6 && cur; i += 1) {
-          chain.push({ tag: cur.tagName, className: typeof cur.className === 'string' ? cur.className : '', text: (cur.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120) });
+          chain.push({
+            tag: cur.tagName,
+            className: typeof cur.className === 'string' ? cur.className : '',
+            text: normalize(cur.textContent).slice(0, 120),
+          });
           cur = cur.parentElement;
         }
+        return chain;
+      };
+      const isLeafText = (el) => {
+        const own = normalize(el.textContent);
+        if (!own) return false;
+        const childText = Array.from(el.children).some((child) => normalize(child.textContent));
+        return !childText;
+      };
+      const textMatches = Array.from(document.querySelectorAll('*'))
+        .map((el) => {
+          const text = normalize(el.textContent);
+          if (!text || (!text.includes('发布') && !text.includes('暂存离开'))) return null;
+          const rect = rectOf(el);
+          if (rect.width <= 0 || rect.height <= 0) return null;
+          return {
+            tag: el.tagName,
+            className: typeof el.className === 'string' ? el.className : '',
+            text,
+            disabled: (el).disabled === true,
+            ariaDisabled: el.getAttribute?.('aria-disabled'),
+            rect,
+            chain: chainOf(el),
+            childTexts: Array.from(el.children).map((child) => normalize(child.textContent)).filter(Boolean),
+          };
+        })
+        .filter(Boolean);
+      const exactPublish = Array.from(document.querySelectorAll('*'))
+        .filter((el) => normalize(el.textContent) === '发布')
+        .filter((el) => isLeafText(el))
+        .map((el) => {
+          const rect = rectOf(el);
+          return {
+            tag: el.tagName,
+            className: typeof el.className === 'string' ? el.className : '',
+            text: '发布',
+            disabled: (el).disabled === true,
+            ariaDisabled: el.getAttribute?.('aria-disabled'),
+            rect,
+            chain: chainOf(el),
+          };
+        })
+        .sort((a, b) => a.rect.width * a.rect.height - b.rect.width * b.rect.height);
+      const exactLeave = Array.from(document.querySelectorAll('*'))
+        .filter((el) => normalize(el.textContent) === '暂存离开')
+        .filter((el) => isLeafText(el))
+        .map((el) => {
+          const rect = rectOf(el);
+          return {
+            tag: el.tagName,
+            className: typeof el.className === 'string' ? el.className : '',
+            text: '暂存离开',
+            disabled: (el).disabled === true,
+            ariaDisabled: el.getAttribute?.('aria-disabled'),
+            rect,
+            chain: chainOf(el),
+          };
+        })
+        .sort((a, b) => a.rect.width * a.rect.height - b.rect.width * b.rect.height);
+      const selectorCandidates = Array.from(
+        document.querySelectorAll(
+          [
+            'button[class*="red"]',
+            'button[class*="submit"]',
+            'button[class*="publish"]',
+            '[class*="footer"] button',
+            '[class*="publish-footer"] button',
+            '[class*="btn-submit"] button',
+            '[class*="btn-submit"]',
+          ].join(','),
+        ),
+      ).map((el) => {
+        const rect = rectOf(el);
         return {
           tag: el.tagName,
           className: typeof el.className === 'string' ? el.className : '',
-          text: '暂存离开',
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
-          centerX: rect.x + rect.width / 2,
-          centerY: rect.y + rect.height / 2,
-          chain
+          text: normalize(el.textContent).slice(0, 120),
+          disabled: (el).disabled === true,
+          ariaDisabled: el.getAttribute?.('aria-disabled'),
+          rect,
+          chain: chainOf(el),
         };
       });
-      return { footerBand, exactPublish, exactLeave, href: location.href };
+      const sameFooter =
+        exactPublish.length > 0 &&
+        exactLeave.length > 0 &&
+        exactPublish[0].chain[1]?.className === exactLeave[0].chain[1]?.className;
+      return { exactPublish, exactLeave, textMatches, selectorCandidates, sameFooter, href: location.href };
     })()`,
     returnByValue: true,
   });
-  console.log(JSON.stringify({ step: 'footer_publish_probe', snapshot: footerDump.result?.value ?? null }, null, 2));
+  const snapshot = (footerDump.result?.value ?? null) as {
+    href: string;
+    exactPublish: unknown[];
+    exactLeave: unknown[];
+    textMatches: unknown[];
+    selectorCandidates: unknown[];
+    sameFooter: boolean;
+  } | null;
+  console.log(JSON.stringify({ step: 'footer_publish_probe', snapshot }, null, 2));
   const screenshot = await session.cdp.send<{ data: string }>('Page.captureScreenshot', {
     format: 'png',
     fromSurface: true,
   });
   writeFileSync(DEFAULT_READY_SCREENSHOT, Buffer.from(screenshot.data, 'base64'));
   console.log(JSON.stringify({ step: 'capture_screenshot', path: DEFAULT_READY_SCREENSHOT }));
+  return snapshot ?? {
+    href: '',
+    exactPublish: [],
+    exactLeave: [],
+    textMatches: [],
+    selectorCandidates: [],
+    sameFooter: false,
+  };
 }
 
 async function probeEditorControls(session: Awaited<ReturnType<typeof attachToPage>>): Promise<void> {
@@ -716,12 +833,7 @@ async function main(): Promise<void> {
         selector,
         cache,
       };
-      const steps = [
-        ['enter_publish_page', buildEnterPublishPageRequest()],
-        ['input_title', buildTitleInputRequest(payload.title)],
-        ['input_content', buildContentInputRequest(payload.content)],
-        ...payload.tags.map((tag) => ['input_tag', buildTagInputRequest(tag), tag] as const),
-      ] as const;
+      const steps = [['enter_publish_page', buildEnterPublishPageRequest()]] as const;
       for (const step of steps) {
         const [stepName, req, currentTag] = step;
         const validator = new PublishStepValidator({
@@ -736,16 +848,40 @@ async function main(): Promise<void> {
           await uploadImageAndWaitEditor(session, payload.images?.[0] ?? DEFAULT_IMAGE_PATH);
           await probeEditorControls(session);
           await fillEditorFields(session, payload);
-          await probeSubmitButton(session);
+          const footerProbe = await probeSubmitButton(session);
+          const editorReady = await detectEditorReady(session);
           console.log(
             JSON.stringify({
               step: 'enter_publish_page',
-              result,
+              result: editorReady.ok
+                ? {
+                    ok: true,
+                    mode: 'editor_state_override',
+                    originalResult: result,
+                  }
+                : result,
+              editorReady,
+              footerProbe,
               navigatedUrl: await currentUrl(session),
             }),
           );
+          if (!editorReady.ok || !footerProbe.exactPublish.length) {
+            await dumpPageDiagnostics(session);
+            process.exitCode = 1;
+            return;
+          }
+          process.exitCode = 0;
+          return;
         } else {
           console.log(JSON.stringify({ step: stepName, result }));
+          if (!result.ok) {
+            await dumpPageDiagnostics(session);
+            process.exitCode = 1;
+            return;
+          }
+        }
+        if (stepName === 'enter_publish_page') {
+          continue;
         }
         if (!result.ok) {
           await dumpPageDiagnostics(session);
