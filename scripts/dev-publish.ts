@@ -12,6 +12,10 @@ import {
   PublishStepValidator,
   publishPost,
 } from '../src/flows/publish-post.js';
+import {
+  buildPublishApprovalToken,
+  type PublishApprovalGateOptions,
+} from '../src/publish/approval-gate.js';
 import { AnchorCache } from '../src/locating/cache.js';
 import { CloudElementSelector } from '../src/client/cloud-selector.js';
 import { EdgeClient, type CloudWebSocketFactory } from '../src/client/edge-client.js';
@@ -58,6 +62,34 @@ function hasFlag(name: string): boolean {
 
 function shouldRealPublish(): boolean {
   return process.env.AIDCP_REAL_PUBLISH === 'true';
+}
+
+function readNumberEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function buildApprovalGate(): PublishApprovalGateOptions | undefined {
+  if (!shouldRealPublish()) return undefined;
+  const token = process.env.AIDCP_PUBLISH_APPROVAL_TOKEN ?? buildPublishApprovalToken();
+  process.env.AIDCP_PUBLISH_APPROVAL_TOKEN = token;
+  console.log(
+    JSON.stringify({
+      step: 'approval_gate_ready',
+      token,
+      signalPath: `/tmp/aidcp-publish-approve-${token}.json`,
+      pollIntervalMs: readNumberEnv('AIDCP_PUBLISH_APPROVAL_POLL_MS', 2_000),
+      timeoutMs: readNumberEnv('AIDCP_PUBLISH_APPROVAL_TIMEOUT_MS', 300_000),
+    }),
+  );
+  return {
+    token,
+    pollIntervalMs: readNumberEnv('AIDCP_PUBLISH_APPROVAL_POLL_MS', 2_000),
+    timeoutMs: readNumberEnv('AIDCP_PUBLISH_APPROVAL_TIMEOUT_MS', 300_000),
+    consumeSignal: process.env.AIDCP_PUBLISH_APPROVAL_CONSUME !== 'false',
+  };
 }
 
 async function dumpPageDiagnostics(session: Awaited<ReturnType<typeof attachToPage>>): Promise<void> {
@@ -1012,6 +1044,7 @@ async function main(): Promise<void> {
       },
       {},
       payload,
+      buildApprovalGate(),
     );
     if (!shouldRealPublish()) {
       console.log(JSON.stringify({ ok: false, error: '[submit_publish] blocked_by_AIDCP_REAL_PUBLISH=false' }));

@@ -24,6 +24,10 @@ import {
   XHS_PUBLISH_TITLE_ANCHOR_HINT,
   XHS_PUBLISH_TITLE_GOAL,
 } from './anchors.js';
+import {
+  waitForPublishApproval,
+  type PublishApprovalGateOptions,
+} from '../publish/approval-gate.js';
 
 type PublishStep =
   | 'enter_publish_page'
@@ -285,6 +289,7 @@ export async function publishPost(
   deps: Omit<EngineDeps, 'validator'> & { validator?: PostValidator },
   options: EngineOptions = {},
   payload: PublishRequestPayload,
+  approvalGate?: PublishApprovalGateOptions,
 ): Promise<PublishResultPayload> {
   if ((payload.images?.length ?? 0) > 0) {
     return { ok: false, error: '[images] images are not supported in phase one' };
@@ -322,6 +327,16 @@ export async function publishPost(
       { step: 'input_tag', payload, currentTag: tag },
     );
     if (!tagResult.ok) return stepError('input_tag', tagResult);
+  }
+
+  if (approvalGate) {
+    const approval = await waitForPublishApproval(approvalGate);
+    if (!approval.ok) {
+      return {
+        ok: false,
+        error: `[approval_gate] ${approval.reason ?? 'approval_failed'} token=${approval.token}`,
+      };
+    }
   }
 
   const submit = await runStep(

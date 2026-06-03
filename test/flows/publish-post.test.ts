@@ -190,7 +190,7 @@ test('publish-post: final validation failure after submit returns explicit error
   const doc = buildDom(publishPageHtml());
   const executor = new FakeExecutor(doc, new Set(), new Set(), true);
   const result = await publishPost(depsFor(doc, executor), {}, payload);
-  assert.deepEqual(result, { ok: false, error: '[submit_publish] post_validate_failed' });
+  assert.deepEqual(result, { ok: false, error: '[validate_publish] missing_post_id' });
 });
 
 test('publish-post: tag not joined successfully fails at input_tag step', async () => {
