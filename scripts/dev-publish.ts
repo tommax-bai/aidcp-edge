@@ -163,52 +163,74 @@ async function navigateCurrentPageToPublish(
 async function clickGraphicEntryAndWaitImageInput(
   session: Awaited<ReturnType<typeof attachToPage>>,
 ): Promise<{ imageInputIndex: number; nodeId: number }> {
-  const leafDump = await session.cdp.send<{
-    result?: { value?: unknown };
-    exceptionDetails?: { text: string };
-  }>('Runtime.evaluate', {
-    expression: `(() => {
-      const dumpChain = (el) => {
-        const chain = [];
-        let cur = el;
-        for (let i = 0; i < 4 && cur; i += 1) {
-          const rect = cur.getBoundingClientRect();
-          const style = cur.getAttribute('style') || '';
-          chain.push({
-            level: i,
-            tag: cur.tagName,
-            className: typeof cur.className === 'string' ? cur.className : '',
-            text: (cur.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120),
-            href: cur.getAttribute?.('href') || null,
-            style,
+  let snapshot: Array<Record<string, unknown>> = [];
+  let visibleGraphic: Record<string, unknown> | undefined;
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const tabsDump = await session.cdp.send<{
+      result?: { value?: unknown };
+      exceptionDetails?: { text: string };
+    }>('Runtime.evaluate', {
+      expression: `(() => {
+        return Array.from(document.querySelectorAll('div,span')).map((el) => {
+          const cls = typeof el.className === 'string' ? el.className : '';
+          if (!/creator-tab|title/.test(cls)) return null;
+          const text = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+          const rect = el.getBoundingClientRect();
+          return {
+            tag: el.tagName,
+            className: cls,
+            text,
+            style: el.getAttribute('style') || '',
             x: rect.x,
             y: rect.y,
             width: rect.width,
             height: rect.height,
-          });
-          cur = cur.parentElement;
-        }
-        return chain;
-      };
-      const all = Array.from(document.querySelectorAll('*'));
-      const hits = all.filter((el) => {
-        const text = (el.textContent || '').replace(/\\s+/g, ' ').trim();
-        if (text !== '上传图文') return false;
-        return !Array.from(el.children).some((child) => ((child.textContent || '').replace(/\\s+/g, ' ').trim() === '上传图文'));
-      });
-      return hits.map((el, index) => ({ index, chain: dumpChain(el) }));
-    })()`,
-    returnByValue: true,
-  });
-  const snapshot = (leafDump.result?.value ?? []) as Array<{ chain: Array<Record<string, unknown>> }>;
-  console.log(JSON.stringify({ step: 'upload_graphic_leaf_dump', snapshot }));
-  const visibleGraphic = snapshot
-    .flatMap((item) => item.chain)
-    .filter((node) => node.tag === 'DIV' && String(node.className ?? '').includes('creator-tab'))
-    .filter((node) => Number(node.x) >= 0 && Number(node.y) >= 0 && Number(node.width) > 0 && Number(node.height) > 0)
-    .filter((node) => !/left:\s*-9999px|top:\s*-9999px/.test(String(node.style ?? '')))
-    .sort((a, b) => Number(a.width) * Number(a.height) - Number(b.width) * Number(b.height))[0];
+          };
+        }).filter(Boolean);
+      })()`,
+      returnByValue: true,
+    });
+    snapshot = (tabsDump.result?.value ?? []) as Array<Record<string, unknown>>;
+    console.log(JSON.stringify({ step: 'upload_graphic_leaf_dump', snapshot }));
+    visibleGraphic = snapshot
+      .filter((node) => String(node.tag ?? '') === 'DIV' && String(node.className ?? '').includes('creator-tab'))
+      .filter((node) => String(node.text ?? '').includes('上传图文'))
+      .filter((node) => Number(node.x) >= 0 && Number(node.y) >= 0 && Number(node.width) > 0 && Number(node.height) > 0)
+      .filter((node) => !/left:\s*-9999px|top:\s*-9999px/.test(String(node.style ?? '')))
+      .sort((a, b) => Number(a.width) * Number(a.height) - Number(b.width) * Number(b.height))[0];
+    if (visibleGraphic) break;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
   if (!visibleGraphic) {
+    const dumpPath = '/tmp/aidcp-select-page-dump.json';
+    const pageSnapshot = await session.cdp.send<{
+      result?: { value?: unknown };
+      exceptionDetails?: { text: string };
+    }>('Runtime.evaluate', {
+      expression: `(() => ({
+        href: location.href,
+        bodyText: document.body ? document.body.innerText.slice(0, 500) : '',
+        creatorTabs: Array.from(document.querySelectorAll('div,span')).map((el) => {
+          const cls = typeof el.className === 'string' ? el.className : '';
+          if (!/creator-tab|title/.test(cls)) return null;
+          const rect = el.getBoundingClientRect();
+          return {
+            tag: el.tagName,
+            className: cls,
+            text: (el.textContent || '').replace(/\\s+/g, ' ').trim(),
+            style: el.getAttribute('style') || '',
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          };
+        }).filter(Boolean)
+      }))()`,
+      returnByValue: true,
+    });
+    writeFileSync(dumpPath, JSON.stringify(pageSnapshot.result?.value ?? null, null, 2));
+    console.log(JSON.stringify({ step: 'select_page_dump', path: dumpPath, snapshot: pageSnapshot.result?.value ?? null }));
     throw new Error(`visible upload graphic card not found: ${JSON.stringify(snapshot)}`);
   }
   console.log(JSON.stringify({ step: 'graphic_click_target', target: visibleGraphic }));
@@ -559,6 +581,12 @@ async function probeSubmitButton(
     returnByValue: true,
   });
   console.log(JSON.stringify({ step: 'footer_publish_probe', snapshot: footerDump.result?.value ?? null }, null, 2));
+  const screenshot = await session.cdp.send<{ data: string }>('Page.captureScreenshot', {
+    format: 'png',
+    fromSurface: true,
+  });
+  writeFileSync(DEFAULT_READY_SCREENSHOT, Buffer.from(screenshot.data, 'base64'));
+  console.log(JSON.stringify({ step: 'capture_screenshot', path: DEFAULT_READY_SCREENSHOT }));
 }
 
 async function probeEditorControls(session: Awaited<ReturnType<typeof attachToPage>>): Promise<void> {
