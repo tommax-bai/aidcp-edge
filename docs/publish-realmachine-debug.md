@@ -215,6 +215,32 @@ Page.navigate('https://creator.xiaohongshu.com/publish/publish?source=official')
 nohup env AIDCP_AUTO_BROWSE=false pnpm start > /Users/bears/.aidcp-edge-logs/edge.out 2>&1 < /dev/null &
 ```
 
+## 部署与重启提醒
+
+- 本次修复属于代码变更，部署后必须重启对应进程才能生效，不会热加载。
+- `edge` 对应提交：`ab8d71f`。
+- 本次修复点：`src/main.ts` 已改为每次发布生成全新 `requestId`，不再复用 `process.env` 中的永久值。
+- 重启对象：`edge` 常驻进程。
+- 推荐后台启动方式：
+
+```bash
+nohup env AIDCP_AUTO_BROWSE=false pnpm start > /Users/bears/.aidcp-edge-logs/edge.out 2>&1 < /dev/null &
+```
+
+- 真发联调时需额外加上：
+
+```bash
+AIDCP_REAL_PUBLISH=true
+```
+
+- 验证修复前，务必确认当前运行中的 `edge` 进程是在部署 `ab8d71f` 之后重启拉起的。
+
+## 通用排查提醒
+
+- 涉及 TypeScript 源码改动后，若旧进程仍在运行，会继续执行旧逻辑，不会自动切到新代码。
+- 典型现象：进程启动时间早于目标 commit 提交时间，说明当前进程大概率尚未加载新代码。
+- 因此在验证修复是否生效前，必须先确认已使用最新代码完成重启，再进行联调或回归检查。
+
 PID 文件：
 
 - `/Users/bears/.aidcp-edge-logs/edge.pid`
