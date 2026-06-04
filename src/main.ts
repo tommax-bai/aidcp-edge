@@ -97,9 +97,7 @@ async function main(): Promise<void> {
     void (async () => {
       let result: PublishResultPayload;
       try {
-        const requestId =
-          process.env.AIDCP_PUBLISH_APPROVAL_REQUEST_ID ?? buildPublishApprovalRequestId();
-        process.env.AIDCP_PUBLISH_APPROVAL_REQUEST_ID = requestId;
+        const requestId = buildPublishApprovalRequestId();
         client.send('publish.approval_request', {
           requestId,
           title: env.payload.title,
