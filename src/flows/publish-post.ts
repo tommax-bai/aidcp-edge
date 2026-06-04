@@ -334,7 +334,7 @@ export async function publishPost(
     if (!approval.ok) {
       return {
         ok: false,
-        error: `[approval_gate] ${approval.reason ?? 'approval_failed'} token=${approval.token}`,
+        error: `[approval_gate] ${approval.reason ?? 'approval_failed'} requestId=${approval.requestId}`,
       };
     }
   }

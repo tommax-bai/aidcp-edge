@@ -78,13 +78,13 @@ test('publish-post: approval gate blocks submit before click', async () => {
     {},
     payload,
     {
-      token: 'tok-block',
+      requestId: 'req-block',
       now: () => 0,
       timeoutMs: 1_000,
       pollIntervalMs: 100,
       readSignal: async () =>
         JSON.stringify({
-          token: 'tok-block',
+          requestId: 'req-block',
           approved: false,
           ts: 1,
           payload: { title: '标题', content: '正文', tags: ['AI'] },
@@ -94,6 +94,6 @@ test('publish-post: approval gate blocks submit before click', async () => {
   );
 
   assert.equal(result.ok, false);
-  assert.equal(result.error, '[approval_gate] approval_rejected token=tok-block');
+  assert.equal(result.error, '[approval_gate] approval_rejected requestId=req-block');
   assert.ok(!executor.calls.includes('note.publish_submit'));
 });

@@ -9,14 +9,14 @@ import {
 test('approval gate: approved true resolves and consumes signal', async () => {
   const removed: string[] = [];
   const result = await waitForPublishApproval({
-    token: 'tok-1',
+    requestId: 'req-1',
     signalDir: '/tmp',
     now: () => 0,
     timeoutMs: 5_000,
     pollIntervalMs: 100,
     readSignal: async () =>
       JSON.stringify({
-        token: 'tok-1',
+        requestId: 'req-1',
         approved: true,
         ts: 1,
         payload: { title: 't', content: 'c', tags: ['x'] },
@@ -28,28 +28,28 @@ test('approval gate: approved true resolves and consumes signal', async () => {
 
   assert.deepEqual(result, {
     ok: true,
-    token: 'tok-1',
-    signalPath: buildPublishApprovalSignalPath('tok-1'),
+    requestId: 'req-1',
+    signalPath: buildPublishApprovalSignalPath('req-1'),
     approved: true,
     signal: {
-      token: 'tok-1',
+      requestId: 'req-1',
       approved: true,
       ts: 1,
       payload: { title: 't', content: 'c', tags: ['x'] },
     },
   });
-  assert.deepEqual(removed, [buildPublishApprovalSignalPath('tok-1')]);
+  assert.deepEqual(removed, [buildPublishApprovalSignalPath('req-1')]);
 });
 
 test('approval gate: approved false rejects explicitly', async () => {
   const result = await waitForPublishApproval({
-    token: 'tok-2',
+    requestId: 'req-2',
     now: () => 0,
     timeoutMs: 5_000,
     pollIntervalMs: 100,
     readSignal: async () =>
       JSON.stringify({
-        token: 'tok-2',
+        requestId: 'req-2',
         approved: false,
         ts: 2,
         payload: { title: 't', content: 'c', tags: ['x'] },
@@ -66,7 +66,7 @@ test('approval gate: missing signal times out', async () => {
   let nowValue = 0;
   const sleeps: number[] = [];
   const result = await waitForPublishApproval({
-    token: 'tok-3',
+    requestId: 'req-3',
     timeoutMs: 250,
     pollIntervalMs: 100,
     now: () => nowValue,
@@ -88,13 +88,13 @@ test('approval gate: missing signal times out', async () => {
 
 test('approval gate: invalid signal fails fast', async () => {
   const result = await waitForPublishApproval({
-    token: 'tok-4',
+    requestId: 'req-4',
     timeoutMs: 5_000,
     pollIntervalMs: 100,
     now: () => 0,
     readSignal: async () =>
       JSON.stringify({
-        token: 'wrong-token',
+        requestId: 'wrong-request-id',
         approved: true,
         ts: 3,
         payload: { title: 't', content: 'c', tags: ['x'] },
@@ -102,5 +102,5 @@ test('approval gate: invalid signal fails fast', async () => {
   });
 
   assert.equal(result.ok, false);
-  assert.equal(result.reason, 'signal_token_mismatch:wrong-token');
+  assert.equal(result.reason, 'signal_request_id_mismatch:wrong-request-id');
 });

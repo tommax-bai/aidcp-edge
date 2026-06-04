@@ -35,6 +35,7 @@ export type MessageType =
   | 'browse.next' // cloud → edge：跳过/继续，关闭当前笔记看下一条
   | 'search.execute' // cloud → edge：执行一次搜索（keyword）
   | 'session.end' // cloud → edge：结束本次自动浏览会话
+  | 'publish.approval_request' // edge → cloud：请求发送发布审批卡片
   | 'publish.request' // cloud → edge：请求发布一篇帖子
   | 'publish.result' // edge → cloud：回传发布结果
   // —— 通用 ——
@@ -204,6 +205,14 @@ export interface SessionEndPayload {
   reason?: string;
 }
 
+export interface PublishApprovalRequestPayload {
+  requestId: string;
+  title: string;
+  content: string;
+  tags: string[];
+  edgeId?: string;
+}
+
 export interface PublishRequestPayload {
   title: string;
   content: string;
@@ -238,6 +247,7 @@ export interface PayloadMap {
   'browse.next': BrowseNextPayload;
   'search.execute': SearchExecutePayload;
   'session.end': SessionEndPayload;
+  'publish.approval_request': PublishApprovalRequestPayload;
   'publish.request': PublishRequestPayload;
   'publish.result': PublishResultPayload;
   error: ErrorPayload;

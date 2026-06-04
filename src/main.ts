@@ -33,7 +33,7 @@ import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
 import { publishPost } from './flows/publish-post.js';
 import { AnchorCache } from './locating/cache.js';
-import { buildPublishApprovalToken } from './publish/approval-gate.js';
+import { buildPublishApprovalRequestId } from './publish/approval-gate.js';
 import type { PublishResultPayload } from './comm/protocol.js';
 import {
   BrowseSession,
@@ -97,8 +97,16 @@ async function main(): Promise<void> {
     void (async () => {
       let result: PublishResultPayload;
       try {
-        const token = process.env.AIDCP_PUBLISH_APPROVAL_TOKEN ?? buildPublishApprovalToken();
-        process.env.AIDCP_PUBLISH_APPROVAL_TOKEN = token;
+        const requestId =
+          process.env.AIDCP_PUBLISH_APPROVAL_REQUEST_ID ?? buildPublishApprovalRequestId();
+        process.env.AIDCP_PUBLISH_APPROVAL_REQUEST_ID = requestId;
+        client.send('publish.approval_request', {
+          requestId,
+          title: env.payload.title,
+          content: env.payload.content,
+          tags: env.payload.tags,
+          edgeId,
+        });
         result = await publishPost(
           {
             dom: session.dom,
@@ -110,7 +118,7 @@ async function main(): Promise<void> {
           env.payload,
           process.env.AIDCP_REAL_PUBLISH === 'true'
             ? {
-                token,
+                requestId,
                 pollIntervalMs: Number(process.env.AIDCP_PUBLISH_APPROVAL_POLL_MS ?? 2_000),
                 timeoutMs: Number(process.env.AIDCP_PUBLISH_APPROVAL_TIMEOUT_MS ?? 300_000),
                 consumeSignal: process.env.AIDCP_PUBLISH_APPROVAL_CONSUME !== 'false',

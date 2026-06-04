@@ -281,3 +281,15 @@ test('publish e2e: exception path still replies unknown error and request id', a
   assert.equal(sent.id, 'pub-exception');
   assert.deepEqual(sent.payload, { ok: false, error: '[unknown] boom' });
 });
+
+test('publish approval request envelope can round-trip', () => {
+  const env = makeEnvelope('publish.approval_request', 'apr-1', 2, {
+    requestId: 'req-1',
+    title: '标题',
+    content: '正文',
+    tags: ['tag1'],
+    edgeId: 'edge-1',
+  });
+  assert.equal(env.type, 'publish.approval_request');
+  assert.equal((env.payload as { requestId: string }).requestId, 'req-1');
+});

@@ -13,7 +13,7 @@ import {
   publishPost,
 } from '../src/flows/publish-post.js';
 import {
-  buildPublishApprovalToken,
+  buildPublishApprovalRequestId,
   type PublishApprovalGateOptions,
 } from '../src/publish/approval-gate.js';
 import { AnchorCache } from '../src/locating/cache.js';
@@ -73,19 +73,20 @@ function readNumberEnv(name: string, fallback: number): number {
 
 function buildApprovalGate(): PublishApprovalGateOptions | undefined {
   if (!shouldRealPublish()) return undefined;
-  const token = process.env.AIDCP_PUBLISH_APPROVAL_TOKEN ?? buildPublishApprovalToken();
-  process.env.AIDCP_PUBLISH_APPROVAL_TOKEN = token;
+  const requestId =
+    process.env.AIDCP_PUBLISH_APPROVAL_REQUEST_ID ?? buildPublishApprovalRequestId();
+  process.env.AIDCP_PUBLISH_APPROVAL_REQUEST_ID = requestId;
   console.log(
     JSON.stringify({
       step: 'approval_gate_ready',
-      token,
-      signalPath: `/tmp/aidcp-publish-approve-${token}.json`,
+      requestId,
+      signalPath: `/tmp/aidcp-publish-approve-${requestId}.json`,
       pollIntervalMs: readNumberEnv('AIDCP_PUBLISH_APPROVAL_POLL_MS', 2_000),
       timeoutMs: readNumberEnv('AIDCP_PUBLISH_APPROVAL_TIMEOUT_MS', 300_000),
     }),
   );
   return {
-    token,
+    requestId,
     pollIntervalMs: readNumberEnv('AIDCP_PUBLISH_APPROVAL_POLL_MS', 2_000),
     timeoutMs: readNumberEnv('AIDCP_PUBLISH_APPROVAL_TIMEOUT_MS', 300_000),
     consumeSignal: process.env.AIDCP_PUBLISH_APPROVAL_CONSUME !== 'false',

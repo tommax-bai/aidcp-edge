@@ -3,14 +3,14 @@ import { readFile, rm } from 'node:fs/promises';
 import type { PublishRequestPayload } from '../comm/protocol.js';
 
 export interface PublishApprovalSignal {
-  token: string;
+  requestId: string;
   approved: boolean;
   ts: number;
   payload: Pick<PublishRequestPayload, 'title' | 'content' | 'tags'>;
 }
 
 export interface PublishApprovalGateOptions {
-  token: string;
+  requestId: string;
   signalDir?: string;
   pollIntervalMs?: number;
   timeoutMs?: number;
@@ -23,7 +23,7 @@ export interface PublishApprovalGateOptions {
 
 export interface PublishApprovalGateResult {
   ok: boolean;
-  token: string;
+  requestId: string;
   signalPath: string;
   approved?: boolean;
   reason?: string;
@@ -38,21 +38,21 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function buildPublishApprovalToken(now: () => number = Date.now): string {
+export function buildPublishApprovalRequestId(now: () => number = Date.now): string {
   return `edge-${now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function buildPublishApprovalSignalPath(token: string, signalDir = DEFAULT_SIGNAL_DIR): string {
-  return `${signalDir.replace(/\/$/, '')}/aidcp-publish-approve-${token}.json`;
+export function buildPublishApprovalSignalPath(requestId: string, signalDir = DEFAULT_SIGNAL_DIR): string {
+  return `${signalDir.replace(/\/$/, '')}/aidcp-publish-approve-${requestId}.json`;
 }
 
-function validateSignal(raw: unknown, token: string): PublishApprovalSignal {
+function validateSignal(raw: unknown, requestId: string): PublishApprovalSignal {
   if (!raw || typeof raw !== 'object') {
     throw new Error('signal_invalid_json');
   }
   const signal = raw as Partial<PublishApprovalSignal>;
-  if (signal.token !== token) {
-    throw new Error(`signal_token_mismatch:${String(signal.token ?? '')}`);
+  if (signal.requestId !== requestId) {
+    throw new Error(`signal_request_id_mismatch:${String(signal.requestId ?? '')}`);
   }
   if (typeof signal.approved !== 'boolean') {
     throw new Error('signal_missing_approved');
@@ -68,7 +68,7 @@ function validateSignal(raw: unknown, token: string): PublishApprovalSignal {
     throw new Error('signal_invalid_payload');
   }
   return {
-    token,
+    requestId,
     approved: signal.approved,
     ts: signal.ts,
     payload: {
@@ -83,7 +83,7 @@ export async function waitForPublishApproval(
   options: PublishApprovalGateOptions,
 ): Promise<PublishApprovalGateResult> {
   const {
-    token,
+    requestId,
     signalDir = DEFAULT_SIGNAL_DIR,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
     timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -94,20 +94,20 @@ export async function waitForPublishApproval(
     removeSignal = (path) => rm(path, { force: true }),
   } = options;
 
-  const signalPath = buildPublishApprovalSignalPath(token, signalDir);
+  const signalPath = buildPublishApprovalSignalPath(requestId, signalDir);
   const deadline = now() + timeoutMs;
 
   while (now() <= deadline) {
     try {
       const content = await readSignal(signalPath);
-      const signal = validateSignal(JSON.parse(content), token);
+      const signal = validateSignal(JSON.parse(content), requestId);
       if (consumeSignal) {
         await removeSignal(signalPath);
       }
       if (!signal.approved) {
         return {
           ok: false,
-          token,
+          requestId,
           signalPath,
           approved: false,
           reason: 'approval_rejected',
@@ -116,7 +116,7 @@ export async function waitForPublishApproval(
       }
       return {
         ok: true,
-        token,
+        requestId,
         signalPath,
         approved: true,
         signal,
@@ -127,7 +127,7 @@ export async function waitForPublishApproval(
         if (message.startsWith('signal_')) {
           return {
             ok: false,
-            token,
+            requestId,
             signalPath,
             reason: message,
           };
@@ -142,7 +142,7 @@ export async function waitForPublishApproval(
 
   return {
     ok: false,
-    token,
+    requestId,
     signalPath,
     reason: 'approval_timeout',
   };
