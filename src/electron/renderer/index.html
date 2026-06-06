@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AIDCP Edge</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">AIDCP Edge</p>
+          <h1>Desktop Control Panel</h1>
+          <p class="subtle">Chrome is launched with a persistent AIDCP profile for Xiaohongshu login.</p>
+        </div>
+        <div class="actions">
+          <button id="relogin" class="secondary">Re-login</button>
+          <button id="toggle-session" class="primary">Pause</button>
+        </div>
+      </section>
+
+      <section id="login-guide" class="notice hidden">
+        <strong>Login required</strong>
+        <span>Log in to xiaohongshu.com in the Chrome window that just opened. AIDCP Edge will continue automatically after login is detected.</span>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <span class="label">XHS login</span>
+          <strong id="auth-status" class="badge">checking</strong>
+        </article>
+        <article class="card">
+          <span class="label">Cloud connection</span>
+          <strong id="cloud-status" class="badge">disconnected</strong>
+        </article>
+        <article class="card">
+          <span class="label">Session state</span>
+          <strong id="session-state" class="badge">idle</strong>
+        </article>
+        <article class="card">
+          <span class="label">Risk control</span>
+          <strong id="risk-status" class="badge">normal</strong>
+        </article>
+        <article class="card">
+          <span class="label">Edge process</span>
+          <strong id="edge-state" class="badge">stopped</strong>
+        </article>
+      </section>
+
+      <section class="stats">
+        <article>
+          <span>Views</span>
+          <strong id="views">0</strong>
+        </article>
+        <article>
+          <span>Likes</span>
+          <strong id="likes">0</strong>
+        </article>
+        <article>
+          <span>Collects</span>
+          <strong id="collects">0</strong>
+        </article>
+      </section>
+
+      <section class="log">
+        <div class="log-head">
+          <span>Latest status</span>
+          <time id="updated-at"></time>
+        </div>
+        <pre id="last-message">Waiting for status...</pre>
+      </section>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

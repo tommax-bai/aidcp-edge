@@ -4,18 +4,49 @@
   "private": true,
   "description": "AIDCP 边缘端：DOM-first 定位层引擎 + CDP（原生 WebSocket）页面接入（DomProvider / ActionExecutor）+ 边-云 WS 客户端（点赞垂直切片）。",
   "type": "module",
+  "main": "src/electron/main.cjs",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "electron:dev": "electron .",
+    "electron:build": "node ./node_modules/electron-builder/cli.js --win",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "start": "tsx src/main.ts"
   },
+  "build": {
+    "appId": "com.aidcp.edge",
+    "productName": "AIDCP",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "tsconfig.json"
+    ],
+    "extraMetadata": {
+      "main": "src/electron/main.cjs"
+    },
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
+  },
   "devDependencies": {
     "@types/jsdom": "^21.1.7",
     "@types/node": "^22.10.0",
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3",
     "jsdom": "^25.0.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
