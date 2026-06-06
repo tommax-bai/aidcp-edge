@@ -26,6 +26,11 @@ import {
   type RemoteAnchor,
   type NoteContentPayload,
   type PublishRequestPayload,
+  type SessionBudgetPayload,
+  type RiskCanDoPayload,
+  type RiskCanDoResultPayload,
+  type RiskRecordPayload,
+  type RiskRecordResultPayload,
 } from '../comm/protocol.js';
 
 /** 最小 WebSocket 抽象（与 cdp/client.ts 同形，便于测试注入） */
@@ -209,6 +214,21 @@ export class EdgeClient {
    */
   reportNoteContent(payload: NoteContentPayload, timeoutMs = 20_000): Promise<Envelope> {
     return this.request('note.content', payload, timeoutMs);
+  }
+
+  async requestSessionBudget(accountId?: string): Promise<SessionBudgetPayload> {
+    const res = await this.request('session.budget.request', { accountId });
+    return res.payload as SessionBudgetPayload;
+  }
+
+  async canDo(action: RiskCanDoPayload['action'], accountId?: string): Promise<RiskCanDoResultPayload> {
+    const res = await this.request('risk.canDo', { action, accountId });
+    return res.payload as RiskCanDoResultPayload;
+  }
+
+  async recordRiskAction(action: RiskRecordPayload['action'], accountId?: string): Promise<RiskRecordResultPayload> {
+    const res = await this.request('risk.record', { action, accountId });
+    return res.payload as RiskRecordResultPayload;
   }
 
   /** 向云端取某 actionId 的主缓存锚点（缓存命中可省一次 LLM） */

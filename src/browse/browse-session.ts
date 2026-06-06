@@ -16,7 +16,7 @@
  * 正文长度相关；点击走贝塞尔轨迹、滚动走惯性序列、输入走键盘节奏（在各子模块内）。
  */
 
-import type { Envelope, NoteContentPayload, PlanResponsePayload, PlanStep } from '../comm/protocol.js';
+import type { Envelope, NoteContentPayload, PlanResponsePayload, PlanStep, SessionBudgetPayload } from '../comm/protocol.js';
 import type { ActionResultPayload } from '../comm/protocol.js';
 import type { FeedScroller, NoteCard } from './feed-scroller.js';
 import type { ModalController } from './modal-controller.js';
@@ -44,6 +44,9 @@ export interface StepRunnerLike {
 /** 与云端通信的最小子集（便于测试打桩） */
 export interface BrowseCloudClient {
   reportNoteContent(payload: NoteContentPayload, timeoutMs?: number): Promise<Envelope>;
+  requestSessionBudget?(accountId?: string): Promise<SessionBudgetPayload>;
+  canDo?(action: 'like' | 'collect', accountId?: string): Promise<{ allowed: boolean; reason?: string }>;
+  recordRiskAction?(action: 'like' | 'collect', accountId?: string): Promise<{ recorded: boolean; reason?: string }>;
 }
 
 export interface BrowseSessionDeps {
@@ -110,6 +113,9 @@ export class BrowseSession {
   private readonly rhythmTotal: number;
   private readonly charsPerMinute: number;
   private readonly logger: (msg: string) => void;
+  private sessionBudget?: SessionBudgetPayload;
+  private sessionStartedAt = 0;
+  private actionCount = 0;
   private processed = 0;
 
   constructor(
@@ -158,8 +164,11 @@ export class BrowseSession {
     this.running = true;
     this.stopRequested = false;
     this.processed = 0;
+    this.actionCount = 0;
+    this.sessionStartedAt = Date.now();
     this.logger('[browse] 启动自动浏览循环');
     try {
+      await this.loadSessionBudget();
       await this.ensureExplore();
       // 初始扫描延迟：真人打开页面后会先扫一眼 feed 再点击（3-6s）
       const scanDelay = sampleDelay(
@@ -225,6 +234,7 @@ export class BrowseSession {
   private async loop(): Promise<void> {
     let emptyScrolls = 0;
     while (!this.stopRequested) {
+      if (this.shouldEndByBudget()) return;
       const cards = await this.deps.scroller.getVisibleCards();
       if (cards.length === 0) {
         emptyScrolls++;
@@ -242,6 +252,7 @@ export class BrowseSession {
 
       for (const card of cards) {
         if (this.stopRequested) return;
+        if (this.shouldEndByBudget()) return;
         if (this.maxCards > 0 && this.processed >= this.maxCards) {
           this.logger(`[browse] 达到 maxCards=${this.maxCards}，停止`);
           return;
@@ -277,6 +288,7 @@ export class BrowseSession {
       }
 
       await this.deps.scroller.scrollNext();
+      this.recordBudgetAction('scroll');
       // 等待懒加载新卡片
       await this.waitForCards(5000);
       await this.humanPause(this.cardGapTiming);
@@ -400,9 +412,11 @@ export class BrowseSession {
         const steps = payload?.steps ?? [];
         this.logger(`[browse] 决策=plan（${steps.length} 步）`);
         for (const step of steps) {
+          if (this.shouldEndByBudget()) return false;
           await this.humanPause(this.actionTiming);
           try {
             const r = await this.deps.stepRunner.run(step);
+            if (r.ok) this.recordBudgetAction(step.actionId);
             this.logger(`[browse] 步骤 ${step.actionId} → ${r.ok ? 'OK' : 'FAIL'}（${r.reason}）`);
           } catch (err) {
             this.logger(`[browse] 步骤 ${step.actionId} 异常：${(err as Error).message}`);
@@ -466,6 +480,19 @@ export class BrowseSession {
    * 注意：`.like-active` class 在 XHS 新版中始终存在，不能用于判断状态。
    */
   private async executeLikeOrCollect(action: 'like' | 'collect'): Promise<void> {
+    if (this.sessionBudget?.viewOnly) {
+      this.logger(`[browse] viewOnly=true，跳过${action === 'like' ? '点赞' : '收藏'}`);
+      return;
+    }
+    if (this.shouldEndByBudget()) return;
+    const allowed = await this.deps.client.canDo?.(action).catch((err) => ({
+      allowed: false,
+      reason: `risk_error:${(err as Error).message}`,
+    }));
+    if (allowed && !allowed.allowed) {
+      this.logger(`[browse] 风控拒绝 ${action}：${allowed.reason ?? 'deny'}`);
+      return;
+    }
     const wrapperCls = action === 'like' ? 'like-wrapper' : 'collect-wrapper';
     // SVG href: 未操作时 #like / #collect，已操作时 #liked / #collected
     const alreadyDoneHref = action === 'like' ? '#liked' : '#collected';
@@ -505,6 +532,10 @@ export class BrowseSession {
       })()`;
       const afterHref = await evalRaw<string>(this.deps.cdp, verifyJs);
       if (afterHref === alreadyDoneHref) {
+        this.recordBudgetAction(action);
+        await this.deps.client.recordRiskAction?.(action).catch((err) => {
+          this.logger(`[browse] 风控记录 ${action} 失败：${(err as Error).message}`);
+        });
         this.logger(`[browse] ✓ ${action === 'like' ? '点赞' : '收藏'}成功 (${result.x}, ${result.y})`);
       } else {
         this.logger(`[browse] ⚠ ${action} 点击后状态未变化 (href=${afterHref})，可能未生效`);
@@ -512,6 +543,38 @@ export class BrowseSession {
     } catch (err) {
       this.logger(`[browse] ${action} 执行失败：${(err as Error).message}`);
     }
+  }
+
+  private async loadSessionBudget(): Promise<void> {
+    if (!this.deps.client.requestSessionBudget) return;
+    try {
+      this.sessionBudget = await this.deps.client.requestSessionBudget();
+      this.sessionStartedAt = this.sessionBudget.startedAt || Date.now();
+      this.logger(
+        `[browse] 会话预算：level=${this.sessionBudget.quotaLevel}, maxActions=${this.sessionBudget.maxActions}, durationMs=${this.sessionBudget.durationMs}, viewOnly=${this.sessionBudget.viewOnly}`,
+      );
+    } catch (err) {
+      this.logger(`[browse] 获取会话预算失败，使用本地默认限制：${(err as Error).message}`);
+    }
+  }
+
+  private shouldEndByBudget(): boolean {
+    if (!this.sessionBudget) return false;
+    if (this.actionCount >= this.sessionBudget.maxActions) {
+      this.logger(`[browse] 达到会话动作预算 ${this.actionCount}/${this.sessionBudget.maxActions}，停止`);
+      return true;
+    }
+    if (Date.now() - this.sessionStartedAt >= this.sessionBudget.durationMs) {
+      this.logger('[browse] 达到会话时长预算，停止');
+      return true;
+    }
+    return false;
+  }
+
+  private recordBudgetAction(label: string): void {
+    if (!this.sessionBudget) return;
+    this.actionCount++;
+    this.logger(`[browse] 预算动作 ${label}: ${this.actionCount}/${this.sessionBudget.maxActions}`);
   }
 }
 

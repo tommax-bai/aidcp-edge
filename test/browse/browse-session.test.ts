@@ -179,9 +179,9 @@ test('browse-session: search.execute 决策触发搜索', async () => {
       return {} as never;
     },
   };
-  const sess = new BrowseSession(h.deps, noOpts());
+  const sess = new BrowseSession(h.deps, { ...noOpts(), maxCards: 1 });
   await sess.start();
-  assert.ok(calls.includes('Input.insertText'));
+  assert.ok(calls.includes('Page.navigate'));
 });
 
 
@@ -242,8 +242,64 @@ test('browse-session: 预筛放行相关标题卡片（正常打开并上报）'
       h.openedCards.push(cc.position);
     },
   };
-  const sess = new BrowseSession(h.deps, noOpts());
+  const sess = new BrowseSession(h.deps, { ...noOpts(), maxCards: 1 });
   await sess.start();
   assert.deepEqual(h.openedCards, [0]);
   assert.equal(h.reported.length, 1);
+});
+
+test('browse-session: 会话预算动作数到上限后自动结束', async () => {
+  const plan = makeEnvelope('plan.response', 'p1', 0, {
+    steps: [{ actionId: 'note.like_button', op: 'click', goal: '点赞' }],
+    reason: 'like it',
+  });
+  const h = makeHarness([plan, plan]);
+  let batches = 0;
+  h.deps.scroller = {
+    getVisibleCards: async () => {
+      batches++;
+      return batches === 1
+        ? [
+            { position: 0, centerX: 10, centerY: 10, title: 'LLM 大模型推理优化', likes: '1.2w' },
+            { position: 1, centerX: 20, centerY: 20, title: 'AI Agent 应用实践', likes: '1.1w' },
+          ]
+        : [];
+    },
+    scrollNext: async () => {},
+    openCard: async (cc) => {
+      h.openedCards.push(cc.position);
+    },
+  };
+  h.deps.client = {
+    ...h.deps.client,
+    requestSessionBudget: async () => ({
+      quotaLevel: 'normal',
+      durationMs: 60_000,
+      maxActions: 1,
+      viewOnly: false,
+      startedAt: Date.now(),
+    }),
+  };
+  const sess = new BrowseSession(h.deps, { ...noOpts(), maxCards: 1 });
+  await sess.start();
+  assert.deepEqual(h.openedCards, [0]);
+  assert.equal(h.steps.length, 1);
+});
+
+test('browse-session: 会话预算时长到上限后自动结束', async () => {
+  const h = makeHarness([makeEnvelope('browse.next', 'd1', 0, { reason: 'skip' })]);
+  h.deps.client = {
+    ...h.deps.client,
+    requestSessionBudget: async () => ({
+      quotaLevel: 'normal',
+      durationMs: 1,
+      maxActions: 60,
+      viewOnly: false,
+      startedAt: Date.now() - 10,
+    }),
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await sess.start();
+  assert.equal(h.openedCards.length, 0);
+  assert.equal(h.reported.length, 0);
 });

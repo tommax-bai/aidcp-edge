@@ -38,6 +38,13 @@ export type MessageType =
   | 'publish.approval_request' // edge → cloud：请求发送发布审批卡片
   | 'publish.request' // cloud → edge：请求发布一篇帖子
   | 'publish.result' // edge → cloud：回传发布结果
+  // —— 风控预算与互动判定 ——
+  | 'session.budget.request' // edge → cloud：请求本次 browse session 预算
+  | 'session.budget' // cloud → edge：下发本次 browse session 预算
+  | 'risk.canDo' // edge → cloud：互动前请求是否允许执行 action
+  | 'risk.canDo.result' // cloud → edge：allow / deny
+  | 'risk.record' // edge → cloud：互动成功后记录 action
+  | 'risk.record.result' // cloud → edge：记录结果
   // —— 通用 ——
   | 'error' // 任一方 → 对方：错误信息
   | 'ping'
@@ -226,6 +233,40 @@ export interface PublishResultPayload {
   error?: string;
 }
 
+export interface SessionBudgetRequestPayload {
+  accountId?: string;
+}
+
+export interface SessionBudgetPayload {
+  durationMs: number;
+  maxActions: number;
+  quotaLevel: 'conservative' | 'normal' | 'aggressive';
+  viewOnly: boolean;
+  startedAt: number;
+}
+
+export interface RiskCanDoPayload {
+  action: 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish';
+  accountId?: string;
+}
+
+export interface RiskCanDoResultPayload {
+  action: RiskCanDoPayload['action'];
+  allowed: boolean;
+  reason?: string;
+}
+
+export interface RiskRecordPayload {
+  action: RiskCanDoPayload['action'];
+  accountId?: string;
+}
+
+export interface RiskRecordResultPayload {
+  action: RiskCanDoPayload['action'];
+  recorded: boolean;
+  reason?: string;
+}
+
 export interface ErrorPayload {
   code: string;
   message: string;
@@ -250,6 +291,12 @@ export interface PayloadMap {
   'publish.approval_request': PublishApprovalRequestPayload;
   'publish.request': PublishRequestPayload;
   'publish.result': PublishResultPayload;
+  'session.budget.request': SessionBudgetRequestPayload;
+  'session.budget': SessionBudgetPayload;
+  'risk.canDo': RiskCanDoPayload;
+  'risk.canDo.result': RiskCanDoResultPayload;
+  'risk.record': RiskRecordPayload;
+  'risk.record.result': RiskRecordResultPayload;
   error: ErrorPayload;
   ping: Record<string, never>;
   pong: Record<string, never>;
