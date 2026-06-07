@@ -15,10 +15,32 @@ const fields = {
 };
 
 let currentStatus;
+const LOG_RETENTION_MS = 2 * 60 * 1000; // 2 minutes
+const logEntries = [];
 
 function setBadge(element, value) {
   element.textContent = value;
   element.className = `badge ${value}`;
+}
+
+function addLogEntry(message) {
+  if (!message) return;
+  const now = Date.now();
+  logEntries.push({ time: now, message });
+  // Prune entries older than 2 minutes
+  const cutoff = now - LOG_RETENTION_MS;
+  while (logEntries.length > 0 && logEntries[0].time < cutoff) {
+    logEntries.shift();
+  }
+  renderLog();
+}
+
+function renderLog() {
+  fields.lastMessage.innerHTML = logEntries.map((entry) => {
+    const time = new Date(entry.time).toLocaleTimeString();
+    return `<div class="log-entry"><span class="log-time">${time}</span> ${entry.message}</div>`;
+  }).join('');
+  fields.lastMessage.scrollTop = fields.lastMessage.scrollHeight;
 }
 
 function render(status) {
@@ -32,7 +54,7 @@ function render(status) {
   fields.likes.textContent = status.stats.likes;
   fields.collects.textContent = status.stats.collects;
   fields.updatedAt.textContent = new Date(status.updatedAt).toLocaleTimeString();
-  fields.lastMessage.textContent = status.lastMessage;
+  addLogEntry(status.lastMessage);
   fields.toggle.textContent = status.session === 'paused' ? 'Resume' : 'Pause';
   fields.loginGuide.classList.toggle('hidden', status.auth !== 'login required');
 }

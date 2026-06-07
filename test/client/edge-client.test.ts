@@ -163,3 +163,75 @@ test('edge-client: onPublishCommand 注销后不再触发', async () => {
   assert.equal(calls, 0);
   assert.equal(ws.sent.length, 0);
 });
+
+test('edge-client: reportNoteContent 收到 note.ack 正常 resolve', async () => {
+  const ws = new FakeWebSocket();
+  const client = await connectClient(ws);
+
+  const promise = client.reportNoteContent({
+    noteId: 'test-note-1',
+    title: '测试笔记',
+    summary: '内容',
+    author: '作者',
+    likeCount: 100,
+    collectCount: 50,
+  });
+
+  // 模拟云端回 note.ack
+  const sent = JSON.parse(ws.sent[0]);
+  ws.emitMessage(makeEnvelope('note.ack', sent.id, 2, { received: true }));
+
+  const resp = await promise;
+  assert.equal(resp.type, 'note.ack');
+  assert.deepEqual(resp.payload, { received: true });
+});
+
+test('edge-client: browse.scroll 路由到 browseHandler', async () => {
+  const ws = new FakeWebSocket();
+  const client = await connectClient(ws);
+  const calls: Envelope[] = [];
+  client.onBrowseCommand((env) => calls.push(env));
+
+  ws.emitMessage(makeEnvelope('browse.scroll', 'cmd-1', 2, { reason: 'scroll' }));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].type, 'browse.scroll');
+});
+
+test('edge-client: note.open 路由到 browseHandler', async () => {
+  const ws = new FakeWebSocket();
+  const client = await connectClient(ws);
+  const calls: Envelope[] = [];
+  client.onBrowseCommand((env) => calls.push(env));
+
+  ws.emitMessage(makeEnvelope('note.open', 'cmd-2', 2, { index: 3, reason: 'open' }));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].type, 'note.open');
+  assert.equal((calls[0].payload as any).index, 3);
+});
+
+test('edge-client: note.close 路由到 browseHandler', async () => {
+  const ws = new FakeWebSocket();
+  const client = await connectClient(ws);
+  const calls: Envelope[] = [];
+  client.onBrowseCommand((env) => calls.push(env));
+
+  ws.emitMessage(makeEnvelope('note.close', 'cmd-3', 2, { reason: 'close' }));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].type, 'note.close');
+});
+
+test('edge-client: 旧消息类型仍正常路由（向后兼容）', async () => {
+  const ws = new FakeWebSocket();
+  const client = await connectClient(ws);
+  const calls: Envelope[] = [];
+  client.onBrowseCommand((env) => calls.push(env));
+
+  ws.emitMessage(makeEnvelope('browse.next', 'cmd-4', 2, { reason: 'next' }));
+  ws.emitMessage(makeEnvelope('session.end', 'cmd-5', 2, { reason: 'end' }));
+  ws.emitMessage(makeEnvelope('search.execute', 'cmd-6', 2, { keyword: 'AI' }));
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].type, 'browse.next');
+  assert.equal(calls[1].type, 'session.end');
+  assert.equal(calls[2].type, 'search.execute');
+});

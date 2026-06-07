@@ -153,12 +153,15 @@ async function main(): Promise<void> {
       },
       browseOpts,
     );
-    // 云端可主动下发 session.end 提前结束本次浏览
+    // 云端异步推送的浏览控制命令统一转发到 BrowseSession 执行
     client.onBrowseCommand((env) => {
-      if (env.type === 'session.end') {
-        console.log('[aidcp-edge] 云端请求结束浏览会话');
-        browse?.stop();
+      if (!browse) {
+        console.log(`[aidcp-edge] 收到云端命令 ${env.type} 但浏览会话未创建，忽略`);
+        return;
       }
+      browse.onCloudCommand(env).catch((err) => {
+        console.error(`[aidcp-edge] 执行云端命令 ${env.type} 失败:`, err);
+      });
     });
     // 不 await：浏览循环长跑，与命令收发并行
     browse.start().catch((err) => {

@@ -242,7 +242,7 @@ function waitForManualEnter(): Promise<void> {
   });
 }
 
-async function evaluateLoginState(host: string, port: number, fetchImpl: typeof fetch): Promise<LoginProbeResult> {
+export async function evaluateLoginState(host: string, port: number, fetchImpl: typeof fetch): Promise<LoginProbeResult> {
   const targets = await fetchJson<CdpTargetInfo[]>(`http://${host}:${port}/json`, fetchImpl);
   const pageTarget =
     targets.find((target) => target.type === 'page' && target.url?.includes('xiaohongshu.com')) ??
@@ -419,11 +419,22 @@ export async function launchChrome(opts: ChromeLauncherOptions = {}): Promise<Ch
   // 1) 复用已有实例
   if (await probeCdp(host, port, fetchImpl)) {
     log(`[aidcp-edge] 检测到已有 Chrome 监听 ${host}:${port}，复用实例`);
+    // 复用实例也需要验证登录态
+    await waitForLogin({
+      host,
+      port,
+      startUrl,
+      timeoutMs: loginTimeoutMs,
+      pollIntervalMs: loginPollIntervalMs,
+      fetchImpl,
+      sleepImpl: sleep,
+      logImpl: log,
+      probeLoginImpl: probeLogin,
+    });
     return { pid: null, reused: true, kill: () => undefined };
   }
 
   // 2) 发现路径并启动
-  const isFirstLaunch = !existsImpl(profileDir);
   const chromePath = discoverChromePath(opts.chromePath, existsImpl);
   const args = buildChromeArgs({ port, profileDir, headless, startUrl });
 
@@ -478,20 +489,18 @@ export async function launchChrome(opts: ChromeLauncherOptions = {}): Promise<Ch
 
   log(`[aidcp-edge] Chrome 已就绪（pid=${child.pid ?? '?'}），CDP ${host}:${port}，stderr=${stderrLogPath}`);
 
-  // 4) 首次登录处理
-  if (isFirstLaunch) {
-    await waitForLogin({
-      host,
-      port,
-      startUrl,
-      timeoutMs: loginTimeoutMs,
-      pollIntervalMs: loginPollIntervalMs,
-      fetchImpl,
-      sleepImpl: sleep,
-      logImpl: log,
-      probeLoginImpl: probeLogin,
-    });
-  }
+  // 4) 验证登录态（无论是否首次启动，都需要确认已登录）
+  await waitForLogin({
+    host,
+    port,
+    startUrl,
+    timeoutMs: loginTimeoutMs,
+    pollIntervalMs: loginPollIntervalMs,
+    fetchImpl,
+    sleepImpl: sleep,
+    logImpl: log,
+    probeLoginImpl: probeLogin,
+  });
 
   let killed = false;
   return {

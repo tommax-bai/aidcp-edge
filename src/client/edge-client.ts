@@ -9,6 +9,8 @@
  *  - 支持以 id 关联的请求/响应（anchor.get / select.request / note.content 等）；
  *  - 自动浏览：把笔记内容以 note.content 作为请求发给云端，等回一个决策信封
  *    （browse.next / search.execute / session.end），交由 BrowseSession 编排。
+ *  - 异步命令推送：云端通过 CommandSink 异步推送控制命令（browse.next / browse.scroll /
+ *    note.open / note.close / search.execute / session.end），由 browseHandler 统一分发。
  *
  * 设计：
  *  - WebSocket 通过工厂注入（默认用运行时全局 WebSocket，Node>=22），便于单测打桩；
@@ -31,6 +33,10 @@ import {
   type RiskCanDoResultPayload,
   type RiskRecordPayload,
   type RiskRecordResultPayload,
+  type ActionCompletedPayload,
+  type PageCardsPayload,
+  type NoteDetailPayload,
+  type ProfileDetailPayload,
 } from '../comm/protocol.js';
 
 /** 最小 WebSocket 抽象（与 cdp/client.ts 同形，便于测试注入） */
@@ -238,6 +244,26 @@ export class EdgeClient {
     return p.anchor ?? null;
   }
 
+  /** 上报动作执行完成 */
+  reportActionCompleted(payload: ActionCompletedPayload): void {
+    this.send('action.completed', payload);
+  }
+
+  /** 上报当前可见卡片列表 */
+  reportPageCards(payload: PageCardsPayload): void {
+    this.send('page.cards', payload);
+  }
+
+  /** 上报笔记详情 */
+  reportNoteDetail(payload: NoteDetailPayload): void {
+    this.send('note.detail', payload);
+  }
+
+  /** 上报个人主页数据 */
+  reportProfileDetail(payload: ProfileDetailPayload): void {
+    this.send('profile.detail', payload);
+  }
+
   close(): void {
     this.failAllPending(new Error('边-云客户端主动关闭'));
     this.ws?.close();
@@ -264,11 +290,21 @@ export class EdgeClient {
       return;
     }
 
-    // 3) 云端主动下发的浏览控制信令（session.end / browse.next / search.execute）
+    // 3) 云端主动下发的浏览控制信令
     if (
       env.type === 'session.end' ||
       env.type === 'browse.next' ||
-      env.type === 'search.execute'
+      env.type === 'browse.scroll' ||
+      env.type === 'note.open' ||
+      env.type === 'note.close' ||
+      env.type === 'search.execute' ||
+      env.type === 'page.scroll' ||
+      env.type === 'interaction.like' ||
+      env.type === 'interaction.collect' ||
+      env.type === 'interaction.follow' ||
+      env.type === 'navigation.back' ||
+      env.type === 'note.browse_images' ||
+      env.type === 'note.scroll_comments'
     ) {
       this.browseHandler?.(env);
       return;

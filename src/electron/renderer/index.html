@@ -8,23 +8,42 @@
   </head>
   <body>
     <main class="shell">
-      <section class="hero">
-        <div>
-          <p class="eyebrow">AIDCP Edge</p>
-          <h1>Desktop Control Panel</h1>
-          <p class="subtle">Chrome is launched with a persistent AIDCP profile for Xiaohongshu login.</p>
-        </div>
-        <div class="actions">
-          <button id="relogin" class="secondary">Re-login</button>
-          <button id="toggle-session" class="primary">Pause</button>
-        </div>
-      </section>
+      <!-- Row 1: Hero + Stats side by side -->
+      <div class="top-row">
+        <section class="hero">
+          <div>
+            <p class="eyebrow">AIDCP Edge</p>
+            <h1>Desktop Control Panel</h1>
+            <p class="subtle">Chrome is launched with a persistent AIDCP profile for Xiaohongshu login.</p>
+          </div>
+          <div class="actions">
+            <button id="relogin" class="secondary">Re-login</button>
+            <button id="toggle-session" class="primary">Pause</button>
+          </div>
+        </section>
+
+        <section class="stats">
+          <article>
+            <span>Views</span>
+            <strong id="views">0</strong>
+          </article>
+          <article>
+            <span>Likes</span>
+            <strong id="likes">0</strong>
+          </article>
+          <article>
+            <span>Collects</span>
+            <strong id="collects">0</strong>
+          </article>
+        </section>
+      </div>
 
       <section id="login-guide" class="notice hidden">
         <strong>Login required</strong>
         <span>Log in to xiaohongshu.com in the Chrome window that just opened. AIDCP Edge will continue automatically after login is detected.</span>
       </section>
 
+      <!-- Row 2: Status cards horizontal -->
       <section class="grid">
         <article class="card">
           <span class="label">XHS login</span>
@@ -48,21 +67,7 @@
         </article>
       </section>
 
-      <section class="stats">
-        <article>
-          <span>Views</span>
-          <strong id="views">0</strong>
-        </article>
-        <article>
-          <span>Likes</span>
-          <strong id="likes">0</strong>
-        </article>
-        <article>
-          <span>Collects</span>
-          <strong id="collects">0</strong>
-        </article>
-      </section>
-
+      <!-- Row 3: Log area (independent large section) -->
       <section class="log">
         <div class="log-head">
           <span>Latest status</span>

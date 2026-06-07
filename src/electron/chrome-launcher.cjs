@@ -1,6 +1,7 @@
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const http = require('node:http');
 
 const DEBUGGING_PORT = 9222;
 const XHS_COOKIE_URL = 'https://www.xiaohongshu.com';
@@ -31,7 +32,33 @@ function getProfilePath(app) {
   return path.join(app.getPath('userData'), 'chrome-profile');
 }
 
-function launchChrome(app) {
+function httpGet(urlPath) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(`http://127.0.0.1:${DEBUGGING_PORT}${urlPath}`, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+        try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(3000, () => { req.destroy(); reject(new Error('timeout')); });
+  });
+}
+
+async function isCdpAlive() {
+  try {
+    await httpGet('/json/version');
+    return true;
+  } catch { return false; }
+}
+
+async function launchChrome(app) {
+  if (await isCdpAlive()) {
+    return { ok: true, chromePath: '(already running)', profilePath: '(existing)', port: DEBUGGING_PORT };
+  }
+
   const chromePath = findChromePath();
   if (!chromePath) {
     return { ok: false, error: 'Chrome was not found. Please install Google Chrome and restart AIDCP Edge.' };
@@ -55,49 +82,55 @@ function launchChrome(app) {
     chromeProcess.unref();
   }
 
+  await new Promise((r) => setTimeout(r, 2000));
   return { ok: true, chromePath, profilePath, port: DEBUGGING_PORT };
 }
 
-async function cdpJson(pathname) {
-  const response = await fetch(`http://127.0.0.1:${DEBUGGING_PORT}${pathname}`);
-  if (!response.ok) throw new Error(`CDP request failed: ${response.status}`);
-  return response.json();
-}
-
 async function hasXhsCookie() {
-  const version = await cdpJson('/json/version');
-  if (!version.webSocketDebuggerUrl) return false;
+  let targets;
+  try {
+    targets = await httpGet('/json/list');
+  } catch { return false; }
 
-  const WebSocket = global.WebSocket || require('ws');
+  const xhsTarget = targets.find((t) => t.type === 'page' && /xiaohongshu\.com/.test(t.url));
+  if (!xhsTarget || !xhsTarget.webSocketDebuggerUrl) return false;
+
+  // Use ws module for WebSocket CDP communication
+  const WebSocket = require('ws');
   return new Promise((resolve) => {
-    const socket = new WebSocket(version.webSocketDebuggerUrl);
+    let socket;
+    try {
+      socket = new WebSocket(xhsTarget.webSocketDebuggerUrl);
+    } catch {
+      return resolve(false);
+    }
     const timer = setTimeout(() => {
-      socket.close();
+      try { socket.close(); } catch {}
       resolve(false);
     }, 5000);
 
-    socket.onopen = () => {
+    socket.on('open', () => {
       socket.send(JSON.stringify({
         id: 1,
         method: 'Network.getCookies',
         params: { urls: [XHS_COOKIE_URL] },
       }));
-    };
-    socket.onerror = () => {
+    });
+    socket.on('error', () => {
       clearTimeout(timer);
       resolve(false);
-    };
-    socket.onmessage = (event) => {
+    });
+    socket.on('message', (raw) => {
       clearTimeout(timer);
-      socket.close();
+      try { socket.close(); } catch {}
       try {
-        const data = JSON.parse(event.data);
+        const data = JSON.parse(raw.toString());
         const cookies = data.result?.cookies || [];
-        resolve(cookies.some((cookie) => /xiaohongshu\.com$/.test(cookie.domain) && !cookie.session));
+        resolve(cookies.some((cookie) => /xiaohongshu\.com$/.test(cookie.domain) && (cookie.name === 'a1' || cookie.name === 'web_session')));
       } catch {
         resolve(false);
       }
-    };
+    });
   });
 }
 

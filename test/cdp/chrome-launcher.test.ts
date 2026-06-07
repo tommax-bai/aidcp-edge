@@ -120,6 +120,7 @@ test('launchChrome 复用已有实例（端口已就绪，不 spawn）', async (
     existsImpl: () => true,
     sleepImpl: noSleep,
     logImpl: noLog,
+    waitForLoginImpl: async () => {},
   });
   assert.equal(inst.reused, true);
   assert.equal(inst.pid, null);
@@ -143,6 +144,7 @@ test('launchChrome 端口空闲时 spawn 并传入正确参数', async () => {
     existsImpl: (p) => p === 'C:/chrome.exe' || p === '/data/profile',
     sleepImpl: noSleep,
     logImpl: noLog,
+    waitForLoginImpl: async () => {},
   });
   assert.equal(inst.reused, false);
   assert.equal(inst.pid, 777);
@@ -166,6 +168,7 @@ test('launchChrome 自己启动的实例 kill 会真正调用 child.kill', async
     existsImpl: () => true,
     sleepImpl: noSleep,
     logImpl: noLog,
+    waitForLoginImpl: async () => {},
   });
   inst.kill();
   inst.kill(); // 幂等
@@ -214,7 +217,7 @@ test('launchChrome 首次启动（profile 不存在）等待人工登录', async
   assert.equal(ctxHost, '127.0.0.1');
 });
 
-test('launchChrome 非首次启动（profile 已存在）不等待登录', async () => {
+test('launchChrome 非首次启动（profile 已存在）仍验证登录态', async () => {
   const sp = makeSpawn();
   let waited = false;
   let n = 0;
@@ -231,7 +234,8 @@ test('launchChrome 非首次启动（profile 已存在）不等待登录', async
       waited = true;
     },
   });
-  assert.equal(waited, false);
+  // 新逻辑：始终验证登录态，不再跳过非首次启动
+  assert.equal(waited, true);
 });
 
 test('launchChrome 首次启动时透传登录轮询配置', async () => {

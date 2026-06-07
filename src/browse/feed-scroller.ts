@@ -24,6 +24,8 @@ export interface NoteCard {
   centerX: number;
   /** 卡片中心 y（CSS 像素，相对视口） */
   centerY: number;
+  /** 笔记唯一标识（云端命令模式下用于定位） */
+  noteId?: string;
   /** 卡片上的标题预览 */
   title?: string;
   /** 作者名 */

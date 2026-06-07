@@ -85,6 +85,7 @@ function startEdge() {
     env: { ...process.env },
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
+    shell: true,
   });
 
   updateStatus({ edge: 'starting', session: 'running', lastMessage: 'Starting aidcp-edge...' });
@@ -131,7 +132,7 @@ async function checkLoginAndStart() {
 }
 
 async function launchChromeAndGateEdge() {
-  const launched = launchChrome(app);
+  const launched = await launchChrome(app);
   if (!launched.ok) {
     updateStatus({ auth: 'chrome missing', edge: 'stopped', lastMessage: launched.error });
     return;
