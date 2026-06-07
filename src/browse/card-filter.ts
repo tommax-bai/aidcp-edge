@@ -1,4 +1,5 @@
-﻿/**
+﻿/** @deprecated 决策已移至 Cloud ContentEvaluator */
+/**
  * 卡片预筛（本地快速判断，不调用 LLM）。
  *
  * 目的：explore feed 中大部分内容明显与人设（AI/LLM/工程师等）无关

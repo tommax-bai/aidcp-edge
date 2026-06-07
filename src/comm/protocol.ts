@@ -348,10 +348,14 @@ export interface NavigationBackPayload {
 
 export interface NoteBrowseImagesPayload {
   noteId: string;
+  /** 浏览图片数量（由 Cloud 控制） */
+  count?: number;
 }
 
 export interface NoteScrollCommentsPayload {
   noteId: string;
+  /** 滚动评论区次数（由 Cloud 控制） */
+  count?: number;
 }
 
 // —— Edge 上报 Payload（edge → cloud）——
@@ -365,6 +369,7 @@ export interface PageCardsPayload {
     collectCount: number;
     coverDesc?: string;
     noteId?: string;
+    isVideo?: boolean;
   }>;
 }
 

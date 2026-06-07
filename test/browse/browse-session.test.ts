@@ -5,10 +5,10 @@ import type { FeedScroller, NoteCard } from '../../src/browse/feed-scroller.js';
 import type { ModalController } from '../../src/browse/modal-controller.js';
 import type { NoteContent } from '../../src/browse/note-extractor.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
-import { makeEnvelope, type Envelope, type NoteContentPayload } from '../../src/comm/protocol.js';
+import { makeEnvelope, type Envelope, type NoteContentPayload, type PageCardsPayload, type ActionCompletedPayload } from '../../src/comm/protocol.js';
 import type { PlanStep, ActionResultPayload } from '../../src/comm/protocol.js';
 
-const CARD: NoteCard = { position: 0, centerX: 10, centerY: 10, title: 'A' };
+const CARD: NoteCard = { position: 0, centerX: 10, centerY: 10, title: 'A', author: 'u', likes: '100', isVideo: false };
 
 function fakeContent(): NoteContent {
   return {
@@ -25,27 +25,22 @@ function fakeContent(): NoteContent {
 
 interface Harness {
   deps: BrowseSessionDeps;
-  reported: NoteContentPayload[];
+  reportedCards: PageCardsPayload[];
+  completedActions: ActionCompletedPayload[];
   openedCards: number[];
   closes: number;
   steps: PlanStep[];
-  decisionFor: (n: number) => Envelope;
 }
 
-function makeHarness(decisions: Envelope[]): Harness {
-  const reported: NoteContentPayload[] = [];
+function makeHarness(cards: NoteCard[] = [CARD]): Harness {
+  const reportedCards: PageCardsPayload[] = [];
+  const completedActions: ActionCompletedPayload[] = [];
   const openedCards: number[] = [];
   const steps: PlanStep[] = [];
   let closes = 0;
-  let cardBatches = 0;
-  let reportIdx = 0;
 
   const scroller: FeedScroller = {
-    getVisibleCards: async () => {
-      // 第一屏返回一张卡（probe + loop 首次），之后返回空（触发停止）
-      cardBatches++;
-      return cardBatches <= 2 ? [CARD] : [];
-    },
+    getVisibleCards: async () => cards,
     scrollNext: async () => {},
     openCard: async (c) => {
       openedCards.push(c.position);
@@ -64,11 +59,11 @@ function makeHarness(decisions: Envelope[]): Harness {
     send: async (method: string, params: Record<string, unknown> = {}) => {
       if (method === 'Runtime.evaluate') {
         const expr = String(params.expression ?? '');
-        // engage-bar 探测：立即报告已渲染，避免轮询空转到超时
+        // engage-bar 探测
         if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) {
           return { result: { value: true } } as never;
         }
-        // note-item 查询：返回 >= 4 以避免 waitForCards 循环
+        // note-item 查询
         if (expr.includes('note-item')) {
           return { result: { value: 10 } } as never;
         }
@@ -79,11 +74,15 @@ function makeHarness(decisions: Envelope[]): Harness {
   };
 
   const client = {
-    reportNoteContent: async (payload: NoteContentPayload): Promise<Envelope> => {
-      reported.push(payload);
-      const d = decisions[Math.min(reportIdx, decisions.length - 1)];
-      reportIdx++;
-      return d;
+    reportNoteContent: async (_payload: NoteContentPayload): Promise<Envelope> => {
+      return makeEnvelope('browse.next', 'ack', 0, { reason: 'ack' });
+    },
+    reportPageCards: (payload: PageCardsPayload) => {
+      reportedCards.push(payload);
+    },
+    reportNoteDetail: () => {},
+    reportActionCompleted: (payload: ActionCompletedPayload) => {
+      completedActions.push(payload);
     },
   };
 
@@ -106,276 +105,260 @@ function makeHarness(decisions: Envelope[]): Harness {
 
   return {
     deps,
-    reported,
+    reportedCards,
+    completedActions,
     openedCards,
     get closes() {
       return closes;
     },
     steps,
-    decisionFor: (n) => decisions[n],
   } as Harness;
 }
 
 function noOpts() {
   return {
-    random: () => 0.99, // > skipProbability(0.2) → 不跳过
+    random: () => 0.99,
     sleep: async () => {},
     logger: () => {},
   };
 }
 
-test('browse-session: browse.next 决策下打开→提取→上报→关闭', async () => {
-  const dec = makeEnvelope('browse.next', 'd1', 0, { reason: 'skip' });
-  const h = makeHarness([dec, makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
+/** 启动会话并延迟推送命令（等 loop 进入 waitForCommand 后再推） */
+async function startAndPush(sess: BrowseSession, commands: Envelope[]): Promise<void> {
+  const done = sess.start();
+  // 给 start() 时间完成初始化（ensureExplore + scanDelay + reportVisibleCards）
+  await new Promise(r => setTimeout(r, 10));
+  for (const cmd of commands) {
+    await sess.onCloudCommand(cmd);
+    await new Promise(r => setTimeout(r, 1));
+  }
+  await done;
+}
+
+// ======== 命令驱动模式测试 ========
+
+test('browse-session: start 后上报 page.cards', async () => {
+  const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());
-  await sess.start();
-  assert.equal(h.reported.length, 1);
-  assert.equal(h.reported[0].title, 'A');
-  assert.deepEqual(h.openedCards, [0]);
-  assert.ok(h.closes >= 1);
+  await startAndPush(sess, [makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
+  assert.ok(h.reportedCards.length >= 1, '应至少上报一次 page.cards');
+  assert.equal(h.reportedCards[0].cards[0].title, 'A');
 });
 
-test('browse-session: plan.response 决策执行 like 步骤', async () => {
-  const plan = makeEnvelope('plan.response', 'p1', 0, {
-    steps: [{ actionId: 'note.like_button', op: 'click', goal: '点赞' }],
-    reason: 'like it',
-  });
-  const h = makeHarness([plan, makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
+test('browse-session: page.cards 包含 isVideo 字段', async () => {
+  const videoCard: NoteCard = { position: 0, centerX: 10, centerY: 10, title: 'Video', isVideo: true };
+  const h = makeHarness([videoCard]);
   const sess = new BrowseSession(h.deps, noOpts());
-  await sess.start();
+  await startAndPush(sess, [makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
+  assert.equal(h.reportedCards[0].cards[0].isVideo, true);
+});
+
+test('browse-session: session.end 命令停止循环', async () => {
+  const h = makeHarness();
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [makeEnvelope('session.end', 's1', 0, { reason: 'test_end' })]);
+  assert.equal(sess.isRunning(), false);
+});
+
+test('browse-session: note.open 命令打开卡片并上报 note.detail', async () => {
+  const h = makeHarness();
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.deepEqual(h.openedCards, [0]);
+});
+
+test('browse-session: browse.scroll 命令触发滚动并上报新卡片', async () => {
+  const h = makeHarness();
+  let scrolled = false;
+  h.deps.scroller = {
+    ...h.deps.scroller,
+    scrollNext: async () => { scrolled = true; },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('browse.scroll', 'bs1', 0, { reason: 'scroll' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.equal(scrolled, true);
+  // 初始上报 + scroll 后再次上报
+  assert.ok(h.reportedCards.length >= 2);
+});
+
+test('browse-session: plan.response 命令执行步骤', async () => {
+  const h = makeHarness();
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('plan.response', 'p1', 0, {
+      steps: [{ actionId: 'note.like_button', op: 'click', goal: '点赞' }],
+      reason: 'like it',
+    }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
   assert.equal(h.steps.length, 1);
   assert.equal(h.steps[0].actionId, 'note.like_button');
 });
 
-test('browse-session: session.end 决策停止循环', async () => {
-  const end = makeEnvelope('session.end', 's1', 0, { reason: 'test_end' });
-  const h = makeHarness([end]);
+test('browse-session: stop() 从外部停止循环', async () => {
+  const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());
-  await sess.start();
+  const done = sess.start();
+  await new Promise(r => setTimeout(r, 10));
+  sess.stop();
+  await done;
   assert.equal(sess.isRunning(), false);
-  assert.equal(h.reported.length, 1);
 });
 
-test('browse-session: 随机跳过卡片时不打开 modal', async () => {
-  const h = makeHarness([makeEnvelope('session.end', 's', 0, { reason: 'test_end' })]);
-  const opts = { ...noOpts(), random: () => 0.0, maxCards: 0 }; // 0 < 0.2 → 总是跳过
-  const sess = new BrowseSession(h.deps, opts);
-  await sess.start();
-  assert.equal(h.openedCards.length, 0);
-  assert.equal(h.reported.length, 0);
+test('browse-session: interaction.like 命令执行点赞并上报结果', async () => {
+  const h = makeHarness();
+  // Mock CDP 返回按钮坐标（模拟未点赞状态 → 点击 → 变为 #liked）
+  let clickCount = 0;
+  let likeCallIndex = 0;
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        // like-wrapper 检查必须在 engage-bar 之前
+        if (expr.includes('like-wrapper')) {
+          likeCallIndex++;
+          if (likeCallIndex === 1) {
+            // 第一次调用：返回按钮坐标
+            return { result: { value: JSON.stringify({ x: 100, y: 200, href: '#like' }) } } as never;
+          } else {
+            // 第二次调用（验证）：返回 #liked
+            return { result: { value: '#liked' } } as never;
+          }
+        }
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      if (method === 'Input.dispatchMouseEvent') {
+        clickCount++;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('interaction.like', 'l1', 0, { noteId: 'n1' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  // 应上报 action.completed
+  const likeResult = h.completedActions.find(a => a.action === 'like');
+  assert.ok(likeResult);
+  assert.equal(likeResult!.ok, true);
 });
 
-test('browse-session: search.execute 决策触发搜索', async () => {
-  const search = makeEnvelope('search.execute', 'se1', 0, { keyword: '奶茶' });
-  const h = makeHarness([search, makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
-  // 让 cdp 记录搜索调用
+test('browse-session: interaction.like 已点赞时上报 already_liked', async () => {
+  const h = makeHarness();
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        // like-wrapper 检查必须在 engage-bar 之前（like 表达式包含 engage-bar）
+        if (expr.includes('like-wrapper')) {
+          return { result: { value: JSON.stringify({ error: 'already' }) } } as never;
+        }
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('interaction.like', 'l1', 0, { noteId: 'n1' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const likeResult = h.completedActions.find(a => a.action === 'like');
+  assert.ok(likeResult);
+  assert.equal(likeResult!.ok, false);
+  assert.equal(likeResult!.reason, 'already_liked');
+});
+
+test('browse-session: 命令在 loop 等待期间推入能被消费', async () => {
+  const h = makeHarness();
+  const sess = new BrowseSession(h.deps, noOpts());
+  // 启动后等 loop 进入 waitForCommand，再推入 session.end
+  const done = sess.start();
+  await new Promise(r => setTimeout(r, 10));
+  await sess.onCloudCommand(makeEnvelope('session.end', 's1', 0, { reason: 'queued-during-loop' }));
+  await done;
+  assert.equal(sess.isRunning(), false);
+});
+
+test('browse-session: search.execute 命令触发搜索', async () => {
+  const h = makeHarness();
   const calls: string[] = [];
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
       calls.push(method);
       if (method === 'Runtime.evaluate') {
         const expr = String(params.expression ?? '');
-        if (expr.includes('note-item')) {
-          return { result: { value: 10 } } as never;
-        }
-        if (expr.includes('location.href')) {
-          return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
-        }
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        if (expr.includes('location.href')) return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
         return { result: { value: true } } as never;
       }
       return {} as never;
     },
   };
-  const sess = new BrowseSession(h.deps, { ...noOpts(), maxCards: 1 });
-  await sess.start();
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('search.execute', 'se1', 0, { keyword: '奶茶' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
   assert.ok(calls.includes('Input.dispatchKeyEvent'), '应触发键盘输入搜索');
 });
 
-
-test('browse-session: 预筛跳过低赞卡片（不打开 modal、不上报，但计入 processed）', async () => {
-  const h = makeHarness([makeEnvelope('session.end', 's', 0, { reason: 'test_end' })]);
-  // 覆盖 scroller：第二屏给一张低赞卡，之后空屏触发停止
-  let batches = 0;
-  h.deps.scroller = {
-    getVisibleCards: async () => {
-      batches++;
-      return batches <= 2 ? [{ position: 0, centerX: 10, centerY: 10, title: '某技术分享', likes: '8' }] : [];
-    },
-    scrollNext: async () => {},
-    openCard: async (cc) => {
-      h.openedCards.push(cc.position);
-    },
-  };
-  const logs: string[] = [];
-  const sess = new BrowseSession(h.deps, { ...noOpts(), logger: (m) => logs.push(m) });
-  await sess.start();
-  assert.equal(h.openedCards.length, 0, '不应打开 modal');
-  assert.equal(h.reported.length, 0, '不应上报云端');
-  assert.ok(logs.some((l) => l.includes('跳过低赞卡片') && l.includes('likes=8')), '应有低赞跳过日志');
-});
-
-test('browse-session: 预筛跳过无关标题卡片（不打开、不上报）', async () => {
-  const h = makeHarness([makeEnvelope('session.end', 's', 0, { reason: 'test_end' })]);
-  let batches = 0;
-  h.deps.scroller = {
-    getVisibleCards: async () => {
-      batches++;
-      return batches <= 2 ? [{ position: 0, centerX: 10, centerY: 10, title: '原神抽卡攻略', likes: '999' }] : [];
-    },
-    scrollNext: async () => {},
-    openCard: async (cc) => {
-      h.openedCards.push(cc.position);
-    },
-  };
-  const logs: string[] = [];
-  const sess = new BrowseSession(h.deps, { ...noOpts(), logger: (m) => logs.push(m) });
-  await sess.start();
-  assert.equal(h.openedCards.length, 0);
-  assert.equal(h.reported.length, 0);
-  assert.ok(logs.some((l) => l.includes('跳过无关卡片')), '应有无关跳过日志');
-});
-
-test('browse-session: 预筛放行相关标题卡片（正常打开并上报）', async () => {
-  const dec = makeEnvelope('browse.next', 'd1', 0, { reason: 'skip' });
-  const h = makeHarness([dec, makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
-  let batches = 0;
-  h.deps.scroller = {
-    getVisibleCards: async () => {
-      batches++;
-      return batches <= 2 ? [{ position: 0, centerX: 10, centerY: 10, title: 'LLM 大模型推理优化', likes: '1.2w' }] : [];
-    },
-    scrollNext: async () => {},
-    openCard: async (cc) => {
-      h.openedCards.push(cc.position);
-    },
-  };
-  const sess = new BrowseSession(h.deps, { ...noOpts(), maxCards: 1 });
-  await sess.start();
-  assert.deepEqual(h.openedCards, [0]);
-  assert.equal(h.reported.length, 1);
-});
-
-test('browse-session: 会话预算动作数到上限后自动结束', async () => {
-  const plan = makeEnvelope('plan.response', 'p1', 0, {
-    steps: [{ actionId: 'note.like_button', op: 'click', goal: '点赞' }],
-    reason: 'like it',
-  });
-  const h = makeHarness([plan, plan]);
-  let batches = 0;
-  h.deps.scroller = {
-    getVisibleCards: async () => {
-      batches++;
-      return batches <= 2
-        ? [
-            { position: 0, centerX: 10, centerY: 10, title: 'LLM 大模型推理优化', likes: '1.2w' },
-            { position: 1, centerX: 20, centerY: 20, title: 'AI Agent 应用实践', likes: '1.1w' },
-          ]
-        : [];
-    },
-    scrollNext: async () => {},
-    openCard: async (cc) => {
-      h.openedCards.push(cc.position);
-    },
-  };
-  h.deps.client = {
-    ...h.deps.client,
-    requestSessionBudget: async () => ({
-      quotaLevel: 'normal',
-      durationMs: 60_000,
-      maxActions: 1,
-      viewOnly: false,
-      startedAt: Date.now(),
-    }),
-  };
-  const sess = new BrowseSession(h.deps, { ...noOpts(), maxCards: 1 });
-  await sess.start();
-  assert.deepEqual(h.openedCards, [0]);
-  assert.equal(h.steps.length, 1);
-});
-
-test('browse-session: 会话预算时长到上限后自动结束', async () => {
-  const h = makeHarness([makeEnvelope('browse.next', 'd1', 0, { reason: 'skip' })]);
-  h.deps.client = {
-    ...h.deps.client,
-    requestSessionBudget: async () => ({
-      quotaLevel: 'normal',
-      durationMs: 1,
-      maxActions: 60,
-      viewOnly: false,
-      startedAt: Date.now() - 10,
-    }),
-  };
-  const sess = new BrowseSession(h.deps, noOpts());
-  await sess.start();
-  assert.equal(h.openedCards.length, 0);
-  assert.equal(h.reported.length, 0);
-});
-
-// ======== onCloudCommand 测试 ========
-
-test('onCloudCommand: session.end 设置 stopRequested', async () => {
-  const dec = makeEnvelope('browse.next', 'd1', 0, { reason: 'skip' });
-  const h = makeHarness([dec, makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
-  const sess = new BrowseSession(h.deps, noOpts());
-  const env = makeEnvelope('session.end', 'cmd-1', 1, { reason: 'test_end' });
-  await sess.onCloudCommand(env);
-  // session.end 后 stopRequested 应为 true（外部可观测 isRunning===false 或无异常即可）
-});
-
-test('onCloudCommand: note.close 关闭 modal', async () => {
-  const h = makeHarness([makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
-  const sess = new BrowseSession(h.deps, noOpts());
-  const env = makeEnvelope('note.close', 'cmd-2', 1, { reason: 'close' });
-  await sess.onCloudCommand(env);
-  assert.ok(h.closes >= 1, '应调用 closeModal');
-});
-
-test('onCloudCommand: browse.scroll 调用 scrollNext', async () => {
-  const h = makeHarness([makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
-  let scrolled = false;
-  h.deps.scroller = {
-    ...h.deps.scroller,
-    scrollNext: async () => { scrolled = true; },
-    getVisibleCards: async () => [],
-  };
+test('browse-session: note.browse_images 使用 Cloud 指定的 count', async () => {
+  const h = makeHarness();
+  let evalCalls = 0;
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
       if (method === 'Runtime.evaluate') {
+        evalCalls++;
         const expr = String(params.expression ?? '');
         if (expr.includes('note-item')) return { result: { value: 10 } } as never;
-        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        if (expr.includes('swiper-wrapper')) return { result: { value: JSON.stringify({ count: 10 }) } } as never;
+        if (expr.includes('swiper-button-next')) return { result: { value: undefined } } as never;
         return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
       }
       return {} as never;
     },
   };
-  const sess = new BrowseSession(h.deps, noOpts());
-  const env = makeEnvelope('browse.scroll', 'cmd-3', 1, { reason: 'scroll' });
-  await sess.onCloudCommand(env);
-  assert.equal(scrolled, true, '应调用 scrollNext');
+  const logs: string[] = [];
+  const sess = new BrowseSession(h.deps, { ...noOpts(), logger: (m) => logs.push(m) });
+  await startAndPush(sess, [
+    makeEnvelope('note.browse_images', 'bi1', 0, { noteId: 'n1', count: 4 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.ok(logs.some(l => l.includes('浏览了 4 张图片')), '应浏览 Cloud 指定的 4 张');
+  assert.ok(h.completedActions.some(a => a.action === 'browse_images' && a.ok));
 });
 
-test('onCloudCommand: browse.next 附带 action=like 先执行点赞', async () => {
-  const h = makeHarness([makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
-  const logs: string[] = [];
-  h.deps.scroller = {
-    ...h.deps.scroller,
-    scrollNext: async () => {},
-    getVisibleCards: async () => [],
-  };
+test('browse-session: note.scroll_comments 使用 Cloud 指定的 count', async () => {
+  const h = makeHarness();
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
       if (method === 'Runtime.evaluate') {
         const expr = String(params.expression ?? '');
         if (expr.includes('note-item')) return { result: { value: 10 } } as never;
-        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        if (expr.includes('comments-container') || expr.includes('note-comment')) return { result: { value: 'ok' } } as never;
         return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
       }
       return {} as never;
     },
   };
+  const logs: string[] = [];
   const sess = new BrowseSession(h.deps, { ...noOpts(), logger: (m) => logs.push(m) });
-  const env = makeEnvelope('browse.next', 'cmd-4', 1, { reason: 'next', action: 'like' } as any);
-  await sess.onCloudCommand(env);
-  assert.ok(logs.some((l) => l.includes('互动') && l.includes('like')), '应触发 like 互动逻辑');
+  await startAndPush(sess, [
+    makeEnvelope('note.scroll_comments', 'sc1', 0, { noteId: 'n1', count: 5 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.ok(logs.some(l => l.includes('评论区滚动完成') && l.includes('5 次')));
+  assert.ok(h.completedActions.some(a => a.action === 'scroll_comments' && a.ok));
 });
