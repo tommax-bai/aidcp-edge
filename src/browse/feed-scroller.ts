@@ -104,10 +104,20 @@ const CARD_SCAN_JS = `(function(){
     var author = txt(el, ['.author', '[class*="author"]', '[class*="name"]']);
     var likes = txt(el, ['.like-wrapper', '[class*="like"] [class*="count"]', '[class*="count"]']);
     var isVideo = !!(el.querySelector('.play-icon') || el.querySelector('[class*="play-icon"]') || el.querySelector('video'));
+    // 提取真实 noteId（从卡片的 /explore/<id> 链接），供云端 visited 去重；缺失则由 modal 兜底解析。
+    var lk = (el.matches && el.matches('a[href*="/explore/"], a[href*="/discovery/item/"]'))
+      ? el
+      : el.querySelector('a[href*="/explore/"], a[href*="/discovery/item/"]');
+    var noteId;
+    if (lk) {
+      var hm = (lk.getAttribute('href')||'').match(/\\/(?:explore|discovery\\/item)\\/([A-Za-z0-9]+)/);
+      if (hm) noteId = hm[1];
+    }
     out.push({
       position: pos++,
       centerX: Math.round(cx),
       centerY: Math.round(cy),
+      noteId: noteId,
       title: title,
       author: author,
       likes: likes,

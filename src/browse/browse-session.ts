@@ -475,9 +475,17 @@ export class BrowseSession {
       content.likes = parseCount(card.likes);
     }
 
+    // 解析真实 noteId：优先 feed 卡片 → modal 内 explore 链接 → 当前页面 URL → 合成兜底。
+    // 真实 noteId 是云端 visited 去重的主键，缺失会导致"反复打开同一张卡"的死循环。
+    const parseNoteId = (u?: string): string | undefined => {
+      const m = (u ?? '').match(/\/(?:explore|discovery\/item)\/([A-Za-z0-9]+)/);
+      return m ? m[1] : undefined;
+    };
+    const realNoteId = card.noteId ?? parseNoteId(content.noteUrl) ?? parseNoteId(await this.evalUrl());
+
     // 用 note.detail 上报
     const payload: NoteDetailPayload = {
-      noteId: card.noteId ?? `card-${card.position}`,
+      noteId: realNoteId ?? `card-${card.position}`,
       title: content.title,
       content: content.body,
       author: content.author,
@@ -610,8 +618,20 @@ export class BrowseSession {
     await this.safeCloseModal();
     await this.humanPause(this.actionTiming);
     if (targetPage === 'feed') {
-      await this.deps.cdp.send('Page.navigate', { url: this.exploreUrl });
-      await this.waitForCards(10000);
+      // 优先 history.back()：保住 feed 滚动位与卡片顺序，避免整页重载导致卡片重新编号 → 反复开同一张。
+      await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
+      await this.sleep(1500);
+      let backOk = false;
+      try {
+        backOk = (await this.deps.scroller.getVisibleCards()).length > 0;
+      } catch {
+        backOk = false;
+      }
+      if (!backOk) {
+        // 兜底：history.back 未回到含卡片的 feed → 整页重载
+        await this.deps.cdp.send('Page.navigate', { url: this.exploreUrl });
+        await this.waitForCards(10000);
+      }
     } else if (targetPage === 'search') {
       await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
       await this.sleep(2000);
