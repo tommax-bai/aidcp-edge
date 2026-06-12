@@ -255,6 +255,21 @@ export class BrowseSession {
     this.logger('[browse] 页面加载超时，继续尝试');
   }
 
+  /**
+   * 轮询直到 scroller 真正检测到可见卡片（与 reportVisibleCards 同口径），超时返回 false。
+   * history.back 后 feed 重渲染有延迟，固定 sleep 后瞬时判断会误判为空 → 误报"无可见卡片"。
+   */
+  private async waitForVisibleCards(timeout: number, min = 1): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      try {
+        if ((await this.deps.scroller.getVisibleCards()).length >= min) return true;
+      } catch { /* ignore */ }
+      await this.sleep(500);
+    }
+    return false;
+  }
+
   private async evalUrl(): Promise<string> {
     const res = await this.deps.cdp.send<{ result?: { value?: unknown } }>(
       'Runtime.evaluate',
@@ -620,17 +635,13 @@ export class BrowseSession {
     if (targetPage === 'feed') {
       // 优先 history.back()：保住 feed 滚动位与卡片顺序，避免整页重载导致卡片重新编号 → 反复开同一张。
       await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
-      await this.sleep(1500);
-      let backOk = false;
-      try {
-        backOk = (await this.deps.scroller.getVisibleCards()).length > 0;
-      } catch {
-        backOk = false;
-      }
-      if (!backOk) {
-        // 兜底：history.back 未回到含卡片的 feed → 整页重载
+      // 轮询等卡片真正出现（scroller 口径），而非固定 sleep 后瞬时判断——
+      // 否则 back 后 feed 没渲染完就误判为空，会让 reportVisibleCards 空报 → 云端误判 session.end。
+      if (!(await this.waitForVisibleCards(8000))) {
+        // 兜底：history.back 未恢复出卡片 → 整页重载，并再次按 scroller 口径确认
         await this.deps.cdp.send('Page.navigate', { url: this.exploreUrl });
         await this.waitForCards(10000);
+        await this.waitForVisibleCards(5000);
       }
     } else if (targetPage === 'search') {
       await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
