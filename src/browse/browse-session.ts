@@ -452,7 +452,10 @@ export class BrowseSession {
       }
     }
     this.deps.client.reportPageCards?.(payload);
-    this.logger(`[browse] 已上报 ${cards.length} 张可见卡片 (page.cards)`);
+    const cardSummary = payload.cards
+      .map((c) => `[${c.index}]“${(c.title ?? '').slice(0, 18)}”${c.author ? '@' + c.author : ''}${c.likeCount ? ' 👍' + c.likeCount : ''}`)
+      .join(' / ');
+    this.logger(`[browse] 已上报 ${cards.length} 张可见卡片 (page.cards): ${cardSummary}`);
   }
 
   /**
@@ -508,7 +511,11 @@ export class BrowseSession {
       collectCount: content.collects,
     };
     this.deps.client.reportNoteDetail?.(payload);
-    this.logger(`[browse] note.open: 已上报 note.detail (noteId=${payload.noteId})`);
+    this.logger(
+      `[browse] note.open: 已上报 note.detail noteId=${payload.noteId}「${(payload.title ?? '').slice(0, 24)}」` +
+        `${payload.author ? ' by ' + payload.author : ''} 👍${payload.likeCount ?? 0} ⭐${payload.collectCount ?? 0}` +
+        ` 正文:${(payload.content ?? '').replace(/\s+/g, ' ').slice(0, 50)}…`,
+    );
     this.processed++;
   }
 
