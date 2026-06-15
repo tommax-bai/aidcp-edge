@@ -229,16 +229,21 @@ function shouldAllowManualEnterFallback(): boolean {
   return process.env.AIDCP_LOGIN_WAIT_MODE === 'manual' || process.stdin.isTTY === true;
 }
 
-function waitForManualEnter(): Promise<void> {
-  return new Promise((resolve) => {
-    const stdin = process.stdin;
-    const onData = () => {
-      stdin.removeListener('data', onData);
-      try {
-        stdin.pause();
-      } catch {
-        /* ignore */
-      }
+function waitForManualEnter(): { promise: Promise<void>; cancel: () => void } {
+  const stdin = process.stdin;
+  let onData: (() => void) | undefined;
+  const cancel = () => {
+    if (onData) stdin.removeListener('data', onData);
+    onData = undefined;
+    try {
+      stdin.pause();
+    } catch {
+      /* ignore */
+    }
+  };
+  const promise = new Promise<void>((resolve) => {
+    onData = () => {
+      cancel();
       resolve();
     };
     try {
@@ -248,6 +253,7 @@ function waitForManualEnter(): Promise<void> {
     }
     stdin.once('data', onData);
   });
+  return { promise, cancel };
 }
 
 export async function evaluateLoginState(host: string, port: number, fetchImpl: typeof fetch): Promise<LoginProbeResult> {
@@ -368,10 +374,11 @@ async function defaultWaitForLogin(ctx: LoginWaitContext): Promise<void> {
   const deadline = Date.now() + ctx.timeoutMs;
   const allowManualEnter = shouldAllowManualEnterFallback();
   const probeLogin = ctx.probeLoginImpl ?? evaluateLoginState;
-  let manualEnterPromise: Promise<void> | undefined;
+  let manual: { promise: Promise<void>; cancel: () => void } | undefined;
   if (allowManualEnter) {
     ctx.logImpl('[aidcp-edge] 可在浏览器中登录小红书；若已确认完成，也可按 Enter 手动继续。');
-    manualEnterPromise = waitForManualEnter().then(() => {
+    manual = waitForManualEnter();
+    void manual.promise.then(() => {
       ctx.logImpl('[aidcp-edge] 收到 Enter，按手动兜底继续启动。');
     });
   } else {
@@ -381,11 +388,12 @@ async function defaultWaitForLogin(ctx: LoginWaitContext): Promise<void> {
     const probePromise = probeLogin(ctx.host, ctx.port, ctx.fetchImpl)
       .then((result) => ({ type: 'probe' as const, result }))
       .catch((error) => ({ type: 'error' as const, error: error as Error }));
-    const race = manualEnterPromise
-      ? await Promise.race([probePromise, manualEnterPromise.then(() => ({ type: 'manual' as const }))])
+    const race = manual
+      ? await Promise.race([probePromise, manual.promise.then(() => ({ type: 'manual' as const }))])
       : await probePromise;
     if (race.type === 'manual') return;
     if (race.type === 'probe' && race.result.loggedIn) {
+      manual?.cancel(); // 登录已检测到：注销 stdin 监听，避免后续误吃用户回车
       ctx.logImpl(`[aidcp-edge] 已检测到登录，继续（signal=${race.result.reason} url=${race.result.url}）`);
       return;
     }

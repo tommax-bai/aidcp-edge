@@ -470,9 +470,15 @@ export class BrowseSession {
       return;
     }
     await this.deps.scroller.openCard(card);
-    const opened = await this.deps.modalCtrl.waitForModal(this.modalTimeoutMs);
+    let opened = await this.deps.modalCtrl.waitForModal(this.modalTimeoutMs);
     if (!opened) {
-      this.logger(`[browse] note.open: modal 未打开`);
+      // 重试一次：点击可能未命中或渲染较慢
+      this.logger('[browse] note.open: modal 未打开，重试一次');
+      await this.deps.scroller.openCard(card);
+      opened = await this.deps.modalCtrl.waitForModal(this.modalTimeoutMs);
+    }
+    if (!opened) {
+      this.logger(`[browse] note.open: modal 未打开（重试后仍失败）`);
       this.deps.client.reportActionCompleted?.({ action: 'open_note', ok: false, reason: 'modal_timeout' });
       return;
     }
