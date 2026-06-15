@@ -15,7 +15,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "test:acceptance": "tsx --test test/acceptance/*.test.ts",
-    "start": "tsx src/main.ts"
+    "start": "tsx src/main.ts",
+    "dev:cloud": "bash scripts/dev-run.sh"
   },
   "build": {
     "appId": "com.aidcp.edge",
