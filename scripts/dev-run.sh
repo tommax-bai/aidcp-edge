@@ -27,9 +27,9 @@ cleanup() { [[ -n "$cloud_pid" ]] && kill "$cloud_pid" 2>/dev/null; }
 trap cleanup EXIT INT TERM
 
 if [[ ! -f "$PEM" ]]; then
-  echo "[dev-run] ⚠️ 未找到 SSH 私钥：$PEM（设 AIDCP_PEM 覆盖）。仅本地起 edge，不合并云端日志。"
+  echo "[dev-run] ⚠️ 未找到 SSH 私钥：${PEM}（设 AIDCP_PEM 覆盖）。仅本地起 edge，不合并云端日志。"
 else
-  echo "[dev-run] tail 云端 journal：$ECS $SVC（Ctrl+C 一并退出）"
+  echo "[dev-run] tail 云端 journal：${ECS} ${SVC}（Ctrl+C 一并退出）"
   ssh -i "$PEM" -o ConnectTimeout=10 "$ECS" "journalctl -u $SVC -f -n 0 --no-pager" 2>&1 \
     | awk '{ print "\033[36m[CLOUD]\033[0m " $0; fflush() }' &
   cloud_pid=$!
