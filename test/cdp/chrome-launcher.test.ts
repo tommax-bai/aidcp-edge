@@ -7,6 +7,7 @@ import {
   probeCdp,
   buildChromeArgs,
   deriveLoginProbeResult,
+  ensurePageTarget,
 } from '../../src/cdp/index.js';
 
 /** 构造一个最小可用的假 fetch（按 url -> ok 映射） */
@@ -121,6 +122,7 @@ test('launchChrome 复用已有实例（端口已就绪，不 spawn）', async (
     sleepImpl: noSleep,
     logImpl: noLog,
     waitForLoginImpl: async () => {},
+    ensurePageTargetImpl: async () => {},
   });
   assert.equal(inst.reused, true);
   assert.equal(inst.pid, null);
@@ -309,4 +311,62 @@ test('launchChrome 首次启动时检测到登录即继续', async () => {
     }),
   });
   assert.ok(logs.some((msg) => msg.includes('已检测到登录，继续')));
+});
+
+// ---------------- ensurePageTarget ----------------
+
+/** 按 URL 路由的假 fetch：/json 返回 targets；/json/new 按配置返回 ok。 */
+function makeTargetFetch(opts: {
+  targets: Array<{ type: string; webSocketDebuggerUrl?: string; url?: string }>;
+  newPutOk?: boolean;
+  newGetOk?: boolean;
+}) {
+  const calls: { url: string; method: string }[] = [];
+  const impl = (async (url: string | URL, init?: { method?: string }) => {
+    const u = String(url);
+    const method = init?.method ?? 'GET';
+    calls.push({ url: u, method });
+    if (u.endsWith('/json')) {
+      return { ok: true, json: async () => opts.targets } as unknown as Response;
+    }
+    if (u.includes('/json/new')) {
+      const ok = method === 'PUT' ? (opts.newPutOk ?? false) : (opts.newGetOk ?? false);
+      return { ok, status: ok ? 200 : 405 } as unknown as Response;
+    }
+    return { ok: true } as unknown as Response;
+  }) as unknown as typeof fetch;
+  return { impl, calls };
+}
+
+test('ensurePageTarget 已有可用 page target 时不新开标签', async () => {
+  const f = makeTargetFetch({
+    targets: [{ type: 'page', webSocketDebuggerUrl: 'ws://x', url: 'https://www.xiaohongshu.com/explore' }],
+  });
+  await ensurePageTarget('127.0.0.1', 9222, 'https://www.xiaohongshu.com/explore', f.impl, () => {});
+  assert.equal(f.calls.some((c) => c.url.includes('/json/new')), false, '已有标签时不应调用 /json/new');
+});
+
+test('ensurePageTarget 无可用 page target 时 PUT 新开一个标签', async () => {
+  // browser 级 target + 一个无 webSocketDebuggerUrl 的 page（都不算可用）
+  const f = makeTargetFetch({ targets: [{ type: 'browser' }, { type: 'page' }], newPutOk: true });
+  await ensurePageTarget('127.0.0.1', 9222, 'https://www.xiaohongshu.com/explore', f.impl, () => {});
+  const newCall = f.calls.find((c) => c.url.includes('/json/new'));
+  assert.ok(newCall, '无可用标签时应调用 /json/new');
+  assert.equal(newCall!.method, 'PUT');
+  assert.ok(newCall!.url.includes('xiaohongshu.com/explore'));
+});
+
+test('ensurePageTarget PUT 不支持时回退 GET', async () => {
+  const f = makeTargetFetch({ targets: [], newPutOk: false, newGetOk: true });
+  await ensurePageTarget('127.0.0.1', 9222, 'u', f.impl, () => {});
+  const methods = f.calls.filter((c) => c.url.includes('/json/new')).map((c) => c.method);
+  assert.deepEqual(methods, ['PUT', 'GET'], '应先试 PUT 再回退 GET');
+});
+
+test('ensurePageTarget 新开失败时抛错', async () => {
+  const f = makeTargetFetch({ targets: [], newPutOk: false, newGetOk: false });
+  await assert.rejects(
+    ensurePageTarget('127.0.0.1', 9222, 'u', f.impl, () => {}),
+    /无法在复用的 Chrome 中新开页面标签/,
+  );
 });

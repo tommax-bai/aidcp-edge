@@ -49,6 +49,14 @@ export interface ChromeLauncherOptions {
   waitForLoginImpl?: (ctx: LoginWaitContext) => Promise<void>;
   /** 注入登录态探测逻辑（测试用） */
   probeLoginImpl?: (host: string, port: number, fetchImpl: typeof fetch) => Promise<LoginProbeResult>;
+  /** 注入“确保复用实例有可用页面标签”逻辑（测试用） */
+  ensurePageTargetImpl?: (
+    host: string,
+    port: number,
+    startUrl: string,
+    fetchImpl: typeof fetch,
+    log: (msg: string) => void,
+  ) => Promise<void>;
   /** 注入日志输出（默认 console.log） */
   logImpl?: (msg: string) => void;
 }
@@ -329,6 +337,33 @@ export async function evaluateLoginState(host: string, port: number, fetchImpl: 
   }
 }
 
+/**
+ * 确保复用的 Chrome 至少有一个可用的页面标签（type:"page" 且有 webSocketDebuggerUrl）。
+ *
+ * 复用场景下 Chrome 可能“活着但无标签”（窗口被关、进程仍在）：此时 `/json/version`
+ * 仍可响应（probeCdp 通过、判定可复用），但 `/json` 无 page target，导致登录检测
+ * （evaluateLoginState）与后续 attachToPage 都失败、卡到超时。此时主动新开一个标签兜底。
+ */
+export async function ensurePageTarget(
+  host: string,
+  port: number,
+  startUrl: string,
+  fetchImpl: typeof fetch = globalThis.fetch,
+  log: (msg: string) => void = (m) => console.log(m),
+): Promise<void> {
+  const targets = await fetchJson<CdpTargetInfo[]>(`http://${host}:${port}/json`, fetchImpl);
+  if (targets.some((t) => t.type === 'page' && t.webSocketDebuggerUrl)) return;
+  log(`[aidcp-edge] 复用的 Chrome 无可用页面标签，自动新开一个：${startUrl}`);
+  // 新版 Chrome 的 /json/new 需要 PUT；旧版仅支持 GET，做一次回退。
+  let res = await fetchImpl(`http://${host}:${port}/json/new?${startUrl}`, { method: 'PUT' });
+  if (!res.ok) {
+    res = await fetchImpl(`http://${host}:${port}/json/new?${startUrl}`);
+  }
+  if (!res.ok) {
+    throw new Error(`无法在复用的 Chrome 中新开页面标签（/json/new HTTP ${res.status}）`);
+  }
+}
+
 async function defaultWaitForLogin(ctx: LoginWaitContext): Promise<void> {
   const deadline = Date.now() + ctx.timeoutMs;
   const allowManualEnter = shouldAllowManualEnterFallback();
@@ -414,11 +449,16 @@ export async function launchChrome(opts: ChromeLauncherOptions = {}): Promise<Ch
   const sleep = opts.sleepImpl ?? defaultSleep;
   const waitForLogin = opts.waitForLoginImpl ?? defaultWaitForLogin;
   const probeLogin = opts.probeLoginImpl ?? evaluateLoginState;
+  const ensurePage = opts.ensurePageTargetImpl ?? ensurePageTarget;
   const log = opts.logImpl ?? ((m: string) => console.log(m));
 
   // 1) 复用已有实例
   if (await probeCdp(host, port, fetchImpl)) {
     log(`[aidcp-edge] 检测到已有 Chrome 监听 ${host}:${port}，复用实例`);
+    // 复用的实例可能“活着但无标签”（窗口被关、进程仍在）：/json/version 仍响应、
+    // 被判可复用，但无 page target，登录检测与 attachToPage 都会失败、卡到超时。
+    // 复用前先确保有一个可用页面标签，没有就主动新开一个。
+    await ensurePage(host, port, startUrl, fetchImpl, log);
     // 复用实例也需要验证登录态
     await waitForLogin({
       host,
