@@ -145,7 +145,9 @@ export class CdpFeedScroller implements FeedScroller {
     options: FeedScrollerOptions = {},
   ) {
     this.random = options.random ?? defaultRandom;
-    this.scrollDistancePx = options.scrollDistancePx ?? 800;
+    // 默认 ~500（约半屏）：相邻两次扫描的可见卡片保留重叠，降低 AI 卡在两次扫描之间被整屏跳过的概率。
+    // （原 800 ≈ 一整屏，相邻快照几乎不重叠 → borderline 卡只有一次被评估机会就划走。）
+    this.scrollDistancePx = options.scrollDistancePx ?? 500;
     this.sleep = options.sleep ?? defaultSleep;
   }
 

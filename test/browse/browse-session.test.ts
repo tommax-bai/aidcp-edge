@@ -188,6 +188,38 @@ test('browse-session: note.open 命令打开卡片并上报 note.detail', async 
   assert.deepEqual(h.openedCards, [0]);
 });
 
+test('browse-session: note.open 按 noteId 命中目标卡（index 已失效也开对）', async () => {
+  // 当前快照：position 0 = NPD，position 1 = LLM 卡。云端意图开 LLM（noteId=llm），
+  // 但下发的 index=0 是「决策时快照」的序号、已过期。应按 noteId 开对，而非按过期 index 开 NPD。
+  const cards: NoteCard[] = [
+    { position: 0, centerX: 10, centerY: 10, noteId: 'npd', title: '职场NPD', isVideo: false },
+    { position: 1, centerX: 10, centerY: 200, noteId: 'llm', title: 'LLM 推理', isVideo: false },
+  ];
+  const h = makeHarness(cards);
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0, noteId: 'llm' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.deepEqual(h.openedCards, [1], '应按 noteId 命中 LLM 卡（position 1），而非过期 index=0 指向的 NPD');
+});
+
+test('browse-session: note.open 目标已滚走时重报当前卡片（不开邻座）', async () => {
+  const cards: NoteCard[] = [
+    { position: 0, centerX: 10, centerY: 10, noteId: 'aaa', title: 'A 卡', isVideo: false },
+    { position: 1, centerX: 10, centerY: 200, noteId: 'bbb', title: 'B 卡', isVideo: false },
+  ];
+  const h = makeHarness(cards);
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0, noteId: 'gone' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  // 目标 noteId 不在当前可见集 → 不开任何卡，且重报一次当前快照（初始 1 次 + 重报 1 次）。
+  assert.equal(h.openedCards.length, 0, '目标已滚走时不应开邻座');
+  assert.ok(h.reportedCards.length >= 2, '应重报当前卡片让云端按现状重判');
+});
+
 test('browse-session: browse.scroll 命令触发滚动并上报新卡片', async () => {
   const h = makeHarness();
   let scrolled = false;

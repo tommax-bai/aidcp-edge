@@ -33,7 +33,7 @@ import type {
   NoteScrollCommentsPayload,
 } from '../comm/protocol.js';
 import type { ActionResultPayload } from '../comm/protocol.js';
-import type { FeedScroller } from './feed-scroller.js';
+import type { FeedScroller, NoteCard } from './feed-scroller.js';
 import type { ModalController } from './modal-controller.js';
 import type { extractNoteContent as ExtractFn } from './note-extractor.js';
 import { executeSearch } from './search-handler.js';
@@ -334,8 +334,8 @@ export class BrowseSession {
       }
       case 'note.open': {
         const payload = env.payload as { noteId?: string; index?: number; reason?: string };
-        this.logger(`[browse] 命令: note.open (index=${payload.index})`);
-        await this.openAndReportNote(payload.index ?? 0);
+        this.logger(`[browse] 命令: note.open (index=${payload.index}, noteId=${payload.noteId ?? '?'})`);
+        await this.openAndReportNote(payload.index ?? 0, payload.noteId);
         break;
       }
       case 'note.close': {
@@ -470,9 +470,24 @@ export class BrowseSession {
   /**
    * 打开指定 index 的卡片，提取内容并用 note.detail 协议上报给云端。
    */
-  private async openAndReportNote(index: number): Promise<void> {
+  private async openAndReportNote(index: number, noteId?: string): Promise<void> {
     const cards = await this.deps.scroller.getVisibleCards();
-    const card = cards.find(c => c.position === index) ?? cards[index];
+    // 优先按 noteId 在「当前快照」里定位：云端决策与 edge 执行之间 feed 可能已滚动，
+    // 纯 index/position 寻址会开成同序号上的"邻座"（云端判 LLM 卡 valuable，edge 却开了 NPD/C罗）。
+    let card: NoteCard | undefined;
+    if (noteId) {
+      card = cards.find((c) => c.noteId === noteId);
+      if (!card) {
+        // 目标卡已滚出可见区：不开邻座，重报当前快照让云端按现状重判
+        // （比报失败触发兜底再 scroll 更稳——再 scroll 会又划过更多内容）。
+        this.logger(`[browse] note.open: 目标 noteId=${noteId} 已不在当前可见卡中（feed 已滚动），重报当前卡片`);
+        await this.reportVisibleCards();
+        return;
+      }
+    } else {
+      // 无 noteId（兜底 / 老协议）：退回按 position/index 寻址。
+      card = cards.find((c) => c.position === index) ?? cards[index];
+    }
     if (!card) {
       this.logger(`[browse] note.open: 找不到 index=${index} 的卡片`);
       this.deps.client.reportActionCompleted?.({ action: 'open_note', ok: false, reason: 'card_not_found' });
