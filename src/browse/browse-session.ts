@@ -116,8 +116,8 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** 详情页停留下限默认区间（与云端 buildPacingDefaults 同口径）。 */
-const DEFAULT_DWELL_FLOOR_MS = { min: 1200, max: 2600 } as const;
+/** 详情页停留下限默认区间（与云端 buildPacingDefaults / DWELL_FLOOR_MS 同口径）。 */
+const DEFAULT_DWELL_FLOOR_MS = { min: 2500, max: 5000 } as const;
 
 /** 由 [min,max] 下限区间构造一个 lognormal 采样配置（中位数取几何中点）。 */
 function makeDwellFloorTiming(range: { min: number; max: number }): TimingConfig {
