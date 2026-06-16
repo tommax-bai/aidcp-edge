@@ -25,6 +25,8 @@ import type {
   ProfileDetailPayload,
   ActionCompletedPayload,
   PageScrollPayload,
+  NoteOpenPayload,
+  NoteClosePayload,
   InteractionLikePayload,
   InteractionCollectPayload,
   InteractionFollowPayload,
@@ -41,6 +43,7 @@ import { evalRaw, type RandomFn, type BrowseCdp } from './cdp-util.js';
 import type { DomProvider } from '../locating/engine.js';
 import {
   sampleDelay,
+  jitterAround,
   TIMING_PRESETS,
   type TimingConfig,
   createDefaultRhythm,
@@ -100,10 +103,27 @@ export interface BrowseSessionOptions {
   rhythmTotal?: number;
   /** 日志（默认 console） */
   logger?: (msg: string) => void;
+  /** 单调时钟（注入便于测试；用于详情页停留时长统计），默认 Date.now */
+  now?: () => number;
+  /**
+   * 详情页最小停留下限区间（毫秒）——缺指令 / 断连兜底用，**非零延迟**。
+   * 默认 {min:1200,max:2600}；可由 session.budget.pacing.dwellFloorMs 覆盖。
+   */
+  dwellFloorMs?: { min: number; max: number };
 }
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** 详情页停留下限默认区间（与云端 buildPacingDefaults 同口径）。 */
+const DEFAULT_DWELL_FLOOR_MS = { min: 1200, max: 2600 } as const;
+
+/** 由 [min,max] 下限区间构造一个 lognormal 采样配置（中位数取几何中点）。 */
+function makeDwellFloorTiming(range: { min: number; max: number }): TimingConfig {
+  const lo = Math.max(1, Math.min(range.min, range.max));
+  const hi = Math.max(lo, Math.max(range.min, range.max));
+  return { mu: Math.log(Math.sqrt(lo * hi)), sigma: 0.25, min: lo, max: hi };
 }
 
 const DEFAULT_EXPLORE_URL = 'https://www.xiaohongshu.com/explore';
@@ -123,6 +143,11 @@ export class BrowseSession {
   private readonly rhythm: SessionRhythm;
   private readonly rhythmTotal: number;
   private readonly logger: (msg: string) => void;
+  private readonly now: () => number;
+  /** 详情页停留下限配置（lognormal，落在 [min,max]） */
+  private dwellFloorTiming: TimingConfig;
+  /** 当前详情页打开时刻（单调时钟）；无打开的详情页时为 null。 */
+  private noteOpenedAt: number | null = null;
   private processed = 0;
 
   /** 命令队列：外部通过 onCloudCommand() 推入，loop() 消费 */
@@ -143,6 +168,37 @@ export class BrowseSession {
     this.rhythm = options.rhythm ?? createDefaultRhythm();
     this.rhythmTotal = options.rhythmTotal ?? DEFAULT_RHYTHM_TOTAL;
     this.logger = options.logger ?? ((m) => console.log(m));
+    this.now = options.now ?? Date.now;
+    this.dwellFloorTiming = makeDwellFloorTiming(options.dwellFloorMs ?? DEFAULT_DWELL_FLOOR_MS);
+  }
+
+  /**
+   * 动作前犹豫 / 感知（time directive `thinkMs`）：围绕云端中心值叠抖动后等待。
+   * 缺 `thinkMs`（旧云端 / 自主动作）→ 不额外等待，由各动作自身的 humanPause 兜底。
+   */
+  private async thinkBefore(thinkMs?: number): Promise<void> {
+    if (!thinkMs || thinkMs <= 0) return;
+    const ms = jitterAround(thinkMs, 0.25, this.random);
+    if (ms > 0) await this.sleep(ms);
+  }
+
+  /**
+   * 返回 / 关闭详情页前确保**实际停留**达标（time directive `dwellMs`），治「无价值秒退」。
+   * - 仅当确有打开的详情页（noteOpenedAt 非空）时生效；
+   * - 中心值 = `dwellMs`（云端按内容算）或缺失时从内置下限采样，再叠抖动；
+   * - 已停留时长（含真实阅读）已达标则不叠加等待（无双重延迟）。
+   */
+  private async ensureDetailDwell(dwellMs?: number): Promise<void> {
+    if (this.noteOpenedAt == null) return;
+    const center = dwellMs && dwellMs > 0 ? dwellMs : sampleDelay(this.dwellFloorTiming, this.random);
+    const target = jitterAround(center, 0.2, this.random);
+    const elapsed = this.now() - this.noteOpenedAt;
+    const remain = target - elapsed;
+    if (remain > 0) {
+      this.logger(`[browse] 返回前兜底停留 +${Math.round(remain)}ms（目标≈${Math.round(target)}ms，已停${Math.round(elapsed)}ms）`);
+      await this.sleep(remain);
+    }
+    this.noteOpenedAt = null;
   }
 
   isRunning(): boolean {
@@ -333,13 +389,16 @@ export class BrowseSession {
         break;
       }
       case 'note.open': {
-        const payload = env.payload as { noteId?: string; index?: number; reason?: string };
+        const payload = env.payload as NoteOpenPayload;
         this.logger(`[browse] 命令: note.open (index=${payload.index}, noteId=${payload.noteId ?? '?'})`);
+        await this.thinkBefore(payload.thinkMs); // 决定打开前的犹豫（time directive）
         await this.openAndReportNote(payload.index ?? 0, payload.noteId);
         break;
       }
       case 'note.close': {
+        const payload = env.payload as NoteClosePayload;
         this.logger(`[browse] 命令: note.close`);
+        await this.ensureDetailDwell(payload.dwellMs); // 关闭前确保停留达标
         await this.safeCloseModal();
         this.deps.client.reportActionCompleted?.({ action: 'close', ok: true });
         break;
@@ -347,18 +406,21 @@ export class BrowseSession {
       case 'interaction.like': {
         const payload = env.payload as InteractionLikePayload;
         this.logger(`[browse] 命令: interaction.like (noteId=${payload.noteId})`);
+        await this.thinkBefore(payload.thinkMs); // 点赞前犹豫（time directive）
         await this.executeLikeOrCollect('like');
         break;
       }
       case 'interaction.collect': {
         const payload = env.payload as InteractionCollectPayload;
         this.logger(`[browse] 命令: interaction.collect (noteId=${payload.noteId})`);
+        await this.thinkBefore(payload.thinkMs); // 收藏前犹豫（time directive）
         await this.executeLikeOrCollect('collect');
         break;
       }
       case 'interaction.follow': {
         const payload = env.payload as InteractionFollowPayload;
         this.logger(`[browse] 命令: interaction.follow (authorId=${payload.authorId ?? '?'})`);
+        await this.thinkBefore(payload.thinkMs); // 关注前犹豫（time directive）
         await this.executeFollow();
         break;
       }
@@ -386,6 +448,8 @@ export class BrowseSession {
       case 'navigation.back': {
         const payload = env.payload as NavigationBackPayload;
         this.logger(`[browse] 命令: navigation.back (${payload.reason ?? ''}, target=${payload.targetPage ?? ''})`);
+        // 返回前确保详情页实际停留达标（治秒退）；须在关 modal 前完成。
+        await this.ensureDetailDwell(payload.dwellMs);
         await this.navigateBack(payload.targetPage);
         break;
       }
@@ -507,6 +571,8 @@ export class BrowseSession {
       return;
     }
     await this.waitForEngageBar();
+    // 记录详情页打开时刻：后续 navigation.back / note.close 据此判定实际停留是否达标（治秒退）。
+    this.noteOpenedAt = this.now();
 
     let content: import('./note-extractor.js').NoteContent;
     try {

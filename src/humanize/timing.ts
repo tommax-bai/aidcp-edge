@@ -77,3 +77,18 @@ export function sampleDelay(config: TimingConfig, random: RandomFn = defaultRand
 export function samplePreset(name: TimingPresetName, random: RandomFn = defaultRandom): number {
   return sampleDelay(TIMING_PRESETS[name], random);
 }
+
+/**
+ * 围绕一个**中心值**叠加对数正态抖动（指令级节奏 Command Pacing 的边缘抖动层）。
+ *
+ * 云端基于内容算出的 `dwellMs`/`thinkMs` 是确定性中心值；若边缘直接照用，两个账号看
+ * 同一篇笔记会停得分毫不差——这本身是指纹。本函数用 median=1.0 的乘性 lognormal 噪声
+ * （`center · exp(sigma · N(0,1))`）把它打散成带随机性的实际时长。
+ *
+ * @param centerMs 中心时长（毫秒）
+ * @param sigma 抖动分散度（默认 0.25）
+ */
+export function jitterAround(centerMs: number, sigma = 0.25, random: RandomFn = defaultRandom): number {
+  const noise = Math.exp(sigma * gaussian(random));
+  return Math.round(Math.max(0, centerMs * noise));
+}

@@ -412,3 +412,72 @@ test('browse-session: note.scroll_comments 使用 Cloud 指定的 count', async 
   assert.ok(logs.some(l => l.includes('评论区滚动完成') && l.includes('5 次')));
   assert.ok(h.completedActions.some(a => a.action === 'scroll_comments' && a.ok));
 });
+
+// ======== 指令级节奏（Command Pacing）测试 ========
+
+/** 捕获 sleep 时长 + 可控时钟的 opts。 */
+function pacingOpts(sleeps: number[], now: () => number) {
+  return {
+    random: () => 0.5, // 固定随机源 → gaussian/jitter 确定性
+    sleep: async (ms: number) => { sleeps.push(ms); },
+    logger: () => {},
+    now,
+  };
+}
+
+// dwellMs=30000 远超所有停顿预设上限（cardGap≤12000 / reading≤15000），
+// 故"> 16000 的 sleep"只可能来自详情页停留兜底，可干净隔离。
+const DWELL_SENTINEL = 30000;
+const ISOLATE = 16000;
+
+test('pacing: navigation.back 带 dwellMs 且停留不足 → 兜底停留（治秒退）', async () => {
+  const h = makeHarness();
+  const sleeps: number[] = [];
+  const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000)); // 时钟恒定 → 已停留≈0
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('navigation.back', 'b', 0, { reason: 'quality_rejected', targetPage: 'feed', dwellMs: DWELL_SENTINEL }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
+  ]);
+  assert.ok(sleeps.some((ms) => ms > ISOLATE), `应有一次≈dwellMs的兜底停留，实际: ${sleeps}`);
+});
+
+test('pacing: 真实阅读已超过 dwellMs → 不叠加等待（无双重延迟）', async () => {
+  const h = makeHarness();
+  const sleeps: number[] = [];
+  // 时钟每次调用 +40000ms：note.open 取 t0，back 时 elapsed≈40000 > 抖动后目标 → 不再补停。
+  let t = 1000;
+  const now = () => { const v = t; t += 40000; return v; };
+  const sess = new BrowseSession(h.deps, pacingOpts(sleeps, now));
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('navigation.back', 'b', 0, { reason: 'quality_rejected', targetPage: 'feed', dwellMs: DWELL_SENTINEL }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
+  ]);
+  assert.ok(!sleeps.some((ms) => ms > ISOLATE), `已读够不应再兜底停留，实际: ${sleeps}`);
+});
+
+test('pacing: navigation.back 缺 dwellMs（旧云端）仍非零停留（不秒退）', async () => {
+  const h = makeHarness();
+  const sleeps: number[] = [];
+  const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000));
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('navigation.back', 'b', 0, { reason: 'quality_rejected', targetPage: 'feed' }), // 无 dwellMs
+    makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
+  ]);
+  // 内置下限 [1200,2600] 采样后抖动 → 必有一次落在该量级的兜底停留（> 1000ms）。
+  assert.ok(sleeps.some((ms) => ms >= 1000), `缺 dwellMs 也应有内置下限兜底，实际: ${sleeps}`);
+});
+
+test('pacing: interaction.like 的 thinkMs → 执行前犹豫等待', async () => {
+  const h = makeHarness();
+  const sleeps: number[] = [];
+  const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000));
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('interaction.like', 'l', 0, { noteId: 'x', thinkMs: DWELL_SENTINEL }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
+  ]);
+  assert.ok(sleeps.some((ms) => ms > ISOLATE), `点赞前应有 thinkMs 犹豫，实际: ${sleeps}`);
+});
