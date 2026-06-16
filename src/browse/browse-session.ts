@@ -571,6 +571,8 @@ export class BrowseSession {
       return;
     }
     await this.waitForEngageBar();
+    // 正文(#detail-desc)常比 engage-bar 晚渲染：先等正文出现再抽取，避免抽到空/「标题+刚刚」。
+    await this.waitForNoteBody();
     // 记录详情页打开时刻：后续 navigation.back / note.close 据此判定实际停留是否达标（治秒退）。
     this.noteOpenedAt = this.now();
 
@@ -635,6 +637,33 @@ export class BrowseSession {
       await this.sleep(intervalMs);
     }
     this.logger('[browse] engage-bar 未在超时内出现，收藏数可能为 0');
+  }
+
+  /**
+   * 等待笔记正文（#detail-desc）渲染出实际文本再返回。
+   *
+   * 背景（实测 6/16）：正文常比 engage-bar 晚一拍渲染，过早抽取会拿到空 body，
+   * 进而回退到含"标题+发布时间"的容器、并让云端 curator 误判"空洞"。这里只盯
+   * 正文容器 `#detail-desc`（评论区也用 `.note-text`，故不以它为准）；纯图文/视频
+   * 笔记本就无正文 → 等到超时即放行（body 合法为空，不阻塞）。
+   */
+  private async waitForNoteBody(timeout = 3500, intervalMs = 250): Promise<void> {
+    const start = Date.now();
+    const expr =
+      '(function(){var d=document.querySelector("#detail-desc")||document.querySelector(".note-detail-mask .desc");return !!d && (d.textContent||"").trim().length>=3;})()';
+    while (Date.now() - start < timeout) {
+      try {
+        const res = await this.deps.cdp.send<{ result?: { value?: unknown } }>(
+          'Runtime.evaluate',
+          { expression: expr, returnByValue: true },
+        );
+        if ((res as { result?: { value?: unknown } }).result?.value === true) return;
+      } catch {
+        /* ignore，下一轮重试 */
+      }
+      await this.sleep(intervalMs);
+    }
+    this.logger('[browse] 正文未在超时内渲染（可能是纯图文/视频笔记，body 为空）');
   }
 
   /**

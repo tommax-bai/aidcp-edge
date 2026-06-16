@@ -146,12 +146,14 @@ export async function extractNoteContent(dom: DomProvider): Promise<NoteContent>
     '[class*="title"]',
     'h1',
   ]);
+  // 正文取 #detail-desc（含其下全部 .note-text 段落）。注意：评论区也用 .note-text，故
+  // 不用裸 .note-text 兜底（会抓到评论），只在 desc 容器作用域内取。
+  // 刻意不再回退 .note-content / [class*="content"]：它们会把"标题+发布时间(刚刚)"拼进 body
+  // （实测 6/16 线上抽到"标题…刚刚"即此回退所致，叠加正文懒加载未就绪）。
   const body = textOf(container, [
     '#detail-desc',
     '.desc',
-    '.note-content',
-    '[class*="desc"]',
-    '[class*="content"]',
+    '#detail-desc .note-text',
   ]);
   const author = textOf(container, [
     '.author-wrapper .name',
