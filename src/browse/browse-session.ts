@@ -87,6 +87,8 @@ export interface BrowseSessionOptions {
   actionTiming?: TimingConfig;
   /** modal 打开超时（毫秒，默认 5000） */
   modalTimeoutMs?: number;
+  /** 首屏扫描前等待 feed 卡片渲染的最长轮询时间（毫秒，默认 12000） */
+  initialScanTimeoutMs?: number;
   /** explore 页 URL（不在该页时导航过去，默认小红书 explore） */
   exploreUrl?: string;
   /** 会话节奏曲线（默认热身→正常→加速→疲劳） */
@@ -116,6 +118,7 @@ export class BrowseSession {
   private readonly cardGapTiming: TimingConfig;
   private readonly actionTiming: TimingConfig;
   private readonly modalTimeoutMs: number;
+  private readonly initialScanTimeoutMs: number;
   private readonly exploreUrl: string;
   private readonly rhythm: SessionRhythm;
   private readonly rhythmTotal: number;
@@ -135,6 +138,7 @@ export class BrowseSession {
     this.cardGapTiming = options.cardGapTiming ?? TIMING_PRESETS.cardGap;
     this.actionTiming = options.actionTiming ?? TIMING_PRESETS.action;
     this.modalTimeoutMs = options.modalTimeoutMs ?? 5000;
+    this.initialScanTimeoutMs = options.initialScanTimeoutMs ?? 12000;
     this.exploreUrl = options.exploreUrl ?? DEFAULT_EXPLORE_URL;
     this.rhythm = options.rhythm ?? createDefaultRhythm();
     this.rhythmTotal = options.rhythmTotal ?? DEFAULT_RHYTHM_TOTAL;
@@ -283,6 +287,11 @@ export class BrowseSession {
    * 所有决策由 Cloud 端做出，Edge 只负责执行。
    */
   private async loop(): Promise<void> {
+    // 首屏 feed 可能尚未水合完成（页面刚 reload / 网络慢，或本就停在 /explore 而 ensureExplore
+    // 跳过了 DOM-ready 轮询）。固定 scanDelay 后瞬时扫描会扫到空 → reportVisibleCards 静默早返回、
+    // 不发 page.cards → 云端只被 page.cards.arrived 驱动 → 两端互等死锁。
+    // 故先轮询等卡片真正渲染出来再上报；getVisibleCards 一旦有卡即返回，feed 已就绪时几乎零延迟。
+    await this.waitForVisibleCards(this.initialScanTimeoutMs);
     // 上报初始可见卡片
     await this.reportVisibleCards();
 

@@ -145,6 +145,24 @@ test('browse-session: start 后上报 page.cards', async () => {
   assert.equal(h.reportedCards[0].cards[0].title, 'A');
 });
 
+test('browse-session: 首屏 feed 延迟渲染时轮询等卡片再上报（不空报）', async () => {
+  const h = makeHarness();
+  // 模拟首屏未水合：前两次扫描为空，第三次才渲染出卡片。
+  let calls = 0;
+  h.deps.scroller = {
+    ...h.deps.scroller,
+    getVisibleCards: async () => {
+      calls++;
+      return calls >= 3 ? [CARD] : [];
+    },
+  };
+  const sess = new BrowseSession(h.deps, { ...noOpts(), initialScanTimeoutMs: 2000 });
+  await startAndPush(sess, [makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
+  // 轮询应等到卡片出现后才上报，而非首次空扫即静默返回。
+  assert.ok(h.reportedCards.length >= 1, '延迟渲染后应仍上报 page.cards');
+  assert.equal(h.reportedCards[0].cards[0].title, 'A');
+});
+
 test('browse-session: page.cards 包含 isVideo 字段', async () => {
   const videoCard: NoteCard = { position: 0, centerX: 10, centerY: 10, title: 'Video', isVideo: true };
   const h = makeHarness([videoCard]);
