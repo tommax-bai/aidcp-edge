@@ -888,27 +888,29 @@ export class BrowseSession {
    * 并兜底返回信息流不卡死。选择器需本地核对校准（见 tasks 6.5）。
    */
   private async openAuthorProfile(authorId?: string): Promise<void> {
-    const { evalRaw: evalRawFn, dispatchClick } = await import('./cdp-util.js');
+    const { evalRaw: evalRawFn } = await import('./cdp-util.js');
     try {
-      // 1) 在详情页定位作者入口。真实小红书：作者头像/名字是 a[href*="/user/profile/"]（a.link-wrapper），
-      // 点纯文字 .info/.name 不会跳转，必须点这个锚点。优先详情页作用域内的链接。
+      // 1) 在详情页定位作者主页链接 a[href*="/user/profile/"]（真实小红书 a.link-wrapper）。
+      // 合成点击不一定触发 SPA 路由跳转，故读出 href 后用 Page.navigate 直达主页
+      // （手动核对该 URL 能正常渲染 .user-interactions）。
       const probe = `(function(){
-        var sels = ['.note-detail-mask a[href*="/user/profile/"]', '.author-wrapper a[href*="/user/profile/"]', 'a[href*="/user/profile/"]', '.author-wrapper a', '.author .name'];
-        for (var i=0;i<sels.length;i++){ var el=document.querySelector(sels[i]); if(el){ var r=el.getBoundingClientRect(); if(r.width>0&&r.height>0) return JSON.stringify({x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)});}}
+        var sels = ['.note-detail-mask a[href*="/user/profile/"]', '.author-wrapper a[href*="/user/profile/"]', 'a[href*="/user/profile/"]'];
+        for (var i=0;i<sels.length;i++){ var el=document.querySelector(sels[i]); if(el){ var h=el.getAttribute('href'); if(h) return JSON.stringify({href:h}); } }
         return JSON.stringify({error:'no_author'});
       })()`;
       const raw = await evalRawFn<string>(this.deps.cdp, probe);
-      const pos = typeof raw === 'string' ? JSON.parse(raw) : { error: 'no_author' };
-      if (pos.error) {
-        this.logger('[browse] profile.open: 未找到作者入口');
+      const info = typeof raw === 'string' ? JSON.parse(raw) : { error: 'no_author' };
+      if (info.error || !info.href) {
+        this.logger('[browse] profile.open: 未找到作者主页链接');
         this.reportProfileFallback(authorId);
         return;
       }
+      const url = String(info.href).startsWith('http') ? String(info.href) : `https://www.xiaohongshu.com${info.href}`;
       await this.humanPause(this.actionTiming);
-      await dispatchClick(this.deps.cdp, pos.x, pos.y, { random: this.random });
+      await this.deps.cdp.send('Page.navigate', { url });
 
       // 2) 等待作者主页渲染
-      if (!(await this.waitForProfile(6000))) {
+      if (!(await this.waitForProfile(8000))) {
         this.logger('[browse] profile.open: 作者主页未在超时内渲染');
         this.reportProfileFallback(authorId);
         return;

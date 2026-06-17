@@ -463,7 +463,7 @@ test('browse-session: profile.open 进主页抽到资料 → reportProfileDetail
       if (method === 'Runtime.evaluate') {
         const expr = String(params.expression ?? '');
         if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
-        if (expr.includes('author-wrapper')) return { result: { value: '{"x":100,"y":200}' } } as never;
+        if (expr.includes('author-wrapper')) return { result: { value: '{"href":"/user/profile/abc123"}' } } as never;
         if (expr.includes('user-interactions')) return { result: { value: '{"authorId":"","followers":"1.2万","posts":"88"}' } } as never;
         if (expr.includes('user-page') || expr.includes('userInfo')) return { result: { value: true } } as never;
         if (expr.includes('note-item')) return { result: { value: 10 } } as never;
