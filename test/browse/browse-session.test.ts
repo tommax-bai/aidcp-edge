@@ -73,11 +73,11 @@ function makeHarness(cards: NoteCard[] = [CARD]): Harness {
         if (expr.includes('swiper-button-next')) {
           return { result: { value: true } } as never;
         }
-        // 评论区滚动动作（含 scrollBy）→ 无返回
-        if (expr.includes('scrollBy')) {
-          return { result: { value: undefined } } as never;
+        // 评论区滚动（新实现：单次 eval 内 overflow 上溯 + scrollBy + 返回 before/after）→ 模拟真实位移
+        if (expr.includes('overflowY')) {
+          return { result: { value: '{"found":true,"before":0,"after":360}' } } as never;
         }
-        // 评论区探测（含 comments-container，不含 scrollBy）→ 命中
+        // 评论区探测（旧路径兼容）
         if (expr.includes('comments-container')) {
           return { result: { value: '{"found":true}' } } as never;
         }
@@ -456,6 +456,30 @@ test('browse-session: note.scroll_comments 无评论区 → no_target', async ()
   assert.ok(act && act.ok === false && act.reason === 'no_target');
 });
 
+test('browse-session: note.scroll_comments 命中但不可滚/已到底（scrollTop 无位移）→ no_scroll（不假报成功）', async () => {
+  const h = makeHarness();
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        // 命中可滚动容器但 scrollTop 始终不变（已到底/不可滚）
+        if (expr.includes('overflowY')) return { result: { value: '{"found":true,"before":500,"after":500}' } } as never;
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.scroll_comments', 'sc3', 0, { noteId: 'n1', count: 3 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const act = h.completedActions.find(a => a.action === 'scroll_comments');
+  assert.ok(act && act.ok === false && act.reason === 'no_scroll', `应回报 no_scroll，实际 ${JSON.stringify(act)}`);
+});
+
 test('browse-session: profile.open 进主页抽到资料 → reportProfileDetail extracted:true', async () => {
   const h = makeHarness();
   h.deps.cdp = {
@@ -464,7 +488,7 @@ test('browse-session: profile.open 进主页抽到资料 → reportProfileDetail
         const expr = String(params.expression ?? '');
         if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
         if (expr.includes('author-wrapper')) return { result: { value: '{"href":"/user/profile/abc123"}' } } as never;
-        if (expr.includes('user-interactions')) return { result: { value: '{"authorId":"","followers":"1.2万","posts":"88"}' } } as never;
+        if (expr.includes('user-interactions')) return { result: { value: '{"authorId":"","followers":"1.2万","posts":"88","lc":"6707"}' } } as never;
         if (expr.includes('user-page') || expr.includes('userInfo')) return { result: { value: true } } as never;
         if (expr.includes('note-item')) return { result: { value: 10 } } as never;
         return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
@@ -482,6 +506,7 @@ test('browse-session: profile.open 进主页抽到资料 → reportProfileDetail
   assert.equal(p.extracted, true);
   assert.equal(p.followersCount, 12000, '1.2万 → 12000');
   assert.equal(p.postsCount, 88);
+  assert.equal(p.likesCollects, 6707, '获赞与收藏 6707 应被抽取并串到 payload');
   assert.equal(p.authorId, 'abc123', '无 URL id 时回退 payload authorId');
 });
 

@@ -809,25 +809,27 @@ export class BrowseSession {
   private async navigateBack(targetPage?: 'feed' | 'search'): Promise<void> {
     await this.safeCloseModal();
     await this.humanPause(this.actionTiming);
-    if (targetPage === 'search') {
+    const wantSearch = targetPage === 'search';
+    // 关键：深读链路用 Page.navigate 进作者主页，故从主页 history.back() 只会回到【可能已过期的笔记详情页
+    // (/explore/<noteId>，搜索来源 token 易失效)】——闪现小红书 404 且回不到列表。因此【当前在作者主页时
+    // 跳过 history.back，直接整页导航到目标列表】，消除 404 闪现；普通情形（笔记 modal 覆盖在列表上）
+    // history.back() 能回到列表并保住滚动位，仍优先用它。
+    const fromUrl = await this.evalUrl();
+    const onProfile = /\/user\/profile\//.test(fromUrl);
+    if (!onProfile) {
       await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
-      await this.sleep(2000);
-    } else {
-      // 'feed' 或【缺省】：云端 back_to_feed 不下发 targetPage，undefined 必须等同 feed 处理。
-      // 关键：深读链路用 Page.navigate 进作者主页，故从主页 history.back() 只能回到【笔记详情页
-      // (/explore/<noteId>)】、到不了 feed（需两次 back）；且过渡态 scroller 可能把详情页元素瞬时
-      // 误计为卡 → 只看 waitForVisibleCards 布尔值会误判"已在 feed"而跳过兜底。故【按 URL 判定是否
-      // 真在 explore feed】，不在 feed 或无卡即整页 Page.navigate(exploreUrl) 兜底——否则
-      // reportVisibleCards 扫到 0 卡静默不发 page.cards → 边端死等命令、云端死等上报 → 互等死锁。
-      await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
-      await this.sleep(800);
-      const url = await this.evalUrl();
-      const onFeed = EXPLORE_FEED_RE.test(url); // /explore（feed）；排除 /explore/<noteId>（详情页）
-      if (!onFeed || !(await this.waitForVisibleCards(4000))) {
-        await this.deps.cdp.send('Page.navigate', { url: this.exploreUrl });
-        await this.waitForCards(10000);
-        await this.waitForVisibleCards(5000);
-      }
+      await this.sleep(wantSearch ? 1200 : 800);
+    }
+    // 健康校验：必须落在【目标列表页（feed: EXPLORE_FEED_RE / search: /search_result）且有可见卡片】才算成功；
+    // 否则整页导航兜底——消除经过期笔记的 404、深读经主页回不去、以及坏页 0 卡 → reportVisibleCards 静默 →
+    // 边-云互等死锁。search 列表不可达时回退 explore feed（保证不卡死，搜索上下文交由云端续刷重建）。
+    const landed = await this.evalUrl();
+    const onTarget = wantSearch ? /\/search_result/.test(landed) : EXPLORE_FEED_RE.test(landed);
+    if (onProfile || !onTarget || !(await this.waitForVisibleCards(wantSearch ? 5000 : 8000))) {
+      if (wantSearch && !onTarget) this.logger('[browse] 搜索结果列表不可达（主页返回/页失效），回退 explore feed');
+      await this.deps.cdp.send('Page.navigate', { url: this.exploreUrl });
+      await this.waitForCards(10000);
+      await this.waitForVisibleCards(5000);
     }
     await this.reportVisibleCards();
     this.deps.client.reportActionCompleted?.({ action: 'back', ok: true });
@@ -883,34 +885,62 @@ export class BrowseSession {
   /**
    * 滚动评论区。count 由 Cloud 指定。
    *
-   * 如实回报：找不到评论区容器 → ok:false reason:'no_target'；命中 → ok:true reason:'scrolled=N'。
-   * 选择器需本地核对校准（见 tasks 5.4）。
+   * 真执行 + 如实回报（不再"命中即假报成功"）：运行时按 overflow 能力上溯定位真正可滚动的评论容器，
+   * 每次滚动记录前后 scrollTop——按实测位移回报：有位移→ok:true scrolled=N/total；命中但不可滚/已到底→
+   * ok:false no_scroll；找不到可滚动容器→ok:false no_target。间隔用 scroll 预设（~0.4-2s）而非 cardGap。
    */
   private async scrollNoteComments(_noteId: string, count: number): Promise<void> {
     try {
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
-      const probe = `(function(){
-        var c = document.querySelector('.comments-container') || document.querySelector('.comments-el')
-          || document.querySelector('.note-comment') || document.querySelector('[class*="comment-list"]')
-          || document.querySelector('[class*="commentList"]');
-        return JSON.stringify({found: !!c});
+      // 单次 eval：上溯找可滚动祖先（评论节点优先）→ 记录 before → scrollBy(instant) → 返回 before/after。
+      const scrollExpr = `(function(){
+        function scrollable(el){
+          var n = el;
+          while (n && n !== document.body && n !== document.documentElement){
+            var s = window.getComputedStyle(n);
+            if (n.scrollHeight > n.clientHeight + 4 && /(auto|scroll)/.test(s.overflowY)) return n;
+            n = n.parentElement;
+          }
+          return null;
+        }
+        var seed = document.querySelector('.comment-item, [class*="comment-item"], [class*="comment"] [class*="content"], .comments-container, [class*="comment-list"], [class*="commentList"]');
+        var c = seed ? scrollable(seed) : null;
+        if (!c) {
+          var cands = document.querySelectorAll('.note-scroller, [class*="scroller"], [class*="comment"], [class*="note-detail"] *');
+          for (var i=0;i<cands.length;i++){
+            var e=cands[i], s=window.getComputedStyle(e);
+            if (e.scrollHeight > e.clientHeight + 40 && /(auto|scroll)/.test(s.overflowY)) { c=e; break; }
+          }
+        }
+        if (!c) return JSON.stringify({found:false});
+        var before = c.scrollTop;
+        c.scrollBy({top: 360});
+        return JSON.stringify({found:true, before:before, after:c.scrollTop});
       })()`;
-      const raw = await evalRawFn<string>(this.deps.cdp, probe);
-      const info = typeof raw === 'string' ? JSON.parse(raw) : { found: false };
-      if (!info.found) {
-        this.logger('[browse] 未找到评论区容器');
+      const times = Math.max(1, count);
+      let anyFound = false;
+      let moved = 0;
+      for (let i = 0; i < times; i++) {
+        await this.humanPause(TIMING_PRESETS.scroll);
+        const raw = await evalRawFn<string>(this.deps.cdp, scrollExpr);
+        const r = typeof raw === 'string' ? JSON.parse(raw) : { found: false };
+        if (r.found) {
+          anyFound = true;
+          if (typeof r.after === 'number' && typeof r.before === 'number' && r.after > r.before) moved++;
+        }
+      }
+      if (!anyFound) {
+        this.logger('[browse] 未找到可滚动的评论区容器');
         this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: false, reason: 'no_target' });
         return;
       }
-      const times = Math.max(1, count);
-      for (let i = 0; i < times; i++) {
-        await this.humanPause(this.cardGapTiming);
-        await this.deps.cdp.send('Runtime.evaluate', {
-          expression: `(function(){ var c = document.querySelector('.comments-container') || document.querySelector('.comments-el') || document.querySelector('.note-comment') || document.querySelector('[class*="comment-list"]') || document.querySelector('[class*="commentList"]') || document.scrollingElement; if(c) c.scrollBy({top: 360, behavior: 'smooth'}); })()`,
-        });
+      if (moved === 0) {
+        this.logger(`[browse] 评论区命中但未发生位移（已到底/不可滚，0/${times}）`);
+        this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: false, reason: 'no_scroll' });
+        return;
       }
-      this.logger(`[browse] 评论区滚动完成 (${times} 次)`);
-      this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: true, reason: `scrolled=${times}` });
+      this.logger(`[browse] 评论区已滚动 ${moved}/${times} 次（实测 scrollTop 位移）`);
+      this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: true, reason: `scrolled=${moved}/${times}` });
     } catch (err) {
       this.logger(`[browse] 滚动评论失败：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: false, reason: (err as Error).message });
@@ -957,11 +987,12 @@ export class BrowseSession {
       const profile = await this.extractAuthorProfile();
       const resolvedId = profile.authorId || authorId || '';
       if (profile.extracted) {
-        this.logger(`[browse] profile.open: 作者资料 作品${profile.postsCount} 粉丝${profile.followersCount}`);
+        this.logger(`[browse] profile.open: 作者资料 粉丝${profile.followersCount} 获赞与收藏${profile.likesCollects}（作品数主页不公开）`);
         this.deps.client.reportProfileDetail?.({
           authorId: resolvedId,
           postsCount: profile.postsCount,
           followersCount: profile.followersCount,
+          likesCollects: profile.likesCollects,
           extracted: true,
         });
       } else {
@@ -980,6 +1011,7 @@ export class BrowseSession {
       authorId: authorId ?? '',
       postsCount: 0,
       followersCount: 0,
+      likesCollects: 0,
       extracted: false,
     });
   }
@@ -1005,12 +1037,12 @@ export class BrowseSession {
     return false;
   }
 
-  /** 从作者主页抽取作品数 / 粉丝数（复用 parseCount 解析中文计数）。 */
-  private async extractAuthorProfile(): Promise<{ authorId: string; postsCount: number; followersCount: number; extracted: boolean }> {
+  /** 从作者主页抽取粉丝数 / 获赞与收藏数（作品数主页不公开，恒 0）。复用 parseCount 解析中文计数。 */
+  private async extractAuthorProfile(): Promise<{ authorId: string; postsCount: number; followersCount: number; likesCollects: number; extracted: boolean }> {
     const { evalRaw: evalRawFn } = await import('./cdp-util.js');
     const js = `(function(){
       function txt(el){return (el&&el.textContent||'').replace(/\\s+/g,' ').trim();}
-      var followers=null, posts=null;
+      var followers=null, posts=null, lc=null;
       var blocks = document.querySelectorAll('.user-interactions > div, .interaction-item, [class*="userInteraction"] > div, [class*="interactionItem"]');
       for (var i=0;i<blocks.length;i++){
         var label = txt(blocks[i]);
@@ -1018,9 +1050,10 @@ export class BrowseSession {
         var num = txt(numEl);
         if (/粉丝/.test(label)) followers = num;
         if (/笔记|作品/.test(label)) posts = num;
+        if (/获赞|收藏/.test(label)) lc = num; // 获赞与收藏：主页真实提供的质量信号（不会误命中 关注/粉丝）
       }
       var idm = location.href.match(/\\/user\\/profile\\/([A-Za-z0-9]+)/);
-      return JSON.stringify({authorId: idm?idm[1]:'', followers: followers, posts: posts});
+      return JSON.stringify({authorId: idm?idm[1]:'', followers: followers, posts: posts, lc: lc});
     })()`;
     const { parseCount } = await import('./note-extractor.js');
     // Page.navigate 整页加载后 .user-interactions 数据异步晚到：轮询等出数再抽（最多 5s），
@@ -1034,11 +1067,13 @@ export class BrowseSession {
         if (info.authorId) lastId = info.authorId;
         const hasFollowers = info.followers != null && info.followers !== '';
         const hasPosts = info.posts != null && info.posts !== '';
-        if (hasFollowers || hasPosts) {
+        const hasLc = info.lc != null && info.lc !== '';
+        if (hasFollowers || hasPosts || hasLc) {
           return {
             authorId: info.authorId || '',
             postsCount: hasPosts ? parseCount(String(info.posts)) : 0,
             followersCount: hasFollowers ? parseCount(String(info.followers)) : 0,
+            likesCollects: hasLc ? parseCount(String(info.lc)) : 0,
             extracted: true,
           };
         }
@@ -1048,7 +1083,7 @@ export class BrowseSession {
       if (this.now() >= deadline) break;
       await this.sleep(500);
     }
-    return { authorId: lastId, postsCount: 0, followersCount: 0, extracted: false };
+    return { authorId: lastId, postsCount: 0, followersCount: 0, likesCollects: 0, extracted: false };
   }
 
   private async safeCloseModal(): Promise<void> {

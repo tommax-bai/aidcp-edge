@@ -434,8 +434,11 @@ export interface NoteDetailPayload {
 
 export interface ProfileDetailPayload {
   authorId: string;
+  /** 作品数：小红书主页【不公开】，恒为 0/未知——关注决策 MUST NOT 依赖此字段（保留仅为向后兼容） */
   postsCount: number;
   followersCount: number;
+  /** 获赞与收藏数（主页 .user-interactions 提供）：关注决策的真实质量信号。缺失=未抽到 */
+  likesCollects?: number;
   /** 作者资料是否成功抽取；false=进了主页但没抽到数字，供云端区分"数据缺失"与"真 0 粉丝" */
   extracted?: boolean;
 }
