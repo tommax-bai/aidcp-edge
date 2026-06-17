@@ -79,7 +79,7 @@ export function extractTags(text: string): string[] {
 }
 
 /** 在作用域内取首个命中选择器的元素文本 */
-function textOf(scope: Element, selectors: string[]): string {
+function textOf(scope: Element, selectors: readonly string[]): string {
   for (const sel of selectors) {
     const el = scope.querySelector(sel);
     const t = (el?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -104,12 +104,16 @@ function attrOf(scope: Element, selectors: string[], attr: string): string {
  */
 function countNear(scope: Element, classKeywords: string[]): number {
   const all = Array.from(scope.querySelectorAll('*')) as Element[];
-  for (const el of all) {
-    const cls = (el.getAttribute('class') || '').toLowerCase();
-    if (classKeywords.some((k) => cls.includes(k))) {
-      const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
-      const n = parseCount(t);
-      if (n > 0) return n;
+  // 按关键词优先级【两遍扫描】：先精确容器（如 like-wrapper）全扫一遍，再退松匹配（如 like 子串）。
+  // 否则 DOM 里靠前的松匹配元素（collect/comment 的 count）会抢先命中，造成 feed/detail 点赞数口径不一。
+  for (const kw of classKeywords) {
+    for (const el of all) {
+      const cls = (el.getAttribute('class') || '').toLowerCase();
+      if (cls.includes(kw)) {
+        const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        const n = parseCount(t);
+        if (n > 0) return n;
+      }
     }
   }
   return 0;
@@ -125,6 +129,24 @@ function detectLiked(scope: Element): boolean {
   }
   return false;
 }
+
+/**
+ * 笔记正文容器选择器——【渲染门 waitForNoteBody 与抽取器 extractNoteContent 共用同一份】，
+ * 避免门通过但抽取器未命中（或反之）的漂移。按优先级：#detail-desc 系列优先，再退布局变体
+ * （note-scroller / note-content 内的 .note-text/.desc 末级文本节点）。
+ * 【刻意不含】裸 `.note-content` / `[class*="content"]`：它们会把"标题+发布时间(刚刚)"拼进正文
+ * （假阳性，f8712f5 实测根因）。变体一律下钻到 .note-text/.desc，既救回长文布局变体（治假阴性）
+ * 又不泄漏标题。
+ */
+export const NOTE_BODY_SELECTORS: readonly string[] = [
+  '#detail-desc',
+  '.note-detail-mask .desc',
+  '.desc',
+  '#detail-desc .note-text',
+  '.note-scroller .note-text',
+  '[class*="note-content"] .note-text',
+  '[class*="note-content"] .desc',
+];
 
 /**
  * 从当前打开的 modal 中提取笔记内容。
@@ -146,15 +168,10 @@ export async function extractNoteContent(dom: DomProvider): Promise<NoteContent>
     '[class*="title"]',
     'h1',
   ]);
-  // 正文取 #detail-desc（含其下全部 .note-text 段落）。注意：评论区也用 .note-text，故
-  // 不用裸 .note-text 兜底（会抓到评论），只在 desc 容器作用域内取。
-  // 刻意不再回退 .note-content / [class*="content"]：它们会把"标题+发布时间(刚刚)"拼进 body
-  // （实测 6/16 线上抽到"标题…刚刚"即此回退所致，叠加正文懒加载未就绪）。
-  const body = textOf(container, [
-    '#detail-desc',
-    '.desc',
-    '#detail-desc .note-text',
-  ]);
+  // 正文取共享 NOTE_BODY_SELECTORS（与渲染门 waitForNoteBody 同一份，避免漂移）。注意：评论区也用
+  // .note-text，故所有 .note-text 候选都下钻在 desc/note-scroller/note-content 容器作用域内，
+  // 不用裸 .note-text 兜底（会抓到评论），也不回退裸 .note-content / [class*="content"]（会拼进标题+时间）。
+  const body = textOf(container, NOTE_BODY_SELECTORS);
   const author = textOf(container, [
     '.author-wrapper .name',
     '.author .name',

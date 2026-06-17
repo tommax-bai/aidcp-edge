@@ -74,3 +74,39 @@ test('extractNoteContent: 无 modal 时降级整页抽取', async () => {
   assert.equal(c.title, '单页笔记');
   assert.equal(c.body, '正文');
 });
+
+// 回归 4.2 + 4.3：正文位于布局变体（note-scroller/note-content，无字面 #detail-desc）——
+// f8712f5 收紧后这类真长文会被抽空（假阴性）；拓宽 NOTE_BODY_SELECTORS 后应抽到非空且不泄漏标题。
+// 同一 fixture 验证点赞数两遍扫描：不被靠前的含 'like' 子串无关元素(entry-like-tip)抢占。
+const VARIANT_LAYOUT_HTML = `
+  <div class="note-detail-mask">
+    <div class="note-container">
+      <div class="title">长文测评：这款相机到底值不值</div>
+      <div class="note-scroller">
+        <div class="note-content">
+          <span class="note-text">说实话用了三个月，成像非常惊艳，续航也够用，强烈推荐给入门玩家。</span>
+        </div>
+      </div>
+      <div class="author-wrapper"><span class="name">器材老饕</span></div>
+      <div class="footer">
+        <span class="entry-like-tip">999</span>
+        <span class="comment-wrapper">88</span>
+        <span class="collect-wrapper">66</span>
+        <span class="like-wrapper">123</span>
+      </div>
+    </div>
+  </div>`;
+
+test('extractNoteContent: 布局变体(note-scroller/note-content，无 #detail-desc) 正文仍抽到非空且不泄漏标题', async () => {
+  const c = await extractNoteContent(domProviderFrom(VARIANT_LAYOUT_HTML));
+  assert.match(c.body, /成像非常惊艳/, '布局变体下正文应抽到非空');
+  assert.ok(!c.body.includes('刚刚'), '正文不应混入发布时间"刚刚"');
+  assert.ok(!c.body.startsWith('长文测评'), '正文不应以标题开头（无标题泄漏）');
+});
+
+test('countNear(点赞数): 两遍扫描优先 like-wrapper 精确容器，不被含 like 子串的无关元素抢占', async () => {
+  const c = await extractNoteContent(domProviderFrom(VARIANT_LAYOUT_HTML));
+  assert.equal(c.likes, 123, 'likes 应取 like-wrapper(123)，而非靠前的 entry-like-tip(999)');
+  assert.equal(c.collects, 66);
+  assert.equal(c.comments, 88);
+});

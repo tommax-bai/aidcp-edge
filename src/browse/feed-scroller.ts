@@ -102,7 +102,9 @@ const CARD_SCAN_JS = `(function(){
       if (a) title = a.getAttribute('title') || undefined;
     }
     var author = txt(el, ['.author', '[class*="author"]', '[class*="name"]']);
-    var likes = txt(el, ['.like-wrapper', '[class*="like"] [class*="count"]', '[class*="count"]']);
+    // 点赞数仅取 like 作用域内的计数：去掉贪婪的裸 [class*="count"] 末位兜底（它会抓到
+    // 收藏/评论/分享的 count，造成 feed 卡与详情页点赞数口径不一）。宁可取空也不取错。
+    var likes = txt(el, ['.like-wrapper', '[class*="like-wrapper"]', '[class*="like"] [class*="count"]']);
     var isVideo = !!(el.querySelector('.play-icon') || el.querySelector('[class*="play-icon"]') || el.querySelector('video'));
     // 提取真实 noteId（从卡片的 /explore/<id> 链接），供云端 visited 去重；缺失则由 modal 兜底解析。
     var lk = (el.matches && el.matches('a[href*="/explore/"], a[href*="/discovery/item/"]'))

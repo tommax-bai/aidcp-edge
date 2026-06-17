@@ -39,6 +39,7 @@ import type { ActionResultPayload } from '../comm/protocol.js';
 import type { FeedScroller, NoteCard } from './feed-scroller.js';
 import type { ModalController } from './modal-controller.js';
 import type { extractNoteContent as ExtractFn } from './note-extractor.js';
+import { NOTE_BODY_SELECTORS } from './note-extractor.js';
 import { executeSearch } from './search-handler.js';
 import { evalRaw, type RandomFn, type BrowseCdp } from './cdp-util.js';
 import type { DomProvider } from '../locating/engine.js';
@@ -672,10 +673,11 @@ export class BrowseSession {
    * 正文容器 `#detail-desc`（评论区也用 `.note-text`，故不以它为准）；纯图文/视频
    * 笔记本就无正文 → 等到超时即放行（body 合法为空，不阻塞）。
    */
-  private async waitForNoteBody(timeout = 3500, intervalMs = 250): Promise<void> {
+  private async waitForNoteBody(timeout = 5500, intervalMs = 250): Promise<void> {
     const start = Date.now();
-    const expr =
-      '(function(){var d=document.querySelector("#detail-desc")||document.querySelector(".note-detail-mask .desc");return !!d && (d.textContent||"").trim().length>=3;})()';
+    // 渲染门与抽取器共用 NOTE_BODY_SELECTORS（避免门通过但抽取器未命中的漂移）。
+    const sel = JSON.stringify([...NOTE_BODY_SELECTORS]);
+    const expr = `(function(){var S=${sel};for(var i=0;i<S.length;i++){var d=document.querySelector(S[i]);if(d&&(d.textContent||'').trim().length>=3)return true;}return false;})()`;
     while (Date.now() - start < timeout) {
       try {
         const res = await this.deps.cdp.send<{ result?: { value?: unknown } }>(
@@ -688,7 +690,23 @@ export class BrowseSession {
       }
       await this.sleep(intervalMs);
     }
-    this.logger('[browse] 正文未在超时内渲染（可能是纯图文/视频笔记，body 为空）');
+    // 超时：区分「真·纯图文/视频笔记（合法无正文）」与「布局变体未命中（modal 内有正文文本但已知选择器没覆盖到，需补 NOTE_BODY_SELECTORS）」。
+    let variantMiss = false;
+    try {
+      const probe = `(function(){var c=document.querySelector('.note-scroller, [class*="note-content"], #noteContainer');return !!c && (c.textContent||'').replace(/\\s+/g,'').length>20;})()`;
+      const res = await this.deps.cdp.send<{ result?: { value?: unknown } }>(
+        'Runtime.evaluate',
+        { expression: probe, returnByValue: true },
+      );
+      variantMiss = (res as { result?: { value?: unknown } }).result?.value === true;
+    } catch {
+      /* ignore */
+    }
+    if (variantMiss) {
+      this.logger('[browse] 正文容器疑似布局变体，已知选择器未命中（body 抽空，需补 NOTE_BODY_SELECTORS）');
+    } else {
+      this.logger('[browse] 正文未在超时内渲染（可能是纯图文/视频笔记，body 为空）');
+    }
   }
 
   /**
