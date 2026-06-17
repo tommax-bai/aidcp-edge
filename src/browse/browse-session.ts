@@ -985,21 +985,33 @@ export class BrowseSession {
       var idm = location.href.match(/\\/user\\/profile\\/([A-Za-z0-9]+)/);
       return JSON.stringify({authorId: idm?idm[1]:'', followers: followers, posts: posts});
     })()`;
-    try {
-      const raw = await evalRawFn<string>(this.deps.cdp, js);
-      const info = typeof raw === 'string' ? JSON.parse(raw) : {};
-      const { parseCount } = await import('./note-extractor.js');
-      const hasFollowers = info.followers != null && info.followers !== '';
-      const hasPosts = info.posts != null && info.posts !== '';
-      return {
-        authorId: info.authorId || '',
-        postsCount: hasPosts ? parseCount(String(info.posts)) : 0,
-        followersCount: hasFollowers ? parseCount(String(info.followers)) : 0,
-        extracted: hasFollowers || hasPosts,
-      };
-    } catch {
-      return { authorId: '', postsCount: 0, followersCount: 0, extracted: false };
+    const { parseCount } = await import('./note-extractor.js');
+    // Page.navigate 整页加载后 .user-interactions 数据异步晚到：轮询等出数再抽（最多 5s），
+    // 避免"进了主页但抽到空"。
+    const deadline = this.now() + 5000;
+    let lastId = '';
+    for (;;) {
+      try {
+        const raw = await evalRawFn<string>(this.deps.cdp, js);
+        const info = typeof raw === 'string' ? JSON.parse(raw) : {};
+        if (info.authorId) lastId = info.authorId;
+        const hasFollowers = info.followers != null && info.followers !== '';
+        const hasPosts = info.posts != null && info.posts !== '';
+        if (hasFollowers || hasPosts) {
+          return {
+            authorId: info.authorId || '',
+            postsCount: hasPosts ? parseCount(String(info.posts)) : 0,
+            followersCount: hasFollowers ? parseCount(String(info.followers)) : 0,
+            extracted: true,
+          };
+        }
+      } catch {
+        /* ignore，下一轮重试 */
+      }
+      if (this.now() >= deadline) break;
+      await this.sleep(500);
     }
+    return { authorId: lastId, postsCount: 0, followersCount: 0, extracted: false };
   }
 
   private async safeCloseModal(): Promise<void> {
