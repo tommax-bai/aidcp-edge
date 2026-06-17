@@ -739,7 +739,9 @@ export class BrowseSession {
   private async executeFollow(): Promise<void> {
     try {
       const js = `(function(){
-        var selectors = ['.author-wrapper .follow-button', '.author-follow-btn', '[data-type="follow"]', '.follow-btn'];
+        // 关注按钮两种上下文：笔记 modal 内 .author-wrapper .follow-button；作者主页 .user-info .follow-button
+        // （真实小红书主页按钮为 button.reds-button-new.follow-button）。bare .follow-button 兜底两者。
+        var selectors = ['.author-wrapper .follow-button', '.user-info .follow-button', '.user-page .follow-button', '.follow-button', '.author-follow-btn', '[data-type="follow"]', '.follow-btn'];
         for (var s of selectors) {
           var el = document.querySelector(s);
           if (el) {
