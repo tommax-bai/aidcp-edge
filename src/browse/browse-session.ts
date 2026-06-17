@@ -806,13 +806,15 @@ export class BrowseSession {
   private async browseNoteImages(_noteId: string, count: number): Promise<void> {
     try {
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
-      // 探测图片轮播：返回 {total, hasNext}
+      // 探测图片轮播：返回 {total, hasNext}。真实小红书：真图用 .swiper-slide:not(.swiper-slide-duplicate)
+      // 计数（swiper loop 会复制首尾），翻页箭头为 .arrow-controller.right（首图时左箭头带 .forbidden）。
       const probe = `(function(){
         var root = document.querySelector('.note-detail-mask') || document.querySelector('.note-container') || document;
-        var slides = root.querySelectorAll('.swiper-slide:not(.swiper-slide-duplicate), .note-slider-img, [class*="slider"] img, [class*="media"] img');
-        var total = slides ? slides.length : 0;
-        var next = root.querySelector('.swiper-button-next, .arrow-right, [class*="arrowRight"]');
-        return JSON.stringify({total: total, hasNext: !!(next && !/disabled|hidden/.test(next.className))});
+        var real = root.querySelectorAll('.swiper-slide:not(.swiper-slide-duplicate)').length;
+        var imgs = root.querySelectorAll('.note-slider-img, [class*="media"] img').length;
+        var total = real || imgs;
+        var next = root.querySelector('.arrow-controller.right, .swiper-button-next');
+        return JSON.stringify({total: total, hasNext: !!(next && !/forbidden|disabled|hidden/.test(next.className || ''))});
       })()`;
       const raw = await evalRawFn<string>(this.deps.cdp, probe);
       const info = typeof raw === 'string' ? JSON.parse(raw) : { total: 0, hasNext: false };
@@ -828,7 +830,7 @@ export class BrowseSession {
         await this.humanPause(this.cardGapTiming);
         const clicked = await evalRawFn<boolean>(
           this.deps.cdp,
-          `(function(){ var root = document.querySelector('.note-detail-mask') || document; var btn = root.querySelector('.swiper-button-next, .arrow-right, [class*="arrowRight"]'); if(btn){ btn.click(); return true; } return false; })()`,
+          `(function(){ var root = document.querySelector('.note-detail-mask') || document; var btn = root.querySelector('.arrow-controller.right, .swiper-button-next'); if(btn && !/forbidden|disabled/.test(btn.className || '')){ btn.click(); return true; } return false; })()`,
         );
         if (clicked) viewed++;
         await this.sleep(800);
@@ -888,9 +890,10 @@ export class BrowseSession {
   private async openAuthorProfile(authorId?: string): Promise<void> {
     const { evalRaw: evalRawFn, dispatchClick } = await import('./cdp-util.js');
     try {
-      // 1) 在详情页定位作者入口（头像/名字）
+      // 1) 在详情页定位作者入口。真实小红书：作者头像/名字是 a[href*="/user/profile/"]（a.link-wrapper），
+      // 点纯文字 .info/.name 不会跳转，必须点这个锚点。优先详情页作用域内的链接。
       const probe = `(function(){
-        var sels = ['.author-wrapper .info', '.author-wrapper .name', '.author-wrapper a', '.author .name', '[class*="author"] a', '[class*="authorContainer"]'];
+        var sels = ['.note-detail-mask a[href*="/user/profile/"]', '.author-wrapper a[href*="/user/profile/"]', 'a[href*="/user/profile/"]', '.author-wrapper a', '.author .name'];
         for (var i=0;i<sels.length;i++){ var el=document.querySelector(sels[i]); if(el){ var r=el.getBoundingClientRect(); if(r.width>0&&r.height>0) return JSON.stringify({x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)});}}
         return JSON.stringify({error:'no_author'});
       })()`;
