@@ -5,7 +5,7 @@ import type { FeedScroller, NoteCard } from '../../src/browse/feed-scroller.js';
 import type { ModalController } from '../../src/browse/modal-controller.js';
 import type { NoteContent } from '../../src/browse/note-extractor.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
-import { makeEnvelope, type Envelope, type NoteContentPayload, type PageCardsPayload, type ActionCompletedPayload } from '../../src/comm/protocol.js';
+import { makeEnvelope, type Envelope, type NoteContentPayload, type PageCardsPayload, type ActionCompletedPayload, type ProfileDetailPayload } from '../../src/comm/protocol.js';
 import type { PlanStep, ActionResultPayload } from '../../src/comm/protocol.js';
 
 const CARD: NoteCard = { position: 0, centerX: 10, centerY: 10, title: 'A', author: 'u', likes: '100', isVideo: false };
@@ -27,6 +27,7 @@ interface Harness {
   deps: BrowseSessionDeps;
   reportedCards: PageCardsPayload[];
   completedActions: ActionCompletedPayload[];
+  reportedProfiles: ProfileDetailPayload[];
   openedCards: number[];
   closes: number;
   steps: PlanStep[];
@@ -35,6 +36,7 @@ interface Harness {
 function makeHarness(cards: NoteCard[] = [CARD]): Harness {
   const reportedCards: PageCardsPayload[] = [];
   const completedActions: ActionCompletedPayload[] = [];
+  const reportedProfiles: ProfileDetailPayload[] = [];
   const openedCards: number[] = [];
   const steps: PlanStep[] = [];
   let closes = 0;
@@ -63,6 +65,22 @@ function makeHarness(cards: NoteCard[] = [CARD]): Harness {
         if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) {
           return { result: { value: true } } as never;
         }
+        // 图片轮播探测（含 swiper-slide）→ 命中 5 张，可翻页
+        if (expr.includes('swiper-slide')) {
+          return { result: { value: '{"total":5,"hasNext":true}' } } as never;
+        }
+        // 翻图点击（含 swiper-button-next，不含 swiper-slide）→ 点中
+        if (expr.includes('swiper-button-next')) {
+          return { result: { value: true } } as never;
+        }
+        // 评论区滚动动作（含 scrollBy）→ 无返回
+        if (expr.includes('scrollBy')) {
+          return { result: { value: undefined } } as never;
+        }
+        // 评论区探测（含 comments-container，不含 scrollBy）→ 命中
+        if (expr.includes('comments-container')) {
+          return { result: { value: '{"found":true}' } } as never;
+        }
         // note-item 查询
         if (expr.includes('note-item')) {
           return { result: { value: 10 } } as never;
@@ -81,6 +99,9 @@ function makeHarness(cards: NoteCard[] = [CARD]): Harness {
       reportedCards.push(payload);
     },
     reportNoteDetail: () => {},
+    reportProfileDetail: (payload: ProfileDetailPayload) => {
+      reportedProfiles.push(payload);
+    },
     reportActionCompleted: (payload: ActionCompletedPayload) => {
       completedActions.push(payload);
     },
@@ -107,6 +128,7 @@ function makeHarness(cards: NoteCard[] = [CARD]): Harness {
     deps,
     reportedCards,
     completedActions,
+    reportedProfiles,
     openedCards,
     get closes() {
       return closes;
@@ -364,53 +386,126 @@ test('browse-session: search.execute 命令触发搜索', async () => {
   assert.ok(calls.includes('Input.dispatchKeyEvent'), '应触发键盘输入搜索');
 });
 
-test('browse-session: note.browse_images 使用 Cloud 指定的 count', async () => {
+test('browse-session: note.browse_images 命中轮播 → 如实回报 browsed=N', async () => {
   const h = makeHarness();
-  let evalCalls = 0;
-  h.deps.cdp = {
-    send: async (method: string, params: Record<string, unknown> = {}) => {
-      if (method === 'Runtime.evaluate') {
-        evalCalls++;
-        const expr = String(params.expression ?? '');
-        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
-        if (expr.includes('swiper-wrapper')) return { result: { value: JSON.stringify({ count: 10 }) } } as never;
-        if (expr.includes('swiper-button-next')) return { result: { value: undefined } } as never;
-        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
-      }
-      return {} as never;
-    },
-  };
-  const logs: string[] = [];
-  const sess = new BrowseSession(h.deps, { ...noOpts(), logger: (m) => logs.push(m) });
+  const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
     makeEnvelope('note.browse_images', 'bi1', 0, { noteId: 'n1', count: 4 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
-  assert.ok(logs.some(l => l.includes('浏览了 4 张图片')), '应浏览 Cloud 指定的 4 张');
-  assert.ok(h.completedActions.some(a => a.action === 'browse_images' && a.ok));
+  const act = h.completedActions.find(a => a.action === 'browse_images');
+  assert.ok(act && act.ok, '命中轮播应 ok:true');
+  assert.match(String(act!.reason ?? ''), /browsed=/, '应回报实际浏览张数');
 });
 
-test('browse-session: note.scroll_comments 使用 Cloud 指定的 count', async () => {
+test('browse-session: note.browse_images 无轮播 → no_target 不假报成功', async () => {
   const h = makeHarness();
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
       if (method === 'Runtime.evaluate') {
         const expr = String(params.expression ?? '');
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        if (expr.includes('swiper-slide')) return { result: { value: '{"total":0,"hasNext":false}' } } as never;
         if (expr.includes('note-item')) return { result: { value: 10 } } as never;
-        if (expr.includes('comments-container') || expr.includes('note-comment')) return { result: { value: 'ok' } } as never;
         return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
       }
       return {} as never;
     },
   };
-  const logs: string[] = [];
-  const sess = new BrowseSession(h.deps, { ...noOpts(), logger: (m) => logs.push(m) });
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.browse_images', 'bi2', 0, { noteId: 'n1', count: 3 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const act = h.completedActions.find(a => a.action === 'browse_images');
+  assert.ok(act && act.ok === false && act.reason === 'no_target', '无轮播应 ok:false reason:no_target');
+});
+
+test('browse-session: note.scroll_comments 命中评论区 → 如实回报 scrolled=N', async () => {
+  const h = makeHarness();
+  const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
     makeEnvelope('note.scroll_comments', 'sc1', 0, { noteId: 'n1', count: 5 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
-  assert.ok(logs.some(l => l.includes('评论区滚动完成') && l.includes('5 次')));
-  assert.ok(h.completedActions.some(a => a.action === 'scroll_comments' && a.ok));
+  const act = h.completedActions.find(a => a.action === 'scroll_comments');
+  assert.ok(act && act.ok, '命中评论区应 ok:true');
+  assert.match(String(act!.reason ?? ''), /scrolled=5/);
+});
+
+test('browse-session: note.scroll_comments 无评论区 → no_target', async () => {
+  const h = makeHarness();
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        if (expr.includes('comments-container')) return { result: { value: '{"found":false}' } } as never;
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.scroll_comments', 'sc2', 0, { noteId: 'n1', count: 3 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const act = h.completedActions.find(a => a.action === 'scroll_comments');
+  assert.ok(act && act.ok === false && act.reason === 'no_target');
+});
+
+test('browse-session: profile.open 进主页抽到资料 → reportProfileDetail extracted:true', async () => {
+  const h = makeHarness();
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        if (expr.includes('author-wrapper')) return { result: { value: '{"x":100,"y":200}' } } as never;
+        if (expr.includes('user-interactions')) return { result: { value: '{"authorId":"","followers":"1.2万","posts":"88"}' } } as never;
+        if (expr.includes('user-page') || expr.includes('userInfo')) return { result: { value: true } } as never;
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('profile.open', 'po1', 0, { authorId: 'abc123' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.equal(h.reportedProfiles.length, 1, '应上报一次 profile.detail');
+  const p = h.reportedProfiles[0];
+  assert.equal(p.extracted, true);
+  assert.equal(p.followersCount, 12000, '1.2万 → 12000');
+  assert.equal(p.postsCount, 88);
+  assert.equal(p.authorId, 'abc123', '无 URL id 时回退 payload authorId');
+});
+
+test('browse-session: profile.open 找不到作者入口 → 上报 extracted:false（保守兜底）', async () => {
+  const h = makeHarness();
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        if (expr.includes('author-wrapper')) return { result: { value: '{"error":"no_author"}' } } as never;
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('profile.open', 'po2', 0, { authorId: 'abc123' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.equal(h.reportedProfiles.length, 1);
+  assert.equal(h.reportedProfiles[0].extracted, false, '抽取失败应 extracted:false');
 });
 
 // ======== 指令级节奏（Command Pacing）测试 ========

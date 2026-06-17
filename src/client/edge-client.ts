@@ -304,7 +304,8 @@ export class EdgeClient {
       env.type === 'interaction.follow' ||
       env.type === 'navigation.back' ||
       env.type === 'note.browse_images' ||
-      env.type === 'note.scroll_comments'
+      env.type === 'note.scroll_comments' ||
+      env.type === 'profile.open'
     ) {
       this.browseHandler?.(env);
       return;

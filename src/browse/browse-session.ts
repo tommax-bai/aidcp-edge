@@ -33,6 +33,7 @@ import type {
   NavigationBackPayload,
   NoteBrowseImagesPayload,
   NoteScrollCommentsPayload,
+  ProfileOpenPayload,
 } from '../comm/protocol.js';
 import type { ActionResultPayload } from '../comm/protocol.js';
 import type { FeedScroller, NoteCard } from './feed-scroller.js';
@@ -457,6 +458,7 @@ export class BrowseSession {
         const payload = env.payload as NoteBrowseImagesPayload;
         const count = payload.count ?? 3;
         this.logger(`[browse] 命令: note.browse_images (noteId=${payload.noteId}, count=${count})`);
+        await this.thinkBefore(payload.thinkMs);
         await this.browseNoteImages(payload.noteId, count);
         break;
       }
@@ -464,7 +466,15 @@ export class BrowseSession {
         const payload = env.payload as NoteScrollCommentsPayload;
         const count = payload.count ?? 3;
         this.logger(`[browse] 命令: note.scroll_comments (noteId=${payload.noteId}, count=${count})`);
+        await this.thinkBefore(payload.thinkMs);
         await this.scrollNoteComments(payload.noteId, count);
+        break;
+      }
+      case 'profile.open': {
+        const payload = env.payload as ProfileOpenPayload;
+        this.logger(`[browse] 命令: profile.open (authorId=${payload.authorId ?? '?'})`);
+        await this.thinkBefore(payload.thinkMs);
+        await this.openAuthorProfile(payload.authorId);
         break;
       }
       case 'plan.response': {
@@ -788,30 +798,43 @@ export class BrowseSession {
 
   /**
    * 浏览笔记图片。count 由 Cloud 指定。
+   *
+   * 如实回报（不再用 `count||1` 兜底假报成功）：找不到图片轮播 → ok:false reason:'no_target'；
+   * 命中 → ok:true reason:'browsed=N'（N 为实际浏览张数）。选择器对照真实小红书详情页 DOM，
+   * 需本地核对校准（见 tasks 5.4）。
    */
   private async browseNoteImages(_noteId: string, count: number): Promise<void> {
     try {
-      const js = `(function(){
-        var swiper = document.querySelector('.swiper-wrapper') || document.querySelector('.note-slider');
-        if (!swiper) return JSON.stringify({count: 0});
-        var slides = swiper.querySelectorAll('.swiper-slide, img');
-        return JSON.stringify({count: slides.length});
-      })()`;
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
-      const raw = await evalRawFn<string>(this.deps.cdp, js);
-      const info = typeof raw === 'string' ? JSON.parse(raw) : { count: 0 };
-      const available = info.count || 1;
-      const browseCount = Math.min(count, available);
-      // 模拟逐张浏览图片（点击下一张按钮或滑动）
-      for (let i = 1; i < browseCount; i++) {
+      // 探测图片轮播：返回 {total, hasNext}
+      const probe = `(function(){
+        var root = document.querySelector('.note-detail-mask') || document.querySelector('.note-container') || document;
+        var slides = root.querySelectorAll('.swiper-slide:not(.swiper-slide-duplicate), .note-slider-img, [class*="slider"] img, [class*="media"] img');
+        var total = slides ? slides.length : 0;
+        var next = root.querySelector('.swiper-button-next, .arrow-right, [class*="arrowRight"]');
+        return JSON.stringify({total: total, hasNext: !!(next && !/disabled|hidden/.test(next.className))});
+      })()`;
+      const raw = await evalRawFn<string>(this.deps.cdp, probe);
+      const info = typeof raw === 'string' ? JSON.parse(raw) : { total: 0, hasNext: false };
+      const total = Number(info.total) || 0;
+      if (total <= 0) {
+        this.logger('[browse] 未找到图片轮播，无图可浏览');
+        this.deps.client.reportActionCompleted?.({ action: 'browse_images', ok: false, reason: 'no_target' });
+        return;
+      }
+      const target = Math.max(1, Math.min(count, total));
+      let viewed = 1;
+      for (let i = 1; i < target; i++) {
         await this.humanPause(this.cardGapTiming);
-        await this.deps.cdp.send('Runtime.evaluate', {
-          expression: `(function(){ var btn = document.querySelector('.swiper-button-next, .next-btn'); if(btn) btn.click(); })()`
-        });
+        const clicked = await evalRawFn<boolean>(
+          this.deps.cdp,
+          `(function(){ var root = document.querySelector('.note-detail-mask') || document; var btn = root.querySelector('.swiper-button-next, .arrow-right, [class*="arrowRight"]'); if(btn){ btn.click(); return true; } return false; })()`,
+        );
+        if (clicked) viewed++;
         await this.sleep(800);
       }
-      this.logger(`[browse] 浏览了 ${browseCount} 张图片`);
-      this.deps.client.reportActionCompleted?.({ action: 'browse_images', ok: true });
+      this.logger(`[browse] 浏览了 ${viewed}/${total} 张图片`);
+      this.deps.client.reportActionCompleted?.({ action: 'browse_images', ok: true, reason: `browsed=${viewed}` });
     } catch (err) {
       this.logger(`[browse] 浏览图片失败：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action: 'browse_images', ok: false, reason: (err as Error).message });
@@ -820,34 +843,157 @@ export class BrowseSession {
 
   /**
    * 滚动评论区。count 由 Cloud 指定。
+   *
+   * 如实回报：找不到评论区容器 → ok:false reason:'no_target'；命中 → ok:true reason:'scrolled=N'。
+   * 选择器需本地核对校准（见 tasks 5.4）。
    */
   private async scrollNoteComments(_noteId: string, count: number): Promise<void> {
     try {
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
-      const js = `(function(){
-        var comments = document.querySelector('.comments-container') || document.querySelector('.note-comment');
-        if (!comments) return 'no-comments';
-        comments.scrollBy({top: 300, behavior: 'smooth'});
-        return 'ok';
+      const probe = `(function(){
+        var c = document.querySelector('.comments-container') || document.querySelector('.comments-el')
+          || document.querySelector('.note-comment') || document.querySelector('[class*="comment-list"]')
+          || document.querySelector('[class*="commentList"]');
+        return JSON.stringify({found: !!c});
       })()`;
-      const result = await evalRawFn<string>(this.deps.cdp, js);
-      if (result === 'no-comments') {
+      const raw = await evalRawFn<string>(this.deps.cdp, probe);
+      const info = typeof raw === 'string' ? JSON.parse(raw) : { found: false };
+      if (!info.found) {
         this.logger('[browse] 未找到评论区容器');
-        this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: false, reason: 'no-comments' });
+        this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: false, reason: 'no_target' });
         return;
       }
-      // 按 Cloud 指定次数滚动
-      for (let i = 1; i < count; i++) {
+      const times = Math.max(1, count);
+      for (let i = 0; i < times; i++) {
         await this.humanPause(this.cardGapTiming);
         await this.deps.cdp.send('Runtime.evaluate', {
-          expression: `(function(){ var c = document.querySelector('.comments-container') || document.querySelector('.note-comment'); if(c) c.scrollBy({top: 300, behavior: 'smooth'}); })()`
+          expression: `(function(){ var c = document.querySelector('.comments-container') || document.querySelector('.comments-el') || document.querySelector('.note-comment') || document.querySelector('[class*="comment-list"]') || document.querySelector('[class*="commentList"]') || document.scrollingElement; if(c) c.scrollBy({top: 360, behavior: 'smooth'}); })()`,
         });
       }
-      this.logger(`[browse] 评论区滚动完成 (${count} 次)`);
-      this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: true });
+      this.logger(`[browse] 评论区滚动完成 (${times} 次)`);
+      this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: true, reason: `scrolled=${times}` });
     } catch (err) {
       this.logger(`[browse] 滚动评论失败：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: false, reason: (err as Error).message });
+    }
+  }
+
+  /**
+   * 进入作者主页并抽取作者资料（作品数/粉丝数），经 profile.detail 上报。
+   *
+   * 取代被静默丢弃的 open_note{type:'profile'}：点击详情页作者头像/名字进入主页、等渲染、抽数字。
+   * 抽取失败/超时仍上报（extracted:false），让云端 FollowAgent 保守 skip 而非把缺失当真 0 粉丝；
+   * 并兜底返回信息流不卡死。选择器需本地核对校准（见 tasks 6.5）。
+   */
+  private async openAuthorProfile(authorId?: string): Promise<void> {
+    const { evalRaw: evalRawFn, dispatchClick } = await import('./cdp-util.js');
+    try {
+      // 1) 在详情页定位作者入口（头像/名字）
+      const probe = `(function(){
+        var sels = ['.author-wrapper .info', '.author-wrapper .name', '.author-wrapper a', '.author .name', '[class*="author"] a', '[class*="authorContainer"]'];
+        for (var i=0;i<sels.length;i++){ var el=document.querySelector(sels[i]); if(el){ var r=el.getBoundingClientRect(); if(r.width>0&&r.height>0) return JSON.stringify({x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)});}}
+        return JSON.stringify({error:'no_author'});
+      })()`;
+      const raw = await evalRawFn<string>(this.deps.cdp, probe);
+      const pos = typeof raw === 'string' ? JSON.parse(raw) : { error: 'no_author' };
+      if (pos.error) {
+        this.logger('[browse] profile.open: 未找到作者入口');
+        this.reportProfileFallback(authorId);
+        return;
+      }
+      await this.humanPause(this.actionTiming);
+      await dispatchClick(this.deps.cdp, pos.x, pos.y, { random: this.random });
+
+      // 2) 等待作者主页渲染
+      if (!(await this.waitForProfile(6000))) {
+        this.logger('[browse] profile.open: 作者主页未在超时内渲染');
+        this.reportProfileFallback(authorId);
+        return;
+      }
+
+      // 3) 抽取作者资料
+      const profile = await this.extractAuthorProfile();
+      const resolvedId = profile.authorId || authorId || '';
+      if (profile.extracted) {
+        this.logger(`[browse] profile.open: 作者资料 作品${profile.postsCount} 粉丝${profile.followersCount}`);
+        this.deps.client.reportProfileDetail?.({
+          authorId: resolvedId,
+          postsCount: profile.postsCount,
+          followersCount: profile.followersCount,
+          extracted: true,
+        });
+      } else {
+        this.logger('[browse] profile.open: 进了主页但未抽到作品/粉丝数');
+        this.reportProfileFallback(resolvedId);
+      }
+    } catch (err) {
+      this.logger(`[browse] profile.open 失败：${(err as Error).message}`);
+      this.reportProfileFallback(authorId);
+    }
+  }
+
+  /** 作者资料不可用时上报 extracted:false，供云端区分"数据缺失"与"真 0 粉丝"。 */
+  private reportProfileFallback(authorId?: string): void {
+    this.deps.client.reportProfileDetail?.({
+      authorId: authorId ?? '',
+      postsCount: 0,
+      followersCount: 0,
+      extracted: false,
+    });
+  }
+
+  /** 轮询等待作者主页渲染（URL 含 /user/profile/ 或主页 DOM 出现）。 */
+  private async waitForProfile(timeout: number): Promise<boolean> {
+    const { evalRaw: evalRawFn } = await import('./cdp-util.js');
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      try {
+        const url = await this.evalUrl();
+        if (url.includes('/user/profile/')) return true;
+        const hasDom = await evalRawFn<boolean>(
+          this.deps.cdp,
+          `!!document.querySelector('.user-page, .user-info, [class*="userPage"], [class*="userInfo"]')`,
+        );
+        if (hasDom === true) return true;
+      } catch {
+        /* ignore，下一轮重试 */
+      }
+      await this.sleep(400);
+    }
+    return false;
+  }
+
+  /** 从作者主页抽取作品数 / 粉丝数（复用 parseCount 解析中文计数）。 */
+  private async extractAuthorProfile(): Promise<{ authorId: string; postsCount: number; followersCount: number; extracted: boolean }> {
+    const { evalRaw: evalRawFn } = await import('./cdp-util.js');
+    const js = `(function(){
+      function txt(el){return (el&&el.textContent||'').replace(/\\s+/g,' ').trim();}
+      var followers=null, posts=null;
+      var blocks = document.querySelectorAll('.user-interactions > div, .interaction-item, [class*="userInteraction"] > div, [class*="interactionItem"]');
+      for (var i=0;i<blocks.length;i++){
+        var label = txt(blocks[i]);
+        var numEl = blocks[i].querySelector('.count, [class*="count"]') || blocks[i];
+        var num = txt(numEl);
+        if (/粉丝/.test(label)) followers = num;
+        if (/笔记|作品/.test(label)) posts = num;
+      }
+      var idm = location.href.match(/\\/user\\/profile\\/([A-Za-z0-9]+)/);
+      return JSON.stringify({authorId: idm?idm[1]:'', followers: followers, posts: posts});
+    })()`;
+    try {
+      const raw = await evalRawFn<string>(this.deps.cdp, js);
+      const info = typeof raw === 'string' ? JSON.parse(raw) : {};
+      const { parseCount } = await import('./note-extractor.js');
+      const hasFollowers = info.followers != null && info.followers !== '';
+      const hasPosts = info.posts != null && info.posts !== '';
+      return {
+        authorId: info.authorId || '',
+        postsCount: hasPosts ? parseCount(String(info.posts)) : 0,
+        followersCount: hasFollowers ? parseCount(String(info.followers)) : 0,
+        extracted: hasFollowers || hasPosts,
+      };
+    } catch {
+      return { authorId: '', postsCount: 0, followersCount: 0, extracted: false };
     }
   }
 
