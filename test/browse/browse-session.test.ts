@@ -576,3 +576,72 @@ test('pacing: interaction.like 的 thinkMs → 执行前犹豫等待', async () 
   ]);
   assert.ok(sleeps.some((ms) => ms > ISOLATE), `点赞前应有 thinkMs 犹豫，实际: ${sleeps}`);
 });
+
+// 回归：云端 back_to_feed 实际下发的 navigation.back【不带 targetPage】（生产路径）。
+// 修复前 undefined 落进 else 分支（裸 history.back + 固定 sleep + 瞬时扫描），feed 未水合即扫到
+// 0 卡 → reportVisibleCards 静默不发 page.cards → 边端死等命令、云端死等上报 → 边-云互等死锁。
+// 修复后 undefined 等同 'feed'：走 waitForVisibleCards 轮询，等水合出卡再上报。
+test('browse-session: navigation.back 无 targetPage（back_to_feed 生产路径）轮询等水合再上报，不静默死锁', async () => {
+  const h = makeHarness();
+  const origSend = h.deps.cdp.send;
+  let wentBack = false;
+  let pollsAfterBack = 0;
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate' && String(params.expression ?? '').includes('history.back()')) {
+        wentBack = true;
+      }
+      return origSend(method, params);
+    },
+  };
+  // 初始扫描有卡；back 之后模拟 feed 延迟水合：前 3 次轮询为空，之后才出卡。
+  h.deps.scroller = {
+    ...h.deps.scroller,
+    getVisibleCards: async () => {
+      if (!wentBack) return [CARD];
+      pollsAfterBack++;
+      return pollsAfterBack <= 3 ? [] : [CARD];
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed' }), // 无 targetPage：复刻云端实际报文
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.ok(
+    h.completedActions.some((a) => a.action === 'back' && a.ok),
+    'navigation.back 应回报 action.completed{back, ok:true}',
+  );
+  // 关键断言：back 后必须等水合再上报 page.cards（初始 1 次 + back 后 1 次）。
+  // 修复前 else 分支瞬时扫到 0 卡会静默 → 只会有 1 次 → 此断言失败。
+  assert.ok(
+    h.reportedCards.length >= 2,
+    `back 后应轮询等水合再上报 page.cards（不静默），实际上报 ${h.reportedCards.length} 次`,
+  );
+});
+
+// 回归：启动时若 Chrome 停在【笔记详情页 /explore/<noteId>】（上一会话残留），
+// 松判断 url.includes('/explore') 会误当"已在 feed"→ 扫详情页 modal 0 卡 → 静默死锁。
+// 严格判定后必须导航回 feed。
+test('browse-session: 启动停在笔记详情页(/explore/<id>) → ensureExplore 严格判定并导航回 feed', async () => {
+  const h = makeHarness();
+  const navIed: string[] = [];
+  const origSend = h.deps.cdp.send;
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Page.navigate') navIed.push(String(params.url ?? ''));
+      if (method === 'Runtime.evaluate' && String(params.expression ?? '') === 'location.href') {
+        // 模拟启动时停在笔记详情页（而非 feed 列表）
+        return { result: { value: 'https://www.xiaohongshu.com/explore/abc123?xsec_token=x' } } as never;
+      }
+      return origSend(method, params);
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
+  // 应发出一次到 feed 的 Page.navigate（/explore 列表，而非 /explore/<id> 详情）。
+  assert.ok(
+    navIed.some((u) => u.includes('/explore') && !/\/explore\/[A-Za-z0-9]/.test(u)),
+    `详情页启动应导航回 feed，实际 Page.navigate: ${JSON.stringify(navIed)}`,
+  );
+});

@@ -128,6 +128,12 @@ function makeDwellFloorTiming(range: { min: number; max: number }): TimingConfig
 }
 
 const DEFAULT_EXPLORE_URL = 'https://www.xiaohongshu.com/explore';
+/**
+ * explore feed 页 URL 判定：匹配 /explore（feed 列表），【排除 /explore/<noteId>（笔记详情页）】。
+ * 用于 ensureExplore（启动）与 navigateBack（back_to_feed）统一判定是否真在 feed——
+ * 历史上松判断 `url.includes('/explore')` 会把详情页误当 feed，导致扫不到卡 → 静默 → 边-云互等死锁。
+ */
+const EXPLORE_FEED_RE = /\/explore\/?(\?|#|$)/;
 const DEFAULT_RHYTHM_TOTAL = 60;
 
 /** 浏览会话（命令驱动模式） */
@@ -291,8 +297,12 @@ export class BrowseSession {
     } catch {
       url = '';
     }
-    if (!url.includes('/explore') && !url.includes('/search')) {
-      this.logger(`[browse] 不在 explore（当前 ${url || '?'}），导航到 ${this.exploreUrl}`);
+    // 严格判定：仅 feed 列表(/explore)或搜索结果(/search)算"已在位"；笔记详情页 /explore/<noteId>
+    // 不算 feed，必须导航回 feed——否则启动时若 Chrome 停在某详情页会扫不到卡 → 静默死锁。
+    const onFeed = EXPLORE_FEED_RE.test(url);
+    const onSearch = url.includes('/search');
+    if (!onFeed && !onSearch) {
+      this.logger(`[browse] 不在 explore feed（当前 ${url || '?'}），导航到 ${this.exploreUrl}`);
       await this.deps.cdp.send('Page.navigate', { url: this.exploreUrl });
       // 等待页面加载：轮询 section.note-item 出现（最多 15 秒）
       await this.waitForCards(15000);
@@ -510,7 +520,12 @@ export class BrowseSession {
    * 包含 title, author, likeCount, collectCount, isVideo, position 等完整信息供 Cloud 决策。
    */
   private async reportVisibleCards(): Promise<void> {
-    const cards = await this.deps.scroller.getVisibleCards();
+    let cards = await this.deps.scroller.getVisibleCards();
+    if (cards.length === 0) {
+      // 不立即放弃：再轮询一轮等 feed 水合（back 后 / 慢渲染），避免静默吞 0 卡 → 边-云互等死锁。
+      await this.waitForVisibleCards(3000);
+      cards = await this.deps.scroller.getVisibleCards();
+    }
     if (cards.length === 0) {
       this.logger('[browse] 无可见卡片可上报');
       return;
@@ -776,23 +791,25 @@ export class BrowseSession {
   private async navigateBack(targetPage?: 'feed' | 'search'): Promise<void> {
     await this.safeCloseModal();
     await this.humanPause(this.actionTiming);
-    if (targetPage === 'feed') {
-      // 优先 history.back()：保住 feed 滚动位与卡片顺序，避免整页重载导致卡片重新编号 → 反复开同一张。
+    if (targetPage === 'search') {
       await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
-      // 轮询等卡片真正出现（scroller 口径），而非固定 sleep 后瞬时判断——
-      // 否则 back 后 feed 没渲染完就误判为空，会让 reportVisibleCards 空报 → 云端误判 session.end。
-      if (!(await this.waitForVisibleCards(8000))) {
-        // 兜底：history.back 未恢复出卡片 → 整页重载，并再次按 scroller 口径确认
+      await this.sleep(2000);
+    } else {
+      // 'feed' 或【缺省】：云端 back_to_feed 不下发 targetPage，undefined 必须等同 feed 处理。
+      // 关键：深读链路用 Page.navigate 进作者主页，故从主页 history.back() 只能回到【笔记详情页
+      // (/explore/<noteId>)】、到不了 feed（需两次 back）；且过渡态 scroller 可能把详情页元素瞬时
+      // 误计为卡 → 只看 waitForVisibleCards 布尔值会误判"已在 feed"而跳过兜底。故【按 URL 判定是否
+      // 真在 explore feed】，不在 feed 或无卡即整页 Page.navigate(exploreUrl) 兜底——否则
+      // reportVisibleCards 扫到 0 卡静默不发 page.cards → 边端死等命令、云端死等上报 → 互等死锁。
+      await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
+      await this.sleep(800);
+      const url = await this.evalUrl();
+      const onFeed = EXPLORE_FEED_RE.test(url); // /explore（feed）；排除 /explore/<noteId>（详情页）
+      if (!onFeed || !(await this.waitForVisibleCards(4000))) {
         await this.deps.cdp.send('Page.navigate', { url: this.exploreUrl });
         await this.waitForCards(10000);
         await this.waitForVisibleCards(5000);
       }
-    } else if (targetPage === 'search') {
-      await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
-      await this.sleep(2000);
-    } else {
-      await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
-      await this.sleep(2000);
     }
     await this.reportVisibleCards();
     this.deps.client.reportActionCompleted?.({ action: 'back', ok: true });
