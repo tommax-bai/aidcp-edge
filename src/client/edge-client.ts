@@ -28,11 +28,6 @@ import {
   type RemoteAnchor,
   type NoteContentPayload,
   type PublishRequestPayload,
-  type SessionBudgetPayload,
-  type RiskCanDoPayload,
-  type RiskCanDoResultPayload,
-  type RiskRecordPayload,
-  type RiskRecordResultPayload,
   type ActionCompletedPayload,
   type PageCardsPayload,
   type NoteDetailPayload,
@@ -72,6 +67,12 @@ export interface EdgeClientOptions {
   app?: string;
   /** 能力声明 */
   capabilities?: string[];
+  /** 该边缘当前驱动的账号标识（hello 上报，用于云端风控归属与验证码定位） */
+  accountId?: string;
+  /** 人类可读机器标签（hello 上报，验证码卡片据此告诉运维去哪台机器） */
+  machineLabel?: string;
+  /** 远程桌面/可达地址（hello 上报，用于人工远程处置） */
+  remoteAddr?: string;
   /** 步骤执行器（把命令落到页面） */
   runner: StepRunner;
   /** WebSocket 工厂（默认全局 WebSocket） */
@@ -101,8 +102,10 @@ interface Pending {
 /** 边-云 WS 客户端 */
 export class EdgeClient {
   private ws?: CloudWebSocket;
-  private readonly opts: Required<Omit<EdgeClientOptions, 'app' | 'capabilities'>> &
-    Pick<EdgeClientOptions, 'app' | 'capabilities'>;
+  private readonly opts: Required<
+    Omit<EdgeClientOptions, 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr'>
+  > &
+    Pick<EdgeClientOptions, 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr'>;
   private seq = 0;
   private readonly pending = new Map<string, Pending>();
   private sessionId?: string;
@@ -116,6 +119,9 @@ export class EdgeClient {
       edgeId: options.edgeId,
       app: options.app,
       capabilities: options.capabilities,
+      accountId: options.accountId,
+      machineLabel: options.machineLabel,
+      remoteAddr: options.remoteAddr,
       runner: options.runner,
       wsFactory: options.wsFactory ?? defaultWsFactory,
       clock: options.clock ?? Date.now,
@@ -151,6 +157,9 @@ export class EdgeClient {
       edgeId: this.opts.edgeId,
       app: this.opts.app,
       capabilities: this.opts.capabilities,
+      accountId: this.opts.accountId,
+      machineLabel: this.opts.machineLabel,
+      remoteAddr: this.opts.remoteAddr,
     });
     const p = welcome.payload as { sessionId?: string };
     this.sessionId = p.sessionId;
@@ -222,20 +231,8 @@ export class EdgeClient {
     return this.request('note.content', payload, timeoutMs);
   }
 
-  async requestSessionBudget(accountId?: string): Promise<SessionBudgetPayload> {
-    const res = await this.request('session.budget.request', { accountId });
-    return res.payload as SessionBudgetPayload;
-  }
-
-  async canDo(action: RiskCanDoPayload['action'], accountId?: string): Promise<RiskCanDoResultPayload> {
-    const res = await this.request('risk.canDo', { action, accountId });
-    return res.payload as RiskCanDoResultPayload;
-  }
-
-  async recordRiskAction(action: RiskRecordPayload['action'], accountId?: string): Promise<RiskRecordResultPayload> {
-    const res = await this.request('risk.record', { action, accountId });
-    return res.payload as RiskRecordResultPayload;
-  }
+  // risk.canDo / risk.record / session.budget.request 为 reserved 通道：风控判定云端单写，
+  // 边缘不再持有互动前自判 / 自记的包装（曾在此、零调用，已随 captcha-restrict-and-interaction-gating 移除）。
 
   /** 向云端取某 actionId 的主缓存锚点（缓存命中可省一次 LLM） */
   async getAnchor(actionId: string): Promise<RemoteAnchor | null> {

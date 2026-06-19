@@ -38,6 +38,9 @@ import type {
 import type { ActionResultPayload } from '../comm/protocol.js';
 import type { FeedScroller, NoteCard } from './feed-scroller.js';
 import type { ModalController } from './modal-controller.js';
+import type { LoginModalWatcher } from './login-modal-watcher.js';
+import type { OverlayKind, OverlayMonitor } from './overlay-monitor.js';
+import { isBlockingKind } from './overlay-monitor.js';
 import type { extractNoteContent as ExtractFn } from './note-extractor.js';
 import { NOTE_BODY_SELECTORS } from './note-extractor.js';
 import { executeSearch } from './search-handler.js';
@@ -79,6 +82,18 @@ export interface BrowseSessionDeps {
   modalCtrl: ModalController;
   /** like 等 plan 步骤执行器（通常是 LikeStepRunner） */
   stepRunner: StepRunnerLike;
+  /**
+   * 登录弹窗检测器（可选，legacy 内联探测）：注入后，每条命令执行前若检测到登录浮层则暂停，
+   * 轮询等待用户登录、弹窗消失后再恢复。未注入且未注入 overlayMonitor 时闸门为 no-op（向后兼容）。
+   */
+  loginGate?: LoginModalWatcher;
+  /**
+   * 弹窗旁路监测体（可选，推荐）：注入后闸门改读其缓存状态（零 CDP）——
+   * 对 login/captcha/unknown 暂停；high-risk 动作（like/collect/follow）提交前用
+   * probeNow() 做一次 fresh 复检（验证码 fail-CLOSED，避免点进风控墙）。
+   * 同时注入 overlayMonitor 与 loginGate 时，优先用 overlayMonitor。
+   */
+  overlayMonitor?: OverlayMonitor;
 }
 
 export interface BrowseSessionOptions {
@@ -94,6 +109,8 @@ export interface BrowseSessionOptions {
   modalTimeoutMs?: number;
   /** 首屏扫描前等待 feed 卡片渲染的最长轮询时间（毫秒，默认 12000） */
   initialScanTimeoutMs?: number;
+  /** 登录弹窗闸门的轮询间隔（毫秒，默认 2000）：弹窗存在时多久复检一次 */
+  loginGatePollMs?: number;
   /** explore 页 URL（不在该页时导航过去，默认小红书 explore） */
   exploreUrl?: string;
   /** 会话节奏曲线（默认热身→正常→加速→疲劳） */
@@ -147,6 +164,9 @@ export class BrowseSession {
   private readonly actionTiming: TimingConfig;
   private readonly modalTimeoutMs: number;
   private readonly initialScanTimeoutMs: number;
+  private readonly loginGatePollMs: number;
+  /** 阻断弹窗当前是否处于"已暂停"状态（用于出现/消失各只记一次日志） */
+  private blockingOverlayActive = false;
   private readonly exploreUrl: string;
   private readonly rhythm: SessionRhythm;
   private readonly rhythmTotal: number;
@@ -172,6 +192,7 @@ export class BrowseSession {
     this.actionTiming = options.actionTiming ?? TIMING_PRESETS.action;
     this.modalTimeoutMs = options.modalTimeoutMs ?? 5000;
     this.initialScanTimeoutMs = options.initialScanTimeoutMs ?? 12000;
+    this.loginGatePollMs = options.loginGatePollMs ?? 2000;
     this.exploreUrl = options.exploreUrl ?? DEFAULT_EXPLORE_URL;
     this.rhythm = options.rhythm ?? createDefaultRhythm();
     this.rhythmTotal = options.rhythmTotal ?? DEFAULT_RHYTHM_TOTAL;
@@ -280,6 +301,16 @@ export class BrowseSession {
     }
   }
 
+  /**
+   * 队列里是否已有终止命令（session.end）在等待。
+   * 用于登录弹窗闸门：闸门暂停期间 loop 不在 waitForCommand，云端 session.end 只会进队列
+   * （commandResolver 为 null），若闸门只看 stopRequested 会永远卡住——故闸门也据此提前退出，
+   * 让 loop 取出 session.end 正常处理（治死锁）。
+   */
+  private terminatePending(): boolean {
+    return this.commandQueue.some((e) => e.type === 'session.end');
+  }
+
   /** 等待下一条云端命令（阻塞直到有命令到达或 stop） */
   private waitForCommand(): Promise<Envelope> {
     if (this.commandQueue.length > 0) {
@@ -359,6 +390,8 @@ export class BrowseSession {
     // 跳过了 DOM-ready 轮询）。固定 scanDelay 后瞬时扫描会扫到空 → reportVisibleCards 静默早返回、
     // 不发 page.cards → 云端只被 page.cards.arrived 驱动 → 两端互等死锁。
     // 故先轮询等卡片真正渲染出来再上报；getVisibleCards 一旦有卡即返回，feed 已就绪时几乎零延迟。
+    // 弹窗闸门：冷启动若停在登录/验证码浮层（含 launcher 误放行的兜底），先暂停再上报。
+    await this.waitWhileBlocked();
     await this.waitForVisibleCards(this.initialScanTimeoutMs);
     // 上报初始可见卡片
     await this.reportVisibleCards();
@@ -375,6 +408,12 @@ export class BrowseSession {
    * 每条命令执行后，相应的 handler 会上报 action.completed 或新的 page.cards/note.detail。
    */
   private async executeCommand(env: Envelope): Promise<void> {
+    // 弹窗闸门：登录/验证码/未知阻断弹窗出现时暂停一切 feed/详情操作，消失后再放行。
+    // session.end 是终止命令，必须先于闸门处理，否则弹窗会卡死会话无法停止。
+    if (env.type !== 'session.end') {
+      await this.waitWhileBlocked();
+      if (this.stopRequested) return;
+    }
     switch (env.type) {
       case 'browse.next': {
         this.logger(`[browse] 命令: browse.next`);
@@ -462,7 +501,7 @@ export class BrowseSession {
         this.logger(`[browse] 命令: navigation.back (${payload.reason ?? ''}, target=${payload.targetPage ?? ''})`);
         // 返回前确保详情页实际停留达标（治秒退）；须在关 modal 前完成。
         await this.ensureDetailDwell(payload.dwellMs);
-        await this.navigateBack(payload.targetPage);
+        await this.navigateBack(payload.targetPage, payload.reason);
         break;
       }
       case 'note.browse_images': {
@@ -740,6 +779,12 @@ export class BrowseSession {
         return;
       }
       await this.humanPause(this.actionTiming);
+      // 提交前 fresh 复检：humanPause 窗口里若弹出验证码，放弃点击（避免打进风控墙）。
+      if (await this.captchaPresentFresh()) {
+        this.logger(`[browse] ${action} 提交前复检到验证码/未知阻断弹窗，放弃点击`);
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'blocked_by_captcha' });
+        return;
+      }
       const { dispatchClick } = await import('./cdp-util.js');
       await dispatchClick(this.deps.cdp, result.x, result.y, { random: this.random });
       // 验证：等动画后检查 SVG href 是否变为 #liked / #collected
@@ -779,7 +824,8 @@ export class BrowseSession {
           var el = document.querySelector(s);
           if (el) {
             var text = el.textContent || '';
-            if (text.includes('已关注') || text.includes('互关')) return JSON.stringify({error:'already'});
+            var pressed = el.getAttribute('aria-pressed') === 'true';
+            if (text.includes('已关注') || text.includes('互关') || pressed) return JSON.stringify({already:true});
             var r = el.getBoundingClientRect();
             if (r.width > 0 && r.height > 0) return JSON.stringify({x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2)});
           }
@@ -789,13 +835,26 @@ export class BrowseSession {
       const { evalRaw: evalRawFn, dispatchClick } = await import('./cdp-util.js');
       const raw = await evalRawFn<string>(this.deps.cdp, js);
       const result = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (result?.already) {
+        // 已关注：目标状态（已关注）本就达成 —— 良性 no-op 成功，而非失败。
+        // 以 ok:true + reason:'already_followed' 上报；云端据 reason 区分"真实新关注"（不带 reason）与"已关注 no-op"。
+        this.logger(`[browse] ✓ 已关注（无需重复关注）`);
+        this.deps.client.reportActionCompleted?.({ action: 'follow', ok: true, reason: 'already_followed' });
+        return;
+      }
       if (result?.error) {
-        const reason = result.error === 'already' ? 'already_followed' : `btn_${result.error}`;
+        const reason = `btn_${result.error}`;
         this.logger(`[browse] 关注失败: ${reason}`);
         this.deps.client.reportActionCompleted?.({ action: 'follow', ok: false, reason });
         return;
       }
       await this.humanPause(this.actionTiming);
+      // 提交前 fresh 复检：避免在验证码窗口里点关注。
+      if (await this.captchaPresentFresh()) {
+        this.logger('[browse] follow 提交前复检到验证码/未知阻断弹窗，放弃点击');
+        this.deps.client.reportActionCompleted?.({ action: 'follow', ok: false, reason: 'blocked_by_captcha' });
+        return;
+      }
       await dispatchClick(this.deps.cdp, result.x, result.y, { random: this.random });
       await this.sleep(1500);
       this.logger(`[browse] ✓ 关注成功 (${result.x}, ${result.y})`);
@@ -806,10 +865,13 @@ export class BrowseSession {
     }
   }
 
-  private async navigateBack(targetPage?: 'feed' | 'search'): Promise<void> {
+  private async navigateBack(targetPage?: 'feed' | 'search', reason?: string): Promise<void> {
     await this.safeCloseModal();
-    await this.humanPause(this.actionTiming);
     const wantSearch = targetPage === 'search';
+    // 熟悉度提速：返回到刚看过的 feed（back_to_feed）时，离页停留已由 ensureDetailDwell 治理，
+    // 返回手势不必再全量犹豫 → 用更轻的手势停顿（cardGap 量级，约 action 的 1/3，仍带抖动、非零、不秒退）。
+    const fastReturn = reason === 'back_to_feed' && !wantSearch;
+    await this.humanPause(fastReturn ? this.cardGapTiming : this.actionTiming);
     // 关键：深读链路用 Page.navigate 进作者主页，故从主页 history.back() 只会回到【可能已过期的笔记详情页
     // (/explore/<noteId>，搜索来源 token 易失效)】——闪现小红书 404 且回不到列表。因此【当前在作者主页时
     // 跳过 history.back，直接整页导航到目标列表】，消除 404 闪现；普通情形（笔记 modal 覆盖在列表上）
@@ -818,7 +880,8 @@ export class BrowseSession {
     const onProfile = /\/user\/profile\//.test(fromUrl);
     if (!onProfile) {
       await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
-      await this.sleep(wantSearch ? 1200 : 800);
+      // 熟悉 feed 已水合更快：缩短 history.back 后的固定落地等待（仍由后续 waitForVisibleCards 兜底确认卡片）。
+      await this.sleep(fastReturn ? 300 : (wantSearch ? 1200 : 800));
     }
     // 健康校验：必须落在【目标列表页（feed: EXPLORE_FEED_RE / search: /search_result）且有可见卡片】才算成功；
     // 否则整页导航兜底——消除经过期笔记的 404、深读经主页回不去、以及坏页 0 卡 → reportVisibleCards 静默 →
@@ -1094,6 +1157,74 @@ export class BrowseSession {
       }
     } catch (err) {
       this.logger(`[browse] 关闭 modal 失败：${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * 弹窗闸门：检测到阻断弹窗（登录/验证码/未知阻断）时**暂停所有操作**，轮询等其消失后恢复。
+   *
+   * - 优先读 overlayMonitor 的**缓存状态**（零 CDP、零网络）；其旁路 loop 已在并行持续判类。
+   *   未注入 overlayMonitor 时回退到 legacy loginGate.isOpen() 内联探测；两者都没有则 no-op。
+   * - 出现 / 消失各只记一次日志（blockingOverlayActive 状态翻转才打），不刷屏。
+   * - 等待期间响应 stopRequested，避免 session.end / 本地 stop 被弹窗卡死。
+   *   注意：调用方须保证 session.end 等终止命令不经过本闸门（见 executeCommand）。
+   * - captcha/unknown 的**云端上报**不在此处——由 overlayMonitor 的 onTransition 回调负责（见 main.ts），
+   *   闸门只管「停手」，与「通知」解耦。
+   */
+  private async waitWhileBlocked(): Promise<void> {
+    const monitor = this.deps.overlayMonitor;
+    const gate = this.deps.loginGate;
+    if (!monitor && !gate) return;
+    // 退出条件除 stopRequested 外，还包含"队列已有 session.end"——否则弹窗常驻时
+    // 云端 session.end 进队列却无人消费，闸门永远轮询 → 死锁（见 terminatePending 注释）。
+    while (!this.stopRequested && !this.terminatePending()) {
+      let blocked = false;
+      let kind: OverlayKind = 'none';
+      if (monitor) {
+        kind = monitor.state; // 读缓存，不打 CDP
+        blocked = isBlockingKind(kind);
+      } else if (gate) {
+        try {
+          blocked = await gate.isOpen();
+        } catch (err) {
+          // legacy 探测失败按"未弹出"处理（fail-open，与历史一致），不误暂停浏览。
+          this.logger(`[browse] 登录弹窗检测失败（按未弹出处理）：${(err as Error).message}`);
+          blocked = false;
+        }
+        kind = blocked ? 'login' : 'none';
+      }
+      if (!blocked) {
+        if (this.blockingOverlayActive) {
+          this.blockingOverlayActive = false;
+          this.logger('[browse] 阻断弹窗已消失，恢复浏览');
+        }
+        return;
+      }
+      if (!this.blockingOverlayActive) {
+        this.blockingOverlayActive = true;
+        const label = kind === 'captcha' ? '验证码' : kind === 'unknown' ? '未知阻断' : '登录';
+        this.logger(`[browse] 检测到${label}弹窗，暂停操作，等待处理…`);
+      }
+      await this.sleep(this.loginGatePollMs);
+    }
+  }
+
+  /**
+   * 高风险动作（like/collect/follow）提交前的 fresh 复检。
+   *
+   * 旁路缓存可能过期约一个 poll 周期：闸门放行后、真正点击前的 humanPause 窗口里若弹出验证码，
+   * 仅靠缓存会漏过。故在 dispatchClick 前就地再探一次：命中 captcha/unknown 即放弃点击。
+   * 复检的 CDP 失败按"有挑战"保守处理（fail-CLOSED）——错过一次点赞很便宜，点进风控墙很贵。
+   * 未注入 overlayMonitor 时恒返回 false（不改变 legacy 行为）。
+   */
+  private async captchaPresentFresh(): Promise<boolean> {
+    const monitor = this.deps.overlayMonitor;
+    if (!monitor) return false;
+    try {
+      const kind = await monitor.probeNow();
+      return kind === 'captcha' || kind === 'unknown';
+    } catch {
+      return true; // fresh 探测失败 → 保守当成有挑战，不点
     }
   }
 }

@@ -4,5 +4,7 @@ export * from './feed-scroller.js';
 export * from './card-filter.js';
 export * from './note-extractor.js';
 export * from './modal-controller.js';
+export * from './login-modal-watcher.js';
+export * from './overlay-monitor.js';
 export * from './search-handler.js';
 export * from './browse-session.js';

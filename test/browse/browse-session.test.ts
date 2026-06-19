@@ -7,6 +7,7 @@ import type { NoteContent } from '../../src/browse/note-extractor.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import { makeEnvelope, type Envelope, type NoteContentPayload, type PageCardsPayload, type ActionCompletedPayload, type ProfileDetailPayload } from '../../src/comm/protocol.js';
 import type { PlanStep, ActionResultPayload } from '../../src/comm/protocol.js';
+import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monitor.js';
 
 const CARD: NoteCard = { position: 0, centerX: 10, centerY: 10, title: 'A', author: 'u', likes: '100', isVideo: false };
 
@@ -352,6 +353,59 @@ test('browse-session: interaction.like 已点赞时上报 already_liked', async 
   assert.equal(likeResult!.reason, 'already_liked');
 });
 
+test('browse-session: interaction.follow 已关注 → 良性 no-op 成功 ok:true + already_followed（非失败）', async () => {
+  const h = makeHarness();
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        // follow 按钮探测：已关注
+        if (expr.includes('follow-button')) {
+          return { result: { value: JSON.stringify({ already: true }) } } as never;
+        }
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('interaction.follow', 'f1', 0, { authorId: 'a1' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const followResult = h.completedActions.find(a => a.action === 'follow');
+  assert.ok(followResult);
+  assert.equal(followResult!.ok, true, 'already_followed 应报良性成功，而非失败');
+  assert.equal(followResult!.reason, 'already_followed');
+});
+
+test('browse-session: interaction.follow 找不到按钮 → ok:false + btn_no-btn（真失败仍如实）', async () => {
+  const h = makeHarness();
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        if (expr.includes('follow-button')) {
+          return { result: { value: JSON.stringify({ error: 'no-btn' }) } } as never;
+        }
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('interaction.follow', 'f2', 0, { authorId: 'a1' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const followResult = h.completedActions.find(a => a.action === 'follow');
+  assert.ok(followResult);
+  assert.equal(followResult!.ok, false, '找不到按钮是真失败');
+  assert.equal(followResult!.reason, 'btn_no-btn');
+});
+
 test('browse-session: 命令在 loop 等待期间推入能被消费', async () => {
   const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());
@@ -669,4 +723,169 @@ test('browse-session: 启动停在笔记详情页(/explore/<id>) → ensureExplo
     navIed.some((u) => u.includes('/explore') && !/\/explore\/[A-Za-z0-9]/.test(u)),
     `详情页启动应导航回 feed，实际 Page.navigate: ${JSON.stringify(navIed)}`,
   );
+});
+
+// ======== 登录弹窗闸门测试 ========
+
+/** 捕获日志的 opts（用于断言暂停/恢复日志） */
+function captureOpts(logs: string[]) {
+  return {
+    random: () => 0.99,
+    sleep: async () => {},
+    logger: (m: string) => logs.push(m),
+    loginGatePollMs: 1,
+  };
+}
+
+test('登录闸门: loop 启动时检测到弹窗则暂停，弹窗消失后恢复并上报卡片', async () => {
+  const h = makeHarness();
+  const logs: string[] = [];
+  // isOpen: 前两次 true（暂停 + 一次轮询）后转 false（消失）
+  let n = 0;
+  h.deps.loginGate = { isOpen: async () => ++n <= 2 };
+  const sess = new BrowseSession(h.deps, captureOpts(logs));
+  await startAndPush(sess, [makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
+  assert.ok(logs.some((m) => m.includes('检测到登录弹窗')), '应记录暂停');
+  assert.ok(logs.some((m) => m.includes('阻断弹窗已消失，恢复浏览')), '应记录恢复');
+  assert.ok(h.reportedCards.length >= 1, '恢复后应上报 page.cards');
+});
+
+test('登录闸门: 弹窗存在时暂停 browse.next，弹窗消失后才执行滚动', async () => {
+  const h = makeHarness();
+  const logs: string[] = [];
+  let scrolled = 0;
+  h.deps.scroller = { ...h.deps.scroller, scrollNext: async () => { scrolled++; } };
+  // 调用序列：#1 loop 启动闸门→false（放行首屏上报）；#2、#3 browse.next 闸门→true（暂停）；#4→false（放行）
+  let n = 0;
+  h.deps.loginGate = { isOpen: async () => { n++; return n >= 2 && n <= 3; } };
+  const sess = new BrowseSession(h.deps, captureOpts(logs));
+  await startAndPush(sess, [
+    makeEnvelope('browse.next', 'c1', 0, {}),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.ok(logs.some((m) => m.includes('检测到登录弹窗')), '应记录暂停');
+  assert.ok(logs.some((m) => m.includes('阻断弹窗已消失，恢复浏览')), '应记录恢复');
+  assert.equal(scrolled, 1, '弹窗消失后应执行一次滚动');
+});
+
+test('登录闸门: session.end 不被弹窗阻塞（终止命令绕过闸门）', async () => {
+  const h = makeHarness();
+  const logs: string[] = [];
+  // loop 启动闸门看到 false（#1），之后恒 true：若 session.end 经过闸门会卡死
+  let n = 0;
+  h.deps.loginGate = { isOpen: async () => ++n > 1 };
+  const sess = new BrowseSession(h.deps, captureOpts(logs));
+  // 若 session.end 被闸门阻塞，下面会挂起（测试超时）；正常应立即结束。
+  await startAndPush(sess, [makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
+  assert.equal(sess.isRunning(), false, '会话应已停止');
+});
+
+test('登录闸门: 未注入 loginGate 时为 no-op（向后兼容）', async () => {
+  const h = makeHarness();
+  assert.equal(h.deps.loginGate, undefined);
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
+  assert.ok(h.reportedCards.length >= 1, '无闸门时正常上报');
+});
+
+test('登录闸门: 弹窗常驻时 cloud session.end 仍能终止会话（治死锁，回归）', async () => {
+  const h = makeHarness();
+  const logs: string[] = [];
+  // 弹窗一直在；用 setImmediate 让出事件循环，避免 instant-sleep 微任务饿死宏任务计时器。
+  h.deps.loginGate = { isOpen: () => new Promise((r) => setImmediate(() => r(true))) };
+  const sess = new BrowseSession(h.deps, {
+    random: () => 0.99,
+    sleep: async () => {},
+    logger: (m: string) => logs.push(m),
+    loginGatePollMs: 1,
+  });
+  const done = sess.start();
+  // 等 loop 进入初始闸门并暂停
+  await new Promise((r) => setTimeout(r, 20));
+  // 弹窗仍在时，loop 不在 waitForCommand —— session.end 只会进队列；闸门须据此退出。
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
+  // 有界等待：若死锁则超时失败而非挂起整个套件。
+  await Promise.race([
+    done,
+    new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('DEADLOCK: 弹窗常驻时 session.end 未能终止会话')), 2000),
+    ),
+  ]);
+  assert.equal(sess.isRunning(), false, '会话应已停止');
+  assert.ok(logs.some((m) => m.includes('检测到登录弹窗')), '应已记录暂停');
+});
+
+// ======== 弹窗旁路监测体（overlayMonitor）闸门 + 提交前复检 ========
+
+/** 可变状态的假监测体：state 由 stateSeq 控制，probeNow 返回 probe 的结果。 */
+function fakeMonitor(opts: { stateSeq?: () => OverlayKind; probe?: () => Promise<OverlayKind> }): OverlayMonitor {
+  return {
+    get state() {
+      return opts.stateSeq ? opts.stateSeq() : 'none';
+    },
+    probeNow: opts.probe ?? (async () => 'none'),
+    start() {},
+    stop() {},
+  };
+}
+
+test('overlayMonitor 闸门: state=captcha 时暂停 browse.next，翻回 none 后才滚动', async () => {
+  const h = makeHarness();
+  const logs: string[] = [];
+  let scrolled = 0;
+  h.deps.scroller = { ...h.deps.scroller, scrollNext: async () => { scrolled++; } };
+  // 读序：#1 loop 启动→none（放行首屏上报）；#2、#3 browse.next→captcha（暂停）；#4→none（放行）
+  let n = 0;
+  h.deps.overlayMonitor = fakeMonitor({ stateSeq: () => { n++; return n >= 2 && n <= 3 ? 'captcha' : 'none'; } });
+  const sess = new BrowseSession(h.deps, captureOpts(logs));
+  await startAndPush(sess, [
+    makeEnvelope('browse.next', 'c1', 0, {}),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.ok(logs.some((m) => m.includes('检测到验证码弹窗')), '应记录验证码暂停');
+  assert.ok(logs.some((m) => m.includes('阻断弹窗已消失，恢复浏览')), '应记录恢复');
+  assert.equal(scrolled, 1, '验证码消失后才滚动一次');
+});
+
+test('overlayMonitor 闸门: session.end 不被 captcha 阻塞（绕过闸门，治死锁）', async () => {
+  const h = makeHarness();
+  const logs: string[] = [];
+  let n = 0;
+  // loop 启动看到 none（#1），之后恒 captcha：若 session.end 经闸门会卡死
+  h.deps.overlayMonitor = fakeMonitor({ stateSeq: () => (++n > 1 ? 'captcha' : 'none') });
+  const sess = new BrowseSession(h.deps, captureOpts(logs));
+  await startAndPush(sess, [makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
+  assert.equal(sess.isRunning(), false, '会话应已停止');
+});
+
+test('overlayMonitor 提交前复检: like 命中 captcha → 放弃点击并上报 blocked_by_captcha', async () => {
+  const h = makeHarness();
+  let clickCount = 0;
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        if (expr.includes('like-wrapper')) {
+          return { result: { value: JSON.stringify({ x: 100, y: 200, href: '#like' }) } } as never;
+        }
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      if (method === 'Input.dispatchMouseEvent') clickCount++;
+      return {} as never;
+    },
+  };
+  // 闸门放行（state=none），但提交前 fresh 复检命中 captcha → 应放弃点击
+  h.deps.overlayMonitor = fakeMonitor({ probe: async () => 'captcha' });
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('interaction.like', 'l1', 0, { noteId: 'n1' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const likeResult = h.completedActions.find((a) => a.action === 'like');
+  assert.ok(likeResult, '应上报 like 结果');
+  assert.equal(likeResult!.ok, false);
+  assert.equal(likeResult!.reason, 'blocked_by_captcha');
+  assert.equal(clickCount, 0, '复检命中验证码时不得派发点击');
 });

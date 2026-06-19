@@ -1,0 +1,282 @@
+/**
+ * 弹窗旁路监测体（持续监测 + 状态缓存 + 翻转回调）。
+ *
+ * 设计动机（与 login-modal-watcher 的「被调才跑」内联探测相对）：
+ *  - 把「检测节奏」与「执行节奏」解耦——后台 loop 按自己的节奏(默认 1s)持续判类，
+ *    状态独立于命令到达保持新鲜，闸门只读缓存(零 CDP)；
+ *  - 把弹窗分成多类，各类的「拿不准时怎么办」与「应对动作」相反：
+ *      login    → 暂停等登录（沿用现状）
+ *      captcha  → 暂停 + 停手 + 升级（漏一次=可能封号，故 fail-CLOSED）
+ *      dismissible(运营活动) → 可关（本 PR 仅分类，关闭交后续 NuisanceDismisser）
+ *      unknown  → 可见阻断遮罩但本地未能归类 → 保守暂停 + 上报云端命名(fail-CLOSED)
+ *      none     → 放行
+ *
+ * 错误策略分两处（关键）：
+ *  - 后台 tick()：探测失败按「保持上一状态」(sticky)，不翻转——否则页面正常导航期间
+ *    Runtime.evaluate 瞬时失败会被误判为验证码，刷假告警；
+ *  - probeNow()：原样抛出，交由调用方（高风险动作提交前复检）按 fail-CLOSED 处理。
+ *
+ * 检测口径沿用项目反混淆理念：只认人类可读、跨改版稳定的语义片段（厂商 iframe host、
+ * 挑战文案、稳定语义 class），不锁混淆 class。验证码组件(数美/极验/网易易盾…)的 DOM 指纹
+ * 极稳定，故本地确定性探测召回高、误报低，无需云端 LLM 介入热路径。
+ */
+
+import type { BrowseCdp } from './cdp-util.js';
+import { evalRaw } from './cdp-util.js';
+import {
+  DEFAULT_LOGIN_CONTAINER_SELECTORS,
+  DEFAULT_LOGIN_PHRASES,
+  LOGIN_EXCLUDE_SELECTOR,
+} from './login-modal-watcher.js';
+
+/** 弹窗类别。 */
+export type OverlayKind = 'none' | 'login' | 'captcha' | 'dismissible' | 'unknown';
+
+/** 阻断浏览的类别（闸门据此暂停）：登录墙 / 验证码 / 未知阻断遮罩。 */
+export function isBlockingKind(kind: OverlayKind): boolean {
+  return kind === 'login' || kind === 'captcha' || kind === 'unknown';
+}
+
+/** 验证码/风控挑战的特征文案（命中任一即判 captcha）。 */
+export const DEFAULT_CAPTCHA_PHRASES = [
+  '安全验证',
+  '滑动验证',
+  '拖动滑块',
+  '拖动下方滑块',
+  '按住滑块拖动',
+  '按住左边滑块',
+  '向右滑动',
+  '依次点击',
+  '请完成验证',
+  '完成下方验证',
+  '点击完成验证',
+  '请按住滑块',
+  '请通过滑块验证',
+];
+
+/** 运营活动/营销弹窗的特征文案（命中 + 存在关闭按钮 → dismissible）。 */
+export const DEFAULT_DISMISSIBLE_PHRASES = [
+  '签到',
+  '领红包',
+  '立即领取',
+  '下载App',
+  '打开App',
+  '开通会员',
+  '立即开通',
+  '新人专享',
+  '限时优惠',
+  '优惠券',
+];
+
+export interface OverlayMonitorOptions {
+  /** 后台轮询间隔(ms)，默认 1000。 */
+  pollMs?: number;
+  /** 探测失败兜底类别（probeNow 抛错时由调用方决定；此处仅留扩展位）。 */
+  loginContainerSelectors?: string[];
+  loginPhrases?: string[];
+  captchaPhrases?: string[];
+  dismissiblePhrases?: string[];
+  excludeSelector?: string;
+  /** 注入 setTimeout / clearTimeout（测试可控）。 */
+  setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  clearTimer?: (h: ReturnType<typeof setTimeout>) => void;
+  /** 日志（默认不打）。 */
+  logger?: (msg: string) => void;
+}
+
+/** 弹窗监测体接口（便于在 BrowseSession 里打桩）。 */
+export interface OverlayMonitor {
+  /** 当前缓存的弹窗类别（零 CDP，供闸门读取）。 */
+  readonly state: OverlayKind;
+  /** 就地 fresh 探测一次（高风险动作提交前复检用；CDP 失败会抛）。 */
+  probeNow(): Promise<OverlayKind>;
+  /** 启动后台监测；onTransition 在类别翻转时触发一次。 */
+  start(onTransition?: (from: OverlayKind, to: OverlayKind) => void): void;
+  /** 停止后台监测（解绑定时器）。 */
+  stop(): void;
+}
+
+/**
+ * 生成「返回当前弹窗类别字符串」的判定 JS。
+ *
+ * 判定优先级（高危先判）：captcha > login > dismissible > unknown > none。
+ * 复用 login-modal-watcher 的可见性/笔记详情排除口径，避免漂移。
+ */
+export function buildClassifyOverlayJs(
+  loginSelectors: string[] = DEFAULT_LOGIN_CONTAINER_SELECTORS,
+  loginPhrases: string[] = DEFAULT_LOGIN_PHRASES,
+  captchaPhrases: string[] = DEFAULT_CAPTCHA_PHRASES,
+  dismissiblePhrases: string[] = DEFAULT_DISMISSIBLE_PHRASES,
+  excludeSelector: string = LOGIN_EXCLUDE_SELECTOR,
+): string {
+  const loginSel = loginSelectors.join(', ');
+  return `(function(){
+    var EXCLUDE = ${JSON.stringify(excludeSelector)};
+    var LOGIN_SEL = ${JSON.stringify(loginSel)};
+    var LOGIN_PHRASES = ${JSON.stringify(loginPhrases)};
+    var CAPTCHA_PHRASES = ${JSON.stringify(captchaPhrases)};
+    var DISMISS_PHRASES = ${JSON.stringify(dismissiblePhrases)};
+    // 已知验证码厂商的 iframe/script host 指纹（数美/极验/网易易盾/阿里 NC/腾讯…）。
+    var CAPTCHA_HOST = /captcha|geetest|geevisit|shumei|fengkong|yidun|dun\\.163|aliyun.*nc|nocaptcha|t\\.captcha\\.qq|aq\\.qq|vaptcha|verify/i;
+    // 可疑验证码容器 class（滑块/拼图/点选等稳定语义片段）。
+    var CAPTCHA_CLS = /(^|[^a-z])(captcha|geetest|nc[_-]|slide[_-]?(verify|wrap|track|btn)|puzzle|vaptcha|shumei|yidun|verify[_-]?(slider|wrap|bar))([^a-z]|$)/i;
+
+    function vis(el){
+      if(!el || !el.getBoundingClientRect) return false;
+      var r = el.getBoundingClientRect();
+      if(!r || r.width<=0 || r.height<=0) return false;
+      var s = window.getComputedStyle ? window.getComputedStyle(el) : null;
+      if(s && (s.display==='none' || s.visibility==='hidden' || parseFloat(s.opacity||'1')<=0.05)) return false;
+      return true;
+    }
+    function txt(el){ return ((el && el.textContent) || '').replace(/\\s+/g,''); }
+    function inNote(el){ return !!(EXCLUDE && el.closest && el.closest(EXCLUDE)); }
+    function hitsAny(s, arr){ for(var i=0;i<arr.length;i++){ if(s.indexOf(arr[i])>=0) return true; } return false; }
+    function hasClose(el){ return !!(el.querySelector && el.querySelector('.close,[class*="close"],[class*="Close"],[aria-label*="关闭"],[aria-label*="close"]')); }
+
+    // 候选遮罩/对话框集合（验证码、运营、unknown 都在这里面找）。
+    var masks = document.querySelectorAll('[class*="mask"],[class*="modal"],[role="dialog"],[aria-modal="true"],[class*="captcha"],[class*="verify"],[id*="captcha"]');
+
+    // ① 验证码：厂商 iframe host / 可疑容器 class / 挑战文案（任一命中）。
+    var iframes = document.querySelectorAll('iframe');
+    for(var i=0;i<iframes.length;i++){
+      var f=iframes[i];
+      if(!vis(f) || inNote(f)) continue;
+      var src=(f.getAttribute && f.getAttribute('src')) || f.src || '';
+      if(CAPTCHA_HOST.test(src)) return 'captcha';
+    }
+    for(var i=0;i<masks.length;i++){
+      var el=masks[i];
+      if(!vis(el) || inNote(el)) continue;
+      if(hitsAny(txt(el), CAPTCHA_PHRASES)) return 'captcha';
+      if(CAPTCHA_CLS.test((el.className && el.className.toString && el.className.toString()) || '')) return 'captcha';
+    }
+
+    // ② 登录墙（沿用 login-modal-watcher 口径）。
+    var logins = document.querySelectorAll(LOGIN_SEL);
+    for(var i=0;i<logins.length;i++){
+      var el=logins[i];
+      if(!vis(el) || inNote(el)) continue;
+      if(hitsAny(txt(el), LOGIN_PHRASES)) return 'login';
+    }
+
+    // ③ 运营活动：营销文案 且 有关闭按钮 → 可关。
+    for(var i=0;i<masks.length;i++){
+      var el=masks[i];
+      if(!vis(el) || inNote(el)) continue;
+      if(hitsAny(txt(el), DISMISS_PHRASES) && hasClose(el)) return 'dismissible';
+    }
+
+    // ④ unknown：可见、较大且 fixed/absolute 的阻断遮罩(非笔记详情)，分不出类且没有明显关闭键，
+    //    或内含未识别 iframe → 保守上报，交云端命名。口径偏保守以抑制误暂停。
+    var vw = window.innerWidth || 1024, vh = window.innerHeight || 768;
+    for(var i=0;i<masks.length;i++){
+      var el=masks[i];
+      if(!vis(el) || inNote(el)) continue;
+      var r=el.getBoundingClientRect();
+      var s = window.getComputedStyle ? window.getComputedStyle(el) : null;
+      var fixed = !!(s && (s.position==='fixed' || s.position==='absolute'));
+      var big = r.width >= vw*0.6 && r.height >= vh*0.4;
+      var hasIframe = !!(el.querySelector && el.querySelector('iframe'));
+      if(hasIframe || (big && fixed && !hasClose(el))) return 'unknown';
+    }
+
+    return 'none';
+  })()`;
+}
+
+/** 就地探测一次，返回弹窗类别（CDP 失败会抛——交调用方决定 fail 策略）。 */
+export async function classifyOverlay(
+  cdp: BrowseCdp,
+  js: string = buildClassifyOverlayJs(),
+): Promise<OverlayKind> {
+  const v = await evalRaw<string>(cdp, js);
+  return isOverlayKind(v) ? v : 'none';
+}
+
+function isOverlayKind(v: unknown): v is OverlayKind {
+  return v === 'none' || v === 'login' || v === 'captcha' || v === 'dismissible' || v === 'unknown';
+}
+
+/** 基于 CDP 的弹窗旁路监测体。 */
+export class CdpOverlayMonitor implements OverlayMonitor {
+  private _state: OverlayKind = 'none';
+  private readonly js: string;
+  private readonly pollMs: number;
+  private readonly setTimer: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  private readonly clearTimer: (h: ReturnType<typeof setTimeout>) => void;
+  private readonly logger?: (msg: string) => void;
+  private onTransition?: (from: OverlayKind, to: OverlayKind) => void;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private stopped = true;
+
+  constructor(
+    private readonly cdp: BrowseCdp,
+    options: OverlayMonitorOptions = {},
+  ) {
+    this.js = buildClassifyOverlayJs(
+      options.loginContainerSelectors ?? DEFAULT_LOGIN_CONTAINER_SELECTORS,
+      options.loginPhrases ?? DEFAULT_LOGIN_PHRASES,
+      options.captchaPhrases ?? DEFAULT_CAPTCHA_PHRASES,
+      options.dismissiblePhrases ?? DEFAULT_DISMISSIBLE_PHRASES,
+      options.excludeSelector ?? LOGIN_EXCLUDE_SELECTOR,
+    );
+    this.pollMs = options.pollMs ?? 1000;
+    this.setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+    this.clearTimer = options.clearTimer ?? ((h) => clearTimeout(h));
+    this.logger = options.logger;
+  }
+
+  get state(): OverlayKind {
+    return this._state;
+  }
+
+  /** fresh 探测（CDP 失败会抛）。 */
+  probeNow(): Promise<OverlayKind> {
+    return classifyOverlay(this.cdp, this.js);
+  }
+
+  /**
+   * 单次探测 + 状态对比 + 翻转回调。供 start 的定时器与单测复用。
+   * 探测失败按 sticky（保持上一状态、不翻转），避免页面导航期的瞬时失败刷假告警。
+   */
+  async tick(): Promise<void> {
+    let next: OverlayKind;
+    try {
+      next = await classifyOverlay(this.cdp, this.js);
+    } catch (err) {
+      this.logger?.(`[overlay] 探测失败(保持上一状态 ${this._state}): ${(err as Error).message}`);
+      return;
+    }
+    if (next !== this._state) {
+      const from = this._state;
+      this._state = next;
+      try {
+        this.onTransition?.(from, next);
+      } catch (err) {
+        this.logger?.(`[overlay] onTransition 回调异常(忽略): ${(err as Error).message}`);
+      }
+    }
+  }
+
+  start(onTransition?: (from: OverlayKind, to: OverlayKind) => void): void {
+    if (!this.stopped) return;
+    this.onTransition = onTransition;
+    this.stopped = false;
+    const loop = async (): Promise<void> => {
+      if (this.stopped) return;
+      await this.tick();
+      if (this.stopped) return;
+      this.timer = this.setTimer(() => void loop(), this.pollMs);
+    };
+    void loop();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer != null) {
+      this.clearTimer(this.timer);
+      this.timer = null;
+    }
+  }
+}

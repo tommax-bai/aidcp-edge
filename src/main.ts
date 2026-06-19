@@ -39,13 +39,20 @@ import {
   BrowseSession,
   CdpFeedScroller,
   CdpModalController,
+  CdpOverlayMonitor,
+  evalRaw,
   extractNoteContent,
+  type OverlayKind,
   type BrowseSessionOptions,
 } from './browse/index.js';
 
 async function main(): Promise<void> {
   const cloudUrl = process.env.AIDCP_CLOUD_URL ?? 'ws://121.89.85.150:8787';
   const edgeId = process.env.AIDCP_EDGE_ID ?? 'edge-local';
+  // hello 身份（用于云端风控归属与验证码定位；均可选，缺省云端安全降级）。
+  const accountId = process.env.AIDCP_ACCOUNT_ID;
+  const machineLabel = process.env.AIDCP_MACHINE_LABEL;
+  const remoteAddr = process.env.AIDCP_REMOTE_ADDR;
   const cdpHost = process.env.AIDCP_CDP_HOST ?? '127.0.0.1';
   const cdpPort = Number(process.env.AIDCP_CDP_PORT ?? 9222);
   const pageUrl = process.env.AIDCP_PAGE_URL;
@@ -74,6 +81,9 @@ async function main(): Promise<void> {
     edgeId,
     app: 'xhs',
     capabilities: ['locating', 'cdp', 'like', 'browse'],
+    ...(accountId ? { accountId } : {}),
+    ...(machineLabel ? { machineLabel } : {}),
+    ...(remoteAddr ? { remoteAddr } : {}),
     runner: {
       run: (step) => {
         if (!runner) throw new Error('runner 尚未就绪');
@@ -137,10 +147,13 @@ async function main(): Promise<void> {
 
   // —— 自动浏览会话 ——
   let browse: BrowseSession | undefined;
+  let overlayMonitor: CdpOverlayMonitor | undefined;
   const autoBrowse = process.env.AIDCP_AUTO_BROWSE !== 'false';
   if (autoBrowse) {
     const browseOpts: BrowseSessionOptions = {};
     if (process.env.AIDCP_EXPLORE_URL) browseOpts.exploreUrl = process.env.AIDCP_EXPLORE_URL;
+    // 旁路弹窗监测体：后台持续判类（登录/验证码/运营/未知），闸门读其缓存状态停手。
+    overlayMonitor = new CdpOverlayMonitor(session.cdp);
     browse = new BrowseSession(
       {
         dom: session.dom,
@@ -149,6 +162,7 @@ async function main(): Promise<void> {
         scroller: new CdpFeedScroller(session.cdp),
         noteExtractor: extractNoteContent,
         modalCtrl: new CdpModalController(session.cdp),
+        overlayMonitor,
         stepRunner: runner,
       },
       browseOpts,
@@ -167,7 +181,38 @@ async function main(): Promise<void> {
     browse.start().catch((err) => {
       console.error('[aidcp-edge] 浏览会话异常:', err);
     });
-    console.log('[aidcp-edge] 自动浏览已启动');
+
+    // 启动旁路监测：类别翻转进 captcha/unknown 时上报云端（人工升级）；离开时上报已清除。
+    // 仅 captcha/unknown 上报（login 只本地暂停、沿用现状不打扰云端）。
+    const isBlockingCloud = (k: OverlayKind): boolean => k === 'captcha' || k === 'unknown';
+    overlayMonitor.start((from, to) => {
+      if (isBlockingCloud(to) && !isBlockingCloud(from)) {
+        void (async () => {
+          let url = '';
+          try {
+            url = await evalRaw<string>(session.cdp, 'location.href');
+          } catch {
+            /* best-effort，URL 取不到不影响上报 */
+          }
+          try {
+            client.send('risk.captcha_detected', { edgeId, kind: to as 'captcha' | 'unknown', url, ...(accountId ? { accountId } : {}) });
+          } catch (err) {
+            console.error('[aidcp-edge] risk.captcha_detected 上报失败:', err);
+          }
+          console.warn(
+            `[aidcp-edge] ⚠ 检测到${to === 'captcha' ? '验证码' : '未知阻断'}弹窗，已本地暂停并上报云端，等待人工处理`,
+          );
+        })();
+      } else if (!isBlockingCloud(to) && isBlockingCloud(from)) {
+        try {
+          client.send('risk.captcha_cleared', { edgeId, ...(accountId ? { accountId } : {}) });
+        } catch (err) {
+          console.error('[aidcp-edge] risk.captcha_cleared 上报失败:', err);
+        }
+        console.log('[aidcp-edge] 阻断弹窗已清除，恢复浏览');
+      }
+    });
+    console.log('[aidcp-edge] 自动浏览已启动（含弹窗旁路监测）');
   }
 
   let shuttingDown = false;
@@ -175,6 +220,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log('\n[aidcp-edge] 收到退出信号，关闭连接 ...');
+    overlayMonitor?.stop();
     browse?.stop();
     client.close();
     session.close();
