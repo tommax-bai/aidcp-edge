@@ -23,6 +23,7 @@
 
 import type { BrowseCdp } from './cdp-util.js';
 import { evalRaw } from './cdp-util.js';
+import { BackgroundWatcher } from './background-watcher.js';
 import {
   DEFAULT_LOGIN_CONTAINER_SELECTORS,
   DEFAULT_LOGIN_PHRASES,
@@ -198,22 +199,24 @@ function isOverlayKind(v: unknown): v is OverlayKind {
   return v === 'none' || v === 'login' || v === 'captcha' || v === 'dismissible' || v === 'unknown';
 }
 
-/** 基于 CDP 的弹窗旁路监测体。 */
-export class CdpOverlayMonitor implements OverlayMonitor {
-  private _state: OverlayKind = 'none';
+/**
+ * 基于 CDP 的弹窗旁路监测体。复用 BackgroundWatcher 的循环 / 容错(sticky) / 翻转 / 启停 / 心跳，
+ * 只提供"如何探测一次弹窗类别"（probe）。外部契约（state/probeNow/start/stop/tick）保持不变。
+ */
+export class CdpOverlayMonitor extends BackgroundWatcher<OverlayKind> implements OverlayMonitor {
+  private readonly cdp: BrowseCdp;
   private readonly js: string;
-  private readonly pollMs: number;
-  private readonly setTimer: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
-  private readonly clearTimer: (h: ReturnType<typeof setTimeout>) => void;
-  private readonly logger?: (msg: string) => void;
-  private onTransition?: (from: OverlayKind, to: OverlayKind) => void;
-  private timer: ReturnType<typeof setTimeout> | null = null;
-  private stopped = true;
 
-  constructor(
-    private readonly cdp: BrowseCdp,
-    options: OverlayMonitorOptions = {},
-  ) {
+  constructor(cdp: BrowseCdp, options: OverlayMonitorOptions = {}) {
+    super('none', {
+      pollMs: options.pollMs,
+      setTimer: options.setTimer,
+      clearTimer: options.clearTimer,
+      logger: options.logger,
+      onProbeError: 'sticky',
+      label: 'overlay',
+    });
+    this.cdp = cdp;
     this.js = buildClassifyOverlayJs(
       options.loginContainerSelectors ?? DEFAULT_LOGIN_CONTAINER_SELECTORS,
       options.loginPhrases ?? DEFAULT_LOGIN_PHRASES,
@@ -221,62 +224,9 @@ export class CdpOverlayMonitor implements OverlayMonitor {
       options.dismissiblePhrases ?? DEFAULT_DISMISSIBLE_PHRASES,
       options.excludeSelector ?? LOGIN_EXCLUDE_SELECTOR,
     );
-    this.pollMs = options.pollMs ?? 1000;
-    this.setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
-    this.clearTimer = options.clearTimer ?? ((h) => clearTimeout(h));
-    this.logger = options.logger;
   }
 
-  get state(): OverlayKind {
-    return this._state;
-  }
-
-  /** fresh 探测（CDP 失败会抛）。 */
-  probeNow(): Promise<OverlayKind> {
+  protected async probe(): Promise<OverlayKind> {
     return classifyOverlay(this.cdp, this.js);
-  }
-
-  /**
-   * 单次探测 + 状态对比 + 翻转回调。供 start 的定时器与单测复用。
-   * 探测失败按 sticky（保持上一状态、不翻转），避免页面导航期的瞬时失败刷假告警。
-   */
-  async tick(): Promise<void> {
-    let next: OverlayKind;
-    try {
-      next = await classifyOverlay(this.cdp, this.js);
-    } catch (err) {
-      this.logger?.(`[overlay] 探测失败(保持上一状态 ${this._state}): ${(err as Error).message}`);
-      return;
-    }
-    if (next !== this._state) {
-      const from = this._state;
-      this._state = next;
-      try {
-        this.onTransition?.(from, next);
-      } catch (err) {
-        this.logger?.(`[overlay] onTransition 回调异常(忽略): ${(err as Error).message}`);
-      }
-    }
-  }
-
-  start(onTransition?: (from: OverlayKind, to: OverlayKind) => void): void {
-    if (!this.stopped) return;
-    this.onTransition = onTransition;
-    this.stopped = false;
-    const loop = async (): Promise<void> => {
-      if (this.stopped) return;
-      await this.tick();
-      if (this.stopped) return;
-      this.timer = this.setTimer(() => void loop(), this.pollMs);
-    };
-    void loop();
-  }
-
-  stop(): void {
-    this.stopped = true;
-    if (this.timer != null) {
-      this.clearTimer(this.timer);
-      this.timer = null;
-    }
   }
 }
