@@ -40,6 +40,8 @@ import {
   CdpFeedScroller,
   CdpModalController,
   CdpOverlayMonitor,
+  CdpNotificationMonitor,
+  WatcherSupervisor,
   evalRaw,
   extractNoteContent,
   type OverlayKind,
@@ -148,6 +150,7 @@ async function main(): Promise<void> {
   // —— 自动浏览会话 ——
   let browse: BrowseSession | undefined;
   let overlayMonitor: CdpOverlayMonitor | undefined;
+  let watcherSupervisor: WatcherSupervisor | undefined;
   const autoBrowse = process.env.AIDCP_AUTO_BROWSE !== 'false';
   if (autoBrowse) {
     const browseOpts: BrowseSessionOptions = {};
@@ -185,7 +188,9 @@ async function main(): Promise<void> {
     // 启动旁路监测：类别翻转进 captcha/unknown 时上报云端（人工升级）；离开时上报已清除。
     // 仅 captcha/unknown 上报（login 只本地暂停、沿用现状不打扰云端）。
     const isBlockingCloud = (k: OverlayKind): boolean => k === 'captcha' || k === 'unknown';
-    overlayMonitor.start((from, to) => {
+    watcherSupervisor = new WatcherSupervisor();
+    // ① 弹窗监测：翻转进 captcha/unknown 上报云端（人工升级）；离开上报已清除。login 只本地暂停、不打扰云端。
+    watcherSupervisor.register(overlayMonitor, (from, to) => {
       if (isBlockingCloud(to) && !isBlockingCloud(from)) {
         void (async () => {
           let url = '';
@@ -212,7 +217,22 @@ async function main(): Promise<void> {
         console.log('[aidcp-edge] 阻断弹窗已清除，恢复浏览');
       }
     });
-    console.log('[aidcp-edge] 自动浏览已启动（含弹窗旁路监测）');
+    // ② 通知未读监测：无→有 上报 notification.detected（云端协调器据此巡视「评论和@」）。
+    const notificationMonitor = new CdpNotificationMonitor(session.cdp);
+    watcherSupervisor.register(notificationMonitor, (from, to) => {
+      if (to === true && from === false) {
+        const epoch = notificationMonitor.nextEpoch();
+        const unreadCount = notificationMonitor.lastCount;
+        try {
+          client.send('notification.detected', { edgeId, epoch, unreadCount, ...(accountId ? { accountId } : {}) });
+          console.log(`[aidcp-edge] 检测到「消息」未读(epoch=${epoch}, count=${unreadCount})，已上报云端`);
+        } catch (err) {
+          console.error('[aidcp-edge] notification.detected 上报失败:', err);
+        }
+      }
+    });
+    watcherSupervisor.startAll();
+    console.log('[aidcp-edge] 自动浏览已启动（含弹窗 + 通知未读旁路监测）');
   }
 
   let shuttingDown = false;
@@ -220,7 +240,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log('\n[aidcp-edge] 收到退出信号，关闭连接 ...');
-    overlayMonitor?.stop();
+    watcherSupervisor?.stopAll();
     browse?.stop();
     client.close();
     session.close();

@@ -34,6 +34,7 @@ import type {
   NoteBrowseImagesPayload,
   NoteScrollCommentsPayload,
   ProfileOpenPayload,
+  NotificationOpenPayload,
 } from '../comm/protocol.js';
 import type { ActionResultPayload } from '../comm/protocol.js';
 import type { FeedScroller, NoteCard } from './feed-scroller.js';
@@ -527,6 +528,14 @@ export class BrowseSession {
         await this.openAuthorProfile(payload.authorId);
         break;
       }
+      case 'notification.open': {
+        const payload = env.payload as NotificationOpenPayload;
+        const limit = payload.limit ?? 10;
+        this.logger(`[browse] 命令: notification.open (limit=${limit})`);
+        await this.thinkBefore(payload.thinkMs);
+        await this.openNotificationsAndExtract(limit);
+        break;
+      }
       case 'plan.response': {
         const payload = env.payload as PlanResponsePayload;
         const steps = payload?.steps ?? [];
@@ -1007,6 +1016,65 @@ export class BrowseSession {
     } catch (err) {
       this.logger(`[browse] 滚动评论失败：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: false, reason: (err as Error).message });
+    }
+  }
+
+  /**
+   * 去通知页查看「评论和@」并抽取评论/@ 项，经 notification.items 上报（复合命令，仿 openAuthorProfile）。
+   *
+   * 边缘只产出原始结构化项（用户名/内容/笔记标题/itemKey）；是否值得通知由云端判定。
+   * 选择器为 best-effort、待真机校准（同项目其它抽取器）。任何失败都上报空 items，使云端巡视能正常收尾恢复
+   * （绝不静默吞——无项就报空）。返回 feed 由云端随后下发 navigation.back（复用现有返回）完成。
+   */
+  private async openNotificationsAndExtract(limit: number): Promise<void> {
+    try {
+      const { evalRaw: evalRawFn } = await import('./cdp-util.js');
+      // 1. 进通知页（best-effort：点"消息"入口）
+      await evalRawFn<boolean>(
+        this.deps.cdp,
+        `(function(){ var a = document.querySelector('a[href*="/notification"]'); if(a){ a.click(); return true; } return false; })()`,
+      );
+      await this.sleep(1200);
+      // 2. 切「评论和@」tab（best-effort：按文案）
+      await evalRawFn<boolean>(
+        this.deps.cdp,
+        `(function(){ var els = Array.from(document.querySelectorAll('[role="tab"], [class*="tab"], a, span, div')); for (var i=0;i<els.length;i++){ var t=(els[i].textContent||'').trim(); if(t==='评论和@' || (/^评论/.test(t) && t.indexOf('@')>=0)){ els[i].click(); return true; } } return false; })()`,
+      );
+      await this.sleep(800);
+      // 3. 抽取评论/@ 项（best-effort，待真机校准）
+      const extractJs = `(function(){
+        var limit = ${limit};
+        var out = [];
+        var items = document.querySelectorAll('[class*="notification"] [class*="item"], [class*="comment"] [class*="item"], [class*="tabs-content"] [class*="container"] > div');
+        for (var i=0;i<items.length && out.length<limit;i++){
+          var it = items[i];
+          var txt = (it.textContent||'');
+          var isMention = /@\\s*(我|你)|提到了你/.test(txt);
+          var isComment = /评论|回复/.test(txt);
+          if(!isMention && !isComment) continue;
+          var userEl = it.querySelector('[class*="name"], [class*="user"], a[href*="/user/profile/"]');
+          var contentEl = it.querySelector('[class*="content"], [class*="comment"], p');
+          var noteEl = it.querySelector('[class*="note"] [class*="title"], [class*="extract"]');
+          var keyEl = it.querySelector('a[href]');
+          var note = (noteEl && noteEl.textContent || '').trim().slice(0,40);
+          var key = (keyEl && keyEl.getAttribute('href') || '').slice(0,120);
+          out.push({
+            kind: isMention ? 'mention' : 'comment',
+            fromUser: (userEl && userEl.textContent || '').trim().slice(0,40),
+            content: (contentEl && contentEl.textContent || txt).trim().slice(0,200),
+            noteTitle: note || undefined,
+            itemKey: key || undefined
+          });
+        }
+        return JSON.stringify(out);
+      })()`;
+      const raw = await evalRawFn<string>(this.deps.cdp, extractJs);
+      const items = typeof raw === 'string' ? JSON.parse(raw) : [];
+      this.deps.client.send?.('notification.items', { items });
+      this.logger(`[browse] notification.items: 上报 ${Array.isArray(items) ? items.length : 0} 条评论/@（选择器待真机校准）`);
+    } catch (err) {
+      this.logger(`[browse] notification.open 执行失败（上报空 items 以便云端收尾）：${(err as Error).message}`);
+      this.deps.client.send?.('notification.items', { items: [] });
     }
   }
 
