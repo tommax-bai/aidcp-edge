@@ -160,12 +160,15 @@ test('publish-post: success path returns postId', async () => {
   );
 });
 
-test('publish-post: images are rejected in phase one', async () => {
+test('publish-post: v1 带图显式改道指令路径（不静默丢图、不假成功）', async () => {
   const doc = buildDom(publishPageHtml());
   const executor = new FakeExecutor(doc);
   const result = await publishPost(depsFor(doc, executor), {}, { ...payload, images: ['a.png'] });
-  assert.deepEqual(result, { ok: false, error: '[images] images are not supported in phase one' });
-  assert.equal(executor.calls.length, 0);
+  // v1 整页路径无上传步骤：带图 MUST 显式失败并改道 upload_image（红线：绝不静默丢图后假成功）。
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /command-driven path/);
+  assert.match(result.error ?? '', /upload_image/);
+  assert.equal(executor.calls.length, 0, '带图绝不进入 v1 执行步骤');
 });
 
 test('publish-post: each step failure returns explicit step error', async () => {

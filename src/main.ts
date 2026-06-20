@@ -33,6 +33,8 @@ import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
 import { publishPost } from './flows/publish-post.js';
 import { PublishCommandDispatcher } from './flows/publish-command-handlers.js';
+import { ImageUploader } from './flows/image-uploader.js';
+import { CdpFileInputSetter } from './cdp/file-input-setter.js';
 import { AnchorCache } from './locating/cache.js';
 import { buildPublishApprovalRequestId } from './publish/approval-gate.js';
 import type { PublishResultPayload, PublishCommandResultPayload } from './comm/protocol.js';
@@ -49,7 +51,26 @@ import {
   type BrowseSessionOptions,
 } from './browse/index.js';
 
+/** 启动时清扫上一轮崩溃残留的配图临时目录（finally-unlink 在 SIGKILL/OOM 时跑不到）。仅命中 aidcp-img-* 前缀。 */
+async function sweepImageTempDirs(): Promise<void> {
+  try {
+    const { readdir, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const base = tmpdir();
+    const entries = await readdir(base).catch(() => [] as string[]);
+    await Promise.all(
+      entries
+        .filter((name) => name.startsWith('aidcp-img-'))
+        .map((name) => rm(join(base, name), { recursive: true, force: true }).catch(() => undefined)),
+    );
+  } catch {
+    // best-effort，清扫失败不阻断启动。
+  }
+}
+
 async function main(): Promise<void> {
+  await sweepImageTempDirs();
   const cloudUrl = process.env.AIDCP_CLOUD_URL ?? 'ws://121.89.85.150:8787';
   const edgeId = process.env.AIDCP_EDGE_ID ?? 'edge-local';
   // hello 身份（用于云端风控归属与验证码定位；均可选，缺省云端安全降级）。
@@ -151,12 +172,22 @@ async function main(): Promise<void> {
 
   // A 阶段1 指令驱动发布：云端逐条下发 publish.command，边缘逐条执行 + 后置校验 + 如实回报。
   // 与上面 publish.request 旧整页路径并行（地基阶段不删旧路）。
-  const publishDispatcher = new PublishCommandDispatcher({
+  // 配图收口：CDP 文件输入桥 + 上传器（复用 session.cdp 单例，绝不重建）。
+  const imageUploader = new ImageUploader({
+    fileInputSetter: new CdpFileInputSetter(session.cdp),
     dom: session.dom,
-    executor: session.executor,
-    selector,
-    cache: publishCache,
   });
+  const publishDispatcher = new PublishCommandDispatcher(
+    {
+      dom: session.dom,
+      executor: session.executor,
+      selector,
+      cache: publishCache,
+    },
+    {},
+    Date.now,
+    imageUploader,
+  );
   client.onPublishAtomCommand((env) => {
     void (async () => {
       let result: PublishCommandResultPayload;

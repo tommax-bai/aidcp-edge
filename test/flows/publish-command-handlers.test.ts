@@ -46,6 +46,7 @@ class FakeSelector implements ElementSelector {
       [goal.includes('可见范围'), 'note.publish_set_option.visibility'],
       [goal.includes('AI'), 'note.publish_set_option.declaration_ai'],
       [goal.includes('定时'), 'note.publish_set_schedule'],
+      [goal.includes('封面'), 'note.publish_set_cover'], // 早于「发布」分支（封面 goal 含「发布页」）
       [goal.includes('标签') || goal.includes('话题'), XHS_PUBLISH_TAG_ACTION_ID],
       [goal.includes('提交') || goal.includes('发布'), XHS_PUBLISH_SUBMIT_ACTION_ID],
     ];
@@ -137,15 +138,54 @@ test('AC-CMD capture_postId 抓不到 → ok:false error=no_target（红线：MU
   assert.equal(res.value, undefined);
 });
 
-test('AC-CMD 配图 kind（upload_image/set_cover）延后 → ok:false error=kind_not_implemented（不假成功）', async () => {
+test('AC-MEDIA upload_image 未注入 uploader → kind_not_implemented（诚实，不假成功）', async () => {
   const doc = buildDom(publishPageHtml());
   const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
-  // 配图链路（下载/上传 CDP 桥）延后到 publish-media-upload；set_option/set_schedule 已实装，不在此列。
-  for (const kind of ['upload_image', 'set_cover'] as const) {
-    const res = await dispatcher.dispatch(cmd(kind, { imageUrl: 'https://cdn/x.jpg' }));
-    assert.equal(res.ok, false, `${kind} 应 ok:false`);
-    assert.equal(res.error, 'kind_not_implemented', `${kind} 应回 kind_not_implemented`);
-  }
+  const res = await dispatcher.dispatch(cmd('upload_image', { imageUrl: 'https://cdn/x.jpg' }));
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'kind_not_implemented');
+});
+
+test('AC-MEDIA upload_image 经注入 uploader → 成功透传 ok:true / 失败透传真实 error（绝不翻成功）', async () => {
+  const doc = buildDom(publishPageHtml());
+  let calledWith = '';
+  const okUploader = { upload: async (url: string) => { calledWith = url; return { ok: true }; } } as any;
+  const okDisp = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, okUploader);
+  const ok = await okDisp.dispatch(cmd('upload_image', { imageUrl: 'https://cdn/a.png' }));
+  assert.equal(ok.ok, true);
+  assert.equal(calledWith, 'https://cdn/a.png', 'imageUrl 透传给 uploader');
+
+  const failUploader = { upload: async () => ({ ok: false, error: 'image_not_attached' }) } as any;
+  const failDisp = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, failUploader);
+  const fail = await failDisp.dispatch(cmd('upload_image', { imageUrl: 'https://cdn/a.png' }));
+  assert.equal(fail.ok, false);
+  assert.equal(fail.error, 'image_not_attached', '上传失败如实回报，绝不翻成 ok:true');
+});
+
+test('AC-MEDIA upload_image 缺 imageUrl（有 uploader）→ no_target', async () => {
+  const doc = buildDom(publishPageHtml());
+  const uploader = { upload: async () => ({ ok: true }) } as any;
+  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, uploader);
+  const res = await dispatcher.dispatch(cmd('upload_image', {}));
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'no_target');
+});
+
+test('AC-MEDIA set_cover → 定位封面入口 + 封面激活态后置校验通过 → ok:true', async () => {
+  const extra = `<button data-action-id="note.publish_set_cover">设为封面</button><div class="cover-active">封面</div>`;
+  const doc = buildDom(publishPageHtml(extra));
+  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const res = await dispatcher.dispatch(cmd('set_cover', { imageUrl: 'https://cdn/a.png' }));
+  assert.equal(res.ok, true);
+  assert.equal(res.kind, 'set_cover');
+});
+
+test('AC-MEDIA set_cover 封面入口缺失 → ok:false（诚实 no_target，不假成功）', async () => {
+  const doc = buildDom(publishPageHtml()); // 无封面入口
+  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)), { maxAttempts: 2 });
+  const res = await dispatcher.dispatch(cmd('set_cover', { imageUrl: 'https://cdn/a.png' }));
+  assert.equal(res.ok, false);
+  assert.ok(res.error, '失败必须带真实 error');
 });
 
 test('AC-CMD-S4 add_with_candidate 按 candidateKind 路由：mention/location/collection 各入对应控件 + 值校验', async () => {

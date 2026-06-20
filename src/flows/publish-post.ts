@@ -292,7 +292,8 @@ export async function publishPost(
   approvalGate?: PublishApprovalGateOptions,
 ): Promise<PublishResultPayload> {
   if ((payload.images?.length ?? 0) > 0) {
-    return { ok: false, error: '[images] images are not supported in phase one' };
+    // v1 整页路径无上传步骤：带图 MUST 显式改道指令驱动路径（upload_image），绝不静默丢图后假成功（红线）。
+    return { ok: false, error: '[images] use command-driven path (upload_image) for images; v1 page path cannot upload' };
   }
 
   const enter = await runStep(

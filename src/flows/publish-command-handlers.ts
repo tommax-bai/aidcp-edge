@@ -12,6 +12,7 @@
 import { LocatingEngine } from '../locating/engine.js';
 import type { ActionRequest, ActionResult, PostValidator } from '../locating/index.js';
 import type { EngineDeps, EngineOptions } from '../locating/engine.js';
+import type { ImageUploader } from './image-uploader.js';
 import type {
   PublishCommandPayload,
   PublishCommandResultPayload,
@@ -131,6 +132,30 @@ function buildSetScheduleRequest(publishTime: number): ActionRequest {
   };
 }
 
+/** set_cover：定位封面入口并将所选图设为封面（best-effort；真实 DOM 待实机校准）。 */
+function buildSetCoverRequest(): ActionRequest {
+  return {
+    actionId: 'note.publish_set_cover',
+    op: 'click',
+    goal: '在发布页设置封面：找到封面/首图选择入口并将目标图设为封面',
+    anchorHint: { text: '封面', textMatch: 'contains' },
+  };
+}
+
+/** 封面后置校验（best-effort）：断言出现「封面激活态」节点，而非仅「点到了」。 */
+function coverActiveValidator(): PostValidator {
+  return {
+    validate: (_req: ActionRequest, root: Element | Document) => {
+      const sel = '[data-action-id="note.publish_cover_active"], .cover-active, .is-cover, [class*="cover"][class*="active"]';
+      try {
+        return !!root.querySelector(sel);
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
 export class PublishCommandDispatcher {
   private readonly clock: () => number;
 
@@ -138,6 +163,8 @@ export class PublishCommandDispatcher {
     private readonly deps: PublishCommandDeps,
     private readonly options: EngineOptions = {},
     clock: () => number = Date.now,
+    /** 配图上传器（publish-media-upload）；未注入时 upload_image 诚实回 kind_not_implemented。 */
+    private readonly uploader?: ImageUploader,
   ) {
     this.clock = clock;
   }
@@ -206,10 +233,11 @@ export class PublishCommandDispatcher {
         const publishTime = payload.params.publishTime ?? 0;
         return this.runAtom(payload, buildSetScheduleRequest(publishTime), valueValidator('定时'));
       }
-      // 配图链路（URL→下载→上传 CDP 桥）延后到 publish-media-upload change：诚实回 kind_not_implemented，绝不假成功。
       case 'upload_image':
+        return this.runUploadImage(payload);
       case 'set_cover':
-        return this.notImplemented(payload);
+        // 封面：定位封面入口 + 点击 + 封面激活态后置校验（断言真成为封面，非仅点到）。
+        return this.runAtom(payload, buildSetCoverRequest(), coverActiveValidator());
       default:
         return this.notImplemented(payload);
     }
@@ -280,6 +308,22 @@ export class PublishCommandDispatcher {
       value: postId,
       details: { actionId: CAPTURE_POST_ID_ACTION, durationMs: this.clock() - startedAt },
     };
+  }
+
+  /** 配图上传：URL→下载→CDP 文件输入桥→后置校验成功态。未注入 uploader 则诚实 kind_not_implemented。 */
+  private async runUploadImage(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+    const startedAt = this.clock();
+    const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
+    const imageUrl = payload.params.imageUrl;
+    if (!this.uploader) return this.notImplemented(payload);
+    if (!imageUrl) {
+      return { ...base, ok: false, error: 'no_target', details: { actionId: 'note.publish_upload_image', durationMs: this.clock() - startedAt } };
+    }
+    const r = await this.uploader.upload(imageUrl);
+    const details = { actionId: 'note.publish_upload_image', durationMs: this.clock() - startedAt };
+    // 红线：上传器的 ok 即真实结果（下载/桥接/后置校验任一失败 → ok:false），此处绝不翻成 ok:true。
+    if (!r.ok) return { ...base, ok: false, error: r.error ?? 'upload_failed', details };
+    return { ...base, ok: true, details };
   }
 
   private notImplemented(payload: PublishCommandPayload): PublishCommandResultPayload {
