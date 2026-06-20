@@ -142,13 +142,15 @@ function buildSetCoverRequest(): ActionRequest {
   };
 }
 
-/** 封面后置校验（best-effort）：断言出现「封面激活态」节点，而非仅「点到了」。 */
+/**
+ * 封面后置校验：**fail-closed**——只认精确锚点 `note.publish_cover_active`（断言所选图真成封面，非仅点到）。
+ * 真实 DOM 在 task-0 校准前不含此锚点 → 诚实失败，绝不用宽泛 [class*=cover][class*=active] 子串误命中页面既有节点假成功。
+ */
 function coverActiveValidator(): PostValidator {
   return {
     validate: (_req: ActionRequest, root: Element | Document) => {
-      const sel = '[data-action-id="note.publish_cover_active"], .cover-active, .is-cover, [class*="cover"][class*="active"]';
       try {
-        return !!root.querySelector(sel);
+        return !!root.querySelector('[data-action-id="note.publish_cover_active"]');
       } catch {
         return false;
       }

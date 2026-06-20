@@ -41,6 +41,17 @@ const fetchHanging = (): typeof fetch =>
       opts.signal?.addEventListener('abort', () => reject(new Error('aborted')));
     })) as unknown as typeof fetch;
 
+/** headers 立即返回 200，但 body 永不产出（半开/涓流）；signal 不绑定到此流（模拟非原生 Response）。 */
+const fetchStallingBody = (): typeof fetch =>
+  ((_url: unknown, _opts: unknown) => {
+    const body = new ReadableStream<Uint8Array>({
+      start() {
+        /* 永不 enqueue、永不 close */
+      },
+    });
+    return Promise.resolve(new Response(body, { status: 200 }));
+  }) as unknown as typeof fetch;
+
 function makeUploader(d: Document, setter: FileInputSetter, fetchImpl: typeof fetch, over = {}) {
   return new ImageUploader({
     fileInputSetter: setter,
@@ -86,6 +97,18 @@ test('AC-MEDIA 下载超时 → image_fetch_failed（不假成功）', async () 
   assert.equal(r.ok, false);
   assert.equal(r.error, 'image_fetch_failed');
   assert.equal(setter.received.length, 0);
+});
+
+test('AC-MEDIA body 半开/涓流 → 超时按 image_fetch_failed（deadline 覆盖 body 流读，不挂死）', async () => {
+  const d = doc();
+  const setter = new FakeFileInputSetter(d);
+  const up = makeUploader(d, setter, fetchStallingBody(), { downloadTimeoutMs: 30 });
+  const start = Date.now();
+  const r = await up.upload('https://cdn.example.com/trickle.png');
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'image_fetch_failed', 'body 流读须被 deadline 抢断');
+  assert.ok(Date.now() - start < 2000, '必须在下载超时内返回，不得挂到云端超时');
+  assert.equal(setter.received.length, 0, 'body 未读完绝不进文件设置');
 });
 
 test('AC-MEDIA 非图字节 → image_format_unsupported（magic-byte 判定，不信扩展名）', async () => {

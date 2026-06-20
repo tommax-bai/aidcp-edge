@@ -172,7 +172,8 @@ test('AC-MEDIA upload_image 缺 imageUrl（有 uploader）→ no_target', async 
 });
 
 test('AC-MEDIA set_cover → 定位封面入口 + 封面激活态后置校验通过 → ok:true', async () => {
-  const extra = `<button data-action-id="note.publish_set_cover">设为封面</button><div class="cover-active">封面</div>`;
+  // 校验器 fail-closed，只认精确锚点 note.publish_cover_active（模拟校准后注入的真实成功态）。
+  const extra = `<button data-action-id="note.publish_set_cover">设为封面</button><div data-action-id="note.publish_cover_active"></div>`;
   const doc = buildDom(publishPageHtml(extra));
   const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
   const res = await dispatcher.dispatch(cmd('set_cover', { imageUrl: 'https://cdn/a.png' }));

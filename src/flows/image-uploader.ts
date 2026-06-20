@@ -41,11 +41,15 @@ export interface ImageUploaderDeps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** best-effort 成功态选择器（真实小红书 DOM 待实机 CDP 校准；命中即视为该图已进入编辑区）。 */
+/**
+ * 默认成功态判定：**fail-closed**——只认我们自己控制的精确锚点 `note.publish_image_thumb`，
+ * 真实小红书 DOM 在 task-0 校准前不含此锚点 → 诚实回 image_not_attached（绝不用宽泛 [class*=...] 子串
+ * 误命中页面既有 chrome 而假成功，对齐 spec「校准前诚实 no_target 而非猜测命中」）。
+ * 校准时注入真实成功态判定（建议基线计数法：setFiles 前后缩略图数严格 +1）覆盖此默认。
+ */
 function defaultHasThumbnail(root: Element | Document): boolean {
-  const sel = '[data-action-id="note.publish_image_thumb"], .img-preview, .upload-success, [class*="preview"]';
   try {
-    return !!root.querySelector(sel);
+    return !!root.querySelector('[data-action-id="note.publish_image_thumb"]');
   } catch {
     return false;
   }
@@ -136,54 +140,72 @@ export class ImageUploader {
     imageUrl: string,
   ): Promise<{ ok: true; dir: string; path: string } | { ok: false; error: string }> {
     const controller = new AbortController();
+    // 一个 deadline 覆盖「连接+头 + body 流读」全程：body 慢/半开时也按时中止，
+    // 使过期/慢 URL（本 change 的首要失败模式）边缘先回干净 image_fetch_failed，不拖到云端单指令超时。
     const timer = setTimeout(() => controller.abort(), this.downloadTimeoutMs);
-    let res: Response;
     try {
-      // redirect:'error'——拒绝任何 3xx，防原始 URL 校验被首跳重定向绕过到内网/本地。
-      res = await this.fetchImpl(imageUrl, { redirect: 'error', signal: controller.signal });
-    } catch {
-      return { ok: false, error: 'image_fetch_failed' };
+      let res: Response;
+      try {
+        // redirect:'error'——拒绝任何 3xx，防原始 URL 校验被首跳重定向绕过到内网/本地。
+        res = await this.fetchImpl(imageUrl, { redirect: 'error', signal: controller.signal });
+      } catch {
+        return { ok: false, error: 'image_fetch_failed' };
+      }
+      if (!res.ok) return { ok: false, error: 'image_fetch_failed' };
+
+      // Content-Length 预检（可被伪造，仅作早拒）。
+      const declared = Number(res.headers.get('content-length') ?? '');
+      if (Number.isFinite(declared) && declared > this.maxBytes) return { ok: false, error: 'image_too_large' };
+
+      const reader = res.body?.getReader?.();
+      // 无 body reader：不回退 arrayBuffer（那会绕过流式上限、可被无 Content-Length 的大 body 撑爆内存）→ 诚实失败。
+      if (!reader) return { ok: false, error: 'image_fetch_failed' };
+
+      let bytes: Uint8Array | null;
+      try {
+        bytes = await this.readCapped(reader, controller.signal);
+      } catch {
+        // body 读期间超时/中止 → 诚实回 image_fetch_failed（非 engine_error）。
+        return { ok: false, error: 'image_fetch_failed' };
+      }
+      if (!bytes) return { ok: false, error: 'image_too_large' };
+
+      const ext = sniffImage(bytes);
+      if (!ext) return { ok: false, error: 'image_format_unsupported' };
+
+      const dir = await mkdtemp(join(tmpdir(), 'aidcp-img-'));
+      const path = join(dir, `image.${ext}`);
+      await writeFile(path, bytes);
+      return { ok: true, dir, path };
     } finally {
       clearTimeout(timer);
     }
-    if (!res.ok) return { ok: false, error: 'image_fetch_failed' };
-
-    // Content-Length 预检（可被伪造，仅作早拒）。
-    const declared = Number(res.headers.get('content-length') ?? '');
-    if (Number.isFinite(declared) && declared > this.maxBytes) return { ok: false, error: 'image_too_large' };
-
-    const bytes = await this.readCapped(res);
-    if (!bytes) return { ok: false, error: 'image_too_large' };
-
-    const ext = sniffImage(bytes);
-    if (!ext) return { ok: false, error: 'image_format_unsupported' };
-
-    const dir = await mkdtemp(join(tmpdir(), 'aidcp-img-'));
-    const path = join(dir, `image.${ext}`);
-    await writeFile(path, bytes);
-    return { ok: true, dir, path };
   }
 
-  /** 流式累计读，超上限即中止（防 Content-Length 说谎）；无 body reader 时回退 arrayBuffer。 */
-  private async readCapped(res: Response): Promise<Uint8Array | null> {
-    const reader = res.body?.getReader?.();
-    if (!reader) {
-      const buf = new Uint8Array(await res.arrayBuffer());
-      return buf.byteLength > this.maxBytes ? null : buf;
-    }
+  /** 流式累计读（含 signal 抢断），超上限返回 null；中止则 throw（由调用方记 image_fetch_failed）。 */
+  private async readCapped(reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal): Promise<Uint8Array | null> {
+    const abortP = new Promise<never>((_, reject) => {
+      if (signal.aborted) reject(new Error('download_aborted'));
+      signal.addEventListener('abort', () => reject(new Error('download_aborted')), { once: true });
+    });
     const chunks: Uint8Array[] = [];
     let total = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) {
-        total += value.byteLength;
-        if (total > this.maxBytes) {
-          await reader.cancel().catch(() => undefined);
-          return null;
+    try {
+      for (;;) {
+        const { done, value } = await Promise.race([reader.read(), abortP]);
+        if (done) break;
+        if (value) {
+          total += value.byteLength;
+          if (total > this.maxBytes) {
+            await reader.cancel().catch(() => undefined);
+            return null;
+          }
+          chunks.push(value);
         }
-        chunks.push(value);
       }
+    } catch (err) {
+      await reader.cancel().catch(() => undefined);
+      throw err;
     }
     const out = new Uint8Array(total);
     let off = 0;
