@@ -35,6 +35,10 @@ import type {
   NoteScrollCommentsPayload,
   ProfileOpenPayload,
   NotificationOpenPayload,
+  NotificationBrowseCommentsPayload,
+  NotificationBrowseLikesPayload,
+  NotificationBrowseFollowsPayload,
+  NotificationBackHomePayload,
 } from '../comm/protocol.js';
 import type { ActionResultPayload } from '../comm/protocol.js';
 import type { FeedScroller, NoteCard } from './feed-scroller.js';
@@ -530,10 +534,37 @@ export class BrowseSession {
       }
       case 'notification.open': {
         const payload = env.payload as NotificationOpenPayload;
-        const limit = payload.limit ?? 10;
-        this.logger(`[browse] 命令: notification.open (limit=${limit})`);
+        this.logger('[browse] 命令: notification.open (导航通知首页)');
         await this.thinkBefore(payload.thinkMs);
-        await this.openNotificationsAndExtract(limit);
+        await this.openNotificationsHome();
+        break;
+      }
+      case 'notification.browse_comments': {
+        const payload = env.payload as NotificationBrowseCommentsPayload;
+        this.logger('[browse] 命令: notification.browse_comments');
+        await this.thinkBefore(payload.thinkMs);
+        await this.browseNotificationComments(payload.scrollMax ?? 3);
+        break;
+      }
+      case 'notification.browse_likes': {
+        const payload = env.payload as NotificationBrowseLikesPayload;
+        this.logger('[browse] 命令: notification.browse_likes');
+        await this.thinkBefore(payload.thinkMs);
+        await this.viewNotificationCategory('likes');
+        break;
+      }
+      case 'notification.browse_follows': {
+        const payload = env.payload as NotificationBrowseFollowsPayload;
+        this.logger('[browse] 命令: notification.browse_follows');
+        await this.thinkBefore(payload.thinkMs);
+        await this.viewNotificationCategory('follows');
+        break;
+      }
+      case 'notification.back_home': {
+        const payload = env.payload as NotificationBackHomePayload;
+        this.logger('[browse] 命令: notification.back_home (返回通知首页)');
+        await this.thinkBefore(payload.thinkMs);
+        await this.openNotificationsHome();
         break;
       }
       case 'plan.response': {
@@ -1020,33 +1051,60 @@ export class BrowseSession {
   }
 
   /**
-   * 去通知页查看「评论和@」并抽取评论/@ 项，经 notification.items 上报（复合命令，仿 openAuthorProfile）。
-   *
-   * 边缘只产出原始结构化项（用户名/内容/笔记标题/itemKey）；是否值得通知由云端判定。
-   * 选择器为 best-effort、待真机校准（同项目其它抽取器）。任何失败都上报空 items，使云端巡视能正常收尾恢复
-   * （绝不静默吞——无项就报空）。返回 feed 由云端随后下发 navigation.back（复用现有返回）完成。
+   * 导航到通知首页并上报各类未读快照（notification.home），喂给云端分诊。
+   * 选择器 best-effort、待真机校准。失败也上报全 0（不静默吞），使分诊能判"无未读"收尾。
    */
-  private async openNotificationsAndExtract(limit: number): Promise<void> {
+  private async openNotificationsHome(): Promise<void> {
     try {
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
-      // 1. 进通知页（best-effort：点"消息"入口）
       await evalRawFn<boolean>(
         this.deps.cdp,
         `(function(){ var a = document.querySelector('a[href*="/notification"]'); if(a){ a.click(); return true; } return false; })()`,
       );
       await this.sleep(1200);
-      // 2. 切「评论和@」tab（best-effort：按文案）
+      const homeJs = `(function(){
+        function unreadNear(labelRe){
+          var els = Array.from(document.querySelectorAll('[role="tab"], [class*="tab"], a, span, div'));
+          for (var i=0;i<els.length;i++){
+            var t=(els[i].textContent||'').trim();
+            if(t.length>10 || !labelRe.test(t)) continue;
+            var badge = els[i].querySelector('[class*="badge"],[class*="dot"],[class*="count"],[class*="red"]');
+            if(badge){ var n=parseInt((badge.textContent||'').replace(/[^0-9]/g,''),10); return isNaN(n)?1:n; }
+          }
+          return 0;
+        }
+        return JSON.stringify({ comments: unreadNear(/评论|@/), likes: unreadNear(/赞|收藏/), follows: unreadNear(/关注|粉丝/) });
+      })()`;
+      const raw = await evalRawFn<string>(this.deps.cdp, homeJs);
+      const home = typeof raw === 'string' ? JSON.parse(raw) : { comments: 0, likes: 0, follows: 0 };
+      this.deps.client.send?.('notification.home', home);
+      this.logger(`[browse] notification.home: 评论${home.comments} 赞藏${home.likes} 关注${home.follows}（选择器待真机校准）`);
+    } catch (err) {
+      this.logger(`[browse] notification.open 失败（上报全 0 以便分诊收尾）：${(err as Error).message}`);
+      this.deps.client.send?.('notification.home', { comments: 0, likes: 0, follows: 0 });
+    }
+  }
+
+  /**
+   * 进「评论和@」分类、滚动加载、抽取原始评论/@ 项，经 notification.items 上报。
+   * 边缘只产出原始项；是否值得通知由云端判。选择器 best-effort、待真机校准；失败上报空 items（不静默吞）。
+   */
+  private async browseNotificationComments(scrollMax: number): Promise<void> {
+    try {
+      const { evalRaw: evalRawFn } = await import('./cdp-util.js');
       await evalRawFn<boolean>(
         this.deps.cdp,
         `(function(){ var els = Array.from(document.querySelectorAll('[role="tab"], [class*="tab"], a, span, div')); for (var i=0;i<els.length;i++){ var t=(els[i].textContent||'').trim(); if(t==='评论和@' || (/^评论/.test(t) && t.indexOf('@')>=0)){ els[i].click(); return true; } } return false; })()`,
       );
       await this.sleep(800);
-      // 3. 抽取评论/@ 项（best-effort，待真机校准）
+      for (let i = 0; i < scrollMax; i++) {
+        await evalRawFn<boolean>(this.deps.cdp, `(function(){ window.scrollBy(0, document.documentElement.clientHeight*0.8); return true; })()`);
+        await this.sleep(600);
+      }
       const extractJs = `(function(){
-        var limit = ${limit};
         var out = [];
         var items = document.querySelectorAll('[class*="notification"] [class*="item"], [class*="comment"] [class*="item"], [class*="tabs-content"] [class*="container"] > div');
-        for (var i=0;i<items.length && out.length<limit;i++){
+        for (var i=0;i<items.length && out.length<50;i++){
           var it = items[i];
           var txt = (it.textContent||'');
           var isMention = /@\\s*(我|你)|提到了你/.test(txt);
@@ -1056,14 +1114,12 @@ export class BrowseSession {
           var contentEl = it.querySelector('[class*="content"], [class*="comment"], p');
           var noteEl = it.querySelector('[class*="note"] [class*="title"], [class*="extract"]');
           var keyEl = it.querySelector('a[href]');
-          var note = (noteEl && noteEl.textContent || '').trim().slice(0,40);
-          var key = (keyEl && keyEl.getAttribute('href') || '').slice(0,120);
           out.push({
             kind: isMention ? 'mention' : 'comment',
             fromUser: (userEl && userEl.textContent || '').trim().slice(0,40),
             content: (contentEl && contentEl.textContent || txt).trim().slice(0,200),
-            noteTitle: note || undefined,
-            itemKey: key || undefined
+            noteTitle: (noteEl && noteEl.textContent || '').trim().slice(0,40) || undefined,
+            itemKey: (keyEl && keyEl.getAttribute('href') || '').slice(0,120) || undefined
           });
         }
         return JSON.stringify(out);
@@ -1073,8 +1129,30 @@ export class BrowseSession {
       this.deps.client.send?.('notification.items', { items });
       this.logger(`[browse] notification.items: 上报 ${Array.isArray(items) ? items.length : 0} 条评论/@（选择器待真机校准）`);
     } catch (err) {
-      this.logger(`[browse] notification.open 执行失败（上报空 items 以便云端收尾）：${(err as Error).message}`);
+      this.logger(`[browse] notification.browse_comments 失败（上报空 items 以便云端收尾）：${(err as Error).message}`);
       this.deps.client.send?.('notification.items', { items: [] });
+    }
+  }
+
+  /**
+   * 进「赞和收藏」/「新增关注」分类看一眼清未读（v1 不抽取），回执 action.completed。
+   * 选择器 best-effort、待真机校准；失败也如实回执，使云端巡视能收尾。
+   */
+  private async viewNotificationCategory(kind: 'likes' | 'follows'): Promise<void> {
+    const action = kind === 'likes' ? 'browse_notification_likes' : 'browse_notification_follows';
+    try {
+      const { evalRaw: evalRawFn } = await import('./cdp-util.js');
+      const labelRe = kind === 'likes' ? '赞|收藏' : '关注|粉丝';
+      await evalRawFn<boolean>(
+        this.deps.cdp,
+        `(function(){ var els = Array.from(document.querySelectorAll('[role="tab"], [class*="tab"], a, span, div')); for (var i=0;i<els.length;i++){ var t=(els[i].textContent||'').trim(); if(t.length<=8 && new RegExp('${labelRe}').test(t)){ els[i].click(); return true; } } return false; })()`,
+      );
+      await this.sleep(800);
+      this.logger(`[browse] ${action}: 已查看（清未读，v1 不抽取）`);
+      this.deps.client.reportActionCompleted?.({ action, ok: true, reason: 'viewed' });
+    } catch (err) {
+      this.logger(`[browse] ${action} 失败：${(err as Error).message}`);
+      this.deps.client.reportActionCompleted?.({ action, ok: false, reason: (err as Error).message });
     }
   }
 
