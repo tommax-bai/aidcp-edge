@@ -30,6 +30,7 @@ import type {
   InteractionLikePayload,
   InteractionCollectPayload,
   InteractionFollowPayload,
+  InteractionCommentPayload,
   NavigationBackPayload,
   NoteBrowseImagesPayload,
   NoteScrollCommentsPayload,
@@ -480,6 +481,13 @@ export class BrowseSession {
         await this.executeFollow();
         break;
       }
+      case 'interaction.comment': {
+        const payload = env.payload as InteractionCommentPayload;
+        this.logger(`[browse] 命令: interaction.comment (noteId=${payload.noteId})`);
+        await this.thinkBefore(payload.thinkMs); // 发评论前犹豫（time directive）
+        await this.executeComment(payload.text);
+        break;
+      }
       case 'search.execute': {
         const payload = env.payload as { keyword?: string; maxResults?: number };
         const kw = payload.keyword ?? '';
@@ -847,6 +855,114 @@ export class BrowseSession {
       }
     } catch (err) {
       this.logger(`[browse] ${action} 执行失败：${(err as Error).message}`);
+      this.deps.client.reportActionCompleted?.({ action, ok: false, reason: (err as Error).message });
+    }
+  }
+
+  /**
+   * 在当前打开的笔记详情页发一条评论。Cloud 已撰写 / 去AI味 / 人审通过，Edge 直接执行。
+   *
+   * 选择器与发布后校验信号由真机 CDP 探针坐实（scripts/comment-probe.ts）：
+   *  - 折叠态入口 `.engage-bar .content-edit .not-active`（"说点什么"）→ 激活后 engage-bar 加 `.active`；
+   *  - 真编辑器 `p#content-textarea`（contenteditable，data-tribute 提及）——必须点本体落 caret；
+   *  - 提交键 `.engage-bar.active button.btn.submit`（"发送"）；
+   *  - 发布后校验：编辑器清空 且 自己的评论作为顶部新 `[id^="comment-"]` 行出现（评论数文本不可靠，不依赖）。
+   * 红线：找不到框/按钮 no_target、未生效 state_unchanged、验证码 blocked_by_captcha——绝不静默假成功。
+   */
+  private async executeComment(text: string): Promise<void> {
+    const action = 'comment';
+    const body = (text ?? '').trim();
+    if (!body) {
+      this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'empty_text' });
+      return;
+    }
+    try {
+      const { dispatchClick, dispatchKeystrokes } = await import('./cdp-util.js');
+
+      // 1) 定位折叠态评论入口并点击激活
+      const entryJs = `(function(){
+        var bar = document.querySelector('.interactions.engage-bar') || document.querySelector('.engage-bar');
+        if (!bar) return JSON.stringify({error:'no-bar'});
+        var entry = bar.querySelector('.content-edit .not-active') || bar.querySelector('.content-edit') || bar.querySelector('.input-box');
+        if (!entry) return JSON.stringify({error:'no-entry'});
+        var r = entry.getBoundingClientRect();
+        return JSON.stringify({x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2)});
+      })()`;
+      const entryRaw = await evalRaw<string>(this.deps.cdp, entryJs);
+      const entry = typeof entryRaw === 'string' ? JSON.parse(entryRaw) : entryRaw;
+      if (entry?.error) {
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: entry.error === 'no-bar' ? 'no_target' : `entry_${entry.error}` });
+        return;
+      }
+      await dispatchClick(this.deps.cdp, entry.x, entry.y, { random: this.random });
+      await this.sleep(400);
+
+      // 2) 定位真正的编辑器（激活后出现），点本体落 caret（contenteditable + data-tribute 不能靠 activeElement）
+      const editorJs = `(function(){
+        var el = document.querySelector('#content-textarea') || document.querySelector('.engage-bar.active [contenteditable="true"]') || document.querySelector('.engage-bar [contenteditable="true"]');
+        if (!el) return JSON.stringify({error:'no-editor'});
+        var r = el.getBoundingClientRect();
+        return JSON.stringify({x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2)});
+      })()`;
+      const editorRaw = await evalRaw<string>(this.deps.cdp, editorJs);
+      const editor = typeof editorRaw === 'string' ? JSON.parse(editorRaw) : editorRaw;
+      if (editor?.error) {
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'no_target' });
+        return;
+      }
+      await dispatchClick(this.deps.cdp, editor.x, editor.y, { random: this.random });
+      await this.sleep(250);
+
+      // 3) 拟人逐字输入
+      await dispatchKeystrokes(this.deps.cdp, body, { random: this.random });
+      await this.humanPause(this.actionTiming);
+
+      // 4) 提交前 fresh 复检验证码（最高风险写互动，务必复检）
+      if (await this.captchaPresentFresh()) {
+        this.logger('[browse] comment 提交前复检到验证码/未知阻断弹窗，放弃发送');
+        await evalRaw(this.deps.cdp, `(function(){var el=document.querySelector('#content-textarea')||document.querySelector('.engage-bar.active [contenteditable="true"]');if(el){el.textContent='';el.dispatchEvent(new Event('input',{bubbles:true}));}return 'ok';})()`);
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'blocked_by_captcha' });
+        return;
+      }
+
+      // 5) 定位提交键并点击（有效内容后 .gray 消失）
+      const submitJs = `(function(){
+        var btn = document.querySelector('.engage-bar.active button.btn.submit') || document.querySelector('.engage-bar button.btn.submit');
+        if (!btn) return JSON.stringify({error:'no-submit'});
+        var r = btn.getBoundingClientRect();
+        return JSON.stringify({x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2)});
+      })()`;
+      const submitRaw = await evalRaw<string>(this.deps.cdp, submitJs);
+      const submit = typeof submitRaw === 'string' ? JSON.parse(submitRaw) : submitRaw;
+      if (submit?.error) {
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'no_target' });
+        return;
+      }
+      await dispatchClick(this.deps.cdp, submit.x, submit.y, { random: this.random });
+
+      // 6) 后置校验：等待后检查 编辑器清空 且 自己的评论作为顶部新行出现
+      await this.sleep(2000);
+      const snippet = body.slice(0, 12);
+      const verifyJs = `(function(){
+        var snip = ${JSON.stringify(snippet)};
+        var el = document.querySelector('#content-textarea') || document.querySelector('.engage-bar.active [contenteditable="true"]');
+        var editorText = el ? (el.textContent || '').trim() : '';
+        var rows = Array.prototype.slice.call(document.querySelectorAll('[id^="comment-"]'), 0, 3);
+        var ownRow = rows.some(function(r){ return (r.textContent || '').indexOf(snip) >= 0; });
+        var cleared = !editorText || editorText.indexOf(snip) < 0;
+        return JSON.stringify({cleared: cleared, ownRow: ownRow});
+      })()`;
+      const vRaw = await evalRaw<string>(this.deps.cdp, verifyJs);
+      const v = typeof vRaw === 'string' ? JSON.parse(vRaw) : vRaw;
+      if (v?.cleared && v?.ownRow) {
+        this.logger('[browse] ✓ 评论发布成功（编辑器清空 + 自己的评论行出现）');
+        this.deps.client.reportActionCompleted?.({ action, ok: true });
+      } else {
+        this.logger(`[browse] ⚠ 评论提交后未确认生效 (cleared=${v?.cleared}, ownRow=${v?.ownRow})`);
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'state_unchanged' });
+      }
+    } catch (err) {
+      this.logger(`[browse] comment 执行失败：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action, ok: false, reason: (err as Error).message });
     }
   }

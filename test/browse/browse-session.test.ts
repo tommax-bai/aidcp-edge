@@ -158,6 +158,71 @@ async function startAndPush(sess: BrowseSession, commands: Envelope[]): Promise<
   await done;
 }
 
+// ======== executeComment（发评论）测试：绝不静默假成功 ========
+
+function commentHarness(opts: { editorError?: boolean; verify?: { cleared: boolean; ownRow: boolean } }): Harness {
+  const h = makeHarness();
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method !== 'Runtime.evaluate') return {} as never;
+      const expr = String(params.expression ?? '');
+      if (expr.includes('ownRow')) {
+        return { result: { value: JSON.stringify(opts.verify ?? { cleared: true, ownRow: true }) } } as never;
+      }
+      if (expr.includes('content-textarea')) {
+        return { result: { value: opts.editorError ? '{"error":"no-editor"}' : '{"x":200,"y":200}' } } as never;
+      }
+      if (expr.includes('btn.submit')) {
+        return { result: { value: '{"x":300,"y":300}' } } as never;
+      }
+      if (expr.includes('content-edit')) {
+        return { result: { value: '{"x":100,"y":100}' } } as never;
+      }
+      if (expr.includes('engage-bar')) return { result: { value: true } } as never;
+      return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+    },
+  };
+  return h;
+}
+
+test('executeComment: 编辑器清空且自己的评论行出现 → ok:true', async () => {
+  const h = commentHarness({ verify: { cleared: true, ownRow: true } });
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const c = h.completedActions.find((a) => a.action === 'comment');
+  assert.ok(c, '应上报 comment 结果');
+  assert.equal(c!.ok, true);
+});
+
+test('executeComment: 找不到编辑器 → ok:false reason no_target（不假成功）', async () => {
+  const h = commentHarness({ editorError: true });
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const c = h.completedActions.find((a) => a.action === 'comment');
+  assert.ok(c);
+  assert.equal(c!.ok, false);
+  assert.equal(c!.reason, 'no_target');
+});
+
+test('executeComment: 提交后未确认生效 → ok:false reason state_unchanged（不假成功）', async () => {
+  const h = commentHarness({ verify: { cleared: false, ownRow: false } });
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const c = h.completedActions.find((a) => a.action === 'comment');
+  assert.ok(c);
+  assert.equal(c!.ok, false);
+  assert.equal(c!.reason, 'state_unchanged');
+});
+
 // ======== 命令驱动模式测试 ========
 
 test('browse-session: start 后上报 page.cards', async () => {
