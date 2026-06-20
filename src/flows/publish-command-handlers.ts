@@ -52,6 +52,85 @@ function buildSelectModeRequest(): ActionRequest {
   };
 }
 
+// ── stage-4 元数据应用：best-effort 锚点（真实小红书 DOM 待实机 CDP 校准；未命中如实 no_target）──
+
+function normalize(s: string | null | undefined): string {
+  return (s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/** 扫 DOM 文本是否含关键词（best-effort 后置校验：确认选项/值已反映，未反映则如实失败）。 */
+function domHasText(root: Element | Document, keyword: string): boolean {
+  const kw = normalize(keyword);
+  if (!kw) return true;
+  const start = 'documentElement' in root ? ((root as Document).body ?? (root as Document).documentElement) : (root as Element);
+  for (const el of Array.from(start.querySelectorAll('*'))) {
+    const signals = [
+      el.textContent,
+      el.getAttribute('aria-label'),
+      el.getAttribute('value'),
+      el.getAttribute('title'),
+      (el as { value?: string }).value, // 表单控件：值在 property 上而非 attribute
+    ];
+    if (signals.some((s) => normalize(s).includes(kw))) return true;
+  }
+  return false;
+}
+
+/** 关键词后置校验器（best-effort）：校验目标值/关键词已出现在页面。 */
+function valueValidator(keyword: string): PostValidator {
+  return { validate: (_req: ActionRequest, root: Element | Document) => domHasText(root, keyword) };
+}
+
+const CANDIDATE_ANCHOR: Record<string, { actionId: string; text: string; goal: string }> = {
+  mention: { actionId: 'note.publish_mention', text: '@', goal: '在发布页 @提及用户：找到 @ 入口/输入框，输入用户名并从候选列表选择' },
+  location: { actionId: 'note.publish_location', text: '地点', goal: '在发布页添加地点：找到地点/位置入口，输入并从候选选择' },
+  collection: { actionId: 'note.publish_collection', text: '合集', goal: '在发布页加入合集/专辑：找到合集入口，选择目标合集' },
+};
+
+/** add_with_candidate 按 candidateKind 路由：topic 用话题锚点，其余 mention/location/collection 用各自锚点。 */
+function buildCandidateRequest(candidateKind: string | undefined, value: string): ActionRequest {
+  if (!candidateKind || candidateKind === 'topic') return buildTagInputRequest(value);
+  const a = CANDIDATE_ANCHOR[candidateKind] ?? CANDIDATE_ANCHOR.mention;
+  return {
+    actionId: a.actionId,
+    op: 'input',
+    value,
+    goal: `${a.goal}。当前要加入的是「${value}」。`,
+    anchorHint: { text: a.text, textMatch: 'contains' },
+  };
+}
+
+const OPTION_KEYWORD: Record<string, string> = {
+  visibility: '可见范围',
+  comment_permission: '评论',
+  save_permission: '保存',
+  declaration_ai: 'AI',
+  declaration_ad: '广告',
+  declaration_origin: '原创',
+};
+
+/** set_option：按 optionKind 定位开关/选项控件，设为 optionValue（best-effort）。 */
+function buildSetOptionRequest(optionKind: string | undefined, optionValue: string): ActionRequest {
+  const kw = OPTION_KEYWORD[optionKind ?? ''] ?? optionKind ?? '选项';
+  return {
+    actionId: `note.publish_set_option.${optionKind ?? 'unknown'}`,
+    op: 'click',
+    goal: `在发布页设置「${kw}」为「${optionValue}」：找到对应的开关/下拉/单选控件并选中目标值`,
+    anchorHint: { text: kw, textMatch: 'contains' },
+  };
+}
+
+/** set_schedule：定位定时发布控件并设定时刻（best-effort）。 */
+function buildSetScheduleRequest(publishTime: number): ActionRequest {
+  return {
+    actionId: 'note.publish_set_schedule',
+    op: 'input',
+    value: String(publishTime),
+    goal: '在发布页设置定时发布：打开「定时发布」并填入目标时刻',
+    anchorHint: { text: '定时', textMatch: 'contains' },
+  };
+}
+
 export class PublishCommandDispatcher {
   private readonly clock: () => number;
 
@@ -96,11 +175,16 @@ export class PublishCommandDispatcher {
       }
       case 'add_with_candidate': {
         const value = payload.params.value ?? '';
-        return this.runAtom(
-          payload,
-          buildTagInputRequest(value),
-          new PublishStepValidator({ step: 'input_tag', currentTag: value, payload: synthPayload(payload) }),
-        );
+        const candidateKind = payload.params.candidateKind;
+        // topic 走话题专用步骤校验器；mention/location/collection 用 best-effort 值校验。
+        if (!candidateKind || candidateKind === 'topic') {
+          return this.runAtom(
+            payload,
+            buildTagInputRequest(value),
+            new PublishStepValidator({ step: 'input_tag', currentTag: value, payload: synthPayload(payload) }),
+          );
+        }
+        return this.runAtom(payload, buildCandidateRequest(candidateKind, value), valueValidator(value));
       }
       case 'submit_publish':
         return this.runAtom(
@@ -110,11 +194,21 @@ export class PublishCommandDispatcher {
         );
       case 'capture_postId':
         return this.runCapturePostId(payload);
-      // 本阶段协议已登记、处理器未实装的 kind：诚实回 kind_not_implemented，绝不假成功。
+      case 'set_option': {
+        const optionValue = payload.params.optionValue ?? payload.params.value ?? '';
+        return this.runAtom(
+          payload,
+          buildSetOptionRequest(payload.params.optionKind, optionValue),
+          valueValidator(optionValue),
+        );
+      }
+      case 'set_schedule': {
+        const publishTime = payload.params.publishTime ?? 0;
+        return this.runAtom(payload, buildSetScheduleRequest(publishTime), valueValidator('定时'));
+      }
+      // 配图链路（URL→下载→上传 CDP 桥）延后到 publish-media-upload change：诚实回 kind_not_implemented，绝不假成功。
       case 'upload_image':
       case 'set_cover':
-      case 'set_option':
-      case 'set_schedule':
         return this.notImplemented(payload);
       default:
         return this.notImplemented(payload);

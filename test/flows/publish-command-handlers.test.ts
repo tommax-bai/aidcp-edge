@@ -35,17 +35,26 @@ class LiveDom implements DomProvider {
 class FakeSelector implements ElementSelector {
   async select(goal: string, els: ElementDescriptor[]): Promise<SelectionResult> {
     const byId = (id: string) => els.find((el) => el.attributes['data-action-id'] === id);
-    const preferred =
-      (goal.includes('进入') && byId(XHS_PUBLISH_ENTRY_ACTION_ID)) ||
-      (goal.includes('图文') && byId(XHS_PUBLISH_ENTRY_ACTION_ID)) ||
-      (goal.includes('标题') && byId(XHS_PUBLISH_TITLE_ACTION_ID)) ||
-      ((goal.includes('正文') || goal.includes('内容')) && byId(XHS_PUBLISH_CONTENT_ACTION_ID)) ||
-      ((goal.includes('标签') || goal.includes('话题')) && byId(XHS_PUBLISH_TAG_ACTION_ID)) ||
-      ((goal.includes('提交') || goal.includes('发布')) && byId(XHS_PUBLISH_SUBMIT_ACTION_ID)) ||
-      els[0];
-    return preferred
-      ? { index: preferred.index, element: preferred, reason: 'picked' }
-      : { index: null, reason: 'none' };
+    // (关键词命中, 目标 action-id) 路由表，首条命中即定向；命中但元素缺失 → null（诚实 no_target，不退而求其次）。
+    const routes: Array<[boolean, string]> = [
+      [goal.includes('进入') || goal.includes('图文'), XHS_PUBLISH_ENTRY_ACTION_ID],
+      [goal.includes('标题'), XHS_PUBLISH_TITLE_ACTION_ID],
+      [goal.includes('正文') || goal.includes('内容'), XHS_PUBLISH_CONTENT_ACTION_ID],
+      [goal.includes('@提及'), 'note.publish_mention'],
+      [goal.includes('地点'), 'note.publish_location'],
+      [goal.includes('合集'), 'note.publish_collection'],
+      [goal.includes('可见范围'), 'note.publish_set_option.visibility'],
+      [goal.includes('AI'), 'note.publish_set_option.declaration_ai'],
+      [goal.includes('定时'), 'note.publish_set_schedule'],
+      [goal.includes('标签') || goal.includes('话题'), XHS_PUBLISH_TAG_ACTION_ID],
+      [goal.includes('提交') || goal.includes('发布'), XHS_PUBLISH_SUBMIT_ACTION_ID],
+    ];
+    for (const [match, id] of routes) {
+      if (!match) continue;
+      const el = byId(id);
+      return el ? { index: el.index, element: el, reason: 'picked' } : { index: null, reason: 'none' };
+    }
+    return els[0] ? { index: els[0].index, element: els[0], reason: 'picked' } : { index: null, reason: 'none' };
   }
 }
 
@@ -128,12 +137,60 @@ test('AC-CMD capture_postId 抓不到 → ok:false error=no_target（红线：MU
   assert.equal(res.value, undefined);
 });
 
-test('AC-CMD 未实装 kind（upload_image）→ ok:false error=kind_not_implemented（不假成功）', async () => {
+test('AC-CMD 配图 kind（upload_image/set_cover）延后 → ok:false error=kind_not_implemented（不假成功）', async () => {
   const doc = buildDom(publishPageHtml());
   const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
-  for (const kind of ['upload_image', 'set_cover', 'set_option', 'set_schedule'] as const) {
+  // 配图链路（下载/上传 CDP 桥）延后到 publish-media-upload；set_option/set_schedule 已实装，不在此列。
+  for (const kind of ['upload_image', 'set_cover'] as const) {
     const res = await dispatcher.dispatch(cmd(kind, { imageUrl: 'https://cdn/x.jpg' }));
     assert.equal(res.ok, false, `${kind} 应 ok:false`);
     assert.equal(res.error, 'kind_not_implemented', `${kind} 应回 kind_not_implemented`);
   }
+});
+
+test('AC-CMD-S4 add_with_candidate 按 candidateKind 路由：mention/location/collection 各入对应控件 + 值校验', async () => {
+  const extra = `
+    <input data-action-id="note.publish_mention" placeholder="@提及用户" />
+    <input data-action-id="note.publish_location" placeholder="添加地点" />
+    <input data-action-id="note.publish_collection" placeholder="加入合集" />
+  `;
+  const doc = buildDom(publishPageHtml(extra));
+  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+
+  const mention = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'mention', value: '老王' }));
+  assert.equal(mention.ok, true, 'mention 应成功');
+  assert.equal((doc.querySelector('[data-action-id="note.publish_mention"]') as HTMLInputElement).value, '老王');
+
+  const location = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'location', value: '上海' }));
+  assert.equal(location.ok, true, 'location 应成功');
+  assert.equal((doc.querySelector('[data-action-id="note.publish_location"]') as HTMLInputElement).value, '上海');
+
+  const collection = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'collection', value: '技术札记' }));
+  assert.equal(collection.ok, true, 'collection 应成功');
+});
+
+test('AC-CMD-S4 add_with_candidate(mention) 控件缺失 → ok:false（诚实 no_target，不假成功）', async () => {
+  const doc = buildDom(publishPageHtml()); // 无 mention 控件
+  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)), { maxAttempts: 2 });
+  const res = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'mention', value: '查无此控件' }));
+  assert.equal(res.ok, false);
+  assert.ok(res.error, '失败必须带真实 error');
+});
+
+test('AC-CMD-S4 set_option(visibility) → 定位选项控件 + 值校验通过', async () => {
+  const extra = `<button data-action-id="note.publish_set_option.visibility">公开</button>`;
+  const doc = buildDom(publishPageHtml(extra));
+  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const res = await dispatcher.dispatch(cmd('set_option', { optionKind: 'visibility', optionValue: '公开' }));
+  assert.equal(res.ok, true);
+  assert.equal(res.kind, 'set_option');
+});
+
+test('AC-CMD-S4 set_schedule → 定位定时控件 + 值写入', async () => {
+  const extra = `<label>定时发布</label><input data-action-id="note.publish_set_schedule" placeholder="选择时间" />`;
+  const doc = buildDom(publishPageHtml(extra));
+  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const res = await dispatcher.dispatch(cmd('set_schedule', { publishTime: 1800000000000 }));
+  assert.equal(res.ok, true);
+  assert.equal(res.kind, 'set_schedule');
 });

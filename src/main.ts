@@ -127,7 +127,8 @@ async function main(): Promise<void> {
           },
           {},
           env.payload,
-          process.env.AIDCP_REAL_PUBLISH === 'true'
+          // A 阶段4：人审默认必过（AC-PUB）——缺省/任何非 'false' 值都挂闸；仅显式 AIDCP_REAL_PUBLISH=false 才跳过（本地开发）。
+          process.env.AIDCP_REAL_PUBLISH !== 'false'
             ? {
                 requestId,
                 pollIntervalMs: Number(process.env.AIDCP_PUBLISH_APPROVAL_POLL_MS ?? 2_000),
