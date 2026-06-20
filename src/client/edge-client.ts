@@ -28,6 +28,7 @@ import {
   type RemoteAnchor,
   type NoteContentPayload,
   type PublishRequestPayload,
+  type PublishCommandPayload,
   type ActionCompletedPayload,
   type PageCardsPayload,
   type NoteDetailPayload,
@@ -57,6 +58,8 @@ export interface StepRunner {
  */
 export type BrowseCommandHandler = (env: Envelope) => void;
 export type PublishCommandHandler = (env: Envelope<PublishRequestPayload>) => void;
+/** A 阶段1 指令驱动发布：单条参数化原子指令处理器（publish.command）。 */
+export type PublishAtomCommandHandler = (env: Envelope<PublishCommandPayload>) => void;
 
 export interface EdgeClientOptions {
   /** 云端 WS 地址，如 ws://127.0.0.1:8787 */
@@ -112,6 +115,7 @@ export class EdgeClient {
   private connected = false;
   private browseHandler?: BrowseCommandHandler;
   private publishHandler?: PublishCommandHandler;
+  private publishAtomHandler?: PublishAtomCommandHandler;
 
   constructor(options: EdgeClientOptions) {
     this.opts = {
@@ -189,6 +193,14 @@ export class EdgeClient {
     this.publishHandler = handler;
     return () => {
       if (this.publishHandler === handler) this.publishHandler = undefined;
+    };
+  }
+
+  /** 注册 A 阶段1 指令驱动发布处理器（publish.command 逐条原子指令）。 */
+  onPublishAtomCommand(handler: PublishAtomCommandHandler): () => void {
+    this.publishAtomHandler = handler;
+    return () => {
+      if (this.publishAtomHandler === handler) this.publishAtomHandler = undefined;
     };
   }
 
@@ -310,6 +322,11 @@ export class EdgeClient {
 
     if (env.type === 'publish.request') {
       this.publishHandler?.(env as Envelope<PublishRequestPayload>);
+      return;
+    }
+
+    if (env.type === 'publish.command') {
+      this.publishAtomHandler?.(env as Envelope<PublishCommandPayload>);
       return;
     }
 

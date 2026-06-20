@@ -123,6 +123,8 @@ export const XHS_PUBLISH_CONTENT_ACTION_ID = 'note.publish_content';
 export const XHS_PUBLISH_TAG_ACTION_ID = 'note.publish_tag';
 /** XHS 提交发布按钮的稳定 actionId。 */
 export const XHS_PUBLISH_SUBMIT_ACTION_ID = 'note.publish_submit';
+/** XHS 选择「图文」发布模式（vs 视频）的稳定 actionId（A 指令运行时 select_mode）。 */
+export const XHS_PUBLISH_SELECT_MODE_ACTION_ID = 'note.publish_select_mode';
 
 const XHS_PUBLISH_SCOPE: ScopeSpec = {
   selector:
@@ -135,6 +137,15 @@ export const XHS_PUBLISH_ENTRY_GOAL =
   '进入笔记发布页：找到页面中的发布/创作入口按钮，常见文本/可访问名可能是「发布」「去发布」「发笔记」「写笔记」「创建」「创作中心」「发布笔记」「发图文」。';
 export const XHS_PUBLISH_ENTRY_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
   text: '创作',
+  textMatch: 'contains',
+};
+
+// 选择「图文」发布模式：进创作页后，小红书 web 端通常先让选「上传图文 / 上传视频」。
+// 点「上传图文」既切到图文模式、也常触发选图器。选择器为最佳推断，实机未命中时如实 no_target、待 CDP 校准。
+export const XHS_PUBLISH_SELECT_MODE_GOAL =
+  '在创作页选择「图文」发布模式：找到「上传图文」「写图文」「图文」之类的按钮/标签（区别于「上传视频」），点击进入图文笔记编辑。';
+export const XHS_PUBLISH_SELECT_MODE_ANCHOR_HINT: Omit<Anchor, 'actionId'> = {
+  text: '图文',
   textMatch: 'contains',
 };
 

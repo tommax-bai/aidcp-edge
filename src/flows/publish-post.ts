@@ -135,7 +135,7 @@ function readInputValue(el: Element | null): string {
   return el.getAttribute('value') ?? el.textContent ?? '';
 }
 
-function extractPostId(root: Element | Document): string | undefined {
+export function extractPostId(root: Element | Document): string | undefined {
   const all = Array.from(rootElement(root).querySelectorAll('*'));
   for (const el of all) {
     for (const attr of ['data-post-id', 'data-note-id', 'data-id', 'data-postid']) {

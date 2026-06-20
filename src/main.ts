@@ -32,9 +32,10 @@ import { EdgeClient } from './client/edge-client.js';
 import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
 import { publishPost } from './flows/publish-post.js';
+import { PublishCommandDispatcher } from './flows/publish-command-handlers.js';
 import { AnchorCache } from './locating/cache.js';
 import { buildPublishApprovalRequestId } from './publish/approval-gate.js';
-import type { PublishResultPayload } from './comm/protocol.js';
+import type { PublishResultPayload, PublishCommandResultPayload } from './comm/protocol.js';
 import {
   BrowseSession,
   CdpFeedScroller,
@@ -143,6 +144,37 @@ async function main(): Promise<void> {
         client.send('publish.result', result, env.id);
       } catch (sendErr) {
         console.error('[aidcp-edge] publish.result 回传失败:', sendErr);
+      }
+    })();
+  });
+
+  // A 阶段1 指令驱动发布：云端逐条下发 publish.command，边缘逐条执行 + 后置校验 + 如实回报。
+  // 与上面 publish.request 旧整页路径并行（地基阶段不删旧路）。
+  const publishDispatcher = new PublishCommandDispatcher({
+    dom: session.dom,
+    executor: session.executor,
+    selector,
+    cache: publishCache,
+  });
+  client.onPublishAtomCommand((env) => {
+    void (async () => {
+      let result: PublishCommandResultPayload;
+      try {
+        result = await publishDispatcher.dispatch(env.payload);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        result = {
+          recordId: env.payload.recordId,
+          seq: env.payload.seq,
+          kind: env.payload.kind,
+          ok: false,
+          error: `dispatch_error: ${message}`,
+        };
+      }
+      try {
+        client.send('publish.command.result', result, env.id);
+      } catch (sendErr) {
+        console.error('[aidcp-edge] publish.command.result 回传失败:', sendErr);
       }
     })();
   });
