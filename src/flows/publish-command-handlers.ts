@@ -13,6 +13,7 @@ import { LocatingEngine } from '../locating/engine.js';
 import type { ActionRequest, ActionResult, PostValidator } from '../locating/index.js';
 import type { EngineDeps, EngineOptions } from '../locating/engine.js';
 import type { ImageUploader } from './image-uploader.js';
+import type { CdpLike } from '../cdp/file-input-setter.js';
 import type {
   PublishCommandPayload,
   PublishCommandResultPayload,
@@ -163,6 +164,8 @@ const XHS_CREATOR_PUBLISH_URL = 'https://creator.xiaohongshu.com/publish/publish
 
 export class PublishCommandDispatcher {
   private readonly clock: () => number;
+  private inputEnabled = false;
+  private domEnabled = false;
 
   constructor(
     private readonly deps: PublishCommandDeps,
@@ -170,8 +173,12 @@ export class PublishCommandDispatcher {
     clock: () => number = Date.now,
     /** 配图上传器（publish-media-upload）；未注入时 upload_image 诚实回 kind_not_implemented。 */
     private readonly uploader?: ImageUploader,
-    /** 直达导航（CDP Page.navigate）；注入时 navigate_entry 用它直达创作发布页，未注入回退点击入口。 */
-    private readonly navigate?: (url: string) => Promise<void>,
+    /**
+     * 原始 CDP（注入时用于发布页的"已校准直驱"步骤——navigate_entry 用 Page.navigate 直达、
+     * select_mode 用 in-page click 选「上传图文」标签——绕开通用 extractor/LLM 选择器对发布页特殊 UI 的不可靠定位）。
+     * 未注入则回退通用 LocatingEngine 路径。
+     */
+    private readonly cdp?: CdpLike,
   ) {
     this.clock = clock;
   }
@@ -182,27 +189,9 @@ export class PublishCommandDispatcher {
       case 'navigate_entry':
         return this.runNavigateEntry(payload);
       case 'select_mode':
-        // 选图文模式后，标题/正文编辑区应出现 → 复用 enter_publish_page 的 isPublishPage 后置校验。
-        return this.runAtom(
-          payload,
-          buildSelectModeRequest(),
-          new PublishStepValidator({ step: 'enter_publish_page', payload: synthPayload(payload) }),
-        );
-      case 'fill_field': {
-        const value = payload.params.value ?? '';
-        if (payload.params.fieldType === 'content') {
-          return this.runAtom(
-            payload,
-            buildContentInputRequest(value),
-            new PublishStepValidator({ step: 'input_content', payload: { title: '', content: value, tags: [] } }),
-          );
-        }
-        return this.runAtom(
-          payload,
-          buildTitleInputRequest(value),
-          new PublishStepValidator({ step: 'input_title', payload: { title: value, content: '', tags: [] } }),
-        );
-      }
+        return this.runSelectMode(payload);
+      case 'fill_field':
+        return this.runFillField(payload);
       case 'add_with_candidate': {
         const value = payload.params.value ?? '';
         const candidateKind = payload.params.candidateKind;
@@ -217,11 +206,7 @@ export class PublishCommandDispatcher {
         return this.runAtom(payload, buildCandidateRequest(candidateKind, value), valueValidator(value));
       }
       case 'submit_publish':
-        return this.runAtom(
-          payload,
-          buildSubmitPublishRequest(),
-          new PublishStepValidator({ step: 'submit_publish', payload: synthPayload(payload) }),
-        );
+        return this.runSubmit(payload);
       case 'capture_postId':
         return this.runCapturePostId(payload);
       case 'set_option': {
@@ -251,8 +236,8 @@ export class PublishCommandDispatcher {
    * 导航后绑定式轮询 isPublishPage 后置校验；未注入 navigate 时回退原点击入口逻辑。
    */
   private async runNavigateEntry(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
-    if (!this.navigate) {
-      // 回退：无直达导航能力时，沿用点击入口 + 后置校验。
+    if (!this.cdp) {
+      // 回退：无 CDP 直驱能力时，沿用点击入口 + 后置校验。
       return this.runAtom(
         payload,
         buildEnterPublishPageRequest(),
@@ -263,7 +248,7 @@ export class PublishCommandDispatcher {
     const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
     const details = { actionId: 'note.publish_entry', durationMs: 0 };
     try {
-      await this.navigate(XHS_CREATOR_PUBLISH_URL);
+      await this.cdp.send('Page.navigate', { url: XHS_CREATOR_PUBLISH_URL });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { ...base, ok: false, error: `navigate_failed: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
@@ -271,7 +256,7 @@ export class PublishCommandDispatcher {
     // 绑定式轮询：等创作发布页渲染出来（isPublishPage 命中）。
     const validator = new PublishStepValidator({ step: 'enter_publish_page', payload: synthPayload(payload) });
     const req = buildEnterPublishPageRequest();
-    const deadline = this.clock() + 15_000;
+    const deadline = this.clock() + 20_000;
     for (;;) {
       let root: Element | Document | undefined;
       try {
@@ -285,6 +270,226 @@ export class PublishCommandDispatcher {
       if (this.clock() >= deadline) {
         return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
       }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
+  /**
+   * 选「上传图文」模式：发布页特殊 UI（div.creator-tab 非标准可交互元素），通用 extractor/LLM 选择器不可靠。
+   * 用 CDP in-page click 直驱（task-0 校准实证可用），再绑定式轮询确认进入图文模式（文件输入 accept 变为图片类）。
+   */
+  private async runSelectMode(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+    if (!this.cdp) {
+      return this.runAtom(
+        payload,
+        buildSelectModeRequest(),
+        new PublishStepValidator({ step: 'enter_publish_page', payload: synthPayload(payload) }),
+      );
+    }
+    const startedAt = this.clock();
+    const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
+    const details = { actionId: XHS_PUBLISH_SELECT_MODE_ACTION_ID, durationMs: 0 };
+    const CLICK_TAB = String.raw`(() => {
+      const els = Array.from(document.querySelectorAll('div,span,[role=tab],[role=button]'));
+      const tab = els.find((e) => (e.innerText || '').trim() === '上传图文' && (String(e.className || '')).includes('creator-tab'))
+        || els.find((e) => (e.innerText || '').trim() === '上传图文' && (String(e.className || '')).includes('tab'))
+        || els.find((e) => (e.innerText || '').trim() === '上传图文');
+      if (!tab) return { clicked: false };
+      try { tab.scrollIntoView({ block: 'center' }); } catch (e) {}
+      tab.click();
+      return { clicked: true };
+    })()`;
+    const IMG_MODE_ACTIVE = String.raw`(() => {
+      const fi = document.querySelector('input[type=file]');
+      const acc = (fi && fi.getAttribute('accept')) || '';
+      if (/jpg|jpeg|png|webp/i.test(acc)) return true;
+      const body = (document.body && document.body.innerText) || '';
+      return body.includes('上传图片') || body.includes('文字配图');
+    })()`;
+    // 标签在导航后异步渲染——轮询重试点击，直到点中或超时（一次性点击会因渲染晚而 no_target）。
+    const clickDeadline = this.clock() + 12_000;
+    let clicked = false;
+    for (;;) {
+      try {
+        const r = await this.cdp.send<{ result?: { value?: { clicked?: boolean } } }>('Runtime.evaluate', {
+          expression: CLICK_TAB,
+          returnByValue: true,
+        });
+        if (r?.result?.value?.clicked) { clicked = true; break; }
+      } catch {
+        // 瞬时 evaluate 失败，继续重试
+      }
+      if (this.clock() >= clickDeadline) break;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    if (!clicked) {
+      return { ...base, ok: false, error: 'no_target', details: { ...details, durationMs: this.clock() - startedAt } };
+    }
+    const deadline = this.clock() + 10_000;
+    for (;;) {
+      try {
+        const c = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', {
+          expression: IMG_MODE_ACTIVE,
+          returnByValue: true,
+        });
+        if (c?.result?.value === true) {
+          return { ...base, ok: true, details: { ...details, durationMs: this.clock() - startedAt } };
+        }
+      } catch {
+        // 忽略瞬时 evaluate 失败，继续轮询
+      }
+      if (this.clock() >= deadline) {
+        return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
+      }
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+
+  private async ensureInputEnabled(): Promise<void> {
+    if (!this.cdp || this.inputEnabled) return;
+    try {
+      await this.cdp.send('Input.enable');
+    } catch {
+      // 某些环境 Input 无需显式 enable；失败忽略，insertText 仍可尝试。
+    }
+    this.inputEnabled = true;
+  }
+
+  /**
+   * 填标题/正文：标题是 React 受控 input、正文是 tiptap contenteditable——JS 直接赋 value/textContent 都不被框架接收。
+   * 用 CDP 真实输入：聚焦目标（校准选择器）→ Input.insertText（React/tiptap 都正确响应）→ 后置校验值真进去。
+   */
+  private async runFillField(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+    const value = payload.params.value ?? '';
+    const isContent = payload.params.fieldType === 'content';
+    if (!this.cdp) {
+      return isContent
+        ? this.runAtom(payload, buildContentInputRequest(value), new PublishStepValidator({ step: 'input_content', payload: { title: '', content: value, tags: [] } }))
+        : this.runAtom(payload, buildTitleInputRequest(value), new PublishStepValidator({ step: 'input_title', payload: { title: value, content: '', tags: [] } }));
+    }
+    const startedAt = this.clock();
+    const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
+    const details = { actionId: isContent ? 'note.publish_content' : 'note.publish_title', durationMs: 0 };
+    // 校准选择器：标题=placeholder「填写标题会有更多赞哦」的 input；正文=tiptap.ProseMirror。
+    const findExpr = isContent
+      ? `document.querySelector('.tiptap.ProseMirror') || document.querySelector('[contenteditable="true"]')`
+      : `document.querySelector('input[placeholder="填写标题会有更多赞哦"]') || document.querySelector('div.edit-container input.d-text') || document.querySelector('input.d-text')`;
+    const FOCUS = String.raw`(() => { const el = ${findExpr}; if (!el) return false; try { el.scrollIntoView({ block: 'center' }); } catch (e) {} el.focus(); try { el.click && el.click(); } catch (e) {} return true; })()`;
+    const probe = JSON.stringify(value.slice(0, 8));
+    const CHECK = isContent
+      ? String.raw`(() => { const el = ${findExpr}; return !!el && (el.innerText || '').includes(${probe}); })()`
+      : String.raw`(() => { const el = ${findExpr}; return !!el && (el.value || '').includes(${probe}); })()`;
+    try {
+      await this.ensureInputEnabled();
+      const f = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: FOCUS, returnByValue: true });
+      if (f?.result?.value !== true) {
+        return { ...base, ok: false, error: 'no_target', details: { ...details, durationMs: this.clock() - startedAt } };
+      }
+      await this.cdp.send('Input.insertText', { text: value });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ...base, ok: false, error: `engine_error: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
+    }
+    const deadline = this.clock() + 5_000;
+    for (;;) {
+      try {
+        const c = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: CHECK, returnByValue: true });
+        if (c?.result?.value === true) return { ...base, ok: true, details: { ...details, durationMs: this.clock() - startedAt } };
+      } catch {
+        // 忽略瞬时失败，继续轮询
+      }
+      if (this.clock() >= deadline) return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+
+  /**
+   * 穿透闭合 shadow 找「文本恰为 label 的元素」的盒模型中心点（CDP DOM 协议级可见闭合 shadow）。
+   * 多命中时取最靠下者（底部操作栏）。返回视口 CSS 像素中心坐标，供 Input 坐标点击。
+   */
+  private async findShadowButtonCenter(label: string): Promise<{ x: number; y: number } | null> {
+    if (!this.cdp) return null;
+    if (!this.domEnabled) {
+      try {
+        await this.cdp.send('DOM.enable');
+      } catch {
+        // 已 enable 或无需 enable
+      }
+      this.domEnabled = true;
+    }
+    const doc = await this.cdp.send<{ root?: unknown }>('DOM.getDocument', { depth: -1, pierce: true });
+    const hits: number[] = [];
+    const walk = (n: any): void => {
+      if (!n || typeof n !== 'object') return;
+      if (n.nodeType === 1 && Array.isArray(n.children)) {
+        if (n.children.some((c: any) => c.nodeType === 3 && (c.nodeValue || '').trim() === label)) {
+          hits.push(n.nodeId);
+        }
+      }
+      for (const c of n.children || []) walk(c);
+      for (const sr of n.shadowRoots || []) walk(sr);
+      if (n.contentDocument) walk(n.contentDocument);
+    };
+    walk((doc as { root?: unknown }).root);
+    let best: { x: number; y: number; cy: number } | null = null;
+    for (const nodeId of hits) {
+      try {
+        const bm = await this.cdp.send<{ model?: { content?: number[] } }>('DOM.getBoxModel', { nodeId });
+        const q = bm?.model?.content;
+        if (!q || q.length < 8) continue;
+        const cx = (q[0] + q[2] + q[4] + q[6]) / 4;
+        const cy = (q[1] + q[3] + q[5] + q[7]) / 4;
+        if (!best || cy > best.cy) best = { x: Math.round(cx), y: Math.round(cy), cy };
+      } catch {
+        // 文本节点 / 无布局节点无盒模型，跳过
+      }
+    }
+    return best ? { x: best.x, y: best.y } : null;
+  }
+
+  /**
+   * 点「发布」提交：发布栏是自定义元素 <xhs-publish-btn>（闭合 shadow，文本搜不到）；
+   * 「发布」为其右侧红色按钮、「暂存离开」在左。用坐标点击宿主右侧区域（安全避开左侧暂存），再后置校验发布成功。
+   */
+  private async runSubmit(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+    if (!this.cdp) {
+      return this.runAtom(payload, buildSubmitPublishRequest(), new PublishStepValidator({ step: 'submit_publish', payload: synthPayload(payload) }));
+    }
+    const startedAt = this.clock();
+    const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
+    const details = { actionId: 'note.publish_submit', durationMs: 0 };
+    // 发布按钮在 <xhs-publish-btn> 闭合 shadow 内（BUTTON.ce-btn.bg-red，文本「发布」）；CDP DOM 穿透闭合 shadow 取精确盒模型中心点。
+    let center: { x: number; y: number } | null = null;
+    try {
+      await this.ensureInputEnabled();
+      center = await this.findShadowButtonCenter('发布');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ...base, ok: false, error: `engine_error: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
+    }
+    if (!center) {
+      return { ...base, ok: false, error: 'no_target', details: { ...details, durationMs: this.clock() - startedAt } };
+    }
+    const { x, y } = center;
+    try {
+      await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      await this.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+      await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ...base, ok: false, error: `engine_error: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
+    }
+    // 后置校验：发布成功信号（出现成功提示 / 离开发布编辑页）。
+    const CHECK = String.raw`(() => { const b = (document.body && document.body.innerText) || ''; return /发布成功|发布中|笔记已?发布|成功发布|稍后可在/.test(b) || !location.href.includes('/publish/publish'); })()`;
+    const deadline = this.clock() + 15_000;
+    for (;;) {
+      try {
+        const c = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: CHECK, returnByValue: true });
+        if (c?.result?.value === true) return { ...base, ok: true, details: { ...details, durationMs: this.clock() - startedAt } };
+      } catch {
+        // 忽略瞬时失败
+      }
+      if (this.clock() >= deadline) return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
       await new Promise((r) => setTimeout(r, 500));
     }
   }
