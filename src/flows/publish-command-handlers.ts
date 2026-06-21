@@ -158,6 +158,9 @@ function coverActiveValidator(): PostValidator {
   };
 }
 
+/** 创作平台图文发布页（navigate_entry 直达；跨子域点击入口会开新标签、edge 看不到，故用 Page.navigate）。 */
+const XHS_CREATOR_PUBLISH_URL = 'https://creator.xiaohongshu.com/publish/publish?source=official';
+
 export class PublishCommandDispatcher {
   private readonly clock: () => number;
 
@@ -167,6 +170,8 @@ export class PublishCommandDispatcher {
     clock: () => number = Date.now,
     /** 配图上传器（publish-media-upload）；未注入时 upload_image 诚实回 kind_not_implemented。 */
     private readonly uploader?: ImageUploader,
+    /** 直达导航（CDP Page.navigate）；注入时 navigate_entry 用它直达创作发布页，未注入回退点击入口。 */
+    private readonly navigate?: (url: string) => Promise<void>,
   ) {
     this.clock = clock;
   }
@@ -175,11 +180,7 @@ export class PublishCommandDispatcher {
   async dispatch(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
     switch (payload.kind) {
       case 'navigate_entry':
-        return this.runAtom(
-          payload,
-          buildEnterPublishPageRequest(),
-          new PublishStepValidator({ step: 'enter_publish_page', payload: synthPayload(payload) }),
-        );
+        return this.runNavigateEntry(payload);
       case 'select_mode':
         // 选图文模式后，标题/正文编辑区应出现 → 复用 enter_publish_page 的 isPublishPage 后置校验。
         return this.runAtom(
@@ -242,6 +243,49 @@ export class PublishCommandDispatcher {
         return this.runAtom(payload, buildSetCoverRequest(), coverActiveValidator());
       default:
         return this.notImplemented(payload);
+    }
+  }
+
+  /**
+   * 进入发布页：优先 CDP Page.navigate 直达创作发布页（跨子域点击入口会开新标签、edge 看不到）。
+   * 导航后绑定式轮询 isPublishPage 后置校验；未注入 navigate 时回退原点击入口逻辑。
+   */
+  private async runNavigateEntry(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+    if (!this.navigate) {
+      // 回退：无直达导航能力时，沿用点击入口 + 后置校验。
+      return this.runAtom(
+        payload,
+        buildEnterPublishPageRequest(),
+        new PublishStepValidator({ step: 'enter_publish_page', payload: synthPayload(payload) }),
+      );
+    }
+    const startedAt = this.clock();
+    const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
+    const details = { actionId: 'note.publish_entry', durationMs: 0 };
+    try {
+      await this.navigate(XHS_CREATOR_PUBLISH_URL);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ...base, ok: false, error: `navigate_failed: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
+    }
+    // 绑定式轮询：等创作发布页渲染出来（isPublishPage 命中）。
+    const validator = new PublishStepValidator({ step: 'enter_publish_page', payload: synthPayload(payload) });
+    const req = buildEnterPublishPageRequest();
+    const deadline = this.clock() + 15_000;
+    for (;;) {
+      let root: Element | Document | undefined;
+      try {
+        root = await this.deps.dom.getRoot();
+      } catch {
+        root = undefined;
+      }
+      if (root && validator.validate(req, root)) {
+        return { ...base, ok: true, details: { ...details, durationMs: this.clock() - startedAt } };
+      }
+      if (this.clock() >= deadline) {
+        return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
+      }
+      await new Promise((r) => setTimeout(r, 500));
     }
   }
 

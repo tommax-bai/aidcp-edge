@@ -201,6 +201,10 @@ async function main(): Promise<void> {
     {},
     Date.now,
     imageUploader,
+    // navigate_entry 直达创作发布页（CDP Page.navigate；跨子域点击入口会开新标签、edge 看不到）。
+    async (url: string) => {
+      await session.cdp.send('Page.navigate', { url });
+    },
   );
   client.onPublishAtomCommand((env) => {
     void (async () => {
