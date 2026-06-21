@@ -173,9 +173,23 @@ async function main(): Promise<void> {
   // A 阶段1 指令驱动发布：云端逐条下发 publish.command，边缘逐条执行 + 后置校验 + 如实回报。
   // 与上面 publish.request 旧整页路径并行（地基阶段不删旧路）。
   // 配图收口：CDP 文件输入桥 + 上传器（复用 session.cdp 单例，绝不重建）。
+  // task-0 实机校准（小红书创作平台发布页，图文模式）注入真实选择器：
+  // - 文件输入：图文模式下页面唯一 input[type=file] 是 input.upload-input（accept jpg/png/webp）。
+  // - 成功态：上传后预览区出现带 src 的缩略图（.img-preview-area img）；input.files 被 XHS 清零，绝不以 files.length 判定。
   const imageUploader = new ImageUploader({
-    fileInputSetter: new CdpFileInputSetter(session.cdp),
+    fileInputSetter: new CdpFileInputSetter(session.cdp, {
+      inputSelector: "document.querySelector('input.upload-input[type=file]') || document.querySelector('input[type=file]')",
+    }),
     dom: session.dom,
+    hasThumbnail: (root) => {
+      try {
+        return Array.from(root.querySelectorAll('.img-preview-area img, img#creator-preview-image-0')).some(
+          (img) => (img.getAttribute('src') || '').length > 0,
+        );
+      } catch {
+        return false;
+      }
+    },
   });
   const publishDispatcher = new PublishCommandDispatcher(
     {
