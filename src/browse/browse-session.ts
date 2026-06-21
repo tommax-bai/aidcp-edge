@@ -31,6 +31,7 @@ import type {
   InteractionCollectPayload,
   InteractionFollowPayload,
   InteractionCommentPayload,
+  InteractionLikeCommentPayload,
   NavigationBackPayload,
   NoteBrowseImagesPayload,
   NoteScrollCommentsPayload,
@@ -41,7 +42,7 @@ import type {
   NotificationBrowseFollowsPayload,
   NotificationBackHomePayload,
 } from '../comm/protocol.js';
-import type { ActionResultPayload } from '../comm/protocol.js';
+import type { ActionResultPayload, CommentCandidate } from '../comm/protocol.js';
 import type { FeedScroller, NoteCard } from './feed-scroller.js';
 import type { ModalController } from './modal-controller.js';
 import type { LoginModalWatcher } from './login-modal-watcher.js';
@@ -488,6 +489,13 @@ export class BrowseSession {
         await this.executeComment(payload.text);
         break;
       }
+      case 'interaction.like_comment': {
+        const payload = env.payload as InteractionLikeCommentPayload;
+        this.logger(`[browse] 命令: interaction.like_comment (anchor=${payload.commentAnchorId})`);
+        await this.thinkBefore(payload.thinkMs); // 点评论赞前犹豫（time directive；边缘只叠抖动，不另加停留）
+        await this.executeLikeComment(payload.commentAnchorId);
+        break;
+      }
       case 'search.execute': {
         const payload = env.payload as { keyword?: string; maxResults?: number };
         const kw = payload.keyword ?? '';
@@ -860,6 +868,82 @@ export class BrowseSession {
   }
 
   /**
+   * 给详情页内「某一条评论」点赞。靠云端给的稳定锚点 commentAnchorId 经 getElementById 重新定位，
+   * 在该评论行内点 `.interactions .like .like-wrapper`，点后按锚点复读校验 svg use #like→#liked（或赞数+1）。
+   * 红线（绝不静默假成功）：
+   *   - 锚点已不在（评论被滚走/重渲染）→ no_target，【绝不退化成「点现在在那个位置的那条」】；
+   *   - 该评论已是已赞 → already_liked，不重复点；
+   *   - 点击后状态未翻转 → state_unchanged；验证码弹窗 → blocked_by_captcha。
+   * action 一律上报为 'comment_like'（= RiskAction，云端据此记账/扣预算/抑制补救滚动）。
+   */
+  private async executeLikeComment(anchorId: string): Promise<void> {
+    const action = 'comment_like';
+    try {
+      const anchorJson = JSON.stringify(anchorId);
+      const locateJs = `(function(){
+        var row = document.getElementById(${anchorJson});
+        if (!row) return JSON.stringify({error:'no_target'});
+        var el = row.querySelector('.interactions .like .like-wrapper') || row.querySelector('.like-wrapper');
+        if (!el) return JSON.stringify({error:'no_like_btn'});
+        var use = el.querySelector('svg use');
+        var href = use ? (use.getAttribute('xlink:href') || use.getAttribute('href')) : null;
+        if (href === '#liked') return JSON.stringify({error:'already'});
+        var cntEl = el.querySelector('.count');
+        var cnt = cntEl ? (cntEl.textContent || '').trim() : null;
+        var r = el.getBoundingClientRect();
+        return JSON.stringify({x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2), href: href, count: cnt});
+      })()`;
+      const raw = await evalRaw<string>(this.deps.cdp, locateJs);
+      const result = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (result?.error) {
+        const reason = result.error === 'already' ? 'already_liked' : result.error; // no_target | no_like_btn | already_liked
+        this.logger(`[browse] comment_like 失败/跳过: ${reason} (anchor=${anchorId})`);
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason });
+        return;
+      }
+      await this.humanPause(this.actionTiming);
+      // 提交前 fresh 复检：humanPause 窗口里若弹出验证码，放弃点击（避免打进风控墙）。
+      if (await this.captchaPresentFresh()) {
+        this.logger('[browse] comment_like 提交前复检到验证码/未知阻断弹窗，放弃点击');
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'blocked_by_captcha' });
+        return;
+      }
+      const { dispatchClick } = await import('./cdp-util.js');
+      await dispatchClick(this.deps.cdp, result.x, result.y, { random: this.random });
+      // 校验：等动画后【按同一锚点复读】该评论行的赞控件，确认 use 翻成 #liked（或赞数较点前 +1）。
+      await this.sleep(1500);
+      const beforeCount = typeof result.count === 'string' ? result.count : null;
+      const verifyJs = `(function(){
+        var row = document.getElementById(${anchorJson});
+        if (!row) return JSON.stringify({href:'no_target', count:null});
+        var el = row.querySelector('.interactions .like .like-wrapper') || row.querySelector('.like-wrapper');
+        if (!el) return JSON.stringify({href:'no_btn', count:null});
+        var use = el.querySelector('svg use');
+        var href = use ? (use.getAttribute('xlink:href') || use.getAttribute('href')) : 'no-use';
+        var cntEl = el.querySelector('.count');
+        var cnt = cntEl ? (cntEl.textContent || '').trim() : null;
+        return JSON.stringify({href: href, count: cnt});
+      })()`;
+      const afterRaw = await evalRaw<string>(this.deps.cdp, verifyJs);
+      const after = typeof afterRaw === 'string' ? JSON.parse(afterRaw) : afterRaw;
+      const countIncremented =
+        beforeCount != null && after?.count != null && /^\d+$/.test(beforeCount) && /^\d+$/.test(after.count)
+          ? Number(after.count) === Number(beforeCount) + 1
+          : false;
+      if (after?.href === '#liked' || countIncremented) {
+        this.logger(`[browse] ✓ 评论点赞成功 (anchor=${anchorId})`);
+        this.deps.client.reportActionCompleted?.({ action, ok: true });
+      } else {
+        this.logger(`[browse] ⚠ comment_like 点击后状态未变化 (href=${after?.href})，可能未生效`);
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'state_unchanged' });
+      }
+    } catch (err) {
+      this.logger(`[browse] comment_like 执行失败：${(err as Error).message}`);
+      this.deps.client.reportActionCompleted?.({ action, ok: false, reason: (err as Error).message });
+    }
+  }
+
+  /**
    * 在当前打开的笔记详情页发一条评论。Cloud 已撰写 / 去AI味 / 人审通过，Edge 直接执行。
    *
    * 选择器与发布后校验信号由真机 CDP 探针坐实（scripts/comment-probe.ts）：
@@ -1159,10 +1243,52 @@ export class BrowseSession {
         return;
       }
       this.logger(`[browse] 评论区已滚动 ${moved}/${times} 次（实测 scrollTop 位移）`);
-      this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: true, reason: `scrolled=${moved}/${times}` });
+      // 终态视口快照：随手抽取当前在视口内的评论候选（锚点最新鲜）供云端 comment_like 评估。
+      // best-effort：抽不到就报空 candidates，云端据此弃权——绝不编造目标。
+      const candidates = await this.harvestCommentCandidates();
+      this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: true, reason: `scrolled=${moved}/${times}`, candidates });
     } catch (err) {
       this.logger(`[browse] 滚动评论失败：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: false, reason: (err as Error).message });
+    }
+  }
+
+  /**
+   * 终态视口快照：抽取当前视口内的评论候选 {anchorId, author?, text, alreadyLiked}，供云端 comment_like_appraiser 评估。
+   * 只取视口内行（锚点最新鲜，bound no_target 率）；alreadyLiked 由该行赞控件 svg use===#liked 判定（供云端预过滤）。
+   * best-effort：任何异常返回空数组（云端据此弃权，绝不编造目标）。
+   */
+  private async harvestCommentCandidates(): Promise<CommentCandidate[]> {
+    try {
+      const harvestJs = `(function(){
+        var rows = Array.prototype.slice.call(document.querySelectorAll('[id^="comment-"]'));
+        var out = [];
+        for (var i = 0; i < rows.length && out.length < 12; i++){
+          var r = rows[i];
+          var rect = r.getBoundingClientRect();
+          if (rect.bottom < -100 || rect.top > window.innerHeight + 100) continue; // 仅视口内（含少量缓冲）
+          var lw = r.querySelector('.interactions .like .like-wrapper') || r.querySelector('.like-wrapper');
+          var use = lw ? lw.querySelector('svg use') : null;
+          var href = use ? (use.getAttribute('xlink:href') || use.getAttribute('href')) : null;
+          var authorEl = r.querySelector('.author .name, [class*="author"] [class*="name"], [class*="nickname"], [class*="name"]');
+          var contentEl = r.querySelector('.content, [class*="content"], .note-text, p');
+          var text = (contentEl ? (contentEl.textContent || '') : (r.textContent || '')).replace(/\\s+/g, ' ').trim().slice(0, 80);
+          if (!text) continue;
+          out.push({
+            anchorId: r.id,
+            author: authorEl ? (authorEl.textContent || '').trim().slice(0, 30) : undefined,
+            text: text,
+            alreadyLiked: href === '#liked'
+          });
+        }
+        return JSON.stringify(out);
+      })()`;
+      const raw = await evalRaw<string>(this.deps.cdp, harvestJs);
+      const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return Array.isArray(arr) ? (arr as CommentCandidate[]) : [];
+    } catch (err) {
+      this.logger(`[browse] 评论候选抽取失败（不影响滚动回执）：${(err as Error).message}`);
+      return [];
     }
   }
 
