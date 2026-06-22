@@ -162,9 +162,6 @@ function coverActiveValidator(): PostValidator {
 /** 创作平台图文发布页（navigate_entry 直达；跨子域点击入口会开新标签、edge 看不到，故用 Page.navigate）。 */
 const XHS_CREATOR_PUBLISH_URL = 'https://creator.xiaohongshu.com/publish/publish?source=official';
 
-/** 小红书标题硬上限：20 字。超限时「发布」按钮静默失效，故填标题时强制截断（兜底，不静默假成功）。 */
-const XHS_TITLE_MAX = 20;
-
 export class PublishCommandDispatcher {
   private readonly clock: () => number;
   private inputEnabled = false;
@@ -365,9 +362,9 @@ export class PublishCommandDispatcher {
   private async runFillField(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
     const isContent = payload.params.fieldType === 'content';
     const rawValue = payload.params.value ?? '';
-    // 小红书标题硬上限 20 字：超限时「发布」按钮静默失效（按钮在、点击无效，editor 不重置）。
-    // 最后一公里强制截断，保证可发布（云端 ContentCreator 亦约束 ≤18 字，此处为兜底，不依赖 LLM 守规）。
-    const value = isContent ? rawValue : rawValue.slice(0, XHS_TITLE_MAX);
+    // 标题/正文均原样填入：长度策略收口云端一处（TitleCreator 已保证标题 ≤18、字形安全）。
+    // edge 不做任何截断/策略——只原样填、后置校验真写入、失败如实回报（边轻云重；不静默假成功）。
+    const value = rawValue;
     if (!this.cdp) {
       return isContent
         ? this.runAtom(payload, buildContentInputRequest(value), new PublishStepValidator({ step: 'input_content', payload: { title: '', content: value, tags: [] } }))
