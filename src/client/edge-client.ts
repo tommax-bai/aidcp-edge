@@ -10,7 +10,7 @@
  *  - 自动浏览：把笔记内容以 note.content 作为请求发给云端，等回一个决策信封
  *    （browse.next / search.execute / session.end），交由 BrowseSession 编排。
  *  - 异步命令推送：云端通过 CommandSink 异步推送控制命令（browse.next / browse.scroll /
- *    note.open / note.close / search.execute / session.end），由 browseHandler 统一分发。
+ *    note.open / note.close / search.execute / session.end / notification.*），由 browseHandler 统一分发。
  *
  * 设计：
  *  - WebSocket 通过工厂注入（默认用运行时全局 WebSocket，Node>=22），便于单测打桩；
@@ -314,7 +314,15 @@ export class EdgeClient {
       env.type === 'navigation.back' ||
       env.type === 'note.browse_images' ||
       env.type === 'note.scroll_comments' ||
-      env.type === 'profile.open'
+      env.type === 'profile.open' ||
+      // 通知巡视（软中断离开流程）自身的命令：MUST 放行到 browseHandler，
+      // 否则会在入口被静默丢弃 → 巡视无回执 → 恢复链永不收敛 → 会话挂死。
+      // 与 command-bridge 的 open_notifications/browse_notification_* 映射对应。
+      env.type === 'notification.open' ||
+      env.type === 'notification.browse_comments' ||
+      env.type === 'notification.browse_likes' ||
+      env.type === 'notification.browse_follows' ||
+      env.type === 'notification.back_home'
     ) {
       this.browseHandler?.(env);
       return;

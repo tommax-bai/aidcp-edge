@@ -235,3 +235,29 @@ test('edge-client: 旧消息类型仍正常路由（向后兼容）', async () =
   assert.equal(calls[1].type, 'session.end');
   assert.equal(calls[2].type, 'search.execute');
 });
+
+// 回归：通知巡视（软中断离开流程）自身的命令 MUST 放行到 browseHandler。
+// 历史 bug：入口路由白名单漏接 notification.*，命令在到达处理器前被静默丢弃，
+// 导致巡视无回执 → 恢复链（excursion_resumer）永不收敛 → 浏览永挂 → 会话被看门狗杀。
+// 与 cloud command-bridge 的 open_notifications/browse_notification_*/notification_back_home 映射一一对应。
+const NOTIFICATION_EXCURSION_COMMANDS = [
+  'notification.open',
+  'notification.browse_comments',
+  'notification.browse_likes',
+  'notification.browse_follows',
+  'notification.back_home',
+] as const;
+
+for (const type of NOTIFICATION_EXCURSION_COMMANDS) {
+  test(`edge-client: ${type} 路由到 browseHandler（不得静默丢弃）`, async () => {
+    const ws = new FakeWebSocket();
+    const client = await connectClient(ws);
+    const calls: Envelope[] = [];
+    client.onBrowseCommand((env) => calls.push(env));
+
+    ws.emitMessage(makeEnvelope(type, `cmd-${type}`, 2, { thinkMs: 0 }));
+
+    assert.equal(calls.length, 1, `${type} 应被路由到 browseHandler 而非在入口丢弃`);
+    assert.equal(calls[0].type, type);
+  });
+}
