@@ -434,7 +434,7 @@ export class PublishCommandDispatcher {
       if (n.contentDocument) walk(n.contentDocument);
     };
     walk((doc as { root?: unknown }).root);
-    let best: { x: number; y: number; cy: number } | null = null;
+    let best: { x: number; y: number; cy: number; nodeId: number } | null = null;
     for (const nodeId of hits) {
       try {
         const bm = await this.cdp.send<{ model?: { content?: number[] } }>('DOM.getBoxModel', { nodeId });
@@ -442,12 +442,55 @@ export class PublishCommandDispatcher {
         if (!q || q.length < 8) continue;
         const cx = (q[0] + q[2] + q[4] + q[6]) / 4;
         const cy = (q[1] + q[3] + q[5] + q[7]) / 4;
-        if (!best || cy > best.cy) best = { x: Math.round(cx), y: Math.round(cy), cy };
+        if (!best || cy > best.cy) best = { x: Math.round(cx), y: Math.round(cy), cy, nodeId };
       } catch {
         // 文本节点 / 无布局节点无盒模型，跳过
       }
     }
+    // 诊断（change diagnose-publish-submit-failure，只观测不改行为）：记录命中按钮节点的属性，
+    // 用于区分「按钮禁用 no-op」——禁用红按钮仍有文字与坐标、点上去无效。诊断失败不影响主路径。
+    if (best) {
+      try {
+        const at = await this.cdp.send<{ attributes?: string[] }>('DOM.getAttributes', { nodeId: best.nodeId });
+        const a = at?.attributes ?? [];
+        const attr = (k: string): string | undefined => { const i = a.indexOf(k); return i >= 0 ? a[i + 1] : undefined; };
+        console.warn(
+          `[publish-submit-diag] button '${label}' node class=${JSON.stringify(attr('class'))} ` +
+          `disabled=${a.includes('disabled')} aria-disabled=${JSON.stringify(attr('aria-disabled'))} center=${best.x},${best.y}`,
+        );
+      } catch { /* 诊断尽力而为 */ }
+    }
     return best ? { x: best.x, y: best.y } : null;
+  }
+
+  /**
+   * 诊断（change diagnose-publish-submit-failure，只观测不改行为）：只读捕获点击坐标处的页面状态——
+   * 顶层命中元素 / 是否在弹层内 / role=dialog / toast 文案 / 正文头 / URL，用于区分
+   * (a) 遮挡或风控 toast 拦截 vs (b) 点到按钮但 no-op vs (c) URL 是否已跳。捕获失败不影响主路径。
+   */
+  private async logSubmitDiag(x: number, y: number, when: string): Promise<void> {
+    if (!this.cdp) return;
+    const EXPR = String.raw`(() => { try {
+      const X=${x}, Y=${y};
+      const top = document.elementFromPoint(X, Y);
+      const desc = (e) => e ? (e.tagName + (e.id ? '#'+e.id : '') + (e.className && e.className.toString ? '.'+e.className.toString().trim().split(/\s+/).join('.') : '')).slice(0,160) : null;
+      const dialogs = Array.from(document.querySelectorAll('[role=dialog],[aria-modal="true"]')).map(function(d){ return { sel: desc(d), text: (d.innerText||'').replace(/\s+/g,' ').slice(0,120) }; });
+      const toast = document.querySelector('[class*="toast" i],[class*="message" i],[class*="tips" i]');
+      return JSON.stringify({
+        href: location.href,
+        atPoint: desc(top),
+        atPointInDialog: !!(top && top.closest && top.closest('[role=dialog],[aria-modal]')),
+        dialogs: dialogs,
+        toast: toast ? { sel: desc(toast), text: (toast.innerText||'').replace(/\s+/g,' ').slice(0,120) } : null,
+        bodyHead: ((document.body&&document.body.innerText)||'').replace(/\s+/g,' ').slice(0,200)
+      });
+    } catch (e) { return JSON.stringify({ diagError: String(e) }); } })()`;
+    try {
+      const r = await this.cdp.send<{ result?: { value?: string } }>('Runtime.evaluate', { expression: EXPR, returnByValue: true });
+      console.warn(`[publish-submit-diag] ${when}: ${r?.result?.value ?? '(no value)'}`);
+    } catch (err) {
+      console.warn(`[publish-submit-diag] ${when}: capture failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -482,6 +525,8 @@ export class PublishCommandDispatcher {
       const message = err instanceof Error ? err.message : String(err);
       return { ...base, ok: false, error: `engine_error: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
     }
+    // 诊断（只观测）：点击后立即快照页面状态（在 deadline 计算之前，不占用 15s 校验窗口）。
+    await this.logSubmitDiag(x, y, 'after-click');
     // 后置校验：发布成功信号（出现成功提示 / 离开发布编辑页）。
     const CHECK = String.raw`(() => { const b = (document.body && document.body.innerText) || ''; return /发布成功|发布中|笔记已?发布|成功发布|稍后可在/.test(b) || !location.href.includes('/publish/publish'); })()`;
     const deadline = this.clock() + 15_000;
@@ -492,7 +537,11 @@ export class PublishCommandDispatcher {
       } catch {
         // 忽略瞬时失败
       }
-      if (this.clock() >= deadline) return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
+      if (this.clock() >= deadline) {
+        // 诊断（只观测）：超时时快照终态——区分 仍在编辑页有弹层/toast vs 已跳但晚于窗口。
+        await this.logSubmitDiag(x, y, 'timeout');
+        return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
+      }
       await new Promise((r) => setTimeout(r, 500));
     }
   }
