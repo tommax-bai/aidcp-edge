@@ -53,6 +53,7 @@ import { NOTE_BODY_SELECTORS } from './note-extractor.js';
 import { executeSearch } from './search-handler.js';
 import { evalRaw, type RandomFn, type BrowseCdp } from './cdp-util.js';
 import { CdpDisconnectedError } from '../cdp/client.js';
+import { buildNotificationHomeJs, buildNotificationItemsJs } from './notification-monitor.js';
 import type { DomProvider } from '../locating/engine.js';
 import {
   sampleDelay,
@@ -477,8 +478,15 @@ export class BrowseSession {
         // CDP 断线：不当业务失败，等有界重连；成功→续跑重报，耗尽→已请求停止退出。
         if (err instanceof CdpDisconnectedError) {
           this.logger('[browse] 命令执行中 CDP 断连，等待有界重连…');
+          // 断连中止的若是通知巡视命令：重连后必须给云端一个诚实的 ok:false 终止回执，触发 excursion_resumer
+          // 关暂停 + 回 feed。否则云端 excursionActive 永真 → 发命令暂停出口扣住 feed 命令 → 看门狗 ~240s 杀整会话，
+          // 且 gatekeeper 此后永久忽略新通知。reason 如实 = cdp_reconnect_aborted（非伪造成功）。
+          const wasExcursion = typeof cmd?.type === 'string' && cmd.type.startsWith('notification.');
           const ok = await this.waitForReconnect();
           if (!ok || this.stopRequested) return;
+          if (wasExcursion) {
+            this.deps.client.reportActionCompleted?.({ action: 'notification_back_home', ok: false, reason: 'cdp_reconnect_aborted' });
+          }
           await this.resumeAfterReconnect();
           continue;
         }
@@ -1381,24 +1389,14 @@ export class BrowseSession {
         `(function(){ var a = document.querySelector('a[href*="/notification"]'); if(a){ a.click(); return true; } return false; })()`,
       );
       await this.sleep(1200);
-      const homeJs = `(function(){
-        function unreadNear(labelRe){
-          var els = Array.from(document.querySelectorAll('[role="tab"], [class*="tab"], a, span, div'));
-          for (var i=0;i<els.length;i++){
-            var t=(els[i].textContent||'').trim();
-            if(t.length>10 || !labelRe.test(t)) continue;
-            var badge = els[i].querySelector('[class*="badge"],[class*="dot"],[class*="count"],[class*="red"]');
-            if(badge){ var n=parseInt((badge.textContent||'').replace(/[^0-9]/g,''),10); return isNaN(n)?1:n; }
-          }
-          return 0;
-        }
-        return JSON.stringify({ comments: unreadNear(/评论|@/), likes: unreadNear(/赞|收藏/), follows: unreadNear(/关注|粉丝/) });
-      })()`;
-      const raw = await evalRawFn<string>(this.deps.cdp, homeJs);
+      // per-tab 未读：复用入口探测同源的结构判据（buildNotificationHomeJs，单一真相），仅作用在真实分类 tab、
+      // 只认纯数字角标——绝不沿用 6.5.3 删掉的宽选择器假阳性源（详见该 builder 注释）。
+      const raw = await evalRawFn<string>(this.deps.cdp, buildNotificationHomeJs());
       const home = typeof raw === 'string' ? JSON.parse(raw) : { comments: 0, likes: 0, follows: 0 };
       this.deps.client.send?.('notification.home', home);
-      this.logger(`[browse] notification.home: 评论${home.comments} 赞藏${home.likes} 关注${home.follows}（选择器待真机校准）`);
+      this.logger(`[browse] notification.home: 评论${home.comments} 赞藏${home.likes} 关注${home.follows}（无数字红点的 tab 待真机校准）`);
     } catch (err) {
+      if (err instanceof CdpDisconnectedError) throw err; // 断连不当业务失败：冒泡到主循环重连，绝不假报「无未读」
       this.logger(`[browse] notification.open 失败（上报全 0 以便分诊收尾）：${(err as Error).message}`);
       this.deps.client.send?.('notification.home', { comments: 0, likes: 0, follows: 0 });
     }
@@ -1420,34 +1418,14 @@ export class BrowseSession {
         await evalRawFn<boolean>(this.deps.cdp, `(function(){ window.scrollBy(0, document.documentElement.clientHeight*0.8); return true; })()`);
         await this.sleep(600);
       }
-      const extractJs = `(function(){
-        var out = [];
-        var items = document.querySelectorAll('[class*="notification"] [class*="item"], [class*="comment"] [class*="item"], [class*="tabs-content"] [class*="container"] > div');
-        for (var i=0;i<items.length && out.length<50;i++){
-          var it = items[i];
-          var txt = (it.textContent||'');
-          var isMention = /@\\s*(我|你)|提到了你/.test(txt);
-          var isComment = /评论|回复/.test(txt);
-          if(!isMention && !isComment) continue;
-          var userEl = it.querySelector('[class*="name"], [class*="user"], a[href*="/user/profile/"]');
-          var contentEl = it.querySelector('[class*="content"], [class*="comment"], p');
-          var noteEl = it.querySelector('[class*="note"] [class*="title"], [class*="extract"]');
-          var keyEl = it.querySelector('a[href]');
-          out.push({
-            kind: isMention ? 'mention' : 'comment',
-            fromUser: (userEl && userEl.textContent || '').trim().slice(0,40),
-            content: (contentEl && contentEl.textContent || txt).trim().slice(0,200),
-            noteTitle: (noteEl && noteEl.textContent || '').trim().slice(0,40) || undefined,
-            itemKey: (keyEl && keyEl.getAttribute('href') || '').slice(0,120) || undefined
-          });
-        }
-        return JSON.stringify(out);
-      })()`;
-      const raw = await evalRawFn<string>(this.deps.cdp, extractJs);
+      // 抽取 JS 抽成单一真相 builder（含 code-point 安全截断 / 正文缺失发空串 / itemKey 排除 profile 链，
+      // 详见 buildNotificationItemsJs 注释）；选择器本身待真机校准 item(a)。
+      const raw = await evalRawFn<string>(this.deps.cdp, buildNotificationItemsJs());
       const items = typeof raw === 'string' ? JSON.parse(raw) : [];
       this.deps.client.send?.('notification.items', { items });
       this.logger(`[browse] notification.items: 上报 ${Array.isArray(items) ? items.length : 0} 条评论/@（选择器待真机校准）`);
     } catch (err) {
+      if (err instanceof CdpDisconnectedError) throw err; // 断连不当业务失败：冒泡到主循环重连，绝不假报「空 items」
       this.logger(`[browse] notification.browse_comments 失败（上报空 items 以便云端收尾）：${(err as Error).message}`);
       this.deps.client.send?.('notification.items', { items: [] });
     }
@@ -1462,14 +1440,22 @@ export class BrowseSession {
     try {
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
       const labelRe = kind === 'likes' ? '赞|收藏' : '关注|粉丝';
-      await evalRawFn<boolean>(
+      // 捕获点击命中布尔：未命中分类 tab（选择器漂移/页面未渲染/单合并 tab）→ 诚实 no_target，
+      // **绝不**像旧码那样丢弃返回值、无条件报 viewed（那是静默假成功，且掩盖了 6.5.4 本要暴露的选择器漂移）。
+      const clicked = await evalRawFn<boolean>(
         this.deps.cdp,
         `(function(){ var els = Array.from(document.querySelectorAll('[role="tab"], [class*="tab"], a, span, div')); for (var i=0;i<els.length;i++){ var t=(els[i].textContent||'').trim(); if(t.length<=8 && new RegExp('${labelRe}').test(t)){ els[i].click(); return true; } } return false; })()`,
       );
+      if (!clicked) {
+        this.logger(`[browse] ${action}: 未找到分类 tab（no_target，不假报已看）`);
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'no_target' });
+        return;
+      }
       await this.sleep(800);
       this.logger(`[browse] ${action}: 已查看（清未读，v1 不抽取）`);
       this.deps.client.reportActionCompleted?.({ action, ok: true, reason: 'viewed' });
     } catch (err) {
+      if (err instanceof CdpDisconnectedError) throw err; // 断连不当业务失败：冒泡到主循环重连，绝不假报「已看」
       this.logger(`[browse] ${action} 失败：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action, ok: false, reason: (err as Error).message });
     }

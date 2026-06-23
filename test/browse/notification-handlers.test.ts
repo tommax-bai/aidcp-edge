@@ -23,6 +23,7 @@ import {
   type ActionCompletedPayload,
 } from '../../src/comm/protocol.js';
 import type { PlanStep, ActionResultPayload } from '../../src/comm/protocol.js';
+import { CdpDisconnectedError } from '../../src/cdp/client.js';
 
 const CARD: NoteCard = { position: 0, centerX: 10, centerY: 10, title: 'A', author: 'u', likes: '100', isVideo: false };
 
@@ -32,8 +33,14 @@ function fakeContent(): NoteContent {
 
 interface Sent { type: string; payload: unknown }
 
-/** cdp 行为：normal=按通知 JS 返回桩值；throw=Runtime.evaluate 抛错（验证失败不吞）。 */
-function makeHarness(mode: 'normal' | 'throw' = 'normal') {
+/**
+ * cdp 行为：
+ *  - normal：按通知 JS 返回桩值；
+ *  - throw：通知 eval 抛普通 Error（业务/选择器失败，不吞）；
+ *  - disconnect：通知 eval 抛 CdpDisconnectedError（断连——handler 必须重抛、绝不假报成功）。
+ * viewClickHits=false：看一眼分类 tab 点击 JS（含 new RegExp）返回 false（模拟选择器漂移未命中 → 应 no_target）。
+ */
+function makeHarness(mode: 'normal' | 'throw' | 'disconnect' = 'normal', viewClickHits = true) {
   const sent: Sent[] = [];
   const completed: ActionCompletedPayload[] = [];
 
@@ -41,12 +48,14 @@ function makeHarness(mode: 'normal' | 'throw' = 'normal') {
     send: async (method: string, params: Record<string, unknown> = {}) => {
       if (method !== 'Runtime.evaluate') return {} as never;
       const expr = String(params.expression ?? '');
-      // 仅通知 handler 的 eval 在 throw 模式抛错；启动期 URL 探测照常成功（否则 ensureExplore 空等超时）。
+      // 仅通知 handler 的 eval 在 throw/disconnect 模式抛错；启动期 URL 探测照常成功（否则 ensureExplore 空等超时）。
       const isNotifExpr =
-        expr.includes('/notification') || expr.includes('unreadNear') ||
+        expr.includes('/notification') || expr.includes('tabUnread') ||
         expr.includes('评论和@') || expr.includes('isMention') || expr.includes('new RegExp(');
-      if (mode === 'throw' && isNotifExpr) throw new Error('cdp boom');
-      if (expr.includes('unreadNear')) {
+      if ((mode === 'throw' || mode === 'disconnect') && isNotifExpr) {
+        throw mode === 'disconnect' ? new CdpDisconnectedError('cdp 断连') : new Error('cdp boom');
+      }
+      if (expr.includes('tabUnread')) {
         return { result: { value: '{"comments":2,"likes":1,"follows":0}' } } as never;
       }
       if (expr.includes('isMention')) {
@@ -59,7 +68,9 @@ function makeHarness(mode: 'normal' | 'throw' = 'normal') {
           },
         } as never;
       }
-      // 导航点击 / tab 点击 / scrollBy 等动作 expr → 命中即可（返回值不被业务校验）；
+      // 看一眼分类 tab 点击 JS（含 new RegExp）：命中可控（false 模拟选择器漂移）。须先于通用 click 分支判定。
+      if (expr.includes('new RegExp(')) return { result: { value: viewClickHits } } as never;
+      // 导航点击 / scrollBy 等动作 expr → 命中即可（返回值不被业务校验）；
       // 其余（URL 探测等）回 explore URL，满足 start() 的 ensureExplore，避免空等初始扫描超时。
       if (expr.includes('click') || expr.includes('scrollBy')) return { result: { value: true } } as never;
       return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
@@ -177,4 +188,76 @@ test('失败不静默吞：cdp 抛错 → items 上报空 + likes 回执 ok:fals
   assert.deepEqual((items!.payload as { items: unknown[] }).items, []);
   const rec = h.completed.find((c) => c.action === 'browse_notification_likes');
   assert.ok(rec && rec.ok === false, 'likes 失败应如实回执 ok:false');
+});
+
+test('NM-C-1: 看一眼未命中分类 tab → ok:false reason:no_target（绝不丢弃点击返回值假报 viewed）', async () => {
+  const h = makeHarness('normal', false); // 分类 tab 点击返回 false（选择器漂移/未渲染）
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('notification.browse_likes', 'n', 0, {}),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const rec = h.completed.find((c) => c.action === 'browse_notification_likes');
+  assert.ok(rec, '应有回执');
+  assert.equal(rec!.ok, false, '未命中 tab 不得假报成功');
+  assert.equal(rec!.reason, 'no_target', '应诚实 no_target，暴露选择器漂移');
+});
+
+test('CDP-NOTIF-1: 通知 open 断连 → 重抛冒泡、绝不假报 notification.home（区别于业务失败才上报全 0）', async () => {
+  const h = makeHarness('disconnect'); // 无 on → waitForReconnect 立即 false → 会话诚实结束
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('notification.open', 'n', 0, {}),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.ok(!h.sent.find((s) => s.type === 'notification.home'), '断连绝不假报 notification.home');
+});
+
+test('CDP-NOTIF-1: 通知 browse_comments 断连 → 绝不假报空 items', async () => {
+  const h = makeHarness('disconnect');
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('notification.browse_comments', 'n', 0, { scrollMax: 1 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.ok(!h.sent.find((s) => s.type === 'notification.items'), '断连绝不假报空 items');
+});
+
+test('CDP-NOTIF-1: 巡视中断连重连成功 → 发诚实 ok:false(cdp_reconnect_aborted) 终止回执，触发云端关暂停回 feed', async () => {
+  const h = makeHarness('normal');
+  const reconnectedListeners: Array<(params: unknown) => void> = [];
+  let threwOnce = false;
+  // 覆盖 cdp：首个通知 eval 抛 CdpDisconnectedError，并安排（waiter 注册后的）setImmediate 触发重连成功。
+  (h.deps as { cdp: BrowseCdp }).cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method !== 'Runtime.evaluate') return {} as never;
+      const expr = String(params.expression ?? '');
+      const isNotif =
+        expr.includes('/notification') || expr.includes('tabUnread') ||
+        expr.includes('评论和@') || expr.includes('new RegExp(') || expr.includes('isMention');
+      if (isNotif && !threwOnce) {
+        threwOnce = true;
+        setImmediate(() => { for (const l of reconnectedListeners.slice()) l(undefined); });
+        throw new CdpDisconnectedError('cdp 断连');
+      }
+      if (expr.includes('click') || expr.includes('scrollBy')) return { result: { value: true } } as never;
+      return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+    },
+    on: (method: string, cb: (params: unknown) => void) => {
+      if (method === 'cdp.reconnected') reconnectedListeners.push(cb);
+      return () => {};
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  await sess.onCloudCommand(makeEnvelope('notification.open', 'n', 0, {}));
+  await new Promise((r) => setTimeout(r, 30));
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
+  await done;
+  assert.ok(!h.sent.find((s) => s.type === 'notification.home'), '断连绝不假报 notification.home');
+  const abort = h.completed.find((c) => c.reason === 'cdp_reconnect_aborted');
+  assert.ok(abort, '重连后应发 cdp_reconnect_aborted 中止回执');
+  assert.equal(abort!.ok, false, '中止回执必须 ok:false（诚实，非伪造成功）');
+  assert.equal(abort!.action, 'notification_back_home', '用 notification_back_home 触发云端 excursion_resumer 关暂停');
 });

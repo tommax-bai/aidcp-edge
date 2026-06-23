@@ -309,7 +309,19 @@ async function main(): Promise<void> {
         }
       }
     });
-    watcherSupervisor.startAll();
+    // CDP 重连联动：不可恢复（重连耗尽、终态）→ 停掉全部后台监测体。否则它们继续对已死的 client 空轮询、
+    // 每 pollMs 刷一行「探测失败(保持上一状态)」僵尸日志直到进程退出（旧码只有 SIGINT 才 stopAll）。
+    // 重连成功 → 重启（start() 幂等：未停则 no-op；曾停则干净恢复，避免恢复的 session 后台盲跑/停摆）。
+    const supervisor = watcherSupervisor; // 闭包内捕获已窄化的非空引用
+    session.cdp.on('cdp.unrecoverable', () => {
+      console.warn('[aidcp-edge] CDP 重连不可恢复，停止后台监测体（避免僵尸轮询）');
+      supervisor.stopAll();
+    });
+    session.cdp.on('cdp.reconnected', () => {
+      console.log('[aidcp-edge] CDP 已重连，重启后台监测体');
+      supervisor.startAll();
+    });
+    supervisor.startAll();
     console.log('[aidcp-edge] 自动浏览已启动（含弹窗 + 通知未读旁路监测）');
   }
 
