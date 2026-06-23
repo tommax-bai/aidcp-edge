@@ -93,9 +93,7 @@ async function main(): Promise<void> {
   if (pageUrl) attachOpts.urlIncludes = pageUrl;
   const session = await attachToPage(attachOpts);
   console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
-
-  // 启用 Input 域（坐标点击 / 按键）；evaluate 已在 attachToPage 启用。
-  await session.cdp.send('Input.enable').catch(() => undefined);
+  // Runtime/Page/Input 域启用 + 反检测注入均在 attachToPage 内（reEnableAndInject，与断线重连共用）。
 
   // 先声明 runner（延迟赋值），打破 client/selector/runner 的相互依赖
   let runner: LikeStepRunner | undefined;

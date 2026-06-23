@@ -8,6 +8,7 @@ import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import { makeEnvelope, type Envelope, type NoteContentPayload, type PageCardsPayload, type ActionCompletedPayload, type ProfileDetailPayload } from '../../src/comm/protocol.js';
 import type { PlanStep, ActionResultPayload } from '../../src/comm/protocol.js';
 import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monitor.js';
+import { CdpDisconnectedError } from '../../src/cdp/client.js';
 
 const CARD: NoteCard = { position: 0, centerX: 10, centerY: 10, title: 'A', author: 'u', likes: '100', isVideo: false };
 
@@ -921,6 +922,70 @@ test('overlayMonitor 闸门: session.end 不被 captcha 阻塞（绕过闸门，
   const sess = new BrowseSession(h.deps, captureOpts(logs));
   await startAndPush(sess, [makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
   assert.equal(sess.isRunning(), false, '会话应已停止');
+});
+
+// ======== CDP 断线重连续跑 ========
+
+/** 给 harness 的 cdp 加 on()（暴露生命周期事件），返回手动 emit 句柄。 */
+function withCdpEvents(h: Harness): (method: string) => void {
+  const listeners = new Map<string, Set<(p: unknown) => void>>();
+  h.deps.cdp = {
+    ...h.deps.cdp,
+    on: (m: string, l: (p: unknown) => void) => {
+      let s = listeners.get(m);
+      if (!s) {
+        s = new Set();
+        listeners.set(m, s);
+      }
+      s.add(l);
+      return () => s!.delete(l);
+    },
+  };
+  return (method: string) => {
+    for (const l of [...(listeners.get(method) ?? [])]) l({});
+  };
+}
+
+test('browse-session: 命令执行中 CDP 断线 → 等重连成功后续跑重报（不当业务失败、不退出会话）', async () => {
+  const h = makeHarness();
+  const emit = withCdpEvents(h);
+  let armed = false;
+  h.deps.scroller = {
+    ...h.deps.scroller,
+    scrollNext: async () => {
+      if (armed) {
+        armed = false;
+        throw new CdpDisconnectedError('boom'); // 模拟命令执行中 CDP 断线
+      }
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 10)); // 初始上报，loop 进 waitForCommand
+  const before = h.reportedCards.length;
+  armed = true;
+  await sess.onCloudCommand(makeEnvelope('browse.scroll', 'c1', 0, { reason: 'scroll' }));
+  await new Promise((r) => setTimeout(r, 5)); // scrollNext 抛 CdpDisconnectedError → loop 捕获 → waitForReconnect 挂起
+  emit('cdp.reconnected'); // 模拟重连成功
+  await new Promise((r) => setTimeout(r, 10)); // resumeAfterReconnect 重报
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
+  await done;
+  assert.ok(h.reportedCards.length > before, '重连成功后应续跑重报 page.cards');
+  assert.equal(sess.isRunning(), false);
+});
+
+test('browse-session: cdp.unrecoverable → 停止浏览循环（诚实失败，交云端看门狗兜底）', async () => {
+  const h = makeHarness();
+  const emit = withCdpEvents(h);
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  emit('cdp.unrecoverable'); // 模拟 CDP 重连耗尽
+  await Promise.race([
+    done,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('unrecoverable 未能停止会话')), 1500)),
+  ]);
+  assert.equal(sess.isRunning(), false, 'unrecoverable 应干净停止会话');
 });
 
 test('overlayMonitor 提交前复检: like 命中 captcha → 放弃点击并上报 blocked_by_captcha', async () => {

@@ -23,6 +23,11 @@ import {
 /** browse 模块需要的最小 CDP 能力（与 CdpClient 兼容） */
 export interface BrowseCdp {
   send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
+  /**
+   * 订阅事件（CDP 事件与 cdp.reconnected/cdp.unrecoverable 生命周期事件共用）。
+   * 可选：真实 CdpClient 提供；纯 { send } 测试桩可省略（续跑/重连感知随之降级为不可用）。
+   */
+  on?(method: string, listener: (params: unknown) => void): () => void;
 }
 
 interface EvaluateResult {

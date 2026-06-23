@@ -52,6 +52,7 @@ import type { extractNoteContent as ExtractFn } from './note-extractor.js';
 import { NOTE_BODY_SELECTORS } from './note-extractor.js';
 import { executeSearch } from './search-handler.js';
 import { evalRaw, type RandomFn, type BrowseCdp } from './cdp-util.js';
+import { CdpDisconnectedError } from '../cdp/client.js';
 import type { DomProvider } from '../locating/engine.js';
 import {
   sampleDelay,
@@ -189,6 +190,11 @@ export class BrowseSession {
   private commandQueue: Envelope[] = [];
   private commandResolver: ((env: Envelope) => void) | null = null;
 
+  /** CDP 断线重连：等待重连结果的 waiter（reconnected→true / unrecoverable→false） */
+  private cdpReconnectWaiters: Array<(ok: boolean) => void> = [];
+  /** CDP 生命周期事件订阅的退订句柄（start 订阅，结束时退订） */
+  private cdpUnsub: Array<() => void> = [];
+
   constructor(
     private readonly deps: BrowseSessionDeps,
     options: BrowseSessionOptions = {},
@@ -266,6 +272,7 @@ export class BrowseSession {
     this.commandQueue = [];
     this.commandResolver = null;
     this.logger('[browse] 启动命令驱动浏览循环');
+    this.subscribeCdpLifecycle();
     try {
       await this.ensureExplore();
       // 初始扫描延迟：真人打开页面后会先扫一眼 feed 再点击（3-6s）
@@ -279,18 +286,76 @@ export class BrowseSession {
       await this.loop();
     } finally {
       this.running = false;
+      for (const u of this.cdpUnsub) u();
+      this.cdpUnsub = [];
       this.logger('[browse] 浏览循环结束');
     }
   }
 
   /** 请求停止（下个安全点退出循环） */
   stop(): void {
+    this.stopForReason('local_stop');
+  }
+
+  /** 请求停止并附带理由（local_stop / cdp_unrecoverable）。唤醒可能正在等待命令的 loop。 */
+  private stopForReason(reason: string): void {
     this.stopRequested = true;
-    // 唤醒可能正在等待命令的 loop
     if (this.commandResolver) {
       const resolve = this.commandResolver;
       this.commandResolver = null;
-      resolve({ v: 2, type: 'session.end', id: 'stop', ts: Date.now(), payload: { reason: 'local_stop' } });
+      resolve({ v: 2, type: 'session.end', id: 'stop', ts: Date.now(), payload: { reason } });
+    }
+  }
+
+  /** 订阅 CDP 断线重连生命周期事件（仅当底层 cdp 暴露 on()；真实 CdpClient 有，测试桩可无）。 */
+  private subscribeCdpLifecycle(): void {
+    const on = this.deps.cdp.on?.bind(this.deps.cdp);
+    if (!on) return;
+    this.cdpUnsub.push(
+      on('cdp.reconnected', () => this.onCdpReconnected()),
+      on('cdp.unrecoverable', () => this.onCdpUnrecoverable()),
+    );
+  }
+
+  private onCdpReconnected(): void {
+    // 重连后页面可能已变（回 feed / 重载）：清详情页 dwell 计时，避免下次返回误判已达标。
+    this.noteOpenedAt = null;
+    this.logger('[browse] CDP 已重连，准备续跑');
+    const waiters = this.cdpReconnectWaiters;
+    this.cdpReconnectWaiters = [];
+    for (const w of waiters) w(true);
+  }
+
+  private onCdpUnrecoverable(): void {
+    // 重连耗尽：停止上报、退出循环（诚实失败），交云端 idle 看门狗兜底结束会话；绝不假装在跑。
+    this.logger('[browse] CDP 重连不可恢复，停止浏览循环（交云端看门狗兜底）');
+    const waiters = this.cdpReconnectWaiters;
+    this.cdpReconnectWaiters = [];
+    for (const w of waiters) w(false);
+    this.stopForReason('cdp_unrecoverable');
+  }
+
+  /** 等待 CDP 重连结果：reconnected→true / unrecoverable→false。无 on() 能力（测试桩）即视为失败。 */
+  private waitForReconnect(): Promise<boolean> {
+    if (!this.deps.cdp.on) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      this.cdpReconnectWaiters.push(resolve);
+    });
+  }
+
+  /**
+   * 重连成功后的续跑点：先过浮层闸门（重连可能落在登录/验证码页，连上≠可用），
+   * 再按当前页确保回 feed 并重报快照让云端重判。不重放断连前的 in-flight 命令（坐标可能已失效）。
+   */
+  private async resumeAfterReconnect(): Promise<void> {
+    try {
+      await this.waitWhileBlocked();
+      if (this.stopRequested) return;
+      await this.ensureExplore();
+      await this.waitForVisibleCards(this.initialScanTimeoutMs);
+      await this.reportVisibleCards();
+    } catch (err) {
+      this.logger(`[browse] 重连后续跑重报失败：${(err as Error).message}`);
     }
   }
 
@@ -406,7 +471,19 @@ export class BrowseSession {
     while (!this.stopRequested) {
       const cmd = await this.waitForCommand();
       if (this.stopRequested) return;
-      await this.executeCommand(cmd);
+      try {
+        await this.executeCommand(cmd);
+      } catch (err) {
+        // CDP 断线：不当业务失败，等有界重连；成功→续跑重报，耗尽→已请求停止退出。
+        if (err instanceof CdpDisconnectedError) {
+          this.logger('[browse] 命令执行中 CDP 断连，等待有界重连…');
+          const ok = await this.waitForReconnect();
+          if (!ok || this.stopRequested) return;
+          await this.resumeAfterReconnect();
+          continue;
+        }
+        throw err; // 其他业务异常保持现状（冒泡 → 会话结束）
+      }
     }
   }
 

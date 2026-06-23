@@ -40,6 +40,40 @@ export interface MinimalWebSocket {
 
 export type WebSocketFactory = (url: string) => MinimalWebSocket;
 
+/**
+ * CDP 连接已断开（区分于业务失败）。上层据此类型走「等重连 / 续跑」，
+ * 而非把连接层丢失误当业务命令失败。
+ */
+export class CdpDisconnectedError extends Error {
+  constructor(message = 'CDP 连接已断开') {
+    super(message);
+    this.name = 'CdpDisconnectedError';
+  }
+}
+
+/**
+ * CDP 断线有界重连配置。缺省不传即关闭重连（行为与历史一致）。
+ * 总时长由 hardCapMs 运行时硬约束，须远小于云端 idle 看门狗阈值（不撞 130s）。
+ */
+export interface CdpReconnectOptions {
+  /** 最大重试次数，默认 5 */
+  maxAttempts?: number;
+  /** 退避基数 ms，默认 500 */
+  baseDelayMs?: number;
+  /** 退避上限 ms，默认 8000 */
+  maxDelayMs?: number;
+  /** 重连总时长硬上限 ms，默认 90_000（到点强制放弃，绝不撞看门狗） */
+  hardCapMs?: number;
+  /** 重新发现目标 page 的 webSocketDebuggerUrl（旧 url 已随 target 失效）；不提供则重试原 url */
+  rediscoverTarget?: () => Promise<string>;
+  /** 新连接建好后回调：重 enable 域 + 重注入反检测 */
+  onReconnected?: (cdp: CdpClient) => Promise<void>;
+  /** 注入 sleep（测试用） */
+  sleepImpl?: (ms: number) => Promise<void>;
+  /** 注入时钟（测试用，硬上限计时） */
+  nowImpl?: () => number;
+}
+
 export interface CdpClientOptions {
   /** 命令超时（毫秒） */
   timeoutMs?: number;
@@ -48,6 +82,8 @@ export interface CdpClientOptions {
    * Node20 环境可传入基于 `ws` 包的适配器。
    */
   wsFactory?: WebSocketFactory;
+  /** CDP 断线有界重连（缺省不传即关闭，零行为变化） */
+  reconnect?: CdpReconnectOptions;
 }
 
 interface Pending {
@@ -75,18 +111,32 @@ export class CdpClient {
   private readonly timeoutMs: number;
   private readonly wsFactory: WebSocketFactory;
   private connected = false;
+  private readonly reconnectOpts?: CdpReconnectOptions;
+  private intentionalClose = false;
+  private reconnecting = false;
 
   constructor(
-    private readonly wsUrl: string,
+    private wsUrl: string,
     options: CdpClientOptions = {},
   ) {
     this.timeoutMs = options.timeoutMs ?? 10_000;
     this.wsFactory = options.wsFactory ?? defaultWsFactory;
+    this.reconnectOpts = options.reconnect;
   }
 
   /** 建立 WS 连接 */
   connect(): Promise<void> {
     if (this.connected) return Promise.resolve();
+    // 复用前弃用旧 ws（重连场景），避免双 socket 与迟到事件
+    if (this.ws) {
+      const old = this.ws;
+      this.ws = undefined;
+      try {
+        old.close();
+      } catch {
+        /* ignore */
+      }
+    }
     return new Promise((resolve, reject) => {
       let settled = false;
       const ws = this.wsFactory(this.wsUrl);
@@ -103,8 +153,13 @@ export class CdpClient {
         }
       });
       ws.addEventListener('close', () => {
+        if (this.ws !== ws) return; // 已被弃用的旧 ws，忽略其 close
         this.connected = false;
-        this.failAllPending(new Error('CDP WS 已关闭'));
+        this.failAllPending(new CdpDisconnectedError('CDP WS 已关闭'));
+        // 意外丢失（非主动 close）且配置了重连 → 启动有界重连
+        if (!this.intentionalClose && this.reconnectOpts && !this.reconnecting) {
+          void this.runReconnect();
+        }
       });
       ws.addEventListener('message', (ev) => this.onMessage(ev.data));
     });
@@ -113,7 +168,7 @@ export class CdpClient {
   /** 发送一条 CDP 命令并等待结果 */
   send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     if (!this.ws || !this.connected) {
-      return Promise.reject(new Error('CDP 未连接，请先 connect()'));
+      return Promise.reject(new CdpDisconnectedError('CDP 未连接，请先 connect()'));
     }
     const id = this.nextId++;
     const payload = JSON.stringify({ id, method, params });
@@ -142,8 +197,9 @@ export class CdpClient {
     return () => set!.delete(listener);
   }
 
-  /** 关闭连接 */
+  /** 关闭连接（主动）。置 intentionalClose 以抢占正在进行的重连退避循环、阻止再触发重连。 */
   close(): void {
+    this.intentionalClose = true;
     this.failAllPending(new Error('CDP 客户端主动关闭'));
     this.ws?.close();
     this.connected = false;
@@ -175,8 +231,54 @@ export class CdpClient {
     }
     // 事件（带 method）
     if (typeof msg.method === 'string') {
-      const set = this.listeners.get(msg.method);
-      if (set) for (const l of set) l(msg.params);
+      this.emitEvent(msg.method, msg.params);
+    }
+  }
+
+  /** 派发事件给 on() 订阅者（CDP 事件与内部生命周期事件 cdp.reconnecting/reconnected/unrecoverable 共用） */
+  private emitEvent(method: string, params: unknown): void {
+    const set = this.listeners.get(method);
+    if (set) for (const l of [...set]) l(params);
+  }
+
+  /**
+   * 有界退避重连：重发现 target → 重连 → onReconnected（重 enable + 重注入）→ 续跑。
+   * 总时长受 hardCapMs 运行时硬约束；主动 close 可随时抢占；耗尽/超时则发 'cdp.unrecoverable'。
+   */
+  private async runReconnect(): Promise<void> {
+    const opts = this.reconnectOpts;
+    if (!opts) return;
+    this.reconnecting = true;
+    const maxAttempts = opts.maxAttempts ?? 5;
+    const baseDelayMs = opts.baseDelayMs ?? 500;
+    const maxDelayMs = opts.maxDelayMs ?? 8_000;
+    const hardCapMs = opts.hardCapMs ?? 90_000;
+    const sleep = opts.sleepImpl ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const now = opts.nowImpl ?? (() => Date.now());
+    const deadline = now() + hardCapMs;
+    try {
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const delay = Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
+        await sleep(delay);
+        if (this.intentionalClose) return; // 主动 close 抢占重连
+        if (now() >= deadline) break; // 总时长硬上限
+        this.emitEvent('cdp.reconnecting', { attempt });
+        try {
+          if (opts.rediscoverTarget) {
+            this.wsUrl = await opts.rediscoverTarget();
+          }
+          if (this.intentionalClose) return;
+          await this.connect(); // 建新 ws；open 后 connected=true
+          if (opts.onReconnected) await opts.onReconnected(this);
+          this.emitEvent('cdp.reconnected', { attempt });
+          return; // 成功
+        } catch {
+          this.connected = false; // 本次失败，继续下个 attempt
+        }
+      }
+      this.emitEvent('cdp.unrecoverable', {}); // 次数/总时长耗尽
+    } finally {
+      this.reconnecting = false;
     }
   }
 

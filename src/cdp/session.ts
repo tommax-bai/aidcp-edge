@@ -5,7 +5,7 @@
  * 这是边缘端把"定位层引擎"接到"真实浏览器"的最小胶水层。
  */
 
-import { CdpClient, type CdpClientOptions } from './client.js';
+import { CdpClient, type CdpClientOptions, type CdpReconnectOptions } from './client.js';
 import { CdpDomProvider } from './dom-provider.js';
 import { CdpActionExecutor } from './action-executor.js';
 import { firstPageTarget, type DiscoverOptions } from './targets.js';
@@ -32,6 +32,27 @@ export interface AttachOptions extends DiscoverOptions {
   stealth?: boolean;
   /** 注入器（测试用，默认 CdpStealthInjector） */
   stealthInjector?: StealthInjector;
+  /**
+   * CDP 断线重连：缺省启用（默认参数）；传 false 关闭；传对象覆盖参数。
+   * 重连内化进 CdpClient（保实例换内层 WS），对云端透明、绝不重发 hello。
+   */
+  reconnect?: Partial<CdpReconnectOptions> | false;
+}
+
+/**
+ * 启用定位/执行所需 CDP 域 + 注入反检测。首次 attach 与断线重连共用，避免口径漂移。
+ * Input.enable（坐标点击/按键所需）也在此——重连后新 WS 必须重启用，否则点击/输入失效。
+ */
+async function reEnableAndInject(
+  cdp: CdpClient,
+  opts: { stealth?: boolean; injector: StealthInjector },
+): Promise<void> {
+  await cdp.send('Runtime.enable').catch(() => undefined);
+  await cdp.send('Page.enable').catch(() => undefined);
+  await cdp.send('Input.enable').catch(() => undefined);
+  if (opts.stealth !== false) {
+    await opts.injector.inject(cdp);
+  }
 }
 
 /**
@@ -43,17 +64,31 @@ export interface AttachOptions extends DiscoverOptions {
  */
 export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSession> {
   const target = await firstPageTarget(options);
-  const cdp = new CdpClient(target.webSocketDebuggerUrl, options.client);
-  await cdp.connect();
-  // 启用定位/执行所需的最小域（evaluate 不强制 enable，但启用便于后续扩展）
-  await cdp.send('Runtime.enable').catch(() => undefined);
-  await cdp.send('Page.enable').catch(() => undefined);
+  const injector = options.stealthInjector ?? new CdpStealthInjector();
 
-  // attach 后立即注入反检测脚本（在启用 Page 域之后）。
-  if (options.stealth !== false) {
-    const injector = options.stealthInjector ?? new CdpStealthInjector();
-    await injector.inject(cdp);
+  // 断线重连配置（缺省启用）：重发现按域名硬过滤（默认 xiaohongshu.com，绝不落无关 tab），
+  // 重连后用 reEnableAndInject 重启用域 + 重注入反检测。
+  let reconnect: CdpReconnectOptions | undefined;
+  if (options.reconnect !== false) {
+    reconnect = {
+      ...(typeof options.reconnect === 'object' ? options.reconnect : {}),
+      rediscoverTarget: async () => {
+        const t = await firstPageTarget({
+          ...options,
+          urlIncludes: options.urlIncludes ?? 'xiaohongshu.com',
+        });
+        return t.webSocketDebuggerUrl;
+      },
+      onReconnected: async (c) => {
+        await reEnableAndInject(c, { stealth: options.stealth, injector });
+      },
+    };
   }
+
+  const cdp = new CdpClient(target.webSocketDebuggerUrl, { ...options.client, reconnect });
+  await cdp.connect();
+  // 启用所需域 + 注入反检测（与重连共用同一函数）。
+  await reEnableAndInject(cdp, { stealth: options.stealth, injector });
 
   return {
     cdp,
