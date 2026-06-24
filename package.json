@@ -16,6 +16,7 @@
     "test": "tsx --test test/**/*.test.ts",
     "test:acceptance": "tsx --test test/acceptance/*.test.ts",
     "start": "tsx src/main.ts",
+    "start:multinode": "tsx scripts/launch-multinode.ts",
     "dev:cloud": "bash scripts/dev-run.sh"
   },
   "build": {

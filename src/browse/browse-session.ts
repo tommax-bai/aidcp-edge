@@ -910,11 +910,19 @@ export class BrowseSession {
       })()`;
       const raw = await evalRaw<string>(this.deps.cdp, js);
       const result = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (result?.error === 'already') {
+        // 已点赞 / 已收藏：目标状态本就达成 —— 良性 no-op 成功，而非失败（对齐 follow already_followed）。
+        // 以 ok:true + reason:`already_${action}d` 上报；云端据 reason 区分"真实新动作"与"no-op"，
+        // 不重复计互动 / 风控，也不再触发 recover_after_<action>_failed 兜底滚动。
+        const reason = `already_${action}d`;
+        const cn = action === 'like' ? '点赞' : '收藏';
+        this.logger(`[browse] ✓ 已${cn}（无需重复${cn}）`);
+        this.deps.client.reportActionCompleted?.({ action, ok: true, reason });
+        return;
+      }
       if (result?.error) {
-        // 已操作或按钮未找到 → 上报失败
-        const reason = result.error === 'already'
-          ? `already_${action}d`
-          : `btn_${result.error}`;
+        // 按钮未找到 / 无互动栏 → 真实失败
+        const reason = `btn_${result.error}`;
         this.logger(`[browse] ${action} 失败: ${reason}`);
         this.deps.client.reportActionCompleted?.({ action, ok: false, reason });
         return;

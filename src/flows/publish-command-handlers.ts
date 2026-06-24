@@ -32,6 +32,7 @@ import {
   buildTagInputRequest,
   buildTitleInputRequest,
   extractPostId,
+  extractPostUrl,
 } from './publish-post.js';
 
 /** 指令运行时依赖（EngineDeps 去掉 validator——validator 由各处理器按 kind 提供）。 */
@@ -585,9 +586,16 @@ export class PublishCommandDispatcher {
     const startedAt = this.clock();
     const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
     let postId: string | undefined;
+    // 详情页分享链接（带 xsec_token）：附带抓取，供后台跳转。抓取失败绝不连累 postId 抓取/成功判定。
+    let postUrl: string | undefined;
     try {
       const root = await this.deps.dom.getRoot();
       postId = extractPostId(root);
+      try {
+        postUrl = extractPostUrl(root);
+      } catch {
+        postUrl = undefined;
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {
@@ -609,6 +617,8 @@ export class PublishCommandDispatcher {
       ...base,
       ok: true,
       value: postId,
+      // 抓到带 xsec_token 的完整分享链接才带；抓不到为 undefined（诚实置空，云端不写假链接）。
+      ...(postUrl ? { postUrl } : {}),
       details: { actionId: CAPTURE_POST_ID_ACTION, durationMs: this.clock() - startedAt },
     };
   }

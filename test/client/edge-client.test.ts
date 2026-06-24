@@ -261,3 +261,28 @@ for (const type of NOTIFICATION_EXCURSION_COMMANDS) {
     assert.equal(calls[0].type, type);
   });
 }
+
+// 回归：浏览闭环互动命令（点赞 / 收藏 / 关注 / 发评论）MUST 放行到 browseHandler。
+// 历史 bug：入口路由白名单漏接 interaction.comment，云端 sendCommand action=comment 已发（飞书已审通过），
+// 但命令在到达处理器前被静默丢弃 → 评论永不发出、无回执（实测 8 发 / 0 执行 / 0 回执）。
+// 与 cloud command-bridge 的 comment→interaction.comment / like→interaction.like 映射一一对应（§2 第4处同步点）。
+const INTERACTION_COMMANDS = [
+  'interaction.like',
+  'interaction.collect',
+  'interaction.follow',
+  'interaction.comment',
+] as const;
+
+for (const type of INTERACTION_COMMANDS) {
+  test(`edge-client: ${type} 路由到 browseHandler（不得静默丢弃）`, async () => {
+    const ws = new FakeWebSocket();
+    const client = await connectClient(ws);
+    const calls: Envelope[] = [];
+    client.onBrowseCommand((env) => calls.push(env));
+
+    ws.emitMessage(makeEnvelope(type, `cmd-${type}`, 2, { thinkMs: 0 }));
+
+    assert.equal(calls.length, 1, `${type} 应被路由到 browseHandler 而非在入口丢弃`);
+    assert.equal(calls[0].type, type);
+  });
+}

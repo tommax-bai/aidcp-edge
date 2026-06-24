@@ -138,6 +138,27 @@ test('AC-CMD capture_postId 抓不到 → ok:false error=no_target（红线：MU
   assert.equal(res.value, undefined);
 });
 
+// change publish-history-account-and-detail：capture_postId 附带抓「带 xsec_token 的完整详情页分享 URL」。
+test('AC-CMD capture_postId 抓到带 xsec_token 的完整分享 URL → 回报 postUrl', async () => {
+  const doc = buildDom(
+    publishPageHtml('<a href="https://www.xiaohongshu.com/explore/post_abc123?xsec_token=ABCTOKEN&xsec_source=pc_feed">查看笔记</a>'),
+  );
+  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const res = await dispatcher.dispatch(cmd('capture_postId'));
+  assert.equal(res.ok, true);
+  assert.equal(res.value, 'post_abc123');
+  assert.ok(res.postUrl?.includes('xsec_token=ABCTOKEN'), '应回报带 token 的完整分享 URL');
+});
+
+test('AC-CMD capture_postId 只有裸 id（缺 xsec_token）→ postUrl 诚实置空（红线：不拼打不开的假链接）', async () => {
+  const doc = buildDom(publishPageHtml('<a href="/explore/post_bare">查看笔记</a>'));
+  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const res = await dispatcher.dispatch(cmd('capture_postId'));
+  assert.equal(res.ok, true);
+  assert.equal(res.value, 'post_bare', 'postId 仍抓得到');
+  assert.equal(res.postUrl, undefined, '缺 token → 不回 postUrl（诚实置空，绝不裸 id 拼假链接）');
+});
+
 test('AC-MEDIA upload_image 未注入 uploader → kind_not_implemented（诚实，不假成功）', async () => {
   const doc = buildDom(publishPageHtml());
   const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));

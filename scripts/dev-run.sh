@@ -35,5 +35,9 @@ else
   cloud_pid=$!
 fi
 
+# 每个节点（含默认账号）必须显式声明 accountId：云端上线「拒绝缺 accountId 握手」后，
+# 不显式声明会被诚实拒绝（绝不偷映射成 default）。默认账号在此显式声明 default。
+export AIDCP_ACCOUNT_ID="${AIDCP_ACCOUNT_ID:-default}"
+
 # edge 前台运行；透传外部环境变量（AIDCP_AUTO_BROWSE / AIDCP_REAL_PUBLISH 等）。
 cd "$REPO_DIR" && npm start

@@ -7,7 +7,10 @@ import {
   probeCdp,
   buildChromeArgs,
   deriveLoginProbeResult,
+  evaluateLoginState,
   ensurePageTarget,
+  clearStaleSingletonLock,
+  type CdpWsLike,
 } from '../../src/cdp/index.js';
 
 /** 构造一个最小可用的假 fetch（按 url -> ok 映射） */
@@ -111,11 +114,31 @@ test('buildChromeArgs 含反检测启动参数且不含 --enable-automation', ()
   assert.ok(!args.includes('--enable-automation'));
 });
 
-// ---------------- launchChrome：复用 ----------------
+// ---------------- launchChrome：拒绝静默接管 / 显式复用 ----------------
 
-test('launchChrome 复用已有实例（端口已就绪，不 spawn）', async () => {
+test('launchChrome 探测到端口已有 Chrome 时默认诚实报错（拒绝静默接管，不 spawn）', async () => {
+  const sp = makeSpawn();
+  await assert.rejects(
+    () =>
+      launchChrome({
+        fetchImpl: fakeFetch(true),
+        spawnImpl: sp.spawnImpl,
+        existsImpl: () => true,
+        sleepImpl: noSleep,
+        logImpl: noLog,
+        waitForLoginImpl: async () => {},
+        ensurePageTargetImpl: async () => {},
+      }),
+    /拒绝静默接管/,
+  );
+  // 既不接管也不另起进程
+  assert.equal(sp.calls.length, 0);
+});
+
+test('launchChrome 显式 allowReuse 时复用已有实例（端口已就绪，不 spawn）', async () => {
   const sp = makeSpawn();
   const inst = await launchChrome({
+    allowReuse: true,
     fetchImpl: fakeFetch(true),
     spawnImpl: sp.spawnImpl,
     existsImpl: () => true,
@@ -129,6 +152,72 @@ test('launchChrome 复用已有实例（端口已就绪，不 spawn）', async (
   assert.equal(sp.calls.length, 0);
   // 复用实例的 kill 不应抛错
   inst.kill();
+});
+
+// ---------------- clearStaleSingletonLock：陈旧锁清理 / 诚实失败 ----------------
+
+test('clearStaleSingletonLock 无锁时正常返回（readlink 抛错）', () => {
+  assert.doesNotThrow(() =>
+    clearStaleSingletonLock('/data/profile', noLog, {
+      readlink: () => {
+        throw new Error('ENOENT');
+      },
+    }),
+  );
+});
+
+test('clearStaleSingletonLock 持有进程已死则清理陈旧锁', () => {
+  let unlinked = '';
+  clearStaleSingletonLock('/data/profile', noLog, {
+    readlink: () => 'myhost-4242',
+    localHostname: () => 'myhost',
+    isProcessAlive: () => false,
+    unlink: (p) => {
+      unlinked = p;
+    },
+  });
+  assert.ok(unlinked.endsWith('SingletonLock'));
+});
+
+test('clearStaleSingletonLock 持有进程仍存活则诚实失败（绝不强删）', () => {
+  let unlinked = false;
+  assert.throws(
+    () =>
+      clearStaleSingletonLock('/data/profile', noLog, {
+        readlink: () => 'myhost-4242',
+        localHostname: () => 'myhost',
+        isProcessAlive: () => true,
+        unlink: () => {
+          unlinked = true;
+        },
+      }),
+    /存活进程/,
+  );
+  assert.equal(unlinked, false);
+});
+
+test('clearStaleSingletonLock 锁由其它主机持有则诚实失败（无法判定存活）', () => {
+  assert.throws(
+    () =>
+      clearStaleSingletonLock('/data/profile', noLog, {
+        readlink: () => 'otherhost-4242',
+        localHostname: () => 'myhost',
+        isProcessAlive: () => false,
+      }),
+    /其它主机/,
+  );
+});
+
+test('clearStaleSingletonLock 解析不出 pid 则诚实失败（绝不盲删）', () => {
+  assert.throws(
+    () =>
+      clearStaleSingletonLock('/data/profile', noLog, {
+        readlink: () => 'garbage-without-pid-xx',
+        localHostname: () => 'garbage-without-pid-xx',
+        isProcessAlive: () => false,
+      }),
+    /无法解析/,
+  );
 });
 
 // ---------------- launchChrome：启动 ----------------
@@ -265,7 +354,7 @@ test('launchChrome 首次启动时透传登录轮询配置', async () => {
   assert.equal(capturedInterval, 678);
 });
 
-test('deriveLoginProbeResult: 真实登录信号命中时返回已登录', () => {
+test('deriveLoginProbeResult: web_session 命中即返回已登录', () => {
   const result = deriveLoginProbeResult({
     href: 'https://www.xiaohongshu.com/explore',
     hasUserCookie: true,
@@ -275,7 +364,7 @@ test('deriveLoginProbeResult: 真实登录信号命中时返回已登录', () =>
     hasLoginPrompt: false,
   });
   assert.equal(result.loggedIn, true);
-  assert.equal(result.reason, 'cookie');
+  assert.equal(result.reason, 'web_session');
 });
 
 test('deriveLoginProbeResult: 登录提示存在时不误判成功', () => {
@@ -289,6 +378,53 @@ test('deriveLoginProbeResult: 登录提示存在时不误判成功', () => {
   });
   assert.equal(result.loggedIn, false);
   assert.equal(result.reason, 'login-prompt');
+});
+
+test('deriveLoginProbeResult: 无 web_session 时单个 DOM 信号不足以判定已登录（修复匿名 cookie/头像误判）', () => {
+  // 历史误判：未登录的 explore 也有 feed 作者头像 / 匿名 cookie；任一单信号都不应放行。
+  for (const partial of [
+    { hasAvatar: true },
+    { hasCreatorEntry: true },
+    { hasUserStorage: true },
+  ]) {
+    const result = deriveLoginProbeResult({
+      href: 'https://www.xiaohongshu.com/explore',
+      hasUserCookie: false,
+      hasUserStorage: false,
+      hasAvatar: false,
+      hasCreatorEntry: false,
+      hasLoginPrompt: false,
+      ...partial,
+    });
+    assert.equal(result.loggedIn, false, `partial=${JSON.stringify(partial)}`);
+    assert.equal(result.reason, 'signals-missing');
+  }
+});
+
+test('deriveLoginProbeResult: 无 web_session 但 nav头像&&创作入口 兜底判定已登录', () => {
+  const result = deriveLoginProbeResult({
+    href: 'https://www.xiaohongshu.com/explore',
+    hasUserCookie: false,
+    hasUserStorage: false,
+    hasAvatar: true,
+    hasCreatorEntry: true,
+    hasLoginPrompt: false,
+  });
+  assert.equal(result.loggedIn, true);
+  assert.equal(result.reason, 'avatar+creator-entry');
+});
+
+test('deriveLoginProbeResult: /login URL 一律判未登录', () => {
+  const result = deriveLoginProbeResult({
+    href: 'https://www.xiaohongshu.com/login',
+    hasUserCookie: true,
+    hasUserStorage: true,
+    hasAvatar: true,
+    hasCreatorEntry: true,
+    hasLoginPrompt: false,
+  });
+  assert.equal(result.loggedIn, false);
+  assert.equal(result.reason, 'login-url');
 });
 
 test('launchChrome 首次启动时检测到登录即继续', async () => {
@@ -369,4 +505,109 @@ test('ensurePageTarget 新开失败时抛错', async () => {
     ensurePageTarget('127.0.0.1', 9222, 'u', f.impl, () => {}),
     /无法在复用的 Chrome 中新开页面标签/,
   );
+});
+
+// ---------------- evaluateLoginState（CDP 路径：getCookies + DOM 信号 + 兜底） ----------------
+
+/** 假 fetch：/json 返回给定 targets。 */
+function makeJsonFetch(targets: Array<{ type: string; url?: string; webSocketDebuggerUrl?: string }>): typeof fetch {
+  return (async () => ({
+    ok: true,
+    status: 200,
+    json: async () => targets,
+  })) as unknown as typeof fetch;
+}
+
+/**
+ * 假 CDP WebSocket 工厂：记录发出的帧；按 method 回复。
+ * - Runtime.evaluate → { result: { value: domSignals } }
+ * - Network.getCookies → { cookies }（cookiesError 为 true 时回 error）
+ */
+function makeFakeWsFactory(opts: {
+  domSignals: Record<string, unknown>;
+  cookies: Array<{ name: string; value: string }>;
+  cookiesError?: boolean;
+  sent: Array<{ method: string; params: Record<string, unknown> }>;
+}): (url: string) => CdpWsLike {
+  return () => {
+    let msgHandler: ((ev?: { data?: unknown }) => void) | undefined;
+    let openHandler: ((ev?: { data?: unknown }) => void) | undefined;
+    const ws: CdpWsLike = {
+      addEventListener(type, handler) {
+        if (type === 'open') openHandler = handler;
+        else if (type === 'message') msgHandler = handler;
+      },
+      send(data: string) {
+        const msg = JSON.parse(data) as { id: number; method: string; params?: Record<string, unknown> };
+        opts.sent.push({ method: msg.method, params: msg.params ?? {} });
+        let payload: Record<string, unknown>;
+        if (msg.method === 'Runtime.evaluate') {
+          payload = { id: msg.id, result: { result: { value: opts.domSignals } } };
+        } else if (msg.method === 'Network.getCookies') {
+          payload = opts.cookiesError
+            ? { id: msg.id, error: { message: 'getCookies unavailable' } }
+            : { id: msg.id, result: { cookies: opts.cookies } };
+        } else {
+          payload = { id: msg.id, result: {} };
+        }
+        setImmediate(() => msgHandler?.({ data: JSON.stringify(payload) }));
+      },
+      close() {},
+    };
+    setImmediate(() => openHandler?.());
+    return ws;
+  };
+}
+
+const XHS_TARGETS = [
+  { type: 'page', url: 'https://www.xiaohongshu.com/explore', webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/page/X' },
+];
+
+test('evaluateLoginState: web_session 存在且无登录提示 → 已登录，且 getCookies 限定 xiaohongshu 作用域', async () => {
+  const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const wsFactory = makeFakeWsFactory({
+    domSignals: { href: 'https://www.xiaohongshu.com/explore', hasUserStorage: false, hasAvatar: false, hasCreatorEntry: false, hasLoginPrompt: false },
+    cookies: [{ name: 'web_session', value: 'abc123def456' }],
+    sent,
+  });
+  const res = await evaluateLoginState('127.0.0.1', 9222, makeJsonFetch(XHS_TARGETS), wsFactory);
+  assert.equal(res.loggedIn, true);
+  assert.ok(res.reason.includes('web_session'));
+  const getCookies = sent.find((s) => s.method === 'Network.getCookies');
+  assert.ok(getCookies, '应调用 Network.getCookies');
+  assert.ok(Array.isArray(getCookies!.params.urls), 'getCookies 应显式传 urls 作用域');
+  assert.ok((getCookies!.params.urls as string[]).some((u) => u.includes('xiaohongshu.com')), 'urls 应限定到 xiaohongshu.com');
+});
+
+test('evaluateLoginState: 空 web_session 值不算登录', async () => {
+  const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const res = await evaluateLoginState('127.0.0.1', 9222, makeJsonFetch(XHS_TARGETS), makeFakeWsFactory({
+    domSignals: { href: 'https://www.xiaohongshu.com/explore', hasUserStorage: false, hasAvatar: false, hasCreatorEntry: false, hasLoginPrompt: false },
+    cookies: [{ name: 'web_session', value: '   ' }],
+    sent,
+  }));
+  assert.equal(res.loggedIn, false);
+});
+
+test('evaluateLoginState: web_session 在但页面有登录提示 → 否决（真机场景：残留 session + 登录框）', async () => {
+  const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const res = await evaluateLoginState('127.0.0.1', 9222, makeJsonFetch(XHS_TARGETS), makeFakeWsFactory({
+    domSignals: { href: 'https://www.xiaohongshu.com/explore', hasUserStorage: false, hasAvatar: false, hasCreatorEntry: true, hasLoginPrompt: true },
+    cookies: [{ name: 'web_session', value: 'stale-but-present' }],
+    sent,
+  }));
+  assert.equal(res.loggedIn, false);
+  assert.equal(res.reason, 'login-prompt');
+});
+
+test('evaluateLoginState: getCookies 失败时退回 DOM 信号（nav头像&&创作入口）兜底', async () => {
+  const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const res = await evaluateLoginState('127.0.0.1', 9222, makeJsonFetch(XHS_TARGETS), makeFakeWsFactory({
+    domSignals: { href: 'https://www.xiaohongshu.com/explore', hasUserStorage: false, hasAvatar: true, hasCreatorEntry: true, hasLoginPrompt: false },
+    cookies: [],
+    cookiesError: true,
+    sent,
+  }));
+  assert.equal(res.loggedIn, true);
+  assert.equal(res.reason, 'avatar+creator-entry');
 });

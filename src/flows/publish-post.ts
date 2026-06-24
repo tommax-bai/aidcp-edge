@@ -155,6 +155,38 @@ export function extractPostId(root: Element | Document): string | undefined {
   return undefined;
 }
 
+/** 完整小红书分享链接（必含 xsec_token 才算可点开）的匹配式。 */
+const XHS_SHARE_URL_RE = /https?:\/\/[^\s"'<>]*xiaohongshu\.com\/[^\s"'<>]*xsec_token=[^\s"'<>]+/i;
+
+/**
+ * 抓「带 xsec_token 的完整小红书详情页分享 URL」（可点开真实笔记，供后台跳转）。
+ * 只回**含 xsec_token** 的完整绝对链接；抓不到则 undefined——诚实置空，绝不用裸 id 拼一个缺 token、
+ * 打不开的假链接冒充（change publish-history-account-and-detail，红线：不派生假值）。
+ */
+export function extractPostUrl(root: Element | Document): string | undefined {
+  const scope = rootElement(root);
+  const candidates: string[] = [];
+  // 1) 规范链接 / og:url（发布成功页常带的可分享绝对地址）。
+  const canonical = scope.querySelector('link[rel="canonical"]')?.getAttribute('href');
+  if (canonical) candidates.push(canonical);
+  const ogUrl = scope.querySelector('meta[property="og:url"]')?.getAttribute('content');
+  if (ogUrl) candidates.push(ogUrl);
+  // 2) 任意 <a href> / 复制链接控件里出现的完整分享链接。
+  for (const el of Array.from(scope.querySelectorAll('a[href], [data-share-url], [data-url], input[value]'))) {
+    const v =
+      el.getAttribute('href') ??
+      el.getAttribute('data-share-url') ??
+      el.getAttribute('data-url') ??
+      el.getAttribute('value');
+    if (v) candidates.push(v);
+  }
+  for (const url of candidates) {
+    const m = url.match(XHS_SHARE_URL_RE);
+    if (m) return m[0];
+  }
+  return undefined;
+}
+
 function isPublishPage(root: Element | Document): boolean {
   return Boolean(
     findElementByKeywords(root, ['填写标题会有更多赞哦', '标题', '填写标题', '输入标题']) ||

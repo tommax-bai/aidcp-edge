@@ -311,6 +311,10 @@ export class EdgeClient {
       env.type === 'interaction.like' ||
       env.type === 'interaction.collect' ||
       env.type === 'interaction.follow' ||
+      // 浏览闭环「发评论」：与 like/follow 同属互动命令，MUST 放行到 browseHandler，
+      // 否则云端 interaction.comment 在入口被静默丢弃 → 评论永不发出（飞书已审也没用）。
+      // 与 command-bridge 的 comment→interaction.comment 映射对应（同 §2 第4处同步点）。
+      env.type === 'interaction.comment' ||
       env.type === 'navigation.back' ||
       env.type === 'note.browse_images' ||
       env.type === 'note.scroll_comments' ||
