@@ -86,13 +86,19 @@ export function buildNotificationBadgeJs(): string {
  * 复用 realBadgeScanFnJs 的结构判据（numericOnly=true），仅作用在真实分类 tab 内、只认纯数字角标。
  * **绝不**沿用旧 `[class*="badge"]/[class*="red"]` 宽选择器 + `isNaN→1`——那正是 6.5.3 在入口探测点名删掉的
  * 假阳性源（命中常驻 reds-icon/badge-container），会让没未读也每类报「1」→ 无谓进各子分类、优先级失真。
- * 无数字红点的 tab 待真机校准 item(a) 据真实 DOM 补锚点；校准前宁可漏报 0 也绝不靠 class 猜 1。
+ *
+ * 真机校准（2026-06-24，活页面 CDP dump）：真实分类 tab = `div.reds-tab-item.tab-item`，结构
+ *   `div.reds-tab-item > div.badge-container > span(标签文字) + div(角标数字)`（无未读时角标位是空注释槽 `<!---->`）。
+ * **tab 范围收到 `[class*="tab-item"]`**：只命中三个真实叶子 tab，排除同样含 `[class*="tab"]` 的包裹容器
+ *   （`reds-tabs-list` / `sticky-tab` / `tabs-content-container`，其拼接文本会把一类角标泄漏给另一类 = 复审 NM-2）。
+ * 角标为 `.badge-container` 内标签 span 之外的数字叶子 div → `__realBadgeIn(tab,true)` 正好命中；
+ * 真机双向验证：赞和收藏有真实未读→likes:1，看一眼清除后→0，清空账号三类全 0（无 phantom）。
  */
 export function buildNotificationHomeJs(): string {
   return `(function(){
     ${realBadgeScanFnJs()}
     function tabUnread(labelRe){
-      var tabs = document.querySelectorAll('[role="tab"], [class*="tab"]');
+      var tabs = document.querySelectorAll('[class*="tab-item"]');
       for (var i = 0; i < tabs.length; i++) {
         var tab = tabs[i];
         var label = (tab.textContent || '').trim();
@@ -109,34 +115,42 @@ export function buildNotificationHomeJs(): string {
 /**
  * 「评论和@」列表原始项抽取 JS：返回 `[{kind, fromUser, content, noteTitle?, itemKey?}]`。
  *
- * 内容质量保障（与 6.5.4 一并修；选择器本身待真机校准 item(a)）：
+ * 真机校准（2026-06-24，活页面 CDP dump）——真实行结构：
+ *   `div.tabs-content-container > div.container`（每条一行，共 ~20 条）
+ *     `a.user-avatar[href=/user/profile/]`（头像，文本空）
+ *     `div.main > div.info > div.user-info > a`（**昵称**，无 class，own-text=昵称）
+ *     `span`（动作标签：评论了你的笔记 / 回复了你的评论 / 提到了你）
+ *     `span.interaction-time`（时间：「2天前」或日期「05-15」，**独立元素、不在正文里**）
+ *     `div.interaction-content`（**正文**；回复型另有 `div.quote-info`=被引原评论，不取）
+ *   行内**只有 profile 链、无 per-comment permalink**（赞类行带 `note-id` 属性、评论类无）。
+ *
+ * 据此换掉旧猜测选择器（旧 `[class*="item"]` 命中 23 个 `avatar-item` 头像→垃圾行；旧 `[class*="user"]`
+ * 先命中空文本的 `a.user-avatar`→昵称抽空）。内容质量保障（6.5.4）：
  *  - **code-point 安全截断**：绝不按 UTF-16 劈裂 emoji 代理对（否则飞书尾部乱码 U+FFFD）；超长补省略号。
- *  - **正文缺失发空串**：绝不回退整行 textContent（否则飞书收到「用户名+时间+回复/赞标签+标题」糊成的 blob）；
- *    空串由云端非空过滤丢弃 = 诚实「无可用正文」。
- *  - **itemKey 取非 profile 链**：per-user profile 链会把同人多条评论去重键撞成一个 → 静默折叠丢失；
- *    找不到非 profile 链则留空，交云端回退去重键。
+ *  - **正文缺失发空串**：绝不回退整行 textContent（避免飞书 blob）；空串由云端非空过滤丢弃 = 诚实无正文。
+ *  - **itemKey 取 note-id 属性 或 非 profile 链**：profile 链 per-user 会把同人多评论去重键撞成一个 → 折叠丢失；
+ *    都没有则留空（评论类即如此），交云端回退到 用户名|正文 去重键（正文已不含时间、跨巡视稳定）。
  */
 export function buildNotificationItemsJs(): string {
   return `(function(){
     function cut(s,n){ s=(s||'').trim(); var a=Array.from(s); return a.length>n ? a.slice(0,n).join('')+'…' : s; }
     var out = [];
-    var items = document.querySelectorAll('[class*="notification"] [class*="item"], [class*="comment"] [class*="item"], [class*="tabs-content"] [class*="container"] > div');
+    var items = document.querySelectorAll('.tabs-content-container > .container');
     for (var i=0;i<items.length && out.length<50;i++){
       var it = items[i];
-      var txt = (it.textContent||'');
-      var isMention = /@\\s*(我|你)|提到了你/.test(txt);
-      var isComment = /评论|回复/.test(txt);
-      if(!isMention && !isComment) continue;
-      var userEl = it.querySelector('[class*="name"], [class*="user"], a[href*="/user/profile/"]');
-      var contentEl = it.querySelector('[class*="content"], [class*="comment"], p');
-      var noteEl = it.querySelector('[class*="note"] [class*="title"], [class*="extract"]');
-      var links = it.querySelectorAll('a[href]'); var key='';
-      for (var k=0;k<links.length;k++){ var h=links[k].getAttribute('href')||''; if(h && h.indexOf('/user/profile/')<0){ key=h; break; } }
+      var actionEl = it.querySelector('.info span, .user-info ~ span, span'); // 动作标签 span（评论了/回复了/提到了你）
+      var actionText = (actionEl && actionEl.textContent || '').trim();
+      var isMention = /提到了你|@/.test(actionText);
+      var isComment = /评论|回复/.test(actionText);
+      if(!isMention && !isComment) continue; // 非评论/@/提及（结构异常行）跳过
+      var userEl = it.querySelector('.user-info a'); // 昵称（避开空文本的 a.user-avatar）
+      var contentEl = it.querySelector('.interaction-content'); // 正文（不含时间、不取 quote-info）
+      var key = it.getAttribute('note-id') || '';
+      if(!key){ var links = it.querySelectorAll('a[href]'); for (var k=0;k<links.length;k++){ var h=links[k].getAttribute('href')||''; if(h && h.indexOf('/user/profile/')<0){ key=h; break; } } }
       out.push({
         kind: isMention ? 'mention' : 'comment',
         fromUser: cut(userEl && userEl.textContent || '', 40),
         content: cut(contentEl && contentEl.textContent || '', 200),
-        noteTitle: cut(noteEl && noteEl.textContent || '', 40) || undefined,
         itemKey: key ? key.slice(0,120) : undefined
       });
     }

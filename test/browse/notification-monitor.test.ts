@@ -55,27 +55,24 @@ function probeHome(tabsHtml: string): { comments: number; likes: number; follows
   return JSON.parse(dom.window.eval(buildNotificationHomeJs()) as string);
 }
 
-// 猜测的真实分类 tab 结构（待真机校准 item a）：reds- 命名，标签文字 + 条件渲染的数字角标。
-const TABS_ALL_READ =
-  '<div role="tab" class="reds-tab-item"><span>评论和@</span></div>' +
-  '<div role="tab" class="reds-tab-item"><span>赞和收藏</span></div>' +
-  '<div role="tab" class="reds-tab-item"><span>新增关注</span></div>';
-const TABS_COMMENTS_2 =
-  '<div role="tab" class="reds-tab-item"><span>评论和@</span><span class="reds-badge">2</span></div>' +
-  '<div role="tab" class="reds-tab-item"><span>赞和收藏</span></div>' +
-  '<div role="tab" class="reds-tab-item"><span>新增关注</span></div>';
+// 真机校准（2026-06-24 活页面 dump）的真实分类 tab 结构：
+//   div.reds-tab-item.tab-item > div.badge-container > span(标签) + div(角标数字) | 空槽<!---->
+const tab = (label: string, badge?: string, active = false) =>
+  `<div class="reds-tab-item tab-item${active ? ' active' : ''}"><div class="badge-container">` +
+  `<span>${label}</span>${badge != null ? `<div class="reds-badge">${badge}</div>` : '<!---->'}</div></div>`;
+const TABS_ALL_READ = tab('评论和@') + tab('赞和收藏') + tab('新增关注');
+const TABS_LIKES_1 = tab('评论和@') + tab('赞和收藏', '1', true) + tab('新增关注');
 // 角标位仅常驻 reds-icon（无真实数字角标）：旧宽选择器 [class*="red"] 会命中它 + isNaN→1 假报「未读1」。
 const TABS_ICON_ONLY =
-  '<div role="tab" class="reds-tab-item"><span>评论和@</span><svg class="reds-icon"><use href="#dot"></use></svg></div>' +
-  '<div role="tab" class="reds-tab-item"><span>赞和收藏</span></div>' +
-  '<div role="tab" class="reds-tab-item"><span>新增关注</span></div>';
+  '<div class="reds-tab-item tab-item"><div class="badge-container"><span>评论和@</span>' +
+  '<svg class="reds-icon"><use href="#dot"></use></svg></div></div>' + tab('赞和收藏') + tab('新增关注');
 
 test('buildNotificationHomeJs: 全已读（无数字角标）→ 三类全 0（不靠 class 猜，诚实无未读）', () => {
   assert.deepEqual(probeHome(TABS_ALL_READ), { comments: 0, likes: 0, follows: 0 });
 });
 
-test('buildNotificationHomeJs: 评论 tab 有数字角标 2 → comments:2，其余 0', () => {
-  assert.deepEqual(probeHome(TABS_COMMENTS_2), { comments: 2, likes: 0, follows: 0 });
+test('buildNotificationHomeJs: 赞和收藏有真实数字角标 1 → likes:1，其余 0（真机 dump 结构）', () => {
+  assert.deepEqual(probeHome(TABS_LIKES_1), { comments: 0, likes: 1, follows: 0 });
 });
 
 test('buildNotificationHomeJs: 角标位仅常驻 reds-icon → 全 0（回归 6.5.3 假阳性，绝不再 isNaN→1）', () => {
@@ -84,55 +81,74 @@ test('buildNotificationHomeJs: 角标位仅常驻 reds-icon → 全 0（回归 6
 
 test('buildNotificationHomeJs(NM-3): tab 内多位数字子文本(时间戳/子计数)不被当角标 → 0（叶子+≤3位守卫）', () => {
   const html =
-    '<div role="tab" class="reds-tab-item"><span>评论和@</span><span class="time">1430</span></div>' +
-    '<div role="tab" class="reds-tab-item"><span>赞和收藏</span></div>' +
-    '<div role="tab" class="reds-tab-item"><span>新增关注</span></div>';
+    '<div class="reds-tab-item tab-item"><div class="badge-container"><span>评论和@</span><span class="time">1430</span></div></div>' +
+    tab('赞和收藏') + tab('新增关注');
   assert.deepEqual(probeHome(html), { comments: 0, likes: 0, follows: 0 });
 });
 
-test('buildNotificationHomeJs: 页面 chrome 里的「赞」按钮(非 tab)带数字 → 不被误读（只扫真实 tab）', () => {
-  // NB-2 回归：旧码全页扫 a/span/div，会从点赞/侧栏按钮误读 badge。新码只扫 [role=tab],[class*=tab]。
+test('buildNotificationHomeJs(NM-2): 真实包裹容器 reds-tabs-list 不被当 tab → 角标不跨类泄漏', () => {
+  // 真机 dump：reds-tabs-list / sticky-tab 也含 [class*="tab"]、拼接文本=三标签。旧 [class*="tab"] 选择器会把
+  // 赞类角标泄漏给评论类。新选择器收到 [class*="tab-item"]（包裹无此 class）→ 杜绝泄漏。
   const html =
-    '<a class="like-wrapper"><span>赞</span><span class="count">99</span></a>' +
-    '<div role="tab" class="reds-tab-item"><span>赞和收藏</span></div>';
-  assert.deepEqual(probeHome(html), { comments: 0, likes: 0, follows: 0 });
+    '<div class="reds-sticky-box sticky sticky-tab"><div class="tertiary left reds-tabs-list">' +
+    TABS_LIKES_1 + '</div></div>';
+  assert.deepEqual(probeHome(html), { comments: 0, likes: 1, follows: 0 }, '只 likes:1，评论/关注不被泄漏污染');
 });
 
-interface RawItem { kind: string; fromUser: string; content: string; noteTitle?: string; itemKey?: string }
+test('buildNotificationHomeJs: 页面 chrome 里的「赞」按钮(非 tab)带数字 → 不被误读（只扫真实 tab-item）', () => {
+  const html =
+    '<a class="like-wrapper"><span>赞</span><span class="count">99</span></a>' + tab('赞和收藏', '2');
+  assert.deepEqual(probeHome(html), { comments: 0, likes: 2, follows: 0 });
+});
+
+interface RawItem { kind: string; fromUser: string; content: string; itemKey?: string }
 /** 在真实 DOM 上跑「评论和@」列表抽取 JS（不绕过选择器）。 */
 function probeItems(listHtml: string): RawItem[] {
   const dom = new JSDOM(`<!DOCTYPE html><html><body>${listHtml}</body></html>`, { runScripts: 'outside-only' });
   return JSON.parse(dom.window.eval(buildNotificationItemsJs()) as string);
 }
 
-test('buildNotificationItemsJs(NCQ-1): 正文子选择器缺失 → content 空串（绝不回退整行 textContent 成 blob）', () => {
-  const items = probeItems('<div class="notification-list"><div class="item"><span class="user-name">张三</span>评论了你的笔记 3分钟前</div></div>');
+// 真机校准（2026-06-24）的真实评论行：div.tabs-content-container > div.container[note-id?]
+//   a.user-avatar(空文本) + div.main>div.info>(div.user-info>a 昵称 / span 动作 / span.interaction-time / div.interaction-content 正文)
+const row = (o: { user: string; action: string; time?: string; content?: string; noteId?: string; extraLink?: string }) =>
+  `<div class="container"${o.noteId ? ` note-id="${o.noteId}"` : ''}>` +
+  `<a class="user-avatar" href="/user/profile/u_${o.user}"></a>` +
+  '<div class="main"><div class="info">' +
+  `<div class="user-info"><a href="/user/profile/u_${o.user}">${o.user}</a></div>` +
+  `<span>${o.action}</span>` +
+  (o.time ? `<span class="interaction-time">${o.time}</span>` : '') +
+  (o.content != null ? `<div class="interaction-content">${o.content}</div>` : '') +
+  (o.extraLink ? `<a href="${o.extraLink}">查看</a>` : '') +
+  '</div></div></div>';
+const list = (...rows: string[]) => `<div class="tabs-content-container">${rows.join('')}</div>`;
+
+test('buildNotificationItemsJs: 真实行结构 → 昵称取 .user-info a（非空文本头像）、正文取 .interaction-content', () => {
+  const items = probeItems(list(row({ user: 'Scott309', action: '评论了你的笔记', time: '2天前', content: '再把 dp 设 2 试一下呢' })));
+  assert.equal(items.length, 1, '只抽 1 行（不被 a.user-avatar/avatar-item 头像污染成多行）');
+  assert.equal(items[0].fromUser, 'Scott309', '昵称取 .user-info a，不是空文本的 a.user-avatar');
+  assert.equal(items[0].content, '再把 dp 设 2 试一下呢', '正文取 .interaction-content，不含时间');
+  assert.equal(items[0].kind, 'comment');
+});
+
+test('buildNotificationItemsJs(NCQ-1): 无 .interaction-content → content 空串（绝不回退整行成 blob）', () => {
+  const items = probeItems(list(row({ user: '张三', action: '评论了你的笔记', time: '3分钟前' })));
   assert.equal(items.length, 1);
   assert.equal(items[0].fromUser, '张三');
   assert.equal(items[0].content, '', '无正文元素时发空串（由云端非空过滤丢弃），不把整行糊进来');
 });
 
-test('buildNotificationItemsJs(NB-5): itemKey 取非 profile 链；仅 profile 链则留空', () => {
-  const withNote = probeItems(
-    '<div class="comment-list"><div class="item">' +
-    '<a href="/user/profile/u1" class="user-name">李四</a><span>回复了你</span>' +
-    '<div class="content">说得对</div><a href="/explore/note456">查看笔记</a></div></div>',
-  );
-  assert.equal(withNote[0].itemKey, '/explore/note456', 'itemKey 应取非 profile 的稳定链接');
-  const onlyProfile = probeItems(
-    '<div class="comment-list"><div class="item">' +
-    '<a href="/user/profile/u1" class="user-name">李四</a><span>回复了你</span>' +
-    '<div class="content">说得对</div></div></div>',
-  );
-  assert.equal(onlyProfile[0].itemKey, undefined, '仅 profile 链 → itemKey 留空，交云端回退 用户名|正文 去重键');
+test('buildNotificationItemsJs(NB-5): itemKey 取 note-id 属性 / 非 profile 链；仅 profile 链则留空', () => {
+  const withNoteId = probeItems(list(row({ user: '李四', action: '评论了你的笔记', content: '说得对', noteId: '6248abc' })));
+  assert.equal(withNoteId[0].itemKey, '6248abc', 'note-id 属性优先作 itemKey');
+  const withLink = probeItems(list(row({ user: '李四', action: '回复了你的评论', content: '说得对', extraLink: '/explore/note456' })));
+  assert.equal(withLink[0].itemKey, '/explore/note456', '无 note-id 时取非 profile 链');
+  const onlyProfile = probeItems(list(row({ user: '李四', action: '回复了你的评论', content: '说得对' })));
+  assert.equal(onlyProfile[0].itemKey, undefined, '仅 profile 链 → 留空，交云端回退 用户名|正文 去重键');
 });
 
 test('buildNotificationItemsJs(NCQ-2): 超长正文按 code-point 截断 + 省略号，绝不劈裂 emoji 代理对', () => {
   const longBody = 'x'.repeat(199) + '😀tail'; // 第 200 个 code point 是 emoji（代理对）
-  const items = probeItems(
-    '<div class="comment-list"><div class="item"><span>评论</span>' +
-    `<div class="content">${longBody}</div></div></div>`,
-  );
+  const items = probeItems(list(row({ user: '阿强', action: '评论了你的笔记', content: longBody })));
   const c = items[0].content;
   assert.equal([...c].length, 201, '200 个 code point + 省略号');
   assert.ok(c.endsWith('😀…'), 'emoji 完整保留在边界、随后省略号');

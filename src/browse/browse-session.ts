@@ -1411,7 +1411,8 @@ export class BrowseSession {
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
       await evalRawFn<boolean>(
         this.deps.cdp,
-        `(function(){ var els = Array.from(document.querySelectorAll('[role="tab"], [class*="tab"], a, span, div')); for (var i=0;i<els.length;i++){ var t=(els[i].textContent||'').trim(); if(t==='评论和@' || (/^评论/.test(t) && t.indexOf('@')>=0)){ els[i].click(); return true; } } return false; })()`,
+        // 真机校准（2026-06-24）：真实分类 tab = [class*="tab-item"]（叶子），点它而非全页文本匹配（避免点到包裹容器）。
+        `(function(){ var els = Array.from(document.querySelectorAll('[class*="tab-item"]')); for (var i=0;i<els.length;i++){ var t=(els[i].textContent||'').trim(); if(t==='评论和@' || (/^评论/.test(t) && t.indexOf('@')>=0)){ els[i].click(); return true; } } return false; })()`,
       );
       await this.sleep(800);
       for (let i = 0; i < scrollMax; i++) {
@@ -1444,7 +1445,8 @@ export class BrowseSession {
       // **绝不**像旧码那样丢弃返回值、无条件报 viewed（那是静默假成功，且掩盖了 6.5.4 本要暴露的选择器漂移）。
       const clicked = await evalRawFn<boolean>(
         this.deps.cdp,
-        `(function(){ var els = Array.from(document.querySelectorAll('[role="tab"], [class*="tab"], a, span, div')); for (var i=0;i<els.length;i++){ var t=(els[i].textContent||'').trim(); if(t.length<=8 && new RegExp('${labelRe}').test(t)){ els[i].click(); return true; } } return false; })()`,
+        // 真机校准（2026-06-24）：分类 tab = [class*="tab-item"]（叶子，文本如「赞和收藏1」含角标数字故放宽到 <=8）。
+        `(function(){ var els = Array.from(document.querySelectorAll('[class*="tab-item"]')); for (var i=0;i<els.length;i++){ var t=(els[i].textContent||'').trim(); if(t.length<=8 && new RegExp('${labelRe}').test(t)){ els[i].click(); return true; } } return false; })()`,
       );
       if (!clicked) {
         this.logger(`[browse] ${action}: 未找到分类 tab（no_target，不假报已看）`);
