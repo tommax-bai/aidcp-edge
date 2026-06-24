@@ -391,7 +391,7 @@ test('browse-session: interaction.like 命令执行点赞并上报结果', async
   assert.equal(likeResult!.ok, true);
 });
 
-test('browse-session: interaction.like 已点赞 → 良性 no-op 成功 ok:true + already_liked（对齐 follow，非失败）', async () => {
+test('browse-session: interaction.like 已点赞时上报 already_liked', async () => {
   const h = makeHarness();
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
@@ -415,9 +415,7 @@ test('browse-session: interaction.like 已点赞 → 良性 no-op 成功 ok:true
   ]);
   const likeResult = h.completedActions.find(a => a.action === 'like');
   assert.ok(likeResult);
-  // 已点赞是良性 no-op 成功（对齐 follow already_followed）：目标状态已达成，不再当失败上报，
-  // 也不触发云端 recover_after_like_failed 兜底滚动；云端据 reason 不重复计互动/风控。
-  assert.equal(likeResult!.ok, true);
+  assert.equal(likeResult!.ok, false);
   assert.equal(likeResult!.reason, 'already_liked');
 });
 
