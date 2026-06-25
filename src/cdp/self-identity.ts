@@ -56,6 +56,31 @@ export type SelfIdentityResult =
   | { ok: true; identity: SelfIdentity }
   | { ok: false; reason: string };
 
+/**
+ * 握手身份决策（纯函数，便于单测覆盖优先级与红线）：
+ *   - 读出真实 id：env 覆盖优先（不同则标 mismatch 供告警），否则用真实 id；
+ *   - 读不出 + 有 env 覆盖：用覆盖值（逃生阀）；
+ *   - 读不出 + 无覆盖：halt（诚实停手，调用方不得握手、绝不回落 default）。
+ */
+export type IdentityDecision =
+  | { kind: 'use'; accountId: string; source: 'env-override' | 'in-place' | 'navigate'; mismatch?: { override: string; real: string } }
+  | { kind: 'use-override-after-read-fail'; accountId: string; reason: string }
+  | { kind: 'halt'; reason: string };
+
+export function decideHandshakeIdentity(idRes: SelfIdentityResult, override: string | undefined): IdentityDecision {
+  if (idRes.ok) {
+    const real = idRes.identity.accountId;
+    if (override) {
+      return override === real
+        ? { kind: 'use', accountId: override, source: 'env-override' }
+        : { kind: 'use', accountId: override, source: 'env-override', mismatch: { override, real } };
+    }
+    return { kind: 'use', accountId: real, source: idRes.identity.source };
+  }
+  if (override) return { kind: 'use-override-after-read-fail', accountId: override, reason: idRes.reason };
+  return { kind: 'halt', reason: idRes.reason };
+}
+
 /** 从一个 href 抽稳定 id；抽不到返回 ''。纯函数。 */
 export function extractIdFromHref(href: string | null | undefined): string {
   if (!href) return '';

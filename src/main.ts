@@ -27,7 +27,7 @@
  * 运行：npm start
  */
 
-import { attachToPage, launchChrome } from './cdp/index.js';
+import { attachToPage, launchChrome, readSelfIdentity, decideHandshakeIdentity } from './cdp/index.js';
 import { EdgeClient } from './client/edge-client.js';
 import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
@@ -73,8 +73,10 @@ async function main(): Promise<void> {
   await sweepImageTempDirs();
   const cloudUrl = process.env.AIDCP_CLOUD_URL ?? 'ws://121.89.85.150:8787';
   const edgeId = process.env.AIDCP_EDGE_ID ?? 'edge-local';
-  // hello 身份（用于云端风控归属与验证码定位；均可选，缺省云端安全降级）。
-  const accountId = process.env.AIDCP_ACCOUNT_ID;
+  // hello 身份（account-identity-from-login）：默认从「登录后读出的真实稳定 id」确立（见 attachToPage 之后）；
+  // 环境变量 AIDCP_ACCOUNT_ID 降级为【可选覆盖】（预置/特殊场景的逃生阀）。
+  const overrideAccountId = process.env.AIDCP_ACCOUNT_ID;
+  let accountId: string | undefined;
   const machineLabel = process.env.AIDCP_MACHINE_LABEL;
   const remoteAddr = process.env.AIDCP_REMOTE_ADDR;
   const cdpHost = process.env.AIDCP_CDP_HOST ?? '127.0.0.1';
@@ -94,6 +96,38 @@ async function main(): Promise<void> {
   const session = await attachToPage(attachOpts);
   console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
   // Runtime/Page/Input 域启用 + 反检测注入均在 attachToPage 内（reEnableAndInject，与断线重连共用）。
+
+  // 身份确立（account-identity-from-login 1.2）：登录态已由 launchChrome 的登录等待保证，
+  // 此处从登录态读出本节点真实稳定账号 id，作为握手身份。env 覆盖优先；读不出即诚实停手、绝不回落 default。
+  {
+    const idRes = await readSelfIdentity(session.cdp, { logger: (m) => console.log(m) });
+    const decision = decideHandshakeIdentity(idRes, overrideAccountId);
+    if (decision.kind === 'halt') {
+      // 红线「绝不静默以默认账号/默认人设开跑」：诚实停手——不握手、不连云端、绝不猜或回落 default。
+      console.error(`[aidcp-edge] ✗ 身份确立失败：登录态读不出稳定账号 id（${decision.reason}）。`);
+      console.error(
+        '[aidcp-edge]   已停手（不握手、不连云端）。请确认该节点浏览器已登录目标账号后重启；如确需指定身份，可设 AIDCP_ACCOUNT_ID 覆盖。',
+      );
+      try {
+        session.close();
+      } catch {
+        /* best-effort */
+      }
+      process.exitCode = 1;
+      return;
+    }
+    if (decision.kind === 'use-override-after-read-fail') {
+      console.warn(`[aidcp-edge] ⚠ 登录态读不出稳定 id（${decision.reason}），改用 AIDCP_ACCOUNT_ID 覆盖值=${decision.accountId}。`);
+    } else if (decision.mismatch) {
+      console.warn(
+        `[aidcp-edge] ⚠ AIDCP_ACCOUNT_ID 覆盖值(${decision.mismatch.override}) ≠ 登录态真实 id(${decision.mismatch.real})——以覆盖值为准，但身份与实际登录账号不一致，请确认是否预期。`,
+      );
+    }
+    accountId = decision.accountId;
+    const display = idRes.ok && idRes.identity.displayName ? ` (${idRes.identity.displayName})` : '';
+    const source = 'source' in decision ? decision.source : 'env-override';
+    console.log(`[aidcp-edge] 账号身份已确立: ${accountId}${display} [source=${source}]`);
+  }
 
   // 先声明 runner（延迟赋值），打破 client/selector/runner 的相互依赖
   let runner: LikeStepRunner | undefined;

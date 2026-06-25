@@ -5,7 +5,9 @@ import {
   isValidStableId,
   deriveInPlaceSelfId,
   readSelfIdentity,
+  decideHandshakeIdentity,
   type SelfIdentitySignals,
+  type SelfIdentityResult,
 } from '../../src/cdp/index.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
@@ -119,4 +121,51 @@ test('readSelfIdentity: 进了主页但 URL 无合规 id → 诚实失败', asyn
   });
   const res = await readSelfIdentity(cdp, fastOpts);
   assert.equal(res.ok, false);
+});
+
+// ---- decideHandshakeIdentity（握手身份优先级 + 红线，纯函数）----
+
+const okRes = (id: string, source: 'in-place' | 'navigate' = 'in-place'): SelfIdentityResult => ({
+  ok: true,
+  identity: { accountId: id, displayName: null, redId: null, source },
+});
+const failRes: SelfIdentityResult = { ok: false, reason: '就地读不出稳定 id 且禁用跳转兜底' };
+
+test('decideHandshakeIdentity: 读出真实 id、无覆盖 → 用真实 id', () => {
+  const d = decideHandshakeIdentity(okRes(REAL_ID, 'navigate'), undefined);
+  assert.equal(d.kind, 'use');
+  if (d.kind === 'use') {
+    assert.equal(d.accountId, REAL_ID);
+    assert.equal(d.source, 'navigate');
+    assert.equal(d.mismatch, undefined);
+  }
+});
+
+test('decideHandshakeIdentity: 覆盖 = 真实 id → 用覆盖、无 mismatch', () => {
+  const d = decideHandshakeIdentity(okRes(REAL_ID), REAL_ID);
+  assert.equal(d.kind, 'use');
+  if (d.kind === 'use') {
+    assert.equal(d.accountId, REAL_ID);
+    assert.equal(d.mismatch, undefined);
+  }
+});
+
+test('decideHandshakeIdentity: 覆盖 ≠ 真实 id → 用覆盖、标 mismatch（供告警）', () => {
+  const d = decideHandshakeIdentity(okRes(REAL_ID), 'default');
+  assert.equal(d.kind, 'use');
+  if (d.kind === 'use') {
+    assert.equal(d.accountId, 'default');
+    assert.deepEqual(d.mismatch, { override: 'default', real: REAL_ID });
+  }
+});
+
+test('decideHandshakeIdentity: 读不出 + 有覆盖 → 用覆盖（逃生阀）', () => {
+  const d = decideHandshakeIdentity(failRes, 'default');
+  assert.equal(d.kind, 'use-override-after-read-fail');
+  if (d.kind === 'use-override-after-read-fail') assert.equal(d.accountId, 'default');
+});
+
+test('decideHandshakeIdentity: 读不出 + 无覆盖 → halt（红线：绝不回落 default）', () => {
+  const d = decideHandshakeIdentity(failRes, undefined);
+  assert.equal(d.kind, 'halt');
 });
