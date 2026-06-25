@@ -1,4 +1,6 @@
 import { readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import type { PublishRequestPayload } from '../comm/protocol.js';
 
@@ -30,7 +32,16 @@ export interface PublishApprovalGateResult {
   signal?: PublishApprovalSignal;
 }
 
-const DEFAULT_SIGNAL_DIR = '/tmp';
+/**
+ * 审批信号文件默认目录：跨平台用 `os.tmpdir()`（Windows 无 `/tmp`），可经
+ * `AIDCP_PUBLISH_APPROVAL_SIGNAL_DIR` 覆盖（同机 mock/e2e 时两端共用以对齐）。
+ * 在 call 时解析（非模块加载时常量），便于 env 覆盖与测试。
+ * 注：生产发布走命令驱动 + 云端把关，不经此 edge 文件闸；此闸服务旧整页 publish.request 路径 + 本地 mock/e2e。
+ */
+function resolveDefaultSignalDir(): string {
+  return process.env.AIDCP_PUBLISH_APPROVAL_SIGNAL_DIR ?? tmpdir();
+}
+
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_TIMEOUT_MS = 5 * 60_000;
 
@@ -42,8 +53,10 @@ export function buildPublishApprovalRequestId(now: () => number = Date.now): str
   return `edge-${now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function buildPublishApprovalSignalPath(requestId: string, signalDir = DEFAULT_SIGNAL_DIR): string {
-  return `${signalDir.replace(/\/$/, '')}/aidcp-publish-approve-${requestId}.json`;
+export function buildPublishApprovalSignalPath(requestId: string, signalDir = resolveDefaultSignalDir()): string {
+  // 用 path.join：与云端 `getApprovalSignalPath`（同样 join）在同一 signalDir 下逐字一致（跨平台），
+  // 且 Windows 用原生分隔符、不再拼出 POSIX-only 的 `/tmp/...`。
+  return join(signalDir, `aidcp-publish-approve-${requestId}.json`);
 }
 
 function validateSignal(raw: unknown, requestId: string): PublishApprovalSignal {
@@ -84,7 +97,7 @@ export async function waitForPublishApproval(
 ): Promise<PublishApprovalGateResult> {
   const {
     requestId,
-    signalDir = DEFAULT_SIGNAL_DIR,
+    signalDir = resolveDefaultSignalDir(),
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     consumeSignal = true,

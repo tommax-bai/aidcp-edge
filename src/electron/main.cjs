@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage } = require('electron');
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, Notification } = require('electron');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
@@ -32,6 +32,27 @@ function updateStatus(patch) {
   BrowserWindow.getAllWindows().forEach((window) => {
     window.webContents.send('status:update', status);
   });
+}
+
+// 红线「不静默假成功」：edge 崩溃 / Chrome 缺失 / 连云失败时，把窗口拉到前台 + 发系统通知，
+// 让托盘最小化的运维立刻看见，而不是停在「运行中」外观空跑。仅暴露失败，不做任何重试/兜底。
+function surfaceFailure(title, body) {
+  try {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  } catch {
+    /* best-effort */
+  }
+  try {
+    if (Notification.isSupported()) {
+      new Notification({ title, body }).show();
+    }
+  } catch {
+    /* best-effort */
+  }
 }
 
 function createWindow() {
@@ -78,14 +99,15 @@ function createTray() {
 
 function startEdge() {
   if (edgeProcess) return;
-  const root = path.resolve(__dirname, '..', '..');
-  const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  edgeProcess = spawn(command, ['tsx', 'src/main.ts'], {
-    cwd: root,
-    env: { ...process.env },
+  // 打包后用 Electron 自带的 Node 运行预编译产物（ELECTRON_RUN_AS_NODE），
+  // 不依赖目标机装 Node/npx/tsx。entry 为 build:dist 编译出的 dist/main.js。
+  const appRoot = app.getAppPath();
+  const edgeEntry = path.join(appRoot, 'dist', 'main.js');
+  edgeProcess = spawn(process.execPath, [edgeEntry], {
+    cwd: appRoot,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
-    shell: true,
   });
 
   updateStatus({ edge: 'starting', session: 'running', lastMessage: 'Starting aidcp-edge...' });
@@ -94,12 +116,20 @@ function startEdge() {
   edgeProcess.stderr.on('data', (chunk) => handleEdgeOutput(chunk.toString(), true));
   edgeProcess.on('exit', (code, signal) => {
     edgeProcess = undefined;
+    const exitedAbnormally = !isQuitting && (signal != null || (code != null && code !== 0));
     updateStatus({
-      edge: 'stopped',
+      edge: exitedAbnormally ? 'warning' : 'stopped',
       cloud: 'disconnected',
       session: status.session === 'paused' ? 'paused' : 'idle',
       lastMessage: `Edge exited${code === null ? '' : ` with code ${code}`}${signal ? ` (${signal})` : ''}.`,
     });
+    // 红线：异常退出（含连云失败致诚实非零退出）不静默——主动弹窗 + 系统通知。
+    if (exitedAbnormally) {
+      surfaceFailure(
+        'AIDCP Edge 已停止运行',
+        `边缘进程异常退出${code === null ? '' : `（code ${code}`}${signal ? ` ${signal}` : ''}${code === null ? '' : '）'}。请打开窗口查看日志/重新登录或重连云端。`,
+      );
+    }
   });
 }
 
@@ -135,6 +165,8 @@ async function launchChromeAndGateEdge() {
   const launched = await launchChrome(app);
   if (!launched.ok) {
     updateStatus({ auth: 'chrome missing', edge: 'stopped', lastMessage: launched.error });
+    // 红线：Chrome 缺失诚实暴露，不静默装作在跑。
+    surfaceFailure('AIDCP Edge 无法启动', launched.error || '未找到 Google Chrome，请安装后重启。');
     return;
   }
   updateStatus({ auth: 'checking', lastMessage: `Chrome launched with profile: ${launched.profilePath}` });

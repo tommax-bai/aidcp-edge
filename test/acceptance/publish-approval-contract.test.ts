@@ -10,6 +10,8 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { tmpdir } from 'node:os';
+import { join, basename } from 'node:path';
 import {
   buildPublishApprovalRequestId,
   buildPublishApprovalSignalPath,
@@ -25,8 +27,23 @@ const signalFor = (id: string, approved: boolean): PublishApprovalSignal => ({
 });
 
 describe('AC-PUB 发布审批信号契约（edge）', () => {
-  it('AC-PUB-01 信号路径格式与跨层约定一致', () => {
-    assert.equal(buildPublishApprovalSignalPath('req-x'), '/tmp/aidcp-publish-approve-req-x.json');
+  it('AC-PUB-01 信号路径格式与跨层约定一致（跨平台）', () => {
+    // 跨端契约：GIVEN 同一 signalDir，edge 与 cloud（getApprovalSignalPath，同样 join）逐字一致。
+    assert.equal(buildPublishApprovalSignalPath('req-x', '/tmp'), join('/tmp', 'aidcp-publish-approve-req-x.json'));
+    // 文件名（跨端必须一致的部分）固定。
+    assert.equal(basename(buildPublishApprovalSignalPath('req-x')), 'aidcp-publish-approve-req-x.json');
+    // 默认目录跨平台 = os.tmpdir()（Windows 无 /tmp，不再 POSIX-only）。
+    assert.equal(buildPublishApprovalSignalPath('req-x'), join(tmpdir(), 'aidcp-publish-approve-req-x.json'));
+    // env 覆盖（同机 mock/e2e 两端共用此 env 对齐）。
+    process.env.AIDCP_PUBLISH_APPROVAL_SIGNAL_DIR = join(tmpdir(), 'aidcp-approve-test');
+    try {
+      assert.equal(
+        buildPublishApprovalSignalPath('req-x'),
+        join(tmpdir(), 'aidcp-approve-test', 'aidcp-publish-approve-req-x.json'),
+      );
+    } finally {
+      delete process.env.AIDCP_PUBLISH_APPROVAL_SIGNAL_DIR;
+    }
   });
 
   it('AC-PUB-02 requestId 唯一且形如 edge-*', () => {

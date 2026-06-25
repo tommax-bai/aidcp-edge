@@ -29,7 +29,7 @@ test('approval gate: approved true resolves and consumes signal', async () => {
   assert.deepEqual(result, {
     ok: true,
     requestId: 'req-1',
-    signalPath: buildPublishApprovalSignalPath('req-1'),
+    signalPath: buildPublishApprovalSignalPath('req-1', '/tmp'),
     approved: true,
     signal: {
       requestId: 'req-1',
@@ -38,7 +38,7 @@ test('approval gate: approved true resolves and consumes signal', async () => {
       payload: { title: 't', content: 'c', tags: ['x'] },
     },
   });
-  assert.deepEqual(removed, [buildPublishApprovalSignalPath('req-1')]);
+  assert.deepEqual(removed, [buildPublishApprovalSignalPath('req-1', '/tmp')]);
 });
 
 test('approval gate: approved false rejects explicitly', async () => {

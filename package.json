@@ -10,8 +10,12 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build:dist": "npm run clean:dist && tsc -p tsconfig.build.json",
     "electron:dev": "electron .",
-    "electron:build": "node ./node_modules/electron-builder/cli.js --win",
+    "electron:build": "npm run build:dist && node ./node_modules/electron-builder/cli.js",
+    "electron:build:win": "npm run build:dist && node ./node_modules/electron-builder/cli.js --win",
+    "electron:build:mac": "npm run build:dist && node ./node_modules/electron-builder/cli.js --mac",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "test:acceptance": "tsx --test test/acceptance/*.test.ts",
@@ -26,9 +30,10 @@
       "output": "dist-electron"
     },
     "files": [
-      "src/**/*",
-      "package.json",
-      "tsconfig.json"
+      "dist/**/*",
+      "src/electron/**/*.cjs",
+      "src/electron/renderer/**/*",
+      "package.json"
     ],
     "extraMetadata": {
       "main": "src/electron/main.cjs"
@@ -40,6 +45,27 @@
           "target": "nsis",
           "arch": [
             "x64"
+          ]
+        }
+      ]
+    },
+    "mac": {
+      "category": "public.app-category.utilities",
+      "hardenedRuntime": true,
+      "identity": null,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
           ]
         }
       ]
