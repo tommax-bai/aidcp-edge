@@ -279,6 +279,14 @@ export class EdgeClient {
     this.connected = false;
   }
 
+  /**
+   * 更新握手携带的账号身份（account-identity-from-login：身份翻转后按新 id 重连）。
+   * 仅改下次 connect() 的 hello 身份；须在 close() 之后、connect() 之前调用。
+   */
+  setAccountId(accountId: string | undefined): void {
+    this.opts.accountId = accountId;
+  }
+
   private onMessage(data: unknown): void {
     const text = typeof data === 'string' ? data : String(data);
     const env = parseEnvelope(text);

@@ -45,6 +45,7 @@ import {
   CdpOverlayMonitor,
   CdpNotificationMonitor,
   WatcherSupervisor,
+  IdentityWatcher,
   evalRaw,
   extractNoteContent,
   type OverlayKind,
@@ -263,6 +264,47 @@ async function main(): Promise<void> {
   let browse: BrowseSession | undefined;
   let overlayMonitor: CdpOverlayMonitor | undefined;
   let watcherSupervisor: WatcherSupervisor | undefined;
+  let identityWatcher: IdentityWatcher | undefined;
+
+  // 身份失效 → 退回无身份态、重新确立、按新 id 重连（account-identity-from-login 1.3/1.4）。
+  // 复用同一 session.cdp（浏览器不重启、端口/目录不重分 = 节点初始化不动），只重跑「身份确立」。
+  let reestablishing = false;
+  const reestablishIdentity = async (): Promise<void> => {
+    if (reestablishing) return;
+    reestablishing = true;
+    try {
+      const r = identityWatcher?.lastReason;
+      const reasonStr = r ? (r.kind === 'changed' ? `换号→${r.newId}` : '登出/过期') : '未知';
+      console.warn(
+        `[aidcp-edge] 身份失效（${reasonStr}）→ 退回无身份态：停账号作用域操作 + 断开云端，重新确立身份（浏览器不重启、端口/目录不重分）...`,
+      );
+      watcherSupervisor?.stopAll();
+      browse?.stop();
+      client.close();
+      const idRes = await readSelfIdentity(session.cdp, { logger: (m) => console.log(m) });
+      const decision = decideHandshakeIdentity(idRes, overrideAccountId);
+      if (decision.kind === 'halt') {
+        console.error(
+          `[aidcp-edge] ✗ 重新确立身份失败（${decision.reason}）：停在无身份态、不重连云端、绝不回落 default。请在该节点重新登录目标账号后重启。`,
+        );
+        return; // 留在无身份态，不静默以默认账号开跑（红线）
+      }
+      accountId = decision.accountId;
+      client.setAccountId(accountId);
+      await client.connect();
+      console.log(
+        `[aidcp-edge] 身份重新确立: ${accountId}，已按新 id 重连云端（云端按新账号拆旧会话 + 重过就绪闸）`,
+      );
+      identityWatcher?.rebaseline(accountId);
+      browse?.start().catch((err) => console.error('[aidcp-edge] 浏览会话异常:', err));
+      watcherSupervisor?.startAll();
+    } catch (err) {
+      console.error('[aidcp-edge] 重新确立身份过程出错:', err);
+    } finally {
+      reestablishing = false;
+    }
+  };
+
   const autoBrowse = process.env.AIDCP_AUTO_BROWSE !== 'false';
   if (autoBrowse) {
     const browseOpts: BrowseSessionOptions = {};
@@ -342,6 +384,16 @@ async function main(): Promise<void> {
           console.error('[aidcp-edge] notification.detected 上报失败:', err);
         }
       }
+    });
+    // ③ 身份持续校验（account-identity-from-login 1.4）：周期就地重读自己的稳定 id，
+    //    连续判失效（登出/过期/换号）→ 退回无身份态、重新确立、按新 id 重连。
+    identityWatcher = new IdentityWatcher(session.cdp, accountId!, {
+      intervalMs: Number(process.env.AIDCP_IDENTITY_CHECK_MS ?? 30_000),
+      threshold: Number(process.env.AIDCP_IDENTITY_FAIL_THRESHOLD ?? 2),
+      logger: (m) => console.log(m),
+    });
+    watcherSupervisor.register(identityWatcher, (from, to) => {
+      if (from === 'healthy' && to === 'invalid') void reestablishIdentity();
     });
     // CDP 重连联动：不可恢复（重连耗尽、终态）→ 停掉全部后台监测体。否则它们继续对已死的 client 空轮询、
     // 每 pollMs 刷一行「探测失败(保持上一状态)」僵尸日志直到进程退出（旧码只有 SIGINT 才 stopAll）。
