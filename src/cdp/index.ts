@@ -8,3 +8,4 @@ export * from './action-executor.js';
 export * from './session.js';
 export * from './chrome-launcher.js';
 export * from './stealth-injector.js';
+export * from './self-identity.js';
