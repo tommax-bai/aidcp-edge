@@ -5,7 +5,7 @@ import type { FeedScroller, NoteCard } from '../../src/browse/feed-scroller.js';
 import type { ModalController } from '../../src/browse/modal-controller.js';
 import type { NoteContent } from '../../src/browse/note-extractor.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
-import { makeEnvelope, type Envelope, type NoteContentPayload, type PageCardsPayload, type ActionCompletedPayload, type ProfileDetailPayload } from '../../src/comm/protocol.js';
+import { makeEnvelope, type Envelope, type NoteContentPayload, type PageCardsPayload, type ActionCompletedPayload, type ProfileDetailPayload, type NoteDetailPayload } from '../../src/comm/protocol.js';
 import type { PlanStep, ActionResultPayload } from '../../src/comm/protocol.js';
 import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monitor.js';
 import { CdpDisconnectedError } from '../../src/cdp/client.js';
@@ -275,6 +275,44 @@ test('browse-session: note.open 命令打开卡片并上报 note.detail', async 
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.deepEqual(h.openedCards, [0]);
+});
+
+test('browse-session: note.open 探测到已关注 → note.detail 带 authorFollowed=true', async () => {
+  const h = makeHarness();
+  const details: NoteDetailPayload[] = [];
+  h.deps.client.reportNoteDetail = (p: NoteDetailPayload) => { details.push(p); };
+  // note.open 时关注态探测（probeAuthorFollowed）会 eval 含 follow-button 的 js → 返回已关注。
+  const base = h.deps.cdp;
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      const expr = String((params as { expression?: unknown })?.expression ?? '');
+      if (method === 'Runtime.evaluate' && expr.includes('follow-button') && expr.includes('followed')) {
+        return { result: { value: '{"followed":true}' } } as never;
+      }
+      return base.send(method, params);
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.equal(details.length, 1, '应上报一次 note.detail');
+  assert.equal(details[0].authorFollowed, true, '已关注 → authorFollowed=true');
+});
+
+test('browse-session: note.open 未关注/读不到 → note.detail authorFollowed=false（回退原流程）', async () => {
+  // 默认 harness cdp：关注态探测 js 落到 URL 兜底 → JSON.parse 抛 → probe 返回 false（安全回退）。
+  const h = makeHarness();
+  const details: NoteDetailPayload[] = [];
+  h.deps.client.reportNoteDetail = (p: NoteDetailPayload) => { details.push(p); };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.equal(details.length, 1, '应上报一次 note.detail');
+  assert.equal(details[0].authorFollowed, false, '探测不到 → falsy → 回退原流程');
 });
 
 test('browse-session: note.open 按 noteId 命中目标卡（index 已失效也开对）', async () => {

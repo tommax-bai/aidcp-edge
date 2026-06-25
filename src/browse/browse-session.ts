@@ -163,6 +163,13 @@ const DEFAULT_EXPLORE_URL = 'https://www.xiaohongshu.com/explore';
 const EXPLORE_FEED_RE = /\/explore\/?(\?|#|$)/;
 const DEFAULT_RHYTHM_TOTAL = 60;
 
+/**
+ * 关注按钮选择器（笔记 modal 作者区 + 作者主页两种上下文）。
+ * executeFollow（点关注）与 note.open 时的关注态探测 probeAuthorFollowed 共用同一份，
+ * 保证「已关注」判定口径完全一致、不漂移（change skip-profile-visit-if-followed）。
+ */
+const FOLLOW_BUTTON_SELECTORS = ['.author-wrapper .follow-button', '.user-info .follow-button', '.user-page .follow-button', '.follow-button', '.author-follow-btn', '[data-type="follow"]', '.follow-btn'];
+
 /** 浏览会话（命令驱动模式） */
 export class BrowseSession {
   private running = false;
@@ -805,6 +812,10 @@ export class BrowseSession {
     };
     const realNoteId = card.noteId ?? parseNoteId(content.noteUrl) ?? parseNoteId(await this.evalUrl());
 
+    // 探测作者区关注按钮当下真实态（change skip-profile-visit-if-followed）：已关注则随 note.detail 带回，
+    // 云端在「是否进主页」评估前据此短路掉整条主页子链。读不到→false→回退原流程。
+    const authorFollowed = await this.probeAuthorFollowed();
+
     // 用 note.detail 上报
     const payload: NoteDetailPayload = {
       noteId: realNoteId ?? `card-${card.position}`,
@@ -813,11 +824,13 @@ export class BrowseSession {
       author: content.author,
       likeCount: content.likes,
       collectCount: content.collects,
+      authorFollowed,
     };
     this.deps.client.reportNoteDetail?.(payload);
     this.logger(
       `[browse] note.open: 已上报 note.detail noteId=${payload.noteId}「${(payload.title ?? '').slice(0, 24)}」` +
         `${payload.author ? ' by ' + payload.author : ''} 👍${payload.likeCount ?? 0} ⭐${payload.collectCount ?? 0}` +
+        `${authorFollowed ? ' [已关注]' : ''}` +
         ` 正文:${(payload.content ?? '').replace(/\s+/g, ' ').slice(0, 50)}…`,
     );
     this.processed++;
@@ -1139,12 +1152,44 @@ export class BrowseSession {
   /**
    * 执行关注操作。Cloud 已做出决策，Edge 直接执行。
    */
+  /**
+   * note.open 时探测笔记 modal 作者区关注按钮当下真实态（change skip-profile-visit-if-followed）。
+   * 复用 executeFollow 的选择器与「已关注/互关/aria-pressed」判定，逐字镜像其扫描顺序：
+   * 对 executeFollow 会判「已关注」的同一元素返回 true，会去点击（未关注）的返回 false。
+   * 无按钮 / 读取失败 / 异常 → false（falsy），云端据此回退原主页评估流程。
+   * 边缘只读取平台当下信号上报、不臆造（红线：MUST NOT 静默假成功）。
+   */
+  private async probeAuthorFollowed(): Promise<boolean> {
+    try {
+      const js = `(function(){
+        var selectors = ${JSON.stringify(FOLLOW_BUTTON_SELECTORS)};
+        for (var s of selectors) {
+          var el = document.querySelector(s);
+          if (el) {
+            var text = el.textContent || '';
+            var pressed = el.getAttribute('aria-pressed') === 'true';
+            if (text.includes('已关注') || text.includes('互关') || pressed) return JSON.stringify({followed:true});
+            var r = el.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) return JSON.stringify({followed:false});
+          }
+        }
+        return JSON.stringify({followed:false});
+      })()`;
+      const { evalRaw: evalRawFn } = await import('./cdp-util.js');
+      const raw = await evalRawFn<string>(this.deps.cdp, js);
+      const result = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return result?.followed === true;
+    } catch {
+      return false;
+    }
+  }
+
   private async executeFollow(): Promise<void> {
     try {
       const js = `(function(){
         // 关注按钮两种上下文：笔记 modal 内 .author-wrapper .follow-button；作者主页 .user-info .follow-button
         // （真实小红书主页按钮为 button.reds-button-new.follow-button）。bare .follow-button 兜底两者。
-        var selectors = ['.author-wrapper .follow-button', '.user-info .follow-button', '.user-page .follow-button', '.follow-button', '.author-follow-btn', '[data-type="follow"]', '.follow-btn'];
+        var selectors = ${JSON.stringify(FOLLOW_BUTTON_SELECTORS)};
         for (var s of selectors) {
           var el = document.querySelector(s);
           if (el) {
