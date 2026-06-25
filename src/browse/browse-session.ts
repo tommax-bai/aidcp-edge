@@ -53,7 +53,7 @@ import { NOTE_BODY_SELECTORS } from './note-extractor.js';
 import { executeSearch } from './search-handler.js';
 import { evalRaw, type RandomFn, type BrowseCdp } from './cdp-util.js';
 import { CdpDisconnectedError } from '../cdp/client.js';
-import { buildNotificationHomeJs, buildNotificationItemsJs } from './notification-monitor.js';
+import { buildNotificationHomeJs, buildNotificationItemsJs, buildNotificationCategoryItemsJs } from './notification-monitor.js';
 import type { DomProvider } from '../locating/engine.js';
 import {
   sampleDelay,
@@ -1451,8 +1451,9 @@ export class BrowseSession {
   }
 
   /**
-   * 进「赞和收藏」/「新增关注」分类看一眼清未读（v1 不抽取），回执 action.completed。
-   * 选择器 best-effort、待真机校准；失败也如实回执，使云端巡视能收尾。
+   * 进「赞和收藏」/「新增关注」分类：清未读 + 抽取发送者经 notification.items 上报（change notification-contact-registry）。
+   * 清零仍是首要目的（保 notification-clear-to-zero 语义）；发送者抽取是清零旁路只读输出，抽取失败绝不阻断清零回执。
+   * 选择器 best-effort、待真机校准；点击未命中如实 no_target（绝不静默假报已看）。
    */
   private async viewNotificationCategory(kind: 'likes' | 'follows'): Promise<void> {
     const action = kind === 'likes' ? 'browse_notification_likes' : 'browse_notification_follows';
@@ -1472,7 +1473,36 @@ export class BrowseSession {
         return;
       }
       await this.sleep(800);
-      this.logger(`[browse] ${action}: 已查看（清未读，v1 不抽取）`);
+      // 滚动加载更多发送者（有界）+ 清未读：连续 STABLE_ROUNDS 行数不增即到底，HARD_CAP 诚实有界（同评论栏策略）。
+      const COUNT_JS = `document.querySelectorAll('.tabs-content-container > .container').length`;
+      const SCROLL_JS = `(function(){ window.scrollBy(0, document.documentElement.clientHeight*0.8); return true; })()`;
+      const HARD_CAP = 12;
+      const STABLE_ROUNDS = 2;
+      let lastCount = -1;
+      let stable = 0;
+      for (let i = 0; i < HARD_CAP; i++) {
+        const count = await evalRawFn<number>(this.deps.cdp, COUNT_JS).catch(() => lastCount);
+        if (count > lastCount) {
+          lastCount = count;
+          stable = 0;
+        } else if (++stable >= STABLE_ROUNDS) {
+          break;
+        }
+        await evalRawFn<boolean>(this.deps.cdp, SCROLL_JS);
+        await this.sleep(600);
+      }
+      // 抽取发送者（点赞/收藏 或 关注）→ notification.items（云端沉淀进通知联系人名册）。
+      // best-effort、待真机校准；抽取失败只记日志、绝不阻断下方清零回执（清零是首要目的）。
+      try {
+        const raw = await evalRawFn<string>(this.deps.cdp, buildNotificationCategoryItemsJs(kind));
+        const items = typeof raw === 'string' ? JSON.parse(raw) : [];
+        this.deps.client.send?.('notification.items', { items });
+        this.logger(`[browse] ${action}: 抽取上报 ${Array.isArray(items) ? items.length : 0} 个发送者（选择器待真机校准）`);
+      } catch (exErr) {
+        if (exErr instanceof CdpDisconnectedError) throw exErr; // 断连冒泡重连，绝不假报
+        this.logger(`[browse] ${action}: 发送者抽取失败（不阻断清零）：${(exErr as Error).message}`);
+      }
+      this.logger(`[browse] ${action}: 已查看（清未读）`);
       this.deps.client.reportActionCompleted?.({ action, ok: true, reason: 'viewed' });
     } catch (err) {
       if (err instanceof CdpDisconnectedError) throw err; // 断连不当业务失败：冒泡到主循环重连，绝不假报「已看」

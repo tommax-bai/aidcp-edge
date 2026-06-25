@@ -145,12 +145,68 @@ export function buildNotificationItemsJs(): string {
       if(!isMention && !isComment) continue; // 非评论/@/提及（结构异常行）跳过
       var userEl = it.querySelector('.user-info a'); // 昵称（避开空文本的 a.user-avatar）
       var contentEl = it.querySelector('.interaction-content'); // 正文（不含时间、不取 quote-info）
+      // 主页ID（稳定身份，change notification-contact-registry）：从行内头像/昵称的 /user/profile/<id> 解析。
+      // 注意：itemKey 仍刻意排除 profile 链（评论去重需保各评论独立）；fromUserId 是独立的身份字段，互不影响。
+      var fromUserId = '';
+      var pl = it.querySelector('a[href*="/user/profile/"]');
+      if(pl){ var ph = pl.getAttribute('href') || ''; var pm = ph.match(/\\/user\\/profile\\/([^/?#]+)/); if(pm) fromUserId = pm[1].slice(0,80); }
       var key = it.getAttribute('note-id') || '';
       if(!key){ var links = it.querySelectorAll('a[href]'); for (var k=0;k<links.length;k++){ var h=links[k].getAttribute('href')||''; if(h && h.indexOf('/user/profile/')<0){ key=h; break; } } }
       out.push({
         kind: isMention ? 'mention' : 'comment',
         fromUser: cut(userEl && userEl.textContent || '', 40),
+        fromUserId: fromUserId || undefined,
         content: cut(contentEl && contentEl.textContent || '', 200),
+        itemKey: key ? key.slice(0,120) : undefined
+      });
+    }
+    return JSON.stringify(out);
+  })()`;
+}
+
+/**
+ * 「赞和收藏」/「新增关注」列表发送者抽取 JS（change notification-contact-registry）：
+ * 返回 `[{kind, fromUser, fromUserId?, content:'', noteTitle?, itemKey?}]`，经 notification.items 上报，
+ * 云端沉淀进通知联系人名册。`category='likes'` → 按行动作文本分 like/collect；`category='follows'` → follow。
+ *
+ * **best-effort，待真机校准**：这两栏的真实行 DOM 未经活页面 dump，此处沿用评论栏的
+ * `.tabs-content-container > .container` 行容器 + `.user-info a` 昵称 + 头像 `/user/profile/` 主页ID 假定；
+ * 上线前须按真机结构校准（tasks 8.3），校准前宁可少抽不可瞎报。诚实：无身份(昵称且主页ID皆空)的行跳过。
+ * 复用 code-point 安全截断；正文恒空（互动型无正文），noteTitle 仅点赞/收藏型尝试。
+ */
+export function buildNotificationCategoryItemsJs(category: 'likes' | 'follows'): string {
+  return `(function(){
+    function cut(s,n){ s=(s||'').trim(); var a=Array.from(s); return a.length>n ? a.slice(0,n).join('')+'…' : s; }
+    function uid(scope){ var a=scope.querySelector('a[href*="/user/profile/"]'); if(!a) return ''; var h=a.getAttribute('href')||''; var m=h.match(/\\/user\\/profile\\/([^/?#]+)/); return m?m[1].slice(0,80):''; }
+    var out = [];
+    var items = document.querySelectorAll('.tabs-content-container > .container');
+    for (var i=0;i<items.length && out.length<50;i++){
+      var it = items[i];
+      var actionEl = it.querySelector('.info span, .user-info ~ span, span');
+      var actionText = (actionEl && actionEl.textContent || '').trim();
+      var kind = '';
+      if ('${category}' === 'follows') {
+        if(!/关注/.test(actionText)) continue; // 非关注行（结构异常）跳过
+        kind = 'follow';
+      } else {
+        if(/收藏/.test(actionText)) kind = 'collect';
+        else if(/赞|点赞/.test(actionText)) kind = 'like';
+        else continue; // 赞/收藏 之外（结构异常）跳过
+      }
+      var userEl = it.querySelector('.user-info a');
+      var fromUser = cut(userEl && userEl.textContent || '', 40);
+      var fromUserId = uid(it);
+      if(!fromUser && !fromUserId) continue; // 诚实：无身份的结构异常行跳过，不记空联系人
+      var noteTitle = '';
+      if(kind !== 'follow'){ var nEl = it.querySelector('.interaction-content') || it.querySelector('[class*="note"] [class*="title"]'); noteTitle = nEl ? cut(nEl.textContent||'', 80) : ''; }
+      var key = it.getAttribute('note-id') || '';
+      if(!key){ var links = it.querySelectorAll('a[href]'); for (var k=0;k<links.length;k++){ var h=links[k].getAttribute('href')||''; if(h && h.indexOf('/user/profile/')<0){ key=h; break; } } }
+      out.push({
+        kind: kind,
+        fromUser: fromUser,
+        fromUserId: fromUserId || undefined,
+        content: '',
+        noteTitle: noteTitle || undefined,
         itemKey: key ? key.slice(0,120) : undefined
       });
     }
