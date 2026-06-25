@@ -1403,8 +1403,12 @@ export class BrowseSession {
   }
 
   /**
-   * 进「评论和@」分类、滚动加载、抽取原始评论/@ 项，经 notification.items 上报。
+   * 进「评论和@」分类、**滚到底**加载、抽取原始评论/@ 项，经 notification.items 上报。
    * 边缘只产出原始项；是否值得通知由云端判。选择器 best-effort、待真机校准；失败上报空 items（不静默吞）。
+   *
+   * 滚动策略（change notification-clear-to-zero）：滚到底 / 直到不再有新项（连续 STABLE_ROUNDS 次评论行数不增），
+   * 有界兜底 HARD_CAP——替代旧的「固定 scrollMax 屏」：未读条数多于一屏时固定屏数会遗留未清，破坏「清零」前提。
+   * scrollMax 由云端下发，此处当作硬上限的下限参考（实际上限取 max(scrollMax, HARD_CAP_FLOOR)）。
    */
   private async browseNotificationComments(scrollMax: number): Promise<void> {
     try {
@@ -1415,8 +1419,22 @@ export class BrowseSession {
         `(function(){ var els = Array.from(document.querySelectorAll('[class*="tab-item"]')); for (var i=0;i<els.length;i++){ var t=(els[i].textContent||'').trim(); if(t==='评论和@' || (/^评论/.test(t) && t.indexOf('@')>=0)){ els[i].click(); return true; } } return false; })()`,
       );
       await this.sleep(800);
-      for (let i = 0; i < scrollMax; i++) {
-        await evalRawFn<boolean>(this.deps.cdp, `(function(){ window.scrollBy(0, document.documentElement.clientHeight*0.8); return true; })()`);
+      // 滚到底：连续 STABLE_ROUNDS 次评论行数不增即判到底；HARD_CAP 防异常无限滚（诚实有界）。
+      const COUNT_JS = `document.querySelectorAll('.tabs-content-container > .container').length`;
+      const SCROLL_JS = `(function(){ window.scrollBy(0, document.documentElement.clientHeight*0.8); return true; })()`;
+      const HARD_CAP = Math.max(scrollMax, 12);
+      const STABLE_ROUNDS = 2;
+      let lastCount = -1;
+      let stable = 0;
+      for (let i = 0; i < HARD_CAP; i++) {
+        const count = await evalRawFn<number>(this.deps.cdp, COUNT_JS).catch(() => lastCount);
+        if (count > lastCount) {
+          lastCount = count;
+          stable = 0;
+        } else if (++stable >= STABLE_ROUNDS) {
+          break; // 连续无新项 → 到底
+        }
+        await evalRawFn<boolean>(this.deps.cdp, SCROLL_JS);
         await this.sleep(600);
       }
       // 抽取 JS 抽成单一真相 builder（含 code-point 安全截断 / 正文缺失发空串 / itemKey 排除 profile 链，
