@@ -280,6 +280,41 @@ export class EdgeClient {
   }
 
   /**
+   * 诚实下线：发起关闭并**等连接真正关闭**（带有界上限）再返回，使云端收到干净关闭帧、
+   * 立即把本节点移出路由目标。回收/关机路径用它，避免「ws.close() 只发起握手、紧接着 process.exit
+   * 把关闭帧吞掉 → 云端最长 staleAfterMs 内仍当其在线并派活」的僵尸复活（BLOCKER①）。
+   */
+  async closeAndWait(timeoutMs = 1500): Promise<void> {
+    this.failAllPending(new Error('边-云客户端主动关闭'));
+    const ws = this.ws;
+    if (!ws) {
+      this.connected = false;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      try {
+        ws.addEventListener('close', finish);
+      } catch {
+        /* 某些桩 ws 不支持二次注册；退化为仅超时兜底 */
+      }
+      const timer = setTimeout(finish, timeoutMs);
+      (timer as { unref?: () => void }).unref?.();
+      try {
+        ws.close();
+      } catch {
+        finish();
+      }
+    });
+    this.connected = false;
+  }
+
+  /**
    * 更新握手携带的账号身份（account-identity-from-login：身份翻转后按新 id 重连）。
    * 仅改下次 connect() 的 hello 身份；须在 close() 之后、connect() 之前调用。
    */

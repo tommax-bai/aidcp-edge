@@ -70,6 +70,9 @@ export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSes
   // 重连后用 reEnableAndInject 重启用域 + 重注入反检测。
   let reconnect: CdpReconnectOptions | undefined;
   if (options.reconnect !== false) {
+    const host = options.host ?? '127.0.0.1';
+    const port = options.port ?? 9222;
+    const doFetch = options.fetchImpl ?? globalThis.fetch;
     reconnect = {
       ...(typeof options.reconnect === 'object' ? options.reconnect : {}),
       rediscoverTarget: async () => {
@@ -81,6 +84,26 @@ export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSes
       },
       onReconnected: async (c) => {
         await reEnableAndInject(c, { stealth: options.stealth, injector });
+      },
+      // 终态快判（进入退避循环前）：① 浏览器进程级端点 /json/version 不可达 → 进程已死 = 终态；
+      // ② 进程在但找不到可用 page target → 页面归零（窗口被关/标签崩，经验不可恢复）= 终态；
+      // ③ 进程在且页面 target 仍在 → 'retry' 走有界重连透明续跑。
+      classify: async () => {
+        try {
+          const res = await doFetch(`http://${host}:${port}/json/version`);
+          if (!res.ok) return 'terminal';
+        } catch {
+          return 'terminal'; // 端口拒连：进程级终态
+        }
+        try {
+          await firstPageTarget({
+            ...options,
+            urlIncludes: options.urlIncludes ?? 'xiaohongshu.com',
+          });
+          return 'retry'; // 页面 target 在，可重连
+        } catch {
+          return 'terminal'; // 页面归零，经验不可恢复
+        }
       },
     };
   }

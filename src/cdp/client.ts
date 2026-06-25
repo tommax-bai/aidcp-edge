@@ -68,6 +68,12 @@ export interface CdpReconnectOptions {
   rediscoverTarget?: () => Promise<string>;
   /** 新连接建好后回调：重 enable 域 + 重注入反检测 */
   onReconnected?: (cdp: CdpClient) => Promise<void>;
+  /**
+   * 进入有界退避循环**之前**的终态快判：返回 'terminal' 则跳过重连、立即发 `cdp.unrecoverable`
+   * （浏览器进程已死 / 页面 target 归零，经验不可恢复——见 06-24 两次真机复现），不磨满重连预算；
+   * 返回 'retry' 走正常退避循环（页面 target 仍在，可重连透明续跑）。不提供则按旧行为直接进循环。
+   */
+  classify?: () => Promise<'terminal' | 'retry'>;
   /** 注入 sleep（测试用） */
   sleepImpl?: (ms: number) => Promise<void>;
   /** 注入时钟（测试用，硬上限计时） */
@@ -257,6 +263,20 @@ export class CdpClient {
     const now = opts.nowImpl ?? (() => Date.now());
     const deadline = now() + hardCapMs;
     try {
+      // 进入退避循环前先做终态快判：端口死 / 页面归零则立即放弃，不磨满重连预算（主导失败 case 从数十秒坍缩到近零）。
+      if (opts.classify) {
+        let verdict: 'terminal' | 'retry' = 'retry';
+        try {
+          verdict = await opts.classify();
+        } catch {
+          verdict = 'retry'; // 快判本身出错不武断判死，退回正常退避循环
+        }
+        if (this.intentionalClose) return; // 主动 close 抢占
+        if (verdict === 'terminal') {
+          this.emitEvent('cdp.unrecoverable', { reason: 'fast-classify' });
+          return;
+        }
+      }
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const delay = Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
         await sleep(delay);

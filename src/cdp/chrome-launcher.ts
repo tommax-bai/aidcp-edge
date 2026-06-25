@@ -89,6 +89,17 @@ export interface ChromeInstance {
   reused: boolean;
   /** 关闭实例（仅自己启动的才真正 kill） */
   kill: () => void;
+  /**
+   * 回收路径用：终止本进程独占的 Chrome 并**确认其真死、调试端口释放**；
+   * 优雅 SIGTERM 在 grace 内未释放端口则升级 SIGKILL。返回 true=端口已确认释放，false=升级后仍占用。
+   * 复用实例（不拥有该浏览器）为 no-op、直接返回 true（绝不回收外部浏览器）。
+   * 这道确认屏障须在「仍活着的旧进程」上跑完再退出，否则重起的新进程会被 clearStaleSingletonLock 诚实拒启。
+   */
+  killAndConfirmDead: (opts?: {
+    sigtermGraceMs?: number;
+    sigkillGraceMs?: number;
+    pollMs?: number;
+  }) => Promise<boolean>;
 }
 
 const DEFAULT_HOST = '127.0.0.1';
@@ -614,7 +625,8 @@ export async function launchChrome(opts: ChromeLauncherOptions = {}): Promise<Ch
       logImpl: log,
       probeLoginImpl: probeLogin,
     });
-    return { pid: null, reused: true, kill: () => undefined };
+    // 复用实例不归本进程所有：kill 与回收均为 no-op（killAndConfirmDead 直接 true，绝不回收外部浏览器）。
+    return { pid: null, reused: true, kill: () => undefined, killAndConfirmDead: async () => true };
   }
 
   // 2) 发现路径并启动
@@ -688,9 +700,44 @@ export async function launchChrome(opts: ChromeLauncherOptions = {}): Promise<Ch
   });
 
   let killed = false;
+  const portFree = async (): Promise<boolean> => !(await probeCdp(host, port, fetchImpl));
+  const killAndConfirmDead = async (o: {
+    sigtermGraceMs?: number;
+    sigkillGraceMs?: number;
+    pollMs?: number;
+  } = {}): Promise<boolean> => {
+    const sigtermGraceMs = o.sigtermGraceMs ?? 2_000;
+    const sigkillGraceMs = o.sigkillGraceMs ?? 2_000;
+    const pollMs = o.pollMs ?? 150;
+    // ① 优雅 SIGTERM，轮询端口直至释放
+    killed = true;
+    try {
+      child.kill();
+    } catch {
+      /* ignore */
+    }
+    let t0 = Date.now();
+    while (Date.now() - t0 < sigtermGraceMs) {
+      if (await portFree()) return true;
+      await sleep(pollMs);
+    }
+    // ② 优雅未释放端口 → 升级 SIGKILL，继续轮询确认
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      /* ignore */
+    }
+    t0 = Date.now();
+    while (Date.now() - t0 < sigkillGraceMs) {
+      if (await portFree()) return true;
+      await sleep(pollMs);
+    }
+    return portFree();
+  };
   return {
     pid: child.pid ?? null,
     reused: false,
+    killAndConfirmDead,
     kill: () => {
       if (killed) return;
       killed = true;

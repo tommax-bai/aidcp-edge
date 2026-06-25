@@ -89,6 +89,12 @@ async function main(): Promise<void> {
   if (process.env.AIDCP_CHROME_PATH) launchOpts.chromePath = process.env.AIDCP_CHROME_PATH;
   if (process.env.AIDCP_CHROME_PROFILE) launchOpts.profileDir = process.env.AIDCP_CHROME_PROFILE;
   if (process.env.AIDCP_CHROME_HEADLESS === 'true') launchOpts.headless = true;
+  // 登录等待上限：看护重起的子进程无 TTY、无从扫码，登录态应已持久化且秒级命中——
+  // launch-multinode 会注入较短值（~45s），使「登录态丢失」按崩溃快速计入重起预算而非干等 5min。
+  // 单机首登（裸 npm start）不设此 env，沿用 5min 默认以容纳人工扫码。
+  if (process.env.AIDCP_CHROME_LOGIN_TIMEOUT_MS) {
+    launchOpts.loginTimeoutMs = Number(process.env.AIDCP_CHROME_LOGIN_TIMEOUT_MS);
+  }
   const chrome = await launchChrome(launchOpts);
 
   console.log(`[aidcp-edge] 连接本机 Chrome CDP ${cdpHost}:${cdpPort} ...`);
@@ -157,11 +163,23 @@ async function main(): Promise<void> {
   });
   const publishCache = new AnchorCache();
 
+  // §7 在途发布追踪：回收若撞上在途发布，先把它诚实判失败（让审批/通知侧看到失败而非半成品），
+  // 绝不静默丢弃让其跨重起被重复触发 → 真账号重复发帖。值为「按各自结果形状诚实判失败」的闭包。
+  const inFlightPublishes = new Map<string, (reason: string) => void>();
+
   await client.connect();
   console.log(`[aidcp-edge] 已连接云端 ${cloudUrl}，等待命令 ...`);
 
   client.onPublishCommand((env) => {
     void (async () => {
+      // §7 在途登记：回收若撞上这条在途发布，按 publish.result 形状诚实判失败（同 env.id 回执）。
+      inFlightPublishes.set(env.id, (reason) => {
+        try {
+          client.send('publish.result', { ok: false, error: `[recycled] ${reason}` }, env.id);
+        } catch {
+          /* 连接可能已在关闭中；best-effort */
+        }
+      });
       let result: PublishResultPayload;
       try {
         const requestId = buildPublishApprovalRequestId();
@@ -194,6 +212,8 @@ async function main(): Promise<void> {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         result = { ok: false, error: `[unknown] ${message}` };
+      } finally {
+        inFlightPublishes.delete(env.id);
       }
       try {
         client.send('publish.result', result, env.id);
@@ -239,6 +259,24 @@ async function main(): Promise<void> {
   );
   client.onPublishAtomCommand((env) => {
     void (async () => {
+      // §7 在途登记：按 publish.command.result 形状诚实判失败（带 recordId/seq/kind，同 env.id 回执）。
+      inFlightPublishes.set(env.id, (reason) => {
+        try {
+          client.send(
+            'publish.command.result',
+            {
+              recordId: env.payload.recordId,
+              seq: env.payload.seq,
+              kind: env.payload.kind,
+              ok: false,
+              error: `[recycled] ${reason}`,
+            },
+            env.id,
+          );
+        } catch {
+          /* best-effort */
+        }
+      });
       let result: PublishCommandResultPayload;
       try {
         result = await publishDispatcher.dispatch(env.payload);
@@ -251,6 +289,8 @@ async function main(): Promise<void> {
           ok: false,
           error: `dispatch_error: ${message}`,
         };
+      } finally {
+        inFlightPublishes.delete(env.id);
       }
       try {
         client.send('publish.command.result', result, env.id);
@@ -411,21 +451,66 @@ async function main(): Promise<void> {
     console.log('[aidcp-edge] 自动浏览已启动（含弹窗 + 通知未读旁路监测）');
   }
 
+  // —— 退出 / 回收统一路径（节点终态诚实下线 + 看护可重起；真关机干净退出）——
+  // 退出码契约（看护进程 launch-multinode 据此决定是否重起）：
+  //   0            = 关机（SIGINT/SIGTERM），不重起；
+  //   EXIT_RECYCLE = CDP 终态回收，请重起（sysexits EX_TEMPFAIL=75：临时失败、邀请重试）。
+  const EXIT_RECYCLE = 75;
+  let recycleRequested = false;
+
+  // §7 回收契约：把全部在途发布诚实判失败（须在关闭云端连接之前发，确保失败回执发得出去）。
+  const failInFlightPublishesHonestly = (reason: string): void => {
+    for (const [, failer] of inFlightPublishes) failer(reason);
+    inFlightPublishes.clear();
+  };
+
   let shuttingDown = false;
-  const shutdown = () => {
+  const shutdown = async (opts: { exitCode: number; recycle: boolean; reason: string }): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log('\n[aidcp-edge] 收到退出信号，关闭连接 ...');
+    // 已请求回收则即便随后信号撞入也以回收码退出（真终态不被掩成 clean exit，MAJOR⑤）。
+    const exitCode = recycleRequested ? EXIT_RECYCLE : opts.exitCode;
+    console.log(`\n[aidcp-edge] 退出流程启动（reason=${opts.reason} recycle=${opts.recycle} exitCode=${exitCode}）...`);
+    // ① 回收：先诚实判失败在途发布（关 WS 之前），绝不留半截/跨重起重复发帖。
+    if (opts.recycle) failInFlightPublishesHonestly(opts.reason);
     watcherSupervisor?.stopAll();
     browse?.stop();
-    client.close();
+    // ② 诚实下线：等边-云连接真正关闭再继续（BLOCKER①），使云端立即停止把本节点当路由目标。
+    try {
+      await client.closeAndWait(1500);
+    } catch {
+      /* best-effort */
+    }
     session.close();
-    // 仅当 Chrome 由本进程启动时才 kill（复用的实例不动）
-    chrome.kill();
-    process.exit(0);
+    // ③ 仅当本进程独占（非复用）该 Chrome 时才回收：杀进程并确认端口/登录锁释放（BLOCKER②，超时升级 SIGKILL）。
+    //    复用模式只诚实退出、绝不回收外部浏览器（killAndConfirmDead 对复用实例为 no-op）。
+    if (chrome.reused) {
+      console.log('[aidcp-edge] 复用模式：只诚实退出，不回收本进程不拥有的外部 Chrome');
+    } else {
+      try {
+        const freed = await chrome.killAndConfirmDead();
+        if (!freed) {
+          console.warn(
+            '[aidcp-edge] ⚠ 升级 SIGKILL 后调试端口仍未确认释放，继续退出（看护重起时 clearStaleSingletonLock 会再判活拒启）',
+          );
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
+    process.exit(exitCode);
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+
+  // CDP 终态（重连不可恢复）→ 诚实下线 + 回收退出（请重起）。autoBrowse 与否都接，节点失去浏览器即回收。
+  session.cdp.on('cdp.unrecoverable', () => {
+    if (recycleRequested) return;
+    recycleRequested = true;
+    console.warn('[aidcp-edge] CDP 重连不可恢复（终态）→ 诚实下线 + 回收退出（请重起）');
+    void shutdown({ exitCode: EXIT_RECYCLE, recycle: true, reason: 'cdp_unrecoverable' });
+  });
+
+  process.on('SIGINT', () => void shutdown({ exitCode: 0, recycle: false, reason: 'SIGINT' }));
+  process.on('SIGTERM', () => void shutdown({ exitCode: 0, recycle: false, reason: 'SIGTERM' }));
 }
 
 main().catch((err) => {
