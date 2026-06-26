@@ -515,5 +515,7 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   console.error('[aidcp-edge] 启动失败:', err);
-  process.exitCode = 1;
+  // 红线「快速失败 + 可见」：致命启动失败（含 client.connect() 连云失败）立即非零退出，
+  // 让桌面外壳的 edgeProcess.on('exit') 立刻看见并弹窗 + 通知；绝不退避重试掩盖未连通。
+  process.exit(1);
 });
