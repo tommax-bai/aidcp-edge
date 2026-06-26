@@ -80,7 +80,7 @@ function createWindow() {
 
 function createTray() {
   const icon = nativeImage.createFromDataURL(
-    'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" rx="8" fill="%232563eb"/><text x="16" y="21" font-size="14" font-family="Arial" text-anchor="middle" fill="white">AE</text></svg>',
+    'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" rx="7" fill="%232563eb"/><g stroke="%23ffffff" stroke-opacity="0.5" stroke-width="1.4" stroke-linecap="round"><line x1="16" y1="16" x2="16" y2="7"/><line x1="16" y1="16" x2="8.2" y2="20.5"/><line x1="16" y1="16" x2="23.8" y2="20.5"/></g><circle cx="8.2" cy="20.5" r="2.4" fill="%23ffffff"/><circle cx="23.8" cy="20.5" r="2.4" fill="%23ffffff"/><circle cx="16" cy="7" r="2.6" fill="%23ff6b6b"/><circle cx="16" cy="16" r="4" fill="%23ffffff"/></svg>',
   );
   tray = new Tray(icon);
   tray.setToolTip('AIDCP Edge');

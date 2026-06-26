@@ -40,6 +40,7 @@
     },
     "win": {
       "signAndEditExecutable": false,
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -51,6 +52,7 @@
     },
     "mac": {
       "category": "public.app-category.utilities",
+      "icon": "build/icon.icns",
       "hardenedRuntime": true,
       "identity": null,
       "target": [
