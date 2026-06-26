@@ -810,7 +810,11 @@ export class BrowseSession {
       const m = (u ?? '').match(/\/(?:explore|discovery\/item)\/([A-Za-z0-9]+)/);
       return m ? m[1] : undefined;
     };
-    const realNoteId = card.noteId ?? parseNoteId(content.noteUrl) ?? parseNoteId(await this.evalUrl());
+    // 当前地址栏 URL（含 xsec_token，详情态）：既用于解析 noteId，也作 note.detail 的可点链接来源（change interaction-feed-enrichment）。
+    const pageUrl = await this.evalUrl();
+    const realNoteId = card.noteId ?? parseNoteId(content.noteUrl) ?? parseNoteId(pageUrl);
+    // 诚实置空：仅当地址栏链接确含 xsec_token 才作为真实可点链接上报；否则不带，绝不用裸 id 拼打不开的假链接。
+    const detailUrl = pageUrl.includes('xsec_token=') ? pageUrl : undefined;
 
     // 探测作者区关注按钮当下真实态（change skip-profile-visit-if-followed）：已关注则随 note.detail 带回，
     // 云端在「是否进主页」评估前据此短路掉整条主页子链。读不到→false→回退原流程。
@@ -825,6 +829,7 @@ export class BrowseSession {
       likeCount: content.likes,
       collectCount: content.collects,
       authorFollowed,
+      ...(detailUrl ? { url: detailUrl } : {}),
     };
     this.deps.client.reportNoteDetail?.(payload);
     this.logger(
@@ -1592,17 +1597,24 @@ export class BrowseSession {
         return;
       }
 
+      // 主页链接（change interaction-feed-enrichment）：取落地地址栏 URL；仅当确是 /user/profile/ 才作可点链接（诚实置空）。
+      const landedUrl = await this.evalUrl();
+      const profileUrl = landedUrl.includes('/user/profile/') ? landedUrl : undefined;
+
       // 3) 抽取作者资料
       const profile = await this.extractAuthorProfile();
       const resolvedId = profile.authorId || authorId || '';
+      const nickname = profile.nickname || undefined; // 抓不到则不带（诚实置空）
       if (profile.extracted) {
-        this.logger(`[browse] profile.open: 作者资料 粉丝${profile.followersCount} 获赞与收藏${profile.likesCollects}（作品数主页不公开）`);
+        this.logger(`[browse] profile.open: 作者资料 粉丝${profile.followersCount} 获赞与收藏${profile.likesCollects}（作品数主页不公开）${nickname ? ' 昵称「' + nickname + '」' : ''}`);
         this.deps.client.reportProfileDetail?.({
           authorId: resolvedId,
           postsCount: profile.postsCount,
           followersCount: profile.followersCount,
           likesCollects: profile.likesCollects,
           extracted: true,
+          ...(nickname ? { nickname } : {}),
+          ...(profileUrl ? { url: profileUrl } : {}),
         });
       } else {
         this.logger('[browse] profile.open: 进了主页但未抽到作品/粉丝数');
@@ -1646,8 +1658,8 @@ export class BrowseSession {
     return false;
   }
 
-  /** 从作者主页抽取粉丝数 / 获赞与收藏数（作品数主页不公开，恒 0）。复用 parseCount 解析中文计数。 */
-  private async extractAuthorProfile(): Promise<{ authorId: string; postsCount: number; followersCount: number; likesCollects: number; extracted: boolean }> {
+  /** 从作者主页抽取粉丝数 / 获赞与收藏数（作品数主页不公开，恒 0）+ 真实昵称。复用 parseCount 解析中文计数。 */
+  private async extractAuthorProfile(): Promise<{ authorId: string; postsCount: number; followersCount: number; likesCollects: number; nickname: string; extracted: boolean }> {
     const { evalRaw: evalRawFn } = await import('./cdp-util.js');
     const js = `(function(){
       function txt(el){return (el&&el.textContent||'').replace(/\\s+/g,' ').trim();}
@@ -1661,8 +1673,10 @@ export class BrowseSession {
         if (/笔记|作品/.test(label)) posts = num;
         if (/获赞|收藏/.test(label)) lc = num; // 获赞与收藏：主页真实提供的质量信号（不会误命中 关注/粉丝）
       }
+      // 真实昵称（change interaction-feed-enrichment）：主页显示名；抓不到留空（诚实置空，云端不伪造）。
+      var name = txt(document.querySelector('.user-name, .user-nickname, [class*="userName"], [class*="nickname"], .user-info .name'));
       var idm = location.href.match(/\\/user\\/profile\\/([A-Za-z0-9]+)/);
-      return JSON.stringify({authorId: idm?idm[1]:'', followers: followers, posts: posts, lc: lc});
+      return JSON.stringify({authorId: idm?idm[1]:'', followers: followers, posts: posts, lc: lc, name: name});
     })()`;
     const { parseCount } = await import('./note-extractor.js');
     // Page.navigate 整页加载后 .user-interactions 数据异步晚到：轮询等出数再抽（最多 5s），
@@ -1683,6 +1697,7 @@ export class BrowseSession {
             postsCount: hasPosts ? parseCount(String(info.posts)) : 0,
             followersCount: hasFollowers ? parseCount(String(info.followers)) : 0,
             likesCollects: hasLc ? parseCount(String(info.lc)) : 0,
+            nickname: typeof info.name === 'string' ? info.name : '',
             extracted: true,
           };
         }
@@ -1692,7 +1707,7 @@ export class BrowseSession {
       if (this.now() >= deadline) break;
       await this.sleep(500);
     }
-    return { authorId: lastId, postsCount: 0, followersCount: 0, likesCollects: 0, extracted: false };
+    return { authorId: lastId, postsCount: 0, followersCount: 0, likesCollects: 0, nickname: '', extracted: false };
   }
 
   private async safeCloseModal(): Promise<void> {

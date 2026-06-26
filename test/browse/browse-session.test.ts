@@ -315,6 +315,43 @@ test('browse-session: note.open 未关注/读不到 → note.detail authorFollow
   assert.equal(details[0].authorFollowed, false, '探测不到 → falsy → 回退原流程');
 });
 
+test('browse-session: 详情页地址栏带 xsec_token → note.detail 带真实可点 url（change interaction-feed-enrichment）', async () => {
+  const h = makeHarness();
+  const details: NoteDetailPayload[] = [];
+  h.deps.client.reportNoteDetail = (p: NoteDetailPayload) => { details.push(p); };
+  const base = h.deps.cdp;
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      const expr = String((params as { expression?: unknown })?.expression ?? '');
+      if (method === 'Runtime.evaluate' && expr.includes('location.href')) {
+        return { result: { value: 'https://www.xiaohongshu.com/explore/abc123?xsec_token=TOK&xsec_source=pc_feed' } } as never;
+      }
+      return base.send(method, params);
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.equal(details.length, 1);
+  assert.ok(details[0].url && details[0].url.includes('xsec_token='), '含 token → 上报真实可点链接');
+});
+
+test('browse-session: 详情页地址栏无 xsec_token → note.detail url 诚实置空（绝不裸 id 拼链）', async () => {
+  // 默认 harness：location.href 兜底返回 .../explore（无 token）。
+  const h = makeHarness();
+  const details: NoteDetailPayload[] = [];
+  h.deps.client.reportNoteDetail = (p: NoteDetailPayload) => { details.push(p); };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.equal(details.length, 1);
+  assert.equal(details[0].url, undefined, '无 token → url 必须置空，绝不伪造');
+});
+
 test('browse-session: note.open 按 noteId 命中目标卡（index 已失效也开对）', async () => {
   // 当前快照：position 0 = NPD，position 1 = LLM 卡。云端意图开 LLM（noteId=llm），
   // 但下发的 index=0 是「决策时快照」的序号、已过期。应按 noteId 开对，而非按过期 index 开 NPD。
