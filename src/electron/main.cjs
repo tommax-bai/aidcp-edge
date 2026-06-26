@@ -231,15 +231,36 @@ ipcMain.handle('edge:resume', () => {
 });
 ipcMain.handle('auth:relogin', () => relogin());
 
-app.whenReady().then(() => {
-  createWindow();
-  createTray();
-  launchChromeAndGateEdge();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    else mainWindow?.show();
+// 诚实拒绝同机多开（多账号多开隔离尚未实现，归 account-identity-from-login）：
+// 当前第二个实例会接管第一个账号的浏览器（串号），故用单实例锁直接拒绝第二个，绝不静默接管。
+// 锁随本实例退出自动释放，故「同一应用重启后重连自己的浏览器」不受影响。
+if (!app.requestSingleInstanceLock()) {
+  try {
+    const { dialog } = require('electron');
+    dialog.showErrorBox(
+      'AIDCP Edge 已在运行',
+      '本机已有一个 AIDCP Edge 在运行。多账号多开尚未支持，为避免账号串用，请先关闭已运行的实例再启动。',
+    );
+  } catch {
+    /* best-effort */
+  }
+  app.quit();
+} else {
+  // 又有人想开第二个：Electron 通知已运行实例——把窗口拉到前台 + 通知，说明无需/不能多开。
+  app.on('second-instance', () => {
+    surfaceFailure('AIDCP Edge 已在运行', '已有一个 AIDCP Edge 在运行，已切到该窗口。多账号多开尚未支持。');
   });
-});
+
+  app.whenReady().then(() => {
+    createWindow();
+    createTray();
+    launchChromeAndGateEdge();
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      else mainWindow?.show();
+    });
+  });
+}
 
 app.on('before-quit', () => {
   isQuitting = true;
