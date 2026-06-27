@@ -1,19 +1,21 @@
 # aidcp-edge publish flow 真实小红书页面联调准备清单
 
-本文档用于 `publishPost` 在真实小红书页面上的静态盘点与联调前准备，不涉及真实浏览器执行，也不修改业务代码。目标是把当前 fake DOM 假设、真实 DOM 待确认点、联调顺序与高概率改动位一次性梳理清楚，方便真机阶段快速收敛。
+本文档用于 `publishPost` 在真实小红书页面上的静态盘点与联调前准备，不涉及真实浏览器执行，也不修改业务代码。注意：`src/flows/anchors.ts` 中的发布锚点（entry/title/content/tag/submit）已按真实小红书 creator DOM 校准（标题 placeholder、正文 `ProseMirror`、标签「话题」按钮、提交「发布」按钮等均为实测文本），下文「待真机确认」聚焦的是运行时仍未实测的行为（执行层输入写入方式、标签候选交互、二次确认弹窗、成功页跳转与 postId/分享链接提取等），而非锚点文本本身。目标是把这些真实 DOM 待确认点、联调顺序与高概率改动位一次性梳理清楚，方便真机阶段快速收敛。
 
 ## 1. 真实 DOM 依赖清单
 
 ### 1.1 流程总览
 
-当前发布流定义在 `src/flows/publish-post.ts`，按固定顺序串行执行：
+当前发布流定义在 `src/flows/publish-post.ts`，`publishPost()` 按固定顺序串行执行：
 
+0. 前置守卫（precondition）：若 `payload.images?.length > 0`，整页路径直接 early-return 报错 `[images] use command-driven path (upload_image) ...`——v1 整页路径不支持上传图片，带图必须改走指令驱动路径（`upload_image`），绝不静默丢图后假成功（红线）。
 1. `enter_publish_page`
 2. `input_title`
 3. `input_content`
 4. `input_tag`（对 `payload.tags` 逐个循环）
-5. `submit_publish`
-6. `validate_publish`
+5. （可选）审批门 `waitForPublishApproval(approvalGate)`：仅当调用方传入 `approvalGate` 时，在 `input_tag` 与 `submit_publish` 之间阻塞等待飞书审批通过（携带 `requestId`）；未通过则以 `[approval_gate] ... requestId=...` 失败返回（见 `src/publish/approval-gate.ts`）。
+6. `submit_publish`
+7. `validate_publish`（`publishPost()` 末尾另有强制 `extractPostId()` 的硬校验，见 §1.2 F）
 
 每一步都通过 `ActionRequest` 携带 `actionId + goal + anchorHint` 进入 `LocatingEngine.resolveAndAct()`，定位层优先尝试缓存锚点，失败后退化到：
 
@@ -38,16 +40,18 @@
   - `src/flows/publish-post.ts` → `buildEnterPublishPageRequest()`
   - `src/flows/publish-post.ts` → `PublishStepValidator.validate()` 的 `enter_publish_page`
 
-- 当前假设
+- 当前锚点（`anchors.ts` 实际值）
   - `actionId`: `note.publish_entry`
-  - `goal`: 进入笔记发布页，入口文案可能是「发布」「去发布」「发笔记」「写笔记」「创建」
-  - `anchorHint`
-    - `role: 'button'`
-    - `text: '发布'`
+  - `goal`（`XHS_PUBLISH_ENTRY_GOAL`）: 进入笔记发布页，入口文案可能是「发布」「去发布」「发笔记」「写笔记」「创建」「创作中心」「发布笔记」「发图文」
+  - `anchorHint`（`XHS_PUBLISH_ENTRY_ANCHOR_HINT`，**无 `role`**）
+    - `text: '创作'`
     - `textMatch: 'contains'`
-  - 后置校验：点击后页面上能找到以下任一文本线索
-    - 标题相关：「标题」「填写标题」「输入标题」
-    - 正文相关：「正文」「写点什么」「添加正文」
+  - 后置校验（`isPublishPage()`）：点击后命中以下任一线索即判为已进入发布页（远比"仅标题/正文文本"宽）
+    - 标题相关：「填写标题会有更多赞哦」「标题」「填写标题」「输入标题」
+    - 正文相关：「正文」「写点什么」「添加正文」「输入正文」「图片编辑」「智能标题」
+    - 发布页特征：「发布笔记」「发图文」「上传图文」「暂存离开」「定时发布」「笔记预览」
+    - 标签相关：「添加标签」「添加话题」「话题」
+    - data-action-id 兜底：存在 `note.publish_title` / `note.publish_content` / `note.publish_submit` 元素
 
 - 待真机确认
   - 发布入口是否真的暴露为 `button` 角色，还是 `a/div/span` + click
@@ -65,12 +69,12 @@
   - `src/flows/publish-post.ts` → `buildTitleInputRequest()`
   - `src/flows/publish-post.ts` → `PublishStepValidator.validate()` 的 `input_title`
 
-- 当前假设
+- 当前锚点（`anchors.ts`）
   - `actionId`: `note.publish_title`
-  - `goal`: 找到标题输入框，文案/占位提示可能是「标题」「填写标题」「输入标题」
-  - `anchorHint`
+  - `goal`（`XHS_PUBLISH_TITLE_GOAL`）: 在发布页填写标题，真实控件通常是 placeholder 为「填写标题会有更多赞哦」的输入框
+  - `anchorHint`（`XHS_PUBLISH_TITLE_ANCHOR_HINT`）
     - `role: 'textbox'`
-    - `text: '标题'`
+    - `text: '填写标题会有更多赞哦'`
     - `textMatch: 'contains'`
     - `scope: XHS_PUBLISH_SCOPE`
   - `XHS_PUBLISH_SCOPE.selector`
@@ -84,7 +88,7 @@
     - `[class*="creator-container"]`
   - 后置校验优先查找：
     - `[data-action-id="note.publish_title"]`
-    - 否则按标题关键词找 `input/textarea/contenteditable=true`
+    - 否则按标题关键词（「填写标题会有更多赞哦」「标题」「填写标题」「输入标题」）找 `input/textarea/contenteditable=true`
   - 校验方式：读取 `value` 或 `textContent`，判断是否包含 `payload.title`
 
 - 待真机确认
@@ -103,17 +107,17 @@
   - `src/flows/publish-post.ts` → `buildContentInputRequest()`
   - `src/flows/publish-post.ts` → `PublishStepValidator.validate()` 的 `input_content`
 
-- 当前假设
+- 当前锚点（`anchors.ts`）
   - `actionId`: `note.publish_content`
-  - `goal`: 找到正文输入框或内容编辑区，文案/占位提示可能是「正文」「输入正文」「添加正文」「写点什么」
-  - `anchorHint`
+  - `goal`（`XHS_PUBLISH_CONTENT_GOAL`）: 找到正文输入框或内容编辑区，真实控件通常是 class 含 tiptap `ProseMirror` 的富文本编辑器
+  - `anchorHint`（`XHS_PUBLISH_CONTENT_ANCHOR_HINT`，**不含 `text`**，改用 `classHint`）
     - `role: 'textbox'`
-    - `text: '正文'`
+    - `classHint: 'ProseMirror'`
     - `textMatch: 'contains'`
     - `scope: XHS_PUBLISH_SCOPE`
   - 后置校验优先查找：
     - `[data-action-id="note.publish_content"]`
-    - 否则按正文关键词找 `input/textarea/contenteditable=true`
+    - 否则按正文关键词（「正文」「写点什么」「添加正文」「输入正文」`ProseMirror`）找 `input/textarea/contenteditable=true`
   - 校验方式：读取 `value` 或 `textContent`，判断是否包含 `payload.content`
 
 - 待真机确认
@@ -132,12 +136,12 @@
   - `src/flows/publish-post.ts` → `buildTagInputRequest()`
   - `src/flows/publish-post.ts` → `PublishStepValidator.validate()` 的 `input_tag`
 
-- 当前假设
+- 当前锚点（`anchors.ts`）
   - `actionId`: `note.publish_tag`
-  - `goal`: 找到标签输入框或添加话题入口，文案/可访问名可能是「标签」「话题」「添加标签」「添加话题」
-  - `anchorHint`
-    - `role: 'textbox'`
-    - `text: '标签'`
+  - `goal`（`XHS_PUBLISH_TAG_GOAL`）: 在发布页添加标签，真实控件通常是文本为「话题」的按钮
+  - `anchorHint`（`XHS_PUBLISH_TAG_ANCHOR_HINT`，**`button` 而非 `textbox`**）
+    - `role: 'button'`
+    - `text: '话题'`
     - `textMatch: 'contains'`
     - `scope: XHS_PUBLISH_SCOPE`
   - 每个 tag 单独执行一次 `op: 'input'`
@@ -149,7 +153,7 @@
   - 输入 `#tag` 后是否需要从搜索下拉中点击候选项才能真正挂载标签
   - 标签是否以 chip/token 形式渲染，且只有选中候选后才出现在 DOM 中
   - 若标签是搜索选择模式，当前单步 `input` 逻辑不足，可能需要扩展为 `input -> click candidate -> validate`
-  - 当前 `anchorHint.role='textbox'` 是否过窄；真实入口可能是 `button` 或 `generic`
+  - 锚点已按「话题」按钮（`role:'button'`）校准；真机需确认入口确为 `button`，而非 `generic`/文本框，以及点击后是否进入标签输入态
   - 当前后置校验过宽，只要页面任意位置出现 tag 文本就算成功，真机时需确认是否会误判
 
 #### E. submit：提交发布
@@ -161,42 +165,42 @@
   - `src/flows/publish-post.ts` → `buildSubmitPublishRequest()`
   - `src/flows/publish-post.ts` → `PublishStepValidator.validate()` 的 `submit_publish`
 
-- 当前假设
+- 当前锚点（`anchors.ts`）
   - `actionId`: `note.publish_submit`
-  - `goal`: 找到最终发布按钮，文案/可访问名可能是「发布」「立即发布」「确认发布」
-  - `anchorHint`
+  - `goal`（`XHS_PUBLISH_SUBMIT_GOAL`）: 找到最终发布按钮，真实小红书 creator 页面通常位于底部固定操作栏，文本精确为「发布」，其左侧同栏常有「暂存离开」按钮
+  - `anchorHint`（`XHS_PUBLISH_SUBMIT_ANCHOR_HINT`，**无 `scope`**，改用 `classHint`）
     - `role: 'button'`
     - `text: '发布'`
     - `textMatch: 'contains'`
-    - `scope: XHS_PUBLISH_SCOPE`
-  - 后置校验：点击后页面中能提取到 `postId`
+    - `classHint: 'submit'`
+  - 后置校验（`submit_publish` 步）：**并非**硬性要求 postId——满足任一即通过：能提取到 `postId`，**或**深度扫描命中「发布」「暂存离开」「立即发布」「确认发布」，**或**命中 `publish / submit` 关键词。真正"必须拿到 `postId`"的硬校验只在 `publishPost()` 末尾（见 F）
 
 - 待真机确认
   - 最终按钮文案是否与入口按钮同样包含“发布”，若同页存在多个“发布”按钮，当前锚点可能歧义
   - 提交后是否出现二次确认弹窗、风险提示、草稿保存提示
-  - 提交按钮是否在固定底栏/顶部栏/portal 中，可能不在 `XHS_PUBLISH_SCOPE` 内
+  - 提交按钮通常在固定底栏/portal 中，故 submit 锚点已不挂 `scope`、改用 `classHint:'submit'` + 文本「发布」定位；真机需确认 `classHint:'submit'` 能稳定命中且不误中其他 submit 类按钮
   - 点击后是否立即跳转，还是先 toast/loading，再异步跳转
   - 若存在二次确认，当前 `submit_publish` 的单次 click + postId 校验会直接失败
 
-#### F. verify：发布成功校验与 postId 提取
+#### F. verify：发布成功校验与 postId / 分享链接提取
 
 - 代码位置
   - `src/flows/publish-post.ts` → `extractPostId()`
+  - `src/flows/publish-post.ts` → `extractPostUrl()`
   - `src/flows/publish-post.ts` → `PublishStepValidator.validate()` 的 `submit_publish`
   - `src/flows/publish-post.ts` → `PublishStepValidator.validate()` 的 `validate_publish`
   - `src/flows/publish-post.ts` → `publishPost()` 末尾 `finalValidator + extractPostId`
 
-- 当前假设
-  - 成功后页面 DOM 中存在以下任一属性：
-    - `data-post-id`
-    - `data-note-id`
-    - `data-id`
-    - `data-postid`
-  - 或存在链接 `href` 命中：
-    - `/explore/<id>`
-    - `/note/<id>`
-    - `/notes/<id>`
-  - `submit_publish` 与 `validate_publish` 都以“能提取到 postId”为成功标准
+- 当前实现
+  - `extractPostId()`：成功后从页面 DOM 提取 id
+    - 优先扫描属性：`data-post-id` / `data-note-id` / `data-id` / `data-postid`
+    - 否则从链接 `href` 命中 `/explore/<id>`、`/note/<id>`、`/notes/<id>` 取 id
+  - `extractPostUrl()`：另抓「带 `xsec_token` 的完整小红书分享 URL」（可点开真实笔记，供后台跳转）
+    - 来源：`link[rel=”canonical”]`、`meta[property=”og:url”]`、`a[href]`、`[data-share-url]`、`[data-url]`、`input[value]`
+    - 只回**含 `xsec_token`** 的完整绝对链接；抓不到即诚实置 `undefined`，绝不用裸 id 拼一个缺 token、打不开的假链接冒充
+  - 成功判据分两层（**并非**两步都以”能提取到 postId”为唯一标准）：
+    - 步验证器 `submit_publish` / `validate_publish`：postId **或**「发布/暂存离开/立即发布/确认发布」**或**「publish/submit」关键词命中即通过（宽松，可被关键词兜底）
+    - `publishPost()` 末尾硬校验：先跑 `validate_publish`，再**强制** `extractPostId()` 非空，否则返回 `[validate_publish] missing_post_id`——“必须拿到 postId”的红线只在这里
 
 - 待真机确认
   - 发布成功后真实跳转 URL 是否为 `/explore/<id>`、`/discovery/item/<id>`、`/note/<id>` 或其他格式
@@ -473,7 +477,7 @@
 - `XHS_PUBLISH_TAG_GOAL`
   - 若真实交互是“添加话题”而非“标签输入框”，需改目标描述
 - `XHS_PUBLISH_TAG_ANCHOR_HINT`
-  - 高概率从 `textbox` 改为更适合真实入口的角色/文本
+  - 已为 `role:'button'` + 文本「话题」；真机若发现入口实为文本框/`generic` 或需"输入后点候选"，再调角色/文本或扩步骤
 
 - `XHS_PUBLISH_SUBMIT_GOAL`
   - 若最终按钮文案不是“发布/立即发布/确认发布”，需改
@@ -544,17 +548,17 @@
 
 ## 5. 静态盘点结论
 
-基于当前源码静态分析，真机联调的最大不确定性集中在四处：
+`anchors.ts` 的发布锚点文本（标题 placeholder「填写标题会有更多赞哦」、正文 `ProseMirror`、标签「话题」按钮、提交「发布」按钮 + `classHint:'submit'`）已按真实小红书 creator DOM 校准，不再是”理想化 fake DOM”。基于当前源码静态分析，真机联调仍未实测、不确定性最高的集中在四处**运行时行为**：
 
-1. `XHS_PUBLISH_SCOPE` 是否能命中真实发布页容器
-2. 标题/正文输入控件的真实 DOM 形态是否与 `textbox + input/value` 假设一致
-3. 标签是否需要“输入后点击候选项”的扩展步骤
-4. 发布成功后的 `postId` 是否能按当前 `extractPostId()` 规则稳定提取
+1. `XHS_PUBLISH_SCOPE` 是否能命中真实发布页容器（提交按钮锚点已不挂 scope，但标题/正文/标签仍依赖 scope）
+2. 执行层 `op:'input'` 对 `ProseMirror` 富文本与标题输入框的真实写入方式（`insertText` / 模拟键盘 / set value）及取值落点是否与 `readInputValue()` 一致
+3. 标签是否需要”输入后点击候选项”的扩展步骤（当前 `input_tag` 仅单步、后置校验偏宽松）
+4. 发布成功后的 `postId` / 分享链接是否能按当前 `extractPostId()` / `extractPostUrl()` 规则稳定提取
 
-在未接真实页面前，当前 publish flow 的整体编排方式是合理的，但 `anchors.ts` 的文本假设与 `PublishStepValidator` 的成功判据都明显偏“理想化 fake DOM”。真机阶段建议优先验证 scope、输入控件类型、标签交互模型、成功页 URL 规则，这四项一旦确认，后续代码调整路径会非常直接。
+当前 publish flow 的整体编排方式是合理的；真机阶段建议优先验证 scope 命中、输入控件写入与取值、标签候选交互、成功页 URL 与 postId/分享链接提取，这四项一旦确认，后续代码调整路径会非常直接。
 
 ## 6. 备注
 
 - 本次仅产出文档，未修改 `src/flows/publish-post.ts`、`src/flows/anchors.ts`、`src/locating/*` 业务代码
-- 工作区存在与本任务无关的未提交改动：`/Users/bears/aidcp-edge/src/browse/browse-session.ts`
+- 工作区可能存在与本任务无关的未提交改动（如 `src/browse/browse-session.ts`）
 - 若后续需要提交本次文档改动，建议提交时仅暂存本文档，避免混入无关文件

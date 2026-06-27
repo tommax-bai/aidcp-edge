@@ -1,5 +1,7 @@
 # aidcp-edge 浏览器 / CDP 现状盘点
 
+> 🕒 **时点快照（原 2026-06-02 勘察）**：本文为某次勘察/联调记录，部分结论已随代码演进失效。**以代码为准**；下列与现状冲突处已就地更正/标注。
+
 更新时间：2026-06-02
 
 ## 已完成能力 & 常见误判
@@ -14,18 +16,20 @@
 
 ## 结论摘要
 
-- `aidcp-edge` 当前不是“只连接已有浏览器”或“只启动新浏览器”的单一模式，而是 **优先探测并复用已有 Chrome CDP 实例；若端口未就绪，则由 edge 自己启动一个新的 Chrome 进程**。证据见 `src/cdp/chrome-launcher.ts:5-8`、`src/cdp/chrome-launcher.ts:183-208`、`src/main.ts:52-62`。
+- ⚠️ **结论已反转（以代码为准）**：`aidcp-edge` 现在 **默认自己拉起一个独立 Chrome（专用调试端口 + 独立 `user-data-dir`），并在探测到调试端口已被占用时「诚实拒绝」静默接管已在监听的 Chrome**——除非显式设置 `AIDCP_CDP_ALLOW_REUSE=true` 才走复用分支。旧文中“优先探测并复用已有实例”的框架已不成立。证据见 `chrome-launcher.ts` 顶部 doc 注释、`launchChrome()`（端口已占用且未开 `allowReuse` 时 `throw`，约 `chrome-launcher.ts:604-610`）、`src/main.ts` 的 `launchChrome(launchOpts)` 调用。
 - CDP 接入层使用的是 **原生 WebSocket + DevTools HTTP `/json` / `/json/version`**，**没有引入 Playwright、Puppeteer、chrome-remote-interface**。证据见 `src/cdp/client.ts:2-7`、`src/cdp/index.ts:2-10`、`README.md:11-12`、`package.json:16-22`。
 - 连接建立流程是：**先通过 `http://host:port/json` 找到 page target，取其 `webSocketDebuggerUrl`，再用原生 WebSocket 连接该 ws endpoint**；不是直接 launch 后拿库内 browser 对象。证据见 `src/cdp/targets.ts:2-6`、`src/cdp/targets.ts:27-53`、`src/cdp/session.ts:44-47`。
-- 登录态当前依赖 **Chrome user-data-dir 持久化复用**。首次启动独立 profile 时，会提示人工登录小红书并等待回车；后续复用同一 profile 时沿用已有登录态。代码里**没有单独的 cookie 导入/导出/注入逻辑**。证据见 `src/cdp/chrome-launcher.ts:6-9`、`src/cdp/chrome-launcher.ts:192-193`、`src/cdp/chrome-launcher.ts:211-252`，以及全仓检索未发现 cookie 管理实现。
+- 登录态当前依赖 **Chrome user-data-dir 持久化复用**，且 **每次启动都会主动校验登录态**（不再有“仅首次/profile 缺失才等待”的 `isFirstLaunch` 逻辑——该字段已删除）。校验口径见 `evaluateLoginState()` / `deriveLoginProbeResult()`：以 `web_session` cookie（httpOnly，经 `Network.getCookies` 读取）为主信号 + DOM 信号（导航头像、创作入口）兜底 + 登录弹窗一票否决；超时上限 `DEFAULT_LOGIN_TIMEOUT_MS = 5min`，手动回车仅作 TTY 兜底（`defaultWaitForLogin()`）。代码里仍**没有 cookie 导入/导出/注入逻辑**（`Network.setCookies` 未使用；`Network.getCookies` 仅做只读登录检测）。
 
 ## 1. 当前到底是“启动新浏览器”还是“连接已有浏览器”
 
-### 1.1 实际行为：两者都支持，但默认策略是“先复用，后启动”
+### 1.1 实际行为：默认「自己拉起独立 Chrome」，端口被占用则诚实拒绝复用
 
-`src/main.ts` 启动时先读取 CDP host/port，随后无条件调用 `launchChrome()`，再调用 `attachToPage()`：
+> ⚠️ 本节结论相对原快照已反转。当前默认是 **edge 自己 spawn 一个独立 Chrome（专用调试端口 + 独立 `user-data-dir`）**；探测到调试端口上已有 Chrome 在监听时，**默认 `throw` 拒绝静默接管**，只有显式 `AIDCP_CDP_ALLOW_REUSE=true` 才走复用分支。下方旧版“先复用、后启动”的描述已不成立。
 
-```45:62:src/main.ts
+`src/main.ts` 启动时先读取 CDP host/port，随后调用 `launchChrome()`，再调用 `attachToPage()`：
+
+```text:src/main.ts (main() 启动段)
 async function main(): Promise<void> {
   const cloudUrl = process.env.AIDCP_CLOUD_URL ?? 'ws://121.89.85.150:8787';
   const edgeId = process.env.AIDCP_EDGE_ID ?? 'edge-local';
@@ -46,41 +50,41 @@ async function main(): Promise<void> {
   const session = await attachToPage(attachOpts);
 ```
 
-`launchChrome()` 的实现明确写了策略：
+`launchChrome()`（`src/cdp/chrome-launcher.ts`）当前的实际策略是：
 
-- 先 `GET /json/version` 探测端口；
-- 若已有实例监听，则直接复用；
-- 否则发现 Chrome 路径并 `spawn` 新进程。
+- 先 `GET /json/version` 探测端口（`probeCdp()`）；
+- **若端口已被占用：默认 `throw` 诚实拒绝**（红线：绝不静默接管陌生浏览器、绝不假装成功）；仅当显式 `allowReuse`（环境变量 `AIDCP_CDP_ALLOW_REUSE` ∈ `1/true/yes`）时，才复用该实例（必要时 `ensurePageTarget()` 兜底新开标签 + 校验登录态）；
+- **端口空闲（默认路径）：发现 Chrome 路径并 `spawn` 一个独立 `user-data-dir` 的新进程**，轮询 `/json/version` 直至就绪，再校验登录态。
 
-```183:208:src/cdp/chrome-launcher.ts
- * 启动或复用 Chrome。
- * - 若 CDP 端口已就绪：直接复用（pid=null, reused=true）。
- * - 否则发现路径并 spawn 新进程，轮询直至 /json/version 就绪。
- * - 首次启动（profile 目录不存在）时提示人工登录并等待 Enter。
- */
-export async function launchChrome(opts: ChromeLauncherOptions = {}): Promise<ChromeInstance> {
-  const host = opts.host ?? DEFAULT_HOST;
-  const port = opts.port ?? DEFAULT_PORT;
-  // ...
-
-  // 1) 复用已有实例
+```text:src/cdp/chrome-launcher.ts (launchChrome ~604)
+  // 1) 端口上已有 Chrome：默认诚实拒绝静默接管（红线：绝不静默假成功）。
   if (await probeCdp(host, port, fetchImpl)) {
-    log(`[aidcp-edge] 检测到已有 Chrome 监听 ${host}:${port}，复用实例`);
-    return { pid: null, reused: true, kill: () => undefined };
+    if (!allowReuse) {
+      throw new Error(
+        `[aidcp-edge] 调试端口 ${host}:${port} 上已有 Chrome 在运行——拒绝静默接管陌生浏览器实例。` +
+          `本节点须使用独立的调试端口与用户数据目录；如确属同一节点的有意复用，显式设置 AIDCP_CDP_ALLOW_REUSE=true。`,
+      );
+    }
+    log(`[aidcp-edge] 检测到已有 Chrome 监听 ${host}:${port}（AIDCP_CDP_ALLOW_REUSE 已开启），复用实例`);
+    await ensurePage(host, port, startUrl, fetchImpl, log);
+    await waitForLogin({ /* 复用实例也需校验登录态 */ });
+    return { pid: null, reused: true, kill: () => undefined, killAndConfirmDead: async () => true };
   }
 ```
 
-继续往下看，端口未就绪时会真正启动 Chrome：
+> 其中 `allowReuse` 默认值取自 `opts.allowReuse ?? AIDCP_CDP_ALLOW_REUSE`；返回值 `ChromeInstance` 现新增 `killAndConfirmDead`（回收路径：终止本进程独占的 Chrome 并确认端口释放，复用实例为 no-op）。
 
-```210:218:src/cdp/chrome-launcher.ts
-  const isFirstLaunch = !existsImpl(profileDir);
+端口空闲时（默认路径）才真正 `spawn` 启动 Chrome（注意：**已无 `isFirstLaunch` 分支**——无论是否首次，启动就绪后都统一 `waitForLogin()` 校验登录态）：
+
+```text:src/cdp/chrome-launcher.ts (launchChrome 默认 spawn 分支)
   const chromePath = discoverChromePath(opts.chromePath, existsImpl);
+  clearLock(profileDir, log); // 清理崩溃残留的单例锁（仅在确认无存活进程持有时清，否则诚实失败）
   const args = buildChromeArgs({ port, profileDir, headless, startUrl });
 
   log(`[aidcp-edge] 启动 Chrome: ${chromePath}`);
   const child: ChildProcess = spawnImpl(chromePath, args, {
     detached: false,
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'pipe'],
   });
 ```
 
@@ -153,20 +157,24 @@ export async function firstPageTarget(
 }
 ```
 
-`attachToPage()` 再把 `webSocketDebuggerUrl` 交给 `CdpClient`：
+`attachToPage()` 再把 `webSocketDebuggerUrl` 交给 `CdpClient`，连接后统一走 `reEnableAndInject()` 启用 CDP 域并注入反检测（重连后也复用同一函数；`Input.enable` 为坐标点击/按键所必需）：
 
-```44:56:src/cdp/session.ts
+```ts:src/cdp/session.ts attachToPage() / reEnableAndInject()
 export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSession> {
   const target = await firstPageTarget(options);
   const cdp = new CdpClient(target.webSocketDebuggerUrl, options.client);
   await cdp.connect();
+  // 启用域 + 注入反检测，重连后也走同一函数重启用
+  await reEnableAndInject(cdp, { stealth: options.stealth, injector });
+  // ...
+}
+
+async function reEnableAndInject(cdp, opts) {
   await cdp.send('Runtime.enable').catch(() => undefined);
   await cdp.send('Page.enable').catch(() => undefined);
-
-  if (options.stealth !== false) {
-    const injector = options.stealthInjector ?? new CdpStealthInjector();
-    await injector.inject(cdp);
-  }
+  await cdp.send('Input.enable').catch(() => undefined); // 坐标点击/按键所需
+  if (opts.stealth !== false) await opts.injector.inject(cdp);
+}
 ```
 
 `CdpClient` 本身就是一个最小原生 WS RPC 客户端：
@@ -217,7 +225,7 @@ export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSes
 
 通过 Node `child_process.spawn()` 直接启动本机 Chrome 可执行文件，并传入固定参数：
 
-```155:180:src/cdp/chrome-launcher.ts
+```ts:src/cdp/chrome-launcher.ts buildChromeArgs()
 export function buildChromeArgs(opts: {
   port: number;
   profileDir: string;
@@ -260,7 +268,7 @@ Chrome 路径优先级：
 
 证据：
 
-```84:108:src/cdp/chrome-launcher.ts
+```ts:src/cdp/chrome-launcher.ts discoverChromePath()
  * 发现 chrome.exe 路径。优先级：
  * 1. 显式 chromePath / 环境变量 AIDCP_CHROME_PATH
  * 2. Windows 常见路径
@@ -290,6 +298,8 @@ export function discoverChromePath(
 | `AIDCP_CDP_HOST` | `127.0.0.1` | env | DevTools HTTP / WS 连接 host | `src/main.ts:48`、`src/cdp/targets.ts:28`、`src/cdp/chrome-launcher.ts:190` |
 | `AIDCP_CDP_PORT` | `9222` | env | DevTools HTTP / WS 连接端口 | `src/main.ts:49`、`src/cdp/targets.ts:29`、`src/cdp/chrome-launcher.ts:191` |
 | `AIDCP_PAGE_URL` | 无 | env | 只附着 URL 包含该子串的 page | `src/main.ts:50`、`src/main.ts:60-61`、`src/cdp/session.ts:22-26` |
+| `AIDCP_CDP_ALLOW_REUSE` | `false` | env | 是否允许复用端口上已在监听的 Chrome（`1`/`true`/`yes` 视为开启）；默认诚实拒绝静默接管 | `src/cdp/chrome-launcher.ts` `launchChrome()`（`allowReuse` 约 597 行、端口占用判定约 604 行） |
+| `AIDCP_CHROME_LOGIN_TIMEOUT_MS` | `300000`（5min） | env | 登录态等待超时；看护子进程可注入更短值 | `src/cdp/chrome-launcher.ts` `DEFAULT_LOGIN_TIMEOUT_MS`、`src/main.ts` `loginTimeoutMs` 注入 |
 | `AIDCP_CHROME_PATH` | 自动发现 | env | 指定 Chrome 可执行文件 | `src/main.ts:54`、`src/cdp/chrome-launcher.ts:24-25`、`src/cdp/chrome-launcher.ts:94-99` |
 | `AIDCP_CHROME_PROFILE` | `~/.aidcp-chrome-profile` | env | 指定 `user-data-dir` | `src/main.ts:55`、`src/cdp/chrome-launcher.ts:26-27`、`src/cdp/chrome-launcher.ts:61`、`src/cdp/chrome-launcher.ts:192` |
 | `AIDCP_CHROME_HEADLESS` | `false` | env | 是否 headless | `src/main.ts:56`、`src/cdp/chrome-launcher.ts:28-29`、`src/cdp/chrome-launcher.ts:193` |
@@ -329,7 +339,7 @@ export function discoverChromePath(
 
 证据：
 
-```115:123:src/cdp/chrome-launcher.ts
+```ts:src/cdp/chrome-launcher.ts probeCdp()
 export async function probeCdp(
   host: string,
   port: number,
@@ -356,61 +366,33 @@ export async function listTargets(options: DiscoverOptions = {}): Promise<CdpTar
 
 `chrome-launcher` 默认使用独立 profile 目录：
 
-```59:63:src/cdp/chrome-launcher.ts
+```ts:src/cdp/chrome-launcher.ts 默认常量
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 9222;
 const DEFAULT_PROFILE_DIR = join(homedir(), '.aidcp-chrome-profile');
 const DEFAULT_START_URL = 'https://www.xiaohongshu.com/explore';
 ```
 
-首次启动时，如果 profile 目录不存在，会提示人工登录：
+> ⚠️ 原快照此处写的是“仅首次启动 / profile 目录不存在（`isFirstLaunch`）才等待人工登录、按 Enter 继续”。**该模型已废弃**——`isFirstLaunch` 字段已删除。
 
-```248:252:src/cdp/chrome-launcher.ts
-  if (isFirstLaunch) {
-    log('[aidcp-edge] 请在浏览器中登录小红书，登录完成后按 Enter 继续...');
-    await waitForLogin();
-  }
-```
+**当前模型：每次启动都自动校验登录态。** 无论是新建 profile 还是复用旧 profile，`launchChrome()` 在 Chrome 就绪后都会调用 `waitForLogin()`（`defaultWaitForLogin()`）轮询检测登录态，检测通过才继续；超时上限 `DEFAULT_LOGIN_TIMEOUT_MS = 5min`（`src/main.ts` 可经 `AIDCP_CHROME_LOGIN_TIMEOUT_MS` 注入更短值给看护子进程）。手动回车**仅作 TTY 兜底**（`shouldAllowManualEnterFallback()`：`AIDCP_LOGIN_WAIT_MODE=manual` 或 stdin 为 TTY 时才挂上 Enter 监听），不再是主路径。
 
-对应测试也明确验证了“首次启动等待登录、非首次不等待”：
+登录态判定口径见 `evaluateLoginState()` + `deriveLoginProbeResult()`：
 
-```192:230:test/cdp/chrome-launcher.test.ts
-test('launchChrome 首次启动（profile 不存在）等待人工登录', async () => {
-  // ...
-  await launchChrome({
-    chromePath: 'C:/chrome.exe',
-    profileDir: '/data/new-profile',
-    // chrome 存在，但 profile 目录不存在 -> 首次启动
-    existsImpl: (p) => p === 'C:/chrome.exe',
-    waitForLoginImpl: async () => {
-      waited = true;
-    },
-  });
-  assert.equal(waited, true);
-});
+- **主正信号**：`web_session` cookie（httpOnly，经 CDP `Network.getCookies` 读取，显式限定 `urls: xiaohongshu.com`）；
+- **DOM 兜底**：导航区用户头像 && 创作入口（“创作中心/发布笔记/我的主页”），仅在读不到 `web_session` 时挽救，避免死等；
+- **一票否决**（高于所有正信号）：URL 含 `/login`，或页面出现登录弹窗（扫码/手机号/验证码登录等）——即便 `web_session` 残留但已失效也判未登录。
 
-test('launchChrome 非首次启动（profile 已存在）不等待登录', async () => {
-  // ...
-  await launchChrome({
-    chromePath: 'C:/chrome.exe',
-    profileDir: '/data/profile',
-    existsImpl: () => true,
-    waitForLoginImpl: async () => {
-      waited = true;
-    },
-  });
-  assert.equal(waited, false);
-});
-```
+### 5.2 没有 cookie 级别的写入/迁移管理（但已有只读 cookie 探测）
 
-### 5.2 没有发现 cookie 级别管理
+> ⚠️ 更正：原快照说 `Network.getCookies` 也“未发现”。现在 **`Network.getCookies` 已被使用**——`evaluateLoginState()` 用它只读地读取 httpOnly 的 `web_session` cookie 来判定登录态。
 
-本次对 `src/`、`docs/`、`test/` 的检索中，没有发现以下实现：
+仍然没有以下实现（不构成 cookie 级别的写入/迁移能力）：
 
-- `Network.getCookies` / `Network.setCookies`
-- cookie 文件导入导出
-- 登录态同步服务
-- 小红书 token / session 专门管理器
+- `Network.setCookies`（写入/注入 cookie）——仍未使用；
+- cookie 文件导入导出；
+- 登录态同步服务；
+- 小红书 token / session 专门管理器。
 
 因此当前登录态方案可以明确归纳为：
 
@@ -432,39 +414,40 @@ chrome --remote-debugging-port=9222 --user-data-dir=/tmp/aidcp-profile
 启动顺序如下：
 
 1. 读取 env：`AIDCP_CDP_HOST` / `AIDCP_CDP_PORT` / `AIDCP_PAGE_URL` / `AIDCP_CHROME_*`
-2. 调用 `launchChrome()`：复用已有实例或启动新实例
-3. 调用 `attachToPage()`：发现 page target，连接 `webSocketDebuggerUrl`
-4. 启用 `Input` 域
+2. 调用 `launchChrome()`：**默认 spawn 一个独立 Chrome**（端口被占用且未开 `AIDCP_CDP_ALLOW_REUSE` 时诚实拒绝；就绪后统一校验登录态）
+3. 调用 `attachToPage()`：发现 page target，连接 `webSocketDebuggerUrl`，并在内部 `reEnableAndInject()` 中启用 `Runtime` / `Page` / **`Input`** 域 + 注入反检测（与断线重连共用同一路径）
+4. 从登录态读出本节点真实账号 id（`readSelfIdentity` + `decideHandshakeIdentity`）作为握手身份
 5. 再装配云端 client、browse session、publish flow 等业务层
 
 关键证据：
 
-```52:67:src/main.ts
-  console.log(`[aidcp-edge] 准备 Chrome（CDP ${cdpHost}:${cdpPort}）...`);
+```text:src/main.ts (main() 装配段)
   const launchOpts: Parameters<typeof launchChrome>[0] = { host: cdpHost, port: cdpPort };
   if (process.env.AIDCP_CHROME_PATH) launchOpts.chromePath = process.env.AIDCP_CHROME_PATH;
   if (process.env.AIDCP_CHROME_PROFILE) launchOpts.profileDir = process.env.AIDCP_CHROME_PROFILE;
   if (process.env.AIDCP_CHROME_HEADLESS === 'true') launchOpts.headless = true;
   const chrome = await launchChrome(launchOpts);
 
-  console.log(`[aidcp-edge] 连接本机 Chrome CDP ${cdpHost}:${cdpPort} ...`);
   const attachOpts: Parameters<typeof attachToPage>[0] = { host: cdpHost, port: cdpPort };
   if (pageUrl) attachOpts.urlIncludes = pageUrl;
   const session = await attachToPage(attachOpts);
-  console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
-
-  await session.cdp.send('Input.enable').catch(() => undefined);
+  // Runtime/Page/Input 域启用 + 反检测注入均在 attachToPage 内（reEnableAndInject，与断线重连共用）。
 ```
 
-退出时只会 kill 自己启动的 Chrome；复用的实例不会被关闭：
+退出 / 回收时**仅当本进程独占（非复用）该 Chrome 才回收**；复用实例只诚实退出，绝不回收外部浏览器：
 
-```160:162:src/main.ts
+```text:src/main.ts (shutdown 路径)
     session.close();
-    // 仅当 Chrome 由本进程启动时才 kill（复用的实例不动）
-    chrome.kill();
+    // ③ 仅当本进程独占（非复用）才回收：杀进程并确认端口/登录锁释放（超时升级 SIGKILL）。
+    if (chrome.reused) {
+      console.log('[aidcp-edge] 复用模式：只诚实退出，不回收本进程不拥有的外部 Chrome');
+    } else {
+      const freed = await chrome.killAndConfirmDead();
+      // freed=false：升级 SIGKILL 后端口仍未确认释放，继续退出（看护重起时由 clearStaleSingletonLock 再判活）。
+    }
 ```
 
-结合 `launchChrome()` 的返回值设计（复用实例时 `kill` 是空操作），说明“连接已有浏览器”是正式支持的运行方式。证据见 `src/cdp/chrome-launcher.ts:204-208`、`src/cdp/chrome-launcher.ts:254-267`。
+注意：回收已从早期“无条件 `chrome.kill()`”改为 **`chrome.reused` 分支 + `killAndConfirmDead()`**（优雅 SIGTERM → 轮询端口 → 必要时升级 SIGKILL 并确认调试端口释放）。复用实例的 `kill` / `killAndConfirmDead` 均为 no-op。证据见 `src/cdp/chrome-launcher.ts` 的 `ChromeInstance` / `launchChrome()` 返回值、`src/main.ts` 的 `shutdown()`。
 
 ## 7. 反检测 / 拟人化模块与浏览器启动的关系
 
@@ -472,7 +455,7 @@ chrome --remote-debugging-port=9222 --user-data-dir=/tmp/aidcp-profile
 
 第一层是 Chrome 启动参数：
 
-```168:174:src/cdp/chrome-launcher.ts
+```ts:src/cdp/chrome-launcher.ts buildChromeArgs() 反检测参数
     // —— 反检测启动参数（见 docs/anti-detection.md §1.1 / §4.1）——
     // 关闭 Blink 的 AutomationControlled 特征：使 navigator.webdriver 不再被置 true。
     '--disable-blink-features=AutomationControlled',
@@ -496,13 +479,11 @@ chrome --remote-debugging-port=9222 --user-data-dir=/tmp/aidcp-profile
   }
 ```
 
-`attachToPage()` 默认会自动注入：
+`attachToPage()` 默认会自动注入（在 `reEnableAndInject()` 内，与 `Input.enable` 同处）：
 
-```52:56:src/cdp/session.ts
-  if (options.stealth !== false) {
-    const injector = options.stealthInjector ?? new CdpStealthInjector();
-    await injector.inject(cdp);
-  }
+```ts:src/cdp/session.ts reEnableAndInject()
+  await cdp.send('Input.enable').catch(() => undefined);
+  if (opts.stealth !== false) await opts.injector.inject(cdp); // injector 由 attachToPage 创建并传入
 ```
 
 ### 7.2 拟人化模块不负责启动浏览器
@@ -556,15 +537,18 @@ const session = await attachToPage({ host: '127.0.0.1', port: 9222 });
 
 ### 8.2 测试
 
-`test/cdp/chrome-launcher.test.ts` 已覆盖：
+`test/cdp/chrome-launcher.test.ts` 已覆盖（节选，以测试名为准）：
 
-- 复用已有实例
-- 端口空闲时 spawn
-- 启动参数正确
-- 首次启动等待人工登录
-- 非首次启动不等待登录
+- **探测到端口已有 Chrome 时默认诚实报错（拒绝静默接管，不 spawn）**；
+- **显式 `allowReuse` 时才复用已有实例**；
+- 端口空闲时 spawn 并传入正确参数（含反检测参数、不含 `--enable-automation`）；
+- 自己启动的实例 `kill` 会真正调用 `child.kill`；
+- **非首次启动（profile 已存在）仍验证登录态**（不再是“非首次不等待登录”）；
+- 登录态判定：`web_session` 命中即已登录、登录提示一票否决、`/login` URL 一律未登录、`getCookies` 限定 xiaohongshu 作用域、失败退回 DOM 信号兜底；
+- `ensurePageTarget` 在复用实例无可用标签时 PUT/GET 新开标签；
+- `clearStaleSingletonLock` 的清理 / 诚实失败分支。
 
-这说明“自动启动 / 复用 Chrome + profile 登录态”是已实现且被测试覆盖的正式能力，而不是临时脚本。
+这说明“默认 spawn 独立 Chrome（端口占用诚实拒绝 / 显式才复用）+ 每次启动校验登录态”是已实现且被测试覆盖的正式能力，而不是临时脚本。
 
 ### 8.3 现有联调文档
 
@@ -584,9 +568,13 @@ const session = await attachToPage({ host: '127.0.0.1', port: 9222 });
 
 ## 9. 真机联调应该怎么接入一个“已登录小红书”的浏览器
 
-基于当前实现，**最稳妥的接入方式是“用户自己先启动一个已登录 profile 的 Chrome，并暴露 remote debugging port；edge 只负责复用并 attach”**。这样可以避免 edge 首次启动时还要等待人工登录，也更符合真机联调场景。
+> ⚠️ 接入方式相对原快照已变更。**默认推荐：直接 `npm start` 让 edge 自己拉起一个独立 Chrome（专用调试端口 + 独立 `user-data-dir`），首登在该窗口扫码即可，登录态自动检测后续跑。** 因为 edge 默认会**诚实拒绝**接管已在监听调试端口的陌生 Chrome，原先“先手动起 Chrome 于 9222 再 `npm start`”的配方在默认配置下会直接报错退出。
 
-### 9.1 推荐步骤（手动先起浏览器，再起 edge）
+若确需复用一个你手动启动并已登录的 Chrome（同一节点的有意复用），**必须显式设置 `AIDCP_CDP_ALLOW_REUSE=true`**，否则 edge 会因端口被占用而拒绝启动。
+
+### 9.1 备选步骤（手动先起浏览器，再让 edge 复用）
+
+> 仅当你确需复用一个已手动启动并登录好的 Chrome 时用本节，且**必须带 `AIDCP_CDP_ALLOW_REUSE=true`**，否则 edge 会因 9222 端口被占用而拒绝启动。多节点同机务必各用独立调试端口 + 独立 `user-data-dir`。
 
 #### macOS 示例
 
@@ -602,9 +590,10 @@ const session = await attachToPage({ host: '127.0.0.1', port: 9222 });
 2. 确认账号已登录
 3. 打开目标页面（建议先落到小红书首页、explore、或后续要联调的发布入口页）
 
-再启动 edge：
+再启动 edge（**注意 `AIDCP_CDP_ALLOW_REUSE=true` 不可省略**）：
 
 ```bash
+AIDCP_CDP_ALLOW_REUSE=true \
 AIDCP_CDP_HOST=127.0.0.1 \
 AIDCP_CDP_PORT=9222 \
 AIDCP_CHROME_PROFILE="$HOME/.aidcp-chrome-profile" \
@@ -613,47 +602,45 @@ npm start
 
 说明：
 
-- 因为 9222 端口已经有 Chrome 在监听，`launchChrome()` 会走“复用已有实例”分支，不会重复启动新浏览器。证据见 `src/cdp/chrome-launcher.ts:204-208`。
+- 9222 端口已有 Chrome 在监听时，`launchChrome()` 默认会 `throw` 拒绝静默接管；只有显式 `AIDCP_CDP_ALLOW_REUSE=true` 才走复用分支（复用前会 `ensurePageTarget()` 兜底新开标签 + 校验登录态）。证据见 `src/cdp/chrome-launcher.ts` 的 `launchChrome()`（端口占用判定约 604 行）。
 - 若需要只附着某个特定页面，可额外设置 `AIDCP_PAGE_URL`，例如：
 
 ```bash
+AIDCP_CDP_ALLOW_REUSE=true \
 AIDCP_CDP_HOST=127.0.0.1 \
 AIDCP_CDP_PORT=9222 \
 AIDCP_PAGE_URL=xiaohongshu.com \
 npm start
 ```
 
-### 9.2 备选步骤（让 edge 自己拉起浏览器）
+### 9.2 推荐步骤（默认：让 edge 自己拉起浏览器）
 
-如果本机还没有启动 Chrome，也可以直接：
+最简单、也是默认推荐的方式——直接：
 
 ```bash
 AIDCP_CHROME_PROFILE="$HOME/.aidcp-chrome-profile" npm start
 ```
 
-首次启动时 edge 会：
+启动时 edge 会：
 
-1. 自动启动 Chrome
+1. 自动 spawn 一个独立 Chrome（专用调试端口 + 独立 `user-data-dir`）
 2. 打开默认起始页 `https://www.xiaohongshu.com/explore`
-3. 提示“请在浏览器中登录小红书，登录完成后按 Enter 继续...”
+3. **自动检测登录态**：未登录时打印“请在浏览器中登录小红书，系统将自动检测登录态后继续”，你在该窗口扫码登录即可；检测到 `web_session` / 登录信号后自动继续（超时 5min）。手动回车仅在 TTY 下作兜底。
 
-证据见 `src/cdp/chrome-launcher.ts:62`、`src/cdp/chrome-launcher.ts:248-252`。
+证据见 `src/cdp/chrome-launcher.ts` 的 `DEFAULT_START_URL` / `launchChrome()` 默认 spawn 分支、`defaultWaitForLogin()` / `evaluateLoginState()`。
 
-但对“真机联调发布”来说，这种方式不如手动先起浏览器稳定，因为：
-
-- 你通常希望先人工确认账号、页面、草稿态、风控态；
-- 你可能希望使用一个明确准备好的 profile；
-- 你可能希望先打开特定发布入口页，而不是默认 explore。
+真机联调发布时，你仍可在该 edge 拉起的窗口里人工确认账号、页面、草稿态、风控态；若希望落到特定发布入口页而非默认 explore，可设置 `AIDCP_EXPLORE_URL` / `AIDCP_PAGE_URL`。只有在“必须复用一个已经手动起好的 Chrome”时，才退回 §9.1 并显式 `AIDCP_CDP_ALLOW_REUSE=true`。
 
 ## 10. 现状离“真机联调发布”还差什么
 
 ### 10.1 已具备的基础能力
 
 - 已具备 **连接真实 Chrome CDP** 的能力；
-- 已具备 **自动启动或复用已有 Chrome** 的能力；
-- 已具备 **复用固定 profile 保持登录态** 的能力；
+- 已具备 **默认自动 spawn 独立 Chrome（专用调试端口 + 独立 `user-data-dir`）** 的能力；端口被占用时诚实拒绝，显式 `AIDCP_CDP_ALLOW_REUSE=true` 才复用；
+- 已具备 **复用固定 profile 保持登录态 + 每次启动自动校验登录态**（`web_session` cookie + DOM 信号 + 登录弹窗否决）的能力；
 - 已具备 **按 URL 过滤附着 page** 的基础能力；
 - 已具备 **反检测启动参数 + attach 后 stealth 注入**；
+- 已具备 **登录弹窗 / 验证码 / 未知阻断的旁路监测**（`CdpOverlayMonitor`，命中即本地暂停并按类上报云端）；
 - 已有相关单测与手动检查脚本。
 
 ### 10.2 主要缺口 / 风险
@@ -667,15 +654,13 @@ AIDCP_CHROME_PROFILE="$HOME/.aidcp-chrome-profile" npm start
 
 这对真机联调发布来说偏弱。若用户同时开了多个小红书 tab、多个站点 tab，可能 attach 到错误页面。证据见 `src/cdp/targets.ts:40-52`。
 
-#### 缺口 2：没有显式登录态校验 / preflight
+#### 缺口 2（已大幅收口）：登录态校验 / 阻断检测已程序化
 
-虽然 profile 可复用登录态，但 edge 启动后没有：
+> ⚠️ 原快照说“没有显式登录态校验 / preflight”——**已不成立**。当前已有：
 
-- 检查当前是否已登录小红书
-- 检查是否落在正确域名
-- 检查是否存在草稿恢复 / 风控 / 实名认证阻断
-
-这部分目前只在 `docs/publish-e2e-checklist.md:312-347` 里作为联调 checklist 提醒，还没有固化成程序化 preflight。
+- ✅ **启动即校验是否已登录小红书**：`evaluateLoginState()`（`web_session` cookie + 导航头像/创作入口 DOM 信号），未登录则 `waitForLogin()` 阻塞等待至超时；
+- ✅ **登录弹窗 / 验证码 / 未知阻断检测**：`CdpOverlayMonitor` 后台持续判类（login/captcha/unknown），命中即本地暂停、必要时上报云端（`risk.captcha_detected`）；
+- 仍偏弱：未单独做“正确域名/落地页”硬校验，也未单独识别“草稿恢复 / 实名认证”等具体阻断子类（这部分仍以 `docs/publish-e2e-checklist.md` 的联调 checklist 提醒为主）。
 
 #### 缺口 3：没有 cookie / session 级别的备份与迁移能力
 
@@ -700,14 +685,23 @@ README 主要描述“手动启动 Chrome 后 attach”，但 `src/main.ts` 已�
 
 ## 11. 建议的真机联调 SOP（基于当前现状）
 
-1. 准备一个专用 Chrome profile，例如 `~/.aidcp-chrome-profile`
-2. 用该 profile 手动启动 Chrome，并显式打开 `--remote-debugging-port=9222`
-3. 在浏览器中登录小红书，确认账号状态正常
-4. 手动打开目标页面，并清理草稿恢复、弹窗、风控提示
-5. 启动 edge，必要时设置 `AIDCP_PAGE_URL` 限定 attach 页面
-6. 若怀疑反检测问题，可先运行 `npx tsx test/manual/check-stealth.ts` 做一次人工检查
+> ⚠️ 原快照的 SOP（先手动起 9222 上的 Chrome 再 `npm start`）在默认配置下会**失败**——端口被占用会触发诚实拒绝。下面以「让 edge 自己拉起独立 Chrome」为默认路径。
 
-推荐命令：
+**默认路径（推荐）：让 edge 自己拉起独立 Chrome**
+
+1. 准备/指定一个专用 `user-data-dir`，例如 `~/.aidcp-chrome-profile`（首次为空也可，扫码登录后即持久化）
+2. 直接启动 edge，让它 spawn 独立 Chrome（反检测启动参数由 `buildChromeArgs()` 自动带上，无需手填 flag）
+3. 在 edge 拉起的窗口里登录小红书并确认账号状态——edge 会自动检测登录态后继续（超时 5min）
+4. 必要时设置 `AIDCP_EXPLORE_URL` / `AIDCP_PAGE_URL` 落到特定页面
+5. 若怀疑反检测问题，可另起终端跑 `npx tsx test/manual/check-stealth.ts` 做一次人工检查
+
+```bash
+AIDCP_CHROME_PROFILE="$HOME/.aidcp-chrome-profile" \
+AIDCP_EXPLORE_URL=https://www.xiaohongshu.com/explore \
+npm start
+```
+
+**备选路径：复用一个你手动起好的已登录 Chrome（必须开 reuse 开关）**
 
 ```bash
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
@@ -718,6 +712,7 @@ README 主要描述“手动启动 Chrome 后 attach”，但 `src/main.ts` 已�
 ```
 
 ```bash
+AIDCP_CDP_ALLOW_REUSE=true \
 AIDCP_CDP_HOST=127.0.0.1 \
 AIDCP_CDP_PORT=9222 \
 AIDCP_PAGE_URL=xiaohongshu.com \
@@ -725,8 +720,10 @@ AIDCP_CHROME_PROFILE="$HOME/.aidcp-chrome-profile" \
 npm start
 ```
 
+（省略 `AIDCP_CDP_ALLOW_REUSE=true` 时，edge 会因 9222 端口被占用而拒绝启动。）
+
 ## 12. 一句话判断
 
 截至当前代码现状，`aidcp-edge` 的浏览器接入能力可以概括为：
 
-> **基于原生 WebSocket CDP，优先复用已有 `--remote-debugging-port` Chrome，必要时自行启动一个带独立 `user-data-dir` 的 Chrome；登录态依赖 profile 复用，不做 cookie 级别管理。**
+> **基于原生 WebSocket CDP，默认自行 spawn 一个带专用调试端口 + 独立 `user-data-dir` 的 Chrome；探测到端口已被占用时诚实拒绝静默接管，仅 `AIDCP_CDP_ALLOW_REUSE=true` 才复用。登录态依赖 profile 复用，且每次启动都自动校验（`web_session` cookie + DOM 信号 + 登录弹窗否决），仍不做 cookie 级别的写入/迁移管理。**

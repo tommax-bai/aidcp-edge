@@ -1,5 +1,9 @@
 # publish flow 真机联调进展记录
 
+> 🕒 **时点快照（原 2026-06-04 联调记录）**：本文为某次勘察/联调记录，部分结论已随代码演进失效。**以代码为准**；下列与现状冲突处已就地更正/标注。
+
+> ⚠️ **SUPERSEDED（2026-06-20，commit `8c7a9fd`）**：本文的核心遗留卡点（creator「发布方式选择页」→「上传图文」最终编辑页）以及下方 TODO #1 / #2 / #6 **均已解决**。方案为 in-page select_mode 直驱：`src/flows/publish-command-handlers.ts:279-297` 用 CDP 在页内点击 `div.creator-tab`（文案「上传图文」），再绑定式轮询确认进入图文模式（文件输入 `accept` 变为图片类）；对应 `src/flows/anchors.ts` 的 `XHS_PUBLISH_SELECT_MODE_ACTION_ID = 'note.publish_select_mode'`、protocol 动作 `select_mode`。下文相关段落保留作为根因链历史记录。
+
 更新时间：2026-06-02
 
 ## 本轮目标
@@ -163,8 +167,8 @@ Page.navigate('https://creator.xiaohongshu.com/publish/publish?source=official')
 
 ## 下一步 TODO
 
-1. 在 creator 选择页上精确定位“上传图文”真实可点击元素
-2. 成功进入最终图文编辑页
+1. ~~在 creator 选择页上精确定位“上传图文”真实可点击元素~~ ✅ 已完成（commit `8c7a9fd`：in-page 点击 `div.creator-tab`）
+2. ~~成功进入最终图文编辑页~~ ✅ 已完成（select_mode 直驱 + 绑定式轮询确认）
 3. 确认是否必须先上传图片
 4. 若必须传图，先由用户确认测试图来源
 5. dump 最终编辑页真实 DOM：
@@ -172,9 +176,7 @@ Page.navigate('https://creator.xiaohongshu.com/publish/publish?source=official')
    - 正文编辑器
    - 标签输入 / 话题入口
    - 发布按钮
-6. 修正：
-   - `src/flows/anchors.ts`
-   - `src/flows/publish-post.ts`
+6. ~~修正：`src/flows/anchors.ts`、`src/flows/publish-post.ts`~~ ✅ 已完成（新增 `XHS_PUBLISH_SELECT_MODE_ACTION_ID`，select_mode 处理见 `src/flows/publish-command-handlers.ts`）
 7. 用 `--dry-run` 逐步跑通：
    - enter
    - title
@@ -187,7 +189,7 @@ Page.navigate('https://creator.xiaohongshu.com/publish/publish?source=official')
 
 ### 1. 本地真机调试入口
 
-- `/Users/bears/aidcp-edge/scripts/dev-publish.ts`
+- `scripts/dev-publish.ts`
 
 用途：
 
@@ -197,22 +199,22 @@ Page.navigate('https://creator.xiaohongshu.com/publish/publish?source=official')
 
 ### 2. 发布锚点定义
 
-- `/Users/bears/aidcp-edge/src/flows/anchors.ts`
+- `src/flows/anchors.ts`
 
 ### 3. 发布流程与后置校验
 
-- `/Users/bears/aidcp-edge/src/flows/publish-post.ts`
+- `src/flows/publish-post.ts`
 
 ### 4. 登录自动检测 / Chrome 启动
 
-- `/Users/bears/aidcp-edge/src/cdp/chrome-launcher.ts`
+- `src/cdp/chrome-launcher.ts`
 
 ## 运行方式备忘
 
 ### 后台常驻 edge 启动命令
 
 ```bash
-nohup env AIDCP_AUTO_BROWSE=false pnpm start > /Users/bears/.aidcp-edge-logs/edge.out 2>&1 < /dev/null &
+nohup env AIDCP_AUTO_BROWSE=false npm start > "$AIDCP_EDGE_LOG_DIR/edge.out" 2>&1 < /dev/null &
 ```
 
 ## 部署与重启提醒
@@ -224,7 +226,7 @@ nohup env AIDCP_AUTO_BROWSE=false pnpm start > /Users/bears/.aidcp-edge-logs/edg
 - 推荐后台启动方式：
 
 ```bash
-nohup env AIDCP_AUTO_BROWSE=false pnpm start > /Users/bears/.aidcp-edge-logs/edge.out 2>&1 < /dev/null &
+nohup env AIDCP_AUTO_BROWSE=false npm start > "$AIDCP_EDGE_LOG_DIR/edge.out" 2>&1 < /dev/null &
 ```
 
 - 真发联调时需额外加上：
@@ -243,23 +245,23 @@ AIDCP_REAL_PUBLISH=true
 
 PID 文件：
 
-- `/Users/bears/.aidcp-edge-logs/edge.pid`
+- `$AIDCP_EDGE_LOG_DIR/edge.pid`
 
 日志文件：
 
-- `/Users/bears/.aidcp-edge-logs/edge.out`
-- `/Users/bears/.aidcp-edge-logs/chrome-stderr.log`
+- `$AIDCP_EDGE_LOG_DIR/edge.out`
+- `$AIDCP_EDGE_LOG_DIR/chrome-stderr.log`
 
 ### dry-run 命令
 
 ```bash
-pnpm exec tsx scripts/dev-publish.ts --dry-run --title='【测试请忽略】AIDCP 自动化发布联调' --content='这是AIDCP端到端发布功能的真机联调测试笔记,请忽略。' --tags='测试'
+npx tsx scripts/dev-publish.ts --dry-run --title='【测试请忽略】AIDCP 自动化发布联调' --content='这是AIDCP端到端发布功能的真机联调测试笔记,请忽略。' --tags='测试'
 ```
 
 ### 真发命令（后续恢复时再用）
 
 ```bash
-pnpm exec tsx scripts/dev-publish.ts --title='【测试请忽略】AIDCP 自动化发布联调' --content='这是AIDCP端到端发布功能的真机联调测试笔记,请忽略。' --tags='测试'
+npx tsx scripts/dev-publish.ts --title='【测试请忽略】AIDCP 自动化发布联调' --content='这是AIDCP端到端发布功能的真机联调测试笔记,请忽略。' --tags='测试'
 ```
 
 ### 查看 CDP target

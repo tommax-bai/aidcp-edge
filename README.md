@@ -6,7 +6,10 @@ AIDCP（AI-Driven Control Plane）**边缘端**。运行在贴近浏览器的一
 > **演进提示**：早期边缘端只有定位层（`locating/`）与 CDP 接入（`cdp/`）。
 > 随云端重构为[事件驱动多 Agent](../aidcp-cloud) 与[协议 v2](../aidcp/docs/protocol.md)，
 > 边缘端补齐了 `browse`（浏览执行层）、`humanize`（拟人化）、`flows`（点赞/发布流程）、
-> `client`（边-云客户端）、`publish`（发布审批）与 `electron`（桌面打包）。
+> `client`（边-云客户端）、`publish`（发布审批）与 `electron`（桌面打包），
+> 并加入 `supervise`（多节点看护重起策略，配合 `start:multinode`）。
+
+> 📐 **关键必读**：小红书 web 是**宽/窄双布局**（主导航在左侧栏 vs 底部图标栏），edge 的定位/动作/监测/验收都须按两状态分别处理 —— 见 [`docs/xhs-layout-states.md`](docs/xhs-layout-states.md)。
 
 ## 能力
 
@@ -31,8 +34,11 @@ src/
     dom-provider.ts  DomProvider：Runtime.evaluate 取 outerHTML → jsdom 解析
     action-executor.ts ActionExecutor：结构路径→XPath，在浏览器侧执行
     session.ts       attachToPage()：发现→连接→产出 dom/executor
-    chrome-launcher.ts Chrome 启动/复用 + 登录检测
+    chrome-launcher.ts Chrome 自启（默认独立实例）+ 登录检测（复用需 AIDCP_CDP_ALLOW_REUSE）
     stealth-injector.ts 反检测脚本注入
+    file-input-setter.ts 发布配图上传：CDP DOM.setFileInputFiles 注入文件
+    self-identity.ts 登录后读出自己账号稳定 userid
+    index.ts         cdp 子模块公共出口
   browse/          浏览执行层（browse-session/feed-scroller/modal-controller/note-extractor/search-handler/card-filter）
   humanize/        拟人化（timing/mouse-path/keyboard-rhythm/scroll-physics/reading-time/session-rhythm）
   client/          边-云 WS 客户端（edge-client/cloud-selector/like-runner）
@@ -40,8 +46,11 @@ src/
   publish/         发布审批信号（approval-gate）
   comm/            协议定义投影（protocol，v2）
   electron/        桌面打包（main/preload/chrome-launcher.cjs + renderer/）
+  supervise/       看护重起策略（respawn-policy；供 start:multinode 多节点看护使用）
+  index.ts         边缘端公共出口（re-exports：locating/cdp/comm/flows/client/browse）
   main.ts          启动入口：装配 Chrome/CDP、云端连接、浏览会话
-test/              locating / cdp / browse / client / publish 测试
+test/              locating / cdp / browse / client / publish / flows / humanize /
+                   integration / acceptance / manual / supervise 测试（非穷举）
 ```
 
 ## 快速开始
@@ -62,6 +71,10 @@ chrome --remote-debugging-port=9222 --user-data-dir=/tmp/aidcp-profile \
 # 2) 启动 edge（连云地址默认 ws://121.89.85.150:8787，可由 AIDCP_CLOUD_URL 覆盖）
 npm start
 ```
+
+> 注意：edge 默认**自启独立 Chrome**（专属调试端口 + user-data-dir），不会复用已在监听的 Chrome；
+> 若要复用上面手动启动的 9222 实例，须显式设置 `AIDCP_CDP_ALLOW_REUSE=true`，否则端口被占会被拒绝启动。
+> 详见 `docs/browser-cdp-status.md`。
 
 ```ts
 import { attachToPage } from 'aidcp-edge';
