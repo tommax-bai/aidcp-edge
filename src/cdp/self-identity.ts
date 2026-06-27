@@ -112,18 +112,28 @@ export function deriveInPlaceSelfId(signals: SelfIdentitySignals): string {
 /** 就地扫描：头像祖先锚点 href + 导航区 profile 锚点 + 昵称/小红书号（best-effort）。 */
 const IN_PLACE_SCAN_JS = `(function(){
   function ahref(a){ return a ? (a.getAttribute('href')||'') : null; }
+  function txt(el){ return el ? (el.textContent||'').replace(/\\s+/g,' ').trim() : ''; }
   var navScope = document.querySelector(${JSON.stringify(NAV_SCOPE_SELECTOR)});
   var avatar = navScope && navScope.querySelector(${JSON.stringify(AVATAR_SELECTOR)});
   var avatarAnchor = null;
   if (avatar){ var n = avatar; while(n && n !== navScope){ if(n.tagName==='A'){ avatarAnchor=n; break; } n=n.parentElement; } }
   var navProfileHrefs = [];
   if (navScope){ var as = navScope.querySelectorAll('a[href*="/user/profile/"]'); for(var i=0;i<as.length && i<12;i++){ var h=ahref(as[i]); if(h) navProfileHrefs.push(h); } }
+  // 自作用域昵称/小红书号：只在登录账号自己的导航容器(navScope)内取，【绝不用全局查询】——
+  // 否则就地路径常停在推荐流等含他人内容的页面，会把【被浏览作者】的昵称错当成登录账号自身(red-line 错配身份)。
+  var nickname = null, redId = null;
+  if (navScope){
+    var nameEl = navScope.querySelector('.user-name, [class*="user-name"], [class*="userName"], .user-nickname, [class*="nickname"]');
+    nickname = txt(nameEl) || null;
+    var nn = navScope.querySelectorAll('span,div,p,a');
+    for (var j=0;j<nn.length;j++){ var t=txt(nn[j]); var m=t.match(/小红书号[:：]?\\s*([A-Za-z0-9_\\-]+)/); if(m){ redId=m[1]; break; } }
+  }
   return JSON.stringify({
     href: location.href,
     avatarAnchorHref: ahref(avatarAnchor),
     navProfileHrefs: navProfileHrefs,
-    nickname: null,
-    redId: null
+    nickname: nickname,
+    redId: redId
   });
 })()`;
 
@@ -222,8 +232,9 @@ export async function readSelfIdentity(
   const inPlaceId = deriveInPlaceSelfId(signals);
   if (inPlaceId) {
     log(`[self-identity] 就地读出稳定 id=${inPlaceId}（source=in-place）`);
-    const display = await readDisplay(cdp);
-    return { ok: true, identity: { accountId: inPlaceId, displayName: display.nickname, redId: display.redId, source: 'in-place' } };
+    // 昵称/redId 取自就地扫描的【自作用域】结果(signals)，不调无作用域的 readDisplay：
+    // 就地路径常停在推荐流，全局 readDisplay 会命中【被浏览作者】的名字、与自己的 id 错配(red-line)。
+    return { ok: true, identity: { accountId: inPlaceId, displayName: signals.nickname, redId: signals.redId, source: 'in-place' } };
   }
 
   // ② 跳转兜底
