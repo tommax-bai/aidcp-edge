@@ -101,7 +101,7 @@ function prefixStream(child: ChildProcess, label: string): void {
 
 function main(): void {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
-  const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
+  const mainEntry = join(repoRoot, 'src', 'main.ts');
 
   // 看护参数（self / adspower 共用）
   const RESPAWN_MAX = Number(process.env.AIDCP_EDGE_RESPAWN_MAX ?? 5);
@@ -177,8 +177,9 @@ function main(): void {
   const spawnNode = (plan: NodePlan): void => {
     if (shuttingDown) return;
     console.log(`[launch-multinode] ${plan.label}: 启动 ${plan.detail}（账号待登录读出）`);
-    // 直接 spawn tsx 执行体（无 npm/shell 外壳层）+ detached 自成进程组：信号可整组送达。
-    const child = spawn(tsxBin, ['src/main.ts'], {
+    // 直接 spawn `node --import tsx`（跨平台：避开 Windows 上 .bin/tsx 非可执行的 ENOENT；无 npm/shell 外壳层）
+    // + detached 自成进程组：POSIX 下信号可整组送达，Windows 下退回 child.kill 兜底（见 shutdown）。
+    const child = spawn(process.execPath, ['--import', 'tsx', mainEntry], {
       cwd: repoRoot,
       env: plan.env,
       detached: true,
