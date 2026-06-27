@@ -16,7 +16,13 @@
  *   AIDCP_NODES="3" npm run start:multinode              # 或经环境变量：个数
  *   AIDCP_NODES="edgeA,edgeB" npm run start:multinode    # 或：显式 edgeId 列表
  *
- * 端口/目录基址可覆盖：
+ * AdsPower 多开模式（每 profile 一个 edge；端口/目录/指纹/IP 由 AdsPower 按 profile 自管，无需分配）：
+ *   AIDCP_ADS_USER_IDS="prof1,prof2" npm run start:multinode   # 列出 AdsPower profile id，各起一个 adspower 节点
+ *   （edgeId 默认 ads-<profileId>；AIDCP_ADS_API_KEY / AIDCP_ADS_API_BASE 随父环境继承、同机各 profile 共用）
+ *   设了 AIDCP_ADS_USER_IDS 即走 adspower 模式（忽略上面的 N/edgeId 参数）；前提：各 profile 已在 AdsPower 登录目标小红书号。
+ *   干跑核对计划（不启动）：AIDCP_MULTINODE_PRINT=1 ...
+ *
+ * 端口/目录基址可覆盖（self 模式）：
  *   AIDCP_CDP_PORT_BASE=9222        # 节点 i 的端口 = base + i
  *   AIDCP_CHROME_PROFILE_BASE=~/.aidcp-chrome-profile
  *
@@ -41,7 +47,8 @@
  *   - 首次登录需各 profile 各登一次：建议先单独跑一个槽位（`AIDCP_CDP_PORT=... AIDCP_CHROME_PROFILE=... npm start`）
  *     在该 TTY 内完成扫码登录、建立持久 profile，之后再用本启动器并行拉起（子进程不持有 TTY/stdin）。
  *   - 【迁移代价】目录命名 `<base>-node-<n>`：存量旧名 `<base>-<accountId>-<n>` 的 profile 按新名找不到、会被迫重新扫码。
- *   - 本脚本只读外部注入，不触发任何云端写操作；不引入指纹浏览器（同机防关联非本次范围）。
+ *   - 本脚本只读外部注入，不触发任何云端写操作。self 模式自起真实指纹 Chrome；adspower 模式（AIDCP_ADS_USER_IDS）
+ *     每 profile 一个独立指纹浏览器（同机防关联，见 change adspower-browser-provider）。
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -59,6 +66,8 @@ interface NodeSlot {
 interface NodePlan {
   index: number;
   label: string;
+  /** 人类可读的槽位摘要（self: port/profile；adspower: profile id），仅日志用。 */
+  detail: string;
   env: NodeJS.ProcessEnv;
 }
 
@@ -91,48 +100,74 @@ function prefixStream(child: ChildProcess, label: string): void {
 }
 
 function main(): void {
-  const slots = parseSlots();
-  if (slots.length === 0) {
-    console.error(
-      '用法: npm run start:multinode -- <N>  或  <edgeId> [<edgeId> ...]  或设置 AIDCP_NODES="3" / "edgeA,edgeB"',
-    );
-    process.exit(2);
-  }
-
-  const basePort = Number(process.env.AIDCP_CDP_PORT_BASE ?? process.env.AIDCP_CDP_PORT ?? 9222);
-  const profileBase = process.env.AIDCP_CHROME_PROFILE_BASE ?? join(homedir(), '.aidcp-chrome-profile');
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
   const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
 
-  // 看护参数
+  // 看护参数（self / adspower 共用）
   const RESPAWN_MAX = Number(process.env.AIDCP_EDGE_RESPAWN_MAX ?? 5);
   const BACKOFF_BASE_MS = Number(process.env.AIDCP_EDGE_RESPAWN_BACKOFF_BASE_MS ?? 1_000);
   const BACKOFF_MAX_MS = Number(process.env.AIDCP_EDGE_RESPAWN_BACKOFF_MAX_MS ?? 30_000);
   const HEALTHY_UPTIME_MS = Number(process.env.AIDCP_EDGE_RESPAWN_HEALTHY_UPTIME_MS ?? 60_000);
   const CHILD_LOGIN_TIMEOUT_MS = process.env.AIDCP_EDGE_CHILD_LOGIN_TIMEOUT_MS ?? '45000';
 
-  // 1) 冻结每槽位计划：env 快照按固定槽位定型（端口/目录/edgeId），重起复用同一快照。
-  const plans: NodePlan[] = slots.map((slot, i) => {
-    const nodeNum = i + 1;
-    const port = basePort + i;
-    const edgeId = slot.edgeId ?? `node-${nodeNum}`;
-    const profileDir = `${profileBase}-node-${nodeNum}`;
-    const label = `node#${nodeNum}`;
-    const env = { ...process.env };
-    // 身份由登录读出：启动器不设 AIDCP_ACCOUNT_ID（清掉继承来的，避免误把某账号标签套到所有槽位）。
-    delete env.AIDCP_ACCOUNT_ID;
-    env.AIDCP_EDGE_ID = edgeId;
-    env.AIDCP_CDP_PORT = String(port);
-    env.AIDCP_CHROME_PROFILE = profileDir;
-    // 独占：绝不复用 / 接管其它节点或外部浏览器（冻结进快照，重起不会漂移泄漏）。
-    delete env.AIDCP_CDP_ALLOW_REUSE;
-    // 本启动器的槽位模型（独立端口 + 独立用户数据目录）是 self 专属；默认 provider 已翻为 adspower，
-    // 但 adspower 多 profile 编排尚未支持，故强制钉回 self，保多节点 self 编排不被默认翻转破坏。
-    env.AIDCP_BROWSER_PROVIDER = 'self';
-    // 收紧子进程登录等待：无 TTY 无从扫码，登录态丢失则按崩溃快速计入重起预算，不干等 5min。
-    env.AIDCP_CHROME_LOGIN_TIMEOUT_MS = CHILD_LOGIN_TIMEOUT_MS;
-    return { index: i, label, env };
-  });
+  // 模式选择：设了 AIDCP_ADS_USER_IDS（逗号分隔的 AdsPower profile 列表）→ adspower 多开；否则 self 多节点。
+  const adsUserIds = (process.env.AIDCP_ADS_USER_IDS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  let plans: NodePlan[];
+  if (adsUserIds.length > 0) {
+    // adspower 模式：每个 profile = 一个 edge。端口/用户数据目录/指纹/IP 由 AdsPower 按 profile 自管，
+    // 无需分配端口或 user-data-dir（self 多开撞端口 / SingletonLock 的问题在此天然消失）。
+    plans = adsUserIds.map((pid, i) => {
+      const edgeId = `ads-${pid}`;
+      const env = { ...process.env };
+      delete env.AIDCP_ACCOUNT_ID; // 身份由登录读出
+      delete env.AIDCP_ADS_USER_IDS; // 不把整列表泄漏给子进程
+      delete env.AIDCP_CDP_PORT; // adspower 端口由 browser/start 动态返回
+      delete env.AIDCP_CHROME_PROFILE; // adspower 自管 user-data-dir
+      delete env.AIDCP_CDP_ALLOW_REUSE;
+      env.AIDCP_BROWSER_PROVIDER = 'adspower';
+      env.AIDCP_ADS_USER_ID = pid; // AIDCP_ADS_API_KEY / AIDCP_ADS_API_BASE 随父环境继承（同机 AdsPower 共用）
+      env.AIDCP_EDGE_ID = edgeId;
+      return { index: i, label: `ads#${i + 1}`, detail: `adspower profile=${pid} edgeId=${edgeId}`, env };
+    });
+  } else {
+    const slots = parseSlots();
+    if (slots.length === 0) {
+      console.error(
+        '用法: npm run start:multinode -- <N> | <edgeId>...  或 AIDCP_NODES=...  或 AIDCP_ADS_USER_IDS="prof1,prof2"（adspower 多开）',
+      );
+      process.exit(2);
+    }
+    const basePort = Number(process.env.AIDCP_CDP_PORT_BASE ?? process.env.AIDCP_CDP_PORT ?? 9222);
+    const profileBase = process.env.AIDCP_CHROME_PROFILE_BASE ?? join(homedir(), '.aidcp-chrome-profile');
+    // 冻结每槽位计划：env 快照按固定槽位定型（端口/目录/edgeId），重起复用同一快照。
+    plans = slots.map((slot, i) => {
+      const nodeNum = i + 1;
+      const port = basePort + i;
+      const edgeId = slot.edgeId ?? `node-${nodeNum}`;
+      const profileDir = `${profileBase}-node-${nodeNum}`;
+      const env = { ...process.env };
+      delete env.AIDCP_ACCOUNT_ID; // 身份由登录读出（不把某账号标签套到所有槽位）
+      env.AIDCP_EDGE_ID = edgeId;
+      env.AIDCP_CDP_PORT = String(port);
+      env.AIDCP_CHROME_PROFILE = profileDir;
+      delete env.AIDCP_CDP_ALLOW_REUSE; // 独占：绝不复用 / 接管其它节点或外部浏览器
+      // self 专属槽位模型（独立端口 + 独立用户数据目录）；默认 provider 已翻 adspower，钉回 self 保多节点 self 编排。
+      env.AIDCP_BROWSER_PROVIDER = 'self';
+      env.AIDCP_CHROME_LOGIN_TIMEOUT_MS = CHILD_LOGIN_TIMEOUT_MS; // 无 TTY 无从扫码，登录态丢失按崩溃快速计入重起预算
+      return { index: i, label: `node#${nodeNum}`, detail: `self port=${port} profile=${profileDir} edgeId=${edgeId}`, env };
+    });
+  }
+
+  // 干跑：只打印计划、不启动（便于核对编排）。
+  if (process.env.AIDCP_MULTINODE_PRINT === '1') {
+    console.log(`[launch-multinode] 计划 ${plans.length} 个节点（dry-run，未启动）：`);
+    for (const p of plans) console.log(`  - ${p.label}: ${p.detail}`);
+    return;
+  }
 
   let shuttingDown = false;
   const children = new Map<number, ChildProcess>();
@@ -141,9 +176,7 @@ function main(): void {
 
   const spawnNode = (plan: NodePlan): void => {
     if (shuttingDown) return;
-    console.log(
-      `[launch-multinode] ${plan.label}: 启动 port=${plan.env.AIDCP_CDP_PORT} profile=${plan.env.AIDCP_CHROME_PROFILE} edgeId=${plan.env.AIDCP_EDGE_ID}（账号待登录读出）`,
-    );
+    console.log(`[launch-multinode] ${plan.label}: 启动 ${plan.detail}（账号待登录读出）`);
     // 直接 spawn tsx 执行体（无 npm/shell 外壳层）+ detached 自成进程组：信号可整组送达。
     const child = spawn(tsxBin, ['src/main.ts'], {
       cwd: repoRoot,
