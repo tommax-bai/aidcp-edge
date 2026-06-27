@@ -110,8 +110,19 @@ test('AdsPowerProvider killAndConfirmDead：stop + active 确认已关 → true'
 
 // ---- selectBrowserProvider ----
 
-test('selectBrowserProvider 默认 self', () => {
-  assert.equal(selectBrowserProvider({ env: {} as NodeJS.ProcessEnv }).kind, 'self');
+test('selectBrowserProvider 默认 adspower（缺 user_id → 诚实报错，不静默 self）', () => {
+  assert.throws(() => selectBrowserProvider({ env: {} as NodeJS.ProcessEnv }), /AIDCP_ADS_USER_ID/);
+});
+
+test('selectBrowserProvider 默认 adspower 全配（仅 user_id）→ adspower', () => {
+  assert.equal(selectBrowserProvider({ env: { AIDCP_ADS_USER_ID: 'k1' } as NodeJS.ProcessEnv }).kind, 'adspower');
+});
+
+test('selectBrowserProvider 显式 self', () => {
+  assert.equal(
+    selectBrowserProvider({ env: { AIDCP_BROWSER_PROVIDER: 'self' } as NodeJS.ProcessEnv }).kind,
+    'self',
+  );
 });
 
 test('selectBrowserProvider adspower 全配 → AdsPowerProvider', () => {

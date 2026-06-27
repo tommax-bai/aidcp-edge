@@ -126,6 +126,9 @@ function main(): void {
     env.AIDCP_CHROME_PROFILE = profileDir;
     // 独占：绝不复用 / 接管其它节点或外部浏览器（冻结进快照，重起不会漂移泄漏）。
     delete env.AIDCP_CDP_ALLOW_REUSE;
+    // 本启动器的槽位模型（独立端口 + 独立用户数据目录）是 self 专属；默认 provider 已翻为 adspower，
+    // 但 adspower 多 profile 编排尚未支持，故强制钉回 self，保多节点 self 编排不被默认翻转破坏。
+    env.AIDCP_BROWSER_PROVIDER = 'self';
     // 收紧子进程登录等待：无 TTY 无从扫码，登录态丢失则按崩溃快速计入重起预算，不干等 5min。
     env.AIDCP_CHROME_LOGIN_TIMEOUT_MS = CHILD_LOGIN_TIMEOUT_MS;
     return { index: i, label, env };

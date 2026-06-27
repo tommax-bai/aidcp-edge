@@ -105,7 +105,9 @@ function startEdge() {
   const edgeEntry = path.join(appRoot, 'dist', 'main.js');
   edgeProcess = spawn(process.execPath, [edgeEntry], {
     cwd: appRoot,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    // 桌面版自带自起 Chrome 流程（chrome-launcher.cjs，固定 9222）；默认 provider 已翻 adspower，
+    // 这里钉回 self 以保桌面版行为不变（'self' 在前、被 ...process.env 覆盖 → 外部显式设置仍可生效）。
+    env: { AIDCP_BROWSER_PROVIDER: 'self', ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });

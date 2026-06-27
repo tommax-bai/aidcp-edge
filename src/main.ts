@@ -14,8 +14,13 @@
  * 环境变量：
  *  - AIDCP_CLOUD_URL       云端 WS 地址（默认 ws://127.0.0.1:8787）
  *  - AIDCP_EDGE_ID         边缘节点标识（默认 edge-local）
- *  - AIDCP_CDP_HOST        CDP host（默认 127.0.0.1）
- *  - AIDCP_CDP_PORT        CDP 端口（默认 9222）
+ *  - AIDCP_BROWSER_PROVIDER 浏览器 provider：self | adspower（**默认 adspower**；self 自起真实指纹 Chrome）
+ *  - AIDCP_ADS_USER_ID     adspower 模式必填：目标 AdsPower profile id（缺则诚实报错、绝不回落 self）
+ *  - AIDCP_ADS_API_BASE    AdsPower 本地 API 基址（默认 http://local.adspower.net:50325）
+ *  - AIDCP_ADS_API_KEY     AdsPower 安全校验 API key（作 Bearer，可选）
+ *  - AIDCP_STEALTH         反检测注入 on|off（缺省随 provider：self=on / adspower=off 由 cdp_mask 独占）
+ *  - AIDCP_CDP_HOST        CDP host（默认 127.0.0.1；self 模式用）
+ *  - AIDCP_CDP_PORT        CDP 端口（默认 9222；self 模式用，adspower 端口由 browser/start 动态返回）
  *  - AIDCP_PAGE_URL        仅附着 url 含该子串的页面（默认取第一个 page）
  *  - AIDCP_CHROME_PATH     Chrome 可执行文件路径（可选，缺省自动发现）
  *  - AIDCP_CHROME_PROFILE  user-data-dir 路径（可选，默认 ~/.aidcp-chrome-profile）

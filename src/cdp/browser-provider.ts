@@ -2,8 +2,10 @@
  * browser-provider.ts — 可插拔浏览器 provider（change adspower-browser-provider）。
  *
  * 把「浏览器启动 / 生命周期」从 main.ts 抽成 provider；CDP attach 及以下（定位 / 拟人 / 读身份）零改动：
- *  - SelfChromeProvider：**默认**，自起真实指纹 Chrome（委托现有 `launchChrome`），行为逐字不变。
- *  - AdsPowerProvider：opt-in，经 AdsPower 本地 API 托管指纹浏览器，拿标准 `debug_port` 交给现成 `attachToPage`。
+ *  - AdsPowerProvider：**默认**（`AIDCP_BROWSER_PROVIDER` 缺省 = adspower），经 AdsPower 本地 API 托管指纹浏览器，
+ *    拿标准 `debug_port` 交给现成 `attachToPage`；须配 `AIDCP_ADS_USER_ID`，否则诚实报错。
+ *  - SelfChromeProvider：显式 `AIDCP_BROWSER_PROVIDER=self`，自起真实指纹 Chrome（委托现有 `launchChrome`），行为逐字不变。
+ *    （`launch-multinode` 与 Electron 桌面版这两条 self 专属路径已各自钉回 self，不受默认翻转影响。）
  *
  * 红线延续（绝不静默假成功）：provider 无法交付一个可用且已就绪的浏览器时**诚实报错停手**，
  * MUST NOT 静默回落 self、MUST NOT 假成功——否则本应用独立指纹 / IP 的账号会偷偷以本机真实指纹起跑。
@@ -215,7 +217,7 @@ export class AdsPowerProvider implements BrowserProvider {
   }
 }
 
-/** 按 `AIDCP_BROWSER_PROVIDER` 选 provider（默认 self）。adspower 缺 user_id / 未知 kind 诚实报错。 */
+/** 按 `AIDCP_BROWSER_PROVIDER` 选 provider（**默认 adspower**）。adspower 缺 user_id / 未知 kind 诚实报错。 */
 export function selectBrowserProvider(
   opts: {
     env?: NodeJS.ProcessEnv;
@@ -225,7 +227,7 @@ export function selectBrowserProvider(
   } = {},
 ): BrowserProvider {
   const env = opts.env ?? process.env;
-  const kind = (env.AIDCP_BROWSER_PROVIDER ?? 'self').toLowerCase();
+  const kind = (env.AIDCP_BROWSER_PROVIDER ?? 'adspower').toLowerCase();
   if (kind === 'self') return new SelfChromeProvider();
   if (kind === 'adspower') {
     const userId = env.AIDCP_ADS_USER_ID;
