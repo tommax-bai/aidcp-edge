@@ -174,6 +174,12 @@ const FOLLOW_BUTTON_SELECTORS = ['.author-wrapper .follow-button', '.user-info .
 export class BrowseSession {
   private running = false;
   private stopRequested = false;
+  /**
+   * 终态关闭标记（change restore-auto-resume A②）：进程主动关闭/下线（close()）或 CDP 不可恢复时置 true，
+   * 永久阻止云端迟到命令唤醒重启浏览循环。注意：与 stopRequested 区分——云端 session.end 只置 stopRequested、
+   * 不置 closing，故 session.end 停循环后仍可被后续浏览类命令唤醒续场；而 close()/CDP 死局是终态、绝不复活。
+   */
+  private closing = false;
   private readonly random: RandomFn;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly cardGapTiming: TimingConfig;
@@ -300,9 +306,18 @@ export class BrowseSession {
     }
   }
 
-  /** 请求停止（下个安全点退出循环） */
+  /** 请求停止（下个安全点退出循环）。非终态：identity 重连等 stop-then-restart 走此（仍可被后续命令唤醒）。 */
   stop(): void {
     this.stopForReason('local_stop');
+  }
+
+  /**
+   * 终态关闭（change restore-auto-resume A②）：进程主动关闭/下线时调用——置 closing 永久阻止后续云端
+   * 命令唤醒重启循环，再 stop()。供 main.ts 关机路径用，与 identity 重连的 stop()（非终态）区分。
+   */
+  close(): void {
+    this.closing = true;
+    this.stop();
   }
 
   /** 请求停止并附带理由（local_stop / cdp_unrecoverable）。唤醒可能正在等待命令的 loop。 */
@@ -336,6 +351,8 @@ export class BrowseSession {
 
   private onCdpUnrecoverable(): void {
     // 重连耗尽：停止上报、退出循环（诚实失败），交云端 idle 看门狗兜底结束会话；绝不假装在跑。
+    // CDP 死局是终态：置 closing，绝不让云端迟到命令（如看门狗 nudge）唤醒重启到一个已死的 CDP 上。
+    this.closing = true;
     this.logger('[browse] CDP 重连不可恢复，停止浏览循环（交云端看门狗兜底）');
     const waiters = this.cdpReconnectWaiters;
     this.cdpReconnectWaiters = [];
@@ -372,6 +389,18 @@ export class BrowseSession {
    * 外部（WebSocket 接收层）调用此方法将云端命令送入队列，loop() 消费执行。
    */
   async onCloudCommand(env: Envelope): Promise<void> {
+    // 循环已停（如云端 session.end 后）：浏览类命令唤醒重启循环，让自动续场 / idle 看门狗 nudge 能复活闭环
+    // （change restore-auto-resume A②）。否则命令会被静默堆进无人消费的队列（loop 已退出、无人 shift）。
+    // 终态关闭（closing：进程下线 / CDP 死局）一律不复活；session.end 本身不唤醒（它就是来停的）。
+    // 注意 start() 会清空 commandQueue（见 :280），故此处不 push 触发命令——靠循环重启后重报 page.cards
+    // 重新驱动云端决策环，而非依赖这条命令存活。
+    if (!this.running) {
+      if (!this.closing && this.isWakeCommand(env.type)) {
+        this.logger(`[browse] 循环已停，收到 ${env.type} → 唤醒重启浏览循环（续场/恢复）`);
+        void this.start().catch((err) => this.logger(`[browse] 唤醒重启失败：${(err as Error).message}`));
+      }
+      return; // 不入队：无消费者，避免静默堆积
+    }
     if (this.commandResolver) {
       const resolve = this.commandResolver;
       this.commandResolver = null;
@@ -379,6 +408,11 @@ export class BrowseSession {
     } else {
       this.commandQueue.push(env);
     }
+  }
+
+  /** 浏览循环已停时，哪些云端命令应唤醒重启循环：除终止命令 session.end 外的浏览类推进命令均可。 */
+  private isWakeCommand(type: string): boolean {
+    return type !== 'session.end';
   }
 
   /**

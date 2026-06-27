@@ -1156,3 +1156,36 @@ test('overlayMonitor 提交前复检: like 命中 captcha → 放弃点击并上
   assert.equal(likeResult!.reason, 'blocked_by_captcha');
   assert.equal(clickCount, 0, '复检命中验证码时不得派发点击');
 });
+
+// ======== 续场唤醒：循环已停后可被云端浏览类命令重启（change restore-auto-resume A②）========
+
+test('browse-session: 循环因 session.end 停止后，收到 page.scroll → 唤醒重启并重报 page.cards', async () => {
+  const h = makeHarness();
+  const sess = new BrowseSession(h.deps, noOpts());
+  // 阶段1：启动 → 上报一次 cards → session.end 停循环（loop 退出、running=false）。
+  await startAndPush(sess, [makeEnvelope('session.end', 'e1', 0, { reason: 'test_end' })]);
+  const afterStop = h.reportedCards.length;
+  assert.ok(afterStop >= 1, '首轮应至少上报一次 page.cards');
+
+  // 阶段2：循环已停，收到一条续场引导 page.scroll → 应唤醒重启循环、重新上报 cards
+  //（旧行为：命令静默堆进无人消费的队列，循环不复活、不再上报）。
+  await sess.onCloudCommand(makeEnvelope('page.scroll', 's1', 0, { reason: 'resume_redrive' }));
+  await new Promise((r) => setTimeout(r, 30)); // 等重启循环 init + 重报（sleep 已被桩为 no-op）
+  assert.ok(h.reportedCards.length > afterStop, 'A②：唤醒重启后应重新上报 page.cards');
+
+  // 收尾：停掉重启的循环，避免悬挂。
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e2', 0, { reason: 'test_end' }));
+  await new Promise((r) => setTimeout(r, 10));
+});
+
+test('browse-session: 终态关闭（close）后收到迟到命令 → MUST NOT 复活循环', async () => {
+  const h = makeHarness();
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [makeEnvelope('session.end', 'e1', 0, { reason: 'test_end' })]);
+  const afterStop = h.reportedCards.length;
+
+  sess.close(); // 终态关闭（进程下线语义）：置 closing
+  await sess.onCloudCommand(makeEnvelope('page.scroll', 's1', 0, { reason: 'late_after_close' }));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(h.reportedCards.length, afterStop, 'A②：终态关闭后迟到命令 MUST NOT 唤醒重启循环');
+});

@@ -491,7 +491,9 @@ async function main(): Promise<void> {
     // ① 回收：先诚实判失败在途发布（关 WS 之前），绝不留半截/跨重起重复发帖。
     if (opts.recycle) failInFlightPublishesHonestly(opts.reason);
     watcherSupervisor?.stopAll();
-    browse?.stop();
+    // 终态关闭：用 close()（非 stop()）置 closing，使关机异步窗口内迟到的云端命令绝不唤醒重启浏览循环
+    // （change restore-auto-resume A②）。identity 重连的 stop-then-restart 仍用 stop()（非终态）。
+    browse?.close();
     // ② 诚实下线：等边-云连接真正关闭再继续（BLOCKER①），使云端立即停止把本节点当路由目标。
     try {
       await client.closeAndWait(1500);
