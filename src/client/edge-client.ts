@@ -76,8 +76,6 @@ export interface EdgeClientOptions {
   machineLabel?: string;
   /** 远程桌面/可达地址（hello 上报，用于人工远程处置） */
   remoteAddr?: string;
-  /** 当前登录账号自身的平台真实昵称（hello 上报，account-real-nickname）；诚实失败时省略，绝不伪造。 */
-  nickname?: string;
   /** 步骤执行器（把命令落到页面） */
   runner: StepRunner;
   /** WebSocket 工厂（默认全局 WebSocket） */
@@ -108,9 +106,9 @@ interface Pending {
 export class EdgeClient {
   private ws?: CloudWebSocket;
   private readonly opts: Required<
-    Omit<EdgeClientOptions, 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr' | 'nickname'>
+    Omit<EdgeClientOptions, 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr'>
   > &
-    Pick<EdgeClientOptions, 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr' | 'nickname'>;
+    Pick<EdgeClientOptions, 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr'>;
   private seq = 0;
   private readonly pending = new Map<string, Pending>();
   private sessionId?: string;
@@ -128,7 +126,6 @@ export class EdgeClient {
       accountId: options.accountId,
       machineLabel: options.machineLabel,
       remoteAddr: options.remoteAddr,
-      nickname: options.nickname,
       runner: options.runner,
       wsFactory: options.wsFactory ?? defaultWsFactory,
       clock: options.clock ?? Date.now,
@@ -167,7 +164,6 @@ export class EdgeClient {
       accountId: this.opts.accountId,
       machineLabel: this.opts.machineLabel,
       remoteAddr: this.opts.remoteAddr,
-      nickname: this.opts.nickname,
     });
     const p = welcome.payload as { sessionId?: string };
     this.sessionId = p.sessionId;
@@ -324,14 +320,6 @@ export class EdgeClient {
    */
   setAccountId(accountId: string | undefined): void {
     this.opts.accountId = accountId;
-  }
-
-  /**
-   * 更新握手携带的登录账号昵称（account-real-nickname：重确立身份后随新 hello 带回）。
-   * 仅改下次 connect() 的 hello 昵称；须在 close() 之后、connect() 之前调用。诚实失败传 undefined 即省略。
-   */
-  setNickname(nickname: string | undefined): void {
-    this.opts.nickname = nickname;
   }
 
   private onMessage(data: unknown): void {

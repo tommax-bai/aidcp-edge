@@ -728,6 +728,68 @@ test('browse-session: profile.open 找不到作者入口 → 上报 extracted:fa
   assert.equal(h.reportedProfiles[0].extracted, false, '抽取失败应 extracted:false');
 });
 
+test('browse-session: profile.open direct=true → 直接 Page.navigate 到 /user/profile/<id>，不抓当前页作者链（account-real-nickname）', async () => {
+  const h = makeHarness();
+  const navUrls: string[] = [];
+  let probeRan = false;
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Page.navigate') { navUrls.push(String(params.url ?? '')); return {} as never; }
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        // direct 路径绝不应跑这条「抓当前页作者链」探针：标记之，并故意返回错误 id 以暴露误用
+        if (expr.includes('author-wrapper')) { probeRan = true; return { result: { value: '{"href":"/user/profile/WRONG"}' } } as never; }
+        if (expr.includes('user-interactions')) return { result: { value: '{"authorId":"abc123","followers":"100","posts":"5","lc":"50","name":"工程师大白"}' } } as never;
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/user/profile/abc123' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('profile.open', 'pod', 0, { authorId: 'abc123', direct: true }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.equal(probeRan, false, 'direct=true 时绝不抓取当前页第一个作者链（不跑 author-wrapper 探针）');
+  assert.ok(
+    navUrls.includes('https://www.xiaohongshu.com/user/profile/abc123'),
+    `应直接导航到指定 profile id，实际 Page.navigate: ${JSON.stringify(navUrls)}`,
+  );
+  assert.equal(h.reportedProfiles.length, 1);
+  assert.equal(h.reportedProfiles[0].authorId, 'abc123');
+});
+
+test('browse-session: profile.open direct 数字未渲染但有昵称 → extracted:false 仍带回 nickname（昵称读与数字门解耦）', async () => {
+  const h = makeHarness();
+  let t = 1000;
+  const now = () => { const v = t; t += 100000; return v; }; // 让 extractAuthorProfile 的 5s 轮询尽快超时
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Page.navigate') return {} as never;
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        // 数字（粉丝/笔记/获赞）一直不渲染（全 null）；昵称经 document.title 兜底拿到（mock 直接给最终 name）
+        if (expr.includes('user-interactions')) return { result: { value: '{"authorId":"abc123","followers":null,"posts":null,"lc":null,"name":"工程师大白"}' } } as never;
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/user/profile/abc123' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, { random: () => 0.99, sleep: async () => {}, logger: () => {}, now });
+  await startAndPush(sess, [
+    makeEnvelope('profile.open', 'pod2', 0, { authorId: 'abc123', direct: true }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.equal(h.reportedProfiles.length, 1);
+  const p = h.reportedProfiles[0];
+  assert.equal(p.extracted, false, '数字未渲染 → extracted:false');
+  assert.equal(p.nickname, '工程师大白', '即便 extracted:false，昵称仍被带回（与数字渲染门解耦）');
+});
+
 // ======== 指令级节奏（Command Pacing）测试 ========
 
 /** 捕获 sleep 时长 + 可控时钟的 opts。 */

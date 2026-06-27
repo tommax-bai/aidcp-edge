@@ -67,11 +67,10 @@ function fakeCdp(r: FakeResponses): BrowseCdp {
 
 const fastOpts = { sleep: async () => undefined, now: () => 0 };
 
-test('readSelfIdentity: 就地读成功（source=in-place，昵称取自自作用域 scan，不跳转）', async () => {
+test('readSelfIdentity: 就地读成功（source=in-place，只确立 id、昵称留空、不跳转、不回退全局 readDisplay）', async () => {
   const cdp = fakeCdp({
-    // 自作用域 scan 在自己导航容器内读到昵称/redId
-    scan: JSON.stringify({ href: '/explore', avatarAnchorHref: `/user/profile/${REAL_ID}`, navProfileHrefs: [], nickname: '小明', redId: 'xm_123' }),
-    // 全局 readDisplay 即便返回别的名字，就地路径也不采用它（见下方红线测试）
+    scan: JSON.stringify({ href: '/explore', avatarAnchorHref: `/user/profile/${REAL_ID}`, navProfileHrefs: [], nickname: null, redId: null }),
+    // 全局 readDisplay 即便返回别的名字，就地路径也绝不采用它（红线：绝不把 feed 上被浏览作者错当成自己）
     display: JSON.stringify({ nickname: '别人', redId: 'other' }),
   });
   const res = await readSelfIdentity(cdp, fastOpts);
@@ -79,23 +78,7 @@ test('readSelfIdentity: 就地读成功（source=in-place，昵称取自自作�
   if (res.ok) {
     assert.equal(res.identity.accountId, REAL_ID);
     assert.equal(res.identity.source, 'in-place');
-    assert.equal(res.identity.displayName, '小明'); // 自作用域 scan 的昵称，非全局 readDisplay
-    assert.equal(res.identity.redId, 'xm_123');
-  }
-});
-
-test('readSelfIdentity: 就地昵称为空不回退全局查询（红线：绝不错配被浏览作者昵称）', async () => {
-  const cdp = fakeCdp({
-    // 自作用域读不到昵称（nickname:null）
-    scan: JSON.stringify({ href: '/explore', avatarAnchorHref: `/user/profile/${REAL_ID}`, navProfileHrefs: [], nickname: null, redId: null }),
-    // 全局 readDisplay 在 feed 上会命中【被浏览作者】的名字——就地路径 MUST NOT 采用它
-    display: JSON.stringify({ nickname: '被浏览的作者', redId: 'author_x' }),
-  });
-  const res = await readSelfIdentity(cdp, fastOpts);
-  assert.equal(res.ok, true);
-  if (res.ok) {
-    assert.equal(res.identity.source, 'in-place');
-    assert.equal(res.identity.displayName, null); // 读不到 → null，绝不用全局命中的他人昵称
+    assert.equal(res.identity.displayName, null); // 就地路径不读昵称（登录账号真实昵称改由云端角色采集）
     assert.equal(res.identity.redId, null);
   }
 });

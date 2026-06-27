@@ -637,7 +637,7 @@ export class BrowseSession {
         const payload = env.payload as ProfileOpenPayload;
         this.logger(`[browse] 命令: profile.open (authorId=${payload.authorId ?? '?'})`);
         await this.thinkBefore(payload.thinkMs);
-        await this.openAuthorProfile(payload.authorId);
+        await this.openAuthorProfile(payload.authorId, payload.direct);
         break;
       }
       case 'notification.open': {
@@ -1568,25 +1568,32 @@ export class BrowseSession {
    * 抽取失败/超时仍上报（extracted:false），让云端 FollowAgent 保守 skip 而非把缺失当真 0 粉丝；
    * 并兜底返回信息流不卡死。选择器需本地核对校准（见 tasks 6.5）。
    */
-  private async openAuthorProfile(authorId?: string): Promise<void> {
+  private async openAuthorProfile(authorId?: string, direct?: boolean): Promise<void> {
     const { evalRaw: evalRawFn } = await import('./cdp-util.js');
     try {
-      // 1) 在详情页定位作者主页链接 a[href*="/user/profile/"]（真实小红书 a.link-wrapper）。
-      // 合成点击不一定触发 SPA 路由跳转，故读出 href 后用 Page.navigate 直达主页
-      // （手动核对该 URL 能正常渲染 .user-interactions）。
-      const probe = `(function(){
-        var sels = ['.note-detail-mask a[href*="/user/profile/"]', '.author-wrapper a[href*="/user/profile/"]', 'a[href*="/user/profile/"]'];
-        for (var i=0;i<sels.length;i++){ var el=document.querySelector(sels[i]); if(el){ var h=el.getAttribute('href'); if(h) return JSON.stringify({href:h}); } }
-        return JSON.stringify({error:'no_author'});
-      })()`;
-      const raw = await evalRawFn<string>(this.deps.cdp, probe);
-      const info = typeof raw === 'string' ? JSON.parse(raw) : { error: 'no_author' };
-      if (info.error || !info.href) {
-        this.logger('[browse] profile.open: 未找到作者主页链接');
-        this.reportProfileFallback(authorId);
-        return;
+      let url: string;
+      if (direct && authorId) {
+        // 云端直驱（change account-real-nickname）：直接导航到指定 profile id、不抓取当前页第一个作者链。
+        // 边缘纯执行——不判定「这是不是自己」（云端独知）；下游 waitForProfile/抽取/上报与点头像进入完全一致。
+        url = `https://www.xiaohongshu.com/user/profile/${authorId}`;
+      } else {
+        // 1) 在详情页定位作者主页链接 a[href*="/user/profile/"]（真实小红书 a.link-wrapper）。
+        // 合成点击不一定触发 SPA 路由跳转，故读出 href 后用 Page.navigate 直达主页
+        // （手动核对该 URL 能正常渲染 .user-interactions）。
+        const probe = `(function(){
+          var sels = ['.note-detail-mask a[href*="/user/profile/"]', '.author-wrapper a[href*="/user/profile/"]', 'a[href*="/user/profile/"]'];
+          for (var i=0;i<sels.length;i++){ var el=document.querySelector(sels[i]); if(el){ var h=el.getAttribute('href'); if(h) return JSON.stringify({href:h}); } }
+          return JSON.stringify({error:'no_author'});
+        })()`;
+        const raw = await evalRawFn<string>(this.deps.cdp, probe);
+        const info = typeof raw === 'string' ? JSON.parse(raw) : { error: 'no_author' };
+        if (info.error || !info.href) {
+          this.logger('[browse] profile.open: 未找到作者主页链接');
+          this.reportProfileFallback(authorId);
+          return;
+        }
+        url = String(info.href).startsWith('http') ? String(info.href) : `https://www.xiaohongshu.com${info.href}`;
       }
-      const url = String(info.href).startsWith('http') ? String(info.href) : `https://www.xiaohongshu.com${info.href}`;
       await this.humanPause(this.actionTiming);
       await this.deps.cdp.send('Page.navigate', { url });
 
@@ -1617,8 +1624,18 @@ export class BrowseSession {
           ...(profileUrl ? { url: profileUrl } : {}),
         });
       } else {
-        this.logger('[browse] profile.open: 进了主页但未抽到作品/粉丝数');
-        this.reportProfileFallback(resolvedId);
+        // 数字未渲染，但昵称/主页链接可能已抽到（change account-real-nickname：昵称读与数字渲染门解耦）——
+        // 仍把昵称/url 带回（extracted:false、计数置 0），使本人主页昵称采集不被数字门卡空。
+        this.logger(`[browse] profile.open: 进了主页但未抽到作品/粉丝数${nickname ? '（仍带回昵称「' + nickname + '」）' : ''}`);
+        this.deps.client.reportProfileDetail?.({
+          authorId: resolvedId,
+          postsCount: 0,
+          followersCount: 0,
+          likesCollects: 0,
+          extracted: false,
+          ...(nickname ? { nickname } : {}),
+          ...(profileUrl ? { url: profileUrl } : {}),
+        });
       }
     } catch (err) {
       this.logger(`[browse] profile.open 失败：${(err as Error).message}`);
@@ -1675,6 +1692,9 @@ export class BrowseSession {
       }
       // 真实昵称（change interaction-feed-enrichment）：主页显示名；抓不到留空（诚实置空，云端不伪造）。
       var name = txt(document.querySelector('.user-name, .user-nickname, [class*="userName"], [class*="nickname"], .user-info .name'));
+      // 标题兜底（change account-real-nickname）：本人主页 document.title 形如「<昵称> - 小红书」，去尾取昵称；
+      // 使昵称不依赖 .user-interactions 数字渲染即可采到（与数字门解耦）。
+      if(!name){ var t=(document.title||'').replace(/\\s*-\\s*小红书\\s*$/,'').replace(/\\s+/g,' ').trim(); if(t) name=t; }
       var idm = location.href.match(/\\/user\\/profile\\/([A-Za-z0-9]+)/);
       return JSON.stringify({authorId: idm?idm[1]:'', followers: followers, posts: posts, lc: lc, name: name});
     })()`;
@@ -1683,11 +1703,13 @@ export class BrowseSession {
     // 避免"进了主页但抽到空"。
     const deadline = this.now() + 5000;
     let lastId = '';
+    let lastName = '';
     for (;;) {
       try {
         const raw = await evalRawFn<string>(this.deps.cdp, js);
         const info = typeof raw === 'string' ? JSON.parse(raw) : {};
         if (info.authorId) lastId = info.authorId;
+        if (typeof info.name === 'string' && info.name) lastName = info.name;
         const hasFollowers = info.followers != null && info.followers !== '';
         const hasPosts = info.posts != null && info.posts !== '';
         const hasLc = info.lc != null && info.lc !== '';
@@ -1707,7 +1729,9 @@ export class BrowseSession {
       if (this.now() >= deadline) break;
       await this.sleep(500);
     }
-    return { authorId: lastId, postsCount: 0, followersCount: 0, likesCollects: 0, nickname: '', extracted: false };
+    // 昵称与数字门解耦（change account-real-nickname）：数字 5s 未渲染时，仍把轮询中读到的昵称带回
+    // （extracted:false 不变，供云端区分「数据缺失」与「真 0 粉丝」），否则本人主页采集每次都被数字门卡空。
+    return { authorId: lastId, postsCount: 0, followersCount: 0, likesCollects: 0, nickname: lastName, extracted: false };
   }
 
   private async safeCloseModal(): Promise<void> {

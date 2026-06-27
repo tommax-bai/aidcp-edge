@@ -78,8 +78,6 @@ async function main(): Promise<void> {
   // 环境变量 AIDCP_ACCOUNT_ID 降级为【可选覆盖】（预置/特殊场景的逃生阀）。
   const overrideAccountId = process.env.AIDCP_ACCOUNT_ID;
   let accountId: string | undefined;
-  // 登录账号自身昵称（account-real-nickname）：诚实闸通过才赋值并随 hello 带回，否则保持 undefined=省略，绝不伪造。
-  let nickname: string | undefined;
   const machineLabel = process.env.AIDCP_MACHINE_LABEL;
   const remoteAddr = process.env.AIDCP_REMOTE_ADDR;
   const cdpHost = process.env.AIDCP_CDP_HOST ?? '127.0.0.1';
@@ -133,12 +131,6 @@ async function main(): Promise<void> {
       );
     }
     accountId = decision.accountId;
-    // 诚实昵称闸(D5)：仅当读出自身昵称(自作用域非空) 且 握手用真实登录 id(use 且无 override mismatch) 时带回；
-    // override 值与真实登录不一致时昵称属于另一账号，错配是红线 → 省略。
-    nickname =
-      idRes.ok && decision.kind === 'use' && !decision.mismatch && idRes.identity.displayName
-        ? idRes.identity.displayName
-        : undefined;
     const display = idRes.ok && idRes.identity.displayName ? ` (${idRes.identity.displayName})` : '';
     const source = 'source' in decision ? decision.source : 'env-override';
     console.log(`[aidcp-edge] 账号身份已确立: ${accountId}${display} [source=${source}]`);
@@ -153,7 +145,6 @@ async function main(): Promise<void> {
     app: 'xhs',
     capabilities: ['locating', 'cdp', 'like', 'browse'],
     ...(accountId ? { accountId } : {}),
-    ...(nickname ? { nickname } : {}),
     ...(machineLabel ? { machineLabel } : {}),
     ...(remoteAddr ? { remoteAddr } : {}),
     runner: {
@@ -340,12 +331,6 @@ async function main(): Promise<void> {
       }
       accountId = decision.accountId;
       client.setAccountId(accountId);
-      // 诚实昵称闸(D5)：重确立身份后同样仅在真实自身昵称可证明属己时带回，否则省略。
-      nickname =
-        idRes.ok && decision.kind === 'use' && !decision.mismatch && idRes.identity.displayName
-          ? idRes.identity.displayName
-          : undefined;
-      client.setNickname(nickname);
       await client.connect();
       console.log(
         `[aidcp-edge] 身份重新确立: ${accountId}，已按新 id 重连云端（云端按新账号拆旧会话 + 重过就绪闸）`,

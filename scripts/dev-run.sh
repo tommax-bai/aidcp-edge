@@ -36,8 +36,6 @@ else
 fi
 
 # 身份默认从登录态读出（account-identity-from-login）：【不再强制 default】。
-# 强制 default 会让边缘以覆盖值握手、丢掉真实登录账号身份——且 account-real-nickname 的诚实闸会因
-# override(default) ≠ 真实登录 id 而【省略昵称】，后台账号列永远显示 default 而非真实账号/昵称。
 # 前置：该节点 Chrome 已登录目标账号（读不出登录态边缘会诚实停手、不回落 default，红线）。
 # 如需为特殊/预置场景显式指定身份，在外部 export AIDCP_ACCOUNT_ID 即可（此处不兜底）。
 
