@@ -27,7 +27,13 @@
  * 运行：npm start
  */
 
-import { attachToPage, launchChrome, readSelfIdentity, decideHandshakeIdentity } from './cdp/index.js';
+import {
+  attachToPage,
+  readSelfIdentity,
+  decideHandshakeIdentity,
+  selectBrowserProvider,
+  type BrowserLaunchOptions,
+} from './cdp/index.js';
 import { EdgeClient } from './client/edge-client.js';
 import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
@@ -84,28 +90,39 @@ async function main(): Promise<void> {
   const cdpPort = Number(process.env.AIDCP_CDP_PORT ?? 9222);
   const pageUrl = process.env.AIDCP_PAGE_URL;
 
-  console.log(`[aidcp-edge] 准备 Chrome（CDP ${cdpHost}:${cdpPort}）...`);
-  const launchOpts: Parameters<typeof launchChrome>[0] = { host: cdpHost, port: cdpPort };
+  // 浏览器启动层可插拔（change adspower-browser-provider）：默认 self 自起真实指纹 Chrome；
+  // AIDCP_BROWSER_PROVIDER=adspower 时改由 AdsPower 指纹浏览器托管（拿 debug_port 喂现成 attach）。
+  const provider = selectBrowserProvider({ logImpl: (m) => console.log(m) });
+  console.log(`[aidcp-edge] 准备浏览器（provider=${provider.kind}，CDP ${cdpHost}:${cdpPort}）...`);
+  const launchOpts: BrowserLaunchOptions = { host: cdpHost, port: cdpPort };
   if (process.env.AIDCP_CHROME_PATH) launchOpts.chromePath = process.env.AIDCP_CHROME_PATH;
   if (process.env.AIDCP_CHROME_PROFILE) launchOpts.profileDir = process.env.AIDCP_CHROME_PROFILE;
   if (process.env.AIDCP_CHROME_HEADLESS === 'true') launchOpts.headless = true;
-  // 登录等待上限：看护重起的子进程无 TTY、无从扫码，登录态应已持久化且秒级命中——
+  // 登录等待上限（self 模式）：看护重起的子进程无 TTY、无从扫码，登录态应已持久化且秒级命中——
   // launch-multinode 会注入较短值（~45s），使「登录态丢失」按崩溃快速计入重起预算而非干等 5min。
   // 单机首登（裸 npm start）不设此 env，沿用 5min 默认以容纳人工扫码。
+  // adspower 模式登录态由其 profile 持久化、此项不参与；身份统一由下方 readSelfIdentity 把关。
   if (process.env.AIDCP_CHROME_LOGIN_TIMEOUT_MS) {
     launchOpts.loginTimeoutMs = Number(process.env.AIDCP_CHROME_LOGIN_TIMEOUT_MS);
   }
-  const chrome = await launchChrome(launchOpts);
+  const { instance: chrome, endpoint } = await provider.launch(launchOpts);
 
-  console.log(`[aidcp-edge] 连接本机 Chrome CDP ${cdpHost}:${cdpPort} ...`);
-  const attachOpts: Parameters<typeof attachToPage>[0] = { host: cdpHost, port: cdpPort };
+  // 反检测恰一层生效：self 默认开 edge 自研 stealth；adspower 默认关、由其 cdp_mask 独占指纹层
+  // （双层叠加会制造不自洽）。AIDCP_STEALTH=on|off 可显式覆盖。
+  const stealthEnv = process.env.AIDCP_STEALTH?.toLowerCase();
+  const stealth = stealthEnv ? !['off', 'false', '0', 'no'].includes(stealthEnv) : provider.kind !== 'adspower';
+
+  console.log(`[aidcp-edge] 连接浏览器 CDP ${endpoint.host}:${endpoint.port}（stealth=${stealth ? 'on' : 'off'}）...`);
+  const attachOpts: Parameters<typeof attachToPage>[0] = { host: endpoint.host, port: endpoint.port, stealth };
   if (pageUrl) attachOpts.urlIncludes = pageUrl;
+  else if (provider.kind === 'adspower') attachOpts.urlIncludes = 'xiaohongshu.com';
   const session = await attachToPage(attachOpts);
   console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
   // Runtime/Page/Input 域启用 + 反检测注入均在 attachToPage 内（reEnableAndInject，与断线重连共用）。
 
-  // 身份确立（account-identity-from-login 1.2）：登录态已由 launchChrome 的登录等待保证，
-  // 此处从登录态读出本节点真实稳定账号 id，作为握手身份。env 覆盖优先；读不出即诚实停手、绝不回落 default。
+  // 身份确立（account-identity-from-login 1.2）：登录态在 self 模式由 launchChrome 的登录等待保证、
+  // 在 adspower 模式由其 profile 持久化；此处统一从登录态读出本节点真实稳定账号 id，作为握手身份。
+  // env 覆盖优先；读不出即诚实停手、绝不回落 default（adspower 模式失败同样不回落 self）。
   {
     const idRes = await readSelfIdentity(session.cdp, { logger: (m) => console.log(m) });
     const decision = decideHandshakeIdentity(idRes, overrideAccountId);
