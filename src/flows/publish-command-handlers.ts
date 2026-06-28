@@ -35,7 +35,7 @@ import {
   extractPostUrl,
 } from './publish-post.js';
 import { dispatchClick, dispatchKeystrokes } from '../browse/cdp-util.js';
-import { samplePreset, jitterAround, type RandomFn } from '../humanize/timing.js';
+import { jitterAround, type RandomFn } from '../humanize/timing.js';
 
 /** 指令运行时依赖（EngineDeps 去掉 validator——validator 由各处理器按 kind 提供）。 */
 export type PublishCommandDeps = Omit<EngineDeps, 'validator'>;
@@ -54,7 +54,12 @@ export interface PublishPacing {
   random?: RandomFn;
 }
 
-/** 各「人类时刻」的中心值（毫秒）；实际值再叠对数正态抖动。集中一处便于标定。 */
+/**
+ * 各「人类时刻」的中心值（毫秒）；实际值再叠对数正态抖动。集中一处便于标定。
+ * 红线约束：单条指令的 edge 执行时长（含 thinkBeforeStep + 本步停顿 + 后置校验轮询）MUST < 云端
+ * CommandSequencer 的单条等待超时（非配图 30s，command-sequencer.ts）。故打字软上限/审阅停留都压在安全线内，
+ * 否则 fill_field/submit_publish 会被云端判超时 → 发布失败。要更长节奏须走 Phase B（云端抬高该步超时）。
+ */
 const PACING_MS = {
   /** 落地发布页后"环顾/定位"再动手 */
   navigateSettle: 1500,
@@ -64,8 +69,10 @@ const PACING_MS = {
   fieldFocus: 700,
   /** 字段填完后的微停顿 */
   fieldDone: 600,
-  /** 逐字打字总时长软上限：超长正文打到此即转快速贴入，避免单篇过久 */
-  typingCapMs: 45_000,
+  /** 点「发布」前"通读全文确认"停留（最像人；压在云端 30s 内：本步 = think+本停顿+点击+15s 后置校验） */
+  submitReview: 4_000,
+  /** 逐字打字总时长软上限：超长正文打到此即转快速贴入。压在 18s（留 think+focus+done+5s 校验 < 云端 30s） */
+  typingCapMs: 18_000,
 } as const;
 
 const CAPTURE_POST_ID_ACTION = 'note.capture_post_id';
@@ -599,7 +606,8 @@ export class PublishCommandDispatcher {
     try {
       if (this.pacingEnabled) {
         // 拟人：点「发布」前"通读全文确认"停留（最像人的一处），再走贝塞尔轨迹+overshoot+落点抖动点击（替代同点三连发）。
-        await this.sleep(samplePreset('reading', this.random));
+        // 停留压在 submitReview 中心值（叠抖动），确保 本步总时长 < 云端 30s 单步超时。
+        await this.pause(PACING_MS.submitReview);
         await dispatchClick(this.cdp, x, y, { random: this.random, sleep: this.sleep });
       } else {
         await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
