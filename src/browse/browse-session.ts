@@ -49,7 +49,7 @@ import type { LoginModalWatcher } from './login-modal-watcher.js';
 import type { OverlayKind, OverlayMonitor } from './overlay-monitor.js';
 import { isBlockingKind } from './overlay-monitor.js';
 import type { extractNoteContent as ExtractFn } from './note-extractor.js';
-import { NOTE_BODY_SELECTORS } from './note-extractor.js';
+import { NOTE_BODY_SELECTORS, parseCount } from './note-extractor.js';
 import { executeSearch } from './search-handler.js';
 import { evalRaw, type RandomFn, type BrowseCdp } from './cdp-util.js';
 import { CdpDisconnectedError } from '../cdp/client.js';
@@ -1439,6 +1439,8 @@ export class BrowseSession {
           var lw = r.querySelector('.interactions .like .like-wrapper') || r.querySelector('.like-wrapper');
           var use = lw ? lw.querySelector('svg use') : null;
           var href = use ? (use.getAttribute('xlink:href') || use.getAttribute('href')) : null;
+          var lcEl = lw ? (lw.querySelector('[class*="count"]') || lw) : null;
+          var likeText = lcEl ? (lcEl.textContent || '').replace(/\\s+/g, ' ').trim() : '';
           var authorEl = r.querySelector('.author .name, [class*="author"] [class*="name"], [class*="nickname"], [class*="name"]');
           var contentEl = r.querySelector('.content, [class*="content"], .note-text, p');
           var text = (contentEl ? (contentEl.textContent || '') : (r.textContent || '')).replace(/\\s+/g, ' ').trim().slice(0, 80);
@@ -1447,14 +1449,23 @@ export class BrowseSession {
             anchorId: r.id,
             author: authorEl ? (authorEl.textContent || '').trim().slice(0, 30) : undefined,
             text: text,
-            alreadyLiked: href === '#liked'
+            alreadyLiked: href === '#liked',
+            likeText: likeText
           });
         }
         return JSON.stringify(out);
       })()`;
       const raw = await evalRaw<string>(this.deps.cdp, harvestJs);
       const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      return Array.isArray(arr) ? (arr as CommentCandidate[]) : [];
+      if (!Array.isArray(arr)) return [];
+      // 解析评论赞数（「1.2万」等惯例 → 数字；抓不到为 undefined，不编造）。change curated-inspiration-corpus Phase 2b。
+      return (arr as Array<{ anchorId: string; author?: string; text: string; alreadyLiked?: boolean; likeText?: string }>).map((c) => ({
+        anchorId: c.anchorId,
+        author: c.author,
+        text: c.text,
+        alreadyLiked: c.alreadyLiked,
+        likeCount: c.likeText ? parseCount(c.likeText) : undefined,
+      }));
     } catch (err) {
       this.logger(`[browse] 评论候选抽取失败（不影响滚动回执）：${(err as Error).message}`);
       return [];
