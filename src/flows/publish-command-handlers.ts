@@ -69,8 +69,8 @@ const PACING_MS = {
   fieldFocus: 700,
   /** 字段填完后的微停顿 */
   fieldDone: 600,
-  /** 点「发布」前"通读全文确认"停留（最像人；压在云端 30s 内：本步 = think+本停顿+点击+15s 后置校验） */
-  submitReview: 4_000,
+  /** 点「发布」前"通读全文确认"停留。压在 2s（提交步预算紧：找按钮+本停顿+点击+最长 15s 后置校验 < 云端 30s） */
+  submitReview: 2_000,
 } as const;
 
 const CAPTURE_POST_ID_ACTION = 'note.capture_post_id';
@@ -234,9 +234,13 @@ export class PublishCommandDispatcher {
     await this.sleep(jitterAround(centerMs, 0.35, this.random));
   }
 
-  /** 动作前"想一下"：各人类动作指令执行前的统一停顿（读操作 capture_postId / 配图下载 upload_image 不加）。 */
+  /**
+   * 动作前"想一下"：各人类动作指令执行前的统一停顿。
+   * 不加的：读操作 capture_postId、配图下载 upload_image、以及 submit_publish——
+   * submit 有自己的"通读停留"且其后置校验最长 15s，再叠通用 think 易撞云端 30s 单步上限。
+   */
   private async thinkBeforeStep(kind: PublishCommandPayload['kind']): Promise<void> {
-    if (kind === 'capture_postId' || kind === 'upload_image') return;
+    if (kind === 'capture_postId' || kind === 'upload_image' || kind === 'submit_publish') return;
     await this.pause(PACING_MS.stepThink);
   }
 
@@ -614,10 +618,10 @@ export class PublishCommandDispatcher {
     const { x, y } = center;
     try {
       if (this.pacingEnabled) {
-        // 拟人：点「发布」前"通读全文确认"停留（最像人的一处），再走贝塞尔轨迹+overshoot+落点抖动点击（替代同点三连发）。
-        // 停留压在 submitReview 中心值（叠抖动），确保 本步总时长 < 云端 30s 单步超时。
+        // 拟人：点「发布」前"通读全文确认"停留，再走贝塞尔轨迹点击。
+        // 关键：发布按钮小而精确，**关掉 overshoot/落点抖动**（精确落点）确保点中——保留移动轨迹(反检测)，但不冒"点偏发不出"的险。
         await this.pause(PACING_MS.submitReview);
-        await dispatchClick(this.cdp, x, y, { random: this.random, sleep: this.sleep });
+        await dispatchClick(this.cdp, x, y, { random: this.random, sleep: this.sleep, overshoot: false, jitter: 0 });
       } else {
         await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
         await this.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
