@@ -155,18 +155,32 @@ test('decideHandshakeIdentity: 覆盖 = 真实 id → 用覆盖、无 mismatch',
 });
 
 test('decideHandshakeIdentity: 覆盖 ≠ 真实 id → 用覆盖、标 mismatch（供告警）', () => {
-  const d = decideHandshakeIdentity(okRes(REAL_ID), 'default');
+  const d = decideHandshakeIdentity(okRes(REAL_ID), 'acct-manual-override');
   assert.equal(d.kind, 'use');
   if (d.kind === 'use') {
-    assert.equal(d.accountId, 'default');
-    assert.deepEqual(d.mismatch, { override: 'default', real: REAL_ID });
+    assert.equal(d.accountId, 'acct-manual-override');
+    assert.deepEqual(d.mismatch, { override: 'acct-manual-override', real: REAL_ID });
   }
 });
 
 test('decideHandshakeIdentity: 读不出 + 有覆盖 → 用覆盖（逃生阀）', () => {
-  const d = decideHandshakeIdentity(failRes, 'default');
+  const d = decideHandshakeIdentity(failRes, 'acct-manual-override');
   assert.equal(d.kind, 'use-override-after-read-fail');
-  if (d.kind === 'use-override-after-read-fail') assert.equal(d.accountId, 'default');
+  if (d.kind === 'use-override-after-read-fail') assert.equal(d.accountId, 'acct-manual-override');
+});
+
+test('retire-default-account: 覆盖值=default 被拒（等同未设覆盖）→ 读出真实 id 则用真实 id', () => {
+  const d = decideHandshakeIdentity(okRes(REAL_ID, 'navigate'), 'default');
+  assert.equal(d.kind, 'use');
+  if (d.kind === 'use') {
+    assert.equal(d.accountId, REAL_ID, 'override=default 被忽略，用真实 id');
+    assert.equal(d.mismatch, undefined);
+  }
+});
+
+test('retire-default-account: 覆盖值=default + 读不出 → halt（绝不回落 default）', () => {
+  const d = decideHandshakeIdentity(failRes, 'default');
+  assert.equal(d.kind, 'halt');
 });
 
 test('decideHandshakeIdentity: 读不出 + 无覆盖 → halt（红线：绝不回落 default）', () => {

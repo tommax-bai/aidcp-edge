@@ -35,6 +35,12 @@ export interface SelfIdentitySignals {
   avatarAnchorHref: string | null;
   /** 导航区内所有 /user/profile 锚点的 href（兜底来源）。 */
   navProfileHrefs: string[];
+  /**
+   * 文本恰为「我」且 href 无查询串的本人 /user/profile 锚点 href（两布局通用强信号，可空）。
+   * 宽布局在左侧栏、窄布局在底部图标栏（见 docs/xhs-layout-states.md）；作者链接一律带
+   * `?channel_type=...&xsec_token=...`，据此与本人区分。读 href 不依赖可见性。
+   */
+  meAnchorHref?: string | null;
   /** 昵称（显示名，best-effort，可 null）。 */
   nickname: string | null;
   /** 小红书号（副标识，best-effort，可 null）。 */
@@ -68,16 +74,19 @@ export type IdentityDecision =
   | { kind: 'halt'; reason: string };
 
 export function decideHandshakeIdentity(idRes: SelfIdentityResult, override: string | undefined): IdentityDecision {
+  // retire-default-account：'default' 已退役为保留禁用标识，绝不接受其作为 override（等同未设覆盖）——
+  // 逃生阀不许逃成 default：读出真实 id 则用真实 id，读不出则诚实 halt、绝不回落 default。
+  const validOverride = override === 'default' ? undefined : override;
   if (idRes.ok) {
     const real = idRes.identity.accountId;
-    if (override) {
-      return override === real
-        ? { kind: 'use', accountId: override, source: 'env-override' }
-        : { kind: 'use', accountId: override, source: 'env-override', mismatch: { override, real } };
+    if (validOverride) {
+      return validOverride === real
+        ? { kind: 'use', accountId: validOverride, source: 'env-override' }
+        : { kind: 'use', accountId: validOverride, source: 'env-override', mismatch: { override: validOverride, real } };
     }
     return { kind: 'use', accountId: real, source: idRes.identity.source };
   }
-  if (override) return { kind: 'use-override-after-read-fail', accountId: override, reason: idRes.reason };
+  if (validOverride) return { kind: 'use-override-after-read-fail', accountId: validOverride, reason: idRes.reason };
   return { kind: 'halt', reason: idRes.reason };
 }
 
@@ -98,6 +107,9 @@ export function isValidStableId(id: string): boolean {
  * 读不出形态合规的 id 返回 ''（交由调用方走跳转兜底或诚实失败）。纯函数、可单测。
  */
 export function deriveInPlaceSelfId(signals: SelfIdentitySignals): string {
+  // 最强信号：文本「我」且无查询串的本人锚点（宽=左侧栏 / 窄=底部图标栏，两布局都在；读 href 不依赖可见性）。
+  const fromMe = extractIdFromHref(signals.meAnchorHref ?? null);
+  if (isValidStableId(fromMe)) return fromMe;
   const fromAvatar = extractIdFromHref(signals.avatarAnchorHref);
   if (isValidStableId(fromAvatar)) return fromAvatar;
   for (const href of signals.navProfileHrefs) {
@@ -118,10 +130,20 @@ const IN_PLACE_SCAN_JS = `(function(){
   if (avatar){ var n = avatar; while(n && n !== navScope){ if(n.tagName==='A'){ avatarAnchor=n; break; } n=n.parentElement; } }
   var navProfileHrefs = [];
   if (navScope){ var as = navScope.querySelectorAll('a[href*="/user/profile/"]'); for(var i=0;i<as.length && i<12;i++){ var h=ahref(as[i]); if(h) navProfileHrefs.push(h); } }
+  // 本人强信号（两布局通用、不依赖可见性）：全文档扫文本恰为「我」且 href 无查询串的 profile 锚点
+  // （作者链接都带 ?channel_type=...）。宽布局它在左侧栏、窄布局在底部图标栏，但 querySelectorAll 全收。
+  var meAnchorHref = null;
+  var allProfile = document.querySelectorAll('a[href*="/user/profile/"]');
+  for (var j=0;j<allProfile.length;j++){
+    var mt = (allProfile[j].textContent||'').replace(/\\s+/g,'').trim();
+    var mh = ahref(allProfile[j]) || '';
+    if (mt === '我' && mh.indexOf('?') < 0){ meAnchorHref = mh; break; }
+  }
   return JSON.stringify({
     href: location.href,
     avatarAnchorHref: ahref(avatarAnchor),
     navProfileHrefs: navProfileHrefs,
+    meAnchorHref: meAnchorHref,
     nickname: null,
     redId: null
   });
@@ -158,11 +180,26 @@ const CLICK_AVATAR_JS = `(function(){
   if(!avatar) return false; var c = avatar.closest('a,button,div')||avatar; c.click(); return true;
 })()`;
 
+/** 点击文本为「我」的本人 profile 锚点（当前小红书侧栏/底部栏本人入口文案）；只点、不写入。两布局通用。 */
+const CLICK_ME_ANCHOR_JS = `(function(){
+  var as = document.querySelectorAll('a[href*="/user/profile/"]');
+  for (var i=0;i<as.length;i++){
+    var t=(as[i].textContent||'').replace(/\\s+/g,'').trim();
+    var h=as[i].getAttribute('href')||'';
+    if (t==='我' && h.indexOf('?')<0){ as[i].click(); return true; }
+  }
+  return false;
+})()`;
+
 export interface ReadSelfIdentityOptions {
   /** 跳转兜底时是否允许导航（默认 true）。设 false 则只试就地、失败即诚实失败（不产生跳转副作用）。 */
   allowNavigate?: boolean;
   /** 跳转兜底等待进入主页的超时（ms，默认 6000）。 */
   navigateTimeoutMs?: number;
+  /** in-place 扫描的 hydrate 有界等待上限（ms，默认 6000）：登录后本人锚点异步渲染，超时前轮询重试，应对冷加载竞态。 */
+  hydrateTimeoutMs?: number;
+  /** hydrate 轮询间隔（ms，默认 500）。 */
+  hydrateIntervalMs?: number;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   logger?: (msg: string) => void;
@@ -211,15 +248,27 @@ export async function readSelfIdentity(
   const allowNavigate = opts.allowNavigate ?? true;
   const navTimeout = opts.navigateTimeoutMs ?? 6000;
 
-  // ① 就地读
-  const scanRaw = await evalRaw<string>(cdp, IN_PLACE_SCAN_JS).catch(() => '');
-  let signals: SelfIdentitySignals;
-  try {
-    signals = JSON.parse(scanRaw) as SelfIdentitySignals;
-  } catch {
-    signals = { href: '', avatarAnchorHref: null, navProfileHrefs: [], nickname: null, redId: null };
+  // ① 就地读（带 hydrate 有界重试）：登录后侧栏/底部栏的本人锚点是异步渲染，attach 后可能尚未出现；
+  //    旧码只扫一次即跌进 navigate 兜底 → 冷加载竞态（真机首跑就栽在这）。此处轮询至读出或超时再降级。
+  const hydrateTimeoutMs = opts.hydrateTimeoutMs ?? 6000;
+  const hydrateIntervalMs = opts.hydrateIntervalMs ?? 500;
+  let signals: SelfIdentitySignals = {
+    href: '', avatarAnchorHref: null, navProfileHrefs: [], meAnchorHref: null, nickname: null, redId: null,
+  };
+  let inPlaceId = '';
+  // 按次数上界循环（不依赖 now() 前进——单测常注入恒定假时钟，靠 deadline 会死循环；真机靠 sleep 实际等待 hydrate）。
+  const hydrateAttempts = Math.max(1, Math.ceil(hydrateTimeoutMs / Math.max(1, hydrateIntervalMs)) + 1);
+  for (let attempt = 0; attempt < hydrateAttempts; attempt++) {
+    const scanRaw = await evalRaw<string>(cdp, IN_PLACE_SCAN_JS).catch(() => '');
+    try {
+      signals = JSON.parse(scanRaw) as SelfIdentitySignals;
+    } catch {
+      signals = { href: '', avatarAnchorHref: null, navProfileHrefs: [], meAnchorHref: null, nickname: null, redId: null };
+    }
+    inPlaceId = deriveInPlaceSelfId(signals);
+    if (inPlaceId) break;
+    if (attempt < hydrateAttempts - 1) await sleep(hydrateIntervalMs);
   }
-  const inPlaceId = deriveInPlaceSelfId(signals);
   if (inPlaceId) {
     log(`[self-identity] 就地读出稳定 id=${inPlaceId}（source=in-place）`);
     // 就地路径只确立 id；昵称/redId 一律置空——绝不在此调无作用域 readDisplay（就地常停在推荐流，
@@ -233,6 +282,8 @@ export async function readSelfIdentity(
     return { ok: false, reason: '就地读不出稳定 id 且禁用跳转兜底' };
   }
   log('[self-identity] 就地无 self-profile 锚点，走跳转兜底（进我的主页读 URL）');
+  // 当前小红书侧栏/底部栏本人入口文案是「我」（非「我的主页」）：优先点本人 profile 锚点，再退回旧文案兜底。
+  await evalRaw<boolean>(cdp, CLICK_ME_ANCHOR_JS).catch(() => false);
   await evalRaw<boolean>(cdp, clickByTextJs('我的主页')).catch(() => false);
   let onProfile = await waitFor(cdp, ON_PROFILE_JS, Math.min(navTimeout, 4000), sleep, now);
   if (!onProfile) {
