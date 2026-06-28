@@ -34,7 +34,7 @@ import {
   extractPostId,
   extractPostUrl,
 } from './publish-post.js';
-import { dispatchClick, dispatchKeystrokes } from '../browse/cdp-util.js';
+import { dispatchClick } from '../browse/cdp-util.js';
 import { jitterAround, type RandomFn } from '../humanize/timing.js';
 
 /** 指令运行时依赖（EngineDeps 去掉 validator——validator 由各处理器按 kind 提供）。 */
@@ -71,8 +71,6 @@ const PACING_MS = {
   fieldDone: 600,
   /** 点「发布」前"通读全文确认"停留（最像人；压在云端 30s 内：本步 = think+本停顿+点击+15s 后置校验） */
   submitReview: 4_000,
-  /** 逐字打字总时长软上限：超长正文打到此即转快速贴入。压在 18s（留 think+focus+done+5s 校验 < 云端 30s） */
-  typingCapMs: 18_000,
 } as const;
 
 const CAPTURE_POST_ID_ACTION = 'note.capture_post_id';
@@ -409,9 +407,13 @@ export class PublishCommandDispatcher {
   }
 
   /**
-   * 逐字打字（拟人，change publish-fill-humanization）：复用 dispatchKeystrokes 按键盘节奏逐字 Input.insertText。
-   * pacing 关 → 回退一次性 insertText（旧行为/快路径）。带打字总时长软上限：超长正文打到上限后转快速贴入，避免单篇耗时过久。
-   * 红线：无论是否到上限，全部字符都会被输入（上限只缩时间不丢内容）。
+   * 拟人打字（change publish-fill-humanization）：分块「突发式」输入——短字段逐字、长正文按小块（突发）输入，
+   * 块间叠对数正态停顿。pacing 关 → 回退一次性 insertText（旧快路径）。
+   *
+   * 为何不逐字到底：每个 Input.insertText 是一次 CDP 往返（~数十 ms），长正文逐字 = 数百次往返，
+   * 其固有开销会连同停顿一起把本步拖过云端 30s 单步超时（task-0 实测 seq=4 fill_field timeout）。
+   * 故用 maxSends 封顶往返数、PAUSE_BUDGET 封顶总停顿——任意长度都稳在 30s 内，又不再是瞬时灌入。
+   * 红线：全部字符都会输入（封顶只缩时间/往返，不丢内容）。
    */
   private async typeHumanized(text: string): Promise<void> {
     if (!this.cdp) return;
@@ -419,13 +421,20 @@ export class PublishCommandDispatcher {
       await this.cdp.send('Input.insertText', { text });
       return;
     }
-    let spent = 0;
-    const cappedSleep = async (ms: number): Promise<void> => {
-      if (spent >= PACING_MS.typingCapMs) return; // 超软上限 → 后续不再停顿（快速贴完剩余字符）
-      spent += ms;
-      await this.sleep(ms);
-    };
-    await dispatchKeystrokes(this.cdp, text, { random: this.random, sleep: cappedSleep });
+    const chars = Array.from(text); // 按 grapheme 切，正确处理中文/emoji
+    if (chars.length === 0) return;
+    // 往返数封顶：短文(≤50)块=1（逐字最像人）；长文按比例增大块，使 insertText 次数 ≤ maxSends。
+    const maxSends = 50;
+    const chunkSize = Math.max(1, Math.ceil(chars.length / maxSends));
+    const chunks: string[] = [];
+    for (let i = 0; i < chars.length; i += chunkSize) chunks.push(chars.slice(i, i + chunkSize).join(''));
+    // 总停顿预算（远小于云端 30s 单步超时，留 think/focus/done/后置校验余量）；均摊到每块、再叠抖动。
+    const PAUSE_BUDGET = 12_000;
+    const perPause = Math.min(220, Math.floor(PAUSE_BUDGET / chunks.length));
+    for (const chunk of chunks) {
+      await this.sleep(jitterAround(perPause, 0.4, this.random));
+      await this.cdp.send('Input.insertText', { text: chunk });
+    }
   }
 
   private async ensureInputEnabled(): Promise<void> {
