@@ -34,9 +34,39 @@ import {
   extractPostId,
   extractPostUrl,
 } from './publish-post.js';
+import { dispatchClick, dispatchKeystrokes } from '../browse/cdp-util.js';
+import { samplePreset, jitterAround, type RandomFn } from '../humanize/timing.js';
 
 /** 指令运行时依赖（EngineDeps 去掉 validator——validator 由各处理器按 kind 提供）。 */
 export type PublishCommandDeps = Omit<EngineDeps, 'validator'>;
+
+/**
+ * 发布填写拟人化节奏（change publish-fill-humanization，Phase A：纯 edge）。
+ * 复用浏览侧已有原语（逐字打字 / 贝塞尔点击 / 对数正态停顿），把"瞬时机械填写"改成有节奏的真人填写。
+ * 全部是中心值常量，便于后续标定；sleep/random 可注入（测试用 instant sleep 保持快+确定）。
+ */
+export interface PublishPacing {
+  /** 关：跳过所有拟人停顿/逐字（仍走原瞬时路径）。默认开。 */
+  enabled?: boolean;
+  /** 注入 sleep（测试传 instant 保持快）；缺省真实 setTimeout。 */
+  sleep?: (ms: number) => Promise<void>;
+  /** 注入随机源（确定性测试）；缺省 Math.random。 */
+  random?: RandomFn;
+}
+
+/** 各「人类时刻」的中心值（毫秒）；实际值再叠对数正态抖动。集中一处便于标定。 */
+const PACING_MS = {
+  /** 落地发布页后"环顾/定位"再动手 */
+  navigateSettle: 1500,
+  /** 选模式/加话题/设选项 等小步前的"想一下" */
+  stepThink: 900,
+  /** 填字段前聚焦后的短停顿（手移到输入框） */
+  fieldFocus: 700,
+  /** 字段填完后的微停顿 */
+  fieldDone: 600,
+  /** 逐字打字总时长软上限：超长正文打到此即转快速贴入，避免单篇过久 */
+  typingCapMs: 45_000,
+} as const;
 
 const CAPTURE_POST_ID_ACTION = 'note.capture_post_id';
 
@@ -167,6 +197,10 @@ export class PublishCommandDispatcher {
   private readonly clock: () => number;
   private inputEnabled = false;
   private domEnabled = false;
+  /** 拟人节奏（change publish-fill-humanization，Phase A）：开关 + 可注入 sleep/random。 */
+  private readonly pacingEnabled: boolean;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly random: RandomFn;
 
   constructor(
     private readonly deps: PublishCommandDeps,
@@ -180,12 +214,31 @@ export class PublishCommandDispatcher {
      * 未注入则回退通用 LocatingEngine 路径。
      */
     private readonly cdp?: CdpLike,
+    /** 发布填写拟人节奏（缺省开、真实 sleep + Math.random）。 */
+    pacing: PublishPacing = {},
   ) {
     this.clock = clock;
+    this.pacingEnabled = pacing.enabled !== false;
+    this.sleep = pacing.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.random = pacing.random ?? Math.random;
+  }
+
+  /** 围绕中心值叠对数正态抖动后停顿（拟人）；pacing 关 / 中心值 ≤0 时直接返回。 */
+  private async pause(centerMs: number): Promise<void> {
+    if (!this.pacingEnabled || centerMs <= 0) return;
+    await this.sleep(jitterAround(centerMs, 0.35, this.random));
+  }
+
+  /** 动作前"想一下"：各人类动作指令执行前的统一停顿（读操作 capture_postId / 配图下载 upload_image 不加）。 */
+  private async thinkBeforeStep(kind: PublishCommandPayload['kind']): Promise<void> {
+    if (kind === 'capture_postId' || kind === 'upload_image') return;
+    await this.pause(PACING_MS.stepThink);
   }
 
   /** 按 kind 路由并执行一条发布指令，返回结果（绝不抛——异常也转成诚实的 ok:false）。 */
   async dispatch(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+    // 拟人：动作前"想一下"，给整条发布序列加上逐项填写的节奏（治"指令间零节奏一气呵成"）。
+    await this.thinkBeforeStep(payload.kind);
     switch (payload.kind) {
       case 'navigate_entry':
         return this.runNavigateEntry(payload);
@@ -266,6 +319,8 @@ export class PublishCommandDispatcher {
         root = undefined;
       }
       if (root && validator.validate(req, root)) {
+        // 拟人：发布页渲染好后"环顾/定位输入框"再动手。
+        await this.pause(PACING_MS.navigateSettle);
         return { ...base, ok: true, details: { ...details, durationMs: this.clock() - startedAt } };
       }
       if (this.clock() >= deadline) {
@@ -346,6 +401,26 @@ export class PublishCommandDispatcher {
     }
   }
 
+  /**
+   * 逐字打字（拟人，change publish-fill-humanization）：复用 dispatchKeystrokes 按键盘节奏逐字 Input.insertText。
+   * pacing 关 → 回退一次性 insertText（旧行为/快路径）。带打字总时长软上限：超长正文打到上限后转快速贴入，避免单篇耗时过久。
+   * 红线：无论是否到上限，全部字符都会被输入（上限只缩时间不丢内容）。
+   */
+  private async typeHumanized(text: string): Promise<void> {
+    if (!this.cdp) return;
+    if (!this.pacingEnabled) {
+      await this.cdp.send('Input.insertText', { text });
+      return;
+    }
+    let spent = 0;
+    const cappedSleep = async (ms: number): Promise<void> => {
+      if (spent >= PACING_MS.typingCapMs) return; // 超软上限 → 后续不再停顿（快速贴完剩余字符）
+      spent += ms;
+      await this.sleep(ms);
+    };
+    await dispatchKeystrokes(this.cdp, text, { random: this.random, sleep: cappedSleep });
+  }
+
   private async ensureInputEnabled(): Promise<void> {
     if (!this.cdp || this.inputEnabled) return;
     try {
@@ -389,7 +464,10 @@ export class PublishCommandDispatcher {
       if (f?.result?.value !== true) {
         return { ...base, ok: false, error: 'no_target', details: { ...details, durationMs: this.clock() - startedAt } };
       }
-      await this.cdp.send('Input.insertText', { text: value });
+      // 拟人：聚焦后短停顿（手移到输入框）→ 逐字打字（替代一次性灌入，标题/正文都逐字）→ 填完微停顿。
+      await this.pause(PACING_MS.fieldFocus);
+      await this.typeHumanized(value);
+      await this.pause(PACING_MS.fieldDone);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { ...base, ok: false, error: `engine_error: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
@@ -519,9 +597,15 @@ export class PublishCommandDispatcher {
     }
     const { x, y } = center;
     try {
-      await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
-      await this.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-      await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+      if (this.pacingEnabled) {
+        // 拟人：点「发布」前"通读全文确认"停留（最像人的一处），再走贝塞尔轨迹+overshoot+落点抖动点击（替代同点三连发）。
+        await this.sleep(samplePreset('reading', this.random));
+        await dispatchClick(this.cdp, x, y, { random: this.random, sleep: this.sleep });
+      } else {
+        await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+        await this.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+        await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { ...base, ok: false, error: `engine_error: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };

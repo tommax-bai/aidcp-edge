@@ -100,9 +100,23 @@ function cmd(kind: PublishCommandPayload['kind'], params: PublishCommandPayload[
   return { recordId: 100, seq, kind, params };
 }
 
+/** instant sleep：拟人停顿在测试里无延迟（保持快+确定），逻辑（逐字/点击调用）仍真实执行。 */
+const instantSleep = async (_ms: number): Promise<void> => {};
+
+/** 构造器封装：默认注入 instant sleep，使新加的拟人节奏不拖慢测试套件。 */
+function mk(
+  deps: ConstructorParameters<typeof PublishCommandDispatcher>[0],
+  options?: ConstructorParameters<typeof PublishCommandDispatcher>[1],
+  clock?: ConstructorParameters<typeof PublishCommandDispatcher>[2],
+  uploader?: ConstructorParameters<typeof PublishCommandDispatcher>[3],
+  cdp?: ConstructorParameters<typeof PublishCommandDispatcher>[4],
+): PublishCommandDispatcher {
+  return new PublishCommandDispatcher(deps, options ?? {}, clock ?? Date.now, uploader, cdp, { sleep: instantSleep });
+}
+
 test('AC-CMD fill_field(title) 成功 → ok:true，DOM 真写入，回报带 recordId+seq+kind', async () => {
   const doc = buildDom(publishPageHtml());
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
   const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'title', value: '测试标题' }, 3));
   assert.equal(res.ok, true);
   assert.equal(res.recordId, 100);
@@ -114,7 +128,7 @@ test('AC-CMD fill_field(title) 成功 → ok:true，DOM 真写入，回报带 re
 test('AC-CMD fill_field 后置校验失败（点了没生效）→ ok:false，绝不伪造成功（红线反例）', async () => {
   const doc = buildDom(publishPageHtml());
   // noopInput：执行器点击但不真写入 → 校验读不到内容 → engine 重试到顶仍失败。
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc, true)), { maxAttempts: 2 });
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc, true)), { maxAttempts: 2 });
   const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'title', value: '没写进去的标题' }));
   assert.equal(res.ok, false);
   assert.ok(res.error, '失败必须带真实 error');
@@ -123,7 +137,7 @@ test('AC-CMD fill_field 后置校验失败（点了没生效）→ ok:false，�
 
 test('AC-CMD capture_postId 抓到 → ok:true value=真实 postId', async () => {
   const doc = buildDom(publishPageHtml('<a href="/explore/post_abc123">查看笔记</a>'));
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
   const res = await dispatcher.dispatch(cmd('capture_postId'));
   assert.equal(res.ok, true);
   assert.equal(res.value, 'post_abc123');
@@ -131,7 +145,7 @@ test('AC-CMD capture_postId 抓到 → ok:true value=真实 postId', async () =>
 
 test('AC-CMD capture_postId 抓不到 → ok:false error=no_target（红线：MUST NOT postId||fake）', async () => {
   const doc = buildDom(publishPageHtml());
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
   const res = await dispatcher.dispatch(cmd('capture_postId'));
   assert.equal(res.ok, false);
   assert.equal(res.error, 'no_target');
@@ -143,7 +157,7 @@ test('AC-CMD capture_postId 抓到带 xsec_token 的完整分享 URL → 回报 
   const doc = buildDom(
     publishPageHtml('<a href="https://www.xiaohongshu.com/explore/post_abc123?xsec_token=ABCTOKEN&xsec_source=pc_feed">查看笔记</a>'),
   );
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
   const res = await dispatcher.dispatch(cmd('capture_postId'));
   assert.equal(res.ok, true);
   assert.equal(res.value, 'post_abc123');
@@ -152,7 +166,7 @@ test('AC-CMD capture_postId 抓到带 xsec_token 的完整分享 URL → 回报 
 
 test('AC-CMD capture_postId 只有裸 id（缺 xsec_token）→ postUrl 诚实置空（红线：不拼打不开的假链接）', async () => {
   const doc = buildDom(publishPageHtml('<a href="/explore/post_bare">查看笔记</a>'));
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
   const res = await dispatcher.dispatch(cmd('capture_postId'));
   assert.equal(res.ok, true);
   assert.equal(res.value, 'post_bare', 'postId 仍抓得到');
@@ -161,7 +175,7 @@ test('AC-CMD capture_postId 只有裸 id（缺 xsec_token）→ postUrl 诚实�
 
 test('AC-MEDIA upload_image 未注入 uploader → kind_not_implemented（诚实，不假成功）', async () => {
   const doc = buildDom(publishPageHtml());
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
   const res = await dispatcher.dispatch(cmd('upload_image', { imageUrl: 'https://cdn/x.jpg' }));
   assert.equal(res.ok, false);
   assert.equal(res.error, 'kind_not_implemented');
@@ -171,13 +185,13 @@ test('AC-MEDIA upload_image 经注入 uploader → 成功透传 ok:true / 失败
   const doc = buildDom(publishPageHtml());
   let calledWith = '';
   const okUploader = { upload: async (url: string) => { calledWith = url; return { ok: true }; } } as any;
-  const okDisp = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, okUploader);
+  const okDisp = mk(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, okUploader);
   const ok = await okDisp.dispatch(cmd('upload_image', { imageUrl: 'https://cdn/a.png' }));
   assert.equal(ok.ok, true);
   assert.equal(calledWith, 'https://cdn/a.png', 'imageUrl 透传给 uploader');
 
   const failUploader = { upload: async () => ({ ok: false, error: 'image_not_attached' }) } as any;
-  const failDisp = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, failUploader);
+  const failDisp = mk(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, failUploader);
   const fail = await failDisp.dispatch(cmd('upload_image', { imageUrl: 'https://cdn/a.png' }));
   assert.equal(fail.ok, false);
   assert.equal(fail.error, 'image_not_attached', '上传失败如实回报，绝不翻成 ok:true');
@@ -186,7 +200,7 @@ test('AC-MEDIA upload_image 经注入 uploader → 成功透传 ok:true / 失败
 test('AC-MEDIA upload_image 缺 imageUrl（有 uploader）→ no_target', async () => {
   const doc = buildDom(publishPageHtml());
   const uploader = { upload: async () => ({ ok: true }) } as any;
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, uploader);
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, uploader);
   const res = await dispatcher.dispatch(cmd('upload_image', {}));
   assert.equal(res.ok, false);
   assert.equal(res.error, 'no_target');
@@ -196,7 +210,7 @@ test('AC-MEDIA set_cover → 定位封面入口 + 封面激活态后置校验通
   // 校验器 fail-closed，只认精确锚点 note.publish_cover_active（模拟校准后注入的真实成功态）。
   const extra = `<button data-action-id="note.publish_set_cover">设为封面</button><div data-action-id="note.publish_cover_active"></div>`;
   const doc = buildDom(publishPageHtml(extra));
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
   const res = await dispatcher.dispatch(cmd('set_cover', { imageUrl: 'https://cdn/a.png' }));
   assert.equal(res.ok, true);
   assert.equal(res.kind, 'set_cover');
@@ -204,7 +218,7 @@ test('AC-MEDIA set_cover → 定位封面入口 + 封面激活态后置校验通
 
 test('AC-MEDIA set_cover 封面入口缺失 → ok:false（诚实 no_target，不假成功）', async () => {
   const doc = buildDom(publishPageHtml()); // 无封面入口
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)), { maxAttempts: 2 });
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), { maxAttempts: 2 });
   const res = await dispatcher.dispatch(cmd('set_cover', { imageUrl: 'https://cdn/a.png' }));
   assert.equal(res.ok, false);
   assert.ok(res.error, '失败必须带真实 error');
@@ -217,7 +231,7 @@ test('AC-CMD-S4 add_with_candidate 按 candidateKind 路由：mention/location/c
     <input data-action-id="note.publish_collection" placeholder="加入合集" />
   `;
   const doc = buildDom(publishPageHtml(extra));
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
 
   const mention = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'mention', value: '老王' }));
   assert.equal(mention.ok, true, 'mention 应成功');
@@ -233,7 +247,7 @@ test('AC-CMD-S4 add_with_candidate 按 candidateKind 路由：mention/location/c
 
 test('AC-CMD-S4 add_with_candidate(mention) 控件缺失 → ok:false（诚实 no_target，不假成功）', async () => {
   const doc = buildDom(publishPageHtml()); // 无 mention 控件
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)), { maxAttempts: 2 });
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), { maxAttempts: 2 });
   const res = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'mention', value: '查无此控件' }));
   assert.equal(res.ok, false);
   assert.ok(res.error, '失败必须带真实 error');
@@ -242,7 +256,7 @@ test('AC-CMD-S4 add_with_candidate(mention) 控件缺失 → ok:false（诚实 n
 test('AC-CMD-S4 set_option(visibility) → 定位选项控件 + 值校验通过', async () => {
   const extra = `<button data-action-id="note.publish_set_option.visibility">公开</button>`;
   const doc = buildDom(publishPageHtml(extra));
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
   const res = await dispatcher.dispatch(cmd('set_option', { optionKind: 'visibility', optionValue: '公开' }));
   assert.equal(res.ok, true);
   assert.equal(res.kind, 'set_option');
@@ -251,8 +265,57 @@ test('AC-CMD-S4 set_option(visibility) → 定位选项控件 + 值校验通过'
 test('AC-CMD-S4 set_schedule → 定位定时控件 + 值写入', async () => {
   const extra = `<label>定时发布</label><input data-action-id="note.publish_set_schedule" placeholder="选择时间" />`;
   const doc = buildDom(publishPageHtml(extra));
-  const dispatcher = new PublishCommandDispatcher(depsFor(doc, new FakeExecutor(doc)));
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
   const res = await dispatcher.dispatch(cmd('set_schedule', { publishTime: 1800000000000 }));
   assert.equal(res.ok, true);
   assert.equal(res.kind, 'set_schedule');
+});
+
+// ── change publish-fill-humanization（Phase A）：CDP 路径填写拟人化 ──────────────
+
+/** 记录 CDP 调用的最小 fake；Runtime.evaluate（FOCUS/CHECK）恒返回 true，使填写后置校验通过。 */
+class FakeCdp {
+  readonly calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+    this.calls.push({ method, params });
+    if (method === 'Runtime.evaluate') return { result: { value: true } } as T;
+    return {} as T;
+  }
+  inserts(): string[] {
+    return this.calls.filter((c) => c.method === 'Input.insertText').map((c) => String(c.params?.text ?? ''));
+  }
+}
+
+function dispatcherWithCdp(cdp: FakeCdp, pacingEnabled = true): PublishCommandDispatcher {
+  const doc = buildDom(publishPageHtml());
+  return new PublishCommandDispatcher(
+    depsFor(doc, new FakeExecutor(doc)),
+    {},
+    Date.now,
+    undefined,
+    cdp as unknown as ConstructorParameters<typeof PublishCommandDispatcher>[4],
+    { sleep: instantSleep, enabled: pacingEnabled, random: () => 0.5 },
+  );
+}
+
+test('拟人填写：CDP 路径标题/正文逐字打字（多次 insertText，拼接==原值）而非一次性灌入', async () => {
+  const cdp = new FakeCdp();
+  const dispatcher = dispatcherWithCdp(cdp);
+  const value = '大模型选型避坑';
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, true);
+  const inserts = cdp.inserts();
+  assert.equal(inserts.length, Array.from(value).length, '应逐字 insertText（每字符一次）');
+  assert.equal(inserts.join(''), value, '逐字拼接应等于原值（不丢内容）');
+});
+
+test('拟人填写：pacing 关 → 回退一次性 insertText（旧快路径，零回归）', async () => {
+  const cdp = new FakeCdp();
+  const dispatcher = dispatcherWithCdp(cdp, false);
+  const value = '大模型选型避坑';
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'title', value }));
+  assert.equal(res.ok, true);
+  const inserts = cdp.inserts();
+  assert.equal(inserts.length, 1, 'pacing 关时一次性灌入');
+  assert.equal(inserts[0], value);
 });
