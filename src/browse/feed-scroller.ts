@@ -101,6 +101,9 @@ const CARD_SCAN_JS = `(function(){
       var a = el.querySelector('a[title]');
       if (a) title = a.getAttribute('title') || undefined;
     }
+    // 跳过非笔记插页（搜索推荐行「猜你想搜」等）：它们会占 position 槽污染 index↔noteId 配对、并被误当卡片打开。
+    // 跳过即不 pos++,使真笔记的 index 无空洞、与 noteId 一一对应。⚠️denylist 串需真机核对是否覆盖现行插页。
+    if (title === '猜你想搜' || title === '猜你想看' || title === '大家都在搜') continue;
     var author = txt(el, ['.author', '[class*="author"]', '[class*="name"]']);
     // 点赞数仅取 like 作用域内的计数：去掉贪婪的裸 [class*="count"] 末位兜底（它会抓到
     // 收藏/评论/分享的 count，造成 feed 卡与详情页点赞数口径不一）。宁可取空也不取错。

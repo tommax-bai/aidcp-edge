@@ -149,6 +149,12 @@ export const NOTE_BODY_SELECTORS: readonly string[] = [
 ];
 
 /**
+ * 非笔记插页标题 denylist（小红书把「猜你想搜」搜索推荐行等混进瀑布流 / 详情页）：抽到这些串视为未命中,
+ * 既防详情标题被污染（真机实测详情标题偶发被抓成「猜你想搜」），也供 feed 卡片识别跳过这些插页（见 feed-scroller CARD_SCAN）。
+ */
+export const INTERSTITIAL_TITLES: ReadonlySet<string> = new Set(['猜你想搜', '猜你想看', '大家都在搜']);
+
+/**
  * 从当前打开的 modal 中提取笔记内容。
  * 找不到笔记详情容器时降级到整个 document 抽取（单条笔记页场景）。
  */
@@ -162,12 +168,11 @@ export async function extractNoteContent(dom: DomProvider): Promise<NoteContent>
   }
   const container = scope as Element;
 
-  const title = textOf(container, [
-    '#detail-title',
-    '.title',
-    '[class*="title"]',
-    'h1',
-  ]);
+  // 标题：收紧选择器——去掉贪婪的 [class*="title"] 与裸 h1（作用域降级到整页时它们会命中全局
+  // 「猜你想搜」搜索推荐插页标题，真机实测污染源）；再过一道插页 denylist,命中则视为未抓到（置空）,
+  // 交由调用方（openAndReportNote）回退卡片标题。⚠️选择器需真机校准：确认 #detail-title/.title 仍是现行详情标题。
+  let title = textOf(container, ['#detail-title', '.note-content .title', '.title']);
+  if (INTERSTITIAL_TITLES.has(title)) title = '';
   // 正文取共享 NOTE_BODY_SELECTORS（与渲染门 waitForNoteBody 同一份，避免漂移）。注意：评论区也用
   // .note-text，故所有 .note-text 候选都下钻在 desc/note-scroller/note-content 容器作用域内，
   // 不用裸 .note-text 兜底（会抓到评论），也不回退裸 .note-content / [class*="content"]（会拼进标题+时间）。
@@ -179,9 +184,14 @@ export async function extractNoteContent(dom: DomProvider): Promise<NoteContent>
     '[class*="author"]',
   ]);
 
-  const likes = countNear(container, ['like-wrapper', 'like']);
-  const collects = countNear(container, ['collect-wrapper', 'collect']);
-  const comments = countNear(container, ['comment-wrapper', 'chat-wrapper', 'comment']);
+  // 点赞/收藏/评论数限定到互动栏（engage-bar）作用域统计——否则在整个 modal 内扫会落到评论区每条评论
+  // 自带的 like-wrapper（真机实测「卡片👍311 vs 详情👍1」：详情点赞被错成某条评论的赞数）。collect-wrapper
+  // 只在互动栏故收藏数本来就对。取不到 engage-bar 才退回整个 container（保底）。⚠️engage-bar 类名需真机校准。
+  // 与 browse-session.executeLikeOrCollect 的 '.interactions.engage-bar' 锚点同口径。
+  const engageBar = container.querySelector('.interactions.engage-bar, .engage-bar') ?? container;
+  const likes = countNear(engageBar, ['like-wrapper', 'like']);
+  const collects = countNear(engageBar, ['collect-wrapper', 'collect']);
+  const comments = countNear(engageBar, ['comment-wrapper', 'chat-wrapper', 'comment']);
 
   const noteUrl = attrOf(container, ['a[href*="/explore/"]', 'a[href*="/discovery/"]'], 'href');
 

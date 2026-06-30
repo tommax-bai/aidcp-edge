@@ -760,6 +760,20 @@ export class BrowseSession {
       this.logger('[browse] 无可见卡片可上报');
       return;
     }
+    // 近重复折叠（change dedup）：同一快照里「同标题+同作者」只保留首张——小红书会把同一创作者近乎一样的
+    // 系列帖（不同 noteId）混进瀑布流,否则云端会对内容几乎相同的两条各开一次（真机实测「第7集 Harness」连开两次）。
+    // 标题或作者为空时用 noteId/coverUrl/position 当指纹,避免把多张「无标题」误折叠成一张。
+    {
+      const seenFp = new Set<string>();
+      const before = cards.length;
+      cards = cards.filter((c) => {
+        const fp = c.title && c.author ? `${c.title}|${c.author}` : (c.noteId ?? c.coverUrl ?? `pos:${c.position}`);
+        if (seenFp.has(fp)) return false;
+        seenFp.add(fp);
+        return true;
+      });
+      if (cards.length < before) this.logger(`[browse] 近重复折叠：${before} → ${cards.length} 张`);
+    }
     const payload: PageCardsPayload = {
       cards: cards.map((card, i) => ({
         index: card.position ?? i,
@@ -844,6 +858,11 @@ export class BrowseSession {
     if (content.likes === 0 && card.likes) {
       const { parseCount } = await import('./note-extractor.js');
       content.likes = parseCount(card.likes);
+    }
+    // 标题兜底（change detail-extraction）：详情标题抽空（选择器未命中 / 命中插页被 denylist 置空）时回退卡片标题,
+    // 避免上报「空标题」note.detail。
+    if ((!content.title || content.title.trim() === '') && card.title) {
+      content.title = card.title;
     }
 
     // 解析真实 noteId：优先 feed 卡片 → modal 内 explore 链接 → 当前页面 URL → 合成兜底。
