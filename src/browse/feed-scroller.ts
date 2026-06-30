@@ -13,7 +13,7 @@
  */
 
 import type { BrowseCdp } from './cdp-util.js';
-import { evalJson, dispatchClick, type RandomFn, defaultRandom } from './cdp-util.js';
+import { evalJson, evalRaw, dispatchClick, type RandomFn, defaultRandom } from './cdp-util.js';
 import { generateScrollSequence } from '../humanize/index.js';
 
 /** 一张笔记卡片（feed 中的单元） */
@@ -163,12 +163,36 @@ export class CdpFeedScroller implements FeedScroller {
     const jitter = 1 + (this.random() - 0.5) * 0.4;
     const total = Math.round(this.scrollDistancePx * jitter);
     const seq = generateScrollSequence(total, { random: this.random });
-    for (const frame of seq) {
-      await evalJson<unknown>(
-        this.cdp,
-        `(function(){ window.scrollBy(0, ${frame.deltaY}); return true; })()`,
+    // 滚动机制：CDP 真实 mouseWheel 在 feed 区中心派发，浏览器原生滚动当前命中的可滚容器——
+    // 小红书宽/窄两布局可滚元素不同（window/document 或内层 .feeds-page，见 docs/xhs-layout-states.md），
+    // 旧的 window.scrollBy 在 document 不可滚的布局上是 no-op（feed 永不推进）。真实滚轮两布局通吃，
+    // 且补回硬件 wheel 事件（消除"无 wheel 事件"指纹），并触发 XHS 懒加载。
+    const vp = await evalRaw<{ w: number; h: number }>(
+      this.cdp,
+      '(function(){ return { w: window.innerWidth || 1280, h: window.innerHeight || 800 }; })()',
+    ).catch(() => ({ w: 1280, h: 800 }));
+    const cx = Math.round(vp.w / 2);
+    const cy = Math.round(vp.h / 2);
+    // 先把光标移到 feed 中心（hover 真实化），再逐帧派发滚轮，保留惯性节奏。
+    // best-effort：单次派发失败（如通知巡视后回 feed 的页面导航瞬间，CDP 对 Input.dispatchMouseEvent 短暂超时）
+    // 只中止本轮滚动、【绝不抛出】——否则一次瞬时超时就会让整个 browse loop 结束（真机实测踩过的坑）。
+    // 下一轮 feed 稳定后再滚；mouseWheel 在稳定页正常生效并触发懒加载。
+    try {
+      await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: cx, y: cy });
+      for (const frame of seq) {
+        await this.cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseWheel',
+          x: cx,
+          y: cy,
+          deltaX: 0,
+          deltaY: frame.deltaY,
+        });
+        if (frame.delay > 0) await this.sleep(frame.delay);
+      }
+    } catch (err) {
+      console.warn(
+        `[feed-scroller] 滚动派发中止（本轮跳过，不中断浏览）：${err instanceof Error ? err.message : String(err)}`,
       );
-      if (frame.delay > 0) await this.sleep(frame.delay);
     }
   }
 

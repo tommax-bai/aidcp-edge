@@ -17,13 +17,28 @@ import type { BrowseCdp } from './cdp-util.js';
 import { evalRaw, dispatchClick, dispatchKeystrokes, pressEnter, type RandomFn } from './cdp-util.js';
 import { sampleDelay, TIMING_PRESETS } from '../humanize/index.js';
 
-/** 小红书搜索框常见选择器（按优先级） */
+/**
+ * 小红书搜索框选择器（按优先级）。当前真机：AI 搜索框是 textarea#search-input
+ * （name=aiSearchTextarea，placeholder 为热搜词而非"搜索"，故不能靠 placeholder*=搜索），
+ * 位于 .search-area-in-header 内、常驻可见（宽/窄两布局都在，见 docs/xhs-layout-states.md）。
+ */
 export const XHS_SEARCH_INPUT_SELECTOR =
-  '#search-input, input#search-input, input[placeholder*="搜索"], ' +
+  // 当前真机：搜索框是 textarea[name=aiSearchTextarea]。宽/窄布局有【两个】实例、id 不同且只有一个可见：
+  //   窄布局 → textarea#search-input（header 框，可见）；
+  //   宽布局 → textarea#search-input-in-feeds（in-content 大框，可见），而 #search-input 在 display:none 的 ai-header 里。
+  // 故选择器同时覆盖两者；取值/聚焦时务必【取可见的那个】（见 buildIsVisibleJs/buildFocusClearJs）。
+  'textarea[name="aiSearchTextarea"], textarea#search-input, textarea#search-input-in-feeds, ' +
+  '#search-input, #search-input-in-feeds, input#search-input, .search-area-in-header textarea, ' +
+  '.search-box-in-content textarea, [class*="search"] textarea, input[placeholder*="搜索"], ' +
   'input[type="search"], [class*="search"] input';
 
-/** 搜索图标选择器（点击后展开搜索框） */
+/** 搜索图标选择器（旧 explore 收起态点击展开用；当前布局搜索框常驻，多为冗余但保留兜底）。 */
 export const XHS_SEARCH_ICON_SELECTOR = 'div.search-icon, .search-icon';
+
+/** 搜索提交按钮：AI textarea 上 Enter 可能只换行不导航，须点提交按钮兜底（真机 .bottom-box-right-submit-button）。 */
+export const XHS_SEARCH_SUBMIT_SELECTOR =
+  '.bottom-box-right-submit-button, .search-area-in-header .submit-button, ' +
+  '.search-area-in-header [class*="submit"], [class*="search"] [class*="submit-button"]';
 
 export interface ExecuteSearchDeps {
   cdp: BrowseCdp;
@@ -35,6 +50,8 @@ export interface ExecuteSearchDeps {
   searchSelector?: string;
   /** 搜索图标选择器（默认 XHS_SEARCH_ICON_SELECTOR） */
   searchIconSelector?: string;
+  /** 搜索提交按钮选择器（默认 XHS_SEARCH_SUBMIT_SELECTOR） */
+  searchSubmitSelector?: string;
   /** 日志输出（默认 console.log） */
   logger?: (msg: string) => void;
 }
@@ -43,10 +60,12 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** 生成"聚焦并清空搜索框"的 JS（命中返回 true） */
+/** 生成"聚焦并清空搜索框"的 JS（命中返回 true）。取【可见】的那个（宽/窄布局两实例，只有一个可见）。 */
 function buildFocusClearJs(selector: string): string {
   return `(function(){
-    var el = document.querySelector(${JSON.stringify(selector)});
+    var cands = Array.prototype.slice.call(document.querySelectorAll(${JSON.stringify(selector)}));
+    // 宽布局可见框是 #search-input-in-feeds、窄布局是 #search-input；querySelector 取首个可能命中隐藏的 header 框。
+    var el = cands.filter(function(e){ return e.offsetWidth > 0 && e.offsetParent !== null; })[0] || cands[0];
     if (!el) return false;
     el.focus();
     try {
@@ -58,12 +77,11 @@ function buildFocusClearJs(selector: string): string {
   })()`;
 }
 
-/** 生成"检查搜索框是否可见（offsetWidth>0）"的 JS（可见返回 true） */
+/** 生成"检查搜索框是否可见（任一候选 offsetWidth>0）"的 JS（可见返回 true）。 */
 function buildIsVisibleJs(selector: string): string {
   return `(function(){
-    var el = document.querySelector(${JSON.stringify(selector)});
-    if (!el) return false;
-    return el.offsetWidth > 0;
+    var cands = Array.prototype.slice.call(document.querySelectorAll(${JSON.stringify(selector)}));
+    return cands.some(function(el){ return el.offsetWidth > 0 && el.offsetParent !== null; });
   })()`;
 }
 
@@ -129,6 +147,27 @@ export async function expandSearchBar(
   return (await evalRaw<boolean>(cdp, buildIsVisibleJs(inputSelector))) === true;
 }
 
+/** 点击搜索提交按钮（拟人化点击其中心坐标）。命中并点击返回 true，找不到返回 false。 */
+export async function clickSearchSubmit(
+  cdp: BrowseCdp,
+  selector: string,
+  options: { random?: RandomFn; sleep: (ms: number) => Promise<void> },
+): Promise<boolean> {
+  const rectRaw = await evalRaw<string | null>(cdp, buildIconRectJs(selector));
+  if (!rectRaw) return false;
+  let rect: { x: number; y: number };
+  try {
+    rect =
+      typeof rectRaw === 'string'
+        ? (JSON.parse(rectRaw) as { x: number; y: number })
+        : (rectRaw as { x: number; y: number });
+  } catch {
+    return false;
+  }
+  await dispatchClick(cdp, rect.x, rect.y, { random: options.random, sleep: options.sleep });
+  return true;
+}
+
 /**
  * 等待搜索导航完成：轮询 location.href 直到包含 "search_result" 或 "search"。
  *
@@ -186,14 +225,22 @@ export async function executeSearch(
   await sleep(sampleDelay(TIMING_PRESETS.action, random));
   await pressEnter(cdp);
 
-  // 3. 等待导航到搜索结果页（轮询 URL，最多 5 秒）。
-  const navigated = await waitForSearchNavigation(cdp, sleep, 5000);
+  // 3. 等待导航到搜索结果页。先给 Enter 一个短窗口；AI 搜索 textarea 上 Enter 可能只换行不导航，
+  //    未跳转则点提交按钮兜底（当前真机 .bottom-box-right-submit-button）。
+  let navigated = await waitForSearchNavigation(cdp, sleep, 1800);
+  if (!navigated) {
+    const submitSelector = deps.searchSubmitSelector ?? XHS_SEARCH_SUBMIT_SELECTOR;
+    const clicked = await clickSearchSubmit(cdp, submitSelector, { random, sleep });
+    if (clicked) logger('[search] Enter 未跳转，点击搜索提交按钮兜底');
+    navigated = await waitForSearchNavigation(cdp, sleep, 4000);
+  }
   if (navigated) {
     const href = await evalRaw<string>(cdp, `(function(){ return location.href; })()`);
     logger(`[search] 搜索导航成功: ${href}`);
     // 4. 额外等待让搜索结果卡片加载。
     await sleep(sampleDelay(TIMING_PRESETS.reading, random));
   } else {
+    logger('[search] 未确认导航到搜索结果页（待真机确认提交方式）');
     // 兜底：即使未确认导航，也给结果页渲染留出时间。
     await sleep(sampleDelay(TIMING_PRESETS.reading, random));
   }

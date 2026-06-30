@@ -42,11 +42,12 @@ test('getVisibleCards: 非数组返回时降级为空数组', async () => {
   assert.deepEqual(cards, []);
 });
 
-test('scrollNext: 惯性序列多帧 window.scrollBy（加速→减速）', async () => {
-  const exprs: string[] = [];
-  const { cdp } = fakeCdp((method, params) => {
-    if (method === 'Runtime.evaluate') exprs.push(String(params.expression));
-    return { result: { type: 'boolean', value: true } };
+test('scrollNext: 惯性序列多帧真实 mouseWheel（加速→减速，两布局通吃）', async () => {
+  // 新机制：CDP 真实 mouseWheel 在 feed 中心派发（取代旧 window.scrollBy，后者在 document 不可滚的
+  // 窄布局上 no-op；见 docs/xhs-layout-states.md）。仅一次 Runtime.evaluate 读 viewport。
+  const { cdp, calls } = fakeCdp((method) => {
+    if (method === 'Runtime.evaluate') return { result: { type: 'object', value: { w: 1280, h: 800 } } };
+    return { result: { value: true } };
   });
   const scroller = new CdpFeedScroller(cdp, {
     random: () => 0.5,
@@ -54,19 +55,22 @@ test('scrollNext: 惯性序列多帧 window.scrollBy（加速→减速）', asyn
     sleep: async () => {},
   });
   await scroller.scrollNext();
-  // 惯性序列应为 8–15 帧，全部走 window.scrollBy
-  assert.ok(exprs.length >= 8 && exprs.length <= 15, `帧数应在 8–15，实际 ${exprs.length}`);
-  for (const e of exprs) assert.match(e, /window\.scrollBy/);
-  // 解析每帧 deltaY，验证总和为正（向下滚）且呈先增后减
-  const deltas = exprs.map((e) => {
-    const m = e.match(/scrollBy\(0,\s*(-?\d+)\)/);
-    return m ? Number(m[1]) : 0;
-  });
+  const wheels = calls.filter(
+    (c) => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mouseWheel',
+  );
+  // 惯性序列应为 8–15 帧，全部走真实 mouseWheel
+  assert.ok(wheels.length >= 8 && wheels.length <= 15, `帧数应在 8–15，实际 ${wheels.length}`);
+  const deltas = wheels.map((c) => Number(c.params.deltaY));
   const sum = deltas.reduce((a, b) => a + b, 0);
   assert.ok(sum > 0, '总位移向下');
   const peak = Math.max(...deltas);
   assert.ok(deltas[0] < peak, '首帧小于峰值（加速）');
   assert.ok(deltas[deltas.length - 1] < peak, '末帧小于峰值（减速）');
+  // 不应再用 window.scrollBy
+  const evals = calls
+    .filter((c) => c.method === 'Runtime.evaluate')
+    .map((c) => String(c.params.expression));
+  for (const e of evals) assert.doesNotMatch(e, /window\.scrollBy/);
 });
 
 test('openCard: 沿贝塞尔轨迹移动后 press/release（非瞬移）', async () => {

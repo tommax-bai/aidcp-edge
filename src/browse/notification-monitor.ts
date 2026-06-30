@@ -71,12 +71,22 @@ export function realBadgeScanFnJs(): string {
 export function buildNotificationBadgeJs(): string {
   return `(function(){
     ${realBadgeScanFnJs()}
-    var entry = document.querySelector('a[href*="/notification"]') || document.querySelector('a[href*="/notice"]');
-    if (!entry) return JSON.stringify({ unread: false, count: 0 });
-    // 角标容器（包住图标 + 条件渲染的角标，不含"通知"文字标签）。无容器则保守判无（待真机重校，而非误报）。
-    var container = entry.querySelector('[class*="badge"]');
-    if (!container) return JSON.stringify({ unread: false, count: 0 });
-    return JSON.stringify(__realBadgeIn(container, false));
+    // 小红书 web 双布局（宽=左侧栏 / 窄=底部图标栏，见 docs/xhs-layout-states.md）：DOM 常【同时存在】
+    // 隐藏的侧栏通知入口 + 可见的底部通知入口；旧码 querySelector 取首个 → 可能命中【隐藏】那个 →
+    // .count 不可见 → 窄布局恒判无未读（真机实测漏报 10 条未读）。
+    // 修复：遍历所有入口，对各自的角标容器跑结构判据(__realBadgeIn 内含可见性判定)，命中第一个真实可见角标即返回——
+    // 自然取到当前布局下【可见】的那个入口的未读，宽/窄两布局通吃。
+    var entries = Array.prototype.slice.call(
+      document.querySelectorAll('a[href*="/notification"], a[href*="/notice"]')
+    );
+    if (entries.length === 0) return JSON.stringify({ unread: false, count: 0 });
+    for (var i = 0; i < entries.length; i++) {
+      var container = entries[i].querySelector('[class*="badge"]');
+      if (!container) continue;
+      var r = __realBadgeIn(container, false);
+      if (r.unread) return JSON.stringify(r);
+    }
+    return JSON.stringify({ unread: false, count: 0 });
   })()`;
 }
 
