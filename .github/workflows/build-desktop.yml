@@ -31,7 +31,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Build macOS installers
-        run: npm run electron:build:mac
+        # --publish never: in CI electron-builder otherwise tries to publish to a
+        # GitHub release and fails on a missing GH_TOKEN. We only want artifacts.
+        run: |
+          npm run build:dist
+          npx electron-builder --mac --publish never
         env:
           # Unsigned build: stop electron-builder from auto-discovering a signing
           # identity on the runner keychain and attempting to sign/notarize.
@@ -60,7 +64,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Build Windows installer
-        run: npm run electron:build:win
+        # --publish never: avoid electron-builder's CI auto-publish (needs GH_TOKEN).
+        run: |
+          npm run build:dist
+          npx electron-builder --win --publish never
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
