@@ -13,7 +13,7 @@
  *
  * 环境变量：
  *  - AIDCP_CLOUD_URL       云端 WS 地址（默认 ws://127.0.0.1:8787）
- *  - AIDCP_EDGE_ID         边缘节点标识（默认 edge-local）
+ *  - AIDCP_EDGE_ID         边缘节点标识（不设则按节点隔离边界派生唯一稳定值：adspower→ads-<分身id> / self→self-<目录末段> / 兜底→host-<主机名>；绝不回落共享常量）
  *  - AIDCP_BROWSER_PROVIDER 浏览器 provider：self | adspower（**默认 adspower**；self 自起真实指纹 Chrome）
  *  - AIDCP_ADS_USER_ID     adspower 模式必填：目标 AdsPower profile id（缺则诚实报错、绝不回落 self）
  *  - AIDCP_ADS_API_BASE    AdsPower 本地 API 基址（默认 http://local.adspower.net:50325）
@@ -40,6 +40,7 @@ import {
   type BrowserLaunchOptions,
 } from './cdp/index.js';
 import { EdgeClient } from './client/edge-client.js';
+import { deriveEdgeId } from './client/edge-id.js';
 import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
 import { publishPost } from './flows/publish-post.js';
@@ -84,7 +85,12 @@ async function sweepImageTempDirs(): Promise<void> {
 async function main(): Promise<void> {
   await sweepImageTempDirs();
   const cloudUrl = process.env.AIDCP_CLOUD_URL ?? 'ws://121.89.85.150:8787';
-  const edgeId = process.env.AIDCP_EDGE_ID ?? 'edge-local';
+  // 节点身份（edgeId）：缺省按节点隔离边界派生【唯一且稳定】的值，绝不回落共享常量（旧 'edge-local' 致同机/跨机
+  // 两个裸 npm start 互踢的根因，见 edge-id.ts）。唯一→根除互踢与下行串号；稳定→保住云端「同节点重连顶替」。
+  const edgeIdDerivation = deriveEdgeId();
+  const edgeId = edgeIdDerivation.edgeId;
+  if (edgeIdDerivation.warning) console.warn(`[aidcp-edge] ⚠ ${edgeIdDerivation.warning}`);
+  console.log(`[aidcp-edge] 节点身份 edgeId=${edgeId} [source=${edgeIdDerivation.source}]`);
   // hello 身份（account-identity-from-login）：默认从「登录后读出的真实稳定 id」确立（见 attachToPage 之后）；
   // 环境变量 AIDCP_ACCOUNT_ID 降级为【可选覆盖】（预置/特殊场景的逃生阀）。
   const overrideAccountId = process.env.AIDCP_ACCOUNT_ID;
