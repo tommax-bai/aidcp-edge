@@ -1,0 +1,73 @@
+name: Build Desktop Installers
+
+# Manually-triggered build of the AIDCP Edge desktop app.
+#
+# Why this exists: the macOS installer (dmg/zip) can ONLY be produced on a
+# macOS machine (hdiutil / dmg tooling is mac-only), so it cannot be built on
+# the Windows dev box. GitHub provides macOS runners, so this workflow builds
+# mac (and Windows, for parity) in the cloud and hands back the installers.
+#
+# How to use:
+#   1) Bump "version" in package.json first (the installers inherit it).
+#   2) Actions tab -> "Build Desktop Installers" -> "Run workflow".
+#   3) When it finishes, download the installers from the run page's Artifacts.
+#
+# The app is intentionally UNSIGNED (build.mac.identity = null), so no Apple
+# certificates/secrets are required.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    name: macOS (dmg + zip, x64 + arm64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build macOS installers
+        run: npm run electron:build:mac
+        env:
+          # Unsigned build: stop electron-builder from auto-discovering a signing
+          # identity on the runner keychain and attempting to sign/notarize.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aidcp-macos
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            dist-electron/*.dmg
+            dist-electron/*.zip
+            dist-electron/*.blockmap
+            dist-electron/latest-mac.yml
+
+  build-windows:
+    name: Windows (nsis exe, x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build Windows installer
+        run: npm run electron:build:win
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aidcp-windows
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            dist-electron/*.exe
+            dist-electron/*.blockmap
+            dist-electron/latest.yml
