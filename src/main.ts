@@ -101,8 +101,8 @@ async function main(): Promise<void> {
   const cdpPort = Number(process.env.AIDCP_CDP_PORT ?? 9222);
   const pageUrl = process.env.AIDCP_PAGE_URL;
 
-  // 浏览器启动层可插拔（change adspower-browser-provider）：默认 self 自起真实指纹 Chrome；
-  // AIDCP_BROWSER_PROVIDER=adspower 时改由 AdsPower 指纹浏览器托管（拿 debug_port 喂现成 attach）。
+  // 浏览器启动层可插拔（change adspower-browser-provider）：默认 adspower（AdsPower 指纹浏览器托管，
+  // 拿 debug_port 喂现成 attach）；AIDCP_BROWSER_PROVIDER=self 时改为自起真实指纹 Chrome。
   const provider = selectBrowserProvider({ logImpl: (m) => console.log(m) });
   console.log(`[aidcp-edge] 准备浏览器（provider=${provider.kind}，CDP ${cdpHost}:${cdpPort}）...`);
   const launchOpts: BrowserLaunchOptions = { host: cdpHost, port: cdpPort };

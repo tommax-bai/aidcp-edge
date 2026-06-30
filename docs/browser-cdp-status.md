@@ -26,6 +26,8 @@
 ### 1.1 实际行为：默认「自己拉起独立 Chrome」，端口被占用则诚实拒绝复用
 
 > ⚠️ 本节结论相对原快照已反转。当前默认是 **edge 自己 spawn 一个独立 Chrome（专用调试端口 + 独立 `user-data-dir`）**；探测到调试端口上已有 Chrome 在监听时，**默认 `throw` 拒绝静默接管**，只有显式 `AIDCP_CDP_ALLOW_REUSE=true` 才走复用分支。下方旧版“先复用、后启动”的描述已不成立。
+>
+> 🔁 **再反转（change `adspower-browser-provider`）**：上面这段「edge 自己 spawn Chrome」只是 **`self` provider** 的行为；运行时**默认 provider 已是 `adspower`**（`AIDCP_BROWSER_PROVIDER` 缺省 = `adspower`，`src/cdp/browser-provider.ts` 的 `selectBrowserProvider`），由 AdsPower 本地 API 托管指纹浏览器、拿其 `debug_port` 交给现成 `attachToPage`。本节描述的 `launchChrome()` 自起/复用逻辑，仅在显式 `AIDCP_BROWSER_PROVIDER=self`（以及 `launch-multinode` / Electron 桌面版两条钉死 self 的路径）时才走。adspower 缺 `AIDCP_ADS_USER_ID` 时**诚实报错、绝不回落 self**。
 
 `src/main.ts` 启动时先读取 CDP host/port，随后调用 `launchChrome()`，再调用 `attachToPage()`：
 
