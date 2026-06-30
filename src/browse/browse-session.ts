@@ -50,7 +50,7 @@ import type { OverlayKind, OverlayMonitor } from './overlay-monitor.js';
 import { isBlockingKind } from './overlay-monitor.js';
 import type { extractNoteContent as ExtractFn } from './note-extractor.js';
 import { NOTE_BODY_SELECTORS, parseCount } from './note-extractor.js';
-import { executeSearch } from './search-handler.js';
+import { executeSearch, applySearchFilters } from './search-handler.js';
 import { evalRaw, type RandomFn, type BrowseCdp } from './cdp-util.js';
 import { CdpDisconnectedError } from '../cdp/client.js';
 import { buildNotificationHomeJs, buildNotificationItemsJs, buildNotificationCategoryItemsJs } from './notification-monitor.js';
@@ -623,9 +623,9 @@ export class BrowseSession {
         break;
       }
       case 'search.execute': {
-        const payload = env.payload as { keyword?: string; maxResults?: number };
+        const payload = env.payload as { keyword?: string; maxResults?: number; sort?: string; timeWindow?: string };
         const kw = payload.keyword ?? '';
-        this.logger(`[browse] 命令: search.execute「${kw}」`);
+        this.logger(`[browse] 命令: search.execute「${kw}」${payload.sort ? ` sort=${payload.sort}` : ''}${payload.timeWindow ? ` time=${payload.timeWindow}` : ''}`);
         await this.safeCloseModal();
         if (kw) {
           try {
@@ -635,6 +635,14 @@ export class BrowseSession {
               sleep: this.sleep,
               logger: this.logger,
             });
+            // 按需评论任务（change comment-search-command）：搜到结果页后应用原生「排序 + 发布时间」筛选。
+            // 自治浏览不带 sort/timeWindow → 跳过，行为不变。控件未生效 honest 降级（不冒充已筛）。
+            if (payload.sort || payload.timeWindow) {
+              await applySearchFilters(
+                { sort: payload.sort, timeWindow: payload.timeWindow },
+                { cdp: this.deps.cdp, random: this.random, sleep: this.sleep, logger: this.logger },
+              );
+            }
           } catch (err) {
             this.logger(`[browse] 搜索执行失败：${(err as Error).message}`);
           }

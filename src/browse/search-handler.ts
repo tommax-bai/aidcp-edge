@@ -40,6 +40,129 @@ export const XHS_SEARCH_SUBMIT_SELECTOR =
   '.bottom-box-right-submit-button, .search-area-in-header .submit-button, ' +
   '.search-area-in-header [class*="submit"], [class*="search"] [class*="submit-button"]';
 
+/**
+ * 搜索结果页原生「排序」标签的中文文案（change comment-search-command）。
+ * 真机：搜索结果页顶部一排排序 tab（综合/最新/最多点赞/最多收藏/最多评论），按文案点击最稳（跨布局/类名漂移）。
+ */
+export const SEARCH_SORT_TEXT: Record<string, string> = {
+  comprehensive: '综合',
+  latest: '最新',
+  most_liked: '最多点赞',
+  most_collected: '最多收藏',
+  most_commented: '最多评论',
+};
+
+/**
+ * 搜索结果页原生「发布时间」筛选的中文文案。多在「筛选」面板内（不限/一天内/一周内/半年内）。
+ */
+export const SEARCH_TIME_TEXT: Record<string, string> = {
+  all: '不限',
+  one_day: '一天内',
+  one_week: '一周内',
+  half_year: '半年内',
+};
+
+/**
+ * 生成「按可见文案精确匹配、取最小面积叶子元素中心坐标」的 JS（返回 JSON {x,y} 或 null）。
+ * 精确相等（textContent.trim() === 目标）避免命中包含子节点文案的大容器；取最小面积=最贴近真正可点的那个。
+ */
+function buildFindByTextRectJs(texts: string[]): string {
+  return `(function(){
+    var targets = ${JSON.stringify(texts)};
+    var nodes = Array.prototype.slice.call(document.querySelectorAll('button,a,span,div,li,label,p'));
+    var best = null;
+    for (var i=0;i<nodes.length;i++){
+      var el = nodes[i];
+      var t = (el.textContent||'').trim();
+      if (targets.indexOf(t) === -1) continue;
+      if (el.offsetParent === null) continue;
+      var r = el.getBoundingClientRect();
+      if (r.width<=0 || r.height<=0) continue;
+      if (r.top<0 || r.left<0) continue;
+      var area = r.width*r.height;
+      if (!best || area < best.area) best = { area: area, x: r.left+r.width/2, y: r.top+r.height/2 };
+    }
+    return best ? JSON.stringify({x:best.x,y:best.y}) : null;
+  })()`;
+}
+
+/** 按可见文案找到元素并拟人化点击其中心；命中并点击返回 true，找不到返回 false（honest，不假点）。 */
+async function clickByVisibleText(
+  cdp: BrowseCdp,
+  texts: string[],
+  opts: { random?: RandomFn; sleep: (ms: number) => Promise<void> },
+): Promise<boolean> {
+  const rectRaw = await evalRaw<string | null>(cdp, buildFindByTextRectJs(texts)).catch(() => null);
+  if (!rectRaw) return false;
+  let rect: { x: number; y: number };
+  try {
+    rect = typeof rectRaw === 'string' ? (JSON.parse(rectRaw) as { x: number; y: number }) : (rectRaw as { x: number; y: number });
+  } catch {
+    return false;
+  }
+  await dispatchClick(cdp, rect.x, rect.y, { random: opts.random, sleep: opts.sleep });
+  return true;
+}
+
+export interface ApplySearchFiltersDeps {
+  cdp: BrowseCdp;
+  random?: RandomFn;
+  sleep?: (ms: number) => Promise<void>;
+  logger?: (msg: string) => void;
+}
+
+/**
+ * 在搜索结果页应用原生「排序 + 发布时间」筛选（change comment-search-command）。
+ *
+ * 按需评论任务要「最近一天 + 最多收藏」：靠点平台原生排序 tab（最多收藏）+ 时间筛选（一天内）。
+ * 按可见文案点击（跨宽/窄布局、跨类名漂移最稳）。两遍：先当作「行内 tab」直接点；缺则开「筛选」面板再点。
+ *
+ * 红线（honest）：控件定位失败 → 返回 applied=false，**绝不假装已筛**——云端据此降级回报、不把未筛结果当「最近一天最多收藏」。
+ * ⚠️ 选择器/面板机制随搜索页布局变，**待真机标定**（参 docs/xhs-layout-states.md、memory xhs-responsive-nav-layout）。
+ */
+export async function applySearchFilters(
+  opts: { sort?: string; timeWindow?: string },
+  deps: ApplySearchFiltersDeps,
+): Promise<{ sortApplied: boolean; timeApplied: boolean }> {
+  const { cdp } = deps;
+  const random = deps.random;
+  const sleep = deps.sleep ?? defaultSleep;
+  const logger = deps.logger ?? ((m: string) => console.log(m));
+  const pause = () => sleep(sampleDelay(TIMING_PRESETS.action, random));
+
+  const wantSort = opts.sort ? SEARCH_SORT_TEXT[opts.sort] : undefined;
+  const wantTime = opts.timeWindow ? SEARCH_TIME_TEXT[opts.timeWindow] : undefined;
+  if (!wantSort && !wantTime) return { sortApplied: false, timeApplied: false };
+
+  // 第一遍：当作行内 tab 直接按文案点（排序 tab 多为行内常驻）。
+  let sortApplied = wantSort ? await clickByVisibleText(cdp, [wantSort], { random, sleep }) : false;
+  if (wantSort) await pause();
+  let timeApplied = wantTime ? await clickByVisibleText(cdp, [wantTime], { random, sleep }) : false;
+  if (wantTime) await pause();
+
+  // 第二遍：仍有未命中 → 尝试开「筛选」面板再点（时间筛选常在面板内）。
+  if ((wantSort && !sortApplied) || (wantTime && !timeApplied)) {
+    const opened = await clickByVisibleText(cdp, ['筛选'], { random, sleep });
+    if (opened) {
+      await pause();
+      if (wantSort && !sortApplied) {
+        sortApplied = await clickByVisibleText(cdp, [wantSort], { random, sleep });
+        await pause();
+      }
+      if (wantTime && !timeApplied) {
+        timeApplied = await clickByVisibleText(cdp, [wantTime], { random, sleep });
+        await pause();
+      }
+    }
+  }
+
+  logger(
+    `[search] 原生筛选：排序「${wantSort ?? '-'}」=${sortApplied ? '已切' : '未生效'}、` +
+      `时间「${wantTime ?? '-'}」=${timeApplied ? '已切' : '未生效'}（未生效=诚实降级，云端不冒充已筛）`,
+  );
+  return { sortApplied, timeApplied };
+}
+
 export interface ExecuteSearchDeps {
   cdp: BrowseCdp;
   /** 随机源（延迟抖动 + 键盘节奏用） */
