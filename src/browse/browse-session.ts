@@ -848,7 +848,9 @@ export class BrowseSession {
     }
     await this.waitForEngageBar();
     // 正文(#detail-desc)常比 engage-bar 晚渲染：先等正文出现再抽取，避免抽到空/「标题+刚刚」。
-    await this.waitForNoteBody();
+    // 按类型给正文门余量：文字/图文渲染实测 <1s，3.5s 已远超（body-less 时早停不空等满 5.5s）；
+    // video 主体是视频、正文多为空 → 2.5s 更短。命中真正文即提前返回，不影响抽取保真。
+    await this.waitForNoteBody(card.isVideo ? 2500 : 3500);
     // 记录详情页打开时刻：后续 navigation.back / note.close 据此判定实际停留是否达标（治秒退）。
     this.noteOpenedAt = this.now();
 
@@ -976,6 +978,29 @@ export class BrowseSession {
   }
 
   /**
+   * 轮询一个返回校验值的表达式，命中 predicate 即提前返回（互动生效多在 300–600ms、发评论多在 1s 内），
+   * 到 timeout 仍未命中则返回最后一次读到的值再交由调用方判定。带上限、首轮立即读——
+   * 取代「固定 sleep 后单次读」：快路径省时，慢路径退化为原等待时长后再判，绝不因过早读误报「未生效」。
+   */
+  private async pollDomUntil(
+    expr: string,
+    predicate: (raw: string) => boolean,
+    timeout: number,
+    intervalMs = 200,
+  ): Promise<string | undefined> {
+    // 按迭代次数限界（不依赖注入时钟 now() 推进——测试常注入恒定 now，若靠 now() 判超时会死循环）：
+    // 约 timeout/intervalMs 轮、每轮之间真等 intervalMs；测试注入即时 sleep 也确定性退出。对齐 waitOptionVisible。
+    const rounds = Math.max(1, Math.ceil(timeout / intervalMs));
+    let last: string | undefined;
+    for (let i = 0; i < rounds; i++) {
+      last = await evalRaw<string>(this.deps.cdp, expr);
+      if (typeof last === 'string' && predicate(last)) return last;
+      if (i < rounds - 1) await this.sleep(intervalMs);
+    }
+    return last;
+  }
+
+  /**
    * 在当前打开的 modal 中执行点赞或收藏。
    * Cloud 已做出决策，Edge 直接执行。执行结果通过 action.completed 上报。
    */
@@ -1005,7 +1030,9 @@ export class BrowseSession {
         this.deps.client.reportActionCompleted?.({ action, ok: false, reason });
         return;
       }
-      await this.humanPause(this.actionTiming);
+      // 点击前只留一个轻停顿兼作验证码复检窗（scroll 档，中位 ~0.8s）：命令派发时已由 thinkBefore
+      // 下发过云端中心犹豫，这里不再叠一整个 action 档（中位 2.5s）重复停顿——节奏收口云端。
+      await this.humanPause(TIMING_PRESETS.scroll);
       // 提交前 fresh 复检：humanPause 窗口里若弹出验证码，放弃点击（避免打进风控墙）。
       if (await this.captchaPresentFresh()) {
         this.logger(`[browse] ${action} 提交前复检到验证码/未知阻断弹窗，放弃点击`);
@@ -1014,8 +1041,8 @@ export class BrowseSession {
       }
       const { dispatchClick } = await import('./cdp-util.js');
       await dispatchClick(this.deps.cdp, result.x, result.y, { random: this.random });
-      // 验证：等动画后检查 SVG href 是否变为 #liked / #collected
-      await this.sleep(1500);
+      // 验证：轮询 SVG href 是否翻成 #liked / #collected（多在 300–600ms 翻转），命中即返回、
+      // 上限 1500ms —— 取代原固定 sleep(1500) 后单次读，快路径省 ~1s，仍带上限不会过早误报。
       const verifyJs = `(function(){
         var bar = document.querySelector('.interactions.engage-bar');
         if (!bar) return 'no-bar';
@@ -1024,7 +1051,7 @@ export class BrowseSession {
         var use = el.querySelector('svg use');
         return use ? (use.getAttribute('xlink:href') || use.getAttribute('href')) : 'no-use';
       })()`;
-      const afterHref = await evalRaw<string>(this.deps.cdp, verifyJs);
+      const afterHref = await this.pollDomUntil(verifyJs, (h) => h === alreadyDoneHref, 1500);
       if (afterHref === alreadyDoneHref) {
         this.logger(`[browse] ✓ ${action === 'like' ? '点赞' : '收藏'}成功 (${result.x}, ${result.y})`);
         this.deps.client.reportActionCompleted?.({ action, ok: true });
@@ -1072,7 +1099,9 @@ export class BrowseSession {
         this.deps.client.reportActionCompleted?.({ action, ok: false, reason });
         return;
       }
-      await this.humanPause(this.actionTiming);
+      // 点击前只留一个轻停顿兼作验证码复检窗（scroll 档，中位 ~0.8s）：命令派发已由 thinkBefore
+      // 下发过云端中心犹豫，不再叠 action 档重复停顿——节奏收口云端。
+      await this.humanPause(TIMING_PRESETS.scroll);
       // 提交前 fresh 复检：humanPause 窗口里若弹出验证码，放弃点击（避免打进风控墙）。
       if (await this.captchaPresentFresh()) {
         this.logger('[browse] comment_like 提交前复检到验证码/未知阻断弹窗，放弃点击');
@@ -1081,9 +1110,21 @@ export class BrowseSession {
       }
       const { dispatchClick } = await import('./cdp-util.js');
       await dispatchClick(this.deps.cdp, result.x, result.y, { random: this.random });
-      // 校验：等动画后【按同一锚点复读】该评论行的赞控件，确认 use 翻成 #liked（或赞数较点前 +1）。
-      await this.sleep(1500);
+      // 校验：轮询【按同一锚点复读】该评论行的赞控件，确认 use 翻成 #liked（或赞数较点前 +1），
+      // 命中即返回、上限 1500ms（取代固定 sleep(1500)，快路径省 ~1s）。
       const beforeCount = typeof result.count === 'string' ? result.count : null;
+      const isCommentLikeFlipped = (raw: string): boolean => {
+        try {
+          const a = JSON.parse(raw);
+          const inc =
+            beforeCount != null && a?.count != null && /^\d+$/.test(beforeCount) && /^\d+$/.test(a.count)
+              ? Number(a.count) === Number(beforeCount) + 1
+              : false;
+          return a?.href === '#liked' || inc;
+        } catch {
+          return false;
+        }
+      };
       const verifyJs = `(function(){
         var row = document.getElementById(${anchorJson});
         if (!row) return JSON.stringify({href:'no_target', count:null});
@@ -1095,7 +1136,7 @@ export class BrowseSession {
         var cnt = cntEl ? (cntEl.textContent || '').trim() : null;
         return JSON.stringify({href: href, count: cnt});
       })()`;
-      const afterRaw = await evalRaw<string>(this.deps.cdp, verifyJs);
+      const afterRaw = await this.pollDomUntil(verifyJs, isCommentLikeFlipped, 1500);
       const after = typeof afterRaw === 'string' ? JSON.parse(afterRaw) : afterRaw;
       const countIncremented =
         beforeCount != null && after?.count != null && /^\d+$/.test(beforeCount) && /^\d+$/.test(after.count)
@@ -1173,7 +1214,8 @@ export class BrowseSession {
 
       // 3) 拟人逐字输入
       await dispatchKeystrokes(this.deps.cdp, body, { random: this.random });
-      await this.humanPause(this.actionTiming);
+      // 输入完到发送的「回读一眼」轻停顿兼验证码复检窗（scroll 档，中位 ~0.8s）；命令派发已下发过云端犹豫。
+      await this.humanPause(TIMING_PRESETS.scroll);
 
       // 4) 提交前 fresh 复检验证码（最高风险写互动，务必复检）
       if (await this.captchaPresentFresh()) {
@@ -1198,8 +1240,8 @@ export class BrowseSession {
       }
       await dispatchClick(this.deps.cdp, submit.x, submit.y, { random: this.random });
 
-      // 6) 后置校验：等待后检查 编辑器清空 且 自己的评论作为顶部新行出现
-      await this.sleep(2000);
+      // 6) 后置校验：轮询「编辑器清空 且 自己的评论作为顶部新行出现」，命中即返回、上限 2000ms
+      //    （取代固定 sleep(2000)；发评论生效多在 1s 内，快路径省 ~1s）。
       const snippet = body.slice(0, 12);
       const verifyJs = `(function(){
         var snip = ${JSON.stringify(snippet)};
@@ -1210,7 +1252,14 @@ export class BrowseSession {
         var cleared = !editorText || editorText.indexOf(snip) < 0;
         return JSON.stringify({cleared: cleared, ownRow: ownRow});
       })()`;
-      const vRaw = await evalRaw<string>(this.deps.cdp, verifyJs);
+      const vRaw = await this.pollDomUntil(verifyJs, (raw) => {
+        try {
+          const v = JSON.parse(raw);
+          return !!(v?.cleared && v?.ownRow);
+        } catch {
+          return false;
+        }
+      }, 2000);
       const v = typeof vRaw === 'string' ? JSON.parse(vRaw) : vRaw;
       if (v?.cleared && v?.ownRow) {
         this.logger(`[browse] ✓ 评论发布成功（编辑器清空 + 自己的评论行出现，耗时 ${elapsed()}）`);
@@ -1294,7 +1343,8 @@ export class BrowseSession {
         this.deps.client.reportActionCompleted?.({ action: 'follow', ok: false, reason });
         return;
       }
-      await this.humanPause(this.actionTiming);
+      // 点击前轻停顿兼验证码复检窗（scroll 档，中位 ~0.8s）；命令派发已由 thinkBefore 下发过云端犹豫，不再叠 action 档。
+      await this.humanPause(TIMING_PRESETS.scroll);
       // 提交前 fresh 复检：避免在验证码窗口里点关注。
       if (await this.captchaPresentFresh()) {
         this.logger('[browse] follow 提交前复检到验证码/未知阻断弹窗，放弃点击');
@@ -1315,9 +1365,10 @@ export class BrowseSession {
     await this.safeCloseModal();
     const wantSearch = targetPage === 'search';
     // 熟悉度提速：返回到刚看过的 feed（back_to_feed）时，离页停留已由 ensureDetailDwell 治理，
-    // 返回手势不必再全量犹豫 → 用更轻的手势停顿（cardGap 量级，约 action 的 1/3，仍带抖动、非零、不秒退）。
+    // 返回手势不必再全量犹豫 → 用更轻的手势停顿（scroll 档，中位 ~0.8s ≈ action 的 1/3，仍带抖动、非零、不秒退）。
+    // 注：此处原误取 cardGapTiming（中位 5s，比 action 还重一倍，与注释本意相反）——快速返回反成最慢档，已修正为 scroll 档。
     const fastReturn = reason === 'back_to_feed' && !wantSearch;
-    await this.humanPause(fastReturn ? this.cardGapTiming : this.actionTiming);
+    await this.humanPause(fastReturn ? TIMING_PRESETS.scroll : this.actionTiming);
     // 关键：深读链路用 Page.navigate 进作者主页，故从主页 history.back() 只会回到【可能已过期的笔记详情页
     // (/explore/<noteId>，搜索来源 token 易失效)】——闪现小红书 404 且回不到列表。因此【当前在作者主页时
     // 跳过 history.back，直接整页导航到目标列表】，消除 404 闪现；普通情形（笔记 modal 覆盖在列表上）
