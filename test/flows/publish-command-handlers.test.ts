@@ -418,10 +418,15 @@ test('runAddTopic 点了但未生成真 token → post_validate_failed（fail-cl
   }
 });
 
-test('runAddTopic 开关 OFF → 走旧兜底路径、绝不碰 CDP 直驱（校准前不静默丢光话题）', async () => {
-  // 不设 AIDCP_PUBLISH_TOPIC_CDP → topicCdpEnabled=false；即便注入 cdp 也走 buildTagInputRequest 兜底（不触 cdp）。
-  const doc = buildDom(publishPageHtml());
-  const cdp = new TopicFakeCdp({ focus: true, center: { x: 1, y: 1 } });
-  await mkTopicCdp(doc, cdp).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }));
-  assert.equal(cdp.calls.length, 0, '兜底路径不走 CDP 直驱（无任何 cdp 调用）');
+test('runAddTopic kill-switch(=0) → 走旧兜底路径、绝不碰 CDP 直驱', async () => {
+  // 默认已启用；显式 AIDCP_PUBLISH_TOPIC_CDP=0 → topicCdpEnabled=false；即便注入 cdp 也走 buildTagInputRequest 兜底（不触 cdp）。
+  process.env.AIDCP_PUBLISH_TOPIC_CDP = '0';
+  try {
+    const doc = buildDom(publishPageHtml());
+    const cdp = new TopicFakeCdp({ focus: true, center: { x: 1, y: 1 } });
+    await mkTopicCdp(doc, cdp).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }));
+    assert.equal(cdp.calls.length, 0, '兜底路径不走 CDP 直驱（无任何 cdp 调用）');
+  } finally {
+    delete process.env.AIDCP_PUBLISH_TOPIC_CDP;
+  }
 });

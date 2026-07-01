@@ -208,9 +208,10 @@ export class PublishCommandDispatcher {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: RandomFn;
   /**
-   * change split-topic-roles：CDP 直驱真实加话题开关（env `AIDCP_PUBLISH_TOPIC_CDP`，默认 OFF）。
-   * 不靠 `this.cdp` 存在与否判启用（生产 cdp 恒注入，否则校准前会静默丢光话题）；OFF 时走旧 buildTagInputRequest 兜底。
-   * 真机 DOM 校准（下拉 .tippy-box / token a.tiptap-topic）确认后方可打开。
+   * change split-topic-roles：CDP 直驱真实加话题开关（env `AIDCP_PUBLISH_TOPIC_CDP`）。
+   * 实机确认真话题贴上后（task 2.5，工程师大白 verified：runAddTopic → a.tiptap-topic）**默认启用**；
+   * 保留 env kill-switch——显式 `AIDCP_PUBLISH_TOPIC_CDP=0/false/no/off` 回退旧 buildTagInputRequest 兜底路径。
+   * 仍不靠 `this.cdp` 存在与否判启用（生产 cdp 恒注入）。runAddTopic fail-closed：DOM 不符即诚实失败（best-effort 跳过、不误贴）。
    */
   private readonly topicCdpEnabled: boolean;
 
@@ -233,7 +234,8 @@ export class PublishCommandDispatcher {
     this.pacingEnabled = pacing.enabled !== false;
     this.sleep = pacing.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.random = pacing.random ?? Math.random;
-    this.topicCdpEnabled = ['1', 'true', 'yes'].includes((process.env.AIDCP_PUBLISH_TOPIC_CDP ?? '').toLowerCase());
+    // 默认启用（实机已确认）；仅在显式 kill-switch 值时关闭、回退旧兜底路径。
+    this.topicCdpEnabled = !['0', 'false', 'no', 'off'].includes((process.env.AIDCP_PUBLISH_TOPIC_CDP ?? '').toLowerCase());
   }
 
   /** 围绕中心值叠对数正态抖动后停顿（拟人）；pacing 关 / 中心值 ≤0 时直接返回。 */
