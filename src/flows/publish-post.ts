@@ -251,6 +251,43 @@ export class PublishStepValidator implements PostValidator {
   }
 }
 
+/** 话题文本规整：strip 前导 #、去所有空白、小写。用于话题 token 精确比对。 */
+function normalizeTopic(value: string | null | undefined): string {
+  return (value ?? '').replace(/^#+/, '').replace(/\s+/g, '').toLowerCase();
+}
+
+/**
+ * 是否已在正文编辑器里生成「真话题 token」（change split-topic-roles，实机校准）。
+ * XHS 提交话题后正文出现 `a.tiptap-topic[data-topic]`（文本 `#话题名`，`data-topic.name` = 话题名）。
+ * 断言存在文本或 `data-topic.name` 与 keyword 匹配的 token；仅有纯文本 `#keyword`（未从下拉提交）→ false，
+ * 治「静默假成功」（老 input_tag 校验只查全局子串，纯文本也误判成功）。
+ */
+export function committedTopicPill(root: Element | Document, keyword: string): boolean {
+  const kw = normalizeTopic(keyword);
+  if (!kw) return false;
+  const scope = rootElement(root);
+  const pills = Array.from(scope.querySelectorAll('a.tiptap-topic, a[data-topic]'));
+  for (const p of pills) {
+    const text = normalizeTopic(p.textContent);
+    let name = '';
+    const dt = p.getAttribute('data-topic');
+    if (dt) {
+      try {
+        name = normalizeTopic(JSON.parse(dt).name);
+      } catch {
+        /* data-topic 非法 JSON：忽略、只按文本比对 */
+      }
+    }
+    if (text === kw || name === kw || text.includes(kw) || name.includes(kw)) return true;
+  }
+  return false;
+}
+
+/** 话题真 token 后置校验器（断言真话题 token，非全局子串）。供 runAddTopic 后置校验与测试复用。 */
+export function topicPillValidator(keyword: string): PostValidator {
+  return { validate: (_req: ActionRequest, root: Element | Document) => committedTopicPill(root, keyword) };
+}
+
 export function buildEnterPublishPageRequest(): ActionRequest {
   return {
     actionId: XHS_PUBLISH_ENTRY_ACTION_ID,

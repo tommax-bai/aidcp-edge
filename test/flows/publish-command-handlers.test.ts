@@ -19,6 +19,7 @@ import {
   XHS_PUBLISH_TAG_ACTION_ID,
   XHS_PUBLISH_TITLE_ACTION_ID,
 } from '../../src/flows/anchors.js';
+import { committedTopicPill } from '../../src/flows/publish-post.js';
 
 function buildDom(html: string): Document {
   return new JSDOM(`<!doctype html><html><body>${html}</body></html>`).window.document;
@@ -318,4 +319,104 @@ test('拟人填写：pacing 关 → 回退一次性 insertText（旧快路径，
   const inserts = cdp.inserts();
   assert.equal(inserts.length, 1, 'pacing 关时一次性灌入');
   assert.equal(inserts[0], value);
+});
+
+// ── change split-topic-roles：真话题 token 校验 + runAddTopic CDP 直驱（实机校准选择器）──
+
+/** 话题专用 fake cdp：FOCUS(含 ProseMirror)→focus 布尔；CENTER(含 tippy-box)→建议中心 JSON 或 ''；其余(点击等)→{}。 */
+class TopicFakeCdp {
+  readonly calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  constructor(private readonly opts: { focus?: boolean; center: { x: number; y: number } | null }) {}
+  async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+    this.calls.push({ method, params });
+    if (method === 'Runtime.evaluate') {
+      const expr = String((params as { expression?: string })?.expression ?? '');
+      if (expr.includes('ProseMirror')) return { result: { value: this.opts.focus !== false } } as T;
+      if (expr.includes('tippy-box')) {
+        return { result: { value: this.opts.center ? JSON.stringify(this.opts.center) : '' } } as T;
+      }
+      return { result: { value: true } } as T;
+    }
+    return {} as T;
+  }
+}
+
+/** 快进时钟：每次调用 +5000ms，使 runAddTopic 的 4s 轮询上限被立即触发（no_target/失败用例不真等 4s）。 */
+function fastClock(): () => number {
+  let t = 0;
+  return () => { t += 5000; return t; };
+}
+
+function mkTopicCdp(doc: Document, cdp: TopicFakeCdp, clock?: () => number): PublishCommandDispatcher {
+  return new PublishCommandDispatcher(
+    depsFor(doc, new FakeExecutor(doc)),
+    {},
+    clock ?? Date.now,
+    undefined,
+    cdp as unknown as ConstructorParameters<typeof PublishCommandDispatcher>[4],
+    { sleep: instantSleep, random: () => 0.5 },
+  );
+}
+
+test('committedTopicPill：真话题 token 存在 → true；仅纯文本 #kw → false（治静默假成功）', () => {
+  const withPill = buildDom(
+    `<div class="tiptap ProseMirror"><p><a class="tiptap-topic" data-topic='{"id":"1","name":"大模型"}' contenteditable="false">#大模型<span class="content-hide">[话题]#</span></a></p></div>`,
+  );
+  assert.equal(committedTopicPill(withPill, '大模型'), true);
+  const plainText = buildDom(`<div class="tiptap ProseMirror"><p>#大模型 还没从下拉提交</p></div>`);
+  assert.equal(committedTopicPill(plainText, '大模型'), false, '纯文本 #kw 不算真话题');
+});
+
+test('runAddTopic happy：#→下拉→真实鼠标点→正文出现 a.tiptap-topic → ok', async () => {
+  process.env.AIDCP_PUBLISH_TOPIC_CDP = '1';
+  try {
+    // 正文预置已提交 token（模拟点击后平台插入的真话题）。
+    const doc = buildDom(
+      `<div class="tiptap ProseMirror"><p><a class="tiptap-topic" data-topic='{"id":"1","name":"大模型"}' contenteditable="false">#大模型</a></p></div>`,
+    );
+    const cdp = new TopicFakeCdp({ focus: true, center: { x: 120, y: 200 } });
+    const res = await mkTopicCdp(doc, cdp).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }));
+    assert.equal(res.ok, true);
+    // 逐字打字：各 insertText 拼接应含 #大模型（治静默假成功——确实在正文打了 #关键词）。
+    const typed = cdp.calls.filter((c) => c.method === 'Input.insertText').map((c) => String((c.params as { text?: string })?.text ?? '')).join('');
+    assert.ok(typed.includes('#大模型'), '真的打了 #大模型');
+    assert.ok(cdp.calls.some((c) => c.method === 'Input.dispatchMouseEvent'), '真实鼠标事件点建议（非 .click()）');
+  } finally {
+    delete process.env.AIDCP_PUBLISH_TOPIC_CDP;
+  }
+});
+
+test('runAddTopic 下拉未出现 → 诚实 no_target', async () => {
+  process.env.AIDCP_PUBLISH_TOPIC_CDP = '1';
+  try {
+    const doc = buildDom(`<div class="tiptap ProseMirror"><p></p></div>`);
+    const cdp = new TopicFakeCdp({ focus: true, center: null });
+    const res = await mkTopicCdp(doc, cdp, fastClock()).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }));
+    assert.equal(res.ok, false);
+    assert.equal(res.error, 'no_target');
+  } finally {
+    delete process.env.AIDCP_PUBLISH_TOPIC_CDP;
+  }
+});
+
+test('runAddTopic 点了但未生成真 token → post_validate_failed（fail-closed，不静默假成功）', async () => {
+  process.env.AIDCP_PUBLISH_TOPIC_CDP = '1';
+  try {
+    // 正文只有纯文本、无 a.tiptap-topic（模拟未真正提交）。
+    const doc = buildDom(`<div class="tiptap ProseMirror"><p>#大模型</p></div>`);
+    const cdp = new TopicFakeCdp({ focus: true, center: { x: 120, y: 200 } });
+    const res = await mkTopicCdp(doc, cdp, fastClock()).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }));
+    assert.equal(res.ok, false);
+    assert.equal(res.error, 'post_validate_failed');
+  } finally {
+    delete process.env.AIDCP_PUBLISH_TOPIC_CDP;
+  }
+});
+
+test('runAddTopic 开关 OFF → 走旧兜底路径、绝不碰 CDP 直驱（校准前不静默丢光话题）', async () => {
+  // 不设 AIDCP_PUBLISH_TOPIC_CDP → topicCdpEnabled=false；即便注入 cdp 也走 buildTagInputRequest 兜底（不触 cdp）。
+  const doc = buildDom(publishPageHtml());
+  const cdp = new TopicFakeCdp({ focus: true, center: { x: 1, y: 1 } });
+  await mkTopicCdp(doc, cdp).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }));
+  assert.equal(cdp.calls.length, 0, '兜底路径不走 CDP 直驱（无任何 cdp 调用）');
 });

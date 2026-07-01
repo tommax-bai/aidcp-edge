@@ -31,6 +31,7 @@ import {
   buildSubmitPublishRequest,
   buildTagInputRequest,
   buildTitleInputRequest,
+  committedTopicPill,
   extractPostId,
   extractPostUrl,
 } from './publish-post.js';
@@ -206,6 +207,12 @@ export class PublishCommandDispatcher {
   private readonly pacingEnabled: boolean;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: RandomFn;
+  /**
+   * change split-topic-roles：CDP 直驱真实加话题开关（env `AIDCP_PUBLISH_TOPIC_CDP`，默认 OFF）。
+   * 不靠 `this.cdp` 存在与否判启用（生产 cdp 恒注入，否则校准前会静默丢光话题）；OFF 时走旧 buildTagInputRequest 兜底。
+   * 真机 DOM 校准（下拉 .tippy-box / token a.tiptap-topic）确认后方可打开。
+   */
+  private readonly topicCdpEnabled: boolean;
 
   constructor(
     private readonly deps: PublishCommandDeps,
@@ -226,6 +233,7 @@ export class PublishCommandDispatcher {
     this.pacingEnabled = pacing.enabled !== false;
     this.sleep = pacing.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.random = pacing.random ?? Math.random;
+    this.topicCdpEnabled = ['1', 'true', 'yes'].includes((process.env.AIDCP_PUBLISH_TOPIC_CDP ?? '').toLowerCase());
   }
 
   /** 围绕中心值叠对数正态抖动后停顿（拟人）；pacing 关 / 中心值 ≤0 时直接返回。 */
@@ -258,8 +266,10 @@ export class PublishCommandDispatcher {
       case 'add_with_candidate': {
         const value = payload.params.value ?? '';
         const candidateKind = payload.params.candidateKind;
-        // topic 走话题专用步骤校验器；mention/location/collection 用 best-effort 值校验。
+        // change split-topic-roles：topic 优先走 CDP 直驱真实加话题（#→下拉→选建议→校验真 token），
+        //   由 AIDCP_PUBLISH_TOPIC_CDP 门控（默认 OFF、非按 cdp 存在与否）；OFF 或无 cdp 回退旧 buildTagInputRequest 兜底。
         if (!candidateKind || candidateKind === 'topic') {
+          if (this.topicCdpEnabled && this.cdp) return this.runAddTopic(payload, value);
           return this.runAtom(
             payload,
             buildTagInputRequest(value),
@@ -649,6 +659,78 @@ export class PublishCommandDispatcher {
         return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
       }
       await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
+  /**
+   * 加话题（change split-topic-roles，实机校准）：在正文富文本 `.tiptap.ProseMirror` 里打 `#关键词`
+   * → 等平台建议下拉 `.tippy-box[role="tooltip"]` → **真实鼠标事件**点匹配建议（无精确命中点「新建话题」贴字面词）
+   * → 后置校验正文出现真话题 token `a.tiptap-topic`（非纯文本）。fail-closed，绝不静默假成功。
+   * 仅在开关开 + cdp 注入时被 dispatch 调用（见 add_with_candidate 分支）。
+   */
+  private async runAddTopic(payload: PublishCommandPayload, keyword: string): Promise<PublishCommandResultPayload> {
+    const startedAt = this.clock();
+    const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
+    const details = { actionId: 'note.publish_topic', durationMs: 0 };
+    const done = (extra: { ok: boolean; error?: string }): PublishCommandResultPayload => ({ ...base, details: { ...details, durationMs: this.clock() - startedAt }, ...extra });
+    const kw = keyword.replace(/^#+/, '').trim();
+    if (!this.cdp || !kw) return done({ ok: false, error: 'no_target' });
+    try {
+      await this.ensureInputEnabled();
+      // 1. 聚焦正文编辑器、光标移到正文末尾（避免插进已有 token 中间）。
+      const FOCUS = String.raw`(() => { const el = document.querySelector('.tiptap.ProseMirror') || document.querySelector('[contenteditable="true"]'); if(!el) return false; try{el.scrollIntoView({block:'center'});}catch(e){} el.focus(); try{el.click&&el.click();}catch(e){} try{const r=document.createRange();r.selectNodeContents(el);r.collapse(false);const s=getSelection();s.removeAllRanges();s.addRange(r);}catch(e){} return true; })()`;
+      const f = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: FOCUS, returnByValue: true });
+      if (f?.result?.value !== true) return done({ ok: false, error: 'no_target' });
+      await this.pause(PACING_MS.fieldFocus);
+      // 2. 打 " #关键词"（逐字触发建议下拉；前导空格避免与前一 token 粘连）。
+      await this.typeHumanized(' #' + kw);
+      // 3. 轮询等下拉里的目标项（优先文本精确匹配 #kw；否则「新建话题」首项贴字面词），取其视口中心坐标。
+      const CENTER = String.raw`(() => {
+        const box = document.querySelector('.tippy-box[role="tooltip"]'); if(!box) return '';
+        const items = Array.prototype.slice.call(box.querySelectorAll('#creator-editor-topic-container .item, .item'));
+        if(!items.length) return '';
+        const norm = function(s){ return (s||'').replace(/\s+/g,'').replace(/^#/,''); };
+        const kw = ${JSON.stringify(kw)};
+        const exact = items.find(function(e){ return !/新建话题/.test(e.innerText||'') && norm(e.innerText).indexOf(kw)===0; });
+        const create = items.find(function(e){ return /新建话题/.test(e.innerText||''); }) || items[0];
+        const target = exact || create; if(!target) return '';
+        const r = target.getBoundingClientRect(); if(!(r.width>0 && r.height>0)) return '';
+        return JSON.stringify({ x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) });
+      })()`;
+      let center: { x: number; y: number } | null = null;
+      const ddDeadline = this.clock() + 4000;
+      for (;;) {
+        try {
+          const c = await this.cdp.send<{ result?: { value?: string } }>('Runtime.evaluate', { expression: CENTER, returnByValue: true });
+          const v = c?.result?.value;
+          if (v) { center = JSON.parse(v) as { x: number; y: number }; break; }
+        } catch {
+          // 瞬时 evaluate 失败，继续轮询
+        }
+        if (this.clock() >= ddDeadline) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (!center) return done({ ok: false, error: 'no_target' });
+      await this.pause(PACING_MS.fieldFocus);
+      // 4. 真实鼠标事件点建议（.click() 实测不提交待定 span）。精确落点、保留移动轨迹（反检测）。
+      await dispatchClick(this.cdp, center.x, center.y, { random: this.random, sleep: this.sleep, overshoot: false, jitter: 0 });
+      // 5. 后置校验：正文出现真话题 token（a.tiptap-topic），非纯文本。读 DOM 快照 + committedTopicPill，fail-closed。
+      const deadline = this.clock() + 4000;
+      for (;;) {
+        let root: Element | Document | undefined;
+        try {
+          root = await this.deps.dom.getRoot();
+        } catch {
+          root = undefined;
+        }
+        if (root && committedTopicPill(root, kw)) return done({ ok: true });
+        if (this.clock() >= deadline) break;
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      return done({ ok: false, error: 'post_validate_failed' });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return done({ ok: false, error: `engine_error: ${message}` });
     }
   }
 
