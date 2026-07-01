@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -13,67 +13,99 @@
         <section class="hero">
           <div>
             <p class="eyebrow">AIDCP Edge</p>
-            <h1>Desktop Control Panel</h1>
-            <p class="subtle">Chrome is launched with a persistent AIDCP profile for Xiaohongshu login.</p>
+            <h1>桌面控制台</h1>
+            <p class="subtle" id="subtitle">以持久化配置启动浏览器，用于小红书登录与自动运营。</p>
           </div>
           <div class="actions">
-            <button id="relogin" class="secondary">Re-login</button>
-            <button id="toggle-session" class="primary">Pause</button>
+            <button id="relogin" class="secondary">重新登录</button>
+            <button id="toggle-session" class="primary">暂停</button>
           </div>
         </section>
 
         <section class="stats">
           <article>
-            <span>Views</span>
+            <span>浏览</span>
             <strong id="views">0</strong>
           </article>
           <article>
-            <span>Likes</span>
+            <span>点赞</span>
             <strong id="likes">0</strong>
           </article>
           <article>
-            <span>Collects</span>
+            <span>收藏</span>
             <strong id="collects">0</strong>
           </article>
         </section>
       </div>
 
       <section id="login-guide" class="notice hidden">
-        <strong>Login required</strong>
-        <span>Log in to xiaohongshu.com in the Chrome window that just opened. AIDCP Edge will continue automatically after login is detected.</span>
+        <strong id="notice-title">需要登录</strong>
+        <span id="notice-body">请在刚打开的 Chrome 窗口中登录 xiaohongshu.com，检测到登录后 AIDCP Edge 会自动继续。</span>
+      </section>
+
+      <!-- Browser provider settings -->
+      <section class="settings">
+        <div class="settings-head">
+          <span>浏览器</span>
+          <div class="seg-group">
+            <button id="prov-adspower" class="seg" type="button">AdsPower 指纹浏览器</button>
+            <button id="prov-self" class="seg" type="button">本机 Chrome</button>
+          </div>
+        </div>
+        <div id="ads-config" class="ads-config">
+          <label class="field">
+            <span class="field-label">分身 ID <em class="req">必填</em></span>
+            <input id="ads-profile" type="text" placeholder="AdsPower 分身 / 用户 ID" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span class="field-label">API Key <em class="opt">可选</em></span>
+            <input id="ads-apikey" type="password" placeholder="开启 API 校验时填写，未开启可留空" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span class="field-label">API 地址 <em class="opt">可选</em></span>
+            <input id="ads-apibase" type="text" placeholder="http://local.adspower.net:50325" autocomplete="off" />
+          </label>
+          <p class="ads-hint">
+            没有 AdsPower？<a id="ads-download" href="#" class="link">下载 AdsPower ↗</a>
+          </p>
+        </div>
+        <div class="settings-actions">
+          <span id="settings-msg" class="settings-msg"></span>
+          <button id="save-settings" class="primary" type="button">保存并启动</button>
+        </div>
       </section>
 
       <!-- Row 2: Status cards horizontal -->
       <section class="grid">
         <article class="card">
-          <span class="label">XHS login</span>
-          <strong id="auth-status" class="badge">checking</strong>
+          <span class="label">小红书登录</span>
+          <strong id="auth-status" class="badge">检测中</strong>
         </article>
         <article class="card">
-          <span class="label">Cloud connection</span>
-          <strong id="cloud-status" class="badge">disconnected</strong>
+          <span class="label">云端连接</span>
+          <strong id="cloud-status" class="badge">未连接</strong>
         </article>
         <article class="card">
-          <span class="label">Session state</span>
-          <strong id="session-state" class="badge">idle</strong>
+          <span class="label">会话状态</span>
+          <strong id="session-state" class="badge">空闲</strong>
         </article>
         <article class="card">
-          <span class="label">Risk control</span>
-          <strong id="risk-status" class="badge">normal</strong>
+          <span class="label">风控状态</span>
+          <strong id="risk-status" class="badge">正常</strong>
         </article>
         <article class="card">
-          <span class="label">Edge process</span>
-          <strong id="edge-state" class="badge">stopped</strong>
+          <span class="label">边缘进程</span>
+          <strong id="edge-state" class="badge">已停止</strong>
         </article>
       </section>
 
       <!-- Row 3: Log area (independent large section) -->
       <section class="log">
         <div class="log-head">
-          <span>Latest status</span>
+          <span>最新状态</span>
           <time id="updated-at"></time>
         </div>
-        <pre id="last-message">Waiting for status...</pre>
+        <pre id="last-message">等待状态…</pre>
       </section>
     </main>
     <script src="./renderer.js"></script>

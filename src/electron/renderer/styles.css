@@ -163,6 +163,153 @@ h1 {
   display: none;
 }
 
+.hidden {
+  display: none !important;
+}
+
+/* ─── Browser provider settings ─── */
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 20px;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.04);
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #475569;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.seg-group {
+  display: inline-flex;
+  padding: 3px;
+  gap: 3px;
+  border-radius: 999px;
+  background: #f1f5f9;
+}
+
+.seg {
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 14px;
+  background: transparent;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.seg.active {
+  background: #2563eb;
+  color: #fff;
+  box-shadow: 0 4px 10px rgba(37, 99, 235, 0.22);
+}
+
+.ads-config {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-label {
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.field-label .req,
+.field-label .opt {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  margin-left: 4px;
+}
+
+.field-label .req {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
+.field-label .opt {
+  color: #475569;
+  background: #e2e8f0;
+}
+
+.field input {
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 14px;
+  color: #172033;
+  background: #fff;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.field input:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+.ads-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.link {
+  color: #2563eb;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.settings-msg {
+  color: #64748b;
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .ads-config {
+    grid-template-columns: 1fr;
+  }
+  .settings-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
 /* ─── Row 2: Status cards horizontal ─── */
 .grid {
   display: grid;
