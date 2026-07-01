@@ -23,6 +23,13 @@ export function toRemoteElement(el: ElementDescriptor): RemoteElement {
   };
 }
 
+/**
+ * 边缘等待云端选元素的超时（毫秒）。change raise-model-call-timeouts-for-thinking-models：
+ * MUST 大于云端单次模型调用天花板（180s），否则边缘先放弃、把一次尚在进行的合法 thinking 选择误判为 llm_error。
+ * 取 200s 留余量（v1 兼容路径、低频，硬编码即可，无需 env）。
+ */
+const SELECT_TIMEOUT_MS = 200_000;
+
 /** 通过云端 select.request 选元素的选择器 */
 export class CloudElementSelector implements ElementSelector {
   constructor(private readonly client: EdgeClient) {}
@@ -36,7 +43,7 @@ export class CloudElementSelector implements ElementSelector {
       const res = await this.client.request('select.request', {
         goal,
         elements: elements.map(toRemoteElement),
-      });
+      }, SELECT_TIMEOUT_MS);
       payload = res.payload as SelectResponsePayload;
     } catch (err) {
       return { index: null, reason: `llm_error:${(err as Error).message}` };
