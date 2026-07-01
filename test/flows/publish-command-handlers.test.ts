@@ -365,6 +365,11 @@ test('committedTopicPill：真话题 token 存在 → true；仅纯文本 #kw �
   assert.equal(committedTopicPill(withPill, '大模型'), true);
   const plainText = buildDom(`<div class="tiptap ProseMirror"><p>#大模型 还没从下拉提交</p></div>`);
   assert.equal(committedTopicPill(plainText, '大模型'), false, '纯文本 #kw 不算真话题');
+  // 子串误判防护：已存在的超串话题 #大模型部署 不得被当作「大模型」已贴上（精确匹配、非子串）。
+  const superStr = buildDom(
+    `<div class="tiptap ProseMirror"><p><a class="tiptap-topic" data-topic='{"id":"9","name":"大模型部署"}' contenteditable="false">#大模型部署<span class="content-hide">[话题]#</span></a></p></div>`,
+  );
+  assert.equal(committedTopicPill(superStr, '大模型'), false, '超串话题不得误判为子串关键词已贴上（治静默假成功）');
 });
 
 test('runAddTopic happy：#→下拉→真实鼠标点→正文出现 a.tiptap-topic → ok', async () => {

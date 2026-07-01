@@ -268,7 +268,11 @@ export function committedTopicPill(root: Element | Document, keyword: string): b
   const scope = rootElement(root);
   const pills = Array.from(scope.querySelectorAll('a.tiptap-topic, a[data-topic]'));
   for (const p of pills) {
-    const text = normalizeTopic(p.textContent);
+    // token 文本形如「#话题名」，另含隐藏后缀 span.content-hide「[话题]#」——比对前先剔除该后缀。
+    const hidden = p.querySelector('.content-hide');
+    let rawText = p.textContent ?? '';
+    if (hidden?.textContent) rawText = rawText.replace(hidden.textContent, '');
+    const text = normalizeTopic(rawText);
     let name = '';
     const dt = p.getAttribute('data-topic');
     if (dt) {
@@ -278,7 +282,8 @@ export function committedTopicPill(root: Element | Document, keyword: string): b
         /* data-topic 非法 JSON：忽略、只按文本比对 */
       }
     }
-    if (text === kw || name === kw || text.includes(kw) || name.includes(kw)) return true;
+    // 精确匹配（**非子串**）：子串会把已存在的「#考研数学」误判成「考研」已贴上——正是本 change 要杜绝的静默假成功。
+    if (name === kw || text === kw) return true;
   }
   return false;
 }

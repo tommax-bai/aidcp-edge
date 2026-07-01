@@ -692,7 +692,8 @@ export class PublishCommandDispatcher {
         const norm = function(s){ return (s||'').replace(/\s+/g,'').replace(/^#/,''); };
         const kw = ${JSON.stringify(kw)};
         const exact = items.find(function(e){ return !/新建话题/.test(e.innerText||'') && norm(e.innerText).indexOf(kw)===0; });
-        const create = items.find(function(e){ return /新建话题/.test(e.innerText||''); }) || items[0];
+        const create = items.find(function(e){ return /新建话题/.test(e.innerText||''); });
+        // 只选「文本精确匹配的项」或「新建话题」；都没有则不点（避免误贴一个无关话题）→ 上层 no_target。
         const target = exact || create; if(!target) return '';
         const r = target.getBoundingClientRect(); if(!(r.width>0 && r.height>0)) return '';
         return JSON.stringify({ x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) });
