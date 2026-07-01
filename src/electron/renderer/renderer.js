@@ -25,6 +25,12 @@ const settingsUi = {
   adsApiKey: document.querySelector('#ads-apikey'),
   adsApiBase: document.querySelector('#ads-apibase'),
   adsDownload: document.querySelector('#ads-download'),
+  adsProbeBadge: document.querySelector('#ads-probe-badge'),
+  adsDetect: document.querySelector('#ads-detect'),
+  adsEnvSelect: document.querySelector('#ads-env-select'),
+  adsRefresh: document.querySelector('#ads-refresh'),
+  adsEnvMsg: document.querySelector('#ads-env-msg'),
+  adsCreate: document.querySelector('#ads-create'),
   save: document.querySelector('#save-settings'),
   msg: document.querySelector('#settings-msg'),
 };
@@ -144,6 +150,7 @@ function applySettings(s) {
 settingsUi.provAdspower.addEventListener('click', () => {
   editingProvider = 'adspower';
   applyProviderSelection('adspower');
+  probeAds(); // 切到 AdsPower 分段即探一次可用性（真实事件，非「打开设置面板」）
 });
 settingsUi.provSelf.addEventListener('click', () => {
   editingProvider = 'self';
@@ -155,9 +162,110 @@ settingsUi.adsDownload.addEventListener('click', (event) => {
   window.aidcpEdge.openAdsDownload();
 });
 
+// ─── AdsPower 探测 / 环境下拉 / 新建入口 ───
+
+// 只读调用带上「当前表单值」（调用级）：支持「新填 API Key 未保存即刷新」而不陷回环。
+function formAdsOpts() {
+  return {
+    apiBase: settingsUi.adsApiBase.value.trim(),
+    apiKey: settingsUi.adsApiKey.value,
+  };
+}
+
+function setProbeBadge(code, text) {
+  settingsUi.adsProbeBadge.textContent = text;
+  settingsUi.adsProbeBadge.className = `badge ${code}`;
+}
+
+function setEnvMsg(text, isError) {
+  settingsUi.adsEnvMsg.textContent = text || '';
+  settingsUi.adsEnvMsg.className = `ads-env-msg${isError ? ' error' : ''}`;
+}
+
+// 探测本地 API 可用性（根级 /status）。可达→就绪；不可达→诚实提示 + 引导下载，不禁死流程。
+async function probeAds() {
+  setProbeBadge('checking', '检测中');
+  settingsUi.adsDetect.disabled = true;
+  try {
+    const r = await window.aidcpEdge.adsStatus(formAdsOpts());
+    if (r && r.ok) {
+      setProbeBadge('connected', '已就绪');
+      if (settingsUi.adsEnvMsg.classList.contains('error')) setEnvMsg('', false);
+    } else {
+      setProbeBadge('warning', '未就绪');
+      setEnvMsg(
+        `未检测到 AdsPower 本地 API${r && r.error ? '（' + r.error + '）' : ''}。请启动 AdsPower 客户端并开启本地 API，或点下方「下载 AdsPower」。仍可手动填写分身 ID 继续。`,
+        true,
+      );
+    }
+  } catch {
+    setProbeBadge('warning', '未就绪');
+  } finally {
+    settingsUi.adsDetect.disabled = false;
+  }
+}
+
+// 把选中环境的 user_id（非 serial_number）写入分身 ID 输入框（手敲框仍可编辑覆盖）。
+function populateEnvs(profiles) {
+  const sel = settingsUi.adsEnvSelect;
+  const current = settingsUi.adsProfile.value.trim();
+  sel.innerHTML = '';
+  const ph = document.createElement('option');
+  ph.value = '';
+  ph.textContent = profiles.length ? '（请选择浏览器环境）' : '（未找到环境，可手动填写分身 ID）';
+  sel.appendChild(ph);
+  for (const p of profiles) {
+    const opt = document.createElement('option');
+    opt.value = p.userId; // ← 写入 adsProfileId 的是 user_id
+    const bits = [p.name || '(未命名)'];
+    if (p.serialNumber) bits.push('#' + p.serialNumber);
+    if (p.groupName) bits.push(p.groupName);
+    if (p.proxy) bits.push(p.proxy);
+    opt.textContent = `${bits.join(' · ')} — ${p.userId}`;
+    if (p.userId && p.userId === current) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+// 拉取环境列表；失败诚实降级为手敲（疑似鉴权失败提示已用当前填写值、别叫用户重填已填的框）。
+async function refreshEnvs() {
+  settingsUi.adsRefresh.disabled = true;
+  setEnvMsg('正在从 AdsPower 拉取环境…', false);
+  try {
+    const r = await window.aidcpEdge.adsListProfiles(formAdsOpts());
+    if (!r || !r.ok) {
+      const authHint = r && r.authLikely
+        ? '：疑似开启了 API 校验；若已在上方填了 API Key，本次刷新已用当前填写值，请确认 Key 正确后重试'
+        : '';
+      setEnvMsg(`拉取环境失败${r && r.error ? '（' + r.error + '）' : ''}${authHint}。可在下方手动填写分身 ID。`, true);
+      return;
+    }
+    populateEnvs(r.profiles || []);
+    const extra = r.truncated ? '（环境较多，仅显示前若干条，可在 AdsPower 用分组精简）' : '';
+    setEnvMsg(`已加载 ${(r.profiles || []).length} 个环境${extra}。选择后其分身 ID 自动填入下方。`, false);
+  } catch (e) {
+    setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可在下方手动填写分身 ID。`, true);
+  } finally {
+    settingsUi.adsRefresh.disabled = false;
+  }
+}
+
+settingsUi.adsEnvSelect.addEventListener('change', () => {
+  const v = settingsUi.adsEnvSelect.value;
+  if (v) settingsUi.adsProfile.value = v; // 选中即写入分身 ID（user_id）
+});
+settingsUi.adsDetect.addEventListener('click', probeAds);
+settingsUi.adsRefresh.addEventListener('click', refreshEnvs);
+settingsUi.adsCreate.addEventListener('click', (event) => {
+  event.preventDefault();
+  window.aidcpEdge.adsOpenCreate();
+  setEnvMsg('已尝试打开 AdsPower：请在其中点「新建浏览器」完成配置，返回后点「刷新」加载新环境。', false);
+});
+
 settingsUi.save.addEventListener('click', async () => {
   const provider = selectedProvider();
   const adsProfileId = settingsUi.adsProfile.value.trim();
+  if (provider === 'adspower') probeAds(); // 保存并启动前探一次可用性（早反馈，不阻塞保存）
   if (provider === 'adspower' && !adsProfileId) {
     settingsUi.msg.textContent = '请先填写 AdsPower 分身 ID。';
     settingsUi.adsProfile.focus();
@@ -204,5 +312,9 @@ fields.relogin.addEventListener('click', async () => {
 });
 
 window.aidcpEdge.onStatusUpdate(render);
-window.aidcpEdge.getSettings().then(applySettings);
+window.aidcpEdge.getSettings().then((s) => {
+  applySettings(s);
+  // 面板加载时若为 AdsPower 模式即探一次（真实事件，低频；非「打开设置面板」）。
+  if (selectedProvider() === 'adspower') probeAds();
+});
 window.aidcpEdge.getStatus().then(render);

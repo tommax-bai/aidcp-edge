@@ -270,6 +270,52 @@ h1 {
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
 }
 
+/* AdsPower 检测状态行 + 环境下拉：整行跨列，清爽竖排 */
+.ads-probe {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ads-full {
+  grid-column: 1 / -1;
+}
+.ads-env-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.ads-env-row select {
+  flex: 1;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 14px;
+  color: #172033;
+  background: #fff;
+}
+.ads-env-row select:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+.seg[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ads-env-msg {
+  color: #64748b;
+  font-size: 12px;
+  min-height: 14px;
+}
+.ads-env-msg.error {
+  color: #b91c1c;
+}
+.ads-hint-sep {
+  margin: 0 6px;
+  color: #cbd5e1;
+}
+
 .ads-hint {
   grid-column: 1 / -1;
   margin: 0;

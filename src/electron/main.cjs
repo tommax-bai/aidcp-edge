@@ -3,6 +3,11 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
+const { createAdsLocalApi } = require('./ads-local-api.cjs');
+
+// 主进程侧 AdsPower 只读客户端（探测 + 环境列表）。单例持有本进程内**唯一**串行节流（1req/s）。
+// 与核心子进程内的 AdsPowerProvider 节流各自独立（跨进程无法共享内存队列，见 ads-local-api.cjs 头注）。
+const adsApi = createAdsLocalApi({});
 
 let mainWindow;
 let tray;
@@ -70,6 +75,45 @@ function buildProviderEnv() {
   if (settings.adsApiKey) env.AIDCP_ADS_API_KEY = settings.adsApiKey;
   if (settings.adsApiBase) env.AIDCP_ADS_API_BASE = settings.adsApiBase;
   return env;
+}
+
+// 解析只读调用的 base/key：优先用渲染层传入的**当前表单值**（支持「新填 key 未保存即刷新」而不陷回环），
+// 表单未带该字段才回落持久化 settings。apiKey 只用于本次请求头、不落日志 / 不写文件。
+function resolveAdsOpts(formOpts) {
+  const o = formOpts || {};
+  const apiBase = (o.apiBase && String(o.apiBase).trim()) || settings.adsApiBase || undefined;
+  const apiKey = Object.prototype.hasOwnProperty.call(o, 'apiKey') ? o.apiKey : settings.adsApiKey;
+  const out = {};
+  if (apiBase) out.apiBase = apiBase;
+  if (apiKey) out.apiKey = apiKey;
+  if (o.groupId) out.groupId = o.groupId;
+  return out;
+}
+
+// 「打开 AdsPower 新建环境」best-effort：AdsPower 不公开直达其内部「新建浏览器」tab 的深链，
+// 故只能尝试拉起 / 聚焦客户端；起不来（未装 / 应用名不符）诚实退回打开官方页面。面板另有引导文案。
+function openAdsClient() {
+  try {
+    if (process.platform === 'darwin') {
+      const child = spawn('open', ['-a', 'AdsPower Global'], { stdio: 'ignore', detached: true });
+      let fellBack = false;
+      const fallback = () => {
+        if (fellBack) return;
+        fellBack = true;
+        void shell.openExternal(ADS_DOWNLOAD_URL);
+      };
+      child.on('error', fallback);
+      child.on('exit', (code) => {
+        if (code !== 0) fallback();
+      });
+      return { launched: true };
+    }
+  } catch {
+    /* 落到下面的官网兜底 */
+  }
+  // 非 macOS 或拉起异常：诚实退回官方页面（非直达新建页）。
+  void shell.openExternal(ADS_DOWNLOAD_URL);
+  return { launched: false };
 }
 
 const status = {
@@ -368,6 +412,10 @@ ipcMain.handle('browser:openAdsDownload', () => {
   void shell.openExternal(ADS_DOWNLOAD_URL);
   return true;
 });
+// AdsPower 只读探测 / 拉取（主进程侧，渲染层不直连本地 API）。opts 可带渲染层当前表单 apiKey/apiBase/groupId。
+ipcMain.handle('ads:status', (_event, opts) => adsApi.status(resolveAdsOpts(opts)));
+ipcMain.handle('ads:listProfiles', (_event, opts) => adsApi.listProfiles(resolveAdsOpts(opts)));
+ipcMain.handle('ads:openCreate', () => openAdsClient());
 
 // 诚实拒绝同机多开（多账号多开隔离尚未实现，归 account-identity-from-login）：
 // 当前第二个实例会接管第一个账号的浏览器（串号），故用单实例锁直接拒绝第二个，绝不静默接管。
