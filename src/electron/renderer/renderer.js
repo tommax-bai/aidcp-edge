@@ -35,7 +35,6 @@ const settingsUi = {
   adsRefresh: document.querySelector('#ads-refresh'),
   adsEnvMsg: document.querySelector('#ads-env-msg'),
   adsCreate: document.querySelector('#ads-create'),
-  save: document.querySelector('#save-settings'),
   applyRestart: document.querySelector('#apply-restart'),
   msg: document.querySelector('#settings-msg'),
 };
@@ -63,6 +62,9 @@ const SUBTITLE = {
 let currentStatus;
 // 用户正在编辑设置表单时不被状态推送回填覆盖（避免边打字边被清空）。
 let editingProvider = null;
+// 设置是否相对「已应用/已保存」有改动。核心在跑且 dirty 时才显示「按新设置重启」；
+// 「保存」按钮已并入「启动」——启动时先存再起，故无独立保存按钮。
+let dirty = false;
 let adsDownloadUrl = 'https://www.adspower.net/download';
 const LOG_RETENTION_MS = 2 * 60 * 1000; // 2 minutes
 const logEntries = [];
@@ -99,7 +101,7 @@ function renderNotice(status) {
     body = '请在刚打开的 Chrome 窗口中登录 xiaohongshu.com，检测到登录后 AIDCP Edge 会自动继续。';
   } else if (status.auth === 'config required') {
     title = '待配置';
-    body = '请在下方「浏览器」设置里选择一个环境（或打开「手动填写」填分身 ID），保存后点右下角「启动」。';
+    body = '请在下方「浏览器」设置里选择一个环境（或打开「手动填写」填分身 ID），然后点右下角「启动」。';
   }
   const show = Boolean(title);
   fields.loginGuide.classList.toggle('hidden', !show);
@@ -146,8 +148,7 @@ function render(status) {
   fields.updatedAt.textContent = new Date(status.updatedAt).toLocaleTimeString();
   addLogEntry(status.lastMessage);
   renderFab(status);
-  // 核心停了就不需要「按新设置重启」入口。
-  if (status.edge === 'stopped') settingsUi.applyRestart.classList.add('hidden');
+  updateApplyRestart(); // 依「dirty && 核心在跑」决定是否显示「按新设置重启」
   if (status.provider && SUBTITLE[status.provider]) fields.subtitle.textContent = SUBTITLE[status.provider];
   // 表单未在编辑时，让 provider 分段跟随实际运行 provider。
   if (status.provider && !editingProvider) applyProviderSelection(status.provider);
@@ -161,9 +162,32 @@ function applyProviderSelection(provider) {
   settingsUi.provAdspower.classList.toggle('active', isAds);
   settingsUi.provSelf.classList.toggle('active', !isAds);
   settingsUi.adsConfig.classList.toggle('hidden', !isAds);
-  // self（本机 Chrome）无可持久化设置项 → 隐藏「保存」；只由悬浮按钮启动 / 暂停 / 恢复。
-  settingsUi.save.classList.toggle('hidden', !isAds);
-  if (!isAds) settingsUi.applyRestart.classList.add('hidden');
+}
+
+// dirty 且核心在跑（非停止/异常）时才显示「按新设置重启」——把已改设置显式应用到在跑核心。
+function updateApplyRestart() {
+  const running = Boolean(currentStatus) && currentStatus.edge !== 'stopped' && currentStatus.edge !== 'warning';
+  settingsUi.applyRestart.classList.toggle('hidden', !(dirty && running));
+}
+
+function markDirty() {
+  dirty = true;
+  updateApplyRestart();
+}
+
+// 保存当前表单设置（供「启动」「按新设置重启」复用；无独立保存按钮）。返回 saveSettings 结果。
+async function saveCurrentSettings() {
+  const provider = selectedProvider();
+  const saved = await window.aidcpEdge.saveSettings({
+    provider,
+    adsProfileId: settingsUi.adsProfile.value.trim(),
+    adsApiKey: settingsUi.adsApiKey.value,
+    adsApiBase: settingsUi.adsApiBase.value.trim(),
+  });
+  if (saved && saved.adsDownloadUrl) adsDownloadUrl = saved.adsDownloadUrl;
+  dirty = false;
+  updateApplyRestart();
+  return saved;
 }
 
 function selectedProvider() {
@@ -185,16 +209,20 @@ function applySettings(s) {
   settingsUi.adsApiBase.value = s.adsApiBase || '';
   updateProfileDisplay();
   editingProvider = null;
+  dirty = false;
   applyProviderSelection(s.provider || 'adspower');
+  updateApplyRestart();
 }
 
 settingsUi.provAdspower.addEventListener('click', () => {
   editingProvider = 'adspower';
+  markDirty();
   applyProviderSelection('adspower');
   probeAds(); // 切到 AdsPower 分段即探一次可用性并自动列环境（真实事件，非「打开设置面板」）
 });
 settingsUi.provSelf.addEventListener('click', () => {
   editingProvider = 'self';
+  markDirty();
   applyProviderSelection('self');
 });
 
@@ -216,7 +244,12 @@ settingsUi.adsManual.addEventListener('change', () => {
   if (manual) settingsUi.adsProfile.focus();
   else updateProfileDisplay();
 });
-settingsUi.adsProfile.addEventListener('input', updateProfileDisplay);
+settingsUi.adsProfile.addEventListener('input', () => {
+  updateProfileDisplay();
+  markDirty();
+});
+settingsUi.adsApiBase.addEventListener('input', markDirty);
+settingsUi.adsApiKey.addEventListener('input', markDirty);
 
 // ─── AdsPower 探测 / 环境列表 / 新建入口 ───
 
@@ -266,6 +299,7 @@ async function probeAds() {
 function selectProfile(userId, itemEl) {
   settingsUi.adsProfile.value = userId;
   updateProfileDisplay();
+  markDirty();
   settingsUi.adsEnvList.querySelectorAll('.ads-env-item').forEach((el) => el.classList.remove('selected'));
   if (itemEl) itemEl.classList.add('selected');
 }
@@ -340,57 +374,43 @@ settingsUi.adsCreate.addEventListener('click', async (event) => {
   );
 });
 
-// 「保存」：只持久化浏览器设置、不打断在跑核心（应用改动经「按新设置重启」）。self 模式无此按钮。
-settingsUi.save.addEventListener('click', async () => {
-  const provider = selectedProvider();
-  const adsProfileId = settingsUi.adsProfile.value.trim();
-  if (provider === 'adspower' && !adsProfileId) {
-    settingsUi.msg.textContent = '请先选择一个环境，或打开「手动填写」填分身 ID。';
-    return;
-  }
-  settingsUi.save.disabled = true;
-  settingsUi.msg.textContent = '正在保存…';
-  try {
-    const saved = await window.aidcpEdge.saveSettings({
-      provider,
-      adsProfileId,
-      adsApiKey: settingsUi.adsApiKey.value,
-      adsApiBase: settingsUi.adsApiBase.value.trim(),
-    });
-    if (saved && saved.adsDownloadUrl) adsDownloadUrl = saved.adsDownloadUrl;
-    // 红线：写盘失败如实告知，不谎报「已保存」。
-    settingsUi.msg.textContent = saved && saved.saveOk === false
-      ? `已保存到内存，但写入本地失败：${saved.saveError || ''}（重启应用后可能丢失）`
-      : '已保存。';
-    // 保存不打断在跑核心：若核心在跑，给「按新设置重启」显式入口应用改动。
-    const running = currentStatus && currentStatus.edge !== 'stopped' && currentStatus.edge !== 'warning';
-    settingsUi.applyRestart.classList.toggle('hidden', !running);
-  } finally {
-    settingsUi.save.disabled = false;
-  }
-});
-
-// 「按新设置重启」：显式应用已保存的改动到在跑核心（不由「保存」隐式打断）。
+// 「按新设置重启」：先保存当前设置，再显式重启把改动应用到在跑核心（dirty && 在跑时才出现）。
 settingsUi.applyRestart.addEventListener('click', async () => {
   settingsUi.applyRestart.disabled = true;
   try {
+    const saved = await saveCurrentSettings();
+    if (saved && saved.saveOk === false) {
+      settingsUi.msg.textContent = `设置本次生效但写盘失败：${saved.saveError || ''}（重启应用后可能丢失）`;
+    }
     const next = await window.aidcpEdge.restart();
-    settingsUi.applyRestart.classList.add('hidden');
     if (next) render(next);
   } finally {
     settingsUi.applyRestart.disabled = false;
   }
 });
 
-// 悬浮会话按钮：按当前三态触发 启动 / 暂停 / 恢复。
+// 悬浮会话按钮：三态触发 恢复 / 启动（=先保存再启动） / 暂停。无独立「保存」按钮。
 fields.sessionFab.addEventListener('click', async () => {
   const action = fields.sessionFab.dataset.action;
   fields.sessionFab.disabled = true;
   try {
     let next;
-    if (action === 'resume') next = await window.aidcpEdge.resume();
-    else if (action === 'start') next = await window.aidcpEdge.start();
-    else next = await window.aidcpEdge.pause();
+    if (action === 'resume') {
+      next = await window.aidcpEdge.resume();
+    } else if (action === 'start') {
+      // 启动 = 先保存当前设置再启动（保存并入启动，无独立保存按钮）。
+      if (selectedProvider() === 'adspower' && !settingsUi.adsProfile.value.trim()) {
+        settingsUi.msg.textContent = '请先选择一个环境，或打开「手动填写」填分身 ID。';
+        return;
+      }
+      const saved = await saveCurrentSettings();
+      settingsUi.msg.textContent = saved && saved.saveOk === false
+        ? `设置本次生效但写盘失败：${saved.saveError || ''}（重启应用后可能丢失）`
+        : '设置已保存，正在启动…';
+      next = await window.aidcpEdge.start();
+    } else {
+      next = await window.aidcpEdge.pause();
+    }
     if (next) render(next);
   } finally {
     fields.sessionFab.disabled = false;

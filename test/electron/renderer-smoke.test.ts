@@ -136,29 +136,65 @@ test('刷新失败(401)：诚实降级 + 提示已用当前填写值', async () 
   assert.match($(w, '#ads-env-msg').textContent ?? '', /手动填写/);
 });
 
-test('保存只保存不重启：调 saveSettings、不调 restart，运行中给「按新设置重启」入口', async () => {
-  let restarted = 0;
-  let saved = 0;
+test('无独立「保存」按钮；启动 = 先保存再启动', async () => {
+  const calls: string[] = [];
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped' }),
+    adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'u1', serialNumber: '1', name: '甲', groupName: 'g', proxy: 'p' }] }),
+    saveSettings: async () => { calls.push('save'); return { provider: 'adspower', adsProfileId: 'u1', saveOk: true }; },
+    start: async () => { calls.push('start'); return makeStatus({ edge: 'starting', session: 'running' }); },
+  }));
+  assert.equal(w.document.querySelector('#save-settings'), null, '不应有独立「保存」按钮');
+  $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click')); // 选环境带出分身 ID
+  $(w, '#session-fab').dispatchEvent(new w.Event('click')); // 悬浮「启动」
+  await tick();
+  await tick();
+  assert.deepEqual(calls, ['save', 'start'], '启动应先 save 再 start');
+});
+
+test('启动前未选环境/未填分身 → 诚实提示，不 save 不 start', async () => {
+  const calls: string[] = [];
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped' }),
+    adsListProfiles: async () => ({ ok: true, profiles: [] }),
+    saveSettings: async () => { calls.push('save'); return { saveOk: true }; },
+    start: async () => { calls.push('start'); return makeStatus(); },
+  }));
+  $(w, '#session-fab').dispatchEvent(new w.Event('click'));
+  await tick();
+  assert.deepEqual(calls, []);
+  assert.match($(w, '#settings-msg').textContent ?? '', /请先选择一个环境/);
+});
+
+test('运行中改设置 → 出现「按新设置重启」，点击先存再重启', async () => {
+  const calls: string[] = [];
   const w = await boot(makeStub({
     getStatus: async () => makeStatus({ edge: 'running', session: 'running' }),
     adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'u1', serialNumber: '1', name: '甲', groupName: 'g', proxy: 'p' }] }),
-    saveSettings: async () => { saved += 1; return { provider: 'adspower', adsProfileId: 'u1', saveOk: true }; },
-    restart: async () => { restarted += 1; return makeStatus(); },
+    saveSettings: async () => { calls.push('save'); return { provider: 'adspower', adsProfileId: 'u1', saveOk: true }; },
+    restart: async () => { calls.push('restart'); return makeStatus({ edge: 'starting' }); },
   }));
-  $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click')); // 选环境带出分身 ID
-  $(w, '#save-settings').dispatchEvent(new w.Event('click'));
+  assert.equal(hidden($(w, '#apply-restart')), true, '未改动时不显示「按新设置重启」');
+  $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click')); // 改选环境 → dirty
+  assert.equal(hidden($(w, '#apply-restart')), false, '改动 + 运行中 → 显示');
+  $(w, '#apply-restart').dispatchEvent(new w.Event('click'));
   await tick();
   await tick();
-  assert.equal(saved, 1, 'save 应被调用一次');
-  assert.equal(restarted, 0, '保存 MUST NOT 触发重启');
-  assert.match($(w, '#settings-msg').textContent ?? '', /已保存/);
-  assert.equal(hidden($(w, '#apply-restart')), false, '运行中保存后应给「按新设置重启」入口');
+  assert.deepEqual(calls, ['save', 'restart'], '重启应先 save 再 restart');
 });
 
-test('self 模式隐藏「保存」按钮（无可存项）', async () => {
-  const w = await boot(makeStub());
-  $(w, '#prov-self').dispatchEvent(new w.Event('click'));
-  assert.equal(hidden($(w, '#save-settings')), true);
+test('self 模式：无分身校验，启动直接先存再起', async () => {
+  const calls: string[] = [];
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped', provider: 'self' }),
+    getSettings: async () => ({ provider: 'self', adsProfileId: '', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x' }),
+    saveSettings: async () => { calls.push('save'); return { provider: 'self', saveOk: true }; },
+    start: async () => { calls.push('start'); return makeStatus({ provider: 'self', edge: 'starting' }); },
+  }));
+  $(w, '#session-fab').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.deepEqual(calls, ['save', 'start']);
 });
 
 test('悬浮 fab 三态：停止→启动 / 运行→暂停 / 暂停→恢复', async () => {
@@ -168,14 +204,6 @@ test('悬浮 fab 三态：停止→启动 / 运行→暂停 / 暂停→恢复', 
   assert.equal($(running, '#session-fab').textContent, '暂停');
   const paused = await boot(makeStub({ getStatus: async () => makeStatus({ session: 'paused' }) }));
   assert.equal($(paused, '#session-fab').textContent, '恢复');
-});
-
-test('悬浮 fab 点击：停止态调 start', async () => {
-  let started = 0;
-  const w = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'stopped' }), start: async () => { started += 1; return makeStatus({ edge: 'starting' }); } }));
-  $(w, '#session-fab').dispatchEvent(new w.Event('click'));
-  await tick();
-  assert.equal(started, 1);
 });
 
 test('打开新建环境：拉起客户端成功 vs 退回官网，文案分档', async () => {
