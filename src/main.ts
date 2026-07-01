@@ -32,6 +32,8 @@
  * 运行：npm start
  */
 
+// 入口级全局 WebSocket 兜底：Electron 自带 Node 20 无全局 WebSocket，须在其它导入前安装。
+import './websocket-polyfill.js';
 import {
   attachToPage,
   readSelfIdentity,
