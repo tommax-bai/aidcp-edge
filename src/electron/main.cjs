@@ -240,6 +240,9 @@ function startEdge() {
       edge: exitedAbnormally ? 'warning' : 'stopped',
       cloud: 'disconnected',
       session: status.session === 'paused' ? 'paused' : 'idle',
+      // 核心已退出 = 无在跑会话：把本地日志派生的 risk 徽标复位 normal（该徽标是日志关键词启发、非权威，
+      // 真风控由云端单写），杜绝上一会话残留的「⚠」把徽标跨会话卡在「警戒」。
+      risk: 'normal',
       lastMessage: `边缘进程已退出${code === null ? '' : `（code ${code}`}${signal ? ` ${signal}` : ''}${code === null ? '' : '）'}。`,
     });
     // 红线：异常退出（含连云失败 / adspower 未登录致诚实非零退出）不静默——主动弹窗 + 系统通知。
@@ -353,6 +356,14 @@ function stopAndRestart(message, patch = {}) {
 function handleEdgeOutput(text, isError = false) {
   const message = text.trim();
   if (!message) return;
+  // 核心正被有意停止 / 已暂停 / 已退出：其关闭期 stdout/stderr 只作为日志行展示，绝不据以翻转
+  // edge / session / risk 徽标——否则关闭 chatter 会把「已暂停/已停止」闪回「运行中/异常」，
+  // 甚至因一行含「⚠」把 risk 卡在「警戒」。正常在跑时（无停止标记且核心存活）才做状态推断。
+  const stopping = isQuitting || restartPending || pausePending || !edgeProcess || status.session === 'paused';
+  if (stopping) {
+    updateStatus({ lastMessage: message });
+    return;
+  }
   const next = { edge: isError ? 'warning' : 'running', lastMessage: message };
   if (message.includes('已连接云端') || message.includes('已握手')) next.cloud = 'connected';
   if (message.includes('连接失败') || message.includes('WS 已关闭') || message.includes('启动失败')) next.cloud = 'disconnected';

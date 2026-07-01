@@ -286,3 +286,25 @@ test('重新登录：有未保存改动时先存再重新登录（与恢复同�
   await tick();
   assert.deepEqual(calls, ['save', 'relogin'], '重新登录前应先落盘改动');
 });
+
+test('保存后解除 provider 编辑闩锁：状态推送可再跟随实际 provider（回归）', async () => {
+  let pushCb: (s: unknown) => void = () => undefined;
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped', provider: 'adspower' }),
+    onStatusUpdate: (cb) => { pushCb = cb; },
+    adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'u1', serialNumber: '1', name: '甲', groupName: 'g', proxy: 'p' }] }),
+    start: async () => makeStatus({ edge: 'starting', session: 'running', provider: 'adspower' }),
+  }));
+  // 点一次 provider 分段 → editingProvider 上闩
+  $(w, '#prov-adspower').dispatchEvent(new w.Event('click'));
+  await tick();
+  // 选环境 + 启动（= 先 save 再 start）：save 里解闩
+  $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click'));
+  $(w, '#session-fab').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  // 之后一条状态推送报 provider=self → 段选应跟随（若闩未解，段会卡在 adspower）
+  pushCb(makeStatus({ provider: 'self', edge: 'running', session: 'running' }));
+  assert.ok($(w, '#prov-self').classList.contains('active'), '保存后应解闩，段选跟随实际 provider=self');
+  assert.equal(hidden($(w, '#ads-config')), true, 'self 下应隐藏 AdsPower 配置块');
+});

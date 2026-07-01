@@ -188,6 +188,9 @@ async function saveCurrentSettings() {
   });
   if (saved && saved.adsDownloadUrl) adsDownloadUrl = saved.adsDownloadUrl;
   dirty = false;
+  // 表单已落盘 = 与持久化/在跑设置一致：解除「编辑中不回填」闩锁，让后续状态推送可再跟随实际 provider。
+  // （否则点过一次 provider 分段后，render 的「跟随实际 provider」分支被永久旁路，段选可能与在跑 provider 不符。）
+  editingProvider = null;
   updateApplyRestart();
   return saved;
 }
