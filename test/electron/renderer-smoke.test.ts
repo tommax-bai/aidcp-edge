@@ -128,6 +128,19 @@ test('高级设置默认折叠，点开展开', async () => {
   assert.equal(hidden($(w, '#ads-advanced')), false);
 });
 
+test('分身 ID / 手动填写 收在「高级设置」内（结构）', () => {
+  const dom = new JSDOM(html);
+  const adv = dom.window.document.querySelector('#ads-advanced');
+  assert.ok(adv?.querySelector('#ads-profile'), '#ads-profile 应在 #ads-advanced 内');
+  assert.ok(adv?.querySelector('#ads-manual'), '#ads-manual 应在 #ads-advanced 内');
+  assert.ok(adv?.querySelector('#ads-profile-display'), '#ads-profile-display 应在 #ads-advanced 内');
+});
+
+test('拉取失败 → 自动展开「高级设置」让手动填写可达', async () => {
+  const w = await boot(makeStub({ adsListProfiles: async () => ({ ok: false, error: 'x' }) }));
+  assert.equal(hidden($(w, '#ads-advanced')), false, '拉取失败应自动展开高级设置');
+});
+
 test('刷新失败(401)：诚实降级 + 提示已用当前填写值', async () => {
   const w = await boot(makeStub({
     adsListProfiles: async () => ({ ok: false, authLikely: true, error: 'HTTP 401' }),

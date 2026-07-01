@@ -101,7 +101,7 @@ function renderNotice(status) {
     body = '请在刚打开的 Chrome 窗口中登录 xiaohongshu.com，检测到登录后 AIDCP Edge 会自动继续。';
   } else if (status.auth === 'config required') {
     title = '待配置';
-    body = '请在下方「浏览器」设置里选择一个环境（或打开「手动填写」填分身 ID），然后点右下角「启动」。';
+    body = '请在下方「浏览器」设置里选择一个环境（或在「高级设置」里打开「手动填写」填分身 ID），然后点右下角「启动」。';
   }
   const show = Boolean(title);
   fields.loginGuide.classList.toggle('hidden', !show);
@@ -236,6 +236,12 @@ settingsUi.adsAdvancedToggle.addEventListener('click', () => {
   settingsUi.adsAdvancedToggle.textContent = hidden ? '高级设置 ▾' : '高级设置 ▴';
 });
 
+// 分身 ID / 手动填写 收在「高级设置」里；需要手动兜底时（探测未就绪 / 拉取失败）自动展开，免得用户去找。
+function openAdvanced() {
+  settingsUi.adsAdvanced.classList.remove('hidden');
+  settingsUi.adsAdvancedToggle.textContent = '高级设置 ▴';
+}
+
 // 「手动填写」开关：开=显示手敲输入框；关=用选中环境的值（只读展示）。
 settingsUi.adsManual.addEventListener('change', () => {
   const manual = settingsUi.adsManual.checked;
@@ -284,9 +290,10 @@ async function probeAds() {
     } else {
       setProbeBadge('warning', '未就绪');
       setEnvMsg(
-        `未检测到 AdsPower 本地 API${r && r.error ? '（' + r.error + '）' : ''}。请启动 AdsPower 客户端并开启本地 API，或点右侧「下载 AdsPower」。仍可打开「手动填写」填分身 ID 继续。`,
+        `未检测到 AdsPower 本地 API${r && r.error ? '（' + r.error + '）' : ''}。请启动 AdsPower 客户端并开启本地 API，或点右侧「下载 AdsPower」。仍可在「高级设置」打开「手动填写」填分身 ID 继续。`,
         true,
       );
+      openAdvanced();
     }
   } catch {
     setProbeBadge('warning', '未就绪');
@@ -312,7 +319,7 @@ function populateEnvs(profiles) {
   if (!profiles.length) {
     const empty = document.createElement('p');
     empty.className = 'ads-env-empty';
-    empty.textContent = '（未找到环境，可打开「手动填写」填分身 ID）';
+    empty.textContent = '（未找到环境，可在「高级设置」打开「手动填写」填分身 ID）';
     list.appendChild(empty);
     return;
   }
@@ -348,14 +355,16 @@ async function refreshEnvs() {
       const authHint = r && r.authLikely
         ? '：疑似开启了 API 校验；若已在「高级设置」里填了 API Key，本次刷新已用当前填写值，请确认 Key 正确后重试'
         : '';
-      setEnvMsg(`拉取环境失败${r && r.error ? '（' + r.error + '）' : ''}${authHint}。可打开「手动填写」填分身 ID。`, true);
+      setEnvMsg(`拉取环境失败${r && r.error ? '（' + r.error + '）' : ''}${authHint}。可在「高级设置」打开「手动填写」填分身 ID。`, true);
+      openAdvanced();
       return;
     }
     populateEnvs(r.profiles || []);
     const extra = r.truncated ? '（环境较多，仅显示前若干条，可在 AdsPower 用分组精简）' : '';
     setEnvMsg(`已加载 ${(r.profiles || []).length} 个环境${extra}。点选一个即自动带出分身 ID。`, false);
   } catch (e) {
-    setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可打开「手动填写」填分身 ID。`, true);
+    setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可在「高级设置」打开「手动填写」填分身 ID。`, true);
+    openAdvanced();
   } finally {
     settingsUi.adsRefresh.disabled = false;
   }
@@ -400,7 +409,7 @@ fields.sessionFab.addEventListener('click', async () => {
     } else if (action === 'start') {
       // 启动 = 先保存当前设置再启动（保存并入启动，无独立保存按钮）。
       if (selectedProvider() === 'adspower' && !settingsUi.adsProfile.value.trim()) {
-        settingsUi.msg.textContent = '请先选择一个环境，或打开「手动填写」填分身 ID。';
+        settingsUi.msg.textContent = '请先选择一个环境，或在「高级设置」里打开「手动填写」填分身 ID。';
         return;
       }
       const saved = await saveCurrentSettings();

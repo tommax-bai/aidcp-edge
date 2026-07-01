@@ -67,16 +67,6 @@
             </div>
             <span id="ads-env-msg" class="ads-env-msg"></span>
           </div>
-          <div class="field ads-full">
-            <div class="ads-id-head">
-              <span class="field-label">分身 ID <em class="req">必填</em></span>
-              <label class="ads-manual-toggle">
-                <input id="ads-manual" type="checkbox" /> 手动填写
-              </label>
-            </div>
-            <div id="ads-profile-display" class="ads-profile-display">（请从上方选择一个环境）</div>
-            <input id="ads-profile" type="text" class="hidden" placeholder="手动填写 AdsPower 分身 ID（user_id）" autocomplete="off" />
-          </div>
           <p class="ads-hint ads-full">
             <a id="ads-create" href="#" class="link">打开 AdsPower 新建环境 ↗</a>
             <span class="ads-hint-sep">·</span>
@@ -85,6 +75,16 @@
           <div class="ads-full">
             <button id="ads-advanced-toggle" class="link ads-adv-toggle" type="button">高级设置 ▾</button>
             <div id="ads-advanced" class="ads-advanced hidden">
+              <div class="field ads-full">
+                <div class="ads-id-head">
+                  <span class="field-label">分身 ID <em class="req">必填</em></span>
+                  <label class="ads-manual-toggle">
+                    <input id="ads-manual" type="checkbox" /> 手动填写
+                  </label>
+                </div>
+                <div id="ads-profile-display" class="ads-profile-display">（请从上方选择一个环境）</div>
+                <input id="ads-profile" type="text" class="hidden" placeholder="手动填写 AdsPower 分身 ID（user_id）" autocomplete="off" />
+              </div>
               <label class="field">
                 <span class="field-label">API 地址 <em class="opt">可选</em></span>
                 <input id="ads-apibase" type="text" placeholder="http://local.adspower.net:50325" autocomplete="off" />
