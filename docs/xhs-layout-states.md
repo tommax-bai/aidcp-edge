@@ -70,6 +70,18 @@ function isNarrowLayout(){
 - 真机验证：narrow(500) 与 wide(1264) 各一次，且用**真正的 `executeSearch`** 端到端——输入「上下文工程」→ 跳结果页 → 22 条相关结果卡。
 - 修复落点：`browse/search-handler.ts`（`XHS_SEARCH_INPUT_SELECTOR` 补 `#search-input-in-feeds` + `name=aiSearchTextarea`；`buildIsVisibleJs`/`buildFocusClearJs` 改「取可见」；Enter 未跳则点 `.submit-button` 兜底）。
 
+### 2.6 搜索结果页原生筛选（排序 + 发布时间）✅ 真机标定 2026-07-01（Tmax 分身，AI 搜索页）
+- **落地页是 AI 搜索页**：`executeSearch` 回车后跳 `/search_result_ai?keyword=...`，容器 `<div class="ai-feeds-page with-ai-chat">`。顶部是**内容频道**「笔记/用户/问点点(ai)」，**不是**经典排序 tab——经典的「综合/最多收藏」排序**在页面上根本不存在行内**。
+- **排序 + 发布时间都在「筛选」面板内**：右上角 `<span>筛选</span>`（在 `div.filter.ai-chat-filter` 里）。**hover 即展开**面板（无需 click），内含：
+  - 排序依据：综合 / 最新 / 最多点赞 / 最多评论 / 最多收藏（`div.tags`，选中=`div.tags.active`）；
+  - 发布时间：不限 / 一天内 / 一周内 / 半年内（同款 `div.tags`）。
+- ⚠️ **每个选项都并排一个 `aria-hidden="true"` 的埋点/命中代理** `div.tags[data-hp-kind="filter-tag-*"]`，与真元素**精确重叠**。按「取最小可见元素」会点到代理 → **已点却没选上**（假阳性）。**定位/校验时必须跳过 `aria-hidden="true"` 子树内的元素**（`el.closest('[aria-hidden="true"]')`）。
+- ⚠️ **应用任一筛选后，触发器文案由「筛选」变「已筛选」**：若只精确匹配「筛选」，切完第一个就找不到触发器、打不开面板、第二个永远切不上。触发器候选须含 `['筛选','已筛选']`。
+- ⚠️ **面板刚展开就点会「瞬时高亮但不提交」**（排序项尤其明显）：hover 展开后需 settle 一下（一次 action 级停顿）再点，否则 `.active` 闪一下又回默认。
+- **点选项即生效**（无「确定」按钮）：会触发结果重排 + 面板收起；被选项的 `.active` **持久**（重开面板仍在）。故**校验真生效 = 点后重新 hover 打开面板、看该项是否仍 `.active`**（点完原地立刻看会因面板收起、选项隐藏而假阴性）。
+- **实现**：`src/browse/search-handler.ts` `applySearchFilters`——pass2 对每个目标「hover 触发器→settle→点→重开面板→校验持久 active」；`buildFindByTextRectJs`/`buildOptionSelectedJs` 排除 aria-hidden 子树；触发器 `SEARCH_FILTER_TRIGGER_TEXTS=['筛选','已筛选']`。真机实证：`最多收藏 + 一天内` 两项均切上、结果重排、持久 active。
+- **宽窄**：本次在 innerWidth=1512（宽）标定；AI 搜索页 `isWide/isNarrow`（侧栏/底部栏）不适用（AI 页无侧栏），窄布局待补测——但定位全靠「可见文案 + 排除 aria-hidden + 取可见」，与宽窄解耦，预期通吃（窄布局若筛选入口收成图标另需补）。
+
 ## 3. 跨切面建议
 - **启动固定桌面视口**：edge 启动 Chrome 带 `--window-size=1440,980`（+ 启动后 `Browser.setWindowBounds` 兜底 maximize；高 DPI 机另需 `--force-device-scale-factor=1` 或 `Emulation.setDeviceMetricsOverride{deviceScaleFactor:1,width:1440}`）→ 优先进 WIDE。
 - **但不得只赌宽窗口**：真实运营机分辨率/缩放不可控，**两状态都必须能跑**（用户硬要求）。所有动作按 §2 的"取可见入口 / 真实滚轮 / SPA 开 modal"做到状态无关。

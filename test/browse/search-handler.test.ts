@@ -45,8 +45,12 @@ test('executeSearch: 搜索框未找到时抛错', async () => {
 });
 
 test('applySearchFilters: 控件存在（找到文案坐标）→ 排序+时间都点到、返回 applied', async () => {
-  const { cdp, calls } = fakeCdp((method) => {
-    if (method === 'Runtime.evaluate') return { result: { value: JSON.stringify({ x: 120, y: 60 }) } };
+  const { cdp, calls } = fakeCdp((method, params) => {
+    if (method === 'Runtime.evaluate') {
+      // 选中态校验 eval（buildOptionSelectedJs，含 'aria-selected'）→ 返回已选中；其余（定位）→ 返回坐标。
+      if (String(params.expression ?? '').includes('aria-selected')) return { result: { value: 'true' } };
+      return { result: { value: JSON.stringify({ x: 120, y: 60 }) } };
+    }
     return {};
   });
   const r = await applySearchFilters(
@@ -78,12 +82,15 @@ test('applySearchFilters: 时间项藏在 hover 展开的「筛选」面板内 �
   const { cdp, calls } = fakeCdp((method, params) => {
     if (method === 'Runtime.evaluate') {
       const expr = String(params.expression ?? '');
-      if (expr.includes('筛选')) {
+      // 选中态校验 eval（含 'aria-selected'）→ 已选中（点后校验通过）。
+      if (expr.includes('aria-selected')) return { result: { value: 'true' } };
+      // 用**带引号**匹配嵌入的目标数组（如 ["筛选"]），避免命中定位 JS 注释里的裸「筛选」二字。
+      if (expr.includes('"筛选"')) {
         filterHovered = true; // 一旦定位/hover 过「筛选」，面板展开、时间项转为可见
         return { result: { value: JSON.stringify({ x: 200, y: 40 }) } };
       }
-      if (expr.includes('最多收藏')) return { result: { value: JSON.stringify({ x: 120, y: 40 }) } };
-      if (expr.includes('一天内')) return { result: { value: filterHovered ? JSON.stringify({ x: 210, y: 130 }) : null } };
+      if (expr.includes('"最多收藏"')) return { result: { value: JSON.stringify({ x: 120, y: 40 }) } };
+      if (expr.includes('"一天内"')) return { result: { value: filterHovered ? JSON.stringify({ x: 210, y: 130 }) : null } };
       return { result: { value: null } };
     }
     return {};
@@ -99,6 +106,23 @@ test('applySearchFilters: 时间项藏在 hover 展开的「筛选」面板内 �
   assert.equal(presses.length, 2, '只应有「排序 tab + 时间项」两次点击——「筛选」靠 hover 展开、不 click（老 bug 会多一次 click 筛选）');
   const onFilter = presses.filter((p) => Math.abs(Number(p.params.x) - 200) < 8 && Math.abs(Number(p.params.y) - 40) < 8);
   assert.equal(onFilter.length, 0, '绝不 click「筛选」控件本体（避免 hover 开→click 又收起面板）');
+});
+
+test('applySearchFilters: 点到了元素但选项未进入选中态 → honest applied=false（治「已点却没选上」假阳性）', async () => {
+  // 定位永远命中（返回坐标=点得到），但选中态校验永远 false（点了没生效，如点到 aria-hidden 埋点代理）。
+  const { cdp } = fakeCdp((method, params) => {
+    if (method === 'Runtime.evaluate') {
+      if (String(params.expression ?? '').includes('aria-selected')) return { result: { value: 'false' } };
+      return { result: { value: JSON.stringify({ x: 120, y: 60 }) } };
+    }
+    return {};
+  });
+  const r = await applySearchFilters(
+    { sort: 'most_collected', timeWindow: 'one_day' },
+    { cdp, sleep: async () => {}, random: () => 0.5 },
+  );
+  assert.equal(r.sortApplied, false, '点了但没选上→不冒充已筛');
+  assert.equal(r.timeApplied, false, '点了但没选上→不冒充已筛');
 });
 
 test('applySearchFilters: 无 sort/timeWindow → no-op，不评估页面', async () => {

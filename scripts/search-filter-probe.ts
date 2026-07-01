@@ -57,7 +57,7 @@ import { writeFileSync } from 'node:fs';
 
 import { attachToPage } from '../src/cdp/index.js';
 import { evalRaw } from '../src/browse/cdp-util.js';
-import { applySearchFilters } from '../src/browse/search-handler.js';
+import { applySearchFilters, executeSearch } from '../src/browse/search-handler.js';
 
 type Session = Awaited<ReturnType<typeof attachToPage>>;
 type Cdp = Session['cdp'];
@@ -82,6 +82,7 @@ const URL_INCLUDES = process.env.AIDCP_PAGE_URL ?? 'xiaohongshu';
 const TS = new Date().toISOString().replace(/[:.]/g, '-');
 const TIME_TEXT = readArg('time', '一天内'); // 时间筛选目标文案
 const SORT_TEXT = readArg('sort-text', '最多收藏'); // 排序 tab 目标文案
+const SEARCH_KW = readArg('search', ''); // 非空 → 先导航到小红书 + 真实搜索进结果页，再 dump（自给自足）
 
 // 排序 tab / 时间筛选的候选文案（与生产 SEARCH_SORT_TEXT / SEARCH_TIME_TEXT 对齐）
 const SORT_TEXTS = ['综合', '最新', '最多点赞', '最多收藏', '最多评论'];
@@ -278,9 +279,29 @@ function summarize(tag: string, d: any): void {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  console.log(`[probe] attach → ${HOST}:${PORT} (url~="${URL_INCLUDES}")`);
-  const session = await attachToPage({ host: HOST, port: PORT, urlIncludes: URL_INCLUDES });
+  // --search 模式：附着当前任意页（AdsPower 起始页等）→ 导航到小红书 → 真实搜索进结果页，再 dump（自给自足）。
+  const attachUrl = SEARCH_KW ? '' : URL_INCLUDES;
+  console.log(`[probe] attach → ${HOST}:${PORT} (url~="${attachUrl || '<第一个 page>'}")`);
+  const session = await attachToPage({ host: HOST, port: PORT, urlIncludes: attachUrl });
   const cdp = session.cdp;
+
+  if (SEARCH_KW) {
+    console.log(`[probe] --search「${SEARCH_KW}」：导航到小红书首页…`);
+    await cdp.send('Page.navigate', { url: 'https://www.xiaohongshu.com/explore' });
+    await sleep(5000); // 等 SPA hydrate
+    const loggedIn = await evalRaw<string>(
+      cdp,
+      `(function(){return JSON.stringify({url:location.href, hasSearch: !!document.querySelector('textarea[name="aiSearchTextarea"], #search-input, #search-input-in-feeds'), loginWall: /login|reds-verify/i.test(document.body.innerHTML.slice(0,2000))});})()`,
+    ).catch(() => null);
+    console.log(`[probe]   首页状态: ${loggedIn}`);
+    console.log(`[probe]   执行真实搜索…`);
+    try {
+      await executeSearch(SEARCH_KW, { cdp, sleep, logger: (m) => console.log('    ' + m) });
+    } catch (e) {
+      console.log(`[probe]   ⚠ executeSearch 失败: ${String(e)}（可能未登录/搜索框未找到；仍继续 dump 当前页）`);
+    }
+    await sleep(3500); // 等结果页渲染
+  }
 
   // ── stage 0: 只读基线 dump ──
   const base = await dump(cdp);

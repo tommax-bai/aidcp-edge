@@ -63,6 +63,13 @@ export const SEARCH_TIME_TEXT: Record<string, string> = {
 };
 
 /**
+ * 「筛选」面板触发器的文案候选。真机实证：**应用任一筛选后，触发器文案由「筛选」变为「已筛选」**——
+ * 若只精确匹配「筛选」，应用第一个筛选后就找不到触发器、打不开面板、第二个筛选永远切不上（真机 bug）。
+ * 故两者都收进候选。
+ */
+export const SEARCH_FILTER_TRIGGER_TEXTS = ['筛选', '已筛选'];
+
+/**
  * 生成「按可见文案精确匹配、取最小面积叶子元素中心坐标」的 JS（返回 JSON {x,y} 或 null）。
  * 精确相等（textContent.trim() === 目标）避免命中包含子节点文案的大容器；取最小面积=最贴近真正可点的那个。
  */
@@ -76,6 +83,9 @@ function buildFindByTextRectJs(texts: string[]): string {
       var t = (el.textContent||'').trim();
       if (targets.indexOf(t) === -1) continue;
       if (el.offsetParent === null) continue;
+      // 跳过埋点/命中代理：真机 AI 搜索页每个筛选项都并排一个 aria-hidden=true 的代理 div（data-hp-kind=filter-tag-*）
+      // 与真元素精确重叠，点它无效（会造成「已点却没选上」的假阳性）。凡处于 aria-hidden 子树内一律不点。
+      if (el.closest && el.closest('[aria-hidden="true"]')) continue;
       var r = el.getBoundingClientRect();
       if (r.width<=0 || r.height<=0) continue;
       if (r.top<0 || r.left<0) continue;
@@ -83,6 +93,33 @@ function buildFindByTextRectJs(texts: string[]): string {
       if (!best || area < best.area) best = { area: area, x: r.left+r.width/2, y: r.top+r.height/2 };
     }
     return best ? JSON.stringify({x:best.x,y:best.y}) : null;
+  })()`;
+}
+
+/**
+ * 生成「按可见文案判定该选项是否已进入选中态」的 JS（返回 'true'/'false'）。
+ * 从命中元素上溯几层，任一祖先的 class 令牌含 active/selected/checked/current/is-active，
+ * 或带 aria-selected/aria-checked="true" → 视为已选中。用于点击后**校验真生效**（治「已点却没选上」假阳性）。
+ */
+function buildOptionSelectedJs(texts: string[]): string {
+  return `(function(){
+    var targets = ${JSON.stringify(texts)};
+    var SEL = ['active','selected','checked','current','is-active'];
+    var nodes = Array.prototype.slice.call(document.querySelectorAll('button,a,span,div,li,label,p'));
+    for (var i=0;i<nodes.length;i++){
+      var el = nodes[i];
+      if (targets.indexOf((el.textContent||'').trim()) === -1) continue;
+      if (el.offsetParent === null) continue;
+      if (el.closest && el.closest('[aria-hidden="true"]')) continue;
+      var p = el;
+      for (var k=0;k<4 && p;k++){
+        var toks = ((p.className||'')+'').split(/\\s+/);
+        for (var j=0;j<SEL.length;j++){ if (toks.indexOf(SEL[j])>=0) return 'true'; }
+        if (p.getAttribute && (p.getAttribute('aria-selected')==='true' || p.getAttribute('aria-checked')==='true')) return 'true';
+        p = p.parentElement;
+      }
+    }
+    return 'false';
   })()`;
 }
 
@@ -137,12 +174,42 @@ async function waitOptionVisible(
   timeoutMs: number,
   sleep: (ms: number) => Promise<void>,
 ): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  do {
+  // 按累计 sleep 计时（不依赖 Date.now()）：生产每轮真等 120ms、约 timeoutMs/120 轮；测试注入即时 sleep 则同轮数快速退出。
+  for (let waited = 0; waited < timeoutMs; waited += 120) {
     if (await findRectByVisibleText(cdp, texts)) return true;
     await sleep(120);
-  } while (Date.now() < deadline);
+  }
   return false;
+}
+
+/** 有界轮询：等某选项进入选中态（点击后校验真生效）。命中返回 true，超时 false。 */
+async function waitOptionSelected(
+  cdp: BrowseCdp,
+  texts: string[],
+  timeoutMs: number,
+  sleep: (ms: number) => Promise<void>,
+): Promise<boolean> {
+  for (let waited = 0; waited < timeoutMs; waited += 120) {
+    const r = await evalRaw<string>(cdp, buildOptionSelectedJs(texts)).catch(() => 'false');
+    if (r === 'true' || (r as unknown) === true) return true;
+    await sleep(120);
+  }
+  return false;
+}
+
+/**
+ * 点某筛选选项并**校验它真进入选中态**才算数（honest：治「已点却没选上」假阳性——真机 AI 搜索页
+ * 每项旁并排一个 aria-hidden 埋点代理，点代理无效；且「点到了元素」≠「筛选真生效」）。
+ * 命中并确认选中返回 true；找不到 / 点了但未变选中 → false（诚实降级，不冒充已筛）。
+ */
+async function clickAndVerifyOption(
+  cdp: BrowseCdp,
+  text: string,
+  opts: { random?: RandomFn; sleep: (ms: number) => Promise<void>; from?: Point },
+): Promise<boolean> {
+  const clicked = await clickByVisibleText(cdp, [text], opts);
+  if (!clicked) return false;
+  return waitOptionSelected(cdp, [text], 1200, opts.sleep);
 }
 
 export interface ApplySearchFiltersDeps {
@@ -175,40 +242,46 @@ export async function applySearchFilters(
   const wantTime = opts.timeWindow ? SEARCH_TIME_TEXT[opts.timeWindow] : undefined;
   if (!wantSort && !wantTime) return { sortApplied: false, timeApplied: false };
 
-  // 第一遍：当作行内 tab 直接按文案点（排序 tab 多为行内常驻）。
-  let sortApplied = wantSort ? await clickByVisibleText(cdp, [wantSort], { random, sleep }) : false;
+  // 第一遍：当作行内 tab 直接按文案点（排序 tab 多为行内常驻）；点后校验真进入选中态才算数。
+  let sortApplied = wantSort ? await clickAndVerifyOption(cdp, wantSort, { random, sleep }) : false;
   if (wantSort) await pause();
-  let timeApplied = wantTime ? await clickByVisibleText(cdp, [wantTime], { random, sleep }) : false;
+  let timeApplied = wantTime ? await clickAndVerifyOption(cdp, wantTime, { random, sleep }) : false;
   if (wantTime) await pause();
 
-  // 第二遍：仍有未命中 → 开「筛选」面板再点（时间筛选常在面板内）。
-  // 「筛选」在真机上多为 **hover 展开** 的悬浮面板：先 hover 展开（不 click，避免「hover 开→click 又收起」，
-  // 这正是先前 bug）；hover 后轮询面板内目标是否可见。若 hover 展开不了（面板实为 click-toggle 触发），
-  // 再补一次 click「筛选」兜底（从 hover 落点起手，路径落在控件上）。对两种触发方式都稳、且绝不二次 toggle。
-  // ⚠ 真机标定项（task 12.1，用 scripts/search-filter-probe.ts）：hover vs click 触发、选中时间项后是否需点「确定」。
-  if ((wantSort && !sortApplied) || (wantTime && !timeApplied)) {
-    // 用**仍未命中**的目标作探针（不是可能已内联命中的那个）：面板内该目标转可见即视为已展开。
-    const probeTarget = (wantTime && !timeApplied ? wantTime : undefined) ?? wantSort!;
-    const filterPos = await hoverByVisibleText(cdp, ['筛选'], { random, sleep });
-    if (filterPos) {
-      let ready = await waitOptionVisible(cdp, [probeTarget], 800, sleep);
-      if (!ready) {
-        // hover 未展开 → 面板可能是 click 触发。补一次 click（从 hover 落点起手，落在「筛选」控件本体）。
-        await clickByVisibleText(cdp, ['筛选'], { random, sleep, from: filterPos });
-        ready = await waitOptionVisible(cdp, [probeTarget], 1500, sleep);
-      }
-      if (ready) {
-        // 点面板内目标时 from=「筛选」坐标：移动路径落在「筛选→面板」区域内，避免中途 mouseleave 收起面板。
-        if (wantSort && !sortApplied) {
-          sortApplied = await clickByVisibleText(cdp, [wantSort], { random, sleep, from: filterPos });
-          await pause();
-        }
-        if (wantTime && !timeApplied) {
-          timeApplied = await clickByVisibleText(cdp, [wantTime], { random, sleep, from: filterPos });
-          await pause();
-        }
-      }
+  // 第二遍：仍有未命中 → 开「筛选」面板再点（真机 AI 搜索页排序 + 时间都在此面板内）。
+  // 关键（真机实证 edge fddfe79 之后）：① 「筛选」是 **hover 展开** 的悬浮面板；② 点一个选项会触发结果重排、
+  // 把面板收起——故**每点一个选项前都重新 hover 展开面板**（点排序→重排→重新 hover→点时间），不能假设面板一直开着。
+  // hover 展开不了（面板实为 click-toggle 触发）→ 补一次 click「筛选」兜底。点后校验真进入选中态才算数（不冒充已筛）。
+  // ⚠ 真机标定项（task 12.1，用 scripts/search-filter-probe.ts）。
+  const applyViaPanel = async (target: string): Promise<boolean> => {
+    const filterPos = await hoverByVisibleText(cdp, SEARCH_FILTER_TRIGGER_TEXTS, { random, sleep });
+    if (!filterPos) return false;
+    let ready = await waitOptionVisible(cdp, [target], 800, sleep);
+    if (!ready) {
+      // hover 未展开 → 面板可能是 click 触发。补一次 click（从 hover 落点起手，落在触发器本体）。
+      await clickByVisibleText(cdp, SEARCH_FILTER_TRIGGER_TEXTS, { random, sleep, from: filterPos });
+      ready = await waitOptionVisible(cdp, [target], 1500, sleep);
     }
+    if (!ready) return false;
+    // 面板刚展开就点会「瞬时高亮但不提交」（真机实证：排序项尤其明显）——settle 一下等选项可交互再点。
+    await pause();
+    // 点目标：from=触发器坐标，路径落在「触发器→面板」区内，避免中途 mouseleave 收起面板。
+    const clicked = await clickByVisibleText(cdp, [target], { random, sleep, from: filterPos });
+    if (!clicked) return false;
+    await pause(); // 等选中后的结果重排 + 面板收起
+    // 校验真生效：**重新 hover 打开面板**（应用后触发器变「已筛选」）再看该项是否持久 active。
+    // 不能点完立刻在原地看——选中会触发结果重排、面板收起，选项转隐藏（offsetParent=null）→ 假阴性。
+    const reopenPos = await hoverByVisibleText(cdp, SEARCH_FILTER_TRIGGER_TEXTS, { random, sleep });
+    if (!reopenPos) return false;
+    return waitOptionSelected(cdp, [target], 1500, sleep);
+  };
+  if (wantSort && !sortApplied) {
+    sortApplied = await applyViaPanel(wantSort);
+    await pause();
+  }
+  if (wantTime && !timeApplied) {
+    timeApplied = await applyViaPanel(wantTime);
+    await pause();
   }
 
   logger(
@@ -415,11 +488,13 @@ export async function executeSearch(
   if (navigated) {
     const href = await evalRaw<string>(cdp, `(function(){ return location.href; })()`);
     logger(`[search] 搜索导航成功: ${href}`);
-    // 4. 额外等待让搜索结果卡片加载。
-    await sleep(sampleDelay(TIMING_PRESETS.reading, random));
+    // 4. 只给结果页首屏渲染一个轻缓冲（scroll 档，中位 ~0.8s）；真正「等结果卡片出现」由调用方
+    //    waitForCards(5000) 兜底、命中即提前返回。原按 reading 档（中位 5s、长尾 15s）固定睡眠与之
+    //    功能重复、纯属白等，故降为轻缓冲。
+    await sleep(sampleDelay(TIMING_PRESETS.scroll, random));
   } else {
     logger('[search] 未确认导航到搜索结果页（待真机确认提交方式）');
-    // 兜底：即使未确认导航，也给结果页渲染留出时间。
-    await sleep(sampleDelay(TIMING_PRESETS.reading, random));
+    // 兜底：未确认导航时也只给轻缓冲；同样由调用方 waitForCards 兜底真正的卡片等待。
+    await sleep(sampleDelay(TIMING_PRESETS.scroll, random));
   }
 }
