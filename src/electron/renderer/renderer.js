@@ -192,6 +192,23 @@ async function saveCurrentSettings() {
   return saved;
 }
 
+// 重启类动作（恢复 / 重新登录）前的落盘闸：这些动作都会按【持久化设置】重起核心进程，
+// 而选环境 / 改 provider 等只改了本地表单（markDirty）、未落盘。若有未保存改动则先存再重启，
+// 否则核心会按旧设置重起——用户「暂停中切换的新环境」不生效（暂停态下「按新设置重启」按钮隐藏、
+// 「恢复」是唯一控件，故必须在此吸收未保存改动）。返回 true=可继续；false=因缺分身 ID 被拦下、调用方应中止。
+async function persistDirtyBeforeRestart(okMessage) {
+  if (!dirty) return true;
+  if (selectedProvider() === 'adspower' && !settingsUi.adsProfile.value.trim()) {
+    settingsUi.msg.textContent = '请先选择一个环境，或在「高级设置」里打开「手动填写」填分身 ID。';
+    return false;
+  }
+  const saved = await saveCurrentSettings();
+  settingsUi.msg.textContent = saved && saved.saveOk === false
+    ? `设置本次生效但写盘失败：${saved.saveError || ''}（重启应用后可能丢失）`
+    : okMessage;
+  return true;
+}
+
 function selectedProvider() {
   return settingsUi.provAdspower.classList.contains('active') ? 'adspower' : 'self';
 }
@@ -407,6 +424,8 @@ fields.sessionFab.addEventListener('click', async () => {
   try {
     let next;
     if (action === 'resume') {
+      // 恢复 = 重启核心。若暂停期间改过浏览器设置（如切换了环境），先落盘再重启，否则会按旧设置重起。
+      if (!(await persistDirtyBeforeRestart('设置已保存，正在按新设置恢复…'))) return;
       next = await window.aidcpEdge.resume();
     } else if (action === 'start') {
       // 启动 = 先保存当前设置再启动（保存并入启动，无独立保存按钮）。
@@ -431,6 +450,8 @@ fields.sessionFab.addEventListener('click', async () => {
 fields.relogin.addEventListener('click', async () => {
   fields.relogin.disabled = true;
   try {
+    // 重新登录同为「按当前浏览器设置重启核心」：若表单有未保存改动（如切换了环境），先落盘再重启。
+    if (!(await persistDirtyBeforeRestart('设置已保存，正在重新登录…'))) return;
     render(await window.aidcpEdge.relogin());
   } finally {
     fields.relogin.disabled = false;

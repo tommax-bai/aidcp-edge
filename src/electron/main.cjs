@@ -16,6 +16,10 @@ let loginPoller;
 let isQuitting = false;
 // 保存后重启标记：SIGTERM 旧边缘进程后，其 exit 回调据此按新 provider 起，而非误判为异常退出弹窗。
 let restartPending = false;
+// 暂停触发的 SIGTERM 标记（一次性）：供退出回调把本次退出判为「有意停止」，不弹异常退出告警。
+// 尤其治「核心启动窗口内点暂停」——此时核心的 SIGTERM handler 尚未安装，会被 signal 直接终止（signal!=null）
+// 而被误判为异常退出。
+let pausePending = false;
 
 // AdsPower 官方下载页（客户端「下载 AdsPower」按钮外链）。
 const ADS_DOWNLOAD_URL = 'https://www.adspower.net/download';
@@ -227,8 +231,10 @@ function startEdge() {
   edgeProcess.stderr.on('data', (chunk) => handleEdgeOutput(chunk.toString(), true));
   edgeProcess.on('exit', (code, signal) => {
     edgeProcess = undefined;
-    // 主动重启（保存设置后按新 provider 起）与退出应用一样是「有意停止」，不算异常、不弹窗。
-    const intentional = isQuitting || restartPending;
+    // 主动重启（保存设置后按新 provider 起）、暂停、退出应用都是「有意停止」，不算异常、不弹窗。
+    // pausePending 一次性消费：治「启动窗口内点暂停」——handler 未装时被 SIGTERM 终止(signal!=null)本不是异常。
+    const intentional = isQuitting || restartPending || pausePending;
+    pausePending = false;
     const exitedAbnormally = !intentional && (signal != null || (code != null && code !== 0));
     updateStatus({
       edge: exitedAbnormally ? 'warning' : 'stopped',
@@ -366,6 +372,8 @@ function pauseEdge() {
   restartPending = false;
   updateStatus({ session: 'paused', lastMessage: '已请求暂停，后台边缘进程将在安全点停止。' });
   if (edgeProcess) {
+    // 暂停是「有意停止」：标记之，使其 SIGTERM 触发的退出不被误判为异常（尤其核心启动窗口内 handler 未装时）。
+    pausePending = true;
     edgeProcess.kill('SIGTERM');
   }
 }

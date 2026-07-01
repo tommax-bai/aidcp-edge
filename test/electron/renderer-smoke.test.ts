@@ -243,3 +243,46 @@ test('防限速：刷新在途禁用按钮，完成后恢复', async () => {
   await tick();
   assert.equal(btn.disabled, false);
 });
+
+test('暂停中切换环境 → 恢复：先存再恢复（回归：新环境不被旧持久化设置覆盖）', async () => {
+  const calls: string[] = [];
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ session: 'paused', edge: 'stopped' }),
+    adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'u_new', serialNumber: '2', name: '乙', groupName: 'g', proxy: 'p' }] }),
+    saveSettings: async () => { calls.push('save'); return { provider: 'adspower', adsProfileId: 'u_new', saveOk: true }; },
+    resume: async () => { calls.push('resume'); return makeStatus({ session: 'running', edge: 'running' }); },
+  }));
+  assert.equal($(w, '#session-fab').textContent, '恢复', '暂停态 fab 应为「恢复」');
+  $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click')); // 暂停中切换环境 → dirty
+  $(w, '#session-fab').dispatchEvent(new w.Event('click')); // 点「恢复」
+  await tick();
+  await tick();
+  assert.deepEqual(calls, ['save', 'resume'], '恢复前应先落盘新环境，再恢复');
+});
+
+test('暂停中未改动 → 恢复：直接恢复，不多余落盘', async () => {
+  const calls: string[] = [];
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ session: 'paused', edge: 'stopped' }),
+    saveSettings: async () => { calls.push('save'); return { saveOk: true }; },
+    resume: async () => { calls.push('resume'); return makeStatus({ session: 'running', edge: 'running' }); },
+  }));
+  $(w, '#session-fab').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.deepEqual(calls, ['resume'], '无改动时恢复不应触发 save');
+});
+
+test('重新登录：有未保存改动时先存再重新登录（与恢复同类修复）', async () => {
+  const calls: string[] = [];
+  const w = await boot(makeStub({
+    adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'u_new', serialNumber: '2', name: '乙', groupName: 'g', proxy: 'p' }] }),
+    saveSettings: async () => { calls.push('save'); return { provider: 'adspower', adsProfileId: 'u_new', saveOk: true }; },
+    relogin: async () => { calls.push('relogin'); return makeStatus(); },
+  }));
+  $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click')); // 改选环境 → dirty
+  $(w, '#relogin').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.deepEqual(calls, ['save', 'relogin'], '重新登录前应先落盘改动');
+});
