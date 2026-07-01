@@ -400,11 +400,22 @@ ipcMain.handle('auth:relogin', () => relogin());
 ipcMain.handle('settings:get', () => ({ ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL }));
 ipcMain.handle('settings:save', (_event, patch) => {
   const res = saveSettings(patch);
-  stopAndRestart(
-    res.ok ? '设置已保存，正在按新配置重启…' : '设置已应用（本次生效），但写入本地失败，重启应用后可能丢失。',
-    { provider: settings.provider },
-  );
+  // 保存只持久化、**不打断**在跑的核心（应用改动经显式 edge:restart「按新设置重启」）。
+  updateStatus({
+    provider: settings.provider,
+    lastMessage: res.ok ? '浏览器设置已保存。' : '设置已应用（本次生效），但写入本地失败，重启应用后可能丢失。',
+  });
   return { ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL, saveOk: res.ok, saveError: res.error };
+});
+// 悬浮「启动」：核心未跑则按当前设置启动；已在跑则不重复启动。
+ipcMain.handle('edge:start', () => {
+  if (!edgeProcess) startFlow();
+  return status;
+});
+// 「按新设置重启」：显式应用已保存的设置到在跑核心（有序重启，不由保存隐式打断）。
+ipcMain.handle('edge:restart', () => {
+  stopAndRestart('正在按新设置重启边缘进程…');
+  return status;
 });
 ipcMain.handle('browser:openAdsDownload', () => {
   void shell.openExternal(ADS_DOWNLOAD_URL);

@@ -316,6 +316,130 @@ h1 {
   color: #cbd5e1;
 }
 
+/* 环境列表（直接展示、可点行，非下拉） */
+.ads-env-head,
+.ads-id-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ads-env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 168px;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 6px;
+  background: #f8fafc;
+}
+.ads-env-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.ads-env-item:hover {
+  border-color: #cbd5e1;
+}
+.ads-env-item.selected {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+.ads-env-item .env-name {
+  font-weight: 600;
+  color: #172033;
+  font-size: 14px;
+}
+.ads-env-item .env-meta {
+  color: #64748b;
+  font-size: 12px;
+}
+.ads-env-empty {
+  margin: 0;
+  padding: 10px;
+  color: #94a3b8;
+  font-size: 13px;
+  text-align: center;
+}
+
+/* 分身 ID：默认由选中环境带出（只读展示）+「手动填写」开关 */
+.ads-manual-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ads-profile-display {
+  padding: 9px 12px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #172033;
+  font-size: 14px;
+  min-height: 20px;
+}
+.ads-profile-display.empty {
+  color: #94a3b8;
+}
+
+/* 高级设置折叠 */
+.ads-adv-toggle {
+  background: transparent;
+  border: 0;
+  padding: 2px 0;
+  font-size: 13px;
+}
+.ads-advanced {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+/* 悬浮会话控制按钮（右下角，三态） */
+.fab {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 50;
+  border: 0;
+  border-radius: 999px;
+  padding: 13px 26px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.22);
+  transition: transform 0.12s, background 0.15s;
+  background: #2563eb;
+}
+.fab:hover {
+  transform: translateY(-1px);
+}
+.fab.start {
+  background: #16a34a;
+}
+.fab.pause {
+  background: #d97706;
+}
+.fab.resume {
+  background: #2563eb;
+}
+.fab[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .ads-hint {
   grid-column: 1 / -1;
   margin: 0;

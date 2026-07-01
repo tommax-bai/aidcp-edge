@@ -18,7 +18,6 @@
           </div>
           <div class="actions">
             <button id="relogin" class="secondary">重新登录</button>
-            <button id="toggle-session" class="primary">暂停</button>
           </div>
         </section>
 
@@ -53,42 +52,54 @@
           </div>
         </div>
         <div id="ads-config" class="ads-config">
-          <label class="field">
-            <span class="field-label">API 地址 <em class="opt">可选</em></span>
-            <input id="ads-apibase" type="text" placeholder="http://local.adspower.net:50325" autocomplete="off" />
-          </label>
-          <label class="field">
-            <span class="field-label">API Key <em class="opt">可选</em></span>
-            <input id="ads-apikey" type="password" placeholder="开启 API 校验时填写，未开启可留空" autocomplete="off" />
-          </label>
-          <div class="ads-probe">
+          <div class="ads-probe ads-full">
             <span class="field-label">AdsPower 状态</span>
             <strong id="ads-probe-badge" class="badge checking">未检测</strong>
             <button id="ads-detect" class="seg" type="button">检测</button>
           </div>
-          <label class="field ads-full">
-            <span class="field-label">浏览器环境 <em class="opt">下拉选择</em></span>
-            <div class="ads-env-row">
-              <select id="ads-env-select">
-                <option value="">（点「刷新」从 AdsPower 加载环境）</option>
-              </select>
+          <div class="field ads-full">
+            <div class="ads-env-head">
+              <span class="field-label">浏览器环境</span>
               <button id="ads-refresh" class="seg" type="button">刷新</button>
             </div>
+            <div id="ads-env-list" class="ads-env-list">
+              <p class="ads-env-empty">（检测就绪后自动列出，或点「刷新」）</p>
+            </div>
             <span id="ads-env-msg" class="ads-env-msg"></span>
-          </label>
-          <label class="field ads-full">
-            <span class="field-label">分身 ID <em class="req">必填</em></span>
-            <input id="ads-profile" type="text" placeholder="从上方下拉选择，或手动填写 AdsPower 分身 ID（兜底）" autocomplete="off" />
-          </label>
-          <p class="ads-hint">
+          </div>
+          <div class="field ads-full">
+            <div class="ads-id-head">
+              <span class="field-label">分身 ID <em class="req">必填</em></span>
+              <label class="ads-manual-toggle">
+                <input id="ads-manual" type="checkbox" /> 手动填写
+              </label>
+            </div>
+            <div id="ads-profile-display" class="ads-profile-display">（请从上方选择一个环境）</div>
+            <input id="ads-profile" type="text" class="hidden" placeholder="手动填写 AdsPower 分身 ID（user_id）" autocomplete="off" />
+          </div>
+          <p class="ads-hint ads-full">
             <a id="ads-create" href="#" class="link">打开 AdsPower 新建环境 ↗</a>
             <span class="ads-hint-sep">·</span>
             没有 AdsPower？<a id="ads-download" href="#" class="link">下载 AdsPower ↗</a>
           </p>
+          <div class="ads-full">
+            <button id="ads-advanced-toggle" class="link ads-adv-toggle" type="button">高级设置 ▾</button>
+            <div id="ads-advanced" class="ads-advanced hidden">
+              <label class="field">
+                <span class="field-label">API 地址 <em class="opt">可选</em></span>
+                <input id="ads-apibase" type="text" placeholder="http://local.adspower.net:50325" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span class="field-label">API Key <em class="opt">可选</em></span>
+                <input id="ads-apikey" type="password" placeholder="开启 API 校验时填写，未开启可留空" autocomplete="off" />
+              </label>
+            </div>
+          </div>
         </div>
         <div class="settings-actions">
           <span id="settings-msg" class="settings-msg"></span>
-          <button id="save-settings" class="primary" type="button">保存并启动</button>
+          <button id="apply-restart" class="secondary hidden" type="button">按新设置重启</button>
+          <button id="save-settings" class="primary" type="button">保存</button>
         </div>
       </section>
 
@@ -125,6 +136,8 @@
         <pre id="last-message">等待状态…</pre>
       </section>
     </main>
+    <!-- 悬浮会话控制：随状态三态（停止→启动 / 运行→暂停 / 已暂停→恢复） -->
+    <button id="session-fab" class="fab" type="button">启动</button>
     <script src="./renderer.js"></script>
   </body>
 </html>

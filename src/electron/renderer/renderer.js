@@ -9,7 +9,7 @@ const fields = {
   collects: document.querySelector('#collects'),
   updatedAt: document.querySelector('#updated-at'),
   lastMessage: document.querySelector('#last-message'),
-  toggle: document.querySelector('#toggle-session'),
+  sessionFab: document.querySelector('#session-fab'),
   relogin: document.querySelector('#relogin'),
   loginGuide: document.querySelector('#login-guide'),
   noticeTitle: document.querySelector('#notice-title'),
@@ -22,16 +22,21 @@ const settingsUi = {
   provSelf: document.querySelector('#prov-self'),
   adsConfig: document.querySelector('#ads-config'),
   adsProfile: document.querySelector('#ads-profile'),
+  adsProfileDisplay: document.querySelector('#ads-profile-display'),
+  adsManual: document.querySelector('#ads-manual'),
   adsApiKey: document.querySelector('#ads-apikey'),
   adsApiBase: document.querySelector('#ads-apibase'),
+  adsAdvancedToggle: document.querySelector('#ads-advanced-toggle'),
+  adsAdvanced: document.querySelector('#ads-advanced'),
   adsDownload: document.querySelector('#ads-download'),
   adsProbeBadge: document.querySelector('#ads-probe-badge'),
   adsDetect: document.querySelector('#ads-detect'),
-  adsEnvSelect: document.querySelector('#ads-env-select'),
+  adsEnvList: document.querySelector('#ads-env-list'),
   adsRefresh: document.querySelector('#ads-refresh'),
   adsEnvMsg: document.querySelector('#ads-env-msg'),
   adsCreate: document.querySelector('#ads-create'),
   save: document.querySelector('#save-settings'),
+  applyRestart: document.querySelector('#apply-restart'),
   msg: document.querySelector('#settings-msg'),
 };
 
@@ -71,7 +76,6 @@ function addLogEntry(message) {
   if (!message) return;
   const now = Date.now();
   logEntries.push({ time: now, message });
-  // Prune entries older than 2 minutes
   const cutoff = now - LOG_RETENTION_MS;
   while (logEntries.length > 0 && logEntries[0].time < cutoff) {
     logEntries.shift();
@@ -95,7 +99,7 @@ function renderNotice(status) {
     body = '请在刚打开的 Chrome 窗口中登录 xiaohongshu.com，检测到登录后 AIDCP Edge 会自动继续。';
   } else if (status.auth === 'config required') {
     title = '待配置';
-    body = '请在下方「浏览器」设置中填写 AdsPower 分身 ID，然后点击「保存并启动」。';
+    body = '请在下方「浏览器」设置里选择一个环境（或打开「手动填写」填分身 ID），保存后点右下角「启动」。';
   }
   const show = Boolean(title);
   fields.loginGuide.classList.toggle('hidden', !show);
@@ -103,6 +107,30 @@ function renderNotice(status) {
     fields.noticeTitle.textContent = title;
     fields.noticeBody.textContent = body;
   }
+}
+
+// 悬浮会话按钮三态：已暂停→恢复 / 已停止（或异常）→启动 / 其余（运行·启动中）→暂停。
+function renderFab(status) {
+  const fab = fields.sessionFab;
+  let text;
+  let cls;
+  let action;
+  if (status.session === 'paused') {
+    text = '恢复';
+    cls = 'resume';
+    action = 'resume';
+  } else if (status.edge === 'stopped' || status.edge === 'warning') {
+    text = '启动';
+    cls = 'start';
+    action = 'start';
+  } else {
+    text = '暂停';
+    cls = 'pause';
+    action = 'pause';
+  }
+  fab.textContent = text;
+  fab.className = `fab ${cls}`;
+  fab.dataset.action = action;
 }
 
 function render(status) {
@@ -117,7 +145,9 @@ function render(status) {
   fields.collects.textContent = status.stats.collects;
   fields.updatedAt.textContent = new Date(status.updatedAt).toLocaleTimeString();
   addLogEntry(status.lastMessage);
-  fields.toggle.textContent = status.session === 'paused' ? '恢复' : '暂停';
+  renderFab(status);
+  // 核心停了就不需要「按新设置重启」入口。
+  if (status.edge === 'stopped') settingsUi.applyRestart.classList.add('hidden');
   if (status.provider && SUBTITLE[status.provider]) fields.subtitle.textContent = SUBTITLE[status.provider];
   // 表单未在编辑时，让 provider 分段跟随实际运行 provider。
   if (status.provider && !editingProvider) applyProviderSelection(status.provider);
@@ -131,10 +161,20 @@ function applyProviderSelection(provider) {
   settingsUi.provAdspower.classList.toggle('active', isAds);
   settingsUi.provSelf.classList.toggle('active', !isAds);
   settingsUi.adsConfig.classList.toggle('hidden', !isAds);
+  // self（本机 Chrome）无可持久化设置项 → 隐藏「保存」；只由悬浮按钮启动 / 暂停 / 恢复。
+  settingsUi.save.classList.toggle('hidden', !isAds);
+  if (!isAds) settingsUi.applyRestart.classList.add('hidden');
 }
 
 function selectedProvider() {
   return settingsUi.provAdspower.classList.contains('active') ? 'adspower' : 'self';
+}
+
+// 分身 ID 只读展示：默认由选中环境带出；手动模式时改由输入框承载。
+function updateProfileDisplay() {
+  const v = settingsUi.adsProfile.value.trim();
+  settingsUi.adsProfileDisplay.textContent = v || '（请从上方选择一个环境）';
+  settingsUi.adsProfileDisplay.classList.toggle('empty', !v);
 }
 
 function applySettings(s) {
@@ -143,6 +183,7 @@ function applySettings(s) {
   settingsUi.adsProfile.value = s.adsProfileId || '';
   settingsUi.adsApiKey.value = s.adsApiKey || '';
   settingsUi.adsApiBase.value = s.adsApiBase || '';
+  updateProfileDisplay();
   editingProvider = null;
   applyProviderSelection(s.provider || 'adspower');
 }
@@ -150,7 +191,7 @@ function applySettings(s) {
 settingsUi.provAdspower.addEventListener('click', () => {
   editingProvider = 'adspower';
   applyProviderSelection('adspower');
-  probeAds(); // 切到 AdsPower 分段即探一次可用性（真实事件，非「打开设置面板」）
+  probeAds(); // 切到 AdsPower 分段即探一次可用性并自动列环境（真实事件，非「打开设置面板」）
 });
 settingsUi.provSelf.addEventListener('click', () => {
   editingProvider = 'self';
@@ -162,7 +203,22 @@ settingsUi.adsDownload.addEventListener('click', (event) => {
   window.aidcpEdge.openAdsDownload();
 });
 
-// ─── AdsPower 探测 / 环境下拉 / 新建入口 ───
+settingsUi.adsAdvancedToggle.addEventListener('click', () => {
+  const hidden = settingsUi.adsAdvanced.classList.toggle('hidden');
+  settingsUi.adsAdvancedToggle.textContent = hidden ? '高级设置 ▾' : '高级设置 ▴';
+});
+
+// 「手动填写」开关：开=显示手敲输入框；关=用选中环境的值（只读展示）。
+settingsUi.adsManual.addEventListener('change', () => {
+  const manual = settingsUi.adsManual.checked;
+  settingsUi.adsProfile.classList.toggle('hidden', !manual);
+  settingsUi.adsProfileDisplay.classList.toggle('hidden', manual);
+  if (manual) settingsUi.adsProfile.focus();
+  else updateProfileDisplay();
+});
+settingsUi.adsProfile.addEventListener('input', updateProfileDisplay);
+
+// ─── AdsPower 探测 / 环境列表 / 新建入口 ───
 
 // 只读调用带上「当前表单值」（调用级）：支持「新填 API Key 未保存即刷新」而不陷回环。
 function formAdsOpts() {
@@ -182,7 +238,7 @@ function setEnvMsg(text, isError) {
   settingsUi.adsEnvMsg.className = `ads-env-msg${isError ? ' error' : ''}`;
 }
 
-// 探测本地 API 可用性（根级 /status）。可达→就绪；不可达→诚实提示 + 引导下载，不禁死流程。
+// 探测本地 API 可用性（根级 /status）。可达→就绪并自动列环境；不可达→诚实提示 + 引导下载，不禁死流程。
 async function probeAds() {
   setProbeBadge('checking', '检测中');
   settingsUi.adsDetect.disabled = true;
@@ -191,10 +247,11 @@ async function probeAds() {
     if (r && r.ok) {
       setProbeBadge('connected', '已就绪');
       if (settingsUi.adsEnvMsg.classList.contains('error')) setEnvMsg('', false);
+      refreshEnvs(); // 就绪即自动列出环境，无需先点刷新
     } else {
       setProbeBadge('warning', '未就绪');
       setEnvMsg(
-        `未检测到 AdsPower 本地 API${r && r.error ? '（' + r.error + '）' : ''}。请启动 AdsPower 客户端并开启本地 API，或点下方「下载 AdsPower」。仍可手动填写分身 ID 继续。`,
+        `未检测到 AdsPower 本地 API${r && r.error ? '（' + r.error + '）' : ''}。请启动 AdsPower 客户端并开启本地 API，或点右侧「下载 AdsPower」。仍可打开「手动填写」填分身 ID 继续。`,
         true,
       );
     }
@@ -205,25 +262,45 @@ async function probeAds() {
   }
 }
 
-// 把选中环境的 user_id（非 serial_number）写入分身 ID 输入框（手敲框仍可编辑覆盖）。
+// 选中某环境：把其 user_id（非 serial_number）设为将写入的分身 ID，并高亮该行。
+function selectProfile(userId, itemEl) {
+  settingsUi.adsProfile.value = userId;
+  updateProfileDisplay();
+  settingsUi.adsEnvList.querySelectorAll('.ads-env-item').forEach((el) => el.classList.remove('selected'));
+  if (itemEl) itemEl.classList.add('selected');
+}
+
+// 直接把环境铺成可点行（非下拉）。每行：名称 + 序号/分组/代理配置/user_id。
 function populateEnvs(profiles) {
-  const sel = settingsUi.adsEnvSelect;
+  const list = settingsUi.adsEnvList;
   const current = settingsUi.adsProfile.value.trim();
-  sel.innerHTML = '';
-  const ph = document.createElement('option');
-  ph.value = '';
-  ph.textContent = profiles.length ? '（请选择浏览器环境）' : '（未找到环境，可手动填写分身 ID）';
-  sel.appendChild(ph);
-  for (const p of profiles) {
-    const opt = document.createElement('option');
-    opt.value = p.userId; // ← 写入 adsProfileId 的是 user_id
-    const bits = [p.name || '(未命名)'];
-    if (p.serialNumber) bits.push('#' + p.serialNumber);
-    if (p.groupName) bits.push(p.groupName);
-    if (p.proxy) bits.push(p.proxy);
-    opt.textContent = `${bits.join(' · ')} — ${p.userId}`;
-    if (p.userId && p.userId === current) opt.selected = true;
-    sel.appendChild(opt);
+  list.innerHTML = '';
+  if (!profiles.length) {
+    const empty = document.createElement('p');
+    empty.className = 'ads-env-empty';
+    empty.textContent = '（未找到环境，可打开「手动填写」填分身 ID）';
+    list.appendChild(empty);
+    return;
+  }
+  for (const prof of profiles) {
+    const item = document.createElement('div');
+    item.className = 'ads-env-item';
+    const name = document.createElement('div');
+    name.className = 'env-name';
+    name.textContent = prof.name || '(未命名)';
+    const meta = document.createElement('div');
+    meta.className = 'env-meta';
+    const bits = [];
+    if (prof.serialNumber) bits.push('#' + prof.serialNumber);
+    if (prof.groupName) bits.push(prof.groupName);
+    bits.push(prof.proxy || '无代理配置');
+    bits.push(prof.userId);
+    meta.textContent = bits.join(' · ');
+    item.appendChild(name);
+    item.appendChild(meta);
+    item.addEventListener('click', () => selectProfile(prof.userId, item));
+    if (prof.userId && prof.userId === current) item.classList.add('selected');
+    list.appendChild(item);
   }
 }
 
@@ -235,25 +312,21 @@ async function refreshEnvs() {
     const r = await window.aidcpEdge.adsListProfiles(formAdsOpts());
     if (!r || !r.ok) {
       const authHint = r && r.authLikely
-        ? '：疑似开启了 API 校验；若已在上方填了 API Key，本次刷新已用当前填写值，请确认 Key 正确后重试'
+        ? '：疑似开启了 API 校验；若已在「高级设置」里填了 API Key，本次刷新已用当前填写值，请确认 Key 正确后重试'
         : '';
-      setEnvMsg(`拉取环境失败${r && r.error ? '（' + r.error + '）' : ''}${authHint}。可在下方手动填写分身 ID。`, true);
+      setEnvMsg(`拉取环境失败${r && r.error ? '（' + r.error + '）' : ''}${authHint}。可打开「手动填写」填分身 ID。`, true);
       return;
     }
     populateEnvs(r.profiles || []);
     const extra = r.truncated ? '（环境较多，仅显示前若干条，可在 AdsPower 用分组精简）' : '';
-    setEnvMsg(`已加载 ${(r.profiles || []).length} 个环境${extra}。选择后其分身 ID 自动填入下方。`, false);
+    setEnvMsg(`已加载 ${(r.profiles || []).length} 个环境${extra}。点选一个即自动带出分身 ID。`, false);
   } catch (e) {
-    setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可在下方手动填写分身 ID。`, true);
+    setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可打开「手动填写」填分身 ID。`, true);
   } finally {
     settingsUi.adsRefresh.disabled = false;
   }
 }
 
-settingsUi.adsEnvSelect.addEventListener('change', () => {
-  const v = settingsUi.adsEnvSelect.value;
-  if (v) settingsUi.adsProfile.value = v; // 选中即写入分身 ID（user_id）
-});
 settingsUi.adsDetect.addEventListener('click', probeAds);
 settingsUi.adsRefresh.addEventListener('click', refreshEnvs);
 settingsUi.adsCreate.addEventListener('click', async (event) => {
@@ -267,17 +340,16 @@ settingsUi.adsCreate.addEventListener('click', async (event) => {
   );
 });
 
+// 「保存」：只持久化浏览器设置、不打断在跑核心（应用改动经「按新设置重启」）。self 模式无此按钮。
 settingsUi.save.addEventListener('click', async () => {
   const provider = selectedProvider();
   const adsProfileId = settingsUi.adsProfile.value.trim();
-  if (provider === 'adspower') probeAds(); // 保存并启动前探一次可用性（早反馈，不阻塞保存）
   if (provider === 'adspower' && !adsProfileId) {
-    settingsUi.msg.textContent = '请先填写 AdsPower 分身 ID。';
-    settingsUi.adsProfile.focus();
+    settingsUi.msg.textContent = '请先选择一个环境，或打开「手动填写」填分身 ID。';
     return;
   }
   settingsUi.save.disabled = true;
-  settingsUi.msg.textContent = '正在保存并按新配置重启…';
+  settingsUi.msg.textContent = '正在保存…';
   try {
     const saved = await window.aidcpEdge.saveSettings({
       provider,
@@ -285,25 +357,43 @@ settingsUi.save.addEventListener('click', async () => {
       adsApiKey: settingsUi.adsApiKey.value,
       adsApiBase: settingsUi.adsApiBase.value.trim(),
     });
-    applySettings(saved);
+    if (saved && saved.adsDownloadUrl) adsDownloadUrl = saved.adsDownloadUrl;
     // 红线：写盘失败如实告知，不谎报「已保存」。
-    settingsUi.msg.textContent = saved.saveOk === false
-      ? `已应用，但写入本地失败：${saved.saveError || ''}（重启后可能丢失）`
+    settingsUi.msg.textContent = saved && saved.saveOk === false
+      ? `已保存到内存，但写入本地失败：${saved.saveError || ''}（重启应用后可能丢失）`
       : '已保存。';
+    // 保存不打断在跑核心：若核心在跑，给「按新设置重启」显式入口应用改动。
+    const running = currentStatus && currentStatus.edge !== 'stopped' && currentStatus.edge !== 'warning';
+    settingsUi.applyRestart.classList.toggle('hidden', !running);
   } finally {
     settingsUi.save.disabled = false;
   }
 });
 
-fields.toggle.addEventListener('click', async () => {
-  fields.toggle.disabled = true;
+// 「按新设置重启」：显式应用已保存的改动到在跑核心（不由「保存」隐式打断）。
+settingsUi.applyRestart.addEventListener('click', async () => {
+  settingsUi.applyRestart.disabled = true;
   try {
-    const next = currentStatus?.session === 'paused'
-      ? await window.aidcpEdge.resume()
-      : await window.aidcpEdge.pause();
-    render(next);
+    const next = await window.aidcpEdge.restart();
+    settingsUi.applyRestart.classList.add('hidden');
+    if (next) render(next);
   } finally {
-    fields.toggle.disabled = false;
+    settingsUi.applyRestart.disabled = false;
+  }
+});
+
+// 悬浮会话按钮：按当前三态触发 启动 / 暂停 / 恢复。
+fields.sessionFab.addEventListener('click', async () => {
+  const action = fields.sessionFab.dataset.action;
+  fields.sessionFab.disabled = true;
+  try {
+    let next;
+    if (action === 'resume') next = await window.aidcpEdge.resume();
+    else if (action === 'start') next = await window.aidcpEdge.start();
+    else next = await window.aidcpEdge.pause();
+    if (next) render(next);
+  } finally {
+    fields.sessionFab.disabled = false;
   }
 });
 
@@ -319,7 +409,7 @@ fields.relogin.addEventListener('click', async () => {
 window.aidcpEdge.onStatusUpdate(render);
 window.aidcpEdge.getSettings().then((s) => {
   applySettings(s);
-  // 面板加载时若为 AdsPower 模式即探一次（真实事件，低频；非「打开设置面板」）。
+  // 面板加载时若为 AdsPower 模式即探一次并自动列环境（真实事件，低频；非「打开设置面板」）。
   if (selectedProvider() === 'adspower') probeAds();
 });
 window.aidcpEdge.getStatus().then(render);
