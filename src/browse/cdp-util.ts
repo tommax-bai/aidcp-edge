@@ -100,21 +100,21 @@ export interface DispatchClickOptions {
 }
 
 /**
- * 在 (x, y) 派发一次拟人化鼠标点击。
+ * 沿拟人化贝塞尔轨迹把光标移动到 (x, y)，**只 mouseMoved、不 press/release**（纯 hover）。
+ * 返回轨迹末点（已含抖动/回拉），供 dispatchClick 复用为落点，或供调用方在 hover 触发的
+ * 悬浮面板上继续操作。
  *
- * 流程（docs/anti-detection.md §5.1）：
- *  1. 从 from（默认目标附近）沿三阶贝塞尔轨迹逐帧 mouseMoved（ease-in-out 速度）；
- *  2. 偶发 overshoot 后回拉；
- *  3. 在落点 mousePressed + mouseReleased。
- *
- * 保持与旧签名兼容：`dispatchClick(cdp, x, y)` 仍可直接调用。
+ * 用途：某些控件是 **hover 展开** 的悬浮面板（如小红书搜索结果页「筛选」）——对其直接
+ * dispatchClick 会「移动上去 hover 展开 → 紧接着 click 又切回收起」，面板内选项永远点不到。
+ * 这类控件应先 dispatchHover 展开、再对面板内目标 dispatchClick；且点击面板内目标时把
+ * `from` 设为该 hover 控件的坐标，让移动路径落在「控件→面板」区域内、避免中途 mouseleave 收起。
  */
-export async function dispatchClick(
+export async function dispatchHover(
   cdp: BrowseCdp,
   x: number,
   y: number,
   options: DispatchClickOptions = {},
-): Promise<void> {
+): Promise<Point> {
   const random = options.random ?? humanDefaultRandom;
   const sleep = options.sleep ?? defaultSleep;
   const moveDelay = options.moveDelayMs ?? 8;
@@ -136,7 +136,27 @@ export async function dispatchClick(
     last = pt;
     if (moveDelay > 0) await sleep(moveDelay);
   }
-  // 落点 = 轨迹末点（已含抖动/回拉）
+  return last;
+}
+
+/**
+ * 在 (x, y) 派发一次拟人化鼠标点击。
+ *
+ * 流程（docs/anti-detection.md §5.1）：
+ *  1. 从 from（默认目标附近）沿三阶贝塞尔轨迹逐帧 mouseMoved（ease-in-out 速度，见 dispatchHover）；
+ *  2. 偶发 overshoot 后回拉；
+ *  3. 在落点 mousePressed + mouseReleased。
+ *
+ * 保持与旧签名兼容：`dispatchClick(cdp, x, y)` 仍可直接调用。
+ */
+export async function dispatchClick(
+  cdp: BrowseCdp,
+  x: number,
+  y: number,
+  options: DispatchClickOptions = {},
+): Promise<void> {
+  // 落点 = 轨迹末点（已含抖动/回拉）；hover 与 click 共用同一移动实现，口径不漂移。
+  const last = await dispatchHover(cdp, x, y, options);
   const base = { x: last.x, y: last.y, button: 'left' as const, clickCount: 1 };
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...base });
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base });

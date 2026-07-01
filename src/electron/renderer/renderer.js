@@ -7,6 +7,7 @@ const fields = {
   views: document.querySelector('#views'),
   likes: document.querySelector('#likes'),
   collects: document.querySelector('#collects'),
+  comments: document.querySelector('#comments'),
   updatedAt: document.querySelector('#updated-at'),
   lastMessage: document.querySelector('#last-message'),
   sessionFab: document.querySelector('#session-fab'),
@@ -145,6 +146,7 @@ function render(status) {
   fields.views.textContent = status.stats.views;
   fields.likes.textContent = status.stats.likes;
   fields.collects.textContent = status.stats.collects;
+  fields.comments.textContent = status.stats.comments ?? 0; // ?? 0 兜底旧版 status 无 comments 字段
   fields.updatedAt.textContent = new Date(status.updatedAt).toLocaleTimeString();
   addLogEntry(status.lastMessage);
   renderFab(status);

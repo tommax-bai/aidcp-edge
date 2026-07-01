@@ -14,8 +14,8 @@
  */
 
 import type { BrowseCdp } from './cdp-util.js';
-import { evalRaw, dispatchClick, dispatchKeystrokes, pressEnter, type RandomFn } from './cdp-util.js';
-import { sampleDelay, TIMING_PRESETS } from '../humanize/index.js';
+import { evalRaw, dispatchClick, dispatchHover, dispatchKeystrokes, pressEnter, type RandomFn } from './cdp-util.js';
+import { sampleDelay, TIMING_PRESETS, type Point } from '../humanize/index.js';
 
 /**
  * 小红书搜索框选择器（按优先级）。当前真机：AI 搜索框是 textarea#search-input
@@ -86,22 +86,63 @@ function buildFindByTextRectJs(texts: string[]): string {
   })()`;
 }
 
-/** 按可见文案找到元素并拟人化点击其中心；命中并点击返回 true，找不到返回 false（honest，不假点）。 */
+/** 按可见文案定位可点元素中心坐标；命中返回 {x,y}，找不到（含隐藏/未渲染）返回 null。 */
+async function findRectByVisibleText(cdp: BrowseCdp, texts: string[]): Promise<Point | null> {
+  const rectRaw = await evalRaw<string | null>(cdp, buildFindByTextRectJs(texts)).catch(() => null);
+  if (!rectRaw) return null;
+  try {
+    const rect = typeof rectRaw === 'string' ? (JSON.parse(rectRaw) as Point) : (rectRaw as Point);
+    return rect && typeof rect.x === 'number' && typeof rect.y === 'number' ? rect : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 按可见文案找到元素并拟人化点击其中心；命中并点击返回 true，找不到返回 false（honest，不假点）。
+ * opts.from：把移动起点设为某已知坐标（如刚 hover 展开的「筛选」控件），让路径落在面板区域内、
+ * 避免中途 mouseleave 把 hover 面板收起（见 applySearchFilters）。
+ */
 async function clickByVisibleText(
   cdp: BrowseCdp,
   texts: string[],
-  opts: { random?: RandomFn; sleep: (ms: number) => Promise<void> },
+  opts: { random?: RandomFn; sleep: (ms: number) => Promise<void>; from?: Point },
 ): Promise<boolean> {
-  const rectRaw = await evalRaw<string | null>(cdp, buildFindByTextRectJs(texts)).catch(() => null);
-  if (!rectRaw) return false;
-  let rect: { x: number; y: number };
-  try {
-    rect = typeof rectRaw === 'string' ? (JSON.parse(rectRaw) as { x: number; y: number }) : (rectRaw as { x: number; y: number });
-  } catch {
-    return false;
-  }
-  await dispatchClick(cdp, rect.x, rect.y, { random: opts.random, sleep: opts.sleep });
+  const rect = await findRectByVisibleText(cdp, texts);
+  if (!rect) return false;
+  await dispatchClick(cdp, rect.x, rect.y, { random: opts.random, sleep: opts.sleep, from: opts.from });
   return true;
+}
+
+/**
+ * 按可见文案 hover（只移动、不 click）到元素中心，返回该中心坐标（找不到返回 null）。
+ * 用于 hover 展开的悬浮控件（如小红书搜索页「筛选」面板）：hover 展开后不 click 触发控件，
+ * 避免「hover 开 → click 又收」；返回的坐标可作为后续点击面板内选项的 from（保持路径在面板内）。
+ */
+async function hoverByVisibleText(
+  cdp: BrowseCdp,
+  texts: string[],
+  opts: { random?: RandomFn; sleep: (ms: number) => Promise<void> },
+): Promise<Point | null> {
+  const rect = await findRectByVisibleText(cdp, texts);
+  if (!rect) return null;
+  await dispatchHover(cdp, rect.x, rect.y, { random: opts.random, sleep: opts.sleep });
+  return rect;
+}
+
+/** 有界轮询：等某文案的可见元素出现（面板展开动画/异步渲染），命中返回 true，超时返回 false。 */
+async function waitOptionVisible(
+  cdp: BrowseCdp,
+  texts: string[],
+  timeoutMs: number,
+  sleep: (ms: number) => Promise<void>,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await findRectByVisibleText(cdp, texts)) return true;
+    await sleep(120);
+  } while (Date.now() < deadline);
+  return false;
 }
 
 export interface ApplySearchFiltersDeps {
@@ -140,18 +181,31 @@ export async function applySearchFilters(
   let timeApplied = wantTime ? await clickByVisibleText(cdp, [wantTime], { random, sleep }) : false;
   if (wantTime) await pause();
 
-  // 第二遍：仍有未命中 → 尝试开「筛选」面板再点（时间筛选常在面板内）。
+  // 第二遍：仍有未命中 → 开「筛选」面板再点（时间筛选常在面板内）。
+  // 「筛选」在真机上多为 **hover 展开** 的悬浮面板：先 hover 展开（不 click，避免「hover 开→click 又收起」，
+  // 这正是先前 bug）；hover 后轮询面板内目标是否可见。若 hover 展开不了（面板实为 click-toggle 触发），
+  // 再补一次 click「筛选」兜底（从 hover 落点起手，路径落在控件上）。对两种触发方式都稳、且绝不二次 toggle。
+  // ⚠ 真机标定项（task 12.1，用 scripts/search-filter-probe.ts）：hover vs click 触发、选中时间项后是否需点「确定」。
   if ((wantSort && !sortApplied) || (wantTime && !timeApplied)) {
-    const opened = await clickByVisibleText(cdp, ['筛选'], { random, sleep });
-    if (opened) {
-      await pause();
-      if (wantSort && !sortApplied) {
-        sortApplied = await clickByVisibleText(cdp, [wantSort], { random, sleep });
-        await pause();
+    const probeTarget = wantTime ?? wantSort!; // 面板内至少一个目标可见即视为已展开
+    const filterPos = await hoverByVisibleText(cdp, ['筛选'], { random, sleep });
+    if (filterPos) {
+      let ready = await waitOptionVisible(cdp, [probeTarget], 800, sleep);
+      if (!ready) {
+        // hover 未展开 → 面板可能是 click 触发。补一次 click（从 hover 落点起手，落在「筛选」控件本体）。
+        await clickByVisibleText(cdp, ['筛选'], { random, sleep, from: filterPos });
+        ready = await waitOptionVisible(cdp, [probeTarget], 1500, sleep);
       }
-      if (wantTime && !timeApplied) {
-        timeApplied = await clickByVisibleText(cdp, [wantTime], { random, sleep });
-        await pause();
+      if (ready) {
+        // 点面板内目标时 from=「筛选」坐标：移动路径落在「筛选→面板」区域内，避免中途 mouseleave 收起面板。
+        if (wantSort && !sortApplied) {
+          sortApplied = await clickByVisibleText(cdp, [wantSort], { random, sleep, from: filterPos });
+          await pause();
+        }
+        if (wantTime && !timeApplied) {
+          timeApplied = await clickByVisibleText(cdp, [wantTime], { random, sleep, from: filterPos });
+          await pause();
+        }
       }
     }
   }

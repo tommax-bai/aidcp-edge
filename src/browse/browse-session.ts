@@ -638,10 +638,17 @@ export class BrowseSession {
             // 按需评论任务（change comment-search-command）：搜到结果页后应用原生「排序 + 发布时间」筛选。
             // 自治浏览不带 sort/timeWindow → 跳过，行为不变。控件未生效 honest 降级（不冒充已筛）。
             if (payload.sort || payload.timeWindow) {
-              await applySearchFilters(
+              const filterRes = await applySearchFilters(
                 { sort: payload.sort, timeWindow: payload.timeWindow },
                 { cdp: this.deps.cdp, random: this.random, sleep: this.sleep, logger: this.logger },
               );
+              // honest：控件未生效如实记录（云端暂不消费此信号，仅供边缘日志/最近状态追溯；绝不据此冒充已筛）。
+              // 不用 ⚠ 前缀——main.cjs 见 ⚠ 会把风控置 warned，筛选未命中不应触发风控。
+              if ((payload.sort && !filterRes.sortApplied) || (payload.timeWindow && !filterRes.timeApplied)) {
+                this.logger(
+                  `[browse] 搜索原生筛选未完全生效（sort=${filterRes.sortApplied} time=${filterRes.timeApplied}）：结果非严格「最近一天·最多收藏」`,
+                );
+              }
             }
           } catch (err) {
             this.logger(`[browse] 搜索执行失败：${(err as Error).message}`);
@@ -1119,6 +1126,9 @@ export class BrowseSession {
    */
   private async executeComment(text: string): Promise<void> {
     const action = 'comment';
+    // 记评论处理耗时：成功/未生效/异常三条出口都带上「耗时」，让 electron「最近状态」能看到评论处理用时（honest，失败也如实报时）。
+    const startedAt = Date.now();
+    const elapsed = () => `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
     const body = (text ?? '').trim();
     if (!body) {
       this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'empty_text' });
@@ -1203,14 +1213,14 @@ export class BrowseSession {
       const vRaw = await evalRaw<string>(this.deps.cdp, verifyJs);
       const v = typeof vRaw === 'string' ? JSON.parse(vRaw) : vRaw;
       if (v?.cleared && v?.ownRow) {
-        this.logger('[browse] ✓ 评论发布成功（编辑器清空 + 自己的评论行出现）');
+        this.logger(`[browse] ✓ 评论发布成功（编辑器清空 + 自己的评论行出现，耗时 ${elapsed()}）`);
         this.deps.client.reportActionCompleted?.({ action, ok: true });
       } else {
-        this.logger(`[browse] ⚠ 评论提交后未确认生效 (cleared=${v?.cleared}, ownRow=${v?.ownRow})`);
+        this.logger(`[browse] ⚠ 评论提交后未确认生效 (cleared=${v?.cleared}, ownRow=${v?.ownRow}，耗时 ${elapsed()})`);
         this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'state_unchanged' });
       }
     } catch (err) {
-      this.logger(`[browse] comment 执行失败：${(err as Error).message}`);
+      this.logger(`[browse] comment 执行失败（耗时 ${elapsed()}）：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action, ok: false, reason: (err as Error).message });
     }
   }

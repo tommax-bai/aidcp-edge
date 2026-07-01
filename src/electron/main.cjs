@@ -123,6 +123,7 @@ const status = {
     views: 0,
     likes: 0,
     collects: 0,
+    comments: 0,
   },
   risk: 'normal',
   edge: 'stopped',
@@ -354,6 +355,8 @@ function handleEdgeOutput(text, isError = false) {
   if (message.includes('上报') || message.includes('提取内容')) next.stats = { views: status.stats.views + 1 };
   if (message.includes('点赞成功') || message.includes('like')) next.stats = { ...(next.stats || {}), likes: status.stats.likes + 1 };
   if (message.includes('收藏成功') || message.includes('collect')) next.stats = { ...(next.stats || {}), collects: status.stats.collects + 1 };
+  // 只认已校验成功的评论（'评论发布成功' 仅在后置校验通过时打，不与「评论点赞成功」/like/collect 撞词）→ 评论计数 +1。
+  if (message.includes('评论发布成功')) next.stats = { ...(next.stats || {}), comments: (status.stats.comments || 0) + 1 };
   if (message.includes('风控拒绝') || message.includes('risk_error') || message.includes('⚠')) next.risk = 'warned';
   updateStatus(next);
 }
