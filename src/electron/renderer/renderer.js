@@ -256,10 +256,15 @@ settingsUi.adsEnvSelect.addEventListener('change', () => {
 });
 settingsUi.adsDetect.addEventListener('click', probeAds);
 settingsUi.adsRefresh.addEventListener('click', refreshEnvs);
-settingsUi.adsCreate.addEventListener('click', (event) => {
+settingsUi.adsCreate.addEventListener('click', async (event) => {
   event.preventDefault();
-  window.aidcpEdge.adsOpenCreate();
-  setEnvMsg('已尝试打开 AdsPower：请在其中点「新建浏览器」完成配置，返回后点「刷新」加载新环境。', false);
+  const r = await window.aidcpEdge.adsOpenCreate();
+  setEnvMsg(
+    r && r.launched
+      ? '已打开 AdsPower 客户端：请在其中点「新建浏览器」完成配置，返回后点「刷新」加载新环境。'
+      : '已打开 AdsPower 官网（未能直接拉起客户端）：安装 / 打开 AdsPower 后在其中点「新建浏览器」，完成后回来点「刷新」。',
+    false,
+  );
 });
 
 settingsUi.save.addEventListener('click', async () => {

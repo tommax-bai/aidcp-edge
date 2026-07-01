@@ -81,8 +81,10 @@ function buildProviderEnv() {
 // 表单未带该字段才回落持久化 settings。apiKey 只用于本次请求头、不落日志 / 不写文件。
 function resolveAdsOpts(formOpts) {
   const o = formOpts || {};
+  // apiKey / apiBase 同一套语义：表单当前值非空则用之，为空才回落持久化 settings（D5）。
   const apiBase = (o.apiBase && String(o.apiBase).trim()) || settings.adsApiBase || undefined;
-  const apiKey = Object.prototype.hasOwnProperty.call(o, 'apiKey') ? o.apiKey : settings.adsApiKey;
+  const formKey = Object.prototype.hasOwnProperty.call(o, 'apiKey') ? String(o.apiKey).trim() : '';
+  const apiKey = formKey || settings.adsApiKey;
   const out = {};
   if (apiBase) out.apiBase = apiBase;
   if (apiKey) out.apiKey = apiKey;
@@ -92,26 +94,22 @@ function resolveAdsOpts(formOpts) {
 
 // 「打开 AdsPower 新建环境」best-effort：AdsPower 不公开直达其内部「新建浏览器」tab 的深链，
 // 故只能尝试拉起 / 聚焦客户端；起不来（未装 / 应用名不符）诚实退回打开官方页面。面板另有引导文案。
-function openAdsClient() {
-  try {
-    if (process.platform === 'darwin') {
-      const child = spawn('open', ['-a', 'AdsPower Global'], { stdio: 'ignore', detached: true });
-      let fellBack = false;
-      const fallback = () => {
-        if (fellBack) return;
-        fellBack = true;
-        void shell.openExternal(ADS_DOWNLOAD_URL);
-      };
-      child.on('error', fallback);
-      child.on('exit', (code) => {
-        if (code !== 0) fallback();
-      });
-      return { launched: true };
-    }
-  } catch {
-    /* 落到下面的官网兜底 */
+// 返回 { launched }：true=真拉起了本机 AdsPower 客户端；false=退回打开了官网。异步等 `open -a` 结果，
+// 让 launched 如实反映（避免面板对着官网却说「已打开 AdsPower」——复查确认的误导文案）。
+async function openAdsClient() {
+  if (process.platform === 'darwin') {
+    const launched = await new Promise((resolve) => {
+      try {
+        const child = spawn('open', ['-a', 'AdsPower Global'], { stdio: 'ignore' });
+        child.on('error', () => resolve(false));
+        child.on('exit', (code) => resolve(code === 0));
+      } catch {
+        resolve(false);
+      }
+    });
+    if (launched) return { launched: true };
   }
-  // 非 macOS 或拉起异常：诚实退回官方页面（非直达新建页）。
+  // 未装 / 拉起失败 / 非 macOS：诚实退回官方页面（非直达新建页）。
   void shell.openExternal(ADS_DOWNLOAD_URL);
   return { launched: false };
 }

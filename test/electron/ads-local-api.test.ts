@@ -16,7 +16,7 @@ const { createAdsLocalApi, normalizeProfile } = require('../../src/electron/ads-
     }>;
     ADS_MIN_INTERVAL_MS: number;
   };
-  normalizeProfile: (it: Record<string, unknown>) => { userId: string; serialNumber: string };
+  normalizeProfile: (it: Record<string, unknown>) => { userId: string; serialNumber: string; proxy: string };
 };
 
 interface StubRes {
@@ -189,6 +189,25 @@ test('本进程内串行节流：相邻只读调用间隔 ≥1s（跨进程碰�
   assert.ok(sleeps[0] >= 1000, `expected ≥1000ms throttle, got ${sleeps[0]}`);
 });
 
+test('并发串行化：两个调用同时进入也按 ≥1s 串行（防两独立按钮/自动探测撞限速）', async () => {
+  let clock = 1_000_000;
+  const sleeps: number[] = [];
+  const order: string[] = [];
+  const api = createAdsLocalApi({
+    nowImpl: () => clock,
+    sleepImpl: async (ms: number) => { sleeps.push(ms); clock += ms; },
+    fetchImpl: (async (url: string) => {
+      order.push(String(url).includes('/status') ? 'status' : 'list');
+      return res(true, 200, { code: 0, data: { list: [] } });
+    }) as unknown as typeof fetch,
+  });
+  // 同时发起（模拟「检测」与「刷新」几乎同时点）——旧实现两者同读旧 lastApiAt、都不等 → sleeps 为空；
+  // 队列串行化后第二个必须等 ≥1s。
+  await Promise.all([api.status(), api.listProfiles()]);
+  assert.equal(order.length, 2);
+  assert.ok(sleeps.some((s) => s >= 1000), `并发调用应被串行节流，实测 sleeps=${JSON.stringify(sleeps)}`);
+});
+
 test('只读边界：normalizeProfile 只读字段映射，模块从不构造 browser/start|stop|active URL', async () => {
   const calls: Array<{ url: string }> = [];
   const api = createAdsLocalApi({
@@ -210,4 +229,11 @@ test('只读边界：normalizeProfile 只读字段映射，模块从不构造 br
   const n = normalizeProfile({ user_id: 'u1', serial_number: 's1' });
   assert.equal(n.userId, 'u1');
   assert.equal(n.serialNumber, 's1');
+});
+
+test('normalizeProfile: 真机 no_proxy（带下划线）归一为「无代理配置」', () => {
+  assert.equal(normalizeProfile({ user_id: 'u', user_proxy_config: { proxy_type: 'no_proxy' } }).proxy, '无代理配置');
+  assert.equal(normalizeProfile({ user_id: 'u', user_proxy_config: { proxy_type: 'noproxy' } }).proxy, '无代理配置');
+  // 有真代理配置仍如实展示
+  assert.match(normalizeProfile({ user_id: 'u', ip: '9.9.9.9', user_proxy_config: { proxy_type: 'socks5' } }).proxy, /socks5/);
 });

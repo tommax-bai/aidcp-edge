@@ -39,7 +39,7 @@ interface Stub {
   openAdsDownload: () => void;
   adsStatus: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
   adsListProfiles: (opts?: unknown) => Promise<unknown>;
-  adsOpenCreate: () => void;
+  adsOpenCreate: () => { launched: boolean } | Promise<{ launched: boolean }>;
 }
 
 function makeStub(overrides: Partial<Stub> = {}): Stub {
@@ -55,7 +55,7 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     openAdsDownload: () => undefined,
     adsStatus: async () => ({ ok: true }),
     adsListProfiles: async () => ({ ok: true, profiles: [] }),
-    adsOpenCreate: () => undefined,
+    adsOpenCreate: () => ({ launched: true }),
     ...overrides,
   };
 }
@@ -128,13 +128,23 @@ test('刷新失败(401)：诚实降级为手敲 + 提示已用当前填写值、
   assert.equal(($(w, '#ads-profile') as HTMLInputElement).disabled, false);
 });
 
-test('打开新建环境：调 adsOpenCreate + 引导刷新文案', async () => {
+test('打开新建环境：拉起客户端成功 → 文案「已打开 AdsPower 客户端」', async () => {
   let called = 0;
-  const w = await boot(makeStub({ adsOpenCreate: () => { called += 1; } }));
+  const w = await boot(makeStub({ adsOpenCreate: () => { called += 1; return { launched: true }; } }));
   ($(w, '#ads-create') as HTMLAnchorElement).dispatchEvent(new w.Event('click'));
   await tick();
+  await tick();
   assert.equal(called, 1);
+  assert.match($(w, '#ads-env-msg').textContent ?? '', /已打开 AdsPower 客户端/);
   assert.match($(w, '#ads-env-msg').textContent ?? '', /新建浏览器/);
+});
+
+test('打开新建环境：拉不起客户端 → 诚实文案「已打开 AdsPower 官网」', async () => {
+  const w = await boot(makeStub({ adsOpenCreate: () => ({ launched: false }) }));
+  ($(w, '#ads-create') as HTMLAnchorElement).dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.match($(w, '#ads-env-msg').textContent ?? '', /已打开 AdsPower 官网/);
 });
 
 test('防限速：刷新在途禁用按钮，完成后恢复', async () => {

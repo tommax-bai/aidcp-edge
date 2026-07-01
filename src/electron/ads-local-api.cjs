@@ -26,17 +26,29 @@ function createAdsLocalApi(deps = {}) {
   const fetchImpl = deps.fetchImpl || globalThis.fetch;
   const now = deps.nowImpl || (() => Date.now());
   const sleep = deps.sleepImpl || defaultSleep;
-  // 主进程内**唯一**串行节流闸门：所有只读调用过这里，按 ≥1.1s 间隔发出。
+  // 主进程内**唯一**串行节流闸门：所有只读请求经 throttledFetch 排进同一条链，
+  // 把「等间隔 → fetch → 记时」作为**不可重入单元**串行执行。
+  // 为什么要队列而非仅一个时间戳：面板「检测」「刷新」是两个独立按钮、各自的 in-flight 禁用管不到对方，
+  // 自动探测（加载/切分段/保存前）也会与手动刷新并发；若只读 lastApiAt 决定等多久，两个并发调用会同读旧值、
+  // 都欠等、几乎同时发 fetch → 撞破 1req/s、把好连接自伤成假失败。队列把它们真正串行开、间隔 ≥1.1s。
   let lastApiAt = 0;
+  let chain = Promise.resolve();
 
-  async function throttle() {
-    if (lastApiAt !== 0) {
-      const wait = ADS_MIN_INTERVAL_MS - (now() - lastApiAt);
-      if (wait > 0) await sleep(wait);
-    }
-  }
-  function markCalled() {
-    lastApiAt = now();
+  function throttledFetch(url, headers) {
+    const run = chain.then(async () => {
+      if (lastApiAt !== 0) {
+        const wait = ADS_MIN_INTERVAL_MS - (now() - lastApiAt);
+        if (wait > 0) await sleep(wait);
+      }
+      try {
+        return await fetchImpl(url, { headers });
+      } finally {
+        lastApiAt = now();
+      }
+    });
+    // 断开 rejection、只为链能继续（本次结果仍由 run 返回给调用方）。
+    chain = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   function baseOf(opts) {
@@ -54,16 +66,13 @@ function createAdsLocalApi(deps = {}) {
    * 不 throw：可达返回 { ok:true }，不可达/异常返回 { ok:false, error }（供面板分档提示）。
    */
   async function status(opts) {
-    await throttle();
     const url = `${baseOf(opts)}/status`;
     let res;
     try {
-      res = await fetchImpl(url, { headers: authHeaders(opts) });
+      res = await throttledFetch(url, authHeaders(opts));
     } catch (e) {
-      markCalled();
       return { ok: false, error: `未检测到 AdsPower 本地 API：${(e && e.message) || String(e)}` };
     }
-    markCalled();
     if (!res.ok) {
       // 收到响应但非 2xx：本地 API 端口有人应答但异常（非「不可达」）。如实标 HTTP 码。
       return { ok: false, error: `AdsPower 本地 API 响应异常（HTTP ${res.status}）` };
@@ -93,18 +102,15 @@ function createAdsLocalApi(deps = {}) {
     const profiles = [];
     let total;
     for (let page = 1; page <= maxPages; page++) {
-      await throttle();
       const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
       if (opts.groupId) qs.set('group_id', String(opts.groupId));
       const url = `${base}/api/v1/user/list?${qs.toString()}`;
       let res;
       try {
-        res = await fetchImpl(url, { headers });
+        res = await throttledFetch(url, headers);
       } catch (e) {
-        markCalled();
         return { ok: false, error: `拉取环境失败：本地 API 不可达（${(e && e.message) || String(e)}）` };
       }
-      markCalled();
       if (!res.ok) {
         const authLikely = res.status === 401 || res.status === 403;
         return {
@@ -157,8 +163,10 @@ function summarizeProxy(it) {
   const host = cfg.proxy_host || '';
   const ip = it.ip || cfg.ip || '';
   const country = it.ip_country || cfg.ip_country || '';
+  // 真机 no_proxy 环境的 proxy_type = 'no_proxy'（带下划线）；兼容 noproxy/no-proxy 各写法当作无代理。
+  const isNoProxy = !type || /^no[_-]?proxy$/i.test(type);
   const parts = [];
-  if (type && type !== 'noproxy') parts.push(type);
+  if (!isNoProxy) parts.push(type);
   if (host) parts.push(host);
   if (ip) parts.push(`ip=${ip}`);
   if (country) parts.push(country);
