@@ -7,6 +7,7 @@ export * from './modal-controller.js';
 export * from './login-modal-watcher.js';
 export * from './background-watcher.js';
 export * from './overlay-monitor.js';
+export * from './overlay-report-gate.js';
 export * from './notification-monitor.js';
 export * from './watcher-supervisor.js';
 export * from './identity-watcher.js';

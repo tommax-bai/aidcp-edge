@@ -1362,6 +1362,13 @@ export class BrowseSession {
   }
 
   private async navigateBack(targetPage?: 'feed' | 'search', reason?: string): Promise<void> {
+    // 返回方式的判据用「返回瞬间头上是否盖着笔记浮层」，须在关浮层【之前】抓一次。
+    // 卡片真实点击开的浮层，其上一条历史即来源列表，history.back() 能回列表并保住滚动位；
+    // 而通知巡视 / 作者主页深读这类【整页离页】返回时头上无浮层，history.back() 只会回踩到
+    // 【token 已失效的旧笔记详情】（/explore/<id>，搜索来源尤甚）→ 闪现小红书 error_code=300031
+    // 「当前笔记暂时无法浏览」，被旁路遮罩监测误判为账号级风控。故【无浮层的整页返回一律跳过后退、
+    // 走下方前向导航兜底直连来源列表】，永不回踩失效详情（含旧只白名单作者主页的情形，现由浮层判据统一覆盖）。
+    const modalWasOpen = await this.deps.modalCtrl.isModalOpen();
     await this.safeCloseModal();
     const wantSearch = targetPage === 'search';
     // 熟悉度提速：返回到刚看过的 feed（back_to_feed）时，离页停留已由 ensureDetailDwell 治理，
@@ -1369,24 +1376,23 @@ export class BrowseSession {
     // 注：此处原误取 cardGapTiming（中位 5s，比 action 还重一倍，与注释本意相反）——快速返回反成最慢档，已修正为 scroll 档。
     const fastReturn = reason === 'back_to_feed' && !wantSearch;
     await this.humanPause(fastReturn ? TIMING_PRESETS.scroll : this.actionTiming);
-    // 关键：深读链路用 Page.navigate 进作者主页，故从主页 history.back() 只会回到【可能已过期的笔记详情页
-    // (/explore/<noteId>，搜索来源 token 易失效)】——闪现小红书 404 且回不到列表。因此【当前在作者主页时
-    // 跳过 history.back，直接整页导航到目标列表】，消除 404 闪现；普通情形（笔记 modal 覆盖在列表上）
-    // history.back() 能回到列表并保住滚动位，仍优先用它。
+    const isOnList = (u: string): boolean => (wantSearch ? /\/search_result/.test(u) : EXPLORE_FEED_RE.test(u));
     const fromUrl = await this.evalUrl();
-    const onProfile = /\/user\/profile\//.test(fromUrl);
-    if (!onProfile) {
+    // 仅当【不在目标列表 且 头上确有笔记浮层】才用 history.back()（保滚动位的好路径）；
+    // 无浮层的整页离页返回（通知 / 主页 / 任意）跳过后退，交下方健康校验兜底前向导航直连列表。
+    if (!isOnList(fromUrl) && modalWasOpen) {
       await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
       // 熟悉 feed 已水合更快：缩短 history.back 后的固定落地等待（仍由后续 waitForVisibleCards 兜底确认卡片）。
       await this.sleep(fastReturn ? 300 : (wantSearch ? 1200 : 800));
     }
-    // 健康校验：必须落在【目标列表页（feed: EXPLORE_FEED_RE / search: /search_result）且有可见卡片】才算成功；
-    // 否则整页导航兜底——消除经过期笔记的 404、深读经主页回不去、以及坏页 0 卡 → reportVisibleCards 静默 →
-    // 边-云互等死锁。search 列表不可达时回退 explore feed（保证不卡死，搜索上下文交由云端续刷重建）。
+    // 健康校验兜底（安全网原样保留）：必须落在【目标列表页（feed: EXPLORE_FEED_RE / search: /search_result）
+    // 且有可见卡片】才算成功；否则整页导航兜底——消除经过期笔记的 404、深读经主页回不去、无浮层整页返回、
+    // 以及坏页 0 卡 → reportVisibleCards 静默 → 边-云互等死锁。search 列表不可达时回退 explore feed
+    // （保证不卡死，搜索上下文交由云端续刷重建）。
     const landed = await this.evalUrl();
-    const onTarget = wantSearch ? /\/search_result/.test(landed) : EXPLORE_FEED_RE.test(landed);
-    if (onProfile || !onTarget || !(await this.waitForVisibleCards(wantSearch ? 5000 : 8000))) {
-      if (wantSearch && !onTarget) this.logger('[browse] 搜索结果列表不可达（主页返回/页失效），回退 explore feed');
+    const onTarget = isOnList(landed);
+    if (!onTarget || !(await this.waitForVisibleCards(wantSearch ? 5000 : 8000))) {
+      if (wantSearch && !onTarget) this.logger('[browse] 搜索结果列表不可达（离页返回/页失效），回退 explore feed');
       await this.deps.cdp.send('Page.navigate', { url: this.exploreUrl });
       await this.waitForCards(10000);
       await this.waitForVisibleCards(5000);

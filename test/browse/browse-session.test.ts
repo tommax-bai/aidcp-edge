@@ -1189,3 +1189,117 @@ test('browse-session: 终态关闭（close）后收到迟到命令 → MUST NOT 
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(h.reportedCards.length, afterStop, 'A②：终态关闭后迟到命令 MUST NOT 唤醒重启循环');
 });
+
+// ======== navigateBack 返回导航：避免回踩失效 token 笔记详情闪 300031（change avoid-return-nav-token-loss-flash）========
+
+interface NavBackHarness {
+  h: Harness;
+  calls: { historyBack: number; navigates: string[] };
+  urlState: { url: string };
+}
+
+/** modalOpen=返回瞬间头上是否盖着笔记浮层；onBackUrl=history.back() 后落到的 URL（模拟历史栈上一格）。 */
+function makeNavBackHarness(opts: { modalOpen: boolean; onBackUrl?: string }): NavBackHarness {
+  const h = makeHarness();
+  const calls = { historyBack: 0, navigates: [] as string[] };
+  const urlState = { url: 'https://www.xiaohongshu.com/explore' }; // 启动时在 feed，避免 ensureExplore 导航
+  let closes = 0;
+  h.deps.modalCtrl = {
+    isModalOpen: async () => opts.modalOpen,
+    closeModal: async () => {
+      closes++;
+    },
+    waitForModal: async () => true,
+  };
+  void closes;
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Page.navigate') {
+        const u = String(params.url ?? '');
+        calls.navigates.push(u);
+        urlState.url = u;
+        return {} as never;
+      }
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('history.back')) {
+          calls.historyBack += 1;
+          if (opts.onBackUrl !== undefined) urlState.url = opts.onBackUrl;
+          return {} as never;
+        }
+        if (expr.includes('note-item')) {
+          return { result: { value: 10 } } as never;
+        }
+        return { result: { value: urlState.url } } as never;
+      }
+      return {} as never;
+    },
+  };
+  return { h, calls, urlState };
+}
+
+async function driveNavBack(nb: NavBackHarness, scenarioUrl: string, back: Envelope): Promise<void> {
+  const sess = new BrowseSession(nb.h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 15)); // 启动 ensureExplore/初扫完成（此刻在 /explore）
+  nb.urlState.url = scenarioUrl; // 模拟已离页 / 在详情
+  await sess.onCloudCommand(back);
+  await new Promise((r) => setTimeout(r, 5));
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
+  await done;
+}
+
+test('navigateBack: 看笔记→开通知→返回（无浮层整页离页）→ 不 history.back，直接 Page.navigate 回 feed（事故回归）', async () => {
+  const nb = makeNavBackHarness({ modalOpen: false });
+  await driveNavBack(
+    nb,
+    'https://www.xiaohongshu.com/notification', // 巡视后停在通知页、头上无浮层
+    makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'feed' }),
+  );
+  assert.equal(nb.calls.historyBack, 0, '无浮层整页返回 MUST NOT history.back 回踩失效笔记详情');
+  assert.ok(
+    nb.calls.navigates.some((u) => u.includes('/explore')),
+    `应直接前向 Page.navigate 回 explore feed，实际: ${JSON.stringify(nb.calls.navigates)}`,
+  );
+  const back = nb.h.completedActions.find((a) => a.action === 'back');
+  assert.ok(back && back.ok === true, 'back 应如实回报 ok:true（不静默）');
+});
+
+test('navigateBack: 笔记浮层盖在列表上返回 → 仍走 history.back（保滚动位）、不整页重载', async () => {
+  const nb = makeNavBackHarness({
+    modalOpen: true,
+    onBackUrl: 'https://www.xiaohongshu.com/explore', // history.back 关浮层回到 feed
+  });
+  await driveNavBack(
+    nb,
+    'https://www.xiaohongshu.com/explore/abc123?xsec_token=tok', // 详情态、头上有浮层
+    makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'feed' }),
+  );
+  assert.equal(nb.calls.historyBack, 1, '有浮层返回应用 history.back 保住滚动位');
+  assert.equal(
+    nb.calls.navigates.length,
+    0,
+    `落回有卡片的 feed 后 MUST NOT 再整页重载，实际 navigates: ${JSON.stringify(nb.calls.navigates)}`,
+  );
+});
+
+test('navigateBack: history.back 落到另一失效详情（坏页）→ 兜底 Page.navigate 回 feed 并上报 page.cards（不静默死锁）', async () => {
+  const nb = makeNavBackHarness({
+    modalOpen: true,
+    onBackUrl: 'https://www.xiaohongshu.com/explore/def456?xsec_token=stale', // back 落到另一条失效详情
+  });
+  const before = nb.h.reportedCards.length;
+  await driveNavBack(
+    nb,
+    'https://www.xiaohongshu.com/explore/abc123?xsec_token=tok',
+    makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'feed' }),
+  );
+  assert.equal(nb.calls.historyBack, 1, '有浮层先尝试 history.back');
+  assert.ok(
+    nb.calls.navigates.some((u) => u.includes('/explore')),
+    `落坏页应兜底整页导航回 feed，实际: ${JSON.stringify(nb.calls.navigates)}`,
+  );
+  assert.ok(nb.h.reportedCards.length > before, '返回后 MUST 上报 page.cards（不静默吞掉造成边-云互等）');
+  const back = nb.h.completedActions.find((a) => a.action === 'back');
+  assert.ok(back && back.ok === true, 'back 如实 ok:true');
+});
