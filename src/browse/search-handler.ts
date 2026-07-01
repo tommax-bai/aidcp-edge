@@ -187,7 +187,8 @@ export async function applySearchFilters(
   // 再补一次 click「筛选」兜底（从 hover 落点起手，路径落在控件上）。对两种触发方式都稳、且绝不二次 toggle。
   // ⚠ 真机标定项（task 12.1，用 scripts/search-filter-probe.ts）：hover vs click 触发、选中时间项后是否需点「确定」。
   if ((wantSort && !sortApplied) || (wantTime && !timeApplied)) {
-    const probeTarget = wantTime ?? wantSort!; // 面板内至少一个目标可见即视为已展开
+    // 用**仍未命中**的目标作探针（不是可能已内联命中的那个）：面板内该目标转可见即视为已展开。
+    const probeTarget = (wantTime && !timeApplied ? wantTime : undefined) ?? wantSort!;
     const filterPos = await hoverByVisibleText(cdp, ['筛选'], { random, sleep });
     if (filterPos) {
       let ready = await waitOptionVisible(cdp, [probeTarget], 800, sleep);
