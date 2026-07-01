@@ -140,14 +140,46 @@ function buildDumpJs(sortTexts: string[], timeTexts: string[]): string {
         filterDetail = { self: describe(node), parentChain: chain };
       }
     }
+    // 宽窄布局判定（按「哪套导航可见」判，见 docs/xhs-layout-states.md）
+    var sideBar = document.querySelector('.side-bar, [class*="side-bar"]');
+    var bottomMenu = document.querySelector('.bottom-menu-ai, [class*="bottom-menu"]');
+    var isWide = !!(sideBar && sideBar.offsetParent !== null);
+    var isNarrow = !!(bottomMenu && bottomMenu.offsetParent !== null);
+
+    // 顶部排序/筛选栏：以「综合」（默认排序，两布局常驻）为锚，向上找同时含排序/筛选词的容器，dump 其结构。
+    // 这是判宽窄差异的关键：看排序选项是行内常驻、还是折叠进「综合 ▾」下拉；时间是否只在「筛选」面板内。
+    function findBar(){
+      var all = Array.prototype.slice.call(document.querySelectorAll('button,a,span,div,li,label,p'));
+      var anchor = null;
+      for (var i=0;i<all.length;i++){ var t=(all[i].textContent||'').trim(); if(t==='综合' && all[i].offsetParent!==null){ anchor=all[i]; break; } }
+      if(!anchor){ for (var j=0;j<all.length;j++){ var t2=(all[j].textContent||'').trim(); if(t2==='筛选' && all[j].offsetParent!==null){ anchor=all[j]; break; } } }
+      if(!anchor) return null;
+      var p = anchor;
+      for (var k=0;k<7 && p;k++){
+        var txt = (p.textContent||'');
+        if (txt.indexOf('综合')>=0 && (txt.indexOf('筛选')>=0 || txt.indexOf('最多')>=0 || txt.indexOf('最新')>=0)) break;
+        p = p.parentElement;
+      }
+      if(!p) p = anchor.parentElement;
+      var cs = window.getComputedStyle(p);
+      return {
+        cls: (p.className && p.className.toString) ? p.className.toString().slice(0,140) : '',
+        display: cs.display,
+        html: (p.outerHTML||'').slice(0, 5000),   // 结构原样（截断）——看排序/筛选是行内还是下拉
+      };
+    }
+
     return JSON.stringify({
       url: location.href,
       title: document.title,
       isSearchResult: /search_result|search\\/result|explore\\?/.test(location.href) || location.href.indexOf('search') >= 0,
+      layout: { innerWidth: window.innerWidth, innerHeight: window.innerHeight, isWide: isWide, isNarrow: isNarrow },
+      defaultSortVisible: findExact(['综合']).filter(function(e){return e.visible;}).length > 0,
       sortTabs: findExact(${JSON.stringify(sortTexts)}),
       filterControls: filterEls,
       filterDetail: filterDetail,
       timeOptions: findExact(${JSON.stringify(timeTexts)}),
+      bar: findBar(),
     });
   })()`;
 }
@@ -223,14 +255,21 @@ function summarize(tag: string, d: any): void {
   const visTimes = times.filter((t) => t.visible).map((t) => t.match);
   const hidTimes = times.filter((t) => !t.visible).map((t) => t.match);
   const sorts = (d.sortTabs ?? []).filter((s: any) => s.visible).map((s: any) => s.match);
+  const L = d.layout ?? {};
   console.log(`  [${tag}] 搜索结果页=${d.isSearchResult} url=${String(d.url).slice(0, 70)}`);
-  console.log(`  [${tag}] 排序tab可见: [${sorts.join(', ')}]`);
+  console.log(`  [${tag}] 布局: innerWidth=${L.innerWidth} ${L.isWide ? 'WIDE(侧栏可见)' : ''}${L.isNarrow ? 'NARROW(底部栏可见)' : ''}${!L.isWide && !L.isNarrow ? '(宽窄未判明)' : ''}`);
+  console.log(`  [${tag}] 排序tab可见: [${sorts.join(', ')}]  「综合」默认排序可见=${d.defaultSortVisible}`);
   console.log(`  [${tag}] 时间选项 可见: [${visTimes.join(', ')}]  隐藏(预渲染): [${hidTimes.join(', ')}]`);
   if (d.filterDetail?.self) {
     const f = d.filterDetail.self;
     console.log(`  [${tag}] 「筛选」: <${f.tag} class="${f.cls}"> cursor=${f.cursor} center=(${f.center.x},${f.center.y}) visible=${f.visible}`);
   } else {
     console.log(`  [${tag}] 「筛选」控件未找到`);
+  }
+  if (d.bar) {
+    console.log(`  [${tag}] 排序/筛选栏容器: <${d.bar.cls || '?'}> display=${d.bar.display}（完整 outerHTML 见 json.bar.html，据此判宽窄下排序是行内还是下拉）`);
+  } else {
+    console.log(`  [${tag}] 未定位到排序/筛选栏容器（「综合」锚点没找到——可能排序被折叠/文案不同）`);
   }
 }
 
