@@ -612,7 +612,7 @@ export class BrowseSession {
         const payload = env.payload as InteractionCommentPayload;
         this.logger(`[browse] 命令: interaction.comment (noteId=${payload.noteId})`);
         await this.thinkBefore(payload.thinkMs); // 发评论前犹豫（time directive）
-        await this.executeComment(payload.text);
+        await this.executeComment(payload.text, payload.groupChatCode);
         break;
       }
       case 'interaction.like_comment': {
@@ -1165,7 +1165,7 @@ export class BrowseSession {
    *  - 发布后校验：编辑器清空 且 自己的评论作为顶部新 `[id^="comment-"]` 行出现（评论数文本不可靠，不依赖）。
    * 红线：找不到框/按钮 no_target、未生效 state_unchanged、验证码 blocked_by_captcha——绝不静默假成功。
    */
-  private async executeComment(text: string): Promise<void> {
+  private async executeComment(text: string, groupChatCode?: string): Promise<void> {
     const action = 'comment';
     // 记评论处理耗时：成功/未生效/异常三条出口都带上「耗时」，让 electron「最近状态」能看到评论处理用时（honest，失败也如实报时）。
     const startedAt = Date.now();
@@ -1176,7 +1176,7 @@ export class BrowseSession {
       return;
     }
     try {
-      const { dispatchClick, dispatchKeystrokes } = await import('./cdp-util.js');
+      const { dispatchClick, dispatchKeystrokes, insertText } = await import('./cdp-util.js');
 
       // 1) 定位折叠态评论入口并点击激活
       const entryJs = `(function(){
@@ -1212,8 +1212,17 @@ export class BrowseSession {
       await dispatchClick(this.deps.cdp, editor.x, editor.y, { random: this.random });
       await this.sleep(250);
 
-      // 3) 拟人逐字输入
+      // 3) 拟人逐字输入正文（文字部分手动输入）
       await dispatchKeystrokes(this.deps.cdp, body, { random: this.random });
+      // 3b) 群聊引流码（change account-group-chat-injection）：串码部分**单次整段插入**（Input.insertText），
+      //     绕过逐字输入会触发的 @/# 提及/主题补全劫持；verbatim，不 trim/不逐字敲。追加「换行 + 码」，
+      //     与云端人审卡展示的合并终稿一致（AC-PUB 审=发）。缺省则不插、行为与今天一致。
+      const code = (groupChatCode ?? '').length > 0 ? groupChatCode! : '';
+      if (code) {
+        await this.sleep(300); // 敲完正文到粘码之间的自然停顿
+        await insertText(this.deps.cdp, `\n${code}`);
+        this.logger(`[browse] comment 群聊引流码整段插入（${code.length} 字，绕过逐字补全）`);
+      }
       // 输入完到发送的「回读一眼」轻停顿兼验证码复检窗（scroll 档，中位 ~0.8s）；命令派发已下发过云端犹豫。
       await this.humanPause(TIMING_PRESETS.scroll);
 
