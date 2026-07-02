@@ -18,7 +18,7 @@
  *  - AIDCP_ADS_USER_ID     adspower 模式必填：目标 AdsPower profile id（缺则诚实报错、绝不回落 self）
  *  - AIDCP_ADS_API_BASE    AdsPower 本地 API 基址（默认 http://local.adspower.net:50325）
  *  - AIDCP_ADS_API_KEY     AdsPower 安全校验 API key（作 Bearer，可选）
- *  - AIDCP_STEALTH         反检测注入 on|off（缺省随 provider：self=on / adspower=off 由 cdp_mask 独占）
+ *  - AIDCP_STEALTH         反检测注入 on|off（缺省随 provider：self=on / adspower=off，反检测两层均交 AdsPower：自动化痕迹由 cdp_mask 掩盖、指纹由 profile 的 fingerprint_config 生成）
  *  - AIDCP_CDP_HOST        CDP host（默认 127.0.0.1；self 模式用）
  *  - AIDCP_CDP_PORT        CDP 端口（默认 9222；self 模式用，adspower 端口由 browser/start 动态返回）
  *  - AIDCP_PAGE_URL        仅附着 url 含该子串的页面（默认取第一个 page）
@@ -120,8 +120,10 @@ async function main(): Promise<void> {
   }
   const { instance: chrome, endpoint } = await provider.launch(launchOpts);
 
-  // 反检测恰一层生效：self 默认开 edge 自研 stealth；adspower 默认关、由其 cdp_mask 独占指纹层
-  // （双层叠加会制造不自洽）。AIDCP_STEALTH=on|off 可显式覆盖。
+  // 反检测恰一层生效：self 默认开 edge 自研 stealth；adspower 默认关、反检测整层交 AdsPower——
+  // 自动化痕迹由 cdp_mask（browser/start 字段，藏 navigator.webdriver 等 CDP 特征）掩盖、
+  // 指纹由 profile 的 fingerprint_config（Canvas/WebGL/UA/时区…）生成（edge 再叠一层会不自洽）。
+  // AIDCP_STEALTH=on|off 可显式覆盖。
   const stealthEnv = process.env.AIDCP_STEALTH?.toLowerCase();
   const stealth = stealthEnv ? !['off', 'false', '0', 'no'].includes(stealthEnv) : provider.kind !== 'adspower';
 

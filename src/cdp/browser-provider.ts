@@ -92,7 +92,9 @@ const defaultSleep = (ms: number): Promise<void> => new Promise<void>((r) => set
 
 /**
  * adspower：经 AdsPower 本地 API（browser/start|stop|active）托管指纹浏览器。
- * 指纹层由 AdsPower 的 cdp_mask 独占（main.ts 在本模式默认关 edge 自研 stealth）。
+ * 反检测整层交 AdsPower（main.ts 在本模式默认关 edge 自研 stealth）：自动化痕迹由 cdp_mask
+ * （browser/start 字段，默认开，掩盖 navigator.webdriver 等 CDP 特征）掩盖、指纹由该 profile 的
+ * fingerprint_config（Canvas/WebGL/UA/时区…按分身稳定生成）负责——两者是 AdsPower 的两套独立机制。
  */
 export class AdsPowerProvider implements BrowserProvider {
   readonly kind = 'adspower' as const;
