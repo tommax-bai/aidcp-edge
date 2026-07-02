@@ -198,6 +198,8 @@ export class BrowseSession {
   private dwellFloorTiming: TimingConfig;
   /** 当前详情页打开时刻（单调时钟）；无打开的详情页时为 null。 */
   private noteOpenedAt: number | null = null;
+  /** 当前 feed 卡片批次的到达时刻（单调时钟）；feed-scroll-card-floor 的停留锚点，每次上报刷新。 */
+  private feedCardsArrivedAt: number | null = null;
   private processed = 0;
 
   /** 命令队列：外部通过 onCloudCommand() 推入，loop() 消费 */
@@ -255,6 +257,25 @@ export class BrowseSession {
       await this.sleep(remain);
     }
     this.noteOpenedAt = null;
+  }
+
+  /**
+   * feed 翻页前确保"看完本批新卡"的停留达标（time directive `dwellMs`，feed-scroll-card-floor）。
+   * - 缺 `dwellMs` / ≤0（返回未刷新 / 旧云端 / 断连）→ 立即翻页、不额外等待；
+   * - 中心值 = 云端按新卡数算的 `dwellMs`，叠抖动为目标；
+   * - 从"本批卡到达时刻"起算已停留，已达标则不叠加（评估耗时被吸收，无双重延迟）；
+   * - 与详情页停留互不干扰（锚点 feedCardsArrivedAt vs noteOpenedAt，触发命令不同）。
+   */
+  private async ensureFeedDwell(dwellMs?: number): Promise<void> {
+    if (!dwellMs || dwellMs <= 0) return;
+    const target = jitterAround(dwellMs, 0.2, this.random);
+    const anchor = this.feedCardsArrivedAt ?? this.now();
+    const elapsed = this.now() - anchor;
+    const remain = target - elapsed;
+    if (remain > 0) {
+      this.logger(`[browse] 翻页前看新卡停留 +${Math.round(remain)}ms（目标≈${Math.round(target)}ms，已停${Math.round(elapsed)}ms）`);
+      await this.sleep(remain);
+    }
   }
 
   isRunning(): boolean {
@@ -567,6 +588,7 @@ export class BrowseSession {
       case 'page.scroll': {
         const payload = env.payload as PageScrollPayload;
         this.logger(`[browse] 命令: page.scroll (${payload.reason ?? ''})`);
+        await this.ensureFeedDwell(payload.dwellMs); // 翻页前看完本批新卡（feed-scroll-card-floor）
         await this.deps.scroller.scrollNext();
         await this.waitForCards(5000);
         await this.reportVisibleCards();
@@ -801,6 +823,8 @@ export class BrowseSession {
       }
     }
     this.deps.client.reportPageCards?.(payload);
+    // feed-scroll-card-floor：刷新"本批卡到达时刻"锚点（下一次带 dwellMs 的翻页据此只补差额）。
+    this.feedCardsArrivedAt = this.now();
     const cardSummary = payload.cards
       .map((c) => `[${c.index}]“${(c.title ?? '').slice(0, 18)}”${c.author ? '@' + c.author : ''}${c.likeCount ? ' 👍' + c.likeCount : ''}`)
       .join(' / ');

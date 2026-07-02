@@ -1303,3 +1303,41 @@ test('navigateBack: history.back 落到另一失效详情（坏页）→ 兜底 
   const back = nb.h.completedActions.find((a) => a.action === 'back');
   assert.ok(back && back.ok === true, 'back 如实 ok:true');
 });
+
+// ======== feed-scroll-card-floor：翻页前「看新卡」停留（ensureFeedDwell） ========
+
+test('pacing: page.scroll 带 dwellMs 且刚到卡（停留不足）→ 翻页前兜底停留', async () => {
+  const h = makeHarness();
+  const sleeps: number[] = [];
+  const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000)); // 时钟恒定 → 已停≈0
+  await startAndPush(sess, [
+    makeEnvelope('page.scroll', 's', 0, { reason: 'feed_scroll', dwellMs: DWELL_SENTINEL }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
+  ]);
+  assert.ok(sleeps.some((ms) => ms > ISOLATE), `翻页前应有≈dwellMs的兜底停留，实际: ${sleeps}`);
+});
+
+test('pacing: page.scroll 已停够（评估耗时被吸收）→ 不叠加等待', async () => {
+  const h = makeHarness();
+  const sleeps: number[] = [];
+  // 时钟每次 +40000：卡片到达锚点后，page.scroll 时 elapsed≈40000 > 抖动后目标 → 不再补停。
+  let t = 1000;
+  const now = () => { const v = t; t += 40000; return v; };
+  const sess = new BrowseSession(h.deps, pacingOpts(sleeps, now));
+  await startAndPush(sess, [
+    makeEnvelope('page.scroll', 's', 0, { reason: 'feed_scroll', dwellMs: DWELL_SENTINEL }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
+  ]);
+  assert.ok(!sleeps.some((ms) => ms > ISOLATE), `已停够不应再兜底停留，实际: ${sleeps}`);
+});
+
+test('pacing: page.scroll 缺 dwellMs（返回未刷新/旧云端）→ 立即翻页不额外停留', async () => {
+  const h = makeHarness();
+  const sleeps: number[] = [];
+  const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000));
+  await startAndPush(sess, [
+    makeEnvelope('page.scroll', 's', 0, { reason: 'feed_scroll' }), // 无 dwellMs
+    makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
+  ]);
+  assert.ok(!sleeps.some((ms) => ms > ISOLATE), `缺 dwellMs 不应有 feed 兜底停留，实际: ${sleeps}`);
+});
