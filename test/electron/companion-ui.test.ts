@@ -220,6 +220,32 @@ test('账号无昵称 → 标题带显示「账号 …尾4位」，绝不摆长 
   assert.equal($(w, '#acct-ava').textContent, '书');
 });
 
+test('AdsPower 环境名作账号标签兜底：平铺展示、不加 @（不冒充小红书昵称）', async () => {
+  const { w } = await boot({ account: { id: '66cd1d4f000000001d0314ee', name: 'Tmax', source: 'env' } });
+  assert.equal($(w, '#acct-name').textContent, 'Tmax');
+  assert.equal($(w, '#acct-ava').textContent, 'T');
+});
+
+test('选环境时环境名随设置持久化（adsProfileName）', async () => {
+  const saves: Array<Record<string, unknown>> = [];
+  const { w } = await boot({ edge: 'stopped', session: 'idle' }, {
+    getStatus: async () => ({ auth: 'checking', cloud: 'disconnected', session: 'idle', risk: 'normal', edge: 'stopped', stats: { views: 0, likes: 0, collects: 0, comments: 0 }, provider: 'adspower', lastMessage: '', updatedAt: new Date().toISOString() }),
+    getSettings: async () => ({ provider: 'adspower', adsProfileId: '', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x' }),
+    adsListProfiles: async () => ({ ok: true, profiles: [
+      { userId: 'u1', serialNumber: '1', name: 'Tmax', groupName: 'g', proxy: 'p' },
+      { userId: 'u2', serialNumber: '2', name: '工程师大白', groupName: 'g', proxy: 'p' },
+    ] }),
+    saveSettings: async (patch: Record<string, unknown>) => { saves.push(patch); return { saveOk: true }; },
+  });
+  const items = Array.from(w.document.querySelectorAll('.ads-env-item'));
+  (items[1] as HTMLElement).dispatchEvent(new w.Event('click')); // 选「工程师大白」
+  $(w, '#session-fab').dispatchEvent(new w.Event('click')); // 启动 = 先存再起
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  const saved = saves.find((p) => p.adsProfileId === 'u2');
+  assert.equal(saved?.adsProfileName, '工程师大白', '保存的设置应带环境名');
+});
+
 test('暂停态：在场感带「状态更新 · N 前」时间戳，不留大空白', async () => {
   const at = new Date(Date.now() - 8000).toISOString();
   const { w } = await boot({ session: 'paused', edge: 'stopped', presence: { text: 'x', at } });

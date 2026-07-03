@@ -101,6 +101,8 @@ let editingProvider = null;
 // 「保存」按钮已并入「启动」——启动时先存再起，故无独立保存按钮。
 let dirty = false;
 let adsDownloadUrl = 'https://www.adspower.net/download';
+// 选中环境的 AdsPower 环境名（随设置持久化，作标题带账号标签兜底）。
+let selectedProfileName = '';
 const LOG_RETENTION_MS = 2 * 60 * 1000; // 开发者详情原始日志保留 2 分钟
 const logEntries = [];
 let lastLogMessage = '';
@@ -177,9 +179,10 @@ function renderNotice(status) {
 function renderTitlebar(status) {
   const acct = status.account;
   if (acct && (acct.name || acct.id)) {
-    // 有昵称显示昵称；只有 id 时显示「账号 …尾4位」——长 id 不上标题带（in-place 身份读取拿不到昵称属常态）。
+    // 标签兜底链：小红书昵称（@ 前缀）> AdsPower 环境名（平铺，不冒充小红书昵称）> 账号 …尾4位。
     const nick = (acct.name || '').replace(/^@/, '');
-    fields.acctName.textContent = nick ? `@${nick}` : `账号 …${String(acct.id).slice(-4)}`;
+    const isXhsNick = nick && acct.source !== 'env';
+    fields.acctName.textContent = nick ? (isXhsNick ? `@${nick}` : nick) : `账号 …${String(acct.id).slice(-4)}`;
     fields.acctAva.textContent = nick ? nick.slice(0, 1) : '书';
   }
   const health = uiLogic.synthesizeHealth(status);
@@ -419,6 +422,7 @@ async function saveCurrentSettings() {
   const saved = await window.aidcpEdge.saveSettings({
     provider,
     adsProfileId: settingsUi.adsProfile.value.trim(),
+    adsProfileName: selectedProfileName,
     adsApiKey: settingsUi.adsApiKey.value,
     adsApiBase: settingsUi.adsApiBase.value.trim(),
   });
@@ -462,6 +466,7 @@ function updateProfileDisplay() {
 function applySettings(s) {
   if (!s) return;
   if (s.adsDownloadUrl) adsDownloadUrl = s.adsDownloadUrl;
+  selectedProfileName = s.adsProfileName || '';
   applyDevVisible(Boolean(s.devDetails));
   settingsUi.adsProfile.value = s.adsProfileId || '';
   settingsUi.adsApiKey.value = s.adsApiKey || '';
@@ -510,6 +515,7 @@ settingsUi.adsManual.addEventListener('change', () => {
   else updateProfileDisplay();
 });
 settingsUi.adsProfile.addEventListener('input', () => {
+  selectedProfileName = ''; // 手填 id 对不上环境名，不冒认
   updateProfileDisplay();
   markDirty();
 });
@@ -561,9 +567,10 @@ async function probeAds() {
   }
 }
 
-// 选中某环境：把其 user_id（非 serial_number）设为将写入的分身 ID，并高亮该行。
-function selectProfile(userId, itemEl) {
+// 选中某环境：把其 user_id（非 serial_number）设为将写入的分身 ID，并高亮该行；顺手记环境名作账号标签。
+function selectProfile(userId, itemEl, profileName) {
   settingsUi.adsProfile.value = userId;
+  selectedProfileName = profileName || '';
   updateProfileDisplay();
   markDirty();
   settingsUi.adsEnvList.querySelectorAll('.ads-env-item').forEach((el) => el.classList.remove('selected'));
@@ -606,13 +613,13 @@ function populateEnvs(profiles) {
     meta.textContent = bits.join(' · ');
     item.appendChild(name);
     item.appendChild(meta);
-    item.addEventListener('click', () => selectProfile(prof.userId, item));
+    item.addEventListener('click', () => selectProfile(prof.userId, item, prof.name));
     if (prof.userId && prof.userId === current) item.classList.add('selected');
     if (!firstItem) firstItem = item;
     list.appendChild(item);
   }
   if (profiles.length === 1 && !current && profiles[0].userId && !coreRunning()) {
-    selectProfile(profiles[0].userId, firstItem);
+    selectProfile(profiles[0].userId, firstItem, profiles[0].name);
     return { autoSelected: profiles[0].name || profiles[0].userId };
   }
   return { autoSelected: null };

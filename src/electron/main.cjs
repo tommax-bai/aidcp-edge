@@ -35,6 +35,9 @@ const DEFAULT_SETTINGS = {
   adsProfileId: '',
   adsApiKey: '',
   adsApiBase: '',
+  // 选中环境的 AdsPower 环境名（操作者自己起的分身名，如「Tmax」）：作标题带账号标签的兜底
+  // （小红书昵称仅 navigate 身份路径可得；环境名桌面端现成可得、且通常就叫账号名）。
+  adsProfileName: '',
   // 「开发者详情」（原始日志区）默认不展示，在设置抽屉里开关（客户版首屏零技术噪音）。
   devDetails: false,
 };
@@ -389,7 +392,12 @@ function startAdsPowerFlow() {
     });
     return;
   }
-  updateStatus({ auth: 'checking', lastMessage: '正在通过 AdsPower 启动指纹浏览器…' });
+  updateStatus({
+    auth: 'checking',
+    lastMessage: '正在通过 AdsPower 启动指纹浏览器…',
+    // 环境名现成可得：启动即点亮标题带账号标签，不用等核心身份确立。
+    ...(settings.adsProfileName ? { account: { id: settings.adsProfileId, name: settings.adsProfileName, source: 'env' } } : {}),
+  });
   startEdge();
 }
 
@@ -442,7 +450,11 @@ function handleEdgeLogLine(message, isError = false) {
   // 结构化 [ui-event] 行优先，中文日志行映射兜底；计数只认 ✓ 成功行（见模块头注的偏离说明）。
   const evt = uiEvents.push(message);
   if (evt) {
-    if (evt.account) status.account = { id: evt.account.id, name: evt.account.name || '' };
+    if (evt.account) {
+      // 账号标签兜底链：小红书昵称（navigate 身份路径才有）> AdsPower 环境名 > 渲染层再兜尾4位。
+      const name = evt.account.name || settings.adsProfileName || '';
+      status.account = { id: evt.account.id, name, source: evt.account.name ? 'xhs' : 'env' };
+    }
     if (evt.presence) next.presence = { text: evt.presence, at: new Date().toISOString() };
     if (evt.publish && evt.publish.state) {
       next.publish = { ...evt.publish, at: new Date().toISOString() };
