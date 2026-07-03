@@ -1070,8 +1070,11 @@ export class BrowseSession {
     const wrapperCls = action === 'like' ? 'like-wrapper' : 'collect-wrapper';
     const alreadyDoneHref = action === 'like' ? '#liked' : '#collected';
     try {
+      // 互动栏常比笔记打开晚一拍渲染（AI 总结流式重排 / 卡片回收）：定位前有界等待，
+      // 避免在渲染完成前误报 btn_no-bar。超时不抛、仍走下方诚实 no-bar。
+      await this.waitForEngageBar();
       const js = `(function(){
-        var bar = document.querySelector('.interactions.engage-bar');
+        var bar = document.querySelector('.interactions.engage-bar') || document.querySelector('.engage-bar');
         if (!bar) return JSON.stringify({error:'no-bar'});
         var el = bar.querySelector('.${wrapperCls}');
         if (!el) return JSON.stringify({error:'no-btn'});
@@ -1106,7 +1109,7 @@ export class BrowseSession {
       // 验证：轮询 SVG href 是否翻成 #liked / #collected（多在 300–600ms 翻转），命中即返回、
       // 上限 1500ms —— 取代原固定 sleep(1500) 后单次读，快路径省 ~1s，仍带上限不会过早误报。
       const verifyJs = `(function(){
-        var bar = document.querySelector('.interactions.engage-bar');
+        var bar = document.querySelector('.interactions.engage-bar') || document.querySelector('.engage-bar');
         if (!bar) return 'no-bar';
         var el = bar.querySelector('.${wrapperCls}');
         if (!el) return 'no-btn';
@@ -1557,8 +1560,21 @@ export class BrowseSession {
       const times = Math.max(1, count);
       let anyFound = false;
       let moved = 0;
+      // 跨屏累计去重：逐屏抽取候选按锚点合并，不再只取终态一屏；首屏也抓，故短评论区
+      // （no_scroll）/ 无可滚容器（no_target）时仍带回当前可见评论。best-effort，有界。
+      const acc = new Map<string, CommentCandidate>();
+      const HARVEST_CAP = 40;
+      const mergeHarvest = async (): Promise<void> => {
+        if (acc.size >= HARVEST_CAP) return;
+        for (const c of await this.harvestCommentCandidates()) {
+          if (!acc.has(c.anchorId)) acc.set(c.anchorId, c);
+          if (acc.size >= HARVEST_CAP) break;
+        }
+      };
       for (let i = 0; i < times; i++) {
         await this.humanPause(TIMING_PRESETS.scroll);
+        // 先抓当前（已 settle 的）本屏候选再滚动：i=0 抓首屏，之后每屏累计。
+        await mergeHarvest();
         const raw = await evalRawFn<string>(this.deps.cdp, scrollExpr);
         const r = typeof raw === 'string' ? JSON.parse(raw) : { found: false };
         if (r.found) {
@@ -1566,20 +1582,24 @@ export class BrowseSession {
           if (typeof r.after === 'number' && typeof r.before === 'number' && r.after > r.before) moved++;
         }
       }
+      // 末屏渲染门：仅当真滚动过（moved>0）才 settle 再抓一次，接住最后一次滚动懒加载的评论；
+      // no_target/no_scroll 无更多可加载，用循环内已累计的候选即可，不白等一拍。
+      if (moved > 0) {
+        await this.humanPause(TIMING_PRESETS.scroll);
+        await mergeHarvest();
+      }
+      const candidates = [...acc.values()];
       if (!anyFound) {
-        this.logger('[browse] 未找到可滚动的评论区容器');
-        this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: false, reason: 'no_target' });
+        this.logger(`[browse] 未找到可滚动的评论区容器（仍抓到可见评论 ${candidates.length} 条随回执带回）`);
+        this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: false, reason: 'no_target', candidates });
         return;
       }
       if (moved === 0) {
-        this.logger(`[browse] 评论区命中但未发生位移（已到底/不可滚，0/${times}）`);
-        this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: false, reason: 'no_scroll' });
+        this.logger(`[browse] 评论区命中但未发生位移（已到底/不可滚，0/${times}；抓到可见评论 ${candidates.length} 条）`);
+        this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: false, reason: 'no_scroll', candidates });
         return;
       }
-      this.logger(`[browse] 评论区已滚动 ${moved}/${times} 次（实测 scrollTop 位移）`);
-      // 终态视口快照：随手抽取当前在视口内的评论候选（锚点最新鲜）供云端 comment_like 评估。
-      // best-effort：抽不到就报空 candidates，云端据此弃权——绝不编造目标。
-      const candidates = await this.harvestCommentCandidates();
+      this.logger(`[browse] 评论区已滚动 ${moved}/${times} 次（实测位移，累计候选 ${candidates.length} 条）`);
       this.deps.client.reportActionCompleted?.({ action: 'scroll_comments', ok: true, reason: `scrolled=${moved}/${times}`, candidates });
     } catch (err) {
       this.logger(`[browse] 滚动评论失败：${(err as Error).message}`);

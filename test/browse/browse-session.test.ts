@@ -713,6 +713,88 @@ test('browse-session: note.scroll_comments 命中但不可滚/已到底（scroll
   assert.ok(act && act.ok === false && act.reason === 'no_scroll', `应回报 no_scroll，实际 ${JSON.stringify(act)}`);
 });
 
+// change fix-interaction-and-comment-capture：滚不动/无可滚容器时仍抓当前可见评论随回执带回（短评论区不再一条不采）。
+test('browse-session: note.scroll_comments 短评论区 no_scroll 仍带回可见评论候选', async () => {
+  const h = makeHarness();
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        // harvestJs（含 window.innerHeight）→ 返回一条可见评论候选
+        if (expr.includes('innerHeight')) {
+          return { result: { value: JSON.stringify([{ anchorId: 'comment-1', author: '小明', text: '这条评论很有用', alreadyLiked: false, likeText: '8' }]) } } as never;
+        }
+        // scrollExpr：命中容器但 scrollTop 不动 → no_scroll
+        if (expr.includes('overflowY')) return { result: { value: '{"found":true,"before":500,"after":500}' } } as never;
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.scroll_comments', 'scb1', 0, { noteId: 'n1', count: 2 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const act = h.completedActions.find(a => a.action === 'scroll_comments');
+  assert.ok(act && act.ok === false && act.reason === 'no_scroll', `应回报 no_scroll，实际 ${JSON.stringify(act)}`);
+  assert.ok(act!.candidates && act!.candidates.length > 0, '短评论区滚不动也应带回可见评论候选');
+  assert.equal(act!.candidates![0].anchorId, 'comment-1');
+});
+
+test('browse-session: note.scroll_comments 无可滚容器 no_target 仍带回可见评论候选', async () => {
+  const h = makeHarness();
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('innerHeight')) {
+          return { result: { value: JSON.stringify([{ anchorId: 'comment-9', text: '路过留言', alreadyLiked: false }]) } } as never;
+        }
+        if (expr.includes('overflowY')) return { result: { value: '{"found":false}' } } as never; // 找不到可滚容器
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.scroll_comments', 'scb2', 0, { noteId: 'n1', count: 2 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const act = h.completedActions.find(a => a.action === 'scroll_comments');
+  assert.ok(act && act.ok === false && act.reason === 'no_target', `应回报 no_target，实际 ${JSON.stringify(act)}`);
+  assert.ok(act!.candidates && act!.candidates.length > 0, '无可滚容器也应带回当前可见评论候选');
+});
+
+test('browse-session: note.scroll_comments 滚动成功经 harvest 回流评论候选（ok:true 带 candidates）', async () => {
+  const h = makeHarness();
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('innerHeight')) {
+          return { result: { value: JSON.stringify([{ anchorId: 'comment-1', text: '第一条', likeText: '3' }, { anchorId: 'comment-2', text: '第二条' }]) } } as never;
+        }
+        if (expr.includes('overflowY')) return { result: { value: '{"found":true,"before":0,"after":360}' } } as never; // 真位移
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.scroll_comments', 'scb3', 0, { noteId: 'n1', count: 3 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const act = h.completedActions.find(a => a.action === 'scroll_comments');
+  assert.ok(act && act.ok === true, '滚动成功应 ok:true');
+  assert.ok(act!.candidates && act!.candidates.length > 0, '成功路径也应经 harvest 带回候选');
+});
+
 test('browse-session: profile.open 进主页抽到资料 → reportProfileDetail extracted:true', async () => {
   const h = makeHarness();
   h.deps.cdp = {
