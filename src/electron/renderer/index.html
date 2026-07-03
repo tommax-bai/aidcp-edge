@@ -63,6 +63,14 @@
 
       <!-- 发布等待卡（纯展示零按钮；审批授权只在飞书。唯一可点=「打开飞书 ↗」纯导航） -->
       <section id="pub-card" class="pub hidden">
+        <!-- 收起态薄条：运行中且无在途审批时自动收起（点击可展开查看） -->
+        <div class="pub-bar hidden" id="pub-bar" role="button" tabindex="0">
+          <span class="pub-bar-thumb"></span>
+          <span class="pub-bar-label">发布</span>
+          <span class="pub-bar-sum" id="pub-bar-sum"></span>
+          <span class="pub-bar-chev">▾</span>
+        </div>
+        <div class="pub-main" id="pub-main">
         <div class="pub-head">
           <span class="pub-evt" id="pub-head">AI 写好了一条新笔记</span>
           <span class="pub-time" id="pub-corner"></span>
@@ -85,6 +93,7 @@
         <div class="pub-foot">
           <p id="pub-foot">全文和「通过 / 驳回」按钮在飞书里，审批结果会自动同步到这里。</p>
           <span class="pub-link" id="pub-link" role="link" tabindex="0">打开飞书 ↗</span>
+        </div>
         </div>
       </section>
 

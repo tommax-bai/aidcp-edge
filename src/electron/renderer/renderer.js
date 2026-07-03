@@ -46,6 +46,9 @@ const fields = {
   pubSteps: document.querySelector('#pub-steps'),
   pubFoot: document.querySelector('#pub-foot'),
   pubLink: document.querySelector('#pub-link'),
+  pubMain: document.querySelector('#pub-main'),
+  pubBar: document.querySelector('#pub-bar'),
+  pubBarSum: document.querySelector('#pub-bar-sum'),
   drawer: document.querySelector('#drawer'),
   drawerMask: document.querySelector('#drawer-mask'),
   drawerClose: document.querySelector('#drawer-close'),
@@ -213,6 +216,8 @@ function renderLoop(status) {
 
 // ─── 发布卡（常驻三态：flow 进行中 / last 上次发布 / empty 从未发布；纯展示零按钮）───
 let lastPublishSig = '';
+// 用户点薄条的临时展开（进行中审批到来 / 会话停止时自动复位）。
+let pubManualOpen = false;
 function renderPublish(status, nowMs) {
   const view = uiLogic.publishView(status.publish, status.lastPublish, nowMs);
   // 终态折一条进活动流（按签名去重，状态重推不重复记）。
@@ -230,13 +235,22 @@ function renderPublish(status, nowMs) {
   if (status.publish) lastPublishSig = `${status.publish.state}:${status.publish.title || ''}`;
   fields.pubCard.classList.remove('hidden'); // 常驻
   fields.pubCard.classList.toggle('empty', view.mode === 'empty');
+  // 收展：flow 永远展开；运行中且无在途审批自动收起为薄条（点击可临时展开）。
+  const dock = uiLogic.publishDock(view, status, pubManualOpen);
+  if (view.mode === 'flow') pubManualOpen = false; // 新审批到来自动展开并复位手动态
+  fields.pubCard.classList.toggle('collapsed', dock.collapsed);
+  fields.pubBar.classList.toggle('hidden', !dock.collapsed);
+  fields.pubMain.classList.toggle('folded', dock.collapsed);
+  if (dock.collapsed) fields.pubBarSum.textContent = dock.summary;
   fields.pubHead.textContent = view.head;
   fields.pubCorner.textContent = view.corner;
   fields.pubCorner.classList.toggle('hot', Boolean(view.cornerHot));
   fields.pubTitle.textContent = view.title || '（新笔记）';
   fields.pubTitle.classList.toggle('muted', view.mode === 'empty');
   // 编号默认形态：无真编号时以「—」占位（云端飞书卡印上 requestId 后自动点亮真编号）。
-  fields.pubMeta.textContent = `图文笔记 · 编号 ${view.code || '—'}`;
+  fields.pubMeta.textContent = view.mode === 'empty'
+    ? '等待第一条笔记 · 编号 —'
+    : `图文笔记 · 编号 ${view.code || '—'}`;
   renderFootRich(fields.pubFoot, view.foot); // 固定模板内 **…** 加粗，破掉整片灰
   fields.pubLink.classList.toggle('hidden', !view.showLink);
   const steps = fields.pubSteps.querySelectorAll('.j-step');
@@ -261,6 +275,16 @@ function renderFootRich(el, text) {
     }
   });
 }
+
+// 收起薄条：点击临时展开（再点卡头收回）；键盘可达。
+function togglePubManual() {
+  pubManualOpen = !pubManualOpen;
+  if (currentStatus) renderPublish(currentStatus, Date.now());
+}
+fields.pubBar.addEventListener('click', togglePubManual);
+fields.pubBar.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') togglePubManual();
+});
 
 // 「打开飞书 ↗」：纯导航（拉起飞书客户端），不是审批操作；拉不起降级为纯文字说明。
 fields.pubLink.addEventListener('click', async () => {

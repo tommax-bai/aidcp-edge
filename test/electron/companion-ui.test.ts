@@ -305,6 +305,35 @@ test('活动流条目带类型记号（治纯文字墙）', async () => {
   assert.equal((ics[0] as HTMLElement).textContent, '藏');
 });
 
+// ── 发布卡收展（dock）──
+test('运行中且无审批 → 发布卡自动收起为薄条；点击可临时展开', async () => {
+  const { w } = await boot(); // running + empty
+  const card = $(w, '#pub-card');
+  assert.ok(card.classList.contains('collapsed'), '运行中空态应收起');
+  assert.equal(hidden($(w, '#pub-bar')), false, '薄条可见');
+  assert.match($(w, '#pub-bar-sum').textContent ?? '', /还没有发布过/);
+  assert.ok($(w, '#pub-main').classList.contains('folded'));
+  $(w, '#pub-bar').dispatchEvent(new w.Event('click'));
+  assert.ok(!card.classList.contains('collapsed'), '点击薄条临时展开');
+});
+
+test('审批到来 → 自动展开；审批落地（仍在运行）→ 再收起为「上次发布」薄条', async () => {
+  const { w, pushStatus } = await boot(); // running + empty → collapsed
+  pushStatus(makeStatus({ publish: { state: 'pending', title: '秋日漫步', at: new Date().toISOString() } }));
+  const card = $(w, '#pub-card');
+  assert.ok(!card.classList.contains('collapsed'), '在途审批必须展开');
+  assert.equal(hidden($(w, '#pub-bar')), true);
+  pushStatus(makeStatus({ publish: { state: 'published', title: '秋日漫步', at: new Date().toISOString() } }));
+  assert.ok(card.classList.contains('collapsed'), '审批落地后收回薄条');
+  assert.match($(w, '#pub-bar-sum').textContent ?? '', /上次发布/);
+});
+
+test('未运行时发布卡保持展开（空态旅程有引导价值）', async () => {
+  const { w } = await boot({ edge: 'stopped', session: 'idle' });
+  assert.ok(!$(w, '#pub-card').classList.contains('collapsed'));
+  assert.equal(hidden($(w, '#pub-bar')), true);
+});
+
 // ── 循环 chip ──
 test('循环 chip 随阶段点亮，停止时全灭', async () => {
   const { w, pushStatus } = await boot({ loopStage: 'read' });
