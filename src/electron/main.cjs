@@ -352,7 +352,11 @@ function startEdge() {
     windowsHide: true,
   });
 
-  updateStatus({ edge: 'starting', session: 'running', lastMessage: '正在启动 aidcp-edge…', ...presencePatch('正在启动引擎…') });
+  // 发布卡在途状态随核心（重）启动清零（edge-companion-ui 8.1 评审修正）：离线窗口内的审批变化
+  // （拒绝/失败）推送会如实丢失，旧 pending/approved 卡若不清会永久滞留成陈卡；真在候审/已批的
+  // 草稿由重连后的云端 hello 快照重新推回（pending/approved 可重建，终态不回放）。lastPublish
+  // 历史态不清（持久数据，云端快照到位后以云端为准覆盖）。
+  updateStatus({ edge: 'starting', session: 'running', publish: null, lastMessage: '正在启动 aidcp-edge…', ...presencePatch('正在启动引擎…') });
 
   edgeProcess.stdout.on('data', (chunk) => handleEdgeOutput(chunk.toString()));
   edgeProcess.stderr.on('data', (chunk) => handleEdgeOutput(chunk.toString(), true));

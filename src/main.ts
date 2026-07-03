@@ -200,9 +200,10 @@ async function main(): Promise<void> {
   // 绝不静默丢弃让其跨重起被重复触发 → 真账号重复发帖。值为「按各自结果形状诚实判失败」的闭包。
   const inFlightPublishes = new Map<string, (reason: string) => void>();
 
-  await client.connect();
-  console.log(`[aidcp-edge] 已连接云端 ${cloudUrl}，等待命令 ...`);
-
+  // 红线（edge-companion-ui 8.1 评审修正）：全部云端主动消息处理器 MUST 在 connect() 之前注册。
+  // 云端在 welcome 回发后立刻推 hello 快照（ui.snapshot）——若 welcome 与快照同一批 socket 读到达，
+  // 两帧在同一宏任务内派发，connect() 的续体（微任务）还没来得及跑注册代码，后注册的处理器
+  // 会静默漏掉首帧。注册本身不需要活连接，先注册零成本。
   client.onPublishCommand((env) => {
     void (async () => {
       // §7 在途登记：回收若撞上这条在途发布，按 publish.result 形状诚实判失败（同 env.id 回执）。
@@ -345,6 +346,10 @@ async function main(): Promise<void> {
   client.onUiSnapshot((env) => {
     for (const uiLine of uiSnapshotToLines(env.payload)) console.log(uiLine);
   });
+
+  // 处理器全部就位后才握手（见上方红线注释：hello 快照紧随 welcome，注册晚一步就漏帧）。
+  await client.connect();
+  console.log(`[aidcp-edge] 已连接云端 ${cloudUrl}，等待命令 ...`);
 
   // —— 自动浏览会话 ——
   let browse: BrowseSession | undefined;
