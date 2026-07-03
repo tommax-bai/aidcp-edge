@@ -93,7 +93,7 @@ function isNarrowLayout(){
   - **点已选中项不会 toggle 掉**（幂等安全，重试可放心做）；**触发器文案「筛选」→「已筛选」= 廉价提交信号**（必要非充分：只说明有筛选生效，不指明哪项）。
   - **AI 总结带原生完成信号**：正文容器窄版 `xhs-ai-message-card__content` / 宽版 `xhs-ai-chat-*` 两套类名家族；`.ai-message` 生成完挂 **`.ai-message-finished`**——比 loading 元素/textLen 启发稳得多（如需等待时用它）。
 - **AI 总结可整体忽略、不必关闭**（产品决策 2026-07-03）：卡片采集不受它污染——真机验证 AI 面板内 `.note-item` 卡 0 个、`a[href*=/explore/]` 链接 0 个；主动关闭不可靠（× 异步晚出现、部分词无 AI、③无按钮）。
-- **修法**（落 change comment-search-command task 5.4）：既然失败=「未提交的瞬态竞态」且无法预判窗口，**不押注任何具体机理**——`applySearchFilters` 改「**逐项幂等应用 + 提交校验 + 有界重试**」：先读持久选中态（已选中跳过）→ 点 → 校验（重开面板读持久 `.active`，触发器「已筛选」作辅助信号）→ 未提交则隔 1-2s 重试（自然错开过渡窗口），K 次仍未提交诚实返回 false。返回值只由最终权威复核决定，瞬时高亮绝不作数。
+- **修法**（落 change comment-search-command task 5.4，**已实装 edge `3c616c5`**）：既然失败=「未提交的瞬态竞态」且无法预判窗口，**不押注任何具体机理**——`applySearchFilters` 改「**逐项幂等应用 + 提交校验 + 有界重试**」：先读持久选中态（已选中跳过）→ 点 → 校验（重开面板读持久 `.active`，触发器「已筛选」作辅助信号；无触发器布局以 selected 为准）→ 未提交则 settle ≥1.8s（瞬时高亮消退窗）重试，每项 ≤3 次，仍未提交诚实返回 false。返回值只由最终权威复核决定，瞬时高亮绝不作数。**附带修**：选项已可见时（面板残留开着/行内 tab）点击路径以目标自身为起点——默认外侧起点会划出面板 → mouseleave 收面板 → 点空/误点下层卡片（真机实证）。真机验收：干净词一点即中；脏状态（面板预开）第 1 点真被吞、重试当场救回；--twice 幂等。
 - **探针**：`scripts/layout-filter-probe.ts`（`--search=<词>`/`--resize=WxH`/`--hover`/`--diag`(命中链)/`--exp`(微时序)/`--forensic [--await-stream] [--target=文案]`(DOM打标+提交跟踪时间线)/`--closeai`/`--production`(真实 applySearchFilters 端到端)/`--twice`(幂等)/`--nowait`(生产时序)/`--watchai`)，产物 `/tmp/aidcp-layout-probe-*`。
 
 ## 3. 跨切面建议
