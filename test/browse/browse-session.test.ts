@@ -384,6 +384,31 @@ test('browse-session: note.open 目标已滚走时重报当前卡片（不开邻
   assert.ok(h.reportedCards.length >= 2, '应重报当前卡片让云端按现状重判');
 });
 
+test('browse-session: note.open 目标滚出视口 → 有界滚动找回并打开（治 /comment 开笔记超时）', async () => {
+  // 成因：AI 总结流式变长把卡往下顶，目标卡滚出视口（仍在 DOM）。getVisibleCards 只取视口内 → 首扫无目标。
+  // 期望：按 noteId 向下滚动找回视口后打开它（而非重报兜底、让命令式读笔记流程干等超时）。
+  const target: NoteCard = { position: 2, centerX: 10, centerY: 300, noteId: 'target', title: '目标卡', isVideo: false };
+  const initial: NoteCard[] = [
+    { position: 0, centerX: 10, centerY: 10, noteId: 'a', title: 'A 卡', isVideo: false },
+    { position: 1, centerX: 10, centerY: 200, noteId: 'b', title: 'B 卡', isVideo: false },
+  ];
+  const h = makeHarness(initial);
+  let scrolls = 0;
+  h.deps.scroller = {
+    ...h.deps.scroller,
+    scrollNext: async () => { scrolls += 1; },
+    // 滚动 2 次后目标卡重新进入视口内
+    getVisibleCards: async () => (scrolls >= 2 ? [...initial, target] : initial),
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0, noteId: 'target' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.ok(scrolls >= 2, '应向下滚动找回目标卡');
+  assert.deepEqual(h.openedCards, [2], '滚动找回后应打开目标卡（position 2），而非重报兜底');
+});
+
 test('browse-session: browse.scroll 命令触发滚动并上报新卡片', async () => {
   const h = makeHarness();
   let scrolled = false;
