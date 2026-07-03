@@ -374,13 +374,16 @@ test('browse-session: note.open 目标已滚走时重报当前卡片（不开邻
     { position: 1, centerX: 10, centerY: 200, noteId: 'bbb', title: 'B 卡', isVideo: false },
   ];
   const h = makeHarness(cards);
+  let scrolled = 0;
+  h.deps.scroller = { ...h.deps.scroller, scrollNext: async () => { scrolled += 1; } };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
     makeEnvelope('note.open', 'n1', 0, { index: 0, noteId: 'gone' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
-  // 目标 noteId 不在当前可见集 → 不开任何卡，且重报一次当前快照（初始 1 次 + 重报 1 次）。
+  // 目标 noteId 真不在 DOM（scrollIntoView 命不中）→ 不开任何卡、【不盲滚】、重报当前快照（初始 1 + 重报 1）。
   assert.equal(h.openedCards.length, 0, '目标已滚走时不应开邻座');
+  assert.equal(scrolled, 0, '真被回收的卡不盲滚（治自主 feed note.open 级联的滚动风暴）');
   assert.ok(h.reportedCards.length >= 2, '应重报当前卡片让云端按现状重判');
 });
 
@@ -393,20 +396,30 @@ test('browse-session: note.open 目标滚出视口 → 有界滚动找回并打�
     { position: 1, centerX: 10, centerY: 200, noteId: 'b', title: 'B 卡', isVideo: false },
   ];
   const h = makeHarness(initial);
-  let scrolls = 0;
+  const originalSend = h.deps.cdp.send;
+  let broughtIntoView = false;
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      // 目标卡仍在 DOM（仅视口外）→ scrollIntoView 命中、返回 true。
+      if (method === 'Runtime.evaluate' && String(params.expression ?? '').includes('scrollIntoView') && String(params.expression ?? '').includes('"target"')) {
+        broughtIntoView = true;
+        return { result: { value: true } } as never;
+      }
+      return originalSend(method, params);
+    },
+  };
   h.deps.scroller = {
     ...h.deps.scroller,
-    scrollNext: async () => { scrolls += 1; },
-    // 滚动 2 次后目标卡重新进入视口内
-    getVisibleCards: async () => (scrolls >= 2 ? [...initial, target] : initial),
+    // scrollIntoView 把目标拉回视口后，getVisibleCards 才含它。
+    getVisibleCards: async () => (broughtIntoView ? [...initial, target] : initial),
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
     makeEnvelope('note.open', 'n1', 0, { index: 0, noteId: 'target' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
-  assert.ok(scrolls >= 2, '应向下滚动找回目标卡');
-  assert.deepEqual(h.openedCards, [2], '滚动找回后应打开目标卡（position 2），而非重报兜底');
+  assert.ok(broughtIntoView, '应对 DOM 内的目标卡 scrollIntoView 拉回视口');
+  assert.deepEqual(h.openedCards, [2], 'scrollIntoView 找回后应打开目标卡（position 2），而非重报兜底');
 });
 
 test('browse-session: browse.scroll 命令触发滚动并上报新卡片', async () => {

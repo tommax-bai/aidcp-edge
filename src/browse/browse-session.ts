@@ -832,22 +832,33 @@ export class BrowseSession {
   }
 
   /**
-   * 按 noteId 有界向下滚动找回目标卡（虚拟列表回收 / AI 总结顶下去后重新滚回视口）。
-   * 命中返回卡片；用尽 maxScrolls 仍未命中返回 undefined。滚动用既有真实滚轮原语（拟人、触发懒加载）。
-   * 方向取【向下】：主因是 AI 总结变长把卡往下顶 + 采集时在顶部未滚动 → 目标多在当前视口下方。
+   * 按 noteId 找回目标卡——**先判它是否还在 DOM**（getVisibleCards 只取视口内卡，卡可能只是被 AI 总结
+   * 顶出视口、仍在 DOM）：在 DOM 就 `scrollIntoView` 精准拉回视口再扫（治 /comment 开笔记）；真被虚拟
+   * 列表回收出 DOM（自主 feed 换页的常态）就**立即返回 undefined、绝不盲滚**——盲滚既救不回、还会把
+   * feed 越滚越乱、每次白费数秒（真机黑匣子实证：自主浏览 note.open 级联里盲滚 5 下次次落空）。
+   * 命中返回卡片；不在 DOM / 拉回后仍无 → undefined（回退旧兜底重报）。
    */
-  private async locateCardByNoteId(noteId: string, maxScrolls: number): Promise<NoteCard | undefined> {
-    for (let i = 0; i < maxScrolls; i++) {
-      await this.deps.scroller.scrollNext();
-      await this.sleep(600); // 滚后给懒加载 / 重排一个渲染窗口，再扫
-      const cards = await this.deps.scroller.getVisibleCards();
-      const hit = cards.find((c) => c.noteId === noteId);
-      if (hit) {
-        this.logger(`[browse] note.open: 第 ${i + 1} 次滚动找回 noteId=${noteId}`);
-        return hit;
+  private async locateCardByNoteId(noteId: string): Promise<NoteCard | undefined> {
+    // 找该 noteId 的 /explore|/discovery/item 链接卡（不限视口），命中则滚其容器到视口中央、返回 true。
+    const scrollIntoViewJs = `(function(){
+      var id = ${JSON.stringify(noteId)};
+      var links = Array.prototype.slice.call(document.querySelectorAll('a[href*="/explore/"], a[href*="/discovery/item/"]'));
+      for (var i=0;i<links.length;i++){
+        var h = links[i].getAttribute('href') || '';
+        if (h.indexOf('/' + id) === -1) continue;
+        var card = (links[i].closest && (links[i].closest('section') || links[i].closest('[class*="note-item"]') || links[i].closest('li') || links[i].closest('div'))) || links[i];
+        try { card.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) { card.scrollIntoView(); }
+        return true;
       }
-    }
-    return undefined;
+      return false; // 不在 DOM（真被回收）
+    })()`;
+    const inDom = await evalRaw<boolean>(this.deps.cdp, scrollIntoViewJs).catch(() => false);
+    if (inDom !== true) return undefined; // 不在 DOM → 立即放弃、不盲滚
+    await this.sleep(500); // 等滚动落定 + 视口内渲染，再按视口口径重扫
+    const cards = await this.deps.scroller.getVisibleCards();
+    const hit = cards.find((c) => c.noteId === noteId);
+    if (hit) this.logger(`[browse] note.open: scrollIntoView 找回 noteId=${noteId}`);
+    return hit;
   }
 
   /**
@@ -865,8 +876,8 @@ export class BrowseSession {
         // 一边变长一边把下方 feed 卡往下顶，被选中的卡滚出视口（仍在 DOM）。命令式流程（/comment 读笔记）
         // 严格等 note.detail、消费不了「重报 page.cards」，找不到就会让云端干等满超时 → 评论发不出。
         // 故先【按 noteId 有界滚动找回视口】（卡还在 DOM，滚回来即命中），再开。
-        this.logger(`[browse] note.open: 目标 noteId=${noteId} 不在视口内快照，滚动找回…`);
-        card = await this.locateCardByNoteId(noteId, 5);
+        this.logger(`[browse] note.open: 目标 noteId=${noteId} 不在视口内快照，尝试 scrollIntoView 找回…`);
+        card = await this.locateCardByNoteId(noteId);
       }
       if (!card) {
         // 有界滚动仍找不到（真被虚拟列表回收出 DOM）：回到旧兜底「重报当前快照」（自主浏览据此重判；
