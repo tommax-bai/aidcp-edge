@@ -210,12 +210,12 @@ function renderLoop(status) {
   });
 }
 
-// ─── 发布等待卡（纯展示零按钮；终态收进活动流）───
+// ─── 发布卡（常驻三态：flow 进行中 / last 上次发布 / empty 从未发布；纯展示零按钮）───
 let lastPublishSig = '';
 function renderPublish(status, nowMs) {
-  const view = uiLogic.publishView(status.publish, nowMs);
-  // 终态：卡片收起 + 折一条进活动流（按签名去重，状态重推不重复记）。
-  if (view.collapsed) {
+  const view = uiLogic.publishView(status.publish, status.lastPublish, nowMs);
+  // 终态折一条进活动流（按签名去重，状态重推不重复记）。
+  if (view.collapsed && status.publish) {
     const sig = `${status.publish.state}:${status.publish.title || ''}`;
     if (sig !== lastPublishSig) {
       lastPublishSig = sig;
@@ -226,15 +226,17 @@ function renderPublish(status, nowMs) {
       }, view.collapsed.type === 'published' ? 'pub-done' : 'pub-muted');
     }
   }
-  fields.pubCard.classList.toggle('hidden', !view.visible);
-  if (!view.visible) return;
-  lastPublishSig = `${status.publish.state}:${status.publish.title || ''}`;
+  if (status.publish) lastPublishSig = `${status.publish.state}:${status.publish.title || ''}`;
+  fields.pubCard.classList.remove('hidden'); // 常驻
+  fields.pubCard.classList.toggle('empty', view.mode === 'empty');
   fields.pubHead.textContent = view.head;
   fields.pubCorner.textContent = view.corner;
   fields.pubCorner.classList.toggle('hot', Boolean(view.cornerHot));
   fields.pubTitle.textContent = view.title || '（新笔记）';
-  fields.pubMeta.textContent = view.code ? `图文笔记 · 编号 ${view.code}` : '图文笔记';
+  fields.pubTitle.classList.toggle('muted', view.mode === 'empty');
+  fields.pubMeta.textContent = view.mode === 'empty' ? '' : (view.code ? `图文笔记 · 编号 ${view.code}` : '图文笔记');
   fields.pubFoot.textContent = view.foot;
+  fields.pubLink.classList.toggle('hidden', !view.showLink); // 「打开飞书」只在进行中出现
   const steps = fields.pubSteps.querySelectorAll('.j-step');
   view.stepStates.forEach((state, i) => {
     const el = steps[i];
@@ -300,7 +302,7 @@ setInterval(() => {
   if (!currentStatus) return;
   const now = Date.now();
   renderPresence(currentStatus, now);
-  if (currentStatus.publish) renderPublish(currentStatus, now);
+  renderPublish(currentStatus, now);
   fields.stream.querySelectorAll('.ev').forEach((row) => {
     const ts = Date.parse(row.dataset.ts || '');
     if (Number.isFinite(ts)) row.querySelector('.ev-t').textContent = uiLogic.relTime(ts, now);

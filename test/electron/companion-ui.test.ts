@@ -179,15 +179,38 @@ test('发布卡已通过 → 第四节点平静色 + 无需操作', async () => 
   assert.match($(w, '#pub-foot').textContent ?? '', /无需操作/);
 });
 
-test('发布终态 → 卡片收起、折进活动流（拒绝不渲染成失败）', async () => {
+test('发布终态 → 折进活动流 + 卡片常驻转「上次发布」', async () => {
   const { w, pushStatus } = await boot({ publish: { state: 'pending', title: '秋日漫步', at: new Date().toISOString() } });
   pushStatus(makeStatus({ publish: { state: 'published', title: '秋日漫步', at: new Date().toISOString() } }));
-  assert.equal(hidden($(w, '#pub-card')), true, '发布后卡片收起');
+  assert.equal(hidden($(w, '#pub-card')), false, '卡片常驻不消失');
+  assert.equal($(w, '#pub-head').textContent, '上次发布');
+  assert.match($(w, '#pub-title').textContent ?? '', /秋日漫步/);
+  assert.equal(hidden($(w, '#pub-link')), true, '历史态不放「打开飞书」');
   assert.match($(w, '#activity-stream').textContent ?? '', /已发布/);
   // 再推一次同状态：按签名去重，不重复记
   pushStatus(makeStatus({ publish: { state: 'published', title: '秋日漫步', at: new Date().toISOString() } }));
   const doneRows = Array.from(w.document.querySelectorAll('#activity-stream .ev.pub-done'));
   assert.equal(doneRows.length, 1);
+});
+
+test('发布卡常驻：从未发布 → 空态幽灵旅程（同设计语言、零按钮）', async () => {
+  const { w } = await boot(); // publish: null, lastPublish 无
+  const card = $(w, '#pub-card');
+  assert.equal(hidden(card), false, '空态也常驻');
+  assert.ok(card.classList.contains('empty'));
+  assert.match($(w, '#pub-title').textContent ?? '', /还没有发布过/);
+  assert.equal(card.querySelectorAll('button').length, 0, '空态同样零按钮');
+  assert.equal(hidden($(w, '#pub-link')), true);
+  const dots = Array.from(card.querySelectorAll('.j-step'));
+  assert.ok(dots.every((el) => (el as HTMLElement).classList.contains('todo')), '幽灵旅程全 todo');
+});
+
+test('发布卡常驻：带本地历史 → 直接呈现上次发布', async () => {
+  const at = new Date(Date.now() - 2 * 3_600_000).toISOString();
+  const { w } = await boot({ lastPublish: { title: '上周的咖啡馆合集', at } });
+  assert.equal($(w, '#pub-head').textContent, '上次发布');
+  assert.match($(w, '#pub-title').textContent ?? '', /咖啡馆合集/);
+  assert.match($(w, '#pub-corner').textContent ?? '', /小时前/);
 });
 
 // ── 形状兼容：旧 status（无新增字段）不炸 ──

@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 interface Health { code: string; label: string; detail: string }
 interface PresenceV { text: string; animate: boolean; fresh: string }
 interface PublishV {
-  visible: boolean;
+  mode: string;
   collapsed: { type: string; sentence: string } | null;
   head?: string;
   corner?: string;
@@ -24,7 +24,7 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   detailRows: (s: Record<string, unknown>) => Array<{ key: string; label: string; value: string }>;
   presenceView: (s: Record<string, unknown>, now: number) => PresenceV;
   loopIndex: (stage: string) => number;
-  publishView: (p: Record<string, unknown> | null, now: number) => PublishV;
+  publishView: (p: Record<string, unknown> | null, last: Record<string, unknown> | null, now: number) => PublishV;
   PRESENCE_FRESH_MS: number;
 };
 
@@ -107,8 +107,8 @@ test('在场感：暂停 / 停止 / 需登录 → 静态诚实文案', () => {
 // ── 发布卡状态机（只读投影）──
 test('发布卡：候审 → 第三节点琥珀、脚注指向飞书、绝无「已再提醒」', () => {
   const now = Date.now();
-  const v = uiLogic.publishView({ state: 'pending', title: '秋日漫步', at: new Date(now - 3 * 60_000).toISOString() }, now);
-  assert.equal(v.visible, true);
+  const v = uiLogic.publishView({ state: 'pending', title: '秋日漫步', at: new Date(now - 3 * 60_000).toISOString() }, null, now);
+  assert.equal(v.mode, 'flow');
   assert.deepEqual(v.stepStates, ['done', 'done', 'cur', 'todo']);
   assert.match(v.corner ?? '', /已等 3 分钟/);
   assert.equal(v.cornerHot, false);
@@ -118,37 +118,56 @@ test('发布卡：候审 → 第三节点琥珀、脚注指向飞书、绝无「
 
 test('发布卡：等超 30 分钟 → 时长琥珀化，仍不谎称已提醒（宁缺毋假）', () => {
   const now = Date.now();
-  const v = uiLogic.publishView({ state: 'pending', title: 't', at: new Date(now - 34 * 60_000).toISOString() }, now);
+  const v = uiLogic.publishView({ state: 'pending', title: 't', at: new Date(now - 34 * 60_000).toISOString() }, null, now);
   assert.equal(v.cornerHot, true);
   assert.ok(!(v.foot ?? '').includes('再次提醒'));
 });
 
 test('发布卡：收到明确再提醒事件 → 才展示「已在飞书再次提醒」', () => {
   const now = Date.now();
-  const v = uiLogic.publishView({ state: 'reminded', title: 't', at: new Date(now - 34 * 60_000).toISOString() }, now);
+  const v = uiLogic.publishView({ state: 'reminded', title: 't', at: new Date(now - 34 * 60_000).toISOString() }, null, now);
   assert.match(v.foot ?? '', /再次提醒/);
 });
 
 test('发布卡：已通过 → 第四节点平静色 + 明示无需操作', () => {
-  const v = uiLogic.publishView({ state: 'approved', title: 't', at: new Date().toISOString() }, Date.now());
+  const v = uiLogic.publishView({ state: 'approved', title: 't', at: new Date().toISOString() }, null, Date.now());
   assert.deepEqual(v.stepStates, ['done', 'done', 'done', 'cur']);
   assert.equal(v.curCalm, true);
   assert.match(v.foot ?? '', /无需操作/);
 });
 
-test('发布卡：已发布 / 暂不发布 → 卡片收起、折进活动流', () => {
+test('发布卡：已发布 → 折进活动流 + 卡片转「上次发布」（常驻）', () => {
   const now = Date.now();
-  const pub = uiLogic.publishView({ state: 'published', title: '秋日漫步', at: new Date(now).toISOString() }, now);
-  assert.equal(pub.visible, false);
+  const pub = uiLogic.publishView({ state: 'published', title: '秋日漫步', at: new Date(now - 2 * 3_600_000).toISOString() }, null, now);
+  assert.equal(pub.mode, 'last');
   assert.match(pub.collapsed?.sentence ?? '', /已发布/);
-  const rej = uiLogic.publishView({ state: 'rejected', at: new Date(now).toISOString() }, now);
-  assert.equal(rej.visible, false);
-  assert.match(rej.collapsed?.sentence ?? '', /暂不发布/);
-  assert.ok(!(rej.collapsed?.sentence ?? '').includes('失败'), '拒绝不渲染成失败');
+  assert.equal(pub.head, '上次发布');
+  assert.match(pub.corner ?? '', /小时前/);
+  assert.deepEqual(pub.stepStates, ['done', 'done', 'done', 'done']);
+  assert.equal(pub.showLink, false, '历史态不放「打开飞书」');
 });
 
-test('发布卡：无发布状态 → 不可见', () => {
-  assert.equal(uiLogic.publishView(null, Date.now()).visible, false);
+test('发布卡：拒绝 → 折进活动流（不渲染成失败）+ 回落上次发布/空态', () => {
+  const now = Date.now();
+  const rej = uiLogic.publishView({ state: 'rejected', at: new Date(now).toISOString() }, { title: '旧文', at: new Date(now - 86_400_000).toISOString() }, now);
+  assert.match(rej.collapsed?.sentence ?? '', /暂不发布/);
+  assert.ok(!(rej.collapsed?.sentence ?? '').includes('失败'), '拒绝不渲染成失败');
+  assert.equal(rej.mode, 'last');
+  assert.equal(rej.title, '旧文');
+  const rejEmpty = uiLogic.publishView({ state: 'rejected', at: new Date(now).toISOString() }, null, now);
+  assert.equal(rejEmpty.mode, 'empty');
+});
+
+test('发布卡常驻：无进行中有历史 → last；两者皆无 → empty 幽灵旅程', () => {
+  const now = Date.now();
+  const last = uiLogic.publishView(null, { title: '秋日漫步', at: new Date(now - 3 * 86_400_000).toISOString() }, now);
+  assert.equal(last.mode, 'last');
+  assert.match(last.corner ?? '', /天前/);
+  const empty = uiLogic.publishView(null, null, now);
+  assert.equal(empty.mode, 'empty');
+  assert.deepEqual(empty.stepStates, ['todo', 'todo', 'todo', 'todo']);
+  assert.match(empty.title ?? '', /还没有发布过/);
+  assert.equal(empty.showLink, false);
 });
 
 test('相对时间走字', () => {

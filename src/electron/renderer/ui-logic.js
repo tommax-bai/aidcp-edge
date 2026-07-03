@@ -13,7 +13,8 @@
     if (diff < 5_000) return '刚刚';
     if (diff < 60_000) return `${Math.floor(diff / 1000)} 秒前`;
     if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-    return `${Math.floor(diff / 3_600_000)} 小时前`;
+    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+    return `${Math.floor(diff / 86_400_000)} 天前`;
   }
 
   // ── 健康合成：五路技术状态 → 一句结论 + 色调。attention 恒优先。──
@@ -102,32 +103,35 @@
     return i === -1 ? -1 : i;
   }
 
-  // ── 发布卡状态机（只读投影）──
-  // 状态：pending →(30min 时长琥珀化)→ [reminded 仅在收到明确事件时] → approved → published | rejected | failed
+  // ── 发布卡（常驻，三个内容态，只读投影）──
+  // flow：进行中（pending →(30min 琥珀化)→ [reminded 仅收到明确事件] → approved）
+  // last：上次发布（终态 published / 本地或云端带回的最近发布记录），四节点全勾
+  // empty：从未发布，幽灵旅程 + 空态文案
+  // 终态另产 collapsed（折进活动流一条记录，渲染层按签名去重）。
   const PUBLISH_WAIT_HOT_MS = 30 * 60_000;
   const PUBLISH_STEPS = ['写好内容', '发到飞书', '等你确认', '择时发布'];
 
-  function publishView(publish, nowMs) {
-    if (!publish || !publish.state) return { visible: false, collapsed: null };
-    const at = publish.at ? Date.parse(publish.at) : nowMs;
+  function publishView(publish, lastPublish, nowMs) {
+    const at = publish && publish.at ? Date.parse(publish.at) : nowMs;
     const waitedMs = Math.max(0, nowMs - (Number.isFinite(at) ? at : nowMs));
     const waitedMin = Math.floor(waitedMs / 60_000);
-    const title = publish.title || '';
-    const state = publish.state;
+    const title = (publish && publish.title) || '';
+    const state = publish ? publish.state : null;
 
     const base = {
-      visible: true,
-      collapsed: null,
       steps: PUBLISH_STEPS,
       title,
-      code: publish.code || '',
-      linkable: true,
+      code: (publish && publish.code) || '',
+      collapsed: null,
+      showLink: false,
     };
 
     if (state === 'pending' || state === 'reminded') {
       const hot = waitedMs >= PUBLISH_WAIT_HOT_MS;
       return {
         ...base,
+        mode: 'flow',
+        showLink: true,
         head: 'AI 写好了一条新笔记',
         corner: waitedMin < 1 ? '刚刚发出' : `已等 ${waitedMin} 分钟`,
         cornerHot: hot,
@@ -142,6 +146,8 @@
     if (state === 'approved') {
       return {
         ...base,
+        mode: 'flow',
+        showLink: true,
         head: '你已在飞书通过',
         corner: '将择时发布',
         cornerHot: false,
@@ -150,17 +156,46 @@
         foot: '无需操作 · 系统会挑一个自然时段发出，发完这里会记一笔',
       };
     }
-    // 终态：卡片收起，折进活动流一条记录。
+
+    // 终态：折一条进活动流；卡片本体转入「上次发布 / 空态」。
+    let collapsed = null;
+    let last = lastPublish || null;
     if (state === 'published') {
-      return { visible: false, collapsed: { type: 'published', sentence: title ? `笔记「${title}」已发布` : '一条笔记已发布' } };
+      collapsed = { type: 'published', sentence: title ? `笔记「${title}」已发布` : '一条笔记已发布' };
+      last = { title, at: publish.at }; // 刚发布的就是最近一次（主进程同时落盘持久化）
+    } else if (state === 'rejected') {
+      collapsed = { type: 'rejected', sentence: '你在飞书选择了暂不发布 · 内容已留档' };
+    } else if (state === 'failed') {
+      collapsed = { type: 'failed', sentence: title ? `笔记「${title}」发布未成功，已如实记录` : '发布未成功，已如实记录' };
     }
-    if (state === 'rejected') {
-      return { visible: false, collapsed: { type: 'rejected', sentence: '你在飞书选择了暂不发布 · 内容已留档' } };
+
+    if (last && last.title) {
+      const lastAt = Date.parse(last.at || '');
+      return {
+        ...base,
+        mode: 'last',
+        collapsed,
+        head: '上次发布',
+        corner: Number.isFinite(lastAt) ? relTime(lastAt, nowMs) : '',
+        cornerHot: false,
+        title: last.title,
+        stepStates: ['done', 'done', 'done', 'done'],
+        curCalm: false,
+        foot: '已发布 · 新笔记写好后会在这里等你确认',
+      };
     }
-    if (state === 'failed') {
-      return { visible: false, collapsed: { type: 'failed', sentence: title ? `笔记「${title}」发布未成功，已如实记录` : '发布未成功，已如实记录' } };
-    }
-    return { visible: false, collapsed: null };
+    return {
+      ...base,
+      mode: 'empty',
+      collapsed,
+      head: '发布',
+      corner: '',
+      cornerHot: false,
+      title: '还没有发布过内容',
+      stepStates: ['todo', 'todo', 'todo', 'todo'],
+      curCalm: false,
+      foot: 'AI 写好笔记后会先发到飞书等你确认，通过后才会发布。',
+    };
   }
 
   return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, loopIndex, LOOP_STAGES, publishView, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS };

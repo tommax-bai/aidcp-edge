@@ -146,7 +146,34 @@ const status = {
   presence: { text: '等待启动…', at: new Date().toISOString() },
   // publish：发布卡只读投影（pending/reminded/approved/published/rejected/failed）。
   publish: null,
+  // lastPublish：最近一次成功发布 {title, at}（本地持久化，重启不丢；云端快照接入后以云端为准）。
+  lastPublish: null,
 };
+
+// 轻量 UI 状态持久化（与用户设置分文件；只存展示性历史，如最近发布）。
+function uiStateFile() {
+  return path.join(app.getPath('userData'), 'ui-state.json');
+}
+
+function loadUiState() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(uiStateFile(), 'utf8'));
+    if (parsed && parsed.lastPublish && typeof parsed.lastPublish.title === 'string') {
+      status.lastPublish = { title: parsed.lastPublish.title, at: parsed.lastPublish.at || null };
+    }
+  } catch {
+    /* 无历史/坏文件按空处理 */
+  }
+}
+
+function saveUiState() {
+  try {
+    fs.mkdirSync(app.getPath('userData'), { recursive: true });
+    fs.writeFileSync(uiStateFile(), JSON.stringify({ lastPublish: status.lastPublish }, null, 2), 'utf8');
+  } catch (error) {
+    console.error('[aidcp-edge] ui-state 写入失败:', error?.message); // 展示性历史，写失败不阻断
+  }
+}
 
 // 核心日志 → UI 事件（结构化优先、中文行映射兜底；计数迁入该模块并修正为仅 ✓ 成功行计数）。
 const uiEvents = createUiEventStream();
@@ -175,6 +202,7 @@ function updateStatus(patch) {
   const full = patch.stats ? { ...patch, stats: mergeStats(status.stats, patch.stats) } : patch;
   Object.assign(status, full, { updatedAt: new Date().toISOString() });
   if (patch.risk) applyOverlayTone(patch.risk);
+  if (full.lastPublish) saveUiState();
   BrowserWindow.getAllWindows().forEach((window) => {
     window.webContents.send('status:update', status);
   });
@@ -458,6 +486,10 @@ function handleEdgeLogLine(message, isError = false) {
     if (evt.presence) next.presence = { text: evt.presence, at: new Date().toISOString() };
     if (evt.publish && evt.publish.state) {
       next.publish = { ...evt.publish, at: new Date().toISOString() };
+      // 发布成功即更新「最近一次发布」并落盘（发布卡常驻的历史态，重启不丢）。
+      if (evt.publish.state === 'published' && evt.publish.title) {
+        next.lastPublish = { title: evt.publish.title, at: next.publish.at };
+      }
     }
     if (evt.statsDelta) {
       const d = evt.statsDelta;
@@ -587,6 +619,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     loadSettings();
+    loadUiState();
     updateStatus({ provider: settings.provider });
     createWindow();
     createTray();
