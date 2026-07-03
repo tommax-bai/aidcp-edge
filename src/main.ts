@@ -61,6 +61,7 @@ import {
   CdpNotificationMonitor,
   WatcherSupervisor,
   IdentityWatcher,
+  CdpLoginModalWatcher,
   evalRaw,
   extractNoteContent,
   createOverlayReportGate,
@@ -359,6 +360,8 @@ async function main(): Promise<void> {
 
   // 身份失效 → 退回无身份态、重新确立、按新 id 重连（account-identity-from-login 1.3/1.4）。
   // 复用同一 session.cdp（浏览器不重启、端口/目录不重分 = 节点初始化不动），只重跑「身份确立」。
+  // 重新确立前先回到能读出身份的消费端首页（触发失效时可能停在创作发布页/弹层态、无「我」锚点）。
+  const reestablishHomeUrl = process.env.AIDCP_EXPLORE_URL ?? 'https://www.xiaohongshu.com/explore';
   let reestablishing = false;
   const reestablishIdentity = async (): Promise<void> => {
     if (reestablishing) return;
@@ -371,7 +374,16 @@ async function main(): Promise<void> {
       );
       watcherSupervisor?.stopAll();
       browse?.stop();
+      // 断连前先把在途发布诚实判失败（须在关 WS 之前，失败回执才发得出去），云端不被无限期挂起等结果。
+      failInFlightPublishesHonestly(`identity_flip:${reasonStr}`);
       client.close();
+      // 先回到消费端首页再判身份：触发失效时可能停在创作发布页/弹层态（无「我」锚点），直接原地读会无谓停摆。
+      // readSelfIdentity 的 hydrate 有界重试会等锚点渲染出来；导航失败则退回原地读（与旧行为同、不更坏）。
+      try {
+        await session.cdp.send('Page.navigate', { url: reestablishHomeUrl });
+      } catch {
+        /* best-effort */
+      }
       const idRes = await readSelfIdentity(session.cdp, { logger: (m) => console.log(m) });
       const decision = decideHandshakeIdentity(idRes, overrideAccountId);
       if (decision.kind === 'halt') {
@@ -488,10 +500,14 @@ async function main(): Promise<void> {
     });
     // ③ 身份持续校验（account-identity-from-login 1.4）：周期就地重读自己的稳定 id，
     //    连续判失效（登出/过期/换号）→ 退回无身份态、重新确立、按新 id 重连。
+    // 正向登出探针：消费页读不出本人锚点时，用登录浮层是否可见区分「真登出」与「无侧栏页/弹层态」。
+    // 复用已校准的登录弹窗检测（排除笔记详情容器、不锁混淆 class）。
+    const loginWall = new CdpLoginModalWatcher(session.cdp);
     identityWatcher = new IdentityWatcher(session.cdp, accountId!, {
       intervalMs: Number(process.env.AIDCP_IDENTITY_CHECK_MS ?? 30_000),
       threshold: Number(process.env.AIDCP_IDENTITY_FAIL_THRESHOLD ?? 2),
       logger: (m) => console.log(m),
+      confirmLoggedOut: () => loginWall.isOpen(),
     });
     watcherSupervisor.register(identityWatcher, (from, to) => {
       if (from === 'healthy' && to === 'invalid') void reestablishIdentity();

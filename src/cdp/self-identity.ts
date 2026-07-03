@@ -119,6 +119,36 @@ export function deriveInPlaceSelfId(signals: SelfIdentitySignals): string {
   return '';
 }
 
+/**
+ * 身份校验的「页面上下文」——就地读身份前先判浏览器此刻停在哪类页面，避免不看页面就一律按消费端锚点判定。
+ *   - `consumer`      消费端 web（`www.xiaohongshu.com` 等）：有「我」锚点、可读稳定 id（判 lost/changed）。
+ *   - `creator-app`   创作平台真实页（`creator.xiaohongshu.com` 非 `/login`）：该页登录门禁，能停在这=已登录。
+ *   - `creator-login` 创作平台登录页（被重定向到 `creator.xiaohongshu.com/login`）：真登出信号。
+ *   - `unknown`       about:blank / 非小红书 / 导航中途等无法判定：本轮跳过、不误杀也不假愈。
+ * 创作子域自带登录信号（发布页未登录会跳 `/login`），故它不是身份判定盲区。
+ */
+export type PageContext = 'consumer' | 'creator-app' | 'creator-login' | 'unknown';
+
+/** 纯判定：从当前页 URL 推导身份校验上下文。纯函数、可单测。 */
+export function classifyPageContext(href: string | null | undefined): PageContext {
+  if (!href) return 'unknown';
+  let host = '';
+  let path = '';
+  try {
+    const u = new URL(href);
+    host = u.hostname.toLowerCase();
+    path = u.pathname.toLowerCase();
+  } catch {
+    return 'unknown';
+  }
+  if (host === 'creator.xiaohongshu.com') {
+    return path.includes('/login') ? 'creator-login' : 'creator-app';
+  }
+  // 消费端 web（创作子域已在上面摘出）：www / m / 裸域等一律归消费端，交锚点读取判定。
+  if (host === 'xiaohongshu.com' || host.endsWith('.xiaohongshu.com')) return 'consumer';
+  return 'unknown';
+}
+
 // ---- 页面内 JS（注入执行，只读 + 合成点击/导航，绝不写入任何账号状态）----
 
 /** 就地扫描：头像祖先锚点 href + 导航区 profile 锚点 + 昵称/小红书号（best-effort）。 */
@@ -306,4 +336,10 @@ export async function readSelfIdentity(
   log(`[self-identity] 跳转读出稳定 id=${navId}（source=navigate）`);
   const display = await readDisplay(cdp);
   return { ok: true, identity: { accountId: navId, displayName: display.nickname, redId: display.redId, source: 'navigate' } };
+}
+
+/** 就地读当前页 URL 并分类为身份校验上下文（读失败按 `unknown`——本轮不判、不误杀）。 */
+export async function readPageContext(cdp: BrowseCdp): Promise<PageContext> {
+  const href = await evalRaw<string>(cdp, CURRENT_URL_JS).catch(() => '');
+  return classifyPageContext(href);
 }

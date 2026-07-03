@@ -14,7 +14,7 @@
  */
 import type { SupervisableWatcher } from './watcher-supervisor.js';
 import type { BrowseCdp } from './cdp-util.js';
-import { readSelfIdentity } from '../cdp/index.js';
+import { readSelfIdentity, readPageContext, type PageContext } from '../cdp/index.js';
 
 export type IdentityHealth = 'healthy' | 'invalid';
 export type IdentityInvalidReason = { kind: 'lost' } | { kind: 'changed'; newId: string };
@@ -28,6 +28,14 @@ export interface IdentityWatcherOptions {
   /** 定时器注入（测试用）。 */
   setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
   clearTimer?: (handle: ReturnType<typeof setInterval>) => void;
+  /** 读当前页身份判定上下文（默认按 cdp 读 location.href 分域）。测试可注入。 */
+  pageContext?: () => Promise<PageContext>;
+  /**
+   * 正向登出探针：消费页读不出本人锚点时，用它区分「真登出」与「停在无侧栏页/弹层态」——
+   * 登录浮层可见=真登出（判 lost），不可见=无法确认（本轮跳过）。
+   * 缺省不注入时按登出计（保守、维持旧行为，不因引入分域判据而漏判真登出）。
+   */
+  confirmLoggedOut?: () => Promise<boolean>;
 }
 
 export class IdentityWatcher implements SupervisableWatcher<IdentityHealth> {
@@ -44,6 +52,8 @@ export class IdentityWatcher implements SupervisableWatcher<IdentityHealth> {
   private readonly log: (msg: string) => void;
   private readonly setTimer: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
   private readonly clearTimer: (handle: ReturnType<typeof setInterval>) => void;
+  private readonly readContext: () => Promise<PageContext>;
+  private readonly confirmLoggedOut: () => Promise<boolean>;
 
   constructor(
     private readonly cdp: BrowseCdp,
@@ -55,6 +65,8 @@ export class IdentityWatcher implements SupervisableWatcher<IdentityHealth> {
     this.log = opts.logger ?? (() => undefined);
     this.setTimer = opts.setTimer ?? ((fn, ms) => setInterval(fn, ms));
     this.clearTimer = opts.clearTimer ?? ((h) => clearInterval(h));
+    this.readContext = opts.pageContext ?? (() => readPageContext(this.cdp));
+    this.confirmLoggedOut = opts.confirmLoggedOut ?? (async () => true);
   }
 
   /** 重设基线 id（身份重新确立后调用）+ 复位为健康态，重新接线监测。 */
@@ -83,20 +95,45 @@ export class IdentityWatcher implements SupervisableWatcher<IdentityHealth> {
     if (this.checking || this.state === 'invalid') return;
     this.checking = true;
     try {
+      // 先按页面上下文分域，绝不不看页面就一律用消费端锚点判定（否则发布把标签页带到创作子域时会误判登出）。
+      const ctx = await this.readContext().catch((): PageContext => 'unknown');
+      if (ctx === 'creator-app') {
+        // 创作平台真实页（登录门禁）：能停在这=已登录 → 健康、清零。
+        this.consecutive = 0;
+        return;
+      }
+      if (ctx === 'unknown') {
+        // about:blank / 非小红书 / 导航中途：本轮跳过——既不计失效也不判健康（不误杀、不假愈）。
+        this.log('[identity-watcher] 当前页无法判定身份（非消费/创作已知页）→ 无法确认，本轮跳过');
+        return;
+      }
       let reason: IdentityInvalidReason | null = null;
-      try {
-        const res = await readSelfIdentity(this.cdp, { allowNavigate: false });
-        if (res.ok) {
-          if (res.identity.accountId === this.establishedId) {
-            this.consecutive = 0;
-            return; // 健康
+      if (ctx === 'creator-login') {
+        // 创作子域被重定向到 /login = 真登出。
+        reason = { kind: 'lost' };
+      } else {
+        // 消费端页面：就地读稳定 id。
+        try {
+          const res = await readSelfIdentity(this.cdp, { allowNavigate: false });
+          if (res.ok) {
+            if (res.identity.accountId === this.establishedId) {
+              this.consecutive = 0;
+              return; // 健康
+            }
+            reason = { kind: 'changed', newId: res.identity.accountId };
+          } else {
+            // 消费页读不出本人锚点：靠正向登出信号区分「真登出」与「无侧栏页/弹层态」。
+            const loggedOut = await this.confirmLoggedOut().catch(() => true);
+            if (loggedOut) {
+              reason = { kind: 'lost' };
+            } else {
+              this.log('[identity-watcher] 消费页无本人锚点但无登录浮层 → 无法确认（疑似无侧栏页/弹层态），本轮跳过');
+              return;
+            }
           }
-          reason = { kind: 'changed', newId: res.identity.accountId };
-        } else {
-          reason = { kind: 'lost' };
+        } catch {
+          reason = { kind: 'lost' }; // 读取异常按登出计一次（防抖阈值兜住瞬时）
         }
-      } catch {
-        reason = { kind: 'lost' }; // 读取异常按登出计一次（防抖阈值兜住瞬时）
       }
       this.consecutive += 1;
       this.log(

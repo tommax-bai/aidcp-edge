@@ -4,6 +4,7 @@ import {
   extractIdFromHref,
   isValidStableId,
   deriveInPlaceSelfId,
+  classifyPageContext,
   readSelfIdentity,
   decideHandshakeIdentity,
   type SelfIdentitySignals,
@@ -40,6 +41,24 @@ test('deriveInPlaceSelfId: 首选头像祖先锚点，兜底导航区锚点', ()
   assert.equal(deriveInPlaceSelfId({ ...base, avatarAnchorHref: '/user/profile/abc', navProfileHrefs: [`/user/profile/${REAL_ID}`] }), REAL_ID);
   // 都没有 → ''（交调用方走兜底/诚实失败）
   assert.equal(deriveInPlaceSelfId(base), '');
+});
+
+test('classifyPageContext: 按子域/路径分身份判定上下文', () => {
+  // 消费端 web（有「我」锚点、可读稳定 id）
+  assert.equal(classifyPageContext('https://www.xiaohongshu.com/explore'), 'consumer');
+  assert.equal(classifyPageContext(`https://www.xiaohongshu.com/user/profile/${REAL_ID}`), 'consumer');
+  // AI 搜索结果页仍属消费端子域（无侧栏的判定交 watcher 的登录浮层探针，不在 URL 分类里区分）
+  assert.equal(classifyPageContext('https://www.xiaohongshu.com/search_result_ai?keyword=x'), 'consumer');
+  assert.equal(classifyPageContext('https://xiaohongshu.com/explore'), 'consumer');
+  // 创作平台真实页（登录门禁）→ creator-app；被弹登录页 → creator-login
+  assert.equal(classifyPageContext('https://creator.xiaohongshu.com/publish/publish?source=official'), 'creator-app');
+  assert.equal(classifyPageContext('https://creator.xiaohongshu.com/login'), 'creator-login');
+  // 无法判定：空/畸形/非小红书/about:blank
+  assert.equal(classifyPageContext(''), 'unknown');
+  assert.equal(classifyPageContext(null), 'unknown');
+  assert.equal(classifyPageContext('not a url'), 'unknown');
+  assert.equal(classifyPageContext('about:blank'), 'unknown');
+  assert.equal(classifyPageContext('https://www.google.com/'), 'unknown');
 });
 
 // ---- readSelfIdentity（注入假 CDP，按表达式分流应答）----
