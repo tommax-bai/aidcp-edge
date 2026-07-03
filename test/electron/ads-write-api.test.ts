@@ -12,6 +12,7 @@ const mod = require('../../src/electron/ads-write-api.cjs') as {
       p: { groupId: string; name?: string; fingerprintConfig: unknown; proxyConfig?: unknown },
       opts?: Record<string, unknown>,
     ) => Promise<{ ok: boolean; userId?: string; error?: string }>;
+    deleteProfile: (userId: string, opts?: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
     WRITE_ALLOWLIST: string[];
   };
   redactSensitive: (v: unknown) => unknown;
@@ -39,7 +40,7 @@ function stubFetch(
 const noThrottle = { nowImpl: () => 0, sleepImpl: async () => undefined };
 
 // ── 红线回归：allowlist 结构性拦截生命周期 / 删除端点（task 2.3，M7 + C3） ──
-for (const forbidden of ['browser/start', 'browser/stop', 'browser/active', 'user/delete', '/api/v1/browser/start', 'user/update']) {
+for (const forbidden of ['browser/start', 'browser/stop', 'browser/active', '/api/v1/browser/start', 'user/update']) {
   test(`allowlist: 禁止端点「${forbidden}」抛错且绝不发出请求`, async () => {
     const calls: Array<{ url: string }> = [];
     const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0 }), calls) });
@@ -47,6 +48,17 @@ for (const forbidden of ['browser/start', 'browser/stop', 'browser/active', 'use
     assert.equal(calls.length, 0, '禁止端点绝不触发任何 fetch');
   });
 }
+
+test('deleteProfile: user/delete 放行、body 带 user_ids（C3 放宽为 UI 确认删）', async () => {
+  const calls: Array<{ url: string; init?: { body?: string } }> = [];
+  const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0 }), calls) });
+  const r = await api.deleteProfile('u1');
+  assert.equal(r.ok, true);
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.includes('/api/v1/user/delete'), calls[0].url);
+  assert.match(String(calls[0].init?.body), /user_ids/);
+  assert.match(String(calls[0].init?.body), /u1/);
+});
 
 test('allowlist: user/create 与 group/create 放行、打 /api/v1/ 前缀', async () => {
   const calls: Array<{ url: string }> = [];

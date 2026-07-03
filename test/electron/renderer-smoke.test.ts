@@ -52,6 +52,7 @@ interface Stub {
   adsOpenCreate: () => { launched: boolean } | Promise<{ launched: boolean }>;
   adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
   adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; template?: string; error?: string }>;
+  adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
 }
 
 function makeStub(overrides: Partial<Stub> = {}): Stub {
@@ -72,6 +73,7 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     adsOpenCreate: () => ({ launched: true }),
     adsTemplates: async () => [{ key: 'win11-intel', label: 'Windows · 8核 8G' }],
     adsCreateEnv: async () => ({ ok: true, template: 'win11-intel' }),
+    adsDeleteEnv: async () => ({ ok: true }),
     ...overrides,
   };
 }
@@ -92,7 +94,7 @@ const $$ = (w: DOMWindow, sel: string) => Array.from(w.document.querySelectorAll
 const hidden = (el: HTMLElement) => el.classList.contains('hidden');
 
 test('中文化：新增控件文案齐全', () => {
-  for (const s of ['浏览器环境', 'AdsPower 状态', '检测', '刷新', '手动填写', '高级设置', '打开 AdsPower 新建环境', '下载 AdsPower']) {
+  for (const s of ['浏览器环境', 'AdsPower 状态', '检测', '刷新', '手动填写', '高级设置', '创建环境', '下载 AdsPower']) {
     assert.ok(html.includes(s), `index.html 应含「${s}」`);
   }
 });
@@ -232,18 +234,6 @@ test('悬浮 fab 三态：停止→启动 / 运行→暂停 / 暂停→恢复', 
   assert.equal($(paused, '#session-fab').textContent, '恢复');
 });
 
-test('手动新建（降级链）：拉起客户端成功 vs 退回官网，文案分档', async () => {
-  const ok = await boot(makeStub({ adsOpenCreate: () => ({ launched: true }) }));
-  $(ok, '#ads-create-manual').dispatchEvent(new ok.Event('click'));
-  await tick();
-  assert.match($(ok, '#ads-env-msg').textContent ?? '', /已打开 AdsPower 客户端/);
-
-  const fallback = await boot(makeStub({ adsOpenCreate: () => ({ launched: false }) }));
-  $(fallback, '#ads-create-manual').dispatchEvent(new fallback.Event('click'));
-  await tick();
-  assert.match($(fallback, '#ads-env-msg').textContent ?? '', /已打开 AdsPower 官网/);
-});
-
 test('程序化建号：填充模板下拉、点「创建环境」→ 传选中模板、成功提示 + 刷新', async () => {
   let sentTemplate = '';
   const w = await boot(makeStub({
@@ -263,7 +253,7 @@ test('程序化建号：填充模板下拉、点「创建环境」→ 传选中�
   assert.match($(w, '#ads-create-msg').textContent ?? '', /已创建环境/);
 });
 
-test('程序化建号失败：诚实提示 + 引导手动新建', async () => {
+test('程序化建号失败：诚实提示', async () => {
   const w = await boot(makeStub({ adsCreateEnv: async () => ({ ok: false, error: 'code=-1 quota' }) }));
   for (let i = 0; i < 3; i++) await tick();
   $(w, '#ads-create').dispatchEvent(new w.Event('click'));
@@ -271,6 +261,23 @@ test('程序化建号失败：诚实提示 + 引导手动新建', async () => {
   const msg = $(w, '#ads-create-msg').textContent ?? '';
   assert.match(msg, /创建失败/);
   assert.match(msg, /quota/);
+});
+
+test('删除环境：点两次确认（第一次仅 armed、第二次才删）', async () => {
+  let deletedId = '';
+  const w = await boot(makeStub({
+    adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'u1', serialNumber: '1', name: '甲', groupName: 'g', proxy: '无代理配置' }] }),
+    adsDeleteEnv: async (opts) => { deletedId = (opts as { userId?: string }).userId ?? ''; return { ok: true }; },
+  }));
+  const del = $(w, '.ads-env-del') as unknown as HTMLButtonElement;
+  assert.ok(del, '每行应有删除按钮');
+  del.dispatchEvent(new w.Event('click')); // 第一次：仅 armed
+  await tick();
+  assert.equal(deletedId, '', '第一次点击不应删除');
+  assert.match(del.textContent ?? '', /确认删除/);
+  del.dispatchEvent(new w.Event('click')); // 第二次：真删
+  for (let i = 0; i < 3; i++) await tick();
+  assert.equal(deletedId, 'u1', '第二次点击才删除该环境');
 });
 
 test('防限速：刷新在途禁用按钮，完成后恢复', async () => {

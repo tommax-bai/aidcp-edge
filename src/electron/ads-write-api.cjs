@@ -1,10 +1,11 @@
 // AdsPower 本地 API 的**主进程侧写客户端**（仅程序化建号/建组：`user/create` + `group/create`）。
 //
 // change adspower-auto-create-env（task 2）。与只读 `ads-local-api.cjs` **刻意分离**：
-//  - 红线（M7，结构性守）：本客户端用**硬编码 allowlist** 只放行 `user/create` / `group/create`。
-//    任何 `browser/start|stop|active`（浏览器生命周期，核心子进程单写）与 `user/delete`（C3，禁程序化删已有号）
-//    的路径在 `post()` 内**直接抛错**、绝不发出——把「主进程绝不碰生命周期 / 绝不程序化删号」从注释自觉
-//    升为**代码上不可能**（回归断言覆盖，见 test/electron/ads-write-api.test.ts）。
+//  - 红线（M7，结构性守）：本客户端用**硬编码 allowlist** 只放行 `user/create` / `group/create` / `user/delete`。
+//    任何 `browser/start|stop|active`（浏览器生命周期，核心子进程单写）路径在 `post()` 内**直接抛错**、
+//    绝不发出——把「主进程绝不碰浏览器生命周期」从注释自觉升为**代码上不可能**（回归断言覆盖）。
+//    注（C3 放宽）：`user/delete` 由原「禁一切程序化删」放宽为**允许、但仅由运维在界面上逐个显式确认触发**
+//    （非自动 / 非批量 / 非 ledger 驱动，删前明确警示不可恢复）——ads-create-flow 内无删除，删除只走 UI 确认路径。
 //  - 节流：复用与只读侧同规格的 ≥1.1s **串行节流单链**（独立实例；跨进程无法共享，故各自一条）。
 //  - 凭据（H3/D9）：POST body **绝不整体 stringify 进日志/错误**；不可达 / code≠0 的错误**不含 body**；
 //    另导出 `redactSensitive()` 供调用方（main.cjs）在打印前脱敏 `proxy_user/proxy_password/Authorization`。
@@ -13,8 +14,9 @@
 const ADS_MIN_INTERVAL_MS = 1100; // 本地 API 限速 1req/s，留余量（与只读侧同规格、独立实例）
 const DEFAULT_ADS_BASE = 'http://local.adspower.net:50325';
 
-// 硬编码写 allowlist：只这两个。新增写端点须显式加入并补回归断言。
-const WRITE_ALLOWLIST = Object.freeze(['user/create', 'group/create']);
+// 硬编码写 allowlist。新增写端点须显式加入并补回归断言。
+// user/delete 允许，但调用方 MUST 仅由运维界面逐个显式确认触发（见头注 C3 放宽）。
+const WRITE_ALLOWLIST = Object.freeze(['user/create', 'group/create', 'user/delete']);
 
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -92,7 +94,7 @@ function createAdsWriteApi(deps = {}) {
       // 红线：不是「诚实失败返回」，而是**抛错**——调用这类端点是编程错误，须在测试/CI 暴露。
       throw new Error(
         `[ads-write] 禁止的写端点「${clean}」：allowlist 只放行 ${WRITE_ALLOWLIST.join(' / ')}。` +
-          '浏览器生命周期（browser/start|stop|active）由核心子进程单写、删除（user/delete）禁程序化。',
+          '浏览器生命周期（browser/start|stop|active）仍由核心子进程单写、绝不经此客户端。',
       );
     }
     const url = `${baseOf(opts)}/api/v1/${clean}`;
@@ -144,7 +146,13 @@ function createAdsWriteApi(deps = {}) {
     return { ok: true, userId: uid, data: r.data };
   }
 
-  return { post, createGroup, createProfile, redactSensitive, WRITE_ALLOWLIST: [...WRITE_ALLOWLIST], ADS_MIN_INTERVAL_MS };
+  /** 删除分身（allowlist 放行；调用方 MUST 仅由运维界面逐个显式确认触发、绝不自动/批量）。 */
+  async function deleteProfile(userId, opts) {
+    if (!userId) return { ok: false, error: '缺 user_id' };
+    return post('user/delete', { user_ids: [String(userId)] }, opts);
+  }
+
+  return { post, createGroup, createProfile, deleteProfile, redactSensitive, WRITE_ALLOWLIST: [...WRITE_ALLOWLIST], ADS_MIN_INTERVAL_MS };
 }
 
 module.exports = { createAdsWriteApi, redactSensitive, normalizePath, WRITE_ALLOWLIST: [...WRITE_ALLOWLIST], ADS_MIN_INTERVAL_MS, DEFAULT_ADS_BASE };

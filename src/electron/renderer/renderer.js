@@ -76,7 +76,6 @@ const settingsUi = {
   adsCreate: document.querySelector('#ads-create'),
   adsTemplate: document.querySelector('#ads-template'),
   adsCreateMsg: document.querySelector('#ads-create-msg'),
-  adsCreateManual: document.querySelector('#ads-create-manual'),
   applyRestart: document.querySelector('#apply-restart'),
   msg: document.querySelector('#settings-msg'),
 };
@@ -631,7 +630,52 @@ function coreRunning() {
   return Boolean(currentStatus) && currentStatus.edge !== 'stopped' && currentStatus.edge !== 'warning';
 }
 
-// 直接把环境铺成可点行（非下拉）。每行：名称 + 序号/分组/代理配置/user_id。
+// 每行删除按钮：点两次确认（第一次「删」→「确认删除?」armed 态，4s 自动收回；第二次才真删）。
+// 删除不可恢复（若已登录账号其登录态一并丢失）——故绝不一次点就删、绝不自动/批量（C3 放宽为 UI 确认删）。
+function makeDeleteBtn(prof) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ads-env-del';
+  btn.textContent = '删';
+  let armed = false;
+  let timer = null;
+  const disarm = () => {
+    armed = false;
+    btn.textContent = '删';
+    btn.classList.remove('armed');
+    if (timer) { clearTimeout(timer); timer = null; }
+  };
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation(); // 不触发行选中
+    if (!armed) {
+      armed = true;
+      btn.textContent = '确认删除?';
+      btn.classList.add('armed');
+      btn.title = `永久删除「${prof.name || prof.userId}」，不可恢复；若已登录账号其登录态一并丢失`;
+      timer = setTimeout(disarm, 4000);
+      return;
+    }
+    disarm();
+    if (!window.aidcpEdge || typeof window.aidcpEdge.adsDeleteEnv !== 'function') return;
+    btn.disabled = true;
+    setEnvMsg(`正在删除「${prof.name || prof.userId}」…`, false);
+    try {
+      const r = await window.aidcpEdge.adsDeleteEnv({ ...formAdsOpts(), userId: prof.userId });
+      if (r && r.ok) {
+        setEnvMsg(`已删除环境「${prof.name || prof.userId}」。`, false);
+        refreshEnvs();
+      } else {
+        setEnvMsg(`删除失败：${(r && r.error) || '未知错误'}`, true);
+        btn.disabled = false;
+      }
+    } catch {
+      btn.disabled = false;
+    }
+  });
+  return btn;
+}
+
+// 直接把环境铺成可点行（非下拉）。每行：名称 + 序号/分组/代理配置/user_id + 删除按钮。
 // 返回 { autoSelected }：恰好一个环境、分身 ID 为空且核心未在跑时自动选中（spec：唯一环境自动选中；
 // 多环境不代选、已有值不覆盖、在跑不动配置）。
 function populateEnvs(profiles) {
@@ -649,6 +693,8 @@ function populateEnvs(profiles) {
   for (const prof of profiles) {
     const item = document.createElement('div');
     item.className = 'ads-env-item';
+    const text = document.createElement('div');
+    text.className = 'env-text';
     const name = document.createElement('div');
     name.className = 'env-name';
     name.textContent = prof.name || '(未命名)';
@@ -660,8 +706,10 @@ function populateEnvs(profiles) {
     bits.push(prof.proxy || '无代理配置');
     bits.push(prof.userId);
     meta.textContent = bits.join(' · ');
-    item.appendChild(name);
-    item.appendChild(meta);
+    text.appendChild(name);
+    text.appendChild(meta);
+    item.appendChild(text);
+    item.appendChild(makeDeleteBtn(prof));
     item.addEventListener('click', () => selectProfile(prof.userId, item, prof.name));
     if (prof.userId && prof.userId === current) item.classList.add('selected');
     if (!firstItem) firstItem = item;
@@ -742,26 +790,12 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       refreshEnvs();
     } else {
       const extra = r && r.violations && r.violations.length ? '（' + r.violations.join('；') + '）' : '';
-      setCreateMsg(`创建失败：${(r && r.error) || '未知错误'}${extra}。也可用下方「打开 AdsPower 新建环境」手动建。`, true);
+      setCreateMsg(`创建失败：${(r && r.error) || '未知错误'}${extra}。`, true);
     }
   } finally {
     settingsUi.adsCreate.disabled = false;
   }
 });
-
-// 手动新建（降级 / 兜底）：拉起 AdsPower 客户端让运维自己建。
-if (settingsUi.adsCreateManual) {
-  settingsUi.adsCreateManual.addEventListener('click', async (event) => {
-    event.preventDefault();
-    const r = await window.aidcpEdge.adsOpenCreate();
-    setEnvMsg(
-      r && r.launched
-        ? '已打开 AdsPower 客户端：请在其中点「新建浏览器」完成配置，返回后点「刷新」加载新环境。'
-        : '已打开 AdsPower 官网（未能直接拉起客户端）：安装 / 打开 AdsPower 后在其中点「新建浏览器」，完成后回来点「刷新」。',
-      false,
-    );
-  });
-}
 
 // 「按新设置重启」：先保存当前设置，再显式重启把改动应用到在跑核心（dirty && 在跑时才出现）。
 settingsUi.applyRestart.addEventListener('click', async () => {

@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   // 「创建环境」程序化建号：整机模板清单 + 建一个环境（代理不碰，默认 no_proxy）。
   adsTemplates: () => ipcRenderer.invoke('ads:templates'),
   adsCreateEnv: (opts) => ipcRenderer.invoke('ads:createEnv', opts),
+  // 删除环境（仅由界面逐个二次确认触发）：opts { userId, apiKey?, apiBase? }。
+  adsDeleteEnv: (opts) => ipcRenderer.invoke('ads:deleteEnv', opts),
   onStatusUpdate: (callback) => {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('status:update', listener);

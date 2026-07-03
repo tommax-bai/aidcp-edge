@@ -687,6 +687,19 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
   }
 });
 
+// 删除环境（C3 放宽为 UI 确认删）：仅由渲染层逐个显式二次确认触发；本处不自动、不批量。
+ipcMain.handle('ads:deleteEnv', async (_event, opts) => {
+  const userId = opts && opts.userId;
+  if (!userId) return { ok: false, error: '缺 userId' };
+  try {
+    const ads = resolveAdsOpts(opts);
+    const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
+    return await writeApi.deleteProfile(String(userId), ads);
+  } catch (e) {
+    return { ok: false, error: `删除失败：${(e && e.message) || String(e)}` };
+  }
+});
+
 // 诚实拒绝同机多开（多账号多开隔离尚未实现，归 account-identity-from-login）：
 // 当前第二个实例会接管第一个账号的浏览器（串号），故用单实例锁直接拒绝第二个，绝不静默接管。
 // 锁随本实例退出自动释放，故「同一应用重启后重连自己的浏览器」不受影响。
