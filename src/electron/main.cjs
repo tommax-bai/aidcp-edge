@@ -656,7 +656,17 @@ if (!app.requestSingleInstanceLock()) {
     updateStatus({ provider: settings.provider });
     createWindow();
     createTray();
-    startFlow();
+    // 不自动启动任务（用户手动点右下角「启动」才开跑）。只做一次轻量预检：
+    // 缺配置时把「待配置」引导亮出来，配置齐备则诚实呈现「就绪」。
+    if (settings.provider === 'adspower' && !(settings.adsProfileId || '').trim()) {
+      updateStatus({
+        auth: 'config required',
+        lastMessage: '待配置：请在设置中选择浏览器环境后点「启动」。',
+        ...presencePatch('等待完成初始设置'),
+      });
+    } else {
+      updateStatus({ lastMessage: '就绪。点右下角「启动」开始自动运营。', ...presencePatch('就绪，等你点「启动」') });
+    }
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
       else mainWindow?.show();

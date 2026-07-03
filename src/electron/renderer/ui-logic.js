@@ -190,7 +190,7 @@
       mode: 'empty',
       collapsed,
       showLink: true,
-      head: '发布',
+      head: '发布过的 AI 写好的笔记',
       corner: '',
       cornerHot: false,
       title: '还没有发布过内容',
