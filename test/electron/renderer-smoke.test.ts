@@ -50,6 +50,8 @@ interface Stub {
   adsStatus: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
   adsListProfiles: (opts?: unknown) => Promise<unknown>;
   adsOpenCreate: () => { launched: boolean } | Promise<{ launched: boolean }>;
+  adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
+  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; template?: string; error?: string }>;
 }
 
 function makeStub(overrides: Partial<Stub> = {}): Stub {
@@ -68,6 +70,8 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     adsStatus: async () => ({ ok: true }),
     adsListProfiles: async () => ({ ok: true, profiles: [] }),
     adsOpenCreate: () => ({ launched: true }),
+    adsTemplates: async () => [{ key: 'win11-intel', label: 'Windows · 8核 8G' }],
+    adsCreateEnv: async () => ({ ok: true, template: 'win11-intel' }),
     ...overrides,
   };
 }
@@ -228,16 +232,45 @@ test('悬浮 fab 三态：停止→启动 / 运行→暂停 / 暂停→恢复', 
   assert.equal($(paused, '#session-fab').textContent, '恢复');
 });
 
-test('打开新建环境：拉起客户端成功 vs 退回官网，文案分档', async () => {
+test('手动新建（降级链）：拉起客户端成功 vs 退回官网，文案分档', async () => {
   const ok = await boot(makeStub({ adsOpenCreate: () => ({ launched: true }) }));
-  $(ok, '#ads-create').dispatchEvent(new ok.Event('click'));
+  $(ok, '#ads-create-manual').dispatchEvent(new ok.Event('click'));
   await tick();
   assert.match($(ok, '#ads-env-msg').textContent ?? '', /已打开 AdsPower 客户端/);
 
   const fallback = await boot(makeStub({ adsOpenCreate: () => ({ launched: false }) }));
-  $(fallback, '#ads-create').dispatchEvent(new fallback.Event('click'));
+  $(fallback, '#ads-create-manual').dispatchEvent(new fallback.Event('click'));
   await tick();
   assert.match($(fallback, '#ads-env-msg').textContent ?? '', /已打开 AdsPower 官网/);
+});
+
+test('程序化建号：填充模板下拉、点「创建环境」→ 传选中模板、成功提示 + 刷新', async () => {
+  let sentTemplate = '';
+  const w = await boot(makeStub({
+    adsCreateEnv: async (opts) => {
+      sentTemplate = (opts as { templateKey?: string }).templateKey ?? '';
+      return { ok: true, template: sentTemplate };
+    },
+  }));
+  for (let i = 0; i < 3; i++) await tick(); // flush populateTemplates()
+  const sel = $(w, '#ads-template') as unknown as HTMLSelectElement;
+  assert.ok(sel.options.length >= 1, '模板下拉应被填充');
+  assert.equal(sel.value, 'win11-intel');
+
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 3; i++) await tick();
+  assert.equal(sentTemplate, 'win11-intel', '应把选中模板传给 adsCreateEnv');
+  assert.match($(w, '#ads-create-msg').textContent ?? '', /已创建环境/);
+});
+
+test('程序化建号失败：诚实提示 + 引导手动新建', async () => {
+  const w = await boot(makeStub({ adsCreateEnv: async () => ({ ok: false, error: 'code=-1 quota' }) }));
+  for (let i = 0; i < 3; i++) await tick();
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 3; i++) await tick();
+  const msg = $(w, '#ads-create-msg').textContent ?? '';
+  assert.match(msg, /创建失败/);
+  assert.match(msg, /quota/);
 });
 
 test('防限速：刷新在途禁用按钮，完成后恢复', async () => {

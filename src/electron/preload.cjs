@@ -14,6 +14,9 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   adsStatus: (opts) => ipcRenderer.invoke('ads:status', opts),
   adsListProfiles: (opts) => ipcRenderer.invoke('ads:listProfiles', opts),
   adsOpenCreate: () => ipcRenderer.invoke('ads:openCreate'),
+  // 「创建环境」程序化建号：整机模板清单 + 建一个环境（代理不碰，默认 no_proxy）。
+  adsTemplates: () => ipcRenderer.invoke('ads:templates'),
+  adsCreateEnv: (opts) => ipcRenderer.invoke('ads:createEnv', opts),
   onStatusUpdate: (callback) => {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('status:update', listener);

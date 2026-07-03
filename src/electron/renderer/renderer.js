@@ -74,6 +74,9 @@ const settingsUi = {
   adsRefresh: document.querySelector('#ads-refresh'),
   adsEnvMsg: document.querySelector('#ads-env-msg'),
   adsCreate: document.querySelector('#ads-create'),
+  adsTemplate: document.querySelector('#ads-template'),
+  adsCreateMsg: document.querySelector('#ads-create-msg'),
+  adsCreateManual: document.querySelector('#ads-create-manual'),
   applyRestart: document.querySelector('#apply-restart'),
   msg: document.querySelector('#settings-msg'),
 };
@@ -699,16 +702,66 @@ async function refreshEnvs() {
 
 settingsUi.adsDetect.addEventListener('click', probeAds);
 settingsUi.adsRefresh.addEventListener('click', refreshEnvs);
-settingsUi.adsCreate.addEventListener('click', async (event) => {
-  event.preventDefault();
-  const r = await window.aidcpEdge.adsOpenCreate();
-  setEnvMsg(
-    r && r.launched
-      ? '已打开 AdsPower 客户端：请在其中点「新建浏览器」完成配置，返回后点「刷新」加载新环境。'
-      : '已打开 AdsPower 官网（未能直接拉起客户端）：安装 / 打开 AdsPower 后在其中点「新建浏览器」，完成后回来点「刷新」。',
-    false,
-  );
+// 创建提示行（与环境列表提示分开，避免互相覆盖）。
+function setCreateMsg(text, isError) {
+  if (!settingsUi.adsCreateMsg) return;
+  settingsUi.adsCreateMsg.textContent = text;
+  settingsUi.adsCreateMsg.classList.toggle('error', !!isError);
+}
+
+// 整机模板下拉：一次性从主进程拉清单填充（防御：桩 / 旧壳无此 API 时静默跳过）。
+async function populateTemplates() {
+  if (!settingsUi.adsTemplate || !window.aidcpEdge || typeof window.aidcpEdge.adsTemplates !== 'function') return;
+  try {
+    const list = await window.aidcpEdge.adsTemplates();
+    if (!Array.isArray(list) || !list.length) return;
+    settingsUi.adsTemplate.innerHTML = '';
+    for (const t of list) {
+      const opt = document.createElement('option');
+      opt.value = t.key;
+      opt.textContent = t.label || t.key;
+      settingsUi.adsTemplate.appendChild(opt);
+    }
+  } catch {
+    /* 静默：模板拉取失败不影响其它 */
+  }
+}
+populateTemplates();
+
+// 「创建环境」程序化建号：挑模板 → 建一个指纹环境（代理不碰，建完提醒去 AdsPower 配代理）。
+settingsUi.adsCreate.addEventListener('click', async () => {
+  const tpl = settingsUi.adsTemplate && settingsUi.adsTemplate.value;
+  if (!tpl) return setCreateMsg('请先选择一个整机模板', true);
+  if (!window.aidcpEdge || typeof window.aidcpEdge.adsCreateEnv !== 'function') return;
+  settingsUi.adsCreate.disabled = true;
+  setCreateMsg('正在创建环境…', false);
+  try {
+    const r = await window.aidcpEdge.adsCreateEnv({ ...formAdsOpts(), templateKey: tpl });
+    if (r && r.ok) {
+      setCreateMsg(`已创建环境（${r.template || tpl}）。请在 AdsPower 里为它配好代理再使用；点上方「刷新」可看到它。`, false);
+      refreshEnvs();
+    } else {
+      const extra = r && r.violations && r.violations.length ? '（' + r.violations.join('；') + '）' : '';
+      setCreateMsg(`创建失败：${(r && r.error) || '未知错误'}${extra}。也可用下方「打开 AdsPower 新建环境」手动建。`, true);
+    }
+  } finally {
+    settingsUi.adsCreate.disabled = false;
+  }
 });
+
+// 手动新建（降级 / 兜底）：拉起 AdsPower 客户端让运维自己建。
+if (settingsUi.adsCreateManual) {
+  settingsUi.adsCreateManual.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const r = await window.aidcpEdge.adsOpenCreate();
+    setEnvMsg(
+      r && r.launched
+        ? '已打开 AdsPower 客户端：请在其中点「新建浏览器」完成配置，返回后点「刷新」加载新环境。'
+        : '已打开 AdsPower 官网（未能直接拉起客户端）：安装 / 打开 AdsPower 后在其中点「新建浏览器」，完成后回来点「刷新」。',
+      false,
+    );
+  });
+}
 
 // 「按新设置重启」：先保存当前设置，再显式重启把改动应用到在跑核心（dirty && 在跑时才出现）。
 settingsUi.applyRestart.addEventListener('click', async () => {

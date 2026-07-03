@@ -237,3 +237,16 @@ test('normalizeProfile: 真机 no_proxy（带下划线）归一为「无代理�
   // 有真代理配置仍如实展示
   assert.match(normalizeProfile({ user_id: 'u', ip: '9.9.9.9', user_proxy_config: { proxy_type: 'socks5' } }).proxy, /socks5/);
 });
+
+test('listGroups: 打 group/list、归一化 groupId/groupName', async () => {
+  const calls: Array<{ url: string }> = [];
+  const api = createAdsLocalApi({
+    ...noThrottle,
+    fetchImpl: stubFetch([['/group/list', () => res(true, 200, { code: 0, data: { list: [{ group_id: 42, group_name: 'aidcp-创建' }] } })]], calls),
+  }) as unknown as { listGroups: (o?: unknown) => Promise<{ ok: boolean; groups?: Array<{ groupId: string; groupName: string }>; error?: string }> };
+  const r = await api.listGroups();
+  assert.equal(r.ok, true);
+  assert.equal(r.groups?.[0].groupId, '42');
+  assert.equal(r.groups?.[0].groupName, 'aidcp-创建');
+  assert.ok(calls[0].url.includes('/api/v1/group/list'));
+});

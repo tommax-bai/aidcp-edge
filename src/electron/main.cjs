@@ -4,6 +4,10 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
 const { createAdsLocalApi } = require('./ads-local-api.cjs');
+const { createAdsWriteApi } = require('./ads-write-api.cjs');
+const adsFingerprint = require('./ads-fingerprint.cjs');
+const { createCreateFlow } = require('./ads-create-flow.cjs');
+const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
 
 // 主进程侧 AdsPower 只读客户端（探测 + 环境列表）。单例持有本进程内**唯一**串行节流（1req/s）。
@@ -629,6 +633,59 @@ ipcMain.handle('browser:openAdsDownload', () => {
 ipcMain.handle('ads:status', (_event, opts) => adsApi.status(resolveAdsOpts(opts)));
 ipcMain.handle('ads:listProfiles', (_event, opts) => adsApi.listProfiles(resolveAdsOpts(opts)));
 ipcMain.handle('ads:openCreate', () => openAdsClient());
+
+// ── 「创建环境」程序化建号（change adspower-auto-create-env）：写客户端 allowlist + 指纹引擎 + 编排 ──
+const ENV_GROUP_NAME = 'aidcp-创建';
+let cachedEnvGroupId = null;
+let adsCreateInFlight = false; // 进程级单飞互斥（防连点双建）
+
+function templateLabel(t) {
+  const osName = t.os === 'windows' ? 'Windows' : t.os === 'macos' ? 'Mac' : t.os;
+  return `${osName} · ${t.hardwareConcurrency}核 ${t.deviceMemory}G`;
+}
+
+// 定位/复用专用分组（先 group/list 查、没有则建、并发 repeat 再查一次）。
+async function ensureEnvGroup(writeApi, adsOpts) {
+  if (cachedEnvGroupId) return { ok: true, groupId: cachedEnvGroupId };
+  const pick = (r) => (r.ok ? ((r.groups.find((g) => g.groupName === ENV_GROUP_NAME) || {}).groupId || '') : '');
+  let gid = pick(await adsApi.listGroups(adsOpts));
+  if (!gid) {
+    const cr = await writeApi.createGroup(ENV_GROUP_NAME, adsOpts);
+    gid = cr.ok ? cr.groupId : pick(await adsApi.listGroups(adsOpts));
+    if (!gid) return { ok: false, error: cr.error || '无法定位/创建专用分组' };
+  }
+  cachedEnvGroupId = gid;
+  return { ok: true, groupId: gid };
+}
+
+// 整机模板清单（供渲染层下拉，一处真源）。
+ipcMain.handle('ads:templates', () =>
+  adsFingerprint.DEVICE_TEMPLATES.map((t) => ({ key: t.key, label: templateLabel(t) })),
+);
+
+// 程序化建一个指纹环境。opts: { templateKey, apiKey?, apiBase? }。代理不碰（默认 no_proxy、手工配）。
+ipcMain.handle('ads:createEnv', async (_event, opts) => {
+  if (adsCreateInFlight) return { ok: false, error: '创建进行中，请等当前创建完成' };
+  adsCreateInFlight = true;
+  try {
+    const ads = resolveAdsOpts(opts);
+    // 凭据只内存（deps），绝不落 settings；写客户端错误层已脱敏。
+    const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
+    const grp = await ensureEnvGroup(writeApi, ads);
+    if (!grp.ok) return { ok: false, error: grp.error };
+    const flow = createCreateFlow({ writeApi, fingerprint: adsFingerprint });
+    return await flow.createEnvironment({
+      templateKey: (opts && opts.templateKey) || '',
+      intendedAccountLabel: opts && opts.intendedAccountLabel,
+      machineLabel: os.hostname(),
+      groupId: grp.groupId,
+    });
+  } catch (e) {
+    return { ok: false, error: `创建失败：${(e && e.message) || String(e)}` };
+  } finally {
+    adsCreateInFlight = false;
+  }
+});
 
 // 诚实拒绝同机多开（多账号多开隔离尚未实现，归 account-identity-from-login）：
 // 当前第二个实例会接管第一个账号的浏览器（串号），故用单实例锁直接拒绝第二个，绝不静默接管。

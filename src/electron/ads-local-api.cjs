@@ -140,7 +140,42 @@ function createAdsLocalApi(deps = {}) {
     return { ok: true, profiles, truncated };
   }
 
-  return { status, listProfiles, ADS_MIN_INTERVAL_MS };
+  /**
+   * 拉取分组：GET {base}/api/v1/group/list（只读，供「创建环境」定位/复用专用分组）。
+   * 不 throw：成功 { ok:true, groups:[{groupId, groupName}] }，失败 { ok:false, error }。
+   */
+  async function listGroups(opts = {}) {
+    const base = baseOf(opts);
+    const url = `${base}/api/v1/group/list?page=1&page_size=1000`;
+    let res;
+    try {
+      res = await throttledFetch(url, authHeaders(opts));
+    } catch (e) {
+      return { ok: false, error: `拉取分组失败：本地 API 不可达（${(e && e.message) || String(e)}）` };
+    }
+    if (!res.ok) {
+      const authLikely = res.status === 401 || res.status === 403;
+      return { ok: false, authLikely, error: `拉取分组失败（HTTP ${res.status}）` };
+    }
+    let body;
+    try {
+      body = await res.json();
+    } catch {
+      return { ok: false, error: '拉取分组失败：本地 API 响应非 JSON' };
+    }
+    if (typeof body.code === 'number' && body.code !== 0) {
+      return { ok: false, error: `拉取分组失败：code=${body.code} ${body.msg || ''}`.trim() };
+    }
+    const data = body.data || {};
+    const list = Array.isArray(data.list) ? data.list : [];
+    const groups = list.map((g) => ({
+      groupId: g.group_id != null ? String(g.group_id) : '',
+      groupName: g.group_name || '',
+    }));
+    return { ok: true, groups };
+  }
+
+  return { status, listProfiles, listGroups, ADS_MIN_INTERVAL_MS };
 }
 
 // user/list 单项归一化。user_id=写入分身 ID 的唯一值；serial_number（UI 序号）/name/代理配置仅供展示。
