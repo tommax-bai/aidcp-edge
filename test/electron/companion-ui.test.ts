@@ -214,6 +214,43 @@ test('回归：今日小结数字永不为空（缺字段兜 0 + 零值弱化）
   assert.ok(!$(w, '#views').classList.contains('zero'), '非零值不弱化');
 });
 
+test('账号无昵称 → 标题带显示「账号 …尾4位」，绝不摆长 id', async () => {
+  const { w } = await boot({ account: { id: '66cd1d4f000000001d0314ee', name: '' } });
+  assert.equal($(w, '#acct-name').textContent, '账号 …14ee');
+  assert.equal($(w, '#acct-ava').textContent, '书');
+});
+
+test('暂停态：在场感带「状态更新 · N 前」时间戳，不留大空白', async () => {
+  const at = new Date(Date.now() - 8000).toISOString();
+  const { w } = await boot({ session: 'paused', edge: 'stopped', presence: { text: 'x', at } });
+  assert.match($(w, '#presence-text').textContent ?? '', /已暂停/);
+  assert.match($(w, '#presence-fresh').textContent ?? '', /状态更新/);
+});
+
+test('开发者详情默认不显示；设置抽屉开关打开并持久化', async () => {
+  const saves: Array<Record<string, unknown>> = [];
+  const { w } = await boot({}, {
+    saveSettings: async (patch: Record<string, unknown>) => { saves.push(patch); return { saveOk: true }; },
+  });
+  assert.equal(hidden($(w, '#dev-section')), true, '默认隐藏');
+  const toggle = $(w, '#dev-toggle') as HTMLInputElement;
+  assert.ok($(w, '#drawer').contains(toggle), '开关在设置抽屉里');
+  toggle.checked = true;
+  toggle.dispatchEvent(new w.Event('change'));
+  assert.equal(hidden($(w, '#dev-section')), false, '打开后显示');
+  assert.ok(saves.some((p) => p.devDetails === true), '开关状态应持久化');
+});
+
+test('活动流条目带类型记号（治纯文字墙）', async () => {
+  const { w, pushActivity } = await boot();
+  pushActivity({ ts: new Date().toISOString(), type: 'like', sentence: '点了个赞' });
+  pushActivity({ ts: new Date().toISOString(), type: 'collect', sentence: '收藏了' });
+  const ics = Array.from(w.document.querySelectorAll('#activity-stream .ev-ic'));
+  assert.equal(ics.length, 2);
+  assert.ok((ics[0] as HTMLElement).classList.contains('ic-collect'), '最新在上=收藏');
+  assert.equal((ics[0] as HTMLElement).textContent, '藏');
+});
+
 // ── 循环 chip ──
 test('循环 chip 随阶段点亮，停止时全灭', async () => {
   const { w, pushStatus } = await boot({ loopStage: 'read' });

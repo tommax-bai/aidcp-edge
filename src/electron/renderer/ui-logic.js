@@ -73,14 +73,16 @@
     const at = p && p.at ? Date.parse(p.at) : NaN;
     const hasFresh = Number.isFinite(at) && nowMs - at < PRESENCE_FRESH_MS;
     const running = s.edge === 'running' && s.session === 'running';
+    // 静态诚实态也带时间戳（真实的状态时刻，不是假装活跃）——否则新鲜度行留白过大。
+    const staticFresh = Number.isFinite(at) ? `状态更新 · ${relTime(at, nowMs)}` : '';
 
     // 非运行态：诚实静态文案，presence 历史文本不再当「正在做」展示。
-    if (s.session === 'paused') return { text: '已暂停，随时可以恢复', animate: false, fresh: '' };
+    if (s.session === 'paused') return { text: '已暂停，随时可以恢复', animate: false, fresh: staticFresh };
     if (s.auth === 'login required') return { text: '等你登录小红书后继续', animate: false, fresh: '' };
     if (s.auth === 'config required') return { text: '等待完成初始设置', animate: false, fresh: '' };
-    if (s.edge === 'warning') return { text: '引擎异常退出，需要处理', animate: false, fresh: '' };
+    if (s.edge === 'warning') return { text: '引擎异常退出，需要处理', animate: false, fresh: staticFresh };
     if (s.edge === 'starting') return { text: '正在启动引擎…', animate: true, fresh: '' };
-    if (!running) return { text: '待命中', animate: false, fresh: '' };
+    if (!running) return { text: '待命中', animate: false, fresh: staticFresh };
 
     if (p && p.text && hasFresh) {
       return { text: p.text, animate: true, fresh: `刚刚更新 · ${relTime(at, nowMs)}` };

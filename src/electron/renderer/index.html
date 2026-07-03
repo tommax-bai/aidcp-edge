@@ -91,7 +91,11 @@
       <div class="stream-h">今天做了这些</div>
       <section class="stream-wrap">
         <div id="activity-stream" class="stream">
-          <p class="stream-empty" id="stream-empty">还没有动态。启动后，AI 做的每件事都会记在这里。</p>
+          <div class="stream-empty" id="stream-empty">
+            <span class="se-dots"><i></i><i></i><i></i></span>
+            <p>还没有动态</p>
+            <span>启动后，AI 做的每件事都会一条条记在这里</span>
+          </div>
         </div>
       </section>
 
@@ -106,8 +110,8 @@
         <time id="updated-at" class="summary-time"></time>
       </section>
 
-      <!-- 原始日志收进开发者详情（折叠） -->
-      <details class="dev">
+      <!-- 原始日志：默认不展示，设置抽屉「显示开发者详情」开关打开后出现（仍为折叠区） -->
+      <details class="dev hidden" id="dev-section">
         <summary>开发者详情</summary>
         <pre id="last-message">等待状态…</pre>
       </details>
@@ -180,6 +184,11 @@
           <button id="apply-restart" class="secondary hidden" type="button">按新设置重启</button>
         </div>
       </section>
+
+      <label class="dev-toggle-row">
+        <input id="dev-toggle" type="checkbox" />
+        <span>显示「开发者详情」<em>主界面底部展示原始运行日志（排查问题用）</em></span>
+      </label>
 
       <div class="drawer-foot">
         <button id="relogin" class="secondary" type="button">重新登录</button>

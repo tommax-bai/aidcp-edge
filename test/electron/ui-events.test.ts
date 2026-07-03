@@ -44,11 +44,12 @@ test('账号身份行 → identity 事件（id + 昵称）', () => {
   assert.equal(evt.account?.name, '晚风手作');
 });
 
-test('账号身份行无昵称 → 用 id 兜底', () => {
+test('账号身份行无昵称 → 叙述不暴露长 id（in-place 读取常态）', () => {
   const s = createUiEventStream();
-  const evt = s.push('[aidcp-edge] 账号身份已确立: acct-9 [source=env-override]');
-  assert.equal(evt?.account?.id, 'acct-9');
+  const evt = s.push('[aidcp-edge] 账号身份已确立: 66cd1d4f000000001d0314ee [source=login]');
+  assert.equal(evt?.account?.id, '66cd1d4f000000001d0314ee');
   assert.equal(evt?.account?.name, '');
+  assert.ok(!(evt?.sentence ?? '').includes('66cd1d4f'), '句子里绝不出现长 id');
 });
 
 test('连接云端 → 活动 + 在场感', () => {

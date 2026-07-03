@@ -177,9 +177,10 @@ function renderNotice(status) {
 function renderTitlebar(status) {
   const acct = status.account;
   if (acct && (acct.name || acct.id)) {
-    const name = acct.name || acct.id;
-    fields.acctName.textContent = name.startsWith('@') ? name : `@${name}`;
-    fields.acctAva.textContent = (acct.name || acct.id).replace(/^@/, '').slice(0, 1) || '书';
+    // 有昵称显示昵称；只有 id 时显示「账号 …尾4位」——长 id 不上标题带（in-place 身份读取拿不到昵称属常态）。
+    const nick = (acct.name || '').replace(/^@/, '');
+    fields.acctName.textContent = nick ? `@${nick}` : `账号 …${String(acct.id).slice(-4)}`;
+    fields.acctAva.textContent = nick ? nick.slice(0, 1) : '书';
   }
   const health = uiLogic.synthesizeHealth(status);
   fields.healthLabel.textContent = health.label;
@@ -252,6 +253,19 @@ fields.pubLink.addEventListener('click', async () => {
 
 // ─── 叙述式活动流（环形 ≤200 条，最新在上）───
 const STREAM_MAX = 200;
+// 事件类型 → 图标字 + 色调（给纯文字流加视觉锚点；这是类型记号，不是 App 图标）。
+const EV_ICONS = [
+  [/^(like|comment_like|follow)$/, ['赞', 'ic-like']],
+  [/^collect$/, ['藏', 'ic-collect']],
+  [/^comment$/, ['评', 'ic-comment']],
+  [/^(note_open|images|profile_read)$/, ['读', 'ic-read']],
+  [/^popup/, ['注', 'ic-warn']],
+  [/^publish/, ['发', 'ic-pub']],
+];
+function evIcon(type) {
+  for (const [re, spec] of EV_ICONS) if (re.test(type || '')) return spec;
+  return ['·', 'ic-sys'];
+}
 function prependActivity(entry, extraClass) {
   if (!entry || !entry.sentence) return;
   if (fields.streamEmpty) fields.streamEmpty.classList.add('hidden');
@@ -261,10 +275,15 @@ function prependActivity(entry, extraClass) {
   const t = document.createElement('span');
   t.className = 'ev-t';
   t.textContent = uiLogic.relTime(Date.parse(row.dataset.ts), Date.now());
+  const [glyph, iconCls] = evIcon(entry.type);
+  const ic = document.createElement('span');
+  ic.className = `ev-ic ${iconCls}`;
+  ic.textContent = glyph;
   const x = document.createElement('span');
   x.className = 'ev-x';
   x.textContent = entry.sentence;
   row.appendChild(t);
+  row.appendChild(ic);
   row.appendChild(x);
   fields.stream.insertBefore(row, fields.stream.firstChild);
   while (fields.stream.querySelectorAll('.ev').length > STREAM_MAX) {
@@ -311,6 +330,18 @@ fields.gear.addEventListener('click', openDrawer);
 fields.drawerClose.addEventListener('click', closeDrawer);
 fields.drawerMask.addEventListener('click', closeDrawer);
 fields.noticeAction.addEventListener('click', openDrawer);
+
+// ─── 开发者详情：默认不展示，设置抽屉里开关（persisted）───
+const devSection = document.querySelector('#dev-section');
+const devToggle = document.querySelector('#dev-toggle');
+function applyDevVisible(v) {
+  devSection.classList.toggle('hidden', !v);
+  devToggle.checked = Boolean(v);
+}
+devToggle.addEventListener('change', () => {
+  applyDevVisible(devToggle.checked);
+  window.aidcpEdge.saveSettings({ devDetails: devToggle.checked }); // 独立持久化，不打断在跑核心
+});
 
 // 悬浮会话按钮三态：已暂停→恢复 / 已停止（或异常）→启动 / 其余（运行·启动中）→暂停。
 function renderFab(status) {
@@ -431,6 +462,7 @@ function updateProfileDisplay() {
 function applySettings(s) {
   if (!s) return;
   if (s.adsDownloadUrl) adsDownloadUrl = s.adsDownloadUrl;
+  applyDevVisible(Boolean(s.devDetails));
   settingsUi.adsProfile.value = s.adsProfileId || '';
   settingsUi.adsApiKey.value = s.adsApiKey || '';
   settingsUi.adsApiBase.value = s.adsApiBase || '';

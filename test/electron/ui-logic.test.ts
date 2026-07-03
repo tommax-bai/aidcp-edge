@@ -94,7 +94,9 @@ test('在场感：运行中但事件过期（>5min）→ 动效关、如实说�
 
 test('在场感：暂停 / 停止 / 需登录 → 静态诚实文案', () => {
   const now = Date.now();
-  assert.equal(uiLogic.presenceView(st({ session: 'paused', edge: 'stopped' }), now).animate, false);
+  const paused = uiLogic.presenceView(st({ session: 'paused', edge: 'stopped', presence: { text: 'x', at: new Date(now - 8000).toISOString() } }), now);
+  assert.equal(paused.animate, false);
+  assert.match(paused.fresh, /状态更新/, '暂停态也要有时间戳、不留大空白');
   const stopped = uiLogic.presenceView(st({ edge: 'stopped', session: 'idle' }), now);
   assert.equal(stopped.animate, false);
   assert.match(stopped.text, /待命/);

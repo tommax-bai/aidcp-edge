@@ -35,6 +35,8 @@ const DEFAULT_SETTINGS = {
   adsProfileId: '',
   adsApiKey: '',
   adsApiBase: '',
+  // 「开发者详情」（原始日志区）默认不展示，在设置抽屉里开关（客户版首屏零技术噪音）。
+  devDetails: false,
 };
 let settings = { ...DEFAULT_SETTINGS };
 

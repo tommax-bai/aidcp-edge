@@ -216,13 +216,34 @@ body { margin: 0; }
   min-height: 140px; max-height: 44vh;
 }
 .stream { display: flex; flex-direction: column; }
-.ev { display: flex; gap: 11px; padding: 9px 0; border-bottom: 1px solid var(--hair); align-items: baseline; }
+.ev { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--hair); align-items: center; }
 .ev:last-child { border-bottom: 0; }
-.ev-t { font-size: 11.5px; color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; flex-shrink: 0; width: 62px; }
+.ev-t { font-size: 11.5px; color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; flex-shrink: 0; width: 58px; }
+/* 事件类型记号：给纯文字流加视觉锚点（类型字 + 柔和色底） */
+.ev-ic {
+  width: 21px; height: 21px; border-radius: 7px; flex-shrink: 0;
+  display: grid; place-items: center;
+  font-size: 10.5px; font-weight: 700;
+  background: #eef2f9; color: #6b7794;
+}
+.ev-ic.ic-like { background: #ffeef1; color: #d02f4d; }
+.ev-ic.ic-collect { background: #fdf1dc; color: #9a6413; }
+.ev-ic.ic-comment { background: #e8f0ff; color: #2c5dd4; }
+.ev-ic.ic-read { background: #ecf0fb; color: #4c5c9c; }
+.ev-ic.ic-warn { background: #fdf1dc; color: #9a6413; }
+.ev-ic.ic-pub { background: var(--good-bg); color: var(--good-fg); }
 .ev-x { font-size: 13.5px; line-height: 1.5; color: #37425a; }
 .ev.pub-done .ev-x { color: var(--good-fg); font-weight: 600; }
 .ev.pub-muted .ev-x { color: var(--mute); }
-.stream-empty { margin: 0; padding: 18px 2px; color: var(--faint); font-size: 13px; text-align: center; }
+.stream-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  margin: 0; padding: 26px 2px 24px; text-align: center;
+}
+.stream-empty p { margin: 2px 0 0; color: var(--mute); font-size: 13.5px; font-weight: 600; }
+.stream-empty > span:last-child { color: var(--faint); font-size: 12px; }
+.se-dots { display: inline-flex; gap: 5px; padding: 9px; border-radius: 12px; background: #eef2f9; }
+.se-dots i { width: 7px; height: 7px; border-radius: 50%; background: #c3ccdb; }
+.se-dots i:nth-child(2) { background: #a9b6cc; }
 
 /* ═══ 今日小结条 ═══ */
 .summary {
@@ -281,6 +302,13 @@ body { margin: 0; }
 }
 .drawer-x:hover { background: rgba(26, 34, 51, 0.06); }
 .drawer-foot { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--hair); display: flex; justify-content: flex-end; }
+.dev-toggle-row {
+  display: flex; align-items: flex-start; gap: 8px;
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--hair);
+  font-size: 12.5px; color: #475569; font-weight: 600; cursor: pointer;
+}
+.dev-toggle-row input { margin-top: 2px; }
+.dev-toggle-row em { display: block; font-style: normal; font-weight: 400; font-size: 11.5px; color: var(--faint); margin-top: 2px; }
 
 .subtle { margin: 0 0 12px; color: var(--mute); font-size: 12.5px; line-height: 1.5; }
 
@@ -373,20 +401,24 @@ body { margin: 0; }
 .badge.paused, .badge.warned, .badge.warning { background: var(--warn-bg); color: var(--warn-fg); }
 .badge.disconnected, .badge.stopped { background: var(--bad-bg); color: var(--bad-fg); }
 
-/* 悬浮会话控制（三态） */
+/* 悬浮会话控制（三态）：白底卡片风 + 状态色点，与标题带药丸同语言（不再是大色块） */
 .fab {
   position: fixed; right: 22px; bottom: 22px; z-index: 50;
-  border: 0; border-radius: 999px; padding: 13px 26px;
-  font-size: 15px; font-weight: 700; font-family: inherit;
-  color: #fff; cursor: pointer;
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.22);
-  transition: transform 0.12s, background 0.15s;
-  background: var(--accent);
+  display: inline-flex; align-items: center; gap: 8px;
+  border: 1px solid var(--hair); border-radius: 999px; padding: 12px 22px;
+  font-size: 14.5px; font-weight: 700; font-family: inherit;
+  color: #334155; cursor: pointer; background: #fff;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
+  transition: transform 0.12s, box-shadow 0.15s;
 }
-.fab:hover { transform: translateY(-1px); }
-.fab.start { background: #16a34a; }
-.fab.pause { background: #d97706; }
-.fab.resume { background: var(--accent); }
+.fab::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+.fab:hover { transform: translateY(-1px); box-shadow: 0 14px 32px rgba(15, 23, 42, 0.2); }
+.fab.start { color: #0f7a46; }
+.fab.start::before { background: #16a34a; }
+.fab.pause { color: #92400e; }
+.fab.pause::before { background: var(--amber); }
+.fab.resume { color: #1d4ed8; }
+.fab.resume::before { background: var(--accent); }
 .fab[disabled] { opacity: 0.6; cursor: not-allowed; }
 
 /* ═══ 动效（全部尊重系统减少动态偏好）═══ */

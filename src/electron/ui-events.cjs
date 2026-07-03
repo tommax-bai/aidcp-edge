@@ -63,7 +63,8 @@ function createUiEventStream() {
         kind: 'identity',
         type: 'identity',
         account: { id: m[1], name: m[2] || '' },
-        sentence: `账号「${m[2] || m[1]}」已就位`,
+        // 无昵称时绝不把长 id 塞进叙述（读取路径为 in-place 时 displayName 为 null，属常态）
+        sentence: m[2] ? `账号「${m[2]}」已就位` : '账号已就位，准备开工',
         presence: '账号已就位，准备开工…',
       }),
     ],
