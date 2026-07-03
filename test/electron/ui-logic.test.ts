@@ -10,6 +10,8 @@ interface PresenceV { text: string; animate: boolean; fresh: string }
 interface PublishV {
   mode: string;
   collapsed: { type: string; sentence: string } | null;
+  showLink?: boolean;
+  title?: string;
   head?: string;
   corner?: string;
   cornerHot?: boolean;
