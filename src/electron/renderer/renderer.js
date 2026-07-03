@@ -247,10 +247,13 @@ function renderPublish(status, nowMs) {
   fields.pubCorner.classList.toggle('hot', Boolean(view.cornerHot));
   fields.pubTitle.textContent = view.title || '（新笔记）';
   fields.pubTitle.classList.toggle('muted', view.mode === 'empty');
-  // 编号默认形态：无真编号时以「—」占位（云端飞书卡印上 requestId 后自动点亮真编号）。
-  fields.pubMeta.textContent = view.mode === 'empty'
-    ? '等待第一条笔记 · 编号 —'
-    : `图文笔记 · 编号 ${view.code || '—'}`;
+  // 编号默认形态：无真编号时以「—」占位（云端飞书卡印上 requestId 后自动点亮真编号）；编号值带灰底小片（设计稿）。
+  fields.pubMeta.textContent = '';
+  fields.pubMeta.appendChild(document.createTextNode(view.mode === 'empty' ? '等待第一条笔记 · 编号 ' : '图文笔记 · 编号 '));
+  const codeChip = document.createElement('span');
+  codeChip.className = 'no';
+  codeChip.textContent = view.code || '—';
+  fields.pubMeta.appendChild(codeChip);
   renderFootRich(fields.pubFoot, view.foot); // 固定模板内 **…** 加粗，破掉整片灰
   fields.pubLink.classList.toggle('hidden', !view.showLink);
   const steps = fields.pubSteps.querySelectorAll('.j-step');

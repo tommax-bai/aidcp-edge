@@ -170,7 +170,8 @@ test('发布卡常驻：无进行中有历史 → last；两者皆无 → empty 
   assert.deepEqual(empty.stepStates, ['todo', 'todo', 'todo', 'todo']);
   assert.match(empty.title ?? '', /还没有发布过/);
   assert.equal(empty.showLink, true, '空态也放「打开飞书」');
-  assert.match(empty.foot ?? '', /\*\*通过后才会发布\*\*/, '关键词带加粗标记');
+  assert.match(empty.foot ?? '', /\*\*「通过\/驳回」\*\*/, '只加粗「通过/驳回」');
+  assert.ok(!(empty.foot ?? '').includes('**通过后才会发布**'), '其余不加粗');
 });
 
 test('相对时间走字', () => {
