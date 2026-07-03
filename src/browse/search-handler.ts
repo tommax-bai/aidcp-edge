@@ -97,30 +97,64 @@ function buildFindByTextRectJs(texts: string[]): string {
 }
 
 /**
- * 生成「按可见文案判定该选项是否已进入选中态」的 JS（返回 'true'/'false'）。
- * 从命中元素上溯几层，任一祖先的 class 令牌含 active/selected/checked/current/is-active，
- * 或带 aria-selected/aria-checked="true" → 视为已选中。用于点击后**校验真生效**（治「已点却没选上」假阳性）。
+ * 生成「读取单个筛选项的提交信号」的 JS（返回 JSON 字符串 `{selected,trigger}`，体内带
+ * commit-signals 标记供测试桩识别）：
+ *  - selected：按可见文案命中该项（排除 aria-hidden 埋点代理），上溯几层任一祖先 class 令牌含
+ *    active/selected/checked/current/is-active 或 aria-selected/aria-checked="true" → 视为选中态在身。
+ *  - trigger：页面可见的筛选触发器文案（'已筛选' 优先 > '筛选' > null 无触发器布局）。
+ *    真机法证（docs/xhs-layout-states.md §2.6.1）：任一筛选**真提交**后触发器由「筛选」变「已筛选」，
+ *    是廉价的全局提交信号；而「点击未提交」的失败只留 CSS 级瞬时高亮、触发器不变。
  */
-function buildOptionSelectedJs(texts: string[]): string {
-  return `(function(){
-    var targets = ${JSON.stringify(texts)};
+function buildCommitSignalsJs(text: string): string {
+  return `(function(){/*commit-signals*/
+    var target = ${JSON.stringify(text)};
     var SEL = ['active','selected','checked','current','is-active'];
     var nodes = Array.prototype.slice.call(document.querySelectorAll('button,a,span,div,li,label,p'));
+    var selected = false;
     for (var i=0;i<nodes.length;i++){
       var el = nodes[i];
-      if (targets.indexOf((el.textContent||'').trim()) === -1) continue;
+      if ((el.textContent||'').trim() !== target) continue;
       if (el.offsetParent === null) continue;
       if (el.closest && el.closest('[aria-hidden="true"]')) continue;
       var p = el;
       for (var k=0;k<4 && p;k++){
         var toks = ((p.className||'')+'').split(/\\s+/);
-        for (var j=0;j<SEL.length;j++){ if (toks.indexOf(SEL[j])>=0) return 'true'; }
-        if (p.getAttribute && (p.getAttribute('aria-selected')==='true' || p.getAttribute('aria-checked')==='true')) return 'true';
+        for (var j=0;j<SEL.length;j++){ if (toks.indexOf(SEL[j])>=0) selected = true; }
+        if (p.getAttribute && (p.getAttribute('aria-selected')==='true' || p.getAttribute('aria-checked')==='true')) selected = true;
         p = p.parentElement;
       }
     }
-    return 'false';
+    var trigger = null;
+    var trigTexts = ['已筛选','筛选'];
+    for (var t=0;t<trigTexts.length && !trigger;t++){
+      for (var m=0;m<nodes.length;m++){
+        var e2 = nodes[m];
+        if ((e2.textContent||'').trim() !== trigTexts[t]) continue;
+        if (e2.offsetParent === null) continue;
+        if (e2.closest && e2.closest('[aria-hidden="true"]')) continue;
+        trigger = trigTexts[t];
+        break;
+      }
+    }
+    return JSON.stringify({ selected: selected, trigger: trigger });
   })()`;
+}
+
+/**
+ * 权威读一次「该项是否已真提交」：selected 在身，且（存在触发器时）触发器已变「已筛选」。
+ * 触发器仍是「筛选」= 全页尚无任何筛选真提交 → 此刻读到的 selected 只可能是瞬时高亮 → 判 false
+ * （假阳性守卫）。无触发器的布局（行内 tab 经典页）以 selected 为准。读不到/解析失败 → false，不冒充。
+ */
+async function readCommitVerdict(cdp: BrowseCdp, target: string): Promise<boolean> {
+  const raw = await evalRaw<string>(cdp, buildCommitSignalsJs(target)).catch(() => null);
+  if (typeof raw !== 'string') return false;
+  try {
+    const sig = JSON.parse(raw) as { selected?: boolean; trigger?: string | null };
+    if (!sig.selected) return false;
+    return sig.trigger == null || sig.trigger === '已筛选';
+  } catch {
+    return false;
+  }
 }
 
 /** 按可见文案定位可点元素中心坐标；命中返回 {x,y}，找不到（含隐藏/未渲染）返回 null。 */
@@ -182,34 +216,78 @@ async function waitOptionVisible(
   return false;
 }
 
-/** 有界轮询：等某选项进入选中态（点击后校验真生效）。命中返回 true，超时 false。 */
-async function waitOptionSelected(
+/** 单项筛选最大「点击→复核」尝试轮数（未提交→重试；固定 3 轮足以熬过亚秒级重渲染过渡窗口）。 */
+const MAX_FILTER_APPLY_ATTEMPTS = 3;
+
+/**
+ * 点击后到权威复核前的最短 settle。真机法证（docs/xhs-layout-states.md §2.6.1）：
+ * 「点击未提交」的失败只留 ~1.7s 内消退的 CSS 级瞬时高亮——settle 足量后读到的选中态才是持久态。
+ */
+const FILTER_VERIFY_SETTLE_MS = 1800;
+
+/**
+ * 确保目标选项可见（行内 tab 已可见则直接用；否则 hover「筛选/已筛选」展开面板，hover 展不开
+ * 再补一次 click 触发器兜底——绝不对 hover 型触发器 click，防「hover 开→click 又收」老 bug）。
+ * 返回 visible 与触发器坐标 from（点面板内选项时作为移动起点，防中途 mouseleave 收面板）。
+ */
+async function ensurePanelTargetVisible(
   cdp: BrowseCdp,
-  texts: string[],
-  timeoutMs: number,
-  sleep: (ms: number) => Promise<void>,
-): Promise<boolean> {
-  for (let waited = 0; waited < timeoutMs; waited += 120) {
-    const r = await evalRaw<string>(cdp, buildOptionSelectedJs(texts)).catch(() => 'false');
-    if (r === 'true' || (r as unknown) === true) return true;
-    await sleep(120);
+  target: string,
+  ctx: { random?: RandomFn; sleep: (ms: number) => Promise<void> },
+): Promise<{ visible: boolean; from?: Point }> {
+  // 已可见（行内 tab，或面板恰好开着）：from=目标自身中心——点击路径原地微动、绝不划出面板。
+  // 若用默认起点（目标外侧 ~60px）起步，路径可能出面板 → mouseleave 收起 → 点空/误点下层卡片（真机实证）。
+  const inline = await findRectByVisibleText(cdp, [target]);
+  if (inline) return { visible: true, from: inline };
+  const trig = await hoverByVisibleText(cdp, SEARCH_FILTER_TRIGGER_TEXTS, ctx);
+  if (!trig) return { visible: false };
+  let ready = await waitOptionVisible(cdp, [target], 800, ctx.sleep);
+  if (!ready) {
+    await clickByVisibleText(cdp, SEARCH_FILTER_TRIGGER_TEXTS, { ...ctx, from: trig });
+    ready = await waitOptionVisible(cdp, [target], 1500, ctx.sleep);
   }
-  return false;
+  return { visible: ready, from: trig };
 }
 
 /**
- * 点某筛选选项并**校验它真进入选中态**才算数（honest：治「已点却没选上」假阳性——真机 AI 搜索页
- * 每项旁并排一个 aria-hidden 埋点代理，点代理无效；且「点到了元素」≠「筛选真生效」）。
- * 命中并确认选中返回 true；找不到 / 点了但未变选中 → false（诚实降级，不冒充已筛）。
+ * 应用单个筛选项：〔幂等前查（已提交→跳过不重复点）→ 点 → settle → 权威复核，未提交则重试〕。
+ *
+ * 治真根因（§2.6.1「点击未提交的瞬态竞态」）：点击撞上页面亚秒级重渲染过渡窗口时会「瞬时高亮但
+ * 从未提交」且无法预判窗口——故不押注任何具体机理，靠「复核戳穿未提交 + 隔轮重试自然错开窗口」通吃。
+ * 返回值只由权威复核（settle 之后 + 触发器提交信号）决定，瞬时高亮绝不作数；已提交的筛选实测在
+ * AI 总结流式生成全程存活、重复点选已选项不 toggle（幂等安全），重试无副作用。
  */
-async function clickAndVerifyOption(
+async function applyOneFilter(
   cdp: BrowseCdp,
-  text: string,
-  opts: { random?: RandomFn; sleep: (ms: number) => Promise<void>; from?: Point },
+  target: string,
+  ctx: { random?: RandomFn; sleep: (ms: number) => Promise<void>; logger?: (msg: string) => void },
 ): Promise<boolean> {
-  const clicked = await clickByVisibleText(cdp, [text], opts);
-  if (!clicked) return false;
-  return waitOptionSelected(cdp, [text], 1200, opts.sleep);
+  const log = ctx.logger ?? (() => {});
+  for (let attempt = 0; attempt < MAX_FILTER_APPLY_ATTEMPTS; attempt++) {
+    const open = await ensurePanelTargetVisible(cdp, target, ctx);
+    if (open.visible) {
+      // 幂等前查 = 上一轮点击的权威复核：已真提交 → 成功返回，绝不重复点。
+      if (await readCommitVerdict(cdp, target)) {
+        log(`[search] 筛选「${target}」第 ${attempt + 1} 轮复核：已提交`);
+        return true;
+      }
+      // 面板刚展开就点会「瞬时高亮不提交」（4a8f241）→ settle 再点；首轮 action 档自然停顿，
+      // 重试轮降为 scroll 档短抖动（控预算：K 轮重试不炸 ~28s 单步）。
+      const preset = attempt === 0 ? TIMING_PRESETS.action : TIMING_PRESETS.scroll;
+      await ctx.sleep(sampleDelay(preset, ctx.random));
+      const clicked = await clickByVisibleText(cdp, [target], { random: ctx.random, sleep: ctx.sleep, from: open.from });
+      log(`[search] 筛选「${target}」第 ${attempt + 1} 轮：未提交→点击${clicked ? '已派发' : '落空（点前面板收起）'}`);
+    } else {
+      log(`[search] 筛选「${target}」第 ${attempt + 1} 轮：控件不可见（触发器/面板未展开）`);
+    }
+    // 点后（或本轮控件不可见）settle 足量再复核：瞬时高亮 ~1.7s 内消退，之后读到的才是持久态。
+    await ctx.sleep(Math.max(sampleDelay(TIMING_PRESETS.scroll, ctx.random), FILTER_VERIFY_SETTLE_MS));
+  }
+  // 终判：最后一轮点击后的权威复核。控件不可见/仍未提交 → 诚实 false（云端降级，不冒充已筛）。
+  const fin = await ensurePanelTargetVisible(cdp, target, ctx);
+  const verdict = fin.visible ? await readCommitVerdict(cdp, target) : false;
+  log(`[search] 筛选「${target}」终判：${verdict ? '已提交' : `未提交（控件${fin.visible ? '可见' : '不可见'}）`}`);
+  return verdict;
 }
 
 export interface ApplySearchFiltersDeps {
@@ -220,13 +298,17 @@ export interface ApplySearchFiltersDeps {
 }
 
 /**
- * 在搜索结果页应用原生「排序 + 发布时间」筛选（change comment-search-command）。
+ * 在搜索结果页应用原生「排序 + 发布时间」筛选（change comment-search-command，task 5.4 重构）。
  *
- * 按需评论任务要「最近一天 + 最多收藏」：靠点平台原生排序 tab（最多收藏）+ 时间筛选（一天内）。
- * 按可见文案点击（跨宽/窄布局、跨类名漂移最稳）。两遍：先当作「行内 tab」直接点；缺则开「筛选」面板再点。
+ * 按需评论任务要「最近一天 + 最多收藏」：靠点平台原生排序（最多收藏）+ 时间筛选（一天内）。
+ * 按可见文案点击（跨宽/窄布局、跨类名漂移最稳）；行内 tab 直接点，藏在「筛选」hover 面板内则展开再点。
  *
- * 红线（honest）：控件定位失败 → 返回 applied=false，**绝不假装已筛**——云端据此降级回报、不把未筛结果当「最近一天最多收藏」。
- * ⚠️ 选择器/面板机制随搜索页布局变，**待真机标定**（参 docs/xhs-layout-states.md、memory xhs-responsive-nav-layout）。
+ * 逐项走「幂等应用 + 权威复核 + 有界重试」（applyOneFilter）：治真根因「点击未提交的瞬态竞态」
+ * （真机法证 docs/xhs-layout-states.md §2.6.1——点击撞上亚秒级重渲染过渡窗口时瞬时高亮但从未提交；
+ * AI 总结流式生成不影响已提交筛选，无需等它、无需关它）。
+ *
+ * 红线（honest）：返回值只由权威复核决定——控件定位失败 / K 轮重试后仍未提交 → applied=false，
+ * **绝不假装已筛**——云端据此降级回报、不把未筛结果当「最近一天最多收藏」。
  */
 export async function applySearchFilters(
   opts: { sort?: string; timeWindow?: string },
@@ -236,53 +318,16 @@ export async function applySearchFilters(
   const random = deps.random;
   const sleep = deps.sleep ?? defaultSleep;
   const logger = deps.logger ?? ((m: string) => console.log(m));
-  const pause = () => sleep(sampleDelay(TIMING_PRESETS.action, random));
 
   const wantSort = opts.sort ? SEARCH_SORT_TEXT[opts.sort] : undefined;
   const wantTime = opts.timeWindow ? SEARCH_TIME_TEXT[opts.timeWindow] : undefined;
   if (!wantSort && !wantTime) return { sortApplied: false, timeApplied: false };
 
-  // 第一遍：当作行内 tab 直接按文案点（排序 tab 多为行内常驻）；点后校验真进入选中态才算数。
-  let sortApplied = wantSort ? await clickAndVerifyOption(cdp, wantSort, { random, sleep }) : false;
-  if (wantSort) await pause();
-  let timeApplied = wantTime ? await clickAndVerifyOption(cdp, wantTime, { random, sleep }) : false;
-  if (wantTime) await pause();
-
-  // 第二遍：仍有未命中 → 开「筛选」面板再点（真机 AI 搜索页排序 + 时间都在此面板内）。
-  // 关键（真机实证 edge fddfe79 之后）：① 「筛选」是 **hover 展开** 的悬浮面板；② 点一个选项会触发结果重排、
-  // 把面板收起——故**每点一个选项前都重新 hover 展开面板**（点排序→重排→重新 hover→点时间），不能假设面板一直开着。
-  // hover 展开不了（面板实为 click-toggle 触发）→ 补一次 click「筛选」兜底。点后校验真进入选中态才算数（不冒充已筛）。
-  // ⚠ 真机标定项（task 12.1，用 scripts/search-filter-probe.ts）。
-  const applyViaPanel = async (target: string): Promise<boolean> => {
-    const filterPos = await hoverByVisibleText(cdp, SEARCH_FILTER_TRIGGER_TEXTS, { random, sleep });
-    if (!filterPos) return false;
-    let ready = await waitOptionVisible(cdp, [target], 800, sleep);
-    if (!ready) {
-      // hover 未展开 → 面板可能是 click 触发。补一次 click（从 hover 落点起手，落在触发器本体）。
-      await clickByVisibleText(cdp, SEARCH_FILTER_TRIGGER_TEXTS, { random, sleep, from: filterPos });
-      ready = await waitOptionVisible(cdp, [target], 1500, sleep);
-    }
-    if (!ready) return false;
-    // 面板刚展开就点会「瞬时高亮但不提交」（真机实证：排序项尤其明显）——settle 一下等选项可交互再点。
-    await pause();
-    // 点目标：from=触发器坐标，路径落在「触发器→面板」区内，避免中途 mouseleave 收起面板。
-    const clicked = await clickByVisibleText(cdp, [target], { random, sleep, from: filterPos });
-    if (!clicked) return false;
-    await pause(); // 等选中后的结果重排 + 面板收起
-    // 校验真生效：**重新 hover 打开面板**（应用后触发器变「已筛选」）再看该项是否持久 active。
-    // 不能点完立刻在原地看——选中会触发结果重排、面板收起，选项转隐藏（offsetParent=null）→ 假阴性。
-    const reopenPos = await hoverByVisibleText(cdp, SEARCH_FILTER_TRIGGER_TEXTS, { random, sleep });
-    if (!reopenPos) return false;
-    return waitOptionSelected(cdp, [target], 1500, sleep);
-  };
-  if (wantSort && !sortApplied) {
-    sortApplied = await applyViaPanel(wantSort);
-    await pause();
-  }
-  if (wantTime && !timeApplied) {
-    timeApplied = await applyViaPanel(wantTime);
-    await pause();
-  }
+  const ctx = { random, sleep, logger };
+  const sortApplied = wantSort ? await applyOneFilter(cdp, wantSort, ctx) : false;
+  // 项间自然停顿（一次 action 档），像真人切完排序再看时间。
+  if (wantSort && wantTime) await sleep(sampleDelay(TIMING_PRESETS.action, random));
+  const timeApplied = wantTime ? await applyOneFilter(cdp, wantTime, ctx) : false;
 
   logger(
     `[search] 原生筛选：排序「${wantSort ?? '-'}」=${sortApplied ? '已切' : '未生效'}、` +

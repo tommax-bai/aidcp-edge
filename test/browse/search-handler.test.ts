@@ -44,85 +44,166 @@ test('executeSearch: 搜索框未找到时抛错', async () => {
   );
 });
 
-test('applySearchFilters: 控件存在（找到文案坐标）→ 排序+时间都点到、返回 applied', async () => {
-  const { cdp, calls } = fakeCdp((method, params) => {
-    if (method === 'Runtime.evaluate') {
-      // 选中态校验 eval（buildOptionSelectedJs，含 'aria-selected'）→ 返回已选中；其余（定位）→ 返回坐标。
-      if (String(params.expression ?? '').includes('aria-selected')) return { result: { value: 'true' } };
-      return { result: { value: JSON.stringify({ x: 120, y: 60 }) } };
-    }
-    return {};
-  });
-  const r = await applySearchFilters(
-    { sort: 'most_collected', timeWindow: 'one_day' },
-    { cdp, sleep: async () => {}, random: () => 0.5 },
-  );
-  assert.equal(r.sortApplied, true);
-  assert.equal(r.timeApplied, true);
-  assert.ok(calls.some((c) => c.method === 'Input.dispatchMouseEvent'), '应有拟人化点击派发');
-});
+// ---------------------------------------------------------------------------
+// applySearchFilters（task 5.4 重构：幂等应用 + 权威复核 + 有界重试，治「点击未提交的瞬态竞态」）
+//
+// 有状态页面桩：模拟真机行为——选项被真实按下（mousePressed 落在其坐标上）且「本次按下会提交」时才
+// 进入已提交集合；提交信号 eval（体内含 commit-signals 标记）按已提交集合返回 {selected, trigger}，
+// 触发器文案在任一项提交后由「筛选」翻成「已筛选」（真机法证 docs/xhs-layout-states.md §2.6.1）。
+// ---------------------------------------------------------------------------
 
-test('applySearchFilters: 控件找不到（坐标 null）→ honest applied=false（不假点）', async () => {
-  const { cdp } = fakeCdp((method) => {
-    if (method === 'Runtime.evaluate') return { result: { value: null } };
-    return {};
-  });
-  const r = await applySearchFilters(
-    { sort: 'most_collected', timeWindow: 'one_day' },
-    { cdp, sleep: async () => {}, random: () => 0.5 },
-  );
-  assert.equal(r.sortApplied, false);
-  assert.equal(r.timeApplied, false);
-});
+const POS: Record<string, { x: number; y: number }> = {
+  最多收藏: { x: 120, y: 60 },
+  一天内: { x: 210, y: 130 },
+  筛选: { x: 300, y: 40 },
+};
 
-test('applySearchFilters: 时间项藏在 hover 展开的「筛选」面板内 → hover 展开(不 click 筛选)后点时间项，honest applied=true', async () => {
-  // 场景：排序 tab 行内可点（pass1 命中）；「一天内」只有在「筛选」被 hover 展开后才可见。
-  // 回归红线：pass2 必须 hover「筛选」把面板展开，绝不 click「筛选」本体（老 bug：hover 开→click 又收→时间项永远点不到）。
-  let filterHovered = false;
+interface FilterPageModel {
+  /** 该项第 nth 次被按下（1 起）是否真提交。默认恒 true。 */
+  commitsOnPress?: (target: string, nth: number) => boolean;
+  /** 选项是否要先 hover「筛选」触发器展开面板才可见（AI 搜索页形态）。默认 false=行内可见。 */
+  optionsNeedPanel?: boolean;
+  /** 预置已提交项（幂等场景）。 */
+  preCommitted?: string[];
+  /** 「瞬时高亮」模型：被按过的项 selected 读数恒 true，即便从未提交（触发器不翻转）。默认 false。 */
+  stickyHighlight?: boolean;
+}
+
+function filterPageFake(model: FilterPageModel = {}) {
+  const committed = new Set<string>(model.preCommitted ?? []);
+  const presses: Record<string, number> = {};
+  let panelOpen = !model.optionsNeedPanel;
   const { cdp, calls } = fakeCdp((method, params) => {
     if (method === 'Runtime.evaluate') {
       const expr = String(params.expression ?? '');
-      // 选中态校验 eval（含 'aria-selected'）→ 已选中（点后校验通过）。
-      if (expr.includes('aria-selected')) return { result: { value: 'true' } };
-      // 用**带引号**匹配嵌入的目标数组（如 ["筛选"]），避免命中定位 JS 注释里的裸「筛选」二字。
-      if (expr.includes('"筛选"')) {
-        filterHovered = true; // 一旦定位/hover 过「筛选」，面板展开、时间项转为可见
-        return { result: { value: JSON.stringify({ x: 200, y: 40 }) } };
+      // 提交信号 eval（须先于按文案定位的分支匹配——其体内也嵌有引号文案）
+      if (expr.includes('commit-signals')) {
+        const target = ['最多收藏', '一天内'].find((t) => expr.includes(`"${t}"`)) ?? '';
+        const selected = committed.has(target) || (model.stickyHighlight === true && (presses[target] ?? 0) > 0);
+        const trigger = committed.size > 0 ? '已筛选' : '筛选';
+        return { result: { value: JSON.stringify({ selected, trigger }) } };
       }
-      if (expr.includes('"最多收藏"')) return { result: { value: JSON.stringify({ x: 120, y: 40 }) } };
-      if (expr.includes('"一天内"')) return { result: { value: filterHovered ? JSON.stringify({ x: 210, y: 130 }) : null } };
+      // 触发器定位（hover 展开面板）：一旦定位过「筛选」，面板展开、选项转可见
+      if (expr.includes('"筛选"')) {
+        panelOpen = true;
+        return { result: { value: JSON.stringify(POS['筛选']) } };
+      }
+      // 选项定位：行内（默认）恒可见；AI 页形态须面板展开后可见
+      for (const t of ['最多收藏', '一天内']) {
+        if (expr.includes(`"${t}"`)) {
+          return { result: { value: panelOpen ? JSON.stringify(POS[t]) : null } };
+        }
+      }
       return { result: { value: null } };
     }
-    return {};
-  });
-  const r = await applySearchFilters(
-    { sort: 'most_collected', timeWindow: 'one_day' },
-    { cdp, sleep: async () => {}, random: () => 0.5 },
-  );
-  assert.equal(r.sortApplied, true);
-  assert.equal(r.timeApplied, true, '时间项应在 hover 展开面板后被点到');
-
-  const presses = calls.filter((c) => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mousePressed');
-  assert.equal(presses.length, 2, '只应有「排序 tab + 时间项」两次点击——「筛选」靠 hover 展开、不 click（老 bug 会多一次 click 筛选）');
-  const onFilter = presses.filter((p) => Math.abs(Number(p.params.x) - 200) < 8 && Math.abs(Number(p.params.y) - 40) < 8);
-  assert.equal(onFilter.length, 0, '绝不 click「筛选」控件本体（避免 hover 开→click 又收起面板）');
-});
-
-test('applySearchFilters: 点到了元素但选项未进入选中态 → honest applied=false（治「已点却没选上」假阳性）', async () => {
-  // 定位永远命中（返回坐标=点得到），但选中态校验永远 false（点了没生效，如点到 aria-hidden 埋点代理）。
-  const { cdp } = fakeCdp((method, params) => {
-    if (method === 'Runtime.evaluate') {
-      if (String(params.expression ?? '').includes('aria-selected')) return { result: { value: 'false' } };
-      return { result: { value: JSON.stringify({ x: 120, y: 60 }) } };
+    if (method === 'Input.dispatchMouseEvent' && params.type === 'mousePressed') {
+      for (const [t, p] of Object.entries(POS)) {
+        if (Math.abs(Number(params.x) - p.x) < 10 && Math.abs(Number(params.y) - p.y) < 10) {
+          presses[t] = (presses[t] ?? 0) + 1;
+          if (t !== '筛选' && (model.commitsOnPress ?? (() => true))(t, presses[t])) committed.add(t);
+        }
+      }
     }
     return {};
   });
-  const r = await applySearchFilters(
-    { sort: 'most_collected', timeWindow: 'one_day' },
-    { cdp, sleep: async () => {}, random: () => 0.5 },
-  );
-  assert.equal(r.sortApplied, false, '点了但没选上→不冒充已筛');
-  assert.equal(r.timeApplied, false, '点了但没选上→不冒充已筛');
+  return { cdp, calls, presses: () => ({ ...presses }), committed };
+}
+
+const RUN = { sleep: async () => {}, random: () => 0.5 };
+
+test('applySearchFilters: 首点即提交 → 排序+时间各恰好 1 次点击、返回 applied（权威复核通过）', async () => {
+  const page = filterPageFake({ optionsNeedPanel: true });
+  const r = await applySearchFilters({ sort: 'most_collected', timeWindow: 'one_day' }, { cdp: page.cdp, ...RUN });
+  assert.equal(r.sortApplied, true);
+  assert.equal(r.timeApplied, true);
+  const p = page.presses();
+  assert.equal(p['最多收藏'] ?? 0, 1, '提交即止，不重复点');
+  assert.equal(p['一天内'] ?? 0, 1, '提交即止，不重复点');
+  assert.equal(p['筛选'] ?? 0, 0, '「筛选」靠 hover 展开、绝不 click（防 hover 开→click 又收的老 bug）');
+});
+
+test('applySearchFilters: 控件找不到（坐标 null）→ honest applied=false、零点击（不假点）', async () => {
+  const { cdp, calls } = fakeCdp((method) => {
+    if (method === 'Runtime.evaluate') return { result: { value: null } };
+    return {};
+  });
+  const r = await applySearchFilters({ sort: 'most_collected', timeWindow: 'one_day' }, { cdp, ...RUN });
+  assert.equal(r.sortApplied, false);
+  assert.equal(r.timeApplied, false);
+  const presses = calls.filter((c) => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mousePressed');
+  assert.equal(presses.length, 0, '定位不到→不盲点');
+});
+
+test('applySearchFilters: 点击从未提交（真根因场景）→ 每项重试上限 3 次点击后诚实 false', async () => {
+  const page = filterPageFake({ optionsNeedPanel: true, commitsOnPress: () => false });
+  const r = await applySearchFilters({ sort: 'most_collected', timeWindow: 'one_day' }, { cdp: page.cdp, ...RUN });
+  assert.equal(r.sortApplied, false, '未提交→不冒充已筛');
+  assert.equal(r.timeApplied, false, '未提交→不冒充已筛');
+  const p = page.presses();
+  assert.equal(p['最多收藏'], 3, '有界重试：每项恰好 3 次尝试、不机关枪连点');
+  assert.equal(p['一天内'], 3, '有界重试：每项恰好 3 次尝试、不机关枪连点');
+});
+
+test('applySearchFilters: 假阳性守卫——瞬时高亮 selected=true 但触发器未翻「已筛选」→ 判未提交、返回 false', async () => {
+  // 真机法证：未提交的点击只留 CSS 级瞬时高亮，触发器文案不变；只信 selected 会假阳性。
+  const page = filterPageFake({ optionsNeedPanel: true, commitsOnPress: () => false, stickyHighlight: true });
+  const r = await applySearchFilters({ sort: 'most_collected', timeWindow: 'one_day' }, { cdp: page.cdp, ...RUN });
+  assert.equal(r.sortApplied, false, '高亮在身但全页无任何筛选真提交→绝不上报成功');
+  assert.equal(r.timeApplied, false, '高亮在身但全页无任何筛选真提交→绝不上报成功');
+});
+
+test('applySearchFilters: 已提交（幂等前查命中）→ 零点击直接返回 true', async () => {
+  const page = filterPageFake({ optionsNeedPanel: true, preCommitted: ['最多收藏', '一天内'] });
+  const r = await applySearchFilters({ sort: 'most_collected', timeWindow: 'one_day' }, { cdp: page.cdp, ...RUN });
+  assert.equal(r.sortApplied, true);
+  assert.equal(r.timeApplied, true);
+  const p = page.presses();
+  assert.equal(p['最多收藏'] ?? 0, 0, '已选中→跳过不重复点（幂等）');
+  assert.equal(p['一天内'] ?? 0, 0, '已选中→跳过不重复点（幂等）');
+});
+
+test('applySearchFilters: 首点被瞬态竞态吞掉、第 2 点提交 → 重试补上、返回 true', async () => {
+  const page = filterPageFake({ optionsNeedPanel: true, commitsOnPress: (_t, nth) => nth >= 2 });
+  const r = await applySearchFilters({ sort: 'most_collected', timeWindow: 'one_day' }, { cdp: page.cdp, ...RUN });
+  assert.equal(r.sortApplied, true, '重试应把被吞的点击补上');
+  assert.equal(r.timeApplied, true, '重试应把被吞的点击补上');
+  const p = page.presses();
+  assert.equal(p['最多收藏'], 2, '第 2 次提交后即止');
+  assert.equal(p['一天内'], 2, '第 2 次提交后即止');
+});
+
+test('applySearchFilters: 行内 tab 布局（无「筛选」面板、无触发器）→ selected 即准、正常应用', async () => {
+  // trigger=null 的布局（经典页行内排序 tab）：无触发器翻转信号可用，以持久 selected 为准。
+  const committed = new Set<string>();
+  const presses: Record<string, number> = {};
+  const { cdp } = fakeCdp((method, params) => {
+    if (method === 'Runtime.evaluate') {
+      const expr = String(params.expression ?? '');
+      if (expr.includes('commit-signals')) {
+        const target = ['最多收藏', '一天内'].find((t) => expr.includes(`"${t}"`)) ?? '';
+        return { result: { value: JSON.stringify({ selected: committed.has(target), trigger: null }) } };
+      }
+      if (expr.includes('"筛选"')) return { result: { value: null } }; // 无触发器
+      for (const t of ['最多收藏', '一天内']) {
+        if (expr.includes(`"${t}"`)) return { result: { value: JSON.stringify(POS[t]) } };
+      }
+      return { result: { value: null } };
+    }
+    if (method === 'Input.dispatchMouseEvent' && params.type === 'mousePressed') {
+      for (const [t, p] of Object.entries(POS)) {
+        if (t !== '筛选' && Math.abs(Number(params.x) - p.x) < 10 && Math.abs(Number(params.y) - p.y) < 10) {
+          presses[t] = (presses[t] ?? 0) + 1;
+          committed.add(t);
+        }
+      }
+    }
+    return {};
+  });
+  const r = await applySearchFilters({ sort: 'most_collected', timeWindow: 'one_day' }, { cdp, ...RUN });
+  assert.equal(r.sortApplied, true);
+  assert.equal(r.timeApplied, true);
+  assert.equal(presses['最多收藏'], 1);
+  assert.equal(presses['一天内'], 1);
 });
 
 test('applySearchFilters: 无 sort/timeWindow → no-op，不评估页面', async () => {
