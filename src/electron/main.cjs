@@ -665,7 +665,14 @@ if (!app.requestSingleInstanceLock()) {
         ...presencePatch('等待完成初始设置'),
       });
     } else {
-      updateStatus({ lastMessage: '就绪。点右下角「启动」开始自动运营。', ...presencePatch('就绪，等你点「启动」') });
+      updateStatus({
+        lastMessage: '就绪。点右下角「启动」开始自动运营。',
+        ...presencePatch('就绪，等你点「启动」'),
+        // 默认态即选中上次用的账号：用持久化设置点亮标题带（不再依赖启动流程）。
+        ...(settings.provider === 'adspower' && settings.adsProfileId
+          ? { account: { id: settings.adsProfileId, name: settings.adsProfileName || '', source: 'env' } }
+          : {}),
+      });
     }
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
