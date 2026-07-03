@@ -47,6 +47,7 @@ import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
 import { publishPost } from './flows/publish-post.js';
 import { PublishCommandDispatcher } from './flows/publish-command-handlers.js';
+import { PublishUiEventTracker, uiSnapshotToLines } from './flows/ui-event-lines.js';
 import { ImageUploader } from './flows/image-uploader.js';
 import { CdpFileInputSetter } from './cdp/file-input-setter.js';
 import { AnchorCache } from './locating/cache.js';
@@ -289,8 +290,11 @@ async function main(): Promise<void> {
     // 注入原始 CDP：navigate_entry 直达发布页 + select_mode 直驱点「上传图文」（发布页特殊 UI，通用选择器不可靠）。
     session.cdp,
   );
+  // 陪伴界面事件（edge-companion-ui 6.4）：发布终态的本地事实经 [ui-event] 行直达桌面壳。
+  const publishUiEvents = new PublishUiEventTracker();
   client.onPublishAtomCommand((env) => {
     void (async () => {
+      publishUiEvents.observe(env.payload);
       // §7 在途登记：按 publish.command.result 形状诚实判失败（带 recordId/seq/kind，同 env.id 回执）。
       inFlightPublishes.set(env.id, (reason) => {
         try {
@@ -308,6 +312,8 @@ async function main(): Promise<void> {
         } catch {
           /* best-effort */
         }
+        const recycledLine = publishUiEvents.onRecycled(env.payload);
+        if (recycledLine) console.log(recycledLine);
       });
       let result: PublishCommandResultPayload;
       try {
@@ -324,12 +330,20 @@ async function main(): Promise<void> {
       } finally {
         inFlightPublishes.delete(env.id);
       }
+      const uiLine = publishUiEvents.onResult(env.payload, result);
+      if (uiLine) console.log(uiLine);
       try {
         client.send('publish.command.result', result, env.id);
       } catch (sendErr) {
         console.error('[aidcp-edge] publish.command.result 回传失败:', sendErr);
       }
     })();
+  });
+
+  // 陪伴界面数据快照（edge-companion-ui 8.1）：云端 ui.snapshot（昵称/最近发布/审批状态）
+  // 转成 [ui-event] 行打到 stdout，由 Electron 壳解析驱动标题带与发布卡。
+  client.onUiSnapshot((env) => {
+    for (const uiLine of uiSnapshotToLines(env.payload)) console.log(uiLine);
   });
 
   // —— 自动浏览会话 ——

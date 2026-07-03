@@ -135,3 +135,17 @@ test('回归：局部计数补丁绝不清空其他计数（今日小结空数�
   assert.deepEqual(mergeStats(null, { likes: 1 }), { views: 0, likes: 1, collects: 0, comments: 0 });
   assert.deepEqual(mergeStats({ views: Number.NaN }, null), { views: 0, likes: 0, collects: 0, comments: 0 });
 });
+
+test('结构化 lastPublish 行（云端快照回填）→ 透传并截断标题', () => {
+  const s = createUiEventStream();
+  const evt = s.push(
+    '[ui-event] {"kind":"lastPublish","lastPublish":{"title":"这是一个特别特别长需要被截断的上次发布笔记标题超过三十个字符的示例标题","at":1730000000000}}',
+  ) as (UiEvent & { lastPublish?: { title: string; at: number } }) | null;
+  assert.ok(evt);
+  assert.equal(evt.kind, 'lastPublish');
+  assert.equal(evt.lastPublish?.at, 1730000000000);
+  assert.ok((evt.lastPublish?.title ?? '').length <= 31, '标题按 30 字截断（含省略号）');
+  assert.ok((evt.lastPublish?.title ?? '').endsWith('…'));
+  assert.equal(evt.sentence, undefined, 'lastPublish 不产活动流句子（不是刚发生的事件）');
+  assert.equal(evt.statsDelta, undefined, 'lastPublish 不计数');
+});

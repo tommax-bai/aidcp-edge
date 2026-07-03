@@ -271,6 +271,9 @@ const INTERACTION_COMMANDS = [
   'interaction.collect',
   'interaction.follow',
   'interaction.comment',
+  // 评论点赞（AIDCP_COMMENT_LIKE）：2026-07-03 发现的同类存量缺口——cloud comment_like→
+  // interaction.like_comment 已下发但白名单漏接、browse-session 处理分支永不可达；修复后锁死。
+  'interaction.like_comment',
 ] as const;
 
 for (const type of INTERACTION_COMMANDS) {
@@ -286,3 +289,29 @@ for (const type of INTERACTION_COMMANDS) {
     assert.equal(calls[0].type, type);
   });
 }
+// 回归：陪伴界面数据快照（ui.snapshot，cloud 主动推送）MUST 路由到 onUiSnapshot 处理器，
+// 不得在入口静默丢弃（§2 第4处同步点；edge-companion-ui 8.1）。
+test('edge-client: ui.snapshot 路由到 uiSnapshotHandler（不得静默丢弃）', async () => {
+  const ws = new FakeWebSocket();
+  const client = await connectClient(ws);
+  const calls: Envelope[] = [];
+  client.onUiSnapshot((env) => calls.push(env));
+
+  ws.emitMessage(
+    makeEnvelope('ui.snapshot', 'cmd-ui-snapshot', 2, {
+      account: { id: 'acc-1', nickname: '晚风手作' },
+      lastPublish: { title: '一篇笔记', at: 1730000000000 },
+    }),
+  );
+
+  assert.equal(calls.length, 1, 'ui.snapshot 应被路由到 uiSnapshotHandler 而非在入口丢弃');
+  assert.equal(calls[0].type, 'ui.snapshot');
+  assert.equal((calls[0].payload as { account?: { nickname?: string } }).account?.nickname, '晚风手作');
+});
+
+test('edge-client: ui.snapshot 未注册处理器时不抛错（静默容忍）', async () => {
+  const ws = new FakeWebSocket();
+  await connectClient(ws);
+  // 不注册 onUiSnapshot，直接推送——不应抛异常
+  ws.emitMessage(makeEnvelope('ui.snapshot', 'cmd-ui-snapshot-2', 2, {}));
+});

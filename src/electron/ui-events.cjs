@@ -18,7 +18,7 @@ const UI_EVENT_PREFIX = '[ui-event]';
 
 // 事件形状（字段全部可选，按需携带）：
 // {
-//   kind: 'activity' | 'presence' | 'publish' | 'identity',
+//   kind: 'activity' | 'presence' | 'publish' | 'identity' | 'lastPublish',
 //   type: string,                     // 机器可读标签（'like' / 'note_open' / 'connect' / ...）
 //   sentence: string,                 // 活动流一句话（人话）
 //   presence: string,                 // 在场感行文案（当前正在做什么）
@@ -26,6 +26,7 @@ const UI_EVENT_PREFIX = '[ui-event]';
 //   statsDelta: { views?, likes?, collects?, comments? },
 //   publish: { state:'pending'|'reminded'|'approved'|'published'|'rejected'|'failed', title?, code? },
 //   account: { id, name },
+//   lastPublish: { title, at },       // 云端快照回填「上次发布」（at=epoch ms）；不产活动流、不计数
 // }
 
 function tryParseStructured(line) {
@@ -225,6 +226,9 @@ function createUiEventStream() {
         // 结构化 publish 事件顺手更新标题上下文（叙述后续互动用）。
         if (structured.kind === 'publish' && structured.publish && structured.publish.title) {
           structured.publish.title = clipTitle(structured.publish.title, 30);
+        }
+        if (structured.kind === 'lastPublish' && structured.lastPublish && structured.lastPublish.title) {
+          structured.lastPublish.title = clipTitle(structured.lastPublish.title, 30);
         }
         return structured;
       }

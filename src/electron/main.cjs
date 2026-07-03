@@ -528,6 +528,14 @@ function handleEdgeLogLine(message, isError = false) {
         next.lastPublish = { title: evt.publish.title, at: next.publish.at };
       }
     }
+    if (evt.lastPublish && typeof evt.lastPublish.title === 'string' && evt.lastPublish.title) {
+      // 云端快照回填「上次发布」（edge-companion-ui 8.1）：以云端为准覆盖本地 ui-state；
+      // 只更新历史态，不折活动流、不计数（这不是「刚发生」的事件）。
+      next.lastPublish = {
+        title: evt.lastPublish.title,
+        at: Number.isFinite(evt.lastPublish.at) ? new Date(evt.lastPublish.at).toISOString() : null,
+      };
+    }
     if (evt.statsDelta) {
       const d = evt.statsDelta;
       next.stats = {

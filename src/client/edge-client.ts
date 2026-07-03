@@ -29,6 +29,7 @@ import {
   type NoteContentPayload,
   type PublishRequestPayload,
   type PublishCommandPayload,
+  type UiSnapshotPayload,
   type ActionCompletedPayload,
   type PageCardsPayload,
   type NoteDetailPayload,
@@ -60,6 +61,8 @@ export type BrowseCommandHandler = (env: Envelope) => void;
 export type PublishCommandHandler = (env: Envelope<PublishRequestPayload>) => void;
 /** A 阶段1 指令驱动发布：单条参数化原子指令处理器（publish.command）。 */
 export type PublishAtomCommandHandler = (env: Envelope<PublishCommandPayload>) => void;
+/** 陪伴界面数据快照处理器（ui.snapshot，cloud 主动推送；核心转 [ui-event] 行给桌面壳）。 */
+export type UiSnapshotHandler = (env: Envelope<UiSnapshotPayload>) => void;
 
 export interface EdgeClientOptions {
   /** 云端 WS 地址，如 ws://127.0.0.1:8787 */
@@ -116,6 +119,7 @@ export class EdgeClient {
   private browseHandler?: BrowseCommandHandler;
   private publishHandler?: PublishCommandHandler;
   private publishAtomHandler?: PublishAtomCommandHandler;
+  private uiSnapshotHandler?: UiSnapshotHandler;
 
   constructor(options: EdgeClientOptions) {
     this.opts = {
@@ -201,6 +205,14 @@ export class EdgeClient {
     this.publishAtomHandler = handler;
     return () => {
       if (this.publishAtomHandler === handler) this.publishAtomHandler = undefined;
+    };
+  }
+
+  /** 注册陪伴界面数据快照处理器（ui.snapshot，change edge-companion-ui 8.1）。 */
+  onUiSnapshot(handler: UiSnapshotHandler): () => void {
+    this.uiSnapshotHandler = handler;
+    return () => {
+      if (this.uiSnapshotHandler === handler) this.uiSnapshotHandler = undefined;
     };
   }
 
@@ -358,6 +370,10 @@ export class EdgeClient {
       // 否则云端 interaction.comment 在入口被静默丢弃 → 评论永不发出（飞书已审也没用）。
       // 与 command-bridge 的 comment→interaction.comment 映射对应（同 §2 第4处同步点）。
       env.type === 'interaction.comment' ||
+      // 评论点赞（AIDCP_COMMENT_LIKE 浏览闭环微互动）：与 comment 同理 MUST 放行，
+      // 否则云端 comment_like→interaction.like_comment 在入口被静默丢弃、browse-session
+      // 的处理分支永不可达（2026-07-03 收口 edge-companion-ui 时发现的存量缺口，同 §2 第4处同步点）。
+      env.type === 'interaction.like_comment' ||
       env.type === 'navigation.back' ||
       env.type === 'note.browse_images' ||
       env.type === 'note.scroll_comments' ||
@@ -382,6 +398,12 @@ export class EdgeClient {
 
     if (env.type === 'publish.command') {
       this.publishAtomHandler?.(env as Envelope<PublishCommandPayload>);
+      return;
+    }
+
+    // 陪伴界面数据快照（cloud 主动推送）：转给 main.ts 落成 [ui-event] 行
+    if (env.type === 'ui.snapshot') {
+      this.uiSnapshotHandler?.(env as Envelope<UiSnapshotPayload>);
       return;
     }
 

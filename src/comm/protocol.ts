@@ -18,6 +18,8 @@ export type MessageType =
   // —— 连接握手 ——
   | 'hello' // edge → cloud：边缘上线，声明能力/会话
   | 'welcome' // cloud → edge：握手确认
+  // —— 陪伴界面数据回填（cloud → edge，主动推送）——
+  | 'ui.snapshot' // cloud → edge：账号资料快照 + 发布审批状态回填（昵称/最近发布/pending·approved·rejected·failed），边缘核心转 [ui-event] 行给桌面壳
   // —— 任务规划 ——
   | 'plan.request' // edge → cloud：给定高层目标，请求拆解为步骤
   | 'plan.response' // cloud → edge：返回有序步骤清单
@@ -116,6 +118,29 @@ export interface WelcomePayload {
   /** 云端分配的会话 id */
   sessionId: string;
   serverVersion: string;
+}
+
+/**
+ * 陪伴界面数据快照（cloud → edge 主动推送，change edge-companion-ui 8.1）。
+ * 发送时机：① 边缘 hello 注册完成后回填全量快照；② 发布审批生命周期变化时增量推送。
+ * 红线：字段全部可选、缺失=云端无该数据；边缘 MUST NOT 以占位/猜测补全（宁缺毋假）。
+ */
+export interface UiSnapshotPayload {
+  /** 账号身份；nickname 为云端账号主数据里的小红书真实昵称（accounts.nickname），空/缺失时边缘不得转发 identity 事件 */
+  account?: { id: string; nickname?: string };
+  /** 最近一次成功发布的摘要；at = epoch ms（来源 publish_log.published_at，为草稿入库时间近似） */
+  lastPublish?: { title: string; at: number };
+  /**
+   * 发布审批状态。云端只推边缘看不到的状态（pending/approved/rejected/failed 终判）；
+   * published 由边缘在提交成功处自知、不经此通道；reminded 仅在真的再次提醒后才推——
+   * 云端当前无再提醒机制，故此值现阶段不会出现（枚举保留，绝不谎称已提醒）。
+   */
+  publish?: {
+    state: 'pending' | 'reminded' | 'approved' | 'published' | 'rejected' | 'failed';
+    title?: string;
+    /** 界面「编号」对暗号用，与飞书审批卡「编号」字段一致（取发布记录 id，如 "#83"） */
+    code?: string;
+  };
 }
 
 /** 规划请求：高层自然语言目标 */
@@ -304,7 +329,8 @@ export interface SessionBudgetPayload {
   startedAt: number;
   /**
    * 极薄节奏默认块（指令级节奏 Command Pacing）。可选、仅供边缘**自主动作 / 断连兜底**用；
-   * 内容相关时长随决策指令以 `dwellMs`/`thinkMs` 下发，不在此携带系数。旧端忽略本字段。
+   * 内容相关的 read/pause/fatigue 系数**不**在此下发——它们收口在云端，随决策指令以
+   * `dwellMs`/`thinkMs` 下发。旧端忽略本字段并走内置默认。
    */
   pacing?: PacingDefaultsPayload;
 }
@@ -479,11 +505,11 @@ export interface NoteAckPayload {
 
 // —— 角色驱动指令 Payload（cloud → edge）——
 //
-// 时间指令（timing directive，指令级节奏 Command Pacing）：决策指令携带可选时间字段，
-// 云端基于已上报内容 + 风控状态 + 会话进度算出**中心值**，边缘收到后叠 lognormal 抖动再执行：
-//   - `thinkMs`：执行动作**前**的犹豫 / 感知时间；
-//   - `dwellMs`：离开当前页前应达到的**总停留时间**（back / close）。
-// 全部可选、向后兼容；缺失走边缘内置默认兜底。
+// 时间指令（timing directive，指令级节奏 Command Pacing）：以下决策指令携带可选时间字段，
+// 由云端基于已上报内容 + 风控状态 + 会话进度算出**中心值**：
+//   - `thinkMs`：执行该动作**前**的犹豫 / 感知时间（动作之前）；
+//   - `dwellMs`：离开当前页前应达到的**总停留时间**（用于 back / close）。
+// 全部可选、向后兼容（旧端忽略）。边缘收到后叠加 lognormal 抖动再执行，缺失则走内置默认兜底。
 
 export interface PageScrollPayload {
   reason?: string;  // feed_scroll | search_scroll
@@ -713,6 +739,7 @@ export interface ErrorPayload {
 export interface PayloadMap {
   hello: HelloPayload;
   welcome: WelcomePayload;
+  'ui.snapshot': UiSnapshotPayload;
   'plan.request': PlanRequestPayload;
   'plan.response': PlanResponsePayload;
   'select.request': SelectRequestPayload;
