@@ -1,16 +1,23 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM, type DOMWindow } from 'jsdom';
 
-// 桌面外壳渲染层无头冒烟：用真实 index.html + renderer.js，在 jsdom 里注入 window.aidcpEdge 桩，
+// 桌面外壳渲染层无头冒烟：用真实 index.html + ui-logic.js + renderer.js，在 jsdom 里注入 window.aidcpEdge 桩，
 // 验证 AdsPower 探测 / 环境直接列表 / 点选带出 / 手动开关 / 高级折叠 / 保存不重启 / 悬浮三态 fab 等接线。
 const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
+const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
 const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
+
+// renderer 装了 1s 走字 interval：测试结束统一 close 掉所有 jsdom window，防止句柄挂住测试进程。
+const openWindows: DOMWindow[] = [];
+after(() => {
+  for (const w of openWindows) w.close();
+});
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -68,7 +75,9 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
 async function boot(stub: Stub): Promise<DOMWindow> {
   const dom = new JSDOM(html, { runScripts: 'dangerously' });
   const { window } = dom;
+  openWindows.push(window);
   (window as unknown as { aidcpEdge: Stub }).aidcpEdge = stub;
+  window.eval(uiLogicSrc); // 纯视图逻辑先注入（真实加载顺序同 index.html 的 <script> 顺序）
   window.eval(rendererSrc);
   for (let i = 0; i < 5; i++) await tick(); // flush getSettings→probe→auto refreshEnvs 链
   return window;

@@ -19,4 +19,12 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
     ipcRenderer.on('status:update', listener);
     return () => ipcRenderer.removeListener('status:update', listener);
   },
+  // 活动流条目（一句人话 + 时间戳 + 类型），与 status 分道：无界流不塞进状态对象。
+  onActivity: (callback) => {
+    const listener = (_event, entry) => callback(entry);
+    ipcRenderer.on('ui:activity', listener);
+    return () => ipcRenderer.removeListener('ui:activity', listener);
+  },
+  // 「打开飞书 ↗」纯导航深链（不是审批操作）；拉不起返回 { ok:false }，渲染层降级纯文字。
+  openFeishu: () => ipcRenderer.invoke('feishu:open'),
 });

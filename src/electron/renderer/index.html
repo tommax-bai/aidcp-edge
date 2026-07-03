@@ -7,46 +7,121 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="shell">
-      <!-- Row 1: Hero + Stats side by side -->
-      <div class="top-row">
-        <section class="hero">
-          <div>
-            <p class="eyebrow">AIDCP Edge</p>
-            <h1>桌面控制台</h1>
-            <p class="subtle" id="subtitle">以持久化配置启动浏览器，用于小红书登录与自动运营。</p>
-          </div>
-          <div class="actions">
-            <button id="relogin" class="secondary">重新登录</button>
-          </div>
-        </section>
-
-        <section class="stats">
-          <article>
-            <span>浏览</span>
-            <strong id="views">0</strong>
-          </article>
-          <article>
-            <span>点赞</span>
-            <strong id="likes">0</strong>
-          </article>
-          <article>
-            <span>收藏</span>
-            <strong id="collects">0</strong>
-          </article>
-          <article>
-            <span>评论</span>
-            <strong id="comments">0</strong>
-          </article>
-        </section>
+    <!-- ═══ 自定义标题带：账号身份 + 综合健康（可拖拽；控件岛 no-drag）═══ -->
+    <header class="titlebar tone-normal" id="titlebar">
+      <div class="tb-lights-pad"></div>
+      <div class="acct">
+        <div class="ava" id="acct-ava">书</div>
+        <div class="acct-h" id="acct-name">小红书账号</div>
+        <span class="acct-p">小红书</span>
       </div>
+      <div class="tb-spacer"></div>
+      <button id="health-pill" class="health-pill nodrag" type="button">
+        <span class="bdot" id="health-dot"></span><span id="health-label">就绪</span>
+      </button>
+      <button id="gear" class="gear nodrag" type="button" title="设置" aria-label="设置">⚙</button>
+      <div class="tb-winctl-pad"></div>
+    </header>
 
-      <section id="login-guide" class="notice hidden">
-        <strong id="notice-title">需要登录</strong>
-        <span id="notice-body">请在刚打开的 Chrome 窗口中登录 xiaohongshu.com，检测到登录后 AIDCP Edge 会自动继续。</span>
+    <!-- 健康明细浮层：五路状态的人话版（点健康药丸开合） -->
+    <div id="health-pop" class="health-pop hidden">
+      <p id="health-detail" class="hp-hint"></p>
+      <div class="hp-row"><span class="hp-label">小红书登录</span><strong id="auth-status" class="badge">检测中</strong></div>
+      <div class="hp-row"><span class="hp-label">云端连接</span><strong id="cloud-status" class="badge">未连接</strong></div>
+      <div class="hp-row"><span class="hp-label">自动运营</span><strong id="session-state" class="badge">待命</strong></div>
+      <div class="hp-row"><span class="hp-label">账号保护</span><strong id="risk-status" class="badge">正常</strong></div>
+      <div class="hp-row"><span class="hp-label">本机引擎</span><strong id="edge-state" class="badge">已停止</strong></div>
+    </div>
+
+    <main class="shell">
+      <!-- 阻塞动作升级为醒目主动步骤（需登录 / 待配置时出现；待配置可点开设置抽屉） -->
+      <section id="login-guide" class="setup hidden">
+        <div class="setup-txt">
+          <strong id="notice-title">需要登录</strong>
+          <span id="notice-body">请在刚打开的 Chrome 窗口中登录 xiaohongshu.com，检测到登录后会自动继续。</span>
+        </div>
+        <button id="notice-action" class="setup-btn hidden" type="button">去设置</button>
       </section>
 
-      <!-- Browser provider settings -->
+      <!-- 在场感行：当前动作 + 呼吸点 + 新鲜度走字（动效只由真实事件驱动） -->
+      <section class="presence">
+        <div class="presence-ic"><span class="core" id="presence-core"></span></div>
+        <div class="presence-main">
+          <div class="presence-txt"><span id="presence-text">等待启动…</span></div>
+          <div class="fresh" id="presence-fresh"></div>
+        </div>
+      </section>
+
+      <!-- 浏览循环 chip：AI 的循环自打勾 -->
+      <div class="loop" id="loop">
+        <span class="loop-step" data-stage="feed">刷 feed</span><span class="loop-sep">›</span>
+        <span class="loop-step" data-stage="select">选笔记</span><span class="loop-sep">›</span>
+        <span class="loop-step" data-stage="read">阅读</span><span class="loop-sep">›</span>
+        <span class="loop-step" data-stage="interact">互动</span><span class="loop-sep">›</span>
+        <span class="loop-step" data-stage="return">返回续刷</span>
+      </div>
+
+      <!-- 发布等待卡（纯展示零按钮；审批授权只在飞书。唯一可点=「打开飞书 ↗」纯导航） -->
+      <section id="pub-card" class="pub hidden">
+        <div class="pub-head">
+          <span class="pub-evt" id="pub-head">AI 写好了一条新笔记</span>
+          <span class="pub-time" id="pub-corner"></span>
+        </div>
+        <div class="pub-body">
+          <div>
+            <div class="pub-title" id="pub-title"></div>
+            <div class="pub-meta" id="pub-meta">图文笔记</div>
+          </div>
+        </div>
+        <div class="journey">
+          <div class="j-steps" id="pub-steps">
+            <div class="j-step"><span class="j-dot"></span><span class="j-lab">写好内容</span></div>
+            <div class="j-step"><span class="j-dot"></span><span class="j-lab">发到飞书</span></div>
+            <div class="j-step"><span class="j-dot"></span><span class="j-lab">等你确认</span></div>
+            <div class="j-step"><span class="j-dot"></span><span class="j-lab">择时发布</span></div>
+          </div>
+        </div>
+        <div class="pub-foot">
+          <p id="pub-foot">全文和「通过 / 驳回」按钮在飞书里，审批结果会自动同步到这里。</p>
+          <span class="pub-link" id="pub-link" role="link" tabindex="0">打开飞书 ↗</span>
+        </div>
+      </section>
+
+      <!-- 叙述式活动流：一句人话一条、最新在上 -->
+      <div class="stream-h">今天做了这些</div>
+      <section class="stream-wrap">
+        <div id="activity-stream" class="stream">
+          <p class="stream-empty" id="stream-empty">还没有动态。启动后，AI 做的每件事都会记在这里。</p>
+        </div>
+      </section>
+
+      <!-- 今日小结条（计数从门面降级至此） -->
+      <section class="summary">
+        <span class="lbl">今日</span>
+        <div class="kpi"><b id="views">0</b><span>浏览</span></div>
+        <div class="kpi"><b id="likes">0</b><span>点赞</span></div>
+        <div class="kpi"><b id="collects">0</b><span>收藏</span></div>
+        <div class="kpi"><b id="comments">0</b><span>评论</span></div>
+        <span class="summary-spacer"></span>
+        <time id="updated-at" class="summary-time"></time>
+      </section>
+
+      <!-- 原始日志收进开发者详情（折叠） -->
+      <details class="dev">
+        <summary>开发者详情</summary>
+        <pre id="last-message">等待状态…</pre>
+      </details>
+    </main>
+
+    <!-- ═══ 设置抽屉：配置表单整体迁入（既有控件 ID 与逻辑不变）═══ -->
+    <div id="drawer-mask" class="drawer-mask hidden"></div>
+    <aside id="drawer" class="drawer" aria-hidden="true">
+      <div class="drawer-head">
+        <span>设置</span>
+        <button id="drawer-close" class="drawer-x nodrag" type="button" aria-label="关闭设置">×</button>
+      </div>
+      <p class="subtle" id="subtitle">以持久化配置启动浏览器，用于小红书登录与自动运营。</p>
+
       <section class="settings">
         <div class="settings-head">
           <span>浏览器</span>
@@ -106,41 +181,14 @@
         </div>
       </section>
 
-      <!-- Row 2: Status cards horizontal -->
-      <section class="grid">
-        <article class="card">
-          <span class="label">小红书登录</span>
-          <strong id="auth-status" class="badge">检测中</strong>
-        </article>
-        <article class="card">
-          <span class="label">云端连接</span>
-          <strong id="cloud-status" class="badge">未连接</strong>
-        </article>
-        <article class="card">
-          <span class="label">会话状态</span>
-          <strong id="session-state" class="badge">空闲</strong>
-        </article>
-        <article class="card">
-          <span class="label">风控状态</span>
-          <strong id="risk-status" class="badge">正常</strong>
-        </article>
-        <article class="card">
-          <span class="label">边缘进程</span>
-          <strong id="edge-state" class="badge">已停止</strong>
-        </article>
-      </section>
+      <div class="drawer-foot">
+        <button id="relogin" class="secondary" type="button">重新登录</button>
+      </div>
+    </aside>
 
-      <!-- Row 3: Log area (independent large section) -->
-      <section class="log">
-        <div class="log-head">
-          <span>最新状态</span>
-          <time id="updated-at"></time>
-        </div>
-        <pre id="last-message">等待状态…</pre>
-      </section>
-    </main>
-    <!-- 悬浮会话控制：随状态三态（停止→启动 / 运行→暂停 / 已暂停→恢复） -->
+    <!-- 悬浮会话控制：三态（停止→启动 / 运行→暂停 / 已暂停→恢复），行为不变 -->
     <button id="session-fab" class="fab" type="button">启动</button>
+    <script src="./ui-logic.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

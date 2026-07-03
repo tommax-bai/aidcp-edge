@@ -1,3 +1,8 @@
+// 陪伴式主界面渲染层（edge-companion-ui）。
+// 纯视图逻辑（健康合成 / 在场感动效门 / 发布卡状态机）在 ui-logic.js（window.uiLogic，可单测）；
+// 本文件只做 DOM 粘合。设置表单 / 悬浮三态 FAB 的既有逻辑原样保留（仅 DOM 迁入设置抽屉）。
+const uiLogic = window.uiLogic;
+
 const fields = {
   auth: document.querySelector('#auth-status'),
   cloud: document.querySelector('#cloud-status'),
@@ -15,7 +20,36 @@ const fields = {
   loginGuide: document.querySelector('#login-guide'),
   noticeTitle: document.querySelector('#notice-title'),
   noticeBody: document.querySelector('#notice-body'),
+  noticeAction: document.querySelector('#notice-action'),
   subtitle: document.querySelector('#subtitle'),
+  // 陪伴式新增
+  titlebar: document.querySelector('#titlebar'),
+  acctAva: document.querySelector('#acct-ava'),
+  acctName: document.querySelector('#acct-name'),
+  healthPill: document.querySelector('#health-pill'),
+  healthLabel: document.querySelector('#health-label'),
+  healthPop: document.querySelector('#health-pop'),
+  healthDetail: document.querySelector('#health-detail'),
+  gear: document.querySelector('#gear'),
+  presenceText: document.querySelector('#presence-text'),
+  presenceFresh: document.querySelector('#presence-fresh'),
+  presenceCore: document.querySelector('#presence-core'),
+  loop: document.querySelector('#loop'),
+  stream: document.querySelector('#activity-stream'),
+  streamEmpty: document.querySelector('#stream-empty'),
+  pubCard: document.querySelector('#pub-card'),
+  pubHead: document.querySelector('#pub-head'),
+  pubCorner: document.querySelector('#pub-corner'),
+  pubTitle: document.querySelector('#pub-title'),
+  pubMeta: document.querySelector('#pub-meta'),
+  pubSteps: document.querySelector('#pub-steps'),
+  pubFoot: document.querySelector('#pub-foot'),
+  pubLink: document.querySelector('#pub-link'),
+  drawer: document.querySelector('#drawer'),
+  drawerMask: document.querySelector('#drawer-mask'),
+  drawerClose: document.querySelector('#drawer-close'),
+  lightsPad: document.querySelector('.tb-lights-pad'),
+  winctlPad: document.querySelector('.tb-winctl-pad'),
 };
 
 const settingsUi = {
@@ -50,8 +84,8 @@ const STATUS_LABELS = {
     'config required': '待配置',
   },
   cloud: { disconnected: '未连接', connected: '已连接' },
-  session: { idle: '空闲', running: '运行中', paused: '已暂停' },
-  risk: { normal: '正常', warned: '警戒', restricted: '受限', frozen: '冻结' },
+  session: { idle: '待命', running: '进行中', paused: '已暂停' },
+  risk: { normal: '正常', warned: '谨慎放慢', restricted: '受限', frozen: '已冻结' },
   edge: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '异常' },
 };
 
@@ -67,16 +101,28 @@ let editingProvider = null;
 // 「保存」按钮已并入「启动」——启动时先存再起，故无独立保存按钮。
 let dirty = false;
 let adsDownloadUrl = 'https://www.adspower.net/download';
-const LOG_RETENTION_MS = 2 * 60 * 1000; // 2 minutes
+const LOG_RETENTION_MS = 2 * 60 * 1000; // 开发者详情原始日志保留 2 分钟
 const logEntries = [];
+let lastLogMessage = '';
+
+// 平台占位：mac 红绿灯内嵌预留左侧；Windows 叠加窗控预留右侧。其余平台两侧归零。
+(function initPlatformPads() {
+  const platform = (navigator.platform || '').toLowerCase();
+  const isMac = platform.includes('mac');
+  const isWin = platform.includes('win');
+  if (!isMac && fields.lightsPad) fields.lightsPad.classList.add('none');
+  if (isWin && fields.winctlPad) fields.winctlPad.classList.add('win');
+})();
 
 function setBadge(element, field, value) {
   element.textContent = STATUS_LABELS[field]?.[value] ?? value;
   element.className = `badge ${value}`;
 }
 
+// ─── 开发者详情：原始日志（滚动保留 + 连续去重）───
 function addLogEntry(message) {
-  if (!message) return;
+  if (!message || message === lastLogMessage) return;
+  lastLogMessage = message;
   const now = Date.now();
   logEntries.push({ time: now, message });
   const cutoff = now - LOG_RETENTION_MS;
@@ -89,28 +135,175 @@ function addLogEntry(message) {
 function renderLog() {
   fields.lastMessage.innerHTML = logEntries.map((entry) => {
     const time = new Date(entry.time).toLocaleTimeString();
-    return `<div class="log-entry"><span class="log-time">${time}</span> ${entry.message}</div>`;
+    return `<div class="log-entry"><span class="log-time">${time}</span> ${escapeHtml(entry.message)}</div>`;
   }).join('');
   fields.lastMessage.scrollTop = fields.lastMessage.scrollHeight;
 }
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ─── 阻塞动作主动步骤（需登录 / 待配置）───
 function renderNotice(status) {
   let title = '';
   let body = '';
+  let action = false;
   if (status.auth === 'login required') {
     title = '需要登录';
-    body = '请在刚打开的 Chrome 窗口中登录 xiaohongshu.com，检测到登录后 AIDCP Edge 会自动继续。';
+    body = '请在刚打开的 Chrome 窗口中登录 xiaohongshu.com，检测到登录后会自动继续。';
   } else if (status.auth === 'config required') {
-    title = '待配置';
-    body = '请在下方「浏览器」设置里选择一个环境（或在「高级设置」里打开「手动填写」填分身 ID），然后点右下角「启动」。';
+    title = '先完成一次设置';
+    body = '选择一个浏览器环境（或手动填写分身 ID），之后就不用再管了。';
+    action = true;
   }
   const show = Boolean(title);
   fields.loginGuide.classList.toggle('hidden', !show);
   if (show) {
     fields.noticeTitle.textContent = title;
     fields.noticeBody.textContent = body;
+    fields.noticeAction.classList.toggle('hidden', !action);
   }
 }
+
+// ─── 标题带：账号身份 + 健康合成 + 风控染色 ───
+function renderTitlebar(status) {
+  const acct = status.account;
+  if (acct && (acct.name || acct.id)) {
+    const name = acct.name || acct.id;
+    fields.acctName.textContent = name.startsWith('@') ? name : `@${name}`;
+    fields.acctAva.textContent = (acct.name || acct.id).replace(/^@/, '').slice(0, 1) || '书';
+  }
+  const health = uiLogic.synthesizeHealth(status);
+  fields.healthLabel.textContent = health.label;
+  fields.healthPill.className = `health-pill nodrag ${health.code}`;
+  fields.healthDetail.textContent = health.detail || '';
+  fields.titlebar.className = `titlebar tone-${uiLogic.bandTone(status)}`;
+}
+
+// ─── 在场感行（动效只由真实事件驱动；诚实待命）───
+function renderPresence(status, nowMs) {
+  const view = uiLogic.presenceView(status, nowMs);
+  fields.presenceText.textContent = view.text;
+  fields.presenceText.classList.toggle('shimmer', view.animate);
+  fields.presenceCore.classList.toggle('live', view.animate);
+  fields.presenceFresh.textContent = view.fresh || '';
+}
+
+// ─── 浏览循环 chip ───
+function renderLoop(status) {
+  const running = status.edge === 'running' && status.session === 'running';
+  const active = running ? uiLogic.loopIndex(status.loopStage) : -1;
+  fields.loop.querySelectorAll('.loop-step').forEach((el) => {
+    el.classList.toggle('on', running && el.dataset.stage === status.loopStage && active !== -1);
+  });
+}
+
+// ─── 发布等待卡（纯展示零按钮；终态收进活动流）───
+let lastPublishSig = '';
+function renderPublish(status, nowMs) {
+  const view = uiLogic.publishView(status.publish, nowMs);
+  // 终态：卡片收起 + 折一条进活动流（按签名去重，状态重推不重复记）。
+  if (view.collapsed) {
+    const sig = `${status.publish.state}:${status.publish.title || ''}`;
+    if (sig !== lastPublishSig) {
+      lastPublishSig = sig;
+      prependActivity({
+        ts: status.publish.at || new Date().toISOString(),
+        type: `publish_${view.collapsed.type}`,
+        sentence: view.collapsed.sentence,
+      }, view.collapsed.type === 'published' ? 'pub-done' : 'pub-muted');
+    }
+  }
+  fields.pubCard.classList.toggle('hidden', !view.visible);
+  if (!view.visible) return;
+  lastPublishSig = `${status.publish.state}:${status.publish.title || ''}`;
+  fields.pubHead.textContent = view.head;
+  fields.pubCorner.textContent = view.corner;
+  fields.pubCorner.classList.toggle('hot', Boolean(view.cornerHot));
+  fields.pubTitle.textContent = view.title || '（新笔记）';
+  fields.pubMeta.textContent = view.code ? `图文笔记 · 编号 ${view.code}` : '图文笔记';
+  fields.pubFoot.textContent = view.foot;
+  const steps = fields.pubSteps.querySelectorAll('.j-step');
+  view.stepStates.forEach((state, i) => {
+    const el = steps[i];
+    if (!el) return;
+    el.className = `j-step ${state}${state === 'cur' && view.curCalm ? ' calm' : ''}`;
+  });
+}
+
+// 「打开飞书 ↗」：纯导航（拉起飞书客户端），不是审批操作；拉不起降级为纯文字说明。
+fields.pubLink.addEventListener('click', async () => {
+  const api = window.aidcpEdge.openFeishu;
+  if (!api) return;
+  const res = await api();
+  if (!res || !res.ok) {
+    fields.pubLink.textContent = '在手机或电脑上打开飞书即可处理';
+    fields.pubLink.classList.add('plain');
+  }
+});
+
+// ─── 叙述式活动流（环形 ≤200 条，最新在上）───
+const STREAM_MAX = 200;
+function prependActivity(entry, extraClass) {
+  if (!entry || !entry.sentence) return;
+  if (fields.streamEmpty) fields.streamEmpty.classList.add('hidden');
+  const row = document.createElement('div');
+  row.className = `ev${extraClass ? ` ${extraClass}` : ''}`;
+  row.dataset.ts = entry.ts || new Date().toISOString();
+  const t = document.createElement('span');
+  t.className = 'ev-t';
+  t.textContent = uiLogic.relTime(Date.parse(row.dataset.ts), Date.now());
+  const x = document.createElement('span');
+  x.className = 'ev-x';
+  x.textContent = entry.sentence;
+  row.appendChild(t);
+  row.appendChild(x);
+  fields.stream.insertBefore(row, fields.stream.firstChild);
+  while (fields.stream.querySelectorAll('.ev').length > STREAM_MAX) {
+    const evs = fields.stream.querySelectorAll('.ev');
+    evs[evs.length - 1].remove();
+  }
+}
+
+// 每秒走字：在场感新鲜度 / 发布卡等待时长 / 活动流相对时间（真实时间，不造活跃）。
+setInterval(() => {
+  if (!currentStatus) return;
+  const now = Date.now();
+  renderPresence(currentStatus, now);
+  if (currentStatus.publish) renderPublish(currentStatus, now);
+  fields.stream.querySelectorAll('.ev').forEach((row) => {
+    const ts = Date.parse(row.dataset.ts || '');
+    if (Number.isFinite(ts)) row.querySelector('.ev-t').textContent = uiLogic.relTime(ts, now);
+  });
+}, 1000);
+
+// ─── 健康明细浮层 ───
+fields.healthPill.addEventListener('click', (event) => {
+  event.stopPropagation();
+  fields.healthPop.classList.toggle('hidden');
+});
+document.addEventListener('click', (event) => {
+  if (!fields.healthPop.classList.contains('hidden') && !fields.healthPop.contains(event.target)) {
+    fields.healthPop.classList.add('hidden');
+  }
+});
+
+// ─── 设置抽屉 ───
+function openDrawer() {
+  fields.drawer.classList.add('open');
+  fields.drawer.setAttribute('aria-hidden', 'false');
+  fields.drawerMask.classList.remove('hidden');
+}
+function closeDrawer() {
+  fields.drawer.classList.remove('open');
+  fields.drawer.setAttribute('aria-hidden', 'true');
+  fields.drawerMask.classList.add('hidden');
+}
+fields.gear.addEventListener('click', openDrawer);
+fields.drawerClose.addEventListener('click', closeDrawer);
+fields.drawerMask.addEventListener('click', closeDrawer);
+fields.noticeAction.addEventListener('click', openDrawer);
 
 // 悬浮会话按钮三态：已暂停→恢复 / 已停止（或异常）→启动 / 其余（运行·启动中）→暂停。
 function renderFab(status) {
@@ -138,6 +331,7 @@ function renderFab(status) {
 
 function render(status) {
   currentStatus = status;
+  const now = Date.now();
   setBadge(fields.auth, 'auth', status.auth);
   setBadge(fields.cloud, 'cloud', status.cloud);
   setBadge(fields.session, 'session', status.session);
@@ -149,15 +343,19 @@ function render(status) {
   fields.comments.textContent = status.stats.comments ?? 0; // ?? 0 兜底旧版 status 无 comments 字段
   fields.updatedAt.textContent = new Date(status.updatedAt).toLocaleTimeString();
   addLogEntry(status.lastMessage);
+  renderTitlebar(status);
+  renderPresence(status, now);
+  renderLoop(status);
+  renderPublish(status, now);
   renderFab(status);
+  renderNotice(status);
   updateApplyRestart(); // 依「dirty && 核心在跑」决定是否显示「按新设置重启」
   if (status.provider && SUBTITLE[status.provider]) fields.subtitle.textContent = SUBTITLE[status.provider];
   // 表单未在编辑时，让 provider 分段跟随实际运行 provider。
   if (status.provider && !editingProvider) applyProviderSelection(status.provider);
-  renderNotice(status);
 }
 
-// ─── Browser provider settings ───
+// ─── Browser provider settings（既有逻辑原样保留，DOM 已迁入抽屉）───
 
 function applyProviderSelection(provider) {
   const isAds = provider !== 'self';
@@ -333,7 +531,14 @@ function selectProfile(userId, itemEl) {
   if (itemEl) itemEl.classList.add('selected');
 }
 
+// 核心是否在跑（自动选中的闸：在跑时绝不替用户改配置）。
+function coreRunning() {
+  return Boolean(currentStatus) && currentStatus.edge !== 'stopped' && currentStatus.edge !== 'warning';
+}
+
 // 直接把环境铺成可点行（非下拉）。每行：名称 + 序号/分组/代理配置/user_id。
+// 返回 { autoSelected }：恰好一个环境、分身 ID 为空且核心未在跑时自动选中（spec：唯一环境自动选中；
+// 多环境不代选、已有值不覆盖、在跑不动配置）。
 function populateEnvs(profiles) {
   const list = settingsUi.adsEnvList;
   const current = settingsUi.adsProfile.value.trim();
@@ -343,8 +548,9 @@ function populateEnvs(profiles) {
     empty.className = 'ads-env-empty';
     empty.textContent = '（未找到环境，可在「高级设置」打开「手动填写」填分身 ID）';
     list.appendChild(empty);
-    return;
+    return { autoSelected: null };
   }
+  let firstItem = null;
   for (const prof of profiles) {
     const item = document.createElement('div');
     item.className = 'ads-env-item';
@@ -363,8 +569,14 @@ function populateEnvs(profiles) {
     item.appendChild(meta);
     item.addEventListener('click', () => selectProfile(prof.userId, item));
     if (prof.userId && prof.userId === current) item.classList.add('selected');
+    if (!firstItem) firstItem = item;
     list.appendChild(item);
   }
+  if (profiles.length === 1 && !current && profiles[0].userId && !coreRunning()) {
+    selectProfile(profiles[0].userId, firstItem);
+    return { autoSelected: profiles[0].name || profiles[0].userId };
+  }
+  return { autoSelected: null };
 }
 
 // 拉取环境列表；失败诚实降级为手敲（疑似鉴权失败提示已用当前填写值、别叫用户重填已填的框）。
@@ -381,9 +593,10 @@ async function refreshEnvs() {
       openAdvanced();
       return;
     }
-    populateEnvs(r.profiles || []);
+    const { autoSelected } = populateEnvs(r.profiles || []);
     const extra = r.truncated ? '（环境较多，仅显示前若干条，可在 AdsPower 用分组精简）' : '';
-    setEnvMsg(`已加载 ${(r.profiles || []).length} 个环境${extra}。点选一个即自动带出分身 ID。`, false);
+    const autoHint = autoSelected ? `已自动选中唯一环境「${autoSelected}」。` : '点选一个即自动带出分身 ID。';
+    setEnvMsg(`已加载 ${(r.profiles || []).length} 个环境${extra}。${autoHint}`, false);
   } catch (e) {
     setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可在「高级设置」打开「手动填写」填分身 ID。`, true);
     openAdvanced();
@@ -461,7 +674,10 @@ fields.relogin.addEventListener('click', async () => {
   }
 });
 
+// ─── 启动接线 ───
 window.aidcpEdge.onStatusUpdate(render);
+// 活动流条目（旧版主进程无此通道时安全跳过——渲染层对旧形状降级不炸）。
+window.aidcpEdge.onActivity?.((entry) => prependActivity(entry));
 window.aidcpEdge.getSettings().then((s) => {
   applySettings(s);
   // 面板加载时若为 AdsPower 模式即探一次并自动列环境（真实事件，低频；非「打开设置面板」）。

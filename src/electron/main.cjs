@@ -4,6 +4,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
 const { createAdsLocalApi } = require('./ads-local-api.cjs');
+const { createUiEventStream } = require('./ui-events.cjs');
 
 // 主进程侧 AdsPower 只读客户端（探测 + 环境列表）。单例持有本进程内**唯一**串行节流（1req/s）。
 // 与核心子进程内的 AdsPowerProvider 节流各自独立（跨进程无法共享内存队列，见 ads-local-api.cjs 头注）。
@@ -133,15 +134,56 @@ const status = {
   edge: 'stopped',
   lastMessage: '边缘进程尚未运行。',
   updatedAt: new Date().toISOString(),
+  // 陪伴式界面新增字段（形状兼容：旧字段全保留，旧渲染层忽略即可）。
+  // account：账号身份（由核心「账号身份已确立」行带出，标题带展示）。
+  account: null,
+  // presence：在场感行（当前正在做什么 + 时间戳）；动效门在渲染层按新鲜度自持。
+  presence: { text: '等待启动…', at: new Date().toISOString() },
+  // publish：发布卡只读投影（pending/reminded/approved/published/rejected/failed）。
+  publish: null,
 };
+
+// 核心日志 → UI 事件（结构化优先、中文行映射兜底；计数迁入该模块并修正为仅 ✓ 成功行计数）。
+const uiEvents = createUiEventStream();
+
+// Windows 叠加窗控随风控状态染色（mac 红绿灯为系统绘制、无需管）。
+// 仅 win32 且 overlay 存在时可调；Electron 在未启用 overlay 时会抛错，故 try/catch 包裹。
+const OVERLAY_TONES = {
+  normal: { color: '#eef4ff', symbolColor: '#1a2233', height: 46 },
+  warned: { color: '#fdf3e0', symbolColor: '#5b4708', height: 46 },
+  danger: { color: '#fde8e8', symbolColor: '#7f1d1d', height: 46 },
+};
+
+function applyOverlayTone(risk) {
+  if (process.platform !== 'win32' || !mainWindow) return;
+  const tone = risk === 'restricted' || risk === 'frozen' ? 'danger' : risk === 'warned' ? 'warned' : 'normal';
+  try {
+    mainWindow.setTitleBarOverlay(OVERLAY_TONES[tone]);
+  } catch {
+    /* overlay 未启用（如 env 强制默认框）时忽略 */
+  }
+}
 
 function updateStatus(patch) {
   Object.assign(status, patch, { updatedAt: new Date().toISOString() });
   if (patch.stats) {
     status.stats = { ...status.stats, ...patch.stats };
   }
+  if (patch.risk) applyOverlayTone(patch.risk);
   BrowserWindow.getAllWindows().forEach((window) => {
     window.webContents.send('status:update', status);
+  });
+}
+
+// 在场感更新的便捷封装：文案 + 现在时刻。
+function presencePatch(text) {
+  return { presence: { text, at: new Date().toISOString() } };
+}
+
+// 活动流条目单独走 ui:activity 通道（无界流不塞进 status 对象）。
+function broadcastActivity(entry) {
+  BrowserWindow.getAllWindows().forEach((window) => {
+    window.webContents.send('ui:activity', entry);
   });
 }
 
@@ -166,13 +208,29 @@ function surfaceFailure(title, body) {
   }
 }
 
+// 自定义标题带的窗框选项：隐藏系统标题栏但保留**原生**窗控（mac 红绿灯内嵌 / Windows 叠加窗控）。
+// 绝不用 frame:false（会丢原生关闭/缩放，非技术用户可能关不掉窗）。其余平台维持默认框。
+function frameOptions() {
+  if (process.platform === 'darwin') {
+    return { titleBarStyle: 'hidden', trafficLightPosition: { x: 14, y: 16 } };
+  }
+  if (process.platform === 'win32') {
+    return {
+      titleBarStyle: 'hidden',
+      titleBarOverlay: { color: '#eef4ff', symbolColor: '#1a2233', height: 46 },
+    };
+  }
+  return {};
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 760,
-    height: 560,
+    height: 640,
     minWidth: 640,
-    minHeight: 480,
+    minHeight: 520,
     title: 'AIDCP Edge',
+    ...frameOptions(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -225,7 +283,7 @@ function startEdge() {
     windowsHide: true,
   });
 
-  updateStatus({ edge: 'starting', session: 'running', lastMessage: '正在启动 aidcp-edge…' });
+  updateStatus({ edge: 'starting', session: 'running', lastMessage: '正在启动 aidcp-edge…', ...presencePatch('正在启动引擎…') });
 
   edgeProcess.stdout.on('data', (chunk) => handleEdgeOutput(chunk.toString()));
   edgeProcess.stderr.on('data', (chunk) => handleEdgeOutput(chunk.toString(), true));
@@ -244,6 +302,7 @@ function startEdge() {
       // 真风控由云端单写），杜绝上一会话残留的「⚠」把徽标跨会话卡在「警戒」。
       risk: 'normal',
       lastMessage: `边缘进程已退出${code === null ? '' : `（code ${code}`}${signal ? ` ${signal}` : ''}${code === null ? '' : '）'}。`,
+      ...presencePatch(status.session === 'paused' ? '已暂停，随时可以恢复' : '引擎已停止'),
     });
     // 红线：异常退出（含连云失败 / adspower 未登录致诚实非零退出）不静默——主动弹窗 + 系统通知。
     if (exitedAbnormally) {
@@ -287,6 +346,7 @@ async function checkLoginAndStart() {
       auth: 'login required',
       session: 'idle',
       lastMessage: '请在刚打开的 Chrome 窗口中登录 xiaohongshu.com。',
+      ...presencePatch('等你登录小红书后继续'),
     });
     return false;
   } catch (error) {
@@ -323,6 +383,7 @@ function startAdsPowerFlow() {
       edge: 'stopped',
       session: 'idle',
       lastMessage: '请在「浏览器」设置中填写 AdsPower 分身 ID，然后点击「保存并启动」。',
+      ...presencePatch('等待完成初始设置'),
     });
     return;
   }
@@ -344,7 +405,7 @@ function startFlow() {
 // 供「保存设置」「恢复」「重新登录」三处复用。
 function stopAndRestart(message, patch = {}) {
   stopLoginPoller();
-  updateStatus({ cloud: 'disconnected', session: 'running', lastMessage: message, ...patch });
+  updateStatus({ cloud: 'disconnected', session: 'running', lastMessage: message, ...presencePatch('正在重启引擎…'), ...patch });
   if (edgeProcess) {
     restartPending = true;
     edgeProcess.kill('SIGTERM');
@@ -354,11 +415,15 @@ function stopAndRestart(message, patch = {}) {
 }
 
 function handleEdgeOutput(text, isError = false) {
-  const message = text.trim();
-  if (!message) return;
+  // 一个 chunk 可能带多行：逐行处理，让活动流 / 计数按真实行数走（旧法整块只算一次）。
+  const lines = String(text).split('\n').map((l) => l.trim()).filter(Boolean);
+  for (const line of lines) handleEdgeLogLine(line, isError);
+}
+
+function handleEdgeLogLine(message, isError = false) {
   // 核心正被有意停止 / 已暂停 / 已退出：其关闭期 stdout/stderr 只作为日志行展示，绝不据以翻转
-  // edge / session / risk 徽标——否则关闭 chatter 会把「已暂停/已停止」闪回「运行中/异常」，
-  // 甚至因一行含「⚠」把 risk 卡在「警戒」。正常在跑时（无停止标记且核心存活）才做状态推断。
+  // edge / session / risk 徽标，也不产 UI 事件——否则关闭 chatter 会把「已暂停/已停止」闪回
+  // 「运行中/异常」，或让在场感在停机后还「活着」。正常在跑时才做状态推断。
   const stopping = isQuitting || restartPending || pausePending || !edgeProcess || status.session === 'paused';
   if (stopping) {
     updateStatus({ lastMessage: message });
@@ -369,19 +434,44 @@ function handleEdgeOutput(text, isError = false) {
   if (message.includes('连接失败') || message.includes('WS 已关闭') || message.includes('启动失败')) next.cloud = 'disconnected';
   if (message.includes('自动浏览已启动') || message.includes('启动自动浏览循环')) next.session = 'running';
   if (message.includes('浏览循环结束') || message.includes('session.end')) next.session = 'idle';
-  if (message.includes('上报') || message.includes('提取内容')) next.stats = { views: status.stats.views + 1 };
-  if (message.includes('点赞成功') || message.includes('like')) next.stats = { ...(next.stats || {}), likes: status.stats.likes + 1 };
-  if (message.includes('收藏成功') || message.includes('collect')) next.stats = { ...(next.stats || {}), collects: status.stats.collects + 1 };
-  // 只认已校验成功的评论（'评论发布成功' 仅在后置校验通过时打，不与「评论点赞成功」/like/collect 撞词）→ 评论计数 +1。
-  if (message.includes('评论发布成功')) next.stats = { ...(next.stats || {}), comments: (status.stats.comments || 0) + 1 };
   if (message.includes('风控拒绝') || message.includes('risk_error') || message.includes('⚠')) next.risk = 'warned';
+
+  // UI 事件（活动流 / 在场感 / 发布卡 / 账号身份 / 计数）统一走 ui-events 模块：
+  // 结构化 [ui-event] 行优先，中文日志行映射兜底；计数只认 ✓ 成功行（见模块头注的偏离说明）。
+  const evt = uiEvents.push(message);
+  if (evt) {
+    if (evt.account) status.account = { id: evt.account.id, name: evt.account.name || '' };
+    if (evt.presence) next.presence = { text: evt.presence, at: new Date().toISOString() };
+    if (evt.publish && evt.publish.state) {
+      next.publish = { ...evt.publish, at: new Date().toISOString() };
+    }
+    if (evt.statsDelta) {
+      const d = evt.statsDelta;
+      next.stats = {
+        ...(next.stats || {}),
+        ...(d.views ? { views: status.stats.views + d.views } : {}),
+        ...(d.likes ? { likes: status.stats.likes + d.likes } : {}),
+        ...(d.collects ? { collects: status.stats.collects + d.collects } : {}),
+        ...(d.comments ? { comments: (status.stats.comments || 0) + d.comments } : {}),
+      };
+    }
+    if (evt.sentence) {
+      broadcastActivity({
+        ts: new Date().toISOString(),
+        type: evt.type || 'info',
+        sentence: evt.sentence,
+        ...(evt.loopStage !== undefined ? { loopStage: evt.loopStage } : {}),
+      });
+    }
+    if (evt.loopStage !== undefined) next.loopStage = evt.loopStage;
+  }
   updateStatus(next);
 }
 
 function pauseEdge() {
   // 暂停取消任何在途重启：否则核心退出回调会据 restartPending 复活它，把用户的暂停覆盖回运行。
   restartPending = false;
-  updateStatus({ session: 'paused', lastMessage: '已请求暂停，后台边缘进程将在安全点停止。' });
+  updateStatus({ session: 'paused', lastMessage: '已请求暂停，后台边缘进程将在安全点停止。', ...presencePatch('已暂停，随时可以恢复') });
   if (edgeProcess) {
     // 暂停是「有意停止」：标记之，使其 SIGTERM 触发的退出不被误判为异常（尤其核心启动窗口内 handler 未装时）。
     pausePending = true;
@@ -438,6 +528,19 @@ ipcMain.handle('edge:start', () => {
 ipcMain.handle('edge:restart', () => {
   stopAndRestart('正在按新设置重启边缘进程…');
   return status;
+});
+// 「打开飞书 ↗」：纯导航（拉起飞书客户端），不是审批操作——审批授权只在飞书内完成。
+// 依次尝试 feishu:// 与 lark:// 协议；都拉不起则如实返回 ok:false，渲染层降级为纯文字。
+ipcMain.handle('feishu:open', async () => {
+  for (const url of ['feishu://', 'lark://']) {
+    try {
+      await shell.openExternal(url);
+      return { ok: true };
+    } catch {
+      /* 未注册该协议，试下一个 */
+    }
+  }
+  return { ok: false };
 });
 ipcMain.handle('browser:openAdsDownload', () => {
   void shell.openExternal(ADS_DOWNLOAD_URL);
