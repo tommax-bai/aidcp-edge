@@ -132,9 +132,15 @@ async function setWindowSize(cdp: any, w: number, h: number) {
     const win = await cdp.send('Browser.getWindowForTarget');
     const windowId = (win as any).windowId;
     await cdp.send('Browser.setWindowBounds', { windowId, bounds: { left: 40, top: 40, width: w, height: h, windowState: 'normal' } });
-  } catch (e) { console.log(`  [resize] Browser.setWindowBounds 失败(${e})，退回 Emulation`); }
-  // 兜底：deviceMetrics override 保证 innerWidth 生效
-  try { await cdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false }); } catch {}
+  } catch (e) { console.log(`  [resize] Browser.setWindowBounds 失败(${e})`); }
+  await new Promise((r) => setTimeout(r, 800));
+  // 只有窗口 bounds 没生效时才用 Emulation 兜底（会残留 override，不得已才用）
+  const iw = await evalRaw<number>(cdp, `innerWidth`).catch(() => 0);
+  console.log(`  [resize] innerWidth=${iw}（目标≈${w}）`);
+  if (Math.abs(Number(iw) - w) > 120) {
+    console.log('  [resize] bounds 未生效，退回 Emulation override（用后记得 --resize 还原）');
+    try { await cdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false }); } catch {}
+  }
 }
 
 async function main() {
@@ -237,6 +243,110 @@ async function main() {
       }
       await snap('3c-diag-open', await dump(cdp), session);
       console.log(`\n[diag] 明细 → /tmp/aidcp-layout-probe-${TS}-3b-diag.json`);
+    }
+  }
+
+  if (hasFlag('forensic')) {
+    // 法证实验：区分「点击已提交→被 AI remount 抹掉」vs「点击根本没提交 + 面板自行收起」vs「坐标漂移点偏」。
+    // 手段：① 面板/选项 DOM 打标记（remount 会换 DOM→标记消失）；② 点击瞬间 elementFromPoint 记实际命中；
+    //      ③ 全程跟踪触发器文案（筛选→已筛选=真提交信号）+ AI 流式(loading/textLen) + 面板开合，逐 250ms 时间线。
+    const target = readArg('target', '最多收藏');
+    const t0 = Date.now();
+    const el = (ms: number) => `+${((ms - t0) / 1000).toFixed(1)}s`;
+
+    const stateJs = `(function(){
+      var out = {};
+      // AI 流式态：正文容器两套类名家族（窄版 xhs-ai-message-*、宽版 xhs-ai-chat-*）；取文本最长者。
+      // 原生完成信号：.ai-message 生成完挂 .ai-message-finished。
+      var cands = [].slice.call(document.querySelectorAll('.ai-message, [class*="xhs-ai-message"], [class*="xhs-ai-chat"], [class*="ai-chat"]'));
+      var maxLen = 0; cands.forEach(function(e){ var L=(e.textContent||'').trim().length; if(L>maxLen) maxLen=L; });
+      out.aiContainer = cands.length > 0;
+      out.aiFinished = !!document.querySelector('.ai-message-finished');
+      out.aiMsgEl = !!document.querySelector('.ai-message');
+      out.aiLoading = out.aiMsgEl && !out.aiFinished;
+      out.aiTextLen = maxLen;
+      // 触发器文案（可见的那个）
+      var trig = null;
+      ['已筛选','筛选'].forEach(function(t){ if(trig) return;
+        var ns=[].slice.call(document.querySelectorAll('span,div,button'));
+        for(var i=0;i<ns.length;i++){ var e=ns[i]; if((e.textContent||'').trim()!==t) continue; if(e.offsetParent===null) continue; if(e.closest&&e.closest('[aria-hidden="true"]')) continue; trig=t; break; } });
+      out.trigger = trig;
+      // 目标选项：可见性 / 选中态 / 打标存活 / 几何
+      var SEL=['active','selected','checked','current','is-active'];
+      var tgt=${JSON.stringify(target)};
+      var found=null;
+      var ns=[].slice.call(document.querySelectorAll('div,span,li,button'));
+      for(var i=0;i<ns.length;i++){ var e=ns[i]; if((e.textContent||'').trim()!==tgt) continue; if(e.closest&&e.closest('[aria-hidden="true"]')) continue;
+        var vis = e.offsetParent!==null; if(!found || (vis && !found.vis)){ var r=e.getBoundingClientRect();
+          var act=false; var p=e; for(var k=0;k<4&&p;k++){ var toks=((p.className||'')+'').split(/\\s+/); for(var j=0;j<SEL.length;j++){ if(toks.indexOf(SEL[j])>=0) act=true; } p=p.parentElement; }
+          found={vis:vis, act:act, stamp:e.getAttribute('data-aidcp-stamp')==='1', x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}; } }
+      out.opt = found;
+      out.stampAliveAnywhere = !!document.querySelector('[data-aidcp-stamp="1"]');
+      return JSON.stringify(out);
+    })()`;
+    const readState = async () => JSON.parse(await evalRaw<string>(cdp, stateJs).catch(() => '{}'));
+    const fmt = (s: any) => `AI[msg=${s.aiMsgEl ? 1 : 0} fin=${s.aiFinished ? 1 : 0} 生成中=${s.aiLoading ? 1 : 0} len=${s.aiTextLen}] trig=${s.trigger ?? '∅'} opt[${s.opt ? `vis=${s.opt.vis ? 1 : 0} act=${s.opt.act ? 1 : 0} stamp=${s.opt.stamp ? 1 : 0} @(${s.opt.x},${s.opt.y})` : '∅'}] stampAny=${s.stampAliveAnywhere ? 1 : 0}`;
+
+    console.log(`\n[forensic] target=「${target}」 t0=导航完成后立即`);
+    console.log(`  ${el(Date.now())} 初态: ${fmt(await readState())}`);
+
+    if (hasFlag('await-stream')) {
+      // 等 AI 总结「正在生成」的当口（textLen 开始增长且仍在早期）再点——复刻「AI 生成的同时人工点筛选」
+      console.log('  [await-stream] 轮询等 AI 流式开始（.ai-message 在场且未 finished）…');
+      let streaming = false;
+      for (let i = 0; i < 50; i++) {
+        const s = await readState();
+        if (s.aiMsgEl && !s.aiFinished) { streaming = true; console.log(`  ${el(Date.now())} 流式进行中(len=${s.aiTextLen} fin=0)→立即开点`); break; }
+        if (s.aiFinished) { console.log(`  ${el(Date.now())} ⚠ 已 finished(len=${s.aiTextLen})——没赶上流式窗口，本轮作 finished 后对照`); break; }
+        await sleep(200);
+      }
+      if (!streaming) console.log(`  ${el(Date.now())} ⚠ 未等到流式（该词可能不生成 AI 总结）——照常继续，本轮仅作无流式对照`);
+    }
+
+    // 1. hover 展开面板
+    const fcRaw = await evalRaw<string>(cdp, `(function(){var ns=[].slice.call(document.querySelectorAll('span,div,button'));var best=null;for(var i=0;i<ns.length;i++){var e=ns[i];var t=(e.textContent||'').trim();if(t!=='筛选'&&t!=='已筛选')continue;if(e.offsetParent===null)continue;if(e.closest&&e.closest('[aria-hidden="true"]'))continue;var r=e.getBoundingClientRect();if(r.width<=0)continue;var a=r.width*r.height;if(!best||a<best.a)best={a:a,x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};}return best?JSON.stringify({x:best.x,y:best.y}):null;})()`).catch(() => null);
+    if (!fcRaw) { console.log('  ✗ 无筛选触发器'); }
+    else {
+      const fc = JSON.parse(fcRaw);
+      const from0 = { x: fc.x - 80, y: fc.y - 50 };
+      for (let i = 1; i <= 12; i++) { const t = i / 12; await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round(from0.x + (fc.x - from0.x) * t), y: Math.round(from0.y + (fc.y - from0.y) * t) }); await sleep(14); }
+      await sleep(700);
+      // 2. 打标记：目标选项 + 其上 3 层父链
+      await evalRaw(cdp, `(function(){var tgt=${JSON.stringify(target)};var ns=[].slice.call(document.querySelectorAll('div,span,li,button'));for(var i=0;i<ns.length;i++){var e=ns[i];if((e.textContent||'').trim()!==tgt)continue;if(e.offsetParent===null)continue;if(e.closest&&e.closest('[aria-hidden="true"]'))continue;var p=e;for(var k=0;k<4&&p;k++){p.setAttribute('data-aidcp-stamp','1');p=p.parentElement;}return 'stamped';}return 'no-target';})()`).catch(() => null);
+      const pre = await readState();
+      console.log(`  ${el(Date.now())} 面板开+已打标: ${fmt(pre)}`);
+      if (!pre.opt?.vis) { console.log('  ✗ 目标选项不可见，面板未开成'); }
+      else {
+        // 3. 复刻生产：用「此刻读到的坐标」move+click；press 前一瞬记 elementFromPoint
+        const cx = pre.opt.x, cy = pre.opt.y;
+        for (let i = 1; i <= 12; i++) { const t = i / 12; await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round(fc.x + (cx - fc.x) * t), y: Math.round(fc.y + (cy - fc.y) * t) }); await sleep(12); }
+        const hitRaw = await evalRaw<string>(cdp, `(function(){var e=document.elementFromPoint(${cx},${cy});var out=[];var p=e;for(var k=0;k<3&&p;k++){out.push(p.tagName.toLowerCase()+'.'+(((p.className||'')+'').split(/\\s+/)[0]||'')+((p.getAttribute&&p.getAttribute('aria-hidden')==='true')?'[AH]':'')+':'+((p.textContent||'').trim().slice(0,8)));p=p.parentElement;}return JSON.stringify(out);})()`).catch(() => '[]');
+        console.log(`  ${el(Date.now())} press 前 elementFromPoint(${cx},${cy}): ${hitRaw}`);
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: cx, y: cy, button: 'left', clickCount: 1 });
+        await sleep(45);
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cx, y: cy, button: 'left', clickCount: 1 });
+        console.log(`  ${el(Date.now())} 已点击。逐 250ms 时间线（关键列：trig 是否变已筛选=提交证据 / opt.vis 面板开合 / stamp 存活=无 remount）:`);
+        // 4. 时间线 20×250ms
+        for (let i = 0; i < 20; i++) {
+          await sleep(250);
+          const s = await readState();
+          console.log(`    ${el(Date.now())} ${fmt(s)}`);
+        }
+        // 5. 鼠标移开→重开面板→终判
+        for (let i = 0; i < 5; i++) { await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 200, y: 600 }); await sleep(20); }
+        await sleep(500);
+        const fc2Raw = await evalRaw<string>(cdp, `(function(){var ns=[].slice.call(document.querySelectorAll('span,div,button'));var best=null;for(var i=0;i<ns.length;i++){var e=ns[i];var t=(e.textContent||'').trim();if(t!=='筛选'&&t!=='已筛选')continue;if(e.offsetParent===null)continue;if(e.closest&&e.closest('[aria-hidden="true"]'))continue;var r=e.getBoundingClientRect();if(r.width<=0)continue;var a=r.width*r.height;if(!best||a<best.a)best={a:a,x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};}return best?JSON.stringify({x:best.x,y:best.y}):null;})()`).catch(() => null);
+        if (fc2Raw) {
+          const fc2 = JSON.parse(fc2Raw);
+          const f2 = { x: fc2.x - 80, y: fc2.y - 50 };
+          for (let i = 1; i <= 12; i++) { const t = i / 12; await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round(f2.x + (fc2.x - f2.x) * t), y: Math.round(f2.y + (fc2.y - f2.y) * t) }); await sleep(14); }
+          await sleep(900);
+        }
+        const fin = await readState();
+        console.log(`  ${el(Date.now())} 【终判·重开面板】 ${fmt(fin)}`);
+        console.log(`  结论要素: 提交与否=trig(已筛选?) + 终态 opt.act；remount 与否=stamp 存活；点偏与否=press 前命中链`);
+        await snap('7-forensic-final', await dump(cdp), session);
+      }
     }
   }
 

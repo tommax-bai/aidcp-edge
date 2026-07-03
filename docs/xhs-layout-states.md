@@ -82,14 +82,19 @@ function isNarrowLayout(){
 - **实现**：`src/browse/search-handler.ts` `applySearchFilters`——pass2 对每个目标「hover 触发器→settle→点→重开面板→校验持久 active」；`buildFindByTextRectJs`/`buildOptionSelectedJs` 排除 aria-hidden 子树；触发器 `SEARCH_FILTER_TRIGGER_TEXTS=['筛选','已筛选']`。真机实证：`最多收藏 + 一天内` 两项均切上、结果重排、持久 active。
 - **宽窄**：本次在 innerWidth=1512（宽）标定；AI 搜索页 `isWide/isNarrow`（侧栏/底部栏）不适用（AI 页无侧栏），窄布局待补测——但定位全靠「可见文案 + 排除 aria-hidden + 取可见」，与宽窄解耦，预期通吃（窄布局若筛选入口收成图标另需补）。
 
-### 2.6.1 ⚠️ AI 总结**流式生成会重置筛选**——「时好时坏」的真根因 ✅ 真机 2026-07-03（Tmax 分身，三布局全测）
+### 2.6.1 ⚠️ 筛选「时好时坏」法证结论：**点击未提交的瞬态竞态**（非「流式重置已提交筛选」）✅ 真机 2026-07-03（Tmax 分身，三布局 + 法证级实验）
 
-- **搜索结果页三种情况**（用户报告，均已真机复现）：① **窄版 AI 总结在顶**（innerWidth≈760，AI 摘要为 feed 上方大块、主导航变底部图标栏）；② **宽版 AI 总结在右侧**（innerWidth≈1512，`ai-feeds-page with-ai-chat`）；③ **无 AI 总结**（用户点右上 `button.xhs-ai-chat-header__close` 关掉→容器变 `search-layout` 全宽；**部分查询词天然不生成**，如「西安回民街必吃小吃本地人推荐排队店」全程无 AI 容器）。**三布局筛选是同一套 hover 面板**（窄版触发器仍是文字「筛选」非图标、面板无裁切）——定位机制与布局解耦，唯一变量是 AI 流式时长。
-- **根因**：「点点 ai」总结是搜完后**异步流式**生成（watchai 实测 textLen 持续增长 +5.5s 未完、典型 2~15s，随词冷热变化，缓存词秒出）。**每生成一段就重渲染、把筛选面板 remount、选中态重置回默认（综合/不限）**。微时序铁证：无等待点「最多收藏」→ +300ms active=true，**+~1.7s 连同「不限」一起被重置**、重开面板不持久；先等 8s（生成完）再点 → 全程持久。「一天内」常侥幸成功只因它排在后面、点到时流式已结束——正是 §2.6「排序项尤其明显」的真解释。
-- **生产影响**：`browse-session.ts` search.execute = `executeSearch`（尾部仅 ~0.8s 轻缓冲）→ **立即** `applySearchFilters`，pass2 点击落在导航后 ~2.5-3s，正撞典型词流式期 → **间歇失败**（honest 降级如实返回 false、无假成功，但「最多收藏」常没切上）。失败与否取决于「点击时刻 vs AI 生成完成时刻」的赛跑，故随词、随缓存漂移。
-- **AI 总结可整体忽略、不必关闭**（产品决策 2026-07-03）：卡片采集不受它污染——真机验证 AI 面板内 `.note-item` 卡 0 个、`a[href*=/explore/]` 链接 0 个（30 张瀑布流卡全在面板外）；关闭反而不可靠（× 异步晚出现、`with-ai-chat` 有回弹迹象、情况③无此按钮）。
-- **修法**（落 change comment-search-command task 5.4）：`applySearchFilters` 改「**前置 settle 闸（有界早退）→ 幂等应用+有界重试 → settle 后权威复核**」——返回值只由流式 settle 之后的复核决定（杜绝「瞬时 active 即上报成功」假阳性）；已选中跳过不重点（实测重复点不 toggle 掉、幂等安全）；情况③无 AI 容器时闸秒过、近零成本。
-- **探针**：`scripts/layout-filter-probe.ts`（`--search=<词>`/`--resize=WxH`/`--hover`/`--diag`(elementFromPoint 命中链)/`--exp`(微时序看选中态回落)/`--closeai`/`--production`(真实 applySearchFilters 端到端)/`--twice`(幂等)/`--nowait`(复刻生产时序)/`--watchai`(流式进度)），产物 `/tmp/aidcp-layout-probe-*`。
+> 本节曾短暂记为「AI 流式生成会重置已提交筛选」，**该判定已被后续法证实验 + 用户人工复测证伪**，以下为修正后的确证事实。
+
+- **搜索结果页三种情况**（用户报告，均已真机复现）：① **窄版 AI 总结在顶**（innerWidth≈760，主导航变底部图标栏）；② **宽版 AI 总结在右侧**（`ai-feeds-page with-ai-chat`）；③ **无 AI 总结**（可点右上 × 关掉→`search-layout` 全宽；**部分查询词天然不生成**）。**三布局筛选是同一套 hover 面板**（窄版触发器仍是文字「筛选」非图标）——定位机制与布局解耦。
+- **已证实（forensic 铁证，DOM 打标 + 触发器文案跟踪 + elementFromPoint 命中链 + 逐 250ms 时间线）**：
+  - **已提交的筛选能在 AI 流式生成全程存活**：窄/宽两布局各实测——AI 正在打字（textLen 9→947 / 211→2550 持续增长、未 finished）时点「最多收藏」，瞬间提交（触发器「筛选」→「已筛选」）、全程选中、甚至 AI 面板中途重启生成也不掉。**用户人工「生成中选筛选项没被重置」的观察正确**。
+  - **当初的失败形态是「点击从未提交」**：瞬时高亮 ~1.7s（CSS 级 hover/active 闪烁）→ 面板自行收起 → 重开不选中、触发器未变「已筛选」。即 handler 没接住这次点击——疑似撞上页面/面板某个**亚秒级重渲染过渡窗口**（结果列表刷新 / AI 锚点注入等时机）；窗口窄、随词冷热与缓存漂移，**无法按需复现**（同参数重放多为成功），但真机已三次实锤（宽版 sort 两次 + 用户现场感知）。等 8s 再点成功 = 等过了窗口，非「等流式结束」。
+  - **点已选中项不会 toggle 掉**（幂等安全，重试可放心做）；**触发器文案「筛选」→「已筛选」= 廉价提交信号**（必要非充分：只说明有筛选生效，不指明哪项）。
+  - **AI 总结带原生完成信号**：正文容器窄版 `xhs-ai-message-card__content` / 宽版 `xhs-ai-chat-*` 两套类名家族；`.ai-message` 生成完挂 **`.ai-message-finished`**——比 loading 元素/textLen 启发稳得多（如需等待时用它）。
+- **AI 总结可整体忽略、不必关闭**（产品决策 2026-07-03）：卡片采集不受它污染——真机验证 AI 面板内 `.note-item` 卡 0 个、`a[href*=/explore/]` 链接 0 个；主动关闭不可靠（× 异步晚出现、部分词无 AI、③无按钮）。
+- **修法**（落 change comment-search-command task 5.4）：既然失败=「未提交的瞬态竞态」且无法预判窗口，**不押注任何具体机理**——`applySearchFilters` 改「**逐项幂等应用 + 提交校验 + 有界重试**」：先读持久选中态（已选中跳过）→ 点 → 校验（重开面板读持久 `.active`，触发器「已筛选」作辅助信号）→ 未提交则隔 1-2s 重试（自然错开过渡窗口），K 次仍未提交诚实返回 false。返回值只由最终权威复核决定，瞬时高亮绝不作数。
+- **探针**：`scripts/layout-filter-probe.ts`（`--search=<词>`/`--resize=WxH`/`--hover`/`--diag`(命中链)/`--exp`(微时序)/`--forensic [--await-stream] [--target=文案]`(DOM打标+提交跟踪时间线)/`--closeai`/`--production`(真实 applySearchFilters 端到端)/`--twice`(幂等)/`--nowait`(生产时序)/`--watchai`)，产物 `/tmp/aidcp-layout-probe-*`。
 
 ## 3. 跨切面建议
 - **启动固定桌面视口**：edge 启动 Chrome 带 `--window-size=1440,980`（+ 启动后 `Browser.setWindowBounds` 兜底 maximize；高 DPI 机另需 `--force-device-scale-factor=1` 或 `Emulation.setDeviceMetricsOverride{deviceScaleFactor:1,width:1440}`）→ 优先进 WIDE。
