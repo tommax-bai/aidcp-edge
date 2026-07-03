@@ -82,6 +82,15 @@ function isNarrowLayout(){
 - **实现**：`src/browse/search-handler.ts` `applySearchFilters`——pass2 对每个目标「hover 触发器→settle→点→重开面板→校验持久 active」；`buildFindByTextRectJs`/`buildOptionSelectedJs` 排除 aria-hidden 子树；触发器 `SEARCH_FILTER_TRIGGER_TEXTS=['筛选','已筛选']`。真机实证：`最多收藏 + 一天内` 两项均切上、结果重排、持久 active。
 - **宽窄**：本次在 innerWidth=1512（宽）标定；AI 搜索页 `isWide/isNarrow`（侧栏/底部栏）不适用（AI 页无侧栏），窄布局待补测——但定位全靠「可见文案 + 排除 aria-hidden + 取可见」，与宽窄解耦，预期通吃（窄布局若筛选入口收成图标另需补）。
 
+### 2.6.1 ⚠️ AI 总结**流式生成会重置筛选**——「时好时坏」的真根因 ✅ 真机 2026-07-03（Tmax 分身，三布局全测）
+
+- **搜索结果页三种情况**（用户报告，均已真机复现）：① **窄版 AI 总结在顶**（innerWidth≈760，AI 摘要为 feed 上方大块、主导航变底部图标栏）；② **宽版 AI 总结在右侧**（innerWidth≈1512，`ai-feeds-page with-ai-chat`）；③ **无 AI 总结**（用户点右上 `button.xhs-ai-chat-header__close` 关掉→容器变 `search-layout` 全宽；**部分查询词天然不生成**，如「西安回民街必吃小吃本地人推荐排队店」全程无 AI 容器）。**三布局筛选是同一套 hover 面板**（窄版触发器仍是文字「筛选」非图标、面板无裁切）——定位机制与布局解耦，唯一变量是 AI 流式时长。
+- **根因**：「点点 ai」总结是搜完后**异步流式**生成（watchai 实测 textLen 持续增长 +5.5s 未完、典型 2~15s，随词冷热变化，缓存词秒出）。**每生成一段就重渲染、把筛选面板 remount、选中态重置回默认（综合/不限）**。微时序铁证：无等待点「最多收藏」→ +300ms active=true，**+~1.7s 连同「不限」一起被重置**、重开面板不持久；先等 8s（生成完）再点 → 全程持久。「一天内」常侥幸成功只因它排在后面、点到时流式已结束——正是 §2.6「排序项尤其明显」的真解释。
+- **生产影响**：`browse-session.ts` search.execute = `executeSearch`（尾部仅 ~0.8s 轻缓冲）→ **立即** `applySearchFilters`，pass2 点击落在导航后 ~2.5-3s，正撞典型词流式期 → **间歇失败**（honest 降级如实返回 false、无假成功，但「最多收藏」常没切上）。失败与否取决于「点击时刻 vs AI 生成完成时刻」的赛跑，故随词、随缓存漂移。
+- **AI 总结可整体忽略、不必关闭**（产品决策 2026-07-03）：卡片采集不受它污染——真机验证 AI 面板内 `.note-item` 卡 0 个、`a[href*=/explore/]` 链接 0 个（30 张瀑布流卡全在面板外）；关闭反而不可靠（× 异步晚出现、`with-ai-chat` 有回弹迹象、情况③无此按钮）。
+- **修法**（落 change comment-search-command task 5.4）：`applySearchFilters` 改「**前置 settle 闸（有界早退）→ 幂等应用+有界重试 → settle 后权威复核**」——返回值只由流式 settle 之后的复核决定（杜绝「瞬时 active 即上报成功」假阳性）；已选中跳过不重点（实测重复点不 toggle 掉、幂等安全）；情况③无 AI 容器时闸秒过、近零成本。
+- **探针**：`scripts/layout-filter-probe.ts`（`--search=<词>`/`--resize=WxH`/`--hover`/`--diag`(elementFromPoint 命中链)/`--exp`(微时序看选中态回落)/`--closeai`/`--production`(真实 applySearchFilters 端到端)/`--twice`(幂等)/`--nowait`(复刻生产时序)/`--watchai`(流式进度)），产物 `/tmp/aidcp-layout-probe-*`。
+
 ## 3. 跨切面建议
 - **启动固定桌面视口**：edge 启动 Chrome 带 `--window-size=1440,980`（+ 启动后 `Browser.setWindowBounds` 兜底 maximize；高 DPI 机另需 `--force-device-scale-factor=1` 或 `Emulation.setDeviceMetricsOverride{deviceScaleFactor:1,width:1440}`）→ 优先进 WIDE。
 - **但不得只赌宽窗口**：真实运营机分辨率/缩放不可控，**两状态都必须能跑**（用户硬要求）。所有动作按 §2 的"取可见入口 / 真实滚轮 / SPA 开 modal"做到状态无关。
