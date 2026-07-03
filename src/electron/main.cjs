@@ -25,6 +25,38 @@ let pausePending = false;
 // AdsPower 官方下载页（客户端「下载 AdsPower」按钮外链）。
 const ADS_DOWNLOAD_URL = 'https://www.adspower.net/download';
 
+// ── 边端日志落文件（排障用）──────────────────────────────────────────────
+// 核心子进程 stdout/stderr 除了进 UI 活动流，再逐行 append 到 userData/logs/edge.log，
+// 便于事后精确复盘（筛选重试 / note.open 分支 / 离线等只在 UI 流一闪而过、无法回溯）。
+// 单文件 + 到 ~5MB 轮转一次（.1 备份）；纯 tee，绝不参与状态判断、失败静默不影响核心。
+let edgeLogStream;
+function edgeLogFilePath() {
+  return path.join(app.getPath('userData'), 'logs', 'edge.log');
+}
+function ensureEdgeLogStream() {
+  if (edgeLogStream) return edgeLogStream;
+  try {
+    const file = edgeLogFilePath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    try {
+      const st = fs.statSync(file);
+      if (st.size > 5 * 1024 * 1024) fs.renameSync(file, file + '.1'); // 轮转
+    } catch { /* 无旧文件 */ }
+    edgeLogStream = fs.createWriteStream(file, { flags: 'a' });
+    edgeLogStream.on('error', () => { edgeLogStream = undefined; }); // 写失败即弃、不抛
+  } catch {
+    edgeLogStream = undefined;
+  }
+  return edgeLogStream;
+}
+function appendEdgeLog(line, isError) {
+  const s = ensureEdgeLogStream();
+  if (!s) return;
+  try {
+    s.write(`${new Date().toISOString()} ${isError ? 'ERR' : '   '} ${line}\n`);
+  } catch { /* ignore */ }
+}
+
 // 桌面客户端浏览器 provider 设置（持久化到 userData/settings.json）：
 //  - provider='adspower'（默认）：核心进程经 AdsPower 本地 API 托管指纹浏览器（每分身独立指纹/IP，防同机多账号关联）；
 //    须填 adsProfileId（= AdsPower 分身 id / AIDCP_ADS_USER_ID），apiKey/apiBase 可选（AdsPower 可关 API 校验）。
@@ -459,6 +491,7 @@ function handleEdgeOutput(text, isError = false) {
 }
 
 function handleEdgeLogLine(message, isError = false) {
+  appendEdgeLog(message, isError); // 落文件（排障回溯，独立于下方状态判断）
   // 核心正被有意停止 / 已暂停 / 已退出：其关闭期 stdout/stderr 只作为日志行展示，绝不据以翻转
   // edge / session / risk 徽标，也不产 UI 事件——否则关闭 chatter 会把「已暂停/已停止」闪回
   // 「运行中/异常」，或让在场感在停机后还「活着」。正常在跑时才做状态推断。
