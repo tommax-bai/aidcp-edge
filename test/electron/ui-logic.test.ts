@@ -146,7 +146,7 @@ test('发布卡：已发布 → 折进活动流 + 卡片转「上次发布」（
   assert.equal(pub.head, '上次发布');
   assert.match(pub.corner ?? '', /小时前/);
   assert.deepEqual(pub.stepStates, ['done', 'done', 'done', 'done']);
-  assert.equal(pub.showLink, false, '历史态不放「打开飞书」');
+  assert.equal(pub.showLink, true, '「打开飞书」纯导航，三态常驻');
 });
 
 test('发布卡：拒绝 → 折进活动流（不渲染成失败）+ 回落上次发布/空态', () => {
@@ -169,7 +169,8 @@ test('发布卡常驻：无进行中有历史 → last；两者皆无 → empty 
   assert.equal(empty.mode, 'empty');
   assert.deepEqual(empty.stepStates, ['todo', 'todo', 'todo', 'todo']);
   assert.match(empty.title ?? '', /还没有发布过/);
-  assert.equal(empty.showLink, false);
+  assert.equal(empty.showLink, true, '空态也放「打开飞书」');
+  assert.match(empty.foot ?? '', /\*\*通过后才会发布\*\*/, '关键词带加粗标记');
 });
 
 test('相对时间走字', () => {

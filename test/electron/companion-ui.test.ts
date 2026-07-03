@@ -185,7 +185,7 @@ test('发布终态 → 折进活动流 + 卡片常驻转「上次发布」', asy
   assert.equal(hidden($(w, '#pub-card')), false, '卡片常驻不消失');
   assert.equal($(w, '#pub-head').textContent, '上次发布');
   assert.match($(w, '#pub-title').textContent ?? '', /秋日漫步/);
-  assert.equal(hidden($(w, '#pub-link')), true, '历史态不放「打开飞书」');
+  assert.equal(hidden($(w, '#pub-link')), false, '「打开飞书」纯导航，历史态也在');
   assert.match($(w, '#activity-stream').textContent ?? '', /已发布/);
   // 再推一次同状态：按签名去重，不重复记
   pushStatus(makeStatus({ publish: { state: 'published', title: '秋日漫步', at: new Date().toISOString() } }));
@@ -200,7 +200,12 @@ test('发布卡常驻：从未发布 → 空态幽灵旅程（同设计语言、
   assert.ok(card.classList.contains('empty'));
   assert.match($(w, '#pub-title').textContent ?? '', /还没有发布过/);
   assert.equal(card.querySelectorAll('button').length, 0, '空态同样零按钮');
-  assert.equal(hidden($(w, '#pub-link')), true);
+  assert.equal(hidden($(w, '#pub-link')), false, '空态也放蓝色「打开飞书」');
+  assert.ok(card.querySelector('#pub-thumb'), '封面占位常在（空态为淡化默认形态）');
+  assert.match($(w, '#pub-meta').textContent ?? '', /编号 —/, '编号默认形态');
+  assert.ok($(w, '#pub-foot').querySelector('b'), '脚注关键词加粗');
+  assert.match($(w, '#pub-foot').textContent ?? '', /通过后才会发布/);
+  assert.ok(!($(w, '#pub-foot').textContent ?? '').includes('**'), '加粗标记不外露');
   const dots = Array.from(card.querySelectorAll('.j-step'));
   assert.ok(dots.every((el) => (el as HTMLElement).classList.contains('todo')), '幽灵旅程全 todo');
 });

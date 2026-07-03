@@ -178,11 +178,20 @@ body { margin: 0; }
 .pub-time { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .pub-time.hot { color: var(--amber-deep); font-weight: 650; }
 .pub-body { display: flex; gap: 12px; margin-top: 12px; align-items: center; }
+/* 封面占位（设计稿 v3）：正式态珊瑚渐变代表笔记封面位；空态淡化虚线作默认形态 */
+.pub-thumb {
+  width: 54px; height: 54px; border-radius: 10px; flex-shrink: 0;
+  background: linear-gradient(135deg, #ffb3c0, #ff6b83);
+}
+.pub.empty .pub-thumb {
+  background: linear-gradient(135deg, #ffeef1, #fde3e8);
+  border: 1.5px dashed #f3c2cc;
+}
 .pub-title { font-size: 15px; font-weight: 650; line-height: 1.35; }
 .pub-title.muted { color: var(--faint); font-weight: 600; }
 .pub.empty .j-lab { color: #c3ccdb; }
 .pub.empty .pub-evt { color: var(--mute); }
-.pub-meta:empty { display: none; }
+.pub.empty .pub-meta { color: #b3bccd; }
 .pub-meta { font-size: 12px; color: var(--mute); margin-top: 5px; }
 .journey { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--hair); }
 .j-steps { display: grid; grid-template-columns: repeat(4, 1fr); }
@@ -203,6 +212,7 @@ body { margin: 0; }
 .j-step.cur.calm .j-lab { color: #51648a; font-weight: 650; }
 .pub-foot { display: flex; align-items: baseline; gap: 14px; margin-top: 14px; }
 .pub-foot p { flex: 1; margin: 0; font-size: 12.5px; color: #8b95a9; line-height: 1.55; }
+.pub-foot p b { color: #48526b; font-weight: 650; }
 .pub-link { font-size: 12.5px; color: var(--feishu); font-weight: 600; white-space: nowrap; cursor: pointer; }
 .pub-link.plain { color: var(--faint); cursor: default; }
 

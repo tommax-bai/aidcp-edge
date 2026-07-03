@@ -41,6 +41,7 @@ const fields = {
   pubHead: document.querySelector('#pub-head'),
   pubCorner: document.querySelector('#pub-corner'),
   pubTitle: document.querySelector('#pub-title'),
+  pubThumb: document.querySelector('#pub-thumb'),
   pubMeta: document.querySelector('#pub-meta'),
   pubSteps: document.querySelector('#pub-steps'),
   pubFoot: document.querySelector('#pub-foot'),
@@ -234,14 +235,30 @@ function renderPublish(status, nowMs) {
   fields.pubCorner.classList.toggle('hot', Boolean(view.cornerHot));
   fields.pubTitle.textContent = view.title || '（新笔记）';
   fields.pubTitle.classList.toggle('muted', view.mode === 'empty');
-  fields.pubMeta.textContent = view.mode === 'empty' ? '' : (view.code ? `图文笔记 · 编号 ${view.code}` : '图文笔记');
-  fields.pubFoot.textContent = view.foot;
-  fields.pubLink.classList.toggle('hidden', !view.showLink); // 「打开飞书」只在进行中出现
+  // 编号默认形态：无真编号时以「—」占位（云端飞书卡印上 requestId 后自动点亮真编号）。
+  fields.pubMeta.textContent = `图文笔记 · 编号 ${view.code || '—'}`;
+  renderFootRich(fields.pubFoot, view.foot); // 固定模板内 **…** 加粗，破掉整片灰
+  fields.pubLink.classList.toggle('hidden', !view.showLink);
   const steps = fields.pubSteps.querySelectorAll('.j-step');
   view.stepStates.forEach((state, i) => {
     const el = steps[i];
     if (!el) return;
     el.className = `j-step ${state}${state === 'cur' && view.curCalm ? ' calm' : ''}`;
+  });
+}
+
+// foot 富文本：仅解析固定文案模板里的 **加粗** 标记（无任何插值，无注入面）。
+function renderFootRich(el, text) {
+  el.textContent = '';
+  String(text).split(/\*\*(.+?)\*\*/g).forEach((seg, i) => {
+    if (!seg) return;
+    if (i % 2 === 1) {
+      const b = document.createElement('b');
+      b.textContent = seg;
+      el.appendChild(b);
+    } else {
+      el.appendChild(document.createTextNode(seg));
+    }
   });
 }
 

@@ -139,8 +139,8 @@
         curCalm: false,
         // 红线：只有收到明确的「已再提醒」事件才这么说；单纯等得久绝不谎称已提醒。
         foot: state === 'reminded'
-          ? '已在飞书再次提醒你 · 不会重复打扰'
-          : '全文和「通过 / 驳回」按钮在飞书里，审批结果会自动同步到这里。',
+          ? '已在飞书**再次提醒**你 · 不会重复打扰'
+          : '全文和「**通过 / 驳回**」按钮在飞书里，审批结果会自动同步到这里。',
       };
     }
     if (state === 'approved') {
@@ -153,7 +153,7 @@
         cornerHot: false,
         stepStates: ['done', 'done', 'done', 'cur'],
         curCalm: true,
-        foot: '无需操作 · 系统会挑一个自然时段发出，发完这里会记一笔',
+        foot: '**无需操作** · 系统会挑一个自然时段发出，发完这里会记一笔',
       };
     }
 
@@ -175,26 +175,28 @@
         ...base,
         mode: 'last',
         collapsed,
+        showLink: true,
         head: '上次发布',
         corner: Number.isFinite(lastAt) ? relTime(lastAt, nowMs) : '',
         cornerHot: false,
         title: last.title,
         stepStates: ['done', 'done', 'done', 'done'],
         curCalm: false,
-        foot: '已发布 · 新笔记写好后会在这里等你确认',
+        foot: '**已发布** · 新笔记写好后会在这里等你确认',
       };
     }
     return {
       ...base,
       mode: 'empty',
       collapsed,
+      showLink: true,
       head: '发布',
       corner: '',
       cornerHot: false,
       title: '还没有发布过内容',
       stepStates: ['todo', 'todo', 'todo', 'todo'],
       curCalm: false,
-      foot: 'AI 写好笔记后会先发到飞书等你确认，通过后才会发布。',
+      foot: 'AI 写好笔记后会先发到飞书等你**确认 / 拒绝**，**通过后才会发布**。',
     };
   }
 
