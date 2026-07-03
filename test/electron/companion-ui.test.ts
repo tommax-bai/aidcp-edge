@@ -202,6 +202,18 @@ test('旧形状 status（无 presence/account/publish）→ 安全降级渲染',
   assert.equal($(w, '#comments').textContent, '0', '旧 stats 无 comments 兜底 0');
 });
 
+test('回归：今日小结数字永不为空（缺字段兜 0 + 零值弱化）', async () => {
+  const { w, pushStatus } = await boot();
+  // 只带 views 的残缺 stats（模拟老 bug 时代的坏状态）：其余计数展示 0 而不是空/undefined
+  pushStatus(makeStatus({ stats: { views: 7 } }));
+  assert.equal($(w, '#views').textContent, '7');
+  assert.equal($(w, '#likes').textContent, '0');
+  assert.equal($(w, '#collects').textContent, '0');
+  assert.equal($(w, '#comments').textContent, '0');
+  assert.ok($(w, '#likes').classList.contains('zero'), '零值应弱化显示');
+  assert.ok(!$(w, '#views').classList.contains('zero'), '非零值不弱化');
+});
+
 // ── 循环 chip ──
 test('循环 chip 随阶段点亮，停止时全灭', async () => {
   const { w, pushStatus } = await boot({ loopStage: 'read' });

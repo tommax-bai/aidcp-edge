@@ -119,6 +119,13 @@ function setBadge(element, field, value) {
   element.className = `badge ${value}`;
 }
 
+// 今日小结计数：数字永不为空（undefined/null → 0）；零值弱化显示，避免一排死零抢视觉。
+function renderKpi(el, value) {
+  const n = Number(value) || 0;
+  el.textContent = n;
+  el.classList.toggle('zero', n === 0);
+}
+
 // ─── 开发者详情：原始日志（滚动保留 + 连续去重）───
 function addLogEntry(message) {
   if (!message || message === lastLogMessage) return;
@@ -337,10 +344,10 @@ function render(status) {
   setBadge(fields.session, 'session', status.session);
   setBadge(fields.risk, 'risk', status.risk);
   setBadge(fields.edge, 'edge', status.edge);
-  fields.views.textContent = status.stats.views;
-  fields.likes.textContent = status.stats.likes;
-  fields.collects.textContent = status.stats.collects;
-  fields.comments.textContent = status.stats.comments ?? 0; // ?? 0 兜底旧版 status 无 comments 字段
+  renderKpi(fields.views, status.stats.views);
+  renderKpi(fields.likes, status.stats.likes);
+  renderKpi(fields.collects, status.stats.collects);
+  renderKpi(fields.comments, status.stats.comments); // 各计数一律 ?? 0 兜底（旧形状 / 部分补丁都不出空数字）
   fields.updatedAt.textContent = new Date(status.updatedAt).toLocaleTimeString();
   addLogEntry(status.lastMessage);
   renderTitlebar(status);

@@ -236,4 +236,20 @@ function createUiEventStream() {
   };
 }
 
-module.exports = { createUiEventStream, UI_EVENT_PREFIX, clipTitle };
+/**
+ * 合并计数补丁：partial patch 只带变化项，其余计数必须保留（修「一次 {views:+1} 把
+ * 点赞/收藏清空」的老 bug——updateStatus 先 Object.assign 整体替换、再合并已替换对象）。
+ * 纯函数供 main.cjs 与单测共用；数值兜底 0，绝不让 undefined 漏进渲染层。
+ */
+function mergeStats(prev, patch) {
+  const base = prev || {};
+  const next = { ...base, ...(patch || {}) };
+  return {
+    views: Number(next.views) || 0,
+    likes: Number(next.likes) || 0,
+    collects: Number(next.collects) || 0,
+    comments: Number(next.comments) || 0,
+  };
+}
+
+module.exports = { createUiEventStream, UI_EVENT_PREFIX, clipTitle, mergeStats };

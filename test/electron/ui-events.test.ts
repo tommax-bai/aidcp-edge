@@ -16,8 +16,9 @@ interface UiEvent {
   publish?: { state: string; title?: string; code?: string };
   account?: { id: string; name?: string };
 }
-const { createUiEventStream } = require('../../src/electron/ui-events.cjs') as {
+const { createUiEventStream, mergeStats } = require('../../src/electron/ui-events.cjs') as {
   createUiEventStream: () => { push: (line: string) => UiEvent | null };
+  mergeStats: (prev: Record<string, number> | null, patch: Record<string, number> | null) => Record<string, number>;
 };
 
 test('结构化 [ui-event] 行优先直接采用', () => {
@@ -124,4 +125,12 @@ test('未识别行 → null（只进开发者详情）', () => {
   const s = createUiEventStream();
   assert.equal(s.push('[aidcp-edge] 节点身份 edgeId=e1 [source=env]'), null);
   assert.equal(s.push(''), null);
+});
+
+test('回归：局部计数补丁绝不清空其他计数（今日小结空数字 bug）', () => {
+  const prev = { views: 3, likes: 5, collects: 2, comments: 1 };
+  assert.deepEqual(mergeStats(prev, { views: 4 }), { views: 4, likes: 5, collects: 2, comments: 1 });
+  // 缺字段 / 非法值一律兜 0，绝不把 undefined 漏进渲染层
+  assert.deepEqual(mergeStats(null, { likes: 1 }), { views: 0, likes: 1, collects: 0, comments: 0 });
+  assert.deepEqual(mergeStats({ views: Number.NaN }, null), { views: 0, likes: 0, collects: 0, comments: 0 });
 });

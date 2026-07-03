@@ -4,7 +4,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
 const { createAdsLocalApi } = require('./ads-local-api.cjs');
-const { createUiEventStream } = require('./ui-events.cjs');
+const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
 
 // 主进程侧 AdsPower 只读客户端（探测 + 环境列表）。单例持有本进程内**唯一**串行节流（1req/s）。
 // 与核心子进程内的 AdsPowerProvider 节流各自独立（跨进程无法共享内存队列，见 ads-local-api.cjs 头注）。
@@ -165,10 +165,10 @@ function applyOverlayTone(risk) {
 }
 
 function updateStatus(patch) {
-  Object.assign(status, patch, { updatedAt: new Date().toISOString() });
-  if (patch.stats) {
-    status.stats = { ...status.stats, ...patch.stats };
-  }
+  // 计数补丁先跟现值合并成**完整** stats 再落（修老 bug：Object.assign 先把 stats 整体
+  // 替换成局部补丁，随后的合并对象已被替换 → 未提及的计数被清空、渲染层出现空数字）。
+  const full = patch.stats ? { ...patch, stats: mergeStats(status.stats, patch.stats) } : patch;
+  Object.assign(status, full, { updatedAt: new Date().toISOString() });
   if (patch.risk) applyOverlayTone(patch.risk);
   BrowserWindow.getAllWindows().forEach((window) => {
     window.webContents.send('status:update', status);
