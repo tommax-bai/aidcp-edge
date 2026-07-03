@@ -129,13 +129,15 @@ function createAdsWriteApi(deps = {}) {
    * 建号：入参已是构造好的 fingerprint_config / user_proxy_config（护栏/断言在上层做）。
    * 返回 { ok, userId? }。
    */
-  async function createProfile({ groupId, name, fingerprintConfig, proxyConfig }, opts) {
+  async function createProfile({ groupId, name, fingerprintConfig, proxyConfig, remark }, opts) {
     const body = {
       group_id: String(groupId),
+      // 代理全程手工（本按钮不碰）：默认 no_proxy 建号，真代理由运维在 AdsPower 侧配。
       user_proxy_config: proxyConfig || { proxy_soft: 'no_proxy' },
       fingerprint_config: fingerprintConfig,
     };
     if (name) body.name = String(name);
+    if (remark != null) body.remark = String(remark); // 承载意图账号/模板/机器（随 user/list 读回）
     const r = await post('user/create', body, opts);
     if (!r.ok) return r;
     const uid = r.data && (r.data.id != null ? String(r.data.id) : r.data.user_id != null ? String(r.data.user_id) : undefined);
