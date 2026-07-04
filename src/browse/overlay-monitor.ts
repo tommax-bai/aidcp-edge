@@ -32,6 +32,33 @@ import {
 
 /** 弹窗类别。 */
 export type OverlayKind = 'none' | 'login' | 'captcha' | 'dismissible' | 'unknown';
+export type BlockingOverlayKind = 'captcha' | 'unknown';
+
+export interface OverlayDomFeature {
+  tag: string;
+  id?: string;
+  className?: string;
+  role?: string;
+  ariaModal?: string;
+  selector?: string;
+  text?: string;
+  rect?: { x: number; y: number; width: number; height: number };
+  style?: { position?: string; zIndex?: string; opacity?: string };
+  hasIframe?: boolean;
+  iframeSrcs?: string[];
+  hasClose?: boolean;
+  matchReasons?: string[];
+}
+
+export interface BlockingOverlaySnapshot {
+  kind: BlockingOverlayKind;
+  /** URL captured at the first local transition into captcha/unknown for this episode. */
+  firstDetectedUrl?: string;
+  capturedAt: number;
+  text?: string;
+  dom?: OverlayDomFeature;
+  candidates: OverlayDomFeature[];
+}
 
 /** 阻断浏览的类别（闸门据此暂停）：登录墙 / 验证码 / 未知阻断遮罩。 */
 export function isBlockingKind(kind: OverlayKind): boolean {
@@ -184,6 +211,228 @@ export function buildClassifyOverlayJs(
 
     return 'none';
   })()`;
+}
+
+export function buildBlockingOverlaySnapshotJs(
+  kind: BlockingOverlayKind,
+  loginSelectors: string[] = DEFAULT_LOGIN_CONTAINER_SELECTORS,
+  loginPhrases: string[] = DEFAULT_LOGIN_PHRASES,
+  captchaPhrases: string[] = DEFAULT_CAPTCHA_PHRASES,
+  dismissiblePhrases: string[] = DEFAULT_DISMISSIBLE_PHRASES,
+  excludeSelector: string = LOGIN_EXCLUDE_SELECTOR,
+): string {
+  const loginSel = loginSelectors.join(', ');
+  return `(function(){
+    var KIND = ${JSON.stringify(kind)};
+    var EXCLUDE = ${JSON.stringify(excludeSelector)};
+    var LOGIN_SEL = ${JSON.stringify(loginSel)};
+    var LOGIN_PHRASES = ${JSON.stringify(loginPhrases)};
+    var CAPTCHA_PHRASES = ${JSON.stringify(captchaPhrases)};
+    var DISMISS_PHRASES = ${JSON.stringify(dismissiblePhrases)};
+    var CAPTCHA_HOST = /captcha|geetest|geevisit|shumei|fengkong|yidun|dun\\.163|aliyun.*nc|nocaptcha|t\\.captcha\\.qq|aq\\.qq|vaptcha|verify/i;
+    var CAPTCHA_CLS = /(^|[^a-z])(captcha|geetest|nc[_-]|slide[_-]?(verify|wrap|track|btn)|puzzle|vaptcha|shumei|yidun|verify[_-]?(slider|wrap|bar))([^a-z]|$)/i;
+
+    function clip(s, n){
+      s = String(s || '').replace(/\\s+/g,' ').trim();
+      return s.length > n ? s.slice(0, n - 1) + '...' : s;
+    }
+    function classText(el){
+      var c = el && el.className;
+      if(!c) return '';
+      if(typeof c === 'string') return c;
+      if(typeof c.baseVal === 'string') return c.baseVal;
+      return String(c);
+    }
+    function vis(el){
+      if(!el || !el.getBoundingClientRect) return false;
+      var r = el.getBoundingClientRect();
+      if(!r || r.width<=0 || r.height<=0) return false;
+      var s = window.getComputedStyle ? window.getComputedStyle(el) : null;
+      if(s && (s.display==='none' || s.visibility==='hidden' || parseFloat(s.opacity||'1')<=0.05)) return false;
+      return true;
+    }
+    function txt(el){ return clip((el && el.textContent) || '', 500); }
+    function compactTxt(el){ return ((el && el.textContent) || '').replace(/\\s+/g,''); }
+    function inNote(el){ return !!(EXCLUDE && el.closest && el.closest(EXCLUDE)); }
+    function hitsAny(s, arr){ for(var i=0;i<arr.length;i++){ if(s.indexOf(arr[i])>=0) return true; } return false; }
+    function hasClose(el){ return !!(el.querySelector && el.querySelector('.close,[class*="close"],[class*="Close"],[aria-label*="close"]')); }
+    function selectorHint(el){
+      var parts = [];
+      var cur = el;
+      for(var depth=0; cur && cur.nodeType === 1 && depth < 4; depth++, cur = cur.parentElement){
+        var tag = (cur.tagName || '').toLowerCase();
+        if(!tag) break;
+        var id = cur.id ? '#' + cur.id : '';
+        var cls = classText(cur).split(/\\s+/).filter(Boolean).slice(0, 3).map(function(c){ return '.' + c; }).join('');
+        parts.unshift(tag + id + cls);
+        if(cur.id) break;
+      }
+      return parts.join(' > ');
+    }
+    function iframeSrcs(el){
+      var out = [];
+      if(((el.tagName || '').toLowerCase()) === 'iframe') {
+        var own = (el.getAttribute && el.getAttribute('src')) || el.src || '';
+        if(own) out.push(clip(own, 180));
+      }
+      if(!el.querySelectorAll) return out;
+      return out.concat(Array.prototype.slice.call(el.querySelectorAll('iframe')).slice(0, 5).map(function(f){
+        return clip((f.getAttribute && f.getAttribute('src')) || f.src || '', 180);
+      }).filter(Boolean)).slice(0, 5);
+    }
+    function domFeature(el, reasons){
+      var r = el.getBoundingClientRect();
+      var s = window.getComputedStyle ? window.getComputedStyle(el) : null;
+      var srcs = iframeSrcs(el);
+      return {
+        tag: (el.tagName || '').toLowerCase(),
+        id: el.id || undefined,
+        className: clip(classText(el), 220) || undefined,
+        role: el.getAttribute && (el.getAttribute('role') || undefined),
+        ariaModal: el.getAttribute && (el.getAttribute('aria-modal') || undefined),
+        selector: selectorHint(el) || undefined,
+        text: txt(el) || undefined,
+        rect: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
+        style: s ? { position: s.position, zIndex: s.zIndex, opacity: s.opacity } : undefined,
+        hasIframe: srcs.length > 0,
+        iframeSrcs: srcs,
+        hasClose: hasClose(el),
+        matchReasons: reasons
+      };
+    }
+    function reasonsFor(el){
+      var reasons = [];
+      var t = compactTxt(el);
+      var cls = classText(el);
+      var r = el.getBoundingClientRect();
+      var s = window.getComputedStyle ? window.getComputedStyle(el) : null;
+      var fixed = !!(s && (s.position==='fixed' || s.position==='absolute'));
+      var vw = window.innerWidth || 1024, vh = window.innerHeight || 768;
+      var big = r.width >= vw*0.6 && r.height >= vh*0.4;
+      var srcs = iframeSrcs(el);
+      if(hitsAny(t, CAPTCHA_PHRASES)) reasons.push('captcha_text');
+      if(CAPTCHA_CLS.test(cls)) reasons.push('captcha_class');
+      if(srcs.some(function(src){ return CAPTCHA_HOST.test(src); })) reasons.push('captcha_iframe_host');
+      if(srcs.length > 0) reasons.push('has_iframe');
+      if(big) reasons.push('large_rect');
+      if(fixed) reasons.push('fixed_or_absolute');
+      if(!hasClose(el)) reasons.push('no_close_control');
+      if(hitsAny(t, LOGIN_PHRASES)) reasons.push('login_text');
+      if(hitsAny(t, DISMISS_PHRASES)) reasons.push('dismissible_text');
+      return reasons;
+    }
+    function includeForKind(reasons){
+      if(KIND === 'captcha') {
+        return reasons.indexOf('captcha_text') >= 0 || reasons.indexOf('captcha_class') >= 0 || reasons.indexOf('captcha_iframe_host') >= 0;
+      }
+      return reasons.indexOf('has_iframe') >= 0 ||
+        (reasons.indexOf('large_rect') >= 0 && reasons.indexOf('fixed_or_absolute') >= 0 && reasons.indexOf('no_close_control') >= 0);
+    }
+
+    var nodes = Array.prototype.slice.call(document.querySelectorAll(
+      '[class*="mask"],[class*="modal"],[role="dialog"],[aria-modal="true"],[class*="captcha"],[class*="verify"],[id*="captcha"]'
+    ));
+    if (KIND === 'captcha') {
+      nodes = nodes.concat(Array.prototype.slice.call(document.querySelectorAll('iframe')).filter(function(f){
+        var src = (f.getAttribute && f.getAttribute('src')) || f.src || '';
+        return CAPTCHA_HOST.test(src);
+      }));
+    }
+    var candidates = [];
+    for(var i=0;i<nodes.length;i++){
+      var el = nodes[i];
+      if(!vis(el) || inNote(el)) continue;
+      var reasons = reasonsFor(el);
+      if(!includeForKind(reasons)) continue;
+      candidates.push(domFeature(el, reasons));
+    }
+    candidates.sort(function(a,b){
+      var ar = a.rect ? a.rect.width * a.rect.height : 0;
+      var br = b.rect ? b.rect.width * b.rect.height : 0;
+      return br - ar;
+    });
+    var primary = candidates[0];
+    return {
+      kind: KIND,
+      firstDetectedUrl: String(location.href || ''),
+      capturedAt: Date.now(),
+      text: primary && primary.text || undefined,
+      dom: primary || undefined,
+      candidates: candidates.slice(0, 3)
+    };
+  })()`;
+}
+
+/** Read-only diagnostic snapshot for the current blocking overlay. */
+export async function captureBlockingOverlaySnapshot(
+  cdp: BrowseCdp,
+  kind: BlockingOverlayKind,
+  js: string = buildBlockingOverlaySnapshotJs(kind),
+): Promise<BlockingOverlaySnapshot> {
+  const raw = await evalRaw<BlockingOverlaySnapshot>(cdp, js);
+  return normalizeBlockingOverlaySnapshot(raw, kind);
+}
+
+function normalizeBlockingOverlaySnapshot(raw: unknown, fallbackKind: BlockingOverlayKind): BlockingOverlaySnapshot {
+  const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const candidates = Array.isArray(obj.candidates)
+    ? obj.candidates.map(normalizeOverlayDomFeature).filter((v): v is OverlayDomFeature => v !== undefined)
+    : [];
+  const dom = normalizeOverlayDomFeature(obj.dom);
+  return {
+    kind: obj.kind === 'captcha' || obj.kind === 'unknown' ? obj.kind : fallbackKind,
+    firstDetectedUrl: typeof obj.firstDetectedUrl === 'string' ? obj.firstDetectedUrl : undefined,
+    capturedAt: typeof obj.capturedAt === 'number' ? obj.capturedAt : Date.now(),
+    text: typeof obj.text === 'string' ? obj.text : dom?.text,
+    dom,
+    candidates,
+  };
+}
+
+function normalizeOverlayDomFeature(raw: unknown): OverlayDomFeature | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.tag !== 'string') return undefined;
+  const rect =
+    obj.rect && typeof obj.rect === 'object'
+      ? (obj.rect as Record<string, unknown>)
+      : undefined;
+  const style =
+    obj.style && typeof obj.style === 'object'
+      ? (obj.style as Record<string, unknown>)
+      : undefined;
+  return {
+    tag: obj.tag,
+    id: typeof obj.id === 'string' ? obj.id : undefined,
+    className: typeof obj.className === 'string' ? obj.className : undefined,
+    role: typeof obj.role === 'string' ? obj.role : undefined,
+    ariaModal: typeof obj.ariaModal === 'string' ? obj.ariaModal : undefined,
+    selector: typeof obj.selector === 'string' ? obj.selector : undefined,
+    text: typeof obj.text === 'string' ? obj.text : undefined,
+    rect:
+      rect &&
+      typeof rect.x === 'number' &&
+      typeof rect.y === 'number' &&
+      typeof rect.width === 'number' &&
+      typeof rect.height === 'number'
+        ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+        : undefined,
+    style: style
+      ? {
+          position: typeof style.position === 'string' ? style.position : undefined,
+          zIndex: typeof style.zIndex === 'string' ? style.zIndex : undefined,
+          opacity: typeof style.opacity === 'string' ? style.opacity : undefined,
+        }
+      : undefined,
+    hasIframe: typeof obj.hasIframe === 'boolean' ? obj.hasIframe : undefined,
+    iframeSrcs: Array.isArray(obj.iframeSrcs)
+      ? obj.iframeSrcs.filter((v): v is string => typeof v === 'string')
+      : undefined,
+    hasClose: typeof obj.hasClose === 'boolean' ? obj.hasClose : undefined,
+    matchReasons: Array.isArray(obj.matchReasons)
+      ? obj.matchReasons.filter((v): v is string => typeof v === 'string')
+      : undefined,
+  };
 }
 
 /** 就地探测一次，返回弹窗类别（CDP 失败会抛——交调用方决定 fail 策略）。 */

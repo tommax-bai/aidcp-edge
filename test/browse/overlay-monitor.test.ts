@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   CdpOverlayMonitor,
   classifyOverlay,
+  captureBlockingOverlaySnapshot,
   buildClassifyOverlayJs,
+  buildBlockingOverlaySnapshotJs,
   isBlockingKind,
   type OverlayKind,
 } from '../../src/browse/overlay-monitor.js';
@@ -135,4 +137,43 @@ test('buildClassifyOverlayJs: 生成的 JS 含各类指纹与返回分支', () =
   assert.match(js, /'dismissible'/);
   assert.match(js, /'unknown'/);
   assert.match(js, /'none'/);
+});
+
+test('captureBlockingOverlaySnapshot: normalizes text, DOM features, and first URL', async () => {
+  const snapshot = await captureBlockingOverlaySnapshot(
+    fakeCdp({
+      value: {
+        kind: 'unknown',
+        firstDetectedUrl: 'https://www.xiaohongshu.com/explore',
+        capturedAt: 123,
+        text: 'content unavailable',
+        dom: {
+          tag: 'div',
+          className: 'global-mask',
+          rect: { x: 0, y: 0, width: 1280, height: 720 },
+          hasIframe: false,
+          hasClose: false,
+          matchReasons: ['large_rect', 'fixed_or_absolute', 'no_close_control'],
+        },
+        candidates: [{ tag: 'div', text: 'content unavailable' }],
+      },
+    }),
+    'unknown',
+  );
+
+  assert.equal(snapshot.kind, 'unknown');
+  assert.equal(snapshot.firstDetectedUrl, 'https://www.xiaohongshu.com/explore');
+  assert.equal(snapshot.text, 'content unavailable');
+  assert.equal(snapshot.dom?.tag, 'div');
+  assert.equal(snapshot.dom?.className, 'global-mask');
+  assert.deepEqual(snapshot.dom?.matchReasons, ['large_rect', 'fixed_or_absolute', 'no_close_control']);
+  assert.equal(snapshot.candidates.length, 1);
+});
+
+test('buildBlockingOverlaySnapshotJs: generated JS captures first URL and DOM feature fields', () => {
+  const js = buildBlockingOverlaySnapshotJs('unknown');
+  assert.match(js, /firstDetectedUrl/);
+  assert.match(js, /matchReasons/);
+  assert.match(js, /hasIframe/);
+  assert.match(js, /hasClose/);
 });

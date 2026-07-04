@@ -64,7 +64,9 @@ import {
   CdpLoginModalWatcher,
   evalRaw,
   extractNoteContent,
+  captureBlockingOverlaySnapshot,
   createOverlayReportGate,
+  type BlockingOverlaySnapshot,
   type BrowseSessionOptions,
 } from './browse/index.js';
 
@@ -464,19 +466,53 @@ async function main(): Promise<void> {
     // 低置信 unknown → 延后一轮确认仍在才报（滤掉离页返回途中 token 失效详情 300031 墙这类瞬时坏页误报）；
     // captcha 指纹 → 即时 fail-CLOSED（绝不弱化真验证码）；detected/cleared 严格配对、杜绝孤儿 cleared。
     const overlayConfirmMs = Number(process.env.AIDCP_OVERLAY_CONFIRM_MS ?? 2000);
+    const isCloudBlockingOverlay = (kind: string): kind is 'captcha' | 'unknown' =>
+      kind === 'captcha' || kind === 'unknown';
+    let overlaySnapshotPromise: Promise<BlockingOverlaySnapshot | undefined> | undefined;
+
+    const resetOverlaySnapshot = (): void => {
+      overlaySnapshotPromise = undefined;
+    };
+    const primeOverlaySnapshot = (kind: 'captcha' | 'unknown'): void => {
+      if (overlaySnapshotPromise) return;
+      overlaySnapshotPromise = captureBlockingOverlaySnapshot(session.cdp, kind).catch((err) => {
+        console.warn('[aidcp-edge] 阻断遮罩现场快照采集失败:', err instanceof Error ? err.message : String(err));
+        return undefined;
+      });
+    };
+    const readPrimedOverlaySnapshot = async (kind: 'captcha' | 'unknown'): Promise<BlockingOverlaySnapshot | undefined> => {
+      primeOverlaySnapshot(kind);
+      return overlaySnapshotPromise;
+    };
     const sendOverlayDetected = (kind: 'captcha' | 'unknown'): void => {
       void (async () => {
+        const overlay = await readPrimedOverlaySnapshot(kind);
         let url = '';
+        if (overlay?.firstDetectedUrl) {
+          url = overlay.firstDetectedUrl;
+        }
         try {
-          url = await evalRaw<string>(session.cdp, 'location.href');
+          if (!url) url = await evalRaw<string>(session.cdp, 'location.href');
         } catch {
           /* best-effort，URL 取不到不影响上报 */
         }
         try {
-          client.send('risk.captcha_detected', { edgeId, kind, url, ...(accountId ? { accountId } : {}) });
+          client.send('risk.captcha_detected', {
+            edgeId,
+            kind,
+            url,
+            ...(overlay ? { overlay } : {}),
+            ...(accountId ? { accountId } : {}),
+          });
         } catch (err) {
           console.error('[aidcp-edge] risk.captcha_detected 上报失败:', err);
         }
+        console.warn('[aidcp-edge] 阻断遮罩现场快照:', {
+          kind,
+          firstDetectedUrl: overlay?.firstDetectedUrl ?? url,
+          text: overlay?.text,
+          dom: overlay?.dom,
+        });
         console.warn(
           `[aidcp-edge] ⚠ 检测到${kind === 'captcha' ? '验证码' : '未知阻断'}弹窗，已本地暂停并上报云端，等待人工处理`,
         );
@@ -490,6 +526,7 @@ async function main(): Promise<void> {
         } catch (err) {
           console.error('[aidcp-edge] risk.captcha_cleared 上报失败:', err);
         }
+        resetOverlaySnapshot();
         console.log('[aidcp-edge] 阻断弹窗已清除，恢复浏览');
       },
       isStillUnknown: () => overlayMonitor?.state === 'unknown',
@@ -500,7 +537,11 @@ async function main(): Promise<void> {
     });
     watcherSupervisor = new WatcherSupervisor();
     // ① 弹窗监测：类别翻转交上报闸决策（unknown 延后确认、captcha 即时、cleared 配对）。login 只本地暂停、不打扰云端。
-    watcherSupervisor.register(overlayMonitor, (from, to) => overlayReportGate.onTransition(from, to));
+    watcherSupervisor.register(overlayMonitor, (from, to) => {
+      if (isCloudBlockingOverlay(to) && !isCloudBlockingOverlay(from)) primeOverlaySnapshot(to);
+      if (!isCloudBlockingOverlay(to)) resetOverlaySnapshot();
+      overlayReportGate.onTransition(from, to);
+    });
     // ② 通知未读监测：无→有 上报 notification.detected（云端协调器据此巡视「评论和@」）。
     const notificationMonitor = new CdpNotificationMonitor(session.cdp);
     watcherSupervisor.register(notificationMonitor, (from, to) => {
