@@ -47,7 +47,7 @@ import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
 import { publishPost } from './flows/publish-post.js';
 import { PublishCommandDispatcher } from './flows/publish-command-handlers.js';
-import { PublishUiEventTracker, uiSnapshotToLines } from './flows/ui-event-lines.js';
+import { PublishUiEventTracker, uiSnapshotToLines, writeNoteStageLine } from './flows/ui-event-lines.js';
 import { ImageUploader } from './flows/image-uploader.js';
 import { CdpFileInputSetter } from './cdp/file-input-setter.js';
 import { AnchorCache } from './locating/cache.js';
@@ -209,6 +209,7 @@ async function main(): Promise<void> {
   // 会静默漏掉首帧。注册本身不需要活连接，先注册零成本。
   client.onPublishCommand((env) => {
     void (async () => {
+      console.log(writeNoteStageLine());
       // §7 在途登记：回收若撞上这条在途发布，按 publish.result 形状诚实判失败（同 env.id 回执）。
       inFlightPublishes.set(env.id, (reason) => {
         try {
@@ -298,6 +299,7 @@ async function main(): Promise<void> {
   const publishUiEvents = new PublishUiEventTracker();
   client.onPublishAtomCommand((env) => {
     void (async () => {
+      console.log(writeNoteStageLine());
       publishUiEvents.observe(env.payload);
       // §7 在途登记：按 publish.command.result 形状诚实判失败（带 recordId/seq/kind，同 env.id 回执）。
       inFlightPublishes.set(env.id, (reason) => {

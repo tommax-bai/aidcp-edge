@@ -9,6 +9,7 @@ import {
   PublishUiEventTracker,
   uiSnapshotToLines,
   publishCode,
+  writeNoteStageLine,
   UI_EVENT_PREFIX,
 } from '../../src/flows/ui-event-lines.js';
 import type { PublishCommandPayload, PublishCommandResultPayload } from '../../src/comm/protocol.js';
@@ -42,6 +43,15 @@ test('ui-event-lines: submit_publish 成功 → published 行，带 fill_field �
   assert.equal(evt.publish?.state, 'published');
   assert.equal(evt.publish?.title, '春日手作分享');
   assert.equal(evt.publish?.code, publishCode(83));
+});
+
+test('ui-event-lines: 发布指令执行期间产出写笔记 loopStage presence', () => {
+  const evt = parseLine(writeNoteStageLine());
+  assert.equal(evt.kind, 'presence');
+  assert.equal(evt.type, 'write_note');
+  assert.equal(evt.loopStage, 'write');
+  assert.match(evt.presence, /写笔记/);
+  assert.equal(evt.sentence, undefined, '只切状态，不塞活动流');
 });
 
 test('ui-event-lines: 单条指令失败不在边缘抢判 failed（云端序列可能容错继续）', () => {

@@ -85,6 +85,16 @@ export function publishCode(recordId: number): string {
   return `#${recordId}`;
 }
 
+/** 发布稿件指令执行期间，Electron loop chip 切到「写笔记」状态；只更新在场感，不产生活动流。 */
+export function writeNoteStageLine(): string {
+  return line({
+    kind: 'presence',
+    type: 'write_note',
+    presence: '正在写笔记并准备发布…',
+    loopStage: 'write',
+  });
+}
+
 /**
  * 发布链路 UI 事件跟踪器（边缘本地部分）：
  *  - 从 fill_field(title) 指令里记住每个 recordId 的标题（终态行带上）；

@@ -22,7 +22,7 @@ const UI_EVENT_PREFIX = '[ui-event]';
 //   type: string,                     // 机器可读标签（'like' / 'note_open' / 'connect' / ...）
 //   sentence: string,                 // 活动流一句话（人话）
 //   presence: string,                 // 在场感行文案（当前正在做什么）
-//   loopStage: 'feed'|'select'|'read'|'interact'|'return'|null,
+//   loopStage: 'feed'|'select'|'read'|'write'|'comment'|'interact'|'return'|null,
 //   statsDelta: { views?, likes?, collects?, comments? },
 //   publish: { state:'pending'|'reminded'|'approved'|'published'|'rejected'|'failed', title?, code? },
 //   account: { id, name },
@@ -158,13 +158,22 @@ function createUiEventStream() {
       }),
     ],
     [
+      /命令: interaction\.comment/,
+      () => ({
+        kind: 'presence',
+        type: 'comment_composing',
+        presence: '正在创作评论…',
+        loopStage: 'comment',
+      }),
+    ],
+    [
       /✓ 评论发布成功/,
       () => ({
         kind: 'activity',
         type: 'comment',
         sentence: '写了一条评论并发布',
         presence: '刚发布了一条评论',
-        loopStage: 'interact',
+        loopStage: 'comment',
         statsDelta: { comments: 1 },
       }),
     ],
@@ -256,6 +265,9 @@ function createUiEventStream() {
         }
         if (structured.kind === 'publish' && structured.publish && structured.publish.state && !structured.presence) {
           structured.presence = publishPresence(structured.publish);
+        }
+        if (structured.kind === 'publish' && structured.publish && structured.publish.state && structured.loopStage === undefined) {
+          structured.loopStage = 'write';
         }
         if (structured.kind === 'lastPublish' && structured.lastPublish && structured.lastPublish.title) {
           structured.lastPublish.title = clipTitle(structured.lastPublish.title, 30);

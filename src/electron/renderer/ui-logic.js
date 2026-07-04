@@ -98,8 +98,8 @@
     };
   }
 
-  // ── 浏览循环 chip：feed → select → read → interact → return ──
-  const LOOP_STAGES = ['feed', 'select', 'read', 'interact', 'return'];
+  // ── 浏览循环 chip：feed → select → read → write/comment/interact → return ──
+  const LOOP_STAGES = ['feed', 'select', 'read', 'write', 'comment', 'interact', 'return'];
   function loopIndex(stage) {
     const i = LOOP_STAGES.indexOf(stage);
     return i === -1 ? -1 : i;

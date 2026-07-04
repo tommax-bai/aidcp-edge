@@ -35,10 +35,12 @@ test('结构化 publish 行 → 同步在场感，进度区跟随发布状态刷
   const pending = s.push('[ui-event] {"kind":"publish","publish":{"state":"pending","title":"秋日城市漫步"}}');
   assert.match(pending?.presence ?? '', /飞书/);
   assert.match(pending?.presence ?? '', /等你确认/);
+  assert.equal(pending?.loopStage, 'write');
 
   const done = s.push('[ui-event] {"kind":"publish","publish":{"state":"published","title":"秋日城市漫步"}}');
   assert.match(done?.presence ?? '', /已发布/);
   assert.match(done?.presence ?? '', /回到浏览/);
+  assert.equal(done?.loopStage, 'write');
 });
 
 test('结构化行 JSON 坏了 → 走兜底映射而非抛错', () => {
@@ -93,7 +95,9 @@ test('✓ 点赞成功 → likes+1，叙述带上最近笔记标题', () => {
 test('✓ 收藏成功 / ✓ 评论发布成功 / ✓ 评论点赞成功 → 各自计数', () => {
   const s = createUiEventStream();
   assert.deepEqual(s.push('[browse] ✓ 收藏成功 (1, 2)')?.statsDelta, { collects: 1 });
-  assert.deepEqual(s.push('[browse] ✓ 评论发布成功（编辑器清空 + 自己的评论行出现，耗时 3s）')?.statsDelta, { comments: 1 });
+  const comment = s.push('[browse] ✓ 评论发布成功（编辑器清空 + 自己的评论行出现，耗时 3s）');
+  assert.deepEqual(comment?.statsDelta, { comments: 1 });
+  assert.equal(comment?.loopStage, 'comment');
   assert.deepEqual(s.push('[browse] ✓ 评论点赞成功 (anchor=c1)')?.statsDelta, { likes: 1 });
   assert.deepEqual(s.push('[browse] ✓ 关注成功')?.statsDelta, { follows: 1 });
 });
@@ -130,6 +134,7 @@ test('浏览循环阶段：scroll→feed / note.open→select / back→return / 
   const s = createUiEventStream();
   assert.equal(s.push('[browse] 命令: page.scroll (continue)')?.loopStage, 'feed');
   assert.equal(s.push('[browse] 命令: note.open (index=2, noteId=n)')?.loopStage, 'select');
+  assert.equal(s.push('[browse] 命令: interaction.comment (noteId=n1)')?.loopStage, 'comment');
   assert.equal(s.push('[browse] 命令: navigation.back (browse_next, target=feed)')?.loopStage, 'return');
   assert.equal(s.push('[browse] 浏览循环结束')?.loopStage, null);
 });
