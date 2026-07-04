@@ -255,12 +255,41 @@ test('今日小结：收到账号 dailyUsage 后优先显示账号今日，并�
       totals: { view: 10, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
       quotas: { view: 150, like: 3, collect: 25, comment: 8, follow: 15, publish: 1 },
       saturated: ['like', 'publish'],
+      windows: {
+        session: {
+          active: true,
+          startedAt: 1730000000000,
+          totals: { like: 1, collect: 0, comment: 0, follow: 0 },
+          quotas: { like: 10, collect: 5, comment: 2, follow: 3 },
+          saturated: [],
+        },
+        minute: {
+          totals: { view: 3, like: 3, collect: 0, comment: 0, follow: 0, publish: 0 },
+          quotas: { view: 8, like: 3, collect: 2, comment: 1, follow: 1, publish: 1 },
+          saturated: ['like'],
+        },
+        hour: {
+          totals: { view: 10, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
+          quotas: { view: 60, like: 13, collect: 7, comment: 2, follow: 4, publish: 1 },
+          saturated: [],
+        },
+        day: {
+          totals: { view: 10, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
+          quotas: { view: 150, like: 3, collect: 25, comment: 8, follow: 15, publish: 1 },
+          saturated: ['like', 'publish'],
+        },
+      },
     },
   }));
   assert.match($(w, '#usage-source').textContent ?? '', /账号今日/);
   assert.match($(w, '#usage-source').textContent ?? '', /标准档/);
   assert.match($(w, '#usage-limit').textContent ?? '', /已达上限/);
+  assert.match($(w, '#usage-limit').textContent ?? '', /分钟/);
+  assert.match($(w, '#usage-limit').textContent ?? '', /今日/);
   assert.ok($(w, '#usage-limit').classList.contains('hit'));
+  assert.ok(!$(w, '#quota-windows').classList.contains('hidden'));
+  assert.match($(w, '#quota-windows').textContent ?? '', /单场/);
+  assert.match($(w, '#quota-windows').textContent ?? '', /小时/);
   assert.equal($(w, '#views').textContent, '10');
   assert.equal($(w, '#likes').textContent, '3');
   assert.equal($(w, '#follows').textContent, '2');

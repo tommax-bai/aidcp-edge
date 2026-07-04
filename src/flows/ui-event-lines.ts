@@ -18,6 +18,7 @@ import type {
 
 export const UI_EVENT_PREFIX = '[ui-event]';
 const DAILY_USAGE_ACTIONS = ['view', 'like', 'collect', 'comment', 'follow', 'publish'] as const;
+const DAILY_USAGE_WINDOWS = ['session', 'minute', 'hour', 'day'] as const;
 
 function line(obj: Record<string, unknown>): string {
   return `${UI_EVENT_PREFIX} ${JSON.stringify(obj)}`;
@@ -46,7 +47,37 @@ function sanitizeDailyUsage(input: UiSnapshotPayload['dailyUsage']): Record<stri
       (DAILY_USAGE_ACTIONS as readonly string[]).includes(action),
     );
   }
+  const windows = sanitizeDailyUsageWindows(input.windows as Record<string, unknown> | undefined);
+  if (windows) dailyUsage.windows = windows;
   return dailyUsage;
+}
+
+function sanitizeDailyUsageWindows(input: Record<string, unknown> | undefined): Record<string, unknown> | null {
+  if (!input || typeof input !== 'object') return null;
+  const output: Record<string, unknown> = {};
+  for (const windowName of DAILY_USAGE_WINDOWS) {
+    const sanitized = sanitizeDailyUsageWindow(input[windowName]);
+    if (sanitized) output[windowName] = sanitized;
+  }
+  return Object.keys(output).length > 0 ? output : null;
+}
+
+function sanitizeDailyUsageWindow(input: unknown): Record<string, unknown> | null {
+  if (!input || typeof input !== 'object') return null;
+  const source = input as Record<string, unknown>;
+  const totals = sanitizeCounts(source.totals as Record<string, unknown> | undefined);
+  if (Object.keys(totals).length === 0) return null;
+  const quotas = sanitizeCounts(source.quotas as Record<string, unknown> | undefined);
+  const output: Record<string, unknown> = { totals };
+  if (typeof source.active === 'boolean') output.active = source.active;
+  if (typeof source.startedAt === 'number' && Number.isFinite(source.startedAt)) output.startedAt = source.startedAt;
+  if (Object.keys(quotas).length > 0) output.quotas = quotas;
+  if (Array.isArray(source.saturated)) {
+    output.saturated = source.saturated.filter((action) =>
+      (DAILY_USAGE_ACTIONS as readonly string[]).includes(action),
+    );
+  }
+  return output;
 }
 
 /** 界面「编号」展示形态（与云端飞书审批卡「编号」字段同源：发布记录 id）。 */

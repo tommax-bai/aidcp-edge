@@ -17,6 +17,7 @@ const fields = {
   publishes: document.querySelector('#publishes'),
   usageSource: document.querySelector('#usage-source'),
   usageLimit: document.querySelector('#usage-limit'),
+  quotaWindows: document.querySelector('#quota-windows'),
   updatedAt: document.querySelector('#updated-at'),
   usageCaps: {
     view: document.querySelector('#views-cap'),
@@ -157,6 +158,13 @@ const USAGE_ITEMS = [
   { action: 'publish', stat: 'publishes', value: fields.publishes, label: '发帖' },
 ];
 
+const QUOTA_WINDOWS = [
+  { key: 'session', label: '单场' },
+  { key: 'minute', label: '分钟' },
+  { key: 'hour', label: '小时' },
+  { key: 'day', label: '今日' },
+];
+
 const QUOTA_LEVEL_LABELS = {
   conservative: '保守档',
   normal: '标准档',
@@ -190,6 +198,7 @@ function usageView(status) {
     totals,
     quotas,
     saturated: new Set(Array.isArray(daily?.saturated) ? daily.saturated : []),
+    windows: daily && daily.windows && typeof daily.windows === 'object' ? daily.windows : null,
   };
 }
 
@@ -216,6 +225,15 @@ function renderUsageItem(item, usage) {
 }
 
 function usageLimitLabel(usage) {
+  const windowViews = quotaWindowViews(usage);
+  if (windowViews.length > 0) {
+    const hit = windowViews.filter((window) => window.limited > 0);
+    if (hit.length > 0) {
+      const labels = hit.map((window) => window.label);
+      return { tone: 'hit', text: `已达上限 · ${labels.join('/')}` };
+    }
+    return { tone: 'ok', text: '额度正常' };
+  }
   if (!usage.quotas) return null;
   let limited = 0;
   for (const item of USAGE_ITEMS) {
@@ -225,6 +243,68 @@ function usageLimitLabel(usage) {
     if (usage.saturated.has(item.action) || used >= cap) limited += 1;
   }
   return limited > 0 ? { tone: 'hit', text: `已达上限 · ${limited}项` } : { tone: 'ok', text: '额度正常' };
+}
+
+function quotaWindowViews(usage) {
+  const windows = usage.windows;
+  if (!windows || typeof windows !== 'object') return [];
+  return QUOTA_WINDOWS.map((item) => quotaWindowView(item, windows[item.key]))
+    .filter(Boolean);
+}
+
+function quotaWindowView(item, window) {
+  if (!window || typeof window !== 'object' || !window.quotas || typeof window.quotas !== 'object') return null;
+  const totals = window.totals && typeof window.totals === 'object' ? window.totals : {};
+  const quotas = window.quotas;
+  const saturated = new Set(Array.isArray(window.saturated) ? window.saturated : []);
+  const active = item.key === 'session' ? window.active !== false : true;
+  const capped = [];
+  for (const usageItem of USAGE_ITEMS) {
+    if (typeof quotas[usageItem.action] !== 'number') continue;
+    const used = count(totals[usageItem.action]);
+    const cap = count(quotas[usageItem.action]);
+    const ratio = cap > 0 ? Math.min(1, used / cap) : 1;
+    const hit = active && (saturated.has(usageItem.action) || used >= cap);
+    capped.push({ ...usageItem, used, cap, ratio, hit });
+  }
+  if (capped.length === 0) return null;
+  const limited = capped.filter((entry) => entry.hit).length;
+  const worst = capped.reduce((best, entry) => (!best || entry.ratio > best.ratio ? entry : best), null);
+  const ratio = active ? (worst?.ratio ?? 0) : 0;
+  const tone = !active ? 'idle' : limited > 0 ? 'hit' : ratio >= 0.8 ? 'near' : 'ok';
+  const state = !active ? '未运行' : limited > 0 ? `已满 ${limited}项` : ratio >= 0.8 ? '临近' : '正常';
+  const meta = worst ? `${worst.label} ${worst.used}/${worst.cap}` : '';
+  return {
+    key: item.key,
+    label: item.label,
+    tone,
+    state,
+    meta,
+    ratio,
+    limited,
+    title: `${item.label}：${state}${capped.length > 0 ? ` · ${capped.map((entry) => `${entry.label} ${entry.used}/${entry.cap}`).join(' · ')}` : ''}`,
+  };
+}
+
+function renderQuotaWindows(usage) {
+  if (!fields.quotaWindows) return;
+  const windows = quotaWindowViews(usage);
+  if (windows.length === 0) {
+    fields.quotaWindows.className = 'quota-windows hidden';
+    fields.quotaWindows.innerHTML = '';
+    return;
+  }
+  fields.quotaWindows.className = 'quota-windows';
+  fields.quotaWindows.innerHTML = windows.map((window) => {
+    const pct = Math.round(window.ratio * 100);
+    return `
+      <div class="quota-window ${window.tone}" title="${escapeHtml(window.title)}">
+        <span class="qw-name">${escapeHtml(window.label)}</span>
+        <strong>${escapeHtml(window.state)}</strong>
+        <i><em style="width:${pct}%"></em></i>
+        <span class="qw-meta">${escapeHtml(window.meta)}</span>
+      </div>`;
+  }).join('');
 }
 
 function renderUsageSummary(status) {
@@ -238,6 +318,7 @@ function renderUsageSummary(status) {
     fields.usageLimit.className = limit ? `summary-limit ${limit.tone}` : 'summary-limit hidden';
   }
   for (const item of USAGE_ITEMS) renderUsageItem(item, usage);
+  renderQuotaWindows(usage);
   fields.updatedAt.textContent = new Date(usage.asOf).toLocaleTimeString();
 }
 

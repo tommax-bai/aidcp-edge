@@ -117,6 +117,20 @@ test('ui-event-lines: uiSnapshotToLines forwards account daily usage for Electro
       totals: { view: 12, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
       quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
       saturated: ['publish'],
+      windows: {
+        minute: {
+          totals: { view: 4, like: 3, collect: 0, comment: 0, follow: 0, publish: 0 },
+          quotas: { view: 8, like: 3, collect: 2, comment: 1, follow: 1, publish: 1 },
+          saturated: ['like'],
+        },
+        session: {
+          active: true,
+          startedAt: 1730000000000,
+          totals: { like: 1, collect: 0, comment: 0, follow: 0 },
+          quotas: { like: 10, collect: 5, comment: 2, follow: 3 },
+          saturated: [],
+        },
+      },
     },
   });
   assert.equal(lines.length, 1);
@@ -128,6 +142,20 @@ test('ui-event-lines: uiSnapshotToLines forwards account daily usage for Electro
     totals: { view: 12, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
     quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
     saturated: ['publish'],
+    windows: {
+      minute: {
+        totals: { view: 4, like: 3, collect: 0, comment: 0, follow: 0, publish: 0 },
+        quotas: { view: 8, like: 3, collect: 2, comment: 1, follow: 1, publish: 1 },
+        saturated: ['like'],
+      },
+      session: {
+        active: true,
+        startedAt: 1730000000000,
+        totals: { like: 1, collect: 0, comment: 0, follow: 0 },
+        quotas: { like: 10, collect: 5, comment: 2, follow: 3 },
+        saturated: [],
+      },
+    },
   });
 });
 

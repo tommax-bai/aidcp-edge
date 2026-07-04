@@ -236,6 +236,7 @@ function applyOverlayTone(risk) {
 }
 
 const DAILY_USAGE_ACTIONS = ['view', 'like', 'collect', 'comment', 'follow', 'publish'];
+const DAILY_USAGE_WINDOWS = ['session', 'minute', 'hour', 'day'];
 
 function cleanCount(value) {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
@@ -272,6 +273,31 @@ function saturatedActions(totals, quotas, explicit) {
   return [...set];
 }
 
+function normalizeUsageWindow(input) {
+  if (!input || typeof input !== 'object' || !input.totals || typeof input.totals !== 'object') return null;
+  const totals = cleanOptionalCounts(input.totals);
+  if (!totals) return null;
+  const quotas = cleanOptionalCounts(input.quotas);
+  const out = {
+    totals,
+    saturated: saturatedActions(totals, quotas, input.saturated),
+  };
+  if (typeof input.active === 'boolean') out.active = input.active;
+  if (typeof input.startedAt === 'number' && Number.isFinite(input.startedAt)) out.startedAt = input.startedAt;
+  if (quotas) out.quotas = quotas;
+  return out;
+}
+
+function normalizeUsageWindows(input) {
+  if (!input || typeof input !== 'object') return null;
+  const windows = {};
+  for (const name of DAILY_USAGE_WINDOWS) {
+    const window = normalizeUsageWindow(input[name]);
+    if (window) windows[name] = window;
+  }
+  return Object.keys(windows).length > 0 ? windows : null;
+}
+
 function normalizeDailyUsage(input) {
   if (!input || typeof input !== 'object') return null;
   const asOf = typeof input.asOf === 'number' && Number.isFinite(input.asOf)
@@ -279,6 +305,7 @@ function normalizeDailyUsage(input) {
     : new Date().toISOString();
   const totals = cleanRequiredCounts(input.totals);
   const quotas = cleanOptionalCounts(input.quotas);
+  const windows = normalizeUsageWindows(input.windows);
   const out = {
     asOf,
     totals,
@@ -286,6 +313,7 @@ function normalizeDailyUsage(input) {
   };
   if (['conservative', 'normal', 'aggressive'].includes(input.quotaLevel)) out.quotaLevel = input.quotaLevel;
   if (quotas) out.quotas = quotas;
+  if (windows) out.windows = windows;
   return out;
 }
 
@@ -307,13 +335,40 @@ function bumpDailyUsage(usage, action, delta) {
   const totals = { ...cleanRequiredCounts(usage.totals) };
   totals[action] = cleanCount(totals[action]) + amount;
   const quotas = cleanOptionalCounts(usage.quotas);
+  const windows = bumpDailyUsageWindows(usage.windows, action, amount);
   return {
     ...usage,
     asOf: new Date().toISOString(),
     totals,
     ...(quotas ? { quotas } : {}),
     saturated: saturatedActions(totals, quotas, usage.saturated),
+    ...(windows ? { windows } : {}),
   };
+}
+
+function bumpDailyUsageWindows(input, action, amount) {
+  if (!input || typeof input !== 'object') return null;
+  const windows = {};
+  for (const name of DAILY_USAGE_WINDOWS) {
+    const window = normalizeUsageWindow(input[name]);
+    if (!window) continue;
+    const hasAction =
+      Object.prototype.hasOwnProperty.call(window.totals, action) ||
+      (window.quotas && Object.prototype.hasOwnProperty.call(window.quotas, action));
+    if (!hasAction) {
+      windows[name] = window;
+      continue;
+    }
+    const totals = { ...window.totals, [action]: cleanCount(window.totals[action]) + amount };
+    const quotas = cleanOptionalCounts(window.quotas);
+    windows[name] = {
+      ...window,
+      totals,
+      ...(quotas ? { quotas } : {}),
+      saturated: saturatedActions(totals, quotas, window.saturated),
+    };
+  }
+  return Object.keys(windows).length > 0 ? windows : null;
 }
 
 function updateStatus(patch) {
