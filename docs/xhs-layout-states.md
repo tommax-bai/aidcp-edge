@@ -96,21 +96,24 @@ function isNarrowLayout(){
 - **修法**（落 change comment-search-command task 5.4，**已实装 edge `3c616c5`**）：既然失败=「未提交的瞬态竞态」且无法预判窗口，**不押注任何具体机理**——`applySearchFilters` 改「**逐项幂等应用 + 提交校验 + 有界重试**」：先读持久选中态（已选中跳过）→ 点 → 校验（重开面板读持久 `.active`，触发器「已筛选」作辅助信号；无触发器布局以 selected 为准）→ 未提交则 settle ≥1.8s（瞬时高亮消退窗）重试，每项 ≤3 次，仍未提交诚实返回 false。返回值只由最终权威复核决定，瞬时高亮绝不作数。**附带修**：选项已可见时（面板残留开着/行内 tab）点击路径以目标自身为起点——默认外侧起点会划出面板 → mouseleave 收面板 → 点空/误点下层卡片（真机实证）。真机验收：干净词一点即中；脏状态（面板预开）第 1 点真被吞、重试当场救回；--twice 幂等。
 - **探针**：`scripts/layout-filter-probe.ts`（`--search=<词>`/`--resize=WxH`/`--hover`/`--diag`(命中链)/`--exp`(微时序)/`--forensic [--await-stream] [--target=文案]`(DOM打标+提交跟踪时间线)/`--closeai`/`--production`(真实 applySearchFilters 端到端)/`--twice`(幂等)/`--nowait`(生产时序)/`--watchai`)，产物 `/tmp/aidcp-layout-probe-*`。
 
-### 2.7 创作发布页（creator.xiaohongshu.com）双布局 —— 选「上传图文」模式 ⚠️ 宽已实证/窄待真机标定 2026-07-04
+### 2.7 创作发布页（creator.xiaohongshu.com）选「上传图文」模式 ✅ 真机标定 + 端到端已验证 2026-07-04
 
-> ⚠️ **新面**：前面 §1–§2.6 都是**消费端**（主站 feed / 搜索）。**创作发布页在另一子域 `creator.xiaohongshu.com/publish/publish`**，是发布下发段（`navigate_entry`→`select_mode`→…）落地的页。它**同样是宽/窄双布局**，机理与消费端一致，下发段定位必须照 §2 的「取可见 + 有界等待渲染 + 幂等 + 诚实失败」办。
+> ⚠️ **新面**：前面 §1–§2.6 都是**消费端**（主站 feed / 搜索）。**创作发布页在另一子域 `creator.xiaohongshu.com/publish/publish`**，是发布下发段（`navigate_entry`→`select_mode`→…）落地的页。默认停「上传视频」，要发图文必须先点「上传图文」切模式。
 
-- **默认停「上传视频」**：发布页落地默认选中「上传视频」tab（文件输入 `accept=.mp4,.mov,...`）；要发图文**必须先点「上传图文」**切模式，才出图文编辑器（标题/正文/传图区）。
-- **tab 重复渲染两套**（2026-07-04 真机只读实测，登录态「工程师大白」）：`div.header-tabs` 文本 = `上传视频\n上传视频\n上传图文\n上传图文`；`div.creator-tab` 里「上传图文」出现多份、其余频道（写长文/发播客）亦重复——**典型双布局：两套同 tab 同时在 DOM，一套可见一套隐藏**（同消费端机理）。
-- ⚠️ **坑（生产 `no_target` 元凶）**：旧 `select_mode`「取第一个文本恰为『上传图文』的元素就点、不挑可见、只等 12s」。双布局下第一个可能是**隐藏副本**（点之无效 → `post_validate_failed`）；窄布局 / 冷加载慢时又可能 12s 内文本选择器全不命中（→ `no_target`，2026-07-03 生产 recordId=37 即此）。
-- ✅ **做法（已实装，`runSelectMode`）**：
-  - **取可见 tab**：候选按可见性过滤 `offsetParent!==null || getClientRects().length>0`（**与 §2.2 notification 同判据**、兼容窄布局 `position:fixed`），再点；优先「精确文本『上传图文』+ class 含 `creator-tab`/`tab`」，其次窄布局 best-effort（可见 + 文本含「图文」而非「视频/长文/播客/直播」的短文本 tab）。
-  - **幂等早退（保守）**：点击前先判「当前**激活** tab 文本含『图文』且不含『视频』」→ 已在图文模式直接成功、不重复点。判据**保守**——仍是视频模式绝不谎报（红线：不静默假成功）。
-  - **有界重试「出现即点」**：把「找+点+确认模式激活」并进一个 20s 重试环（**严格 < 云端单指令 30s 超时**），点后留 ~1.5s grace 再重点，容忍冷加载晚渲染。
-  - **模式激活后置校验（权威 + 辅助带否决）**：权威判据 `MODE_STATE` 读**可见激活 tab** 的文本返回 `'image' | 'video' | ''`——`'image'`（激活 tab 含「图文」不含「视频」）判已在图文模式。**辅助信号** `IMG_MODE_ACTIVE`（任一文件输入 accept 变图片类，或出现「上传图片/文字配图」）**仅在「已点击 + 激活态未识别（非 video）」时才采信**；一旦 `MODE_STATE==='video'`（仍确认在视频模式）即**否决**辅助信号——防「点了没切上却因残留图片信号谎报成功」（评审对抗性反馈：辅助信号是「电平」非「跃变」，须防残留）。注意文件输入常 `display:none`，故辅助探针**刻意不按可见性过滤**（否则恒空），安全性靠「video 否决」而非可见性。
-  - **诚实失败**：始终无可见 tab 且未在图文模式 → `no_target`；点了但模式没切上（含仍在视频模式被否决）→ `post_validate_failed`；绝不假成功。
-- 🔶 **窄布局形态待真机标定**：以上宽布局路径已按 2026-07-04 实测证据实装；**窄布局下「上传图文」是否收成图标 / 换文案 / 换结构尚未标定**，当前窄布局候选是 best-effort（不死绑精确中文文案）、命中不了如实 `no_target`。标定入口：AdsPower 起该账号浏览器拿 debug port → `Page.navigate` 到发布页 → 宽/窄各 dump `div.creator-tab`/`header-tabs`/`input[type=file]` 的可见性/文案/class → 据此收紧窄布局候选。
-- **相关代码**：`src/flows/publish-command-handlers.ts` `runSelectMode()`（`XHS_CREATOR_PUBLISH_URL` / `IS_VISIBLE` / `MODE_STATE` / `CLICK_TAB` / `IMG_MODE_ACTIVE`）；序列 `aidcp-cloud/src/publish-agent/command-sequencer.ts`（`navigate_entry`→`select_mode`…，fail-fast + 30s 单指令超时）。openspec change `publish-select-mode-layout-robust`。
+**真机标定关键结论（2026-07-04，登录态「工程师大白」CDP 只读 + 端到端实测；探针 `scripts/calibrate-select-mode-layout.ts` / `scripts/verify-select-mode-live.ts`）**：
+
+- **重复 tab 的隐藏机理 ≠ `display:none`，而是「移到屏幕外」**：`div.creator-tab` 里「上传图文」有**两份**——一份在**屏幕外** `rect≈{x:-9758,y:-9934}`、一份在屏内 `{x:369,y:81}`（真实可点的那个）。屏幕外那份 `offsetParent` **非空**、`getClientRects()` **非空** → **消费端那套 `offsetParent!==null || getClientRects().length>0` 判据会把它误判成可见、且它在文档序更靠前 → 旧「取第一个」正是点了它**。这跟消费端「隐藏=display:none/offsetParent=null」不是一回事。
+- **不是宽/窄响应式差异**：`Emulation` 把视口压到 **600×900** 时，tab 栏**形态与 1904 宽完全一样**（还是那排 `div.creator-tab`：上传视频/上传图文/写长文/发播客 @ y:81），屏幕外副本也一样在 `-9758`。即**该重复是「持久的屏幕外克隆」、与视口宽度无关**——创作页 tab 栏没观察到独立的窄布局形态。（原「宽/窄双布局」是假说；真因是屏幕外克隆。）
+- **默认模式信号**：视频模式下激活 tab = `div.creator-tab.active`「上传视频」；唯一文件输入 `accept=.mp4,.mov,...`。切图文后文件输入 `accept=.jpg,.jpeg,.png,.webp`、激活 tab 变「上传图文」。
+
+- ⚠️ **坑（生产 `no_target`/`post_validate_failed` 元凶）**：旧 `select_mode`「取第一个文本『上传图文』就点、不挑可见、只等 12s」→ 双布局下点了**屏幕外克隆**（点之无效 → `post_validate_failed`）；冷加载慢又可能 12s 内不命中（→ `no_target`，2026-07-03 生产 recordId=37）。
+- ✅ **做法（已实装 + 真机验，`runSelectMode`）**：
+  - **取可见 = 与视口相交**（`IS_VISIBLE`，**真机标定后改**）：`getBoundingClientRect()` 有非零盒 **且** 落在视口内（`right>0 && bottom>0 && left<innerWidth && top<innerHeight`）。这才排除得掉屏幕外克隆（`-9758` 那份 `right<0`）；**注意：消费端的 `offsetParent` 判据在此不适用**（屏幕外元素 offsetParent 非空）。兼容 `position:fixed`（其 rect 亦在视口内）。选中优先「精确『上传图文』+ `creator-tab`/`tab` class」，其次 best-effort 短文本含「图文」的 tab。
+  - **幂等早退（保守）** + **有界重试 20s（< 云 30s）出现即点、grace 1.5s 重点**（同前）。
+  - **模式激活后置校验（权威 `MODE_STATE` + 辅助 `IMG_MODE_ACTIVE` 带 video 否决）**：`MODE_STATE` 读**可见激活 tab** 返回 `'image'|'video'|''`，`'image'` 判已在图文模式（权威）；辅助信号仅「已点击 + 激活态未识别（非 video）」时采信，`MODE_STATE==='video'` 即**否决**（评审硬化：辅助是「电平」非「跃变」，防残留图片信号谎报）。文件输入常 `display:none`，辅助探针刻意不按可见性过滤，安全靠 video 否决。
+  - **诚实失败**：无可见 tab 且未在图文模式 → `no_target`；点了没切上（含 video 否决）→ `post_validate_failed`；绝不假成功。
+- ✅ **端到端真机验证（2026-07-04）**：真实 `PublishCommandDispatcher` 跑一条 `select_mode`——BEFORE `mode=video`/accept 视频类；`ok:true` **531ms**（点中屏内 `369,81`、未误点屏外克隆、无重试）；AFTER `mode=image`/`accept=.jpg,.jpeg,.png,.webp`（**模式真切换**）。窄视口（600×900）dump 亦确认取的是屏内可见 tab。
+- **相关代码/探针**：`src/flows/publish-command-handlers.ts` `runSelectMode()`（`IS_VISIBLE`=视口相交 / `MODE_STATE` / `CLICK_TAB` / `IMG_MODE_ACTIVE`）；`scripts/calibrate-select-mode-layout.ts`（宽/窄只读 dump）；`scripts/verify-select-mode-live.ts`（驱动真实 dispatcher 端到端）；序列 `aidcp-cloud/src/publish-agent/command-sequencer.ts`（fail-fast + 30s 单指令超时）。openspec change `publish-select-mode-layout-robust`。
 
 ## 3. 跨切面建议
 - **启动固定桌面视口**：edge 启动 Chrome 带 `--window-size=1440,980`（+ 启动后 `Browser.setWindowBounds` 兜底 maximize；高 DPI 机另需 `--force-device-scale-factor=1` 或 `Emulation.setDeviceMetricsOverride{deviceScaleFactor:1,width:1440}`）→ 优先进 WIDE。

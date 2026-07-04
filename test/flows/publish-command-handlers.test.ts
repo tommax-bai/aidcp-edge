@@ -577,7 +577,8 @@ test('select_mode 红线：下发的点击 JS 含可见性判据（取可见非�
   await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
   const clickJs = cdp.exprContaining('/*CLICK_TAB*/');
   assert.ok(clickJs, '应有 CLICK_TAB 表达式被下发');
-  assert.ok(clickJs!.includes('offsetParent') && clickJs!.includes('getClientRects'), '点击 JS 必须按可见性过滤候选（offsetParent||getClientRects）');
+  // 可见性判据须按「与视口相交」过滤（真机标定：隐藏副本被移到屏幕外 x≈-9758，offsetParent 判据会误判其可见）。
+  assert.ok(clickJs!.includes('getBoundingClientRect') && clickJs!.includes('innerWidth'), '点击 JS 必须按视口相交过滤候选（getBoundingClientRect + innerWidth/Height）');
 });
 
 test('select_mode 红线：模式判据保守（激活 tab 文本含「图文」与「视频」两侧约束，绝不视频模式谎报）', async () => {

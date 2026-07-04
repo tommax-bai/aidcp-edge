@@ -381,8 +381,10 @@ export class PublishCommandDispatcher {
     const done = (extra: { ok: boolean; error?: string }): PublishCommandResultPayload =>
       ({ ...base, details: { ...details, durationMs: this.clock() - startedAt }, ...extra });
 
-    // 可见性判据（与消费端 notification-monitor 一致）：兼容窄布局 position:fixed（offsetParent 为 null 但有 client rect）。
-    const IS_VISIBLE = String.raw`function(el){ try { return el.offsetParent !== null || (el.getClientRects && el.getClientRects().length > 0); } catch (e) { return false; } }`;
+    // 可见性判据（**真机标定 2026-07-04**）：创作页的「上传图文」隐藏副本不是 display:none，而是被移到**屏幕外**
+    // （实测隐藏副本 rect≈{x:-9758,y:-9934}，offsetParent 非空、getClientRects 非空——消费端那套 offsetParent 判据会误判其可见）。
+    // 故这里判「与视口相交」：有非零盒 + 落在视口内（排除屏幕外副本）。兼容 position:fixed（其 rect 亦在视口内）。
+    const IS_VISIBLE = String.raw`function(el){ try { const r = el.getBoundingClientRect(); if (!(r.width > 0 && r.height > 0)) return false; const vw = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 0; const vh = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 0; return r.right > 0 && r.bottom > 0 && r.left < vw && r.top < vh; } catch (e) { return false; } }`;
     const TXT_OF = String.raw`function(e){ return ((e.innerText || e.textContent || '')).replace(/\s+/g, '').trim(); }`;
 
     // 权威模式判据：读【可见激活】tab 的文本判当前处于哪个模式，返回 'image' | 'video' | ''（激活态识别不出）。
