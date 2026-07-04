@@ -91,7 +91,7 @@ const STATUS_LABELS = {
     'config required': '待配置',
   },
   cloud: { disconnected: '未连接', connected: '已连接' },
-  session: { idle: '待命', running: '进行中', paused: '已暂停' },
+  session: { idle: '待命', running: '进行中', resting: '休息中', paused: '已暂停' },
   risk: { normal: '正常', warned: '谨慎放慢', restricted: '受限', frozen: '已冻结' },
   edge: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '异常' },
 };

@@ -22,7 +22,7 @@
 
   function synthesizeHealth(status) {
     const s = status || {};
-    if (s.edge === 'warning') return { code: 'attention', label: '需要注意', detail: '引擎异常退出，请查看详情或重新启动' };
+    if (s.edge === 'warning') return { code: 'attention', label: '引擎已停止', detail: '请查看开发者详情，或重新启动 / 重新登录' };
     if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需要注意', detail: AUTH_ATTENTION[s.auth] };
     if (s.risk === 'restricted' || s.risk === 'frozen') {
       return { code: 'attention', label: '需要注意', detail: s.risk === 'frozen' ? '账号被冻结，已停止操作' : '账号受限，已收紧动作' };
@@ -31,6 +31,7 @@
       return { code: 'attention', label: '云端连接中断', detail: '正在等待与云端恢复连接' };
     }
     if (s.session === 'paused') return { code: 'paused', label: '已暂停', detail: '点右下角「恢复」继续' };
+    if (s.edge === 'running' && s.session === 'resting') return { code: 'paused', label: '休息中', detail: '休息结束后会自动继续' };
     if (s.edge === 'starting') return { code: 'ready', label: '正在启动…', detail: '引擎启动中' };
     if (s.edge === 'running' && s.session === 'running') {
       return { code: 'running', label: s.risk === 'warned' ? '运行中 · 放慢节奏' : '运行中 · 一切正常', detail: '' };
@@ -50,7 +51,7 @@
   const DETAIL_LABELS = {
     auth: { label: '小红书登录', values: { checking: '检测中', 'login required': '需要登录', 'logged in': '已登录', 'chrome missing': '缺少 Chrome', 'config required': '待完成设置' } },
     cloud: { label: '云端连接', values: { disconnected: '未连接', connected: '已连接' } },
-    session: { label: '自动运营', values: { idle: '待命', running: '进行中', paused: '已暂停' } },
+    session: { label: '自动运营', values: { idle: '待命', running: '进行中', resting: '休息中', paused: '已暂停' } },
     risk: { label: '账号保护', values: { normal: '正常', warned: '谨慎放慢', restricted: '受限', frozen: '已冻结' } },
     edge: { label: '本机引擎', values: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '异常' } },
   };
@@ -79,9 +80,10 @@
 
     // 非运行态：诚实静态文案，presence 历史文本不再当「正在做」展示。
     if (s.session === 'paused') return { text: '已暂停，随时可以恢复', animate: false, fresh: staticFresh };
+    if (s.session === 'resting') return { text: (p && p.text) || '这一轮结束，休息后会自动继续', animate: false, fresh: staticFresh };
     if (s.auth === 'login required') return { text: '等你登录小红书后继续', animate: false, fresh: '' };
     if (s.auth === 'config required') return { text: '等待完成初始设置', animate: false, fresh: '' };
-    if (s.edge === 'warning') return { text: '引擎异常退出，需要处理', animate: false, fresh: staticFresh };
+    if (s.edge === 'warning') return { text: '引擎已停止，请查看详情或重新启动', animate: false, fresh: staticFresh };
     if (s.edge === 'starting') return { text: '正在启动引擎…', animate: true, fresh: '' };
     if (!running) return { text: '待命中', animate: false, fresh: staticFresh };
 

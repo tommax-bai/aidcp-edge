@@ -511,8 +511,17 @@ function handleEdgeLogLine(message, isError = false) {
   const next = { edge: isError ? 'warning' : 'running', lastMessage: message };
   if (message.includes('已连接云端') || message.includes('已握手')) next.cloud = 'connected';
   if (message.includes('连接失败') || message.includes('WS 已关闭') || message.includes('启动失败')) next.cloud = 'disconnected';
-  if (message.includes('自动浏览已启动') || message.includes('启动自动浏览循环')) next.session = 'running';
-  if (message.includes('浏览循环结束') || message.includes('session.end')) next.session = 'idle';
+  if (
+    message.includes('自动浏览已启动') ||
+    message.includes('启动自动浏览循环') ||
+    message.includes('启动命令驱动浏览循环') ||
+    message.includes('唤醒重启浏览循环')
+  ) {
+    next.session = 'running';
+  }
+  if (message.includes('浏览循环结束')) {
+    next.session = message.includes('后继续') ? 'resting' : 'idle';
+  }
   if (message.includes('风控拒绝') || message.includes('risk_error') || message.includes('⚠')) next.risk = 'warned';
 
   // UI 事件（活动流 / 在场感 / 发布卡 / 账号身份 / 计数）统一走 ui-events 模块：

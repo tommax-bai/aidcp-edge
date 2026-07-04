@@ -133,6 +133,15 @@ test('浏览循环阶段：scroll→feed / note.open→select / back→return / 
   assert.equal(s.push('[browse] 浏览循环结束')?.loopStage, null);
 });
 
+test('浏览循环结束带续场时间 → 活动流说明休息后继续', () => {
+  const s = createUiEventStream();
+  const evt = s.push('[browse] 浏览循环结束，预计休息约 2 分钟后继续');
+  assert.equal(evt?.type, 'session_end');
+  assert.equal(evt?.sentence, '这一轮浏览结束，约 2 分钟后继续');
+  assert.match(evt?.presence ?? '', /休息约 2 分钟后会继续/);
+  assert.equal(evt?.loopStage, null);
+});
+
 test('未识别行 → null（只进开发者详情）', () => {
   const s = createUiEventStream();
   assert.equal(s.push('[aidcp-edge] 节点身份 edgeId=e1 [source=env]'), null);

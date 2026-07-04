@@ -41,6 +41,7 @@ import type {
   NotificationBrowseLikesPayload,
   NotificationBrowseFollowsPayload,
   NotificationBackHomePayload,
+  SessionEndPayload,
 } from '../comm/protocol.js';
 import type { ActionResultPayload, CommentCandidate } from '../comm/protocol.js';
 import type { PacingOp, PacingFloorPayload } from '../comm/protocol.js';
@@ -295,6 +296,8 @@ export class BrowseSession {
   /** 命令队列：外部通过 onCloudCommand() 推入，loop() 消费 */
   private commandQueue: Envelope[] = [];
   private commandResolver: ((env: Envelope) => void) | null = null;
+  /** 收到 session.end 时云端给出的自动续场休息时长；等循环真正停稳时展示给桌面壳。 */
+  private pendingAutoResumeInMs: number | undefined;
 
   /** CDP 断线重连：等待重连结果的 waiter（reconnected→true / unrecoverable→false） */
   private cdpReconnectWaiters: Array<(ok: boolean) => void> = [];
@@ -522,7 +525,11 @@ export class BrowseSession {
       this.running = false;
       for (const u of this.cdpUnsub) u();
       this.cdpUnsub = [];
-      this.logger('[browse] 浏览循环结束');
+      const resumeSuffix = this.pendingAutoResumeInMs === undefined
+        ? ''
+        : `，预计休息约 ${this.formatAutoResumeMinutes(this.pendingAutoResumeInMs)} 分钟后继续`;
+      this.pendingAutoResumeInMs = undefined;
+      this.logger(`[browse] 浏览循环结束${resumeSuffix}`);
       if (shouldWake) {
         this.logger('[browse] 停止期间收到续场命令 → 停稳后唤醒重启浏览循环');
         void this.start().catch((err) => this.logger(`[browse] 唤醒重启失败：${(err as Error).message}`));
@@ -652,6 +659,14 @@ export class BrowseSession {
   /** 浏览循环已停时，哪些云端命令应唤醒重启循环：除终止命令 session.end 外的浏览类推进命令均可。 */
   private isWakeCommand(type: string): boolean {
     return type !== 'session.end';
+  }
+
+  private validAutoResumeInMs(v: unknown): number | undefined {
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+  }
+
+  private formatAutoResumeMinutes(ms: number): number {
+    return Math.max(1, Math.ceil(ms / 60_000));
   }
 
   /**
@@ -986,7 +1001,13 @@ export class BrowseSession {
         break;
       }
       case 'session.end': {
-        this.logger('[browse] 命令: session.end，结束会话');
+        const payload = env.payload as SessionEndPayload;
+        this.pendingAutoResumeInMs = this.validAutoResumeInMs(payload.autoResumeInMs);
+        this.logger(
+          this.pendingAutoResumeInMs === undefined
+            ? '[browse] 命令: session.end，结束会话'
+            : `[browse] 命令: session.end，结束会话（预计休息约 ${this.formatAutoResumeMinutes(this.pendingAutoResumeInMs)} 分钟后继续）`,
+        );
         this.stopRequested = true;
         await this.safeCloseModal();
         break;

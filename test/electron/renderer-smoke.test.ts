@@ -225,11 +225,13 @@ test('self 模式：无分身校验，启动直接先存再起', async () => {
   assert.deepEqual(calls, ['save', 'start']);
 });
 
-test('悬浮 fab 三态：停止→启动 / 运行→暂停 / 暂停→恢复', async () => {
+test('悬浮 fab 三态：停止→启动 / 运行与休息→暂停 / 暂停→恢复', async () => {
   const stopped = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'stopped' }) }));
   assert.equal($(stopped, '#session-fab').textContent, '启动');
   const running = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'running', session: 'running' }) }));
   assert.equal($(running, '#session-fab').textContent, '暂停');
+  const resting = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'running', session: 'resting' }) }));
+  assert.equal($(resting, '#session-fab').textContent, '暂停');
   const paused = await boot(makeStub({ getStatus: async () => makeStatus({ session: 'paused' }) }));
   assert.equal($(paused, '#session-fab').textContent, '恢复');
 });

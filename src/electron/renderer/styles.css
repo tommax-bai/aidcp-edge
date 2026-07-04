@@ -447,7 +447,7 @@ body { margin: 0; }
   background: #eef2ff; color: #3730a3; font-size: 12px; font-weight: 600;
 }
 .badge.connected, .badge.running, .badge.normal { background: var(--good-bg); color: var(--good-fg); }
-.badge.paused, .badge.warned, .badge.warning { background: var(--warn-bg); color: var(--warn-fg); }
+.badge.paused, .badge.resting, .badge.warned, .badge.warning { background: var(--warn-bg); color: var(--warn-fg); }
 .badge.disconnected, .badge.stopped { background: var(--bad-bg); color: var(--bad-fg); }
 
 /* 悬浮会话控制（三态）：白底卡片风 + 状态色点，与标题带药丸同语言（不再是大色块） */

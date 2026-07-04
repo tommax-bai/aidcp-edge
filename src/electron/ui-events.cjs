@@ -226,12 +226,12 @@ function createUiEventStream() {
       () => ({ kind: 'activity', type: 'popup_cleared', sentence: '弹窗已处理，继续浏览', presence: '继续浏览…' }),
     ],
     [
-      /浏览循环结束/,
-      () => ({
+      /浏览循环结束(?:，预计休息约\s*(\d+)\s*分钟后继续)?/,
+      (m) => ({
         kind: 'activity',
         type: 'session_end',
-        sentence: '这一轮浏览结束',
-        presence: '这一轮逛完了，休息一下…',
+        sentence: m[1] ? `这一轮浏览结束，约 ${m[1]} 分钟后继续` : '这一轮浏览结束',
+        presence: m[1] ? `这一轮逛完了，休息约 ${m[1]} 分钟后会继续` : '这一轮逛完了，休息一下…',
         loopStage: null,
       }),
     ],
