@@ -293,6 +293,32 @@ test('min-interval: 重连 applyPacingSnapshot 后 gate 用新 floor（连接级
   assert.ok(gate.includes(13000), `applyPacingSnapshot 后 gate 应用新 floor 13000，实际: ${gate}`);
 });
 
+test('min-interval: 重连 applyPacingSnapshot 重置锚点 → 紧接动作跳过间隔（§3.2 不变量2）', async () => {
+  const h = makeHarness();
+  const sleeps: number[] = [];
+  const mono: Mono = { t: 0 };
+  const sess = new BrowseSession(h.deps, baseOpts(sleeps, mono, { action: { minMs: 12000, maxMs: 12000 } }));
+  mono.t = 1000;
+  const done = sess.start();
+  await tick(30);
+  // o1 建立锚点 lastActionEndAt = 1000。
+  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 }));
+  await waitDetails(h, 1);
+  await tick(60); // 等 o1 的 markActionEnd（uplink 后记账）落定，再模拟重连——真实重连在 loop 停止后重注入、无竞争。
+  // 模拟身份翻转重连：applyPacingSnapshot 重注入 + 重置锚点（页面已变、首操作跳过间隔）。
+  sess.applyPacingSnapshot({ action: { minMs: 12000, maxMs: 12000 } }, 1.0);
+  const before = sleeps.length;
+  mono.t = 1100; // 相对旧锚点仅 elapsed=100（≪ floor）；若锚点未清则会补差额 ~11900。
+  await sess.onCloudCommand(makeEnvelope('note.open', 'o2', 0, { index: 0 }));
+  await waitDetails(h, 2);
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
+  await done;
+  const gate = sleeps.slice(before);
+  // 锚点已清 → gate('action') 补差额=0；若未清则 remaining=floor(12000)−elapsed(100)=11900。
+  // gate 仅剩 note.open 固有的秒级停顿（与锚点无关、清与不清都有）；补差额 11900 不出现即证锚点已重置。
+  assert.ok(!gate.some((x) => x >= 5000), `applyPacingSnapshot 清锚点后无 gate 补差额（否则会现 ~11900），实际: ${gate}`);
+});
+
 /** 复算 jitterAround(center, 0.25, random=()=>0.5) 的乘性噪声指数部分（gaussian 在 random=0.5 处的值）。 */
 function gaussianAtHalf(): number {
   // Box–Muller: u1=0.5,u2=0.5 → sqrt(-2 ln0.5)·cos(2π·0.5) = sqrt(1.3863)·cos(π) = 1.17741·(−1)

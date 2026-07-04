@@ -330,12 +330,15 @@ export class BrowseSession {
    * 重连后重注入 welcome pacing 快照（设计 §4.3 最严重缺口修复）：BrowseSession 只构造一次，
    * identity 翻转重连复用同一对象，若不重注入则连接级快照退化成进程级、风控升级到不了边缘节奏层。
    * `reestablishIdentity` 在 connect() 之后、start() 之前调用本方法。逐字段回落，缺省不改现值。
+   * 同时重置最小间隔锚点（重连后页面已变、首操作跳过间隔——对齐 §3.2 不变量2「重连丢弃重置」，
+   * 与 onCdpReconnected 的 CDP-重连清锚点两路一致；否则身份翻转重连极快时首操作会补一次残余间隔）。
    */
   applyPacingSnapshot(opFloorsMs?: Partial<Record<PacingOp, PacingFloorPayload>>, tempo?: number): void {
     if (opFloorsMs) this.opFloorCfg = { ...opFloorsMs };
     if (validPositiveMs(tempo)) this.tempo = tempo!;
     const dd = floorRangeToMinMax(opFloorsMs?.detail_dwell);
     if (dd) this.dwellFloorTiming = makeDwellFloorTiming(dd);
+    this.lastActionEndAt = null;
     this.logger(
       `[browse] 应用 pacing 快照：tempo=${this.tempo} ops=${Object.keys(this.opFloorCfg).join(',') || '(空,用内置)'}`,
     );
