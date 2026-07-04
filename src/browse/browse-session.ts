@@ -1242,6 +1242,7 @@ export class BrowseSession {
       noteId: realNoteId ?? `card-${card.position}`,
       title: content.title,
       content: content.body,
+      mediaType: card.isVideo ? 'video' : 'image_text',
       author: content.author,
       likeCount: content.likes,
       collectCount: content.collects,
@@ -1885,7 +1886,7 @@ export class BrowseSession {
           return null;
         }
         function fallback(root){
-          var sels=['.note-scroller','[class*="note-scroller"]','[class*="scroller"]','.comments-container','[class*="comments-container"]','[class*="comment-list"]','[class*="commentList"]'];
+          var sels=['.note-scroller','[class*="note-scroller"]','[class*="scroller"]','.note-detail-mask','.note-container'];
           for(var i=0;i<sels.length;i++){
             var nodes=(root||document).querySelectorAll(sels[i]);
             for(var j=0;j<nodes.length;j++){

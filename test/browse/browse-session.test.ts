@@ -28,6 +28,7 @@ function fakeContent(): NoteContent {
 interface Harness {
   deps: BrowseSessionDeps;
   reportedCards: PageCardsPayload[];
+  reportedDetails: NoteDetailPayload[];
   completedActions: ActionCompletedPayload[];
   reportedProfiles: ProfileDetailPayload[];
   openedCards: number[];
@@ -37,6 +38,7 @@ interface Harness {
 
 function makeHarness(cards: NoteCard[] = [CARD]): Harness {
   const reportedCards: PageCardsPayload[] = [];
+  const reportedDetails: NoteDetailPayload[] = [];
   const completedActions: ActionCompletedPayload[] = [];
   const reportedProfiles: ProfileDetailPayload[] = [];
   const openedCards: number[] = [];
@@ -100,7 +102,9 @@ function makeHarness(cards: NoteCard[] = [CARD]): Harness {
     reportPageCards: (payload: PageCardsPayload) => {
       reportedCards.push(payload);
     },
-    reportNoteDetail: () => {},
+    reportNoteDetail: (payload: NoteDetailPayload) => {
+      reportedDetails.push(payload);
+    },
     reportProfileDetail: (payload: ProfileDetailPayload) => {
       reportedProfiles.push(payload);
     },
@@ -129,6 +133,7 @@ function makeHarness(cards: NoteCard[] = [CARD]): Harness {
   return {
     deps,
     reportedCards,
+    reportedDetails,
     completedActions,
     reportedProfiles,
     openedCards,
@@ -275,6 +280,17 @@ test('browse-session: note.open 命令打开卡片并上报 note.detail', async 
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.deepEqual(h.openedCards, [0]);
+  assert.equal(h.reportedDetails[0].mediaType, 'image_text');
+});
+
+test('browse-session: note.open 视频卡上报 note.detail.mediaType=video', async () => {
+  const h = makeHarness([{ ...CARD, title: 'V', isVideo: true }]);
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.equal(h.reportedDetails[0].mediaType, 'video');
 });
 
 test('browse-session: note.open 长正文后执行正文小步滚动阅读', async () => {
