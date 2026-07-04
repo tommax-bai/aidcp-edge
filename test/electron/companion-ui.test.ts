@@ -317,6 +317,16 @@ test('运行中且无审批 → 发布卡自动收起为薄条；点击可临时
   assert.ok(!card.classList.contains('collapsed'), '点击薄条临时展开');
 });
 
+test('发布卡薄条展开后，点击卡头可收起', async () => {
+  const { w } = await boot({ lastPublish: { title: '上周的咖啡馆合集', at: new Date().toISOString() } });
+  const card = $(w, '#pub-card');
+  assert.ok(card.classList.contains('collapsed'), '运行中上次发布应默认收起');
+  $(w, '#pub-bar').dispatchEvent(new w.Event('click'));
+  assert.ok(!card.classList.contains('collapsed'), '点击薄条展开');
+  $(w, '#pub-head-row').dispatchEvent(new w.Event('click'));
+  assert.ok(card.classList.contains('collapsed'), '点击卡头应收起');
+});
+
 test('审批到来 → 自动展开；审批落地（仍在运行）→ 再收起为「上次发布」薄条', async () => {
   const { w, pushStatus } = await boot(); // running + empty → collapsed
   pushStatus(makeStatus({ publish: { state: 'pending', title: '秋日漫步', at: new Date().toISOString() } }));

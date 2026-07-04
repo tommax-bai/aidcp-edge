@@ -1298,6 +1298,26 @@ test('browse-session: 循环因 session.end 停止后，收到 page.scroll → �
   await new Promise((r) => setTimeout(r, 10));
 });
 
+test('browse-session: session.end 收尾竞态中收到 page.scroll → 停稳后仍唤醒重启', async () => {
+  const h = makeHarness();
+  const sess = new BrowseSession(h.deps, noOpts());
+
+  const firstRun = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.ok(h.reportedCards.length >= 1, '首轮应至少上报一次 page.cards');
+
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e1', 0, { reason: 'publish_takeover' }));
+  await sess.onCloudCommand(makeEnvelope('page.scroll', 's1', 0, { reason: 'resume_redrive' }));
+  await firstRun;
+  const afterFirstRun = h.reportedCards.length;
+
+  await new Promise((r) => setTimeout(r, 30));
+  assert.ok(h.reportedCards.length > afterFirstRun, '停稳后应消费延迟续场唤醒并重新上报 page.cards');
+
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e2', 0, { reason: 'test_end' }));
+  await new Promise((r) => setTimeout(r, 10));
+});
+
 test('browse-session: 终态关闭（close）后收到迟到命令 → MUST NOT 复活循环', async () => {
   const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());

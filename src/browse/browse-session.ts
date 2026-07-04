@@ -249,6 +249,7 @@ const FOLLOW_BUTTON_SELECTORS = ['.author-wrapper .follow-button', '.user-info .
 export class BrowseSession {
   private running = false;
   private stopRequested = false;
+  private stopInProgress = false;
   /**
    * 终态关闭标记（change restore-auto-resume A②）：进程主动关闭/下线（close()）或 CDP 不可恢复时置 true，
    * 永久阻止云端迟到命令唤醒重启浏览循环。注意：与 stopRequested 区分——云端 session.end 只置 stopRequested、
@@ -288,6 +289,7 @@ export class BrowseSession {
   private tempo = 1.0;
   /** 可打断 sleep 的唤醒句柄集合（stopRequested / 终止命令到达时全部提前 resolve）。 */
   private readonly sleepWakers = new Set<() => void>();
+  private wakeAfterStop = false;
   private processed = 0;
 
   /** 命令队列：外部通过 onCloudCommand() 推入，loop() 消费 */
@@ -495,6 +497,8 @@ export class BrowseSession {
     if (this.running) return;
     this.running = true;
     this.stopRequested = false;
+    this.stopInProgress = false;
+    this.wakeAfterStop = false;
     this.processed = 0;
     this.commandQueue = [];
     this.commandResolver = null;
@@ -512,10 +516,17 @@ export class BrowseSession {
 
       await this.loop();
     } finally {
+      const shouldWake = this.wakeAfterStop && !this.closing;
+      this.wakeAfterStop = false;
+      this.stopInProgress = false;
       this.running = false;
       for (const u of this.cdpUnsub) u();
       this.cdpUnsub = [];
       this.logger('[browse] 浏览循环结束');
+      if (shouldWake) {
+        this.logger('[browse] 停止期间收到续场命令 → 停稳后唤醒重启浏览循环');
+        void this.start().catch((err) => this.logger(`[browse] 唤醒重启失败：${(err as Error).message}`));
+      }
     }
   }
 
@@ -535,6 +546,7 @@ export class BrowseSession {
 
   /** 请求停止并附带理由（local_stop / cdp_unrecoverable）。唤醒可能正在等待命令的 loop。 */
   private stopForReason(reason: string): void {
+    this.stopInProgress = true;
     this.stopRequested = true;
     this.wakeInterruptibleSleeps(); // 打断可能正卡在 gate 最小间隔等待里的循环，让其立即中止本动作、退出
     if (this.commandResolver) {
@@ -617,6 +629,14 @@ export class BrowseSession {
       }
       return; // 不入队：无消费者，避免静默堆积
     }
+    if (!this.closing && this.isWakeCommand(env.type) && (this.stopRequested || this.stopInProgress)) {
+      // A publish/comment takeover can send session.end and then a resume scroll very close together.
+      // If the scroll lands while the old loop is still unwinding, queueing it would lose the wake.
+      this.wakeAfterStop = true;
+      this.logger(`[browse] 循环正在停止，收到 ${env.type} → 记录为停稳后续场唤醒`);
+      return;
+    }
+    if (env.type === 'session.end') this.stopInProgress = true;
     if (this.commandResolver) {
       const resolve = this.commandResolver;
       this.commandResolver = null;

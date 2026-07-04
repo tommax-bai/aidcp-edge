@@ -30,6 +30,17 @@ test('结构化 [ui-event] 行优先直接采用', () => {
   assert.match(evt.publish?.title ?? '', /秋日城市漫步/);
 });
 
+test('结构化 publish 行 → 同步在场感，进度区跟随发布状态刷新', () => {
+  const s = createUiEventStream();
+  const pending = s.push('[ui-event] {"kind":"publish","publish":{"state":"pending","title":"秋日城市漫步"}}');
+  assert.match(pending?.presence ?? '', /飞书/);
+  assert.match(pending?.presence ?? '', /等你确认/);
+
+  const done = s.push('[ui-event] {"kind":"publish","publish":{"state":"published","title":"秋日城市漫步"}}');
+  assert.match(done?.presence ?? '', /已发布/);
+  assert.match(done?.presence ?? '', /回到浏览/);
+});
+
 test('结构化行 JSON 坏了 → 走兜底映射而非抛错', () => {
   const s = createUiEventStream();
   assert.equal(s.push('[ui-event] {not-json'), null);

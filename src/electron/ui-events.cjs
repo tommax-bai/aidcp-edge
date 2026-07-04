@@ -49,6 +49,27 @@ function clipTitle(title, max = 18) {
   return t.length > max ? `${t.slice(0, max)}…` : t;
 }
 
+function publishPresence(publish) {
+  const title = clipTitle(publish && publish.title, 16);
+  const subject = title ? `「${title}」` : '这条笔记';
+  switch (publish && publish.state) {
+    case 'pending':
+      return `${subject}已发到飞书，等你确认…`;
+    case 'reminded':
+      return `${subject}还在等确认，飞书已再次提醒…`;
+    case 'approved':
+      return `${subject}已通过，正在择时发布…`;
+    case 'published':
+      return `${subject}已发布，准备回到浏览…`;
+    case 'rejected':
+      return `${subject}暂不发布，继续浏览…`;
+    case 'failed':
+      return `${subject}发布未成功，已如实记录…`;
+    default:
+      return '';
+  }
+}
+
 /**
  * 创建一条 UI 事件流。带极薄会话上下文（最近打开的笔记标题），用于把「✓ 点赞成功」这类
  * 无上下文的成功行叙述成「给「xxx」点了个赞」。上下文只增不猜：拿不到标题就说泛化句子。
@@ -226,6 +247,9 @@ function createUiEventStream() {
         // 结构化 publish 事件顺手更新标题上下文（叙述后续互动用）。
         if (structured.kind === 'publish' && structured.publish && structured.publish.title) {
           structured.publish.title = clipTitle(structured.publish.title, 30);
+        }
+        if (structured.kind === 'publish' && structured.publish && structured.publish.state && !structured.presence) {
+          structured.presence = publishPresence(structured.publish);
         }
         if (structured.kind === 'lastPublish' && structured.lastPublish && structured.lastPublish.title) {
           structured.lastPublish.title = clipTitle(structured.lastPublish.title, 30);

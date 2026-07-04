@@ -38,6 +38,7 @@ const fields = {
   stream: document.querySelector('#activity-stream'),
   streamEmpty: document.querySelector('#stream-empty'),
   pubCard: document.querySelector('#pub-card'),
+  pubHeadRow: document.querySelector('#pub-head-row'),
   pubHead: document.querySelector('#pub-head'),
   pubCorner: document.querySelector('#pub-corner'),
   pubTitle: document.querySelector('#pub-title'),
@@ -286,9 +287,18 @@ function togglePubManual() {
   pubManualOpen = !pubManualOpen;
   if (currentStatus) renderPublish(currentStatus, Date.now());
 }
+function collapsePubManual() {
+  if (!pubManualOpen) return;
+  pubManualOpen = false;
+  if (currentStatus) renderPublish(currentStatus, Date.now());
+}
 fields.pubBar.addEventListener('click', togglePubManual);
 fields.pubBar.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || e.key === ' ') togglePubManual();
+});
+fields.pubHeadRow.addEventListener('click', collapsePubManual);
+fields.pubHeadRow.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') collapsePubManual();
 });
 
 // 「打开飞书 ↗」：纯导航（拉起飞书客户端），不是审批操作；拉不起降级为纯文字说明。
