@@ -175,7 +175,7 @@ function makeDwellFloorTiming(range: { min: number; max: number }): TimingConfig
 // 立即执行、不累加，不够只补差额（remaining = max(0, floor−elapsed)）。云端往返被 elapsed 天然吸收。
 //
 // 三道夹之第三道（边缘二次夹）：即便云端读出口/facade 失守，floor 离开边缘前恒被夹进
-// [OP_MIN_FLOOR[op], CAP_MS] —— 配置只能抬高延迟、**永远抬不穿非零防呆下限**（绝不零延迟红线）。
+// [OP_MIN_FLOOR[op], 类别上限] —— 配置只能抬高延迟、**永远抬不穿非零防呆下限**（绝不零延迟红线）。
 
 /** 每类操作的内置默认区间（welcome 缺该 op 时逐字段回落，量级=现役预设/DWELL_FLOOR_MS，天然非零）。 */
 const BUILTIN_FLOOR: Record<PacingOp, PacingFloorPayload> = {
@@ -183,6 +183,9 @@ const BUILTIN_FLOOR: Record<PacingOp, PacingFloorPayload> = {
   scroll: { minMs: 500, maxMs: 1500 },
   card_gap: { minMs: 3000, maxMs: 7000 },
   detail_dwell: { minMs: 2500, maxMs: 5000 },
+  feed_card_read: { minMs: 450, maxMs: 7000 },
+  content_glance: { minMs: 2500, maxMs: 90000 },
+  content_read: { minMs: 2500, maxMs: 90000 },
 };
 
 /** 每类操作的防呆下限（= 边缘二次夹的下界，> 0）：有效 floor 恒 ≥ 此值，杜绝零延迟。 */
@@ -191,6 +194,9 @@ const OP_MIN_FLOOR: Record<PacingOp, number> = {
   scroll: 300,
   card_gap: 1000,
   detail_dwell: 1000,
+  feed_card_read: 100,
+  content_glance: 1000,
+  content_read: 1000,
 };
 
 /** 每类操作的采样分散度（内置常量、不入库；较现役预设略放宽以稀释左尾、配合反射采样消硬左壁）。 */
@@ -199,13 +205,26 @@ const BUILTIN_SIGMA: Record<PacingOp, number> = {
   scroll: 0.3,
   card_gap: 0.45,
   detail_dwell: 0.25,
+  feed_card_read: 0.25,
+  content_glance: 0.25,
+  content_read: 0.25,
 };
 
 /**
- * 全局小上限（结构上 ≪ 云端 idle 看门狗下限 IDLE_NUDGE_MIN_MS=200_000）：任何有效 floor 恒 ≤ 15s，
- * 单次前台 gate sleep 永不逼近看门狗阈值 → 最小间隔与断连兜底/idle 看门狗结构性不冲突（设计 §4.3）。
+ * 前台 gate 小上限（结构上 ≪ 云端 idle 看门狗下限 IDLE_NUDGE_MIN_MS=200_000）：前台动作 floor 恒 ≤ 15s，
+ * 阅读停留类另有更高但仍低于看门狗轻推的类别上限，二者与断连兜底/idle 看门狗结构性不冲突（设计 §4.3）。
  */
 const CAP_MS = 15_000;
+
+const OP_MAX_FLOOR: Record<PacingOp, number> = {
+  action: CAP_MS,
+  scroll: CAP_MS,
+  card_gap: CAP_MS,
+  detail_dwell: CAP_MS,
+  feed_card_read: 30_000,
+  content_glance: 90_000,
+  content_read: 90_000,
+};
 
 /** 正数校验：welcome 逐字段回落用（非有限正数 → 回落内置默认，绝不回落 0/负数）。 */
 function validPositiveMs(v: unknown): number | undefined {
@@ -219,6 +238,11 @@ function floorRangeToMinMax(f: PacingFloorPayload | undefined): { min: number; m
   const hi = validPositiveMs(f.maxMs);
   if (lo == null || hi == null) return undefined;
   return { min: lo, max: hi };
+}
+
+function floorRangeToTiming(f: PacingFloorPayload | undefined, fallback: TimingConfig): TimingConfig {
+  const range = floorRangeToMinMax(f);
+  return range ? makeDwellFloorTiming(range) : fallback;
 }
 
 /** 单调时钟默认实现：优先 performance.now()，备选 process.hrtime.bigint()/1e6（只自身作差、绝不持久化/跨基准）。 */
@@ -237,7 +261,6 @@ const COMMENT_PRELUDE_MIN_STEPS = 4;
 const COMMENT_PRELUDE_MAX_STEPS = 14;
 const COMMENT_SCROLL_MIN_PX = 150;
 const COMMENT_SCROLL_MAX_PX = 290;
-
 /**
  * explore feed 页 URL 判定：匹配 /explore（feed 列表），【排除 /explore/<noteId>（笔记详情页）】。
  * 用于 ensureExplore（启动）与 navigateBack（back_to_feed）统一判定是否真在 feed——
@@ -266,8 +289,9 @@ export class BrowseSession {
   private closing = false;
   private readonly random: RandomFn;
   private readonly sleep: (ms: number) => Promise<void>;
-  private readonly cardGapTiming: TimingConfig;
+  private cardGapTiming: TimingConfig;
   private readonly actionTiming: TimingConfig;
+  private scrollTiming: TimingConfig;
   private readonly modalTimeoutMs: number;
   private readonly initialScanTimeoutMs: number;
   private readonly loginGatePollMs: number;
@@ -317,8 +341,9 @@ export class BrowseSession {
   ) {
     this.random = options.random ?? Math.random;
     this.sleep = options.sleep ?? defaultSleep;
-    this.cardGapTiming = options.cardGapTiming ?? TIMING_PRESETS.cardGap;
+    this.cardGapTiming = options.cardGapTiming ?? floorRangeToTiming(options.opFloorsMs?.card_gap, TIMING_PRESETS.cardGap);
     this.actionTiming = options.actionTiming ?? TIMING_PRESETS.action;
+    this.scrollTiming = floorRangeToTiming(options.opFloorsMs?.scroll, TIMING_PRESETS.scroll);
     this.modalTimeoutMs = options.modalTimeoutMs ?? 5000;
     this.initialScanTimeoutMs = options.initialScanTimeoutMs ?? 12000;
     this.loginGatePollMs = options.loginGatePollMs ?? 2000;
@@ -350,6 +375,10 @@ export class BrowseSession {
     if (validPositiveMs(tempo)) this.tempo = tempo!;
     const dd = floorRangeToMinMax(opFloorsMs?.detail_dwell);
     if (dd) this.dwellFloorTiming = makeDwellFloorTiming(dd);
+    const cg = floorRangeToMinMax(opFloorsMs?.card_gap);
+    if (cg) this.cardGapTiming = makeDwellFloorTiming(cg);
+    const sc = floorRangeToMinMax(opFloorsMs?.scroll);
+    if (sc) this.scrollTiming = makeDwellFloorTiming(sc);
     this.lastActionEndAt = null;
     this.logger(
       `[browse] 应用 pacing 快照：tempo=${this.tempo} ops=${Object.keys(this.opFloorCfg).join(',') || '(空,用内置)'}`,
@@ -416,7 +445,7 @@ export class BrowseSession {
 
   /**
    * 某类操作的**有效 floor**（毫秒，恒 > 0）：配置区间**反射采样** × tempo ÷ fatigue，夹进
-   * [OP_MIN_FLOOR[op], CAP_MS]（边缘二次夹=第三道）。每次现采样一次（勿在循环里重采）。
+   * [OP_MIN_FLOOR[op], 类别上限]（边缘二次夹=第三道）。每次现采样一次（勿在循环里重采）。
    * - 逐字段回落：cfg 缺 / 非正 → BUILTIN_FLOOR[op]；
    * - tempo 乘算（风控档，≥1 放大延迟）、fatigue 用 applySpeedFactor 除算（与 humanPause 同向：系数>1=更快）；
    * - clamp 下界 OP_MIN_FLOOR[op] > 0 → **配置只能抬高延迟、抬不穿非零下限**（绝不零延迟红线）。
@@ -428,7 +457,7 @@ export class BrowseSession {
     const raw = sampleReflect(minMs, maxMs, BUILTIN_SIGMA[op], this.random);
     const withTempo = raw * this.tempo;
     const withFatigue = applySpeedFactor(withTempo, this.rhythm.getSpeedFactor(this.progress()));
-    const clamped = Math.min(CAP_MS, Math.max(OP_MIN_FLOOR[op], withFatigue));
+    const clamped = Math.min(OP_MAX_FLOOR[op], Math.max(OP_MIN_FLOOR[op], withFatigue));
     return Math.round(clamped);
   }
 
@@ -1751,7 +1780,7 @@ export class BrowseSession {
     // 返回手势不必再全量犹豫 → 用更轻的手势停顿（scroll 档，中位 ~0.8s ≈ action 的 1/3，仍带抖动、非零、不秒退）。
     // 注：此处原误取 cardGapTiming（中位 5s，比 action 还重一倍，与注释本意相反）——快速返回反成最慢档，已修正为 scroll 档。
     const fastReturn = reason === 'back_to_feed' && !wantSearch;
-    await this.humanPause(fastReturn ? TIMING_PRESETS.scroll : this.actionTiming);
+    await this.humanPause(fastReturn ? this.scrollTiming : this.actionTiming);
     const isOnList = (u: string): boolean => (wantSearch ? /\/search_result/.test(u) : EXPLORE_FEED_RE.test(u));
     const fromUrl = await this.evalUrl();
     // 仅当【不在目标列表 且 头上确有笔记浮层】才用 history.back()（保滚动位的好路径）；
@@ -1942,7 +1971,7 @@ export class BrowseSession {
         }
       };
       for (let i = 0; i < times; i++) {
-        await this.humanPause(TIMING_PRESETS.scroll);
+        await this.humanPause(this.scrollTiming);
         // 先抓当前（已 settle 的）本屏候选再滚动：i=0 抓首屏，之后每屏累计。
         await mergeHarvest();
         const raw = await evalRawFn<string>(this.deps.cdp, makeScrollExpr(this.variedScrollDistance()));
@@ -1955,7 +1984,7 @@ export class BrowseSession {
       // 末屏渲染门：仅当真滚动过（moved>0）才 settle 再抓一次，接住最后一次滚动懒加载的评论；
       // no_target/no_scroll 无更多可加载，用循环内已累计的候选即可，不白等一拍。
       if (moved > 0) {
-        await this.humanPause(TIMING_PRESETS.scroll);
+        await this.humanPause(this.scrollTiming);
         await mergeHarvest();
       }
       const candidates = [...acc.values()];
