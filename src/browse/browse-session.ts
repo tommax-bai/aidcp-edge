@@ -50,7 +50,7 @@ import type { ModalController } from './modal-controller.js';
 import type { LoginModalWatcher } from './login-modal-watcher.js';
 import type { OverlayKind, OverlayMonitor } from './overlay-monitor.js';
 import { isBlockingKind } from './overlay-monitor.js';
-import type { extractNoteContent as ExtractFn } from './note-extractor.js';
+import type { extractNoteContent as ExtractFn, NoteContent } from './note-extractor.js';
 import { NOTE_BODY_SELECTORS, parseCount } from './note-extractor.js';
 import { executeSearch, applySearchFilters } from './search-handler.js';
 import { evalRaw, type RandomFn, type BrowseCdp } from './cdp-util.js';
@@ -231,6 +231,13 @@ function defaultMonoNow(): number {
 }
 
 const DEFAULT_EXPLORE_URL = 'https://www.xiaohongshu.com/explore';
+const BODY_READ_MIN_CHARS = 240;
+const BODY_READ_MIN_LINES = 5;
+const COMMENT_PRELUDE_MIN_STEPS = 4;
+const COMMENT_PRELUDE_MAX_STEPS = 14;
+const COMMENT_SCROLL_MIN_PX = 150;
+const COMMENT_SCROLL_MAX_PX = 290;
+
 /**
  * explore feed 页 URL 判定：匹配 /explore（feed 列表），【排除 /explore/<noteId>（笔记详情页）】。
  * 用于 ensureExplore（启动）与 navigateBack（back_to_feed）统一判定是否真在 feed——
@@ -493,6 +500,12 @@ export class BrowseSession {
     const factor = this.rhythm.getSpeedFactor(this.progress());
     const ms = applySpeedFactor(base, factor);
     if (ms > 0) await this.sleep(ms);
+  }
+
+  private variedScrollDistance(min = COMMENT_SCROLL_MIN_PX, max = COMMENT_SCROLL_MAX_PX): number {
+    const lo = Math.min(min, max);
+    const hi = Math.max(min, max);
+    return Math.round(lo + this.random() * (hi - lo));
   }
 
   /** 启动浏览循环（命令驱动：上报卡片 → 等待指令 → 执行 → 循环） */
@@ -1213,6 +1226,7 @@ export class BrowseSession {
         `${authorFollowed ? ' [已关注]' : ''}` +
         ` 正文:${(payload.content ?? '').replace(/\s+/g, ' ').slice(0, 50)}…`,
     );
+    await this.readLongBody(content);
     this.processed++;
   }
 
@@ -1280,6 +1294,58 @@ export class BrowseSession {
     } else {
       this.logger('[browse] 正文未在超时内渲染（可能是纯图文/视频笔记，body 为空）');
     }
+  }
+
+  /**
+   * 长正文阅读动作：详情抽取完成后，先在正文/详情滚动容器内做数次小步滚动，再进入看图/评论阶段。
+   * 这不是数据抽取所必需，而是浏览行为本身的保真：长文不能只抽完文本就直接跳到评论。
+   */
+  private async readLongBody(content: NoteContent): Promise<void> {
+    const compactLen = (content.body || '').replace(/\s+/g, '').length;
+    const lineCount = (content.body || '').split(/\n+/).filter((s) => s.trim().length > 0).length;
+    if (compactLen < BODY_READ_MIN_CHARS && lineCount < BODY_READ_MIN_LINES) return;
+
+    const steps = Math.min(8, Math.max(2, Math.ceil((compactLen - 160) / 260)));
+    const selectors = JSON.stringify([...NOTE_BODY_SELECTORS]);
+    const { evalRaw: evalRawFn } = await import('./cdp-util.js');
+    let moved = 0;
+    for (let i = 0; i < steps; i++) {
+      await this.humanPause(TIMING_PRESETS.scroll);
+      const distance = this.variedScrollDistance(170, 320);
+      const expr = `(function(){
+        var S=${selectors};
+        var root=document.querySelector('.note-detail-mask')||document.querySelector('.note-container')||document;
+        function firstBody(){
+          for(var i=0;i<S.length;i++){ var el=root.querySelector(S[i])||document.querySelector(S[i]); if(el&&(el.textContent||'').trim()) return el; }
+          return null;
+        }
+        function scrollable(el){
+          var n=el;
+          while(n&&n!==document.body&&n!==document.documentElement){
+            var s=window.getComputedStyle(n);
+            if(n.scrollHeight>n.clientHeight+8&&/(auto|scroll)/.test(s.overflowY)) return n;
+            n=n.parentElement;
+          }
+          return document.scrollingElement||document.documentElement;
+        }
+        var body=firstBody();
+        if(!body) return JSON.stringify({found:false});
+        var c=scrollable(body);
+        var before=c.scrollTop||0;
+        c.scrollBy({top:${distance}});
+        var after=c.scrollTop||0;
+        var rect=body.getBoundingClientRect();
+        var vh=document.documentElement.clientHeight||document.body.clientHeight||800;
+        var reachedEnd=rect.bottom<vh*0.75 || after+c.clientHeight>=c.scrollHeight-24;
+        return JSON.stringify({found:true,before:before,after:after,reachedEnd:reachedEnd});
+      })()`;
+      const raw = await evalRawFn<string>(this.deps.cdp, expr);
+      const r = typeof raw === 'string' ? JSON.parse(raw) : { found: false };
+      if (!r.found) break;
+      if (typeof r.after === 'number' && typeof r.before === 'number' && r.after > r.before) moved++;
+      if (r.reachedEnd) break;
+    }
+    if (moved > 0) this.logger(`[browse] 正文已小步滚动阅读 ${moved}/${steps} 次`);
   }
 
   /**
@@ -1747,7 +1813,8 @@ export class BrowseSession {
           this.deps.cdp,
           `(function(){ var root = document.querySelector('.note-detail-mask') || document; var btn = root.querySelector('.arrow-controller.right, .swiper-button-next'); if(btn && !/forbidden|disabled/.test(btn.className || '')){ btn.click(); return true; } return false; })()`,
         );
-        if (clicked) viewed++;
+        if (!clicked) break;
+        viewed++;
         await this.sleep(800);
       }
       this.logger(`[browse] 浏览了 ${viewed}/${total} 张图片`);
@@ -1756,6 +1823,72 @@ export class BrowseSession {
       this.logger(`[browse] 浏览图片失败：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action: 'browse_images', ok: false, reason: (err as Error).message });
     }
+  }
+
+  private async bringCommentAreaIntoReach(
+    evalRawFn: (cdp: BrowseCdp, expression: string) => Promise<string>,
+    maxSteps: number,
+  ): Promise<boolean> {
+    const steps = Math.max(COMMENT_PRELUDE_MIN_STEPS, Math.min(COMMENT_PRELUDE_MAX_STEPS, maxSteps));
+    for (let i = 0; i < steps; i++) {
+      const distance = this.variedScrollDistance(180, 340);
+      const expr = `(function(){
+        function visible(el){
+          var r=el.getBoundingClientRect();
+          var vh=document.documentElement.clientHeight||document.body.clientHeight||800;
+          return r.bottom>80 && r.top<vh*0.92;
+        }
+        function seed(root){
+          var sels=['[id^="comment-"]','.comment-item','[class*="comment-item"]','.comments-container','[class*="comments-container"]','[class*="comment-list"]','[class*="commentList"]'];
+          for(var i=0;i<sels.length;i++){
+            var el=(root||document).querySelector(sels[i]);
+            if(el&&((el.textContent||'').trim().length>0||el.children.length>0)) return el;
+          }
+          return null;
+        }
+        function scrollable(el){
+          var n=el;
+          while(n&&n!==document.body&&n!==document.documentElement){
+            var s=window.getComputedStyle(n);
+            if(n.scrollHeight>n.clientHeight+8&&/(auto|scroll)/.test(s.overflowY)) return n;
+            n=n.parentElement;
+          }
+          return null;
+        }
+        function fallback(root){
+          var sels=['.note-scroller','[class*="note-scroller"]','[class*="scroller"]','.comments-container','[class*="comments-container"]','[class*="comment-list"]','[class*="commentList"]'];
+          for(var i=0;i<sels.length;i++){
+            var nodes=(root||document).querySelectorAll(sels[i]);
+            for(var j=0;j<nodes.length;j++){
+              var n=nodes[j], s=window.getComputedStyle(n);
+              if(n.scrollHeight>n.clientHeight+8&&/(auto|scroll)/.test(s.overflowY)) return n;
+            }
+          }
+          return document.scrollingElement||document.documentElement;
+        }
+        var root=document.querySelector('.note-detail-mask')||document.querySelector('.note-container')||document;
+        var hit=seed(root);
+        if(hit&&visible(hit)) return JSON.stringify({found:true,visible:true});
+        var c=hit ? (scrollable(hit)||fallback(root)) : fallback(root);
+        if(!c) return JSON.stringify({found:false,atBottom:true});
+        var before=c.scrollTop||0;
+        c.scrollBy({top:${distance}});
+        var after=c.scrollTop||0;
+        var hitAfter=seed(root);
+        return JSON.stringify({
+          found:!!hitAfter,
+          visible:!!(hitAfter&&visible(hitAfter)),
+          moved:after>before,
+          atBottom:after+c.clientHeight>=c.scrollHeight-24
+        });
+      })()`;
+      const raw = await evalRawFn(this.deps.cdp, expr);
+      const r = typeof raw === 'string' ? JSON.parse(raw) : { found: false };
+      if (r.found && r.visible !== false) return true;
+      if (r.atBottom && !r.moved) return false;
+      await this.humanPause(TIMING_PRESETS.scroll);
+    }
+    return false;
   }
 
   /**
@@ -1768,8 +1901,10 @@ export class BrowseSession {
   private async scrollNoteComments(_noteId: string, count: number): Promise<void> {
     try {
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
-      // 单次 eval：上溯找可滚动祖先（评论节点优先）→ 记录 before → scrollBy(instant) → 返回 before/after。
-      const scrollExpr = `(function(){
+      const times = Math.max(1, count);
+      await this.bringCommentAreaIntoReach(evalRawFn, Math.max(times + 2, Math.ceil(times * 1.5)));
+      // 单次 eval：上溯找可滚动祖先（评论节点优先）→ 记录 before → 小步 scrollBy → 返回 before/after。
+      const makeScrollExpr = (distance: number): string => `(function(){
         function scrollable(el){
           var n = el;
           while (n && n !== document.body && n !== document.documentElement){
@@ -1779,10 +1914,10 @@ export class BrowseSession {
           }
           return null;
         }
-        var seed = document.querySelector('.comment-item, [class*="comment-item"], [class*="comment"] [class*="content"], .comments-container, [class*="comment-list"], [class*="commentList"]');
+        var seed = document.querySelector('[id^="comment-"], .comment-item, [class*="comment-item"], .comments-container, [class*="comments-container"], [class*="comment-list"], [class*="commentList"]');
         var c = seed ? scrollable(seed) : null;
         if (!c) {
-          var cands = document.querySelectorAll('.note-scroller, [class*="scroller"], [class*="comment"], [class*="note-detail"] *');
+          var cands = document.querySelectorAll('.note-scroller, [class*="note-scroller"], [class*="scroller"], .comments-container, [class*="comments-container"], [class*="comment-list"], [class*="commentList"]');
           for (var i=0;i<cands.length;i++){
             var e=cands[i], s=window.getComputedStyle(e);
             if (e.scrollHeight > e.clientHeight + 40 && /(auto|scroll)/.test(s.overflowY)) { c=e; break; }
@@ -1790,10 +1925,9 @@ export class BrowseSession {
         }
         if (!c) return JSON.stringify({found:false});
         var before = c.scrollTop;
-        c.scrollBy({top: 360});
+        c.scrollBy({top:${distance}});
         return JSON.stringify({found:true, before:before, after:c.scrollTop});
       })()`;
-      const times = Math.max(1, count);
       let anyFound = false;
       let moved = 0;
       // 跨屏累计去重：逐屏抽取候选按锚点合并，不再只取终态一屏；首屏也抓，故短评论区
@@ -1811,7 +1945,7 @@ export class BrowseSession {
         await this.humanPause(TIMING_PRESETS.scroll);
         // 先抓当前（已 settle 的）本屏候选再滚动：i=0 抓首屏，之后每屏累计。
         await mergeHarvest();
-        const raw = await evalRawFn<string>(this.deps.cdp, scrollExpr);
+        const raw = await evalRawFn<string>(this.deps.cdp, makeScrollExpr(this.variedScrollDistance()));
         const r = typeof raw === 'string' ? JSON.parse(raw) : { found: false };
         if (r.found) {
           anyFound = true;

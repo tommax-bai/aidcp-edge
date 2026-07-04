@@ -277,6 +277,33 @@ test('browse-session: note.open 命令打开卡片并上报 note.detail', async 
   assert.deepEqual(h.openedCards, [0]);
 });
 
+test('browse-session: note.open 长正文后执行正文小步滚动阅读', async () => {
+  const h = makeHarness();
+  const longBody = Array.from({ length: 24 }, (_, i) => `第${i + 1}段正文内容，包含足够多的信息需要继续往下看。`).join('\n');
+  h.deps.noteExtractor = (async () => ({ ...fakeContent(), body: longBody })) as unknown as BrowseSessionDeps['noteExtractor'];
+  const base = h.deps.cdp;
+  let bodyScrolls = 0;
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      const expr = String(params.expression ?? '');
+      if (method === 'Runtime.evaluate' && expr.includes('return true;}return false')) {
+        return { result: { value: true } } as never;
+      }
+      if (method === 'Runtime.evaluate' && expr.includes('function firstBody')) {
+        bodyScrolls += 1;
+        return { result: { value: JSON.stringify({ found: true, before: 0, after: 220, reachedEnd: bodyScrolls >= 2 }) } } as never;
+      }
+      return base.send(method, params);
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.ok(bodyScrolls >= 1, '长正文打开后应滚动正文阅读');
+});
+
 test('browse-session: note.open 探测到已关注 → note.detail 带 authorFollowed=true', async () => {
   const h = makeHarness();
   const details: NoteDetailPayload[] = [];
