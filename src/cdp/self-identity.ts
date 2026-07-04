@@ -47,6 +47,29 @@ export interface SelfIdentitySignals {
   redId: string | null;
 }
 
+/** 创作平台同源登录态存储里的账号信号（只读白名单字段，绝不扫 cookie/token）。 */
+export interface CreatorStorageIdentitySignals {
+  href: string;
+  /** USER_INFO_FOR_BIZ.userId（真机 2026-07-05 验证为创作平台主用户 id）。 */
+  userId: string | null;
+  /** USER_INFO_FOR_BIZ.userName，显示名，不能当主键。 */
+  userName: string | null;
+  /** USER_INFO_FOR_BIZ.redId，小红书号，显示/辅助信息，不能当主键。 */
+  redId: string | null;
+  /** snsWebPublishCurrentUser 冗余 id。 */
+  snsWebPublishCurrentUser: string | null;
+  /** USER_INFO.user.value.userId 冗余 id。 */
+  userInfoUserId: string | null;
+  /** nps-userId 冗余 id。 */
+  npsUserId: string | null;
+}
+
+export type CreatorStorageIdentityDerivation =
+  | { ok: true; accountId: string; displayName: string | null; redId: string | null }
+  | { ok: false; reason: string };
+
+export type SelfIdentitySource = 'in-place' | 'navigate' | 'creator-storage';
+
 export interface SelfIdentity {
   /** 账号主键 = 登录态读出的稳定 userid。 */
   accountId: string;
@@ -55,7 +78,7 @@ export interface SelfIdentity {
   /** 小红书号，可空。 */
   redId: string | null;
   /** 身份从哪条路读出。 */
-  source: 'in-place' | 'navigate';
+  source: SelfIdentitySource;
 }
 
 export type SelfIdentityResult =
@@ -69,7 +92,7 @@ export type SelfIdentityResult =
  *   - 读不出 + 无覆盖：halt（诚实停手，调用方不得握手、绝不回落 default）。
  */
 export type IdentityDecision =
-  | { kind: 'use'; accountId: string; source: 'env-override' | 'in-place' | 'navigate'; mismatch?: { override: string; real: string } }
+  | { kind: 'use'; accountId: string; source: 'env-override' | SelfIdentitySource; mismatch?: { override: string; real: string } }
   | { kind: 'use-override-after-read-fail'; accountId: string; reason: string }
   | { kind: 'halt'; reason: string };
 
@@ -117,6 +140,36 @@ export function deriveInPlaceSelfId(signals: SelfIdentitySignals): string {
     if (isValidStableId(id)) return id;
   }
   return '';
+}
+
+function cleanOptionalText(value: string | null | undefined): string | null {
+  const s = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return s || null;
+}
+
+/**
+ * 创作平台启动兜底：只从白名单同源存储字段读稳定 userid。
+ * 多个候选均有效但不一致时拒绝采信，避免用陈旧/串号存储污染账号主键。
+ */
+export function deriveCreatorStorageIdentity(signals: CreatorStorageIdentitySignals): CreatorStorageIdentityDerivation {
+  const candidates = [
+    signals.userId,
+    signals.snsWebPublishCurrentUser,
+    signals.userInfoUserId,
+    signals.npsUserId,
+  ];
+  const validIds = candidates
+    .map((v) => String(v ?? '').trim())
+    .filter((v) => isValidStableId(v));
+  const unique = Array.from(new Set(validIds));
+  if (unique.length === 0) return { ok: false, reason: '创作平台存储无形态合规的稳定 id' };
+  if (unique.length > 1) return { ok: false, reason: `创作平台存储稳定 id 冲突（${unique.join(',')}）` };
+  return {
+    ok: true,
+    accountId: unique[0],
+    displayName: cleanOptionalText(signals.userName),
+    redId: cleanOptionalText(signals.redId),
+  };
 }
 
 /**
@@ -176,6 +229,24 @@ const IN_PLACE_SCAN_JS = `(function(){
     meAnchorHref: meAnchorHref,
     nickname: null,
     redId: null
+  });
+})()`;
+
+/** 创作平台同源存储扫描：只读明确用户字段，避开 cookie/session token。 */
+const CREATOR_STORAGE_SCAN_JS = `(function(){
+  function parse(k){ try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch(e) { return null; } }
+  function str(v){ return typeof v === 'string' ? v : null; }
+  var biz = parse('USER_INFO_FOR_BIZ') || {};
+  var userInfo = parse('USER_INFO') || {};
+  var userValue = userInfo && userInfo.user && (userInfo.user.value || userInfo.user) || {};
+  return JSON.stringify({
+    href: location.href,
+    userId: str(biz.userId),
+    userName: str(biz.userName),
+    redId: str(biz.redId),
+    snsWebPublishCurrentUser: str(localStorage.getItem('snsWebPublishCurrentUser')),
+    userInfoUserId: str(userValue.userId),
+    npsUserId: str(localStorage.getItem('nps-userId'))
   });
 })()`;
 
@@ -264,6 +335,16 @@ async function readDisplay(cdp: BrowseCdp): Promise<{ nickname: string | null; r
   }
 }
 
+async function readCreatorStorageIdentity(cdp: BrowseCdp): Promise<CreatorStorageIdentityDerivation> {
+  const raw = await evalRaw<string>(cdp, CREATOR_STORAGE_SCAN_JS).catch(() => '');
+  try {
+    const signals = JSON.parse(raw) as CreatorStorageIdentitySignals;
+    return deriveCreatorStorageIdentity(signals);
+  } catch {
+    return { ok: false, reason: '创作平台存储读取结果不可解析' };
+  }
+}
+
 /**
  * 登录后读出自己账号的稳定 id。首选就地读、兜底跳转读；读不出/形态不匹配 → 诚实失败（ok:false）。
  * 绝不回落 default。
@@ -307,9 +388,39 @@ export async function readSelfIdentity(
     return { ok: true, identity: { accountId: inPlaceId, displayName: null, redId: null, source: 'in-place' } };
   }
 
-  // ② 跳转兜底
+  // ② 创作平台启动兜底：当前标签页若已停在 creator 非登录页，登录门禁说明账号在场；
+  //    但握手仍必须读稳定 id，故只读同源存储里的白名单 userid 字段，昵称只作显示名。
+  const pageContext = classifyPageContext(signals.href);
+  if (pageContext === 'creator-login') {
+    return { ok: false, reason: '当前停在创作平台登录页，登录态已失效' };
+  }
+  let creatorStorageFailure: string | null = null;
+  if (pageContext === 'creator-app') {
+    const creator = await readCreatorStorageIdentity(cdp);
+    if (creator.ok) {
+      log(`[self-identity] 创作平台存储读出稳定 id=${creator.accountId}（source=creator-storage）`);
+      return {
+        ok: true,
+        identity: {
+          accountId: creator.accountId,
+          displayName: creator.displayName,
+          redId: creator.redId,
+          source: 'creator-storage',
+        },
+      };
+    }
+    creatorStorageFailure = creator.reason;
+    log(`[self-identity] 创作平台非登录页但${creator.reason}，继续既有跳转兜底`);
+  }
+
+  // ③ 跳转兜底
   if (!allowNavigate) {
-    return { ok: false, reason: '就地读不出稳定 id 且禁用跳转兜底' };
+    return {
+      ok: false,
+      reason: creatorStorageFailure
+        ? `创作平台已登录但${creatorStorageFailure}，且禁用跳转兜底`
+        : '就地读不出稳定 id 且禁用跳转兜底',
+    };
   }
   log('[self-identity] 就地无 self-profile 锚点，走跳转兜底（进我的主页读 URL）');
   // 当前小红书侧栏/底部栏本人入口文案是「我」（非「我的主页」）：优先点本人 profile 锚点，再退回旧文案兜底。

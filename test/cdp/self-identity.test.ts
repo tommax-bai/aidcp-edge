@@ -4,11 +4,14 @@ import {
   extractIdFromHref,
   isValidStableId,
   deriveInPlaceSelfId,
+  deriveCreatorStorageIdentity,
   classifyPageContext,
   readSelfIdentity,
   decideHandshakeIdentity,
   type SelfIdentitySignals,
+  type CreatorStorageIdentitySignals,
   type SelfIdentityResult,
+  type SelfIdentitySource,
 } from '../../src/cdp/index.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
@@ -43,6 +46,48 @@ test('deriveInPlaceSelfId: 首选头像祖先锚点，兜底导航区锚点', ()
   assert.equal(deriveInPlaceSelfId(base), '');
 });
 
+test('deriveCreatorStorageIdentity: 创作平台存储稳定 id 一致 → 读出 id，昵称只作显示名', () => {
+  const signals: CreatorStorageIdentitySignals = {
+    href: 'https://creator.xiaohongshu.com/statistics/account/v2',
+    userId: REAL_ID,
+    userName: ' 工程师大白 ',
+    redId: '5039527968',
+    snsWebPublishCurrentUser: REAL_ID,
+    userInfoUserId: REAL_ID,
+    npsUserId: REAL_ID,
+  };
+  const res = deriveCreatorStorageIdentity(signals);
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    assert.equal(res.accountId, REAL_ID);
+    assert.equal(res.displayName, '工程师大白');
+    assert.equal(res.redId, '5039527968');
+  }
+});
+
+test('deriveCreatorStorageIdentity: 创作平台存储无合规 id / 合规 id 冲突 → 拒绝采信', () => {
+  const base: CreatorStorageIdentitySignals = {
+    href: 'https://creator.xiaohongshu.com/statistics/account/v2',
+    userId: null,
+    userName: '工程师大白',
+    redId: null,
+    snsWebPublishCurrentUser: null,
+    userInfoUserId: null,
+    npsUserId: null,
+  };
+  assert.deepEqual(deriveCreatorStorageIdentity({ ...base, userId: 'abc' }), {
+    ok: false,
+    reason: '创作平台存储无形态合规的稳定 id',
+  });
+  const conflict = deriveCreatorStorageIdentity({
+    ...base,
+    userId: REAL_ID,
+    snsWebPublishCurrentUser: 'a1b2c3d4e5f60718293a4b5c',
+  });
+  assert.equal(conflict.ok, false);
+  if (!conflict.ok) assert.match(conflict.reason, /冲突/);
+});
+
 test('classifyPageContext: 按子域/路径分身份判定上下文', () => {
   // 消费端 web（有「我」锚点、可读稳定 id）
   assert.equal(classifyPageContext('https://www.xiaohongshu.com/explore'), 'consumer');
@@ -52,6 +97,7 @@ test('classifyPageContext: 按子域/路径分身份判定上下文', () => {
   assert.equal(classifyPageContext('https://xiaohongshu.com/explore'), 'consumer');
   // 创作平台真实页（登录门禁）→ creator-app；被弹登录页 → creator-login
   assert.equal(classifyPageContext('https://creator.xiaohongshu.com/publish/publish?source=official'), 'creator-app');
+  assert.equal(classifyPageContext('https://creator.xiaohongshu.com/statistics/account/v2'), 'creator-app');
   assert.equal(classifyPageContext('https://creator.xiaohongshu.com/login'), 'creator-login');
   // 无法判定：空/畸形/非小红书/about:blank
   assert.equal(classifyPageContext(''), 'unknown');
@@ -65,6 +111,7 @@ test('classifyPageContext: 按子域/路径分身份判定上下文', () => {
 
 interface FakeResponses {
   scan: string; // IN_PLACE_SCAN_JS 的 JSON 串
+  creatorStorage?: string;
   display?: string;
   onProfile?: boolean;
   url?: string;
@@ -75,6 +122,15 @@ function fakeCdp(r: FakeResponses): BrowseCdp {
     const e = String((params as { expression?: string } | undefined)?.expression ?? '');
     let value: unknown = '';
     if (e.includes('avatarAnchorHref')) value = r.scan;
+    else if (e.includes('USER_INFO_FOR_BIZ')) value = r.creatorStorage ?? JSON.stringify({
+      href: 'https://creator.xiaohongshu.com/statistics/account/v2',
+      userId: null,
+      userName: null,
+      redId: null,
+      snsWebPublishCurrentUser: null,
+      userInfoUserId: null,
+      npsUserId: null,
+    });
     else if (e.includes('小红书号')) value = r.display ?? JSON.stringify({ nickname: null, redId: null });
     else if (e.includes('test(location.href)')) value = r.onProfile ?? false;
     else if (e.includes('.click()')) value = true;
@@ -119,6 +175,90 @@ test('readSelfIdentity: 就地无锚点 → 跳转兜底成功（source=navigate
   }
 });
 
+test('readSelfIdentity: 启动停在创作平台真实页 → 从 creator 存储读稳定 id，不依赖点击入口', async () => {
+  const cdp = fakeCdp({
+    scan: JSON.stringify({
+      href: 'https://creator.xiaohongshu.com/statistics/account/v2',
+      avatarAnchorHref: null,
+      navProfileHrefs: [],
+      meAnchorHref: null,
+      nickname: null,
+      redId: null,
+    }),
+    creatorStorage: JSON.stringify({
+      href: 'https://creator.xiaohongshu.com/statistics/account/v2',
+      userId: REAL_ID,
+      userName: '工程师大白',
+      redId: '5039527968',
+      snsWebPublishCurrentUser: REAL_ID,
+      userInfoUserId: REAL_ID,
+      npsUserId: REAL_ID,
+    }),
+    onProfile: false,
+  });
+  const res = await readSelfIdentity(cdp, fastOpts);
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    assert.equal(res.identity.accountId, REAL_ID);
+    assert.equal(res.identity.source, 'creator-storage');
+    assert.equal(res.identity.displayName, '工程师大白');
+    assert.equal(res.identity.redId, '5039527968');
+  }
+});
+
+test('readSelfIdentity: 创作平台登录页即使存储残留 id 也诚实失败', async () => {
+  const cdp = fakeCdp({
+    scan: JSON.stringify({
+      href: 'https://creator.xiaohongshu.com/login',
+      avatarAnchorHref: null,
+      navProfileHrefs: [],
+      meAnchorHref: null,
+      nickname: null,
+      redId: null,
+    }),
+    creatorStorage: JSON.stringify({
+      href: 'https://creator.xiaohongshu.com/login',
+      userId: REAL_ID,
+      userName: '工程师大白',
+      redId: '5039527968',
+      snsWebPublishCurrentUser: REAL_ID,
+      userInfoUserId: REAL_ID,
+      npsUserId: REAL_ID,
+    }),
+  });
+  const res = await readSelfIdentity(cdp, fastOpts);
+  assert.equal(res.ok, false);
+  if (!res.ok) assert.match(res.reason, /创作平台登录页/);
+});
+
+test('readSelfIdentity: 创作平台存储 id 冲突且禁用跳转 → 诚实失败，不用昵称兜底', async () => {
+  const cdp = fakeCdp({
+    scan: JSON.stringify({
+      href: 'https://creator.xiaohongshu.com/statistics/account/v2',
+      avatarAnchorHref: null,
+      navProfileHrefs: [],
+      meAnchorHref: null,
+      nickname: null,
+      redId: null,
+    }),
+    creatorStorage: JSON.stringify({
+      href: 'https://creator.xiaohongshu.com/statistics/account/v2',
+      userId: REAL_ID,
+      userName: '工程师大白',
+      redId: '5039527968',
+      snsWebPublishCurrentUser: 'a1b2c3d4e5f60718293a4b5c',
+      userInfoUserId: null,
+      npsUserId: null,
+    }),
+  });
+  const res = await readSelfIdentity(cdp, { ...fastOpts, allowNavigate: false });
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.match(res.reason, /冲突/);
+    assert.doesNotMatch(res.reason, /工程师大白/);
+  }
+});
+
 test('readSelfIdentity: 读不出 → 诚实失败（ok:false，不回落 default）', async () => {
   const cdp = fakeCdp({
     scan: JSON.stringify({ href: '/explore', avatarAnchorHref: null, navProfileHrefs: [], nickname: null, redId: null }),
@@ -148,7 +288,7 @@ test('readSelfIdentity: 进了主页但 URL 无合规 id → 诚实失败', asyn
 
 // ---- decideHandshakeIdentity（握手身份优先级 + 红线，纯函数）----
 
-const okRes = (id: string, source: 'in-place' | 'navigate' = 'in-place'): SelfIdentityResult => ({
+const okRes = (id: string, source: SelfIdentitySource = 'in-place'): SelfIdentityResult => ({
   ok: true,
   identity: { accountId: id, displayName: null, redId: null, source },
 });
