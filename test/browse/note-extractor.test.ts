@@ -5,6 +5,7 @@ import {
   extractNoteContent,
   parseCount,
   extractTags,
+  textWithNewlines,
 } from '../../src/browse/note-extractor.js';
 import type { DomProvider } from '../../src/locating/engine.js';
 
@@ -102,6 +103,38 @@ test('extractNoteContent: 布局变体(note-scroller/note-content，无 #detail-
   assert.match(c.body, /成像非常惊艳/, '布局变体下正文应抽到非空');
   assert.ok(!c.body.includes('刚刚'), '正文不应混入发布时间"刚刚"');
   assert.ok(!c.body.startsWith('长文测评'), '正文不应以标题开头（无标题泄漏）');
+});
+
+// 换行保真回归（curated_content.body 生产实测 0/64 含换行的根因）：正文不得走 \s+ 单行压缩。
+// XHS 正文两种形态都要活到 body：字面 \n（pre-wrap 渲染常态）与 <br> 标签（textContent 下连空格都不留）。
+test('extractNoteContent: 正文保留字面换行（pre-wrap 形态）', async () => {
+  const html = `
+    <div class="note-detail-mask">
+      <div id="detail-title">分段笔记</div>
+      <div id="detail-desc">第一段开头
+第二段继续
+
+第四行（隔一个空行）</div>
+    </div>`;
+  const c = await extractNoteContent(domProviderFrom(html));
+  assert.equal(c.body, '第一段开头\n第二段继续\n\n第四行（隔一个空行）');
+});
+
+test('extractNoteContent: 正文 <br> 映射为换行', async () => {
+  const html = `
+    <div class="note-detail-mask">
+      <div id="detail-desc">第一行<br>第二行<br><br>第三段</div>
+    </div>`;
+  const c = await extractNoteContent(domProviderFrom(html));
+  assert.equal(c.body, '第一行\n第二行\n\n第三段');
+});
+
+test('textWithNewlines: 块级边界成换行、行内空白压缩、空行至多留一个', () => {
+  const { document } = buildDom(
+    `<div id="x"><p>甲  乙</p><p>丙</p><span>丁</span><br><br><br><span>戊</span></div>`,
+  );
+  const el = document.getElementById('x') as Element;
+  assert.equal(textWithNewlines(el), '甲 乙\n\n丙\n丁\n\n戊');
 });
 
 test('countNear(点赞数): 两遍扫描优先 like-wrapper 精确容器，不被含 like 子串的无关元素抢占', async () => {

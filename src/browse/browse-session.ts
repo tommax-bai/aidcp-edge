@@ -1823,7 +1823,10 @@ export class BrowseSession {
           var likeText = lcEl ? (lcEl.textContent || '').replace(/\\s+/g, ' ').trim() : '';
           var authorEl = r.querySelector('.author .name, [class*="author"] [class*="name"], [class*="nickname"], [class*="name"]');
           var contentEl = r.querySelector('.content, [class*="content"], .note-text, p');
-          var text = (contentEl ? (contentEl.textContent || '') : (r.textContent || '')).replace(/\\s+/g, ' ').trim().slice(0, 80);
+          // 保留换行：真页面 innerText 把 <br>/块级边界映射为换行；只压换行以外的空白（\\s+ 会抹平段落）。
+          var srcEl = contentEl || r;
+          var rawText = (srcEl.innerText || srcEl.textContent || '');
+          var text = rawText.replace(/[^\\S\\n]+/g, ' ').replace(/ *\\n */g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim().slice(0, 80);
           if (!text) continue;
           out.push({
             anchorId: r.id,

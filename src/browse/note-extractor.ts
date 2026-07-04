@@ -88,6 +88,59 @@ function textOf(scope: Element, selectors: readonly string[]): string {
   return '';
 }
 
+/** 块级边界视为换行的标签（正文段落结构；jsdom 无布局，只能按标签语义判块级）。 */
+const LINE_BREAK_TAGS = new Set([
+  'P', 'DIV', 'SECTION', 'ARTICLE', 'LI', 'UL', 'OL', 'BLOCKQUOTE', 'PRE',
+  'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'TR',
+]);
+
+/**
+ * 取元素文本并保留行结构：<br> 与块级元素边界映射为 \n，文本节点里的字面 \n 保留；
+ * 只压缩空格/制表符/nbsp，行首行尾空白收敛，连续空行至多留一个。
+ * 背景：正文若走 textOf 的 `\s+`→' ' 压缩，段落换行全部丢失（curated_content.body 实测 0/64 含换行）；
+ * DOM 快照来自 outerHTML + jsdom（无布局、innerText 不可用），<br> 在 textContent 下连空格都不留，
+ * 故必须自行把行结构序列化出来。
+ */
+export function textWithNewlines(el: Element): string {
+  const parts: string[] = [];
+  const walk = (node: Node): void => {
+    if (node.nodeType === 3) {
+      parts.push(node.textContent ?? '');
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const tag = (node as Element).tagName.toUpperCase();
+    if (tag === 'BR') {
+      parts.push('\n');
+      return;
+    }
+    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return;
+    const isBlock = LINE_BREAK_TAGS.has(tag);
+    if (isBlock) parts.push('\n');
+    for (let i = 0; i < node.childNodes.length; i++) walk(node.childNodes[i]);
+    if (isBlock) parts.push('\n');
+  };
+  walk(el);
+  return parts
+    .join('')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t\u00a0]+/g, ' ')
+    .replace(/ ?\n ?/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** 正文专用取文本：保留换行（标题/作者/计数等单行字段仍走 textOf 的单行压缩）。 */
+function bodyTextOf(scope: Element, selectors: readonly string[]): string {
+  for (const sel of selectors) {
+    const el = scope.querySelector(sel);
+    if (!el) continue;
+    const t = textWithNewlines(el);
+    if (t) return t;
+  }
+  return '';
+}
+
 /** 在作用域内取首个命中选择器元素的某属性 */
 function attrOf(scope: Element, selectors: string[], attr: string): string {
   for (const sel of selectors) {
@@ -176,7 +229,8 @@ export async function extractNoteContent(dom: DomProvider): Promise<NoteContent>
   // 正文取共享 NOTE_BODY_SELECTORS（与渲染门 waitForNoteBody 同一份，避免漂移）。注意：评论区也用
   // .note-text，故所有 .note-text 候选都下钻在 desc/note-scroller/note-content 容器作用域内，
   // 不用裸 .note-text 兜底（会抓到评论），也不回退裸 .note-content / [class*="content"]（会拼进标题+时间）。
-  const body = textOf(container, NOTE_BODY_SELECTORS);
+  // 正文走保留换行的序列化（bodyTextOf）：段落结构是精选语料/创作素材的一部分，不得压平。
+  const body = bodyTextOf(container, NOTE_BODY_SELECTORS);
   const author = textOf(container, [
     '.author-wrapper .name',
     '.author .name',
