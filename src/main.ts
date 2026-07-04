@@ -399,6 +399,11 @@ async function main(): Promise<void> {
         `[aidcp-edge] 身份重新确立: ${accountId}，已按新 id 重连云端（云端按新账号拆旧会话 + 重过就绪闸）`,
       );
       identityWatcher?.rebaseline(accountId);
+      // 重连重注入节奏快照（pacing-floor-config-min-interval 设计 §4.3 最严重缺口）：BrowseSession 只构造一次，
+      // identity 翻转复用同一对象；须在 connect()（新 welcome 已到）之后、start() 之前把新 floors/tempo 灌进去，
+      // 否则连接级快照在唯一原地重连路径上退化成进程级、风控升级到不了边缘节奏层。
+      const reconnPacing = client.getPacing();
+      browse?.applyPacingSnapshot(reconnPacing?.opFloorsMs, reconnPacing?.tempo);
       browse?.start().catch((err) => console.error('[aidcp-edge] 浏览会话异常:', err));
       watcherSupervisor?.startAll();
     } catch (err) {
@@ -412,6 +417,18 @@ async function main(): Promise<void> {
   if (autoBrowse) {
     const browseOpts: BrowseSessionOptions = {};
     if (process.env.AIDCP_EXPLORE_URL) browseOpts.exploreUrl = process.env.AIDCP_EXPLORE_URL;
+    // 节奏快照（pacing-floor-config-min-interval 设计 §4.3）：welcome 下发的每类操作 floor 区间 + tempo
+    // 透传进 BrowseSession；detail_dwell 区间复活死参数 dwellFloorMs（详情页停留兜底 floor 源）。
+    // 缺省（旧云端未下发）→ 全用内置默认、非零降级、无回归。
+    const initialPacing = client.getPacing();
+    if (initialPacing) {
+      browseOpts.opFloorsMs = initialPacing.opFloorsMs;
+      browseOpts.tempo = initialPacing.tempo;
+      const dd = initialPacing.opFloorsMs?.detail_dwell;
+      if (dd && typeof dd.minMs === 'number' && typeof dd.maxMs === 'number') {
+        browseOpts.dwellFloorMs = { min: dd.minMs, max: dd.maxMs };
+      }
+    }
     // 旁路弹窗监测体：后台持续判类（登录/验证码/运营/未知），闸门读其缓存状态停手。
     overlayMonitor = new CdpOverlayMonitor(session.cdp);
     browse = new BrowseSession(

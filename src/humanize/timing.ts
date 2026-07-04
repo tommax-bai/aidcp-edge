@@ -79,6 +79,38 @@ export function samplePreset(name: TimingPresetName, random: RandomFn = defaultR
 }
 
 /**
+ * 从对数正态分布采样一个停顿时长（毫秒，已取整），但对越界样本做**反射**（triangle-wave 折返）
+ * 回到 [min,max] 内，而非 `sampleDelay` 的**硬裁**。
+ *
+ * 背景（见 pacing-floor-configurable-min-interval 设计 §7 防指纹）：最小间隔 gating 会把「补差额」
+ * 补到 floor 这一固定值，硬裁采样在直方图 min 处堆出一根竖直左壁尖峰——本身是可被行为分析识别的
+ * 指纹。反射采样把超出 [lo,hi] 的样本按边界**反弹**回区间内（周期 = 2·span 的三角波折叠），保证结果
+ * 恒落在 [lo,hi]，同时把原本会堆在墙上的左/右尾质量摊回分布内、消掉竖直壁。
+ *
+ * - 中位数取 [min,max] 的几何中点（median = √(min·max)），与 `makeDwellFloorTiming` 同口径；
+ * - `min===max`（退化区间）直接返回该值；
+ * - **新 helper，刻意不改共享 `sampleDelay`**（避免波及其它 dwell/pause caller，见设计 §9-Q1）。
+ *
+ * @param min 区间下界（毫秒，调用方须保证 > 0）
+ * @param max 区间上界（毫秒）
+ * @param sigma 对数正态分散度（越大长尾越重）
+ */
+export function sampleReflect(min: number, max: number, sigma: number, random: RandomFn = defaultRandom): number {
+  const lo = Math.max(1, Math.min(min, max));
+  const hi = Math.max(lo, Math.max(min, max));
+  if (!(hi > lo)) return Math.round(lo); // 退化区间（min===max）：无展宽可采，直接返回下界
+  const mu = ln(Math.sqrt(lo * hi));
+  const raw = Math.exp(mu + sigma * gaussian(random));
+  // 三角波折返：把 raw 折进 [lo,hi]。周期 = 2·span，[0,span] 段正向、(span,2·span) 段反向。
+  const span = hi - lo;
+  const period = 2 * span;
+  let t = (raw - lo) % period;
+  if (t < 0) t += period;
+  const folded = t <= span ? lo + t : hi - (t - span);
+  return Math.round(folded);
+}
+
+/**
  * 围绕一个**中心值**叠加对数正态抖动（指令级节奏 Command Pacing 的边缘抖动层）。
  *
  * 云端基于内容算出的 `dwellMs`/`thinkMs` 是确定性中心值；若边缘直接照用，两个账号看

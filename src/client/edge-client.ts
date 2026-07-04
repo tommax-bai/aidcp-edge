@@ -34,6 +34,8 @@ import {
   type PageCardsPayload,
   type NoteDetailPayload,
   type ProfileDetailPayload,
+  type WelcomePayload,
+  type PacingSnapshotPayload,
 } from '../comm/protocol.js';
 
 /** 最小 WebSocket 抽象（与 cdp/client.ts 同形，便于测试注入） */
@@ -115,6 +117,8 @@ export class EdgeClient {
   private seq = 0;
   private readonly pending = new Map<string, Pending>();
   private sessionId?: string;
+  /** welcome 握手下发的节奏快照（每类操作 floor 区间 + tempo）；重连（新 connect）后被最新 welcome 覆盖。 */
+  private pacing?: PacingSnapshotPayload;
   private connected = false;
   private browseHandler?: BrowseCommandHandler;
   private publishHandler?: PublishCommandHandler;
@@ -169,9 +173,14 @@ export class EdgeClient {
       machineLabel: this.opts.machineLabel,
       remoteAddr: this.opts.remoteAddr,
     });
-    const p = welcome.payload as { sessionId?: string };
+    const p = welcome.payload as WelcomePayload;
     this.sessionId = p.sessionId;
-    this.opts.logger(`[edge-client] 已握手，sessionId=${this.sessionId ?? '?'}`);
+    // 节奏快照（pacing-floor-config-min-interval 设计 §4.3）：welcome 是 hello 的请求/响应，按 pending-id
+    // 命中返回、永不经过主动命令白名单，故此处直接取用零白名单遗漏风险。缺省（旧云端）→ undefined，边缘用内置默认。
+    this.pacing = p.pacing;
+    this.opts.logger(
+      `[edge-client] 已握手，sessionId=${this.sessionId ?? '?'}${this.pacing ? `，pacing tempo=${this.pacing.tempo}` : '（无 pacing，用内置默认）'}`,
+    );
   }
 
   isConnected(): boolean {
@@ -180,6 +189,11 @@ export class EdgeClient {
 
   getSessionId(): string | undefined {
     return this.sessionId;
+  }
+
+  /** 取最近一次 welcome 下发的节奏快照（供 main.ts 组装 browseOpts / 重连后 applyPacingSnapshot）；缺省 undefined。 */
+  getPacing(): PacingSnapshotPayload | undefined {
+    return this.pacing;
   }
 
   /**

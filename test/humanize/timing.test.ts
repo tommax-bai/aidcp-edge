@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sampleDelay, samplePreset, TIMING_PRESETS, gaussian } from '../../src/humanize/timing.js';
+import { sampleDelay, sampleReflect, samplePreset, TIMING_PRESETS, gaussian } from '../../src/humanize/timing.js';
 
 /** 简单种子化 PRNG（mulberry32），保证测试可复现 */
 function mulberry32(seed: number): () => number {
@@ -69,4 +69,40 @@ test('samplePreset: 各预设名可用且在区间内', () => {
     const cfg = TIMING_PRESETS[name];
     assert.ok(v >= cfg.min && v <= cfg.max);
   }
+});
+
+// ======== sampleReflect（反射采样，消硬左壁指纹）测试 ========
+
+test('sampleReflect: 大量采样恒落在 [min,max]（反射保证有界）', () => {
+  const rng = mulberry32(7);
+  for (let i = 0; i < 20000; i++) {
+    const v = sampleReflect(1000, 2000, 0.8, rng);
+    assert.ok(v >= 1000 && v <= 2000, `样本 ${v} 越界 [1000,2000]`);
+  }
+});
+
+test('sampleReflect: 退化区间 min===max → 返回该值（无展宽可采）', () => {
+  const rng = mulberry32(9);
+  for (let i = 0; i < 100; i++) {
+    assert.equal(sampleReflect(12345, 12345, 0.35, rng), 12345);
+  }
+});
+
+test('sampleReflect: 反射消掉硬左壁尖峰——边界处样本远少于硬裁 sampleDelay', () => {
+  // 同一底层对数正态（mu=ln(√(min·max))、sigma 大 → 左尾重）：
+  // 硬裁 sampleDelay 把越界左尾全堆在 min 上一根竖直尖峰；反射 sampleReflect 把它们弹回分布内、摊平。
+  const min = 1000, max = 2000, sigma = 0.9, n = 40000;
+  const mu = Math.log(Math.sqrt(min * max));
+  const cfg = { mu, sigma, min, max };
+  const rngClamp = mulberry32(101);
+  const rngReflect = mulberry32(101); // 同种子 → 同随机序列，公平对比
+  let clampAtMin = 0;
+  let reflectAtMin = 0;
+  for (let i = 0; i < n; i++) {
+    if (sampleDelay(cfg, rngClamp) === min) clampAtMin++;
+    if (sampleReflect(min, max, sigma, rngReflect) === min) reflectAtMin++;
+  }
+  // 硬裁应在 min 处堆出可观尖峰（左尾质量），反射应几乎不在边界堆积。
+  assert.ok(clampAtMin > n * 0.05, `硬裁应在 min 处有尖峰，实际 ${clampAtMin}/${n}`);
+  assert.ok(reflectAtMin < clampAtMin / 10, `反射应把左壁尖峰摊平（reflect ${reflectAtMin} ≪ clamp ${clampAtMin}）`);
 });

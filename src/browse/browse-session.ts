@@ -43,6 +43,7 @@ import type {
   NotificationBackHomePayload,
 } from '../comm/protocol.js';
 import type { ActionResultPayload, CommentCandidate } from '../comm/protocol.js';
+import type { PacingOp, PacingFloorPayload } from '../comm/protocol.js';
 import type { FeedScroller, NoteCard } from './feed-scroller.js';
 import type { ModalController } from './modal-controller.js';
 import type { LoginModalWatcher } from './login-modal-watcher.js';
@@ -57,6 +58,7 @@ import { buildNotificationHomeJs, buildNotificationItemsJs, buildNotificationCat
 import type { DomProvider } from '../locating/engine.js';
 import {
   sampleDelay,
+  sampleReflect,
   jitterAround,
   TIMING_PRESETS,
   type TimingConfig,
@@ -131,13 +133,25 @@ export interface BrowseSessionOptions {
   rhythmTotal?: number;
   /** 日志（默认 console） */
   logger?: (msg: string) => void;
-  /** 单调时钟（注入便于测试；用于详情页停留时长统计），默认 Date.now */
+  /** 详情页停留时长统计用的墙钟（注入便于测试），默认 Date.now。与最小间隔的单调时钟 monoNow 分离、绝不混算。 */
   now?: () => number;
   /**
+   * 最小间隔 gating 的**单调时钟**（注入便于测试给可控递增值）：单一注入口、只自身作差、绝不与 now/Date.now
+   * 混算或持久化。默认 performance.now()（备选 hrtime）。（pacing-floor-config-min-interval 设计 §3.2）
+   */
+  monoNow?: () => number;
+  /**
    * 详情页最小停留下限区间（毫秒）——缺指令 / 断连兜底用，**非零延迟**。
-   * 默认 {min:1200,max:2600}；可由 session.budget.pacing.dwellFloorMs 覆盖。
+   * 默认 {min:2500,max:5000}；由 welcome pacing 快照的 detail_dwell 区间下发（复活死参数、设计 §4.3）。
    */
   dwellFloorMs?: { min: number; max: number };
+  /**
+   * welcome pacing 快照的每类操作 floor 区间（构造期初值；重连经 applyPacingSnapshot 刷新）。
+   * 缺该 op → effectiveFloor 逐字段回落 BUILTIN_FLOOR。（设计 §4.2/§4.3）
+   */
+  opFloorsMs?: Partial<Record<PacingOp, PacingFloorPayload>>;
+  /** welcome pacing 快照的风控档标量（边缘乘算；默认 1.0≡无 tempo）。（设计 §7-tempo） */
+  tempo?: number;
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -152,6 +166,67 @@ function makeDwellFloorTiming(range: { min: number; max: number }): TimingConfig
   const lo = Math.max(1, Math.min(range.min, range.max));
   const hi = Math.max(lo, Math.max(range.min, range.max));
   return { mu: Math.log(Math.sqrt(lo * hi)), sigma: 0.25, min: lo, max: hi };
+}
+
+// ======== 最小间隔 gating（pacing-floor-config-min-interval，设计 §3/§4.3/§5） ========
+//
+// 语义：边缘记「上次操作完成时刻」(lastActionEndAt，单调时钟)；下一动作到达时够久（elapsed≥floor）
+// 立即执行、不累加，不够只补差额（remaining = max(0, floor−elapsed)）。云端往返被 elapsed 天然吸收。
+//
+// 三道夹之第三道（边缘二次夹）：即便云端读出口/facade 失守，floor 离开边缘前恒被夹进
+// [OP_MIN_FLOOR[op], CAP_MS] —— 配置只能抬高延迟、**永远抬不穿非零防呆下限**（绝不零延迟红线）。
+
+/** 每类操作的内置默认区间（welcome 缺该 op 时逐字段回落，量级=现役预设/DWELL_FLOOR_MS，天然非零）。 */
+const BUILTIN_FLOOR: Record<PacingOp, PacingFloorPayload> = {
+  action: { minMs: 1500, maxMs: 4000 },
+  scroll: { minMs: 500, maxMs: 1500 },
+  card_gap: { minMs: 3000, maxMs: 7000 },
+  detail_dwell: { minMs: 2500, maxMs: 5000 },
+};
+
+/** 每类操作的防呆下限（= 边缘二次夹的下界，> 0）：有效 floor 恒 ≥ 此值，杜绝零延迟。 */
+const OP_MIN_FLOOR: Record<PacingOp, number> = {
+  action: 800,
+  scroll: 300,
+  card_gap: 1000,
+  detail_dwell: 1000,
+};
+
+/** 每类操作的采样分散度（内置常量、不入库；较现役预设略放宽以稀释左尾、配合反射采样消硬左壁）。 */
+const BUILTIN_SIGMA: Record<PacingOp, number> = {
+  action: 0.35,
+  scroll: 0.3,
+  card_gap: 0.45,
+  detail_dwell: 0.25,
+};
+
+/**
+ * 全局小上限（结构上 ≪ 云端 idle 看门狗下限 IDLE_NUDGE_MIN_MS=200_000）：任何有效 floor 恒 ≤ 15s，
+ * 单次前台 gate sleep 永不逼近看门狗阈值 → 最小间隔与断连兜底/idle 看门狗结构性不冲突（设计 §4.3）。
+ */
+const CAP_MS = 15_000;
+
+/** 正数校验：welcome 逐字段回落用（非有限正数 → 回落内置默认，绝不回落 0/负数）。 */
+function validPositiveMs(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+/** 把协议 {minMs,maxMs} 区间转成 dwell 采样用的 {min,max}；任一字段非正数则整体判无效返回 undefined。 */
+function floorRangeToMinMax(f: PacingFloorPayload | undefined): { min: number; max: number } | undefined {
+  if (!f) return undefined;
+  const lo = validPositiveMs(f.minMs);
+  const hi = validPositiveMs(f.maxMs);
+  if (lo == null || hi == null) return undefined;
+  return { min: lo, max: hi };
+}
+
+/** 单调时钟默认实现：优先 performance.now()，备选 process.hrtime.bigint()/1e6（只自身作差、绝不持久化/跨基准）。 */
+function defaultMonoNow(): number {
+  const perf = (globalThis as { performance?: { now?: () => number } }).performance;
+  if (perf && typeof perf.now === 'function') return perf.now();
+  const hr = (globalThis as { process?: { hrtime?: { bigint?: () => bigint } } }).process?.hrtime?.bigint;
+  if (typeof hr === 'function') return Number(hr()) / 1e6;
+  return Date.now();
 }
 
 const DEFAULT_EXPLORE_URL = 'https://www.xiaohongshu.com/explore';
@@ -194,12 +269,25 @@ export class BrowseSession {
   private readonly rhythmTotal: number;
   private readonly logger: (msg: string) => void;
   private readonly now: () => number;
+  /** 最小间隔的单调时钟（单一实现·单一注入口·只自身作差）。 */
+  private readonly monoNow: () => number;
   /** 详情页停留下限配置（lognormal，落在 [min,max]） */
   private dwellFloorTiming: TimingConfig;
-  /** 当前详情页打开时刻（单调时钟）；无打开的详情页时为 null。 */
+  /** 当前详情页打开时刻（墙钟 this.now）；无打开的详情页时为 null。 */
   private noteOpenedAt: number | null = null;
-  /** 当前 feed 卡片批次的到达时刻（单调时钟）；feed-scroll-card-floor 的停留锚点，每次上报刷新。 */
+  /** 当前 feed 卡片批次的到达时刻（墙钟 this.now）；feed-scroll-card-floor 的停留锚点，每次上报刷新。 */
   private feedCardsArrivedAt: number | null = null;
+  /**
+   * 最小间隔单锚点 = 上次操作完成时刻（monoNow 单调值）；null=首操作/重连后，跳过间隔。
+   * 会话内内存、单进程；重启/重连即 null。绝不持久化、绝不与墙钟作差。（设计 §3.2）
+   */
+  private lastActionEndAt: number | null = null;
+  /** welcome pacing 快照的每类操作 floor 区间（构造/重连注入；缺 op 回落 BUILTIN_FLOOR）。 */
+  private opFloorCfg: Partial<Record<PacingOp, PacingFloorPayload>> = {};
+  /** welcome pacing 快照的风控档标量（边缘乘算；1.0≡无 tempo）。 */
+  private tempo = 1.0;
+  /** 可打断 sleep 的唤醒句柄集合（stopRequested / 终止命令到达时全部提前 resolve）。 */
+  private readonly sleepWakers = new Set<() => void>();
   private processed = 0;
 
   /** 命令队列：外部通过 onCloudCommand() 推入，loop() 消费 */
@@ -227,7 +315,30 @@ export class BrowseSession {
     this.rhythmTotal = options.rhythmTotal ?? DEFAULT_RHYTHM_TOTAL;
     this.logger = options.logger ?? ((m) => console.log(m));
     this.now = options.now ?? Date.now;
-    this.dwellFloorTiming = makeDwellFloorTiming(options.dwellFloorMs ?? DEFAULT_DWELL_FLOOR_MS);
+    this.monoNow = options.monoNow ?? defaultMonoNow;
+    // 详情页停留下限：优先显式 dwellFloorMs（main.ts 由 welcome detail_dwell 区间塞入），
+    // 否则回落 opFloorsMs.detail_dwell，再否则内置默认。
+    const detailDwell = options.dwellFloorMs
+      ?? floorRangeToMinMax(options.opFloorsMs?.detail_dwell)
+      ?? DEFAULT_DWELL_FLOOR_MS;
+    this.dwellFloorTiming = makeDwellFloorTiming(detailDwell);
+    this.opFloorCfg = { ...(options.opFloorsMs ?? {}) };
+    if (validPositiveMs(options.tempo)) this.tempo = options.tempo!;
+  }
+
+  /**
+   * 重连后重注入 welcome pacing 快照（设计 §4.3 最严重缺口修复）：BrowseSession 只构造一次，
+   * identity 翻转重连复用同一对象，若不重注入则连接级快照退化成进程级、风控升级到不了边缘节奏层。
+   * `reestablishIdentity` 在 connect() 之后、start() 之前调用本方法。逐字段回落，缺省不改现值。
+   */
+  applyPacingSnapshot(opFloorsMs?: Partial<Record<PacingOp, PacingFloorPayload>>, tempo?: number): void {
+    if (opFloorsMs) this.opFloorCfg = { ...opFloorsMs };
+    if (validPositiveMs(tempo)) this.tempo = tempo!;
+    const dd = floorRangeToMinMax(opFloorsMs?.detail_dwell);
+    if (dd) this.dwellFloorTiming = makeDwellFloorTiming(dd);
+    this.logger(
+      `[browse] 应用 pacing 快照：tempo=${this.tempo} ops=${Object.keys(this.opFloorCfg).join(',') || '(空,用内置)'}`,
+    );
   }
 
   /**
@@ -289,6 +400,84 @@ export class BrowseSession {
   }
 
   /**
+   * 某类操作的**有效 floor**（毫秒，恒 > 0）：配置区间**反射采样** × tempo ÷ fatigue，夹进
+   * [OP_MIN_FLOOR[op], CAP_MS]（边缘二次夹=第三道）。每次现采样一次（勿在循环里重采）。
+   * - 逐字段回落：cfg 缺 / 非正 → BUILTIN_FLOOR[op]；
+   * - tempo 乘算（风控档，≥1 放大延迟）、fatigue 用 applySpeedFactor 除算（与 humanPause 同向：系数>1=更快）；
+   * - clamp 下界 OP_MIN_FLOOR[op] > 0 → **配置只能抬高延迟、抬不穿非零下限**（绝不零延迟红线）。
+   */
+  private effectiveFloor(op: PacingOp): number {
+    const cfg = this.opFloorCfg[op];
+    const minMs = validPositiveMs(cfg?.minMs) ?? BUILTIN_FLOOR[op].minMs;
+    const maxMs = validPositiveMs(cfg?.maxMs) ?? BUILTIN_FLOOR[op].maxMs;
+    const raw = sampleReflect(minMs, maxMs, BUILTIN_SIGMA[op], this.random);
+    const withTempo = raw * this.tempo;
+    const withFatigue = applySpeedFactor(withTempo, this.rhythm.getSpeedFactor(this.progress()));
+    const clamped = Math.min(CAP_MS, Math.max(OP_MIN_FLOOR[op], withFatigue));
+    return Math.round(clamped);
+  }
+
+  /**
+   * 最小间隔待补差额（毫秒）：设计 ensureMinInterval 抽象的通用式（锚 lastActionEndAt → elapsed → 只补差额）。
+   * **只计算、不自 sleep**——sleep 由 gateBeforeAction 与 think 取 `max` 后单次执行，杜绝叠加（设计 §3.2 不变量 6）。
+   * - 无锚点（首操作 / 重连后）→ 0（首操作由会话起点初始扫描延迟兜住）；
+   * - elapsed 含云端 RTT / 决策 / LLM 时间 → 天然被吸收，云端慢回（elapsed≥floor）返 0、不额外等、不塌零。
+   */
+  private ensureMinInterval(op: PacingOp): number {
+    if (this.lastActionEndAt == null) return 0;
+    const floor = this.effectiveFloor(op);
+    const elapsed = this.monoNow() - this.lastActionEndAt;
+    return Math.max(0, floor - elapsed);
+  }
+
+  /**
+   * 动作前统一闸（替代散落的 thinkBefore + 引导性 humanPause）：折 think（云端犹豫）与最小间隔，
+   * 同一「now→执行本动作」跨度**只比一次、用 `max` 不用 `+`**（设计 §3.1）。
+   * @returns 是否应继续执行本动作：等待期间被 stop / 终止命令唤醒则返回 false（醒后立即检查、令调用方中止）。
+   */
+  private async gateBeforeAction(op: PacingOp, thinkMs?: number): Promise<boolean> {
+    const think = thinkMs && thinkMs > 0 ? jitterAround(thinkMs, 0.25, this.random) : 0;
+    const remaining = this.ensureMinInterval(op);
+    const wait = Math.max(remaining, think); // ← max，绝不相加
+    if (wait > 0) await this.sleepInterruptible(wait);
+    return !this.stopRequested && !this.closing && !this.terminatePending();
+  }
+
+  /** 记账：把上次操作完成时刻推进到当前单调时刻。放在命令原子动作 + 功能性 settle + uplink 之后（设计 §4.3）。 */
+  private markActionEnd(): void {
+    this.lastActionEndAt = this.monoNow();
+  }
+
+  /**
+   * 可打断 sleep（替代裸 setTimeout）：正常到时或被 wakeInterruptibleSleeps() 提前唤醒（stopRequested /
+   * 终止命令到达）即 resolve。用注入的 this.sleep 计时（测试可控），故 gate 等待时长仍被 sleep 桩捕获。
+   * 不复活 closing 终态（唤醒只 resolve 本 sleep，重启由 onCloudCommand 的 !closing 闸把关）。
+   */
+  private sleepInterruptible(ms: number): Promise<void> {
+    if (ms <= 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        this.sleepWakers.delete(waker);
+        resolve();
+      };
+      const waker = (): void => finish();
+      this.sleepWakers.add(waker);
+      void this.sleep(ms).then(finish); // 到时自然 resolve；唤醒时 finish 已幂等，多余定时器无害空转
+    });
+  }
+
+  /** 唤醒所有正在等待的可打断 sleep（stopForReason / 终止命令入队时调用）。 */
+  private wakeInterruptibleSleeps(): void {
+    if (this.sleepWakers.size === 0) return;
+    const wakers = [...this.sleepWakers];
+    this.sleepWakers.clear();
+    for (const w of wakers) w();
+  }
+
+  /**
    * 拟人化停顿：按预设分布采样，再按会话进度的疲劳曲线缩放，最后 sleep。
    */
   private async humanPause(timing: TimingConfig): Promise<void> {
@@ -344,6 +533,7 @@ export class BrowseSession {
   /** 请求停止并附带理由（local_stop / cdp_unrecoverable）。唤醒可能正在等待命令的 loop。 */
   private stopForReason(reason: string): void {
     this.stopRequested = true;
+    this.wakeInterruptibleSleeps(); // 打断可能正卡在 gate 最小间隔等待里的循环，让其立即中止本动作、退出
     if (this.commandResolver) {
       const resolve = this.commandResolver;
       this.commandResolver = null;
@@ -364,6 +554,8 @@ export class BrowseSession {
   private onCdpReconnected(): void {
     // 重连后页面可能已变（回 feed / 重载）：清详情页 dwell 计时，避免下次返回误判已达标。
     this.noteOpenedAt = null;
+    // 同处清最小间隔锚点：重连页面已变、间隔重置，首操作跳过间隔（设计 §4.3）。
+    this.lastActionEndAt = null;
     this.logger('[browse] CDP 已重连，准备续跑');
     const waiters = this.cdpReconnectWaiters;
     this.cdpReconnectWaiters = [];
@@ -428,6 +620,9 @@ export class BrowseSession {
       resolve(env);
     } else {
       this.commandQueue.push(env);
+      // 循环正卡在某命令处理中（含 gate 最小间隔等待）：仅当排入的是**终止命令**才唤醒 gate 提前中止本动作
+      // （让 loop 尽快取到 session.end 停下）。普通命令绝不唤醒——否则 gate 会在 floor 未满时提前放行 → 破坏最小间隔。
+      if (env.type === 'session.end') this.wakeInterruptibleSleeps();
     }
   }
 
@@ -536,6 +731,10 @@ export class BrowseSession {
       if (this.stopRequested) return;
       try {
         await this.executeCommand(cmd);
+        // 记账：命令的原子动作 + 功能性 settle + uplink 已完成，把「上次操作完成时刻」推进到现在，
+        // 让下一动作的最小间隔从此刻起算、与云端 idle 看门狗量同一段 gap（设计 §4.3）。
+        // session.end 非操作、stopRequested 时本命令已被 gate 中止 → 不记账。
+        if (!this.stopRequested && cmd.type !== 'session.end') this.markActionEnd();
       } catch (err) {
         // CDP 断线：不当业务失败，等有界重连；成功→续跑重报，耗尽→已请求停止退出。
         if (err instanceof CdpDisconnectedError) {
@@ -597,7 +796,7 @@ export class BrowseSession {
       case 'note.open': {
         const payload = env.payload as NoteOpenPayload;
         this.logger(`[browse] 命令: note.open (index=${payload.index}, noteId=${payload.noteId ?? '?'})`);
-        await this.thinkBefore(payload.thinkMs); // 决定打开前的犹豫（time directive）
+        if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 打开前犹豫（max，非累加）
         await this.openAndReportNote(payload.index ?? 0, payload.noteId);
         break;
       }
@@ -612,35 +811,35 @@ export class BrowseSession {
       case 'interaction.like': {
         const payload = env.payload as InteractionLikePayload;
         this.logger(`[browse] 命令: interaction.like (noteId=${payload.noteId})`);
-        await this.thinkBefore(payload.thinkMs); // 点赞前犹豫（time directive）
+        if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 点赞前犹豫（max）
         await this.executeLikeOrCollect('like');
         break;
       }
       case 'interaction.collect': {
         const payload = env.payload as InteractionCollectPayload;
         this.logger(`[browse] 命令: interaction.collect (noteId=${payload.noteId})`);
-        await this.thinkBefore(payload.thinkMs); // 收藏前犹豫（time directive）
+        if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 收藏前犹豫（max）
         await this.executeLikeOrCollect('collect');
         break;
       }
       case 'interaction.follow': {
         const payload = env.payload as InteractionFollowPayload;
         this.logger(`[browse] 命令: interaction.follow (authorId=${payload.authorId ?? '?'})`);
-        await this.thinkBefore(payload.thinkMs); // 关注前犹豫（time directive）
+        if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 关注前犹豫（max）
         await this.executeFollow();
         break;
       }
       case 'interaction.comment': {
         const payload = env.payload as InteractionCommentPayload;
         this.logger(`[browse] 命令: interaction.comment (noteId=${payload.noteId})`);
-        await this.thinkBefore(payload.thinkMs); // 发评论前犹豫（time directive）
+        if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 发评论前犹豫（max）
         await this.executeComment(payload.text, payload.groupChatCode);
         break;
       }
       case 'interaction.like_comment': {
         const payload = env.payload as InteractionLikeCommentPayload;
         this.logger(`[browse] 命令: interaction.like_comment (anchor=${payload.commentAnchorId})`);
-        await this.thinkBefore(payload.thinkMs); // 点评论赞前犹豫（time directive；边缘只叠抖动，不另加停留）
+        if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 点评论赞前犹豫（max）
         await this.executeLikeComment(payload.commentAnchorId);
         break;
       }
@@ -692,7 +891,7 @@ export class BrowseSession {
         const payload = env.payload as NoteBrowseImagesPayload;
         const count = payload.count ?? 3;
         this.logger(`[browse] 命令: note.browse_images (noteId=${payload.noteId}, count=${count})`);
-        await this.thinkBefore(payload.thinkMs);
+        if (!(await this.gateBeforeAction('card_gap', payload.thinkMs))) break; // 翻图前最小间隔（card_gap 档）
         await this.browseNoteImages(payload.noteId, count);
         break;
       }
@@ -700,14 +899,14 @@ export class BrowseSession {
         const payload = env.payload as NoteScrollCommentsPayload;
         const count = payload.count ?? 3;
         this.logger(`[browse] 命令: note.scroll_comments (noteId=${payload.noteId}, count=${count})`);
-        await this.thinkBefore(payload.thinkMs);
+        if (!(await this.gateBeforeAction('scroll', payload.thinkMs))) break; // 滚评论前最小间隔（scroll 档）
         await this.scrollNoteComments(payload.noteId, count);
         break;
       }
       case 'profile.open': {
         const payload = env.payload as ProfileOpenPayload;
         this.logger(`[browse] 命令: profile.open (authorId=${payload.authorId ?? '?'})`);
-        await this.thinkBefore(payload.thinkMs);
+        if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 开主页前最小间隔（action 档）
         await this.openAuthorProfile(payload.authorId, payload.direct);
         break;
       }
@@ -1095,10 +1294,8 @@ export class BrowseSession {
         this.deps.client.reportActionCompleted?.({ action, ok: false, reason });
         return;
       }
-      // 点击前只留一个轻停顿兼作验证码复检窗（scroll 档，中位 ~0.8s）：命令派发时已由 thinkBefore
-      // 下发过云端中心犹豫，这里不再叠一整个 action 档（中位 2.5s）重复停顿——节奏收口云端。
-      await this.humanPause(TIMING_PRESETS.scroll);
-      // 提交前 fresh 复检：humanPause 窗口里若弹出验证码，放弃点击（避免打进风控墙）。
+      // 点击前 fresh 复检验证码（fail-CLOSED）：引导性停顿已上移到命令入口的 gateBeforeAction（最小间隔 + 云端犹豫，
+      // 取 max 不累加），此处不再叠一段停顿——避免「操作后兜底累加」（设计 §3.3）。若当前有验证码/未知阻断浮层则放弃点击。
       if (await this.captchaPresentFresh()) {
         this.logger(`[browse] ${action} 提交前复检到验证码/未知阻断弹窗，放弃点击`);
         this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'blocked_by_captcha' });
@@ -1164,10 +1361,7 @@ export class BrowseSession {
         this.deps.client.reportActionCompleted?.({ action, ok: false, reason });
         return;
       }
-      // 点击前只留一个轻停顿兼作验证码复检窗（scroll 档，中位 ~0.8s）：命令派发已由 thinkBefore
-      // 下发过云端中心犹豫，不再叠 action 档重复停顿——节奏收口云端。
-      await this.humanPause(TIMING_PRESETS.scroll);
-      // 提交前 fresh 复检：humanPause 窗口里若弹出验证码，放弃点击（避免打进风控墙）。
+      // 点击前 fresh 复检验证码（fail-CLOSED）：引导性停顿已上移到命令入口 gateBeforeAction（max 非累加），此处不再叠停顿。
       if (await this.captchaPresentFresh()) {
         this.logger('[browse] comment_like 提交前复检到验证码/未知阻断弹窗，放弃点击');
         this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'blocked_by_captcha' });
@@ -1288,8 +1482,8 @@ export class BrowseSession {
         await insertText(this.deps.cdp, `\n${code}`);
         this.logger(`[browse] comment 群聊引流码整段插入（${code.length} 字，绕过逐字补全）`);
       }
-      // 输入完到发送的「回读一眼」轻停顿兼验证码复检窗（scroll 档，中位 ~0.8s）；命令派发已下发过云端犹豫。
-      await this.humanPause(TIMING_PRESETS.scroll);
+      // 注：敲完正文到发送之间的「子步骤微停顿」由上面 3) 的逐字输入 / 3b) 的粘码前 sleep(300) 承载（保留）；
+      // 引导性停顿已上移到命令入口 gateBeforeAction（最小间隔，max 非累加），此处不再叠一段——避免操作后兜底累加（设计 §3.3）。
 
       // 4) 提交前 fresh 复检验证码（最高风险写互动，务必复检）
       if (await this.captchaPresentFresh()) {
@@ -1417,9 +1611,7 @@ export class BrowseSession {
         this.deps.client.reportActionCompleted?.({ action: 'follow', ok: false, reason });
         return;
       }
-      // 点击前轻停顿兼验证码复检窗（scroll 档，中位 ~0.8s）；命令派发已由 thinkBefore 下发过云端犹豫，不再叠 action 档。
-      await this.humanPause(TIMING_PRESETS.scroll);
-      // 提交前 fresh 复检：避免在验证码窗口里点关注。
+      // 点击前 fresh 复检验证码（fail-CLOSED）：引导性停顿已上移到命令入口 gateBeforeAction（max 非累加），此处不再叠停顿。
       if (await this.captchaPresentFresh()) {
         this.logger('[browse] follow 提交前复检到验证码/未知阻断弹窗，放弃点击');
         this.deps.client.reportActionCompleted?.({ action: 'follow', ok: false, reason: 'blocked_by_captcha' });
