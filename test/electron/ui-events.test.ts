@@ -12,7 +12,7 @@ interface UiEvent {
   sentence?: string;
   presence?: string;
   loopStage?: string | null;
-  statsDelta?: { views?: number; likes?: number; collects?: number; comments?: number };
+  statsDelta?: { views?: number; likes?: number; collects?: number; comments?: number; follows?: number; publishes?: number };
   publish?: { state: string; title?: string; code?: string };
   account?: { id: string; name?: string };
 }
@@ -95,6 +95,7 @@ test('✓ 收藏成功 / ✓ 评论发布成功 / ✓ 评论点赞成功 → 各
   assert.deepEqual(s.push('[browse] ✓ 收藏成功 (1, 2)')?.statsDelta, { collects: 1 });
   assert.deepEqual(s.push('[browse] ✓ 评论发布成功（编辑器清空 + 自己的评论行出现，耗时 3s）')?.statsDelta, { comments: 1 });
   assert.deepEqual(s.push('[browse] ✓ 评论点赞成功 (anchor=c1)')?.statsDelta, { likes: 1 });
+  assert.deepEqual(s.push('[browse] ✓ 关注成功')?.statsDelta, { follows: 1 });
 });
 
 test('红线：失败行绝不计数（旧 substring 匹配的已知误计全部修正）', () => {
@@ -149,11 +150,32 @@ test('未识别行 → null（只进开发者详情）', () => {
 });
 
 test('回归：局部计数补丁绝不清空其他计数（今日小结空数字 bug）', () => {
-  const prev = { views: 3, likes: 5, collects: 2, comments: 1 };
-  assert.deepEqual(mergeStats(prev, { views: 4 }), { views: 4, likes: 5, collects: 2, comments: 1 });
+  const prev = { views: 3, likes: 5, collects: 2, comments: 1, follows: 4, publishes: 1 };
+  assert.deepEqual(mergeStats(prev, { views: 4 }), {
+    views: 4,
+    likes: 5,
+    collects: 2,
+    comments: 1,
+    follows: 4,
+    publishes: 1,
+  });
   // 缺字段 / 非法值一律兜 0，绝不把 undefined 漏进渲染层
-  assert.deepEqual(mergeStats(null, { likes: 1 }), { views: 0, likes: 1, collects: 0, comments: 0 });
-  assert.deepEqual(mergeStats({ views: Number.NaN }, null), { views: 0, likes: 0, collects: 0, comments: 0 });
+  assert.deepEqual(mergeStats(null, { likes: 1 }), {
+    views: 0,
+    likes: 1,
+    collects: 0,
+    comments: 0,
+    follows: 0,
+    publishes: 0,
+  });
+  assert.deepEqual(mergeStats({ views: Number.NaN }, null), {
+    views: 0,
+    likes: 0,
+    collects: 0,
+    comments: 0,
+    follows: 0,
+    publishes: 0,
+  });
 });
 
 test('结构化 lastPublish 行（云端快照回填）→ 透传并截断标题', () => {

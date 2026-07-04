@@ -27,7 +27,7 @@ function makeStatus(over: Record<string, unknown> = {}) {
     session: 'running',
     risk: 'normal',
     edge: 'running',
-    stats: { views: 3, likes: 1, collects: 0, comments: 0 },
+    stats: { views: 3, likes: 1, collects: 0, comments: 0, follows: 0, publishes: 0 },
     provider: 'adspower',
     lastMessage: '',
     updatedAt: new Date().toISOString(),
@@ -238,8 +238,33 @@ test('回归：今日小结数字永不为空（缺字段兜 0 + 零值弱化）
   assert.equal($(w, '#likes').textContent, '0');
   assert.equal($(w, '#collects').textContent, '0');
   assert.equal($(w, '#comments').textContent, '0');
+  assert.equal($(w, '#follows').textContent, '0');
+  assert.equal($(w, '#publishes').textContent, '0');
   assert.ok($(w, '#likes').classList.contains('zero'), '零值应弱化显示');
   assert.ok(!$(w, '#views').classList.contains('zero'), '非零值不弱化');
+});
+
+test('今日小结：收到账号 dailyUsage 后优先显示账号今日，并标记已到上限项', async () => {
+  const { w, pushStatus } = await boot();
+  pushStatus(makeStatus({
+    stats: { views: 999, likes: 999, collects: 999, comments: 999, follows: 999, publishes: 999 },
+    dailyUsage: {
+      asOf: 1730000001000,
+      quotaLevel: 'normal',
+      totals: { view: 10, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
+      quotas: { view: 150, like: 3, collect: 25, comment: 8, follow: 15, publish: 1 },
+      saturated: ['like', 'publish'],
+    },
+  }));
+  assert.match($(w, '#usage-source').textContent ?? '', /账号今日/);
+  assert.match($(w, '#usage-source').textContent ?? '', /标准档/);
+  assert.equal($(w, '#views').textContent, '10');
+  assert.equal($(w, '#likes').textContent, '3');
+  assert.equal($(w, '#follows').textContent, '2');
+  assert.equal($(w, '#publishes').textContent, '1');
+  assert.equal($(w, '#likes-cap').textContent, '/3');
+  assert.ok($(w, '#likes').closest('.kpi')?.classList.contains('saturated'));
+  assert.ok($(w, '#publishes').closest('.kpi')?.classList.contains('saturated'));
 });
 
 test('账号无昵称 → 标题带显示「账号 …尾4位」，绝不摆长 id', async () => {

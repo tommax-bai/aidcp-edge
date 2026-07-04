@@ -17,9 +17,36 @@ import type {
 } from '../comm/protocol.js';
 
 export const UI_EVENT_PREFIX = '[ui-event]';
+const DAILY_USAGE_ACTIONS = ['view', 'like', 'collect', 'comment', 'follow', 'publish'] as const;
 
 function line(obj: Record<string, unknown>): string {
   return `${UI_EVENT_PREFIX} ${JSON.stringify(obj)}`;
+}
+
+function sanitizeCounts(input: Record<string, unknown> | undefined): Record<string, number> {
+  const output: Record<string, number> = {};
+  if (!input) return output;
+  for (const action of DAILY_USAGE_ACTIONS) {
+    const value = input[action];
+    if (typeof value === 'number' && Number.isFinite(value)) output[action] = Math.max(0, Math.floor(value));
+  }
+  return output;
+}
+
+function sanitizeDailyUsage(input: UiSnapshotPayload['dailyUsage']): Record<string, unknown> | null {
+  if (!input || !Number.isFinite(input.asOf)) return null;
+  const totals = sanitizeCounts(input.totals as Record<string, unknown> | undefined);
+  if (Object.keys(totals).length === 0) return null;
+  const quotas = sanitizeCounts(input.quotas as Record<string, unknown> | undefined);
+  const dailyUsage: Record<string, unknown> = { asOf: input.asOf, totals };
+  if (input.quotaLevel) dailyUsage.quotaLevel = input.quotaLevel;
+  if (Object.keys(quotas).length > 0) dailyUsage.quotas = quotas;
+  if (Array.isArray(input.saturated)) {
+    dailyUsage.saturated = input.saturated.filter((action) =>
+      (DAILY_USAGE_ACTIONS as readonly string[]).includes(action),
+    );
+  }
+  return dailyUsage;
 }
 
 /** 界面「编号」展示形态（与云端飞书审批卡「编号」字段同源：发布记录 id）。 */
@@ -90,5 +117,7 @@ export function uiSnapshotToLines(p: UiSnapshotPayload): string[] {
     if (typeof p.publish.code === 'string' && p.publish.code) publish.code = p.publish.code;
     lines.push(line({ kind: 'publish', publish }));
   }
+  const dailyUsage = sanitizeDailyUsage(p.dailyUsage);
+  if (dailyUsage) lines.push(line({ kind: 'dailyUsage', dailyUsage }));
   return lines;
 }

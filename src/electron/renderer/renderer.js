@@ -13,7 +13,26 @@ const fields = {
   likes: document.querySelector('#likes'),
   collects: document.querySelector('#collects'),
   comments: document.querySelector('#comments'),
+  follows: document.querySelector('#follows'),
+  publishes: document.querySelector('#publishes'),
+  usageSource: document.querySelector('#usage-source'),
   updatedAt: document.querySelector('#updated-at'),
+  usageCaps: {
+    view: document.querySelector('#views-cap'),
+    like: document.querySelector('#likes-cap'),
+    collect: document.querySelector('#collects-cap'),
+    comment: document.querySelector('#comments-cap'),
+    follow: document.querySelector('#follows-cap'),
+    publish: document.querySelector('#publishes-cap'),
+  },
+  usageBars: {
+    view: document.querySelector('#views-bar'),
+    like: document.querySelector('#likes-bar'),
+    collect: document.querySelector('#collects-bar'),
+    comment: document.querySelector('#comments-bar'),
+    follow: document.querySelector('#follows-bar'),
+    publish: document.querySelector('#publishes-bar'),
+  },
   lastMessage: document.querySelector('#last-message'),
   sessionFab: document.querySelector('#session-fab'),
   relogin: document.querySelector('#relogin'),
@@ -128,11 +147,80 @@ function setBadge(element, field, value) {
   element.className = `badge ${value}`;
 }
 
-// 今日小结计数：数字永不为空（undefined/null → 0）；零值弱化显示，避免一排死零抢视觉。
-function renderKpi(el, value) {
-  const n = Number(value) || 0;
-  el.textContent = n;
-  el.classList.toggle('zero', n === 0);
+const USAGE_ITEMS = [
+  { action: 'view', stat: 'views', value: fields.views, label: '浏览' },
+  { action: 'like', stat: 'likes', value: fields.likes, label: '点赞' },
+  { action: 'collect', stat: 'collects', value: fields.collects, label: '收藏' },
+  { action: 'comment', stat: 'comments', value: fields.comments, label: '评论' },
+  { action: 'follow', stat: 'follows', value: fields.follows, label: '关注' },
+  { action: 'publish', stat: 'publishes', value: fields.publishes, label: '发帖' },
+];
+
+const QUOTA_LEVEL_LABELS = {
+  conservative: '保守档',
+  normal: '标准档',
+  aggressive: '进取档',
+};
+
+function count(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
+function parseUsageTime(value, fallback) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const parsed = Date.parse(value || '');
+  if (Number.isFinite(parsed)) return parsed;
+  return Date.parse(fallback || '') || Date.now();
+}
+
+function usageView(status) {
+  const daily = status.dailyUsage;
+  const hasDaily = Boolean(daily && daily.totals && typeof daily.totals === 'object');
+  const stats = status.stats || {};
+  const totals = {};
+  for (const item of USAGE_ITEMS) {
+    totals[item.action] = hasDaily ? count(daily.totals[item.action]) : count(stats[item.stat]);
+  }
+  const quotas = daily && daily.quotas && typeof daily.quotas === 'object' ? daily.quotas : null;
+  return {
+    hasDaily,
+    quotaLevel: daily?.quotaLevel,
+    asOf: hasDaily ? parseUsageTime(daily.asOf, status.updatedAt) : parseUsageTime(status.updatedAt, status.updatedAt),
+    totals,
+    quotas,
+    saturated: new Set(Array.isArray(daily?.saturated) ? daily.saturated : []),
+  };
+}
+
+function renderUsageItem(item, usage) {
+  const used = count(usage.totals[item.action]);
+  const cap = usage.quotas && typeof usage.quotas[item.action] === 'number' ? count(usage.quotas[item.action]) : null;
+  const card = item.value.closest('.kpi');
+  const capEl = fields.usageCaps[item.action];
+  const barEl = fields.usageBars[item.action];
+  const hasCap = cap !== null;
+  const saturated = hasCap && (usage.saturated.has(item.action) || used >= cap);
+  const ratio = hasCap ? (cap > 0 ? Math.min(1, used / cap) : 1) : 0;
+
+  item.value.textContent = used;
+  item.value.classList.toggle('zero', used === 0);
+  if (capEl) capEl.textContent = hasCap ? `/${cap}` : '';
+  if (barEl) barEl.style.width = hasCap ? `${Math.round(ratio * 100)}%` : '0%';
+  if (card) {
+    card.classList.toggle('has-limit', hasCap);
+    card.classList.toggle('near', hasCap && !saturated && ratio >= 0.8);
+    card.classList.toggle('saturated', saturated);
+    card.title = hasCap ? `${item.label} ${used}/${cap}${saturated ? '，今日已到上限' : ''}` : `${item.label} ${used}`;
+  }
+}
+
+function renderUsageSummary(status) {
+  const usage = usageView(status);
+  fields.usageSource.textContent = usage.hasDaily
+    ? `账号今日${usage.quotaLevel ? ` · ${QUOTA_LEVEL_LABELS[usage.quotaLevel] || usage.quotaLevel}` : ''}`
+    : '本机实时';
+  for (const item of USAGE_ITEMS) renderUsageItem(item, usage);
+  fields.updatedAt.textContent = new Date(usage.asOf).toLocaleTimeString();
 }
 
 // ─── 开发者详情：原始日志（滚动保留 + 连续去重）───
@@ -436,11 +524,7 @@ function render(status) {
   setBadge(fields.session, 'session', status.session);
   setBadge(fields.risk, 'risk', status.risk);
   setBadge(fields.edge, 'edge', status.edge);
-  renderKpi(fields.views, status.stats.views);
-  renderKpi(fields.likes, status.stats.likes);
-  renderKpi(fields.collects, status.stats.collects);
-  renderKpi(fields.comments, status.stats.comments); // 各计数一律 ?? 0 兜底（旧形状 / 部分补丁都不出空数字）
-  fields.updatedAt.textContent = new Date(status.updatedAt).toLocaleTimeString();
+  renderUsageSummary(status); // 各计数一律 ?? 0 兜底（旧形状 / 部分补丁都不出空数字）
   addLogEntry(status.lastMessage);
   renderTitlebar(status);
   renderPresence(status, now);

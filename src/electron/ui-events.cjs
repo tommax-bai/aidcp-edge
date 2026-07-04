@@ -181,7 +181,13 @@ function createUiEventStream() {
     ],
     [
       /✓ 关注成功/,
-      () => ({ kind: 'activity', type: 'follow', sentence: '关注了这位作者', loopStage: 'interact' }),
+      () => ({
+        kind: 'activity',
+        type: 'follow',
+        sentence: '关注了这位作者',
+        loopStage: 'interact',
+        statsDelta: { follows: 1 },
+      }),
     ],
     [
       /浏览了 (\d+)\/(\d+) 张图片/,
@@ -278,6 +284,8 @@ function mergeStats(prev, patch) {
     likes: Number(next.likes) || 0,
     collects: Number(next.collects) || 0,
     comments: Number(next.comments) || 0,
+    follows: Number(next.follows) || 0,
+    publishes: Number(next.publishes) || 0,
   };
 }
 

@@ -170,7 +170,10 @@ const status = {
     likes: 0,
     collects: 0,
     comments: 0,
+    follows: 0,
+    publishes: 0,
   },
+  dailyUsage: null,
   risk: 'normal',
   edge: 'stopped',
   lastMessage: '边缘进程尚未运行。',
@@ -230,6 +233,87 @@ function applyOverlayTone(risk) {
   } catch {
     /* overlay 未启用（如 env 强制默认框）时忽略 */
   }
+}
+
+const DAILY_USAGE_ACTIONS = ['view', 'like', 'collect', 'comment', 'follow', 'publish'];
+
+function cleanCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
+function cleanRequiredCounts(input) {
+  const source = input && typeof input === 'object' ? input : {};
+  const counts = {};
+  for (const action of DAILY_USAGE_ACTIONS) counts[action] = cleanCount(source[action]);
+  return counts;
+}
+
+function cleanOptionalCounts(input) {
+  const source = input && typeof input === 'object' ? input : null;
+  if (!source) return null;
+  const counts = {};
+  for (const action of DAILY_USAGE_ACTIONS) {
+    if (typeof source[action] === 'number' && Number.isFinite(source[action])) {
+      counts[action] = cleanCount(source[action]);
+    }
+  }
+  return Object.keys(counts).length > 0 ? counts : null;
+}
+
+function saturatedActions(totals, quotas, explicit) {
+  const set = new Set(Array.isArray(explicit) ? explicit.filter((a) => DAILY_USAGE_ACTIONS.includes(a)) : []);
+  if (quotas) {
+    for (const action of DAILY_USAGE_ACTIONS) {
+      if (typeof quotas[action] === 'number' && cleanCount(totals[action]) >= cleanCount(quotas[action])) {
+        set.add(action);
+      }
+    }
+  }
+  return [...set];
+}
+
+function normalizeDailyUsage(input) {
+  if (!input || typeof input !== 'object') return null;
+  const asOf = typeof input.asOf === 'number' && Number.isFinite(input.asOf)
+    ? new Date(input.asOf).toISOString()
+    : new Date().toISOString();
+  const totals = cleanRequiredCounts(input.totals);
+  const quotas = cleanOptionalCounts(input.quotas);
+  const out = {
+    asOf,
+    totals,
+    saturated: saturatedActions(totals, quotas, input.saturated),
+  };
+  if (['conservative', 'normal', 'aggressive'].includes(input.quotaLevel)) out.quotaLevel = input.quotaLevel;
+  if (quotas) out.quotas = quotas;
+  return out;
+}
+
+function statsFromDailyUsage(usage) {
+  const totals = usage?.totals || {};
+  return mergeStats(null, {
+    views: cleanCount(totals.view),
+    likes: cleanCount(totals.like),
+    collects: cleanCount(totals.collect),
+    comments: cleanCount(totals.comment),
+    follows: cleanCount(totals.follow),
+    publishes: cleanCount(totals.publish),
+  });
+}
+
+function bumpDailyUsage(usage, action, delta) {
+  const amount = cleanCount(delta);
+  if (!usage || !DAILY_USAGE_ACTIONS.includes(action) || amount <= 0) return usage || null;
+  const totals = { ...cleanRequiredCounts(usage.totals) };
+  totals[action] = cleanCount(totals[action]) + amount;
+  const quotas = cleanOptionalCounts(usage.quotas);
+  return {
+    ...usage,
+    asOf: new Date().toISOString(),
+    totals,
+    ...(quotas ? { quotas } : {}),
+    saturated: saturatedActions(totals, quotas, usage.saturated),
+  };
 }
 
 function updateStatus(patch) {
@@ -537,6 +621,11 @@ function handleEdgeLogLine(message, isError = false) {
     if (evt.publish && evt.publish.state) {
       next.publish = { ...evt.publish, at: new Date().toISOString() };
       // 发布成功即更新「最近一次发布」并落盘（发布卡常驻的历史态，重启不丢）。
+      if (evt.publish.state === 'published') {
+        const baseStats = next.stats ? mergeStats(status.stats, next.stats) : status.stats;
+        next.stats = { ...(next.stats || {}), publishes: cleanCount(baseStats.publishes) + 1 };
+        next.dailyUsage = bumpDailyUsage(next.dailyUsage || status.dailyUsage, 'publish', 1);
+      }
       if (evt.publish.state === 'published' && evt.publish.title) {
         next.lastPublish = { title: evt.publish.title, at: next.publish.at };
       }
@@ -549,15 +638,33 @@ function handleEdgeLogLine(message, isError = false) {
         at: Number.isFinite(evt.lastPublish.at) ? new Date(evt.lastPublish.at).toISOString() : null,
       };
     }
+    if (evt.dailyUsage) {
+      const dailyUsage = normalizeDailyUsage(evt.dailyUsage);
+      if (dailyUsage) {
+        next.dailyUsage = dailyUsage;
+        next.stats = statsFromDailyUsage(dailyUsage);
+      }
+    }
     if (evt.statsDelta) {
       const d = evt.statsDelta;
+      const baseStats = next.stats ? mergeStats(status.stats, next.stats) : status.stats;
+      let dailyUsage = next.dailyUsage || status.dailyUsage;
       next.stats = {
         ...(next.stats || {}),
-        ...(d.views ? { views: status.stats.views + d.views } : {}),
-        ...(d.likes ? { likes: status.stats.likes + d.likes } : {}),
-        ...(d.collects ? { collects: status.stats.collects + d.collects } : {}),
-        ...(d.comments ? { comments: (status.stats.comments || 0) + d.comments } : {}),
+        ...(d.views ? { views: cleanCount(baseStats.views) + cleanCount(d.views) } : {}),
+        ...(d.likes ? { likes: cleanCount(baseStats.likes) + cleanCount(d.likes) } : {}),
+        ...(d.collects ? { collects: cleanCount(baseStats.collects) + cleanCount(d.collects) } : {}),
+        ...(d.comments ? { comments: cleanCount(baseStats.comments) + cleanCount(d.comments) } : {}),
+        ...(d.follows ? { follows: cleanCount(baseStats.follows) + cleanCount(d.follows) } : {}),
+        ...(d.publishes ? { publishes: cleanCount(baseStats.publishes) + cleanCount(d.publishes) } : {}),
       };
+      if (d.views) dailyUsage = bumpDailyUsage(dailyUsage, 'view', d.views);
+      if (d.likes) dailyUsage = bumpDailyUsage(dailyUsage, 'like', d.likes);
+      if (d.collects) dailyUsage = bumpDailyUsage(dailyUsage, 'collect', d.collects);
+      if (d.comments) dailyUsage = bumpDailyUsage(dailyUsage, 'comment', d.comments);
+      if (d.follows) dailyUsage = bumpDailyUsage(dailyUsage, 'follow', d.follows);
+      if (d.publishes) dailyUsage = bumpDailyUsage(dailyUsage, 'publish', d.publishes);
+      if (dailyUsage) next.dailyUsage = dailyUsage;
     }
     if (evt.sentence) {
       broadcastActivity({

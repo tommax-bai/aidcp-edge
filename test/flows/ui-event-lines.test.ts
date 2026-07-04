@@ -21,7 +21,7 @@ function res(payload: PublishCommandPayload, ok: boolean, error?: string): Publi
   return { recordId: payload.recordId, seq: payload.seq, kind: payload.kind, ok, ...(error ? { error } : {}) };
 }
 
-function parseLine(line: string): { kind: string; publish?: { state: string; title?: string; code?: string } } {
+function parseLine(line: string): Record<string, any> {
   assert.ok(line.startsWith(`${UI_EVENT_PREFIX} `), `行必须以 ${UI_EVENT_PREFIX} 开头: ${line}`);
   assert.ok(!line.includes('\n'), '一事一行，绝不含换行');
   return JSON.parse(line.slice(UI_EVENT_PREFIX.length + 1));
@@ -107,6 +107,28 @@ test('ui-event-lines: 审批状态推送 → publish 行透传 state/title/code'
   const evt = parseLine(lines[0]);
   assert.equal(evt.kind, 'publish');
   assert.deepEqual(evt.publish, { state: 'pending', title: '候审笔记', code: '#84' });
+});
+
+test('ui-event-lines: uiSnapshotToLines forwards account daily usage for Electron summary', () => {
+  const lines = uiSnapshotToLines({
+    dailyUsage: {
+      asOf: 1730000001000,
+      quotaLevel: 'normal',
+      totals: { view: 12, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
+      quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+      saturated: ['publish'],
+    },
+  });
+  assert.equal(lines.length, 1);
+  const evt = parseLine(lines[0]);
+  assert.equal(evt.kind, 'dailyUsage');
+  assert.deepEqual(evt.dailyUsage, {
+    asOf: 1730000001000,
+    quotaLevel: 'normal',
+    totals: { view: 12, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
+    quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+    saturated: ['publish'],
+  });
 });
 
 test('ui-event-lines: 空快照 / 坏 at → 不产行（缺数据不造数据）', () => {

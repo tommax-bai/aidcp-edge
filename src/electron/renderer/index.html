@@ -110,13 +110,37 @@
       </section>
 
       <!-- 今日小结条（计数从门面降级至此） -->
-      <section class="summary">
-        <span class="lbl">今日</span>
-        <div class="kpi"><b id="views">0</b><span>浏览</span></div>
-        <div class="kpi"><b id="likes">0</b><span>点赞</span></div>
-        <div class="kpi"><b id="collects">0</b><span>收藏</span></div>
-        <div class="kpi"><b id="comments">0</b><span>评论</span></div>
-        <span class="summary-spacer"></span>
+      <section class="summary" id="daily-summary">
+        <div class="summary-head">
+          <span class="lbl">今日</span>
+          <span id="usage-source" class="summary-source">本机实时</span>
+        </div>
+        <div class="usage-grid">
+          <div class="kpi" data-action="view">
+            <div class="kpi-main"><b id="views">0</b><span id="views-cap" class="kpi-cap"></span></div>
+            <span class="kpi-label">浏览</span><i class="usage-bar"><em id="views-bar"></em></i>
+          </div>
+          <div class="kpi" data-action="like">
+            <div class="kpi-main"><b id="likes">0</b><span id="likes-cap" class="kpi-cap"></span></div>
+            <span class="kpi-label">点赞</span><i class="usage-bar"><em id="likes-bar"></em></i>
+          </div>
+          <div class="kpi" data-action="collect">
+            <div class="kpi-main"><b id="collects">0</b><span id="collects-cap" class="kpi-cap"></span></div>
+            <span class="kpi-label">收藏</span><i class="usage-bar"><em id="collects-bar"></em></i>
+          </div>
+          <div class="kpi" data-action="comment">
+            <div class="kpi-main"><b id="comments">0</b><span id="comments-cap" class="kpi-cap"></span></div>
+            <span class="kpi-label">评论</span><i class="usage-bar"><em id="comments-bar"></em></i>
+          </div>
+          <div class="kpi" data-action="follow">
+            <div class="kpi-main"><b id="follows">0</b><span id="follows-cap" class="kpi-cap"></span></div>
+            <span class="kpi-label">关注</span><i class="usage-bar"><em id="follows-bar"></em></i>
+          </div>
+          <div class="kpi" data-action="publish">
+            <div class="kpi-main"><b id="publishes">0</b><span id="publishes-cap" class="kpi-cap"></span></div>
+            <span class="kpi-label">发帖</span><i class="usage-bar"><em id="publishes-bar"></em></i>
+          </div>
+        </div>
         <time id="updated-at" class="summary-time"></time>
       </section>
 
