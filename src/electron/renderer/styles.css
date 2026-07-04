@@ -283,9 +283,12 @@ body { margin: 0; }
 /* ═══ 今日小结条 ═══ */
 .summary {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "head time"
+    "metrics metrics";
+  align-items: start;
+  gap: 10px 12px;
   background:
     linear-gradient(135deg, rgba(255,255,255,0.88), rgba(239,245,255,0.9) 46%, rgba(255,255,255,0.96)),
     linear-gradient(90deg, rgba(59,111,240,0.08), rgba(19,122,88,0.06));
@@ -294,8 +297,16 @@ body { margin: 0; }
   padding: 12px 14px;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.82), 0 2px 8px rgba(15, 23, 42, 0.04);
 }
-.summary-head { display: flex; flex-direction: column; gap: 5px; min-width: 66px; }
-.summary .lbl { font-size: 11px; letter-spacing: 0; text-transform: none; color: var(--faint); font-weight: 750; }
+.summary-head {
+  grid-area: head;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.summary-title { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.summary .lbl { font-size: 12px; letter-spacing: 0; text-transform: none; color: #1f2a44; font-weight: 800; white-space: nowrap; }
 .summary-source {
   width: fit-content;
   border-radius: 999px;
@@ -306,7 +317,24 @@ body { margin: 0; }
   font-weight: 700;
   white-space: nowrap;
 }
+.summary-limit {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+.summary-limit.ok {
+  background: rgba(20, 184, 166, 0.11);
+  color: #0f766e;
+}
+.summary-limit.hit {
+  background: rgba(239, 68, 68, 0.1);
+  color: #b91c1c;
+}
 .usage-grid {
+  grid-area: metrics;
   display: grid;
   grid-template-columns: repeat(6, minmax(58px, 1fr));
   gap: 8px;
@@ -354,7 +382,15 @@ body { margin: 0; }
 }
 .kpi.saturated b, .kpi.saturated .kpi-cap { color: #b91c1c; }
 .kpi.saturated .usage-bar em { background: linear-gradient(90deg, #ef4444, #fb7185); }
-.summary-time { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; justify-self: end; }
+.summary-time {
+  grid-area: time;
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  justify-self: end;
+  align-self: center;
+}
 
 /* 开发者详情（原始日志折叠） */
 .dev { border: 1px dashed var(--hair); border-radius: 11px; padding: 8px 14px; background: #fafbfe; }
@@ -557,13 +593,10 @@ body { margin: 0; }
 @media (max-width: 620px) {
   .acct-p { display: none; }
   .summary {
-    grid-template-columns: 1fr auto;
-    align-items: start;
     gap: 10px;
   }
   .summary-head { min-width: 0; }
   .usage-grid {
-    grid-column: 1 / -1;
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .summary-time { justify-self: end; padding-top: 1px; }

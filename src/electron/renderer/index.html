@@ -112,8 +112,11 @@
       <!-- 今日小结条（计数从门面降级至此） -->
       <section class="summary" id="daily-summary">
         <div class="summary-head">
-          <span class="lbl">今日</span>
-          <span id="usage-source" class="summary-source">本机实时</span>
+          <div class="summary-title">
+            <span class="lbl">今日用量</span>
+            <span id="usage-source" class="summary-source">本机实时</span>
+          </div>
+          <span id="usage-limit" class="summary-limit hidden"></span>
         </div>
         <div class="usage-grid">
           <div class="kpi" data-action="view">

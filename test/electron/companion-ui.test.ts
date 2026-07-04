@@ -240,6 +240,7 @@ test('回归：今日小结数字永不为空（缺字段兜 0 + 零值弱化）
   assert.equal($(w, '#comments').textContent, '0');
   assert.equal($(w, '#follows').textContent, '0');
   assert.equal($(w, '#publishes').textContent, '0');
+  assert.ok($(w, '#usage-limit').classList.contains('hidden'), '本机实时没有权威 quota，不展示上限判断');
   assert.ok($(w, '#likes').classList.contains('zero'), '零值应弱化显示');
   assert.ok(!$(w, '#views').classList.contains('zero'), '非零值不弱化');
 });
@@ -258,6 +259,8 @@ test('今日小结：收到账号 dailyUsage 后优先显示账号今日，并�
   }));
   assert.match($(w, '#usage-source').textContent ?? '', /账号今日/);
   assert.match($(w, '#usage-source').textContent ?? '', /标准档/);
+  assert.match($(w, '#usage-limit').textContent ?? '', /已达上限/);
+  assert.ok($(w, '#usage-limit').classList.contains('hit'));
   assert.equal($(w, '#views').textContent, '10');
   assert.equal($(w, '#likes').textContent, '3');
   assert.equal($(w, '#follows').textContent, '2');

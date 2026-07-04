@@ -16,6 +16,7 @@ const fields = {
   follows: document.querySelector('#follows'),
   publishes: document.querySelector('#publishes'),
   usageSource: document.querySelector('#usage-source'),
+  usageLimit: document.querySelector('#usage-limit'),
   updatedAt: document.querySelector('#updated-at'),
   usageCaps: {
     view: document.querySelector('#views-cap'),
@@ -214,11 +215,28 @@ function renderUsageItem(item, usage) {
   }
 }
 
+function usageLimitLabel(usage) {
+  if (!usage.quotas) return null;
+  let limited = 0;
+  for (const item of USAGE_ITEMS) {
+    const cap = typeof usage.quotas[item.action] === 'number' ? count(usage.quotas[item.action]) : null;
+    if (cap === null) continue;
+    const used = count(usage.totals[item.action]);
+    if (usage.saturated.has(item.action) || used >= cap) limited += 1;
+  }
+  return limited > 0 ? { tone: 'hit', text: `已达上限 · ${limited}项` } : { tone: 'ok', text: '额度正常' };
+}
+
 function renderUsageSummary(status) {
   const usage = usageView(status);
   fields.usageSource.textContent = usage.hasDaily
     ? `账号今日${usage.quotaLevel ? ` · ${QUOTA_LEVEL_LABELS[usage.quotaLevel] || usage.quotaLevel}` : ''}`
     : '本机实时';
+  const limit = usageLimitLabel(usage);
+  if (fields.usageLimit) {
+    fields.usageLimit.textContent = limit ? limit.text : '';
+    fields.usageLimit.className = limit ? `summary-limit ${limit.tone}` : 'summary-limit hidden';
+  }
   for (const item of USAGE_ITEMS) renderUsageItem(item, usage);
   fields.updatedAt.textContent = new Date(usage.asOf).toLocaleTimeString();
 }
