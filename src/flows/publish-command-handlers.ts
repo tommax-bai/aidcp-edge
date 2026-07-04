@@ -352,8 +352,19 @@ export class PublishCommandDispatcher {
   }
 
   /**
-   * 选「上传图文」模式：发布页特殊 UI（div.creator-tab 非标准可交互元素），通用 extractor/LLM 选择器不可靠。
-   * 用 CDP in-page click 直驱（task-0 校准实证可用），再绑定式轮询确认进入图文模式（文件输入 accept 变为图片类）。
+   * 选「上传图文」模式（change publish-select-mode-layout-robust：跨宽/窄双布局稳健）。
+   *
+   * 创作发布页与消费端首页/搜索页同机理——**tab 栏重复渲染两套**（一套可见、一套隐藏），且默认停在「上传视频」。
+   * 通用 extractor/LLM 选择器对该特殊 UI 不可靠，仍用 CDP in-page click 直驱，但必须按消费端已定型的双布局套路：
+   *  ① **只点可见**的那个「上传图文」tab（可见性判据 `offsetParent!==null || getClientRects().length>0`，
+   *     与 notification-monitor 一致、兼容窄布局 `position:fixed`）——躲开隐藏副本（治「点隐藏副本→no-op→post_validate_failed」）；
+   *  ② **幂等早退**：点击前先以**保守信号**（当前激活 tab 文本含「图文」不含「视频」）判是否已在图文模式，已在则直接成功；
+   *     保守 = 仅正面证据才算已在图文模式，仍是视频模式绝不谎报（红线：不静默假成功）；
+   *  ③ **有界重试「出现即点」**容忍冷加载晚渲染，点后留 grace 再重点；整步窗口 20s 严格 < 云端单指令 30s 超时；
+   *  ④ **失败诚实分类**：始终无可见 tab 且未在图文模式 → `no_target`；点了但模式始终未激活 → `post_validate_failed`。
+   *
+   * 注：窄布局下「上传图文」的精确形态（是否收成图标 / 换文案）**待真机标定**，当前窄布局候选为 best-effort、
+   * 不死绑精确中文文案；命中不了如实 `no_target`。校准入口见 `docs/xhs-layout-states.md`「创作发布页双布局」一节。
    */
   private async runSelectMode(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
     if (!this.cdp) {
@@ -363,63 +374,129 @@ export class PublishCommandDispatcher {
         new PublishStepValidator({ step: 'enter_publish_page', payload: synthPayload(payload) }),
       );
     }
+    const cdp = this.cdp; // 越过 guard 后固化为非空局部，供下方闭包捕获（class 属性不跨闭包收窄）。
     const startedAt = this.clock();
     const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
     const details = { actionId: XHS_PUBLISH_SELECT_MODE_ACTION_ID, durationMs: 0 };
-    const CLICK_TAB = String.raw`(() => {
-      const els = Array.from(document.querySelectorAll('div,span,[role=tab],[role=button]'));
-      const tab = els.find((e) => (e.innerText || '').trim() === '上传图文' && (String(e.className || '')).includes('creator-tab'))
-        || els.find((e) => (e.innerText || '').trim() === '上传图文' && (String(e.className || '')).includes('tab'))
-        || els.find((e) => (e.innerText || '').trim() === '上传图文');
+    const done = (extra: { ok: boolean; error?: string }): PublishCommandResultPayload =>
+      ({ ...base, details: { ...details, durationMs: this.clock() - startedAt }, ...extra });
+
+    // 可见性判据（与消费端 notification-monitor 一致）：兼容窄布局 position:fixed（offsetParent 为 null 但有 client rect）。
+    const IS_VISIBLE = String.raw`function(el){ try { return el.offsetParent !== null || (el.getClientRects && el.getClientRects().length > 0); } catch (e) { return false; } }`;
+    const TXT_OF = String.raw`function(e){ return ((e.innerText || e.textContent || '')).replace(/\s+/g, '').trim(); }`;
+
+    // 权威模式判据：读【可见激活】tab 的文本判当前处于哪个模式，返回 'image' | 'video' | ''（激活态识别不出）。
+    // 'image'（激活 tab 含「图文」不含「视频」）= 权威「已在图文模式」；'video'（激活 tab 含「视频」不含「图文」）
+    // = 权威「仍在视频模式」，用于**否决**下方辅助信号（防「点了没切上却因残留图片信号谎报成功」，双布局硬化）；
+    // ''（active class 没识别出来）= 未知，点击后回落辅助信号兜底（旧验证路径）。保守：仅 'image' 才判已在图文模式。
+    const MODE_STATE = String.raw`/*MODE_STATE*/(() => {
+      const visible = ${IS_VISIBLE}; const txtOf = ${TXT_OF};
+      const tabs = Array.prototype.slice.call(document.querySelectorAll('[role=tab],[class*=creator-tab],[class*=tab]'));
+      let sawVideo = false;
+      for (const t of tabs) {
+        if (!visible(t)) continue;
+        const cls = String((t.className && t.className.baseVal != null) ? t.className.baseVal : (t.className || ''));
+        const active = /(^|[\s_-])(active|selected|current)([\s_-]|$)/i.test(cls)
+          || t.getAttribute('aria-selected') === 'true' || t.getAttribute('aria-current') === 'true';
+        if (!active) continue;
+        const txt = txtOf(t);
+        const isImg = txt.indexOf('图文') >= 0, isVid = txt.indexOf('视频') >= 0;
+        if (isImg && !isVid) return 'image';   // 激活 tab 明确是图文 → 权威判已在图文模式
+        if (isVid && !isImg) sawVideo = true;  // 激活 tab 是视频 → 记「仍在视频」（否决辅助信号）
+      }
+      return sawVideo ? 'video' : '';          // '' = 激活态未识别
+    })()`;
+
+    // 点【可见】的「上传图文」tab：先精确文本 + creator-tab/tab class，再窄布局 best-effort（可见 + 文本含「图文」而非其它频道、取最短文本贴近 tab 自身）。
+    const CLICK_TAB = String.raw`/*CLICK_TAB*/(() => {
+      const visible = ${IS_VISIBLE}; const txtOf = ${TXT_OF};
+      const all = Array.prototype.slice.call(document.querySelectorAll('div,span,button,a,li,[role=tab],[role=button]'));
+      const vis = all.filter(visible);
+      let tab = vis.find((e) => txtOf(e) === '上传图文' && /creator-tab/.test(String(e.className || '')))
+        || vis.find((e) => txtOf(e) === '上传图文' && /tab/i.test(String(e.className || '')))
+        || vis.find((e) => txtOf(e) === '上传图文');
+      if (!tab) {
+        // 窄布局 best-effort（待真机标定）：可见 + 文本含「图文」而非「视频/长文/播客/直播」、短文本（贴近 tab 而非容器）。
+        const cand = vis.filter((e) => {
+          const t = txtOf(e);
+          return t.length > 0 && t.length <= 6 && t.indexOf('图文') >= 0
+            && t.indexOf('视频') < 0 && t.indexOf('长文') < 0 && t.indexOf('播客') < 0 && t.indexOf('直播') < 0
+            && (/tab/i.test(String(e.className || '')) || e.getAttribute('role') === 'tab' || t === '图文' || t === '写图文');
+        });
+        cand.sort((a, b) => txtOf(a).length - txtOf(b).length);
+        tab = cand[0];
+      }
       if (!tab) return { clicked: false };
       try { tab.scrollIntoView({ block: 'center' }); } catch (e) {}
-      tab.click();
+      try { tab.click(); } catch (e) { return { clicked: false }; }
       return { clicked: true };
     })()`;
-    const IMG_MODE_ACTIVE = String.raw`(() => {
-      const fi = document.querySelector('input[type=file]');
-      const acc = (fi && fi.getAttribute('accept')) || '';
-      if (/jpg|jpeg|png|webp/i.test(acc)) return true;
+
+    // 图文模式激活的**辅助**信号（仅在「已点击 + 激活态未知（非 video）」时才采信）：任一文件输入 accept 变图片类，
+    // 或页面出现「上传图片/文字配图」。多文件输入取 some、补 image/* 前缀。注意文件输入常 display:none，故此探针
+    // 刻意**不按可见性过滤**（否则恒空）——安全性由「MODE_STATE==='video' 时否决本信号」保证，而非靠可见性。
+    const IMG_MODE_ACTIVE = String.raw`/*IMG_MODE_ACTIVE*/(() => {
+      const fis = Array.prototype.slice.call(document.querySelectorAll('input[type=file]'));
+      if (fis.some((fi) => /jpg|jpeg|png|webp|image\//i.test((fi.getAttribute('accept') || '')))) return true;
       const body = (document.body && document.body.innerText) || '';
-      return body.includes('上传图片') || body.includes('文字配图');
+      return body.indexOf('上传图片') >= 0 || body.indexOf('文字配图') >= 0;
     })()`;
-    // 标签在导航后异步渲染——轮询重试点击，直到点中或超时（一次性点击会因渲染晚而 no_target）。
-    const clickDeadline = this.clock() + 12_000;
-    let clicked = false;
-    for (;;) {
+
+    const evalBool = async (expression: string): Promise<boolean> => {
       try {
-        const r = await this.cdp.send<{ result?: { value?: { clicked?: boolean } } }>('Runtime.evaluate', {
-          expression: CLICK_TAB,
-          returnByValue: true,
-        });
-        if (r?.result?.value?.clicked) { clicked = true; break; }
+        const r = await cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression, returnByValue: true });
+        return r?.result?.value === true;
       } catch {
-        // 瞬时 evaluate 失败，继续重试
+        return false; // 瞬时 evaluate 失败当「未就绪」，继续轮询
       }
-      if (this.clock() >= clickDeadline) break;
-      await new Promise((r) => setTimeout(r, 400));
-    }
-    if (!clicked) {
-      return { ...base, ok: false, error: 'no_target', details: { ...details, durationMs: this.clock() - startedAt } };
-    }
-    const deadline = this.clock() + 10_000;
-    for (;;) {
+    };
+    const evalState = async (): Promise<string> => {
       try {
-        const c = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', {
-          expression: IMG_MODE_ACTIVE,
-          returnByValue: true,
-        });
-        if (c?.result?.value === true) {
-          return { ...base, ok: true, details: { ...details, durationMs: this.clock() - startedAt } };
+        const r = await cdp.send<{ result?: { value?: string } }>('Runtime.evaluate', { expression: MODE_STATE, returnByValue: true });
+        return typeof r?.result?.value === 'string' ? r.result.value : '';
+      } catch {
+        return ''; // 瞬时失败当「激活态未知」
+      }
+    };
+    // 是否已在图文模式（幂等早退 + 后置校验二合一）：
+    //  - 'image'（权威、可见激活 tab 是图文）→ 成功；
+    //  - 未点击前：只认权威 'image'（保守，绝不用辅助信号盲判——避免残留图片信号在视频模式误判）；
+    //  - 点击后：'video'（仍确认在视频模式）→ **否决**辅助信号（点了没切上不谎报，双布局硬化）；
+    //    激活态未知（''）才回落辅助信号 IMG_MODE_ACTIVE（旧真机验证路径：文件输入 accept 变图片类 / 出现上传图片·文字配图）。
+    const inImageMode = async (clicked: boolean): Promise<boolean> => {
+      const state = await evalState();
+      if (state === 'image') return true;
+      if (!clicked) return false;
+      if (state === 'video') return false;
+      return await evalBool(IMG_MODE_ACTIVE);
+    };
+
+    // 统一有界重试：每轮先判「已在图文模式」（幂等早退 + 后置校验二合一）→ 否则点可见 tab（点后 grace 再重点）。
+    const deadline = this.clock() + 20_000;
+    const RECLICK_GRACE_MS = 1_500;
+    let everClicked = false;
+    let lastClickAt = Number.NEGATIVE_INFINITY;
+    for (;;) {
+      if (await inImageMode(everClicked)) return done({ ok: true });
+      const now = this.clock();
+      if (!everClicked || now - lastClickAt >= RECLICK_GRACE_MS) {
+        try {
+          const r = await cdp.send<{ result?: { value?: { clicked?: boolean } } }>('Runtime.evaluate', {
+            expression: CLICK_TAB,
+            returnByValue: true,
+          });
+          if (r?.result?.value?.clicked) { everClicked = true; lastClickAt = now; }
+        } catch {
+          // 瞬时 evaluate 失败，下一轮重试
         }
-      } catch {
-        // 忽略瞬时 evaluate 失败，继续轮询
       }
-      if (this.clock() >= deadline) {
-        return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
-      }
+      if (this.clock() >= deadline) break;
       await new Promise((r) => setTimeout(r, 400));
     }
+    // 收尾一次模式判定（末次点击可能刚落）。
+    if (await inImageMode(everClicked)) return done({ ok: true });
+    // 诚实分类：点过但模式没切上 → post_validate_failed；从未点中任何可见 tab → no_target。
+    return done(everClicked ? { ok: false, error: 'post_validate_failed' } : { ok: false, error: 'no_target' });
   }
 
   /**

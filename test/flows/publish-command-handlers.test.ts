@@ -430,3 +430,161 @@ test('runAddTopic kill-switch(=0) → 走旧兜底路径、绝不碰 CDP 直驱'
     delete process.env.AIDCP_PUBLISH_TOPIC_CDP;
   }
 });
+
+// ── change publish-select-mode-layout-robust：select_mode 跨宽/窄双布局稳健 ──────────────
+//
+// 说明：in-page JS 的真实「取可见」选择只有在真实浏览器上才可验证（→ 真机标定 backlog）。
+// 这些单测用脚本化 fake cdp（按表达式注释标记分派）验证 runSelectMode 的【控制流 + 诚实分类】：
+// 幂等早退 / 冷加载有界重试 / 点了没切上 post_validate_failed / 从未点中 no_target / 绝不假成功；
+// 另有两条静态断言，坐实「取可见」与「保守幂等判据」这两条双布局红线确实注入进了下发的 JS。
+
+/**
+ * select_mode 专用 fake cdp：按 Runtime.evaluate 表达式里的注释标记（/*CLICK_TAB* / 等）分派、脚本化返回值。
+ */
+class SelectModeFakeCdp {
+  readonly calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  private clicked = false;
+  private clickAttempts = 0;
+  constructor(
+    private readonly opts: {
+      /** MODE_STATE 在成功点击前的返回（''|'image'|'video'，缺省 'video'=正常起步于视频模式）。 */
+      stateFromStart?: '' | 'image' | 'video';
+      /** CLICK_TAB 从第几次尝试起返回 clicked:true（0=首次即中，缺省 0）；Infinity=永不命中。 */
+      clickSucceedsAtAttempt?: number;
+      /** MODE_STATE 在成功点击后的返回（缺省沿用 stateFromStart）。 */
+      stateAfterClick?: '' | 'image' | 'video';
+      /** 成功点击后 IMG_MODE_ACTIVE 转真（辅助信号）。 */
+      imgActiveAfterClick?: boolean;
+      /** IMG_MODE_ACTIVE 点击前就为真——模拟「视频模式下残留图片信号」，验证硬化否决。 */
+      imgActiveFromStart?: boolean;
+    },
+  ) {}
+  private static exprOf(c: { params?: Record<string, unknown> }): string {
+    return String((c.params as { expression?: string })?.expression ?? '');
+  }
+  clickEvalCount(): number {
+    return this.calls.filter((c) => SelectModeFakeCdp.exprOf(c).includes('/*CLICK_TAB*/')).length;
+  }
+  exprContaining(marker: string): string | undefined {
+    const c = this.calls.find((x) => SelectModeFakeCdp.exprOf(x).includes(marker));
+    return c ? SelectModeFakeCdp.exprOf(c) : undefined;
+  }
+  async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+    this.calls.push({ method, params });
+    if (method !== 'Runtime.evaluate') return {} as T;
+    const expr = String((params as { expression?: string })?.expression ?? '');
+    if (expr.includes('/*CLICK_TAB*/')) {
+      const attempt = this.clickAttempts++;
+      const hit = attempt >= (this.opts.clickSucceedsAtAttempt ?? 0);
+      if (hit) this.clicked = true;
+      return { result: { value: { clicked: hit } } } as T;
+    }
+    if (expr.includes('/*MODE_STATE*/')) {
+      const start = this.opts.stateFromStart ?? 'video';
+      const v = this.clicked ? (this.opts.stateAfterClick ?? start) : start;
+      return { result: { value: v } } as T;
+    }
+    if (expr.includes('/*IMG_MODE_ACTIVE*/')) {
+      const v = !!this.opts.imgActiveFromStart || (this.clicked && !!this.opts.imgActiveAfterClick);
+      return { result: { value: v } } as T;
+    }
+    return { result: { value: false } } as T;
+  }
+}
+
+/** 小步时钟：每次调用 +stepMs，使 20s 窗口在有限次迭代后触发（失败用例不真等 20s）。 */
+function selectStepClock(stepMs: number): () => number {
+  let t = 0;
+  return () => { t += stepMs; return t; };
+}
+
+function mkSelectMode(cdp: SelectModeFakeCdp, clock: () => number): PublishCommandDispatcher {
+  const doc = buildDom(publishPageHtml());
+  return new PublishCommandDispatcher(
+    depsFor(doc, new FakeExecutor(doc)),
+    {},
+    clock,
+    undefined,
+    cdp as unknown as ConstructorParameters<typeof PublishCommandDispatcher>[4],
+    { sleep: instantSleep, random: () => 0.5 },
+  );
+}
+
+test('select_mode 幂等早退：进入时已在图文模式（state=image）→ ok:true 且不点击（治「本已在模式却报 no_target」）', async () => {
+  const cdp = new SelectModeFakeCdp({ stateFromStart: 'image' });
+  const res = await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
+  assert.equal(res.ok, true);
+  assert.equal(res.kind, 'select_mode');
+  assert.equal(cdp.clickEvalCount(), 0, '已在图文模式应幂等早退、绝不点击');
+});
+
+test('select_mode happy：视频起步 → 点中可见 tab → 激活 tab 变图文（state=image）→ ok:true', async () => {
+  const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: 0, stateAfterClick: 'image' });
+  const res = await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
+  assert.equal(res.ok, true);
+  assert.ok(cdp.clickEvalCount() >= 1, '视频模式起步应真的点了图文 tab');
+});
+
+test('select_mode happy（辅助信号兜底）：点击后激活态未识别（state=""）但 IMG_MODE_ACTIVE 转真 → ok:true（不回归旧验证信号）', async () => {
+  const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: 0, stateAfterClick: '', imgActiveAfterClick: true });
+  const res = await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
+  assert.equal(res.ok, true, '激活态识别不出时点击后 IMG 信号（文件输入 accept 变图片类）应兜底确认成功');
+});
+
+test('select_mode 冷加载：tab 晚渲染（前若干次点击 miss，稍后命中）→ 有界重试点中 → ok:true', async () => {
+  // 前 2 次 CLICK_TAB miss（clicked:false），第 3 次起命中；命中后激活 tab 变图文。
+  const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: 2, stateAfterClick: 'image' });
+  const res = await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
+  assert.equal(res.ok, true);
+  assert.ok(cdp.clickEvalCount() >= 3, '应重试点击直到命中（冷加载容忍）');
+});
+
+test('select_mode 始终无可见 tab 且未在图文模式 → 诚实 no_target（红线：绝不假成功）', async () => {
+  const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: Number.POSITIVE_INFINITY });
+  const res = await mkSelectMode(cdp, selectStepClock(5000)).dispatch(cmd('select_mode', {}, 1));
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'no_target');
+});
+
+test('select_mode 点了但模式始终未激活（点到隐藏副本/点击无效）→ 诚实 post_validate_failed', async () => {
+  const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: 0, stateAfterClick: '', imgActiveAfterClick: false });
+  const res = await mkSelectMode(cdp, selectStepClock(5000)).dispatch(cmd('select_mode', {}, 1));
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'post_validate_failed', '点了没切上模式必须诚实报，绝不谎报已切');
+});
+
+// ── 双布局硬化（评审对抗性反馈：辅助信号是「电平」非「跃变」，须防残留图片信号在视频模式假成功）──
+
+test('select_mode 硬化：点了但仍确认在视频模式（state=video）+ 残留图片信号 → 否决辅助信号、诚实 post_validate_failed', async () => {
+  // 关键：imgActiveFromStart=true（视频模式下就存在图片信号）+ 点击后 state 仍 'video'。
+  // 旧「电平或」会因 IMG 为真而假成功；硬化后 state==='video' 否决 IMG → 诚实失败。
+  const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: 0, stateAfterClick: 'video', imgActiveFromStart: true });
+  const res = await mkSelectMode(cdp, selectStepClock(5000)).dispatch(cmd('select_mode', {}, 1));
+  assert.equal(res.ok, false, '仍在视频模式绝不因残留图片信号谎报成功（红线：不假成功）');
+  assert.equal(res.error, 'post_validate_failed');
+});
+
+test('select_mode 硬化：点击前存在残留图片信号但未点中任何 tab → 只认权威 state、诚实 no_target（不盲信 IMG）', async () => {
+  // 点击前只认权威 MODE_STATE（'video'），IMG 残留信号不参与点击前判定 → 从未点中 → no_target（非假成功）。
+  const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: Number.POSITIVE_INFINITY, stateFromStart: 'video', imgActiveFromStart: true });
+  const res = await mkSelectMode(cdp, selectStepClock(5000)).dispatch(cmd('select_mode', {}, 1));
+  assert.equal(res.ok, false, '点击前残留图片信号绝不当作已在图文模式');
+  assert.equal(res.error, 'no_target');
+});
+
+test('select_mode 红线：下发的点击 JS 含可见性判据（取可见非取首个，躲隐藏副本）', async () => {
+  const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: 0, stateAfterClick: 'image' });
+  await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
+  const clickJs = cdp.exprContaining('/*CLICK_TAB*/');
+  assert.ok(clickJs, '应有 CLICK_TAB 表达式被下发');
+  assert.ok(clickJs!.includes('offsetParent') && clickJs!.includes('getClientRects'), '点击 JS 必须按可见性过滤候选（offsetParent||getClientRects）');
+});
+
+test('select_mode 红线：模式判据保守（激活 tab 文本含「图文」与「视频」两侧约束，绝不视频模式谎报）', async () => {
+  const cdp = new SelectModeFakeCdp({ stateFromStart: 'image' });
+  await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
+  const modeJs = cdp.exprContaining('/*MODE_STATE*/');
+  assert.ok(modeJs, '应有 MODE_STATE 表达式被下发');
+  assert.ok(modeJs!.includes('图文') && modeJs!.includes('视频'), '模式判据须同时约束「图文」与「视频」两侧');
+  assert.ok(/aria-selected|active|selected|current/.test(modeJs!), '模式判据须限定激活态 tab');
+});
