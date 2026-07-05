@@ -319,19 +319,34 @@ export async function applySearchFilters(
   const sleep = deps.sleep ?? defaultSleep;
   const logger = deps.logger ?? ((m: string) => console.log(m));
 
-  const wantSort = opts.sort ? SEARCH_SORT_TEXT[opts.sort] : undefined;
-  const wantTime = opts.timeWindow ? SEARCH_TIME_TEXT[opts.timeWindow] : undefined;
-  if (!wantSort && !wantTime) return { sortApplied: false, timeApplied: false };
+  const sortIsDefault = opts.sort === 'comprehensive';
+  const timeIsDefault = opts.timeWindow === 'all';
+  const wantSort = opts.sort && !sortIsDefault ? SEARCH_SORT_TEXT[opts.sort] : undefined;
+  const wantTime = opts.timeWindow && !timeIsDefault ? SEARCH_TIME_TEXT[opts.timeWindow] : undefined;
+  if (!wantSort && !wantTime) {
+    const sortApplied = opts.sort ? sortIsDefault : false;
+    const timeApplied = opts.timeWindow ? timeIsDefault : false;
+    if (sortIsDefault || timeIsDefault) {
+      logger(
+        `[search] 原生筛选：排序「${sortIsDefault ? SEARCH_SORT_TEXT.comprehensive : '-'}」=` +
+          `${sortIsDefault ? '默认态无需点击' : '-'}、时间「${timeIsDefault ? SEARCH_TIME_TEXT.all : '-'}」=` +
+          `${timeIsDefault ? '默认态无需点击' : '-'}（默认值不打开筛选面板）`,
+      );
+    }
+    return { sortApplied, timeApplied };
+  }
 
   const ctx = { random, sleep, logger };
-  const sortApplied = wantSort ? await applyOneFilter(cdp, wantSort, ctx) : false;
+  const sortApplied = sortIsDefault ? true : wantSort ? await applyOneFilter(cdp, wantSort, ctx) : false;
   // 项间自然停顿（一次 action 档），像真人切完排序再看时间。
   if (wantSort && wantTime) await sleep(sampleDelay(TIMING_PRESETS.action, random));
-  const timeApplied = wantTime ? await applyOneFilter(cdp, wantTime, ctx) : false;
+  const timeApplied = timeIsDefault ? true : wantTime ? await applyOneFilter(cdp, wantTime, ctx) : false;
 
   logger(
-    `[search] 原生筛选：排序「${wantSort ?? '-'}」=${sortApplied ? '已切' : '未生效'}、` +
-      `时间「${wantTime ?? '-'}」=${timeApplied ? '已切' : '未生效'}（未生效=诚实降级，云端不冒充已筛）`,
+    `[search] 原生筛选：排序「${sortIsDefault ? SEARCH_SORT_TEXT.comprehensive : wantSort ?? '-'}」=` +
+      `${sortIsDefault ? '默认态无需点击' : sortApplied ? '已切' : '未生效'}、` +
+      `时间「${timeIsDefault ? SEARCH_TIME_TEXT.all : wantTime ?? '-'}」=` +
+      `${timeIsDefault ? '默认态无需点击' : timeApplied ? '已切' : '未生效'}（未生效=诚实降级，云端不冒充已筛）`,
   );
   return { sortApplied, timeApplied };
 }

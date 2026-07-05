@@ -212,3 +212,15 @@ test('applySearchFilters: 无 sort/timeWindow → no-op，不评估页面', asyn
   assert.deepEqual(r, { sortApplied: false, timeApplied: false });
   assert.equal(calls.length, 0);
 });
+
+test('applySearchFilters: explicit default sort/timeWindow are no-op success and do not touch the page', async () => {
+  const { cdp, calls } = fakeCdp(() => {
+    throw new Error('default filters should not evaluate the page');
+  });
+  const r = await applySearchFilters(
+    { sort: 'comprehensive', timeWindow: 'all' },
+    { cdp, sleep: async () => {}, logger: () => {} },
+  );
+  assert.deepEqual(r, { sortApplied: true, timeApplied: true });
+  assert.equal(calls.length, 0);
+});
