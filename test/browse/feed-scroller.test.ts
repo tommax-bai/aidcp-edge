@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
 import { CdpFeedScroller, type NoteCard } from '../../src/browse/feed-scroller.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
@@ -33,6 +34,38 @@ test('getVisibleCards: 解析浏览器侧返回的 JSON 卡片清单', async () 
   assert.equal(cards.length, 2);
   assert.equal(cards[0].title, 'A');
   assert.equal(cards[1].centerX, 300);
+});
+
+test('getVisibleCards: 从包裹卡片元素的祖先链接解析 noteId', async () => {
+  const dom = new JSDOM(
+    '<!doctype html><html><body>' +
+      '<a href="/explore/target123?xsec_token=t">' +
+        '<section class="note-item">' +
+          '<img src="https://example.test/a.jpg">' +
+          '<div class="title">目标标题</div>' +
+          '<div class="author">作者</div>' +
+        '</section>' +
+      '</a>' +
+    '</body></html>',
+    { runScripts: 'outside-only' },
+  );
+  Object.defineProperty(dom.window, 'innerHeight', { value: 800, configurable: true });
+  Object.defineProperty(dom.window, 'innerWidth', { value: 1280, configurable: true });
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value() {
+      return { left: 10, top: 100, right: 210, bottom: 300, width: 200, height: 200 };
+    },
+  });
+
+  const { cdp } = fakeCdp((method, params) => {
+    assert.equal(method, 'Runtime.evaluate');
+    const value = dom.window.eval(String(params.expression ?? ''));
+    return { result: { type: 'string', value } };
+  });
+  const scroller = new CdpFeedScroller(cdp);
+  const cards = await scroller.getVisibleCards();
+  assert.equal(cards[0].noteId, 'target123');
 });
 
 test('getVisibleCards: 非数组返回时降级为空数组', async () => {

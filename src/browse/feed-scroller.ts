@@ -112,7 +112,8 @@ const CARD_SCAN_JS = `(function(){
     // 提取真实 noteId（从卡片的 /explore/<id> 链接），供云端 visited 去重；缺失则由 modal 兜底解析。
     var lk = (el.matches && el.matches('a[href*="/explore/"], a[href*="/discovery/item/"]'))
       ? el
-      : el.querySelector('a[href*="/explore/"], a[href*="/discovery/item/"]');
+      : (el.querySelector('a[href*="/explore/"], a[href*="/discovery/item/"]') ||
+        (el.closest && el.closest('a[href*="/explore/"], a[href*="/discovery/item/"]')));
     var noteId;
     if (lk) {
       var hm = (lk.getAttribute('href')||'').match(/\\/(?:explore|discovery\\/item)\\/([A-Za-z0-9]+)/);

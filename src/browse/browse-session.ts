@@ -772,15 +772,31 @@ export class BrowseSession {
    * 轮询直到 scroller 真正检测到可见卡片（与 reportVisibleCards 同口径），超时返回 false。
    * history.back 后 feed 重渲染有延迟，固定 sleep 后瞬时判断会误判为空 → 误报"无可见卡片"。
    */
-  private async waitForVisibleCards(timeout: number, min = 1): Promise<boolean> {
+  private async waitForVisibleCards(
+    timeout: number,
+    min = 1,
+    isReady?: (cards: NoteCard[]) => boolean,
+  ): Promise<boolean> {
     const start = Date.now();
     while (Date.now() - start < timeout) {
       try {
-        if ((await this.deps.scroller.getVisibleCards()).length >= min) return true;
+        const cards = await this.deps.scroller.getVisibleCards();
+        if (cards.length >= min && (!isReady || isReady(cards))) return true;
       } catch { /* ignore */ }
       await this.sleep(500);
     }
     return false;
+  }
+
+  private async waitForSearchResultNoteIds(timeout = 2500): Promise<void> {
+    const ready = await this.waitForVisibleCards(
+      timeout,
+      1,
+      (cards) => Boolean(cards[0]?.noteId),
+    );
+    if (!ready) {
+      this.logger('[browse] 搜索结果 noteId 水合等待超时，按当前卡片快照诚实上报');
+    }
   }
 
   private async evalUrl(): Promise<string> {
@@ -956,6 +972,7 @@ export class BrowseSession {
           }
         }
         await this.waitForCards(5000);
+        await this.waitForSearchResultNoteIds();
         await this.reportVisibleCards();
         break;
       }
@@ -1078,14 +1095,23 @@ export class BrowseSession {
     // 系列帖（不同 noteId）混进瀑布流,否则云端会对内容几乎相同的两条各开一次（真机实测「第7集 Harness」连开两次）。
     // 标题或作者为空时用 noteId/coverUrl/position 当指纹,避免把多张「无标题」误折叠成一张。
     {
-      const seenFp = new Set<string>();
+      const seenFp = new Map<string, number>();
       const before = cards.length;
-      cards = cards.filter((c) => {
+      const deduped: typeof cards = [];
+      for (const c of cards) {
         const fp = c.title && c.author ? `${c.title}|${c.author}` : (c.noteId ?? c.coverUrl ?? `pos:${c.position}`);
-        if (seenFp.has(fp)) return false;
-        seenFp.add(fp);
-        return true;
-      });
+        const priorIndex = seenFp.get(fp);
+        if (priorIndex === undefined) {
+          seenFp.set(fp, deduped.length);
+          deduped.push(c);
+          continue;
+        }
+        const prior = deduped[priorIndex];
+        if (!prior.noteId && c.noteId) {
+          deduped[priorIndex] = c;
+        }
+      }
+      cards = deduped;
       if (cards.length < before) this.logger(`[browse] 近重复折叠：${before} → ${cards.length} 张`);
     }
     const payload: PageCardsPayload = {

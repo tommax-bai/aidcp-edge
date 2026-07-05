@@ -266,6 +266,17 @@ test('browse-session: page.cards 包含 isVideo 字段', async () => {
   assert.equal(h.reportedCards[0].cards[0].isVideo, true);
 });
 
+test('browse-session: 近重复折叠优先保留带 noteId 的卡片', async () => {
+  const h = makeHarness([
+    { position: 0, centerX: 10, centerY: 10, title: '同题', author: '同作者', isVideo: false },
+    { position: 1, centerX: 10, centerY: 160, title: '同题', author: '同作者', noteId: 'target-note', isVideo: false },
+  ]);
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [makeEnvelope('session.end', 'e', 0, { reason: 'test_end' })]);
+  assert.equal(h.reportedCards[0].cards.length, 1);
+  assert.equal(h.reportedCards[0].cards[0].noteId, 'target-note');
+});
+
 test('browse-session: session.end 命令停止循环', async () => {
   const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());
@@ -649,7 +660,7 @@ test('browse-session: search.execute 命令触发搜索', async () => {
       if (method === 'Runtime.evaluate') {
         const expr = String(params.expression ?? '');
         if (expr.includes('note-item')) return { result: { value: 10 } } as never;
-        if (expr.includes('location.href')) return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+        if (expr.includes('location.href')) return { result: { value: 'https://www.xiaohongshu.com/search_result_ai?keyword=%E5%A5%B6%E8%8C%B6' } } as never;
         return { result: { value: true } } as never;
       }
       return {} as never;
@@ -661,6 +672,44 @@ test('browse-session: search.execute 命令触发搜索', async () => {
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.ok(calls.includes('Input.dispatchKeyEvent'), '应触发键盘输入搜索');
+});
+
+test('browse-session: search.execute 上报前等待搜索卡片 noteId 水合', async () => {
+  const h = makeHarness();
+  let searchStarted = false;
+  let scansAfterSearch = 0;
+  h.deps.scroller = {
+    ...h.deps.scroller,
+    getVisibleCards: async () => {
+      if (!searchStarted) return [CARD];
+      scansAfterSearch++;
+      return scansAfterSearch < 3
+        ? [{ position: 0, centerX: 10, centerY: 10, title: '目标标题', author: '作者', isVideo: false }]
+        : [{ position: 0, centerX: 10, centerY: 10, title: '目标标题', author: '作者', noteId: 'target-note', isVideo: false }];
+    },
+  };
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Input.dispatchKeyEvent') searchStarted = true;
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        if (expr.includes('location.href')) return { result: { value: 'https://www.xiaohongshu.com/search_result_ai?keyword=t' } } as never;
+        return { result: { value: true } } as never;
+      }
+      return {} as never;
+    },
+  };
+
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('search.execute', 'se1', 0, { keyword: '目标' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+
+  const last = h.reportedCards[h.reportedCards.length - 1];
+  assert.ok(scansAfterSearch >= 3, '应等待到搜索卡片 noteId 水合后再上报');
+  assert.equal(last.cards[0].noteId, 'target-note');
 });
 
 test('browse-session: note.browse_images 命中轮播 → 如实回报 browsed=N', async () => {
