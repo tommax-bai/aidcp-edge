@@ -129,6 +129,9 @@ test('ui-event-lines: uiSnapshotToLines forwards account daily usage for Electro
       saturated: ['publish'],
       windows: {
         minute: {
+          startedAt: 1729999941000,
+          windowMs: 60000,
+          expiresAt: 1730000061000,
           totals: { view: 4, like: 3, collect: 0, comment: 0, follow: 0, publish: 0 },
           quotas: { view: 8, like: 3, collect: 2, comment: 1, follow: 1, publish: 1 },
           saturated: ['like'],
@@ -136,7 +139,9 @@ test('ui-event-lines: uiSnapshotToLines forwards account daily usage for Electro
         session: {
           active: true,
           startedAt: 1730000000000,
-          totals: { like: 1, collect: 0, comment: 0, follow: 0 },
+          windowMs: 600000,
+          expiresAt: 1730000600000,
+          totals: { view: 2, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
           quotas: { like: 10, collect: 5, comment: 2, follow: 3 },
           saturated: [],
         },
@@ -154,6 +159,9 @@ test('ui-event-lines: uiSnapshotToLines forwards account daily usage for Electro
     saturated: ['publish'],
     windows: {
       minute: {
+        startedAt: 1729999941000,
+        windowMs: 60000,
+        expiresAt: 1730000061000,
         totals: { view: 4, like: 3, collect: 0, comment: 0, follow: 0, publish: 0 },
         quotas: { view: 8, like: 3, collect: 2, comment: 1, follow: 1, publish: 1 },
         saturated: ['like'],
@@ -161,7 +169,9 @@ test('ui-event-lines: uiSnapshotToLines forwards account daily usage for Electro
       session: {
         active: true,
         startedAt: 1730000000000,
-        totals: { like: 1, collect: 0, comment: 0, follow: 0 },
+        windowMs: 600000,
+        expiresAt: 1730000600000,
+        totals: { view: 2, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
         quotas: { like: 10, collect: 5, comment: 2, follow: 3 },
         saturated: [],
       },

@@ -284,6 +284,8 @@ function normalizeUsageWindow(input) {
   };
   if (typeof input.active === 'boolean') out.active = input.active;
   if (typeof input.startedAt === 'number' && Number.isFinite(input.startedAt)) out.startedAt = input.startedAt;
+  if (typeof input.windowMs === 'number' && Number.isFinite(input.windowMs) && input.windowMs > 0) out.windowMs = Math.floor(input.windowMs);
+  if (typeof input.expiresAt === 'number' && Number.isFinite(input.expiresAt)) out.expiresAt = input.expiresAt;
   if (quotas) out.quotas = quotas;
   return out;
 }
@@ -361,11 +363,19 @@ function bumpDailyUsageWindows(input, action, amount) {
     }
     const totals = { ...window.totals, [action]: cleanCount(window.totals[action]) + amount };
     const quotas = cleanOptionalCounts(window.quotas);
+    const now = Date.now();
+    const expired = typeof window.expiresAt === 'number' && Number.isFinite(window.expiresAt) && window.expiresAt <= now;
+    const baseTotals = expired && typeof window.windowMs === 'number'
+      ? Object.fromEntries(DAILY_USAGE_ACTIONS.map((name) => [name, name === action ? amount : 0]))
+      : totals;
     windows[name] = {
       ...window,
-      totals,
+      totals: baseTotals,
+      ...(expired && typeof window.windowMs === 'number'
+        ? { startedAt: now - window.windowMs, expiresAt: now + window.windowMs }
+        : {}),
       ...(quotas ? { quotas } : {}),
-      saturated: saturatedActions(totals, quotas, window.saturated),
+      saturated: saturatedActions(baseTotals, quotas, expired ? [] : window.saturated),
     };
   }
   return Object.keys(windows).length > 0 ? windows : null;

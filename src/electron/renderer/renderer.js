@@ -4,6 +4,7 @@
 const uiLogic = window.uiLogic;
 
 const fields = {
+  dailySummary: document.querySelector('#daily-summary'),
   auth: document.querySelector('#auth-status'),
   cloud: document.querySelector('#cloud-status'),
   session: document.querySelector('#session-state'),
@@ -17,6 +18,7 @@ const fields = {
   publishes: document.querySelector('#publishes'),
   usageSource: document.querySelector('#usage-source'),
   usageLimit: document.querySelector('#usage-limit'),
+  quotaToggle: document.querySelector('#quota-toggle'),
   quotaWindows: document.querySelector('#quota-windows'),
   updatedAt: document.querySelector('#updated-at'),
   usageCaps: {
@@ -134,6 +136,7 @@ let selectedProfileName = '';
 const LOG_RETENTION_MS = 2 * 60 * 1000; // 开发者详情原始日志保留 2 分钟
 const logEntries = [];
 let lastLogMessage = '';
+let quotaDetailsOpen = false;
 
 // 平台占位：mac 红绿灯内嵌预留左侧；Windows 叠加窗控预留右侧。其余平台两侧归零。
 (function initPlatformPads() {
@@ -245,35 +248,46 @@ function usageLimitLabel(usage) {
   return limited > 0 ? { tone: 'hit', text: `已达上限 · ${limited}项` } : { tone: 'ok', text: '额度正常' };
 }
 
-function quotaWindowViews(usage) {
+function quotaWindowViewsAt(usage, now) {
   const windows = usage.windows;
   if (!windows || typeof windows !== 'object') return [];
-  return QUOTA_WINDOWS.map((item) => quotaWindowView(item, windows[item.key]))
+  return QUOTA_WINDOWS.map((item) => quotaWindowView(item, windows[item.key], now))
     .filter(Boolean);
 }
 
-function quotaWindowView(item, window) {
-  if (!window || typeof window !== 'object' || !window.quotas || typeof window.quotas !== 'object') return null;
+function quotaWindowViews(usage) {
+  return quotaWindowViewsAt(usage, Date.now());
+}
+
+function quotaWindowView(item, window, now) {
+  if (!window || typeof window !== 'object') return null;
   const totals = window.totals && typeof window.totals === 'object' ? window.totals : {};
-  const quotas = window.quotas;
+  const quotas = window.quotas && typeof window.quotas === 'object' ? window.quotas : {};
   const saturated = new Set(Array.isArray(window.saturated) ? window.saturated : []);
   const active = item.key === 'session' ? window.active !== false : true;
+  const expiresAt = typeof window.expiresAt === 'number' && Number.isFinite(window.expiresAt) ? window.expiresAt : null;
+  const expired = (item.key === 'minute' || item.key === 'hour') && expiresAt !== null && expiresAt <= now;
+  const rows = [];
   const capped = [];
   for (const usageItem of USAGE_ITEMS) {
-    if (typeof quotas[usageItem.action] !== 'number') continue;
+    const hasTotal = Object.prototype.hasOwnProperty.call(totals, usageItem.action);
+    const hasCap = typeof quotas[usageItem.action] === 'number';
+    if (!hasTotal && !hasCap) continue;
     const used = count(totals[usageItem.action]);
-    const cap = count(quotas[usageItem.action]);
-    const ratio = cap > 0 ? Math.min(1, used / cap) : 1;
-    const hit = active && (saturated.has(usageItem.action) || used >= cap);
-    capped.push({ ...usageItem, used, cap, ratio, hit });
+    const cap = hasCap ? count(quotas[usageItem.action]) : null;
+    const ratio = cap !== null ? (cap > 0 ? Math.min(1, used / cap) : 1) : 0;
+    const hit = !expired && active && cap !== null && (saturated.has(usageItem.action) || used >= cap);
+    const row = { ...usageItem, used, cap, ratio, hit, hasCap };
+    rows.push(row);
+    if (hasCap) capped.push(row);
   }
-  if (capped.length === 0) return null;
-  const limited = capped.filter((entry) => entry.hit).length;
+  if (rows.length === 0) return null;
+  const limited = rows.filter((entry) => entry.hit).length;
   const worst = capped.reduce((best, entry) => (!best || entry.ratio > best.ratio ? entry : best), null);
-  const ratio = active ? (worst?.ratio ?? 0) : 0;
-  const tone = !active ? 'idle' : limited > 0 ? 'hit' : ratio >= 0.8 ? 'near' : 'ok';
-  const state = !active ? '未运行' : limited > 0 ? `已满 ${limited}项` : ratio >= 0.8 ? '临近' : '正常';
-  const meta = worst ? `${worst.label} ${worst.used}/${worst.cap}` : '';
+  const ratio = !expired && active ? (worst?.ratio ?? 0) : 0;
+  const tone = expired || !active ? 'idle' : limited > 0 ? 'hit' : ratio >= 0.8 ? 'near' : 'ok';
+  const state = expired ? '待刷新' : !active ? '未运行' : limited > 0 ? `已满 ${limited}项` : ratio >= 0.8 ? '临近' : '正常';
+  const meta = expired ? '等待云端快照' : (worst ? `${worst.label} ${worst.used}/${worst.cap}` : '无窗口上限');
   return {
     key: item.key,
     label: item.label,
@@ -282,27 +296,45 @@ function quotaWindowView(item, window) {
     meta,
     ratio,
     limited,
-    title: `${item.label}：${state}${capped.length > 0 ? ` · ${capped.map((entry) => `${entry.label} ${entry.used}/${entry.cap}`).join(' · ')}` : ''}`,
+    expired,
+    rows,
+    title: `${item.label}: ${state}${rows.length > 0 ? ` · ${rows.map((entry) => `${entry.label} ${entry.used}/${entry.cap ?? '-'}`).join(' · ')}` : ''}`,
   };
 }
 
 function renderQuotaWindows(usage) {
   if (!fields.quotaWindows) return;
   const windows = quotaWindowViews(usage);
-  if (windows.length === 0) {
+  fields.dailySummary?.classList.toggle('expanded', quotaDetailsOpen && windows.length > 0);
+  if (fields.quotaToggle) {
+    fields.quotaToggle.classList.toggle('open', quotaDetailsOpen && windows.length > 0);
+    fields.quotaToggle.setAttribute('aria-expanded', quotaDetailsOpen && windows.length > 0 ? 'true' : 'false');
+  }
+  if (windows.length === 0 || !quotaDetailsOpen) {
     fields.quotaWindows.className = 'quota-windows hidden';
     fields.quotaWindows.innerHTML = '';
     return;
   }
   fields.quotaWindows.className = 'quota-windows';
   fields.quotaWindows.innerHTML = windows.map((window) => {
-    const pct = Math.round(window.ratio * 100);
+    const rows = window.rows.map((entry) => {
+      const pct = entry.cap !== null ? Math.round(entry.ratio * 100) : 0;
+      const value = entry.cap !== null ? `${entry.used}/${entry.cap}` : `${entry.used}/-`;
+      return `
+        <div class="qwd-row ${entry.hit ? 'hit' : entry.ratio >= 0.8 && entry.cap !== null ? 'near' : ''}">
+          <span>${escapeHtml(entry.label)}</span>
+          <b>${escapeHtml(value)}</b>
+          <i><em style="width:${pct}%"></em></i>
+        </div>`;
+    }).join('');
     return `
-      <div class="quota-window ${window.tone}" title="${escapeHtml(window.title)}">
-        <span class="qw-name">${escapeHtml(window.label)}</span>
-        <strong>${escapeHtml(window.state)}</strong>
-        <i><em style="width:${pct}%"></em></i>
-        <span class="qw-meta">${escapeHtml(window.meta)}</span>
+      <div class="quota-window-detail ${window.tone}" title="${escapeHtml(window.title)}">
+        <div class="qwd-head">
+          <span>${escapeHtml(window.label)}</span>
+          <strong>${escapeHtml(window.state)}</strong>
+        </div>
+        <small>${escapeHtml(window.meta)}</small>
+        <div class="qwd-rows">${rows}</div>
       </div>`;
   }).join('');
 }
@@ -544,6 +576,7 @@ function prependActivity(entry, extraClass) {
 setInterval(() => {
   if (!currentStatus) return;
   const now = Date.now();
+  renderUsageSummary(currentStatus);
   renderPresence(currentStatus, now);
   renderPublish(currentStatus, now);
   fields.stream.querySelectorAll('.ev').forEach((row) => {
@@ -551,6 +584,20 @@ setInterval(() => {
     if (Number.isFinite(ts)) row.querySelector('.ev-t').textContent = uiLogic.relTime(ts, now);
   });
 }, 1000);
+
+function toggleQuotaDetails() {
+  quotaDetailsOpen = !quotaDetailsOpen;
+  if (currentStatus) renderUsageSummary(currentStatus);
+}
+
+fields.dailySummary?.addEventListener('click', (event) => {
+  if (event.target.closest('button')) return;
+  toggleQuotaDetails();
+});
+fields.quotaToggle?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  toggleQuotaDetails();
+});
 
 // ─── 健康明细浮层 ───
 fields.healthPill.addEventListener('click', (event) => {

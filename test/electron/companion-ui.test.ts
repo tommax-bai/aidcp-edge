@@ -247,6 +247,8 @@ test('回归：今日小结数字永不为空（缺字段兜 0 + 零值弱化）
 
 test('今日小结：收到账号 dailyUsage 后优先显示账号今日，并标记已到上限项', async () => {
   const { w, pushStatus } = await boot();
+  const originalNow = w.Date.now;
+  w.Date.now = () => 1730000002000;
   pushStatus(makeStatus({
     stats: { views: 999, likes: 999, collects: 999, comments: 999, follows: 999, publishes: 999 },
     dailyUsage: {
@@ -259,21 +261,32 @@ test('今日小结：收到账号 dailyUsage 后优先显示账号今日，并�
         session: {
           active: true,
           startedAt: 1730000000000,
-          totals: { like: 1, collect: 0, comment: 0, follow: 0 },
+          windowMs: 600000,
+          expiresAt: 1730000600000,
+          totals: { view: 2, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
           quotas: { like: 10, collect: 5, comment: 2, follow: 3 },
           saturated: [],
         },
         minute: {
+          startedAt: 1729999941000,
+          windowMs: 60000,
+          expiresAt: 1730000061000,
           totals: { view: 3, like: 3, collect: 0, comment: 0, follow: 0, publish: 0 },
           quotas: { view: 8, like: 3, collect: 2, comment: 1, follow: 1, publish: 1 },
           saturated: ['like'],
         },
         hour: {
+          startedAt: 1729996401000,
+          windowMs: 3600000,
+          expiresAt: 1730003601000,
           totals: { view: 10, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
           quotas: { view: 60, like: 13, collect: 7, comment: 2, follow: 4, publish: 1 },
           saturated: [],
         },
         day: {
+          startedAt: 1729958400000,
+          windowMs: 86400000,
+          expiresAt: 1730044800000,
           totals: { view: 10, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
           quotas: { view: 150, like: 3, collect: 25, comment: 8, follow: 15, publish: 1 },
           saturated: ['like', 'publish'],
@@ -287,9 +300,16 @@ test('今日小结：收到账号 dailyUsage 后优先显示账号今日，并�
   assert.match($(w, '#usage-limit').textContent ?? '', /分钟/);
   assert.match($(w, '#usage-limit').textContent ?? '', /今日/);
   assert.ok($(w, '#usage-limit').classList.contains('hit'));
+  assert.ok($(w, '#quota-windows').classList.contains('hidden'), 'collapsed card should only show daily totals');
+  $(w, '#daily-summary').click();
+  await tick();
   assert.ok(!$(w, '#quota-windows').classList.contains('hidden'));
+  assert.equal(w.document.querySelectorAll('.quota-window-detail').length, 4);
+  assert.equal(w.document.querySelectorAll('.qwd-row').length, 24);
   assert.match($(w, '#quota-windows').textContent ?? '', /单场/);
   assert.match($(w, '#quota-windows').textContent ?? '', /小时/);
+  assert.match($(w, '#quota-windows').textContent ?? '', /2\/-/);
+  assert.match($(w, '#quota-windows').textContent ?? '', /10\/60/);
   assert.equal($(w, '#views').textContent, '10');
   assert.equal($(w, '#likes').textContent, '3');
   assert.equal($(w, '#follows').textContent, '2');
@@ -297,6 +317,42 @@ test('今日小结：收到账号 dailyUsage 后优先显示账号今日，并�
   assert.equal($(w, '#likes-cap').textContent, '/3');
   assert.ok($(w, '#likes').closest('.kpi')?.classList.contains('saturated'));
   assert.ok($(w, '#publishes').closest('.kpi')?.classList.contains('saturated'));
+  w.Date.now = originalNow;
+});
+
+test('今日小结：过期分钟窗口不再作为当前已达上限展示', async () => {
+  const now = 1730000120000;
+  const { w, pushStatus } = await boot();
+  const originalNow = w.Date.now;
+  w.Date.now = () => now;
+  try {
+    pushStatus(makeStatus({
+      dailyUsage: {
+        asOf: now,
+        quotaLevel: 'normal',
+        totals: { view: 11, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
+        quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+        saturated: [],
+        windows: {
+          minute: {
+            startedAt: now - 120000,
+            windowMs: 60000,
+            expiresAt: now - 60000,
+            totals: { view: 8, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
+            quotas: { view: 8, like: 3, collect: 2, comment: 1, follow: 1, publish: 1 },
+            saturated: ['view'],
+          },
+        },
+      },
+    }));
+    assert.match($(w, '#usage-limit').textContent ?? '', /额度正常/);
+    assert.ok(!$(w, '#usage-limit').classList.contains('hit'));
+    $(w, '#daily-summary').click();
+    await tick();
+    assert.match($(w, '#quota-windows').textContent ?? '', /待刷新/);
+  } finally {
+    w.Date.now = originalNow;
+  }
 });
 
 test('账号无昵称 → 标题带显示「账号 …尾4位」，绝不摆长 id', async () => {
