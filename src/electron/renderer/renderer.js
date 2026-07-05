@@ -187,6 +187,29 @@ function parseUsageTime(value, fallback) {
   return Date.parse(fallback || '') || Date.now();
 }
 
+function parseOptionalTime(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function timeHint(at, now) {
+  const diff = at - now;
+  if (diff > 0) {
+    const seconds = Math.ceil(diff / 1000);
+    if (seconds < 90) return `约 ${seconds} 秒后`;
+    const minutes = Math.ceil(seconds / 60);
+    if (minutes < 90) return `约 ${minutes} 分钟后`;
+    const hours = Math.ceil(minutes / 60);
+    if (hours < 24) return `约 ${hours} 小时后`;
+  }
+  return new Date(at).toLocaleTimeString();
+}
+
+function refreshMeta(refreshAt, now) {
+  if (refreshAt === null) return '等待云端快照';
+  if (refreshAt > now) return `${timeHint(refreshAt, now)}刷新`;
+  return `${new Date(refreshAt).toLocaleTimeString()} 应已刷新，等待云端快照`;
+}
+
 function usageView(status) {
   const daily = status.dailyUsage;
   const hasDaily = Boolean(daily && daily.totals && typeof daily.totals === 'object');
@@ -267,7 +290,9 @@ function quotaWindowView(item, window, now) {
   const quotas = window.quotas && typeof window.quotas === 'object' ? window.quotas : {};
   const saturated = new Set(Array.isArray(window.saturated) ? window.saturated : []);
   const active = item.key === 'session' ? window.active !== false : true;
-  const expiresAt = typeof window.expiresAt === 'number' && Number.isFinite(window.expiresAt) ? window.expiresAt : null;
+  const expiresAt = parseOptionalTime(window.expiresAt);
+  const refreshAt = parseOptionalTime(window.refreshAt);
+  const releaseAt = parseOptionalTime(window.releaseAt);
   const expired = (item.key === 'minute' || item.key === 'hour') && expiresAt !== null && expiresAt <= now;
   const rows = [];
   const capped = [];
@@ -289,7 +314,10 @@ function quotaWindowView(item, window, now) {
   const ratio = !expired && active ? (worst?.ratio ?? 0) : 0;
   const tone = expired || !active ? 'idle' : limited > 0 ? 'hit' : ratio >= 0.8 ? 'near' : 'ok';
   const state = expired ? '待刷新' : !active ? '未运行' : limited > 0 ? `已满 ${limited}项` : ratio >= 0.8 ? '临近' : '正常';
-  const meta = expired ? '等待云端快照' : (worst ? `${worst.label} ${worst.used}/${worst.cap}` : '无窗口上限');
+  const baseMeta = worst ? `${worst.label} ${worst.used}/${worst.cap}` : '无窗口上限';
+  const meta = expired
+    ? refreshMeta(refreshAt, now)
+    : (limited > 0 && releaseAt !== null && releaseAt > now ? `${baseMeta} · ${timeHint(releaseAt, now)}释放` : baseMeta);
   return {
     key: item.key,
     label: item.label,

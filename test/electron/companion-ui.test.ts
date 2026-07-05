@@ -301,6 +301,7 @@ test('今日小结：收到账号 dailyUsage 后优先显示账号今日，并�
           startedAt: 1729999941000,
           windowMs: 60000,
           expiresAt: 1730000061000,
+          releaseAt: 1730000042000,
           totals: { view: 3, like: 3, collect: 0, comment: 0, follow: 0, publish: 0 },
           quotas: { view: 8, like: 3, collect: 2, comment: 1, follow: 1, publish: 1 },
           saturated: ['like'],
@@ -340,6 +341,7 @@ test('今日小结：收到账号 dailyUsage 后优先显示账号今日，并�
   assert.match($(w, '#quota-windows').textContent ?? '', /小时/);
   assert.match($(w, '#quota-windows').textContent ?? '', /2\/-/);
   assert.match($(w, '#quota-windows').textContent ?? '', /10\/60/);
+  assert.match($(w, '#quota-windows').textContent ?? '', /释放/);
   assert.equal($(w, '#views').textContent, '10');
   assert.equal($(w, '#likes').textContent, '3');
   assert.equal($(w, '#follows').textContent, '2');
@@ -368,6 +370,7 @@ test('今日小结：过期分钟窗口不再作为当前已达上限展示', as
             startedAt: now - 120000,
             windowMs: 60000,
             expiresAt: now - 60000,
+            refreshAt: now + 30000,
             totals: { view: 8, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
             quotas: { view: 8, like: 3, collect: 2, comment: 1, follow: 1, publish: 1 },
             saturated: ['view'],
@@ -380,6 +383,7 @@ test('今日小结：过期分钟窗口不再作为当前已达上限展示', as
     $(w, '#daily-summary').click();
     await tick();
     assert.match($(w, '#quota-windows').textContent ?? '', /待刷新/);
+    assert.match($(w, '#quota-windows').textContent ?? '', /约 30 秒后刷新/);
   } finally {
     w.Date.now = originalNow;
   }

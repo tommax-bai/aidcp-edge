@@ -288,6 +288,8 @@ function normalizeUsageWindow(input) {
   if (typeof input.startedAt === 'number' && Number.isFinite(input.startedAt)) out.startedAt = input.startedAt;
   if (typeof input.windowMs === 'number' && Number.isFinite(input.windowMs) && input.windowMs > 0) out.windowMs = Math.floor(input.windowMs);
   if (typeof input.expiresAt === 'number' && Number.isFinite(input.expiresAt)) out.expiresAt = input.expiresAt;
+  if (typeof input.refreshAt === 'number' && Number.isFinite(input.refreshAt)) out.refreshAt = input.refreshAt;
+  if (typeof input.releaseAt === 'number' && Number.isFinite(input.releaseAt)) out.releaseAt = input.releaseAt;
   if (quotas) out.quotas = quotas;
   return out;
 }

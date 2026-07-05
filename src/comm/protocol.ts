@@ -172,6 +172,8 @@ export interface UiDailyUsageWindowStatus {
   startedAt?: number;
   windowMs?: number;
   expiresAt?: number;
+  refreshAt?: number;
+  releaseAt?: number;
   totals: UiDailyUsageCounts;
   quotas?: UiDailyUsageCounts;
   saturated?: UiDailyUsageAction[];

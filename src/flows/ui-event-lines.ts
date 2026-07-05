@@ -73,6 +73,8 @@ function sanitizeDailyUsageWindow(input: unknown): Record<string, unknown> | nul
   if (typeof source.startedAt === 'number' && Number.isFinite(source.startedAt)) output.startedAt = source.startedAt;
   if (typeof source.windowMs === 'number' && Number.isFinite(source.windowMs) && source.windowMs > 0) output.windowMs = Math.floor(source.windowMs);
   if (typeof source.expiresAt === 'number' && Number.isFinite(source.expiresAt)) output.expiresAt = source.expiresAt;
+  if (typeof source.refreshAt === 'number' && Number.isFinite(source.refreshAt)) output.refreshAt = source.refreshAt;
+  if (typeof source.releaseAt === 'number' && Number.isFinite(source.releaseAt)) output.releaseAt = source.releaseAt;
   if (Object.keys(quotas).length > 0) output.quotas = quotas;
   if (Array.isArray(source.saturated)) {
     output.saturated = source.saturated.filter((action) =>
