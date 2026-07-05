@@ -97,6 +97,36 @@ test('风控警戒 → 标题带染琥珀；异常 → 健康药丸「需要注�
   assert.ok($(w, '#health-pill').classList.contains('attention'));
 });
 
+test('异常退出详情在客户端内持久展示，且不把堆栈塞进主界面', async () => {
+  const summary = '启动失败：AdsPower browser/start 失败：code=-1 msg=[k1e0ero8] is being used by [tommax.bai@gmail.com] and is not allowed to open';
+  const { w } = await boot({
+    edge: 'warning',
+    cloud: 'disconnected',
+    session: 'idle',
+    lastMessage: 'at async main (file:///dist/main.js:102:44)',
+    edgeFailure: { summary, at: new Date().toISOString(), exitCode: 1 },
+  });
+  assert.equal(hidden($(w, '#edge-failure')), false, '异常详情应在主界面可见');
+  assert.match($(w, '#edge-failure-text').textContent ?? '', /browser\/start 失败/);
+  assert.match($(w, '#edge-failure-text').textContent ?? '', /tommax\.bai@gmail\.com/);
+  assert.doesNotMatch($(w, '#edge-failure').textContent ?? '', /at async/, '主界面不展示堆栈行');
+
+  $(w, '#health-pill').dispatchEvent(new w.Event('click'));
+  assert.match($(w, '#health-detail').textContent ?? '', /is being used/);
+});
+
+test('新启动状态会清除上一轮异常详情', async () => {
+  const { w, pushStatus } = await boot({
+    edge: 'warning',
+    session: 'idle',
+    edgeFailure: { summary: '启动失败：AdsPower API 不可达', at: new Date().toISOString(), exitCode: 1 },
+  });
+  assert.equal(hidden($(w, '#edge-failure')), false);
+  pushStatus(makeStatus({ edge: 'starting', session: 'running', cloud: 'disconnected', edgeFailure: null }));
+  assert.equal(hidden($(w, '#edge-failure')), true);
+  assert.equal($(w, '#edge-failure-text').textContent, '');
+});
+
 test('健康明细浮层点开可见五路人话状态', async () => {
   const { w } = await boot();
   assert.equal(hidden($(w, '#health-pop')), true, '默认收起');

@@ -154,6 +154,42 @@ body { margin: 0; }
 }
 .fresh { font-size: 11.5px; color: var(--faint); margin-top: 4px; font-variant-numeric: tabular-nums; min-height: 14px; }
 
+.edge-failure {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 13px;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #fff7f7, #fff);
+}
+.ef-mark {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: #fff;
+  background: #dc2626;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+.ef-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.ef-main strong { color: var(--bad-fg); font-size: 13px; }
+.ef-main span {
+  color: #5f2630;
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 /* 浏览循环 chip */
 .loop {
   display: flex; align-items: center; gap: 5px; flex-wrap: wrap;

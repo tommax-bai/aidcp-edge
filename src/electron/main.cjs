@@ -25,6 +25,7 @@ let restartPending = false;
 // 尤其治「核心启动窗口内点暂停」——此时核心的 SIGTERM handler 尚未安装，会被 signal 直接终止（signal!=null）
 // 而被误判为异常退出。
 let pausePending = false;
+let lastEdgeFailureLine = '';
 
 // AdsPower 官方下载页（客户端「下载 AdsPower」按钮外链）。
 const ADS_DOWNLOAD_URL = 'https://www.adspower.net/download';
@@ -177,6 +178,7 @@ const status = {
   risk: 'normal',
   edge: 'stopped',
   lastMessage: '边缘进程尚未运行。',
+  edgeFailure: null,
   updatedAt: new Date().toISOString(),
   // 陪伴式界面新增字段（形状兼容：旧字段全保留，旧渲染层忽略即可）。
   // account：账号身份（由核心「账号身份已确立」行带出，标题带展示）。
@@ -398,6 +400,55 @@ function presencePatch(text) {
   return { presence: { text, at: new Date().toISOString() } };
 }
 
+function clearEdgeFailurePatch() {
+  lastEdgeFailureLine = '';
+  return { edgeFailure: null };
+}
+
+function exitMessage(code, signal) {
+  return `边缘进程已退出${code === null ? '' : `（code ${code}`}${signal ? ` ${signal}` : ''}${code === null ? '' : '）'}。`;
+}
+
+function conciseFailureLine(message) {
+  const raw = String(message || '').trim();
+  if (!raw || /^at\s/.test(raw) || /^\(?node:/.test(raw)) return '';
+  let summary = raw
+    .replace(/\s+/g, ' ')
+    .replace(/^\[aidcp-edge\]\s*/, '')
+    .replace(/^启动失败:\s*Error:\s*/, '启动失败：')
+    .replace(/^Error:\s*/, '')
+    .replace(/\[aidcp-edge\]\s*/g, '');
+  if (!summary || /^at\s/.test(summary)) return '';
+  if (summary.length > 520) summary = `${summary.slice(0, 517)}...`;
+  return summary;
+}
+
+function rememberEdgeFailureCandidate(message, isError) {
+  const raw = String(message || '');
+  if (!isError && !/(启动失败|失败|不可达|not allowed|being used|no_target|code=-?\d+)/i.test(raw)) return;
+  const summary = conciseFailureLine(raw);
+  if (summary) lastEdgeFailureLine = summary;
+}
+
+function edgeFailurePatch(summary, extra = {}) {
+  const clean = conciseFailureLine(summary) || String(summary || '').trim();
+  if (!clean) return { edgeFailure: null };
+  return {
+    edgeFailure: {
+      summary: clean,
+      at: new Date().toISOString(),
+      ...extra,
+    },
+  };
+}
+
+function abnormalExitFailurePatch(code, signal) {
+  return edgeFailurePatch(lastEdgeFailureLine || exitMessage(code, signal), {
+    exitCode: code ?? null,
+    signal: signal ?? null,
+  });
+}
+
 // 活动流条目单独走 ui:activity 通道（无界流不塞进 status 对象）。
 function broadcastActivity(entry) {
   BrowserWindow.getAllWindows().forEach((window) => {
@@ -505,7 +556,14 @@ function startEdge() {
   // （拒绝/失败）推送会如实丢失，旧 pending/approved 卡若不清会永久滞留成陈卡；真在候审/已批的
   // 草稿由重连后的云端 hello 快照重新推回（pending/approved 可重建，终态不回放）。lastPublish
   // 历史态不清（持久数据，云端快照到位后以云端为准覆盖）。
-  updateStatus({ edge: 'starting', session: 'running', publish: null, lastMessage: '正在启动 aidcp-edge…', ...presencePatch('正在启动引擎…') });
+  updateStatus({
+    edge: 'starting',
+    session: 'running',
+    publish: null,
+    lastMessage: '正在启动 aidcp-edge…',
+    ...presencePatch('正在启动引擎…'),
+    ...clearEdgeFailurePatch(),
+  });
 
   edgeProcess.stdout.on('data', (chunk) => handleEdgeOutput(chunk.toString()));
   edgeProcess.stderr.on('data', (chunk) => handleEdgeOutput(chunk.toString(), true));
@@ -516,6 +574,7 @@ function startEdge() {
     const intentional = isQuitting || restartPending || pausePending;
     pausePending = false;
     const exitedAbnormally = !intentional && (signal != null || (code != null && code !== 0));
+    const message = exitMessage(code, signal);
     updateStatus({
       edge: exitedAbnormally ? 'warning' : 'stopped',
       cloud: 'disconnected',
@@ -523,8 +582,9 @@ function startEdge() {
       // 核心已退出 = 无在跑会话：把本地日志派生的 risk 徽标复位 normal（该徽标是日志关键词启发、非权威，
       // 真风控由云端单写），杜绝上一会话残留的「⚠」把徽标跨会话卡在「警戒」。
       risk: 'normal',
-      lastMessage: `边缘进程已退出${code === null ? '' : `（code ${code}`}${signal ? ` ${signal}` : ''}${code === null ? '' : '）'}。`,
+      lastMessage: message,
       ...presencePatch(status.session === 'paused' ? '已暂停，随时可以恢复' : '引擎已停止'),
+      ...(exitedAbnormally ? abnormalExitFailurePatch(code, signal) : clearEdgeFailurePatch()),
     });
     // 红线：异常退出（含连云失败 / adspower 未登录致诚实非零退出）不静默——主动弹窗 + 系统通知。
     if (exitedAbnormally) {
@@ -534,7 +594,7 @@ function startEdge() {
         : '请打开窗口查看日志 / 重新登录或重连云端。';
       surfaceFailure(
         'AIDCP Edge 已停止运行',
-        `边缘进程异常退出${code === null ? '' : `（code ${code}`}${signal ? ` ${signal}` : ''}${code === null ? '' : '）'}。${adspowerHint}`,
+        `${message}${status.edgeFailure && status.edgeFailure.summary ? `原因：${status.edgeFailure.summary}。` : ''}${adspowerHint}`,
       );
     }
     // 有意重启：旧进程退出后按当前设置起新流程。退出应用途中（isQuitting）绝不再起——
@@ -560,7 +620,7 @@ async function checkLoginAndStart() {
     const loggedIn = await hasXhsCookie();
     if (loggedIn) {
       stopLoginPoller();
-      updateStatus({ auth: 'logged in', lastMessage: '已检测到小红书登录，正在启动 aidcp-edge…' });
+      updateStatus({ auth: 'logged in', lastMessage: '已检测到小红书登录，正在启动 aidcp-edge…', ...clearEdgeFailurePatch() });
       startEdge();
       return true;
     }
@@ -578,16 +638,22 @@ async function checkLoginAndStart() {
 }
 
 async function launchChromeAndGateEdge() {
-  updateStatus({ provider: 'self' });
+  updateStatus({ provider: 'self', ...clearEdgeFailurePatch() });
   const launched = await launchChrome(app);
   if (!launched.ok) {
     // session 显式回 idle：stopAndRestart 曾乐观置 running，此处不清会残留绿色「运行中」与实际停止矛盾。
-    updateStatus({ auth: 'chrome missing', edge: 'stopped', session: 'idle', lastMessage: launched.error });
+    updateStatus({
+      auth: 'chrome missing',
+      edge: 'stopped',
+      session: 'idle',
+      lastMessage: launched.error,
+      ...edgeFailurePatch(launched.error || '未找到 Google Chrome，请安装后重启。'),
+    });
     // 红线：Chrome 缺失诚实暴露，不静默装作在跑。
     surfaceFailure('AIDCP Edge 无法启动', launched.error || '未找到 Google Chrome，请安装后重启。');
     return;
   }
-  updateStatus({ auth: 'checking', lastMessage: `Chrome 已启动，配置目录：${launched.profilePath}` });
+  updateStatus({ auth: 'checking', lastMessage: `Chrome 已启动，配置目录：${launched.profilePath}`, ...clearEdgeFailurePatch() });
   const loggedIn = await checkLoginAndStart();
   if (!loggedIn && !loginPoller) {
     loginPoller = setInterval(checkLoginAndStart, 5000);
@@ -597,7 +663,7 @@ async function launchChromeAndGateEdge() {
 // adspower（AdsPower 指纹浏览器）路径：不自起本机 Chrome、不做 9222 cookie 轮询；
 // 浏览器启动 / 登录态 / 身份确立全由核心进程经 AdsPower 本地 API 完成（未登录 → 核心诚实非零退出并弹窗）。
 function startAdsPowerFlow() {
-  updateStatus({ provider: 'adspower' });
+  updateStatus({ provider: 'adspower', ...clearEdgeFailurePatch() });
   if (!settings.adsProfileId || !settings.adsProfileId.trim()) {
     // 缺分身 ID 无法启动：诚实提示待配置，不静默假装在跑。
     updateStatus({
@@ -614,6 +680,7 @@ function startAdsPowerFlow() {
     lastMessage: '正在通过 AdsPower 启动指纹浏览器…',
     // 环境名现成可得：启动即点亮标题带账号标签，不用等核心身份确立。
     ...(settings.adsProfileName ? { account: { id: settings.adsProfileId, name: settings.adsProfileName, source: 'env' } } : {}),
+    ...clearEdgeFailurePatch(),
   });
   startEdge();
 }
@@ -632,7 +699,7 @@ function startFlow() {
 // 供「保存设置」「恢复」「重新登录」三处复用。
 function stopAndRestart(message, patch = {}) {
   stopLoginPoller();
-  updateStatus({ cloud: 'disconnected', session: 'running', lastMessage: message, ...presencePatch('正在重启引擎…'), ...patch });
+  updateStatus({ cloud: 'disconnected', session: 'running', lastMessage: message, ...presencePatch('正在重启引擎…'), ...clearEdgeFailurePatch(), ...patch });
   if (edgeProcess) {
     restartPending = true;
     edgeProcess.kill('SIGTERM');
@@ -653,11 +720,13 @@ function handleEdgeLogLine(message, isError = false) {
   // edge / session / risk 徽标，也不产 UI 事件——否则关闭 chatter 会把「已暂停/已停止」闪回
   // 「运行中/异常」，或让在场感在停机后还「活着」。正常在跑时才做状态推断。
   const stopping = isQuitting || restartPending || pausePending || !edgeProcess || status.session === 'paused';
+  if (!stopping) rememberEdgeFailureCandidate(message, isError);
   if (stopping) {
     updateStatus({ lastMessage: message });
     return;
   }
   const next = { edge: isError ? 'warning' : 'running', lastMessage: message };
+  if (!isError && status.edgeFailure) next.edgeFailure = null;
   if (message.includes('已连接云端') || message.includes('已握手')) next.cloud = 'connected';
   if (message.includes('连接失败') || message.includes('WS 已关闭') || message.includes('启动失败')) next.cloud = 'disconnected';
   if (
@@ -747,7 +816,7 @@ function handleEdgeLogLine(message, isError = false) {
 function pauseEdge() {
   // 暂停取消任何在途重启：否则核心退出回调会据 restartPending 复活它，把用户的暂停覆盖回运行。
   restartPending = false;
-  updateStatus({ session: 'paused', lastMessage: '已请求暂停，后台边缘进程将在安全点停止。', ...presencePatch('已暂停，随时可以恢复') });
+  updateStatus({ session: 'paused', lastMessage: '已请求暂停，后台边缘进程将在安全点停止。', ...presencePatch('已暂停，随时可以恢复'), ...clearEdgeFailurePatch() });
   if (edgeProcess) {
     // 暂停是「有意停止」：标记之，使其 SIGTERM 触发的退出不被误判为异常（尤其核心启动窗口内 handler 未装时）。
     pausePending = true;

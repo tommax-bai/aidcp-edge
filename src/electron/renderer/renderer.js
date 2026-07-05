@@ -44,6 +44,8 @@ const fields = {
   noticeTitle: document.querySelector('#notice-title'),
   noticeBody: document.querySelector('#notice-body'),
   noticeAction: document.querySelector('#notice-action'),
+  edgeFailure: document.querySelector('#edge-failure'),
+  edgeFailureText: document.querySelector('#edge-failure-text'),
   subtitle: document.querySelector('#subtitle'),
   // 陪伴式新增
   titlebar: document.querySelector('#titlebar'),
@@ -401,6 +403,18 @@ function renderNotice(status) {
   }
 }
 
+function failureSummary(status) {
+  const summary = status && status.edgeFailure && status.edgeFailure.summary;
+  return typeof summary === 'string' ? summary.trim() : '';
+}
+
+function renderEdgeFailure(status) {
+  const summary = failureSummary(status);
+  const show = Boolean(summary) && (status.edge === 'warning' || status.auth === 'chrome missing');
+  fields.edgeFailure.classList.toggle('hidden', !show);
+  fields.edgeFailureText.textContent = show ? summary : '';
+}
+
 // ─── 标题带：账号身份 + 健康合成 + 风控染色 ───
 function renderTitlebar(status) {
   const acct = status.account;
@@ -414,7 +428,7 @@ function renderTitlebar(status) {
   const health = uiLogic.synthesizeHealth(status);
   fields.healthLabel.textContent = health.label;
   fields.healthPill.className = `health-pill nodrag ${health.code}`;
-  fields.healthDetail.textContent = health.detail || '';
+  fields.healthDetail.textContent = failureSummary(status) || health.detail || '';
   fields.titlebar.className = `titlebar tone-${uiLogic.bandTone(status)}`;
 }
 
@@ -672,6 +686,7 @@ function render(status) {
   setBadge(fields.edge, 'edge', status.edge);
   renderUsageSummary(status); // 各计数一律 ?? 0 兜底（旧形状 / 部分补丁都不出空数字）
   addLogEntry(status.lastMessage);
+  renderEdgeFailure(status);
   renderTitlebar(status);
   renderPresence(status, now);
   renderLoop(status);

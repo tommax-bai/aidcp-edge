@@ -22,7 +22,8 @@
 
   function synthesizeHealth(status) {
     const s = status || {};
-    if (s.edge === 'warning') return { code: 'attention', label: '需要注意', detail: '引擎已停止，请查看开发者详情，或重新启动 / 重新登录' };
+    const edgeFailure = s.edgeFailure && typeof s.edgeFailure.summary === 'string' ? s.edgeFailure.summary.trim() : '';
+    if (s.edge === 'warning') return { code: 'attention', label: '需要注意', detail: edgeFailure || '引擎已停止，请查看开发者详情，或重新启动 / 重新登录' };
     if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需要注意', detail: AUTH_ATTENTION[s.auth] };
     if (s.risk === 'restricted' || s.risk === 'frozen') {
       return { code: 'attention', label: '需要注意', detail: s.risk === 'frozen' ? '账号被冻结，已停止操作' : '账号受限，已收紧动作' };
