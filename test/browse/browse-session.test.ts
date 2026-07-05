@@ -21,6 +21,7 @@ function fakeContent(): NoteContent {
     collects: 0,
     comments: 0,
     tags: [],
+    images: [],
     isLiked: false,
   };
 }

@@ -26,7 +26,7 @@ import type { PlanStep, ActionResultPayload } from '../../src/comm/protocol.js';
 const CARD: NoteCard = { position: 0, centerX: 10, centerY: 10, title: 'A', author: 'u', likes: '100', isVideo: false };
 
 function fakeContent(): NoteContent {
-  return { title: 'A', body: 'b', author: 'u', likes: 1, collects: 0, comments: 0, tags: [], isLiked: false };
+  return { title: 'A', body: 'b', author: 'u', likes: 1, collects: 0, comments: 0, tags: [], images: [], isLiked: false };
 }
 
 interface Harness {

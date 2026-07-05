@@ -1248,6 +1248,7 @@ export class BrowseSession {
       collectCount: content.collects,
       authorFollowed,
       ...(detailUrl ? { url: detailUrl } : {}),
+      ...(content.images.length > 0 ? { images: content.images } : {}),
     };
     this.deps.client.reportNoteDetail?.(payload);
     this.logger(

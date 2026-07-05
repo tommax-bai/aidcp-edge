@@ -28,9 +28,13 @@ export interface NoteContent {
   tags: string[];
   /** 笔记 URL */
   noteUrl?: string;
+  /** Original note carousel images, ordered and deduplicated. */
+  images: Array<{ index: number; url: string; width?: number; height?: number; alt?: string }>;
   /** 当前是否已点赞 */
   isLiked: boolean;
 }
+
+const NOTE_IMAGE_HARD_MAX = 9;
 
 /**
  * 解析中文计数文本为整数。
@@ -151,6 +155,87 @@ function attrOf(scope: Element, selectors: string[], attr: string): string {
   return '';
 }
 
+function parseSrcset(srcset: string | null | undefined): string {
+  if (!srcset) return '';
+  const first = srcset
+    .split(',')
+    .map((p) => p.trim().split(/\s+/)[0])
+    .find(Boolean);
+  return first ?? '';
+}
+
+function normalizeImageUrl(raw: string | null | undefined): string {
+  const s = (raw ?? '').trim();
+  if (!s) return '';
+  if (s.startsWith('//')) return `https:${s}`;
+  if (/^https?:\/\//i.test(s)) return s;
+  return '';
+}
+
+function numberAttr(img: HTMLImageElement, attr: 'width' | 'height'): number | undefined {
+  const fromProp = Number(img[attr]);
+  if (Number.isFinite(fromProp) && fromProp > 0) return Math.floor(fromProp);
+  const fromAttr = Number(img.getAttribute(attr));
+  return Number.isFinite(fromAttr) && fromAttr > 0 ? Math.floor(fromAttr) : undefined;
+}
+
+function isNonNoteImage(img: HTMLImageElement): boolean {
+  const container = img.closest('[class*="avatar"], [class*="user-avatar"], [class*="author"]');
+  if (container) return true;
+  if (img.closest('.swiper-slide-duplicate')) return true;
+  const cls = (img.getAttribute('class') || '').toLowerCase();
+  return cls.includes('avatar') || cls.includes('emoji');
+}
+
+/**
+ * Extract original note carousel image references. This only reads DOM URLs.
+ */
+export function extractNoteImages(container: Element, limit = NOTE_IMAGE_HARD_MAX): NoteContent['images'] {
+  const cap = Math.max(0, Math.min(Math.floor(limit), NOTE_IMAGE_HARD_MAX));
+  if (cap <= 0) return [];
+  const selectors = [
+    '.swiper-slide:not(.swiper-slide-duplicate) img',
+    'img.note-slider-img',
+    '.note-slider-img',
+    '[class*="media"] img',
+  ];
+  const nodes: HTMLImageElement[] = [];
+  const seenNode = new Set<Element>();
+  for (const sel of selectors) {
+    for (const el of Array.from(container.querySelectorAll(sel))) {
+      const element = el as Element;
+      const img = (element.tagName?.toUpperCase() === 'IMG' ? element : element.querySelector?.('img')) as HTMLImageElement | null;
+      if (!img || seenNode.has(img)) continue;
+      seenNode.add(img);
+      nodes.push(img);
+    }
+  }
+
+  const seenUrl = new Set<string>();
+  const images: NoteContent['images'] = [];
+  for (const img of nodes) {
+    if (isNonNoteImage(img)) continue;
+    const url = normalizeImageUrl(
+      img.currentSrc || img.getAttribute('src') || parseSrcset(img.getAttribute('srcset')) || img.getAttribute('data-src'),
+    );
+    if (!url || seenUrl.has(url)) continue;
+    seenUrl.add(url);
+    const alt = (img.getAttribute('alt') || '').trim();
+    const item: NoteContent['images'][number] = {
+      index: images.length,
+      url,
+    };
+    const width = numberAttr(img, 'width');
+    const height = numberAttr(img, 'height');
+    if (width) item.width = width;
+    if (height) item.height = height;
+    if (alt) item.alt = alt;
+    images.push(item);
+    if (images.length >= cap) break;
+  }
+  return images;
+}
+
 /**
  * 在某个数字计数控件附近取其计数文本：先取控件自身文本，
  * 命中类似 like-wrapper / collect-wrapper / comment-wrapper 的语义容器。
@@ -251,6 +336,7 @@ export async function extractNoteContent(dom: DomProvider): Promise<NoteContent>
 
   const tags = extractTags(`${title} ${body}`);
   const isLiked = detectLiked(container);
+  const images = extractNoteImages(container);
 
   const content: NoteContent = {
     title,
@@ -260,6 +346,7 @@ export async function extractNoteContent(dom: DomProvider): Promise<NoteContent>
     collects,
     comments,
     tags,
+    images,
     isLiked,
   };
   if (noteUrl) content.noteUrl = noteUrl;

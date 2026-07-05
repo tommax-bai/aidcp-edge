@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { buildDom } from '../helpers.js';
 import {
   extractNoteContent,
+  extractNoteImages,
   parseCount,
   extractTags,
   textWithNewlines,
@@ -142,4 +143,25 @@ test('countNear(点赞数): 两遍扫描优先 like-wrapper 精确容器，不�
   assert.equal(c.likes, 123, 'likes 应取 like-wrapper(123)，而非靠前的 entry-like-tip(999)');
   assert.equal(c.collects, 66);
   assert.equal(c.comments, 88);
+});
+test('extractNoteImages: keeps note carousel images ordered, deduped, and filtered', () => {
+  const { document } = buildDom(`
+    <div class="note-detail-mask">
+      <div class="swiper-slide"><img class="note-slider-img" src="//img.xhs/a.jpg" width="1080" height="1440" alt="first image"></div>
+      <div class="swiper-slide"><img class="note-slider-img" src="https://img.xhs/b.jpg"></div>
+      <div class="swiper-slide"><img class="note-slider-img" src="https://img.xhs/a.jpg"></div>
+      <div class="swiper-slide swiper-slide-duplicate"><img class="note-slider-img" src="https://img.xhs/clone.jpg"></div>
+      <div class="author-wrapper"><img src="https://img.xhs/avatar.jpg"></div>
+      <div class="swiper-slide"><img class="emoji" src="https://img.xhs/emoji.png"></div>
+      <div class="swiper-slide"><img class="note-slider-img" src="data:image/png;base64,abc"></div>
+      <div class="swiper-slide"><img class="note-slider-img" src="blob:https://xhs/abc"></div>
+      <div class="media-box"><img srcset="https://img.xhs/c-small.jpg 1x, https://img.xhs/c-large.jpg 2x"></div>
+    </div>`);
+  const root = document.querySelector('.note-detail-mask') as Element;
+
+  assert.deepEqual(extractNoteImages(root), [
+    { index: 0, url: 'https://img.xhs/a.jpg', width: 1080, height: 1440, alt: 'first image' },
+    { index: 1, url: 'https://img.xhs/b.jpg' },
+    { index: 2, url: 'https://img.xhs/c-small.jpg' },
+  ]);
 });
