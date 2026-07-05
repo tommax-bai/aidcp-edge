@@ -807,6 +807,40 @@ export class BrowseSession {
     return typeof res.result?.value === 'string' ? res.result.value : '';
   }
 
+  private parseNoteIdFromUrl(u?: string): string | undefined {
+    const m = (u ?? '').match(/\/(?:explore|discovery\/item)\/([A-Za-z0-9]+)/);
+    return m ? m[1] : undefined;
+  }
+
+  private async reportCurrentNoteImageSnapshot(noteId: string): Promise<void> {
+    let content: NoteContent;
+    try {
+      content = await this.deps.noteExtractor(this.deps.dom);
+    } catch (err) {
+      this.logger(`[browse] note.browse_images: 图片快照抽取失败：${(err as Error).message}`);
+      return;
+    }
+    if (content.images.length === 0) return;
+    const pageUrl = await this.evalUrl();
+    const detailUrl = pageUrl.includes('xsec_token=') ? pageUrl : undefined;
+    const realNoteId = noteId || this.parseNoteIdFromUrl(content.noteUrl) || this.parseNoteIdFromUrl(pageUrl);
+    if (!realNoteId) return;
+    const payload: NoteDetailPayload = {
+      noteId: realNoteId,
+      title: content.title,
+      content: content.body,
+      mediaType: 'image_text',
+      author: content.author,
+      likeCount: content.likes,
+      collectCount: content.collects,
+      ...(detailUrl ? { url: detailUrl } : {}),
+      images: content.images,
+      refreshOnly: true,
+    };
+    this.deps.client.reportNoteDetail?.(payload);
+    this.logger(`[browse] note.browse_images: 已刷新参考图快照 noteId=${payload.noteId} images=${content.images.length}`);
+  }
+
   /**
    * 主循环：上报可见卡片 → 等待 Cloud 命令 → 执行 → 上报完成 → 循环。
    * 所有决策由 Cloud 端做出，Edge 只负责执行。
@@ -1249,13 +1283,9 @@ export class BrowseSession {
 
     // 解析真实 noteId：优先 feed 卡片 → modal 内 explore 链接 → 当前页面 URL → 合成兜底。
     // 真实 noteId 是云端 visited 去重的主键，缺失会导致"反复打开同一张卡"的死循环。
-    const parseNoteId = (u?: string): string | undefined => {
-      const m = (u ?? '').match(/\/(?:explore|discovery\/item)\/([A-Za-z0-9]+)/);
-      return m ? m[1] : undefined;
-    };
     // 当前地址栏 URL（含 xsec_token，详情态）：既用于解析 noteId，也作 note.detail 的可点链接来源（change interaction-feed-enrichment）。
     const pageUrl = await this.evalUrl();
-    const realNoteId = card.noteId ?? parseNoteId(content.noteUrl) ?? parseNoteId(pageUrl);
+    const realNoteId = card.noteId ?? this.parseNoteIdFromUrl(content.noteUrl) ?? this.parseNoteIdFromUrl(pageUrl);
     // 诚实置空：仅当地址栏链接确含 xsec_token 才作为真实可点链接上报；否则不带，绝不用裸 id 拼打不开的假链接。
     const detailUrl = pageUrl.includes('xsec_token=') ? pageUrl : undefined;
 
@@ -1875,6 +1905,7 @@ export class BrowseSession {
         await this.sleep(800);
       }
       this.logger(`[browse] 浏览了 ${viewed}/${total} 张图片`);
+      await this.reportCurrentNoteImageSnapshot(_noteId);
       this.deps.client.reportActionCompleted?.({ action: 'browse_images', ok: true, reason: `browsed=${viewed}` });
     } catch (err) {
       this.logger(`[browse] 浏览图片失败：${(err as Error).message}`);
@@ -2473,5 +2504,4 @@ export class BrowseSession {
     }
   }
 }
-
 

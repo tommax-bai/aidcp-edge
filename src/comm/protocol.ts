@@ -746,6 +746,8 @@ export interface NoteDetailPayload {
   url?: string;
   /** Original carousel image references; omitted/empty when not observed. */
   images?: NoteImagePayload[];
+  /** Refresh-only detail after carousel browsing; cloud MUST NOT count it as a new view. */
+  refreshOnly?: boolean;
 }
 
 export interface ProfileDetailPayload {

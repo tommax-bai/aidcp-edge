@@ -714,6 +714,13 @@ test('browse-session: search.execute 上报前等待搜索卡片 noteId 水合',
 
 test('browse-session: note.browse_images 命中轮播 → 如实回报 browsed=N', async () => {
   const h = makeHarness();
+  h.deps.noteExtractor = (async () => ({
+    ...fakeContent(),
+    images: [
+      { index: 0, url: 'https://img.test/a.jpg' },
+      { index: 1, url: 'https://img.test/b.jpg' },
+    ],
+  })) as unknown as BrowseSessionDeps['noteExtractor'];
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
     makeEnvelope('note.browse_images', 'bi1', 0, { noteId: 'n1', count: 4 }),
@@ -722,6 +729,9 @@ test('browse-session: note.browse_images 命中轮播 → 如实回报 browsed=N
   const act = h.completedActions.find(a => a.action === 'browse_images');
   assert.ok(act && act.ok, '命中轮播应 ok:true');
   assert.match(String(act!.reason ?? ''), /browsed=/, '应回报实际浏览张数');
+  assert.equal(h.reportedDetails.length, 1, '成功翻图后应刷新参考图快照');
+  assert.equal(h.reportedDetails[0].refreshOnly, true);
+  assert.deepEqual(h.reportedDetails[0].images?.map((img) => img.url), ['https://img.test/a.jpg', 'https://img.test/b.jpg']);
 });
 
 test('browse-session: note.browse_images 无轮播 → no_target 不假报成功', async () => {
@@ -745,6 +755,7 @@ test('browse-session: note.browse_images 无轮播 → no_target 不假报成功
   ]);
   const act = h.completedActions.find(a => a.action === 'browse_images');
   assert.ok(act && act.ok === false && act.reason === 'no_target', '无轮播应 ok:false reason:no_target');
+  assert.equal(h.reportedDetails.length, 0, '失败翻图不应伪造图片快照');
 });
 
 test('browse-session: note.scroll_comments 命中评论区 → 如实回报 scrolled=N', async () => {
