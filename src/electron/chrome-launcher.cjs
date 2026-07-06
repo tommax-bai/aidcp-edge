@@ -54,7 +54,7 @@ async function isCdpAlive() {
   } catch { return false; }
 }
 
-async function launchChrome(app) {
+async function launchChrome(app, opts = {}) {
   if (await isCdpAlive()) {
     return { ok: true, chromePath: '(already running)', profilePath: '(existing)', port: DEBUGGING_PORT };
   }
@@ -68,13 +68,18 @@ async function launchChrome(app) {
   fs.mkdirSync(profilePath, { recursive: true });
 
   if (!chromeProcess || chromeProcess.killed) {
-    chromeProcess = spawn(chromePath, [
+    const args = [
       `--remote-debugging-port=${DEBUGGING_PORT}`,
       `--user-data-dir=${profilePath}`,
       '--no-first-run',
       '--no-default-browser-check',
+      '--window-size=1440,980',
+      ...(opts.launchPosition && Number.isFinite(opts.launchPosition.left) && Number.isFinite(opts.launchPosition.top)
+        ? [`--window-position=${Math.floor(opts.launchPosition.left)},${Math.floor(opts.launchPosition.top)}`]
+        : []),
       LOGIN_URL,
-    ], {
+    ];
+    chromeProcess = spawn(chromePath, args, {
       detached: true,
       stdio: 'ignore',
       windowsHide: false,

@@ -47,6 +47,8 @@ interface Stub {
   restart: () => Promise<unknown>;
   relogin: () => Promise<unknown>;
   openAdsDownload: () => void;
+  showDrivenBrowser: () => Promise<{ ok: boolean; error?: string }>;
+  resetBrowserParking: () => Promise<{ ok: boolean; error?: string }>;
   adsStatus: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
   adsListProfiles: (opts?: unknown) => Promise<unknown>;
   adsOpenCreate: () => { launched: boolean } | Promise<{ launched: boolean }>;
@@ -56,7 +58,7 @@ interface Stub {
 }
 
 function makeStub(overrides: Partial<Stub> = {}): Stub {
-  const settings = { provider: 'adspower', adsProfileId: '', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'https://x' };
+  const settings = { provider: 'adspower', adsProfileId: '', adsApiKey: '', adsApiBase: '', browserParkingMode: 'edge-strip', adsDownloadUrl: 'https://x' };
   return {
     onStatusUpdate: () => undefined,
     getStatus: async () => makeStatus(),
@@ -68,6 +70,8 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     restart: async () => makeStatus({ edge: 'starting', session: 'running' }),
     relogin: async () => makeStatus(),
     openAdsDownload: () => undefined,
+    showDrivenBrowser: async () => ({ ok: false, error: '当前没有可控制的浏览器窗口' }),
+    resetBrowserParking: async () => ({ ok: false, error: '当前没有可控制的浏览器窗口' }),
     adsStatus: async () => ({ ok: true }),
     adsListProfiles: async () => ({ ok: true, profiles: [] }),
     adsOpenCreate: () => ({ launched: true }),
@@ -94,7 +98,7 @@ const $$ = (w: DOMWindow, sel: string) => Array.from(w.document.querySelectorAll
 const hidden = (el: HTMLElement) => el.classList.contains('hidden');
 
 test('中文化：新增控件文案齐全', () => {
-  for (const s of ['浏览器环境', 'AdsPower 状态', '检测', '刷新', '手动填写', '高级设置', '创建环境', '下载 AdsPower']) {
+  for (const s of ['浏览器环境', 'AdsPower 状态', '检测', '刷新', '手动填写', '高级设置', '创建环境', '下载 AdsPower', '窗口停放', '副屏停放', '边缘停放', '完全移出']) {
     assert.ok(html.includes(s), `index.html 应含「${s}」`);
   }
 });
@@ -224,6 +228,37 @@ test('self 模式：无分身校验，启动直接先存再起', async () => {
   await tick();
   await tick();
   assert.deepEqual(calls, ['save', 'start']);
+});
+
+test('窗口停放：旧设置缺值时默认边缘停放', async () => {
+  const w = await boot(makeStub({
+    getSettings: async () => ({ provider: 'adspower', adsProfileId: '', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x' }),
+  }));
+  assert.ok($(w, '#parking-edge-strip').classList.contains('active'));
+});
+
+test('窗口停放：选择完全移出后保存带 browserParkingMode', async () => {
+  let savedPatch: { browserParkingMode?: string } = {};
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped', provider: 'self' }),
+    getSettings: async () => ({ provider: 'self', adsProfileId: '', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x' }),
+    saveSettings: async (patch) => { savedPatch = patch as { browserParkingMode?: string }; return { provider: 'self', saveOk: true }; },
+    start: async () => makeStatus({ provider: 'self', edge: 'starting' }),
+  }));
+  $(w, '#parking-offscreen').dispatchEvent(new w.Event('click'));
+  $(w, '#session-fab').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.equal(savedPatch.browserParkingMode, 'offscreen');
+});
+
+test('窗口停放：无可控浏览器时显示浏览器诚实失败', async () => {
+  const w = await boot(makeStub({
+    showDrivenBrowser: async () => ({ ok: false, error: '当前没有可控制的浏览器窗口' }),
+  }));
+  $(w, '#browser-show').dispatchEvent(new w.Event('click'));
+  await tick();
+  assert.match($(w, '#settings-msg').textContent ?? '', /当前没有可控制的浏览器窗口/);
 });
 
 test('悬浮 fab 三态：停止→启动 / 运行与休息→暂停 / 暂停→恢复', async () => {

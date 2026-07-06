@@ -61,7 +61,7 @@ test('AdsPowerProvider.launch 成功 → 端点带 debug_port、实例非 reused
     { apiBase: 'http://x:50325', userId: 'k1', apiKey: 'secret' },
     { fetchImpl, ...noopDeps },
   );
-  const out = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  const out = await provider.launch({ host: '127.0.0.1', port: 9222, windowPosition: { left: 1902, top: 0 } });
   assert.equal(out.endpoint.port, 61332);
   assert.equal(out.endpoint.host, '127.0.0.1');
   assert.equal(out.instance.reused, false);
@@ -70,6 +70,7 @@ test('AdsPowerProvider.launch 成功 → 端点带 debug_port、实例非 reused
   assert.ok(startCall);
   const decoded = decodeURIComponent(startCall.url);
   assert.match(decoded, /--window-size=1440,980/);
+  assert.match(decoded, /--window-position=1902,0/);
   assert.match(decoded, /xiaohongshu\.com/);
   assert.equal(startCall.headers?.Authorization, 'Bearer secret');
 });

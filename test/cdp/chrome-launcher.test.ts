@@ -102,6 +102,17 @@ test('buildChromeArgs headless 时追加 --headless=new', () => {
   assert.ok(args.includes('--headless=new'));
 });
 
+test('buildChromeArgs 带窗口位置提示', () => {
+  const args = buildChromeArgs({
+    port: 1,
+    profileDir: 'd',
+    headless: false,
+    windowPosition: { left: 1902, top: 0 },
+    startUrl: 'u',
+  });
+  assert.ok(args.includes('--window-position=1902,0'));
+});
+
 test('buildChromeArgs 含反检测启动参数且不含 --enable-automation', () => {
   const args = buildChromeArgs({
     port: 9222,

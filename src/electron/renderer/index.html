@@ -183,6 +183,19 @@
             <button id="prov-self" class="seg" type="button">本机 Chrome</button>
           </div>
         </div>
+        <div class="field parking-field">
+          <span class="field-label">窗口停放</span>
+          <div class="seg-group parking-options">
+            <button id="parking-display" class="seg parking-btn" type="button" data-mode="parking-display">副屏停放</button>
+            <button id="parking-edge-strip" class="seg parking-btn" type="button" data-mode="edge-strip">边缘停放</button>
+            <button id="parking-offscreen" class="seg parking-btn" type="button" data-mode="offscreen">完全移出</button>
+          </div>
+          <span class="parking-hint">默认边缘停放；副屏不可用会自动降级，完全移出会做可见性校验。</span>
+          <div class="parking-actions">
+            <button id="browser-show" class="secondary small" type="button">显示浏览器</button>
+            <button id="browser-reset-parking" class="secondary small" type="button">重置位置</button>
+          </div>
+        </div>
         <div id="ads-config" class="ads-config">
           <div class="ads-probe ads-full">
             <span class="field-label">AdsPower 状态</span>

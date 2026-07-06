@@ -21,6 +21,7 @@ export interface BrowserLaunchOptions {
   chromePath?: string;
   profileDir?: string;
   headless?: boolean;
+  windowPosition?: { left: number; top: number };
   loginTimeoutMs?: number;
   /** CDP 就绪轮询超时（adspower 用），默认 15000。 */
   readyTimeoutMs?: number;
@@ -50,6 +51,7 @@ export class SelfChromeProvider implements BrowserProvider {
       chromePath: opts.chromePath,
       profileDir: opts.profileDir,
       headless: opts.headless,
+      windowPosition: opts.windowPosition,
       loginTimeoutMs: opts.loginTimeoutMs,
     });
     // self 模式下 Chrome 绑定在传入端口上，attach 端点即传入端点。
@@ -127,7 +129,11 @@ export class AdsPowerProvider implements BrowserProvider {
   async launch(opts: BrowserLaunchOptions): Promise<LaunchedBrowser> {
     const startUrl = this.cfg.startUrl ?? DEFAULT_ADS_START_URL;
     // 固定桌面视口（否则落进小红书窄屏布局变体致定位/滚动失效）+ 起始页，均经 launch_args 传入。
-    const launchArgs = ['--window-size=1440,980', startUrl];
+    const launchArgs = ['--window-size=1440,980'];
+    if (opts.windowPosition) {
+      launchArgs.push(`--window-position=${Math.floor(opts.windowPosition.left)},${Math.floor(opts.windowPosition.top)}`);
+    }
+    launchArgs.push(startUrl);
     this.log(`[aidcp-edge] 请求 AdsPower browser/start profile=${this.cfg.userId} ...`);
     const data = await this.api<AdsStartData>('browser/start', {
       user_id: this.cfg.userId,

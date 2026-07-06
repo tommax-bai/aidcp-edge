@@ -102,9 +102,13 @@ const settingsUi = {
   adsCreate: document.querySelector('#ads-create'),
   adsTemplate: document.querySelector('#ads-template'),
   adsCreateMsg: document.querySelector('#ads-create-msg'),
+  parkingButtons: Array.from(document.querySelectorAll('.parking-btn')),
+  browserShow: document.querySelector('#browser-show'),
+  browserResetParking: document.querySelector('#browser-reset-parking'),
   applyRestart: document.querySelector('#apply-restart'),
   msg: document.querySelector('#settings-msg'),
 };
+const PARKING_MODES = new Set(['parking-display', 'edge-strip', 'offscreen']);
 
 // 状态码保持英文（供 CSS 上色 + main 侧判断），展示文案在此本地化。className 仍用原始码不动色。
 const STATUS_LABELS = {
@@ -773,6 +777,7 @@ async function saveCurrentSettings() {
   const provider = selectedProvider();
   const saved = await window.aidcpEdge.saveSettings({
     provider,
+    browserParkingMode: selectedParkingMode(),
     adsProfileId: settingsUi.adsProfile.value.trim(),
     adsProfileName: selectedProfileName,
     adsApiKey: settingsUi.adsApiKey.value,
@@ -808,6 +813,19 @@ function selectedProvider() {
   return settingsUi.provAdspower.classList.contains('active') ? 'adspower' : 'self';
 }
 
+function selectedParkingMode() {
+  const active = settingsUi.parkingButtons.find((btn) => btn.classList.contains('active'));
+  const mode = active && active.dataset ? active.dataset.mode : '';
+  return PARKING_MODES.has(mode) ? mode : 'edge-strip';
+}
+
+function applyParkingSelection(mode) {
+  const safe = PARKING_MODES.has(mode) ? mode : 'edge-strip';
+  for (const btn of settingsUi.parkingButtons) {
+    btn.classList.toggle('active', btn.dataset.mode === safe);
+  }
+}
+
 function promptMissingAdsProfile() {
   settingsUi.msg.textContent = '请先选择一个环境，或在「高级设置」里打开「手动填写」填分身 ID。';
   openDrawer();
@@ -828,6 +846,7 @@ function applySettings(s) {
   settingsUi.adsProfile.value = s.adsProfileId || '';
   settingsUi.adsApiKey.value = s.adsApiKey || '';
   settingsUi.adsApiBase.value = s.adsApiBase || '';
+  applyParkingSelection(s.browserParkingMode || 'edge-strip');
   updateProfileDisplay();
   editingProvider = null;
   dirty = false;
@@ -878,6 +897,26 @@ settingsUi.adsProfile.addEventListener('input', () => {
 });
 settingsUi.adsApiBase.addEventListener('input', markDirty);
 settingsUi.adsApiKey.addEventListener('input', markDirty);
+for (const btn of settingsUi.parkingButtons) {
+  btn.addEventListener('click', () => {
+    applyParkingSelection(btn.dataset.mode);
+    markDirty();
+  });
+}
+
+async function runBrowserRecovery(action) {
+  const api = action === 'show' ? window.aidcpEdge.showDrivenBrowser : window.aidcpEdge.resetBrowserParking;
+  if (typeof api !== 'function') return;
+  const label = action === 'show' ? '显示浏览器' : '重置浏览器位置';
+  try {
+    const r = await api();
+    settingsUi.msg.textContent = r && r.ok ? `${label}指令已发送。` : `${label}失败：${(r && r.error) || '当前没有可控制的浏览器窗口'}`;
+  } catch (e) {
+    settingsUi.msg.textContent = `${label}失败：${(e && e.message) || e}`;
+  }
+}
+settingsUi.browserShow.addEventListener('click', () => runBrowserRecovery('show'));
+settingsUi.browserResetParking.addEventListener('click', () => runBrowserRecovery('reset'));
 
 // ─── AdsPower 探测 / 环境列表 / 新建入口 ───
 
