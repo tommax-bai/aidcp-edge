@@ -68,7 +68,9 @@ npm run typecheck
 chrome --remote-debugging-port=9222 --user-data-dir=/tmp/aidcp-profile \
   --disable-blink-features=AutomationControlled
 
-# 2) 启动 edge（连云地址默认 ws://121.89.85.150:8787，可由 AIDCP_CLOUD_URL 覆盖）
+# 2) 启动 edge（显式选择 dev 或 ol）
+# dev: AIDCP_CLOUD_URL=ws://121.89.85.150:8787 npm start
+# ol:  AIDCP_CLOUD_URL=ws://123.56.253.183:8787 npm start
 npm start
 ```
 
@@ -84,7 +86,8 @@ const session = await attachToPage({ host: '127.0.0.1', port: 9222 });
 // session.dom / session.executor 可直接喂给 LocatingEngine
 ```
 
-> 关键环境变量：`AIDCP_CLOUD_URL`（连云地址）、`AIDCP_CDP_HOST/PORT`、`AIDCP_CHROME_PROFILE`、
+> 关键环境变量：`AIDCP_CLOUD_URL`（连云地址；dev=`ws://121.89.85.150:8787`，ol=`ws://123.56.253.183:8787`）、
+> `AIDCP_CDP_HOST/PORT`、`AIDCP_CHROME_PROFILE`、
 > `AIDCP_AUTO_BROWSE`、`AIDCP_REAL_PUBLISH`。详见总览仓 `aidcp/docs/handoff-2026-06-05.md`。
 
 ## 与云端的关系
@@ -94,4 +97,5 @@ Qwen LLM 推理、风控、锚点持久化集中在 **aidcp-cloud**。两端通�
 消息格式见总览仓 `aidcp/docs/protocol.md`。
 
 > 约束：CDP 一律走原生 WebSocket；不引入重型浏览器自动化框架，保持边缘轻量。
-> 部署口径：本地只跑 edge 连 ECS 上的 cloud（`ws://121.89.85.150:8787`），本地不起 cloud。
+> 部署口径：本地只跑 edge 连命名 ECS target 上的 cloud，本地不起 cloud。dev 连接
+> `ws://121.89.85.150:8787`；ol 连接 `ws://123.56.253.183:8787` 或后续 ol 域名。
