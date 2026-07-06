@@ -1032,6 +1032,7 @@ export class BrowseSession {
       case 'page.scroll': {
         const payload = env.payload as PageScrollPayload;
         this.logger(`[browse] 命令: page.scroll (${payload.reason ?? ''})`);
+        if (payload.reason === 'resume_redrive') await this.ensureExplore();
         await this.ensureFeedDwell(payload.dwellMs); // 翻页前看完本批新卡（feed-scroll-card-floor）
         await this.deps.scroller.scrollNext();
         await this.waitForCards(5000);

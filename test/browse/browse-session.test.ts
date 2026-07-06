@@ -1477,6 +1477,53 @@ test('browse-session: session.end 收尾竞态中收到 page.scroll → 停稳�
   await new Promise((r) => setTimeout(r, 10));
 });
 
+test('browse-session: 发布续场 page.scroll 在创作平台页时先回 explore feed 再滚动', async () => {
+  const h = makeHarness();
+  let currentUrl = 'https://www.xiaohongshu.com/explore';
+  const navigates: string[] = [];
+  const scrollUrls: string[] = [];
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Page.navigate') {
+        const url = String(params.url ?? '');
+        currentUrl = url;
+        navigates.push(url);
+        return {} as never;
+      }
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr === 'location.href') return { result: { value: currentUrl } } as never;
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        return { result: { value: currentUrl } } as never;
+      }
+      return {} as never;
+    },
+  };
+  h.deps.scroller = {
+    getVisibleCards: async () => [CARD],
+    scrollNext: async () => {
+      scrollUrls.push(currentUrl);
+    },
+    openCard: async (c) => {
+      h.openedCards.push(c.position);
+    },
+  };
+
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+
+  currentUrl = 'https://creator.xiaohongshu.com/publish/publish?source=official&published=true';
+  await sess.onCloudCommand(makeEnvelope('page.scroll', 's1', 0, { reason: 'resume_redrive' }));
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.ok(navigates.includes('https://www.xiaohongshu.com/explore'), 'resume_redrive 应先导航回 explore feed');
+  assert.equal(scrollUrls.at(-1), 'https://www.xiaohongshu.com/explore', '滚动应发生在 feed 页，而不是 creator 发布页');
+
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
+  await done;
+});
+
 test('browse-session: 终态关闭（close）后收到迟到命令 → MUST NOT 复活循环', async () => {
   const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());
