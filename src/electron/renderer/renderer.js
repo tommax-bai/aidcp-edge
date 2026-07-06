@@ -252,25 +252,45 @@ function renderUsageItem(item, usage) {
   }
 }
 
+function compactLabels(labels) {
+  const unique = [...new Set(labels.filter(Boolean))];
+  if (unique.length <= 2) return unique.join('/');
+  return `${unique.slice(0, 2).join('/')}等${unique.length}项`;
+}
+
+function compactHitText(parts) {
+  if (parts.length <= 2) return parts.join(' · ');
+  return `${parts.slice(0, 2).join(' · ')} 等${parts.length}项`;
+}
+
+function quotaHitTexts(windowViews) {
+  const byAction = new Map();
+  for (const window of windowViews) {
+    for (const entry of window.rows.filter((row) => row.hit)) {
+      const current = byAction.get(entry.action) || { label: entry.label, windows: [] };
+      if (!current.windows.includes(window.label)) current.windows.push(window.label);
+      byAction.set(entry.action, current);
+    }
+  }
+  return [...byAction.values()].map((entry) => `${entry.label}已达${compactLabels(entry.windows)}上限`);
+}
+
 function usageLimitLabel(usage) {
   const windowViews = quotaWindowViews(usage);
   if (windowViews.length > 0) {
-    const hit = windowViews.filter((window) => window.limited > 0);
-    if (hit.length > 0) {
-      const labels = hit.map((window) => window.label);
-      return { tone: 'hit', text: `已达上限 · ${labels.join('/')}` };
-    }
+    const hit = quotaHitTexts(windowViews);
+    if (hit.length > 0) return { tone: 'hit', text: compactHitText(hit), title: hit.join(' · ') };
     return { tone: 'ok', text: '额度正常' };
   }
   if (!usage.quotas) return null;
-  let limited = 0;
+  const limited = [];
   for (const item of USAGE_ITEMS) {
     const cap = typeof usage.quotas[item.action] === 'number' ? count(usage.quotas[item.action]) : null;
     if (cap === null) continue;
     const used = count(usage.totals[item.action]);
-    if (usage.saturated.has(item.action) || used >= cap) limited += 1;
+    if (usage.saturated.has(item.action) || used >= cap) limited.push(item.label);
   }
-  return limited > 0 ? { tone: 'hit', text: `已达上限 · ${limited}项` } : { tone: 'ok', text: '额度正常' };
+  return limited.length > 0 ? { tone: 'hit', text: `${compactLabels(limited)}已达今日上限` } : { tone: 'ok', text: '额度正常' };
 }
 
 function quotaWindowViewsAt(usage, now) {
@@ -378,6 +398,7 @@ function renderUsageSummary(status) {
   if (fields.usageLimit) {
     fields.usageLimit.textContent = limit ? limit.text : '';
     fields.usageLimit.className = limit ? `summary-limit ${limit.tone}` : 'summary-limit hidden';
+    fields.usageLimit.title = limit ? limit.title || limit.text : '';
   }
   for (const item of USAGE_ITEMS) renderUsageItem(item, usage);
   renderQuotaWindows(usage);

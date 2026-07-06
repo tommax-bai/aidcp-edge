@@ -363,9 +363,9 @@ test('今日小结：收到账号 dailyUsage 后优先显示账号今日，并�
   }));
   assert.match($(w, '#usage-source').textContent ?? '', /账号今日/);
   assert.match($(w, '#usage-source').textContent ?? '', /标准档/);
-  assert.match($(w, '#usage-limit').textContent ?? '', /已达上限/);
-  assert.match($(w, '#usage-limit').textContent ?? '', /分钟/);
-  assert.match($(w, '#usage-limit').textContent ?? '', /今日/);
+  assert.match($(w, '#usage-limit').textContent ?? '', /点赞已达分钟\/今日上限/);
+  assert.match($(w, '#usage-limit').textContent ?? '', /发帖已达小时\/今日上限/);
+  assert.match($(w, '#usage-limit').title ?? '', /发帖已达小时\/今日上限/);
   assert.ok($(w, '#usage-limit').classList.contains('hit'));
   assert.ok($(w, '#quota-windows').classList.contains('hidden'), 'collapsed card should only show daily totals');
   $(w, '#daily-summary').click();
