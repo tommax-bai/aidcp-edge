@@ -69,6 +69,72 @@
   // ── 在场感动效门（红线：绝不用动效盖住停滞会话）──
   // 只有「会话在跑 + 引擎在跑 + 最近事件足够新鲜（与看门狗有界 idle 对齐，5 分钟）」才允许动。
   const PRESENCE_FRESH_MS = 5 * 60_000;
+  const QUOTA_ACTION_LABELS = {
+    view: '浏览',
+    like: '点赞',
+    collect: '收藏',
+    comment: '评论',
+    follow: '关注',
+    publish: '发帖',
+  };
+  const QUOTA_WINDOW_LABELS = {
+    session: '单场',
+    minute: '分钟',
+    hour: '小时',
+    day: '今日',
+  };
+  const QUOTA_WINDOW_PRIORITY = ['session', 'minute', 'hour', 'day'];
+  const QUOTA_ACTION_PRIORITY = ['view', 'like', 'collect', 'comment', 'follow', 'publish'];
+
+  function finiteNumber(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+
+  function count(value) {
+    const n = finiteNumber(value);
+    return n === null ? 0 : Math.max(0, Math.floor(n));
+  }
+
+  function objectOrEmpty(value) {
+    return value && typeof value === 'object' ? value : {};
+  }
+
+  function futureWaitText(at, nowMs) {
+    if (at === null) return '';
+    const diff = at - nowMs;
+    if (!(diff > 0)) return '';
+    const seconds = Math.ceil(diff / 1000);
+    if (seconds < 90) return `${seconds} 秒后`;
+    const minutes = Math.ceil(seconds / 60);
+    if (minutes < 90) return `${minutes} 分钟后`;
+    const hours = Math.ceil(minutes / 60);
+    if (hours < 24) return `${hours} 小时后`;
+    return `${Math.ceil(hours / 24)} 天后`;
+  }
+
+  function quotaRestPresenceText(status, nowMs) {
+    const windows = status && status.dailyUsage && objectOrEmpty(status.dailyUsage).windows;
+    if (!windows || typeof windows !== 'object') return '';
+    for (const windowKey of QUOTA_WINDOW_PRIORITY) {
+      const window = objectOrEmpty(windows[windowKey]);
+      if (!Object.keys(window).length) continue;
+      if (windowKey === 'session' && window.active === false) continue;
+      const expiresAt = finiteNumber(window.expiresAt);
+      if ((windowKey === 'minute' || windowKey === 'hour' || windowKey === 'day') && expiresAt !== null && expiresAt <= nowMs) continue;
+      const totals = objectOrEmpty(window.totals);
+      const quotas = objectOrEmpty(window.quotas);
+      const saturated = new Set(Array.isArray(window.saturated) ? window.saturated : []);
+      for (const action of QUOTA_ACTION_PRIORITY) {
+        const cap = finiteNumber(quotas[action]);
+        if (cap === null) continue;
+        const used = count(totals[action]);
+        if (!saturated.has(action) && used < count(cap)) continue;
+        const wait = futureWaitText(finiteNumber(window.releaseAt), nowMs);
+        return `${QUOTA_ACTION_LABELS[action]}已达到${QUOTA_WINDOW_LABELS[windowKey]}上限，休息中${wait ? `，预计 ${wait}继续` : ''}`;
+      }
+    }
+    return '';
+  }
 
   function presenceView(status, nowMs) {
     const s = status || {};
@@ -90,6 +156,14 @@
 
     if (p && p.text && hasFresh) {
       return { text: p.text, animate: true, fresh: `刚刚更新 · ${relTime(at, nowMs)}` };
+    }
+    const quotaRestText = quotaRestPresenceText(s, nowMs);
+    if (quotaRestText) {
+      return {
+        text: quotaRestText,
+        animate: false,
+        fresh: Number.isFinite(at) ? `最后动态 · ${relTime(at, nowMs)}` : '',
+      };
     }
     // 在跑但事件已不新鲜：如实说「没有新动态」，绝不假装仍在忙。
     return {

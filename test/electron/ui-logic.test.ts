@@ -97,6 +97,78 @@ test('在场感：运行中但事件过期（>5min）→ 动效关、如实说�
   assert.match(v.text, /没有新动态/);
 });
 
+test('在场感：运行中但事件过期 + 当前小时限额已满 → 文案说明上限和预计继续时间', () => {
+  const now = Date.now();
+  const v = uiLogic.presenceView(st({
+    presence: { text: '正在继续浏览…', at: new Date(now - 6 * 60_000).toISOString() },
+    dailyUsage: {
+      totals: { view: 38, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
+      saturated: [],
+      windows: {
+        hour: {
+          startedAt: now - 24 * 60_000,
+          windowMs: 3_600_000,
+          expiresAt: now + 36 * 60_000,
+          releaseAt: now + 36 * 60_000,
+          totals: { view: 38, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
+          quotas: { view: 38, like: 3, collect: 2, comment: 1, follow: 1, publish: 1 },
+          saturated: ['view'],
+        },
+      },
+    },
+  }), now);
+  assert.equal(v.animate, false);
+  assert.match(v.text, /浏览已达到小时上限，休息中/);
+  assert.match(v.text, /预计 36 分钟后继续/);
+});
+
+test('在场感：过期限额窗口不再解释为当前上限休息', () => {
+  const now = Date.now();
+  const v = uiLogic.presenceView(st({
+    presence: { text: '正在继续浏览…', at: new Date(now - 6 * 60_000).toISOString() },
+    dailyUsage: {
+      totals: { view: 8, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
+      saturated: [],
+      windows: {
+        minute: {
+          startedAt: now - 2 * 60_000,
+          windowMs: 60_000,
+          expiresAt: now - 60_000,
+          releaseAt: now + 30_000,
+          totals: { view: 8, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
+          quotas: { view: 8, like: 3, collect: 2, comment: 1, follow: 1, publish: 1 },
+          saturated: ['view'],
+        },
+      },
+    },
+  }), now);
+  assert.equal(v.animate, false);
+  assert.match(v.text, /没有新动态/);
+});
+
+test('在场感：没有上限数字时不臆造限额休息原因', () => {
+  const now = Date.now();
+  const v = uiLogic.presenceView(st({
+    presence: { text: '正在继续浏览…', at: new Date(now - 6 * 60_000).toISOString() },
+    dailyUsage: {
+      totals: { view: 8, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
+      saturated: [],
+      windows: {
+        hour: {
+          startedAt: now - 10 * 60_000,
+          windowMs: 3_600_000,
+          expiresAt: now + 50 * 60_000,
+          releaseAt: now + 36 * 60_000,
+          totals: { view: 8, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
+          saturated: ['view'],
+        },
+      },
+    },
+  }), now);
+  assert.equal(v.animate, false);
+  assert.match(v.text, /没有新动态/);
+});
+
 test('在场感：暂停 / 停止 / 需登录 → 静态诚实文案', () => {
   const now = Date.now();
   const paused = uiLogic.presenceView(st({ session: 'paused', edge: 'stopped', presence: { text: 'x', at: new Date(now - 8000).toISOString() } }), now);

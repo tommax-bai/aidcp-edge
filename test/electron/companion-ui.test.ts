@@ -174,6 +174,42 @@ test('红线：停止 / 事件过期时动效止息、如实待命', async () =>
   assert.match($(w, '#presence-text').textContent ?? '', /没有新动态/);
 });
 
+test('运行中 + 事件过期 + 小时限额已满 → 在场感说明休息原因和预计继续时间', async () => {
+  const now = 1730000000000;
+  const stale = new Date(now - 6 * 60_000).toISOString();
+  const { w, pushStatus } = await boot();
+  const originalNow = w.Date.now;
+  w.Date.now = () => now;
+  try {
+    pushStatus(makeStatus({
+      presence: { text: '正在继续浏览…', at: stale },
+      dailyUsage: {
+        asOf: now,
+        quotaLevel: 'normal',
+        totals: { view: 38, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
+        quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+        saturated: [],
+        windows: {
+          hour: {
+            startedAt: now - 24 * 60_000,
+            windowMs: 3_600_000,
+            expiresAt: now + 36 * 60_000,
+            releaseAt: now + 36 * 60_000,
+            totals: { view: 38, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
+            quotas: { view: 38, like: 13, collect: 7, comment: 2, follow: 4, publish: 1 },
+            saturated: ['view'],
+          },
+        },
+      },
+    }));
+    assert.equal($(w, '#presence-text').classList.contains('shimmer'), false);
+    assert.match($(w, '#presence-text').textContent ?? '', /浏览已达到小时上限，休息中/);
+    assert.match($(w, '#presence-text').textContent ?? '', /预计 36 分钟后继续/);
+  } finally {
+    w.Date.now = originalNow;
+  }
+});
+
 // ── 活动流 ──
 test('活动流：事件进流、最新在上、空态隐藏', async () => {
   const { w, pushActivity } = await boot();
