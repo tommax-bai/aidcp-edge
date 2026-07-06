@@ -794,7 +794,7 @@ async function saveCurrentSettings() {
 async function persistDirtyBeforeRestart(okMessage) {
   if (!dirty) return true;
   if (selectedProvider() === 'adspower' && !settingsUi.adsProfile.value.trim()) {
-    settingsUi.msg.textContent = '请先选择一个环境，或在「高级设置」里打开「手动填写」填分身 ID。';
+    promptMissingAdsProfile();
     return false;
   }
   const saved = await saveCurrentSettings();
@@ -806,6 +806,11 @@ async function persistDirtyBeforeRestart(okMessage) {
 
 function selectedProvider() {
   return settingsUi.provAdspower.classList.contains('active') ? 'adspower' : 'self';
+}
+
+function promptMissingAdsProfile() {
+  settingsUi.msg.textContent = '请先选择一个环境，或在「高级设置」里打开「手动填写」填分身 ID。';
+  openDrawer();
 }
 
 // 分身 ID 只读展示：默认由选中环境带出；手动模式时改由输入框承载。
@@ -994,6 +999,7 @@ function populateEnvs(profiles) {
     return { autoSelected: null };
   }
   let firstItem = null;
+  let currentSelected = null;
   for (const prof of profiles) {
     const item = document.createElement('div');
     item.className = 'ads-env-item';
@@ -1015,7 +1021,10 @@ function populateEnvs(profiles) {
     item.appendChild(text);
     item.appendChild(makeDeleteBtn(prof));
     item.addEventListener('click', () => selectProfile(prof.userId, item, prof.name));
-    if (prof.userId && prof.userId === current) item.classList.add('selected');
+    if (prof.userId && prof.userId === current) {
+      item.classList.add('selected');
+      currentSelected = prof.name || prof.userId;
+    }
     if (!firstItem) firstItem = item;
     list.appendChild(item);
   }
@@ -1023,7 +1032,7 @@ function populateEnvs(profiles) {
     selectProfile(profiles[0].userId, firstItem, profiles[0].name);
     return { autoSelected: profiles[0].name || profiles[0].userId };
   }
-  return { autoSelected: null };
+  return { autoSelected: null, currentSelected };
 }
 
 // 拉取环境列表；失败诚实降级为手敲（疑似鉴权失败提示已用当前填写值、别叫用户重填已填的框）。
@@ -1040,9 +1049,13 @@ async function refreshEnvs() {
       openAdvanced();
       return;
     }
-    const { autoSelected } = populateEnvs(r.profiles || []);
+    const { autoSelected, currentSelected } = populateEnvs(r.profiles || []);
     const extra = r.truncated ? '（环境较多，仅显示前若干条，可在 AdsPower 用分组精简）' : '';
-    const autoHint = autoSelected ? `已自动选中唯一环境「${autoSelected}」。` : '点选一个即自动带出分身 ID。';
+    const autoHint = autoSelected
+      ? `已自动选中唯一环境「${autoSelected}」。`
+      : currentSelected
+        ? `已选中「${currentSelected}」。`
+        : '点选一个即自动带出分身 ID。';
     setEnvMsg(`已加载 ${(r.profiles || []).length} 个环境${extra}。${autoHint}`, false);
   } catch (e) {
     setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可在「高级设置」打开「手动填写」填分身 ID。`, true);
@@ -1090,7 +1103,9 @@ settingsUi.adsCreate.addEventListener('click', async () => {
   try {
     const r = await window.aidcpEdge.adsCreateEnv({ ...formAdsOpts(), templateKey: tpl });
     if (r && r.ok) {
-      setCreateMsg(`已创建环境（${r.template || tpl}）。请在 AdsPower 里为它配好代理再使用；点上方「刷新」可看到它。`, false);
+      if (r.userId && !coreRunning()) selectProfile(r.userId, null, '');
+      const selectedHint = r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
+      setCreateMsg(`已创建环境（${r.template || tpl}）。${selectedHint}请在 AdsPower 里为它配好代理再使用。`, false);
       refreshEnvs();
     } else {
       const extra = r && r.violations && r.violations.length ? '（' + r.violations.join('；') + '）' : '';
@@ -1129,7 +1144,7 @@ fields.sessionFab.addEventListener('click', async () => {
     } else if (action === 'start') {
       // 启动 = 先保存当前设置再启动（保存并入启动，无独立保存按钮）。
       if (selectedProvider() === 'adspower' && !settingsUi.adsProfile.value.trim()) {
-        settingsUi.msg.textContent = '请先选择一个环境，或在「高级设置」里打开「手动填写」填分身 ID。';
+        promptMissingAdsProfile();
         return;
       }
       const saved = await saveCurrentSettings();

@@ -51,7 +51,7 @@ interface Stub {
   adsListProfiles: (opts?: unknown) => Promise<unknown>;
   adsOpenCreate: () => { launched: boolean } | Promise<{ launched: boolean }>;
   adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
-  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; template?: string; error?: string }>;
+  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; template?: string; error?: string }>;
   adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
 }
 
@@ -192,6 +192,7 @@ test('启动前未选环境/未填分身 → 诚实提示，不 save 不 start',
   await tick();
   assert.deepEqual(calls, []);
   assert.match($(w, '#settings-msg').textContent ?? '', /请先选择一个环境/);
+  assert.equal($(w, '#drawer').classList.contains('open'), true, '提示应打开设置抽屉，避免启动按钮像没反应');
 });
 
 test('运行中改设置 → 出现「按新设置重启」，点击先存再重启', async () => {
@@ -253,6 +254,40 @@ test('程序化建号：填充模板下拉、点「创建环境」→ 传选中�
   for (let i = 0; i < 3; i++) await tick();
   assert.equal(sentTemplate, 'win11-intel', '应把选中模板传给 adsCreateEnv');
   assert.match($(w, '#ads-create-msg').textContent ?? '', /已创建环境/);
+});
+
+test('程序化建号成功返回 userId → 自动选中新环境，启动可直接保存并开跑', async () => {
+  const calls: string[] = [];
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped' }),
+    adsListProfiles: async () => ({
+      ok: true,
+      profiles: [
+        { userId: 'u_old', serialNumber: '1', name: '旧环境', groupName: 'g', proxy: 'p' },
+        { userId: 'u_new', serialNumber: '2', name: '新环境', groupName: 'g', proxy: 'p' },
+      ],
+    }),
+    adsCreateEnv: async () => ({ ok: true, userId: 'u_new', template: 'win11-intel' }),
+    saveSettings: async (patch) => {
+      calls.push(`save:${(patch as { adsProfileId?: string }).adsProfileId || ''}`);
+      return { provider: 'adspower', adsProfileId: 'u_new', saveOk: true };
+    },
+    start: async () => {
+      calls.push('start');
+      return makeStatus({ edge: 'starting', session: 'running' });
+    },
+  }));
+  for (let i = 0; i < 3; i++) await tick();
+
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(($(w, '#ads-profile') as HTMLInputElement).value, 'u_new');
+  assert.match($(w, '#ads-create-msg').textContent ?? '', /已自动选中/);
+  assert.match($(w, '#ads-env-msg').textContent ?? '', /已选中「新环境」/);
+
+  $(w, '#session-fab').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 3; i++) await tick();
+  assert.deepEqual(calls, ['save:u_new', 'start']);
 });
 
 test('程序化建号失败：诚实提示', async () => {
