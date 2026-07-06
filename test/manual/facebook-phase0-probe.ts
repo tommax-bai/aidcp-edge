@@ -15,6 +15,11 @@
  *   AIDCP_FB_RUN_EDITOR_PROBE=true \
  *   AIDCP_FB_RUN_F2=1 \
  *   AIDCP_FB_F2_URLS=https://www.facebook.com/login/,https://www.facebook.com/checkpoint/ \
+ *   AIDCP_FB_EXECUTE_GATED_SUBMIT=1 \
+ *   AIDCP_FB_GATED_SUBMIT=1 \
+ *   AIDCP_FB_DISPOSABLE_CONFIRMED=1 \
+ *   AIDCP_FB_GATED_TARGET_URL=https://www.facebook.com/... \
+ *   AIDCP_FB_GATED_COMMENT_TEXT='operator-owned disposable test comment' \
  *   npx tsx test/manual/facebook-phase0-probe.ts
  */
 
@@ -36,8 +41,10 @@ import {
   probeFacebookCommentEditorReadOnly,
   readFacebookIdentity,
   classifyFacebookOverlay,
+  runFacebookGatedSubmitProbe,
   type FacebookEditorProbeResult,
   type FacebookGatedSubmitPreflightResult,
+  type FacebookGatedSubmitProbeResult,
   type FacebookPageStructureSummary,
   type FacebookStorageSummary,
   type FacebookFingerprintSummary,
@@ -69,6 +76,7 @@ interface Phase0ProbeReport {
   pageStructure: FacebookPageStructureSummary;
   editorProbe?: FacebookEditorProbeResult;
   gatedSubmitPreflight: FacebookGatedSubmitPreflightResult;
+  gatedSubmitProbe?: FacebookGatedSubmitProbeResult;
   blockingProbes: BlockingProbeResult[];
 }
 
@@ -163,7 +171,10 @@ async function writeReportIfRequested(report: Phase0ProbeReport): Promise<void> 
 
 async function main(): Promise<void> {
   const userId = requireEnv('AIDCP_ADS_USER_ID');
-  const targetUrl = process.env.AIDCP_FB_PROBE_URL?.trim() || facebookPlatformDriver.defaultStartUrl;
+  const executeGatedSubmit = boolEnv('AIDCP_FB_EXECUTE_GATED_SUBMIT');
+  const gatedTargetUrl = process.env.AIDCP_FB_GATED_TARGET_URL?.trim();
+  const targetUrl = process.env.AIDCP_FB_PROBE_URL?.trim() ||
+    (executeGatedSubmit && gatedTargetUrl ? gatedTargetUrl : facebookPlatformDriver.defaultStartUrl);
   const waitMs = Number(process.env.AIDCP_FB_WAIT_MS ?? 3500);
   const runEditorProbe = boolEnv('AIDCP_FB_RUN_EDITOR_PROBE');
   const runF2 = boolEnv('AIDCP_FB_RUN_F2');
@@ -172,6 +183,12 @@ async function main(): Promise<void> {
 
   if (runF2 && f2Urls.length === 0) {
     throw new Error('AIDCP_FB_RUN_F2=1 requires AIDCP_FB_F2_URLS');
+  }
+  if (executeGatedSubmit && runEditorProbe) {
+    throw new Error('AIDCP_FB_EXECUTE_GATED_SUBMIT=1 cannot be combined with AIDCP_FB_RUN_EDITOR_PROBE');
+  }
+  if (executeGatedSubmit && runF2) {
+    throw new Error('AIDCP_FB_EXECUTE_GATED_SUBMIT=1 cannot be combined with AIDCP_FB_RUN_F2');
   }
 
   const provider = selectProvider(targetUrl, userId);
@@ -204,9 +221,18 @@ async function main(): Promise<void> {
     const gatedSubmitPreflight = await facebookGatedSubmitPreflight(session.cdp, {
       enabled: boolEnv('AIDCP_FB_GATED_SUBMIT'),
       disposableAccountConfirmed: boolEnv('AIDCP_FB_DISPOSABLE_CONFIRMED'),
-      targetUrl: process.env.AIDCP_FB_GATED_TARGET_URL,
+      targetUrl: gatedTargetUrl,
       currentUrl: finalUrl,
     });
+    const gatedSubmitProbe = executeGatedSubmit
+      ? await runFacebookGatedSubmitProbe(session.cdp, {
+        enabled: boolEnv('AIDCP_FB_GATED_SUBMIT'),
+        disposableAccountConfirmed: boolEnv('AIDCP_FB_DISPOSABLE_CONFIRMED'),
+        targetUrl: gatedTargetUrl,
+        currentUrl: finalUrl,
+        commentText: process.env.AIDCP_FB_GATED_COMMENT_TEXT,
+      })
+      : undefined;
     const blockingProbes = await runBlockingProbes(session.cdp, f2Urls, waitMs);
 
     const report: Phase0ProbeReport = {
@@ -222,6 +248,7 @@ async function main(): Promise<void> {
       pageStructure,
       ...(editorProbe ? { editorProbe } : {}),
       gatedSubmitPreflight,
+      ...(gatedSubmitProbe ? { gatedSubmitProbe } : {}),
       blockingProbes,
     };
 

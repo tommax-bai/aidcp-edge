@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   facebookGatedSubmitPreflight,
   probeFacebookCommentEditorReadOnly,
+  runFacebookGatedSubmitProbe,
 } from '../../src/facebook/index.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
@@ -14,8 +15,9 @@ interface Call {
 class EditorProbeFakeCdp implements BrowseCdp {
   calls: Call[] = [];
   text = '';
+  reloads = 0;
 
-  constructor(private readonly mode: 'ok' | 'gated' | 'no-editor' = 'ok') {}
+  constructor(private readonly mode: 'ok' | 'gated' | 'no-editor' | 'submit-disabled' | 'not-confirmed' = 'ok') {}
 
   async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ method, params });
@@ -25,6 +27,13 @@ class EditorProbeFakeCdp implements BrowseCdp {
     }
     if (method === 'Input.dispatchKeyEvent' && params?.type === 'keyDown' && params.key === 'Backspace') {
       this.text = '';
+      return {} as T;
+    }
+    if (method === 'Input.dispatchMouseEvent') {
+      return {} as T;
+    }
+    if (method === 'Page.reload') {
+      this.reloads += 1;
       return {} as T;
     }
     const expression = String(params?.expression ?? '');
@@ -45,11 +54,23 @@ class EditorProbeFakeCdp implements BrowseCdp {
             markerAccepted: this.text.length > 0,
             submitControlObserved: true,
             submitControlLabel: '发布评论',
+            submitControlDisabled: this.mode === 'submit-disabled',
+            x: 100,
+            y: 120,
           }),
         },
       } as T;
     }
-    if (expression.includes('selected:fbSelectEditorContents')) {
+    if (expression.includes('visible: fbText')) {
+      return {
+        result: {
+          value: JSON.stringify({
+            visible: this.text.length > 0 && (this.reloads === 0 || this.mode !== 'not-confirmed'),
+          }),
+        },
+      } as T;
+    }
+    if (expression.includes('selected:fbSelectEditorContents') || expression.includes('selected:true')) {
       return { result: { value: JSON.stringify({ found: true, selected: true }) } } as T;
     }
     if (expression.includes('textLength:fbText')) {
@@ -147,4 +168,86 @@ test('facebookGatedSubmitPreflight: target mismatch and clean ready states are e
     currentUrl: 'https://www.facebook.com/Meta/posts/1',
     overlay: 'none',
   });
+});
+
+test('runFacebookGatedSubmitProbe: refuses actual submit without comment text', async () => {
+  const cdp = new EditorProbeFakeCdp();
+  const result = await runFacebookGatedSubmitProbe(cdp, {
+    enabled: true,
+    disposableAccountConfirmed: true,
+    targetUrl: 'https://www.facebook.com/Meta/posts/1',
+    currentUrl: 'https://www.facebook.com/Meta/posts/1',
+    classifyOverlay: async () => 'none',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'missing_comment_text');
+  assert.equal(result.submitted, false);
+  assert.equal(cdp.calls.some((c) => c.method === 'Input.insertText'), false);
+});
+
+test('runFacebookGatedSubmitProbe: submits only after gates and confirms by reload visibility', async () => {
+  const cdp = new EditorProbeFakeCdp();
+  const commentText = 'aidcp-disposable-f1-comment';
+  const result = await runFacebookGatedSubmitProbe(cdp, {
+    enabled: true,
+    disposableAccountConfirmed: true,
+    targetUrl: 'https://www.facebook.com/Meta/posts/1',
+    currentUrl: 'https://www.facebook.com/Meta/posts/1',
+    commentText,
+    classifyOverlay: async () => 'none',
+    sleep: async () => {},
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.submitted, true);
+  assert.equal(result.serverConfirmed, true);
+  assert.equal(result.markerAccepted, true);
+  assert.equal(result.submitControlObserved, true);
+  assert.equal(result.optimisticVisible, true);
+  assert.equal(result.reloadedVisible, true);
+  assert.equal(cdp.reloads, 1);
+  assert.equal(cdp.calls.some((c) => c.method === 'Input.insertText'), true);
+  assert.equal(cdp.calls.some((c) => c.method === 'Input.dispatchMouseEvent'), true);
+  assert.equal(JSON.stringify(result).includes(commentText), false);
+});
+
+test('runFacebookGatedSubmitProbe: submitted but not reload-confirmed is not ok', async () => {
+  const cdp = new EditorProbeFakeCdp('not-confirmed');
+  const result = await runFacebookGatedSubmitProbe(cdp, {
+    enabled: true,
+    disposableAccountConfirmed: true,
+    targetUrl: 'https://www.facebook.com/Meta/posts/1',
+    currentUrl: 'https://www.facebook.com/Meta/posts/1',
+    commentText: 'aidcp-disposable-f1-comment',
+    classifyOverlay: async () => 'none',
+    sleep: async () => {},
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'not_confirmed_after_reload');
+  assert.equal(result.submitted, true);
+  assert.equal(result.serverConfirmed, false);
+  assert.equal(result.optimisticVisible, true);
+  assert.equal(result.reloadedVisible, false);
+});
+
+test('runFacebookGatedSubmitProbe: disabled submit control clears draft and does not click', async () => {
+  const cdp = new EditorProbeFakeCdp('submit-disabled');
+  const result = await runFacebookGatedSubmitProbe(cdp, {
+    enabled: true,
+    disposableAccountConfirmed: true,
+    targetUrl: 'https://www.facebook.com/Meta/posts/1',
+    currentUrl: 'https://www.facebook.com/Meta/posts/1',
+    commentText: 'aidcp-disposable-f1-comment',
+    classifyOverlay: async () => 'none',
+    sleep: async () => {},
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'submit_control_disabled');
+  assert.equal(result.submitted, false);
+  assert.equal(cdp.text, '');
+  assert.equal(cdp.reloads, 0);
+  assert.equal(cdp.calls.some((c) => c.method === 'Input.dispatchMouseEvent'), false);
 });
