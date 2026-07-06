@@ -72,6 +72,8 @@ export interface AdsPowerDeps {
   sleepImpl?: (ms: number) => Promise<void>;
   logImpl?: (msg: string) => void;
   nowImpl?: () => number;
+  apiTimeoutMs?: number;
+  cdpProbeTimeoutMs?: number;
 }
 
 interface AdsStartData {
@@ -87,8 +89,12 @@ const DEFAULT_ADS_BASE = 'http://local.adspower.net:50325';
 const DEFAULT_ADS_START_URL = 'https://www.xiaohongshu.com/explore';
 /** 本地 API 限速 1req/s，留余量串行节流。 */
 const ADS_MIN_INTERVAL_MS = 1100;
+const DEFAULT_ADS_API_TIMEOUT_MS = 30_000;
+const DEFAULT_ADS_CDP_PROBE_TIMEOUT_MS = 2_000;
 
 const defaultSleep = (ms: number): Promise<void> => new Promise<void>((r) => setTimeout(r, ms));
+const positiveMs = (value: number | undefined, fallback: number): number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 
 /**
  * adspower：经 AdsPower 本地 API（browser/start|stop|active）托管指纹浏览器。
@@ -102,6 +108,8 @@ export class AdsPowerProvider implements BrowserProvider {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: (msg: string) => void;
   private readonly now: () => number;
+  private readonly apiTimeoutMs: number;
+  private readonly cdpProbeTimeoutMs: number;
   private lastApiAt = 0;
 
   constructor(
@@ -112,12 +120,15 @@ export class AdsPowerProvider implements BrowserProvider {
     this.sleep = deps.sleepImpl ?? defaultSleep;
     this.log = deps.logImpl ?? ((m) => console.log(m));
     this.now = deps.nowImpl ?? (() => Date.now());
+    this.apiTimeoutMs = positiveMs(deps.apiTimeoutMs, DEFAULT_ADS_API_TIMEOUT_MS);
+    this.cdpProbeTimeoutMs = positiveMs(deps.cdpProbeTimeoutMs, DEFAULT_ADS_CDP_PROBE_TIMEOUT_MS);
   }
 
   async launch(opts: BrowserLaunchOptions): Promise<LaunchedBrowser> {
     const startUrl = this.cfg.startUrl ?? DEFAULT_ADS_START_URL;
     // 固定桌面视口（否则落进小红书窄屏布局变体致定位/滚动失效）+ 起始页，均经 launch_args 传入。
     const launchArgs = ['--window-size=1440,980', startUrl];
+    this.log(`[aidcp-edge] 请求 AdsPower browser/start profile=${this.cfg.userId} ...`);
     const data = await this.api<AdsStartData>('browser/start', {
       user_id: this.cfg.userId,
       open_tabs: '1', // 关掉平台/历史页，留干净标签
@@ -161,16 +172,27 @@ export class AdsPowerProvider implements BrowserProvider {
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`;
     let res: Response;
     try {
-      res = await this.fetchImpl(url, { headers });
+      res = await this.fetchWithTimeout(url, { headers }, this.apiTimeoutMs, path);
     } catch (e) {
+      const message = (e as Error).message || String(e);
       throw new Error(
-        `[aidcp-edge] AdsPower 本地 API 不可达（${path}）：${(e as Error).message}` +
+        `[aidcp-edge] AdsPower 本地 API 不可达（${path}）：${message}` +
           '——确认 AdsPower 客户端已运行、本地 API 已开启。诚实失败，不回落 self。',
       );
     } finally {
       this.lastApiAt = this.now();
     }
-    const body = (await res.json()) as { code: number; msg?: string; data?: T };
+    let body: { code: number; msg?: string; data?: T };
+    try {
+      body = await this.withTimeout(
+        res.json() as Promise<{ code: number; msg?: string; data?: T }>,
+        this.apiTimeoutMs,
+        `${path} 响应`,
+      );
+    } catch (e) {
+      const message = (e as Error).message || String(e);
+      throw new Error(`[aidcp-edge] AdsPower ${path} 响应异常：${message}（诚实失败，不回落 self）`);
+    }
     if (body.code !== 0) {
       throw new Error(
         `[aidcp-edge] AdsPower ${path} 失败：code=${body.code} msg=${body.msg ?? ''}（诚实失败，不回落 self）`,
@@ -183,7 +205,13 @@ export class AdsPowerProvider implements BrowserProvider {
     const deadline = this.now() + timeoutMs;
     for (;;) {
       try {
-        const r = await this.fetchImpl(`http://${host}:${port}/json/version`);
+        const remaining = Math.max(1, deadline - this.now());
+        const r = await this.fetchWithTimeout(
+          `http://${host}:${port}/json/version`,
+          {},
+          Math.min(this.cdpProbeTimeoutMs, remaining),
+          'cdp/json/version',
+        );
         if (r.ok) return;
       } catch {
         /* 未就绪，继续轮询 */
@@ -192,6 +220,48 @@ export class AdsPowerProvider implements BrowserProvider {
         throw new Error(`[aidcp-edge] AdsPower 浏览器 CDP ${host}:${port} 未就绪（${timeoutMs}ms）——诚实失败`);
       }
       await this.sleep(300);
+    }
+  }
+
+  private async fetchWithTimeout(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number,
+    label: string,
+  ): Promise<Response> {
+    const controller = new AbortController();
+    try {
+      return await this.withTimeout(
+        this.fetchImpl(url, { ...init, signal: controller.signal }),
+        timeoutMs,
+        label,
+        () => controller.abort(),
+      );
+    } catch (e) {
+      if (controller.signal.aborted) throw new Error(`${label} 超时（${timeoutMs}ms）`);
+      throw e;
+    }
+  }
+
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    label: string,
+    onTimeout?: () => void,
+  ): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            onTimeout?.();
+            reject(new Error(`${label} 超时（${timeoutMs}ms）`));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
