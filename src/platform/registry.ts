@@ -1,7 +1,9 @@
+import { facebookPlatformDriver } from '../facebook/driver.js';
 import { xhsPlatformDriver } from '../xhs/driver.js';
 import { normalizePlatformId, type PlatformDriver, type PlatformId } from './driver.js';
 
 export const PLATFORM_DRIVERS: Partial<Record<PlatformId, PlatformDriver>> = {
+  facebook: facebookPlatformDriver,
   xiaohongshu: xhsPlatformDriver,
 };
 

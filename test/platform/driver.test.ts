@@ -23,11 +23,17 @@ test('normalizePlatformId: xhs aliases resolve to xiaohongshu', () => {
   assert.equal(normalizePlatformId('xiaohongshu'), 'xiaohongshu');
 });
 
-test('selectPlatformDriver: recognized but unimplemented facebook fails honestly', () => {
-  assert.throws(
-    () => selectPlatformDriver({ env: { AIDCP_PLATFORM: 'facebook' } as NodeJS.ProcessEnv }),
-    /recognized but has no edge driver/,
-  );
+test('selectPlatformDriver: facebook selects minimal identity/overlay driver', () => {
+  const driver = selectPlatformDriver({ env: { AIDCP_PLATFORM: 'facebook' } as NodeJS.ProcessEnv });
+  assert.equal(driver.platform, 'facebook');
+  assert.equal(driver.app, 'facebook');
+  assert.equal(driver.defaultStartUrl, 'https://www.facebook.com/');
+  assert.equal(driver.attachUrlIncludes, 'facebook.com');
+  assert.deepEqual(driver.edgeCapabilities, ['locating', 'cdp']);
+  assert.deepEqual(driver.capabilities, ['identity', 'overlay']);
+  assert.equal(driver.isAllowedTargetUrl('https://www.facebook.com/groups/example'), true);
+  assert.equal(driver.isAllowedTargetUrl('https://m.facebook.com/story.php?story_fbid=1'), true);
+  assert.equal(driver.isAllowedTargetUrl('https://www.xiaohongshu.com/explore'), false);
 });
 
 test('normalizePlatformId: unknown platform values fail honestly', () => {
