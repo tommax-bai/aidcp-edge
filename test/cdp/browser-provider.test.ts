@@ -115,6 +115,34 @@ test('AdsPowerProvider.launch API 不可达 → 诚实报错（不回落 self）
   await assert.rejects(provider.launch({ host: '127.0.0.1', port: 9222 }), /不可达|不回落 self/);
 });
 
+test('AdsPowerProvider.launch API 半开无响应 → 有界超时并诚实报错', async () => {
+  const fetchImpl = ((url: string, init?: { signal?: AbortSignal }) => {
+    assert.match(String(url), /browser\/start/);
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+  }) as unknown as typeof fetch;
+  const logs: string[] = [];
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    { fetchImpl, sleepImpl: async () => undefined, logImpl: (m) => logs.push(m), nowImpl: () => 0, apiTimeoutMs: 5 },
+  );
+  await assert.rejects(provider.launch({ host: '127.0.0.1', port: 9222 }), /browser\/start 超时|不回落 self/);
+  assert.match(logs.join('\n'), /请求 AdsPower browser\/start profile=k1/);
+});
+
+test('AdsPowerProvider.launch API 响应体卡住 → 有界超时并诚实报错', async () => {
+  const fetchImpl = (async () => ({
+    ok: true,
+    json: async () => new Promise(() => undefined),
+  })) as unknown as typeof fetch;
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    { fetchImpl, ...noopDeps, apiTimeoutMs: 5 },
+  );
+  await assert.rejects(provider.launch({ host: '127.0.0.1', port: 9222 }), /响应异常|响应 超时|不回落 self/);
+});
+
 test('AdsPowerProvider killAndConfirmDead：stop + active 确认已关 → true', async () => {
   const fetchImpl = routedFetch([
     ['/api/v1/browser/start', () => ({ code: 0, data: { debug_port: 5000 } })],
