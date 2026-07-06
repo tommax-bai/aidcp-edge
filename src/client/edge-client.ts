@@ -88,6 +88,8 @@ export interface EdgeClientOptions {
   url: string;
   /** 边缘节点标识 */
   edgeId: string;
+  /** 运行时平台标识（如 "xiaohongshu"） */
+  platform?: string;
   /** 业务/站点标识（如 "xhs"） */
   app?: string;
   /** 能力声明 */
@@ -130,9 +132,12 @@ interface Pending {
 export class EdgeClient {
   private ws?: CloudWebSocket;
   private readonly opts: Required<
-    Omit<EdgeClientOptions, 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr' | 'reconnect'>
+    Omit<
+      EdgeClientOptions,
+      'platform' | 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr' | 'reconnect'
+    >
   > &
-    Pick<EdgeClientOptions, 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr'>;
+    Pick<EdgeClientOptions, 'platform' | 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr'>;
   private seq = 0;
   private readonly pending = new Map<string, Pending>();
   private sessionId?: string;
@@ -153,6 +158,7 @@ export class EdgeClient {
     this.opts = {
       url: options.url,
       edgeId: options.edgeId,
+      platform: options.platform,
       app: options.app,
       capabilities: options.capabilities,
       accountId: options.accountId,
@@ -221,6 +227,7 @@ export class EdgeClient {
     await this.openSocket();
     const welcome = await this.request('hello', {
       edgeId: this.opts.edgeId,
+      platform: this.opts.platform,
       app: this.opts.app,
       capabilities: this.opts.capabilities,
       accountId: this.opts.accountId,

@@ -14,6 +14,7 @@
  * 环境变量：
  *  - AIDCP_CLOUD_URL       云端 WS 地址（默认 ws://127.0.0.1:8787）
  *  - AIDCP_EDGE_ID         边缘节点标识（不设则按节点隔离边界派生唯一稳定值：adspower→ads-<分身id> / self→self-<目录末段> / 兜底→host-<主机名>；绝不回落共享常量）
+ *  - AIDCP_PLATFORM        平台装配：xiaohongshu | xhs（默认 xiaohongshu；facebook 在后续 change 接入）
  *  - AIDCP_BROWSER_PROVIDER 浏览器 provider：self | adspower（**默认 adspower**；self 自起真实指纹 Chrome）
  *  - AIDCP_ADS_USER_ID     adspower 模式必填：目标 AdsPower profile id（缺则诚实报错、绝不回落 self）
  *  - AIDCP_ADS_API_BASE    AdsPower 本地 API 基址（默认 http://local.adspower.net:50325）
@@ -36,11 +37,10 @@
 import './websocket-polyfill.js';
 import {
   attachToPage,
-  readSelfIdentity,
-  decideHandshakeIdentity,
   selectBrowserProvider,
   type BrowserLaunchOptions,
 } from './cdp/index.js';
+import { selectPlatformDriver } from './platform/index.js';
 import { EdgeClient } from './client/edge-client.js';
 import { deriveEdgeId } from './client/edge-id.js';
 import { CloudElementSelector } from './client/cloud-selector.js';
@@ -57,7 +57,6 @@ import {
   BrowseSession,
   CdpFeedScroller,
   CdpModalController,
-  CdpOverlayMonitor,
   CdpNotificationMonitor,
   WatcherSupervisor,
   IdentityWatcher,
@@ -68,6 +67,7 @@ import {
   createOverlayReportGate,
   type BlockingOverlaySnapshot,
   type BrowseSessionOptions,
+  type OverlayMonitor,
 } from './browse/index.js';
 
 /** 启动时清扫上一轮崩溃残留的配图临时目录（finally-unlink 在 SIGKILL/OOM 时跑不到）。仅命中 aidcp-img-* 前缀。 */
@@ -91,6 +91,10 @@ async function sweepImageTempDirs(): Promise<void> {
 async function main(): Promise<void> {
   await sweepImageTempDirs();
   const cloudUrl = process.env.AIDCP_CLOUD_URL ?? 'ws://121.89.85.150:8787';
+  const platformDriver = selectPlatformDriver({ env: process.env });
+  console.log(
+    `[aidcp-edge] 平台装配 platform=${platformDriver.platform} app=${platformDriver.app} capabilities=${platformDriver.capabilities.join(',')}`,
+  );
   // 节点身份（edgeId）：缺省按节点隔离边界派生【唯一且稳定】的值，绝不回落共享常量（旧 'edge-local' 致同机/跨机
   // 两个裸 npm start 互踢的根因，见 edge-id.ts）。唯一→根除互踢与下行串号；稳定→保住云端「同节点重连顶替」。
   const edgeIdDerivation = deriveEdgeId();
@@ -109,7 +113,10 @@ async function main(): Promise<void> {
 
   // 浏览器启动层可插拔（change adspower-browser-provider）：默认 adspower（AdsPower 指纹浏览器托管，
   // 拿 debug_port 喂现成 attach）；AIDCP_BROWSER_PROVIDER=self 时改为自起真实指纹 Chrome。
-  const provider = selectBrowserProvider({ logImpl: (m) => console.log(m) });
+  const provider = selectBrowserProvider({
+    startUrl: process.env.AIDCP_EXPLORE_URL ?? platformDriver.defaultStartUrl,
+    logImpl: (m) => console.log(m),
+  });
   console.log(`[aidcp-edge] 准备浏览器（provider=${provider.kind}，CDP ${cdpHost}:${cdpPort}）...`);
   const launchOpts: BrowserLaunchOptions = { host: cdpHost, port: cdpPort };
   if (process.env.AIDCP_CHROME_PATH) launchOpts.chromePath = process.env.AIDCP_CHROME_PATH;
@@ -134,7 +141,7 @@ async function main(): Promise<void> {
   console.log(`[aidcp-edge] 连接浏览器 CDP ${endpoint.host}:${endpoint.port}（stealth=${stealth ? 'on' : 'off'}）...`);
   const attachOpts: Parameters<typeof attachToPage>[0] = { host: endpoint.host, port: endpoint.port, stealth };
   if (pageUrl) attachOpts.urlIncludes = pageUrl;
-  else if (provider.kind === 'adspower') attachOpts.urlIncludes = 'xiaohongshu.com';
+  else if (provider.kind === 'adspower') attachOpts.urlIncludes = platformDriver.attachUrlIncludes;
   const session = await attachToPage(attachOpts);
   console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
   // Runtime/Page/Input 域启用 + 反检测注入均在 attachToPage 内（reEnableAndInject，与断线重连共用）。
@@ -143,8 +150,8 @@ async function main(): Promise<void> {
   // 在 adspower 模式由其 profile 持久化；此处统一从登录态读出本节点真实稳定账号 id，作为握手身份。
   // env 覆盖优先；读不出即诚实停手、绝不回落 default（adspower 模式失败同样不回落 self）。
   {
-    const idRes = await readSelfIdentity(session.cdp, { logger: (m) => console.log(m) });
-    const decision = decideHandshakeIdentity(idRes, overrideAccountId);
+    const idRes = await platformDriver.readIdentity(session.cdp, { logger: (m) => console.log(m) });
+    const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
     if (decision.kind === 'halt') {
       // 红线「绝不静默以默认账号/默认人设开跑」：诚实停手——不握手、不连云端、绝不猜或回落 default。
       console.error(`[aidcp-edge] ✗ 身份确立失败：登录态读不出稳定账号 id（${decision.reason}）。`);
@@ -178,8 +185,9 @@ async function main(): Promise<void> {
   const client = new EdgeClient({
     url: cloudUrl,
     edgeId,
-    app: 'xhs',
-    capabilities: ['locating', 'cdp', 'like', 'browse'],
+    platform: platformDriver.platform,
+    app: platformDriver.app,
+    capabilities: [...platformDriver.edgeCapabilities],
     ...(accountId ? { accountId } : {}),
     ...(machineLabel ? { machineLabel } : {}),
     ...(remoteAddr ? { remoteAddr } : {}),
@@ -207,7 +215,7 @@ async function main(): Promise<void> {
   //   EXIT_RECYCLE = 可恢复终态回收，请重起（sysexits EX_TEMPFAIL=75：临时失败、邀请重试）。
   const EXIT_RECYCLE = 75;
   let browse: BrowseSession | undefined;
-  let overlayMonitor: CdpOverlayMonitor | undefined;
+  let overlayMonitor: OverlayMonitor | undefined;
   let watcherSupervisor: WatcherSupervisor | undefined;
   let identityWatcher: IdentityWatcher | undefined;
   let requestShutdown: ((reason: string) => void) | undefined;
@@ -396,7 +404,7 @@ async function main(): Promise<void> {
   // 身份失效 → 退回无身份态、重新确立、按新 id 重连（account-identity-from-login 1.3/1.4）。
   // 复用同一 session.cdp（浏览器不重启、端口/目录不重分 = 节点初始化不动），只重跑「身份确立」。
   // 重新确立前先回到能读出身份的消费端首页（触发失效时可能停在创作发布页/弹层态、无「我」锚点）。
-  const reestablishHomeUrl = process.env.AIDCP_EXPLORE_URL ?? 'https://www.xiaohongshu.com/explore';
+  const reestablishHomeUrl = process.env.AIDCP_EXPLORE_URL ?? platformDriver.defaultStartUrl;
   let reestablishing = false;
   const reestablishIdentity = async (): Promise<void> => {
     if (reestablishing) return;
@@ -419,8 +427,8 @@ async function main(): Promise<void> {
       } catch {
         /* best-effort */
       }
-      const idRes = await readSelfIdentity(session.cdp, { logger: (m) => console.log(m) });
-      const decision = decideHandshakeIdentity(idRes, overrideAccountId);
+      const idRes = await platformDriver.readIdentity(session.cdp, { logger: (m) => console.log(m) });
+      const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
       if (decision.kind === 'halt') {
         console.error(
           `[aidcp-edge] ✗ 重新确立身份失败（${decision.reason}）：停在无身份态、不重连云端、绝不回落 default。请在该节点重新登录目标账号后重启。`,
@@ -451,7 +459,7 @@ async function main(): Promise<void> {
   const autoBrowse = process.env.AIDCP_AUTO_BROWSE !== 'false';
   if (autoBrowse) {
     const browseOpts: BrowseSessionOptions = {};
-    if (process.env.AIDCP_EXPLORE_URL) browseOpts.exploreUrl = process.env.AIDCP_EXPLORE_URL;
+    browseOpts.exploreUrl = process.env.AIDCP_EXPLORE_URL ?? platformDriver.defaultStartUrl;
     // 节奏快照（pacing-floor-config-min-interval 设计 §4.3）：welcome 下发的每类操作 floor 区间 + tempo
     // 透传进 BrowseSession；detail_dwell 区间复活死参数 dwellFloorMs（详情页停留兜底 floor 源）。
     // 缺省（旧云端未下发）→ 全用内置默认、非零降级、无回归。
@@ -465,7 +473,7 @@ async function main(): Promise<void> {
       }
     }
     // 旁路弹窗监测体：后台持续判类（登录/验证码/运营/未知），闸门读其缓存状态停手。
-    overlayMonitor = new CdpOverlayMonitor(session.cdp);
+    overlayMonitor = platformDriver.createOverlayMonitor(session.cdp);
     browse = new BrowseSession(
       {
         dom: session.dom,
