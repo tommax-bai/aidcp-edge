@@ -93,21 +93,43 @@ export function classifyFacebookPermalink(href: string): FacebookPermalinkKind {
   }
 }
 
+export function sanitizeFacebookPermalinkHref(href: string): string {
+  const url = new URL(href, 'https://www.facebook.com/');
+  const kind = classifyFacebookPermalink(url.href);
+  const clean = new URL(url.origin + url.pathname);
+  clean.hash = '';
+  clean.pathname = clean.pathname.replace(/\/+$/, '') || '/';
+  if (kind === 'group_post' && url.searchParams.has('multi_permalinks')) {
+    clean.searchParams.set('multi_permalinks', url.searchParams.get('multi_permalinks') ?? '');
+  } else if (kind === 'story') {
+    if (url.searchParams.has('story_fbid')) clean.searchParams.set('story_fbid', url.searchParams.get('story_fbid') ?? '');
+    if (url.searchParams.has('id')) clean.searchParams.set('id', url.searchParams.get('id') ?? '');
+  } else if (url.pathname.toLowerCase().includes('/permalink.php')) {
+    if (url.searchParams.has('story_fbid')) clean.searchParams.set('story_fbid', url.searchParams.get('story_fbid') ?? '');
+    if (url.searchParams.has('id')) clean.searchParams.set('id', url.searchParams.get('id') ?? '');
+  }
+  return clean.href;
+}
+
 export function normalizeFacebookPermalinks(hrefs: string[]): FacebookPermalinkCandidate[] {
   const out: FacebookPermalinkCandidate[] = [];
   const seen = new Set<string>();
   for (const href of hrefs) {
-    let normalized = '';
+    let normalized: string;
+    let kind: FacebookPermalinkKind;
     try {
-      normalized = new URL(href, 'https://www.facebook.com/').href;
+      const url = new URL(href, 'https://www.facebook.com/');
+      kind = classifyFacebookPermalink(url.href);
+      if (kind === 'unknown') continue;
+      normalized = sanitizeFacebookPermalinkHref(url.href);
     } catch {
       continue;
     }
     if (seen.has(normalized)) continue;
     seen.add(normalized);
-    out.push({ href: normalized, kind: classifyFacebookPermalink(normalized) });
+    out.push({ href: normalized, kind });
   }
-  return out.filter((c) => c.kind !== 'unknown');
+  return out;
 }
 
 const PAGE_STRUCTURE_SCAN_JS = String.raw`(function(){
@@ -212,10 +234,14 @@ export function normalizeFacebookPageStructure(raw: RawPageStructure): FacebookP
     articleCount: raw.articleCount,
     commentEditorCount: raw.commentEditorCount,
     permalinkCandidates: normalizeFacebookPermalinks(raw.permalinkHrefs ?? []),
-    postCandidates: (raw.postCandidates ?? []).map((p) => ({
-      ...p,
-      permalinkCandidates: normalizeFacebookPermalinks(p.permalinkHrefs ?? []),
-    })),
+    postCandidates: (raw.postCandidates ?? []).map((p) => {
+      const { permalinkHrefs: _permalinkHrefs, ...safe } = p;
+      void _permalinkHrefs;
+      return {
+        ...safe,
+        permalinkCandidates: normalizeFacebookPermalinks(p.permalinkHrefs ?? []),
+      };
+    }),
     membership: raw.membership,
     virtualization: raw.virtualization,
   };

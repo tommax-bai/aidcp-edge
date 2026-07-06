@@ -5,6 +5,7 @@ import {
   classifyFacebookSurface,
   collectFacebookPageStructure,
   normalizeFacebookPageStructure,
+  sanitizeFacebookPermalinkHref,
 } from '../../src/facebook/index.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
@@ -20,6 +21,7 @@ const baseRaw = {
   commentEditorCount: 1,
   permalinkHrefs: [
     '/groups/facepagerusers/posts/1234567890/',
+    'https://www.facebook.com/groups/1109299026882957/?multi_permalinks=1769888790823974&hoisted_section_header_type=recently_seen&__cft__[0]=SECRET_CONTEXT&__tn__=%2CO%2CP-R',
     'https://www.facebook.com/search/posts/?q=links',
     'https://www.facebook.com/Meta/posts/833823022640243/',
   ],
@@ -34,7 +36,10 @@ const baseRaw = {
     hasCommentRegion: true,
     top: 120,
     bottom: 760,
-    permalinkHrefs: ['/groups/facepagerusers/posts/1234567890/'],
+    permalinkHrefs: [
+      '/groups/facepagerusers/posts/1234567890/',
+      'https://www.facebook.com/Meta/posts/833823022640243/#',
+    ],
   }],
   membership: {
     joinVisible: true,
@@ -68,17 +73,32 @@ test('classifyFacebookPermalink: keeps only post-like permalink candidates', () 
   assert.equal(classifyFacebookPermalink('https://www.facebook.com/search/posts/?q=x'), 'unknown');
 });
 
-test('normalizeFacebookPageStructure: summarizes structure without raw post text', () => {
+test('sanitizeFacebookPermalinkHref: strips tracking query and hash data', () => {
+  assert.equal(
+    sanitizeFacebookPermalinkHref('https://www.facebook.com/groups/1109299026882957/?multi_permalinks=1769888790823974&__cft__[0]=SECRET_CONTEXT&__tn__=%2CO%2CP-R'),
+    'https://www.facebook.com/groups/1109299026882957?multi_permalinks=1769888790823974',
+  );
+  assert.equal(
+    sanitizeFacebookPermalinkHref('https://www.facebook.com/Meta/posts/833823022640243/#comments'),
+    'https://www.facebook.com/Meta/posts/833823022640243',
+  );
+});
+
+test('normalizeFacebookPageStructure: summarizes structure without raw post text or tracking URLs', () => {
   const summary = normalizeFacebookPageStructure(baseRaw);
+  const serialized = JSON.stringify(summary);
   assert.equal(summary.surface, 'group_post');
   assert.equal(summary.articleCount, 1);
   assert.equal(summary.commentEditorCount, 1);
   assert.equal(summary.membership.joinVisible, true);
   assert.equal(summary.virtualization.likelyVirtualized, true);
-  assert.deepEqual(summary.permalinkCandidates.map((c) => c.kind), ['group_post', 'page_post']);
+  assert.deepEqual(summary.permalinkCandidates.map((c) => c.kind), ['group_post', 'group_post', 'page_post']);
   assert.equal(summary.postCandidates[0].hasCommentRegion, true);
   assert.equal(summary.postCandidates[0].expandControlCount, 1);
-  assert.equal(JSON.stringify(summary).includes('real post body'), false);
+  assert.equal(serialized.includes('real post body'), false);
+  assert.equal(serialized.includes('permalinkHrefs'), false);
+  assert.equal(serialized.includes('__cft__'), false);
+  assert.equal(serialized.includes('SECRET_CONTEXT'), false);
 });
 
 test('collectFacebookPageStructure: parses CDP JSON and classifies current surface', async () => {
