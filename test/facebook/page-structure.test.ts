@@ -1,0 +1,88 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  classifyFacebookPermalink,
+  classifyFacebookSurface,
+  collectFacebookPageStructure,
+  normalizeFacebookPageStructure,
+} from '../../src/facebook/index.js';
+import type { BrowseCdp } from '../../src/browse/cdp-util.js';
+
+function fakeCdp(raw: unknown): BrowseCdp {
+  return {
+    send: async () => ({ result: { value: JSON.stringify(raw) } }) as never,
+  };
+}
+
+const baseRaw = {
+  href: 'https://www.facebook.com/groups/facepagerusers/posts/1234567890/',
+  articleCount: 1,
+  commentEditorCount: 1,
+  permalinkHrefs: [
+    '/groups/facepagerusers/posts/1234567890/',
+    'https://www.facebook.com/search/posts/?q=links',
+    'https://www.facebook.com/Meta/posts/833823022640243/',
+  ],
+  postCandidates: [{
+    index: 0,
+    role: 'article',
+    textLength: 240,
+    authorLinkCount: 2,
+    commentEditorCount: 1,
+    commentControlCount: 2,
+    expandControlCount: 1,
+    hasCommentRegion: true,
+    top: 120,
+    bottom: 760,
+    permalinkHrefs: ['/groups/facepagerusers/posts/1234567890/'],
+  }],
+  membership: {
+    joinVisible: true,
+    joinedVisible: false,
+    pendingVisible: false,
+    questionVisible: false,
+  },
+  virtualization: {
+    viewportHeight: 932,
+    scrollHeight: 3100,
+    articleCount: 1,
+    likelyVirtualized: true,
+  },
+};
+
+test('classifyFacebookSurface: URL-first Page, Group, post, search, and blocking surfaces', () => {
+  assert.equal(classifyFacebookSurface('https://www.facebook.com/groups/foo'), 'group');
+  assert.equal(classifyFacebookSurface('https://www.facebook.com/groups/foo/posts/123/'), 'group_post');
+  assert.equal(classifyFacebookSurface('https://www.facebook.com/groups/1/?multi_permalinks=2'), 'group_post');
+  assert.equal(classifyFacebookSurface('https://www.facebook.com/Meta/posts/833823022640243/'), 'page_post');
+  assert.equal(classifyFacebookSurface('https://www.facebook.com/search/posts/?q=x'), 'search');
+  assert.equal(classifyFacebookSurface('https://www.facebook.com/login/?next=x'), 'login');
+  assert.equal(classifyFacebookSurface('https://www.facebook.com/checkpoint/123'), 'checkpoint');
+});
+
+test('classifyFacebookPermalink: keeps only post-like permalink candidates', () => {
+  assert.equal(classifyFacebookPermalink('https://www.facebook.com/groups/foo/posts/123/'), 'group_post');
+  assert.equal(classifyFacebookPermalink('https://www.facebook.com/groups/1/?multi_permalinks=2'), 'group_post');
+  assert.equal(classifyFacebookPermalink('https://www.facebook.com/Meta/posts/833823022640243/'), 'page_post');
+  assert.equal(classifyFacebookPermalink('https://www.facebook.com/story.php?story_fbid=1&id=2'), 'story');
+  assert.equal(classifyFacebookPermalink('https://www.facebook.com/search/posts/?q=x'), 'unknown');
+});
+
+test('normalizeFacebookPageStructure: summarizes structure without raw post text', () => {
+  const summary = normalizeFacebookPageStructure(baseRaw);
+  assert.equal(summary.surface, 'group_post');
+  assert.equal(summary.articleCount, 1);
+  assert.equal(summary.commentEditorCount, 1);
+  assert.equal(summary.membership.joinVisible, true);
+  assert.equal(summary.virtualization.likelyVirtualized, true);
+  assert.deepEqual(summary.permalinkCandidates.map((c) => c.kind), ['group_post', 'page_post']);
+  assert.equal(summary.postCandidates[0].hasCommentRegion, true);
+  assert.equal(summary.postCandidates[0].expandControlCount, 1);
+  assert.equal(JSON.stringify(summary).includes('real post body'), false);
+});
+
+test('collectFacebookPageStructure: parses CDP JSON and classifies current surface', async () => {
+  const summary = await collectFacebookPageStructure(fakeCdp(baseRaw));
+  assert.equal(summary.surface, 'group_post');
+  assert.equal(summary.postCandidates[0].permalinkCandidates[0].kind, 'group_post');
+});
