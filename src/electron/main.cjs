@@ -6,7 +6,11 @@ const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
 const { createAdsLocalApi } = require('./ads-local-api.cjs');
 const { createAdsWriteApi } = require('./ads-write-api.cjs');
 const adsFingerprint = require('./ads-fingerprint.cjs');
-const { createCreateFlow } = require('./ads-create-flow.cjs');
+const {
+  ENV_GROUP_NAME,
+  createEnvGroupResolver,
+  createEnvironmentWithGroupRecovery,
+} = require('./ads-create-env-service.cjs');
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
 
@@ -906,27 +910,12 @@ ipcMain.handle('ads:listProfiles', (_event, opts) => adsApi.listProfiles(resolve
 ipcMain.handle('ads:openCreate', () => openAdsClient());
 
 // ── 「创建环境」程序化建号（change adspower-auto-create-env）：写客户端 allowlist + 指纹引擎 + 编排 ──
-const ENV_GROUP_NAME = 'aidcp-创建';
-let cachedEnvGroupId = null;
+const envGroupResolver = createEnvGroupResolver({ adsApi, groupName: ENV_GROUP_NAME });
 let adsCreateInFlight = false; // 进程级单飞互斥（防连点双建）
 
 function templateLabel(t) {
   const osName = t.os === 'windows' ? 'Windows' : t.os === 'macos' ? 'Mac' : t.os;
   return `${osName} · ${t.hardwareConcurrency}核 ${t.deviceMemory}G`;
-}
-
-// 定位/复用专用分组（先 group/list 查、没有则建、并发 repeat 再查一次）。
-async function ensureEnvGroup(writeApi, adsOpts) {
-  if (cachedEnvGroupId) return { ok: true, groupId: cachedEnvGroupId };
-  const pick = (r) => (r.ok ? ((r.groups.find((g) => g.groupName === ENV_GROUP_NAME) || {}).groupId || '') : '');
-  let gid = pick(await adsApi.listGroups(adsOpts));
-  if (!gid) {
-    const cr = await writeApi.createGroup(ENV_GROUP_NAME, adsOpts);
-    gid = cr.ok ? cr.groupId : pick(await adsApi.listGroups(adsOpts));
-    if (!gid) return { ok: false, error: cr.error || '无法定位/创建专用分组' };
-  }
-  cachedEnvGroupId = gid;
-  return { ok: true, groupId: gid };
 }
 
 // 整机模板清单（供渲染层下拉，一处真源）。
@@ -942,14 +931,15 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     const ads = resolveAdsOpts(opts);
     // 凭据只内存（deps），绝不落 settings；写客户端错误层已脱敏。
     const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
-    const grp = await ensureEnvGroup(writeApi, ads);
-    if (!grp.ok) return { ok: false, error: grp.error };
-    const flow = createCreateFlow({ writeApi, fingerprint: adsFingerprint });
-    return await flow.createEnvironment({
+    return await createEnvironmentWithGroupRecovery({
+      writeApi,
+      adsApi,
+      fingerprint: adsFingerprint,
+      adsOpts: ads,
       templateKey: (opts && opts.templateKey) || '',
       intendedAccountLabel: opts && opts.intendedAccountLabel,
       machineLabel: os.hostname(),
-      groupId: grp.groupId,
+      groupResolver: envGroupResolver,
     });
   } catch (e) {
     return { ok: false, error: `创建失败：${(e && e.message) || String(e)}` };
