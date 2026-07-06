@@ -8,13 +8,13 @@
  *  - 连接云端 WS（默认 ws://127.0.0.1:8787），握手上线；
  *  - 元素选择委托云端（CloudElementSelector）；
  *  - 用 LikeStepRunner 执行云端下发的命令，结果回传云端；
- *  - 登录完成后创建 BrowseSession 并 start()：自动浏览 explore feed、打开笔记、
- *    提取内容上报云端、按云端决策（like / browse.next / search / session.end）动作。
+ *  - 对支持 browse 的平台，登录完成后创建 BrowseSession 并 start()：自动浏览 explore feed、
+ *    打开笔记、提取内容上报云端、按云端决策（like / browse.next / search / session.end）动作。
  *
  * 环境变量：
  *  - AIDCP_CLOUD_URL       云端 WS 地址（默认 ws://127.0.0.1:8787）
  *  - AIDCP_EDGE_ID         边缘节点标识（不设则按节点隔离边界派生唯一稳定值：adspower→ads-<分身id> / self→self-<目录末段> / 兜底→host-<主机名>；绝不回落共享常量）
- *  - AIDCP_PLATFORM        平台装配：xiaohongshu | xhs（默认 xiaohongshu；facebook 在后续 change 接入）
+ *  - AIDCP_PLATFORM        平台装配：xiaohongshu | xhs | facebook | fb（默认 xiaohongshu）
  *  - AIDCP_BROWSER_PROVIDER 浏览器 provider：self | adspower（**默认 adspower**；self 自起真实指纹 Chrome）
  *  - AIDCP_ADS_USER_ID     adspower 模式必填：目标 AdsPower profile id（缺则诚实报错、绝不回落 self）
  *  - AIDCP_ADS_API_BASE    AdsPower 本地 API 基址（默认 http://local.adspower.net:50325）
@@ -152,7 +152,10 @@ async function main(): Promise<void> {
   console.log(`[aidcp-edge] 连接浏览器 CDP ${endpoint.host}:${endpoint.port}（stealth=${stealth ? 'on' : 'off'}）...`);
   const attachOpts: Parameters<typeof attachToPage>[0] = { host: endpoint.host, port: endpoint.port, stealth };
   if (pageUrl) attachOpts.urlIncludes = pageUrl;
-  else if (provider.kind === 'adspower') attachOpts.urlIncludes = platformDriver.attachUrlIncludes;
+  else if (provider.kind === 'adspower') {
+    attachOpts.urlIncludes = platformDriver.attachUrlIncludes;
+    attachOpts.targetPredicate = (target) => platformDriver.isAllowedTargetUrl(target.url);
+  }
   const session = await attachToPage(attachOpts);
   console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
   await applyBrowserParking(session.cdp, parkingConfig, (m) => console.log(m));
@@ -484,7 +487,12 @@ async function main(): Promise<void> {
     }
   };
 
-  const autoBrowse = process.env.AIDCP_AUTO_BROWSE !== 'false';
+  const wantsAutoBrowse = process.env.AIDCP_AUTO_BROWSE !== 'false';
+  const supportsBrowse = platformDriver.capabilities.includes('browse');
+  const autoBrowse = wantsAutoBrowse && supportsBrowse;
+  if (wantsAutoBrowse && !supportsBrowse) {
+    console.warn(`[aidcp-edge] platform=${platformDriver.platform} does not support browse; BrowseSession will not start.`);
+  }
   if (autoBrowse) {
     const browseOpts: BrowseSessionOptions = {};
     browseOpts.exploreUrl = process.env.AIDCP_EXPLORE_URL ?? platformDriver.defaultStartUrl;

@@ -19,6 +19,14 @@ export type PlatformCapability =
   | 'interact'
   | 'patrol';
 
+export interface PlatformTargetDescriptor {
+  readonly startUrl: string;
+  /** Backward-compatible substring used by older attach paths. */
+  readonly attachUrlIncludes: string;
+  /** Host suffixes that are valid for this platform runtime. */
+  readonly allowedHostSuffixes: readonly string[];
+}
+
 export interface PlatformDriver {
   readonly platform: PlatformId;
   /** Backward-compatible site/app label carried in hello.app. */
@@ -26,8 +34,10 @@ export interface PlatformDriver {
   readonly capabilities: readonly PlatformCapability[];
   /** Existing edge capability labels carried in hello.capabilities. */
   readonly edgeCapabilities: readonly string[];
+  readonly target: PlatformTargetDescriptor;
   readonly defaultStartUrl: string;
   readonly attachUrlIncludes: string;
+  isAllowedTargetUrl(url: string): boolean;
   readIdentity(cdp: BrowseCdp, opts?: ReadSelfIdentityOptions): Promise<SelfIdentityResult>;
   decideIdentity(idRes: SelfIdentityResult, override: string | undefined): IdentityDecision;
   createOverlayMonitor(cdp: BrowseCdp): OverlayMonitor;
@@ -46,6 +56,15 @@ export class UnsupportedPlatformCapabilityError extends Error {
 export function assertPlatformCapability(driver: PlatformDriver, capability: PlatformCapability): void {
   if (!driver.capabilities.includes(capability)) {
     throw new UnsupportedPlatformCapabilityError(driver.platform, capability);
+  }
+}
+
+export function isUrlAllowedByTargetDescriptor(url: string, target: PlatformTargetDescriptor): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return target.allowedHostSuffixes.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+  } catch {
+    return false;
   }
 }
 

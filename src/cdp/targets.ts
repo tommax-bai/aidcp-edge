@@ -39,13 +39,15 @@ export async function listTargets(options: DiscoverOptions = {}): Promise<CdpTar
 
 /** 选取第一个 type==='page' 的 target（可按 url 过滤） */
 export async function firstPageTarget(
-  options: DiscoverOptions & { urlIncludes?: string } = {},
+  options: DiscoverOptions & { urlIncludes?: string; targetPredicate?: (target: CdpTarget) => boolean } = {},
 ): Promise<CdpTarget> {
   const targets = await listTargets(options);
   const pages = targets.filter((t) => t.type === 'page' && t.webSocketDebuggerUrl);
-  const match = options.urlIncludes
-    ? pages.find((t) => t.url.includes(options.urlIncludes!))
-    : pages[0];
+  const match = options.targetPredicate
+    ? pages.find(options.targetPredicate)
+    : options.urlIncludes
+      ? pages.find((t) => t.url.includes(options.urlIncludes!))
+      : pages[0];
   if (!match) {
     throw new Error('未找到可用的 page target（确认 Chrome 已用 --remote-debugging-port 启动）');
   }

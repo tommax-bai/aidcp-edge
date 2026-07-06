@@ -8,7 +8,7 @@
 import { CdpClient, type CdpClientOptions, type CdpReconnectOptions } from './client.js';
 import { CdpDomProvider } from './dom-provider.js';
 import { CdpActionExecutor } from './action-executor.js';
-import { firstPageTarget, type DiscoverOptions } from './targets.js';
+import { firstPageTarget, type CdpTarget, type DiscoverOptions } from './targets.js';
 import { CdpStealthInjector, type StealthInjector } from './stealth-injector.js';
 
 export interface EdgeSession {
@@ -22,6 +22,8 @@ export interface EdgeSession {
 export interface AttachOptions extends DiscoverOptions {
   /** 仅附着 url 含该子串的页面 */
   urlIncludes?: string;
+  /** 平台自定义 target 选择谓词；优先级高于 urlIncludes。 */
+  targetPredicate?: (target: CdpTarget) => boolean;
   /** 透传给 CdpClient 的选项 */
   client?: CdpClientOptions;
   /**
