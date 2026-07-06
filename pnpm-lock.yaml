@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      jsdom:
+        specifier: ^25.0.1
+        version: 25.0.1
     devDependencies:
       '@types/jsdom':
         specifier: ^21.1.7
@@ -14,9 +18,6 @@ importers:
       '@types/node':
         specifier: ^22.10.0
         version: 22.19.19
-      jsdom:
-        specifier: ^25.0.1
-        version: 25.0.1
       tsx:
         specifier: ^4.19.2
         version: 4.22.4
