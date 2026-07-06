@@ -704,6 +704,11 @@ body { margin: 0; }
 }
 .field input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59, 111, 240, 0.15); }
 
+.parking-field { gap: 8px; }
+.parking-options { align-self: flex-start; flex-wrap: wrap; }
+.parking-hint { color: var(--mute); font-size: 12px; line-height: 1.45; }
+.parking-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
 .ads-probe { display: flex; align-items: center; gap: 10px; }
 .ads-full { grid-column: 1 / -1; }
 .ads-env-head, .ads-id-head { display: flex; align-items: center; justify-content: space-between; }
@@ -765,6 +770,7 @@ body { margin: 0; }
   transition: background 0.15s;
 }
 .secondary:hover { background: #f8fafc; }
+.secondary.small { padding: 6px 12px; font-size: 12px; }
 
 /* 徽章（健康明细 / AdsPower 探测共用） */
 .badge {

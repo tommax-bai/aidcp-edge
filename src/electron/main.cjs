@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, Notification, shell } = require('electron');
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, Notification, shell, screen } = require('electron');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -13,6 +13,12 @@ const {
 } = require('./ads-create-env-service.cjs');
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
+const {
+  DEFAULT_PARKING_MODE,
+  normalizeParkingMode,
+  computeBrowserParkingPlan,
+  parkingEnv,
+} = require('./browser-parking.cjs');
 
 // 主进程侧 AdsPower 只读客户端（探测 + 环境列表）。单例持有本进程内**唯一**串行节流（1req/s）。
 // 与核心子进程内的 AdsPowerProvider 节流各自独立（跨进程无法共享内存队列，见 ads-local-api.cjs 头注）。
@@ -30,6 +36,7 @@ let restartPending = false;
 // 而被误判为异常退出。
 let pausePending = false;
 let lastEdgeFailureLine = '';
+let browserParkingReady = false;
 
 // AdsPower 官方下载页（客户端「下载 AdsPower」按钮外链）。
 const ADS_DOWNLOAD_URL = 'https://www.adspower.net/download';
@@ -79,6 +86,8 @@ const DEFAULT_SETTINGS = {
   // 选中环境的 AdsPower 环境名（操作者自己起的分身名，如「Tmax」）：作标题带账号标签的兜底
   // （小红书昵称仅 navigate 身份路径可得；环境名桌面端现成可得、且通常就叫账号名）。
   adsProfileName: '',
+  // 浏览器窗口停放：默认把窗口大部分移到屏幕边缘，保留可恢复边条，不用最小化/headless。
+  browserParkingMode: DEFAULT_PARKING_MODE,
   // 「开发者详情」（原始日志区）默认不展示，在设置抽屉里开关（客户版首屏零技术噪音）。
   devDetails: false,
 };
@@ -96,6 +105,7 @@ function loadSettings() {
     settings = { ...DEFAULT_SETTINGS };
   }
   if (settings.provider !== 'self' && settings.provider !== 'adspower') settings.provider = 'adspower';
+  settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
   return settings;
 }
 
@@ -105,6 +115,7 @@ function loadSettings() {
 function saveSettings(patch) {
   settings = { ...settings, ...(patch || {}) };
   if (settings.provider !== 'self' && settings.provider !== 'adspower') settings.provider = 'adspower';
+  settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
   try {
     fs.mkdirSync(app.getPath('userData'), { recursive: true });
     fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2), 'utf8');
@@ -118,14 +129,32 @@ function saveSettings(patch) {
 // 由当前设置推导注入给核心进程的 provider 相关 env。
 // 'self' 在前、被 ...process.env 覆盖 → 外部显式设 AIDCP_BROWSER_PROVIDER 等仍是逃生阀、优先生效。
 function buildProviderEnv() {
-  if (settings.provider === 'self') return { AIDCP_BROWSER_PROVIDER: 'self' };
   const env = {
-    AIDCP_BROWSER_PROVIDER: 'adspower',
-    AIDCP_ADS_USER_ID: settings.adsProfileId,
+    ...buildBrowserParkingEnv(),
+    AIDCP_BROWSER_PROVIDER: settings.provider === 'self' ? 'self' : 'adspower',
   };
+  if (settings.provider === 'self') return env;
+  env.AIDCP_ADS_USER_ID = settings.adsProfileId;
   if (settings.adsApiKey) env.AIDCP_ADS_API_KEY = settings.adsApiKey;
   if (settings.adsApiBase) env.AIDCP_ADS_API_BASE = settings.adsApiBase;
   return env;
+}
+
+function currentParkingPlan(mode = settings.browserParkingMode) {
+  let displays = [];
+  let primary;
+  try {
+    displays = screen.getAllDisplays();
+    primary = screen.getPrimaryDisplay();
+  } catch {
+    displays = [];
+    primary = null;
+  }
+  return computeBrowserParkingPlan(mode, displays, primary);
+}
+
+function buildBrowserParkingEnv() {
+  return parkingEnv(currentParkingPlan());
 }
 
 // 解析只读调用的 base/key：优先用渲染层传入的**当前表单值**（支持「新填 key 未保存即刷新」而不陷回环），
@@ -532,6 +561,9 @@ function createTray() {
     { label: '显示窗口', click: () => mainWindow?.show() },
     { label: '隐藏窗口', click: () => mainWindow?.hide() },
     { type: 'separator' },
+    { label: '显示浏览器窗口', click: () => { void sendBrowserParkingCommand('browser.show'); } },
+    { label: '重置浏览器位置', click: () => { void sendBrowserParkingCommand('browser.park'); } },
+    { type: 'separator' },
     { label: '退出', click: quitApp },
   ]));
   tray.on('click', () => {
@@ -539,6 +571,18 @@ function createTray() {
     if (mainWindow.isVisible()) mainWindow.hide();
     else mainWindow.show();
   });
+}
+
+function sendBrowserParkingCommand(type) {
+  if (!edgeProcess || !browserParkingReady || !edgeProcess.stdin || edgeProcess.stdin.destroyed) {
+    return { ok: false, error: '当前没有可控制的浏览器窗口' };
+  }
+  try {
+    edgeProcess.stdin.write(`${JSON.stringify({ type })}\n`);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error?.message || '发送浏览器控制指令失败' };
+  }
 }
 
 function startEdge() {
@@ -551,6 +595,7 @@ function startEdge() {
   // self：桌面自起 Chrome 流程 chrome-launcher.cjs 固定 9222）。provider env 在前、被 ...process.env
   // 覆盖 → 外部显式设置仍是逃生阀、优先生效。
   const wasAdspower = settings.provider === 'adspower';
+  browserParkingReady = false;
   edgeProcess = spawn(process.execPath, [edgeEntry], {
     cwd: appRoot,
     env: { ...buildProviderEnv(), ...process.env, ELECTRON_RUN_AS_NODE: '1' },
@@ -575,6 +620,7 @@ function startEdge() {
   edgeProcess.stderr.on('data', (chunk) => handleEdgeOutput(chunk.toString(), true));
   edgeProcess.on('exit', (code, signal) => {
     edgeProcess = undefined;
+    browserParkingReady = false;
     // 主动重启（保存设置后按新 provider 起）、暂停、退出应用都是「有意停止」，不算异常、不弹窗。
     // pausePending 一次性消费：治「启动窗口内点暂停」——handler 未装时被 SIGTERM 终止(signal!=null)本不是异常。
     const intentional = isQuitting || restartPending || pausePending;
@@ -645,7 +691,7 @@ async function checkLoginAndStart() {
 
 async function launchChromeAndGateEdge() {
   updateStatus({ provider: 'self', ...clearEdgeFailurePatch() });
-  const launched = await launchChrome(app);
+  const launched = await launchChrome(app, { launchPosition: currentParkingPlan().launchPosition });
   if (!launched.ok) {
     // session 显式回 idle：stopAndRestart 曾乐观置 running，此处不清会残留绿色「运行中」与实际停止矛盾。
     updateStatus({
@@ -722,6 +768,7 @@ function handleEdgeOutput(text, isError = false) {
 
 function handleEdgeLogLine(message, isError = false) {
   appendEdgeLog(message, isError); // 落文件（排障回溯，独立于下方状态判断）
+  if (message.includes('[browser-parking] control-ready')) browserParkingReady = true;
   // 核心正被有意停止 / 已暂停 / 已退出：其关闭期 stdout/stderr 只作为日志行展示，绝不据以翻转
   // edge / session / risk 徽标，也不产 UI 事件——否则关闭 chatter 会把「已暂停/已停止」闪回
   // 「运行中/异常」，或让在场感在停机后还「活着」。正常在跑时才做状态推断。
@@ -904,6 +951,8 @@ ipcMain.handle('browser:openAdsDownload', () => {
   void shell.openExternal(ADS_DOWNLOAD_URL);
   return true;
 });
+ipcMain.handle('browser:showDriven', () => sendBrowserParkingCommand('browser.show'));
+ipcMain.handle('browser:resetParking', () => sendBrowserParkingCommand('browser.park'));
 // AdsPower 只读探测 / 拉取（主进程侧，渲染层不直连本地 API）。opts 可带渲染层当前表单 apiKey/apiBase/groupId。
 ipcMain.handle('ads:status', (_event, opts) => adsApi.status(resolveAdsOpts(opts)));
 ipcMain.handle('ads:listProfiles', (_event, opts) => adsApi.listProfiles(resolveAdsOpts(opts)));

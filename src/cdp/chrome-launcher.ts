@@ -27,6 +27,8 @@ export interface ChromeLauncherOptions {
   profileDir?: string;
   /** 是否 headless（默认 false：需要人工登录） */
   headless?: boolean;
+  /** 启动时的窗口位置提示；最终位置仍由 CDP 停放校准。 */
+  windowPosition?: { left: number; top: number };
   /** 启动后打开的 URL（默认小红书 explore 页） */
   startUrl?: string;
   /** 探测/启动就绪超时（毫秒），默认 10000 */
@@ -547,6 +549,7 @@ export function buildChromeArgs(opts: {
   port: number;
   profileDir: string;
   headless: boolean;
+  windowPosition?: { left: number; top: number };
   startUrl: string;
 }): string[] {
   const args = [
@@ -569,6 +572,9 @@ export function buildChromeArgs(opts: {
     '--start-maximized',
     `--user-data-dir=${opts.profileDir}`,
   ];
+  if (opts.windowPosition) {
+    args.push(`--window-position=${Math.floor(opts.windowPosition.left)},${Math.floor(opts.windowPosition.top)}`);
+  }
   if (opts.headless) {
     args.push('--headless=new');
   }
@@ -639,7 +645,7 @@ export async function launchChrome(opts: ChromeLauncherOptions = {}): Promise<Ch
   const chromePath = discoverChromePath(opts.chromePath, existsImpl);
   // 启动前清理崩溃残留的单例锁：仅在确认无存活进程持有时清，否则诚实失败（绝不盲删致并发损坏）。
   clearLock(profileDir, log);
-  const args = buildChromeArgs({ port, profileDir, headless, startUrl });
+  const args = buildChromeArgs({ port, profileDir, headless, windowPosition: opts.windowPosition, startUrl });
 
   log(`[aidcp-edge] 启动 Chrome: ${chromePath}`);
   const stderrLogPath = chromeLogPath();

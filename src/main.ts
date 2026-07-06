@@ -36,7 +36,10 @@
 // 入口级全局 WebSocket 兜底：Electron 自带 Node 20 无全局 WebSocket，须在其它导入前安装。
 import './websocket-polyfill.js';
 import {
+  applyBrowserParking,
   attachToPage,
+  browserParkingConfigFromEnv,
+  installBrowserParkingStdinControl,
   selectBrowserProvider,
   type BrowserLaunchOptions,
 } from './cdp/index.js';
@@ -122,6 +125,13 @@ async function main(): Promise<void> {
   if (process.env.AIDCP_CHROME_PATH) launchOpts.chromePath = process.env.AIDCP_CHROME_PATH;
   if (process.env.AIDCP_CHROME_PROFILE) launchOpts.profileDir = process.env.AIDCP_CHROME_PROFILE;
   if (process.env.AIDCP_CHROME_HEADLESS === 'true') launchOpts.headless = true;
+  const parkingConfig = browserParkingConfigFromEnv(process.env);
+  if (process.env.AIDCP_BROWSER_PARKING_LAUNCH_POSITION) {
+    const [leftRaw, topRaw] = process.env.AIDCP_BROWSER_PARKING_LAUNCH_POSITION.split(',');
+    const left = Number(leftRaw);
+    const top = Number(topRaw);
+    if (Number.isFinite(left) && Number.isFinite(top)) launchOpts.windowPosition = { left, top };
+  }
   // 登录等待上限（self 模式）：看护重起的子进程无 TTY、无从扫码，登录态应已持久化且秒级命中——
   // launch-multinode 会注入较短值（~45s），使「登录态丢失」按崩溃快速计入重起预算而非干等 5min。
   // 单机首登（裸 npm start）不设此 env，沿用 5min 默认以容纳人工扫码。
@@ -144,6 +154,8 @@ async function main(): Promise<void> {
   else if (provider.kind === 'adspower') attachOpts.urlIncludes = platformDriver.attachUrlIncludes;
   const session = await attachToPage(attachOpts);
   console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
+  await applyBrowserParking(session.cdp, parkingConfig, (m) => console.log(m));
+  installBrowserParkingStdinControl(session.cdp, parkingConfig, (m) => console.log(m));
   // Runtime/Page/Input 域启用 + 反检测注入均在 attachToPage 内（reEnableAndInject，与断线重连共用）。
 
   // 身份确立（account-identity-from-login 1.2）：登录态在 self 模式由 launchChrome 的登录等待保证、
