@@ -62,6 +62,7 @@ import {
   sampleReflect,
   jitterAround,
   TIMING_PRESETS,
+  generateScrollSequence,
   type TimingConfig,
   createDefaultRhythm,
   applySpeedFactor,
@@ -261,6 +262,21 @@ const COMMENT_PRELUDE_MIN_STEPS = 4;
 const COMMENT_PRELUDE_MAX_STEPS = 14;
 const COMMENT_SCROLL_MIN_PX = 150;
 const COMMENT_SCROLL_MAX_PX = 290;
+
+interface ScrollProbeSnapshot {
+  found?: boolean;
+  visible?: boolean;
+  scrollTop?: number;
+  before?: number;
+  after?: number;
+  scrollHeight?: number;
+  clientHeight?: number;
+  x?: number;
+  y?: number;
+  reachedEnd?: boolean;
+  atBottom?: boolean;
+  moved?: boolean;
+}
 /**
  * explore feed 页 URL 判定：匹配 /explore（feed 列表），【排除 /explore/<noteId>（笔记详情页）】。
  * 用于 ensureExplore（启动）与 navigateBack（back_to_feed）统一判定是否真在 feed——
@@ -535,6 +551,82 @@ export class BrowseSession {
     const lo = Math.min(min, max);
     const hi = Math.max(min, max);
     return Math.round(lo + this.random() * (hi - lo));
+  }
+
+  private parseScrollProbe(raw: unknown): ScrollProbeSnapshot {
+    if (typeof raw === 'string') {
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        return parsed && typeof parsed === 'object' ? parsed as ScrollProbeSnapshot : { found: false };
+      } catch {
+        return { found: false };
+      }
+    }
+    return raw && typeof raw === 'object' ? raw as ScrollProbeSnapshot : { found: false };
+  }
+
+  private probeScrollTop(p: ScrollProbeSnapshot): number | undefined {
+    for (const v of [p.scrollTop, p.before, p.after]) {
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+    }
+    return undefined;
+  }
+
+  private async dispatchInertialWheel(x: number, y: number, distance: number): Promise<void> {
+    const total = Math.round(distance);
+    const seq = generateScrollSequence(total, { random: this.random });
+    if (seq.length === 0) return;
+    const px = Math.round(x);
+    const py = Math.round(y);
+    await this.deps.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: px, y: py });
+    for (const frame of seq) {
+      await this.deps.cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseWheel',
+        x: px,
+        y: py,
+        deltaX: 0,
+        deltaY: frame.deltaY,
+      });
+      if (frame.delay > 0) await this.sleep(frame.delay);
+    }
+  }
+
+  private async inertialScrollByProbe(
+    evalRawFn: (cdp: BrowseCdp, expression: string) => Promise<string>,
+    probeExpr: string,
+    distance: number,
+  ): Promise<ScrollProbeSnapshot> {
+    const beforeProbe = this.parseScrollProbe(await evalRawFn(this.deps.cdp, probeExpr));
+    const before = this.probeScrollTop(beforeProbe);
+    const hasPoint = typeof beforeProbe.x === 'number' && typeof beforeProbe.y === 'number';
+
+    if (hasPoint) {
+      await this.dispatchInertialWheel(beforeProbe.x!, beforeProbe.y!, distance);
+      const afterProbe = this.parseScrollProbe(await evalRawFn(this.deps.cdp, probeExpr));
+      const after = this.probeScrollTop(afterProbe) ?? before;
+      const moved = typeof before === 'number' && typeof after === 'number' && after > before;
+      const atBottom = afterProbe.atBottom ?? (
+        typeof after === 'number' &&
+        typeof afterProbe.clientHeight === 'number' &&
+        typeof afterProbe.scrollHeight === 'number'
+          ? after + afterProbe.clientHeight >= afterProbe.scrollHeight - 24
+          : undefined
+      );
+      return {
+        ...afterProbe,
+        before,
+        after,
+        moved,
+        atBottom,
+        found: afterProbe.found ?? beforeProbe.found,
+        visible: afterProbe.visible ?? beforeProbe.visible,
+      };
+    }
+
+    // Compatibility for unit-test probes that return a precomputed before/after pair.
+    const after = beforeProbe.after ?? before;
+    const moved = typeof before === 'number' && typeof after === 'number' && after > before;
+    return { ...beforeProbe, before, after, moved };
   }
 
   /** 启动浏览循环（命令驱动：上报卡片 → 等待指令 → 执行 → 循环） */
@@ -1425,6 +1517,18 @@ export class BrowseSession {
       const expr = `(function(){
         var S=${selectors};
         var root=document.querySelector('.note-detail-mask')||document.querySelector('.note-container')||document;
+        function pointFor(el){
+          var r=el.getBoundingClientRect();
+          var vw=document.documentElement.clientWidth||document.body.clientWidth||1280;
+          var vh=document.documentElement.clientHeight||document.body.clientHeight||800;
+          var left=Math.max(8, Math.min(vw-8, Math.max(r.left, 8)));
+          var right=Math.max(8, Math.min(vw-8, Math.min(r.right, vw-8)));
+          var top=Math.max(80, Math.min(vh-40, Math.max(r.top, 80)));
+          var bottom=Math.max(80, Math.min(vh-40, Math.min(r.bottom, vh-40)));
+          var x=Math.round((left+right)/2);
+          var y=Math.round((top+bottom)/2);
+          return {x:x,y:y};
+        }
         function firstBody(){
           for(var i=0;i<S.length;i++){ var el=root.querySelector(S[i])||document.querySelector(S[i]); if(el&&(el.textContent||'').trim()) return el; }
           return null;
@@ -1441,16 +1545,14 @@ export class BrowseSession {
         var body=firstBody();
         if(!body) return JSON.stringify({found:false});
         var c=scrollable(body);
-        var before=c.scrollTop||0;
-        c.scrollBy({top:${distance}});
-        var after=c.scrollTop||0;
         var rect=body.getBoundingClientRect();
         var vh=document.documentElement.clientHeight||document.body.clientHeight||800;
-        var reachedEnd=rect.bottom<vh*0.75 || after+c.clientHeight>=c.scrollHeight-24;
-        return JSON.stringify({found:true,before:before,after:after,reachedEnd:reachedEnd});
+        var scrollTop=c.scrollTop||0;
+        var reachedEnd=rect.bottom<vh*0.75 || scrollTop+c.clientHeight>=c.scrollHeight-24;
+        var p=pointFor(c);
+        return JSON.stringify({found:true,scrollTop:scrollTop,scrollHeight:c.scrollHeight,clientHeight:c.clientHeight,x:p.x,y:p.y,reachedEnd:reachedEnd});
       })()`;
-      const raw = await evalRawFn<string>(this.deps.cdp, expr);
-      const r = typeof raw === 'string' ? JSON.parse(raw) : { found: false };
+      const r = await this.inertialScrollByProbe(evalRawFn, expr, distance);
       if (!r.found) break;
       if (typeof r.after === 'number' && typeof r.before === 'number' && r.after > r.before) moved++;
       if (r.reachedEnd) break;
@@ -1944,6 +2046,16 @@ export class BrowseSession {
     for (let i = 0; i < steps; i++) {
       const distance = this.variedScrollDistance(180, 340);
       const expr = `(function(){
+        function pointFor(el){
+          var r=el.getBoundingClientRect();
+          var vw=document.documentElement.clientWidth||document.body.clientWidth||1280;
+          var vh=document.documentElement.clientHeight||document.body.clientHeight||800;
+          var left=Math.max(8, Math.min(vw-8, Math.max(r.left, 8)));
+          var right=Math.max(8, Math.min(vw-8, Math.min(r.right, vw-8)));
+          var top=Math.max(80, Math.min(vh-40, Math.max(r.top, 80)));
+          var bottom=Math.max(80, Math.min(vh-40, Math.min(r.bottom, vh-40)));
+          return {x:Math.round((left+right)/2),y:Math.round((top+bottom)/2)};
+        }
         function visible(el){
           var r=el.getBoundingClientRect();
           var vh=document.documentElement.clientHeight||document.body.clientHeight||800;
@@ -1982,19 +2094,21 @@ export class BrowseSession {
         if(hit&&visible(hit)) return JSON.stringify({found:true,visible:true});
         var c=hit ? (scrollable(hit)||fallback(root)) : fallback(root);
         if(!c) return JSON.stringify({found:false,atBottom:true});
-        var before=c.scrollTop||0;
-        c.scrollBy({top:${distance}});
-        var after=c.scrollTop||0;
+        var scrollTop=c.scrollTop||0;
         var hitAfter=seed(root);
+        var p=pointFor(c);
         return JSON.stringify({
           found:!!hitAfter,
           visible:!!(hitAfter&&visible(hitAfter)),
-          moved:after>before,
-          atBottom:after+c.clientHeight>=c.scrollHeight-24
+          scrollTop:scrollTop,
+          scrollHeight:c.scrollHeight,
+          clientHeight:c.clientHeight,
+          x:p.x,
+          y:p.y,
+          atBottom:scrollTop+c.clientHeight>=c.scrollHeight-24
         });
       })()`;
-      const raw = await evalRawFn(this.deps.cdp, expr);
-      const r = typeof raw === 'string' ? JSON.parse(raw) : { found: false };
+      const r = await this.inertialScrollByProbe(evalRawFn, expr, distance);
       if (r.found && r.visible !== false) return true;
       if (r.atBottom && !r.moved) return false;
       await this.humanPause(TIMING_PRESETS.scroll);
@@ -2014,8 +2128,18 @@ export class BrowseSession {
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
       const times = Math.max(1, count);
       await this.bringCommentAreaIntoReach(evalRawFn, Math.max(times + 2, Math.ceil(times * 1.5)));
-      // 单次 eval：上溯找可滚动祖先（评论节点优先）→ 记录 before → 小步 scrollBy → 返回 before/after。
-      const makeScrollExpr = (distance: number): string => `(function(){
+      // 单次滚动：上溯找可滚动祖先（评论节点优先）→ 记录 before → feed 同款惯性 wheel → 复测 after。
+      const scrollProbeExpr = `(function(){
+        function pointFor(el){
+          var r=el.getBoundingClientRect();
+          var vw=document.documentElement.clientWidth||document.body.clientWidth||1280;
+          var vh=document.documentElement.clientHeight||document.body.clientHeight||800;
+          var left=Math.max(8, Math.min(vw-8, Math.max(r.left, 8)));
+          var right=Math.max(8, Math.min(vw-8, Math.min(r.right, vw-8)));
+          var top=Math.max(80, Math.min(vh-40, Math.max(r.top, 80)));
+          var bottom=Math.max(80, Math.min(vh-40, Math.min(r.bottom, vh-40)));
+          return {x:Math.round((left+right)/2),y:Math.round((top+bottom)/2)};
+        }
         function scrollable(el){
           var n = el;
           while (n && n !== document.body && n !== document.documentElement){
@@ -2035,9 +2159,8 @@ export class BrowseSession {
           }
         }
         if (!c) return JSON.stringify({found:false});
-        var before = c.scrollTop;
-        c.scrollBy({top:${distance}});
-        return JSON.stringify({found:true, before:before, after:c.scrollTop});
+        var p=pointFor(c);
+        return JSON.stringify({found:true, scrollTop:c.scrollTop||0, scrollHeight:c.scrollHeight, clientHeight:c.clientHeight, x:p.x, y:p.y});
       })()`;
       let anyFound = false;
       let moved = 0;
@@ -2056,8 +2179,7 @@ export class BrowseSession {
         await this.humanPause(this.scrollTiming);
         // 先抓当前（已 settle 的）本屏候选再滚动：i=0 抓首屏，之后每屏累计。
         await mergeHarvest();
-        const raw = await evalRawFn<string>(this.deps.cdp, makeScrollExpr(this.variedScrollDistance()));
-        const r = typeof raw === 'string' ? JSON.parse(raw) : { found: false };
+        const r = await this.inertialScrollByProbe(evalRawFn, scrollProbeExpr, this.variedScrollDistance());
         if (r.found) {
           anyFound = true;
           if (typeof r.after === 'number' && typeof r.before === 'number' && r.after > r.before) moved++;

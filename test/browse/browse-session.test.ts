@@ -899,6 +899,43 @@ test('browse-session: note.scroll_comments 滚动成功经 harvest 回流评论�
   assert.ok(act!.candidates && act!.candidates.length > 0, '成功路径也应经 harvest 带回候选');
 });
 
+test('browse-session: note.scroll_comments 使用 feed 同款多帧 mouseWheel 而非 DOM 跳滚', async () => {
+  const h = makeHarness();
+  let scrollTop = 0;
+  let wheelFrames = 0;
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Input.dispatchMouseEvent') {
+        if (params.type === 'mouseWheel') {
+          wheelFrames++;
+          scrollTop += Number(params.deltaY ?? 0);
+        }
+        return {} as never;
+      }
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('innerHeight')) return { result: { value: JSON.stringify([]) } } as never;
+        if (expr.includes('function visible')) return { result: { value: '{"found":true,"visible":true}' } } as never;
+        if (expr.includes('overflowY')) {
+          return { result: { value: JSON.stringify({ found: true, scrollTop, scrollHeight: 2400, clientHeight: 500, x: 640, y: 420 }) } } as never;
+        }
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar')) return { result: { value: true } } as never;
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.scroll_comments', 'scb4', 0, { noteId: 'n1', count: 1 }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const act = h.completedActions.find(a => a.action === 'scroll_comments');
+  assert.ok(wheelFrames >= 8, `评论区滚动应派发惯性 wheel 多帧，实际 ${wheelFrames}`);
+  assert.ok(act && act.ok === true, `wheel 后应按真实 scrollTop 位移回报成功，实际 ${JSON.stringify(act)}`);
+  assert.match(String(act!.reason ?? ''), /scrolled=1/);
+});
+
 test('browse-session: profile.open 进主页抽到资料 → reportProfileDetail extracted:true', async () => {
   const h = makeHarness();
   h.deps.cdp = {
