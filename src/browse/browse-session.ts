@@ -637,6 +637,13 @@ export class BrowseSession {
     this.stopForReason('cdp_unrecoverable');
   }
 
+  /** 云端 WS 断开时丢弃旧连接上已经排队、尚未执行的云端命令，避免重连后盲目重放。 */
+  discardQueuedCloudCommands(reason = 'cloud_ws_disconnected'): void {
+    const count = this.commandQueue.length;
+    this.commandQueue = [];
+    if (count > 0) this.logger(`[browse] 云端连接断开，已丢弃 ${count} 条旧命令（reason=${reason}）`);
+  }
+
   /** 等待 CDP 重连结果：reconnected→true / unrecoverable→false。无 on() 能力（测试桩）即视为失败。 */
   private waitForReconnect(): Promise<boolean> {
     if (!this.deps.cdp.on) return Promise.resolve(false);
@@ -659,6 +666,22 @@ export class BrowseSession {
     } catch (err) {
       this.logger(`[browse] 重连后续跑重报失败：${(err as Error).message}`);
     }
+  }
+
+  /**
+   * 云端 WS 重连后的恢复点：不重放旧连接命令，按当前真实页面重报快照让云端重新决策。
+   * 与 CDP 重连共用恢复语义，但这里不触碰 CDP 连接本身。
+   */
+  async recoverAfterCloudReconnect(): Promise<void> {
+    this.discardQueuedCloudCommands('cloud_ws_reconnected');
+    this.lastActionEndAt = null;
+    this.logger('[browse] 云端已重连，清理旧命令状态并重报当前页面');
+    if (!this.running) {
+      if (this.closing || this.stopRequested) return;
+      await this.start();
+      return;
+    }
+    await this.resumeAfterReconnect();
   }
 
   /**
@@ -2504,4 +2527,3 @@ export class BrowseSession {
     }
   }
 }
-

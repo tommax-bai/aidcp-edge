@@ -65,6 +65,23 @@ export type PublishCommandHandler = (env: Envelope<PublishRequestPayload>) => vo
 export type PublishAtomCommandHandler = (env: Envelope<PublishCommandPayload>) => void;
 /** 陪伴界面数据快照处理器（ui.snapshot，cloud 主动推送；核心转 [ui-event] 行给桌面壳）。 */
 export type UiSnapshotHandler = (env: Envelope<UiSnapshotPayload>) => void;
+export type CloudConnectionEvent = 'cloud.disconnected' | 'cloud.reconnecting' | 'cloud.reconnected' | 'cloud.unrecoverable';
+export type CloudConnectionListener = (params: unknown) => void;
+
+export interface CloudReconnectOptions {
+  /** 最大重试次数，默认 12 */
+  maxAttempts?: number;
+  /** 退避基数 ms，默认 1000 */
+  baseDelayMs?: number;
+  /** 单次退避上限 ms，默认 15000 */
+  maxDelayMs?: number;
+  /** 重连总时长硬上限 ms，默认 180000 */
+  hardCapMs?: number;
+  /** 注入 sleep（测试用） */
+  sleepImpl?: (ms: number) => Promise<void>;
+  /** 注入时钟（测试用，硬上限计时） */
+  nowImpl?: () => number;
+}
 
 export interface EdgeClientOptions {
   /** 云端 WS 地址，如 ws://127.0.0.1:8787 */
@@ -91,6 +108,8 @@ export interface EdgeClientOptions {
   idGen?: () => string;
   /** 日志（默认 console） */
   logger?: (msg: string) => void;
+  /** 云端 WS 意外断线有界重连；默认开启，传 false 可关闭（测试/特殊启动路径用） */
+  reconnect?: CloudReconnectOptions | false;
 }
 
 function defaultWsFactory(url: string): CloudWebSocket {
@@ -111,7 +130,7 @@ interface Pending {
 export class EdgeClient {
   private ws?: CloudWebSocket;
   private readonly opts: Required<
-    Omit<EdgeClientOptions, 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr'>
+    Omit<EdgeClientOptions, 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr' | 'reconnect'>
   > &
     Pick<EdgeClientOptions, 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr'>;
   private seq = 0;
@@ -120,6 +139,11 @@ export class EdgeClient {
   /** welcome 握手下发的节奏快照（每类操作 floor 区间 + tempo）；重连（新 connect）后被最新 welcome 覆盖。 */
   private pacing?: PacingSnapshotPayload;
   private connected = false;
+  private intentionalClose = false;
+  private reconnecting = false;
+  private hasCompletedHello = false;
+  private readonly reconnectOpts?: CloudReconnectOptions;
+  private readonly listeners = new Map<CloudConnectionEvent, Set<CloudConnectionListener>>();
   private browseHandler?: BrowseCommandHandler;
   private publishHandler?: PublishCommandHandler;
   private publishAtomHandler?: PublishAtomCommandHandler;
@@ -140,31 +164,61 @@ export class EdgeClient {
       idGen: options.idGen ?? (() => `edge-${++this.seq}`),
       logger: options.logger ?? ((m) => console.log(m)),
     };
+    this.reconnectOpts = options.reconnect === false ? undefined : (options.reconnect ?? {});
   }
 
   /** 连接云端并完成握手（hello → welcome） */
-  async connect(): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
+  connect(): Promise<void> {
+    this.intentionalClose = false;
+    return this.openAndHello();
+  }
+
+  private openSocket(): Promise<void> {
+    if (this.ws) {
+      const old = this.ws;
+      this.ws = undefined;
+      try {
+        old.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    return new Promise<void>((resolve, reject) => {
       const ws = this.opts.wsFactory(this.opts.url);
       this.ws = ws;
       let settled = false;
       ws.addEventListener('open', () => {
+        if (this.ws !== ws) return;
         this.connected = true;
         settled = true;
         resolve();
       });
       ws.addEventListener('error', (ev) => {
+        if (this.ws !== ws) return;
         if (!settled) {
           settled = true;
           reject(new Error(`边-云 WS 连接失败: ${describeError(ev)}`));
         }
       });
       ws.addEventListener('close', () => {
+        if (this.ws !== ws) return;
         this.connected = false;
         this.failAllPending(new Error('边-云 WS 已关闭'));
+        if (!this.intentionalClose && this.hasCompletedHello) {
+          this.opts.logger('[edge-client] 云端 WS 已关闭，准备自动重连');
+          this.emitEvent('cloud.disconnected', {});
+          if (this.reconnectOpts && !this.reconnecting) void this.runReconnect();
+        }
       });
-      ws.addEventListener('message', (ev) => this.onMessage(ev.data));
+      ws.addEventListener('message', (ev) => {
+        if (this.ws !== ws) return;
+        this.onMessage(ev.data);
+      });
     });
+  }
+
+  private async openAndHello(): Promise<void> {
+    await this.openSocket();
     const welcome = await this.request('hello', {
       edgeId: this.opts.edgeId,
       app: this.opts.app,
@@ -178,6 +232,7 @@ export class EdgeClient {
     // 节奏快照（pacing-floor-config-min-interval 设计 §4.3）：welcome 是 hello 的请求/响应，按 pending-id
     // 命中返回、永不经过主动命令白名单，故此处直接取用零白名单遗漏风险。缺省（旧云端）→ undefined，边缘用内置默认。
     this.pacing = p.pacing;
+    this.hasCompletedHello = true;
     this.opts.logger(
       `[edge-client] 已握手，sessionId=${this.sessionId ?? '?'}${this.pacing ? `，pacing tempo=${this.pacing.tempo}` : '（无 pacing，用内置默认）'}`,
     );
@@ -228,6 +283,17 @@ export class EdgeClient {
     return () => {
       if (this.uiSnapshotHandler === handler) this.uiSnapshotHandler = undefined;
     };
+  }
+
+  /** 订阅云端 WS 生命周期事件（cloud.disconnected/reconnecting/reconnected/unrecoverable）。 */
+  on(method: CloudConnectionEvent, listener: CloudConnectionListener): () => void {
+    let set = this.listeners.get(method);
+    if (!set) {
+      set = new Set();
+      this.listeners.set(method, set);
+    }
+    set.add(listener);
+    return () => set!.delete(listener);
   }
 
   /** 发送一条信封（不等待响应） */
@@ -300,6 +366,7 @@ export class EdgeClient {
   }
 
   close(): void {
+    this.intentionalClose = true;
     this.failAllPending(new Error('边-云客户端主动关闭'));
     this.ws?.close();
     this.connected = false;
@@ -311,6 +378,7 @@ export class EdgeClient {
    * 把关闭帧吞掉 → 云端最长 staleAfterMs 内仍当其在线并派活」的僵尸复活（BLOCKER①）。
    */
   async closeAndWait(timeoutMs = 1500): Promise<void> {
+    this.intentionalClose = true;
     this.failAllPending(new Error('边-云客户端主动关闭'));
     const ws = this.ws;
     if (!ws) {
@@ -460,6 +528,50 @@ export class EdgeClient {
     }
     this.pending.clear();
   }
+
+  private emitEvent(method: CloudConnectionEvent, params: unknown): void {
+    const set = this.listeners.get(method);
+    if (set) for (const l of [...set]) l(params);
+  }
+
+  private async runReconnect(): Promise<void> {
+    const opts = this.reconnectOpts;
+    if (!opts) return;
+    this.reconnecting = true;
+    const maxAttempts = opts.maxAttempts ?? 12;
+    const baseDelayMs = opts.baseDelayMs ?? 1_000;
+    const maxDelayMs = opts.maxDelayMs ?? 15_000;
+    const hardCapMs = opts.hardCapMs ?? 180_000;
+    const sleep = opts.sleepImpl ?? defaultReconnectSleep;
+    const now = opts.nowImpl ?? (() => Date.now());
+    const deadline = now() + hardCapMs;
+    try {
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const delay = Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
+        await sleep(delay);
+        if (this.intentionalClose) return;
+        if (now() >= deadline) break;
+        this.opts.logger(`[edge-client] 云端重连中 attempt=${attempt}/${maxAttempts}`);
+        this.emitEvent('cloud.reconnecting', { attempt });
+        try {
+          await this.openAndHello();
+          if (this.intentionalClose) return;
+          this.opts.logger(`[edge-client] 云端已重连，sessionId=${this.sessionId ?? '?'}`);
+          this.emitEvent('cloud.reconnected', { attempt, sessionId: this.sessionId });
+          return;
+        } catch (err) {
+          this.connected = false;
+          this.failAllPending(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
+      const reason = 'cloud_reconnect_exhausted';
+      this.connected = false;
+      this.opts.logger('[edge-client] 云端重连耗尽，停止保持本地假运行态');
+      this.emitEvent('cloud.unrecoverable', { reason });
+    } finally {
+      this.reconnecting = false;
+    }
+  }
 }
 
 function describeError(ev: unknown): string {
@@ -467,4 +579,11 @@ function describeError(ev: unknown): string {
     return String((ev as { message: unknown }).message);
   }
   return 'unknown';
+}
+
+function defaultReconnectSleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    (timer as { unref?: () => void }).unref?.();
+  });
 }

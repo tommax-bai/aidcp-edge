@@ -1335,6 +1335,24 @@ test('browse-session: 命令执行中 CDP 断线 → 等重连成功后续跑重
   assert.equal(sess.isRunning(), false);
 });
 
+test('browse-session: 云端 WS 重连后丢弃旧队列并重报 page.cards', async () => {
+  const h = makeHarness();
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 10)); // 初始上报，loop 进 waitForCommand
+  const before = h.reportedCards.length;
+  (sess as unknown as { commandQueue: Envelope[] }).commandQueue = [
+    makeEnvelope('page.scroll', 'stale-scroll', 0, { reason: 'stale_before_reconnect' }),
+  ];
+
+  await sess.recoverAfterCloudReconnect();
+
+  assert.equal((sess as unknown as { commandQueue: Envelope[] }).commandQueue.length, 0, '旧连接命令队列必须清空');
+  assert.ok(h.reportedCards.length > before, '云端重连后应按当前真实页面重报 page.cards');
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
+  await done;
+});
+
 test('browse-session: cdp.unrecoverable → 停止浏览循环（诚实失败，交云端看门狗兜底）', async () => {
   const h = makeHarness();
   const emit = withCdpEvents(h);

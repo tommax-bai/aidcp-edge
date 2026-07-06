@@ -202,6 +202,42 @@ async function main(): Promise<void> {
   // §7 在途发布追踪：回收若撞上在途发布，先把它诚实判失败（让审批/通知侧看到失败而非半成品），
   // 绝不静默丢弃让其跨重起被重复触发 → 真账号重复发帖。值为「按各自结果形状诚实判失败」的闭包。
   const inFlightPublishes = new Map<string, (reason: string) => void>();
+  // 退出码契约（看护进程 launch-multinode 据此决定是否重起）：
+  //   0            = 关机（SIGINT/SIGTERM），不重起；
+  //   EXIT_RECYCLE = 可恢复终态回收，请重起（sysexits EX_TEMPFAIL=75：临时失败、邀请重试）。
+  const EXIT_RECYCLE = 75;
+  let browse: BrowseSession | undefined;
+  let overlayMonitor: CdpOverlayMonitor | undefined;
+  let watcherSupervisor: WatcherSupervisor | undefined;
+  let identityWatcher: IdentityWatcher | undefined;
+  let requestShutdown: ((reason: string) => void) | undefined;
+
+  // §7 回收契约：把全部在途发布诚实判失败（须在关闭云端连接之前发，确保失败回执发得出去）。
+  // 云端 WS 已断时 send 会 best-effort 失败，但本地 in-flight 必须立刻清掉，避免重连后重放旧发布。
+  const failInFlightPublishesHonestly = (reason: string): void => {
+    for (const [, failer] of inFlightPublishes) failer(reason);
+    inFlightPublishes.clear();
+  };
+
+  client.on('cloud.disconnected', () => {
+    failInFlightPublishesHonestly('cloud_ws_disconnected');
+    browse?.discardQueuedCloudCommands('cloud_ws_disconnected');
+  });
+  client.on('cloud.reconnected', () => {
+    const reconnPacing = client.getPacing();
+    browse?.applyPacingSnapshot(reconnPacing?.opFloorsMs, reconnPacing?.tempo);
+    browse?.recoverAfterCloudReconnect().catch((err) => {
+      console.error('[aidcp-edge] 云端重连后浏览恢复失败:', err);
+    });
+  });
+  client.on('cloud.unrecoverable', () => {
+    console.warn('[aidcp-edge] 云端重连耗尽 → 诚实下线 + 回收退出（请重起）');
+    if (requestShutdown) {
+      requestShutdown('cloud_ws_unrecoverable');
+    } else {
+      process.exitCode = EXIT_RECYCLE;
+    }
+  });
 
   // 红线（edge-companion-ui 8.1 评审修正）：全部云端主动消息处理器 MUST 在 connect() 之前注册。
   // 云端在 welcome 回发后立刻推 hello 快照（ui.snapshot）——若 welcome 与快照同一批 socket 读到达，
@@ -357,11 +393,6 @@ async function main(): Promise<void> {
   console.log(`[aidcp-edge] 已连接云端 ${cloudUrl}，等待命令 ...`);
 
   // —— 自动浏览会话 ——
-  let browse: BrowseSession | undefined;
-  let overlayMonitor: CdpOverlayMonitor | undefined;
-  let watcherSupervisor: WatcherSupervisor | undefined;
-  let identityWatcher: IdentityWatcher | undefined;
-
   // 身份失效 → 退回无身份态、重新确立、按新 id 重连（account-identity-from-login 1.3/1.4）。
   // 复用同一 session.cdp（浏览器不重启、端口/目录不重分 = 节点初始化不动），只重跑「身份确立」。
   // 重新确立前先回到能读出身份的消费端首页（触发失效时可能停在创作发布页/弹层态、无「我」锚点）。
@@ -589,18 +620,7 @@ async function main(): Promise<void> {
   }
 
   // —— 退出 / 回收统一路径（节点终态诚实下线 + 看护可重起；真关机干净退出）——
-  // 退出码契约（看护进程 launch-multinode 据此决定是否重起）：
-  //   0            = 关机（SIGINT/SIGTERM），不重起；
-  //   EXIT_RECYCLE = CDP 终态回收，请重起（sysexits EX_TEMPFAIL=75：临时失败、邀请重试）。
-  const EXIT_RECYCLE = 75;
   let recycleRequested = false;
-
-  // §7 回收契约：把全部在途发布诚实判失败（须在关闭云端连接之前发，确保失败回执发得出去）。
-  const failInFlightPublishesHonestly = (reason: string): void => {
-    for (const [, failer] of inFlightPublishes) failer(reason);
-    inFlightPublishes.clear();
-  };
-
   let shuttingDown = false;
   const shutdown = async (opts: { exitCode: number; recycle: boolean; reason: string }): Promise<void> => {
     if (shuttingDown) return;
@@ -639,13 +659,16 @@ async function main(): Promise<void> {
     }
     process.exit(exitCode);
   };
+  requestShutdown = (reason: string): void => {
+    if (recycleRequested) return;
+    recycleRequested = true;
+    void shutdown({ exitCode: EXIT_RECYCLE, recycle: true, reason });
+  };
 
   // CDP 终态（重连不可恢复）→ 诚实下线 + 回收退出（请重起）。autoBrowse 与否都接，节点失去浏览器即回收。
   session.cdp.on('cdp.unrecoverable', () => {
-    if (recycleRequested) return;
-    recycleRequested = true;
     console.warn('[aidcp-edge] CDP 重连不可恢复（终态）→ 诚实下线 + 回收退出（请重起）');
-    void shutdown({ exitCode: EXIT_RECYCLE, recycle: true, reason: 'cdp_unrecoverable' });
+    requestShutdown?.('cdp_unrecoverable');
   });
 
   process.on('SIGINT', () => void shutdown({ exitCode: 0, recycle: false, reason: 'SIGINT' }));

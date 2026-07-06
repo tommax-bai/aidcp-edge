@@ -729,8 +729,15 @@ function handleEdgeLogLine(message, isError = false) {
   }
   const next = { edge: isError ? 'warning' : 'running', lastMessage: message };
   if (!isError && status.edgeFailure) next.edgeFailure = null;
-  if (message.includes('已连接云端') || message.includes('已握手')) next.cloud = 'connected';
+  if (message.includes('已连接云端') || message.includes('已握手') || message.includes('云端已重连')) next.cloud = 'connected';
   if (message.includes('连接失败') || message.includes('WS 已关闭') || message.includes('启动失败')) next.cloud = 'disconnected';
+  if (message.includes('云端重连中')) next.cloud = 'disconnected';
+  if (message.includes('云端重连耗尽')) {
+    next.edge = 'warning';
+    next.cloud = 'disconnected';
+    next.session = 'idle';
+    next.presence = { text: '云端重连失败，等待重启', at: new Date().toISOString() };
+  }
   if (
     message.includes('自动浏览已启动') ||
     message.includes('启动自动浏览循环') ||
