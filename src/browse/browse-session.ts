@@ -283,6 +283,7 @@ interface ScrollProbeSnapshot {
  * 历史上松判断 `url.includes('/explore')` 会把详情页误当 feed，导致扫不到卡 → 静默 → 边-云互等死锁。
  */
 const EXPLORE_FEED_RE = /\/explore\/?(\?|#|$)/;
+const SEARCH_LIST_RE = /\/search(?:_result)?(?:[/?#]|$)/;
 const DEFAULT_RHYTHM_TOTAL = 60;
 
 /**
@@ -324,6 +325,9 @@ export class BrowseSession {
   private dwellFloorTiming: TimingConfig;
   /** 当前详情页打开时刻（墙钟 this.now）；无打开的详情页时为 null。 */
   private noteOpenedAt: number | null = null;
+  /** 打开笔记前所在的来源列表 URL；用于 navigation.back 直连返回 search/feed，避免回踩详情历史。 */
+  private sourceListUrl: string | null = null;
+  private sourceListPageType: 'feed' | 'search' | null = null;
   /** 当前 feed 卡片批次的到达时刻（墙钟 this.now）；feed-scroll-card-floor 的停留锚点，每次上报刷新。 */
   private feedCardsArrivedAt: number | null = null;
   /**
@@ -857,7 +861,7 @@ export class BrowseSession {
     // 严格判定：仅 feed 列表(/explore)或搜索结果(/search)算"已在位"；笔记详情页 /explore/<noteId>
     // 不算 feed，必须导航回 feed——否则启动时若 Chrome 停在某详情页会扫不到卡 → 静默死锁。
     const onFeed = EXPLORE_FEED_RE.test(url);
-    const onSearch = url.includes('/search');
+    const onSearch = this.isSearchListUrl(url);
     if (!onFeed && !onSearch) {
       this.logger(`[browse] 不在 explore feed（当前 ${url || '?'}），导航到 ${this.exploreUrl}`);
       await this.deps.cdp.send('Page.navigate', { url: this.exploreUrl });
@@ -920,6 +924,34 @@ export class BrowseSession {
       { expression: 'location.href', returnByValue: true },
     );
     return typeof res.result?.value === 'string' ? res.result.value : '';
+  }
+
+  private isSearchListUrl(url: string): boolean {
+    return SEARCH_LIST_RE.test(url);
+  }
+
+  private isTargetListUrl(url: string, target: 'feed' | 'search'): boolean {
+    return target === 'search' ? this.isSearchListUrl(url) : EXPLORE_FEED_RE.test(url);
+  }
+
+  private rememberSourceListUrl(url: string): void {
+    if (EXPLORE_FEED_RE.test(url)) {
+      this.sourceListPageType = 'feed';
+      this.sourceListUrl = this.exploreUrl;
+      return;
+    }
+    if (this.isSearchListUrl(url)) {
+      this.sourceListPageType = 'search';
+      this.sourceListUrl = url;
+    }
+  }
+
+  private async rememberCurrentSourceList(): Promise<void> {
+    try {
+      this.rememberSourceListUrl(await this.evalUrl());
+    } catch {
+      // 记录来源列表是返回路径优化，失败不应阻断 note.open；后续会走诚实降级。
+    }
   }
 
   private parseNoteIdFromUrl(u?: string): string | undefined {
@@ -1356,6 +1388,7 @@ export class BrowseSession {
       this.deps.client.reportActionCompleted?.({ action: 'open_note', ok: false, reason: 'card_not_found' });
       return;
     }
+    await this.rememberCurrentSourceList();
     await this.deps.scroller.openCard(card);
     let opened = await this.deps.modalCtrl.waitForModal(this.modalTimeoutMs);
     if (!opened) {
@@ -1951,37 +1984,59 @@ export class BrowseSession {
   }
 
   private async navigateBack(targetPage?: 'feed' | 'search', reason?: string): Promise<void> {
-    // 返回方式的判据用「返回瞬间头上是否盖着笔记浮层」，须在关浮层【之前】抓一次。
-    // 卡片真实点击开的浮层，其上一条历史即来源列表，history.back() 能回列表并保住滚动位；
-    // 而通知巡视 / 作者主页深读这类【整页离页】返回时头上无浮层，history.back() 只会回踩到
-    // 【token 已失效的旧笔记详情】（/explore/<id>，搜索来源尤甚）→ 闪现小红书 error_code=300031
-    // 「当前笔记暂时无法浏览」，被旁路遮罩监测误判为账号级风控。故【无浮层的整页返回一律跳过后退、
-    // 走下方前向导航兜底直连来源列表】，永不回踩失效详情（含旧只白名单作者主页的情形，现由浮层判据统一覆盖）。
+    // navigation.back 的协议名保留，但边缘语义改为「回到来源列表」：
+    // 默认用 Page.navigate 直连 feed/search 来源页，避免 history.back 回踩过期详情路由并触发
+    // 小红书 access-limit-app 弹窗；只有搜索来源 URL 缺失且当前仍像笔记浮层时，才允许历史兜底。
     const modalWasOpen = await this.deps.modalCtrl.isModalOpen();
     await this.safeCloseModal();
-    const wantSearch = targetPage === 'search';
+    const target: 'feed' | 'search' = targetPage === 'search' ? 'search' : 'feed';
+    const wantSearch = target === 'search';
     // 熟悉度提速：返回到刚看过的 feed（back_to_feed）时，离页停留已由 ensureDetailDwell 治理，
     // 返回手势不必再全量犹豫 → 用更轻的手势停顿（scroll 档，中位 ~0.8s ≈ action 的 1/3，仍带抖动、非零、不秒退）。
     // 注：此处原误取 cardGapTiming（中位 5s，比 action 还重一倍，与注释本意相反）——快速返回反成最慢档，已修正为 scroll 档。
     const fastReturn = reason === 'back_to_feed' && !wantSearch;
     await this.humanPause(fastReturn ? this.scrollTiming : this.actionTiming);
-    const isOnList = (u: string): boolean => (wantSearch ? /\/search_result/.test(u) : EXPLORE_FEED_RE.test(u));
-    const fromUrl = await this.evalUrl();
-    // 仅当【不在目标列表 且 头上确有笔记浮层】才用 history.back()（保滚动位的好路径）；
-    // 无浮层的整页离页返回（通知 / 主页 / 任意）跳过后退，交下方健康校验兜底前向导航直连列表。
-    if (!isOnList(fromUrl) && modalWasOpen) {
-      await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
-      // 熟悉 feed 已水合更快：缩短 history.back 后的固定落地等待（仍由后续 waitForVisibleCards 兜底确认卡片）。
-      await this.sleep(fastReturn ? 300 : (wantSearch ? 1200 : 800));
+
+    const recordedSearchUrl = wantSearch
+      && this.sourceListPageType === 'search'
+      && this.sourceListUrl
+      && this.isSearchListUrl(this.sourceListUrl)
+      ? this.sourceListUrl
+      : null;
+    const targetUrl = wantSearch ? recordedSearchUrl : this.exploreUrl;
+    const targetWaitMs = wantSearch ? 5000 : 8000;
+    const navigateToList = async (url: string): Promise<boolean> => {
+      await this.deps.cdp.send('Page.navigate', { url });
+      await this.waitForCards(10000);
+      return this.waitForVisibleCards(targetWaitMs);
+    };
+
+    let landed = await this.evalUrl().catch(() => '');
+    let ready = false;
+    if (!this.isTargetListUrl(landed, target)) {
+      if (targetUrl) {
+        ready = await navigateToList(targetUrl);
+      } else if (wantSearch && modalWasOpen) {
+        this.logger('[browse] 搜索来源 URL 缺失，使用 history.back 健康校验兜底');
+        await this.deps.cdp.send('Runtime.evaluate', { expression: 'history.back()' });
+        await this.sleep(1200);
+      } else {
+        if (wantSearch) this.logger('[browse] 搜索来源 URL 缺失，回退 explore feed');
+        ready = await navigateToList(this.exploreUrl);
+      }
+      landed = await this.evalUrl().catch(() => landed);
     }
-    // 健康校验兜底（安全网原样保留）：必须落在【目标列表页（feed: EXPLORE_FEED_RE / search: /search_result）
-    // 且有可见卡片】才算成功；否则整页导航兜底——消除经过期笔记的 404、深读经主页回不去、无浮层整页返回、
-    // 以及坏页 0 卡 → reportVisibleCards 静默 → 边-云互等死锁。search 列表不可达时回退 explore feed
-    // （保证不卡死，搜索上下文交由云端续刷重建）。
-    const landed = await this.evalUrl();
-    const onTarget = isOnList(landed);
-    if (!onTarget || !(await this.waitForVisibleCards(wantSearch ? 5000 : 8000))) {
-      if (wantSearch && !onTarget) this.logger('[browse] 搜索结果列表不可达（离页返回/页失效），回退 explore feed');
+
+    if (!ready && this.isTargetListUrl(landed, target)) {
+      ready = await this.waitForVisibleCards(targetWaitMs);
+    }
+    if (!ready && targetUrl) {
+      ready = await navigateToList(targetUrl);
+      landed = await this.evalUrl().catch(() => landed);
+    }
+    // 健康校验安全网：search 来源不可达或历史兜底落到坏页时，最终回退 explore，保证闭环继续上报。
+    if (!ready) {
+      if (wantSearch) this.logger('[browse] 搜索结果列表不可达（来源 URL 缺失/页失效），回退 explore feed');
       await this.deps.cdp.send('Page.navigate', { url: this.exploreUrl });
       await this.waitForCards(10000);
       await this.waitForVisibleCards(5000);

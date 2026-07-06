@@ -131,12 +131,34 @@ test('buildClassifyOverlayJs: 生成的 JS 含各类指纹与返回分支', () =
   const js = buildClassifyOverlayJs();
   assert.match(js, /安全验证/); // 验证码文案
   assert.match(js, /扫码登录/); // 登录文案
+  assert.match(js, /当前笔记暂时无法浏览/); // 小红书笔记访问限制文案
   assert.match(js, /geetest/); // 厂商 host 指纹
   assert.match(js, /'captcha'/);
   assert.match(js, /'login'/);
   assert.match(js, /'dismissible'/);
   assert.match(js, /'unknown'/);
   assert.match(js, /'none'/);
+});
+
+test('buildClassifyOverlayJs: 小红书 access-limit-app 归为可恢复非阻断弹窗', async () => {
+  const { JSDOM } = await import('jsdom');
+  const dom = new JSDOM(`
+    <div class="reds-modal reds-modal-open access-modal" style="position: fixed; width: 800px; height: 600px;">
+      <div class="access-limit-app">
+        <p>当前笔记暂时无法浏览</p>
+        <p>请打开小红书App扫码查看</p>
+      </div>
+    </div>
+  `, { pretendToBeVisual: true });
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
+    value() {
+      return { x: 0, y: 0, left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 };
+    },
+  });
+
+  const kind = Function('window', 'document', `return ${buildClassifyOverlayJs()};`)(dom.window, dom.window.document);
+  assert.equal(kind, 'dismissible');
+  assert.equal(isBlockingKind(kind), false);
 });
 
 test('captureBlockingOverlaySnapshot: normalizes text, DOM features, and first URL', async () => {

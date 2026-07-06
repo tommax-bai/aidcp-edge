@@ -1121,36 +1121,47 @@ test('pacing: interaction.like 的 thinkMs → 执行前犹豫等待', async () 
 });
 
 // 回归：云端 back_to_feed 实际下发的 navigation.back【不带 targetPage】（生产路径）。
-// 修复前 undefined 落进 else 分支（裸 history.back + 固定 sleep + 瞬时扫描），feed 未水合即扫到
+// 修复前 undefined 落进 else 分支（裸 history.back / 固定 sleep + 瞬时扫描），feed 未水合即扫到
 // 0 卡 → reportVisibleCards 静默不发 page.cards → 边端死等命令、云端死等上报 → 边-云互等死锁。
-// 修复后 undefined 等同 'feed'：走 waitForVisibleCards 轮询，等水合出卡再上报。
+// 修复后 undefined 等同 'feed'：直连 explore feed，并走 waitForVisibleCards 轮询，等水合出卡再上报。
 test('browse-session: navigation.back 无 targetPage（back_to_feed 生产路径）轮询等水合再上报，不静默死锁', async () => {
   const h = makeHarness();
-  const origSend = h.deps.cdp.send;
-  let wentBack = false;
+  let url = 'https://www.xiaohongshu.com/explore';
+  let returnStarted = false;
   let pollsAfterBack = 0;
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
-      if (method === 'Runtime.evaluate' && String(params.expression ?? '').includes('history.back()')) {
-        wentBack = true;
+      if (method === 'Page.navigate') {
+        url = String(params.url ?? '');
+        if (url.includes('/explore')) returnStarted = true;
+        return {} as never;
       }
-      return origSend(method, params);
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('history.back()')) throw new Error('navigation.back must not use history.back for feed return');
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        return { result: { value: url } } as never;
+      }
+      return {} as never;
     },
   };
   // 初始扫描有卡；back 之后模拟 feed 延迟水合：前 3 次轮询为空，之后才出卡。
   h.deps.scroller = {
     ...h.deps.scroller,
     getVisibleCards: async () => {
-      if (!wentBack) return [CARD];
+      if (!returnStarted) return [CARD];
       pollsAfterBack++;
       return pollsAfterBack <= 3 ? [] : [CARD];
     },
   };
   const sess = new BrowseSession(h.deps, noOpts());
-  await startAndPush(sess, [
-    makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed' }), // 无 targetPage：复刻云端实际报文
-    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
-  ]);
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 15)); // 启动在 explore 完成首扫
+  url = 'https://www.xiaohongshu.com/notification';
+  await sess.onCloudCommand(makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed' })); // 无 targetPage：复刻云端实际报文
+  await new Promise((r) => setTimeout(r, 5));
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
+  await done;
   assert.ok(
     h.completedActions.some((a) => a.action === 'back' && a.ok),
     'navigation.back 应回报 action.completed{back, ok:true}',
@@ -1611,7 +1622,7 @@ test('navigateBack: 看笔记→开通知→返回（无浮层整页离页）→
   assert.ok(back && back.ok === true, 'back 应如实回报 ok:true（不静默）');
 });
 
-test('navigateBack: 笔记浮层盖在列表上返回 → 仍走 history.back（保滚动位）、不整页重载', async () => {
+test('navigateBack: 笔记浮层盖在列表上返回 → 直接 Page.navigate 回 feed，不再 history.back', async () => {
   const nb = makeNavBackHarness({
     modalOpen: true,
     onBackUrl: 'https://www.xiaohongshu.com/explore', // history.back 关浮层回到 feed
@@ -1621,15 +1632,65 @@ test('navigateBack: 笔记浮层盖在列表上返回 → 仍走 history.back（
     'https://www.xiaohongshu.com/explore/abc123?xsec_token=tok', // 详情态、头上有浮层
     makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'feed' }),
   );
-  assert.equal(nb.calls.historyBack, 1, '有浮层返回应用 history.back 保住滚动位');
-  assert.equal(
-    nb.calls.navigates.length,
-    0,
-    `落回有卡片的 feed 后 MUST NOT 再整页重载，实际 navigates: ${JSON.stringify(nb.calls.navigates)}`,
+  assert.equal(nb.calls.historyBack, 0, 'feed 来源即便有浮层也 MUST NOT history.back 回踩详情历史');
+  assert.ok(
+    nb.calls.navigates.some((u) => u.includes('/explore')),
+    `应直接前向 Page.navigate 回 explore feed，实际: ${JSON.stringify(nb.calls.navigates)}`,
   );
 });
 
-test('navigateBack: history.back 落到另一失效详情（坏页）→ 兜底 Page.navigate 回 feed 并上报 page.cards（不静默死锁）', async () => {
+test('navigateBack: 搜索来源记录 URL → 直接 Page.navigate 回搜索结果，不拽回 explore', async () => {
+  const searchUrl = 'https://www.xiaohongshu.com/search_result?keyword=palantir';
+  const detailUrl = 'https://www.xiaohongshu.com/explore/abc123?xsec_token=tok';
+  const h = makeHarness([{ ...CARD, noteId: 'abc123' }]);
+  const calls = { historyBack: 0, navigates: [] as string[] };
+  const urlState = { url: searchUrl };
+  h.deps.scroller = {
+    ...h.deps.scroller,
+    openCard: async (c) => {
+      h.openedCards.push(c.position);
+      urlState.url = detailUrl;
+    },
+  };
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Page.navigate') {
+        const u = String(params.url ?? '');
+        calls.navigates.push(u);
+        urlState.url = u;
+        return {} as never;
+      }
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('history.back')) {
+          calls.historyBack += 1;
+          return {} as never;
+        }
+        if (expr.includes('collect-wrapper') || expr.includes('engage-bar') || expr.includes('detail-desc')) {
+          return { result: { value: true } } as never;
+        }
+        if (expr.includes('note-item')) {
+          return { result: { value: 10 } } as never;
+        }
+        return { result: { value: urlState.url } } as never;
+      }
+      return {} as never;
+    },
+  };
+
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n', 0, { index: 0, noteId: 'abc123' }),
+    makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'search' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+
+  assert.equal(calls.historyBack, 0, '有记录的搜索来源 MUST NOT history.back');
+  assert.equal(calls.navigates.at(-1), searchUrl, `应返回搜索结果 URL，实际: ${JSON.stringify(calls.navigates)}`);
+  assert.equal(urlState.url, searchUrl);
+});
+
+test('navigateBack: 搜索来源 URL 缺失时 history.back 落坏页 → 兜底 Page.navigate 回 feed 并上报 page.cards', async () => {
   const nb = makeNavBackHarness({
     modalOpen: true,
     onBackUrl: 'https://www.xiaohongshu.com/explore/def456?xsec_token=stale', // back 落到另一条失效详情
@@ -1638,9 +1699,9 @@ test('navigateBack: history.back 落到另一失效详情（坏页）→ 兜底 
   await driveNavBack(
     nb,
     'https://www.xiaohongshu.com/explore/abc123?xsec_token=tok',
-    makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'feed' }),
+    makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'search' }),
   );
-  assert.equal(nb.calls.historyBack, 1, '有浮层先尝试 history.back');
+  assert.equal(nb.calls.historyBack, 1, '搜索来源 URL 缺失的边界情形可用 history.back 健康校验兜底');
   assert.ok(
     nb.calls.navigates.some((u) => u.includes('/explore')),
     `落坏页应兜底整页导航回 feed，实际: ${JSON.stringify(nb.calls.navigates)}`,

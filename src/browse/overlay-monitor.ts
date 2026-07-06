@@ -96,6 +96,13 @@ export const DEFAULT_DISMISSIBLE_PHRASES = [
   '优惠券',
 ];
 
+/** 小红书笔记级访问限制弹窗：不是账号级验证码/登录墙，应允许返回列表恢复。 */
+export const DEFAULT_XHS_ACCESS_LIMIT_PHRASES = [
+  '当前笔记暂时无法浏览',
+  '请打开小红书App扫码查看',
+  '小红书如何扫码',
+];
+
 export interface OverlayMonitorOptions {
   /** 后台轮询间隔(ms)，默认 1000。 */
   pollMs?: number;
@@ -144,10 +151,12 @@ export function buildClassifyOverlayJs(
     var LOGIN_PHRASES = ${JSON.stringify(loginPhrases)};
     var CAPTCHA_PHRASES = ${JSON.stringify(captchaPhrases)};
     var DISMISS_PHRASES = ${JSON.stringify(dismissiblePhrases)};
+    var ACCESS_LIMIT_PHRASES = ${JSON.stringify(DEFAULT_XHS_ACCESS_LIMIT_PHRASES)};
     // 已知验证码厂商的 iframe/script host 指纹（数美/极验/网易易盾/阿里 NC/腾讯…）。
     var CAPTCHA_HOST = /captcha|geetest|geevisit|shumei|fengkong|yidun|dun\\.163|aliyun.*nc|nocaptcha|t\\.captcha\\.qq|aq\\.qq|vaptcha|verify/i;
     // 可疑验证码容器 class（滑块/拼图/点选等稳定语义片段）。
     var CAPTCHA_CLS = /(^|[^a-z])(captcha|geetest|nc[_-]|slide[_-]?(verify|wrap|track|btn)|puzzle|vaptcha|shumei|yidun|verify[_-]?(slider|wrap|bar))([^a-z]|$)/i;
+    var ACCESS_LIMIT_CLS = /access[-_](modal|limit)|access-limit-app/i;
 
     function vis(el){
       if(!el || !el.getBoundingClientRect) return false;
@@ -188,14 +197,22 @@ export function buildClassifyOverlayJs(
       if(hitsAny(txt(el), LOGIN_PHRASES)) return 'login';
     }
 
-    // ③ 运营活动：营销文案 且 有关闭按钮 → 可关。
+    // ③ 小红书笔记级访问限制：可通过回来源列表恢复，不作为账号级阻断。
+    for(var i=0;i<masks.length;i++){
+      var el=masks[i];
+      if(!vis(el) || inNote(el)) continue;
+      var cls=(el.className && el.className.toString && el.className.toString()) || '';
+      if(ACCESS_LIMIT_CLS.test(cls) || hitsAny(txt(el), ACCESS_LIMIT_PHRASES)) return 'dismissible';
+    }
+
+    // ④ 运营活动：营销文案 且 有关闭按钮 → 可关。
     for(var i=0;i<masks.length;i++){
       var el=masks[i];
       if(!vis(el) || inNote(el)) continue;
       if(hitsAny(txt(el), DISMISS_PHRASES) && hasClose(el)) return 'dismissible';
     }
 
-    // ④ unknown：可见、较大且 fixed/absolute 的阻断遮罩(非笔记详情)，分不出类且没有明显关闭键，
+    // ⑤ unknown：可见、较大且 fixed/absolute 的阻断遮罩(非笔记详情)，分不出类且没有明显关闭键，
     //    或内含未识别 iframe → 保守上报，交云端命名。口径偏保守以抑制误暂停。
     var vw = window.innerWidth || 1024, vh = window.innerHeight || 768;
     for(var i=0;i<masks.length;i++){
