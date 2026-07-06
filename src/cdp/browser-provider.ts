@@ -223,6 +223,7 @@ export class AdsPowerProvider implements BrowserProvider {
 export function selectBrowserProvider(
   opts: {
     env?: NodeJS.ProcessEnv;
+    startUrl?: string;
     fetchImpl?: typeof fetch;
     sleepImpl?: (ms: number) => Promise<void>;
     logImpl?: (msg: string) => void;
@@ -240,7 +241,7 @@ export function selectBrowserProvider(
       apiBase: env.AIDCP_ADS_API_BASE ?? DEFAULT_ADS_BASE,
       apiKey: env.AIDCP_ADS_API_KEY,
       userId,
-      startUrl: env.AIDCP_EXPLORE_URL,
+      startUrl: opts.startUrl ?? env.AIDCP_EXPLORE_URL,
     };
     return new AdsPowerProvider(cfg, {
       fetchImpl: opts.fetchImpl,

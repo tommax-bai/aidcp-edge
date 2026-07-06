@@ -74,6 +74,25 @@ test('AdsPowerProvider.launch 成功 → 端点带 debug_port、实例非 reused
   assert.equal(startCall.headers?.Authorization, 'Bearer secret');
 });
 
+test('AdsPowerProvider.launch 支持平台 driver 注入起始页', async () => {
+  const calls: Array<{ url: string; headers?: Record<string, string> }> = [];
+  const fetchImpl = routedFetch(
+    [
+      ['/api/v1/browser/start', () => ({ code: 0, data: { debug_port: 61332 } })],
+      ['/json/version', () => ({})],
+    ],
+    calls,
+  );
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1', startUrl: 'https://example.test/home' },
+    { fetchImpl, ...noopDeps },
+  );
+  await provider.launch({ host: '127.0.0.1', port: 9222 });
+  const startCall = calls.find((c) => c.url.includes('browser/start'));
+  assert.ok(startCall);
+  assert.match(decodeURIComponent(startCall.url), /https:\/\/example\.test\/home/);
+});
+
 test('AdsPowerProvider.launch code≠0 → 诚实报错（不回落 self）', async () => {
   const fetchImpl = routedFetch([
     ['/api/v1/browser/start', () => ({ code: -1, msg: 'Profile does not exist' })],
@@ -128,6 +147,14 @@ test('selectBrowserProvider 显式 self', () => {
 test('selectBrowserProvider adspower 全配 → AdsPowerProvider', () => {
   const p = selectBrowserProvider({
     env: { AIDCP_BROWSER_PROVIDER: 'adspower', AIDCP_ADS_USER_ID: 'k1' } as NodeJS.ProcessEnv,
+  });
+  assert.equal(p.kind, 'adspower');
+});
+
+test('selectBrowserProvider accepts driver-provided startUrl without changing provider selection', () => {
+  const p = selectBrowserProvider({
+    env: { AIDCP_BROWSER_PROVIDER: 'adspower', AIDCP_ADS_USER_ID: 'k1' } as NodeJS.ProcessEnv,
+    startUrl: 'https://example.test/home',
   });
   assert.equal(p.kind, 'adspower');
 });
