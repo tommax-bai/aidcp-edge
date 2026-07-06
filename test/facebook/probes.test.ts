@@ -4,6 +4,7 @@ import {
   collectFacebookFingerprintSummary,
   collectFacebookStorageSummary,
   summarizeCookies,
+  summarizeStorageNames,
 } from '../../src/facebook/index.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
@@ -40,7 +41,7 @@ function fakeCdpForProbes(): BrowseCdp {
           result: {
             value: JSON.stringify({
               href: 'https://www.facebook.com/',
-              localStorage: { count: 2, keys: ['presence', 'USER_SETTINGS'] },
+              localStorage: { count: 3, keys: ['presence', 'USER_SETTINGS', 'falco_queue_hmac_ttl.SECRET_KEY_SHOULD_NOT_LEAK'] },
               sessionStorage: { count: 1, keys: ['tabId'] },
               indexedDB: { count: 2, names: ['Comet', 'Messenger'] },
               cacheStorage: { count: 0, names: [] },
@@ -84,9 +85,23 @@ test('collectFacebookStorageSummary: output contains no raw cookie/storage value
   const summary = await collectFacebookStorageSummary(fakeCdpForProbes());
   const serialized = JSON.stringify(summary);
   assert.equal(summary.cookies.length, 2);
-  assert.deepEqual(summary.localStorage.keys, ['presence', 'USER_SETTINGS']);
+  assert.equal(summary.localStorage.count, 3);
+  assert.equal(summary.localStorage.entries.length, 3);
   assert.equal(serialized.includes('SECRET_SESSION_TOKEN_SHOULD_NOT_LEAK'), false);
+  assert.equal(serialized.includes('SECRET_KEY_SHOULD_NOT_LEAK'), false);
   assert.equal(serialized.includes('1234567890'), false);
+  assert.equal(serialized.includes('presence'), false);
+  assert.equal(serialized.includes('USER_SETTINGS'), false);
+});
+
+test('summarizeStorageNames: redacts storage keys and flags risky shapes', () => {
+  const out = summarizeStorageNames(['presence', 'falco_queue_hmac_ttl.SECRET_KEY_SHOULD_NOT_LEAK']);
+  const serialized = JSON.stringify(out);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].nameHash.length, 16);
+  assert.equal(out[1].tokenLike, true);
+  assert.equal(serialized.includes('presence'), false);
+  assert.equal(serialized.includes('SECRET_KEY_SHOULD_NOT_LEAK'), false);
 });
 
 test('collectFacebookFingerprintSummary: reports safe non-secret provider/page summary', async () => {

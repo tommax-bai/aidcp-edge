@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { evalRaw, type BrowseCdp } from '../../browse/cdp-util.js';
 
 export interface RawCookieLike {
@@ -22,19 +23,26 @@ export interface RedactedCookieSummary {
   valueLengthBucket: 'empty' | 'short' | 'medium' | 'long';
 }
 
+export interface RedactedStorageNameSummary {
+  nameHash: string;
+  nameLengthBucket: 'empty' | 'short' | 'medium' | 'long';
+  containsDigit: boolean;
+  tokenLike: boolean;
+}
+
 export interface WebStorageAreaSummary {
   count: number;
-  keys: string[];
+  entries: RedactedStorageNameSummary[];
 }
 
 export interface IndexedDbSummary {
   count: number;
-  names: string[];
+  entries: RedactedStorageNameSummary[];
 }
 
 export interface CacheStorageSummary {
   count: number;
-  names: string[];
+  entries: RedactedStorageNameSummary[];
 }
 
 export interface FacebookStorageSummary {
@@ -46,12 +54,37 @@ export interface FacebookStorageSummary {
   cacheStorage: CacheStorageSummary;
 }
 
+interface RawStorageSummary {
+  href: string;
+  localStorage: { count: number; keys: string[] };
+  sessionStorage: { count: number; keys: string[] };
+  indexedDB: { count: number; names: string[] };
+  cacheStorage: { count: number; names: string[] };
+}
+
 function valueLengthBucket(value: string | undefined): RedactedCookieSummary['valueLengthBucket'] {
   const len = String(value ?? '').length;
   if (len === 0) return 'empty';
   if (len <= 16) return 'short';
   if (len <= 64) return 'medium';
   return 'long';
+}
+
+function nameLengthBucket(value: string | undefined): RedactedStorageNameSummary['nameLengthBucket'] {
+  return valueLengthBucket(value);
+}
+
+function storageNameHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+export function summarizeStorageNames(names: string[]): RedactedStorageNameSummary[] {
+  return names.map((name) => ({
+    nameHash: storageNameHash(String(name ?? '')),
+    nameLengthBucket: nameLengthBucket(name),
+    containsDigit: /\d/.test(name),
+    tokenLike: /token|secret|session|hmac|ttl|queue|persist|recovery|auth|key/i.test(name) || /[A-Za-z0-9_-]{24,}/.test(name),
+  }));
 }
 
 export function summarizeCookies(cookies: RawCookieLike[]): RedactedCookieSummary[] {
@@ -97,9 +130,25 @@ const STORAGE_SCAN_JS = `(async function(){
 export async function collectFacebookStorageSummary(cdp: BrowseCdp): Promise<FacebookStorageSummary> {
   const cookieRes = await cdp.send<{ cookies?: RawCookieLike[] }>('Network.getAllCookies').catch(() => ({ cookies: [] }));
   const raw = await evalRaw<string>(cdp, STORAGE_SCAN_JS);
-  const storage = JSON.parse(raw) as Omit<FacebookStorageSummary, 'cookies'>;
+  const storage = JSON.parse(raw) as RawStorageSummary;
   return {
-    ...storage,
+    href: storage.href,
+    localStorage: {
+      count: storage.localStorage.count,
+      entries: summarizeStorageNames(storage.localStorage.keys),
+    },
+    sessionStorage: {
+      count: storage.sessionStorage.count,
+      entries: summarizeStorageNames(storage.sessionStorage.keys),
+    },
+    indexedDB: {
+      count: storage.indexedDB.count,
+      entries: summarizeStorageNames(storage.indexedDB.names),
+    },
+    cacheStorage: {
+      count: storage.cacheStorage.count,
+      entries: summarizeStorageNames(storage.cacheStorage.names),
+    },
     cookies: summarizeCookies(cookieRes.cookies ?? []),
   };
 }
