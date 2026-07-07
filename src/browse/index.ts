@@ -12,4 +12,5 @@ export * from './notification-monitor.js';
 export * from './watcher-supervisor.js';
 export * from './identity-watcher.js';
 export * from './search-handler.js';
+export * from './captcha-assist.js';
 export * from './browse-session.js';
