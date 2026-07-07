@@ -101,6 +101,7 @@ const settingsUi = {
   adsEnvMsg: document.querySelector('#ads-env-msg'),
   adsCreate: document.querySelector('#ads-create'),
   adsTemplate: document.querySelector('#ads-template'),
+  adsPlatform: document.querySelector('#ads-platform'),
   adsCreateMsg: document.querySelector('#ads-create-msg'),
   parkingButtons: Array.from(document.querySelectorAll('.parking-btn')),
   browserShow: document.querySelector('#browser-show'),
@@ -139,6 +140,16 @@ let dirty = false;
 let adsDownloadUrl = 'https://www.adspower.net/download';
 // 选中环境的 AdsPower 环境名（随设置持久化，作标题带账号标签兜底）。
 let selectedProfileName = '';
+// change edge-environment-platform-select：当前选中环境的运行时平台（同步进 settings.platform，启动时注入核心）。
+let selectedPlatform = 'xiaohongshu';
+function normPlatform(raw) {
+  const v = String(raw == null ? '' : raw).trim().toLowerCase();
+  if (v === 'facebook' || v === 'fb') return 'facebook';
+  return 'xiaohongshu';
+}
+function platformLabel(p) {
+  return normPlatform(p) === 'facebook' ? 'Facebook' : '小红书';
+}
 const LOG_RETENTION_MS = 2 * 60 * 1000; // 开发者详情原始日志保留 2 分钟
 const logEntries = [];
 let lastLogMessage = '';
@@ -780,6 +791,7 @@ async function saveCurrentSettings() {
     browserParkingMode: selectedParkingMode(),
     adsProfileId: settingsUi.adsProfile.value.trim(),
     adsProfileName: selectedProfileName,
+    platform: selectedPlatform,
     adsApiKey: settingsUi.adsApiKey.value,
     adsApiBase: settingsUi.adsApiBase.value.trim(),
   });
@@ -842,6 +854,7 @@ function applySettings(s) {
   if (!s) return;
   if (s.adsDownloadUrl) adsDownloadUrl = s.adsDownloadUrl;
   selectedProfileName = s.adsProfileName || '';
+  selectedPlatform = normPlatform(s.platform);
   applyDevVisible(Boolean(s.devDetails));
   settingsUi.adsProfile.value = s.adsProfileId || '';
   settingsUi.adsApiKey.value = s.adsApiKey || '';
@@ -892,6 +905,7 @@ settingsUi.adsManual.addEventListener('change', () => {
 });
 settingsUi.adsProfile.addEventListener('input', () => {
   selectedProfileName = ''; // 手填 id 对不上环境名，不冒认
+  selectedPlatform = 'xiaohongshu'; // 手填 id 平台未知 → 回落小红书（与历史一致，零回归）；需 FB 则经环境列表选中
   updateProfileDisplay();
   markDirty();
 });
@@ -963,10 +977,12 @@ async function probeAds() {
   }
 }
 
-// 选中某环境：把其 user_id（非 serial_number）设为将写入的分身 ID，并高亮该行；顺手记环境名作账号标签。
-function selectProfile(userId, itemEl, profileName) {
+// 选中某环境：把其 user_id（非 serial_number）设为将写入的分身 ID，并高亮该行；顺手记环境名作账号标签
+// 与该环境的平台（platform，来自其 remark；同步进 settings 供启动注入 AIDCP_PLATFORM）。
+function selectProfile(userId, itemEl, profileName, platform) {
   settingsUi.adsProfile.value = userId;
   selectedProfileName = profileName || '';
+  selectedPlatform = normPlatform(platform);
   updateProfileDisplay();
   markDirty();
   settingsUi.adsEnvList.querySelectorAll('.ads-env-item').forEach((el) => el.classList.remove('selected'));
@@ -1050,6 +1066,7 @@ function populateEnvs(profiles) {
     const meta = document.createElement('div');
     meta.className = 'env-meta';
     const bits = [];
+    bits.push(platformLabel(prof.platform)); // 平台标签（小红书 / Facebook）
     if (prof.serialNumber) bits.push('#' + prof.serialNumber);
     if (prof.groupName) bits.push(prof.groupName);
     bits.push(prof.proxy || '无代理配置');
@@ -1059,7 +1076,7 @@ function populateEnvs(profiles) {
     text.appendChild(meta);
     item.appendChild(text);
     item.appendChild(makeDeleteBtn(prof));
-    item.addEventListener('click', () => selectProfile(prof.userId, item, prof.name));
+    item.addEventListener('click', () => selectProfile(prof.userId, item, prof.name, prof.platform));
     if (prof.userId && prof.userId === current) {
       item.classList.add('selected');
       currentSelected = prof.name || prof.userId;
@@ -1068,7 +1085,7 @@ function populateEnvs(profiles) {
     list.appendChild(item);
   }
   if (profiles.length === 1 && !current && profiles[0].userId && !coreRunning()) {
-    selectProfile(profiles[0].userId, firstItem, profiles[0].name);
+    selectProfile(profiles[0].userId, firstItem, profiles[0].name, profiles[0].platform);
     return { autoSelected: profiles[0].name || profiles[0].userId };
   }
   return { autoSelected: null, currentSelected };
@@ -1136,13 +1153,15 @@ populateTemplates();
 settingsUi.adsCreate.addEventListener('click', async () => {
   const tpl = settingsUi.adsTemplate && settingsUi.adsTemplate.value;
   if (!tpl) return setCreateMsg('请先选择一个整机模板', true);
+  const platform = normPlatform(settingsUi.adsPlatform && settingsUi.adsPlatform.value);
   if (!window.aidcpEdge || typeof window.aidcpEdge.adsCreateEnv !== 'function') return;
   settingsUi.adsCreate.disabled = true;
   setCreateMsg('正在创建环境…', false);
   try {
-    const r = await window.aidcpEdge.adsCreateEnv({ ...formAdsOpts(), templateKey: tpl });
+    const r = await window.aidcpEdge.adsCreateEnv({ ...formAdsOpts(), templateKey: tpl, platform });
     if (r && r.ok) {
-      if (r.userId && !coreRunning()) selectProfile(r.userId, null, '');
+      // 新建即选中时，带上刚选的平台（回执 platform 优先，回落表单选择）。
+      if (r.userId && !coreRunning()) selectProfile(r.userId, null, '', r.platform || platform);
       const selectedHint = r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
       setCreateMsg(`已创建环境（${r.template || tpl}）。${selectedHint}请在 AdsPower 里为它配好代理再使用。`, false);
       refreshEnvs();

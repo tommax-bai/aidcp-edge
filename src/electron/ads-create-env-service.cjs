@@ -59,6 +59,7 @@ async function createEnvironmentWithGroupRecovery({
   templateKey,
   intendedAccountLabel,
   machineLabel,
+  platform,
   groupResolver,
   createFlowFactory = createCreateFlow,
 } = {}) {
@@ -73,6 +74,7 @@ async function createEnvironmentWithGroupRecovery({
       templateKey,
       intendedAccountLabel,
       machineLabel,
+      platform,
       groupId: grp.groupId,
     });
     return { result, groupId: grp.groupId };

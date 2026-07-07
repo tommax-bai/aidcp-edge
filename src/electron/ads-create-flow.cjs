@@ -11,14 +11,28 @@
 const STATUS = Object.freeze({ UNVERIFIED: 'unverified', READY: 'ready', VERIFY_FAILED: 'verify_failed' });
 const REMARK_TAG = 'aidcp-env';
 
-/** 把意图/模板/机器编码进分身 remark（随 user/create 写入、user/list 读回）。 */
-function encodeRemark({ intendedAccountLabel, template, machine, createdAt } = {}) {
+// change edge-environment-platform-select：每环境的运行时平台（决定启动时打开哪个平台首页、握手上报哪个平台）。
+// 与核心 src/platform 的 PlatformId 对齐（xiaohongshu | facebook）；空/未知/旧环境一律回落 xiaohongshu（零回归）。
+const DEFAULT_PLATFORM = 'xiaohongshu';
+const SUPPORTED_PLATFORMS = Object.freeze(['xiaohongshu', 'facebook']);
+
+/** 归一平台字符串到规范值；空/未知回落 xiaohongshu（shell 层不抛，honest fallback）。 */
+function normalizePlatform(raw) {
+  const v = String(raw == null ? '' : raw).trim().toLowerCase();
+  if (!v || v === 'xhs' || v === 'redbook' || v === 'xiaohongshu') return 'xiaohongshu';
+  if (v === 'facebook' || v === 'fb') return 'facebook';
+  return DEFAULT_PLATFORM;
+}
+
+/** 把意图/模板/机器/平台编码进分身 remark（随 user/create 写入、user/list 读回）。 */
+function encodeRemark({ intendedAccountLabel, template, machine, createdAt, platform } = {}) {
   return JSON.stringify({
     t: REMARK_TAG,
     acct: intendedAccountLabel || '',
     tpl: template || '',
     mach: machine || '',
     ts: createdAt || 0,
+    plat: normalizePlatform(platform), // 每环境平台（缺省 xiaohongshu）
   });
 }
 
@@ -27,7 +41,14 @@ function parseRemark(remark) {
   try {
     const o = JSON.parse(String(remark));
     if (o && o.t === REMARK_TAG) {
-      return { intendedAccountLabel: o.acct || '', template: o.tpl || '', machine: o.mach || '', createdAt: o.ts || 0 };
+      return {
+        intendedAccountLabel: o.acct || '',
+        template: o.tpl || '',
+        machine: o.mach || '',
+        createdAt: o.ts || 0,
+        // 旧环境无 plat 字段 → 回落 xiaohongshu（零回归）。
+        platform: normalizePlatform(o.plat),
+      };
     }
   } catch {
     /* 非 JSON / 非本 change：忽略 */
@@ -48,7 +69,7 @@ function createCreateFlow(deps) {
    * 建一个环境。代理不传（默认 no_proxy，手工在 AdsPower 侧配）。
    * @returns {Promise<{ ok: boolean, userId?: string, status?: string, template?: string, intendedAccountLabel?: string, violations?: string[], error?: string, code?: number }>}
    */
-  async function createEnvironment({ templateKey, intendedAccountLabel, machineLabel, groupId, name } = {}) {
+  async function createEnvironment({ templateKey, intendedAccountLabel, machineLabel, groupId, name, platform } = {}) {
     if (inFlight) {
       return { ok: false, error: '创建进行中，请等当前创建完成（防连点双建）' };
     }
@@ -64,7 +85,7 @@ function createCreateFlow(deps) {
         return { ok: false, status: 'rejected', violations: built.violations, error: '指纹护栏/一致性断言未过：' + built.violations.join('；') };
       }
 
-      const remark = encodeRemark({ intendedAccountLabel, template: templateKey, machine: machineLabel, createdAt: now() });
+      const remark = encodeRemark({ intendedAccountLabel, template: templateKey, machine: machineLabel, createdAt: now(), platform });
       const r = await writeApi.createProfile({
         groupId,
         name: name || templateKey,
@@ -81,6 +102,7 @@ function createCreateFlow(deps) {
         status: STATUS.UNVERIFIED,
         template: templateKey,
         intendedAccountLabel: intendedAccountLabel || '',
+        platform: normalizePlatform(platform),
       };
     } finally {
       inFlight = false;
@@ -90,4 +112,4 @@ function createCreateFlow(deps) {
   return { createEnvironment, encodeRemark, parseRemark, STATUS };
 }
 
-module.exports = { createCreateFlow, encodeRemark, parseRemark, STATUS, REMARK_TAG };
+module.exports = { createCreateFlow, encodeRemark, parseRemark, normalizePlatform, STATUS, REMARK_TAG, DEFAULT_PLATFORM, SUPPORTED_PLATFORMS };
