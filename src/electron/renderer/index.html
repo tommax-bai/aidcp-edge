@@ -52,6 +52,16 @@
         </div>
       </section>
 
+      <!-- 内嵌运行时首启内核准备进度（仅缺内核时显示；下完自动隐藏） -->
+      <section id="kernel-prep" class="kernel-prep hidden" aria-live="polite">
+        <div class="kp-head">
+          <span id="kernel-prep-label">正在准备浏览器内核…</span>
+          <span id="kernel-prep-pct">0%</span>
+        </div>
+        <div class="kp-track"><div id="kernel-prep-bar" class="kp-bar"></div></div>
+        <div class="kp-note">约 750MB，仅首次下载，完成后即可正常使用。</div>
+      </section>
+
       <section id="edge-failure" class="edge-failure hidden" aria-live="polite">
         <span class="ef-mark">!</span>
         <div class="ef-main">

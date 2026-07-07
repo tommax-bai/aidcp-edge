@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
 const { createAdsLocalApi } = require('./ads-local-api.cjs');
 const { createAdsWriteApi } = require('./ads-write-api.cjs');
+const adsRuntime = require('./ads-runtime.cjs');
 const adsFingerprint = require('./ads-fingerprint.cjs');
 const { normalizePlatform } = require('./ads-create-flow.cjs');
 const {
@@ -38,6 +39,9 @@ let restartPending = false;
 let pausePending = false;
 let lastEdgeFailureLine = '';
 let browserParkingReady = false;
+// 内嵌 AdsPower 运行时解析出的 Local API base（非默认端口时覆盖 AIDCP_ADS_API_BASE 喂核心）；
+// 外部客户端 / 未内嵌形态下保持 null，buildProviderEnv 回落 settings.adsApiBase 或核心默认 50325。
+let embeddedAdsApiBase = null;
 
 // AdsPower 官方下载页（客户端「下载 AdsPower」按钮外链）。
 const ADS_DOWNLOAD_URL = 'https://www.adspower.net/download';
@@ -143,7 +147,9 @@ function buildProviderEnv() {
   if (settings.provider === 'self') return env;
   env.AIDCP_ADS_USER_ID = settings.adsProfileId;
   if (settings.adsApiKey) env.AIDCP_ADS_API_KEY = settings.adsApiKey;
-  if (settings.adsApiBase) env.AIDCP_ADS_API_BASE = settings.adsApiBase;
+  // 内嵌运行时解析出的实际 base 优先（覆盖非默认端口）；否则回落设置项。
+  if (embeddedAdsApiBase) env.AIDCP_ADS_API_BASE = embeddedAdsApiBase;
+  else if (settings.adsApiBase) env.AIDCP_ADS_API_BASE = settings.adsApiBase;
   return env;
 }
 
@@ -227,6 +233,8 @@ const status = {
   presence: { text: '等待启动…', at: new Date().toISOString() },
   // publish：发布卡只读投影（pending/reminded/approved/published/rejected/failed）。
   publish: null,
+  // kernelPrep：内嵌运行时首启内核准备进度 { state, percent, version }；null=无需/已完成（形状兼容，旧渲染层忽略）。
+  kernelPrep: null,
   // lastPublish：最近一次成功发布 {title, at}（本地持久化，重启不丢；云端快照接入后以云端为准）。
   lastPublish: null,
 };
@@ -719,9 +727,77 @@ async function launchChromeAndGateEdge() {
   }
 }
 
+// 起核心前确保 AdsPower 运行时就绪 + 所需浏览器内核已下载（change edge-bundled-adspower-cli-runtime）。
+// 三档：
+//  - external：Local API 已可达（外部 AdsPower 客户端/既有运行时）→ 沿用现状，不起内嵌运行时、不预检内核（内核由外部客户端自管）。
+//  - none：Local API 不可达且未随包内嵌运行时（迁移期）→ 保持现状，交由核心启动时诚实失败。
+//  - embedded：Local API 不可达但随包有 CLI → 起内嵌运行时、条件式预检内核（缺则带进度下载、下完才放行）。
+// 红线：任何失败诚实回报 + 弹窗、返回 { ok:false }，MUST NOT 起核心；内核 MUST NOT 惰性推迟到核心的 browser/start。
+async function ensureAdsRuntimeAndKernel() {
+  embeddedAdsApiBase = null;
+  // 1. Local API 已可达？（外部客户端在跑就沿用现状）
+  const probe = await adsApi.status(resolveAdsOpts()).catch(() => null);
+  if (probe && probe.ok) return { ok: true, mode: 'external' };
+
+  // 2. 随包内嵌运行时是否存在
+  const cliEntry = adsRuntime.resolveCliEntry({
+    resourcesPath: process.resourcesPath,
+    appRoot: app.getAppPath(),
+  });
+  if (!cliEntry) return { ok: true, mode: 'none' };
+
+  // 3. 起内嵌运行时
+  updateStatus({ auth: 'checking', lastMessage: '正在启动内置 AdsPower 运行时…', ...presencePatch('正在准备浏览器运行时…') });
+  const apiKey = settings.adsApiKey || process.env.AIDCP_ADS_API_KEY;
+  const rt = await adsRuntime.ensureRuntime({ cliEntry, execPath: process.execPath, apiKey });
+  if (!rt.ok) {
+    updateStatus({
+      auth: 'config required',
+      edge: 'stopped',
+      session: 'idle',
+      kernelPrep: null,
+      lastMessage: `内置 AdsPower 运行时启动失败：${rt.error}`,
+      ...edgeFailurePatch(rt.error || '内置 AdsPower 运行时启动失败'),
+      ...presencePatch('运行时启动失败'),
+    });
+    surfaceFailure('AIDCP Edge 无法启动', `内置 AdsPower 运行时启动失败：${rt.error || '未知错误'}`);
+    return { ok: false, error: rt.error };
+  }
+  embeddedAdsApiBase = rt.base;
+
+  // 4. 条件式内核预检（缺则带进度下载、下完才放行）
+  const version = adsFingerprint.DEFAULT_KERNEL;
+  const kres = await adsRuntime.ensureKernel({
+    cliEntry,
+    execPath: process.execPath,
+    version,
+    onProgress: ({ percent, state }) => {
+      updateStatus({
+        kernelPrep: { state, percent, version },
+        lastMessage: `正在下载浏览器内核 ${version}（约 750MB，仅首次）… ${percent}%`,
+        ...presencePatch(`准备浏览器内核 ${percent}%`),
+      });
+    },
+  });
+  if (!kres.ok) {
+    updateStatus({
+      edge: 'stopped',
+      session: 'idle',
+      kernelPrep: { state: 'failed', percent: 0, version },
+      lastMessage: `浏览器内核准备失败：${kres.error}`,
+      ...edgeFailurePatch(kres.error || '浏览器内核准备失败'),
+      ...presencePatch('内核准备失败，可重试'),
+    });
+    surfaceFailure('AIDCP Edge 无法启动', `浏览器内核准备失败：${kres.error || '未知错误'}`);
+    return { ok: false, error: kres.error };
+  }
+  updateStatus({ kernelPrep: null, ...clearEdgeFailurePatch() });
+  return { ok: true, mode: 'embedded', base: rt.base };
+}
+
 // adspower（AdsPower 指纹浏览器）路径：不自起本机 Chrome、不做 9222 cookie 轮询；
 // 浏览器启动 / 登录态 / 身份确立全由核心进程经 AdsPower 本地 API 完成（未登录 → 核心诚实非零退出并弹窗）。
-function startAdsPowerFlow() {
+async function startAdsPowerFlow() {
   updateStatus({ provider: 'adspower', ...clearEdgeFailurePatch() });
   if (!settings.adsProfileId || !settings.adsProfileId.trim()) {
     // 缺分身 ID 无法启动：诚实提示待配置，不静默假装在跑。
@@ -741,6 +817,9 @@ function startAdsPowerFlow() {
     ...(settings.adsProfileName ? { account: { id: settings.adsProfileId, name: settings.adsProfileName, source: 'env' } } : {}),
     ...clearEdgeFailurePatch(),
   });
+  // 起核心前确保运行时 + 内核就绪；失败已诚实呈现，绝不带核心进注定失败的启动。
+  const prep = await ensureAdsRuntimeAndKernel();
+  if (!prep.ok) return;
   startEdge();
 }
 
