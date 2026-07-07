@@ -73,6 +73,84 @@ function appendEdgeLog(line, isError) {
   } catch { /* ignore */ }
 }
 
+// Electron 壳层自身日志。edge.log 只覆盖核心子进程 stdout/stderr；启动按钮、spawn 失败、
+// stale child 这类问题发生在主进程侧，必须另落 app.log，否则排障会只看到“核心没日志”。
+let appLogStream;
+function appLogFilePath() {
+  return path.join(app.getPath('userData'), 'logs', 'app.log');
+}
+function ensureAppLogStream() {
+  if (appLogStream) return appLogStream;
+  try {
+    const file = appLogFilePath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    try {
+      const st = fs.statSync(file);
+      if (st.size > 5 * 1024 * 1024) fs.renameSync(file, file + '.1');
+    } catch { /* 无旧文件 */ }
+    appLogStream = fs.createWriteStream(file, { flags: 'a' });
+    appLogStream.on('error', () => { appLogStream = undefined; });
+  } catch {
+    appLogStream = undefined;
+  }
+  return appLogStream;
+}
+function appendAppLog(line, isError = false) {
+  const s = ensureAppLogStream();
+  if (!s) return;
+  try {
+    s.write(`${new Date().toISOString()} ${isError ? 'ERR' : '   '} ${line}\n`);
+  } catch { /* ignore */ }
+}
+
+function edgeProcessSummary(child = edgeProcess) {
+  if (!child) return 'none';
+  return `pid=${child.pid || 'n/a'} exitCode=${child.exitCode ?? 'null'} signal=${child.signalCode ?? 'null'} killed=${child.killed ? 'true' : 'false'}`;
+}
+
+function isEdgeProcessAlive(child) {
+  if (!child) return false;
+  if (child.exitCode !== null || child.signalCode !== null) return false;
+  if (!child.pid) return true;
+  try {
+    process.kill(child.pid, 0);
+    return true;
+  } catch (error) {
+    return error && error.code === 'EPERM';
+  }
+}
+
+function clearStaleEdgeProcess(context) {
+  if (!edgeProcess || isEdgeProcessAlive(edgeProcess)) return false;
+  appendAppLog(`[edge-process] stale child cleared at ${context}: ${edgeProcessSummary(edgeProcess)}`, true);
+  edgeProcess = undefined;
+  return true;
+}
+
+function hasLiveEdgeProcess(context) {
+  if (!edgeProcess) return false;
+  if (isEdgeProcessAlive(edgeProcess)) return true;
+  clearStaleEdgeProcess(context);
+  return false;
+}
+
+function handleEdgeSpawnFailure(error, child) {
+  const message = error && error.message ? error.message : String(error || '未知错误');
+  appendAppLog(`[edge-process] spawn failed: ${message} (${edgeProcessSummary(child)})`, true);
+  if (!child || edgeProcess === child) edgeProcess = undefined;
+  const summary = `核心进程启动失败：${message}`;
+  updateStatus({
+    edge: 'warning',
+    cloud: 'disconnected',
+    session: 'idle',
+    auth: settings.provider === 'adspower' ? 'checking' : status.auth,
+    lastMessage: summary,
+    ...presencePatch('启动失败，等待处理'),
+    ...edgeFailurePatch(summary),
+  });
+  surfaceFailure('AIDCP Edge 启动失败', `${summary}。请打开开发者详情或查看 logs/app.log。`);
+}
+
 // 桌面客户端浏览器 provider 设置（持久化到 userData/settings.json）：
 //  - provider='adspower'（默认）：核心进程经 AdsPower 本地 API 托管指纹浏览器（每分身独立指纹/IP，防同机多账号关联）；
 //    须填 adsProfileId（= AdsPower 分身 id / AIDCP_ADS_USER_ID），apiKey/apiBase 可选（AdsPower 可关 API 校验）。
@@ -586,22 +664,38 @@ function sendBrowserParkingCommand(type) {
 }
 
 function startEdge() {
-  if (edgeProcess) return;
+  if (hasLiveEdgeProcess('startEdge')) {
+    appendAppLog(`[edge-process] startEdge skipped: existing child alive (${edgeProcessSummary()})`);
+    return;
+  }
   // 打包后用 Electron 自带的 Node 运行预编译产物（ELECTRON_RUN_AS_NODE），
   // 不依赖目标机装 Node/npx/tsx。entry 为 build:dist 编译出的 dist/main.js。
   const appRoot = app.getAppPath();
   const edgeEntry = path.join(appRoot, 'dist', 'main.js');
+  // 打包后 appRoot 是 app.asar 文件；spawn cwd 必须是真目录，否则 macOS 抛 ENOTDIR。
+  const edgeCwd = appRoot.endsWith('.asar') ? path.dirname(appRoot) : appRoot;
   // 浏览器 provider 由桌面设置决定（默认 adspower：核心经 AdsPower 本地 API 托管指纹浏览器；
   // self：桌面自起 Chrome 流程 chrome-launcher.cjs 固定 9222）。provider env 在前、被 ...process.env
   // 覆盖 → 外部显式设置仍是逃生阀、优先生效。
   const wasAdspower = settings.provider === 'adspower';
   browserParkingReady = false;
-  edgeProcess = spawn(process.execPath, [edgeEntry], {
-    cwd: appRoot,
-    env: { ...buildProviderEnv(), ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
+  appendAppLog(
+    `[edge-process] spawning provider=${settings.provider} profile=${settings.adsProfileId || '-'} entry=${edgeEntry} cwd=${edgeCwd}`,
+  );
+  let child;
+  try {
+    child = spawn(process.execPath, [edgeEntry], {
+      cwd: edgeCwd,
+      env: { ...buildProviderEnv(), ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+  } catch (error) {
+    handleEdgeSpawnFailure(error, child);
+    return;
+  }
+  edgeProcess = child;
+  appendAppLog(`[edge-process] spawned ${edgeProcessSummary(child)}`);
 
   // 发布卡在途状态随核心（重）启动清零（edge-companion-ui 8.1 评审修正）：离线窗口内的审批变化
   // （拒绝/失败）推送会如实丢失，旧 pending/approved 卡若不清会永久滞留成陈卡；真在候审/已批的
@@ -616,10 +710,12 @@ function startEdge() {
     ...clearEdgeFailurePatch(),
   });
 
-  edgeProcess.stdout.on('data', (chunk) => handleEdgeOutput(chunk.toString()));
-  edgeProcess.stderr.on('data', (chunk) => handleEdgeOutput(chunk.toString(), true));
-  edgeProcess.on('exit', (code, signal) => {
-    edgeProcess = undefined;
+  child.on('error', (error) => handleEdgeSpawnFailure(error, child));
+  child.stdout.on('data', (chunk) => handleEdgeOutput(chunk.toString()));
+  child.stderr.on('data', (chunk) => handleEdgeOutput(chunk.toString(), true));
+  child.on('exit', (code, signal) => {
+    appendAppLog(`[edge-process] exit code=${code ?? 'null'} signal=${signal ?? 'null'} (${edgeProcessSummary(child)})`);
+    if (edgeProcess === child) edgeProcess = undefined;
     browserParkingReady = false;
     // 主动重启（保存设置后按新 provider 起）、暂停、退出应用都是「有意停止」，不算异常、不弹窗。
     // pausePending 一次性消费：治「启动窗口内点暂停」——handler 未装时被 SIGTERM 终止(signal!=null)本不是异常。
@@ -715,6 +811,7 @@ async function launchChromeAndGateEdge() {
 // adspower（AdsPower 指纹浏览器）路径：不自起本机 Chrome、不做 9222 cookie 轮询；
 // 浏览器启动 / 登录态 / 身份确立全由核心进程经 AdsPower 本地 API 完成（未登录 → 核心诚实非零退出并弹窗）。
 function startAdsPowerFlow() {
+  appendAppLog(`[edge-flow] start adspower profile=${settings.adsProfileId || '-'} live=${hasLiveEdgeProcess('startAdsPowerFlow') ? 'true' : 'false'}`);
   updateStatus({ provider: 'adspower', ...clearEdgeFailurePatch() });
   if (!settings.adsProfileId || !settings.adsProfileId.trim()) {
     // 缺分身 ID 无法启动：诚实提示待配置，不静默假装在跑。
@@ -739,6 +836,7 @@ function startAdsPowerFlow() {
 
 // 按当前 provider 设置分派启动流程。
 function startFlow() {
+  appendAppLog(`[edge-flow] startFlow provider=${settings.provider}`);
   if (settings.provider === 'self') {
     launchChromeAndGateEdge();
   } else {
@@ -752,7 +850,7 @@ function startFlow() {
 function stopAndRestart(message, patch = {}) {
   stopLoginPoller();
   updateStatus({ cloud: 'disconnected', session: 'running', lastMessage: message, ...presencePatch('正在重启引擎…'), ...clearEdgeFailurePatch(), ...patch });
-  if (edgeProcess) {
+  if (hasLiveEdgeProcess('stopAndRestart')) {
     restartPending = true;
     edgeProcess.kill('SIGTERM');
   } else {
@@ -917,6 +1015,10 @@ ipcMain.handle('auth:relogin', () => relogin());
 ipcMain.handle('settings:get', () => ({ ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL }));
 ipcMain.handle('settings:save', (_event, patch) => {
   const res = saveSettings(patch);
+  appendAppLog(
+    `[settings] save provider=${settings.provider} profile=${settings.adsProfileId || '-'} result=${res.ok ? 'ok' : `failed:${res.error || ''}`}`,
+    !res.ok,
+  );
   // 保存只持久化、**不打断**在跑的核心（应用改动经显式 edge:restart「按新设置重启」）。
   updateStatus({
     provider: settings.provider,
@@ -926,7 +1028,9 @@ ipcMain.handle('settings:save', (_event, patch) => {
 });
 // 悬浮「启动」：核心未跑则按当前设置启动；已在跑则不重复启动。
 ipcMain.handle('edge:start', () => {
-  if (!edgeProcess) startFlow();
+  appendAppLog(`[ipc] edge:start current=${edgeProcessSummary()}`);
+  if (!hasLiveEdgeProcess('edge:start')) startFlow();
+  else appendAppLog(`[ipc] edge:start ignored: child alive (${edgeProcessSummary()})`);
   return status;
 });
 // 「按新设置重启」：显式应用已保存的设置到在跑核心（有序重启，不由保存隐式打断）。
@@ -1031,7 +1135,9 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
+    appendAppLog(`[app] ready version=${app.getVersion()} userData=${app.getPath('userData')}`);
     loadSettings();
+    appendAppLog(`[settings] loaded provider=${settings.provider} profile=${settings.adsProfileId || '-'} devDetails=${settings.devDetails ? 'true' : 'false'}`);
     loadUiState();
     updateStatus({ provider: settings.provider });
     createWindow();
@@ -1062,6 +1168,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.on('before-quit', () => {
+  appendAppLog(`[app] before-quit edge=${edgeProcessSummary()}`);
   isQuitting = true;
 });
 

@@ -8,8 +8,9 @@
 
 - **桌面包 = aidcp-edge 的 Electron 应用**。外壳启动后拉起编译产物 `dist/main.js` 跑整个边缘运行时，所以 **任何 edge 源码改动都要重打安装包才进包**，光改代码不重打没用。
 - **下载地址是自有服务器，不是 GitHub**。安装包托管在 ECS `/opt/aidcp/downloads/`，Nginx 以 `/downloads/` 提供；后台「下载客户端」按钮的地址 **写死在前端** `aidcp-console/src/config/downloads.ts`。
-- **mac 的 dmg 必须在 macOS 上构建**（依赖 `hdiutil` 等 mac 专有工具），本机 Windows 打不了 → 走 **GitHub Actions** 的 macOS runner。
-- **不签名、无自动更新**：app 是 unsigned（`build.mac.identity = null`），也没接 electron-updater → 用户升级要 **重新下载安装**。
+- **mac 的 dmg 必须在 macOS 上构建并签名/公证**（依赖 `hdiutil`、Developer ID、`notarytool` 等 mac 专有工具），本机 Windows 打不了 → 走 **GitHub Actions** 的 macOS runner。
+- **mac 发布包必须可信**：GitHub Actions 用 Developer ID Application 证书签名、Apple notarization 公证并 staple；未通过 `codesign` / `spctl` / `stapler` 的 mac 包不得上传或切下载配置。
+- **无自动更新**：还没接 electron-updater → 用户升级要 **重新下载安装**。
 - **红线**：生产机上 **只碰 `/opt/aidcp/downloads` 和 `/opt/aidcp/console`，绝不碰同机 isales**。
 - **SSH**：`ssh -i ~/codes/isales-4.pem root@121.89.85.150`（私钥须存在；在 harness 里跑 ssh/scp 命令要 `dangerouslyDisableSandbox`，且可能被 auto-mode 分类器要二次确认，正常放行）。
 
@@ -39,9 +40,15 @@ npm run electron:build:win
 工作流：`aidcp-edge/.github/workflows/build-desktop.yml`（手动触发）。
 
 - [ ] 确保第 1 步已推到 `master`（CI 从 master 拉代码）。
+- [ ] 确认仓库 Actions secrets 已配置且只通过 GitHub Secrets 注入，绝不写进仓库/日志/文档：
+      `MAC_CSC_LINK` / `MAC_CSC_KEY_PASSWORD` / `APPLE_API_KEY_BASE64` /
+      `APPLE_API_KEY_ID` / `APPLE_API_ISSUER` / `APPLE_TEAM_ID`。
 - [ ] 触发构建：
       - 网页：GitHub → 仓库 → **Actions** → 左侧 **Build Desktop Installers** → **Run workflow** → 选 `master` → 跑。
       - 或命令行：`gh workflow run build-desktop.yml --ref master`，再 `gh run watch <run-id>` 看进度。
+- [ ] macOS job 必须完成以下闸后才会上传 artifact：
+      - `.app`：`codesign --verify --deep --strict`、`spctl --assess --type exec`、`xcrun stapler validate`
+      - `.dmg`：`xcrun stapler validate`、`spctl --assess --type open --context context:primary-signature`
 - [ ] 跑完下载产物（macOS 那份）：
       ```bash
       gh run download <run-id> --name aidcp-macos --dir <某临时目录>
@@ -108,7 +115,7 @@ ssh -i ~/codes/isales-4.pem root@121.89.85.150 '
 
 - 真机访问后台走 **:8088 或 IP**（:80 域名 `aidcp.tommax.cc` 未备案前打不开）。
 - 用户升级需 **重新下载安装**（无自动更新）。
-- 不签名 → mac 用户首次打开要手动允许一下（与历史一致，非本次回退）。
+- mac 用户仍可能看到一次“从互联网下载，是否打开”的普通确认；如果出现“无法验证开发者 / Apple 无法检查是否恶意软件”这类阻断提示，说明签名/公证闸失效，必须停止发布并回查 CI。
 
 ---
 
@@ -116,7 +123,8 @@ ssh -i ~/codes/isales-4.pem root@121.89.85.150 '
 
 - **手动触发**（`workflow_dispatch`）；`macos-latest` 出 x64+arm64 dmg/zip，`windows-latest` 出 nsis exe；产物作为 run artifact，保留 14 天。
 - **必须 `electron-builder --publish never`**：CI 环境里 electron-builder 会自动尝试把产物发布到 GitHub release，缺 `GH_TOKEN` 直接报错（构建本身是成功的，只卡在发布步）。
-- **不签名**：`mac.identity = null` + `CSC_IDENTITY_AUTO_DISCOVERY=false`，无需任何 Apple 证书 / secret。
+- **mac 签名/公证**：`package.json` 的 mac 配置启用 `forceCodeSigning`、hardened runtime、entitlements 和 notarization；CI 从 GitHub Secrets 注入 Developer ID `.p12` 与 App Store Connect API Key，先签 `.app`，再单独 notarize/staple `.dmg`。
+- **签名失败必须失败**：证书、公证凭据、staple 或 Gatekeeper 校验任一失败，macOS job 必须非零退出，不能上传 unsigned/bad ticket 包。
 - **CI 产物 ≠ 下载地址**：14 天过期、私有仓要 GitHub 登录、是临时签名 URL、还套了一层 zip → **不能**直接挂后台，只能下载下来再转存到 ECS `/downloads/`（即第 3 步）。后台始终用自有服务器的固定地址。
 - `gh` 本机已登录（含 `repo` 权限），可直接 `gh workflow run` / `gh run watch` / `gh run download`。
 

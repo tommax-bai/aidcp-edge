@@ -12,8 +12,10 @@ name: Build Desktop Installers
 #   2) Actions tab -> "Build Desktop Installers" -> "Run workflow".
 #   3) When it finishes, download the installers from the run page's Artifacts.
 #
-# The app is intentionally UNSIGNED (build.mac.identity = null), so no Apple
-# certificates/secrets are required.
+# macOS artifacts are signed with a Developer ID Application certificate and
+# notarized with Apple notarytool. Required repository secrets:
+#   MAC_CSC_LINK, MAC_CSC_KEY_PASSWORD,
+#   APPLE_API_KEY_BASE64, APPLE_API_KEY_ID, APPLE_API_ISSUER, APPLE_TEAM_ID
 
 on:
   workflow_dispatch:
@@ -30,16 +32,103 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      - name: Check macOS signing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "$name is required" >&2
+              missing=1
+            fi
+          done
+          exit "$missing"
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Materialize Apple notarization key
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_API_KEY_BASE64:-}" ]; then
+            echo "APPLE_API_KEY_BASE64 is required for macOS notarization" >&2
+            exit 1
+          fi
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$APPLE_API_KEY"
+          chmod 600 "$APPLE_API_KEY"
+        env:
+          APPLE_API_KEY: ${{ runner.temp }}/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
       - name: Build macOS installers
         # --publish never: in CI electron-builder otherwise tries to publish to a
         # GitHub release and fails on a missing GH_TOKEN. We only want artifacts.
         run: |
+          set -euo pipefail
           npm run build:dist
           npx electron-builder --mac --publish never
         env:
-          # Unsigned build: stop electron-builder from auto-discovering a signing
-          # identity on the runner keychain and attempting to sign/notarize.
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ runner.temp }}/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Notarize and staple DMGs
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(dist-electron/*.dmg)
+          if [ "${#dmgs[@]}" -eq 0 ]; then
+            echo "No DMG artifacts found" >&2
+            exit 1
+          fi
+          for dmg in "${dmgs[@]}"; do
+            echo "Notarizing $dmg"
+            xcrun notarytool submit "$dmg" \
+              --key "$APPLE_API_KEY" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" \
+              --wait
+            xcrun stapler staple "$dmg"
+          done
+        env:
+          APPLE_API_KEY: ${{ runner.temp }}/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      - name: Verify macOS trust gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          apps=(dist-electron/mac*/AIDCP.app)
+          if [ "${#apps[@]}" -eq 0 ]; then
+            echo "No AIDCP.app bundles found" >&2
+            exit 1
+          fi
+          for app in "${apps[@]}"; do
+            echo "Verifying app bundle $app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            spctl --assess --verbose --type exec "$app"
+            xcrun stapler validate "$app"
+          done
+
+          dmgs=(dist-electron/*.dmg)
+          if [ "${#dmgs[@]}" -eq 0 ]; then
+            echo "No DMG artifacts found" >&2
+            exit 1
+          fi
+          for dmg in "${dmgs[@]}"; do
+            echo "Verifying DMG $dmg"
+            xcrun stapler validate "$dmg"
+            spctl --assess --verbose --type open --context context:primary-signature "$dmg"
+          done
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
