@@ -154,6 +154,43 @@ body { margin: 0; }
 }
 .fresh { font-size: 11.5px; color: var(--faint); margin-top: 4px; font-variant-numeric: tabular-nums; min-height: 14px; }
 
+.kernel-prep {
+  padding: 11px 13px;
+  border: 1px solid #cdd9f0;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #f5f9ff, #fff);
+}
+.kp-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 13px;
+  color: #1a2233;
+  margin-bottom: 7px;
+}
+.kp-head #kernel-prep-pct {
+  font-variant-numeric: tabular-nums;
+  color: #2f5fd0;
+  font-weight: 600;
+}
+.kp-track {
+  height: 7px;
+  border-radius: 999px;
+  background: #e3eafb;
+  overflow: hidden;
+}
+.kp-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #4f83e6, #2f5fd0);
+  transition: width 0.3s ease;
+}
+.kp-note {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: #6b7686;
+}
 .edge-failure {
   display: flex;
   align-items: flex-start;

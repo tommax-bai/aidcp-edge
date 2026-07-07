@@ -59,6 +59,10 @@ const fields = {
   presenceText: document.querySelector('#presence-text'),
   presenceFresh: document.querySelector('#presence-fresh'),
   presenceCore: document.querySelector('#presence-core'),
+  kernelPrep: document.querySelector('#kernel-prep'),
+  kernelPrepLabel: document.querySelector('#kernel-prep-label'),
+  kernelPrepPct: document.querySelector('#kernel-prep-pct'),
+  kernelPrepBar: document.querySelector('#kernel-prep-bar'),
   loop: document.querySelector('#loop'),
   stream: document.querySelector('#activity-stream'),
   streamEmpty: document.querySelector('#stream-empty'),
@@ -740,6 +744,20 @@ function renderFab(status) {
   fab.dataset.action = action;
 }
 
+// 内嵌运行时首启内核准备进度条：仅在 kernelPrep 处于下载/安装态时显示；null/完成/失败态隐藏（失败走 edge-failure 呈现）。
+function renderKernelPrep(status) {
+  if (!fields.kernelPrep) return;
+  const kp = status.kernelPrep;
+  const active = kp && (kp.state === 'pending' || kp.state === 'downloading' || kp.state === 'installing');
+  fields.kernelPrep.classList.toggle('hidden', !active);
+  if (!active) return;
+  const pct = Math.max(0, Math.min(100, Number(kp.percent) || 0));
+  const stateLabel = kp.state === 'installing' ? '正在安装浏览器内核' : '正在下载浏览器内核';
+  fields.kernelPrepLabel.textContent = `${stateLabel} ${kp.version || ''}…`.trim();
+  fields.kernelPrepPct.textContent = `${pct}%`;
+  fields.kernelPrepBar.style.width = `${pct}%`;
+}
+
 function render(status) {
   currentStatus = status;
   const now = Date.now();
@@ -753,6 +771,7 @@ function render(status) {
   renderEdgeFailure(status);
   renderTitlebar(status);
   renderPresence(status, now);
+  renderKernelPrep(status);
   renderLoop(status);
   renderPublish(status, now);
   renderFab(status);
