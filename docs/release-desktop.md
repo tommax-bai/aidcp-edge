@@ -123,7 +123,7 @@ ssh -i ~/codes/isales-4.pem root@121.89.85.150 '
 
 - **手动触发**（`workflow_dispatch`）；`macos-latest` 出 x64+arm64 dmg/zip，`windows-latest` 出 nsis exe；产物作为 run artifact，保留 14 天。
 - **必须 `electron-builder --publish never`**：CI 环境里 electron-builder 会自动尝试把产物发布到 GitHub release，缺 `GH_TOKEN` 直接报错（构建本身是成功的，只卡在发布步）。
-- **mac 签名/公证**：`package.json` 的 mac 配置启用 `forceCodeSigning`、hardened runtime、entitlements 和 notarization；CI 从 GitHub Secrets 注入 Developer ID `.p12` 与 App Store Connect API Key，先签 `.app`，再单独 notarize/staple `.dmg`。
+- **mac 签名/公证**：`package.json` 的 mac 配置启用 `forceCodeSigning`、hardened runtime、entitlements，并关闭 electron-builder 内置 notarization；CI 从 GitHub Secrets 注入 Developer ID `.p12` 与 App Store Connect API Key，先签 `.app`，再用显式 `notarytool` 公证/staple `.app`，随后生成 dmg/zip 并公证/staple `.dmg`。
 - **签名失败必须失败**：证书、公证凭据、staple 或 Gatekeeper 校验任一失败，macOS job 必须非零退出，不能上传 unsigned/bad ticket 包。
 - **CI 产物 ≠ 下载地址**：14 天过期、私有仓要 GitHub 登录、是临时签名 URL、还套了一层 zip → **不能**直接挂后台，只能下载下来再转存到 ECS `/downloads/`（即第 3 步）。后台始终用自有服务器的固定地址。
 - `gh` 本机已登录（含 `repo` 权限），可直接 `gh workflow run` / `gh run watch` / `gh run download`。
