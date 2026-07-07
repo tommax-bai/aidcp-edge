@@ -29,6 +29,8 @@ import {
   type NoteContentPayload,
   type PublishRequestPayload,
   type PublishCommandPayload,
+  type CaptchaAssistCapturePayload,
+  type CaptchaAssistClickPayload,
   type UiSnapshotPayload,
   type ActionCompletedPayload,
   type PageCardsPayload,
@@ -63,6 +65,10 @@ export type BrowseCommandHandler = (env: Envelope) => void;
 export type PublishCommandHandler = (env: Envelope<PublishRequestPayload>) => void;
 /** A 阶段1 指令驱动发布：单条参数化原子指令处理器（publish.command）。 */
 export type PublishAtomCommandHandler = (env: Envelope<PublishCommandPayload>) => void;
+/** 验证码云端协助指令处理器（captcha.assist.capture/click）。 */
+export type CaptchaAssistCommandHandler = (
+  env: Envelope<CaptchaAssistCapturePayload | CaptchaAssistClickPayload>,
+) => void;
 /** 陪伴界面数据快照处理器（ui.snapshot，cloud 主动推送；核心转 [ui-event] 行给桌面壳）。 */
 export type UiSnapshotHandler = (env: Envelope<UiSnapshotPayload>) => void;
 export type CloudConnectionEvent = 'cloud.disconnected' | 'cloud.reconnecting' | 'cloud.reconnected' | 'cloud.unrecoverable';
@@ -152,6 +158,7 @@ export class EdgeClient {
   private browseHandler?: BrowseCommandHandler;
   private publishHandler?: PublishCommandHandler;
   private publishAtomHandler?: PublishAtomCommandHandler;
+  private captchaAssistHandler?: CaptchaAssistCommandHandler;
   private uiSnapshotHandler?: UiSnapshotHandler;
 
   constructor(options: EdgeClientOptions) {
@@ -281,6 +288,14 @@ export class EdgeClient {
     this.publishAtomHandler = handler;
     return () => {
       if (this.publishAtomHandler === handler) this.publishAtomHandler = undefined;
+    };
+  }
+
+  /** 注册验证码云端协助指令处理器（capture/click 均必须在验证码暂停期间可达）。 */
+  onCaptchaAssistCommand(handler: CaptchaAssistCommandHandler): () => void {
+    this.captchaAssistHandler = handler;
+    return () => {
+      if (this.captchaAssistHandler === handler) this.captchaAssistHandler = undefined;
     };
   }
 
@@ -487,6 +502,11 @@ export class EdgeClient {
 
     if (env.type === 'publish.command') {
       this.publishAtomHandler?.(env as Envelope<PublishCommandPayload>);
+      return;
+    }
+
+    if (env.type === 'captcha.assist.capture' || env.type === 'captcha.assist.click') {
+      this.captchaAssistHandler?.(env as Envelope<CaptchaAssistCapturePayload | CaptchaAssistClickPayload>);
       return;
     }
 

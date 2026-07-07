@@ -67,6 +67,7 @@ import {
   evalRaw,
   extractNoteContent,
   captureBlockingOverlaySnapshot,
+  CaptchaAssistHandler,
   createOverlayReportGate,
   type BlockingOverlaySnapshot,
   type BrowseSessionOptions,
@@ -406,6 +407,21 @@ async function main(): Promise<void> {
   // 转成 [ui-event] 行打到 stdout，由 Electron 壳解析驱动标题带与发布卡。
   client.onUiSnapshot((env) => {
     for (const uiLine of uiSnapshotToLines(env.payload)) console.log(uiLine);
+  });
+
+  const captchaAssist = new CaptchaAssistHandler({
+    cdp: session.cdp,
+    client,
+    edgeId,
+    getAccountId: () => accountId,
+    getOverlayMonitor: () => overlayMonitor,
+    logger: (m) => console.log(m),
+  });
+  client.onCaptchaAssistCommand((env) => {
+    if (env.type !== 'captcha.assist.capture' && env.type !== 'captcha.assist.click') return;
+    captchaAssist.handle(env.type, env.payload).catch((err) => {
+      console.error(`[aidcp-edge] 验证码协助指令 ${env.type} 处理失败:`, err);
+    });
   });
 
   // 处理器全部就位后才握手（见上方红线注释：hello 快照紧随 welcome，注册晚一步就漏帧）。

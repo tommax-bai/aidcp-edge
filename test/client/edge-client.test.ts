@@ -354,3 +354,21 @@ test('edge-client: ui.snapshot 未注册处理器时不抛错（静默容忍）'
   // 不注册 onUiSnapshot，直接推送——不应抛异常
   ws.emitMessage(makeEnvelope('ui.snapshot', 'cmd-ui-snapshot-2', 2, {}));
 });
+
+test('edge-client: captcha assist capture/click 路由到 captchaAssistHandler（不得静默丢弃）', async () => {
+  const ws = new FakeWebSocket();
+  const client = await connectClient(ws);
+  const calls: Envelope[] = [];
+  client.onCaptchaAssistCommand((env) => calls.push(env));
+
+  ws.emitMessage(makeEnvelope('captcha.assist.capture', 'cap-1', 2, { incidentId: 'incident-1', reason: 'refresh' }));
+  ws.emitMessage(
+    makeEnvelope('captcha.assist.click', 'click-1', 2, {
+      incidentId: 'incident-1',
+      snapshotId: 'snap-1',
+      points: [{ x: 0.25, y: 0.75 }],
+    }),
+  );
+
+  assert.deepEqual(calls.map((env) => env.type), ['captcha.assist.capture', 'captcha.assist.click']);
+});
