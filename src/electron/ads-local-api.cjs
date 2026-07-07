@@ -11,6 +11,8 @@
 // 红线：只读（仅 /status 与 user/list），MUST NOT 触碰 browser/start|stop|active；探测/拉取失败诚实回报、不假成功。
 // 敏感值：apiKey 只用于本次请求的 Authorization 头，不落日志、不写文件。
 
+const { parseRemark, DEFAULT_PLATFORM } = require('./ads-create-flow.cjs');
+
 const ADS_MIN_INTERVAL_MS = 1100; // 本地 API 限速 1req/s，留余量串行节流（与核心同规格、但独立实例）
 const DEFAULT_ADS_BASE = 'http://local.adspower.net:50325';
 const DEFAULT_PAGE_SIZE = 100;
@@ -181,11 +183,14 @@ function createAdsLocalApi(deps = {}) {
 // user/list 单项归一化。user_id=写入分身 ID 的唯一值；serial_number（UI 序号）/name/代理配置仅供展示。
 function normalizeProfile(it) {
   it = it || {};
+  // change edge-environment-platform-select：从 remark 解出该环境的平台（旧环境无 plat → 回落 xiaohongshu）。
+  const meta = parseRemark(it.remark);
   return {
     userId: it.user_id != null ? String(it.user_id) : '', // ← 唯一分身 ID，写入 adsProfileId
     serialNumber: it.serial_number != null ? String(it.serial_number) : '', // 仅展示，MUST NOT 写入 adsProfileId
     name: it.name || it.username || '',
     groupName: it.group_name || '',
+    platform: meta ? meta.platform : DEFAULT_PLATFORM, // 每环境平台（展示 + 选中时同步进 settings 供启动注入）
     proxy: summarizeProxy(it), // 代理**配置**摘要（非实测出口 IP）
   };
 }

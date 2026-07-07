@@ -122,3 +122,41 @@ test('parseRemark: 往返 + 非本 change 备注返回 null', () => {
   assert.equal(parseRemark('运维随手写的普通备注'), null);
   assert.equal(parseRemark('{"foo":1}'), null);
 });
+
+// ── change edge-environment-platform-select：每环境平台写进 remark + 回读 ──
+
+test('创建时选平台 → remark 带 plat、回执带 platform', async () => {
+  const w = recordingWriteApi({ ok: true, userId: 'u-fb' });
+  const flow = createCreateFlow({ writeApi: w, fingerprint: realFingerprint });
+  const r = (await flow.createEnvironment({ templateKey: 'win11-intel', groupId: 'g1', platform: 'facebook' } as any)) as any;
+  assert.equal(r.ok, true);
+  assert.equal(r.platform, 'facebook', '回执带归一化后的平台');
+  const meta = parseRemark((w.calls[0] as any).remark) as any;
+  assert.equal(meta.platform, 'facebook', 'remark 里 plat=facebook');
+});
+
+test('创建不传平台 → 回落 xiaohongshu（零回归）', async () => {
+  const w = recordingWriteApi({ ok: true, userId: 'u-xhs' });
+  const flow = createCreateFlow({ writeApi: w, fingerprint: realFingerprint });
+  const r = (await flow.createEnvironment({ templateKey: 'win11-intel', groupId: 'g1' })) as any;
+  assert.equal(r.platform, 'xiaohongshu');
+  const meta = parseRemark((w.calls[0] as any).remark) as any;
+  assert.equal(meta.platform, 'xiaohongshu');
+});
+
+test('normalizePlatform: 别名归一 + 未知/空回落 xiaohongshu', () => {
+  const { normalizePlatform } = flowMod as any;
+  assert.equal(normalizePlatform('fb'), 'facebook');
+  assert.equal(normalizePlatform('Facebook'), 'facebook');
+  assert.equal(normalizePlatform('xhs'), 'xiaohongshu');
+  assert.equal(normalizePlatform(''), 'xiaohongshu');
+  assert.equal(normalizePlatform(undefined), 'xiaohongshu');
+  assert.equal(normalizePlatform('instagram'), 'xiaohongshu', '未知平台 shell 层回落而非抛错');
+});
+
+test('parseRemark: 旧环境（无 plat 字段）回读平台回落 xiaohongshu', () => {
+  // 模拟 change 前写入的 remark（无 plat 键）。
+  const legacy = JSON.stringify({ t: 'aidcp-env', acct: 'A', tpl: 'win11-intel', mach: 'm', ts: 1 });
+  const dec = parseRemark(legacy) as any;
+  assert.equal(dec.platform, 'xiaohongshu');
+});

@@ -6,6 +6,7 @@ const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
 const { createAdsLocalApi } = require('./ads-local-api.cjs');
 const { createAdsWriteApi } = require('./ads-write-api.cjs');
 const adsFingerprint = require('./ads-fingerprint.cjs');
+const { normalizePlatform } = require('./ads-create-flow.cjs');
 const {
   ENV_GROUP_NAME,
   createEnvGroupResolver,
@@ -86,6 +87,9 @@ const DEFAULT_SETTINGS = {
   // 选中环境的 AdsPower 环境名（操作者自己起的分身名，如「Tmax」）：作标题带账号标签的兜底
   // （小红书昵称仅 navigate 身份路径可得；环境名桌面端现成可得、且通常就叫账号名）。
   adsProfileName: '',
+  // 选中环境的运行时平台（change edge-environment-platform-select）：决定启动时核心以哪个平台驱动打开首页
+  // + 握手上报哪个平台。选中环境时由该环境 remark 的平台同步进来；缺省 xiaohongshu（零回归）。
+  platform: 'xiaohongshu',
   // 浏览器窗口停放：默认把窗口大部分移到屏幕边缘，保留可恢复边条，不用最小化/headless。
   browserParkingMode: DEFAULT_PARKING_MODE,
   // 「开发者详情」（原始日志区）默认不展示，在设置抽屉里开关（客户版首屏零技术噪音）。
@@ -132,6 +136,9 @@ function buildProviderEnv() {
   const env = {
     ...buildBrowserParkingEnv(),
     AIDCP_BROWSER_PROVIDER: settings.provider === 'self' ? 'self' : 'adspower',
+    // change edge-environment-platform-select：把选中环境的平台注入核心（核心据此选平台驱动 = 启动打开哪个平台首页）。
+    // 缺省 xiaohongshu → 与历史行为逐位等价（核心默认也是 xhs）；...process.env 仍可覆盖（逃生阀）。
+    AIDCP_PLATFORM: normalizePlatform(settings.platform),
   };
   if (settings.provider === 'self') return env;
   env.AIDCP_ADS_USER_ID = settings.adsProfileId;
@@ -988,6 +995,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       templateKey: (opts && opts.templateKey) || '',
       intendedAccountLabel: opts && opts.intendedAccountLabel,
       machineLabel: os.hostname(),
+      platform: opts && opts.platform,
       groupResolver: envGroupResolver,
     });
   } catch (e) {

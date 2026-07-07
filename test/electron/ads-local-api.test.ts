@@ -16,7 +16,7 @@ const { createAdsLocalApi, normalizeProfile } = require('../../src/electron/ads-
     }>;
     ADS_MIN_INTERVAL_MS: number;
   };
-  normalizeProfile: (it: Record<string, unknown>) => { userId: string; serialNumber: string; proxy: string };
+  normalizeProfile: (it: Record<string, unknown>) => { userId: string; serialNumber: string; proxy: string; platform: string };
 };
 
 interface StubRes {
@@ -236,6 +236,17 @@ test('normalizeProfile: 真机 no_proxy（带下划线）归一为「无代理�
   assert.equal(normalizeProfile({ user_id: 'u', user_proxy_config: { proxy_type: 'noproxy' } }).proxy, '无代理配置');
   // 有真代理配置仍如实展示
   assert.match(normalizeProfile({ user_id: 'u', ip: '9.9.9.9', user_proxy_config: { proxy_type: 'socks5' } }).proxy, /socks5/);
+});
+
+test('normalizeProfile: 从 remark 解出平台（change edge-environment-platform-select）；旧环境回落 xiaohongshu', () => {
+  const fbRemark = JSON.stringify({ t: 'aidcp-env', acct: '', tpl: 'win11-intel', mach: 'm', ts: 1, plat: 'facebook' });
+  assert.equal(normalizeProfile({ user_id: 'u', remark: fbRemark }).platform, 'facebook');
+  const xhsRemark = JSON.stringify({ t: 'aidcp-env', plat: 'xiaohongshu' });
+  assert.equal(normalizeProfile({ user_id: 'u', remark: xhsRemark }).platform, 'xiaohongshu');
+  // 旧环境（无 plat / 非本 change remark / 无 remark）→ 回落 xiaohongshu
+  assert.equal(normalizeProfile({ user_id: 'u', remark: JSON.stringify({ t: 'aidcp-env', tpl: 'x' }) }).platform, 'xiaohongshu');
+  assert.equal(normalizeProfile({ user_id: 'u', remark: '运维随手写的备注' }).platform, 'xiaohongshu');
+  assert.equal(normalizeProfile({ user_id: 'u' }).platform, 'xiaohongshu');
 });
 
 test('listGroups: 打 group/list、归一化 groupId/groupName', async () => {
