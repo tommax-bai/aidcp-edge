@@ -87,8 +87,7 @@ const fields = {
 };
 
 const settingsUi = {
-  provAdspower: document.querySelector('#prov-adspower'),
-  provSelf: document.querySelector('#prov-self'),
+  useChrome: document.querySelector('#use-chrome'),
   adsConfig: document.querySelector('#ads-config'),
   adsProfile: document.querySelector('#ads-profile'),
   adsProfileDisplay: document.querySelector('#ads-profile-display'),
@@ -97,9 +96,6 @@ const settingsUi = {
   adsApiBase: document.querySelector('#ads-apibase'),
   adsAdvancedToggle: document.querySelector('#ads-advanced-toggle'),
   adsAdvanced: document.querySelector('#ads-advanced'),
-  adsDownload: document.querySelector('#ads-download'),
-  adsProbeBadge: document.querySelector('#ads-probe-badge'),
-  adsDetect: document.querySelector('#ads-detect'),
   adsEnvList: document.querySelector('#ads-env-list'),
   adsRefresh: document.querySelector('#ads-refresh'),
   adsEnvMsg: document.querySelector('#ads-env-msg'),
@@ -141,7 +137,6 @@ let editingProvider = null;
 // 设置是否相对「已应用/已保存」有改动。核心在跑且 dirty 时才显示「按新设置重启」；
 // 「保存」按钮已并入「启动」——启动时先存再起，故无独立保存按钮。
 let dirty = false;
-let adsDownloadUrl = 'https://www.adspower.net/download';
 // 选中环境的 AdsPower 环境名（随设置持久化，作标题带账号标签兜底）。
 let selectedProfileName = '';
 // change edge-environment-platform-select：当前选中环境的运行时平台（同步进 settings.platform，启动时注入核心）。
@@ -785,10 +780,10 @@ function render(status) {
 // ─── Browser provider settings（既有逻辑原样保留，DOM 已迁入抽屉）───
 
 function applyProviderSelection(provider) {
-  const isAds = provider !== 'self';
-  settingsUi.provAdspower.classList.toggle('active', isAds);
-  settingsUi.provSelf.classList.toggle('active', !isAds);
-  settingsUi.adsConfig.classList.toggle('hidden', !isAds);
+  const isChrome = provider === 'self';
+  // 开关：开=本机 Chrome(self)，关=默认内置 AdsPower。AdsPower 环境卡仅在关(=adspower)时显示。
+  settingsUi.useChrome.checked = isChrome;
+  settingsUi.adsConfig.classList.toggle('hidden', isChrome);
 }
 
 // dirty 且核心在跑（非停止/异常）时才显示「按新设置重启」——把已改设置显式应用到在跑核心。
@@ -814,7 +809,6 @@ async function saveCurrentSettings() {
     adsApiKey: settingsUi.adsApiKey.value,
     adsApiBase: settingsUi.adsApiBase.value.trim(),
   });
-  if (saved && saved.adsDownloadUrl) adsDownloadUrl = saved.adsDownloadUrl;
   dirty = false;
   // 表单已落盘 = 与持久化/在跑设置一致：解除「编辑中不回填」闩锁，让后续状态推送可再跟随实际 provider。
   // （否则点过一次 provider 分段后，render 的「跟随实际 provider」分支被永久旁路，段选可能与在跑 provider 不符。）
@@ -841,7 +835,7 @@ async function persistDirtyBeforeRestart(okMessage) {
 }
 
 function selectedProvider() {
-  return settingsUi.provAdspower.classList.contains('active') ? 'adspower' : 'self';
+  return settingsUi.useChrome.checked ? 'self' : 'adspower';
 }
 
 function selectedParkingMode() {
@@ -871,7 +865,6 @@ function updateProfileDisplay() {
 
 function applySettings(s) {
   if (!s) return;
-  if (s.adsDownloadUrl) adsDownloadUrl = s.adsDownloadUrl;
   selectedProfileName = s.adsProfileName || '';
   selectedPlatform = normPlatform(s.platform);
   applyDevVisible(Boolean(s.devDetails));
@@ -886,21 +879,12 @@ function applySettings(s) {
   updateApplyRestart();
 }
 
-settingsUi.provAdspower.addEventListener('click', () => {
-  editingProvider = 'adspower';
+settingsUi.useChrome.addEventListener('change', () => {
+  const provider = selectedProvider();
+  editingProvider = provider;
   markDirty();
-  applyProviderSelection('adspower');
-  probeAds(); // 切到 AdsPower 分段即探一次可用性并自动列环境（真实事件，非「打开设置面板」）
-});
-settingsUi.provSelf.addEventListener('click', () => {
-  editingProvider = 'self';
-  markDirty();
-  applyProviderSelection('self');
-});
-
-settingsUi.adsDownload.addEventListener('click', (event) => {
-  event.preventDefault();
-  window.aidcpEdge.openAdsDownload();
+  applyProviderSelection(provider);
+  if (provider === 'adspower') probeAds(); // 切回 AdsPower 即探一次可用性并列环境
 });
 
 settingsUi.adsAdvancedToggle.addEventListener('click', () => {
@@ -961,38 +945,28 @@ function formAdsOpts() {
   };
 }
 
-function setProbeBadge(code, text) {
-  settingsUi.adsProbeBadge.textContent = text;
-  settingsUi.adsProbeBadge.className = `badge ${code}`;
-}
-
 function setEnvMsg(text, isError) {
   settingsUi.adsEnvMsg.textContent = text || '';
   settingsUi.adsEnvMsg.className = `ads-env-msg${isError ? ' error' : ''}`;
 }
 
-// 探测本地 API 可用性（根级 /status）。可达→就绪并自动列环境；不可达→诚实提示 + 引导下载，不禁死流程。
+// 静默探测本地 API（根级 /status）以填充环境列表：可达→列环境；不可达→诚实提示于环境行、不禁死流程
+// （启动时应用会自动拉起内置 AdsPower 运行时；此处不再有可见「检测」按钮/状态徽标）。
 async function probeAds() {
-  setProbeBadge('checking', '检测中');
-  settingsUi.adsDetect.disabled = true;
   try {
     const r = await window.aidcpEdge.adsStatus(formAdsOpts());
     if (r && r.ok) {
-      setProbeBadge('connected', '已就绪');
       if (settingsUi.adsEnvMsg.classList.contains('error')) setEnvMsg('', false);
       refreshEnvs(); // 就绪即自动列出环境，无需先点刷新
     } else {
-      setProbeBadge('warning', '未就绪');
       setEnvMsg(
-        `未检测到 AdsPower 本地 API${r && r.error ? '（' + r.error + '）' : ''}。请启动 AdsPower 客户端并开启本地 API，或点右侧「下载 AdsPower」。仍可在「高级设置」打开「手动填写」填分身 ID 继续。`,
+        `暂未连接到 AdsPower 本地 API${r && r.error ? '（' + r.error + '）' : ''}。启动后应用会自动拉起内置运行时；也可在「高级设置」打开「手动填写」直接填分身 ID。`,
         true,
       );
       openAdvanced();
     }
   } catch {
-    setProbeBadge('warning', '未就绪');
-  } finally {
-    settingsUi.adsDetect.disabled = false;
+    setEnvMsg('检测 AdsPower 本地 API 失败。', true);
   }
 }
 
@@ -1140,7 +1114,6 @@ async function refreshEnvs() {
   }
 }
 
-settingsUi.adsDetect.addEventListener('click', probeAds);
 settingsUi.adsRefresh.addEventListener('click', refreshEnvs);
 // 创建提示行（与环境列表提示分开，避免互相覆盖）。
 function setCreateMsg(text, isError) {

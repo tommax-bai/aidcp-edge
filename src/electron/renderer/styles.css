@@ -711,10 +711,34 @@ body { margin: 0; }
 
 /* ── 设置表单（从旧首页迁入，样式微调、控件不变）── */
 .settings { display: flex; flex-direction: column; gap: 14px; }
-.settings-head {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  color: #475569; font-size: 14px; font-weight: 700; flex-wrap: wrap;
+/* 设置分区卡片：把「浏览器引擎 / AdsPower 环境 / 窗口停放」分组，消掉多次调整后的割裂感 */
+.set-card {
+  display: flex; flex-direction: column; gap: 12px;
+  border: 1px solid var(--hair); border-radius: 12px;
+  padding: 14px 16px; background: #fff;
 }
+.set-card-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+}
+.set-card-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.set-card-title > span:first-child { font-size: 14px; font-weight: 700; color: #334155; }
+.set-card-sub { font-size: 12px; font-weight: 500; color: var(--mute); }
+
+/* 开关（本机 Chrome 开/关；关=默认内置 AdsPower） */
+.switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch-track {
+  position: relative; flex: none; width: 40px; height: 22px;
+  border-radius: 999px; background: #cbd5e1; transition: background 0.18s;
+}
+.switch-thumb {
+  position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+  transition: transform 0.18s;
+}
+.switch input:checked + .switch-track { background: var(--accent); }
+.switch input:checked + .switch-track .switch-thumb { transform: translateX(18px); }
+.switch-label { font-size: 12.5px; font-weight: 600; color: #475569; }
 .seg-group { display: inline-flex; padding: 3px; gap: 3px; border-radius: 999px; background: #f1f5f9; }
 .seg {
   border: 0; border-radius: 999px; padding: 7px 12px;
@@ -725,7 +749,8 @@ body { margin: 0; }
 .seg.active { background: var(--accent); color: #fff; box-shadow: 0 4px 10px rgba(59, 111, 240, 0.22); }
 .seg[disabled] { opacity: 0.5; cursor: not-allowed; }
 
-.ads-config { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: end; }
+/* .ads-config 现为 .set-card 之一，布局交给卡片的 flex column，自身只保留间距 */
+.ads-config { gap: 12px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field-label { color: var(--mute); font-size: 12.5px; font-weight: 600; }
 .field-label .req, .field-label .opt {

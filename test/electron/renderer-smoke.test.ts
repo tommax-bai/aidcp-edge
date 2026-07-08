@@ -98,26 +98,24 @@ const $$ = (w: DOMWindow, sel: string) => Array.from(w.document.querySelectorAll
 const hidden = (el: HTMLElement) => el.classList.contains('hidden');
 
 test('中文化：新增控件文案齐全', () => {
-  for (const s of ['浏览器环境', 'AdsPower 状态', '检测', '刷新', '手动填写', '高级设置', '创建环境', '下载 AdsPower', '窗口停放', '副屏停放', '边缘停放', '完全移出']) {
+  for (const s of ['浏览器引擎', '本机 Chrome', '浏览器环境', '刷新', '手动填写', '高级设置', '创建环境', '窗口停放', '副屏停放', '边缘停放', '完全移出']) {
     assert.ok(html.includes(s), `index.html 应含「${s}」`);
   }
 });
 
-test('探测就绪 → 徽标已就绪 + 自动列出环境（无需先点刷新）', async () => {
+test('探测就绪 → 静默自动列出环境（无徽标、无需先点刷新）', async () => {
   const w = await boot(makeStub({
     adsStatus: async () => ({ ok: true }),
     adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'u1', serialNumber: '1', name: '甲', groupName: 'g', proxy: '无代理配置' }] }),
   }));
-  assert.equal($(w, '#ads-probe-badge').textContent, '已就绪');
   const items = $$(w, '.ads-env-item');
   assert.equal(items.length, 1, '就绪后应自动列出环境行');
   assert.match(items[0].textContent ?? '', /甲/);
 });
 
-test('探测不可达 → 未就绪 + 诚实提示，不禁死', async () => {
+test('探测不可达 → 环境行诚实提示（无徽标），不禁死', async () => {
   const w = await boot(makeStub({ adsStatus: async () => ({ ok: false, error: 'ECONNREFUSED' }) }));
-  assert.equal($(w, '#ads-probe-badge').textContent, '未就绪');
-  assert.match($(w, '#ads-env-msg').textContent ?? '', /未检测到 AdsPower 本地 API/);
+  assert.match($(w, '#ads-env-msg').textContent ?? '', /暂未连接到 AdsPower 本地 API/);
 });
 
 test('点选环境行 → 分身 ID 带出 user_id（非 serial_number）', async () => {
@@ -416,16 +414,18 @@ test('保存后解除 provider 编辑闩锁：状态推送可再跟随实际 pro
     adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'u1', serialNumber: '1', name: '甲', groupName: 'g', proxy: 'p' }] }),
     start: async () => makeStatus({ edge: 'starting', session: 'running', provider: 'adspower' }),
   }));
-  // 点一次 provider 分段 → editingProvider 上闩
-  $(w, '#prov-adspower').dispatchEvent(new w.Event('click'));
+  // 拨动一次浏览器开关 → editingProvider 上闩（开→关，回到 adspower 但已标记编辑中）
+  const sw = $(w, '#use-chrome') as unknown as { checked: boolean };
+  sw.checked = true; $(w, '#use-chrome').dispatchEvent(new w.Event('change'));
+  sw.checked = false; $(w, '#use-chrome').dispatchEvent(new w.Event('change'));
   await tick();
   // 选环境 + 启动（= 先 save 再 start）：save 里解闩
   $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click'));
   $(w, '#session-fab').dispatchEvent(new w.Event('click'));
   await tick();
   await tick();
-  // 之后一条状态推送报 provider=self → 段选应跟随（若闩未解，段会卡在 adspower）
+  // 之后一条状态推送报 provider=self → 开关应跟随（若闩未解，会卡在 adspower/未勾）
   pushCb(makeStatus({ provider: 'self', edge: 'running', session: 'running' }));
-  assert.ok($(w, '#prov-self').classList.contains('active'), '保存后应解闩，段选跟随实际 provider=self');
+  assert.ok(($(w, '#use-chrome') as unknown as { checked: boolean }).checked, '保存后应解闩，开关跟随实际 provider=self');
   assert.equal(hidden($(w, '#ads-config')), true, 'self 下应隐藏 AdsPower 配置块');
 });

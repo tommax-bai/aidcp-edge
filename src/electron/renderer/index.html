@@ -186,43 +186,34 @@
       <p class="subtle" id="subtitle">以持久化配置启动浏览器，用于小红书登录与自动运营。</p>
 
       <section class="settings">
-        <div class="settings-head">
-          <span>浏览器</span>
-          <div class="seg-group">
-            <button id="prov-adspower" class="seg" type="button">AdsPower 指纹浏览器</button>
-            <button id="prov-self" class="seg" type="button">本机 Chrome</button>
+        <!-- 浏览器引擎：默认内置 AdsPower 指纹浏览器；开关切到本机 Chrome -->
+        <div class="set-card">
+          <div class="set-card-head">
+            <div class="set-card-title">
+              <span>浏览器引擎</span>
+              <span class="set-card-sub">默认使用内置 AdsPower 指纹浏览器（免装客户端）</span>
+            </div>
+            <label class="switch" title="打开则改用本机 Chrome">
+              <input id="use-chrome" type="checkbox" />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">本机 Chrome</span>
+            </label>
           </div>
         </div>
-        <div class="field parking-field">
-          <span class="field-label">窗口停放</span>
-          <div class="seg-group parking-options">
-            <button id="parking-display" class="seg parking-btn" type="button" data-mode="parking-display">副屏停放</button>
-            <button id="parking-edge-strip" class="seg parking-btn" type="button" data-mode="edge-strip">边缘停放</button>
-            <button id="parking-offscreen" class="seg parking-btn" type="button" data-mode="offscreen">完全移出</button>
-          </div>
-          <span class="parking-hint">默认边缘停放；副屏不可用会自动降级，完全移出会做可见性校验。</span>
-          <div class="parking-actions">
-            <button id="browser-show" class="secondary small" type="button">显示浏览器</button>
-            <button id="browser-reset-parking" class="secondary small" type="button">重置位置</button>
-          </div>
-        </div>
-        <div id="ads-config" class="ads-config">
-          <div class="ads-probe ads-full">
-            <span class="field-label">AdsPower 状态</span>
-            <strong id="ads-probe-badge" class="badge checking">未检测</strong>
-            <button id="ads-detect" class="seg" type="button">检测</button>
-          </div>
-          <div class="field ads-full">
+
+        <!-- AdsPower 环境（本机 Chrome 关闭时显示）-->
+        <div id="ads-config" class="set-card ads-config">
+          <div class="field">
             <div class="ads-env-head">
               <span class="field-label">浏览器环境</span>
               <button id="ads-refresh" class="seg" type="button">刷新</button>
             </div>
             <div id="ads-env-list" class="ads-env-list">
-              <p class="ads-env-empty">（检测就绪后自动列出，或点「刷新」）</p>
+              <p class="ads-env-empty">（就绪后自动列出，或点「刷新」）</p>
             </div>
             <span id="ads-env-msg" class="ads-env-msg"></span>
           </div>
-          <div class="ads-create-row ads-full">
+          <div class="ads-create-row">
             <select id="ads-platform" class="ads-template" aria-label="平台">
               <option value="xiaohongshu">小红书</option>
               <option value="facebook">Facebook</option>
@@ -230,14 +221,11 @@
             <select id="ads-template" class="ads-template" aria-label="整机模板"></select>
             <button id="ads-create" class="seg" type="button">创建环境</button>
           </div>
-          <span id="ads-create-msg" class="ads-env-msg ads-full"></span>
-          <p class="ads-hint ads-full">
-            没有 AdsPower？<a id="ads-download" href="#" class="link">下载 AdsPower ↗</a>
-          </p>
-          <div class="ads-full">
+          <span id="ads-create-msg" class="ads-env-msg"></span>
+          <div>
             <button id="ads-advanced-toggle" class="link ads-adv-toggle" type="button">高级设置 ▾</button>
             <div id="ads-advanced" class="ads-advanced hidden">
-              <div class="field ads-full">
+              <div class="field">
                 <div class="ads-id-head">
                   <span class="field-label">分身 ID <em class="req">必填</em></span>
                   <label class="ads-manual-toggle">
@@ -258,6 +246,24 @@
             </div>
           </div>
         </div>
+
+        <!-- 窗口停放 -->
+        <div class="set-card">
+          <div class="field parking-field">
+            <span class="field-label">窗口停放</span>
+            <div class="seg-group parking-options">
+              <button id="parking-display" class="seg parking-btn" type="button" data-mode="parking-display">副屏停放</button>
+              <button id="parking-edge-strip" class="seg parking-btn" type="button" data-mode="edge-strip">边缘停放</button>
+              <button id="parking-offscreen" class="seg parking-btn" type="button" data-mode="offscreen">完全移出</button>
+            </div>
+            <span class="parking-hint">默认边缘停放；副屏不可用会自动降级，完全移出会做可见性校验。</span>
+            <div class="parking-actions">
+              <button id="browser-show" class="secondary small" type="button">显示浏览器</button>
+              <button id="browser-reset-parking" class="secondary small" type="button">重置位置</button>
+            </div>
+          </div>
+        </div>
+
         <div class="settings-actions">
           <span id="settings-msg" class="settings-msg"></span>
           <button id="apply-restart" class="secondary hidden" type="button">按新设置重启</button>
