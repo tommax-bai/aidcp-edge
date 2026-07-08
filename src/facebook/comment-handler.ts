@@ -1,0 +1,132 @@
+// Facebook 定向评论命令处理器（change facebook-scheduled-comment，task 4.x + 静默丢弃坑修复）。
+//
+// Facebook 边端无 BrowseSession（driver 不声明 'browse'）。云端下发的 search.execute / note.open /
+// interaction.comment 三条命令（均已在 edge-client 主动命令白名单）此前无处理器 → `browseHandler?.()`
+// 可选链静默吞、零回执 → 云端 sendAndAwait 干等超时（此路径无巡视看门狗，会挂死云端）。
+//
+// 本处理器由 main.ts 按 driver 的 'comment' 能力注册（comment-only 平台，独立于 autoBrowse 的
+// BrowseSession 单槽 browseHandler，杜绝与小红书争抢）。三条命令翻成执行器调用 + 镜像小红书回执契约：
+//   - search.execute → 命中候选回 page.cards（permalink 放 noteId）；阻断/权限/导航失败回 action.completed{action:'search'}
+//   - note.open{url} → 开帖+评论框就绪回 note.detail；失败回 action.completed{action:'open_note'}
+//   - interaction.comment → 一律回 action.completed{action:'comment', ok}
+// 白名单命中但本平台不支持的其他命令 → 显式回 action.completed{ok:false, reason:'capability_unsupported'}，
+// 绝不再落回静默丢弃（红线：MUST NOT 静默假成功/静默丢弃）。
+
+import type { Envelope, InteractionCommentPayload, NoteOpenPayload, SearchExecutePayload } from '../comm/protocol.js';
+import type { ActionCompletedPayload, NoteDetailPayload, PageCardsPayload } from '../comm/protocol.js';
+import type { FacebookCommentExecutor } from './comment-executor.js';
+
+/** 处理器回执所需的最小客户端能力（EdgeClient 已实现这三个方法）。 */
+export interface FacebookCommentReplyClient {
+  reportPageCards(payload: PageCardsPayload): void;
+  reportNoteDetail(payload: NoteDetailPayload): void;
+  reportActionCompleted(payload: ActionCompletedPayload): void;
+}
+
+export interface FacebookCommentHandlerDeps {
+  executor: FacebookCommentExecutor;
+  client: FacebookCommentReplyClient;
+  logger?: (msg: string) => void;
+}
+
+export class FacebookCommentHandler {
+  private readonly executor: FacebookCommentExecutor;
+  private readonly client: FacebookCommentReplyClient;
+  private readonly log: (msg: string) => void;
+  /** 单飞：同一时刻只处理一条评论命令，防并发争抢同一浏览器会话。 */
+  private busy = false;
+
+  constructor(deps: FacebookCommentHandlerDeps) {
+    this.executor = deps.executor;
+    this.client = deps.client;
+    this.log = deps.logger ?? (() => {});
+  }
+
+  /** 云端主动命令入口（由 client.onBrowseCommand 转发）。绝不抛：任何异常都翻成诚实非成功回执。 */
+  async handle(env: Envelope): Promise<void> {
+    try {
+      switch (env.type) {
+        case 'search.execute':
+          await this.onSearch(env.payload as SearchExecutePayload);
+          return;
+        case 'note.open':
+          await this.onOpen(env.payload as NoteOpenPayload);
+          return;
+        case 'interaction.comment':
+          await this.onComment(env.payload as InteractionCommentPayload);
+          return;
+        default:
+          // 白名单命中但本平台不支持：显式诚实回执，绝不静默丢弃。
+          this.log(`[fb-comment] 收到本平台不支持的命令 ${env.type}，回 capability_unsupported`);
+          this.client.reportActionCompleted({ action: env.type, ok: false, reason: 'capability_unsupported' });
+          return;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log(`[fb-comment] 处理命令 ${env.type} 异常：${message}`);
+      // 归一到该命令的回执面，让云端 sendAndAwait 不至于干等超时。
+      const action = env.type === 'search.execute' ? 'search' : env.type === 'note.open' ? 'open_note' : env.type === 'interaction.comment' ? 'comment' : env.type;
+      this.client.reportActionCompleted({ action, ok: false, reason: `handler_error:${message}` });
+    }
+  }
+
+  private async onSearch(payload: SearchExecutePayload): Promise<void> {
+    const keyword = payload.keyword ?? '';
+    const container = payload.container ?? '';
+    if (!container) {
+      // 无容器 = 绝不全站搜（红线）：诚实非成功。
+      this.client.reportActionCompleted({ action: 'search', ok: false, reason: 'permission_gated' });
+      return;
+    }
+    const r = await this.executor.searchInContainer(keyword, container);
+    if (!r.ok) {
+      this.client.reportActionCompleted({ action: 'search', ok: false, reason: r.reason ?? 'no_candidates' });
+      return;
+    }
+    // 命中（含空候选）→ page.cards：permalink 放 noteId，云端据此下发 note.open{url}。
+    const cards: PageCardsPayload['cards'] = r.candidates.map((c, i) => ({
+      index: i,
+      title: '',
+      likeCount: 0,
+      collectCount: 0,
+      noteId: c.permalink,
+    }));
+    this.client.reportPageCards({ cards });
+  }
+
+  private async onOpen(payload: NoteOpenPayload): Promise<void> {
+    const url = payload.url ?? '';
+    if (!url) {
+      this.client.reportActionCompleted({ action: 'open_note', ok: false, reason: 'no_target' });
+      return;
+    }
+    const r = await this.executor.openPost(url);
+    if (!r.ok) {
+      this.client.reportActionCompleted({ action: 'open_note', ok: false, reason: r.reason ?? 'open_failed' });
+      return;
+    }
+    if (!r.editorReady) {
+      // 帖子开了但评论框始终催不出来 → 诚实非成功，让云端换下一个候选（不做无望的提交）。
+      this.client.reportActionCompleted({ action: 'open_note', ok: false, reason: 'editor_not_found' });
+      return;
+    }
+    // permalink 作为 noteId 回 note.detail；正文/计数诚实置零（本流程不做深读抽取）。
+    this.client.reportNoteDetail({ noteId: url, title: '', content: '', likeCount: 0, collectCount: 0 });
+  }
+
+  private async onComment(payload: InteractionCommentPayload): Promise<void> {
+    if (this.busy) {
+      this.client.reportActionCompleted({ action: 'comment', ok: false, reason: 'busy' });
+      return;
+    }
+    this.busy = true;
+    try {
+      // noteId 即候选帖 permalink（云端下发）；submitComment 在「已由 note.open 打开的该帖」上操作，
+      // 并用它做 own-identity 服务器确认的目标帖收窄。
+      const r = await this.executor.submitComment(payload.noteId, payload.text ?? '');
+      this.client.reportActionCompleted({ action: 'comment', ok: r.ok, ...(r.reason ? { reason: r.reason } : {}) });
+    } finally {
+      this.busy = false;
+    }
+  }
+}

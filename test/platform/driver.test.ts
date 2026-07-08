@@ -23,14 +23,16 @@ test('normalizePlatformId: xhs aliases resolve to xiaohongshu', () => {
   assert.equal(normalizePlatformId('xiaohongshu'), 'xiaohongshu');
 });
 
-test('selectPlatformDriver: facebook selects minimal identity/overlay driver', () => {
+test('selectPlatformDriver: facebook selects identity/overlay/comment driver (no browse)', () => {
   const driver = selectPlatformDriver({ env: { AIDCP_PLATFORM: 'facebook' } as NodeJS.ProcessEnv });
   assert.equal(driver.platform, 'facebook');
   assert.equal(driver.app, 'facebook');
   assert.equal(driver.defaultStartUrl, 'https://www.facebook.com/');
   assert.equal(driver.attachUrlIncludes, 'facebook.com');
   assert.deepEqual(driver.edgeCapabilities, ['locating', 'cdp']);
-  assert.deepEqual(driver.capabilities, ['identity', 'overlay']);
+  // 'comment'（Facebook 定向评论）已加入；'browse' 刻意不含——绝不让小红书 BrowseSession 挂到 FB 边端。
+  assert.deepEqual(driver.capabilities, ['identity', 'overlay', 'comment']);
+  assert.equal(driver.capabilities.includes('browse'), false);
   assert.equal(driver.isAllowedTargetUrl('https://www.facebook.com/groups/example'), true);
   assert.equal(driver.isAllowedTargetUrl('https://m.facebook.com/story.php?story_fbid=1'), true);
   assert.equal(driver.isAllowedTargetUrl('https://www.xiaohongshu.com/explore'), false);

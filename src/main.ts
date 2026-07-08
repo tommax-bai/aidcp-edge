@@ -44,6 +44,7 @@ import {
   type BrowserLaunchOptions,
 } from './cdp/index.js';
 import { selectPlatformDriver } from './platform/index.js';
+import { FacebookCommentExecutor, FacebookCommentHandler } from './facebook/index.js';
 import { EdgeClient } from './client/edge-client.js';
 import { deriveEdgeId } from './client/edge-id.js';
 import { CloudElementSelector } from './client/cloud-selector.js';
@@ -426,6 +427,35 @@ async function main(): Promise<void> {
       console.error(`[aidcp-edge] 验证码协助指令 ${env.type} 处理失败:`, err);
     });
   });
+
+  // —— Facebook 定向评论处理器（change facebook-scheduled-comment，静默丢弃坑修复）——
+  // comment-only 平台（声明 'comment' 但不声明 'browse'，如 Facebook）：注册独立评论处理器，
+  // 把云端 search.execute/note.open/interaction.comment 翻成 FacebookCommentExecutor 调用并诚实回执。
+  // 绝不锁在 if(autoBrowse) 内——否则 Facebook（无 browse 能力）永不注册 browseHandler，
+  // 这三条已在白名单的命令会被 `browseHandler?.()` 可选链静默吞、零回执 → 云端干等超时挂死。
+  // 与小红书（browse+comment）的 BrowseSession 单槽 browseHandler 互斥：仅 comment-only 平台走这里。
+  const commentOnlyDriver =
+    platformDriver.capabilities.includes('comment') && !platformDriver.capabilities.includes('browse');
+  if (commentOnlyDriver) {
+    // 该平台的旁路弹窗监测体后台常开：执行器每步操作前 fresh 复检登录/验证码（fail-closed）。
+    overlayMonitor = platformDriver.createOverlayMonitor(session.cdp);
+    overlayMonitor.start();
+    const fbCommentExecutor = new FacebookCommentExecutor({
+      cdp: session.cdp,
+      getAccountId: () => accountId,
+      overlayMonitor,
+      logger: (m) => console.log(m),
+    });
+    const fbCommentHandler = new FacebookCommentHandler({
+      executor: fbCommentExecutor,
+      client,
+      logger: (m) => console.log(m),
+    });
+    client.onBrowseCommand((env) => {
+      void fbCommentHandler.handle(env);
+    });
+    console.log(`[aidcp-edge] Facebook 定向评论处理器已注册（platform=${platformDriver.platform}）`);
+  }
 
   // 处理器全部就位后才握手（见上方红线注释：hello 快照紧随 welcome，注册晚一步就漏帧）。
   await client.connect();
