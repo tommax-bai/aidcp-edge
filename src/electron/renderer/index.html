@@ -270,6 +270,82 @@
         </div>
       </section>
 
+      <!-- ═══ 账号人设：扫码登录后按关键词生成（change edge-persona-keyword-generation）═══ -->
+      <section class="settings persona-config">
+        <div class="settings-head">
+          <span>账号人设</span>
+          <strong id="persona-state-badge" class="badge checking">未设置</strong>
+        </div>
+        <p class="subtle persona-hint" id="persona-hint">选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。</p>
+
+        <div class="field">
+          <span class="field-label">垂类 / 行业</span>
+          <div class="seg-group persona-kw-group" data-dim="vertical" data-select="single">
+            <button class="seg kw-btn" type="button" data-kw="美妆护肤">美妆护肤</button>
+            <button class="seg kw-btn" type="button" data-kw="母婴亲子">母婴亲子</button>
+            <button class="seg kw-btn" type="button" data-kw="数码科技">数码科技</button>
+            <button class="seg kw-btn" type="button" data-kw="美食探店">美食探店</button>
+            <button class="seg kw-btn" type="button" data-kw="时尚穿搭">时尚穿搭</button>
+            <button class="seg kw-btn" type="button" data-kw="健身运动">健身运动</button>
+            <button class="seg kw-btn" type="button" data-kw="家居生活">家居生活</button>
+            <button class="seg kw-btn" type="button" data-kw="职场成长">职场成长</button>
+            <button class="seg kw-btn" type="button" data-kw="旅行户外">旅行户外</button>
+            <button class="seg kw-btn" type="button" data-kw="情感生活">情感生活</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <span class="field-label">兴趣标签 <em class="opt">多选</em></span>
+          <div class="seg-group persona-kw-group" data-dim="interest" data-select="multi">
+            <button class="seg kw-btn" type="button" data-kw="好物分享">好物分享</button>
+            <button class="seg kw-btn" type="button" data-kw="教程干货">教程干货</button>
+            <button class="seg kw-btn" type="button" data-kw="测评种草">测评种草</button>
+            <button class="seg kw-btn" type="button" data-kw="日常记录">日常记录</button>
+            <button class="seg kw-btn" type="button" data-kw="避坑指南">避坑指南</button>
+            <button class="seg kw-btn" type="button" data-kw="灵感收藏">灵感收藏</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <span class="field-label">语气调性</span>
+          <div class="seg-group persona-kw-group" data-dim="tone" data-select="single">
+            <button class="seg kw-btn" type="button" data-kw="亲切接地气">亲切接地气</button>
+            <button class="seg kw-btn" type="button" data-kw="专业理性">专业理性</button>
+            <button class="seg kw-btn" type="button" data-kw="活泼幽默">活泼幽默</button>
+            <button class="seg kw-btn" type="button" data-kw="温柔治愈">温柔治愈</button>
+            <button class="seg kw-btn" type="button" data-kw="犀利真实">犀利真实</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <span class="field-label">内容 / 互动偏好 <em class="opt">多选</em></span>
+          <div class="seg-group persona-kw-group" data-dim="engagement" data-select="multi">
+            <button class="seg kw-btn" type="button" data-kw="乐于点赞互动">乐于点赞互动</button>
+            <button class="seg kw-btn" type="button" data-kw="精挑收藏">精挑收藏</button>
+            <button class="seg kw-btn" type="button" data-kw="爱评论交流">爱评论交流</button>
+            <button class="seg kw-btn" type="button" data-kw="关注同好">关注同好</button>
+          </div>
+        </div>
+
+        <div class="persona-actions">
+          <button id="persona-generate" class="seg persona-gen-btn" type="button" disabled>生成人设</button>
+          <span id="persona-msg" class="ads-env-msg"></span>
+        </div>
+
+        <!-- 草稿卡：生成后展示身份摘要 + soul 预览；确认（落库开跑）/ 重新生成（不限次） -->
+        <div id="persona-draft" class="persona-draft hidden">
+          <div class="persona-draft-head">
+            <span class="field-label">生成的人设</span>
+            <strong id="persona-draft-summary" class="badge near"></strong>
+          </div>
+          <pre id="persona-draft-body" class="persona-draft-body"></pre>
+          <div class="persona-draft-actions">
+            <button id="persona-regenerate" class="secondary small" type="button">重新生成</button>
+            <button id="persona-confirm" class="seg" type="button">确认使用</button>
+          </div>
+        </div>
+      </section>
+
       <label class="dev-toggle-row">
         <input id="dev-toggle" type="checkbox" />
         <span>显示「开发者详情」<em>主界面底部展示原始运行日志（排查问题用）</em></span>

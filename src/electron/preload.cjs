@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   adsCreateEnv: (opts) => ipcRenderer.invoke('ads:createEnv', opts),
   // 删除环境（仅由界面逐个二次确认触发）：opts { userId, apiKey?, apiBase? }。
   adsDeleteEnv: (opts) => ipcRenderer.invoke('ads:deleteEnv', opts),
+  // 建号自助人设（change edge-persona-keyword-generation）：选关键词 → 云端生成草稿 / 确认落库。
+  // 经 core stdin 桥打到云端；返回云端诚实回执 { ok, soulYaml?, identitySummary?, reason? }。
+  personaGenerate: (opts) => ipcRenderer.invoke('persona:generate', opts),
+  personaPersist: (opts) => ipcRenderer.invoke('persona:persist', opts),
   onStatusUpdate: (callback) => {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('status:update', listener);

@@ -30,6 +30,10 @@ let mainWindow;
 let tray;
 let edgeProcess;
 let loginPoller;
+// 建号自助人设 stdin/stdout 桥（change edge-persona-keyword-generation）：
+// persona.generate/persist 带 correlation id 下发 core，core 经 [persona-reply] 行回执，按 id 命中 pending。
+const personaPending = new Map(); // id -> { resolve, timer }
+let personaSeq = 0;
 let isQuitting = false;
 // 保存后重启标记：SIGTERM 旧边缘进程后，其 exit 回调据此按新 provider 起，而非误判为异常退出弹窗。
 let restartPending = false;
@@ -600,6 +604,52 @@ function sendBrowserParkingCommand(type) {
   }
 }
 
+// 建号自助人设：把带 correlation id 的 persona 命令写进 core stdin，返回按 [persona-reply] 命中的 Promise。
+// 不 gate 在 browserParkingReady（persona 与 parking 独立）；仅要求 core 进程 + stdin 在。
+function sendPersonaCommand(type, payload) {
+  return new Promise((resolve) => {
+    if (!edgeProcess || !edgeProcess.stdin || edgeProcess.stdin.destroyed) {
+      resolve({ ok: false, reason: 'edge_not_running' });
+      return;
+    }
+    const id = `persona-${++personaSeq}-${Date.now()}`;
+    // 略长于 core 侧 190s WS 超时，容 core 在 WS 超时后仍回执诚实失败。
+    const timer = setTimeout(() => {
+      personaPending.delete(id);
+      resolve({ ok: false, reason: 'edge_request_timeout' });
+    }, 200_000);
+    personaPending.set(id, { resolve, timer });
+    try {
+      edgeProcess.stdin.write(`${JSON.stringify({ type, id, payload })}\n`);
+    } catch (error) {
+      clearTimeout(timer);
+      personaPending.delete(id);
+      resolve({ ok: false, reason: 'edge_write_failed' });
+    }
+  });
+}
+
+// core 回执行 `[persona-reply] {id, ok, payload?, error?}`：按 id 命中 pending resolve。
+// ok=true → 把云端结果 payload（{ok, soulYaml?, identitySummary?, reason?}）回给渲染层；
+// ok=false（桥/WS 层失败）→ 归一成 { ok:false, reason:'edge_request_failed' } 诚实回执。
+function handlePersonaReply(jsonText) {
+  let obj;
+  try {
+    obj = JSON.parse(jsonText);
+  } catch {
+    return;
+  }
+  const entry = obj && obj.id ? personaPending.get(obj.id) : undefined;
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  personaPending.delete(obj.id);
+  if (obj.ok && obj.payload && typeof obj.payload === 'object') {
+    entry.resolve(obj.payload);
+  } else {
+    entry.resolve({ ok: false, reason: 'edge_request_failed', detail: obj.error });
+  }
+}
+
 function startEdge() {
   if (edgeProcess) return;
   // 打包后用 Electron 自带的 Node 运行预编译产物（ELECTRON_RUN_AS_NODE），
@@ -853,6 +903,11 @@ function handleEdgeOutput(text, isError = false) {
 }
 
 function handleEdgeLogLine(message, isError = false) {
+  // 建号自助人设回执：早拦截，按 id 命中 pending，不当普通日志/状态行处理。
+  if (message.startsWith('[persona-reply]')) {
+    handlePersonaReply(message.slice('[persona-reply]'.length).trim());
+    return;
+  }
   appendEdgeLog(message, isError); // 落文件（排障回溯，独立于下方状态判断）
   if (message.includes('[browser-parking] control-ready')) browserParkingReady = true;
   // 核心正被有意停止 / 已暂停 / 已退出：其关闭期 stdout/stderr 只作为日志行展示，绝不据以翻转
@@ -1039,6 +1094,10 @@ ipcMain.handle('browser:openAdsDownload', () => {
 });
 ipcMain.handle('browser:showDriven', () => sendBrowserParkingCommand('browser.show'));
 ipcMain.handle('browser:resetParking', () => sendBrowserParkingCommand('browser.park'));
+// 建号自助人设（change edge-persona-keyword-generation）：渲染层选关键词 → 云端生成草稿 / 确认落库。
+// 经 core stdin 桥打到云端；不本地判成功，透传云端诚实回执。
+ipcMain.handle('persona:generate', (_event, payload) => sendPersonaCommand('persona.generate', payload));
+ipcMain.handle('persona:persist', (_event, payload) => sendPersonaCommand('persona.persist', payload));
 // AdsPower 只读探测 / 拉取（主进程侧，渲染层不直连本地 API）。opts 可带渲染层当前表单 apiKey/apiBase/groupId。
 ipcMain.handle('ads:status', (_event, opts) => adsApi.status(resolveAdsOpts(opts)));
 ipcMain.handle('ads:listProfiles', (_event, opts) => adsApi.listProfiles(resolveAdsOpts(opts)));

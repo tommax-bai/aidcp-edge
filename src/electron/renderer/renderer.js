@@ -775,6 +775,7 @@ function render(status) {
   if (status.provider && SUBTITLE[status.provider]) fields.subtitle.textContent = SUBTITLE[status.provider];
   // 表单未在编辑时，让 provider 分段跟随实际运行 provider。
   if (status.provider && !editingProvider) applyProviderSelection(status.provider);
+  updatePersonaGate(status); // 建号人设：仅登录+云端已连接才可生成（不触碰已选关键词/草稿，避免状态推送重置向导）
 }
 
 // ─── Browser provider settings（既有逻辑原样保留，DOM 已迁入抽屉）───
@@ -1219,6 +1220,139 @@ fields.relogin.addEventListener('click', async () => {
     render(await window.aidcpEdge.relogin());
   } finally {
     fields.relogin.disabled = false;
+  }
+});
+
+// ─── 建号自助人设向导（change edge-persona-keyword-generation）───
+const personaUi = {
+  stateBadge: document.querySelector('#persona-state-badge'),
+  hint: document.querySelector('#persona-hint'),
+  kwGroups: Array.from(document.querySelectorAll('.persona-kw-group')),
+  generate: document.querySelector('#persona-generate'),
+  msg: document.querySelector('#persona-msg'),
+  draft: document.querySelector('#persona-draft'),
+  draftSummary: document.querySelector('#persona-draft-summary'),
+  draftBody: document.querySelector('#persona-draft-body'),
+  regenerate: document.querySelector('#persona-regenerate'),
+  confirm: document.querySelector('#persona-confirm'),
+};
+let personaReady = false; // 已登录 + 云端已连接才可生成
+let personaDraftYaml = ''; // 当前草稿 soulYaml（确认时提交）
+
+const PERSONA_GEN_FAIL = {
+  generation_failed: '生成失败（模型未产出可用结果），请重试。',
+  persona_invalid: '生成结果不合规，请重试。',
+  no_keywords: '请先选择关键词。',
+  missing_idempotency_key: '内部错误（缺幂等键），请重试。',
+  edge_not_running: '引擎未运行，请先启动。',
+  edge_request_timeout: '生成超时，请重试。',
+  edge_request_failed: '与云端通信失败，请检查连接后重试。',
+  unavailable: '云端暂不支持人设生成，请稍后再试。',
+  unknown_account: '账号身份未就绪，请确认已扫码登录。',
+};
+const PERSONA_PERSIST_FAIL = {
+  unknown_account: '账号身份未就绪（云端未建号），请稍后重试。',
+  persona_required: '人设为空，无法保存。',
+  persona_invalid: '人设格式无效，请重新生成。',
+  edge_request_failed: '与云端通信失败，请重试。',
+  edge_request_timeout: '保存超时，请重试。',
+  unavailable: '云端暂不支持，请稍后再试。',
+};
+
+function setPersonaMsg(text, isError) {
+  if (!personaUi.msg) return;
+  personaUi.msg.textContent = text || '';
+  personaUi.msg.classList.toggle('error', Boolean(isError));
+}
+
+function setPersonaBadge(text, variant) {
+  if (!personaUi.stateBadge) return;
+  personaUi.stateBadge.textContent = text;
+  personaUi.stateBadge.className = `badge${variant ? ' ' + variant : ''}`;
+}
+
+function collectPersonaKeywords() {
+  return personaUi.kwGroups
+    .flatMap((g) => Array.from(g.querySelectorAll('.kw-btn.active')).map((b) => b.dataset.kw))
+    .filter(Boolean);
+}
+
+function newIdempotencyKey() {
+  return `persona-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+}
+
+// 登录+云端已连接才可生成。只改 disabled/hint，绝不触碰已选关键词与草稿（状态推送不重置向导进度）。
+function updatePersonaGate(status) {
+  personaReady = status && status.auth === 'logged in' && status.cloud === 'connected';
+  if (personaUi.generate) personaUi.generate.disabled = !personaReady;
+  if (personaUi.hint) {
+    personaUi.hint.textContent = personaReady
+      ? '选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。'
+      : '请先在打开的浏览器里扫码登录，登录并连上云端后即可生成人设。';
+  }
+}
+
+// 关键词 toggle：单选组互斥、多选组可叠加。
+personaUi.kwGroups.forEach((group) => {
+  const single = group.dataset.select === 'single';
+  group.addEventListener('click', (e) => {
+    const btn = e.target.closest('.kw-btn');
+    if (!btn || !group.contains(btn)) return;
+    if (single) {
+      group.querySelectorAll('.kw-btn').forEach((b) => b.classList.toggle('active', b === btn));
+    } else {
+      btn.classList.toggle('active');
+    }
+  });
+});
+
+async function runPersonaGenerate() {
+  if (!personaReady) return setPersonaMsg('请先扫码登录并连上云端', true);
+  const keywordSelections = collectPersonaKeywords();
+  if (!keywordSelections.length) return setPersonaMsg('请先选择关键词', true);
+  if (!window.aidcpEdge || typeof window.aidcpEdge.personaGenerate !== 'function') return;
+  personaUi.generate.disabled = true;
+  if (personaUi.regenerate) personaUi.regenerate.disabled = true;
+  setPersonaMsg('正在生成人设…（可能需要十几秒）', false);
+  try {
+    const r = await window.aidcpEdge.personaGenerate({ keywordSelections, idempotencyKey: newIdempotencyKey() });
+    if (r && r.ok && r.soulYaml) {
+      personaDraftYaml = r.soulYaml;
+      if (personaUi.draftSummary) personaUi.draftSummary.textContent = r.identitySummary || '已生成';
+      if (personaUi.draftBody) personaUi.draftBody.textContent = r.soulYaml;
+      personaUi.draft?.classList.remove('hidden');
+      setPersonaBadge('待确认', 'warning');
+      setPersonaMsg('已生成草稿，确认后即绑定；不满意可「重新生成」。', false);
+    } else {
+      personaDraftYaml = '';
+      personaUi.draft?.classList.add('hidden');
+      setPersonaMsg(PERSONA_GEN_FAIL[(r && r.reason) || ''] || `生成失败：${(r && r.reason) || '未知'}`, true);
+    }
+  } finally {
+    personaUi.generate.disabled = !personaReady;
+    if (personaUi.regenerate) personaUi.regenerate.disabled = false;
+  }
+}
+
+personaUi.generate?.addEventListener('click', runPersonaGenerate);
+personaUi.regenerate?.addEventListener('click', runPersonaGenerate);
+
+personaUi.confirm?.addEventListener('click', async () => {
+  if (!personaDraftYaml) return;
+  if (!window.aidcpEdge || typeof window.aidcpEdge.personaPersist !== 'function') return;
+  personaUi.confirm.disabled = true;
+  setPersonaMsg('正在保存人设…', false);
+  try {
+    const r = await window.aidcpEdge.personaPersist({ soulYaml: personaDraftYaml });
+    if (r && r.ok) {
+      setPersonaBadge('已设置', 'normal');
+      personaUi.draft?.classList.add('hidden');
+      setPersonaMsg('人设已保存，账号即将开始自动运营。', false);
+    } else {
+      setPersonaMsg(PERSONA_PERSIST_FAIL[(r && r.reason) || ''] || `保存失败：${(r && r.reason) || '未知'}`, true);
+    }
+  } finally {
+    personaUi.confirm.disabled = false;
   }
 });
 

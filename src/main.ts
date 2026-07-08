@@ -46,6 +46,7 @@ import {
 import { selectPlatformDriver } from './platform/index.js';
 import { FacebookCommentExecutor, FacebookCommentHandler } from './facebook/index.js';
 import { EdgeClient } from './client/edge-client.js';
+import { registerPersonaStdinCommands } from './client/persona-onboarding.js';
 import { deriveEdgeId } from './client/edge-id.js';
 import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
@@ -215,6 +216,10 @@ async function main(): Promise<void> {
       },
     },
   });
+
+  // 建号自助人设 stdin 桥（change edge-persona-keyword-generation）：身份已确立、client 就绪后装上，
+  // 桌面壳经 stdin 下发 persona.generate/persist → 打到云端 → stdout [persona-reply] 回桥。
+  registerPersonaStdinCommands(client, (m) => console.log(m));
 
   const selector = new CloudElementSelector(client);
   runner = new LikeStepRunner({
