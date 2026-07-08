@@ -1452,6 +1452,8 @@ export class BrowseSession {
       likeCount: content.likes,
       collectCount: content.collects,
       authorFollowed,
+      // 发布相对时刻原始文本（change feed-hot-lead-group-comment）：抽到才带、缺则不带（诚实置空）。
+      ...(content.publishedAtText ? { publishedAtText: content.publishedAtText } : {}),
       ...(detailUrl ? { url: detailUrl } : {}),
       ...(content.images.length > 0 ? { images: content.images } : {}),
     };

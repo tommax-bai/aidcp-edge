@@ -7,6 +7,11 @@
  *
  * 数字解析覆盖中文计数惯例：'1.2w' / '1.2万' → 12000，'999' → 999，'1万' → 10000，
  * 带千分位 '1,234' → 1234。无法解析时返回 0（绝不臆造）。
+ *
+ * ⚠️ 发布时刻抽取（change feed-hot-lead-group-comment）的选择器为最佳猜测，需运营机真机标定
+ * （见 NOTE_PUBLISHED_AT_SELECTORS 注释）。边缘只抽正文列底部日期容器的【原始串】、不解析、不判热度；
+ * 该日期选择器与正文白名单 NOTE_BODY_SELECTORS【物理隔离】——历史 bug f8712f5 曾把「标题+发布时间」
+ * 裸抓进正文，故日期节点绝不落在正文文本容器内，抽不到诚实置空、MUST NOT 臆造。
  */
 
 import type { DomProvider } from '../locating/engine.js';
@@ -32,6 +37,9 @@ export interface NoteContent {
   images: Array<{ index: number; url: string; width?: number; height?: number; alt?: string }>;
   /** 当前是否已点赞 */
   isLiked: boolean;
+  /** 发布相对时刻原始文本（change feed-hot-lead-group-comment）：如「3小时前 / 昨天 14:30 / 07-05」。
+   *  只抽正文列底部日期容器的原始串、不解析；抽不到则 undefined、MUST NOT 臆造。 */
+  publishedAtText?: string;
 }
 
 const NOTE_IMAGE_HARD_MAX = 9;
@@ -293,6 +301,49 @@ export const NOTE_BODY_SELECTORS: readonly string[] = [
 export const INTERSTITIAL_TITLES: ReadonlySet<string> = new Set(['猜你想搜', '猜你想看', '大家都在搜']);
 
 /**
+ * 发布相对时刻【窄选择器】（change feed-hot-lead-group-comment）。
+ * ⚠️ 选择器需运营机真机标定：以下均为最佳猜测。小红书详情页发布时刻位于【正文列底部的日期容器】
+ * （常见结构 `.bottom-container > .date`，文本形如「编辑于 3小时前 广东」/「昨天 14:30」/「07-05」），
+ * 与标题/正文同处一片区——历史 bug f8712f5 曾把「标题+发布时间」裸抓进正文。
+ * 隔离设计：① 只取日期【叶子节点】、优先 bottom-container 作用域；② 与正文白名单 NOTE_BODY_SELECTORS
+ * 物理隔离（是两份独立常量、互不交叉）；③ 抽取时再过一道正文文本容器 denylist
+ * （见 NOTE_BODY_TEXT_DENYLIST），命中正文文本容器内的候选一律跳过，绝不把正文当日期。
+ * 末两条 `.date` / `[class*="date"]` 为兜底、匹配偏宽（如评论区日期、误含 "date" 子串的类），仅在前面全落空时用，务必真机确认。
+ */
+export const NOTE_PUBLISHED_AT_SELECTORS: readonly string[] = [
+  '.bottom-container .date',
+  '[class*="bottom-container"] .date',
+  '.bottom-container time',
+  'time[datetime]',
+  '.date',
+  '[class*="date"]',
+];
+
+/**
+ * 正文【文本叶子容器】denylist：发布时刻抽取时，凡候选日期节点本身位于这些正文文本容器内即跳过，
+ * 与正文抽取物理隔离（防 f8712f5 类「标题+发布时间」串进正文，反向亦然）。
+ * 注意【刻意不含】宽泛的 `.note-content` / `[class*="content"]`：真机里日期容器本就嵌在 note-content 列内，
+ * 排它会误杀合法日期；这里只排真正承载正文文字的末级容器（#detail-desc / .desc / .note-text）。
+ */
+const NOTE_BODY_TEXT_DENYLIST = '#detail-desc, .desc, .note-text';
+
+/**
+ * 从笔记详情作用域抽发布时刻【原始文本】（trim 后），抽不到返回 undefined。
+ * 只读原始串、不解析（云端解析成小时数并算热度速率）；命中正文文本容器内的候选一律跳过（隔离于正文）。
+ */
+export function extractPublishedAtText(container: Element): string | undefined {
+  for (const sel of NOTE_PUBLISHED_AT_SELECTORS) {
+    for (const el of Array.from(container.querySelectorAll(sel))) {
+      // 隔离闸：日期节点若落在正文文本容器内则跳过（绝不把正文首段误当发布时刻）。
+      if ((el as Element).closest(NOTE_BODY_TEXT_DENYLIST)) continue;
+      const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t) return t;
+    }
+  }
+  return undefined;
+}
+
+/**
  * 从当前打开的 modal 中提取笔记内容。
  * 找不到笔记详情容器时降级到整个 document 抽取（单条笔记页场景）。
  */
@@ -315,6 +366,9 @@ export async function extractNoteContent(dom: DomProvider): Promise<NoteContent>
   // .note-text，故所有 .note-text 候选都下钻在 desc/note-scroller/note-content 容器作用域内，
   // 不用裸 .note-text 兜底（会抓到评论），也不回退裸 .note-content / [class*="content"]（会拼进标题+时间）。
   // 正文走保留换行的序列化（bodyTextOf）：段落结构是精选语料/创作素材的一部分，不得压平。
+  // 【与发布时刻隔离】：正文只走 NOTE_BODY_SELECTORS 白名单（末级文本容器），发布时刻另走
+  // NOTE_PUBLISHED_AT_SELECTORS（bottom-container 里的 .date 等日期叶子），两份选择器物理独立、
+  // 日期节点是正文容器的【兄弟节点】不在其内，故正文抽取不会命中日期串（f8712f5 隔离约束）。
   const body = bodyTextOf(container, NOTE_BODY_SELECTORS);
   const author = textOf(container, [
     '.author-wrapper .name',
@@ -337,6 +391,8 @@ export async function extractNoteContent(dom: DomProvider): Promise<NoteContent>
   const tags = extractTags(`${title} ${body}`);
   const isLiked = detectLiked(container);
   const images = extractNoteImages(container);
+  // 发布相对时刻原始文本（窄选择器、与正文物理隔离）：抽不到则 undefined、诚实置空，云端负责解析算热度。
+  const publishedAtText = extractPublishedAtText(container);
 
   const content: NoteContent = {
     title,
@@ -350,5 +406,6 @@ export async function extractNoteContent(dom: DomProvider): Promise<NoteContent>
     isLiked,
   };
   if (noteUrl) content.noteUrl = noteUrl;
+  if (publishedAtText) content.publishedAtText = publishedAtText;
   return content;
 }

@@ -4,6 +4,7 @@ import { buildDom } from '../helpers.js';
 import {
   extractNoteContent,
   extractNoteImages,
+  extractPublishedAtText,
   parseCount,
   extractTags,
   textWithNewlines,
@@ -144,6 +145,60 @@ test('countNear(点赞数): 两遍扫描优先 like-wrapper 精确容器，不�
   assert.equal(c.collects, 66);
   assert.equal(c.comments, 88);
 });
+// change feed-hot-lead-group-comment：发布时刻抽取双向断言。发布时刻位于正文列底部日期容器
+// （.bottom-container > .date），与标题/正文同处一片区——必须抽到原始串，且正文【不含】该日期串
+// （隔离于 NOTE_BODY_SELECTORS，守 f8712f5 红线）。
+const DATED_MODAL_HTML = `
+  <div class="note-detail-mask">
+    <div id="noteContainer">
+      <div id="detail-title">超好喝的奶茶推荐</div>
+      <div class="note-content">
+        <div class="note-scroller">
+          <div id="detail-desc">这家店真的绝了，强烈安利大家去试试</div>
+          <div class="bottom-container">
+            <span class="date">编辑于 3小时前 广东</span>
+          </div>
+        </div>
+      </div>
+      <div class="author-wrapper"><span class="name">小红薯达人</span></div>
+      <div class="footer">
+        <span class="like-wrapper">1.2w</span>
+        <span class="collect-wrapper">3456</span>
+        <span class="comment-wrapper">789</span>
+      </div>
+    </div>
+  </div>`;
+
+test('extractNoteContent: 详情含日期节点时抽到 publishedAtText，且正文不含该日期串', async () => {
+  const c = await extractNoteContent(domProviderFrom(DATED_MODAL_HTML));
+  assert.equal(c.publishedAtText, '编辑于 3小时前 广东', '应抽到正文列底部日期原始串');
+  assert.match(c.body, /强烈安利/, '正文应抽到非空');
+  assert.ok(!c.body.includes('3小时前'), '正文不应混入发布时刻（隔离于日期容器）');
+  assert.ok(!c.body.includes('编辑于'), '正文不应混入日期前缀');
+});
+
+test('extractNoteContent: 无日期节点时 publishedAtText 为 undefined、正文不受影响', async () => {
+  const noDate = DATED_MODAL_HTML.replace(
+    /<div class="bottom-container">[\s\S]*?<\/div>/,
+    '',
+  );
+  const c = await extractNoteContent(domProviderFrom(noDate));
+  assert.equal(c.publishedAtText, undefined, '无日期节点应诚实置空、绝不臆造');
+  assert.match(c.body, /强烈安利/, '正文仍正常抽取');
+});
+
+test('extractPublishedAtText: 跳过落在正文文本容器内的候选（隔离 denylist）', () => {
+  // 若日期串误落在正文文本容器 #detail-desc 内，抽取器应跳过、不把正文首段当发布时刻。
+  const { document } = buildDom(`
+    <div class="note-detail-mask">
+      <div id="noteContainer">
+        <div id="detail-desc"><span class="date">正文里恰好有个 .date 节点</span></div>
+      </div>
+    </div>`);
+  const container = document.querySelector('.note-detail-mask') as Element;
+  assert.equal(extractPublishedAtText(container), undefined);
+});
+
 test('extractNoteImages: keeps note carousel images ordered, deduped, and filtered', () => {
   const { document } = buildDom(`
     <div class="note-detail-mask">
