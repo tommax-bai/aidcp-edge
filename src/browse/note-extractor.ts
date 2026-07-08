@@ -42,7 +42,9 @@ export interface NoteContent {
   publishedAtText?: string;
 }
 
-const NOTE_IMAGE_HARD_MAX = 9;
+// 抓取精选集时单条笔记轮播图的提取上限（截图参考素材，非发布图张数）。
+// 与发布侧 IMAGE_COUNT_HARD_MAX/REFERENCE_IMAGE_MAX_COUNT=9（小红书图文帖硬约束）无关，勿混改。
+const NOTE_IMAGE_HARD_MAX = 30;
 
 /**
  * 解析中文计数文本为整数。
