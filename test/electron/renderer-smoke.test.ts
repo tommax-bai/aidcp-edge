@@ -70,8 +70,8 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     restart: async () => makeStatus({ edge: 'starting', session: 'running' }),
     relogin: async () => makeStatus(),
     openAdsDownload: () => undefined,
-    showDrivenBrowser: async () => ({ ok: false, error: '当前没有可控制的浏览器窗口' }),
-    resetBrowserParking: async () => ({ ok: false, error: '当前没有可控制的浏览器窗口' }),
+    showDrivenBrowser: async () => ({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' }),
+    resetBrowserParking: async () => ({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' }),
     adsStatus: async () => ({ ok: true }),
     adsListProfiles: async () => ({ ok: true, profiles: [] }),
     adsOpenCreate: () => ({ launched: true }),
@@ -254,11 +254,11 @@ test('窗口停放：选择完全移出后保存带 browserParkingMode', async (
 
 test('窗口停放：无可控浏览器时显示浏览器诚实失败', async () => {
   const w = await boot(makeStub({
-    showDrivenBrowser: async () => ({ ok: false, error: '当前没有可控制的浏览器窗口' }),
+    showDrivenBrowser: async () => ({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' }),
   }));
   $(w, '#browser-show').dispatchEvent(new w.Event('click'));
   await tick();
-  assert.match($(w, '#settings-msg').textContent ?? '', /当前没有可控制的浏览器窗口/);
+  assert.match($(w, '#settings-msg').textContent ?? '', /引擎未运行或浏览器尚未就绪，请先启动引擎再操作/);
 });
 
 test('悬浮 fab 三态：停止→启动 / 运行与休息→暂停 / 暂停→恢复', async () => {

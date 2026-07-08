@@ -943,7 +943,7 @@ async function runBrowserRecovery(action) {
   const label = action === 'show' ? '显示浏览器' : '重置浏览器位置';
   try {
     const r = await api();
-    settingsUi.msg.textContent = r && r.ok ? `${label}指令已发送。` : `${label}失败：${(r && r.error) || '当前没有可控制的浏览器窗口'}`;
+    settingsUi.msg.textContent = r && r.ok ? `${label}指令已发送。` : `${label}失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`;
   } catch (e) {
     settingsUi.msg.textContent = `${label}失败：${(e && e.message) || e}`;
   }

@@ -590,7 +590,7 @@ function createTray() {
 
 function sendBrowserParkingCommand(type) {
   if (!edgeProcess || !browserParkingReady || !edgeProcess.stdin || edgeProcess.stdin.destroyed) {
-    return { ok: false, error: '当前没有可控制的浏览器窗口' };
+    return { ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' };
   }
   try {
     edgeProcess.stdin.write(`${JSON.stringify({ type })}\n`);
