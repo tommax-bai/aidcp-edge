@@ -64,6 +64,7 @@ interface FakeConfig {
   accepted?: boolean;
   submitCtl?: { found: boolean; disabled: boolean; label: string | null; x: number; y: number };
   verify?: { confirmed: boolean; matchedText: boolean; matchedOwnIdentity: boolean; articleCount: number };
+  containerName?: string | null;
 }
 
 class FakeCdp implements BrowseCdp {
@@ -103,6 +104,10 @@ class FakeCdp implements BrowseCdp {
       if (expr.includes('collectPermalinks')) {
         const s = (this.cfg.structureFor ?? (() => struct()))(this.scrolls);
         return val(JSON.stringify(s));
+      }
+      if (expr.includes('og:title')) {
+        const n = this.cfg.containerName === undefined ? 'Puerto Rico Y Sus Encantos e Historia' : this.cfg.containerName;
+        return val(JSON.stringify({ name: n }));
       }
       if (expr.includes('window.scrollBy')) return val(undefined);
       if (expr.includes('focused:focused')) {
@@ -171,6 +176,8 @@ test('fb-executor: 群容器 → 站内搜 URL + 候选帖 permalink', async () 
   // permalink 经 sanitize 归一（去尾斜杠/追踪参数）——候选帖链接为规范化后的形态。
   assert.equal(r.candidates[0].permalink, 'https://www.facebook.com/groups/123456/posts/999');
   assert.match(cdp.navigations[0], /\/groups\/123456\/search\/\?q=/);
+  // 容器真实群名自动读出回传（人只看群名、不看 id）。
+  assert.equal(r.containerName, 'Puerto Rico Y Sus Encantos e Historia');
 });
 
 test('fb-executor: 登录失效浮层 → login_required（不返回候选）', async () => {
@@ -195,12 +202,21 @@ test('fb-executor: 非成员（可见 Join）→ permission_gated', async () => 
   assert.equal(r.reason, 'permission_gated');
 });
 
-test('fb-executor: 容器内无候选 → ok:true 空候选（云端映射 no_strong_candidate）', async () => {
+test('fb-executor: 容器内无候选 → ok:true 空候选（云端映射 no_strong_candidate），仍带回群名', async () => {
   const cdp = new FakeCdp({ structureFor: () => struct({ postCandidates: [] }) });
   const ex = makeExecutor(cdp);
   const r = await ex.searchInContainer('咖啡', 'https://www.facebook.com/groups/1');
   assert.equal(r.ok, true);
   assert.equal(r.candidates.length, 0);
+  assert.equal(r.containerName, 'Puerto Rico Y Sus Encantos e Historia');
+});
+
+test('fb-executor: 读不出群名 → containerName undefined（绝不用 id 冒充）', async () => {
+  const cdp = new FakeCdp({ structureFor: () => struct({ postCandidates: [post('https://www.facebook.com/groups/1/posts/2/')] }), containerName: null });
+  const ex = makeExecutor(cdp);
+  const r = await ex.searchInContainer('咖啡', 'https://www.facebook.com/groups/1');
+  assert.equal(r.ok, true);
+  assert.equal(r.containerName, undefined);
 });
 
 // ─────────────────────────── openPost ───────────────────────────

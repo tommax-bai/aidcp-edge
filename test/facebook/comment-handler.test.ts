@@ -63,17 +63,19 @@ function makeHandler(exec: FakeExecutor) {
   return { handler, cap };
 }
 
-test('fb-handler: search.execute 命中候选 → page.cards（permalink 放 noteId）', async () => {
+test('fb-handler: search.execute 命中候选 → page.cards（permalink 放 noteId + 群名回传）', async () => {
   const exec = new FakeExecutor({
     search: {
       ok: true,
       candidates: [{ index: 0, permalink: 'https://www.facebook.com/groups/1/posts/2', kind: 'group_post', hasCommentRegion: true }],
+      containerName: 'Puerto Rico Y Sus Encantos e Historia',
     },
   });
   const { handler, cap } = makeHandler(exec);
   await handler.handle(makeEnvelope('search.execute', 'c1', 1, { keyword: '咖啡', container: 'https://www.facebook.com/groups/1' } as never));
   assert.equal(cap.cards.length, 1);
   assert.equal(cap.cards[0].cards[0].noteId, 'https://www.facebook.com/groups/1/posts/2');
+  assert.equal(cap.cards[0].containerName, 'Puerto Rico Y Sus Encantos e Historia');
   assert.equal(cap.actions.length, 0);
   assert.deepEqual(exec.searchArg, { keyword: '咖啡', container: 'https://www.facebook.com/groups/1' });
 });

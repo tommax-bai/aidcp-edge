@@ -84,6 +84,7 @@ export class FacebookCommentHandler {
       return;
     }
     // 命中（含空候选）→ page.cards：permalink 放 noteId，云端据此下发 note.open{url}。
+    // containerName：容器真实群名回传，云端据此把配置容器名自动回填（人只看群名、不看 id）。
     const cards: PageCardsPayload['cards'] = r.candidates.map((c, i) => ({
       index: i,
       title: '',
@@ -91,7 +92,7 @@ export class FacebookCommentHandler {
       collectCount: 0,
       noteId: c.permalink,
     }));
-    this.client.reportPageCards({ cards });
+    this.client.reportPageCards({ cards, ...(r.containerName ? { containerName: r.containerName } : {}) });
   }
 
   private async onOpen(payload: NoteOpenPayload): Promise<void> {

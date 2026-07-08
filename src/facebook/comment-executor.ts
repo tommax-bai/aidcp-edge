@@ -61,6 +61,11 @@ export interface FacebookSearchResult {
   reason?: FacebookCommentStepReason;
   candidates: FacebookCandidatePost[];
   surface?: string;
+  /**
+   * 容器（群/主页）的真实人类可读名称（change facebook-container-display-name）。
+   * 从容器页读出真名回传，供云端把配置里的容器名自动回填——人只看群名、不看 id。读不出为 undefined、不编造。
+   */
+  containerName?: string;
 }
 
 export interface FacebookOpenResult {
@@ -166,6 +171,20 @@ export class FacebookCommentExecutor {
     await this.sleep(this.opts.settleMs);
   }
 
+  /**
+   * 读容器（群/主页）真实名称：og:title → group header h1 → 清洗后的 document.title。
+   * 读不出返回 undefined（诚实：绝不用 id 冒充名称）。best-effort，不抛。
+   */
+  private async readContainerName(): Promise<string | undefined> {
+    try {
+      const raw = await evalJson<{ name: string | null }>(this.cdp, CONTAINER_NAME_JS);
+      const name = (raw?.name ?? '').trim();
+      return name.length > 0 ? name : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** 有界复探页面结构，直到 surface 落到期望集合或轮数耗尽（返回最后一次探测）。 */
   private async probeStructureUntil(
     accept: (s: FacebookPageStructureSummary) => boolean,
@@ -238,22 +257,26 @@ export class FacebookCommentExecutor {
     const blocked = await this.blockingReason();
     if (blocked) return { ok: false, reason: blocked, candidates: [] };
 
+    // 读容器真实名称（人只看群名、不看 id）——导航到容器搜索面后即可读，与候选无关，尽早捕获。
+    const containerName = await this.readContainerName();
+
     // 催拉懒加载搜索结果（滚一屏、复探），直到探到候选帖或轮数耗尽。
     let structure = await this.probeStructureUntil((s) => s.postCandidates.length > 0);
     for (let i = 0; i < this.opts.editorScrollRounds && (!structure || structure.postCandidates.length === 0); i++) {
       await this.scrollViewport(this.opts.editorScrollDistancePx);
       structure = await this.probeStructureUntil((s) => s.postCandidates.length > 0);
     }
-    if (!structure) return { ok: false, reason: 'nav_error', candidates: [] };
+    if (!structure) return { ok: false, reason: 'nav_error', candidates: [], containerName };
 
     // 非成员 / 待批准 / 群问答门槛 → 绝不评论，honest permission_gated。
     const m = structure.membership;
     if ((m.joinVisible && !m.joinedVisible) || m.pendingVisible || m.questionVisible) {
-      return { ok: false, reason: 'permission_gated', candidates: [], surface: structure.surface };
+      return { ok: false, reason: 'permission_gated', candidates: [], surface: structure.surface, containerName };
     }
     // 结果面应是站内搜索面；落到 login/checkpoint（surface 归类）→ 登录失效。
-    if (structure.surface === 'login') return { ok: false, reason: 'login_required', candidates: [], surface: 'login' };
-    if (structure.surface === 'checkpoint') return { ok: false, reason: 'blocked_by_captcha', candidates: [], surface: 'checkpoint' };
+    if (structure.surface === 'login') return { ok: false, reason: 'login_required', candidates: [], surface: 'login', containerName };
+    if (structure.surface === 'checkpoint')
+      return { ok: false, reason: 'blocked_by_captcha', candidates: [], surface: 'checkpoint', containerName };
 
     const candidates: FacebookCandidatePost[] = [];
     for (const post of structure.postCandidates) {
@@ -267,8 +290,8 @@ export class FacebookCommentExecutor {
       });
       if (candidates.length >= this.opts.maxCandidates) break;
     }
-    if (candidates.length === 0) return { ok: true, reason: 'no_candidates', candidates: [], surface: structure.surface };
-    return { ok: true, candidates, surface: structure.surface };
+    if (candidates.length === 0) return { ok: true, reason: 'no_candidates', candidates: [], surface: structure.surface, containerName };
+    return { ok: true, candidates, surface: structure.surface, containerName };
   }
 
   /**
@@ -446,6 +469,20 @@ const FB_EXEC_HELPERS_JS = `
   function fbJoinSignalVisible(){ try{ if(!/\\/groups\\//.test(location.pathname)) return false; return /(加入小组|Join group|\\bJoin\\b|待批准|Pending|回答问题|Answer questions)/i.test(document.body.innerText||''); }catch(e){ return false; } }
   function fbEditors(){ return Array.prototype.slice.call(document.querySelectorAll('[contenteditable="true"][role="textbox"]')).filter(function(el){ return fbVisible(el)&&fbIsCommentEditor(el); }); }
 `;
+
+/**
+ * 读容器真实名称：og:title 优先，其次群头部 h1，最后清洗 document.title（去掉尾部「| Facebook」「- Facebook」等）。
+ * 读不出返回 null——诚实，云端据此不回填（绝不用 id 冒充名称）。
+ */
+const CONTAINER_NAME_JS = `(function(){
+  function clean(s){ return String(s||'').replace(/\\s+/g,' ').replace(/\\s*[|\\-–]\\s*Facebook\\s*$/i,'').trim(); }
+  var og=document.querySelector('meta[property="og:title"]'); var ogv=og?clean(og.getAttribute('content')):'';
+  if(ogv) return JSON.stringify({name:ogv});
+  var h1=document.querySelector('[role="main"] h1, h1'); var hv=h1?clean(h1.innerText||h1.textContent):'';
+  if(hv) return JSON.stringify({name:hv});
+  var tv=clean(document.title);
+  return JSON.stringify({name: tv || null});
+})()`;
 
 /** 催拉后聚焦评论框：命中群问答/入群门禁 → permissionGated；否则 focus。 */
 const FOCUS_EDITOR_JS = `(function(){${FB_EXEC_HELPERS_JS}
