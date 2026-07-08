@@ -38,6 +38,7 @@ npm run electron:build:win
 ### 2B. macOS（必须用 CI；本机 Windows 打不了）
 
 工作流：`aidcp-edge/.github/workflows/build-desktop.yml`（手动触发）。
+核心脚本：`aidcp-edge/scripts/build-desktop-macos.sh`，GitHub Actions 也是调用这个脚本完成签名、公证、staple 和 Gatekeeper 校验。
 
 - [ ] 确保第 1 步已推到 `master`（CI 从 master 拉代码）。
 - [ ] 确认仓库 Actions secrets 已配置且只通过 GitHub Secrets 注入，绝不写进仓库/日志/文档：
@@ -49,6 +50,7 @@ npm run electron:build:win
 - [ ] macOS job 必须完成以下闸后才会上传 artifact：
       - `.app`：`codesign --verify --deep --strict`、`spctl --assess --type exec`、`xcrun stapler validate`
       - `.dmg`：`xcrun stapler validate`、`spctl --assess --type open --context context:primary-signature`
+- [ ] Apple notarization 是异步队列，不是每次都要 60 分钟以上；正常可能几分钟到几十分钟，但本项目首次配置时实测存在超过 60 分钟才 `Accepted` 的提交，所以脚本按“偶发很慢”处理：x64/arm64 并行提交，单个 submission 最长等待 2 小时，macOS job 总上限 6 小时。
 - [ ] 跑完下载产物（macOS 那份）：
       ```bash
       gh run download <run-id> --name aidcp-macos --dir <某临时目录>
@@ -123,7 +125,7 @@ ssh -i ~/codes/isales-4.pem root@121.89.85.150 '
 
 - **手动触发**（`workflow_dispatch`）；`macos-latest` 出 x64+arm64 dmg/zip，`windows-latest` 出 nsis exe；产物作为 run artifact，保留 14 天。
 - **必须 `electron-builder --publish never`**：CI 环境里 electron-builder 会自动尝试把产物发布到 GitHub release，缺 `GH_TOKEN` 直接报错（构建本身是成功的，只卡在发布步）。
-- **mac 签名/公证**：`package.json` 的 mac 配置启用 `forceCodeSigning`、hardened runtime、entitlements，并关闭 electron-builder 内置 notarization；CI 从 GitHub Secrets 注入 Developer ID `.p12` 与 App Store Connect API Key，先签 `.app`，再用显式 `notarytool` 公证/staple `.app`，随后生成 dmg/zip 并公证/staple `.dmg`。
+- **mac 签名/公证**：`scripts/build-desktop-macos.sh` 先构建签名 `.app`，调用 `scripts/notarize-and-staple.sh` 并行公证/staple x64/arm64 `.app`，随后生成 dmg/zip 并并行公证/staple `.dmg`。`package.json` 的 mac 配置启用 `forceCodeSigning`、hardened runtime、entitlements，并关闭 electron-builder 内置 notarization。
 - **签名失败必须失败**：证书、公证凭据、staple 或 Gatekeeper 校验任一失败，macOS job 必须非零退出，不能上传 unsigned/bad ticket 包。
 - **CI 产物 ≠ 下载地址**：14 天过期、私有仓要 GitHub 登录、是临时签名 URL、还套了一层 zip → **不能**直接挂后台，只能下载下来再转存到 ECS `/downloads/`（即第 3 步）。后台始终用自有服务器的固定地址。
 - `gh` 本机已登录（含 `repo` 权限），可直接 `gh workflow run` / `gh run watch` / `gh run download`。
