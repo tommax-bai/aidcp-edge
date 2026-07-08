@@ -115,7 +115,7 @@ test('探测就绪 → 静默自动列出环境（无徽标、无需先点刷新
 
 test('探测不可达 → 环境行诚实提示（无徽标），不禁死', async () => {
   const w = await boot(makeStub({ adsStatus: async () => ({ ok: false, error: 'ECONNREFUSED' }) }));
-  assert.match($(w, '#ads-env-msg').textContent ?? '', /暂未连接到 AdsPower 本地 API/);
+  assert.match($(w, '#ads-env-msg').textContent ?? '', /暂未连接到本地指纹浏览器服务/);
 });
 
 test('点选环境行 → 分身 ID 带出 user_id（非 serial_number）', async () => {

@@ -73,11 +73,11 @@ function createAdsLocalApi(deps = {}) {
     try {
       res = await throttledFetch(url, authHeaders(opts));
     } catch (e) {
-      return { ok: false, error: `未检测到 AdsPower 本地 API：${(e && e.message) || String(e)}` };
+      return { ok: false, error: `未检测到本地指纹浏览器服务：${(e && e.message) || String(e)}` };
     }
     if (!res.ok) {
       // 收到响应但非 2xx：本地 API 端口有人应答但异常（非「不可达」）。如实标 HTTP 码。
-      return { ok: false, error: `AdsPower 本地 API 响应异常（HTTP ${res.status}）` };
+      return { ok: false, error: `本地指纹浏览器服务响应异常（HTTP ${res.status}）` };
     }
     let body = null;
     try {
@@ -86,7 +86,7 @@ function createAdsLocalApi(deps = {}) {
       body = null;
     }
     if (body && typeof body.code === 'number' && body.code !== 0) {
-      return { ok: false, error: `AdsPower 本地 API 返回 code=${body.code} ${body.msg || ''}`.trim() };
+      return { ok: false, error: `本地指纹浏览器服务返回 code=${body.code} ${body.msg || ''}`.trim() };
     }
     return { ok: true };
   }

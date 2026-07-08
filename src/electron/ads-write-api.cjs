@@ -104,13 +104,13 @@ function createAdsWriteApi(deps = {}) {
       res = await throttledRequest(url, { method: 'POST', headers, body: JSON.stringify(body) });
     } catch (e) {
       // 不含 body：诚实报不可达，不泄露 body 里的代理账密。
-      return { ok: false, error: `AdsPower 本地 API 不可达（${clean}）：${e && e.message ? e.message : String(e)}` };
+      return { ok: false, error: `本地指纹浏览器服务不可达（${clean}）：${e && e.message ? e.message : String(e)}` };
     }
     let json;
     try {
       json = await res.json();
     } catch {
-      return { ok: false, error: `AdsPower ${clean} 响应非 JSON（HTTP ${res && res.status})` };
+      return { ok: false, error: `指纹浏览器服务 ${clean} 响应非 JSON（HTTP ${res && res.status})` };
     }
     if (!json || json.code !== 0) {
       // 只带 code + msg，不带 body。

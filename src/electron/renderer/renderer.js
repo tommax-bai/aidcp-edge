@@ -127,7 +127,7 @@ const STATUS_LABELS = {
 };
 
 const SUBTITLE = {
-  adspower: 'AdsPower 指纹浏览器托管，每个分身独立指纹与 IP，规避同机多账号关联。',
+  adspower: '内置指纹浏览器托管，每个分身独立指纹与 IP，规避同机多账号关联。',
   self: '本机 Chrome 以持久化配置启动，用于小红书登录与自动运营。',
 };
 
@@ -960,13 +960,13 @@ async function probeAds() {
       refreshEnvs(); // 就绪即自动列出环境，无需先点刷新
     } else {
       setEnvMsg(
-        `暂未连接到 AdsPower 本地 API${r && r.error ? '（' + r.error + '）' : ''}。启动后应用会自动拉起内置运行时；也可在「高级设置」打开「手动填写」直接填分身 ID。`,
+        `暂未连接到本地指纹浏览器服务${r && r.error ? '（' + r.error + '）' : ''}。启动后应用会自动拉起内置运行时；也可在「高级设置」打开「手动填写」直接填分身 ID。`,
         true,
       );
       openAdvanced();
     }
   } catch {
-    setEnvMsg('检测 AdsPower 本地 API 失败。', true);
+    setEnvMsg('检测本地指纹浏览器服务失败。', true);
   }
 }
 
@@ -1087,7 +1087,7 @@ function populateEnvs(profiles) {
 // 拉取环境列表；失败诚实降级为手敲（疑似鉴权失败提示已用当前填写值、别叫用户重填已填的框）。
 async function refreshEnvs() {
   settingsUi.adsRefresh.disabled = true;
-  setEnvMsg('正在从 AdsPower 拉取环境…', false);
+  setEnvMsg('正在拉取指纹浏览器环境…', false);
   try {
     const r = await window.aidcpEdge.adsListProfiles(formAdsOpts());
     if (!r || !r.ok) {
@@ -1099,7 +1099,7 @@ async function refreshEnvs() {
       return;
     }
     const { autoSelected, currentSelected } = populateEnvs(r.profiles || []);
-    const extra = r.truncated ? '（环境较多，仅显示前若干条，可在 AdsPower 用分组精简）' : '';
+    const extra = r.truncated ? '（环境较多，仅显示前若干条，可用分组精简）' : '';
     const autoHint = autoSelected
       ? `已自动选中唯一环境「${autoSelected}」。`
       : currentSelected
@@ -1155,7 +1155,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       // 新建即选中时，带上刚选的平台（回执 platform 优先，回落表单选择）。
       if (r.userId && !coreRunning()) selectProfile(r.userId, null, '', r.platform || platform);
       const selectedHint = r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
-      setCreateMsg(`已创建环境（${r.template || tpl}）。${selectedHint}请在 AdsPower 里为它配好代理再使用。`, false);
+      setCreateMsg(`已创建环境（${r.template || tpl}）。${selectedHint}请为它配好代理再使用。`, false);
       refreshEnvs();
     } else {
       const extra = r && r.violations && r.violations.length ? '（' + r.violations.join('；') + '）' : '';

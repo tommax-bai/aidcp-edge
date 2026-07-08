@@ -657,7 +657,7 @@ function startEdge() {
     if (exitedAbnormally) {
       // adspower 模式下最常见的诚实非零退出 = 分身未登录小红书导致身份确立失败（core exit 1）。
       const adspowerHint = wasAdspower
-        ? '若使用 AdsPower：请在该分身的浏览器窗口登录小红书后，点击「重新登录」重试；并确认 AdsPower 客户端已运行、本地 API 已开启、分身 ID 正确。'
+        ? '请在该分身的浏览器窗口登录小红书后，点击「重新登录」重试；并确认分身 ID 正确、指纹浏览器已就绪。'
         : '请打开窗口查看日志 / 重新登录或重连云端。';
       surfaceFailure(
         'AIDCP Edge 已停止运行',
@@ -747,7 +747,7 @@ async function ensureAdsRuntimeAndKernel() {
   if (!cliEntry) return { ok: true, mode: 'none' };
 
   // 3. 起内嵌运行时
-  updateStatus({ auth: 'checking', lastMessage: '正在启动内置 AdsPower 运行时…', ...presencePatch('正在准备浏览器运行时…') });
+  updateStatus({ auth: 'checking', lastMessage: '正在启动内置指纹浏览器运行时…', ...presencePatch('正在准备浏览器运行时…') });
   const apiKey = settings.adsApiKey || process.env.AIDCP_ADS_API_KEY;
   const rt = await adsRuntime.ensureRuntime({ cliEntry, execPath: process.execPath, apiKey });
   if (!rt.ok) {
@@ -756,11 +756,11 @@ async function ensureAdsRuntimeAndKernel() {
       edge: 'stopped',
       session: 'idle',
       kernelPrep: null,
-      lastMessage: `内置 AdsPower 运行时启动失败：${rt.error}`,
-      ...edgeFailurePatch(rt.error || '内置 AdsPower 运行时启动失败'),
+      lastMessage: `内置指纹浏览器运行时启动失败：${rt.error}`,
+      ...edgeFailurePatch(rt.error || '内置指纹浏览器运行时启动失败'),
       ...presencePatch('运行时启动失败'),
     });
-    surfaceFailure('AIDCP Edge 无法启动', `内置 AdsPower 运行时启动失败：${rt.error || '未知错误'}`);
+    surfaceFailure('AIDCP Edge 无法启动', `内置指纹浏览器运行时启动失败：${rt.error || '未知错误'}`);
     return { ok: false, error: rt.error };
   }
   embeddedAdsApiBase = rt.base;
@@ -805,14 +805,14 @@ async function startAdsPowerFlow() {
       auth: 'config required',
       edge: 'stopped',
       session: 'idle',
-      lastMessage: '请在「浏览器」设置中填写 AdsPower 分身 ID，然后点击「保存并启动」。',
+      lastMessage: '请在「浏览器」设置中填写分身 ID，然后点击「保存并启动」。',
       ...presencePatch('等待完成初始设置'),
     });
     return;
   }
   updateStatus({
     auth: 'checking',
-    lastMessage: '正在通过 AdsPower 启动指纹浏览器…',
+    lastMessage: '正在启动指纹浏览器…',
     // 环境名现成可得：启动即点亮标题带账号标签，不用等核心身份确立。
     ...(settings.adsProfileName ? { account: { id: settings.adsProfileId, name: settings.adsProfileName, source: 'env' } } : {}),
     ...clearEdgeFailurePatch(),
@@ -1091,7 +1091,12 @@ ipcMain.handle('ads:deleteEnv', async (_event, opts) => {
   try {
     const ads = resolveAdsOpts(opts);
     const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
-    return await writeApi.deleteProfile(String(userId), ads);
+    const r = await writeApi.deleteProfile(String(userId), ads);
+    // 环境正打开/被占用时服务端拒删，原始报错含空 user 列表([])且暴露方案名——转中性友好文案。
+    if (r && r.ok === false && /being used|being opened|cannot be deleted|is open|正在使用|已打开/i.test(String(r.error || ''))) {
+      return { ok: false, error: '该环境正在使用中（可能已在其它设备或窗口打开），无法删除；请先关闭该环境后重试。' };
+    }
+    return r;
   } catch (e) {
     return { ok: false, error: `删除失败：${(e && e.message) || String(e)}` };
   }

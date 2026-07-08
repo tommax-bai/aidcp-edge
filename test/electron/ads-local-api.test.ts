@@ -64,7 +64,7 @@ test('status: 本地 API 不可达（fetch 抛错）→ ok:false 诚实回报，
   });
   const r = await api.status();
   assert.equal(r.ok, false);
-  assert.match(r.error ?? '', /未检测到 AdsPower 本地 API/);
+  assert.match(r.error ?? '', /未检测到本地指纹浏览器服务/);
 });
 
 test('status: 非 2xx → ok:false 标 HTTP 码', async () => {

@@ -800,6 +800,9 @@ body { margin: 0; }
 .ads-env-msg { color: var(--mute); font-size: 12px; min-height: 14px; }
 .ads-env-msg.error { color: #b91c1c; }
 .ads-create-row { display: flex; gap: 8px; align-items: center; }
+/* 平台下拉按内容收窄（选项短），系统模板下拉占满余量（选项长，避免截断） */
+.ads-create-row #ads-platform { flex: 0 0 auto; width: auto; }
+.ads-create-row #ads-template { flex: 1 1 auto; }
 /* 创建提示行空着时不占位（否则 grid gap+min-height 会把下拉与「下载 AdsPower」撑开一大截）。 */
 #ads-create-msg:empty { display: none; }
 .ads-template {
