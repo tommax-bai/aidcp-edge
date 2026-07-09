@@ -13,6 +13,10 @@ const {
   createEnvGroupResolver,
   createEnvironmentWithGroupRecovery,
 } = require('./ads-create-env-service.cjs');
+const {
+  parseFacebookAccountImport,
+  profileNameForFacebookImport,
+} = require('./facebook-account-import.cjs');
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
 const {
@@ -1600,25 +1604,70 @@ ipcMain.handle('ads:templates', () =>
   adsFingerprint.DEVICE_TEMPLATES.map((t) => ({ key: t.key, label: templateLabel(t) })),
 );
 
-// 程序化建一个指纹环境。opts: { templateKey, apiKey?, apiBase? }。代理不碰（默认 no_proxy、手工配）。
+// 程序化建一个指纹环境。opts: { templateKey, apiKey?, apiBase?, facebookAccountImport? }。代理不碰（默认 no_proxy、手工配）。
 ipcMain.handle('ads:createEnv', async (_event, opts) => {
   if (adsCreateInFlight) return { ok: false, error: '创建进行中，请等当前创建完成' };
   adsCreateInFlight = true;
   try {
     const ads = resolveAdsOpts(opts);
+    const platform = normalizePlatform(opts && opts.platform);
+    const importText = platform === 'facebook' ? (opts && opts.facebookAccountImport) : '';
+    const parsedImport = parseFacebookAccountImport(importText);
+    if (!parsedImport.ok) return { ok: false, error: parsedImport.error };
     // 凭据只内存（deps），绝不落 settings；写客户端错误层已脱敏。
     const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
-    return await createEnvironmentWithGroupRecovery({
-      writeApi,
-      adsApi,
-      fingerprint: adsFingerprint,
-      adsOpts: ads,
-      templateKey: (opts && opts.templateKey) || '',
-      intendedAccountLabel: opts && opts.intendedAccountLabel,
-      machineLabel: os.hostname(),
-      platform: opts && opts.platform,
-      groupResolver: envGroupResolver,
-    });
+    const entries = parsedImport.entries || [];
+    if (entries.length === 0) {
+      return await createEnvironmentWithGroupRecovery({
+        writeApi,
+        adsApi,
+        fingerprint: adsFingerprint,
+        adsOpts: ads,
+        templateKey: (opts && opts.templateKey) || '',
+        intendedAccountLabel: opts && opts.intendedAccountLabel,
+        machineLabel: os.hostname(),
+        platform,
+        groupResolver: envGroupResolver,
+      });
+    }
+
+    const created = [];
+    for (let i = 0; i < entries.length; i += 1) {
+      const entry = entries[i];
+      const result = await createEnvironmentWithGroupRecovery({
+        writeApi,
+        adsApi,
+        fingerprint: adsFingerprint,
+        adsOpts: ads,
+        templateKey: (opts && opts.templateKey) || '',
+        intendedAccountLabel: '',
+        machineLabel: os.hostname(),
+        platform,
+        name: profileNameForFacebookImport(entry, i),
+        accountImport: entry,
+        groupResolver: envGroupResolver,
+      });
+      if (!result.ok) {
+        return {
+          ok: false,
+          error: `第 ${i + 1} 行创建失败：${result.error || '未知错误'}`,
+          created,
+        };
+      }
+      created.push({
+        userId: result.userId,
+        template: result.template,
+        platform: result.platform,
+      });
+    }
+    return {
+      ok: true,
+      userId: created.length === 1 ? created[0].userId : undefined,
+      template: (opts && opts.templateKey) || '',
+      platform,
+      created,
+      createdCount: created.length,
+    };
   } catch (e) {
     return { ok: false, error: `创建失败：${(e && e.message) || String(e)}` };
   } finally {

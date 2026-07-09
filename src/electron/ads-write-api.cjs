@@ -33,7 +33,7 @@ function normalizePath(path) {
  * 用于调用方日志（本模块自身不打印 body）。
  */
 function redactSensitive(value) {
-  const SENSITIVE = /^(proxy_user|proxy_password|password|authorization|api_?key|token)$/i;
+  const SENSITIVE = /^(proxy_user|proxy_password|password|authorization|api_?key|token|cookie|fakey)$/i;
   const walk = (v) => {
     if (Array.isArray(v)) return v.map(walk);
     if (v && typeof v === 'object') {
@@ -131,7 +131,7 @@ function createAdsWriteApi(deps = {}) {
    * 建号：入参已是构造好的 fingerprint_config / user_proxy_config（护栏/断言在上层做）。
    * 返回 { ok, userId? }。
    */
-  async function createProfile({ groupId, name, fingerprintConfig, proxyConfig, remark }, opts) {
+  async function createProfile({ groupId, name, fingerprintConfig, proxyConfig, remark, accountImport }, opts) {
     const body = {
       group_id: String(groupId),
       // 代理全程手工（本按钮不碰）：默认 no_proxy 建号，真代理由运维在 AdsPower 侧配。
@@ -140,6 +140,17 @@ function createAdsWriteApi(deps = {}) {
     };
     if (name) body.name = String(name);
     if (remark != null) body.remark = String(remark); // 承载意图账号/模板/机器（随 user/list 读回）
+    if (accountImport) {
+      const account = accountImport;
+      if (account.domainName) body.domain_name = String(account.domainName);
+      if (Array.isArray(account.openUrls) && account.openUrls.length) body.open_urls = account.openUrls.map(String);
+      if (account.username) body.username = String(account.username);
+      if (account.password) body.password = String(account.password);
+      if (account.fakey) body.fakey = String(account.fakey);
+      if (account.cookie) body.cookie = String(account.cookie);
+      if (Array.isArray(account.repeatConfig) && account.repeatConfig.length) body.repeat_config = account.repeatConfig;
+      if (account.ignoreCookieError != null) body.ignore_cookie_error = String(account.ignoreCookieError);
+    }
     const r = await post('user/create', body, opts);
     if (!r.ok) return r;
     const uid = r.data && (r.data.id != null ? String(r.data.id) : r.data.user_id != null ? String(r.data.user_id) : undefined);

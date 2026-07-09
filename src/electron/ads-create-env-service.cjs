@@ -60,6 +60,8 @@ async function createEnvironmentWithGroupRecovery({
   intendedAccountLabel,
   machineLabel,
   platform,
+  name,
+  accountImport,
   groupResolver,
   createFlowFactory = createCreateFlow,
 } = {}) {
@@ -75,6 +77,8 @@ async function createEnvironmentWithGroupRecovery({
       intendedAccountLabel,
       machineLabel,
       platform,
+      name,
+      accountImport,
       groupId: grp.groupId,
     });
     return { result, groupId: grp.groupId };

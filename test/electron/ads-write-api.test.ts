@@ -9,7 +9,7 @@ const mod = require('../../src/electron/ads-write-api.cjs') as {
     post: (path: string, body: unknown, opts?: Record<string, unknown>) => Promise<{ ok: boolean; data?: unknown; code?: number; error?: string }>;
     createGroup: (name: string, opts?: Record<string, unknown>) => Promise<{ ok: boolean; groupId?: string; error?: string }>;
     createProfile: (
-      p: { groupId: string; name?: string; fingerprintConfig: unknown; proxyConfig?: unknown },
+      p: { groupId: string; name?: string; fingerprintConfig: unknown; proxyConfig?: unknown; accountImport?: Record<string, unknown> },
       opts?: Record<string, unknown>,
     ) => Promise<{ ok: boolean; userId?: string; error?: string }>;
     deleteProfile: (userId: string, opts?: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
@@ -103,14 +103,48 @@ test('redactSensitive: 脱敏 proxy_password / Authorization / api_key', () => {
     user_proxy_config: { proxy_soft: 'http', proxy_user: 'alice', proxy_password: 'S3cr3t!' },
     headers: { Authorization: 'Bearer abc' },
     api_key: 'k',
+    cookie: 'c_user=secret',
+    fakey: '2fa',
     fingerprint_config: { canvas: '1' },
   }) as Record<string, any>;
   assert.equal(red.user_proxy_config.proxy_password, '***');
   assert.equal(red.user_proxy_config.proxy_user, '***');
   assert.equal(red.headers.Authorization, '***');
   assert.equal(red.api_key, '***');
+  assert.equal(red.cookie, '***');
+  assert.equal(red.fakey, '***');
   assert.equal(red.group_id, '1'); // 非敏感保留
   assert.equal(red.fingerprint_config.canvas, '1');
+});
+
+test('createProfile: Facebook account import fields enter user/create body', async () => {
+  const calls: Array<{ url: string; init?: { body?: string } }> = [];
+  const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0, data: { id: 'k1fb' } }), calls) });
+  const r = await api.createProfile({
+    groupId: '42',
+    name: 'Facebook import 1',
+    fingerprintConfig: { canvas: '1' },
+    accountImport: {
+      domainName: 'facebook.com',
+      openUrls: ['https://www.facebook.com/'],
+      username: 'a@example.com',
+      password: 'pw',
+      fakey: 'KEY',
+      cookie: '[{"name":"c_user","value":"100000000000001"}]',
+      repeatConfig: [4],
+      ignoreCookieError: '0',
+    },
+  });
+  assert.equal(r.ok, true);
+  const body = JSON.parse(calls[0].init?.body || '{}') as Record<string, any>;
+  assert.equal(body.domain_name, 'facebook.com');
+  assert.deepEqual(body.open_urls, ['https://www.facebook.com/']);
+  assert.equal(body.username, 'a@example.com');
+  assert.equal(body.password, 'pw');
+  assert.equal(body.fakey, 'KEY');
+  assert.match(body.cookie, /c_user/);
+  assert.deepEqual(body.repeat_config, [4]);
+  assert.equal(body.ignore_cookie_error, '0');
 });
 
 // ── 便捷封装：createGroup / createProfile 抽出 id ──

@@ -147,3 +147,32 @@ test('createEnvironmentWithGroupRecovery does not retry unrelated create failure
   assert.equal(result.ok, false);
   assert.match(String(result.error), /quota exceeded/);
 });
+
+test('createEnvironmentWithGroupRecovery passes import payload into create flow', async () => {
+  let captured: Record<string, unknown> | undefined;
+  const adsApi = {
+    listGroups: async () => ({ ok: true, groups: [{ groupId: 'g1', groupName: ENV_GROUP_NAME }] }),
+  };
+  const accountImport = { username: 'a@example.com', cookie: 'cookie-json' };
+  const result = await createEnvironmentWithGroupRecovery({
+    writeApi: { createGroup: async () => ({ ok: true, groupId: 'created' }) },
+    adsApi,
+    fingerprint: {},
+    templateKey: 'win11-intel',
+    machineLabel: 'mac-01',
+    platform: 'facebook',
+    name: 'Facebook import 1',
+    accountImport,
+    groupResolver: createEnvGroupResolver({ adsApi }),
+    createFlowFactory: () => ({
+      createEnvironment: async (arg: Record<string, unknown>) => {
+        captured = arg;
+        return { ok: true, userId: 'u-fb' };
+      },
+    }),
+  });
+  assert.equal(result.ok, true);
+  assert.equal(captured?.name, 'Facebook import 1');
+  assert.deepEqual(captured?.accountImport, accountImport);
+  assert.equal(captured?.platform, 'facebook');
+});

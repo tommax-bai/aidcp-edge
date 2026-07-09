@@ -759,12 +759,17 @@ body { margin: 0; }
 }
 .field-label .req { color: #991b1b; background: #fee2e2; }
 .field-label .opt { color: #475569; background: #e2e8f0; }
-.field input {
+.field input, .field textarea {
   border: 1px solid #cbd5e1; border-radius: 10px; padding: 9px 12px;
   font-size: 13.5px; color: var(--ink); background: #fff; font-family: inherit;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
-.field input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59, 111, 240, 0.15); }
+.field textarea {
+  min-height: 88px;
+  resize: vertical;
+  line-height: 1.35;
+}
+.field input:focus, .field textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59, 111, 240, 0.15); }
 
 .parking-field { gap: 8px; }
 .parking-options { align-self: flex-start; flex-wrap: wrap; }
@@ -803,6 +808,10 @@ body { margin: 0; }
 /* 平台下拉按内容收窄（选项短），系统模板下拉占满余量（选项长，避免截断） */
 .ads-create-row #ads-platform { flex: 0 0 auto; width: auto; }
 .ads-create-row #ads-template { flex: 1 1 auto; }
+.ads-fb-import textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
 /* 创建提示行空着时不占位（否则 grid gap+min-height 会把下拉与「下载 AdsPower」撑开一大截）。 */
 #ads-create-msg:empty { display: none; }
 .ads-template {
