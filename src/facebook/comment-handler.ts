@@ -111,8 +111,16 @@ export class FacebookCommentHandler {
       this.client.reportActionCompleted({ action: 'open_note', ok: false, reason: 'editor_not_found' });
       return;
     }
-    // permalink 作为 noteId 回 note.detail；正文/计数诚实置零（本流程不做深读抽取）。
-    this.client.reportNoteDetail({ noteId: url, title: '', content: '', likeCount: 0, collectCount: 0 });
+    // permalink 作为 noteId 回 note.detail；content=帖子正文（图片帖常空）、comments=顶部他人评论——
+    // 供云端撰写器「读了再写」（顺着讨论、用内容语言）。计数诚实置零（本流程不做点赞/收藏计数）。
+    this.client.reportNoteDetail({
+      noteId: url,
+      title: '',
+      content: r.postText ?? '',
+      likeCount: 0,
+      collectCount: 0,
+      ...(r.comments && r.comments.length > 0 ? { comments: r.comments } : {}),
+    });
   }
 
   private async onComment(payload: InteractionCommentPayload): Promise<void> {

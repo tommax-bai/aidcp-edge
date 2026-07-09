@@ -65,6 +65,7 @@ interface FakeConfig {
   submitCtl?: { found: boolean; disabled: boolean; label: string | null; x: number; y: number };
   verify?: { confirmed: boolean; matchedText: boolean; matchedOwnIdentity: boolean; articleCount: number };
   containerName?: string | null;
+  postContent?: { postText: string | null; comments: string[] };
 }
 
 class FakeCdp implements BrowseCdp {
@@ -108,6 +109,9 @@ class FakeCdp implements BrowseCdp {
       if (expr.includes('og:title')) {
         const n = this.cfg.containerName === undefined ? 'Puerto Rico Y Sus Encantos e Historia' : this.cfg.containerName;
         return val(JSON.stringify({ name: n }));
+      }
+      if (expr.includes('blockTexts')) {
+        return val(JSON.stringify(this.cfg.postContent ?? { postText: null, comments: [] }));
       }
       if (expr.includes('window.scrollBy')) return val(undefined);
       if (expr.includes('focused:focused')) {
@@ -241,6 +245,30 @@ test('fb-executor: 评论框在首屏下、滚动催拉后就绪（F1 补丁①�
   assert.equal(r.ok, true);
   assert.equal(r.editorReady, true);
   assert.ok(cdp.scrolls >= 1, '应发生过滚动催拉');
+});
+
+test('fb-executor: 开帖读了再写——回读帖子正文 + 他人评论', async () => {
+  const cdp = new FakeCdp({
+    structureFor: () => struct({ href: 'https://www.facebook.com/groups/1/posts/2/', articleCount: 1, commentEditorCount: 1 }),
+    postContent: { postText: 'Foto de Rio Piedras', comments: ['Y en esta época están en su máximo esplendor', 'Qué recuerdos'] },
+  });
+  const ex = makeExecutor(cdp);
+  const r = await ex.openPost('https://www.facebook.com/groups/1/posts/2/');
+  assert.equal(r.ok, true);
+  assert.equal(r.postText, 'Foto de Rio Piedras');
+  assert.deepEqual(r.comments, ['Y en esta época están en su máximo esplendor', 'Qué recuerdos']);
+});
+
+test('fb-executor: 图片帖无正文 → postText 省略、comments 可空（诚实不臆造）', async () => {
+  const cdp = new FakeCdp({
+    structureFor: () => struct({ href: 'https://www.facebook.com/groups/1/posts/2/', articleCount: 1, commentEditorCount: 1 }),
+    postContent: { postText: null, comments: [] },
+  });
+  const ex = makeExecutor(cdp);
+  const r = await ex.openPost('https://www.facebook.com/groups/1/posts/2/');
+  assert.equal(r.ok, true);
+  assert.equal(r.postText, undefined);
+  assert.equal(r.comments, undefined);
 });
 
 test('fb-executor: 评论框始终催不出 → ok:true 但 editorReady:false', async () => {

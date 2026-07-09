@@ -74,6 +74,13 @@ export interface FacebookOpenResult {
   surface?: string;
   /** 开帖后是否已在视口内探到评论框（含滚动催拉后的复探）。 */
   editorReady: boolean;
+  /**
+   * 帖子文字正文（change facebook-comment-read-before-write）：图片帖常为空。best-effort、不臆造。
+   * 供云端撰写器「读了再写」。
+   */
+  postText?: string;
+  /** 帖子下他人评论正文样本（去作者名/界面词，顶部若干条）。供撰写器顺着讨论、用内容语言写。 */
+  comments?: string[];
 }
 
 export interface FacebookSubmitResult {
@@ -109,6 +116,8 @@ export interface FacebookCommentExecutorOptions {
   /** 提交点击后 / reload 后的确认等待。 */
   waitAfterSubmitMs?: number;
   waitAfterReloadMs?: number;
+  /** 读了再写：开帖后最多抽取的他人评论条数（供撰写器上下文）。 */
+  maxComments?: number;
 }
 
 const DEFAULTS: Required<FacebookCommentExecutorOptions> = {
@@ -119,6 +128,7 @@ const DEFAULTS: Required<FacebookCommentExecutorOptions> = {
   surfaceProbeRounds: 4,
   waitAfterSubmitMs: 4_000,
   waitAfterReloadMs: 5_000,
+  maxComments: 6,
 };
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -322,7 +332,35 @@ export class FacebookCommentExecutor {
       structure = await this.probeStructureUntil((s) => s.commentEditorCount > 0);
       editorReady = Boolean(structure && structure.commentEditorCount > 0);
     }
-    return { ok: true, editorReady, surface: structure?.surface };
+    // 读了再写：滚动已催出评论区后，抽帖子正文（图片帖常空）+ 顶部他人评论，供云端撰写器用内容语言顺着讨论写。
+    const content = await this.readPostContent();
+    return {
+      ok: true,
+      editorReady,
+      surface: structure?.surface,
+      ...(content.postText ? { postText: content.postText } : {}),
+      ...(content.comments.length > 0 ? { comments: content.comments } : {}),
+    };
+  }
+
+  /**
+   * 抽帖子文字正文 + 顶部他人评论（change facebook-comment-read-before-write）。
+   * 正文：主帖 article 的 story_message / 最长非链接文本块，图片帖常为空。
+   * 评论：嵌套 article（评论条目）里去作者名/界面词后的正文，顶部 maxComments 条。best-effort、不抛。
+   */
+  private async readPostContent(): Promise<{ postText?: string; comments: string[] }> {
+    try {
+      const raw = await evalJson<{ postText: string | null; comments: string[] }>(
+        this.cdp,
+        buildPostContentJs(this.opts.maxComments),
+      );
+      const postText = (raw?.postText ?? '').trim();
+      const comments = Array.isArray(raw?.comments) ? raw.comments.map((c) => String(c ?? '').trim()).filter(Boolean) : [];
+      return { ...(postText ? { postText } : {}), comments };
+    } catch (err) {
+      this.log(`[fb-comment] 读帖子内容失败：${(err as Error).message}`);
+      return { comments: [] };
+    }
   }
 
   /**
@@ -483,6 +521,58 @@ const CONTAINER_NAME_JS = `(function(){
   var tv=clean(document.title);
   return JSON.stringify({name: tv || null});
 })()`;
+
+/**
+ * 读了再写：抽帖子正文 + 顶部他人评论（change facebook-comment-read-before-write）。
+ * - 主帖 = 不被其他 article 包含的顶层 [role=article]；评论 = 嵌套 article（探针实证：主帖 + N 条嵌套评论）。
+ * - 正文：story_message 优先，否则主帖里最长的「非链接、非界面词」文本块；图片帖常为空 → null。
+ * - 评论正文：每条评论 article 里，取最长的「非作者链接、非界面词」文本块（作者名在 <a> 里、界面词是短块）。
+ * - 界面词过滤（本号 FB 界面为中文/英文）：赞/回复/分享/查看翻译/关注/时间数字等。
+ */
+function buildPostContentJs(maxComments: number): string {
+  return `(function(){
+    function t(el){return ((el&&el.innerText)||'').replace(/\\s+/g,' ').trim();}
+    var CHROME=/^(赞|回复|分享|查看翻译|隐藏|关注|举报|编辑|删除|置顶|Like|Reply|Share|See translation|Follow|Hide|\\d+\\s*(分钟|小时|天|周|年|min|h|d|w|y)?|[·•]|)$/i;
+    function isChrome(s){ return !s || s.length<2 || CHROME.test(s); }
+    function inAnchor(node){ var p=node; while(p){ if(p.tagName==='A') return true; p=p.parentElement; } return false; }
+    function inAny(node, roots){ for(var i=0;i<roots.length;i++){ if(roots[i]!==node && roots[i].contains(node)) return true; } return false; }
+    // 取 root 下的文本块节点（非链接、非嵌套 exclude 内、非界面词），返回其文本。
+    function blockTexts(root, exclude){
+      return Array.prototype.slice.call(root.querySelectorAll('div[dir="auto"]'))
+        .filter(function(d){ return !inAnchor(d) && !inAny(d, exclude||[]); })
+        .map(t).filter(function(s){ return !isChrome(s); });
+    }
+    function longest(arr){ var best=''; for(var i=0;i<arr.length;i++){ if(arr[i].length>best.length) best=arr[i]; } return best; }
+    var arts=Array.prototype.slice.call(document.querySelectorAll('[role="article"], article'));
+    function isNested(a){ return arts.some(function(b){ return b!==a && b.contains(a); }); }
+    var top=arts.filter(function(a){ return !isNested(a); });
+    var comments=arts.filter(isNested);
+    var post=top[0]||null;
+    var postText=null;
+    if(post){
+      var sm=post.querySelector('[data-ad-rendering-role="story_message"],[data-ad-comet-preview="message"]');
+      var smt=sm?t(sm):'';
+      // 主帖正文：story_message 优先；否则取主帖里「排除嵌套评论区」后的最长文本块（图片帖常为空）。
+      postText = (smt && !isChrome(smt)) ? smt : (longest(blockTexts(post, comments)) || null);
+      if(postText) postText=postText.slice(0,600);
+    }
+    // 疑似「纯人名」（1-4 个首字母大写词、无句子小写词/标点）→ 丢：这类是标记好友/回复空评论，非实义讨论。
+    function looksLikeName(s){ return /^([A-ZÁÉÍÓÚÑ][\\wáéíóúñ'’.-]*\\s+){0,3}[A-ZÁÉÍÓÚÑ][\\wáéíóúñ'’.-]*$/.test(s) && s.split(/\\s+/).length<=4; }
+    function authorOf(c){ var a=c.querySelector('a[href*="/user/"],a[href*="profile.php?id="],a[href*="/groups/"][role="link"]'); return a?t(a):''; }
+    var out=[]; var seen={};
+    for(var k=0;k<comments.length && out.length<${Math.max(1, Math.floor(maxComments))};k++){
+      var author=authorOf(comments[k]);
+      var all=blockTexts(comments[k], []);
+      var blocks=author ? all.filter(function(s){ return s!==author && s.indexOf(author)!==0; }) : all;
+      var body=longest(blocks);
+      if(!body || looksLikeName(body)) continue;   // 空 / 纯人名 → 跳过
+      var key=body.slice(0,60);
+      if(seen[key]) continue; seen[key]=1;          // 去重
+      out.push(body.slice(0,240));
+    }
+    return JSON.stringify({postText:postText, comments:out});
+  })()`;
+}
 
 /** 催拉后聚焦评论框：命中群问答/入群门禁 → permissionGated；否则 focus。 */
 const FOCUS_EDITOR_JS = `(function(){${FB_EXEC_HELPERS_JS}
