@@ -1023,13 +1023,15 @@ body { margin: 0; }
 .rail-toggle.flip svg { transform: scaleX(-1); }
 @media (prefers-reduced-motion: reduce) { .rail-toggle svg { transition: none; } }
 .rail-badge {
-  display: none; position: absolute; top: -5px; right: -5px;
-  min-width: 15px; height: 15px; padding: 0 4px; box-sizing: border-box;
+  display: none; position: absolute; top: -7px; right: -7px;
+  min-width: 17px; height: 17px; padding: 0 3px; box-sizing: border-box;
   border-radius: 999px; background: #dc2626; color: #fff;
-  font-size: 9.5px; font-weight: 700; line-height: 15px; text-align: center; border: 2px solid #f7f9fd;
+  align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 800; line-height: 1; text-align: center; white-space: nowrap;
+  font-variant-numeric: tabular-nums; border: 2px solid #f7f9fd;
 }
-.env-rail.collapsed .rail-badge:not(.hidden) { display: block; }
-.env-rail.expanded .rail-badge:not(.hidden) { display: block; }
+.env-rail.collapsed .rail-badge:not(.hidden) { display: inline-flex; }
+.env-rail.expanded .rail-badge:not(.hidden) { display: inline-flex; }
 .rail-badge.hidden { display: none !important; }
 
 /* 汇总 chip（展开态） */
