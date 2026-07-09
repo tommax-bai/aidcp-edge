@@ -1776,12 +1776,16 @@ function newIdempotencyKey() {
 // onboarding 三态（change persona-wizard-onboarding-fixes）：已绑→已设置跳过 / 未绑未连→分态引导 / 未绑已连→启用。
 // 只改 disabled/hint/显隐，绝不触碰已选关键词与草稿（状态推送不重置向导进度）。
 function updatePersonaGate(status) {
-  const bound = Boolean((status && status.personaBound) || personaLocallyBound);
   const loggedIn = Boolean(status && status.auth === 'logged in');
   const connected = Boolean(status && status.cloud === 'connected');
   personaReady = loggedIn && connected;
 
-  // ① 已绑人设：显示「已设置」、隐藏向导体与提示、不再要求配置（修「已绑仍显示未设置」）。
+  // 「是否已绑」仅在已连云（权威可知该环境对应哪个真实账号 + personaBound 已到）时判定；之前一律中立。
+  // 切环境泄漏由 resetPersonaDraft() 清 personaLocallyBound 处理；断连时 known=false 已让其无关，无需额外清。
+  const known = personaReady;
+  const bound = known && (Boolean(status && status.personaBound) || personaLocallyBound);
+
+  // ① 已绑人设：显示「已设置」、隐藏向导体与提示、跳过（修「已绑仍显示未设置」）。
   if (personaUi.boundNote) personaUi.boundNote.classList.toggle('hidden', !bound);
   if (personaUi.wizardBody) personaUi.wizardBody.classList.toggle('hidden', bound);
   if (personaUi.hint) personaUi.hint.classList.toggle('hidden', bound);
@@ -1789,18 +1793,21 @@ function updatePersonaGate(status) {
     setPersonaBadge('已设置', 'normal');
     return;
   }
-  // 未绑：本会话刚生成的「待确认」态不被状态推送覆盖，否则回落「未设置」。
-  if (personaUi.stateBadge && personaUi.stateBadge.textContent !== '待确认') setPersonaBadge('未设置', 'checking');
+  // 未绑或未知：徽标区分——权威已知未绑=「未设置」；未连云尚不知道=「待启动」（宁缺毋假，不谎称未设置）。
+  // 本会话刚生成的「待确认」草稿态不被状态推送覆盖。
+  if (personaUi.stateBadge && personaUi.stateBadge.textContent !== '待确认') {
+    setPersonaBadge(known ? '未设置' : '待启动', 'checking');
+  }
 
-  // ②/③ 未绑：gate 判据不变，只改可见性与分态引导。
+  // 生成 gate 判据不变；只改可见性与分态引导（未连云时对是否已绑保持中立）。
   if (personaUi.generate) personaUi.generate.disabled = !personaReady;
   if (personaUi.hint) {
     if (personaReady) {
       personaUi.hint.textContent = '选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。';
     } else if (!loggedIn) {
-      personaUi.hint.textContent = '请先点右下角「启动」，并在打开的浏览器里扫码登录，再来生成人设。';
+      personaUi.hint.textContent = '请先点右下角「启动」并扫码登录；连上云端后会显示该账号是否已设置人设，未设置可在此生成。';
     } else {
-      personaUi.hint.textContent = '已登录，正在连接云端…连上后即可生成人设。';
+      personaUi.hint.textContent = '正在连接云端…连上后会显示该账号人设状态。';
     }
   }
 }

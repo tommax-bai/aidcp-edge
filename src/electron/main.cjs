@@ -920,6 +920,9 @@ function startEdge(handle) {
   handle.browserParkingReady = false;
   handle.browserAlreadyRunning = false;
   handle.spawnedAtMs = Date.now();
+  // 换会话重置已绑人设信号（change persona-badge-preconnect-neutral）：云端只在为真时下发 personaBound、从不发 false，
+  // 若上一会话该环境曾已绑、随后被解绑再重启，stale-true 会残留成误显示「已设置」——每次启动清零、待新会话权威信号重建。
+  handle.status.personaBound = false;
   const child = spawn(process.execPath, [edgeEntry], {
     cwd: appRoot,
     env: spawnEnv,
