@@ -371,6 +371,18 @@ for (const type of INTERACTION_COMMANDS) {
     assert.equal(calls[0].type, type);
   });
 }
+
+test('edge-client: group.join 路由到 browseHandler（Facebook 命令处理器），不得静默丢弃', async () => {
+  const ws = new FakeWebSocket();
+  const client = await connectClient(ws);
+  const calls: Envelope[] = [];
+  client.onBrowseCommand((env) => calls.push(env));
+
+  ws.emitMessage(makeEnvelope('group.join', 'cmd-group-join', 2, { groupUrl: 'https://www.facebook.com/groups/1' }));
+
+  assert.equal(calls.length, 1, 'group.join 应被路由到 handler 而非在入口丢弃');
+  assert.equal(calls[0].type, 'group.join');
+});
 // 回归：陪伴界面数据快照（ui.snapshot，cloud 主动推送）MUST 路由到 onUiSnapshot 处理器，
 // 不得在入口静默丢弃（§2 第4处同步点；edge-companion-ui 8.1）。
 test('edge-client: ui.snapshot 路由到 uiSnapshotHandler（不得静默丢弃）', async () => {

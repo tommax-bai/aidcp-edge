@@ -491,6 +491,8 @@ export class EdgeClient {
       // 否则云端 comment_like→interaction.like_comment 在入口被静默丢弃、browse-session
       // 的处理分支永不可达（2026-07-03 收口 edge-companion-ui 时发现的存量缺口，同 §2 第4处同步点）。
       env.type === 'interaction.like_comment' ||
+      // Facebook 加群原子指令：走 Facebook 命令处理器（不是 xhs BrowseSession）。漏白名单会在入口静默丢弃。
+      env.type === 'group.join' ||
       env.type === 'navigation.back' ||
       env.type === 'note.browse_images' ||
       env.type === 'note.scroll_comments' ||

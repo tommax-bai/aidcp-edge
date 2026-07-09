@@ -12,9 +12,10 @@
 // 白名单命中但本平台不支持的其他命令 → 显式回 action.completed{ok:false, reason:'capability_unsupported'}，
 // 绝不再落回静默丢弃（红线：MUST NOT 静默假成功/静默丢弃）。
 
-import type { Envelope, InteractionCommentPayload, NoteOpenPayload, SearchExecutePayload } from '../comm/protocol.js';
+import type { Envelope, GroupJoinPayload, InteractionCommentPayload, NoteOpenPayload, SearchExecutePayload } from '../comm/protocol.js';
 import type { ActionCompletedPayload, NoteDetailPayload, PageCardsPayload } from '../comm/protocol.js';
 import type { FacebookCommentExecutor } from './comment-executor.js';
+import type { FacebookJoinExecutor } from './join-executor.js';
 
 /** 处理器回执所需的最小客户端能力（EdgeClient 已实现这三个方法）。 */
 export interface FacebookCommentReplyClient {
@@ -25,12 +26,14 @@ export interface FacebookCommentReplyClient {
 
 export interface FacebookCommentHandlerDeps {
   executor: FacebookCommentExecutor;
+  joinExecutor?: FacebookJoinExecutor;
   client: FacebookCommentReplyClient;
   logger?: (msg: string) => void;
 }
 
 export class FacebookCommentHandler {
   private readonly executor: FacebookCommentExecutor;
+  private readonly joinExecutor?: FacebookJoinExecutor;
   private readonly client: FacebookCommentReplyClient;
   private readonly log: (msg: string) => void;
   /** 单飞：同一时刻只处理一条评论命令，防并发争抢同一浏览器会话。 */
@@ -38,6 +41,7 @@ export class FacebookCommentHandler {
 
   constructor(deps: FacebookCommentHandlerDeps) {
     this.executor = deps.executor;
+    this.joinExecutor = deps.joinExecutor;
     this.client = deps.client;
     this.log = deps.logger ?? (() => {});
   }
@@ -54,6 +58,9 @@ export class FacebookCommentHandler {
           return;
         case 'interaction.comment':
           await this.onComment(env.payload as InteractionCommentPayload);
+          return;
+        case 'group.join':
+          await this.onJoin(env.payload as GroupJoinPayload);
           return;
         default:
           // 白名单命中但本平台不支持：显式诚实回执，绝不静默丢弃。
@@ -132,8 +139,34 @@ export class FacebookCommentHandler {
     try {
       // noteId 即候选帖 permalink（云端下发）；submitComment 在「已由 note.open 打开的该帖」上操作，
       // 并用它做 own-identity 服务器确认的目标帖收窄。
-      const r = await this.executor.submitComment(payload.noteId, payload.text ?? '');
+      const r = await this.executor.submitComment(payload.noteId, payload.text ?? '', payload.groupChatCode);
       this.client.reportActionCompleted({ action: 'comment', ok: r.ok, ...(r.reason ? { reason: r.reason } : {}) });
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async onJoin(payload: GroupJoinPayload): Promise<void> {
+    if (!this.joinExecutor) {
+      this.client.reportActionCompleted({ action: 'join_group', ok: false, reason: 'capability_unsupported' });
+      return;
+    }
+    if (this.busy) {
+      this.client.reportActionCompleted({ action: 'join_group', ok: false, reason: 'busy' });
+      return;
+    }
+    this.busy = true;
+    try {
+      const r = await this.joinExecutor.joinGroup(payload.groupUrl, { click: payload.click, thinkMs: payload.thinkMs });
+      this.client.reportActionCompleted({
+        action: 'join_group',
+        ok: r.ok,
+        groupUrl: r.groupUrl,
+        clicked: r.clicked,
+        ...(r.reason ? { reason: r.reason } : {}),
+        ...(r.observation ? { observation: r.observation } : {}),
+        ...(r.postObservation ? { postObservation: r.postObservation } : {}),
+      });
     } finally {
       this.busy = false;
     }

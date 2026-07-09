@@ -313,6 +313,18 @@ test('fb-executor: 服务器确认命中 → ok:true（回车提交 + reload 都
   assert.match(cdp.typed, /很喜欢这条分享/);
 });
 
+test('fb-executor: 联系方式用 Input.insertText 整段追加，正文仍先拟人输入', async () => {
+  const cdp = new FakeCdp({
+    verify: { confirmed: true, matchedText: true, matchedOwnIdentity: true, articleCount: 1 },
+  });
+  const ex = makeExecutor(cdp);
+  const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '正文评论', 'LINE ID: abc123');
+  assert.equal(r.ok, true);
+  assert.match(cdp.typed, /正文评论/);
+  assert.match(cdp.typed, /\nLINE ID: abc123/);
+  assert.ok(cdp.enters >= 1, '联系方式插入后仍用回车提交');
+});
+
 test('fb-executor: reload 后仅乐观渲染、own-identity 未命中 → verification_ambiguous（F1 补丁②：不冒充成功）', async () => {
   const cdp = new FakeCdp({
     verify: { confirmed: false, matchedText: true, matchedOwnIdentity: false, articleCount: 1 },

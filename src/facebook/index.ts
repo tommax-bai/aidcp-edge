@@ -3,6 +3,8 @@ export * from './identity.js';
 export * from './overlay.js';
 export * from './comment-executor.js';
 export * from './comment-handler.js';
+export * from './join-executor.js';
+export * from './join-handler.js';
 export * from './probes/editor-probe.js';
 export * from './probes/fingerprint.js';
 export * from './probes/gated-submit.js';

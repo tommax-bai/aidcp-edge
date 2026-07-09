@@ -11,12 +11,13 @@ import type {
   FacebookSearchResult,
   FacebookSubmitResult,
 } from '../../src/facebook/comment-executor.js';
+import type { FacebookJoinResult } from '../../src/facebook/join-executor.js';
 
 // 最小执行器桩：三个方法各返可配结果。
 class FakeExecutor {
   searchArg?: { keyword: string; container: string };
   openArg?: string;
-  submitArg?: { url: string; text: string };
+  submitArg?: { url: string; text: string; contactInfo?: string };
   constructor(
     private readonly cfg: {
       search?: FacebookSearchResult;
@@ -32,9 +33,22 @@ class FakeExecutor {
     this.openArg = url;
     return this.cfg.open ?? { ok: true, editorReady: true };
   }
-  async submitComment(url: string, text: string): Promise<FacebookSubmitResult> {
-    this.submitArg = { url, text };
+  async submitComment(url: string, text: string, contactInfo?: string): Promise<FacebookSubmitResult> {
+    this.submitArg = { url, text, ...(contactInfo ? { contactInfo } : {}) };
     return this.cfg.submit ?? { ok: true, submitted: true, serverConfirmed: true };
+  }
+}
+
+class FakeJoinExecutor {
+  joinArg?: { groupUrl: string; click?: boolean; thinkMs?: number };
+  constructor(private readonly result: FacebookJoinResult) {}
+  async joinGroup(groupUrl: string, options: { click?: boolean; thinkMs?: number } = {}): Promise<FacebookJoinResult> {
+    this.joinArg = {
+      groupUrl,
+      ...(typeof options.click === 'boolean' ? { click: options.click } : {}),
+      ...(typeof options.thinkMs === 'number' ? { thinkMs: options.thinkMs } : {}),
+    };
+    return this.result;
   }
 }
 
@@ -53,10 +67,11 @@ function fakeClient(): { client: FacebookCommentReplyClient; cap: Captured } {
   return { client, cap };
 }
 
-function makeHandler(exec: FakeExecutor) {
+function makeHandler(exec: FakeExecutor, joinExec?: FakeJoinExecutor) {
   const { client, cap } = fakeClient();
   const handler = new FacebookCommentHandler({
     executor: exec as unknown as import('../../src/facebook/comment-executor.js').FacebookCommentExecutor,
+    ...(joinExec ? { joinExecutor: joinExec as unknown as import('../../src/facebook/join-executor.js').FacebookJoinExecutor } : {}),
     client,
     logger: () => {},
   });
@@ -137,6 +152,24 @@ test('fb-handler: interaction.comment 成功 → action.completed{comment,ok:tru
   assert.deepEqual(exec.submitArg, { url: 'https://www.facebook.com/groups/1/posts/2', text: '很喜欢' });
 });
 
+test('fb-handler: interaction.comment 带 groupChatCode → 透传给 executor contactInfo', async () => {
+  const exec = new FakeExecutor({ submit: { ok: true, submitted: true, serverConfirmed: true } });
+  const { handler, cap } = makeHandler(exec);
+  await handler.handle(
+    makeEnvelope('interaction.comment', 'c1', 1, {
+      noteId: 'https://www.facebook.com/groups/1/posts/2',
+      text: '正文',
+      groupChatCode: 'LINE ID: abc123',
+    } as never),
+  );
+  assert.equal(cap.actions[0].ok, true);
+  assert.deepEqual(exec.submitArg, {
+    url: 'https://www.facebook.com/groups/1/posts/2',
+    text: '正文',
+    contactInfo: 'LINE ID: abc123',
+  });
+});
+
 test('fb-handler: interaction.comment ambiguous → action.completed{comment,ok:false,reason}', async () => {
   const exec = new FakeExecutor({ submit: { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false } });
   const { handler, cap } = makeHandler(exec);
@@ -153,6 +186,32 @@ test('fb-handler: 不支持的白名单命令（session.end）→ capability_uns
   const { handler, cap } = makeHandler(exec);
   await handler.handle(makeEnvelope('session.end', 'c1', 1, { reason: 'x' } as never));
   assert.equal(cap.actions.length, 1);
+  assert.equal(cap.actions[0].ok, false);
+  assert.equal(cap.actions[0].reason, 'capability_unsupported');
+});
+
+test('fb-handler: group.join 路由到 join executor，回 action.completed{join_group}', async () => {
+  const exec = new FakeExecutor();
+  const joinExec = new FakeJoinExecutor({
+    ok: false,
+    reason: 'observation_only',
+    groupUrl: 'https://www.facebook.com/groups/1',
+    clicked: false,
+    observation: { groupUrl: 'https://www.facebook.com/groups/1', mainCtaText: 'Join group' },
+  });
+  const { handler, cap } = makeHandler(exec, joinExec);
+  await handler.handle(makeEnvelope('group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1', click: false } as never));
+  assert.equal(cap.actions[0].action, 'join_group');
+  assert.equal(cap.actions[0].ok, false);
+  assert.equal(cap.actions[0].reason, 'observation_only');
+  assert.equal(cap.actions[0].groupUrl, 'https://www.facebook.com/groups/1');
+  assert.deepEqual(joinExec.joinArg, { groupUrl: 'https://www.facebook.com/groups/1', click: false });
+});
+
+test('fb-handler: group.join 未装配 join executor → capability_unsupported', async () => {
+  const { handler, cap } = makeHandler(new FakeExecutor());
+  await handler.handle(makeEnvelope('group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
+  assert.equal(cap.actions[0].action, 'join_group');
   assert.equal(cap.actions[0].ok, false);
   assert.equal(cap.actions[0].reason, 'capability_unsupported');
 });
