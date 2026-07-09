@@ -322,12 +322,16 @@ export const NOTE_PUBLISHED_AT_SELECTORS: readonly string[] = [
 ];
 
 /**
- * 正文【文本叶子容器】denylist：发布时刻抽取时，凡候选日期节点本身位于这些正文文本容器内即跳过，
- * 与正文抽取物理隔离（防 f8712f5 类「标题+发布时间」串进正文，反向亦然）。
- * 注意【刻意不含】宽泛的 `.note-content` / `[class*="content"]`：真机里日期容器本就嵌在 note-content 列内，
- * 排它会误杀合法日期；这里只排真正承载正文文字的末级容器（#detail-desc / .desc / .note-text）。
+ * 发布时刻抽取的 denylist：凡候选日期节点位于这些容器内即跳过，防误抓。两类：
+ * ① 正文文本叶子容器（#detail-desc / .desc / .note-text）——防 f8712f5 类「标题+发布时间」串进正文（反向亦然）。
+ *    【刻意不含】宽泛的 `.note-content` / `[class*="content"]`：真机里日期容器本就嵌在 note-content 列内，排它会误杀合法日期。
+ * ② 评论区容器（.comment-item / [class*="comment"]）——真机标定（backlog 簇 16，工程师大白 2026-07-09）确认：
+ *    详情页 `.date` / `[class*="date"]` 共命中 12 个，其中 11 个是评论时间戳（如「1天前浙江」，位于 `.comment-item .date`），
+ *    只有 1 个是笔记发布时刻（`.bottom-container .date`=「2天前 广东」，宽/窄布局均首命中）。主选择器精确、
+ *    正常路径不会落到宽兜底；但为防 XHS 改名 `.bottom-container` 后兜底 `.date` 误抓评论时间戳，这里显式排除评论区。
  */
-const NOTE_BODY_TEXT_DENYLIST = '#detail-desc, .desc, .note-text';
+const NOTE_BODY_TEXT_DENYLIST =
+  '#detail-desc, .desc, .note-text, .comment-item, [class*="comment-item"], [class*="comment"]';
 
 /**
  * 从笔记详情作用域抽发布时刻【原始文本】（trim 后），抽不到返回 undefined。
