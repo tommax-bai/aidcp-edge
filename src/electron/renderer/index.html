@@ -13,7 +13,7 @@
       <div class="acct">
         <div class="ava" id="acct-ava">书</div>
         <div class="acct-h" id="acct-name">小红书账号</div>
-        <span class="acct-p">小红书</span>
+        <span class="acct-p" id="acct-plat">小红书</span>
       </div>
       <div class="tb-spacer"></div>
       <button id="health-pill" class="health-pill nodrag" type="button">
@@ -26,7 +26,7 @@
     <!-- 健康明细浮层：五路状态的人话版（点健康药丸开合） -->
     <div id="health-pop" class="health-pop hidden">
       <p id="health-detail" class="hp-hint"></p>
-      <div class="hp-row"><span class="hp-label">小红书登录</span><strong id="auth-status" class="badge">检测中</strong></div>
+      <div class="hp-row"><span class="hp-label" id="auth-label">小红书登录</span><strong id="auth-status" class="badge">检测中</strong></div>
       <div class="hp-row"><span class="hp-label">云端连接</span><strong id="cloud-status" class="badge">未连接</strong></div>
       <div class="hp-row"><span class="hp-label">自动运营</span><strong id="session-state" class="badge">待命</strong></div>
       <div class="hp-row"><span class="hp-label">账号保护</span><strong id="risk-status" class="badge">正常</strong></div>
@@ -42,9 +42,10 @@
         <div class="rail-head">
           <span class="rail-title">环境 <span id="rail-count">0</span></span>
           <span class="rail-head-ctl">
-            <button id="rail-add" class="rail-add nodrag" type="button" title="添加环境" aria-label="添加环境">＋</button>
+            <!-- 加号/箭头用内联 SVG：全角「＋」字形在 CJK 字体里天然偏移、书名号「‹›」在 24px 钮里偏小（问题 7/8） -->
+            <button id="rail-add" class="rail-add nodrag" type="button" title="添加环境" aria-label="添加环境"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" fill="none"/></svg></button>
             <span class="rail-toggle-wrap">
-              <button id="rail-toggle" class="rail-toggle nodrag" type="button" title="展开 / 收起环境栏" aria-label="展开 / 收起环境栏">‹</button>
+              <button id="rail-toggle" class="rail-toggle nodrag" type="button" title="展开 / 收起环境栏" aria-label="展开 / 收起环境栏"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M10.2 3.2 5.4 8l4.8 4.8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></button>
               <span id="rail-badge" class="rail-badge hidden">0</span>
             </span>
           </span>
@@ -55,7 +56,7 @@
           <span class="sum-chip idle" id="rail-sum-idle">⏸ 0</span>
         </div>
         <div id="rail-list" class="rail-list"></div>
-        <button id="rail-foot-add" class="rail-foot-add" type="button" title="添加环境" aria-label="添加环境">＋</button>
+        <button id="rail-foot-add" class="rail-foot-add" type="button" title="添加环境" aria-label="添加环境"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" fill="none"/></svg></button>
         <div class="rail-foot">
           <button id="rail-guide" class="rail-btn hidden" type="button">引导处理</button>
           <button id="rail-start-all" class="rail-btn" type="button">全部启动</button>
@@ -279,7 +280,7 @@
         </div>
       </div>
 
-      <!-- 新建环境：程序化建一个指纹环境（代理不碰，建完提醒去 AdsPower 配代理） -->
+      <!-- 新建环境：程序化建一个指纹环境（代理可选：填了随建号下发，不填默认 no_proxy） -->
       <div id="env-tab-create-body" class="env-add-body hidden">
         <div class="ads-create-row">
           <select id="ads-platform" class="ads-template" aria-label="平台">
@@ -293,85 +294,180 @@
           <span class="field-label">Facebook 账号资料 <em class="opt">可选</em></span>
           <textarea id="ads-fb-import" rows="4" spellcheck="false" autocomplete="off" placeholder="email----password----2FA----cookie"></textarea>
         </label>
+        <div class="proxy-form">
+          <div class="proxy-row">
+            <span class="field-label">代理 <em class="opt">可选</em></span>
+            <select id="ads-proxy-type" class="ads-template proxy-type" aria-label="代理类型">
+              <option value="no_proxy">无代理</option>
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+              <option value="socks5">SOCKS5</option>
+            </select>
+          </div>
+          <div id="ads-proxy-detail" class="proxy-detail hidden">
+            <div class="proxy-grid">
+              <input id="ads-proxy-host" type="text" placeholder="代理地址（IP / 域名）" autocomplete="off" />
+              <input id="ads-proxy-port" type="text" placeholder="端口" inputmode="numeric" autocomplete="off" />
+              <input id="ads-proxy-user" type="text" placeholder="用户名（可选）" autocomplete="off" />
+              <input id="ads-proxy-pass" type="password" placeholder="密码（可选）" autocomplete="new-password" />
+            </div>
+          </div>
+        </div>
         <span id="ads-create-msg" class="ads-env-msg"></span>
-        <p class="subtle">新建的环境代理默认为空，请在 AdsPower 客户端为它配好代理再使用。</p>
+        <p class="subtle">不填代理则默认为空；之后可在「加入现有环境」列表中该环境行的「代理」按钮补配或修改。</p>
       </div>
     </aside>
 
-    <!-- ═══ 账号人设浮层（edge-fleet-rail-env-management）：由左栏每行的人设图标拉起，
-         对「该行环境」做人设向导（选关键词 → 生成 → 确认）。审批/落库诚实回执，绝不本地判成功。 ═══ -->
-    <div id="persona-mask" class="pop-mask hidden"></div>
-    <aside id="persona-pop" class="persona-pop hidden" aria-hidden="true" aria-label="账号人设">
+    <!-- ═══ 环境代理编辑浮层（edge-client-proxy-platform-persona-ux）：按环境改 user_proxy_config（受限 user/update）。
+         密码不回显（list 不回传密码），保存 = 整体替换该环境代理配置；下次启动该环境生效。 ═══ -->
+    <div id="proxy-mask" class="pop-mask hidden"></div>
+    <aside id="proxy-pop" class="proxy-pop hidden" aria-hidden="true" role="dialog" aria-label="环境代理">
       <div class="pop-head">
-        <span>账号人设 <em id="persona-pop-env" class="pop-head-env"></em></span>
+        <span>环境代理 <em id="proxy-pop-env" class="pop-head-env"></em></span>
+        <button id="proxy-close" class="drawer-x nodrag" type="button" aria-label="关闭">×</button>
+      </div>
+      <p class="subtle" id="proxy-pop-current"></p>
+      <div class="proxy-form">
+        <div class="proxy-row">
+          <span class="field-label">代理类型</span>
+          <select id="proxy-pop-type" class="ads-template proxy-type" aria-label="代理类型">
+            <option value="no_proxy">无代理</option>
+            <option value="http">HTTP</option>
+            <option value="https">HTTPS</option>
+            <option value="socks5">SOCKS5</option>
+          </select>
+        </div>
+        <div id="proxy-pop-detail" class="proxy-detail hidden">
+          <div class="proxy-grid">
+            <input id="proxy-pop-host" type="text" placeholder="代理地址（IP / 域名）" autocomplete="off" />
+            <input id="proxy-pop-port" type="text" placeholder="端口" inputmode="numeric" autocomplete="off" />
+            <input id="proxy-pop-user" type="text" placeholder="用户名（可选）" autocomplete="off" />
+            <input id="proxy-pop-pass" type="password" placeholder="密码（不回显，带鉴权代理需重填）" autocomplete="new-password" />
+          </div>
+          <p class="subtle proxy-warn">提示：给已在运营的账号更换代理会改变出口 IP 与时区画像，可能引起平台风控注意，请谨慎操作。</p>
+        </div>
+        <div class="proxy-actions">
+          <span id="proxy-pop-msg" class="ads-env-msg"></span>
+          <button id="proxy-save" class="setup-btn" type="button">保存</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ═══ 账号人设浮层（重设计于 edge-client-proxy-platform-persona-ux）：三段式骨架（头带身份锚点 /
+         滚动体 / 底部操作栏）+ 两步向导（选关键词 → 预览确认）。由左栏每行的人设图标拉起，对「该行环境」
+         做人设向导。审批/落库诚实回执，绝不本地判成功；闸三态与草稿环境锚定语义不变。 ═══ -->
+    <div id="persona-mask" class="pop-mask hidden"></div>
+    <aside id="persona-pop" class="persona-pop hidden" aria-hidden="true" role="dialog" aria-label="账号人设">
+      <div class="persona-head">
+        <span class="persona-ava" id="persona-ava">✦</span>
+        <span class="persona-head-txt">
+          <span class="persona-head-title">账号人设 <em id="persona-pop-env" class="pop-head-env"></em></span>
+          <span class="persona-plat" id="persona-plat">小红书</span>
+        </span>
         <span class="pop-head-r">
           <strong id="persona-state-badge" class="badge checking">未设置</strong>
           <button id="persona-close" class="drawer-x nodrag" type="button" aria-label="关闭">×</button>
         </span>
       </div>
-      <p class="subtle persona-hint" id="persona-hint">选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。</p>
-      <p class="subtle hidden" id="persona-bound-note">该账号已设置人设，正在正常自动运营。如需调整，可在后台管理页编辑。</p>
 
-      <div id="persona-wizard-body">
-        <div class="field">
-          <span class="field-label">垂类 / 行业</span>
-          <div class="seg-group persona-kw-group" data-dim="vertical" data-select="single">
-            <button class="seg kw-btn" type="button" data-kw="美妆护肤">美妆护肤</button>
-            <button class="seg kw-btn" type="button" data-kw="母婴亲子">母婴亲子</button>
-            <button class="seg kw-btn" type="button" data-kw="数码科技">数码科技</button>
-            <button class="seg kw-btn" type="button" data-kw="美食探店">美食探店</button>
-            <button class="seg kw-btn" type="button" data-kw="时尚穿搭">时尚穿搭</button>
-            <button class="seg kw-btn" type="button" data-kw="健身运动">健身运动</button>
-            <button class="seg kw-btn" type="button" data-kw="家居生活">家居生活</button>
-            <button class="seg kw-btn" type="button" data-kw="职场成长">职场成长</button>
-            <button class="seg kw-btn" type="button" data-kw="旅行户外">旅行户外</button>
-            <button class="seg kw-btn" type="button" data-kw="情感生活">情感生活</button>
-          </div>
-          <input id="persona-vertical-custom" class="persona-custom-input" type="text" maxlength="40" placeholder="或自定义垂类，如 宠物 / 手办 / 中古…" autocomplete="off" />
+      <div class="persona-body">
+        <!-- 闸未就绪空态（未登录 / 连云中）：专属面板替代改写一行小字 -->
+        <div id="persona-empty" class="persona-empty hidden">
+          <span class="se-dots"><i></i><i></i><i></i></span>
+          <p id="persona-empty-title">先启动并登录这个账号</p>
+          <span id="persona-empty-sub" class="pe-sub">启动并在浏览器里登录后，这里就能为它生成人设。</span>
+          <button id="persona-empty-action" class="secondary small" type="button">去启动</button>
         </div>
 
-        <div class="field">
-          <span class="field-label">兴趣 <em class="opt">标签快捷选 + 自己填</em></span>
-          <div class="seg-group persona-kw-group" data-dim="interest" data-select="multi">
-            <button class="seg kw-btn" type="button" data-kw="好物分享">好物分享</button>
-            <button class="seg kw-btn" type="button" data-kw="教程干货">教程干货</button>
-            <button class="seg kw-btn" type="button" data-kw="测评种草">测评种草</button>
-            <button class="seg kw-btn" type="button" data-kw="日常记录">日常记录</button>
-            <button class="seg kw-btn" type="button" data-kw="避坑指南">避坑指南</button>
-            <button class="seg kw-btn" type="button" data-kw="灵感收藏">灵感收藏</button>
-          </div>
-          <input id="persona-interest-custom" class="persona-custom-input" type="text" maxlength="120" placeholder="或自己填，逗号分隔，如 成分党,早C晚A,敏感肌护理" autocomplete="off" />
+        <!-- 已绑态卡片 -->
+        <div id="persona-bound-note" class="persona-bound hidden">
+          <span class="pb-check">✓</span>
+          <span class="pb-txt">
+            <strong>该账号已设置人设，正在正常自动运营。</strong>
+            <em>如需调整，可在后台管理页编辑。</em>
+          </span>
         </div>
 
-        <div class="field">
-          <span class="field-label">语气调性</span>
-          <div class="seg-group persona-kw-group" data-dim="tone" data-select="single">
-            <button class="seg kw-btn" type="button" data-kw="亲切接地气">亲切接地气</button>
-            <button class="seg kw-btn" type="button" data-kw="专业理性">专业理性</button>
-            <button class="seg kw-btn" type="button" data-kw="活泼幽默">活泼幽默</button>
-            <button class="seg kw-btn" type="button" data-kw="温柔治愈">温柔治愈</button>
-            <button class="seg kw-btn" type="button" data-kw="犀利真实">犀利真实</button>
+        <div id="persona-wizard-body">
+          <div class="j-steps persona-steps" id="persona-steps">
+            <div class="j-step cur" data-stage="pick"><span class="j-dot"></span><span class="j-lab">选关键词</span></div>
+            <div class="j-step" data-stage="preview"><span class="j-dot"></span><span class="j-lab">预览确认</span></div>
           </div>
-        </div>
+          <p class="subtle persona-hint" id="persona-hint">选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。</p>
 
-        <div class="persona-actions">
-          <button id="persona-generate" class="seg persona-gen-btn" type="button" disabled>生成人设</button>
-          <span id="persona-msg" class="ads-env-msg"></span>
-        </div>
+          <!-- Stage 1：选关键词（三组区块卡） -->
+          <div class="persona-stage" id="persona-stage-pick">
+            <div class="persona-card field">
+              <span class="field-label">垂类 / 行业 <em class="opt">单选</em></span>
+              <div class="persona-kw-group" data-dim="vertical" data-select="single">
+                <button class="kw-btn" type="button" data-kw="美妆护肤">美妆护肤</button>
+                <button class="kw-btn" type="button" data-kw="母婴亲子">母婴亲子</button>
+                <button class="kw-btn" type="button" data-kw="数码科技">数码科技</button>
+                <button class="kw-btn" type="button" data-kw="美食探店">美食探店</button>
+                <button class="kw-btn" type="button" data-kw="时尚穿搭">时尚穿搭</button>
+                <button class="kw-btn" type="button" data-kw="健身运动">健身运动</button>
+                <button class="kw-btn" type="button" data-kw="家居生活">家居生活</button>
+                <button class="kw-btn" type="button" data-kw="职场成长">职场成长</button>
+                <button class="kw-btn" type="button" data-kw="旅行户外">旅行户外</button>
+                <button class="kw-btn" type="button" data-kw="情感生活">情感生活</button>
+              </div>
+              <span class="persona-or">或自定义</span>
+              <input id="persona-vertical-custom" class="persona-custom-input" type="text" maxlength="40" placeholder="如 宠物 / 手办 / 中古…" autocomplete="off" />
+            </div>
 
-        <!-- 草稿卡：生成后展示身份摘要 + soul 预览；确认（落库开跑）/ 重新生成（不限次） -->
-        <div id="persona-draft" class="persona-draft hidden">
-          <div class="persona-draft-head">
-            <span class="field-label">生成的人设</span>
-            <strong id="persona-draft-summary" class="badge near"></strong>
+            <div class="persona-card field">
+              <span class="field-label">兴趣 <em class="opt">可多选</em><span class="kw-count" id="persona-interest-count"></span></span>
+              <div class="persona-kw-group" data-dim="interest" data-select="multi">
+                <button class="kw-btn" type="button" data-kw="好物分享">好物分享</button>
+                <button class="kw-btn" type="button" data-kw="教程干货">教程干货</button>
+                <button class="kw-btn" type="button" data-kw="测评种草">测评种草</button>
+                <button class="kw-btn" type="button" data-kw="日常记录">日常记录</button>
+                <button class="kw-btn" type="button" data-kw="避坑指南">避坑指南</button>
+                <button class="kw-btn" type="button" data-kw="灵感收藏">灵感收藏</button>
+              </div>
+              <span class="persona-or">或自己填（逗号分隔）</span>
+              <input id="persona-interest-custom" class="persona-custom-input" type="text" maxlength="120" placeholder="如 成分党,早C晚A,敏感肌护理" autocomplete="off" />
+            </div>
+
+            <div class="persona-card field">
+              <span class="field-label">语气调性 <em class="opt">单选</em></span>
+              <div class="persona-kw-group" data-dim="tone" data-select="single">
+                <button class="kw-btn" type="button" data-kw="亲切接地气">亲切接地气</button>
+                <button class="kw-btn" type="button" data-kw="专业理性">专业理性</button>
+                <button class="kw-btn" type="button" data-kw="活泼幽默">活泼幽默</button>
+                <button class="kw-btn" type="button" data-kw="温柔治愈">温柔治愈</button>
+                <button class="kw-btn" type="button" data-kw="犀利真实">犀利真实</button>
+              </div>
+            </div>
           </div>
-          <pre id="persona-draft-body" class="persona-draft-body"></pre>
-          <div class="persona-draft-actions">
-            <button id="persona-regenerate" class="secondary small" type="button">重新生成</button>
-            <button id="persona-confirm" class="seg" type="button">确认使用</button>
+
+          <!-- Stage 2：预览确认（关键词摘要条可回退；生成中出骨架；结果摘要优先、YAML 折叠） -->
+          <div class="persona-stage hidden" id="persona-stage-preview">
+            <button id="persona-kw-summary" class="persona-kw-summary" type="button" title="返回修改关键词">
+              <span id="persona-kw-summary-text"></span><span class="edit">改关键词</span>
+            </button>
+            <div id="persona-skeleton" class="persona-skeleton hidden" aria-hidden="true"><i></i><i></i><i></i></div>
+            <div id="persona-draft" class="persona-draft hidden">
+              <div class="persona-draft-head">
+                <span class="pd-ic">✦</span>
+                <strong id="persona-draft-summary" class="pd-title"></strong>
+              </div>
+              <details class="pd-details">
+                <summary>查看完整人设定义</summary>
+                <pre id="persona-draft-body" class="persona-draft-body"></pre>
+              </details>
+            </div>
           </div>
-        </div>
-      </div><!-- /#persona-wizard-body -->
+        </div><!-- /#persona-wizard-body -->
+      </div>
+
+      <!-- 底部操作栏：消息位 + 阶段化 CTA（主动作实心蓝、永不沉到折叠线以下） -->
+      <div class="persona-foot">
+        <span id="persona-msg" class="persona-msg"></span>
+        <button id="persona-regenerate" class="secondary hidden" type="button">重新生成</button>
+        <button id="persona-generate" class="setup-btn persona-cta" type="button" disabled>生成人设</button>
+        <button id="persona-confirm" class="setup-btn persona-cta hidden" type="button">确认使用</button>
+      </div>
     </aside>
 
     <!-- ═══ 设置抽屉：精简为「浏览器引擎 + 窗口停放 + 开发者开关」（环境管理与人设已搬到左栏）═══ -->

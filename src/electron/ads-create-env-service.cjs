@@ -62,6 +62,7 @@ async function createEnvironmentWithGroupRecovery({
   platform,
   name,
   accountImport,
+  proxy,
   groupResolver,
   createFlowFactory = createCreateFlow,
 } = {}) {
@@ -79,6 +80,7 @@ async function createEnvironmentWithGroupRecovery({
       platform,
       name,
       accountImport,
+      proxy,
       groupId: grp.groupId,
     });
     return { result, groupId: grp.groupId };

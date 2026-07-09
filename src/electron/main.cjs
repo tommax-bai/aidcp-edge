@@ -8,6 +8,7 @@ const { createAdsWriteApi } = require('./ads-write-api.cjs');
 const adsRuntime = require('./ads-runtime.cjs');
 const adsFingerprint = require('./ads-fingerprint.cjs');
 const { normalizePlatform } = require('./ads-create-flow.cjs');
+const { normalizeProxyInput } = require('./ads-proxy-config.cjs');
 const {
   ENV_GROUP_NAME,
   createEnvGroupResolver,
@@ -977,6 +978,8 @@ function startEdge(handle) {
       cloud: 'disconnected',
       session: 'idle',
       risk: 'normal',
+      // adspower 的登录态由身份确立事件写入（本次进程已死）→ 诚实复位待检测；self 由 cookie 门自管。
+      ...(handle.kind === 'adspower' ? { auth: 'checking' } : {}),
       overlayBlocked: false,
       respawnGaveUp: gaveUp,
       lastMessage: `核心进程启动失败：${msg}`
@@ -1021,6 +1024,8 @@ function startEdge(handle) {
       // 核心已退出 = 无在跑会话：把本地日志派生的 risk 徽标复位 normal（该徽标是日志关键词启发、非权威，
       // 真风控由云端单写），杜绝上一会话残留的「⚠」把徽标跨会话卡在「警戒」。
       risk: 'normal',
+      // 同理诚实复位 adspower 登录态（由身份事件写入、随进程死亡失效）；self 由 cookie 门自管。
+      ...(handle.kind === 'adspower' ? { auth: 'checking' } : {}),
       overlayBlocked: false,
       respawnGaveUp: gaveUp,
       lastMessage: gaveUp
@@ -1321,6 +1326,9 @@ function handleEdgeLogLine(handle, message, isError = false) {
       // 账号标签兜底链：平台昵称（navigate 身份路径才有）> AdsPower 环境名 > 渲染层再兜尾4位。
       const name = evt.account.name || handle.name || '';
       handle.status.account = { id: evt.account.id, name, source: evt.account.name ? 'xhs' : 'env' };
+      // 身份确立 = 登录态权威信号（核心读不出登录身份会诚实退出、不会走到这行），据此翻登录态。
+      // adspower 路径此前无人写 'logged in'（cookie 门是 self 专属），人设闸因此永不开——修于本 change。
+      next.auth = 'logged in';
       refreshSameAccountWarnings();
     }
     // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在已绑时下发（sticky true）。
@@ -1604,7 +1612,8 @@ ipcMain.handle('ads:templates', () =>
   adsFingerprint.DEVICE_TEMPLATES.map((t) => ({ key: t.key, label: templateLabel(t) })),
 );
 
-// 程序化建一个指纹环境。opts: { templateKey, apiKey?, apiBase?, facebookAccountImport? }。代理不碰（默认 no_proxy、手工配）。
+// 程序化建一个指纹环境。opts: { templateKey, apiKey?, apiBase?, proxy?, facebookAccountImport? }。
+// 代理可选（缺省 no_proxy）；FB 支持批量账号导入（每行一个环境，共用同一份代理输入）。
 ipcMain.handle('ads:createEnv', async (_event, opts) => {
   if (adsCreateInFlight) return { ok: false, error: '创建进行中，请等当前创建完成' };
   adsCreateInFlight = true;
@@ -1627,6 +1636,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         intendedAccountLabel: opts && opts.intendedAccountLabel,
         machineLabel: os.hostname(),
         platform,
+        proxy: opts && opts.proxy, // 原始表单输入；归一/校验在 create-flow 的归一层做
         groupResolver: envGroupResolver,
       });
     }
@@ -1645,6 +1655,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         platform,
         name: profileNameForFacebookImport(entry, i),
         accountImport: entry,
+        proxy: opts && opts.proxy, // 批量导入的每个环境共用同一份代理输入
         groupResolver: envGroupResolver,
       });
       if (!result.ok) {
@@ -1672,6 +1683,27 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     return { ok: false, error: `创建失败：${(e && e.message) || String(e)}` };
   } finally {
     adsCreateInFlight = false;
+  }
+});
+
+// 改已有环境代理（edge-client-proxy-platform-persona-ux）：归一层校验 → 写客户端受限 user/update
+// （body 只含 user_id + user_proxy_config 两键）。密码只内存流转、不落盘、日志已脱敏。
+ipcMain.handle('ads:updateEnvProxy', async (_event, opts) => {
+  const userId = opts && opts.userId;
+  if (!userId) return { ok: false, error: '缺 userId' };
+  const norm = normalizeProxyInput((opts && opts.proxy) || {});
+  if (!norm.ok) return { ok: false, error: `代理输入不合法：${norm.error}` };
+  try {
+    const ads = resolveAdsOpts(opts);
+    const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
+    const r = await writeApi.updateProfileProxy({ userId: String(userId), proxyConfig: norm.proxyConfig }, ads);
+    if (r && r.ok === false && /being used|being opened|is open|正在使用|已打开/i.test(String(r.error || ''))) {
+      return { ok: false, error: '该环境正在使用中，无法修改代理；请先关闭该环境后重试。' };
+    }
+    if (r && r.ok) return { ok: true, noProxy: norm.noProxy };
+    return r;
+  } catch (e) {
+    return { ok: false, error: `修改代理失败：${(e && e.message) || String(e)}` };
   }
 });
 

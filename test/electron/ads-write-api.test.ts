@@ -39,8 +39,8 @@ function stubFetch(
 }
 const noThrottle = { nowImpl: () => 0, sleepImpl: async () => undefined };
 
-// ── 红线回归：allowlist 结构性拦截生命周期 / 删除端点（task 2.3，M7 + C3） ──
-for (const forbidden of ['browser/start', 'browser/stop', 'browser/active', '/api/v1/browser/start', 'user/update']) {
+// ── 红线回归：allowlist 结构性拦截生命周期端点（task 2.3，M7；user/update 已受限放行、仅改代理） ──
+for (const forbidden of ['browser/start', 'browser/stop', 'browser/active', '/api/v1/browser/start']) {
   test(`allowlist: 禁止端点「${forbidden}」抛错且绝不发出请求`, async () => {
     const calls: Array<{ url: string }> = [];
     const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0 }), calls) });
@@ -48,6 +48,38 @@ for (const forbidden of ['browser/start', 'browser/stop', 'browser/active', '/ap
     assert.equal(calls.length, 0, '禁止端点绝不触发任何 fetch');
   });
 }
+
+// ── user/update 受限放行（edge-client-proxy-platform-persona-ux）：body 结构性只含两键 ──
+test('updateProfileProxy: user/update 放行、body 只含 user_id + user_proxy_config 两键', async () => {
+  const calls: Array<{ url: string; init?: { body?: string } }> = [];
+  const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0 }), calls) }) as unknown as {
+    updateProfileProxy: (a: Record<string, unknown>, opts?: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
+  };
+  const r = await api.updateProfileProxy({
+    userId: 'u1',
+    proxyConfig: { proxy_soft: 'other', proxy_type: 'socks5', proxy_host: '1.2.3.4', proxy_port: '1080' },
+    // 多余字段（调用方硬塞也进不了 body——结构性两键约束）：
+    remark: 'evil', fingerprint_config: { canvas: '0' },
+  });
+  assert.equal(r.ok, true);
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.includes('/api/v1/user/update'), calls[0].url);
+  const body = JSON.parse(String(calls[0].init?.body)) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(body).sort(), ['user_id', 'user_proxy_config'], 'body 只允许两键，放行 update ≠ 打开整张写面');
+  assert.equal(body.user_id, 'u1');
+});
+
+test('updateProfileProxy: 缺 userId / 缺归一 proxyConfig 诚实拒绝、不发请求', async () => {
+  const calls: Array<{ url: string }> = [];
+  const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0 }), calls) }) as unknown as {
+    updateProfileProxy: (a: Record<string, unknown>, opts?: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
+  };
+  const r1 = await api.updateProfileProxy({ proxyConfig: { proxy_soft: 'no_proxy' } });
+  assert.equal(r1.ok, false);
+  const r2 = await api.updateProfileProxy({ userId: 'u1', proxyConfig: { proxy_type: 'http' } });
+  assert.equal(r2.ok, false, '未经归一层（无 proxy_soft）的对象拒发');
+  assert.equal(calls.length, 0);
+});
 
 test('deleteProfile: user/delete 放行、body 带 user_ids（C3 放宽为 UI 确认删）', async () => {
   const calls: Array<{ url: string; init?: { body?: string } }> = [];

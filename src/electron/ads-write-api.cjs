@@ -1,11 +1,14 @@
 // AdsPower 本地 API 的**主进程侧写客户端**（仅程序化建号/建组：`user/create` + `group/create`）。
 //
 // change adspower-auto-create-env（task 2）。与只读 `ads-local-api.cjs` **刻意分离**：
-//  - 红线（M7，结构性守）：本客户端用**硬编码 allowlist** 只放行 `user/create` / `group/create` / `user/delete`。
+//  - 红线（M7，结构性守）：本客户端用**硬编码 allowlist** 只放行 `user/create` / `group/create` / `user/delete` / `user/update`。
 //    任何 `browser/start|stop|active`（浏览器生命周期，核心子进程单写）路径在 `post()` 内**直接抛错**、
 //    绝不发出——把「主进程绝不碰浏览器生命周期」从注释自觉升为**代码上不可能**（回归断言覆盖）。
 //    注（C3 放宽）：`user/delete` 由原「禁一切程序化删」放宽为**允许、但仅由运维在界面上逐个显式确认触发**
 //    （非自动 / 非批量 / 非 ledger 驱动，删前明确警示不可恢复）——ads-create-flow 内无删除，删除只走 UI 确认路径。
+//    注（edge-client-proxy-platform-persona-ux 放宽）：`user/update` **仅限改代理**——唯一封装 `updateProfileProxy`
+//    的 body 只构造 `{ user_id, user_proxy_config }` 两键，fingerprint / remark / 分组等一概不经此口
+//    （放行 update ≠ 打开整张写面，回归断言覆盖两键约束）。
 //  - 节流：复用与只读侧同规格的 ≥1.1s **串行节流单链**（独立实例；跨进程无法共享，故各自一条）。
 //  - 凭据（H3/D9）：POST body **绝不整体 stringify 进日志/错误**；不可达 / code≠0 的错误**不含 body**；
 //    另导出 `redactSensitive()` 供调用方（main.cjs）在打印前脱敏 `proxy_user/proxy_password/Authorization`。
@@ -16,7 +19,8 @@ const DEFAULT_ADS_BASE = 'http://local.adspower.net:50325';
 
 // 硬编码写 allowlist。新增写端点须显式加入并补回归断言。
 // user/delete 允许，但调用方 MUST 仅由运维界面逐个显式确认触发（见头注 C3 放宽）。
-const WRITE_ALLOWLIST = Object.freeze(['user/create', 'group/create', 'user/delete']);
+// user/update 允许，但仅经 updateProfileProxy 的两键 body（见头注 proxy 放宽）。
+const WRITE_ALLOWLIST = Object.freeze(['user/create', 'group/create', 'user/delete', 'user/update']);
 
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -134,7 +138,7 @@ function createAdsWriteApi(deps = {}) {
   async function createProfile({ groupId, name, fingerprintConfig, proxyConfig, remark, accountImport }, opts) {
     const body = {
       group_id: String(groupId),
-      // 代理全程手工（本按钮不碰）：默认 no_proxy 建号，真代理由运维在 AdsPower 侧配。
+      // 代理可选：上层（ads-create-flow 经归一层）填则下发，缺省 no_proxy 建号（与历史行为等价）。
       user_proxy_config: proxyConfig || { proxy_soft: 'no_proxy' },
       fingerprint_config: fingerprintConfig,
     };
@@ -163,7 +167,20 @@ function createAdsWriteApi(deps = {}) {
     return post('user/delete', { user_ids: [String(userId)] }, opts);
   }
 
-  return { post, createGroup, createProfile, deleteProfile, redactSensitive, WRITE_ALLOWLIST: [...WRITE_ALLOWLIST], ADS_MIN_INTERVAL_MS };
+  /**
+   * 改已有分身的代理（user/update 的**唯一**封装）。结构性约束：body 只构造
+   * `{ user_id, user_proxy_config }` 两键、不接受/不透传其他字段——放行 update 仅为改代理。
+   * @param {{ userId: string|number, proxyConfig: object }} args proxyConfig 须已经 ads-proxy-config 归一
+   */
+  async function updateProfileProxy({ userId, proxyConfig } = {}, opts) {
+    if (!userId) return { ok: false, error: '缺 user_id' };
+    if (!proxyConfig || typeof proxyConfig !== 'object' || !proxyConfig.proxy_soft) {
+      return { ok: false, error: '缺 user_proxy_config（须经归一层构造）' };
+    }
+    return post('user/update', { user_id: String(userId), user_proxy_config: proxyConfig }, opts);
+  }
+
+  return { post, createGroup, createProfile, deleteProfile, updateProfileProxy, redactSensitive, WRITE_ALLOWLIST: [...WRITE_ALLOWLIST], ADS_MIN_INTERVAL_MS };
 }
 
 module.exports = { createAdsWriteApi, redactSensitive, normalizePath, WRITE_ALLOWLIST: [...WRITE_ALLOWLIST], ADS_MIN_INTERVAL_MS, DEFAULT_ADS_BASE };

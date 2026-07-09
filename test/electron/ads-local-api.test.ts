@@ -243,10 +243,49 @@ test('normalizeProfile: 从 remark 解出平台（change edge-environment-platfo
   assert.equal(normalizeProfile({ user_id: 'u', remark: fbRemark }).platform, 'facebook');
   const xhsRemark = JSON.stringify({ t: 'aidcp-env', plat: 'xiaohongshu' });
   assert.equal(normalizeProfile({ user_id: 'u', remark: xhsRemark }).platform, 'xiaohongshu');
-  // 旧环境（无 plat / 非本 change remark / 无 remark）→ 回落 xiaohongshu
+  // 旧环境（无 plat / 非本 change remark / 无 remark、且无任何平台信号）→ 回落 xiaohongshu
   assert.equal(normalizeProfile({ user_id: 'u', remark: JSON.stringify({ t: 'aidcp-env', tpl: 'x' }) }).platform, 'xiaohongshu');
   assert.equal(normalizeProfile({ user_id: 'u', remark: '运维随手写的备注' }).platform, 'xiaohongshu');
   assert.equal(normalizeProfile({ user_id: 'u' }).platform, 'xiaohongshu');
+});
+
+// ── change edge-client-proxy-platform-persona-ux：存量无 plat 环境的只读兜底推断（remark 权威优先） ──
+test('inferPlatform: 表驱动优先级 remark > domain > urls > 关键词 > 回落', () => {
+  const infer = (require('../../src/electron/ads-local-api.cjs') as { inferPlatform: (it: Record<string, unknown>) => { platform: string; platformSource: string } }).inferPlatform;
+  const fbRemark = JSON.stringify({ t: 'aidcp-env', plat: 'xiaohongshu' });
+  const cases: Array<[Record<string, unknown>, string, string]> = [
+    // remark 权威：名称/域名信号一律让位
+    [{ remark: fbRemark, domain_name: 'facebook.com', name: 'fb 主号' }, 'xiaohongshu', 'remark'],
+    // 手工建的 FB 环境：domain_name 命中
+    [{ domain_name: 'facebook.com' }, 'facebook', 'domain'],
+    [{ domain_name: 'www.xiaohongshu.com' }, 'xiaohongshu', 'domain'],
+    // open_urls 命中（字符串/数组两形态都容忍）
+    [{ open_urls: ['https://www.facebook.com/'] }, 'facebook', 'urls'],
+    [{ open_urls: 'https://xiaohongshu.com/explore' }, 'xiaohongshu', 'urls'],
+    // 分组/名称关键词
+    [{ group_name: 'FB-客户组' }, 'facebook', 'keyword'],
+    [{ name: '脸书-01' }, 'facebook', 'keyword'],
+    // 全空回落（与推断引入前逐位等价）
+    [{}, 'xiaohongshu', 'fallback'],
+    [{ name: '心机小兔' }, 'xiaohongshu', 'fallback'],
+  ];
+  for (const [it, plat, src] of cases) {
+    const r = infer(it);
+    assert.equal(r.platform, plat, JSON.stringify(it));
+    assert.equal(r.platformSource, src, JSON.stringify(it));
+  }
+});
+
+test('normalizeProfile: 结构化 proxyConfig 透传非密字段、绝不透传密码', () => {
+  const p = normalizeProfile({
+    user_id: 'u',
+    user_proxy_config: { proxy_soft: 'other', proxy_type: 'socks5', proxy_host: '1.2.3.4', proxy_port: 1080, proxy_user: 'alice', proxy_password: 'S3cr3t!' },
+  }) as unknown as { proxyConfig: Record<string, unknown> };
+  assert.deepEqual(p.proxyConfig, { noProxy: false, proxyType: 'socks5', proxyHost: '1.2.3.4', proxyPort: '1080', proxyUser: 'alice' });
+  assert.ok(!('proxyPassword' in p.proxyConfig) && !('proxy_password' in p.proxyConfig), '密码 MUST NOT 透传渲染层');
+  const noProxy = normalizeProfile({ user_id: 'u', user_proxy_config: { proxy_type: 'no_proxy' } }) as unknown as { proxyConfig: { noProxy: boolean; proxyType: string } };
+  assert.equal(noProxy.proxyConfig.noProxy, true);
+  assert.equal(noProxy.proxyConfig.proxyType, '');
 });
 
 test('listGroups: 打 group/list、归一化 groupId/groupName', async () => {

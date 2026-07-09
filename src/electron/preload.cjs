@@ -28,11 +28,13 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   adsStatus: (opts) => ipcRenderer.invoke('ads:status', opts),
   adsListProfiles: (opts) => ipcRenderer.invoke('ads:listProfiles', opts),
   adsOpenCreate: () => ipcRenderer.invoke('ads:openCreate'),
-  // 「创建环境」程序化建号：整机模板清单 + 建一个环境（代理不碰，默认 no_proxy）。
+  // 「创建环境」程序化建号：整机模板清单 + 建一个环境（可选 proxy 表单输入，缺省 no_proxy）。
   adsTemplates: () => ipcRenderer.invoke('ads:templates'),
   adsCreateEnv: (opts) => ipcRenderer.invoke('ads:createEnv', opts),
   // 删除环境（仅由界面逐个二次确认触发）：opts { userId, apiKey?, apiBase? }。
   adsDeleteEnv: (opts) => ipcRenderer.invoke('ads:deleteEnv', opts),
+  // 改已有环境代理（仅改 user_proxy_config，受限 user/update）：opts { userId, proxy, apiKey?, apiBase? }。
+  adsUpdateEnvProxy: (opts) => ipcRenderer.invoke('ads:updateEnvProxy', opts),
   // 建号自助人设（change edge-persona-keyword-generation）：选关键词 → 云端生成草稿 / 确认落库。
   // 带 envId 路由（多环境）：打到草稿所属环境的 core，绝不因中途切换把人设写进别的账号。
   personaGenerate: (envId, opts) => ipcRenderer.invoke('persona:generate', envId, opts),

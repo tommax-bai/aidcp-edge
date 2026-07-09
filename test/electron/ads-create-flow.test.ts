@@ -43,13 +43,41 @@ test('happy path: 用真指纹引擎构造、remark 编码意图/模板/机器�
   assert.equal(w.calls.length, 1);
   const body = w.calls[0] as any;
   assert.equal(body.groupId, 'g1');
-  assert.deepEqual(body.proxyConfig, { proxy_soft: 'no_proxy' }, '代理手工、默认 no_proxy');
+  assert.deepEqual(body.proxyConfig, { proxy_soft: 'no_proxy' }, '不填代理 → 缺省仍 no_proxy（零回归）');
   assert.ok(body.fingerprintConfig && body.fingerprintConfig.random_ua, '带上构造好的 fingerprint_config');
   const meta = parseRemark(body.remark);
   assert.ok(meta);
   assert.equal(meta!.intendedAccountLabel, 'A');
   assert.equal(meta!.template, 'win11-intel');
   assert.equal(meta!.machine, 'mac-01');
+});
+
+// ── change edge-client-proxy-platform-persona-ux：创建可选填代理 ──
+test('带合法 proxy 输入 → user_proxy_config 随建号下发（proxy_soft=other）', async () => {
+  const w = recordingWriteApi({ ok: true, userId: 'u-new' });
+  const flow = createCreateFlow({ writeApi: w, fingerprint: realFingerprint });
+  const r = await flow.createEnvironment({
+    templateKey: 'win11-intel',
+    groupId: 'g1',
+    proxy: { proxyType: 'socks5', proxyHost: '1.2.3.4', proxyPort: '1080' },
+  });
+  assert.equal(r.ok, true);
+  const body = w.calls[0] as any;
+  assert.deepEqual(body.proxyConfig, { proxy_soft: 'other', proxy_type: 'socks5', proxy_host: '1.2.3.4', proxy_port: '1080' });
+});
+
+test('非法 proxy 输入 → 诚实拒建、不发请求（绝不静默按 no_proxy 建号）', async () => {
+  const w = recordingWriteApi();
+  const flow = createCreateFlow({ writeApi: w, fingerprint: realFingerprint });
+  const r = await flow.createEnvironment({
+    templateKey: 'win11-intel',
+    groupId: 'g1',
+    proxy: { proxyType: 'http', proxyHost: 'h.example', proxyPort: '70000' },
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 'rejected');
+  assert.match(String(r.error), /代理输入不合法/);
+  assert.equal(w.calls.length, 0);
 });
 
 test('未知模板 → 诚实拒建，不调 createProfile', async () => {

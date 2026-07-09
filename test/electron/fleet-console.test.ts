@@ -302,7 +302,8 @@ test('红线：人设草稿绑定生成时的环境，中途切换环境后确�
   const gen = w.document.querySelector('#persona-generate') as HTMLButtonElement;
   // 选一个单选关键词组的项，令生成通过校验
   (w.document.querySelector('.persona-kw-group[data-dim="vertical"] .kw-btn') as HTMLElement).click();
-  gen.disabled = false; // 直接放行（gate 依赖 status，boot 首个 status 已 logged in+connected）
+  // 不再手动放行：boot 首个 status 已 logged in+connected，闸必须自然打开（回归主进程 auth 链路的渲染侧契约）
+  assert.equal(gen.disabled, false, '登录+连云后生成按钮必须自然可点（gate 不得永久 disabled）');
   gen.click();
   await tick();
   assert.deepEqual(calls.gen, ['ads-p1'], '生成打到当前环境');
@@ -433,4 +434,75 @@ test('人设图标：点击左栏行内人设图标 → 选中该环境并打开
   assert.equal(pop.classList.contains('open'), true, '点人设图标打开人设浮层');
   assert.equal(pop.classList.contains('hidden'), false, '打开必须移除 hidden（否则只见遮罩不见内容）');
   assert.deepEqual(calls.select, ['ads-p2'], '打开人设即把该环境设为选中（浮层作用于它）');
+});
+
+// ── change edge-client-proxy-platform-persona-ux：平台化 UI + 人设浮层重设计 ──
+
+test('平台标识：FB 环境行染平台类、顶栏徽标随选中环境切换、改平台后 rail 重建（签名含 platform）', async () => {
+  const { w, pushStatus, pushFleet } = await boot();
+  const snap = (p1Plat: string) => ({
+    provider: 'adspower',
+    selectedEnvId: 'ads-p1',
+    railCollapsed: true,
+    environments: [
+      { envId: 'ads-p1', kind: 'adspower', profileId: 'p1', name: '环境一', platform: p1Plat, status: makeStatus({ envId: 'ads-p1', envName: '环境一' }) },
+      { envId: 'ads-p2', kind: 'adspower', profileId: 'p2', name: '环境二', platform: 'xiaohongshu', status: makeStatus({ envId: 'ads-p2', envName: '环境二', edge: 'stopped', session: 'idle' }) },
+    ],
+  });
+  pushFleet(snap('facebook'));
+  await tick();
+  const rowOf = (id: string) => [...w.document.querySelectorAll('.rail-row')].find((r) => (r as HTMLElement).dataset.envId === id) as HTMLElement;
+  assert.ok(rowOf('ads-p1').className.includes('plat-facebook'), 'FB 环境行带 plat-facebook 类');
+  assert.ok(rowOf('ads-p2').className.includes('plat-xiaohongshu'), '小红书环境行带 plat-xiaohongshu 类');
+  // 顶栏身份区随选中环境（ads-p1 = FB）切换文案与配色，健康浮层登录行同步
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一' }));
+  await tick();
+  assert.equal(w.document.querySelector('#acct-plat')!.textContent, 'Facebook');
+  assert.equal(w.document.querySelector('#acct-plat')!.classList.contains('plat-facebook'), true);
+  assert.equal(w.document.querySelector('#auth-label')!.textContent, 'Facebook 登录');
+  // 平台变化必须触发 rail 重建（platform 在变更签名里；漏掉则 UI 停留旧平台）
+  pushFleet(snap('xiaohongshu'));
+  await tick();
+  assert.ok(rowOf('ads-p1').className.includes('plat-xiaohongshu'), '改平台后 rail 行重建为新平台类');
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一' }));
+  await tick();
+  assert.equal(w.document.querySelector('#acct-plat')!.textContent, '小红书');
+  assert.equal(w.document.querySelector('#acct-plat')!.classList.contains('plat-facebook'), false);
+});
+
+test('人设浮层：未就绪环境出空态面板（向导收起）；生成后进预览页、「改关键词」回第一步草稿保留', async () => {
+  const calls: Record<string, unknown[]> = { persist: [] };
+  const { w, pushStatus } = await boot({
+    personaGenerate: async () => ({ ok: true, soulYaml: 'soul: X', identitySummary: 'X 人设' }),
+    personaPersist: async (envId: string) => { calls.persist.push(envId); return { ok: true }; },
+  });
+  const rowOf = (id: string) => [...w.document.querySelectorAll('.rail-row')].find((r) => (r as HTMLElement).dataset.envId === id) as HTMLElement;
+  // 环境二未启动未登录：打开其人设浮层 → 空态面板 + 「待启动」徽标 + 向导收起
+  pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二', auth: 'checking', cloud: 'disconnected', edge: 'stopped', session: 'idle' }));
+  await tick();
+  (rowOf('ads-p2').querySelector('.rail-persona') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-empty')!.classList.contains('hidden'), false, '未就绪显示空态面板');
+  assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), true, '未就绪收起向导');
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '待启动');
+  assert.equal((w.document.querySelector('#persona-empty-action') as HTMLElement).textContent, '去启动');
+  // 切回已登录+连云的环境一 → 向导可用
+  (rowOf('ads-p1').querySelector('.rail-persona') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), false);
+  assert.equal(w.document.querySelector('#persona-empty')!.classList.contains('hidden'), true);
+  // 选关键词生成 → 切到预览页、identitySummary 升为标题
+  (w.document.querySelector('.persona-kw-group[data-dim="vertical"] .kw-btn') as HTMLElement).click();
+  (w.document.querySelector('#persona-generate') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-stage-preview')!.classList.contains('hidden'), false, '生成后进入预览页');
+  assert.equal(w.document.querySelector('#persona-draft')!.classList.contains('hidden'), false);
+  assert.equal(w.document.querySelector('#persona-draft-summary')!.textContent, 'X 人设');
+  // 「改关键词」回第一步：草稿保留，确认仍能打回生成时环境
+  (w.document.querySelector('#persona-kw-summary') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-stage-pick')!.classList.contains('hidden'), false, '回到选关键词');
+  (w.document.querySelector('#persona-confirm') as HTMLElement).click();
+  await tick();
+  assert.deepEqual(calls.persist, ['ads-p1'], '草稿未因回退丢失，确认仍打回生成时环境');
 });

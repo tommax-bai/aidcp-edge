@@ -5,8 +5,11 @@
 //  - 绑定意图（C2/D7）：把 intendedAccountLabel + 模板 + 建号机写进分身 remark（随 user/list 读回），
 //    供登录握手回写比对真实 accountId。
 //  - 防连点双建（H5）：单飞互斥，创建在途时重入诚实返回「进行中」。
-//  - 代理全程手工（本按钮不碰，用户定）：默认 no_proxy 建号，不下发/不校验/不去重代理。
+//  - 代理可选（edge-client-proxy-platform-persona-ux）：表单填了合法代理即随建号下发，
+//    不填默认 no_proxy（与历史行为逐位等价）；非法输入经归一层诚实拒建、绝不静默降级。
 //  - 不做本机台账（D8）：账本以 AdsPower user/list 为准（专用分组 + remark），此模块不落任何本机文件。
+
+const { normalizeProxyInput } = require('./ads-proxy-config.cjs');
 
 const STATUS = Object.freeze({ UNVERIFIED: 'unverified', READY: 'ready', VERIFY_FAILED: 'verify_failed' });
 const REMARK_TAG = 'aidcp-env';
@@ -66,10 +69,11 @@ function createCreateFlow(deps) {
   let inFlight = false;
 
   /**
-   * 建一个环境。代理不传（默认 no_proxy，手工在 AdsPower 侧配）。
+   * 建一个环境。proxy 可选（渲染层原始输入）：填了经归一层校验后随建号下发，
+   * 非法诚实拒建；缺省 no_proxy（与历史行为逐位等价）。
    * @returns {Promise<{ ok: boolean, userId?: string, status?: string, template?: string, intendedAccountLabel?: string, violations?: string[], error?: string, code?: number }>}
    */
-  async function createEnvironment({ templateKey, intendedAccountLabel, machineLabel, groupId, name, platform, accountImport } = {}) {
+  async function createEnvironment({ templateKey, intendedAccountLabel, machineLabel, groupId, name, platform, accountImport, proxy } = {}) {
     if (inFlight) {
       return { ok: false, error: '创建进行中，请等当前创建完成（防连点双建）' };
     }
@@ -78,6 +82,12 @@ function createCreateFlow(deps) {
       if (!groupId) return { ok: false, status: 'rejected', error: '缺 groupId（应先建/取专用分组）' };
       const tpl = fingerprint.getTemplate(templateKey);
       if (!tpl) return { ok: false, status: 'rejected', error: `未知整机模板：${templateKey}` };
+
+      const proxyNorm = normalizeProxyInput(proxy || {});
+      if (!proxyNorm.ok) {
+        // 与指纹护栏同款诚实拒建：绝不静默按 no_proxy 建号。
+        return { ok: false, status: 'rejected', error: `代理输入不合法：${proxyNorm.error}` };
+      }
 
       const built = fingerprint.buildFingerprintConfig(tpl);
       if (!built.ok) {
@@ -90,7 +100,7 @@ function createCreateFlow(deps) {
         groupId,
         name: name || templateKey,
         fingerprintConfig: built.fingerprintConfig,
-        proxyConfig: { proxy_soft: 'no_proxy' }, // 代理手工，本按钮不碰
+        proxyConfig: proxyNorm.proxyConfig,
         remark,
         accountImport,
       });

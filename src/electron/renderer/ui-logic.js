@@ -336,6 +336,7 @@
       return {
         envId: e && e.envId,
         name: (e && (e.name || (e.status && e.status.envName))) || '',
+        platform: (e && e.platform) || '', // 平台视觉标识（rail 行按平台上色）
         level: lv.level,
         needsAction: lv.needsAction,
         label: lv.label,

@@ -51,6 +51,8 @@ const fields = {
   titlebar: document.querySelector('#titlebar'),
   acctAva: document.querySelector('#acct-ava'),
   acctName: document.querySelector('#acct-name'),
+  acctPlat: document.querySelector('#acct-plat'),
+  authLabel: document.querySelector('#auth-label'),
   healthPill: document.querySelector('#health-pill'),
   healthLabel: document.querySelector('#health-label'),
   healthPop: document.querySelector('#health-pop'),
@@ -123,11 +125,27 @@ const fields = {
   envTabJoinBody: document.querySelector('#env-tab-join-body'),
   envTabCreateBody: document.querySelector('#env-tab-create-body'),
   adsManualAdd: document.querySelector('#ads-manual-add'),
-  // 账号人设浮层（edge-fleet-rail-env-management）
+  // 账号人设浮层（edge-fleet-rail-env-management；重设计于 edge-client-proxy-platform-persona-ux）
   personaPop: document.querySelector('#persona-pop'),
   personaMask: document.querySelector('#persona-mask'),
   personaClose: document.querySelector('#persona-close'),
   personaPopEnv: document.querySelector('#persona-pop-env'),
+  personaAva: document.querySelector('#persona-ava'),
+  personaPlat: document.querySelector('#persona-plat'),
+  // 环境代理编辑浮层（edge-client-proxy-platform-persona-ux）
+  proxyPop: document.querySelector('#proxy-pop'),
+  proxyMask: document.querySelector('#proxy-mask'),
+  proxyClose: document.querySelector('#proxy-close'),
+  proxyPopEnv: document.querySelector('#proxy-pop-env'),
+  proxyPopCurrent: document.querySelector('#proxy-pop-current'),
+  proxyPopType: document.querySelector('#proxy-pop-type'),
+  proxyPopDetail: document.querySelector('#proxy-pop-detail'),
+  proxyPopHost: document.querySelector('#proxy-pop-host'),
+  proxyPopPort: document.querySelector('#proxy-pop-port'),
+  proxyPopUser: document.querySelector('#proxy-pop-user'),
+  proxyPopPass: document.querySelector('#proxy-pop-pass'),
+  proxyPopMsg: document.querySelector('#proxy-pop-msg'),
+  proxySave: document.querySelector('#proxy-save'),
 };
 
 const settingsUi = {
@@ -153,6 +171,13 @@ const settingsUi = {
   adsFbImportWrap: document.querySelector('#ads-fb-import-wrap'),
   adsFbImport: document.querySelector('#ads-fb-import'),
   adsCreateMsg: document.querySelector('#ads-create-msg'),
+  // 新建环境的可选代理区块（edge-client-proxy-platform-persona-ux）
+  adsProxyType: document.querySelector('#ads-proxy-type'),
+  adsProxyDetail: document.querySelector('#ads-proxy-detail'),
+  adsProxyHost: document.querySelector('#ads-proxy-host'),
+  adsProxyPort: document.querySelector('#ads-proxy-port'),
+  adsProxyUser: document.querySelector('#ads-proxy-user'),
+  adsProxyPass: document.querySelector('#ads-proxy-pass'),
   parkingButtons: Array.from(document.querySelectorAll('.parking-btn')),
   browserShow: document.querySelector('#browser-show'),
   browserResetParking: document.querySelector('#browser-reset-parking'),
@@ -543,6 +568,12 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// 当前选中环境的平台（fleet 环境优先，回落 settings 平台）——顶栏/登录提示/人设浮层共用。
+function selectedEnvPlatform() {
+  const env = fleetView.envs.get(fleetView.selected);
+  return normPlatform((env && env.platform) || selectedPlatform);
+}
+
 // ─── 阻塞动作主动步骤（需登录 / 待配置）───
 function renderNotice(status) {
   let title = '';
@@ -550,7 +581,9 @@ function renderNotice(status) {
   let action = false;
   if (status.auth === 'login required') {
     title = '需要登录';
-    body = '请在刚打开的 Chrome 窗口中登录 xiaohongshu.com，检测到登录后会自动继续。';
+    body = selectedEnvPlatform() === 'facebook'
+      ? '请在打开的浏览器窗口中登录 facebook.com，检测到登录后会自动继续。'
+      : '请在刚打开的 Chrome 窗口中登录 xiaohongshu.com，检测到登录后会自动继续。';
   } else if (status.auth === 'config required') {
     title = '先完成一次设置';
     body = '选择一个浏览器环境（或手动填写分身 ID），之后就不用再管了。';
@@ -577,16 +610,28 @@ function renderEdgeFailure(status) {
   fields.edgeFailureText.textContent = show ? summary : '';
 }
 
-// ─── 标题带：账号身份 + 健康合成 + 风控染色 ───
+// ─── 标题带：账号身份 + 平台标识（随选中环境）+ 健康合成 + 风控染色 ───
 function renderTitlebar(status) {
+  const plat = selectedEnvPlatform();
+  const fb = plat === 'facebook';
   const acct = status.account;
   if (acct && (acct.name || acct.id)) {
-    // 标签兜底链：小红书昵称（@ 前缀）> AdsPower 环境名（平铺，不冒充小红书昵称）> 账号 …尾4位。
+    // 标签兜底链：平台昵称（@ 前缀）> AdsPower 环境名（平铺，不冒充平台昵称）> 账号 …尾4位。
     const nick = (acct.name || '').replace(/^@/, '');
-    const isXhsNick = nick && acct.source !== 'env';
-    fields.acctName.textContent = nick ? (isXhsNick ? `@${nick}` : nick) : `账号 …${String(acct.id).slice(-4)}`;
-    fields.acctAva.textContent = nick ? nick.slice(0, 1) : '书';
+    const isPlatNick = nick && acct.source !== 'env';
+    fields.acctName.textContent = nick ? (isPlatNick ? `@${nick}` : nick) : `账号 …${String(acct.id).slice(-4)}`;
+    fields.acctAva.textContent = nick ? nick.slice(0, 1) : (fb ? 'f' : '书');
+  } else {
+    // 无账号信息时按平台给默认身份占位（此前写死小红书，FB 环境也顶着「书」——问题 3）。
+    fields.acctAva.textContent = fb ? 'f' : '书';
+    fields.acctName.textContent = fb ? 'Facebook 账号' : '小红书账号';
   }
+  fields.acctAva.classList.toggle('plat-facebook', fb);
+  if (fields.acctPlat) {
+    fields.acctPlat.textContent = platformLabel(plat);
+    fields.acctPlat.classList.toggle('plat-facebook', fb);
+  }
+  if (fields.authLabel) fields.authLabel.textContent = fb ? 'Facebook 登录' : '小红书登录';
   const health = uiLogic.synthesizeHealth(status);
   fields.healthLabel.textContent = health.label;
   fields.healthPill.className = `health-pill nodrag ${health.code}`;
@@ -861,28 +906,49 @@ fields.noticeAction.addEventListener('click', () => openEnvAddPanel('join'));
 
 // ─── 账号人设浮层（左栏行内人设图标拉起，对「该行环境」做人设）───
 // 打开即把该环境设为选中（右侧陪伴视图 + 状态随之切过去），使人设向导的 gate（登录+连云）与草稿归属
-// 都锚定这个环境（persist 打回它，绝不跨账号）。
+// 都锚定这个环境（persist 打回它，绝不跨账号）。头部身份锚点（头像 + 平台小标）把这个事实可视化。
 function openPersonaPop(envId) {
   if (!fields.personaPop) return;
   if (envId && envId !== fleetView.selected && fleetView.envs.has(envId)) selectEnv(envId);
   const env = fleetView.envs.get(fleetView.selected);
   const label = env && (env.name || (env.status && env.status.account && env.status.account.name)) || '';
   if (fields.personaPopEnv) fields.personaPopEnv.textContent = label ? `· ${label}` : '';
+  const plat = selectedEnvPlatform();
+  const fb = plat === 'facebook';
+  if (fields.personaAva) fields.personaAva.textContent = label ? label.slice(0, 1) : '✦';
+  if (fields.personaPlat) {
+    fields.personaPlat.textContent = platformLabel(plat);
+    fields.personaPlat.classList.toggle('plat-facebook', fb);
+  }
+  fields.personaPop.classList.toggle('plat-facebook', fb);
   fields.personaPop.classList.remove('hidden'); // .hidden 是 !important，必须移除否则只见遮罩不见内容
   fields.personaPop.classList.add('open');
   fields.personaPop.setAttribute('aria-hidden', 'false');
   fields.personaMask?.classList.remove('hidden');
-  if (currentStatus) updatePersonaGate(currentStatus); // 按该环境状态刷新可否生成 + 已绑态
+  // 用目标环境**自身**的状态评闸：此前用 currentStatus，目标环境尚无状态推送时会拿上一环境的状态误开闸。
+  updatePersonaGate((env && env.status) || null);
 }
-function closePersonaPop() {
+function closePersonaPop(force) {
   if (!fields.personaPop) return;
+  // 生成在途时误点遮罩不整层关闭（结果会丢在看不见的地方）；× 与「去启动」仍可强制关。
+  if (personaInFlight && force !== true) {
+    setPersonaMsg('正在生成人设…完成后可关闭。', false);
+    return;
+  }
   fields.personaPop.classList.remove('open');
   fields.personaPop.classList.add('hidden');
   fields.personaPop.setAttribute('aria-hidden', 'true');
   fields.personaMask?.classList.add('hidden');
 }
-fields.personaClose?.addEventListener('click', closePersonaPop);
-fields.personaMask?.addEventListener('click', closePersonaPop);
+fields.personaClose?.addEventListener('click', () => closePersonaPop(true));
+fields.personaMask?.addEventListener('click', () => closePersonaPop(false));
+// Escape 关最上层浮层（人设 / 代理 / 添加环境）。
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (fields.personaPop && fields.personaPop.classList.contains('open')) closePersonaPop(false);
+  else if (fields.proxyPop && fields.proxyPop.classList.contains('open')) closeProxyPop();
+  else if (fields.envAddPanel && fields.envAddPanel.classList.contains('open')) closeEnvAddPanel();
+});
 
 // ─── 开发者详情：默认不展示，设置抽屉里开关（persisted）───
 const devSection = document.querySelector('#dev-section');
@@ -1016,6 +1082,7 @@ function absorbPublishTerminal(envKey, status) {
 /** fleet 快照（花名册 + 各环境状态 + 选中项）全量对齐：建行 / 摘行 / 同步选中与收展。 */
 function applyFleetSnapshot(snap) {
   if (!snap || !Array.isArray(snap.environments)) return;
+  const prevSelectedPlat = selectedEnvPlatform();
   const known = new Set();
   fleetView.order = [];
   for (const e of snap.environments) {
@@ -1050,6 +1117,10 @@ function applyFleetSnapshot(snap) {
     const env = fleetView.envs.get(fleetView.selected);
     if (env && env.status) render(env.status);
     rebuildActivityStream();
+  } else if (selectedEnvPlatform() !== prevSelectedPlat) {
+    // 选中未变但其平台变了（如「改平台」落盘回推）：立即刷标题带等平台标识，不等下一次状态心跳。
+    const env = fleetView.envs.get(fleetView.selected);
+    if (env && env.status) render(env.status);
   }
   renderRail();
 }
@@ -1106,14 +1177,16 @@ function renderRail() {
     selected: fleetView.selected,
     guided: Boolean(fleetView.guided),
     counts,
-    rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, railDisplayName(r), r.label, Boolean(r.status && r.status.personaBound)]),
+    // platform 必须进签名：改平台后行才会重建上色（漏掉则签名未变、UI 停留旧平台）。
+    rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, railDisplayName(r), r.label, Boolean(r.status && r.status.personaBound), normPlatform(r.platform)]),
   });
   if (sig === fleetView.lastRailSig) return;
   fleetView.lastRailSig = sig;
   fields.envRail.classList.toggle('collapsed', fleetView.collapsed);
   fields.envRail.classList.toggle('expanded', !fleetView.collapsed);
   if (fields.railToggle) {
-    fields.railToggle.textContent = fleetView.collapsed ? '›' : '‹';
+    // 箭头是内联 SVG（默认朝左=收起方向）；收起态水平翻转指向展开方向，不再切字符。
+    fields.railToggle.classList.toggle('flip', fleetView.collapsed);
     fields.railToggle.title = fleetView.collapsed ? '展开环境列表' : '收起环境列表';
     fields.railToggle.setAttribute('aria-label', fields.railToggle.title);
   }
@@ -1145,7 +1218,7 @@ function renderRail() {
 
 function makeRailRow(row) {
   const btn = document.createElement('div');
-  btn.className = `rail-row lv-${row.level}${row.needsAction ? ' pulse' : ''}${row.envId === fleetView.selected ? ' selected' : ''}`;
+  btn.className = `rail-row lv-${row.level} plat-${normPlatform(row.platform)}${row.needsAction ? ' pulse' : ''}${row.envId === fleetView.selected ? ' selected' : ''}`;
   btn.dataset.envId = row.envId;
   btn.tabIndex = 0;
   btn.setAttribute('role', 'button');
@@ -1680,17 +1753,29 @@ function populateEnvs(profiles) {
   let firstItem = null;
   let currentSelected = null;
   for (const prof of profiles) {
+    // 平台显示优先级：花名册成员的人工标注（settings 持久化）> 列表推断（remark 权威 / 兜底信号）。
+    const member = roster.find((m) => m.profileId === prof.userId);
+    const displayPlat = normPlatform(member ? member.platform : prof.platform);
+    const inferred = !member && prof.platformSource && prof.platformSource !== 'remark';
     const item = document.createElement('div');
     item.className = 'ads-env-item';
     const text = document.createElement('div');
     text.className = 'env-text';
     const name = document.createElement('div');
     name.className = 'env-name';
-    name.textContent = prof.name || '(未命名)';
+    const platChip = document.createElement('span');
+    platChip.className = `env-plat plat-${displayPlat}${inferred ? ' inferred' : ''}`;
+    platChip.textContent = platformLabel(displayPlat) + (inferred ? '?' : '');
+    platChip.title = inferred
+      ? (prof.platformSource === 'fallback'
+        ? '平台未标注，默认按小红书；如不对可点「改平台」修正'
+        : '平台由环境信息推断；如不对可点「改平台」修正')
+      : '该环境的运行平台';
+    name.appendChild(platChip);
+    name.appendChild(document.createTextNode(prof.name || '(未命名)'));
     const meta = document.createElement('div');
     meta.className = 'env-meta';
     const bits = [];
-    bits.push(platformLabel(prof.platform)); // 平台标签（小红书 / Facebook）
     if (prof.serialNumber) bits.push('#' + prof.serialNumber);
     if (prof.groupName) bits.push(prof.groupName);
     bits.push(prof.proxy || '无代理配置');
@@ -1715,8 +1800,10 @@ function populateEnvs(profiles) {
       });
       item.appendChild(removeBtn);
     }
+    item.appendChild(makePlatformBtn(prof, displayPlat));
+    item.appendChild(makeProxyBtn(prof));
     item.appendChild(makeDeleteBtn(prof));
-    item.addEventListener('click', () => selectProfile(prof.userId, item, prof.name, prof.platform));
+    item.addEventListener('click', () => selectProfile(prof.userId, item, prof.name, member ? member.platform : prof.platform));
     if (prof.userId && prof.userId === current) {
       item.classList.add('selected');
       currentSelected = prof.name || prof.userId;
@@ -1729,6 +1816,43 @@ function populateEnvs(profiles) {
     return { autoSelected: profiles[0].name || profiles[0].userId };
   }
   return { autoSelected: null, currentSelected };
+}
+
+// 显式改平台入口（edge-client-proxy-platform-persona-ux）：纠正无 remark 标注环境的误推断。
+// 人工选择写进花名册成员（settings 持久化）并覆盖推断；remark 有标注的环境同样可覆盖显示/启动平台
+// （启动注入以 settings 花名册为准）。非成员先就地改显示，加入花名册时随之持久化。
+function makePlatformBtn(prof, displayPlat) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ads-env-plat-switch';
+  btn.textContent = '改平台';
+  btn.title = '切换该环境的运行平台（小红书 ↔ Facebook）';
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation(); // 不触发行选中
+    const next = normPlatform(displayPlat) === 'facebook' ? 'xiaohongshu' : 'facebook';
+    prof.platform = next;
+    prof.platformSource = 'manual';
+    const member = roster.find((m) => m.profileId === prof.userId);
+    if (member) { member.platform = next; void persistRoster(); }
+    if (settingsUi.adsProfile.value.trim() === prof.userId) selectedPlatform = next;
+    refreshRosterMarks(); // lastProfiles 就地更新，重绘列表行
+    setEnvMsg(`已把「${prof.name || prof.userId}」标为 ${platformLabel(next)}${member ? '（已保存，下次启动生效）' : '（加入花名册后随启动生效）'}。`, false);
+  });
+  return btn;
+}
+
+// 每行「代理」编辑入口：读回非密字段预填，保存经受限 user/update 下发（详见 openProxyPop）。
+function makeProxyBtn(prof) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ads-env-proxy';
+  btn.textContent = '代理';
+  btn.title = `查看 / 修改该环境的代理（当前：${prof.proxy || '无代理配置'}）`;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation(); // 不触发行选中
+    openProxyPop(prof);
+  });
+  return btn;
 }
 
 // 拉取环境列表；失败诚实降级为手敲（疑似鉴权失败提示已用当前填写值、别叫用户重填已填的框）。
@@ -1790,12 +1914,50 @@ populateTemplates();
 updateFacebookImportVisibility();
 if (settingsUi.adsPlatform) settingsUi.adsPlatform.addEventListener('change', updateFacebookImportVisibility);
 
-// 「创建环境」程序化建号：挑模板 → 建一个指纹环境（代理不碰，建完提醒去 AdsPower 配代理）。
+// ── 代理表单（edge-client-proxy-platform-persona-ux）：新建可选区块 + 已有环境编辑浮层共用读值/校验 ──
+// 主校验在主进程归一层（ads-proxy-config），前端只做「选了类型必须填 host/port」的即时反馈。
+function readProxyForm(ui) {
+  return {
+    proxyType: ui.type ? ui.type.value : 'no_proxy',
+    proxyHost: ui.host ? ui.host.value.trim() : '',
+    proxyPort: ui.port ? ui.port.value.trim() : '',
+    proxyUser: ui.user ? ui.user.value.trim() : '',
+    proxyPassword: ui.pass ? ui.pass.value : '',
+  };
+}
+function quickProxyCheck(p) {
+  if (p.proxyType === 'no_proxy') return '';
+  if (!p.proxyHost) return '请填写代理地址';
+  if (!/^\d+$/.test(p.proxyPort) || Number(p.proxyPort) < 1 || Number(p.proxyPort) > 65535) return '端口须为 1-65535 的整数';
+  if (p.proxyPassword && !p.proxyUser) return '填了密码就必须填用户名';
+  return '';
+}
+const createProxyUi = {
+  type: settingsUi.adsProxyType,
+  host: settingsUi.adsProxyHost,
+  port: settingsUi.adsProxyPort,
+  user: settingsUi.adsProxyUser,
+  pass: settingsUi.adsProxyPass,
+};
+function resetCreateProxyForm() {
+  if (createProxyUi.type) createProxyUi.type.value = 'no_proxy';
+  for (const k of ['host', 'port', 'user', 'pass']) if (createProxyUi[k]) createProxyUi[k].value = '';
+  settingsUi.adsProxyDetail?.classList.add('hidden');
+}
+settingsUi.adsProxyType?.addEventListener('change', () => {
+  settingsUi.adsProxyDetail?.classList.toggle('hidden', settingsUi.adsProxyType.value === 'no_proxy');
+});
+
+// 「创建环境」程序化建号：挑模板 →（可选填代理）→ 建一个指纹环境。非法代理主进程诚实拒建。
 settingsUi.adsCreate.addEventListener('click', async () => {
   const tpl = settingsUi.adsTemplate && settingsUi.adsTemplate.value;
   if (!tpl) return setCreateMsg('请先选择一个整机模板', true);
   const platform = normPlatform(settingsUi.adsPlatform && settingsUi.adsPlatform.value);
   if (!window.aidcpEdge || typeof window.aidcpEdge.adsCreateEnv !== 'function') return;
+  const proxy = readProxyForm(createProxyUi);
+  const proxyErr = quickProxyCheck(proxy);
+  if (proxyErr) return setCreateMsg(`代理输入不完整：${proxyErr}。`, true);
+  const withProxy = proxy.proxyType !== 'no_proxy';
   settingsUi.adsCreate.disabled = true;
   setCreateMsg('正在创建环境…', false);
   try {
@@ -1803,7 +1965,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       platform === 'facebook' && settingsUi.adsFbImport
         ? settingsUi.adsFbImport.value
         : '';
-    const r = await window.aidcpEdge.adsCreateEnv({ ...formAdsOpts(), templateKey: tpl, platform, facebookAccountImport });
+    const r = await window.aidcpEdge.adsCreateEnv({ ...formAdsOpts(), templateKey: tpl, platform, proxy, facebookAccountImport });
     if (r && r.ok) {
       // 新建即选中时，带上刚选的平台（回执 platform 优先，回落表单选择）。
       if (r.userId && !coreRunning()) selectProfile(r.userId, null, '', r.platform || platform);
@@ -1811,7 +1973,9 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       const createdCount = Number(r.createdCount || (Array.isArray(r.created) ? r.created.length : 0));
       const countHint = createdCount > 1 ? `已创建 ${createdCount} 个环境。` : `已创建环境（${r.template || tpl}）。`;
       if (createdCount > 0 && settingsUi.adsFbImport) settingsUi.adsFbImport.value = '';
-      setCreateMsg(`${countHint}${selectedHint}请为它配好代理再使用。`, false);
+      const proxyHint = withProxy ? '代理已随建号写入。' : '未配代理，可稍后在环境行「代理」里补配。';
+      setCreateMsg(`${countHint}${selectedHint}${proxyHint}`, false);
+      resetCreateProxyForm();
       refreshEnvs();
     } else {
       const extra = r && r.violations && r.violations.length ? '（' + r.violations.join('；') + '）' : '';
@@ -1819,6 +1983,78 @@ settingsUi.adsCreate.addEventListener('click', async () => {
     }
   } finally {
     settingsUi.adsCreate.disabled = false;
+  }
+});
+
+// ── 环境代理编辑浮层：预填非密字段（list 不回传密码），保存 = 整体替换、下次启动生效 ──
+const PROXY_TYPE_OPTIONS = new Set(['http', 'https', 'socks5']);
+let proxyPopTarget = null; // { userId, name }
+function setProxyPopMsg(text, isError) {
+  if (!fields.proxyPopMsg) return;
+  fields.proxyPopMsg.textContent = text || '';
+  fields.proxyPopMsg.classList.toggle('error', Boolean(isError));
+}
+function syncProxyPopDetail() {
+  fields.proxyPopDetail?.classList.toggle('hidden', fields.proxyPopType && fields.proxyPopType.value === 'no_proxy');
+}
+function openProxyPop(prof) {
+  if (!fields.proxyPop) return;
+  proxyPopTarget = { userId: prof.userId, name: prof.name || prof.userId };
+  if (fields.proxyPopEnv) fields.proxyPopEnv.textContent = `· ${proxyPopTarget.name}`;
+  // 当前配置如实呈现（含 UI 下拉表达不了的代理厂商类型——保存会整体替换，这行让用户知道在替换什么）。
+  if (fields.proxyPopCurrent) fields.proxyPopCurrent.textContent = `当前：${prof.proxy || '无代理配置'}`;
+  const cfg = prof.proxyConfig || {};
+  if (fields.proxyPopType) {
+    fields.proxyPopType.value = !cfg.noProxy && PROXY_TYPE_OPTIONS.has(cfg.proxyType) ? cfg.proxyType : 'no_proxy';
+  }
+  if (fields.proxyPopHost) fields.proxyPopHost.value = cfg.noProxy ? '' : (cfg.proxyHost || '');
+  if (fields.proxyPopPort) fields.proxyPopPort.value = cfg.noProxy ? '' : (cfg.proxyPort || '');
+  if (fields.proxyPopUser) fields.proxyPopUser.value = cfg.noProxy ? '' : (cfg.proxyUser || '');
+  if (fields.proxyPopPass) fields.proxyPopPass.value = ''; // 密码绝不回显
+  syncProxyPopDetail();
+  setProxyPopMsg('', false);
+  fields.proxyPop.classList.remove('hidden');
+  fields.proxyPop.classList.add('open');
+  fields.proxyPop.setAttribute('aria-hidden', 'false');
+  fields.proxyMask?.classList.remove('hidden');
+}
+function closeProxyPop() {
+  if (!fields.proxyPop) return;
+  proxyPopTarget = null;
+  fields.proxyPop.classList.remove('open');
+  fields.proxyPop.classList.add('hidden');
+  fields.proxyPop.setAttribute('aria-hidden', 'true');
+  fields.proxyMask?.classList.add('hidden');
+}
+fields.proxyClose?.addEventListener('click', closeProxyPop);
+fields.proxyMask?.addEventListener('click', closeProxyPop);
+fields.proxyPopType?.addEventListener('change', syncProxyPopDetail);
+fields.proxySave?.addEventListener('click', async () => {
+  if (!proxyPopTarget || !window.aidcpEdge || typeof window.aidcpEdge.adsUpdateEnvProxy !== 'function') return;
+  const proxy = readProxyForm({
+    type: fields.proxyPopType,
+    host: fields.proxyPopHost,
+    port: fields.proxyPopPort,
+    user: fields.proxyPopUser,
+    pass: fields.proxyPopPass,
+  });
+  const err = quickProxyCheck(proxy);
+  if (err) return setProxyPopMsg(err, true);
+  fields.proxySave.disabled = true;
+  setProxyPopMsg('正在保存…', false);
+  try {
+    const r = await window.aidcpEdge.adsUpdateEnvProxy({ ...formAdsOpts(), userId: proxyPopTarget.userId, proxy });
+    if (r && r.ok) {
+      setEnvMsg(`已更新「${proxyPopTarget.name}」的代理（${proxy.proxyType === 'no_proxy' ? '已清除代理' : proxy.proxyType}），下次启动该环境生效。`, false);
+      closeProxyPop();
+      refreshEnvs();
+    } else {
+      setProxyPopMsg(`保存失败：${(r && r.error) || '未知错误'}`, true);
+    }
+  } catch (e) {
+    setProxyPopMsg(`保存失败：${(e && e.message) || e}`, true);
+  } finally {
+    if (fields.proxySave) fields.proxySave.disabled = false;
   }
 });
 
@@ -1878,7 +2114,8 @@ fields.relogin.addEventListener('click', async () => {
   }
 });
 
-// ─── 建号自助人设向导（change edge-persona-keyword-generation）───
+// ─── 建号自助人设向导（change edge-persona-keyword-generation；重设计于 edge-client-proxy-platform-persona-ux）───
+// 行为契约不变：闸三态语义 / 状态推送绝不重置已选关键词与草稿 / 草稿环境锚定 / 诚实失败展示。
 const personaUi = {
   stateBadge: document.querySelector('#persona-state-badge'),
   hint: document.querySelector('#persona-hint'),
@@ -1894,11 +2131,63 @@ const personaUi = {
   draftBody: document.querySelector('#persona-draft-body'),
   regenerate: document.querySelector('#persona-regenerate'),
   confirm: document.querySelector('#persona-confirm'),
+  // 重设计新增：空态面板 / 两步指示 / 阶段容器 / 骨架 / 关键词摘要条
+  empty: document.querySelector('#persona-empty'),
+  emptyTitle: document.querySelector('#persona-empty-title'),
+  emptySub: document.querySelector('#persona-empty-sub'),
+  emptyAction: document.querySelector('#persona-empty-action'),
+  steps: document.querySelector('#persona-steps'),
+  stagePick: document.querySelector('#persona-stage-pick'),
+  stagePreview: document.querySelector('#persona-stage-preview'),
+  skeleton: document.querySelector('#persona-skeleton'),
+  kwSummary: document.querySelector('#persona-kw-summary'),
+  kwSummaryText: document.querySelector('#persona-kw-summary-text'),
+  interestCount: document.querySelector('#persona-interest-count'),
 };
 let personaReady = false; // 已登录 + 云端已连接才可生成
 let personaDraftYaml = ''; // 当前草稿 soulYaml（确认时提交）
 let personaLocallyBound = false; // 本会话确认成功后即视为已绑（personaBound 信号要等下次 hello 才到）
 let personaDraftEnvId; // 草稿所属环境（多环境：persist MUST 打回生成时那个账号，不随后续切换环境漂移）
+let personaStage = 'pick'; // 两步向导阶段：pick（选关键词）| preview（预览确认）
+let personaInFlight = false; // 生成请求在途（骨架 + 按钮禁用 + 遮罩误点不关层）
+
+// 底部操作栏按阶段/形态切换主 CTA：向导态 pick=「生成人设」、preview=「重新生成 + 确认使用」；
+// 空态/已绑态收起全部按钮（空态面板自带「去启动」）。
+function syncPersonaFoot(mode) {
+  const wizard = mode === 'wizard';
+  const inPick = personaStage === 'pick';
+  personaUi.generate?.classList.toggle('hidden', !wizard || !inPick);
+  personaUi.regenerate?.classList.toggle('hidden', !wizard || inPick);
+  personaUi.confirm?.classList.toggle('hidden', !wizard || inPick);
+}
+
+function setPersonaStage(stage) {
+  personaStage = stage === 'preview' ? 'preview' : 'pick';
+  personaUi.stagePick?.classList.toggle('hidden', personaStage !== 'pick');
+  personaUi.stagePreview?.classList.toggle('hidden', personaStage !== 'preview');
+  if (personaUi.steps) {
+    personaUi.steps.querySelectorAll('.j-step').forEach((el) => {
+      const s = el.dataset.stage;
+      el.className = `j-step${s === personaStage ? ' cur' : s === 'pick' && personaStage === 'preview' ? ' done' : ''}`;
+    });
+  }
+  const wizardVisible = personaUi.wizardBody && !personaUi.wizardBody.classList.contains('hidden');
+  syncPersonaFoot(wizardVisible ? 'wizard' : 'hidden');
+}
+
+function updateKwSummary(keywords) {
+  if (personaUi.kwSummaryText) personaUi.kwSummaryText.textContent = `关键词：${keywords.join(' · ')}`;
+}
+// 「改关键词」：回到第一步；草稿保留（回来还能确认）。
+personaUi.kwSummary?.addEventListener('click', () => setPersonaStage('pick'));
+
+// 空态「去启动 / 打开浏览器窗口」：复用既有 FAB 三态与浏览器前置流程，不新增 IPC。
+personaUi.emptyAction?.addEventListener('click', () => {
+  closePersonaPop(true);
+  const action = fields.sessionFab && fields.sessionFab.dataset.action;
+  if (action === 'start' || action === 'resume') fields.sessionFab.click();
+  else window.aidcpEdge.showDrivenBrowser?.(currentEnvId()); // 已在运行（等登录）：抬浏览器窗口去登录
+});
 
 // 切换环境时清空人设草稿（向导是每环境独立的）：绝不让 A 生成的草稿留在界面上被误确认到 B 的账号。
 // 同时清本会话「已绑」态（personaLocallyBound 是账号级、随环境切换失效，等新环境自己的 hello 信号）。
@@ -1907,6 +2196,8 @@ function resetPersonaDraft() {
   personaDraftEnvId = undefined;
   personaLocallyBound = false;
   personaUi.draft?.classList.add('hidden');
+  personaUi.skeleton?.classList.add('hidden');
+  setPersonaStage('pick'); // 草稿已清，预览页无意义：切回第一步
 }
 
 const PERSONA_GEN_FAIL = {
@@ -1958,8 +2249,8 @@ function newIdempotencyKey() {
   return `persona-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
 
-// onboarding 三态（change persona-wizard-onboarding-fixes）：已绑→已设置跳过 / 未绑未连→分态引导 / 未绑已连→启用。
-// 只改 disabled/hint/显隐，绝不触碰已选关键词与草稿（状态推送不重置向导进度）。
+// onboarding 三态（change persona-wizard-onboarding-fixes）：已绑→已设置跳过 / 未绑未连→空态面板 / 未绑已连→启用向导。
+// 只改 disabled/显隐/面板文案，绝不触碰已选关键词与草稿（状态推送不重置向导进度）。
 function updatePersonaGate(status) {
   const loggedIn = Boolean(status && status.auth === 'logged in');
   const connected = Boolean(status && status.cloud === 'connected');
@@ -1970,12 +2261,15 @@ function updatePersonaGate(status) {
   const known = personaReady;
   const bound = known && (Boolean(status && status.personaBound) || personaLocallyBound);
 
-  // ① 已绑人设：显示「已设置」、隐藏向导体与提示、跳过（修「已绑仍显示未设置」）。
+  // 三形态显隐一处收口：已绑=绿卡 / 未就绪=空态面板 / 已连未绑=向导。
   if (personaUi.boundNote) personaUi.boundNote.classList.toggle('hidden', !bound);
-  if (personaUi.wizardBody) personaUi.wizardBody.classList.toggle('hidden', bound);
-  if (personaUi.hint) personaUi.hint.classList.toggle('hidden', bound);
+  if (personaUi.wizardBody) personaUi.wizardBody.classList.toggle('hidden', bound || !known);
+  if (personaUi.empty) personaUi.empty.classList.toggle('hidden', bound || known);
+
+  // ① 已绑人设：显示「已设置」、收起向导与底部按钮（修「已绑仍显示未设置」）。
   if (bound) {
     setPersonaBadge('已设置', 'normal');
+    syncPersonaFoot('hidden');
     return;
   }
   // 未绑或未知：徽标区分——权威已知未绑=「未设置」；未连云尚不知道=「待启动」（宁缺毋假，不谎称未设置）。
@@ -1984,20 +2278,39 @@ function updatePersonaGate(status) {
     setPersonaBadge(known ? '未设置' : '待启动', 'checking');
   }
 
-  // 生成 gate 判据不变；只改可见性与分态引导（未连云时对是否已绑保持中立）。
-  if (personaUi.generate) personaUi.generate.disabled = !personaReady;
-  if (personaUi.hint) {
-    if (personaReady) {
-      personaUi.hint.textContent = '选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。';
-    } else if (!loggedIn) {
-      personaUi.hint.textContent = '请先点右下角「启动」并扫码登录；连上云端后会显示该账号是否已设置人设，未设置可在此生成。';
-    } else {
-      personaUi.hint.textContent = '正在连接云端…连上后会显示该账号人设状态。';
+  // ② 闸未就绪：空态面板分两态（未登录 / 连云中），替代旧版「改写一行小字 + 一屏灰按钮」。
+  if (!known) {
+    const running = Boolean(status && (status.edge === 'running' || status.edge === 'starting'));
+    if (personaUi.emptyTitle) personaUi.emptyTitle.textContent = loggedIn ? '正在连接云端…' : '先启动并登录这个账号';
+    if (personaUi.emptySub) {
+      personaUi.emptySub.textContent = loggedIn
+        ? '连上云端后会显示该账号的人设状态，未设置可在此生成。'
+        : running
+          ? '环境已在运行：请在它的浏览器窗口里完成登录，登录后这里就能生成人设。'
+          : '启动该环境并在浏览器里登录后，这里就能为它生成人设。';
     }
+    if (personaUi.emptyAction) {
+      personaUi.emptyAction.classList.toggle('hidden', loggedIn); // 连云中无需动作
+      personaUi.emptyAction.textContent = running ? '打开浏览器窗口' : '去启动';
+    }
+    syncPersonaFoot('hidden');
+    return;
   }
+
+  // ③ 已连云且未绑：向导可用（生成 gate 判据不变）。
+  if (personaUi.generate) personaUi.generate.disabled = personaInFlight || !personaReady;
+  if (personaUi.hint) personaUi.hint.textContent = '选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。';
+  syncPersonaFoot('wizard');
 }
 
-// 关键词 toggle：单选组互斥、多选组可叠加。
+// 关键词 toggle：单选组互斥、多选组可叠加；同步 aria-pressed 与「已选 n」计数。
+function syncKwGroupState(group) {
+  group.querySelectorAll('.kw-btn').forEach((b) => b.setAttribute('aria-pressed', b.classList.contains('active') ? 'true' : 'false'));
+  if (group.dataset.dim === 'interest' && personaUi.interestCount) {
+    const n = group.querySelectorAll('.kw-btn.active').length;
+    personaUi.interestCount.textContent = n ? `已选 ${n}` : '';
+  }
+}
 personaUi.kwGroups.forEach((group) => {
   const single = group.dataset.select === 'single';
   group.addEventListener('click', (e) => {
@@ -2008,16 +2321,25 @@ personaUi.kwGroups.forEach((group) => {
     } else {
       btn.classList.toggle('active');
     }
+    syncKwGroupState(group);
   });
+  syncKwGroupState(group);
 });
 
 async function runPersonaGenerate() {
-  if (!personaReady) return setPersonaMsg('请先扫码登录并连上云端', true);
+  if (!personaReady) return setPersonaMsg('请先启动该环境并在浏览器里登录', true);
   const keywordSelections = collectPersonaKeywords();
   if (!keywordSelections.length) return setPersonaMsg('请先选择关键词', true);
   if (!window.aidcpEdge || typeof window.aidcpEdge.personaGenerate !== 'function') return;
+  personaInFlight = true;
+  // 预先切到预览页：让「结果会出现在哪」提前可见，生成中该处呈现骨架。
+  updateKwSummary(keywordSelections);
+  setPersonaStage('preview');
+  personaUi.skeleton?.classList.remove('hidden');
+  personaUi.draft?.classList.add('hidden');
   personaUi.generate.disabled = true;
-  if (personaUi.regenerate) personaUi.regenerate.disabled = true;
+  if (personaUi.regenerate) { personaUi.regenerate.disabled = true; personaUi.regenerate.textContent = '正在生成…'; }
+  if (personaUi.confirm) personaUi.confirm.disabled = true;
   setPersonaMsg('正在生成人设…（可能需要十几秒）', false);
   const genEnvId = currentEnvId(); // 生成时锁定目标环境；persist 打回它，绝不随后续切换漂移
   try {
@@ -2025,7 +2347,8 @@ async function runPersonaGenerate() {
     if (r && r.ok && r.soulYaml) {
       personaDraftYaml = r.soulYaml;
       personaDraftEnvId = genEnvId;
-      if (personaUi.draftSummary) personaUi.draftSummary.textContent = r.identitySummary || '已生成';
+      // 信息层级：identitySummary（给人看的人设）升为标题；原始 YAML 收进折叠。
+      if (personaUi.draftSummary) personaUi.draftSummary.textContent = r.identitySummary || '已生成人设';
       if (personaUi.draftBody) personaUi.draftBody.textContent = r.soulYaml;
       personaUi.draft?.classList.remove('hidden');
       setPersonaBadge('待确认', 'warning');
@@ -2033,11 +2356,15 @@ async function runPersonaGenerate() {
     } else {
       personaDraftYaml = '';
       personaUi.draft?.classList.add('hidden');
+      setPersonaStage('pick'); // 失败诚实回到选关键词，错误在底栏警示条如实展示
       setPersonaMsg(PERSONA_GEN_FAIL[(r && r.reason) || ''] || `生成失败：${(r && r.reason) || '未知'}`, true);
     }
   } finally {
+    personaInFlight = false;
+    personaUi.skeleton?.classList.add('hidden');
     personaUi.generate.disabled = !personaReady;
-    if (personaUi.regenerate) personaUi.regenerate.disabled = false;
+    if (personaUi.regenerate) { personaUi.regenerate.disabled = false; personaUi.regenerate.textContent = '重新生成'; }
+    if (personaUi.confirm) personaUi.confirm.disabled = false;
   }
 }
 
@@ -2058,8 +2385,8 @@ personaUi.confirm?.addEventListener('click', async () => {
       setPersonaBadge('已设置', 'normal');
       personaUi.draft?.classList.add('hidden');
       personaUi.wizardBody?.classList.add('hidden');
-      personaUi.hint?.classList.add('hidden');
       personaUi.boundNote?.classList.remove('hidden');
+      syncPersonaFoot('hidden');
       setPersonaMsg('人设已保存，账号即将开始自动运营。', false);
     } else {
       setPersonaMsg(PERSONA_PERSIST_FAIL[(r && r.reason) || ''] || `保存失败：${(r && r.reason) || '未知'}`, true);

@@ -217,16 +217,55 @@ function createAdsLocalApi(deps = {}) {
 // user/list 单项归一化。user_id=写入分身 ID 的唯一值；serial_number（UI 序号）/name/代理配置仅供展示。
 function normalizeProfile(it) {
   it = it || {};
-  // change edge-environment-platform-select：从 remark 解出该环境的平台（旧环境无 plat → 回落 xiaohongshu）。
-  const meta = parseRemark(it.remark);
+  const { platform, platformSource } = inferPlatform(it);
   return {
     userId: it.user_id != null ? String(it.user_id) : '', // ← 唯一分身 ID，写入 adsProfileId
     serialNumber: it.serial_number != null ? String(it.serial_number) : '', // 仅展示，MUST NOT 写入 adsProfileId
     name: it.name || it.username || '',
     groupName: it.group_name || '',
-    platform: meta ? meta.platform : DEFAULT_PLATFORM, // 每环境平台（展示 + 选中时同步进 settings 供启动注入）
+    platform, // 每环境平台（展示 + 选中时同步进 settings 供启动注入）
+    platformSource, // remark|domain|urls|keyword|fallback——UI 对非 remark 来源标注「推断」
     proxy: summarizeProxy(it), // 代理**配置**摘要（非实测出口 IP）
+    proxyConfig: structuredProxy(it), // 结构化非密字段，供编辑浮层预填（**不含密码**）
   };
+}
+
+// 平台兜底推断（change edge-client-proxy-platform-persona-ux，扩展 edge-environment-platform-select 的回落）：
+// remark plat（权威，永远最高）→ domain_name 命中平台域名 → open_urls 任一命中 → 分组/名称关键词 → 回落 xhs。
+// 纯只读：绝不因推断回写 remark；缺字段安全降级。误推断可在加入面板显式改平台纠正（存本机 settings）。
+const FB_KEYWORD_RE = /facebook|\bfb\b|脸书/i;
+
+function platformOfUrlish(s) {
+  const v = String(s || '');
+  if (!v) return '';
+  if (/(facebook|fb)\.com/i.test(v)) return 'facebook';
+  if (/xiaohongshu\.com/i.test(v)) return 'xiaohongshu';
+  return '';
+}
+
+function inferPlatform(it) {
+  it = it || {};
+  const meta = parseRemark(it.remark);
+  if (meta) return { platform: meta.platform, platformSource: 'remark' };
+
+  const byDomain = platformOfUrlish(it.domain_name);
+  if (byDomain) return { platform: byDomain, platformSource: 'domain' };
+
+  const urls = Array.isArray(it.open_urls) ? it.open_urls : (typeof it.open_urls === 'string' && it.open_urls ? [it.open_urls] : []);
+  for (const u of urls) {
+    const byUrl = platformOfUrlish(u);
+    if (byUrl) return { platform: byUrl, platformSource: 'urls' };
+  }
+
+  const label = `${it.group_name || ''} ${it.name || it.username || ''}`;
+  if (FB_KEYWORD_RE.test(label)) return { platform: 'facebook', platformSource: 'keyword' };
+
+  return { platform: DEFAULT_PLATFORM, platformSource: 'fallback' };
+}
+
+// 真机 no_proxy 环境的 proxy_type = 'no_proxy'（带下划线）；兼容 noproxy/no-proxy 各写法当作无代理。
+function isNoProxyType(type) {
+  return !type || /^no[_-]?proxy$/i.test(type);
 }
 
 // 代理配置摘要：user/list 返回的是代理**配置**（proxy 类型/host + 配置 ip/ip_country），
@@ -237,8 +276,7 @@ function summarizeProxy(it) {
   const host = cfg.proxy_host || '';
   const ip = it.ip || cfg.ip || '';
   const country = it.ip_country || cfg.ip_country || '';
-  // 真机 no_proxy 环境的 proxy_type = 'no_proxy'（带下划线）；兼容 noproxy/no-proxy 各写法当作无代理。
-  const isNoProxy = !type || /^no[_-]?proxy$/i.test(type);
+  const isNoProxy = isNoProxyType(type);
   const parts = [];
   if (!isNoProxy) parts.push(type);
   if (host) parts.push(host);
@@ -247,4 +285,19 @@ function summarizeProxy(it) {
   return parts.length ? parts.join(' · ') : '无代理配置';
 }
 
-module.exports = { createAdsLocalApi, normalizeProfile, ADS_MIN_INTERVAL_MS, DEFAULT_ADS_BASE };
+// 结构化代理透传（编辑浮层预填用）。红线：**不透传 proxy_password**——list 本就可能不回传密码，
+// 且渲染层绝不回显旧密码；port/user 各版本回传完整度未验证，预填容忍空、由用户补全。
+function structuredProxy(it) {
+  const cfg = (it && (it.user_proxy_config || it.proxy_config)) || {};
+  const type = cfg.proxy_type || cfg.proxy_soft || '';
+  const noProxy = isNoProxyType(type);
+  return {
+    noProxy,
+    proxyType: noProxy ? '' : String(type || '').toLowerCase(),
+    proxyHost: cfg.proxy_host != null ? String(cfg.proxy_host) : '',
+    proxyPort: cfg.proxy_port != null ? String(cfg.proxy_port) : '',
+    proxyUser: cfg.proxy_user != null ? String(cfg.proxy_user) : '',
+  };
+}
+
+module.exports = { createAdsLocalApi, normalizeProfile, inferPlatform, ADS_MIN_INTERVAL_MS, DEFAULT_ADS_BASE };
