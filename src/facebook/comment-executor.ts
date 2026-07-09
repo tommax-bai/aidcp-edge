@@ -578,12 +578,17 @@ function buildPostContentJs(maxComments: number): string {
   })()`;
 }
 
-/** 催拉后聚焦评论框：命中群问答/入群门禁 → permissionGated；否则 focus。 */
+/**
+ * 催拉后聚焦评论框：命中**群问答编辑器**（输入回答/Answer entry-question，非评论框）→ permissionGated；否则 focus。
+ * 注意：**不再**用全页 body 的「加入/Join」词做门禁——帖子 permalink 页的侧栏/推荐群 chrome 几乎必含「加入/Join」，
+ * 会把已入群的成员误判为未入群（真机实证：submit permission_gated 假阳）。成员身份已在搜索期由 membership 闸核过
+ * （搜到候选=可访问该群帖），且此处已找到真实可聚焦的评论框（非群问答框）——即可评论。
+ */
 const FOCUS_EDITOR_JS = `(function(){${FB_EXEC_HELPERS_JS}
   var eds=fbEditors();
   if(eds.length===0) return JSON.stringify({found:false,focused:false,permissionGated:false});
   var el=eds[0];
-  if(fbIsGroupQuestionEditor(el)||fbJoinSignalVisible()) return JSON.stringify({found:true,focused:false,permissionGated:true});
+  if(fbIsGroupQuestionEditor(el)) return JSON.stringify({found:true,focused:false,permissionGated:true});
   try{ el.scrollIntoView({block:'center'}); }catch(e){}
   try{ el.focus(); }catch(e){}
   var focused=document.activeElement===el;
