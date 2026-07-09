@@ -44,7 +44,7 @@ import {
   type BrowserLaunchOptions,
 } from './cdp/index.js';
 import { selectPlatformDriver } from './platform/index.js';
-import { FacebookCommentExecutor, FacebookCommentHandler } from './facebook/index.js';
+import { FacebookCommentExecutor, FacebookCommentHandler, FacebookJoinExecutor } from './facebook/index.js';
 import { EdgeClient } from './client/edge-client.js';
 import { registerPersonaStdinCommands } from './client/persona-onboarding.js';
 import { deriveEdgeId } from './client/edge-id.js';
@@ -424,9 +424,10 @@ async function main(): Promise<void> {
   // 绝不锁在 if(autoBrowse) 内——否则 Facebook（无 browse 能力）永不注册 browseHandler，
   // 这三条已在白名单的命令会被 `browseHandler?.()` 可选链静默吞、零回执 → 云端干等超时挂死。
   // 与小红书（browse+comment）的 BrowseSession 单槽 browseHandler 互斥：仅 comment-only 平台走这里。
-  const commentOnlyDriver =
-    platformDriver.capabilities.includes('comment') && !platformDriver.capabilities.includes('browse');
-  if (commentOnlyDriver) {
+  const facebookCommandDriver =
+    (platformDriver.capabilities.includes('comment') || platformDriver.capabilities.includes('join')) &&
+    !platformDriver.capabilities.includes('browse');
+  if (facebookCommandDriver) {
     // 该平台的旁路弹窗监测体后台常开：执行器每步操作前 fresh 复检登录/验证码（fail-closed）。
     overlayMonitor = platformDriver.createOverlayMonitor(session.cdp);
     overlayMonitor.start();
@@ -436,8 +437,16 @@ async function main(): Promise<void> {
       overlayMonitor,
       logger: (m) => console.log(m),
     });
+    const fbJoinExecutor = platformDriver.capabilities.includes('join')
+      ? new FacebookJoinExecutor({
+          cdp: session.cdp,
+          overlayMonitor,
+          logger: (m) => console.log(m),
+        })
+      : undefined;
     const fbCommentHandler = new FacebookCommentHandler({
       executor: fbCommentExecutor,
+      ...(fbJoinExecutor ? { joinExecutor: fbJoinExecutor } : {}),
       client,
       logger: (m) => console.log(m),
     });

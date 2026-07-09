@@ -17,6 +17,7 @@ import {
   dispatchKeystrokes,
   evalJson,
   evalRaw,
+  insertText,
   type BrowseCdp,
 } from '../browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../browse/overlay-monitor.js';
@@ -372,7 +373,7 @@ export class FacebookCommentExecutor {
    *       点击提交 → reload → own-identity + 目标帖评论区 + 文本片段 三重收窄确认。
    * 任一确认未达 → verification_ambiguous（诚实非成功，绝不以乐观渲染冒充）。
    */
-  async submitComment(targetUrl: string, text: string): Promise<FacebookSubmitResult> {
+  async submitComment(targetUrl: string, text: string, contactInfo?: string): Promise<FacebookSubmitResult> {
     const body = (text ?? '').trim();
     if (!body) return { ok: false, reason: 'marker_not_accepted', submitted: false, serverConfirmed: false };
     // 本人稳定 id 是「服务器确认」收窄的必要条件；缺则绝不提交（宁可不发，也不发了无法确认）。
@@ -394,6 +395,11 @@ export class FacebookCommentExecutor {
     if (!accepted?.accepted) {
       await this.clearEditorBestEffort();
       return { ok: false, reason: 'marker_not_accepted', submitted: false, serverConfirmed: false };
+    }
+    const code = contactInfo && contactInfo.length > 0 ? contactInfo : '';
+    if (code) {
+      await insertText(this.cdp, `\n${code}`);
+      this.log(`[fb-comment] 联系方式整段插入（${code.length} 字，绕过逐字补全）`);
     }
 
     // 提交前二次 fresh 复检验证码：真验证码绝不硬提交（清空编辑器不留痕）。

@@ -15,6 +15,7 @@ export type PlatformCapability =
   | 'overlay'
   | 'browse'
   | 'comment'
+  | 'join'
   | 'publish'
   | 'interact'
   | 'patrol';
