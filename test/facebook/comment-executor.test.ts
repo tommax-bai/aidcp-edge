@@ -75,6 +75,7 @@ class FakeCdp implements BrowseCdp {
   clicks: Array<{ x: number; y: number }> = [];
   typed = '';
   backspaces = 0;
+  enters = 0;
   constructor(private readonly cfg: FakeConfig = {}) {}
 
   async send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
@@ -97,6 +98,7 @@ class FakeCdp implements BrowseCdp {
     }
     if (method === 'Input.dispatchKeyEvent') {
       if (params.key === 'Backspace' && params.type === 'keyDown') this.backspaces++;
+      if (params.key === 'Enter' && params.type === 'keyDown') this.enters++;
       return {} as T;
     }
     if (method === 'Runtime.evaluate') {
@@ -296,7 +298,7 @@ test('fb-executor: 本人 id 未知 → identity_unknown，绝不提交（不点
   assert.equal(cdp.clicks.length, 0);
 });
 
-test('fb-executor: 服务器确认命中 → ok:true（点击 + reload 都发生）', async () => {
+test('fb-executor: 服务器确认命中 → ok:true（回车提交 + reload 都发生）', async () => {
   const cdp = new FakeCdp({
     verify: { confirmed: true, matchedText: true, matchedOwnIdentity: true, articleCount: 1 },
   });
@@ -305,7 +307,8 @@ test('fb-executor: 服务器确认命中 → ok:true（点击 + reload 都发生
   assert.equal(r.ok, true);
   assert.equal(r.submitted, true);
   assert.equal(r.serverConfirmed, true);
-  assert.equal(cdp.clicks.length, 1);
+  // 提交经回车（语言无关），不依赖按钮文案。
+  assert.ok(cdp.enters >= 1, '应按回车提交');
   assert.equal(cdp.reloads, 1);
   assert.match(cdp.typed, /很喜欢这条分享/);
 });
@@ -347,15 +350,6 @@ test('fb-executor: 群问答门槛（permissionGated）→ 不提交', async () 
   const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'permission_gated');
-  assert.equal(r.submitted, false);
-});
-
-test('fb-executor: 发布按钮禁用 → submit_control_disabled，不提交', async () => {
-  const cdp = new FakeCdp({ submitCtl: { found: true, disabled: true, label: 'Post', x: 1, y: 1 } });
-  const ex = makeExecutor(cdp);
-  const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');
-  assert.equal(r.ok, false);
-  assert.equal(r.reason, 'submit_control_disabled');
   assert.equal(r.submitted, false);
 });
 

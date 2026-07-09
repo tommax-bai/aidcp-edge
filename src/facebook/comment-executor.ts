@@ -13,7 +13,6 @@
 // 所有 DOM 交互经 BrowseCdp（Runtime.evaluate 注入自包含 IIFE + Node 侧 JSON.parse），与探针同构、可用 { send } 桩单测。
 
 import {
-  dispatchClick,
   dispatchKey,
   dispatchKeystrokes,
   evalJson,
@@ -397,17 +396,6 @@ export class FacebookCommentExecutor {
       return { ok: false, reason: 'marker_not_accepted', submitted: false, serverConfirmed: false };
     }
 
-    // 找发布控件（受控输入后才出现/启用）。
-    const submit = await evalJson<SubmitControl>(this.cdp, SUBMIT_CONTROL_JS);
-    if (!submit?.found) {
-      await this.clearEditorBestEffort();
-      return { ok: false, reason: 'submit_control_not_found', submitted: false, serverConfirmed: false };
-    }
-    if (submit.disabled) {
-      await this.clearEditorBestEffort();
-      return { ok: false, reason: 'submit_control_disabled', submitted: false, serverConfirmed: false };
-    }
-
     // 提交前二次 fresh 复检验证码：真验证码绝不硬提交（清空编辑器不留痕）。
     const blockedMid = await this.blockingReason();
     if (blockedMid) {
@@ -415,7 +403,11 @@ export class FacebookCommentExecutor {
       return { ok: false, reason: blockedMid, submitted: false, serverConfirmed: false };
     }
 
-    await dispatchClick(this.cdp, submit.x, submit.y);
+    // 提交：FB 评论/回答框**回车即发**（语言无关，不依赖按钮文案；Shift+Enter 才换行）。
+    // 受控输入后可能失焦——先再聚焦一次，确保 Enter 落在编辑器上；随后按 Enter 提交。
+    // （旧版按按钮文案 `发布评论|Post|…` 定位提交控件在西语/问答帖上会 submit_control_not_found；回车更稳。）
+    await evalJson<FocusEditorResult>(this.cdp, FOCUS_EDITOR_JS);
+    await dispatchKey(this.cdp, 'Enter', 'Enter', 13);
     await this.sleep(this.opts.waitAfterSubmitMs);
     // reload 后做 own-identity 收窄确认（F1 补丁②）：绝不用乐观渲染 / 全页文本命中冒充成功。
     try {
@@ -487,13 +479,6 @@ interface FocusEditorResult {
   permissionGated: boolean;
 }
 
-interface SubmitControl {
-  found: boolean;
-  disabled: boolean;
-  label: string | null;
-  x: number;
-  y: number;
-}
 
 interface ScopedVerifyResult {
   confirmed: boolean;
@@ -579,16 +564,16 @@ function buildPostContentJs(maxComments: number): string {
 }
 
 /**
- * 催拉后聚焦评论框：命中**群问答编辑器**（输入回答/Answer entry-question，非评论框）→ permissionGated；否则 focus。
- * 注意：**不再**用全页 body 的「加入/Join」词做门禁——帖子 permalink 页的侧栏/推荐群 chrome 几乎必含「加入/Join」，
- * 会把已入群的成员误判为未入群（真机实证：submit permission_gated 假阳）。成员身份已在搜索期由 membership 闸核过
- * （搜到候选=可访问该群帖），且此处已找到真实可聚焦的评论框（非群问答框）——即可评论。
+ * 催拉后聚焦评论/回答框，聚焦成功即可评论。
+ * 注意：**不再**在此做入群/群问答门禁。真机实证两类假阳：(1) 全页 body 的「加入/Join」词会命中侧栏/推荐群 chrome，
+ * 把已入群成员误判未入群；(2) **问答型帖子**的回复框 aria-label 是「输入回答…/Answer」（与入群问答同文案），
+ * 但那是合法的回帖框、答一条即评论。成员身份已在搜索期由 membership 闸核过（搜到候选=可访问该群帖），
+ * 且此处已找到真实可聚焦的评论框——直接聚焦。真正的入群/待批准在搜索期就 permission_gated 了。
  */
 const FOCUS_EDITOR_JS = `(function(){${FB_EXEC_HELPERS_JS}
   var eds=fbEditors();
   if(eds.length===0) return JSON.stringify({found:false,focused:false,permissionGated:false});
   var el=eds[0];
-  if(fbIsGroupQuestionEditor(el)) return JSON.stringify({found:true,focused:false,permissionGated:true});
   try{ el.scrollIntoView({block:'center'}); }catch(e){}
   try{ el.focus(); }catch(e){}
   var focused=document.activeElement===el;
@@ -603,15 +588,6 @@ function buildMarkerAcceptedJs(text: string): string {
     return JSON.stringify({accepted: t.indexOf(${jsString(text.trim())})>=0});
   })()`;
 }
-
-/** 找发布评论控件（受控输入后启用），返回其视口中心点 + 禁用态。 */
-const SUBMIT_CONTROL_JS = `(function(){${FB_EXEC_HELPERS_JS}
-  var eds=fbEditors(); var editor=eds[0]||document.activeElement;
-  var root=(editor&&(editor.closest('[role="article"]')||editor.closest('form')))||document;
-  var nodes=Array.prototype.slice.call(root.querySelectorAll('button,[role="button"],div[aria-label],span[aria-label]'));
-  for(var i=0;i<nodes.length;i++){ var n=nodes[i]; if(!fbVisible(n)) continue; var lab=(n.getAttribute('aria-label')||fbText(n)||''); if(/^(发布评论|发表评论|Post|Comment|Reply|Send)$/i.test(lab)){ var dis=(n.disabled===true)||n.getAttribute('aria-disabled')==='true'||n.hasAttribute('disabled'); var r=n.getBoundingClientRect(); return JSON.stringify({found:true,disabled:dis,label:lab,x:r.left+r.width/2,y:r.top+r.height/2}); } }
-  return JSON.stringify({found:false,disabled:false,label:null,x:0,y:0});
-})()`;
 
 /** 全选评论编辑器内容（配合 Backspace 清空，不提交）。 */
 const SELECT_EDITOR_CONTENTS_JS = `(function(){${FB_EXEC_HELPERS_JS}
