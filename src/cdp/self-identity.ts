@@ -68,7 +68,7 @@ export type CreatorStorageIdentityDerivation =
   | { ok: true; accountId: string; displayName: string | null; redId: string | null }
   | { ok: false; reason: string };
 
-export type SelfIdentitySource = 'in-place' | 'navigate' | 'creator-storage';
+export type SelfIdentitySource = 'in-place' | 'navigate' | 'creator-storage' | 'facebook-cookie';
 
 export interface SelfIdentity {
   /** 账号主键 = 登录态读出的稳定 userid。 */

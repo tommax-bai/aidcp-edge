@@ -3,14 +3,21 @@ import type { SelfIdentityResult } from '../cdp/self-identity.js';
 
 export const FACEBOOK_NUMERIC_ID_RE = /^\d{5,}$/;
 
+interface FacebookCookieLike {
+  name?: string;
+  value?: string;
+  domain?: string;
+}
+
 export interface FacebookIdentitySignals {
   href: string;
   profileHrefs: string[];
+  cookieUserId: string | null;
   displayName: string | null;
 }
 
 export type FacebookIdentityDerivation =
-  | { ok: true; accountId: string; displayName: string | null; source: 'profile-link' }
+  | { ok: true; accountId: string; displayName: string | null; source: 'cookie' | 'profile-link' | 'cookie+profile-link' }
   | { ok: false; reason: string };
 
 export function extractFacebookIdFromHref(href: string | null | undefined): string {
@@ -34,19 +41,32 @@ function cleanDisplayName(value: string | null | undefined): string | null {
 }
 
 export function deriveFacebookIdentity(signals: FacebookIdentitySignals): FacebookIdentityDerivation {
+  const cookieUserId = FACEBOOK_NUMERIC_ID_RE.test(signals.cookieUserId ?? '') ? signals.cookieUserId : null;
   const ids = signals.profileHrefs
     .map(extractFacebookIdFromHref)
     .filter(Boolean);
   const unique = Array.from(new Set(ids));
-  if (unique.length === 1) {
+  if (unique.length > 1) return { ok: false, reason: `facebook identity candidates conflict: ${unique.join(',')}` };
+  const profileId = unique[0] ?? null;
+  if (cookieUserId && profileId && cookieUserId !== profileId) {
+    return { ok: false, reason: 'facebook identity cookie/profile mismatch' };
+  }
+  if (cookieUserId) {
     return {
       ok: true,
-      accountId: unique[0],
+      accountId: cookieUserId,
+      displayName: cleanDisplayName(signals.displayName),
+      source: profileId ? 'cookie+profile-link' : 'cookie',
+    };
+  }
+  if (profileId) {
+    return {
+      ok: true,
+      accountId: profileId,
       displayName: cleanDisplayName(signals.displayName),
       source: 'profile-link',
     };
   }
-  if (unique.length > 1) return { ok: false, reason: `facebook identity candidates conflict: ${unique.join(',')}` };
   if (cleanDisplayName(signals.displayName)) {
     return { ok: false, reason: 'facebook display name is present but no stable numeric id candidate was found' };
   }
@@ -74,14 +94,30 @@ const FACEBOOK_IDENTITY_SCAN_JS = `(function(){
   return JSON.stringify({ href: location.href, profileHrefs: hrefs, displayName: menuName });
 })()`;
 
+async function readFacebookCookieUserId(cdp: BrowseCdp): Promise<{ ok: true; accountId: string | null } | { ok: false; reason: string }> {
+  const cookieRes = await cdp.send<{ cookies?: FacebookCookieLike[] }>('Network.getAllCookies').catch(() => ({ cookies: [] }));
+  const ids = (cookieRes.cookies ?? [])
+    .filter((cookie) => cookie.name === 'c_user' && String(cookie.domain ?? '').includes('facebook.com'))
+    .map((cookie) => String(cookie.value ?? '').trim())
+    .filter((value) => FACEBOOK_NUMERIC_ID_RE.test(value));
+  const unique = Array.from(new Set(ids));
+  if (unique.length > 1) return { ok: false, reason: 'facebook c_user cookie candidates conflict' };
+  return { ok: true, accountId: unique[0] ?? null };
+}
+
 export async function readFacebookIdentity(
   cdp: BrowseCdp,
   opts: { logger?: (msg: string) => void } = {},
 ): Promise<SelfIdentityResult> {
+  const cookie = await readFacebookCookieUserId(cdp);
+  if (!cookie.ok) {
+    opts.logger?.(`[facebook-identity] ${cookie.reason}`);
+    return { ok: false, reason: cookie.reason };
+  }
   const raw = await evalRaw<string>(cdp, FACEBOOK_IDENTITY_SCAN_JS);
   let signals: FacebookIdentitySignals;
   try {
-    signals = JSON.parse(raw) as FacebookIdentitySignals;
+    signals = { ...(JSON.parse(raw) as FacebookIdentitySignals), cookieUserId: cookie.accountId };
   } catch {
     return { ok: false, reason: 'facebook identity scan returned invalid JSON' };
   }
@@ -96,7 +132,7 @@ export async function readFacebookIdentity(
       accountId: derived.accountId,
       displayName: derived.displayName,
       redId: null,
-      source: 'in-place',
+      source: derived.source === 'profile-link' ? 'in-place' : 'facebook-cookie',
     },
   };
 }
