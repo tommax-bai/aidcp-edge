@@ -15,6 +15,7 @@ const {
 } = require('./ads-create-env-service.cjs');
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
+const { envKeyFromSettings, adoptStoredLastPublish, serializeUiState } = require('./ui-state.cjs');
 const {
   DEFAULT_PARKING_MODE,
   normalizeParkingMode,
@@ -244,6 +245,12 @@ const status = {
 };
 
 // 轻量 UI 状态持久化（与用户设置分文件；只存展示性历史，如最近发布）。
+// 历史态带环境归属键（change env-switch-last-publish-reset）：异键/缺键不采纳，防切环境后串显旧账号内容。
+// lastPublishEnvKey 与 status.lastPublish 同生同灭；runningEnvKey 在核心 spawn 时刻快照，
+// 写入归属一律取它——防「保存了新设置但未重启」窗口内把旧核心的发布记到新环境名下。
+let lastPublishEnvKey = null;
+let runningEnvKey = null;
+
 function uiStateFile() {
   return path.join(app.getPath('userData'), 'ui-state.json');
 }
@@ -251,8 +258,11 @@ function uiStateFile() {
 function loadUiState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(uiStateFile(), 'utf8'));
-    if (parsed && parsed.lastPublish && typeof parsed.lastPublish.title === 'string') {
-      status.lastPublish = { title: parsed.lastPublish.title, at: parsed.lastPublish.at || null };
+    const envKey = envKeyFromSettings(settings);
+    const adopted = adoptStoredLastPublish(parsed, envKey);
+    if (adopted) {
+      status.lastPublish = adopted;
+      lastPublishEnvKey = envKey;
     }
   } catch {
     /* 无历史/坏文件按空处理 */
@@ -262,7 +272,7 @@ function loadUiState() {
 function saveUiState() {
   try {
     fs.mkdirSync(app.getPath('userData'), { recursive: true });
-    fs.writeFileSync(uiStateFile(), JSON.stringify({ lastPublish: status.lastPublish }, null, 2), 'utf8');
+    fs.writeFileSync(uiStateFile(), JSON.stringify(serializeUiState(lastPublishEnvKey, status.lastPublish), null, 2), 'utf8');
   } catch (error) {
     console.error('[aidcp-edge] ui-state 写入失败:', error?.message); // 展示性历史，写失败不阻断
   }
@@ -661,6 +671,7 @@ function startEdge() {
   // 覆盖 → 外部显式设置仍是逃生阀、优先生效。
   const wasAdspower = settings.provider === 'adspower';
   browserParkingReady = false;
+  runningEnvKey = envKeyFromSettings(settings);
   edgeProcess = spawn(process.execPath, [edgeEntry], {
     cwd: appRoot,
     env: { ...buildProviderEnv(), ...process.env, ELECTRON_RUN_AS_NODE: '1' },
@@ -671,11 +682,15 @@ function startEdge() {
   // 发布卡在途状态随核心（重）启动清零（edge-companion-ui 8.1 评审修正）：离线窗口内的审批变化
   // （拒绝/失败）推送会如实丢失，旧 pending/approved 卡若不清会永久滞留成陈卡；真在候审/已批的
   // 草稿由重连后的云端 hello 快照重新推回（pending/approved 可重建，终态不回放）。lastPublish
-  // 历史态不清（持久数据，云端快照到位后以云端为准覆盖）。
+  // 历史态同环境重启不清（持久数据，云端快照到位后以云端为准覆盖）；归属其他环境则随本次启动
+  // 清出展示、回落空态占位（change env-switch-last-publish-reset：切环境不得串显旧账号内容）。
+  const staleLastPublish = Boolean(status.lastPublish) && lastPublishEnvKey !== runningEnvKey;
+  if (staleLastPublish) lastPublishEnvKey = null;
   updateStatus({
     edge: 'starting',
     session: 'running',
     publish: null,
+    ...(staleLastPublish ? { lastPublish: null } : {}),
     lastMessage: '正在启动 aidcp-edge…',
     ...presencePatch('正在启动引擎…'),
     ...clearEdgeFailurePatch(),
@@ -966,6 +981,8 @@ function handleEdgeLogLine(message, isError = false) {
       }
       if (evt.publish.state === 'published' && evt.publish.title) {
         next.lastPublish = { title: evt.publish.title, at: next.publish.at };
+        // 归属按 spawn 时刻的环境键记：事件来自在跑核心，而 settings 可能已被改成尚未生效的新环境。
+        lastPublishEnvKey = runningEnvKey || envKeyFromSettings(settings);
       }
     }
     if (evt.lastPublish && typeof evt.lastPublish.title === 'string' && evt.lastPublish.title) {
@@ -975,6 +992,7 @@ function handleEdgeLogLine(message, isError = false) {
         title: evt.lastPublish.title,
         at: Number.isFinite(evt.lastPublish.at) ? new Date(evt.lastPublish.at).toISOString() : null,
       };
+      lastPublishEnvKey = runningEnvKey || envKeyFromSettings(settings);
     }
     if (evt.dailyUsage) {
       const dailyUsage = normalizeDailyUsage(evt.dailyUsage);
