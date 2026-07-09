@@ -498,17 +498,22 @@ const FB_EXEC_HELPERS_JS = `
 `;
 
 /**
- * 读容器真实名称：og:title 优先，其次群头部 h1，最后清洗 document.title（去掉尾部「| Facebook」「- Facebook」等）。
- * 读不出返回 null——诚实，云端据此不回填（绝不用 id 冒充名称）。
+ * 读容器真实群名。真机实证：群内**搜索页与群主页**的 document.title 都是「(N) <群名> | Facebook」形态
+ * （N=未读数前缀），群名稳定藏在这里；而搜索页的 h1 是「搜索结果」（会误当群名）。故顺序：
+ * og:title（群主页偶有、干净）→ 清洗后的 document.title（去「(N) 」未读前缀 + 去「| Facebook」尾缀）→ h1，
+ * 且每步都过「通用词」过滤（搜索结果/Search results/Facebook/群组/首页 等一律丢，绝不当群名）。
+ * 读不出返回 null——诚实，云端据此不回填、绝不用 id 或界面词冒充群名。
  */
 const CONTAINER_NAME_JS = `(function(){
-  function clean(s){ return String(s||'').replace(/\\s+/g,' ').replace(/\\s*[|\\-–]\\s*Facebook\\s*$/i,'').trim(); }
+  function clean(s){ return String(s||'').replace(/\\s+/g,' ').replace(/^\\(\\d+\\+?\\)\\s*/,'').replace(/\\s*[|\\-–·]\\s*Facebook\\s*$/i,'').trim(); }
+  function generic(s){ return !s || /^(搜索结果|搜尋結果|Search results?|Resultados|Facebook|群组|群組|Groups?|首页|首頁|Home)$/i.test(s); }
   var og=document.querySelector('meta[property="og:title"]'); var ogv=og?clean(og.getAttribute('content')):'';
-  if(ogv) return JSON.stringify({name:ogv});
-  var h1=document.querySelector('[role="main"] h1, h1'); var hv=h1?clean(h1.innerText||h1.textContent):'';
-  if(hv) return JSON.stringify({name:hv});
+  if(ogv && !generic(ogv)) return JSON.stringify({name:ogv});
   var tv=clean(document.title);
-  return JSON.stringify({name: tv || null});
+  if(tv && !generic(tv)) return JSON.stringify({name:tv});
+  var h1=document.querySelector('[role="main"] h1, h1'); var hv=h1?clean(h1.innerText||h1.textContent):'';
+  if(hv && !generic(hv)) return JSON.stringify({name:hv});
+  return JSON.stringify({name: null});
 })()`;
 
 /**
