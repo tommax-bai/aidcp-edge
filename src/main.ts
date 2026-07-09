@@ -75,6 +75,14 @@ import {
   type BrowseSessionOptions,
   type OverlayMonitor,
 } from './browse/index.js';
+import type { IdentityDecision, SelfIdentityResult } from './cdp/self-identity.js';
+
+function verifiedAccountNickname(idRes: SelfIdentityResult, decision: IdentityDecision): string | undefined {
+  if (!idRes.ok || decision.kind !== 'use') return undefined;
+  if (decision.accountId !== idRes.identity.accountId) return undefined;
+  const nickname = idRes.identity.displayName?.trim();
+  return nickname || undefined;
+}
 
 async function main(): Promise<void> {
   const cloudUrl = process.env.AIDCP_CLOUD_URL ?? 'ws://121.89.85.150:8787';
@@ -95,6 +103,7 @@ async function main(): Promise<void> {
   // 环境变量 AIDCP_ACCOUNT_ID 降级为【可选覆盖】（预置/特殊场景的逃生阀）。
   const overrideAccountId = process.env.AIDCP_ACCOUNT_ID;
   let accountId: string | undefined;
+  let accountNickname: string | undefined;
   const machineLabel = process.env.AIDCP_MACHINE_LABEL;
   const remoteAddr = process.env.AIDCP_REMOTE_ADDR;
   const cdpHost = process.env.AIDCP_CDP_HOST ?? '127.0.0.1';
@@ -176,7 +185,8 @@ async function main(): Promise<void> {
       );
     }
     accountId = decision.accountId;
-    const display = idRes.ok && idRes.identity.displayName ? ` (${idRes.identity.displayName})` : '';
+    accountNickname = verifiedAccountNickname(idRes, decision);
+    const display = accountNickname ? ` (${accountNickname})` : '';
     const source = 'source' in decision ? decision.source : 'env-override';
     console.log(`[aidcp-edge] 账号身份已确立: ${accountId}${display} [source=${source}]`);
   }
@@ -191,6 +201,7 @@ async function main(): Promise<void> {
     app: platformDriver.app,
     capabilities: [...platformDriver.edgeCapabilities],
     ...(accountId ? { accountId } : {}),
+    ...(accountNickname ? { accountNickname } : {}),
     ...(machineLabel ? { machineLabel } : {}),
     ...(remoteAddr ? { remoteAddr } : {}),
     runner: {
@@ -487,10 +498,12 @@ async function main(): Promise<void> {
         return; // 留在无身份态，不静默以默认账号开跑（红线）
       }
       accountId = decision.accountId;
-      client.setAccountId(accountId);
+      accountNickname = verifiedAccountNickname(idRes, decision);
+      client.setAccountIdentity(accountId, accountNickname);
       await client.connect();
+      const display = accountNickname ? ` (${accountNickname})` : '';
       console.log(
-        `[aidcp-edge] 身份重新确立: ${accountId}，已按新 id 重连云端（云端按新账号拆旧会话 + 重过就绪闸）`,
+        `[aidcp-edge] 身份重新确立: ${accountId}${display}，已按新 id 重连云端（云端按新账号拆旧会话 + 重过就绪闸）`,
       );
       identityWatcher?.rebaseline(accountId);
       // 重连重注入节奏快照（pacing-floor-config-min-interval 设计 §4.3 最严重缺口）：BrowseSession 只构造一次，

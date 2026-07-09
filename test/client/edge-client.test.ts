@@ -112,6 +112,49 @@ test('edge-client: hello carries platform metadata without changing message type
   await connecting;
 });
 
+test('edge-client: hello carries optional account nickname for display enrichment', async () => {
+  const ws = new FakeWebSocket();
+  const client = new EdgeClient({
+    url: 'ws://test',
+    edgeId: 'edge-1',
+    platform: 'facebook',
+    app: 'fb',
+    capabilities: ['identity', 'overlay', 'comment'],
+    accountId: '1234567890',
+    accountNickname: 'Test User',
+    runner: {
+      run: async () => ({
+        actionId: 'noop',
+        ok: true,
+        outcome: 'success',
+        attempts: 1,
+        reason: 'ok',
+      }),
+    },
+    wsFactory: () => ws,
+    idGen: () => 'hello-1',
+    clock: () => 1,
+    logger: () => {},
+  });
+  const connecting = client.connect();
+  ws.emitOpen();
+  await Promise.resolve();
+
+  const sent = JSON.parse(ws.sent[0]) as Envelope;
+  assert.equal(sent.type, 'hello');
+  assert.deepEqual(sent.payload, {
+    edgeId: 'edge-1',
+    platform: 'facebook',
+    app: 'fb',
+    capabilities: ['identity', 'overlay', 'comment'],
+    accountId: '1234567890',
+    accountNickname: 'Test User',
+  });
+
+  ws.emitMessage(makeEnvelope('welcome', 'hello-1', 1, { sessionId: 's1', serverVersion: 'v1' }));
+  await connecting;
+});
+
 function publishPayload(): PublishRequestPayload {
   return {
     title: '标题',

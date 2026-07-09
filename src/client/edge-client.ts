@@ -102,6 +102,8 @@ export interface EdgeClientOptions {
   capabilities?: string[];
   /** 该边缘当前驱动的账号标识（hello 上报，用于云端风控归属与验证码定位） */
   accountId?: string;
+  /** 该账号的人类可读昵称（hello 上报，仅用于云端展示补充） */
+  accountNickname?: string;
   /** 人类可读机器标签（hello 上报，验证码卡片据此告诉运维去哪台机器） */
   machineLabel?: string;
   /** 远程桌面/可达地址（hello 上报，用于人工远程处置） */
@@ -140,10 +142,10 @@ export class EdgeClient {
   private readonly opts: Required<
     Omit<
       EdgeClientOptions,
-      'platform' | 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr' | 'reconnect'
+      'platform' | 'app' | 'capabilities' | 'accountId' | 'accountNickname' | 'machineLabel' | 'remoteAddr' | 'reconnect'
     >
   > &
-    Pick<EdgeClientOptions, 'platform' | 'app' | 'capabilities' | 'accountId' | 'machineLabel' | 'remoteAddr'>;
+    Pick<EdgeClientOptions, 'platform' | 'app' | 'capabilities' | 'accountId' | 'accountNickname' | 'machineLabel' | 'remoteAddr'>;
   private seq = 0;
   private readonly pending = new Map<string, Pending>();
   private sessionId?: string;
@@ -169,6 +171,7 @@ export class EdgeClient {
       app: options.app,
       capabilities: options.capabilities,
       accountId: options.accountId,
+      accountNickname: options.accountNickname,
       machineLabel: options.machineLabel,
       remoteAddr: options.remoteAddr,
       runner: options.runner,
@@ -238,6 +241,7 @@ export class EdgeClient {
       app: this.opts.app,
       capabilities: this.opts.capabilities,
       accountId: this.opts.accountId,
+      accountNickname: this.opts.accountNickname,
       machineLabel: this.opts.machineLabel,
       remoteAddr: this.opts.remoteAddr,
     });
@@ -436,6 +440,15 @@ export class EdgeClient {
    */
   setAccountId(accountId: string | undefined): void {
     this.opts.accountId = accountId;
+  }
+
+  /**
+   * 更新握手携带的账号身份和展示名；须在 close() 之后、connect() 之前调用。
+   * accountNickname 只作展示补充，云端不得用它做身份路由。
+   */
+  setAccountIdentity(accountId: string | undefined, accountNickname: string | undefined): void {
+    this.opts.accountId = accountId;
+    this.opts.accountNickname = accountNickname;
   }
 
   private onMessage(data: unknown): void {

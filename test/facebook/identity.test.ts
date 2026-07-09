@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  cleanFacebookDisplayName,
   deriveFacebookIdentity,
   extractFacebookIdFromHref,
   readFacebookIdentity,
@@ -8,7 +9,9 @@ import {
 } from '../../src/facebook/index.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
-function fakeCdp(raw: string, cookies: Array<{ name?: string; value?: string; domain?: string }> = []): BrowseCdp {
+type CookieLike = { name?: string; value?: string; domain?: string };
+
+function fakeCdp(raw: string, cookies: CookieLike[] = []): BrowseCdp {
   return {
     send: async (method: string) => {
       if (method === 'Network.getAllCookies') return { cookies } as never;
@@ -17,9 +20,31 @@ function fakeCdp(raw: string, cookies: Array<{ name?: string; value?: string; do
   };
 }
 
+function fakeCdpSequence(
+  raws: string[],
+  cookies: CookieLike[] = [],
+): { cdp: BrowseCdp; calls: Array<{ method: string; params?: Record<string, unknown> }> } {
+  const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  return {
+    calls,
+    cdp: {
+      send: async (method: string, params?: Record<string, unknown>) => {
+        calls.push({ method, params });
+        if (method === 'Network.getAllCookies') return { cookies } as never;
+        if (method === 'Runtime.evaluate') {
+          const value = raws.shift() ?? '';
+          return { result: { value } } as never;
+        }
+        return {} as never;
+      },
+    },
+  };
+}
+
 test('extractFacebookIdFromHref: accepts numeric profile.php and /people ids only', () => {
   assert.equal(extractFacebookIdFromHref('https://www.facebook.com/profile.php?id=1234567890'), '1234567890');
   assert.equal(extractFacebookIdFromHref('/people/Test-User/1234567890/'), '1234567890');
+  assert.equal(extractFacebookIdFromHref('https://www.facebook.com/story.php?id=1234567890'), '');
   assert.equal(extractFacebookIdFromHref('https://www.facebook.com/some.vanity.name'), '');
   assert.equal(extractFacebookIdFromHref(null), '');
 });
@@ -39,10 +64,47 @@ test('deriveFacebookIdentity: stable numeric id succeeds with optional display n
   });
 });
 
+test('deriveFacebookIdentity: profile URL id wins over unrelated page profile links', () => {
+  const signals: FacebookIdentitySignals = {
+    href: 'https://www.facebook.com/profile.php?id=1234567890',
+    profileHrefs: [
+      'https://www.facebook.com/profile.php?id=1234567890',
+      'https://www.facebook.com/profile.php?id=9876543210',
+    ],
+    cookieUserId: null,
+    displayName: null,
+    title: 'Test User | Facebook',
+  };
+  assert.deepEqual(deriveFacebookIdentity(signals), {
+    ok: true,
+    accountId: '1234567890',
+    displayName: 'Test User',
+    source: 'profile-url',
+  });
+});
+
+test('deriveFacebookIdentity: generic Facebook profile titles are ignored', () => {
+  const res = deriveFacebookIdentity({
+    href: 'https://www.facebook.com/profile.php?id=1234567890',
+    profileHrefs: [],
+    cookieUserId: null,
+    displayName: null,
+    title: 'Facebook',
+  });
+  assert.equal(res.ok, true);
+  if (res.ok) assert.equal(res.displayName, null);
+});
+
 test('deriveFacebookIdentity: display name alone is rejected', () => {
   const res = deriveFacebookIdentity({ href: 'https://www.facebook.com/', profileHrefs: [], cookieUserId: null, displayName: 'Test User' });
   assert.equal(res.ok, false);
   if (!res.ok) assert.match(res.reason, /display name/);
+});
+
+test('cleanFacebookDisplayName: strips Facebook title suffixes and rejects generic labels', () => {
+  assert.equal(cleanFacebookDisplayName(' Test User | Facebook '), 'Test User');
+  assert.equal(cleanFacebookDisplayName('Facebook'), null);
+  assert.equal(cleanFacebookDisplayName('Facebook - log in or sign up'), null);
 });
 
 test('deriveFacebookIdentity: c_user cookie succeeds when profile link is not rendered yet', () => {
@@ -75,6 +137,24 @@ test('deriveFacebookIdentity: matching c_user and profile link succeeds', () => 
       accountId: '1234567890',
       displayName: null,
       source: 'cookie+profile-link',
+    },
+  );
+});
+
+test('deriveFacebookIdentity: matching c_user and profile URL succeeds with profile title nickname', () => {
+  assert.deepEqual(
+    deriveFacebookIdentity({
+      href: 'https://www.facebook.com/profile.php?id=1234567890',
+      profileHrefs: ['https://www.facebook.com/profile.php?id=1234567890'],
+      cookieUserId: '1234567890',
+      displayName: null,
+      title: 'Test User | Facebook',
+    }),
+    {
+      ok: true,
+      accountId: '1234567890',
+      displayName: 'Test User',
+      source: 'cookie+profile-url',
     },
   );
 });
@@ -182,4 +262,48 @@ test('readFacebookIdentity: conflicting c_user cookies fail without logging cook
   assert.equal(res.ok, false);
   if (!res.ok) assert.match(res.reason, /c_user cookie candidates conflict/);
   assert.equal(logs.some((line) => line.includes('1234567890') || line.includes('9876543210')), false);
+});
+
+test('readFacebookIdentity: probes /me for nickname only after stable id is known', async () => {
+  const { cdp, calls } = fakeCdpSequence([
+    JSON.stringify({
+      href: 'https://www.facebook.com/',
+      profileHrefs: ['https://www.facebook.com/profile.php?id=1234567890'],
+      displayName: null,
+    }),
+    JSON.stringify({
+      href: 'https://www.facebook.com/profile.php?id=1234567890',
+      profileHrefs: [
+        'https://www.facebook.com/profile.php?id=1234567890',
+        'https://www.facebook.com/profile.php?id=9876543210',
+      ],
+      displayName: null,
+      title: 'Test User | Facebook',
+    }),
+  ]);
+  const res = await readFacebookIdentity(cdp, { sleep: async () => undefined, navigateTimeoutMs: 1 });
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    assert.equal(res.identity.accountId, '1234567890');
+    assert.equal(res.identity.displayName, 'Test User');
+  }
+  assert.deepEqual(calls.map((call) => call.method), ['Network.getAllCookies', 'Runtime.evaluate', 'Page.navigate', 'Runtime.evaluate']);
+  assert.deepEqual(calls[2].params, { url: 'https://www.facebook.com/me' });
+});
+
+test('readFacebookIdentity: allowNavigate=false keeps id without /me nickname probe', async () => {
+  const { cdp, calls } = fakeCdpSequence([
+    JSON.stringify({
+      href: 'https://www.facebook.com/',
+      profileHrefs: ['https://www.facebook.com/profile.php?id=1234567890'],
+      displayName: null,
+    }),
+  ]);
+  const res = await readFacebookIdentity(cdp, { allowNavigate: false });
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    assert.equal(res.identity.accountId, '1234567890');
+    assert.equal(res.identity.displayName, null);
+  }
+  assert.deepEqual(calls.map((call) => call.method), ['Network.getAllCookies', 'Runtime.evaluate']);
 });
