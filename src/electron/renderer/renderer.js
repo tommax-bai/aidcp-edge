@@ -84,6 +84,29 @@ const fields = {
   drawerClose: document.querySelector('#drawer-close'),
   lightsPad: document.querySelector('.tb-lights-pad'),
   winctlPad: document.querySelector('.tb-winctl-pad'),
+  // 多环境 fleet（edge-multi-environment-fleet）
+  fleetRow: document.querySelector('#fleet-row'),
+  envRail: document.querySelector('#env-rail'),
+  railToggle: document.querySelector('#rail-toggle'),
+  railBadge: document.querySelector('#rail-badge'),
+  railList: document.querySelector('#rail-list'),
+  railGuide: document.querySelector('#rail-guide'),
+  railStartAll: document.querySelector('#rail-start-all'),
+  railRamConfirm: document.querySelector('#rail-ram-confirm'),
+  railRamText: document.querySelector('#rail-ram-text'),
+  railRamForce: document.querySelector('#rail-ram-force'),
+  railRamCancel: document.querySelector('#rail-ram-cancel'),
+  railMsg: document.querySelector('#rail-msg'),
+  guidePanel: document.querySelector('#guide-panel'),
+  guideTitle: document.querySelector('#guide-title'),
+  guideBody: document.querySelector('#guide-body'),
+  guideOpen: document.querySelector('#guide-open'),
+  guideDone: document.querySelector('#guide-done'),
+  guideSkip: document.querySelector('#guide-skip'),
+  guideExit: document.querySelector('#guide-exit'),
+  guideHint: document.querySelector('#guide-hint'),
+  sameAccountWarn: document.querySelector('#same-account-warn'),
+  sameAccountText: document.querySelector('#same-account-text'),
 };
 
 const settingsUi = {
@@ -132,6 +155,25 @@ const SUBTITLE = {
 };
 
 let currentStatus;
+// ── 多环境 fleet 视图态（edge-multi-environment-fleet）──
+// 状态 / 活动按 envId 归属；右侧主区域只呈现「当前选中环境」的投影（内容与交互不变）。
+// 无 envId 的旧形状（单环境主进程 / 测试桩）归 '__local__'，环境栏对其隐藏——零回归。
+const fleetView = {
+  envs: new Map(), // envId -> { envId, name, platform, status }
+  order: [], // 花名册顺序
+  selected: null, // 当前选中 envId
+  collapsed: true, // 环境栏默认收起为窄图标条
+  buffers: new Map(), // envId -> [{ entry, cls }]（每环境活动流缓冲，≤200 条，绝不串号）
+  logs: new Map(), // envId -> { entries:[{time,message}], last }（每环境开发者原始日志，绝不串号）
+  guided: null, // 引导处理态 { done:Set, current }
+  lastRailSig: '', // 环境栏 DOM 变更签名（每秒 stale 重估时避免无谓重建，见 renderRail）
+};
+function currentEnvId() {
+  return fleetView.selected && fleetView.selected !== '__local__' ? fleetView.selected : undefined;
+}
+function routeSelKey() {
+  return fleetView.selected || '__local__';
+}
 // 用户正在编辑设置表单时不被状态推送回填覆盖（避免边打字边被清空）。
 let editingProvider = null;
 // 设置是否相对「已应用/已保存」有改动。核心在跑且 dirty 时才显示「按新设置重启」；
@@ -139,6 +181,25 @@ let editingProvider = null;
 let dirty = false;
 // 选中环境的 AdsPower 环境名（随设置持久化，作标题带账号标签兜底）。
 let selectedProfileName = '';
+// 运行花名册（edge-multi-environment-fleet）：多选加入的环境成员 [{profileId, name, platform}]，
+// 按 profileId 去重（同一分身 MUST NOT 重复加入，防 edgeId 撞车）；持久化为 settings.environments。
+let roster = [];
+// 最近一次拉取的环境列表（roster 变更后就地重刷成员标记，无需重新拉取）。
+let lastProfiles = [];
+function normalizeRosterList(list) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(list) ? list : []) {
+    const id = String((raw && (raw.profileId !== undefined ? raw.profileId : raw.userId)) || '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ profileId: id, name: (raw && raw.name) || '', platform: normPlatform(raw && raw.platform) });
+  }
+  return out;
+}
+function rosterHas(profileId) {
+  return roster.some((m) => m.profileId === profileId);
+}
 // change edge-environment-platform-select：当前选中环境的运行时平台（同步进 settings.platform，启动时注入核心）。
 let selectedPlatform = 'xiaohongshu';
 function normPlatform(raw) {
@@ -150,8 +211,6 @@ function platformLabel(p) {
   return normPlatform(p) === 'facebook' ? 'Facebook' : '小红书';
 }
 const LOG_RETENTION_MS = 2 * 60 * 1000; // 开发者详情原始日志保留 2 分钟
-const logEntries = [];
-let lastLogMessage = '';
 let quotaDetailsOpen = false;
 
 // 平台占位：mac 红绿灯内嵌预留左侧；Windows 叠加窗控预留右侧。其余平台两侧归零。
@@ -419,21 +478,29 @@ function renderUsageSummary(status) {
   fields.updatedAt.textContent = new Date(usage.asOf).toLocaleTimeString();
 }
 
-// ─── 开发者详情：原始日志（滚动保留 + 连续去重）───
-function addLogEntry(message) {
-  if (!message || message === lastLogMessage) return;
-  lastLogMessage = message;
+// ─── 开发者详情：原始日志（滚动保留 + 连续去重；按 envId 分桶，绝不跨环境串号/相邻误吞）───
+function logBucket(envKey) {
+  let b = fleetView.logs.get(envKey);
+  if (!b) { b = { entries: [], last: '' }; fleetView.logs.set(envKey, b); }
+  return b;
+}
+
+// 记录某环境一行原始日志（供所有环境调用，含未选中环境；只有选中环境时才刷 DOM）。
+function recordLog(envKey, message) {
+  if (!message) return;
+  const b = logBucket(envKey);
+  if (message === b.last) return; // 连续去重按本环境桶判，绝不因别环境的相同末行而误吞
+  b.last = message;
   const now = Date.now();
-  logEntries.push({ time: now, message });
+  b.entries.push({ time: now, message });
   const cutoff = now - LOG_RETENTION_MS;
-  while (logEntries.length > 0 && logEntries[0].time < cutoff) {
-    logEntries.shift();
-  }
-  renderLog();
+  while (b.entries.length > 0 && b.entries[0].time < cutoff) b.entries.shift();
+  if (envKey === routeSelKey()) renderLog();
 }
 
 function renderLog() {
-  fields.lastMessage.innerHTML = logEntries.map((entry) => {
+  const b = fleetView.logs.get(routeSelKey());
+  fields.lastMessage.innerHTML = (b ? b.entries : []).map((entry) => {
     const time = new Date(entry.time).toLocaleTimeString();
     return `<div class="log-entry"><span class="log-time">${time}</span> ${escapeHtml(entry.message)}</div>`;
   }).join('');
@@ -514,24 +581,14 @@ function renderLoop(status) {
 }
 
 // ─── 发布卡（常驻三态：flow 进行中 / last 上次发布 / empty 从未发布；纯展示零按钮）───
-let lastPublishSig = '';
-// 用户点薄条的临时展开（进行中审批到来 / 会话停止时自动复位）。
+// 终态折流的去重签名按 envId 分桶（多环境下 A 的终态签名绝不吞掉 B 的折流）。
+const lastPublishSigByEnv = new Map();
+// 用户点薄条的临时展开（进行中审批到来 / 会话停止 / 切换环境时自动复位）。
 let pubManualOpen = false;
 function renderPublish(status, nowMs) {
   const view = uiLogic.publishView(status.publish, status.lastPublish, nowMs);
-  // 终态折一条进活动流（按签名去重，状态重推不重复记）。
-  if (view.collapsed && status.publish) {
-    const sig = `${status.publish.state}:${status.publish.title || ''}`;
-    if (sig !== lastPublishSig) {
-      lastPublishSig = sig;
-      prependActivity({
-        ts: status.publish.at || new Date().toISOString(),
-        type: `publish_${view.collapsed.type}`,
-        sentence: view.collapsed.sentence,
-      }, view.collapsed.type === 'published' ? 'pub-done' : 'pub-muted');
-    }
-  }
-  if (status.publish) lastPublishSig = `${status.publish.state}:${status.publish.title || ''}`;
+  // 终态折流 + 去重已收口到 absorbPublishTerminal（在 routeStatus 里对每个环境跑，含未选中环境），
+  // 这里只负责发布卡的视觉渲染，绝不再自己 prependActivity（否则选中环境会重复记一条）。
   fields.pubCard.classList.remove('hidden'); // 常驻
   fields.pubCard.classList.toggle('empty', view.mode === 'empty');
   // 收展：flow 永远展开；运行中且无在途审批自动收起为薄条（点击可临时展开）。
@@ -623,7 +680,7 @@ function evIcon(type) {
   for (const [re, spec] of EV_ICONS) if (re.test(type || '')) return spec;
   return ['·', 'ic-sys'];
 }
-function prependActivity(entry, extraClass) {
+function domPrependActivity(entry, extraClass) {
   if (!entry || !entry.sentence) return;
   if (fields.streamEmpty) fields.streamEmpty.classList.add('hidden');
   const row = document.createElement('div');
@@ -649,6 +706,37 @@ function prependActivity(entry, extraClass) {
   }
 }
 
+// 每环境活动缓冲（旧→新，≤200 条）：切换环境时按缓冲重建流，绝不串号。
+function bufferActivity(envKey, entry, cls) {
+  const arr = fleetView.buffers.get(envKey) || [];
+  arr.push({ entry, cls });
+  while (arr.length > STREAM_MAX) arr.shift();
+  fleetView.buffers.set(envKey, arr);
+}
+
+/** 面向「当前选中环境」的活动追加（渲染层内部合成的条目也经此入缓冲）。 */
+function prependActivity(entry, extraClass) {
+  if (!entry || !entry.sentence) return;
+  bufferActivity(routeSelKey(), entry, extraClass);
+  domPrependActivity(entry, extraClass);
+}
+
+/** 主进程活动广播入口：按 entry.envId 归属；非选中环境只进缓冲、不上屏。 */
+function routeActivity(entry) {
+  if (!entry || !entry.sentence) return;
+  const key = entry.envId || routeSelKey();
+  bufferActivity(key, entry, undefined);
+  if (key === routeSelKey()) domPrependActivity(entry);
+}
+
+/** 切换环境后按缓冲整体重建活动流 DOM（旧→新逐条前插 → 最新在上）。 */
+function rebuildActivityStream() {
+  fields.stream.querySelectorAll('.ev').forEach((row) => row.remove());
+  const arr = fleetView.buffers.get(routeSelKey()) || [];
+  if (fields.streamEmpty) fields.streamEmpty.classList.toggle('hidden', arr.length > 0);
+  for (const item of arr) domPrependActivity(item.entry, item.cls);
+}
+
 // 每秒走字：在场感新鲜度 / 发布卡等待时长 / 活动流相对时间（真实时间，不造活跃）。
 setInterval(() => {
   if (!currentStatus) return;
@@ -660,6 +748,7 @@ setInterval(() => {
     const ts = Date.parse(row.dataset.ts || '');
     if (Number.isFinite(ts)) row.querySelector('.ev-t').textContent = uiLogic.relTime(ts, now);
   });
+  renderRail(); // 失联（stale）判定依赖走钟，每秒重估状态环
 }, 1000);
 
 function toggleQuotaDetails() {
@@ -762,7 +851,8 @@ function render(status) {
   setBadge(fields.risk, 'risk', status.risk);
   setBadge(fields.edge, 'edge', status.edge);
   renderUsageSummary(status); // 各计数一律 ?? 0 兜底（旧形状 / 部分补丁都不出空数字）
-  addLogEntry(status.lastMessage);
+  // 原始日志记录已移到 routeStatus（按 envId 分桶、覆盖未选中环境）；此处仅刷当前环境的日志 DOM。
+  renderLog();
   renderEdgeFailure(status);
   renderTitlebar(status);
   renderPresence(status, now);
@@ -771,12 +861,327 @@ function render(status) {
   renderPublish(status, now);
   renderFab(status);
   renderNotice(status);
+  renderSameAccount(status); // 同账号铺多环境告警（多环境 fleet；无告警字段时隐藏，零回归）
   updateApplyRestart(); // 依「dirty && 核心在跑」决定是否显示「按新设置重启」
   if (status.provider && SUBTITLE[status.provider]) fields.subtitle.textContent = SUBTITLE[status.provider];
   // 表单未在编辑时，让 provider 分段跟随实际运行 provider。
   if (status.provider && !editingProvider) applyProviderSelection(status.provider);
   updatePersonaGate(status); // 建号人设：仅登录+云端已连接才可生成（不触碰已选关键词/草稿，避免状态推送重置向导）
 }
+
+// ─── 多环境 fleet：状态路由 / 环境栏 / 引导处理 / 全部启动（edge-multi-environment-fleet）───
+
+function renderSameAccount(status) {
+  if (!fields.sameAccountWarn) return;
+  const warn = status && status.sameAccountWarning;
+  fields.sameAccountWarn.classList.toggle('hidden', !warn);
+  if (warn && fields.sameAccountText) fields.sameAccountText.textContent = warn.message || '';
+}
+
+/** 主进程状态推送入口：按 envId 归属到对应环境；仅选中环境上屏。无 envId 的旧形状归 '__local__'。 */
+function routeStatus(status) {
+  if (!status) return;
+  const key = status.envId || '__local__';
+  let env = fleetView.envs.get(key);
+  if (!env) {
+    env = { envId: key, name: status.envName || '', platform: '', status };
+    fleetView.envs.set(key, env);
+    if (!fleetView.order.includes(key)) fleetView.order.push(key);
+  } else {
+    env.status = status;
+    if (status.envName) env.name = status.envName;
+  }
+  if (!fleetView.selected) fleetView.selected = key;
+  // 原始日志与发布终态折流对**每个**环境记录（含未选中）：未选中环境的日志进其桶、发布终态折进其活动缓冲，
+  // 切过去时历史完整、绝不丢，也绝不串到别的环境。
+  recordLog(key, status.lastMessage);
+  absorbPublishTerminal(key, status);
+  if (fleetView.selected === key) render(status);
+  renderRail();
+  maybeAdvanceGuide();
+  updateStartAllProgress(); // 「全部启动」进度随各环境起来实时推进 k/N
+}
+
+// 发布终态（published/rejected/failed）折一条叙述进**该环境**的活动缓冲，按签名去重（每环境独立）。
+// 覆盖未选中环境（渲染层的 renderPublish 只跑选中环境，会漏掉后台环境的发布叙述）。
+function absorbPublishTerminal(envKey, status) {
+  if (!status || !status.publish || !window.uiLogic) return;
+  const view = uiLogic.publishView(status.publish, status.lastPublish, Date.now());
+  if (!view.collapsed) { lastPublishSigByEnv.set(envKey, `${status.publish.state}:${status.publish.title || ''}`); return; }
+  const sig = `${status.publish.state}:${status.publish.title || ''}`;
+  if (sig === (lastPublishSigByEnv.get(envKey) || '')) return;
+  lastPublishSigByEnv.set(envKey, sig);
+  const entry = {
+    ts: status.publish.at || new Date().toISOString(),
+    type: `publish_${view.collapsed.type}`,
+    sentence: view.collapsed.sentence,
+  };
+  const cls = view.collapsed.type === 'published' ? 'pub-done' : 'pub-muted';
+  bufferActivity(envKey, entry, cls);
+  if (envKey === routeSelKey()) domPrependActivity(entry, cls);
+}
+
+/** fleet 快照（花名册 + 各环境状态 + 选中项）全量对齐：建行 / 摘行 / 同步选中与收展。 */
+function applyFleetSnapshot(snap) {
+  if (!snap || !Array.isArray(snap.environments)) return;
+  const known = new Set();
+  fleetView.order = [];
+  for (const e of snap.environments) {
+    if (!e || !e.envId) continue;
+    known.add(e.envId);
+    fleetView.order.push(e.envId);
+    const existing = fleetView.envs.get(e.envId);
+    if (existing) {
+      existing.name = e.name || existing.name;
+      existing.platform = e.platform || existing.platform;
+      if (e.status) existing.status = e.status;
+    } else {
+      fleetView.envs.set(e.envId, { envId: e.envId, name: e.name || '', platform: e.platform || '', status: e.status });
+    }
+  }
+  for (const key of [...fleetView.envs.keys()]) {
+    if (known.has(key)) continue;
+    fleetView.envs.delete(key); // 快照为准（含 '__local__' 占位）
+    // 连同该环境的所有渲染层缓冲一并清（否则同一分身移出再加回会重放上一会话的陈旧活动 + 吞掉新发布折流，
+    // 还有全会话内存泄漏）。
+    fleetView.buffers.delete(key);
+    fleetView.logs.delete(key);
+    lastPublishSigByEnv.delete(key);
+  }
+  if (typeof snap.railCollapsed === 'boolean') fleetView.collapsed = snap.railCollapsed;
+  const prevSelected = fleetView.selected;
+  if (snap.selectedEnvId && fleetView.envs.has(snap.selectedEnvId)) fleetView.selected = snap.selectedEnvId;
+  if (!fleetView.selected || !fleetView.envs.has(fleetView.selected)) fleetView.selected = fleetView.order[0] || null;
+  if (fleetView.selected && fleetView.selected !== prevSelected) {
+    pubManualOpen = false;
+    resetPersonaDraft();
+    const env = fleetView.envs.get(fleetView.selected);
+    if (env && env.status) render(env.status);
+    rebuildActivityStream();
+  }
+  renderRail();
+}
+
+/** 点选环境：右侧主区域整体切到该环境的陪伴视图（状态 + 活动流 + 发布卡投影一起换，绝不残留）。 */
+function selectEnv(envId) {
+  if (!envId || !fleetView.envs.has(envId) || envId === fleetView.selected) return;
+  fleetView.selected = envId;
+  pubManualOpen = false;
+  resetPersonaDraft(); // 人设向导每环境独立：切换即清草稿，绝不把 A 的草稿误确认到 B
+  window.aidcpEdge.fleetSelect?.(envId);
+  const env = fleetView.envs.get(envId);
+  if (env && env.status) render(env.status);
+  rebuildActivityStream();
+  renderRail();
+}
+
+function railEnvList() {
+  return fleetView.order
+    .filter((id) => id !== '__local__')
+    .map((id) => fleetView.envs.get(id))
+    .filter(Boolean);
+}
+
+function renderRail() {
+  if (!fields.envRail || !window.uiLogic || typeof uiLogic.fleetRailModel !== 'function') return;
+  const list = railEnvList();
+  const show = list.length > 0;
+  fields.envRail.classList.toggle('hidden', !show);
+  fields.fleetRow?.classList.toggle('with-rail', show);
+  if (!show) { fleetView.lastRailSig = ''; return; }
+  const model = uiLogic.fleetRailModel(list, Date.now());
+  // 变更签名：每秒 stale 重估会反复调本函数，但只有模型真变时才重建 DOM——否则 innerHTML='' 会每秒
+  // 打断 1.6s 脉冲动画（视觉抖动）、把行焦点甩回 <body>、并吞掉跨 tick 的点击手势。
+  const sig = JSON.stringify({
+    show,
+    collapsed: fleetView.collapsed,
+    selected: fleetView.selected,
+    guided: Boolean(fleetView.guided),
+    rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, r.name || (r.status && r.status.account && r.status.account.name) || '', r.label]),
+  });
+  if (sig === fleetView.lastRailSig) return;
+  fleetView.lastRailSig = sig;
+  fields.envRail.classList.toggle('collapsed', fleetView.collapsed);
+  fields.envRail.classList.toggle('expanded', !fleetView.collapsed);
+  if (fields.railToggle) {
+    fields.railToggle.title = fleetView.collapsed ? '展开环境列表' : '收起环境列表';
+    fields.railToggle.setAttribute('aria-label', fields.railToggle.title);
+  }
+  if (fields.railBadge) {
+    fields.railBadge.textContent = String(model.pendingCount);
+    fields.railBadge.classList.toggle('hidden', model.pendingCount === 0);
+  }
+  if (fields.railGuide) {
+    fields.railGuide.classList.toggle('hidden', model.pendingCount === 0 && !fleetView.guided);
+    fields.railGuide.textContent = model.pendingCount > 0 ? `引导处理（${model.pendingCount}）` : '引导处理';
+  }
+  if (!fields.railList) return;
+  fields.railList.innerHTML = '';
+  for (const row of model.rows) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `rail-row lv-${row.level}${row.needsAction ? ' pulse' : ''}${row.envId === fleetView.selected ? ' selected' : ''}`;
+    btn.dataset.envId = row.envId;
+    const displayName = row.name || (row.status && row.status.account && row.status.account.name) || `环境 …${String(row.envId).slice(-4)}`;
+    btn.title = `${displayName} · ${row.label}`; // 收起态悬停出名字与状态
+    const ava = document.createElement('span');
+    ava.className = 'rail-ava';
+    ava.textContent = displayName.slice(0, 1);
+    btn.appendChild(ava);
+    const meta = document.createElement('span');
+    meta.className = 'rail-meta';
+    const nameEl = document.createElement('span');
+    nameEl.className = 'rail-name';
+    nameEl.textContent = displayName;
+    const stateEl = document.createElement('span');
+    stateEl.className = 'rail-state';
+    stateEl.textContent = row.label;
+    meta.appendChild(nameEl);
+    meta.appendChild(stateEl);
+    btn.appendChild(meta);
+    btn.addEventListener('click', () => selectEnv(row.envId));
+    fields.railList.appendChild(btn);
+  }
+}
+
+function setRailMsg(text) {
+  if (fields.railMsg) fields.railMsg.textContent = text || '';
+}
+
+fields.railToggle?.addEventListener('click', () => {
+  fleetView.collapsed = !fleetView.collapsed;
+  window.aidcpEdge.fleetSetRailCollapsed?.(fleetView.collapsed);
+  renderRail();
+});
+
+// ── 「全部启动」：内存上限预检，超限诚实拦阻、让运维确认后 force 放行 ──
+async function doStartAll(force) {
+  const api = window.aidcpEdge.fleetStartAll;
+  if (typeof api !== 'function') return;
+  fields.railRamConfirm?.classList.add('hidden');
+  const res = await api(force ? { force: true } : undefined);
+  if (res && res.ok === false && res.reason === 'ram') {
+    if (fields.railRamText) {
+      fields.railRamText.textContent = `预计需 ~${res.requiredMB}MB 内存（${res.plannedCount} 个环境 × ~1GB），本机当前可用 ~${res.freeMB}MB，可能不足并拖垮已在跑的环境。仍要全部启动吗？`;
+    }
+    fields.railRamConfirm?.classList.remove('hidden');
+    return;
+  }
+  if (res && res.ok) {
+    if (res.queued > 0 && Array.isArray(res.envIds)) {
+      fleetView.startAll = { ids: res.envIds, total: res.queued };
+      updateStartAllProgress();
+    } else if (res.queued > 0) {
+      setRailMsg(`已错峰排队启动 ${res.queued} 个环境（相邻间隔约 1.1s）。`); // 旧主进程无 envIds 时兜底
+    } else {
+      setRailMsg('没有待启动的环境。');
+    }
+  }
+}
+
+// 「全部启动」实时进度（如实呈现 k/N，不是一句静态提示）：随各环境状态推送重算已起数，全起后收尾。
+// 精确「下一个 Ns 后」倒计时依赖错峰队列时序（未透传渲染层），当前以每行「第 N 位」传达顺序。
+function updateStartAllProgress() {
+  const sa = fleetView.startAll;
+  if (!sa) return;
+  const launched = sa.ids.filter((id) => {
+    const e = fleetView.envs.get(id);
+    return e && e.status && e.status.edge === 'running';
+  }).length;
+  if (launched >= sa.total) {
+    setRailMsg(`已全部启动（${sa.total}/${sa.total}）。`);
+    fleetView.startAll = null;
+    return;
+  }
+  setRailMsg(`启动中 ${launched}/${sa.total} · 其余 ${sa.total - launched} 个错峰排队（相邻约 1.1s）…`);
+}
+fields.railStartAll?.addEventListener('click', () => { void doStartAll(false); });
+fields.railRamForce?.addEventListener('click', () => { void doStartAll(true); });
+fields.railRamCancel?.addEventListener('click', () => fields.railRamConfirm?.classList.add('hidden'));
+
+// ── 引导式登录 / 验证码流：待处理环境排队、一次引导一个；新到项实时并入（队列每步重算）──
+function guideQueue() {
+  if (!fleetView.guided) return [];
+  const model = uiLogic.fleetRailModel(railEnvList(), Date.now());
+  return model.rows.filter((r) => r.needsAction && !fleetView.guided.done.has(r.envId));
+}
+
+function setGuideHint(text) {
+  if (!fields.guideHint) return;
+  fields.guideHint.textContent = text || '';
+  fields.guideHint.classList.toggle('hidden', !text);
+}
+
+function exitGuide(message) {
+  fleetView.guided = null;
+  fields.guidePanel?.classList.add('hidden');
+  setGuideHint(message || '');
+  renderRail();
+}
+
+function showGuideStep() {
+  const q = guideQueue();
+  if (q.length === 0) {
+    exitGuide('全部待处理环境已处理完成。');
+    return;
+  }
+  const target = q[0];
+  fleetView.guided.current = target.envId;
+  selectEnv(target.envId);
+  const displayName = target.name || `环境 …${String(target.envId).slice(-4)}`;
+  if (fields.guideTitle) fields.guideTitle.textContent = `引导处理（剩 ${q.length} 个）：${displayName}`;
+  if (fields.guideBody) {
+    fields.guideBody.textContent = `当前状态：${target.label}。点「打开窗口」找到它的浏览器窗口，在窗口里完成登录 / 验证码后点「完成 · 重检」。`;
+  }
+  fields.guidePanel?.classList.remove('hidden');
+}
+
+function startGuide() {
+  fleetView.guided = { done: new Set(), current: null };
+  setGuideHint('');
+  showGuideStep();
+}
+
+/** 状态推送后：当前引导中的环境**真正恢复**（核心在跑且不再需处理）→ 自动续跑并前进到下一个。
+ * 红线修正：绝不在 relogin 重启的 checking/starting/stopped 瞬态（needsAction 短暂为 false）误判已恢复
+ * ——那会把「登录其实没完成」的环境错误退休、永久踢出引导队列。只认「edge 在跑且不需处理」这个正向成功信号。 */
+function maybeAdvanceGuide() {
+  if (!fleetView.guided || !fleetView.guided.current) return;
+  const env = fleetView.envs.get(fleetView.guided.current);
+  if (!env) { // 环境被移出花名册：视为完成，前进
+    fleetView.guided.done.add(fleetView.guided.current);
+    showGuideStep();
+    return;
+  }
+  const lv = uiLogic.fleetLevel(env.status, Date.now());
+  const recovered = !lv.needsAction && env.status && env.status.edge === 'running';
+  if (recovered) {
+    fleetView.guided.done.add(fleetView.guided.current);
+    setGuideHint(`「${env.name || env.envId}」已恢复（${lv.label}），前进到下一个。`);
+    showGuideStep();
+  }
+}
+
+fields.railGuide?.addEventListener('click', startGuide);
+fields.guideExit?.addEventListener('click', () => exitGuide(''));
+fields.guideSkip?.addEventListener('click', () => {
+  if (!fleetView.guided || !fleetView.guided.current) return;
+  fleetView.guided.done.add(fleetView.guided.current);
+  showGuideStep();
+});
+fields.guideOpen?.addEventListener('click', async () => {
+  const envId = fleetView.guided && fleetView.guided.current;
+  if (!envId || typeof window.aidcpEdge.showDrivenBrowser !== 'function') return;
+  const r = await window.aidcpEdge.showDrivenBrowser(envId);
+  // 诚实红线：抬不动 / 无法保证抬前时告知窗口所在，绝不假装已抬前。
+  setGuideHint(r && r.ok ? (r.hint || '已请求把该环境的浏览器窗口前置。') : `打开窗口失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`);
+});
+fields.guideDone?.addEventListener('click', async () => {
+  const envId = fleetView.guided && fleetView.guided.current;
+  if (!envId || typeof window.aidcpEdge.relogin !== 'function') return;
+  setGuideHint('已触发该环境重新登录 / 重检，恢复后会自动前进到下一个…');
+  await window.aidcpEdge.relogin(envId);
+});
 
 // ─── Browser provider settings（既有逻辑原样保留，DOM 已迁入抽屉）───
 
@@ -798,9 +1203,20 @@ function markDirty() {
   updateApplyRestart();
 }
 
+// 保存前把「手动填写的分身 ID」并入花名册（兜底路径也是一个成员；重复 id 不复加）。
+function rosterForSave() {
+  const val = settingsUi.adsProfile.value.trim();
+  const list = roster.map((m) => ({ ...m }));
+  if (val && !list.some((m) => m.profileId === val)) {
+    list.push({ profileId: val, name: selectedProfileName, platform: selectedPlatform });
+  }
+  return list;
+}
+
 // 保存当前表单设置（供「启动」「按新设置重启」复用；无独立保存按钮）。返回 saveSettings 结果。
 async function saveCurrentSettings() {
   const provider = selectedProvider();
+  const environments = rosterForSave();
   const saved = await window.aidcpEdge.saveSettings({
     provider,
     browserParkingMode: selectedParkingMode(),
@@ -809,7 +1225,10 @@ async function saveCurrentSettings() {
     platform: selectedPlatform,
     adsApiKey: settingsUi.adsApiKey.value,
     adsApiBase: settingsUi.adsApiBase.value.trim(),
+    environments,
   });
+  roster = normalizeRosterList((saved && saved.environments) || environments);
+  refreshRosterMarks();
   dirty = false;
   // 表单已落盘 = 与持久化/在跑设置一致：解除「编辑中不回填」闩锁，让后续状态推送可再跟随实际 provider。
   // （否则点过一次 provider 分段后，render 的「跟随实际 provider」分支被永久旁路，段选可能与在跑 provider 不符。）
@@ -868,6 +1287,11 @@ function applySettings(s) {
   if (!s) return;
   selectedProfileName = s.adsProfileName || '';
   selectedPlatform = normPlatform(s.platform);
+  // 花名册：新形状 environments 优先；旧单值 adsProfileId 向后兼容加载为单元素花名册。
+  roster = Array.isArray(s.environments) && s.environments.length > 0
+    ? normalizeRosterList(s.environments)
+    : normalizeRosterList(s.adsProfileId ? [{ profileId: s.adsProfileId, name: s.adsProfileName, platform: s.platform }] : []);
+  if (typeof s.railCollapsed === 'boolean') fleetView.collapsed = s.railCollapsed;
   applyDevVisible(Boolean(s.devDetails));
   settingsUi.adsProfile.value = s.adsProfileId || '';
   settingsUi.adsApiKey.value = s.adsApiKey || '';
@@ -927,8 +1351,9 @@ async function runBrowserRecovery(action) {
   if (typeof api !== 'function') return;
   const label = action === 'show' ? '显示浏览器' : '重置浏览器位置';
   try {
-    const r = await api();
-    settingsUi.msg.textContent = r && r.ok ? `${label}指令已发送。` : `${label}失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`;
+    const r = await api(currentEnvId());
+    // 诚实边界：外壳只能「尽力抬前」，成功回执带窗口所在提示（r.hint），绝不宣称已抬到最前。
+    settingsUi.msg.textContent = r && r.ok ? (r.hint || `${label}指令已发送。`) : `${label}失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`;
   } catch (e) {
     settingsUi.msg.textContent = `${label}失败：${(e && e.message) || e}`;
   }
@@ -973,14 +1398,41 @@ async function probeAds() {
 
 // 选中某环境：把其 user_id（非 serial_number）设为将写入的分身 ID，并高亮该行；顺手记环境名作账号标签
 // 与该环境的平台（platform，来自其 remark；同步进 settings 供启动注入 AIDCP_PLATFORM）。
+// 多环境（edge-multi-environment-fleet）：选中即**加入运行花名册**（多选累积）；已在花名册的成员
+// 再点只切换当前值、诚实提示已加入，MUST NOT 重复出现两次（防 edgeId 撞车）。
 function selectProfile(userId, itemEl, profileName, platform) {
   settingsUi.adsProfile.value = userId;
   selectedProfileName = profileName || '';
   selectedPlatform = normPlatform(platform);
+  if (userId && !rosterHas(userId)) {
+    roster.push({ profileId: userId, name: profileName || '', platform: normPlatform(platform) });
+  } else if (userId) {
+    setEnvMsg(`「${profileName || userId}」已在运行花名册中。`, false);
+  }
   updateProfileDisplay();
   markDirty();
   settingsUi.adsEnvList.querySelectorAll('.ads-env-item').forEach((el) => el.classList.remove('selected'));
   if (itemEl) itemEl.classList.add('selected');
+  refreshRosterMarks();
+}
+
+// 从花名册移出一个成员；若其恰为当前分身 ID，则回落到剩余首个成员（或清空）。
+function removeFromRoster(profileId) {
+  roster = roster.filter((m) => m.profileId !== profileId);
+  if (settingsUi.adsProfile.value.trim() === profileId) {
+    const next = roster[0];
+    settingsUi.adsProfile.value = next ? next.profileId : '';
+    selectedProfileName = next ? next.name : '';
+    selectedPlatform = next ? normPlatform(next.platform) : 'xiaohongshu';
+    updateProfileDisplay();
+  }
+  markDirty();
+  refreshRosterMarks();
+}
+
+// roster 变更后就地重刷环境列表的成员标记（不重新拉取）。
+function refreshRosterMarks() {
+  if (lastProfiles.length > 0) populateEnvs(lastProfiles);
 }
 
 // 核心是否在跑（自动选中的闸：在跑时绝不替用户改配置）。
@@ -1033,10 +1485,12 @@ function makeDeleteBtn(prof) {
   return btn;
 }
 
-// 直接把环境铺成可点行（非下拉）。每行：名称 + 序号/分组/代理配置/user_id + 删除按钮。
-// 返回 { autoSelected }：恰好一个环境、分身 ID 为空且核心未在跑时自动选中（spec：唯一环境自动选中；
-// 多环境不代选、已有值不覆盖、在跑不动配置）。
+// 直接把环境铺成可点行（非下拉）。每行：名称 + 序号/分组/代理配置/user_id + 成员标记/移出 + 删除按钮。
+// 多选（edge-multi-environment-fleet）：点行 = 加入运行花名册（已加入的行带「已加入」标记与「移出」钮）。
+// 返回 { autoSelected }：恰好一个环境、花名册为空且核心未在跑时自动加入（spec：唯一环境自动加入花名册；
+// 多环境不代选、已有成员不覆盖、在跑不动配置）。
 function populateEnvs(profiles) {
+  lastProfiles = Array.isArray(profiles) ? profiles : [];
   const list = settingsUi.adsEnvList;
   const current = settingsUi.adsProfile.value.trim();
   list.innerHTML = '';
@@ -1069,6 +1523,22 @@ function populateEnvs(profiles) {
     text.appendChild(name);
     text.appendChild(meta);
     item.appendChild(text);
+    if (prof.userId && rosterHas(prof.userId)) {
+      const badge = document.createElement('span');
+      badge.className = 'env-member-badge';
+      badge.textContent = '已加入';
+      item.appendChild(badge);
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'ads-env-remove';
+      removeBtn.textContent = '移出';
+      removeBtn.title = '从运行花名册移出（不删除环境本身）';
+      removeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeFromRoster(prof.userId);
+      });
+      item.appendChild(removeBtn);
+    }
     item.appendChild(makeDeleteBtn(prof));
     item.addEventListener('click', () => selectProfile(prof.userId, item, prof.name, prof.platform));
     if (prof.userId && prof.userId === current) {
@@ -1078,7 +1548,7 @@ function populateEnvs(profiles) {
     if (!firstItem) firstItem = item;
     list.appendChild(item);
   }
-  if (profiles.length === 1 && !current && profiles[0].userId && !coreRunning()) {
+  if (profiles.length === 1 && !current && roster.length === 0 && profiles[0].userId && !coreRunning()) {
     selectProfile(profiles[0].userId, firstItem, profiles[0].name, profiles[0].platform);
     return { autoSelected: profiles[0].name || profiles[0].userId };
   }
@@ -1102,10 +1572,10 @@ async function refreshEnvs() {
     const { autoSelected, currentSelected } = populateEnvs(r.profiles || []);
     const extra = r.truncated ? '（环境较多，仅显示前若干条，可用分组精简）' : '';
     const autoHint = autoSelected
-      ? `已自动选中唯一环境「${autoSelected}」。`
+      ? `已自动加入唯一环境「${autoSelected}」。`
       : currentSelected
         ? `已选中「${currentSelected}」。`
-        : '点选一个即自动带出分身 ID。';
+        : '点选环境即加入运行花名册（可多选并行运行）。';
     setEnvMsg(`已加载 ${(r.profiles || []).length} 个环境${extra}。${autoHint}`, false);
   } catch (e) {
     setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可在「高级设置」打开「手动填写」填分身 ID。`, true);
@@ -1175,8 +1645,8 @@ settingsUi.applyRestart.addEventListener('click', async () => {
     if (saved && saved.saveOk === false) {
       settingsUi.msg.textContent = `设置本次生效但写盘失败：${saved.saveError || ''}（重启应用后可能丢失）`;
     }
-    const next = await window.aidcpEdge.restart();
-    if (next) render(next);
+    const next = await window.aidcpEdge.restart(currentEnvId());
+    if (next) routeStatus(next);
   } finally {
     settingsUi.applyRestart.disabled = false;
   }
@@ -1191,10 +1661,10 @@ fields.sessionFab.addEventListener('click', async () => {
     if (action === 'resume') {
       // 恢复 = 重启核心。若暂停期间改过浏览器设置（如切换了环境），先落盘再重启，否则会按旧设置重起。
       if (!(await persistDirtyBeforeRestart('设置已保存，正在按新设置恢复…'))) return;
-      next = await window.aidcpEdge.resume();
+      next = await window.aidcpEdge.resume(currentEnvId());
     } else if (action === 'start') {
       // 启动 = 先保存当前设置再启动（保存并入启动，无独立保存按钮）。
-      if (selectedProvider() === 'adspower' && !settingsUi.adsProfile.value.trim()) {
+      if (selectedProvider() === 'adspower' && !settingsUi.adsProfile.value.trim() && roster.length === 0) {
         promptMissingAdsProfile();
         return;
       }
@@ -1202,11 +1672,11 @@ fields.sessionFab.addEventListener('click', async () => {
       settingsUi.msg.textContent = saved && saved.saveOk === false
         ? `设置本次生效但写盘失败：${saved.saveError || ''}（重启应用后可能丢失）`
         : '设置已保存，正在启动…';
-      next = await window.aidcpEdge.start();
+      next = await window.aidcpEdge.start(currentEnvId());
     } else {
-      next = await window.aidcpEdge.pause();
+      next = await window.aidcpEdge.pause(currentEnvId());
     }
-    if (next) render(next);
+    if (next) routeStatus(next);
   } finally {
     fields.sessionFab.disabled = false;
   }
@@ -1217,7 +1687,7 @@ fields.relogin.addEventListener('click', async () => {
   try {
     // 重新登录同为「按当前浏览器设置重启核心」：若表单有未保存改动（如切换了环境），先落盘再重启。
     if (!(await persistDirtyBeforeRestart('设置已保存，正在重新登录…'))) return;
-    render(await window.aidcpEdge.relogin());
+    routeStatus(await window.aidcpEdge.relogin(currentEnvId()));
   } finally {
     fields.relogin.disabled = false;
   }
@@ -1243,6 +1713,16 @@ const personaUi = {
 let personaReady = false; // 已登录 + 云端已连接才可生成
 let personaDraftYaml = ''; // 当前草稿 soulYaml（确认时提交）
 let personaLocallyBound = false; // 本会话确认成功后即视为已绑（personaBound 信号要等下次 hello 才到）
+let personaDraftEnvId; // 草稿所属环境（多环境：persist MUST 打回生成时那个账号，不随后续切换环境漂移）
+
+// 切换环境时清空人设草稿（向导是每环境独立的）：绝不让 A 生成的草稿留在界面上被误确认到 B 的账号。
+// 同时清本会话「已绑」态（personaLocallyBound 是账号级、随环境切换失效，等新环境自己的 hello 信号）。
+function resetPersonaDraft() {
+  personaDraftYaml = '';
+  personaDraftEnvId = undefined;
+  personaLocallyBound = false;
+  personaUi.draft?.classList.add('hidden');
+}
 
 const PERSONA_GEN_FAIL = {
   generation_failed: '生成失败（模型未产出可用结果），请重试。',
@@ -1347,10 +1827,12 @@ async function runPersonaGenerate() {
   personaUi.generate.disabled = true;
   if (personaUi.regenerate) personaUi.regenerate.disabled = true;
   setPersonaMsg('正在生成人设…（可能需要十几秒）', false);
+  const genEnvId = currentEnvId(); // 生成时锁定目标环境；persist 打回它，绝不随后续切换漂移
   try {
-    const r = await window.aidcpEdge.personaGenerate({ keywordSelections, idempotencyKey: newIdempotencyKey() });
+    const r = await window.aidcpEdge.personaGenerate(genEnvId, { keywordSelections, idempotencyKey: newIdempotencyKey() });
     if (r && r.ok && r.soulYaml) {
       personaDraftYaml = r.soulYaml;
+      personaDraftEnvId = genEnvId;
       if (personaUi.draftSummary) personaUi.draftSummary.textContent = r.identitySummary || '已生成';
       if (personaUi.draftBody) personaUi.draftBody.textContent = r.soulYaml;
       personaUi.draft?.classList.remove('hidden');
@@ -1376,7 +1858,8 @@ personaUi.confirm?.addEventListener('click', async () => {
   personaUi.confirm.disabled = true;
   setPersonaMsg('正在保存人设…', false);
   try {
-    const r = await window.aidcpEdge.personaPersist({ soulYaml: personaDraftYaml });
+    // 打回草稿所属环境（personaDraftEnvId），不是「当前选中环境」——防中途切换环境把 A 的人设写进 B 的账号。
+    const r = await window.aidcpEdge.personaPersist(personaDraftEnvId, { soulYaml: personaDraftYaml });
     if (r && r.ok) {
       // 确认成功即本地视为已绑（personaBound 信号要等下次 hello 才到）：立即折叠向导为「已设置」态。
       personaLocallyBound = true;
@@ -1395,12 +1878,18 @@ personaUi.confirm?.addEventListener('click', async () => {
 });
 
 // ─── 启动接线 ───
-window.aidcpEdge.onStatusUpdate(render);
+// 状态 / 活动按 envId 路由（无 envId 的旧形状归 '__local__'，行为与单环境逐位一致）。
+window.aidcpEdge.onStatusUpdate(routeStatus);
 // 活动流条目（旧版主进程无此通道时安全跳过——渲染层对旧形状降级不炸）。
-window.aidcpEdge.onActivity?.((entry) => prependActivity(entry));
+window.aidcpEdge.onActivity?.(routeActivity);
+// fleet 快照通道（多环境花名册 / 选中项 / 收展；旧主进程无此通道时安全跳过）。
+window.aidcpEdge.onFleetUpdate?.(applyFleetSnapshot);
 window.aidcpEdge.getSettings().then((s) => {
   applySettings(s);
   // 面板加载时若为 AdsPower 模式即探一次并自动列环境（真实事件，低频；非「打开设置面板」）。
   if (selectedProvider() === 'adspower') probeAds();
 });
-window.aidcpEdge.getStatus().then(render);
+window.aidcpEdge.getStatus().then(routeStatus);
+if (typeof window.aidcpEdge.fleetGet === 'function') {
+  window.aidcpEdge.fleetGet().then(applyFleetSnapshot).catch(() => undefined);
+}

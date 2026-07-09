@@ -237,7 +237,10 @@ function createUiEventStream() {
       }),
     ],
     [
-      /阻断弹窗已清除，恢复浏览/,
+      // 两条恢复信号：overlayReportGate 发「已清除」（云端上报路径，main.ts）、browse-session 循环发「已消失」
+      // （本地闸放行路径）。两者都归一为 popup_cleared，使多环境的 overlayBlocked 待人工态可靠即时清除，
+      // 不必等下一次成功互动兜底（否则纯登录墙路径清除会延迟）。
+      /阻断弹窗已(清除|消失)，恢复浏览/,
       () => ({ kind: 'activity', type: 'popup_cleared', sentence: '弹窗已处理，继续浏览', presence: '继续浏览…' }),
     ],
     [

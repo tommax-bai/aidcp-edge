@@ -15,37 +15,32 @@ const {
 } = require('./ads-create-env-service.cjs');
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
-const { envKeyFromSettings, adoptStoredLastPublish, serializeUiState } = require('./ui-state.cjs');
 const {
   DEFAULT_PARKING_MODE,
   normalizeParkingMode,
   computeBrowserParkingPlan,
   parkingEnv,
 } = require('./browser-parking.cjs');
+const fleet = require('./fleet.cjs');
 
-// 主进程侧 AdsPower 只读客户端（探测 + 环境列表）。单例持有本进程内**唯一**串行节流（1req/s）。
+// 主进程侧 AdsPower 只读客户端（探测 + 环境列表 + 在跑分身对账）。单例持有本进程内**唯一**串行节流（1req/s）。
 // 与核心子进程内的 AdsPowerProvider 节流各自独立（跨进程无法共享内存队列，见 ads-local-api.cjs 头注）。
 const adsApi = createAdsLocalApi({});
 
 let mainWindow;
 let tray;
-let edgeProcess;
-let loginPoller;
+let loginPoller; // self（本机 Chrome）登录门专用；self 为单环境遗留路径，全局一份即可
 // 建号自助人设 stdin/stdout 桥（change edge-persona-keyword-generation）：
 // persona.generate/persist 带 correlation id 下发 core，core 经 [persona-reply] 行回执，按 id 命中 pending。
+// pending 全局一份（id 全局唯一）；命令只写「当前选中环境」的子进程 stdin。
 const personaPending = new Map(); // id -> { resolve, timer }
 let personaSeq = 0;
 let isQuitting = false;
-// 保存后重启标记：SIGTERM 旧边缘进程后，其 exit 回调据此按新 provider 起，而非误判为异常退出弹窗。
-let restartPending = false;
-// 暂停触发的 SIGTERM 标记（一次性）：供退出回调把本次退出判为「有意停止」，不弹异常退出告警。
-// 尤其治「核心启动窗口内点暂停」——此时核心的 SIGTERM handler 尚未安装，会被 signal 直接终止（signal!=null）
-// 而被误判为异常退出。
-let pausePending = false;
-let lastEdgeFailureLine = '';
-let browserParkingReady = false;
+// 优雅全停已完成、允许本次 quit 直落（before-quit 二次进入不再拦截）。
+let quitFinal = false;
+let quitStopAllInFlight = false;
 // 内嵌 AdsPower 运行时解析出的 Local API base（非默认端口时覆盖 AIDCP_ADS_API_BASE 喂核心）；
-// 外部客户端 / 未内嵌形态下保持 null，buildProviderEnv 回落 settings.adsApiBase 或核心默认 50325。
+// 外部客户端 / 未内嵌形态下保持 null，spawn env 回落 settings.adsApiBase 或核心默认 50325。
 let embeddedAdsApiBase = null;
 
 // AdsPower 官方下载页（客户端「下载 AdsPower」按钮外链）。
@@ -53,7 +48,7 @@ const ADS_DOWNLOAD_URL = 'https://www.adspower.net/download';
 
 // ── 边端日志落文件（排障用）──────────────────────────────────────────────
 // 核心子进程 stdout/stderr 除了进 UI 活动流，再逐行 append 到 userData/logs/edge.log，
-// 便于事后精确复盘（筛选重试 / note.open 分支 / 离线等只在 UI 流一闪而过、无法回溯）。
+// 便于事后精确复盘。多环境下同一文件、每行带 [envId] 前缀（交织输出仍可按环境筛）。
 // 单文件 + 到 ~5MB 轮转一次（.1 备份）；纯 tee，绝不参与状态判断、失败静默不影响核心。
 let edgeLogStream;
 function edgeLogFilePath() {
@@ -75,34 +70,35 @@ function ensureEdgeLogStream() {
   }
   return edgeLogStream;
 }
-function appendEdgeLog(line, isError) {
+function appendEdgeLog(envId, line, isError) {
   const s = ensureEdgeLogStream();
   if (!s) return;
   try {
-    s.write(`${new Date().toISOString()} ${isError ? 'ERR' : '   '} ${line}\n`);
+    s.write(`${new Date().toISOString()} ${isError ? 'ERR' : '   '} [${envId}] ${line}\n`);
   } catch { /* ignore */ }
 }
 
 // 桌面客户端浏览器 provider 设置（持久化到 userData/settings.json）：
-//  - provider='adspower'（默认）：核心进程经 AdsPower 本地 API 托管指纹浏览器（每分身独立指纹/IP，防同机多账号关联）；
-//    须填 adsProfileId（= AdsPower 分身 id / AIDCP_ADS_USER_ID），apiKey/apiBase 可选（AdsPower 可关 API 校验）。
-//  - provider='self'：自起本机真实指纹 Chrome（等价旧桌面行为，固定 9222 + cookie 轮询登录门）。
+//  - provider='adspower'（默认）：核心进程经 AdsPower 本地 API 托管指纹浏览器；多环境（edge-multi-environment-fleet）
+//    下以 environments 花名册（[{profileId,name,platform}]）声明并行环境，每环境一个受监督子进程。
+//  - provider='self'：自起本机真实指纹 Chrome（等价旧桌面行为，固定 9222 + cookie 轮询登录门；单环境遗留路径）。
+// 旧单值 adsProfileId/adsProfileName/platform 向后兼容加载为单元素花名册，并保持镜像回写（回滚兼容）。
 // 敏感值（apiKey）只落本机 userData、随用户机器，不进仓库 / 不外发。
 const DEFAULT_SETTINGS = {
   provider: 'adspower',
+  environments: [],
   adsProfileId: '',
   adsApiKey: '',
   adsApiBase: '',
-  // 选中环境的 AdsPower 环境名（操作者自己起的分身名，如「Tmax」）：作标题带账号标签的兜底
-  // （小红书昵称仅 navigate 身份路径可得；环境名桌面端现成可得、且通常就叫账号名）。
   adsProfileName: '',
-  // 选中环境的运行时平台（change edge-environment-platform-select）：决定启动时核心以哪个平台驱动打开首页
-  // + 握手上报哪个平台。选中环境时由该环境 remark 的平台同步进来；缺省 xiaohongshu（零回归）。
   platform: 'xiaohongshu',
   // 浏览器窗口停放：默认把窗口大部分移到屏幕边缘，保留可恢复边条，不用最小化/headless。
   browserParkingMode: DEFAULT_PARKING_MODE,
   // 「开发者详情」（原始日志区）默认不展示，在设置抽屉里开关（客户版首屏零技术噪音）。
   devDetails: false,
+  // 环境栏（fleet rail）收起态与上次选中环境（跨重启保留）。
+  railCollapsed: true,
+  selectedEnvId: '',
 };
 let settings = { ...DEFAULT_SETTINGS };
 
@@ -111,24 +107,51 @@ function settingsFile() {
 }
 
 function loadSettings() {
+  let parsed = {};
   try {
-    const parsed = JSON.parse(fs.readFileSync(settingsFile(), 'utf8'));
-    settings = { ...DEFAULT_SETTINGS, ...parsed };
+    parsed = JSON.parse(fs.readFileSync(settingsFile(), 'utf8'));
   } catch {
-    settings = { ...DEFAULT_SETTINGS };
+    parsed = {};
   }
+  settings = { ...DEFAULT_SETTINGS, ...parsed };
   if (settings.provider !== 'self' && settings.provider !== 'adspower') settings.provider = 'adspower';
   settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
+  // 花名册迁移（向后兼容）：旧单值 adsProfileId → 单元素花名册；镜像回写旧字段（回滚兼容）。
+  settings.environments = fleet.migrateEnvironments(parsed && typeof parsed === 'object' ? { ...parsed, environments: settings.environments } : settings);
+  applyLegacyMirror();
   return settings;
+}
+
+// 把花名册首成员镜像回旧单值字段（回滚兼容）。**platform 只在 adspower 模式镜像**：self（本机 Chrome）
+// 模式的 platform 是独立设置，绝不被 adspower 花名册的 environments[0]（可能是 facebook）污染而错注平台。
+function applyLegacyMirror() {
+  const mirror = fleet.legacyMirrorOf(settings.environments);
+  settings.adsProfileId = mirror.adsProfileId;
+  settings.adsProfileName = mirror.adsProfileName;
+  if (settings.provider === 'adspower') settings.platform = mirror.platform;
 }
 
 // 返回 { ok, error }：写盘成功 ok=true；失败 ok=false 并带 error 文案。
 // 红线（绝不静默假成功）：写盘失败时当次仍用内存设置继续跑，但 MUST 把「未持久化」如实回报给上层 / UI，
 // 绝不谎报保存成功——否则用户以为已存、重启后配置丢失却毫无提示。
 function saveSettings(patch) {
-  settings = { ...settings, ...(patch || {}) };
+  const p = { ...(patch || {}) };
+  // 花名册来源二选一：显式 environments 优先；否则旧 adsProfileId 补丁（旧渲染层/单环境语义）转单元素花名册。
+  if (Array.isArray(p.environments)) {
+    p.environments = fleet.normalizeEnvironments(p.environments);
+  } else if (Object.prototype.hasOwnProperty.call(p, 'adsProfileId')) {
+    const single = fleet.normalizeEnvironment({
+      profileId: p.adsProfileId,
+      name: p.adsProfileName !== undefined ? p.adsProfileName : settings.adsProfileName,
+      platform: p.platform !== undefined ? p.platform : settings.platform,
+    });
+    p.environments = single ? [single] : [];
+  }
+  settings = { ...settings, ...p };
   if (settings.provider !== 'self' && settings.provider !== 'adspower') settings.provider = 'adspower';
   settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
+  settings.environments = fleet.normalizeEnvironments(settings.environments);
+  applyLegacyMirror();
   try {
     fs.mkdirSync(app.getPath('userData'), { recursive: true });
     fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2), 'utf8');
@@ -137,25 +160,6 @@ function saveSettings(patch) {
     console.error('[aidcp-edge] settings 写入失败:', error?.message);
     return { ok: false, error: error?.message || '未知错误' };
   }
-}
-
-// 由当前设置推导注入给核心进程的 provider 相关 env。
-// 'self' 在前、被 ...process.env 覆盖 → 外部显式设 AIDCP_BROWSER_PROVIDER 等仍是逃生阀、优先生效。
-function buildProviderEnv() {
-  const env = {
-    ...buildBrowserParkingEnv(),
-    AIDCP_BROWSER_PROVIDER: settings.provider === 'self' ? 'self' : 'adspower',
-    // change edge-environment-platform-select：把选中环境的平台注入核心（核心据此选平台驱动 = 启动打开哪个平台首页）。
-    // 缺省 xiaohongshu → 与历史行为逐位等价（核心默认也是 xhs）；...process.env 仍可覆盖（逃生阀）。
-    AIDCP_PLATFORM: normalizePlatform(settings.platform),
-  };
-  if (settings.provider === 'self') return env;
-  env.AIDCP_ADS_USER_ID = settings.adsProfileId;
-  if (settings.adsApiKey) env.AIDCP_ADS_API_KEY = settings.adsApiKey;
-  // 内嵌运行时解析出的实际 base 优先（覆盖非默认端口）；否则回落设置项。
-  if (embeddedAdsApiBase) env.AIDCP_ADS_API_BASE = embeddedAdsApiBase;
-  else if (settings.adsApiBase) env.AIDCP_ADS_API_BASE = settings.adsApiBase;
-  return env;
 }
 
 function currentParkingPlan(mode = settings.browserParkingMode) {
@@ -171,15 +175,45 @@ function currentParkingPlan(mode = settings.browserParkingMode) {
   return computeBrowserParkingPlan(mode, displays, primary);
 }
 
-function buildBrowserParkingEnv() {
-  return parkingEnv(currentParkingPlan());
+// 每环境停放注入：按环境在花名册中的序号做窗口错位（级联偏移），使多个 headful 窗口不完全叠死、
+// 行↔窗口按加入顺序可对应（同名/同色受平台限制做不到，见「打开窗口」的诚实文案）。
+const ENV_WINDOW_CASCADE_PX = 36;
+function buildBrowserParkingEnv(cascadeIndex = 0) {
+  const plan = currentParkingPlan();
+  if (cascadeIndex > 0) {
+    const dx = cascadeIndex * ENV_WINDOW_CASCADE_PX;
+    plan.bounds = { ...plan.bounds, left: plan.bounds.left + dx, top: plan.bounds.top + dx };
+    plan.launchPosition = { left: plan.launchPosition.left + dx, top: plan.launchPosition.top + dx };
+    plan.visibleBounds = { ...plan.visibleBounds, left: plan.visibleBounds.left + dx, top: plan.visibleBounds.top + dx };
+  }
+  return parkingEnv(plan);
+}
+
+// self（本机 Chrome）遗留路径的 provider env（单环境）。'self' 在前、被 ...process.env 覆盖 →
+// 外部显式设 AIDCP_BROWSER_PROVIDER 等仍是逃生阀、优先生效。
+function buildSelfProviderEnv() {
+  return {
+    ...buildBrowserParkingEnv(0),
+    AIDCP_BROWSER_PROVIDER: 'self',
+    AIDCP_PLATFORM: normalizePlatform(settings.platform),
+  };
+}
+
+// adspower 每环境通用注入（不含身份键；身份由 fleet.buildEnvSpawnEnv 注入并守闸）。
+function buildAdsProviderEnv(handle) {
+  const env = {
+    ...buildBrowserParkingEnv(handle ? handle.cascadeIndex : 0),
+  };
+  if (settings.adsApiKey) env.AIDCP_ADS_API_KEY = settings.adsApiKey;
+  if (embeddedAdsApiBase) env.AIDCP_ADS_API_BASE = embeddedAdsApiBase;
+  else if (settings.adsApiBase) env.AIDCP_ADS_API_BASE = settings.adsApiBase;
+  return env;
 }
 
 // 解析只读调用的 base/key：优先用渲染层传入的**当前表单值**（支持「新填 key 未保存即刷新」而不陷回环），
 // 表单未带该字段才回落持久化 settings。apiKey 只用于本次请求头、不落日志 / 不写文件。
 function resolveAdsOpts(formOpts) {
   const o = formOpts || {};
-  // apiKey / apiBase 同一套语义：表单当前值非空则用之，为空才回落持久化 settings（D5）。
   const apiBase = (o.apiBase && String(o.apiBase).trim()) || settings.adsApiBase || undefined;
   const formKey = Object.prototype.hasOwnProperty.call(o, 'apiKey') ? String(o.apiKey).trim() : '';
   const apiKey = formKey || settings.adsApiKey;
@@ -192,8 +226,6 @@ function resolveAdsOpts(formOpts) {
 
 // 「打开 AdsPower 新建环境」best-effort：AdsPower 不公开直达其内部「新建浏览器」tab 的深链，
 // 故只能尝试拉起 / 聚焦客户端；起不来（未装 / 应用名不符）诚实退回打开官方页面。面板另有引导文案。
-// 返回 { launched }：true=真拉起了本机 AdsPower 客户端；false=退回打开了官网。异步等 `open -a` 结果，
-// 让 launched 如实反映（避免面板对着官网却说「已打开 AdsPower」——复查确认的误导文案）。
 async function openAdsClient() {
   if (process.platform === 'darwin') {
     const launched = await new Promise((resolve) => {
@@ -207,50 +239,177 @@ async function openAdsClient() {
     });
     if (launched) return { launched: true };
   }
-  // 未装 / 拉起失败 / 非 macOS：诚实退回官方页面（非直达新建页）。
   void shell.openExternal(ADS_DOWNLOAD_URL);
   return { launched: false };
 }
 
-const status = {
-  provider: 'adspower',
-  cloud: 'disconnected',
-  auth: 'checking',
-  session: 'idle',
-  stats: {
-    views: 0,
-    likes: 0,
-    collects: 0,
-    comments: 0,
-    follows: 0,
-    publishes: 0,
-  },
-  dailyUsage: null,
-  risk: 'normal',
-  edge: 'stopped',
-  lastMessage: '边缘进程尚未运行。',
-  edgeFailure: null,
-  updatedAt: new Date().toISOString(),
-  // 陪伴式界面新增字段（形状兼容：旧字段全保留，旧渲染层忽略即可）。
-  // account：账号身份（由核心「账号身份已确立」行带出，标题带展示）。
-  account: null,
-  // presence：在场感行（当前正在做什么 + 时间戳）；动效门在渲染层按新鲜度自持。
-  presence: { text: '等待启动…', at: new Date().toISOString() },
-  // publish：发布卡只读投影（pending/reminded/approved/published/rejected/failed）。
-  publish: null,
-  // kernelPrep：内嵌运行时首启内核准备进度 { state, percent, version }；null=无需/已完成（形状兼容，旧渲染层忽略）。
-  kernelPrep: null,
-  // lastPublish：最近一次成功发布 {title, at}（本地持久化，重启不丢；云端快照接入后以云端为准）。
-  lastPublish: null,
+// ── 多环境注册表（edge-multi-environment-fleet）──────────────────────────
+// 每环境 = 一个 AdsPower 分身 = 一个受监督子进程 = 一条云端连接；envId=ads-<分身id>（唯一 + 稳定）。
+// self（本机 Chrome）为单环境遗留路径，占一个 envId='self' 的 handle。
+
+/** 单环境状态投影模板（形状与旧单环境 status 逐位一致，渲染层零迁移）。 */
+function makeStatus(provider) {
+  return {
+    provider,
+    cloud: 'disconnected',
+    auth: 'checking',
+    session: 'idle',
+    stats: { views: 0, likes: 0, collects: 0, comments: 0, follows: 0, publishes: 0 },
+    dailyUsage: null,
+    risk: 'normal',
+    edge: 'stopped',
+    lastMessage: '边缘进程尚未运行。',
+    edgeFailure: null,
+    updatedAt: new Date().toISOString(),
+    account: null,
+    presence: { text: '等待启动…', at: new Date().toISOString() },
+    publish: null,
+    kernelPrep: null,
+    lastPublish: null,
+    // 多环境新增（旧渲染层忽略即可）：有界重起放弃终态 + 同账号铺多环境告警 + 阻断浮层待人工。
+    respawnGaveUp: false,
+    sameAccountWarning: null,
+    // 核心遇登录/验证码/未知阻断弹窗、已本地暂停等待人工处理（红线：绝不呈现为在线健康）。
+    // 由核心成对信号驱动：`检测到X弹窗，暂停操作`(置真) / `阻断弹窗已清除，恢复浏览`(置假)。
+    overlayBlocked: false,
+    // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在已绑时下发（sticky true），
+    // 渲染层据此把徽标翻「已设置」并跳过向导。按环境隔离（账号级信号）。
+    personaBound: false,
+  };
+}
+
+/** envId -> EnvHandle。EnvHandle 持子进程句柄 + 冻结身份 + 状态投影 + 每环境解析器/意图标志/重起计数。 */
+const envs = new Map();
+let selectedEnvId = '';
+
+function makeEnvHandle({ envId, kind, profileId, name, platform, cascadeIndex }) {
+  return {
+    envId,
+    kind, // 'adspower' | 'self'
+    profileId: profileId || '',
+    name: name || '',
+    platform: platform || 'xiaohongshu',
+    cascadeIndex: cascadeIndex || 0,
+    child: undefined,
+    status: makeStatus(kind === 'self' ? 'self' : 'adspower'),
+    // 每环境各一份日志→UI 事件解析器（交织 stdout 按 envId 归属，绝不串号）。
+    uiEvents: createUiEventStream(),
+    browserParkingReady: false,
+    restartPending: false,
+    pausePending: false,
+    removed: false,
+    // 排队启动期间被暂停/移出/退出的取消闸：queued start（尚无子进程、SIGTERM 无处可发）据此在
+    // startEdge 处诚实放弃拉起，杜绝「暂停/退出被排队启动覆盖」与孤儿子进程。
+    stopRequested: false,
+    lastEdgeFailureLine: '',
+    respawnStreak: 0,
+    respawnTimer: null,
+    gaveUp: false,
+    spawnedAtMs: 0,
+    browserAlreadyRunning: false,
+  };
+}
+
+function selectedHandle() {
+  return envs.get(selectedEnvId) || envs.values().next().value;
+}
+
+/** 依当前 settings 同步注册表：新增环境建 handle、被移出花名册的环境有序停止并摘除、序号重排。 */
+function syncEnvHandles() {
+  const wanted = new Map(); // envId -> spec
+  if (settings.provider === 'self') {
+    wanted.set('self', { envId: 'self', kind: 'self', profileId: '', name: '本机 Chrome', platform: settings.platform, cascadeIndex: 0 });
+  } else {
+    settings.environments.forEach((env, i) => {
+      const envId = fleet.envIdForProfile(env.profileId);
+      wanted.set(envId, { envId, kind: 'adspower', profileId: env.profileId, name: env.name, platform: env.platform, cascadeIndex: i });
+    });
+  }
+  // 摘除不再需要的环境：在跑的先有意停止（removed + stopRequested 使退出回调 / 排队启动都按「有意」
+  // 处理——不告警、不重起、queued start 到点也不再拉起，杜绝孤儿）。
+  for (const [envId, handle] of envs) {
+    if (wanted.has(envId)) continue;
+    handle.removed = true;
+    handle.stopRequested = true;
+    clearRespawnTimer(handle);
+    if (handle.child) {
+      queueLifecycle(() => { try { handle.child?.kill('SIGTERM'); } catch { /* ignore */ } });
+    }
+    envs.delete(envId);
+  }
+  // 建新 / 更新元数据（既有 handle 的运行态保留）。
+  for (const [envId, spec] of wanted) {
+    const existing = envs.get(envId);
+    if (existing) {
+      existing.name = spec.name;
+      existing.platform = spec.platform;
+      existing.cascadeIndex = spec.cascadeIndex;
+    } else {
+      const handle = makeEnvHandle(spec);
+      // 环境名现成可得：未启动前就点亮账号标签（登录后被真实身份覆盖）。
+      if (spec.kind === 'adspower' && spec.profileId) {
+        handle.status.account = { id: spec.profileId, name: spec.name || '', source: 'env' };
+      }
+      envs.set(envId, handle);
+    }
+  }
+  if (!envs.has(selectedEnvId)) {
+    const first = envs.keys().next();
+    selectedEnvId = first.done ? '' : first.value;
+  }
+  // 花名册变更后重算同账号告警：某一重复环境被移出后，幸存兄弟的告警必须随之撤下，
+  // 否则会留一个「幽灵需处理项」（脉冲 + 计入待处理 + 混进引导队列）直到别的环境再发身份事件。
+  refreshSameAccountWarnings();
+  broadcastFleet();
+}
+
+/** fleet 快照（花名册 + 各环境状态 + 选中项），供渲染层建栏/全量对齐。 */
+function fleetSnapshot() {
+  return {
+    provider: settings.provider,
+    selectedEnvId,
+    railCollapsed: Boolean(settings.railCollapsed),
+    environments: [...envs.values()].map((h) => ({
+      envId: h.envId,
+      kind: h.kind,
+      profileId: h.profileId,
+      name: h.name,
+      platform: h.platform,
+      status: { ...h.status, envId: h.envId, envName: h.name },
+    })),
+  };
+}
+
+function broadcastFleet() {
+  BrowserWindow.getAllWindows().forEach((window) => {
+    window.webContents.send('fleet:update', fleetSnapshot());
+  });
+}
+
+// ── 生命周期错峰串行队列（AdsPower ~1req/s；启动/停止/重登统一走此口）──
+const lifecycleQueue = fleet.createStaggerQueue({
+  spacingMs: Number(process.env.AIDCP_FLEET_STAGGER_MS) > 0 ? Number(process.env.AIDCP_FLEET_STAGGER_MS) : undefined,
+});
+function queueLifecycle(fn) {
+  return lifecycleQueue.enqueue(fn);
+}
+
+// ── 每环境有界重起（复用 respawn-policy 语义；CJS 副本见 fleet.cjs，parity 用例锁一致）──
+const RESPAWN_OPTS = {
+  maxConsecutiveFailures: Number(process.env.AIDCP_EDGE_RESPAWN_MAX ?? 5),
+  backoffBaseMs: Number(process.env.AIDCP_EDGE_RESPAWN_BACKOFF_BASE_MS ?? 1_000),
+  backoffMaxMs: Number(process.env.AIDCP_EDGE_RESPAWN_BACKOFF_MAX_MS ?? 30_000),
+  healthyUptimeMs: Number(process.env.AIDCP_EDGE_RESPAWN_HEALTHY_UPTIME_MS ?? 60_000),
 };
+function clearRespawnTimer(handle) {
+  if (handle.respawnTimer) {
+    clearTimeout(handle.respawnTimer);
+    handle.respawnTimer = null;
+  }
+}
 
-// 轻量 UI 状态持久化（与用户设置分文件；只存展示性历史，如最近发布）。
-// 历史态带环境归属键（change env-switch-last-publish-reset）：异键/缺键不采纳，防切环境后串显旧账号内容。
-// lastPublishEnvKey 与 status.lastPublish 同生同灭；runningEnvKey 在核心 spawn 时刻快照，
-// 写入归属一律取它——防「保存了新设置但未重启」窗口内把旧核心的发布记到新环境名下。
-let lastPublishEnvKey = null;
-let runningEnvKey = null;
-
+// ── 轻量 UI 状态持久化（与用户设置分文件；只存展示性历史，按 envId 分桶）──
+let uiState = { byEnv: {} };
 function uiStateFile() {
   return path.join(app.getPath('userData'), 'ui-state.json');
 }
@@ -258,31 +417,40 @@ function uiStateFile() {
 function loadUiState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(uiStateFile(), 'utf8'));
-    const envKey = envKeyFromSettings(settings);
-    const adopted = adoptStoredLastPublish(parsed, envKey);
-    if (adopted) {
-      status.lastPublish = adopted;
-      lastPublishEnvKey = envKey;
+    if (parsed && parsed.byEnv && typeof parsed.byEnv === 'object') {
+      uiState = { byEnv: parsed.byEnv };
+    } else if (parsed && parsed.lastPublish && typeof parsed.lastPublish.title === 'string') {
+      // 旧单环境形状：归入迁移后的首个环境（无环境则挂 self）。
+      const first = envs.keys().next();
+      const legacyEnvId = first.done ? 'self' : first.value;
+      uiState = { byEnv: { [legacyEnvId]: { lastPublish: { title: parsed.lastPublish.title, at: parsed.lastPublish.at || null } } } };
     }
   } catch {
     /* 无历史/坏文件按空处理 */
+  }
+  for (const handle of envs.values()) {
+    const saved = uiState.byEnv[handle.envId];
+    if (saved && saved.lastPublish && typeof saved.lastPublish.title === 'string') {
+      handle.status.lastPublish = { title: saved.lastPublish.title, at: saved.lastPublish.at || null };
+    }
   }
 }
 
 function saveUiState() {
   try {
+    for (const handle of envs.values()) {
+      if (handle.status.lastPublish) {
+        uiState.byEnv[handle.envId] = { lastPublish: handle.status.lastPublish };
+      }
+    }
     fs.mkdirSync(app.getPath('userData'), { recursive: true });
-    fs.writeFileSync(uiStateFile(), JSON.stringify(serializeUiState(lastPublishEnvKey, status.lastPublish), null, 2), 'utf8');
+    fs.writeFileSync(uiStateFile(), JSON.stringify(uiState, null, 2), 'utf8');
   } catch (error) {
     console.error('[aidcp-edge] ui-state 写入失败:', error?.message); // 展示性历史，写失败不阻断
   }
 }
 
-// 核心日志 → UI 事件（结构化优先、中文行映射兜底；计数迁入该模块并修正为仅 ✓ 成功行计数）。
-const uiEvents = createUiEventStream();
-
-// Windows 叠加窗控随风控状态染色（mac 红绿灯为系统绘制、无需管）。
-// 仅 win32 且 overlay 存在时可调；Electron 在未启用 overlay 时会抛错，故 try/catch 包裹。
+// Windows 叠加窗控随风控状态染色（mac 红绿灯为系统绘制、无需管）。仅对**选中环境**生效。
 const OVERLAY_TONES = {
   normal: { color: '#eef4ff', symbolColor: '#1a2233', height: 46 },
   warned: { color: '#fdf3e0', symbolColor: '#5b4708', height: 46 },
@@ -447,15 +615,17 @@ function bumpDailyUsageWindows(input, action, amount) {
   return Object.keys(windows).length > 0 ? windows : null;
 }
 
-function updateStatus(patch) {
+/** 每环境状态合并 + 广播（status:update 带 envId 路由键；渲染层按键归属，绝不串号）。 */
+function updateStatus(handle, patch) {
   // 计数补丁先跟现值合并成**完整** stats 再落（修老 bug：Object.assign 先把 stats 整体
   // 替换成局部补丁，随后的合并对象已被替换 → 未提及的计数被清空、渲染层出现空数字）。
-  const full = patch.stats ? { ...patch, stats: mergeStats(status.stats, patch.stats) } : patch;
-  Object.assign(status, full, { updatedAt: new Date().toISOString() });
-  if (patch.risk) applyOverlayTone(patch.risk);
+  const full = patch.stats ? { ...patch, stats: mergeStats(handle.status.stats, patch.stats) } : patch;
+  Object.assign(handle.status, full, { updatedAt: new Date().toISOString() });
+  if (patch.risk && handle.envId === selectedEnvId) applyOverlayTone(patch.risk);
   if (full.lastPublish) saveUiState();
+  const payload = { ...handle.status, envId: handle.envId, envName: handle.name };
   BrowserWindow.getAllWindows().forEach((window) => {
-    window.webContents.send('status:update', status);
+    window.webContents.send('status:update', payload);
   });
 }
 
@@ -464,8 +634,8 @@ function presencePatch(text) {
   return { presence: { text, at: new Date().toISOString() } };
 }
 
-function clearEdgeFailurePatch() {
-  lastEdgeFailureLine = '';
+function clearEdgeFailurePatch(handle) {
+  handle.lastEdgeFailureLine = '';
   return { edgeFailure: null };
 }
 
@@ -487,11 +657,11 @@ function conciseFailureLine(message) {
   return summary;
 }
 
-function rememberEdgeFailureCandidate(message, isError) {
+function rememberEdgeFailureCandidate(handle, message, isError) {
   const raw = String(message || '');
   if (!isError && !/(启动失败|失败|不可达|not allowed|being used|no_target|code=-?\d+)/i.test(raw)) return;
   const summary = conciseFailureLine(raw);
-  if (summary) lastEdgeFailureLine = summary;
+  if (summary) handle.lastEdgeFailureLine = summary;
 }
 
 function edgeFailurePatch(summary, extra = {}) {
@@ -506,17 +676,18 @@ function edgeFailurePatch(summary, extra = {}) {
   };
 }
 
-function abnormalExitFailurePatch(code, signal) {
-  return edgeFailurePatch(lastEdgeFailureLine || exitMessage(code, signal), {
+function abnormalExitFailurePatch(handle, code, signal) {
+  return edgeFailurePatch(handle.lastEdgeFailureLine || exitMessage(code, signal), {
     exitCode: code ?? null,
     signal: signal ?? null,
   });
 }
 
-// 活动流条目单独走 ui:activity 通道（无界流不塞进 status 对象）。
-function broadcastActivity(entry) {
+// 活动流条目单独走 ui:activity 通道（无界流不塞进 status 对象）；带 envId 路由键。
+function broadcastActivity(handle, entry) {
+  const payload = { ...entry, envId: handle.envId };
   BrowserWindow.getAllWindows().forEach((window) => {
-    window.webContents.send('ui:activity', entry);
+    window.webContents.send('ui:activity', payload);
   });
 }
 
@@ -558,7 +729,7 @@ function frameOptions() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 760,
+    width: 820,
     height: 640,
     minWidth: 640,
     minHeight: 520,
@@ -590,8 +761,8 @@ function createTray() {
     { label: '显示窗口', click: () => mainWindow?.show() },
     { label: '隐藏窗口', click: () => mainWindow?.hide() },
     { type: 'separator' },
-    { label: '显示浏览器窗口', click: () => { void sendBrowserParkingCommand('browser.show'); } },
-    { label: '重置浏览器位置', click: () => { void sendBrowserParkingCommand('browser.park'); } },
+    { label: '显示浏览器窗口', click: () => { void sendBrowserParkingCommand(selectedHandle(), 'browser.show'); } },
+    { label: '重置浏览器位置', click: () => { void sendBrowserParkingCommand(selectedHandle(), 'browser.park'); } },
     { type: 'separator' },
     { label: '退出', click: quitApp },
   ]));
@@ -602,23 +773,34 @@ function createTray() {
   });
 }
 
-function sendBrowserParkingCommand(type) {
-  if (!edgeProcess || !browserParkingReady || !edgeProcess.stdin || edgeProcess.stdin.destroyed) {
+function sendBrowserParkingCommand(handle, type) {
+  if (!handle || !handle.child || !handle.browserParkingReady || !handle.child.stdin || handle.child.stdin.destroyed) {
     return { ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' };
   }
   try {
-    edgeProcess.stdin.write(`${JSON.stringify({ type })}\n`);
-    return { ok: true };
+    handle.child.stdin.write(`${JSON.stringify({ type })}\n`);
+    // 「尽力抬前」诚实边界：外壳只能请求核心把窗口前置/归位，无法保证系统真把它抬到最前，
+    // 故回执带窗口所在的定位提示、绝不宣称「已抬到最前」。
+    const plan = currentParkingPlan();
+    const where = plan.effectiveMode === 'offscreen'
+      ? '窗口平时完全移出屏幕，请稍候其自动归位'
+      : '窗口平时停放在屏幕边缘';
+    return { ok: true, hint: `已向该环境发出窗口${type === 'browser.show' ? '前置' : '归位'}请求；若未见弹出，${where}，也可在系统窗口切换器里按名字找到它。` };
   } catch (error) {
     return { ok: false, error: error?.message || '发送浏览器控制指令失败' };
   }
 }
 
-// 建号自助人设：把带 correlation id 的 persona 命令写进 core stdin，返回按 [persona-reply] 命中的 Promise。
-// 不 gate 在 browserParkingReady（persona 与 parking 独立）；仅要求 core 进程 + stdin 在。
-function sendPersonaCommand(type, payload) {
+// 建号自助人设：把带 correlation id 的 persona 命令写进**目标环境**（envId 路由，缺省选中环境）的 core stdin，
+// 返回按 [persona-reply] 命中的 Promise。不 gate 在 browserParkingReady（persona 与 parking 独立）。
+// 红线（跨账号误绑）：persist 必须打到「草稿所属环境」的子进程，不能因中途切换环境把 A 的人设写进 B 的账号。
+function sendPersonaCommand(envId, type, payload) {
   return new Promise((resolve) => {
-    if (!edgeProcess || !edgeProcess.stdin || edgeProcess.stdin.destroyed) {
+    // 严格路由（红线：跨账号误绑）：显式给了 envId 就**只**打那个环境，绝不回落选中环境——
+    // 否则草稿所属环境在 persist 在途时被移出花名册，会把人设写进当前选中的另一个账号。
+    // 缺省（undefined，单环境/local）才回落选中环境（向后兼容）。
+    const handle = envId ? envs.get(envId) : selectedHandle();
+    if (!handle || !handle.child || !handle.child.stdin || handle.child.stdin.destroyed) {
       resolve({ ok: false, reason: 'edge_not_running' });
       return;
     }
@@ -630,7 +812,7 @@ function sendPersonaCommand(type, payload) {
     }, 200_000);
     personaPending.set(id, { resolve, timer });
     try {
-      edgeProcess.stdin.write(`${JSON.stringify({ type, id, payload })}\n`);
+      handle.child.stdin.write(`${JSON.stringify({ type, id, payload })}\n`);
     } catch (error) {
       clearTimeout(timer);
       personaPending.delete(id);
@@ -640,8 +822,6 @@ function sendPersonaCommand(type, payload) {
 }
 
 // core 回执行 `[persona-reply] {id, ok, payload?, error?}`：按 id 命中 pending resolve。
-// ok=true → 把云端结果 payload（{ok, soulYaml?, identitySummary?, reason?}）回给渲染层；
-// ok=false（桥/WS 层失败）→ 归一成 { ok:false, reason:'edge_request_failed' } 诚实回执。
 function handlePersonaReply(jsonText) {
   let obj;
   try {
@@ -660,80 +840,216 @@ function handlePersonaReply(jsonText) {
   }
 }
 
-function startEdge() {
-  if (edgeProcess) return;
+/** 同账号铺多环境检测（云端会合并风控/配额、发布只定向最早那条边缘）：状态变更后全量重算。 */
+function refreshSameAccountWarnings() {
+  const entries = [...envs.values()]
+    .filter((h) => h.status.account && h.status.account.source !== 'env') // 只认登录读出的真实身份
+    .map((h) => ({ envId: h.envId, accountId: h.status.account.id }));
+  const dupEnvIds = new Set(fleet.duplicateAccountGroups(entries).flatMap((g) => g.envIds));
+  for (const handle of envs.values()) {
+    const shouldWarn = dupEnvIds.has(handle.envId);
+    const isWarned = Boolean(handle.status.sameAccountWarning);
+    if (shouldWarn === isWarned) continue;
+    updateStatus(handle, {
+      sameAccountWarning: shouldWarn
+        ? { message: '该环境与另一环境登录了同一账号：云端会合并两者的风控与配额预算、发布只定向最早连接的那条边缘。请改为一个环境一个独立账号。' }
+        : null,
+    });
+  }
+}
+
+/** 有界重起调度尾（exit / spawn-error 两处共用）：respawn → 退避后经错峰队列重起（再校验取消闸）。 */
+function scheduleRespawnIfNeeded(handle, decision) {
+  if (decision.action !== 'respawn' || isQuitting) return;
+  handle.respawnTimer = setTimeout(() => {
+    handle.respawnTimer = null;
+    if (isQuitting || handle.removed || handle.child || handle.stopRequested) return;
+    void queueLifecycle(() => startFlowForEnv(handle));
+  }, decision.delayMs || 0);
+  if (handle.respawnTimer && typeof handle.respawnTimer.unref === 'function') handle.respawnTimer.unref();
+}
+
+/** spawn 一个环境的核心子进程（非 detached，随外壳退出终止）。身份闸在此强制执行。 */
+function startEdge(handle) {
+  // 取消闸（红线）：排队等待期间被退出 / 移出 / 暂停的启动到点也绝不拉起子进程——
+  // 否则退出期会 spawn 孤儿 Chrome（gracefulStopAllAndQuit 已快照 SIGTERM 集、抓不到它），
+  // 或把用户的暂停 / 移出静默覆盖回运行。
+  if (!handle || handle.child || handle.removed || handle.stopRequested || isQuitting) return;
+  if (handle.status.session === 'paused') return;
+  clearRespawnTimer(handle);
   // 打包后用 Electron 自带的 Node 运行预编译产物（ELECTRON_RUN_AS_NODE），
   // 不依赖目标机装 Node/npx/tsx。entry 为 build:dist 编译出的 dist/main.js。
   const appRoot = app.getAppPath();
   const edgeEntry = path.join(appRoot, 'dist', 'main.js');
-  // 浏览器 provider 由桌面设置决定（默认 adspower：核心经 AdsPower 本地 API 托管指纹浏览器；
-  // self：桌面自起 Chrome 流程 chrome-launcher.cjs 固定 9222）。provider env 在前、被 ...process.env
-  // 覆盖 → 外部显式设置仍是逃生阀、优先生效。
-  const wasAdspower = settings.provider === 'adspower';
-  browserParkingReady = false;
-  runningEnvKey = envKeyFromSettings(settings);
-  edgeProcess = spawn(process.execPath, [edgeEntry], {
+  let spawnEnv;
+  if (handle.kind === 'adspower') {
+    // 身份闸（红线）：冻结 env 注入唯一稳定身份；无法派生（缺分身 id）则诚实拒绝，绝不回落主机名。
+    const built = fleet.buildEnvSpawnEnv({
+      environment: { profileId: handle.profileId, name: handle.name, platform: handle.platform },
+      processEnv: process.env,
+      providerEnv: buildAdsProviderEnv(handle),
+    });
+    if (!built.ok) {
+      updateStatus(handle, {
+        auth: 'config required',
+        edge: 'stopped',
+        session: 'idle',
+        lastMessage: built.reason,
+        ...edgeFailurePatch(built.reason),
+        ...presencePatch('身份不完整，已拒绝启动'),
+      });
+      return;
+    }
+    // 同 edgeId 已在跑（理论上被花名册去重挡住；此为最后闸）：拒绝二次 spawn 防云端互踢。
+    const dupRunning = [...envs.values()].some((h) => h !== handle && h.child && h.envId === built.envId);
+    if (dupRunning) {
+      updateStatus(handle, {
+        edge: 'stopped',
+        session: 'idle',
+        lastMessage: '同一分身已有环境在运行，拒绝重复启动（同 edgeId 的第二条连接会被云端互踢）。',
+        ...presencePatch('分身已在其它环境运行'),
+      });
+      return;
+    }
+    spawnEnv = { ...built.env, ELECTRON_RUN_AS_NODE: '1' };
+  } else {
+    // self 遗留路径：维持旧合并次序（provider env 在前、被 ...process.env 覆盖 → 外部显式设置仍是逃生阀）。
+    spawnEnv = { ...buildSelfProviderEnv(), ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+  }
+
+  handle.browserParkingReady = false;
+  handle.browserAlreadyRunning = false;
+  handle.spawnedAtMs = Date.now();
+  const child = spawn(process.execPath, [edgeEntry], {
     cwd: appRoot,
-    env: { ...buildProviderEnv(), ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    env: spawnEnv,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
+  handle.child = child;
 
   // 发布卡在途状态随核心（重）启动清零（edge-companion-ui 8.1 评审修正）：离线窗口内的审批变化
   // （拒绝/失败）推送会如实丢失，旧 pending/approved 卡若不清会永久滞留成陈卡；真在候审/已批的
-  // 草稿由重连后的云端 hello 快照重新推回（pending/approved 可重建，终态不回放）。lastPublish
-  // 历史态同环境重启不清（持久数据，云端快照到位后以云端为准覆盖）；归属其他环境则随本次启动
-  // 清出展示、回落空态占位（change env-switch-last-publish-reset：切环境不得串显旧账号内容）。
-  const staleLastPublish = Boolean(status.lastPublish) && lastPublishEnvKey !== runningEnvKey;
-  if (staleLastPublish) lastPublishEnvKey = null;
-  updateStatus({
+  // 草稿由重连后的云端 hello 快照重新推回。lastPublish 历史态不清（持久数据）。
+  updateStatus(handle, {
     edge: 'starting',
     session: 'running',
     publish: null,
-    ...(staleLastPublish ? { lastPublish: null } : {}),
+    respawnGaveUp: false,
     lastMessage: '正在启动 aidcp-edge…',
     ...presencePatch('正在启动引擎…'),
-    ...clearEdgeFailurePatch(),
+    ...clearEdgeFailurePatch(handle),
   });
 
-  edgeProcess.stdout.on('data', (chunk) => handleEdgeOutput(chunk.toString()));
-  edgeProcess.stderr.on('data', (chunk) => handleEdgeOutput(chunk.toString(), true));
-  edgeProcess.on('exit', (code, signal) => {
-    edgeProcess = undefined;
-    browserParkingReady = false;
-    // 主动重启（保存设置后按新 provider 起）、暂停、退出应用都是「有意停止」，不算异常、不弹窗。
-    // pausePending 一次性消费：治「启动窗口内点暂停」——handler 未装时被 SIGTERM 终止(signal!=null)本不是异常。
-    const intentional = isQuitting || restartPending || pausePending;
-    pausePending = false;
+  child.stdout.on('data', (chunk) => handleEdgeOutput(handle, chunk.toString()));
+  child.stderr.on('data', (chunk) => handleEdgeOutput(handle, chunk.toString(), true));
+  // spawn 失败（EAGAIN 多环境 fork 压力 / ENOENT 产物缺失）：'error' 事件无监听会被 EventEmitter
+  // 重抛为未捕获异常 → 整个监督者进程崩、连累全部兄弟环境（破坏崩溃隔离）；即便 Electron 幸存，
+  // 'error' 后不发 'exit'，handle.child 永远钉住 → 该环境卡死在 starting、重起/放弃永不触发（静默假成功）。
+  // 故必须挂 'error'：诚实呈现失败 + 走同一条有界重起/放弃路径。exit 与 error 用 `handle.child===child`
+  // 互斥，谁先触发谁处理、另一个 no-op。
+  child.on('error', (err) => {
+    if (handle.child !== child) return;
+    handle.child = undefined;
+    handle.browserParkingReady = false;
+    const msg = (err && err.message) || String(err);
+    appendEdgeLog(handle.envId, `spawn error: ${msg}`, true);
+    if (handle.removed) return;
+    const decision = isQuitting
+      ? { action: 'stop', streak: handle.respawnStreak }
+      : fleet.decideRespawn(
+          { exitCode: 1, uptimeMs: Date.now() - handle.spawnedAtMs, prevStreak: handle.respawnStreak, shuttingDown: isQuitting },
+          RESPAWN_OPTS,
+        );
+    handle.respawnStreak = decision.streak;
+    const gaveUp = decision.action === 'give-up';
+    const willRespawn = decision.action === 'respawn';
+    if (gaveUp) handle.gaveUp = true;
+    updateStatus(handle, {
+      edge: 'warning',
+      cloud: 'disconnected',
+      session: 'idle',
+      risk: 'normal',
+      overlayBlocked: false,
+      respawnGaveUp: gaveUp,
+      lastMessage: `核心进程启动失败：${msg}`
+        + (gaveUp ? ` 连续失败已达上限（${RESPAWN_OPTS.maxConsecutiveFailures} 次），已放弃自动重启。`
+          : willRespawn ? ` 将在 ${Math.round((decision.delayMs || 0) / 1000)}s 后自动重试。` : ''),
+      ...edgeFailurePatch(`核心进程启动失败：${msg}`),
+      ...presencePatch(gaveUp ? '错误 · 已放弃自动重启' : '启动失败，稍后重试'),
+    });
+    if (decision.streak === 1 || gaveUp) {
+      surfaceFailure(`AIDCP Edge${handle.name ? `（${handle.name}）` : ''} 启动失败`, `核心进程无法启动：${msg}`);
+    }
+    scheduleRespawnIfNeeded(handle, decision);
+  });
+  child.on('exit', (code, signal) => {
+    if (handle.child !== child) return; // 已被 'error' 处理器接管
+    handle.child = undefined;
+    handle.browserParkingReady = false;
+    // 主动重启（保存设置后按新 provider 起）、暂停、移出花名册、退出应用都是「有意停止」，不算异常。
+    const intentional = isQuitting || handle.restartPending || handle.pausePending || handle.removed;
+    handle.pausePending = false;
     const exitedAbnormally = !intentional && (signal != null || (code != null && code !== 0));
     const message = exitMessage(code, signal);
-    updateStatus({
+    if (handle.removed) return; // 已摘除的环境不再投影状态
+
+    // 有界重起决策（仅对异常退出计入；有意停止一律 stop）。
+    const decision = exitedAbnormally
+      ? fleet.decideRespawn(
+          { exitCode: signal != null && code == null ? null : code, uptimeMs: Date.now() - handle.spawnedAtMs, prevStreak: handle.respawnStreak, shuttingDown: isQuitting },
+          RESPAWN_OPTS,
+        )
+      : { action: 'stop', streak: 0 };
+    handle.respawnStreak = decision.streak;
+
+    const willRespawn = decision.action === 'respawn';
+    const gaveUp = decision.action === 'give-up';
+    if (gaveUp) handle.gaveUp = true;
+
+    updateStatus(handle, {
       edge: exitedAbnormally ? 'warning' : 'stopped',
       cloud: 'disconnected',
-      session: status.session === 'paused' ? 'paused' : 'idle',
+      session: handle.status.session === 'paused' ? 'paused' : 'idle',
       // 核心已退出 = 无在跑会话：把本地日志派生的 risk 徽标复位 normal（该徽标是日志关键词启发、非权威，
       // 真风控由云端单写），杜绝上一会话残留的「⚠」把徽标跨会话卡在「警戒」。
       risk: 'normal',
-      lastMessage: message,
-      ...presencePatch(status.session === 'paused' ? '已暂停，随时可以恢复' : '引擎已停止'),
-      ...(exitedAbnormally ? abnormalExitFailurePatch(code, signal) : clearEdgeFailurePatch()),
+      overlayBlocked: false,
+      respawnGaveUp: gaveUp,
+      lastMessage: gaveUp
+        ? `${message} 连续失败已达上限（${RESPAWN_OPTS.maxConsecutiveFailures} 次），已放弃自动重启，请人工排查后点「启动」重试。`
+        : willRespawn
+          ? `${message} 将在 ${Math.round((decision.delayMs || 0) / 1000)}s 后自动重启（第 ${decision.streak}/${RESPAWN_OPTS.maxConsecutiveFailures} 次）。`
+          : message,
+      ...presencePatch(
+        gaveUp
+          ? '错误 · 已放弃自动重启'
+          : willRespawn
+            ? '异常退出，稍后自动重启'
+            : handle.status.session === 'paused'
+              ? '已暂停，随时可以恢复'
+              : '引擎已停止',
+      ),
+      ...(exitedAbnormally ? abnormalExitFailurePatch(handle, code, signal) : clearEdgeFailurePatch(handle)),
     });
-    // 红线：异常退出（含连云失败 / adspower 未登录致诚实非零退出）不静默——主动弹窗 + 系统通知。
-    if (exitedAbnormally) {
-      // adspower 模式下最常见的诚实非零退出 = 分身未登录小红书导致身份确立失败（core exit 1）。
-      const adspowerHint = wasAdspower
-        ? '请在该分身的浏览器窗口登录小红书后，点击「重新登录」重试；并确认分身 ID 正确、指纹浏览器已就绪。'
+
+    // 红线：异常退出不静默——首次失败与放弃时弹系统通知（重起风暴中间不刷屏，状态行已如实呈现）。
+    if (exitedAbnormally && (decision.streak === 1 || gaveUp)) {
+      const adspowerHint = handle.kind === 'adspower'
+        ? '请在该分身的浏览器窗口登录后，点击「重新登录」重试；并确认分身 ID 正确、指纹浏览器已就绪。'
         : '请打开窗口查看日志 / 重新登录或重连云端。';
       surfaceFailure(
-        'AIDCP Edge 已停止运行',
-        `${message}${status.edgeFailure && status.edgeFailure.summary ? `原因：${status.edgeFailure.summary}。` : ''}${adspowerHint}`,
+        `AIDCP Edge${handle.name ? `（${handle.name}）` : ''} ${gaveUp ? '已放弃自动重启' : '已停止运行'}`,
+        `${message}${handle.status.edgeFailure && handle.status.edgeFailure.summary ? `原因：${handle.status.edgeFailure.summary}。` : ''}${adspowerHint}`,
       );
     }
-    // 有意重启：旧进程退出后按当前设置起新流程。退出应用途中（isQuitting）绝不再起——
-    // 否则会在关闭后留下孤儿核心 + 它拉起的浏览器。
-    if (restartPending) {
-      restartPending = false;
-      if (!isQuitting) startFlow();
+
+    scheduleRespawnIfNeeded(handle, decision);
+
+    // 有意重启：旧进程退出后按当前设置起新流程（经错峰队列）。退出应用途中绝不再起。
+    if (handle.restartPending) {
+      handle.restartPending = false;
+      if (!isQuitting) void queueLifecycle(() => startFlowForEnv(handle));
     }
   });
 }
@@ -746,17 +1062,17 @@ function stopLoginPoller() {
 }
 
 // 以下 checkLoginAndStart / launchChromeAndGateEdge 为 self（本机 Chrome）专属登录门：
-// 固定 9222 起 Chrome → 轮询 cookie 确认已登录小红书 → 再起核心。adspower 模式不走此路（见 startAdsPowerFlow）。
-async function checkLoginAndStart() {
+// 固定 9222 起 Chrome → 轮询 cookie 确认已登录小红书 → 再起核心。adspower 模式不走此路。
+async function checkLoginAndStart(handle) {
   try {
     const loggedIn = await hasXhsCookie();
     if (loggedIn) {
       stopLoginPoller();
-      updateStatus({ auth: 'logged in', lastMessage: '已检测到小红书登录，正在启动 aidcp-edge…', ...clearEdgeFailurePatch() });
-      startEdge();
+      updateStatus(handle, { auth: 'logged in', lastMessage: '已检测到小红书登录，正在启动 aidcp-edge…', ...clearEdgeFailurePatch(handle) });
+      startEdge(handle);
       return true;
     }
-    updateStatus({
+    updateStatus(handle, {
       auth: 'login required',
       session: 'idle',
       lastMessage: '请在刚打开的 Chrome 窗口中登录 xiaohongshu.com。',
@@ -764,17 +1080,16 @@ async function checkLoginAndStart() {
     });
     return false;
   } catch (error) {
-    updateStatus({ auth: 'checking', lastMessage: `正在等待 Chrome CDP：${error.message}` });
+    updateStatus(handle, { auth: 'checking', lastMessage: `正在等待 Chrome CDP：${error.message}` });
     return false;
   }
 }
 
-async function launchChromeAndGateEdge() {
-  updateStatus({ provider: 'self', ...clearEdgeFailurePatch() });
+async function launchChromeAndGateEdge(handle) {
+  updateStatus(handle, { provider: 'self', ...clearEdgeFailurePatch(handle) });
   const launched = await launchChrome(app, { launchPosition: currentParkingPlan().launchPosition });
   if (!launched.ok) {
-    // session 显式回 idle：stopAndRestart 曾乐观置 running，此处不清会残留绿色「运行中」与实际停止矛盾。
-    updateStatus({
+    updateStatus(handle, {
       auth: 'chrome missing',
       edge: 'stopped',
       session: 'idle',
@@ -785,20 +1100,27 @@ async function launchChromeAndGateEdge() {
     surfaceFailure('AIDCP Edge 无法启动', launched.error || '未找到 Google Chrome，请安装后重启。');
     return;
   }
-  updateStatus({ auth: 'checking', lastMessage: `Chrome 已启动，配置目录：${launched.profilePath}`, ...clearEdgeFailurePatch() });
-  const loggedIn = await checkLoginAndStart();
+  updateStatus(handle, { auth: 'checking', lastMessage: `Chrome 已启动，配置目录：${launched.profilePath}`, ...clearEdgeFailurePatch(handle) });
+  const loggedIn = await checkLoginAndStart(handle);
   if (!loggedIn && !loginPoller) {
-    loginPoller = setInterval(checkLoginAndStart, 5000);
+    loginPoller = setInterval(() => { void checkLoginAndStart(handle); }, 5000);
   }
 }
 
 // 起核心前确保 AdsPower 运行时就绪 + 所需浏览器内核已下载（change edge-bundled-adspower-cli-runtime）。
-// 三档：
-//  - external：Local API 已可达（外部 AdsPower 客户端/既有运行时）→ 沿用现状，不起内嵌运行时、不预检内核（内核由外部客户端自管）。
-//  - none：Local API 不可达且未随包内嵌运行时（迁移期）→ 保持现状，交由核心启动时诚实失败。
-//  - embedded：Local API 不可达但随包有 CLI → 起内嵌运行时、条件式预检内核（缺则带进度下载、下完才放行）。
-// 红线：任何失败诚实回报 + 弹窗、返回 { ok:false }，MUST NOT 起核心；内核 MUST NOT 惰性推迟到核心的 browser/start。
-async function ensureAdsRuntimeAndKernel() {
+// 多环境下运行时/内核为**整机共享**：同一时刻只跑一次预检（in-flight 单飞），后续环境等同一结果；
+// settle 后清除，下次启动重新探测（运行时可能中途退出，不缓存陈旧结论）。
+// 红线：任何失败诚实回报 + 弹窗、返回 { ok:false }，MUST NOT 起核心。
+let adsPrepInFlight = null;
+function ensureAdsRuntimeAndKernelOnce(handle) {
+  if (adsPrepInFlight) return adsPrepInFlight;
+  adsPrepInFlight = ensureAdsRuntimeAndKernel(handle).finally(() => {
+    adsPrepInFlight = null;
+  });
+  return adsPrepInFlight;
+}
+
+async function ensureAdsRuntimeAndKernel(handle) {
   embeddedAdsApiBase = null;
   // 1. Local API 已可达？（外部客户端在跑就沿用现状）
   const probe = await adsApi.status(resolveAdsOpts()).catch(() => null);
@@ -812,11 +1134,11 @@ async function ensureAdsRuntimeAndKernel() {
   if (!cliEntry) return { ok: true, mode: 'none' };
 
   // 3. 起内嵌运行时
-  updateStatus({ auth: 'checking', lastMessage: '正在启动内置指纹浏览器运行时…', ...presencePatch('正在准备浏览器运行时…') });
+  updateStatus(handle, { auth: 'checking', lastMessage: '正在启动内置指纹浏览器运行时…', ...presencePatch('正在准备浏览器运行时…') });
   const apiKey = settings.adsApiKey || process.env.AIDCP_ADS_API_KEY;
   const rt = await adsRuntime.ensureRuntime({ cliEntry, execPath: process.execPath, apiKey });
   if (!rt.ok) {
-    updateStatus({
+    updateStatus(handle, {
       auth: 'config required',
       edge: 'stopped',
       session: 'idle',
@@ -837,7 +1159,7 @@ async function ensureAdsRuntimeAndKernel() {
     execPath: process.execPath,
     version,
     onProgress: ({ percent, state }) => {
-      updateStatus({
+      updateStatus(handle, {
         kernelPrep: { state, percent, version },
         lastMessage: `正在下载浏览器内核 ${version}（约 750MB，仅首次）… ${percent}%`,
         ...presencePatch(`准备浏览器内核 ${percent}%`),
@@ -845,7 +1167,7 @@ async function ensureAdsRuntimeAndKernel() {
     },
   });
   if (!kres.ok) {
-    updateStatus({
+    updateStatus(handle, {
       edge: 'stopped',
       session: 'idle',
       kernelPrep: { state: 'failed', percent: 0, version },
@@ -856,86 +1178,110 @@ async function ensureAdsRuntimeAndKernel() {
     surfaceFailure('AIDCP Edge 无法启动', `浏览器内核准备失败：${kres.error || '未知错误'}`);
     return { ok: false, error: kres.error };
   }
-  updateStatus({ kernelPrep: null, ...clearEdgeFailurePatch() });
+  updateStatus(handle, { kernelPrep: null, ...clearEdgeFailurePatch(handle) });
   return { ok: true, mode: 'embedded', base: rt.base };
 }
 
 // adspower（AdsPower 指纹浏览器）路径：不自起本机 Chrome、不做 9222 cookie 轮询；
 // 浏览器启动 / 登录态 / 身份确立全由核心进程经 AdsPower 本地 API 完成（未登录 → 核心诚实非零退出并弹窗）。
-async function startAdsPowerFlow() {
-  updateStatus({ provider: 'adspower', ...clearEdgeFailurePatch() });
-  if (!settings.adsProfileId || !settings.adsProfileId.trim()) {
+async function startAdsPowerFlow(handle) {
+  updateStatus(handle, { provider: 'adspower', ...clearEdgeFailurePatch(handle) });
+  if (!handle.profileId || !handle.profileId.trim()) {
     // 缺分身 ID 无法启动：诚实提示待配置，不静默假装在跑。
-    updateStatus({
+    updateStatus(handle, {
       auth: 'config required',
       edge: 'stopped',
       session: 'idle',
-      lastMessage: '请在「浏览器」设置中填写分身 ID，然后点击「保存并启动」。',
+      lastMessage: '请在「浏览器」设置中加入至少一个环境，然后点击「启动」。',
       ...presencePatch('等待完成初始设置'),
     });
     return;
   }
-  updateStatus({
+  updateStatus(handle, {
     auth: 'checking',
-    lastMessage: '正在启动指纹浏览器…',
+    lastMessage: handle.browserAlreadyRunning
+      ? '该分身浏览器已在运行，正在接管（不重复拉起）…'
+      : '正在启动指纹浏览器…',
     // 环境名现成可得：启动即点亮标题带账号标签，不用等核心身份确立。
-    ...(settings.adsProfileName ? { account: { id: settings.adsProfileId, name: settings.adsProfileName, source: 'env' } } : {}),
-    ...clearEdgeFailurePatch(),
+    ...(handle.name ? { account: { id: handle.profileId, name: handle.name, source: 'env' } } : {}),
+    ...clearEdgeFailurePatch(handle),
   });
   // 起核心前确保运行时 + 内核就绪；失败已诚实呈现，绝不带核心进注定失败的启动。
-  const prep = await ensureAdsRuntimeAndKernel();
+  const prep = await ensureAdsRuntimeAndKernelOnce(handle);
   if (!prep.ok) return;
-  startEdge();
+  // 运行时/内核准备可长达数分钟（首启下载）；这期间被暂停/移出/退出则诚实放弃，不再拉起子进程。
+  // （startEdge 亦有同一取消闸兜底；此处提前返回避免多余「正在启动」状态残留。）
+  if (handle.removed || handle.stopRequested || isQuitting || handle.status.session === 'paused') return;
+  startEdge(handle);
 }
 
-// 按当前 provider 设置分派启动流程。
-function startFlow() {
-  if (settings.provider === 'self') {
-    launchChromeAndGateEdge();
-  } else {
-    startAdsPowerFlow();
+// 按环境分派启动流程（不做队列；调用方决定是否经错峰队列进入）。
+function startFlowForEnv(handle) {
+  if (!handle) return;
+  if (handle.kind === 'self') {
+    return launchChromeAndGateEdge(handle);
   }
+  return startAdsPowerFlow(handle);
 }
 
-// 有序重启：停登录轮询；若核心在跑则 SIGTERM 之，其 exit 回调据 restartPending 起新流程（避免与
-// startEdge 的「已在跑则跳过」相撞导致重启丢失）；无在跑核心时直接按当前 provider 起。
-// 供「保存设置」「恢复」「重新登录」三处复用。
-function stopAndRestart(message, patch = {}) {
+/** 手动/排队启动入口：清放弃终态（人工重试口）+ 清取消闸 + 错峰入队。 */
+function queueStartEnv(handle, queuePosition) {
+  if (!handle || handle.child) return;
+  handle.gaveUp = false;
+  handle.respawnStreak = 0;
+  handle.stopRequested = false; // 显式启动意图：解除任何在途取消闸
+  clearRespawnTimer(handle);
+  updateStatus(handle, {
+    edge: 'starting',
+    respawnGaveUp: false,
+    lastMessage: queuePosition ? `已排队错峰启动（第 ${queuePosition} 位，相邻间隔约 1.1s）…` : '已排队错峰启动…',
+    ...presencePatch('排队启动中…'),
+  });
+  void queueLifecycle(() => startFlowForEnv(handle));
+}
+
+// 有序重启：停登录轮询；若核心在跑则 SIGTERM 之，其 exit 回调据 restartPending 起新流程；
+// 无在跑核心时直接错峰入队。供「保存设置」「恢复」「重新登录」三处复用。
+function stopAndRestart(handle, message, patch = {}) {
+  if (!handle) return;
   stopLoginPoller();
-  updateStatus({ cloud: 'disconnected', session: 'running', lastMessage: message, ...presencePatch('正在重启引擎…'), ...clearEdgeFailurePatch(), ...patch });
-  if (edgeProcess) {
-    restartPending = true;
-    edgeProcess.kill('SIGTERM');
+  handle.gaveUp = false;
+  handle.respawnStreak = 0;
+  handle.stopRequested = false; // 显式重启意图：解除任何在途取消闸
+  clearRespawnTimer(handle);
+  updateStatus(handle, { cloud: 'disconnected', session: 'running', respawnGaveUp: false, lastMessage: message, ...presencePatch('正在重启引擎…'), ...clearEdgeFailurePatch(handle), ...patch });
+  if (handle.child) {
+    handle.restartPending = true;
+    void queueLifecycle(() => { try { handle.child?.kill('SIGTERM'); } catch { /* ignore */ } });
   } else {
-    startFlow();
+    void queueLifecycle(() => startFlowForEnv(handle));
   }
 }
 
-function handleEdgeOutput(text, isError = false) {
+function handleEdgeOutput(handle, text, isError = false) {
   // 一个 chunk 可能带多行：逐行处理，让活动流 / 计数按真实行数走（旧法整块只算一次）。
   const lines = String(text).split('\n').map((l) => l.trim()).filter(Boolean);
-  for (const line of lines) handleEdgeLogLine(line, isError);
+  for (const line of lines) handleEdgeLogLine(handle, line, isError);
 }
 
-function handleEdgeLogLine(message, isError = false) {
+function handleEdgeLogLine(handle, message, isError = false) {
   // 建号自助人设回执：早拦截，按 id 命中 pending，不当普通日志/状态行处理。
   if (message.startsWith('[persona-reply]')) {
     handlePersonaReply(message.slice('[persona-reply]'.length).trim());
     return;
   }
-  appendEdgeLog(message, isError); // 落文件（排障回溯，独立于下方状态判断）
-  if (message.includes('[browser-parking] control-ready')) browserParkingReady = true;
+  appendEdgeLog(handle.envId, message, isError); // 落文件（排障回溯，独立于下方状态判断）
+  if (message.includes('[browser-parking] control-ready')) handle.browserParkingReady = true;
   // 核心正被有意停止 / 已暂停 / 已退出：其关闭期 stdout/stderr 只作为日志行展示，绝不据以翻转
-  // edge / session / risk 徽标，也不产 UI 事件——否则关闭 chatter 会把「已暂停/已停止」闪回
-  // 「运行中/异常」，或让在场感在停机后还「活着」。正常在跑时才做状态推断。
-  const stopping = isQuitting || restartPending || pausePending || !edgeProcess || status.session === 'paused';
-  if (!stopping) rememberEdgeFailureCandidate(message, isError);
+  // edge / session / risk 徽标，也不产 UI 事件。正常在跑时才做状态推断。
+  const stopping = isQuitting || handle.restartPending || handle.pausePending || handle.removed || !handle.child || handle.status.session === 'paused';
+  if (!stopping) rememberEdgeFailureCandidate(handle, message, isError);
   if (stopping) {
-    updateStatus({ lastMessage: message });
+    if (!handle.removed) updateStatus(handle, { lastMessage: message });
     return;
   }
   const next = { edge: isError ? 'warning' : 'running', lastMessage: message };
-  if (!isError && status.edgeFailure) next.edgeFailure = null;
+  if (!isError && handle.status.edgeFailure) next.edgeFailure = null;
   if (message.includes('已连接云端') || message.includes('已握手') || message.includes('云端已重连')) next.cloud = 'connected';
   if (message.includes('连接失败') || message.includes('WS 已关闭') || message.includes('启动失败')) next.cloud = 'disconnected';
   if (message.includes('云端重连中')) next.cloud = 'disconnected';
@@ -958,31 +1304,31 @@ function handleEdgeLogLine(message, isError = false) {
   }
   if (message.includes('风控拒绝') || message.includes('risk_error') || message.includes('⚠')) next.risk = 'warned';
 
-  // UI 事件（活动流 / 在场感 / 发布卡 / 账号身份 / 计数）统一走 ui-events 模块：
-  // 结构化 [ui-event] 行优先，中文日志行映射兜底；计数只认 ✓ 成功行（见模块头注的偏离说明）。
-  const evt = uiEvents.push(message);
+  // 健康运行达阈值 → 连续失败预算清零（respawn-policy 的健康信号在退出时按 uptime 判，这里无需处理）。
+
+  // UI 事件（活动流 / 在场感 / 发布卡 / 账号身份 / 计数）统一走该环境自己的 ui-events 实例：
+  // 结构化 [ui-event] 行优先，中文日志行映射兜底；计数只认 ✓ 成功行。
+  const evt = handle.uiEvents.push(message);
   if (evt) {
     if (evt.account) {
-      // 账号标签兜底链：小红书昵称（navigate 身份路径才有）> AdsPower 环境名 > 渲染层再兜尾4位。
-      const name = evt.account.name || settings.adsProfileName || '';
-      status.account = { id: evt.account.id, name, source: evt.account.name ? 'xhs' : 'env' };
+      // 账号标签兜底链：平台昵称（navigate 身份路径才有）> AdsPower 环境名 > 渲染层再兜尾4位。
+      const name = evt.account.name || handle.name || '';
+      handle.status.account = { id: evt.account.id, name, source: evt.account.name ? 'xhs' : 'env' };
+      refreshSameAccountWarnings();
     }
-    // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在已绑时下发（sticky true），
-    // 渲染层据此把徽标翻「已设置」并跳过向导，修「已绑仍显示未设置」bug。
-    if (evt.personaBound === true) status.personaBound = true;
+    // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在已绑时下发（sticky true）。
+    if (evt.personaBound === true) next.personaBound = true;
     if (evt.presence) next.presence = { text: evt.presence, at: new Date().toISOString() };
     if (evt.publish && evt.publish.state) {
       next.publish = { ...evt.publish, at: new Date().toISOString() };
       // 发布成功即更新「最近一次发布」并落盘（发布卡常驻的历史态，重启不丢）。
       if (evt.publish.state === 'published') {
-        const baseStats = next.stats ? mergeStats(status.stats, next.stats) : status.stats;
+        const baseStats = next.stats ? mergeStats(handle.status.stats, next.stats) : handle.status.stats;
         next.stats = { ...(next.stats || {}), publishes: cleanCount(baseStats.publishes) + 1 };
-        next.dailyUsage = bumpDailyUsage(next.dailyUsage || status.dailyUsage, 'publish', 1);
+        next.dailyUsage = bumpDailyUsage(next.dailyUsage || handle.status.dailyUsage, 'publish', 1);
       }
       if (evt.publish.state === 'published' && evt.publish.title) {
         next.lastPublish = { title: evt.publish.title, at: next.publish.at };
-        // 归属按 spawn 时刻的环境键记：事件来自在跑核心，而 settings 可能已被改成尚未生效的新环境。
-        lastPublishEnvKey = runningEnvKey || envKeyFromSettings(settings);
       }
     }
     if (evt.lastPublish && typeof evt.lastPublish.title === 'string' && evt.lastPublish.title) {
@@ -992,7 +1338,6 @@ function handleEdgeLogLine(message, isError = false) {
         title: evt.lastPublish.title,
         at: Number.isFinite(evt.lastPublish.at) ? new Date(evt.lastPublish.at).toISOString() : null,
       };
-      lastPublishEnvKey = runningEnvKey || envKeyFromSettings(settings);
     }
     if (evt.dailyUsage) {
       const dailyUsage = normalizeDailyUsage(evt.dailyUsage);
@@ -1003,8 +1348,8 @@ function handleEdgeLogLine(message, isError = false) {
     }
     if (evt.statsDelta) {
       const d = evt.statsDelta;
-      const baseStats = next.stats ? mergeStats(status.stats, next.stats) : status.stats;
-      let dailyUsage = next.dailyUsage || status.dailyUsage;
+      const baseStats = next.stats ? mergeStats(handle.status.stats, next.stats) : handle.status.stats;
+      let dailyUsage = next.dailyUsage || handle.status.dailyUsage;
       next.stats = {
         ...(next.stats || {}),
         ...(d.views ? { views: cleanCount(baseStats.views) + cleanCount(d.views) } : {}),
@@ -1023,7 +1368,7 @@ function handleEdgeLogLine(message, isError = false) {
       if (dailyUsage) next.dailyUsage = dailyUsage;
     }
     if (evt.sentence) {
-      broadcastActivity({
+      broadcastActivity(handle, {
         ts: new Date().toISOString(),
         type: evt.type || 'info',
         sentence: evt.sentence,
@@ -1031,73 +1376,187 @@ function handleEdgeLogLine(message, isError = false) {
       });
     }
     if (evt.loopStage !== undefined) next.loopStage = evt.loopStage;
+    // 阻断浮层（登录/验证码/未知阻断）待人工处理：核心成对信号驱动（`popup` 置真 / `popup_cleared`
+    // 或会话结束或有成功互动 置假），使该环境在环境栏浮顶为「需人工」而非绿色在线（红线：多环境跨窗
+    // 盯验证码正是本控制台的核心目的）。
+    if (evt.type === 'popup') next.overlayBlocked = true;
+    else if (evt.type === 'popup_cleared' || evt.type === 'session_end' || evt.statsDelta) next.overlayBlocked = false;
   }
-  updateStatus(next);
+  updateStatus(handle, next);
 }
 
-function pauseEdge() {
-  // 暂停取消任何在途重启：否则核心退出回调会据 restartPending 复活它，把用户的暂停覆盖回运行。
-  restartPending = false;
-  updateStatus({ session: 'paused', lastMessage: '已请求暂停，后台边缘进程将在安全点停止。', ...presencePatch('已暂停，随时可以恢复'), ...clearEdgeFailurePatch() });
-  if (edgeProcess) {
+function pauseEdge(handle) {
+  if (!handle) return;
+  // 暂停取消任何在途重启/重起，并置取消闸：排队等待中的启动（尚无子进程、SIGTERM 无处可发）到点
+  // 也不再拉起，杜绝「暂停被排队启动静默覆盖回运行」。
+  handle.restartPending = false;
+  handle.stopRequested = true;
+  stopLoginPoller(); // self 路径的 5s 登录轮询若在跑，暂停期间应停（否则空转、每 tick 被取消闸挡下）
+  clearRespawnTimer(handle);
+  updateStatus(handle, { session: 'paused', overlayBlocked: false, lastMessage: '已请求暂停，后台边缘进程将在安全点停止。', ...presencePatch('已暂停，随时可以恢复'), ...clearEdgeFailurePatch(handle) });
+  if (handle.child) {
     // 暂停是「有意停止」：标记之，使其 SIGTERM 触发的退出不被误判为异常（尤其核心启动窗口内 handler 未装时）。
-    pausePending = true;
-    edgeProcess.kill('SIGTERM');
+    handle.pausePending = true;
+    void queueLifecycle(() => { try { handle.child?.kill('SIGTERM'); } catch { /* ignore */ } });
   }
 }
 
-function resumeEdge() {
-  stopAndRestart('已请求恢复，正在按当前浏览器设置重启边缘进程。');
+function resumeEdge(handle) {
+  stopAndRestart(handle, '已请求恢复，正在按当前浏览器设置重启边缘进程。');
 }
 
-function relogin() {
-  stopAndRestart('已请求重新登录，正在按当前浏览器设置重启边缘进程。');
-  return status;
+function relogin(handle) {
+  stopAndRestart(handle, '已请求重新登录，正在按当前浏览器设置重启边缘进程。');
+  return handle ? handle.status : null;
 }
 
-function quitApp() {
+/**
+ * 「全部启动」：内存上限预检（headful 每环境 ~1GB vs 本机可用）→ 超限诚实拦阻（force 才放行）→
+ * 对全部未在跑环境错峰入队。返回 { ok, queued } 或 { ok:false, reason:'ram', ... }。
+ */
+function startAllEnvs({ force = false } = {}) {
+  const targets = [...envs.values()].filter((h) => !h.child && !h.removed);
+  if (targets.length === 0) return { ok: true, queued: 0 };
+  const admission = fleet.ramAdmission({ plannedCount: targets.length, freeBytes: os.freemem() });
+  if (!admission.ok && !force) {
+    return {
+      ok: false,
+      reason: 'ram',
+      requiredMB: admission.requiredMB,
+      freeMB: admission.freeMB,
+      plannedCount: targets.length,
+    };
+  }
+  targets.forEach((h, i) => queueStartEnv(h, i + 1));
+  return { ok: true, queued: targets.length, envIds: targets.map((h) => h.envId) };
+}
+
+/** 「全部停止」（不退出应用）：全部在跑环境按暂停语义错峰停止；处于重起退避窗口（无子进程）的环境
+ * 也置暂停 + 清重起定时器，杜绝「全部停止后某个崩溃环境几秒后自行复活」的静默矛盾。 */
+function stopAllEnvs() {
+  const running = [...envs.values()].filter((h) => h.child);
+  const backoff = [...envs.values()].filter((h) => !h.child && h.respawnTimer && !h.removed);
+  for (const h of running) pauseEdge(h);
+  for (const h of backoff) pauseEdge(h); // clearRespawnTimer + stopRequested 在 pauseEdge 内
+  return { ok: true, stopped: running.length + backoff.length };
+}
+
+/** 应用退出：对全部在跑环境经串行队列有序 SIGTERM + 有界等待确认退出，不留孤儿。 */
+async function gracefulStopAllAndQuit() {
+  if (quitStopAllInFlight) return;
+  quitStopAllInFlight = true;
   isQuitting = true;
-  restartPending = false; // 退出即作废任何在途重启，杜绝关闭后孤儿核心
-  if (edgeProcess) {
-    edgeProcess.kill('SIGTERM');
-    edgeProcess = undefined;
-  }
   stopLoginPoller();
+  for (const handle of envs.values()) clearRespawnTimer(handle);
+  const running = [...envs.values()].filter((h) => h.child);
+  for (const handle of running) {
+    await queueLifecycle(() => {
+      try {
+        handle.child?.kill('SIGTERM');
+      } catch { /* ignore */ }
+    });
+  }
+  // 有界等待（迭代计数限界，最多 ~10s）：等核心的诚实关机（browser/stop + 确认浏览器死）跑完。
+  for (let i = 0; i < 100; i++) {
+    if (![...envs.values()].some((h) => h.child)) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  quitFinal = true;
   app.quit();
 }
 
-ipcMain.handle('status:get', () => status);
-ipcMain.handle('edge:pause', () => {
-  pauseEdge();
-  return status;
+function quitApp() {
+  app.quit(); // 经 before-quit 统一走优雅全停
+}
+
+/** 外壳重启对账：经 browser/active 探已在运行的分身——启动时接管、不重复拉起（防孤儿/防互踢）。 */
+async function reconcileRunningProfiles() {
+  if (settings.provider !== 'adspower' || envs.size === 0) return;
+  const res = await adsApi.listActiveProfiles(resolveAdsOpts()).catch(() => null);
+  if (!res || !res.ok) return; // 无法对账（服务未起等）：不猜测、维持默认「未运行」呈现
+  const active = new Set(res.activeUserIds);
+  for (const handle of envs.values()) {
+    if (handle.kind !== 'adspower' || !handle.profileId || handle.child) continue;
+    if (!active.has(handle.profileId)) continue;
+    handle.browserAlreadyRunning = true;
+    updateStatus(handle, {
+      lastMessage: '检测到该分身浏览器已在运行（可能为上次会话遗留）；点「启动」将直接接管，不会重复拉起。',
+      ...presencePatch('分身浏览器已在运行，待接管'),
+    });
+  }
+}
+
+// ── IPC（全部控制通道带 envId 路由键；缺省落到当前选中环境，兼容旧渲染层）──
+
+function resolveHandle(envId) {
+  return (envId && envs.get(envId)) || selectedHandle();
+}
+
+function statusOf(handle) {
+  if (!handle) return { ...makeStatus(settings.provider), envId: '', envName: '' };
+  return { ...handle.status, envId: handle.envId, envName: handle.name };
+}
+
+ipcMain.handle('status:get', (_event, envId) => statusOf(resolveHandle(envId)));
+ipcMain.handle('edge:pause', (_event, envId) => {
+  const handle = resolveHandle(envId);
+  pauseEdge(handle);
+  return statusOf(handle);
 });
-ipcMain.handle('edge:resume', () => {
-  resumeEdge();
-  return status;
+ipcMain.handle('edge:resume', (_event, envId) => {
+  const handle = resolveHandle(envId);
+  resumeEdge(handle);
+  return statusOf(handle);
 });
-ipcMain.handle('auth:relogin', () => relogin());
+ipcMain.handle('auth:relogin', (_event, envId) => {
+  const handle = resolveHandle(envId);
+  relogin(handle);
+  return statusOf(handle);
+});
 ipcMain.handle('settings:get', () => ({ ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL }));
 ipcMain.handle('settings:save', (_event, patch) => {
   const res = saveSettings(patch);
+  syncEnvHandles(); // 花名册变更即同步注册表（新环境建行、移出的有序停止）
   // 保存只持久化、**不打断**在跑的核心（应用改动经显式 edge:restart「按新设置重启」）。
-  updateStatus({
-    provider: settings.provider,
-    lastMessage: res.ok ? '浏览器设置已保存。' : '设置已应用（本次生效），但写入本地失败，重启应用后可能丢失。',
-  });
+  const handle = selectedHandle();
+  if (handle) {
+    updateStatus(handle, {
+      provider: settings.provider,
+      lastMessage: res.ok ? '浏览器设置已保存。' : '设置已应用（本次生效），但写入本地失败，重启应用后可能丢失。',
+    });
+  }
   return { ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL, saveOk: res.ok, saveError: res.error };
 });
-// 悬浮「启动」：核心未跑则按当前设置启动；已在跑则不重复启动。
-ipcMain.handle('edge:start', () => {
-  if (!edgeProcess) startFlow();
-  return status;
+// 悬浮「启动」：目标环境未跑则错峰启动；已在跑则不重复启动。
+ipcMain.handle('edge:start', (_event, envId) => {
+  const handle = resolveHandle(envId);
+  if (handle && !handle.child) queueStartEnv(handle);
+  return statusOf(handle);
 });
 // 「按新设置重启」：显式应用已保存的设置到在跑核心（有序重启，不由保存隐式打断）。
-ipcMain.handle('edge:restart', () => {
-  stopAndRestart('正在按新设置重启边缘进程…');
-  return status;
+ipcMain.handle('edge:restart', (_event, envId) => {
+  const handle = resolveHandle(envId);
+  stopAndRestart(handle, '正在按新设置重启边缘进程…');
+  return statusOf(handle);
+});
+// ── fleet 控制面 ──
+ipcMain.handle('fleet:get', () => fleetSnapshot());
+ipcMain.handle('fleet:select', (_event, envId) => {
+  if (envId && envs.has(envId)) {
+    selectedEnvId = envId;
+    saveSettings({ selectedEnvId: envId });
+    applyOverlayTone(selectedHandle()?.status.risk || 'normal');
+    broadcastFleet();
+  }
+  return fleetSnapshot();
+});
+ipcMain.handle('fleet:startAll', (_event, opts) => startAllEnvs(opts || {}));
+ipcMain.handle('fleet:stopAll', () => stopAllEnvs());
+ipcMain.handle('fleet:setRailCollapsed', (_event, collapsed) => {
+  saveSettings({ railCollapsed: Boolean(collapsed) });
+  return { ok: true };
 });
 // 「打开飞书 ↗」：纯导航（拉起飞书客户端），不是审批操作——审批授权只在飞书内完成。
-// 依次尝试 feishu:// 与 lark:// 协议；都拉不起则如实返回 ok:false，渲染层降级为纯文字。
 ipcMain.handle('feishu:open', async () => {
   for (const url of ['feishu://', 'lark://']) {
     try {
@@ -1113,12 +1572,12 @@ ipcMain.handle('browser:openAdsDownload', () => {
   void shell.openExternal(ADS_DOWNLOAD_URL);
   return true;
 });
-ipcMain.handle('browser:showDriven', () => sendBrowserParkingCommand('browser.show'));
-ipcMain.handle('browser:resetParking', () => sendBrowserParkingCommand('browser.park'));
+ipcMain.handle('browser:showDriven', (_event, envId) => sendBrowserParkingCommand(resolveHandle(envId), 'browser.show'));
+ipcMain.handle('browser:resetParking', (_event, envId) => sendBrowserParkingCommand(resolveHandle(envId), 'browser.park'));
 // 建号自助人设（change edge-persona-keyword-generation）：渲染层选关键词 → 云端生成草稿 / 确认落库。
-// 经 core stdin 桥打到云端；不本地判成功，透传云端诚实回执。
-ipcMain.handle('persona:generate', (_event, payload) => sendPersonaCommand('persona.generate', payload));
-ipcMain.handle('persona:persist', (_event, payload) => sendPersonaCommand('persona.persist', payload));
+// envId 路由（多环境）：草稿属哪个环境就 persist 到哪个环境，杜绝中途切换环境把人设写进别的账号。
+ipcMain.handle('persona:generate', (_event, envId, payload) => sendPersonaCommand(envId, 'persona.generate', payload));
+ipcMain.handle('persona:persist', (_event, envId, payload) => sendPersonaCommand(envId, 'persona.persist', payload));
 // AdsPower 只读探测 / 拉取（主进程侧，渲染层不直连本地 API）。opts 可带渲染层当前表单 apiKey/apiBase/groupId。
 ipcMain.handle('ads:status', (_event, opts) => adsApi.status(resolveAdsOpts(opts)));
 ipcMain.handle('ads:listProfiles', (_event, opts) => adsApi.listProfiles(resolveAdsOpts(opts)));
@@ -1182,50 +1641,55 @@ ipcMain.handle('ads:deleteEnv', async (_event, opts) => {
   }
 });
 
-// 诚实拒绝同机多开（多账号多开隔离尚未实现，归 account-identity-from-login）：
-// 当前第二个实例会接管第一个账号的浏览器（串号），故用单实例锁直接拒绝第二个，绝不静默接管。
-// 锁随本实例退出自动释放，故「同一应用重启后重连自己的浏览器」不受影响。
+// 单实例锁（edge-multi-environment-fleet 语义重写）：一台机只跑**一个监督者**，其下并行托管 N 个环境。
+// 第二个监督者实例会与第一个抢环境子进程与浏览器（同 edgeId 双拉 → 云端互踢），故仍然拒绝；
+// 多账号并行请在已运行的这个实例里把多个环境加入花名册。
 if (!app.requestSingleInstanceLock()) {
   try {
     const { dialog } = require('electron');
     dialog.showErrorBox(
       'AIDCP Edge 已在运行',
-      '本机已有一个 AIDCP Edge 在运行。多账号多开尚未支持，为避免账号串用，请先关闭已运行的实例再启动。',
+      '本机已有一个 AIDCP Edge 监督者在运行（一台机一个监督者、其下可并行托管多个环境）。请在已运行的窗口里把要跑的环境加入花名册，不要重复启动应用。',
     );
   } catch {
     /* best-effort */
   }
   app.quit();
 } else {
-  // 又有人想开第二个：Electron 通知已运行实例——把窗口拉到前台 + 通知，说明无需/不能多开。
+  // 又有人想开第二个：Electron 通知已运行实例——把窗口拉到前台 + 通知。
   app.on('second-instance', () => {
-    surfaceFailure('AIDCP Edge 已在运行', '已有一个 AIDCP Edge 在运行，已切到该窗口。多账号多开尚未支持。');
+    surfaceFailure('AIDCP Edge 已在运行', '已有一个 AIDCP Edge 监督者在运行，已切到该窗口。多环境请在环境栏 / 设置里加入并行运行。');
   });
 
   app.whenReady().then(() => {
     loadSettings();
+    if (settings.selectedEnvId) selectedEnvId = settings.selectedEnvId;
+    syncEnvHandles();
     loadUiState();
-    updateStatus({ provider: settings.provider });
+    // 不自动启动任务（用户手动点「启动」才开跑）。只做一次轻量预检：
+    // 缺配置时把「待配置」引导亮出来，配置齐备则诚实呈现「就绪」。
+    for (const handle of envs.values()) {
+      if (handle.kind === 'adspower' && !handle.profileId) {
+        updateStatus(handle, {
+          auth: 'config required',
+          lastMessage: '待配置：请在设置中加入浏览器环境后点「启动」。',
+          ...presencePatch('等待完成初始设置'),
+        });
+      } else {
+        updateStatus(handle, {
+          lastMessage: '就绪。点右下角「启动」开始自动运营。',
+          ...presencePatch('就绪，等你点「启动」'),
+        });
+      }
+    }
+    if (settings.provider === 'adspower' && envs.size === 0) {
+      // 空花名册：无 handle 可投影，广播 fleet 快照让渲染层呈现「待加入环境」空态。
+      broadcastFleet();
+    }
     createWindow();
     createTray();
-    // 不自动启动任务（用户手动点右下角「启动」才开跑）。只做一次轻量预检：
-    // 缺配置时把「待配置」引导亮出来，配置齐备则诚实呈现「就绪」。
-    if (settings.provider === 'adspower' && !(settings.adsProfileId || '').trim()) {
-      updateStatus({
-        auth: 'config required',
-        lastMessage: '待配置：请在设置中选择浏览器环境后点「启动」。',
-        ...presencePatch('等待完成初始设置'),
-      });
-    } else {
-      updateStatus({
-        lastMessage: '就绪。点右下角「启动」开始自动运营。',
-        ...presencePatch('就绪，等你点「启动」'),
-        // 默认态即选中上次用的账号：用持久化设置点亮标题带（不再依赖启动流程）。
-        ...(settings.provider === 'adspower' && settings.adsProfileId
-          ? { account: { id: settings.adsProfileId, name: settings.adsProfileName || '', source: 'env' } }
-          : {}),
-      });
-    }
+    // 外壳重启对账（异步 best-effort）：已在运行的分身如实标出，启动时接管、不重复拉起。
+    void reconcileRunningProfiles();
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
       else mainWindow?.show();
@@ -1233,8 +1697,29 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 
-app.on('before-quit', () => {
+// 监督者级兜底：多环境下监督者进程是全部环境 UI/控制的单点。未捕获异常若让进程崩溃，会连累
+// 全部在跑兄弟环境（破坏崩溃隔离——子进程的云端工作虽独立，但外壳一崩用户就失去可见/可控）。
+// 故兜住未捕获异常/拒绝：落文件 + 弹一次通知，绝不静默、也绝不整体退出。子进程各自的 'error'/'exit'
+// 已单独诚实处理其失败，这里只防外壳自身的意外崩溃。
+process.on('uncaughtException', (err) => {
+  try { appendEdgeLog('supervisor', `uncaughtException: ${(err && err.stack) || err}`, true); } catch { /* ignore */ }
+  try { surfaceFailure('AIDCP Edge 监督者遇到内部错误', `已记录并继续运行其余环境：${(err && err.message) || err}`); } catch { /* ignore */ }
+});
+process.on('unhandledRejection', (reason) => {
+  try { appendEdgeLog('supervisor', `unhandledRejection: ${(reason && reason.stack) || reason}`, true); } catch { /* ignore */ }
+});
+
+app.on('before-quit', (event) => {
+  if (quitFinal) return; // 优雅全停已完成，放行退出
   isQuitting = true;
+  const anyRunning = [...envs.values()].some((h) => h.child);
+  if (!anyRunning) {
+    quitFinal = true;
+    return;
+  }
+  // 有在跑环境：拦下本次退出，先优雅全停（错峰 SIGTERM + 有界等待），完成后再真正退出。
+  event.preventDefault();
+  void gracefulStopAllAndQuit();
 });
 
 app.on('window-all-closed', (event) => {

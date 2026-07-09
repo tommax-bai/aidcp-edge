@@ -25,6 +25,13 @@ export interface ImageUploaderDeps {
   fileInputSetter: FileInputSetter;
   /** 后置校验读 DOM 找成功态（缩略图）节点。 */
   dom: DomProvider;
+  /**
+   * 临时目录前缀（多环境隔离，edge-multi-environment-fleet）：同机多个边缘子进程并行时，
+   * 各自的下载目录必须落在自己的命名空间（如 `aidcp-img-<edgeId>-`），使兄弟进程的启动清扫
+   * 只清自己名下、绝不误删他人在途上传（误删=发布半截，触「静默假成功」红线）。
+   * 缺省保留旧前缀 `aidcp-img-`（单环境行为不变）。
+   */
+  tempDirPrefix?: string;
   fetchImpl?: typeof fetch;
   /** 下载超时（毫秒）；总预算须低于云端单指令超时，使慢/过期 URL 边缘先返回干净 ok:false。 */
   downloadTimeoutMs?: number;
@@ -52,6 +59,38 @@ function defaultHasThumbnail(root: Element | Document): boolean {
     return !!root.querySelector('[data-action-id="note.publish_image_thumb"]');
   } catch {
     return false;
+  }
+}
+
+/**
+ * 配图临时目录命名空间（edge-multi-environment-fleet）：按 edgeId 派生 `aidcp-img-<ns>-` 前缀，
+ * 使同机多环境各有独立命名空间——启动清扫只清自己名下、绝不误删兄弟在途上传。
+ * 与外壳侧 fleet.cjs 的 imageTempNamespace 同公式（parity 用例锁住不漂移）。
+ */
+export function imageTempPrefixFor(edgeId: string): string {
+  const safe = String(edgeId || '').replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48);
+  return `aidcp-img-${safe || 'default'}-`;
+}
+
+/**
+ * 启动时清扫上一轮崩溃残留的配图临时目录（finally-unlink 在 SIGKILL/OOM 时跑不到）。
+ * 只清 ownPrefix（= 本环境自己的命名空间）名下的目录：多环境并行时兄弟进程在途上传目录绝不触碰
+ * （误删=兄弟发布半截，触「静默假成功」红线）。best-effort，失败不阻断启动。
+ */
+export async function sweepImageTempDirs(ownPrefix: string, baseDir?: string): Promise<void> {
+  try {
+    const { readdir, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const base = baseDir || tmpdir();
+    const entries = await readdir(base).catch(() => [] as string[]);
+    await Promise.all(
+      entries
+        .filter((name) => name.startsWith(ownPrefix))
+        .map((name) => rm(join(base, name), { recursive: true, force: true }).catch(() => undefined)),
+    );
+  } catch {
+    // best-effort，清扫失败不阻断启动。
   }
 }
 
@@ -86,10 +125,12 @@ export class ImageUploader {
   private readonly hasThumbnail: (root: Element | Document) => boolean;
   private readonly clock: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly tempDirPrefix: string;
 
   constructor(deps: ImageUploaderDeps) {
     this.fileInputSetter = deps.fileInputSetter;
     this.dom = deps.dom;
+    this.tempDirPrefix = deps.tempDirPrefix ?? 'aidcp-img-';
     this.fetchImpl = deps.fetchImpl ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
     this.downloadTimeoutMs = deps.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
     this.maxBytes = deps.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -173,7 +214,7 @@ export class ImageUploader {
       const ext = sniffImage(bytes);
       if (!ext) return { ok: false, error: 'image_format_unsupported' };
 
-      const dir = await mkdtemp(join(tmpdir(), 'aidcp-img-'));
+      const dir = await mkdtemp(join(tmpdir(), this.tempDirPrefix));
       const path = join(dir, `image.${ext}`);
       await writeFile(path, bytes);
       return { ok: true, dir, path };

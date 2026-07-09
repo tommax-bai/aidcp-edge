@@ -261,3 +261,25 @@ test('listGroups: 打 group/list、归一化 groupId/groupName', async () => {
   assert.equal(r.groups?.[0].groupName, 'aidcp-创建');
   assert.ok(calls[0].url.includes('/api/v1/group/list'));
 });
+
+// ── browser/local-active 对账（edge-multi-environment-fleet：外壳重启防双拉/防互踢）──
+
+test('listActiveProfiles：返回本机已打开分身的 user_id 列表', async () => {
+  const api = createAdsLocalApi({
+    fetchImpl: stubFetch([
+      ['/api/v1/browser/local-active', () => res(true, 200, { code: 0, data: { list: [{ user_id: 'p1', ws: {} }, { user_id: 'p3' }] } })],
+    ]),
+  }) as unknown as { listActiveProfiles: (o?: Record<string, unknown>) => Promise<{ ok: boolean; activeUserIds?: string[]; error?: string }> };
+  const r = await api.listActiveProfiles();
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.activeUserIds, ['p1', 'p3']);
+});
+
+test('listActiveProfiles：本地 API 不可达 → 诚实 ok:false（调用方按「无法对账」处理，不猜测）', async () => {
+  const api = createAdsLocalApi({
+    fetchImpl: stubFetch([['/api/v1/browser/local-active', () => { throw new Error('ECONNREFUSED'); }]]),
+  }) as unknown as { listActiveProfiles: (o?: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }> };
+  const r = await api.listActiveProfiles();
+  assert.equal(r.ok, false);
+  assert.match(String(r.error), /不可达/);
+});

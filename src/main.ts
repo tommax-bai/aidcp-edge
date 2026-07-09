@@ -53,7 +53,7 @@ import { LikeStepRunner } from './client/like-runner.js';
 import { publishPost } from './flows/publish-post.js';
 import { PublishCommandDispatcher } from './flows/publish-command-handlers.js';
 import { PublishUiEventTracker, uiSnapshotToLines, writeNoteStageLine } from './flows/ui-event-lines.js';
-import { ImageUploader } from './flows/image-uploader.js';
+import { ImageUploader, imageTempPrefixFor, sweepImageTempDirs } from './flows/image-uploader.js';
 import { CdpFileInputSetter } from './cdp/file-input-setter.js';
 import { AnchorCache } from './locating/cache.js';
 import { buildPublishApprovalRequestId } from './publish/approval-gate.js';
@@ -76,26 +76,7 @@ import {
   type OverlayMonitor,
 } from './browse/index.js';
 
-/** 启动时清扫上一轮崩溃残留的配图临时目录（finally-unlink 在 SIGKILL/OOM 时跑不到）。仅命中 aidcp-img-* 前缀。 */
-async function sweepImageTempDirs(): Promise<void> {
-  try {
-    const { readdir, rm } = await import('node:fs/promises');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
-    const base = tmpdir();
-    const entries = await readdir(base).catch(() => [] as string[]);
-    await Promise.all(
-      entries
-        .filter((name) => name.startsWith('aidcp-img-'))
-        .map((name) => rm(join(base, name), { recursive: true, force: true }).catch(() => undefined)),
-    );
-  } catch {
-    // best-effort，清扫失败不阻断启动。
-  }
-}
-
 async function main(): Promise<void> {
-  await sweepImageTempDirs();
   const cloudUrl = process.env.AIDCP_CLOUD_URL ?? 'ws://121.89.85.150:8787';
   const platformDriver = selectPlatformDriver({ env: process.env });
   console.log(
@@ -107,6 +88,9 @@ async function main(): Promise<void> {
   const edgeId = edgeIdDerivation.edgeId;
   if (edgeIdDerivation.warning) console.warn(`[aidcp-edge] ⚠ ${edgeIdDerivation.warning}`);
   console.log(`[aidcp-edge] 节点身份 edgeId=${edgeId} [source=${edgeIdDerivation.source}]`);
+  // 配图临时目录按环境命名空间隔离：清扫/下载都只在 aidcp-img-<本edgeId>- 名下（多环境并行不串扫）。
+  const imageTempPrefix = imageTempPrefixFor(edgeId);
+  await sweepImageTempDirs(imageTempPrefix);
   // hello 身份（account-identity-from-login）：默认从「登录后读出的真实稳定 id」确立（见 attachToPage 之后）；
   // 环境变量 AIDCP_ACCOUNT_ID 降级为【可选覆盖】（预置/特殊场景的逃生阀）。
   const overrideAccountId = process.env.AIDCP_ACCOUNT_ID;
@@ -338,6 +322,7 @@ async function main(): Promise<void> {
       inputSelector: "document.querySelector('input.upload-input[type=file]') || document.querySelector('input[type=file]')",
     }),
     dom: session.dom,
+    tempDirPrefix: imageTempPrefix,
     hasThumbnail: (root) => {
       try {
         return Array.from(root.querySelectorAll('.img-preview-area img, img#creator-preview-image-0')).some(

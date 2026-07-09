@@ -1,0 +1,388 @@
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { JSDOM, type DOMWindow } from 'jsdom';
+import { createRequire } from 'node:module';
+
+// 多环境 fleet 主界面（edge-multi-environment-fleet）：环境栏 / envId 路由不串号 / 切换环境整体切换 /
+// 引导处理流 / 全部启动内存拦阻 —— 用真实 index.html + ui-logic.js + renderer.js 在 jsdom 里驱动。
+const require = createRequire(import.meta.url);
+const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
+  fleetLevel: (s: unknown, now: number) => { level: string; needsAction: boolean; label: string };
+  fleetRailModel: (l: unknown[], now: number) => { rows: Array<{ envId: string; level: string; needsAction: boolean }>; pendingCount: number };
+  FLEET_STALE_MS: number;
+};
+
+const here = dirname(fileURLToPath(import.meta.url));
+const electronDir = join(here, '../../src/electron');
+const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+const openWindows: DOMWindow[] = [];
+after(() => {
+  for (const w of openWindows) w.close();
+});
+
+function makeStatus(over: Record<string, unknown> = {}) {
+  return {
+    auth: 'logged in',
+    cloud: 'connected',
+    session: 'running',
+    risk: 'normal',
+    edge: 'running',
+    stats: { views: 0, likes: 0, collects: 0, comments: 0, follows: 0, publishes: 0 },
+    provider: 'adspower',
+    lastMessage: '',
+    updatedAt: new Date().toISOString(),
+    account: null,
+    presence: { text: '…', at: new Date().toISOString() },
+    publish: null,
+    ...over,
+  };
+}
+
+interface BootHandles {
+  w: DOMWindow;
+  pushStatus: (s: unknown) => void;
+  pushActivity: (e: unknown) => void;
+  pushFleet: (snap: unknown) => void;
+  calls: Record<string, unknown[]>;
+}
+
+async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<string, unknown> = {}): Promise<BootHandles> {
+  const dom = new JSDOM(html, { runScripts: 'dangerously' });
+  const { window } = dom;
+  openWindows.push(window);
+  let pushStatus: (s: unknown) => void = () => undefined;
+  let pushActivity: (e: unknown) => void = () => undefined;
+  let pushFleet: (snap: unknown) => void = () => undefined;
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], startAll: [], select: [] };
+  const settings = {
+    provider: 'adspower',
+    adsProfileId: 'p1',
+    adsProfileName: '环境一',
+    environments: [
+      { profileId: 'p1', name: '环境一', platform: 'xiaohongshu' },
+      { profileId: 'p2', name: '环境二', platform: 'xiaohongshu' },
+    ],
+    adsApiKey: '',
+    adsApiBase: '',
+    railCollapsed: true,
+    adsDownloadUrl: 'https://x',
+    ...settingsOver,
+  };
+  (window as unknown as { aidcpEdge: unknown }).aidcpEdge = {
+    onStatusUpdate: (cb: (s: unknown) => void) => { pushStatus = cb; },
+    onActivity: (cb: (e: unknown) => void) => { pushActivity = cb; },
+    onFleetUpdate: (cb: (snap: unknown) => void) => { pushFleet = cb; },
+    getStatus: async () => makeStatus({ envId: 'ads-p1', envName: '环境一' }),
+    getSettings: async () => settings,
+    saveSettings: async (patch: Record<string, unknown>) => ({ ...settings, ...patch, saveOk: true }),
+    fleetGet: async () => ({
+      provider: 'adspower',
+      selectedEnvId: 'ads-p1',
+      railCollapsed: true,
+      environments: [
+        { envId: 'ads-p1', kind: 'adspower', profileId: 'p1', name: '环境一', platform: 'xiaohongshu', status: makeStatus({ envId: 'ads-p1', envName: '环境一' }) },
+        { envId: 'ads-p2', kind: 'adspower', profileId: 'p2', name: '环境二', platform: 'xiaohongshu', status: makeStatus({ envId: 'ads-p2', envName: '环境二', edge: 'stopped', session: 'idle' }) },
+      ],
+    }),
+    fleetSelect: async (envId: string) => { calls.select.push(envId); return {}; },
+    fleetSetRailCollapsed: async () => ({ ok: true }),
+    fleetStartAll: async (opts: unknown) => { calls.startAll.push(opts); return { ok: true, queued: 2 }; },
+    fleetStopAll: async () => ({ ok: true }),
+    relogin: async (envId: string) => { calls.relogin.push(envId); return makeStatus({ envId }); },
+    showDrivenBrowser: async (envId: string) => { calls.showDriven.push(envId); return { ok: true, hint: '已请求前置；窗口平时停放在屏幕边缘。' }; },
+    resetBrowserParking: async () => ({ ok: true }),
+    pause: async () => makeStatus(),
+    resume: async () => makeStatus(),
+    start: async () => makeStatus(),
+    restart: async () => makeStatus(),
+    adsStatus: async () => ({ ok: false, error: 'not running' }),
+    adsListProfiles: async () => ({ ok: true, profiles: [] }),
+    adsTemplates: async () => [],
+    openFeishu: async () => ({ ok: true }),
+    ...apiOver,
+  };
+  const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
+  const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
+  window.eval(uiLogicSrc);
+  window.eval(rendererSrc);
+  await tick();
+  await tick();
+  return { w: window, pushStatus, pushActivity, pushFleet, calls };
+}
+
+// ── 纯逻辑：状态环分级 / 排序 / 失联 ──
+
+test('fleetLevel：失联（心跳超阈值）绝不呈现为在线', () => {
+  const now = Date.now();
+  const fresh = uiLogic.fleetLevel({ edge: 'running', session: 'running', cloud: 'connected', updatedAt: new Date(now - 1000).toISOString() }, now);
+  assert.equal(fresh.level, 'running');
+  const stale = uiLogic.fleetLevel({ edge: 'running', session: 'running', cloud: 'connected', updatedAt: new Date(now - uiLogic.FLEET_STALE_MS - 1000).toISOString() }, now);
+  assert.equal(stale.level, 'stale');
+  assert.equal(stale.label, '失联');
+});
+
+test('fleetLevel：放弃重启终态为 error 且需处理；同账号告警为 attention', () => {
+  const now = Date.now();
+  assert.equal(uiLogic.fleetLevel({ respawnGaveUp: true, edge: 'stopped' }, now).level, 'error');
+  const warn = uiLogic.fleetLevel({ edge: 'stopped', session: 'idle', sameAccountWarning: { message: 'x' } }, now);
+  assert.equal(warn.level, 'attention');
+  assert.equal(warn.needsAction, true);
+});
+
+test('红线：阻断浮层（验证码/登录墙）即便 edge 仍 running 也判需处理，绝不呈现为绿色在线', () => {
+  const now = Date.now();
+  // 核心遇验证码本地暂停：edge/session 仍 running、risk 至多 warned，若不专门判会绿色在线（漏盯验证码）。
+  const blocked = uiLogic.fleetLevel({ edge: 'running', session: 'running', cloud: 'connected', overlayBlocked: true, updatedAt: new Date(now).toISOString() }, now);
+  assert.equal(blocked.level, 'attention');
+  assert.equal(blocked.needsAction, true);
+  assert.match(blocked.label, /人工/);
+  // 清除后回到在线
+  const cleared = uiLogic.fleetLevel({ edge: 'running', session: 'running', cloud: 'connected', overlayBlocked: false, updatedAt: new Date(now).toISOString() }, now);
+  assert.equal(cleared.level, 'running');
+});
+
+test('fleetRailModel：需处理浮顶、同级保持花名册序、待处理计数正确', () => {
+  const now = Date.now();
+  const model = uiLogic.fleetRailModel([
+    { envId: 'a', name: 'A', status: makeStatus({ updatedAt: new Date(now).toISOString() }) },
+    { envId: 'b', name: 'B', status: makeStatus({ auth: 'login required', edge: 'stopped', updatedAt: new Date(now).toISOString() }) },
+    { envId: 'c', name: 'C', status: makeStatus({ edge: 'warning', updatedAt: new Date(now).toISOString() }) },
+  ], now);
+  assert.deepEqual(model.rows.map((r) => r.envId), ['c', 'b', 'a'], 'error > attention > running');
+  assert.equal(model.pendingCount, 2);
+});
+
+// ── DOM：环境栏 / 路由不串号 / 切换整体切换 ──
+
+test('环境栏：fleet 快照建行、默认收起、点选切换主区域并回写选中', async () => {
+  const { w, calls } = await boot();
+  const rail = w.document.querySelector('#env-rail')!;
+  assert.equal(rail.classList.contains('hidden'), false, '有环境时环境栏可见');
+  assert.equal(rail.classList.contains('collapsed'), true, '默认收起为窄图标条');
+  const rows = w.document.querySelectorAll('.rail-row');
+  assert.equal(rows.length, 2);
+  // 选中环境一时标题带显示其账号标签
+  assert.match(w.document.querySelector('#acct-name')!.textContent!, /环境一|小红书账号/);
+  // 点选环境二 → fleetSelect 回写 + 行选中态
+  const rowB = [...rows].find((r) => (r as HTMLElement).dataset.envId === 'ads-p2') as HTMLElement;
+  rowB.click();
+  await tick();
+  assert.deepEqual(calls.select, ['ads-p2']);
+  assert.equal(
+    (w.document.querySelector('.rail-row[data-env-id="ads-p2"]') as HTMLElement).classList.contains('selected'),
+    true,
+  );
+});
+
+test('红线：并发环境的状态与活动按 envId 归属，切换环境不残留、不串号', async () => {
+  const { w, pushStatus, pushActivity } = await boot();
+  // 环境一：3 个浏览计数；环境二：99 个（若串号立刻可见）
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', stats: { views: 3, likes: 0, collects: 0, comments: 0, follows: 0, publishes: 0 } }));
+  pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二', stats: { views: 99, likes: 0, collects: 0, comments: 0, follows: 0, publishes: 0 } }));
+  pushActivity({ ts: new Date().toISOString(), type: 'like', sentence: '环境一给「A」点了赞', envId: 'ads-p1' });
+  pushActivity({ ts: new Date().toISOString(), type: 'like', sentence: '环境二给「B」点了赞', envId: 'ads-p2' });
+  await tick();
+  // 当前选中环境一：只见环境一的计数与活动
+  assert.equal(w.document.querySelector('#views')!.textContent, '3');
+  const stream1 = w.document.querySelector('#activity-stream')!.textContent!;
+  assert.match(stream1, /环境一给/);
+  assert.doesNotMatch(stream1, /环境二给/, '环境二的活动 MUST NOT 混入环境一的流');
+  // 切到环境二：整块投影切换、不残留环境一数据
+  ([...w.document.querySelectorAll('.rail-row')].find((r) => (r as HTMLElement).dataset.envId === 'ads-p2') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#views')!.textContent, '99');
+  const stream2 = w.document.querySelector('#activity-stream')!.textContent!;
+  assert.match(stream2, /环境二给/);
+  assert.doesNotMatch(stream2, /环境一给/, '切换后环境一的活动 MUST NOT 残留');
+});
+
+test('无 envId 的旧形状状态推送 → 单环境行为不变、环境栏不出现（零回归）', async () => {
+  const { w, pushStatus } = await boot({
+    fleetGet: undefined,
+    onFleetUpdate: undefined,
+    getStatus: async () => makeStatus(),
+  }, { environments: [], adsProfileId: 'u1' });
+  pushStatus(makeStatus({ stats: { views: 7, likes: 0, collects: 0, comments: 0, follows: 0, publishes: 0 } }));
+  await tick();
+  assert.equal(w.document.querySelector('#views')!.textContent, '7');
+  assert.equal(w.document.querySelector('#env-rail')!.classList.contains('hidden'), true, '旧形状下环境栏隐藏');
+});
+
+test('待处理徽标 + 需处理浮顶：需登录环境脉冲并计入徽标', async () => {
+  const { w, pushStatus } = await boot();
+  pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二', auth: 'login required', edge: 'stopped', session: 'idle' }));
+  await tick();
+  const badge = w.document.querySelector('#rail-badge')!;
+  assert.equal(badge.classList.contains('hidden'), false);
+  assert.equal(badge.textContent, '1');
+  const firstRow = w.document.querySelector('.rail-row') as HTMLElement;
+  assert.equal(firstRow.dataset.envId, 'ads-p2', '需处理环境浮顶');
+  assert.equal(firstRow.classList.contains('pulse'), true, '需处理项状态环脉冲');
+});
+
+test('引导处理流：排队一次一个、打开窗口带诚实提示、恢复后自动前进直至完成', async () => {
+  const { w, pushStatus, calls } = await boot();
+  // 两个环境都需要登录
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', auth: 'login required', edge: 'stopped', session: 'idle' }));
+  pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二', auth: 'login required', edge: 'stopped', session: 'idle' }));
+  await tick();
+  // 展开环境栏并进入引导
+  (w.document.querySelector('#rail-toggle') as HTMLElement).click();
+  const guideBtn = w.document.querySelector('#rail-guide') as HTMLElement;
+  assert.equal(guideBtn.classList.contains('hidden'), false);
+  guideBtn.click();
+  await tick();
+  const panel = w.document.querySelector('#guide-panel')!;
+  assert.equal(panel.classList.contains('hidden'), false);
+  assert.match(w.document.querySelector('#guide-title')!.textContent!, /剩 2 个/);
+  // 打开窗口 → 诚实提示（不宣称已抬到最前）
+  (w.document.querySelector('#guide-open') as HTMLElement).click();
+  await tick();
+  assert.equal(calls.showDriven.length, 1);
+  assert.match(w.document.querySelector('#guide-hint')!.textContent!, /屏幕边缘|前置/);
+  // 完成 · 重检 → 触发该环境 relogin
+  (w.document.querySelector('#guide-done') as HTMLElement).click();
+  await tick();
+  assert.equal(calls.relogin.length, 1);
+  // 该环境恢复 → 自动前进到下一个
+  const firstEnv = calls.relogin[0] as string;
+  pushStatus(makeStatus({ envId: firstEnv, envName: '环境一', auth: 'logged in', edge: 'running', session: 'running' }));
+  await tick();
+  assert.match(w.document.querySelector('#guide-title')!.textContent!, /剩 1 个/, '恢复后自动前进');
+  // 第二个也恢复 → 引导完成收起
+  const remaining = firstEnv === 'ads-p1' ? 'ads-p2' : 'ads-p1';
+  pushStatus(makeStatus({ envId: remaining, envName: '环境二', auth: 'logged in', edge: 'running', session: 'running' }));
+  await tick();
+  assert.equal(w.document.querySelector('#guide-panel')!.classList.contains('hidden'), true);
+  assert.match(w.document.querySelector('#guide-hint')!.textContent!, /处理完成/);
+});
+
+test('红线：引导流绝不在 relogin 重启瞬态误判已恢复而永久踢出未完成登录的环境', async () => {
+  const { w, pushStatus, calls } = await boot();
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', auth: 'login required', edge: 'stopped', session: 'idle' }));
+  await tick();
+  (w.document.querySelector('#rail-toggle') as HTMLElement).click();
+  (w.document.querySelector('#rail-guide') as HTMLElement).click();
+  await tick();
+  assert.match(w.document.querySelector('#guide-title')!.textContent!, /剩 1 个/);
+  (w.document.querySelector('#guide-done') as HTMLElement).click(); // 触发 relogin
+  await tick();
+  assert.equal(calls.relogin.length, 1);
+  // relogin 重启瞬态：checking / starting / stopped —— needsAction 会短暂为 false，但 edge!=='running'，绝不退休
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', auth: 'checking', edge: 'stopped', session: 'idle' }));
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', auth: 'checking', edge: 'starting', session: 'running' }));
+  await tick();
+  assert.equal(w.document.querySelector('#guide-panel')!.classList.contains('hidden'), false, '瞬态不得让引导收起');
+  assert.match(w.document.querySelector('#guide-title')!.textContent!, /剩 1 个/, '瞬态绝不误判已恢复');
+  // 核心起来后仍需登录（登录其实没完成）→ 环境必须仍在引导队列、绝不被永久踢出
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', auth: 'login required', edge: 'running', session: 'running' }));
+  await tick();
+  assert.match(w.document.querySelector('#guide-title')!.textContent!, /剩 1 个/, '仍需登录 → 仍在队列');
+  // 真正登录完成（edge running + 不需处理）→ 才退休、引导完成
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', auth: 'logged in', edge: 'running', session: 'running', cloud: 'connected' }));
+  await tick();
+  assert.equal(w.document.querySelector('#guide-panel')!.classList.contains('hidden'), true, '真恢复才收起');
+});
+
+test('红线：人设草稿绑定生成时的环境，中途切换环境后确认仍打回原环境（绝不跨账号误绑）', async () => {
+  const calls: Record<string, unknown[]> = { gen: [], persist: [] };
+  const { w } = await boot({
+    personaGenerate: async (envId: string) => { calls.gen.push(envId); return { ok: true, soulYaml: 'soul: A', identitySummary: 'A 人设' }; },
+    personaPersist: async (envId: string) => { calls.persist.push(envId); return { ok: true }; },
+    getStatus: async () => makeStatus({ envId: 'ads-p1', envName: '环境一', auth: 'logged in', cloud: 'connected' }),
+  });
+  // 环境一登录+连云 → 可生成
+  (w as unknown as { pushStatus?: unknown }); // noop
+  const gen = w.document.querySelector('#persona-generate') as HTMLButtonElement;
+  // 选一个单选关键词组的项，令生成通过校验
+  (w.document.querySelector('.persona-kw-group[data-dim="vertical"] .kw-btn') as HTMLElement).click();
+  gen.disabled = false; // 直接放行（gate 依赖 status，boot 首个 status 已 logged in+connected）
+  gen.click();
+  await tick();
+  assert.deepEqual(calls.gen, ['ads-p1'], '生成打到当前环境');
+  // 切到环境二
+  ([...w.document.querySelectorAll('.rail-row')].find((r) => (r as HTMLElement).dataset.envId === 'ads-p2') as HTMLElement).click();
+  await tick();
+  // 切换后草稿被清（向导每环境独立），确认按钮此时无草稿 → 不会误 persist 到环境二
+  (w.document.querySelector('#persona-confirm') as HTMLElement).click();
+  await tick();
+  assert.equal(calls.persist.length, 0, '切换环境清空草稿后，确认不再向任何环境写入（绝不误绑环境二）');
+});
+
+test('全部启动：内存预检超限 → 诚实拦阻出确认；确认后 force 放行', async () => {
+  let callCount = 0;
+  const { w } = await boot({
+    fleetStartAll: async (opts: { force?: boolean } | undefined) => {
+      callCount += 1;
+      if (!opts || !opts.force) return { ok: false, reason: 'ram', requiredMB: 4096, freeMB: 2048, plannedCount: 4 };
+      return { ok: true, queued: 4, envIds: ['ads-p1', 'ads-p2', 'ads-a', 'ads-b'] };
+    },
+  });
+  (w.document.querySelector('#rail-toggle') as HTMLElement).click();
+  (w.document.querySelector('#rail-start-all') as HTMLElement).click();
+  await tick();
+  const confirm = w.document.querySelector('#rail-ram-confirm')!;
+  assert.equal(confirm.classList.contains('hidden'), false, '超限必须先诚实拦阻');
+  assert.match(w.document.querySelector('#rail-ram-text')!.textContent!, /4096.*2048|可能不足/);
+  (w.document.querySelector('#rail-ram-force') as HTMLElement).click();
+  await tick();
+  assert.equal(callCount, 2, 'force 二次调用');
+  assert.equal(confirm.classList.contains('hidden'), true);
+  // 实时进度：如实呈现 k/N（k=已 running 的目标环境数）而非静态一句话。
+  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /启动中 \d\/4|已错峰排队启动 4/);
+});
+
+test('同账号告警：选中环境带 sameAccountWarning → 主区域出告警条', async () => {
+  const { w, pushStatus } = await boot();
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', sameAccountWarning: { message: '该环境与另一环境登录了同一账号。' } }));
+  await tick();
+  const warn = w.document.querySelector('#same-account-warn')!;
+  assert.equal(warn.classList.contains('hidden'), false);
+  assert.match(w.document.querySelector('#same-account-text')!.textContent!, /同一账号/);
+  // 告警解除即隐藏
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', sameAccountWarning: null }));
+  await tick();
+  assert.equal(warn.classList.contains('hidden'), true);
+});
+
+// ── 花名册多选（adspower-desktop-env-picker MODIFIED）──
+
+test('花名册：点选多个环境累积加入、重复点选诚实提示已加入、可移出', async () => {
+  const { w } = await boot({
+    adsStatus: async () => ({ ok: true }),
+    adsListProfiles: async () => ({
+      ok: true,
+      profiles: [
+        { userId: 'p1', name: '环境一', serialNumber: '1', groupName: '', proxy: '', platform: 'xiaohongshu' },
+        { userId: 'p2', name: '环境二', serialNumber: '2', groupName: '', proxy: '', platform: 'xiaohongshu' },
+        { userId: 'p3', name: '环境三', serialNumber: '3', groupName: '', proxy: '', platform: 'xiaohongshu' },
+      ],
+    }),
+  }, { environments: [{ profileId: 'p1', name: '环境一', platform: 'xiaohongshu' }] });
+  await tick();
+  await tick();
+  const items = w.document.querySelectorAll('.ads-env-item');
+  assert.equal(items.length, 3);
+  // p1 已是成员：带「已加入」标记
+  assert.match(items[0].textContent!, /已加入/);
+  // 点选 p3 → 加入花名册
+  (items[2] as HTMLElement).click();
+  await tick();
+  const itemsAfter = w.document.querySelectorAll('.ads-env-item');
+  assert.match(itemsAfter[2].textContent!, /已加入/, '点选即加入花名册');
+  // 重复点选 p3 → 诚实提示已在花名册、不重复加入
+  (w.document.querySelectorAll('.ads-env-item')[2] as HTMLElement).click();
+  await tick();
+  assert.match(w.document.querySelector('#ads-env-msg')!.textContent!, /已在运行花名册/);
+  // 移出 p3
+  const removeBtn = w.document.querySelectorAll('.ads-env-item')[2].querySelector('.ads-env-remove') as HTMLElement;
+  removeBtn.click();
+  await tick();
+  assert.doesNotMatch(w.document.querySelectorAll('.ads-env-item')[2].textContent!, /已加入/, '移出后成员标记消失');
+});

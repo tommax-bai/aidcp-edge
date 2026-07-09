@@ -941,3 +941,110 @@ body { margin: 0; }
   }
   .summary-time { justify-self: end; padding-top: 1px; }
 }
+
+/* ═══ 多环境 fleet（edge-multi-environment-fleet）═══ */
+.fleet-row { display: flex; align-items: stretch; min-height: 0; }
+.fleet-row.with-rail > .shell { width: auto; max-width: 720px; flex: 1; min-width: 0; padding-left: 14px; padding-right: 14px; }
+
+/* 环境栏：默认收起为 ~56px 窄图标条；展开出名字与状态文字 */
+.env-rail {
+  display: flex; flex-direction: column; gap: 8px;
+  width: 56px; flex-shrink: 0;
+  padding: 10px 6px 12px;
+  border-right: 1px solid #e5eaf2;
+  background: linear-gradient(180deg, #f7f9fd, #fdfdff);
+  min-height: calc(100vh - 46px);
+  box-sizing: border-box;
+  transition: width 0.15s ease;
+}
+.env-rail.expanded { width: 208px; }
+.env-rail.hidden { display: none; }
+
+.rail-toggle {
+  position: relative;
+  width: 40px; height: 32px; margin: 0 auto;
+  border: 1px solid #dbe3ef; border-radius: 8px;
+  background: #fff; color: #43506a; cursor: pointer; font-size: 14px;
+}
+.env-rail.expanded .rail-toggle { width: calc(100% - 4px); }
+.rail-badge {
+  position: absolute; top: -6px; right: -6px;
+  min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box;
+  border-radius: 8px; background: #dc2626; color: #fff;
+  font-size: 10.5px; font-weight: 700; line-height: 16px; text-align: center;
+}
+.rail-badge.hidden { display: none; }
+
+.rail-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; flex: 1; min-height: 0; }
+
+.rail-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 5px; border: 0; border-radius: 10px;
+  background: transparent; cursor: pointer; text-align: left; width: 100%;
+  box-sizing: border-box;
+}
+.rail-row:hover { background: #eef2fa; }
+.rail-row.selected { background: #e3ebfb; }
+
+/* 头像安静样式（浅底 + 品牌色字），状态由外圈色环承担 */
+.rail-ava {
+  position: relative; flex-shrink: 0;
+  width: 34px; height: 34px; border-radius: 50%;
+  background: #eef3fc; color: #2563eb;
+  display: grid; place-items: center;
+  font-size: 14px; font-weight: 700;
+  box-shadow: 0 0 0 2.5px var(--ring, #cbd5e1);
+}
+.rail-row.lv-running .rail-ava { --ring: #16a34a; }
+.rail-row.lv-attention .rail-ava { --ring: #d97706; }
+.rail-row.lv-error .rail-ava { --ring: #dc2626; }
+.rail-row.lv-launching .rail-ava { --ring: #2563eb; }
+.rail-row.lv-offline .rail-ava { --ring: #9aa7ba; }
+.rail-row.lv-stale .rail-ava { --ring: #a16207; }
+
+/* 需处理项：状态环脉冲 */
+@keyframes rail-pulse {
+  0% { box-shadow: 0 0 0 2.5px var(--ring), 0 0 0 2.5px rgba(220, 38, 38, 0); }
+  70% { box-shadow: 0 0 0 2.5px var(--ring), 0 0 0 9px rgba(220, 38, 38, 0.18); }
+  100% { box-shadow: 0 0 0 2.5px var(--ring), 0 0 0 2.5px rgba(220, 38, 38, 0); }
+}
+.rail-row.pulse .rail-ava { animation: rail-pulse 1.6s ease-out infinite; }
+
+.rail-meta { min-width: 0; display: none; }
+.env-rail.expanded .rail-meta { display: block; }
+.rail-name { font-size: 12.5px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rail-state { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rail-row.lv-error .rail-state, .rail-row.lv-attention .rail-state { color: #b45309; font-weight: 600; }
+
+.rail-foot { display: none; flex-direction: column; gap: 6px; }
+.env-rail.expanded .rail-foot { display: flex; }
+.rail-btn {
+  border: 1px solid #dbe3ef; border-radius: 8px; background: #fff;
+  padding: 6px 8px; font-size: 12px; color: #33415c; cursor: pointer;
+}
+.rail-btn.warn { border-color: #f2c063; background: #fff7e8; color: #92600a; }
+.rail-btn.hidden { display: none; }
+.rail-ram { border: 1px solid #f2c063; border-radius: 8px; background: #fff8ec; padding: 8px; }
+.rail-ram.hidden { display: none; }
+.rail-ram p { margin: 0 0 6px; font-size: 11.5px; line-height: 1.5; color: #7a5410; }
+.rail-ram-actions { display: flex; gap: 6px; }
+.rail-msg { margin: 0; font-size: 11px; color: #64748b; line-height: 1.5; }
+.rail-msg:empty { display: none; }
+
+/* 引导处理面板与提示 */
+.setup.guide { border-color: #b7cdf5; background: linear-gradient(180deg, #eef4ff, #fff); }
+.setup.warn { border-color: #f2c063; background: linear-gradient(180deg, #fff8ec, #fff); }
+.guide-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.setup-btn.plain { background: #fff; color: #43506a; border: 1px solid #dbe3ef; }
+.guide-hint { margin: -6px 0 0; font-size: 12px; color: #64748b; line-height: 1.5; }
+.guide-hint.hidden, .setup.guide.hidden, .setup.warn.hidden { display: none; }
+
+/* 花名册（设置抽屉环境列表）成员标记与移出钮 */
+.ads-env-item .env-member-badge {
+  flex-shrink: 0; font-size: 10.5px; font-weight: 700; color: #15803d;
+  border: 1px solid #b8e0c5; background: #effaf2; border-radius: 6px; padding: 1.5px 6px;
+}
+.ads-env-remove {
+  flex-shrink: 0; border: 1px solid #dbe3ef; background: #fff; color: #64748b;
+  border-radius: 6px; font-size: 11px; padding: 2px 7px; cursor: pointer;
+}

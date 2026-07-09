@@ -1,0 +1,168 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { decideRespawn as decideRespawnTs } from '../../src/supervise/respawn-policy.js';
+import { imageTempPrefixFor } from '../../src/flows/image-uploader.js';
+
+// fleet.cjs（多环境外壳纯决策层）单测：设置迁移 / 冻结 env 身份闸 / 错峰队列 / 内存预检 / 同账号检测。
+const require = createRequire(import.meta.url);
+const fleet = require('../../src/electron/fleet.cjs');
+
+// ── 花名册归一 / 设置迁移 ──
+
+test('normalizeEnvironments：去空 id、按 profileId 去重（同一分身绝不出现两次）', () => {
+  const envs = fleet.normalizeEnvironments([
+    { profileId: 'p1', name: 'A', platform: 'xiaohongshu' },
+    { profileId: 'p1', name: 'A-dup' },
+    { profileId: '', name: 'empty' },
+    { userId: 'p2', name: 'B', platform: 'fb' },
+    null,
+  ]);
+  assert.deepEqual(envs.map((e: { profileId: string }) => e.profileId), ['p1', 'p2']);
+  assert.equal(envs[1].platform, 'facebook');
+});
+
+test('migrateEnvironments：旧单值 adsProfileId 向后兼容加载为单元素花名册', () => {
+  const envs = fleet.migrateEnvironments({ adsProfileId: 'legacy1', adsProfileName: '老环境', platform: 'xiaohongshu' });
+  assert.deepEqual(envs, [{ profileId: 'legacy1', name: '老环境', platform: 'xiaohongshu' }]);
+});
+
+test('migrateEnvironments：已有 environments 数组优先于旧单值', () => {
+  const envs = fleet.migrateEnvironments({
+    adsProfileId: 'legacy1',
+    environments: [{ profileId: 'p1', name: 'A' }, { profileId: 'p2', name: 'B' }],
+  });
+  assert.deepEqual(envs.map((e: { profileId: string }) => e.profileId), ['p1', 'p2']);
+});
+
+test('legacyMirrorOf：首成员镜像回旧字段（回滚兼容）；空花名册镜像为空', () => {
+  assert.deepEqual(fleet.legacyMirrorOf([{ profileId: 'p1', name: 'A', platform: 'facebook' }]), {
+    adsProfileId: 'p1',
+    adsProfileName: 'A',
+    platform: 'facebook',
+  });
+  assert.equal(fleet.legacyMirrorOf([]).adsProfileId, '');
+});
+
+// ── 冻结 spawn env + 身份闸 ──
+
+test('buildEnvSpawnEnv：注入 AIDCP_ADS_USER_ID、剔除继承的身份/端口键（防串号）', () => {
+  const built = fleet.buildEnvSpawnEnv({
+    environment: { profileId: 'p9', name: 'X', platform: 'xiaohongshu' },
+    processEnv: {
+      AIDCP_CLOUD_URL: 'ws://example:8787',
+      AIDCP_ACCOUNT_ID: 'poisoned-account',
+      AIDCP_EDGE_ID: 'poisoned-shared-edge',
+      AIDCP_ADS_USER_ID: 'poisoned-profile',
+      AIDCP_CDP_PORT: '9222',
+      AIDCP_CHROME_PROFILE: '/tmp/x',
+    },
+    providerEnv: { AIDCP_ADS_API_KEY: 'k' },
+  });
+  assert.equal(built.ok, true);
+  assert.equal(built.envId, 'ads-p9');
+  assert.equal(built.env.AIDCP_ADS_USER_ID, 'p9');
+  assert.equal(built.env.AIDCP_BROWSER_PROVIDER, 'adspower');
+  assert.equal(built.env.AIDCP_CLOUD_URL, 'ws://example:8787'); // 其余继承保留（逃生阀）
+  // 身份/端口键必须被剔除：任何一个泄漏都会钉死身份 → 云端互踢/串号
+  for (const key of ['AIDCP_ACCOUNT_ID', 'AIDCP_EDGE_ID', 'AIDCP_CDP_PORT', 'AIDCP_CHROME_PROFILE']) {
+    assert.equal(key in built.env, false, `${key} 不应泄漏进子进程 env`);
+  }
+});
+
+test('buildEnvSpawnEnv：缺分身 id（将回落主机名共享身份）→ 诚实拒绝（红线）', () => {
+  const built = fleet.buildEnvSpawnEnv({ environment: { profileId: '' }, processEnv: {}, providerEnv: {} });
+  assert.equal(built.ok, false);
+  assert.match(built.reason, /拒绝启动/);
+});
+
+// ── 错峰串行队列 ──
+
+test('createStaggerQueue：相邻任务开始间隔 ≥ spacing；单任务失败不阻塞其余', async () => {
+  let clock = 0;
+  const sleeps: number[] = [];
+  const queue = fleet.createStaggerQueue({
+    spacingMs: 1100,
+    now: () => clock,
+    sleep: async (ms: number) => {
+      sleeps.push(ms);
+      clock += ms; // 模拟时间推进
+    },
+  });
+  const startedAt: number[] = [];
+  const r1 = queue.enqueue(async () => {
+    startedAt.push(clock);
+    return 'a';
+  });
+  const r2 = queue.enqueue(async () => {
+    startedAt.push(clock);
+    throw new Error('boom'); // 失败被吞成 { ok:false }，不断链
+  });
+  const r3 = queue.enqueue(async () => {
+    startedAt.push(clock);
+    return 'c';
+  });
+  assert.equal(await r1, 'a');
+  const failed = await r2;
+  assert.equal(failed.ok, false);
+  assert.match(failed.error, /boom/);
+  assert.equal(await r3, 'c'); // 前一任务失败，队列继续
+  // 相邻开始间隔 ≥ 1100ms
+  for (let i = 1; i < startedAt.length; i++) {
+    assert.ok(startedAt[i] - startedAt[i - 1] >= 1100, `第 ${i} 个任务与前一个间隔不足: ${startedAt[i] - startedAt[i - 1]}`);
+  }
+  assert.equal(sleeps.length >= 2, true);
+});
+
+// ── 内存上限预检 ──
+
+test('ramAdmission：超限诚实拦阻（ok=false 且带需用/可用数）', () => {
+  const gb = 1024 * 1024 * 1024;
+  const over = fleet.ramAdmission({ plannedCount: 4, freeBytes: 2 * gb });
+  assert.equal(over.ok, false);
+  assert.equal(over.requiredMB, 4096);
+  assert.equal(over.freeMB, 2048);
+  const under = fleet.ramAdmission({ plannedCount: 2, freeBytes: 3 * gb });
+  assert.equal(under.ok, true);
+});
+
+// ── 同账号铺多环境检测 ──
+
+test('duplicateAccountGroups：同账号两环境成组；无账号/单环境不报', () => {
+  const groups = fleet.duplicateAccountGroups([
+    { envId: 'ads-1', accountId: 'acct-a' },
+    { envId: 'ads-2', accountId: 'acct-a' },
+    { envId: 'ads-3', accountId: 'acct-b' },
+    { envId: 'ads-4', accountId: '' },
+  ]);
+  assert.deepEqual(groups, [{ accountId: 'acct-a', envIds: ['ads-1', 'ads-2'] }]);
+});
+
+// ── parity：CJS 副本与 TS 原件语义逐位一致（改任一份必须同步另一份）──
+
+test('decideRespawn parity：CJS 副本与 src/supervise/respawn-policy.ts 输出逐位一致', () => {
+  const opts = { maxConsecutiveFailures: 5, backoffBaseMs: 1000, backoffMaxMs: 30000, healthyUptimeMs: 60000 };
+  const exitCodes = [null, 0, 1, 137];
+  const uptimes = [0, 1000, 59999, 60000, 3600000];
+  const streaks = [0, 1, 4, 5, 6];
+  for (const shuttingDown of [false, true]) {
+    for (const exitCode of exitCodes) {
+      for (const uptimeMs of uptimes) {
+        for (const prevStreak of streaks) {
+          const input = { exitCode, uptimeMs, prevStreak, shuttingDown };
+          assert.deepEqual(
+            fleet.decideRespawn(input, opts),
+            decideRespawnTs(input, opts),
+            `input=${JSON.stringify(input)}`,
+          );
+        }
+      }
+    }
+  }
+});
+
+test('imageTempNamespace parity：外壳侧与核心侧同公式（清扫边界一致）', () => {
+  for (const edgeId of ['ads-p1', 'self-node-1', 'host-my.Mac (2)', '', 'x'.repeat(80)]) {
+    assert.equal(`aidcp-img-${fleet.imageTempNamespace(edgeId)}-`, imageTempPrefixFor(edgeId));
+  }
+});

@@ -177,7 +177,41 @@ function createAdsLocalApi(deps = {}) {
     return { ok: true, groups };
   }
 
-  return { status, listProfiles, listGroups, ADS_MIN_INTERVAL_MS };
+  /**
+   * 对账当前**本机已打开**的浏览器分身：GET {base}/api/v1/browser/local-active（只读）。
+   * 用途（edge-multi-environment-fleet）：外壳重启时 spawn 前对账已在运行的分身——已在运行则接管、
+   * 不重复拉起（防孤儿 + 防同 edgeId 第二连接被云端互踢）。
+   * 不 throw：成功 { ok:true, activeUserIds:[...] }，失败 { ok:false, error }（调用方按「无法对账」诚实处理）。
+   */
+  async function listActiveProfiles(opts = {}) {
+    const url = `${baseOf(opts)}/api/v1/browser/local-active`;
+    let res;
+    try {
+      res = await throttledFetch(url, authHeaders(opts));
+    } catch (e) {
+      return { ok: false, error: `对账在跑分身失败：本地 API 不可达（${(e && e.message) || String(e)}）` };
+    }
+    if (!res.ok) {
+      return { ok: false, error: `对账在跑分身失败（HTTP ${res.status}）` };
+    }
+    let body;
+    try {
+      body = await res.json();
+    } catch {
+      return { ok: false, error: '对账在跑分身失败：本地 API 响应非 JSON' };
+    }
+    if (typeof body.code === 'number' && body.code !== 0) {
+      return { ok: false, error: `对账在跑分身失败：code=${body.code} ${body.msg || ''}`.trim() };
+    }
+    const data = body.data || {};
+    const list = Array.isArray(data.list) ? data.list : [];
+    const activeUserIds = list
+      .map((it) => (it && it.user_id != null ? String(it.user_id) : ''))
+      .filter(Boolean);
+    return { ok: true, activeUserIds };
+  }
+
+  return { status, listProfiles, listGroups, listActiveProfiles, ADS_MIN_INTERVAL_MS };
 }
 
 // user/list 单项归一化。user_id=写入分身 ID 的唯一值；serial_number（UI 序号）/name/代理配置仅供展示。

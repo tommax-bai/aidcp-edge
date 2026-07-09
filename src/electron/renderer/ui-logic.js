@@ -289,5 +289,63 @@
     return { collapsed: running && !manualOpen, summary };
   }
 
-  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, loopIndex, LOOP_STAGES, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS };
+  // ── 多环境 fleet（edge-multi-environment-fleet）：环境栏状态环分级 / 紧迫度排序 / 待处理计数 ──
+  // 分级（收起态由头像外圈色环承担）：
+  //   error(红,需处理)     放弃重启终态 / 引擎异常
+  //   attention(琥珀,需处理) 需登录 / 待配置 / 风控受限冻结 / 同账号告警 / 云端连接中断
+  //   launching(蓝)        启动中
+  //   stale(深黄)          状态心跳超阈值——失联，MUST NOT 呈现为在线
+  //   running(绿)          运行中
+  //   offline(灰)          已停止 / 已暂停
+  const FLEET_STALE_MS = 5 * 60_000; // 状态投影超 5 分钟无任何更新即判失联（诚实：不确定 ≠ 在线）
+
+  function fleetLevel(status, nowMs) {
+    const s = status || {};
+    if (s.respawnGaveUp) return { level: 'error', needsAction: true, label: '错误 · 已放弃重启' };
+    if (s.edge === 'warning') return { level: 'error', needsAction: true, label: '异常' };
+    // 阻断浮层待人工（登录/验证码/未知阻断，核心已本地暂停）：即便 edge 仍 running 也 MUST 浮顶为需处理，
+    // 绝不呈现为绿色在线（多环境跨窗盯验证码是本控制台核心目的）。置于 running 判定之前。
+    if (s.overlayBlocked) return { level: 'attention', needsAction: true, label: '需人工处理' };
+    if (s.auth === 'login required') return { level: 'attention', needsAction: true, label: '需要登录' };
+    if (s.auth === 'config required') return { level: 'attention', needsAction: true, label: '待配置' };
+    if (s.auth === 'chrome missing') return { level: 'attention', needsAction: true, label: '缺少 Chrome' };
+    if (s.risk === 'restricted' || s.risk === 'frozen') {
+      return { level: 'attention', needsAction: true, label: s.risk === 'frozen' ? '账号被冻结' : '账号受限' };
+    }
+    if (s.sameAccountWarning) return { level: 'attention', needsAction: true, label: '同账号告警' };
+    if (s.edge === 'starting') return { level: 'launching', needsAction: false, label: '启动中' };
+    if (s.edge === 'running') {
+      const at = Date.parse(s.updatedAt || '');
+      if (Number.isFinite(at) && Number.isFinite(nowMs) && nowMs - at > FLEET_STALE_MS) {
+        return { level: 'stale', needsAction: false, label: '失联' };
+      }
+      if (s.session === 'running' && s.cloud !== 'connected') return { level: 'attention', needsAction: true, label: '云端连接中断' };
+      return { level: 'running', needsAction: false, label: s.session === 'paused' ? '已暂停' : s.session === 'resting' ? '休息中' : '运行中' };
+    }
+    if (s.session === 'paused') return { level: 'offline', needsAction: false, label: '已暂停' };
+    return { level: 'offline', needsAction: false, label: '已停止' };
+  }
+
+  // 紧迫度排序：需处理（error→attention）浮顶，其后 launching/stale/running，再 offline；同级保持花名册序。
+  const FLEET_LEVEL_RANK = { error: 0, attention: 1, launching: 2, stale: 3, running: 4, offline: 5 };
+
+  /** 输入 [{envId, name, status}]，输出 { rows:[{envId,name,level,needsAction,label,status}], pendingCount }。 */
+  function fleetRailModel(list, nowMs) {
+    const rows = (Array.isArray(list) ? list : []).map((e, i) => {
+      const lv = fleetLevel(e && e.status, nowMs);
+      return {
+        envId: e && e.envId,
+        name: (e && (e.name || (e.status && e.status.envName))) || '',
+        level: lv.level,
+        needsAction: lv.needsAction,
+        label: lv.label,
+        rosterIndex: i,
+        status: e && e.status,
+      };
+    });
+    rows.sort((a, b) => (FLEET_LEVEL_RANK[a.level] - FLEET_LEVEL_RANK[b.level]) || (a.rosterIndex - b.rosterIndex));
+    return { rows, pendingCount: rows.filter((r) => r.needsAction).length };
+  }
+
+  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, loopIndex, LOOP_STAGES, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, FLEET_STALE_MS };
 });

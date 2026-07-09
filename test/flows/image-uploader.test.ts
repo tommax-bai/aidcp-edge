@@ -153,3 +153,38 @@ test('AC-MEDIA 红线反例：设了 files 但无缩略图（成功态缺）→ 
   // 即便后置校验失败也必须清理临时文件。
   await assert.rejects(access(setter.received[0][0]), '失败路径也必须清理临时文件');
 });
+
+// ── 多环境临时目录隔离（edge-multi-environment-fleet D5）──
+
+test('多环境：tempDirPrefix 注入后下载目录落在本环境命名空间', async () => {
+  const d = doc();
+  const setter = new FakeFileInputSetter(d, { ok: true }, true);
+  const up = makeUploader(d, setter, fetchReturning(PNG), { tempDirPrefix: 'aidcp-img-ads-p1-' });
+  const r = await up.upload('https://cdn.example.com/a.png');
+  assert.equal(r.ok, true);
+  assert.match(setter.received[0][0], /aidcp-img-ads-p1-/, '临时路径必须带本环境命名空间前缀');
+});
+
+test('红线回归：启动清扫只清自己命名空间，兄弟环境在途目录不被误删', async () => {
+  const { mkdtemp, mkdir, writeFile, access: accessF, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { imageTempPrefixFor, sweepImageTempDirs } = await import('../../src/flows/image-uploader.js');
+  // 用独立沙箱 base 目录，避免动真实 tmpdir 里其它进程的文件。
+  const base = await mkdtemp(join(tmpdir(), 'aidcp-sweep-test-'));
+  try {
+    const prefixA = imageTempPrefixFor('ads-envA');
+    const prefixB = imageTempPrefixFor('ads-envB');
+    const dirA = join(base, `${prefixA}residue`);
+    const dirB = join(base, `${prefixB}inflight`);
+    await mkdir(dirA, { recursive: true });
+    await mkdir(dirB, { recursive: true });
+    await writeFile(join(dirB, 'image.png'), 'in-flight-upload');
+    // 环境 A 启动清扫：只清 A 的残留。
+    await sweepImageTempDirs(prefixA, base);
+    await assert.rejects(accessF(dirA), 'A 自己的残留目录应被清掉');
+    await accessF(join(dirB, 'image.png')); // B 的在途上传完好（误删=兄弟发布半截，红线）
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});

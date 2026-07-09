@@ -33,7 +33,53 @@
       <div class="hp-row"><span class="hp-label">本机引擎</span><strong id="edge-state" class="badge">已停止</strong></div>
     </div>
 
-    <main class="shell">
+    <div class="fleet-row" id="fleet-row">
+      <!-- ═══ 环境栏（edge-multi-environment-fleet）：默认收起为窄图标条，状态由头像外圈色环承担；
+           需处理项脉冲、展开钮带待处理计数徽标；点选某环境把右侧主区域切到该环境的陪伴视图 ═══ -->
+      <aside id="env-rail" class="env-rail collapsed hidden" aria-label="环境栏">
+        <button id="rail-toggle" class="rail-toggle nodrag" type="button" title="展开环境列表" aria-label="展开环境列表">
+          <span class="rail-toggle-ic">☰</span>
+          <span id="rail-badge" class="rail-badge hidden">0</span>
+        </button>
+        <div id="rail-list" class="rail-list"></div>
+        <div class="rail-foot">
+          <button id="rail-guide" class="rail-btn hidden" type="button">引导处理</button>
+          <button id="rail-start-all" class="rail-btn" type="button">全部启动</button>
+          <div id="rail-ram-confirm" class="rail-ram hidden">
+            <p id="rail-ram-text"></p>
+            <div class="rail-ram-actions">
+              <button id="rail-ram-force" class="rail-btn warn" type="button">仍要启动</button>
+              <button id="rail-ram-cancel" class="rail-btn" type="button">取消</button>
+            </div>
+          </div>
+          <p id="rail-msg" class="rail-msg"></p>
+        </div>
+      </aside>
+
+      <main class="shell">
+      <!-- 引导式登录/验证码流：把全部待处理环境排队、一次引导一个 -->
+      <section id="guide-panel" class="setup guide hidden">
+        <div class="setup-txt">
+          <strong id="guide-title">引导处理</strong>
+          <span id="guide-body"></span>
+        </div>
+        <div class="guide-actions">
+          <button id="guide-open" class="setup-btn" type="button">打开窗口</button>
+          <button id="guide-done" class="setup-btn" type="button">完成 · 重检</button>
+          <button id="guide-skip" class="setup-btn plain" type="button">跳过</button>
+          <button id="guide-exit" class="setup-btn plain" type="button">退出</button>
+        </div>
+      </section>
+      <p id="guide-hint" class="guide-hint hidden"></p>
+
+      <!-- 同账号铺多环境告警（云端会合并风控/配额、发布只定向最早那条边缘） -->
+      <section id="same-account-warn" class="setup warn hidden">
+        <div class="setup-txt">
+          <strong>同账号告警</strong>
+          <span id="same-account-text"></span>
+        </div>
+      </section>
+
       <!-- 阻塞动作升级为醒目主动步骤（需登录 / 待配置时出现；待配置可点开设置抽屉） -->
       <section id="login-guide" class="setup hidden">
         <div class="setup-txt">
@@ -174,7 +220,8 @@
         <summary>开发者详情</summary>
         <pre id="last-message">等待状态…</pre>
       </details>
-    </main>
+      </main>
+    </div>
 
     <!-- ═══ 设置抽屉：配置表单整体迁入（既有控件 ID 与逻辑不变）═══ -->
     <div id="drawer-mask" class="drawer-mask hidden"></div>
