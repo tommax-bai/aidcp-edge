@@ -84,12 +84,19 @@ const fields = {
   drawerClose: document.querySelector('#drawer-close'),
   lightsPad: document.querySelector('.tb-lights-pad'),
   winctlPad: document.querySelector('.tb-winctl-pad'),
-  // 多环境 fleet（edge-multi-environment-fleet）
+  // 多环境 fleet（edge-multi-environment-fleet / edge-fleet-rail-env-management）
   fleetRow: document.querySelector('#fleet-row'),
   envRail: document.querySelector('#env-rail'),
   railToggle: document.querySelector('#rail-toggle'),
   railBadge: document.querySelector('#rail-badge'),
   railList: document.querySelector('#rail-list'),
+  railCount: document.querySelector('#rail-count'),
+  railAdd: document.querySelector('#rail-add'),
+  railFootAdd: document.querySelector('#rail-foot-add'),
+  railSum: document.querySelector('#rail-sum'),
+  railSumRun: document.querySelector('#rail-sum-run'),
+  railSumAttn: document.querySelector('#rail-sum-attn'),
+  railSumIdle: document.querySelector('#rail-sum-idle'),
   railGuide: document.querySelector('#rail-guide'),
   railStartAll: document.querySelector('#rail-start-all'),
   railRamConfirm: document.querySelector('#rail-ram-confirm'),
@@ -107,6 +114,20 @@ const fields = {
   guideHint: document.querySelector('#guide-hint'),
   sameAccountWarn: document.querySelector('#same-account-warn'),
   sameAccountText: document.querySelector('#same-account-text'),
+  // 添加/创建环境面板（edge-fleet-rail-env-management）
+  envAddPanel: document.querySelector('#env-add-panel'),
+  envAddMask: document.querySelector('#env-add-mask'),
+  envAddClose: document.querySelector('#env-add-close'),
+  envTabJoin: document.querySelector('#env-tab-join'),
+  envTabCreate: document.querySelector('#env-tab-create'),
+  envTabJoinBody: document.querySelector('#env-tab-join-body'),
+  envTabCreateBody: document.querySelector('#env-tab-create-body'),
+  adsManualAdd: document.querySelector('#ads-manual-add'),
+  // 账号人设浮层（edge-fleet-rail-env-management）
+  personaPop: document.querySelector('#persona-pop'),
+  personaMask: document.querySelector('#persona-mask'),
+  personaClose: document.querySelector('#persona-close'),
+  personaPopEnv: document.querySelector('#persona-pop-env'),
 };
 
 const settingsUi = {
@@ -119,7 +140,11 @@ const settingsUi = {
   adsApiBase: document.querySelector('#ads-apibase'),
   adsAdvancedToggle: document.querySelector('#ads-advanced-toggle'),
   adsAdvanced: document.querySelector('#ads-advanced'),
+  // 设置抽屉里的「指纹浏览器高级设置」折叠（API 地址/Key）——与上面 join 面板的手动分身 ID 折叠是两处。
+  adsAdvanced2Toggle: document.querySelector('#ads-advanced2-toggle'),
+  adsAdvanced2: document.querySelector('#ads-advanced2'),
   adsEnvList: document.querySelector('#ads-env-list'),
+  adsManualAdd: document.querySelector('#ads-manual-add'),
   adsRefresh: document.querySelector('#ads-refresh'),
   adsEnvMsg: document.querySelector('#ads-env-msg'),
   adsCreate: document.querySelector('#ads-create'),
@@ -790,7 +815,62 @@ function closeDrawer() {
 fields.gear.addEventListener('click', openDrawer);
 fields.drawerClose.addEventListener('click', closeDrawer);
 fields.drawerMask.addEventListener('click', closeDrawer);
-fields.noticeAction.addEventListener('click', openDrawer);
+
+// ─── 添加/创建环境面板（左栏「＋」拉起）───
+function openEnvAddPanel(tab) {
+  if (!fields.envAddPanel) return;
+  fields.envAddPanel.classList.add('open');
+  fields.envAddPanel.setAttribute('aria-hidden', 'false');
+  fields.envAddMask?.classList.remove('hidden');
+  switchEnvTab(tab || 'join');
+  // 打开即探一次 AdsPower 可用性并列环境（真实事件、低频）。
+  if (selectedProvider() === 'adspower') probeAds();
+  if (fields.adsTemplate) populateTemplates();
+}
+function closeEnvAddPanel() {
+  if (!fields.envAddPanel) return;
+  fields.envAddPanel.classList.remove('open');
+  fields.envAddPanel.setAttribute('aria-hidden', 'true');
+  fields.envAddMask?.classList.add('hidden');
+}
+function switchEnvTab(tab) {
+  const join = tab !== 'create';
+  fields.envTabJoin?.classList.toggle('active', join);
+  fields.envTabCreate?.classList.toggle('active', !join);
+  fields.envTabJoinBody?.classList.toggle('hidden', !join);
+  fields.envTabCreateBody?.classList.toggle('hidden', join);
+}
+fields.railAdd?.addEventListener('click', () => openEnvAddPanel('join'));
+fields.railFootAdd?.addEventListener('click', () => openEnvAddPanel('join'));
+fields.envAddClose?.addEventListener('click', closeEnvAddPanel);
+fields.envAddMask?.addEventListener('click', closeEnvAddPanel);
+fields.envTabJoin?.addEventListener('click', () => switchEnvTab('join'));
+fields.envTabCreate?.addEventListener('click', () => switchEnvTab('create'));
+// 待配置引导的「添加环境」按钮直达左栏加环境面板（不再去设置抽屉）。
+fields.noticeAction.addEventListener('click', () => openEnvAddPanel('join'));
+
+// ─── 账号人设浮层（左栏行内人设图标拉起，对「该行环境」做人设）───
+// 打开即把该环境设为选中（右侧陪伴视图 + 状态随之切过去），使人设向导的 gate（登录+连云）与草稿归属
+// 都锚定这个环境（persist 打回它，绝不跨账号）。
+function openPersonaPop(envId) {
+  if (!fields.personaPop) return;
+  if (envId && envId !== fleetView.selected && fleetView.envs.has(envId)) selectEnv(envId);
+  const env = fleetView.envs.get(fleetView.selected);
+  const label = env && (env.name || (env.status && env.status.account && env.status.account.name)) || '';
+  if (fields.personaPopEnv) fields.personaPopEnv.textContent = label ? `· ${label}` : '';
+  fields.personaPop.classList.add('open');
+  fields.personaPop.setAttribute('aria-hidden', 'false');
+  fields.personaMask?.classList.remove('hidden');
+  if (currentStatus) updatePersonaGate(currentStatus); // 按该环境状态刷新可否生成 + 已绑态
+}
+function closePersonaPop() {
+  if (!fields.personaPop) return;
+  fields.personaPop.classList.remove('open');
+  fields.personaPop.setAttribute('aria-hidden', 'true');
+  fields.personaMask?.classList.add('hidden');
+}
+fields.personaClose?.addEventListener('click', closePersonaPop);
+fields.personaMask?.addEventListener('click', closePersonaPop);
 
 // ─── 开发者详情：默认不展示，设置抽屉里开关（persisted）───
 const devSection = document.querySelector('#dev-section');
@@ -982,6 +1062,17 @@ function railEnvList() {
     .filter(Boolean);
 }
 
+// 三大分组（按紧迫度）：需处理浮顶 → 运行中 → 暂停·离线。级别归组一处收口。
+const RAIL_GROUPS = [
+  { key: 'attn', title: '需要处理', crit: true, has: (r) => r.needsAction },
+  { key: 'run', title: '运行中', crit: false, has: (r) => !r.needsAction && (r.level === 'running' || r.level === 'launching') },
+  { key: 'idle', title: '暂停 · 离线', crit: false, has: (r) => !r.needsAction && (r.level === 'offline' || r.level === 'stale') },
+];
+
+function railDisplayName(row) {
+  return row.name || (row.status && row.status.account && row.status.account.name) || `环境 …${String(row.envId).slice(-4)}`;
+}
+
 function renderRail() {
   if (!fields.envRail || !window.uiLogic || typeof uiLogic.fleetRailModel !== 'function') return;
   const list = railEnvList();
@@ -990,6 +1081,11 @@ function renderRail() {
   fields.fleetRow?.classList.toggle('with-rail', show);
   if (!show) { fleetView.lastRailSig = ''; return; }
   const model = uiLogic.fleetRailModel(list, Date.now());
+  const counts = {
+    run: model.rows.filter((r) => !r.needsAction && (r.level === 'running' || r.level === 'launching')).length,
+    attn: model.pendingCount,
+    idle: model.rows.filter((r) => !r.needsAction && (r.level === 'offline' || r.level === 'stale')).length,
+  };
   // 变更签名：每秒 stale 重估会反复调本函数，但只有模型真变时才重建 DOM——否则 innerHTML='' 会每秒
   // 打断 1.6s 脉冲动画（视觉抖动）、把行焦点甩回 <body>、并吞掉跨 tick 的点击手势。
   const sig = JSON.stringify({
@@ -997,16 +1093,23 @@ function renderRail() {
     collapsed: fleetView.collapsed,
     selected: fleetView.selected,
     guided: Boolean(fleetView.guided),
-    rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, r.name || (r.status && r.status.account && r.status.account.name) || '', r.label]),
+    counts,
+    rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, railDisplayName(r), r.label, Boolean(r.status && r.status.personaBound)]),
   });
   if (sig === fleetView.lastRailSig) return;
   fleetView.lastRailSig = sig;
   fields.envRail.classList.toggle('collapsed', fleetView.collapsed);
   fields.envRail.classList.toggle('expanded', !fleetView.collapsed);
   if (fields.railToggle) {
+    fields.railToggle.textContent = fleetView.collapsed ? '›' : '‹';
     fields.railToggle.title = fleetView.collapsed ? '展开环境列表' : '收起环境列表';
     fields.railToggle.setAttribute('aria-label', fields.railToggle.title);
   }
+  if (fields.railCount) fields.railCount.textContent = String(list.length);
+  if (fields.railSum) fields.railSum.classList.toggle('hidden', fleetView.collapsed);
+  if (fields.railSumRun) fields.railSumRun.textContent = `▶ ${counts.run}`;
+  if (fields.railSumAttn) fields.railSumAttn.textContent = `⚠ ${counts.attn}`;
+  if (fields.railSumIdle) fields.railSumIdle.textContent = `⏸ ${counts.idle}`;
   if (fields.railBadge) {
     fields.railBadge.textContent = String(model.pendingCount);
     fields.railBadge.classList.toggle('hidden', model.pendingCount === 0);
@@ -1017,31 +1120,60 @@ function renderRail() {
   }
   if (!fields.railList) return;
   fields.railList.innerHTML = '';
-  for (const row of model.rows) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = `rail-row lv-${row.level}${row.needsAction ? ' pulse' : ''}${row.envId === fleetView.selected ? ' selected' : ''}`;
-    btn.dataset.envId = row.envId;
-    const displayName = row.name || (row.status && row.status.account && row.status.account.name) || `环境 …${String(row.envId).slice(-4)}`;
-    btn.title = `${displayName} · ${row.label}`; // 收起态悬停出名字与状态
-    const ava = document.createElement('span');
-    ava.className = 'rail-ava';
-    ava.textContent = displayName.slice(0, 1);
-    btn.appendChild(ava);
-    const meta = document.createElement('span');
-    meta.className = 'rail-meta';
-    const nameEl = document.createElement('span');
-    nameEl.className = 'rail-name';
-    nameEl.textContent = displayName;
-    const stateEl = document.createElement('span');
-    stateEl.className = 'rail-state';
-    stateEl.textContent = row.label;
-    meta.appendChild(nameEl);
-    meta.appendChild(stateEl);
-    btn.appendChild(meta);
-    btn.addEventListener('click', () => selectEnv(row.envId));
-    fields.railList.appendChild(btn);
+  for (const g of RAIL_GROUPS) {
+    const groupRows = model.rows.filter(g.has);
+    if (groupRows.length === 0) continue;
+    const head = document.createElement('div');
+    head.className = `rail-group${g.crit ? ' crit' : ''}`;
+    head.innerHTML = `${g.title} <span class="n">${groupRows.length}</span>`;
+    fields.railList.appendChild(head);
+    for (const row of groupRows) fields.railList.appendChild(makeRailRow(row));
   }
+}
+
+function makeRailRow(row) {
+  const btn = document.createElement('div');
+  btn.className = `rail-row lv-${row.level}${row.needsAction ? ' pulse' : ''}${row.envId === fleetView.selected ? ' selected' : ''}`;
+  btn.dataset.envId = row.envId;
+  btn.tabIndex = 0;
+  btn.setAttribute('role', 'button');
+  const displayName = railDisplayName(row);
+  btn.title = `${displayName} · ${row.label}`; // 收起态悬停出名字与状态
+  const ava = document.createElement('span');
+  ava.className = 'rail-ava';
+  ava.textContent = displayName.slice(0, 1);
+  btn.appendChild(ava);
+  const meta = document.createElement('span');
+  meta.className = 'rail-meta';
+  // 昵称行：昵称 + 人设图标（点击弹独立浮层做人设）
+  const nameLine = document.createElement('span');
+  nameLine.className = 'rail-nameline';
+  const nameEl = document.createElement('span');
+  nameEl.className = 'rail-name';
+  nameEl.textContent = displayName;
+  nameLine.appendChild(nameEl);
+  const bound = Boolean(row.status && row.status.personaBound);
+  const pIcon = document.createElement('button');
+  pIcon.type = 'button';
+  pIcon.className = `rail-persona${bound ? ' set' : ''}`;
+  pIcon.textContent = '✦';
+  pIcon.title = bound ? '账号人设：已设置（点击查看 / 调整）' : '账号人设：未设置（点击设置）';
+  pIcon.setAttribute('aria-label', pIcon.title);
+  pIcon.addEventListener('click', (e) => { e.stopPropagation(); openPersonaPop(row.envId); });
+  nameLine.appendChild(pIcon);
+  meta.appendChild(nameLine);
+  // 状态行：状态点 + 文案
+  const stateEl = document.createElement('span');
+  stateEl.className = 'rail-state';
+  const dot = document.createElement('span');
+  dot.className = 'rail-dot';
+  stateEl.appendChild(dot);
+  stateEl.appendChild(document.createTextNode(row.label));
+  meta.appendChild(stateEl);
+  btn.appendChild(meta);
+  btn.addEventListener('click', () => selectEnv(row.envId));
+  btn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectEnv(row.envId); } });
+  return btn;
 }
 
 function setRailMsg(text) {
@@ -1272,8 +1404,9 @@ function applyParkingSelection(mode) {
 }
 
 function promptMissingAdsProfile() {
-  settingsUi.msg.textContent = '请先选择一个环境，或在「高级设置」里打开「手动填写」填分身 ID。';
-  openDrawer();
+  settingsUi.msg.textContent = '请先在左栏「＋ 添加环境」加入至少一个环境。';
+  setRailMsg('请先「＋ 添加环境」加入至少一个环境。');
+  openEnvAddPanel('join'); // 环境管理已搬到左栏：直达添加面板，不再去设置抽屉
 }
 
 // 分身 ID 只读展示：默认由选中环境带出；手动模式时改由输入框承载。
@@ -1312,21 +1445,29 @@ settingsUi.useChrome.addEventListener('change', () => {
   if (provider === 'adspower') probeAds(); // 切回 AdsPower 即探一次可用性并列环境
 });
 
+// 加环境面板里的「手动填分身 ID」折叠。
 settingsUi.adsAdvancedToggle.addEventListener('click', () => {
   const hidden = settingsUi.adsAdvanced.classList.toggle('hidden');
-  settingsUi.adsAdvancedToggle.textContent = hidden ? '高级设置 ▾' : '高级设置 ▴';
+  settingsUi.adsAdvancedToggle.textContent = hidden ? '手动填分身 ID ▾' : '手动填分身 ID ▴';
 });
 
-// 分身 ID / 手动填写 收在「高级设置」里；需要手动兜底时（探测未就绪 / 拉取失败）自动展开，免得用户去找。
+// 设置抽屉里的「指纹浏览器高级设置」折叠（API 地址/Key）。
+settingsUi.adsAdvanced2Toggle?.addEventListener('click', () => {
+  const hidden = settingsUi.adsAdvanced2.classList.toggle('hidden');
+  settingsUi.adsAdvanced2Toggle.textContent = hidden ? '指纹浏览器高级设置 ▾' : '指纹浏览器高级设置 ▴';
+});
+
+// 手动分身 ID 折叠；需要手动兜底时（探测未就绪 / 拉取失败）自动展开，免得用户去找。
 function openAdvanced() {
   settingsUi.adsAdvanced.classList.remove('hidden');
-  settingsUi.adsAdvancedToggle.textContent = '高级设置 ▴';
+  settingsUi.adsAdvancedToggle.textContent = '手动填分身 ID ▴';
 }
 
-// 「手动填写」开关：开=显示手敲输入框；关=用选中环境的值（只读展示）。
+// 「手动填写」开关：开=显示手敲输入框 + 加入按钮；关=用选中环境的值（只读展示）。
 settingsUi.adsManual.addEventListener('change', () => {
   const manual = settingsUi.adsManual.checked;
   settingsUi.adsProfile.classList.toggle('hidden', !manual);
+  settingsUi.adsManualAdd?.classList.toggle('hidden', !manual);
   settingsUi.adsProfileDisplay.classList.toggle('hidden', manual);
   if (manual) settingsUi.adsProfile.focus();
   else updateProfileDisplay();
@@ -1335,7 +1476,17 @@ settingsUi.adsProfile.addEventListener('input', () => {
   selectedProfileName = ''; // 手填 id 对不上环境名，不冒认
   selectedPlatform = 'xiaohongshu'; // 手填 id 平台未知 → 回落小红书（与历史一致，零回归）；需 FB 则经环境列表选中
   updateProfileDisplay();
-  markDirty();
+});
+// 「加入这个分身 ID」：把手敲 id 作为一个花名册成员加入并落盘（兜底路径，列表拉不到时用）。
+settingsUi.adsManualAdd?.addEventListener('click', () => {
+  const id = settingsUi.adsProfile.value.trim();
+  if (!id) { setEnvMsg('请先填写分身 ID。', true); return; }
+  if (rosterHas(id)) { setEnvMsg(`「${id}」已在运行花名册中。`, false); return; }
+  roster.push({ profileId: id, name: '', platform: 'xiaohongshu' });
+  settingsUi.adsProfile.value = '';
+  refreshRosterMarks();
+  setEnvMsg(`已加入分身 ID「${id}」，在左栏可见并可启动。`, false);
+  void persistRoster();
 });
 settingsUi.adsApiBase.addEventListener('input', markDirty);
 settingsUi.adsApiKey.addEventListener('input', markDirty);
@@ -1404,16 +1555,19 @@ function selectProfile(userId, itemEl, profileName, platform) {
   settingsUi.adsProfile.value = userId;
   selectedProfileName = profileName || '';
   selectedPlatform = normPlatform(platform);
+  let added = false;
   if (userId && !rosterHas(userId)) {
     roster.push({ profileId: userId, name: profileName || '', platform: normPlatform(platform) });
+    added = true;
   } else if (userId) {
     setEnvMsg(`「${profileName || userId}」已在运行花名册中。`, false);
   }
   updateProfileDisplay();
-  markDirty();
   settingsUi.adsEnvList.querySelectorAll('.ads-env-item').forEach((el) => el.classList.remove('selected'));
   if (itemEl) itemEl.classList.add('selected');
   refreshRosterMarks();
+  // 加入即落盘（根治「加入后左栏不显示」）：main 据此 syncEnvHandles + 广播花名册 → 左栏立刻出现该环境的离线行。
+  if (added) { setEnvMsg(`已加入「${profileName || userId}」，在左栏可见并可启动。`, false); void persistRoster(); }
 }
 
 // 从花名册移出一个成员；若其恰为当前分身 ID，则回落到剩余首个成员（或清空）。
@@ -1426,8 +1580,18 @@ function removeFromRoster(profileId) {
     selectedPlatform = next ? normPlatform(next.platform) : 'xiaohongshu';
     updateProfileDisplay();
   }
-  markDirty();
   refreshRosterMarks();
+  void persistRoster(); // 移出即落盘：main 有序停止并摘除该环境、左栏随即撤下
+}
+
+// 把当前花名册直接落盘（加入/移出即时生效，不必等「启动」）。main 的 syncEnvHandles 会据此建行/摘行。
+async function persistRoster() {
+  if (!window.aidcpEdge || typeof window.aidcpEdge.saveSettings !== 'function') return;
+  const environments = roster.map((m) => ({ profileId: m.profileId, name: m.name, platform: m.platform }));
+  try {
+    const saved = await window.aidcpEdge.saveSettings({ environments });
+    if (saved && Array.isArray(saved.environments)) { roster = normalizeRosterList(saved.environments); refreshRosterMarks(); }
+  } catch { /* 落盘失败静默；下次「启动」的 saveCurrentSettings 会再落一次 */ }
 }
 
 // roster 变更后就地重刷环境列表的成员标记（不重新拉取）。

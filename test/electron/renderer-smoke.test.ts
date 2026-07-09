@@ -98,7 +98,8 @@ const $$ = (w: DOMWindow, sel: string) => Array.from(w.document.querySelectorAll
 const hidden = (el: HTMLElement) => el.classList.contains('hidden');
 
 test('中文化：新增控件文案齐全', () => {
-  for (const s of ['浏览器引擎', '本机 Chrome', '浏览器环境', '刷新', '手动填写', '高级设置', '创建环境', '窗口停放', '副屏停放', '边缘停放', '完全移出']) {
+  // 环境管理与人设已搬到左栏浮层；设置抽屉只剩浏览器引擎 + 窗口停放 + 开发者开关。
+  for (const s of ['浏览器引擎', '本机 Chrome', '添加环境', '加入现有环境', '新建环境', '刷新', '手动填写', '创建环境', '账号人设', '窗口停放', '副屏停放', '边缘停放', '完全移出', '指纹浏览器高级设置']) {
     assert.ok(html.includes(s), `index.html 应含「${s}」`);
   }
 });
@@ -175,11 +176,14 @@ test('无独立「保存」按钮；启动 = 先保存再启动', async () => {
     start: async () => { calls.push('start'); return makeStatus({ edge: 'starting', session: 'running' }); },
   }));
   assert.equal(w.document.querySelector('#save-settings'), null, '不应有独立「保存」按钮');
-  $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click')); // 选环境带出分身 ID
+  $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click')); // 加入环境 → 即时落盘（extra save，根治「加入后左栏不显示」）
+  await tick();
   $(w, '#session-fab').dispatchEvent(new w.Event('click')); // 悬浮「启动」
   await tick();
   await tick();
-  assert.deepEqual(calls, ['save', 'start'], '启动应先 save 再 start');
+  // 加入环境已即时落盘一次；启动再 save + start。收口契约：启动前必先 save。
+  assert.deepEqual(calls.slice(-2), ['save', 'start'], '启动应先 save 再 start');
+  assert.ok(calls.filter((c) => c === 'save').length >= 1);
 });
 
 test('启动前未选环境/未填分身 → 诚实提示，不 save 不 start', async () => {
@@ -193,20 +197,21 @@ test('启动前未选环境/未填分身 → 诚实提示，不 save 不 start',
   $(w, '#session-fab').dispatchEvent(new w.Event('click'));
   await tick();
   assert.deepEqual(calls, []);
-  assert.match($(w, '#settings-msg').textContent ?? '', /请先选择一个环境/);
-  assert.equal($(w, '#drawer').classList.contains('open'), true, '提示应打开设置抽屉，避免启动按钮像没反应');
+  assert.match($(w, '#settings-msg').textContent ?? '', /添加环境/);
+  // 环境管理已搬到左栏：诚实提示直达「添加环境」面板（不再打开设置抽屉）。
+  assert.equal($(w, '#env-add-panel').classList.contains('open'), true, '提示应打开添加环境面板，避免启动按钮像没反应');
 });
 
-test('运行中改设置 → 出现「按新设置重启」，点击先存再重启', async () => {
+test('运行中改设置（窗口停放）→ 出现「按新设置重启」，点击先存再重启', async () => {
+  // 环境增删已即时落盘（不走「按新设置重启」）；该按钮现用于 provider/窗口停放等仍需重启在跑核心的改动。
   const calls: string[] = [];
   const w = await boot(makeStub({
     getStatus: async () => makeStatus({ edge: 'running', session: 'running' }),
-    adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'u1', serialNumber: '1', name: '甲', groupName: 'g', proxy: 'p' }] }),
-    saveSettings: async () => { calls.push('save'); return { provider: 'adspower', adsProfileId: 'u1', saveOk: true }; },
+    saveSettings: async () => { calls.push('save'); return { provider: 'adspower', saveOk: true }; },
     restart: async () => { calls.push('restart'); return makeStatus({ edge: 'starting' }); },
   }));
   assert.equal(hidden($(w, '#apply-restart')), true, '未改动时不显示「按新设置重启」');
-  $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click')); // 改选环境 → dirty
+  $(w, '#parking-offscreen').dispatchEvent(new w.Event('click')); // 改窗口停放 → dirty
   assert.equal(hidden($(w, '#apply-restart')), false, '改动 + 运行中 → 显示');
   $(w, '#apply-restart').dispatchEvent(new w.Event('click'));
   await tick();
@@ -320,7 +325,8 @@ test('程序化建号成功返回 userId → 自动选中新环境，启动可�
 
   $(w, '#session-fab').dispatchEvent(new w.Event('click'));
   for (let i = 0; i < 3; i++) await tick();
-  assert.deepEqual(calls, ['save:u_new', 'start']);
+  // 建号后自动加入即时落盘一次（environments 补丁、无 adsProfileId → 'save:'）；启动再 save:u_new + start。
+  assert.deepEqual(calls.slice(-2), ['save:u_new', 'start']);
 });
 
 test('程序化建号失败：诚实提示', async () => {

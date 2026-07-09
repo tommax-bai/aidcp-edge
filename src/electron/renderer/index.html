@@ -34,14 +34,28 @@
     </div>
 
     <div class="fleet-row" id="fleet-row">
-      <!-- ═══ 环境栏（edge-multi-environment-fleet）：默认收起为窄图标条，状态由头像外圈色环承担；
-           需处理项脉冲、展开钮带待处理计数徽标；点选某环境把右侧主区域切到该环境的陪伴视图 ═══ -->
+      <!-- ═══ 环境栏（edge-fleet-rail-env-management）：环境管理收口于此。
+           栏头「环境 N」+「＋ 添加环境」+ 收起钮（红色待处理徽标）；汇总 chip「▶运行 ⚠需处理 ⏸离线」；
+           按紧迫度分组列全部环境（含未启动的离线行）；每行昵称后一个人设图标（点击弹独立浮层）。
+           默认收起为窄图标条：头像退安静样式、状态由外圈色环承担、需处理脉冲。 ═══ -->
       <aside id="env-rail" class="env-rail collapsed hidden" aria-label="环境栏">
-        <button id="rail-toggle" class="rail-toggle nodrag" type="button" title="展开环境列表" aria-label="展开环境列表">
-          <span class="rail-toggle-ic">☰</span>
-          <span id="rail-badge" class="rail-badge hidden">0</span>
-        </button>
+        <div class="rail-head">
+          <span class="rail-title">环境 <span id="rail-count">0</span></span>
+          <span class="rail-head-ctl">
+            <button id="rail-add" class="rail-add nodrag" type="button" title="添加环境" aria-label="添加环境">＋</button>
+            <span class="rail-toggle-wrap">
+              <button id="rail-toggle" class="rail-toggle nodrag" type="button" title="展开 / 收起环境栏" aria-label="展开 / 收起环境栏">‹</button>
+              <span id="rail-badge" class="rail-badge hidden">0</span>
+            </span>
+          </span>
+        </div>
+        <div id="rail-sum" class="rail-sum hidden">
+          <span class="sum-chip run" id="rail-sum-run">▶ 0</span>
+          <span class="sum-chip attn" id="rail-sum-attn">⚠ 0</span>
+          <span class="sum-chip idle" id="rail-sum-idle">⏸ 0</span>
+        </div>
         <div id="rail-list" class="rail-list"></div>
+        <button id="rail-foot-add" class="rail-foot-add" type="button" title="添加环境" aria-label="添加环境">＋</button>
         <div class="rail-foot">
           <button id="rail-guide" class="rail-btn hidden" type="button">引导处理</button>
           <button id="rail-start-all" class="rail-btn" type="button">全部启动</button>
@@ -80,13 +94,13 @@
         </div>
       </section>
 
-      <!-- 阻塞动作升级为醒目主动步骤（需登录 / 待配置时出现；待配置可点开设置抽屉） -->
+      <!-- 阻塞动作升级为醒目主动步骤（需登录 / 待配置时出现；待配置引导去左栏加环境） -->
       <section id="login-guide" class="setup hidden">
         <div class="setup-txt">
           <strong id="notice-title">需要登录</strong>
           <span id="notice-body">请在刚打开的 Chrome 窗口中登录 xiaohongshu.com，检测到登录后会自动继续。</span>
         </div>
-        <button id="notice-action" class="setup-btn hidden" type="button">去设置</button>
+        <button id="notice-action" class="setup-btn hidden" type="button">添加环境</button>
       </section>
 
       <!-- 在场感行：当前动作 + 呼吸点 + 新鲜度走字（动效只由真实事件驱动） -->
@@ -223,110 +237,78 @@
       </main>
     </div>
 
-    <!-- ═══ 设置抽屉：配置表单整体迁入（既有控件 ID 与逻辑不变）═══ -->
-    <div id="drawer-mask" class="drawer-mask hidden"></div>
-    <aside id="drawer" class="drawer" aria-hidden="true">
-      <div class="drawer-head">
-        <span>设置</span>
-        <button id="drawer-close" class="drawer-x nodrag" type="button" aria-label="关闭设置">×</button>
+    <!-- ═══ 添加/创建环境面板（edge-fleet-rail-env-management）：由左栏「＋」拉起的独立浮层，
+         集中做「加入现有 AdsPower 环境（多选）」与「新建指纹环境（模板 + 平台）」；
+         加入即落盘并作为离线行出现在左栏（根治「加入后左栏不显示」）。 ═══ -->
+    <div id="env-add-mask" class="pop-mask hidden"></div>
+    <aside id="env-add-panel" class="env-add-panel hidden" aria-hidden="true" aria-label="添加环境">
+      <div class="pop-head">
+        <span>添加环境</span>
+        <button id="env-add-close" class="drawer-x nodrag" type="button" aria-label="关闭">×</button>
       </div>
-      <p class="subtle" id="subtitle">以持久化配置启动浏览器，用于小红书登录与自动运营。</p>
+      <div class="env-add-tabs">
+        <button id="env-tab-join" class="env-add-tab active" type="button" data-tab="join">加入现有环境</button>
+        <button id="env-tab-create" class="env-add-tab" type="button" data-tab="create">新建环境</button>
+      </div>
 
-      <section class="settings">
-        <!-- 浏览器引擎：默认内置 AdsPower 指纹浏览器；开关切到本机 Chrome -->
-        <div class="set-card">
-          <div class="set-card-head">
-            <div class="set-card-title">
-              <span>浏览器引擎</span>
-              <span class="set-card-sub">默认使用内置指纹浏览器（免装客户端）</span>
-            </div>
-            <label class="switch" title="打开则改用本机 Chrome">
-              <input id="use-chrome" type="checkbox" />
-              <span class="switch-track"><span class="switch-thumb"></span></span>
-              <span class="switch-label">本机 Chrome</span>
-            </label>
-          </div>
+      <!-- 加入现有环境：AdsPower 环境列表，点选加入运行花名册（多选累积） -->
+      <div id="env-tab-join-body" class="env-add-body">
+        <div class="ads-env-head">
+          <span class="field-label">选择要并行运行的环境</span>
+          <button id="ads-refresh" class="seg" type="button">刷新</button>
         </div>
-
-        <!-- AdsPower 环境（本机 Chrome 关闭时显示）-->
-        <div id="ads-config" class="set-card ads-config">
-          <div class="field">
-            <div class="ads-env-head">
-              <span class="field-label">浏览器环境</span>
-              <button id="ads-refresh" class="seg" type="button">刷新</button>
-            </div>
-            <div id="ads-env-list" class="ads-env-list">
-              <p class="ads-env-empty">（就绪后自动列出，或点「刷新」）</p>
-            </div>
-            <span id="ads-env-msg" class="ads-env-msg"></span>
-          </div>
-          <div class="ads-create-row">
-            <select id="ads-platform" class="ads-template" aria-label="平台">
-              <option value="xiaohongshu">小红书</option>
-              <option value="facebook">Facebook</option>
-            </select>
-            <select id="ads-template" class="ads-template" aria-label="整机模板"></select>
-            <button id="ads-create" class="seg" type="button">创建环境</button>
-          </div>
-          <span id="ads-create-msg" class="ads-env-msg"></span>
-          <div>
-            <button id="ads-advanced-toggle" class="link ads-adv-toggle" type="button">高级设置 ▾</button>
-            <div id="ads-advanced" class="ads-advanced hidden">
-              <div class="field">
-                <div class="ads-id-head">
-                  <span class="field-label">分身 ID <em class="req">必填</em></span>
-                  <label class="ads-manual-toggle">
-                    <input id="ads-manual" type="checkbox" /> 手动填写
-                  </label>
-                </div>
-                <div id="ads-profile-display" class="ads-profile-display">（请从上方选择一个环境）</div>
-                <input id="ads-profile" type="text" class="hidden" placeholder="手动填写分身 ID（user_id）" autocomplete="off" />
+        <div id="ads-env-list" class="ads-env-list">
+          <p class="ads-env-empty">（就绪后自动列出，或点「刷新」）</p>
+        </div>
+        <span id="ads-env-msg" class="ads-env-msg"></span>
+        <div>
+          <button id="ads-advanced-toggle" class="link ads-adv-toggle" type="button">手动填分身 ID ▾</button>
+          <div id="ads-advanced" class="ads-advanced hidden">
+            <div class="field">
+              <div class="ads-id-head">
+                <span class="field-label">分身 ID <em class="req">必填</em></span>
+                <label class="ads-manual-toggle">
+                  <input id="ads-manual" type="checkbox" /> 手动填写
+                </label>
               </div>
-              <label class="field">
-                <span class="field-label">API 地址 <em class="opt">可选</em></span>
-                <input id="ads-apibase" type="text" placeholder="留空自动使用本地服务地址" autocomplete="off" />
-              </label>
-              <label class="field">
-                <span class="field-label">API Key <em class="opt">按需</em></span>
-                <input id="ads-apikey" type="password" placeholder="由本机自动启动内置运行时时必填；连接已在运行的指纹浏览器可留空" autocomplete="off" />
-              </label>
+              <div id="ads-profile-display" class="ads-profile-display">（请从上方选择一个环境）</div>
+              <input id="ads-profile" type="text" class="hidden" placeholder="手动填写分身 ID（user_id）" autocomplete="off" />
+              <button id="ads-manual-add" class="seg hidden" type="button">加入这个分身 ID</button>
             </div>
           </div>
         </div>
+      </div>
 
-        <!-- 窗口停放 -->
-        <div class="set-card">
-          <div class="field parking-field">
-            <span class="field-label">窗口停放</span>
-            <div class="seg-group parking-options">
-              <button id="parking-display" class="seg parking-btn" type="button" data-mode="parking-display">副屏停放</button>
-              <button id="parking-edge-strip" class="seg parking-btn" type="button" data-mode="edge-strip">边缘停放</button>
-              <button id="parking-offscreen" class="seg parking-btn" type="button" data-mode="offscreen">完全移出</button>
-            </div>
-            <span class="parking-hint">默认边缘停放；副屏不可用会自动降级，完全移出会做可见性校验。</span>
-            <div class="parking-actions">
-              <button id="browser-show" class="secondary small" type="button">显示浏览器</button>
-              <button id="browser-reset-parking" class="secondary small" type="button">重置位置</button>
-            </div>
-          </div>
+      <!-- 新建环境：程序化建一个指纹环境（代理不碰，建完提醒去 AdsPower 配代理） -->
+      <div id="env-tab-create-body" class="env-add-body hidden">
+        <div class="ads-create-row">
+          <select id="ads-platform" class="ads-template" aria-label="平台">
+            <option value="xiaohongshu">小红书</option>
+            <option value="facebook">Facebook</option>
+          </select>
+          <select id="ads-template" class="ads-template" aria-label="整机模板"></select>
+          <button id="ads-create" class="seg" type="button">创建环境</button>
         </div>
+        <span id="ads-create-msg" class="ads-env-msg"></span>
+        <p class="subtle">新建的环境代理默认为空，请在 AdsPower 客户端为它配好代理再使用。</p>
+      </div>
+    </aside>
 
-        <div class="settings-actions">
-          <span id="settings-msg" class="settings-msg"></span>
-          <button id="apply-restart" class="secondary hidden" type="button">按新设置重启</button>
-        </div>
-      </section>
-
-      <!-- ═══ 账号人设：扫码登录后按关键词生成（change edge-persona-keyword-generation）═══ -->
-      <section class="settings persona-config">
-        <div class="settings-head">
-          <span>账号人设</span>
+    <!-- ═══ 账号人设浮层（edge-fleet-rail-env-management）：由左栏每行的人设图标拉起，
+         对「该行环境」做人设向导（选关键词 → 生成 → 确认）。审批/落库诚实回执，绝不本地判成功。 ═══ -->
+    <div id="persona-mask" class="pop-mask hidden"></div>
+    <aside id="persona-pop" class="persona-pop hidden" aria-hidden="true" aria-label="账号人设">
+      <div class="pop-head">
+        <span>账号人设 <em id="persona-pop-env" class="pop-head-env"></em></span>
+        <span class="pop-head-r">
           <strong id="persona-state-badge" class="badge checking">未设置</strong>
-        </div>
-        <p class="subtle persona-hint" id="persona-hint">选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。</p>
-        <p class="subtle hidden" id="persona-bound-note">该账号已设置人设，正在正常自动运营。如需调整，可在后台管理页编辑。</p>
+          <button id="persona-close" class="drawer-x nodrag" type="button" aria-label="关闭">×</button>
+        </span>
+      </div>
+      <p class="subtle persona-hint" id="persona-hint">选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。</p>
+      <p class="subtle hidden" id="persona-bound-note">该账号已设置人设，正在正常自动运营。如需调整，可在后台管理页编辑。</p>
 
-        <div id="persona-wizard-body">
+      <div id="persona-wizard-body">
         <div class="field">
           <span class="field-label">垂类 / 行业</span>
           <div class="seg-group persona-kw-group" data-dim="vertical" data-select="single">
@@ -385,7 +367,68 @@
             <button id="persona-confirm" class="seg" type="button">确认使用</button>
           </div>
         </div>
-        </div><!-- /#persona-wizard-body -->
+      </div><!-- /#persona-wizard-body -->
+    </aside>
+
+    <!-- ═══ 设置抽屉：精简为「浏览器引擎 + 窗口停放 + 开发者开关」（环境管理与人设已搬到左栏）═══ -->
+    <div id="drawer-mask" class="drawer-mask hidden"></div>
+    <aside id="drawer" class="drawer" aria-hidden="true">
+      <div class="drawer-head">
+        <span>设置</span>
+        <button id="drawer-close" class="drawer-x nodrag" type="button" aria-label="关闭设置">×</button>
+      </div>
+      <p class="subtle" id="subtitle">以持久化配置启动浏览器，用于小红书登录与自动运营。</p>
+
+      <section class="settings">
+        <!-- 浏览器引擎：默认内置 AdsPower 指纹浏览器；开关切到本机 Chrome。AdsPower API 凭据收在此卡高级折叠。 -->
+        <div class="set-card">
+          <div class="set-card-head">
+            <div class="set-card-title">
+              <span>浏览器引擎</span>
+              <span class="set-card-sub">默认使用内置指纹浏览器（免装客户端）</span>
+            </div>
+            <label class="switch" title="打开则改用本机 Chrome">
+              <input id="use-chrome" type="checkbox" />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">本机 Chrome</span>
+            </label>
+          </div>
+          <div id="ads-config" class="ads-config">
+            <button id="ads-advanced2-toggle" class="link ads-adv-toggle" type="button">指纹浏览器高级设置 ▾</button>
+            <div id="ads-advanced2" class="ads-advanced hidden">
+              <label class="field">
+                <span class="field-label">API 地址 <em class="opt">可选</em></span>
+                <input id="ads-apibase" type="text" placeholder="留空自动使用本地服务地址" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span class="field-label">API Key <em class="opt">按需</em></span>
+                <input id="ads-apikey" type="password" placeholder="由本机自动启动内置运行时时必填；连接已在运行的指纹浏览器可留空" autocomplete="off" />
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- 窗口停放 -->
+        <div class="set-card">
+          <div class="field parking-field">
+            <span class="field-label">窗口停放</span>
+            <div class="seg-group parking-options">
+              <button id="parking-display" class="seg parking-btn" type="button" data-mode="parking-display">副屏停放</button>
+              <button id="parking-edge-strip" class="seg parking-btn" type="button" data-mode="edge-strip">边缘停放</button>
+              <button id="parking-offscreen" class="seg parking-btn" type="button" data-mode="offscreen">完全移出</button>
+            </div>
+            <span class="parking-hint">默认边缘停放；副屏不可用会自动降级，完全移出会做可见性校验。</span>
+            <div class="parking-actions">
+              <button id="browser-show" class="secondary small" type="button">显示浏览器</button>
+              <button id="browser-reset-parking" class="secondary small" type="button">重置位置</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-actions">
+          <span id="settings-msg" class="settings-msg"></span>
+          <button id="apply-restart" class="secondary hidden" type="button">按新设置重启</button>
+        </div>
       </section>
 
       <label class="dev-toggle-row">

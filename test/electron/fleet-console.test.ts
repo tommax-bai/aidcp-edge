@@ -386,3 +386,47 @@ test('花名册：点选多个环境累积加入、重复点选诚实提示已�
   await tick();
   assert.doesNotMatch(w.document.querySelectorAll('.ads-env-item')[2].textContent!, /已加入/, '移出后成员标记消失');
 });
+
+test('根治 #1：加入环境即时落盘（saveSettings 带 environments），main 据此建行 → 左栏立即出现', async () => {
+  const saves: Array<Record<string, unknown>> = [];
+  const { w } = await boot({
+    adsStatus: async () => ({ ok: true }),
+    adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'pX', name: '新环境', serialNumber: '9', groupName: '', proxy: '', platform: 'xiaohongshu' }] }),
+    saveSettings: async (patch: Record<string, unknown>) => { saves.push(patch); return { ...patch, saveOk: true, environments: patch.environments }; },
+  }, { environments: [], adsProfileId: '', adsProfileName: '' });
+  await tick();
+  await tick();
+  (w.document.querySelectorAll('.ads-env-item')[0] as HTMLElement).click(); // 加入
+  await tick();
+  await tick();
+  // 关键：加入即落盘 environments（旧 bug：只改本地花名册没落盘 → 左栏永不出现）。
+  const envSave = saves.find((p) => Array.isArray(p.environments) && (p.environments as Array<{ profileId: string }>).some((e) => e.profileId === 'pX'));
+  assert.ok(envSave, '加入环境必须立即 saveSettings 带 environments（含 pX）');
+});
+
+test('环境栏「＋」打开添加面板；设置抽屉已精简（环境列表 / 人设向导不在抽屉里）', async () => {
+  const { w } = await boot();
+  // 左栏「＋ 添加环境」拉起独立浮层
+  assert.equal(w.document.querySelector('#env-add-panel')!.classList.contains('open'), false);
+  (w.document.querySelector('#rail-add') as HTMLElement).click();
+  assert.equal(w.document.querySelector('#env-add-panel')!.classList.contains('open'), true, '「＋」打开添加环境面板');
+  // 环境列表与人设向导都在左栏浮层里，不在设置抽屉 #drawer 里
+  const drawer = w.document.querySelector('#drawer')!;
+  assert.equal(drawer.contains(w.document.querySelector('#ads-env-list')), false, '环境列表不在设置抽屉');
+  assert.equal(drawer.contains(w.document.querySelector('#persona-wizard-body')), false, '人设向导不在设置抽屉');
+  // 人设向导在人设浮层里
+  assert.equal(w.document.querySelector('#persona-pop')!.contains(w.document.querySelector('#persona-wizard-body')), true);
+});
+
+test('人设图标：点击左栏行内人设图标 → 选中该环境并打开人设浮层', async () => {
+  const { w, calls } = await boot();
+  const rows = w.document.querySelectorAll('.rail-row');
+  assert.ok(rows.length >= 2);
+  const rowB = [...rows].find((r) => (r as HTMLElement).dataset.envId === 'ads-p2') as HTMLElement;
+  const pIcon = rowB.querySelector('.rail-persona') as HTMLElement;
+  assert.ok(pIcon, '每行昵称后应有人设图标');
+  pIcon.click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), true, '点人设图标打开人设浮层');
+  assert.deepEqual(calls.select, ['ads-p2'], '打开人设即把该环境设为选中（浮层作用于它）');
+});
