@@ -819,6 +819,8 @@ fields.drawerMask.addEventListener('click', closeDrawer);
 // ─── 添加/创建环境面板（左栏「＋」拉起）───
 function openEnvAddPanel(tab) {
   if (!fields.envAddPanel) return;
+  // 必须移除 hidden（.hidden 是 !important、否则面板被钉死 display:none，只见遮罩不见内容）。
+  fields.envAddPanel.classList.remove('hidden');
   fields.envAddPanel.classList.add('open');
   fields.envAddPanel.setAttribute('aria-hidden', 'false');
   fields.envAddMask?.classList.remove('hidden');
@@ -830,6 +832,7 @@ function openEnvAddPanel(tab) {
 function closeEnvAddPanel() {
   if (!fields.envAddPanel) return;
   fields.envAddPanel.classList.remove('open');
+  fields.envAddPanel.classList.add('hidden');
   fields.envAddPanel.setAttribute('aria-hidden', 'true');
   fields.envAddMask?.classList.add('hidden');
 }
@@ -858,6 +861,7 @@ function openPersonaPop(envId) {
   const env = fleetView.envs.get(fleetView.selected);
   const label = env && (env.name || (env.status && env.status.account && env.status.account.name)) || '';
   if (fields.personaPopEnv) fields.personaPopEnv.textContent = label ? `· ${label}` : '';
+  fields.personaPop.classList.remove('hidden'); // .hidden 是 !important，必须移除否则只见遮罩不见内容
   fields.personaPop.classList.add('open');
   fields.personaPop.setAttribute('aria-hidden', 'false');
   fields.personaMask?.classList.remove('hidden');
@@ -866,6 +870,7 @@ function openPersonaPop(envId) {
 function closePersonaPop() {
   if (!fields.personaPop) return;
   fields.personaPop.classList.remove('open');
+  fields.personaPop.classList.add('hidden');
   fields.personaPop.setAttribute('aria-hidden', 'true');
   fields.personaMask?.classList.add('hidden');
 }

@@ -957,7 +957,7 @@ body { margin: 0; }
   box-sizing: border-box;
   transition: width 0.15s ease;
 }
-.env-rail.expanded { width: 216px; }
+.env-rail.expanded { width: 168px; }
 .env-rail.hidden { display: none; }
 
 /* 栏头：环境计数 + 添加 + 收起（带徽标） */
@@ -1013,7 +1013,13 @@ body { margin: 0; }
 .rail-row.selected { background: #eaf1ff; border-left-color: #3b6ff0; }
 .rail-row.lv-error { border-left-color: #e5484d; }
 .rail-row.lv-attention { border-left-color: #d97706; }
-.env-rail.collapsed .rail-row { justify-content: center; margin: 2px 8px; padding: 8px 0; border-left: 0; }
+/* 收起态：每行是一个 44px 见方的居中格，只放头像；名字/状态块强制隐藏（!important 压过任何残留），
+   杜绝「头像比行大、名字框压在行上」的重叠。 */
+.env-rail.collapsed .rail-row {
+  justify-content: center; align-items: center; gap: 0;
+  width: 44px; height: 40px; margin: 3px auto; padding: 0; border-left: 0; border-radius: 11px;
+}
+.env-rail.collapsed .rail-meta { display: none !important; }
 .env-rail.collapsed .rail-row.selected { background: #eaf1ff; box-shadow: inset 0 0 0 1px rgba(59,111,240,.22); }
 
 /* 头像：展开=品牌色实心；收起=安静浅底 + 外圈色环承担状态 */
@@ -1024,8 +1030,9 @@ body { margin: 0; }
   display: grid; place-items: center; font-size: 12px; font-weight: 700;
 }
 .env-rail.collapsed .rail-ava {
+  width: 28px; height: 28px;
   background: #f1f5fb; color: #2563eb;
-  box-shadow: 0 0 0 2px #f7f9fd, 0 0 0 4px var(--ring, #cbd5e1);
+  box-shadow: 0 0 0 2px #f7f9fd, 0 0 0 3.5px var(--ring, #cbd5e1);
 }
 .rail-row.lv-running .rail-ava { --ring: #16a34a; }
 .rail-row.lv-attention .rail-ava { --ring: #d97706; }
