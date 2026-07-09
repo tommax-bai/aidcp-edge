@@ -277,7 +277,9 @@
           <strong id="persona-state-badge" class="badge checking">未设置</strong>
         </div>
         <p class="subtle persona-hint" id="persona-hint">选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。</p>
+        <p class="subtle hidden" id="persona-bound-note">该账号已设置人设，正在正常自动运营。如需调整，可在后台管理页编辑。</p>
 
+        <div id="persona-wizard-body">
         <div class="field">
           <span class="field-label">垂类 / 行业</span>
           <div class="seg-group persona-kw-group" data-dim="vertical" data-select="single">
@@ -292,10 +294,11 @@
             <button class="seg kw-btn" type="button" data-kw="旅行户外">旅行户外</button>
             <button class="seg kw-btn" type="button" data-kw="情感生活">情感生活</button>
           </div>
+          <input id="persona-vertical-custom" class="persona-custom-input" type="text" maxlength="40" placeholder="或自定义垂类，如 宠物 / 手办 / 中古…" autocomplete="off" />
         </div>
 
         <div class="field">
-          <span class="field-label">兴趣标签 <em class="opt">多选</em></span>
+          <span class="field-label">兴趣 <em class="opt">标签快捷选 + 自己填</em></span>
           <div class="seg-group persona-kw-group" data-dim="interest" data-select="multi">
             <button class="seg kw-btn" type="button" data-kw="好物分享">好物分享</button>
             <button class="seg kw-btn" type="button" data-kw="教程干货">教程干货</button>
@@ -304,6 +307,7 @@
             <button class="seg kw-btn" type="button" data-kw="避坑指南">避坑指南</button>
             <button class="seg kw-btn" type="button" data-kw="灵感收藏">灵感收藏</button>
           </div>
+          <input id="persona-interest-custom" class="persona-custom-input" type="text" maxlength="120" placeholder="或自己填，逗号分隔，如 成分党,早C晚A,敏感肌护理" autocomplete="off" />
         </div>
 
         <div class="field">
@@ -314,16 +318,6 @@
             <button class="seg kw-btn" type="button" data-kw="活泼幽默">活泼幽默</button>
             <button class="seg kw-btn" type="button" data-kw="温柔治愈">温柔治愈</button>
             <button class="seg kw-btn" type="button" data-kw="犀利真实">犀利真实</button>
-          </div>
-        </div>
-
-        <div class="field">
-          <span class="field-label">内容 / 互动偏好 <em class="opt">多选</em></span>
-          <div class="seg-group persona-kw-group" data-dim="engagement" data-select="multi">
-            <button class="seg kw-btn" type="button" data-kw="乐于点赞互动">乐于点赞互动</button>
-            <button class="seg kw-btn" type="button" data-kw="精挑收藏">精挑收藏</button>
-            <button class="seg kw-btn" type="button" data-kw="爱评论交流">爱评论交流</button>
-            <button class="seg kw-btn" type="button" data-kw="关注同好">关注同好</button>
           </div>
         </div>
 
@@ -344,6 +338,7 @@
             <button id="persona-confirm" class="seg" type="button">确认使用</button>
           </div>
         </div>
+        </div><!-- /#persona-wizard-body -->
       </section>
 
       <label class="dev-toggle-row">

@@ -952,6 +952,9 @@ function handleEdgeLogLine(message, isError = false) {
       const name = evt.account.name || settings.adsProfileName || '';
       status.account = { id: evt.account.id, name, source: evt.account.name ? 'xhs' : 'env' };
     }
+    // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在已绑时下发（sticky true），
+    // 渲染层据此把徽标翻「已设置」并跳过向导，修「已绑仍显示未设置」bug。
+    if (evt.personaBound === true) status.personaBound = true;
     if (evt.presence) next.presence = { text: evt.presence, at: new Date().toISOString() };
     if (evt.publish && evt.publish.state) {
       next.publish = { ...evt.publish, at: new Date().toISOString() };

@@ -1227,6 +1227,10 @@ fields.relogin.addEventListener('click', async () => {
 const personaUi = {
   stateBadge: document.querySelector('#persona-state-badge'),
   hint: document.querySelector('#persona-hint'),
+  boundNote: document.querySelector('#persona-bound-note'),
+  wizardBody: document.querySelector('#persona-wizard-body'),
+  verticalCustom: document.querySelector('#persona-vertical-custom'),
+  interestCustom: document.querySelector('#persona-interest-custom'),
   kwGroups: Array.from(document.querySelectorAll('.persona-kw-group')),
   generate: document.querySelector('#persona-generate'),
   msg: document.querySelector('#persona-msg'),
@@ -1238,10 +1242,12 @@ const personaUi = {
 };
 let personaReady = false; // 已登录 + 云端已连接才可生成
 let personaDraftYaml = ''; // 当前草稿 soulYaml（确认时提交）
+let personaLocallyBound = false; // 本会话确认成功后即视为已绑（personaBound 信号要等下次 hello 才到）
 
 const PERSONA_GEN_FAIL = {
   generation_failed: '生成失败（模型未产出可用结果），请重试。',
   persona_invalid: '生成结果不合规，请重试。',
+  input_too_large: '关键词太多或太长，请精简后重试。',
   no_keywords: '请先选择关键词。',
   missing_idempotency_key: '内部错误（缺幂等键），请重试。',
   edge_not_running: '引擎未运行，请先启动。',
@@ -1272,23 +1278,50 @@ function setPersonaBadge(text, variant) {
 }
 
 function collectPersonaKeywords() {
-  return personaUi.kwGroups
+  const chips = personaUi.kwGroups
     .flatMap((g) => Array.from(g.querySelectorAll('.kw-btn.active')).map((b) => b.dataset.kw))
     .filter(Boolean);
+  const custom = [];
+  const v = personaUi.verticalCustom && personaUi.verticalCustom.value.trim();
+  if (v) custom.push(v); // 自定义垂类（长尾）
+  const iRaw = personaUi.interestCustom && personaUi.interestCustom.value.trim();
+  if (iRaw) custom.push(...iRaw.split(/[,，、]/).map((s) => s.trim()).filter(Boolean)); // 自由文本兴趣（逗号/顿号分隔）
+  return [...chips, ...custom];
 }
 
 function newIdempotencyKey() {
   return `persona-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
 
-// 登录+云端已连接才可生成。只改 disabled/hint，绝不触碰已选关键词与草稿（状态推送不重置向导进度）。
+// onboarding 三态（change persona-wizard-onboarding-fixes）：已绑→已设置跳过 / 未绑未连→分态引导 / 未绑已连→启用。
+// 只改 disabled/hint/显隐，绝不触碰已选关键词与草稿（状态推送不重置向导进度）。
 function updatePersonaGate(status) {
-  personaReady = status && status.auth === 'logged in' && status.cloud === 'connected';
+  const bound = Boolean((status && status.personaBound) || personaLocallyBound);
+  const loggedIn = Boolean(status && status.auth === 'logged in');
+  const connected = Boolean(status && status.cloud === 'connected');
+  personaReady = loggedIn && connected;
+
+  // ① 已绑人设：显示「已设置」、隐藏向导体与提示、不再要求配置（修「已绑仍显示未设置」）。
+  if (personaUi.boundNote) personaUi.boundNote.classList.toggle('hidden', !bound);
+  if (personaUi.wizardBody) personaUi.wizardBody.classList.toggle('hidden', bound);
+  if (personaUi.hint) personaUi.hint.classList.toggle('hidden', bound);
+  if (bound) {
+    setPersonaBadge('已设置', 'normal');
+    return;
+  }
+  // 未绑：本会话刚生成的「待确认」态不被状态推送覆盖，否则回落「未设置」。
+  if (personaUi.stateBadge && personaUi.stateBadge.textContent !== '待确认') setPersonaBadge('未设置', 'checking');
+
+  // ②/③ 未绑：gate 判据不变，只改可见性与分态引导。
   if (personaUi.generate) personaUi.generate.disabled = !personaReady;
   if (personaUi.hint) {
-    personaUi.hint.textContent = personaReady
-      ? '选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。'
-      : '请先在打开的浏览器里扫码登录，登录并连上云端后即可生成人设。';
+    if (personaReady) {
+      personaUi.hint.textContent = '选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。';
+    } else if (!loggedIn) {
+      personaUi.hint.textContent = '请先点右下角「启动」，并在打开的浏览器里扫码登录，再来生成人设。';
+    } else {
+      personaUi.hint.textContent = '已登录，正在连接云端…连上后即可生成人设。';
+    }
   }
 }
 
@@ -1345,8 +1378,13 @@ personaUi.confirm?.addEventListener('click', async () => {
   try {
     const r = await window.aidcpEdge.personaPersist({ soulYaml: personaDraftYaml });
     if (r && r.ok) {
+      // 确认成功即本地视为已绑（personaBound 信号要等下次 hello 才到）：立即折叠向导为「已设置」态。
+      personaLocallyBound = true;
       setPersonaBadge('已设置', 'normal');
       personaUi.draft?.classList.add('hidden');
+      personaUi.wizardBody?.classList.add('hidden');
+      personaUi.hint?.classList.add('hidden');
+      personaUi.boundNote?.classList.remove('hidden');
       setPersonaMsg('人设已保存，账号即将开始自动运营。', false);
     } else {
       setPersonaMsg(PERSONA_PERSIST_FAIL[(r && r.reason) || ''] || `保存失败：${(r && r.reason) || '未知'}`, true);

@@ -164,5 +164,8 @@ export function uiSnapshotToLines(p: UiSnapshotPayload): string[] {
   }
   const dailyUsage = sanitizeDailyUsage(p.dailyUsage);
   if (dailyUsage) lines.push(line({ kind: 'dailyUsage', dailyUsage }));
+  // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在 true 时下发，转成 ui-event 行给壳，
+  // 边缘据此把已绑账号徽标翻「已设置」并跳过向导（修「已绑仍显示未设置」bug）。
+  if (p.personaBound === true) lines.push(line({ kind: 'personaBound', personaBound: true }));
   return lines;
 }
