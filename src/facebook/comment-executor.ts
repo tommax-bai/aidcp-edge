@@ -270,11 +270,15 @@ export class FacebookCommentExecutor {
     // 读容器真实名称（人只看群名、不看 id）——导航到容器搜索面后即可读，与候选无关，尽早捕获。
     const containerName = await this.readContainerName();
 
-    // 催拉懒加载搜索结果（滚一屏、复探），直到探到候选帖或轮数耗尽。
-    let structure = await this.probeStructureUntil((s) => s.postCandidates.length > 0);
-    for (let i = 0; i < this.opts.editorScrollRounds && (!structure || structure.postCandidates.length === 0); i++) {
+    // 催拉懒加载搜索结果（滚一屏、复探），直到探到**带 permalink 的**候选帖或轮数耗尽。
+    // 关键：搜索结果页的帖子 article 先渲染、permalink 链接晚一拍才 hydrate——只等「有 article」会过早接受
+    // 到一批无 permalink 的帖 → 候选空（no_candidates）。故接受条件收窄为「至少一条帖已带 permalink」。
+    const hasPermalink = (s: FacebookPageStructureSummary): boolean =>
+      s.postCandidates.some((p) => p.permalinkCandidates.length > 0);
+    let structure = await this.probeStructureUntil(hasPermalink);
+    for (let i = 0; i < this.opts.editorScrollRounds && !(structure && hasPermalink(structure)); i++) {
       await this.scrollViewport(this.opts.editorScrollDistancePx);
-      structure = await this.probeStructureUntil((s) => s.postCandidates.length > 0);
+      structure = await this.probeStructureUntil(hasPermalink);
     }
     if (!structure) return { ok: false, reason: 'nav_error', candidates: [], containerName };
 
