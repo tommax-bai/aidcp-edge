@@ -53,7 +53,7 @@ interface Stub {
   adsListProfiles: (opts?: unknown) => Promise<unknown>;
   adsOpenCreate: () => { launched: boolean } | Promise<{ launched: boolean }>;
   adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
-  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; template?: string; error?: string }>;
+  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; template?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string }>;
   adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
 }
 
@@ -289,6 +289,34 @@ test('程序化建号：填充模板下拉、点「创建环境」→ 传选中�
   for (let i = 0; i < 3; i++) await tick();
   assert.equal(sentTemplate, 'win11-intel', '应把选中模板传给 adsCreateEnv');
   assert.match($(w, '#ads-create-msg').textContent ?? '', /已创建环境/);
+});
+
+test('Facebook 导入框：仅 Facebook 平台显示，创建时透传但提示不泄露账号资料', async () => {
+  let sent: Record<string, unknown> = {};
+  const secretLine = 'a@example.com----pw-secret----KEYSECRET----c_user=100000000000001; xs=TOKEN';
+  const w = await boot(makeStub({
+    adsCreateEnv: async (opts) => {
+      sent = opts as Record<string, unknown>;
+      return { ok: true, createdCount: 2, created: [{ userId: 'u1' }, { userId: 'u2' }], platform: 'facebook' };
+    },
+  }));
+  for (let i = 0; i < 3; i++) await tick();
+  assert.ok($(w, '#ads-fb-import-wrap').classList.contains('hidden'), '默认小红书不显示导入框');
+
+  const platform = $(w, '#ads-platform') as HTMLSelectElement;
+  platform.value = 'facebook';
+  platform.dispatchEvent(new w.Event('change'));
+  assert.ok(!$(w, '#ads-fb-import-wrap').classList.contains('hidden'), 'Facebook 平台显示导入框');
+  ($(w, '#ads-fb-import') as HTMLTextAreaElement).value = `${secretLine}\n${secretLine}`;
+
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(sent.platform, 'facebook');
+  assert.equal(sent.facebookAccountImport, `${secretLine}\n${secretLine}`);
+  const msg = $(w, '#ads-create-msg').textContent ?? '';
+  assert.match(msg, /已创建 2 个环境/);
+  assert.doesNotMatch(msg, /a@example.com|pw-secret|KEYSECRET|TOKEN/);
+  assert.equal(($(w, '#ads-fb-import') as HTMLTextAreaElement).value, '', '成功后清空一次性输入');
 });
 
 test('程序化建号成功返回 userId → 自动选中新环境，启动可直接保存并开跑', async () => {

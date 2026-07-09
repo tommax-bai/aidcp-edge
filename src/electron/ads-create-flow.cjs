@@ -69,7 +69,7 @@ function createCreateFlow(deps) {
    * 建一个环境。代理不传（默认 no_proxy，手工在 AdsPower 侧配）。
    * @returns {Promise<{ ok: boolean, userId?: string, status?: string, template?: string, intendedAccountLabel?: string, violations?: string[], error?: string, code?: number }>}
    */
-  async function createEnvironment({ templateKey, intendedAccountLabel, machineLabel, groupId, name, platform } = {}) {
+  async function createEnvironment({ templateKey, intendedAccountLabel, machineLabel, groupId, name, platform, accountImport } = {}) {
     if (inFlight) {
       return { ok: false, error: '创建进行中，请等当前创建完成（防连点双建）' };
     }
@@ -92,6 +92,7 @@ function createCreateFlow(deps) {
         fingerprintConfig: built.fingerprintConfig,
         proxyConfig: { proxy_soft: 'no_proxy' }, // 代理手工，本按钮不碰
         remark,
+        accountImport,
       });
       if (!r.ok) return { ok: false, error: r.error, code: r.code };
 

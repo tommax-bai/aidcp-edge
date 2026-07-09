@@ -135,6 +135,29 @@ test('创建时选平台 → remark 带 plat、回执带 platform', async () => 
   assert.equal(meta.platform, 'facebook', 'remark 里 plat=facebook');
 });
 
+test('Facebook 导入资料只透传给 createProfile，不写进 remark', async () => {
+  const w = recordingWriteApi({ ok: true, userId: 'u-fb-import' });
+  const flow = createCreateFlow({ writeApi: w, fingerprint: realFingerprint });
+  const accountImport = {
+    username: 'fb@example.com',
+    password: 'secret-password',
+    fakey: 'SECRET2FA',
+    cookie: '[{"name":"c_user","value":"100000000000001"}]',
+    domainName: 'facebook.com',
+    repeatConfig: [4],
+  };
+  const r = (await flow.createEnvironment({
+    templateKey: 'win11-intel',
+    groupId: 'g1',
+    platform: 'facebook',
+    intendedAccountLabel: '',
+    accountImport,
+  } as any)) as any;
+  assert.equal(r.ok, true);
+  assert.deepEqual((w.calls[0] as any).accountImport, accountImport);
+  assert.doesNotMatch(String((w.calls[0] as any).remark), /fb@example.com|secret-password|SECRET2FA|c_user/);
+});
+
 test('创建不传平台 → 回落 xiaohongshu（零回归）', async () => {
   const w = recordingWriteApi({ ok: true, userId: 'u-xhs' });
   const flow = createCreateFlow({ writeApi: w, fingerprint: realFingerprint });

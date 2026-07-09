@@ -106,6 +106,8 @@ const settingsUi = {
   adsCreate: document.querySelector('#ads-create'),
   adsTemplate: document.querySelector('#ads-template'),
   adsPlatform: document.querySelector('#ads-platform'),
+  adsFbImportWrap: document.querySelector('#ads-fb-import-wrap'),
+  adsFbImport: document.querySelector('#ads-fb-import'),
   adsCreateMsg: document.querySelector('#ads-create-msg'),
   parkingButtons: Array.from(document.querySelectorAll('.parking-btn')),
   browserShow: document.querySelector('#browser-show'),
@@ -153,6 +155,11 @@ function normPlatform(raw) {
 }
 function platformLabel(p) {
   return normPlatform(p) === 'facebook' ? 'Facebook' : '小红书';
+}
+function updateFacebookImportVisibility() {
+  if (!settingsUi.adsFbImportWrap) return;
+  const facebook = normPlatform(settingsUi.adsPlatform && settingsUi.adsPlatform.value) === 'facebook';
+  settingsUi.adsFbImportWrap.classList.toggle('hidden', !facebook);
 }
 const LOG_RETENTION_MS = 2 * 60 * 1000; // 开发者详情原始日志保留 2 分钟
 const logEntries = [];
@@ -1167,6 +1174,8 @@ async function populateTemplates() {
   }
 }
 populateTemplates();
+updateFacebookImportVisibility();
+if (settingsUi.adsPlatform) settingsUi.adsPlatform.addEventListener('change', updateFacebookImportVisibility);
 
 // 「创建环境」程序化建号：挑模板 → 建一个指纹环境（代理不碰，建完提醒去 AdsPower 配代理）。
 settingsUi.adsCreate.addEventListener('click', async () => {
@@ -1177,12 +1186,19 @@ settingsUi.adsCreate.addEventListener('click', async () => {
   settingsUi.adsCreate.disabled = true;
   setCreateMsg('正在创建环境…', false);
   try {
-    const r = await window.aidcpEdge.adsCreateEnv({ ...formAdsOpts(), templateKey: tpl, platform });
+    const facebookAccountImport =
+      platform === 'facebook' && settingsUi.adsFbImport
+        ? settingsUi.adsFbImport.value
+        : '';
+    const r = await window.aidcpEdge.adsCreateEnv({ ...formAdsOpts(), templateKey: tpl, platform, facebookAccountImport });
     if (r && r.ok) {
       // 新建即选中时，带上刚选的平台（回执 platform 优先，回落表单选择）。
       if (r.userId && !coreRunning()) selectProfile(r.userId, null, '', r.platform || platform);
       const selectedHint = r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
-      setCreateMsg(`已创建环境（${r.template || tpl}）。${selectedHint}请在 AdsPower 里为它配好代理再使用。`, false);
+      const createdCount = Number(r.createdCount || (Array.isArray(r.created) ? r.created.length : 0));
+      const countHint = createdCount > 1 ? `已创建 ${createdCount} 个环境。` : `已创建环境（${r.template || tpl}）。`;
+      if (createdCount > 0 && settingsUi.adsFbImport) settingsUi.adsFbImport.value = '';
+      setCreateMsg(`${countHint}${selectedHint}请在 AdsPower 里为它配好代理再使用。`, false);
       refreshEnvs();
     } else {
       const extra = r && r.violations && r.violations.length ? '（' + r.violations.join('；') + '）' : '';
