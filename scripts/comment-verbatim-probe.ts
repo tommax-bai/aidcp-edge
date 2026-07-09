@@ -1,8 +1,8 @@
 /**
- * comment-verbatim-probe.ts — 群聊引流码「原样送达」执行端探针（change account-group-chat-injection，先决调研）
+ * comment-verbatim-probe.ts — 联系方式「原样送达」执行端探针（change account-group-chat-injection，先决调研）
  * ===========================================================================
  *
- * 背景：/comment group:on 会把账号「关联群聊引流码」verbatim 追加到评论，云端已保证「人审卡=返回文本」。
+ * 背景：/comment --contact 会把账号「联系方式」verbatim 追加到评论，云端已保证「人审卡=返回文本」。
  * 但边缘发评论是**逐字符**敲进 p#content-textarea（contenteditable + data-tribute @提及编辑器），且发送前会 trim。
  * 已知风险：`@`（确证触发提及补全，云端 sanitize 专剥它）、可能的 `#`（主题）、换行 —— 逐字敲入可能被补全劫持、
  * 或换行被吞，导致「发出去的 ≠ 人审通过的」。emoji 已确证安全（按码点切分）。

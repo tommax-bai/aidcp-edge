@@ -1782,7 +1782,7 @@ export class BrowseSession {
    *  - 发布后校验：编辑器清空 且 自己的评论作为顶部新 `[id^="comment-"]` 行出现（评论数文本不可靠，不依赖）。
    * 红线：找不到框/按钮 no_target、未生效 state_unchanged、验证码 blocked_by_captcha——绝不静默假成功。
    */
-  private async executeComment(text: string, groupChatCode?: string): Promise<void> {
+  private async executeComment(text: string, contactInfo?: string): Promise<void> {
     const action = 'comment';
     // 记评论处理耗时：成功/未生效/异常三条出口都带上「耗时」，让 electron「最近状态」能看到评论处理用时（honest，失败也如实报时）。
     const startedAt = Date.now();
@@ -1831,14 +1831,14 @@ export class BrowseSession {
 
       // 3) 拟人逐字输入正文（文字部分手动输入）
       await dispatchKeystrokes(this.deps.cdp, body, { random: this.random });
-      // 3b) 群聊引流码（change account-group-chat-injection）：串码部分**单次整段插入**（Input.insertText），
-      //     绕过逐字输入会触发的 @/# 提及/主题补全劫持；verbatim，不 trim/不逐字敲。追加「换行 + 码」，
+      // 3b) 联系方式（change account-group-chat-injection）：串码部分**单次整段插入**（Input.insertText），
+      //     绕过逐字输入会触发的 @/# 提及/主题补全劫持；verbatim，不 trim/不逐字敲。追加「换行 + 联系方式」，
       //     与云端人审卡展示的合并终稿一致（AC-PUB 审=发）。缺省则不插、行为与今天一致。
-      const code = (groupChatCode ?? '').length > 0 ? groupChatCode! : '';
+      const code = (contactInfo ?? '').length > 0 ? contactInfo! : '';
       if (code) {
-        await this.sleep(300); // 敲完正文到粘码之间的自然停顿
+        await this.sleep(300); // 敲完正文到粘联系方式之间的自然停顿
         await insertText(this.deps.cdp, `\n${code}`);
-        this.logger(`[browse] comment 群聊引流码整段插入（${code.length} 字，绕过逐字补全）`);
+        this.logger(`[browse] comment 联系方式整段插入（${code.length} 字，绕过逐字补全）`);
       }
       // 注：敲完正文到发送之间的「子步骤微停顿」由上面 3) 的逐字输入 / 3b) 的粘码前 sleep(300) 承载（保留）；
       // 引导性停顿已上移到命令入口 gateBeforeAction（最小间隔，max 非累加），此处不再叠一段——避免操作后兜底累加（设计 §3.3）。
