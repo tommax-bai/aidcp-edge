@@ -14,6 +14,7 @@
     "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build:dist": "npm run clean:dist && tsc -p tsconfig.build.json",
     "electron:dev": "electron .",
+    "electron:dev:ol": "AIDCP_CLOUD_URL=ws://123.56.253.183:8787 electron .",
     "electron:build": "npm run build:dist && node ./node_modules/electron-builder/cli.js",
     "electron:build:win": "npm run build:dist && node ./node_modules/electron-builder/cli.js --win",
     "electron:build:mac": "npm run build:dist && node ./node_modules/electron-builder/cli.js --mac",
@@ -21,6 +22,7 @@
     "test": "tsx --test test/**/*.test.ts",
     "test:acceptance": "tsx --test test/acceptance/*.test.ts",
     "start": "tsx src/main.ts",
+    "start:ol": "AIDCP_CLOUD_URL=ws://123.56.253.183:8787 tsx src/main.ts",
     "start:multinode": "tsx scripts/launch-multinode.ts",
     "dev:cloud": "bash scripts/dev-run.sh"
   },
