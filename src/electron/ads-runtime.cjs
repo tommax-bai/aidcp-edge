@@ -130,19 +130,61 @@ async function runResilient(run, cliEntry, args, opts, { retries = 3, throttleDe
 
 // 从 CLI stdout 抽 JSON 载荷：去 ANSI、丢弃「Executing command:」前缀行，其余 trim 后 JSON.parse。
 // 解析失败返回 null（调用方诚实报错，不臆造）。
-function parseCliJson(out) {
-  const clean = stripAnsi(out);
-  const body = clean
-    .split('\n')
-    .filter((l) => !/^Executing command:/.test(l.trim()))
-    .join('\n')
-    .trim();
-  if (!body) return null;
-  try {
-    return JSON.parse(body);
-  } catch {
-    return null;
+// 从 start 处（'{' 或 '['）做括号平衡抽取（尊重字符串/转义），返回该 JSON 片段或 null。
+function balancedJsonSlice(s, start) {
+  const openCh = s[start];
+  if (openCh !== '{' && openCh !== '[') return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < s.length; i += 1) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') {
+      inStr = true;
+    } else if (c === '{' || c === '[') {
+      depth += 1;
+    } else if (c === '}' || c === ']') {
+      depth -= 1;
+      if (depth === 0) return s.slice(start, i + 1);
+      if (depth < 0) return null;
+    }
   }
+  return null;
+}
+
+function parseCliJson(out) {
+  const clean = stripAnsi(out)
+    .split('\n')
+    .filter((l) => !/^\s*Executing command:/.test(l))
+    .join('\n');
+  // 先整体尝试（干净输出的常见情形）。
+  const trimmed = clean.trim();
+  if (trimmed) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      /* 落到容错抽取 */
+    }
+  }
+  // 容错：扫描每个 { 或 [ 起点做括号平衡抽取，返回首个能 parse 成对象/数组的 JSON——
+  // 容忍 CLI 的 [i]/[warn] 日志行与前后混入的非 JSON 文本（不同机器 / 首启态输出各异）。
+  for (let i = 0; i < clean.length; i += 1) {
+    const c = clean[i];
+    if (c !== '{' && c !== '[') continue;
+    const block = balancedJsonSlice(clean, i);
+    if (!block) continue;
+    try {
+      const v = JSON.parse(block);
+      if (v && typeof v === 'object') return v;
+    } catch {
+      /* 继续找下一个候选 */
+    }
+  }
+  return null;
 }
 
 // 从 `ads status` 人类输出解析实际监听端口（默认 50325，被占时运行时会回退，故不硬编码）。
@@ -206,17 +248,39 @@ async function ensureRuntime({ cliEntry, execPath, apiKey, run = runCli, isReady
   return { ok: false, error: started.error || started.err || '内嵌运行时启动后未在预期时间内就绪', out: started.out };
 }
 
+function extractKernelList(out) {
+  const data = parseCliJson(out);
+  if (!data) return null;
+  if (Array.isArray(data.list)) return data.list;
+  if (data.data && Array.isArray(data.data.list)) return data.data.list;
+  if (Array.isArray(data.data)) return data.data;
+  return null;
+}
+
 // 查某内核是否已下载：{ ok, present, listed }。
-async function kernelDownloaded({ cliEntry, execPath, version, kernelType = DEFAULT_KERNEL_TYPE, run = runCli } = {}) {
-  const r = await runResilient(run, cliEntry, ['get-kernel-list', JSON.stringify({ kernel_type: kernelType })], {
-    execPath,
-    timeoutMs: 20000,
-  });
-  const data = parseCliJson(r.out);
-  const list = data && (Array.isArray(data.list) ? data.list : data.data && Array.isArray(data.data.list) ? data.data.list : Array.isArray(data.data) ? data.data : null);
-  if (!Array.isArray(list)) {
+// get-kernel-list 走 LocalAPI 查云端内核清单；刚起服务/云端握手未稳/网络慢时可能一时取不到，
+// 故有界重试（不止限流那一种）；仍失败带 raw 回报，供上层落日志诊断。
+async function kernelDownloaded({ cliEntry, execPath, version, kernelType = DEFAULT_KERNEL_TYPE, run = runCli, tries = 6, retryDelayMs = 1500 } = {}) {
+  let r;
+  let list = null;
+  for (let i = 0; i < tries; i += 1) {
+    r = await runResilient(run, cliEntry, ['get-kernel-list', JSON.stringify({ kernel_type: kernelType })], {
+      execPath,
+      timeoutMs: 30000,
+    });
+    list = extractKernelList(r.out);
+    if (Array.isArray(list) && list.length) break;
+    if (i < tries - 1) await delay(retryDelayMs);
+  }
+  if (!Array.isArray(list) || !list.length) {
     const throttled = isThrottled(r);
-    return { ok: false, error: throttled ? 'AdsPower 本地 API 限流，未取到内核列表' : '无法解析内核列表（get-kernel-list）', raw: r.out, throttled };
+    return {
+      ok: false,
+      error: throttled ? 'AdsPower 本地 API 限流，未取到内核列表' : '无法解析内核列表（get-kernel-list）',
+      raw: (r && r.out) || '',
+      rawErr: (r && r.err) || '',
+      throttled,
+    };
   }
   const hit = list.find((k) => String(k.kernel) === String(version) && String(k.kernel_type || DEFAULT_KERNEL_TYPE) === String(kernelType));
   return { ok: true, present: !!(hit && hit.is_downloaded), listed: !!hit };

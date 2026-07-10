@@ -1521,7 +1521,18 @@ async function ensureAdsRuntimeAndKernel(handle) {
       });
     },
   });
-  if (handle) appendEdgeLog(handle.envId, kres.ok ? (kres.alreadyPresent ? `浏览器内核 ${version} 已就绪` : `浏览器内核 ${version} 下载完成`) : `浏览器内核 ${version} 准备失败：${kres.error || ''}`, !kres.ok);
+  if (handle) {
+    if (kres.ok) {
+      appendEdgeLog(handle.envId, kres.alreadyPresent ? `浏览器内核 ${version} 已就绪` : `浏览器内核 ${version} 下载完成`);
+    } else {
+      appendEdgeLog(handle.envId, `浏览器内核 ${version} 准备失败：${kres.error || ''}`, true);
+      // 诊断：把 get-kernel-list / download-kernel 的原始输出落日志（截断），便于定位真机差异。
+      const raw = (kres.raw || '').toString().slice(0, 1500);
+      const rawErr = (kres.rawErr || '').toString().slice(0, 500);
+      if (raw) appendEdgeLog(handle.envId, `内核命令原始输出(截断): ${raw}`, true);
+      if (rawErr) appendEdgeLog(handle.envId, `内核命令 stderr(截断): ${rawErr}`, true);
+    }
+  }
   if (!kres.ok) {
     if (handle) {
       updateStatus(handle, {
