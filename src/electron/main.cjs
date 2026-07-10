@@ -1504,12 +1504,18 @@ async function ensureAdsRuntimeAndKernel(handle) {
 
   // 条件式内核预检（缺则带进度下载、下完才放行；已下则秒过）
   const version = adsFingerprint.DEFAULT_KERNEL;
+  if (handle) appendEdgeLog(handle.envId, `检查浏览器内核 ${version} 就绪情况（缺则首次下载约 750MB）…`);
+  let loggedDownloadStart = false;
   const kres = await adsRuntime.ensureKernel({
     cliEntry: kernelCli,
     execPath: process.execPath,
     version,
     onProgress: ({ percent, state }) => {
       if (!handle) return;
+      if (!loggedDownloadStart && (state === 'downloading' || state === 'installing')) {
+        loggedDownloadStart = true;
+        appendEdgeLog(handle.envId, `开始下载浏览器内核 ${version}（约 750MB，仅首次；带进度条）…`);
+      }
       updateStatus(handle, {
         kernelPrep: { state, percent, version },
         lastMessage: `正在下载浏览器内核 ${version}（约 750MB，仅首次）… ${percent}%`,
@@ -1517,6 +1523,7 @@ async function ensureAdsRuntimeAndKernel(handle) {
       });
     },
   });
+  if (handle) appendEdgeLog(handle.envId, kres.ok ? (kres.alreadyPresent ? `浏览器内核 ${version} 已就绪` : `浏览器内核 ${version} 下载完成`) : `浏览器内核 ${version} 准备失败：${kres.error || ''}`, !kres.ok);
   if (!kres.ok) {
     if (handle) {
       updateStatus(handle, {

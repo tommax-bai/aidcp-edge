@@ -1003,6 +1003,20 @@ function renderKernelPrep(status) {
   fields.kernelPrepBar.style.width = `${pct}%`;
 }
 
+// 内核首启进度条为「机器级」全局呈现：任一环境在下载/安装内核即显示其进度，与当前选中环境无关。
+// （内核是机器共享资源、首启通常只一个环境在下；下载环境若非选中，旧逻辑会让用户看不到任何进度。）
+function renderKernelPrepGlobal() {
+  let active = null;
+  for (const env of fleetView.envs.values()) {
+    const kp = env.status && env.status.kernelPrep;
+    if (kp && (kp.state === 'pending' || kp.state === 'downloading' || kp.state === 'installing')) {
+      active = env.status;
+      break;
+    }
+  }
+  renderKernelPrep(active || { kernelPrep: null });
+}
+
 function render(status) {
   currentStatus = status;
   const now = Date.now();
@@ -1017,7 +1031,8 @@ function render(status) {
   renderEdgeFailure(status);
   renderTitlebar(status);
   renderPresence(status, now);
-  renderKernelPrep(status);
+  // 内核首启进度条改由 renderKernelPrepGlobal 全局驱动（内核机器级共享、下载环境未必是当前选中环境）；
+  // 此处不再按选中环境渲染，避免选中的非下载环境把进度条误藏。
   renderLoop(status);
   renderPublish(status, now);
   renderFab(status);
@@ -1058,6 +1073,7 @@ function routeStatus(status) {
   recordLog(key, status.lastMessage);
   absorbPublishTerminal(key, status);
   if (fleetView.selected === key) render(status);
+  renderKernelPrepGlobal(); // 内核首启进度条全局呈现，不受「仅选中环境上屏」限制
   renderRail();
   maybeAdvanceGuide();
   updateStartAllProgress(); // 「全部启动」进度随各环境起来实时推进 k/N
