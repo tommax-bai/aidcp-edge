@@ -284,7 +284,9 @@ interface ScrollProbeSnapshot {
  * 历史上松判断 `url.includes('/explore')` 会把详情页误当 feed，导致扫不到卡 → 静默 → 边-云互等死锁。
  */
 const EXPLORE_FEED_RE = /\/explore\/?(\?|#|$)/;
-const SEARCH_LIST_RE = /\/search(?:_result)?(?:[/?#]|$)/;
+// 搜索结果页 URL：经典 /search_result、AI 搜索 /search_result_ai（含 _ai 等后缀）、裸 /search 均算。
+// `_result\w*` 覆盖 search_result_ai 这类真机 AI 搜索页——否则诚实闸会把真结果页误判为「未到结果页」而漏报（change comment-search-nav-confirm）。
+const SEARCH_LIST_RE = /\/search(?:_result\w*)?(?:[/?#]|$)/;
 const DEFAULT_RHYTHM_TOTAL = 60;
 
 /**
@@ -1215,6 +1217,10 @@ export class BrowseSession {
         const kw = payload.keyword ?? '';
         this.logger(`[browse] 命令: search.execute「${kw}」${payload.sort ? ` sort=${payload.sort}` : ''}${payload.timeWindow ? ` time=${payload.timeWindow}` : ''}`);
         await this.safeCloseModal();
+        // 诚实闸（change comment-search-nav-confirm）：采卡前必须确认真到达搜索结果页。
+        // 判据是「采卡时刻的实时 URL」——不与 executeSearch 的布尔取 AND（布尔可能滞后，
+        // AND 会把「其实已到结果页但确认稍慢」误杀成不上报，制造新的静默不上报回归）。
+        let onSearch = false;
         if (kw) {
           try {
             await executeSearch(kw, {
@@ -1223,9 +1229,10 @@ export class BrowseSession {
               sleep: this.sleep,
               logger: this.logger,
             });
-            // 按需评论任务（change comment-search-command）：搜到结果页后应用原生「排序 + 发布时间」筛选。
+            onSearch = this.isSearchListUrl(await this.evalUrl());
+            // 按需评论任务（change comment-search-command）：仅在**确认已到结果页**时应用原生「排序 + 发布时间」筛选。
             // 自治浏览不带 sort/timeWindow → 跳过，行为不变。控件未生效 honest 降级（不冒充已筛）。
-            if (payload.sort || payload.timeWindow) {
+            if (onSearch && (payload.sort || payload.timeWindow)) {
               const filterRes = await applySearchFilters(
                 { sort: payload.sort, timeWindow: payload.timeWindow },
                 { cdp: this.deps.cdp, random: this.random, sleep: this.sleep, logger: this.logger },
@@ -1239,8 +1246,19 @@ export class BrowseSession {
               }
             }
           } catch (err) {
+            // 抛错（搜索框未找到等）→ 视为未到结果页，走诚实失败分支，绝不 fall through 去报当前页。
             this.logger(`[browse] 搜索执行失败：${(err as Error).message}`);
+            onSearch = false;
           }
+        } else {
+          // 无关键词：仅当已在搜索结果页才认，绝不主动把当前页当搜索结果。
+          onSearch = this.isSearchListUrl(await this.evalUrl());
+        }
+        if (!onSearch) {
+          // 红线（MUST NOT 静默假成功）：未确认到达结果页时绝不采/报当前页 feed；诚实回失败回执供云端消费。
+          this.logger('[browse] 搜索未到达结果页（未确认导航/仍在 feed）→ 诚实回 search ok:false，不把当前页当搜索结果上报');
+          this.deps.client.reportActionCompleted?.({ action: 'search', ok: false, reason: 'not_on_search_page' });
+          break;
         }
         await this.waitForCards(5000);
         await this.waitForSearchResultNoteIds();

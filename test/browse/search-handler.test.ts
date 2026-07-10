@@ -44,6 +44,38 @@ test('executeSearch: 搜索框未找到时抛错', async () => {
   );
 });
 
+// 诚实闸（change comment-search-nav-confirm）：executeSearch 返回「是否确认到达搜索结果页」。
+test('executeSearch: 确认导航到搜索结果页（search_result_ai）→ 返回 true', async () => {
+  const { cdp } = fakeCdp((method, params) => {
+    if (method === 'Runtime.evaluate') {
+      const expr = String(params.expression ?? '');
+      if (expr.includes('location.href')) {
+        return { result: { value: 'https://www.xiaohongshu.com/search_result_ai?keyword=x' } };
+      }
+      return { result: { value: true } };
+    }
+    return {};
+  });
+  const ok = await executeSearch('奶茶', { cdp, sleep: async () => {}, random: () => 0.5 });
+  assert.equal(ok, true, '到达搜索结果页 MUST 返回 true');
+});
+
+test('executeSearch: 未确认导航（恒停 /explore、提交按钮找不到）→ 返回 false', async () => {
+  const { cdp } = fakeCdp((method, params) => {
+    if (method === 'Runtime.evaluate') {
+      const expr = String(params.expression ?? '');
+      if (expr.includes('location.href')) {
+        return { result: { value: 'https://www.xiaohongshu.com/explore' } };
+      }
+      if (expr.includes('getBoundingClientRect')) return { result: { value: null } }; // 提交按钮定位不到
+      return { result: { value: true } }; // 搜索框可见 + 聚焦成功
+    }
+    return {};
+  });
+  const ok = await executeSearch('奶茶', { cdp, sleep: async () => {}, random: () => 0.5 });
+  assert.equal(ok, false, '未跳转结果页（仍在 feed）MUST 返回 false，供调用方诚实回失败');
+});
+
 // ---------------------------------------------------------------------------
 // applySearchFilters（task 5.4 重构：幂等应用 + 权威复核 + 有界重试，治「点击未提交的瞬态竞态」）
 //

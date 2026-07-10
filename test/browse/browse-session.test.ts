@@ -712,6 +712,40 @@ test('browse-session: search.execute 上报前等待搜索卡片 noteId 水合',
   assert.equal(last.cards[0].noteId, 'target-note');
 });
 
+// 核心回归（change comment-search-nav-confirm）：搜索未导航到结果页（仍在 feed）时，
+// 边端 MUST NOT 把当前 feed 当搜索结果上报，且 MUST 发诚实的 action.completed{search, ok:false}。
+test('browse-session: search.execute 未到结果页（恒停 /explore）→ 不把 feed 冒充搜索结果 + 诚实回 search ok:false', async () => {
+  const h = makeHarness([
+    { position: 0, centerX: 10, centerY: 10, title: 'FEED-A', author: '路人', noteId: 'feed-note', isVideo: false },
+  ]);
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+        // location.href 恒为首页 feed：搜索导航从未确认到达结果页。
+        if (expr.includes('location.href')) return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+        if (expr.includes('getBoundingClientRect')) return { result: { value: null } } as never; // 提交按钮找不到
+        return { result: { value: true } } as never;
+      }
+      return {} as never;
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise(r => setTimeout(r, 10)); // 让 start 完成初始 feed 上报
+  const before = h.reportedCards.length;
+  await sess.onCloudCommand(makeEnvelope('search.execute', 'se1', 0, { keyword: 'Claude Code实测' }));
+  await new Promise(r => setTimeout(r, 5));
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
+  await done;
+
+  assert.equal(h.reportedCards.length, before, '未到结果页时 search.execute MUST NOT 新增 page.cards（feed 绝不冒充搜索结果）');
+  const searchFail = h.completedActions.find((a) => a.action === 'search' && a.ok === false);
+  assert.ok(searchFail, '未到结果页 MUST 发 action.completed{search, ok:false}');
+  assert.equal(searchFail?.reason, 'not_on_search_page', 'reason MUST 为 not_on_search_page（诚实归因，非离线/无结果）');
+});
+
 test('browse-session: note.browse_images 命中轮播 → 如实回报 browsed=N', async () => {
   const h = makeHarness();
   h.deps.noteExtractor = (async () => ({

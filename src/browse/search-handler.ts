@@ -506,11 +506,13 @@ export async function waitForSearchNavigation(
 /**
  * 执行一次搜索。
  * @throws 当页面上找不到搜索框时抛错（调用方可据此降级/上报）。
+ * @returns true 当且仅当已确认导航到搜索结果页；未确认到达（可能仍停在 feed）返回 false。
+ *          调用方 MUST 以此 + 实时 URL 判定是否可把当前页卡片当搜索结果上报（绝不把 feed 冒充搜索结果）。
  */
 export async function executeSearch(
   keyword: string,
   deps: ExecuteSearchDeps,
-): Promise<void> {
+): Promise<boolean> {
   const { cdp } = deps;
   const selector = deps.searchSelector ?? XHS_SEARCH_INPUT_SELECTOR;
   const iconSelector = deps.searchIconSelector ?? XHS_SEARCH_ICON_SELECTOR;
@@ -552,9 +554,11 @@ export async function executeSearch(
     //    waitForCards(5000) 兜底、命中即提前返回。原按 reading 档（中位 5s、长尾 15s）固定睡眠与之
     //    功能重复、纯属白等，故降为轻缓冲。
     await sleep(sampleDelay(TIMING_PRESETS.scroll, random));
-  } else {
-    logger('[search] 未确认导航到搜索结果页（待真机确认提交方式）');
-    // 兜底：未确认导航时也只给轻缓冲；同样由调用方 waitForCards 兜底真正的卡片等待。
-    await sleep(sampleDelay(TIMING_PRESETS.scroll, random));
+    return true;
   }
+  logger('[search] 未确认导航到搜索结果页（待真机确认提交方式）');
+  // 兜底：未确认导航时也只给轻缓冲；同样由调用方 waitForCards 兜底真正的卡片等待。
+  // 返回 false：调用方据此（+ 实时 URL）绝不把当前页 feed 当搜索结果上报。
+  await sleep(sampleDelay(TIMING_PRESETS.scroll, random));
+  return false;
 }
