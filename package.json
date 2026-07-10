@@ -23,6 +23,7 @@
     "test": "tsx --test test/**/*.test.ts",
     "test:acceptance": "tsx --test test/acceptance/*.test.ts",
     "start": "tsx src/main.ts",
+    "start:ol": "AIDCP_CLOUD_URL=ws://123.56.253.183:8787 tsx src/main.ts",
     "start:multinode": "tsx scripts/launch-multinode.ts",
     "dev:cloud": "bash scripts/dev-run.sh"
   },
