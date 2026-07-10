@@ -106,7 +106,46 @@ function hasMemberSignal(obs: FacebookGroupJoinObservation | undefined): boolean
   });
 }
 
+/**
+ * Join / Joined / Pending 按钮标签的多语关键词（contains 匹配，小写）。收口于此单一来源：既导出给单测，
+ * 又注入 in-page 观测 IIFE——避免旧「EN/ZH 精确匹配」把非英中群的 Join 按钮（如越南语「Tham gia nhóm」）
+ * 吞成 null，从而让云端判定角色（多语 LLM）拿不到 CTA 文本、只能 fail-closed 跳过。覆盖目标群常见语种。
+ */
+export const JOIN_CTA_LABELS: readonly string[] = [
+  'join', '加入', 'tham gia', 'unir', 'únete', 'unirte', 'participar', 'entrar al grupo', 'entrar no grupo',
+  'gabung', 'bergabung', 'เข้าร่วม', 'rejoindre', 'beitreten', 'iscriviti', 'entrar', 'участник', 'вступить',
+  'присоединиться', '참여', '가입', '参加', 'انضمام', 'انضم', 'كتِل', 'sertai', 'daftar',
+];
+export const MEMBER_CTA_LABELS: readonly string[] = [
+  'joined', 'leave group', '已加入', '退出小组', '退出', 'đã tham gia', 'rời nhóm', 'miembro', 'unido',
+  'salir del grupo', 'anggota', 'keluar dari grup', 'membre', 'quitter le groupe', 'mitglied', 'gruppe verlassen',
+  'เป็นสมาชิกแล้ว', 'ออกจากกลุ่ม', '참여됨', '가입됨', '已是成员',
+];
+export const PENDING_CTA_LABELS: readonly string[] = [
+  'pending', 'request sent', 'cancel request', '待批准', '已申请', '待审批', 'đang chờ', 'hủy yêu cầu',
+  'solicitud enviada', 'cancelar solicitud', 'menunggu', 'batalkan permintaan', 'demande envoyée',
+  'annuler la demande', 'anfrage gesendet', 'รอการอนุมัติ', '요청 보냄', '요청됨',
+];
+
+export type CtaKind = 'join' | 'member' | 'pending' | '';
+
+/**
+ * 按标签把 Join 按钮分类。**member / pending 先判、join 后判**——否则「đã tham gia」(已加入) 会被
+ * 「tham gia」(加入) 子串误判成 join。纯函数、多语 contains 匹配；与下方 IIFE 内的 ctaKind 同源同序。
+ */
+export function classifyCtaLabel(label: string | null | undefined): CtaKind {
+  const s = String(label ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!s) return '';
+  if (MEMBER_CTA_LABELS.some((k) => s.includes(k))) return 'member';
+  if (PENDING_CTA_LABELS.some((k) => s.includes(k))) return 'pending';
+  if (JOIN_CTA_LABELS.some((k) => s.includes(k))) return 'join';
+  return '';
+}
+
 const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
+  var JOIN_KW = ${JSON.stringify(JOIN_CTA_LABELS)};
+  var MEMBER_KW = ${JSON.stringify(MEMBER_CTA_LABELS)};
+  var PENDING_KW = ${JSON.stringify(PENDING_CTA_LABELS)};
   function visible(el){
     if (!el || !el.getBoundingClientRect) return false;
     var r = el.getBoundingClientRect();
@@ -125,19 +164,23 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
   function disabled(el){
     return !!(el.disabled || el.getAttribute('aria-disabled') === 'true' || el.getAttribute('disabled') != null);
   }
+  function anyIncludes(label, kws){ for (var i=0;i<kws.length;i++){ if (kws[i] && label.indexOf(kws[i]) >= 0) return true; } return false; }
   function ctaKind(label){
     label = String(label || '').replace(/\s+/g, ' ').trim().toLowerCase();
     if (!label) return '';
-    if (/^(join|join group|加入小组|加入社团|加入群组)$/.test(label)) return 'join';
-    if (/^(joined|leave group|已加入|退出小组)$/.test(label)) return 'member';
-    if (/^(pending|request sent|cancel request|待批准|已申请)$/.test(label)) return 'pending';
+    // member / pending 先判、join 后判：多语 contains 匹配（"đã tham gia"=joined 不能被 "tham gia"=join 误判）。
+    if (anyIncludes(label, MEMBER_KW)) return 'member';
+    if (anyIncludes(label, PENDING_KW)) return 'pending';
+    if (anyIncludes(label, JOIN_KW)) return 'join';
     return '';
   }
   var dialogs = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).filter(visible);
   var modalText = dialogs.length ? short(text(dialogs[0]), 1400) : null;
-  var h1 = Array.from(document.querySelectorAll('h1,[role="heading"][aria-level="1"]')).filter(visible)[0] || null;
-  var headerRoot = h1 && h1.closest ? (h1.closest('[role="main"]') || h1.closest('div')) : null;
-  var headerText = short([text(h1), headerRoot ? text(headerRoot) : ''].filter(Boolean).join(' '), 1400);
+  var h1 = Array.from(document.querySelectorAll('h1,[role="heading"][aria-level="1"],[role="main"] [role="heading"]')).filter(visible)[0]
+    || Array.from(document.querySelectorAll('[role="heading"]')).filter(visible)[0] || null;
+  var headerRoot = h1 && h1.closest ? (h1.closest('[role="main"]') || h1.closest('div')) : (document.querySelector('[role="main"]') || null);
+  // headerText 兜底：h1/heading 抓不到时回落 [role=main] 区域文本、再回落 document.title——让云端判定角色至少拿到群名 + 按钮文案（含非英中 Join 标签）。
+  var headerText = short([text(h1), headerRoot ? text(headerRoot) : ''].filter(Boolean).join(' '), 1400) || short(document.title || '', 300) || null;
   var nodes = Array.from(document.querySelectorAll('button,a,[role="button"]')).filter(isActionNode);
   var main = null;
   var join = null;

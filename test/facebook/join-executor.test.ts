@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monitor.js';
-import { FacebookJoinExecutor } from '../../src/facebook/join-executor.js';
+import { FacebookJoinExecutor, classifyCtaLabel } from '../../src/facebook/join-executor.js';
 
 interface RawJoinObservation {
   pageUrl?: string;
@@ -167,4 +167,41 @@ test('fb-join-executor: captcha overlay fail-closed，不点击', async () => {
   assert.equal(r.clicked, false);
   assert.equal(cdp.clicks.length, 0);
   assert.equal(r.observation?.captchaDetected, true);
+});
+
+// ── change facebook-group-join-observe-i18n：Join 按钮多语识别（修复越南语等群 CTA 被 EN/ZH 精确匹配吞成 null）──
+test('classifyCtaLabel: 多语 Join 标签均识别为 join', () => {
+  for (const label of [
+    'Join group', 'Join', '加入小组', '加入群组',
+    'Tham gia nhóm',            // 越南语（本次真机故障的群）
+    'Unirte al grupo', 'Únete', // 西语
+    'Participar', 'Entrar no grupo', // 葡语
+    'Gabung', 'Bergabung',      // 印尼语
+    'Rejoindre le groupe',      // 法语
+    'Beitreten',                // 德语
+    'เข้าร่วมกลุ่ม',              // 泰语
+    '참여하기',                  // 韩语
+  ]) {
+    assert.equal(classifyCtaLabel(label), 'join', `expected join for "${label}"`);
+  }
+});
+
+test('classifyCtaLabel: 已加入 / 待批准语义优先于 join（避免子串误判）', () => {
+  // "Đã tham gia"(已加入) 含 "tham gia"(加入) 子串——必须判 member、绝不判 join。
+  assert.equal(classifyCtaLabel('Đã tham gia'), 'member');
+  assert.equal(classifyCtaLabel('Joined'), 'member');
+  assert.equal(classifyCtaLabel('已加入'), 'member');
+  assert.equal(classifyCtaLabel('Leave group'), 'member');
+  assert.equal(classifyCtaLabel('Rời nhóm'), 'member');           // 越南语「退出小组」
+  assert.equal(classifyCtaLabel('Solicitud enviada'), 'pending'); // 西语「已申请」
+  assert.equal(classifyCtaLabel('Đang chờ phê duyệt'), 'pending');// 越南语「待批准」
+  assert.equal(classifyCtaLabel('Pending'), 'pending');
+});
+
+test('classifyCtaLabel: 空 / 无关标签 → 空（保持 fail-closed，不误当 join）', () => {
+  assert.equal(classifyCtaLabel(''), '');
+  assert.equal(classifyCtaLabel(null), '');
+  assert.equal(classifyCtaLabel('Share'), '');
+  assert.equal(classifyCtaLabel('Invite'), '');
+  assert.equal(classifyCtaLabel('分享'), '');
 });
