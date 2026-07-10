@@ -48,8 +48,40 @@ interface CropRect {
 
 const SNAPSHOT_TTL_MS = 5 * 60_000;
 
+// 每 incident 保留最近若干帧（change captcha-assist-live-snapshot）：实时抓帧会推进"最新"，
+// 运营点的是被 pin 的稍旧但"与所见一致"的帧，按其 snapshotId 在环内查回该帧自己的 crop 落点。
+// 边缘环 > 云端近期集，确保云端放行的 snapshotId 边缘一定还留着（云端拦不到、边缘却已淘汰 = 白跑）。
+const SNAPSHOT_RING_SIZE = 8;
+
+// 实时抓帧循环参数（都有硬钳制，云端下发只是 hint）。
+const LIVE_INTERVAL_MS = { def: 800, min: 600, max: 2000 };
+const LIVE_MAX_DURATION_MS = { def: 30_000, min: 5_000, max: 120_000 };
+const LIVE_MAX_FRAMES = { min: 1, max: 400 };
+// 自主判"验证码已清除"需连续 K 次探测都无遮罩才成立——多步验证码在旧挑战消失、新挑战未绘出之间
+// 有瞬时无遮罩窗口，单次没看到就发 risk.captcha_cleared 会提前解 restricted（自残）。
+const LIVE_CLEAR_CONFIRMATIONS = 3;
+// 最小推帧间隔硬地板：带倒计时/动画的页每帧字节都变、内容去重永不命中时，用它兜住带宽/成本。
+const LIVE_MIN_PUSH_INTERVAL_MS = 600;
+// 实时帧适度降质以约束单帧字节（运营看清挑战足够，不追求原画质）。
+const LIVE_FRAME_QUALITY = 60;
+
+interface LiveState {
+  token: number;
+  clearStreak: number;
+  lastPushedHash?: string;
+  lastPushAt: number;
+}
+
 export class CaptchaAssistHandler {
-  private readonly snapshots = new Map<string, CaptchaAssistSnapshotPayload>();
+  // 每 incident 一个最近帧环（newest last）。
+  private readonly snapshotRings = new Map<string, CaptchaAssistSnapshotPayload[]>();
+  // 活跃实时循环：存在 = 在跑；token 用于 re-arm 时抢占旧循环、stopLive 时令旧循环自然退出。
+  private readonly live = new Map<string, LiveState>();
+  // 点击派发中的 incident：实时 tick MUST 跳过，避免抓到点击派发到一半的半程画面。
+  private readonly clicking = new Set<string>();
+  // 抓帧进行中的 incident：手动刷新与实时 tick 互斥，避免并发 captureScreenshot 叠加。
+  private readonly capturing = new Set<string>();
+  private liveCounter = 0;
   private readonly now: () => number;
   private readonly idGen: () => string;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -70,9 +102,27 @@ export class CaptchaAssistHandler {
     await this.handleClick(payload as CaptchaAssistClickPayload);
   }
 
+  private pushSnapshot(incidentId: string, snap: CaptchaAssistSnapshotPayload): void {
+    const ring = this.snapshotRings.get(incidentId) ?? [];
+    ring.push(snap);
+    while (ring.length > SNAPSHOT_RING_SIZE) ring.shift();
+    this.snapshotRings.set(incidentId, ring);
+  }
+
+  private findSnapshot(incidentId: string, snapshotId: string): CaptchaAssistSnapshotPayload | undefined {
+    const ring = this.snapshotRings.get(incidentId);
+    if (!ring) return undefined;
+    // 从最新往旧找：常规提交命中最新，冻结提交命中稍旧帧。
+    for (let i = ring.length - 1; i >= 0; i--) {
+      if (ring[i].snapshotId === snapshotId) return ring[i];
+    }
+    return undefined;
+  }
+
   private async handleCapture(payload: CaptchaAssistCapturePayload): Promise<void> {
     const kind = await this.probeBlockingKind();
     if (!kind) {
+      this.stopLive(payload.incidentId);
       this.sendClickResult({
         incidentId: payload.incidentId,
         status: 'not_blocked',
@@ -83,10 +133,13 @@ export class CaptchaAssistHandler {
       return;
     }
     try {
+      this.capturing.add(payload.incidentId);
       const snapshot = await this.captureSnapshot(payload.incidentId, kind, payload);
-      this.snapshots.set(payload.incidentId, snapshot);
+      this.pushSnapshot(payload.incidentId, snapshot);
       this.deps.client.send('captcha.assist.snapshot', snapshot);
       this.logger(`[captcha-assist] 已回传截图 incident=${payload.incidentId} snapshot=${snapshot.snapshotId}`);
+      // 带 live 字段 = 进入有界实时抓帧循环（首帧已推，seed 去重哈希避免立即重推同帧）。
+      if (payload.live) this.startLive(payload.incidentId, payload.live, hashImageData(snapshot.image.data));
     } catch (err) {
       this.sendClickResult({
         incidentId: payload.incidentId,
@@ -94,17 +147,19 @@ export class CaptchaAssistHandler {
         reason: `capture_failed:${(err as Error).message}`,
         checkedAt: this.now(),
       });
+    } finally {
+      this.capturing.delete(payload.incidentId);
     }
   }
 
   private async handleClick(payload: CaptchaAssistClickPayload): Promise<void> {
-    const snapshot = this.snapshots.get(payload.incidentId);
-    if (!snapshot || snapshot.snapshotId !== payload.snapshotId) {
+    const snapshot = this.findSnapshot(payload.incidentId, payload.snapshotId);
+    if (!snapshot) {
       this.sendClickResult({
         incidentId: payload.incidentId,
         snapshotId: payload.snapshotId,
         status: 'stale_snapshot',
-        reason: snapshot ? 'snapshot_id_mismatch' : 'snapshot_missing',
+        reason: this.snapshotRings.has(payload.incidentId) ? 'snapshot_id_mismatch' : 'snapshot_missing',
         checkedAt: this.now(),
       });
       return;
@@ -119,6 +174,8 @@ export class CaptchaAssistHandler {
       });
       return;
     }
+    // 点击全程暂停实时 tick（互斥），避免抓到点击派发中途 / settle / 复检期间的画面。
+    this.clicking.add(payload.incidentId);
     try {
       for (const point of payload.points) {
         if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1) {
@@ -131,6 +188,7 @@ export class CaptchaAssistHandler {
           });
           return;
         }
+        // 用"被点的那一帧自己的 crop"缩放落点（冻结提交时该帧可能不是最新帧）。
         const x = snapshot.crop.x + point.x * snapshot.crop.width;
         const y = snapshot.crop.y + point.y * snapshot.crop.height;
         await dispatchClick(this.deps.cdp, x, y, { jitter: 0, overshoot: false, moveDelayMs: 6 });
@@ -139,6 +197,7 @@ export class CaptchaAssistHandler {
       await this.sleep(payload.settleMs ?? 1500);
       const kind = await this.probeBlockingKind();
       if (!kind) {
+        this.stopLive(payload.incidentId);
         this.sendClickResult({
           incidentId: payload.incidentId,
           snapshotId: payload.snapshotId,
@@ -149,7 +208,7 @@ export class CaptchaAssistHandler {
         return;
       }
       const next = await this.captureSnapshot(payload.incidentId, kind, {});
-      this.snapshots.set(payload.incidentId, next);
+      this.pushSnapshot(payload.incidentId, next);
       this.sendClickResult({
         incidentId: payload.incidentId,
         snapshotId: payload.snapshotId,
@@ -166,6 +225,97 @@ export class CaptchaAssistHandler {
         reason: `click_failed:${(err as Error).message}`,
         checkedAt: this.now(),
       });
+    } finally {
+      this.clicking.delete(payload.incidentId);
+    }
+  }
+
+  // ── 实时抓帧循环（change captcha-assist-live-snapshot）─────────────────────────
+  // 有界、内容去重、自终止。iteration-bounded：终止靠 for-loop 帧数上界 + token 抢占，
+  // 绝不拿 now() 当唯一终止条件（桩测注入恒定 now 会死循环，见 memory）。
+
+  private startLive(incidentId: string, hint: NonNullable<CaptchaAssistCapturePayload['live']>, seedHash: string): void {
+    const token = ++this.liveCounter;
+    // re-arm：直接覆盖 token，旧循环下一拍看到 token 变了会自然退出，clearStreak 归零重来。
+    this.live.set(incidentId, { token, clearStreak: 0, lastPushedHash: seedHash, lastPushAt: this.now() });
+    const intervalMs = clampRange(hint.intervalMs, LIVE_INTERVAL_MS.def, LIVE_INTERVAL_MS.min, LIVE_INTERVAL_MS.max);
+    const maxDurationMs = clampRange(hint.maxDurationMs, LIVE_MAX_DURATION_MS.def, LIVE_MAX_DURATION_MS.min, LIVE_MAX_DURATION_MS.max);
+    const framesByTime = Math.ceil(maxDurationMs / intervalMs) + 2;
+    const maxFrames = clampRange(hint.maxFrames, framesByTime, LIVE_MAX_FRAMES.min, LIVE_MAX_FRAMES.max);
+    void this.runLiveLoop(incidentId, token, intervalMs, maxDurationMs, maxFrames);
+  }
+
+  private stopLive(incidentId: string): void {
+    // 删 token → 正在跑的循环下一拍看到 token 不匹配即退出。
+    this.live.delete(incidentId);
+  }
+
+  private async runLiveLoop(
+    incidentId: string,
+    token: number,
+    intervalMs: number,
+    maxDurationMs: number,
+    maxFrames: number,
+  ): Promise<void> {
+    const startedAt = this.now();
+    try {
+      for (let i = 0; i < maxFrames; i++) {
+        await this.sleep(intervalMs);
+        // token 变了（stopLive / re-arm）→ 本循环退出。
+        if (this.live.get(incidentId)?.token !== token) return;
+        // 软时间上界：真机会触发；桩测恒定 now 下不触发但 maxFrames 兜住，不会死循环。
+        if (this.now() - startedAt >= maxDurationMs) break;
+        await this.liveTick(incidentId, token);
+      }
+    } catch (err) {
+      this.logger(`[captcha-assist] 实时循环异常退出 incident=${incidentId}: ${(err as Error).message}`);
+    } finally {
+      // 仅当仍是本循环持有 token 时清理，避免误删 re-arm 后的新循环状态。
+      if (this.live.get(incidentId)?.token === token) this.live.delete(incidentId);
+    }
+  }
+
+  private async liveTick(incidentId: string, token: number): Promise<void> {
+    if (this.clicking.has(incidentId) || this.capturing.has(incidentId)) return;
+    const kind = await this.probeBlockingKind();
+    const state = this.live.get(incidentId);
+    if (!state || state.token !== token) return;
+
+    if (!kind) {
+      // 无遮罩：连续确认 K 次 + 有 tick 间隔作 settle 才判真清除，单次不清（防瞬时无遮罩窗口误清）。
+      state.clearStreak += 1;
+      if (state.clearStreak >= LIVE_CLEAR_CONFIRMATIONS) {
+        this.stopLive(incidentId);
+        // 自主清除只发 risk.captcha_cleared（走 onCleared），绝不发 click_result——否则把非运营
+        // 发起的探测记进 incident.lastResult，污染前端"上次复检"与审计。
+        this.sendRiskCleared();
+        this.logger(`[captcha-assist] 实时循环自主判清除 incident=${incidentId}（连续${state.clearStreak}次无遮罩）`);
+      }
+      return;
+    }
+    state.clearStreak = 0;
+
+    // 仍被挡：抓帧 → 内容去重（+最小推帧间隔地板）→ 变了才推新帧。
+    this.capturing.add(incidentId);
+    try {
+      const snap = await this.captureSnapshot(incidentId, kind, { quality: LIVE_FRAME_QUALITY });
+      const cur = this.live.get(incidentId);
+      if (!cur || cur.token !== token) return; // 抓帧期间被抢占/停止
+      const hash = hashImageData(snap.image.data);
+      const now = this.now();
+      const unchanged = hash === cur.lastPushedHash;
+      const tooSoon = now - cur.lastPushAt < LIVE_MIN_PUSH_INTERVAL_MS;
+      if (unchanged || tooSoon) return;
+      cur.lastPushedHash = hash;
+      cur.lastPushAt = now;
+      this.pushSnapshot(incidentId, snap);
+      this.deps.client.send('captcha.assist.snapshot', snap);
+      this.logger(`[captcha-assist] 实时新帧 incident=${incidentId} snapshot=${snap.snapshotId}`);
+    } catch (err) {
+      // 单次抓帧失败不杀循环，下一拍再试。
+      this.logger(`[captcha-assist] 实时抓帧失败 incident=${incidentId}: ${(err as Error).message}`);
+    } finally {
+      this.capturing.delete(incidentId);
     }
   }
 
@@ -282,4 +432,23 @@ function computeCrop(viewport: ViewportInfo, overlay: BlockingOverlaySnapshot | 
 
 function clampPositive(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/** 取正数 value（无效则用 def），再钳到 [min,max]。用于把云端下发的 live hint 收进安全区间。 */
+function clampRange(value: unknown, def: number, min: number, max: number): number {
+  const v = typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : def;
+  return Math.min(max, Math.max(min, v));
+}
+
+/**
+ * 便宜的内容哈希（FNV-1a 32-bit）用于实时抓帧去重：同帧不重推。
+ * 精确哈希对带倒计时/动画的页会每帧不同（去重失效），故上层另有最小推帧间隔地板兜底成本。
+ */
+function hashImageData(data: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < data.length; i++) {
+    h ^= data.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `${(h >>> 0).toString(16)}:${data.length}`;
 }
