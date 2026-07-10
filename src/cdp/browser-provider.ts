@@ -128,8 +128,11 @@ export class AdsPowerProvider implements BrowserProvider {
 
   async launch(opts: BrowserLaunchOptions): Promise<LaunchedBrowser> {
     const startUrl = this.cfg.startUrl ?? DEFAULT_ADS_START_URL;
-    // 固定桌面视口（否则落进小红书窄屏布局变体致定位/滚动失效）+ 起始页，均经 launch_args 传入。
-    const launchArgs = ['--window-size=1440,980'];
+    // 固定桌面视口（否则落进小红书窄屏布局变体致定位/滚动失效；FB 同理，窄窗触发响应式移动布局、
+    // 无 role=feed/article）+ 起始页，均经 launch_args 传入。
+    //   --window-size 作兜底；--start-maximized 覆盖 AdsPower profile 记忆的小窗口（探针实测默认 360px 窄窗
+    //   压过 --window-size → FB 移动布局），与 self 模式 chrome-launcher 一致强制 PC 布局。
+    const launchArgs = ['--window-size=1440,980', '--start-maximized'];
     if (opts.windowPosition) {
       launchArgs.push(`--window-position=${Math.floor(opts.windowPosition.left)},${Math.floor(opts.windowPosition.top)}`);
     }

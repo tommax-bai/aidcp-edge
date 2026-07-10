@@ -70,6 +70,7 @@ test('AdsPowerProvider.launch 成功 → 端点带 debug_port、实例非 reused
   assert.ok(startCall);
   const decoded = decodeURIComponent(startCall.url);
   assert.match(decoded, /--window-size=1440,980/);
+  assert.match(decoded, /--start-maximized/); // 覆盖 AdsPower profile 记忆的窄窗 → 强制 PC 布局（FB 无 role=feed/article 兜底）
   assert.match(decoded, /--window-position=1902,0/);
   assert.match(decoded, /xiaohongshu\.com/);
   assert.equal(startCall.headers?.Authorization, 'Bearer secret');
