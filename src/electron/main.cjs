@@ -1374,13 +1374,54 @@ function ensureAdsServiceOnce(handle) {
   return adsServiceInFlight;
 }
 
+// 首启把随包只读模板暂存到用户可写目录（打包态 Resources 只读、App Translocation 下尤甚，
+// 而 CLI 要往自身 cwd/ 写）。版本戳（app 版本 + CLI 版本）不符即清旧重拷，避免升级后旧副本遮挡新运行时。
+// 开发态无 resourcesPath / 无模板则跳过（resolveCliEntry 的 node_modules 候选直解）。
+function stageAdsRuntimeIfNeeded() {
+  try {
+    if (!process.resourcesPath) return { ok: true, skipped: 'dev' };
+    const src = path.join(process.resourcesPath, 'adspower-browser');
+    if (!fs.existsSync(src)) return { ok: true, skipped: 'no-template' };
+    const destRoot = path.join(app.getPath('userData'), 'ads-runtime');
+    const dest = path.join(destRoot, 'adspower-browser');
+    const stampPath = path.join(destRoot, 'stage.json');
+    let pkgVersion = '';
+    try { pkgVersion = JSON.parse(fs.readFileSync(path.join(src, 'package.json'), 'utf8')).version || ''; } catch { /* best-effort */ }
+    const wantStamp = JSON.stringify({ appVersion: app.getVersion(), pkgVersion });
+    let haveStamp = '';
+    try { haveStamp = fs.readFileSync(stampPath, 'utf8'); } catch { /* 无戳即视为需暂存 */ }
+    if (fs.existsSync(dest) && haveStamp === wantStamp) return { ok: true, staged: false };
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.mkdirSync(destRoot, { recursive: true });
+    fs.cpSync(src, dest, { recursive: true });
+    fs.writeFileSync(stampPath, wantStamp);
+    return { ok: true, staged: true };
+  } catch (e) {
+    return { ok: false, error: `指纹浏览器运行时暂存失败：${(e && e.message) || String(e)}` };
+  }
+}
+
 async function ensureAdsService(handle) {
   adsServiceBase = null;
   // 1. 服务已可达则复用（外部 AdsPower / 已在跑的 CLI daemon）；其自管内核，不在此预检。
   const probe = await adsApi.status(resolveAdsOpts()).catch(() => null);
   if (probe && probe.ok) return { ok: true, mode: 'adopted' };
 
-  // 2. 服务未就绪 → 拉起随包运行时。
+  // 2. 服务未就绪 → 首启暂存随包模板到可写目录，再拉起随包运行时。
+  const staged = stageAdsRuntimeIfNeeded();
+  if (!staged.ok) {
+    if (handle) {
+      updateStatus(handle, {
+        auth: 'config required',
+        edge: 'stopped',
+        session: 'idle',
+        lastMessage: staged.error,
+        ...edgeFailurePatch(staged.error),
+        ...presencePatch('运行时暂存失败'),
+      });
+    }
+    return { ok: false, error: staged.error };
+  }
   const cliEntry = adsRuntime.resolveCliEntry({
     resourcesPath: process.resourcesPath,
     appRoot: app.getAppPath(),

@@ -7,3 +7,9 @@ dist-electron/
 edge_output.txt
 tmp-cdp-query.cjs
 tmp_diag.ts
+
+# self-contained-ads-runtime: baked key (secret) + staging artifacts — do not commit
+resources/ads-runtime.json
+build/ads-prefix/
+build/ads-runtime/
+build/ads-install.log
