@@ -56,11 +56,11 @@ test('buildStealthScript 覆盖 navigator.plugins 补齐非空插件列表', () 
   assert.match(src, /PDF Viewer/);
 });
 
-test('buildStealthScript 覆盖 permissions.query Notification 返回非 denied', () => {
+test('buildStealthScript 覆盖 permissions.query Notification：忠实映射 default→prompt（denied 照实）', () => {
   const src = buildStealthScript();
   assert.match(src, /permissions/);
   assert.match(src, /notifications/);
-  // denied 应被改写为 prompt（构建工具可能用单/双引号）
+  // default 映射为 prompt（构建工具可能用单/双引号）；denied/granted 原样，不再谎报。
   assert.match(src, /["']prompt["']/);
 });
 

@@ -42,7 +42,25 @@ export interface AttachOptions extends DiscoverOptions {
 }
 
 /**
- * 启用定位/执行所需 CDP 域 + 注入反检测。首次 attach 与断线重连共用，避免口径漂移。
+ * 指纹浏览器权限弹窗兜底（change browser-permission-prompt-defaults）。
+ * 启动参数 `--deny-permission-prompts` 已在**新起**的浏览器上关掉权限弹窗；但复用一个已存活的
+ * 浏览器时（AdsPower 交回运行中的 profile / self 复用已开的调试端口）拿不到该参数——此处经 CDP
+ * 对默认浏览上下文把常见会弹窗的权限一律置 `denied`，等价「用户点了禁止通知/定位」，与真实浏览器
+ * 观感一致、不抹掉任何 web API（不制造反检测破绽）。省略 origin ⇒ 对所有 origin 生效。
+ * best-effort：任一权限名在某内核不被 setPermission 接受而 reject，也绝不影响 attach/续跑。
+ */
+const DENIED_BROWSER_PERMISSIONS = ['notifications', 'geolocation', 'camera', 'microphone'] as const;
+
+export async function denyPermissionPrompts(cdp: CdpClient): Promise<void> {
+  for (const name of DENIED_BROWSER_PERMISSIONS) {
+    await cdp
+      .send('Browser.setPermission', { permission: { name }, setting: 'denied' })
+      .catch(() => undefined);
+  }
+}
+
+/**
+ * 启用定位/执行所需 CDP 域 + 注入反检测 + 权限弹窗兜底。首次 attach 与断线重连共用，避免口径漂移。
  * Input.enable（坐标点击/按键所需）也在此——重连后新 WS 必须重启用，否则点击/输入失效。
  */
 async function reEnableAndInject(
@@ -52,6 +70,8 @@ async function reEnableAndInject(
   await cdp.send('Runtime.enable').catch(() => undefined);
   await cdp.send('Page.enable').catch(() => undefined);
   await cdp.send('Input.enable').catch(() => undefined);
+  // 权限弹窗兜底：与启动参数 --deny-permission-prompts 形成双保险，覆盖复用/重连拿不到该参数的浏览器。
+  await denyPermissionPrompts(cdp);
   if (opts.stealth !== false) {
     await opts.injector.inject(cdp);
   }

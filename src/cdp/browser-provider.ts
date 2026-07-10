@@ -128,8 +128,9 @@ export class AdsPowerProvider implements BrowserProvider {
 
   async launch(opts: BrowserLaunchOptions): Promise<LaunchedBrowser> {
     const startUrl = this.cfg.startUrl ?? DEFAULT_ADS_START_URL;
-    // 固定桌面视口（否则落进小红书窄屏布局变体致定位/滚动失效）+ 起始页，均经 launch_args 传入。
-    const launchArgs = ['--window-size=1440,980'];
+    // 固定桌面视口（否则落进小红书窄屏布局变体致定位/滚动失效）+ 关权限弹窗（--deny-permission-prompts：
+    // 通知/定位/摄像头等一律拒绝而非弹窗，见 change browser-permission-prompt-defaults）+ 起始页，均经 launch_args 传入。
+    const launchArgs = ['--window-size=1440,980', '--deny-permission-prompts'];
     if (opts.windowPosition) {
       launchArgs.push(`--window-position=${Math.floor(opts.windowPosition.left)},${Math.floor(opts.windowPosition.top)}`);
     }

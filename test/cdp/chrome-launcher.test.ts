@@ -92,6 +92,7 @@ test('buildChromeArgs 含全部硬性调试参数', () => {
   assert.ok(args.includes('--no-default-browser-check'));
   assert.ok(args.includes('--disable-session-crashed-bubble'));
   assert.ok(args.includes('--hide-crash-restore-bubble'));
+  assert.ok(args.includes('--deny-permission-prompts'));
   assert.ok(args.includes('--user-data-dir=/tmp/p'));
   assert.equal(args[args.length - 1], 'https://www.xiaohongshu.com/explore');
   assert.ok(!args.includes('--headless=new'));

@@ -750,7 +750,9 @@ const BROWSER_PERMISSION_LABELS = {
   usb: 'USB 设备',
   'clipboard-read': '剪贴板读取',
 };
-const BROWSER_PERMISSION_ALLOWLIST = new Set(['fullscreen', 'pointerLock']);
+// notifications 放行：客户端自身的状态提醒经本窗口发出，不该被拦（change browser-permission-prompt-defaults）；
+// 设备类权限（定位/摄像头/麦克风等）仍默认拒绝。指纹浏览器的权限弹窗由其自身抑制、与本窗口策略无关。
+const BROWSER_PERMISSION_ALLOWLIST = new Set(['fullscreen', 'pointerLock', 'notifications']);
 const permissionNoticeAt = new Map();
 
 function installPermissionPolicy(win) {

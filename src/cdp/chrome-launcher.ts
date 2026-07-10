@@ -563,6 +563,8 @@ export function buildChromeArgs(opts: {
     '--disable-blink-features=AutomationControlled',
     // 去掉"正受到自动化控制"信息栏提示。
     '--disable-infobars',
+    // 关掉权限弹窗（通知/定位/摄像头等一律拒绝而非弹窗），见 change browser-permission-prompt-defaults。
+    '--deny-permission-prompts',
     // 注意：刻意不加 --enable-automation（它会让 UA 暴露调试态、弹出自动化提示）。
     // —— 固定桌面视口：优先进小红书【宽布局】（左侧栏），避免落入【窄布局】（底部图标栏）
     //    导致 self-id/通知/滚动等选择器与滚动机制错位（见 docs/xhs-layout-states.md）。

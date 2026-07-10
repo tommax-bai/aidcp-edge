@@ -139,9 +139,11 @@ export function buildStealthScript(): string {
             if (desc && desc.name === 'notifications') {
               const state =
                 typeof Notification !== 'undefined' ? Notification.permission : 'prompt';
-              // headless 下常为 'denied' 但 Notification.permission='default'，矛盾 → 对齐成 'prompt'
-              const resolved =
-                state === 'denied' ? 'prompt' : state === 'default' ? 'prompt' : state;
+              // 忠实映射 Notification.permission → Permissions API state：default→prompt，denied/granted 原样。
+              // 既覆盖 headless 下 query 原生误报 'denied'（Notification.permission 实为 'default'）的矛盾；
+              // 又保证当通知被主动置 denied 时（change browser-permission-prompt-defaults）query 如实报 'denied'、
+              // 与 Notification.permission 一致——旧代码把 denied 也改写成 'prompt' 反而会制造新破绽。
+              const resolved = state === 'default' ? 'prompt' : state;
               return Promise.resolve({
                 state: resolved,
                 onchange: null,
