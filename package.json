@@ -1,6 +1,6 @@
 {
   "name": "aidcp-edge",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "private": true,
   "description": "AIDCP 边缘端：DOM-first 定位层引擎 + CDP（原生 WebSocket）页面接入（DomProvider / ActionExecutor）+ 边-云 WS 客户端（点赞垂直切片）。",
   "author": "AIDCP",
@@ -13,10 +13,11 @@
     "build": "tsc -p tsconfig.json",
     "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build:dist": "npm run clean:dist && tsc -p tsconfig.build.json",
+    "build:ads-runtime": "node scripts/stage-ads-runtime.mjs",
     "electron:dev": "electron .",
-    "electron:build": "npm run build:dist && node ./node_modules/electron-builder/cli.js",
-    "electron:build:win": "npm run build:dist && node ./node_modules/electron-builder/cli.js --win",
-    "electron:build:mac": "npm run build:dist && node ./node_modules/electron-builder/cli.js --mac",
+    "electron:build": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js",
+    "electron:build:win": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --win",
+    "electron:build:mac": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "test:acceptance": "tsx --test test/acceptance/*.test.ts",
@@ -35,6 +36,16 @@
       "src/electron/**/*.cjs",
       "src/electron/renderer/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/ads-runtime/adspower-browser",
+        "to": "adspower-browser"
+      },
+      {
+        "from": "resources/ads-runtime.json",
+        "to": "ads-runtime.json"
+      }
     ],
     "extraMetadata": {
       "main": "src/electron/main.cjs"
