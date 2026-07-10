@@ -1,5 +1,5 @@
 import { evalRaw, type BrowseCdp } from '../browse/cdp-util.js';
-import type { ReadSelfIdentityOptions, SelfIdentityResult } from '../cdp/self-identity.js';
+import type { ReadSelfIdentityOptions, SelfIdentity, SelfIdentityResult } from '../cdp/self-identity.js';
 
 export const FACEBOOK_NUMERIC_ID_RE = /^\d{5,}$/;
 
@@ -9,9 +9,17 @@ interface FacebookCookieLike {
   domain?: string;
 }
 
+/** 本人 profile 锚点（含 aria-label）——用于 id 锚定就地取昵称（顶栏头像锚点 aria 形如「<昵称>的头像」）。 */
+export interface FacebookProfileAnchor {
+  href: string;
+  ariaLabel: string | null;
+}
+
 export interface FacebookIdentitySignals {
   href: string;
   profileHrefs: string[];
+  /** 本人/他人 profile 锚点及其 aria-label（就地 id 锚定取昵称用；缺省空数组）。 */
+  profileAnchors?: FacebookProfileAnchor[];
   cookieUserId: string | null;
   displayName: string | null;
   h1?: string | null;
@@ -55,21 +63,74 @@ const GENERIC_FACEBOOK_DISPLAY_NAMES = new Set([
   'login',
   'sign up',
   'create new account',
+  'account controls and settings',
+  'menu',
+  'marketplace',
   '首页',
   '主页',
   '个人主页',
+  '你的个人主页',
+  '账户控制选项和设置',
+  '帐户控制选项和设置',
+  '菜单',
   '登录',
   '注册',
 ]);
 
 export function cleanFacebookDisplayName(value: string | null | undefined): string | null {
   let s = String(value ?? '').replace(/\s+/g, ' ').trim();
+  // 先剥前导未读计数前缀「(4) 」，防「(4) Facebook」这类标签栏标题穿过清洗被当昵称。
+  s = s.replace(/^\(\d+\)\s*/, '').trim();
   s = s.replace(/\s*[|｜]\s*Facebook(?:\s*[-–—]\s*.*)?$/i, '').trim();
   s = s.replace(/\s*[-–—]\s*Facebook(?:\s*[-–—]\s*.*)?$/i, '').trim();
   s = s.replace(/\s*[·•]\s*Facebook$/i, '').trim();
   if (/^facebook\s*[-–—]\s*(log in|login|sign up|signup|登录|注册)/i.test(s)) return null;
   if (GENERIC_FACEBOOK_DISPLAY_NAMES.has(s.toLowerCase())) return null;
   return s || null;
+}
+
+/** 头像 aria-label 的多语后缀：仅当命中才认定这是「头像标签」、剥离后取名；否则不信为昵称。 */
+const AVATAR_ARIA_SUFFIX_RE = /\s*(?:的大?头像|的大頭貼|['’‘]s\s+(?:profile picture|profile photo|avatar))\s*$/i;
+
+/**
+ * 从本人头像锚点的 aria-label 提取昵称（纯函数）。
+ * 仅当 aria 含已知「头像 / 's profile picture」后缀时才剥后缀取名——无后缀的 aria（如「你的个人主页」）一律返回 null，
+ * 避免把通用外壳标签误当昵称。剥后结果再过 cleanFacebookDisplayName（拒 Facebook/(N) Facebook/通用词）。
+ */
+export function extractNameFromAvatarAria(aria: string | null | undefined): string | null {
+  const s = String(aria ?? '').replace(/\s+/g, ' ').trim();
+  if (!s || !AVATAR_ARIA_SUFFIX_RE.test(s)) return null;
+  const name = s.replace(AVATAR_ARIA_SUFFIX_RE, '').trim();
+  return cleanFacebookDisplayName(name);
+}
+
+/** 本人头像锚点判据：href 数字 id === accountId，或 href 为 /me 自链（无 id 但确为本人）。纯函数。 */
+function isSelfProfileHref(href: string, accountId: string): boolean {
+  if (extractFacebookIdFromHref(href) === accountId) return true;
+  try {
+    const path = new URL(href, 'https://www.facebook.com').pathname.replace(/\/+$/, '').toLowerCase();
+    return path === '/me';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 从本人 profile 锚点集里按 id 锚定取昵称（纯函数）：取首个「是本人（id 匹配或 /me） & aria 含头像后缀」的名字。
+ * id 锚定 ⇒ 绝不把他人/他页锚点的名字当作本账号昵称。
+ */
+export function avatarNameForId(
+  anchors: FacebookProfileAnchor[] | undefined,
+  accountId: string,
+): string | null {
+  if (!anchors || !accountId) return null;
+  for (const a of anchors) {
+    if (!a || typeof a.href !== 'string') continue;
+    if (!isSelfProfileHref(a.href, accountId)) continue;
+    const name = extractNameFromAvatarAria(a.ariaLabel);
+    if (name) return name;
+  }
+  return null;
 }
 
 function firstDisplayNameCandidate(values: Array<string | null | undefined>): string | null {
@@ -87,7 +148,17 @@ export function deriveFacebookIdentity(signals: FacebookIdentitySignals): Facebo
     .map(extractFacebookIdFromHref)
     .filter(Boolean);
   const unique = Array.from(new Set(ids));
-  const displayName = firstDisplayNameCandidate([signals.displayName, signals.h1, signals.ogTitle, signals.title]);
+
+  // 上下文选昵称：
+  //  - onOwnProfile=true（当前页就是本人主页，URL id === accountId）：页面标题/og/h1 就是本人姓名，可用；
+  //  - onOwnProfile=false（首页/信息流/群页面等）：标题=页面名而非本人姓名，MUST NOT 用——只用 id 锚定头像标签 + 菜单文本。
+  const nameForId = (accountId: string, onOwnProfile: boolean): string | null => {
+    const avatarName = avatarNameForId(signals.profileAnchors, accountId);
+    const candidates = onOwnProfile
+      ? [avatarName, signals.h1, signals.ogTitle, signals.title, signals.displayName]
+      : [avatarName, signals.displayName];
+    return firstDisplayNameCandidate(candidates);
+  };
 
   if (locationId) {
     if (cookieUserId && cookieUserId !== locationId) {
@@ -96,7 +167,7 @@ export function deriveFacebookIdentity(signals: FacebookIdentitySignals): Facebo
     return {
       ok: true,
       accountId: locationId,
-      displayName: firstDisplayNameCandidate([signals.h1, signals.ogTitle, signals.title, signals.displayName]),
+      displayName: nameForId(locationId, true),
       source: cookieUserId ? 'cookie+profile-url' : 'profile-url',
     };
   }
@@ -110,7 +181,7 @@ export function deriveFacebookIdentity(signals: FacebookIdentitySignals): Facebo
     return {
       ok: true,
       accountId: cookieUserId,
-      displayName,
+      displayName: nameForId(cookieUserId, false),
       source: profileId ? 'cookie+profile-link' : 'cookie',
     };
   }
@@ -118,11 +189,12 @@ export function deriveFacebookIdentity(signals: FacebookIdentitySignals): Facebo
     return {
       ok: true,
       accountId: profileId,
-      displayName,
+      displayName: nameForId(profileId, false),
       source: 'profile-link',
     };
   }
-  if (displayName) {
+  const anyName = firstDisplayNameCandidate([signals.displayName, signals.h1, signals.ogTitle, signals.title]);
+  if (anyName) {
     return { ok: false, reason: 'facebook display name is present but no stable numeric id candidate was found' };
   }
   return { ok: false, reason: 'facebook stable numeric id candidate was not found' };
@@ -132,10 +204,16 @@ const FACEBOOK_IDENTITY_SCAN_JS = `(function(){
   function attr(el, name){ return el && el.getAttribute ? (el.getAttribute(name) || '') : ''; }
   function text(el){ return el ? (el.textContent || '').replace(/\\s+/g, ' ').trim() : ''; }
   var hrefs = [];
-  var anchors = document.querySelectorAll('a[href*="profile.php?id="],a[href*="/people/"]');
-  for (var i = 0; i < anchors.length && hrefs.length < 20; i++) {
+  var profileAnchors = [];
+  // 顶栏头像自链一般是 profile.php?id=<自己>（其 aria-label 形如「<昵称>的头像」），/me 为其自链变体。
+  var anchors = document.querySelectorAll('a[href*="profile.php?id="],a[href*="/people/"],a[href$="/me"],a[href*="/me/"]');
+  for (var i = 0; i < anchors.length && profileAnchors.length < 30; i++) {
     var h = attr(anchors[i], 'href');
-    if (h) hrefs.push(h);
+    if (!h) continue;
+    profileAnchors.push({ href: h, ariaLabel: attr(anchors[i], 'aria-label') || null });
+    // profileHrefs 只收 profile.php?id= / people（数字 id 派生输入，逐字保持既有行为，不含 /me）。
+    var isProfileHref = h.indexOf('profile.php?id=') >= 0 || h.indexOf('/people/') >= 0;
+    if (isProfileHref && hrefs.length < 20) hrefs.push(h);
   }
   var menuName = null;
   var labels = document.querySelectorAll('[aria-label]');
@@ -151,6 +229,7 @@ const FACEBOOK_IDENTITY_SCAN_JS = `(function(){
   return JSON.stringify({
     href: location.href,
     profileHrefs: hrefs,
+    profileAnchors: profileAnchors,
     displayName: menuName,
     h1: text(mainH1) || null,
     ogTitle: og ? attr(og, 'content') || null : null,
@@ -162,9 +241,15 @@ const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(r
 
 function normalizeFacebookIdentitySignals(raw: FacebookIdentitySignals, cookieUserId: string | null): FacebookIdentitySignals {
   const profileHrefs = Array.isArray(raw.profileHrefs) ? raw.profileHrefs.filter((href): href is string => typeof href === 'string') : [];
+  const profileAnchors = Array.isArray(raw.profileAnchors)
+    ? raw.profileAnchors
+        .filter((a): a is FacebookProfileAnchor => !!a && typeof a.href === 'string')
+        .map((a) => ({ href: a.href, ariaLabel: typeof a.ariaLabel === 'string' ? a.ariaLabel : null }))
+    : [];
   return {
     href: typeof raw.href === 'string' ? raw.href : '',
     profileHrefs,
+    profileAnchors,
     cookieUserId,
     displayName: typeof raw.displayName === 'string' ? raw.displayName : null,
     h1: typeof raw.h1 === 'string' ? raw.h1 : null,
@@ -197,14 +282,20 @@ function selfIdentitySource(source: FacebookIdentitySource): 'in-place' | 'faceb
   return String(source).startsWith('cookie') ? 'facebook-cookie' : 'in-place';
 }
 
+/**
+ * 读出 Facebook 登录账号身份（数字 id + 昵称）。
+ * - 数字 id：cookie `c_user` / profile 锚点 / profile URL 锚定（逐字保持既有行为）。
+ * - 昵称：**就地** id 锚定读取（本人头像锚点 aria-label「<昵称>的头像」），**绝不导航 /me**、非本人主页页不取页面标题。
+ * - 昵称随顶栏异步渲染 → 按次数上界就地轮询等它出现；耗尽仍无 → 诚实以空昵称返回（不阻断身份、不猜、不导航）。
+ */
 export async function readFacebookIdentity(
   cdp: BrowseCdp,
   opts: ReadSelfIdentityOptions = {},
 ): Promise<SelfIdentityResult> {
   const log = opts.logger ?? (() => undefined);
   const sleep = opts.sleep ?? defaultSleep;
-  const allowNavigate = opts.allowNavigate ?? true;
-  const navTimeout = opts.navigateTimeoutMs ?? 4000;
+  const hydrateTimeoutMs = opts.hydrateTimeoutMs ?? 3000;
+  const hydrateIntervalMs = opts.hydrateIntervalMs ?? 500;
 
   const cookie = await readFacebookCookieUserId(cdp);
   if (!cookie.ok) {
@@ -212,46 +303,34 @@ export async function readFacebookIdentity(
     return { ok: false, reason: cookie.reason };
   }
 
-  const signals = await scanFacebookIdentitySignals(cdp, cookie.accountId);
-  if (!signals) {
-    return { ok: false, reason: 'facebook identity scan returned invalid JSON' };
-  }
-  let derived = deriveFacebookIdentity(signals);
-  if (!derived.ok) {
-    log(`[facebook-identity] ${derived.reason}`);
-    return { ok: false, reason: derived.reason };
-  }
-  if (!derived.displayName && allowNavigate) {
-    try {
-      await cdp.send('Page.navigate', { url: 'https://www.facebook.com/me' });
-      await sleep(navTimeout);
-      const profileSignals = await scanFacebookIdentitySignals(cdp, cookie.accountId);
-      if (profileSignals) {
-        const profileDerived = deriveFacebookIdentity(profileSignals);
-        if (profileDerived.ok) {
-          if (profileDerived.accountId !== derived.accountId) {
-            const reason = `facebook /me identity mismatch: expected ${derived.accountId}, got ${profileDerived.accountId}`;
-            log(`[facebook-identity] ${reason}`);
-            return { ok: false, reason };
-          }
-          if (profileDerived.displayName) derived = { ...derived, displayName: profileDerived.displayName };
-        } else {
-          log(`[facebook-identity] /me nickname probe skipped: ${profileDerived.reason}`);
-        }
+  // 就地有界重试（不导航）：昵称随顶栏异步渲染，按【次数上界】轮询等它出现。
+  // 用迭代次数限界（不依赖 now() 前进——单测常注入恒定假时钟，靠 deadline 会死循环）。
+  const attempts = Math.max(1, Math.ceil(hydrateTimeoutMs / Math.max(1, hydrateIntervalMs)) + 1);
+  let lastReason = 'facebook identity scan returned invalid JSON';
+  let bestIdentity: SelfIdentity | null = null;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const signals = await scanFacebookIdentitySignals(cdp, cookie.accountId);
+    if (signals) {
+      const derived = deriveFacebookIdentity(signals);
+      if (derived.ok) {
+        const identity: SelfIdentity = {
+          accountId: derived.accountId,
+          displayName: derived.displayName,
+          redId: null,
+          source: selfIdentitySource(derived.source),
+        };
+        if (derived.displayName) return { ok: true, identity };
+        bestIdentity = identity; // id 已确立、昵称尚空 → 记为兜底，继续等昵称就地渲染
       } else {
-        log('[facebook-identity] /me nickname probe returned invalid JSON');
+        lastReason = derived.reason;
       }
-    } catch (err) {
-      log(`[facebook-identity] /me nickname probe failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+    if (attempt < attempts - 1) await sleep(hydrateIntervalMs);
   }
-  return {
-    ok: true,
-    identity: {
-      accountId: derived.accountId,
-      displayName: derived.displayName,
-      redId: null,
-      source: selfIdentitySource(derived.source),
-    },
-  };
+  if (bestIdentity) {
+    log(`[facebook-identity] 就地读出 id=${bestIdentity.accountId}，昵称就地未读到 → 诚实留空（不再跳 /me）`);
+    return { ok: true, identity: bestIdentity };
+  }
+  log(`[facebook-identity] ${lastReason}`);
+  return { ok: false, reason: lastReason };
 }
