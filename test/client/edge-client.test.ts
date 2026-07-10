@@ -383,6 +383,20 @@ test('edge-client: group.join 路由到 browseHandler（Facebook 命令处理器
   assert.equal(calls.length, 1, 'group.join 应被路由到 handler 而非在入口丢弃');
   assert.equal(calls[0].type, 'group.join');
 });
+
+test('edge-client: edge.task.acquire/release 路由到任务控制处理器', async () => {
+  const ws = new FakeWebSocket();
+  const client = await connectClient(ws);
+  const calls: Envelope[] = [];
+  client.onEdgeTaskCommand((env) => calls.push(env));
+  ws.emitMessage(makeEnvelope('edge.task.acquire', 'task-acquire', 2, {
+    taskId: 'task-1', kind: 'publish', priority: 'human', leaseMs: 60_000,
+  }));
+  ws.emitMessage(makeEnvelope('edge.task.release', 'task-release', 3, {
+    taskId: 'task-1', outcome: 'completed',
+  }));
+  assert.deepEqual(calls.map((env) => env.type), ['edge.task.acquire', 'edge.task.release']);
+});
 // 回归：陪伴界面数据快照（ui.snapshot，cloud 主动推送）MUST 路由到 onUiSnapshot 处理器，
 // 不得在入口静默丢弃（§2 第4处同步点；edge-companion-ui 8.1）。
 test('edge-client: ui.snapshot 路由到 uiSnapshotHandler（不得静默丢弃）', async () => {

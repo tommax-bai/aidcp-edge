@@ -347,6 +347,12 @@ export class BrowseSession {
   /** 命令队列：外部通过 onCloudCommand() 推入，loop() 消费 */
   private commandQueue: Envelope[] = [];
   private commandResolver: ((env: Envelope) => void) | null = null;
+  /** 任务租约冻结普通浏览命令；带当前 taskId 的评论/维护命令仍由同一 loop 执行。 */
+  private taskBlocked = false;
+  private taskBlockEpoch = 0;
+  /** 当前正在执行的启动/命令原子区；quiesce 只等到该边界，不排空旧命令。 */
+  private activeOperationCount = 0;
+  private readonly operationIdleWaiters = new Set<() => void>();
   /** 收到 session.end 时云端给出的自动续场休息时长；等循环真正停稳时展示给桌面壳。 */
   private pendingAutoResumeInMs: number | undefined;
 
@@ -646,14 +652,18 @@ export class BrowseSession {
     this.logger('[browse] 启动命令驱动浏览循环');
     this.subscribeCdpLifecycle();
     try {
-      await this.ensureExplore();
-      // 初始扫描延迟：真人打开页面后会先扫一眼 feed 再点击（3-6s）
-      const scanDelay = sampleDelay(
-        { mu: Math.log(4500), sigma: 0.3, min: 3000, max: 7000 },
-        this.random,
-      );
-      this.logger(`[browse] 扫描 feed（${Math.round(scanDelay / 1000)}s）...`);
-      await this.sleep(scanDelay);
+      if (!this.taskBlocked) {
+        await this.trackOperation(async () => {
+          await this.ensureExplore();
+          // 初始扫描延迟：真人打开页面后会先扫一眼 feed 再点击（3-6s）
+          const scanDelay = sampleDelay(
+            { mu: Math.log(4500), sigma: 0.3, min: 3000, max: 7000 },
+            this.random,
+          );
+          this.logger(`[browse] 扫描 feed（${Math.round(scanDelay / 1000)}s）...`);
+          await this.sleep(scanDelay);
+        });
+      }
 
       await this.loop();
     } finally {
@@ -740,6 +750,68 @@ export class BrowseSession {
     if (count > 0) this.logger(`[browse] 云端连接断开，已丢弃 ${count} 条旧命令（reason=${reason}）`);
   }
 
+  /**
+   * 独占任务接管：先封住普通浏览准入、丢弃尚未开始的旧命令，再等待当前原子操作收敛。
+   * 返回被取消的旧命令数，供 edge.task.acquired 可观测上报。
+   */
+  async quiesceForTask(): Promise<number> {
+    this.taskBlocked = true;
+    this.taskBlockEpoch++;
+    this.wakeAfterStop = false;
+    const cancelled = this.commandQueue.length;
+    this.commandQueue = [];
+    if (cancelled > 0) this.logger(`[browse] 任务接管取消 ${cancelled} 条未开始的旧浏览命令`);
+    if (this.activeOperationCount === 0) return cancelled;
+    await new Promise<void>((resolve) => this.operationIdleWaiters.add(resolve));
+    return cancelled;
+  }
+
+  /** 最后一个独占任务释放：回真实 feed/search，再解除冻结并重报快照。 */
+  async resumeAfterTask(): Promise<void> {
+    if (!this.taskBlocked) return;
+    const resumeEpoch = this.taskBlockEpoch;
+    if (!this.running) {
+      if (this.taskBlockEpoch === resumeEpoch) this.taskBlocked = false;
+      if (!this.closing && !this.stopRequested) void this.start().catch((err) => this.logger(`[browse] 任务后重启失败：${(err as Error).message}`));
+      return;
+    }
+    const overlayStillBlocked = this.deps.overlayMonitor && isBlockingKind(this.deps.overlayMonitor.state);
+    if (overlayStillBlocked) {
+      // 验证码仍在时不等待恢复（否则下一次 system_recovery acquire 会与此等待互锁）。传输层硬暂停
+      // 已阻止普通命令；浏览 loop 自己继续等浮层清除，下一次人工点击仍可立即取得系统租约。
+      if (this.taskBlockEpoch === resumeEpoch) this.taskBlocked = false;
+      this.logger('[browse] 系统恢复任务已释放但阻断仍在，保持本地闸门等待下一次恢复动作');
+      return;
+    }
+    try {
+      await this.waitWhileBlocked();
+      if (this.taskBlockEpoch !== resumeEpoch) return;
+      await this.trackOperation(async () => {
+        await this.ensureExplore();
+        await this.waitForVisibleCards(this.initialScanTimeoutMs);
+        await this.reportVisibleCards();
+      });
+    } finally {
+      // 若恢复期间来了新 acquire，epoch 已推进，绝不能误清新任务的冻结。
+      if (this.taskBlockEpoch === resumeEpoch) this.taskBlocked = false;
+    }
+    this.logger('[browse] 独占任务队列已清空，按当前页面恢复浏览');
+  }
+
+  private async trackOperation<T>(work: () => Promise<T>): Promise<T> {
+    this.activeOperationCount++;
+    try {
+      return await work();
+    } finally {
+      this.activeOperationCount--;
+      if (this.activeOperationCount === 0) {
+        const waiters = [...this.operationIdleWaiters];
+        this.operationIdleWaiters.clear();
+        for (const resolve of waiters) resolve();
+      }
+    }
+  }
+
   /** 等待 CDP 重连结果：reconnected→true / unrecoverable→false。无 on() 能力（测试桩）即视为失败。 */
   private waitForReconnect(): Promise<boolean> {
     if (!this.deps.cdp.on) return Promise.resolve(false);
@@ -785,6 +857,11 @@ export class BrowseSession {
    * 外部（WebSocket 接收层）调用此方法将云端命令送入队列，loop() 消费执行。
    */
   async onCloudCommand(env: Envelope): Promise<void> {
+    const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
+    if (this.taskBlocked && typeof taskId !== 'string') {
+      this.logger(`[browse] 独占任务期间丢弃普通命令 ${env.type}`);
+      return;
+    }
     // 循环已停（如云端 session.end 后）：浏览类命令唤醒重启循环，让自动续场 / idle 看门狗 nudge 能复活闭环
     // （change restore-auto-resume A②）。否则命令会被静默堆进无人消费的队列（loop 已退出、无人 shift）。
     // 终态关闭（closing：进程下线 / CDP 死局）一律不复活；session.end 本身不唤醒（它就是来停的）。
@@ -998,16 +1075,21 @@ export class BrowseSession {
     // 不发 page.cards → 云端只被 page.cards.arrived 驱动 → 两端互等死锁。
     // 故先轮询等卡片真正渲染出来再上报；getVisibleCards 一旦有卡即返回，feed 已就绪时几乎零延迟。
     // 弹窗闸门：冷启动若停在登录/验证码浮层（含 launcher 误放行的兜底），先暂停再上报。
-    await this.waitWhileBlocked();
-    await this.waitForVisibleCards(this.initialScanTimeoutMs);
-    // 上报初始可见卡片
-    await this.reportVisibleCards();
+    if (!this.taskBlocked) {
+      // 阻断等待本身不占页面写原子区：system_recovery 租约必须能穿透验证码等待并执行人工点击。
+      await this.waitWhileBlocked();
+      if (!this.taskBlocked) await this.trackOperation(async () => {
+        await this.waitForVisibleCards(this.initialScanTimeoutMs);
+        // 上报初始可见卡片
+        await this.reportVisibleCards();
+      });
+    }
 
     while (!this.stopRequested) {
       const cmd = await this.waitForCommand();
       if (this.stopRequested) return;
       try {
-        await this.executeCommand(cmd);
+        await this.trackOperation(() => this.executeCommand(cmd));
         // 记账：命令的原子动作 + 功能性 settle + uplink 已完成，把「上次操作完成时刻」推进到现在，
         // 让下一动作的最小间隔从此刻起算、与云端 idle 看门狗量同一段 gap（设计 §4.3）。
         // session.end 非操作、stopRequested 时本命令已被 gate 中止 → 不记账。

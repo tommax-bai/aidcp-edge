@@ -57,12 +57,18 @@ import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
 import { publishPost } from './flows/publish-post.js';
 import { PublishCommandDispatcher } from './flows/publish-command-handlers.js';
+import { EdgeTaskCoordinator } from './execution/edge-task-coordinator.js';
 import { PublishUiEventTracker, uiSnapshotToLines, writeNoteStageLine } from './flows/ui-event-lines.js';
 import { ImageUploader, imageTempPrefixFor, sweepImageTempDirs } from './flows/image-uploader.js';
 import { CdpFileInputSetter } from './cdp/file-input-setter.js';
 import { AnchorCache } from './locating/cache.js';
 import { buildPublishApprovalRequestId } from './publish/approval-gate.js';
-import type { PublishResultPayload, PublishCommandResultPayload } from './comm/protocol.js';
+import type {
+  PublishResultPayload,
+  PublishCommandResultPayload,
+  EdgeTaskAcquirePayload,
+  EdgeTaskReleasePayload,
+} from './comm/protocol.js';
 import {
   BrowseSession,
   CdpFeedScroller,
@@ -252,6 +258,27 @@ async function main(): Promise<void> {
   let watcherSupervisor: WatcherSupervisor | undefined;
   let identityWatcher: IdentityWatcher | undefined;
   let requestShutdown: ((reason: string) => void) | undefined;
+  const taskCoordinator = new EdgeTaskCoordinator({
+    browse: {
+      quiesceForTask: () => browse?.quiesceForTask() ?? Promise.resolve(0),
+      resumeAfterTask: () => browse?.resumeAfterTask() ?? Promise.resolve(),
+    },
+    onAcquired: (payload) => {
+      try {
+        client.send('edge.task.acquired', payload);
+      } catch (err) {
+        console.error('[aidcp-edge] edge.task.acquired 回传失败:', err);
+      }
+    },
+    onReleased: (payload) => {
+      try {
+        client.send('edge.task.released', payload);
+      } catch (err) {
+        console.error('[aidcp-edge] edge.task.released 回传失败:', err);
+      }
+    },
+    logger: (message) => console.log(message),
+  });
 
   // §7 回收契约：把全部在途发布诚实判失败（须在关闭云端连接之前发，确保失败回执发得出去）。
   // 云端 WS 已断时 send 会 best-effort 失败，但本地 in-flight 必须立刻清掉，避免重连后重放旧发布。
@@ -262,6 +289,7 @@ async function main(): Promise<void> {
 
   client.on('cloud.disconnected', () => {
     failInFlightPublishesHonestly('cloud_ws_disconnected');
+    taskCoordinator.reset('cloud_ws_disconnected');
     browse?.discardQueuedCloudCommands('cloud_ws_disconnected');
   });
   client.on('cloud.reconnected', () => {
@@ -284,6 +312,14 @@ async function main(): Promise<void> {
   // 云端在 welcome 回发后立刻推 hello 快照（ui.snapshot）——若 welcome 与快照同一批 socket 读到达，
   // 两帧在同一宏任务内派发，connect() 的续体（微任务）还没来得及跑注册代码，后注册的处理器
   // 会静默漏掉首帧。注册本身不需要活连接，先注册零成本。
+  client.onEdgeTaskCommand((env) => {
+    if (env.type === 'edge.task.acquire') {
+      taskCoordinator.acquire(env.payload as EdgeTaskAcquirePayload);
+    } else if (env.type === 'edge.task.release') {
+      taskCoordinator.release(env.payload as EdgeTaskReleasePayload);
+    }
+  });
+
   client.onPublishCommand((env) => {
     void (async () => {
       console.log(writeNoteStageLine());
@@ -376,6 +412,24 @@ async function main(): Promise<void> {
   // 陪伴界面事件（edge-companion-ui 6.4）：发布终态的本地事实经 [ui-event] 行直达桌面壳。
   const publishUiEvents = new PublishUiEventTracker();
   client.onPublishAtomCommand((env) => {
+    if (!taskCoordinator.canExecute(env.payload.taskId)) {
+      client.send(
+        'publish.command.result',
+        {
+          recordId: env.payload.recordId,
+          seq: env.payload.seq,
+          kind: env.payload.kind,
+          ok: false,
+          error: 'task_lease_mismatch',
+        },
+        env.id,
+      );
+      console.warn(
+        `[aidcp-edge] 拒绝无效发布租约 taskId=${env.payload.taskId || '-'} current=${taskCoordinator.currentTaskId ?? '-'}`,
+      );
+      return;
+    }
+    taskCoordinator.touch(env.payload.taskId);
     void (async () => {
       console.log(writeNoteStageLine());
       publishUiEvents.observe(env.payload);
@@ -440,6 +494,23 @@ async function main(): Promise<void> {
   });
   client.onCaptchaAssistCommand((env) => {
     if (env.type !== 'captcha.assist.capture' && env.type !== 'captcha.assist.click') return;
+    if (env.type === 'captcha.assist.click') {
+      const clickPayload = env.payload as { taskId?: string; incidentId: string; snapshotId: string };
+      const taskId = clickPayload.taskId;
+      if (!taskId || !taskCoordinator.canExecute(taskId)) {
+        client.send('captcha.assist.click_result', {
+          incidentId: clickPayload.incidentId,
+          snapshotId: clickPayload.snapshotId,
+          edgeId,
+          ...(accountId ? { accountId } : {}),
+          status: 'failed',
+          reason: 'task_lease_mismatch',
+          checkedAt: Date.now(),
+        });
+        return;
+      }
+      taskCoordinator.touch(taskId);
+    }
     captchaAssist.handle(env.type, env.payload).catch((err) => {
       console.error(`[aidcp-edge] 验证码协助指令 ${env.type} 处理失败:`, err);
     });
@@ -478,6 +549,15 @@ async function main(): Promise<void> {
       logger: (m) => console.log(m),
     });
     client.onBrowseCommand((env) => {
+      const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
+      const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
+      if (!taskCoordinator.canExecute(ownedTaskId)) {
+        console.warn(
+          `[aidcp-edge] Facebook 命令被任务租约抑制 type=${env.type} taskId=${ownedTaskId ?? '-'} current=${taskCoordinator.currentTaskId ?? '-'}`,
+        );
+        return;
+      }
+      if (ownedTaskId) taskCoordinator.touch(ownedTaskId);
       void fbCommentHandler.handle(env);
     });
     console.log(`[aidcp-edge] Facebook 定向评论处理器已注册（platform=${platformDriver.platform}）`);
@@ -587,10 +667,20 @@ async function main(): Promise<void> {
         console.log(`[aidcp-edge] 收到云端命令 ${env.type} 但浏览会话未创建，忽略`);
         return;
       }
+      const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
+      const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
+      if (!taskCoordinator.canExecute(ownedTaskId)) {
+        console.warn(
+          `[aidcp-edge] 任务租约抑制命令 type=${env.type} taskId=${ownedTaskId ?? '-'} current=${taskCoordinator.currentTaskId ?? '-'}`,
+        );
+        return;
+      }
+      if (ownedTaskId) taskCoordinator.touch(ownedTaskId);
       browse.onCloudCommand(env).catch((err) => {
         console.error(`[aidcp-edge] 执行云端命令 ${env.type} 失败:`, err);
       });
     });
+    if (taskCoordinator.blocksBrowse) await browse.quiesceForTask();
     // 不 await：浏览循环长跑，与命令收发并行
     browse.start().catch((err) => {
       console.error('[aidcp-edge] 浏览会话异常:', err);

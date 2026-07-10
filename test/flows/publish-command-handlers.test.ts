@@ -98,7 +98,7 @@ function depsFor(doc: Document, executor: ActionExecutor) {
 }
 
 function cmd(kind: PublishCommandPayload['kind'], params: PublishCommandPayload['params'] = {}, seq = 0): PublishCommandPayload {
-  return { recordId: 100, seq, kind, params };
+  return { taskId: 'task-publish-1', recordId: 100, seq, kind, params };
 }
 
 /** instant sleep：拟人停顿在测试里无延迟（保持快+确定），逻辑（逐字/点击调用）仍真实执行。 */

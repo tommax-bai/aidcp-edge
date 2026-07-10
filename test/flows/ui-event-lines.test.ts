@@ -15,7 +15,7 @@ import {
 import type { PublishCommandPayload, PublishCommandResultPayload } from '../../src/comm/protocol.js';
 
 function cmd(kind: PublishCommandPayload['kind'], seq: number, params: unknown = {}, recordId = 83): PublishCommandPayload {
-  return { recordId, seq, kind, params: params as PublishCommandPayload['params'] };
+  return { taskId: 'task-publish-1', recordId, seq, kind, params: params as PublishCommandPayload['params'] };
 }
 
 function res(payload: PublishCommandPayload, ok: boolean, error?: string): PublishCommandResultPayload {

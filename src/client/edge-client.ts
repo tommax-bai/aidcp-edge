@@ -38,6 +38,8 @@ import {
   type ProfileDetailPayload,
   type WelcomePayload,
   type PacingSnapshotPayload,
+  type EdgeTaskAcquirePayload,
+  type EdgeTaskReleasePayload,
 } from '../comm/protocol.js';
 
 /** 最小 WebSocket 抽象（与 cdp/client.ts 同形，便于测试注入） */
@@ -65,6 +67,8 @@ export type BrowseCommandHandler = (env: Envelope) => void;
 export type PublishCommandHandler = (env: Envelope<PublishRequestPayload>) => void;
 /** A 阶段1 指令驱动发布：单条参数化原子指令处理器（publish.command）。 */
 export type PublishAtomCommandHandler = (env: Envelope<PublishCommandPayload>) => void;
+/** 同一 edge/CDP 页面写任务租约控制（acquire/release）。 */
+export type EdgeTaskCommandHandler = (env: Envelope<EdgeTaskAcquirePayload | EdgeTaskReleasePayload>) => void;
 /** 验证码云端协助指令处理器（captcha.assist.capture/click）。 */
 export type CaptchaAssistCommandHandler = (
   env: Envelope<CaptchaAssistCapturePayload | CaptchaAssistClickPayload>,
@@ -160,6 +164,7 @@ export class EdgeClient {
   private browseHandler?: BrowseCommandHandler;
   private publishHandler?: PublishCommandHandler;
   private publishAtomHandler?: PublishAtomCommandHandler;
+  private edgeTaskHandler?: EdgeTaskCommandHandler;
   private captchaAssistHandler?: CaptchaAssistCommandHandler;
   private uiSnapshotHandler?: UiSnapshotHandler;
 
@@ -292,6 +297,13 @@ export class EdgeClient {
     this.publishAtomHandler = handler;
     return () => {
       if (this.publishAtomHandler === handler) this.publishAtomHandler = undefined;
+    };
+  }
+
+  onEdgeTaskCommand(handler: EdgeTaskCommandHandler): () => void {
+    this.edgeTaskHandler = handler;
+    return () => {
+      if (this.edgeTaskHandler === handler) this.edgeTaskHandler = undefined;
     };
   }
 
@@ -517,6 +529,11 @@ export class EdgeClient {
 
     if (env.type === 'publish.command') {
       this.publishAtomHandler?.(env as Envelope<PublishCommandPayload>);
+      return;
+    }
+
+    if (env.type === 'edge.task.acquire' || env.type === 'edge.task.release') {
+      this.edgeTaskHandler?.(env as Envelope<EdgeTaskAcquirePayload | EdgeTaskReleasePayload>);
       return;
     }
 

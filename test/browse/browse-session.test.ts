@@ -1748,3 +1748,77 @@ test('pacing: page.scroll 缺 dwellMs（返回未刷新/旧云端）→ 立即�
   ]);
   assert.ok(!sleeps.some((ms) => ms > ISOLATE), `缺 dwellMs 不应有 feed 兜底停留，实际: ${sleeps}`);
 });
+
+test('task quiesce: 等当前浏览原子动作完成、取消未开始旧命令，租约释放后按新快照恢复', async () => {
+  const h = makeHarness();
+  let releaseScroll!: () => void;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const scrollGate = new Promise<void>((resolve) => { releaseScroll = resolve; });
+  let scrollCalls = 0;
+  h.deps.scroller.scrollNext = async () => {
+    scrollCalls++;
+    markStarted();
+    await scrollGate;
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  const running = sess.start();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await sess.onCloudCommand(makeEnvelope('page.scroll', 'active-scroll', 0, { reason: 'active' }));
+  await started;
+  // 当前 scroll 执行中，把一个旧 back 排进队列；quiesce 必须丢它而不是先排空。
+  await sess.onCloudCommand(makeEnvelope('navigation.back', 'stale-back', 0, { reason: 'stale' }));
+  let settled = false;
+  const quiesced = sess.quiesceForTask().then((count) => { settled = true; return count; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, '当前原子动作尚未收敛前不能回 quiesced');
+  releaseScroll();
+  assert.equal(await quiesced, 1, '未开始的旧 back 被取消');
+
+  await sess.resumeAfterTask();
+  await sess.onCloudCommand(makeEnvelope('page.scroll', 'fresh-scroll', 0, { reason: 'new_page_decision' }));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await sess.onCloudCommand(makeEnvelope('session.end', 'end-after-task', 0, { reason: 'done' }));
+  await running;
+  assert.equal(scrollCalls, 2, '释放后新浏览命令可执行（未永久冻结）');
+  assert.equal(h.completedActions.some((item) => item.action === 'back'), false, '被取消的旧 back 从未重放');
+});
+
+test('task quiesce regression: 在途 navigation.back 完成后才允许发布 acquire 收敛', async () => {
+  const h = makeHarness();
+  const originalSend = h.deps.cdp.send.bind(h.deps.cdp);
+  let detailMode = false;
+  let releaseNavigate!: () => void;
+  let markNavigateStarted!: () => void;
+  const navigateStarted = new Promise<void>((resolve) => { markNavigateStarted = resolve; });
+  const navigateGate = new Promise<void>((resolve) => { releaseNavigate = resolve; });
+  h.deps.cdp.send = async (method: string, params: Record<string, unknown> = {}) => {
+    if (method === 'Runtime.evaluate' && String(params.expression ?? '').includes('location.href')) {
+      return { result: { value: detailMode ? 'https://www.xiaohongshu.com/explore/note-1' : 'https://www.xiaohongshu.com/explore' } } as never;
+    }
+    if (detailMode && method === 'Page.navigate') {
+      markNavigateStarted();
+      await navigateGate;
+      detailMode = false;
+      return {} as never;
+    }
+    return originalSend(method, params);
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  const running = sess.start();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  detailMode = true;
+  await sess.onCloudCommand(makeEnvelope('navigation.back', 'active-back', 0, { reason: 'back_to_feed' }));
+  await navigateStarted;
+  await sess.onCloudCommand(makeEnvelope('page.scroll', 'stale-scroll', 0, { reason: 'old_page_decision' }));
+  let acquired = false;
+  const quiesced = sess.quiesceForTask().then((count) => { acquired = true; return count; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(acquired, false, 'navigation.back 的 Page.navigate 未完成时不得回 acquired');
+  releaseNavigate();
+  assert.equal(await quiesced, 1, 'back 后尚未开始的旧 scroll 被取消');
+  assert.equal(h.completedActions.some((item) => item.action === 'back' && item.ok), true);
+  await sess.resumeAfterTask();
+  await sess.onCloudCommand(makeEnvelope('session.end', 'end-after-back', 0, { reason: 'done' }));
+  await running;
+});
