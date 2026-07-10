@@ -1109,6 +1109,9 @@ function startEdge(handle) {
   handle.browserAlreadyRunning = false;
   handle.coreParked = false;
   handle.closePending = false;
+  // 每次真正拉起核心前清「本次运行遇内核缺失」标记：该标记只反映本 core run 是否撞过
+  // 「SunBrowser <N> is not ready」，退出处据此把内核缺失退出识别为可恢复的「准备内核」而非失败。
+  handle.kernelMissThisRun = false;
   handle.spawnedAtMs = Date.now();
   // 换会话重置已绑人设信号（change persona-badge-preconnect-neutral）：云端只在为真时下发 personaBound、从不发 false，
   // 若上一会话该环境曾已绑、随后被解绑再重启，stale-true 会残留成误显示「已设置」——每次启动清零、待新会话权威信号重建。
@@ -1212,7 +1215,13 @@ function startEdge(handle) {
     }
     scheduleRespawnIfNeeded(handle, decision);
   });
-  child.on('exit', (code, signal) => {
+  // 终局判定挂 'close'（非 'exit'）：Node 只保证 'close' 在 stdio 全部 drain 后触发、且必在 'exit' 之后；
+  // 'exit' 可能早于末尾 stdout/stderr 'data'，那样内核缺失退出时 kernelMissThisRun/neededKernel 尚未由
+  // handleEdgeLogLine 写入 → 被误判为硬失败、弹出本 change 意在消除的启动失败通知。改挂 'close' 后，
+  // 「SunBrowser <N> is not ready」等末行必已处理完，内核缺失分类可靠。（spawn 失败无 'close'，由上方 'error'
+  // 经 handle.child===child 互斥兜底；核心不派生继承 stdio 的孙进程，'close' 及时触发；退出应用的有界等待
+  // 读 handle.child、'close' 仅晚 'exit' 数毫秒，远在 ~10s 预算内。）
+  child.on('close', (code, signal) => {
     if (handle.child !== child) return; // 已被 'error' 处理器接管
     const wasClosing = handle.closePending;
     const wasParked = handle.coreParked;
@@ -1243,6 +1252,31 @@ function startEdge(handle) {
     const willRespawn = decision.action === 'respawn';
     const gaveUp = decision.action === 'give-up';
     if (gaveUp) handle.gaveUp = true;
+
+    // 内核缺失退出 = 「所需内核尚未下载」的可恢复态：不弹失败、不置 edgeFailure、不惊扰运维，呈现「正在准备
+    // 浏览器内核」，随后由 respawn 的预检下载正确内核并重启（全自动，无需人工）。守卫（红线：不静默掩盖真失败）：
+    // 仅当决策仍是 respawn（未耗尽重试）、本次运行确因内核缺失退出、且该版本尚未被确保过时才如此；否则（已确保
+    // 过该版本仍失败 / 重试耗尽）走下方正常失败呈现。下载本身失败在预检处已诚实暴露，不经此路。
+    const neededKernelV = handle.neededKernel ? String(handle.neededKernel) : '';
+    const kernelMissExit = exitedAbnormally && willRespawn && handle.kernelMissThisRun && neededKernelV
+      && !(handle.kernelEnsuredVersions && handle.kernelEnsuredVersions.has(neededKernelV));
+    if (kernelMissExit) {
+      updateStatus(handle, {
+        edge: 'starting',
+        cloud: 'disconnected',
+        session: handle.status.session === 'paused' ? 'paused' : 'idle',
+        risk: 'normal',
+        ...(handle.kind === 'adspower' ? { auth: 'checking' } : {}),
+        overlayBlocked: false,
+        respawnGaveUp: false,
+        kernelPrep: { state: 'pending', percent: 0, version: neededKernelV },
+        lastMessage: `检测到该环境需要浏览器内核 ${neededKernelV}，正在准备下载后自动重启…`,
+        ...presencePatch(`准备浏览器内核 ${neededKernelV}…`),
+        ...clearEdgeFailurePatch(handle),
+      });
+      scheduleRespawnIfNeeded(handle, decision); // 由预检下载内核后重启；不弹失败通知、不进入下方失败呈现
+      return;
+    }
 
     updateStatus(handle, {
       edge: exitedAbnormally ? 'warning' : 'stopped',
@@ -1526,6 +1560,12 @@ async function ensureAdsRuntimeAndKernel(handle) {
     }
     return { ok: false, error: kres.error };
   }
+  if (handle) {
+    // 记下已成功确保就绪的内核版本（已在盘 or 刚下完）。若之后 browser/start 仍报该版本 not ready，
+    // 属真异常（非「尚未下载」），不再当可恢复的内核准备处理——见 handleEdgeLogLine / 核心退出处的 kernelMissExit 守卫。
+    if (!handle.kernelEnsuredVersions) handle.kernelEnsuredVersions = new Set();
+    handle.kernelEnsuredVersions.add(String(version));
+  }
   if (handle) appendEdgeLog(handle.envId, kres.alreadyPresent ? `浏览器内核 ${version} 已就绪` : `浏览器内核 ${version} 下载完成`);
   if (handle) updateStatus(handle, { kernelPrep: null, ...clearEdgeFailurePatch(handle) });
   return { ok: true, mode: svc.mode, base: svc.base };
@@ -1622,10 +1662,29 @@ function handleEdgeLogLine(handle, message, isError = false) {
   }
   appendEdgeLog(handle.envId, message, isError); // 落文件（排障回溯，独立于下方状态判断）
   // AdsPower profile 可绑 ≠ DEFAULT_KERNEL 的内核；browser/start 会诚实报「SunBrowser <N> is not ready」。
-  // 捕获该版本记到环境句柄，下次预检据此确保正确内核（反应式——该版本 LocalAPI user/list 不暴露）；
-  // 修 profile 内核 ≠ 默认导致的启动死循环（如某环境需 147、预检却只查 148 → 永远撞「147 not ready」）。
+  // 该版本 LocalAPI（v2 browser-profile/list 亦然）不暴露，只能据启动报错反应式获知——同 AdsPower CLI 自愈。
+  // UX 修（本次）：首次发现「内核尚未下载」不当启动失败，直接转「准备内核」进度态；不落失败候选、不翻
+  // warning、不弹通知。核心随后退出，退出处据此走可恢复分支：respawn 的预检据 neededKernel 下载正确内核
+  // 并重启。已确保过该版本仍 not ready = 真异常，不拦（走下方正常失败派生，红线：不静默掩盖真失败）。
   const kernelMiss = /SunBrowser (\d+) is not ready/.exec(message);
-  if (kernelMiss && handle) handle.neededKernel = kernelMiss[1];
+  if (kernelMiss && handle) {
+    const v = kernelMiss[1];
+    handle.neededKernel = v;
+    const alreadyEnsured = handle.kernelEnsuredVersions && handle.kernelEnsuredVersions.has(v);
+    const stoppingNow = isQuitting || handle.restartPending || handle.pausePending || handle.removed
+      || !handle.child || handle.status.session === 'paused';
+    if (!alreadyEnsured && !stoppingNow) {
+      handle.kernelMissThisRun = true;
+      updateStatus(handle, {
+        edge: 'starting',
+        kernelPrep: { state: 'pending', percent: 0, version: v },
+        lastMessage: `检测到该环境需要浏览器内核 ${v}，正在准备下载…`,
+        ...presencePatch(`准备浏览器内核 ${v}…`),
+        ...clearEdgeFailurePatch(handle),
+      });
+      return; // 该行按「内核准备」处理，跳过失败候选记忆与 warning 派生
+    }
+  }
   if (message.includes('[browser-parking] control-ready')) {
     handle.browserParkingReady = true;
     handle.browserPersonaNoticeState = null;
@@ -1782,10 +1841,13 @@ function pauseEdge(handle) {
     return;
   }
   // 无核心（如重起退避窗口）只暂停后续拉起；此时没有可被误关的 owned browser 句柄。
+  // kernelPrep 显式清零：若在内核缺失 respawn 退避窗口内暂停，会 clearRespawnTimer 掐掉唯一会清 kernelPrep 的
+  // 预检重启，残留 pending 会让机器级全局进度条永久显示「正在下载内核 N…0%」（实则无下载在进行）。
   updateStatus(handle, {
     edge: 'stopped',
     session: 'paused',
     overlayBlocked: false,
+    kernelPrep: null,
     lastMessage: '已暂停自动启动；当前没有运行中的边缘进程。',
     ...presencePatch('已暂停，随时可以恢复'),
     ...clearEdgeFailurePatch(handle),
@@ -1839,6 +1901,7 @@ function closeEdge(handle) {
       cloud: 'disconnected',
       session: 'closed',
       overlayBlocked: false,
+      kernelPrep: null, // 同 pauseEdge：清掉退避窗口内被掐断的内核缺失 respawn 残留的 pending 进度条
       lastMessage: '浏览器已关闭。',
       ...presencePatch('已关闭浏览器'),
       ...clearEdgeFailurePatch(handle),
