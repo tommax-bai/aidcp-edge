@@ -92,7 +92,7 @@ function makeExecutor(cdp: FakeCdp, overlayMonitor?: OverlayMonitor) {
       sleep: async () => {},
       logger: () => {},
     },
-    { settleMs: 0, waitAfterClickMs: 0 },
+    { settleMs: 0, waitAfterClickMs: 0, readyTimeoutMs: 2000, pollMs: 500 },
   );
 }
 
@@ -244,4 +244,39 @@ test('fb-join-executor: 同意浮层清掉后继续正常入组判定', async ()
   const r = await ex.joinGroup('https://www.facebook.com/groups/123');
   assert.equal(r.reason, 'observation_only');
   assert.equal(r.observation?.mainCtaText, 'Join group');
+});
+
+// ── change fb-group-join-wait-render：就绪轮询——等页面真渲染出决定性信号再判定，别死等固定时长（FB 网络不稳）──
+const EMPTY_OBS = () => obs({ mainCtaText: null, mainCtaAria: null, headerText: null, membershipSignals: [], joinButton: { found: false } });
+
+test('fb-join-executor: 页面仍在加载（空观察）时轮询等待，直到加入按钮渲染出来再点击加入', async () => {
+  // 前两次观察是"还在加载"（无按钮/无信号），第三次才渲染出加入按钮；点击后确认已加入。
+  const cdp = new FakeCdp([
+    EMPTY_OBS(),
+    EMPTY_OBS(),
+    obs(), // 第三次：加入按钮已渲染（默认 obs 即 joinButton.found + Join group）
+    obs({ mainCtaText: 'Joined', mainCtaAria: 'Joined', membershipSignals: ['You are now a member'], joinButton: { found: false } }),
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, true, '等到按钮渲染后成功加入');
+  assert.equal(r.clicked, true);
+  assert.equal(cdp.navigations.length, 1, '只导航一次（轮询不重复导航）');
+  assert.equal(cdp.clicks.length, 1);
+});
+
+test('fb-join-executor: 触上限仍无决定性信号 → 诚实 no_button（点击路径），绝不假成功', async () => {
+  const cdp = new FakeCdp([EMPTY_OBS()]); // 一直空
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'no_button', '等不到按钮就诚实报 no_button，不点击、不冒充成功');
+  assert.equal(r.clicked, false);
+  assert.equal(cdp.clicks.length, 0);
+});
+
+test('fb-join-executor: 观察态一直空 + observe-only → observation_only（诚实，不假成功）', async () => {
+  const cdp = new FakeCdp([EMPTY_OBS()]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123');
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'observation_only');
+  assert.equal(r.clicked, false);
 });

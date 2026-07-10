@@ -31,6 +31,9 @@ export interface FacebookGroupJoinObservation {
   questionnaireRequired?: boolean;
   pendingRequest?: boolean;
   navError?: string | null;
+  /** 可见动作节点数 + 文档就绪态（change fb-group-join-wait-render）：用于「等页面真加载完再判定」的就绪轮询 + 审计取证（看清是否观察时仍在 loading）。 */
+  actionNodeCount?: number;
+  documentReady?: string;
 }
 
 interface RawJoinObservation extends FacebookGroupJoinObservation {
@@ -56,13 +59,20 @@ export interface FacebookJoinExecutorDeps {
 }
 
 export interface FacebookJoinExecutorOptions {
+  /** 导航后、开始就绪轮询前的初始等待（缺省 0：轮询本身会等页面加载，不再靠固定时长）。 */
   settleMs?: number;
   waitAfterClickMs?: number;
+  /** 就绪轮询上限（change fb-group-join-wait-render）：等「加入按钮/成员/登录/验证码/问卷/待审」等决定性信号出现的最长时间，兜底；FB 网络不稳时靠它宽松等待。 */
+  readyTimeoutMs?: number;
+  /** 就绪轮询间隔。 */
+  pollMs?: number;
 }
 
 const DEFAULTS: Required<FacebookJoinExecutorOptions> = {
-  settleMs: 2_500,
+  settleMs: 0,
   waitAfterClickMs: 2_000,
+  readyTimeoutMs: 12_000,
+  pollMs: 600,
 };
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -96,6 +106,8 @@ function publicObservation(raw: RawJoinObservation, groupUrl: string): FacebookG
     questionnaireRequired: raw.questionnaireRequired === true,
     pendingRequest: raw.pendingRequest === true,
     navError: raw.navError ?? null,
+    actionNodeCount: typeof raw.actionNodeCount === 'number' ? raw.actionNodeCount : 0,
+    documentReady: raw.documentReady ?? undefined,
   };
 }
 
@@ -222,6 +234,8 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
   return JSON.stringify({
     pageUrl: location.href,
     title: document.title || '',
+    actionNodeCount: nodes.length,
+    documentReady: document.readyState,
     mainCtaText: main ? main.text : null,
     mainCtaAria: main ? main.aria : null,
     headerText: headerText || null,
@@ -261,20 +275,21 @@ export class FacebookJoinExecutor {
     let observation: FacebookGroupJoinObservation | undefined;
     try {
       await this.cdp.send('Page.navigate', { url: groupUrl });
-      await this.sleep(this.opts.settleMs);
-      // 先清 cookie 同意浮层（良性合规横幅）：清不掉则诚实 blocked_by_consent，绝不带浮层继续。
-      const consent = await this.acceptConsent(this.cdp);
-      if (consent.handled && !consent.cleared) {
-        observation = await this.collectObservation(groupUrl, {});
+      if (this.opts.settleMs > 0) await this.sleep(this.opts.settleMs);
+      // 就绪轮询（change fb-group-join-wait-render）：反复观察，直到出现决定性信号（加入按钮已渲染 / 已是成员 /
+      // 需登录 / 验证码 / 问卷 / 待审 / 同意浮层清不掉）或触上限——按「页面真加载出来」判定，而非死等固定时长
+      // （FB 群页头部+按钮实测常需数秒、且网络不稳）。同意/阻断浮层在轮询内每轮幂等处理。触上限仍无信号 → 用最后一次观察诚实交云端判定。
+      const ready = await this.observeUntilReady(groupUrl);
+      if (ready.consentBlocked) {
+        observation = ready.observation;
         return { ok: false, reason: 'blocked_by_consent', groupUrl, clicked: false, observation };
       }
-      const block = await this.blockingReason();
-      if (block) {
-        observation = await this.collectObservation(groupUrl, { [block === 'login_required' ? 'loginRequired' : 'captchaDetected']: true });
-        return { ok: false, reason: block, groupUrl, clicked: false, observation };
+      if (ready.block) {
+        observation = ready.observation;
+        return { ok: false, reason: ready.block, groupUrl, clicked: false, observation };
       }
-      const raw = await evalJson<RawJoinObservation>(this.cdp, GROUP_JOIN_OBSERVE_JS);
-      observation = publicObservation(raw, groupUrl);
+      observation = ready.observation;
+      const raw: RawJoinObservation = ready.raw ?? {};
       if (observation.loginRequired) return { ok: false, reason: 'login_required', groupUrl, clicked: false, observation };
       if (observation.captchaDetected) return { ok: false, reason: 'blocked_by_captcha', groupUrl, clicked: false, observation };
       if (hasMemberSignal(observation)) return { ok: false, reason: 'already_member', groupUrl, clicked: false, observation };
@@ -313,6 +328,57 @@ export class FacebookJoinExecutor {
         observation: observation ?? { groupUrl, navError: message },
       };
     }
+  }
+
+  /**
+   * 就绪轮询（change fb-group-join-wait-render）：导航后反复观察，直到出现**决定性信号**再返回——
+   * 加入按钮已渲染 / 已是成员 / 需登录 / 验证码 / 问卷 / 待审 / 同意浮层清不掉。避免在 FB 群页尚未渲染出
+   * 头部与按钮（实测常需数秒、网络不稳）时就过早观察到空页面而误判 ambiguous。触上限仍无信号 → 返回最后一次
+   * 观察（诚实交云端判定，绝不假成功）。同意/阻断浮层每轮幂等处理，任意时刻出现都能捕获。
+   */
+  private async observeUntilReady(groupUrl: string): Promise<{
+    raw?: RawJoinObservation;
+    observation: FacebookGroupJoinObservation;
+    block?: 'login_required' | 'blocked_by_captcha';
+    consentBlocked?: boolean;
+  }> {
+    const pollMs = Math.max(50, this.opts.pollMs);
+    const maxPolls = Math.max(1, Math.ceil(this.opts.readyTimeoutMs / pollMs));
+    const deadline = Date.now() + this.opts.readyTimeoutMs;
+    let lastRaw: RawJoinObservation | undefined;
+    let lastObs: FacebookGroupJoinObservation = { groupUrl };
+    for (let i = 0; i < maxPolls; i++) {
+      const consent = await this.acceptConsent(this.cdp);
+      if (consent.handled && !consent.cleared) {
+        return { observation: await this.collectObservation(groupUrl, {}), consentBlocked: true };
+      }
+      const block = await this.blockingReason();
+      if (block) {
+        return {
+          observation: await this.collectObservation(groupUrl, {
+            [block === 'login_required' ? 'loginRequired' : 'captchaDetected']: true,
+          }),
+          block,
+        };
+      }
+      const raw = await evalJson<RawJoinObservation>(this.cdp, GROUP_JOIN_OBSERVE_JS);
+      const obs = publicObservation(raw, groupUrl);
+      lastRaw = raw;
+      lastObs = obs;
+      if (this.isDecisiveObservation(raw, obs)) return { raw, observation: obs };
+      if (Date.now() >= deadline) break;
+      await this.sleep(pollMs);
+    }
+    return { raw: lastRaw, observation: lastObs };
+  }
+
+  /** 是否已出现足以判定的信号：明确门槛/阻断态、已是成员、加入按钮已渲染、或任一已分类 CTA。 */
+  private isDecisiveObservation(raw: RawJoinObservation, obs: FacebookGroupJoinObservation): boolean {
+    if (obs.loginRequired || obs.captchaDetected || obs.questionnaireRequired || obs.pendingRequest) return true;
+    if (hasMemberSignal(obs)) return true;
+    if (raw.joinButton?.found) return true;
+    if (obs.mainCtaText) return true;
+    return false;
   }
 
   private async collectObservation(
