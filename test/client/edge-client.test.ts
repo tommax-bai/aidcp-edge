@@ -302,6 +302,23 @@ test('edge-client: note.close 路由到 browseHandler', async () => {
   assert.equal(calls[0].type, 'note.close');
 });
 
+// change facebook-browse-and-like-loop（task 4.4）：FB 浏览/点赞独立命令 MUST 放行到 browseHandler，
+// 绝不落入「其他主动消息暂忽略」被静默丢弃（typecheck 抓不到白名单遗漏）。这些类型与小红书共用同一
+// 平台中立白名单（零改 protocol.ts）；此断言锁死它们不被误当「xhs-only」移除而回归静默丢弃。
+const FB_BROWSE_COMMANDS = ['page.scroll', 'note.open', 'note.close', 'interaction.like', 'navigation.back'] as const;
+for (const type of FB_BROWSE_COMMANDS) {
+  test(`edge-client: Facebook 浏览命令 ${type} 路由到 browseHandler（不得静默丢弃）`, async () => {
+    const ws = new FakeWebSocket();
+    const client = await connectClient(ws);
+    const calls: Envelope[] = [];
+    client.onBrowseCommand((env) => calls.push(env));
+
+    ws.emitMessage(makeEnvelope(type, `fb-${type}`, 2, { thinkMs: 0 }));
+    assert.equal(calls.length, 1, `${type} 应被路由到 browseHandler 而非在入口丢弃`);
+    assert.equal(calls[0].type, type);
+  });
+}
+
 test('edge-client: 旧消息类型仍正常路由（向后兼容）', async () => {
   const ws = new FakeWebSocket();
   const client = await connectClient(ws);

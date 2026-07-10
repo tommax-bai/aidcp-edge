@@ -19,10 +19,13 @@ export const facebookPlatformDriver: PlatformDriver = {
   platform: 'facebook',
   app: 'facebook',
   // 'comment'：Facebook 定向评论执行能力（change facebook-scheduled-comment）。
-  // 'join'：Facebook 加群原子执行能力（change facebook-group-join-and-commenting），必须独立于 browse。
-  // 刻意不含 'browse'——绝不能让边缘装配闸把小红书 BrowseSession 挂到 Facebook 边端上（design 决策）；
-  // Facebook 命令走独立处理器（main.ts 按此能力注册），不复用浏览闭环。
-  capabilities: ['identity', 'overlay', 'comment', 'join'],
+  // 'join'：Facebook 加群原子执行能力（change facebook-group-join-and-commenting），独立于 browse。
+  // 'browse'/'interact'：Facebook 浏览+点赞闭环（change facebook-browse-and-like-loop）。声明 'browse' 使
+  //   装配闸（main.ts）解析到 FacebookBrowseSession——**与 FacebookBrowseSession 实现原子同落**，绝不裸声明
+  //   （否则装配闸会把小红书 BrowseSession 挂到 Facebook 边端；design 的 co-landing 不变量）。FB 浏览会话独占
+  //   单槽 browseHandler 并【内含】评论/加群委托（声明 browse 后旧 comment-only 注册闸不再触发）。
+  // 'identity'/'overlay' 为 driver 运行时能力（读身份 / 监测浮层），非编排词表——不进云端 registry 能力集。
+  capabilities: ['identity', 'overlay', 'browse', 'comment', 'join', 'interact'],
   edgeCapabilities: ['locating', 'cdp'],
   target: FACEBOOK_TARGET,
   defaultStartUrl: FACEBOOK_TARGET.startUrl,

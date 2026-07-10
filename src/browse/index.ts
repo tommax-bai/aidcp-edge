@@ -14,3 +14,4 @@ export * from './identity-watcher.js';
 export * from './search-handler.js';
 export * from './captcha-assist.js';
 export * from './browse-session.js';
+export * from './edge-browse-session.js';

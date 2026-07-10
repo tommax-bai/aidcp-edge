@@ -1,0 +1,42 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { isNeutralLikeLabel, isCommentLabel, isReactedState } from '../../src/facebook/cta-labels.js';
+
+test('cta-labels: 中性点赞按钮 aria-label 多语言命中', () => {
+  assert.equal(isNeutralLikeLabel('留下心情'), true);
+  assert.equal(isNeutralLikeLabel('点赞'), true);
+  assert.equal(isNeutralLikeLabel('Like'), true);
+  assert.equal(isNeutralLikeLabel('React'), true);
+  assert.equal(isNeutralLikeLabel('Me gusta'), true);
+  // 反应计数汇总按钮 aria-label「赞」（带数字文案）不是中性点赞按钮——不命中。
+  assert.equal(isNeutralLikeLabel('赞：3,706位用户'), false);
+  assert.equal(isNeutralLikeLabel(''), false);
+});
+
+test('cta-labels: 帖级「评论」按钮标签命中（排除评论级 react 用）', () => {
+  assert.equal(isCommentLabel('发表评论'), true);
+  assert.equal(isCommentLabel('发表评论：66'), true);
+  assert.equal(isCommentLabel('Comment'), true);
+  assert.equal(isCommentLabel('回复'), false, '回复/Reply 不算帖级评论按钮');
+  assert.equal(isCommentLabel('Reply'), false);
+});
+
+test('cta-labels: 已反应态判定（正向信号才算，绝不「变了就算」）', () => {
+  // 空文案变反应词（zh 实测留下心情→赞）。
+  assert.equal(isReactedState('留下心情', '赞'), true);
+  // 撤销串（最可靠跨语言已赞信号）。
+  assert.equal(isReactedState('取消赞', ''), true);
+  assert.equal(isReactedState('Remove Like', ''), true);
+  // 仍是中性、文案空 → 未反应。
+  assert.equal(isReactedState('留下心情', ''), false);
+  assert.equal(isReactedState('Like', ''), false);
+});
+
+test('cta-labels: 反应【计数汇总】按钮（aria-label=赞 + 数字文案）绝不误判已赞（数字守卫）', () => {
+  // 关键回归：任何已有反应的帖子都有此按钮；误判会让 like 永远 no-op / 假 already_liked。
+  assert.equal(isReactedState('赞', '3,829'), false);
+  assert.equal(isReactedState('赞', '1.2万'), false);
+  assert.equal(isReactedState('Like', '3,706'), false);
+  // 撤销串即使带数字仍算已赞（撤销优先）。
+  assert.equal(isReactedState('取消赞', '3,829'), true);
+});

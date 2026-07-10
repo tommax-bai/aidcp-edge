@@ -44,7 +44,14 @@ import {
   type BrowserLaunchOptions,
 } from './cdp/index.js';
 import { selectPlatformDriver } from './platform/index.js';
-import { FacebookCommentExecutor, FacebookCommentHandler, FacebookJoinExecutor } from './facebook/index.js';
+import {
+  FacebookBrowseSession,
+  FacebookCommentExecutor,
+  FacebookCommentHandler,
+  FacebookJoinExecutor,
+  parseFacebookBrowseMode,
+  usesFacebookBrowseSession,
+} from './facebook/index.js';
 import { EdgeClient } from './client/edge-client.js';
 import { registerPersonaStdinCommands } from './client/persona-onboarding.js';
 import {
@@ -85,6 +92,7 @@ import {
   type BlockingOverlaySnapshot,
   type BrowseSessionOptions,
   type OverlayMonitor,
+  type EdgeBrowseSession,
 } from './browse/index.js';
 import type { IdentityDecision, SelfIdentityResult } from './cdp/self-identity.js';
 
@@ -259,7 +267,8 @@ async function main(): Promise<void> {
   //   0            = 关机（SIGINT/SIGTERM），不重起；
   //   EXIT_RECYCLE = 可恢复终态回收，请重起（sysexits EX_TEMPFAIL=75：临时失败、邀请重试）。
   const EXIT_RECYCLE = 75;
-  let browse: BrowseSession | undefined;
+  // 平台无关的命令会话句柄：小红书=BrowseSession，Facebook=FacebookBrowseSession（EdgeBrowseSession 契约）。
+  let browse: EdgeBrowseSession | undefined;
   let overlayMonitor: OverlayMonitor | undefined;
   let watcherSupervisor: WatcherSupervisor | undefined;
   let identityWatcher: IdentityWatcher | undefined;
@@ -633,9 +642,138 @@ async function main(): Promise<void> {
 
   const wantsAutoBrowse = process.env.AIDCP_AUTO_BROWSE !== 'false';
   const supportsBrowse = platformDriver.capabilities.includes('browse');
-  const autoBrowse = wantsAutoBrowse && supportsBrowse;
+  // Facebook 声明 browse → 装配闸解析到 FacebookBrowseSession（绝不小红书 BrowseSession；co-landing 不变量）。
+  const useFacebookBrowse = usesFacebookBrowseSession(platformDriver);
+  const autoBrowse = wantsAutoBrowse && supportsBrowse && !useFacebookBrowse;
   if (wantsAutoBrowse && !supportsBrowse) {
     console.warn(`[aidcp-edge] platform=${platformDriver.platform} does not support browse; BrowseSession will not start.`);
+  }
+  if (useFacebookBrowse) {
+    // —— Facebook 浏览+点赞闭环（change facebook-browse-and-like-loop）——
+    // FacebookBrowseSession 独占单槽 browseHandler，【内含】评论/加群委托（声明 browse 后旧 comment-only 注册闸
+    // `(comment||join)&&!browse` 不再触发）。浏览/点赞由 AIDCP_FB_BROWSE_AUTO（off/shadow/on）门控，评论/加群始终服务。
+    overlayMonitor = platformDriver.createOverlayMonitor(session.cdp);
+    // FB 浏览高危动作会触发验证码 / FB 软限流（overlay.ts 归类 unknown）。把 captcha/unknown 翻转上报云端
+    // （risk.captcha_detected/cleared）：驱动远程验证码协助 + FB 限流退避（account-nurture-discipline-spine 云端
+    // facebook-throttle-signals 依赖此信号把账号迁至 restricted）。复用小红书同一套上报闸（unknown 延后确认 /
+    // captcha 即时 fail-closed / detected-cleared 严格配对）。执行器另有每步 fresh 复检做本地 fail-closed。
+    {
+      const overlayConfirmMs = Number(process.env.AIDCP_OVERLAY_CONFIRM_MS ?? 2000);
+      const isCloudBlockingOverlay = (kind: string): kind is 'captcha' | 'unknown' => kind === 'captcha' || kind === 'unknown';
+      let overlaySnapshotPromise: Promise<BlockingOverlaySnapshot | undefined> | undefined;
+      const resetOverlaySnapshot = (): void => {
+        overlaySnapshotPromise = undefined;
+      };
+      const primeOverlaySnapshot = (kind: 'captcha' | 'unknown'): void => {
+        if (overlaySnapshotPromise) return;
+        overlaySnapshotPromise = captureBlockingOverlaySnapshot(session.cdp, kind).catch(() => undefined);
+      };
+      const sendOverlayDetected = (kind: 'captcha' | 'unknown'): void => {
+        void (async () => {
+          primeOverlaySnapshot(kind);
+          const overlay = await overlaySnapshotPromise;
+          let url = overlay?.firstDetectedUrl ?? '';
+          if (!url) {
+            try {
+              url = await evalRaw<string>(session.cdp, 'location.href');
+            } catch {
+              /* best-effort */
+            }
+          }
+          try {
+            client.send('risk.captcha_detected', {
+              edgeId,
+              kind,
+              url,
+              ...(overlay ? { overlay } : {}),
+              ...(accountId ? { accountId } : {}),
+            });
+          } catch (err) {
+            console.error('[aidcp-edge] risk.captcha_detected 上报失败:', err);
+          }
+          console.warn(`[aidcp-edge] ⚠ Facebook 检测到${kind === 'captcha' ? '验证码' : '未知阻断/限流'}，已上报云端`);
+        })();
+      };
+      const overlayReportGate = createOverlayReportGate({
+        sendDetected: sendOverlayDetected,
+        sendCleared: () => {
+          try {
+            client.send('risk.captcha_cleared', { edgeId, ...(accountId ? { accountId } : {}) });
+          } catch (err) {
+            console.error('[aidcp-edge] risk.captcha_cleared 上报失败:', err);
+          }
+          resetOverlaySnapshot();
+        },
+        isStillUnknown: () => overlayMonitor?.state === 'unknown',
+        schedule: (fn, ms) => {
+          setTimeout(fn, ms);
+        },
+        confirmMs: overlayConfirmMs,
+      });
+      // 用 WatcherSupervisor 托管 overlayMonitor 生命周期（CDP 不可恢复→停避免僵尸轮询；重连→重启），
+      // 取代裸 overlayMonitor.start()（否则会话失联后监测体空轮询到进程退出）。
+      const fbSupervisor = new WatcherSupervisor();
+      watcherSupervisor = fbSupervisor;
+      fbSupervisor.register(overlayMonitor, (from, to) => {
+        if (isCloudBlockingOverlay(to) && !isCloudBlockingOverlay(from)) primeOverlaySnapshot(to);
+        if (!isCloudBlockingOverlay(to)) resetOverlaySnapshot();
+        overlayReportGate.onTransition(from, to);
+      });
+      session.cdp.on?.('cdp.unrecoverable', () => fbSupervisor.stopAll());
+      session.cdp.on?.('cdp.reconnected', () => fbSupervisor.startAll());
+      fbSupervisor.startAll();
+    }
+    const fbCommentExecutor = new FacebookCommentExecutor({
+      cdp: session.cdp,
+      getAccountId: () => accountId,
+      overlayMonitor,
+      logger: (m) => console.log(m),
+    });
+    const fbJoinExecutor = new FacebookJoinExecutor({
+      cdp: session.cdp,
+      overlayMonitor,
+      logger: (m) => console.log(m),
+    });
+    const fbCommentHandler = new FacebookCommentHandler({
+      executor: fbCommentExecutor,
+      joinExecutor: fbJoinExecutor,
+      client,
+      logger: (m) => console.log(m),
+    });
+    browse = new FacebookBrowseSession(
+      {
+        cdp: session.cdp,
+        client,
+        commentHandler: fbCommentHandler,
+        overlayMonitor,
+        logger: (m) => console.log(m),
+      },
+      {
+        feedUrl: process.env.AIDCP_EXPLORE_URL ?? platformDriver.defaultStartUrl,
+        tempo: client.getPacing()?.tempo,
+      },
+    );
+    const fbSession = browse;
+    client.onBrowseCommand((env) => {
+      const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
+      const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
+      if (!taskCoordinator.canExecute(ownedTaskId)) {
+        console.warn(
+          `[aidcp-edge] Facebook 命令被任务租约抑制 type=${env.type} taskId=${ownedTaskId ?? '-'} current=${taskCoordinator.currentTaskId ?? '-'}`,
+        );
+        return;
+      }
+      if (ownedTaskId) taskCoordinator.touch(ownedTaskId);
+      fbSession.onCloudCommand(env).catch((err) => {
+        console.error(`[aidcp-edge] 执行 Facebook 命令 ${env.type} 失败:`, err);
+      });
+    });
+    if (taskCoordinator.blocksBrowse) await browse.quiesceForTask();
+    // 不 await：会话长跑，与命令收发并行。start() 内部据 AIDCP_FB_BROWSE_AUTO 决定是否自动进 feed。
+    browse.start().catch((err) => {
+      console.error('[aidcp-edge] Facebook 浏览会话异常:', err);
+    });
+    console.log(`[aidcp-edge] Facebook 浏览会话已注册（mode=${parseFacebookBrowseMode()}，含评论/加群委托）`);
   }
   if (autoBrowse) {
     const browseOpts: BrowseSessionOptions = {};
