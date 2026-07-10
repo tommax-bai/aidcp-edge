@@ -1401,11 +1401,12 @@ function stageAdsRuntimeIfNeeded() {
 
 async function ensureAdsService(handle) {
   adsServiceBase = null;
-  // 1. 服务已可达则复用（外部 AdsPower / 已在跑的 CLI daemon）；其自管内核，不在此预检。
-  const probe = await adsApi.status(resolveAdsOpts()).catch(() => null);
-  if (probe && probe.ok) return { ok: true, mode: 'adopted' };
-
-  // 2. 服务未就绪 → 首启暂存随包模板到可写目录，再拉起随包运行时。
+  // CLI-first：运行时生命周期（起停 / 就绪 / 内核）统一走随包 CLI。先暂存随包模板 + 解析 cliEntry
+  // （无论最终复用已在跑的 daemon 还是新起，内核预检都要 cliEntry），再由 ensureRuntime 用 `ads status`
+  // 判活：已在跑则复用（adopted）、否则 `ads start`（embedded）。
+  // 注：判活读 CLI 自身 pid/store（我方 daemon / 本包上次所起），不探测独立运行的 AdsPower 桌面端——
+  //   硬切换自包含形态本不依赖桌面端；若外部桌面端占端口，属超范围的共存冲突，由运营侧收敛。
+  // 1. 首启暂存随包模板到可写目录（打包态 Resources 只读）。
   const staged = stageAdsRuntimeIfNeeded();
   if (!staged.ok) {
     if (handle) {
@@ -1441,19 +1442,15 @@ async function ensureAdsService(handle) {
     return { ok: false, error };
   }
 
-  // 3. 起内嵌运行时（`ads status` 已在跑则复用、否则 `ads start -k <key>`）。
+  // 2. 起内嵌运行时（`ads status` 已在跑则复用、否则 `ads start -k <key>`）。
   if (handle) updateStatus(handle, { auth: 'checking', lastMessage: '正在启动内置指纹浏览器运行时…', ...presencePatch('正在准备浏览器运行时…') });
   const apiKey = resolveAdsApiKey('');
-  // 就绪判定用 HTTP LocalAPI /status（权威可靠）——不依赖 `ads status`（Electron Node 20 下 fork 起服务后
-  // 其 pid/store 写入可能未完成、误报未在跑，但 HTTP 正常）。
+  // 就绪判定走 CLI `ads status`（staging 已把其判活从 `ps|grep "node"` 换成 process.kill(pid,0)，故在
+  // Electron 宿主下也可靠——服务进程名是 Electron 二进制而非 "node"，旧的 grep 会漏判、新的存在性探测不受影响）。
   const rt = await adsRuntime.ensureRuntime({
     cliEntry,
     execPath: process.execPath,
     apiKey,
-    isReady: async () => {
-      const p = await adsApi.status(resolveAdsOpts()).catch(() => null);
-      return !!(p && p.ok);
-    },
   });
   if (!rt.ok) {
     if (handle) {
@@ -1471,7 +1468,7 @@ async function ensureAdsService(handle) {
     return { ok: false, error: rt.error };
   }
   adsServiceBase = rt.base; // P0-A：运行时解析出的实际端口即单一 base 权威
-  return { ok: true, mode: 'embedded', base: rt.base, cliEntry };
+  return { ok: true, mode: rt.alreadyRunning ? 'adopted' : 'embedded', base: rt.base, cliEntry };
 }
 
 function ensureAdsRuntimeAndKernelOnce(handle) {
@@ -1484,13 +1481,27 @@ function ensureAdsRuntimeAndKernelOnce(handle) {
 
 // 启动浏览器前的完整确保 = 服务确保 + 内核预检（无论服务是刚起的还是已在跑的都要预检——
 // 我们自己先前起的服务也没下内核，adopted 直接放行会撞 browser/start「SunBrowser 148 is not ready」）。
-// 内核经 **HTTP LocalAPI 直连**（绕开 CLI 的 get-kernel-list/download-kernel——Electron Node 20 下
-// `ads start` 未写 pid/store，CLI 命令误判「runtime not running」，但服务在监听、HTTP 正常）。
+// 内核走随包 **CLI**（get-kernel-list / download-kernel）——staging 修好 isRunning 判活后，CLI 命令在
+// Electron 宿主下可靠；download-kernel 非 TTY 下逐轮吐 `Kernel progress: N% [state]`，经 onProgress 上进度条。
 async function ensureAdsRuntimeAndKernel(handle) {
   const svc = await ensureAdsServiceOnce(handle);
   if (!svc.ok) return svc;
   const version = adsFingerprint.DEFAULT_KERNEL;
-  const kres = await ensureKernelViaHttp(handle, version);
+  if (handle) appendEdgeLog(handle.envId, `检查浏览器内核 ${version} 就绪情况（缺则首次下载约 750MB）…`);
+  const kres = await adsRuntime.ensureKernel({
+    cliEntry: svc.cliEntry,
+    execPath: process.execPath,
+    version,
+    kernelType: 'Chrome',
+    onProgress: ({ percent, state }) => {
+      if (!handle) return;
+      updateStatus(handle, {
+        kernelPrep: { state: state === 'completed' ? 'installing' : state, percent, version },
+        lastMessage: `正在下载浏览器内核 ${version}（约 750MB，仅首次）… ${percent}%`,
+        ...presencePatch(`准备浏览器内核 ${percent}%`),
+      });
+    },
+  });
   if (!kres.ok) {
     if (handle) {
       updateStatus(handle, {
@@ -1505,43 +1516,9 @@ async function ensureAdsRuntimeAndKernel(handle) {
     }
     return { ok: false, error: kres.error };
   }
+  if (handle) appendEdgeLog(handle.envId, kres.alreadyPresent ? `浏览器内核 ${version} 已就绪` : `浏览器内核 ${version} 下载完成`);
   if (handle) updateStatus(handle, { kernelPrep: null, ...clearEdgeFailurePatch(handle) });
   return { ok: true, mode: svc.mode, base: svc.base };
-}
-
-// 内核预检（HTTP 直连）：查 GET /kernels → 已下则秒过；缺则轮询 POST /download-kernel（幂等）到 completed，
-// 每轮把进度经 kernelPrep 上报（带进度条）。诚实失败、绝不假成功。
-async function ensureKernelViaHttp(handle, version) {
-  if (handle) appendEdgeLog(handle.envId, `检查浏览器内核 ${version} 就绪情况（缺则首次下载约 750MB）…`);
-  const kl = await adsApi.kernels({ ...resolveAdsOpts(), kernelType: 'Chrome' });
-  if (!kl.ok) return { ok: false, error: kl.error };
-  const hit = (kl.list || []).find((k) => String(k.kernel) === String(version) && String(k.kernel_type || 'Chrome') === 'Chrome');
-  if (hit && hit.is_downloaded) {
-    if (handle) appendEdgeLog(handle.envId, `浏览器内核 ${version} 已就绪`);
-    return { ok: true, alreadyPresent: true };
-  }
-  if (!hit) return { ok: false, error: `内核 ${version} 不在可下载列表中` };
-
-  if (handle) appendEdgeLog(handle.envId, `开始下载浏览器内核 ${version}（约 750MB，仅首次；带进度条）…`);
-  const deadline = Date.now() + 30 * 60 * 1000; // 30min 上限，超时诚实报错
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-  while (Date.now() < deadline) {
-    const d = await adsApi.downloadKernel({ ...resolveAdsOpts(), kernelType: 'Chrome', version });
-    if (!d.ok) return { ok: false, error: d.error };
-    if (handle) {
-      updateStatus(handle, {
-        kernelPrep: { state: d.status === 'completed' ? 'installing' : d.status, percent: d.progress, version },
-        lastMessage: `正在下载浏览器内核 ${version}（约 750MB，仅首次）… ${d.progress}%`,
-        ...presencePatch(`准备浏览器内核 ${d.progress}%`),
-      });
-    }
-    if (d.status === 'completed') {
-      if (handle) appendEdgeLog(handle.envId, `浏览器内核 ${version} 下载完成`);
-      return { ok: true, downloaded: true };
-    }
-    await wait(1500);
-  }
-  return { ok: false, error: `内核 ${version} 下载超时（30min）` };
 }
 
 // adspower（AdsPower 指纹浏览器）路径：不自起本机 Chrome、不做 9222 cookie 轮询；
