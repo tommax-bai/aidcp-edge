@@ -34,3 +34,25 @@ test('application quit still uses final SIGTERM for every retained core', () => 
   const quit = functionSource('gracefulStopAllAndQuit', 'quitApp');
   assert.match(quit, /kill\('SIGTERM'\)/);
 });
+
+// Regression guard for a recurring packaged-only failure: in an asar:true build
+// app.getAppPath() is the app.asar FILE, so spawning the core with cwd = appRoot
+// throws 'spawn ENOTDIR' and the browser never launches (invisible to dev /
+// typecheck / other tests). Fixed twice already (20d3784 lost on a feature branch,
+// re-shipped in 0.3.5, re-fixed in 3f578b9). Keep the asar-guarded cwd forever.
+test('core child spawn cwd is asar-guarded and never the raw app.asar appRoot', () => {
+  const startEdge = functionSource('startEdge', 'stopLoginPoller');
+  // must derive a real directory when appRoot is the packaged asar file
+  assert.match(
+    startEdge,
+    /appRoot\.endsWith\('\.asar'\)\s*\?\s*path\.dirname\(appRoot\)\s*:\s*appRoot/,
+    'startEdge must guard the spawn cwd against the app.asar file',
+  );
+  // the core spawn must consume the guarded value, not the raw appRoot
+  assert.match(startEdge, /cwd:\s*edgeCwd\b/, 'core spawn must use the guarded edgeCwd');
+  assert.doesNotMatch(
+    startEdge,
+    /cwd:\s*appRoot\b/,
+    'core spawn cwd must never be the raw appRoot (app.asar file → spawn ENOTDIR)',
+  );
+});

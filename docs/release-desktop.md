@@ -34,7 +34,10 @@ npm run electron:build:win
 # 产物：dist-electron/AIDCP Setup <版本>.exe
 ```
 
-### 2B. macOS（必须用 CI；本机 Windows 打不了）
+### 2B. macOS（Mac 本机可打；非 Mac 才必须用 CI）
+
+- **在 Mac 上直接本机打**：`npm run electron:build:mac` → `dist-electron/AIDCP-<版本>-arm64.dmg`（Apple 芯片）、`AIDCP-<版本>.dmg`（Intel），与 CI 产物一致（master 默认 `mac.identity=null`，不签名）。
+- **只有在非 Mac 机器上**（如 Windows 本机打不了 dmg）才必须走下面的 CI。
 
 工作流：`aidcp-edge/.github/workflows/build-desktop.yml`（手动触发）。
 
@@ -49,6 +52,17 @@ npm run electron:build:win
       得到：`AIDCP-<版本>-arm64.dmg`（Apple 芯片）、`AIDCP-<版本>.dmg`（Intel），外加 zip/blockmap（下载页用不到，忽略）。
 
 > 这个工作流同时也产出 Windows exe（产物名 `aidcp-windows`）。想三平台全用 CI 出、不本地打也行——下载 `aidcp-windows` 即可。
+
+### 2C. 打包后本机冒烟（发版前必做，别省）
+
+> **为什么必做**：有一类只在打包态才犯的 bug——核心子进程 spawn 的工作目录落进 `app.asar`（一个文件、非目录），macOS 抛 `spawn ENOTDIR`，核心起不来、浏览器无法启动。**本地 `electron .`、`npm run typecheck`、单测全抓不到**，只有跑打包产物才暴露。已复发过两次（`0.3.5` 又发出去一次）。详见 `aidcp-edge/CLAUDE.md`「打包红线」。
+
+- [ ] **源码级回归已兜底**：`npx tsx --test test/electron/lifecycle-contract.test.ts` 会断言核心 spawn 的 cwd 是 asar 守卫后的值、绝不是裸 `appRoot`。改过 `src/electron/**` 的先跑它。
+- [ ] **产物级校验（快，不用真机 AdsPower）**：确认修复真进了包的 asar——
+      ```bash
+      node -e "const a=require('@electron/asar');const s=a.extractFile('dist-electron/mac-arm64/AIDCP.app/Contents/Resources/app.asar','src/electron/main.cjs').toString();console.log(/cwd:\s*edgeCwd/.test(s)&&!/cwd:\s*appRoot\b/.test(s)?'OK: cwd asar-guarded':'FAIL: raw appRoot cwd shipped')"
+      ```
+- [ ] **真机冒烟（发正式版前至少一次）**：装上刚打的 dmg，点「启动」，确认核心不 `ENOTDIR`、能走到「正在启动指纹浏览器」并真的弹出浏览器（需 AdsPower 在跑 + 至少一个环境）。日志：`~/Library/Application Support/aidcp-edge/logs/app.log` 里 spawn 行的 `cwd=` 应是 `.../Contents/Resources`、不是 `.../app.asar`。
 
 ## 3. 上传安装包到服务器
 
