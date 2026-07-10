@@ -43,7 +43,12 @@ function obs(over: Partial<RawJoinObservation> = {}): RawJoinObservation {
 
 class FakeCdp implements BrowseCdp {
   navigations: string[] = [];
+  /** 加入点击次数（现由页面内 JS element.click() 完成，标记表达式 __FB_JOIN_CLICK__ 计入）。 */
   clicks: Array<{ x: number; y: number }> = [];
+  /** 原始坐标 mousePressed 次数——改用 JS 点击后加入路径应恒为 0（坐标点击真机不生效已移除）。 */
+  mousePresses = 0;
+  /** 模拟页面内 JS 点击是否命中到「加入」按钮；置 false 复现「点击瞬间按钮消失」。 */
+  jsClickSucceeds = true;
   escapes = 0;
   private evalCount = 0;
 
@@ -55,12 +60,17 @@ class FakeCdp implements BrowseCdp {
       return {} as T;
     }
     if (method === 'Runtime.evaluate') {
+      // JS 加入点击 eval（带唯一标记）：记一次加入点击、返回 clicked，不消费观察序列。
+      if (String(params.expression ?? '').includes('__FB_JOIN_CLICK__')) {
+        if (this.jsClickSucceeds) this.clicks.push({ x: -1, y: -1 });
+        return { result: { value: JSON.stringify({ clicked: this.jsClickSucceeds }) } } as T;
+      }
       const current = this.observations[Math.min(this.evalCount, this.observations.length - 1)] ?? obs();
       this.evalCount++;
       return { result: { value: JSON.stringify(current) } } as T;
     }
     if (method === 'Input.dispatchMouseEvent') {
-      if (params.type === 'mousePressed') this.clicks.push({ x: Number(params.x), y: Number(params.y) });
+      if (params.type === 'mousePressed') this.mousePresses++;
       return {} as T;
     }
     if (method === 'Input.dispatchKeyEvent') {
@@ -347,4 +357,31 @@ test('fb-join-executor: documentReady 未知（旧形态）时加入按钮仍决
   const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123');
   assert.equal(r.reason, 'observation_only');
   assert.equal(r.observation?.mainCtaText, 'Join group');
+});
+
+// ── change fb-group-join-js-click：加入点击改用页面内 element.click()（真机实证:坐标鼠标点击不让 FB 加入、
+//    水合布局漂移使坐标落空；JS 点击在同一 div[role=button] 上稳定翻成「已加入」）。保留点前拟人 hover 移动做反检测。──
+test('fb-join-executor: 加入用页面内 JS 点击，不再派发坐标 mousePressed', async () => {
+  const cdp = new FakeCdp([
+    obs(),
+    obs({ mainCtaText: 'Joined', mainCtaAria: 'Joined', membershipSignals: ['You are now a member'], joinButton: { found: false } }),
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, true);
+  assert.equal(r.clicked, true);
+  assert.equal(cdp.clicks.length, 1, 'JS 加入点击一次');
+  assert.equal(cdp.mousePresses, 0, '不再用坐标 mousePressed 点加入（真机不生效已移除）');
+});
+
+test('fb-join-executor: JS 点击瞬间按钮消失（未命中）→ 诚实 no_button，不冒充点过、不进 post 轮询', async () => {
+  const cdp = new FakeCdp([
+    obs(), // pre: 加入按钮在（进入点击分支）
+    obs({ mainCtaText: 'Joined', membershipSignals: ['You are now a member'], joinButton: { found: false } }), // 不应被消费
+  ]);
+  cdp.jsClickSucceeds = false;
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'no_button');
+  assert.equal(r.clicked, false);
+  assert.equal(cdp.clicks.length, 0);
 });

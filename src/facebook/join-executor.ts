@@ -1,4 +1,4 @@
-import { dispatchClick, evalJson, pressEscape, type BrowseCdp } from '../browse/cdp-util.js';
+import { dispatchHover, evalJson, pressEscape, type BrowseCdp } from '../browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../browse/overlay-monitor.js';
 import { isUrlAllowedByTargetDescriptor } from '../platform/driver.js';
 import { FACEBOOK_TARGET } from './driver.js';
@@ -75,7 +75,10 @@ export interface FacebookJoinExecutorOptions {
 const DEFAULTS: Required<FacebookJoinExecutorOptions> = {
   settleMs: 0,
   waitAfterClickMs: 1_500,
-  readyTimeoutMs: 20_000,
+  // 30s（原 20s）：就绪轮询按信号出现即早返回，放长只在 FB 慢加载时多等、快页面零成本；
+  // 边缘 click 腿最坏 ≈ 30(ready)+2(settle)+1.5(afterClick)+45(post)=78.5s（自动路径 thinkMs=0）+ CDP 往返，
+  // 云端 group.join 步骤超时已相应提到 120s 留足余量（见 cloud facebook-group-join-edge-steps.ts）。
+  readyTimeoutMs: 30_000,
   pollMs: 600,
   postClickTimeoutMs: 45_000,
   preClickSettleMs: 2_000,
@@ -266,6 +269,55 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
   });
 })()`;
 
+/**
+ * 在页面内**重新定位**群主体区域的「加入」按钮并调用其 `.click()`（真机实证:FB 的加入控件是
+ * `div[role=button]` + React 合成事件，CDP 坐标鼠标点击不可靠——页面水合时布局漂移使坐标落空、
+ * 且派发的 mouse 事件序列未必触发其处理器；`element.click()` 在同一按钮上稳定翻成「已加入」）。
+ * 点击前在 join-executor 侧另做一次拟人 hover 移动到按钮（保留 mousemove 轨迹供反检测），此处只负责
+ * 「点当下真实存在的那个加入按钮」——不依赖过期坐标。分类关键词与 GROUP_JOIN_OBSERVE_JS 同源（同三张多语表）。
+ * 表达式带唯一标记 __FB_JOIN_CLICK__ 便于测试桩区分「点击 eval」与「观察 eval」，不打乱观察序列。
+ */
+const GROUP_JOIN_CLICK_JS = String.raw`/*__FB_JOIN_CLICK__*/(function(){
+  var JOIN_KW = ${JSON.stringify(JOIN_CTA_LABELS)};
+  var MEMBER_KW = ${JSON.stringify(MEMBER_CTA_LABELS)};
+  var PENDING_KW = ${JSON.stringify(PENDING_CTA_LABELS)};
+  function visible(el){
+    if (!el || !el.getBoundingClientRect) return false;
+    var r = el.getBoundingClientRect();
+    var s = window.getComputedStyle ? getComputedStyle(el) : null;
+    return r.width > 0 && r.height > 0 && (!s || (s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity || '1') > 0.01));
+  }
+  function text(el){ return String((el && (el.innerText || el.textContent)) || '').replace(/\s+/g, ' ').trim(); }
+  function aria(el){ return String((el && (el.getAttribute('aria-label') || el.getAttribute('title'))) || '').replace(/\s+/g, ' ').trim(); }
+  function disabled(el){ return !!(el.disabled || el.getAttribute('aria-disabled') === 'true' || el.getAttribute('disabled') != null); }
+  function anyIncludes(label, kws){ for (var i=0;i<kws.length;i++){ if (kws[i] && label.indexOf(kws[i]) >= 0) return true; } return false; }
+  function ctaKind(label){
+    label = String(label || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!label) return '';
+    if (anyIncludes(label, MEMBER_KW)) return 'member';
+    if (anyIncludes(label, PENDING_KW)) return 'pending';
+    if (anyIncludes(label, JOIN_KW)) return 'join';
+    return '';
+  }
+  var nodes = Array.from(document.querySelectorAll('button,a,[role="button"]')).filter(function(el){
+    return visible(el) && !(el.closest && el.closest('[role="banner"],[role="navigation"],[role="complementary"]'));
+  });
+  // 取「第一个 join 节点」，组合规则与 GROUP_JOIN_OBSERVE_JS 的 main/join 选取逐字一致（kind = ctaKind(text||aria) || ctaKind(aria)）：
+  // 保证点到的正是观察校验为加入的那个节点，绝不因规则漂移点到成员/待审节点（点「退出/取消」即自残）。
+  var target = null;
+  for (var i = 0; i < nodes.length; i++) {
+    var node = nodes[i];
+    var kind = ctaKind(text(node) || aria(node)) || ctaKind(aria(node));
+    if (kind === 'join') { target = node; break; }
+  }
+  if (!target) return JSON.stringify({ clicked: false });
+  // 禁用态诚实 bail（与 observe 的 pre-click disabled 闸一致）——绝不点已禁用/占位按钮冒充点过。
+  if (disabled(target)) return JSON.stringify({ clicked: false, reason: 'disabled' });
+  var r = target.getBoundingClientRect();
+  try { target.click(); } catch (e) { return JSON.stringify({ clicked: false, error: String((e && e.message) || e) }); }
+  return JSON.stringify({ clicked: true, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), text: String(text(target)).slice(0, 120) });
+})()`;
+
 export class FacebookJoinExecutor {
   private readonly cdp: BrowseCdp;
   private readonly overlayMonitor?: OverlayMonitor;
@@ -321,7 +373,18 @@ export class FacebookJoinExecutor {
       // 挂上点击处理器→点了不生效（真机:同群早点点空、页面稳定后点成功）。点前多等一小会儿让水合完成再点，更可靠。
       if (this.opts.preClickSettleMs > 0) await this.sleep(this.opts.preClickSettleMs);
       if (options.thinkMs && options.thinkMs > 0) await this.sleep(options.thinkMs);
-      await dispatchClick(this.cdp, button.x, button.y);
+      // 拟人 hover 移动到按钮（就绪观察时的坐标，仅为保留 mousemove 轨迹供反检测）——落点是否精确不影响结果，
+      // 真正的点击由页面内 element.click() 完成（change fb-group-join-js-click：真机实证坐标点击不让 FB 加入、JS 点击稳定生效）。
+      try {
+        await dispatchHover(this.cdp, button.x, button.y);
+      } catch {
+        /* hover 仅拟人化，失败不影响后续 JS 点击。 */
+      }
+      const clickResult = await evalJson<{ clicked?: boolean }>(this.cdp, GROUP_JOIN_CLICK_JS);
+      if (!clickResult?.clicked) {
+        // 点击瞬间按钮已消失/不可点（布局漂移或已被他路加入）→ 诚实 no_button，绝不冒充点过。
+        return { ok: false, reason: 'no_button', groupUrl, clicked: false, observation };
+      }
       if (this.opts.waitAfterClickMs > 0) await this.sleep(this.opts.waitAfterClickMs);
       // 点击后轮询（change fb-group-join-postclick-wait）：等成员态真渲染出来再判——FB 常在点击后数秒才把按钮从「加入小组」
       // 翻成「已加入」，死等一次会把已成功的加入误判成 join_failed。轮询到 已加入/待审/问卷/登录/验证码 或触上限。
