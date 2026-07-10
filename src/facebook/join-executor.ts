@@ -66,16 +66,19 @@ export interface FacebookJoinExecutorOptions {
   readyTimeoutMs?: number;
   /** 就绪轮询间隔。 */
   pollMs?: number;
-  /** 点击加入后等「已加入/退出小组/待审/问卷」等成员态渲染出来的轮询上限（change fb-group-join-postclick-wait）：FB 常在点击后数秒才把按钮翻成「已加入」，死等 2s 看一次会误判失败。 */
+  /** 点击加入后等「已加入/退出小组/待审/问卷」等成员态渲染出来的轮询上限（change fb-group-join-postclick-wait / -timeouts）：FB 常在点击后 ~12s+ 才把按钮翻成「已加入」，且网络不稳；死等一次会误判失败。放宽到 45s。 */
   postClickTimeoutMs?: number;
+  /** 点击加入按钮前的稳定等待（change fb-group-join-timeouts）：按钮在 interactive 阶段即渲染，但 React 可能尚未挂点击处理器、点了不生效；点前多等一会儿让水合完成，点击更可靠。 */
+  preClickSettleMs?: number;
 }
 
 const DEFAULTS: Required<FacebookJoinExecutorOptions> = {
   settleMs: 0,
   waitAfterClickMs: 1_500,
-  readyTimeoutMs: 12_000,
+  readyTimeoutMs: 20_000,
   pollMs: 600,
-  postClickTimeoutMs: 10_000,
+  postClickTimeoutMs: 45_000,
+  preClickSettleMs: 2_000,
 };
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -314,6 +317,9 @@ export class FacebookJoinExecutor {
       if (!button?.found || button.disabled || typeof button.x !== 'number' || typeof button.y !== 'number') {
         return { ok: false, reason: 'no_button', groupUrl, clicked: false, observation };
       }
+      // 点击前定值稳定等待（change fb-group-join-timeouts）：加入按钮常在 interactive 阶段就渲染，但此时 React 可能尚未
+      // 挂上点击处理器→点了不生效（真机:同群早点点空、页面稳定后点成功）。点前多等一小会儿让水合完成再点，更可靠。
+      if (this.opts.preClickSettleMs > 0) await this.sleep(this.opts.preClickSettleMs);
       if (options.thinkMs && options.thinkMs > 0) await this.sleep(options.thinkMs);
       await dispatchClick(this.cdp, button.x, button.y);
       if (this.opts.waitAfterClickMs > 0) await this.sleep(this.opts.waitAfterClickMs);
