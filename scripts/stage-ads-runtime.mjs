@@ -103,6 +103,45 @@ if (!cliSrc.includes(CHECK_CALL)) {
 writeFileSync(cliPath, cliSrc.split(CHECK_CALL).join(CHECK_STUB));
 console.log('[stage-ads-runtime] neutered CLI self-update (pinned runtime)');
 
+// --- Host/Node-version-agnostic liveness (replace the CLI's `ps | grep "node"` check) ---
+// isRunning(pid) decided "is the runtime alive" via `ps -f -p <pid> | grep "node"` (posix)
+// / `tasklist | findstr node.exe` (win) — it ASSUMES the service process is named "node".
+// But `ads start` forks the service with process.execPath as the interpreter; under Electron
+// (ELECTRON_RUN_AS_NODE) that's the Electron binary (named "AIDCP", not "node"), so the grep
+// never matches -> readPidFile has a live pid yet isRunning=false -> every store-dependent CLI
+// command (status / get-kernel-list / download-kernel / stop, via hasRunning/getChildStatus)
+// wrongly reports "runtime is not running". This is INDEPENDENT of Node version (a newer Node
+// doesn't rename the host binary), so it can't be fixed by upgrading — only by dropping the
+// "must be named node" assumption. We already route kernel/status over HTTP LocalAPI (main.cjs),
+// but patch the CLI's own check too, as defense-in-depth, so raw CLI subcommands also work under
+// any host: probe liveness with process.kill(pid, 0) (signal 0 = existence check; throws ESRCH
+// when gone, EPERM when alive-but-not-ours). Cross-platform, no subprocess, no name assumption.
+// The surrounding `if (pid) { ... } else { resolve(false); }` guard is preserved.
+const cliSrc2 = readFileSync(cliPath, 'utf8');
+const ISRUNNING_CALL = [
+  '      (0, import_node_child_process.exec)(',
+  `        util.format(process.platform === "win32" ? 'tasklist /fi "PID eq %s" | findstr /i "node.exe"' : 'ps -f -p %s | grep "node"', pid),`,
+  '        { windowsHide: true },',
+  '        function(err, stdout, stderr) {',
+  '          resolve(!err && !!stdout.toString().trim());',
+  '        }',
+  '      );',
+].join('\n');
+const ISRUNNING_STUB = [
+  '      try {',
+  '        process.kill(Number(pid), 0);',
+  '        resolve(true);',
+  '      } catch (e) {',
+  '        resolve(!!(e && e.code === "EPERM"));',
+  '      }',
+].join('\n');
+if (!cliSrc2.includes(ISRUNNING_CALL)) {
+  console.error('[stage-ads-runtime] FAILED: isRunning ps|grep-node block not found (CLI shape changed — re-verify on version bump)');
+  process.exit(1);
+}
+writeFileSync(cliPath, cliSrc2.split(ISRUNNING_CALL).join(ISRUNNING_STUB));
+console.log('[stage-ads-runtime] patched isRunning -> host/version-agnostic liveness (process.kill 0)');
+
 // Sanity: native sqlite must be present (all-arch) or the packaged service can't load.
 const nativeMac = join(out, 'sqlite', 'mac', 'node_sqlite3.node');
 const nativeArm = join(out, 'sqlite', 'arm64', 'node_sqlite3.node');
