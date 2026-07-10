@@ -31,9 +31,14 @@ export function classifyFacebookOverlayFromSignals(signals: FacebookBlockingSign
     return 'login';
   }
 
+  // FB 软阻断 / 限流信号（change account-nurture-discipline-spine §5.2）：FB 主力限流是 inline
+  // 弹窗/toast（"Action Blocked"/"we limit how often you can do this"/"misusing this feature"/
+  // "you can't use this feature right now"/"going too fast"）。识别为 'unknown' 阻断态 → 经既有
+  // risk.captcha_detected 带 overlay.text 上报（不改协议）→ 云端 §3 词库匹配把风控迁至 restricted。
+  // 与云端 FB_THROTTLE_PHRASES 语义对齐（两仓各自维护，无共享模块）。
   if (
     href.includes('/help/contact') ||
-    /temporarily blocked|you.?re temporarily blocked|暂时被限制|功能暂时不可用|你暂时无法使用/i.test(textLower)
+    /temporarily blocked|action blocked|we limit how often you can do this|misusing this feature|you can.?t use this feature right now|going too fast|this feature is( ?n.?t| not) available|your account is restricted|暂时被限制|功能暂时不可用|此功能暂时无法使用|你暂时无法使用|操作被封锁/i.test(textLower)
   ) {
     return 'unknown';
   }
