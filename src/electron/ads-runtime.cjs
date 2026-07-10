@@ -16,6 +16,7 @@ const fs = require('node:fs');
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const DEFAULT_KERNEL_TYPE = 'Chrome';
 const ADS_HOST = 'local.adspower.net';
+const DEFAULT_PORT = 50325;
 
 function stripAnsi(s) {
   return String(s == null ? '' : s).replace(ANSI_RE, '');
@@ -167,19 +168,39 @@ async function getRuntime({ cliEntry, execPath, run = runCli } = {}) {
 }
 
 // 确保运行时在跑：已跑则返回其 base；未跑则用 apiKey `start`、轮询就绪。
-// 返回 { ok, base, port } 或 { ok:false, error }。
-async function ensureRuntime({ cliEntry, execPath, apiKey, run = runCli, readyTries = 20, readyIntervalMs = 500 } = {}) {
+// 就绪判定优先用注入的 `isReady`（HTTP LocalAPI /status，权威且可靠）：实测在 Electron 自带 Node 20 下
+// `ads start` 经 child_process.fork 起服务后，其 pid/store 写入握手可能未完成 → `ads status` 误报「未在跑」，
+// 但服务本身在监听、HTTP LocalAPI 正常。故不依赖 `ads status`（仅作端口解析与兜底），以 HTTP 探活为准。
+// 端口优先从 `ads start` 输出（"Server running at :<port>"）解析，回落 `ads status`，再回落默认 50325。
+// isReady: 可选 async () => boolean，命中即视为就绪。返回 { ok, base, port } 或 { ok:false, error }。
+async function ensureRuntime({ cliEntry, execPath, apiKey, run = runCli, isReady, readyTries = 40, readyIntervalMs = 500 } = {}) {
   if (!cliEntry) return { ok: false, error: '未找到随包 AdsPower 运行时（cli entry）' };
-  let rt = await getRuntime({ cliEntry, execPath, run });
-  if (rt.running && rt.port) return { ok: true, base: rt.base, port: rt.port, alreadyRunning: true };
+  // 已在跑？优先 HTTP 探活（可靠），否则回落 CLI status。
+  if (isReady) {
+    if (await isReady().catch(() => false)) {
+      const rt0 = await getRuntime({ cliEntry, execPath, run }).catch(() => ({}));
+      const port0 = rt0.port || DEFAULT_PORT;
+      return { ok: true, base: baseForPort(port0), port: port0, alreadyRunning: true };
+    }
+  } else {
+    const rt = await getRuntime({ cliEntry, execPath, run });
+    if (rt.running && rt.port) return { ok: true, base: rt.base, port: rt.port, alreadyRunning: true };
+  }
   if (!apiKey || !String(apiKey).trim()) {
     return { ok: false, error: '运行时未在跑且缺少 AdsPower api-key，无法启动内嵌运行时' };
   }
   const started = await run(cliEntry, ['start', '-k', String(apiKey)], { execPath, timeoutMs: 120000 });
-  // start 会 daemon 化并返回；轮询 status 确认就绪。
+  const startedPort = parseRuntimePort(started.out) || DEFAULT_PORT;
+  // start 会 daemon 化并返回；轮询就绪。
   for (let i = 0; i < readyTries; i += 1) {
-    rt = await getRuntime({ cliEntry, execPath, run });
-    if (rt.running && rt.port) return { ok: true, base: rt.base, port: rt.port };
+    if (isReady) {
+      if (await isReady().catch(() => false)) {
+        return { ok: true, base: baseForPort(startedPort), port: startedPort };
+      }
+    } else {
+      const rt = await getRuntime({ cliEntry, execPath, run });
+      if (rt.running && rt.port) return { ok: true, base: rt.base, port: rt.port };
+    }
     await delay(readyIntervalMs);
   }
   return { ok: false, error: started.error || started.err || '内嵌运行时启动后未在预期时间内就绪', out: started.out };
