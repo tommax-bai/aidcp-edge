@@ -405,6 +405,142 @@ test('删除环境：点两次确认（第一次仅 armed、第二次才删）',
   assert.equal(deletedId, 'u1', '第二次点击才删除该环境');
 });
 
+test('删除环境：删云端成功后自动移出本地花名册（不留孤儿）', async () => {
+  const saves: Array<Record<string, unknown>> = [];
+  let deletedId = '';
+  // 有状态云端桩：删除真从列表移除（模拟真实——删了云端 profile 后 listProfiles 不再返回它）。
+  // 两个环境避开「唯一环境 + 花名册空 → 自动加入」把被删项又加回来的干扰。
+  let cloud = [
+    { userId: 'u1', serialNumber: '1', name: '甲', groupName: 'g', proxy: 'p' },
+    { userId: 'u2', serialNumber: '2', name: '乙', groupName: 'g', proxy: 'p' },
+  ];
+  const w = await boot(makeStub({
+    getSettings: async () => ({ provider: 'adspower', adsProfileId: 'u1', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x',
+      environments: [
+        { profileId: 'u1', name: '甲', platform: 'xiaohongshu' },
+        { profileId: 'u2', name: '乙', platform: 'xiaohongshu' },
+      ] }),
+    adsListProfiles: async () => ({ ok: true, truncated: false, profiles: cloud }),
+    adsDeleteEnv: async (opts) => { deletedId = (opts as { userId?: string }).userId ?? ''; cloud = cloud.filter((p) => p.userId !== deletedId); return { ok: true }; },
+    saveSettings: async (patch) => { saves.push(patch as Record<string, unknown>); return { provider: 'adspower', saveOk: true }; },
+  }));
+  const del = ($$(w, '.ads-env-del')[0]) as unknown as HTMLButtonElement; // 甲(u1) 那行的删除
+  del.dispatchEvent(new w.Event('click')); // armed
+  await tick();
+  del.dispatchEvent(new w.Event('click')); // 真删
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(deletedId, 'u1', '应删除该云端环境');
+  const envSaves = saves.filter((p) => Array.isArray(p.environments));
+  assert.ok(envSaves.length >= 1, '删除后应落盘花名册');
+  const last = envSaves[envSaves.length - 1].environments as Array<{ profileId: string }>;
+  assert.ok(!last.some((e) => e.profileId === 'u1'), '删除的环境应已从本地花名册移出（不留孤儿）');
+  assert.ok(last.some((e) => e.profileId === 'u2'), '其它环境应保留在花名册');
+});
+
+test('刷新：花名册里云端已删的孤儿被自动清理', async () => {
+  const saves: Array<Record<string, unknown>> = [];
+  const w = await boot(makeStub({
+    getSettings: async () => ({ provider: 'adspower', adsProfileId: 'u1', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x',
+      environments: [
+        { profileId: 'orphan', name: '孤儿', platform: 'facebook' },
+        { profileId: 'u1', name: '甲', platform: 'xiaohongshu' },
+      ] }),
+    adsListProfiles: async () => ({ ok: true, truncated: false, profiles: [{ userId: 'u1', serialNumber: '1', name: '甲', groupName: 'g', proxy: 'p' }] }),
+    saveSettings: async (patch) => { saves.push(patch as Record<string, unknown>); return { provider: 'adspower', saveOk: true }; },
+  }));
+  for (let i = 0; i < 4; i++) await tick();
+  const envSaves = saves.filter((p) => Array.isArray(p.environments));
+  assert.ok(envSaves.length >= 1, '刷新检测到孤儿后应落盘花名册');
+  const last = envSaves[envSaves.length - 1].environments as Array<{ profileId: string }>;
+  assert.ok(!last.some((e) => e.profileId === 'orphan'), '孤儿（云端已删）应被清理');
+  assert.ok(last.some((e) => e.profileId === 'u1'), '仍在云端的环境应保留');
+  assert.match($(w, '#ads-env-msg').textContent ?? '', /已清理 1 个/);
+});
+
+test('刷新安全闸：列表被截断时绝不剔孤儿（防一次不全的拉取误清空花名册）', async () => {
+  const saves: Array<Record<string, unknown>> = [];
+  const w = await boot(makeStub({
+    getSettings: async () => ({ provider: 'adspower', adsProfileId: 'u1', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x',
+      environments: [
+        { profileId: 'on-later-page', name: '在后续页', platform: 'facebook' },
+        { profileId: 'u1', name: '甲', platform: 'xiaohongshu' },
+      ] }),
+    adsListProfiles: async () => ({ ok: true, truncated: true, profiles: [{ userId: 'u1', serialNumber: '1', name: '甲', groupName: 'g', proxy: 'p' }] }),
+    saveSettings: async (patch) => { saves.push(patch as Record<string, unknown>); return { provider: 'adspower', saveOk: true }; },
+  }));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.ok(!saves.some((p) => Array.isArray(p.environments)), '截断的拉取绝不应改写花名册（绝不剔孤儿）');
+  assert.doesNotMatch($(w, '#ads-env-msg').textContent ?? '', /已清理/);
+});
+
+test('刷新安全闸：云端返回空列表（疑似后端空响应）时绝不剔孤儿', async () => {
+  const saves: Array<Record<string, unknown>> = [];
+  await boot(makeStub({
+    getSettings: async () => ({ provider: 'adspower', adsProfileId: 'u1', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x',
+      environments: [
+        { profileId: 'u1', name: '甲', platform: 'xiaohongshu' },
+        { profileId: 'u2', name: '乙', platform: 'facebook' },
+      ] }),
+    adsListProfiles: async () => ({ ok: true, truncated: false, profiles: [] }),
+    saveSettings: async (patch) => { saves.push(patch as Record<string, unknown>); return { provider: 'adspower', saveOk: true }; },
+  }));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.ok(!saves.some((p) => Array.isArray(p.environments)), '一个环境都没取到时绝不应清空花名册（宁漏剔、不误删）');
+});
+
+test('删除唯一环境后不静默自动加入无关的剩余环境（回归 Finding 1）', async () => {
+  const saves: Array<Record<string, unknown>> = [];
+  let cloud = [
+    { userId: 'X', serialNumber: '1', name: '甲', groupName: 'g', proxy: 'p' },
+    { userId: 'Y', serialNumber: '2', name: '乙', groupName: 'g', proxy: 'p' },
+  ];
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped' }),
+    getSettings: async () => ({ provider: 'adspower', adsProfileId: 'X', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x',
+      environments: [{ profileId: 'X', name: '甲', platform: 'xiaohongshu' }] }), // 花名册只有 X；Y 从未加入
+    adsListProfiles: async () => ({ ok: true, truncated: false, profiles: cloud }),
+    adsDeleteEnv: async (opts) => { const id = (opts as { userId?: string }).userId; cloud = cloud.filter((p) => p.userId !== id); return { ok: true }; },
+    saveSettings: async (patch) => { saves.push(patch as Record<string, unknown>); return { provider: 'adspower', saveOk: true }; },
+  }));
+  const del = ($$(w, '.ads-env-del')[0]) as unknown as HTMLButtonElement; // 甲(X) 那行（列表首行）
+  del.dispatchEvent(new w.Event('click')); // armed
+  await tick();
+  del.dispatchEvent(new w.Event('click')); // 真删 X
+  for (let i = 0; i < 6; i++) await tick();
+  const envSaves = saves.filter((p) => Array.isArray(p.environments));
+  for (const p of envSaves) {
+    assert.ok(!(p.environments as Array<{ profileId: string }>).some((e) => e.profileId === 'Y'), '删除唯一环境不应把无关的剩余环境 Y 自动拉进花名册');
+  }
+});
+
+test('首次列出唯一环境仍自动加入花名册（allowAutoJoin 合法路径保留）', async () => {
+  const saves: Array<Record<string, unknown>> = [];
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped' }),
+    getSettings: async () => ({ provider: 'adspower', adsProfileId: '', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x' }), // 无 environments → 花名册空
+    adsListProfiles: async () => ({ ok: true, truncated: false, profiles: [{ userId: 'only1', serialNumber: '1', name: '唯一', groupName: 'g', proxy: 'p' }] }),
+    saveSettings: async (patch) => { saves.push(patch as Record<string, unknown>); return { provider: 'adspower', saveOk: true }; },
+  }));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.match($(w, '#ads-env-msg').textContent ?? '', /已自动加入唯一环境/);
+  const envSaves = saves.filter((p) => Array.isArray(p.environments));
+  assert.ok(envSaves.some((p) => (p.environments as Array<{ profileId: string }>).some((e) => e.profileId === 'only1')), '唯一环境应被自动加入花名册');
+});
+
+test('空响应安全闸（红线）：整份花名册都不在本次云端列表时，绝不把在用环境渲染成可移除的残留行', async () => {
+  // 撤销残留行渲染后的回归守卫：success-but-empty 的偶发响应下，不得把活着的环境误标成已删除+给一键移出。
+  const w = await boot(makeStub({
+    getSettings: async () => ({ provider: 'adspower', adsProfileId: 'A', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x',
+      environments: [
+        { profileId: 'A', name: '在用甲', platform: 'facebook' },
+        { profileId: 'B', name: '在用乙', platform: 'xiaohongshu' },
+      ] }),
+    adsListProfiles: async () => ({ ok: true, truncated: false, profiles: [] }), // 偶发空响应（非账号真空）
+  }));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal($$(w, '.ads-env-orphan').length, 0, '空响应下绝不渲染任何「残留/已删除」行（否则误标在用环境）');
+});
+
 test('防限速：刷新在途禁用按钮，完成后恢复', async () => {
   let resolveList: (v: unknown) => void = () => undefined;
   const pending = new Promise((res) => { resolveList = res; });

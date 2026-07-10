@@ -1751,6 +1751,30 @@ async function persistRoster() {
   } catch { /* 落盘失败静默；下次「启动」的 saveCurrentSettings 会再落一次 */ }
 }
 
+// 刷新时剔除孤儿：花名册里 profileId 已不在云端实时列表中的成员（云端 profile 已删除、本地残留）自动移出。
+// **只应在「成功且完整」的拉取后调用**（调用点 refreshEnvs 已守 r.ok && !r.truncated）——否则一次失败/截断的
+// 拉取会把在跑的花名册误判成全体孤儿清空（红线：不因缺数据自残）。返回移出的条数。
+function pruneOrphanRoster(profiles) {
+  const live = new Set((profiles || []).map((p) => p.userId).filter(Boolean));
+  // 二道防御（截断闸之外）：一个环境都没取到（疑似后端「成功但空」的偶发响应，而非账号真空）时绝不剔——
+  // 否则会把整份在用花名册全判成孤儿清空。宁可漏剔孤儿、绝不误删在用环境（红线：不因缺数据自残）。
+  if (live.size === 0) return 0;
+  const orphanIds = roster.filter((m) => m.profileId && !live.has(m.profileId)).map((m) => m.profileId);
+  if (orphanIds.length === 0) return 0;
+  const drop = new Set(orphanIds);
+  roster = roster.filter((m) => !drop.has(m.profileId));
+  // 当前选中的分身正是被剔的孤儿 → 回落到剩余首个成员（或清空），与 removeFromRoster 一致。
+  if (drop.has(settingsUi.adsProfile.value.trim())) {
+    const next = roster[0];
+    settingsUi.adsProfile.value = next ? next.profileId : '';
+    selectedProfileName = next ? next.name : '';
+    selectedPlatform = next ? normPlatform(next.platform) : 'xiaohongshu';
+    updateProfileDisplay();
+  }
+  void persistRoster(); // 落盘：main 的 syncEnvHandles 有序停止并摘除这些孤儿环境、左栏随即撤下
+  return orphanIds.length;
+}
+
 // roster 变更后就地重刷环境列表的成员标记（不重新拉取）。
 function refreshRosterMarks() {
   if (lastProfiles.length > 0) populateEnvs(lastProfiles);
@@ -1794,7 +1818,10 @@ function makeDeleteBtn(prof) {
       const r = await window.aidcpEdge.adsDeleteEnv({ ...formAdsOpts(), userId: prof.userId });
       if (r && r.ok) {
         setEnvMsg(`已删除环境「${prof.name || prof.userId}」。`, false);
-        refreshEnvs();
+        // 删除云端 profile 成功后一并把它从本地运行花名册移出——否则本地残留成「谁都删不掉」的孤儿：
+        // 移出按钮只在云端实时列表里的环境行上出现，profile 一删该行随即消失、再无移除入口（刷新剔孤儿是补救）。
+        if (rosterHas(prof.userId)) removeFromRoster(prof.userId);
+        refreshEnvs({ suppressAutoJoin: true }); // 删除后不触发「唯一环境自动加入」（否则会静默拉进无关的剩余环境，评审 Finding 1）
       } else {
         setEnvMsg(`删除失败：${(r && r.error) || '未知错误'}`, true);
         btn.disabled = false;
@@ -1808,9 +1835,12 @@ function makeDeleteBtn(prof) {
 
 // 直接把环境铺成可点行（非下拉）。每行：名称 + 序号/分组/代理配置/user_id + 成员标记/移出 + 删除按钮。
 // 多选（edge-multi-environment-fleet）：点行 = 加入运行花名册（已加入的行带「已加入」标记与「移出」钮）。
-// 返回 { autoSelected }：恰好一个环境、花名册为空且核心未在跑时自动加入（spec：唯一环境自动加入花名册；
-// 多环境不代选、已有成员不覆盖、在跑不动配置）。
-function populateEnvs(profiles) {
+// 返回 { autoSelected }：恰好一个环境、花名册为空、核心未在跑、且调用方 allowAutoJoin 放行时自动加入（spec：
+// 唯一环境自动加入花名册；多环境不代选、已有成员不覆盖、在跑不动配置；删除/剔孤儿后的刷新不放行，见 refreshEnvs）。
+// 注：这里 MUST NOT 把「不在本次云端列表里的花名册成员」当作已删除渲染成可移除的残留行——本次列表可能是
+// 偶发的 success-but-empty 或截断（>1000）结果，误标会把在用环境说成已删除并给一键移出（自残）。孤儿的自动
+// 清理只由 refreshEnvs→pruneOrphanRoster 在「成功且完整且非空」时做；边角（空/截断）宁可留孤儿、不误删。
+function populateEnvs(profiles, allowAutoJoin = false) {
   lastProfiles = Array.isArray(profiles) ? profiles : [];
   const list = settingsUi.adsEnvList;
   const current = settingsUi.adsProfile.value.trim();
@@ -1883,7 +1913,9 @@ function populateEnvs(profiles) {
     if (!firstItem) firstItem = item;
     list.appendChild(item);
   }
-  if (profiles.length === 1 && !current && roster.length === 0 && profiles[0].userId && !coreRunning()) {
+  // 唯一环境自动加入（首次列出的便利）：仅当调用方 allowAutoJoin 放行。删除/剔孤儿后触发的刷新绝不放行，
+  // 否则会把一个无关的剩余环境静默拉进运行队列（评审 Finding 1 回归）。
+  if (allowAutoJoin && profiles.length === 1 && !current && roster.length === 0 && profiles[0].userId && !coreRunning()) {
     selectProfile(profiles[0].userId, firstItem, profiles[0].name, profiles[0].platform);
     return { autoSelected: profiles[0].name || profiles[0].userId };
   }
@@ -1928,7 +1960,8 @@ function makeProxyBtn(prof) {
 }
 
 // 拉取环境列表；失败诚实降级为手敲（疑似鉴权失败提示已用当前填写值、别叫用户重填已填的框）。
-async function refreshEnvs() {
+async function refreshEnvs(opts) {
+  const suppressAutoJoin = Boolean(opts && opts.suppressAutoJoin);
   settingsUi.adsRefresh.disabled = true;
   setEnvMsg('正在拉取指纹浏览器环境…', false);
   try {
@@ -1941,14 +1974,23 @@ async function refreshEnvs() {
       openAdvanced();
       return;
     }
-    const { autoSelected, currentSelected } = populateEnvs(r.profiles || []);
+    const profiles = r.profiles || [];
+    // 刷新即清理孤儿：花名册里在云端实时列表已不存在的环境（云端 profile 已删、本地残留）自动移出。
+    // 安全闸：仅在成功拉取（本分支即 r.ok）且列表**完整**（!r.truncated）时剔——拉取失败已走上面 !r.ok 分支；
+    // 截断时列表不全（成员可能在未显示的后续页），绝不剔，杜绝「一次不全的拉取把整份花名册误清空」。
+    const prunedCount = r.truncated ? 0 : pruneOrphanRoster(profiles);
+    // 删除后刷新（suppressAutoJoin）或本轮剔了孤儿（prunedCount>0，花名册刚被动清空）时绝不自动加入——
+    // 否则「唯一环境自动加入」会把一个无关的剩余环境静默拉进运行队列（评审 Finding 1）。
+    const allowAutoJoin = !suppressAutoJoin && prunedCount === 0;
+    const { autoSelected, currentSelected } = populateEnvs(profiles, allowAutoJoin);
     const extra = r.truncated ? '（环境较多，仅显示前若干条，可用分组精简）' : '';
+    const cleaned = prunedCount > 0 ? `已清理 ${prunedCount} 个云端已删除的残留环境。` : '';
     const autoHint = autoSelected
       ? `已自动加入唯一环境「${autoSelected}」。`
       : currentSelected
         ? `已选中「${currentSelected}」。`
         : '点选环境即加入运行花名册（可多选并行运行）。';
-    setEnvMsg(`已加载 ${(r.profiles || []).length} 个环境${extra}。${autoHint}`, false);
+    setEnvMsg(`已加载 ${profiles.length} 个环境${extra}。${cleaned}${autoHint}`, false);
   } catch (e) {
     setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可在「高级设置」打开「手动填写」填分身 ID。`, true);
     openAdvanced();
