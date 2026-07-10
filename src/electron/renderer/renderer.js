@@ -185,7 +185,7 @@ const settingsUi = {
   applyRestart: document.querySelector('#apply-restart'),
   msg: document.querySelector('#settings-msg'),
 };
-const PARKING_MODES = new Set(['parking-display', 'edge-strip', 'offscreen']);
+const PARKING_MODES = new Set(['primary-screen', 'parking-display', 'edge-strip', 'offscreen']);
 
 // 状态码保持英文（供 CSS 上色 + main 侧判断），展示文案在此本地化。className 仍用原始码不动色。
 const STATUS_LABELS = {
@@ -215,6 +215,7 @@ const fleetView = {
   envs: new Map(), // envId -> { envId, name, platform, status }
   order: [], // 花名册顺序
   selected: null, // 当前选中 envId
+  shownEnv: null, // 头像三态：已把浏览器抬到主屏前台的那个 envId（null=无）。切换选中即清，见 selectEnv
   collapsed: true, // 环境栏默认收起为窄图标条
   buffers: new Map(), // envId -> [{ entry, cls }]（每环境活动流缓冲，≤200 条，绝不串号）
   logs: new Map(), // envId -> { entries:[{time,message}], last }（每环境开发者原始日志，绝不串号）
@@ -1108,6 +1109,10 @@ function applyFleetSnapshot(snap) {
     fleetView.buffers.delete(key);
     fleetView.logs.delete(key);
     lastPublishSigByEnv.delete(key);
+    // 人设弹窗宽限的每环境时间戳也要清：adspower envId 由分身确定性派生，移出再加回会复用同一 key，
+    // 残留的旧 since 会让 elapsed 远超宽限 → 跳过宽限、对（可能已绑的）账号立刻误弹。顺带清显示态指针。
+    personaUnboundSince.delete(key);
+    if (fleetView.shownEnv === key) fleetView.shownEnv = null;
   }
   if (typeof snap.railCollapsed === 'boolean') fleetView.collapsed = snap.railCollapsed;
   const prevSelected = fleetView.selected;
@@ -1131,6 +1136,7 @@ function applyFleetSnapshot(snap) {
 function selectEnv(envId) {
   if (!envId || !fleetView.envs.has(envId) || envId === fleetView.selected) return;
   fleetView.selected = envId;
+  fleetView.shownEnv = null; // 切到另一个环境：头像三态从头开始，绝不留着旧环境的「已显示」指针
   pubManualOpen = false;
   resetPersonaDraft(); // 人设向导每环境独立：切换即清草稿，绝不把 A 的草稿误确认到 B
   window.aidcpEdge.fleetSelect?.(envId);
@@ -1166,6 +1172,14 @@ function renderRail() {
   fields.fleetRow?.classList.toggle('with-rail', show);
   if (!show) { fleetView.lastRailSig = ''; return; }
   const model = uiLogic.fleetRailModel(list, Date.now());
+  // 头像三态清理：仅在浏览器确已不在（环境移出 / 核心非运行）时撤销「已显示」相位。
+  // 绝不按 level 清——attention（验证码浮层、云端瞬断、风控受限等，核心仍在跑、浏览器仍可控）
+  // 必须保留 shown，否则盯验证码的环境永远回不到「归位」态（第三态不可达）。以 status.edge 为准。
+  if (fleetView.shownEnv) {
+    const shownRow = model.rows.find((r) => r.envId === fleetView.shownEnv);
+    const edgeAlive = shownRow && shownRow.status && (shownRow.status.edge === 'running' || shownRow.status.edge === 'starting');
+    if (!edgeAlive) fleetView.shownEnv = null;
+  }
   const counts = {
     run: model.rows.filter((r) => !r.needsAction && (r.level === 'running' || r.level === 'launching')).length,
     attn: model.pendingCount,
@@ -1177,6 +1191,7 @@ function renderRail() {
     show,
     collapsed: fleetView.collapsed,
     selected: fleetView.selected,
+    shown: fleetView.shownEnv,
     guided: Boolean(fleetView.guided),
     counts,
     // platform 必须进签名：改平台后行才会重建上色（漏掉则签名未变、UI 停留旧平台）。
@@ -1220,12 +1235,20 @@ function renderRail() {
 
 function makeRailRow(row) {
   const btn = document.createElement('div');
-  btn.className = `rail-row lv-${row.level} plat-${normPlatform(row.platform)}${row.needsAction ? ' pulse' : ''}${row.envId === fleetView.selected ? ' selected' : ''}`;
+  const isSelected = row.envId === fleetView.selected;
+  const isShown = row.envId === fleetView.shownEnv;
+  btn.className = `rail-row lv-${row.level} plat-${normPlatform(row.platform)}${row.needsAction ? ' pulse' : ''}${isSelected ? ' selected' : ''}${isShown ? ' shown' : ''}`;
   btn.dataset.envId = row.envId;
   btn.tabIndex = 0;
   btn.setAttribute('role', 'button');
   const displayName = railDisplayName(row);
-  btn.title = `${displayName} · ${row.label}`; // 收起态悬停出名字与状态
+  // 收起态悬停出名字与状态 + 头像三态的下一步提示（收起态整卡即头像；点整卡=点头像）。
+  const nextHint = !isSelected
+    ? '点击选中'
+    : isShown
+      ? '再次点击：浏览器归位'
+      : '再次点击：把浏览器抬到主屏前台';
+  btn.title = `${displayName} · ${row.label} · ${nextHint}`;
   const ava = document.createElement('span');
   ava.className = 'rail-ava';
   ava.textContent = displayName.slice(0, 1);
@@ -1258,9 +1281,39 @@ function makeRailRow(row) {
   stateEl.appendChild(document.createTextNode(row.label));
   meta.appendChild(stateEl);
   btn.appendChild(meta);
-  btn.addEventListener('click', () => selectEnv(row.envId));
-  btn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectEnv(row.envId); } });
+  btn.addEventListener('click', () => onRailRowActivate(row.envId));
+  btn.addEventListener('keydown', (e) => {
+    // 只在整行本身聚焦时响应键盘：焦点在行内的人设 ✦ 按钮上时 e.target≠btn，放行让按钮原生激活（开人设浮层），
+    // 否则本处 preventDefault 会吞掉按钮激活、还把三态切换误触发在人设图标上。
+    if (e.target !== btn) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRailRowActivate(row.envId); }
+  });
   return btn;
+}
+
+// 环境头像三态（用户要求）：①未选中→选中（红高亮）②已选中且浏览器未抬前→把浏览器抬到主屏前台并聚焦
+// ③已抬前→让浏览器归位（回背景停放位）。②③复用既有 showDrivenBrowser / resetBrowserParking 通道。
+// 诚实边界：指令失败（引擎未起 / 浏览器未就绪）绝不推进相位，把回执文案如实显示在环境栏消息位。
+// 人设 ✦ 图标自带 stopPropagation（见 makeRailRow），不会误触发本三态。
+async function onRailRowActivate(envId) {
+  if (!envId || !fleetView.envs.has(envId)) return;
+  if (envId !== fleetView.selected) { selectEnv(envId); return; } // ① 选中
+  const showing = fleetView.shownEnv !== envId; // 目标动作：未显示→显示；已显示→归位
+  const api = showing ? window.aidcpEdge.showDrivenBrowser : window.aidcpEdge.resetBrowserParking;
+  if (typeof api !== 'function') return;
+  const label = showing ? '显示浏览器' : '浏览器归位';
+  try {
+    const r = await api(envId);
+    if (r && r.ok) {
+      fleetView.shownEnv = showing ? envId : null; // 仅成功才推进相位
+      setRailMsg(r.hint || `${label}指令已发送。`);
+      renderRail();
+    } else {
+      setRailMsg(`${label}失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`);
+    }
+  } catch (e) {
+    setRailMsg(`${label}失败：${(e && e.message) || e}`);
+  }
 }
 
 function setRailMsg(text) {
@@ -1480,11 +1533,11 @@ function selectedProvider() {
 function selectedParkingMode() {
   const active = settingsUi.parkingButtons.find((btn) => btn.classList.contains('active'));
   const mode = active && active.dataset ? active.dataset.mode : '';
-  return PARKING_MODES.has(mode) ? mode : 'edge-strip';
+  return PARKING_MODES.has(mode) ? mode : 'primary-screen';
 }
 
 function applyParkingSelection(mode) {
-  const safe = PARKING_MODES.has(mode) ? mode : 'edge-strip';
+  const safe = PARKING_MODES.has(mode) ? mode : 'primary-screen';
   for (const btn of settingsUi.parkingButtons) {
     btn.classList.toggle('active', btn.dataset.mode === safe);
   }
@@ -1505,6 +1558,7 @@ function updateProfileDisplay() {
 
 function applySettings(s) {
   if (!s) return;
+  if (Number.isFinite(Number(s.personaPromptGraceMs))) personaPromptGraceMs = Math.max(0, Number(s.personaPromptGraceMs));
   selectedProfileName = s.adsProfileName || '';
   selectedPlatform = normPlatform(s.platform);
   // 花名册：新形状 environments 优先；旧单值 adsProfileId 向后兼容加载为单元素花名册。
@@ -1516,7 +1570,7 @@ function applySettings(s) {
   settingsUi.adsProfile.value = s.adsProfileId || '';
   settingsUi.adsApiKey.value = s.adsApiKey || '';
   settingsUi.adsApiBase.value = s.adsApiBase || '';
-  applyParkingSelection(s.browserParkingMode || 'edge-strip');
+  applyParkingSelection(s.browserParkingMode || 'primary-screen');
   updateProfileDisplay();
   editingProvider = null;
   dirty = false;
@@ -2250,6 +2304,14 @@ let personaDraftEnvId; // 草稿所属环境（多环境：persist MUST 打回�
 let personaStage = 'pick'; // 两步向导阶段：pick（选关键词）| preview（预览确认）
 let personaInFlight = false; // 生成请求在途（骨架 + 按钮禁用 + 遮罩误点不关层）
 const personaPrompted = new Set();
+// 人设弹窗判定时机（用户反馈：已设置人设的账号被误弹）：账号刚「登录+连云」的空窗里，云端「已绑人设」
+// 信号（sticky true、只在已绑时下发、要等下一次心跳）可能还没到，此刻按未绑弹窗会误扰已设置的账号。
+// 给一个宽限期——先记下每个环境首次进入「已连云且暂判未绑」的时刻；宽限内不弹、只挂一个到点复评的
+// 定时器；宽限到点仍未绑才认定为真未设置并弹。已设置的账号会在这个窗口内翻成已绑，从而永不被弹。
+const PERSONA_PROMPT_GRACE_MS = 6000;
+let personaPromptGraceMs = PERSONA_PROMPT_GRACE_MS; // 可经 settings.personaPromptGraceMs 覆盖（默认 6s；主要供测试注入短值 / 高级调优）
+const personaUnboundSince = new Map(); // envId -> ts：首次观察到 known && !bound
+let personaPromptReevalTimer = null; // 单个待触发的到点复评定时器（针对当前环境）
 
 // 底部操作栏按阶段/形态切换主 CTA：向导态 pick=「生成人设」、preview=「重新生成 + 确认使用」；
 // 空态/已绑态收起全部按钮（空态面板自带「去启动」）。
@@ -2347,13 +2409,24 @@ function clearPersonaPromptForCurrentEnv() {
 }
 
 function maybePromptPersonaSetup(status, known, bound) {
-  if (!known) return;
+  const trackKey = currentEnvId() || '__local__';
+  if (!known) { personaUnboundSince.delete(trackKey); return; }
   if (bound) {
     clearPersonaPromptForCurrentEnv();
+    personaUnboundSince.delete(trackKey);
     return;
   }
   const key = personaPromptKey(status);
   if (personaPrompted.has(key)) return;
+  // known && !bound：可能只是 personaBound 权威信号尚未到达的空窗——先过宽限期再认定未绑。
+  let since = personaUnboundSince.get(trackKey);
+  if (since == null) { since = Date.now(); personaUnboundSince.set(trackKey, since); }
+  const elapsed = Date.now() - since;
+  if (elapsed < personaPromptGraceMs) {
+    schedulePersonaPromptReeval(trackKey, personaPromptGraceMs - elapsed);
+    return;
+  }
+  // 宽限到点仍未绑：认定为真未设置，弹窗 + 系统通知。
   personaPrompted.add(key);
   const envId = currentEnvId();
   const env = fleetView.envs.get(envId);
@@ -2368,6 +2441,18 @@ function maybePromptPersonaSetup(status, known, bound) {
     /* old preload without notify */
   }
   if (!fields.personaPop || !fields.personaPop.classList.contains('open')) openPersonaPop(envId);
+}
+
+// 到点复评：宽限期内若无后续状态推送触发，也主动再判一次。只对「仍是当前环境」生效，
+// 用其最新状态重跑 updatePersonaGate（内部会再走到 maybePromptPersonaSetup，此时宽限已过 →
+// 认定并弹；若期间已绑则自然跳过）。
+function schedulePersonaPromptReeval(envId, delay) {
+  if (personaPromptReevalTimer) clearTimeout(personaPromptReevalTimer);
+  personaPromptReevalTimer = setTimeout(() => {
+    personaPromptReevalTimer = null;
+    if ((currentEnvId() || '__local__') !== envId) return; // 已切走：交给新环境自己的评估
+    updatePersonaGate(currentStatus || null);
+  }, Math.max(0, delay));
 }
 
 function collectPersonaKeywords() {

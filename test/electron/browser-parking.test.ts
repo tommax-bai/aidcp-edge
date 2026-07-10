@@ -20,10 +20,22 @@ const parking = require('../../src/electron/browser-parking.cjs') as {
 const primary = { id: 1, workArea: { x: 0, y: 0, width: 1920, height: 1080 } };
 const secondary = { id: 2, workArea: { x: 1920, y: 0, width: 1600, height: 900 } };
 
-test('normalizeParkingMode defaults invalid values to edge-strip', () => {
+test('primary-screen is the default and invalid values normalize to it', () => {
+  assert.equal(parking.DEFAULT_PARKING_MODE, 'primary-screen');
+  assert.equal(parking.normalizeParkingMode('primary-screen'), 'primary-screen');
   assert.equal(parking.normalizeParkingMode('offscreen'), 'offscreen');
-  assert.equal(parking.normalizeParkingMode('bogus'), 'edge-strip');
-  assert.equal(parking.normalizeParkingMode(undefined), 'edge-strip');
+  assert.equal(parking.normalizeParkingMode('bogus'), 'primary-screen');
+  assert.equal(parking.normalizeParkingMode(undefined), 'primary-screen');
+});
+
+test('primary-screen parks fully on the primary display and shows centered', () => {
+  const plan = parking.computeBrowserParkingPlan('primary-screen', [primary], primary);
+  assert.equal(plan.effectiveMode, 'primary-screen');
+  // 背景位：右对齐但完全在屏内（left+width=1920≤屏宽），顶部近上沿——操作系统必然认账。
+  assert.deepEqual(plan.bounds, { left: 480, top: 40, width: 1440, height: 980 });
+  // 抬前/兜底位：居中于主屏工作区。
+  assert.deepEqual(plan.visibleBounds, { left: 240, top: 50, width: 1440, height: 980 });
+  assert.deepEqual(plan.fallbackBounds, plan.visibleBounds);
 });
 
 test('parking-display targets a secondary display when available', () => {
@@ -32,11 +44,12 @@ test('parking-display targets a secondary display when available', () => {
   assert.deepEqual(plan.bounds, { left: 1920, top: 0, width: 1440, height: 980 });
 });
 
-test('parking-display falls back to edge-strip without secondary display', () => {
+test('parking-display falls back to the default (primary-screen) without a secondary display', () => {
   const plan = parking.computeBrowserParkingPlan('parking-display', [primary], primary);
-  assert.equal(plan.effectiveMode, 'edge-strip');
+  assert.equal(plan.effectiveMode, 'primary-screen');
   assert.equal(plan.reason, 'no_secondary_display');
-  assert.deepEqual(plan.bounds, { left: 1902, top: 0, width: 1440, height: 980 });
+  // effectiveMode 与 bounds 一致（都是 primary-screen），不再各说各话。
+  assert.deepEqual(plan.bounds, { left: 480, top: 40, width: 1440, height: 980 });
 });
 
 test('offscreen is fully beyond the primary display right edge', () => {

@@ -101,7 +101,7 @@ const DEFAULT_SETTINGS = {
   adsApiBase: '',
   adsProfileName: '',
   platform: 'xiaohongshu',
-  // 浏览器窗口停放：默认把窗口大部分移到屏幕边缘，保留可恢复边条，不用最小化/headless。
+  // 浏览器窗口停放：默认主屏停放（窗口停在主屏可靠可见的背景位、不抢焦点，不用最小化/headless）。
   browserParkingMode: DEFAULT_PARKING_MODE,
   // 「开发者详情」（原始日志区）默认不展示，在设置抽屉里开关（客户版首屏零技术噪音）。
   devDetails: false,
@@ -305,6 +305,10 @@ function makeEnvHandle({ envId, kind, profileId, name, platform, cascadeIndex })
     uiEvents: createUiEventStream(),
     browserParkingReady: false,
     browserPersonaNoticeState: null,
+    // 人设横幅判定宽限（同 renderer 弹窗宽限）：记下首次「登录+连云」时刻 + 到点复评定时器，
+    // 避免刚连云、personaBound(sticky true) 尚未到达的空窗里误给已设置账号推横幅。
+    personaNoticeReadySince: 0,
+    personaNoticeTimer: null,
     restartPending: false,
     pausePending: false,
     coreParked: false,
@@ -845,9 +849,41 @@ function writeBrowserControlCommand(handle, type, payload) {
   }
 }
 
+// 人设横幅判定宽限期（同 renderer 弹窗宽限，理由一致）：账号刚登录+连云的空窗里，云端「已绑人设」
+// 信号可能还没到，此刻按未绑推横幅会误扰已设置的账号。宽限内先不推、挂到点复评；宽限到点仍未绑才推。
+const PERSONA_NOTICE_GRACE_MS = 6000;
+
+function personaNoticeReady(handle) {
+  const s = handle.status || {};
+  return s.auth === 'logged in' && s.cloud === 'connected';
+}
+
+function resetPersonaNoticeGrace(handle) {
+  if (!handle) return;
+  handle.personaNoticeReadySince = 0;
+  if (handle.personaNoticeTimer) { clearTimeout(handle.personaNoticeTimer); handle.personaNoticeTimer = null; }
+}
+
 function syncBrowserPersonaNotice(handle, force = false) {
   if (!handle || !handle.browserParkingReady) return;
-  const notice = browserPersonaNoticeForStatus(handle.status, handle.name);
+  const ready = personaNoticeReady(handle);
+  if (!ready) handle.personaNoticeReadySince = 0;
+  else if (!handle.personaNoticeReadySince) handle.personaNoticeReadySince = Date.now();
+
+  let notice = browserPersonaNoticeForStatus(handle.status, handle.name);
+  if (notice.active && ready) {
+    const elapsed = Date.now() - handle.personaNoticeReadySince;
+    if (elapsed < PERSONA_NOTICE_GRACE_MS) {
+      notice = { active: false }; // 宽限内先不推横幅（已设置账号会在此窗口内翻成已绑而永不被推）
+      if (!handle.personaNoticeTimer) {
+        handle.personaNoticeTimer = setTimeout(() => {
+          handle.personaNoticeTimer = null;
+          if (handle.removed || !handle.child) return;
+          syncBrowserPersonaNotice(handle);
+        }, Math.max(0, PERSONA_NOTICE_GRACE_MS - elapsed));
+      }
+    }
+  }
   const stateKey = browserPersonaNoticeKey(notice);
   if (!force && handle.browserPersonaNoticeState === stateKey) return;
   const result = writeBrowserControlCommand(handle, 'browser.personaNotice', notice);
@@ -863,7 +899,11 @@ function sendBrowserParkingCommand(handle, type) {
     const plan = currentParkingPlan();
     const where = plan.effectiveMode === 'offscreen'
       ? '窗口平时完全移出屏幕，请稍候其自动归位'
-      : '窗口平时停放在屏幕边缘';
+      : plan.effectiveMode === 'edge-strip'
+        ? '窗口平时停放在屏幕边缘'
+        : plan.effectiveMode === 'parking-display'
+          ? '窗口平时停放在副屏'
+          : '窗口平时停放在主屏背景位';
     return { ok: true, hint: `已向该环境发出窗口${type === 'browser.show' ? '前置' : '归位'}请求；若未见弹出，${where}，也可在系统窗口切换器里按名字找到它。` };
   } catch (error) {
     return { ok: false, error: error?.message || '发送浏览器控制指令失败' };
@@ -1025,6 +1065,7 @@ function startEdge(handle) {
 
   handle.browserParkingReady = false;
   handle.browserPersonaNoticeState = null;
+  resetPersonaNoticeGrace(handle);
   handle.browserAlreadyRunning = false;
   handle.coreParked = false;
   handle.closePending = false;
@@ -1097,6 +1138,7 @@ function startEdge(handle) {
     handle.child = undefined;
     handle.browserParkingReady = false;
     handle.browserPersonaNoticeState = null;
+    resetPersonaNoticeGrace(handle);
     const msg = (err && err.message) || String(err);
     appendEdgeLog(handle.envId, `spawn error: ${msg}`, true);
     if (handle.removed) return;
@@ -1139,6 +1181,7 @@ function startEdge(handle) {
     handle.child = undefined;
     handle.browserParkingReady = false;
     handle.browserPersonaNoticeState = null;
+    resetPersonaNoticeGrace(handle);
     // 主动重启、暂停驻留、显式关闭、移出花名册、退出应用都是「有意停止」，不算异常。
     const intentional = isQuitting || wasRestarting || wasPausing || wasParked || wasClosing || handle.removed;
     handle.pausePending = false;

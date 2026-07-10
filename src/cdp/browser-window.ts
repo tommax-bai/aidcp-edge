@@ -1,7 +1,7 @@
 import { createInterface } from 'node:readline';
 import type { CdpClient } from './client.js';
 
-export type BrowserParkingMode = 'parking-display' | 'edge-strip' | 'offscreen';
+export type BrowserParkingMode = 'primary-screen' | 'parking-display' | 'edge-strip' | 'offscreen';
 
 export interface BrowserWindowBounds {
   left: number;
@@ -36,7 +36,7 @@ export interface BrowserPersonaNoticeController {
   dispose(): void;
 }
 
-const VALID_MODES = new Set(['parking-display', 'edge-strip', 'offscreen']);
+const VALID_MODES = new Set(['primary-screen', 'parking-display', 'edge-strip', 'offscreen']);
 const MIN_VIEWPORT_WIDTH = 1000;
 const MIN_VIEWPORT_HEIGHT = 600;
 
@@ -56,7 +56,7 @@ function parseBounds(raw: string | undefined): BrowserWindowBounds | null {
 }
 
 function modeOf(raw: string | undefined): BrowserParkingMode {
-  return VALID_MODES.has(raw || '') ? raw as BrowserParkingMode : 'edge-strip';
+  return VALID_MODES.has(raw || '') ? raw as BrowserParkingMode : 'primary-screen';
 }
 
 export function browserParkingConfigFromEnv(env: NodeJS.ProcessEnv = process.env): BrowserParkingConfig | null {
@@ -119,7 +119,7 @@ export async function applyBrowserParking(
     return;
   }
 
-  logger(`[browser-parking] mode=${config.effectiveMode} visibility check failed, falling back to edge-strip`);
+  logger(`[browser-parking] mode=${config.effectiveMode} visibility check failed, falling back to visible bounds`);
   await setWindowBounds(cdp, config.fallbackBounds);
   const fallbackProbe = await probeVisibility(cdp);
   if (!isVisibleProbeOk(fallbackProbe)) {
@@ -137,6 +137,12 @@ export async function showBrowserWindow(
 ): Promise<void> {
   if (!config) throw new Error('未配置浏览器窗口位置');
   await setWindowBounds(cdp, config.visibleBounds);
+  // 抬前：把标签页/窗口带到最前并聚焦（诚实边界：系统层焦点无法 100% 保证，故仍 best-effort、不抛断流程）。
+  try {
+    await cdp.send('Page.bringToFront', {});
+  } catch (e) {
+    logger(`[browser-parking] bringToFront failed: ${(e as Error).message}`);
+  }
   logger('[browser-parking] browser window moved to visible bounds');
 }
 

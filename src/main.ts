@@ -175,7 +175,13 @@ async function main(): Promise<void> {
   }
   const session = await attachToPage(attachOpts);
   console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
-  await applyBrowserParking(session.cdp, parkingConfig, (m) => console.log(m));
+  // 停放校验失败会抛（bounds 与兜底位都过不了可见性探针）；绝不能因此跳过下面的 stdin 控制通道安装，
+  // 否则 control-ready 永不发出、「显示浏览器 / 重置位置」被永久禁用（静默假死）。故此处吞异常、只记日志。
+  try {
+    await applyBrowserParking(session.cdp, parkingConfig, (m) => console.log(m));
+  } catch (e) {
+    console.log(`[browser-parking] apply failed at startup: ${(e as Error).message}`);
+  }
   installBrowserParkingStdinControl(session.cdp, parkingConfig, (m) => console.log(m));
   // Runtime/Page/Input 域启用 + 反检测注入均在 attachToPage 内（reEnableAndInject，与断线重连共用）。
 

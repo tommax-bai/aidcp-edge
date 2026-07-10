@@ -59,7 +59,7 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
   let pushStatus: (s: unknown) => void = () => undefined;
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], startAll: [], select: [], close: [], notify: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], select: [], close: [], notify: [] };
   const settings = {
     provider: 'adspower',
     adsProfileId: 'p1',
@@ -97,7 +97,7 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
     relogin: async (envId: string) => { calls.relogin.push(envId); return makeStatus({ envId }); },
     notify: async (payload: unknown) => { calls.notify.push(payload); return { ok: true }; },
     showDrivenBrowser: async (envId: string) => { calls.showDriven.push(envId); return { ok: true, hint: '已请求前置；窗口平时停放在屏幕边缘。' }; },
-    resetBrowserParking: async () => ({ ok: true }),
+    resetBrowserParking: async (envId: string) => { calls.resetParking.push(envId); return { ok: true }; },
     pause: async () => makeStatus(),
     resume: async () => makeStatus(),
     close: async (envId: string) => { calls.close.push(envId); return makeStatus({ envId, edge: 'stopped', cloud: 'disconnected', session: 'closed' }); },
@@ -190,6 +190,76 @@ test('环境栏：fleet 快照建行、默认收起、点选切换主区域并�
     (w.document.querySelector('.rail-row[data-env-id="ads-p2"]') as HTMLElement).classList.contains('selected'),
     true,
   );
+});
+
+test('环境头像三态：①未选中→选中 ②再点→抬前显示（shown 态）③再点→归位（撤 shown）', async () => {
+  const { w, calls, pushStatus } = await boot();
+  // 抬前/归位只对在跑环境有意义（离线环境的显示态会被清）：先让环境二在运行。
+  pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二' }));
+  await tick();
+  const rowOf = (id: string) => w.document.querySelector(`.rail-row[data-env-id="${id}"]`) as HTMLElement;
+  // ① 未选中 → 仅选中，绝不触发浏览器指令
+  rowOf('ads-p2').click();
+  await tick();
+  assert.ok(calls.select.includes('ads-p2'));
+  assert.equal(rowOf('ads-p2').classList.contains('selected'), true);
+  assert.equal(calls.showDriven.length, 0, '仅选中不抬浏览器');
+  // ② 已选中 → 抬前显示该环境浏览器，行进入 shown 态
+  rowOf('ads-p2').click();
+  await tick();
+  assert.deepEqual(calls.showDriven, ['ads-p2'], '第二次点击抬前该环境浏览器');
+  assert.equal(rowOf('ads-p2').classList.contains('shown'), true, '抬前后行进入 shown 态');
+  // ③ 已显示 → 归位，撤 shown
+  rowOf('ads-p2').click();
+  await tick();
+  assert.deepEqual(calls.resetParking, ['ads-p2'], '第三次点击让该环境浏览器归位');
+  assert.equal(rowOf('ads-p2').classList.contains('shown'), false, '归位后撤 shown 态');
+  // 切到另一个环境即重置三态相位（shownEnv 清空）
+  rowOf('ads-p1').click();
+  await tick();
+  assert.equal(rowOf('ads-p2').classList.contains('shown'), false);
+});
+
+test('环境头像三态：验证码浮层态（core 仍在跑）保留 shown，第三态仍可归位', async () => {
+  const { w, calls, pushStatus } = await boot();
+  const rowOf = (id: string) => w.document.querySelector(`.rail-row[data-env-id="${id}"]`) as HTMLElement;
+  pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二' }));
+  await tick();
+  rowOf('ads-p2').click(); await tick(); // 选中
+  rowOf('ads-p2').click(); await tick(); // 抬前 → shown
+  assert.deepEqual(calls.showDriven, ['ads-p2']);
+  assert.equal(rowOf('ads-p2').classList.contains('shown'), true);
+  // 进入验证码浮层态：needsAction/attention 但 core 仍 running、浏览器仍可控 → 不得清 shown。
+  pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二', overlayBlocked: true }));
+  await tick();
+  assert.equal(rowOf('ads-p2').classList.contains('shown'), true, 'attention 态（core 在跑）保留 shown，否则盯验证码环境的第三态不可达');
+  // 第三态可达：再点 → 归位（resetBrowserParking），而非又一次抬前。
+  rowOf('ads-p2').click(); await tick();
+  assert.deepEqual(calls.resetParking, ['ads-p2'], 'attention 态第三次点击应归位而非再次抬前');
+  assert.equal(rowOf('ads-p2').classList.contains('shown'), false);
+});
+
+test('环境头像三态：键盘落在人设 ✦ 图标上不触发浏览器抬前/归位', async () => {
+  const { w, calls, pushStatus } = await boot();
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一' }));
+  await tick();
+  const pIcon = (w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-persona') as HTMLElement);
+  // ads-p1 已是选中环境；焦点在其 ✦ 上按 Enter：整行 keydown 必须放行（e.target≠行），绝不触发三态切换。
+  pIcon.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+  assert.equal(calls.showDriven.length, 0, '键盘落在 ✦ 上不得抬前浏览器');
+  assert.equal(calls.resetParking.length, 0, '键盘落在 ✦ 上不得归位浏览器');
+});
+
+test('人设弹窗：账号已绑人设时绝不自动弹（宽限内翻已绑即跳过）', async () => {
+  // 大宽限：到点复评定时器不在测试内触发，弹与不弹只由「是否已绑」决定。
+  const { w, calls, pushStatus } = await boot({}, { personaPromptGraceMs: 60_000 });
+  await tick();
+  // 宽限窗口内 personaBound 权威信号到达 → 判已绑，永不弹、不通知。
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: true }));
+  await tick();
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), false, '已绑账号不得自动弹出人设浮层');
+  assert.equal(calls.notify.length, 0, '已绑账号不得发通知');
 });
 
 test('红线：并发环境的状态与活动按 envId 归属，切换环境不残留、不串号', async () => {
@@ -533,18 +603,27 @@ test('暂停态显式关闭只路由当前选中环境并切到已关闭', async
   assert.equal(close.classList.contains('hidden'), true);
 });
 
-test('人设浮层：未绑已就绪账号自动弹出并通知；偏好面板为语气调性 + 内容偏好，招聘求职置顶且支持自定义', async () => {
+test('人设浮层：已就绪未绑账号在宽限期内不自动弹（不发通知）', async () => {
+  // 大宽限：断言时一定仍在窗口内，与 boot 耗时无竞态。
+  const { w, calls } = await boot({}, { personaPromptGraceMs: 60_000 });
+  await tick();
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), false, '宽限期内不得自动弹出人设浮层');
+  assert.equal(calls.notify.length, 0, '宽限期内不得发系统通知');
+});
+
+test('人设浮层：宽限到点未绑账号自动弹出并通知；偏好面板为语气调性 + 内容偏好，招聘求职置顶且支持自定义', async () => {
   const generateCalls: Array<{ envId: string; payload: { keywordSelections: string[] } }> = [];
   const { w, calls, pushStatus } = await boot({
     personaGenerate: async (envId: string, payload: { keywordSelections: string[] }) => {
       generateCalls.push({ envId, payload });
       return { ok: true, soulYaml: 'soul: custom', identitySummary: '自定义人设' };
     },
-  });
-  await tick();
+  }, { personaPromptGraceMs: 30 });
+  // 只等「最终弹出」，不抢在时钟前断言关闭（避免与 boot 耗时竞态；宽限到点复评定时器负责弹出）。
+  await new Promise((r) => setTimeout(r, 300));
 
   const pop = w.document.querySelector('#persona-pop')!;
-  assert.equal(pop.classList.contains('open'), true, '未绑已就绪账号应主动弹出人设浮层');
+  assert.equal(pop.classList.contains('open'), true, '宽限到点后未绑账号应自动弹出人设浮层');
   assert.equal(calls.notify.length, 1, '未绑已就绪账号应发一次系统通知');
   pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一' }));
   await tick();

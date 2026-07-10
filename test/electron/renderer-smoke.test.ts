@@ -101,7 +101,7 @@ const hidden = (el: HTMLElement) => el.classList.contains('hidden');
 
 test('中文化：新增控件文案齐全', () => {
   // 环境管理与人设已搬到左栏浮层；设置抽屉只剩浏览器引擎 + 窗口停放 + 开发者开关。
-  for (const s of ['浏览器引擎', '本机 Chrome', '添加环境', '加入现有环境', '新建环境', '刷新', '手动填写', '创建环境', '账号人设', '窗口停放', '副屏停放', '边缘停放', '完全移出', '指纹浏览器高级设置']) {
+  for (const s of ['浏览器引擎', '本机 Chrome', '添加环境', '加入现有环境', '新建环境', '刷新', '手动填写', '创建环境', '账号人设', '窗口停放', '主屏停放', '副屏停放', '边缘停放', '完全移出', '指纹浏览器高级设置']) {
     assert.ok(html.includes(s), `index.html 应含「${s}」`);
   }
 });
@@ -235,11 +235,11 @@ test('self 模式：无分身校验，启动直接先存再起', async () => {
   assert.deepEqual(calls, ['save', 'start']);
 });
 
-test('窗口停放：旧设置缺值时默认边缘停放', async () => {
+test('窗口停放：旧设置缺值时默认主屏停放', async () => {
   const w = await boot(makeStub({
     getSettings: async () => ({ provider: 'adspower', adsProfileId: '', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x' }),
   }));
-  assert.ok($(w, '#parking-edge-strip').classList.contains('active'));
+  assert.ok($(w, '#parking-primary-screen').classList.contains('active'));
 });
 
 test('窗口停放：选择完全移出后保存带 browserParkingMode', async () => {

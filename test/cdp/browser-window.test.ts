@@ -58,12 +58,23 @@ test('applyBrowserParking falls back when hidden after first placement', async (
   assert.deepEqual((sets[1].params.bounds as Record<string, unknown>).left, 1902);
 });
 
-test('showBrowserWindow moves to visible bounds', async () => {
+test('showBrowserWindow moves to visible bounds and raises the window', async () => {
   const cfg = browserParkingConfigFromEnv(env);
   const page = fakeCdp([]);
   await showBrowserWindow(page.cdp, cfg, () => undefined);
   const set = page.calls.find((c) => c.method === 'Browser.setWindowBounds');
   assert.deepEqual((set?.params.bounds as Record<string, unknown>).left, 80);
+  assert.ok(page.calls.some((c) => c.method === 'Page.bringToFront'), '抬前需把窗口带到最前并聚焦');
+});
+
+test('browserParkingConfigFromEnv accepts the primary-screen mode', () => {
+  const cfg = browserParkingConfigFromEnv({
+    ...env,
+    AIDCP_BROWSER_PARKING_MODE: 'primary-screen',
+    AIDCP_BROWSER_PARKING_EFFECTIVE_MODE: 'primary-screen',
+  });
+  assert.equal(cfg?.mode, 'primary-screen');
+  assert.equal(cfg?.effectiveMode, 'primary-screen');
 });
 
 function noticeCdp(dom: JSDOM) {

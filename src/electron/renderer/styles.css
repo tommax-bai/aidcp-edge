@@ -1125,7 +1125,10 @@ body { margin: 0; }
   box-sizing: border-box; border-left: 3px solid transparent;
 }
 .rail-row:hover { background: #f0f5ff; }
-.rail-row.selected { background: #eaf1ff; border-left-color: #3b6ff0; }
+.rail-row.selected { background: rgba(255,46,77,.09); border-left-color: #ff2e4d; }
+/* 头像三态第三态：浏览器已抬到主屏前台——比选中态更实的红 + 内描边，示意「此浏览器正显示在屏上」。
+   放在选中态之后，选中且已显示时叠加更强底色。 */
+.rail-row.shown { background: rgba(255,46,77,.16); border-left-color: #ff2e4d; box-shadow: inset 0 0 0 1px rgba(255,46,77,.30); }
 .rail-row.lv-error { border-left-color: #e5484d; }
 .rail-row.lv-attention { border-left-color: #d97706; }
 /* 收起态：每行是一个 44px 见方的居中格，只放头像；名字/状态块强制隐藏（!important 压过任何残留），
@@ -1135,7 +1138,8 @@ body { margin: 0; }
   width: 44px; height: 40px; margin: 3px auto; padding: 0; border-left: 0; border-radius: 11px;
 }
 .env-rail.collapsed .rail-meta { display: none !important; }
-.env-rail.collapsed .rail-row.selected { background: #eaf1ff; box-shadow: inset 0 0 0 1px rgba(59,111,240,.22); }
+.env-rail.collapsed .rail-row.selected { background: rgba(255,46,77,.10); box-shadow: inset 0 0 0 1px rgba(255,46,77,.42); }
+.env-rail.collapsed .rail-row.shown { background: rgba(255,46,77,.16); box-shadow: inset 0 0 0 2px rgba(255,46,77,.6); }
 
 /* 头像：展开=品牌色实心；收起=安静浅底 + 外圈色环承担状态 */
 .rail-ava {
