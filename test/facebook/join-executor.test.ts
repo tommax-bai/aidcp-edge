@@ -18,6 +18,7 @@ interface RawJoinObservation {
   questionnaireRequired?: boolean;
   pendingRequest?: boolean;
   navError?: string | null;
+  documentReady?: string;
   joinButton?: { found: boolean; disabled?: boolean; x?: number; y?: number; text?: string | null; aria?: string | null };
 }
 
@@ -325,4 +326,25 @@ test('fb-join-executor: 点击后按钮始终未翻转 → 超时诚实 join_fai
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'join_failed');
   assert.equal(r.clicked, true);
+});
+
+// ── change fb-group-join-await-ready：加入按钮在 loading 瞬间出现不立即判定，等到 interactive 再判（真机:loading 态观察被云端 LLM 保守判 ambiguous）──
+test('fb-join-executor: 加入按钮在 loading 阶段出现→不立即判定，等 interactive 才停并送可信观察', async () => {
+  const cdp = new FakeCdp([
+    obs({ documentReady: 'loading' }),      // 加入按钮已在，但页面 loading → 不决定、继续轮询
+    obs({ documentReady: 'loading' }),
+    obs({ documentReady: 'interactive' }),  // 页面 interactive + 加入按钮 → 决定
+    obs({ mainCtaText: '已加入', mainCtaAria: '已加入', joinButton: { found: false } }), // post: joined
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.observation?.documentReady, 'interactive', '送云端的是 interactive 态、不是 loading');
+  assert.equal(r.ok, true);
+  assert.equal(r.clicked, true);
+});
+
+test('fb-join-executor: documentReady 未知（旧形态）时加入按钮仍决定（零回归）', async () => {
+  const cdp = new FakeCdp([obs()]); // 无 documentReady 字段 → undefined，不等于 loading → 决定
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123');
+  assert.equal(r.reason, 'observation_only');
+  assert.equal(r.observation?.mainCtaText, 'Join group');
 });

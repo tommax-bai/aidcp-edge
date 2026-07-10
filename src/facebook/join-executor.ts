@@ -381,14 +381,16 @@ export class FacebookJoinExecutor {
   }
 
   /**
-   * 是否已出现足以判定的信号：明确门槛/阻断态（登录/验证码/问卷/待审）、已是成员、或**加入按钮真渲染出来**（带坐标）。
-   * 刻意 NOT 把「有任意 mainCtaText」当决定性——真机事故:页面 loading 阶段一个无关 chrome 按钮被分类后，
-   * 轮询就误以为拿到信号而提前停在空页。只认真正的加入按钮/明确态,其余继续等到页面加载出来或触上限。
+   * 是否已出现足以判定的信号：明确门槛/阻断态（登录/验证码/问卷/待审）、已是成员、或**加入按钮真渲染出来且页面已过 loading**。
+   * 刻意 NOT 把「有任意 mainCtaText」当决定性——真机事故:loading 阶段无关 chrome 按钮被分类后轮询误以为拿到信号而提前停。
+   * 加入按钮还要求 documentReady 已过 'loading'——真机事故:加入按钮在 loading 瞬间就出现、轮询立即停，把 loading 态观察
+   * 送给云端 LLM，LLM 因「UI 未加载完」保守判 ambiguous（实测:同群在 interactive 态判 instant_join、在 loading 态判 ambiguous）。
+   * 阻断/成员/门槛态是确定性状态、不受 readyState 影响，立即决定；只有需 LLM 判的「加入」case 等到页面稳定。
    */
   private isDecisiveObservation(raw: RawJoinObservation, obs: FacebookGroupJoinObservation): boolean {
     if (obs.loginRequired || obs.captchaDetected || obs.questionnaireRequired || obs.pendingRequest) return true;
     if (hasMemberSignal(obs)) return true;
-    if (raw.joinButton?.found) return true;
+    if (raw.joinButton?.found && obs.documentReady !== 'loading') return true;
     return false;
   }
 
