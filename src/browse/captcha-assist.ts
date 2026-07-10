@@ -12,6 +12,7 @@ import {
   type BlockingOverlaySnapshot,
   type OverlayMonitor,
 } from './overlay-monitor.js';
+import { sampleDelay, defaultRandom as humanDefaultRandom, type TimingConfig } from '../humanize/index.js';
 
 type CaptchaAssistCommandPayload = CaptchaAssistCapturePayload | CaptchaAssistClickPayload;
 
@@ -30,6 +31,33 @@ export interface CaptchaAssistHandlerDeps {
   idGen?: () => string;
   sleep?: (ms: number) => Promise<void>;
   logger?: (msg: string) => void;
+  /** 注入随机源（change captcha-assist-humanize-click）：拟人参数与停顿共用，测试注入确定性。 */
+  random?: () => number;
+}
+
+/**
+ * 协助注入点击的拟人节奏基线（change captcha-assist-humanize-click）。
+ * 现役日常点击默认 overshoot~15% / jitter 3 / moveDelay 8；验证码是反爬审查最严、专门用鼠标轨迹熵
+ * 做指纹的场景，这里取**不低于日常**的档：恢复 overshoot + 小幅 jitter + 略慢移动 + 落点前读图停顿 +
+ * 点间对数正态停顿。中心值按 edgeId 派生每机偏置（见 captchaPacing），避免全 fleet 逐字相同的节奏自成
+ * 车队指纹。
+ */
+const CAPTCHA_PACING = {
+  jitter: 2,
+  overshootProb: 0.22,
+  moveDelayMs: 11,
+  hoverDwell: { mu: Math.log(650), sigma: 0.4, min: 280, max: 1600 } satisfies TimingConfig,
+  interPoint: { mu: Math.log(950), sigma: 0.4, min: 420, max: 2600 } satisfies TimingConfig,
+};
+
+/** 按 edgeId 派生 [-0.15, 0.15) 的每机偏置（FNV-1a），打散车队级节奏指纹。 */
+function edgeIdBias(edgeId: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < edgeId.length; i++) {
+    h ^= edgeId.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return ((h >>> 0) % 1000) / 1000 * 0.3 - 0.15;
 }
 
 interface ViewportInfo {
@@ -86,12 +114,26 @@ export class CaptchaAssistHandler {
   private readonly idGen: () => string;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly logger: (msg: string) => void;
+  private readonly random: () => number;
 
   constructor(private readonly deps: CaptchaAssistHandlerDeps) {
     this.now = deps.now ?? Date.now;
     this.idGen = deps.idGen ?? (() => `snap-${this.now()}-${Math.random().toString(36).slice(2, 8)}`);
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.logger = deps.logger ?? ((msg) => console.log(msg));
+    this.random = deps.random ?? humanDefaultRandom;
+  }
+
+  /** 本 edge 的协助点击节奏：基线叠 edgeId 派生偏置（防车队指纹）。 */
+  private captchaPacing() {
+    const bias = edgeIdBias(this.deps.edgeId);
+    return {
+      jitter: CAPTCHA_PACING.jitter,
+      overshootProb: Math.min(0.35, Math.max(0.1, CAPTCHA_PACING.overshootProb + bias * 0.4)),
+      moveDelayMs: Math.max(6, Math.round(CAPTCHA_PACING.moveDelayMs * (1 + bias))),
+      hoverDwell: CAPTCHA_PACING.hoverDwell,
+      interPoint: CAPTCHA_PACING.interPoint,
+    };
   }
 
   async handle(type: 'captcha.assist.capture' | 'captcha.assist.click', payload: CaptchaAssistCommandPayload): Promise<void> {
@@ -177,7 +219,13 @@ export class CaptchaAssistHandler {
     // 点击全程暂停实时 tick（互斥），避免抓到点击派发中途 / settle / 复检期间的画面。
     this.clicking.add(payload.incidentId);
     try {
-      for (const point of payload.points) {
+      // 拟人注入（change captcha-assist-humanize-click）：连续光标 + overshoot/jitter + 逐帧 dt 抖动 +
+      // 落点前读图停顿 + 点间对数正态停顿；节奏按 edgeId 派生偏置。不再用比日常更弱的 jitter:0/overshoot:false。
+      const pacing = this.captchaPacing();
+      let cursor: { x: number; y: number } | undefined;
+      const pts = payload.points;
+      for (let i = 0; i < pts.length; i++) {
+        const point = pts[i];
         if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1) {
           this.sendClickResult({
             incidentId: payload.incidentId,
@@ -191,8 +239,19 @@ export class CaptchaAssistHandler {
         // 用"被点的那一帧自己的 crop"缩放落点（冻结提交时该帧可能不是最新帧）。
         const x = snapshot.crop.x + point.x * snapshot.crop.width;
         const y = snapshot.crop.y + point.y * snapshot.crop.height;
-        await dispatchClick(this.deps.cdp, x, y, { jitter: 0, overshoot: false, moveDelayMs: 6 });
-        await this.sleep(220);
+        // 上一点的**真实落点**作下一点起步，保光标连续（dispatchClick 返回含 jitter/overshoot 的末点）。
+        cursor = await dispatchClick(this.deps.cdp, x, y, {
+          from: cursor,
+          jitter: pacing.jitter,
+          overshoot: this.random() < pacing.overshootProb,
+          moveDelayMs: pacing.moveDelayMs,
+          moveDelayJitter: true,
+          hoverDwellMs: sampleDelay(pacing.hoverDwell, this.random),
+          random: this.random,
+          sleep: this.sleep,
+        });
+        // 点间对数正态停顿：仅非末点后停（末点后直接进 settle）。
+        if (i < pts.length - 1) await this.sleep(sampleDelay(pacing.interPoint, this.random));
       }
       await this.sleep(payload.settleMs ?? 1500);
       const kind = await this.probeBlockingKind();

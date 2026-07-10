@@ -18,6 +18,7 @@ import {
   generateKeyStrokes,
   type RandomFn as HumanRandomFn,
   defaultRandom as humanDefaultRandom,
+  jitterAround,
 } from '../humanize/index.js';
 
 /** browse 模块需要的最小 CDP 能力（与 CdpClient 兼容） */
@@ -97,6 +98,17 @@ export interface DispatchClickOptions {
   sleep?: (ms: number) => Promise<void>;
   /** 逐帧移动间的延迟(ms)，默认 8（约 120fps，自然且不拖慢） */
   moveDelayMs?: number;
+  /**
+   * 逐帧延迟是否叠对数正态抖动（change captcha-assist-humanize-click）。默认 false = 固定 moveDelayMs
+   *（等周期，浏览路径零回归）。true = 每帧 `jitterAround(moveDelayMs)`，打散 dt 方差为 0 的机器特征
+   *（验证码等高审查场景用）。
+   */
+  moveDelayJitter?: boolean;
+  /**
+   * 移动到位后、按下之前的读图/瞄准停顿(ms)（change captcha-assist-humanize-click）。默认 0 = 无停顿
+   *（现有 click 零回归）。>0 时在 hover 与 press 之间插一段可注入 sleep 的 dwell。
+   */
+  hoverDwellMs?: number;
 }
 
 /**
@@ -134,7 +146,9 @@ export async function dispatchHover(
   for (const pt of path) {
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pt.x, y: pt.y });
     last = pt;
-    if (moveDelay > 0) await sleep(moveDelay);
+    // 逐帧延迟：默认固定；开抖动时每帧走 lognormal（消 dt 方差=0 的机器特征）。
+    const delay = options.moveDelayJitter ? jitterAround(moveDelay, 0.35, random) : moveDelay;
+    if (delay > 0) await sleep(delay);
   }
   return last;
 }
@@ -154,12 +168,17 @@ export async function dispatchClick(
   x: number,
   y: number,
   options: DispatchClickOptions = {},
-): Promise<void> {
+): Promise<Point> {
   // 落点 = 轨迹末点（已含抖动/回拉）；hover 与 click 共用同一移动实现，口径不漂移。
   const last = await dispatchHover(cdp, x, y, options);
+  // 落点前读图/瞄准停顿（默认 0，普通 click 零回归）。
+  const dwell = options.hoverDwellMs ?? 0;
+  if (dwell > 0) await (options.sleep ?? defaultSleep)(dwell);
   const base = { x: last.x, y: last.y, button: 'left' as const, clickCount: 1 };
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...base });
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base });
+  // 返回真实落点（含 jitter/overshoot 残差），供多点循环把上一落点作下一点起点、保光标连续。
+  return last;
 }
 
 /** 派发一次按键（press + release），key/code 形如 'Escape' / 'Enter'。 */

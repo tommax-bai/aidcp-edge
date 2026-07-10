@@ -157,6 +157,8 @@ test('captcha assist click: normalized points map to viewport coordinates and cl
     idGen: () => 'snap-click',
     sleep: async () => {},
     logger: () => {},
+    // 确定性随机源：0.5 → symmetric=0（jitter 无位移）且 0.5≥overshootProb（关 overshoot），落点精确。
+    random: () => 0.5,
   });
   await handler.handle('captcha.assist.capture', { incidentId: 'cap-3', quality: 80 });
   client.sent.length = 0;
@@ -300,6 +302,7 @@ test('帧环：点击稍旧但仍在环内的 snapshotId 被接受；不在环�
     idGen: seqIdGen(), // snap-1 (首帧), snap-2 (实时新帧)
     sleep: async () => {},
     logger: () => {},
+    random: () => 0.5, // 精确落点（见上）
   });
 
   await handler.handle('captcha.assist.capture', {
@@ -330,4 +333,70 @@ test('帧环：点击稍旧但仍在环内的 snapshotId 被接受；不在环�
     points: [{ x: 0.5, y: 0.5 }],
   });
   assert.equal((client.sent[0].payload as { status: string }).status, 'stale_snapshot');
+});
+
+// ── 拟人注入（change captcha-assist-humanize-click）─────────────────────────────
+
+test('拟人注入：多点连续光标（下点从上点真实落点起步）+ press 数==落点数 + 有 mouseMoved 轨迹', async () => {
+  // crop = {76,76,248,148}。A(0.25,0.25)→(138,113)，B(0.75,0.75)→(262,187)。random=0.5 → jitter 无位移、关 overshoot。
+  const cdp = new FakeCdp({ overlayRect: { x: 100, y: 100, width: 200, height: 100 } });
+  const client = new FakeClient();
+  const handler = new CaptchaAssistHandler({
+    cdp,
+    client,
+    edgeId: 'edge-1',
+    overlayMonitor: new FakeMonitor(['captcha', 'none']),
+    now: () => 5000,
+    idGen: () => 'snap-mp',
+    sleep: async () => {},
+    logger: () => {},
+    random: () => 0.5,
+  });
+  await handler.handle('captcha.assist.capture', { incidentId: 'mp-1', quality: 80 });
+  cdp.calls.length = 0;
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'mp-1',
+    snapshotId: 'snap-mp',
+    points: [{ x: 0.25, y: 0.25 }, { x: 0.75, y: 0.75 }],
+    settleMs: 1,
+  });
+
+  const presses = cdp.calls.filter((c) => c.method === 'Input.dispatchMouseEvent' && c.params?.type === 'mousePressed');
+  const moves = cdp.calls.filter((c) => c.method === 'Input.dispatchMouseEvent' && c.params?.type === 'mouseMoved');
+  assert.equal(presses.length, 2, 'press 次数 == 落点数');
+  assert.ok(moves.length > 0, '有 mouseMoved 轨迹（非瞬移）');
+  assert.deepEqual([presses[0].params?.x, presses[0].params?.y], [138, 113]);
+  assert.deepEqual([presses[1].params?.x, presses[1].params?.y], [262, 187]);
+  // 第二点应从上一真实落点 (138,113) 起步（光标连续），而非默认远起点。
+  const firstReleaseIdx = cdp.calls.findIndex((c) => c.params?.type === 'mouseReleased');
+  const nextMove = cdp.calls.slice(firstReleaseIdx + 1).find((c) => c.params?.type === 'mouseMoved');
+  assert.deepEqual([nextMove?.params?.x, nextMove?.params?.y], [138, 113], '第二点从上一真实落点起步');
+});
+
+test('拟人注入：真实随机源下落点仍落在 target±jitter 容差内（jitter 有界不脱靶）', async () => {
+  const cdp = new FakeCdp({ overlayRect: { x: 100, y: 100, width: 200, height: 100 } });
+  const client = new FakeClient();
+  const handler = new CaptchaAssistHandler({
+    cdp,
+    client,
+    edgeId: 'edge-xyz',
+    overlayMonitor: new FakeMonitor(['captcha', 'none']),
+    now: () => 6000,
+    idGen: () => 'snap-tol',
+    sleep: async () => {},
+    logger: () => {},
+    // 不注入 random → 用真实 Math.random（非退化）。
+  });
+  await handler.handle('captcha.assist.capture', { incidentId: 'tol-1', quality: 80 });
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'tol-1',
+    snapshotId: 'snap-tol',
+    points: [{ x: 0.5, y: 0.5 }], // → (200,150)
+    settleMs: 1,
+  });
+  const pressed = cdp.calls.find((c) => c.method === 'Input.dispatchMouseEvent' && c.params?.type === 'mousePressed');
+  // jitter=2 → 落点在 target ± 2px 内（overshoot 是中间点、不改最终 press 落点）。
+  assert.ok(Math.abs((pressed?.params?.x as number) - 200) <= 2, `x 应在 200±2，实为 ${pressed?.params?.x}`);
+  assert.ok(Math.abs((pressed?.params?.y as number) - 150) <= 2, `y 应在 150±2，实为 ${pressed?.params?.y}`);
 });
