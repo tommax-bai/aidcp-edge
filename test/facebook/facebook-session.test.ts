@@ -1,0 +1,284 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  FacebookBrowseSession,
+  parseFacebookBrowseMode,
+  usesFacebookBrowseSession,
+  type FacebookBrowseSessionDeps,
+  type FacebookBrowseMode,
+} from '../../src/facebook/facebook-session.js';
+import type { FacebookCommentHandler } from '../../src/facebook/comment-handler.js';
+import type { FacebookFeedReader, FacebookFeedCard } from '../../src/facebook/feed-reader.js';
+import type { FacebookPostReader, FacebookPostDetail } from '../../src/facebook/post-reader.js';
+import type { FacebookLikeExecutor, FacebookLikeResult } from '../../src/facebook/like-executor.js';
+import { selectPlatformDriver } from '../../src/platform/index.js';
+import type { Envelope, ActionCompletedPayload, NoteDetailPayload, PageCardsPayload } from '../../src/comm/protocol.js';
+import type { BrowseCdp } from '../../src/browse/cdp-util.js';
+
+function makeEnv(type: string, payload: unknown = {}): Envelope {
+  return { v: 2, type, id: `cmd-${type}`, ts: 0, payload } as unknown as Envelope;
+}
+
+interface Harness {
+  session: FacebookBrowseSession;
+  cards: PageCardsPayload[];
+  details: NoteDetailPayload[];
+  actions: ActionCompletedPayload[];
+  delegated: Envelope[];
+  ensureCalls: number;
+  likeShadowFlags: Array<boolean | undefined>;
+}
+
+function makeSession(opts: {
+  mode?: FacebookBrowseMode;
+  commandTimeoutMs?: number;
+  card?: FacebookFeedCard;
+  detail?: Partial<FacebookPostDetail>;
+  like?: (shadow?: boolean) => FacebookLikeResult;
+  hangOpen?: boolean;
+} = {}): Harness {
+  const cards: PageCardsPayload[] = [];
+  const details: NoteDetailPayload[] = [];
+  const actions: ActionCompletedPayload[] = [];
+  const delegated: Envelope[] = [];
+  const likeShadowFlags: Array<boolean | undefined> = [];
+  const state = { ensureCalls: 0 };
+
+  const card: FacebookFeedCard = opts.card ?? {
+    index: 0,
+    noteId: 'https://www.facebook.com/a/posts/pfbid0ONE',
+    author: 'Alice',
+    textPreview: 'hi there',
+    reactionCount: 5,
+    isVideo: false,
+  };
+
+  const client = {
+    reportPageCards(p: PageCardsPayload) {
+      cards.push(p);
+    },
+    reportNoteDetail(p: NoteDetailPayload) {
+      details.push(p);
+    },
+    reportActionCompleted(p: ActionCompletedPayload) {
+      actions.push(p);
+    },
+  };
+  const commentHandler = {
+    handle: async (env: Envelope) => {
+      delegated.push(env);
+    },
+  } as unknown as FacebookCommentHandler;
+  const feedReader = {
+    ensureFeed: async () => {
+      state.ensureCalls++;
+      return { ok: true as const };
+    },
+    scanCards: async () => [card],
+    scrollNext: async () => {},
+  } as unknown as FacebookFeedReader;
+  const postReader = {
+    openAndRead: async (permalink: string): Promise<FacebookPostDetail> => {
+      if (opts.hangOpen) return new Promise<FacebookPostDetail>(() => {}); // 永不 resolve → 触发超时兜底
+      return {
+        ok: true,
+        permalink,
+        body: 'the post body',
+        comments: ['c1', 'c2'],
+        reactionCount: 5,
+        commentCount: 2,
+        isVideo: false,
+        author: 'Alice',
+        ...opts.detail,
+      };
+    },
+  } as unknown as FacebookPostReader;
+  const likeExecutor = {
+    like: async (o?: { shadow?: boolean }): Promise<FacebookLikeResult> => {
+      likeShadowFlags.push(o?.shadow);
+      if (opts.like) return opts.like(o?.shadow);
+      return o?.shadow ? { ok: false, reason: 'shadow', executed: false } : { ok: true, executed: true };
+    },
+  } as unknown as FacebookLikeExecutor;
+
+  const deps: FacebookBrowseSessionDeps = {
+    cdp: { send: async () => ({}) } as unknown as BrowseCdp,
+    client,
+    commentHandler,
+    feedReader,
+    postReader,
+    likeExecutor,
+  };
+  const session = new FacebookBrowseSession(deps, {
+    mode: opts.mode ?? 'on',
+    commandTimeoutMs: opts.commandTimeoutMs ?? 90_000,
+    feedUrl: 'https://www.facebook.com/',
+  });
+  return {
+    session,
+    cards,
+    details,
+    actions,
+    delegated,
+    likeShadowFlags,
+    get ensureCalls() {
+      return state.ensureCalls;
+    },
+  } as Harness;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// ─────────────────────────── co-landing（task 6.2）───────────────────────────
+
+test('co-landing: 声明 browse 的 Facebook driver 解析到 FacebookBrowseSession，小红书不', () => {
+  const fb = selectPlatformDriver({ env: { AIDCP_PLATFORM: 'facebook' } as NodeJS.ProcessEnv });
+  const xhs = selectPlatformDriver({ env: {} as NodeJS.ProcessEnv });
+  assert.equal(usesFacebookBrowseSession(fb), true);
+  assert.equal(usesFacebookBrowseSession(xhs), false);
+  assert.equal(fb.capabilities.includes('browse'), true, 'FB 声明 browse');
+});
+
+test('co-landing: FacebookBrowseSession 满足 EdgeBrowseSession 契约（9 方法）', async () => {
+  const { session } = makeSession();
+  for (const m of ['start', 'onCloudCommand', 'stop', 'close', 'quiesceForTask', 'resumeAfterTask', 'discardQueuedCloudCommands', 'applyPacingSnapshot', 'recoverAfterCloudReconnect']) {
+    assert.equal(typeof (session as unknown as Record<string, unknown>)[m], 'function', `缺方法 ${m}`);
+  }
+  assert.equal(await session.quiesceForTask(), 0);
+});
+
+// ─────────────────────────── kill switch 解析 ───────────────────────────
+
+test('parseFacebookBrowseMode: 默认 off；shadow/on 三态', () => {
+  assert.equal(parseFacebookBrowseMode({}), 'off');
+  assert.equal(parseFacebookBrowseMode({ AIDCP_FB_BROWSE_AUTO: 'shadow' }), 'shadow');
+  assert.equal(parseFacebookBrowseMode({ AIDCP_FB_BROWSE_AUTO: 'on' }), 'on');
+  assert.equal(parseFacebookBrowseMode({ AIDCP_FB_BROWSE_AUTO: 'true' }), 'on');
+  assert.equal(parseFacebookBrowseMode({ AIDCP_FB_BROWSE_AUTO: 'garbage' }), 'off');
+});
+
+// ─────────────────────────── 浏览命令 dispatch（mode=on）───────────────────────────
+
+test('note.open（浏览，无 url）→ 深读上报 note.detail（collectCount=0，带 comments/url）', async () => {
+  const h = makeSession({ mode: 'on' });
+  await h.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  assert.equal(h.details.length, 1);
+  const d = h.details[0];
+  assert.equal(d.noteId, 'https://www.facebook.com/a/posts/pfbid0ONE');
+  assert.equal(d.content, 'the post body');
+  assert.equal(d.collectCount, 0, 'FB 无收藏：诚实 0');
+  assert.equal(d.url, 'https://www.facebook.com/a/posts/pfbid0ONE');
+  assert.deepEqual(d.comments, ['c1', 'c2']);
+  assert.equal(h.actions.length, 0, '成功深读不发 action.completed（note.detail 即回执）');
+});
+
+test('interaction.like（mode=on）→ 真点赞 ok:true（云端据此 record）', async () => {
+  const h = makeSession({ mode: 'on' });
+  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'x' }));
+  assert.deepEqual(h.likeShadowFlags, [false]);
+  assert.equal(h.actions.length, 1);
+  assert.equal(h.actions[0].action, 'like');
+  assert.equal(h.actions[0].ok, true);
+});
+
+test('page.scroll → 翻页扫卡 page.cards（collectCount=0）', async () => {
+  const h = makeSession({ mode: 'on' });
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  assert.equal(h.cards.length, 1);
+  assert.equal(h.cards[0].cards[0].collectCount, 0);
+  assert.equal(h.cards[0].cards[0].noteId, 'https://www.facebook.com/a/posts/pfbid0ONE');
+});
+
+test('navigation.back → 回 feed 重报 page.cards（驱动下一轮 feed.entered）', async () => {
+  const h = makeSession({ mode: 'on' });
+  await h.session.onCloudCommand(makeEnv('navigation.back', { targetPage: 'feed' }));
+  assert.equal(h.cards.length, 1);
+});
+
+// ─────────────────────────── 评论/加群委托 ───────────────────────────
+
+test('评论/搜索/加群/按url开帖 → 委托 commentHandler（不走浏览路径）', async () => {
+  const h = makeSession({ mode: 'on' });
+  await h.session.onCloudCommand(makeEnv('search.execute', { container: 'https://www.facebook.com/groups/x' }));
+  await h.session.onCloudCommand(makeEnv('interaction.comment', { noteId: 'x', text: 'hi' }));
+  await h.session.onCloudCommand(makeEnv('group.join', { groupUrl: 'https://www.facebook.com/groups/x' }));
+  await h.session.onCloudCommand(makeEnv('note.open', { url: 'https://www.facebook.com/a/posts/pfbid0URL', taskId: 't1' }));
+  assert.deepEqual(h.delegated.map((e) => e.type), ['search.execute', 'interaction.comment', 'group.join', 'note.open']);
+  assert.equal(h.details.length, 0, '委托路径不走浏览深读');
+});
+
+// ─────────────────────────── kill switch 门控 ───────────────────────────
+
+test('mode=off：浏览/点赞回 browse_disabled；评论/加群仍委托', async () => {
+  const h = makeSession({ mode: 'off' });
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'x' }));
+  await h.session.onCloudCommand(makeEnv('group.join', { groupUrl: 'https://www.facebook.com/groups/x' }));
+  const disabled = h.actions.filter((a) => a.reason === 'browse_disabled');
+  assert.equal(disabled.length, 2, 'scroll + like 均 browse_disabled');
+  assert.equal(h.likeShadowFlags.length, 0, 'off 不触发点赞执行器');
+  assert.deepEqual(h.delegated.map((e) => e.type), ['group.join'], '加群仍委托');
+});
+
+test('mode=shadow：点赞只记不执行 → ok:false reason=shadow（云端不记账）', async () => {
+  const h = makeSession({ mode: 'shadow' });
+  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'x' }));
+  assert.deepEqual(h.likeShadowFlags, [true], 'shadow 传入 like 执行器');
+  assert.equal(h.actions[0].ok, false);
+  assert.equal(h.actions[0].reason, 'shadow');
+});
+
+// ─────────────────────────── 不支持命令诚实回执 ───────────────────────────
+
+test('FB v1 不支持的命令 → capability_unsupported（绝不静默丢弃）', async () => {
+  const h = makeSession({ mode: 'on' });
+  await h.session.onCloudCommand(makeEnv('interaction.collect', { noteId: 'x' }));
+  await h.session.onCloudCommand(makeEnv('interaction.follow', { authorId: 'a' }));
+  await h.session.onCloudCommand(makeEnv('profile.open', { authorId: 'a' }));
+  assert.equal(h.actions.length, 3);
+  assert.ok(h.actions.every((a) => a.reason === 'capability_unsupported'));
+});
+
+// ─────────────────────────── 有界超时兜底（task 4.2/7.5）───────────────────────────
+
+test('浏览命令超时 → 诚实 timeout 回执，绝不挂死', async () => {
+  const h = makeSession({ mode: 'on', commandTimeoutMs: 30, hangOpen: true });
+  // 不 await（fn 永不 resolve）；定时器触发 timeout 回执。
+  void h.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0HANG' }));
+  await sleep(80);
+  assert.equal(h.actions.length, 1);
+  assert.equal(h.actions[0].action, 'open_note');
+  assert.equal(h.actions[0].ok, false);
+  assert.equal(h.actions[0].reason, 'timeout');
+});
+
+// ─────────────────────────── start() 门控 ───────────────────────────
+
+test('超时后串行链继续：卡死命令不活锁后续命令（task 4.3）', async () => {
+  const h = makeSession({ mode: 'on', commandTimeoutMs: 30, hangOpen: true });
+  void h.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0HANG' })); // 卡死
+  void h.session.onCloudCommand(makeEnv('page.scroll', {})); // 排在卡死命令之后
+  await sleep(120);
+  const timeout = h.actions.find((a) => a.reason === 'timeout');
+  assert.ok(timeout, '卡死命令回 timeout');
+  assert.equal(h.cards.length, 1, '超时放行链后，后续 page.scroll 仍执行并上报（未被活锁）');
+});
+
+test('start(): mode=off 不进 feed（不 ensureFeed/不报卡）；mode=on 进 feed 报首屏', async () => {
+  const off = makeSession({ mode: 'off' });
+  await off.session.start();
+  assert.equal(off.ensureCalls, 0);
+  assert.equal(off.cards.length, 0);
+
+  const on = makeSession({ mode: 'on' });
+  await on.session.start();
+  assert.equal(on.ensureCalls, 1);
+  assert.equal(on.cards.length, 1, 'on 模式上报首屏 page.cards');
+});
+
+test('session_closing：close 后命令诚实回执，绝不静默', async () => {
+  const h = makeSession({ mode: 'on' });
+  h.session.close();
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  assert.equal(h.actions.at(-1)?.reason, 'session_closing');
+});
