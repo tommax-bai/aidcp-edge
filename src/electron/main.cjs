@@ -1487,12 +1487,23 @@ function ensureAdsRuntimeAndKernelOnce(handle) {
 async function ensureAdsRuntimeAndKernel(handle) {
   const svc = await ensureAdsServiceOnce(handle);
   if (!svc.ok) return svc;
-  if (svc.mode !== 'embedded') return { ok: true, mode: svc.mode };
+  // 内核预检必须在启动浏览器前跑，无论服务是刚起的（embedded）还是已在跑的（adopted）——
+  // 我们自己先前起的服务（如「选已有环境」拉列表时起的）也没下内核，adopted 直接放行会撞
+  // browser/start「SunBrowser 148 is not ready」。adopted 时 svc 不带 cliEntry，这里补解析。
+  const kernelCli = svc.cliEntry || adsRuntime.resolveCliEntry({
+    resourcesPath: process.resourcesPath,
+    appRoot: app.getAppPath(),
+    userDataPath: app.getPath('userData'),
+  });
+  if (!kernelCli) {
+    // 无随包运行时可管内核（纯外部自管形态）——放行，由外部服务自管内核（迁移期）。
+    return { ok: true, mode: svc.mode };
+  }
 
-  // 条件式内核预检（缺则带进度下载、下完才放行）
+  // 条件式内核预检（缺则带进度下载、下完才放行；已下则秒过）
   const version = adsFingerprint.DEFAULT_KERNEL;
   const kres = await adsRuntime.ensureKernel({
-    cliEntry: svc.cliEntry,
+    cliEntry: kernelCli,
     execPath: process.execPath,
     version,
     onProgress: ({ percent, state }) => {
@@ -1519,7 +1530,7 @@ async function ensureAdsRuntimeAndKernel(handle) {
     return { ok: false, error: kres.error };
   }
   if (handle) updateStatus(handle, { kernelPrep: null, ...clearEdgeFailurePatch(handle) });
-  return { ok: true, mode: 'embedded', base: svc.base };
+  return { ok: true, mode: svc.mode, base: svc.base };
 }
 
 // adspower（AdsPower 指纹浏览器）路径：不自起本机 Chrome、不做 9222 cookie 轮询；
