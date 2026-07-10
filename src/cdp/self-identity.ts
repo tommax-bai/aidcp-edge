@@ -454,3 +454,129 @@ export async function readPageContext(cdp: BrowseCdp): Promise<PageContext> {
   const href = await evalRaw<string>(cdp, CURRENT_URL_JS).catch(() => '');
   return classifyPageContext(href);
 }
+
+// ===========================================================================
+// change adspower-first-login-wait-gate —— 启动期首次登录有界等待门 + 诚实停手真退出编排
+// ===========================================================================
+
+export type LoginWaitResult =
+  | { kind: 'identified'; identity: SelfIdentity }
+  | { kind: 'timeout' }
+  | { kind: 'interrupted'; reason: string };
+
+export interface WaitForLoginOptions {
+  /** 总等待预算（ms）。<=0 立即返回 timeout（调用方一般在进入前就判掉）。 */
+  timeoutMs: number;
+  /** 两次就地重读之间的间隔（ms，默认 5000）。 */
+  intervalMs?: number;
+  /** 中断轮询间隔（ms，默认 500）——比读间隔密，使暂停/关闭响应到亚秒级。 */
+  interruptPollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+  logger?: (msg: string) => void;
+  /** 就地重读（默认 readSelfIdentity，allowNavigate=false、单次扫描）。注入以适配多平台/单测。 */
+  readIdentity?: (cdp: BrowseCdp) => Promise<SelfIdentityResult>;
+  /** 轮询中断意图：返回原因串即中断、返回 null 继续。 */
+  pollInterrupt?: () => string | null;
+}
+
+const defaultInPlaceRead = (
+  cdp: BrowseCdp,
+  sleep: (ms: number) => Promise<void>,
+  now: () => number,
+): Promise<SelfIdentityResult> => readSelfIdentity(cdp, { allowNavigate: false, hydrateTimeoutMs: 0, sleep, now });
+
+/**
+ * 有界「等待登录」循环（change adspower-first-login-wait-gate）：保持 CDP 附着、周期就地重读，
+ * 读出真 id 即 identified；期间收到中断即 interrupted；预算耗尽 timeout。
+ * 【按迭代次数上界循环、不依赖 now() 前进】——单测注入恒定假时钟不会死循环（与 hydrate 循环同款）。
+ * 内层就地重读用极小 hydrate 预算（单次扫描），绝不把 readSelfIdentity 默认 ~6s 轮询嵌进 ~5s 外层循环；
+ * 中断按 interruptPollMs 亚秒级检查，读按 intervalMs 稀疏进行（不 hammer CDP）。
+ */
+export async function waitForLoginIdentity(
+  cdp: BrowseCdp,
+  opts: WaitForLoginOptions,
+): Promise<LoginWaitResult> {
+  const sleep = opts.sleep ?? defaultSleep;
+  const now = opts.now ?? (() => Date.now());
+  const log = opts.logger ?? (() => undefined);
+  const timeoutMs = Math.max(0, opts.timeoutMs);
+  const readIntervalMs = Math.max(1, opts.intervalMs ?? 5000);
+  const interruptPollMs = Math.max(1, opts.interruptPollMs ?? 500);
+  const readIdentity = opts.readIdentity ?? ((c) => defaultInPlaceRead(c, sleep, now));
+  const pollInterrupt = opts.pollInterrupt ?? (() => null);
+
+  const readEveryTicks = Math.max(1, Math.round(readIntervalMs / interruptPollMs));
+  const totalTicks = Math.max(1, Math.ceil(timeoutMs / interruptPollMs) + 1);
+
+  for (let tick = 0; tick < totalTicks; tick++) {
+    const interrupt = pollInterrupt();
+    if (interrupt) {
+      log(`[self-identity] 等待登录被中断（${interrupt}）`);
+      return { kind: 'interrupted', reason: interrupt };
+    }
+    if (tick % readEveryTicks === 0) {
+      const idRes = await readIdentity(cdp).catch(
+        (): SelfIdentityResult => ({ ok: false, reason: '等待期就地重读异常' }),
+      );
+      if (idRes.ok) {
+        log(`[self-identity] 等待期读出稳定 id=${idRes.identity.accountId}（source=${idRes.identity.source}）`);
+        return { kind: 'identified', identity: idRes.identity };
+      }
+    }
+    if (tick < totalTicks - 1) await sleep(interruptPollMs);
+  }
+  log('[self-identity] 等待登录超时');
+  return { kind: 'timeout' };
+}
+
+/** proceed 携带的握手决策一定非 halt（halt 一律走 terminate）——收窄类型让调用方无需再判 halt。 */
+export type NonHaltIdentityDecision = Exclude<IdentityDecision, { kind: 'halt' }>;
+
+export type StartupIdentityAction =
+  | { kind: 'proceed'; decision: NonHaltIdentityDecision }
+  | { kind: 'terminate'; code: number; reason: string };
+
+export interface ResolveStartupIdentityDeps {
+  /** 浏览器 provider 类型（'adspower' | 'self'）。 */
+  providerKind: string;
+  /** 首读得到的握手决策（decideIdentity(firstRead, override)）。 */
+  initialDecision: IdentityDecision;
+  override: string | undefined;
+  /** 登录等待预算（ms）；<=0 表示等待门关闭（回到即刻停手、但仍经真退出端点）。 */
+  loginWaitMs: number;
+  /** 触发等待（注入 waitForLoginIdentity 的绑定或单测桩）。仅门控命中才调用。 */
+  waitForLogin: () => Promise<LoginWaitResult>;
+  /** 复用 decideIdentity 把等待读出的身份定为握手决策。 */
+  decideIdentity: (idRes: SelfIdentityResult, override: string | undefined) => IdentityDecision;
+  logger?: (msg: string) => void;
+}
+
+/**
+ * 启动期身份决策编排（纯逻辑、可注入、可单测）——把「首读决策 + provider + 等待门」映射到一个明确 action：
+ * - 门控【可判定】：initialDecision=halt 且 provider=adspower 且 loginWaitMs>0 → 进有界等待门；
+ *   不试图区分「登录尚未建立」vs「已登录但读不出」（无判据），确凿登出由等待超时兜底。
+ * - 等待读出真 id → proceed；等待超时/中断 → terminate(0)（干净停止、不自动重起：~5min 等待 > 健康存活阈值
+ *   会让看护连续失败计数清零→有界放弃永不触发→无限重起，故超时必须用不重起的干净停止码）。
+ * - 其它 halt（self / override 失败仍 halt / adspower 关等待 / 等待后仍 halt）→ terminate(1)（既有可重起终态；
+ *   此类即刻停手 uptime < 健康阈值，看护有界重起后会诚实放弃、无无限重起）。
+ * - 非 halt → proceed。
+ * 【关键】所有 halt 都返回显式 terminate action，调用方据此走真退出端点——绝不回落 bare-return 挂僵尸。
+ */
+export async function resolveStartupIdentity(deps: ResolveStartupIdentityDeps): Promise<StartupIdentityAction> {
+  const log = deps.logger ?? (() => undefined);
+  const { initialDecision, providerKind, override, loginWaitMs } = deps;
+  if (initialDecision.kind === 'halt' && providerKind === 'adspower' && loginWaitMs > 0) {
+    log('[self-identity] adspower 启动期未读出登录身份 → 进入有界等待登录门');
+    const waitRes = await deps.waitForLogin();
+    if (waitRes.kind === 'identified') {
+      const decided = deps.decideIdentity({ ok: true, identity: waitRes.identity }, override);
+      if (decided.kind === 'halt') return { kind: 'terminate', code: 1, reason: 'post_wait_halt' };
+      return { kind: 'proceed', decision: decided };
+    }
+    if (waitRes.kind === 'interrupted') return { kind: 'terminate', code: 0, reason: `interrupted:${waitRes.reason}` };
+    return { kind: 'terminate', code: 0, reason: 'login_wait_timeout' };
+  }
+  if (initialDecision.kind === 'halt') return { kind: 'terminate', code: 1, reason: 'halt' };
+  return { kind: 'proceed', decision: initialDecision };
+}

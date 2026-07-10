@@ -41,7 +41,10 @@ import {
   browserParkingConfigFromEnv,
   installBrowserParkingStdinControl,
   selectBrowserProvider,
+  waitForLoginIdentity,
+  resolveStartupIdentity,
   type BrowserLaunchOptions,
+  type ReadSelfIdentityOptions,
 } from './cdp/index.js';
 import { selectPlatformDriver } from './platform/index.js';
 import { FacebookCommentExecutor, FacebookCommentHandler, FacebookJoinExecutor } from './facebook/index.js';
@@ -131,6 +134,15 @@ async function main(): Promise<void> {
   const cdpHost = process.env.AIDCP_CDP_HOST ?? '127.0.0.1';
   const cdpPort = Number(process.env.AIDCP_CDP_PORT ?? 9222);
   const pageUrl = process.env.AIDCP_PAGE_URL;
+  // 启动期登录等待门预算（change adspower-first-login-wait-gate）：adspower 首登有界等待上限（ms）。
+  // 默认 5min（人工扫码量级）；设 0 / 非法 / 负 = 关等待门（即刻停手，但仍经真退出端点，不复活僵尸）。
+  // self 模式有壳侧登录门、不走此门；看护 / headless / 无人值守场景应显式注入短值或 0。
+  const loginWaitMs = (() => {
+    const raw = process.env.AIDCP_ADSPOWER_LOGIN_WAIT_MS;
+    if (raw === undefined) return 300_000;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  })();
 
   // 浏览器启动层可插拔（change adspower-browser-provider）：默认 adspower（AdsPower 指纹浏览器托管，
   // 拿 debug_port 喂现成 attach）；AIDCP_BROWSER_PROVIDER=self 时改为自起真实指纹 Chrome。
@@ -185,38 +197,90 @@ async function main(): Promise<void> {
   installBrowserParkingStdinControl(session.cdp, parkingConfig, (m) => console.log(m));
   // Runtime/Page/Input 域启用 + 反检测注入均在 attachToPage 内（reEnableAndInject，与断线重连共用）。
 
-  // 身份确立（account-identity-from-login 1.2）：登录态在 self 模式由 launchChrome 的登录等待保证、
-  // 在 adspower 模式由其 profile 持久化；此处统一从登录态读出本节点真实稳定账号 id，作为握手身份。
-  // env 覆盖优先；读不出即诚实停手、绝不回落 default（adspower 模式失败同样不回落 self）。
+  // 收口真退出端点（change adspower-first-login-wait-gate）：本进程带 IPC 通道 + stdin 控制读取器两个常驻句柄，
+  // 仅置 process.exitCode 后 return 会钉死事件循环、挂成存活僵尸（看护的 child-exit 永不触发→有界重起不 engage；
+  // 外壳「启动」因僵尸 child 仍在而空操作）。process.exit 硬终止、无视常驻句柄（与 main.ts 尾部 catch、lifecycle exit 同款）。
+  const terminateNow = (code: number): never => {
+    try {
+      session.close();
+    } catch {
+      /* best-effort */
+    }
+    process.exit(code);
+  };
+
+  // 身份确立（account-identity-from-login 1.2 + adspower-first-login-wait-gate）：从登录态读出本节点真实稳定账号 id 作握手身份。
+  // self 模式登录态由壳侧登录门保证；adspower 模式无壳侧门——新建环境=全新未登录分身，首读必 halt。故 adspower 首读 halt 时
+  // 不即刻停手，进【有界等待登录门】等操作者扫码；读出真 id 无缝续握手，超时/中断诚实【干净停止】。红线不变：只在读出真实
+  // 稳定 id 时握手，超时绝不猜、绝不回落 default；所有 halt 都经 terminateNow 真退出（绝不 bare-return 挂僵尸）。
   {
-    const idRes = await platformDriver.readIdentity(session.cdp, { logger: (m) => console.log(m) });
+    // adspower 首读 allowNavigate=false：登录页无「我」锚点，navigate 兜底既接不住新登录又只带误导航风险（task 1.5）。self 维持默认。
+    const firstReadOpts: ReadSelfIdentityOptions = { logger: (m) => console.log(m) };
+    if (provider.kind === 'adspower') firstReadOpts.allowNavigate = false;
+    const idRes = await platformDriver.readIdentity(session.cdp, firstReadOpts);
     const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
-    if (decision.kind === 'halt') {
-      // 红线「绝不静默以默认账号/默认人设开跑」：诚实停手——不握手、不连云端、绝不猜或回落 default。
-      console.error(`[aidcp-edge] ✗ 身份确立失败：登录态读不出稳定账号 id（${decision.reason}）。`);
-      console.error(
-        '[aidcp-edge]   已停手（不握手、不连云端）。请确认该节点浏览器已登录目标账号后重启；如确需指定身份，可设 AIDCP_ACCOUNT_ID 覆盖。',
-      );
-      try {
-        session.close();
-      } catch {
-        /* best-effort */
+
+    const action = await resolveStartupIdentity({
+      providerKind: provider.kind,
+      initialDecision: decision,
+      override: overrideAccountId,
+      loginWaitMs,
+      decideIdentity: (r, o) => platformDriver.decideIdentity(r, o),
+      logger: (m) => console.log(m),
+      waitForLogin: () => {
+        console.log(
+          `[aidcp-edge] 请在浏览器里扫码登录目标账号（等待登录中，最长 ${Math.round(loginWaitMs / 1000)}s）…`,
+        );
+        console.log('[browser-parking] awaiting-login'); // 外壳可识别的等待态状态行（task 1.4 / 4.1）
+        return waitForLoginIdentity(session.cdp, {
+          timeoutMs: loginWaitMs,
+          logger: (m) => console.log(m),
+          // 平台无关就地重读（allowNavigate=false、单次扫描）：不 hammer CDP、不骚扰二维码页。
+          readIdentity: (cdp) =>
+            platformDriver.readIdentity(cdp, { allowNavigate: false, hydrateTimeoutMs: 0, logger: () => undefined }),
+          // 中断：等待早窗唯一被搁置的中断路径是经 IPC 堆进 pendingLifecycleCommands 的暂停/关闭；非破坏性探测（find 不 splice），
+          // 成功续跑后仍由下方 dispatchLifecycleCommand 一次性派发这些排队命令（不双派发）。
+          pollInterrupt: () => {
+            const cmd = pendingLifecycleCommands.find((c) => c === 'pause' || c === 'close');
+            return cmd ?? null;
+          },
+        });
+      },
+    });
+
+    if (action.kind === 'terminate') {
+      if (action.reason === 'login_wait_timeout') {
+        console.error(
+          `[aidcp-edge] ✗ 等待登录超时（${Math.round(loginWaitMs / 1000)}s 内未完成登录）→ 诚实停手（干净停止、不自动重起）。请在浏览器登录目标账号后点「启动」重试。`,
+        );
+      } else if (action.reason.startsWith('interrupted:')) {
+        const cmd = action.reason.slice('interrupted:'.length);
+        console.log(`[aidcp-edge] 等待登录期间收到「${cmd}」→ 干净停止（不自动重起），可在浏览器登录后点「启动/恢复」重来。`);
+      } else {
+        // 常规诚实停手（self / override 失败仍 halt / adspower 关等待门 / 等待后仍 halt）。
+        const haltReason = 'reason' in decision ? decision.reason : '';
+        console.error(`[aidcp-edge] ✗ 身份确立失败：登录态读不出稳定账号 id（${haltReason}）。`);
+        console.error(
+          '[aidcp-edge]   已停手（不握手、不连云端）。请确认该节点浏览器已登录目标账号后重启；如确需指定身份，可设 AIDCP_ACCOUNT_ID 覆盖。',
+        );
       }
-      process.exitCode = 1;
-      return;
+      terminateNow(action.code);
+    } else {
+      const resolved = action.decision;
+      if (resolved.kind === 'use-override-after-read-fail') {
+        console.warn(`[aidcp-edge] ⚠ 登录态读不出稳定 id（${resolved.reason}），改用 AIDCP_ACCOUNT_ID 覆盖值=${resolved.accountId}。`);
+      } else if (resolved.mismatch) {
+        console.warn(
+          `[aidcp-edge] ⚠ AIDCP_ACCOUNT_ID 覆盖值(${resolved.mismatch.override}) ≠ 登录态真实 id(${resolved.mismatch.real})——以覆盖值为准，但身份与实际登录账号不一致，请确认是否预期。`,
+        );
+      }
+      accountId = resolved.accountId;
+      // 昵称仅在首读成功（in-place 恒 null / navigate 才有）时取；等待路径 idRes 为首读失败结果，verifiedAccountNickname 自然返回 undefined。
+      accountNickname = verifiedAccountNickname(idRes, resolved);
+      const display = accountNickname ? ` (${accountNickname})` : '';
+      const source = 'source' in resolved ? resolved.source : 'env-override';
+      console.log(`[aidcp-edge] 账号身份已确立: ${accountId}${display} [source=${source}]`);
     }
-    if (decision.kind === 'use-override-after-read-fail') {
-      console.warn(`[aidcp-edge] ⚠ 登录态读不出稳定 id（${decision.reason}），改用 AIDCP_ACCOUNT_ID 覆盖值=${decision.accountId}。`);
-    } else if (decision.mismatch) {
-      console.warn(
-        `[aidcp-edge] ⚠ AIDCP_ACCOUNT_ID 覆盖值(${decision.mismatch.override}) ≠ 登录态真实 id(${decision.mismatch.real})——以覆盖值为准，但身份与实际登录账号不一致，请确认是否预期。`,
-      );
-    }
-    accountId = decision.accountId;
-    accountNickname = verifiedAccountNickname(idRes, decision);
-    const display = accountNickname ? ` (${accountNickname})` : '';
-    const source = 'source' in decision ? decision.source : 'env-override';
-    console.log(`[aidcp-edge] 账号身份已确立: ${accountId}${display} [source=${source}]`);
   }
 
   // 先声明 runner（延迟赋值），打破 client/selector/runner 的相互依赖

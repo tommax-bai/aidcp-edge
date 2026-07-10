@@ -1700,6 +1700,12 @@ function handleEdgeLogLine(handle, message, isError = false) {
   }
   const next = { edge: isError ? 'warning' : 'running', lastMessage: message };
   if (!isError && handle.status.edgeFailure) next.edgeFailure = null;
+  if (message.includes('[browser-parking] awaiting-login')) {
+    // adspower 首登有界等待门（change adspower-first-login-wait-gate）：核心在等操作者扫码登录、浏览器与 CDP 仍在。
+    // 诚实呈现「待登录」，绝不加任何 respawn 抑制（核心不退出，respawn 本就不触发；超时走干净停止码亦不重起）。
+    next.auth = 'login required';
+    next.presence = { text: '请在浏览器里扫码登录', at: new Date().toISOString() };
+  }
   if (message.includes('已连接云端') || message.includes('已握手') || message.includes('云端已重连')) next.cloud = 'connected';
   if (message.includes('连接失败') || message.includes('WS 已关闭') || message.includes('启动失败')) next.cloud = 'disconnected';
   if (message.includes('云端重连中')) next.cloud = 'disconnected';
