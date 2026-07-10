@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monitor.js';
-import { FacebookCommentExecutor } from '../../src/facebook/comment-executor.js';
+import { FacebookCommentExecutor, isFacebookCommentEditorLabel } from '../../src/facebook/comment-executor.js';
 
 // ── raw page-structure builder (matches RawPageStructure the scan JS returns) ──
 interface RawStruct {
@@ -395,4 +395,26 @@ test('fb-executor: 受控输入未被接受 → marker_not_accepted，不提交'
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'marker_not_accepted');
   assert.equal(r.submitted, false);
+});
+
+// ─────────────────────────── comment-editor label detection ───────────────────────────
+// 页内 fbEditors() 用 FakeCdp 只回罐装 focus、测不到真正的标签正则；这条回归直接打标签断言（与页内同源）。
+test('fb-executor: 评论框标签识别覆盖真机变体与多语言（回归 发表公开评论 漏配 → 评论从未发出）', () => {
+  // 真机实证漏配（zh-Hans 群帖详情页评论框 aria-label）——此前使 fbEditors() 恒空、误报 editor_not_found。
+  assert.equal(isFacebookCommentEditorLabel('发表公开评论…'), true);
+  // 其余中文变体
+  for (const l of ['写评论', '发表评论', '以 Tianxing Bai 的身份发表评论', '评论', '留言']) {
+    assert.equal(isFacebookCommentEditorLabel(l), true, l);
+  }
+  // en / vi / es 变体（该账号亦定向越南语/西语群，界面语言可能被切换）
+  for (const l of ['Write a comment', 'Write a public comment…', 'Comment as Tom', 'Bình luận', 'Viết bình luận công khai', 'Comentar', 'Escribe un comentario']) {
+    assert.equal(isFacebookCommentEditorLabel(l), true, l);
+  }
+  // 群问答帖回答框（合法回帖框，保留原支持）
+  assert.equal(isFacebookCommentEditorLabel('输入回答…'), true);
+  assert.equal(isFacebookCommentEditorLabel('Answer'), true);
+  // 无关编辑框标签不误配（贴图/动图「评论」是 role=button、由 fbEditors 的选择器排除，不在标签层否定之列）。
+  for (const l of ['你在想什么？', "What's on your mind?", '输入消息…', 'Message', 'Search Facebook', '', null, undefined]) {
+    assert.equal(isFacebookCommentEditorLabel(l), false, String(l));
+  }
 });

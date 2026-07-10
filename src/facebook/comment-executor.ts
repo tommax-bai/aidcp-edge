@@ -31,6 +31,29 @@ import {
 } from './probes/page-structure.js';
 import { isUrlAllowedByTargetDescriptor } from '../platform/driver.js';
 
+/**
+ * Facebook 评论编辑框的 aria-label / placeholder 识别（跨 UI 语言 + 文案变体）。
+ *
+ * 真机实证（zh-Hans 界面、群帖详情页）评论框 aria-label 是「发表公开评论…」——旧表里的 `发表评论`
+ * 不含中间「公开」二字、`发表评论` 子串不连续 → 正则漏匹配 → fbEditors() 恒空 → 误报 editor_not_found，
+ * 该账号评论**从未发出过一次**。这里改按「评论」概念宽匹配，覆盖真机变体与该账号定向的越南语/西语群
+ * （界面语言可能被切到 vi/es）。
+ *
+ * 宽匹配之所以安全：本正则只作用在**可见的** `[contenteditable="true"][role="textbox"]`（见 fbEditors）——
+ * 「用贴图/动图/头像评论」等虽含「评论」字样但是 role=button，被选择器天然排除，不会被误当输入框。
+ *   zh 写评论 / 发表评论 / 发表公开评论 / 以…身份发表评论 / 评论 / 留言 · en Write a (public) comment / Comment as ·
+ *   vi (Viết) bình luận (công khai) · es Comentar / comentario · 群问答帖回答框 输入回答 / Answer
+ *
+ * 该来源字符串**同时**喂给页内 IIFE（见 FB_EXEC_HELPERS_JS 的 fbIsCommentEditor）与可单测的 TS 断言
+ * isFacebookCommentEditorLabel，二者共用 `.source`、绝不再各写一份漂移出第二个漏配。
+ */
+export const FB_COMMENT_EDITOR_LABEL_RE = /评论|留言|comment|bình luận|coment|输入回答|answer/i;
+
+/** 与页内 fbIsCommentEditor 同源的评论框标签断言，供单测直接校验语言/变体覆盖（无需真实 DOM/可见性）。 */
+export function isFacebookCommentEditorLabel(label: string | null | undefined): boolean {
+  return FB_COMMENT_EDITOR_LABEL_RE.test(String(label ?? ''));
+}
+
 /** 搜索/开帖/提交诚实非成功原因（与云端 outcome 映射对齐）。 */
 export type FacebookCommentStepReason =
   | 'permission_gated' // 容器非法 / 非成员 / 待批准 / 群问答门槛
@@ -513,7 +536,7 @@ interface ScopedVerifyResult {
 const FB_EXEC_HELPERS_JS = `
   function fbVisible(el){ if(!el) return false; const r=el.getBoundingClientRect(); const s=getComputedStyle(el); return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'; }
   function fbText(el){ return ((el&&el.innerText)||'').replace(/\\s+/g,' ').trim(); }
-  function fbIsCommentEditor(el){ if(!el) return false; var lab=((el.getAttribute&&(el.getAttribute('aria-label')||el.getAttribute('data-placeholder')||el.getAttribute('placeholder')))||''); if(/写评论|发表评论|Write a comment|Comment as|Comment|输入回答|Answer/i.test(lab)) return true; return /写评论|Write a comment/i.test(fbText(el)); }
+  function fbIsCommentEditor(el){ if(!el) return false; var lab=((el.getAttribute&&(el.getAttribute('aria-label')||el.getAttribute('data-placeholder')||el.getAttribute('placeholder')))||''); var re=/${FB_COMMENT_EDITOR_LABEL_RE.source}/i; if(re.test(lab)) return true; return re.test(fbText(el)); }
   function fbIsGroupQuestionEditor(el){ var lab=((el&&el.getAttribute&&el.getAttribute('aria-label'))||''); return /输入回答|Answer/i.test(lab); }
   function fbJoinSignalVisible(){ try{ if(!/\\/groups\\//.test(location.pathname)) return false; return /(加入小组|Join group|\\bJoin\\b|待批准|Pending|回答问题|Answer questions)/i.test(document.body.innerText||''); }catch(e){ return false; } }
   function fbEditors(){ return Array.prototype.slice.call(document.querySelectorAll('[contenteditable="true"][role="textbox"]')).filter(function(el){ return fbVisible(el)&&fbIsCommentEditor(el); }); }
