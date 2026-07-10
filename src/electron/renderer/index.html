@@ -354,7 +354,7 @@
     </aside>
 
     <!-- ═══ 账号人设浮层（重设计于 edge-client-proxy-platform-persona-ux）：三段式骨架（头带身份锚点 /
-         滚动体 / 底部操作栏）+ 两步向导（选关键词 → 预览确认）。由左栏每行的人设图标拉起，对「该行环境」
+         滚动体 / 底部操作栏）+ 两步向导（设置偏好 → 预览确认）。由左栏每行的人设图标拉起，对「该行环境」
          做人设向导。审批/落库诚实回执，绝不本地判成功；闸三态与草稿环境锚定语义不变。 ═══ -->
     <div id="persona-mask" class="pop-mask hidden"></div>
     <aside id="persona-pop" class="persona-pop hidden" aria-hidden="true" role="dialog" aria-label="账号人设">
@@ -390,45 +390,13 @@
 
         <div id="persona-wizard-body">
           <div class="j-steps persona-steps" id="persona-steps">
-            <div class="j-step cur" data-stage="pick"><span class="j-dot"></span><span class="j-lab">选关键词</span></div>
+            <div class="j-step cur" data-stage="pick"><span class="j-dot"></span><span class="j-lab">设置偏好</span></div>
             <div class="j-step" data-stage="preview"><span class="j-dot"></span><span class="j-lab">预览确认</span></div>
           </div>
-          <p class="subtle persona-hint" id="persona-hint">选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。</p>
+          <p class="subtle persona-hint" id="persona-hint">设置语气和内容偏好，自动生成这个账号的人设；确认后账号才会开始自动运营。</p>
 
-          <!-- Stage 1：选关键词（三组区块卡） -->
+          <!-- Stage 1：设置偏好（两个面板：语气调性 / 内容偏好） -->
           <div class="persona-stage" id="persona-stage-pick">
-            <div class="persona-card field">
-              <span class="field-label">垂类 / 行业 <em class="opt">单选</em></span>
-              <div class="persona-kw-group" data-dim="vertical" data-select="single">
-                <button class="kw-btn" type="button" data-kw="美妆护肤">美妆护肤</button>
-                <button class="kw-btn" type="button" data-kw="母婴亲子">母婴亲子</button>
-                <button class="kw-btn" type="button" data-kw="数码科技">数码科技</button>
-                <button class="kw-btn" type="button" data-kw="美食探店">美食探店</button>
-                <button class="kw-btn" type="button" data-kw="时尚穿搭">时尚穿搭</button>
-                <button class="kw-btn" type="button" data-kw="健身运动">健身运动</button>
-                <button class="kw-btn" type="button" data-kw="家居生活">家居生活</button>
-                <button class="kw-btn" type="button" data-kw="职场成长">职场成长</button>
-                <button class="kw-btn" type="button" data-kw="旅行户外">旅行户外</button>
-                <button class="kw-btn" type="button" data-kw="情感生活">情感生活</button>
-              </div>
-              <span class="persona-or">或自定义</span>
-              <input id="persona-vertical-custom" class="persona-custom-input" type="text" maxlength="40" placeholder="如 宠物 / 手办 / 中古…" autocomplete="off" />
-            </div>
-
-            <div class="persona-card field">
-              <span class="field-label">兴趣 <em class="opt">可多选</em><span class="kw-count" id="persona-interest-count"></span></span>
-              <div class="persona-kw-group" data-dim="interest" data-select="multi">
-                <button class="kw-btn" type="button" data-kw="好物分享">好物分享</button>
-                <button class="kw-btn" type="button" data-kw="教程干货">教程干货</button>
-                <button class="kw-btn" type="button" data-kw="测评种草">测评种草</button>
-                <button class="kw-btn" type="button" data-kw="日常记录">日常记录</button>
-                <button class="kw-btn" type="button" data-kw="避坑指南">避坑指南</button>
-                <button class="kw-btn" type="button" data-kw="灵感收藏">灵感收藏</button>
-              </div>
-              <span class="persona-or">或自己填（逗号分隔）</span>
-              <input id="persona-interest-custom" class="persona-custom-input" type="text" maxlength="120" placeholder="如 成分党,早C晚A,敏感肌护理" autocomplete="off" />
-            </div>
-
             <div class="persona-card field">
               <span class="field-label">语气调性 <em class="opt">单选</em></span>
               <div class="persona-kw-group" data-dim="tone" data-select="single">
@@ -438,6 +406,11 @@
                 <button class="kw-btn" type="button" data-kw="温柔治愈">温柔治愈</button>
                 <button class="kw-btn" type="button" data-kw="犀利真实">犀利真实</button>
               </div>
+            </div>
+
+            <div class="persona-card field">
+              <span class="field-label">内容偏好 <em class="opt">可多选</em><span class="kw-count" id="persona-content-count"></span></span>
+              <div id="persona-content-groups" class="persona-content-groups"></div>
             </div>
           </div>
 

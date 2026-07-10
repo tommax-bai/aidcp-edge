@@ -143,7 +143,8 @@ function buildFingerprintConfig(template) {
   const fp = {
     automatic_timezone: '1', // 时区随代理 IP
     language_switch: '1', // 语言随代理 IP
-    location_switch: '1',
+    location: 'block', // 默认拒绝页面地理位置授权弹窗
+    location_switch: '1', // 指纹地理位置仍随代理 IP（与授权策略独立）
     webrtc: 'proxy', // 替换成代理 IP（禁 local/real）
     canvas: '1',
     webgl_image: '1',

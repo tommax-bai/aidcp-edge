@@ -59,7 +59,7 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
   let pushStatus: (s: unknown) => void = () => undefined;
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], startAll: [], select: [], close: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], startAll: [], select: [], close: [], notify: [] };
   const settings = {
     provider: 'adspower',
     adsProfileId: 'p1',
@@ -95,6 +95,7 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
     fleetStartAll: async (opts: unknown) => { calls.startAll.push(opts); return { ok: true, queued: 2 }; },
     fleetStopAll: async () => ({ ok: true }),
     relogin: async (envId: string) => { calls.relogin.push(envId); return makeStatus({ envId }); },
+    notify: async (payload: unknown) => { calls.notify.push(payload); return { ok: true }; },
     showDrivenBrowser: async (envId: string) => { calls.showDriven.push(envId); return { ok: true, hint: '已请求前置；窗口平时停放在屏幕边缘。' }; },
     resetBrowserParking: async () => ({ ok: true }),
     pause: async () => makeStatus(),
@@ -312,7 +313,7 @@ test('红线：人设草稿绑定生成时的环境，中途切换环境后确�
   (w as unknown as { pushStatus?: unknown }); // noop
   const gen = w.document.querySelector('#persona-generate') as HTMLButtonElement;
   // 选一个单选关键词组的项，令生成通过校验
-  (w.document.querySelector('.persona-kw-group[data-dim="vertical"] .kw-btn') as HTMLElement).click();
+  (w.document.querySelector('.persona-kw-group[data-dim="content"][data-category="招聘求职"] .kw-btn') as HTMLElement).click();
   // 不再手动放行：boot 首个 status 已 logged in+connected，闸必须自然打开（回归主进程 auth 链路的渲染侧契约）
   assert.equal(gen.disabled, false, '登录+连云后生成按钮必须自然可点（gate 不得永久 disabled）');
   gen.click();
@@ -503,7 +504,7 @@ test('人设浮层：未就绪环境出空态面板（向导收起）；生成�
   assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), false);
   assert.equal(w.document.querySelector('#persona-empty')!.classList.contains('hidden'), true);
   // 选关键词生成 → 切到预览页、identitySummary 升为标题
-  (w.document.querySelector('.persona-kw-group[data-dim="vertical"] .kw-btn') as HTMLElement).click();
+  (w.document.querySelector('.persona-kw-group[data-dim="content"][data-category="招聘求职"] .kw-btn') as HTMLElement).click();
   (w.document.querySelector('#persona-generate') as HTMLElement).click();
   await tick();
   assert.equal(w.document.querySelector('#persona-stage-preview')!.classList.contains('hidden'), false, '生成后进入预览页');
@@ -530,4 +531,44 @@ test('暂停态显式关闭只路由当前选中环境并切到已关闭', async
   assert.deepEqual(calls.close, ['ads-p1']);
   assert.equal(w.document.querySelector('#session-fab')!.textContent, '启动');
   assert.equal(close.classList.contains('hidden'), true);
+});
+
+test('人设浮层：未绑已就绪账号自动弹出并通知；偏好面板为语气调性 + 内容偏好，招聘求职置顶且支持自定义', async () => {
+  const generateCalls: Array<{ envId: string; payload: { keywordSelections: string[] } }> = [];
+  const { w, calls, pushStatus } = await boot({
+    personaGenerate: async (envId: string, payload: { keywordSelections: string[] }) => {
+      generateCalls.push({ envId, payload });
+      return { ok: true, soulYaml: 'soul: custom', identitySummary: '自定义人设' };
+    },
+  });
+  await tick();
+
+  const pop = w.document.querySelector('#persona-pop')!;
+  assert.equal(pop.classList.contains('open'), true, '未绑已就绪账号应主动弹出人设浮层');
+  assert.equal(calls.notify.length, 1, '未绑已就绪账号应发一次系统通知');
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一' }));
+  await tick();
+  assert.equal(calls.notify.length, 1, '重复状态更新不得刷通知');
+
+  const cards = [...w.document.querySelectorAll('#persona-stage-pick .persona-card')];
+  assert.match(cards[0].textContent || '', /语气调性/, '语气调性必须是第一个面板');
+  assert.match(cards[1].textContent || '', /内容偏好/, '内容偏好必须是第二个面板');
+  const firstGroup = w.document.querySelector('.persona-pref-group')!;
+  assert.match(firstGroup.textContent || '', /招聘求职/);
+  for (const item of ['骑手外卖', '蓝领零工', '数据标注', '自有兼职', '在校实习']) {
+    assert.match(firstGroup.textContent || '', new RegExp(item));
+  }
+
+  (firstGroup.querySelector('.persona-add-custom') as HTMLElement).click();
+  const customInput = firstGroup.querySelector('.persona-custom-input') as HTMLInputElement;
+  customInput.value = '直播招聘';
+  (firstGroup.querySelector('.persona-custom-add') as HTMLElement).click();
+  assert.match(firstGroup.textContent || '', /直播招聘/, '自定义偏好应出现在当前分组');
+
+  (w.document.querySelector('.persona-kw-group[data-dim="tone"] .kw-btn') as HTMLElement).click();
+  (w.document.querySelector('#persona-generate') as HTMLElement).click();
+  await tick();
+  assert.equal(generateCalls.length, 1);
+  assert.deepEqual(generateCalls[0].payload.keywordSelections.includes('招聘求职'), true, '选择内容偏好时应带上行业标题');
+  assert.deepEqual(generateCalls[0].payload.keywordSelections.includes('直播招聘'), true, '自定义兴趣应进入生成关键词');
 });

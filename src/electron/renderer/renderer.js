@@ -2128,6 +2128,93 @@ fields.relogin.addEventListener('click', async () => {
   }
 });
 
+const PERSONA_CONTENT_GROUPS = [
+  { title: '招聘求职', items: ['骑手外卖', '蓝领零工', '数据标注', '自有兼职', '在校实习'] },
+  { title: '生活记录', items: ['生活剪影', '婚礼准备'] },
+  { title: '时尚', items: ['潮流玩具', '潮流活动', '鞋靴', '配饰', '发型', '箱包'] },
+  { title: '影视综艺', items: ['舞蹈欣赏', '综艺娱乐'] },
+  { title: '美食', items: ['美食测评', '美食 VLOG', '野外烹饪', '美食探店'] },
+  { title: '情感', items: ['励志鸡汤', '情感故事', '心理学', '情感知识'] },
+  { title: '美妆', items: ['美甲', '护肤', '身体护理', '香水'] },
+  { title: '教育', items: ['校园教育', '家庭教育', '留学教育', '校园生活'] },
+  { title: '家居家装', items: ['家居好物', '住宅装修', '居家经验', '园艺插花', '建筑分享'] },
+  { title: '社科资讯', items: ['军事', '科学科普', '法律知识', '民生', '历史'] },
+  { title: '兴趣才艺', items: ['手工 DIY', '文玩文创', '指玩', '益智玩具', '战术装备'] },
+  { title: '亲子', items: ['孕产经验', '萌娃', '孕期穿搭', '亲子早教', '亲子好物', '母婴日常', '育儿经验'] },
+  { title: '科技数码', items: ['影音设备', '手机平板', '智能家居', '前沿科技', '电脑', '智能穿戴', '数码搭配', '玩机攻略'] },
+  { title: '旅游', items: ['旅游攻略'] },
+  { title: '城市出行', items: ['话剧喜剧', '线下游戏', '购物体验', '展览分享', '公园游玩'] },
+  { title: '医疗与健身', items: ['健康养生', '健身饮食', '体态矫正', '燃脂减肥', '减肥健康'] },
+  { title: '宠物', items: ['养猫日常', '狗狗日常', '水族类', '爬行两栖', '家养宠物'] },
+  { title: '二次元', items: ['宅玩', '同人衍生', '动漫'] },
+  { title: '摄影', items: ['摄影器材', '摄影作品', '摄影技巧'] },
+  { title: '人文艺术', items: ['文学阅读', '艺术绘画', '艺术活动', '戏剧', '艺术设计'] },
+  { title: '汽车', items: ['摩托车', '看车选买', '二手车选买', '汽车知识', '新能源智能'] },
+  { title: '商业财经', items: ['财经解读', '金融理财', '楼市资讯'] },
+  { title: '搞笑', items: ['日常搞笑', '小剧场'] },
+  { title: '音乐', items: ['原创音乐', '音乐演出', '乐器大师'] },
+  { title: '游戏', items: ['手机游戏', '竞技游戏', '网络游戏', '主机游戏'] },
+  { title: '体育运动', items: ['篮球', '滑雪', '跑步', '垂钓', '徒步', '游泳', '骑行', '滑板', '足球', '飞盘', '露营', '水上活动', '极限运动'] },
+  { title: '个人管理', items: ['星座', '职场干货'] },
+];
+
+function renderPersonaContentGroups() {
+  const host = document.querySelector('#persona-content-groups');
+  if (!host) return;
+  host.innerHTML = '';
+  for (const group of PERSONA_CONTENT_GROUPS) {
+    const section = document.createElement('section');
+    section.className = 'persona-pref-group';
+
+    const head = document.createElement('div');
+    head.className = 'persona-pref-head';
+    const title = document.createElement('strong');
+    title.className = 'persona-pref-title';
+    title.textContent = group.title;
+    const add = document.createElement('button');
+    add.className = 'persona-add-custom';
+    add.type = 'button';
+    add.textContent = '+';
+    add.title = `自定义${group.title}偏好`;
+    add.setAttribute('aria-label', `自定义${group.title}偏好`);
+    head.append(title, add);
+    section.appendChild(head);
+
+    const chips = document.createElement('div');
+    chips.className = 'persona-kw-group';
+    chips.dataset.dim = 'content';
+    chips.dataset.category = group.title;
+    chips.dataset.select = 'multi';
+    for (const item of group.items) {
+      const btn = document.createElement('button');
+      btn.className = 'kw-btn';
+      btn.type = 'button';
+      btn.dataset.kw = item;
+      btn.textContent = item;
+      chips.appendChild(btn);
+    }
+    section.appendChild(chips);
+
+    const custom = document.createElement('div');
+    custom.className = 'persona-custom-row hidden';
+    const input = document.createElement('input');
+    input.className = 'persona-custom-input';
+    input.type = 'text';
+    input.maxLength = 40;
+    input.placeholder = `添加${group.title}偏好`;
+    input.autocomplete = 'off';
+    const confirm = document.createElement('button');
+    confirm.className = 'secondary small persona-custom-add';
+    confirm.type = 'button';
+    confirm.textContent = '添加';
+    custom.append(input, confirm);
+    section.appendChild(custom);
+    host.appendChild(section);
+  }
+}
+
+renderPersonaContentGroups();
+
 // ─── 建号自助人设向导（change edge-persona-keyword-generation；重设计于 edge-client-proxy-platform-persona-ux）───
 // 行为契约不变：闸三态语义 / 状态推送绝不重置已选关键词与草稿 / 草稿环境锚定 / 诚实失败展示。
 const personaUi = {
@@ -2135,8 +2222,6 @@ const personaUi = {
   hint: document.querySelector('#persona-hint'),
   boundNote: document.querySelector('#persona-bound-note'),
   wizardBody: document.querySelector('#persona-wizard-body'),
-  verticalCustom: document.querySelector('#persona-vertical-custom'),
-  interestCustom: document.querySelector('#persona-interest-custom'),
   kwGroups: Array.from(document.querySelectorAll('.persona-kw-group')),
   generate: document.querySelector('#persona-generate'),
   msg: document.querySelector('#persona-msg'),
@@ -2156,7 +2241,7 @@ const personaUi = {
   skeleton: document.querySelector('#persona-skeleton'),
   kwSummary: document.querySelector('#persona-kw-summary'),
   kwSummaryText: document.querySelector('#persona-kw-summary-text'),
-  interestCount: document.querySelector('#persona-interest-count'),
+  contentCount: document.querySelector('#persona-content-count'),
 };
 let personaReady = false; // 已登录 + 云端已连接才可生成
 let personaDraftYaml = ''; // 当前草稿 soulYaml（确认时提交）
@@ -2164,6 +2249,7 @@ let personaLocallyBound = false; // 本会话确认成功后即视为已绑（pe
 let personaDraftEnvId; // 草稿所属环境（多环境：persist MUST 打回生成时那个账号，不随后续切换环境漂移）
 let personaStage = 'pick'; // 两步向导阶段：pick（选关键词）| preview（预览确认）
 let personaInFlight = false; // 生成请求在途（骨架 + 按钮禁用 + 遮罩误点不关层）
+const personaPrompted = new Set();
 
 // 底部操作栏按阶段/形态切换主 CTA：向导态 pick=「生成人设」、preview=「重新生成 + 确认使用」；
 // 空态/已绑态收起全部按钮（空态面板自带「去启动」）。
@@ -2190,7 +2276,7 @@ function setPersonaStage(stage) {
 }
 
 function updateKwSummary(keywords) {
-  if (personaUi.kwSummaryText) personaUi.kwSummaryText.textContent = `关键词：${keywords.join(' · ')}`;
+  if (personaUi.kwSummaryText) personaUi.kwSummaryText.textContent = `偏好：${keywords.join(' · ')}`;
 }
 // 「改关键词」：回到第一步；草稿保留（回来还能确认）。
 personaUi.kwSummary?.addEventListener('click', () => setPersonaStage('pick'));
@@ -2247,16 +2333,54 @@ function setPersonaBadge(text, variant) {
   personaUi.stateBadge.className = `badge${variant ? ' ' + variant : ''}`;
 }
 
+function personaPromptKey(status) {
+  const envId = currentEnvId() || '__local__';
+  const accountId = status && status.account && status.account.id ? status.account.id : envId;
+  return `${envId}:${accountId}`;
+}
+
+function clearPersonaPromptForCurrentEnv() {
+  const prefix = `${currentEnvId() || '__local__'}:`;
+  for (const key of [...personaPrompted]) {
+    if (key.startsWith(prefix)) personaPrompted.delete(key);
+  }
+}
+
+function maybePromptPersonaSetup(status, known, bound) {
+  if (!known) return;
+  if (bound) {
+    clearPersonaPromptForCurrentEnv();
+    return;
+  }
+  const key = personaPromptKey(status);
+  if (personaPrompted.has(key)) return;
+  personaPrompted.add(key);
+  const envId = currentEnvId();
+  const env = fleetView.envs.get(envId);
+  const label = (env && (env.name || (env.status && env.status.account && env.status.account.name))) || '当前账号';
+  try {
+    const notifyResult = window.aidcpEdge.notify?.({
+      title: '需要设置账号人设',
+      body: `${label} 已登录但还没有人设，设置后才会开始自动运营。`,
+    });
+    if (notifyResult && typeof notifyResult.catch === 'function') notifyResult.catch(() => undefined);
+  } catch {
+    /* old preload without notify */
+  }
+  if (!fields.personaPop || !fields.personaPop.classList.contains('open')) openPersonaPop(envId);
+}
+
 function collectPersonaKeywords() {
-  const chips = personaUi.kwGroups
-    .flatMap((g) => Array.from(g.querySelectorAll('.kw-btn.active')).map((b) => b.dataset.kw))
-    .filter(Boolean);
-  const custom = [];
-  const v = personaUi.verticalCustom && personaUi.verticalCustom.value.trim();
-  if (v) custom.push(v); // 自定义垂类（长尾）
-  const iRaw = personaUi.interestCustom && personaUi.interestCustom.value.trim();
-  if (iRaw) custom.push(...iRaw.split(/[,，、]/).map((s) => s.trim()).filter(Boolean)); // 自由文本兴趣（逗号/顿号分隔）
-  return [...chips, ...custom];
+  const out = [];
+  for (const group of personaUi.kwGroups) {
+    const selected = Array.from(group.querySelectorAll('.kw-btn.active'))
+      .map((b) => b.dataset.kw)
+      .filter(Boolean);
+    if (!selected.length) continue;
+    if (group.dataset.dim === 'content' && group.dataset.category) out.push(group.dataset.category);
+    out.push(...selected);
+  }
+  return [...new Set(out)];
 }
 
 function newIdempotencyKey() {
@@ -2284,6 +2408,7 @@ function updatePersonaGate(status) {
   if (bound) {
     setPersonaBadge('已设置', 'normal');
     syncPersonaFoot('hidden');
+    clearPersonaPromptForCurrentEnv();
     return;
   }
   // 未绑或未知：徽标区分——权威已知未绑=「未设置」；未连云尚不知道=「待启动」（宁缺毋假，不谎称未设置）。
@@ -2313,16 +2438,19 @@ function updatePersonaGate(status) {
 
   // ③ 已连云且未绑：向导可用（生成 gate 判据不变）。
   if (personaUi.generate) personaUi.generate.disabled = personaInFlight || !personaReady;
-  if (personaUi.hint) personaUi.hint.textContent = '选几类关键词，自动生成这个账号的人设；确认后账号才会开始自动运营。';
+  if (personaUi.hint) personaUi.hint.textContent = '设置语气和内容偏好，自动生成这个账号的人设；确认后账号才会开始自动运营。';
   syncPersonaFoot('wizard');
+  maybePromptPersonaSetup(status, known, bound);
 }
 
 // 关键词 toggle：单选组互斥、多选组可叠加；同步 aria-pressed 与「已选 n」计数。
 function syncKwGroupState(group) {
   group.querySelectorAll('.kw-btn').forEach((b) => b.setAttribute('aria-pressed', b.classList.contains('active') ? 'true' : 'false'));
-  if (group.dataset.dim === 'interest' && personaUi.interestCount) {
-    const n = group.querySelectorAll('.kw-btn.active').length;
-    personaUi.interestCount.textContent = n ? `已选 ${n}` : '';
+  if (personaUi.contentCount) {
+    const n = personaUi.kwGroups
+      .filter((g) => g.dataset.dim === 'content')
+      .reduce((sum, g) => sum + g.querySelectorAll('.kw-btn.active').length, 0);
+    personaUi.contentCount.textContent = n ? `已选 ${n}` : '';
   }
 }
 personaUi.kwGroups.forEach((group) => {
@@ -2338,6 +2466,50 @@ personaUi.kwGroups.forEach((group) => {
     syncKwGroupState(group);
   });
   syncKwGroupState(group);
+});
+
+function addCustomPreference(group, value) {
+  const name = (value || '').trim();
+  if (!name) return;
+  const normalized = name.slice(0, 40);
+  const existing = Array.from(group.querySelectorAll('.kw-btn')).find((b) => b.dataset.kw === normalized);
+  if (existing) {
+    existing.classList.add('active');
+    syncKwGroupState(group);
+    return;
+  }
+  const btn = document.createElement('button');
+  btn.className = 'kw-btn active custom';
+  btn.type = 'button';
+  btn.dataset.kw = normalized;
+  btn.textContent = normalized;
+  group.appendChild(btn);
+  syncKwGroupState(group);
+}
+
+document.querySelectorAll('.persona-pref-group').forEach((section) => {
+  const add = section.querySelector('.persona-add-custom');
+  const row = section.querySelector('.persona-custom-row');
+  const input = section.querySelector('.persona-custom-input');
+  const confirm = section.querySelector('.persona-custom-add');
+  const group = section.querySelector('.persona-kw-group');
+  add?.addEventListener('click', () => {
+    row?.classList.toggle('hidden');
+    if (row && !row.classList.contains('hidden')) input?.focus();
+  });
+  const submit = () => {
+    if (!group || !input) return;
+    addCustomPreference(group, input.value);
+    input.value = '';
+    row?.classList.add('hidden');
+  };
+  confirm?.addEventListener('click', submit);
+  input?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submit();
+    }
+  });
 });
 
 async function runPersonaGenerate() {

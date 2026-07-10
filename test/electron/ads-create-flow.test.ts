@@ -45,6 +45,8 @@ test('happy path: 用真指纹引擎构造、remark 编码意图/模板/机器�
   assert.equal(body.groupId, 'g1');
   assert.deepEqual(body.proxyConfig, { proxy_soft: 'no_proxy' }, '不填代理 → 缺省仍 no_proxy（零回归）');
   assert.ok(body.fingerprintConfig && body.fingerprintConfig.random_ua, '带上构造好的 fingerprint_config');
+  assert.equal(body.fingerprintConfig.location, 'block', 'user/create 指纹配置默认 Block 地理位置授权');
+  assert.equal(body.fingerprintConfig.location_switch, '1', 'IP-based 指纹地理位置保持开启');
   const meta = parseRemark(body.remark);
   assert.ok(meta);
   assert.equal(meta!.intendedAccountLabel, 'A');

@@ -101,6 +101,8 @@ test('所有 DEVICE_TEMPLATES 构造出 ok 且自洽，均 pin 桌面 OS', () =>
     // 噪声开、webrtc 非 local/real、device_memory 2 的幂
     assert.equal(built.canvas, '1');
     assert.notEqual(built.webrtc, 'local');
+    assert.equal(built.location, 'block', `${t.key} 应默认拒绝页面地理位置授权`);
+    assert.equal(built.location_switch, '1', `${t.key} 指纹地理位置仍应随代理 IP`);
     assert.ok(['2', '4', '8', '16'].includes(built.device_memory));
     // webgl='3' 不带 config；'2' 带 OS 匹配 renderer
     if (built.webgl === '3') assert.equal(built.webgl_config, undefined, `${t.key} webgl='3' 不应带 config`);

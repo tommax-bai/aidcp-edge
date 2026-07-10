@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   // 带 envId 路由（多环境）：打到草稿所属环境的 core，绝不因中途切换把人设写进别的账号。
   personaGenerate: (envId, opts) => ipcRenderer.invoke('persona:generate', envId, opts),
   personaPersist: (envId, opts) => ipcRenderer.invoke('persona:persist', envId, opts),
+  notify: (payload) => ipcRenderer.invoke('notify:show', payload),
   onStatusUpdate: (callback) => {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('status:update', listener);

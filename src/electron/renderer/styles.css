@@ -908,6 +908,30 @@ body { margin: 0; }
 .persona-kw-group .kw-btn.active { border-color: var(--accent); background: #eaf1ff; color: #2563eb; }
 .persona-kw-group .kw-btn.active::before { content: "✓ "; font-weight: 800; }
 .persona-kw-group .kw-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(59, 111, 240, 0.15); }
+.persona-content-groups { display: flex; flex-direction: column; gap: 16px; }
+.persona-pref-group { display: flex; flex-direction: column; gap: 9px; }
+.persona-pref-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.persona-pref-title { font-size: 13px; color: #1f2937; }
+.persona-add-custom {
+  width: 24px; height: 24px; border-radius: 50%; border: 1px solid #dbe3ef;
+  background: #fff; color: #64748b; font-size: 17px; line-height: 1; cursor: pointer;
+  display: grid; place-items: center; font-family: inherit;
+}
+.persona-add-custom:hover { border-color: #b8c9f5; background: #eaf1ff; color: var(--accent); }
+.persona-pref-group .persona-kw-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.persona-pref-group .kw-btn {
+  display: inline-flex; align-items: center; width: 100%; min-height: 38px; justify-content: center; border-radius: 8px; background: #fff;
+  color: #5b6475; font-size: 13px; padding: 7px 10px; text-align: center;
+}
+.persona-pref-group .kw-btn::before { content: "+ "; font-size: 18px; line-height: 0; font-weight: 400; color: #64748b; }
+.persona-pref-group .kw-btn.active::before { content: "✓ "; font-size: 13px; font-weight: 800; color: var(--accent); }
+.persona-pref-group .kw-btn.custom { border-style: dashed; }
+.persona-custom-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.persona-custom-row.hidden { display: none; }
+.persona-custom-input {
+  min-width: 0; border: 1px solid #dbe3ef; border-radius: 8px; padding: 8px 10px;
+  font-size: 13px; font-family: inherit; color: var(--ink); background: #fff;
+}
 /* 空态 / 已绑态专属面板 */
 .persona-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; padding: 26px 8px 24px; }
 .persona-empty p { margin: 2px 0 0; color: var(--mute); font-size: 13.5px; font-weight: 600; }

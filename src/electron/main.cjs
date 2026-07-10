@@ -27,6 +27,10 @@ const {
   parkingEnv,
 } = require('./browser-parking.cjs');
 const fleet = require('./fleet.cjs');
+const {
+  browserPersonaNoticeForStatus,
+  browserPersonaNoticeKey,
+} = require('./persona-notice.cjs');
 
 // 主进程侧 AdsPower 只读客户端（探测 + 环境列表 + 在跑分身对账）。单例持有本进程内**唯一**串行节流（1req/s）。
 // 与核心子进程内的 AdsPowerProvider 节流各自独立（跨进程无法共享内存队列，见 ads-local-api.cjs 头注）。
@@ -300,6 +304,7 @@ function makeEnvHandle({ envId, kind, profileId, name, platform, cascadeIndex })
     // 每环境各一份日志→UI 事件解析器（交织 stdout 按 envId 归属，绝不串号）。
     uiEvents: createUiEventStream(),
     browserParkingReady: false,
+    browserPersonaNoticeState: null,
     restartPending: false,
     pausePending: false,
     coreParked: false,
@@ -628,6 +633,7 @@ function updateStatus(handle, patch) {
   // 替换成局部补丁，随后的合并对象已被替换 → 未提及的计数被清空、渲染层出现空数字）。
   const full = patch.stats ? { ...patch, stats: mergeStats(handle.status.stats, patch.stats) } : patch;
   Object.assign(handle.status, full, { updatedAt: new Date().toISOString() });
+  syncBrowserPersonaNotice(handle);
   if (patch.risk && handle.envId === selectedEnvId) applyOverlayTone(patch.risk);
   if (full.lastPublish) saveUiState();
   const payload = { ...handle.status, envId: handle.envId, envName: handle.name };
@@ -719,6 +725,51 @@ function surfaceFailure(title, body) {
   }
 }
 
+function surfaceNotification(title, body) {
+  try {
+    if (Notification.isSupported()) {
+      new Notification({ title, body }).show();
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
+const BROWSER_PERMISSION_LABELS = {
+  geolocation: '地理位置',
+  media: '摄像头/麦克风',
+  midi: 'MIDI 设备',
+  midiSysex: 'MIDI 设备',
+  hid: 'HID 设备',
+  serial: '串口设备',
+  bluetooth: '蓝牙设备',
+  usb: 'USB 设备',
+  'clipboard-read': '剪贴板读取',
+};
+const BROWSER_PERMISSION_ALLOWLIST = new Set(['fullscreen', 'pointerLock']);
+const permissionNoticeAt = new Map();
+
+function installPermissionPolicy(win) {
+  try {
+    win.webContents.session.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+      const allow = BROWSER_PERMISSION_ALLOWLIST.has(permission);
+      if (!allow) {
+        const label = BROWSER_PERMISSION_LABELS[permission] || permission || '未知权限';
+        const origin = details && details.requestingUrl ? String(details.requestingUrl).slice(0, 120) : '当前页面';
+        const key = `${permission}:${origin}`;
+        const now = Date.now();
+        if (now - (permissionNoticeAt.get(key) || 0) > 60_000) {
+          permissionNoticeAt.set(key, now);
+          surfaceNotification('已拦截浏览器授权请求', `${origin} 请求访问「${label}」，客户端已默认拒绝。`);
+        }
+      }
+      callback(allow);
+    });
+  } catch (error) {
+    console.error('[aidcp-edge] 安装浏览器权限处理失败:', error?.message || error);
+  }
+}
+
 // 自定义标题带的窗框选项：隐藏系统标题栏但保留**原生**窗控（mac 红绿灯内嵌 / Windows 叠加窗控）。
 // 绝不用 frame:false（会丢原生关闭/缩放，非技术用户可能关不掉窗）。其余平台维持默认框。
 function frameOptions() {
@@ -749,6 +800,7 @@ function createWindow() {
     },
   });
 
+  installPermissionPolicy(mainWindow);
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
@@ -780,12 +832,32 @@ function createTray() {
   });
 }
 
-function sendBrowserParkingCommand(handle, type) {
+function writeBrowserControlCommand(handle, type, payload) {
   if (!handle || !handle.child || !handle.browserParkingReady || !handle.child.stdin || handle.child.stdin.destroyed) {
     return { ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' };
   }
   try {
-    handle.child.stdin.write(`${JSON.stringify({ type })}\n`);
+    const message = payload === undefined ? { type } : { type, payload };
+    handle.child.stdin.write(`${JSON.stringify(message)}\n`);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error?.message || '发送浏览器控制指令失败' };
+  }
+}
+
+function syncBrowserPersonaNotice(handle, force = false) {
+  if (!handle || !handle.browserParkingReady) return;
+  const notice = browserPersonaNoticeForStatus(handle.status, handle.name);
+  const stateKey = browserPersonaNoticeKey(notice);
+  if (!force && handle.browserPersonaNoticeState === stateKey) return;
+  const result = writeBrowserControlCommand(handle, 'browser.personaNotice', notice);
+  if (result.ok) handle.browserPersonaNoticeState = stateKey;
+}
+
+function sendBrowserParkingCommand(handle, type) {
+  const sent = writeBrowserControlCommand(handle, type);
+  if (!sent.ok) return sent;
+  try {
     // 「尽力抬前」诚实边界：外壳只能请求核心把窗口前置/归位，无法保证系统真把它抬到最前，
     // 故回执带窗口所在的定位提示、绝不宣称「已抬到最前」。
     const plan = currentParkingPlan();
@@ -949,6 +1021,7 @@ function startEdge(handle) {
   }
 
   handle.browserParkingReady = false;
+  handle.browserPersonaNoticeState = null;
   handle.browserAlreadyRunning = false;
   handle.coreParked = false;
   handle.closePending = false;
@@ -1020,6 +1093,7 @@ function startEdge(handle) {
     if (handle.child !== child) return;
     handle.child = undefined;
     handle.browserParkingReady = false;
+    handle.browserPersonaNoticeState = null;
     const msg = (err && err.message) || String(err);
     appendEdgeLog(handle.envId, `spawn error: ${msg}`, true);
     if (handle.removed) return;
@@ -1061,6 +1135,7 @@ function startEdge(handle) {
     const wasRestarting = handle.restartPending;
     handle.child = undefined;
     handle.browserParkingReady = false;
+    handle.browserPersonaNoticeState = null;
     // 主动重启、暂停驻留、显式关闭、移出花名册、退出应用都是「有意停止」，不算异常。
     const intentional = isQuitting || wasRestarting || wasPausing || wasParked || wasClosing || handle.removed;
     handle.pausePending = false;
@@ -1359,7 +1434,11 @@ function handleEdgeLogLine(handle, message, isError = false) {
     return;
   }
   appendEdgeLog(handle.envId, message, isError); // 落文件（排障回溯，独立于下方状态判断）
-  if (message.includes('[browser-parking] control-ready')) handle.browserParkingReady = true;
+  if (message.includes('[browser-parking] control-ready')) {
+    handle.browserParkingReady = true;
+    handle.browserPersonaNoticeState = null;
+    syncBrowserPersonaNotice(handle, true);
+  }
   // 核心正被有意停止 / 已暂停 / 已退出：其关闭期 stdout/stderr 只作为日志行展示，绝不据以翻转
   // edge / session / risk 徽标，也不产 UI 事件。正常在跑时才做状态推断。
   const stopping = isQuitting || handle.restartPending || handle.pausePending || handle.removed || !handle.child || handle.status.session === 'paused';
@@ -1777,7 +1856,20 @@ ipcMain.handle('browser:resetParking', (_event, envId) => sendBrowserParkingComm
 // 建号自助人设（change edge-persona-keyword-generation）：渲染层选关键词 → 云端生成草稿 / 确认落库。
 // envId 路由（多环境）：草稿属哪个环境就 persist 到哪个环境，杜绝中途切换环境把人设写进别的账号。
 ipcMain.handle('persona:generate', (_event, envId, payload) => sendPersonaCommand(envId, 'persona.generate', payload));
-ipcMain.handle('persona:persist', (_event, envId, payload) => sendPersonaCommand(envId, 'persona.persist', payload));
+ipcMain.handle('persona:persist', async (_event, envId, payload) => {
+  const result = await sendPersonaCommand(envId, 'persona.persist', payload);
+  if (result && result.ok === true) {
+    const handle = envId ? envs.get(envId) : selectedHandle();
+    if (handle) updateStatus(handle, { personaBound: true });
+  }
+  return result;
+});
+ipcMain.handle('notify:show', (_event, payload) => {
+  const title = payload && typeof payload.title === 'string' ? payload.title : 'AIDCP Edge';
+  const body = payload && typeof payload.body === 'string' ? payload.body : '';
+  surfaceNotification(title, body);
+  return { ok: true };
+});
 // AdsPower 只读探测 / 拉取（主进程侧，渲染层不直连本地 API）。opts 可带渲染层当前表单 apiKey/apiBase/groupId。
 ipcMain.handle('ads:status', (_event, opts) => adsApi.status(resolveAdsOpts(opts)));
 ipcMain.handle('ads:listProfiles', (_event, opts) => adsApi.listProfiles(resolveAdsOpts(opts)));
