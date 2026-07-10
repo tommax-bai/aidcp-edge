@@ -280,3 +280,24 @@ test('fb-join-executor: 观察态一直空 + observe-only → observation_only�
   assert.equal(r.reason, 'observation_only');
   assert.equal(r.clicked, false);
 });
+
+// ── change fb-group-join-cta-precision：避开页面 chrome 误判 + 不因杂项 CTA 提前停轮询（真机:退出联想输入被裸「退出」误判致提前停在 loading）──
+test('classifyCtaLabel: 页面 chrome / 无关词不误判（真机回归）', () => {
+  assert.equal(classifyCtaLabel('退出联想输入'), '', '输入法 chrome，曾被裸「退出」误判成 member');
+  assert.equal(classifyCtaLabel('查看推荐小组'), '', '含「小组」但非加入/退出');
+  assert.equal(classifyCtaLabel('分享小组'), '');
+  assert.equal(classifyCtaLabel('返回上一页'), '');
+  assert.equal(classifyCtaLabel('Reunir equipo'), '', '含「unir」子串但非入组——裸 unir 已移除');
+});
+
+test('fb-join-executor: 杂项 CTA 文本（无真加入按钮/无成员/门槛信号）不算决定性，继续轮询到加入按钮出现', async () => {
+  const cdp = new FakeCdp([
+    obs({ mainCtaText: '退出联想输入', mainCtaAria: '退出联想输入', membershipSignals: [], joinButton: { found: false } }),
+    obs(), // 真加入按钮渲染出来
+    obs({ mainCtaText: 'Joined', mainCtaAria: 'Joined', membershipSignals: ['You are now a member'], joinButton: { found: false } }),
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, true, '跳过杂项 CTA、等到真加入按钮再点');
+  assert.equal(r.clicked, true);
+  assert.equal(cdp.clicks.length, 1);
+});

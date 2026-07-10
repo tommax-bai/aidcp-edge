@@ -127,15 +127,17 @@ function hasMemberSignal(obs: FacebookGroupJoinObservation | undefined): boolean
  * 又注入 in-page 观测 IIFE——避免旧「EN/ZH 精确匹配」把非英中群的 Join 按钮（如越南语「Tham gia nhóm」）
  * 吞成 null，从而让云端判定角色（多语 LLM）拿不到 CTA 文本、只能 fail-closed 跳过。覆盖目标群常见语种。
  */
+// 关键词刻意剔除会误命中页面 chrome 的**裸词**（真机事故:裸「退出」命中输入法「退出联想输入」；裸「entrar」「unir」
+// 也是无关子串隐患）。保留各语种明确的加入/退出/待审动词短语;真正的 chrome 隔离靠下方 IIFE 的作用域排除（顶栏/导航/侧栏）。
 export const JOIN_CTA_LABELS: readonly string[] = [
-  'join', '加入', 'tham gia', 'unir', 'únete', 'unirte', 'participar', 'entrar al grupo', 'entrar no grupo',
-  'gabung', 'bergabung', 'เข้าร่วม', 'rejoindre', 'beitreten', 'iscriviti', 'entrar', 'участник', 'вступить',
-  'присоединиться', '참여', '가입', '参加', 'انضمام', 'انضم', 'كتِل', 'sertai', 'daftar',
+  'join group', 'join', '加入小组', '加入群组', '加入社团', '加入', 'tham gia', 'únete', 'unirte', 'participar',
+  'entrar al grupo', 'entrar no grupo', 'gabung', 'bergabung', 'เข้าร่วม', 'rejoindre', 'beitreten', 'iscriviti',
+  'вступить', 'присоединиться', '참여', '가입', 'انضمام', 'انضم', 'sertai',
 ];
 export const MEMBER_CTA_LABELS: readonly string[] = [
-  'joined', 'leave group', '已加入', '退出小组', '退出', 'đã tham gia', 'rời nhóm', 'miembro', 'unido',
-  'salir del grupo', 'anggota', 'keluar dari grup', 'membre', 'quitter le groupe', 'mitglied', 'gruppe verlassen',
-  'เป็นสมาชิกแล้ว', 'ออกจากกลุ่ม', '참여됨', '가입됨', '已是成员',
+  'joined', 'leave group', '已加入', '退出小组', '退出群组', '退出社团', 'đã tham gia', 'rời nhóm',
+  'salir del grupo', 'keluar dari grup', 'quitter le groupe', 'gruppe verlassen', 'ออกจากกลุ่ม',
+  '已是成员', '你已加入',
 ];
 export const PENDING_CTA_LABELS: readonly string[] = [
   'pending', 'request sent', 'cancel request', '待批准', '已申请', '待审批', 'đang chờ', 'hủy yêu cầu',
@@ -197,7 +199,10 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
   var headerRoot = h1 && h1.closest ? (h1.closest('[role="main"]') || h1.closest('div')) : (document.querySelector('[role="main"]') || null);
   // headerText 兜底：h1/heading 抓不到时回落 [role=main] 区域文本、再回落 document.title——让云端判定角色至少拿到群名 + 按钮文案（含非英中 Join 标签）。
   var headerText = short([text(h1), headerRoot ? text(headerRoot) : ''].filter(Boolean).join(' '), 1400) || short(document.title || '', 300) || null;
-  var nodes = Array.from(document.querySelectorAll('button,a,[role="button"]')).filter(isActionNode);
+  // 只扫群主体区域的动作按钮，排除顶栏/导航/侧栏等页面 chrome（真机事故:顶栏输入法「退出联想输入」被误判成成员 CTA）。
+  var nodes = Array.from(document.querySelectorAll('button,a,[role="button"]')).filter(function(el){
+    return isActionNode(el) && !(el.closest && el.closest('[role="banner"],[role="navigation"],[role="complementary"]'));
+  });
   var main = null;
   var join = null;
   var signals = [];
@@ -207,9 +212,14 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
     var a = short(aria(node), 120);
     var kind = ctaKind(label) || ctaKind(a);
     if (!kind) continue;
-    if (!main) main = { el: node, text: label || null, aria: a || null, kind: kind };
-    if (kind === 'join' && !join) join = node;
-    if (kind === 'member' || kind === 'pending') signals.push(label || a);
+    if (kind === 'join') {
+      // main 优先取「加入」按钮：即便成员/待审按钮在 DOM 里排更前，mainCtaText 也如实反映加入 CTA（供云端判定）。
+      if (!join) join = node;
+      if (!main || main.kind !== 'join') main = { el: node, text: label || null, aria: a || null, kind: 'join' };
+    } else {
+      if (!main) main = { el: node, text: label || null, aria: a || null, kind: kind };
+      signals.push(label || a);
+    }
   }
   var modalLower = String(modalText || '').toLowerCase();
   var headerLower = String(headerText || '').toLowerCase();
@@ -372,12 +382,15 @@ export class FacebookJoinExecutor {
     return { raw: lastRaw, observation: lastObs };
   }
 
-  /** 是否已出现足以判定的信号：明确门槛/阻断态、已是成员、加入按钮已渲染、或任一已分类 CTA。 */
+  /**
+   * 是否已出现足以判定的信号：明确门槛/阻断态（登录/验证码/问卷/待审）、已是成员、或**加入按钮真渲染出来**（带坐标）。
+   * 刻意 NOT 把「有任意 mainCtaText」当决定性——真机事故:页面 loading 阶段一个无关 chrome 按钮被分类后，
+   * 轮询就误以为拿到信号而提前停在空页。只认真正的加入按钮/明确态,其余继续等到页面加载出来或触上限。
+   */
   private isDecisiveObservation(raw: RawJoinObservation, obs: FacebookGroupJoinObservation): boolean {
     if (obs.loginRequired || obs.captchaDetected || obs.questionnaireRequired || obs.pendingRequest) return true;
     if (hasMemberSignal(obs)) return true;
     if (raw.joinButton?.found) return true;
-    if (obs.mainCtaText) return true;
     return false;
   }
 
