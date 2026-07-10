@@ -92,7 +92,7 @@ function makeExecutor(cdp: FakeCdp, overlayMonitor?: OverlayMonitor) {
       sleep: async () => {},
       logger: () => {},
     },
-    { settleMs: 0, waitAfterClickMs: 0, readyTimeoutMs: 2000, pollMs: 500 },
+    { settleMs: 0, waitAfterClickMs: 0, readyTimeoutMs: 2000, pollMs: 500, postClickTimeoutMs: 2000 },
   );
 }
 
@@ -300,4 +300,29 @@ test('fb-join-executor: 杂项 CTA 文本（无真加入按钮/无成员/门槛�
   assert.equal(r.ok, true, '跳过杂项 CTA、等到真加入按钮再点');
   assert.equal(r.clicked, true);
   assert.equal(cdp.clicks.length, 1);
+});
+
+// ── change fb-group-join-postclick-wait：点击后轮询等「已加入」渲染，别死等一次把已成功的加入误判失败（真机:加群成功但飞书回失败）──
+test('fb-join-executor: 点击后按钮延迟翻转（加入小组→稍后已加入）→ 轮询等到成员态判 joined', async () => {
+  const cdp = new FakeCdp([
+    obs(), // pre: 加入按钮
+    obs({ mainCtaText: '加入小组', mainCtaAria: '加入小组', membershipSignals: [], joinButton: { found: true, x: 100, y: 50 } }), // post1: 未翻
+    obs({ mainCtaText: '加入小组', mainCtaAria: '加入小组', membershipSignals: [], joinButton: { found: true, x: 100, y: 50 } }), // post2: 未翻
+    obs({ mainCtaText: '已加入', mainCtaAria: '已加入', membershipSignals: [], joinButton: { found: false } }), // post3: 已加入
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, true, '等到「已加入」渲染再判成功');
+  assert.equal(r.clicked, true);
+  assert.equal(r.postObservation?.mainCtaText, '已加入');
+});
+
+test('fb-join-executor: 点击后按钮始终未翻转 → 超时诚实 join_failed（不假成功）', async () => {
+  const cdp = new FakeCdp([
+    obs(),
+    obs({ mainCtaText: '加入小组', mainCtaAria: '加入小组', membershipSignals: [], joinButton: { found: true, x: 100, y: 50 } }),
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'join_failed');
+  assert.equal(r.clicked, true);
 });

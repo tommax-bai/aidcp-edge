@@ -66,13 +66,16 @@ export interface FacebookJoinExecutorOptions {
   readyTimeoutMs?: number;
   /** 就绪轮询间隔。 */
   pollMs?: number;
+  /** 点击加入后等「已加入/退出小组/待审/问卷」等成员态渲染出来的轮询上限（change fb-group-join-postclick-wait）：FB 常在点击后数秒才把按钮翻成「已加入」，死等 2s 看一次会误判失败。 */
+  postClickTimeoutMs?: number;
 }
 
 const DEFAULTS: Required<FacebookJoinExecutorOptions> = {
   settleMs: 0,
-  waitAfterClickMs: 2_000,
+  waitAfterClickMs: 1_500,
   readyTimeoutMs: 12_000,
   pollMs: 600,
+  postClickTimeoutMs: 10_000,
 };
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -313,19 +316,14 @@ export class FacebookJoinExecutor {
       }
       if (options.thinkMs && options.thinkMs > 0) await this.sleep(options.thinkMs);
       await dispatchClick(this.cdp, button.x, button.y);
-      await this.sleep(this.opts.waitAfterClickMs);
-      const postRaw = await evalJson<RawJoinObservation>(this.cdp, GROUP_JOIN_OBSERVE_JS);
-      const postObservation = publicObservation(postRaw, groupUrl);
-      await this.dismissOptionalModal(postObservation);
-      if (hasMemberSignal(postObservation)) {
-        return { ok: true, groupUrl, clicked: true, observation, postObservation };
-      }
-      if (postObservation.questionnaireRequired) {
-        return { ok: false, reason: 'questionnaire_required', groupUrl, clicked: true, observation, postObservation };
-      }
-      if (postObservation.pendingRequest) {
-        return { ok: false, reason: 'pending', groupUrl, clicked: true, observation, postObservation };
-      }
+      if (this.opts.waitAfterClickMs > 0) await this.sleep(this.opts.waitAfterClickMs);
+      // 点击后轮询（change fb-group-join-postclick-wait）：等成员态真渲染出来再判——FB 常在点击后数秒才把按钮从「加入小组」
+      // 翻成「已加入」，死等一次会把已成功的加入误判成 join_failed。轮询到 已加入/待审/问卷/登录/验证码 或触上限。
+      const post = await this.observePostClickUntilSettled(groupUrl);
+      const postObservation = post.observation;
+      if (post.reason === 'joined') return { ok: true, groupUrl, clicked: true, observation, postObservation };
+      if (post.reason) return { ok: false, reason: post.reason, groupUrl, clicked: true, observation, postObservation };
+      // 触上限仍未见成员态：按钮还停在「加入小组」→ 诚实 join_failed（绝不冒充成功）。
       return { ok: false, reason: 'join_failed', groupUrl, clicked: true, observation, postObservation };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -392,6 +390,38 @@ export class FacebookJoinExecutor {
     if (hasMemberSignal(obs)) return true;
     if (raw.joinButton?.found) return true;
     return false;
+  }
+
+  /**
+   * 点击「加入」后轮询等成员态渲染（change fb-group-join-postclick-wait）：FB 常在点击后数秒才把按钮从「加入小组」
+   * 翻成「已加入」（真机实测:+2s 时仍显示加入小组、documentReady=interactive，加载完后才变已加入）。反复观察直到
+   * 已加入（joined）/ 待审（pending）/ 问卷（questionnaire）/ 登录 / 验证码 出现，或触上限。触上限仍未见成员态 →
+   * 无 reason 返回（调用方判 join_failed，诚实、绝不因"点过了"就冒充成功）。
+   */
+  private async observePostClickUntilSettled(
+    groupUrl: string,
+  ): Promise<{
+    observation: FacebookGroupJoinObservation;
+    reason?: 'joined' | 'pending' | 'questionnaire_required' | 'login_required' | 'blocked_by_captcha';
+  }> {
+    const pollMs = Math.max(50, this.opts.pollMs);
+    const maxPolls = Math.max(1, Math.ceil(this.opts.postClickTimeoutMs / pollMs));
+    const deadline = Date.now() + this.opts.postClickTimeoutMs;
+    let last: FacebookGroupJoinObservation = { groupUrl };
+    for (let i = 0; i < maxPolls; i++) {
+      const raw = await evalJson<RawJoinObservation>(this.cdp, GROUP_JOIN_OBSERVE_JS);
+      const obs = publicObservation(raw, groupUrl);
+      await this.dismissOptionalModal(obs);
+      last = obs;
+      if (obs.loginRequired) return { observation: obs, reason: 'login_required' };
+      if (obs.captchaDetected) return { observation: obs, reason: 'blocked_by_captcha' };
+      if (hasMemberSignal(obs)) return { observation: obs, reason: 'joined' };
+      if (obs.questionnaireRequired) return { observation: obs, reason: 'questionnaire_required' };
+      if (obs.pendingRequest) return { observation: obs, reason: 'pending' };
+      if (Date.now() >= deadline) break;
+      await this.sleep(pollMs);
+    }
+    return { observation: last };
   }
 
   private async collectObservation(
