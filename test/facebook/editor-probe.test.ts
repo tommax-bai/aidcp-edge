@@ -170,6 +170,39 @@ test('facebookGatedSubmitPreflight: target mismatch and clean ready states are e
   });
 });
 
+test('facebookGatedSubmitPreflight: cookie 同意浮层清不掉 → blocked_by_consent（不进 classify）', async () => {
+  const cdp = new EditorProbeFakeCdp();
+  let classifyCalled = false;
+  const result = await facebookGatedSubmitPreflight(cdp, {
+    enabled: true,
+    disposableAccountConfirmed: true,
+    targetUrl: 'https://www.facebook.com/Meta/posts/1',
+    currentUrl: 'https://www.facebook.com/Meta/posts/1',
+    acceptConsent: async () => ({ handled: true, cleared: false, attempts: 3, reason: 'blocked_by_consent' as const }),
+    classifyOverlay: async () => {
+      classifyCalled = true;
+      return 'none';
+    },
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, 'blocked_by_consent');
+  assert.equal(classifyCalled, false); // 清不掉即止，不再往后判分类
+});
+
+test('facebookGatedSubmitPreflight: cookie 同意浮层清掉后照常放行', async () => {
+  const cdp = new EditorProbeFakeCdp();
+  const targetUrl = 'https://www.facebook.com/Meta/posts/1';
+  const ready = await facebookGatedSubmitPreflight(cdp, {
+    enabled: true,
+    disposableAccountConfirmed: true,
+    targetUrl,
+    currentUrl: targetUrl,
+    acceptConsent: async () => ({ handled: true, cleared: true, attempts: 1 }),
+    classifyOverlay: async () => 'none',
+  });
+  assert.deepEqual(ready, { ok: true, targetUrl, currentUrl: targetUrl, overlay: 'none' });
+});
+
 test('runFacebookGatedSubmitProbe: refuses actual submit without comment text', async () => {
   const cdp = new EditorProbeFakeCdp();
   const result = await runFacebookGatedSubmitProbe(cdp, {

@@ -2,6 +2,7 @@ import { dispatchClick, evalJson, pressEscape, type BrowseCdp } from '../browse/
 import type { OverlayKind, OverlayMonitor } from '../browse/overlay-monitor.js';
 import { isUrlAllowedByTargetDescriptor } from '../platform/driver.js';
 import { FACEBOOK_TARGET } from './driver.js';
+import { defaultFacebookConsentAccepter, type FacebookConsentAccepter } from './consent.js';
 
 export type FacebookJoinReason =
   | 'observation_only'
@@ -11,6 +12,7 @@ export type FacebookJoinReason =
   | 'no_button'
   | 'not_facebook'
   | 'login_required'
+  | 'blocked_by_consent'
   | 'blocked_by_captcha'
   | 'nav_error'
   | 'join_failed';
@@ -47,6 +49,8 @@ export interface FacebookJoinResult {
 export interface FacebookJoinExecutorDeps {
   cdp: BrowseCdp;
   overlayMonitor?: OverlayMonitor;
+  /** cookie 同意浮层自动接受器（缺省用 env 策略）；导航后、阻断判定前置调用。 */
+  acceptConsent?: FacebookConsentAccepter;
   sleep?: (ms: number) => Promise<void>;
   logger?: (msg: string) => void;
 }
@@ -235,6 +239,7 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
 export class FacebookJoinExecutor {
   private readonly cdp: BrowseCdp;
   private readonly overlayMonitor?: OverlayMonitor;
+  private readonly acceptConsent: FacebookConsentAccepter;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: (msg: string) => void;
   private readonly opts: Required<FacebookJoinExecutorOptions>;
@@ -242,6 +247,7 @@ export class FacebookJoinExecutor {
   constructor(deps: FacebookJoinExecutorDeps, options: FacebookJoinExecutorOptions = {}) {
     this.cdp = deps.cdp;
     this.overlayMonitor = deps.overlayMonitor;
+    this.acceptConsent = deps.acceptConsent ?? defaultFacebookConsentAccepter();
     this.sleep = deps.sleep ?? defaultSleep;
     this.log = deps.logger ?? (() => {});
     this.opts = { ...DEFAULTS, ...options };
@@ -256,6 +262,12 @@ export class FacebookJoinExecutor {
     try {
       await this.cdp.send('Page.navigate', { url: groupUrl });
       await this.sleep(this.opts.settleMs);
+      // 先清 cookie 同意浮层（良性合规横幅）：清不掉则诚实 blocked_by_consent，绝不带浮层继续。
+      const consent = await this.acceptConsent(this.cdp);
+      if (consent.handled && !consent.cleared) {
+        observation = await this.collectObservation(groupUrl, {});
+        return { ok: false, reason: 'blocked_by_consent', groupUrl, clicked: false, observation };
+      }
       const block = await this.blockingReason();
       if (block) {
         observation = await this.collectObservation(groupUrl, { [block === 'login_required' ? 'loginRequired' : 'captchaDetected']: true });

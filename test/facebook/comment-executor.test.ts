@@ -146,12 +146,24 @@ function overlay(kind: OverlayKind): OverlayMonitor {
   };
 }
 
-function makeExecutor(cdp: FakeCdp, over: { accountId?: string; overlayMonitor?: OverlayMonitor } = {}) {
+// 默认注入「无同意条」no-op：隔离 comment 逻辑测试，不让真 detector 多消费一次序列型 eval。
+// cookie 同意浮层真实行为由 consent.test.ts 覆盖，wiring 由本文件专门的 consent 用例覆盖。
+const NO_CONSENT = async () => ({ handled: false, cleared: false, attempts: 0 });
+
+function makeExecutor(
+  cdp: FakeCdp,
+  over: {
+    accountId?: string;
+    overlayMonitor?: OverlayMonitor;
+    acceptConsent?: (cdp: BrowseCdp) => Promise<{ handled: boolean; cleared: boolean; attempts: number }>;
+  } = {},
+) {
   return new FacebookCommentExecutor(
     {
       cdp,
       getAccountId: () => (over.accountId === undefined ? '100000123456789' : over.accountId),
       ...(over.overlayMonitor ? { overlayMonitor: over.overlayMonitor } : {}),
+      acceptConsent: over.acceptConsent ?? NO_CONSENT,
       sleep: async () => {},
       logger: () => {},
     },
@@ -192,6 +204,17 @@ test('fb-executor: 登录失效浮层 → login_required（不返回候选）', 
   const r = await ex.searchInContainer('咖啡', 'https://www.facebook.com/groups/1');
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'login_required');
+});
+
+test('fb-executor: cookie 同意浮层清不掉 → blocked_by_consent（先于阻断判定）', async () => {
+  const cdp = new FakeCdp({ structureFor: () => struct({ postCandidates: [post('https://www.facebook.com/groups/1/posts/2/')] }) });
+  const ex = makeExecutor(cdp, {
+    overlayMonitor: overlay('none'),
+    acceptConsent: async () => ({ handled: true, cleared: false, attempts: 3 }),
+  });
+  const r = await ex.searchInContainer('咖啡', 'https://www.facebook.com/groups/1');
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'blocked_by_consent');
 });
 
 test('fb-executor: 非成员（可见 Join）→ permission_gated', async () => {
@@ -288,7 +311,7 @@ test('fb-executor: 评论框始终催不出 → ok:true 但 editorReady:false', 
 test('fb-executor: 本人 id 未知 → identity_unknown，绝不提交（不点击）', async () => {
   const cdp = new FakeCdp();
   const ex = new FacebookCommentExecutor(
-    { cdp, getAccountId: () => undefined, sleep: async () => {}, logger: () => {} },
+    { cdp, getAccountId: () => undefined, acceptConsent: NO_CONSENT, sleep: async () => {}, logger: () => {} },
     { settleMs: 0, waitAfterSubmitMs: 0, waitAfterReloadMs: 0 },
   );
   const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');

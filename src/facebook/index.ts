@@ -1,6 +1,7 @@
 export * from './driver.js';
 export * from './identity.js';
 export * from './overlay.js';
+export * from './consent.js';
 export * from './comment-executor.js';
 export * from './comment-handler.js';
 export * from './join-executor.js';

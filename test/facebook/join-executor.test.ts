@@ -79,11 +79,16 @@ function overlay(kind: OverlayKind): OverlayMonitor {
   };
 }
 
+// 默认注入「无同意条」no-op：隔离 join 逻辑测试，不让真 detector 多消费一次序列型 eval。
+// cookie 同意浮层的真实行为由 consent.test.ts 覆盖，wiring 由本文件专门的 consent 用例覆盖。
+const NO_CONSENT = async () => ({ handled: false, cleared: false, attempts: 0 });
+
 function makeExecutor(cdp: FakeCdp, overlayMonitor?: OverlayMonitor) {
   return new FacebookJoinExecutor(
     {
       cdp,
       ...(overlayMonitor ? { overlayMonitor } : {}),
+      acceptConsent: NO_CONSENT,
       sleep: async () => {},
       logger: () => {},
     },
@@ -204,4 +209,39 @@ test('classifyCtaLabel: 空 / 无关标签 → 空（保持 fail-closed，不误
   assert.equal(classifyCtaLabel('Share'), '');
   assert.equal(classifyCtaLabel('Invite'), '');
   assert.equal(classifyCtaLabel('分享'), '');
+});
+
+test('fb-join-executor: 同意浮层清不掉 → blocked_by_consent，不点击 Join', async () => {
+  const cdp = new FakeCdp([obs()]);
+  const ex = new FacebookJoinExecutor(
+    {
+      cdp,
+      acceptConsent: async () => ({ handled: true, cleared: false, attempts: 3, reason: 'blocked_by_consent' as const }),
+      sleep: async () => {},
+      logger: () => {},
+    },
+    { settleMs: 0, waitAfterClickMs: 0 },
+  );
+  const r = await ex.joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'blocked_by_consent');
+  assert.equal(r.clicked, false);
+  assert.equal(cdp.clicks.length, 0);
+});
+
+test('fb-join-executor: 同意浮层清掉后继续正常入组判定', async () => {
+  // consent 清除后，join 逻辑照常：observe-only 返回结构化 observation。
+  const cdp = new FakeCdp([obs()]);
+  const ex = new FacebookJoinExecutor(
+    {
+      cdp,
+      acceptConsent: async () => ({ handled: true, cleared: true, attempts: 1 }),
+      sleep: async () => {},
+      logger: () => {},
+    },
+    { settleMs: 0, waitAfterClickMs: 0 },
+  );
+  const r = await ex.joinGroup('https://www.facebook.com/groups/123');
+  assert.equal(r.reason, 'observation_only');
+  assert.equal(r.observation?.mainCtaText, 'Join group');
 });

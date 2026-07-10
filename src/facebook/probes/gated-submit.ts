@@ -8,6 +8,7 @@ import {
 } from '../../browse/cdp-util.js';
 import type { OverlayKind } from '../../browse/overlay-monitor.js';
 import { classifyFacebookOverlay } from '../overlay.js';
+import { defaultFacebookConsentAccepter, type FacebookConsentAccepter } from '../consent.js';
 
 export type FacebookGatedSubmitPreflightReason =
   | 'disabled'
@@ -16,6 +17,7 @@ export type FacebookGatedSubmitPreflightReason =
   | 'target_not_facebook'
   | 'current_not_facebook'
   | 'target_mismatch'
+  | 'blocked_by_consent'
   | 'blocked_by_login'
   | 'blocked_by_captcha'
   | 'blocked_by_unknown';
@@ -26,6 +28,11 @@ export interface FacebookGatedSubmitPreflightOptions {
   targetUrl?: string;
   currentUrl?: string;
   classifyOverlay?: (cdp: BrowseCdp) => Promise<OverlayKind>;
+  /**
+   * cookie 同意浮层自动接受器（缺省用 env 策略）。在 overlay 分类前置调用：
+   * 同意条是良性合规横幅、先拟人接受清掉，clear 后原动作照常放行；清不掉则诚实 blocked_by_consent。
+   */
+  acceptConsent?: FacebookConsentAccepter;
 }
 
 export type FacebookGatedSubmitPreflightResult =
@@ -260,6 +267,13 @@ export async function facebookGatedSubmitPreflight(
   if (!isFacebookUrl(currentUrl)) return { ok: false, reason: 'current_not_facebook', targetUrl: options.targetUrl, currentUrl };
   if (normalizeTarget(currentUrl) !== normalizeTarget(options.targetUrl)) {
     return { ok: false, reason: 'target_mismatch', targetUrl: options.targetUrl, currentUrl };
+  }
+
+  // 先清 cookie 同意浮层（良性合规横幅）：clear 后原动作照常；清不掉则诚实 blocked_by_consent，绝不假成功。
+  const acceptConsent = options.acceptConsent ?? defaultFacebookConsentAccepter();
+  const consent = await acceptConsent(cdp);
+  if (consent.handled && !consent.cleared) {
+    return { ok: false, reason: 'blocked_by_consent', targetUrl: options.targetUrl, currentUrl };
   }
 
   const classify = options.classifyOverlay ?? classifyFacebookOverlay;

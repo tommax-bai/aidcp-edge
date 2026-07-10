@@ -22,6 +22,7 @@ import {
 } from '../browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../browse/overlay-monitor.js';
 import { FACEBOOK_TARGET } from './driver.js';
+import { defaultFacebookConsentAccepter, type FacebookConsentAccepter } from './consent.js';
 import { FACEBOOK_NUMERIC_ID_RE } from './identity.js';
 import {
   classifyFacebookSurface,
@@ -34,6 +35,7 @@ import { isUrlAllowedByTargetDescriptor } from '../platform/driver.js';
 export type FacebookCommentStepReason =
   | 'permission_gated' // 容器非法 / 非成员 / 待批准 / 群问答门槛
   | 'login_required' // 登录失效 / checkpoint / 账号恢复
+  | 'blocked_by_consent' // cookie 同意浮层清不掉（认出但接受失败）
   | 'blocked_by_captcha' // 人机验证 / 未知阻断浮层
   | 'no_candidates' // 容器内搜索无可评论候选
   | 'not_facebook' // 链接非 Facebook（防御性）
@@ -98,6 +100,8 @@ export interface FacebookCommentExecutorDeps {
   getAccountId: () => string | undefined;
   /** 旁路弹窗监测体；每步操作前 fresh 复检登录/验证码。缺省则退化为不阻断（仅结构探测把关）。 */
   overlayMonitor?: OverlayMonitor;
+  /** cookie 同意浮层自动接受器（缺省用 env 策略）；每步阻断复检前置调用。 */
+  acceptConsent?: FacebookConsentAccepter;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
   logger?: (msg: string) => void;
@@ -141,6 +145,7 @@ export class FacebookCommentExecutor {
   private readonly cdp: BrowseCdp;
   private readonly getAccountId: () => string | undefined;
   private readonly overlayMonitor?: OverlayMonitor;
+  private readonly acceptConsent: FacebookConsentAccepter;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: (msg: string) => void;
   private readonly opts: Required<FacebookCommentExecutorOptions>;
@@ -149,6 +154,7 @@ export class FacebookCommentExecutor {
     this.cdp = deps.cdp;
     this.getAccountId = deps.getAccountId;
     this.overlayMonitor = deps.overlayMonitor;
+    this.acceptConsent = deps.acceptConsent ?? defaultFacebookConsentAccepter();
     this.sleep = deps.sleep ?? defaultSleep;
     this.log = deps.logger ?? (() => {});
     this.opts = { ...DEFAULTS, ...options };
@@ -157,8 +163,18 @@ export class FacebookCommentExecutor {
   /**
    * fresh 复检旁路弹窗；命中登录/验证码/未知 → 返回诚实原因，否则 undefined。
    * 探测本身抛错 → 保守当验证码（fail-closed，绝不带阻断继续操作）。
+   *
+   * 先清 cookie 同意浮层（良性合规横幅，先于阻断判定）：clear 后照常复检；
+   * 认出但清不掉 → 诚实 blocked_by_consent，绝不带浮层继续。
    */
   private async blockingReason(): Promise<FacebookCommentStepReason | undefined> {
+    try {
+      const consent = await this.acceptConsent(this.cdp);
+      if (consent.handled && !consent.cleared) return 'blocked_by_consent';
+    } catch (err) {
+      // 接受器自身异常不吞成阻断，也不假成功——记日志后继续走原阻断复检。
+      this.log(`[fb-comment] consent accept error: ${(err as Error).message}`);
+    }
     const monitor = this.overlayMonitor;
     if (!monitor) return undefined;
     let kind: OverlayKind;
