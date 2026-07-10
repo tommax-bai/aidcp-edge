@@ -43,6 +43,7 @@ interface Stub {
   saveSettings: (patch: unknown) => Promise<unknown>;
   pause: () => Promise<unknown>;
   resume: () => Promise<unknown>;
+  close: () => Promise<unknown>;
   start: () => Promise<unknown>;
   restart: () => Promise<unknown>;
   relogin: () => Promise<unknown>;
@@ -66,6 +67,7 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     saveSettings: async () => ({ ...settings, saveOk: true }),
     pause: async () => makeStatus({ session: 'paused' }),
     resume: async () => makeStatus({ session: 'running', edge: 'running' }),
+    close: async () => makeStatus({ session: 'closed', edge: 'stopped', cloud: 'disconnected' }),
     start: async () => makeStatus({ edge: 'starting', session: 'running' }),
     restart: async () => makeStatus({ edge: 'starting', session: 'running' }),
     relogin: async () => makeStatus(),
@@ -264,15 +266,34 @@ test('窗口停放：无可控浏览器时显示浏览器诚实失败', async ()
   assert.match($(w, '#settings-msg').textContent ?? '', /引擎未运行或浏览器尚未就绪，请先启动引擎再操作/);
 });
 
-test('悬浮 fab 三态：停止→启动 / 运行与休息→暂停 / 暂停→恢复', async () => {
+test('悬浮生命周期控制：关闭/停止→启动，运行→暂停，暂停→关闭+恢复', async () => {
   const stopped = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'stopped' }) }));
   assert.equal($(stopped, '#session-fab').textContent, '启动');
+  const closed = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'stopped', session: 'closed' }) }));
+  assert.equal($(closed, '#session-fab').textContent, '启动');
+  assert.ok($(closed, '#session-close').classList.contains('hidden'));
   const running = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'running', session: 'running' }) }));
   assert.equal($(running, '#session-fab').textContent, '暂停');
   const resting = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'running', session: 'resting' }) }));
   assert.equal($(resting, '#session-fab').textContent, '暂停');
   const paused = await boot(makeStub({ getStatus: async () => makeStatus({ session: 'paused' }) }));
   assert.equal($(paused, '#session-fab').textContent, '恢复');
+  assert.equal($(paused, '#session-close').textContent, '关闭');
+  assert.ok(!$(paused, '#session-close').classList.contains('hidden'));
+});
+
+test('暂停态点击关闭：调用显式 close 并切到已关闭/启动', async () => {
+  let closes = 0;
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ session: 'paused', edge: 'stopped' }),
+    close: async () => { closes++; return makeStatus({ session: 'closed', edge: 'stopped', cloud: 'disconnected' }); },
+  }));
+  $(w, '#session-close').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.equal(closes, 1);
+  assert.equal($(w, '#session-fab').textContent, '启动');
+  assert.ok($(w, '#session-close').classList.contains('hidden'));
 });
 
 test('程序化建号：填充模板下拉、点「创建环境」→ 传选中模板、成功提示 + 刷新', async () => {

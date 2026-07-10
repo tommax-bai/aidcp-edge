@@ -302,6 +302,8 @@ function makeEnvHandle({ envId, kind, profileId, name, platform, cascadeIndex })
     browserParkingReady: false,
     restartPending: false,
     pausePending: false,
+    coreParked: false,
+    closePending: false,
     removed: false,
     // 排队启动期间被暂停/移出/退出的取消闸：queued start（尚无子进程、SIGTERM 无处可发）据此在
     // startEdge 处诚实放弃拉起，杜绝「暂停/退出被排队启动覆盖」与孤儿子进程。
@@ -874,6 +876,30 @@ function scheduleRespawnIfNeeded(handle, decision) {
   if (handle.respawnTimer && typeof handle.respawnTimer.unref === 'function') handle.respawnTimer.unref();
 }
 
+/**
+ * 把窄生命周期意图送到该环境自己的 core。pause 交付失败绝不回落 SIGTERM——SIGTERM 是最终关闭，
+ * 若拿它伪装暂停会再次关掉浏览器。异步 send 失败也按目标 handle 原位回报，不串环境。
+ */
+function sendCoreLifecycle(handle, command, onError) {
+  const child = handle && handle.child;
+  const fail = (error) => {
+    if (typeof onError === 'function') onError(error instanceof Error ? error : new Error(String(error)));
+  };
+  if (!child || typeof child.send !== 'function' || child.connected === false) {
+    fail(new Error('核心进程 IPC 不可用'));
+    return false;
+  }
+  try {
+    child.send({ type: `lifecycle.${command}` }, (error) => {
+      if (error && handle.child === child) fail(error);
+    });
+    return true;
+  } catch (error) {
+    fail(error);
+    return false;
+  }
+}
+
 /** spawn 一个环境的核心子进程（非 detached，随外壳退出终止）。身份闸在此强制执行。 */
 function startEdge(handle) {
   // 取消闸（红线）：排队等待期间被退出 / 移出 / 暂停的启动到点也绝不拉起子进程——
@@ -924,6 +950,8 @@ function startEdge(handle) {
 
   handle.browserParkingReady = false;
   handle.browserAlreadyRunning = false;
+  handle.coreParked = false;
+  handle.closePending = false;
   handle.spawnedAtMs = Date.now();
   // 换会话重置已绑人设信号（change persona-badge-preconnect-neutral）：云端只在为真时下发 personaBound、从不发 false，
   // 若上一会话该环境曾已绑、随后被解绑再重启，stale-true 会残留成误显示「已设置」——每次启动清零、待新会话权威信号重建。
@@ -931,7 +959,8 @@ function startEdge(handle) {
   const child = spawn(process.execPath, [edgeEntry], {
     cwd: appRoot,
     env: spawnEnv,
-    stdio: ['pipe', 'pipe', 'pipe'],
+    // 第四路 IPC 专用于本地生命周期意图；persona/browser parking 既有 stdin 协议保持不变。
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     windowsHide: true,
   });
   handle.child = child;
@@ -951,6 +980,37 @@ function startEdge(handle) {
 
   child.stdout.on('data', (chunk) => handleEdgeOutput(handle, chunk.toString()));
   child.stderr.on('data', (chunk) => handleEdgeOutput(handle, chunk.toString(), true));
+  child.on('message', (message) => {
+    if (handle.child !== child || !message || typeof message !== 'object') return;
+    if (message.type === 'lifecycle.paused') {
+      handle.pausePending = false;
+      handle.coreParked = true;
+      updateStatus(handle, {
+        edge: 'stopped',
+        cloud: 'disconnected',
+        session: 'paused',
+        overlayBlocked: false,
+        lastMessage: '已暂停自动运营，浏览器保持打开。',
+        ...presencePatch('已暂停，浏览器保持打开'),
+        ...clearEdgeFailurePatch(handle),
+      });
+      return;
+    }
+    if (message.type === 'lifecycle.close_failed') {
+      handle.closePending = false;
+      handle.pausePending = false;
+      handle.coreParked = true;
+      handle.stopRequested = true;
+      updateStatus(handle, {
+        edge: 'stopped',
+        cloud: 'disconnected',
+        session: 'paused',
+        lastMessage: '浏览器关闭状态未能确认，仍按暂停处理；可重试关闭。',
+        ...edgeFailurePatch('浏览器关闭状态未能确认'),
+        ...presencePatch('关闭未确认，仍保持暂停'),
+      });
+    }
+  });
   // spawn 失败（EAGAIN 多环境 fork 压力 / ENOENT 产物缺失）：'error' 事件无监听会被 EventEmitter
   // 重抛为未捕获异常 → 整个监督者进程崩、连累全部兄弟环境（破坏崩溃隔离）；即便 Electron 幸存，
   // 'error' 后不发 'exit'，handle.child 永远钉住 → 该环境卡死在 starting、重起/放弃永不触发（静默假成功）。
@@ -995,11 +1055,17 @@ function startEdge(handle) {
   });
   child.on('exit', (code, signal) => {
     if (handle.child !== child) return; // 已被 'error' 处理器接管
+    const wasClosing = handle.closePending;
+    const wasParked = handle.coreParked;
+    const wasPausing = handle.pausePending;
+    const wasRestarting = handle.restartPending;
     handle.child = undefined;
     handle.browserParkingReady = false;
-    // 主动重启（保存设置后按新 provider 起）、暂停、移出花名册、退出应用都是「有意停止」，不算异常。
-    const intentional = isQuitting || handle.restartPending || handle.pausePending || handle.removed;
+    // 主动重启、暂停驻留、显式关闭、移出花名册、退出应用都是「有意停止」，不算异常。
+    const intentional = isQuitting || wasRestarting || wasPausing || wasParked || wasClosing || handle.removed;
     handle.pausePending = false;
+    handle.coreParked = false;
+    handle.closePending = false;
     const exitedAbnormally = !intentional && (signal != null || (code != null && code !== 0));
     const message = exitMessage(code, signal);
     if (handle.removed) return; // 已摘除的环境不再投影状态
@@ -1020,7 +1086,11 @@ function startEdge(handle) {
     updateStatus(handle, {
       edge: exitedAbnormally ? 'warning' : 'stopped',
       cloud: 'disconnected',
-      session: handle.status.session === 'paused' ? 'paused' : 'idle',
+      session: wasClosing
+        ? 'closed'
+        : wasRestarting
+          ? 'running'
+          : (handle.status.session === 'paused' || wasPausing || wasParked ? 'paused' : 'idle'),
       // 核心已退出 = 无在跑会话：把本地日志派生的 risk 徽标复位 normal（该徽标是日志关键词启发、非权威，
       // 真风控由云端单写），杜绝上一会话残留的「⚠」把徽标跨会话卡在「警戒」。
       risk: 'normal',
@@ -1028,17 +1098,23 @@ function startEdge(handle) {
       ...(handle.kind === 'adspower' ? { auth: 'checking' } : {}),
       overlayBlocked: false,
       respawnGaveUp: gaveUp,
-      lastMessage: gaveUp
+      lastMessage: wasClosing
+        ? '浏览器已关闭。'
+        : gaveUp
         ? `${message} 连续失败已达上限（${RESPAWN_OPTS.maxConsecutiveFailures} 次），已放弃自动重启，请人工排查后点「启动」重试。`
         : willRespawn
           ? `${message} 将在 ${Math.round((decision.delayMs || 0) / 1000)}s 后自动重启（第 ${decision.streak}/${RESPAWN_OPTS.maxConsecutiveFailures} 次）。`
           : message,
       ...presencePatch(
-        gaveUp
+        wasClosing
+          ? '已关闭浏览器'
+          : wasRestarting
+            ? '正在重启引擎…'
+            : gaveUp
           ? '错误 · 已放弃自动重启'
           : willRespawn
             ? '异常退出，稍后自动重启'
-            : handle.status.session === 'paused'
+            : (handle.status.session === 'paused' || wasPausing || wasParked)
               ? '已暂停，随时可以恢复'
               : '引擎已停止',
       ),
@@ -1402,22 +1478,123 @@ function handleEdgeLogLine(handle, message, isError = false) {
 
 function pauseEdge(handle) {
   if (!handle) return;
+  if (handle.coreParked || handle.pausePending) return;
   // 暂停取消任何在途重启/重起，并置取消闸：排队等待中的启动（尚无子进程、SIGTERM 无处可发）到点
   // 也不再拉起，杜绝「暂停被排队启动静默覆盖回运行」。
   handle.restartPending = false;
   handle.stopRequested = true;
   stopLoginPoller(); // self 路径的 5s 登录轮询若在跑，暂停期间应停（否则空转、每 tick 被取消闸挡下）
   clearRespawnTimer(handle);
-  updateStatus(handle, { session: 'paused', overlayBlocked: false, lastMessage: '已请求暂停，后台边缘进程将在安全点停止。', ...presencePatch('已暂停，随时可以恢复'), ...clearEdgeFailurePatch(handle) });
   if (handle.child) {
-    // 暂停是「有意停止」：标记之，使其 SIGTERM 触发的退出不被误判为异常（尤其核心启动窗口内 handler 未装时）。
+    const child = handle.child;
+    const previousSession = handle.status.session;
     handle.pausePending = true;
-    void queueLifecycle(() => { try { handle.child?.kill('SIGTERM'); } catch { /* ignore */ } });
+    updateStatus(handle, {
+      session: 'paused',
+      overlayBlocked: false,
+      lastMessage: '正在暂停自动运营，浏览器将保持打开…',
+      ...presencePatch('正在暂停，浏览器将保持打开'),
+      ...clearEdgeFailurePatch(handle),
+    });
+    sendCoreLifecycle(handle, 'pause', (error) => {
+      if (handle.child !== child) return;
+      handle.pausePending = false;
+      handle.stopRequested = false;
+      updateStatus(handle, {
+        edge: 'warning',
+        session: previousSession === 'paused' ? 'running' : previousSession,
+        lastMessage: `暂停失败：${error.message}。自动运营可能仍在运行，浏览器未被关闭。`,
+        ...edgeFailurePatch(`暂停失败：${error.message}`),
+        ...presencePatch('暂停请求未送达，请重试'),
+      });
+    });
+    return;
   }
+  // 无核心（如重起退避窗口）只暂停后续拉起；此时没有可被误关的 owned browser 句柄。
+  updateStatus(handle, {
+    edge: 'stopped',
+    session: 'paused',
+    overlayBlocked: false,
+    lastMessage: '已暂停自动启动；当前没有运行中的边缘进程。',
+    ...presencePatch('已暂停，随时可以恢复'),
+    ...clearEdgeFailurePatch(handle),
+  });
 }
 
 function resumeEdge(handle) {
+  if (!handle) return;
+  handle.stopRequested = false;
+  clearRespawnTimer(handle);
+  if (handle.child && (handle.coreParked || handle.pausePending || handle.status.session === 'paused')) {
+    const child = handle.child;
+    handle.restartPending = true;
+    updateStatus(handle, {
+      edge: 'starting',
+      cloud: 'disconnected',
+      session: 'running',
+      lastMessage: '正在复用已打开的浏览器恢复自动运营…',
+      ...presencePatch('正在恢复引擎…'),
+      ...clearEdgeFailurePatch(handle),
+    });
+    sendCoreLifecycle(handle, 'resume', (error) => {
+      if (handle.child !== child) return;
+      handle.restartPending = false;
+      handle.pausePending = false;
+      handle.coreParked = true;
+      handle.stopRequested = true;
+      updateStatus(handle, {
+        edge: 'stopped',
+        session: 'paused',
+        lastMessage: `恢复失败：${error.message}。浏览器仍保持打开。`,
+        ...edgeFailurePatch(`恢复失败：${error.message}`),
+        ...presencePatch('恢复请求未送达，仍保持暂停'),
+      });
+    });
+    return;
+  }
   stopAndRestart(handle, '已请求恢复，正在按当前浏览器设置重启边缘进程。');
+}
+
+function closeEdge(handle) {
+  if (!handle || handle.closePending || handle.status.session === 'closed') return;
+  handle.restartPending = false;
+  handle.stopRequested = true;
+  stopLoginPoller();
+  clearRespawnTimer(handle);
+  if (!handle.child) {
+    handle.coreParked = false;
+    updateStatus(handle, {
+      edge: 'stopped',
+      cloud: 'disconnected',
+      session: 'closed',
+      overlayBlocked: false,
+      lastMessage: '浏览器已关闭。',
+      ...presencePatch('已关闭浏览器'),
+      ...clearEdgeFailurePatch(handle),
+    });
+    return;
+  }
+
+  const child = handle.child;
+  const previousSession = handle.status.session;
+  handle.closePending = true;
+  updateStatus(handle, {
+    lastMessage: '正在关闭浏览器并确认回收…',
+    ...presencePatch('正在关闭浏览器…'),
+    ...clearEdgeFailurePatch(handle),
+  });
+  sendCoreLifecycle(handle, 'close', (error) => {
+    if (handle.child !== child) return;
+    handle.closePending = false;
+    handle.stopRequested = previousSession === 'paused';
+    updateStatus(handle, {
+      edge: handle.coreParked ? 'stopped' : 'warning',
+      session: previousSession,
+      lastMessage: `关闭失败：${error.message}。浏览器关闭状态未确认。`,
+      ...edgeFailurePatch(`关闭失败：${error.message}`),
+      ...presencePatch(previousSession === 'paused' ? '关闭失败，仍保持暂停' : '关闭请求未送达'),
+    });
+  });
 }
 
 function relogin(handle) {
@@ -1430,8 +1607,9 @@ function relogin(handle) {
  * 对全部未在跑环境错峰入队。返回 { ok, queued } 或 { ok:false, reason:'ram', ... }。
  */
 function startAllEnvs({ force = false } = {}) {
+  const paused = [...envs.values()].filter((h) => h.child && h.status.session === 'paused' && !h.removed);
   const targets = [...envs.values()].filter((h) => !h.child && !h.removed);
-  if (targets.length === 0) return { ok: true, queued: 0 };
+  if (targets.length === 0 && paused.length === 0) return { ok: true, queued: 0 };
   const admission = fleet.ramAdmission({ plannedCount: targets.length, freeBytes: os.freemem() });
   if (!admission.ok && !force) {
     return {
@@ -1442,14 +1620,16 @@ function startAllEnvs({ force = false } = {}) {
       plannedCount: targets.length,
     };
   }
+  paused.forEach((h) => resumeEdge(h));
   targets.forEach((h, i) => queueStartEnv(h, i + 1));
-  return { ok: true, queued: targets.length, envIds: targets.map((h) => h.envId) };
+  const all = [...paused, ...targets];
+  return { ok: true, queued: all.length, envIds: all.map((h) => h.envId) };
 }
 
 /** 「全部停止」（不退出应用）：全部在跑环境按暂停语义错峰停止；处于重起退避窗口（无子进程）的环境
  * 也置暂停 + 清重起定时器，杜绝「全部停止后某个崩溃环境几秒后自行复活」的静默矛盾。 */
 function stopAllEnvs() {
-  const running = [...envs.values()].filter((h) => h.child);
+  const running = [...envs.values()].filter((h) => h.child && h.status.session !== 'paused' && !h.pausePending);
   const backoff = [...envs.values()].filter((h) => !h.child && h.respawnTimer && !h.removed);
   for (const h of running) pauseEdge(h);
   for (const h of backoff) pauseEdge(h); // clearRespawnTimer + stopRequested 在 pauseEdge 内
@@ -1521,6 +1701,11 @@ ipcMain.handle('edge:pause', (_event, envId) => {
 ipcMain.handle('edge:resume', (_event, envId) => {
   const handle = resolveHandle(envId);
   resumeEdge(handle);
+  return statusOf(handle);
+});
+ipcMain.handle('edge:close', (_event, envId) => {
+  const handle = resolveHandle(envId);
+  closeEdge(handle);
   return statusOf(handle);
 });
 ipcMain.handle('auth:relogin', (_event, envId) => {

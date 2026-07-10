@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   getStatus: (envId) => ipcRenderer.invoke('status:get', envId),
   pause: (envId) => ipcRenderer.invoke('edge:pause', envId),
   resume: (envId) => ipcRenderer.invoke('edge:resume', envId),
+  close: (envId) => ipcRenderer.invoke('edge:close', envId),
   start: (envId) => ipcRenderer.invoke('edge:start', envId),
   restart: (envId) => ipcRenderer.invoke('edge:restart', envId),
   relogin: (envId) => ipcRenderer.invoke('auth:relogin', envId),

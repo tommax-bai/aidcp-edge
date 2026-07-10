@@ -47,6 +47,11 @@ import { selectPlatformDriver } from './platform/index.js';
 import { FacebookCommentExecutor, FacebookCommentHandler, FacebookJoinExecutor } from './facebook/index.js';
 import { EdgeClient } from './client/edge-client.js';
 import { registerPersonaStdinCommands } from './client/persona-onboarding.js';
+import {
+  CoreLifecycleController,
+  parseCoreLifecycleCommand,
+  type CoreLifecycleCommand,
+} from './client/core-lifecycle.js';
 import { deriveEdgeId } from './client/edge-id.js';
 import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
@@ -85,6 +90,17 @@ function verifiedAccountNickname(idRes: SelfIdentityResult, decision: IdentityDe
 }
 
 async function main(): Promise<void> {
+  // Electron 子进程 IPC 可能在浏览器/身份初始化完成前抵达；先窄解析并排队，待生命周期资源
+  // 全部就绪后按原顺序交付。绝不把未知 IPC 当生命周期命令。
+  const pendingLifecycleCommands: CoreLifecycleCommand[] = [];
+  let dispatchLifecycleCommand: ((command: CoreLifecycleCommand) => void) | undefined;
+  process.on('message', (message: unknown) => {
+    const command = parseCoreLifecycleCommand(message);
+    if (!command) return;
+    if (dispatchLifecycleCommand) dispatchLifecycleCommand(command);
+    else pendingLifecycleCommands.push(command);
+  });
+
   const cloudUrl = process.env.AIDCP_CLOUD_URL ?? 'ws://121.89.85.150:8787';
   const platformDriver = selectPlatformDriver({ env: process.env });
   console.log(
@@ -707,31 +723,28 @@ async function main(): Promise<void> {
 
   // —— 退出 / 回收统一路径（节点终态诚实下线 + 看护可重起；真关机干净退出）——
   let recycleRequested = false;
-  let shuttingDown = false;
-  const shutdown = async (opts: { exitCode: number; recycle: boolean; reason: string }): Promise<void> => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    // 已请求回收则即便随后信号撞入也以回收码退出（真终态不被掩成 clean exit，MAJOR⑤）。
-    const exitCode = recycleRequested ? EXIT_RECYCLE : opts.exitCode;
-    console.log(`\n[aidcp-edge] 退出流程启动（reason=${opts.reason} recycle=${opts.recycle} exitCode=${exitCode}）...`);
-    // ① 回收：先诚实判失败在途发布（关 WS 之前），绝不留半截/跨重起重复发帖。
-    if (opts.recycle) failInFlightPublishesHonestly(opts.reason);
-    watcherSupervisor?.stopAll();
-    // 终态关闭：用 close()（非 stop()）置 closing，使关机异步窗口内迟到的云端命令绝不唤醒重启浏览循环
-    // （change restore-auto-resume A②）。identity 重连的 stop-then-restart 仍用 stop()（非终态）。
-    browse?.close();
-    // ② 诚实下线：等边-云连接真正关闭再继续（BLOCKER①），使云端立即停止把本节点当路由目标。
-    try {
-      await client.closeAndWait(1500);
-    } catch {
-      /* best-effort */
-    }
-    session.close();
-    // ③ 仅当本进程独占（非复用）该 Chrome 时才回收：杀进程并确认端口/登录锁释放（BLOCKER②，超时升级 SIGKILL）。
-    //    复用模式只诚实退出、绝不回收外部浏览器（killAndConfirmDead 对复用实例为 no-op）。
-    if (chrome.reused) {
-      console.log('[aidcp-edge] 复用模式：只诚实退出，不回收本进程不拥有的外部 Chrome');
-    } else {
+  const lifecycle = new CoreLifecycleController({
+    deactivate: async (reason) => {
+      console.log(`\n[aidcp-edge] 自动运营停用流程启动（reason=${reason}）...`);
+      // 暂停/关闭/回收都先诚实终止在途发布，绝不让半截命令跨恢复重放。
+      failInFlightPublishesHonestly(reason);
+      watcherSupervisor?.stopAll();
+      // 终态关闭：用 close()（非 stop()）置 closing，使停用异步窗口内迟到的云端命令绝不唤醒浏览循环。
+      browse?.close();
+      // 诚实下线：等边-云连接真正关闭再继续（有界），使云端立即停止把本节点当路由目标。
+      try {
+        await client.closeAndWait(1500);
+      } catch {
+        /* best-effort */
+      }
+      session.close();
+    },
+    closeOwnedBrowser: async () => {
+      // 仅最终关闭才到这里；pause/resume-preserve 明确绕过。复用模式绝不回收外部浏览器。
+      if (chrome.reused) {
+        console.log('[aidcp-edge] 复用模式：只诚实退出，不回收本进程不拥有的外部 Chrome');
+        return true;
+      }
       try {
         const freed = await chrome.killAndConfirmDead();
         if (!freed) {
@@ -739,11 +752,37 @@ async function main(): Promise<void> {
             '[aidcp-edge] ⚠ 升级 SIGKILL 后调试端口仍未确认释放，继续退出（看护重起时 clearStaleSingletonLock 会再判活拒启）',
           );
         }
-      } catch {
-        /* best-effort */
+        return freed;
+      } catch (error) {
+        console.warn(`[aidcp-edge] ⚠ 浏览器最终回收异常：${(error as Error)?.message || String(error)}`);
+        return false;
       }
-    }
-    process.exit(exitCode);
+    },
+    exit: (code) => process.exit(code),
+    onPaused: () => {
+      if (typeof process.send === 'function' && process.connected) {
+        process.send({ type: 'lifecycle.paused' });
+      }
+    },
+    onCloseFailed: () => {
+      if (typeof process.send === 'function' && process.connected) {
+        process.send({ type: 'lifecycle.close_failed' });
+      }
+    },
+    logger: (message) => console.log(message),
+  });
+
+  dispatchLifecycleCommand = (command) => {
+    void lifecycle.request(command).catch((error) => {
+      console.error(`[aidcp-edge] lifecycle.${command} 处理失败:`, error);
+    });
+  };
+  for (const command of pendingLifecycleCommands.splice(0)) dispatchLifecycleCommand(command);
+
+  const shutdown = (opts: { exitCode: number; recycle: boolean; reason: string }): Promise<void> => {
+    // 已请求回收则即便随后信号撞入也以回收码退出（真终态不被掩成 clean exit，MAJOR⑤）。
+    const exitCode = recycleRequested ? EXIT_RECYCLE : opts.exitCode;
+    return lifecycle.shutdown({ exitCode, reason: opts.reason, preserveBrowser: false });
   };
   requestShutdown = (reason: string): void => {
     if (recycleRequested) return;

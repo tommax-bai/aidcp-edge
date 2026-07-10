@@ -31,7 +31,8 @@
     if (s.edge === 'running' && s.session === 'running' && s.cloud !== 'connected') {
       return { code: 'attention', label: '云端连接中断', detail: '正在等待与云端恢复连接' };
     }
-    if (s.session === 'paused') return { code: 'paused', label: '已暂停', detail: '点右下角「恢复」继续' };
+    if (s.session === 'paused') return { code: 'paused', label: '已暂停', detail: '浏览器保持打开；可恢复或关闭' };
+    if (s.session === 'closed') return { code: 'ready', label: '已关闭', detail: '浏览器已关闭，点右下角「启动」重新打开' };
     if (s.edge === 'running' && s.session === 'resting') return { code: 'paused', label: '休息中', detail: '休息结束后会自动继续' };
     if (s.edge === 'starting') return { code: 'ready', label: '正在启动…', detail: '引擎启动中' };
     if (s.edge === 'running' && s.session === 'running') {
@@ -52,7 +53,7 @@
   const DETAIL_LABELS = {
     auth: { label: '小红书登录', values: { checking: '检测中', 'login required': '需要登录', 'logged in': '已登录', 'chrome missing': '缺少 Chrome', 'config required': '待完成设置' } },
     cloud: { label: '云端连接', values: { disconnected: '未连接', connected: '已连接' } },
-    session: { label: '自动运营', values: { idle: '待命', running: '进行中', resting: '休息中', paused: '已暂停' } },
+    session: { label: '自动运营', values: { idle: '待命', running: '进行中', resting: '休息中', paused: '已暂停', closed: '已关闭' } },
     risk: { label: '账号保护', values: { normal: '正常', warned: '谨慎放慢', restricted: '受限', frozen: '已冻结' } },
     edge: { label: '本机引擎', values: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '异常' } },
   };
@@ -146,7 +147,8 @@
     const staticFresh = Number.isFinite(at) ? `状态更新 · ${relTime(at, nowMs)}` : '';
 
     // 非运行态：诚实静态文案，presence 历史文本不再当「正在做」展示。
-    if (s.session === 'paused') return { text: '已暂停，随时可以恢复', animate: false, fresh: staticFresh };
+    if (s.session === 'paused') return { text: '已暂停，浏览器保持打开', animate: false, fresh: staticFresh };
+    if (s.session === 'closed') return { text: '已关闭浏览器', animate: false, fresh: staticFresh };
     if (s.session === 'resting') return { text: (p && p.text) || '这一轮结束，休息后会自动继续', animate: false, fresh: staticFresh };
     if (s.auth === 'login required') return { text: '等你登录小红书后继续', animate: false, fresh: '' };
     if (s.auth === 'config required') return { text: '等待完成初始设置', animate: false, fresh: '' };
@@ -323,6 +325,7 @@
       return { level: 'running', needsAction: false, label: s.session === 'paused' ? '已暂停' : s.session === 'resting' ? '休息中' : '运行中' };
     }
     if (s.session === 'paused') return { level: 'offline', needsAction: false, label: '已暂停' };
+    if (s.session === 'closed') return { level: 'offline', needsAction: false, label: '已关闭' };
     return { level: 'offline', needsAction: false, label: '已停止' };
   }
 

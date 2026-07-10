@@ -59,7 +59,7 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
   let pushStatus: (s: unknown) => void = () => undefined;
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], startAll: [], select: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], startAll: [], select: [], close: [] };
   const settings = {
     provider: 'adspower',
     adsProfileId: 'p1',
@@ -99,6 +99,7 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
     resetBrowserParking: async () => ({ ok: true }),
     pause: async () => makeStatus(),
     resume: async () => makeStatus(),
+    close: async (envId: string) => { calls.close.push(envId); return makeStatus({ envId, edge: 'stopped', cloud: 'disconnected', session: 'closed' }); },
     start: async () => makeStatus(),
     restart: async () => makeStatus(),
     adsStatus: async () => ({ ok: false, error: 'not running' }),
@@ -133,6 +134,16 @@ test('fleetLevel：放弃重启终态为 error 且需处理；同账号告警为
   const warn = uiLogic.fleetLevel({ edge: 'stopped', session: 'idle', sameAccountWarning: { message: 'x' } }, now);
   assert.equal(warn.level, 'attention');
   assert.equal(warn.needsAction, true);
+});
+
+test('fleetLevel：暂停与关闭同属离线组但标签明确区分', () => {
+  const now = Date.now();
+  const paused = uiLogic.fleetLevel({ edge: 'stopped', session: 'paused' }, now);
+  const closed = uiLogic.fleetLevel({ edge: 'stopped', session: 'closed' }, now);
+  assert.equal(paused.level, 'offline');
+  assert.equal(paused.label, '已暂停');
+  assert.equal(closed.level, 'offline');
+  assert.equal(closed.label, '已关闭');
 });
 
 test('红线：阻断浮层（验证码/登录墙）即便 edge 仍 running 也判需处理，绝不呈现为绿色在线', () => {
@@ -505,4 +516,18 @@ test('人设浮层：未就绪环境出空态面板（向导收起）；生成�
   (w.document.querySelector('#persona-confirm') as HTMLElement).click();
   await tick();
   assert.deepEqual(calls.persist, ['ads-p1'], '草稿未因回退丢失，确认仍打回生成时环境');
+});
+
+test('暂停态显式关闭只路由当前选中环境并切到已关闭', async () => {
+  const { w, pushStatus, calls } = await boot();
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'stopped', cloud: 'disconnected', session: 'paused' }));
+  await tick();
+  const close = w.document.querySelector('#session-close') as HTMLElement;
+  assert.equal(close.classList.contains('hidden'), false);
+  close.click();
+  await tick();
+  await tick();
+  assert.deepEqual(calls.close, ['ads-p1']);
+  assert.equal(w.document.querySelector('#session-fab')!.textContent, '启动');
+  assert.equal(close.classList.contains('hidden'), true);
 });

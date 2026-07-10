@@ -541,8 +541,11 @@
       </div>
     </aside>
 
-    <!-- 悬浮会话控制：三态（停止→启动 / 运行→暂停 / 已暂停→恢复），行为不变 -->
-    <button id="session-fab" class="fab" type="button">启动</button>
+    <!-- 悬浮会话控制：运行→暂停；暂停→关闭/恢复；关闭→启动。 -->
+    <div class="fab-group" aria-label="环境生命周期控制">
+      <button id="session-close" class="fab close hidden" type="button">关闭</button>
+      <button id="session-fab" class="fab" type="button">启动</button>
+    </div>
     <script src="./ui-logic.js"></script>
     <script src="./renderer.js"></script>
   </body>

@@ -59,6 +59,9 @@ test('健康合成：任一路异常 → 需要注意', () => {
 
 test('健康合成：暂停 / 启动中 / 停止', () => {
   assert.equal(uiLogic.synthesizeHealth(st({ session: 'paused', edge: 'stopped' })).code, 'paused');
+  const closed = uiLogic.synthesizeHealth(st({ session: 'closed', edge: 'stopped', cloud: 'disconnected' }));
+  assert.equal(closed.label, '已关闭');
+  assert.match(closed.detail, /启动/);
   const resting = uiLogic.synthesizeHealth(st({ session: 'resting', edge: 'running' }));
   assert.equal(resting.code, 'paused');
   assert.match(resting.label, /休息中/);
@@ -174,6 +177,9 @@ test('在场感：暂停 / 停止 / 需登录 → 静态诚实文案', () => {
   const paused = uiLogic.presenceView(st({ session: 'paused', edge: 'stopped', presence: { text: 'x', at: new Date(now - 8000).toISOString() } }), now);
   assert.equal(paused.animate, false);
   assert.match(paused.fresh, /状态更新/, '暂停态也要有时间戳、不留大空白');
+  const closed = uiLogic.presenceView(st({ session: 'closed', edge: 'stopped', presence: { text: 'x', at: new Date(now - 8000).toISOString() } }), now);
+  assert.equal(closed.animate, false);
+  assert.match(closed.text, /已关闭浏览器/);
   const resting = uiLogic.presenceView(st({ session: 'resting', presence: { text: '这一轮逛完了，休息约 2 分钟后会继续', at: new Date(now - 8000).toISOString() } }), now);
   assert.equal(resting.animate, false);
   assert.match(resting.text, /休息约 2 分钟后会继续/);

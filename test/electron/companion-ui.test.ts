@@ -60,6 +60,7 @@ async function boot(statusOver: Record<string, unknown> = {}, apiOver: Record<st
     saveSettings: async () => ({ ...settings, saveOk: true }),
     pause: async () => makeStatus({ session: 'paused' }),
     resume: async () => makeStatus(),
+    close: async () => makeStatus({ session: 'closed', edge: 'stopped', cloud: 'disconnected' }),
     start: async () => makeStatus(),
     restart: async () => makeStatus(),
     relogin: async () => makeStatus(),

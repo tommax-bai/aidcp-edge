@@ -39,6 +39,7 @@ const fields = {
   },
   lastMessage: document.querySelector('#last-message'),
   sessionFab: document.querySelector('#session-fab'),
+  sessionClose: document.querySelector('#session-close'),
   relogin: document.querySelector('#relogin'),
   loginGuide: document.querySelector('#login-guide'),
   noticeTitle: document.querySelector('#notice-title'),
@@ -196,7 +197,7 @@ const STATUS_LABELS = {
     'config required': '待配置',
   },
   cloud: { disconnected: '未连接', connected: '已连接' },
-  session: { idle: '待命', running: '进行中', resting: '休息中', paused: '已暂停' },
+  session: { idle: '待命', running: '进行中', resting: '休息中', paused: '已暂停', closed: '已关闭' },
   risk: { normal: '正常', warned: '谨慎放慢', restricted: '受限', frozen: '已冻结' },
   edge: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '异常' },
 };
@@ -962,7 +963,7 @@ devToggle.addEventListener('change', () => {
   window.aidcpEdge.saveSettings({ devDetails: devToggle.checked }); // 独立持久化，不打断在跑核心
 });
 
-// 悬浮会话按钮三态：已暂停→恢复 / 已停止（或异常）→启动 / 其余（运行·启动中）→暂停。
+// 悬浮会话控制：已暂停→关闭+恢复 / 已关闭或停止→启动 / 其余（运行·启动中）→暂停。
 function renderFab(status) {
   const fab = fields.sessionFab;
   let text;
@@ -984,6 +985,7 @@ function renderFab(status) {
   fab.textContent = text;
   fab.className = `fab ${cls}`;
   fab.dataset.action = action;
+  if (fields.sessionClose) fields.sessionClose.classList.toggle('hidden', status.session !== 'paused');
 }
 
 // 内嵌运行时首启内核准备进度条：仅在 kernelPrep 处于下载/安装态时显示；null/完成/失败态隐藏（失败走 edge-failure 呈现）。
@@ -2099,6 +2101,18 @@ fields.sessionFab.addEventListener('click', async () => {
     }
     if (next) routeStatus(next);
   } finally {
+    fields.sessionFab.disabled = false;
+  }
+});
+
+fields.sessionClose?.addEventListener('click', async () => {
+  fields.sessionClose.disabled = true;
+  fields.sessionFab.disabled = true;
+  try {
+    const next = await window.aidcpEdge.close(currentEnvId());
+    if (next) routeStatus(next);
+  } finally {
+    fields.sessionClose.disabled = false;
     fields.sessionFab.disabled = false;
   }
 });
