@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monitor.js';
-import { FacebookJoinExecutor, classifyCtaLabel } from '../../src/facebook/join-executor.js';
+import { FacebookJoinExecutor, classifyCtaLabel, hasMemberSignal } from '../../src/facebook/join-executor.js';
 
 interface RawJoinObservation {
   pageUrl?: string;
@@ -384,4 +384,22 @@ test('fb-join-executor: JS 点击瞬间按钮消失（未命中）→ 诚实 no_
   assert.equal(r.reason, 'no_button');
   assert.equal(r.clicked, false);
   assert.equal(cdp.clicks.length, 0);
+});
+
+// ── change facebook-join-comment-resilience P0-2：确认侧多语（非英中群加成功后确认已加入，替 EN/ZH 精确 ===）──
+test('hasMemberSignal: 多语成员标签 contains 识别（非英中群加成功→确认已加入，P0-2）', () => {
+  assert.equal(hasMemberSignal({ mainCtaText: 'Đã tham gia' }), true); // 越南语「已加入」（旧 === 漏判→误报 join_failed）
+  assert.equal(hasMemberSignal({ mainCtaText: 'Salir del grupo' }), true); // 西语「退出小组」= 已是成员
+  assert.equal(hasMemberSignal({ mainCtaAria: 'Rời nhóm' }), true); // 越南语「退出小组」（aria）
+  assert.equal(hasMemberSignal({ mainCtaText: '✓ Joined' }), true); // 装饰性英文（旧精确 === 漏掉）
+  assert.equal(hasMemberSignal({ mainCtaText: 'Joined ⌄' }), true);
+  assert.equal(hasMemberSignal({ membershipSignals: ['Bạn đã là thành viên của nhóm này'] }), true); // 多语「已成为成员」整句
+});
+
+test('hasMemberSignal: 加入按钮 / 无关标签 / 空 不误判为成员（不假成功，P0-2）', () => {
+  assert.equal(hasMemberSignal({ mainCtaText: 'Join group' }), false);
+  assert.equal(hasMemberSignal({ mainCtaText: 'Tham gia nhóm' }), false); // 越南语「加入」不含成员词
+  assert.equal(hasMemberSignal({ mainCtaText: 'Share' }), false);
+  assert.equal(hasMemberSignal(undefined), false);
+  assert.equal(hasMemberSignal({}), false);
 });

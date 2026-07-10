@@ -120,14 +120,26 @@ function publicObservation(raw: RawJoinObservation, groupUrl: string): FacebookG
   };
 }
 
-function hasMemberSignal(obs: FacebookGroupJoinObservation | undefined): boolean {
+/** NFKC 归一 + 收敛空白 + 小写：多语标签/短语匹配统一口径（与 in-page ctaKind 的 replace(/\s+/g,' ').toLowerCase() 对齐）。 */
+function normLabel(s: string | null | undefined): string {
+  return String(s ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * 是否已是成员（confirm 侧多语，change facebook-join-comment-resilience P0-2）。旧实现用 EN/ZH 精确 === 与窄短语，
+ * 非英中群加成功后按钮翻成本地语「已加入/退出小组」确认不到 → 边缘诚实但错误地报 join_failed、云端可能重复加入。
+ * 现改为对成员按钮词表 MEMBER_CTA_LABELS + 多语「已成为成员」整句做 NFKC contains（与 ctaKind 同源；member 先于 join 判，
+ * 「đã tham gia」不会被「tham gia」误伤；装饰性英文 "✓ Joined"/"Joined ⌄" 也不再被 === 漏掉）。仍须正向命中成员词，
+ * 绝不放宽成「无信号也算已加入」（红线：不假成功）。导出供单测。
+ */
+export function hasMemberSignal(obs: FacebookGroupJoinObservation | undefined): boolean {
   if (!obs) return false;
-  const cta = (obs.mainCtaText ?? '').trim().toLowerCase();
-  const aria = (obs.mainCtaAria ?? '').trim().toLowerCase();
-  if (['joined', 'leave group', '已加入', '退出小组'].some((s) => cta === s || aria === s)) return true;
+  const hitLabel = (s: string): boolean => s.length > 0 && MEMBER_CTA_LABELS.some((k) => s.includes(k));
+  if (hitLabel(normLabel(obs.mainCtaText)) || hitLabel(normLabel(obs.mainCtaAria))) return true;
   return (obs.membershipSignals ?? []).some((signal) => {
-    const s = signal.toLowerCase();
-    return ['you are now a member', 'member of this group', '已是成员', '你已加入'].some((needle) => s.includes(needle));
+    const s = normLabel(signal);
+    if (s.length === 0) return false;
+    return MEMBER_MEMBERSHIP_PHRASES.some((n) => s.includes(n)) || MEMBER_CTA_LABELS.some((k) => s.includes(k));
   });
 }
 
@@ -153,6 +165,21 @@ export const PENDING_CTA_LABELS: readonly string[] = [
   'solicitud enviada', 'cancelar solicitud', 'menunggu', 'batalkan permintaan', 'demande envoyée',
   'annuler la demande', 'anfrage gesendet', 'รอการอนุมัติ', '요청 보냄', '요청됨',
 ];
+/** 「已成为成员」整句信号（多语，NFKC 小写 contains）——与 MEMBER_CTA_LABELS 并用确认已加入（P0-2）。 */
+export const MEMBER_MEMBERSHIP_PHRASES: readonly string[] = [
+  'you are now a member', 'member of this group', '已是成员', '你已加入',
+  'ahora eres miembro', 'bạn đã là thành viên', 'sudah menjadi anggota', 'вы теперь участник',
+];
+/**
+ * 入群问卷「回答问题才能加入」的多语短语（NFKC 小写 contains，P0-2）。旧实现仅 EN/ZH 正则 → 非英中问卷被漏判为
+ * questionnaireRequired=false、随后被 dismissOptionalModal 按 Esc 误关（破坏真问卷）。保守取多词短语、避免单裸词误判。
+ */
+export const QUESTIONNAIRE_PHRASES: readonly string[] = [
+  'membership questions', 'answer questions', 'answer these questions', 'questions to join', 'required question',
+  '回答问题', '入群问题', '必答', '加入前请回答',
+  'trả lời câu hỏi', 'responde las preguntas', 'preguntas de membresía', 'jawab pertanyaan',
+  'répondez aux questions', 'beantworte die fragen', 'ตอบคำถาม',
+];
 
 export type CtaKind = 'join' | 'member' | 'pending' | '';
 
@@ -173,6 +200,7 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
   var JOIN_KW = ${JSON.stringify(JOIN_CTA_LABELS)};
   var MEMBER_KW = ${JSON.stringify(MEMBER_CTA_LABELS)};
   var PENDING_KW = ${JSON.stringify(PENDING_CTA_LABELS)};
+  var QUESTION_KW = ${JSON.stringify(QUESTIONNAIRE_PHRASES)};
   function visible(el){
     if (!el || !el.getBoundingClientRect) return false;
     var r = el.getBoundingClientRect();
@@ -215,6 +243,7 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
   var main = null;
   var join = null;
   var signals = [];
+  var pendingCta = false;
   for (var i = 0; i < nodes.length; i++) {
     var node = nodes[i];
     var label = short(text(node) || aria(node), 120);
@@ -226,16 +255,16 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
       if (!join) join = node;
       if (!main || main.kind !== 'join') main = { el: node, text: label || null, aria: a || null, kind: 'join' };
     } else {
+      if (kind === 'pending') pendingCta = true; // 多语「待审/已申请」按钮（PENDING_KW 分类），供 pending 判定（P0-2）。
       if (!main) main = { el: node, text: label || null, aria: a || null, kind: kind };
       signals.push(label || a);
     }
   }
   var modalLower = String(modalText || '').toLowerCase();
   var headerLower = String(headerText || '').toLowerCase();
-  var pending = signals.some(function(s){ return /(pending|request sent|cancel request|待批准|已申请)/i.test(s); }) ||
-    /(pending|request sent|cancel request|待批准|已申请)/i.test(modalLower);
-  var questionnaire = /(membership questions|answer questions|required question|回答问题|入群问题|必答)/i.test(modalLower) ||
-    /(membership questions|answer questions|回答问题|入群问题)/i.test(headerLower);
+  // 待审/问卷改用多语词表 contains（P0-2）：pendingCta = 多语「待审」按钮已分类；modal/header 文本亦对多语词表命中。
+  var pending = pendingCta || anyIncludes(modalLower, PENDING_KW);
+  var questionnaire = anyIncludes(modalLower, QUESTION_KW) || anyIncludes(headerLower, QUESTION_KW);
   var login = /\/login|\/checkpoint|\/recover/i.test(location.pathname);
   var captcha = /(captcha|security check|人机验证|安全验证)/i.test(modalLower);
   var btn = null;
