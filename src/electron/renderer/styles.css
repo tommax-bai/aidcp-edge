@@ -808,10 +808,49 @@ body { margin: 0; }
 .ads-env-empty { margin: 0; padding: 10px; color: #94a3b8; font-size: 12.5px; text-align: center; }
 .ads-env-msg { color: var(--mute); font-size: 12px; min-height: 14px; }
 .ads-env-msg.error { color: #b91c1c; }
-.ads-create-row { display: flex; gap: 8px; align-items: center; }
+.ads-create-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 /* 平台下拉按内容收窄（选项短），系统模板下拉占满余量（选项长，避免截断） */
 .ads-create-row #ads-platform { flex: 0 0 auto; width: auto; }
-.ads-create-row #ads-template { flex: 1 1 auto; }
+.ads-create-row #ads-template { flex: 1 1 150px; }
+.ads-create-btn {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 8px 16px;
+  border: 1px solid #2f5fd0;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 6px 16px rgba(59, 111, 240, 0.22);
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s, transform 0.12s;
+}
+.ads-create-btn:hover {
+  background: #2f5fd0;
+  border-color: #244fb8;
+  box-shadow: 0 8px 20px rgba(59, 111, 240, 0.28);
+}
+.ads-create-btn:active {
+  transform: translateY(1px);
+  box-shadow: 0 3px 10px rgba(59, 111, 240, 0.22);
+}
+.ads-create-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(59, 111, 240, 0.22), 0 6px 16px rgba(59, 111, 240, 0.22);
+}
+.ads-create-btn[disabled] {
+  opacity: 0.58;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+@media (max-width: 430px) {
+  .ads-create-row #ads-platform { flex: 1 1 88px; }
+  .ads-create-btn { width: 100%; }
+}
 .ads-fb-import textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
