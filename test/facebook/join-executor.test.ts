@@ -19,6 +19,7 @@ interface RawJoinObservation {
   pendingRequest?: boolean;
   navError?: string | null;
   documentReady?: string;
+  actionNodeCount?: number;
   joinButton?: { found: boolean; disabled?: boolean; x?: number; y?: number; text?: string | null; aria?: string | null };
 }
 
@@ -36,6 +37,9 @@ function obs(over: Partial<RawJoinObservation> = {}): RawJoinObservation {
     questionnaireRequired: false,
     pendingRequest: false,
     navError: null,
+    // 默认代表「页面已渲染」（真机观察恒带 actionNodeCount）——isMinimallyReady=true，除非用例显式覆盖为 loading/0（P1-5）。
+    documentReady: 'complete',
+    actionNodeCount: 8,
     joinButton: { found: true, disabled: false, x: 100, y: 50, text: 'Join group', aria: 'Join group' },
     ...over,
   };
@@ -258,7 +262,9 @@ test('fb-join-executor: 同意浮层清掉后继续正常入组判定', async ()
 });
 
 // ── change fb-group-join-wait-render：就绪轮询——等页面真渲染出决定性信号再判定，别死等固定时长（FB 网络不稳）──
-const EMPTY_OBS = () => obs({ mainCtaText: null, mainCtaAria: null, headerText: null, membershipSignals: [], joinButton: { found: false } });
+// 空观察 = 页面尚未渲染（loading + 0 动作节点 + 无 CTA/按钮）——P1-5 语义下即「未最小就绪」，超时判 not_ready。
+const EMPTY_OBS = () =>
+  obs({ mainCtaText: null, mainCtaAria: null, headerText: null, membershipSignals: [], documentReady: 'loading', actionNodeCount: 0, joinButton: { found: false } });
 
 test('fb-join-executor: 页面仍在加载（空观察）时轮询等待，直到加入按钮渲染出来再点击加入', async () => {
   // 前两次观察是"还在加载"（无按钮/无信号），第三次才渲染出加入按钮；点击后确认已加入。
@@ -275,20 +281,29 @@ test('fb-join-executor: 页面仍在加载（空观察）时轮询等待，直�
   assert.equal(cdp.clicks.length, 1);
 });
 
-test('fb-join-executor: 触上限仍无决定性信号 → 诚实 no_button（点击路径），绝不假成功', async () => {
-  const cdp = new FakeCdp([EMPTY_OBS()]); // 一直空
+test('fb-join-executor: 页面一直未渲染（空观察）触上限 → not_ready（P1-5 可重试瞬态，不点击、不假成功）', async () => {
+  const cdp = new FakeCdp([EMPTY_OBS()]); // 一直 loading + 0 节点
   const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
   assert.equal(r.ok, false);
-  assert.equal(r.reason, 'no_button', '等不到按钮就诚实报 no_button，不点击、不冒充成功');
+  assert.equal(r.reason, 'not_ready', '页面没加载出来是慢渲染瞬态，非终局 no_button');
   assert.equal(r.clicked, false);
   assert.equal(cdp.clicks.length, 0);
 });
 
-test('fb-join-executor: 观察态一直空 + observe-only → observation_only（诚实，不假成功）', async () => {
+test('fb-join-executor: 页面已渲染但确实无加入按钮 → no_button（终局，非 not_ready）', async () => {
+  // 已最小就绪（documentReady=complete + 有动作节点）却没有加入按钮 → 真的没按钮，诚实 no_button。
+  const cdp = new FakeCdp([obs({ mainCtaText: null, mainCtaAria: null, headerText: 'Public group', joinButton: { found: false } })]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'no_button');
+  assert.equal(r.clicked, false);
+});
+
+test('fb-join-executor: 观察态一直空 + observe-only → not_ready（P1-5，未渲染即诚实瞬态）', async () => {
   const cdp = new FakeCdp([EMPTY_OBS()]);
   const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123');
   assert.equal(r.ok, false);
-  assert.equal(r.reason, 'observation_only');
+  assert.equal(r.reason, 'not_ready');
   assert.equal(r.clicked, false);
 });
 
@@ -402,4 +417,25 @@ test('hasMemberSignal: 加入按钮 / 无关标签 / 空 不误判为成员（�
   assert.equal(hasMemberSignal({ mainCtaText: 'Share' }), false);
   assert.equal(hasMemberSignal(undefined), false);
   assert.equal(hasMemberSignal({}), false);
+});
+
+// ── change facebook-join-comment-resilience P1-5：慢渲染瞬态 not_ready（供云端短退避重试而非 LLM→永久失败）──
+test('fb-join-executor: 就绪超时仍 loading 且无加入按钮 → not_ready（P1-5 可重试瞬态，非 no_button/observation_only）', async () => {
+  const cdp = new FakeCdp([obs({ documentReady: 'loading', joinButton: { found: false } })]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'not_ready');
+  assert.equal(r.clicked, false);
+  assert.equal(cdp.clicks.length, 0);
+});
+
+// ── change facebook-join-comment-resilience P1-7：点击后加群流程浮层不被盲 Esc（绝不破坏真的待审/问卷门）──
+test('fb-join-executor: post-click 待审浮层不被 Esc 误关（P1-7 保守闸）', async () => {
+  const cdp = new FakeCdp([
+    obs(),
+    obs({ modalText: 'Solicitud enviada, pendiente de aprobación', pendingRequest: true, joinButton: { found: false } }),
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.reason, 'pending');
+  assert.equal(cdp.escapes, 0);
 });

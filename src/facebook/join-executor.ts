@@ -15,6 +15,10 @@ export type FacebookJoinReason =
   | 'blocked_by_consent'
   | 'blocked_by_captcha'
   | 'nav_error'
+  // P1-5（change facebook-join-comment-resilience）：慢渲染瞬态——就绪/点击后上限触顶时页面仍未最小就绪（仍 loading /
+  // 无可见动作节点）。区别于「genuinely 没按钮 / 真失败」，供云端跳过 LLM、走短退避重试而非落永久失败。
+  | 'not_ready'
+  | 'post_not_confirmed_slow'
   | 'join_failed';
 
 export interface FacebookGroupJoinObservation {
@@ -180,6 +184,25 @@ export const QUESTIONNAIRE_PHRASES: readonly string[] = [
   'trả lời câu hỏi', 'responde las preguntas', 'preguntas de membresía', 'jawab pertanyaan',
   'répondez aux questions', 'beantworte die fragen', 'ตอบคำถาม',
 ];
+
+/**
+ * 页面是否已「最小就绪」（P1-5）：文档已过 loading 且有可见动作节点。用于把「就绪/点击后上限触顶时页面还没加载出来」
+ * 与「页面已就绪却真的没按钮 / 真失败」区分开——前者是可重试的网络瞬态（not_ready / post_not_confirmed_slow）。
+ */
+function isMinimallyReady(obs: FacebookGroupJoinObservation | undefined): boolean {
+  if (!obs) return false;
+  return obs.documentReady !== 'loading' && (obs.actionNodeCount ?? 0) > 0;
+}
+
+/**
+ * modal 文本是否含加群流程信号（加入/成员/待审/问卷任一多语词，P1-7）。用于 dismissOptionalModal 的保守闸：
+ * 只清「明确无关的可选浮层」，凡含加群流程信号一律不盲 Esc（可能是词表未覆盖语种的入群门，绝不破坏真门）。
+ */
+function modalLooksJoinRelated(modalText: string | null | undefined): boolean {
+  const s = normLabel(modalText);
+  if (!s) return false;
+  return [...MEMBER_CTA_LABELS, ...PENDING_CTA_LABELS, ...QUESTIONNAIRE_PHRASES].some((k) => s.includes(k));
+}
 
 export type CtaKind = 'join' | 'member' | 'pending' | '';
 
@@ -392,9 +415,15 @@ export class FacebookJoinExecutor {
       if (hasMemberSignal(observation)) return { ok: false, reason: 'already_member', groupUrl, clicked: false, observation };
       if (observation.questionnaireRequired) return { ok: false, reason: 'questionnaire_required', groupUrl, clicked: false, observation };
       if (observation.pendingRequest) return { ok: false, reason: 'pending', groupUrl, clicked: false, observation };
-      if (!options.click) return { ok: false, reason: 'observation_only', groupUrl, clicked: false, observation };
 
       const button = raw.joinButton;
+      // P1-5：就绪轮询触顶但页面仍未最小就绪（仍 loading / 无动作节点）且没抓到加入按钮 → not_ready（可重试网络瞬态）。
+      // 供云端直接短退避重试，绝不把「慢渲染」当成 observation_only 喂给判定角色 → fail-closed → 永久失败（本 change 治的主因）。
+      if (!isMinimallyReady(observation) && !button?.found) {
+        return { ok: false, reason: 'not_ready', groupUrl, clicked: false, observation };
+      }
+      if (!options.click) return { ok: false, reason: 'observation_only', groupUrl, clicked: false, observation };
+
       if (!button?.found || button.disabled || typeof button.x !== 'number' || typeof button.y !== 'number') {
         return { ok: false, reason: 'no_button', groupUrl, clicked: false, observation };
       }
@@ -421,8 +450,10 @@ export class FacebookJoinExecutor {
       const postObservation = post.observation;
       if (post.reason === 'joined') return { ok: true, groupUrl, clicked: true, observation, postObservation };
       if (post.reason) return { ok: false, reason: post.reason, groupUrl, clicked: true, observation, postObservation };
-      // 触上限仍未见成员态：按钮还停在「加入小组」→ 诚实 join_failed（绝不冒充成功）。
-      return { ok: false, reason: 'join_failed', groupUrl, clicked: true, observation, postObservation };
+      // 触上限仍未见成员态：页面已最小就绪却仍无成员态 → 诚实 join_failed；仍在加载/无动作节点 → post_not_confirmed_slow
+      //（P1-5：慢渲染瞬态，供云端短退避重试而非当终局失败）。两者都绝不冒充成功。
+      const settled = isMinimallyReady(postObservation);
+      return { ok: false, reason: settled ? 'join_failed' : 'post_not_confirmed_slow', groupUrl, clicked: true, observation, postObservation };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.log(`[fb-join] joinGroup failed: ${message}`);
@@ -551,7 +582,10 @@ export class FacebookJoinExecutor {
   }
 
   private async dismissOptionalModal(observation: FacebookGroupJoinObservation): Promise<void> {
-    if (!observation.modalText || observation.questionnaireRequired) return;
+    // P1-7：只清「明确无关的可选浮层」。凡是问卷 / 待审 / 或 modal 文本含加群流程信号（含词表未覆盖语种的入群门），
+    // 一律不盲 Esc——绝不破坏真的入群问卷/审批门（破坏性动作比误判更差）。诚实留给后续轮询/上层判定。
+    if (!observation.modalText || observation.questionnaireRequired || observation.pendingRequest) return;
+    if (modalLooksJoinRelated(observation.modalText)) return;
     try {
       await pressEscape(this.cdp);
     } catch {
