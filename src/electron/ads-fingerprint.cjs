@@ -15,6 +15,8 @@ const REALISTIC_CORES = Object.freeze(['2', '4', '6', '8', '12', '16']);
 const ALLOWED_WEBRTC = Object.freeze(['proxy', 'disabled']); // 禁 local/real（真机 IP 泄露）
 const NOISE_FIELDS = Object.freeze(['canvas', 'webgl_image', 'audio', 'client_rects']);
 const DEFAULT_KERNEL = '148'; // 须为本机已安装内核；ua_auto 会随机分 OS + 触发按分身下载，故 pin（见探针 1.4）
+// AdsPower random_ua.ua_system_version 是离散枚举，不接受 13_6 / 14_4 这类补丁版本。
+const ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS = Object.freeze(['Windows 10', 'Windows 11', 'Mac OS X 10', 'Mac OS X 11', 'Mac OS X 12', 'Mac OS X 13']);
 
 // OS 标志字体（跨 OS 混装即矛盾）。
 const WIN_FONTS = /segoe ui|calibri|consolas|cambria|tahoma/i;
@@ -26,8 +28,8 @@ const DEVICE_TEMPLATES = Object.freeze([
   { key: 'win11-nvidia', os: 'windows', uaSystemVersion: 'Windows 10', kernel: DEFAULT_KERNEL, deviceMemory: '16', hardwareConcurrency: '16', screenResolution: '2560_1440', webglMode: '3' },
   { key: 'win11-nvidia-custom', os: 'windows', uaSystemVersion: 'Windows 10', kernel: DEFAULT_KERNEL, deviceMemory: '16', hardwareConcurrency: '12', screenResolution: '1920_1080', webglMode: '2',
     webglVendor: 'Google Inc. (NVIDIA)', webglRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { key: 'macos-m2', os: 'macos', uaSystemVersion: 'Mac OS X 13_6', kernel: DEFAULT_KERNEL, deviceMemory: '8', hardwareConcurrency: '8', screenResolution: '1728_1117', webglMode: '3' },
-  { key: 'macos-m3', os: 'macos', uaSystemVersion: 'Mac OS X 14_4', kernel: DEFAULT_KERNEL, deviceMemory: '16', hardwareConcurrency: '12', screenResolution: '1512_982', webglMode: '3' },
+  { key: 'macos-m2', os: 'macos', uaSystemVersion: 'Mac OS X 13', kernel: DEFAULT_KERNEL, deviceMemory: '8', hardwareConcurrency: '8', screenResolution: '1728_1117', webglMode: '3' },
+  { key: 'macos-m3', os: 'macos', uaSystemVersion: 'Mac OS X 13', kernel: DEFAULT_KERNEL, deviceMemory: '16', hardwareConcurrency: '12', screenResolution: '1512_982', webglMode: '3' },
 ]);
 
 /** 从各带 OS 信息的字段推断 OS 家族；返回 'windows'|'macos'|'linux'|'mobile'|'unknown'。 */
@@ -134,6 +136,10 @@ function assertOsCoherent(template, fp) {
 function buildFingerprintConfig(template) {
   const t = template || {};
   const kernel = t.kernel || DEFAULT_KERNEL;
+  const templateViolations = [];
+  if (!ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS.includes(String(t.uaSystemVersion || ''))) {
+    templateViolations.push(`ua_system_version=${t.uaSystemVersion || '(empty)'} 不在 AdsPower 支持枚举内（合法：${ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS.join('/')}）`);
+  }
   const fp = {
     automatic_timezone: '1', // 时区随代理 IP
     language_switch: '1', // 语言随代理 IP
@@ -161,7 +167,7 @@ function buildFingerprintConfig(template) {
 
   const g = validateGuardrails(fp);
   const a = assertOsCoherent(t, fp);
-  const violations = [...g.violations, ...a.violations];
+  const violations = [...templateViolations, ...g.violations, ...a.violations];
   if (violations.length > 0) return { ok: false, violations, template: t };
   return { ok: true, fingerprintConfig: fp, violations: [], template: t };
 }
@@ -176,6 +182,7 @@ module.exports = {
   REALISTIC_CORES,
   ALLOWED_WEBRTC,
   DEFAULT_KERNEL,
+  ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS,
   osFromUaSystemVersion,
   osFromRenderer,
   osFromFonts,

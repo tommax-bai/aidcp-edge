@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const fp = require('../../src/electron/ads-fingerprint.cjs') as {
   DEVICE_TEMPLATES: Array<{ key: string; os: string; uaSystemVersion: string; webglMode: string; deviceMemory: string }>;
+  ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS: string[];
   validateGuardrails: (f: Record<string, unknown>) => { ok: boolean; violations: string[] };
   assertOsCoherent: (t: { os: string }, f: Record<string, unknown>) => { ok: boolean; violations: string[] };
   buildFingerprintConfig: (t: unknown) => { ok: boolean; fingerprintConfig?: Record<string, any>; violations: string[] };
@@ -57,7 +58,7 @@ test('护栏: fonts 跨 OS 混装被拒', () => {
 test('断言: Mac 模板 + Windows/Direct3D11 renderer → 违规', () => {
   const macTpl = { os: 'macos' };
   const badFp = {
-    random_ua: { ua_system_version: ['Mac OS X 13_6'] },
+    random_ua: { ua_system_version: ['Mac OS X 13'] },
     webgl: '2',
     webgl_config: { unmasked_renderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
   };
@@ -96,6 +97,7 @@ test('所有 DEVICE_TEMPLATES 构造出 ok 且自洽，均 pin 桌面 OS', () =>
     const built = r.fingerprintConfig!;
     // 显式 pin OS
     assert.ok(built.random_ua && built.random_ua.ua_system_version[0] === t.uaSystemVersion, `${t.key} 应 pin ua_system_version`);
+    assert.ok(fp.ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS.includes(t.uaSystemVersion), `${t.key} ua_system_version 必须是 AdsPower 可匹配枚举`);
     // 噪声开、webrtc 非 local/real、device_memory 2 的幂
     assert.equal(built.canvas, '1');
     assert.notEqual(built.webrtc, 'local');
@@ -104,6 +106,23 @@ test('所有 DEVICE_TEMPLATES 构造出 ok 且自洽，均 pin 桌面 OS', () =>
     if (built.webgl === '3') assert.equal(built.webgl_config, undefined, `${t.key} webgl='3' 不应带 config`);
     if (built.webgl === '2') assert.ok(built.webgl_config && built.webgl_config.unmasked_renderer, `${t.key} webgl='2' 应带 renderer`);
   }
+});
+
+test('AdsPower 不支持的 ua_system_version 在提交前被拒', () => {
+  const template = {
+    key: 'bad-macos',
+    os: 'macos',
+    uaSystemVersion: 'Mac OS X 14_4',
+    kernel: '148',
+    deviceMemory: '16',
+    hardwareConcurrency: '12',
+    screenResolution: '1512_982',
+    webglMode: '3',
+  };
+  const r = fp.buildFingerprintConfig(template);
+  assert.equal(r.ok, false);
+  assert.match(r.violations.join('; '), /ua_system_version=Mac OS X 14_4/);
+  assert.match(r.violations.join('; '), /AdsPower 支持枚举/);
 });
 
 test("webgl='2' 内置模板的 renderer 与其声明 OS 家族一致", () => {
