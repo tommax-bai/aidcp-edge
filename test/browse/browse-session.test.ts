@@ -1822,3 +1822,102 @@ test('task quiesce regression: 在途 navigation.back 完成后才允许发布 a
   await sess.onCloudCommand(makeEnvelope('session.end', 'end-after-back', 0, { reason: 'done' }));
   await running;
 });
+
+// ======== feed.refresh（深度到阈值点右下「刷新」回顶换新批，change feed-refresh-on-depth）========
+
+interface RefreshCtl {
+  url?: string;      // location.href（默认 explore feed）
+  locate?: string;   // .floating-btn-sets 定位结果（默认命中 {x,y}）
+  verify?: string;   // 点后 {y,first} 后置校验（默认回顶+换新）
+  preFirst?: string; // 点前首卡 noteId（默认 OLD）
+}
+
+function refreshHarness(ctl: RefreshCtl): Harness {
+  const h = makeHarness();
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method !== 'Runtime.evaluate') return {} as never;
+      const expr = String(params.expression ?? '');
+      if (expr.includes('window.scrollY')) {
+        // 点后后置校验（含 a[href*=/explore/]，故须先于 pre-state 判）
+        return { result: { value: ctl.verify ?? '{"y":0,"first":"NEWfeed01"}' } } as never;
+      }
+      if (expr.includes('floating-btn-sets')) {
+        return { result: { value: ctl.locate ?? '{"x":100,"y":100}' } } as never;
+      }
+      if (expr === 'location.href') {
+        return { result: { value: ctl.url ?? 'https://www.xiaohongshu.com/explore' } } as never;
+      }
+      if (expr.includes('/explore/')) {
+        // 点前首卡 noteId（firstVisibleNoteId）
+        return { result: { value: ctl.preFirst ?? 'OLDfeed00' } } as never;
+      }
+      return { result: { value: ctl.url ?? 'https://www.xiaohongshu.com/explore' } } as never;
+    },
+  };
+  return h;
+}
+
+test('feed.refresh: 定位到刷新按钮 + 点后回顶换新批 → ok:true 且上报新 page.cards', async () => {
+  const h = refreshHarness({ verify: '{"y":0,"first":"NEWfeed01"}', preFirst: 'OLDfeed00' });
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 15)); // start 初扫会先报一次 page.cards
+  const before = h.reportedCards.length;
+  await sess.onCloudCommand(makeEnvelope('feed.refresh', 'r1', 0, { reason: 'feed_refresh', thinkMs: 300 }));
+  await new Promise((r) => setTimeout(r, 5));
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
+  await done;
+  const r = h.completedActions.find((a) => a.action === 'refresh');
+  assert.ok(r, '应上报 refresh 回执');
+  assert.equal(r!.ok, true);
+  assert.equal(h.reportedCards.length, before + 1, '成功刷新须恰好上报一次新 page.cards');
+});
+
+test('feed.refresh: 点后首卡为空（仅回到顶部、内容未换）→ not_reloaded，绝不假成功、不报卡', async () => {
+  // 对抗评审红线守卫：空首卡时 undefined!==pre 恒真会让纯回顶冒充换新批。
+  const h = refreshHarness({ verify: '{"y":0,"first":""}', preFirst: 'OLDfeed00' });
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 15)); // start 初扫会先报一次 page.cards
+  const before = h.reportedCards.length;
+  await sess.onCloudCommand(makeEnvelope('feed.refresh', 'r1', 0, { reason: 'feed_refresh' }));
+  await new Promise((r) => setTimeout(r, 5));
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
+  await done;
+  const r = h.completedActions.find((a) => a.action === 'refresh');
+  assert.ok(r);
+  assert.equal(r!.ok, false);
+  assert.equal(r!.reason, 'not_reloaded');
+  assert.equal(h.reportedCards.length, before, 'not_reloaded 不得把陈旧/空卡当新批上报');
+});
+
+test('feed.refresh: 找不到悬浮容器 → ok:false no_floating_btn（不假成功）', async () => {
+  const h = refreshHarness({ locate: '{"error":"no_floating_btn"}' });
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('feed.refresh', 'r1', 0, { reason: 'feed_refresh' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const r = h.completedActions.find((a) => a.action === 'refresh');
+  assert.ok(r);
+  assert.equal(r!.ok, false);
+  assert.equal(r!.reason, 'no_floating_btn');
+});
+
+test('feed.refresh: 不在 explore feed → ok:false wrong_context（不点、不假成功）', async () => {
+  const ctl: RefreshCtl = { url: 'https://www.xiaohongshu.com/explore' };
+  const h = refreshHarness(ctl);
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  ctl.url = 'https://www.xiaohongshu.com/explore/6abc12345678?xsec_token=t'; // 详情页（非 feed）
+  await sess.onCloudCommand(makeEnvelope('feed.refresh', 'r1', 0, { reason: 'feed_refresh' }));
+  await new Promise((r) => setTimeout(r, 1));
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
+  await done;
+  const r = h.completedActions.find((a) => a.action === 'refresh');
+  assert.ok(r);
+  assert.equal(r!.ok, false);
+  assert.equal(r!.reason, 'wrong_context');
+});

@@ -25,6 +25,7 @@ import type {
   ProfileDetailPayload,
   ActionCompletedPayload,
   PageScrollPayload,
+  FeedRefreshPayload,
   NoteOpenPayload,
   NoteClosePayload,
   InteractionLikePayload,
@@ -1153,6 +1154,12 @@ export class BrowseSession {
         await this.reportVisibleCards();
         break;
       }
+      case 'feed.refresh': {
+        const payload = env.payload as FeedRefreshPayload;
+        this.logger(`[browse] 命令: feed.refresh (${payload.reason ?? ''})`);
+        await this.refreshFeed(payload.thinkMs);
+        break;
+      }
       case 'note.open': {
         const payload = env.payload as NoteOpenPayload;
         this.logger(`[browse] 命令: note.open (index=${payload.index}, noteId=${payload.noteId ?? '?'})`);
@@ -1699,6 +1706,104 @@ export class BrowseSession {
       if (i < rounds - 1) await this.sleep(intervalMs);
     }
     return last;
+  }
+
+  /** 抽取当前 DOM 里第一张 feed 卡的 noteId（虚拟列表下 = 当前渲染的最上一张）；无则空串。 */
+  private async firstVisibleNoteId(): Promise<string> {
+    const js = `(function(){
+      var a = document.querySelector('a[href*="/explore/"],a[href*="/discovery/item/"]');
+      if (!a) return '';
+      var m = (a.getAttribute('href')||'').match(/\\/(explore|discovery\\/item)\\/([0-9a-f]{8,})/i);
+      return m ? m[2] : '';
+    })()`;
+    const raw = await evalRaw<string>(this.deps.cdp, js).catch(() => '');
+    return typeof raw === 'string' ? raw : '';
+  }
+
+  /**
+   * feed 深度到阈值：点击右下角「刷新」按钮回到顶部换出全新一批（change feed-refresh-on-depth）。
+   * 诚实执行 + 硬化后置校验：仅当「滚动回顶 且 出现具体非空的、与点击前不同的首卡」才算刷新真发生；
+   * 只看滚动归零会被空首卡蒙混（纯回到顶部冒充换新批）——红线：绝不静默假成功。成功才上报新一批卡片。
+   */
+  private async refreshFeed(thinkMs?: number): Promise<void> {
+    const action = 'refresh' as const;
+    try {
+      // ① 上下文闸：必须在 explore feed（详情/搜索/通知页无此按钮）
+      const url = await this.evalUrl();
+      if (!EXPLORE_FEED_RE.test(url)) {
+        this.logger(`[browse] refresh 非 feed 页(${url})，诚实放弃`);
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'wrong_context' });
+        return;
+      }
+      // ② 定位右下「刷新」按钮：.floating-btn-sets 内 class 含 reload 且非 back-top（退路 svg use[href="#reload"]）。
+      //    真机标定：宽窄布局结构一致（docs/xhs-layout-states，探针 scripts/feed-refresh-button-probe.ts）。
+      const locateJs = `(function(){
+        var box = document.querySelector('.floating-btn-sets');
+        if (!box) return JSON.stringify({error:'no_floating_btn'});
+        var btn = null;
+        var kids = box.querySelectorAll('*');
+        for (var i=0;i<kids.length;i++){
+          var el = kids[i];
+          var cls = String((el.className && el.className.baseVal!=null)?el.className.baseVal:(el.className||''));
+          if (/(^|\\s)reload(\\s|$)/.test(cls) && !/back-top/.test(cls)) { btn = el; break; }
+        }
+        if (!btn) {
+          var use = box.querySelector('use[href="#reload"], use[*|href="#reload"]');
+          if (use) btn = (use.closest && use.closest('div,button,span')) || use.parentElement;
+        }
+        if (!btn) return JSON.stringify({error:'no_reload_btn'});
+        var r = btn.getBoundingClientRect();
+        if (!(r.width>0 && r.height>0)) return JSON.stringify({error:'no_reload_btn'});
+        return JSON.stringify({x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2)});
+      })()`;
+      const rawLoc = await evalRaw<string>(this.deps.cdp, locateJs);
+      const loc = typeof rawLoc === 'string' ? JSON.parse(rawLoc) : rawLoc;
+      if (loc?.error) {
+        this.logger(`[browse] refresh 定位失败: ${loc.error}`);
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: loc.error });
+        return;
+      }
+      // ③ 最小间隔 + 点前犹豫（复用 action 档；gate 返回 false = CDP 重连中止等，诚实退出不点）
+      if (!(await this.gateBeforeAction('action', thinkMs))) return;
+      // ④ 点击前 fresh 复检验证码（fail-CLOSED）
+      if (await this.captchaPresentFresh()) {
+        this.logger('[browse] refresh 提交前复检到验证码/阻断，放弃点击');
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'blocked_by_captcha' });
+        return;
+      }
+      // ⑤ 点击前一刻抓 pre-state 首卡（在 think-gate 之后，使前后比较只框住这次点击，防 think 窗内异步重渲染误判）
+      const preFirstNoteId = await this.firstVisibleNoteId();
+      // ⑥ 拟人点击
+      const { dispatchClick } = await import('./cdp-util.js');
+      await dispatchClick(this.deps.cdp, loc.x, loc.y, { random: this.random });
+      // ⑦ 后置校验：滚动回顶(~0) 且 出现具体非空、与点前不同的首卡，才算真刷新。
+      const verifyJs = `(function(){
+        var y = Math.round(window.scrollY || (document.scrollingElement ? document.scrollingElement.scrollTop : 0) || 0);
+        var a = document.querySelector('a[href*="/explore/"],a[href*="/discovery/item/"]');
+        var id = '';
+        if (a) { var m = (a.getAttribute('href')||'').match(/\\/(explore|discovery\\/item)\\/([0-9a-f]{8,})/i); if (m) id = m[2]; }
+        return JSON.stringify({y: y, first: id});
+      })()`;
+      const reloaded = (raw: string): boolean => {
+        try {
+          const o = JSON.parse(raw) as { y: number; first: string };
+          return typeof o.first === 'string' && o.first.length > 0 && o.first !== preFirstNoteId && o.y < 100;
+        } catch {
+          return false;
+        }
+      };
+      const last = await this.pollDomUntil(verifyJs, reloaded, 2000);
+      if (typeof last === 'string' && reloaded(last)) {
+        this.logger('[browse] refresh 成功：回顶 + 换出全新一批');
+        await this.reportVisibleCards();
+        this.deps.client.reportActionCompleted?.({ action, ok: true });
+      } else {
+        this.logger('[browse] refresh 点后未确认换新批（not_reloaded），诚实失败、不报卡');
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'not_reloaded' });
+      }
+    } catch (err) {
+      this.deps.client.reportActionCompleted?.({ action, ok: false, reason: (err as Error).message });
+    }
   }
 
   /**
