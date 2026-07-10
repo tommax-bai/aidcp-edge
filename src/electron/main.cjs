@@ -984,6 +984,9 @@ function startEdge(handle) {
   // 不依赖目标机装 Node/npx/tsx。entry 为 build:dist 编译出的 dist/main.js。
   const appRoot = app.getAppPath();
   const edgeEntry = path.join(appRoot, 'dist', 'main.js');
+  // 打包后 appRoot 是 app.asar 文件；spawn cwd 必须是真目录，否则 macOS 抛 ENOTDIR，
+  // 核心进程根本起不来、浏览器无法启动（本地 dev 因 appRoot 为真目录不触发）。
+  const edgeCwd = appRoot.endsWith('.asar') ? path.dirname(appRoot) : appRoot;
   let spawnEnv;
   if (handle.kind === 'adspower') {
     // 身份闸（红线）：冻结 env 注入唯一稳定身份；无法派生（缺分身 id）则诚实拒绝，绝不回落主机名。
@@ -1030,7 +1033,7 @@ function startEdge(handle) {
   // 若上一会话该环境曾已绑、随后被解绑再重启，stale-true 会残留成误显示「已设置」——每次启动清零、待新会话权威信号重建。
   handle.status.personaBound = false;
   const child = spawn(process.execPath, [edgeEntry], {
-    cwd: appRoot,
+    cwd: edgeCwd,
     env: spawnEnv,
     // 第四路 IPC 专用于本地生命周期意图；persona/browser parking 既有 stdin 协议保持不变。
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
