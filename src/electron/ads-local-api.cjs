@@ -36,14 +36,14 @@ function createAdsLocalApi(deps = {}) {
   let lastApiAt = 0;
   let chain = Promise.resolve();
 
-  function throttledFetch(url, headers) {
+  function throttledCore(fn) {
     const run = chain.then(async () => {
       if (lastApiAt !== 0) {
         const wait = ADS_MIN_INTERVAL_MS - (now() - lastApiAt);
         if (wait > 0) await sleep(wait);
       }
       try {
-        return await fetchImpl(url, { headers });
+        return await fn();
       } finally {
         lastApiAt = now();
       }
@@ -51,6 +51,14 @@ function createAdsLocalApi(deps = {}) {
     // 断开 rejection、只为链能继续（本次结果仍由 run 返回给调用方）。
     chain = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  function throttledFetch(url, headers) {
+    return throttledCore(() => fetchImpl(url, { headers }));
+  }
+  // 通用请求（支持 POST/body），与 throttledFetch 共用同一条串行节流链。
+  function throttledRequest(url, init) {
+    return throttledCore(() => fetchImpl(url, init));
   }
 
   function baseOf(opts) {
@@ -211,7 +219,67 @@ function createAdsLocalApi(deps = {}) {
     return { ok: true, activeUserIds };
   }
 
-  return { status, listProfiles, listGroups, listActiveProfiles, ADS_MIN_INTERVAL_MS };
+  /**
+   * 取内核清单：GET {base}/api/v2/browser-profile/kernels?kernel_type=Chrome。
+   * 直连 HTTP（绕开 CLI 的 `get-kernel-list`——Electron Node 20 下 `ads start` 未写 pid/store，
+   * CLI 命令会误判「runtime not running」，但服务本身在监听、HTTP 正常）。
+   * 不 throw：成功 { ok:true, list:[{kernel, kernel_type, is_downloaded}] }，失败 { ok:false, error }。
+   */
+  async function kernels(opts = {}) {
+    const kt = (opts && opts.kernelType) || 'Chrome';
+    const url = `${baseOf(opts)}/api/v2/browser-profile/kernels?kernel_type=${encodeURIComponent(kt)}`;
+    let res;
+    try {
+      res = await throttledFetch(url, authHeaders(opts));
+    } catch (e) {
+      return { ok: false, error: `取内核列表失败：本地 API 不可达（${(e && e.message) || String(e)}）` };
+    }
+    if (!res.ok) return { ok: false, error: `取内核列表失败（HTTP ${res.status}）` };
+    let body;
+    try {
+      body = await res.json();
+    } catch {
+      return { ok: false, error: '取内核列表失败：本地 API 响应非 JSON' };
+    }
+    if (typeof body.code === 'number' && body.code !== 0) {
+      return { ok: false, error: `取内核列表失败：code=${body.code} ${body.msg || ''}`.trim() };
+    }
+    const data = body.data || {};
+    const list = Array.isArray(data.list) ? data.list : Array.isArray(data) ? data : [];
+    return { ok: true, list };
+  }
+
+  /**
+   * 触发/查询内核下载：POST {base}/api/v2/browser-profile/download-kernel {kernel_type, kernel_version}。
+   * 幂等：首次触发下载，之后每次返回当前进度；轮询到 status='completed' 即完成。
+   * 返回 { ok:true, status, progress }（progress 0-100；completed/installing 归 100）或 { ok:false, error }。
+   */
+  async function downloadKernel(opts = {}) {
+    const payload = JSON.stringify({ kernel_type: (opts && opts.kernelType) || 'Chrome', kernel_version: String(opts && opts.version) });
+    const url = `${baseOf(opts)}/api/v2/browser-profile/download-kernel`;
+    let res;
+    try {
+      res = await throttledRequest(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders(opts) }, body: payload });
+    } catch (e) {
+      return { ok: false, error: `内核下载请求失败：本地 API 不可达（${(e && e.message) || String(e)}）` };
+    }
+    if (!res.ok) return { ok: false, error: `内核下载请求失败（HTTP ${res.status}）` };
+    let body;
+    try {
+      body = await res.json();
+    } catch {
+      return { ok: false, error: '内核下载请求失败：本地 API 响应非 JSON' };
+    }
+    if (typeof body.code === 'number' && body.code !== 0) {
+      return { ok: false, error: `内核下载失败：code=${body.code} ${body.msg || ''}`.trim() };
+    }
+    const d = body.data || {};
+    const status = d.status || 'pending';
+    const progress = ['completed', 'installing'].includes(status) ? 100 : Math.max(0, Math.min(100, Number(d.progress) || 0));
+    return { ok: true, status, progress };
+  }
+
+  return { status, listProfiles, listGroups, listActiveProfiles, kernels, downloadKernel, ADS_MIN_INTERVAL_MS };
 }
 
 // user/list 单项归一化。user_id=写入分身 ID 的唯一值；serial_number（UI 序号）/name/代理配置仅供展示。

@@ -1482,57 +1482,15 @@ function ensureAdsRuntimeAndKernelOnce(handle) {
   return adsPrepInFlight;
 }
 
-// 启动浏览器前的完整确保 = 服务确保 + （仅内嵌形态）内核预检。
-// 复用外部/已在跑的服务时其自管内核，跳过预检（保持迁移期行为）。
+// 启动浏览器前的完整确保 = 服务确保 + 内核预检（无论服务是刚起的还是已在跑的都要预检——
+// 我们自己先前起的服务也没下内核，adopted 直接放行会撞 browser/start「SunBrowser 148 is not ready」）。
+// 内核经 **HTTP LocalAPI 直连**（绕开 CLI 的 get-kernel-list/download-kernel——Electron Node 20 下
+// `ads start` 未写 pid/store，CLI 命令误判「runtime not running」，但服务在监听、HTTP 正常）。
 async function ensureAdsRuntimeAndKernel(handle) {
   const svc = await ensureAdsServiceOnce(handle);
   if (!svc.ok) return svc;
-  // 内核预检必须在启动浏览器前跑，无论服务是刚起的（embedded）还是已在跑的（adopted）——
-  // 我们自己先前起的服务（如「选已有环境」拉列表时起的）也没下内核，adopted 直接放行会撞
-  // browser/start「SunBrowser 148 is not ready」。adopted 时 svc 不带 cliEntry，这里补解析。
-  const kernelCli = svc.cliEntry || adsRuntime.resolveCliEntry({
-    resourcesPath: process.resourcesPath,
-    appRoot: app.getAppPath(),
-    userDataPath: app.getPath('userData'),
-  });
-  if (!kernelCli) {
-    // 无随包运行时可管内核（纯外部自管形态）——放行，由外部服务自管内核（迁移期）。
-    return { ok: true, mode: svc.mode };
-  }
-
-  // 条件式内核预检（缺则带进度下载、下完才放行；已下则秒过）
   const version = adsFingerprint.DEFAULT_KERNEL;
-  if (handle) appendEdgeLog(handle.envId, `检查浏览器内核 ${version} 就绪情况（缺则首次下载约 750MB）…`);
-  let loggedDownloadStart = false;
-  const kres = await adsRuntime.ensureKernel({
-    cliEntry: kernelCli,
-    execPath: process.execPath,
-    version,
-    onProgress: ({ percent, state }) => {
-      if (!handle) return;
-      if (!loggedDownloadStart && (state === 'downloading' || state === 'installing')) {
-        loggedDownloadStart = true;
-        appendEdgeLog(handle.envId, `开始下载浏览器内核 ${version}（约 750MB，仅首次；带进度条）…`);
-      }
-      updateStatus(handle, {
-        kernelPrep: { state, percent, version },
-        lastMessage: `正在下载浏览器内核 ${version}（约 750MB，仅首次）… ${percent}%`,
-        ...presencePatch(`准备浏览器内核 ${percent}%`),
-      });
-    },
-  });
-  if (handle) {
-    if (kres.ok) {
-      appendEdgeLog(handle.envId, kres.alreadyPresent ? `浏览器内核 ${version} 已就绪` : `浏览器内核 ${version} 下载完成`);
-    } else {
-      appendEdgeLog(handle.envId, `浏览器内核 ${version} 准备失败：${kres.error || ''}`, true);
-      // 诊断：把 get-kernel-list / download-kernel 的原始输出落日志（截断），便于定位真机差异。
-      const raw = (kres.raw || '').toString().slice(0, 1500);
-      const rawErr = (kres.rawErr || '').toString().slice(0, 500);
-      if (raw) appendEdgeLog(handle.envId, `内核命令原始输出(截断): ${raw}`, true);
-      if (rawErr) appendEdgeLog(handle.envId, `内核命令 stderr(截断): ${rawErr}`, true);
-    }
-  }
+  const kres = await ensureKernelViaHttp(handle, version);
   if (!kres.ok) {
     if (handle) {
       updateStatus(handle, {
@@ -1549,6 +1507,41 @@ async function ensureAdsRuntimeAndKernel(handle) {
   }
   if (handle) updateStatus(handle, { kernelPrep: null, ...clearEdgeFailurePatch(handle) });
   return { ok: true, mode: svc.mode, base: svc.base };
+}
+
+// 内核预检（HTTP 直连）：查 GET /kernels → 已下则秒过；缺则轮询 POST /download-kernel（幂等）到 completed，
+// 每轮把进度经 kernelPrep 上报（带进度条）。诚实失败、绝不假成功。
+async function ensureKernelViaHttp(handle, version) {
+  if (handle) appendEdgeLog(handle.envId, `检查浏览器内核 ${version} 就绪情况（缺则首次下载约 750MB）…`);
+  const kl = await adsApi.kernels({ ...resolveAdsOpts(), kernelType: 'Chrome' });
+  if (!kl.ok) return { ok: false, error: kl.error };
+  const hit = (kl.list || []).find((k) => String(k.kernel) === String(version) && String(k.kernel_type || 'Chrome') === 'Chrome');
+  if (hit && hit.is_downloaded) {
+    if (handle) appendEdgeLog(handle.envId, `浏览器内核 ${version} 已就绪`);
+    return { ok: true, alreadyPresent: true };
+  }
+  if (!hit) return { ok: false, error: `内核 ${version} 不在可下载列表中` };
+
+  if (handle) appendEdgeLog(handle.envId, `开始下载浏览器内核 ${version}（约 750MB，仅首次；带进度条）…`);
+  const deadline = Date.now() + 30 * 60 * 1000; // 30min 上限，超时诚实报错
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  while (Date.now() < deadline) {
+    const d = await adsApi.downloadKernel({ ...resolveAdsOpts(), kernelType: 'Chrome', version });
+    if (!d.ok) return { ok: false, error: d.error };
+    if (handle) {
+      updateStatus(handle, {
+        kernelPrep: { state: d.status === 'completed' ? 'installing' : d.status, percent: d.progress, version },
+        lastMessage: `正在下载浏览器内核 ${version}（约 750MB，仅首次）… ${d.progress}%`,
+        ...presencePatch(`准备浏览器内核 ${d.progress}%`),
+      });
+    }
+    if (d.status === 'completed') {
+      if (handle) appendEdgeLog(handle.envId, `浏览器内核 ${version} 下载完成`);
+      return { ok: true, downloaded: true };
+    }
+    await wait(1500);
+  }
+  return { ok: false, error: `内核 ${version} 下载超时（30min）` };
 }
 
 // adspower（AdsPower 指纹浏览器）路径：不自起本机 Chrome、不做 9222 cookie 轮询；
