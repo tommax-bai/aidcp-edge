@@ -48,9 +48,10 @@ let isQuitting = false;
 // 优雅全停已完成、允许本次 quit 直落（before-quit 二次进入不再拦截）。
 let quitFinal = false;
 let quitStopAllInFlight = false;
-// 内嵌 AdsPower 运行时解析出的 Local API base（非默认端口时覆盖 AIDCP_ADS_API_BASE 喂核心）；
-// 外部客户端 / 未内嵌形态下保持 null，spawn env 回落 settings.adsApiBase 或核心默认 50325。
-let embeddedAdsApiBase = null;
+// 运行时确保后解析出的 Local API base（非默认端口时覆盖 AIDCP_ADS_API_BASE 喂核心）；
+// 这是主进程读写 + 全部核心子进程的**单一 base 权威**（P0-A：resolveAdsOpts 亦优先采用它，
+// 杜绝「解析出非 50325 端口、主进程却仍发 50325」的串台）。未确保前保持 null，回落 settings.adsApiBase 或核心默认 50325。
+let adsServiceBase = null;
 
 // AdsPower 官方下载页（客户端「下载 AdsPower」按钮外链）。
 const ADS_DOWNLOAD_URL = 'https://www.adspower.net/download';
@@ -208,24 +209,61 @@ function buildSelfProviderEnv() {
   };
 }
 
+// 随包内置的共享 AdsPower 凭据（数据文件 `ads-runtime.json`，可轮换、绝不硬编码进 .cjs）：
+// 打包态从 process.resourcesPath 读，开发态从 appRoot/resources 读。缺失/损坏返回空串（诚实回落）。
+let bakedAdsRuntimeConfigCache;
+function resolveBakedAdsRuntimeConfig() {
+  if (bakedAdsRuntimeConfigCache !== undefined) return bakedAdsRuntimeConfigCache;
+  const candidates = [
+    process.resourcesPath ? path.join(process.resourcesPath, 'ads-runtime.json') : null,
+    path.join(app.getAppPath(), 'resources', 'ads-runtime.json'),
+  ];
+  for (const p of candidates) {
+    try {
+      if (p && fs.existsSync(p)) {
+        const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+        bakedAdsRuntimeConfigCache = cfg && typeof cfg === 'object' ? cfg : {};
+        return bakedAdsRuntimeConfigCache;
+      }
+    } catch {
+      /* best-effort：坏文件当未配置，诚实回落到 settings/env/空 */
+    }
+  }
+  bakedAdsRuntimeConfigCache = {};
+  return bakedAdsRuntimeConfigCache;
+}
+
+// 单一 api-key 解析器（优先级：表单当前值 > 本机设置 > 环境变量 > 随包内置默认）。
+// 空串表示彻底缺失——上游据此诚实报错，MUST NOT 静默假成功。
+function resolveAdsApiKey(formKey) {
+  const form = formKey && String(formKey).trim();
+  if (form) return form;
+  if (settings.adsApiKey) return settings.adsApiKey;
+  if (process.env.AIDCP_ADS_API_KEY) return String(process.env.AIDCP_ADS_API_KEY);
+  const baked = resolveBakedAdsRuntimeConfig().adsApiKey;
+  return baked && String(baked).trim() ? String(baked).trim() : '';
+}
+
 // adspower 每环境通用注入（不含身份键；身份由 fleet.buildEnvSpawnEnv 注入并守闸）。
 function buildAdsProviderEnv(handle) {
   const env = {
     ...buildBrowserParkingEnv(handle ? handle.cascadeIndex : 0),
   };
-  if (settings.adsApiKey) env.AIDCP_ADS_API_KEY = settings.adsApiKey;
-  if (embeddedAdsApiBase) env.AIDCP_ADS_API_BASE = embeddedAdsApiBase;
+  const apiKey = resolveAdsApiKey('');
+  if (apiKey) env.AIDCP_ADS_API_KEY = apiKey;
+  if (adsServiceBase) env.AIDCP_ADS_API_BASE = adsServiceBase;
   else if (settings.adsApiBase) env.AIDCP_ADS_API_BASE = settings.adsApiBase;
   return env;
 }
 
 // 解析只读调用的 base/key：优先用渲染层传入的**当前表单值**（支持「新填 key 未保存即刷新」而不陷回环），
-// 表单未带该字段才回落持久化 settings。apiKey 只用于本次请求头、不落日志 / 不写文件。
+// 表单未带该字段才回落。base 优先级（P0-A）：表单 > 运行时解析出的 adsServiceBase > 持久化 settings > 核心默认。
+// apiKey 走单一解析器（含随包内置默认），只用于本次请求头、不落日志 / 不写文件。
 function resolveAdsOpts(formOpts) {
   const o = formOpts || {};
-  const apiBase = (o.apiBase && String(o.apiBase).trim()) || settings.adsApiBase || undefined;
+  const apiBase = (o.apiBase && String(o.apiBase).trim()) || adsServiceBase || settings.adsApiBase || undefined;
   const formKey = Object.prototype.hasOwnProperty.call(o, 'apiKey') ? String(o.apiKey).trim() : '';
-  const apiKey = formKey || settings.adsApiKey;
+  const apiKey = resolveAdsApiKey(formKey);
   const out = {};
   if (apiBase) out.apiBase = apiBase;
   if (apiKey) out.apiKey = apiKey;
@@ -1322,7 +1360,71 @@ async function launchChromeAndGateEdge(handle) {
 // 多环境下运行时/内核为**整机共享**：同一时刻只跑一次预检（in-flight 单飞），后续环境等同一结果；
 // settle 后清除，下次启动重新探测（运行时可能中途退出，不缓存陈旧结论）。
 // 红线：任何失败诚实回报 + 弹窗、返回 { ok:false }，MUST NOT 起核心。
+let adsServiceInFlight = null;
 let adsPrepInFlight = null;
+
+// 服务确保（单飞，跨 create-env / 启动 / 代理 / 删除去重）：确保指纹浏览器 LocalAPI 服务就绪、
+// 确立单一 base 权威。**不下载内核**——元数据类操作（新建环境等）只需服务就绪。
+// 返回 { ok, mode:'adopted'|'embedded', base?, cliEntry?, error? }。handle 可空（无 UI 上下文时不打状态）。
+function ensureAdsServiceOnce(handle) {
+  if (adsServiceInFlight) return adsServiceInFlight;
+  adsServiceInFlight = ensureAdsService(handle).finally(() => {
+    adsServiceInFlight = null;
+  });
+  return adsServiceInFlight;
+}
+
+async function ensureAdsService(handle) {
+  adsServiceBase = null;
+  // 1. 服务已可达则复用（外部 AdsPower / 已在跑的 CLI daemon）；其自管内核，不在此预检。
+  const probe = await adsApi.status(resolveAdsOpts()).catch(() => null);
+  if (probe && probe.ok) return { ok: true, mode: 'adopted' };
+
+  // 2. 服务未就绪 → 拉起随包运行时。
+  const cliEntry = adsRuntime.resolveCliEntry({
+    resourcesPath: process.resourcesPath,
+    appRoot: app.getAppPath(),
+    userDataPath: app.getPath('userData'),
+  });
+  if (!cliEntry) {
+    // 硬切换：无随包运行时且服务未就绪 = 诚实硬停，绝不「继续尝试」去连一个不存在的 50325。
+    const error = '指纹浏览器运行时未就绪：未随包运行时且本机无可达的指纹浏览器服务';
+    if (handle) {
+      updateStatus(handle, {
+        auth: 'config required',
+        edge: 'stopped',
+        session: 'idle',
+        lastMessage: error,
+        ...edgeFailurePatch(error),
+        ...presencePatch('运行时未就绪'),
+      });
+    }
+    return { ok: false, error };
+  }
+
+  // 3. 起内嵌运行时（`ads status` 已在跑则复用、否则 `ads start -k <key>`）。
+  if (handle) updateStatus(handle, { auth: 'checking', lastMessage: '正在启动内置指纹浏览器运行时…', ...presencePatch('正在准备浏览器运行时…') });
+  const apiKey = resolveAdsApiKey('');
+  const rt = await adsRuntime.ensureRuntime({ cliEntry, execPath: process.execPath, apiKey });
+  if (!rt.ok) {
+    if (handle) {
+      updateStatus(handle, {
+        auth: 'config required',
+        edge: 'stopped',
+        session: 'idle',
+        kernelPrep: null,
+        lastMessage: `内置指纹浏览器运行时启动失败：${rt.error}`,
+        ...edgeFailurePatch(rt.error || '内置指纹浏览器运行时启动失败'),
+        ...presencePatch('运行时启动失败'),
+      });
+      surfaceFailure('AIDCP Edge 无法启动', `内置指纹浏览器运行时启动失败：${rt.error || '未知错误'}`);
+    }
+    return { ok: false, error: rt.error };
+  }
+  adsServiceBase = rt.base; // P0-A：运行时解析出的实际端口即单一 base 权威
+  return { ok: true, mode: 'embedded', base: rt.base, cliEntry };
+}
+
 function ensureAdsRuntimeAndKernelOnce(handle) {
   if (adsPrepInFlight) return adsPrepInFlight;
   adsPrepInFlight = ensureAdsRuntimeAndKernel(handle).finally(() => {
@@ -1331,45 +1433,21 @@ function ensureAdsRuntimeAndKernelOnce(handle) {
   return adsPrepInFlight;
 }
 
+// 启动浏览器前的完整确保 = 服务确保 + （仅内嵌形态）内核预检。
+// 复用外部/已在跑的服务时其自管内核，跳过预检（保持迁移期行为）。
 async function ensureAdsRuntimeAndKernel(handle) {
-  embeddedAdsApiBase = null;
-  // 1. Local API 已可达？（外部客户端在跑就沿用现状）
-  const probe = await adsApi.status(resolveAdsOpts()).catch(() => null);
-  if (probe && probe.ok) return { ok: true, mode: 'external' };
+  const svc = await ensureAdsServiceOnce(handle);
+  if (!svc.ok) return svc;
+  if (svc.mode !== 'embedded') return { ok: true, mode: svc.mode };
 
-  // 2. 随包内嵌运行时是否存在
-  const cliEntry = adsRuntime.resolveCliEntry({
-    resourcesPath: process.resourcesPath,
-    appRoot: app.getAppPath(),
-  });
-  if (!cliEntry) return { ok: true, mode: 'none' };
-
-  // 3. 起内嵌运行时
-  updateStatus(handle, { auth: 'checking', lastMessage: '正在启动内置指纹浏览器运行时…', ...presencePatch('正在准备浏览器运行时…') });
-  const apiKey = settings.adsApiKey || process.env.AIDCP_ADS_API_KEY;
-  const rt = await adsRuntime.ensureRuntime({ cliEntry, execPath: process.execPath, apiKey });
-  if (!rt.ok) {
-    updateStatus(handle, {
-      auth: 'config required',
-      edge: 'stopped',
-      session: 'idle',
-      kernelPrep: null,
-      lastMessage: `内置指纹浏览器运行时启动失败：${rt.error}`,
-      ...edgeFailurePatch(rt.error || '内置指纹浏览器运行时启动失败'),
-      ...presencePatch('运行时启动失败'),
-    });
-    surfaceFailure('AIDCP Edge 无法启动', `内置指纹浏览器运行时启动失败：${rt.error || '未知错误'}`);
-    return { ok: false, error: rt.error };
-  }
-  embeddedAdsApiBase = rt.base;
-
-  // 4. 条件式内核预检（缺则带进度下载、下完才放行）
+  // 条件式内核预检（缺则带进度下载、下完才放行）
   const version = adsFingerprint.DEFAULT_KERNEL;
   const kres = await adsRuntime.ensureKernel({
-    cliEntry,
+    cliEntry: svc.cliEntry,
     execPath: process.execPath,
     version,
     onProgress: ({ percent, state }) => {
+      if (!handle) return;
       updateStatus(handle, {
         kernelPrep: { state, percent, version },
         lastMessage: `正在下载浏览器内核 ${version}（约 750MB，仅首次）… ${percent}%`,
@@ -1378,19 +1456,21 @@ async function ensureAdsRuntimeAndKernel(handle) {
     },
   });
   if (!kres.ok) {
-    updateStatus(handle, {
-      edge: 'stopped',
-      session: 'idle',
-      kernelPrep: { state: 'failed', percent: 0, version },
-      lastMessage: `浏览器内核准备失败：${kres.error}`,
-      ...edgeFailurePatch(kres.error || '浏览器内核准备失败'),
-      ...presencePatch('内核准备失败，可重试'),
-    });
-    surfaceFailure('AIDCP Edge 无法启动', `浏览器内核准备失败：${kres.error || '未知错误'}`);
+    if (handle) {
+      updateStatus(handle, {
+        edge: 'stopped',
+        session: 'idle',
+        kernelPrep: { state: 'failed', percent: 0, version },
+        lastMessage: `浏览器内核准备失败：${kres.error}`,
+        ...edgeFailurePatch(kres.error || '浏览器内核准备失败'),
+        ...presencePatch('内核准备失败，可重试'),
+      });
+      surfaceFailure('AIDCP Edge 无法启动', `浏览器内核准备失败：${kres.error || '未知错误'}`);
+    }
     return { ok: false, error: kres.error };
   }
-  updateStatus(handle, { kernelPrep: null, ...clearEdgeFailurePatch(handle) });
-  return { ok: true, mode: 'embedded', base: rt.base };
+  if (handle) updateStatus(handle, { kernelPrep: null, ...clearEdgeFailurePatch(handle) });
+  return { ok: true, mode: 'embedded', base: svc.base };
 }
 
 // adspower（AdsPower 指纹浏览器）路径：不自起本机 Chrome、不做 9222 cookie 轮询；
@@ -1943,6 +2023,11 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
   if (adsCreateInFlight) return { ok: false, error: '创建进行中，请等当前创建完成' };
   adsCreateInFlight = true;
   try {
+    // 先确保指纹浏览器服务就绪（仅服务、不下内核）——冷机不再裸抛 group/create 的 fetch failed。
+    const svc = await ensureAdsServiceOnce(null);
+    if (!svc.ok) {
+      return { ok: false, error: `指纹浏览器运行时未就绪：${svc.error || '未知错误'}`, retryable: true };
+    }
     const ads = resolveAdsOpts(opts);
     const platform = normalizePlatform(opts && opts.platform);
     const importText = platform === 'facebook' ? (opts && opts.facebookAccountImport) : '';
@@ -2019,6 +2104,8 @@ ipcMain.handle('ads:updateEnvProxy', async (_event, opts) => {
   const norm = normalizeProxyInput((opts && opts.proxy) || {});
   if (!norm.ok) return { ok: false, error: `代理输入不合法：${norm.error}` };
   try {
+    const svc = await ensureAdsServiceOnce(null);
+    if (!svc.ok) return { ok: false, error: `指纹浏览器运行时未就绪：${svc.error || '未知错误'}`, retryable: true };
     const ads = resolveAdsOpts(opts);
     const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
     const r = await writeApi.updateProfileProxy({ userId: String(userId), proxyConfig: norm.proxyConfig }, ads);
@@ -2037,6 +2124,8 @@ ipcMain.handle('ads:deleteEnv', async (_event, opts) => {
   const userId = opts && opts.userId;
   if (!userId) return { ok: false, error: '缺 userId' };
   try {
+    const svc = await ensureAdsServiceOnce(null);
+    if (!svc.ok) return { ok: false, error: `指纹浏览器运行时未就绪：${svc.error || '未知错误'}`, retryable: true };
     const ads = resolveAdsOpts(opts);
     const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
     const r = await writeApi.deleteProfile(String(userId), ads);

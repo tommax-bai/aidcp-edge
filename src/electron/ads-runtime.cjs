@@ -27,8 +27,13 @@ function delay(ms) {
 
 // 解析随包 CLI 入口：优先 extraResources（打包态 process.resourcesPath），回落 node_modules（开发态）。
 // 找不到返回 null——调用方据此优雅跳过内嵌运行时（迁移期：外部已装 AdsPower 客户端时行为不变）。
-function resolveCliEntry({ resourcesPath, appRoot } = {}) {
+function resolveCliEntry({ resourcesPath, appRoot, userDataPath } = {}) {
   const candidates = [];
+  if (userDataPath) {
+    // 首选：首启暂存到用户可写目录的副本（打包态 App Translocation 下 Resources 只读，
+    // CLI 要往自身 cwd/ 写，故运行时用这份可写副本）。
+    candidates.push(path.join(userDataPath, 'ads-runtime', 'adspower-browser', 'cli', 'index.js'));
+  }
   if (resourcesPath) {
     candidates.push(path.join(resourcesPath, 'adspower-browser', 'cli', 'index.js'));
     candidates.push(path.join(resourcesPath, 'app.asar.unpacked', 'node_modules', 'adspower-browser', 'cli', 'index.js'));
