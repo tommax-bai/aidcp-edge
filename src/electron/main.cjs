@@ -1446,7 +1446,17 @@ async function ensureAdsService(handle) {
   // 3. 起内嵌运行时（`ads status` 已在跑则复用、否则 `ads start -k <key>`）。
   if (handle) updateStatus(handle, { auth: 'checking', lastMessage: '正在启动内置指纹浏览器运行时…', ...presencePatch('正在准备浏览器运行时…') });
   const apiKey = resolveAdsApiKey('');
-  const rt = await adsRuntime.ensureRuntime({ cliEntry, execPath: process.execPath, apiKey });
+  // 就绪判定用 HTTP LocalAPI /status（权威可靠）——不依赖 `ads status`（Electron Node 20 下 fork 起服务后
+  // 其 pid/store 写入可能未完成、误报未在跑，但 HTTP 正常）。
+  const rt = await adsRuntime.ensureRuntime({
+    cliEntry,
+    execPath: process.execPath,
+    apiKey,
+    isReady: async () => {
+      const p = await adsApi.status(resolveAdsOpts()).catch(() => null);
+      return !!(p && p.ok);
+    },
+  });
   if (!rt.ok) {
     if (handle) {
       updateStatus(handle, {
