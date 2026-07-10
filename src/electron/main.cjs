@@ -2039,7 +2039,13 @@ ipcMain.handle('notify:show', (_event, payload) => {
 });
 // AdsPower 只读探测 / 拉取（主进程侧，渲染层不直连本地 API）。opts 可带渲染层当前表单 apiKey/apiBase/groupId。
 ipcMain.handle('ads:status', (_event, opts) => adsApi.status(resolveAdsOpts(opts)));
-ipcMain.handle('ads:listProfiles', (_event, opts) => adsApi.listProfiles(resolveAdsOpts(opts)));
+// 「选择已有环境」拉分身列表：先确保服务就绪（冷机会启动随包运行时），再拉列表——
+// 否则裸抛「本地 API 不可达(fetch failed)」。确保失败则诚实回错（面板据此提示手动填分身 ID）。
+ipcMain.handle('ads:listProfiles', async (_event, opts) => {
+  const svc = await ensureAdsServiceOnce(null);
+  if (!svc.ok) return { ok: false, error: `指纹浏览器运行时未就绪：${svc.error || '未知错误'}` };
+  return adsApi.listProfiles(resolveAdsOpts(opts));
+});
 ipcMain.handle('ads:openCreate', () => openAdsClient());
 
 // ── 「创建环境」程序化建号（change adspower-auto-create-env）：写客户端 allowlist + 指纹引擎 + 编排 ──
