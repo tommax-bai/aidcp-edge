@@ -1354,12 +1354,13 @@ async function launchChromeAndGateEdge(handle) {
   }
 }
 
-// 起核心前确保 AdsPower 运行时就绪 + 所需浏览器内核已下载（change edge-bundled-adspower-cli-runtime）。
-// 多环境下运行时/内核为**整机共享**：同一时刻只跑一次预检（in-flight 单飞），后续环境等同一结果；
-// settle 后清除，下次启动重新探测（运行时可能中途退出，不缓存陈旧结论）。
+// 起核心前确保 AdsPower 运行时就绪 + 该 profile 所需浏览器内核已下载（change edge-bundled-adspower-cli-runtime）。
+// 服务为整机单例 → 全局单飞（ensureAdsServiceOnce）；内核为整机共享但**按版本**（不同 profile 可绑不同内核）
+// → 按版本单飞（ensureKernelOnce）。均 settle 后清除、下次重探（运行时可能中途退出，不缓存陈旧结论）。
 // 红线：任何失败诚实回报 + 弹窗、返回 { ok:false }，MUST NOT 起核心。
 let adsServiceInFlight = null;
-let adsPrepInFlight = null;
+// 内核按版本单飞：同版本并发环境共享一次下载、不同版本各自确保，避免全局单飞把 147/148 串成同一结果。
+const adsKernelInFlight = new Map(); // version(string) -> Promise<{ok,...}>
 
 // 服务确保（单飞，跨 create-env / 启动 / 代理 / 删除去重）：确保指纹浏览器 LocalAPI 服务就绪、
 // 确立单一 base 权威。**不下载内核**——元数据类操作（新建环境等）只需服务就绪。
@@ -1471,25 +1472,15 @@ async function ensureAdsService(handle) {
   return { ok: true, mode: rt.alreadyRunning ? 'adopted' : 'embedded', base: rt.base, cliEntry };
 }
 
-function ensureAdsRuntimeAndKernelOnce(handle) {
-  if (adsPrepInFlight) return adsPrepInFlight;
-  adsPrepInFlight = ensureAdsRuntimeAndKernel(handle).finally(() => {
-    adsPrepInFlight = null;
-  });
-  return adsPrepInFlight;
-}
-
-// 启动浏览器前的完整确保 = 服务确保 + 内核预检（无论服务是刚起的还是已在跑的都要预检——
-// 我们自己先前起的服务也没下内核，adopted 直接放行会撞 browser/start「SunBrowser 148 is not ready」）。
-// 内核走随包 **CLI**（get-kernel-list / download-kernel）——staging 修好 isRunning 判活后，CLI 命令在
-// Electron 宿主下可靠；download-kernel 非 TTY 下逐轮吐 `Kernel progress: N% [state]`，经 onProgress 上进度条。
-async function ensureAdsRuntimeAndKernel(handle) {
-  const svc = await ensureAdsServiceOnce(handle);
-  if (!svc.ok) return svc;
-  const version = adsFingerprint.DEFAULT_KERNEL;
-  if (handle) appendEdgeLog(handle.envId, `检查浏览器内核 ${version} 就绪情况（缺则首次下载约 750MB）…`);
-  const kres = await adsRuntime.ensureKernel({
-    cliEntry: svc.cliEntry,
+// 内核确保（按版本单飞）：同一内核版本同一时刻只跑一次 get-kernel-list + download-kernel，
+// 同版本并发环境等同一结果；不同版本各自并行、互不串扰。进度回调挂首个调用方的 handle，
+// 全局进度条（renderKernelPrepGlobal）不挑环境仍会展示。
+function ensureKernelOnce(version, cliEntry, handle) {
+  const key = String(version);
+  const existing = adsKernelInFlight.get(key);
+  if (existing) return existing;
+  const p = adsRuntime.ensureKernel({
+    cliEntry,
     execPath: process.execPath,
     version,
     kernelType: 'Chrome',
@@ -1501,18 +1492,35 @@ async function ensureAdsRuntimeAndKernel(handle) {
         ...presencePatch(`准备浏览器内核 ${percent}%`),
       });
     },
-  });
+  }).finally(() => adsKernelInFlight.delete(key));
+  adsKernelInFlight.set(key, p);
+  return p;
+}
+
+// 启动浏览器前的完整确保 = 服务确保 + 内核预检（无论服务是刚起的还是已在跑的都要预检——
+// 我们自己先前起的服务也没下内核，adopted 直接放行会撞 browser/start「SunBrowser 148 is not ready」）。
+// 内核走随包 **CLI**（get-kernel-list / download-kernel）——staging 修好 isRunning 判活后，CLI 命令在
+// Electron 宿主下可靠；download-kernel 非 TTY 下逐轮吐 `Kernel progress: N% [state]`，经 onProgress 上进度条。
+async function ensureAdsRuntimeAndKernel(handle) {
+  const svc = await ensureAdsServiceOnce(handle);
+  if (!svc.ok) return svc;
+  // 该环境所需内核版本：优先上次 browser/start 诚实报出的版本（handle.neededKernel）——AdsPower profile
+  // 可绑 ≠ DEFAULT_KERNEL 的内核（旧版/手工建/云端同步来的），且 LocalAPI user/list 不暴露该版本，故按
+  // 启动报错「SunBrowser <N> is not ready」反应式确保（同 AdsPower CLI open-browser 的自愈做法）；否则默认。
+  const version = (handle && handle.neededKernel) || adsFingerprint.DEFAULT_KERNEL;
+  if (handle) appendEdgeLog(handle.envId, `检查浏览器内核 ${version} 就绪情况（缺则首次下载约 750MB）…`);
+  const kres = await ensureKernelOnce(version, svc.cliEntry, handle);
   if (!kres.ok) {
     if (handle) {
       updateStatus(handle, {
         edge: 'stopped',
         session: 'idle',
         kernelPrep: { state: 'failed', percent: 0, version },
-        lastMessage: `浏览器内核准备失败：${kres.error}`,
-        ...edgeFailurePatch(kres.error || '浏览器内核准备失败'),
+        lastMessage: `浏览器内核 ${version} 准备失败：${kres.error}`,
+        ...edgeFailurePatch(kres.error || `浏览器内核 ${version} 准备失败`),
         ...presencePatch('内核准备失败，可重试'),
       });
-      surfaceFailure('AIDCP Edge 无法启动', `浏览器内核准备失败：${kres.error || '未知错误'}`);
+      surfaceFailure('AIDCP Edge 无法启动', `浏览器内核 ${version} 准备失败：${kres.error || '未知错误'}`);
     }
     return { ok: false, error: kres.error };
   }
@@ -1546,7 +1554,8 @@ async function startAdsPowerFlow(handle) {
     ...clearEdgeFailurePatch(handle),
   });
   // 起核心前确保运行时 + 内核就绪；失败已诚实呈现，绝不带核心进注定失败的启动。
-  const prep = await ensureAdsRuntimeAndKernelOnce(handle);
+  // 服务全局单飞 + 内核按版本单飞（见 ensureAdsServiceOnce / ensureKernelOnce），无需再叠一层全局 once。
+  const prep = await ensureAdsRuntimeAndKernel(handle);
   if (!prep.ok) return;
   // 运行时/内核准备可长达数分钟（首启下载）；这期间被暂停/移出/退出则诚实放弃，不再拉起子进程。
   // （startEdge 亦有同一取消闸兜底；此处提前返回避免多余「正在启动」状态残留。）
@@ -1610,6 +1619,11 @@ function handleEdgeLogLine(handle, message, isError = false) {
     return;
   }
   appendEdgeLog(handle.envId, message, isError); // 落文件（排障回溯，独立于下方状态判断）
+  // AdsPower profile 可绑 ≠ DEFAULT_KERNEL 的内核；browser/start 会诚实报「SunBrowser <N> is not ready」。
+  // 捕获该版本记到环境句柄，下次预检据此确保正确内核（反应式——该版本 LocalAPI user/list 不暴露）；
+  // 修 profile 内核 ≠ 默认导致的启动死循环（如某环境需 147、预检却只查 148 → 永远撞「147 not ready」）。
+  const kernelMiss = /SunBrowser (\d+) is not ready/.exec(message);
+  if (kernelMiss && handle) handle.neededKernel = kernelMiss[1];
   if (message.includes('[browser-parking] control-ready')) {
     handle.browserParkingReady = true;
     handle.browserPersonaNoticeState = null;
