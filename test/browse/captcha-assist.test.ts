@@ -400,3 +400,71 @@ test('拟人注入：真实随机源下落点仍落在 target±jitter 容差内�
   assert.ok(Math.abs((pressed?.params?.x as number) - 200) <= 2, `x 应在 200±2，实为 ${pressed?.params?.x}`);
   assert.ok(Math.abs((pressed?.params?.y as number) - 150) <= 2, `y 应在 150±2，实为 ${pressed?.params?.y}`);
 });
+
+// ── 真实轨迹回放（change captcha-assist-trajectory-replay）──────────────────────
+
+test('轨迹回放：带有效轨迹 → click_result replayMode=trajectory，落点权威 (200,150)', async () => {
+  const cdp = new FakeCdp({ overlayRect: { x: 100, y: 100, width: 200, height: 100 } }); // crop {76,76,248,148}
+  const client = new FakeClient();
+  const handler = new CaptchaAssistHandler({
+    cdp,
+    client,
+    edgeId: 'edge-1',
+    overlayMonitor: new FakeMonitor(['captcha', 'none']),
+    now: () => 7000,
+    idGen: () => 'snap-traj',
+    sleep: async () => {},
+    logger: () => {},
+    random: () => 0.5,
+  });
+  await handler.handle('captcha.assist.capture', { incidentId: 'traj-1', quality: 80 });
+  cdp.calls.length = 0;
+  client.sent.length = 0;
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'traj-1',
+    snapshotId: 'snap-traj',
+    points: [{ x: 0.5, y: 0.5 }],
+    settleMs: 1,
+    trajectory: { v: 1, samples: [{ x: 0.1, y: 0.1, t: 0 }, { x: 0.9, y: 0.9, t: 100 }], clicks: [1] },
+  });
+
+  const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as { status: string; replayMode?: string };
+  assert.equal(result.replayMode, 'trajectory');
+  assert.equal(result.status, 'cleared');
+  const pressed = cdp.calls.find((c) => c.method === 'Input.dispatchMouseEvent' && c.params?.type === 'mousePressed');
+  assert.equal(pressed?.params?.x, 200);
+  assert.equal(pressed?.params?.y, 150);
+});
+
+test('轨迹回放：畸形轨迹（clicks 长度不符）→ 诚实回落合成，replayMode=synthetic', async () => {
+  const cdp = new FakeCdp({ overlayRect: { x: 100, y: 100, width: 200, height: 100 } });
+  const client = new FakeClient();
+  const logs: string[] = [];
+  const handler = new CaptchaAssistHandler({
+    cdp,
+    client,
+    edgeId: 'edge-1',
+    overlayMonitor: new FakeMonitor(['captcha', 'none']),
+    now: () => 8000,
+    idGen: () => 'snap-bad',
+    sleep: async () => {},
+    logger: (m) => logs.push(m),
+    random: () => 0.5,
+  });
+  await handler.handle('captcha.assist.capture', { incidentId: 'bad-1', quality: 80 });
+  client.sent.length = 0;
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'bad-1',
+    snapshotId: 'snap-bad',
+    points: [{ x: 0.5, y: 0.5 }],
+    settleMs: 1,
+    // clicks 长度 2 ≠ 点数 1 → 无效 → 回落合成。
+    trajectory: { v: 1, samples: [{ x: 0.1, y: 0.1, t: 0 }], clicks: [0, 0] },
+  });
+
+  const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as { replayMode?: string };
+  assert.equal(result.replayMode, 'synthetic', '畸形轨迹应回落合成');
+  assert.ok(logs.some((l) => l.includes('轨迹无效')), '丢弃轨迹应可观测（有日志）');
+});

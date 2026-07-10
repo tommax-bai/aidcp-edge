@@ -13,6 +13,7 @@ import {
   type OverlayMonitor,
 } from './overlay-monitor.js';
 import { sampleDelay, defaultRandom as humanDefaultRandom, type TimingConfig } from '../humanize/index.js';
+import { sanitizeTrajectory, replayTrajectory } from '../humanize/trajectory-replay.js';
 
 type CaptchaAssistCommandPayload = CaptchaAssistCapturePayload | CaptchaAssistClickPayload;
 
@@ -216,42 +217,55 @@ export class CaptchaAssistHandler {
       });
       return;
     }
+    // 落点范围校验前置（合成与轨迹两路都用 points 作权威落点）。
+    for (const point of payload.points) {
+      if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1) {
+        this.sendClickResult({
+          incidentId: payload.incidentId,
+          snapshotId: payload.snapshotId,
+          status: 'invalid_target',
+          reason: 'point_out_of_range',
+          checkedAt: this.now(),
+        });
+        return;
+      }
+    }
+    // 轨迹有效 → 回放运营真实轨迹；无/无效 → 回落合成拟人路径（change captcha-assist-humanize-click）。
+    const traj = sanitizeTrajectory(payload.trajectory, payload.points.length);
+    const replayMode: 'trajectory' | 'synthetic' = traj ? 'trajectory' : 'synthetic';
+    if (payload.trajectory && !traj) {
+      // 可观测丢弃：轨迹畸形/超限被丢，如实标注回落，绝不静默、绝不谎称用了轨迹。
+      this.logger(`[captcha-assist] 轨迹无效，回落合成 incident=${payload.incidentId}`);
+    }
     // 点击全程暂停实时 tick（互斥），避免抓到点击派发中途 / settle / 复检期间的画面。
     this.clicking.add(payload.incidentId);
     try {
-      // 拟人注入（change captcha-assist-humanize-click）：连续光标 + overshoot/jitter + 逐帧 dt 抖动 +
-      // 落点前读图停顿 + 点间对数正态停顿；节奏按 edgeId 派生偏置。不再用比日常更弱的 jitter:0/overshoot:false。
-      const pacing = this.captchaPacing();
-      let cursor: { x: number; y: number } | undefined;
-      const pts = payload.points;
-      for (let i = 0; i < pts.length; i++) {
-        const point = pts[i];
-        if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1) {
-          this.sendClickResult({
-            incidentId: payload.incidentId,
-            snapshotId: payload.snapshotId,
-            status: 'invalid_target',
-            reason: 'point_out_of_range',
-            checkedAt: this.now(),
+      if (traj) {
+        // 落点权威取 points（按被点帧 crop 缩放）；样本供移动/时序；每次 press 前补 move 到权威点。
+        await replayTrajectory(this.deps.cdp, snapshot.crop, payload.points, traj, this.random, this.sleep);
+      } else {
+        // 合成拟人注入：连续光标 + overshoot/jitter + 逐帧 dt 抖动 + 落点前读图停顿 + 点间对数正态停顿。
+        const pacing = this.captchaPacing();
+        let cursor: { x: number; y: number } | undefined;
+        const pts = payload.points;
+        for (let i = 0; i < pts.length; i++) {
+          const point = pts[i];
+          // 用"被点的那一帧自己的 crop"缩放落点（冻结提交时该帧可能不是最新帧）。
+          const x = snapshot.crop.x + point.x * snapshot.crop.width;
+          const y = snapshot.crop.y + point.y * snapshot.crop.height;
+          // 上一点的**真实落点**作下一点起步，保光标连续。
+          cursor = await dispatchClick(this.deps.cdp, x, y, {
+            from: cursor,
+            jitter: pacing.jitter,
+            overshoot: this.random() < pacing.overshootProb,
+            moveDelayMs: pacing.moveDelayMs,
+            moveDelayJitter: true,
+            hoverDwellMs: sampleDelay(pacing.hoverDwell, this.random),
+            random: this.random,
+            sleep: this.sleep,
           });
-          return;
+          if (i < pts.length - 1) await this.sleep(sampleDelay(pacing.interPoint, this.random));
         }
-        // 用"被点的那一帧自己的 crop"缩放落点（冻结提交时该帧可能不是最新帧）。
-        const x = snapshot.crop.x + point.x * snapshot.crop.width;
-        const y = snapshot.crop.y + point.y * snapshot.crop.height;
-        // 上一点的**真实落点**作下一点起步，保光标连续（dispatchClick 返回含 jitter/overshoot 的末点）。
-        cursor = await dispatchClick(this.deps.cdp, x, y, {
-          from: cursor,
-          jitter: pacing.jitter,
-          overshoot: this.random() < pacing.overshootProb,
-          moveDelayMs: pacing.moveDelayMs,
-          moveDelayJitter: true,
-          hoverDwellMs: sampleDelay(pacing.hoverDwell, this.random),
-          random: this.random,
-          sleep: this.sleep,
-        });
-        // 点间对数正态停顿：仅非末点后停（末点后直接进 settle）。
-        if (i < pts.length - 1) await this.sleep(sampleDelay(pacing.interPoint, this.random));
       }
       await this.sleep(payload.settleMs ?? 1500);
       const kind = await this.probeBlockingKind();
@@ -262,6 +276,7 @@ export class CaptchaAssistHandler {
           snapshotId: payload.snapshotId,
           status: 'cleared',
           checkedAt: this.now(),
+          replayMode,
         });
         this.sendRiskCleared();
         return;
@@ -275,6 +290,7 @@ export class CaptchaAssistHandler {
         reason: 'blocking_overlay_still_visible',
         checkedAt: this.now(),
         snapshot: next,
+        replayMode,
       });
     } catch (err) {
       this.sendClickResult({
@@ -283,6 +299,7 @@ export class CaptchaAssistHandler {
         status: 'failed',
         reason: `click_failed:${(err as Error).message}`,
         checkedAt: this.now(),
+        replayMode,
       });
     } finally {
       this.clicking.delete(payload.incidentId);
