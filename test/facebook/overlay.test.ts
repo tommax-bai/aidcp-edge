@@ -46,6 +46,35 @@ test('classifyFacebookOverlayFromSignals: temporarily blocked text is unknown-bl
   }), 'unknown');
 });
 
+test('classifyFacebookOverlayFromSignals: FB soft-block/throttle toasts are unknown-blocking (§5.2)', () => {
+  const throttles = [
+    'Action Blocked',
+    "You can't use this feature right now",
+    'We limit how often you can do this to protect our community',
+    'It looks like you were misusing this feature by going too fast',
+    'You’re Going Too Fast', // 智能引号 + 大小写
+    '操作被封锁',
+    '此功能暂时无法使用',
+  ];
+  for (const text of throttles) {
+    assert.equal(
+      classifyFacebookOverlayFromSignals({ href: 'https://www.facebook.com/', text }),
+      'unknown',
+      `should classify throttle text as unknown: ${text}`,
+    );
+  }
+});
+
+test('classifyFacebookOverlayFromSignals: 普通正文不误判为限流（no false positive）', () => {
+  assert.equal(
+    classifyFacebookOverlayFromSignals({
+      href: 'https://www.facebook.com/groups/x/',
+      text: 'This feature helps you limit distractions while you post updates.',
+    }),
+    'none',
+  );
+});
+
 test('classifyFacebookOverlayFromSignals: clean facebook page is none', () => {
   assert.equal(classifyFacebookOverlayFromSignals({
     href: 'https://www.facebook.com/groups/example/permalink/1/',
