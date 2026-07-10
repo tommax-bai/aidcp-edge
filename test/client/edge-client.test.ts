@@ -441,3 +441,18 @@ test('edge-client: captcha assist capture/click 路由到 captchaAssistHandler�
 
   assert.deepEqual(calls.map((env) => env.type), ['captcha.assist.capture', 'captcha.assist.click']);
 });
+
+// 回归（change pacing-fallback-hardening）：中途风控档位刷新 pacing.update MUST 放行到 browseHandler，
+// 漏白名单则在入口静默丢弃 → 边缘兜底节奏收不到升档（同 notification.* 活锁前车）。
+test('edge-client: pacing.update 路由到 browseHandler（不得静默丢弃）', async () => {
+  const ws = new FakeWebSocket();
+  const client = await connectClient(ws);
+  const calls: Envelope[] = [];
+  client.onBrowseCommand((env) => calls.push(env));
+
+  ws.emitMessage(makeEnvelope('pacing.update', 'cmd-pu', 2, { tempo: 1.6 }));
+
+  assert.equal(calls.length, 1, 'pacing.update 应被路由到 browseHandler 而非在入口丢弃');
+  assert.equal(calls[0].type, 'pacing.update');
+  assert.equal((calls[0].payload as { tempo: number }).tempo, 1.6);
+});

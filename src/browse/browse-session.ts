@@ -26,6 +26,7 @@ import type {
   ActionCompletedPayload,
   PageScrollPayload,
   FeedRefreshPayload,
+  PacingUpdatePayload,
   NoteOpenPayload,
   NoteClosePayload,
   InteractionLikePayload,
@@ -161,8 +162,11 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** 详情页停留下限默认区间（与云端 buildPacingDefaults / DWELL_FLOOR_MS 同口径）。 */
+/** 详情页停留下限默认区间（与云端 DWELL_FLOOR_MS 同口径；welcome 快照缺 detail_dwell 时的内置回落）。 */
 const DEFAULT_DWELL_FLOOR_MS = { min: 2500, max: 5000 } as const;
+
+/** tempo 档位上限（防呆）：云端现役最大 1.6（restricted/frozen）；留足头寸、越界即忽略，杜绝失控大停留逼近 idle 看门狗。 */
+const MAX_TEMPO = 3;
 
 /** 由 [min,max] 下限区间构造一个 lognormal 采样配置（中位数取几何中点）。 */
 function makeDwellFloorTiming(range: { min: number; max: number }): TimingConfig {
@@ -415,6 +419,18 @@ export class BrowseSession {
   }
 
   /**
+   * 中途风控档位刷新（change pacing-fallback-hardening）：会话稳定连接期间收到 cloud 的 `pacing.update`，
+   * 只更新兜底节奏所用 tempo（校验正数、否则忽略）。**不动 `lastActionEndAt`**——中途刷新 ≠ 重连，
+   * 不得借此跳过一次最小间隔（区别于 `applyPacingSnapshot` 的重连语义会清锚点）。
+   */
+  applyTempoUpdate(tempo?: number): void {
+    // 校验正数且不超上限（防 malformed / 未来云端下发过大 tempo 使兜底停留失控逼近 idle 看门狗）；越界忽略、保留现值。
+    if (!validPositiveMs(tempo) || tempo! > MAX_TEMPO) return;
+    this.tempo = tempo!;
+    this.logger(`[browse] 应用中途档位刷新：tempo=${this.tempo}`);
+  }
+
+  /**
    * 动作前犹豫 / 感知（time directive `thinkMs`）：围绕云端中心值叠抖动后等待。
    * 缺 `thinkMs`（旧云端 / 自主动作）→ 不额外等待，由各动作自身的 humanPause 兜底。
    */
@@ -427,12 +443,13 @@ export class BrowseSession {
   /**
    * 返回 / 关闭详情页前确保**实际停留**达标（time directive `dwellMs`），治「无价值秒退」。
    * - 仅当确有打开的详情页（noteOpenedAt 非空）时生效；
-   * - 中心值 = `dwellMs`（云端按内容算）或缺失时从内置下限采样，再叠抖动；
+   * - 中心值 = `dwellMs`（云端按内容算，已烘入 tempo）或缺失时从内置下限采样、**叠当前 tempo 档位**，再叠抖动；
    * - 已停留时长（含真实阅读）已达标则不叠加等待（无双重延迟）。
+   * 注（change pacing-fallback-hardening）：tempo 只叠在**边缘采样兜底**上，云端已下发的 `dwellMs` 不再叠（防 double-count）。
    */
   private async ensureDetailDwell(dwellMs?: number): Promise<void> {
     if (this.noteOpenedAt == null) return;
-    const center = dwellMs && dwellMs > 0 ? dwellMs : sampleDelay(this.dwellFloorTiming, this.random);
+    const center = dwellMs && dwellMs > 0 ? dwellMs : sampleDelay(this.dwellFloorTiming, this.random) * this.tempo;
     const target = jitterAround(center, 0.2, this.random);
     const elapsed = this.now() - this.noteOpenedAt;
     const remain = target - elapsed;
@@ -860,6 +877,14 @@ export class BrowseSession {
    * 外部（WebSocket 接收层）调用此方法将云端命令送入队列，loop() 消费执行。
    */
   async onCloudCommand(env: Envelope): Promise<void> {
+    // 中途风控档位刷新（change pacing-fallback-hardening）：轻量标量更新，MUST 早于 wake / 独占任务 / 停机判定，
+    // 直接应用并返回——绝不入队、绝不唤醒或复活已停会话。否则会被当作唤醒命令 start() 复活云端意在停住的会话（自残），
+    // 或在停机 / 独占任务窗口被静默丢弃使边缘永停在旧档（云端乐观推送、不重发同值）。停机时应用亦无害：只更
+    // this.tempo 供下次运行取用（不触碰 lastActionEndAt、不做原子动作）。
+    if (env.type === 'pacing.update') {
+      this.applyTempoUpdate((env.payload as PacingUpdatePayload).tempo);
+      return;
+    }
     const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
     if (this.taskBlocked && typeof taskId !== 'string') {
       this.logger(`[browse] 独占任务期间丢弃普通命令 ${env.type}`);
@@ -899,7 +924,8 @@ export class BrowseSession {
 
   /** 浏览循环已停时，哪些云端命令应唤醒重启循环：除终止命令 session.end 外的浏览类推进命令均可。 */
   private isWakeCommand(type: string): boolean {
-    return type !== 'session.end';
+    // pacing.update 在 onCloudCommand 顶端已被直接应用并返回、永不到此；显式排除作纵深防御——它绝不唤醒/复活循环。
+    return type !== 'session.end' && type !== 'pacing.update';
   }
 
   private validAutoResumeInMs(v: unknown): number | undefined {

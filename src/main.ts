@@ -675,7 +675,10 @@ async function main(): Promise<void> {
       }
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
       const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
-      if (!taskCoordinator.canExecute(ownedTaskId)) {
+      // pacing.update 是轻量档位刷新（change pacing-fallback-hardening）：不触碰页面 / 不入队 / 不唤醒，
+      // MUST 穿透任务租约闸——否则独占任务（发布 / 评论 / 验证码恢复）窗口内的升档会被丢弃，
+      // 而云端乐观推送不重发同值 → 边缘永停在旧档。onCloudCommand 顶端会即时应用并返回。
+      if (env.type !== 'pacing.update' && !taskCoordinator.canExecute(ownedTaskId)) {
         console.warn(
           `[aidcp-edge] 任务租约抑制命令 type=${env.type} taskId=${ownedTaskId ?? '-'} current=${taskCoordinator.currentTaskId ?? '-'}`,
         );

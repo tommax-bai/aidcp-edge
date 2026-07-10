@@ -324,3 +324,114 @@ function gaussianAtHalf(): number {
   // Box–Muller: u1=0.5,u2=0.5 → sqrt(-2 ln0.5)·cos(2π·0.5) = sqrt(1.3863)·cos(π) = 1.17741·(−1)
   return Math.sqrt(-2 * Math.log(0.5)) * Math.cos(2 * Math.PI * 0.5);
 }
+
+// ============ change pacing-fallback-hardening：中途档位刷新 pacing.update ============
+
+test('pacing.update: 中途升档放大最小间隔且不重置锚点', async () => {
+  const h = makeHarness();
+  const sleeps: number[] = [];
+  const mono: Mono = { t: 0 };
+  // 初始 tempo=1.0（不传）；退化区间 {3000,3000} → 反射采样确定性 3000。
+  const sess = new BrowseSession(h.deps, baseOpts(sleeps, mono, { action: { minMs: 3000, maxMs: 3000 } }));
+  mono.t = 1000;
+  const done = sess.start();
+  await tick(30);
+  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 })); // 锚点 = 1000
+  await waitDetails(h, 1);
+  // 时钟推进到 2000 后中途升档 tempo=2.0。若误经 markActionEnd 记账，锚点会被推进到 2000。
+  mono.t = 2000;
+  await sess.onCloudCommand(makeEnvelope('pacing.update', 'pu', 0, { tempo: 2.0 }));
+  const before = sleeps.length;
+  // o2 仍在 2000：正确 → elapsed=2000−1000=1000、floor=3000×2.0=6000 → gate=5000；
+  //           误推进锚点 → elapsed=0 → gate=6000（本断言据此把关「不重置锚点」）。
+  await sess.onCloudCommand(makeEnvelope('note.open', 'o2', 0, { index: 0 }));
+  await waitDetails(h, 2);
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
+  await done;
+  const gate = sleeps.slice(before);
+  assert.ok(gate.includes(5000), `升档后 gate 应 = floor(3000×2=6000)−elapsed(1000)=5000（证 tempo 已应用），实际: ${gate}`);
+  assert.ok(!gate.includes(6000), `锚点不应被 pacing.update 推进（否则 elapsed=0 → 6000），实际: ${gate}`);
+});
+
+/** 驱动 note.open → note.close，返回 note.close 期间新增的最大 sleep（= ensureDetailDwell 兜底停留）。 */
+async function driveOpenClose(
+  h: Harness,
+  sleeps: number[],
+  tempo: number | undefined,
+  dwellMs?: number,
+): Promise<number> {
+  const mono: Mono = { t: 0 };
+  const opts: BrowseSessionOptions = { ...baseOpts(sleeps, mono, undefined, tempo), now: () => 5000 }; // 恒定 now → elapsed=0
+  const sess = new BrowseSession(h.deps, opts);
+  const done = sess.start();
+  await tick(30);
+  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 }));
+  await waitDetails(h, 1);
+  const before = sleeps.length;
+  await sess.onCloudCommand(makeEnvelope('note.close', 'c1', 0, dwellMs === undefined ? {} : { dwellMs }));
+  const start = Date.now();
+  while (sleeps.length === before) { if (Date.now() - start > 2000) break; await tick(5); }
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
+  await done;
+  const created = sleeps.slice(before);
+  return created.length ? Math.max(...created) : 0;
+}
+
+test('ensureDetailDwell: 缺 dwellMs 的内置兜底停留随 tempo 放大', async () => {
+  const d1 = await driveOpenClose(makeHarness(), [], 1.0);
+  const d2 = await driveOpenClose(makeHarness(), [], 2.0);
+  assert.ok(d1 > 0 && d2 > 0, `两档都应有非零兜底停留，实际 d1=${d1} d2=${d2}`);
+  assert.ok(d2 >= d1 * 1.8 && d2 <= d1 * 2.2, `tempo=2 兜底停留应≈2×tempo=1（elapsed 恒 0），实际 d1=${d1} d2=${d2}`);
+});
+
+test('ensureDetailDwell: 云端已下发 dwellMs 不再随 tempo 放大（防 double-count）', async () => {
+  const d1 = await driveOpenClose(makeHarness(), [], 1.0, 8000);
+  const d2 = await driveOpenClose(makeHarness(), [], 2.0, 8000);
+  // 给定 dwellMs=8000（已含云端 tempo），边缘只叠抖动、不再乘 this.tempo → 两档实测停留一致。
+  assert.equal(d1, d2, `给定 dwellMs 时兜底停留不应随 tempo 变（防二次放大），实际 d1=${d1} d2=${d2}`);
+});
+
+test('pacing.update: 循环已停时应用档位但绝不复活会话（回归 Finding 1 自残红线）', async () => {
+  const h = makeHarness();
+  const sleeps: number[] = [];
+  const mono: Mono = { t: 0 };
+  const logs: string[] = [];
+  const opts: BrowseSessionOptions = { ...baseOpts(sleeps, mono), logger: (m: string) => logs.push(m) };
+  const sess = new BrowseSession(h.deps, opts);
+  mono.t = 1000;
+  const done = sess.start();
+  await tick(30);
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' })); // 停掉循环
+  await done;
+  assert.equal(sess.isRunning(), false, 'session.end 后循环应已停');
+
+  const before = logs.length;
+  await sess.onCloudCommand(makeEnvelope('pacing.update', 'pu', 0, { tempo: 1.6 })); // 停机窗口收到档位刷新
+  await tick(30);
+  const after = logs.slice(before);
+  assert.equal(sess.isRunning(), false, 'pacing.update 绝不复活已停会话（自残红线）');
+  assert.ok(!after.some((l) => l.includes('唤醒重启')), 'pacing.update 不应触发唤醒重启循环');
+  assert.ok(after.some((l) => l.includes('应用中途档位刷新：tempo=1.6')), 'pacing.update 停机时仍应用 tempo、不静默丢弃');
+});
+
+test('applyTempoUpdate: 越界 tempo（>上限）被忽略、兜底停留不失控', async () => {
+  // 构造期 tempo=1.0；越界 pacing.update{tempo:99} 应被 MAX_TEMPO 挡下、保留 1.0。
+  const h = makeHarness();
+  const sleeps: number[] = [];
+  const opts: BrowseSessionOptions = { ...baseOpts(sleeps, { t: 0 }, undefined, 1.0), now: () => 5000 };
+  const sess = new BrowseSession(h.deps, opts);
+  const done = sess.start();
+  await tick(30);
+  await sess.onCloudCommand(makeEnvelope('pacing.update', 'pu', 0, { tempo: 99 })); // 越界 → 忽略
+  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 }));
+  await waitDetails(h, 1);
+  const before = sleeps.length;
+  await sess.onCloudCommand(makeEnvelope('note.close', 'c1', 0, {})); // 缺 dwellMs → 兜底停留 = sample×tempo
+  const start = Date.now();
+  while (sleeps.length === before) { if (Date.now() - start > 2000) break; await tick(5); }
+  await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
+  await done;
+  const dwell = Math.max(0, ...sleeps.slice(before));
+  // tempo 若被误设 99：兜底停留≈3535×99≈35 万 ms；被挡下保持 1.0 → ≈3535ms 量级、远低于看门狗。
+  assert.ok(dwell > 0 && dwell < 20000, `越界 tempo 应被忽略、兜底停留保持 tempo=1.0 量级，实际 ${dwell}`);
+});

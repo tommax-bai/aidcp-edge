@@ -496,6 +496,9 @@ export class EdgeClient {
       // ⚠️ 此白名单 typecheck 抓不到——漏加则 feed.refresh 在入口被静默丢弃，browse-session 的处理分支永不可达
       //    （同 §2 第4处同步点，notification-monitor 活锁前车之鉴）。与 command-bridge 的 refresh→feed.refresh 映射对应。
       env.type === 'feed.refresh' ||
+      // 中途风控档位刷新（change pacing-fallback-hardening）：独立主动命令，MUST 放行到 browseHandler，
+      // 否则在入口被静默丢弃 → 边缘兜底节奏收不到升档（notification-monitor 活锁前车，同 §2 第4处同步点）。
+      env.type === 'pacing.update' ||
       env.type === 'interaction.like' ||
       env.type === 'interaction.collect' ||
       env.type === 'interaction.follow' ||
