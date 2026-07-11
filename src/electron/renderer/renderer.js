@@ -1775,6 +1775,30 @@ function pruneOrphanRoster(profiles) {
   return orphanIds.length;
 }
 
+// 拉列表时以 AdsPower 实时名回填花名册成员名（change edge-env-name-live-sync）：治「加入那一刻拍下、
+// 此后永不更新」导致左栏展示名与添加面板显示的真名漂移（新建即空名 / 手填空名 / AdsPower 端改名三源）。
+// 只覆盖**本次列表在场、实时名非空、且与现存名不同**的成员；返回改动数、不自行落盘（由 refreshEnvs 统一落一次，
+// 杜绝与 pruneOrphanRoster 的双落盘竞态）。名字为纯展示字段，无「人工标注优先」问题（对比 platform）。
+// **缺数据不自残**：本函数只在 refreshEnvs 的 `!r.truncated` 守卫下调用，空实时名从不回填（不因缺数据误清 / 误改）。
+function reconcileRosterNames(profiles) {
+  const liveName = new Map();
+  for (const p of profiles || []) {
+    if (p && p.userId && p.name) liveName.set(String(p.userId), p.name);
+  }
+  if (liveName.size === 0) return 0; // 二道防御：一个带名环境都没取到时绝不回填（同 pruneOrphanRoster 的空列表守卫）
+  let changed = 0;
+  for (const m of roster) {
+    const live = liveName.get(String(m.profileId));
+    if (live && live !== m.name) { m.name = live; changed += 1; }
+  }
+  if (changed > 0) {
+    // 当前选中分身的名字同步更新，保持旧单值镜像 adsProfileName 与花名册一致（saveCurrentSettings 会写该镜像）。
+    const selLive = liveName.get(settingsUi.adsProfile.value.trim());
+    if (selLive) selectedProfileName = selLive;
+  }
+  return changed;
+}
+
 // roster 变更后就地重刷环境列表的成员标记（不重新拉取）。
 function refreshRosterMarks() {
   if (lastProfiles.length > 0) populateEnvs(lastProfiles);
@@ -1975,10 +1999,17 @@ async function refreshEnvs(opts) {
       return;
     }
     const profiles = r.profiles || [];
+    // 拉列表时以实时名回填花名册成员名（change edge-env-name-live-sync），治左栏展示名与添加面板漂移。
+    // **先回填、再剔孤儿**：这样 pruneOrphanRoster 内部若因剔孤儿而落盘，快照里已含回填后的名字，无需重复落盘。
+    // 同守 !r.truncated：截断/不全的拉取绝不回填（不因缺数据误改在用环境名）。
+    const renamedCount = r.truncated ? 0 : reconcileRosterNames(profiles);
     // 刷新即清理孤儿：花名册里在云端实时列表已不存在的环境（云端 profile 已删、本地残留）自动移出。
     // 安全闸：仅在成功拉取（本分支即 r.ok）且列表**完整**（!r.truncated）时剔——拉取失败已走上面 !r.ok 分支；
     // 截断时列表不全（成员可能在未显示的后续页），绝不剔，杜绝「一次不全的拉取把整份花名册误清空」。
     const prunedCount = r.truncated ? 0 : pruneOrphanRoster(profiles);
+    // 回填了名字但本轮没剔孤儿（prune 未落盘）时补一次落盘，令 main 的 syncEnvHandles 刷新 handle.name → 左栏随即显真名；
+    // 剔了孤儿则 prune 已带回填名落盘一次，这里不重复（全程仅一次落盘、无竞态）。
+    if (renamedCount > 0 && prunedCount === 0) void persistRoster();
     // 删除后刷新（suppressAutoJoin）或本轮剔了孤儿（prunedCount>0，花名册刚被动清空）时绝不自动加入——
     // 否则「唯一环境自动加入」会把一个无关的剩余环境静默拉进运行队列（评审 Finding 1）。
     const allowAutoJoin = !suppressAutoJoin && prunedCount === 0;
@@ -2081,8 +2112,10 @@ settingsUi.adsCreate.addEventListener('click', async () => {
         : '';
     const r = await window.aidcpEdge.adsCreateEnv({ ...formAdsOpts(), templateKey: tpl, platform, proxy, facebookAccountImport });
     if (r && r.ok) {
-      // 新建即选中时，带上刚选的平台（回执 platform 优先，回落表单选择）。
-      if (r.userId && !coreRunning()) selectProfile(r.userId, null, '', r.platform || platform);
+      // 新建即选中时，带上刚起好的环境名（回执 name）与平台（回执 platform 优先，回落表单选择）。
+      // 带回真名根治「新建即空名」——否则左栏回落「环境 …末4位」、与添加面板显示的真名不一致
+      // （change edge-env-name-live-sync）。
+      if (r.userId && !coreRunning()) selectProfile(r.userId, null, r.name || '', r.platform || platform);
       const selectedHint = r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
       const createdCount = Number(r.createdCount || (Array.isArray(r.created) ? r.created.length : 0));
       const countHint = createdCount > 1 ? `已创建 ${createdCount} 个环境。` : `已创建环境（${r.template || tpl}）。`;

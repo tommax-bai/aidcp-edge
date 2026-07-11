@@ -9,7 +9,7 @@ const flowMod = require('../../src/electron/ads-create-flow.cjs') as {
     fingerprint: { getTemplate: (k: string) => unknown; buildFingerprintConfig: (t: unknown) => { ok: boolean; fingerprintConfig?: unknown; violations: string[] } };
     nowImpl?: () => number;
   }) => {
-    createEnvironment: (a: Record<string, unknown>) => Promise<{ ok: boolean; userId?: string; status?: string; violations?: string[]; error?: string; intendedAccountLabel?: string }>;
+    createEnvironment: (a: Record<string, unknown>) => Promise<{ ok: boolean; userId?: string; name?: string; status?: string; violations?: string[]; error?: string; intendedAccountLabel?: string }>;
     parseRemark: (r: string) => { intendedAccountLabel: string; template: string; machine: string } | null;
     encodeRemark: (o: Record<string, unknown>) => string;
     STATUS: { UNVERIFIED: string };
@@ -39,6 +39,7 @@ test('happy path: 用真指纹引擎构造、remark 编码意图/模板/机器�
 
   assert.equal(r.ok, true);
   assert.equal(r.userId, 'u-new');
+  assert.equal(r.name, 'win11-intel', '不显式传 name → 返回体带回实际写入 AdsPower 的名字（回落模板名），供渲染层入册用真名（edge-env-name-live-sync）');
   assert.equal(r.status, STATUS.UNVERIFIED, '建成只标未验证，绝不当就绪');
   assert.equal(w.calls.length, 1);
   const body = w.calls[0] as any;
@@ -52,6 +53,15 @@ test('happy path: 用真指纹引擎构造、remark 编码意图/模板/机器�
   assert.equal(meta!.intendedAccountLabel, 'A');
   assert.equal(meta!.template, 'win11-intel');
   assert.equal(meta!.machine, 'mac-01');
+});
+
+test('显式传 name（FB 导入路径）→ 返回体原样带回该名（edge-env-name-live-sync）', async () => {
+  const w = recordingWriteApi({ ok: true, userId: 'u-fb' });
+  const flow = createCreateFlow({ writeApi: w, fingerprint: realFingerprint });
+  const r = await flow.createEnvironment({ templateKey: 'win11-intel', groupId: 'g1', name: 'Facebook import 1' });
+  assert.equal(r.ok, true);
+  assert.equal(r.name, 'Facebook import 1', '显式 name 应原样回执，与写入 AdsPower 的 name 一致');
+  assert.equal((w.calls[0] as any).name, 'Facebook import 1', 'user/create body 也应带该 name');
 });
 
 // ── change edge-client-proxy-platform-persona-ux：创建可选填代理 ──

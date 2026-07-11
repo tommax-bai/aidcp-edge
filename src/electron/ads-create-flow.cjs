@@ -110,6 +110,9 @@ function createCreateFlow(deps) {
       return {
         ok: true,
         userId: r.userId,
+        // 带回实际写入 AdsPower 的环境名（= 上面 createProfile 的 name），供渲染层入册用真名、
+        // 不再让「加入即空名」漂移出左栏与添加面板不一致（change edge-env-name-live-sync）。
+        name: name || templateKey,
         status: STATUS.UNVERIFIED,
         template: templateKey,
         intendedAccountLabel: intendedAccountLabel || '',

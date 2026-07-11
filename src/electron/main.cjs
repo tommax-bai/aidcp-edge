@@ -2229,6 +2229,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       }
       created.push({
         userId: result.userId,
+        name: result.name,
         template: result.template,
         platform: result.platform,
       });
@@ -2236,6 +2237,8 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     return {
       ok: true,
       userId: created.length === 1 ? created[0].userId : undefined,
+      // 单账号导入自动选中时带回真名，供渲染层入册用真名（change edge-env-name-live-sync）。
+      name: created.length === 1 ? created[0].name : undefined,
       template: (opts && opts.templateKey) || '',
       platform,
       created,

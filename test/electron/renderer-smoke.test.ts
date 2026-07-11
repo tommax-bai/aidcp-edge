@@ -54,7 +54,7 @@ interface Stub {
   adsListProfiles: (opts?: unknown) => Promise<unknown>;
   adsOpenCreate: () => { launched: boolean } | Promise<{ launched: boolean }>;
   adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
-  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; template?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string }>;
+  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string }>;
   adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
 }
 
@@ -619,4 +619,61 @@ test('保存后解除 provider 编辑闩锁：状态推送可再跟随实际 pro
   pushCb(makeStatus({ provider: 'self', edge: 'running', session: 'running' }));
   assert.ok(($(w, '#use-chrome') as unknown as { checked: boolean }).checked, '保存后应解闩，开关跟随实际 provider=self');
   assert.equal(hidden($(w, '#ads-config')), true, 'self 下应隐藏 AdsPower 配置块');
+});
+
+// ── 环境展示名保真（change edge-env-name-live-sync）：治左栏展示名与添加面板对同一环境显示不同名字 ──
+
+const savedEnvsOf = (calls: Array<Record<string, unknown>>, profileId: string) =>
+  calls
+    .map((p) => (p && (p.environments as Array<{ profileId?: string; name?: string }>)) || [])
+    .flat()
+    .filter((e) => e && e.profileId === profileId);
+
+test('创建环境：回执带回真名 → 花名册落盘真名（不再空名 → 左栏与面板一致）', async () => {
+  const saved: Array<Record<string, unknown>> = [];
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped' }), // coreRunning=false → 新建即自动选中
+    adsStatus: async () => ({ ok: true }),
+    // 新建后紧接着的自动刷新里 user/list 尚未带出新环境（传播延迟）——正是需要「回执带名」兜住的场景
+    adsListProfiles: async () => ({ ok: true, profiles: [] }),
+    adsTemplates: async () => [{ key: 'win11-intel', label: 'Windows · 8核 8G' }],
+    adsCreateEnv: async () => ({ ok: true, userId: 'newu', name: '我的新环境', platform: 'xiaohongshu', template: 'win11-intel' }),
+    saveSettings: async (patch: unknown) => { saved.push((patch as Record<string, unknown>) || {}); return { provider: 'adspower', ...(patch as object), saveOk: true }; },
+  }));
+  (($(w, '#ads-template')) as unknown as { value: string }).value = 'win11-intel';
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 6; i++) await tick();
+  const persisted = savedEnvsOf(saved, 'newu');
+  assert.ok(persisted.length > 0, '创建后应把新环境落盘进花名册');
+  assert.ok(persisted.every((e) => e.name === '我的新环境'), '落盘的新环境名应为真名而非空串');
+  assert.match($(w, '#ads-profile-display').textContent ?? '', /newu/, '只读展示应带出新环境 user_id');
+});
+
+test('拉列表回填：花名册空名成员用 user/list 实时名补齐并落盘', async () => {
+  const saved: Array<Record<string, unknown>> = [];
+  await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped' }),
+    adsStatus: async () => ({ ok: true }),
+    getSettings: async () => ({ provider: 'adspower', adsProfileId: 'p1', adsProfileName: '', adsApiKey: '', adsApiBase: '', browserParkingMode: 'edge-strip', environments: [{ profileId: 'p1', name: '', platform: 'xiaohongshu' }] }),
+    adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'p1', name: '真名甲', serialNumber: '1', proxy: 'x' }] }),
+    saveSettings: async (patch: unknown) => { saved.push((patch as Record<string, unknown>) || {}); return { provider: 'adspower', ...(patch as object), saveOk: true }; },
+  }));
+  for (let i = 0; i < 6; i++) await tick();
+  const persisted = savedEnvsOf(saved, 'p1');
+  assert.ok(persisted.length > 0, '回填应触发一次落盘');
+  assert.ok(persisted.some((e) => e.name === '真名甲'), '空名成员应被回填为 user/list 实时名');
+});
+
+test('拉列表回填：截断结果绝不回填（不因缺数据误改在用环境名）', async () => {
+  const saved: Array<Record<string, unknown>> = [];
+  await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped' }),
+    adsStatus: async () => ({ ok: true }),
+    getSettings: async () => ({ provider: 'adspower', adsProfileId: 'p1', adsProfileName: '', adsApiKey: '', adsApiBase: '', browserParkingMode: 'edge-strip', environments: [{ profileId: 'p1', name: '', platform: 'xiaohongshu' }] }),
+    adsListProfiles: async () => ({ ok: true, truncated: true, profiles: [{ userId: 'p1', name: '真名甲', serialNumber: '1', proxy: 'x' }] }),
+    saveSettings: async (patch: unknown) => { saved.push((patch as Record<string, unknown>) || {}); return { provider: 'adspower', ...(patch as object), saveOk: true }; },
+  }));
+  for (let i = 0; i < 6; i++) await tick();
+  const reconciled = savedEnvsOf(saved, 'p1').some((e) => e.name === '真名甲');
+  assert.equal(reconciled, false, '截断拉取不得回填名字（缺数据不自残）');
 });
