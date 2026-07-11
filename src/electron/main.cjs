@@ -1974,6 +1974,59 @@ function resumeEdge(handle) {
   stopAndRestart(handle, '已请求恢复，正在按当前浏览器设置重启边缘进程。');
 }
 
+/**
+ * 无核心子进程时的诚实关闭核实（红线：绝不零回收假报已关）。该 profile 的浏览器由外部 AdsPower 运行时
+ * 托管、会在核心死亡（如暂停驻留期崩溃）后存活。经**只读** browser/local-active 查其是否真的不在跑：
+ * 确认不在跑才判「已关闭」；仍在跑则如实报「浏览器仍在运行、恢复接管后再关」；查不动则如实报「无法确认」。
+ * 外壳只读 ads-local-api 边界不破：这里只读、不发停止；真关闭仍由（恢复后的）核心权威执行。
+ */
+async function confirmOwnedProfileClosedFromShell(handle) {
+  updateStatus(handle, {
+    lastMessage: '正在确认浏览器是否已关闭…',
+    ...presencePatch('正在确认浏览器状态…'),
+  });
+  const res = await adsApi.listActiveProfiles(resolveAdsOpts()).catch(() => null);
+  // 期间被启动 / 恢复 / 移出（start/resume 会把 stopRequested 复位为 false）：交给新流程，勿覆盖更新后的状态。
+  if (handle.child || handle.removed || !handle.stopRequested) return;
+  // 仅在拿到**结构良好**的在跑分身列表时才据其判定；code:0 但 data.list 缺失/非数组不算「确认为空」，
+  // 绝不把不完整列表当已关（红线：不完整列表 ≠ 已关，防孤儿浏览器被假报已关）。
+  const active =
+    res && res.ok && res.listWellFormed && Array.isArray(res.activeUserIds) ? res.activeUserIds : null;
+  if (active && active.includes(handle.profileId)) {
+    // 分身确在跑但无核心可关：诚实报未关（保持暂停——浏览器开着、自动运营停着），引导恢复接管后再关。
+    updateStatus(handle, {
+      edge: 'warning',
+      session: 'paused',
+      lastMessage: '浏览器仍在运行，但当前没有核心进程来关闭它；请点「恢复」接管后再关闭。',
+      ...edgeFailurePatch('无核心进程可关闭浏览器，需恢复接管'),
+      ...presencePatch('浏览器仍在运行，待接管后关闭'),
+    });
+    return;
+  }
+  if (active) {
+    // 结构良好的列表里没有该分身 = 确认已关。
+    updateStatus(handle, {
+      edge: 'stopped',
+      cloud: 'disconnected',
+      session: 'closed',
+      overlayBlocked: false,
+      kernelPrep: null,
+      lastMessage: '浏览器已关闭。',
+      ...presencePatch('已关闭浏览器'),
+      ...clearEdgeFailurePatch(handle),
+    });
+    return;
+  }
+  // 拿不到结构良好的列表（不可达 / 响应不完整）：不确定，绝不假报已关。
+  updateStatus(handle, {
+    edge: 'warning',
+    session: 'paused',
+    lastMessage: '无法确认浏览器关闭状态；可点「恢复」接管后再关闭，或重启客户端。',
+    ...edgeFailurePatch('无法确认浏览器关闭状态'),
+    ...presencePatch('关闭状态未能确认'),
+  });
+}
+
 function closeEdge(handle) {
   if (!handle || handle.closePending || handle.status.session === 'closed') return;
   handle.restartPending = false;
@@ -1982,6 +2035,12 @@ function closeEdge(handle) {
   clearRespawnTimer(handle);
   if (!handle.child) {
     handle.coreParked = false;
+    // 无核心子进程：adspower 分身浏览器由外部运行时托管、会在核心死亡后存活。MUST NOT 零回收假报已关——
+    // 经**只读** browser/local-active 诚实核实后再判定；确认不在跑才判已关，仍在跑/查不动都如实回报。
+    if (handle.kind === 'adspower' && handle.profileId) {
+      void confirmOwnedProfileClosedFromShell(handle);
+      return;
+    }
     updateStatus(handle, {
       edge: 'stopped',
       cloud: 'disconnected',

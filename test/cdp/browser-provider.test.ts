@@ -146,14 +146,153 @@ test('AdsPowerProvider.launch API 响应体卡住 → 有界超时并诚实报�
   await assert.rejects(provider.launch({ host: '127.0.0.1', port: 9222 }), /响应异常|响应 超时|不回落 self/);
 });
 
-test('AdsPowerProvider killAndConfirmDead：stop + active 确认已关 → true', async () => {
-  const fetchImpl = routedFetch([
+// ---- AdsPowerProvider.killAndConfirmDead：权威端点实证 + 升级实杀 + 诚实未确认 ----
+// 关闭确认以「该 profile 调试端点是否变暗」为权威判据（独立于 AdsPower 自报），软停止未生效则升级
+// （重发 + OS 级强杀）；无法确认端点变暗时诚实 false，绝不假成功（红线）。
+
+// launch 所需的最小路由（browser/start + waitCdpReady 用 /json/version）+ browser/stop。
+const adsCloseFetch = (extra: Array<[string, () => unknown]> = []): typeof fetch =>
+  routedFetch([
     ['/api/v1/browser/start', () => ({ code: 0, data: { debug_port: 5000 } })],
     ['/json/version', () => ({})],
     ['/api/v1/browser/stop', () => ({ code: 0 })],
-    ['/api/v1/browser/active', () => ({ code: 0, data: { status: 'Inactive' } })],
+    ...extra,
   ]);
-  const provider = new AdsPowerProvider({ apiBase: 'http://x:50325', userId: 'k1' }, { fetchImpl, ...noopDeps });
+const closeBounds = { closeConfirmTries: 3, closeConfirmIntervalMs: 0 };
+
+test('killAndConfirmDead：软停止后调试端点变暗 → 确认已关 true', async () => {
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    { fetchImpl: adsCloseFetch(), ...noopDeps, ...closeBounds, probeCdpImpl: async () => false, osKillEnabled: false },
+  );
+  const { instance } = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(await instance.killAndConfirmDead(), true);
+});
+
+test('killAndConfirmDead：软停止未使端点变暗 + OS 级强杀成功 → 升级后 true', async () => {
+  let osKilled = false;
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    {
+      fetchImpl: adsCloseFetch(),
+      ...noopDeps,
+      ...closeBounds,
+      probeCdpImpl: async () => !osKilled, // OS 杀前一直应答（浏览器仍活），杀后变暗
+      osKillEnabled: true,
+      osKillImpl: async () => {
+        osKilled = true;
+        return true;
+      },
+    },
+  );
+  const { instance } = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(await instance.killAndConfirmDead(), true);
+  assert.equal(osKilled, true);
+});
+
+test('killAndConfirmDead：端点一直应答 + OS 杀禁用 → 诚实 false（绝不假成功）', async () => {
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    { fetchImpl: adsCloseFetch(), ...noopDeps, ...closeBounds, probeCdpImpl: async () => true, osKillEnabled: false },
+  );
+  const { instance } = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(await instance.killAndConfirmDead(), false);
+});
+
+test('killAndConfirmDead：端点一直应答 + OS 杀也没杀掉 → 诚实 false', async () => {
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    {
+      fetchImpl: adsCloseFetch(),
+      ...noopDeps,
+      ...closeBounds,
+      probeCdpImpl: async () => true,
+      osKillEnabled: true,
+      osKillImpl: async () => false, // 拿不到可杀进程
+    },
+  );
+  const { instance } = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(await instance.killAndConfirmDead(), false);
+});
+
+test('killAndConfirmDead：browser/stop 失败但端点变暗 → 端点权威判 true，且如实记 stop 失败', async () => {
+  const logs: string[] = [];
+  const fetchImpl = routedFetch([
+    ['/api/v1/browser/start', () => ({ code: 0, data: { debug_port: 5000 } })],
+    ['/json/version', () => ({})],
+    ['/api/v1/browser/stop', () => ({ code: -1, msg: 'stop failed' })], // api() 抛错 → stop 记失败
+  ]);
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    {
+      fetchImpl,
+      sleepImpl: async () => undefined,
+      nowImpl: () => 0,
+      logImpl: (m) => logs.push(m),
+      ...closeBounds,
+      probeCdpImpl: async () => false, // 端点已暗 = 真死
+      osKillEnabled: false,
+    },
+  );
+  const { instance } = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(await instance.killAndConfirmDead(), true);
+  assert.match(logs.join('\n'), /browser\/stop 失败/);
+});
+
+test('killAndConfirmDead：stop API 不可达 + 端点仍应答 → 不再「查不动当已关」，诚实 false', async () => {
+  // 老 bug 反例：停止 API 抛错曾被静默吞 + confirmClosed 查不动返回 true。新逻辑以端点为权威，端口仍应答=未死。
+  const fetchImpl = routedFetch([
+    ['/api/v1/browser/start', () => ({ code: 0, data: { debug_port: 5000 } })],
+    ['/json/version', () => ({})],
+    // 不路由 browser/stop → api() 抛 unrouted → stop 如实记失败、不当已关
+  ]);
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    { fetchImpl, ...noopDeps, ...closeBounds, probeCdpImpl: async () => true, osKillEnabled: false },
+  );
+  const { instance } = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(await instance.killAndConfirmDead(), false);
+});
+
+test('killAndConfirmDead：单次瞬态不应答（非连续）不判已关 → 不假成功（K=2 连读闸）', async () => {
+  // probe 交替 应答/不应答：任何时刻都凑不出连续 2 次不应答 → 绝不据单次瞬态误判已关。
+  let n = 0;
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    {
+      fetchImpl: adsCloseFetch(),
+      ...noopDeps,
+      ...closeBounds,
+      probeCdpImpl: async () => n++ % 2 === 0, // true,false,true,false… 无连续两次 false
+      osKillEnabled: false,
+    },
+  );
+  const { instance } = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(await instance.killAndConfirmDead(), false);
+});
+
+test('默认关闭探测：stop 后 /json/version 连接被拒 → 判真死 true（超时=仍活、被拒=已死）', async () => {
+  // 用默认 probeCdpImpl（带超时的 defaultProbeAlive）：启动期端点应答；关闭后端口被拒即真死。
+  let stopped = false;
+  const fetchImpl = (async (url: string) => {
+    const u = String(url);
+    if (u.includes('/api/v1/browser/start')) {
+      return { ok: true, json: async () => ({ code: 0, data: { debug_port: 5000 } }) } as unknown;
+    }
+    if (u.includes('/api/v1/browser/stop')) {
+      stopped = true;
+      return { ok: true, json: async () => ({ code: 0 }) } as unknown;
+    }
+    if (u.includes('/json/version')) {
+      if (!stopped) return { ok: true, json: async () => ({}) } as unknown; // 启动就绪
+      throw new Error('ECONNREFUSED'); // 关闭后端口被拒 = 已死
+    }
+    throw new Error(`unrouted ${u}`);
+  }) as unknown as typeof fetch;
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    { fetchImpl, ...noopDeps, ...closeBounds, closeProbeTimeoutMs: 50, osKillEnabled: false }, // 不注入 probeCdpImpl → 走默认
+  );
   const { instance } = await provider.launch({ host: '127.0.0.1', port: 9222 });
   assert.equal(await instance.killAndConfirmDead(), true);
 });

@@ -212,11 +212,14 @@ function createAdsLocalApi(deps = {}) {
       return { ok: false, error: `对账在跑分身失败：code=${body.code} ${body.msg || ''}`.trim() };
     }
     const data = body.data || {};
-    const list = Array.isArray(data.list) ? data.list : [];
+    // listWellFormed 区分「确认为空」(data.list 是数组、恰好没有在跑分身) 与「响应不完整」(code:0 但
+    // data.list 缺失/非数组)：调用方据此避免把不完整列表当「已关」（防孤儿浏览器被假报已关）。
+    const listWellFormed = Array.isArray(data.list);
+    const list = listWellFormed ? data.list : [];
     const activeUserIds = list
       .map((it) => (it && it.user_id != null ? String(it.user_id) : ''))
       .filter(Boolean);
-    return { ok: true, activeUserIds };
+    return { ok: true, activeUserIds, listWellFormed };
   }
 
   /**

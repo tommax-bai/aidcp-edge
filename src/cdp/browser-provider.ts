@@ -10,6 +10,7 @@
  * 红线延续（绝不静默假成功）：provider 无法交付一个可用且已就绪的浏览器时**诚实报错停手**，
  * MUST NOT 静默回落 self、MUST NOT 假成功——否则本应用独立指纹 / IP 的账号会偷偷以本机真实指纹起跑。
  */
+import { execFile } from 'node:child_process';
 import { launchChrome, type ChromeInstance } from './chrome-launcher.js';
 
 export type BrowserProviderKind = 'self' | 'adspower';
@@ -76,15 +77,24 @@ export interface AdsPowerDeps {
   nowImpl?: () => number;
   apiTimeoutMs?: number;
   cdpProbeTimeoutMs?: number;
+  /** 关闭确认用的调试端点探活（默认 chrome-launcher.probeCdp）；测试可注入。 */
+  probeCdpImpl?: (host: string, port: number, fetchImpl: typeof fetch) => Promise<boolean>;
+  /** 软停止未生效时的 OS 级强杀兜底（默认按调试端口反查监听进程 SIGKILL）；测试可注入。 */
+  osKillImpl?: (host: string, port: number, log: (m: string) => void) => Promise<boolean>;
+  /** OS 级强杀兜底开关（默认随 env AIDCP_ADS_CLOSE_OS_KILL，缺省开）。 */
+  osKillEnabled?: boolean;
+  /** 关闭确认轮询次数（迭代限界，勿用 Date.now，测试注入恒定 now 才不死循环）。 */
+  closeConfirmTries?: number;
+  /** 关闭确认每次轮询间隔 ms。 */
+  closeConfirmIntervalMs?: number;
+  /** 单次关闭探测超时 ms（小于轮询间隔量级，保最坏总时长落在退出预算内）。 */
+  closeProbeTimeoutMs?: number;
 }
 
 interface AdsStartData {
   ws?: { selenium?: string; puppeteer?: string };
   debug_port?: string | number;
   webdriver?: string;
-}
-interface AdsActiveData {
-  status?: string;
 }
 
 const DEFAULT_ADS_BASE = 'http://local.adspower.net:50325';
@@ -93,10 +103,86 @@ const DEFAULT_ADS_START_URL = 'https://www.xiaohongshu.com/explore';
 const ADS_MIN_INTERVAL_MS = 1100;
 const DEFAULT_ADS_API_TIMEOUT_MS = 30_000;
 const DEFAULT_ADS_CDP_PROBE_TIMEOUT_MS = 2_000;
+/**
+ * 关闭确认：每个阶段（停止 / 重发停止 / OS 杀后）轮询该 profile 调试端点是否变暗的次数与间隔。
+ * 每次探测都设**小超时**（closeProbeTimeoutMs），超时/异常一律视为「仍应答」（浏览器可能只是慢/挂，
+ * 绝不据此假报已关）；只有连续 K 次**明确不应答**（连接被拒 = 端口无监听）才判真死，过滤单次瞬态。
+ * 最坏（端口挂着一直超时）≈ 2 阶段 × 5×(0.35+0.25)s + 一次 1req/s 节流 ≈ 7.6s，稳落在外壳退出期
+ * gracefulStopAllAndQuit 的 10s 有界等待内（避免退出期截断致孤儿）。正常 stop 秒级生效即在首阶段确认。
+ */
+const DEFAULT_CLOSE_CONFIRM_TRIES = 5;
+const DEFAULT_CLOSE_CONFIRM_INTERVAL_MS = 250;
+/** 单次关闭探测超时：小于轮询间隔量级，使「端口挂着一直超时」的最坏总时长仍落在 10s 退出预算内。 */
+const DEFAULT_CLOSE_PROBE_TIMEOUT_MS = 350;
+/** 判「真死」所需的连续不应答次数（过滤单次瞬态错误，防残余假成功）。 */
+const CLOSE_CONFIRM_DARK_STREAK = 2;
 
 const defaultSleep = (ms: number): Promise<void> => new Promise<void>((r) => setTimeout(r, ms));
 const positiveMs = (value: number | undefined, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+const positiveInt = (value: number | undefined, fallback: number): number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+
+function envOsKillEnabled(): boolean {
+  const v = (process.env.AIDCP_ADS_CLOSE_OS_KILL ?? '').trim().toLowerCase();
+  return !['0', 'false', 'no', 'off'].includes(v); // 缺省开
+}
+
+/**
+ * 关闭探测（默认）：判该 profile 的**本机调试端点**是否仍在监听（浏览器是否还活着）。
+ * 有界超时；**返回 true = 仍应答/仍活**：收到任意 HTTP 响应=在监听；超时（TCP 接受但 HTTP 慢/挂）也当仍活
+ * （绝不据「慢」判已关）。**只有连接被拒 / 复位**（端口无监听）才返回 false = 已死。与「查不动当已关」相反。
+ */
+async function defaultProbeAlive(
+  host: string,
+  port: number,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    await fetchImpl(`http://${host}:${port}/json/version`, { signal: controller.signal });
+    return true; // 有响应 = 端口在监听 = 仍活
+  } catch {
+    return controller.signal.aborted; // 超时（aborted）= 仍在监听但慢 = 仍活(true)；连接被拒 = 已死(false)
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * OS 级强杀兜底：按浏览器**本机调试端口**反查其**监听进程**并 SIGKILL（仅打监听者、不误伤客户端连接）。
+ * 仅对本机端口生效；win32 暂不支持（返回 false → 上层如实判未确认，绝不假成功）。
+ */
+async function defaultOsKill(host: string, port: number, log: (m: string) => void): Promise<boolean> {
+  if (host !== '127.0.0.1' && host !== 'localhost') return false;
+  if (process.platform === 'win32') return false;
+  const pids = await new Promise<number[]>((resolve) => {
+    // 地址+端口双限定（-iTCP@host:port）：只打绑在该回环端点上的监听者（浏览器），不误伤同端口他址监听。
+    execFile('lsof', ['-nP', `-iTCP@${host}:${port}`, '-sTCP:LISTEN', '-t'], { timeout: 3_000 }, (err, stdout) => {
+      if (err && !stdout) return resolve([]);
+      resolve(
+        String(stdout)
+          .split(/\s+/)
+          .map((s) => Number(s.trim()))
+          .filter((n) => Number.isInteger(n) && n > 0),
+      );
+    });
+  });
+  if (pids.length === 0) return false;
+  let anyKilled = false;
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGKILL');
+      anyKilled = true;
+      log(`[aidcp-edge] OS 级强杀调试端口 ${port} 监听进程 pid=${pid}`);
+    } catch {
+      /* 进程可能已退出 */
+    }
+  }
+  return anyKilled;
+}
 
 /**
  * adspower：经 AdsPower 本地 API（browser/start|stop|active）托管指纹浏览器。
@@ -112,6 +198,12 @@ export class AdsPowerProvider implements BrowserProvider {
   private readonly now: () => number;
   private readonly apiTimeoutMs: number;
   private readonly cdpProbeTimeoutMs: number;
+  private readonly probeCdpImpl: (host: string, port: number, fetchImpl: typeof fetch) => Promise<boolean>;
+  private readonly osKillImpl: (host: string, port: number, log: (m: string) => void) => Promise<boolean>;
+  private readonly osKillEnabled: boolean;
+  private readonly closeConfirmTries: number;
+  private readonly closeConfirmIntervalMs: number;
+  private readonly closeProbeTimeoutMs: number;
   private lastApiAt = 0;
 
   constructor(
@@ -124,6 +216,13 @@ export class AdsPowerProvider implements BrowserProvider {
     this.now = deps.nowImpl ?? (() => Date.now());
     this.apiTimeoutMs = positiveMs(deps.apiTimeoutMs, DEFAULT_ADS_API_TIMEOUT_MS);
     this.cdpProbeTimeoutMs = positiveMs(deps.cdpProbeTimeoutMs, DEFAULT_ADS_CDP_PROBE_TIMEOUT_MS);
+    this.osKillImpl = deps.osKillImpl ?? defaultOsKill;
+    this.osKillEnabled = deps.osKillEnabled ?? envOsKillEnabled();
+    this.closeConfirmTries = positiveInt(deps.closeConfirmTries, DEFAULT_CLOSE_CONFIRM_TRIES);
+    this.closeConfirmIntervalMs = positiveMs(deps.closeConfirmIntervalMs, DEFAULT_CLOSE_CONFIRM_INTERVAL_MS);
+    this.closeProbeTimeoutMs = positiveMs(deps.closeProbeTimeoutMs, DEFAULT_CLOSE_PROBE_TIMEOUT_MS);
+    // 默认探测走有界超时的「仍活」判据（超时=仍活、连接被拒=已死）；测试可注入即时桩。
+    this.probeCdpImpl = deps.probeCdpImpl ?? ((h, p, f) => defaultProbeAlive(h, p, f, this.closeProbeTimeoutMs));
   }
 
   async launch(opts: BrowserLaunchOptions): Promise<LaunchedBrowser> {
@@ -161,10 +260,9 @@ export class AdsPowerProvider implements BrowserProvider {
       kill: () => {
         void this.stop();
       },
-      killAndConfirmDead: async () => {
-        await this.stop();
-        return this.confirmClosed();
-      },
+      // 权威关闭：以该 profile 调试端点是否变暗判死活，软停止未生效则升级（重发 + OS 级强杀），
+      // 无法确认绝不假成功（红线：绝不静默假成功）。endpoint 端口即此处交付的 debug_port。
+      killAndConfirmDead: async () => this.closeAndConfirm(host, port),
     };
     return { instance, endpoint: { host, port } };
   }
@@ -274,26 +372,61 @@ export class AdsPowerProvider implements BrowserProvider {
     }
   }
 
-  private async stop(): Promise<void> {
+  /** 调 browser/stop 请求关闭；失败**如实返回并记日志**（不再静默吞成假成功）。 */
+  private async stop(): Promise<{ ok: boolean; error?: string }> {
     try {
       await this.api<unknown>('browser/stop', { user_id: this.cfg.userId });
       this.log(`[aidcp-edge] AdsPower browser/stop profile=${this.cfg.userId}`);
+      return { ok: true };
     } catch (e) {
-      this.log(`[aidcp-edge] AdsPower stop 容忍异常：${(e as Error).message}`);
+      const error = (e as Error).message || String(e);
+      this.log(`[aidcp-edge] ⚠ AdsPower browser/stop 失败（profile=${this.cfg.userId}）：${error}`);
+      return { ok: false, error };
     }
   }
 
-  /** 轮询 browser/active 确认已关（status!=Active）；无法确认返回 false（不阻塞退出）。 */
-  private async confirmClosed(): Promise<boolean> {
-    for (let i = 0; i < 5; i++) {
-      try {
-        const data = await this.api<AdsActiveData>('browser/active', { user_id: this.cfg.userId });
-        if (data?.status !== 'Active') return true;
-      } catch {
-        return true; // 查不动就当已关，best-effort
+  /**
+   * 有界轮询该 profile 的**调试端点**（`/json/version`）是否不再应答 = 浏览器进程真退出。
+   * 这是**独立于 AdsPower 自报状态**的权威判据：浏览器存活期其本机调试端口一直应答（即便暂停
+   * 已拆掉本进程的 CDP 客户端连接，端口仍监听），端口不再应答才是真死。迭代次数限界（勿用 Date.now，
+   * 否则测试注入恒定 now 会死循环）。端口仍应答=未死返回 false。
+   */
+  private async waitPortDark(host: string, port: number): Promise<boolean> {
+    let darkStreak = 0;
+    for (let i = 0; i < this.closeConfirmTries; i++) {
+      // probeCdpImpl 返回 true=仍应答/仍活，false=不应答（连接被拒=已死）；默认实现带超时（超时→仍活）。
+      if (await this.probeCdpImpl(host, port, this.fetchImpl)) {
+        darkStreak = 0; // 端口仍应答 → 连读清零
+      } else if (++darkStreak >= CLOSE_CONFIRM_DARK_STREAK) {
+        return true; // 连续 K 次不应答 = 真死（过滤单次瞬态错误，防残余假成功）
       }
-      await this.sleep(500);
+      await this.sleep(this.closeConfirmIntervalMs);
     }
+    return false; // 上限内未连续确认不应答 = 未确认已死（仍活或不确定）
+  }
+
+  /**
+   * 关闭并按权威端点实证确认：软停止 → 等端口变暗 → 未暗重发停止 → 仍未暗则 OS 级强杀兜底 → 再确认。
+   * 全程无法确认端口变暗（或无法取得可杀进程）时**如实返回 false**（未确认关闭），MUST NOT 假成功。
+   * 关闭按 profile 重新发起、以端点判定，不依赖关闭前 CDP 客户端连接状态（暂停驻留后仍能收敛）。
+   */
+  private async closeAndConfirm(host: string, port: number): Promise<boolean> {
+    await this.stop();
+    if (await this.waitPortDark(host, port)) return true;
+
+    this.log(`[aidcp-edge] AdsPower 首次停止后调试端口仍应答，重发 browser/stop profile=${this.cfg.userId}`);
+    await this.stop();
+    if (await this.waitPortDark(host, port)) return true;
+
+    if (this.osKillEnabled) {
+      this.log(`[aidcp-edge] 软停止未使浏览器退出，升级 OS 级强杀 profile=${this.cfg.userId} 调试端口=${port}`);
+      const killed = await this.osKillImpl(host, port, this.log);
+      if (killed && (await this.waitPortDark(host, port))) return true;
+    }
+
+    this.log(
+      `[aidcp-edge] ⚠ AdsPower 关闭未能确认浏览器真死（profile=${this.cfg.userId}，端口=${port}）——如实回报未确认，不假成功`,
+    );
     return false;
   }
 }
