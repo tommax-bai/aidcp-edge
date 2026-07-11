@@ -73,9 +73,17 @@ verify_trust_gates() {
         xcrun stapler validate "$artifact"
         ;;
       *.dmg)
-        echo "Verifying DMG $artifact"
+        # electron-builder ships an UNSIGNED dmg CONTAINER: the signed + notarized + stapled
+        # .app inside is what Gatekeeper actually runs; the downloaded dmg opens without a
+        # Gatekeeper prompt because the notarization ticket is stapled to it. `stapler validate`
+        # is the authoritative notarization check for the dmg. We deliberately do NOT run
+        # `spctl --assess --type open --context context:primary-signature` on the dmg — that
+        # asserts a PRIMARY CODE SIGNATURE the container intentionally lacks and false-fails
+        # ("rejected: no usable signature") even though the dmg is fully notarized. The .app's
+        # full codesign + spctl (source=Notarized Developer ID) + stapler gates above already
+        # prove the payload is Gatekeeper-clean.
+        echo "Verifying DMG $artifact (stapled notarization ticket)"
         xcrun stapler validate "$artifact"
-        spctl --assess --verbose --type open --context context:primary-signature "$artifact"
         ;;
       *)
         echo "Skipping trust gate for unsupported artifact: $artifact" >&2
