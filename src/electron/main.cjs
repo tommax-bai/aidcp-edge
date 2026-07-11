@@ -525,6 +525,11 @@ const RESPAWN_OPTS = {
   backoffMaxMs: Number(process.env.AIDCP_EDGE_RESPAWN_BACKOFF_MAX_MS ?? 30_000),
   healthyUptimeMs: Number(process.env.AIDCP_EDGE_RESPAWN_HEALTHY_UPTIME_MS ?? 60_000),
 };
+// 护栏：AdsPower「同账号并发占用拒启」识别为不可重起终局（默认开）。关掉（'0'/'false'/'off'/'no'）
+// 则退回把它按普通崩溃走有界重起的旧行为，供识别误伤时应急回退。
+const ENV_IN_USE_TERMINAL = !['0', 'false', 'off', 'no'].includes(
+  String(process.env.AIDCP_EDGE_ENV_IN_USE_TERMINAL ?? '').trim().toLowerCase(),
+);
 function clearRespawnTimer(handle) {
   if (handle.respawnTimer) {
     clearTimeout(handle.respawnTimer);
@@ -1191,6 +1196,9 @@ function startEdge(handle) {
   // 每次真正拉起核心前清「本次运行遇内核缺失」标记：该标记只反映本 core run 是否撞过
   // 「SunBrowser <N> is not ready」，退出处据此把内核缺失退出识别为可恢复的「准备内核」而非失败。
   handle.kernelMissThisRun = false;
+  // 同理清「本次运行遇同账号并发占用拒启」标记：只反映本 core run 是否撞过 in-use 拒启，退出处据此判终局。
+  handle.envInUseThisRun = false;
+  handle.envInUseHolder = null;
   handle.spawnedAtMs = Date.now();
   // 换会话重置已绑人设信号（change persona-badge-preconnect-neutral）：云端只在为真时下发 personaBound、从不发 false，
   // 若上一会话该环境曾已绑、随后被解绑再重启，stale-true 会残留成误显示「已设置」——每次启动清零、待新会话权威信号重建。
@@ -1320,13 +1328,21 @@ function startEdge(handle) {
     const message = exitMessage(code, signal);
     if (handle.removed) return; // 已摘除的环境不再投影状态
 
-    // 有界重起决策（仅对异常退出计入；有意停止一律 stop）。
-    const decision = exitedAbnormally
-      ? fleet.decideRespawn(
-          { exitCode: signal != null && code == null ? null : code, uptimeMs: Date.now() - handle.spawnedAtMs, prevStreak: handle.respawnStreak, shuttingDown: isQuitting },
-          RESPAWN_OPTS,
-        )
-      : { action: 'stop', streak: 0 };
+    // 同账号并发占用拒启 = 不可重起终局：重起不会自愈（分身正被同账号在别处打开、不允许并发打开）。
+    // 识别后强制停止、不进重起、不消耗连续失败预算。红线：本分支 MUST NOT 对该分身发起任何
+    // browser/stop / OS 杀 / 调试附着——占用者是别处的活跃会话，绝不干扰（拒启本就未拿到浏览器句柄）。
+    const envInUse = exitedAbnormally && handle.envInUseThisRun === true;
+    const inUseHolder = handle.envInUseHolder ? `（AdsPower 账号 ${handle.envInUseHolder}）` : '';
+    const inUseMsg = `环境被其它设备或窗口占用${inUseHolder}；已停止启动，请在占用它的一端关闭后再点「启动」重试。`;
+    // 有界重起决策（仅对异常退出计入；有意停止 / 不可重起终局一律 stop）。
+    const decision = envInUse
+      ? { action: 'stop', streak: 0 }
+      : exitedAbnormally
+        ? fleet.decideRespawn(
+            { exitCode: signal != null && code == null ? null : code, uptimeMs: Date.now() - handle.spawnedAtMs, prevStreak: handle.respawnStreak, shuttingDown: isQuitting },
+            RESPAWN_OPTS,
+          )
+        : { action: 'stop', streak: 0 };
     handle.respawnStreak = decision.streak;
 
     const willRespawn = decision.action === 'respawn';
@@ -1373,7 +1389,9 @@ function startEdge(handle) {
       ...(handle.kind === 'adspower' ? { auth: 'checking' } : {}),
       overlayBlocked: false,
       respawnGaveUp: gaveUp,
-      lastMessage: wasClosing
+      lastMessage: envInUse
+        ? inUseMsg
+        : wasClosing
         ? '浏览器已关闭。'
         : gaveUp
         ? `${message} 连续失败已达上限（${RESPAWN_OPTS.maxConsecutiveFailures} 次），已放弃自动重启，请人工排查后点「启动」重试。`
@@ -1393,11 +1411,18 @@ function startEdge(handle) {
               ? '已暂停，随时可以恢复'
               : '引擎已停止',
       ),
-      ...(exitedAbnormally ? abnormalExitFailurePatch(handle, code, signal) : clearEdgeFailurePatch(handle)),
+      ...(envInUse
+        ? edgeFailurePatch(inUseMsg)
+        : exitedAbnormally
+          ? abnormalExitFailurePatch(handle, code, signal)
+          : clearEdgeFailurePatch(handle)),
     });
 
-    // 红线：异常退出不静默——首次失败与放弃时弹系统通知（重起风暴中间不刷屏，状态行已如实呈现）。
-    if (exitedAbnormally && (decision.streak === 1 || gaveUp)) {
+    // 红线：异常退出不静默——首次失败 / 放弃 / 不可重起终局时弹一次系统通知（重起风暴中间不刷屏）。
+    if (envInUse) {
+      // 不可重起终局：给专门的「环境被占用」通知，不带「重新登录」这类误导性提示。
+      surfaceFailure(`AIDCP Edge${handle.name ? `（${handle.name}）` : ''} 环境被占用`, inUseMsg);
+    } else if (exitedAbnormally && (decision.streak === 1 || gaveUp)) {
       const adspowerHint = handle.kind === 'adspower'
         ? '请在该分身的浏览器窗口登录后，点击「重新登录」重试；并确认分身 ID 正确、指纹浏览器已就绪。'
         : '请打开窗口查看日志 / 重新登录或重连云端。';
@@ -1774,6 +1799,16 @@ function handleEdgeLogLine(handle, message, isError = false) {
   // edge / session / risk 徽标，也不产 UI 事件。正常在跑时才做状态推断。
   const stopping = isQuitting || handle.restartPending || handle.pausePending || handle.removed || !handle.child || handle.status.session === 'paused';
   if (!stopping) rememberEdgeFailureCandidate(handle, message, isError);
+  // AdsPower「同账号并发占用拒启」= 不可重起终局：该分身已被同一账号在别处打开、不允许并发打开，
+  // 重起一万次也开不了。置标志，退出处（child.on('close')）据此强制停止、不进重起、不消耗失败预算，
+  // 并呈现「环境被占用」而非通用文案。与缺内核特判同构（都靠退出处读本次运行标志）。
+  if (!stopping && ENV_IN_USE_TERMINAL) {
+    const inUse = fleet.classifyAdsInUse(message);
+    if (inUse.inUse) {
+      handle.envInUseThisRun = true;
+      if (inUse.account) handle.envInUseHolder = inUse.account;
+    }
+  }
   if (stopping) {
     if (!handle.removed) updateStatus(handle, { lastMessage: message });
     return;
