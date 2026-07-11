@@ -38,6 +38,16 @@ export interface FacebookGroupJoinObservation {
   /** 可见动作节点数 + 文档就绪态（change fb-group-join-wait-render）：用于「等页面真加载完再判定」的就绪轮询 + 审计取证（看清是否观察时仍在 loading）。 */
   actionNodeCount?: number;
   documentReady?: string;
+  /**
+   * L3 结构后置校验（change facebook-join-structural-verify）：群主体内是否存在可聚焦发帖/评论 composer
+   * （`[contenteditable]`/`[role=textbox]`，语言无关成员态信号；M3 子树判别群内发帖框 vs 顶栏/群内搜索框）。
+   */
+  composerPresent?: boolean;
+  /**
+   * L3：群主体内是否存在可见「加入」CTA。承重闸——joined 要求 composerPresent 且 joinCtaPresent 为 false
+   * （非成员公开组即便渲染 composer 也仍显示加入 CTA、故 joinCtaPresent=true 不判 joined，防新 false-positive）。
+   */
+  joinCtaPresent?: boolean;
 }
 
 interface RawJoinObservation extends FacebookGroupJoinObservation {
@@ -121,7 +131,27 @@ function publicObservation(raw: RawJoinObservation, groupUrl: string): FacebookG
     navError: raw.navError ?? null,
     actionNodeCount: typeof raw.actionNodeCount === 'number' ? raw.actionNodeCount : 0,
     documentReady: raw.documentReady ?? undefined,
+    composerPresent: raw.composerPresent === true,
+    joinCtaPresent: raw.joinCtaPresent === true,
   };
+}
+
+/**
+ * L3 结构确认加入（change facebook-join-structural-verify）——**承重判据 = 语言无关、点击可归因的「跃迁」**：
+ * composer 点前不存在、点后存在。这是修正后的核心（对抗评审揪出）：不能只靠「点后无可见加入 CTA」当正向——
+ * `joinCtaPresent` 由**词表**派生（`!!join`，join 靠 JOIN_CTA_LABELS 命中），在**未覆盖语种**（正是本功能要治的场景）
+ * 会 fail-open：非成员的加入按钮标签也未命中词表 → joinCtaPresent=false → 裸 composer 就误判已加入。跃迁不依赖词表：
+ * 非成员公开组点前已渲染 composer → 无跃迁、不误判；点击后 composer 才出现 = 点击真让本账号成为成员。`!joinCtaPresent`
+ * 与 `documentReady!=='loading'` 仅作 corroborating/兜底、不单独承重。**仅用于 post-click**——observe/pre-click 无点击、
+ * 绝不据结构判 already_member（那条会没点击就 markJoined、污染账本、在没加入的群假评论）。导出供单测。
+ */
+export function structuralJoinConfirmed(
+  pre: FacebookGroupJoinObservation | undefined,
+  post: FacebookGroupJoinObservation | undefined,
+): boolean {
+  if (!post) return false;
+  if (pre?.composerPresent === true) return false; // 点前已有 composer（如公开组对非成员）→ 非跃迁，绝不认
+  return post.composerPresent === true && post.joinCtaPresent !== true && post.documentReady !== 'loading';
 }
 
 /** NFKC 归一 + 收敛空白 + 小写：多语标签/短语匹配统一口径（与 in-page ctaKind 的 replace(/\s+/g,' ').toLowerCase() 对齐）。 */
@@ -283,6 +313,23 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
       signals.push(label || a);
     }
   }
+  // L3 结构后置校验（change facebook-join-structural-verify）：群主体内是否存在可聚焦发帖/评论 composer。
+  // M3 子树判别：只认 [role=main] 内的 [contenteditable]/[role=textbox]，排除顶栏/导航/侧栏 chrome 与搜索框
+  //（顶栏搜索、群内搜索按 aria/placeholder「搜索」多语词剔除），避免把无关输入框当发帖框。选择器精度留真机取证细化。
+  function isComposer(el){
+    if (!el || !visible(el)) return false;
+    if (el.closest && el.closest('[role="banner"],[role="navigation"],[role="complementary"],[role="search"]')) return false;
+    var ph = String((el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('placeholder'))) || '').toLowerCase();
+    if (/search|搜索|搜尋|tìm kiếm|buscar|cari|recherch|suche|ค้นหา/.test(ph)) return false;
+    return true;
+  }
+  // fail-closed：无 [role=main] 时不认 composer（否则任意页面 textbox 如 Messenger 抽屉会被当群发帖框）。
+  var mainEl = document.querySelector('[role="main"]');
+  var composerPresent = !!mainEl && Array.from(document.querySelectorAll('[contenteditable="true"],[role="textbox"]')).some(function(el){
+    return isComposer(el) && mainEl.contains && mainEl.contains(el);
+  });
+  // joinCtaPresent = 群主体内是否有可见「加入」CTA（即上方分类到的 join 节点）。承重闸用。
+  var joinCtaPresent = !!join;
   var modalLower = String(modalText || '').toLowerCase();
   var headerLower = String(headerText || '').toLowerCase();
   // 待审/问卷改用多语词表 contains（P0-2）：pendingCta = 多语「待审」按钮已分类；modal/header 文本亦对多语词表命中。
@@ -317,6 +364,8 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
     questionnaireRequired: questionnaire,
     pendingRequest: pending,
     navError: null,
+    composerPresent: composerPresent,
+    joinCtaPresent: joinCtaPresent,
     joinButton: btn || { found: false }
   });
 })()`;
@@ -415,6 +464,9 @@ export class FacebookJoinExecutor {
       if (hasMemberSignal(observation)) return { ok: false, reason: 'already_member', groupUrl, clicked: false, observation };
       if (observation.questionnaireRequired) return { ok: false, reason: 'questionnaire_required', groupUrl, clicked: false, observation };
       if (observation.pendingRequest) return { ok: false, reason: 'pending', groupUrl, clicked: false, observation };
+      // L3：observe/pre-click **不据结构判 already_member**（对抗评审揪出）——此处无点击，joinCtaPresent 词表派生会 fail-open，
+      // 结构 already_member 会没点击就 markJoined、污染账本、在没加入的群假评论。结构判定仅用于 post-click 的「跃迁」（见 structuralJoinConfirmed）。
+      // observe 期已加入只认词表 hasMemberSignal（权威正向标签）。
 
       const button = raw.joinButton;
       // P1-5：就绪轮询触顶但页面仍未最小就绪（仍 loading / 无动作节点）且没抓到加入按钮 → not_ready（可重试网络瞬态）。
@@ -446,7 +498,7 @@ export class FacebookJoinExecutor {
       if (this.opts.waitAfterClickMs > 0) await this.sleep(this.opts.waitAfterClickMs);
       // 点击后轮询（change fb-group-join-postclick-wait）：等成员态真渲染出来再判——FB 常在点击后数秒才把按钮从「加入小组」
       // 翻成「已加入」，死等一次会把已成功的加入误判成 join_failed。轮询到 已加入/待审/问卷/登录/验证码 或触上限。
-      const post = await this.observePostClickUntilSettled(groupUrl);
+      const post = await this.observePostClickUntilSettled(groupUrl, observation);
       const postObservation = post.observation;
       if (post.reason === 'joined') return { ok: true, groupUrl, clicked: true, observation, postObservation };
       if (post.reason) return { ok: false, reason: post.reason, groupUrl, clicked: true, observation, postObservation };
@@ -519,6 +571,7 @@ export class FacebookJoinExecutor {
   private isDecisiveObservation(raw: RawJoinObservation, obs: FacebookGroupJoinObservation): boolean {
     if (obs.loginRequired || obs.captchaDetected || obs.questionnaireRequired || obs.pendingRequest) return true;
     if (hasMemberSignal(obs)) return true;
+    // L3：不把结构成员态当 observe 期决定性信号（结构判定仅用于 post-click 跃迁；observe 期据结构判 already_member 已删除）。
     if (raw.joinButton?.found && obs.documentReady !== 'loading') return true;
     return false;
   }
@@ -531,6 +584,8 @@ export class FacebookJoinExecutor {
    */
   private async observePostClickUntilSettled(
     groupUrl: string,
+    /** 同一次 click 导航内的点前观测——供 L3「跃迁」判据（composer 点前无、点后有）。 */
+    preObservation: FacebookGroupJoinObservation | undefined,
   ): Promise<{
     observation: FacebookGroupJoinObservation;
     reason?: 'joined' | 'pending' | 'questionnaire_required' | 'login_required' | 'blocked_by_captcha';
@@ -546,9 +601,13 @@ export class FacebookJoinExecutor {
       last = obs;
       if (obs.loginRequired) return { observation: obs, reason: 'login_required' };
       if (obs.captchaDetected) return { observation: obs, reason: 'blocked_by_captcha' };
-      if (hasMemberSignal(obs)) return { observation: obs, reason: 'joined' };
+      if (hasMemberSignal(obs)) return { observation: obs, reason: 'joined' }; // 词表命中：权威成员标签，authoritative
+      // 顺序（L3）：pending/问卷先于结构 joined——Join→Pending 翻转即便渲了 composer 也判 pending、不判 joined。
       if (obs.questionnaireRequired) return { observation: obs, reason: 'questionnaire_required' };
       if (obs.pendingRequest) return { observation: obs, reason: 'pending' };
+      // L3 结构主判（承重 = 语言无关「跃迁」）：composer 点前无、点后有 → 点击真让本账号成为成员 → joined。
+      // 非成员公开组点前已有 composer → 无跃迁、不误判；未覆盖语种加入据此仍被识别（消灭重复加群），且不依赖词表派生的 joinCtaPresent。
+      if (structuralJoinConfirmed(preObservation, obs)) return { observation: obs, reason: 'joined' };
       if (Date.now() >= deadline) break;
       await this.sleep(pollMs);
     }

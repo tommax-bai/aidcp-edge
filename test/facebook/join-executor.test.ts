@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monitor.js';
-import { FacebookJoinExecutor, classifyCtaLabel, hasMemberSignal } from '../../src/facebook/join-executor.js';
+import { FacebookJoinExecutor, classifyCtaLabel, hasMemberSignal, structuralJoinConfirmed } from '../../src/facebook/join-executor.js';
 
 interface RawJoinObservation {
   pageUrl?: string;
@@ -20,6 +20,8 @@ interface RawJoinObservation {
   navError?: string | null;
   documentReady?: string;
   actionNodeCount?: number;
+  composerPresent?: boolean;
+  joinCtaPresent?: boolean;
   joinButton?: { found: boolean; disabled?: boolean; x?: number; y?: number; text?: string | null; aria?: string | null };
 }
 
@@ -145,6 +147,85 @@ test('fb-join-executor: click=true 点击一次 Join，post observation 显示 j
   assert.equal(cdp.navigations[0], 'https://www.facebook.com/groups/123');
   assert.equal(cdp.clicks.length, 1);
   assert.equal(r.postObservation?.mainCtaText, 'Joined');
+});
+
+// ── change facebook-join-structural-verify（L3）：结构后置校验，承重=语言无关「跃迁」；消灭「本地语已加入→误判 join_failed→重复加群」──
+test('L3: 跃迁（点前无 composer→点后有 composer）→ joined（词表未命中语种也识别，消灭重复加群）', async () => {
+  const cdp = new FakeCdp([
+    obs({ composerPresent: false, joinCtaPresent: true }), // pre：非成员加入页，无 composer、加入 CTA 在（joinButton.found 一致）
+    obs({
+      mainCtaText: 'Đăng bài', // 越南语「发帖」——非成员词表标签，hasMemberSignal 命不中
+      mainCtaAria: null,
+      membershipSignals: [],
+      composerPresent: true, // 点后 composer 出现 = 跃迁
+      joinCtaPresent: false,
+      joinButton: { found: false },
+    }),
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, true); // 跃迁语言无关，不再因词表漏命本地语成员标签误报 join_failed
+  assert.equal(r.clicked, true);
+});
+
+test('L3 红线: 非成员公开组点前已有 composer（无跃迁）→ 点后绝不判 joined，诚实 join_failed（防 fail-open false-positive）', async () => {
+  const cdp = new FakeCdp([
+    obs({ composerPresent: true, joinCtaPresent: true }), // pre：公开组对非成员已渲染 composer + 加入 CTA 在
+    obs({ mainCtaText: '参加', composerPresent: true, joinCtaPresent: false, joinButton: { found: false } }), // post：composer 仍在但点前就有→无跃迁；未覆盖语种致 joinCtaPresent=false
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'join_failed'); // 点前已有 composer → structuralJoinConfirmed=false → 绝不据 fail-open 的 joinCtaPresent 假成功
+});
+
+test('L3 红线: 未覆盖语种非成员 + 主体有 composer（joinButton 未命中词表）→ observe 期绝不判 already_member', async () => {
+  // 关键回归：joinCtaPresent 由词表派生、未覆盖语种 fail-open。修前 observe 期结构 already_member 会没点击就 markJoined、污染账本。
+  const cdp = new FakeCdp([
+    obs({ mainCtaText: '参加', mainCtaAria: '参加', composerPresent: true, joinCtaPresent: false, joinButton: { found: false } }),
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123'); // observe-only
+  assert.notEqual(r.reason, 'already_member'); // observe/pre-click 绝不据结构判已加入（已删除该路径）
+});
+
+test('L3: 点后 composer 在但加入 CTA 仍可见（点前无 composer、join 未生效）→ join_failed（不假成功）', async () => {
+  const cdp = new FakeCdp([
+    obs({ composerPresent: false, joinCtaPresent: true }),
+    obs({ mainCtaText: 'Join group', composerPresent: true, joinCtaPresent: true, joinButton: { found: true } }),
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'join_failed'); // joinCtaPresent=true → structuralJoinConfirmed=false → 绝不假成功
+  assert.equal(r.clicked, true);
+});
+
+test('L3: Join→Pending 且渲染了 composer（跃迁）→ 判 pending（pending 先于结构 joined）', async () => {
+  const cdp = new FakeCdp([
+    obs({ composerPresent: false, joinCtaPresent: true }),
+    obs({ pendingRequest: true, composerPresent: true, joinCtaPresent: false, joinButton: { found: false } }),
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'pending'); // pending 判据先于结构 joined，composer 跃迁不把 pending 读成 joined
+});
+
+test('L3: 点后无 composer（无跃迁）无成员词表信号 → join_failed（结构不假成功）', async () => {
+  const cdp = new FakeCdp([
+    obs({ composerPresent: false, joinCtaPresent: true }),
+    obs({ mainCtaText: null, composerPresent: false, joinCtaPresent: false, joinButton: { found: false } }),
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'join_failed'); // composer 未出现 → 无跃迁 → 无正向信号不假成功
+});
+
+test('structuralJoinConfirmed: 仅「跃迁（点前无 composer→点后有且无可见加入 CTA、非 loading）」才认', () => {
+  const post = { composerPresent: true, joinCtaPresent: false, documentReady: 'complete' };
+  assert.equal(structuralJoinConfirmed({ composerPresent: false }, post), true); // 跃迁
+  assert.equal(structuralJoinConfirmed(undefined, post), true); // 点前无观测视为无 composer
+  assert.equal(structuralJoinConfirmed({ composerPresent: true }, post), false); // 点前已有 composer→无跃迁（防公开组 fail-open）
+  assert.equal(structuralJoinConfirmed({ composerPresent: false }, { composerPresent: true, joinCtaPresent: true, documentReady: 'complete' }), false); // 加入 CTA 仍在
+  assert.equal(structuralJoinConfirmed({ composerPresent: false }, { composerPresent: false, documentReady: 'complete' }), false); // 点后无 composer
+  assert.equal(structuralJoinConfirmed({ composerPresent: false }, { composerPresent: true, joinCtaPresent: false, documentReady: 'loading' }), false); // loading 不认
+  assert.equal(structuralJoinConfirmed({ composerPresent: false }, undefined), false);
 });
 
 test('fb-join-executor: pre-click 已有问卷门槛时 fail-closed，不点击不提交', async () => {
