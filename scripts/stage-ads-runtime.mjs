@@ -8,7 +8,19 @@
 //
 // Cross-platform seam: only the OS-specific global-install path differs (§2.2).
 import { execFileSync } from 'node:child_process';
-import { existsSync, rmSync, mkdirSync, cpSync, writeFileSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  rmSync,
+  mkdirSync,
+  cpSync,
+  writeFileSync,
+  readFileSync,
+  lstatSync,
+  readlinkSync,
+  readdirSync,
+  realpathSync,
+  unlinkSync,
+} from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -141,6 +153,48 @@ if (!cliSrc2.includes(ISRUNNING_CALL)) {
 }
 writeFileSync(cliPath, cliSrc2.split(ISRUNNING_CALL).join(ISRUNNING_STUB));
 console.log('[stage-ads-runtime] patched isRunning -> host/version-agnostic liveness (process.kill 0)');
+
+// --- Strip absolute / bundle-escaping symlinks (codesign --deep --strict killers) ---
+// npm materializes node_modules/.bin/* CLI shims as ABSOLUTE symlinks into build/ads-prefix
+// (the throwaway global-install prefix). Bundled into a signed .app they are dead links
+// pointing at build-machine paths, and `codesign --verify --deep --strict` rejects the whole
+// bundle with "invalid destination for symbolic link in bundle". This ONLY surfaces in signed
+// CI builds — local unsigned builds skip codesign, so it slips through typecheck/tests/dir builds.
+// These .bin shims are CLI conveniences the app never uses (the runtime is invoked
+// programmatically, not via .bin), so drop any symlink whose target is absolute or resolves
+// outside the staged tree. Internal relative symlinks (target stays inside `out`) are kept —
+// codesign is fine with those.
+function stripEscapingSymlinks(dir, rootReal) {
+  let removed = 0;
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch {
+      continue;
+    }
+    if (st.isSymbolicLink()) {
+      let escapes = readlinkSync(p).startsWith('/');
+      if (!escapes) {
+        try {
+          escapes = !realpathSync(p).startsWith(rootReal);
+        } catch {
+          escapes = true; // dangling → dead link, drop it
+        }
+      }
+      if (escapes) {
+        unlinkSync(p);
+        removed++;
+      }
+    } else if (st.isDirectory()) {
+      removed += stripEscapingSymlinks(p, rootReal);
+    }
+  }
+  return removed;
+}
+const strippedLinks = stripEscapingSymlinks(out, realpathSync(out));
+console.log(`[stage-ads-runtime] stripped ${strippedLinks} absolute/escaping symlink(s) (codesign-safe)`);
 
 // Sanity: native sqlite must be present (all-arch) or the packaged service can't load.
 const nativeMac = join(out, 'sqlite', 'mac', 'node_sqlite3.node');
