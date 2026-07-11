@@ -140,9 +140,15 @@ export interface FacebookCommentExecutorOptions {
   editorScrollDistancePx?: number;
   /** 结构探测的复探轮数（导航后等 surface 稳定）。 */
   surfaceProbeRounds?: number;
-  /** 提交点击后 / reload 后的确认等待。 */
+  /** 提交后就地确认前的初始沉淀（等乐观渲染出现）/ reload 后确认前的初始沉淀。 */
   waitAfterSubmitMs?: number;
   waitAfterReloadMs?: number;
+  /** 就地 ack 门控确认（不刷新）的有界轮询轮数与间隔（治「秒退」误判、抓服务器点头即成功）。 */
+  inPlaceVerifyRounds?: number;
+  inPlaceVerifyIntervalMs?: number;
+  /** 刷新兜底后的有界轮询轮数与间隔（替代「死等一次」，治慢渲染假阴性 P2②）。 */
+  reloadVerifyRounds?: number;
+  reloadVerifyIntervalMs?: number;
   /** 读了再写：开帖后最多抽取的他人评论条数（供撰写器上下文）。 */
   maxComments?: number;
 }
@@ -153,8 +159,12 @@ const DEFAULTS: Required<FacebookCommentExecutorOptions> = {
   editorScrollRounds: 6,
   editorScrollDistancePx: 700,
   surfaceProbeRounds: 4,
-  waitAfterSubmitMs: 4_000,
-  waitAfterReloadMs: 5_000,
+  waitAfterSubmitMs: 500,
+  waitAfterReloadMs: 2_500,
+  inPlaceVerifyRounds: 32,
+  inPlaceVerifyIntervalMs: 300,
+  reloadVerifyRounds: 8,
+  reloadVerifyIntervalMs: 800,
   maxComments: 6,
 };
 
@@ -162,6 +172,25 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
 
 function jsString(s: string): string {
   return JSON.stringify(s);
+}
+
+/**
+ * FB 评论 id 的乐观占位前缀（客户端本地生成、服务器点头**前**就渲染在评论行上）——
+ * 真机探针实证：回车后 ~68ms 就带 `comment_id=client…`，服务器写入响应 ~3.5s 才到、之后 id 才升级为正式格式。
+ * 绝不据乐观占位判成功（会 over-confirm，红线）。
+ */
+const FB_CLIENT_COMMENT_ID_RE = /^client/i;
+/** FB 服务器正式评论 id 前缀（base64 "comment:"）——服务器点头**后**才有，是 ack-gated 的硬信号。 */
+const FB_SERVER_COMMENT_ID_RE = /^Y29tbWVudD/;
+
+/**
+ * 判某个 `comment_id` 值是否为**服务器正式 id**（而非乐观占位）。TS 与页内 JS 同源（注入 `.source`）。
+ * 保守：只认正式前缀、明确排除 client 占位；前缀变体识别不出时宁可返回 false（退到点赞/回复信号或刷新兜底，安全降级、绝不 over-confirm）。
+ */
+export function isServerFacebookCommentId(value: string): boolean {
+  const v = (value ?? '').trim();
+  if (!v || FB_CLIENT_COMMENT_ID_RE.test(v)) return false;
+  return FB_SERVER_COMMENT_ID_RE.test(v);
 }
 
 export class FacebookCommentExecutor {
@@ -408,9 +437,12 @@ export class FacebookCommentExecutor {
 
   /**
    * 在当前已打开的目标帖 permalink 上提交评论并做「服务器确认」。
-   * 顺序：本人 id 前置 → fresh 阻断复检 → 催拉+聚焦评论框 → 受控输入 → 找发布控件 → 提交前二次 fresh 复检 →
-   *       点击提交 → reload → own-identity + 目标帖评论区 + 文本片段 三重收窄确认。
-   * 任一确认未达 → verification_ambiguous（诚实非成功，绝不以乐观渲染冒充）。
+   * 顺序：本人 id 前置 → fresh 阻断复检 → 催拉+聚焦评论框 → 受控输入 → 提交前二次 fresh 复检 → 回车提交 →
+   *   (1) 就地 ack 门控快确认（不刷新）：仅当「本人+文本」评论行上出现**服务器正式评论 id** 或 **点赞/回复交互控件**
+   *       才算成功——二者皆服务器点头后才有；乐观渲染、客户端占位 id、全页文本命中一律不算（真机探针实证，绝不 over-confirm）。
+   *   (2) 兜底：刷新一次 + **有界轮询**三重收窄确认（own-identity + 目标帖评论区 + 文本片段），
+   *       替代旧「死等一次」——治慢渲染下评论已在服务器却没在单次窗口重渲染的假阴性（P2②）。
+   * 两条都确认不了 → verification_ambiguous（诚实非成功，去重标记照打、不重发）。
    */
   async submitComment(targetUrl: string, text: string, contactInfo?: string): Promise<FacebookSubmitResult> {
     const body = (text ?? '').trim();
@@ -453,25 +485,58 @@ export class FacebookCommentExecutor {
     // （旧版按按钮文案 `发布评论|Post|…` 定位提交控件在西语/问答帖上会 submit_control_not_found；回车更稳。）
     await evalJson<FocusEditorResult>(this.cdp, FOCUS_EDITOR_JS);
     await dispatchKey(this.cdp, 'Enter', 'Enter', 13);
-    await this.sleep(this.opts.waitAfterSubmitMs);
-    // reload 后做 own-identity 收窄确认（F1 补丁②）：绝不用乐观渲染 / 全页文本命中冒充成功。
+
+    // (1) 就地 ack 门控快确认（不刷新，抓服务器点头即成功、比刷新又快又准）。
+    if (await this.inPlaceAckConfirm(body, ownId, targetUrl)) {
+      return { ok: true, submitted: true, serverConfirmed: true };
+    }
+    // (2) 兜底：刷新一次 + 有界轮询三重收窄确认（治慢渲染假阴性；提交后误导性报错浮层不当作失败，确认信号权威）。
     try {
       await this.cdp.send('Page.reload', { ignoreCache: true });
     } catch (err) {
       this.log(`[fb-comment] reload 失败：${(err as Error).message}`);
       return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
     }
-    await this.sleep(this.opts.waitAfterReloadMs);
-    let confirmed = false;
-    try {
-      const verify = await evalJson<ScopedVerifyResult>(this.cdp, buildScopedVerifyJs(body, ownId, targetUrl));
-      confirmed = Boolean(verify?.confirmed);
-    } catch (err) {
-      this.log(`[fb-comment] 服务器确认探测失败：${(err as Error).message}`);
-      confirmed = false;
+    if (await this.reloadScopedConfirm(body, ownId, targetUrl)) {
+      return { ok: true, submitted: true, serverConfirmed: true };
     }
-    if (!confirmed) return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
-    return { ok: true, submitted: true, serverConfirmed: true };
+    return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
+  }
+
+  /**
+   * 就地 ack 门控确认（不刷新）：有界轮询，命中「服务器正式评论 id 或 点赞/回复交互控件」即成功。
+   * 有界轮次 + 注入式 sleep（不用 wall-clock 循环），测试可确定性驱动。
+   */
+  private async inPlaceAckConfirm(body: string, ownId: string, targetUrl: string): Promise<boolean> {
+    await this.sleep(this.opts.waitAfterSubmitMs);
+    for (let i = 0; i < this.opts.inPlaceVerifyRounds; i++) {
+      if (i > 0) await this.sleep(this.opts.inPlaceVerifyIntervalMs);
+      try {
+        const v = await evalJson<AckVerifyResult>(this.cdp, buildAckVerifyJs(body, ownId, targetUrl));
+        if (v?.ackConfirmed) return true;
+      } catch (err) {
+        this.log(`[fb-comment] 就地 ack 确认探测失败：${(err as Error).message}`);
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 刷新兜底后有界轮询三重收窄确认（own-identity + 目标帖评论区 + 文本片段）。
+   * 替代旧「reload 后死等一次」：慢渲染下评论已在服务器却没在单次窗口重渲染 → 多查几眼即命中（治 P2② 假阴性）。
+   */
+  private async reloadScopedConfirm(body: string, ownId: string, targetUrl: string): Promise<boolean> {
+    await this.sleep(this.opts.waitAfterReloadMs);
+    for (let i = 0; i < this.opts.reloadVerifyRounds; i++) {
+      if (i > 0) await this.sleep(this.opts.reloadVerifyIntervalMs);
+      try {
+        const v = await evalJson<ScopedVerifyResult>(this.cdp, buildScopedVerifyJs(body, ownId, targetUrl));
+        if (v?.confirmed) return true;
+      } catch (err) {
+        this.log(`[fb-comment] 刷新确认探测失败：${(err as Error).message}`);
+      }
+    }
+    return false;
   }
 
   /** 催拉 + 聚焦评论框；返回 reason 表示失败（editor_not_found / permission_gated）。 */
@@ -530,6 +595,13 @@ interface ScopedVerifyResult {
   matchedText: boolean;
   matchedOwnIdentity: boolean;
   articleCount: number;
+}
+
+interface AckVerifyResult {
+  /** 「本人+文本」评论行上出现服务器正式 id 或 点赞/回复交互控件 → 服务器已点头。 */
+  ackConfirmed: boolean;
+  serverId: boolean;
+  reactions: number;
 }
 
 /** 共享页内工具：可见性、评论框判定、群问答/入群门禁判定。 */
@@ -677,5 +749,42 @@ function buildScopedVerifyJs(text: string, ownId: string, targetUrl: string): st
       if(matchedText&&matchedOwn) break;
     }
     return JSON.stringify({confirmed:matchedText&&matchedOwn,matchedText:matchedText,matchedOwnIdentity:matchedOwn,articleCount:articles.length});
+  })()`;
+}
+
+/**
+ * 就地 ack 门控确认（不刷新）：在「本人身份 + 文本片段」收窄到的评论行上，判服务器点头信号——
+ * ① 服务器正式评论 id（非 client 乐观占位，与 isServerFacebookCommentId 同源）；② 点赞/回复交互控件（乐观阶段为 0）。
+ * 任一命中即 ackConfirmed。语言无关（不吃任何 locale 文案）。红线：绝不据乐观渲染/占位 id 冒充成功。
+ */
+function buildAckVerifyJs(text: string, ownId: string, targetUrl: string): string {
+  const fragment = text.trim().slice(0, 60);
+  let targetPath = '';
+  try {
+    targetPath = new URL(targetUrl).pathname;
+  } catch {
+    targetPath = '';
+  }
+  return `(function(){${FB_EXEC_HELPERS_JS}
+    var frag=${jsString(fragment)}; var ownId=${jsString(ownId)}; var targetPath=${jsString(targetPath)};
+    var CLIENT_RE=/${FB_CLIENT_COMMENT_ID_RE.source}/i; var SERVER_RE=/${FB_SERVER_COMMENT_ID_RE.source}/;
+    function serverId(href){ var m=/[?&](?:reply_comment_id|comment_id)=([^&]+)/i.exec(href||''); if(!m) return false; var v=''; try{ v=decodeURIComponent(m[1]); }catch(e){ v=m[1]; } if(!v||CLIENT_RE.test(v)) return false; return SERVER_RE.test(v); }
+    var articles=Array.prototype.slice.call(document.querySelectorAll('[role="article"], article'));
+    if(articles.length===0) return JSON.stringify({ackConfirmed:false,serverId:false,reactions:0});
+    var target=null;
+    if(targetPath){ for(var i=0;i<articles.length;i++){ var ls=articles[i].querySelectorAll('a[href]'); for(var j=0;j<ls.length;j++){ if((ls[j].getAttribute('href')||'').indexOf(targetPath)>=0){ target=articles[i]; break; } } if(target) break; } }
+    if(!target) target=articles[0];
+    var nodes=Array.prototype.slice.call(target.querySelectorAll('[role="article"]')); if(nodes.length===0) nodes=[target];
+    for(var k=0;k<nodes.length;k++){ var node=nodes[k];
+      var txt=fbText(node); if(!(frag.length>0 && txt.indexOf(frag)>=0)) continue;
+      var owns=node.querySelectorAll('a[href*="/profile.php?id="], a[href*="/people/"], a[href*="user/"]'); var ownHit=false;
+      for(var a=0;a<owns.length;a++){ if((owns[a].getAttribute('href')||'').indexOf(ownId)>=0){ ownHit=true; break; } }
+      if(!ownHit) continue;
+      var hasServer=false; var idl=node.querySelectorAll('a[href*="comment_id="]');
+      for(var b=0;b<idl.length;b++){ if(serverId(idl[b].getAttribute('href'))){ hasServer=true; break; } }
+      var reactions=node.querySelectorAll('[role="button"]').length;
+      if(hasServer || reactions>=2){ return JSON.stringify({ackConfirmed:true,serverId:hasServer,reactions:reactions}); }
+    }
+    return JSON.stringify({ackConfirmed:false,serverId:false,reactions:0});
   })()`;
 }

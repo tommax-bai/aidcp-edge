@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monitor.js';
-import { FacebookCommentExecutor, isFacebookCommentEditorLabel } from '../../src/facebook/comment-executor.js';
+import { FacebookCommentExecutor, isFacebookCommentEditorLabel, isServerFacebookCommentId } from '../../src/facebook/comment-executor.js';
 
 // ── raw page-structure builder (matches RawPageStructure the scan JS returns) ──
 interface RawStruct {
@@ -64,6 +64,10 @@ interface FakeConfig {
   accepted?: boolean;
   submitCtl?: { found: boolean; disabled: boolean; label: string | null; x: number; y: number };
   verify?: { confirmed: boolean; matchedText: boolean; matchedOwnIdentity: boolean; articleCount: number };
+  /** 就地 ack 门控确认结果（默认不确认 → 流程落到刷新兜底，保留旧路径覆盖）。 */
+  ack?: { ackConfirmed: boolean; serverId?: boolean; reactions?: number };
+  /** 刷新兜底三重确认只在第 N 次及以后命中（模拟慢渲染，验证有界轮询治 P2② 假阴性）。 */
+  verifyConfirmAfter?: number;
   containerName?: string | null;
   postContent?: { postText: string | null; comments: string[] };
 }
@@ -76,6 +80,7 @@ class FakeCdp implements BrowseCdp {
   typed = '';
   backspaces = 0;
   enters = 0;
+  verifyCalls = 0;
   constructor(private readonly cfg: FakeConfig = {}) {}
 
   async send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
@@ -126,7 +131,15 @@ class FakeCdp implements BrowseCdp {
         return val(JSON.stringify(this.cfg.submitCtl ?? { found: true, disabled: false, label: 'Post', x: 50, y: 60 }));
       }
       if (expr.includes('selectNodeContents')) return val('selected');
+      if (expr.includes('ackConfirmed')) {
+        return val(JSON.stringify(this.cfg.ack ?? { ackConfirmed: false, serverId: false, reactions: 0 }));
+      }
       if (expr.includes('matchedOwnIdentity')) {
+        this.verifyCalls++;
+        if (this.cfg.verifyConfirmAfter !== undefined) {
+          const confirmed = this.verifyCalls >= this.cfg.verifyConfirmAfter;
+          return val(JSON.stringify({ confirmed, matchedText: true, matchedOwnIdentity: confirmed, articleCount: 1 }));
+        }
         return val(
           JSON.stringify(this.cfg.verify ?? { confirmed: true, matchedText: true, matchedOwnIdentity: true, articleCount: 1 }),
         );
@@ -358,6 +371,39 @@ test('fb-executor: reload 后仅乐观渲染、own-identity 未命中 → verifi
   assert.equal(r.reason, 'verification_ambiguous');
   assert.equal(r.submitted, true);
   assert.equal(r.serverConfirmed, false);
+});
+
+test('fb-executor: 就地 ack 命中（服务器 id / 点赞回复出现）→ ok:true 且不刷新（快确认）', async () => {
+  const cdp = new FakeCdp({ ack: { ackConfirmed: true, serverId: true, reactions: 4 } });
+  const ex = makeExecutor(cdp);
+  const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');
+  assert.equal(r.ok, true);
+  assert.equal(r.serverConfirmed, true);
+  assert.equal(cdp.reloads, 0, '就地已确认则绝不刷新（比现状又快又准）');
+  assert.ok(cdp.enters >= 1, '仍经回车提交');
+});
+
+test('fb-executor: 就地未确认但刷新后有界轮询稍后一轮命中 → ok:true（治慢渲染假阴性 P2②）', async () => {
+  // 就地 ack 默认不确认 → 刷新兜底；前两次三重确认落空，第 3 次才命中（模拟慢渲染）。
+  const cdp = new FakeCdp({ verifyConfirmAfter: 3 });
+  const ex = makeExecutor(cdp);
+  const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');
+  assert.equal(r.ok, true);
+  assert.equal(r.serverConfirmed, true);
+  assert.equal(cdp.reloads, 1, '只刷新一次');
+  assert.ok(cdp.verifyCalls >= 3, '刷新后应有界轮询多次直到命中，而非只查一次');
+});
+
+test('isServerFacebookCommentId: 服务器正式 id 认、客户端乐观占位/空不认', () => {
+  // 真机探针取到的正式 id（base64 "comment:" 前缀）。
+  assert.equal(isServerFacebookCommentId('Y29tbWVudDoxNTY0OTc1MzcxOTU0ODUxXzIzMjc1NTgxOTQzMTgxMjc='), true);
+  // 乐观占位（回车后 ~68ms 就有、服务器点头前，绝不据此判成功）。
+  assert.equal(isServerFacebookCommentId('client:1234567890'), false);
+  assert.equal(isServerFacebookCommentId('clientabc'), false);
+  // 空/空白/未知前缀 → 保守不认（安全降级到点赞回复信号或刷新兜底）。
+  assert.equal(isServerFacebookCommentId(''), false);
+  assert.equal(isServerFacebookCommentId('   '), false);
+  assert.equal(isServerFacebookCommentId('99887766'), false);
 });
 
 test('fb-executor: 提交前验证码 fresh 复检命中 → blocked_by_captcha，不提交', async () => {
