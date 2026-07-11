@@ -898,11 +898,11 @@ body { margin: 0; }
 .kw-count { font-size: 11px; color: var(--faint); font-weight: 600; margin-left: 6px; }
 .persona-or { font-size: 11px; color: var(--faint); }
 /* 关键词 chip：语气调性（单选）与内容偏好（多选）共用同一「边缘弧度方形」chip，
-   统一形状 + 标记（✓）与文字之间的间距（用 flex gap，不再靠 content 里的空格，修偏紧凑）。 */
+   统一形状 + 虚线描边（自定义与非自定义一致）+ 标记（✓）与文字间距（用 flex gap）。 */
 .persona-kw-group { display: flex; flex-wrap: wrap; gap: 8px; }
 .persona-kw-group .kw-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  min-height: 38px; padding: 7px 14px; border: 1px solid #dbe3ef; border-radius: 8px;
+  min-height: 38px; padding: 7px 14px; border: 1px dashed #cbd5e8; border-radius: 8px;
   background: #fff; color: #5b6475; font-size: 13px; font-weight: 600;
   cursor: pointer; font-family: inherit; text-align: center;
   transition: border-color 0.12s, background 0.12s, color 0.12s;
@@ -911,6 +911,9 @@ body { margin: 0; }
 .persona-kw-group .kw-btn.active { border-color: var(--accent); background: #eaf1ff; color: #2563eb; }
 .persona-kw-group .kw-btn.active::before { content: "✓"; font-size: 13px; line-height: 1; font-weight: 800; color: var(--accent); }
 .persona-kw-group .kw-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(59, 111, 240, 0.15); }
+/* 语气调性：等宽网格铺满每一行（原 flex 按字数长短参差、右侧不齐）。5 项 → 3 列 [3,2]。 */
+.persona-kw-group[data-dim="tone"] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.persona-kw-group[data-dim="tone"] .kw-btn { width: 100%; }
 .persona-content-groups { display: flex; flex-direction: column; gap: 16px; }
 .persona-pref-group { display: flex; flex-direction: column; gap: 9px; }
 .persona-pref-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -919,7 +922,6 @@ body { margin: 0; }
 .persona-pref-group .persona-kw-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .persona-pref-group .kw-btn { width: 100%; }
 .persona-pref-group .kw-btn:not(.active)::before { content: "+"; font-size: 15px; line-height: 1; font-weight: 400; color: #64748b; }
-.persona-pref-group .kw-btn.custom { border-style: dashed; }
 /* 自定义加号：排在该类目所有预设选项之后，独占一整行（跨两列）故各类目位置一致；
    形同选项、只显示「+」故更窄（左对齐 46px）。描边/字色达 WCAG 3:1 可辨。 */
 .persona-add-custom {
