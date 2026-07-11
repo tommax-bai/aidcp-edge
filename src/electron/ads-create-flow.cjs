@@ -98,7 +98,10 @@ function createCreateFlow(deps) {
       const remark = encodeRemark({ intendedAccountLabel, template: templateKey, machine: machineLabel, createdAt: now(), platform });
       const r = await writeApi.createProfile({
         groupId,
-        name: name || templateKey,
+        // 建号不写死设备模板名（change edge-adspower-name-follows-nickname）：标准建号路径 name 缺省 →
+        // 不下发 name、交 AdsPower 默认命名（登录读到真实昵称后由主进程渐进改名跟随昵称）；
+        // FB 批量导入路径仍显式传 name（profileNameForFacebookImport），原样下发。
+        name,
         fingerprintConfig: built.fingerprintConfig,
         proxyConfig: proxyNorm.proxyConfig,
         remark,
@@ -110,9 +113,10 @@ function createCreateFlow(deps) {
       return {
         ok: true,
         userId: r.userId,
-        // 带回实际写入 AdsPower 的环境名（= 上面 createProfile 的 name），供渲染层入册用真名、
-        // 不再让「加入即空名」漂移出左栏与添加面板不一致（change edge-env-name-live-sync）。
-        name: name || templateKey,
+        // 带回实际写入 AdsPower 的环境名（= 上面 createProfile 的 name）：显式传了（FB 导入）则带回该名、
+        // 标准建号未传则为空（AdsPower 默认命名，入册允许空名、由左栏显示兜底 + 登录后渐进改名跟随昵称，
+        // change edge-adspower-name-follows-nickname）。
+        name: name || '',
         status: STATUS.UNVERIFIED,
         template: templateKey,
         intendedAccountLabel: intendedAccountLabel || '',

@@ -337,6 +337,44 @@ function resolveAdsOpts(formOpts) {
   return out;
 }
 
+// 环境名跟随真实昵称（change edge-adspower-name-follows-nickname）：某 adspower 环境登录读出真实平台昵称后，
+// 若其 AdsPower 环境名与昵称不一致，则经写客户端改名封装把 AdsPower 名改成昵称，让左栏 / 添加面板 / 直接打开
+// 指纹浏览器客户端三处显示名一致（存量环境随下次登录渐进改到位）。铁律：
+//  - **只改 adspower 环境**（self 无 profileId、无 AdsPower 名）；缺 profileId / 空昵称一律不发。
+//  - **幂等去抖**：昵称已等于当前已知名（handle.name）即跳过、绝不重复发 user/update。
+//  - **在途去重**：同名改名在飞时不重复发（handle.renamingTo 标记）。
+//  - **诚实降级**：写失败（不可达 / code≠0 / 撞限速）保持原名、记一次可观测日志、不重试风暴、不阻塞浏览闭环；
+//    下次该环境再产生身份事件时自然再试。绝不把改名失败伪装成成功。
+//  - fire-and-forget：调用方不 await；写客户端 ≥1.1s 串行节流保证不与核心本地 API 同秒并发。
+async function maybeRenameEnvToNickname(handle, nickname) {
+  if (!handle || handle.kind !== 'adspower') return;
+  const userId = handle.profileId && String(handle.profileId).trim();
+  if (!userId) return;
+  const nick = nickname == null ? '' : String(nickname).trim();
+  if (!nick) return;
+  if (nick === String(handle.name || '')) return; // 幂等去抖：名已一致不发
+  if (handle.renamingTo === nick) return; // 同名改名在途，不重复发
+  handle.renamingTo = nick;
+  try {
+    const ads = resolveAdsOpts({});
+    const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
+    const r = await writeApi.renameProfile({ userId, name: nick }, ads);
+    if (r && r.ok) {
+      // 本地花名册名同步（令下次 user/list 回填与 reconcileRosterNames 一致、单写、不双落盘竞态）。
+      handle.name = nick;
+      if (handle.status && handle.status.account) handle.status.account.name = nick;
+      console.log(`[aidcp-edge] 环境名跟随昵称：已把 ${userId} 改名为「${nick}」`);
+    } else {
+      // 诚实降级：保持原名，记一次可观测日志，不重试风暴、不阻塞浏览。
+      console.warn(`[aidcp-edge] 环境名跟随昵称失败（保持原名，后续再试）：${userId} → ${(r && r.error) || '未知错误'}`);
+    }
+  } catch (e) {
+    console.warn(`[aidcp-edge] 环境名跟随昵称异常（保持原名，不影响浏览）：${(e && e.message) || String(e)}`);
+  } finally {
+    if (handle.renamingTo === nick) handle.renamingTo = undefined;
+  }
+}
+
 // 「打开 AdsPower 新建环境」best-effort：AdsPower 不公开直达其内部「新建浏览器」tab 的深链，
 // 故只能尝试拉起 / 聚焦客户端；起不来（未装 / 应用名不符）诚实退回打开官方页面。面板另有引导文案。
 async function openAdsClient() {
@@ -1857,6 +1895,11 @@ function handleEdgeLogLine(handle, message, isError = false) {
       // adspower 路径此前无人写 'logged in'（cookie 门是 self 专属），人设闸因此永不开——修于本 change。
       next.auth = 'logged in';
       refreshSameAccountWarnings();
+      // 环境名跟随真实昵称（change edge-adspower-name-follows-nickname）：读到平台真实昵称（evt.account.name
+      // 非空 = source 'xhs'）且与 AdsPower 环境名不一致时，经写客户端改名封装把该环境名改成昵称。
+      // 幂等去抖（名已一致不发）+ 诚实降级（写失败保持原名、不重试风暴、不阻塞浏览闭环）；fire-and-forget，
+      // 不 await（受写客户端 ≥1.1s 串行节流，不阻塞消息处理）。
+      if (evt.account.name) maybeRenameEnvToNickname(handle, evt.account.name);
     }
     // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在已绑时下发（sticky true）。
     if (evt.personaBound === true) next.personaBound = true;

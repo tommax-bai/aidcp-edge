@@ -1195,8 +1195,14 @@ const RAIL_GROUPS = [
   { key: 'idle', title: '暂停 · 离线', crit: false, has: (r) => !r.needsAction && (r.level === 'offline' || r.level === 'stale') },
 ];
 
+// 显示优先级（真实昵称 → 花名册/环境名 → 末4位）的**唯一实现**在 ui-logic.js（可单测），此处委托；
+// uiLogic 未加载时用同逻辑内联兜底，行为逐位一致（change edge-adspower-name-follows-nickname）。
 function railDisplayName(row) {
-  return row.name || (row.status && row.status.account && row.status.account.name) || `环境 …${String(row.envId).slice(-4)}`;
+  if (window.uiLogic && typeof uiLogic.railDisplayName === 'function') return uiLogic.railDisplayName(row);
+  const acct = row && row.status && row.status.account;
+  const realNick = acct && acct.source !== 'env' && acct.name ? String(acct.name) : '';
+  const envId = row && row.envId != null ? String(row.envId) : '';
+  return realNick || (row && row.name) || (acct && acct.name) || `环境 …${envId.slice(-4)}`;
 }
 
 function renderRail() {

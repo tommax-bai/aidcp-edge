@@ -99,6 +99,40 @@ test('updateProfileProxy: 缺 userId / 缺归一 proxyConfig 诚实拒绝、不�
   assert.equal(calls.length, 0);
 });
 
+// ── user/update 第二用途（edge-adspower-name-follows-nickname）：renameProfile 改名、body 结构性只含两键 ──
+test('renameProfile: user/update 改名放行、body 只含 user_id + name 两键（代理/指纹/remark 进不了）', async () => {
+  const calls: Array<{ url: string; init?: { body?: string } }> = [];
+  const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0 }), calls) }) as unknown as {
+    renameProfile: (a: Record<string, unknown>, opts?: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
+  };
+  const r = await api.renameProfile({
+    userId: 'u1',
+    name: '小兔',
+    // 攻击面：调用方硬塞代理/指纹/remark 想借改名口打开整张写面——结构性两键约束应挡下。
+    user_proxy_config: { proxy_soft: 'other' }, fingerprint_config: { canvas: '0' }, remark: 'evil',
+  });
+  assert.equal(r.ok, true);
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.includes('/api/v1/user/update'), calls[0].url);
+  const body = JSON.parse(String(calls[0].init?.body)) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(body).sort(), ['name', 'user_id'], 'body 只允许两键，放行 update ≠ 打开整张写面');
+  assert.equal(body.user_id, 'u1');
+  assert.equal(body.name, '小兔');
+  assert.ok(!('user_proxy_config' in body) && !('fingerprint_config' in body) && !('remark' in body), '改名封装不混入代理/指纹/remark');
+});
+
+test('renameProfile: 缺 userId / 空 name 诚实拒绝、不发请求（绝不假成功）', async () => {
+  const calls: Array<{ url: string }> = [];
+  const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0 }), calls) }) as unknown as {
+    renameProfile: (a: Record<string, unknown>, opts?: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
+  };
+  const r1 = await api.renameProfile({ name: 'x' });
+  assert.equal(r1.ok, false);
+  const r2 = await api.renameProfile({ userId: 'u1', name: '   ' });
+  assert.equal(r2.ok, false, '空/纯空白 name 拒发');
+  assert.equal(calls.length, 0);
+});
+
 test('deleteProfile: user/delete 放行、body 带 user_ids（C3 放宽为 UI 确认删）', async () => {
   const calls: Array<{ url: string; init?: { body?: string } }> = [];
   const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0 }), calls) });

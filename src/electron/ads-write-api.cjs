@@ -6,9 +6,11 @@
 //    绝不发出——把「主进程绝不碰浏览器生命周期」从注释自觉升为**代码上不可能**（回归断言覆盖）。
 //    注（C3 放宽）：`user/delete` 由原「禁一切程序化删」放宽为**允许、但仅由运维在界面上逐个显式确认触发**
 //    （非自动 / 非批量 / 非 ledger 驱动，删前明确警示不可恢复）——ads-create-flow 内无删除，删除只走 UI 确认路径。
-//    注（edge-client-proxy-platform-persona-ux 放宽）：`user/update` **仅限改代理**——唯一封装 `updateProfileProxy`
-//    的 body 只构造 `{ user_id, user_proxy_config }` 两键，fingerprint / remark / 分组等一概不经此口
-//    （放行 update ≠ 打开整张写面，回归断言覆盖两键约束）。
+//    注（edge-client-proxy-platform-persona-ux / edge-adspower-name-follows-nickname 放宽）：`user/update`
+//    **仅限改代理或改环境名两种用途**——只提供两个封装：`updateProfileProxy` 的 body 只构造
+//    `{ user_id, user_proxy_config }` 两键、`renameProfile` 的 body 只构造 `{ user_id, name }` 两键；
+//    fingerprint / remark / 分组一概不经此口，代理与名字亦互不混入对方 body
+//    （放行 update ≠ 打开整张写面，回归断言分别覆盖两个封装的两键约束）。
 //  - 节流：复用与只读侧同规格的 ≥1.1s **串行节流单链**（独立实例；跨进程无法共享，故各自一条）。
 //  - 凭据（H3/D9）：POST body **绝不整体 stringify 进日志/错误**；不可达 / code≠0 的错误**不含 body**；
 //    另导出 `redactSensitive()` 供调用方（main.cjs）在打印前脱敏 `proxy_user/proxy_password/Authorization`。
@@ -19,7 +21,7 @@ const DEFAULT_ADS_BASE = 'http://local.adspower.net:50325';
 
 // 硬编码写 allowlist。新增写端点须显式加入并补回归断言。
 // user/delete 允许，但调用方 MUST 仅由运维界面逐个显式确认触发（见头注 C3 放宽）。
-// user/update 允许，但仅经 updateProfileProxy 的两键 body（见头注 proxy 放宽）。
+// user/update 允许，但仅经 updateProfileProxy（改代理）/ renameProfile（改名）的各自两键 body（见头注放宽）。
 const WRITE_ALLOWLIST = Object.freeze(['user/create', 'group/create', 'user/delete', 'user/update']);
 
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -180,7 +182,20 @@ function createAdsWriteApi(deps = {}) {
     return post('user/update', { user_id: String(userId), user_proxy_config: proxyConfig }, opts);
   }
 
-  return { post, createGroup, createProfile, deleteProfile, updateProfileProxy, redactSensitive, WRITE_ALLOWLIST: [...WRITE_ALLOWLIST], ADS_MIN_INTERVAL_MS };
+  /**
+   * 改已有分身的**环境名**（user/update 的第二个、也是仅有的另一个封装）。结构性约束：body 只构造
+   * `{ user_id, name }` 两键、不接受/不透传任何其他字段——放行 update 仅为「改代理」或「改名」两用途，
+   * 代理与名字互不混入对方 body（回归断言分别锁两个封装的键集）。缺 userId / 空 name 诚实拒绝、绝不发出。
+   * @param {{ userId: string|number, name: string }} args
+   */
+  async function renameProfile({ userId, name } = {}, opts) {
+    if (!userId) return { ok: false, error: '缺 user_id' };
+    const nm = name == null ? '' : String(name).trim();
+    if (!nm) return { ok: false, error: '缺环境名（空名不发改名）' };
+    return post('user/update', { user_id: String(userId), name: nm }, opts);
+  }
+
+  return { post, createGroup, createProfile, deleteProfile, updateProfileProxy, renameProfile, redactSensitive, WRITE_ALLOWLIST: [...WRITE_ALLOWLIST], ADS_MIN_INTERVAL_MS };
 }
 
 module.exports = { createAdsWriteApi, redactSensitive, normalizePath, WRITE_ALLOWLIST: [...WRITE_ALLOWLIST], ADS_MIN_INTERVAL_MS, DEFAULT_ADS_BASE };

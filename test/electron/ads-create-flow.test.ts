@@ -39,10 +39,11 @@ test('happy path: 用真指纹引擎构造、remark 编码意图/模板/机器�
 
   assert.equal(r.ok, true);
   assert.equal(r.userId, 'u-new');
-  assert.equal(r.name, 'win11-intel', '不显式传 name → 返回体带回实际写入 AdsPower 的名字（回落模板名），供渲染层入册用真名（edge-env-name-live-sync）');
+  assert.equal(r.name, '', '标准建号不写死模板名（change edge-adspower-name-follows-nickname）：不显式传 name → 回执 name 为空、入册允许空名（AdsPower 默认命名 + 登录后渐进改名跟随昵称）');
   assert.equal(r.status, STATUS.UNVERIFIED, '建成只标未验证，绝不当就绪');
   assert.equal(w.calls.length, 1);
   const body = w.calls[0] as any;
+  assert.equal(body.name, undefined, '标准建号不把设备模板名写进 user/create 的 name（缺省 → AdsPower 默认命名）');
   assert.equal(body.groupId, 'g1');
   assert.deepEqual(body.proxyConfig, { proxy_soft: 'no_proxy' }, '不填代理 → 缺省仍 no_proxy（零回归）');
   assert.ok(body.fingerprintConfig && body.fingerprintConfig.random_ua, '带上构造好的 fingerprint_config');

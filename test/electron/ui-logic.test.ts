@@ -27,6 +27,7 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   presenceView: (s: Record<string, unknown>, now: number) => PresenceV;
   loopIndex: (stage: string) => number;
   publishView: (p: Record<string, unknown> | null, last: Record<string, unknown> | null, now: number) => PublishV;
+  railDisplayName: (row: Record<string, unknown>) => string;
   PRESENCE_FRESH_MS: number;
 };
 
@@ -263,4 +264,19 @@ test('相对时间走字', () => {
   assert.equal(uiLogic.relTime(now - 1000, now), '刚刚');
   assert.equal(uiLogic.relTime(now - 30_000, now), '30 秒前');
   assert.equal(uiLogic.relTime(now - 5 * 60_000, now), '5 分钟前');
+});
+
+// ── 左栏显示名优先级（change edge-adspower-name-follows-nickname）：真实昵称 → 花名册/环境名 → 末4位 ──
+test('railDisplayName：真实昵称优先于花名册名（实时名回填成模板名也不遮蔽已知昵称）', () => {
+  // 回归场景：reconcileRosterNames 把花名册名刷成 AdsPower 模板名，但真实昵称已读到（source!=='env'）→ 显示昵称。
+  const row = { envId: 'ads-abcd1234', name: 'win11-intel', status: { account: { id: 'u1', name: '大白', source: 'xhs' } } };
+  assert.equal(uiLogic.railDisplayName(row), '大白');
+});
+test('railDisplayName：未读到真实昵称（source=env）→ 回落花名册/环境名', () => {
+  const row = { envId: 'ads-abcd1234', name: 'win11-intel', status: { account: { id: 'u1', name: 'win11-intel', source: 'env' } } };
+  assert.equal(uiLogic.railDisplayName(row), 'win11-intel', 'source=env 不是登录读出的真实身份，不算昵称档');
+});
+test('railDisplayName：既无真实昵称也无环境名 → 「环境 …末4位」兜底', () => {
+  const row = { envId: 'ads-abcd1234', name: '', status: {} };
+  assert.equal(uiLogic.railDisplayName(row), '环境 …1234');
 });
