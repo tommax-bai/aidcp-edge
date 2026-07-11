@@ -56,4 +56,9 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   },
   // 「打开飞书 ↗」纯导航深链（不是审批操作）；拉不起返回 { ok:false }，渲染层降级纯文字。
   openFeishu: () => ipcRenderer.invoke('feishu:open'),
+  // 对外客户鉴权（change edge-client-customer-auth）：登录窗口用 clientLogin；主界面/托盘用 clientLogout。
+  // 主进程做实际 HTTP，渲染层不直连网络（避免 CORS / 凭据落渲染层）。
+  clientLogin: (creds) => ipcRenderer.invoke('client-auth:login', creds),
+  clientLogout: () => ipcRenderer.invoke('client-auth:logout'),
+  clientSession: () => ipcRenderer.invoke('client-auth:session'),
 });

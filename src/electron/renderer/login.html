@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;" />
+<title>AIDCP · 登录</title>
+<style>
+  :root {
+    --bg: #F5F7FA;
+    --panel: #FFFFFF;
+    --text: #182230;
+    --text-2: #5D6B80;
+    --text-3: #93A0B4;
+    --line: #E2E8F0;
+    --line-strong: #CBD5E1;
+    --btn: #1B2B40;
+    --btn-text: #F4F7FB;
+    --accent: #2F6BDF;
+    --accent-soft: rgba(47, 107, 223, 0.13);
+    --err: #C2413E;
+    --r-md: 9px;
+    --ease: cubic-bezier(.22, 1, .36, 1);
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 14px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .body {
+    flex: 1; position: relative; overflow: hidden;
+    display: flex; align-items: center; justify-content: center; padding: 12px 24px;
+  }
+  /* ambient: 极淡冷光呼吸 + 点阵,克制科技感 */
+  .ambient { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
+  .ambient::before {
+    content: ""; position: absolute; left: 50%; top: 45%;
+    width: 540px; height: 540px; transform: translate(-50%, -50%);
+    background: radial-gradient(circle, var(--accent-soft), transparent 66%);
+    filter: blur(26px); opacity: .5; animation: breathe 10s ease-in-out infinite;
+  }
+  .ambient::after {
+    content: ""; position: absolute; inset: 0;
+    background-image: radial-gradient(var(--line-strong) .7px, transparent .7px);
+    background-size: 26px 26px; opacity: .26;
+    -webkit-mask-image: radial-gradient(120% 90% at 50% 45%, #000 8%, transparent 62%);
+  }
+  @keyframes breathe {
+    0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: .4; }
+    50% { transform: translate(-50%, -53%) scale(1.05); opacity: .6; }
+  }
+  .col { width: 324px; max-width: 100%; position: relative; z-index: 1; }
+  .mark { display: flex; justify-content: center; margin-bottom: 18px; }
+  .mark svg { width: 40px; height: 40px; color: var(--text); }
+  .orbit { transform-box: fill-box; transform-origin: center; animation: orbitspin 30s linear infinite; }
+  h1 { margin: 0 0 6px; text-align: center; font-size: 21px; font-weight: 600; letter-spacing: -.01em; }
+  .sub { margin: 0 0 30px; text-align: center; font-size: 13px; color: var(--text-2); }
+  .anim-in { opacity: 0; animation: rise .52s var(--ease) forwards; }
+  .mark.anim-in { animation-delay: .04s; }
+  h1.anim-in { animation-delay: .10s; }
+  .sub.anim-in { animation-delay: .16s; }
+  #fName.anim-in { animation-delay: .22s; }
+  #fKey.anim-in { animation-delay: .28s; }
+  .btn.anim-in { animation-delay: .34s; }
+  @keyframes rise { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
+  @keyframes orbitspin { to { transform: rotate(360deg); } }
+  .f { margin-bottom: 16px; }
+  .f label { display: block; font-size: 12.5px; font-weight: 500; color: var(--text-2); margin-bottom: 6px; transition: color .16s; }
+  .f.focused label { color: var(--accent); }
+  .f.err label { color: var(--err); }
+  .inp { display: flex; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-md); transition: border-color .16s, box-shadow .16s; }
+  .inp:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .f.err .inp { border-color: var(--err); box-shadow: 0 0 0 3px rgba(194,65,62,.1); }
+  .inp input { flex: 1; width: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font-family: inherit; font-size: 14px; padding: 11px 13px; }
+  .inp input::placeholder { color: var(--text-3); }
+  .inp input.mono { font-family: var(--mono); font-size: 13px; letter-spacing: .04em; }
+  .eye { border: 0; background: transparent; cursor: pointer; color: var(--text-3); padding: 0 12px 0 6px; align-self: stretch; display: flex; align-items: center; transition: color .15s; }
+  .eye:hover { color: var(--text-2); }
+  .eye:focus-visible { outline: none; color: var(--accent); }
+  .eye svg { width: 17px; height: 17px; }
+  .fmsg { min-height: 17px; margin-top: 5px; font-size: 12px; color: var(--err); opacity: 0; transition: opacity .15s; }
+  .f.err .fmsg { opacity: 1; }
+  .btn { width: 100%; margin-top: 6px; border: 0; cursor: pointer; border-radius: var(--r-md); background: var(--btn); color: var(--btn-text); font-family: inherit; font-size: 14px; font-weight: 600; padding: 12px; letter-spacing: .02em; display: flex; align-items: center; justify-content: center; gap: 8px; transition: opacity .15s, transform .1s; }
+  .btn:hover { opacity: .93; }
+  .btn:active { transform: translateY(1px); }
+  .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft), 0 0 0 1px var(--accent); }
+  .btn[disabled] { cursor: default; opacity: .75; }
+  .spin { width: 15px; height: 15px; border-radius: 50%; border: 2px solid rgba(255,255,255,.3); border-top-color: var(--btn-text); animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .gmsg { min-height: 18px; margin-top: 14px; text-align: center; font-size: 12.5px; color: var(--err); opacity: 0; transition: opacity .18s; }
+  .gmsg.show { opacity: 1; }
+  .gmsg.plain { color: var(--text-2); }
+  .col.shake { animation: shake .32s cubic-bezier(.36,.07,.19,.97); }
+  @keyframes shake { 20%,60% { transform: translateX(-3px); } 40%,80% { transform: translateX(3px); } }
+  .foot { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; border-top: 1px solid var(--line); font-size: 12px; color: var(--text-3); background: var(--bg); }
+  .ver { font-family: var(--mono); font-size: 11px; }
+  @media (prefers-reduced-motion: reduce) {
+    .anim-in, .orbit, .ambient::before, .col.shake { animation: none !important; opacity: 1 !important; transform: none !important; }
+    .spin { animation-duration: 1.4s; }
+  }
+</style>
+</head>
+<body>
+  <div class="body">
+    <div class="ambient" aria-hidden="true"></div>
+    <div class="col" id="col">
+      <div class="mark anim-in" aria-hidden="true">
+        <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.5">
+          <g class="orbit">
+            <ellipse cx="20" cy="20" rx="15" ry="6.6" />
+            <ellipse cx="20" cy="20" rx="15" ry="6.6" transform="rotate(60 20 20)" opacity="0.55" />
+            <ellipse cx="20" cy="20" rx="15" ry="6.6" transform="rotate(120 20 20)" opacity="0.3" />
+          </g>
+          <circle cx="20" cy="20" r="3.2" fill="currentColor" stroke="none" />
+        </svg>
+      </div>
+      <h1 class="anim-in">欢迎使用 AIDCP</h1>
+      <p class="sub anim-in">登录你的客户端以继续</p>
+      <form id="form" novalidate>
+        <div class="f anim-in" id="fName">
+          <label for="name">账户名</label>
+          <div class="inp">
+            <input id="name" type="text" autocomplete="off" placeholder="输入账户名" autofocus />
+          </div>
+          <div class="fmsg">请输入账户名</div>
+        </div>
+        <div class="f anim-in" id="fKey">
+          <label for="key">访问密钥</label>
+          <div class="inp">
+            <input id="key" type="password" class="mono" autocomplete="off" placeholder="粘贴访问密钥" />
+            <button type="button" class="eye" id="eye" aria-label="显示密钥" aria-pressed="false">
+              <svg id="eyeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" />
+              </svg>
+            </button>
+          </div>
+          <div class="fmsg">请输入访问密钥</div>
+        </div>
+        <button class="btn anim-in" type="submit" id="btn"><span id="btnLabel">登录</span></button>
+        <div class="gmsg" id="gmsg" role="alert" aria-live="assertive"></div>
+      </form>
+    </div>
+  </div>
+  <div class="foot">
+    <span>没有访问密钥？请联系你的服务顾问获取</span>
+    <span class="ver" id="ver"></span>
+  </div>
+
+<script>
+  (function () {
+    var api = window.aidcpEdge || {};
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var nameEl = document.getElementById('name');
+    var key = document.getElementById('key');
+    var eye = document.getElementById('eye');
+    var eyeIcon = document.getElementById('eyeIcon');
+    var form = document.getElementById('form');
+    var btn = document.getElementById('btn');
+    var gmsg = document.getElementById('gmsg');
+    var col = document.getElementById('col');
+
+    eye.addEventListener('click', function () {
+      var show = key.type === 'password';
+      key.type = show ? 'text' : 'password';
+      eye.setAttribute('aria-pressed', String(show));
+      eye.setAttribute('aria-label', show ? '隐藏密钥' : '显示密钥');
+      eyeIcon.innerHTML = show
+        ? '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/><line x1="4" y1="4" x2="20" y2="20"/>'
+        : '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>';
+    });
+    ['name', 'key'].forEach(function (id) {
+      var el = document.getElementById(id), f = el.closest('.f');
+      el.addEventListener('focus', function () { f.classList.add('focused'); });
+      el.addEventListener('blur', function () { f.classList.remove('focused'); });
+      el.addEventListener('input', function () { f.classList.remove('err'); });
+    });
+    function shake() { if (reduce) return; col.classList.remove('shake'); void col.offsetWidth; col.classList.add('shake'); }
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      gmsg.classList.remove('show', 'plain');
+      var n = nameEl.value.trim(), k = key.value.trim(), bad = false;
+      if (!n) { document.getElementById('fName').classList.add('err'); bad = true; }
+      if (!k) { document.getElementById('fKey').classList.add('err'); bad = true; }
+      if (bad) { shake(); return; }
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spin"></span><span>验证中…</span>';
+      Promise.resolve(api.clientLogin ? api.clientLogin({ name: n, key: k }) : { ok: false, reason: 'network' })
+        .then(function (r) {
+          if (r && r.ok) {
+            btn.innerHTML = '<span>✓</span><span>已验证</span>';
+            // 主进程会在拉起主窗口后关闭本登录窗;此处只做过场,无需跳转。
+            return;
+          }
+          btn.disabled = false;
+          btn.innerHTML = '<span id="btnLabel">登录</span>';
+          gmsg.classList.add('show');
+          var reason = r && r.reason;
+          if (reason === 'disabled') { gmsg.textContent = '该账户已停用，请联系你的服务顾问'; }
+          else if (reason === 'rate_limited') { gmsg.textContent = '尝试过于频繁，请 ' + (r.retryAfter || 30) + ' 秒后再试'; }
+          else if (reason === 'network') { gmsg.classList.add('plain'); gmsg.textContent = '无法连接服务器，请检查网络后重试'; }
+          else { gmsg.textContent = '账户名或访问密钥不正确，请核对后重试'; document.getElementById('fKey').classList.add('err'); shake(); }
+        })
+        .catch(function () {
+          btn.disabled = false;
+          btn.innerHTML = '<span id="btnLabel">登录</span>';
+          gmsg.classList.add('show', 'plain'); gmsg.textContent = '无法连接服务器，请稍后重试';
+        });
+    });
+
+    // 版本号（best-effort，从设置读；拿不到留空）。
+    try {
+      if (api.getSettings) api.getSettings().then(function (s) { if (s && s.appVersion) document.getElementById('ver').textContent = 'v' + s.appVersion; });
+    } catch (e) { /* ignore */ }
+  })();
+</script>
+</body>
+</html>

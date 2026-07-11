@@ -158,6 +158,10 @@ const DEFAULT_SETTINGS = {
   // 环境栏（fleet rail）收起态与上次选中环境（跨重启保留）。
   railCollapsed: true,
   selectedEnvId: '',
+  // 对外客户鉴权登录门（change edge-client-customer-auth）：opt-in、默认不启用（零回归）。
+  // clientAuthUrl 给完整 http(s):// 地址即启用；或 clientAuthEnabled=true 由云端主机派生客户鉴权地址。
+  clientAuthUrl: '',
+  clientAuthEnabled: false,
 };
 let settings = { ...DEFAULT_SETTINGS };
 
@@ -216,6 +220,161 @@ function resolveCloudUrl() {
 function cloudSelectionView() {
   const r = resolveCloudUrl();
   return { key: r.key, url: r.url, label: CLOUD_ENV_LABELS[r.key] || r.key || '默认', fromSelection: r.fromSelection };
+}
+
+// ── 对外客户鉴权登录门（change edge-client-customer-auth）─────────────────────
+// 给客户端加一层「客户 name+key 登录」。**opt-in、零回归**：仅当配置了客户鉴权地址时启用登录门；
+// 未配置（现有运营装机 / dev）行为与从前完全一致（无登录、无过滤）。地址解析：
+//   ① 显式完整 URL：env AIDCP_CLIENT_AUTH_URL 或 settings.clientAuthUrl（http(s)://…）；
+//   ② 显式启用（env AIDCP_CLIENT_AUTH_ENABLE=1 或 settings.clientAuthEnabled）→ 由云端 WS 主机派生
+//      ws(s)://host:8787 → http(s)://host:8091（部署经 Nginx 反代时用 ① 给完整 URL）。
+// 登录后：客户令牌存 userData/client-session.json（随 AIDCP_USER_DATA_DIR 多实例隔离）；
+// 环境栏只显示云端按该客户下发的可见环境（与本地花名册求交，见 syncEnvHandles 的 allowedProfileIds 过滤）。
+// 边缘只走 HTTP 到客户鉴权端口，**不改 WS 协议 / hello**（协议零改）。
+const CLIENT_AUTH_DEFAULT_PORT = 8091;
+let loginWindow = null;
+let clientSession = null; // { token, name, expiresAt(ms) } | null
+let allowedProfileIds = null; // Set<profileId> | null（null = 未 gated，不过滤）
+let sessionTimer = null;
+let proceededOnce = false;
+
+function resolveClientAuthBase() {
+  const explicit = String((process.env.AIDCP_CLIENT_AUTH_URL || '') || (settings && settings.clientAuthUrl) || '').trim();
+  if (/^https?:\/\//i.test(explicit)) return explicit.replace(/\/+$/, '');
+  const enabled = process.env.AIDCP_CLIENT_AUTH_ENABLE === '1' || Boolean(settings && settings.clientAuthEnabled);
+  if (!enabled) return '';
+  const cloud = resolveCloudUrl().url;
+  const m = /^wss?:\/\/([^/:]+)(?::(\d+))?/i.exec(String(cloud || '').trim());
+  if (!m) return '';
+  const scheme = /^wss:/i.test(cloud) ? 'https' : 'http';
+  return `${scheme}://${m[1]}:${CLIENT_AUTH_DEFAULT_PORT}`;
+}
+function clientAuthEnabled() {
+  return Boolean(resolveClientAuthBase());
+}
+function clientSessionFile() {
+  return path.join(app.getPath('userData'), 'client-session.json');
+}
+function loadClientSession() {
+  try {
+    const s = JSON.parse(fs.readFileSync(clientSessionFile(), 'utf8'));
+    clientSession = s && typeof s.token === 'string' && s.token ? s : null;
+  } catch {
+    clientSession = null;
+  }
+}
+function saveClientSession(s) {
+  clientSession = s;
+  try { fs.writeFileSync(clientSessionFile(), JSON.stringify(s), 'utf8'); } catch { /* best-effort */ }
+}
+function clearClientSession() {
+  clientSession = null;
+  try { fs.unlinkSync(clientSessionFile()); } catch { /* ignore */ }
+}
+function hasValidSession() {
+  return Boolean(clientSession && clientSession.token && (!clientSession.expiresAt || Date.now() < clientSession.expiresAt));
+}
+async function clientAuthFetch(pathname, { method = 'GET', token, body } = {}) {
+  const base = resolveClientAuthBase();
+  if (!base) return { status: 0, ok: false, data: null };
+  const headers = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  try {
+    const res = await fetch(base + pathname, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    let data = null;
+    try { data = await res.json(); } catch { /* 非 JSON 忽略 */ }
+    return { status: res.status, ok: res.ok, data };
+  } catch (e) {
+    return { status: 0, ok: false, data: null, error: String((e && e.message) || e) };
+  }
+}
+// 拉该客户可见环境 → 设 allowedProfileIds。返回 false 表示会话已失效（401），由调用方决定登出。
+async function refreshAllowedEnvironments() {
+  if (!clientAuthEnabled() || !hasValidSession()) { allowedProfileIds = null; return true; }
+  const r = await clientAuthFetch('/my-environments', { token: clientSession.token });
+  if (r.status === 401) return false;
+  if (r.ok && r.data && Array.isArray(r.data.environments)) {
+    allowedProfileIds = new Set(r.data.environments.map((e) => String((e && e.envKey) || '')).filter(Boolean));
+  } else if (allowedProfileIds == null) {
+    allowedProfileIds = new Set(); // 首次拉取失败 → fail-closed 空集（不误显他人环境）；已建立则保留上次已知
+  }
+  return true;
+}
+// 会话失效（登出 / 被停用 / 令牌过期）：清会话 + 拆掉所有环境 handle（停在跑子进程）+ 关主窗 + 回登录门。
+function onSessionInvalid() {
+  clearClientSession();
+  allowedProfileIds = new Set();
+  try { syncEnvHandles(); } catch { /* ignore */ } // wanted 为空 → 移除并 SIGTERM 全部环境
+  if (mainWindow) { try { mainWindow.close(); } catch { /* ignore */ } mainWindow = null; }
+  createLoginWindow();
+}
+function createLoginWindow() {
+  if (loginWindow) { try { loginWindow.show(); loginWindow.focus(); } catch { /* ignore */ } return; }
+  loginWindow = new BrowserWindow({
+    width: 820,
+    height: 640,
+    minWidth: 640,
+    minHeight: 520,
+    title: 'AIDCP',
+    backgroundColor: '#F5F7FA',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  loginWindow.loadFile(path.join(__dirname, 'renderer', 'login.html'));
+  loginWindow.on('closed', () => { loginWindow = null; });
+}
+// 登录成功 / 已有会话后的正常启动流程（原 whenReady 主体收拢于此，便于登录门前置门控 + 登录后续跑）。
+async function proceedAfterAuth() {
+  if (clientAuthEnabled() && hasValidSession()) {
+    const ok = await refreshAllowedEnvironments();
+    if (!ok) { clearClientSession(); allowedProfileIds = new Set(); createLoginWindow(); return; }
+  } else {
+    allowedProfileIds = null; // 未 gated：不过滤
+  }
+  syncEnvHandles();
+  loadUiState();
+  // 一次性轻量预检：缺配置亮「待配置」，齐备则「就绪」。
+  for (const handle of envs.values()) {
+    if (handle.kind === 'adspower' && !handle.profileId) {
+      updateStatus(handle, {
+        auth: 'config required',
+        lastMessage: '待配置：请在设置中加入浏览器环境后点「启动」。',
+        ...presencePatch('等待完成初始设置'),
+      });
+    } else {
+      updateStatus(handle, {
+        lastMessage: '就绪。点右下角「启动」开始自动运营。',
+        ...presencePatch('就绪，等你点「启动」'),
+      });
+    }
+  }
+  if (settings.provider === 'adspower' && envs.size === 0) broadcastFleet();
+  if (!mainWindow) createWindow();
+  if (!proceededOnce) {
+    proceededOnce = true;
+    createTray();
+    void reconcileRunningProfiles();
+    startSessionMaintenance();
+  }
+}
+// 会话维护：滑动续签 + 定时复核可见范围（管理员增删环境即时生效）；失效即登出回登录门。
+function startSessionMaintenance() {
+  if (sessionTimer) return;
+  sessionTimer = setInterval(async () => {
+    if (!clientAuthEnabled() || !hasValidSession()) return;
+    if (clientSession.expiresAt && clientSession.expiresAt - Date.now() < 5 * 60_000) {
+      const rr = await clientAuthFetch('/auth/refresh', { method: 'POST', token: clientSession.token });
+      if (rr.status === 200 && rr.data && rr.data.token) {
+        saveClientSession({ token: rr.data.token, name: clientSession.name, expiresAt: Date.now() + (Number(rr.data.expiresIn) || 900) * 1000 });
+      } else if (rr.status === 401) { onSessionInvalid(); return; }
+    }
+    const ok = await refreshAllowedEnvironments();
+    if (!ok) { onSessionInvalid(); return; }
+    syncEnvHandles();
+  }, 4 * 60_000);
 }
 
 // 把花名册首成员镜像回旧单值字段（回滚兼容）。**platform 只在 adspower 模式镜像**：self（本机 Chrome）
@@ -502,9 +661,13 @@ function syncEnvHandles() {
   if (settings.provider === 'self') {
     wanted.set('self', { envId: 'self', kind: 'self', profileId: '', name: '本机 Chrome', platform: settings.platform, cascadeIndex: 0 });
   } else {
-    settings.environments.forEach((env, i) => {
+    // 按登录客户可见范围过滤（change edge-client-customer-auth）：allowedProfileIds 为 null 时不过滤（未 gated）；
+    // 为 Set 时只保留归属当前客户的环境——非本客户环境不建 handle、不显示、不启动。cascadeIndex 用连续序号（错峰）。
+    let idx = 0;
+    settings.environments.forEach((env) => {
+      if (allowedProfileIds && !allowedProfileIds.has(env.profileId)) return;
       const envId = fleet.envIdForProfile(env.profileId);
-      wanted.set(envId, { envId, kind: 'adspower', profileId: env.profileId, name: env.name, platform: env.platform, cascadeIndex: i });
+      wanted.set(envId, { envId, kind: 'adspower', profileId: env.profileId, name: env.name, platform: env.platform, cascadeIndex: idx++ });
     });
   }
   // 摘除不再需要的环境：在跑的先有意停止（removed + stopRequested 使退出回调 / 排队启动都按「有意」
@@ -994,15 +1157,20 @@ function createTray() {
   );
   tray = new Tray(icon);
   tray.setToolTip('AIDCP Edge');
-  tray.setContextMenu(Menu.buildFromTemplate([
+  const trayTemplate = [
     { label: '显示窗口', click: () => mainWindow?.show() },
     { label: '隐藏窗口', click: () => mainWindow?.hide() },
     { type: 'separator' },
     { label: '显示浏览器窗口', click: () => { void sendBrowserParkingCommand(selectedHandle(), 'browser.show'); } },
     { label: '重置浏览器位置', click: () => { void sendBrowserParkingCommand(selectedHandle(), 'browser.park'); } },
     { type: 'separator' },
-    { label: '退出', click: quitApp },
-  ]));
+  ];
+  // 对外客户登录态下提供「退出登录」（change edge-client-customer-auth）：停所有环境、回登录门,不改主界面。
+  if (clientAuthEnabled()) {
+    trayTemplate.push({ label: '退出登录', click: () => { if (clientSession && clientSession.token) void clientAuthFetch('/logout', { method: 'POST', token: clientSession.token }); onSessionInvalid(); } });
+  }
+  trayTemplate.push({ label: '退出', click: quitApp });
+  tray.setContextMenu(Menu.buildFromTemplate(trayTemplate));
   tray.on('click', () => {
     if (!mainWindow) return;
     if (mainWindow.isVisible()) mainWindow.hide();
@@ -2291,9 +2459,54 @@ ipcMain.handle('auth:relogin', (_event, envId) => {
   relogin(handle);
   return statusOf(handle);
 });
-ipcMain.handle('settings:get', () => ({ ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL, cloudEnv: cloudSelectionView() }));
+ipcMain.handle('settings:get', () => ({ ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL, cloudEnv: cloudSelectionView(), appVersion: app.getVersion() }));
+
+// 对外客户鉴权（change edge-client-customer-auth）：登录窗口调 login；主进程做 HTTP，成功后拉可见环境 + 建主窗 + 关登录窗。
+ipcMain.handle('client-auth:login', async (_event, creds) => {
+  const name = String((creds && creds.name) || '').trim();
+  const key = String((creds && creds.key) || '');
+  if (!name || !key) return { ok: false, reason: 'invalid_credentials' };
+  const r = await clientAuthFetch('/login', { method: 'POST', body: { name, key } });
+  if (r.status === 200 && r.data && r.data.token) {
+    const ttl = Number(r.data.expiresIn) || 900;
+    saveClientSession({ token: r.data.token, name, expiresAt: Date.now() + ttl * 1000 });
+    await proceedAfterAuth();
+    if (loginWindow) { try { loginWindow.close(); } catch { /* ignore */ } loginWindow = null; }
+    return { ok: true };
+  }
+  if (r.status === 429) return { ok: false, reason: 'rate_limited', retryAfter: (r.data && r.data.retryAfter) || 30 };
+  if (r.status === 0) return { ok: false, reason: 'network' };
+  // 登录侧 401 一律不可区分（防枚举）；停用在受保护请求侧才显现。
+  return { ok: false, reason: 'invalid_credentials' };
+});
+ipcMain.handle('client-auth:logout', async () => {
+  if (clientSession && clientSession.token) {
+    void clientAuthFetch('/logout', { method: 'POST', token: clientSession.token });
+  }
+  onSessionInvalid();
+  return { ok: true };
+});
+ipcMain.handle('client-auth:session', () => ({
+  enabled: clientAuthEnabled(),
+  name: (clientSession && clientSession.name) || null,
+}));
 ipcMain.handle('settings:save', (_event, patch) => {
+  const beforeIds = new Set((settings.environments || []).map((e) => e.profileId).filter(Boolean));
   const res = saveSettings(patch);
+  // 自动归属（change edge-client-customer-auth）：登录态下新增的环境归当前客户,并乐观即时可见。
+  // 只对「本次新出现的 profileId」登记；已有环境不重复。attach 后台 best-effort,失败不阻断保存。
+  if (clientAuthEnabled() && hasValidSession() && allowedProfileIds) {
+    for (const env of settings.environments) {
+      if (env.profileId && !beforeIds.has(env.profileId)) {
+        allowedProfileIds.add(env.profileId);
+        void clientAuthFetch('/environments', {
+          method: 'POST',
+          token: clientSession.token,
+          body: { envKey: env.profileId, label: env.name || '', platform: env.platform || '' },
+        });
+      }
+    }
+  }
   syncEnvHandles(); // 花名册变更即同步注册表（新环境建行、移出的有序停止）
   // 保存只持久化、**不打断**在跑的核心（应用改动经显式 edge:restart「按新设置重启」/「全部重启换云」）。
   const handle = selectedHandle();
@@ -2547,39 +2760,23 @@ if (!app.requestSingleInstanceLock()) {
     surfaceFailure('AIDCP Edge 已在运行', '已有一个 AIDCP Edge 监督者在运行，已切到该窗口。多环境请在环境栏 / 设置里加入并行运行。');
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     loadSettings();
+    loadClientSession();
     if (settings.selectedEnvId) selectedEnvId = settings.selectedEnvId;
-    syncEnvHandles();
-    loadUiState();
-    // 不自动启动任务（用户手动点「启动」才开跑）。只做一次轻量预检：
-    // 缺配置时把「待配置」引导亮出来，配置齐备则诚实呈现「就绪」。
-    for (const handle of envs.values()) {
-      if (handle.kind === 'adspower' && !handle.profileId) {
-        updateStatus(handle, {
-          auth: 'config required',
-          lastMessage: '待配置：请在设置中加入浏览器环境后点「启动」。',
-          ...presencePatch('等待完成初始设置'),
-        });
-      } else {
-        updateStatus(handle, {
-          lastMessage: '就绪。点右下角「启动」开始自动运营。',
-          ...presencePatch('就绪，等你点「启动」'),
-        });
-      }
-    }
-    if (settings.provider === 'adspower' && envs.size === 0) {
-      // 空花名册：无 handle 可投影，广播 fleet 快照让渲染层呈现「待加入环境」空态。
-      broadcastFleet();
-    }
-    createWindow();
-    createTray();
-    // 外壳重启对账（异步 best-effort）：已在运行的分身如实标出，启动时接管、不重复拉起。
-    void reconcileRunningProfiles();
+    // activate（dock 点击 / 无窗）无条件注册一次，兼顾未登录（拉回登录门）与已登录（拉回主窗）两态。
     app.on('activate', () => {
+      if (clientAuthEnabled() && !hasValidSession()) { createLoginWindow(); return; }
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
       else mainWindow?.show();
     });
+    // 登录门前置门控（change edge-client-customer-auth）：启用且无有效会话 → 只显示登录门，
+    // 不连云、不建主窗、不 syncEnvHandles；登录成功由 IPC 回调走 proceedAfterAuth()。未 gated 或已登录 → 正常流程。
+    if (clientAuthEnabled() && !hasValidSession()) {
+      createLoginWindow();
+      return;
+    }
+    await proceedAfterAuth();
   });
 }
 
