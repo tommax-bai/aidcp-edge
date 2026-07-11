@@ -2437,7 +2437,8 @@ function renderPersonaContentGroups() {
   const host = document.querySelector('#persona-content-groups');
   if (!host) return;
   host.innerHTML = '';
-  for (const group of PERSONA_CONTENT_GROUPS) {
+  PERSONA_CONTENT_GROUPS.forEach((group, idx) => {
+    const rowId = `persona-custom-row-${idx}`;
     const section = document.createElement('section');
     section.className = 'persona-pref-group';
 
@@ -2446,13 +2447,7 @@ function renderPersonaContentGroups() {
     const title = document.createElement('strong');
     title.className = 'persona-pref-title';
     title.textContent = group.title;
-    const add = document.createElement('button');
-    add.className = 'persona-add-custom';
-    add.type = 'button';
-    add.textContent = '+';
-    add.title = `自定义${group.title}偏好`;
-    add.setAttribute('aria-label', `自定义${group.title}偏好`);
-    head.append(title, add);
+    head.append(title);
     section.appendChild(head);
 
     const chips = document.createElement('div');
@@ -2468,9 +2463,20 @@ function renderPersonaContentGroups() {
       btn.textContent = item;
       chips.appendChild(btn);
     }
+    // 自定义加号排在该类目所有预设选项之后（网格最后一格）；不是 .kw-btn，不参与选中/计数。
+    const add = document.createElement('button');
+    add.className = 'persona-add-custom';
+    add.type = 'button';
+    add.textContent = '+';
+    add.title = `自定义${group.title}偏好`;
+    add.setAttribute('aria-label', `自定义${group.title}偏好`);
+    add.setAttribute('aria-expanded', 'false'); // 展开态用于无障碍：指向下方就地输入框
+    add.setAttribute('aria-controls', rowId);
+    chips.appendChild(add);
     section.appendChild(chips);
 
     const custom = document.createElement('div');
+    custom.id = rowId;
     custom.className = 'persona-custom-row hidden';
     const input = document.createElement('input');
     input.className = 'persona-custom-input';
@@ -2485,7 +2491,7 @@ function renderPersonaContentGroups() {
     custom.append(input, confirm);
     section.appendChild(custom);
     host.appendChild(section);
-  }
+  });
 }
 
 renderPersonaContentGroups();
@@ -2789,7 +2795,10 @@ function addCustomPreference(group, value) {
   btn.type = 'button';
   btn.dataset.kw = normalized;
   btn.textContent = normalized;
-  group.appendChild(btn);
+  // 插到「+」加号之前，让加号始终排在最后一格。
+  const addBtn = group.querySelector('.persona-add-custom');
+  if (addBtn) group.insertBefore(btn, addBtn);
+  else group.appendChild(btn);
   syncKwGroupState(group);
 }
 
@@ -2801,13 +2810,18 @@ document.querySelectorAll('.persona-pref-group').forEach((section) => {
   const group = section.querySelector('.persona-kw-group');
   add?.addEventListener('click', () => {
     row?.classList.toggle('hidden');
-    if (row && !row.classList.contains('hidden')) input?.focus();
+    const open = Boolean(row && !row.classList.contains('hidden'));
+    add.setAttribute('aria-expanded', String(open));
+    if (open) input?.focus();
   });
   const submit = () => {
     if (!group || !input) return;
     addCustomPreference(group, input.value);
     input.value = '';
     row?.classList.add('hidden');
+    // 收起输入框时把焦点交还加号（否则焦点落到 body、键盘用户丢失位置）。
+    add?.setAttribute('aria-expanded', 'false');
+    add?.focus();
   };
   confirm?.addEventListener('click', submit);
   input?.addEventListener('keydown', (event) => {
