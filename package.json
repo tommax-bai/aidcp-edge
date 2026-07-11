@@ -15,6 +15,7 @@
     "build:dist": "npm run clean:dist && tsc -p tsconfig.build.json",
     "build:ads-runtime": "node scripts/stage-ads-runtime.mjs",
     "electron:dev": "electron .",
+    "electron:ol": "AIDCP_USER_DATA_DIR=\"$HOME/.aidcp-edge/ol\" AIDCP_CLOUD_URL=ws://123.56.253.183:8787 electron .",
     "electron:build": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js",
     "electron:build:win": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --win",
     "electron:build:mac": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac",
