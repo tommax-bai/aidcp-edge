@@ -71,6 +71,7 @@ test('AdsPowerProvider.launch 成功 → 端点带 debug_port、实例非 reused
   const decoded = decodeURIComponent(startCall.url);
   assert.match(decoded, /--window-size=1440,980/);
   assert.match(decoded, /--deny-permission-prompts/);
+  assert.match(decoded, /--lang=en-US/); // C1: 界面语言钉英文（兜登出 chrome，见 facebook-locale-pin-en-us）
   assert.match(decoded, /--window-position=1902,0/);
   assert.match(decoded, /xiaohongshu\.com/);
   assert.equal(startCall.headers?.Authorization, 'Bearer secret');

@@ -2,6 +2,11 @@ const FACEBOOK_DOMAIN = 'facebook.com';
 const FACEBOOK_COOKIE_DOMAIN = '.facebook.com';
 const FACEBOOK_START_URL = 'https://www.facebook.com/';
 const FIELD_DELIMITER = '----';
+// 界面 chrome 语言钉英文的 belt（change facebook-locale-pin-en-us / C1）：归一化 header 形态（name=value;…）
+// 导入 cookie 时，缺 `locale` 则注入 en_US，统一导入号首屏/登录前界面语言；已有 locale 保留用户值不覆盖。
+// 结构化形态（JSON 数组 / TSV 导出）走 looksStructuredCookie 原样透传、**不注入**（用户自带的 cookie 逐字保留）。
+// belt-not-authority——FB 账号服务端语言登录后最终权威、会覆盖此值。
+const FB_DEFAULT_LOCALE = 'en_US';
 const FB_COOKIE_NAMES = new Set([
   'c_user',
   'xs',
@@ -58,6 +63,10 @@ function normalizeFacebookCookie(rawCookie) {
   }
   if (!pairs.some((p) => p.name === 'xs')) {
     return { ok: false, error: 'cookie 缺少 xs' };
+  }
+  // 缺 locale → 注入 en_US（统一首屏界面语言）；已有则保留用户值（不覆盖）。见 FB_DEFAULT_LOCALE。
+  if (!pairs.some((p) => p.name === 'locale')) {
+    pairs.push({ name: 'locale', value: FB_DEFAULT_LOCALE });
   }
 
   const cookies = pairs.map((pair, idx) => ({

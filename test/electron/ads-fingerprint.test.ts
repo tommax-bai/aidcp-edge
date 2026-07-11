@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url);
 const fp = require('../../src/electron/ads-fingerprint.cjs') as {
   DEVICE_TEMPLATES: Array<{ key: string; os: string; uaSystemVersion: string; webglMode: string; deviceMemory: string }>;
   ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS: string[];
+  FINGERPRINT_UI_LANGUAGE: string[];
   validateGuardrails: (f: Record<string, unknown>) => { ok: boolean; violations: string[] };
   assertOsCoherent: (t: { os: string }, f: Record<string, unknown>) => { ok: boolean; violations: string[] };
   buildFingerprintConfig: (t: unknown) => { ok: boolean; fingerprintConfig?: Record<string, any>; violations: string[] };
@@ -125,6 +126,28 @@ test('AdsPower 不支持的 ua_system_version 在提交前被拒', () => {
   assert.equal(r.ok, false);
   assert.match(r.violations.join('; '), /ua_system_version=Mac OS X 14_4/);
   assert.match(r.violations.join('; '), /AdsPower 支持枚举/);
+});
+
+// ── C1（facebook-locale-pin-en-us）：界面语言钉死 en-US、时区仍随 IP、pin 不触发一致性拒建 ──
+test('语言 pin: 每个模板产物 language=[en-US]、language_switch 关闭、时区仍 based-on-IP', () => {
+  assert.deepEqual(fp.FINGERPRINT_UI_LANGUAGE, ['en-US'], '语言常量单点应为 en-US');
+  for (const t of fp.DEVICE_TEMPLATES) {
+    const r = fp.buildFingerprintConfig(t);
+    assert.equal(r.ok, true, `${t.key}: ${r.violations.join('; ')}`);
+    const built = r.fingerprintConfig!;
+    assert.deepEqual(built.language, ['en-US'], `${t.key} 界面语言应钉 en-US`);
+    assert.equal(built.language_switch, '0', `${t.key} 语言不应随代理 IP`);
+    assert.equal(built.automatic_timezone, '1', `${t.key} 时区仍应随代理 IP（语言 pin 与时区独立、并存无冲突）`);
+  }
+});
+
+test('语言 pin: language 不进四者一致断言，pin en-US 不触发 coherence 拒建', () => {
+  const macTpl = fp.DEVICE_TEMPLATES.find((t) => t.os === 'macos')!;
+  const r = fp.buildFingerprintConfig(macTpl);
+  assert.equal(r.ok, true, r.violations.join('; '));
+  const a = fp.assertOsCoherent(macTpl, r.fingerprintConfig!);
+  assert.equal(a.ok, true, `language=en-US 不应触发 OS 不一致：${a.violations.join('; ')}`);
+  assert.doesNotMatch(a.violations.join(), /language|语言/, 'language 不是 OS 一致性字段');
 });
 
 test("webgl='2' 内置模板的 renderer 与其声明 OS 家族一致", () => {

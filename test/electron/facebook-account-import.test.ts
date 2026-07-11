@@ -21,6 +21,26 @@ test('normalizeFacebookCookie: header cookie becomes AdsPower JSON with Facebook
   assert.ok(!cookies.some((c) => c.name === 'NID'), 'non-Facebook cookie names are not imported onto facebook.com');
 });
 
+// ── C1（facebook-locale-pin-en-us）：缺 locale → 注入 en_US；已有 locale → 保留用户值 ──
+test('normalizeFacebookCookie: 缺 locale → 注入 en_US（belt 统一首屏界面语言）', () => {
+  const res = mod.normalizeFacebookCookie(rawCookie); // rawCookie 不含 locale
+  assert.equal(res.ok, true);
+  const cookies = JSON.parse(res.cookie || '[]') as Array<{ name: string; value: string; domain: string }>;
+  const locale = cookies.find((c) => c.name === 'locale');
+  assert.ok(locale, '缺 locale 应被注入');
+  assert.equal(locale!.value, 'en_US');
+  assert.equal(locale!.domain, '.facebook.com');
+});
+
+test('normalizeFacebookCookie: 已有 locale → 保留用户值、不覆盖、不重复', () => {
+  const res = mod.normalizeFacebookCookie(`${rawCookie}; locale=vi_VN`);
+  assert.equal(res.ok, true);
+  const cookies = JSON.parse(res.cookie || '[]') as Array<{ name: string; value: string }>;
+  const locales = cookies.filter((c) => c.name === 'locale');
+  assert.equal(locales.length, 1, 'locale 不应重复注入');
+  assert.equal(locales[0].value, 'vi_VN', '用户已有 locale 值不被覆盖');
+});
+
 test('parseFacebookAccountImport: parses one or more lines without leaking values in errors', () => {
   const parsed = mod.parseFacebookAccountImport([
     `a@example.com----pw1----KEY1----${rawCookie}`,

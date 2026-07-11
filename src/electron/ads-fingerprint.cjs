@@ -18,6 +18,13 @@ const DEFAULT_KERNEL = '148'; // 须为本机已安装内核；ua_auto 会随机
 // AdsPower random_ua.ua_system_version 是离散枚举，不接受 13_6 / 14_4 这类补丁版本。
 const ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS = Object.freeze(['Windows 10', 'Windows 11', 'Mac OS X 10', 'Mac OS X 11', 'Mac OS X 12', 'Mac OS X 13']);
 
+// 界面 chrome 语言钉死规范 en-US（change facebook-locale-pin-en-us / C1）——单点常量便于回滚 / 灰度。
+// 现状「语言随代理 IP」会让中国代理号突现中文 UI，令下游按钮/状态的文字识别跨国家/跨语言群组时漂移、
+// 漏判 fail-closed 跳过；钉英文让识别单语化。已真机探针实证（2026-07-11，本机 AdsPower CLI chrome_149）：
+// language_switch:'0' + language:['en-US'] → navigator.languages=['en-US','en']、Accept-Language 英文、
+// **不随 IP**，且时区仍随 IP 独立。language 不进 assertOsCoherent（非 OS 一致性字段）；内容语言不受影响。
+const FINGERPRINT_UI_LANGUAGE = Object.freeze(['en-US']);
+
 // OS 标志字体（跨 OS 混装即矛盾）。
 const WIN_FONTS = /segoe ui|calibri|consolas|cambria|tahoma/i;
 const MAC_FONTS = /helvetica neue|san francisco|sf pro|\.sf ns|monaco|menlo/i;
@@ -142,7 +149,8 @@ function buildFingerprintConfig(template) {
   }
   const fp = {
     automatic_timezone: '1', // 时区随代理 IP
-    language_switch: '1', // 语言随代理 IP
+    language_switch: '0', // 语言钉死 en-US（不随代理 IP）——见 FINGERPRINT_UI_LANGUAGE
+    language: [...FINGERPRINT_UI_LANGUAGE], // 规范界面语言，令下游文字识别单语化；内容语言不受影响
     location: 'block', // 默认拒绝页面地理位置授权弹窗
     location_switch: '1', // 指纹地理位置仍随代理 IP（与授权策略独立）
     webrtc: 'proxy', // 替换成代理 IP（禁 local/real）
@@ -184,6 +192,7 @@ module.exports = {
   ALLOWED_WEBRTC,
   DEFAULT_KERNEL,
   ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS,
+  FINGERPRINT_UI_LANGUAGE,
   osFromUaSystemVersion,
   osFromRenderer,
   osFromFonts,

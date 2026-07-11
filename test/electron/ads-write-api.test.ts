@@ -69,6 +69,24 @@ test('updateProfileProxy: user/update 放行、body 只含 user_id + user_proxy_
   assert.equal(body.user_id, 'u1');
 });
 
+// ── C1 存量号结构性边界（facebook-locale-pin-en-us task 3.1）：写客户端改不动指纹语言 ──
+test('updateProfileProxy: 硬塞 fingerprint_config(含 language) 也进不了 body——存量号指纹语言结构性改不动', async () => {
+  const calls: Array<{ url: string; init?: { body?: string } }> = [];
+  const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0 }), calls) }) as unknown as {
+    updateProfileProxy: (a: Record<string, unknown>, opts?: Record<string, unknown>) => Promise<{ ok: boolean }>;
+  };
+  const r = await api.updateProfileProxy({
+    userId: 'u1',
+    proxyConfig: { proxy_soft: 'no_proxy' },
+    // 攻击面：调用方想借 update 改指纹语言（language_switch/language）——结构性两键约束应挡下。
+    fingerprint_config: { language_switch: '1', language: ['vi-VN'] },
+  });
+  assert.equal(r.ok, true);
+  const body = JSON.parse(String(calls[0].init?.body)) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(body).sort(), ['user_id', 'user_proxy_config'], 'fingerprint_config 结构性进不了 user/update body');
+  assert.ok(!('fingerprint_config' in body), '存量号指纹语言经受限写客户端改不动、无法回退到随 IP');
+});
+
 test('updateProfileProxy: 缺 userId / 缺归一 proxyConfig 诚实拒绝、不发请求', async () => {
   const calls: Array<{ url: string }> = [];
   const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0 }), calls) }) as unknown as {
