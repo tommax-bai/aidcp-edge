@@ -284,7 +284,7 @@ test('红线：并发环境的状态与活动按 envId 归属，切换环境不�
   assert.doesNotMatch(stream2, /环境一给/, '切换后环境一的活动 MUST NOT 残留');
 });
 
-test('无 envId 的旧形状状态推送 → 单环境行为不变、环境栏不出现（零回归）', async () => {
+test('无 envId 的旧形状 / 空名册 → 单环境统计不变、环境栏常驻显示并给添加入口', async () => {
   const { w, pushStatus } = await boot({
     fleetGet: undefined,
     onFleetUpdate: undefined,
@@ -292,8 +292,13 @@ test('无 envId 的旧形状状态推送 → 单环境行为不变、环境栏�
   }, { environments: [], adsProfileId: 'u1' });
   pushStatus(makeStatus({ stats: { views: 7, likes: 0, collects: 0, comments: 0, follows: 0, publishes: 0 } }));
   await tick();
-  assert.equal(w.document.querySelector('#views')!.textContent, '7');
-  assert.equal(w.document.querySelector('#env-rail')!.classList.contains('hidden'), true, '旧形状下环境栏隐藏');
+  assert.equal(w.document.querySelector('#views')!.textContent, '7', '单环境统计不变');
+  const rail = w.document.querySelector('#env-rail')!;
+  // 环境栏常驻显示（用户要求「左边栏默认展示」）：空名册也保留栏、强制展开、露出添加入口。
+  assert.equal(rail.classList.contains('hidden'), false, '空名册也常驻显示环境栏');
+  assert.equal(rail.classList.contains('expanded'), true, '空名册强制展开露出空态');
+  assert.equal(w.document.querySelectorAll('.rail-row').length, 0, '空名册无环境行');
+  assert.ok(w.document.querySelector('#rail-list .rail-empty'), '空态给「添加第一个环境」入口');
 });
 
 test('待处理徽标 + 需处理浮顶：需登录环境脉冲并计入徽标', async () => {

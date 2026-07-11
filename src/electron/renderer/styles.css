@@ -1120,6 +1120,15 @@ body { margin: 0; }
 .sum-chip.idle { color: #3f4c68; background: #e8edf6; }
 
 .rail-list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; flex: 1; min-height: 0; }
+/* 空名册空态：常驻环境栏里的「添加第一个环境」按钮（仅展开态出现；空名册本就强制展开） */
+.rail-empty {
+  margin: 10px 8px; padding: 12px 10px; width: calc(100% - 16px);
+  border: 1px dashed #c2d0e8; border-radius: 9px; background: #f5f9ff;
+  color: #3c60c8; font-size: 12px; font-weight: 600; line-height: 1.5;
+  text-align: center; cursor: pointer; transition: background .12s, border-color .12s;
+}
+.rail-empty:hover { background: #e9f1ff; border-color: #9db6e8; }
+.env-rail.collapsed .rail-empty { display: none; }
 .rail-group { font-size: 10px; letter-spacing: .06em; color: #98a2b8; font-weight: 700; padding: 8px 8px 3px; display: flex; align-items: center; gap: 6px; }
 .rail-group.crit { color: #c0453f; }
 .rail-group .n { opacity: .8; }

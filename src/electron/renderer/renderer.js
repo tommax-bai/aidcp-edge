@@ -1208,10 +1208,15 @@ function railDisplayName(row) {
 function renderRail() {
   if (!fields.envRail || !window.uiLogic || typeof uiLogic.fleetRailModel !== 'function') return;
   const list = railEnvList();
-  const show = list.length > 0;
+  // 环境栏常驻显示（用户要求「左边栏默认展示」）：名册为空也保留栏、露出「＋ 添加环境」入口，
+  // 不再按有无环境显隐（此前空名册整栏 hidden，新实例进来完全看不到添加入口）。
+  const show = true;
+  const empty = list.length === 0;
+  // 名册空时本次渲染强制展开（把空态提示与添加入口露出来），但不落库、不覆盖用户已保存的收起偏好；
+  // 一旦有环境即回落 fleetView.collapsed（默认收起为窄图标条）。
+  const collapsed = empty ? false : fleetView.collapsed;
   fields.envRail.classList.toggle('hidden', !show);
   fields.fleetRow?.classList.toggle('with-rail', show);
-  if (!show) { fleetView.lastRailSig = ''; return; }
   const model = uiLogic.fleetRailModel(list, Date.now());
   // 头像三态清理：仅在浏览器确已不在（环境移出 / 核心非运行）时撤销「已显示」相位。
   // 绝不按 level 清——attention（验证码浮层、云端瞬断、风控受限等，核心仍在跑、浏览器仍可控）
@@ -1230,7 +1235,8 @@ function renderRail() {
   // 打断 1.6s 脉冲动画（视觉抖动）、把行焦点甩回 <body>、并吞掉跨 tick 的点击手势。
   const sig = JSON.stringify({
     show,
-    collapsed: fleetView.collapsed,
+    empty,
+    collapsed,
     selected: fleetView.selected,
     shown: fleetView.shownEnv,
     guided: Boolean(fleetView.guided),
@@ -1240,16 +1246,16 @@ function renderRail() {
   });
   if (sig === fleetView.lastRailSig) return;
   fleetView.lastRailSig = sig;
-  fields.envRail.classList.toggle('collapsed', fleetView.collapsed);
-  fields.envRail.classList.toggle('expanded', !fleetView.collapsed);
+  fields.envRail.classList.toggle('collapsed', collapsed);
+  fields.envRail.classList.toggle('expanded', !collapsed);
   if (fields.railToggle) {
     // 箭头是内联 SVG（默认朝左=收起方向）；收起态水平翻转指向展开方向，不再切字符。
-    fields.railToggle.classList.toggle('flip', fleetView.collapsed);
-    fields.railToggle.title = fleetView.collapsed ? '展开环境列表' : '收起环境列表';
+    fields.railToggle.classList.toggle('flip', collapsed);
+    fields.railToggle.title = collapsed ? '展开环境列表' : '收起环境列表';
     fields.railToggle.setAttribute('aria-label', fields.railToggle.title);
   }
   if (fields.railCount) fields.railCount.textContent = String(list.length);
-  if (fields.railSum) fields.railSum.classList.toggle('hidden', fleetView.collapsed);
+  if (fields.railSum) fields.railSum.classList.toggle('hidden', collapsed);
   if (fields.railSumRun) fields.railSumRun.textContent = `▶ ${counts.run}`;
   if (fields.railSumAttn) fields.railSumAttn.textContent = `⚠ ${counts.attn}`;
   if (fields.railSumIdle) fields.railSumIdle.textContent = `⏸ ${counts.idle}`;
@@ -1263,6 +1269,16 @@ function renderRail() {
   }
   if (!fields.railList) return;
   fields.railList.innerHTML = '';
+  if (empty) {
+    // 空名册空态：直接给一个「添加第一个环境」按钮（点开加入 / 新建面板），别让用户找那个小「＋」。
+    const cta = document.createElement('button');
+    cta.type = 'button';
+    cta.className = 'rail-empty';
+    cta.textContent = '＋ 添加第一个环境';
+    cta.addEventListener('click', () => openEnvAddPanel('join'));
+    fields.railList.appendChild(cta);
+    return;
+  }
   for (const g of RAIL_GROUPS) {
     const groupRows = model.rows.filter(g.has);
     if (groupRows.length === 0) continue;
