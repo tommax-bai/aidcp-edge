@@ -112,7 +112,21 @@ function appendEdgeLog(envId, line, isError) {
 // AIDCP_CLOUD_URL）；界面留空则回落启动环境变量、再回落缺省 dev（对现有以环境变量启动的流程零回归）。
 // 两个正式地址一处真源；custom 允许任意 ws(s):// 地址。dev=测试、ol=线上生产。
 const CLOUD_ENV_URLS = { dev: 'ws://121.89.85.150:8787', ol: 'ws://123.56.253.183:8787' };
-const DEFAULT_CLOUD_URL = CLOUD_ENV_URLS.dev;
+// 构建期烘焙的缺省云端环境：分发包用 electron-builder `-c.extraMetadata.aidcpCloudDefaultEnv=ol`
+// 注入 'dev' | 'ol'，让「无界面选择、无启动环境变量」时连指定云（如线上分发包默认 ol）。
+// 普通开发 / CI 包不带此字段 → '' → 沿用历史缺省 dev（零回归）。只读打包进 app 的 package.json；
+// 读失败或字段非法即回落 ''。dev(electron .) 下 getAppPath 是仓库根、package.json 无此字段 → 不受影响。
+function readBakedDefaultCloudEnv() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8'));
+    const v = String((pkg && pkg.aidcpCloudDefaultEnv) || '').trim();
+    return v === 'dev' || v === 'ol' ? v : '';
+  } catch {
+    return '';
+  }
+}
+const BAKED_DEFAULT_CLOUD_ENV = readBakedDefaultCloudEnv();
+const DEFAULT_CLOUD_URL = CLOUD_ENV_URLS[BAKED_DEFAULT_CLOUD_ENV] || CLOUD_ENV_URLS.dev;
 const CLOUD_ENV_LABELS = { dev: 'dev', ol: 'ol（线上）', custom: '自定义', '': '默认' };
 function isWsUrl(u) {
   return /^wss?:\/\//i.test(String(u || '').trim());
@@ -188,6 +202,13 @@ function resolveCloudUrl() {
   }
   const env = String(process.env.AIDCP_CLOUD_URL || '').trim();
   if (env) return { url: env, key: cloudKeyForUrl(env), fromSelection: false };
+  // 无界面选择、无启动环境变量：回落到构建期烘焙的缺省环境。
+  // 烘焙缺省（ol/dev）必须像「界面选择」一样显式下发给核心（fromSelection:true）——否则核心自身
+  // 回落 dev，造成「界面显示 ol、实连 dev」（违反 change edge-cloud-env-selector「显示须等于实际连接」红线）。
+  // 未烘焙（普通包，BAKED_DEFAULT_CLOUD_ENV==''）→ 保持历史缺省、不显式注入（零回归）。
+  if (BAKED_DEFAULT_CLOUD_ENV === 'dev' || BAKED_DEFAULT_CLOUD_ENV === 'ol') {
+    return { url: CLOUD_ENV_URLS[BAKED_DEFAULT_CLOUD_ENV], key: BAKED_DEFAULT_CLOUD_ENV, fromSelection: true };
+  }
   return { url: DEFAULT_CLOUD_URL, key: 'dev', fromSelection: false };
 }
 

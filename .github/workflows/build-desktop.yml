@@ -12,16 +12,37 @@ name: Build Desktop Installers
 #   2) Actions tab -> "Build Desktop Installers" -> "Run workflow".
 #   3) When it finishes, download the installers from the run page's Artifacts.
 #
-# The app is intentionally UNSIGNED (build.mac.identity = null), so no Apple
-# certificates/secrets are required.
+# macOS artifacts are signed with a Developer ID Application certificate and
+# notarized with Apple notarytool. Required repository secrets:
+#   MAC_CSC_LINK, MAC_CSC_KEY_PASSWORD,
+#   APPLE_API_KEY_BASE64, APPLE_API_KEY_ID, APPLE_API_ISSUER, APPLE_TEAM_ID
+#   ADS_RUNTIME_JSON_BASE64  (baked self-contained runtime key; gitignored locally)
+#
+# Inputs:
+#   cloud_default_env  dev|ol — baked default cloud the app connects to out of the box.
+#                      ol = production. Absent field => app falls back to its own dev default.
+#   include_windows    also build the Windows installer (not self-contained yet; off by default).
 
 on:
   workflow_dispatch:
+    inputs:
+      cloud_default_env:
+        description: 'Baked default cloud env (dev|ol). ol connects to production out of the box.'
+        type: choice
+        options:
+          - dev
+          - ol
+        default: dev
+      include_windows:
+        description: 'Also build the Windows installer (unsigned, not self-contained yet).'
+        type: boolean
+        default: false
 
 jobs:
   build-mac:
     name: macOS (dmg + zip, x64 + arm64)
     runs-on: macos-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -30,16 +51,71 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Build macOS installers
-        # --publish never: in CI electron-builder otherwise tries to publish to a
-        # GitHub release and fails on a missing GH_TOKEN. We only want artifacts.
+      - name: Check macOS signing secrets
+        shell: bash
         run: |
-          npm run build:dist
-          npx electron-builder --mac --publish never
+          set -euo pipefail
+          missing=0
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "$name is required" >&2
+              missing=1
+            fi
+          done
+          exit "$missing"
         env:
-          # Unsigned build: stop electron-builder from auto-discovering a signing
-          # identity on the runner keychain and attempting to sign/notarize.
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Materialize Apple notarization key
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_API_KEY_BASE64:-}" ]; then
+            echo "APPLE_API_KEY_BASE64 is required for macOS notarization" >&2
+            exit 1
+          fi
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$APPLE_API_KEY"
+          chmod 600 "$APPLE_API_KEY"
+        env:
+          APPLE_API_KEY: ${{ runner.temp }}/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+      - name: Materialize self-contained runtime key
+        # resources/ads-runtime.json (baked AdsPower key) is gitignored, so it is NOT in the
+        # CI checkout. It IS referenced by build.extraResources and already ships inside every
+        # distributed .app, so storing it as a repo secret is strictly more protected, not a new
+        # exposure. Decode it here so the packaged app bundles the self-contained runtime.
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${ADS_RUNTIME_JSON_BASE64:-}" ]; then
+            echo "ADS_RUNTIME_JSON_BASE64 is required to bundle the self-contained runtime" >&2
+            exit 1
+          fi
+          mkdir -p resources
+          printf '%s' "$ADS_RUNTIME_JSON_BASE64" | base64 --decode > resources/ads-runtime.json
+          # Validate shape only; never print the key value.
+          node -e "const j=require('./resources/ads-runtime.json'); if(!j || typeof j.adsApiKey!=='string' || !j.adsApiKey){console.error('ads-runtime.json missing adsApiKey');process.exit(1);} console.log('ads-runtime.json ok (version '+j.version+')')"
+        env:
+          ADS_RUNTIME_JSON_BASE64: ${{ secrets.ADS_RUNTIME_JSON_BASE64 }}
+      - name: Build signed and notarized macOS installers
+        shell: bash
+        # --publish never is enforced by scripts/build-desktop-macos.sh.
+        timeout-minutes: 330
+        run: scripts/build-desktop-macos.sh
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ runner.temp }}/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          NOTARY_TIMEOUT_SECONDS: '7200'
+          NOTARY_POLL_SECONDS: '30'
+          # Bake the default cloud env chosen at dispatch (dev|ol) into this build.
+          AIDCP_CLOUD_DEFAULT_ENV: ${{ inputs.cloud_default_env }}
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -54,6 +130,10 @@ jobs:
 
   build-windows:
     name: Windows (nsis exe, x64)
+    # Off by default: the Windows job does not yet stage the self-contained runtime
+    # (build:ads-runtime / ads-runtime.json), so it would fail on missing extraResources.
+    # Opt in only once Windows self-contained packaging is wired up.
+    if: ${{ inputs.include_windows }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

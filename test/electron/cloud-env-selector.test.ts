@@ -66,3 +66,24 @@ test('settings:get 与 fleetSnapshot 带出目标云端视图，供界面常驻�
 test('提供「全部重启换云」IPC（避免部分环境连旧云的裂脑）', () => {
   assert.match(main, /ipcMain\.handle\(\s*['"]cloud:restartAll['"]/, '必须暴露 cloud:restartAll 全部重启换云');
 });
+
+// 构建期烘焙缺省云端环境（mac 签名分发包默认 ol）：分发包用 electron-builder
+// extraMetadata.aidcpCloudDefaultEnv 注入 dev|ol；普通包不带字段 → 沿用历史缺省 dev（零回归）。
+test('烘焙缺省云端环境：读打包 package.json 的 aidcpCloudDefaultEnv，缺省址回落 dev', () => {
+  assert.match(main, /aidcpCloudDefaultEnv/, '必须读取打包 package.json 的 aidcpCloudDefaultEnv 字段');
+  assert.match(main, /BAKED_DEFAULT_CLOUD_ENV/, '必须有烘焙缺省环境常量');
+  assert.match(
+    code,
+    /DEFAULT_CLOUD_URL\s*=\s*CLOUD_ENV_URLS\[BAKED_DEFAULT_CLOUD_ENV\]\s*\|\|\s*CLOUD_ENV_URLS\.dev/,
+    'DEFAULT_CLOUD_URL 必须按烘焙缺省取址、否则回落 dev',
+  );
+});
+
+test('烘焙缺省 dev/ol 必须像界面选择一样 fromSelection:true 显式下发核心（防显示≠实连）', () => {
+  // 否则核心（main.ts）自身回落 dev，界面显示 ol 但实连 dev——违反「显示须等于实际连接」红线。
+  assert.match(
+    code,
+    /BAKED_DEFAULT_CLOUD_ENV === 'dev' \|\| BAKED_DEFAULT_CLOUD_ENV === 'ol'[\s\S]*?fromSelection:\s*true/,
+    '烘焙缺省 dev/ol 必须以 fromSelection:true 返回，保证显式注入 AIDCP_CLOUD_URL',
+  );
+});
