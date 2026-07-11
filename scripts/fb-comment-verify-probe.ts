@@ -168,6 +168,34 @@ function buildExistingSampleJs(): string {
   })()`;
 }
 
+/** 轻量：评论框/评论是否已渲染（用于导航后等待真实渲染，避开弹层骨架期）。 */
+function buildEditorPresentJs(): string {
+  return `(function(){${HELPERS_JS}
+    var ed = fbFindEditor();
+    var arts = document.querySelectorAll('[role="article"], article');
+    var comments = 0;
+    for (var i=0;i<arts.length;i++){ if (arts[i].parentElement && arts[i].parentElement.closest && arts[i].parentElement.closest('[role="article"], article')) comments++; }
+    return JSON.stringify({ editorFound: !!ed.editor, editorCount: ed.editorCount, commentArticleCount: comments });
+  })()`;
+}
+
+/** 点击「写评论…」占位（部分 FB 面板评论框需点开才出现 contenteditable）。返回是否点到。 */
+function buildClickComposerPlaceholderJs(): string {
+  return `(function(){${HELPERS_JS}
+    // 已有真编辑器则无需点
+    if (fbFindEditor().editor) return JSON.stringify({clicked:false, reason:'already_editor'});
+    var cands = Array.prototype.slice.call(document.querySelectorAll('[aria-label], [role="button"], div'));
+    for (var i=0;i<cands.length;i++){ var el=cands[i]; if(!fbVisible(el)) continue;
+      var lab = (fbLabel(el)||fbText(el));
+      if (/写评论|发表评论|发表公开评论|Write a comment|Comment|Bình luận|Comentar|Escribe un comentario/i.test(lab) && fbText(el).length < 30){
+        try{ el.scrollIntoView({block:'center'}); el.click(); }catch(e){}
+        return JSON.stringify({clicked:true, label:lab.slice(0,30)});
+      }
+    }
+    return JSON.stringify({clicked:false, reason:'no_placeholder'});
+  })()`;
+}
+
 /** 聚焦评论框（scrollIntoView + focus）。 */
 function buildFocusJs(): string {
   return `(function(){${HELPERS_JS}
@@ -287,6 +315,29 @@ async function screenshot(session: Session, ts: number, tag: string): Promise<vo
   }
 }
 
+// 导航后等评论框/评论真实渲染（避开弹层骨架期）；必要时点开「写评论…」占位
+async function waitForEditor(session: Session, maxMs: number): Promise<{ editorFound: boolean; commentArticleCount: number; waitedMs: number; clickedPlaceholder: boolean }> {
+  const start = Date.now();
+  let last = { editorFound: false, commentArticleCount: 0 };
+  let clicked = false;
+  while (Date.now() - start < maxMs) {
+    try {
+      const s = await evalJson<{ editorFound: boolean; editorCount: number; commentArticleCount: number }>(session.cdp, buildEditorPresentJs());
+      last = { editorFound: s.editorFound, commentArticleCount: s.commentArticleCount };
+      if (s.editorFound) break;
+      // 渲染出结构但没现成 contenteditable → 试点开占位（每轮最多一次）
+      if (!clicked && (s.commentArticleCount > 0 || Date.now() - start > 6000)) {
+        const c = await evalJson<{ clicked: boolean }>(session.cdp, buildClickComposerPlaceholderJs());
+        if (c.clicked) { clicked = true; log('composer_placeholder_clicked', c as unknown as Record<string, unknown>); }
+      }
+    } catch {
+      // ignore transient eval errors during modal render
+    }
+    await sleep(600);
+  }
+  return { ...last, waitedMs: Date.now() - start, clickedPlaceholder: clicked };
+}
+
 // firstMs：某信号在时间线里首次为真的相对 ms（无则 null）
 function firstMs(frames: PollFrame[], pred: (f: PollFrame) => boolean): number | null {
   for (const f of frames) if (pred(f)) return f.tMs;
@@ -328,8 +379,11 @@ async function main(): Promise<void> {
     if (navUrl) {
       log('navigate', { navUrl });
       await session.cdp.send('Page.navigate', { url: navUrl });
-      await sleep(4000);
+      await sleep(3000);
     }
+    // 等评论框/评论真实渲染（弹层式帖子详情有骨架加载期，固定等待会误判 editor_not_found）
+    const ready = await waitForEditor(session, 20000);
+    log('editor_ready', ready);
 
     // ---- Stage 0（默认，只读）：学「已确认评论」的 DOM 形态 ----
     const sample = await evalJson<{
@@ -349,7 +403,13 @@ async function main(): Promise<void> {
     }
 
     // ---- 聚焦 + 拟人输入（type-test 与真发共用）----
-    const focus = await evalJson<{ found: boolean; focused: boolean; labeled: boolean }>(session.cdp, buildFocusJs());
+    let focus = await evalJson<{ found: boolean; focused: boolean; labeled: boolean }>(session.cdp, buildFocusJs());
+    if (!focus.found) {
+      // 兜底：点开「写评论…」占位再聚焦一次（部分面板评论框需先点开）
+      await evalRaw(session.cdp, buildClickComposerPlaceholderJs()).catch(() => undefined);
+      await sleep(900);
+      focus = await evalJson<{ found: boolean; focused: boolean; labeled: boolean }>(session.cdp, buildFocusJs());
+    }
     log('focus', focus);
     if (!focus.found) {
       log('abort', { reason: 'editor_not_found', hint: '把 readonly_sample 发回来，可能需要放宽编辑器选择器' });
