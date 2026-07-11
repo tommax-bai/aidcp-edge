@@ -897,12 +897,13 @@ body { margin: 0; }
 .persona-card { border: 1px solid var(--hair); border-radius: 12px; padding: 12px 14px; background: #fff; }
 .kw-count { font-size: 11px; color: var(--faint); font-weight: 600; margin-left: 6px; }
 .persona-or { font-size: 11px; color: var(--faint); }
-/* 关键词 chip：语气调性（单选）与内容偏好（多选）共用同一「边缘弧度方形」chip，
-   统一形状 + 虚线描边（自定义与非自定义一致）+ 标记（✓）与文字间距（用 flex gap）。 */
+/* 关键词 chip：语气调性（单选）与内容偏好（多选）共用同一「边缘弧度方形」chip。
+   非自定义（预设）实线描边；自定义（用户新增 + 加号框）同尺寸同位置、仅描边改虚线。
+   标记（✓）与文字间距用 flex gap。 */
 .persona-kw-group { display: flex; flex-wrap: wrap; gap: 8px; }
 .persona-kw-group .kw-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  min-height: 38px; padding: 7px 14px; border: 1px dashed #cbd5e8; border-radius: 8px;
+  min-height: 38px; padding: 7px 14px; border: 1px solid #dbe3ef; border-radius: 8px;
   background: #fff; color: #5b6475; font-size: 13px; font-weight: 600;
   cursor: pointer; font-family: inherit; text-align: center;
   transition: border-color 0.12s, background 0.12s, color 0.12s;
@@ -922,12 +923,13 @@ body { margin: 0; }
 .persona-pref-group .persona-kw-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .persona-pref-group .kw-btn { width: 100%; }
 .persona-pref-group .kw-btn:not(.active)::before { content: "+"; font-size: 15px; line-height: 1; font-weight: 400; color: #64748b; }
-/* 自定义加号：排在该类目所有预设选项之后，独占一整行（跨两列）故各类目位置一致；
-   形同选项、只显示「+」故更窄（左对齐 46px）。描边/字色达 WCAG 3:1 可辨。 */
+/* 自定义（用户新增）chip：与预设同尺寸同位置，仅描边改虚线（选中态仍蓝框，标记用户所加）。 */
+.persona-pref-group .kw-btn.custom { border-style: dashed; }
+/* 自定义加号框：与预设选项同尺寸同位置（撑满网格单元、随选项流排），仅描边虚线、居中「+」。 */
 .persona-add-custom {
-  grid-column: 1 / -1; justify-self: start; display: inline-flex; align-items: center; justify-content: center;
-  min-height: 38px; min-width: 46px; padding: 0 14px; border: 1px dashed #8b94a6; border-radius: 8px;
-  background: #fbfcfe; color: #5b6475; font-size: 18px; line-height: 1; cursor: pointer; font-family: inherit;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 100%; min-height: 38px; padding: 7px 14px; border: 1px dashed #cbd5e8; border-radius: 8px;
+  background: #fff; color: #5b6475; font-size: 15px; line-height: 1; cursor: pointer; font-family: inherit;
   transition: border-color 0.12s, background 0.12s, color 0.12s;
 }
 .persona-add-custom:hover { border-color: var(--accent); background: #eaf1ff; color: var(--accent); }
