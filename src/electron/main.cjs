@@ -107,6 +107,24 @@ function appendEdgeLog(envId, line, isError) {
 //  - provider='self'：自起本机真实指纹 Chrome（等价旧桌面行为，固定 9222 + cookie 轮询登录门；单环境遗留路径）。
 // 旧单值 adsProfileId/adsProfileName/platform 向后兼容加载为单元素花名册，并保持镜像回写（回滚兼容）。
 // 敏感值（apiKey）只落本机 userData、随用户机器，不进仓库 / 不外发。
+// ── 云端环境选择（change edge-cloud-env-selector）─────────────────────────────
+// 客户端连哪个云端由「设置里的选择」权威决定：界面选了就以界面为准（派生核心时显式覆盖继承来的
+// AIDCP_CLOUD_URL）；界面留空则回落启动环境变量、再回落缺省 dev（对现有以环境变量启动的流程零回归）。
+// 两个正式地址一处真源；custom 允许任意 ws(s):// 地址。dev=测试、ol=线上生产。
+const CLOUD_ENV_URLS = { dev: 'ws://121.89.85.150:8787', ol: 'ws://123.56.253.183:8787' };
+const DEFAULT_CLOUD_URL = CLOUD_ENV_URLS.dev;
+const CLOUD_ENV_LABELS = { dev: 'dev', ol: 'ol（线上）', custom: '自定义', '': '默认' };
+function isWsUrl(u) {
+  return /^wss?:\/\//i.test(String(u || '').trim());
+}
+// 地址 → 展示 key（供「当前连的是哪个云」常驻显示；未知地址归 custom、空归 ''）。
+function cloudKeyForUrl(url) {
+  const u = String(url || '').trim();
+  if (u === CLOUD_ENV_URLS.dev) return 'dev';
+  if (u === CLOUD_ENV_URLS.ol) return 'ol';
+  return u ? 'custom' : '';
+}
+
 const DEFAULT_SETTINGS = {
   provider: 'adspower',
   environments: [],
@@ -115,6 +133,10 @@ const DEFAULT_SETTINGS = {
   adsApiBase: '',
   adsProfileName: '',
   platform: 'xiaohongshu',
+  // 云端环境选择（change edge-cloud-env-selector）：'' = 未选择（跟随启动环境变量 / 缺省 dev，零回归）；
+  // 'dev' | 'ol' 用映射地址；'custom' 用 cloudUrlCustom。
+  cloudEnvKey: '',
+  cloudUrlCustom: '',
   // 浏览器窗口停放：默认主屏停放（窗口停在主屏可靠可见的背景位、不抢焦点，不用最小化/headless）。
   browserParkingMode: DEFAULT_PARKING_MODE,
   // 「开发者详情」（原始日志区）默认不展示，在设置抽屉里开关（客户版首屏零技术噪音）。
@@ -142,7 +164,37 @@ function loadSettings() {
   // 花名册迁移（向后兼容）：旧单值 adsProfileId → 单元素花名册；镜像回写旧字段（回滚兼容）。
   settings.environments = fleet.migrateEnvironments(parsed && typeof parsed === 'object' ? { ...parsed, environments: settings.environments } : settings);
   applyLegacyMirror();
+  normalizeCloudSettings();
   return settings;
+}
+
+// 归一化云端选择（loadSettings / saveSettings 共用）：非法 key 归 ''；custom 地址去空白；
+// custom 选了但地址非法 → 降级为「未选择」，绝不注入垃圾地址（诚实回落，不静默连坏地址）。
+function normalizeCloudSettings() {
+  const key = settings.cloudEnvKey;
+  if (key !== 'dev' && key !== 'ol' && key !== 'custom') settings.cloudEnvKey = '';
+  settings.cloudUrlCustom = String(settings.cloudUrlCustom || '').trim();
+  if (settings.cloudEnvKey === 'custom' && !isWsUrl(settings.cloudUrlCustom)) settings.cloudEnvKey = '';
+}
+
+// 解析派生核心该连的云端：界面选择优先 > 启动环境变量 AIDCP_CLOUD_URL > 缺省 dev。
+// fromSelection=true 时派生处 MUST 在合并之后显式覆盖继承来的 AIDCP_CLOUD_URL（否则被 processEnv 同名值压过）；
+// false 时不注入、沿用继承 / 缺省（零回归）。
+function resolveCloudUrl() {
+  const key = settings.cloudEnvKey;
+  if (key === 'dev' || key === 'ol') return { url: CLOUD_ENV_URLS[key], key, fromSelection: true };
+  if (key === 'custom' && isWsUrl(settings.cloudUrlCustom)) {
+    return { url: settings.cloudUrlCustom.trim(), key: 'custom', fromSelection: true };
+  }
+  const env = String(process.env.AIDCP_CLOUD_URL || '').trim();
+  if (env) return { url: env, key: cloudKeyForUrl(env), fromSelection: false };
+  return { url: DEFAULT_CLOUD_URL, key: 'dev', fromSelection: false };
+}
+
+// 供界面常驻显示「目标云端」（当前选择解析出的地址 + 友好名）。
+function cloudSelectionView() {
+  const r = resolveCloudUrl();
+  return { key: r.key, url: r.url, label: CLOUD_ENV_LABELS[r.key] || r.key || '默认', fromSelection: r.fromSelection };
 }
 
 // 把花名册首成员镜像回旧单值字段（回滚兼容）。**platform 只在 adspower 模式镜像**：self（本机 Chrome）
@@ -175,6 +227,7 @@ function saveSettings(patch) {
   settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
   settings.environments = fleet.normalizeEnvironments(settings.environments);
   applyLegacyMirror();
+  normalizeCloudSettings();
   try {
     fs.mkdirSync(app.getPath('userData'), { recursive: true });
     fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2), 'utf8');
@@ -335,6 +388,9 @@ function makeStatus(provider) {
     // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在已绑时下发（sticky true），
     // 渲染层据此把徽标翻「已设置」并跳过向导。按环境隔离（账号级信号）。
     personaBound: false,
+    // 本环境核心本次实际被派生去连的云端 key（change edge-cloud-env-selector）：''=未启动/未知。
+    // 界面据此与「目标云端」比对，运行中且不一致即显示「待重启生效」（红线：显示=实际连接）。
+    connectedCloudKey: '',
   };
 }
 
@@ -436,6 +492,7 @@ function fleetSnapshot() {
     provider: settings.provider,
     selectedEnvId,
     railCollapsed: Boolean(settings.railCollapsed),
+    cloudEnv: cloudSelectionView(), // 目标云端（当前选择解析出的地址 + 友好名，change edge-cloud-env-selector）
     environments: [...envs.values()].map((h) => ({
       envId: h.envId,
       kind: h.kind,
@@ -1116,6 +1173,15 @@ function startEdge(handle) {
     spawnEnv = { ...buildSelfProviderEnv(), ...process.env, ELECTRON_RUN_AS_NODE: '1' };
   }
 
+  // 云端环境注入（change edge-cloud-env-selector）：界面已显式选择时，在**合并之后**覆盖继承来的
+  // AIDCP_CLOUD_URL（必须在此、而非塞进 providerEnv：合并 { ...providerEnv, ...processEnv } 会让继承值压过）；
+  // 未选择则不动、沿用继承 / 缺省（零回归）。stamp 本次实际连接的云端 key，供界面「当前云端」显示与实际一致。
+  const cloudSel = resolveCloudUrl();
+  if (cloudSel.fromSelection) spawnEnv.AIDCP_CLOUD_URL = cloudSel.url;
+  handle.connectedCloudKey = cloudSel.fromSelection
+    ? cloudSel.key
+    : cloudKeyForUrl(String(process.env.AIDCP_CLOUD_URL || '').trim() || DEFAULT_CLOUD_URL);
+
   handle.browserParkingReady = false;
   handle.browserPersonaNoticeState = null;
   resetPersonaNoticeGrace(handle);
@@ -1146,6 +1212,7 @@ function startEdge(handle) {
     session: 'running',
     publish: null,
     respawnGaveUp: false,
+    connectedCloudKey: handle.connectedCloudKey || '',
     lastMessage: '正在启动 aidcp-edge…',
     ...presencePatch('正在启动引擎…'),
     ...clearEdgeFailurePatch(handle),
@@ -2066,11 +2133,11 @@ ipcMain.handle('auth:relogin', (_event, envId) => {
   relogin(handle);
   return statusOf(handle);
 });
-ipcMain.handle('settings:get', () => ({ ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL }));
+ipcMain.handle('settings:get', () => ({ ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL, cloudEnv: cloudSelectionView() }));
 ipcMain.handle('settings:save', (_event, patch) => {
   const res = saveSettings(patch);
   syncEnvHandles(); // 花名册变更即同步注册表（新环境建行、移出的有序停止）
-  // 保存只持久化、**不打断**在跑的核心（应用改动经显式 edge:restart「按新设置重启」）。
+  // 保存只持久化、**不打断**在跑的核心（应用改动经显式 edge:restart「按新设置重启」/「全部重启换云」）。
   const handle = selectedHandle();
   if (handle) {
     updateStatus(handle, {
@@ -2078,7 +2145,15 @@ ipcMain.handle('settings:save', (_event, patch) => {
       lastMessage: res.ok ? '浏览器设置已保存。' : '设置已应用（本次生效），但写入本地失败，重启应用后可能丢失。',
     });
   }
-  return { ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL, saveOk: res.ok, saveError: res.error };
+  broadcastFleet(); // cloudEnv 目标云端可能已变，推快照让界面「当前云端」即时刷新（保存不打断在跑核心）
+  return { ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL, cloudEnv: cloudSelectionView(), saveOk: res.ok, saveError: res.error };
+});
+// 「全部重启并连接新云端」（change edge-cloud-env-selector）：切换云端后显式把全部在跑 / 退避中的环境
+// 有序重启，使其按新选择重新解析云端地址连接——避免部分环境连旧云、部分连新云的裂脑。
+ipcMain.handle('cloud:restartAll', () => {
+  const targets = [...envs.values()].filter((h) => (h.child || h.respawnTimer) && !h.removed);
+  for (const h of targets) stopAndRestart(h, '正在按新云端重启边缘进程…');
+  return { ok: true, restarted: targets.length, cloudEnv: cloudSelectionView() };
 });
 // 悬浮「启动」：目标环境未跑则错峰启动；已在跑则不重复启动。
 ipcMain.handle('edge:start', (_event, envId) => {

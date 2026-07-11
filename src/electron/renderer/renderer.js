@@ -59,6 +59,9 @@ const fields = {
   healthPop: document.querySelector('#health-pop'),
   healthDetail: document.querySelector('#health-detail'),
   gear: document.querySelector('#gear'),
+  // 标题带常驻「当前云端」chip（change edge-cloud-env-selector）
+  cloudEnvChip: document.querySelector('#cloud-env-chip'),
+  cloudEnvChipLabel: document.querySelector('#cloud-env-chip-label'),
   presenceText: document.querySelector('#presence-text'),
   presenceFresh: document.querySelector('#presence-fresh'),
   presenceCore: document.querySelector('#presence-core'),
@@ -184,7 +187,16 @@ const settingsUi = {
   browserResetParking: document.querySelector('#browser-reset-parking'),
   applyRestart: document.querySelector('#apply-restart'),
   msg: document.querySelector('#settings-msg'),
+  // 云端环境卡（change edge-cloud-env-selector）
+  cloudEnvButtons: Array.from(document.querySelectorAll('.cloud-env-btn')),
+  cloudEnvCustomField: document.querySelector('#cloud-env-custom-field'),
+  cloudUrlCustom: document.querySelector('#cloud-url-custom'),
+  cloudEnvCurrent: document.querySelector('#cloud-env-current'),
+  cloudEnvHint: document.querySelector('#cloud-env-hint'),
+  cloudRestartAll: document.querySelector('#cloud-restart-all'),
 };
+// 云端环境展示名（一处；与主进程 CLOUD_ENV_LABELS 对齐）。
+const CLOUD_ENV_LABELS = { dev: 'dev', ol: 'ol（线上）', custom: '自定义', '': '默认' };
 const PARKING_MODES = new Set(['primary-screen', 'parking-display', 'edge-strip', 'offscreen']);
 
 // 状态码保持英文（供 CSS 上色 + main 侧判断），展示文案在此本地化。className 仍用原始码不动色。
@@ -208,6 +220,9 @@ const SUBTITLE = {
 };
 
 let currentStatus;
+// 云端环境（change edge-cloud-env-selector）：本地已选 key + 主进程解析出的目标云端视图（含友好名）。
+let cloudSelKey = '';
+let targetCloud = { key: '', label: '默认', url: '' };
 // ── 多环境 fleet 视图态（edge-multi-environment-fleet）──
 // 状态 / 活动按 envId 归属；右侧主区域只呈现「当前选中环境」的投影（内容与交互不变）。
 // 无 envId 的旧形状（单环境主进程 / 测试桩）归 '__local__'，环境栏对其隐藏——零回归。
@@ -1039,6 +1054,7 @@ function render(status) {
   renderNotice(status);
   renderSameAccount(status); // 同账号铺多环境告警（多环境 fleet；无告警字段时隐藏，零回归）
   updateApplyRestart(); // 依「dirty && 核心在跑」决定是否显示「按新设置重启」
+  updateCloudPending(); // 云端环境（change edge-cloud-env-selector）：随状态心跳刷「当前云端 / 待重启生效」
   if (status.provider && SUBTITLE[status.provider]) fields.subtitle.textContent = SUBTITLE[status.provider];
   // 表单未在编辑时，让 provider 分段跟随实际运行 provider。
   if (status.provider && !editingProvider) applyProviderSelection(status.provider);
@@ -1145,6 +1161,9 @@ function applyFleetSnapshot(snap) {
     const env = fleetView.envs.get(fleetView.selected);
     if (env && env.status) render(env.status);
   }
+  // 云端环境（change edge-cloud-env-selector）：目标云端随快照更新；刷新 chip / 当前连接 / 待重启。
+  if (snap.cloudEnv) targetCloud = snap.cloudEnv;
+  updateCloudPending();
   renderRail();
 }
 
@@ -1572,6 +1591,80 @@ function updateProfileDisplay() {
   settingsUi.adsProfileDisplay.classList.toggle('empty', !v);
 }
 
+// ─── 云端环境（change edge-cloud-env-selector）───
+function isWsUrl(u) {
+  return /^wss?:\/\//i.test(String(u || '').trim());
+}
+// 反映已选 key 到分段按钮 + 自定义输入框显隐（不触发保存）。
+function applyCloudSelectionUi() {
+  for (const btn of settingsUi.cloudEnvButtons) {
+    btn.classList.toggle('active', btn.dataset && btn.dataset.cloud === cloudSelKey);
+  }
+  settingsUi.cloudEnvCustomField.classList.toggle('hidden', cloudSelKey !== 'custom');
+}
+// 把某选择落盘（custom 先校验地址；非法则诚实提示、不保存、不注入垃圾）。返回 saved（或 {ok:false}）。
+async function persistCloudSelection() {
+  const key = cloudSelKey;
+  const custom = settingsUi.cloudUrlCustom.value.trim();
+  if (key === 'custom' && !isWsUrl(custom)) {
+    settingsUi.cloudEnvHint.textContent = '自定义地址需以 ws:// 或 wss:// 开头。';
+    return { ok: false };
+  }
+  const saved = await window.aidcpEdge.saveSettings({ cloudEnvKey: key, cloudUrlCustom: custom });
+  // 主进程归一化可能把非法 custom 降级为 ''（未选择）；以回执为准回填。
+  cloudSelKey = (saved && typeof saved.cloudEnvKey === 'string') ? saved.cloudEnvKey : key;
+  if (saved && saved.cloudEnv) targetCloud = saved.cloudEnv;
+  applyCloudSelectionUi();
+  updateCloudPending();
+  return saved;
+}
+// 选择某云端：ol 需二次确认；确认/落盘成功后提示需重启在跑环境生效。
+async function selectCloudEnv(key) {
+  if (key === 'ol' && cloudSelKey !== 'ol') {
+    if (!window.confirm('将连接线上生产云端 ol，确认切换？\n（切换后需重启运行中的环境才生效）')) return;
+  }
+  cloudSelKey = key;
+  applyCloudSelectionUi();
+  if (key === 'custom') {
+    // 等用户填地址再落盘：仅展开输入框、聚焦；不立即保存空地址。
+    settingsUi.cloudUrlCustom.focus();
+    settingsUi.cloudEnvHint.textContent = '填写 ws:// 或 wss:// 地址后自动保存。';
+    if (!isWsUrl(settingsUi.cloudUrlCustom.value)) { updateCloudPending(); return; }
+  }
+  const saved = await persistCloudSelection();
+  if (saved && saved.ok !== false) {
+    settingsUi.cloudEnvHint.textContent = `云端已切到「${targetCloud.label}」，需重启运行中的环境才生效。`;
+  }
+}
+// 依「运行中环境实际连接的云端」与「目标云端」比对，刷新 chip / 当前连接 / 待重启按钮。
+// 红线：显示=实际连接；已切未重启显示为「待重启生效」，绝不显示成已生效。
+function updateCloudPending() {
+  const target = targetCloud || { key: '', label: '默认' };
+  const running = [...fleetView.envs.values()].filter(
+    (e) => e.status && (e.status.edge === 'running' || e.status.edge === 'starting') && e.status.connectedCloudKey,
+  );
+  const pending = running.some((e) => e.status.connectedCloudKey !== target.key);
+  // 当前实际连接：有在跑环境取其一的 live key；否则显示目标（下次启动将用）。
+  const liveKey = running.length ? running[0].status.connectedCloudKey : target.key;
+  if (settingsUi.cloudEnvCurrent) {
+    settingsUi.cloudEnvCurrent.textContent = pending
+      ? `${CLOUD_ENV_LABELS[liveKey] || liveKey || '默认'} → 目标 ${target.label}（待重启生效）`
+      : (CLOUD_ENV_LABELS[liveKey] || target.label || '默认');
+    settingsUi.cloudEnvCurrent.classList.toggle('ol', (pending ? liveKey : target.key) === 'ol');
+  }
+  if (settingsUi.cloudRestartAll) settingsUi.cloudRestartAll.classList.toggle('hidden', !pending);
+  // 标题带 chip：运行中显示 live、否则显示目标；待重启加后缀与 pending 态；ol 醒目色。
+  if (fields.cloudEnvChipLabel) {
+    fields.cloudEnvChipLabel.textContent = pending
+      ? `云端 ${CLOUD_ENV_LABELS[liveKey] || '默认'}·待重启`
+      : `云端 ${CLOUD_ENV_LABELS[liveKey] || target.label || '默认'}`;
+  }
+  if (fields.cloudEnvChip) {
+    fields.cloudEnvChip.classList.toggle('ol', (pending ? liveKey : target.key) === 'ol');
+    fields.cloudEnvChip.classList.toggle('pending', pending);
+  }
+}
+
 function applySettings(s) {
   if (!s) return;
   if (Number.isFinite(Number(s.personaPromptGraceMs))) personaPromptGraceMs = Math.max(0, Number(s.personaPromptGraceMs));
@@ -1588,11 +1681,48 @@ function applySettings(s) {
   settingsUi.adsApiBase.value = s.adsApiBase || '';
   applyParkingSelection(s.browserParkingMode || 'primary-screen');
   updateProfileDisplay();
+  // 云端环境（change edge-cloud-env-selector）：回填已选 key、自定义地址、目标云端视图。
+  cloudSelKey = typeof s.cloudEnvKey === 'string' ? s.cloudEnvKey : '';
+  settingsUi.cloudUrlCustom.value = s.cloudUrlCustom || '';
+  if (s.cloudEnv) targetCloud = s.cloudEnv;
+  applyCloudSelectionUi();
+  updateCloudPending();
   editingProvider = null;
   dirty = false;
   applyProviderSelection(s.provider || 'adspower');
   updateApplyRestart();
 }
+
+// 云端环境卡交互（change edge-cloud-env-selector）
+for (const btn of settingsUi.cloudEnvButtons) {
+  btn.addEventListener('click', () => {
+    const key = btn.dataset && btn.dataset.cloud;
+    if (key === 'dev' || key === 'ol' || key === 'custom') void selectCloudEnv(key);
+  });
+}
+// 自定义地址填好后（change/blur）落盘（仅当当前是 custom）。
+settingsUi.cloudUrlCustom.addEventListener('change', () => {
+  if (cloudSelKey !== 'custom') return;
+  void persistCloudSelection().then((saved) => {
+    if (saved && saved.ok !== false) {
+      settingsUi.cloudEnvHint.textContent = `云端已切到「${targetCloud.label}」，需重启运行中的环境才生效。`;
+    }
+  });
+});
+// 「全部重启并连接新云端」：有序重启全部在跑环境，使其按新选择重连。
+settingsUi.cloudRestartAll.addEventListener('click', async () => {
+  settingsUi.cloudRestartAll.disabled = true;
+  try {
+    const r = await window.aidcpEdge.cloudRestartAll?.();
+    settingsUi.cloudEnvHint.textContent = r && r.ok
+      ? `已请求重启 ${r.restarted} 个环境并连接「${(r.cloudEnv && r.cloudEnv.label) || targetCloud.label}」…`
+      : '重启请求失败，请重试。';
+  } finally {
+    settingsUi.cloudRestartAll.disabled = false;
+  }
+});
+// 标题带「当前云端」chip 点击 → 打开设置抽屉（去切换）。
+fields.cloudEnvChip?.addEventListener('click', openDrawer);
 
 settingsUi.useChrome.addEventListener('change', () => {
   const provider = selectedProvider();

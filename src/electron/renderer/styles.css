@@ -1298,3 +1298,21 @@ body { margin: 0; }
   border-radius: 6px; font-size: 11px; padding: 2px 7px; cursor: pointer; white-space: nowrap;
 }
 .ads-env-plat-switch:hover, .ads-env-proxy:hover { border-color: #b8c9f5; color: #2563eb; background: #eaf1ff; }
+
+/* ─── 云端环境（change edge-cloud-env-selector）─── */
+/* 标题带常驻「当前云端」chip：中性底；ol=生产用警示色；待重启用告警色。 */
+.cloud-env-chip {
+  height: 24px; padding: 0 9px; border: 0; border-radius: 999px;
+  display: inline-flex; align-items: center; cursor: pointer; margin-right: 6px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.2px;
+  color: #3f4c68; background: #e8edf6; white-space: nowrap;
+}
+.cloud-env-chip:hover { filter: brightness(0.97); }
+.cloud-env-chip.ol { color: var(--warn-fg); background: var(--warn-bg); }
+.cloud-env-chip.pending { color: var(--bad-fg); background: var(--bad-bg); }
+/* 云端环境卡 */
+.cloud-env-options { margin-bottom: 10px; }
+.cloud-env-current { font-size: 12px; color: var(--mute); margin-top: 4px; }
+.cloud-env-current .badge { display: inline-block; vertical-align: middle; margin-left: 4px; }
+.cloud-env-current .badge.ol { background: var(--warn-bg); color: var(--warn-fg); }
+.cloud-env-actions { margin-top: 10px; }

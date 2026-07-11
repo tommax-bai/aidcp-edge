@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   fleetSelect: (envId) => ipcRenderer.invoke('fleet:select', envId),
   fleetStartAll: (opts) => ipcRenderer.invoke('fleet:startAll', opts),
   fleetStopAll: () => ipcRenderer.invoke('fleet:stopAll'),
+  // 云端环境（change edge-cloud-env-selector）：切换云端后「全部重启并连接新云端」。
+  cloudRestartAll: () => ipcRenderer.invoke('cloud:restartAll'),
   fleetSetRailCollapsed: (collapsed) => ipcRenderer.invoke('fleet:setRailCollapsed', collapsed),
   onFleetUpdate: (callback) => {
     const listener = (_event, snapshot) => callback(snapshot);
