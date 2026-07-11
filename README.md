@@ -90,6 +90,24 @@ const session = await attachToPage({ host: '127.0.0.1', port: 9222 });
 > `AIDCP_CDP_HOST/PORT`、`AIDCP_CHROME_PROFILE`、
 > `AIDCP_AUTO_BROWSE`、`AIDCP_REAL_PUBLISH`。详见总览仓 `aidcp/docs/handoff-2026-06-05.md`。
 
+### 同机并行两个 GUI（如 dev + ol）
+
+桌面客户端默认「一台机一个监督者」（单实例锁）。若要在同一台机器上并行两个 GUI（例如一个连 dev、一个连 ol），给每个实例设不同的 `AIDCP_USER_DATA_DIR`——它把该实例的**用户数据目录**（进而单实例锁 / 设置名册 / 界面状态 / 日志 / 内置运行时落地）整体隔离；未设时用默认目录、行为不变。
+
+```bash
+# 实例甲：dev（默认目录）
+AIDCP_CLOUD_URL=ws://121.89.85.150:8787 npm run electron:dev
+
+# 实例乙：ol（独立用户数据目录）
+AIDCP_USER_DATA_DIR="$HOME/Library/Application Support/aidcp-edge-ol" \
+AIDCP_CLOUD_URL=ws://123.56.253.183:8787 npm run electron:dev
+```
+
+> 并行前置（本机全局 AdsPower 服务与分身库两实例共享，仅 userData 被隔离）：
+> - 两实例的 AdsPower 分身**不重叠**（同一分身被两实例驱动 = 两套操纵系上同一浏览器，且因连不同云不报错、静默互扰）；
+> - **先起一个、待 AdsPower 本机服务稳定后再起第二个**（避免冷启动抢杀机器全局 50325 守护进程）；
+> - 两实例保持默认 AdsPower 模式（self 模式会撞固定 9222 调试端口）。
+
 ## 与云端的关系
 
 边缘端做**定位 + 执行 + 拟人化 + 本地缓存命中 + 结构化上报**；任务规划、事件驱动编排、

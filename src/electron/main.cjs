@@ -32,6 +32,19 @@ const {
   browserPersonaNoticeKey,
 } = require('./persona-notice.cjs');
 
+// ── 实例级 userData 隔离（change edge-multi-instance-userdata-isolation）──────
+// 同机并行多个监督者（如一个连 dev、一个连 ol）时，各实例需独立的单实例锁 /
+// 设置(名册) / 界面状态 / 日志 / 内置运行时落地目录——它们全部从 userData 派生。
+// 设了 AIDCP_USER_DATA_DIR 就把 userData 指到该目录；未设则用默认目录、行为逐字不变（零回归）。
+// 必须在 requestSingleInstanceLock() 与任何 app.getPath('userData') 之前设置：锁文件落在 userData，
+// 且所有 userData 派生路径读取均为 whenReady 之后的懒调用，故模块顶部此处即满足顺序约束。
+{
+  const instanceUserDataDir = (process.env.AIDCP_USER_DATA_DIR || '').trim();
+  if (instanceUserDataDir) {
+    app.setPath('userData', instanceUserDataDir);
+  }
+}
+
 // 主进程侧 AdsPower 只读客户端（探测 + 环境列表 + 在跑分身对账）。单例持有本进程内**唯一**串行节流（1req/s）。
 // 与核心子进程内的 AdsPowerProvider 节流各自独立（跨进程无法共享内存队列，见 ads-local-api.cjs 头注）。
 const adsApi = createAdsLocalApi({});
