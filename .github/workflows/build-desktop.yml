@@ -121,12 +121,12 @@ jobs:
         with:
           name: aidcp-macos
           if-no-files-found: error
-          retention-days: 14
+          # Keep the artifact lean: the download page serves only the dmgs (ECS-hosted).
+          # zip/blockmap/latest-mac.yml are auto-update plumbing we do not use and only bloat
+          # the Actions artifact storage quota.
+          retention-days: 7
           path: |
             dist-electron/*.dmg
-            dist-electron/*.zip
-            dist-electron/*.blockmap
-            dist-electron/latest-mac.yml
 
   build-windows:
     name: Windows (nsis exe, x64)
