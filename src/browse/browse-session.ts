@@ -54,7 +54,7 @@ import type { OverlayKind, OverlayMonitor } from './overlay-monitor.js';
 import { isBlockingKind } from './overlay-monitor.js';
 import type { extractNoteContent as ExtractFn, NoteContent } from './note-extractor.js';
 import { NOTE_BODY_SELECTORS, parseCount } from './note-extractor.js';
-import { executeSearch, applySearchFilters } from './search-handler.js';
+import { executeSearch, applySearchFilters, SEARCH_RESULT_URL_RE, searchResultMatchesKeyword } from './search-handler.js';
 import { evalRaw, type RandomFn, type BrowseCdp } from './cdp-util.js';
 import { CdpDisconnectedError } from '../cdp/client.js';
 import { buildNotificationHomeJs, buildNotificationItemsJs, buildNotificationCategoryItemsJs } from './notification-monitor.js';
@@ -290,7 +290,8 @@ interface ScrollProbeSnapshot {
 const EXPLORE_FEED_RE = /\/explore\/?(\?|#|$)/;
 // 搜索结果页 URL：经典 /search_result、AI 搜索 /search_result_ai（含 _ai 等后缀）、裸 /search 均算。
 // `_result\w*` 覆盖 search_result_ai 这类真机 AI 搜索页——否则诚实闸会把真结果页误判为「未到结果页」而漏报（change comment-search-nav-confirm）。
-const SEARCH_LIST_RE = /\/search(?:_result\w*)?(?:[/?#]|$)/;
+// 单一真源（change comment-keep-open-through-approval）：与 search-handler 的 executeSearch 判据 import 同一常量，杜绝两处漂移。
+const SEARCH_LIST_RE = SEARCH_RESULT_URL_RE;
 const DEFAULT_RHYTHM_TOTAL = 60;
 
 /**
@@ -1228,6 +1229,18 @@ export class BrowseSession {
         const payload = env.payload as InteractionCommentPayload;
         this.logger(`[browse] 命令: interaction.comment (noteId=${payload.noteId})`);
         if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 发评论前犹豫（max）
+        // 发布前就地核对（change comment-keep-open-through-approval，取舍2）：读当前详情页 URL 的 noteId
+        // 与目标核对，明确不符（页面被弹层顶掉/被导航到别的笔记）→ 诚实终止不发；不搜索、不重开。
+        // 只在 URL 能正向解析出 noteId 且【明确不符】时拦；取不到（如详情为搜索页上的弹层）宽松放行——
+        // keep-open 持锁已是主保护，此为二次安全闸，绝不因取不到就误杀有效评论、也绝不在错笔记上发。
+        if (payload.noteId) {
+          const currentId = this.parseNoteIdFromUrl(await this.evalUrl());
+          if (currentId && currentId !== payload.noteId) {
+            this.logger(`[browse] interaction.comment 目标核对失败：当前详情 noteId=${currentId} ≠ 目标 ${payload.noteId} → 诚实终止不发`);
+            this.deps.client.reportActionCompleted?.({ action: 'comment', ok: false, reason: 'note_page_mismatch' });
+            break;
+          }
+        }
         await this.executeComment(payload.text, payload.groupChatCode);
         break;
       }
@@ -1255,7 +1268,13 @@ export class BrowseSession {
               sleep: this.sleep,
               logger: this.logger,
             });
-            onSearch = this.isSearchListUrl(await this.evalUrl());
+            // 权威判据（采卡时刻实时 URL）：既是搜索结果页，且结果页关键词与本次搜索词一致（change
+            // comment-keep-open-through-approval，关 Bug C）——提交失败时浏览器赖在旧关键词结果页上，
+            // 只验页型会把旧页当本次成功、采错词的卡；核对 keyword 参数杜绝。
+            {
+              const nowUrl = await this.evalUrl();
+              onSearch = this.isSearchListUrl(nowUrl) && searchResultMatchesKeyword(nowUrl, kw);
+            }
             // 按需评论任务（change comment-search-command）：仅在**确认已到结果页**时应用原生「排序 + 发布时间」筛选。
             // 自治浏览不带 sort/timeWindow → 跳过，行为不变。控件未生效 honest 降级（不冒充已筛）。
             if (onSearch && (payload.sort || payload.timeWindow)) {

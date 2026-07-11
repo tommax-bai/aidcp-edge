@@ -45,19 +45,57 @@ test('executeSearch: 搜索框未找到时抛错', async () => {
 });
 
 // 诚实闸（change comment-search-nav-confirm）：executeSearch 返回「是否确认到达搜索结果页」。
-test('executeSearch: 确认导航到搜索结果页（search_result_ai）→ 返回 true', async () => {
+// keyword 一致（change comment-keep-open-through-approval）：结果页 URL 的 keyword 参数须与本次词一致才认。
+test('executeSearch: 确认导航到本次关键词的结果页（search_result_ai + keyword 一致）→ 返回 true', async () => {
   const { cdp } = fakeCdp((method, params) => {
     if (method === 'Runtime.evaluate') {
       const expr = String(params.expression ?? '');
       if (expr.includes('location.href')) {
-        return { result: { value: 'https://www.xiaohongshu.com/search_result_ai?keyword=x' } };
+        // keyword=奶茶（编码）——与本次搜索词一致
+        return { result: { value: 'https://www.xiaohongshu.com/search_result_ai?keyword=%E5%A5%B6%E8%8C%B6&source=web_explore_feed' } };
       }
       return { result: { value: true } };
     }
     return {};
   });
   const ok = await executeSearch('奶茶', { cdp, sleep: async () => {}, random: () => 0.5 });
-  assert.equal(ok, true, '到达搜索结果页 MUST 返回 true');
+  assert.equal(ok, true, '到达本次关键词的搜索结果页 MUST 返回 true');
+});
+
+// Bug C 守卫（change comment-keep-open-through-approval）：提交失败时浏览器赖在【旧关键词】结果页上，
+// 只验页型会把旧页当本次成功、采错词的卡；keyword 不符 MUST 判未到达（诚实回 false）。
+test('executeSearch: 停在旧关键词结果页（keyword 不符）→ 返回 false（关 Bug C）', async () => {
+  const { cdp } = fakeCdp((method, params) => {
+    if (method === 'Runtime.evaluate') {
+      const expr = String(params.expression ?? '');
+      if (expr.includes('location.href')) {
+        // 命令搜「奶茶」，却停在旧的「facebook外贸开发客户」结果页（真机实证的残留旧页）
+        return { result: { value: 'https://www.xiaohongshu.com/search_result_ai?keyword=facebook%E5%A4%96%E8%B4%B8%E5%BC%80%E5%8F%91%E5%AE%A2%E6%88%B7' } };
+      }
+      if (expr.includes('getBoundingClientRect')) return { result: { value: null } }; // 提交按钮也定位不到 → 无从纠正
+      return { result: { value: true } };
+    }
+    return {};
+  });
+  const ok = await executeSearch('奶茶', { cdp, sleep: async () => {}, random: () => 0.5 });
+  assert.equal(ok, false, '停在旧关键词页 MUST 返回 false，绝不把旧页当本次搜索成功');
+});
+
+// 双重编码容错（真机 URL 观测到 keyword 双重编码 %25..）：解码后一致仍应认到达。
+test('executeSearch: keyword 双重编码但解码后一致 → 返回 true', async () => {
+  const { cdp } = fakeCdp((method, params) => {
+    if (method === 'Runtime.evaluate') {
+      const expr = String(params.expression ?? '');
+      if (expr.includes('location.href')) {
+        // %25E5%25A5%25B6%25E8%258C%25B6 = 双重编码的「奶茶」
+        return { result: { value: 'https://www.xiaohongshu.com/search_result_ai?keyword=%25E5%25A5%25B6%25E8%258C%25B6' } };
+      }
+      return { result: { value: true } };
+    }
+    return {};
+  });
+  const ok = await executeSearch('奶茶', { cdp, sleep: async () => {}, random: () => 0.5 });
+  assert.equal(ok, true, '双重编码解码后与本次词一致 MUST 认到达');
 });
 
 test('executeSearch: 未确认导航（恒停 /explore、提交按钮找不到）→ 返回 false', async () => {

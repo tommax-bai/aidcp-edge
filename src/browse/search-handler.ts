@@ -41,6 +41,46 @@ export const XHS_SEARCH_SUBMIT_SELECTOR =
   '.search-area-in-header [class*="submit"], [class*="search"] [class*="submit-button"]';
 
 /**
+ * 搜索结果页 URL 权威判据（change comment-keep-open-through-approval）：与 browse-session 的 onSearch 判据
+ * **逐字一致**（单一真源，两处 import 同一常量，杜绝漂移）——按 URL **路径段**命中 /search、/search_result、
+ * AI 搜索 /search_result_ai 等后缀（保留 `_result\w*`），**绝不用任意子串 includes('search')**：否则详情页
+ * 残留 `xsec_source=pc_search` 之类会让首轮误判「已到结果页」、跳过唯一可靠的提交按钮兜底（H1 根因）。
+ */
+export const SEARCH_RESULT_URL_RE = /\/search(?:_result\w*)?(?:[/?#]|$)/;
+
+/** 归一化关键词用于身份比对：解码（容双重编码）+ 去空白 + 小写。 */
+function normalizeSearchKeyword(raw: string): string {
+  let s = raw;
+  for (let i = 0; i < 2; i++) {
+    try {
+      const dec = decodeURIComponent(s);
+      if (dec === s) break;
+      s = dec;
+    } catch {
+      break;
+    }
+  }
+  return s.replace(/\s+/g, '').toLowerCase();
+}
+
+/**
+ * 结果页 URL 的 keyword 参数是否与本次搜索词一致（change comment-keep-open-through-approval，关 Bug C）。
+ * 提交失败时浏览器会赖在**上一次搜索的旧关键词结果页**上——只验「是不是搜索页」会把旧页当本次成功
+ * （真机实证：命令搜「DeepSeek Claude成本」却停在 `keyword=facebook外贸开发客户` 旧页）。
+ * 判据：URL 的 keyword 参数归一后与本次词有实质重叠（互为子串，容截断/大小写/双重编码）。
+ * 宽松兜底：URL 无 keyword 参数（某些结果页变体）→ 无法证否 → 返回 true（不因取不到关键词而误杀真结果页）。
+ */
+export function searchResultMatchesKeyword(url: string, keyword: string): boolean {
+  const want = normalizeSearchKeyword(keyword);
+  if (!want) return true;
+  const m = /[?&]keyword=([^&#]*)/.exec(url);
+  if (!m) return true;
+  const got = normalizeSearchKeyword(m[1] ?? '');
+  if (!got) return true;
+  return got.includes(want) || want.includes(got);
+}
+
+/**
  * 搜索结果页原生「排序」标签的中文文案（change comment-search-command）。
  * 真机：搜索结果页顶部一排排序 tab（综合/最新/最多点赞/最多收藏/最多评论），按文案点击最稳（跨布局/类名漂移）。
  */
@@ -480,21 +520,31 @@ export async function clickSearchSubmit(
 }
 
 /**
- * 等待搜索导航完成：轮询 location.href 直到包含 "search_result" 或 "search"。
+ * 等待搜索导航完成：轮询 location.href 直到命中**严格结果页判据** `SEARCH_RESULT_URL_RE`
+ * （且 opts.keyword 非空时，结果页关键词须与本次搜索词一致）。
  *
- * @returns 是否在超时内确认导航到搜索结果页。
+ * change comment-keep-open-through-approval：判据由旧的宽松 `includes('search')` 收严——否则起点 URL
+ * 残留 `search` 子串（详情页 xsec_source=pc_search / 旧关键词页）会让首轮立即误判成功、跳过提交按钮兜底
+ * （H1 根因），且会把旧关键词页当本次结果（Bug C）。
+ *
+ * @returns 是否在超时内确认导航到**本次搜索**的结果页。
  */
 export async function waitForSearchNavigation(
   cdp: BrowseCdp,
   sleep: (ms: number) => Promise<void>,
   timeout = 5000,
+  opts: { keyword?: string } = {},
 ): Promise<boolean> {
   const interval = 200;
   let waited = 0;
   const check = `(function(){ return location.href; })()`;
   while (waited <= timeout) {
     const href = await evalRaw<string>(cdp, check);
-    if (typeof href === 'string' && (href.includes('search_result') || href.includes('search'))) {
+    if (
+      typeof href === 'string' &&
+      SEARCH_RESULT_URL_RE.test(href) &&
+      (opts.keyword == null || searchResultMatchesKeyword(href, opts.keyword))
+    ) {
       return true;
     }
     await sleep(interval);
@@ -540,12 +590,13 @@ export async function executeSearch(
 
   // 3. 等待导航到搜索结果页。先给 Enter 一个短窗口；AI 搜索 textarea 上 Enter 可能只换行不导航，
   //    未跳转则点提交按钮兜底（当前真机 .bottom-box-right-submit-button）。
-  let navigated = await waitForSearchNavigation(cdp, sleep, 1800);
+  let navigated = await waitForSearchNavigation(cdp, sleep, 1800, { keyword });
   if (!navigated) {
     const submitSelector = deps.searchSubmitSelector ?? XHS_SEARCH_SUBMIT_SELECTOR;
     const clicked = await clickSearchSubmit(cdp, submitSelector, { random, sleep });
-    if (clicked) logger('[search] Enter 未跳转，点击搜索提交按钮兜底');
-    navigated = await waitForSearchNavigation(cdp, sleep, 4000);
+    // change comment-keep-open-through-approval：提交按钮未找到时诚实记录（便于真机定位），不静默。
+    logger(clicked ? '[search] Enter 未跳转，点击搜索提交按钮兜底' : '[search] Enter 未跳转，且提交按钮未找到，无法兜底提交');
+    navigated = await waitForSearchNavigation(cdp, sleep, 4000, { keyword });
   }
   if (navigated) {
     const href = await evalRaw<string>(cdp, `(function(){ return location.href; })()`);

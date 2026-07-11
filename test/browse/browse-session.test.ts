@@ -167,7 +167,7 @@ async function startAndPush(sess: BrowseSession, commands: Envelope[]): Promise<
 
 // ======== executeComment（发评论）测试：绝不静默假成功 ========
 
-function commentHarness(opts: { editorError?: boolean; verify?: { cleared: boolean; ownRow: boolean } }): Harness {
+function commentHarness(opts: { editorError?: boolean; verify?: { cleared: boolean; ownRow: boolean }; pageUrl?: string }): Harness {
   const h = makeHarness();
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
@@ -186,7 +186,11 @@ function commentHarness(opts: { editorError?: boolean; verify?: { cleared: boole
         return { result: { value: '{"x":100,"y":100}' } } as never;
       }
       if (expr.includes('engage-bar')) return { result: { value: true } } as never;
-      return { result: { value: 'https://www.xiaohongshu.com/explore' } } as never;
+      // note-item 计数：让 waitForCards 立即满足（否则 pageUrl 为详情页时 ensureExplore 会 waitForCards(15000) 空转 15s）。
+      if (expr.includes('note-item')) return { result: { value: 10 } } as never;
+      // location.href（evalUrl）与其它兜底 expr：默认停在 /explore（无可解析 noteId → 就地核对宽松放行）；
+      // 传 pageUrl 可指定当前详情页 URL 以驱动 keep-open 发前就地核对（change comment-keep-open-through-approval）。
+      return { result: { value: opts.pageUrl ?? 'https://www.xiaohongshu.com/explore' } } as never;
     },
   };
   return h;
@@ -228,6 +232,32 @@ test('executeComment: 提交后未确认生效 → ok:false reason state_unchang
   assert.ok(c);
   assert.equal(c!.ok, false);
   assert.equal(c!.reason, 'state_unchanged');
+});
+
+// keep-open 发前就地核对（change comment-keep-open-through-approval，取舍2）
+test('interaction.comment: 当前详情 noteId 与目标不符 → 诚实回 note_page_mismatch、绝不在错笔记上发', async () => {
+  const h = commentHarness({ verify: { cleared: true, ownRow: true }, pageUrl: 'https://www.xiaohongshu.com/explore/other999' });
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const c = h.completedActions.find((a) => a.action === 'comment');
+  assert.ok(c, '应上报 comment 结果');
+  assert.equal(c!.ok, false);
+  assert.equal(c!.reason, 'note_page_mismatch', '页面被动到别的笔记 → 诚实终止不发');
+});
+
+test('interaction.comment: 当前详情 noteId 与目标一致 → 就地核对通过、正常发布', async () => {
+  const h = commentHarness({ verify: { cleared: true, ownRow: true }, pageUrl: 'https://www.xiaohongshu.com/explore/n1' });
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const c = h.completedActions.find((a) => a.action === 'comment');
+  assert.ok(c);
+  assert.equal(c!.ok, true, '就地核对一致 → 正常发布');
 });
 
 // ======== 命令驱动模式测试 ========
@@ -694,7 +724,7 @@ test('browse-session: search.execute 上报前等待搜索卡片 noteId 水合',
       if (method === 'Runtime.evaluate') {
         const expr = String(params.expression ?? '');
         if (expr.includes('note-item')) return { result: { value: 10 } } as never;
-        if (expr.includes('location.href')) return { result: { value: 'https://www.xiaohongshu.com/search_result_ai?keyword=t' } } as never;
+        if (expr.includes('location.href')) return { result: { value: 'https://www.xiaohongshu.com/search_result_ai?keyword=%E7%9B%AE%E6%A0%87' } } as never; // keyword=目标（与本次搜索词一致，change comment-keep-open-through-approval）
         return { result: { value: true } } as never;
       }
       return {} as never;
