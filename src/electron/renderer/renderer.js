@@ -194,6 +194,7 @@ const settingsUi = {
   parkingButtons: Array.from(document.querySelectorAll('.parking-btn')),
   browserShow: document.querySelector('#browser-show'),
   browserResetParking: document.querySelector('#browser-reset-parking'),
+  browserColdStandby: document.querySelector('#browser-cold-standby'),
   applyRestart: document.querySelector('#apply-restart'),
   msg: document.querySelector('#settings-msg'),
   // 云端环境卡（change edge-cloud-env-selector）
@@ -1715,6 +1716,7 @@ async function saveCurrentSettings() {
   const saved = await window.aidcpEdge.saveSettings({
     provider,
     browserParkingMode: selectedParkingMode(),
+    browserColdStandbyEnabled: Boolean(settingsUi.browserColdStandby && settingsUi.browserColdStandby.checked),
     adsProfileId: settingsUi.adsProfile.value.trim(),
     adsProfileName: selectedProfileName,
     platform: selectedPlatform,
@@ -1868,6 +1870,7 @@ function applySettings(s) {
   settingsUi.adsApiKey.value = s.adsApiKey || '';
   settingsUi.adsApiBase.value = s.adsApiBase || '';
   applyParkingSelection(s.browserParkingMode || 'primary-screen');
+  if (settingsUi.browserColdStandby) settingsUi.browserColdStandby.checked = s.browserColdStandbyEnabled !== false;
   updateProfileDisplay();
   // 云端环境（change edge-cloud-env-selector）：回填已选 key、自定义地址、目标云端视图。
   cloudSelKey = typeof s.cloudEnvKey === 'string' ? s.cloudEnvKey : '';
@@ -1986,6 +1989,7 @@ async function runBrowserRecovery(action) {
 }
 settingsUi.browserShow.addEventListener('click', () => runBrowserRecovery('show'));
 settingsUi.browserResetParking.addEventListener('click', () => runBrowserRecovery('reset'));
+settingsUi.browserColdStandby?.addEventListener('change', markDirty);
 
 // ─── AdsPower 探测 / 环境列表 / 新建入口 ───
 

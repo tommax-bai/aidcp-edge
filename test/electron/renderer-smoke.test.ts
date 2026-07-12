@@ -257,6 +257,24 @@ test('窗口停放：选择完全移出后保存带 browserParkingMode', async (
   assert.equal(savedPatch.browserParkingMode, 'offscreen');
 });
 
+test('冷待机开关：旧设置缺值时默认开启，保存时带 browserColdStandbyEnabled', async () => {
+  let savedPatch: { browserColdStandbyEnabled?: boolean } = {};
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped', provider: 'self' }),
+    getSettings: async () => ({ provider: 'self', adsProfileId: '', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x' }),
+    saveSettings: async (patch) => { savedPatch = patch as { browserColdStandbyEnabled?: boolean }; return { provider: 'self', saveOk: true }; },
+    start: async () => makeStatus({ provider: 'self', edge: 'starting' }),
+  }));
+  const toggle = $(w, '#browser-cold-standby') as HTMLInputElement;
+  assert.equal(toggle.checked, true);
+  toggle.checked = false;
+  toggle.dispatchEvent(new w.Event('change'));
+  $(w, '#session-fab').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.equal(savedPatch.browserColdStandbyEnabled, false);
+});
+
 test('窗口停放：无可控浏览器时显示浏览器诚实失败', async () => {
   const w = await boot(makeStub({
     showDrivenBrowser: async () => ({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' }),

@@ -339,6 +339,16 @@ async function main(): Promise<void> {
   let watcherSupervisor: WatcherSupervisor | undefined;
   let identityWatcher: IdentityWatcher | undefined;
   let requestShutdown: ((reason: string) => void) | undefined;
+  let coldStandbyActive = false;
+  let coldStandbyWakeRequested = false;
+  const requestColdStandbyWake = (reason: string): void => {
+    if (!coldStandbyActive || coldStandbyWakeRequested) return;
+    coldStandbyWakeRequested = true;
+    console.log(`[aidcp-edge] 冷待机期间收到唤醒触发 (${reason})，请求外壳恢复浏览器`);
+    if (typeof process.send === 'function' && process.connected) {
+      process.send({ type: 'lifecycle.wake_requested', reason });
+    }
+  };
   const taskCoordinator = new EdgeTaskCoordinator({
     browse: {
       quiesceForTask: () => browse?.quiesceForTask() ?? Promise.resolve(0),
@@ -374,6 +384,10 @@ async function main(): Promise<void> {
     browse?.discardQueuedCloudCommands('cloud_ws_disconnected');
   });
   client.on('cloud.reconnected', () => {
+    if (coldStandbyActive) {
+      console.log('[aidcp-edge] 冷待机期间云端已重连；继续保持待机，等待唤醒');
+      return;
+    }
     const reconnPacing = client.getPacing();
     browse?.applyPacingSnapshot(reconnPacing?.opFloorsMs, reconnPacing?.tempo);
     browse?.recoverAfterCloudReconnect().catch((err) => {
@@ -667,6 +681,10 @@ async function main(): Promise<void> {
       logger: (m) => console.log(m),
     });
     client.onBrowseCommand((env) => {
+      if (coldStandbyActive) {
+        requestColdStandbyWake(`cloud_command:${env.type}`);
+        return;
+      }
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
       const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
       if (!taskCoordinator.canExecute(ownedTaskId)) {
@@ -858,6 +876,10 @@ async function main(): Promise<void> {
     );
     const fbSession = browse;
     client.onBrowseCommand((env) => {
+      if (coldStandbyActive) {
+        requestColdStandbyWake(`cloud_command:${env.type}`);
+        return;
+      }
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
       const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
       if (!taskCoordinator.canExecute(ownedTaskId)) {
@@ -910,6 +932,10 @@ async function main(): Promise<void> {
     );
     // 云端异步推送的浏览控制命令统一转发到 BrowseSession 执行
     client.onBrowseCommand((env) => {
+      if (coldStandbyActive) {
+        requestColdStandbyWake(`cloud_command:${env.type}`);
+        return;
+      }
       if (!browse) {
         console.log(`[aidcp-edge] 收到云端命令 ${env.type} 但浏览会话未创建，忽略`);
         return;
@@ -1070,6 +1096,7 @@ async function main(): Promise<void> {
   let recycleRequested = false;
   const lifecycle = new CoreLifecycleController({
     deactivate: async (reason) => {
+      coldStandbyActive = false;
       console.log(`\n[aidcp-edge] 自动运营停用流程启动（reason=${reason}）...`);
       // 暂停/关闭/回收都先诚实终止在途发布，绝不让半截命令跨恢复重放。
       failInFlightPublishesHonestly(reason);
@@ -1103,6 +1130,32 @@ async function main(): Promise<void> {
         return false;
       }
     },
+    enterStandby: async () => {
+      console.log('\n[aidcp-edge] 冷待机流程启动：停止自动化、关闭浏览器、保留云端连接...');
+      coldStandbyActive = true;
+      coldStandbyWakeRequested = false;
+      failInFlightPublishesHonestly('cold_standby');
+      watcherSupervisor?.stopAll();
+      browse?.close();
+      if (chrome.reused) {
+        console.log('[aidcp-edge] 复用模式：不回收本进程不拥有的外部 Chrome，拒绝进入冷待机');
+        coldStandbyActive = false;
+        return false;
+      }
+      try {
+        const freed = await chrome.killAndConfirmDead();
+        if (!freed) {
+          console.warn('[aidcp-edge] ⚠ 冷待机浏览器关闭状态未能确认，拒绝进入冷待机');
+          coldStandbyActive = false;
+          return false;
+        }
+        return true;
+      } catch (error) {
+        console.warn(`[aidcp-edge] ⚠ 冷待机关闭浏览器异常：${(error as Error)?.message || String(error)}`);
+        coldStandbyActive = false;
+        return false;
+      }
+    },
     exit: (code) => process.exit(code),
     onPaused: () => {
       if (typeof process.send === 'function' && process.connected) {
@@ -1112,6 +1165,11 @@ async function main(): Promise<void> {
     onCloseFailed: () => {
       if (typeof process.send === 'function' && process.connected) {
         process.send({ type: 'lifecycle.close_failed' });
+      }
+    },
+    onStandby: () => {
+      if (typeof process.send === 'function' && process.connected) {
+        process.send({ type: 'lifecycle.standby' });
       }
     },
     logger: (message) => console.log(message),
@@ -1137,6 +1195,10 @@ async function main(): Promise<void> {
 
   // CDP 终态（重连不可恢复）→ 诚实下线 + 回收退出（请重起）。autoBrowse 与否都接，节点失去浏览器即回收。
   session.cdp.on('cdp.unrecoverable', () => {
+    if (coldStandbyActive) {
+      console.log('[aidcp-edge] CDP 因冷待机关闭浏览器而不可用；保留云端连接，等待外壳唤醒');
+      return;
+    }
     console.warn('[aidcp-edge] CDP 重连不可恢复（终态）→ 诚实下线 + 回收退出（请重起）');
     requestShutdown?.('cdp_unrecoverable');
   });

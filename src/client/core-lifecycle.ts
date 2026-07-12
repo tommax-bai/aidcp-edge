@@ -1,11 +1,13 @@
-export type CoreLifecycleCommand = 'pause' | 'resume' | 'close';
-export type CoreLifecycleState = 'active' | 'pausing' | 'paused' | 'finalizing' | 'finished';
+export type CoreLifecycleCommand = 'pause' | 'resume' | 'close' | 'standby';
+export type CoreLifecycleState = 'active' | 'pausing' | 'paused' | 'standby' | 'finalizing' | 'finished';
 
 export interface CoreLifecycleDependencies {
   deactivate(reason: string): Promise<void>;
   closeOwnedBrowser(): Promise<boolean>;
+  enterStandby?: () => Promise<boolean>;
   exit(code: number): void;
   onPaused?(): void;
+  onStandby?(): void;
   onCloseFailed?(): void;
   logger?(message: string): void;
 }
@@ -24,6 +26,7 @@ export function parseCoreLifecycleCommand(message: unknown): CoreLifecycleComman
   if (type === 'lifecycle.pause') return 'pause';
   if (type === 'lifecycle.resume') return 'resume';
   if (type === 'lifecycle.close') return 'close';
+  if (type === 'lifecycle.standby') return 'standby';
   return null;
 }
 
@@ -47,6 +50,10 @@ export class CoreLifecycleController {
     return this.enqueue(async () => {
       if (command === 'pause') {
         await this.pause();
+        return;
+      }
+      if (command === 'standby') {
+        await this.standby();
         return;
       }
       await this.finalize({
@@ -79,6 +86,24 @@ export class CoreLifecycleController {
       this.log('[aidcp-edge] lifecycle paused: automation stopped, owned browser retained');
     }
     this.deps.onPaused?.();
+  }
+
+  private async standby(): Promise<void> {
+    if (this.finalizing || this.currentState === 'finished') return;
+    if (this.currentState === 'standby') {
+      this.deps.onStandby?.();
+      return;
+    }
+    this.currentState = 'pausing';
+    const confirmed = await this.deps.enterStandby?.();
+    if (!confirmed) {
+      this.currentState = 'paused';
+      this.deps.onCloseFailed?.();
+      return;
+    }
+    this.currentState = 'standby';
+    this.log('[aidcp-edge] lifecycle standby: browser closed, cloud connection retained');
+    this.deps.onStandby?.();
   }
 
   private async finalize(opts: CoreFinalizeOptions): Promise<void> {
