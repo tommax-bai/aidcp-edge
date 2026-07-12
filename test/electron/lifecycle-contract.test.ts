@@ -30,6 +30,20 @@ test('explicit close is exposed through preload and routed by envId', () => {
   assert.match(close, /sendCoreLifecycle\(handle, 'close'/);
 });
 
+test('browser cold standby uses lifecycle.standby and manual controls cancel timers', () => {
+  assert.match(main, /browserColdStandbyEnabled:\s*DEFAULT_BROWSER_COLD_STANDBY_ENABLED/);
+  assert.match(main, /sendCoreLifecycle\(handle, 'standby'/);
+  assert.match(main, /message\.type === 'lifecycle\.standby'/);
+  assert.match(main, /message\.type === 'lifecycle\.wake_requested'/);
+
+  const pause = functionSource('pauseEdge', 'resumeEdge');
+  assert.match(pause, /clearColdStandbyTimer\(handle\)/, 'manual pause must cancel cold standby timers');
+  const close = functionSource('closeEdge', 'relogin');
+  assert.match(close, /clearColdStandbyTimer\(handle\)/, 'manual close must cancel cold standby timers');
+  const restart = functionSource('stopAndRestart', 'handleEdgeOutput');
+  assert.match(restart, /clearColdStandbyTimer\(handle\)/, 'manual restart must cancel cold standby timers');
+});
+
 test('application quit still uses final SIGTERM for every retained core', () => {
   const quit = functionSource('gracefulStopAllAndQuit', 'quitApp');
   assert.match(quit, /kill\('SIGTERM'\)/);

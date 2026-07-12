@@ -84,6 +84,37 @@ function sanitizeDailyUsageWindow(input: unknown): Record<string, unknown> | nul
   return output;
 }
 
+function sanitizeBrowserStandby(input: UiSnapshotPayload['browserStandby']): Record<string, unknown> | null {
+  if (!input || typeof input !== 'object') return null;
+  if (typeof input.enabled !== 'boolean' || typeof input.eligible !== 'boolean') return null;
+  const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
+  if (!reason) return null;
+  const source = input.source === 'risk' || input.source === 'session' ? input.source : null;
+  if (!source) return null;
+  const waitMs = finiteNonNegative(input.waitMs);
+  const wakeAt = finiteNonNegative(input.wakeAt);
+  const generatedAt = finiteNonNegative(input.generatedAt);
+  const minWaitMs = finiteNonNegative(input.minWaitMs);
+  const warmupMs = finiteNonNegative(input.warmupMs);
+  if (waitMs === null || wakeAt === null || generatedAt === null || minWaitMs === null || warmupMs === null) return null;
+  return {
+    enabled: input.enabled,
+    eligible: input.eligible,
+    reason,
+    waitMs,
+    wakeAt,
+    generatedAt,
+    source,
+    minWaitMs,
+    warmupMs,
+  };
+}
+
+function finiteNonNegative(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  return Math.floor(value);
+}
+
 /** 界面「编号」展示形态（与云端飞书审批卡「编号」字段同源：发布记录 id）。 */
 export function publishCode(recordId: number): string {
   return `#${recordId}`;
@@ -164,6 +195,8 @@ export function uiSnapshotToLines(p: UiSnapshotPayload): string[] {
   }
   const dailyUsage = sanitizeDailyUsage(p.dailyUsage);
   if (dailyUsage) lines.push(line({ kind: 'dailyUsage', dailyUsage }));
+  const browserStandby = sanitizeBrowserStandby(p.browserStandby);
+  if (browserStandby) lines.push(line({ kind: 'browserStandby', browserStandby }));
   // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在 true 时下发，转成 ui-event 行给壳，
   // 边缘据此把已绑账号徽标翻「已设置」并跳过向导（修「已绑仍显示未设置」bug）。
   if (p.personaBound === true) lines.push(line({ kind: 'personaBound', personaBound: true }));

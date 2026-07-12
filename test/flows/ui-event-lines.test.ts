@@ -183,6 +183,55 @@ test('ui-event-lines: uiSnapshotToLines forwards account daily usage for Electro
   });
 });
 
+test('ui-event-lines: uiSnapshotToLines forwards sanitized browser standby hint', () => {
+  const lines = uiSnapshotToLines({
+    browserStandby: {
+      enabled: true,
+      eligible: true,
+      reason: ' view_quota:hour ',
+      waitMs: 1_800_000.8,
+      wakeAt: 1730001801000,
+      generatedAt: 1730000001000,
+      source: 'risk',
+      minWaitMs: 1_200_000,
+      warmupMs: 90_000,
+    },
+  });
+  assert.equal(lines.length, 1);
+  const evt = parseLine(lines[0]);
+  assert.equal(evt.kind, 'browserStandby');
+  assert.deepEqual(evt.browserStandby, {
+    enabled: true,
+    eligible: true,
+    reason: 'view_quota:hour',
+    waitMs: 1_800_000,
+    wakeAt: 1730001801000,
+    generatedAt: 1730000001000,
+    source: 'risk',
+    minWaitMs: 1_200_000,
+    warmupMs: 90_000,
+  });
+});
+
+test('ui-event-lines: malformed browser standby hint is dropped', () => {
+  assert.deepEqual(
+    uiSnapshotToLines({
+      browserStandby: {
+        enabled: true,
+        eligible: true,
+        reason: '',
+        waitMs: 1,
+        wakeAt: 1,
+        generatedAt: 1,
+        source: 'risk',
+        minWaitMs: 1,
+        warmupMs: 1,
+      },
+    }),
+    [],
+  );
+});
+
 test('ui-event-lines: 空快照 / 坏 at → 不产行（缺数据不造数据）', () => {
   assert.deepEqual(uiSnapshotToLines({}), []);
   assert.deepEqual(

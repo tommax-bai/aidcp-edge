@@ -26,6 +26,14 @@ const {
   computeBrowserParkingPlan,
   parkingEnv,
 } = require('./browser-parking.cjs');
+const {
+  DEFAULT_BROWSER_COLD_STANDBY_ENABLED,
+  DEFAULT_BROWSER_COLD_STANDBY_MIN_WAIT_MS,
+  DEFAULT_BROWSER_COLD_STANDBY_WARMUP_MS,
+  normalizeColdStandbySettings,
+  shouldEnterColdStandby,
+  normalizeBrowserStandbyHint,
+} = require('./browser-cold-standby.cjs');
 const fleet = require('./fleet.cjs');
 const {
   browserPersonaNoticeForStatus,
@@ -167,6 +175,10 @@ const DEFAULT_SETTINGS = {
   cloudUrlCustom: '',
   // 浏览器窗口停放：默认主屏停放（窗口停在主屏可靠可见的背景位、不抢焦点，不用最小化/headless）。
   browserParkingMode: DEFAULT_PARKING_MODE,
+  // 长等待冷待机：默认开启；由云端给确定性长等待 hint，壳本地二次判断后关闭浏览器并预热恢复。
+  browserColdStandbyEnabled: DEFAULT_BROWSER_COLD_STANDBY_ENABLED,
+  browserColdStandbyMinWaitMs: DEFAULT_BROWSER_COLD_STANDBY_MIN_WAIT_MS,
+  browserColdStandbyWarmupMs: DEFAULT_BROWSER_COLD_STANDBY_WARMUP_MS,
   // 「开发者详情」（原始日志区）默认不展示，在设置抽屉里开关（客户版首屏零技术噪音）。
   devDetails: false,
   // 环境栏（fleet rail）收起态与上次选中环境（跨重启保留）。
@@ -193,6 +205,7 @@ function loadSettings() {
   settings = { ...DEFAULT_SETTINGS, ...parsed };
   if (settings.provider !== 'self' && settings.provider !== 'adspower') settings.provider = 'adspower';
   settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
+  normalizeColdStandbySettingsIntoSettings();
   // 花名册迁移（向后兼容）：旧单值 adsProfileId → 单元素花名册；镜像回写旧字段（回滚兼容）。
   settings.environments = fleet.migrateEnvironments(parsed && typeof parsed === 'object' ? { ...parsed, environments: settings.environments } : settings);
   applyLegacyMirror();
@@ -429,6 +442,7 @@ function saveSettings(patch) {
   settings = { ...settings, ...p };
   if (settings.provider !== 'self' && settings.provider !== 'adspower') settings.provider = 'adspower';
   settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
+  normalizeColdStandbySettingsIntoSettings();
   settings.environments = fleet.normalizeEnvironments(settings.environments);
   applyLegacyMirror();
   normalizeCloudSettings();
@@ -440,6 +454,13 @@ function saveSettings(patch) {
     console.error('[aidcp-edge] settings 写入失败:', error?.message);
     return { ok: false, error: error?.message || '未知错误' };
   }
+}
+
+function normalizeColdStandbySettingsIntoSettings() {
+  const normalized = normalizeColdStandbySettings(settings, process.env);
+  settings.browserColdStandbyEnabled = normalized.enabled;
+  settings.browserColdStandbyMinWaitMs = normalized.minWaitMs;
+  settings.browserColdStandbyWarmupMs = normalized.warmupMs;
 }
 
 function currentParkingPlan(mode = settings.browserParkingMode) {
@@ -611,6 +632,7 @@ function makeStatus(provider) {
     session: 'idle',
     stats: { views: 0, likes: 0, collects: 0, comments: 0, follows: 0, publishes: 0 },
     dailyUsage: null,
+    browserStandby: null,
     risk: 'normal',
     edge: 'stopped',
     lastMessage: '边缘进程尚未运行。',
@@ -672,6 +694,10 @@ function makeEnvHandle({ envId, kind, profileId, name, platform, cascadeIndex })
     gaveUp: false,
     spawnedAtMs: 0,
     browserAlreadyRunning: false,
+    coldStandbyTimer: null,
+    coldStandbyWakeAt: 0,
+    coldStandbyActive: false,
+    coldStandbyPending: false,
   };
 }
 
@@ -1378,6 +1404,162 @@ function sendCoreLifecycle(handle, command, onError) {
   }
 }
 
+function clearColdStandbyTimer(handle) {
+  if (!handle) return;
+  if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
+  handle.coldStandbyTimer = null;
+  handle.coldStandbyWakeAt = 0;
+  handle.coldStandbyPending = false;
+  handle.coldStandbyActive = false;
+}
+
+function coldStandbyStatus(mode, hint, extra = {}) {
+  const normalized = normalizeBrowserStandbyHint(hint);
+  return {
+    mode,
+    ...(normalized ? { hint: normalized, wakeAt: normalized.wakeAt, reason: normalized.reason } : {}),
+    ...extra,
+    at: new Date().toISOString(),
+  };
+}
+
+function coldStandbyFlags(handle) {
+  return {
+    hasChild: Boolean(handle.child),
+    restartPending: handle.restartPending,
+    pausePending: handle.pausePending,
+    closePending: handle.closePending,
+    coreParked: handle.coreParked,
+    removed: handle.removed,
+    stopRequested: handle.stopRequested,
+  };
+}
+
+function applyBrowserStandbyHint(handle, rawHint) {
+  if (!handle) return;
+  const hint = normalizeBrowserStandbyHint(rawHint);
+  const settingsView = normalizeColdStandbySettings(settings, process.env);
+  const decision = shouldEnterColdStandby({
+    status: handle.status,
+    flags: coldStandbyFlags(handle),
+    hint,
+    settings: settingsView,
+    now: Date.now(),
+  });
+  if (!decision.ok) {
+    if (handle.coldStandbyActive || handle.coldStandbyPending || decision.reason === 'disabled') {
+      if (handle.coldStandbyActive || handle.coldStandbyPending) {
+        wakeColdStandby(handle, decision.reason);
+        return;
+      }
+      clearColdStandbyTimer(handle);
+      updateStatus(handle, {
+        browserStandby: coldStandbyStatus(decision.reason === 'disabled' ? 'disabled' : 'skipped', hint, { reason: decision.reason }),
+      });
+    }
+    return;
+  }
+  if (handle.coldStandbyActive) {
+    scheduleColdStandbyWake(handle, decision);
+    updateStatus(handle, {
+      browserStandby: coldStandbyStatus('sleeping', decision.hint, {
+        wakeDelayMs: decision.wakeDelayMs,
+        warmupMs: decision.warmupMs,
+      }),
+      ...presencePatch('长时间等待中，浏览器已关闭，云端连接保持中'),
+    });
+    return;
+  }
+  enterColdStandby(handle, decision);
+}
+
+function enterColdStandby(handle, decision) {
+  if (!handle || !handle.child || handle.coldStandbyPending || handle.coldStandbyActive) return;
+  clearColdStandbyTimer(handle);
+  handle.coldStandbyPending = true;
+  handle.coldStandbyWakeAt = decision.hint.wakeAt;
+  updateStatus(handle, {
+    session: 'resting',
+    browserStandby: coldStandbyStatus('scheduled', decision.hint, {
+      wakeDelayMs: decision.wakeDelayMs,
+      warmupMs: decision.warmupMs,
+    }),
+    lastMessage: `预计等待约 ${Math.ceil(decision.remainingMs / 60_000)} 分钟，正在关闭浏览器进入冷待机…`,
+    ...presencePatch('长时间等待，正在关闭浏览器冷待机…'),
+    ...clearEdgeFailurePatch(handle),
+  });
+  const child = handle.child;
+  sendCoreLifecycle(handle, 'standby', (error) => {
+    if (handle.child !== child) return;
+    clearColdStandbyTimer(handle);
+    updateStatus(handle, {
+      edge: 'warning',
+      session: handle.status.session === 'resting' ? 'running' : handle.status.session,
+      browserStandby: coldStandbyStatus('skipped', decision.hint, { reason: 'standby_failed' }),
+      lastMessage: `冷待机失败：${error.message}。浏览器关闭状态未确认。`,
+      ...edgeFailurePatch(`冷待机失败：${error.message}`),
+      ...presencePatch('冷待机请求未送达'),
+    });
+  });
+}
+
+function onColdStandbyAck(handle) {
+  if (!handle || !handle.coldStandbyPending) return;
+  handle.coldStandbyPending = false;
+  handle.coldStandbyActive = true;
+  const hint = handle.status.browserStandby && handle.status.browserStandby.hint;
+  const decision = shouldEnterColdStandby({
+    status: { ...handle.status, edge: 'running', cloud: 'connected', session: 'resting' },
+    flags: { ...coldStandbyFlags(handle), closePending: false, pausePending: false },
+    hint,
+    settings: normalizeColdStandbySettings(settings, process.env),
+    now: Date.now(),
+  });
+  if (decision.ok) scheduleColdStandbyWake(handle, decision);
+  updateStatus(handle, {
+    edge: 'running',
+    cloud: 'connected',
+    session: 'resting',
+    overlayBlocked: false,
+    browserStandby: coldStandbyStatus('sleeping', hint, decision.ok ? {
+      wakeDelayMs: decision.wakeDelayMs,
+      warmupMs: decision.warmupMs,
+    } : { reason: decision.reason }),
+    lastMessage: '浏览器已关闭进入冷待机，云端连接保持中。',
+    ...presencePatch('长时间等待中，浏览器已关闭，云端连接保持中'),
+    ...clearEdgeFailurePatch(handle),
+  });
+}
+
+function scheduleColdStandbyWake(handle, decision) {
+  if (!handle || !decision.ok) return;
+  if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
+  handle.coldStandbyWakeAt = decision.hint.wakeAt;
+  handle.coldStandbyTimer = setTimeout(() => {
+    handle.coldStandbyTimer = null;
+    wakeColdStandby(handle, 'scheduled_wake');
+  }, decision.wakeDelayMs);
+  if (handle.coldStandbyTimer && typeof handle.coldStandbyTimer.unref === 'function') handle.coldStandbyTimer.unref();
+}
+
+function wakeColdStandby(handle, reason) {
+  if (!handle || (!handle.coldStandbyActive && !handle.coldStandbyPending)) return;
+  if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
+  handle.coldStandbyTimer = null;
+  handle.coldStandbyPending = false;
+  handle.coldStandbyActive = false;
+  handle.stopRequested = false;
+  updateStatus(handle, {
+    browserStandby: coldStandbyStatus('waking', handle.status.browserStandby && handle.status.browserStandby.hint, { reason }),
+    lastMessage: reason === 'cloud_command'
+      ? '冷待机期间收到新任务，正在提前恢复浏览器…'
+      : '冷待机等待结束，正在提前恢复浏览器…',
+    ...presencePatch('正在恢复浏览器…'),
+    ...clearEdgeFailurePatch(handle),
+  });
+  resumeEdge(handle);
+}
+
 /** spawn 一个环境的核心子进程（非 detached，随外壳退出终止）。身份闸在此强制执行。 */
 function startEdge(handle) {
   // 取消闸（红线）：排队等待期间被退出 / 移出 / 暂停的启动到点也绝不拉起子进程——
@@ -1386,6 +1568,7 @@ function startEdge(handle) {
   if (!handle || handle.child || handle.removed || handle.stopRequested || isQuitting) return;
   if (handle.status.session === 'paused') return;
   clearRespawnTimer(handle);
+  clearColdStandbyTimer(handle);
   // 打包后用 Electron 自带的 Node 运行预编译产物（ELECTRON_RUN_AS_NODE），
   // 不依赖目标机装 Node/npx/tsx。entry 为 build:dist 编译出的 dist/main.js。
   const appRoot = app.getAppPath();
@@ -1469,6 +1652,7 @@ function startEdge(handle) {
   updateStatus(handle, {
     edge: 'starting',
     session: 'running',
+    browserStandby: null,
     publish: null,
     respawnGaveUp: false,
     connectedCloudKey: handle.connectedCloudKey || '',
@@ -1481,7 +1665,16 @@ function startEdge(handle) {
   child.stderr.on('data', (chunk) => handleEdgeOutput(handle, chunk.toString(), true));
   child.on('message', (message) => {
     if (handle.child !== child || !message || typeof message !== 'object') return;
+    if (message.type === 'lifecycle.standby') {
+      onColdStandbyAck(handle);
+      return;
+    }
+    if (message.type === 'lifecycle.wake_requested') {
+      wakeColdStandby(handle, 'cloud_command');
+      return;
+    }
     if (message.type === 'lifecycle.paused') {
+      clearColdStandbyTimer(handle);
       handle.pausePending = false;
       handle.coreParked = true;
       updateStatus(handle, {
@@ -1496,6 +1689,7 @@ function startEdge(handle) {
       return;
     }
     if (message.type === 'lifecycle.close_failed') {
+      clearColdStandbyTimer(handle);
       handle.closePending = false;
       handle.pausePending = false;
       handle.coreParked = true;
@@ -1977,6 +2171,7 @@ function queueStartEnv(handle, queuePosition) {
   handle.respawnStreak = 0;
   handle.stopRequested = false; // 显式启动意图：解除任何在途取消闸
   clearRespawnTimer(handle);
+  clearColdStandbyTimer(handle);
   updateStatus(handle, {
     edge: 'starting',
     respawnGaveUp: false,
@@ -1995,6 +2190,7 @@ function stopAndRestart(handle, message, patch = {}) {
   handle.respawnStreak = 0;
   handle.stopRequested = false; // 显式重启意图：解除任何在途取消闸
   clearRespawnTimer(handle);
+  clearColdStandbyTimer(handle);
   updateStatus(handle, { cloud: 'disconnected', session: 'running', respawnGaveUp: false, lastMessage: message, ...presencePatch('正在重启引擎…'), ...clearEdgeFailurePatch(handle), ...patch });
   if (handle.child) {
     handle.restartPending = true;
@@ -2099,6 +2295,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
   // UI 事件（活动流 / 在场感 / 发布卡 / 账号身份 / 计数）统一走该环境自己的 ui-events 实例：
   // 结构化 [ui-event] 行优先，中文日志行映射兜底；计数只认 ✓ 成功行。
   const evt = handle.uiEvents.push(message);
+  let standbyHint = null;
   if (evt) {
     if (evt.account) {
       // 账号标签兜底链：平台昵称（navigate 身份路径才有）> AdsPower 环境名 > 渲染层再兜尾4位。
@@ -2144,6 +2341,10 @@ function handleEdgeLogLine(handle, message, isError = false) {
         next.stats = statsFromDailyUsage(dailyUsage);
       }
     }
+    if (evt.browserStandby) {
+      standbyHint = normalizeBrowserStandbyHint(evt.browserStandby);
+      if (standbyHint) next.browserStandby = coldStandbyStatus('hint', standbyHint);
+    }
     if (evt.statsDelta) {
       const d = evt.statsDelta;
       const baseStats = next.stats ? mergeStats(handle.status.stats, next.stats) : handle.status.stats;
@@ -2181,6 +2382,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
     else if (evt.type === 'popup_cleared' || evt.type === 'session_end' || evt.statsDelta) next.overlayBlocked = false;
   }
   updateStatus(handle, next);
+  if (standbyHint) applyBrowserStandbyHint(handle, standbyHint);
 }
 
 function pauseEdge(handle) {
@@ -2192,6 +2394,7 @@ function pauseEdge(handle) {
   handle.stopRequested = true;
   stopLoginPoller(); // self 路径的 5s 登录轮询若在跑，暂停期间应停（否则空转、每 tick 被取消闸挡下）
   clearRespawnTimer(handle);
+  clearColdStandbyTimer(handle);
   if (handle.child) {
     const child = handle.child;
     const previousSession = handle.status.session;
@@ -2235,6 +2438,7 @@ function resumeEdge(handle) {
   if (!handle) return;
   handle.stopRequested = false;
   clearRespawnTimer(handle);
+  clearColdStandbyTimer(handle);
   if (handle.child && (handle.coreParked || handle.pausePending || handle.status.session === 'paused')) {
     const child = handle.child;
     handle.restartPending = true;
@@ -2324,6 +2528,7 @@ function closeEdge(handle) {
   handle.stopRequested = true;
   stopLoginPoller();
   clearRespawnTimer(handle);
+  clearColdStandbyTimer(handle);
   if (!handle.child) {
     handle.coreParked = false;
     // 无核心子进程：adspower 分身浏览器由外部运行时托管、会在核心死亡后存活。MUST NOT 零回收假报已关——
@@ -2412,7 +2617,10 @@ async function gracefulStopAllAndQuit() {
   quitStopAllInFlight = true;
   isQuitting = true;
   stopLoginPoller();
-  for (const handle of envs.values()) clearRespawnTimer(handle);
+  for (const handle of envs.values()) {
+    clearRespawnTimer(handle);
+    clearColdStandbyTimer(handle);
+  }
   const running = [...envs.values()].filter((h) => h.child);
   for (const handle of running) {
     await queueLifecycle(() => {
