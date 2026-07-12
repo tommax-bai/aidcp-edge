@@ -337,28 +337,40 @@ const SCOPE_HELPERS_JS = String.raw`
     }
     return false;
   }
-  // 群名主标题：首个可见 h1（优先 [role=main] 内），回落 aria-level=1 heading。
-  function __groupHeading(){
-    var pref = Array.from(document.querySelectorAll('[role="main"] h1,[role="main"] [role="heading"][aria-level="1"]')).filter(visible)[0];
-    if (pref) return pref;
-    return Array.from(document.querySelectorAll('h1,[role="heading"][aria-level="1"]')).filter(visible)[0] || null;
+  // 候选群名主标题（文档序，优先 [role=main] 内）。页面上可能有多个 h1/aria-level=1（目标群 + 各推荐卡片各一）——
+  // 由 __resolveHeaderBlock 逐个甄别，取**属于目标群**的那个，绝不盲取首个（对抗评审 v4：盲取首个会取到推荐卡片的 heading）。
+  function __groupHeadings(){
+    var inMain = Array.from(document.querySelectorAll('[role="main"] h1,[role="main"] [role="heading"][aria-level="1"]')).filter(visible);
+    if (inMain.length) return inMain;
+    return Array.from(document.querySelectorAll('h1,[role="heading"][aria-level="1"]')).filter(visible);
   }
-  // D1：头部/动作区 = 群名主标题的最高祖先，且该祖先不含异群 /groups/ 链接；封顶 [role=main]。解析不出主标题 → null（fail-closed）。
+  // D1：头部/动作区 = 群名主标题上溯到「不含异群 /groups/ 引用」的最高祖先，封顶 [role=main]。
+  // **对抗评审 v4 根因修（正向甄别 heading）**：只做负向（块无异群引用）不足——推荐卡片的「群名+加入」内容列本身可不带异群链接
+  // （异群链接在兄弟缩略图列），其干净内容列片段会冒充目标头部、其加入钮被误点（jsdom 复现 ok=true 加错群）。
+  // 正向信号 = **walk 抵达/停在 ceiling**：目标群顶层 heading 上溯只在 [role=main] 处才撞见（别处的）推荐位异群引用；
+  // 而推荐卡片内的 heading 会先停在「引用异群的中层卡片容器」（低于 ceiling）。停在中层 → 该 heading 属某推荐卡片 → 跳过试下一个。
+  // 逐个 heading 试，取首个「停在 ceiling 且块无异群引用」的；无一合格 → null（fail-closed）。
   function __resolveHeaderBlock(targetGid){
-    var h = __groupHeading();
-    if (!h) return null;
-    var ceiling = (h.closest && h.closest('[role="main"]')) || document.body;
-    var node = h;
-    while (node && node !== ceiling){
-      var parent = node.parentElement;
-      if (!parent) break;
-      if (__hasForeignGroupRef(parent, targetGid)) break; // 再往上就会纳入推荐位异群引用 → 停（窄=安全侧）
-      node = parent;
+    var hs = __groupHeadings();
+    for (var hi = 0; hi < hs.length; hi++){
+      var h = hs[hi];
+      var ceiling = (h.closest && h.closest('[role="main"]')) || document.body;
+      var node = h;
+      var brokeBelowCeiling = false;
+      while (node && node !== ceiling){
+        var parent = node.parentElement;
+        if (!parent) break;
+        if (__hasForeignGroupRef(parent, targetGid)){
+          if (parent !== ceiling) brokeBelowCeiling = true; // heading 落在「引用异群的中层容器（推荐卡片）」内 → 非目标顶层 heading
+          break;
+        }
+        node = parent;
+      }
+      if (brokeBelowCeiling) continue;                                    // 推荐卡片内的 heading → 试下一个
+      if (node === h && __hasForeignGroupRef(node, targetGid)) continue;  // 起点 h 子树自身带异群引用 → 试下一个
+      return node;
     }
-    // 返回前保证块**必无异群引用**（安全完备性基石）：node≠h 已在 walk 中被当 parent 用 __hasForeignGroupRef 验过 self+后代干净；
-    // 仅起点 h（walk 未展开即 break）的子树未验 → 对 h 补一次完整 self+后代核。命中即整块不可信 → 拒（fail-closed）。
-    if (node === h && __hasForeignGroupRef(node, targetGid)) return null;
-    return node;
+    return null; // 无任一 heading 产出「停在 ceiling + 块无异群引用」的目标头部块 → fail-closed
   }
   var __HEADER_BLOCK = __resolveHeaderBlock(__TARGET_GID);
   // E1（corroborating）：候选自身或祖先链上任一元素（含属性编码 id 的 div[role=button]/裸 div）解析到异群 /groups/ → 排除。

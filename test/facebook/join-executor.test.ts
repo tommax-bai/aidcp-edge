@@ -790,9 +790,9 @@ test('scope-guard: 成员信号 + 域内有 join 按钮（矛盾污染）→ 抑
   assert.equal(r.reason, 'observation_only');
 });
 
-// § 三轮再评审闭合：异群 /groups/id 编码在**头部块根元素自身**的属性上（`div#B data-nav=/groups/999`），块内同时嵌着目标 header 与推荐位 join。
-// 修前 __hasForeignGroupRef 只扫后代、漏块根自身属性 → 把 #B 当干净块返回 → 推荐位 join 在域被点。修后节点自身检查 + 块根返回前再核 → #B 不被当块、块收窄到 #header、推荐位出域。
-test('scope-guard[jsdom]: 异群 id 在头部块根自身属性（div#B data-nav，块内含推荐位 join）→ 块收窄、推荐位出域、不误点（三轮闭合）', async () => {
+// § 三轮再评审闭合：异群 /groups/id 编码在**中层容器自身**属性上（`div#B data-nav=/groups/999`），目标 header 与推荐位 join 都嵌其中。
+// 目标 heading 上溯先撞见「引用异群的中层容器 #B（低于 ceiling）」→ 甄别为「非目标顶层 heading」→ fail-closed（不点、可重试），推荐位绝不被点。
+test('scope-guard[jsdom]: 目标与推荐位同处「自身引用异群的中层容器」#B 内 → fail-closed（not_ready）、推荐位绝不被点（三/四轮闭合）', async () => {
   const dom = buildGroupDom(
     '<div role="main">' +
       '<div id="B" data-nav="/groups/999">' +
@@ -806,7 +806,54 @@ test('scope-guard[jsdom]: 异群 id 在头部块根自身属性（div#B data-nav
     railClicked = true;
   });
   const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
-  assert.equal(r.reason, 'pending', '块收窄到 #header（目标 pending），推荐位 join 出域');
-  assert.equal(railClicked, false, '块根自身属性编码异群 id 时推荐位 join 仍绝不被点（三轮红线闭合）');
-  assert.equal(r.observation?.outOfScopeJoinCount, 1, '推荐位 join 出域并计数');
+  assert.equal(r.reason, 'not_ready', '目标 heading 落在引用异群的中层容器内 → 甄别掉 → fail-closed 可重试');
+  assert.equal(railClicked, false, '推荐位 join 绝不被点（红线闭合）');
+  assert.equal(r.clicked, false);
+});
+
+// § 四轮再评审红线闭合（根因：heading 盲取首个、只负向校验）：FB「你可能想加入」**双列卡片**——异群 /groups/999 链接在缩略图列，
+// 群名 h1+加入钮在**兄弟内容列**（内容列自身无异群链接）。修前 __groupHeading 盲取首个 h1=推荐卡片名 → 块=干净内容列 → 推荐位加入钮被点（jsdom 复现 ok=true 加错群）。
+// 修后逐 heading 甄别：推荐卡片 heading 上溯停在「引用异群的中层卡片」（低于 ceiling）→ 跳过；取到停在 ceiling 的目标 heading。
+test('scope-guard[jsdom]: 双列推荐卡片（异群链接在缩略图列、群名+加入在内容列）+ 卡片 heading 在目标之前 → 只点目标、绝不点推荐位（四轮红线闭合）', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div class="card">' +
+        '<a href="/groups/999"><span>thumb</span></a>' +
+        '<div class="content"><h1>Rail A Group</h1><div role="button" id="railAjoin">加入小组</div></div>' +
+      '</div>' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">加入小组</div></div>' +
+      '</div>',
+  );
+  const doc = dom.window.document;
+  let railClicked = false;
+  (doc.getElementById('railAjoin') as HTMLElement).addEventListener('click', () => {
+    railClicked = true;
+  });
+  (doc.getElementById('target') as HTMLElement).addEventListener('click', () => {
+    (doc.getElementById('target') as HTMLElement).textContent = '已加入';
+  });
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(railClicked, false, '推荐卡片内容列的异群加入钮绝不被点（根因红线闭合）');
+  assert.equal(r.clicked, true, '点的是甄别出的目标群 join');
+  assert.equal(r.ok, true, '点后 joined（目标群）');
+});
+
+// § 四轮再评审红线闭合（成员方向）：双列推荐卡片内容列显示异群「已加入」→ 修前 heading 盲取致其在域 → 伪造 already_member。修后甄别掉推荐卡片 heading。
+test('scope-guard[jsdom]: 双列推荐卡片内容列显示异群「已加入」+ 卡片 heading 在目标之前 → 不伪造 already_member（四轮闭合）', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="railA">' +
+        '<a href="/groups/999">Rail A</a>' +
+        '<div id="railA-inner"><h1>Rail A Group</h1><div role="button" id="railAmember">已加入</div></div>' +
+      '</div>' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">加入小组</div></div>' +
+      '</div>',
+  );
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123'); // observe-only
+  assert.notEqual(r.reason, 'already_member', '推荐卡片异群「已加入」绝不伪造目标 already_member');
+  assert.equal(r.reason, 'observation_only');
+  assert.ok(
+    !(r.observation?.membershipSignals ?? []).some((s) => s.includes('已加入')),
+    'membershipSignals 不含推荐卡片异群「已加入」',
+  );
 });
