@@ -2253,7 +2253,13 @@ function selectProfile(userId, itemEl, profileName, platform) {
   if (itemEl) itemEl.classList.add('selected');
   refreshRosterMarks();
   // 加入即落盘（根治「加入后左栏不显示」）：main 据此 syncEnvHandles + 广播花名册 → 左栏立刻出现该环境的离线行。
-  if (added) { setEnvMsg(`已加入「${profileName || userId}」，在左栏可见并可启动。`, false); void persistRoster(); }
+  if (added) {
+    setEnvMsg(`已加入「${profileName || userId}」，在左栏可见并可启动。`, false);
+    const persisted = persistRoster();
+    void persisted;
+    return persisted;
+  }
+  return Promise.resolve();
 }
 
 // 从花名册移出一个成员；若其恰为当前分身 ID，则回落到剩余首个成员（或清空）。
@@ -2459,7 +2465,7 @@ function populateEnvs(profiles, allowAutoJoin = false) {
     item.appendChild(makePlatformBtn(prof, displayPlat));
     item.appendChild(makeProxyBtn(prof));
     item.appendChild(makeDeleteBtn(prof));
-    item.addEventListener('click', () => selectProfile(prof.userId, item, prof.name, member ? member.platform : prof.platform));
+    item.addEventListener('click', () => { void selectProfile(prof.userId, item, prof.name, member ? member.platform : prof.platform); });
     if (prof.userId && prof.userId === current) {
       item.classList.add('selected');
       currentSelected = prof.name || prof.userId;
@@ -2470,7 +2476,7 @@ function populateEnvs(profiles, allowAutoJoin = false) {
   // 唯一环境自动加入（首次列出的便利）：仅当调用方 allowAutoJoin 放行。删除/剔孤儿后触发的刷新绝不放行，
   // 否则会把一个无关的剩余环境静默拉进运行队列（评审 Finding 1 回归）。
   if (allowAutoJoin && profiles.length === 1 && !current && roster.length === 0 && profiles[0].userId && !coreRunning()) {
-    selectProfile(profiles[0].userId, firstItem, profiles[0].name, profiles[0].platform);
+    void selectProfile(profiles[0].userId, firstItem, profiles[0].name, profiles[0].platform);
     return { autoSelected: profiles[0].name || profiles[0].userId };
   }
   return { autoSelected: null, currentSelected };
@@ -2649,15 +2655,16 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       // 新建即选中时，带上刚起好的环境名（回执 name）与平台（回执 platform 优先，回落表单选择）。
       // 带回真名根治「新建即空名」——否则左栏回落「环境 …末4位」、与添加面板显示的真名不一致
       // （change edge-env-name-live-sync）。
-      if (r.userId && !coreRunning()) selectProfile(r.userId, null, r.name || '', r.platform || platform);
+      if (r.userId && !coreRunning()) await selectProfile(r.userId, null, r.name || '', r.platform || platform);
       const selectedHint = r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
       const createdCount = Number(r.createdCount || (Array.isArray(r.created) ? r.created.length : 0));
       const countHint = createdCount > 1 ? `已创建 ${createdCount} 个环境。` : `已创建环境（${r.template || tpl}）。`;
       if (createdCount > 0 && settingsUi.adsFbImport) settingsUi.adsFbImport.value = '';
       const proxyHint = withProxy ? '代理已随建号写入。' : '未配代理，可稍后在环境行「代理」里补配。';
-      setCreateMsg(`${countHint}${selectedHint}${proxyHint}`, false);
+      const visibilityHint = r.visibilityWarning ? r.visibilityWarning : '';
+      setCreateMsg(`${countHint}${selectedHint}${proxyHint}${visibilityHint}`, Boolean(r.visibilityWarning));
       resetCreateProxyForm();
-      refreshEnvs();
+      await refreshEnvs();
     } else {
       const extra = r && r.violations && r.violations.length ? '（' + r.violations.join('；') + '）' : '';
       setCreateMsg(`创建失败：${(r && r.error) || '未知错误'}${extra}。`, true);
