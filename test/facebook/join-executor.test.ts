@@ -789,3 +789,24 @@ test('scope-guard: 成员信号 + 域内有 join 按钮（矛盾污染）→ 抑
   assert.notEqual(r.reason, 'already_member', '有域内 join 按钮时成员信号不伪造 already_member');
   assert.equal(r.reason, 'observation_only');
 });
+
+// § 三轮再评审闭合：异群 /groups/id 编码在**头部块根元素自身**的属性上（`div#B data-nav=/groups/999`），块内同时嵌着目标 header 与推荐位 join。
+// 修前 __hasForeignGroupRef 只扫后代、漏块根自身属性 → 把 #B 当干净块返回 → 推荐位 join 在域被点。修后节点自身检查 + 块根返回前再核 → #B 不被当块、块收窄到 #header、推荐位出域。
+test('scope-guard[jsdom]: 异群 id 在头部块根自身属性（div#B data-nav，块内含推荐位 join）→ 块收窄、推荐位出域、不误点（三轮闭合）', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="B" data-nav="/groups/999">' +
+        '<div id="header"><h1>Target Group</h1><div role="button" id="target">已申请</div></div>' +
+        '<div id="feed"><div role="button" id="rail">加入小组</div></div>' +
+      '</div>' +
+      '</div>',
+  );
+  let railClicked = false;
+  (dom.window.document.getElementById('rail') as HTMLElement).addEventListener('click', () => {
+    railClicked = true;
+  });
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.reason, 'pending', '块收窄到 #header（目标 pending），推荐位 join 出域');
+  assert.equal(railClicked, false, '块根自身属性编码异群 id 时推荐位 join 仍绝不被点（三轮红线闭合）');
+  assert.equal(r.observation?.outOfScopeJoinCount, 1, '推荐位 join 出域并计数');
+});

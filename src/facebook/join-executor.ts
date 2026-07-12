@@ -323,12 +323,17 @@ const SCOPE_HELPERS_JS = String.raw`
   // node 子树内是否含「异于目标群」的 group 导航引用——**扫全部元素**的 href/属性值（二轮评审红线闭合）：
   // group id 可能编码在 div[role=button]/裸 div 的 data-* 上（非 a[href]/role=link），只查 link 元素会漏检 → 头部块吞掉推荐位（红线）。
   // 早退于首个异群引用；无异群时全扫（即无推荐位、无风险的场景，只是确认干净）。残留仅剩「id 完全不在任何属性、只活 JS 闭包」（0.1 gated）。
+  function __foreignId(el, targetGid){
+    var gid = __groupIdFromEl(el);
+    return !!gid && (!targetGid || gid !== targetGid);
+  }
   function __hasForeignGroupRef(node, targetGid){
-    if (!node || !node.querySelectorAll) return false;
+    if (!node) return false;
+    if (__foreignId(node, targetGid)) return true; // 节点**自身**属性（三轮评审：块根自身 data-* 编码异群 id、后代扫描漏它 → 误当干净块）
+    if (!node.querySelectorAll) return false;
     var els = node.querySelectorAll('*');
     for (var i = 0; i < els.length; i++){
-      var gid = __groupIdFromEl(els[i]);
-      if (gid && (!targetGid || gid !== targetGid)) return true;
+      if (__foreignId(els[i], targetGid)) return true;
     }
     return false;
   }
@@ -350,17 +355,20 @@ const SCOPE_HELPERS_JS = String.raw`
       if (__hasForeignGroupRef(parent, targetGid)) break; // 再往上就会纳入推荐位异群引用 → 停（窄=安全侧）
       node = parent;
     }
+    // 返回前保证块**必无异群引用**（安全完备性基石）：node≠h 已在 walk 中被当 parent 用 __hasForeignGroupRef 验过 self+后代干净；
+    // 仅起点 h（walk 未展开即 break）的子树未验 → 对 h 补一次完整 self+后代核。命中即整块不可信 → 拒（fail-closed）。
+    if (node === h && __hasForeignGroupRef(node, targetGid)) return null;
     return node;
   }
   var __HEADER_BLOCK = __resolveHeaderBlock(__TARGET_GID);
   // E1（corroborating）：候选自身或祖先链上任一元素（含属性编码 id 的 div[role=button]/裸 div）解析到异群 /groups/ → 排除。
   // 上溯 12 层足够覆盖卡片包裹；D1 已扫兄弟子树、E1 补候选祖先链，两者合起覆盖属性编码在「候选自身/祖先」与「兄弟」两类。
   function __candForeignRef(el, targetGid){
-    var node = el;
-    for (var hops = 0; node && hops < 12; hops++){
-      var gid = __groupIdFromEl(node);
-      if (gid && (!targetGid || gid !== targetGid)) return true;
-      node = node.parentElement;
+    // 只在候选到 __HEADER_BLOCK 之间查（三轮评审：走到根会被块**上方**的共享祖先异群引用误伤目标自身；块上方由 D1 处理）。
+    // fix ① 后头部块 own+后代已保证无异群引用，故本 E1 实为纯 corroborating（块内不会命中）——保留作防御纵深，无固定层上限。
+    for (var node = el; node; node = node.parentElement){
+      if (__foreignId(node, targetGid)) return true;
+      if (node === __HEADER_BLOCK) break;
     }
     return false;
   }
