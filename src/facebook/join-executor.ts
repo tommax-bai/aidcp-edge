@@ -48,6 +48,24 @@ export interface FacebookGroupJoinObservation {
    * （非成员公开组即便渲染 composer 也仍显示加入 CTA、故 joinCtaPresent=true 不判 joined，防新 false-positive）。
    */
   joinCtaPresent?: boolean;
+  /**
+   * change facebook-join-candidate-scope-guard：从 `location.pathname` 解析出的目标群 id（供作用域判据 + 审计）；解析不出为 null。
+   */
+  targetGroupId?: string | null;
+  /**
+   * 目标群「头部/动作区」块是否成功解析（fail-closed 正向包含的前提）。false = 无法确立作用域 → 观测腿绝不在域内选到 join、
+   * 点击腿 fail-closed（诚实不点，绝不页面级点）。
+   */
+  scopeResolved?: boolean;
+  /**
+   * 被判定「不在目标群作用域」而排除的 join-kind 候选数（多为推荐位异群 join）——纯诊断/审计，佐证「为何诚实不点」。
+   */
+  outOfScopeJoinCount?: number;
+  /**
+   * 全量候选清单（含 `inTargetScope:false`，有界）：守 L4「边缘不静默丢原文」——把作用域标注后的完整候选画面上报云端裁判/落审计，
+   * 但只有 `inTargetScope=true` 的候选进 mainCta / joinButton / membershipSignals。
+   */
+  ctaCandidates?: Array<{ text: string | null; kind: string; inTargetScope: boolean }>;
 }
 
 interface RawJoinObservation extends FacebookGroupJoinObservation {
@@ -133,6 +151,12 @@ function publicObservation(raw: RawJoinObservation, groupUrl: string): FacebookG
     documentReady: raw.documentReady ?? undefined,
     composerPresent: raw.composerPresent === true,
     joinCtaPresent: raw.joinCtaPresent === true,
+    targetGroupId: raw.targetGroupId ?? null,
+    // 只有真 observe IIFE 会给出布尔 scopeResolved；缺字段（如预烘焙观测/旧形态）保持 undefined =「未评估」，
+    // 绝不默认成 false——否则「作用域未确立」的 fail-closed 闸会对所有未标注观测误触发。
+    scopeResolved: typeof raw.scopeResolved === 'boolean' ? raw.scopeResolved : undefined,
+    outOfScopeJoinCount: typeof raw.outOfScopeJoinCount === 'number' ? raw.outOfScopeJoinCount : 0,
+    ctaCandidates: Array.isArray(raw.ctaCandidates) ? raw.ctaCandidates : [],
   };
 }
 
@@ -249,7 +273,103 @@ export function classifyCtaLabel(label: string | null | undefined): CtaKind {
   return '';
 }
 
+/**
+ * change facebook-join-candidate-scope-guard：加群候选「目标群作用域」守卫（语言无关、fail-closed 正向包含）。
+ * 注入进 observe / click 两个 IIFE（须在 visible 定义之后），令两腿共用同一判据、绝不漂移。
+ *
+ * 承重 = **D1 正向包含（fail-closed）**：候选在域 **当且仅当** 它是「目标群头部/动作区」块的后代——该块 =
+ * 含群名主标题（h1 / [role=heading][aria-level=1]）、且不含任何**异群** `/groups/` 链接的**最大祖先**（上界封顶 [role=main]）。
+ * 解析不出主标题 → 无候选在域内（默认出域）。这样即便推荐位 join 是**兄弟裸 div[role=button]、无异群 href 祖先**，
+ * 也因不在目标头部块内被挡住（承重不靠链接黑名单）。真机事故背景：FB「发现更多小组」推荐位 join 与目标群 join 文案逐字相同
+ * （chrome 语言随账号非随群）→ 旧「页面级文档序首个 join」会误点异群 join（加错群、云端从未裁决，红线）。
+ * E1（候选自身/最近祖先链接指向异群）为 corroborating 排除、只减不增。E2（推荐轮播容器）selector 待真机校准（task 0.2），
+ * 校准前不接线——D1 已把推荐位挡在头部块外，E2 为纯 corroborating。
+ */
+const SCOPE_HELPERS_JS = String.raw`
+  function __parseGroupId(pathname){
+    var m = String(pathname || '').match(/\/groups\/([^\/?#]+)/i);
+    if (!m || !m[1]) return null;
+    var raw; try { raw = decodeURIComponent(m[1]); } catch (e) { raw = String(m[1]); }
+    raw = raw.trim().toLowerCase();
+    return raw || null;
+  }
+  function __groupIdFromHref(href){
+    if (!href) return null;
+    var path;
+    try { path = new URL(href, location.href).pathname; } catch (e) { path = String(href); }
+    return __parseGroupId(path);
+  }
+  var __TARGET_GID = __parseGroupId(location.pathname);
+  // 从一个导航元素取它指向的 group id——不止看 a[href]：推荐位卡片常用**非锚点导航**（div[role=link] + onClick/data-*，
+  // group id 编码在属性值里而非 href）。对抗评审坐实：只认 a[href] 会漏掉非锚点推荐位、头部块一路吞到 [role=main]（红线 fail-open）。
+  // 故先取 href，再扫该元素所有属性值里的 /groups/<id>（兜底捕获 data-* 等编码的目标）。
+  function __groupIdFromEl(el){
+    if (!el) return null;
+    var gid = __groupIdFromHref(el.getAttribute && el.getAttribute('href'));
+    if (gid) return gid;
+    if (el.attributes){
+      for (var i = 0; i < el.attributes.length; i++){
+        var v = el.attributes[i] && el.attributes[i].value;
+        var m = v && String(v).match(/\/groups\/([^\/?#"']+)/i);
+        if (m && m[1]){
+          var id; try { id = decodeURIComponent(m[1]); } catch (e) { id = m[1]; }
+          id = id.trim().toLowerCase();
+          if (id) return id;
+        }
+      }
+    }
+    return null;
+  }
+  // node 子树内是否含「异于目标群」的 group 导航引用（a[href] 或 role=link，含属性编码的 id）——框定头部块上界（再往上纳入异群引用即停）。
+  function __hasForeignGroupRef(node, targetGid){
+    if (!node || !node.querySelectorAll) return false;
+    var els = node.querySelectorAll('a[href],[role="link"]');
+    for (var i = 0; i < els.length; i++){
+      var gid = __groupIdFromEl(els[i]);
+      if (gid && (!targetGid || gid !== targetGid)) return true;
+    }
+    return false;
+  }
+  // 群名主标题：首个可见 h1（优先 [role=main] 内），回落 aria-level=1 heading。
+  function __groupHeading(){
+    var pref = Array.from(document.querySelectorAll('[role="main"] h1,[role="main"] [role="heading"][aria-level="1"]')).filter(visible)[0];
+    if (pref) return pref;
+    return Array.from(document.querySelectorAll('h1,[role="heading"][aria-level="1"]')).filter(visible)[0] || null;
+  }
+  // D1：头部/动作区 = 群名主标题的最高祖先，且该祖先不含异群 /groups/ 链接；封顶 [role=main]。解析不出主标题 → null（fail-closed）。
+  function __resolveHeaderBlock(targetGid){
+    var h = __groupHeading();
+    if (!h) return null;
+    var ceiling = (h.closest && h.closest('[role="main"]')) || document.body;
+    var node = h;
+    while (node && node !== ceiling){
+      var parent = node.parentElement;
+      if (!parent) break;
+      if (__hasForeignGroupRef(parent, targetGid)) break; // 再往上就会纳入推荐位异群引用 → 停（窄=安全侧）
+      node = parent;
+    }
+    return node;
+  }
+  var __HEADER_BLOCK = __resolveHeaderBlock(__TARGET_GID);
+  // E1（corroborating）：候选自身/最近祖先导航引用（a[href] 或 role=link，含属性编码 id）解析到异群 /groups/ → 排除。
+  function __candForeignRef(el, targetGid){
+    var ref = (el.closest && el.closest('a[href],[role="link"]')) || null;
+    if (!ref) return false;
+    var gid = __groupIdFromEl(ref);
+    return !!gid && (!targetGid || gid !== targetGid);
+  }
+  // 最终判据 = D1 正向包含 AND NOT E1（E2 校准前不接线）。fail-closed：无头部块一律出域。
+  function __inTargetScope(el){
+    if (!__HEADER_BLOCK || !el) return false;
+    if (!(__HEADER_BLOCK.contains && __HEADER_BLOCK.contains(el))) return false;
+    if (__candForeignRef(el, __TARGET_GID)) return false;
+    return true;
+  }
+  var __SCOPE_RESOLVED = __TARGET_GID != null && !!__HEADER_BLOCK;
+`;
+
 const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
+  ${SCOPE_HELPERS_JS}
   var JOIN_KW = ${JSON.stringify(JOIN_CTA_LABELS)};
   var MEMBER_KW = ${JSON.stringify(MEMBER_CTA_LABELS)};
   var PENDING_KW = ${JSON.stringify(PENDING_CTA_LABELS)};
@@ -297,12 +417,19 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
   var join = null;
   var signals = [];
   var pendingCta = false;
+  // change facebook-join-candidate-scope-guard：作用域感知——mainCta / join / membershipSignals 只在「目标群作用域内」候选中选取；
+  // 出域候选（多为推荐位异群 join）只如实记入 ctaCandidates（守 L4 不静默丢），绝不选取、绝不计入成员信号（防误点/误判 already_member）。
+  var outOfScopeJoinCount = 0;
+  var ctaCandidates = [];
   for (var i = 0; i < nodes.length; i++) {
     var node = nodes[i];
     var label = short(text(node) || aria(node), 120);
     var a = short(aria(node), 120);
     var kind = ctaKind(label) || ctaKind(a);
     if (!kind) continue;
+    var inScope = __inTargetScope(node);
+    if (ctaCandidates.length < 16) ctaCandidates.push({ text: label || a || null, kind: kind, inTargetScope: inScope });
+    if (!inScope) { if (kind === 'join') outOfScopeJoinCount++; continue; }
     if (kind === 'join') {
       // main 优先取「加入」按钮：即便成员/待审按钮在 DOM 里排更前，mainCtaText 也如实反映加入 CTA（供云端判定）。
       if (!join) join = node;
@@ -366,6 +493,10 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
     navError: null,
     composerPresent: composerPresent,
     joinCtaPresent: joinCtaPresent,
+    targetGroupId: __TARGET_GID,
+    scopeResolved: __SCOPE_RESOLVED,
+    outOfScopeJoinCount: outOfScopeJoinCount,
+    ctaCandidates: ctaCandidates,
     joinButton: btn || { found: false }
   });
 })()`;
@@ -379,6 +510,7 @@ const GROUP_JOIN_OBSERVE_JS = String.raw`(function(){
  * 表达式带唯一标记 __FB_JOIN_CLICK__ 便于测试桩区分「点击 eval」与「观察 eval」，不打乱观察序列。
  */
 const GROUP_JOIN_CLICK_JS = String.raw`/*__FB_JOIN_CLICK__*/(function(){
+  ${SCOPE_HELPERS_JS}
   var JOIN_KW = ${JSON.stringify(JOIN_CTA_LABELS)};
   var MEMBER_KW = ${JSON.stringify(MEMBER_CTA_LABELS)};
   var PENDING_KW = ${JSON.stringify(PENDING_CTA_LABELS)};
@@ -400,18 +532,22 @@ const GROUP_JOIN_CLICK_JS = String.raw`/*__FB_JOIN_CLICK__*/(function(){
     if (anyIncludes(label, JOIN_KW)) return 'join';
     return '';
   }
+  // change facebook-join-candidate-scope-guard：作用域 fail-closed——目标群 id 解析失败 或 头部块解析不出 → 诚实 scope_unresolved、绝不页面级点。
+  if (__TARGET_GID == null || !__HEADER_BLOCK) return JSON.stringify({ clicked: false, reason: 'scope_unresolved' });
   var nodes = Array.from(document.querySelectorAll('button,a,[role="button"]')).filter(function(el){
     return visible(el) && !(el.closest && el.closest('[role="banner"],[role="navigation"],[role="complementary"]'));
   });
-  // 取「第一个 join 节点」，组合规则与 GROUP_JOIN_OBSERVE_JS 的 main/join 选取逐字一致（kind = ctaKind(text||aria) || ctaKind(aria)）：
-  // 保证点到的正是观察校验为加入的那个节点，绝不因规则漂移点到成员/待审节点（点「退出/取消」即自残）。
+  // 只在「目标群头部/动作区」内取文档序首个 join；**删除**「页面级文档序第一个 join」回落——那正是误点推荐位异群 join 的路径。
+  // 组合规则与 GROUP_JOIN_OBSERVE_JS 逐字一致（kind = ctaKind(text||aria) || ctaKind(aria)，且 __inTargetScope 同源）：
+  // 保证点到的正是观察校验为加入、且在目标群作用域内的那个节点，绝不点成员/待审节点（点「退出/取消」即自残）、绝不点异群 join（加错群即红线）。
   var target = null;
   for (var i = 0; i < nodes.length; i++) {
     var node = nodes[i];
     var kind = ctaKind(text(node) || aria(node)) || ctaKind(aria(node));
-    if (kind === 'join') { target = node; break; }
+    if (kind === 'join' && __inTargetScope(node)) { target = node; break; }
   }
-  if (!target) return JSON.stringify({ clicked: false });
+  // 作用域内无 join 候选（目标自身是 member/pending/晚渲染，仅推荐位有异群 join）→ 诚实 no_target_in_scope、绝不越域找 join 冒充点过。
+  if (!target) return JSON.stringify({ clicked: false, reason: 'no_target_in_scope' });
   // 禁用态诚实 bail（与 observe 的 pre-click disabled 闸一致）——绝不点已禁用/占位按钮冒充点过。
   if (disabled(target)) return JSON.stringify({ clicked: false, reason: 'disabled' });
   var r = target.getBoundingClientRect();
@@ -461,7 +597,11 @@ export class FacebookJoinExecutor {
       const raw: RawJoinObservation = ready.raw ?? {};
       if (observation.loginRequired) return { ok: false, reason: 'login_required', groupUrl, clicked: false, observation };
       if (observation.captchaDetected) return { ok: false, reason: 'blocked_by_captcha', groupUrl, clicked: false, observation };
-      if (hasMemberSignal(observation)) return { ok: false, reason: 'already_member', groupUrl, clicked: false, observation };
+      // already_member 仅当**域内无 join 按钮**时成立（矛盾守卫，对抗评审红线闭合补强）：一个显示「加入」CTA 的群绝不可能是你已加入的群，
+      // 故「有成员信号 + 同时有域内 join 按钮」必是异群信号污染（如极端不透明推荐位漏出域）→ 不判 already_member、照常去点目标自身 join。
+      if (hasMemberSignal(observation) && !raw.joinButton?.found) {
+        return { ok: false, reason: 'already_member', groupUrl, clicked: false, observation };
+      }
       if (observation.questionnaireRequired) return { ok: false, reason: 'questionnaire_required', groupUrl, clicked: false, observation };
       if (observation.pendingRequest) return { ok: false, reason: 'pending', groupUrl, clicked: false, observation };
       // L3：observe/pre-click **不据结构判 already_member**（对抗评审揪出）——此处无点击，joinCtaPresent 词表派生会 fail-open，
@@ -476,6 +616,12 @@ export class FacebookJoinExecutor {
       }
       if (!options.click) return { ok: false, reason: 'observation_only', groupUrl, clicked: false, observation };
 
+      // change facebook-join-candidate-scope-guard（Fix，对抗评审 Finding 2）：作用域未确立（页面已就绪但目标群 id/头部块解析不出）
+      // → not_ready 可重试瞬态，绝不落 no_button——no_button 被云端判永久 failed（不进重试池），会把「重导航/晚渲染时暂时框不住
+      // 作用域」的可加入群永久丢弃。fail-closed 安全侧：不点、可重试。
+      if (observation.scopeResolved === false) {
+        return { ok: false, reason: 'not_ready', groupUrl, clicked: false, observation };
+      }
       if (!button?.found || button.disabled || typeof button.x !== 'number' || typeof button.y !== 'number') {
         return { ok: false, reason: 'no_button', groupUrl, clicked: false, observation };
       }
@@ -490,9 +636,17 @@ export class FacebookJoinExecutor {
       } catch {
         /* hover 仅拟人化，失败不影响后续 JS 点击。 */
       }
-      const clickResult = await evalJson<{ clicked?: boolean }>(this.cdp, GROUP_JOIN_CLICK_JS);
+      const clickResult = await evalJson<{ clicked?: boolean; reason?: string }>(this.cdp, GROUP_JOIN_CLICK_JS);
       if (!clickResult?.clicked) {
-        // 点击瞬间按钮已消失/不可点（布局漂移或已被他路加入）→ 诚实 no_button，绝不冒充点过。
+        const bail = clickResult?.reason;
+        // 作用域守卫 fail-closed（scope_unresolved：目标群 id/头部块解析不出；no_target_in_scope：域内无 join 候选）
+        // → 「未能确立作用域、无法确信下手」的可重试瞬态，映射 not_ready（云端短退避重试、不计入尝试上限）。绝不折叠成 no_button：
+        // no_button 被云端判永久 failed（对抗评审 Finding 2 坐实），会把「重导航/晚渲染时暂时框不住作用域」的可加入群永久丢弃。
+        if (bail === 'scope_unresolved' || bail === 'no_target_in_scope') {
+          this.log(`[fb-join] click bail (scope-guard, retryable): ${bail}`);
+          return { ok: false, reason: 'not_ready', groupUrl, clicked: false, observation };
+        }
+        // 点击瞬间按钮已消失/不可点（布局漂移或已被他路加入）→ 诚实 no_button，绝不冒充点过（既有行为）。
         return { ok: false, reason: 'no_button', groupUrl, clicked: false, observation };
       }
       if (this.opts.waitAfterClickMs > 0) await this.sleep(this.opts.waitAfterClickMs);

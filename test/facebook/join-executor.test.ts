@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
 
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monitor.js';
@@ -519,4 +520,231 @@ test('fb-join-executor: post-click 待审浮层不被 Esc 误关（P1-7 保守�
   const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
   assert.equal(r.reason, 'pending');
   assert.equal(cdp.escapes, 0);
+});
+
+// ── change facebook-join-candidate-scope-guard[jsdom]：加群候选「目标群作用域」守卫 ──
+// 这些用例在 jsdom 真跑注入的 GROUP_JOIN_OBSERVE_JS / GROUP_JOIN_CLICK_JS（非预烘焙观测），端到端验证「fail-closed 正向包含」：
+// 只在目标群头部/动作区内选/点 join，绝不误点「发现更多小组」推荐位的异群 join（文案与目标群逐字相同、且是兄弟裸 div 无异群 href）。
+function buildGroupDom(bodyHtml: string, url = 'https://www.facebook.com/groups/123'): JSDOM {
+  const dom = new JSDOM(`<!doctype html><html><body>${bodyHtml}</body></html>`, { url, runScripts: 'outside-only' });
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value() {
+      return { left: 10, top: 100, right: 120, bottom: 140, width: 110, height: 40 };
+    },
+  });
+  return dom;
+}
+
+function jsdomJoinCdp(dom: JSDOM): BrowseCdp {
+  return {
+    send: async (method: string, params?: Record<string, unknown>) => {
+      if (method !== 'Runtime.evaluate') return {} as never;
+      const value = dom.window.eval(String(params?.expression ?? ''));
+      return { result: { value: typeof value === 'string' ? value : JSON.stringify(value) } } as never;
+    },
+  };
+}
+
+function makeJsdomExecutor(dom: JSDOM) {
+  return new FacebookJoinExecutor(
+    { cdp: jsdomJoinCdp(dom), acceptConsent: NO_CONSENT, sleep: async () => {}, logger: () => {} },
+    { settleMs: 0, waitAfterClickMs: 0, readyTimeoutMs: 2000, pollMs: 500, postClickTimeoutMs: 2000, preClickSettleMs: 0 },
+  );
+}
+
+// § 本次订正核心红线：推荐位异群 join 是**兄弟裸 div[role=button]、无异群 href 祖先** → 黑名单（异群链接排除）漏排、
+// 唯有正向包含（目标头部块之外默认出域）挡得住。
+test('scope-guard[jsdom]: 目标 pending + 推荐位裸 div 异群 join（无异群 href 祖先）→ 判 pending、绝不点异群 join（正向包含承重，非靠 E1）', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">已申请</div></div>' +
+      '<div id="suggestions"><div class="card"><a href="/groups/999">Other Group</a><div role="button" id="rail">加入小组</div></div></div>' +
+      '</div>',
+  );
+  let railClicked = false;
+  (dom.window.document.getElementById('rail') as HTMLElement).addEventListener('click', () => {
+    railClicked = true;
+  });
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.reason, 'pending', '目标群自身控件是待审 → 判 pending');
+  assert.equal(r.clicked, false);
+  assert.equal(railClicked, false, '绝不点推荐位异群 join（红线）');
+  assert.equal(r.observation?.outOfScopeJoinCount, 1, '推荐位 join 被判出域并如实计数');
+  assert.ok(
+    (r.observation?.ctaCandidates ?? []).some((c) => c.kind === 'join' && c.inTargetScope === false),
+    '出域 join 候选仍全量上报（守 L4 不静默丢原文）',
+  );
+});
+
+test('scope-guard[jsdom]: 推荐位异群 join 带 /groups/异 id 祖先链接（E1 场景）→ 亦出域、判 pending、不点', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">已申请</div></div>' +
+      '<div id="suggestions"><div class="card"><a href="/groups/999"><div role="button" id="rail">加入小组</div></a></div></div>' +
+      '</div>',
+  );
+  let railClicked = false;
+  (dom.window.document.getElementById('rail') as HTMLElement).addEventListener('click', () => {
+    railClicked = true;
+  });
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.reason, 'pending');
+  assert.equal(railClicked, false, '带异群链接的推荐位 join 亦绝不点');
+});
+
+test('scope-guard[jsdom]: 目标群自身 join 在头部块内 → 点击腿点的是目标 join、非推荐位异群 join；点后 joined', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">加入小组</div></div>' +
+      '<div id="suggestions"><div class="card"><a href="/groups/999">Other Group</a><div role="button" id="rail">加入小组</div></div></div>' +
+      '</div>',
+  );
+  const doc = dom.window.document;
+  let railClicked = false;
+  (doc.getElementById('rail') as HTMLElement).addEventListener('click', () => {
+    railClicked = true;
+  });
+  (doc.getElementById('target') as HTMLElement).addEventListener('click', () => {
+    (doc.getElementById('target') as HTMLElement).textContent = '已加入'; // 点后翻成成员态供点后 observe 判 joined
+  });
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(railClicked, false, '绝不点推荐位异群 join');
+  assert.equal(r.clicked, true, '点的是目标群自身 join');
+  assert.equal(r.ok, true, '点后翻成「已加入」→ joined');
+});
+
+test('scope-guard[jsdom]: 无群名主标题（头部块解析不出）→ fail-closed，scopeResolved=false、不点任何 join', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="suggestions"><div class="card"><a href="/groups/999">Other Group</a><div role="button" id="rail">加入小组</div></div></div>' +
+      '</div>',
+  );
+  let railClicked = false;
+  (dom.window.document.getElementById('rail') as HTMLElement).addEventListener('click', () => {
+    railClicked = true;
+  });
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.observation?.scopeResolved, false, '无 h1 → 作用域未确立');
+  assert.equal(r.reason, 'not_ready', '作用域未确立映射为可重试 not_ready（非 no_button 永久失败）');
+  assert.equal(r.clicked, false);
+  assert.equal(railClicked, false, '绝不页面级点异群 join');
+});
+
+test('scope-guard[jsdom]: 推荐位建议群「已加入」信号在头部块外 → 不进 membershipSignals、不误判 already_member（红线尾巴）', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">加入小组</div></div>' +
+      '<div id="suggestions"><div class="card"><a href="/groups/999">Other Group</a><div role="button" id="rail">已加入</div></div></div>' +
+      '</div>',
+  );
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123'); // observe-only
+  assert.notEqual(r.reason, 'already_member', '推荐位异群「已加入」绝不使目标群假成员');
+  assert.equal(r.reason, 'observation_only');
+  assert.ok(
+    !(r.observation?.membershipSignals ?? []).some((s) => s.includes('已加入')),
+    'membershipSignals 不含推荐位异群「已加入」',
+  );
+});
+
+test('scope-guard[jsdom]: 目标群自身 join 被指向本群 id 的链接包裹 → 不误排（同群链接在域、候选可选）', async () => {
+  // 同群 /groups/123 链接不触发异群排除、也不收窄头部块 → join 候选仍在域内可选（outOfScopeJoinCount=0，判定得到 join 观测）。
+  // 注：真机 FB 的 join 控件是 div[role=button] 非锚点；此处仅验作用域「不误排同群链接」，故走 observe-only 断言在域可选（不做点击-导航）。
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="header"><h1>Target Group</h1><a href="/groups/123"><div role="button" id="target">加入小组</div></a></div>' +
+      '</div>',
+  );
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123'); // observe-only
+  assert.equal(r.reason, 'observation_only', '在域内找到 join 候选（非 no_button）');
+  assert.equal(r.observation?.outOfScopeJoinCount, 0, '同群链接不被判异群、无候选被误排');
+  assert.equal(classifyCtaLabel(r.observation?.mainCtaText), 'join', 'mainCta 反映在域 join 候选');
+});
+
+// § 对抗评审 Fix 1a 红线闭合：推荐位用**非锚点导航**（div[role=link] + data-* 编码 group id，无 a[href]）——
+// 修前 __hasForeignGroupLink 只认 a[href] → 找不到异群引用 → 头部块吞到 [role=main] → 误点/误判（fail-open 红线）。
+// 修后 __groupIdFromEl 扫元素属性值里的 /groups/<id> → 认出异群引用 → 框住头部块 → 推荐位出域。
+test('scope-guard[jsdom]: 推荐位用非锚点导航（role=link + data-* 编码异群 id，无 a[href]）→ 仍被识别为异群、出域，不误点（红线闭合）', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">已申请</div></div>' +
+      '<div id="feed"><div class="card"><div role="link" data-visit="/groups/999">Other</div><div role="button" id="rail">加入小组</div></div></div>' +
+      '</div>',
+  );
+  let railClicked = false;
+  (dom.window.document.getElementById('rail') as HTMLElement).addEventListener('click', () => {
+    railClicked = true;
+  });
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.reason, 'pending', '目标 pending；非锚点推荐位 join 出域、不冒充目标 CTA');
+  assert.equal(railClicked, false, '非锚点推荐位异群 join 绝不被点（红线闭合）');
+  assert.equal(r.observation?.outOfScopeJoinCount, 1, '非锚点推荐位 join 被判出域并计数');
+});
+
+// § 对抗评审 Finding 3 闭合（点击腿作用域守卫回归护栏）：推荐位异群 join 在文档序**先于**目标群自身 join。
+// 若点击腿的 `&& __inTargetScope(node)` 被删（退回页面级文档序首个 join），会先点到推荐位异群 join → 本用例失败。
+test('scope-guard[jsdom]: 推荐位异群 join 在文档序先于目标 join + click → 点击腿只点在域的目标 join、绝不点先出现的异群 join', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="suggestions"><div class="card"><a href="/groups/999">Other</a><div role="button" id="rail">加入小组</div></div></div>' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">加入小组</div></div>' +
+      '</div>',
+  );
+  const doc = dom.window.document;
+  let railClicked = false;
+  (doc.getElementById('rail') as HTMLElement).addEventListener('click', () => {
+    railClicked = true;
+  });
+  (doc.getElementById('target') as HTMLElement).addEventListener('click', () => {
+    (doc.getElementById('target') as HTMLElement).textContent = '已加入';
+  });
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(railClicked, false, '先出现的推荐位异群 join 绝不被点（作用域守卫承重）');
+  assert.equal(r.clicked, true, '点的是文档序更后、但在域的目标 join');
+  assert.equal(r.ok, true, '点后 joined');
+});
+
+// § 对抗评审 Finding 4 闭合：目标群 id 从 in-page location 解析不出（畸形/非群页）→ fail-closed（scopeResolved=false、not_ready、不点）。
+test('scope-guard[jsdom]: in-page URL 无 /groups/<id>（畸形）→ __TARGET_GID=null，fail-closed（scopeResolved=false、not_ready、不点任何 join）', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">加入小组</div></div>' +
+      '<div id="feed"><div class="card"><a href="/groups/999">Other</a><div role="button" id="rail">加入小组</div></div></div>' +
+      '</div>',
+    'https://www.facebook.com/watch', // in-page location 无 /groups/<id> → __parseGroupId 返回 null
+  );
+  const doc = dom.window.document;
+  let railClicked = false;
+  let targetClicked = false;
+  (doc.getElementById('rail') as HTMLElement).addEventListener('click', () => {
+    railClicked = true;
+  });
+  (doc.getElementById('target') as HTMLElement).addEventListener('click', () => {
+    targetClicked = true;
+  });
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.observation?.targetGroupId, null, '畸形 in-page URL → 目标群 id 解析为 null');
+  assert.equal(r.observation?.scopeResolved, false, 'targetGid=null → 作用域未确立');
+  assert.equal(r.reason, 'not_ready', 'fail-closed 可重试（非 no_button 永久失败）');
+  assert.equal(railClicked, false, '绝不点任何 join');
+  assert.equal(targetClicked, false);
+});
+
+// § 对抗评审 Finding 5 闭合（点后子句）：点击目标 join 后，目标未翻成成员，而推荐位卡片显示异群「已加入」（出域）→
+// 绝不据推荐位信号伪造 joined，诚实 join_failed。
+test('scope-guard[jsdom]: 点后目标未成成员、推荐位异群「已加入」在头部块外 → 不伪造 joined、诚实 join_failed', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">加入小组</div></div>' +
+      '<div id="suggestions"><div class="card"><a href="/groups/999">Other</a><div role="button" id="rail">已加入</div></div></div>' +
+      '</div>',
+  );
+  // target 点击后不改变状态（模拟加入未生效）；推荐位「已加入」是异群、出域，绝不能被读成目标 joined。
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.clicked, true, '点了目标 join');
+  assert.equal(r.reason, 'join_failed', '目标未翻成成员 + 推荐位异群「已加入」出域 → 不伪造 joined');
+  assert.ok(
+    !(r.postObservation?.membershipSignals ?? []).some((s) => s.includes('已加入')),
+    '点后 membershipSignals 亦不含推荐位异群「已加入」',
+  );
 });
