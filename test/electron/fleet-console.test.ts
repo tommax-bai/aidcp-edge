@@ -294,6 +294,52 @@ test('人设弹窗：用户手动打开查看时，已绑信号到达不自动�
   assert.equal(calls.notify.length, 0, '手动查看已绑状态不得发未设置通知');
 });
 
+test('人设弹窗：已绑账号可手动进入更新流程，确认后覆盖当前人设', async () => {
+  const calls: Record<string, unknown[]> = { gen: [], persist: [] };
+  const { w, pushStatus } = await boot({
+    personaGenerate: async (envId: string, payload: { keywordSelections: string[] }) => {
+      calls.gen.push({ envId, payload });
+      return { ok: true, soulYaml: 'identity:\n  name: "新人设"', identitySummary: '新人设' };
+    },
+    personaPersist: async (envId: string, payload: { soulYaml: string }) => {
+      calls.persist.push({ envId, payload });
+      return { ok: true };
+    },
+  }, { personaPromptGraceMs: 60_000 });
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: true }));
+  await tick();
+
+  (w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-persona') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), false, '已绑账号先显示已设置卡片');
+  (w.document.querySelector('#persona-update') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), false, '点击更新后显示向导');
+  assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), true, '更新中隐藏已设置卡片');
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '待更新');
+  assert.match(w.document.querySelector('#persona-hint')!.textContent || '', /覆盖当前账号的人设/);
+  assert.equal((w.document.querySelector('#persona-generate') as HTMLElement).textContent, '生成新草稿');
+
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: true }));
+  await tick();
+  assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), false, '更新中收到已绑状态推送不得把向导藏回去');
+
+  (w.document.querySelector('.persona-kw-group[data-dim="content"][data-category="招聘求职"] .kw-btn') as HTMLElement).click();
+  (w.document.querySelector('#persona-generate') as HTMLElement).click();
+  await tick();
+  assert.deepEqual((calls.gen[0] as { envId: string }).envId, 'ads-p1');
+  assert.equal(w.document.querySelector('#persona-draft-summary')!.textContent, '新人设');
+  assert.equal((w.document.querySelector('#persona-confirm') as HTMLElement).textContent, '确认更新');
+
+  (w.document.querySelector('#persona-confirm') as HTMLElement).click();
+  await tick();
+  assert.deepEqual((calls.persist[0] as { envId: string }).envId, 'ads-p1');
+  assert.match((calls.persist[0] as { payload: { soulYaml: string } }).payload.soulYaml, /新人设/);
+  assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), true, '确认更新后收起向导');
+  assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), false, '确认更新后回到已设置卡片');
+  assert.match(w.document.querySelector('#persona-msg')!.textContent || '', /人设已更新/);
+});
+
 test('红线：并发环境的状态与活动按 envId 归属，切换环境不残留、不串号', async () => {
   const { w, pushStatus, pushActivity } = await boot();
   // 环境一：3 个浏览计数；环境二：99 个（若串号立刻可见）
