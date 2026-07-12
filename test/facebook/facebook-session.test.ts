@@ -12,7 +12,7 @@ import type { FacebookFeedReader, FacebookFeedCard } from '../../src/facebook/fe
 import type { FacebookPostReader, FacebookPostDetail } from '../../src/facebook/post-reader.js';
 import type { FacebookLikeExecutor, FacebookLikeResult } from '../../src/facebook/like-executor.js';
 import { selectPlatformDriver } from '../../src/platform/index.js';
-import type { Envelope, ActionCompletedPayload, NoteDetailPayload, PageCardsPayload } from '../../src/comm/protocol.js';
+import type { Envelope, ActionCompletedPayload, NoteDetailPayload, PageCardsPayload, ProfileDetailPayload } from '../../src/comm/protocol.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
 function makeEnv(type: string, payload: unknown = {}): Envelope {
@@ -23,6 +23,7 @@ interface Harness {
   session: FacebookBrowseSession;
   cards: PageCardsPayload[];
   details: NoteDetailPayload[];
+  profiles: ProfileDetailPayload[];
   actions: ActionCompletedPayload[];
   delegated: Envelope[];
   ensureCalls: number;
@@ -36,9 +37,11 @@ function makeSession(opts: {
   detail?: Partial<FacebookPostDetail>;
   like?: (shadow?: boolean) => FacebookLikeResult;
   hangOpen?: boolean;
+  cdpSend?: BrowseCdp['send'];
 } = {}): Harness {
   const cards: PageCardsPayload[] = [];
   const details: NoteDetailPayload[] = [];
+  const profiles: ProfileDetailPayload[] = [];
   const actions: ActionCompletedPayload[] = [];
   const delegated: Envelope[] = [];
   const likeShadowFlags: Array<boolean | undefined> = [];
@@ -59,6 +62,9 @@ function makeSession(opts: {
     },
     reportNoteDetail(p: NoteDetailPayload) {
       details.push(p);
+    },
+    reportProfileDetail(p: ProfileDetailPayload) {
+      profiles.push(p);
     },
     reportActionCompleted(p: ActionCompletedPayload) {
       actions.push(p);
@@ -102,7 +108,7 @@ function makeSession(opts: {
   } as unknown as FacebookLikeExecutor;
 
   const deps: FacebookBrowseSessionDeps = {
-    cdp: { send: async () => ({}) } as unknown as BrowseCdp,
+    cdp: { send: opts.cdpSend ?? (async () => ({})) } as unknown as BrowseCdp,
     client,
     commentHandler,
     feedReader,
@@ -118,6 +124,7 @@ function makeSession(opts: {
     session,
     cards,
     details,
+    profiles,
     actions,
     delegated,
     likeShadowFlags,
@@ -226,6 +233,39 @@ test('mode=shadow：点赞只记不执行 → ok:false reason=shadow（云端不
   assert.deepEqual(h.likeShadowFlags, [true], 'shadow 传入 like 执行器');
   assert.equal(h.actions[0].ok, false);
   assert.equal(h.actions[0].reason, 'shadow');
+});
+
+test('profile.open direct：采本人主页昵称 → 上报 profile.detail，不走 action.completed', async () => {
+  const navUrls: string[] = [];
+  const h = makeSession({
+    mode: 'shadow',
+    cdpSend: async <T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> => {
+      if (method === 'Page.navigate') {
+        navUrls.push(String(params?.url ?? ''));
+        return {} as T;
+      }
+      if (method === 'Runtime.evaluate') {
+        return {
+          result: {
+            value: JSON.stringify({
+              url: 'https://www.facebook.com/profile.php?id=61591701813509',
+              title: 'Dennis Scott | Facebook',
+              nickname: 'Dennis Scott',
+              bodyTextLen: 100,
+            }),
+          },
+        } as T;
+      }
+      return {} as T;
+    },
+  });
+  await h.session.onCloudCommand(makeEnv('profile.open', { authorId: '61591701813509', direct: true }));
+  assert.deepEqual(navUrls, ['https://www.facebook.com/profile.php?id=61591701813509']);
+  assert.equal(h.profiles.length, 1);
+  assert.equal(h.profiles[0].authorId, '61591701813509');
+  assert.equal(h.profiles[0].nickname, 'Dennis Scott');
+  assert.equal(h.profiles[0].extracted, false, 'FB v1 不臆造主页数字');
+  assert.equal(h.actions.length, 0, 'profile.detail 即回执，不额外 action.completed');
 });
 
 // ─────────────────────────── 不支持命令诚实回执 ───────────────────────────

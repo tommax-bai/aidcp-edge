@@ -19,7 +19,7 @@
  *  - FB 无收藏/关注/看图（v1）：这些命令诚实回 capability_unsupported，绝不臆造。
  */
 
-import type { BrowseCdp } from '../browse/cdp-util.js';
+import { evalJson, type BrowseCdp } from '../browse/cdp-util.js';
 import type { OverlayMonitor } from '../browse/overlay-monitor.js';
 import { jitterAround } from '../humanize/index.js';
 import type { EdgeBrowseSession } from '../browse/edge-browse-session.js';
@@ -30,6 +30,8 @@ import type {
   NoteOpenPayload,
   InteractionLikePayload,
   PageCardsPayload,
+  ProfileDetailPayload,
+  ProfileOpenPayload,
   PacingOp,
   PacingFloorPayload,
 } from '../comm/protocol.js';
@@ -63,6 +65,7 @@ export function usesFacebookBrowseSession(driver: PlatformDriver): boolean {
 export interface FacebookSessionClient {
   reportPageCards(payload: PageCardsPayload): void;
   reportNoteDetail(payload: NoteDetailPayload): void;
+  reportProfileDetail(payload: ProfileDetailPayload): void;
   reportActionCompleted(payload: ActionCompletedPayload): void;
 }
 
@@ -92,7 +95,15 @@ export interface FacebookBrowseSessionOptions {
 type TerminalReport =
   | { type: 'cards'; payload: PageCardsPayload }
   | { type: 'detail'; payload: NoteDetailPayload }
+  | { type: 'profile'; payload: ProfileDetailPayload }
   | { type: 'action'; payload: ActionCompletedPayload };
+
+interface FacebookProfileSnapshot {
+  url?: string;
+  title?: string;
+  nickname?: string;
+  bodyTextLen?: number;
+}
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -239,6 +250,16 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       case 'note.close':
         await this.runBrowseCommand('close', () => this.closeNote());
         return;
+      case 'profile.open': {
+        const payload = (env.payload ?? {}) as ProfileOpenPayload;
+        if (payload.direct) {
+          await this.runProfileCommand(payload);
+          return;
+        }
+        this.log('[fb-session] profile.open 非 direct 路径 FB v1 不支持，回 capability_unsupported');
+        this.client.reportActionCompleted({ action: 'profile_open', ok: false, reason: 'capability_unsupported' });
+        return;
+      }
       case 'session.end':
         this.log('[fb-session] 命令: session.end');
         this.running = false;
@@ -299,6 +320,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private emit(r: TerminalReport): void {
     if (r.type === 'cards') this.client.reportPageCards(r.payload);
     else if (r.type === 'detail') this.client.reportNoteDetail(r.payload);
+    else if (r.type === 'profile') this.client.reportProfileDetail(r.payload);
     else this.client.reportActionCompleted(r.payload);
   }
 
@@ -378,6 +400,112 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private async closeNote(): Promise<TerminalReport> {
     await this.navigateFeedBestEffort();
     return { type: 'action', payload: { action: 'close', ok: true } };
+  }
+
+  /**
+   * Facebook 本人昵称采集：云端会在首个 page.cards 后下发 profile.open{direct:true}。
+   * v1 只支持 direct 自己主页采集，回 profile.detail 解除云端 nickname-enricher 等待；
+   * 不支持普通作者主页/关注链路，避免扩大自动行为面。
+   */
+  private async runProfileCommand(payload: ProfileOpenPayload): Promise<void> {
+    let settled = false;
+    const emitOnce = (report: TerminalReport): void => {
+      if (settled) return;
+      settled = true;
+      this.emit(report);
+    };
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.log(`[fb-session] profile.open direct 超时（${this.commandTimeoutMs}ms），回 extracted:false`);
+        emitOnce({ type: 'profile', payload: this.profileFallback(payload.authorId) });
+        resolve();
+      }, this.commandTimeoutMs);
+      this.openDirectProfile(payload)
+        .then((report) => {
+          clearTimeout(timer);
+          emitOnce(report);
+          resolve();
+        })
+        .catch((err) => {
+          clearTimeout(timer);
+          this.log(`[fb-session] profile.open direct 失败：${(err as Error).message}`);
+          emitOnce({ type: 'profile', payload: this.profileFallback(payload.authorId) });
+          resolve();
+        });
+    });
+  }
+
+  private async openDirectProfile(payload: ProfileOpenPayload): Promise<TerminalReport> {
+    const authorId = String(payload.authorId ?? '').trim();
+    if (!authorId) return { type: 'profile', payload: this.profileFallback(authorId) };
+    await this.thinkBefore(payload.thinkMs);
+    const url = /^\d+$/.test(authorId)
+      ? `https://www.facebook.com/profile.php?id=${encodeURIComponent(authorId)}`
+      : `https://www.facebook.com/${encodeURIComponent(authorId)}`;
+    this.log(`[fb-session] 命令: profile.open direct（authorId=${authorId}）`);
+    await this.cdp.send('Page.navigate', { url });
+    const snapshot = await this.waitAndReadProfile();
+    const nickname = (snapshot.nickname ?? '').trim();
+    const landedUrl = snapshot.url?.startsWith('https://www.facebook.com/') ? snapshot.url : url;
+    this.log(
+      `[fb-session] profile.detail direct authorId=${authorId}` +
+        `${nickname ? ` nickname="${nickname}"` : ' nickname=<empty>'} extracted=false`,
+    );
+    return {
+      type: 'profile',
+      payload: {
+        authorId,
+        postsCount: 0,
+        followersCount: 0,
+        likesCollects: 0,
+        extracted: false,
+        ...(nickname ? { nickname } : {}),
+        ...(landedUrl ? { url: landedUrl } : {}),
+      },
+    };
+  }
+
+  private async waitAndReadProfile(timeoutMs = 8000): Promise<FacebookProfileSnapshot> {
+    const deadline = Date.now() + timeoutMs;
+    let last: FacebookProfileSnapshot = {};
+    while (Date.now() < deadline) {
+      last = await this.readProfileSnapshot();
+      if (last.nickname || (last.bodyTextLen ?? 0) > 0) return last;
+      await this.sleep(300);
+    }
+    return last;
+  }
+
+  private async readProfileSnapshot(): Promise<FacebookProfileSnapshot> {
+    return evalJson<FacebookProfileSnapshot>(
+      this.cdp,
+      `(() => {
+        const clean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+        const title = clean(document.title).replace(/\\s*\\|\\s*Facebook\\s*$/i, '');
+        const h1 = clean(document.querySelector('h1')?.textContent || '');
+        const mainH1 = clean(document.querySelector('[role="main"] h1')?.textContent || '');
+        const bodyText = clean(document.body?.innerText || '');
+        const nickname = [mainH1, h1, title].find((v) =>
+          v && !/^(Facebook|首页|Home|通知|Notifications)$/i.test(v)
+        ) || '';
+        return JSON.stringify({
+          url: location.href,
+          title: document.title,
+          nickname,
+          bodyTextLen: bodyText.length
+        });
+      })()`,
+    );
+  }
+
+  private profileFallback(authorId?: string): ProfileDetailPayload {
+    return {
+      authorId: authorId ?? '',
+      postsCount: 0,
+      followersCount: 0,
+      likesCollects: 0,
+      extracted: false,
+    };
   }
 
   private async navigateFeedBestEffort(): Promise<void> {
