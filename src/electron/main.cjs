@@ -126,6 +126,20 @@ function readBakedDefaultCloudEnv() {
   }
 }
 const BAKED_DEFAULT_CLOUD_ENV = readBakedDefaultCloudEnv();
+// 构建期烘焙的对外客户鉴权地址（change edge-client-customer-auth）：分发包用
+// electron-builder `-c.extraMetadata.aidcpClientAuthUrl=https://…/capi` 注入，让分发的客户端「一装即带登录门」，
+// 无需运营 / 客户手填环境变量。只读打包进 app 的 package.json；非法 / 缺失 → ''（登录门保持 opt-in 关闭，零回归）。
+// dev(electron .) 下 getAppPath 是仓库根、package.json 无此字段 → 不受影响。
+function readBakedClientAuthUrl() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8'));
+    const v = String((pkg && pkg.aidcpClientAuthUrl) || '').trim();
+    return /^https?:\/\//i.test(v) ? v.replace(/\/+$/, '') : '';
+  } catch {
+    return '';
+  }
+}
+const BAKED_CLIENT_AUTH_URL = readBakedClientAuthUrl();
 const DEFAULT_CLOUD_URL = CLOUD_ENV_URLS[BAKED_DEFAULT_CLOUD_ENV] || CLOUD_ENV_URLS.dev;
 const CLOUD_ENV_LABELS = { dev: 'dev', ol: 'ol（线上）', custom: '自定义', '': '默认' };
 function isWsUrl(u) {
@@ -239,8 +253,10 @@ let sessionTimer = null;
 let proceededOnce = false;
 
 function resolveClientAuthBase() {
+  // 优先级：显式环境变量 / 设置里的完整地址 > 构建期烘焙地址（分发包）> 显式启用+云端主机派生。
   const explicit = String((process.env.AIDCP_CLIENT_AUTH_URL || '') || (settings && settings.clientAuthUrl) || '').trim();
   if (/^https?:\/\//i.test(explicit)) return explicit.replace(/\/+$/, '');
+  if (BAKED_CLIENT_AUTH_URL) return BAKED_CLIENT_AUTH_URL;
   const enabled = process.env.AIDCP_CLIENT_AUTH_ENABLE === '1' || Boolean(settings && settings.clientAuthEnabled);
   if (!enabled) return '';
   const cloud = resolveCloudUrl().url;
