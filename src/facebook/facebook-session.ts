@@ -30,6 +30,7 @@ import type {
   NoteOpenPayload,
   InteractionLikePayload,
   PageCardsPayload,
+  PageScrollPayload,
   ProfileDetailPayload,
   ProfileOpenPayload,
   PacingOp,
@@ -125,6 +126,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private running = false;
   private closing = false;
   private tempo: number;
+  /** 最近一次 page.cards 到达时间；用于吸收云端评估耗时，避免 dwellMs 变成额外固定等待。 */
+  private lastCardsAt = 0;
   /** 命令串行链：一次只处理一条，避免并发争抢同一浏览器会话。 */
   private chain: Promise<void> = Promise.resolve();
 
@@ -235,9 +238,14 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         return;
       }
       // —— 浏览/点赞类（受 kill switch 门控）——
-      case 'page.scroll':
-        await this.runBrowseCommand('scroll', () => this.scrollFeed());
+      case 'page.scroll': {
+        const payload = (env.payload ?? {}) as PageScrollPayload;
+        await this.runBrowseCommand('scroll', async () => {
+          await this.ensureFeedDwell(payload.dwellMs);
+          return this.scrollFeed();
+        });
         return;
+      }
       case 'interaction.like': {
         const payload = env.payload as InteractionLikePayload;
         await this.runBrowseCommand('like', async () => {
@@ -319,8 +327,20 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (ms > 0) await this.sleep(ms);
   }
 
+  /** feed 翻页前确保本批卡片已停留到云端目标；已花掉的 LLM/网络时间会被吸收，不双重叠加。 */
+  private async ensureFeedDwell(dwellMs?: number): Promise<void> {
+    if (!dwellMs || dwellMs <= 0 || this.lastCardsAt <= 0) return;
+    const target = jitterAround(dwellMs * this.tempo, 0.2);
+    const elapsed = Date.now() - this.lastCardsAt;
+    const remaining = Math.max(0, target - elapsed);
+    if (remaining > 0) await this.sleep(remaining);
+  }
+
   private emit(r: TerminalReport): void {
-    if (r.type === 'cards') this.client.reportPageCards(r.payload);
+    if (r.type === 'cards') {
+      this.lastCardsAt = Date.now();
+      this.client.reportPageCards(r.payload);
+    }
     else if (r.type === 'detail') this.client.reportNoteDetail(r.payload);
     else if (r.type === 'profile') this.client.reportProfileDetail(r.payload);
     else this.client.reportActionCompleted(r.payload);
@@ -338,6 +358,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       this.log('[fb-session] feed 就绪但无可上报卡片');
       return;
     }
+    this.lastCardsAt = Date.now();
     this.client.reportPageCards(this.toPageCards(cards));
     this.log(`[fb-session] 已上报首屏 ${cards.length} 张 feed 卡片`);
   }

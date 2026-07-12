@@ -207,6 +207,18 @@ test('page.scroll → 翻页扫卡 page.cards（collectCount=0）', async () => 
   assert.equal(h.cards[0].cards[0].noteId, 'https://www.facebook.com/a/posts/pfbid0ONE');
 });
 
+test('page.scroll 带 dwellMs → FB 翻页前先按卡片停留兜底等待', async () => {
+  const sleeps: number[] = [];
+  const h = makeSession({ mode: 'on', sleep: async (ms) => { sleeps.push(ms); } });
+  await h.session.start();
+  assert.equal(h.cards.length, 1, 'start 应先上报首屏，建立 dwell 锚点');
+
+  await h.session.onCloudCommand(makeEnv('page.scroll', { dwellMs: 5000 }));
+
+  assert.ok(sleeps.some((ms) => ms > 0), `应消费 dwellMs 产生等待，实际=${JSON.stringify(sleeps)}`);
+  assert.equal(h.cards.length, 2, '等待后仍应执行 scroll 并上报新 page.cards');
+});
+
 test('navigation.back → 回 feed 重报 page.cards（驱动下一轮 feed.entered）', async () => {
   const h = makeSession({ mode: 'on' });
   await h.session.onCloudCommand(makeEnv('navigation.back', { targetPage: 'feed' }));
