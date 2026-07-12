@@ -262,6 +262,38 @@ test('人设弹窗：账号已绑人设时绝不自动弹（宽限内翻已绑�
   assert.equal(calls.notify.length, 0, '已绑账号不得发通知');
 });
 
+test('人设弹窗：启动竞态中已自动弹出后，已绑信号到达应自动收起', async () => {
+  const { w, calls, pushStatus } = await boot({}, { personaPromptGraceMs: 30 });
+  await new Promise((r) => setTimeout(r, 300));
+  const pop = w.document.querySelector('#persona-pop')!;
+  assert.equal(pop.classList.contains('open'), true, '宽限到点后未绑态会先自动弹出');
+  assert.equal(calls.notify.length, 1, '自动弹出时只通知一次');
+
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: true }));
+  await tick();
+  assert.equal(pop.classList.contains('open'), false, '自动弹出的误扰在已绑信号到达后必须收起');
+  assert.equal(pop.classList.contains('hidden'), true, '收起后必须重新加 hidden，避免只遮不藏');
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '已设置');
+  assert.equal(calls.notify.length, 1, '已绑信号到达不得再次通知');
+});
+
+test('人设弹窗：用户手动打开查看时，已绑信号到达不自动关闭', async () => {
+  const { w, calls, pushStatus } = await boot({}, { personaPromptGraceMs: 60_000 });
+  await tick();
+  const pIcon = w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-persona') as HTMLElement;
+  pIcon.click();
+  await tick();
+  const pop = w.document.querySelector('#persona-pop')!;
+  assert.equal(pop.classList.contains('open'), true, '手动点击人设图标应打开浮层');
+
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: true }));
+  await tick();
+  assert.equal(pop.classList.contains('open'), true, '手动打开的人设浮层用于查看/调整，不应被已绑信号关掉');
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '已设置');
+  assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), true, '已绑时向导仍应收起');
+  assert.equal(calls.notify.length, 0, '手动查看已绑状态不得发未设置通知');
+});
+
 test('红线：并发环境的状态与活动按 envId 归属，切换环境不残留、不串号', async () => {
   const { w, pushStatus, pushActivity } = await boot();
   // 环境一：3 个浏览计数；环境二：99 个（若串号立刻可见）

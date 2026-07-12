@@ -926,7 +926,7 @@ fields.noticeAction.addEventListener('click', () => openEnvAddPanel('join'));
 // ─── 账号人设浮层（左栏行内人设图标拉起，对「该行环境」做人设）───
 // 打开即把该环境设为选中（右侧陪伴视图 + 状态随之切过去），使人设向导的 gate（登录+连云）与草稿归属
 // 都锚定这个环境（persist 打回它，绝不跨账号）。头部身份锚点（头像 + 平台小标）把这个事实可视化。
-function openPersonaPop(envId) {
+function openPersonaPop(envId, reason = 'manual') {
   if (!fields.personaPop) return;
   if (envId && envId !== fleetView.selected && fleetView.envs.has(envId)) selectEnv(envId);
   const env = fleetView.envs.get(fleetView.selected);
@@ -944,6 +944,8 @@ function openPersonaPop(envId) {
   fields.personaPop.classList.add('open');
   fields.personaPop.setAttribute('aria-hidden', 'false');
   fields.personaMask?.classList.remove('hidden');
+  personaPopOpenReason = reason === 'auto' ? 'auto' : 'manual';
+  personaPopOpenEnvId = currentEnvId() || envId || null;
   // 用目标环境**自身**的状态评闸：此前用 currentStatus，目标环境尚无状态推送时会拿上一环境的状态误开闸。
   updatePersonaGate((env && env.status) || null);
 }
@@ -958,6 +960,8 @@ function closePersonaPop(force) {
   fields.personaPop.classList.add('hidden');
   fields.personaPop.setAttribute('aria-hidden', 'true');
   fields.personaMask?.classList.add('hidden');
+  personaPopOpenReason = null;
+  personaPopOpenEnvId = null;
 }
 fields.personaClose?.addEventListener('click', () => closePersonaPop(true));
 fields.personaMask?.addEventListener('click', () => closePersonaPop(false));
@@ -2587,6 +2591,8 @@ let personaDraftEnvId; // 草稿所属环境（多环境：persist MUST 打回�
 let personaStage = 'pick'; // 两步向导阶段：pick（选关键词）| preview（预览确认）
 let personaInFlight = false; // 生成请求在途（骨架 + 按钮禁用 + 遮罩误点不关层）
 const personaPrompted = new Set();
+let personaPopOpenReason = null; // manual | auto：只自动收起系统误弹，不影响用户手动查看/调整
+let personaPopOpenEnvId = null;
 // 人设弹窗判定时机（用户反馈：已设置人设的账号被误弹）：账号刚「登录+连云」的空窗里，云端「已绑人设」
 // 信号（sticky true、只在已绑时下发、要等下一次心跳）可能还没到，此刻按未绑弹窗会误扰已设置的账号。
 // 给一个宽限期——先记下每个环境首次进入「已连云且暂判未绑」的时刻；宽限内不弹、只挂一个到点复评的
@@ -2723,7 +2729,7 @@ function maybePromptPersonaSetup(status, known, bound) {
   } catch {
     /* old preload without notify */
   }
-  if (!fields.personaPop || !fields.personaPop.classList.contains('open')) openPersonaPop(envId);
+  if (!fields.personaPop || !fields.personaPop.classList.contains('open')) openPersonaPop(envId, 'auto');
 }
 
 // 到点复评：宽限期内若无后续状态推送触发，也主动再判一次。只对「仍是当前环境」生效，
@@ -2777,6 +2783,15 @@ function updatePersonaGate(status) {
     setPersonaBadge('已设置', 'normal');
     syncPersonaFoot('hidden');
     clearPersonaPromptForCurrentEnv();
+    personaUnboundSince.delete(currentEnvId() || '__local__');
+    if (
+      fields.personaPop
+      && fields.personaPop.classList.contains('open')
+      && personaPopOpenReason === 'auto'
+      && (!personaPopOpenEnvId || personaPopOpenEnvId === (currentEnvId() || '__local__'))
+    ) {
+      closePersonaPop(true);
+    }
     return;
   }
   // 未绑或未知：徽标区分——权威已知未绑=「未设置」；未连云尚不知道=「待启动」（宁缺毋假，不谎称未设置）。
