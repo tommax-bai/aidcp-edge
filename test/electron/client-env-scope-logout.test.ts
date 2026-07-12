@@ -84,6 +84,43 @@ test('clientAuthFetch 有界超时（refresh 随每次刷新调用，绝不无�
   assert.match(main, /signal:\s*AbortSignal\.timeout\(\d+\)/, 'clientAuthFetch 必须带超时 signal');
 });
 
+test('登录态程序化建号：ads:createEnv 成功后等待归属当前客户，再让刷新可见', () => {
+  const block = handlerBlock(main, 'ads:createEnv');
+  assert.ok(block, 'ads:createEnv handler 必须存在');
+  assert.match(main, /async function attachClientEnvironmentToCurrentUser/, '主进程必须有可等待的客户归属写入函数');
+  assert.match(
+    main,
+    /clientAuthFetch\('\/environments',\s*\{\s*method:\s*'POST',\s*token:\s*clientSession\.token/,
+    '客户归属写入必须走受客户令牌保护的 /environments',
+  );
+  assert.match(
+    block,
+    /const attach = await attachClientEnvironmentToCurrentUser\(\{\s*userId: result\.userId,\s*name: result\.name,\s*platform: result\.platform \|\| platform,\s*\}\);/,
+    '单环境创建成功后必须 await 归属，避免随后刷新按旧 scope 过滤掉新环境',
+  );
+  assert.match(
+    block,
+    /visibilityWarning/,
+    '归属失败时必须回传可见性告警，不能把“创建成功但不可见”伪装成完全成功',
+  );
+});
+
+test('保存花名册新增环境：客户归属不再 fire-and-forget', () => {
+  const block = handlerBlock(main, 'settings:save');
+  assert.match(block, /ipcMain\.handle\('settings:save',\s*async/, 'settings:save 需要 async 等待归属写入');
+  assert.match(block, /const attach = await attachClientEnvironmentToCurrentUser/, '新增环境入册时必须等待客户归属写入');
+  assert.doesNotMatch(block, /void clientAuthFetch\('\/environments'/, '不得再后台 best-effort 写归属后立即返回');
+});
+
+test('创建成功后刷新 UI：先等左栏入册，再等添加窗口列表刷新', () => {
+  assert.match(
+    renderer,
+    /if \(r\.userId && !coreRunning\(\)\) await selectProfile\(r\.userId, null, r\.name \|\| '', r\.platform \|\| platform\);/,
+    '创建成功后自动选中必须等待 persistRoster 完成，左栏才稳定出现',
+  );
+  assert.match(renderer, /await refreshEnvs\(\);/, '创建成功后必须等待添加窗口环境列表刷新完成');
+});
+
 test('设置抽屉移除 per-环境「重新登录」按钮；auth:relogin IPC 保留（通知巡视引导流「重检」仍用）', () => {
   assert.doesNotMatch(html, /id="relogin"/, '设置抽屉不再有 per-环境「重新登录」按钮（换成客户端「退出登录」）');
   assert.match(main, /ipcMain\.handle\(\s*['"]auth:relogin['"]/, 'auth:relogin IPC 保留——引导流「重检」仍走这条路径、非本按钮');

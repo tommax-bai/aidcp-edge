@@ -324,6 +324,38 @@ async function refreshAllowedEnvironments() {
   }
   return true;
 }
+
+async function attachClientEnvironmentToCurrentUser({ userId, name, platform } = {}) {
+  const envKey = String(userId || '').trim();
+  if (!envKey || !clientAuthEnabled() || !hasValidSession()) return { ok: true, attached: false };
+  const r = await clientAuthFetch('/environments', {
+    method: 'POST',
+    token: clientSession.token,
+    body: { envKey, label: String(name || '').trim(), platform: normalizePlatform(platform) },
+  });
+  if (r.status === 401) {
+    onSessionInvalid();
+    return { ok: false, attached: false, error: '客户端登录已失效，新环境已创建但未能分配给当前用户，请重新登录后在后台分配。' };
+  }
+  if (!r.ok) {
+    const detail = r.error ? `（${r.error}）` : '';
+    return { ok: false, attached: false, error: `新环境已创建，但分配给当前用户失败${detail}。` };
+  }
+  if (!(allowedProfileIds instanceof Set)) allowedProfileIds = new Set();
+  allowedProfileIds.add(envKey);
+  return { ok: true, attached: true };
+}
+
+function withClientAttachment(result, attach) {
+  if (!result || !result.ok || !attach || attach.ok) {
+    return attach && attach.attached ? { ...result, assignedToCurrentClient: true } : result;
+  }
+  return {
+    ...result,
+    assignedToCurrentClient: false,
+    visibilityWarning: attach.error || '新环境已创建，但分配给当前用户失败，刷新后可能暂不可见。',
+  };
+}
 // 会话失效（登出 / 被停用 / 令牌过期）：清会话 + 拆掉所有环境 handle（停在跑子进程）+ 关主窗 + 回登录门。
 function onSessionInvalid() {
   clearClientSession();
@@ -2514,20 +2546,22 @@ ipcMain.handle('client-auth:session', () => ({
   enabled: clientAuthEnabled(),
   name: (clientSession && clientSession.name) || null,
 }));
-ipcMain.handle('settings:save', (_event, patch) => {
+ipcMain.handle('settings:save', async (_event, patch) => {
   const beforeIds = new Set((settings.environments || []).map((e) => e.profileId).filter(Boolean));
   const res = saveSettings(patch);
   // 自动归属（change edge-client-customer-auth）：登录态下新增的环境归当前客户,并乐观即时可见。
-  // 只对「本次新出现的 profileId」登记；已有环境不重复。attach 后台 best-effort,失败不阻断保存。
+  // 只对「本次新出现的 profileId」登记；已有环境不重复。这里必须 await：否则创建成功后紧接着刷新可见集时，
+  // 云端归属可能尚未写入，登录态列表会按旧 scope 过滤掉刚创建的环境。
+  const attachErrors = [];
   if (clientAuthEnabled() && hasValidSession() && allowedProfileIds) {
     for (const env of settings.environments) {
       if (env.profileId && !beforeIds.has(env.profileId)) {
-        allowedProfileIds.add(env.profileId);
-        void clientAuthFetch('/environments', {
-          method: 'POST',
-          token: clientSession.token,
-          body: { envKey: env.profileId, label: env.name || '', platform: env.platform || '' },
+        const attach = await attachClientEnvironmentToCurrentUser({
+          userId: env.profileId,
+          name: env.name,
+          platform: env.platform,
         });
+        if (!attach.ok) attachErrors.push(attach.error || '分配给当前用户失败');
       }
     }
   }
@@ -2541,7 +2575,13 @@ ipcMain.handle('settings:save', (_event, patch) => {
     });
   }
   broadcastFleet(); // cloudEnv 目标云端可能已变，推快照让界面「当前云端」即时刷新（保存不打断在跑核心）
-  return { ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL, cloudEnv: cloudSelectionView(), saveOk: res.ok, saveError: res.error };
+  return {
+    ...settings,
+    adsDownloadUrl: ADS_DOWNLOAD_URL,
+    cloudEnv: cloudSelectionView(),
+    saveOk: res.ok && attachErrors.length === 0,
+    saveError: res.error || attachErrors[0],
+  };
 });
 // 「全部重启并连接新云端」（change edge-cloud-env-selector）：切换云端后显式把全部在跑 / 退避中的环境
 // 有序重启，使其按新选择重新解析云端地址连接——避免部分环境连旧云、部分连新云的裂脑。
@@ -2684,7 +2724,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
     const entries = parsedImport.entries || [];
     if (entries.length === 0) {
-      return await createEnvironmentWithGroupRecovery({
+      const result = await createEnvironmentWithGroupRecovery({
         writeApi,
         adsApi,
         fingerprint: adsFingerprint,
@@ -2696,9 +2736,19 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         proxy: opts && opts.proxy, // 原始表单输入；归一/校验在 create-flow 的归一层做
         groupResolver: envGroupResolver,
       });
+      if (result && result.ok) {
+        const attach = await attachClientEnvironmentToCurrentUser({
+          userId: result.userId,
+          name: result.name,
+          platform: result.platform || platform,
+        });
+        return withClientAttachment(result, attach);
+      }
+      return result;
     }
 
     const created = [];
+    const attachErrors = [];
     for (let i = 0; i < entries.length; i += 1) {
       const entry = entries[i];
       const result = await createEnvironmentWithGroupRecovery({
@@ -2728,6 +2778,12 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         template: result.template,
         platform: result.platform,
       });
+      const attach = await attachClientEnvironmentToCurrentUser({
+        userId: result.userId,
+        name: result.name,
+        platform: result.platform || platform,
+      });
+      if (!attach.ok) attachErrors.push(`第 ${i + 1} 行：${attach.error || '分配给当前用户失败'}`);
     }
     return {
       ok: true,
@@ -2738,6 +2794,10 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       platform,
       created,
       createdCount: created.length,
+      assignedToCurrentClient: attachErrors.length === 0 && created.length > 0 && clientAuthEnabled() && hasValidSession(),
+      visibilityWarning: attachErrors.length
+        ? `已创建 ${created.length} 个环境，但有 ${attachErrors.length} 个未能分配给当前用户，刷新后可能暂不可见。`
+        : undefined,
     };
   } catch (e) {
     return { ok: false, error: `创建失败：${(e && e.message) || String(e)}` };
