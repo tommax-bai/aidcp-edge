@@ -297,6 +297,10 @@ test('classifyCtaLabel: 已加入 / 待批准语义优先于 join（避免子串
   assert.equal(classifyCtaLabel('Rời nhóm'), 'member');           // 越南语「退出小组」
   assert.equal(classifyCtaLabel('Solicitud enviada'), 'pending'); // 西语「已申请」
   assert.equal(classifyCtaLabel('Đang chờ phê duyệt'), 'pending');// 越南语「待批准」
+  assert.equal(classifyCtaLabel('取消请求'), 'pending');           // 中文「取消请求」= 已提交入群申请，待审核
+  assert.equal(classifyCtaLabel('取消加入请求'), 'pending');
+  assert.equal(classifyCtaLabel('取消申请'), 'pending');
+  assert.equal(classifyCtaLabel('已发送请求'), 'pending');
   assert.equal(classifyCtaLabel('Pending'), 'pending');
 });
 
@@ -306,6 +310,7 @@ test('classifyCtaLabel: 空 / 无关标签 → 空（保持 fail-closed，不误
   assert.equal(classifyCtaLabel('Share'), '');
   assert.equal(classifyCtaLabel('Invite'), '');
   assert.equal(classifyCtaLabel('分享'), '');
+  assert.equal(classifyCtaLabel('取消'), '');
 });
 
 test('fb-join-executor: 同意浮层清不掉 → blocked_by_consent，不点击 Join', async () => {
@@ -552,6 +557,32 @@ function makeJsdomExecutor(dom: JSDOM) {
     { settleMs: 0, waitAfterClickMs: 0, readyTimeoutMs: 2000, pollMs: 500, postClickTimeoutMs: 2000, preClickSettleMs: 0 },
   );
 }
+
+// ── change facebook-join-pending-label-audit：中文 pending 按钮形态「取消请求」必须如实判 pending ──
+test('pending-label-audit[jsdom]: 目标群「取消请求」按钮 → pendingRequest=true，绝不尝试点击', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">取消请求</div></div>' +
+      '</div>',
+  );
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.reason, 'pending');
+  assert.equal(r.clicked, false);
+  assert.equal(r.observation?.pendingRequest, true);
+  assert.equal(r.observation?.mainCtaText, '取消请求');
+});
+
+test('pending-label-audit[jsdom]: 裸「取消」按钮不触发 pending 误判', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">取消</div></div>' +
+      '</div>',
+  );
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.reason, 'no_button');
+  assert.equal(r.clicked, false);
+  assert.equal(r.observation?.pendingRequest, false);
+});
 
 // § 本次订正核心红线：推荐位异群 join 是**兄弟裸 div[role=button]、无异群 href 祖先** → 黑名单（异群链接排除）漏排、
 // 唯有正向包含（目标头部块之外默认出域）挡得住。

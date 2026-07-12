@@ -219,7 +219,8 @@ export const MEMBER_CTA_LABELS: readonly string[] = [
   '已是成员', '你已加入',
 ];
 export const PENDING_CTA_LABELS: readonly string[] = [
-  'pending', 'request sent', 'cancel request', '待批准', '已申请', '待审批', 'đang chờ', 'hủy yêu cầu',
+  'pending', 'request sent', 'cancel request', '待批准', '已申请', '待审批', '取消请求', '取消加入请求',
+  '取消申请', '已发送请求', 'đang chờ', 'hủy yêu cầu',
   'solicitud enviada', 'cancelar solicitud', 'menunggu', 'batalkan permintaan', 'demande envoyée',
   'annuler la demande', 'anfrage gesendet', 'รอการอนุมัติ', '요청 보냄', '요청됨',
 ];
