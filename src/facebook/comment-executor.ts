@@ -17,7 +17,6 @@ import {
   dispatchKeystrokes,
   evalJson,
   evalRaw,
-  insertText,
   type BrowseCdp,
 } from '../browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../browse/overlay-monitor.js';
@@ -172,6 +171,14 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
 
 function jsString(s: string): string {
   return JSON.stringify(s);
+}
+
+function textFragment(s: string): string {
+  return s.replace(/\s+/g, ' ').trim().slice(0, 60);
+}
+
+function requiredTextFragments(body: string, contactInfo?: string): string[] {
+  return [textFragment(body), contactInfo ? textFragment(contactInfo) : ''].filter(Boolean);
 }
 
 /**
@@ -468,9 +475,18 @@ export class FacebookCommentExecutor {
       return { ok: false, reason: 'marker_not_accepted', submitted: false, serverConfirmed: false };
     }
     const code = contactInfo && contactInfo.length > 0 ? contactInfo : '';
+    const requiredFragments = requiredTextFragments(body, code);
     if (code) {
-      await insertText(this.cdp, `\n${code}`);
-      this.log(`[fb-comment] 联系方式整段插入（${code.length} 字，绕过逐字补全）`);
+      // 真机探针实证：正文逐字输入后，再用单次 Input.insertText 灌入 "\n+联系方式" 会被 FB/React
+      // 编辑器吞掉整段；换行和联系方式逐字符输入可稳定进入编辑器。
+      await dispatchKeystrokes(this.cdp, `\n${code}`, { sleep: this.sleep });
+      const contactAccepted = await evalJson<{ accepted: boolean }>(this.cdp, buildEditorContainsFragmentsJs(requiredFragments));
+      if (!contactAccepted?.accepted) {
+        this.log(`[fb-comment] 联系方式追加后未被编辑器验收（${code.length} 字）——不提交，避免裸发`);
+        await this.clearEditorBestEffort();
+        return { ok: false, reason: 'marker_not_accepted', submitted: false, serverConfirmed: false };
+      }
+      this.log(`[fb-comment] 联系方式逐字符追加并验收通过（${code.length} 字）`);
     }
 
     // 提交前二次 fresh 复检验证码：真验证码绝不硬提交（清空编辑器不留痕）。
@@ -487,7 +503,7 @@ export class FacebookCommentExecutor {
     await dispatchKey(this.cdp, 'Enter', 'Enter', 13);
 
     // (1) 就地 ack 门控快确认（不刷新，抓服务器点头即成功、比刷新又快又准）。
-    if (await this.inPlaceAckConfirm(body, ownId, targetUrl)) {
+    if (await this.inPlaceAckConfirm(requiredFragments, ownId, targetUrl)) {
       return { ok: true, submitted: true, serverConfirmed: true };
     }
     // (2) 兜底：刷新一次 + 有界轮询三重收窄确认（治慢渲染假阴性；提交后误导性报错浮层不当作失败，确认信号权威）。
@@ -497,7 +513,7 @@ export class FacebookCommentExecutor {
       this.log(`[fb-comment] reload 失败：${(err as Error).message}`);
       return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
     }
-    if (await this.reloadScopedConfirm(body, ownId, targetUrl)) {
+    if (await this.reloadScopedConfirm(requiredFragments, ownId, targetUrl)) {
       return { ok: true, submitted: true, serverConfirmed: true };
     }
     return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
@@ -507,12 +523,12 @@ export class FacebookCommentExecutor {
    * 就地 ack 门控确认（不刷新）：有界轮询，命中「服务器正式评论 id 或 点赞/回复交互控件」即成功。
    * 有界轮次 + 注入式 sleep（不用 wall-clock 循环），测试可确定性驱动。
    */
-  private async inPlaceAckConfirm(body: string, ownId: string, targetUrl: string): Promise<boolean> {
+  private async inPlaceAckConfirm(requiredFragments: string[], ownId: string, targetUrl: string): Promise<boolean> {
     await this.sleep(this.opts.waitAfterSubmitMs);
     for (let i = 0; i < this.opts.inPlaceVerifyRounds; i++) {
       if (i > 0) await this.sleep(this.opts.inPlaceVerifyIntervalMs);
       try {
-        const v = await evalJson<AckVerifyResult>(this.cdp, buildAckVerifyJs(body, ownId, targetUrl));
+        const v = await evalJson<AckVerifyResult>(this.cdp, buildAckVerifyJs(requiredFragments, ownId, targetUrl));
         if (v?.ackConfirmed) return true;
       } catch (err) {
         this.log(`[fb-comment] 就地 ack 确认探测失败：${(err as Error).message}`);
@@ -525,12 +541,12 @@ export class FacebookCommentExecutor {
    * 刷新兜底后有界轮询三重收窄确认（own-identity + 目标帖评论区 + 文本片段）。
    * 替代旧「reload 后死等一次」：慢渲染下评论已在服务器却没在单次窗口重渲染 → 多查几眼即命中（治 P2② 假阴性）。
    */
-  private async reloadScopedConfirm(body: string, ownId: string, targetUrl: string): Promise<boolean> {
+  private async reloadScopedConfirm(requiredFragments: string[], ownId: string, targetUrl: string): Promise<boolean> {
     await this.sleep(this.opts.waitAfterReloadMs);
     for (let i = 0; i < this.opts.reloadVerifyRounds; i++) {
       if (i > 0) await this.sleep(this.opts.reloadVerifyIntervalMs);
       try {
-        const v = await evalJson<ScopedVerifyResult>(this.cdp, buildScopedVerifyJs(body, ownId, targetUrl));
+        const v = await evalJson<ScopedVerifyResult>(this.cdp, buildScopedVerifyJs(requiredFragments, ownId, targetUrl));
         if (v?.confirmed) return true;
       } catch (err) {
         this.log(`[fb-comment] 刷新确认探测失败：${(err as Error).message}`);
@@ -711,6 +727,16 @@ function buildMarkerAcceptedJs(text: string): string {
   })()`;
 }
 
+function buildEditorContainsFragmentsJs(fragments: string[]): string {
+  return `(function(){${FB_EXEC_HELPERS_JS}
+    var eds=fbEditors(); var el=eds[0]||document.activeElement;
+    var t=fbText(el);
+    var fragments=${JSON.stringify(fragments)};
+    var accepted=fragments.length>0 && fragments.every(function(f){ return f && t.indexOf(f)>=0; });
+    return JSON.stringify({accepted:accepted});
+  })()`;
+}
+
 /** 全选评论编辑器内容（配合 Backspace 清空，不提交）。 */
 const SELECT_EDITOR_CONTENTS_JS = `(function(){${FB_EXEC_HELPERS_JS}
   var eds=fbEditors(); var el=eds[0]||document.activeElement; if(!el) return 'no-editor';
@@ -723,8 +749,7 @@ const SELECT_EDITOR_CONTENTS_JS = `(function(){${FB_EXEC_HELPERS_JS}
  * - 在其评论区找评论节点：文本含片段（前 60 字）且节点内有指向本人数字 id 的作者链接。
  * - 全页文本命中（旧探针）不作数；缺任一命中 → confirmed=false。
  */
-function buildScopedVerifyJs(text: string, ownId: string, targetUrl: string): string {
-  const fragment = text.trim().slice(0, 60);
+function buildScopedVerifyJs(requiredFragments: string[], ownId: string, targetUrl: string): string {
   let targetPath = '';
   try {
     targetPath = new URL(targetUrl).pathname;
@@ -732,7 +757,8 @@ function buildScopedVerifyJs(text: string, ownId: string, targetUrl: string): st
     targetPath = '';
   }
   return `(function(){${FB_EXEC_HELPERS_JS}
-    var frag=${jsString(fragment)}; var ownId=${jsString(ownId)}; var targetPath=${jsString(targetPath)};
+    var fragments=${JSON.stringify(requiredFragments)}; var ownId=${jsString(ownId)}; var targetPath=${jsString(targetPath)};
+    function hasAllFragments(txt){ return fragments.length>0 && fragments.every(function(f){ return f && txt.indexOf(f)>=0; }); }
     var articles=Array.prototype.slice.call(document.querySelectorAll('[role="article"], article'));
     if(articles.length===0) return JSON.stringify({confirmed:false,matchedText:false,matchedOwnIdentity:false,articleCount:0});
     var target=null;
@@ -743,7 +769,7 @@ function buildScopedVerifyJs(text: string, ownId: string, targetUrl: string): st
     if(commentNodes.length===0) commentNodes=[target];
     var matchedText=false, matchedOwn=false;
     for(var k=0;k<commentNodes.length;k++){ var node=commentNodes[k];
-      var txt=fbText(node); var hasText=frag.length>0 && txt.indexOf(frag)>=0; if(!hasText) continue; matchedText=true;
+      var txt=fbText(node); var hasText=hasAllFragments(txt); if(!hasText) continue; matchedText=true;
       var authorLinks=node.querySelectorAll('a[href*="/profile.php?id="], a[href*="/people/"], a[href*="user/"]');
       for(var a=0;a<authorLinks.length;a++){ if((authorLinks[a].getAttribute('href')||'').indexOf(ownId)>=0){ matchedOwn=true; break; } }
       if(matchedText&&matchedOwn) break;
@@ -757,8 +783,7 @@ function buildScopedVerifyJs(text: string, ownId: string, targetUrl: string): st
  * ① 服务器正式评论 id（非 client 乐观占位，与 isServerFacebookCommentId 同源）；② 点赞/回复交互控件（乐观阶段为 0）。
  * 任一命中即 ackConfirmed。语言无关（不吃任何 locale 文案）。红线：绝不据乐观渲染/占位 id 冒充成功。
  */
-function buildAckVerifyJs(text: string, ownId: string, targetUrl: string): string {
-  const fragment = text.trim().slice(0, 60);
+function buildAckVerifyJs(requiredFragments: string[], ownId: string, targetUrl: string): string {
   let targetPath = '';
   try {
     targetPath = new URL(targetUrl).pathname;
@@ -766,7 +791,8 @@ function buildAckVerifyJs(text: string, ownId: string, targetUrl: string): strin
     targetPath = '';
   }
   return `(function(){${FB_EXEC_HELPERS_JS}
-    var frag=${jsString(fragment)}; var ownId=${jsString(ownId)}; var targetPath=${jsString(targetPath)};
+    var fragments=${JSON.stringify(requiredFragments)}; var ownId=${jsString(ownId)}; var targetPath=${jsString(targetPath)};
+    function hasAllFragments(txt){ return fragments.length>0 && fragments.every(function(f){ return f && txt.indexOf(f)>=0; }); }
     var CLIENT_RE=/${FB_CLIENT_COMMENT_ID_RE.source}/i; var SERVER_RE=/${FB_SERVER_COMMENT_ID_RE.source}/;
     function serverId(href){ var m=/[?&](?:reply_comment_id|comment_id)=([^&]+)/i.exec(href||''); if(!m) return false; var v=''; try{ v=decodeURIComponent(m[1]); }catch(e){ v=m[1]; } if(!v||CLIENT_RE.test(v)) return false; return SERVER_RE.test(v); }
     var articles=Array.prototype.slice.call(document.querySelectorAll('[role="article"], article'));
@@ -776,7 +802,7 @@ function buildAckVerifyJs(text: string, ownId: string, targetUrl: string): strin
     if(!target) target=articles[0];
     var nodes=Array.prototype.slice.call(target.querySelectorAll('[role="article"]')); if(nodes.length===0) nodes=[target];
     for(var k=0;k<nodes.length;k++){ var node=nodes[k];
-      var txt=fbText(node); if(!(frag.length>0 && txt.indexOf(frag)>=0)) continue;
+      var txt=fbText(node); if(!hasAllFragments(txt)) continue;
       var owns=node.querySelectorAll('a[href*="/profile.php?id="], a[href*="/people/"], a[href*="user/"]'); var ownHit=false;
       for(var a=0;a<owns.length;a++){ if((owns[a].getAttribute('href')||'').indexOf(ownId)>=0){ ownHit=true; break; } }
       if(!ownHit) continue;
