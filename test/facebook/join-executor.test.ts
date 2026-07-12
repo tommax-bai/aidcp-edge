@@ -838,6 +838,27 @@ test('scope-guard[jsdom]: 双列推荐卡片（异群链接在缩略图列、群
   assert.equal(r.ok, true, '点后 joined（目标群）');
 });
 
+// § 五轮再评审：异群 /groups 链接**游离在推荐卡片外**（卡片自身无引用、其 h1 上溯停在 ceiling）→ 目标区与推荐卡片区都成「干净 h1 区域」= 歧义。
+// 歧义守卫：≥2 个合格 h1 区域 → fail-closed（not_ready），绝不在无法确信哪个是目标时点错群。
+test('scope-guard[jsdom]: 异群链接游离在推荐卡片外（卡片无引用）致目标区与卡片区对称歧义 → fail-closed、绝不点错群（五轮安全网）', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<a href="/groups/999">Other</a>' +
+      '<div class="card"><h1>Rail Group</h1><div role="button" id="rail">加入小组</div></div>' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">加入小组</div></div>' +
+      '</div>',
+  );
+  const doc = dom.window.document;
+  let railClicked = false;
+  let targetClicked = false;
+  (doc.getElementById('rail') as HTMLElement).addEventListener('click', () => { railClicked = true; });
+  (doc.getElementById('target') as HTMLElement).addEventListener('click', () => { targetClicked = true; });
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.reason, 'not_ready', '两个对称干净 h1 区域 → 歧义 → fail-closed 可重试');
+  assert.equal(railClicked, false, '歧义下绝不点推荐位异群 join（红线降级为 fail-closed）');
+  assert.equal(targetClicked, false);
+});
+
 // § 四轮再评审红线闭合（成员方向）：双列推荐卡片内容列显示异群「已加入」→ 修前 heading 盲取致其在域 → 伪造 already_member。修后甄别掉推荐卡片 heading。
 test('scope-guard[jsdom]: 双列推荐卡片内容列显示异群「已加入」+ 卡片 heading 在目标之前 → 不伪造 already_member（四轮闭合）', async () => {
   const dom = buildGroupDom(

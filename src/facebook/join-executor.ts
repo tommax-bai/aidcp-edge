@@ -352,6 +352,7 @@ const SCOPE_HELPERS_JS = String.raw`
   // 逐个 heading 试，取首个「停在 ceiling 且块无异群引用」的；无一合格 → null（fail-closed）。
   function __resolveHeaderBlock(targetGid){
     var hs = __groupHeadings();
+    var accepted = [];
     for (var hi = 0; hi < hs.length; hi++){
       var h = hs[hi];
       var ceiling = (h.closest && h.closest('[role="main"]')) || document.body;
@@ -368,9 +369,11 @@ const SCOPE_HELPERS_JS = String.raw`
       }
       if (brokeBelowCeiling) continue;                                    // 推荐卡片内的 heading → 试下一个
       if (node === h && __hasForeignGroupRef(node, targetGid)) continue;  // 起点 h 子树自身带异群引用 → 试下一个
-      return node;
+      accepted.push(node);
     }
-    return null; // 无任一 heading 产出「停在 ceiling + 块无异群引用」的目标头部块 → fail-closed
+    // 歧义即 fail-closed（对抗评审 v5，原则性安全网）：正常页恰一个「停在 ceiling 的干净 h1 区域」（目标群头部；推荐卡片带自身异群引用故其 h1 停在中层被跳过）。
+    // 出现 ≥2 个 → 说明有对称的干净 h1 区域（如异群链接游离在卡片外、卡片本身无引用 → 目标与推荐卡片都被接受）→ 无法确信哪个是目标 → 宁可不点（可重试），绝不在歧义下点错群。
+    return accepted.length === 1 ? accepted[0] : null;
   }
   var __HEADER_BLOCK = __resolveHeaderBlock(__TARGET_GID);
   // E1（corroborating）：候选自身或祖先链上任一元素（含属性编码 id 的 div[role=button]/裸 div）解析到异群 /groups/ → 排除。
