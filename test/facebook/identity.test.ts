@@ -2,8 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   cleanFacebookDisplayName,
+  classifyFacebookIdentityPageContext,
   deriveFacebookIdentity,
   extractFacebookIdFromHref,
+  readFacebookIdentityPageContext,
   readFacebookIdentity,
   type FacebookIdentitySignals,
 } from '../../src/facebook/index.js';
@@ -105,6 +107,20 @@ test('cleanFacebookDisplayName: strips Facebook title suffixes and rejects gener
   assert.equal(cleanFacebookDisplayName(' Test User | Facebook '), 'Test User');
   assert.equal(cleanFacebookDisplayName('Facebook'), null);
   assert.equal(cleanFacebookDisplayName('Facebook - log in or sign up'), null);
+});
+
+test('classifyFacebookIdentityPageContext: Facebook pages are consumer; login/recovery/checkpoint are lost signals', () => {
+  assert.equal(classifyFacebookIdentityPageContext('https://www.facebook.com/'), 'consumer');
+  assert.equal(classifyFacebookIdentityPageContext('https://m.facebook.com/story.php?story_fbid=x'), 'consumer');
+  assert.equal(classifyFacebookIdentityPageContext('https://www.facebook.com/login/?next=x'), 'creator-login');
+  assert.equal(classifyFacebookIdentityPageContext('https://www.facebook.com/recover/initiate/'), 'creator-login');
+  assert.equal(classifyFacebookIdentityPageContext('https://www.facebook.com/checkpoint/123'), 'creator-login');
+  assert.equal(classifyFacebookIdentityPageContext('https://example.com/'), 'unknown');
+});
+
+test('readFacebookIdentityPageContext: reads location.href and classifies without navigation', async () => {
+  const res = await readFacebookIdentityPageContext(fakeCdp('https://www.facebook.com/login/?next=x'));
+  assert.equal(res, 'creator-login');
 });
 
 test('deriveFacebookIdentity: c_user cookie succeeds when profile link is not rendered yet', () => {

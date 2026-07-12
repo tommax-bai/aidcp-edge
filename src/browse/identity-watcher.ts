@@ -14,7 +14,13 @@
  */
 import type { SupervisableWatcher } from './watcher-supervisor.js';
 import type { BrowseCdp } from './cdp-util.js';
-import { readSelfIdentity, readPageContext, type PageContext } from '../cdp/index.js';
+import {
+  readSelfIdentity,
+  readPageContext,
+  type PageContext,
+  type ReadSelfIdentityOptions,
+  type SelfIdentityResult,
+} from '../cdp/index.js';
 
 export type IdentityHealth = 'healthy' | 'invalid';
 export type IdentityInvalidReason = { kind: 'lost' } | { kind: 'changed'; newId: string };
@@ -30,6 +36,8 @@ export interface IdentityWatcherOptions {
   clearTimer?: (handle: ReturnType<typeof setInterval>) => void;
   /** 读当前页身份判定上下文（默认按 cdp 读 location.href 分域）。测试可注入。 */
   pageContext?: () => Promise<PageContext>;
+  /** 运行期就地读身份函数；缺省为小红书 readSelfIdentity，Facebook 等平台可注入自己的稳定 id 读取器。 */
+  readIdentity?: (cdp: BrowseCdp, opts?: ReadSelfIdentityOptions) => Promise<SelfIdentityResult>;
   /**
    * 正向登出探针：消费页读不出本人锚点时，用它区分「真登出」与「停在无侧栏页/弹层态」——
    * 登录浮层可见=真登出（判 lost），不可见=无法确认（本轮跳过）。
@@ -53,6 +61,7 @@ export class IdentityWatcher implements SupervisableWatcher<IdentityHealth> {
   private readonly setTimer: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
   private readonly clearTimer: (handle: ReturnType<typeof setInterval>) => void;
   private readonly readContext: () => Promise<PageContext>;
+  private readonly readIdentity: (cdp: BrowseCdp, opts?: ReadSelfIdentityOptions) => Promise<SelfIdentityResult>;
   private readonly confirmLoggedOut: () => Promise<boolean>;
 
   constructor(
@@ -66,6 +75,7 @@ export class IdentityWatcher implements SupervisableWatcher<IdentityHealth> {
     this.setTimer = opts.setTimer ?? ((fn, ms) => setInterval(fn, ms));
     this.clearTimer = opts.clearTimer ?? ((h) => clearInterval(h));
     this.readContext = opts.pageContext ?? (() => readPageContext(this.cdp));
+    this.readIdentity = opts.readIdentity ?? readSelfIdentity;
     this.confirmLoggedOut = opts.confirmLoggedOut ?? (async () => true);
   }
 
@@ -114,7 +124,7 @@ export class IdentityWatcher implements SupervisableWatcher<IdentityHealth> {
       } else {
         // 消费端页面：就地读稳定 id。
         try {
-          const res = await readSelfIdentity(this.cdp, { allowNavigate: false });
+          const res = await this.readIdentity(this.cdp, { allowNavigate: false });
           if (res.ok) {
             if (res.identity.accountId === this.establishedId) {
               this.consecutive = 0;

@@ -1,5 +1,5 @@
 import { evalRaw, type BrowseCdp } from '../browse/cdp-util.js';
-import type { ReadSelfIdentityOptions, SelfIdentityResult } from '../cdp/self-identity.js';
+import type { PageContext, ReadSelfIdentityOptions, SelfIdentityResult } from '../cdp/self-identity.js';
 
 export const FACEBOOK_NUMERIC_ID_RE = /^\d{5,}$/;
 
@@ -195,6 +195,27 @@ async function scanFacebookIdentitySignals(cdp: BrowseCdp, cookieUserId: string 
 
 function selfIdentitySource(source: FacebookIdentitySource): 'in-place' | 'facebook-cookie' {
   return String(source).startsWith('cookie') ? 'facebook-cookie' : 'in-place';
+}
+
+export function classifyFacebookIdentityPageContext(href: string | null | undefined): PageContext {
+  if (!href) return 'unknown';
+  let host = '';
+  let path = '';
+  try {
+    const url = new URL(href);
+    host = url.hostname.toLowerCase();
+    path = url.pathname.toLowerCase();
+  } catch {
+    return 'unknown';
+  }
+  if (!(host === 'facebook.com' || host.endsWith('.facebook.com'))) return 'unknown';
+  if (/\/(login|recover|checkpoint|two_step_verification)(?:\/|$)/.test(path)) return 'creator-login';
+  return 'consumer';
+}
+
+export async function readFacebookIdentityPageContext(cdp: BrowseCdp): Promise<PageContext> {
+  const href = await evalRaw<string>(cdp, 'location.href').catch(() => '');
+  return classifyFacebookIdentityPageContext(href);
 }
 
 export async function readFacebookIdentity(
