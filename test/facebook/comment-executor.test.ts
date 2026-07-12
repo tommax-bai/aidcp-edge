@@ -62,6 +62,7 @@ interface FakeConfig {
   structureFor?: (scrolls: number) => RawStruct;
   focus?: { found: boolean; focused: boolean; permissionGated: boolean };
   accepted?: boolean;
+  contactAccepted?: boolean;
   submitCtl?: { found: boolean; disabled: boolean; label: string | null; x: number; y: number };
   verify?: { confirmed: boolean; matchedText: boolean; matchedOwnIdentity: boolean; articleCount: number };
   /** 就地 ack 门控确认结果（默认不确认 → 流程落到刷新兜底，保留旧路径覆盖）。 */
@@ -78,6 +79,7 @@ class FakeCdp implements BrowseCdp {
   scrolls = 0;
   clicks: Array<{ x: number; y: number }> = [];
   typed = '';
+  insertTexts: string[] = [];
   backspaces = 0;
   enters = 0;
   verifyCalls = 0;
@@ -98,7 +100,9 @@ class FakeCdp implements BrowseCdp {
       return {} as T;
     }
     if (method === 'Input.insertText') {
-      this.typed += String(params.text ?? '');
+      const text = String(params.text ?? '');
+      this.insertTexts.push(text);
+      this.typed += text;
       return {} as T;
     }
     if (method === 'Input.dispatchKeyEvent') {
@@ -126,6 +130,9 @@ class FakeCdp implements BrowseCdp {
       }
       if (expr.includes('accepted: t.indexOf')) {
         return val(JSON.stringify({ accepted: this.cfg.accepted ?? true }));
+      }
+      if (expr.includes('{accepted:accepted}')) {
+        return val(JSON.stringify({ accepted: this.cfg.contactAccepted ?? true }));
       }
       if (expr.includes('r.left+r.width/2')) {
         return val(JSON.stringify(this.cfg.submitCtl ?? { found: true, disabled: false, label: 'Post', x: 50, y: 60 }));
@@ -349,7 +356,7 @@ test('fb-executor: 服务器确认命中 → ok:true（回车提交 + reload 都
   assert.match(cdp.typed, /很喜欢这条分享/);
 });
 
-test('fb-executor: 联系方式用 Input.insertText 整段追加，正文仍先拟人输入', async () => {
+test('fb-executor: 联系方式逐字符追加并验收，避免换行+联系方式整段 bulk 被 FB 吞掉', async () => {
   const cdp = new FakeCdp({
     verify: { confirmed: true, matchedText: true, matchedOwnIdentity: true, articleCount: 1 },
   });
@@ -358,7 +365,20 @@ test('fb-executor: 联系方式用 Input.insertText 整段追加，正文仍先�
   assert.equal(r.ok, true);
   assert.match(cdp.typed, /正文评论/);
   assert.match(cdp.typed, /\nLINE ID: abc123/);
+  assert.equal(cdp.insertTexts.some((text) => text === '\nLINE ID: abc123'), false, '不得再用失败的换行+联系方式整段 bulk 追加');
+  assert.equal(cdp.insertTexts.some((text) => text === '\n'), true, '换行应作为独立输入事件进入编辑器');
   assert.ok(cdp.enters >= 1, '联系方式插入后仍用回车提交');
+});
+
+test('fb-executor: 联系方式追加后未被编辑器验收 → 不提交，避免裸发正文', async () => {
+  const cdp = new FakeCdp({ contactAccepted: false });
+  const ex = makeExecutor(cdp);
+  const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '正文评论', 'LINE ID: abc123');
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'marker_not_accepted');
+  assert.equal(r.submitted, false);
+  assert.equal(cdp.enters, 0, '联系方式没被验收时不能按 Enter 发布');
+  assert.ok(cdp.backspaces >= 1, '失败时应清空草稿');
 });
 
 test('fb-executor: reload 后仅乐观渲染、own-identity 未命中 → verification_ambiguous（F1 补丁②：不冒充成功）', async () => {
