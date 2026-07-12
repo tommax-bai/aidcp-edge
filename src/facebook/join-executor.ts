@@ -320,10 +320,12 @@ const SCOPE_HELPERS_JS = String.raw`
     }
     return null;
   }
-  // node 子树内是否含「异于目标群」的 group 导航引用（a[href] 或 role=link，含属性编码的 id）——框定头部块上界（再往上纳入异群引用即停）。
+  // node 子树内是否含「异于目标群」的 group 导航引用——**扫全部元素**的 href/属性值（二轮评审红线闭合）：
+  // group id 可能编码在 div[role=button]/裸 div 的 data-* 上（非 a[href]/role=link），只查 link 元素会漏检 → 头部块吞掉推荐位（红线）。
+  // 早退于首个异群引用；无异群时全扫（即无推荐位、无风险的场景，只是确认干净）。残留仅剩「id 完全不在任何属性、只活 JS 闭包」（0.1 gated）。
   function __hasForeignGroupRef(node, targetGid){
     if (!node || !node.querySelectorAll) return false;
-    var els = node.querySelectorAll('a[href],[role="link"]');
+    var els = node.querySelectorAll('*');
     for (var i = 0; i < els.length; i++){
       var gid = __groupIdFromEl(els[i]);
       if (gid && (!targetGid || gid !== targetGid)) return true;
@@ -351,12 +353,16 @@ const SCOPE_HELPERS_JS = String.raw`
     return node;
   }
   var __HEADER_BLOCK = __resolveHeaderBlock(__TARGET_GID);
-  // E1（corroborating）：候选自身/最近祖先导航引用（a[href] 或 role=link，含属性编码 id）解析到异群 /groups/ → 排除。
+  // E1（corroborating）：候选自身或祖先链上任一元素（含属性编码 id 的 div[role=button]/裸 div）解析到异群 /groups/ → 排除。
+  // 上溯 12 层足够覆盖卡片包裹；D1 已扫兄弟子树、E1 补候选祖先链，两者合起覆盖属性编码在「候选自身/祖先」与「兄弟」两类。
   function __candForeignRef(el, targetGid){
-    var ref = (el.closest && el.closest('a[href],[role="link"]')) || null;
-    if (!ref) return false;
-    var gid = __groupIdFromEl(ref);
-    return !!gid && (!targetGid || gid !== targetGid);
+    var node = el;
+    for (var hops = 0; node && hops < 12; hops++){
+      var gid = __groupIdFromEl(node);
+      if (gid && (!targetGid || gid !== targetGid)) return true;
+      node = node.parentElement;
+    }
+    return false;
   }
   // 最终判据 = D1 正向包含 AND NOT E1（E2 校准前不接线）。fail-closed：无头部块一律出域。
   function __inTargetScope(el){

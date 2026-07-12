@@ -748,3 +748,44 @@ test('scope-guard[jsdom]: 点后目标未成成员、推荐位异群「已加入
     '点后 membershipSignals 亦不含推荐位异群「已加入」',
   );
 });
+
+// § 二轮再评审红线闭合：group id 编码在 **div[role="button"] 的属性**（data-*）上、子树内无任何 a[href]/[role=link] 带该 id。
+// 修前 __hasForeignGroupRef 只扫 a[href],[role=link] → 漏检 → 头部块吞掉推荐位 → 异群 join 被点（jsdom 复现 ok=true）。
+// 修后异群检测扫**全部元素**属性 → 识别出域。
+test('scope-guard[jsdom]: 异群 id 编码在 div[role=button] 的 data-* 属性（无 a[href]/role=link）→ 仍识别出域、不误点（二轮红线闭合）', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="header"><h1>Target Group</h1><div role="button" id="target">已申请</div></div>' +
+      '<div id="feed"><div class="card"><div class="name">Suggested</div><div role="button" id="rail" data-nav="/groups/999">加入小组</div></div></div>' +
+      '</div>',
+  );
+  let railClicked = false;
+  (dom.window.document.getElementById('rail') as HTMLElement).addEventListener('click', () => {
+    railClicked = true;
+  });
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.reason, 'pending', '目标 pending；属性编码在 role=button 上的异群 join 仍出域');
+  assert.equal(railClicked, false, '属性编码在非 link 元素上的异群 join 绝不被点（二轮红线闭合）');
+  assert.equal(r.observation?.outOfScopeJoinCount, 1, '被判出域并计数');
+});
+
+// § 二轮再评审 minor 闭合：D7-2 成员矛盾守卫需正反回归（mutation-killing：删 `&& !raw.joinButton?.found` 应致某测失败）。
+test('scope-guard: 真成员（域内成员 CTA、无 join 按钮）→ already_member（D7-2 基线正向断言）', async () => {
+  const cdp = new FakeCdp([
+    obs({ mainCtaText: '已加入', mainCtaAria: '已加入', membershipSignals: [], joinButton: { found: false } }),
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.reason, 'already_member', '成员 CTA + 无 join 按钮 → 诚实 already_member');
+  assert.equal(r.clicked, false);
+});
+
+test('scope-guard: 成员信号 + 域内有 join 按钮（矛盾污染）→ 抑制 already_member（D7-2 守卫，mutation-killing）', async () => {
+  // 有 join CTA 的群不可能已加入；成员信号必是异群污染（如极端不透明推荐位漏出域）→ 不判 already_member。
+  // 删掉守卫条件 `&& !raw.joinButton?.found` 会让本用例误判 already_member → 失败（护住守卫）。
+  const cdp = new FakeCdp([
+    obs({ mainCtaText: 'Join group', mainCtaAria: 'Join group', membershipSignals: ['已加入'], joinButton: { found: true, x: 100, y: 50 } }),
+  ]);
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123'); // observe-only
+  assert.notEqual(r.reason, 'already_member', '有域内 join 按钮时成员信号不伪造 already_member');
+  assert.equal(r.reason, 'observation_only');
+});
