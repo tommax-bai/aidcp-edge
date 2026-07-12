@@ -113,10 +113,11 @@ if [ ! -f resources/ads-runtime.json ]; then
   exit 1
 fi
 
-# 分发包可在构建期烘焙缺省云端环境（AIDCP_CLOUD_DEFAULT_ENV=dev|ol），注入 packaged package.json 的
-# aidcpCloudDefaultEnv 字段；客户端启动时据此决定"无界面选择/无启动环境变量"时连哪个云。
-# 未设置则不注入 → 客户端回落其自身缺省 dev（零回归）。注入到 dir 构建（写 .app 内 package.json）即可，
-# 后续 --prepackaged 复用已建 .app、无需重复。
+# 分发包可在构建期烘焙缺省云端环境（AIDCP_CLOUD_DEFAULT_ENV=dev|ol）和客户登录门地址
+# （AIDCP_CLIENT_AUTH_URL=http(s)://.../capi），注入 packaged package.json。客户端启动时据此决定
+# "无界面选择/无启动环境变量"时连哪个云、是否一装即启用客户登录验证。
+# 未设置则不注入 → 客户端回落其自身缺省 dev + 登录门关闭（零回归）。注入到 dir 构建（写 .app 内
+# package.json）即可，后续 --prepackaged 复用已建 .app、无需重复。
 builder_dir_args=("${builder_arch_args[@]}")
 if [ -n "${AIDCP_CLOUD_DEFAULT_ENV:-}" ]; then
   case "$AIDCP_CLOUD_DEFAULT_ENV" in
@@ -126,6 +127,22 @@ if [ -n "${AIDCP_CLOUD_DEFAULT_ENV:-}" ]; then
       ;;
     *)
       echo "Unsupported AIDCP_CLOUD_DEFAULT_ENV: $AIDCP_CLOUD_DEFAULT_ENV (want dev|ol)" >&2
+      exit 2
+      ;;
+  esac
+fi
+client_auth_url="${AIDCP_CLIENT_AUTH_URL:-}"
+while [ -n "$client_auth_url" ] && [ "${client_auth_url%/}" != "$client_auth_url" ]; do
+  client_auth_url="${client_auth_url%/}"
+done
+if [ -n "$client_auth_url" ]; then
+  case "$client_auth_url" in
+    http://*|https://*)
+      builder_dir_args+=("-c.extraMetadata.aidcpClientAuthUrl=$client_auth_url")
+      echo "Baking client auth URL into build: $client_auth_url"
+      ;;
+    *)
+      echo "Unsupported AIDCP_CLIENT_AUTH_URL: $client_auth_url (want http(s)://...)" >&2
       exit 2
       ;;
   esac

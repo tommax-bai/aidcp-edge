@@ -9,6 +9,8 @@ import { dirname, join } from 'node:path';
 // 锁住云端环境选择的关键不变量：地址映射、按选择解析、**在 env 合并之后**覆盖、留空零注入、custom 非法降级。
 const here = dirname(fileURLToPath(import.meta.url));
 const main = readFileSync(join(here, '../../src/electron/main.cjs'), 'utf8');
+const buildScript = readFileSync(join(here, '../../scripts/build-desktop-macos.sh'), 'utf8');
+const buildWorkflow = readFileSync(join(here, '../../.github/workflows/build-desktop.yml'), 'utf8');
 // 顺序不变量按**代码**位置比较：剥掉整行注释，避免注释里合法引用这些符号名污染位置。
 const code = main.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
 
@@ -85,5 +87,20 @@ test('烘焙缺省 dev/ol 必须像界面选择一样 fromSelection:true 显式�
     code,
     /BAKED_DEFAULT_CLOUD_ENV === 'dev' \|\| BAKED_DEFAULT_CLOUD_ENV === 'ol'[\s\S]*?fromSelection:\s*true/,
     '烘焙缺省 dev/ol 必须以 fromSelection:true 返回，保证显式注入 AIDCP_CLOUD_URL',
+  );
+});
+
+test('签名 mac 分发构建必须能烘焙客户登录门 URL，且 ol 默认指向 OL /capi', () => {
+  assert.match(buildScript, /AIDCP_CLIENT_AUTH_URL/, 'mac 签名脚本必须读取 AIDCP_CLIENT_AUTH_URL');
+  assert.match(
+    buildScript,
+    /extraMetadata\.aidcpClientAuthUrl/,
+    'mac 签名脚本必须把客户登录门地址写入 packaged package.json',
+  );
+  assert.match(buildWorkflow, /client_auth_url:/, 'CI workflow 必须暴露 client_auth_url 输入');
+  assert.match(
+    buildWorkflow,
+    /https:\/\/aidcp\.tommax\.cc\/capi/,
+    'ol 构建未显式传 client_auth_url 时，必须默认烘焙 OL 客户鉴权地址',
   );
 });

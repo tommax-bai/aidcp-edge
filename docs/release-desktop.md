@@ -49,9 +49,9 @@ npm run electron:build:win
 - 工作流：`aidcp-edge/.github/workflows/build-desktop.yml`（手动触发；核心脚本 `scripts/build-desktop-macos.sh` 完成签名 → notarytool 公证 → staple → Gatekeeper 校验）。
 
 - [ ] 确保第 1 步已推到 `master`（CI 从 master 拉代码），且第 1 步的 secret 齐全。
-- [ ] 触发构建（**带烘焙缺省云端环境**）：
-      - 网页：GitHub → 仓库 → **Actions** → **Build Desktop Installers** → **Run workflow** → 选 `master`、`cloud_default_env` 选 `dev` 或 `ol`（`ol` = 装完默认连线上）、`include_windows` 默认关 → 跑。
-      - 或命令行：`gh workflow run build-desktop.yml --ref master -f cloud_default_env=ol`，再 `gh run watch <run-id>` 看进度。**公证是异步排队，正常几分钟到几十分钟，偶发 >1 小时**（脚本按此设上限）。
+- [ ] 触发构建（**带烘焙缺省云端环境 + 客户登录门**）：
+      - 网页：GitHub → 仓库 → **Actions** → **Build Desktop Installers** → **Run workflow** → 选 `master`、`cloud_default_env` 选 `dev` 或 `ol`（`ol` = 装完默认连线上）；`client_auth_url` 留空时，`ol` 构建默认烘焙 `https://aidcp.tommax.cc/capi` 并开启客户登录门；`include_windows` 默认关 → 跑。
+      - 或命令行：`gh workflow run build-desktop.yml --ref master -f cloud_default_env=ol -f client_auth_url=https://aidcp.tommax.cc/capi`，再 `gh run watch <run-id>` 看进度。**公证是异步排队，正常几分钟到几十分钟，偶发 >1 小时**（脚本按此设上限）。
 - [ ] 跑完下载产物（macOS 那份）：
       ```bash
       gh run download <run-id> --name aidcp-macos --dir <某临时目录>
@@ -137,6 +137,7 @@ ssh -i ~/codes/isales-4.pem root@121.89.85.150 '
 
 - **手动触发**（`workflow_dispatch`）；`macos-latest` 出签名+公证的 x64+arm64 dmg/zip；`include_windows=true` 时 `windows-latest` 才出 nsis exe（默认关，见 §2B）。产物作为 run artifact，保留 14 天。
 - **输入 `cloud_default_env`（dev|ol）**：经 `-c.extraMetadata.aidcpCloudDefaultEnv` 注入打包 package.json，客户端「无界面选择、无启动环境变量」时据此连指定云（`ol`=装完默认连线上）。不注入=沿用客户端自身缺省 dev。
+- **输入 `client_auth_url`（http(s)://.../capi）**：经 `-c.extraMetadata.aidcpClientAuthUrl` 注入打包 package.json，客户端启动即开启客户登录门。`cloud_default_env=ol` 且该输入留空时，workflow 默认使用 `https://aidcp.tommax.cc/capi`。
 - **必须 `electron-builder --publish never`**（脚本内已强制）：CI 环境里 electron-builder 会自动尝试把产物发布到 GitHub release，缺 `GH_TOKEN` 直接报错。
 - **mac 签名 / 公证**：`scripts/build-desktop-macos.sh` 先构建签名 `.app`（`forceCodeSigning` + hardened runtime + entitlements + 关内置 notarize），再用 `scripts/notarize-and-staple.sh` 显式 `notarytool` 公证 / staple `.app`，随后生成并公证 / staple dmg/zip，最后 Gatekeeper 校验。任一闸失败 → job 非零退出，绝不上传坏包。
 - **自包含运行时进 CI**：build 前 `npm run build:ads-runtime`（stage 随包 AdsPower CLI）+ 从 `ADS_RUNTIME_JSON_BASE64` secret 还原 `resources/ads-runtime.json`（baked key），缺任一即诚实失败。

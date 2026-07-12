@@ -21,6 +21,8 @@ name: Build Desktop Installers
 # Inputs:
 #   cloud_default_env  dev|ol — baked default cloud the app connects to out of the box.
 #                      ol = production. Absent field => app falls back to its own dev default.
+#   client_auth_url    optional http(s) /capi URL baked into the app. For ol builds,
+#                      empty means https://aidcp.tommax.cc/capi.
 #   include_windows    also build the Windows installer (not self-contained yet; off by default).
 
 on:
@@ -37,6 +39,10 @@ on:
         description: 'Also build the Windows installer (unsigned, not self-contained yet).'
         type: boolean
         default: false
+      client_auth_url:
+        description: 'Optional client auth base URL to bake into mac app. Empty + ol => https://aidcp.tommax.cc/capi.'
+        type: string
+        default: ''
 
 jobs:
   build-mac:
@@ -105,6 +111,27 @@ jobs:
           node -e "const j=require('./resources/ads-runtime.json'); if(!j || typeof j.adsApiKey!=='string' || !j.adsApiKey){console.error('ads-runtime.json missing adsApiKey');process.exit(1);} console.log('ads-runtime.json ok (version '+j.version+')')"
         env:
           ADS_RUNTIME_JSON_BASE64: ${{ secrets.ADS_RUNTIME_JSON_BASE64 }}
+      - name: Resolve baked client auth URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          auth_url="${{ inputs.client_auth_url }}"
+          if [ -z "$auth_url" ] && [ "${{ inputs.cloud_default_env }}" = "ol" ]; then
+            auth_url="https://aidcp.tommax.cc/capi"
+          fi
+          while [ -n "$auth_url" ] && [ "${auth_url%/}" != "$auth_url" ]; do
+            auth_url="${auth_url%/}"
+          done
+          if [ -n "$auth_url" ]; then
+            case "$auth_url" in
+              http://*|https://*) ;;
+              *) echo "client_auth_url must be http(s)://..." >&2; exit 2 ;;
+            esac
+            echo "AIDCP_CLIENT_AUTH_URL=$auth_url" >> "$GITHUB_ENV"
+            echo "Client auth URL will be baked into the mac app."
+          else
+            echo "No client auth URL baked; login gate remains disabled by default."
+          fi
       - name: Build signed and notarized macOS installers
         shell: bash
         # --publish never is enforced by scripts/build-desktop-macos.sh.
@@ -149,7 +176,7 @@ jobs:
           gh release create "$tag" \
             --target "${GITHUB_SHA}" \
             --title "AIDCP Edge desktop ${version} (signed + notarized)" \
-            --notes "Signed + notarized macOS build (cloud_default_env baked at dispatch). Not for permanent release — download channel for the ECS download page." \
+            --notes "Signed + notarized macOS build (cloud_default_env and optional client_auth_url baked at dispatch). Not for permanent release — download channel for the ECS download page." \
             --prerelease \
             dist-electron/*.dmg
           echo "Published assets:"
