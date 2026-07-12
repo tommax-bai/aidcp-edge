@@ -540,8 +540,12 @@
         <span>显示「开发者详情」<em>主界面底部展示原始运行日志（排查问题用）</em></span>
       </label>
 
-      <div class="drawer-foot">
-        <button id="relogin" class="secondary" type="button">重新登录</button>
+      <!-- 客户端登出（change edge-client-env-scope-and-logout）：取代原 per-环境「重新登录」按钮。
+           作用=退出当前 name+key 客户端登录、回登录门重新登录账号。仅客户鉴权启用时显示（renderer 据 clientSession() 门控）；
+           注：通知巡视引导流的「重检」仍走 window.aidcpEdge.relogin（另一条路径，与本按钮无关、保留不变）。 -->
+      <div id="client-session-foot" class="drawer-foot client-session-foot hidden">
+        <span id="client-session-name" class="client-session-name"></span>
+        <button id="client-logout" class="secondary" type="button" title="退出当前客户端登录，回到登录页可重新登录账号">退出登录</button>
       </div>
     </aside>
 

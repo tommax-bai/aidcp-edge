@@ -583,20 +583,6 @@ test('暂停中未改动 → 恢复：直接恢复，不多余落盘', async () 
   assert.deepEqual(calls, ['resume'], '无改动时恢复不应触发 save');
 });
 
-test('重新登录：有未保存改动时先存再重新登录（与恢复同类修复）', async () => {
-  const calls: string[] = [];
-  const w = await boot(makeStub({
-    adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'u_new', serialNumber: '2', name: '乙', groupName: 'g', proxy: 'p' }] }),
-    saveSettings: async () => { calls.push('save'); return { provider: 'adspower', adsProfileId: 'u_new', saveOk: true }; },
-    relogin: async () => { calls.push('relogin'); return makeStatus(); },
-  }));
-  $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click')); // 改选环境 → dirty
-  $(w, '#relogin').dispatchEvent(new w.Event('click'));
-  await tick();
-  await tick();
-  assert.deepEqual(calls, ['save', 'relogin'], '重新登录前应先落盘改动');
-});
-
 test('保存后解除 provider 编辑闩锁：状态推送可再跟随实际 provider（回归）', async () => {
   let pushCb: (s: unknown) => void = () => undefined;
   const w = await boot(makeStub({

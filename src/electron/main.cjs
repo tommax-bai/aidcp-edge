@@ -296,7 +296,15 @@ async function clientAuthFetch(pathname, { method = 'GET', token, body } = {}) {
   const headers = { 'content-type': 'application/json' };
   if (token) headers.authorization = `Bearer ${token}`;
   try {
-    const res = await fetch(base + pathname, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    // 有界超时：登录/刷新/拉可见环境都经此出口，refreshAllowedEnvironments 现随每次「刷新」列表调用——面板挂起时
+    // 绝不能让裸 fetch 无限吊住按钮。超时按 status:0（非 401）处理：refreshAllowedEnvironments 据此保留上次已知集、
+    // 不误登出、不清空（与网络抖动同路径）。
+    const res = await fetch(base + pathname, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(12000),
+    });
     let data = null;
     try { data = await res.json(); } catch { /* 非 JSON 忽略 */ }
     return { status: res.status, ok: res.ok, data };
@@ -2613,7 +2621,32 @@ ipcMain.handle('ads:status', (_event, opts) => adsApi.status(resolveAdsOpts(opts
 ipcMain.handle('ads:listProfiles', async (_event, opts) => {
   const svc = await ensureAdsServiceOnce(null);
   if (!svc.ok) return { ok: false, error: `指纹浏览器运行时未就绪：${svc.error || '未知错误'}` };
-  return adsApi.listProfiles(resolveAdsOpts(opts));
+  const result = await adsApi.listProfiles(resolveAdsOpts(opts));
+  // 按登录客户可见范围收窄「加入现有环境」**显示列表**（change edge-client-env-scope-and-logout，补 edge-client-customer-auth
+  // 的漏）：此前该列表列出本机全部指纹环境、不分归属，把他人环境的名字/分组/代理/分身 ID 暴露给已登录客户，也让用户误加入
+  // 永不启动的非归属环境。
+  //   铁律（fail-closed，绝不 fail-open）：客户鉴权启用时 MUST NOT 把本机全量列表回给已登录客户——只有两种安全出口：
+  //   ① 会话有效 → 先刷新可见集（用户点「刷新」的语义就是拉最新，后台刚分配的环境应即时出现），再按 allowedProfileIds
+  //      收窄显示（语义与 syncEnvHandles 逐字对齐：Set 含空集=只显示零个，绝不因缺数据回落全量泄漏他人）。
+  //   ② 会话已失效 / 刷新 401 / 刷新中会话翻失效（allowedProfileIds 被置 null）→ 诚实登出并回 {ok:false}，绝不回落全量。
+  //      注意：令牌到期但未被清理时 hasValidSession() 为假而 allowedProfileIds 可能仍是旧 Set，若按「有 Set 就过滤」会
+  //      放过这条 → 故这里对「gated 且无有效会话」一律登出，不复用旧集。
+  //   只收窄**显示**：另带 physicalUserIds（本机物理存在的全部分身 id）给渲染层做孤儿剔除，令「云端降范围但本机仍在」的
+  //   环境不被误当云端已删而销毁花名册项（物理删除才剔、降范围不剔）。null（未 gated）不收窄=零回归；ok:false 原样透传。
+  if (result && result.ok && clientAuthEnabled()) {
+    if (!hasValidSession()) { onSessionInvalid(); return { ok: false, error: '登录已失效，请重新登录客户端。' }; }
+    const ok = await refreshAllowedEnvironments(); // 顺带拉最新可见集；401 → false
+    if (!ok || !(allowedProfileIds instanceof Set)) { onSessionInvalid(); return { ok: false, error: '登录已失效，请重新登录客户端。' }; }
+    // physicalUserIds 供渲染层孤儿剔除按物理存在判定，但**收窄到「渲染层已合法知晓的 id」= 花名册成员 ∪ 归属集**：
+    // 绝不把他人环境的分身 id 透过 IPC 回渲染层（多租户同机时 result.profiles 此刻还是本机全量，直接 map 会带出他人 id；
+    // 他人 id 一旦到渲染层，配合未按归属设闸的写出口即可删/改他人环境——写侧归属属既有缺口、专项跟进，本处先不新增泄漏面）。
+    // foreign id 不在 roster/allowed、本就不与花名册成员相撞、不影响剔孤儿；降范围但本机仍在的环境仍在 roster 里、故不被误剔（保 MAJOR-2 修复）。
+    const knownIds = new Set(allowedProfileIds);
+    for (const e of settings.environments || []) { if (e && e.profileId) knownIds.add(e.profileId); }
+    result.physicalUserIds = (result.profiles || []).map((p) => p && p.userId).filter((id) => id && knownIds.has(id));
+    result.profiles = (result.profiles || []).filter((p) => p && allowedProfileIds.has(p.userId));
+  }
+  return result;
 });
 ipcMain.handle('ads:openCreate', () => openAdsClient());
 

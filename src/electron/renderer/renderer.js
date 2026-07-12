@@ -40,7 +40,9 @@ const fields = {
   lastMessage: document.querySelector('#last-message'),
   sessionFab: document.querySelector('#session-fab'),
   sessionClose: document.querySelector('#session-close'),
-  relogin: document.querySelector('#relogin'),
+  clientSessionFoot: document.querySelector('#client-session-foot'),
+  clientSessionName: document.querySelector('#client-session-name'),
+  clientLogout: document.querySelector('#client-logout'),
   loginGuide: document.querySelector('#login-guide'),
   noticeTitle: document.querySelector('#notice-title'),
   noticeBody: document.querySelector('#notice-body'),
@@ -1903,11 +1905,12 @@ async function persistRoster() {
   } catch { /* 落盘失败静默；下次「启动」的 saveCurrentSettings 会再落一次 */ }
 }
 
-// 刷新时剔除孤儿：花名册里 profileId 已不在云端实时列表中的成员（云端 profile 已删除、本地残留）自动移出。
-// **只应在「成功且完整」的拉取后调用**（调用点 refreshEnvs 已守 r.ok && !r.truncated）——否则一次失败/截断的
-// 拉取会把在跑的花名册误判成全体孤儿清空（红线：不因缺数据自残）。返回移出的条数。
-function pruneOrphanRoster(profiles) {
-  const live = new Set((profiles || []).map((p) => p.userId).filter(Boolean));
+// 刷新时剔除孤儿：花名册里 profileId 已不在**本机物理分身列表**中的成员（AdsPower profile 已删除、本地残留）自动移出。
+// 参数 liveIds = 本机物理存在的全部分身 id（gated 时由 main 的 physicalUserIds 提供、非按云端可见集收窄的显示列表——
+// 降范围≠物理删除，绝不把降范围环境当孤儿销毁）。**只应在「成功且完整」的拉取后调用**（调用点 refreshEnvs 已守
+// r.ok && !r.truncated）——否则一次失败/截断的拉取会把在跑的花名册误判成全体孤儿清空（红线：不因缺数据自残）。返回移出的条数。
+function pruneOrphanRoster(liveIds) {
+  const live = new Set((liveIds || []).filter(Boolean));
   // 二道防御（截断闸之外）：一个环境都没取到（疑似后端「成功但空」的偶发响应，而非账号真空）时绝不剔——
   // 否则会把整份在用花名册全判成孤儿清空。宁可漏剔孤儿、绝不误删在用环境（红线：不因缺数据自残）。
   if (live.size === 0) return 0;
@@ -2155,10 +2158,14 @@ async function refreshEnvs(opts) {
     // **先回填、再剔孤儿**：这样 pruneOrphanRoster 内部若因剔孤儿而落盘，快照里已含回填后的名字，无需重复落盘。
     // 同守 !r.truncated：截断/不全的拉取绝不回填（不因缺数据误改在用环境名）。
     const renamedCount = r.truncated ? 0 : reconcileRosterNames(profiles);
-    // 刷新即清理孤儿：花名册里在云端实时列表已不存在的环境（云端 profile 已删、本地残留）自动移出。
+    // 刷新即清理孤儿：花名册里在本机指纹浏览器已不存在的环境（AdsPower profile 已删、本地残留）自动移出。
     // 安全闸：仅在成功拉取（本分支即 r.ok）且列表**完整**（!r.truncated）时剔——拉取失败已走上面 !r.ok 分支；
     // 截断时列表不全（成员可能在未显示的后续页），绝不剔，杜绝「一次不全的拉取把整份花名册误清空」。
-    const prunedCount = r.truncated ? 0 : pruneOrphanRoster(profiles);
+    // 孤儿判据按「本机物理是否还在」（change edge-client-env-scope-and-logout）：gated 时 profiles 已按云端可见集收窄，
+    // 若拿它剔孤儿会把「云端降范围但本机仍在」的环境误当云端已删而销毁花名册项+破坏再授权自动恢复；故用 main 另带的
+    // physicalUserIds（本机全部物理分身 id）；未 gated 时该字段缺省、回落用 profiles 自身 id（与旧行为逐字一致）。
+    const physicalIds = Array.isArray(r.physicalUserIds) ? r.physicalUserIds : profiles.map((p) => p.userId).filter(Boolean);
+    const prunedCount = r.truncated ? 0 : pruneOrphanRoster(physicalIds);
     // 回填了名字但本轮没剔孤儿（prune 未落盘）时补一次落盘，令 main 的 syncEnvHandles 刷新 handle.name → 左栏随即显真名；
     // 剔了孤儿则 prune 已带回填名落盘一次，这里不重复（全程仅一次落盘、无竞态）。
     if (renamedCount > 0 && prunedCount === 0) void persistRoster();
@@ -2414,16 +2421,43 @@ fields.sessionClose?.addEventListener('click', async () => {
   }
 });
 
-fields.relogin.addEventListener('click', async () => {
-  fields.relogin.disabled = true;
-  try {
-    // 重新登录同为「按当前浏览器设置重启核心」：若表单有未保存改动（如切换了环境），先落盘再重启。
-    if (!(await persistDirtyBeforeRestart('设置已保存，正在重新登录…'))) return;
-    routeStatus(await window.aidcpEdge.relogin(currentEnvId()));
-  } finally {
-    fields.relogin.disabled = false;
-  }
-});
+// 窗口内「退出登录」入口（change edge-client-env-scope-and-logout）：取代原 per-环境「重新登录」按钮。
+// 作用=退出当前 name+key 客户端登录、回登录门重新登录账号，复用既有 clientLogout（清会话→拆全部环境→回登录门）。
+// 仅客户鉴权启用时露出（clientAuthEnabled 为假=内部/运营构建时不出现，=零回归）。点击走二次确认（arm→「确认退出?」
+// 4s 回退→再点才真登出），因为登出会停掉全部在跑环境。
+// 注：通知巡视引导流的「重检」仍走 window.aidcpEdge.relogin（renderer 上文 triggerGuideRecheck 一带），是另一条路径、保留不变。
+(async function initClientLogoutEntry() {
+  if (!fields.clientLogout || !window.aidcpEdge || typeof window.aidcpEdge.clientSession !== 'function') return;
+  let sess = null;
+  try { sess = await window.aidcpEdge.clientSession(); } catch { /* 未启用/取不到 → 保持隐藏 */ }
+  if (!sess || !sess.enabled) return; // 未启用客户鉴权：入口不显示
+  if (fields.clientSessionName) fields.clientSessionName.textContent = sess.name ? `当前客户：${sess.name}` : '';
+  fields.clientSessionFoot?.classList.remove('hidden');
+  let armed = false;
+  let timer = null;
+  const disarm = () => {
+    armed = false;
+    fields.clientLogout.textContent = '退出登录';
+    fields.clientLogout.classList.remove('armed');
+    if (timer) { clearTimeout(timer); timer = null; }
+  };
+  fields.clientLogout.addEventListener('click', async () => {
+    if (!armed) {
+      armed = true;
+      fields.clientLogout.textContent = '确认退出?';
+      fields.clientLogout.classList.add('armed');
+      timer = setTimeout(disarm, 4000);
+      return;
+    }
+    disarm();
+    fields.clientLogout.disabled = true;
+    try {
+      await window.aidcpEdge.clientLogout(); // 清会话→拆环境→关主窗→回登录门（主进程 onSessionInvalid 接管）
+    } catch {
+      fields.clientLogout.disabled = false;
+    }
+  });
+})();
 
 const PERSONA_CONTENT_GROUPS = [
   { title: '招聘求职', items: ['骑手外卖', '蓝领零工', '数据标注', '自有兼职', '在校实习'] },

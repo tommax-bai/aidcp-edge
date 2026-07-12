@@ -703,6 +703,10 @@ body { margin: 0; }
 }
 .drawer-x:hover { background: rgba(26, 34, 51, 0.06); }
 .drawer-foot { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--hair); display: flex; justify-content: flex-end; }
+/* 客户端登出入口（change edge-client-env-scope-and-logout）：当前客户名靠左、登出按钮靠右；armed 态给醒目底色。 */
+.client-session-foot { margin-top: 8px; justify-content: space-between; align-items: center; gap: 10px; }
+.client-session-name { color: var(--muted, #6b7385); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#client-logout.armed { background: #fee2e2; border-color: #f87171; font-weight: 600; }
 .dev-toggle-row {
   display: flex; align-items: flex-start; gap: 8px;
   margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--hair);
