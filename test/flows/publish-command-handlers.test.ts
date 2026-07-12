@@ -207,6 +207,39 @@ test('AC-MEDIA upload_image 缺 imageUrl（有 uploader）→ no_target', async 
   assert.equal(res.error, 'no_target');
 });
 
+test('FB-PUBLISH platform=facebook → 交给 Facebook executor，绝不走 XHS fill_field DOM 路径', async () => {
+  const doc = buildDom(publishPageHtml());
+  const seen: PublishCommandPayload[] = [];
+  const facebookPublisher = {
+    dispatch: async (payload: PublishCommandPayload) => {
+      seen.push(payload);
+      return { recordId: payload.recordId, seq: payload.seq, kind: payload.kind, ok: true };
+    },
+  };
+  const dispatcher = new PublishCommandDispatcher(
+    depsFor(doc, new FakeExecutor(doc)),
+    {},
+    Date.now,
+    undefined,
+    undefined,
+    { sleep: instantSleep },
+    facebookPublisher,
+  );
+  const res = await dispatcher.dispatch({ ...cmd('fill_field', { fieldType: 'content', value: 'FB正文' }, 9), platform: 'facebook' });
+  assert.equal(res.ok, true);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].platform, 'facebook');
+  assert.equal((doc.querySelector('[data-action-id="note.publish_content"]') as HTMLTextAreaElement).value, '');
+});
+
+test('FB-PUBLISH platform=facebook 但未注入 executor → kind_not_implemented（诚实失败）', async () => {
+  const doc = buildDom(publishPageHtml());
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
+  const res = await dispatcher.dispatch({ ...cmd('fill_field', { fieldType: 'content', value: 'FB正文' }), platform: 'facebook' });
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'kind_not_implemented');
+});
+
 test('AC-MEDIA set_cover → 定位封面入口 + 封面激活态后置校验通过 → ok:true', async () => {
   // 校验器 fail-closed，只认精确锚点 note.publish_cover_active（模拟校准后注入的真实成功态）。
   const extra = `<button data-action-id="note.publish_set_cover">设为封面</button><div data-action-id="note.publish_cover_active"></div>`;

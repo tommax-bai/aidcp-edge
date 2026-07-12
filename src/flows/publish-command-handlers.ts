@@ -55,6 +55,10 @@ export interface PublishPacing {
   random?: RandomFn;
 }
 
+export interface PlatformPublishCommandExecutor {
+  dispatch(payload: PublishCommandPayload): Promise<PublishCommandResultPayload>;
+}
+
 /**
  * 各「人类时刻」的中心值（毫秒）；实际值再叠对数正态抖动。集中一处便于标定。
  * 红线约束：单条指令的 edge 执行时长（含 thinkBeforeStep + 本步停顿 + 后置校验轮询）MUST < 云端
@@ -229,6 +233,8 @@ export class PublishCommandDispatcher {
     private readonly cdp?: CdpLike,
     /** 发布填写拟人节奏（缺省开、真实 sleep + Math.random）。 */
     pacing: PublishPacing = {},
+    /** Facebook 发布执行器；未注入时 Facebook 指令诚实回 kind_not_implemented。 */
+    private readonly facebookPublisher?: PlatformPublishCommandExecutor,
   ) {
     this.clock = clock;
     this.pacingEnabled = pacing.enabled !== false;
@@ -256,6 +262,10 @@ export class PublishCommandDispatcher {
 
   /** 按 kind 路由并执行一条发布指令，返回结果（绝不抛——异常也转成诚实的 ok:false）。 */
   async dispatch(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+    if (payload.platform === 'facebook') {
+      if (!this.facebookPublisher) return this.notImplemented(payload);
+      return this.facebookPublisher.dispatch(payload);
+    }
     // 拟人：动作前"想一下"，给整条发布序列加上逐项填写的节奏（治"指令间零节奏一气呵成"）。
     await this.thinkBeforeStep(payload.kind);
     switch (payload.kind) {

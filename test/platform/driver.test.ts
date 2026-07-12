@@ -32,7 +32,8 @@ test('selectPlatformDriver: facebook declares browse/interact (co-landed with Fa
   assert.deepEqual(driver.edgeCapabilities, ['locating', 'cdp']);
   // change facebook-browse-and-like-loop：'browse'/'interact' 已声明——但仅因 FacebookBrowseSession 在同一 change
   // 原子同落（co-landing），装配闸据此解析到 FB 浏览会话而非小红书 BrowseSession。'comment'/'join' 为既有能力。
-  assert.deepEqual(driver.capabilities, ['identity', 'overlay', 'browse', 'comment', 'join', 'interact']);
+  // change facebook-post-publish：'publish' 与 FacebookPublishExecutor 同落，不能裸声明。
+  assert.deepEqual(driver.capabilities, ['identity', 'overlay', 'browse', 'comment', 'join', 'publish', 'interact']);
   assert.equal(driver.capabilities.includes('browse'), true);
   assert.equal(driver.isAllowedTargetUrl('https://www.facebook.com/groups/example'), true);
   assert.equal(driver.isAllowedTargetUrl('https://m.facebook.com/story.php?story_fbid=1'), true);

@@ -771,6 +771,8 @@ export interface PublishCommandParams {
  * 注意：此 `recordId`（数字，PublishLogStore.insert 返回）与 AC-PUB 审批文件的 `requestId`（字符串）是两个不同的键。
  */
 export interface PublishCommandPayload {
+  /** 运行时平台；缺省按历史小红书处理。 */
+  platform?: 'xiaohongshu' | 'facebook';
   /** 当前 edge 页面写任务租约；发布完整序列逐条携同一值。 */
   taskId: string;
   /** 发布记录主键 */

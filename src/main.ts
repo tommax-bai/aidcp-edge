@@ -52,6 +52,7 @@ import {
   FacebookCommentExecutor,
   FacebookCommentHandler,
   FacebookJoinExecutor,
+  FacebookPublishExecutor,
   parseFacebookBrowseMode,
   usesFacebookBrowseSession,
 } from './facebook/index.js';
@@ -475,6 +476,41 @@ async function main(): Promise<void> {
       }
     },
   });
+  const facebookImageUploader = new ImageUploader({
+    fileInputSetter: new CdpFileInputSetter(session.cdp, {
+      inputSelector: String.raw`(() => {
+        const visible = (el) => {
+          if (!el || !el.getBoundingClientRect) return false;
+          const r = el.getBoundingClientRect();
+          const s = window.getComputedStyle ? getComputedStyle(el) : null;
+          return r.width > 0 && r.height > 0 && (!s || (s.display !== 'none' && s.visibility !== 'hidden'));
+        };
+        const dialogs = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).filter(visible);
+        const root = dialogs[0] || document;
+        const inputs = Array.from(root.querySelectorAll('input[type=file]'));
+        return inputs.find((input) => /image|jpg|jpeg|png|webp|gif/i.test(input.getAttribute('accept') || '')) || inputs[0] || null;
+      })()`,
+    }),
+    dom: session.dom,
+    tempDirPrefix: imageTempPrefix,
+    hasThumbnail: (root) => {
+      try {
+        const labels = Array.from(root.querySelectorAll('[aria-label],[title]')).map((el) =>
+          `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`,
+        );
+        if (labels.some((label) => /(remove|delete|移除|删除|刪除).{0,12}(photo|image|照片|图片|圖片)/i.test(label))) return true;
+        const docBody = 'body' in root ? root.body : null;
+        const text = (docBody?.innerText ?? root.textContent ?? '').replace(/\s+/g, ' ');
+        return /(photo attached|image attached|已添加照片|已加入照片|已添加图片|đã thêm ảnh)/i.test(text);
+      } catch {
+        return false;
+      }
+    },
+  });
+  const facebookPublishExecutor = new FacebookPublishExecutor({
+    cdp: session.cdp,
+    uploader: facebookImageUploader,
+  });
   const publishDispatcher = new PublishCommandDispatcher(
     {
       dom: session.dom,
@@ -487,6 +523,8 @@ async function main(): Promise<void> {
     imageUploader,
     // 注入原始 CDP：navigate_entry 直达发布页 + select_mode 直驱点「上传图文」（发布页特殊 UI，通用选择器不可靠）。
     session.cdp,
+    undefined,
+    facebookPublishExecutor,
   );
   // 陪伴界面事件（edge-companion-ui 6.4）：发布终态的本地事实经 [ui-event] 行直达桌面壳。
   const publishUiEvents = new PublishUiEventTracker();

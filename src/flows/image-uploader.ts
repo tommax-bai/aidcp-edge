@@ -94,7 +94,7 @@ export async function sweepImageTempDirs(ownPrefix: string, baseDir?: string): P
   }
 }
 
-/** magic-byte 嗅探：返回扩展名（jpg/png/webp）或 null（非支持图）。不信任扩展名 / Content-Type。 */
+/** magic-byte 嗅探：返回扩展名（jpg/png/webp/gif）或 null（非支持图）。不信任扩展名 / Content-Type。 */
 function sniffImage(bytes: Uint8Array): string | null {
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'jpg';
   if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'png';
@@ -105,6 +105,7 @@ function sniffImage(bytes: Uint8Array): string | null {
   ) {
     return 'webp';
   }
+  if (bytes.length >= 4 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return 'gif';
   return null;
 }
 

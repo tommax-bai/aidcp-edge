@@ -13,6 +13,7 @@
  * Optional:
  *   AIDCP_FB_PROBE_URL=https://www.facebook.com/Meta/posts/... \
  *   AIDCP_FB_RUN_EDITOR_PROBE=true \
+ *   AIDCP_FB_RUN_POST_COMPOSER_PROBE=true \
  *   AIDCP_FB_RUN_F2=1 \
  *   AIDCP_FB_F2_URLS=https://www.facebook.com/login/,https://www.facebook.com/checkpoint/ \
  *   AIDCP_FB_EXECUTE_GATED_SUBMIT=1 \
@@ -39,12 +40,14 @@ import {
   facebookGatedSubmitPreflight,
   facebookPlatformDriver,
   probeFacebookCommentEditorReadOnly,
+  probeFacebookPostComposerReadOnly,
   readFacebookIdentity,
   classifyFacebookOverlay,
   runFacebookGatedSubmitProbe,
   type FacebookEditorProbeResult,
   type FacebookGatedSubmitPreflightResult,
   type FacebookGatedSubmitProbeResult,
+  type FacebookPostComposerProbeResult,
   type FacebookPageStructureSummary,
   type FacebookStorageSummary,
   type FacebookFingerprintSummary,
@@ -75,6 +78,7 @@ interface Phase0ProbeReport {
   storage: FacebookStorageSummary;
   pageStructure: FacebookPageStructureSummary;
   editorProbe?: FacebookEditorProbeResult;
+  postComposerProbe?: FacebookPostComposerProbeResult;
   gatedSubmitPreflight: FacebookGatedSubmitPreflightResult;
   gatedSubmitProbe?: FacebookGatedSubmitProbeResult;
   blockingProbes: BlockingProbeResult[];
@@ -177,6 +181,7 @@ async function main(): Promise<void> {
     (executeGatedSubmit && gatedTargetUrl ? gatedTargetUrl : facebookPlatformDriver.defaultStartUrl);
   const waitMs = Number(process.env.AIDCP_FB_WAIT_MS ?? 3500);
   const runEditorProbe = boolEnv('AIDCP_FB_RUN_EDITOR_PROBE');
+  const runPostComposerProbe = boolEnv('AIDCP_FB_RUN_POST_COMPOSER_PROBE');
   const runF2 = boolEnv('AIDCP_FB_RUN_F2');
   const f2Urls = runF2 ? splitUrls(process.env.AIDCP_FB_F2_URLS) : [];
   const keepBrowser = boolEnv('AIDCP_FB_KEEP_BROWSER');
@@ -186,6 +191,9 @@ async function main(): Promise<void> {
   }
   if (executeGatedSubmit && runEditorProbe) {
     throw new Error('AIDCP_FB_EXECUTE_GATED_SUBMIT=1 cannot be combined with AIDCP_FB_RUN_EDITOR_PROBE');
+  }
+  if (executeGatedSubmit && runPostComposerProbe) {
+    throw new Error('AIDCP_FB_EXECUTE_GATED_SUBMIT=1 cannot be combined with AIDCP_FB_RUN_POST_COMPOSER_PROBE');
   }
   if (executeGatedSubmit && runF2) {
     throw new Error('AIDCP_FB_EXECUTE_GATED_SUBMIT=1 cannot be combined with AIDCP_FB_RUN_F2');
@@ -218,6 +226,7 @@ async function main(): Promise<void> {
     const storage = await collectFacebookStorageSummary(session.cdp);
     const pageStructure = await collectFacebookPageStructure(session.cdp);
     const editorProbe = runEditorProbe ? await probeFacebookCommentEditorReadOnly(session.cdp) : undefined;
+    const postComposerProbe = runPostComposerProbe ? await probeFacebookPostComposerReadOnly(session.cdp) : undefined;
     const gatedSubmitPreflight = await facebookGatedSubmitPreflight(session.cdp, {
       enabled: boolEnv('AIDCP_FB_GATED_SUBMIT'),
       disposableAccountConfirmed: boolEnv('AIDCP_FB_DISPOSABLE_CONFIRMED'),
@@ -247,6 +256,7 @@ async function main(): Promise<void> {
       storage,
       pageStructure,
       ...(editorProbe ? { editorProbe } : {}),
+      ...(postComposerProbe ? { postComposerProbe } : {}),
       gatedSubmitPreflight,
       ...(gatedSubmitProbe ? { gatedSubmitProbe } : {}),
       blockingProbes,
