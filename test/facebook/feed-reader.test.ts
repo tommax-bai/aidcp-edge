@@ -47,13 +47,21 @@ test('fb-feed: 跳过未水合空壳 + 无 permalink 卡，映射字段，去重
       permalinkHrefs: ['https://www.facebook.com/bob/posts/pfbid0XYZ'],
       hasVideo: true,
     },
+    {
+      hydrated: true,
+      author: 'Josi',
+      textPreview: 'Spiaggia libera',
+      reactionText: '1.2K',
+      permalinkHrefs: ['https://www.facebook.com/watch/?v=4525277067786120&notif_id=123&ref=watch_permalink'],
+      hasVideo: true,
+    },
     { hydrated: true, author: 'NoLink', permalinkHrefs: [] }, // 无可开链接 → 跳过（诚实）
     { hydrated: true, author: 'Dup', permalinkHrefs: ['https://www.facebook.com/alice/posts/pfbid0ABC'] }, // 同 permalink → 去重
   ]);
   const reader = new FacebookFeedReader({ cdp, sleep: async () => {} });
   const cards = await reader.scanCards();
 
-  assert.equal(cards.length, 2, '只保留 2 张已水合、带 permalink、去重后的卡片');
+  assert.equal(cards.length, 3, '只保留已水合、带 permalink、去重后的卡片，含 watch 视频帖');
   const alice = cards[0];
   assert.equal(alice.author, 'Alice');
   assert.equal(alice.textPreview, 'hello world');
@@ -66,6 +74,12 @@ test('fb-feed: 跳过未水合空壳 + 无 permalink 卡，映射字段，去重
   const bob = cards[1];
   assert.equal(bob.reactionCount, 0, '反应数抓不到诚实置 0');
   assert.equal(bob.isVideo, true);
+
+  const watch = cards[2];
+  assert.equal(watch.author, 'Josi');
+  assert.equal(watch.noteId, 'https://www.facebook.com/watch?v=4525277067786120', 'watch 视频帖只保留 v 参数');
+  assert.equal(watch.reactionCount, 1200);
+  assert.equal(watch.isVideo, true);
 });
 
 test('fb-feed: 扫描异常/非数组 → 空数组（绝不臆造卡片）', async () => {

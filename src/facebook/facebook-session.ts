@@ -106,6 +106,8 @@ interface FacebookProfileSnapshot {
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const FEED_CARD_HYDRATION_RETRY_ROUNDS = 6;
+const FEED_CARD_HYDRATION_RETRY_MS = 700;
 
 export class FacebookBrowseSession implements EdgeBrowseSession {
   private readonly cdp: BrowseCdp;
@@ -331,7 +333,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       this.log(`[fb-session] feed 未就绪（${ensure.reason}）：不上报首屏（云端看门狗后续可 nudge）`);
       return;
     }
-    const cards = await this.feedReader.scanCards();
+    const cards = await this.scanFeedCardsWithHydrationRetry('initial');
     if (cards.length === 0) {
       this.log('[fb-session] feed 就绪但无可上报卡片');
       return;
@@ -376,7 +378,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   /** feed 翻页 → 扫卡 → page.cards。 */
   private async scrollFeed(): Promise<TerminalReport> {
     await this.feedReader.scrollNext();
-    const cards = await this.feedReader.scanCards();
+    const cards = await this.scanFeedCardsWithHydrationRetry('scroll');
     if (cards.length === 0) {
       return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'no_target' } };
     }
@@ -389,7 +391,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (!ensure.ok) {
       return { type: 'action', payload: { action: 'back', ok: false, reason: ensure.reason ?? 'no_feed' } };
     }
-    const cards = await this.feedReader.scanCards();
+    const cards = await this.scanFeedCardsWithHydrationRetry('back');
     if (cards.length === 0) {
       return { type: 'action', payload: { action: 'back', ok: false, reason: 'no_feed' } };
     }
@@ -400,6 +402,22 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private async closeNote(): Promise<TerminalReport> {
     await this.navigateFeedBestEffort();
     return { type: 'action', payload: { action: 'close', ok: true } };
+  }
+
+  /**
+   * FB feed 常先水合作者/正文，permalink 链接晚一拍出现。page.cards 必须有可开 permalink，
+   * 所以这里只做短有界重试，不造卡、不放宽候选规则。
+   */
+  private async scanFeedCardsWithHydrationRetry(context: 'initial' | 'scroll' | 'back'): Promise<FacebookFeedCard[]> {
+    for (let i = 0; i < FEED_CARD_HYDRATION_RETRY_ROUNDS; i++) {
+      const cards = await this.feedReader.scanCards();
+      if (cards.length > 0) {
+        if (i > 0) this.log(`[fb-session] feed permalink 延迟水合，${context} 第 ${i + 1} 次扫描拿到 ${cards.length} 张卡片`);
+        return cards;
+      }
+      if (i < FEED_CARD_HYDRATION_RETRY_ROUNDS - 1) await this.sleep(FEED_CARD_HYDRATION_RETRY_MS);
+    }
+    return [];
   }
 
   /**

@@ -27,6 +27,7 @@ interface Harness {
   actions: ActionCompletedPayload[];
   delegated: Envelope[];
   ensureCalls: number;
+  scanCalls: number;
   likeShadowFlags: Array<boolean | undefined>;
 }
 
@@ -36,6 +37,8 @@ function makeSession(opts: {
   card?: FacebookFeedCard;
   detail?: Partial<FacebookPostDetail>;
   like?: (shadow?: boolean) => FacebookLikeResult;
+  cardBatches?: FacebookFeedCard[][];
+  sleep?: (ms: number) => Promise<void>;
   hangOpen?: boolean;
   cdpSend?: BrowseCdp['send'];
 } = {}): Harness {
@@ -45,7 +48,7 @@ function makeSession(opts: {
   const actions: ActionCompletedPayload[] = [];
   const delegated: Envelope[] = [];
   const likeShadowFlags: Array<boolean | undefined> = [];
-  const state = { ensureCalls: 0 };
+  const state = { ensureCalls: 0, scanCalls: 0 };
 
   const card: FacebookFeedCard = opts.card ?? {
     index: 0,
@@ -80,7 +83,11 @@ function makeSession(opts: {
       state.ensureCalls++;
       return { ok: true as const };
     },
-    scanCards: async () => [card],
+    scanCards: async () => {
+      state.scanCalls++;
+      if (opts.cardBatches) return opts.cardBatches.shift() ?? [];
+      return [card];
+    },
     scrollNext: async () => {},
   } as unknown as FacebookFeedReader;
   const postReader = {
@@ -114,6 +121,7 @@ function makeSession(opts: {
     feedReader,
     postReader,
     likeExecutor,
+    ...(opts.sleep ? { sleep: opts.sleep } : {}),
   };
   const session = new FacebookBrowseSession(deps, {
     mode: opts.mode ?? 'on',
@@ -130,6 +138,9 @@ function makeSession(opts: {
     likeShadowFlags,
     get ensureCalls() {
       return state.ensureCalls;
+    },
+    get scanCalls() {
+      return state.scanCalls;
     },
   } as Harness;
 }
@@ -314,6 +325,33 @@ test('start(): mode=off 不进 feed（不 ensureFeed/不报卡）；mode=on 进 
   await on.session.start();
   assert.equal(on.ensureCalls, 1);
   assert.equal(on.cards.length, 1, 'on 模式上报首屏 page.cards');
+});
+
+test('start(): feed 已就绪但 permalink 晚水合 → 短重试后上报 page.cards', async () => {
+  let sleepCalls = 0;
+  const h = makeSession({
+    mode: 'shadow',
+    cardBatches: [
+      [],
+      [],
+      [{
+        index: 0,
+        noteId: 'https://www.facebook.com/a/posts/pfbid0LATE',
+        author: 'Late',
+        textPreview: 'hydrated later',
+        reactionCount: 0,
+        isVideo: false,
+      }],
+    ],
+    sleep: async () => {
+      sleepCalls++;
+    },
+  });
+  await h.session.start();
+  assert.equal(h.scanCalls, 3);
+  assert.equal(sleepCalls, 2);
+  assert.equal(h.cards.length, 1);
+  assert.equal(h.cards[0].cards[0].noteId, 'https://www.facebook.com/a/posts/pfbid0LATE');
 });
 
 test('session_closing：close 后命令诚实回执，绝不静默', async () => {

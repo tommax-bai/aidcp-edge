@@ -72,7 +72,15 @@ export function classifyFacebookSurface(href: string): FacebookSurfaceType {
     return 'group_post';
   }
   if (path.startsWith('/groups/')) return 'group';
-  if (/\/posts\/[^/]+/.test(path) || path.includes('/permalink.php') || url.searchParams.has('story_fbid')) return 'page_post';
+  if (
+    /\/posts\/[^/]+/.test(path) ||
+    path.includes('/permalink.php') ||
+    /\/videos\/[^/]+/.test(path) ||
+    /^\/reel\/[^/]+/.test(path) ||
+    ((path === '/watch' || path === '/watch/') && url.searchParams.has('v')) ||
+    url.searchParams.has('story_fbid')
+  )
+    return 'page_post';
   if (path === '/' || path === '/home.php') return 'home';
   if (path.split('/').filter(Boolean).length === 1) return 'page';
   return 'unknown';
@@ -85,7 +93,14 @@ export function classifyFacebookPermalink(href: string): FacebookPermalinkKind {
     if (/^\/groups\/[^/]+\/posts\/[^/]+/.test(path) || (path.startsWith('/groups/') && url.searchParams.has('multi_permalinks'))) {
       return 'group_post';
     }
-    if (/\/posts\/[^/]+/.test(path) || path.includes('/permalink.php')) return 'page_post';
+    if (
+      /\/posts\/[^/]+/.test(path) ||
+      path.includes('/permalink.php') ||
+      /\/videos\/[^/]+/.test(path) ||
+      /^\/reel\/[^/]+/.test(path) ||
+      ((path === '/watch' || path === '/watch/') && url.searchParams.has('v'))
+    )
+      return 'page_post';
     if (url.searchParams.has('story_fbid')) return 'story';
     return 'unknown';
   } catch {
@@ -107,6 +122,8 @@ export function sanitizeFacebookPermalinkHref(href: string): string {
   } else if (url.pathname.toLowerCase().includes('/permalink.php')) {
     if (url.searchParams.has('story_fbid')) clean.searchParams.set('story_fbid', url.searchParams.get('story_fbid') ?? '');
     if (url.searchParams.has('id')) clean.searchParams.set('id', url.searchParams.get('id') ?? '');
+  } else if ((url.pathname.toLowerCase() === '/watch' || url.pathname.toLowerCase() === '/watch/') && url.searchParams.has('v')) {
+    clean.searchParams.set('v', url.searchParams.get('v') ?? '');
   }
   return clean.href;
 }
@@ -145,6 +162,9 @@ const PAGE_STRUCTURE_SCAN_JS = String.raw`(function(){
     return /\/groups\/[^/]+\/posts\/[^/?#]+/i.test(h) ||
       /\/posts\/[^/?#]+/i.test(h) ||
       /\/permalink\.php/i.test(h) ||
+      /\/videos\/[^/?#]+/i.test(h) ||
+      /\/reel\/[^/?#]+/i.test(h) ||
+      /\/watch\/?\?[^#]*[?&]?v=/i.test(h) ||
       /[?&](story_fbid|multi_permalinks)=/i.test(h);
   }
   function collectPermalinks(root){

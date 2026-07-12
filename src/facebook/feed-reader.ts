@@ -5,7 +5,7 @@
  *  - feed 容器 `div[role="feed"]`，卡片 `[role="article"]`；window/document 滚动（非内层容器）。
  *  - FB **虚拟化** feed：视口外 article 是空壳（无作者/permalink/按钮）——**抽取必须跳过空壳**
  *    （无作者链接即跳过，绝不臆造），水合判据 = 存在 `h2/h3/h4 a` 作者链接。
- *  - 作者名/主页 `article :is(h2,h3,h4) a`；permalink `a[href*="/posts/"|"/permalink"|"story_fbid"|"/videos/"|"/reel/"]`；
+ *  - 作者名/主页 `article :is(h2,h3,h4) a`；permalink `a[href*="/posts/"|"/permalink"|"story_fbid"|"/videos/"|"/reel/"|"/watch/?v="]`；
  *    正文预览 `[data-ad-comet-preview="message"]|[data-ad-preview="message"]|div[dir="auto"]`；
  *    反应数取「赞」计数汇总按钮（带数字，非 toggle）。
  *
@@ -110,7 +110,7 @@ const FEED_SCAN_JS = String.raw`(function(){
   function vis(el){ if(!el||!el.getBoundingClientRect) return false; var r=el.getBoundingClientRect(); if(r.width<=0||r.height<=0) return false; var s=window.getComputedStyle?getComputedStyle(el):null; return !s||(s.visibility!=='hidden'&&s.display!=='none'&&Number(s.opacity||'1')>0.01); }
   function txt(el){ return String((el&&el.innerText)||(el&&el.textContent)||'').replace(/\s+/g,' ').trim(); }
   function href(a){ try{ return new URL(a.getAttribute('href')||a.href||'', location.href).href; }catch(e){ return ''; } }
-  function isPermalink(h){ return /\/groups\/[^/]+\/posts\/[^/?#]+/i.test(h)||/\/posts\/[^/?#]+/i.test(h)||/\/permalink\.php/i.test(h)||/\/videos\/[^/?#]+/i.test(h)||/\/reel\/[^/?#]+/i.test(h)||/[?&](story_fbid|multi_permalinks)=/i.test(h); }
+  function isPermalink(h){ return /\/groups\/[^/]+\/posts\/[^/?#]+/i.test(h)||/\/posts\/[^/?#]+/i.test(h)||/\/permalink\.php/i.test(h)||/\/videos\/[^/?#]+/i.test(h)||/\/reel\/[^/?#]+/i.test(h)||/\/watch\/?\?[^#]*[?&]?v=/i.test(h)||/[?&](story_fbid|multi_permalinks)=/i.test(h); }
   var feed = document.querySelector('div[role="feed"]');
   var scope = feed || document;
   var arts = Array.prototype.slice.call(scope.querySelectorAll('[role="article"]'));
@@ -134,7 +134,7 @@ const FEED_SCAN_JS = String.raw`(function(){
     var reactionText = '';
     var btns = a.querySelectorAll('[role="button"][aria-label]');
     for(var b=0;b<btns.length;b++){ var lab=(btns[b].getAttribute('aria-label')||'').replace(/\s+/g,' ').trim(); var bt=txt(btns[b]); if(/^(赞|讚|Like|Me gusta)/i.test(lab) && /\d/.test(bt)){ reactionText=bt; break; } }
-    var hasVideo = !!(a.querySelector('video') || perms.some(function(h){ return /\/videos\/|\/reel\//i.test(h); }));
+    var hasVideo = !!(a.querySelector('video') || perms.some(function(h){ return /\/videos\/|\/reel\/|\/watch\/?\?/i.test(h); }));
     out.push({ hydrated:true, author:author||null, textPreview:(preview||'').slice(0,180)||null, reactionText:reactionText||null, permalinkHrefs:perms, hasVideo:hasVideo });
   }
   return JSON.stringify(out);

@@ -205,11 +205,42 @@ const REACT_LOCATE_HELPERS = `
       for(var i=0;i<cbtns.length;i++){ if(COMMENT.test((cbtns[i].getAttribute('aria-label')||''))) return true; }
     }
     return false; }
-  // 帖级 react 控件（dialog 内优先）：命中 react 词 + 同栏含「发表评论」。返回 {el, state}。
+  function postKey(raw){ try{ var u=new URL(raw, location.href); u.hash=''; var p=u.pathname.replace(/\\/+$/,'')||'/';
+      if((p==='/watch'||p==='/watch/')&&u.searchParams.get('v')) return u.origin+'/watch?v='+u.searchParams.get('v');
+      if(u.searchParams.get('story_fbid')) return u.origin+p+'?story_fbid='+u.searchParams.get('story_fbid')+(u.searchParams.get('id')?'&id='+u.searchParams.get('id'):'');
+      return u.origin+p;
+    }catch(e){ return ''; } }
+  function currentArticleRoot(){
+    var here=postKey(location.href); if(!here) return null;
+    var arts=document.querySelectorAll('[role="article"], article');
+    for(var i=0;i<arts.length;i++){ var a=arts[i]; if(!fbVis(a)) continue; var links=a.querySelectorAll('a[href]');
+      for(var j=0;j<links.length;j++){ var raw=(links[j].getAttribute('href')||'').trim(); if(!raw||raw==='#'||raw.indexOf('#')===0||/^javascript:/i.test(raw)) continue; if(postKey(raw||links[j].href||'')===here) return a; }
+    }
+    return null;
+  }
+  function currentLooksPostLike(){
+    try{ var u=new URL(location.href); var p=u.pathname.toLowerCase();
+      return /\\/posts\\/[^/?#]+/.test(p)||/\\/groups\\/[^/]+\\/posts\\/[^/?#]+/.test(p)||/\\/permalink\\.php/.test(p)||/^\\/reel\\/[^/?#]+/.test(p)||/\\/videos\\/[^/?#]+/.test(p)||((p==='/watch'||p==='/watch/')&&u.searchParams.has('v'))||u.searchParams.has('story_fbid')||u.searchParams.has('multi_permalinks');
+    }catch(e){ return false; } }
+  function searchRoots(){
+    var current=currentArticleRoot();
+    if(current) return [current];
+    if(currentLooksPostLike()) return [];
+    var roots=[]; var seen=[];
+    function add(r){ if(!r) return; for(var i=0;i<seen.length;i++){ if(seen[i]===r) return; } seen.push(r); roots.push(r); }
+    var dialogs=document.querySelectorAll('[role="dialog"]');
+    for(var d=0;d<dialogs.length;d++){ if(fbVis(dialogs[d])) add(dialogs[d]); }
+    add(document);
+    return roots;
+  }
+  // 帖级 react 控件：优先当前 permalink 所在 article，再扫可见 dialog，最后扫整页。
+  // 命中 react 词 + 同栏含「评论」按钮。返回 {el, state}。
   function findPostReactControl(){
-    var dialog=document.querySelector('[role="dialog"]'); var root=dialog||document;
-    var btns=root.querySelectorAll('[role="button"][aria-label]');
-    for(var i=0;i<btns.length;i++){ var el=btns[i]; if(!fbVis(el)) continue; var st=reactState(el); if(!st) continue; if(!clusterHasComment(el)) continue; return {el:el, state:st}; }
+    var roots=searchRoots();
+    for(var r=0;r<roots.length;r++){
+      var btns=roots[r].querySelectorAll('[role="button"][aria-label]');
+      for(var i=0;i<btns.length;i++){ var el=btns[i]; if(!fbVis(el)) continue; var st=reactState(el); if(!st) continue; if(!clusterHasComment(el)) continue; return {el:el, state:st}; }
+    }
     return null; }
 `;
 
