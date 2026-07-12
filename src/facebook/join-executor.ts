@@ -344,36 +344,44 @@ const SCOPE_HELPERS_JS = String.raw`
     if (inMain.length) return inMain;
     return Array.from(document.querySelectorAll('h1,[role="heading"][aria-level="1"]')).filter(visible);
   }
-  // D1：头部/动作区 = 群名主标题上溯到「不含异群 /groups/ 引用」的最高祖先，封顶 [role=main]。
-  // **对抗评审 v4 根因修（正向甄别 heading）**：只做负向（块无异群引用）不足——推荐卡片的「群名+加入」内容列本身可不带异群链接
-  // （异群链接在兄弟缩略图列），其干净内容列片段会冒充目标头部、其加入钮被误点（jsdom 复现 ok=true 加错群）。
-  // 正向信号 = **walk 抵达/停在 ceiling**：目标群顶层 heading 上溯只在 [role=main] 处才撞见（别处的）推荐位异群引用；
-  // 而推荐卡片内的 heading 会先停在「引用异群的中层卡片容器」（低于 ceiling）。停在中层 → 该 heading 属某推荐卡片 → 跳过试下一个。
-  // 逐个 heading 试，取首个「停在 ceiling 且块无异群引用」的；无一合格 → null（fail-closed）。
+  // D1：头部/动作区 = 群名主标题上溯到「不含异群 /groups/ 引用」的**最后一个干净祖先**（停在首个含异群引用的祖先之下），封顶 [role=main]。
+  // 块内**必无异群引用**（正向包含承重）→ 兄弟推荐位栏的异群 join 结构性排除在块外；块内含目标自身 CTA（join/member/pending）。
+  //
+  // **真机校准（2026-07-12，task 0.1，运营机 AdsPower 实测）**：三处坐实 + 一处推翻早前 v4/v5 的过度硬化——
+  //   ① 目标群名恒为 [role=main] 内单一 <h1>；真实「相关小组/发现更多小组」推荐卡片**不用 h1**（用链接/纯文本），故页面群名 h1 唯一。
+  //   ② 加群成功后 FB 常弹「相关小组」takeover：其异群栏与目标 h1 **共享一个 [role=main] 之下的中层 div**（栏是目标头部的兄弟子树）。
+  //      早前 v4「walk 没停在 ceiling 就拒该 heading」会把这唯一的目标 h1 也拒掉 → scopeResolved=false → 成员/待审读不出、
+  //      成功加群被误报 join_failed（成员信号收窄到未解析的块=空）。真机 2/2 群复现，属可用性回归、非安全问题（栏 join 仍全出域）。
+  //   ③ 每张真实推荐卡片的异群 /groups/<id> 锚点距其 join 钮仅 2–4 跳、__hasForeignGroupRef 后代扫描恒能检出（无「纯 JS 闭包」形态）。
+  // 故改为：单一 heading（真实 FB 群页/成员页/takeover 均如此）→ 直接用其最后干净祖先作块（修回归）；
+  //   多 heading（合成/极端）→ 保留 v4/v5 甄别：优先唯一「停在 ceiling」者（目标顶层区域），≥2 个对称干净区域 → 歧义 fail-closed（绝不猜）。
+  // residual（真机未见、诚实记录）：若某目标页**自身无 h1** 而某推荐卡片**有 h1**，单 heading 分支会误接受该卡片块——真实 FB 目标群页恒有 h1、卡片从不用 h1，故不触发。
   function __resolveHeaderBlock(targetGid){
     var hs = __groupHeadings();
-    var accepted = [];
+    var blocks = [];  // { node: 最后干净祖先, atCeiling: 是否走到/停在 [role=main] }
     for (var hi = 0; hi < hs.length; hi++){
       var h = hs[hi];
       var ceiling = (h.closest && h.closest('[role="main"]')) || document.body;
       var node = h;
-      var brokeBelowCeiling = false;
+      var atCeiling = false;
       while (node && node !== ceiling){
         var parent = node.parentElement;
         if (!parent) break;
         if (__hasForeignGroupRef(parent, targetGid)){
-          if (parent !== ceiling) brokeBelowCeiling = true; // heading 落在「引用异群的中层容器（推荐卡片）」内 → 非目标顶层 heading
-          break;
+          if (parent === ceiling) atCeiling = true;  // 只在 [role=main] 处才撞见异群引用 = 目标顶层区域（栏是 main 内的兄弟子树）
+          break;                                     // 停在含异群引用的祖先之下：绝不把它并入块（块保持无异群引用）
         }
         node = parent;
       }
-      if (brokeBelowCeiling) continue;                                    // 推荐卡片内的 heading → 试下一个
-      if (node === h && __hasForeignGroupRef(node, targetGid)) continue;  // 起点 h 子树自身带异群引用 → 试下一个
-      accepted.push(node);
+      if (node === ceiling) atCeiling = true;                             // 一路干净走到 ceiling（页面无异群引用）
+      if (node === h && __hasForeignGroupRef(node, targetGid)) continue;  // 起点 h 子树自身带异群引用（异群卡片的 h1）→ 跳过
+      blocks.push({ node: node, atCeiling: atCeiling });
     }
-    // 歧义即 fail-closed（对抗评审 v5，原则性安全网）：正常页恰一个「停在 ceiling 的干净 h1 区域」（目标群头部；推荐卡片带自身异群引用故其 h1 停在中层被跳过）。
-    // 出现 ≥2 个 → 说明有对称的干净 h1 区域（如异群链接游离在卡片外、卡片本身无引用 → 目标与推荐卡片都被接受）→ 无法确信哪个是目标 → 宁可不点（可重试），绝不在歧义下点错群。
-    return accepted.length === 1 ? accepted[0] : null;
+    if (blocks.length === 0) return null;                                 // 无群名 h1 → fail-closed
+    if (blocks.length === 1) return blocks[0].node;                       // 真实 FB：单一群名 h1 → 用其最后干净祖先（含目标自身 CTA、排除兄弟栏）
+    // 多 heading：优先唯一「停在 ceiling」的目标顶层区域（v4 双列卡片甄别）；≥2 个对称 → 歧义 fail-closed（v5 安全网）。
+    var atCeil = blocks.filter(function(b){ return b.atCeiling; });
+    return atCeil.length === 1 ? atCeil[0].node : null;
   }
   var __HEADER_BLOCK = __resolveHeaderBlock(__TARGET_GID);
   // E1（corroborating）：候选自身或祖先链上任一元素（含属性编码 id 的 div[role=button]/裸 div）解析到异群 /groups/ → 排除。

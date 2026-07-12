@@ -792,7 +792,12 @@ test('scope-guard: 成员信号 + 域内有 join 按钮（矛盾污染）→ 抑
 
 // § 三轮再评审闭合：异群 /groups/id 编码在**中层容器自身**属性上（`div#B data-nav=/groups/999`），目标 header 与推荐位 join 都嵌其中。
 // 目标 heading 上溯先撞见「引用异群的中层容器 #B（低于 ceiling）」→ 甄别为「非目标顶层 heading」→ fail-closed（不点、可重试），推荐位绝不被点。
-test('scope-guard[jsdom]: 目标与推荐位同处「自身引用异群的中层容器」#B 内 → fail-closed（not_ready）、推荐位绝不被点（三/四轮闭合）', async () => {
+// § 真机校准（2026-07-12 task 0.1）：这正是「加群后『相关小组』takeover」的合成还原——目标 h1 与异群栏共享一个
+// 引用异群的中层容器 #B（栏 #feed 是目标头部 #header 的兄弟子树）。早前 v4「没停 ceiling 就拒 heading」会把唯一的
+// 目标 h1 也拒掉 → fail-closed，致成功加群/待审读不出（成员信号收窄到未解析块=空）。真机 2/2 群复现该回归。
+// 修后（单一 heading → 最后干净祖先作块）：块 = #header（含目标自身「已申请」、排除兄弟栏 #feed）→ 正确判 pending；
+// 异群栏 join 仍在块外、绝不被点（正向包含承重，安全不变、可用性修回）。
+test('scope-guard[jsdom]: 目标与「相关小组」栏同处引用异群的中层容器 #B（takeover 还原）→ 读出目标自身「已申请」判 pending、栏 join 绝不点（真机校准）', async () => {
   const dom = buildGroupDom(
     '<div role="main">' +
       '<div id="B" data-nav="/groups/999">' +
@@ -806,9 +811,36 @@ test('scope-guard[jsdom]: 目标与推荐位同处「自身引用异群的中层
     railClicked = true;
   });
   const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
-  assert.equal(r.reason, 'not_ready', '目标 heading 落在引用异群的中层容器内 → 甄别掉 → fail-closed 可重试');
-  assert.equal(railClicked, false, '推荐位 join 绝不被点（红线闭合）');
+  assert.equal(r.reason, 'pending', '块=#header 含目标自身「已申请」→ 正确读出 pending（真机校准修回归，非 fail-closed 漏读）');
+  assert.equal(railClicked, false, '兄弟栏异群 join 在块外、绝不被点（正向包含承重，红线不变）');
   assert.equal(r.clicked, false);
+  assert.equal(r.observation?.scopeResolved, true, '单一目标 h1 的最后干净祖先作块 → 作用域确立');
+});
+
+// § 真机校准（2026-07-12 task 0.1）：加群成功后「相关小组」takeover 的成员态还原——目标自身「已加入」在 #header，
+// 异群栏在兄弟 #feed，两者共享引用异群的 #B。修前该唯一目标 h1 被 v4 拒掉 → 成员信号收窄到空 → 不判 already_member →
+// 落 not_ready → 已加入群被云端反复重试、成功加群误报 join_failed。修后块=#header 含「已加入」→ 正确 already_member。
+test('scope-guard[jsdom]: 加群后 takeover 成员态（目标「已加入」+ 兄弟异群栏，共享 #B）→ 读出目标自身成员信号、判 already_member、栏绝不污染（真机校准）', async () => {
+  const dom = buildGroupDom(
+    '<div role="main">' +
+      '<div id="B" data-nav="/groups/999">' +
+        '<div id="header"><h1>Target Group</h1><div role="button" id="target">已加入</div></div>' +
+        '<div id="feed"><div role="button" id="rail">加入小组</div></div>' +
+      '</div>' +
+      '</div>',
+  );
+  let railClicked = false;
+  (dom.window.document.getElementById('rail') as HTMLElement).addEventListener('click', () => {
+    railClicked = true;
+  });
+  const r = await makeJsdomExecutor(dom).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(r.reason, 'already_member', '块=#header 含目标自身「已加入」→ 正确读出成员信号判 already_member（修回归，非漏读落 not_ready）');
+  assert.equal(railClicked, false, '兄弟栏异群 join 绝不被点');
+  assert.equal(r.clicked, false);
+  assert.ok(
+    !(r.observation?.ctaCandidates ?? []).some((c) => c.kind === 'join' && c.inTargetScope === true),
+    '兄弟栏异群 join 出域（inTargetScope=false），绝不冒充目标自身 join',
+  );
 });
 
 // § 四轮再评审红线闭合（根因：heading 盲取首个、只负向校验）：FB「你可能想加入」**双列卡片**——异群 /groups/999 链接在缩略图列，
