@@ -91,10 +91,10 @@
       </section>
       <p id="guide-hint" class="guide-hint hidden"></p>
 
-      <!-- 同账号铺多环境告警（云端会合并风控/配额、发布只定向最早那条边缘） -->
+      <!-- 同账号铺多环境提示（云端会合并风控/配额、发布只定向最早那条边缘） -->
       <section id="same-account-warn" class="setup warn hidden">
         <div class="setup-txt">
-          <strong>同账号告警</strong>
+          <strong>账号重复运行</strong>
           <span id="same-account-text"></span>
         </div>
       </section>
@@ -194,15 +194,15 @@
         </div>
       </section>
 
-      <!-- 今日小结条（计数从门面降级至此） -->
+      <!-- 今日进展条（计数从门面降级至此） -->
       <section class="summary" id="daily-summary">
         <div class="summary-head">
           <div class="summary-title">
-            <span class="lbl">今日用量</span>
+            <span class="lbl">今日进展</span>
             <span id="usage-source" class="summary-source">本机实时</span>
           </div>
           <span id="usage-limit" class="summary-limit hidden"></span>
-          <button id="quota-toggle" class="quota-toggle" type="button" aria-label="展开限额明细" aria-expanded="false">⌄</button>
+          <button id="quota-toggle" class="quota-toggle" type="button" aria-label="查看今日节奏" aria-expanded="false">⌄</button>
         </div>
         <div class="usage-grid">
           <div class="kpi" data-action="view">

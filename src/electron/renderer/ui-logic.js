@@ -17,23 +17,22 @@
     return `${Math.floor(diff / 86_400_000)} 天前`;
   }
 
-  // ── 健康合成：五路技术状态 → 一句结论 + 色调。attention 恒优先。──
+  // ── 健康合成：五路技术状态 → 一句结论 + 色调。真正中断与可恢复协助分级。──
   const AUTH_ATTENTION = { 'login required': '需要登录小红书', 'chrome missing': '本机缺少 Chrome', 'config required': '需要完成初始设置' };
 
   function synthesizeHealth(status) {
     const s = status || {};
     const edgeFailure = s.edgeFailure && typeof s.edgeFailure.summary === 'string' ? s.edgeFailure.summary.trim() : '';
-    if (s.edge === 'warning') return { code: 'attention', label: '需要注意', detail: edgeFailure || '引擎已停止，请查看开发者详情，或重新启动 / 重新登录' };
-    if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需要注意', detail: AUTH_ATTENTION[s.auth] };
-    if (s.risk === 'restricted' || s.risk === 'frozen') {
-      return { code: 'attention', label: '需要注意', detail: s.risk === 'frozen' ? '账号被冻结，已停止操作' : '账号受限，已收紧动作' };
-    }
+    if (s.edge === 'warning') return { code: 'error', label: '运行异常', detail: edgeFailure || '引擎未能继续运行，请查看详情后重新启动' };
+    if (s.risk === 'frozen') return { code: 'error', label: '账号已暂停', detail: '账号当前无法继续操作，请查看详情' };
+    if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需要协助', detail: AUTH_ATTENTION[s.auth] };
+    if (s.risk === 'restricted') return { code: 'attention', label: '节奏已调整', detail: '账号互动暂时受限，已自动放慢节奏' };
     if (s.edge === 'running' && s.session === 'running' && s.cloud !== 'connected') {
-      return { code: 'attention', label: '云端连接中断', detail: '正在等待与云端恢复连接' };
+      return { code: 'attention', label: '正在重新连接', detail: '连接恢复后会自动继续' };
     }
     if (s.session === 'paused') return { code: 'paused', label: '已暂停', detail: '浏览器保持打开；可恢复或关闭' };
     if (s.session === 'closed') return { code: 'ready', label: '已关闭', detail: '浏览器已关闭，点右下角「启动」重新打开' };
-    if (s.edge === 'running' && s.session === 'resting') return { code: 'paused', label: '休息中', detail: '休息结束后会自动继续' };
+    if (s.edge === 'running' && s.session === 'resting') return { code: 'paused', label: '等待下一轮', detail: '当前阶段完成后会自动继续' };
     if (s.edge === 'starting') return { code: 'ready', label: '正在启动…', detail: '引擎启动中' };
     if (s.edge === 'running' && s.session === 'running') {
       return { code: 'running', label: s.risk === 'warned' ? '运行中 · 放慢节奏' : '运行中 · 一切正常', detail: '' };
@@ -41,11 +40,11 @@
     return { code: 'ready', label: '就绪', detail: '点右下角「启动」开始' };
   }
 
-  // 标题带色调：随风控状态染色（normal 平静 / warned 琥珀 / restricted·frozen 警示）。
+  // 标题带色调：可恢复的节奏调整用琥珀，只有冻结使用红色。
   function bandTone(status) {
     const risk = (status || {}).risk;
-    if (risk === 'restricted' || risk === 'frozen') return 'danger';
-    if (risk === 'warned') return 'warned';
+    if (risk === 'frozen') return 'danger';
+    if (risk === 'warned' || risk === 'restricted') return 'warned';
     return 'normal';
   }
 
@@ -53,9 +52,9 @@
   const DETAIL_LABELS = {
     auth: { label: '小红书登录', values: { checking: '检测中', 'login required': '需要登录', 'logged in': '已登录', 'chrome missing': '缺少 Chrome', 'config required': '待完成设置' } },
     cloud: { label: '云端连接', values: { disconnected: '未连接', connected: '已连接' } },
-    session: { label: '自动运营', values: { idle: '待命', running: '进行中', resting: '休息中', paused: '已暂停', closed: '已关闭' } },
-    risk: { label: '账号保护', values: { normal: '正常', warned: '谨慎放慢', restricted: '受限', frozen: '已冻结' } },
-    edge: { label: '本机引擎', values: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '异常' } },
+    session: { label: '自动运营', values: { idle: '待命', running: '进行中', resting: '等待下一轮', paused: '已暂停', closed: '已关闭' } },
+    risk: { label: '账号保护', values: { normal: '正常', warned: '谨慎放慢', restricted: '已调整节奏', frozen: '已暂停' } },
+    edge: { label: '本机引擎', values: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '需要处理' } },
   };
 
   function detailRows(status) {
@@ -71,18 +70,12 @@
   // 只有「会话在跑 + 引擎在跑 + 最近事件足够新鲜（与看门狗有界 idle 对齐，5 分钟）」才允许动。
   const PRESENCE_FRESH_MS = 5 * 60_000;
   const QUOTA_ACTION_LABELS = {
-    view: '浏览',
-    like: '点赞',
-    collect: '收藏',
-    comment: '评论',
-    follow: '关注',
-    publish: '发帖',
-  };
-  const QUOTA_WINDOW_LABELS = {
-    session: '单场',
-    minute: '分钟',
-    hour: '小时',
-    day: '今日',
+    view: '内容观察',
+    like: '点赞互动',
+    collect: '收藏互动',
+    comment: '评论互动',
+    follow: '关注互动',
+    publish: '内容发布',
   };
   const QUOTA_WINDOW_PRIORITY = ['session', 'minute', 'hour', 'day'];
   const QUOTA_ACTION_PRIORITY = ['view', 'like', 'collect', 'comment', 'follow', 'publish'];
@@ -113,7 +106,7 @@
     return `${Math.ceil(hours / 24)} 天后`;
   }
 
-  function quotaRestPresenceText(status, nowMs) {
+  function quotaCompletionPresence(status, nowMs) {
     const windows = status && status.dailyUsage && objectOrEmpty(status.dailyUsage).windows;
     if (!windows || typeof windows !== 'object') return '';
     for (const windowKey of QUOTA_WINDOW_PRIORITY) {
@@ -130,11 +123,21 @@
         if (cap === null) continue;
         const used = count(totals[action]);
         if (!saturated.has(action) && used < count(cap)) continue;
+        const activity = QUOTA_ACTION_LABELS[action];
         const wait = futureWaitText(finiteNumber(window.releaseAt), nowMs);
-        return `${QUOTA_ACTION_LABELS[action]}已达到${QUOTA_WINDOW_LABELS[windowKey]}上限，休息中${wait ? `，预计 ${wait}继续` : ''}`;
+        const text = windowKey === 'day'
+          ? `今日${activity}计划已完成`
+          : windowKey === 'session'
+            ? `本轮${activity}计划已完成`
+            : `${activity}完成一轮`;
+        return {
+          text,
+          animate: false,
+          fresh: `先让平台认识你一点${wait ? ` · 预计 ${wait}继续` : ''}`,
+        };
       }
     }
-    return '';
+    return null;
   }
 
   function presenceView(status, nowMs) {
@@ -149,22 +152,24 @@
     // 非运行态：诚实静态文案，presence 历史文本不再当「正在做」展示。
     if (s.session === 'paused') return { text: '已暂停，浏览器保持打开', animate: false, fresh: staticFresh };
     if (s.session === 'closed') return { text: '已关闭浏览器', animate: false, fresh: staticFresh };
-    if (s.session === 'resting') return { text: (p && p.text) || '这一轮结束，休息后会自动继续', animate: false, fresh: staticFresh };
     if (s.auth === 'login required') return { text: '等你登录小红书后继续', animate: false, fresh: '' };
     if (s.auth === 'config required') return { text: '等待完成初始设置', animate: false, fresh: '' };
     if (s.edge === 'warning') return { text: '引擎已停止，请查看详情或重新启动', animate: false, fresh: staticFresh };
     if (s.edge === 'starting') return { text: '正在启动引擎…', animate: true, fresh: '' };
+    const quotaCompletion = quotaCompletionPresence(s, nowMs);
+    if (s.session === 'resting') {
+      return quotaCompletion || { text: '这一轮已经完成，稍作等待后会自动继续', animate: false, fresh: staticFresh };
+    }
     if (!running) return { text: '待命中', animate: false, fresh: staticFresh };
 
     if (p && p.text && hasFresh) {
       return { text: p.text, animate: true, fresh: `刚刚更新 · ${relTime(at, nowMs)}` };
     }
-    const quotaRestText = quotaRestPresenceText(s, nowMs);
-    if (quotaRestText) {
+    if (quotaCompletion) {
       return {
-        text: quotaRestText,
+        text: quotaCompletion.text,
         animate: false,
-        fresh: Number.isFinite(at) ? `最后动态 · ${relTime(at, nowMs)}` : '',
+        fresh: quotaCompletion.fresh,
       };
     }
     // 在跑但事件已不新鲜：如实说「没有新动态」，绝不假装仍在忙。
@@ -294,7 +299,7 @@
   // ── 多环境 fleet（edge-multi-environment-fleet）：环境栏状态环分级 / 紧迫度排序 / 待处理计数 ──
   // 分级（收起态由头像外圈色环承担）：
   //   error(红,需处理)     放弃重启终态 / 引擎异常
-  //   attention(琥珀,需处理) 需登录 / 待配置 / 风控受限冻结 / 同账号告警 / 云端连接中断
+  //   attention(琥珀,需处理) 需登录 / 待配置 / 风控受限 / 账号重复运行 / 云端重连
   //   launching(蓝)        启动中
   //   stale(深黄)          状态心跳超阈值——失联，MUST NOT 呈现为在线
   //   running(绿)          运行中
@@ -307,22 +312,21 @@
     if (s.edge === 'warning') return { level: 'error', needsAction: true, label: '异常' };
     // 阻断浮层待人工（登录/验证码/未知阻断，核心已本地暂停）：即便 edge 仍 running 也 MUST 浮顶为需处理，
     // 绝不呈现为绿色在线（多环境跨窗盯验证码是本控制台核心目的）。置于 running 判定之前。
-    if (s.overlayBlocked) return { level: 'attention', needsAction: true, label: '需人工处理' };
+    if (s.overlayBlocked) return { level: 'attention', needsAction: true, label: '等待你处理' };
     if (s.auth === 'login required') return { level: 'attention', needsAction: true, label: '需要登录' };
     if (s.auth === 'config required') return { level: 'attention', needsAction: true, label: '待配置' };
     if (s.auth === 'chrome missing') return { level: 'attention', needsAction: true, label: '缺少 Chrome' };
-    if (s.risk === 'restricted' || s.risk === 'frozen') {
-      return { level: 'attention', needsAction: true, label: s.risk === 'frozen' ? '账号被冻结' : '账号受限' };
-    }
-    if (s.sameAccountWarning) return { level: 'attention', needsAction: true, label: '同账号告警' };
+    if (s.risk === 'frozen') return { level: 'error', needsAction: true, label: '账号已暂停' };
+    if (s.risk === 'restricted') return { level: 'attention', needsAction: true, label: '节奏已调整' };
+    if (s.sameAccountWarning) return { level: 'attention', needsAction: true, label: '账号重复运行' };
     if (s.edge === 'starting') return { level: 'launching', needsAction: false, label: '启动中' };
     if (s.edge === 'running') {
       const at = Date.parse(s.updatedAt || '');
       if (Number.isFinite(at) && Number.isFinite(nowMs) && nowMs - at > FLEET_STALE_MS) {
         return { level: 'stale', needsAction: false, label: '失联' };
       }
-      if (s.session === 'running' && s.cloud !== 'connected') return { level: 'attention', needsAction: true, label: '云端连接中断' };
-      return { level: 'running', needsAction: false, label: s.session === 'paused' ? '已暂停' : s.session === 'resting' ? '休息中' : '运行中' };
+      if (s.session === 'running' && s.cloud !== 'connected') return { level: 'attention', needsAction: true, label: '正在重新连接' };
+      return { level: 'running', needsAction: false, label: s.session === 'paused' ? '已暂停' : s.session === 'resting' ? '等待下一轮' : '运行中' };
     }
     if (s.session === 'paused') return { level: 'offline', needsAction: false, label: '已暂停' };
     if (s.session === 'closed') return { level: 'offline', needsAction: false, label: '已关闭' };

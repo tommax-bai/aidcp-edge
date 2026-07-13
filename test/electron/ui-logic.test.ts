@@ -50,12 +50,13 @@ test('健康合成：正常运行 → 运行中', () => {
   assert.match(h.label, /运行中/);
 });
 
-test('健康合成：任一路异常 → 需要注意', () => {
+test('健康合成：可恢复状态需要协助，真正中断状态为错误', () => {
   assert.equal(uiLogic.synthesizeHealth(st({ auth: 'login required' })).code, 'attention');
   assert.equal(uiLogic.synthesizeHealth(st({ auth: 'config required' })).code, 'attention');
-  assert.equal(uiLogic.synthesizeHealth(st({ edge: 'warning' })).code, 'attention');
-  assert.equal(uiLogic.synthesizeHealth(st({ risk: 'frozen' })).code, 'attention');
+  assert.equal(uiLogic.synthesizeHealth(st({ edge: 'warning' })).code, 'error');
+  assert.equal(uiLogic.synthesizeHealth(st({ risk: 'frozen' })).code, 'error');
   assert.equal(uiLogic.synthesizeHealth(st({ cloud: 'disconnected' })).code, 'attention');
+  assert.equal(uiLogic.synthesizeHealth(st({ risk: 'restricted' })).code, 'attention');
 });
 
 test('健康合成：暂停 / 启动中 / 停止', () => {
@@ -65,7 +66,7 @@ test('健康合成：暂停 / 启动中 / 停止', () => {
   assert.match(closed.detail, /启动/);
   const resting = uiLogic.synthesizeHealth(st({ session: 'resting', edge: 'running' }));
   assert.equal(resting.code, 'paused');
-  assert.match(resting.label, /休息中/);
+  assert.match(resting.label, /等待下一轮/);
   assert.equal(uiLogic.synthesizeHealth(st({ edge: 'starting', session: 'running', cloud: 'disconnected' })).code, 'ready');
   assert.equal(uiLogic.synthesizeHealth(st({ edge: 'stopped', session: 'idle', cloud: 'disconnected' })).code, 'ready');
 });
@@ -73,7 +74,7 @@ test('健康合成：暂停 / 启动中 / 停止', () => {
 test('标题带色调随风控状态', () => {
   assert.equal(uiLogic.bandTone(st()), 'normal');
   assert.equal(uiLogic.bandTone(st({ risk: 'warned' })), 'warned');
-  assert.equal(uiLogic.bandTone(st({ risk: 'restricted' })), 'danger');
+  assert.equal(uiLogic.bandTone(st({ risk: 'restricted' })), 'warned');
   assert.equal(uiLogic.bandTone(st({ risk: 'frozen' })), 'danger');
 });
 
@@ -101,7 +102,7 @@ test('在场感：运行中但事件过期（>5min）→ 动效关、如实说�
   assert.match(v.text, /没有新动态/);
 });
 
-test('在场感：运行中但事件过期 + 当前小时限额已满 → 文案说明上限和预计继续时间', () => {
+test('在场感：运行中但事件过期 + 当前阶段完成 → 文案说明成果和预计继续时间', () => {
   const now = Date.now();
   const v = uiLogic.presenceView(st({
     presence: { text: '正在继续浏览…', at: new Date(now - 6 * 60_000).toISOString() },
@@ -122,8 +123,9 @@ test('在场感：运行中但事件过期 + 当前小时限额已满 → 文案
     },
   }), now);
   assert.equal(v.animate, false);
-  assert.match(v.text, /浏览已达到小时上限，休息中/);
-  assert.match(v.text, /预计 36 分钟后继续/);
+  assert.match(v.text, /内容观察完成一轮/);
+  assert.match(v.fresh, /先让平台认识你一点/);
+  assert.match(v.fresh, /预计 36 分钟后继续/);
 });
 
 test('在场感：过期限额窗口不再解释为当前上限休息', () => {
@@ -181,9 +183,9 @@ test('在场感：暂停 / 停止 / 需登录 → 静态诚实文案', () => {
   const closed = uiLogic.presenceView(st({ session: 'closed', edge: 'stopped', presence: { text: 'x', at: new Date(now - 8000).toISOString() } }), now);
   assert.equal(closed.animate, false);
   assert.match(closed.text, /已关闭浏览器/);
-  const resting = uiLogic.presenceView(st({ session: 'resting', presence: { text: '这一轮逛完了，休息约 2 分钟后会继续', at: new Date(now - 8000).toISOString() } }), now);
+  const resting = uiLogic.presenceView(st({ session: 'resting', presence: { text: '旧的技术休息文案', at: new Date(now - 8000).toISOString() } }), now);
   assert.equal(resting.animate, false);
-  assert.match(resting.text, /休息约 2 分钟后会继续/);
+  assert.match(resting.text, /这一轮已经完成/);
   const stopped = uiLogic.presenceView(st({ edge: 'stopped', session: 'idle' }), now);
   assert.equal(stopped.animate, false);
   assert.match(stopped.text, /待命/);

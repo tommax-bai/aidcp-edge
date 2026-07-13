@@ -89,13 +89,16 @@ test('标题带展示账号身份与健康结论', async () => {
   assert.ok($(w, '#titlebar').classList.contains('tone-normal'));
 });
 
-test('风控警戒 → 标题带染琥珀；异常 → 健康药丸「需要注意」', async () => {
+test('风控警戒与登录协助用琥珀；真正异常使用独立错误态', async () => {
   const { w, pushStatus } = await boot();
   pushStatus(makeStatus({ risk: 'warned' }));
   assert.ok($(w, '#titlebar').classList.contains('tone-warned'));
-  pushStatus(makeStatus({ edge: 'warning' }));
-  assert.equal($(w, '#health-label').textContent, '需要注意');
+  pushStatus(makeStatus({ auth: 'login required', edge: 'stopped', session: 'idle' }));
+  assert.equal($(w, '#health-label').textContent, '需要协助');
   assert.ok($(w, '#health-pill').classList.contains('attention'));
+  pushStatus(makeStatus({ edge: 'warning' }));
+  assert.equal($(w, '#health-label').textContent, '运行异常');
+  assert.ok($(w, '#health-pill').classList.contains('error'));
 });
 
 test('异常退出详情在客户端内持久展示，且不把堆栈塞进主界面', async () => {
@@ -176,7 +179,7 @@ test('红线：停止 / 事件过期时动效止息、如实待命', async () =>
   assert.match($(w, '#presence-text').textContent ?? '', /没有新动态/);
 });
 
-test('运行中 + 事件过期 + 小时限额已满 → 在场感说明休息原因和预计继续时间', async () => {
+test('运行中 + 事件过期 + 阶段计划完成 → 在场感说明成果和预计继续时间', async () => {
   const now = 1730000000000;
   const stale = new Date(now - 6 * 60_000).toISOString();
   const { w, pushStatus } = await boot();
@@ -205,8 +208,9 @@ test('运行中 + 事件过期 + 小时限额已满 → 在场感说明休息原
       },
     }));
     assert.equal($(w, '#presence-text').classList.contains('shimmer'), false);
-    assert.match($(w, '#presence-text').textContent ?? '', /浏览已达到小时上限，休息中/);
-    assert.match($(w, '#presence-text').textContent ?? '', /预计 36 分钟后继续/);
+    assert.match($(w, '#presence-text').textContent ?? '', /内容观察完成一轮/);
+    assert.match($(w, '#presence-fresh').textContent ?? '', /先让平台认识你一点/);
+    assert.match($(w, '#presence-fresh').textContent ?? '', /预计 36 分钟后继续/);
   } finally {
     w.Date.now = originalNow;
   }
@@ -298,7 +302,7 @@ test('旧形状 status（无 presence/account/publish）→ 安全降级渲染',
   assert.equal($(w, '#comments').textContent, '0', '旧 stats 无 comments 兜底 0');
 });
 
-test('回归：今日小结数字永不为空（缺字段兜 0 + 零值弱化）', async () => {
+test('回归：今日进展数字永不为空（缺字段兜 0 + 零值弱化）', async () => {
   const { w, pushStatus } = await boot();
   // 只带 views 的残缺 stats（模拟老 bug 时代的坏状态）：其余计数展示 0 而不是空/undefined
   pushStatus(makeStatus({ stats: { views: 7 } }));
@@ -308,12 +312,13 @@ test('回归：今日小结数字永不为空（缺字段兜 0 + 零值弱化）
   assert.equal($(w, '#comments').textContent, '0');
   assert.equal($(w, '#follows').textContent, '0');
   assert.equal($(w, '#publishes').textContent, '0');
-  assert.ok($(w, '#usage-limit').classList.contains('hidden'), '本机实时没有权威 quota，不展示上限判断');
+  assert.equal($(w, '#daily-summary .lbl').textContent, '今日进展');
+  assert.ok($(w, '#usage-limit').classList.contains('hidden'), '本机实时没有权威计划数据，不展示完成判断');
   assert.ok($(w, '#likes').classList.contains('zero'), '零值应弱化显示');
   assert.ok(!$(w, '#views').classList.contains('zero'), '非零值不弱化');
 });
 
-test('今日小结：收到账号 dailyUsage 后优先显示账号今日，并标记已到上限项', async () => {
+test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并标记已完成计划', async () => {
   const { w, pushStatus } = await boot();
   const originalNow = w.Date.now;
   w.Date.now = () => 1730000002000;
@@ -364,33 +369,36 @@ test('今日小结：收到账号 dailyUsage 后优先显示账号今日，并�
     },
   }));
   assert.match($(w, '#usage-source').textContent ?? '', /账号今日/);
-  assert.match($(w, '#usage-source').textContent ?? '', /标准档/);
-  assert.match($(w, '#usage-limit').textContent ?? '', /点赞已达分钟\/今日上限/);
-  assert.match($(w, '#usage-limit').textContent ?? '', /发帖已达小时\/今日上限/);
-  assert.match($(w, '#usage-limit').title ?? '', /发帖已达小时\/今日上限/);
-  assert.ok($(w, '#usage-limit').classList.contains('hit'));
+  assert.match($(w, '#usage-source').textContent ?? '', /均衡节奏/);
+  assert.match($(w, '#usage-limit').textContent ?? '', /今日点赞\/发帖计划已完成/);
+  assert.match($(w, '#usage-limit').title ?? '', /发帖：阶段节奏、今日计划已完成/);
+  assert.ok($(w, '#usage-limit').classList.contains('complete'));
+  assert.ok(!$(w, '#usage-limit').classList.contains('hit'));
+  assert.equal($(w, '#quota-toggle').getAttribute('aria-label'), '查看今日节奏');
   assert.ok($(w, '#quota-windows').classList.contains('hidden'), 'collapsed card should only show daily totals');
   $(w, '#daily-summary').click();
   await tick();
+  assert.equal($(w, '#quota-toggle').getAttribute('aria-label'), '收起今日节奏');
   assert.ok(!$(w, '#quota-windows').classList.contains('hidden'));
   assert.equal(w.document.querySelectorAll('.quota-window-detail').length, 4);
   assert.equal(w.document.querySelectorAll('.qwd-row').length, 24);
-  assert.match($(w, '#quota-windows').textContent ?? '', /单场/);
-  assert.match($(w, '#quota-windows').textContent ?? '', /小时/);
+  assert.match($(w, '#quota-windows').textContent ?? '', /本轮计划/);
+  assert.match($(w, '#quota-windows').textContent ?? '', /阶段节奏/);
   assert.match($(w, '#quota-windows').textContent ?? '', /2\/-/);
   assert.match($(w, '#quota-windows').textContent ?? '', /10\/60/);
-  assert.match($(w, '#quota-windows').textContent ?? '', /释放/);
+  assert.match($(w, '#quota-windows').textContent ?? '', /继续/);
+  assert.doesNotMatch($(w, '#daily-summary').textContent ?? '', /已达|上限|额度|释放|已满/);
   assert.equal($(w, '#views').textContent, '10');
   assert.equal($(w, '#likes').textContent, '3');
   assert.equal($(w, '#follows').textContent, '2');
   assert.equal($(w, '#publishes').textContent, '1');
   assert.equal($(w, '#likes-cap').textContent, '/3');
-  assert.ok($(w, '#likes').closest('.kpi')?.classList.contains('saturated'));
-  assert.ok($(w, '#publishes').closest('.kpi')?.classList.contains('saturated'));
+  assert.ok($(w, '#likes').closest('.kpi')?.classList.contains('complete'));
+  assert.ok($(w, '#publishes').closest('.kpi')?.classList.contains('complete'));
   w.Date.now = originalNow;
 });
 
-test('今日小结：过期分钟窗口不再作为当前已达上限展示', async () => {
+test('今日进展：过期窗口不再作为当前计划完成展示', async () => {
   const now = 1730000120000;
   const { w, pushStatus } = await boot();
   const originalNow = w.Date.now;
@@ -416,12 +424,12 @@ test('今日小结：过期分钟窗口不再作为当前已达上限展示', as
         },
       },
     }));
-    assert.match($(w, '#usage-limit').textContent ?? '', /额度正常/);
-    assert.ok(!$(w, '#usage-limit').classList.contains('hit'));
+    assert.match($(w, '#usage-limit').textContent ?? '', /按计划进行中/);
+    assert.ok(!$(w, '#usage-limit').classList.contains('complete'));
     $(w, '#daily-summary').click();
     await tick();
-    assert.match($(w, '#quota-windows').textContent ?? '', /待刷新/);
-    assert.match($(w, '#quota-windows').textContent ?? '', /约 30 秒后刷新/);
+    assert.match($(w, '#quota-windows').textContent ?? '', /准备下一轮/);
+    assert.match($(w, '#quota-windows').textContent ?? '', /约 30 秒后进入下一轮/);
   } finally {
     w.Date.now = originalNow;
   }

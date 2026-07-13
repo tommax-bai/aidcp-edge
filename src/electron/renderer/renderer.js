@@ -211,7 +211,7 @@ const STATUS_LABELS = {
     'config required': '待配置',
   },
   cloud: { disconnected: '未连接', connected: '已连接' },
-  session: { idle: '待命', running: '进行中', resting: '休息中', paused: '已暂停', closed: '已关闭' },
+  session: { idle: '待命', running: '进行中', resting: '等待下一轮', paused: '已暂停', closed: '已关闭' },
   risk: { normal: '正常', warned: '谨慎放慢', restricted: '受限', frozen: '已冻结' },
   edge: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '异常' },
 };
@@ -313,16 +313,16 @@ const USAGE_ITEMS = [
 ];
 
 const QUOTA_WINDOWS = [
-  { key: 'session', label: '单场' },
-  { key: 'minute', label: '分钟' },
-  { key: 'hour', label: '小时' },
-  { key: 'day', label: '今日' },
+  { key: 'session', label: '本轮计划' },
+  { key: 'minute', label: '当前节奏' },
+  { key: 'hour', label: '阶段节奏' },
+  { key: 'day', label: '今日计划' },
 ];
 
 const QUOTA_LEVEL_LABELS = {
-  conservative: '保守档',
-  normal: '标准档',
-  aggressive: '进取档',
+  conservative: '稳妥节奏',
+  normal: '均衡节奏',
+  aggressive: '积极节奏',
 };
 
 function count(value) {
@@ -354,9 +354,9 @@ function timeHint(at, now) {
 }
 
 function refreshMeta(refreshAt, now) {
-  if (refreshAt === null) return '等待云端快照';
-  if (refreshAt > now) return `${timeHint(refreshAt, now)}刷新`;
-  return `${new Date(refreshAt).toLocaleTimeString()} 应已刷新，等待云端快照`;
+  if (refreshAt === null) return '等待下一轮';
+  if (refreshAt > now) return `${timeHint(refreshAt, now)}进入下一轮`;
+  return '正在准备下一轮';
 }
 
 function usageView(status) {
@@ -396,8 +396,8 @@ function renderUsageItem(item, usage) {
   if (card) {
     card.classList.toggle('has-limit', hasCap);
     card.classList.toggle('near', hasCap && !saturated && ratio >= 0.8);
-    card.classList.toggle('saturated', saturated);
-    card.title = hasCap ? `${item.label} ${used}/${cap}${saturated ? '，今日已到上限' : ''}` : `${item.label} ${used}`;
+    card.classList.toggle('complete', saturated);
+    card.title = hasCap ? `${item.label} ${used}/${cap}${saturated ? '，今日计划已完成' : ''}` : `${item.label} ${used}`;
   }
 }
 
@@ -407,29 +407,40 @@ function compactLabels(labels) {
   return `${unique.slice(0, 2).join('/')}等${unique.length}项`;
 }
 
-function compactHitText(parts) {
+function compactProgressText(parts) {
   if (parts.length <= 2) return parts.join(' · ');
   return `${parts.slice(0, 2).join(' · ')} 等${parts.length}项`;
 }
 
-function quotaHitTexts(windowViews) {
+function quotaCompletionSummary(windowViews) {
   const byAction = new Map();
   for (const window of windowViews) {
-    for (const entry of window.rows.filter((row) => row.hit)) {
+    for (const entry of window.rows.filter((row) => row.complete)) {
       const current = byAction.get(entry.action) || { label: entry.label, windows: [] };
-      if (!current.windows.includes(window.label)) current.windows.push(window.label);
+      if (!current.windows.some((item) => item.key === window.key)) current.windows.push({ key: window.key, label: window.label });
       byAction.set(entry.action, current);
     }
   }
-  return [...byAction.values()].map((entry) => `${entry.label}已达${compactLabels(entry.windows)}上限`);
+  const daily = [];
+  const rounds = [];
+  const title = [];
+  for (const entry of byAction.values()) {
+    if (entry.windows.some((window) => window.key === 'day')) daily.push(entry.label);
+    else rounds.push(entry.label);
+    title.push(`${entry.label}：${entry.windows.map((window) => window.label).join('、')}已完成`);
+  }
+  const text = [];
+  if (daily.length > 0) text.push(`今日${compactLabels(daily)}计划已完成`);
+  if (rounds.length > 0) text.push(`${compactLabels(rounds)}完成一轮`);
+  return { text, title };
 }
 
-function usageLimitLabel(usage) {
+function usageProgressLabel(usage) {
   const windowViews = quotaWindowViews(usage);
   if (windowViews.length > 0) {
-    const hit = quotaHitTexts(windowViews);
-    if (hit.length > 0) return { tone: 'hit', text: compactHitText(hit), title: hit.join(' · ') };
-    return { tone: 'ok', text: '额度正常' };
+    const complete = quotaCompletionSummary(windowViews);
+    if (complete.text.length > 0) return { tone: 'complete', text: compactProgressText(complete.text), title: complete.title.join(' · ') };
+    return { tone: 'ok', text: '按计划进行中' };
   }
   if (!usage.quotas) return null;
   const limited = [];
@@ -439,7 +450,9 @@ function usageLimitLabel(usage) {
     const used = count(usage.totals[item.action]);
     if (usage.saturated.has(item.action) || used >= cap) limited.push(item.label);
   }
-  return limited.length > 0 ? { tone: 'hit', text: `${compactLabels(limited)}已达今日上限` } : { tone: 'ok', text: '额度正常' };
+  return limited.length > 0
+    ? { tone: 'complete', text: `今日${compactLabels(limited)}计划已完成` }
+    : { tone: 'ok', text: '按计划进行中' };
 }
 
 function quotaWindowViewsAt(usage, now) {
@@ -472,21 +485,21 @@ function quotaWindowView(item, window, now) {
     const used = count(totals[usageItem.action]);
     const cap = hasCap ? count(quotas[usageItem.action]) : null;
     const ratio = cap !== null ? (cap > 0 ? Math.min(1, used / cap) : 1) : 0;
-    const hit = !expired && active && cap !== null && (saturated.has(usageItem.action) || used >= cap);
-    const row = { ...usageItem, used, cap, ratio, hit, hasCap };
+    const complete = !expired && active && cap !== null && (saturated.has(usageItem.action) || used >= cap);
+    const row = { ...usageItem, used, cap, ratio, complete, hasCap };
     rows.push(row);
     if (hasCap) capped.push(row);
   }
   if (rows.length === 0) return null;
-  const limited = rows.filter((entry) => entry.hit).length;
+  const completed = rows.filter((entry) => entry.complete).length;
   const worst = capped.reduce((best, entry) => (!best || entry.ratio > best.ratio ? entry : best), null);
   const ratio = !expired && active ? (worst?.ratio ?? 0) : 0;
-  const tone = expired || !active ? 'idle' : limited > 0 ? 'hit' : ratio >= 0.8 ? 'near' : 'ok';
-  const state = expired ? '待刷新' : !active ? '未运行' : limited > 0 ? `已满 ${limited}项` : ratio >= 0.8 ? '临近' : '正常';
-  const baseMeta = worst ? `${worst.label} ${worst.used}/${worst.cap}` : '无窗口上限';
+  const tone = expired || !active ? 'idle' : completed > 0 ? 'complete' : ratio >= 0.8 ? 'near' : 'ok';
+  const state = expired ? '准备下一轮' : !active ? '等待开始' : completed > 0 ? `完成 ${completed}项` : ratio >= 0.8 ? '接近完成' : '进行中';
+  const baseMeta = worst ? `${worst.label} ${worst.used}/${worst.cap}` : '持续记录中';
   const meta = expired
     ? refreshMeta(refreshAt, now)
-    : (limited > 0 && releaseAt !== null && releaseAt > now ? `${baseMeta} · ${timeHint(releaseAt, now)}释放` : baseMeta);
+    : (completed > 0 && releaseAt !== null && releaseAt > now ? `${baseMeta} · ${timeHint(releaseAt, now)}继续` : baseMeta);
   return {
     key: item.key,
     label: item.label,
@@ -494,7 +507,7 @@ function quotaWindowView(item, window, now) {
     state,
     meta,
     ratio,
-    limited,
+    completed,
     expired,
     rows,
     title: `${item.label}: ${state}${rows.length > 0 ? ` · ${rows.map((entry) => `${entry.label} ${entry.used}/${entry.cap ?? '-'}`).join(' · ')}` : ''}`,
@@ -508,6 +521,7 @@ function renderQuotaWindows(usage) {
   if (fields.quotaToggle) {
     fields.quotaToggle.classList.toggle('open', quotaDetailsOpen && windows.length > 0);
     fields.quotaToggle.setAttribute('aria-expanded', quotaDetailsOpen && windows.length > 0 ? 'true' : 'false');
+    fields.quotaToggle.setAttribute('aria-label', quotaDetailsOpen && windows.length > 0 ? '收起今日节奏' : '查看今日节奏');
   }
   if (windows.length === 0 || !quotaDetailsOpen) {
     fields.quotaWindows.className = 'quota-windows hidden';
@@ -520,7 +534,7 @@ function renderQuotaWindows(usage) {
       const pct = entry.cap !== null ? Math.round(entry.ratio * 100) : 0;
       const value = entry.cap !== null ? `${entry.used}/${entry.cap}` : `${entry.used}/-`;
       return `
-        <div class="qwd-row ${entry.hit ? 'hit' : entry.ratio >= 0.8 && entry.cap !== null ? 'near' : ''}">
+        <div class="qwd-row ${entry.complete ? 'complete' : entry.ratio >= 0.8 && entry.cap !== null ? 'near' : ''}">
           <span>${escapeHtml(entry.label)}</span>
           <b>${escapeHtml(value)}</b>
           <i><em style="width:${pct}%"></em></i>
@@ -543,7 +557,7 @@ function renderUsageSummary(status) {
   fields.usageSource.textContent = usage.hasDaily
     ? `账号今日${usage.quotaLevel ? ` · ${QUOTA_LEVEL_LABELS[usage.quotaLevel] || usage.quotaLevel}` : ''}`
     : '本机实时';
-  const limit = usageLimitLabel(usage);
+  const limit = usageProgressLabel(usage);
   if (fields.usageLimit) {
     fields.usageLimit.textContent = limit ? limit.text : '';
     fields.usageLimit.className = limit ? `summary-limit ${limit.tone}` : 'summary-limit hidden';

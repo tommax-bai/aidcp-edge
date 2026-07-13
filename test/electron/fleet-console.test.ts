@@ -129,12 +129,14 @@ test('fleetLevel：失联（心跳超阈值）绝不呈现为在线', () => {
   assert.equal(stale.label, '失联');
 });
 
-test('fleetLevel：放弃重启终态为 error 且需处理；同账号告警为 attention', () => {
+test('fleetLevel：放弃重启和冻结为 error；账号重复运行为 attention', () => {
   const now = Date.now();
   assert.equal(uiLogic.fleetLevel({ respawnGaveUp: true, edge: 'stopped' }, now).level, 'error');
+  assert.equal(uiLogic.fleetLevel({ risk: 'frozen', edge: 'running' }, now).level, 'error');
   const warn = uiLogic.fleetLevel({ edge: 'stopped', session: 'idle', sameAccountWarning: { message: 'x' } }, now);
   assert.equal(warn.level, 'attention');
   assert.equal(warn.needsAction, true);
+  assert.equal(warn.label, '账号重复运行');
 });
 
 test('fleetLevel：暂停与关闭同属离线组但标签明确区分', () => {
@@ -153,7 +155,7 @@ test('红线：阻断浮层（验证码/登录墙）即便 edge 仍 running 也�
   const blocked = uiLogic.fleetLevel({ edge: 'running', session: 'running', cloud: 'connected', overlayBlocked: true, updatedAt: new Date(now).toISOString() }, now);
   assert.equal(blocked.level, 'attention');
   assert.equal(blocked.needsAction, true);
-  assert.match(blocked.label, /人工/);
+  assert.match(blocked.label, /处理/);
   // 清除后回到在线
   const cleared = uiLogic.fleetLevel({ edge: 'running', session: 'running', cloud: 'connected', overlayBlocked: false, updatedAt: new Date(now).toISOString() }, now);
   assert.equal(cleared.level, 'running');
