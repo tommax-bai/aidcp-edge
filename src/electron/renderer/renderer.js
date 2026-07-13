@@ -1274,6 +1274,11 @@ function closePersonaPop(force) {
   fields.personaPop.classList.add('hidden');
   fields.personaPop.setAttribute('aria-hidden', 'true');
   fields.personaMask?.classList.add('hidden');
+  if (isPersonaGrowthActive()) {
+    clearPersonaGrowth();
+    personaUi.boundNote?.classList.remove('hidden');
+    syncPersonaFoot('hidden');
+  }
 }
 fields.personaClose?.addEventListener('click', () => closePersonaPop(true));
 fields.personaMask?.addEventListener('click', () => closePersonaPop(false));
@@ -2890,6 +2895,8 @@ const personaUi = {
   draftBody: document.querySelector('#persona-draft-body'),
   regenerate: document.querySelector('#persona-regenerate'),
   confirm: document.querySelector('#persona-confirm'),
+  growth: document.querySelector('#persona-growth'),
+  growthStart: document.querySelector('#persona-growth-start'),
   // 重设计新增：空态面板 / 两步指示 / 阶段容器 / 骨架 / 关键词摘要条
   empty: document.querySelector('#persona-empty'),
   emptyTitle: document.querySelector('#persona-empty-title'),
@@ -2909,6 +2916,7 @@ let personaLocallyBound = false; // 本会话确认成功后即视为已绑（pe
 let personaDraftEnvId; // 草稿所属环境（多环境：persist MUST 打回生成时那个账号，不随后续切换环境漂移）
 let personaStage = 'pick'; // 两步向导阶段：pick（选关键词）| preview（预览确认）
 let personaInFlight = false; // 生成请求在途（骨架 + 按钮禁用 + 遮罩误点不关层）
+let personaGrowthEnvId = null; // 本次刚确认成功的人设所属环境；只让该环境出现一次成长引导
 const personaPrompted = new Set();
 // 人设弹窗判定时机（用户反馈：已设置人设的账号被误弹）：账号刚「登录+连云」的空窗里，云端「已绑人设」
 // 信号（sticky true、只在已绑时下发、要等下一次心跳）可能还没到，此刻按未绑弹窗会误扰已设置的账号。
@@ -2923,10 +2931,41 @@ let personaPromptReevalTimer = null; // 单个待触发的到点复评定时器�
 // 空态/已绑态收起全部按钮（空态面板自带「去启动」）。
 function syncPersonaFoot(mode) {
   const wizard = mode === 'wizard';
+  const growth = mode === 'growth';
   const inPick = personaStage === 'pick';
   personaUi.generate?.classList.toggle('hidden', !wizard || !inPick);
   personaUi.regenerate?.classList.toggle('hidden', !wizard || inPick);
   personaUi.confirm?.classList.toggle('hidden', !wizard || inPick);
+  personaUi.growthStart?.classList.toggle('hidden', !growth);
+}
+
+function isPersonaGrowthActive() {
+  const envId = currentEnvId() || '__local__';
+  return Boolean(personaGrowthEnvId && personaGrowthEnvId === envId);
+}
+
+function playPersonaGrowthAnimation() {
+  if (!personaUi.growth) return;
+  personaUi.growth.classList.remove('play');
+  // 强制重启一次性动画；只在展示成长引导时触发，不在日常 bound 状态循环。
+  void personaUi.growth.offsetWidth;
+  personaUi.growth.classList.add('play');
+}
+
+function showPersonaGrowth(envId) {
+  personaGrowthEnvId = envId || currentEnvId() || '__local__';
+  personaUi.growth?.classList.remove('hidden');
+  personaUi.boundNote?.classList.add('hidden');
+  syncPersonaFoot('growth');
+  setPersonaMsg('', false);
+  playPersonaGrowthAnimation();
+}
+
+function clearPersonaGrowth() {
+  personaGrowthEnvId = null;
+  personaUi.growth?.classList.add('hidden');
+  personaUi.growth?.classList.remove('play');
+  personaUi.growthStart?.classList.add('hidden');
 }
 
 function setPersonaStage(stage) {
@@ -2957,12 +2996,20 @@ personaUi.emptyAction?.addEventListener('click', () => {
   else window.aidcpEdge.showDrivenBrowser?.(currentEnvId()); // 已在运行（等登录）：抬浏览器窗口去登录
 });
 
+personaUi.growthStart?.addEventListener('click', () => {
+  const action = fields.sessionFab && fields.sessionFab.dataset.action;
+  clearPersonaGrowth();
+  closePersonaPop(true);
+  if (action === 'start' || action === 'resume') fields.sessionFab.click();
+});
+
 // 切换环境时清空人设草稿（向导是每环境独立的）：绝不让 A 生成的草稿留在界面上被误确认到 B 的账号。
 // 同时清本会话「已绑」态（personaLocallyBound 是账号级、随环境切换失效，等新环境自己的 hello 信号）。
 function resetPersonaDraft() {
   personaDraftYaml = '';
   personaDraftEnvId = undefined;
   personaLocallyBound = false;
+  clearPersonaGrowth();
   personaUi.draft?.classList.add('hidden');
   personaUi.skeleton?.classList.add('hidden');
   setPersonaStage('pick'); // 草稿已清，预览页无意义：切回第一步
@@ -3089,16 +3136,18 @@ function updatePersonaGate(status) {
   // 切环境泄漏由 resetPersonaDraft() 清 personaLocallyBound 处理；断连时 known=false 已让其无关，无需额外清。
   const known = personaReady;
   const bound = known && (Boolean(status && status.personaBound) || personaLocallyBound);
+  const growthActive = bound && isPersonaGrowthActive();
 
-  // 三形态显隐一处收口：已绑=绿卡 / 未就绪=空态面板 / 已连未绑=向导。
-  if (personaUi.boundNote) personaUi.boundNote.classList.toggle('hidden', !bound);
+  // 四形态显隐一处收口：刚绑=成长引导 / 已绑=绿卡 / 未就绪=空态面板 / 已连未绑=向导。
+  if (personaUi.growth) personaUi.growth.classList.toggle('hidden', !growthActive);
+  if (personaUi.boundNote) personaUi.boundNote.classList.toggle('hidden', !bound || growthActive);
   if (personaUi.wizardBody) personaUi.wizardBody.classList.toggle('hidden', bound || !known);
   if (personaUi.empty) personaUi.empty.classList.toggle('hidden', bound || known);
 
   // ① 已绑人设：显示「已设置」、收起向导与底部按钮（修「已绑仍显示未设置」）。
   if (bound) {
     setPersonaBadge('已设置', 'normal');
-    syncPersonaFoot('hidden');
+    syncPersonaFoot(growthActive ? 'growth' : 'hidden');
     clearPersonaPromptForCurrentEnv();
     return;
   }
@@ -3268,11 +3317,11 @@ personaUi.confirm?.addEventListener('click', async () => {
       // 确认成功即本地视为已绑（personaBound 信号要等下次 hello 才到）：立即折叠向导为「已设置」态。
       personaLocallyBound = true;
       setPersonaBadge('已设置', 'normal');
+      const growthEnvId = personaDraftEnvId || currentEnvId() || '__local__';
+      personaDraftYaml = '';
       personaUi.draft?.classList.add('hidden');
       personaUi.wizardBody?.classList.add('hidden');
-      personaUi.boundNote?.classList.remove('hidden');
-      syncPersonaFoot('hidden');
-      setPersonaMsg('人设已保存，账号即将开始自动运营。', false);
+      showPersonaGrowth(growthEnvId);
     } else {
       setPersonaMsg(PERSONA_PERSIST_FAIL[(r && r.reason) || ''] || `保存失败：${(r && r.reason) || '未知'}`, true);
     }

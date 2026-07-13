@@ -59,7 +59,7 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
   let pushStatus: (s: unknown) => void = () => undefined;
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], select: [], close: [], notify: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], select: [], close: [], notify: [], start: [], resume: [] };
   const settings = {
     provider: 'adspower',
     adsProfileId: 'p1',
@@ -99,9 +99,9 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
     showDrivenBrowser: async (envId: string) => { calls.showDriven.push(envId); return { ok: true, hint: '已请求前置；窗口平时停放在屏幕边缘。' }; },
     resetBrowserParking: async (envId: string) => { calls.resetParking.push(envId); return { ok: true }; },
     pause: async () => makeStatus(),
-    resume: async () => makeStatus(),
+    resume: async (envId: string) => { calls.resume.push(envId); return makeStatus({ envId }); },
     close: async (envId: string) => { calls.close.push(envId); return makeStatus({ envId, edge: 'stopped', cloud: 'disconnected', session: 'closed' }); },
-    start: async () => makeStatus(),
+    start: async (envId: string) => { calls.start.push(envId); return makeStatus({ envId }); },
     restart: async () => makeStatus(),
     adsStatus: async () => ({ ok: false, error: 'not running' }),
     adsListProfiles: async () => ({ ok: true, profiles: [] }),
@@ -594,6 +594,35 @@ test('人设浮层：未就绪环境出空态面板（向导收起）；生成�
   (w.document.querySelector('#persona-confirm') as HTMLElement).click();
   await tick();
   assert.deepEqual(calls.persist, ['ads-p1'], '草稿未因回退丢失，确认仍打回生成时环境');
+  assert.equal(w.document.querySelector('#persona-growth')!.classList.contains('hidden'), false, '确认成功后展示一次成长引导');
+  assert.match(w.document.querySelector('#persona-growth')!.textContent || '', /更容易被看见的内容灵感/);
+  assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), true, '成长引导期间不同时显示已设置卡片');
+  assert.equal(w.document.querySelector('#persona-growth-start')!.classList.contains('hidden'), false, '底部 CTA 切到开始生成');
+});
+
+test('人设成长引导：点击开始生成复用现有启动按钮并关闭浮层', async () => {
+  const { w, calls, pushStatus } = await boot({
+    getStatus: async () => makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'stopped', session: 'idle', auth: 'logged in', cloud: 'connected' }),
+    personaGenerate: async () => ({ ok: true, soulYaml: 'soul: Start', identitySummary: 'Start 人设' }),
+    personaPersist: async () => ({ ok: true }),
+  });
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'stopped', session: 'idle', auth: 'logged in', cloud: 'connected' }));
+  await tick();
+
+  (w.document.querySelector('.persona-kw-group[data-dim="content"][data-category="招聘求职"] .kw-btn') as HTMLElement).click();
+  (w.document.querySelector('#persona-generate') as HTMLElement).click();
+  await tick();
+  (w.document.querySelector('#persona-confirm') as HTMLElement).click();
+  await tick();
+
+  const start = w.document.querySelector('#persona-growth-start') as HTMLElement;
+  assert.equal(start.classList.contains('hidden'), false);
+  start.click();
+  await tick();
+
+  assert.deepEqual(calls.start, ['ads-p1'], '开始生成走现有 session-fab 启动链路');
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), false, '点击后关闭人设浮层');
+  assert.equal(w.document.querySelector('#persona-growth')!.classList.contains('hidden'), true, '成长引导只出现一次');
 });
 
 test('暂停态显式关闭只路由当前选中环境并切到已关闭', async () => {
