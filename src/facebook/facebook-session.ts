@@ -63,6 +63,42 @@ export function usesFacebookBrowseSession(driver: PlatformDriver): boolean {
   return driver.platform === 'facebook' && driver.capabilities.includes('browse');
 }
 
+/**
+ * 将协议消息名归一为云端编排消费的动作名。
+ *
+ * `action.completed.action` 是云端角色之间的关联键，而不是协议消息名。即使 Facebook
+ * 当前不支持某个原子动作，也必须回报这里的规范动作名；否则云端会把
+ * `note.browse_images` 误当成未知失败并在详情页下发 feed scroll。
+ */
+const FB_COMMAND_ACTION_NAMES: Readonly<Record<string, string>> = {
+  'page.scroll': 'scroll',
+  'feed.refresh': 'refresh',
+  'interaction.like': 'like',
+  'interaction.collect': 'collect',
+  'interaction.follow': 'follow',
+  'interaction.comment': 'comment',
+  'interaction.like_comment': 'comment_like',
+  'search.execute': 'search',
+  'note.open': 'open_note',
+  'note.close': 'close',
+  'note.browse_images': 'browse_images',
+  'note.scroll_comments': 'scroll_comments',
+  'navigation.back': 'back',
+  'profile.open': 'profile_open',
+  'group.join': 'join_group',
+  'notification.open': 'open_notifications',
+  'notification.browse_comments': 'browse_notification_comments',
+  'notification.browse_likes': 'browse_notification_likes',
+  'notification.browse_follows': 'browse_notification_follows',
+  'notification.back_home': 'notification_back_home',
+  'pacing.update': 'pacing_update',
+  'session.end': 'session.end',
+};
+
+export function facebookActionNameForCommand(type: string): string {
+  return FB_COMMAND_ACTION_NAMES[type] ?? type;
+}
+
 /** 本会话上报所需的最小客户端能力（EdgeClient 已实现）。 */
 export interface FacebookSessionClient {
   reportPageCards(payload: PageCardsPayload): void;
@@ -164,6 +200,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private running = false;
   private closing = false;
   private tempo: number;
+  /** 当前可滚动列表的来源；详情页恢复时必须回原 feed 或原搜索页，不能一律跳首页。 */
+  private activeFeedUrl: string;
   /** 最近一次 page.cards 到达时间；用于吸收云端评估耗时，避免 dwellMs 变成额外固定等待。 */
   private lastCardsAt = 0;
   /** 命令串行链：一次只处理一条，避免并发争抢同一浏览器会话。 */
@@ -176,6 +214,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     this.sleep = deps.sleep ?? defaultSleep;
     this.log = deps.logger ?? ((m) => console.log(m));
     this.feedUrl = options.feedUrl ?? FACEBOOK_DEFAULT_START_URL;
+    this.activeFeedUrl = this.feedUrl;
     this.mode = options.mode ?? parseFacebookBrowseMode();
     this.commandTimeoutMs = options.commandTimeoutMs ?? 90_000;
     this.tempo = options.tempo && options.tempo > 0 ? options.tempo : 1.0;
@@ -325,17 +364,43 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         this.client.reportActionCompleted({ action: 'profile_open', ok: false, reason: 'capability_unsupported' });
         return;
       }
+      case 'pacing.update': {
+        const payload = (env.payload ?? {}) as { opFloorsMs?: Partial<Record<PacingOp, PacingFloorPayload>>; tempo?: number };
+        // 配置更新不是原子动作：只更新后续命令的节奏，不产生 action.completed，更不唤醒浏览循环。
+        this.applyPacingSnapshot(payload.opFloorsMs, payload.tempo);
+        return;
+      }
       case 'session.end':
         this.log('[fb-session] 命令: session.end');
         this.running = false;
         await this.navigateFeedBestEffort();
         return;
-      // —— FB v1 浏览不支持：诚实 capability_unsupported，绝不臆造 ——
+      // FB 还未具备这些原子实现，但它们是云端可下发的正式命令。必须保留规范
+      // action 名称，让 DeepReader / CommentReviewer / 通知恢复链能消费失败并退出详情页。
+      case 'feed.refresh':
+      case 'interaction.collect':
+      case 'interaction.follow':
+      case 'interaction.like_comment':
+      case 'note.browse_images':
+      case 'note.scroll_comments':
+      case 'notification.open':
+      case 'notification.browse_comments':
+      case 'notification.browse_likes':
+      case 'notification.browse_follows':
+      case 'notification.back_home':
+        this.reportUnsupportedCommand(env.type);
+        return;
+      // —— 未知消息同样诚实失败，绝不静默丢弃或伪造成功 ——
       default:
-        this.log(`[fb-session] 命令 ${env.type} FB v1 浏览不支持，回 capability_unsupported`);
-        this.client.reportActionCompleted({ action: this.actionName(env.type), ok: false, reason: 'capability_unsupported' });
+        this.reportUnsupportedCommand(env.type);
         return;
     }
+  }
+
+  private reportUnsupportedCommand(type: string): void {
+    const action = facebookActionNameForCommand(type);
+    this.log(`[fb-session] 命令 ${type} FB v1 浏览不支持，回 ${action}:capability_unsupported`);
+    this.client.reportActionCompleted({ action, ok: false, reason: 'capability_unsupported' });
   }
 
   /**
@@ -440,6 +505,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       this.log(`[fb-session] feed 未就绪（${ensure.reason}）：不上报首屏（云端看门狗后续可 nudge）`);
       return;
     }
+    this.activeFeedUrl = this.feedUrl;
     const cards = await this.scanFeedCardsWithHydrationRetry('initial');
     if (cards.length === 0) {
       this.log('[fb-session] feed 就绪但无可上报卡片');
@@ -484,6 +550,12 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
 
   /** feed 翻页 → 扫卡 → page.cards。 */
   private async scrollFeed(): Promise<TerminalReport> {
+    // 只有确认已在 feed 后才能滚动。详情页里的 document scroll 既不会回到 feed，
+    // 也可能把详情里的 article 误当成 feed 卡片，制造“面板在前进、浏览器却卡帖”的假进展。
+    const ensure = await this.feedReader.ensureFeed(this.activeFeedUrl);
+    if (!ensure.ok) {
+      return { type: 'action', payload: { action: 'scroll', ok: false, reason: ensure.reason ?? 'no_feed' } };
+    }
     await this.feedReader.scrollNext();
     const cards = await this.scanFeedCardsWithHydrationRetry('scroll');
     if (cards.length === 0) {
@@ -510,6 +582,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (!ensure.ok) {
       return { type: 'action', payload: { action: 'search', ok: false, reason: ensure.reason ?? 'search_unavailable' } };
     }
+    this.activeFeedUrl = searchUrl;
     const cards = await this.scanFeedCardsWithHydrationRetry('search');
     if (cards.length === 0) return { type: 'action', payload: { action: 'search', ok: false, reason: 'no_candidates' } };
     const maxResults = Number.isFinite(payload.maxResults) && (payload.maxResults ?? 0) > 0
@@ -524,6 +597,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (!ensure.ok) {
       return { type: 'action', payload: { action: 'back', ok: false, reason: ensure.reason ?? 'no_feed' } };
     }
+    this.activeFeedUrl = this.feedUrl;
     const cards = await this.scanFeedCardsWithHydrationRetry('back');
     if (cards.length === 0) {
       return { type: 'action', payload: { action: 'back', ok: false, reason: 'no_feed' } };
@@ -682,25 +756,6 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   }
 
   private actionName(type: string): string {
-    switch (type) {
-      case 'note.open':
-        return 'open_note';
-      case 'page.scroll':
-        return 'scroll';
-      case 'interaction.like':
-        return 'like';
-      case 'navigation.back':
-        return 'back';
-      case 'note.close':
-        return 'close';
-      case 'interaction.comment':
-        return 'comment';
-      case 'search.execute':
-        return 'search';
-      case 'group.join':
-        return 'join_group';
-      default:
-        return type;
-    }
+    return facebookActionNameForCommand(type);
   }
 }

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   FacebookBrowseSession,
+  facebookActionNameForCommand,
   parseFacebookBrowseMode,
   usesFacebookBrowseSession,
   type FacebookBrowseSessionDeps,
@@ -365,6 +366,59 @@ test('FB v1 不支持的命令 → capability_unsupported（绝不静默丢弃�
   await h.session.onCloudCommand(makeEnv('profile.open', { authorId: 'a' }));
   assert.equal(h.actions.length, 3);
   assert.ok(h.actions.every((a) => a.reason === 'capability_unsupported'));
+});
+
+test('FB 云端命令回执使用规范动作名，深读失败不会退化为未知动作', async () => {
+  const expected: Record<string, string> = {
+    'page.scroll': 'scroll',
+    'feed.refresh': 'refresh',
+    'interaction.like': 'like',
+    'interaction.collect': 'collect',
+    'interaction.follow': 'follow',
+    'interaction.comment': 'comment',
+    'interaction.like_comment': 'comment_like',
+    'search.execute': 'search',
+    'note.open': 'open_note',
+    'note.close': 'close',
+    'note.browse_images': 'browse_images',
+    'note.scroll_comments': 'scroll_comments',
+    'navigation.back': 'back',
+    'profile.open': 'profile_open',
+    'group.join': 'join_group',
+    'notification.open': 'open_notifications',
+    'notification.browse_comments': 'browse_notification_comments',
+    'notification.browse_likes': 'browse_notification_likes',
+    'notification.browse_follows': 'browse_notification_follows',
+    'notification.back_home': 'notification_back_home',
+    'pacing.update': 'pacing_update',
+    'session.end': 'session.end',
+  };
+  for (const [command, action] of Object.entries(expected)) {
+    assert.equal(facebookActionNameForCommand(command), action, command);
+  }
+
+  const h = makeSession({ mode: 'on' });
+  for (const type of ['note.browse_images', 'note.scroll_comments', 'interaction.collect', 'interaction.follow', 'interaction.like_comment']) {
+    await h.session.onCloudCommand(makeEnv(type, {}));
+  }
+  assert.deepEqual(h.actions.map((a) => a.action), ['browse_images', 'scroll_comments', 'collect', 'follow', 'comment_like']);
+  assert.ok(h.actions.every((a) => a.ok === false && a.reason === 'capability_unsupported'));
+});
+
+test('FB scroll 在详情页时先回到 feed，再扫描并滚动', async () => {
+  const h = makeSession({ mode: 'on' });
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  assert.equal(h.ensureCalls, 1);
+  assert.deepEqual(h.ensureUrls, ['https://www.facebook.com/']);
+  assert.equal(h.cards.length, 1);
+});
+
+test('FB scroll 在搜索详情页时回到原搜索结果，不误跳首页', async () => {
+  const h = makeSession({ mode: 'on' });
+  await h.session.onCloudCommand(makeEnv('search.execute', { keyword: 'Puerto Rico' }));
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  assert.equal(h.ensureUrls[0], 'https://www.facebook.com/search/posts/?q=Puerto+Rico');
+  assert.equal(h.ensureUrls[1], 'https://www.facebook.com/search/posts/?q=Puerto+Rico');
 });
 
 // ─────────────────────────── 有界超时兜底（task 4.2/7.5）───────────────────────────
