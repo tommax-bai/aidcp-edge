@@ -44,7 +44,13 @@ export interface FeedScroller {
   /** 滚动到下一屏（惯性序列，模拟人类） */
   scrollNext(): Promise<void>;
   /** 点击指定卡片打开 modal */
-  openCard(card: NoteCard): Promise<void>;
+  openCard(card: NoteCard, options?: OpenCardOptions): Promise<void>;
+}
+
+/** 打开卡片的可选预算；截止只在下一条 CDP 输入前检查，已发出的输入仍等待安全结束。 */
+export interface OpenCardOptions {
+  deadlineAt?: number;
+  clock?: () => number;
 }
 
 export interface FeedScrollerOptions {
@@ -200,11 +206,16 @@ export class CdpFeedScroller implements FeedScroller {
     }
   }
 
-  async openCard(card: NoteCard): Promise<void> {
+  async openCard(card: NoteCard, options: OpenCardOptions = {}): Promise<void> {
     // 沿贝塞尔轨迹移动到卡片中心（落点抖动由 mouse-path 处理），起点为上次光标位置。
     const x = card.centerX;
     const y = card.centerY;
-    const opts: Parameters<typeof dispatchClick>[3] = { random: this.random, sleep: this.sleep };
+    const opts: Parameters<typeof dispatchClick>[3] = {
+      random: this.random,
+      sleep: this.sleep,
+      deadlineAt: options.deadlineAt,
+      clock: options.clock,
+    };
     if (this.lastCursor) opts.from = this.lastCursor;
     await dispatchClick(this.cdp, x, y, opts);
     this.lastCursor = { x, y };

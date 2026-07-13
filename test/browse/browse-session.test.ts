@@ -325,6 +325,45 @@ test('browse-session: note.open 命令打开卡片并上报 note.detail', async 
   assert.equal(h.reportedDetails[0].mediaType, 'image_text');
 });
 
+test('browse-session: note.open 预算耗尽后如实失败，接管等待到安全边界才结束', async () => {
+  const h = makeHarness();
+  let clock = 0;
+  let signalClickStarted!: () => void;
+  const clickStarted = new Promise<void>((resolve) => { signalClickStarted = resolve; });
+  let releaseClick!: () => void;
+  const clickGate = new Promise<void>((resolve) => { releaseClick = resolve; });
+  const logs: string[] = [];
+  h.deps.scroller = {
+    ...h.deps.scroller,
+    openCard: async (_card, options) => {
+      signalClickStarted();
+      await clickGate;
+      clock = options?.deadlineAt ?? clock;
+    },
+  };
+  const sess = new BrowseSession(h.deps, { ...noOpts(), now: () => clock, noteOpenTimeoutMs: 10, logger: (line) => logs.push(line) });
+  const running = sess.start();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await sess.onCloudCommand(makeEnvelope('note.open', 'n-timeout', 0, { index: 0 }));
+  await clickStarted;
+
+  let quiesced = false;
+  const quiesce = sess.quiesceForTask().then(() => { quiesced = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(quiesced, false, '点击仍在执行时不得提前完成接管');
+
+  releaseClick();
+  await quiesce;
+  const openResult = h.completedActions.find((item) => item.action === 'open_note');
+  assert.deepEqual(openResult, { action: 'open_note', ok: false, reason: 'open_timeout' });
+  assert.equal(h.reportedDetails.length, 0, '未取得详情时不得伪造 note.detail 成功');
+  assert.ok(logs.some((line) => line.includes('click_primary=') && line.includes('open_timeout')), '超时日志保留阶段耗时');
+
+  await sess.resumeAfterTask();
+  await sess.onCloudCommand(makeEnvelope('session.end', 'end-timeout', 0, { reason: 'test_end' }));
+  await running;
+});
+
 test('browse-session: note.open 视频卡上报 note.detail.mediaType=video', async () => {
   const h = makeHarness([{ ...CARD, title: 'V', isVideo: true }]);
   const sess = new BrowseSession(h.deps, noOpts());

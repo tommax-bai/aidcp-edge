@@ -55,7 +55,7 @@ import { isBlockingKind } from './overlay-monitor.js';
 import type { extractNoteContent as ExtractFn, NoteContent } from './note-extractor.js';
 import { NOTE_BODY_SELECTORS, parseCount } from './note-extractor.js';
 import { executeSearch, applySearchFilters, SEARCH_RESULT_URL_RE, searchResultMatchesKeyword } from './search-handler.js';
-import { evalRaw, type RandomFn, type BrowseCdp } from './cdp-util.js';
+import { evalRaw, InputDispatchDeadlineError, type RandomFn, type BrowseCdp } from './cdp-util.js';
 import { CdpDisconnectedError } from '../cdp/client.js';
 import { buildNotificationHomeJs, buildNotificationItemsJs, buildNotificationCategoryItemsJs } from './notification-monitor.js';
 import type { DomProvider } from '../locating/engine.js';
@@ -122,6 +122,8 @@ export interface BrowseSessionOptions {
   actionTiming?: TimingConfig;
   /** modal 打开超时（毫秒，默认 5000） */
   modalTimeoutMs?: number;
+  /** 单次 note.open 的整体墙钟上限（毫秒，默认 30000）；仅在 CDP 安全边界后收敛。 */
+  noteOpenTimeoutMs?: number;
   /** 首屏扫描前等待 feed 卡片渲染的最长轮询时间（毫秒，默认 12000） */
   initialScanTimeoutMs?: number;
   /** 登录弹窗闸门的轮询间隔（毫秒，默认 2000）：弹窗存在时多久复检一次 */
@@ -293,6 +295,15 @@ const EXPLORE_FEED_RE = /\/explore\/?(\?|#|$)/;
 // 单一真源（change comment-keep-open-through-approval）：与 search-handler 的 executeSearch 判据 import 同一常量，杜绝两处漂移。
 const SEARCH_LIST_RE = SEARCH_RESULT_URL_RE;
 const DEFAULT_RHYTHM_TOTAL = 60;
+const DEFAULT_NOTE_OPEN_TIMEOUT_MS = 30_000;
+
+/** note.open 到达自身安全边界前耗尽整体预算。 */
+class NoteOpenDeadlineError extends Error {
+  constructor(public readonly phase: string) {
+    super(`note.open 超时 phase=${phase}`);
+    this.name = 'NoteOpenDeadlineError';
+  }
+}
 
 /**
  * 关注按钮选择器（笔记 modal 作者区 + 作者主页两种上下文）。
@@ -318,6 +329,7 @@ export class BrowseSession {
   private readonly actionTiming: TimingConfig;
   private scrollTiming: TimingConfig;
   private readonly modalTimeoutMs: number;
+  private readonly noteOpenTimeoutMs: number;
   private readonly initialScanTimeoutMs: number;
   private readonly loginGatePollMs: number;
   /** 阻断弹窗当前是否处于"已暂停"状态（用于出现/消失各只记一次日志） */
@@ -379,6 +391,7 @@ export class BrowseSession {
     this.actionTiming = options.actionTiming ?? TIMING_PRESETS.action;
     this.scrollTiming = floorRangeToTiming(options.opFloorsMs?.scroll, TIMING_PRESETS.scroll);
     this.modalTimeoutMs = options.modalTimeoutMs ?? 5000;
+    this.noteOpenTimeoutMs = Math.max(1, options.noteOpenTimeoutMs ?? DEFAULT_NOTE_OPEN_TIMEOUT_MS);
     this.initialScanTimeoutMs = options.initialScanTimeoutMs ?? 12000;
     this.loginGatePollMs = options.loginGatePollMs ?? 2000;
     this.exploreUrl = options.exploreUrl ?? DEFAULT_EXPLORE_URL;
@@ -603,14 +616,16 @@ export class BrowseSession {
     return undefined;
   }
 
-  private async dispatchInertialWheel(x: number, y: number, distance: number): Promise<void> {
+  private async dispatchInertialWheel(x: number, y: number, distance: number, deadlineAt?: number): Promise<void> {
     const total = Math.round(distance);
     const seq = generateScrollSequence(total, { random: this.random });
     if (seq.length === 0) return;
     const px = Math.round(x);
     const py = Math.round(y);
+    this.assertNoteOpenDeadline(deadlineAt, 'body_scroll_move');
     await this.deps.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: px, y: py });
     for (const frame of seq) {
+      this.assertNoteOpenDeadline(deadlineAt, 'body_scroll_wheel');
       await this.deps.cdp.send('Input.dispatchMouseEvent', {
         type: 'mouseWheel',
         x: px,
@@ -626,13 +641,16 @@ export class BrowseSession {
     evalRawFn: (cdp: BrowseCdp, expression: string) => Promise<string>,
     probeExpr: string,
     distance: number,
+    deadlineAt?: number,
   ): Promise<ScrollProbeSnapshot> {
+    this.assertNoteOpenDeadline(deadlineAt, 'body_scroll_probe_before');
     const beforeProbe = this.parseScrollProbe(await evalRawFn(this.deps.cdp, probeExpr));
     const before = this.probeScrollTop(beforeProbe);
     const hasPoint = typeof beforeProbe.x === 'number' && typeof beforeProbe.y === 'number';
 
     if (hasPoint) {
-      await this.dispatchInertialWheel(beforeProbe.x!, beforeProbe.y!, distance);
+      await this.dispatchInertialWheel(beforeProbe.x!, beforeProbe.y!, distance, deadlineAt);
+      this.assertNoteOpenDeadline(deadlineAt, 'body_scroll_probe_after');
       const afterProbe = this.parseScrollProbe(await evalRawFn(this.deps.cdp, probeExpr));
       const after = this.probeScrollTop(afterProbe) ?? before;
       const moved = typeof before === 'number' && typeof after === 'number' && after > before;
@@ -1509,8 +1527,48 @@ export class BrowseSession {
   /**
    * 打开指定 index 的卡片，提取内容并用 note.detail 协议上报给云端。
    */
+  private assertNoteOpenDeadline(deadlineAt: number | undefined, phase: string): void {
+    if (deadlineAt !== undefined && this.now() >= deadlineAt) throw new NoteOpenDeadlineError(phase);
+  }
+
+  private remainingNoteOpenMs(deadlineAt: number, phase: string): number {
+    this.assertNoteOpenDeadline(deadlineAt, phase);
+    return Math.max(1, deadlineAt - this.now());
+  }
+
+  /** 以剩余 budget 截短非关键阅读停顿；返回 false 表示预算已耗尽。 */
+  private async humanPauseBeforeNoteDeadline(timing: TimingConfig, deadlineAt: number): Promise<boolean> {
+    const base = sampleDelay(timing, this.random);
+    const ms = applySpeedFactor(base, this.rhythm.getSpeedFactor(this.progress()));
+    const remaining = deadlineAt - this.now();
+    if (remaining <= 0) return false;
+    if (ms > 0) await this.sleep(Math.min(ms, remaining));
+    return this.now() < deadlineAt;
+  }
+
   private async openAndReportNote(index: number, noteId?: string): Promise<void> {
-    const cards = await this.deps.scroller.getVisibleCards();
+    const startedAt = this.now();
+    const deadlineAt = startedAt + this.noteOpenTimeoutMs;
+    const phaseDurations: string[] = [];
+    const finish = (outcome: string): void => {
+      this.logger(
+        `[browse] note.open ${outcome} totalMs=${Math.max(0, this.now() - startedAt)} budgetMs=${this.noteOpenTimeoutMs} phases=${phaseDurations.join(',') || '-'}`,
+      );
+    };
+    const phase = async <T>(name: string, work: () => Promise<T>): Promise<T> => {
+      this.assertNoteOpenDeadline(deadlineAt, name);
+      const phaseStartedAt = this.now();
+      try {
+        const result = await work();
+        this.assertNoteOpenDeadline(deadlineAt, name);
+        return result;
+      } finally {
+        phaseDurations.push(`${name}=${Math.max(0, this.now() - phaseStartedAt)}ms`);
+      }
+    };
+
+    try {
+      const cards = await phase('cards_snapshot', () => this.deps.scroller.getVisibleCards());
     // 优先按 noteId 在「当前快照」里定位：云端决策与 edge 执行之间 feed 可能已滚动，
     // 纯 index/position 寻址会开成同序号上的"邻座"（云端判 LLM 卡 valuable，edge 却开了 NPD/C罗）。
     let card: NoteCard | undefined;
@@ -1522,13 +1580,14 @@ export class BrowseSession {
         // 严格等 note.detail、消费不了「重报 page.cards」，找不到就会让云端干等满超时 → 评论发不出。
         // 故先【按 noteId 有界滚动找回视口】（卡还在 DOM，滚回来即命中），再开。
         this.logger(`[browse] note.open: 目标 noteId=${noteId} 不在视口内快照，尝试 scrollIntoView 找回…`);
-        card = await this.locateCardByNoteId(noteId);
+        card = await phase('locate_card', () => this.locateCardByNoteId(noteId));
       }
       if (!card) {
         // 有界滚动仍找不到（真被虚拟列表回收出 DOM）：回到旧兜底「重报当前快照」（自主浏览据此重判；
         // 命令式流程则如实超时——已尽力，不假成功）。
         this.logger(`[browse] note.open: 滚动后仍无 noteId=${noteId}，重报当前卡片`);
-        await this.reportVisibleCards();
+        await phase('report_cards_fallback', () => this.reportVisibleCards());
+        finish('failed:card_not_found');
         return;
       }
     } else {
@@ -1538,36 +1597,49 @@ export class BrowseSession {
     if (!card) {
       this.logger(`[browse] note.open: 找不到 index=${index} 的卡片`);
       this.deps.client.reportActionCompleted?.({ action: 'open_note', ok: false, reason: 'card_not_found' });
+      finish('failed:card_not_found');
       return;
     }
-    await this.rememberCurrentSourceList();
-    await this.deps.scroller.openCard(card);
-    let opened = await this.deps.modalCtrl.waitForModal(this.modalTimeoutMs);
+    await phase('remember_source', () => this.rememberCurrentSourceList());
+    await phase('click_primary', () => this.deps.scroller.openCard(card, { deadlineAt, clock: this.now }));
+    let opened = await phase(
+      'modal_wait_primary',
+      () => this.deps.modalCtrl.waitForModal(Math.min(this.modalTimeoutMs, this.remainingNoteOpenMs(deadlineAt, 'modal_wait_primary'))),
+    );
     if (!opened) {
       // 重试一次：点击可能未命中或渲染较慢
       this.logger('[browse] note.open: modal 未打开，重试一次');
-      await this.deps.scroller.openCard(card);
-      opened = await this.deps.modalCtrl.waitForModal(this.modalTimeoutMs);
+      await phase('click_retry', () => this.deps.scroller.openCard(card!, { deadlineAt, clock: this.now }));
+      opened = await phase(
+        'modal_wait_retry',
+        () => this.deps.modalCtrl.waitForModal(Math.min(this.modalTimeoutMs, this.remainingNoteOpenMs(deadlineAt, 'modal_wait_retry'))),
+      );
     }
     if (!opened) {
       this.logger(`[browse] note.open: modal 未打开（重试后仍失败）`);
       this.deps.client.reportActionCompleted?.({ action: 'open_note', ok: false, reason: 'modal_timeout' });
+      finish('failed:modal_timeout');
       return;
     }
-    await this.waitForEngageBar();
+    await phase('engage_bar', () => this.waitForEngageBar(Math.min(3000, this.remainingNoteOpenMs(deadlineAt, 'engage_bar'))));
     // 正文(#detail-desc)常比 engage-bar 晚渲染：先等正文出现再抽取，避免抽到空/「标题+刚刚」。
     // 按类型给正文门余量：文字/图文渲染实测 <1s，3.5s 已远超（body-less 时早停不空等满 5.5s）；
     // video 主体是视频、正文多为空 → 2.5s 更短。命中真正文即提前返回，不影响抽取保真。
-    await this.waitForNoteBody(card.isVideo ? 2500 : 3500);
+    await phase(
+      'body_ready',
+      () => this.waitForNoteBody(Math.min(card.isVideo ? 2500 : 3500, this.remainingNoteOpenMs(deadlineAt, 'body_ready'))),
+    );
     // 记录详情页打开时刻：后续 navigation.back / note.close 据此判定实际停留是否达标（治秒退）。
     this.noteOpenedAt = this.now();
 
     let content: import('./note-extractor.js').NoteContent;
     try {
-      content = await this.deps.noteExtractor(this.deps.dom);
+      content = await phase('extract', () => this.deps.noteExtractor(this.deps.dom));
     } catch (err) {
+      if (err instanceof NoteOpenDeadlineError || err instanceof InputDispatchDeadlineError) throw err;
       this.logger(`[browse] note.open: 提取内容失败：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action: 'open_note', ok: false, reason: 'extract_failed' });
+      finish('failed:extract_failed');
       return;
     }
 
@@ -1585,14 +1657,14 @@ export class BrowseSession {
     // 解析真实 noteId：优先 feed 卡片 → modal 内 explore 链接 → 当前页面 URL → 合成兜底。
     // 真实 noteId 是云端 visited 去重的主键，缺失会导致"反复打开同一张卡"的死循环。
     // 当前地址栏 URL（含 xsec_token，详情态）：既用于解析 noteId，也作 note.detail 的可点链接来源（change interaction-feed-enrichment）。
-    const pageUrl = await this.evalUrl();
+    const pageUrl = await phase('page_url', () => this.evalUrl());
     const realNoteId = card.noteId ?? this.parseNoteIdFromUrl(content.noteUrl) ?? this.parseNoteIdFromUrl(pageUrl);
     // 诚实置空：仅当地址栏链接确含 xsec_token 才作为真实可点链接上报；否则不带，绝不用裸 id 拼打不开的假链接。
     const detailUrl = pageUrl.includes('xsec_token=') ? pageUrl : undefined;
 
     // 探测作者区关注按钮当下真实态（change skip-profile-visit-if-followed）：已关注则随 note.detail 带回，
     // 云端在「是否进主页」评估前据此短路掉整条主页子链。读不到→false→回退原流程。
-    const authorFollowed = await this.probeAuthorFollowed();
+    const authorFollowed = await phase('author_follow_probe', () => this.probeAuthorFollowed());
 
     // 用 note.detail 上报
     const payload: NoteDetailPayload = {
@@ -1616,8 +1688,19 @@ export class BrowseSession {
         `${authorFollowed ? ' [已关注]' : ''}` +
         ` 正文:${(payload.content ?? '').replace(/\s+/g, ' ').slice(0, 50)}…`,
     );
-    await this.readLongBody(content);
+    await this.readLongBody(content, deadlineAt);
     this.processed++;
+    finish('completed');
+    } catch (err) {
+      if (err instanceof NoteOpenDeadlineError || err instanceof InputDispatchDeadlineError) {
+        const timeoutPhase = err instanceof NoteOpenDeadlineError ? err.phase : 'click_input';
+        this.logger(`[browse] note.open: 预算耗尽，停止后续输入并等待安全边界 phase=${timeoutPhase}`);
+        this.deps.client.reportActionCompleted?.({ action: 'open_note', ok: false, reason: 'open_timeout' });
+        finish(`failed:open_timeout phase=${timeoutPhase}`);
+        return;
+      }
+      throw err;
+    }
   }
 
   /**
@@ -1690,7 +1773,7 @@ export class BrowseSession {
    * 长正文阅读动作：详情抽取完成后，先在正文/详情滚动容器内做数次小步滚动，再进入看图/评论阶段。
    * 这不是数据抽取所必需，而是浏览行为本身的保真：长文不能只抽完文本就直接跳到评论。
    */
-  private async readLongBody(content: NoteContent): Promise<void> {
+  private async readLongBody(content: NoteContent, deadlineAt?: number): Promise<void> {
     const compactLen = (content.body || '').replace(/\s+/g, '').length;
     const lineCount = (content.body || '').split(/\n+/).filter((s) => s.trim().length > 0).length;
     if (compactLen < BODY_READ_MIN_CHARS && lineCount < BODY_READ_MIN_LINES) return;
@@ -1699,9 +1782,13 @@ export class BrowseSession {
     const selectors = JSON.stringify([...NOTE_BODY_SELECTORS]);
     const { evalRaw: evalRawFn } = await import('./cdp-util.js');
     let moved = 0;
-    for (let i = 0; i < steps; i++) {
-      await this.humanPause(TIMING_PRESETS.scroll);
-      const distance = this.variedScrollDistance(170, 320);
+    try {
+      for (let i = 0; i < steps; i++) {
+        if (deadlineAt !== undefined && !(await this.humanPauseBeforeNoteDeadline(TIMING_PRESETS.scroll, deadlineAt))) {
+          this.logger('[browse] note.open: 详情已上报，预算耗尽，跳过剩余长文阅读');
+          return;
+        }
+        const distance = this.variedScrollDistance(170, 320);
       const expr = `(function(){
         var S=${selectors};
         var root=document.querySelector('.note-detail-mask')||document.querySelector('.note-container')||document;
@@ -1740,10 +1827,17 @@ export class BrowseSession {
         var p=pointFor(c);
         return JSON.stringify({found:true,scrollTop:scrollTop,scrollHeight:c.scrollHeight,clientHeight:c.clientHeight,x:p.x,y:p.y,reachedEnd:reachedEnd});
       })()`;
-      const r = await this.inertialScrollByProbe(evalRawFn, expr, distance);
-      if (!r.found) break;
-      if (typeof r.after === 'number' && typeof r.before === 'number' && r.after > r.before) moved++;
-      if (r.reachedEnd) break;
+        const r = await this.inertialScrollByProbe(evalRawFn, expr, distance, deadlineAt);
+        if (!r.found) break;
+        if (typeof r.after === 'number' && typeof r.before === 'number' && r.after > r.before) moved++;
+        if (r.reachedEnd) break;
+      }
+    } catch (err) {
+      if (err instanceof NoteOpenDeadlineError) {
+        this.logger('[browse] note.open: 详情已上报，预算耗尽，停止长文阅读');
+        return;
+      }
+      throw err;
     }
     if (moved > 0) this.logger(`[browse] 正文已小步滚动阅读 ${moved}/${steps} 次`);
   }

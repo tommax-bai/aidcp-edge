@@ -109,6 +109,27 @@ export interface DispatchClickOptions {
    *（现有 click 零回归）。>0 时在 hover 与 press 之间插一段可注入 sleep 的 dwell。
    */
   hoverDwellMs?: number;
+  /**
+   * 可选的整体操作截止时刻。只在下一条输入尚未发出时检查，绝不取消已经发出的 CDP 命令；
+   * 这样调用方可在安全边界收敛长点击，而不会让页面写操作与后续任务并发。
+   */
+  deadlineAt?: number;
+  /** deadlineAt 对应的墙钟（测试可注入，默认 Date.now）。 */
+  clock?: () => number;
+}
+
+/** 拟人化输入在发送下一条 CDP 事件前发现预算已耗尽。 */
+export class InputDispatchDeadlineError extends Error {
+  constructor(public readonly deadlineAt: number) {
+    super(`输入操作超过截止时间 deadlineAt=${deadlineAt}`);
+    this.name = 'InputDispatchDeadlineError';
+  }
+}
+
+function assertInputDeadline(options: DispatchClickOptions): void {
+  if (options.deadlineAt === undefined) return;
+  const clock = options.clock ?? Date.now;
+  if (clock() >= options.deadlineAt) throw new InputDispatchDeadlineError(options.deadlineAt);
 }
 
 /**
@@ -144,6 +165,7 @@ export async function dispatchHover(
 
   let last: Point = from;
   for (const pt of path) {
+    assertInputDeadline(options);
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pt.x, y: pt.y });
     last = pt;
     // 逐帧延迟：默认固定；开抖动时每帧走 lognormal（消 dt 方差=0 的机器特征）。
@@ -173,9 +195,14 @@ export async function dispatchClick(
   const last = await dispatchHover(cdp, x, y, options);
   // 落点前读图/瞄准停顿（默认 0，普通 click 零回归）。
   const dwell = options.hoverDwellMs ?? 0;
-  if (dwell > 0) await (options.sleep ?? defaultSleep)(dwell);
+  if (dwell > 0) {
+    assertInputDeadline(options);
+    await (options.sleep ?? defaultSleep)(dwell);
+  }
   const base = { x: last.x, y: last.y, button: 'left' as const, clickCount: 1 };
+  assertInputDeadline(options);
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...base });
+  assertInputDeadline(options);
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base });
   // 返回真实落点（含 jitter/overshoot 残差），供多点循环把上一落点作下一点起点、保光标连续。
   return last;

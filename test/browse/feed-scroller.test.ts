@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { CdpFeedScroller, type NoteCard } from '../../src/browse/feed-scroller.js';
-import type { BrowseCdp } from '../../src/browse/cdp-util.js';
+import { InputDispatchDeadlineError, type BrowseCdp } from '../../src/browse/cdp-util.js';
 
 /** 假 CDP：记录调用并按 method 返回预设 */
 function fakeCdp(handler: (method: string, params: Record<string, unknown>) => unknown): {
@@ -121,4 +121,20 @@ test('openCard: 沿贝塞尔轨迹移动后 press/release（非瞬移）', async
   // 落点应在中心附近（jitter 默认 3px；random=0.5 → 抖动量 0）
   assert.ok(Math.abs(Number(pressed?.params.x) - 100) <= 5, '落点 x 接近中心');
   assert.ok(Math.abs(Number(pressed?.params.y) - 200) <= 5, '落点 y 接近中心');
+});
+
+test('openCard: 预算耗尽后在下一条输入前停止，不伪造已结束的在飞输入', async () => {
+  let clock = 0;
+  const { cdp, calls } = fakeCdp((method) => {
+    if (method === 'Input.dispatchMouseEvent') clock += 10;
+    return {};
+  });
+  const scroller = new CdpFeedScroller(cdp, { random: () => 0.5, sleep: async () => {} });
+  await assert.rejects(
+    scroller.openCard(CARDS[0], { deadlineAt: 25, clock: () => clock }),
+    (err: unknown) => err instanceof InputDispatchDeadlineError,
+  );
+  const inputs = calls.filter((call) => call.method === 'Input.dispatchMouseEvent');
+  assert.equal(inputs.length, 3, '前三条已发出的输入允许安全返回，预算后不再发送第四条');
+  assert.equal(inputs.some((call) => call.params.type === 'mousePressed'), false, '预算耗尽后不得继续执行按下动作');
 });
