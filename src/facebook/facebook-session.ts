@@ -19,7 +19,7 @@
  *  - FB 无收藏/关注/看图（v1）：这些命令诚实回 capability_unsupported，绝不臆造。
  */
 
-import type { BrowseCdp } from '../browse/cdp-util.js';
+import { evalJson, type BrowseCdp } from '../browse/cdp-util.js';
 import type { OverlayMonitor } from '../browse/overlay-monitor.js';
 import { jitterAround } from '../humanize/index.js';
 import type { EdgeBrowseSession } from '../browse/edge-browse-session.js';
@@ -30,6 +30,9 @@ import type {
   NoteOpenPayload,
   InteractionLikePayload,
   PageCardsPayload,
+  PageScrollPayload,
+  ProfileDetailPayload,
+  ProfileOpenPayload,
   PacingOp,
   PacingFloorPayload,
 } from '../comm/protocol.js';
@@ -63,6 +66,7 @@ export function usesFacebookBrowseSession(driver: PlatformDriver): boolean {
 export interface FacebookSessionClient {
   reportPageCards(payload: PageCardsPayload): void;
   reportNoteDetail(payload: NoteDetailPayload): void;
+  reportProfileDetail(payload: ProfileDetailPayload): void;
   reportActionCompleted(payload: ActionCompletedPayload): void;
 }
 
@@ -92,9 +96,19 @@ export interface FacebookBrowseSessionOptions {
 type TerminalReport =
   | { type: 'cards'; payload: PageCardsPayload }
   | { type: 'detail'; payload: NoteDetailPayload }
+  | { type: 'profile'; payload: ProfileDetailPayload }
   | { type: 'action'; payload: ActionCompletedPayload };
 
+interface FacebookProfileSnapshot {
+  url?: string;
+  title?: string;
+  nickname?: string;
+  bodyTextLen?: number;
+}
+
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const FEED_CARD_HYDRATION_RETRY_ROUNDS = 6;
+const FEED_CARD_HYDRATION_RETRY_MS = 700;
 
 export class FacebookBrowseSession implements EdgeBrowseSession {
   private readonly cdp: BrowseCdp;
@@ -112,6 +126,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private running = false;
   private closing = false;
   private tempo: number;
+  /** 最近一次 page.cards 到达时间；用于吸收云端评估耗时，避免 dwellMs 变成额外固定等待。 */
+  private lastCardsAt = 0;
   /** 命令串行链：一次只处理一条，避免并发争抢同一浏览器会话。 */
   private chain: Promise<void> = Promise.resolve();
 
@@ -222,9 +238,14 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         return;
       }
       // —— 浏览/点赞类（受 kill switch 门控）——
-      case 'page.scroll':
-        await this.runBrowseCommand('scroll', () => this.scrollFeed());
+      case 'page.scroll': {
+        const payload = (env.payload ?? {}) as PageScrollPayload;
+        await this.runBrowseCommand('scroll', async () => {
+          await this.ensureFeedDwell(payload.dwellMs);
+          return this.scrollFeed();
+        });
         return;
+      }
       case 'interaction.like': {
         const payload = env.payload as InteractionLikePayload;
         await this.runBrowseCommand('like', async () => {
@@ -239,6 +260,16 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       case 'note.close':
         await this.runBrowseCommand('close', () => this.closeNote());
         return;
+      case 'profile.open': {
+        const payload = (env.payload ?? {}) as ProfileOpenPayload;
+        if (payload.direct) {
+          await this.runProfileCommand(payload);
+          return;
+        }
+        this.log('[fb-session] profile.open 非 direct 路径 FB v1 不支持，回 capability_unsupported');
+        this.client.reportActionCompleted({ action: 'profile_open', ok: false, reason: 'capability_unsupported' });
+        return;
+      }
       case 'session.end':
         this.log('[fb-session] 命令: session.end');
         this.running = false;
@@ -296,9 +327,22 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (ms > 0) await this.sleep(ms);
   }
 
+  /** feed 翻页前确保本批卡片已停留到云端目标；已花掉的 LLM/网络时间会被吸收，不双重叠加。 */
+  private async ensureFeedDwell(dwellMs?: number): Promise<void> {
+    if (!dwellMs || dwellMs <= 0 || this.lastCardsAt <= 0) return;
+    const target = jitterAround(dwellMs * this.tempo, 0.2);
+    const elapsed = Date.now() - this.lastCardsAt;
+    const remaining = Math.max(0, target - elapsed);
+    if (remaining > 0) await this.sleep(remaining);
+  }
+
   private emit(r: TerminalReport): void {
-    if (r.type === 'cards') this.client.reportPageCards(r.payload);
+    if (r.type === 'cards') {
+      this.lastCardsAt = Date.now();
+      this.client.reportPageCards(r.payload);
+    }
     else if (r.type === 'detail') this.client.reportNoteDetail(r.payload);
+    else if (r.type === 'profile') this.client.reportProfileDetail(r.payload);
     else this.client.reportActionCompleted(r.payload);
   }
 
@@ -309,11 +353,12 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       this.log(`[fb-session] feed 未就绪（${ensure.reason}）：不上报首屏（云端看门狗后续可 nudge）`);
       return;
     }
-    const cards = await this.feedReader.scanCards();
+    const cards = await this.scanFeedCardsWithHydrationRetry('initial');
     if (cards.length === 0) {
       this.log('[fb-session] feed 就绪但无可上报卡片');
       return;
     }
+    this.lastCardsAt = Date.now();
     this.client.reportPageCards(this.toPageCards(cards));
     this.log(`[fb-session] 已上报首屏 ${cards.length} 张 feed 卡片`);
   }
@@ -354,7 +399,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   /** feed 翻页 → 扫卡 → page.cards。 */
   private async scrollFeed(): Promise<TerminalReport> {
     await this.feedReader.scrollNext();
-    const cards = await this.feedReader.scanCards();
+    const cards = await this.scanFeedCardsWithHydrationRetry('scroll');
     if (cards.length === 0) {
       return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'no_target' } };
     }
@@ -367,7 +412,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (!ensure.ok) {
       return { type: 'action', payload: { action: 'back', ok: false, reason: ensure.reason ?? 'no_feed' } };
     }
-    const cards = await this.feedReader.scanCards();
+    const cards = await this.scanFeedCardsWithHydrationRetry('back');
     if (cards.length === 0) {
       return { type: 'action', payload: { action: 'back', ok: false, reason: 'no_feed' } };
     }
@@ -378,6 +423,128 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private async closeNote(): Promise<TerminalReport> {
     await this.navigateFeedBestEffort();
     return { type: 'action', payload: { action: 'close', ok: true } };
+  }
+
+  /**
+   * FB feed 常先水合作者/正文，permalink 链接晚一拍出现。page.cards 必须有可开 permalink，
+   * 所以这里只做短有界重试，不造卡、不放宽候选规则。
+   */
+  private async scanFeedCardsWithHydrationRetry(context: 'initial' | 'scroll' | 'back'): Promise<FacebookFeedCard[]> {
+    for (let i = 0; i < FEED_CARD_HYDRATION_RETRY_ROUNDS; i++) {
+      const cards = await this.feedReader.scanCards();
+      if (cards.length > 0) {
+        if (i > 0) this.log(`[fb-session] feed permalink 延迟水合，${context} 第 ${i + 1} 次扫描拿到 ${cards.length} 张卡片`);
+        return cards;
+      }
+      if (i < FEED_CARD_HYDRATION_RETRY_ROUNDS - 1) await this.sleep(FEED_CARD_HYDRATION_RETRY_MS);
+    }
+    return [];
+  }
+
+  /**
+   * Facebook 本人昵称采集：云端会在首个 page.cards 后下发 profile.open{direct:true}。
+   * v1 只支持 direct 自己主页采集，回 profile.detail 解除云端 nickname-enricher 等待；
+   * 不支持普通作者主页/关注链路，避免扩大自动行为面。
+   */
+  private async runProfileCommand(payload: ProfileOpenPayload): Promise<void> {
+    let settled = false;
+    const emitOnce = (report: TerminalReport): void => {
+      if (settled) return;
+      settled = true;
+      this.emit(report);
+    };
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.log(`[fb-session] profile.open direct 超时（${this.commandTimeoutMs}ms），回 extracted:false`);
+        emitOnce({ type: 'profile', payload: this.profileFallback(payload.authorId) });
+        resolve();
+      }, this.commandTimeoutMs);
+      this.openDirectProfile(payload)
+        .then((report) => {
+          clearTimeout(timer);
+          emitOnce(report);
+          resolve();
+        })
+        .catch((err) => {
+          clearTimeout(timer);
+          this.log(`[fb-session] profile.open direct 失败：${(err as Error).message}`);
+          emitOnce({ type: 'profile', payload: this.profileFallback(payload.authorId) });
+          resolve();
+        });
+    });
+  }
+
+  private async openDirectProfile(payload: ProfileOpenPayload): Promise<TerminalReport> {
+    const authorId = String(payload.authorId ?? '').trim();
+    if (!authorId) return { type: 'profile', payload: this.profileFallback(authorId) };
+    await this.thinkBefore(payload.thinkMs);
+    const url = /^\d+$/.test(authorId)
+      ? `https://www.facebook.com/profile.php?id=${encodeURIComponent(authorId)}`
+      : `https://www.facebook.com/${encodeURIComponent(authorId)}`;
+    this.log(`[fb-session] 命令: profile.open direct（authorId=${authorId}）`);
+    await this.cdp.send('Page.navigate', { url });
+    const snapshot = await this.waitAndReadProfile();
+    const nickname = (snapshot.nickname ?? '').trim();
+    const landedUrl = snapshot.url?.startsWith('https://www.facebook.com/') ? snapshot.url : url;
+    this.log(
+      `[fb-session] profile.detail direct authorId=${authorId}` +
+        `${nickname ? ` nickname="${nickname}"` : ' nickname=<empty>'} extracted=false`,
+    );
+    return {
+      type: 'profile',
+      payload: {
+        authorId,
+        postsCount: 0,
+        followersCount: 0,
+        likesCollects: 0,
+        extracted: false,
+        ...(nickname ? { nickname } : {}),
+        ...(landedUrl ? { url: landedUrl } : {}),
+      },
+    };
+  }
+
+  private async waitAndReadProfile(timeoutMs = 8000): Promise<FacebookProfileSnapshot> {
+    const deadline = Date.now() + timeoutMs;
+    let last: FacebookProfileSnapshot = {};
+    while (Date.now() < deadline) {
+      last = await this.readProfileSnapshot();
+      if (last.nickname || (last.bodyTextLen ?? 0) > 0) return last;
+      await this.sleep(300);
+    }
+    return last;
+  }
+
+  private async readProfileSnapshot(): Promise<FacebookProfileSnapshot> {
+    return evalJson<FacebookProfileSnapshot>(
+      this.cdp,
+      `(() => {
+        const clean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+        const title = clean(document.title).replace(/\\s*\\|\\s*Facebook\\s*$/i, '');
+        const h1 = clean(document.querySelector('h1')?.textContent || '');
+        const mainH1 = clean(document.querySelector('[role="main"] h1')?.textContent || '');
+        const bodyText = clean(document.body?.innerText || '');
+        const nickname = [mainH1, h1, title].find((v) =>
+          v && !/^(Facebook|首页|Home|通知|Notifications)$/i.test(v)
+        ) || '';
+        return JSON.stringify({
+          url: location.href,
+          title: document.title,
+          nickname,
+          bodyTextLen: bodyText.length
+        });
+      })()`,
+    );
+  }
+
+  private profileFallback(authorId?: string): ProfileDetailPayload {
+    return {
+      authorId: authorId ?? '',
+      postsCount: 0,
+      followersCount: 0,
+      likesCollects: 0,
+      extracted: false,
+    };
   }
 
   private async navigateFeedBestEffort(): Promise<void> {

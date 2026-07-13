@@ -60,6 +60,8 @@ test('classifyFacebookSurface: URL-first Page, Group, post, search, and blocking
   assert.equal(classifyFacebookSurface('https://www.facebook.com/groups/foo/posts/123/'), 'group_post');
   assert.equal(classifyFacebookSurface('https://www.facebook.com/groups/1/?multi_permalinks=2'), 'group_post');
   assert.equal(classifyFacebookSurface('https://www.facebook.com/Meta/posts/833823022640243/'), 'page_post');
+  assert.equal(classifyFacebookSurface('https://www.facebook.com/watch/?v=4525277067786120&ref=watch_permalink'), 'page_post');
+  assert.equal(classifyFacebookSurface('https://www.facebook.com/reel/1234567890/'), 'page_post');
   assert.equal(classifyFacebookSurface('https://www.facebook.com/search/posts/?q=x'), 'search');
   assert.equal(classifyFacebookSurface('https://www.facebook.com/login/?next=x'), 'login');
   assert.equal(classifyFacebookSurface('https://www.facebook.com/checkpoint/123'), 'checkpoint');
@@ -70,6 +72,8 @@ test('classifyFacebookPermalink: keeps only post-like permalink candidates', () 
   assert.equal(classifyFacebookPermalink('https://www.facebook.com/groups/1/?multi_permalinks=2'), 'group_post');
   assert.equal(classifyFacebookPermalink('https://www.facebook.com/Meta/posts/833823022640243/'), 'page_post');
   assert.equal(classifyFacebookPermalink('https://www.facebook.com/story.php?story_fbid=1&id=2'), 'story');
+  assert.equal(classifyFacebookPermalink('https://www.facebook.com/watch/?v=4525277067786120&ref=watch_permalink'), 'page_post');
+  assert.equal(classifyFacebookPermalink('https://www.facebook.com/reel/1234567890/'), 'page_post');
   assert.equal(classifyFacebookPermalink('https://www.facebook.com/search/posts/?q=x'), 'unknown');
 });
 
@@ -81,6 +85,10 @@ test('sanitizeFacebookPermalinkHref: strips tracking query and hash data', () =>
   assert.equal(
     sanitizeFacebookPermalinkHref('https://www.facebook.com/Meta/posts/833823022640243/#comments'),
     'https://www.facebook.com/Meta/posts/833823022640243',
+  );
+  assert.equal(
+    sanitizeFacebookPermalinkHref('https://www.facebook.com/watch/?v=4525277067786120&notif_id=123&ref=watch_permalink'),
+    'https://www.facebook.com/watch?v=4525277067786120',
   );
 });
 

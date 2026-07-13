@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { IdentityWatcher, type IdentityHealth } from '../../src/browse/index.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
-import type { PageContext } from '../../src/cdp/index.js';
+import type { PageContext, SelfIdentityResult } from '../../src/cdp/index.js';
 
 const ID_A = '63e2ff0500000000260049ce'; // 基线
 const ID_B = 'a1b2c3d4e5f60718293a4b5c'; // 换成别的号
@@ -171,4 +171,25 @@ test('IdentityWatcher: inconclusive 跳过后回消费页仍能正常判定（�
   await w.check(); // changed 2/2 → 触发
   assert.deepEqual(transitions, [['healthy', 'invalid']]);
   assert.deepEqual(w.lastReason, { kind: 'changed', newId: ID_B });
+});
+
+test('IdentityWatcher: 可注入平台身份读取器（FB 不复用小红书 readSelfIdentity）', async () => {
+  const transitions: Array<[IdentityHealth, IdentityHealth]> = [];
+  let readCalls = 0;
+  const readIdentity = async (_cdp: BrowseCdp, opts?: { allowNavigate?: boolean }): Promise<SelfIdentityResult> => {
+    readCalls++;
+    assert.equal(opts?.allowNavigate, false, '运行期校验必须就地读，不导航');
+    return { ok: true, identity: { accountId: '1234567890', displayName: null, redId: null, source: 'facebook-cookie' } };
+  };
+  const w = new IdentityWatcher({ send: async () => ({ result: { value: '' } }) } as unknown as BrowseCdp, '1234567890', {
+    threshold: 1,
+    ...noTimer,
+    pageContext: async () => 'consumer',
+    readIdentity,
+    confirmLoggedOut: async () => true,
+  });
+  w.start((from, to) => transitions.push([from, to]));
+  await w.check();
+  assert.equal(readCalls, 1);
+  assert.equal(transitions.length, 0);
 });

@@ -54,6 +54,7 @@ import {
   FacebookJoinExecutor,
   FacebookPublishExecutor,
   parseFacebookBrowseMode,
+  readFacebookIdentityPageContext,
   usesFacebookBrowseSession,
 } from './facebook/index.js';
 import { EdgeClient } from './client/edge-client.js';
@@ -1035,11 +1036,16 @@ async function main(): Promise<void> {
     // 正向登出探针：消费页读不出本人锚点时，用登录浮层是否可见区分「真登出」与「无侧栏页/弹层态」。
     // 复用已校准的登录弹窗检测（排除笔记详情容器、不锁混淆 class）。
     const loginWall = new CdpLoginModalWatcher(session.cdp);
+    const confirmLoggedOut = platformDriver.platform === 'facebook'
+      ? async () => overlayMonitor?.state === 'login' || (await readFacebookIdentityPageContext(session.cdp)) === 'creator-login'
+      : () => loginWall.isOpen();
     identityWatcher = new IdentityWatcher(session.cdp, accountId!, {
       intervalMs: Number(process.env.AIDCP_IDENTITY_CHECK_MS ?? 30_000),
       threshold: Number(process.env.AIDCP_IDENTITY_FAIL_THRESHOLD ?? 2),
       logger: (m) => console.log(m),
-      confirmLoggedOut: () => loginWall.isOpen(),
+      readIdentity: platformDriver.readIdentity,
+      ...(platformDriver.platform === 'facebook' ? { pageContext: () => readFacebookIdentityPageContext(session.cdp) } : {}),
+      confirmLoggedOut,
     });
     watcherSupervisor.register(identityWatcher, (from, to) => {
       if (from === 'healthy' && to === 'invalid') void reestablishIdentity();

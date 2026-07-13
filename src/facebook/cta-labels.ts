@@ -2,8 +2,9 @@
  * Facebook 反应（点赞）按钮的多语言 aria-label / 文案匹配。
  *
  * 背景（真机探针 facebook-browse-and-like-loop-probe-findings.md §「Action bar / LIKE DISAMBIGUATION」）：
- *  - 帖级「点赞动作」按钮 = `[role=button][aria-label="留下心情"]`（zh-CN），**文案为空**；hover 展开反应选择器、
- *    单击即「赞/Like」。它与「赞：N」反应【计数汇总】按钮（aria-label="赞" + 数字文案）不同——后者不是 toggle。
+ *  - 帖级「点赞动作」按钮 = `[role=button][aria-label="留下心情"]` 或
+ *    `[aria-label="给<作者>的帖子留下心情"]`（zh-CN），**文案为空**；单击即「赞/Like」。
+ *    它与「赞：N」反应【计数汇总】按钮、以及反应项「给<作者>的帖子留下心情：赞」不同——后两者不是 toggle。
  *  - 已赞态确切串真机未拿到（留待 shadow task 8.2 收紧）；已知：react 后该按钮的**空文案会变成反应词**
  *    （中文实测变「赞」蓝字），或 aria-label 变「取消赞 / Remove Like」类「撤销」串。
  *
@@ -14,10 +15,11 @@
  * 红线：不确定即判「未反应」——绝不把「不确定」当「已赞」冒充成功（MUST NOT 静默假成功）。
  */
 
-/** 中性「点赞动作」按钮的 aria-label（点它 = 赞）。锚点，不含数字计数串。 */
-export const NEUTRAL_LIKE_LABEL_SOURCE = '^\\s*(留下心情|赞一个|点赞|讚|Like|React|Reaccionar|Me gusta)\\s*$';
+/** 中性「点赞动作」按钮的 aria-label（点它 = 赞）。锚点，不含数字计数串，也不含「：赞」反应项后缀。 */
+export const NEUTRAL_LIKE_LABEL_SOURCE =
+  '^\\s*(?:给.+的帖子)?\\s*(留下心情|赞一个|点赞|讚|Like|React|Reaccionar|Me gusta)\\s*$';
 /** 帖级动作栏里的「评论」按钮 aria-label（前缀匹配）：帖级 react 按钮的同栏必含它，评论级 react 无。 */
-export const COMMENT_LABEL_SOURCE = '(发表评论|發表評論|写评论|寫留言|Comment|Write a comment|Comentar)';
+export const COMMENT_LABEL_SOURCE = '(发表评论|發表評論|写评论|寫留言|评论.+帖子|Comment|Write a comment|Comment.+post|Comentar)';
 /** 已反应后按钮呈现的「反应词」文案（空→非空，蓝字激活）。 */
 export const REACTED_WORD_SOURCE = '^\\s*(赞|讚|大赞|超赞|Like|Love|Care|Haha|Wow|Me gusta|Me encanta)\\s*$';
 /** 「撤销反应」串（其存在 = 当前已赞，最可靠的跨语言已赞信号）。 */

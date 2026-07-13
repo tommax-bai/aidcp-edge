@@ -136,14 +136,18 @@ test('fb-like[shadow]: 目标不存在 → 仍诚实 no_target（不冒充 shado
 // 回归：反应【计数汇总】按钮（aria-label=赞 + 数字文案，DOM 序在 留下心情 toggle 之前）绝不被误当已赞 toggle。
 
 /** 构造 FB 帖级动作栏 DOM（dialog>article>action-bar：计数汇总 / 留下心情 toggle / 发表评论 / 分享）。 */
-function buildActionBarDom(opts: { withToggle?: boolean; reactionText?: string } = {}): JSDOM {
-  const toggle = opts.withToggle === false ? '' : '<div role="button" aria-label="留下心情"></div>';
+function buildActionBarDom(opts: { withToggle?: boolean; reactionText?: string; localized?: boolean; withReactionOption?: boolean } = {}): JSDOM {
+  const toggleLabel = opts.localized ? '给Oi Fong的帖子留下心情' : '留下心情';
+  const commentLabel = opts.localized ? '评论Oi Fong的帖子' : '发表评论';
+  const reactionOption = opts.withReactionOption ? '<div role="button" aria-label="给Oi Fong的帖子留下心情：赞">赞</div>' : '';
+  const toggle = opts.withToggle === false ? '' : `<div role="button" aria-label="${toggleLabel}"></div>`;
   const dom = new JSDOM(
     '<!doctype html><html><body><div role="dialog"><div role="article">' +
       '<div class="action-bar">' +
       `<div role="button" aria-label="赞">${opts.reactionText ?? '3,829'}</div>` + // 计数汇总（非 toggle）
+      reactionOption + // 反应项（非 toggle）：真实 FB 会出现在主按钮附近，不能误选
       toggle + // 留下心情 toggle（可选）
-      '<div role="button" aria-label="发表评论">66</div>' +
+      `<div role="button" aria-label="${commentLabel}">评论</div>` +
       '<div role="button" aria-label="发送给好友或发布到你的个人主页。">12</div>' +
       '</div></div></div></body></html>',
     { runScripts: 'outside-only' },
@@ -194,6 +198,91 @@ test('fb-like[jsdom]: 已有反应但本号未赞 → 找到真 toggle 而非误
   assert.equal(r.reason, undefined);
   assert.equal(r.ok, true);
   assert.equal(r.executed, true);
+});
+
+test('fb-like[jsdom]: FB 中文本地化 label → 选「给某人的帖子留下心情」主按钮，不选「：赞」反应项', async () => {
+  const dom = buildActionBarDom({ localized: true, withReactionOption: true, reactionText: '3,829' });
+  const toggle = dom.window.document.querySelector('[aria-label="给Oi Fong的帖子留下心情"]') as HTMLElement;
+  const reactionOption = dom.window.document.querySelector('[aria-label="给Oi Fong的帖子留下心情：赞"]') as HTMLElement;
+  let reactionOptionClicked = false;
+  reactionOption.addEventListener('click', () => {
+    reactionOptionClicked = true;
+  });
+  toggle.addEventListener('click', () => {
+    toggle.textContent = '赞';
+  });
+  const exec = new FacebookLikeExecutor({ cdp: jsdomCdp(dom), ...noSleep }, fastOpts);
+  const r = await exec.like();
+  assert.equal(r.ok, true);
+  assert.equal(r.executed, true);
+  assert.equal(reactionOptionClicked, false, '反应项「：赞」不是主 toggle，不能被点击或误判 already_liked');
+});
+
+test('fb-like[jsdom]: 多帖子页面优先锁当前 permalink 所在 article，不误点背景帖子', async () => {
+  const targetUrl = 'https://www.facebook.com/lai.oifong.7/posts/pfbid02jYCajznmdpP7ypC1LSUqozfeezRaUBmFDE1V82LXt2PbYWrFLEKWjwqdf68rnNRWl';
+  const dom = new JSDOM(
+    '<!doctype html><html><body><div role="dialog"></div>' +
+      '<div role="article" id="bg">' +
+      '<a href="https://www.facebook.com/dazn/posts/pfbid0BG">1天</a>' +
+      '<a href="#">空操作链接</a>' +
+      '<div role="button" aria-label="给DAZN的帖子留下心情"></div>' +
+      '<div role="button" aria-label="评论DAZN的帖子">评论</div>' +
+      '</div>' +
+      '<div role="article" id="target">' +
+      `<a href="${targetUrl}?__cft__[0]=x">1天</a>` +
+      '<div role="button" aria-label="给Oi Fong的帖子留下心情：赞">赞</div>' +
+      '<div role="button" aria-label="给Oi Fong的帖子留下心情"></div>' +
+      '<div role="button" aria-label="评论Oi Fong的帖子">评论</div>' +
+      '</div></body></html>',
+    { runScripts: 'outside-only', url: targetUrl },
+  );
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value() {
+      return { left: 10, top: 100, right: 60, bottom: 130, width: 50, height: 30 };
+    },
+  });
+  let bgClicked = false;
+  (dom.window.document.querySelector('#bg [aria-label="给DAZN的帖子留下心情"]') as HTMLElement).addEventListener('click', () => {
+    bgClicked = true;
+  });
+  const targetToggle = dom.window.document.querySelector('#target [aria-label="给Oi Fong的帖子留下心情"]') as HTMLElement;
+  targetToggle.addEventListener('click', () => {
+    targetToggle.textContent = '赞';
+  });
+  const exec = new FacebookLikeExecutor({ cdp: jsdomCdp(dom), ...noSleep }, fastOpts);
+  const r = await exec.like();
+  assert.equal(r.ok, true);
+  assert.equal(r.executed, true);
+  assert.equal(bgClicked, false, '当前 URL 对应 target article，不能误点背景帖子');
+});
+
+test('fb-like[jsdom]: 当前是帖子 URL 但页面无匹配 article → no_target，不扫整页误点背景', async () => {
+  const currentUrl = 'https://www.facebook.com/lai.oifong.7/posts/pfbid0TARGET';
+  const dom = new JSDOM(
+    '<!doctype html><html><body>' +
+      '<div role="article" id="bg">' +
+      '<a href="https://www.facebook.com/dazn/posts/pfbid0BG">1天</a>' +
+      '<div role="button" aria-label="给DAZN的帖子留下心情"></div>' +
+      '<div role="button" aria-label="评论DAZN的帖子">评论</div>' +
+      '</div></body></html>',
+    { runScripts: 'outside-only', url: currentUrl },
+  );
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value() {
+      return { left: 10, top: 100, right: 60, bottom: 130, width: 50, height: 30 };
+    },
+  });
+  let bgClicked = false;
+  (dom.window.document.querySelector('#bg [aria-label="给DAZN的帖子留下心情"]') as HTMLElement).addEventListener('click', () => {
+    bgClicked = true;
+  });
+  const exec = new FacebookLikeExecutor({ cdp: jsdomCdp(dom), ...noSleep }, fastOpts);
+  const r = await exec.like();
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'no_target');
+  assert.equal(bgClicked, false);
 });
 
 test('fb-like[jsdom]: 只有「赞」计数汇总按钮、无 toggle → no_target（绝不把计数按钮当 toggle 点）', async () => {

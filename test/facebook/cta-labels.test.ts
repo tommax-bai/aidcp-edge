@@ -4,18 +4,22 @@ import { isNeutralLikeLabel, isCommentLabel, isReactedState } from '../../src/fa
 
 test('cta-labels: 中性点赞按钮 aria-label 多语言命中', () => {
   assert.equal(isNeutralLikeLabel('留下心情'), true);
+  assert.equal(isNeutralLikeLabel('给Oi Fong的帖子留下心情'), true);
   assert.equal(isNeutralLikeLabel('点赞'), true);
   assert.equal(isNeutralLikeLabel('Like'), true);
   assert.equal(isNeutralLikeLabel('React'), true);
   assert.equal(isNeutralLikeLabel('Me gusta'), true);
   // 反应计数汇总按钮 aria-label「赞」（带数字文案）不是中性点赞按钮——不命中。
   assert.equal(isNeutralLikeLabel('赞：3,706位用户'), false);
+  // 反应项/已反应展示不是中性 toggle，不能抢在真 toggle 前面被选中。
+  assert.equal(isNeutralLikeLabel('给Oi Fong的帖子留下心情：赞'), false);
   assert.equal(isNeutralLikeLabel(''), false);
 });
 
 test('cta-labels: 帖级「评论」按钮标签命中（排除评论级 react 用）', () => {
   assert.equal(isCommentLabel('发表评论'), true);
   assert.equal(isCommentLabel('发表评论：66'), true);
+  assert.equal(isCommentLabel('评论Oi Fong的帖子'), true);
   assert.equal(isCommentLabel('Comment'), true);
   assert.equal(isCommentLabel('回复'), false, '回复/Reply 不算帖级评论按钮');
   assert.equal(isCommentLabel('Reply'), false);
