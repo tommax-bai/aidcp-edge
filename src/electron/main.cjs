@@ -65,6 +65,9 @@ let loginPoller; // self（本机 Chrome）登录门专用；self 为单环境�
 // pending 全局一份（id 全局唯一）；命令只写「当前选中环境」的子进程 stdin。
 const personaPending = new Map(); // id -> { resolve, timer }
 let personaSeq = 0;
+// 稿件预览审批桥：渲染层动作经目标环境 core stdin → cloud WS → stdout 回执。
+const publishApprovalPending = new Map(); // id -> { resolve, timer }
+let publishApprovalSeq = 0;
 let isQuitting = false;
 // 优雅全停已完成、允许本次 quit 直落（before-quit 二次进入不再拦截）。
 let quitFinal = false;
@@ -1369,6 +1372,29 @@ function sendPersonaCommand(envId, type, payload) {
   });
 }
 
+function sendPublishApprovalCommand(envId, payload) {
+  return new Promise((resolve) => {
+    const handle = envId ? envs.get(envId) : selectedHandle();
+    if (!handle || !handle.child || !handle.child.stdin || handle.child.stdin.destroyed) {
+      resolve({ ok: false, reason: 'edge_not_running' });
+      return;
+    }
+    const id = `publish-approval-${++publishApprovalSeq}-${Date.now()}`;
+    const timer = setTimeout(() => {
+      publishApprovalPending.delete(id);
+      resolve({ ok: false, reason: 'edge_request_timeout' });
+    }, 35_000);
+    publishApprovalPending.set(id, { resolve, timer });
+    try {
+      handle.child.stdin.write(`${JSON.stringify({ type: 'publish.approval_action', id, payload })}\n`);
+    } catch {
+      clearTimeout(timer);
+      publishApprovalPending.delete(id);
+      resolve({ ok: false, reason: 'edge_write_failed' });
+    }
+  });
+}
+
 // core 回执行 `[persona-reply] {id, ok, payload?, error?}`：按 id 命中 pending resolve。
 function handlePersonaReply(jsonText) {
   let obj;
@@ -1381,6 +1407,24 @@ function handlePersonaReply(jsonText) {
   if (!entry) return;
   clearTimeout(entry.timer);
   personaPending.delete(obj.id);
+  if (obj.ok && obj.payload && typeof obj.payload === 'object') {
+    entry.resolve(obj.payload);
+  } else {
+    entry.resolve({ ok: false, reason: 'edge_request_failed', detail: obj.error });
+  }
+}
+
+function handlePublishApprovalReply(jsonText) {
+  let obj;
+  try {
+    obj = JSON.parse(jsonText);
+  } catch {
+    return;
+  }
+  const entry = obj && obj.id ? publishApprovalPending.get(obj.id) : undefined;
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  publishApprovalPending.delete(obj.id);
   if (obj.ok && obj.payload && typeof obj.payload === 'object') {
     entry.resolve(obj.payload);
   } else {
@@ -2257,6 +2301,10 @@ function handleEdgeLogLine(handle, message, isError = false) {
     handlePersonaReply(message.slice('[persona-reply]'.length).trim());
     return;
   }
+  if (message.startsWith('[publish-approval-reply]')) {
+    handlePublishApprovalReply(message.slice('[publish-approval-reply]'.length).trim());
+    return;
+  }
   appendEdgeLog(handle.envId, message, isError); // 落文件（排障回溯，独立于下方状态判断）
   // AdsPower profile 可绑 ≠ DEFAULT_KERNEL 的内核；browser/start 会诚实报「SunBrowser <N> is not ready」。
   // 该版本 LocalAPI（v2 browser-profile/list 亦然）不暴露，只能据启动报错反应式获知——同 AdsPower CLI 自愈。
@@ -2841,18 +2889,6 @@ ipcMain.handle('fleet:setRailCollapsed', (_event, collapsed) => {
   saveSettings({ railCollapsed: Boolean(collapsed) });
   return { ok: true };
 });
-// 「打开飞书 ↗」：纯导航（拉起飞书客户端），不是审批操作——审批授权只在飞书内完成。
-ipcMain.handle('feishu:open', async () => {
-  for (const url of ['feishu://', 'lark://']) {
-    try {
-      await shell.openExternal(url);
-      return { ok: true };
-    } catch {
-      /* 未注册该协议，试下一个 */
-    }
-  }
-  return { ok: false };
-});
 ipcMain.handle('browser:openAdsDownload', () => {
   void shell.openExternal(ADS_DOWNLOAD_URL);
   return true;
@@ -2869,6 +2905,22 @@ ipcMain.handle('persona:persist', async (_event, envId, payload) => {
     if (handle) updateStatus(handle, { personaBound: true });
   }
   return result;
+});
+ipcMain.handle('publish:approval', (_event, envId, payload) => {
+  const requestId = String(payload && payload.requestId || '').trim();
+  const approved = payload && payload.approved;
+  const contentVersion = payload && payload.contentVersion;
+  if (!/^publish-\d+$/.test(requestId) || typeof approved !== 'boolean') {
+    return { ok: false, reason: 'invalid_request' };
+  }
+  if (contentVersion !== undefined && (!Number.isInteger(contentVersion) || contentVersion < 0)) {
+    return { ok: false, reason: 'invalid_version' };
+  }
+  return sendPublishApprovalCommand(envId, {
+    requestId,
+    approved,
+    contentVersion: contentVersion === undefined ? 0 : contentVersion,
+  });
 });
 ipcMain.handle('notify:show', (_event, payload) => {
   const title = payload && typeof payload.title === 'string' ? payload.title : 'AIDCP Edge';

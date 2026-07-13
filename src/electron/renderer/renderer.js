@@ -83,7 +83,6 @@ const fields = {
   pubMeta: document.querySelector('#pub-meta'),
   pubSteps: document.querySelector('#pub-steps'),
   pubFoot: document.querySelector('#pub-foot'),
-  pubLink: document.querySelector('#pub-link'),
   pubMain: document.querySelector('#pub-main'),
   pubBar: document.querySelector('#pub-bar'),
   pubBarSum: document.querySelector('#pub-bar-sum'),
@@ -94,6 +93,10 @@ const fields = {
   publishPreviewKind: document.querySelector('#publish-preview-kind'),
   publishPreviewTitle: null,
   publishPreviewContent: document.querySelector('#publish-preview-content'),
+  publishPreviewActions: document.querySelector('#publish-preview-actions'),
+  publishPreviewActionHint: document.querySelector('#publish-preview-action-hint'),
+  publishPreviewApprove: document.querySelector('#publish-preview-approve'),
+  publishPreviewCancel: document.querySelector('#publish-preview-cancel'),
   drawer: document.querySelector('#drawer'),
   drawerMask: document.querySelector('#drawer-mask'),
   drawerClose: document.querySelector('#drawer-close'),
@@ -230,6 +233,7 @@ const SUBTITLE = {
 };
 
 let currentStatus;
+let publishPreviewActionBusy = false;
 // 云端环境（change edge-cloud-env-selector）：本地已选 key + 主进程解析出的目标云端视图（含友好名）。
 let cloudSelKey = '';
 let targetCloud = { key: '', label: '默认', url: '' };
@@ -698,7 +702,7 @@ function renderLoop(status) {
   });
 }
 
-// ─── 发布卡（常驻三态：flow 进行中 / last 上次发布 / empty 从未发布；纯展示零按钮）───
+// ─── 发布卡（常驻三态：flow 进行中 / last 上次发布 / empty 从未发布；审批在预览内完成）───
 // 终态折流的去重签名按 envId 分桶（多环境下 A 的终态签名绝不吞掉 B 的折流）。
 const lastPublishSigByEnv = new Map();
 // 用户点薄条的临时展开（进行中审批到来 / 会话停止 / 切换环境时自动复位）。
@@ -735,8 +739,8 @@ function renderPublish(status, nowMs) {
   codeChip.textContent = view.code || (preview && preview.code) || '—';
   fields.pubMeta.appendChild(codeChip);
   renderFootRich(fields.pubFoot, view.foot); // 固定模板内 **…** 加粗，破掉整片灰
-  fields.pubLink.classList.toggle('hidden', !view.showLink);
   fields.pubPreviewLink.classList.toggle('hidden', !(preview && view.mode === 'flow'));
+  syncPublishPreviewActions(status);
   const steps = fields.pubSteps.querySelectorAll('.j-step');
   view.stepStates.forEach((state, i) => {
     const el = steps[i];
@@ -753,6 +757,33 @@ const PUBLISH_PREVIEW_STATES = {
   rejected: '已驳回',
   failed: '发布失败',
 };
+
+function publishPreviewActionReason(reason) {
+  switch (reason) {
+    case 'version_stale': return '稿件已更新，请关闭后重新查看。';
+    case 'account_offline': return '账号当前不在线，暂时无法发布。';
+    case 'already_decided': return '这份稿件已被处理。';
+    case 'not_pending': return '这份稿件已不在待确认状态。';
+    case 'account_mismatch': return '当前环境与稿件账号不一致。';
+    case 'edge_not_running': return '引擎未运行，暂时无法提交。';
+    default: return '操作未完成，请稍后重试。';
+  }
+}
+
+function syncPublishPreviewActions(status) {
+  if (!fields.publishPreviewActions) return;
+  const state = status && status.publish && status.publish.state;
+  const pending = Boolean(status && status.publishPreview && (state === 'pending' || state === 'reminded'));
+  fields.publishPreviewActions.classList.toggle('hidden', !pending && !publishPreviewActionBusy);
+  const disabled = publishPreviewActionBusy || !pending;
+  fields.publishPreviewApprove.disabled = disabled;
+  fields.publishPreviewCancel.disabled = disabled;
+  if (publishPreviewActionBusy) {
+    fields.publishPreviewActionHint.textContent = '正在提交，请稍候…';
+  } else if (pending) {
+    fields.publishPreviewActionHint.textContent = '确认稿件内容后直接操作';
+  }
+}
 
 function appendPreviewText(parent, text, className) {
   const el = document.createElement('div');
@@ -857,6 +888,7 @@ function renderPublishPreviewContent(status) {
     appendPreviewText(auditSection, `配图说明：参考图 ${audit.requestedCount} 张；${statusLabel}。`, 'publish-preview-empty');
     fields.publishPreviewContent.appendChild(auditSection);
   }
+  syncPublishPreviewActions(status);
 }
 
 function openPublishPreview() {
@@ -882,6 +914,47 @@ fields.pubPreviewLink.addEventListener('keydown', (e) => {
 });
 fields.publishPreviewClose.addEventListener('click', closePublishPreview);
 fields.publishPreviewMask.addEventListener('click', closePublishPreview);
+async function submitPublishPreviewAction(approved) {
+  const preview = currentStatus && currentStatus.publishPreview;
+  if (!preview || publishPreviewActionBusy) return;
+  const publishApproval = window.aidcpEdge && window.aidcpEdge.publishApproval;
+  if (typeof publishApproval !== 'function') {
+    fields.publishPreviewActionHint.textContent = '当前客户端不支持稿件操作。';
+    return;
+  }
+  publishPreviewActionBusy = true;
+  syncPublishPreviewActions(currentStatus);
+  let result;
+  try {
+    result = await publishApproval(currentStatus.envId, {
+      requestId: `publish-${preview.recordId}`,
+      approved,
+      contentVersion: Number.isInteger(preview.contentVersion) ? preview.contentVersion : 0,
+    });
+  } catch {
+    result = { ok: false, reason: 'request_failed' };
+  }
+  publishPreviewActionBusy = false;
+  if (!result || result.ok !== true) {
+    fields.publishPreviewActionHint.textContent = publishPreviewActionReason(result && result.reason);
+    syncPublishPreviewActions(currentStatus);
+    return;
+  }
+  const nextState = result.state || (approved ? 'approved' : 'rejected');
+  currentStatus = {
+    ...currentStatus,
+    publish: {
+      ...(currentStatus.publish || {}),
+      state: nextState,
+      title: currentStatus.publish?.title || preview.title,
+      at: new Date().toISOString(),
+    },
+  };
+  renderPublish(currentStatus, Date.now());
+  renderPublishPreviewContent(currentStatus);
+}
+fields.publishPreviewApprove.addEventListener('click', () => { void submitPublishPreviewAction(true); });
+fields.publishPreviewCancel.addEventListener('click', () => { void submitPublishPreviewAction(false); });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && fields.publishPreviewPanel.classList.contains('open')) closePublishPreview();
 });
@@ -918,17 +991,6 @@ fields.pubBar.addEventListener('keydown', (e) => {
 fields.pubHeadRow.addEventListener('click', collapsePubManual);
 fields.pubHeadRow.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || e.key === ' ') collapsePubManual();
-});
-
-// 「打开飞书 ↗」：纯导航（拉起飞书客户端），不是审批操作；拉不起降级为纯文字说明。
-fields.pubLink.addEventListener('click', async () => {
-  const api = window.aidcpEdge.openFeishu;
-  if (!api) return;
-  const res = await api();
-  if (!res || !res.ok) {
-    fields.pubLink.textContent = '在手机或电脑上打开飞书即可处理';
-    fields.pubLink.classList.add('plain');
-  }
 });
 
 // ─── 叙述式活动流（环形 ≤200 条，最新在上）───
