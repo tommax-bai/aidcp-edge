@@ -137,7 +137,7 @@ function createUiEventStream() {
       },
     ],
     [
-      /✓ 点赞成功/,
+      /^(?!.*\[fb-like\]).*✓ 点赞成功/,
       () => ({
         kind: 'activity',
         type: 'like',

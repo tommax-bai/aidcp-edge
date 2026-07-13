@@ -25,6 +25,7 @@ interface Harness {
   details: NoteDetailPayload[];
   profiles: ProfileDetailPayload[];
   actions: ActionCompletedPayload[];
+  logs: string[];
   delegated: Envelope[];
   ensureCalls: number;
   ensureUrls: string[];
@@ -47,6 +48,7 @@ function makeSession(opts: {
   const details: NoteDetailPayload[] = [];
   const profiles: ProfileDetailPayload[] = [];
   const actions: ActionCompletedPayload[] = [];
+  const logs: string[] = [];
   const delegated: Envelope[] = [];
   const likeShadowFlags: Array<boolean | undefined> = [];
   const state = { ensureCalls: 0, ensureUrls: [] as string[], scanCalls: 0 };
@@ -123,6 +125,7 @@ function makeSession(opts: {
     feedReader,
     postReader,
     likeExecutor,
+    logger: (message) => logs.push(message),
     ...(opts.sleep ? { sleep: opts.sleep } : {}),
   };
   const session = new FacebookBrowseSession(deps, {
@@ -136,6 +139,7 @@ function makeSession(opts: {
     details,
     profiles,
     actions,
+    logs,
     delegated,
     likeShadowFlags,
     get ensureCalls() {
@@ -202,6 +206,23 @@ test('interaction.like（mode=on）→ 真点赞 ok:true（云端据此 record�
   assert.equal(h.actions.length, 1);
   assert.equal(h.actions[0].action, 'like');
   assert.equal(h.actions[0].ok, true);
+});
+
+test('confirmed Facebook session/read/like → structured companion UI events；shadow 不计成功', async () => {
+  const on = makeSession({ mode: 'on' });
+  await on.session.start();
+  await on.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  await on.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'x' }));
+  const events = on.logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as Record<string, unknown>);
+  assert.deepEqual(events.map((event) => event.type), ['session_start', 'feed', 'note_open', 'like']);
+  assert.deepEqual(events[2].statsDelta, { views: 1 });
+  assert.deepEqual(events[3].statsDelta, { likes: 1 });
+
+  const shadow = makeSession({ mode: 'shadow' });
+  await shadow.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'x' }));
+  assert.equal(shadow.logs.some((line) => line.includes('"type":"like"')), false, 'shadow 不得伪报点赞成功');
 });
 
 test('page.scroll → 翻页扫卡 page.cards（collectCount=0）', async () => {

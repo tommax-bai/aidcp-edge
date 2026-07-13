@@ -92,6 +92,13 @@ test('✓ 点赞成功 → likes+1，叙述带上最近笔记标题', () => {
   assert.equal(evt?.loopStage, 'interact');
 });
 
+test('Facebook confirmed like 只认结构化事件，旧日志行不重复计数', () => {
+  const s = createUiEventStream();
+  assert.equal(s.push('[fb-like] ✓ 点赞成功（按钮状态已翻转）'), null);
+  const evt = s.push('[ui-event] {"kind":"activity","type":"like","sentence":"点了个赞","statsDelta":{"likes":1}}');
+  assert.deepEqual(evt?.statsDelta, { likes: 1 });
+});
+
 test('✓ 收藏成功 / ✓ 评论发布成功 / ✓ 评论点赞成功 → 各自计数', () => {
   const s = createUiEventStream();
   assert.deepEqual(s.push('[browse] ✓ 收藏成功 (1, 2)')?.statsDelta, { collects: 1 });

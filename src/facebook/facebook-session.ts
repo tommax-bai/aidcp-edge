@@ -100,6 +100,19 @@ type TerminalReport =
   | { type: 'profile'; payload: ProfileDetailPayload }
   | { type: 'action'; payload: ActionCompletedPayload };
 
+/**
+ * 伴随桌面端的结构化事件。云端 `dailyUsage` 才是账号今日总量的权威；这里仅把已确认的
+ * Facebook 动作即时投影到当前子进程的活动流、在场状态和本地兜底计数，不能据此猜测成功。
+ */
+interface FacebookCompanionUiEvent {
+  kind: 'activity' | 'presence';
+  type: 'session_start' | 'feed' | 'note_open' | 'like';
+  sentence?: string;
+  presence?: string;
+  loopStage?: 'feed' | 'read' | 'interact';
+  statsDelta?: { views?: number; likes?: number };
+}
+
 interface FacebookProfileSnapshot {
   url?: string;
   title?: string;
@@ -169,6 +182,13 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       return;
     }
     this.log(`[fb-session] 启动自动浏览（mode=${this.mode}）→ 导航 feed ${this.feedUrl}`);
+    this.emitCompanionUiEvent({
+      kind: 'activity',
+      type: 'session_start',
+      sentence: '开始自动浏览',
+      presence: '开始今天的浏览…',
+      loopStage: 'feed',
+    });
     await this.reportInitialFeed();
   }
 
@@ -351,10 +371,42 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (r.type === 'cards') {
       this.lastCardsAt = Date.now();
       this.client.reportPageCards(r.payload);
+      this.emitCompanionUiEvent({
+        kind: 'presence',
+        type: 'feed',
+        presence: '正在浏览推荐流…',
+        loopStage: 'feed',
+      });
     }
-    else if (r.type === 'detail') this.client.reportNoteDetail(r.payload);
+    else if (r.type === 'detail') {
+      this.client.reportNoteDetail(r.payload);
+      this.emitCompanionUiEvent({
+        kind: 'activity',
+        type: 'note_open',
+        sentence: '打开了一条内容',
+        presence: '正在认真阅读一条内容…',
+        loopStage: 'read',
+        statsDelta: { views: 1 },
+      });
+    }
     else if (r.type === 'profile') this.client.reportProfileDetail(r.payload);
-    else this.client.reportActionCompleted(r.payload);
+    else {
+      this.client.reportActionCompleted(r.payload);
+      if (r.payload.action === 'like' && r.payload.ok) {
+        this.emitCompanionUiEvent({
+          kind: 'activity',
+          type: 'like',
+          sentence: '点了个赞',
+          presence: '刚点了个赞',
+          loopStage: 'interact',
+          statsDelta: { likes: 1 },
+        });
+      }
+    }
+  }
+
+  private emitCompanionUiEvent(event: FacebookCompanionUiEvent): void {
+    this.log(`[ui-event] ${JSON.stringify(event)}`);
   }
 
   /** 导航 feed → 扫卡 → 上报 page.cards（首屏 / 重连恢复）。无命令可回，best-effort 直发。 */
@@ -369,8 +421,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       this.log('[fb-session] feed 就绪但无可上报卡片');
       return;
     }
-    this.lastCardsAt = Date.now();
-    this.client.reportPageCards(this.toPageCards(cards));
+    this.emit({ type: 'cards', payload: this.toPageCards(cards) });
     this.log(`[fb-session] 已上报首屏 ${cards.length} 张 feed 卡片`);
   }
 
