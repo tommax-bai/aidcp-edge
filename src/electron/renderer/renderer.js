@@ -993,6 +993,7 @@ async function submitPublishPreviewAction(approved) {
   }
   publishPreviewActionBusy = true;
   syncPublishPreviewActions(currentStatus);
+  closePublishPreview();
   let result;
   try {
     result = await publishApproval(currentStatus.envId, {
@@ -1005,8 +1006,8 @@ async function submitPublishPreviewAction(approved) {
   }
   publishPreviewActionBusy = false;
   if (!result || result.ok !== true) {
+    openPublishPreview();
     fields.publishPreviewActionHint.textContent = publishPreviewActionReason(result && result.reason);
-    syncPublishPreviewActions(currentStatus);
     return;
   }
   const nextState = result.state || (approved ? 'approved' : 'rejected');
@@ -1020,7 +1021,6 @@ async function submitPublishPreviewAction(approved) {
     },
   };
   renderPublish(currentStatus, Date.now());
-  renderPublishPreviewContent(currentStatus);
 }
 fields.publishPreviewApprove.addEventListener('click', () => { void submitPublishPreviewAction(true); });
 fields.publishPreviewCancel.addEventListener('click', () => { void submitPublishPreviewAction(false); });

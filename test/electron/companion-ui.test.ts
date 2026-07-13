@@ -328,14 +328,45 @@ test('洗稿稿件预览：发布卡显示查看入口，打开抽屉展示正�
   assert.equal($(w, '#publish-preview-approve').textContent, '发布');
   assert.equal($(w, '#publish-preview-cancel').textContent, '取消');
   $(w, '#publish-preview-approve').dispatchEvent(new w.Event('click'));
+  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false, '点击发布后应立即关闭预览');
   await tick();
   assert.equal(approvalCalls.length, 1);
   assert.equal((approvalCalls[0] as { requestId: string }).requestId, 'publish-89');
   assert.equal((approvalCalls[0] as { approved: boolean }).approved, true);
   assert.equal((approvalCalls[0] as { contentVersion: number }).contentVersion, 0);
   assert.equal(hidden($(w, '#publish-preview-actions')), true);
-  $(w, '#publish-preview-close').dispatchEvent(new w.Event('click'));
   assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false);
+});
+
+test('洗稿稿件预览：点击取消后立即关闭抽屉并提交驳回', async () => {
+  const approvalCalls: unknown[] = [];
+  const { w } = await boot({
+    publish: { state: 'pending', title: '洗稿标题', code: '#90', at: new Date().toISOString() },
+    publishPreview: {
+      recordId: 90,
+      code: '#90',
+      kind: 'rewrite',
+      title: '洗稿标题',
+      content: '正文',
+      topics: [],
+      images: [],
+      contentVersion: 1,
+      updatedAt: Date.now(),
+    },
+  }, {
+    publishApproval: async (_envId: unknown, payload: unknown) => {
+      approvalCalls.push(payload);
+      return { ok: true, state: 'rejected' };
+    },
+  });
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  assert.ok($(w, '#publish-preview-panel').classList.contains('open'));
+  $(w, '#publish-preview-cancel').dispatchEvent(new w.Event('click'));
+  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false, '点击取消后应立即关闭预览');
+  await tick();
+  assert.equal(approvalCalls.length, 1);
+  assert.equal((approvalCalls[0] as { approved: boolean }).approved, false);
+  assert.equal((approvalCalls[0] as { contentVersion: number }).contentVersion, 1);
 });
 
 test('发布卡已通过 → 第四节点平静色 + 无需操作', async () => {
