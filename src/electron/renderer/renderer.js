@@ -77,6 +77,7 @@ const fields = {
   runtimeGuidanceMascot: document.querySelector('#runtime-guidance-mascot'),
   runtimeGuidanceFlow: document.querySelector('#runtime-guidance-flow'),
   runtimeGuidanceResume: document.querySelector('#runtime-guidance-resume'),
+  runtimeGuidanceNote: document.querySelector('#runtime-guidance-note'),
   kernelPrep: document.querySelector('#kernel-prep'),
   kernelPrepLabel: document.querySelector('#kernel-prep-label'),
   kernelPrepPct: document.querySelector('#kernel-prep-pct'),
@@ -724,6 +725,8 @@ function renderRuntimeGuidance(status, nowMs) {
   fields.runtimeGuidanceDetail.classList.toggle('hidden', !view.detail);
   fields.runtimeGuidanceResume.textContent = view.resume || '';
   fields.runtimeGuidanceResume.classList.toggle('hidden', !view.resume);
+  fields.runtimeGuidanceNote.textContent = view.note || '';
+  fields.runtimeGuidanceNote.classList.toggle('hidden', !view.note);
   fields.runtimeGuidanceMascot.src = RUNTIME_GUIDANCE_MASCOTS[view.mascot] || '';
   fields.runtimeGuidanceMascot.classList.toggle('animate', Boolean(view.animate));
 

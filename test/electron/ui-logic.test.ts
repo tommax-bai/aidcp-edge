@@ -16,6 +16,7 @@ interface RuntimeGuidanceV {
   value?: string;
   detail: string;
   resume: string;
+  note?: string;
   steps: Array<{ label: string; detail: string; state: string }>;
 }
 interface PublishV {
@@ -136,7 +137,7 @@ test('在场感：运行中但事件过期 + 当前阶段完成 → 文案说明
   }), now);
   assert.equal(v.animate, false);
   assert.match(v.text, /这一小时的探索告一段落/);
-  assert.match(v.fresh, /预计约 36 分钟后自动继续/);
+  assert.match(v.fresh, /约 36 分钟后自动继续/);
 });
 
 test('运行价值说明：新鲜浏览事件先说明正在寻找内容灵感', () => {
@@ -162,7 +163,7 @@ test('运行价值说明：本轮浏览完成才展示自然间隔与三步说�
         session: {
           active: true,
           releaseAt: now + 42 * 60_000,
-          totals: { view: 12, like: 1 },
+          totals: { view: 12, like: 1, collect: 2 },
           quotas: { view: 12, like: 3 },
           saturated: ['view'],
         },
@@ -175,8 +176,37 @@ test('运行价值说明：本轮浏览完成才展示自然间隔与三步说�
   assert.match(v?.title ?? '', /整理/);
   assert.match(v?.value ?? '', /自然节奏/);
   assert.deepEqual(v?.steps.map((step) => step.label), ['浏览与互动', '留出自然间隔', '继续寻找灵感']);
-  assert.match(v?.steps[0].detail ?? '', /12 条首页内容已观察/);
-  assert.match(v?.resume ?? '', /42 分钟后自动继续/);
+  assert.equal(v?.steps[0].detail, '2 条灵感已记录');
+  assert.match(v?.resume ?? '', /约 42 分钟后自动继续/);
+  assert.equal(v?.note, '本轮进展已记录');
+});
+
+test('运行价值说明：本轮等待缺少浏览配额字段时仍展示完整进度', () => {
+  const now = Date.now();
+  const v = uiLogic.runtimeGuidanceView(st({
+    session: 'resting',
+    presence: { text: '这一轮已经完成，稍作等待后会自动继续', at: new Date(now - 21_000).toISOString() },
+    dailyUsage: {
+      totals: { view: 12, collect: 2 },
+      windows: {
+        session: {
+          active: true,
+          releaseAt: now + 8 * 60_000,
+          totals: { view: 12, collect: 2 },
+        },
+      },
+    },
+  }), now);
+  assert.equal(v?.mode, 'session');
+  assert.equal(v?.title, '先整理一下刚才发现的方向。');
+  assert.equal(v?.value, '停一停不是失去进度，而是为下一轮寻找留出自然节奏。');
+  assert.deepEqual(v?.steps.map((step) => [step.label, step.detail]), [
+    ['浏览与互动', '2 条灵感已记录'],
+    ['留出自然间隔', '让账号信号更清晰'],
+    ['继续寻找灵感', '推荐内容更聚焦'],
+  ]);
+  assert.equal(v?.resume, '约 8 分钟后自动继续');
+  assert.equal(v?.note, '本轮进展已记录');
 });
 
 test('运行价值说明：单项互动完成不升级为全局浏览间隔', () => {

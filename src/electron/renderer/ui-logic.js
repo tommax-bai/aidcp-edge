@@ -124,6 +124,8 @@
       key,
       active,
       expired,
+      totals,
+      saturated,
       expiresAt,
       releaseAt: finiteNumber(window.releaseAt),
       capped,
@@ -131,9 +133,65 @@
     };
   }
 
-  function guidanceSteps(observed) {
+  function firstCount(sources, keys) {
+    for (const source of sources) {
+      const obj = objectOrEmpty(source);
+      for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) return count(obj[key]);
+      }
+    }
+    return 0;
+  }
+
+  function usageCount(status, window, keys) {
+    const daily = objectOrEmpty(objectOrEmpty(status).dailyUsage);
+    return firstCount([window && window.totals, daily.totals, objectOrEmpty(status).stats], keys);
+  }
+
+  function observedCount(status, window) {
+    return usageCount(status, window, ['view', 'views']);
+  }
+
+  function inspirationCount(status, window) {
+    return usageCount(status, window, ['inspiration', 'inspirations', 'candidate', 'candidates', 'collect', 'collects']);
+  }
+
+  function guidanceReleaseAt(window) {
+    if (!window) return null;
+    return window.releaseAt !== null ? window.releaseAt : window.expiresAt;
+  }
+
+  function hasBrowseRestSignal(status, window, strict) {
+    if (!window || !window.active || window.expired) return false;
+    const observed = observedCount(status, window);
+    const inspirations = inspirationCount(status, window);
+    const browseComplete = window.view && window.view.cap > 0 && window.view.complete;
+    if (strict) return Boolean(browseComplete && observed > 0);
+    return observed > 0 || inspirations > 0;
+  }
+
+  function intervalGuidance(status, window, key, nowMs) {
+    const wait = futureWaitText(guidanceReleaseAt(window), nowMs);
+    if (!wait) return null;
+    const isSession = key === 'session';
+    return {
+      mode: key,
+      mascot: 'monitoring',
+      animate: false,
+      kicker: isSession ? '' : '这一小时的探索告一段落',
+      title: isSession ? '先整理一下刚才发现的方向。' : '先让平台认识你一点。',
+      value: '停一停不是失去进度，而是为下一轮寻找留出自然节奏。',
+      detail: '',
+      steps: guidanceSteps(observedCount(status, window), inspirationCount(status, window)),
+      resume: `约 ${wait}自动继续`,
+      note: isSession ? '本轮进展已记录' : '本小时进展已记录',
+    };
+  }
+
+  function guidanceSteps(observed, inspirations) {
+    const browseDetail = inspirations > 0 ? `${inspirations} 条灵感已记录` : `${observed} 条首页内容已观察`;
     return [
-      { icon: 'browse', state: 'done', label: '浏览与互动', detail: `${observed} 条首页内容已观察` },
+      { icon: 'browse', state: 'done', label: '浏览与互动', detail: browseDetail },
       { icon: 'pause', state: 'current', label: '留出自然间隔', detail: '让账号信号更清晰' },
       { icon: 'search', state: 'next', label: '继续寻找灵感', detail: '推荐内容更聚焦' },
     ];
@@ -180,20 +238,17 @@
 
     for (const key of ['session', 'hour']) {
       const window = guidanceWindow(s, key, nowMs);
-      const wait = window && futureWaitText(window.releaseAt, nowMs);
-      if (!window || !window.active || window.expired || !window.view || window.view.cap <= 0 || !window.view.complete || !wait) continue;
-      const isSession = key === 'session';
-      return {
-        mode: key,
-        mascot: 'monitoring',
-        animate: false,
-        kicker: isSession ? '本轮浏览完成' : '这一小时的探索告一段落',
-        title: isSession ? '先整理一下刚才发现的方向。' : '先让平台认识你一点。',
-        value: '停一停不是失去进度，而是为下一轮寻找留出自然节奏。',
-        detail: '',
-        steps: guidanceSteps(window.view.used),
-        resume: `预计约 ${wait}自动继续`,
-      };
+      if (!hasBrowseRestSignal(s, window, true)) continue;
+      const guidance = intervalGuidance(s, window, key, nowMs);
+      if (guidance) return guidance;
+    }
+
+    if (s.session === 'resting') {
+      const sessionWindow = guidanceWindow(s, 'session', nowMs);
+      if (hasBrowseRestSignal(s, sessionWindow, false)) {
+        const guidance = intervalGuidance(s, sessionWindow, 'session', nowMs);
+        if (guidance) return guidance;
+      }
     }
     return null;
   }

@@ -223,7 +223,45 @@ test('运行中 + 事件过期 + 阶段计划完成 → 说明自然间隔的成
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /浏览与互动/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /38 条首页内容已观察/);
     assert.match($(w, '#runtime-guidance-resume').textContent ?? '', /36 分钟后自动继续/);
+    assert.equal($(w, '#runtime-guidance-note').textContent, '本小时进展已记录');
     assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-monitoring/);
+  } finally {
+    w.Date.now = originalNow;
+  }
+});
+
+test('本轮等待缺少浏览配额字段时仍渲染自然间隔进度卡', async () => {
+  const now = 1730000000000;
+  const stale = new Date(now - 21_000).toISOString();
+  const { w, pushStatus } = await boot();
+  const originalNow = w.Date.now;
+  w.Date.now = () => now;
+  try {
+    pushStatus(makeStatus({
+      session: 'resting',
+      presence: { text: '这一轮已经完成，稍作等待后会自动继续', at: stale },
+      dailyUsage: {
+        asOf: now,
+        totals: { view: 12, collect: 2 },
+        windows: {
+          session: {
+            active: true,
+            releaseAt: now + 8 * 60_000,
+            totals: { view: 12, collect: 2 },
+          },
+        },
+      },
+    }));
+    assert.equal(hidden($(w, '.presence')), true, '完整进度卡出现时隐藏旧的简短状态行');
+    assert.equal(hidden($(w, '#runtime-guidance')), false);
+    assert.equal($(w, '#runtime-guidance').dataset.mode, 'session');
+    assert.equal($(w, '#runtime-guidance-title').textContent, '先整理一下刚才发现的方向。');
+    assert.match($(w, '#runtime-guidance-value').textContent ?? '', /自然节奏/);
+    assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /2 条灵感已记录/);
+    assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /让账号信号更清晰/);
+    assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /推荐内容更聚焦/);
+    assert.equal($(w, '#runtime-guidance-resume').textContent, '约 8 分钟后自动继续');
+    assert.equal($(w, '#runtime-guidance-note').textContent, '本轮进展已记录');
   } finally {
     w.Date.now = originalNow;
   }
