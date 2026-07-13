@@ -22,6 +22,7 @@ export interface EdgeTaskCoordinatorOptions {
 interface QueuedAcquire {
   payload: EdgeTaskAcquirePayload;
   order: number;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 interface ActiveLease {
@@ -39,6 +40,8 @@ const PRIORITY: Record<EdgeTaskAcquirePayload['priority'], number> = {
 
 const DEFAULT_MAX_ABSOLUTE_LEASE_MS = 30 * 60_000;
 const MIN_LEASE_MS = 1_000;
+const DEFAULT_ACQUIRE_TIMEOUT_MS = 45_000;
+const MIN_ACQUIRE_TIMEOUT_MS = 1;
 
 /**
  * 同一 edge/CDP 的页面写执行权事实源。
@@ -85,9 +88,11 @@ export class EdgeTaskCoordinator {
       this.onReleased({ taskId: payload.taskId, reason: 'duplicate' });
       return;
     }
-    this.queue.push({ payload: this.normalise(payload), order: this.order++ });
+    const queued: QueuedAcquire = { payload: this.normalise(payload), order: this.order++ };
+    this.armAcquireExpiry(queued);
+    this.queue.push(queued);
     this.browseBlocked = true;
-    this.logger(`[task] queued taskId=${payload.taskId} kind=${payload.kind} priority=${payload.priority}`);
+    this.logger(`[task] queued taskId=${payload.taskId} kind=${payload.kind} priority=${payload.priority} acquireTimeoutMs=${queued.payload.acquireTimeoutMs}`);
     void this.drain();
   }
 
@@ -99,7 +104,8 @@ export class EdgeTaskCoordinator {
     }
     const queued = this.queue.findIndex((entry) => entry.payload.taskId === taskId);
     if (queued >= 0) {
-      this.queue.splice(queued, 1);
+      const [entry] = this.queue.splice(queued, 1);
+      if (entry) this.clearAcquireExpiry(entry);
       this.rememberTerminal(taskId, 'released');
       this.onReleased({ taskId, reason: 'released' });
       void this.drain();
@@ -134,6 +140,7 @@ export class EdgeTaskCoordinator {
     if (this.active?.timer) clearTimeout(this.active.timer);
     const activeId = this.active?.payload.taskId;
     this.active = undefined;
+    for (const queued of this.queue) this.clearAcquireExpiry(queued);
     this.queue = [];
     this.quiescing = false;
     this.logger(`[task] reset reason=${reason}${activeId ? ` active=${activeId}` : ''}`);
@@ -142,7 +149,14 @@ export class EdgeTaskCoordinator {
 
   private normalise(payload: EdgeTaskAcquirePayload): EdgeTaskAcquirePayload {
     const leaseMs = Number.isFinite(payload.leaseMs) ? Math.max(MIN_LEASE_MS, payload.leaseMs) : MIN_LEASE_MS;
-    return { ...payload, leaseMs: Math.min(leaseMs, this.maxAbsoluteLeaseMs) };
+    const requestedAcquireTimeoutMs = Number.isFinite(payload.acquireTimeoutMs)
+      ? payload.acquireTimeoutMs!
+      : DEFAULT_ACQUIRE_TIMEOUT_MS;
+    const acquireTimeoutMs = Math.max(
+      MIN_ACQUIRE_TIMEOUT_MS,
+      Math.min(requestedAcquireTimeoutMs, this.maxAbsoluteLeaseMs),
+    );
+    return { ...payload, leaseMs: Math.min(leaseMs, this.maxAbsoluteLeaseMs), acquireTimeoutMs };
   }
 
   private pickNext(): QueuedAcquire | undefined {
@@ -154,7 +168,29 @@ export class EdgeTaskCoordinator {
       const priorityDelta = PRIORITY[current.payload.priority] - PRIORITY[selected.payload.priority];
       if (priorityDelta > 0 || (priorityDelta === 0 && current.order < selected.order)) best = i;
     }
-    return this.queue.splice(best, 1)[0];
+    const [next] = this.queue.splice(best, 1);
+    if (next) this.clearAcquireExpiry(next);
+    return next;
+  }
+
+  private armAcquireExpiry(queued: QueuedAcquire): void {
+    const delay = queued.payload.acquireTimeoutMs ?? DEFAULT_ACQUIRE_TIMEOUT_MS;
+    queued.timer = setTimeout(() => {
+      const index = this.queue.indexOf(queued);
+      if (index < 0) return;
+      this.queue.splice(index, 1);
+      this.rememberTerminal(queued.payload.taskId, 'expired');
+      this.onReleased({ taskId: queued.payload.taskId, reason: 'expired' });
+      this.logger(`[task] acquire expired taskId=${queued.payload.taskId}`);
+      void this.drain();
+    }, delay);
+    queued.timer.unref?.();
+  }
+
+  private clearAcquireExpiry(queued: QueuedAcquire): void {
+    if (!queued.timer) return;
+    clearTimeout(queued.timer);
+    queued.timer = undefined;
   }
 
   private async drain(): Promise<void> {

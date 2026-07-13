@@ -88,6 +88,32 @@ describe('EdgeTaskCoordinator', () => {
     assert.equal(coordinator.canExecute(), true);
   });
 
+  it('quiesce 未在 acquire 等待期内收敛时废弃排队任务，不授予无主租约', async () => {
+    const gate = deferred<number>();
+    const acquired: EdgeTaskAcquiredPayload[] = [];
+    const released: EdgeTaskReleasedPayload[] = [];
+    let resumed = 0;
+    const coordinator = new EdgeTaskCoordinator({
+      browse: {
+        quiesceForTask: async () => gate.promise,
+        resumeAfterTask: async () => { resumed++; },
+      },
+      onAcquired: (payload) => acquired.push(payload),
+      onReleased: (payload) => released.push(payload),
+    });
+
+    coordinator.acquire({ taskId: 'stale-acquire', kind: 'comment_prepare', priority: 'automatic', leaseMs: 60_000, acquireTimeoutMs: 5 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(acquired, []);
+    assert.deepEqual(released, [{ taskId: 'stale-acquire', reason: 'expired' }]);
+
+    gate.resolve(0);
+    await tick();
+    assert.deepEqual(acquired, [], 'quiesce 迟到也不得重新授予已过期任务');
+    assert.equal(resumed, 1);
+    assert.equal(coordinator.canExecute(), true);
+  });
+
   it('两个发布任务整段串行，原子命令绝不 A/B 交错', async () => {
     const atoms: string[] = [];
     let coordinator!: EdgeTaskCoordinator;
