@@ -484,6 +484,20 @@
           </div>
         </div>
 
+        <!-- 只由主进程对已打包 OL macOS 应用开放；运行时云端选择不会决定更新供应链。 -->
+        <div id="ol-update-card" class="set-card hidden">
+          <div class="set-card-head">
+            <div class="set-card-title">
+              <span>软件更新</span>
+              <span class="set-card-sub">检查是否有可用的新版本；下载和重启仍需你后续确认</span>
+            </div>
+          </div>
+          <div class="parking-actions">
+            <button id="ol-update-check" class="secondary small" type="button">检查更新</button>
+            <span id="ol-update-msg" class="parking-hint"></span>
+          </div>
+        </div>
+
         <!-- 浏览器引擎：默认内置 AdsPower 指纹浏览器；开关切到本机 Chrome。AdsPower API 凭据收在此卡高级折叠。 -->
         <div class="set-card">
           <div class="set-card-head">

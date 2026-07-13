@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { normalizeOlUpdateConfig, createAutoUpdateService, UPDATE_CHECK_INTERVAL_MS } = require('../../src/electron/auto-update.cjs');
 
-function fakeUpdater() {
+function fakeUpdater(isUpdateAvailable = false) {
   const listeners = new Map<string, Array<(...args: any[]) => void>>();
   return {
     listeners,
@@ -22,7 +22,7 @@ function fakeUpdater() {
       for (const listener of listeners.get(event) || []) listener(...args);
     },
     setFeedURL(feed: unknown) { this.feed = feed; },
-    async checkForUpdates() { this.checks += 1; return { updateInfo: { version: '9.9.9' } }; },
+    async checkForUpdates() { this.checks += 1; return { isUpdateAvailable, updateInfo: { version: '9.9.9' } }; },
     async downloadUpdate() { this.downloads += 1; return ['downloaded']; },
     quitAndInstall() { this.installs += 1; },
   };
@@ -96,4 +96,17 @@ test('errors remain observable and installation occurs only by explicit call', a
   assert.equal(updater.installs, 0);
   assert.equal(service.quitAndInstall(), true);
   assert.equal(updater.installs, 1);
+});
+
+test('a user-triggered check exposes availability without starting a download', async () => {
+  const updater = fakeUpdater(true);
+  const service = createAutoUpdateService({
+    autoUpdater: updater,
+    config: { isPackaged: true, platform: 'darwin', channel: 'ol', url: 'https://updates.example.com/ol/' },
+  });
+
+  const result = await service.checkForUpdates();
+  assert.equal(result?.isUpdateAvailable, true);
+  assert.equal(updater.checks, 1);
+  assert.equal(updater.downloads, 0, 'checking manually must not bypass the explicit download confirmation');
 });

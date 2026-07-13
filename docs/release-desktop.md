@@ -64,6 +64,8 @@ npm run electron:build:win
 
 > 此步骤只适用于 `cloud_default_env=ol` 的 macOS 正式包。普通下载页仍然要继续上架两个 dmg，供首次安装和无法自动更新的客户端使用；**GitHub Release 只是 CI 产物中转，已安装客户端不会从 GitHub 拉更新。**
 
+> 已安装的受支持客户端可在「设置 → 软件更新 → 检查更新」主动检查；托盘菜单也提供“检查更新”。两者只检查，不会绕过“下载更新”和“停止并更新”的用户确认。
+
 - [ ] 触发 CI 时确认 `update_url` 是 OL 的固定 HTTPS 静态目录（默认 `https://aidcp.oss-cn-beijing.aliyuncs.com/updates/ol/stable`），并保持 `cloud_default_env=ol`。不得把用户运行时选择的 dev/custom 云端地址当作更新源。
 - [ ] CI 通过后，在中控仓 macOS 发版机运行只读预检（不写 OSS）：
       ```bash

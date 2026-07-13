@@ -1362,6 +1362,32 @@ function initializeOlAutoUpdate() {
   return autoUpdateService || null;
 }
 
+function olUpdateManualStatus() {
+  return {
+    enabled: Boolean(autoUpdateService && autoUpdateService.enabled),
+    currentVersion: app.getVersion(),
+  };
+}
+
+// 手动入口复用同一更新服务：不绕过 OL 打包闸、不改变六小时的后台检查频率，也绝不触发下载。
+async function checkOlUpdateManually() {
+  if (!autoUpdateService || !autoUpdateService.enabled) {
+    return { ok: false, reason: 'unavailable', ...olUpdateManualStatus() };
+  }
+  const result = await autoUpdateService.checkForUpdates();
+  if (!result) {
+    return { ok: false, reason: 'busy_or_failed', ...olUpdateManualStatus() };
+  }
+  const version = updateVersionOf(result.updateInfo);
+  if (result.isUpdateAvailable) {
+    appendEdgeLog('updater', `用户手动检查到 OL 更新 ${version}`, false);
+    return { ok: true, status: 'update_available', version, ...olUpdateManualStatus() };
+  }
+  appendEdgeLog('updater', `用户手动检查更新：当前版本 ${app.getVersion()} 已是最新`, false);
+  surfaceNotification('AIDCP Edge 已是最新版本', `当前版本 ${app.getVersion()} 已是最新，无需下载。`);
+  return { ok: true, status: 'up_to_date', version, ...olUpdateManualStatus() };
+}
+
 const BROWSER_PERMISSION_LABELS = {
   geolocation: '地理位置',
   media: '摄像头/麦克风',
@@ -1453,6 +1479,9 @@ function createTray() {
     { label: '重置浏览器位置', click: () => { void sendBrowserParkingCommand(selectedHandle(), 'browser.park'); } },
     { type: 'separator' },
   ];
+  if (autoUpdateService && autoUpdateService.enabled) {
+    trayTemplate.push({ label: '检查更新', click: () => { void checkOlUpdateManually(); } }, { type: 'separator' });
+  }
   // 对外客户登录态下提供「退出登录」（change edge-client-customer-auth）：停所有环境、回登录门,不改主界面。
   if (clientAuthEnabled()) {
     trayTemplate.push({ label: '退出登录', click: () => { if (clientSession && clientSession.token) void clientAuthFetch('/logout', { method: 'POST', token: clientSession.token }); onSessionInvalid(); } });
@@ -2927,6 +2956,8 @@ ipcMain.handle('auth:relogin', (_event, envId) => {
   return statusOf(handle);
 });
 ipcMain.handle('settings:get', () => ({ ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL, cloudEnv: cloudSelectionView(), appVersion: app.getVersion() }));
+ipcMain.handle('update:status', () => olUpdateManualStatus());
+ipcMain.handle('update:check', () => checkOlUpdateManually());
 
 // 对外客户鉴权（change edge-client-customer-auth）：登录窗口调 login；主进程做 HTTP，成功后拉可见环境 + 建主窗 + 关登录窗。
 ipcMain.handle('client-auth:login', async (_event, creds) => {

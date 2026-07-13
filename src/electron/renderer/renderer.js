@@ -197,6 +197,9 @@ const settingsUi = {
   browserColdStandby: document.querySelector('#browser-cold-standby'),
   applyRestart: document.querySelector('#apply-restart'),
   msg: document.querySelector('#settings-msg'),
+  olUpdateCard: document.querySelector('#ol-update-card'),
+  olUpdateCheck: document.querySelector('#ol-update-check'),
+  olUpdateMsg: document.querySelector('#ol-update-msg'),
   // 云端环境卡（change edge-cloud-env-selector）
   cloudEnvButtons: Array.from(document.querySelectorAll('.cloud-env-btn')),
   cloudEnvCustomField: document.querySelector('#cloud-env-custom-field'),
@@ -1056,6 +1059,40 @@ function closeDrawer() {
 fields.gear.addEventListener('click', openDrawer);
 fields.drawerClose.addEventListener('click', closeDrawer);
 fields.drawerMask.addEventListener('click', closeDrawer);
+
+async function loadOlUpdateManualControl() {
+  if (!settingsUi.olUpdateCard || typeof window.aidcpEdge.updateStatus !== 'function') return;
+  try {
+    const status = await window.aidcpEdge.updateStatus();
+    const enabled = Boolean(status && status.enabled);
+    settingsUi.olUpdateCard.classList.toggle('hidden', !enabled);
+    if (enabled && settingsUi.olUpdateMsg) settingsUi.olUpdateMsg.textContent = `当前版本 ${status.currentVersion || '—'}`;
+  } catch {
+    settingsUi.olUpdateCard.classList.add('hidden');
+  }
+}
+
+settingsUi.olUpdateCheck?.addEventListener('click', async () => {
+  if (typeof window.aidcpEdge.checkForUpdate !== 'function') return;
+  settingsUi.olUpdateCheck.disabled = true;
+  if (settingsUi.olUpdateMsg) settingsUi.olUpdateMsg.textContent = '正在检查更新…';
+  try {
+    const result = await window.aidcpEdge.checkForUpdate();
+    if (result && result.ok && result.status === 'up_to_date') {
+      if (settingsUi.olUpdateMsg) settingsUi.olUpdateMsg.textContent = `当前版本 ${result.currentVersion} 已是最新`;
+    } else if (result && result.ok && result.status === 'update_available') {
+      if (settingsUi.olUpdateMsg) settingsUi.olUpdateMsg.textContent = `发现新版本 ${result.version}，请在提示中选择是否下载`;
+    } else if (settingsUi.olUpdateMsg) {
+      settingsUi.olUpdateMsg.textContent = result && result.reason === 'unavailable'
+        ? '此客户端不支持 OL 自动更新'
+        : '检查未完成，请查看系统提示后稍后重试';
+    }
+  } catch {
+    if (settingsUi.olUpdateMsg) settingsUi.olUpdateMsg.textContent = '检查失败，请稍后重试';
+  } finally {
+    settingsUi.olUpdateCheck.disabled = false;
+  }
+});
 
 // ─── 添加/创建环境面板（左栏「＋」拉起）───
 function openEnvAddPanel(tab) {
@@ -3146,6 +3183,7 @@ window.aidcpEdge.getSettings().then((s) => {
   // 面板加载时若为 AdsPower 模式即探一次并自动列环境（真实事件，低频；非「打开设置面板」）。
   if (selectedProvider() === 'adspower') probeAds();
 });
+void loadOlUpdateManualControl();
 window.aidcpEdge.getStatus().then(routeStatus);
 if (typeof window.aidcpEdge.fleetGet === 'function') {
   window.aidcpEdge.fleetGet().then(applyFleetSnapshot).catch(() => undefined);

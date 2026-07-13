@@ -9,6 +9,10 @@ const root = join(here, '../..');
 const buildScript = readFileSync(join(root, 'scripts/build-desktop-macos.sh'), 'utf8');
 const workflow = readFileSync(join(root, '.github/workflows/build-desktop.yml'), 'utf8');
 const verifier = readFileSync(join(root, 'scripts/verify-ol-auto-update-artifacts.mjs'), 'utf8');
+const main = readFileSync(join(root, 'src/electron/main.cjs'), 'utf8');
+const preload = readFileSync(join(root, 'src/electron/preload.cjs'), 'utf8');
+const renderer = readFileSync(join(root, 'src/electron/renderer/renderer.js'), 'utf8');
+const html = readFileSync(join(root, 'src/electron/renderer/index.html'), 'utf8');
 
 test('only OL macOS build bakes a generic HTTPS update source', () => {
   assert.match(buildScript, /AIDCP_CLOUD_DEFAULT_ENV:-\}" = "ol"/, 'OL guard is required');
@@ -26,4 +30,15 @@ test('CI delivers every macOS update artifact and build runs the fail-closed ver
   assert.match(verifier, /app-update\.yml/, 'verifier must inspect packaged updater config');
   assert.match(verifier, /aidcpUpdateChannel/, 'verifier must inspect packaged OL channel');
   assert.match(verifier, /latest-mac\.yml/, 'verifier must inspect generated update manifest');
+});
+
+test('only eligible OL clients expose a user-triggered update check without auto-downloading', () => {
+  assert.match(main, /async function checkOlUpdateManually\(\)/, 'main process owns the manual check gate');
+  assert.match(main, /result\.isUpdateAvailable/, 'manual result must distinguish an available update');
+  assert.match(main, /label: '检查更新'/, 'eligible tray menu must expose manual check');
+  assert.match(main, /ipcMain\.handle\('update:check'/, 'renderer must not access updater directly');
+  assert.match(preload, /checkForUpdate: \(\) => ipcRenderer\.invoke\('update:check'\)/, 'preload exposes a narrow manual-check IPC');
+  assert.match(html, /id="ol-update-check"/, 'settings drawer must contain the visible manual check button');
+  assert.match(renderer, /loadOlUpdateManualControl/, 'unsupported clients must keep the settings card hidden');
+  assert.match(renderer, /正在检查更新/, 'manual click must show progress rather than silently doing nothing');
 });

@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   relogin: (envId) => ipcRenderer.invoke('auth:relogin', envId),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (patch) => ipcRenderer.invoke('settings:save', patch),
+  updateStatus: () => ipcRenderer.invoke('update:status'),
+  checkForUpdate: () => ipcRenderer.invoke('update:check'),
   openAdsDownload: () => ipcRenderer.invoke('browser:openAdsDownload'),
   showDrivenBrowser: (envId) => ipcRenderer.invoke('browser:showDriven', envId),
   resetBrowserParking: (envId) => ipcRenderer.invoke('browser:resetParking', envId),
