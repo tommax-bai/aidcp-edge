@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { JSDOM, type DOMWindow } from 'jsdom';
 
 // 陪伴式主界面冒烟（edge-companion-ui）：标题带健康合成 / 设置抽屉 / 在场感诚实态 /
-// 活动流 / 发布卡纯展示零按钮 —— 用真实 index.html + ui-logic.js + renderer.js 在 jsdom 里驱动。
+// 活动流 / 发布卡与稿件预览动作 —— 用真实 index.html + ui-logic.js + renderer.js 在 jsdom 里驱动。
 const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
@@ -65,7 +65,6 @@ async function boot(statusOver: Record<string, unknown> = {}, apiOver: Record<st
     restart: async () => makeStatus(),
     relogin: async () => makeStatus(),
     openAdsDownload: () => undefined,
-    openFeishu: async () => ({ ok: true }),
     adsStatus: async () => ({ ok: true }),
     adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'u1', serialNumber: '1', name: '甲', groupName: 'g', proxy: 'p' }] }),
     adsOpenCreate: () => ({ launched: true }),
@@ -228,8 +227,8 @@ test('活动流：事件进流、最新在上、空态隐藏', async () => {
   assert.match((rows[0] as HTMLElement).textContent ?? '', /秋日漫步/, '最新在上');
 });
 
-// ── 发布卡：纯展示零按钮 ──
-test('发布卡候审：可见、第三节点琥珀、卡内零按钮（审批只在飞书）', async () => {
+// ── 发布卡：卡片入口 + 预览内动作 ──
+test('发布卡候审：可见、第三节点琥珀，提示从稿件预览处理', async () => {
   const at = new Date(Date.now() - 3 * 60_000).toISOString();
   const { w } = await boot({ publish: { state: 'pending', title: '秋日城市漫步', at } });
   const card = $(w, '#pub-card');
@@ -239,11 +238,12 @@ test('发布卡候审：可见、第三节点琥珀、卡内零按钮（审批�
   assert.match($(w, '#pub-corner').textContent ?? '', /已等 3 分钟/);
   const steps = Array.from(card.querySelectorAll('.j-step'));
   assert.ok((steps[2] as HTMLElement).classList.contains('cur'));
-  assert.match($(w, '#pub-foot').textContent ?? '', /飞书/);
+  assert.match($(w, '#pub-foot').textContent ?? '', /稿件预览/);
   assert.ok(!($(w, '#pub-foot').textContent ?? '').includes('再次提醒'), '未收到再提醒事件绝不谎称');
 });
 
 test('洗稿稿件预览：发布卡显示查看入口，打开抽屉展示正文/话题/配图且无原稿字段', async () => {
+  const approvalCalls: unknown[] = [];
   const { w } = await boot({
     publish: { state: 'pending', title: '洗稿标题', code: '#89', at: new Date().toISOString() },
     publishPreview: {
@@ -257,8 +257,14 @@ test('洗稿稿件预览：发布卡显示查看入口，打开抽屉展示正�
       contentVersion: 0,
       updatedAt: Date.now(),
     },
+  }, {
+    publishApproval: async (_envId: unknown, payload: unknown) => {
+      approvalCalls.push(payload);
+      return { ok: true, state: 'approved' };
+    },
   });
   assert.equal(hidden($(w, '#pub-preview-link')), false);
+  assert.equal($(w, '#pub-preview-link').textContent, '查看稿件 ↗');
   $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
   assert.ok($(w, '#publish-preview-panel').classList.contains('open'));
   assert.equal($(w, '#publish-preview-kind').textContent, '洗稿稿件');
@@ -273,6 +279,16 @@ test('洗稿稿件预览：发布卡显示查看入口，打开抽屉展示正�
   assert.match($(w, '#publish-preview-content').textContent ?? '', /#生活方式/);
   assert.equal($(w, '#publish-preview-content img').getAttribute('src'), 'https://cdn.example.com/1.jpg');
   assert.doesNotMatch($(w, '#publish-preview-content').textContent ?? '', /原稿|作者|链接/);
+  assert.equal(hidden($(w, '#publish-preview-actions')), false);
+  assert.equal($(w, '#publish-preview-approve').textContent, '发布');
+  assert.equal($(w, '#publish-preview-cancel').textContent, '取消');
+  $(w, '#publish-preview-approve').dispatchEvent(new w.Event('click'));
+  await tick();
+  assert.equal(approvalCalls.length, 1);
+  assert.equal((approvalCalls[0] as { requestId: string }).requestId, 'publish-89');
+  assert.equal((approvalCalls[0] as { approved: boolean }).approved, true);
+  assert.equal((approvalCalls[0] as { contentVersion: number }).contentVersion, 0);
+  assert.equal(hidden($(w, '#publish-preview-actions')), true);
   $(w, '#publish-preview-close').dispatchEvent(new w.Event('click'));
   assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false);
 });
@@ -291,7 +307,7 @@ test('发布终态 → 折进活动流 + 卡片常驻转「上次发布」', asy
   assert.equal(hidden($(w, '#pub-card')), false, '卡片常驻不消失');
   assert.equal($(w, '#pub-head').textContent, '上次发布');
   assert.match($(w, '#pub-title').textContent ?? '', /秋日漫步/);
-  assert.equal(hidden($(w, '#pub-link')), false, '「打开飞书」纯导航，历史态也在');
+  assert.equal(w.document.querySelector('#pub-link'), null, '不再展示打开飞书入口');
   assert.match($(w, '#activity-stream').textContent ?? '', /已发布/);
   // 再推一次同状态：按签名去重，不重复记
   pushStatus(makeStatus({ publish: { state: 'published', title: '秋日漫步', at: new Date().toISOString() } }));
@@ -306,11 +322,11 @@ test('发布卡常驻：从未发布 → 空态幽灵旅程（同设计语言、
   assert.ok(card.classList.contains('empty'));
   assert.match($(w, '#pub-title').textContent ?? '', /还没有发布过/);
   assert.equal(card.querySelectorAll('button').length, 0, '空态同样零按钮');
-  assert.equal(hidden($(w, '#pub-link')), false, '空态也放蓝色「打开飞书」');
+  assert.equal(w.document.querySelector('#pub-link'), null, '空态也不展示打开飞书入口');
   assert.ok(card.querySelector('#pub-thumb'), '封面占位常在（空态为淡化默认形态）');
   assert.match($(w, '#pub-meta').textContent ?? '', /编号 —/, '编号默认形态');
   assert.ok($(w, '#pub-foot').querySelector('b'), '脚注关键词加粗');
-  assert.match($(w, '#pub-foot').textContent ?? '', /通过后才会发布/);
+  assert.match($(w, '#pub-foot').textContent ?? '', /确认后才会发布/);
   assert.ok(!($(w, '#pub-foot').textContent ?? '').includes('**'), '加粗标记不外露');
   const dots = Array.from(card.querySelectorAll('.j-step'));
   assert.ok(dots.every((el) => (el as HTMLElement).classList.contains('todo')), '幽灵旅程全 todo');

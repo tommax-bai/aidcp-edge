@@ -249,7 +249,7 @@ body { margin: 0; }
 }
 .loop-sep { color: #c3ccdb; font-size: 10px; }
 
-/* ═══ 发布等待卡（纯展示零按钮）═══ */
+/* ═══ 发布等待卡（稿件入口）═══ */
 .pub {
   background: var(--card);
   border: 1px solid var(--hair); border-radius: 13px;
@@ -307,8 +307,6 @@ body { margin: 0; }
   font-size: 12.5px; color: var(--accent); font-weight: 650; white-space: nowrap; cursor: pointer;
 }
 .pub-preview-link:hover { text-decoration: underline; }
-.pub-link { font-size: 12.5px; color: var(--feishu); font-weight: 600; white-space: nowrap; cursor: pointer; }
-.pub-link.plain { color: var(--faint); cursor: default; }
 
 /* 发布卡收展：主体折叠动画 + 收起薄条（同设计语言：白卡内一行、小封面记号 + 摘要 + 折角） */
 .pub-main { overflow: hidden; max-height: 400px; opacity: 1; transition: max-height 0.28s ease, opacity 0.2s ease; }
@@ -777,6 +775,21 @@ body { margin: 0; }
 .publish-preview-image.failed img { display: none; }
 .publish-preview-image.failed .publish-preview-image-fallback { display: flex; }
 .publish-preview-empty { color: var(--faint); font-size: 12.5px; }
+.publish-preview-actions {
+  position: sticky; bottom: 0; margin: 18px -20px -20px; padding: 14px 20px 20px;
+  border-top: 1px solid var(--hair); background: var(--card);
+}
+.publish-preview-action-hint { min-height: 18px; margin-bottom: 10px; color: var(--faint); font-size: 12px; }
+.publish-preview-action-buttons { display: flex; justify-content: flex-end; gap: 9px; }
+.publish-preview-button {
+  min-width: 86px; height: 34px; padding: 0 16px; border: 1px solid transparent; border-radius: 9px;
+  font-size: 13px; font-weight: 700; cursor: pointer;
+}
+.publish-preview-button:disabled { cursor: default; opacity: .55; }
+.publish-preview-button.secondary { border-color: #d9dfeb; background: #fff; color: #59677f; }
+.publish-preview-button.secondary:hover:not(:disabled) { background: #f6f8fc; }
+.publish-preview-button.primary { background: var(--accent); color: #fff; box-shadow: 0 4px 10px rgba(84, 106, 190, .18); }
+.publish-preview-button.primary:hover:not(:disabled) { filter: brightness(.97); }
 @media (prefers-reduced-motion: reduce) { .publish-preview-panel { transition: none; } }
 .drawer-head {
   display: flex; align-items: center; justify-content: space-between;

@@ -194,14 +194,14 @@ test('在场感：暂停 / 停止 / 需登录 → 静态诚实文案', () => {
 });
 
 // ── 发布卡状态机（只读投影）──
-test('发布卡：候审 → 第三节点琥珀、脚注指向飞书、绝无「已再提醒」', () => {
+test('发布卡：候审 → 第三节点琥珀、脚注指向稿件预览、绝无「已再提醒」', () => {
   const now = Date.now();
   const v = uiLogic.publishView({ state: 'pending', title: '秋日漫步', at: new Date(now - 3 * 60_000).toISOString() }, null, now);
   assert.equal(v.mode, 'flow');
   assert.deepEqual(v.stepStates, ['done', 'done', 'cur', 'todo']);
   assert.match(v.corner ?? '', /已等 3 分钟/);
   assert.equal(v.cornerHot, false);
-  assert.match(v.foot ?? '', /飞书/);
+  assert.match(v.foot ?? '', /稿件预览/);
   assert.ok(!(v.foot ?? '').includes('再次提醒'), '未收到再提醒事件绝不谎称已提醒');
 });
 
@@ -212,10 +212,10 @@ test('发布卡：等超 30 分钟 → 时长琥珀化，仍不谎称已提醒�
   assert.ok(!(v.foot ?? '').includes('再次提醒'));
 });
 
-test('发布卡：收到明确再提醒事件 → 才展示「已在飞书再次提醒」', () => {
+test('发布卡：收到明确再提醒事件 → 仍提示稿件待确认', () => {
   const now = Date.now();
   const v = uiLogic.publishView({ state: 'reminded', title: 't', at: new Date(now - 34 * 60_000).toISOString() }, null, now);
-  assert.match(v.foot ?? '', /再次提醒/);
+  assert.match(v.foot ?? '', /稿件仍待确认/);
 });
 
 test('发布卡：已通过 → 第四节点平静色 + 明示无需操作', () => {
@@ -233,13 +233,13 @@ test('发布卡：已发布 → 折进活动流 + 卡片转「上次发布」（
   assert.equal(pub.head, '上次发布');
   assert.match(pub.corner ?? '', /小时前/);
   assert.deepEqual(pub.stepStates, ['done', 'done', 'done', 'done']);
-  assert.equal(pub.showLink, true, '「打开飞书」纯导航，三态常驻');
+  assert.equal(pub.showLink, false, '卡片不再展示打开飞书入口');
 });
 
 test('发布卡：拒绝 → 折进活动流（不渲染成失败）+ 回落上次发布/空态', () => {
   const now = Date.now();
   const rej = uiLogic.publishView({ state: 'rejected', at: new Date(now).toISOString() }, { title: '旧文', at: new Date(now - 86_400_000).toISOString() }, now);
-  assert.match(rej.collapsed?.sentence ?? '', /暂不发布/);
+  assert.match(rej.collapsed?.sentence ?? '', /取消发布/);
   assert.ok(!(rej.collapsed?.sentence ?? '').includes('失败'), '拒绝不渲染成失败');
   assert.equal(rej.mode, 'last');
   assert.equal(rej.title, '旧文');
@@ -256,8 +256,8 @@ test('发布卡常驻：无进行中有历史 → last；两者皆无 → empty 
   assert.equal(empty.mode, 'empty');
   assert.deepEqual(empty.stepStates, ['todo', 'todo', 'todo', 'todo']);
   assert.match(empty.title ?? '', /还没有发布过/);
-  assert.equal(empty.showLink, true, '空态也放「打开飞书」');
-  assert.match(empty.foot ?? '', /\*\*「通过\/驳回」\*\*/, '只加粗「通过/驳回」');
+  assert.equal(empty.showLink, false, '空态也不展示打开飞书入口');
+  assert.match(empty.foot ?? '', /\*\*发布 \/ 取消\*\*/, '只加粗「发布 / 取消」');
   assert.ok(!(empty.foot ?? '').includes('**通过后才会发布**'), '其余不加粗');
 });
 

@@ -215,7 +215,7 @@
       return {
         ...base,
         mode: 'flow',
-        showLink: true,
+        showLink: false,
         head: 'AI 写好了一条新笔记',
         corner: waitedMin < 1 ? '刚刚发出' : `已等 ${waitedMin} 分钟`,
         cornerHot: hot,
@@ -223,16 +223,16 @@
         curCalm: false,
         // 红线：只有收到明确的「已再提醒」事件才这么说；单纯等得久绝不谎称已提醒。
         foot: state === 'reminded'
-          ? '已在飞书**再次提醒**你 · 不会重复打扰'
-          : '全文和**「通过 / 驳回」**按钮在飞书里，审批结果会自动同步到这里。',
+          ? '稿件仍待确认 · 可在稿件预览里**发布 / 取消**'
+          : '全文在稿件预览里，可直接**发布 / 取消**，审批结果会自动同步到这里。',
       };
     }
     if (state === 'approved') {
       return {
         ...base,
         mode: 'flow',
-        showLink: true,
-        head: '你已在飞书通过',
+        showLink: false,
+        head: '已确认发布',
         corner: '将择时发布',
         cornerHot: false,
         stepStates: ['done', 'done', 'done', 'cur'],
@@ -248,7 +248,7 @@
       collapsed = { type: 'published', sentence: title ? `笔记「${title}」已发布` : '一条笔记已发布' };
       last = { title, at: publish.at }; // 刚发布的就是最近一次（主进程同时落盘持久化）
     } else if (state === 'rejected') {
-      collapsed = { type: 'rejected', sentence: '你在飞书选择了暂不发布 · 内容已留档' };
+      collapsed = { type: 'rejected', sentence: '你选择了取消发布 · 内容已留档' };
     } else if (state === 'failed') {
       collapsed = { type: 'failed', sentence: title ? `笔记「${title}」发布未成功，已如实记录` : '发布未成功，已如实记录' };
     }
@@ -259,7 +259,7 @@
         ...base,
         mode: 'last',
         collapsed,
-        showLink: true,
+        showLink: false,
         head: '上次发布',
         corner: Number.isFinite(lastAt) ? relTime(lastAt, nowMs) : '',
         cornerHot: false,
@@ -273,14 +273,14 @@
       ...base,
       mode: 'empty',
       collapsed,
-      showLink: true,
+      showLink: false,
       head: '发布过的 AI 写好的笔记',
       corner: '',
       cornerHot: false,
       title: '还没有发布过内容',
       stepStates: ['todo', 'todo', 'todo', 'todo'],
       curCalm: false,
-      foot: 'AI 写好笔记后会先发到飞书等你**「通过/驳回」**，通过后才会发布。',
+      foot: 'AI 写好笔记后会先在这里等你**发布 / 取消**，确认后才会发布。',
     };
   }
 
