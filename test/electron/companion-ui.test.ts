@@ -263,6 +263,12 @@ test('洗稿稿件预览：发布卡显示查看入口，打开抽屉展示正�
   assert.ok($(w, '#publish-preview-panel').classList.contains('open'));
   assert.equal($(w, '#publish-preview-kind').textContent, '洗稿稿件');
   assert.equal($(w, '#publish-preview-title').textContent, '洗稿标题');
+  const previewContent = $(w, '#publish-preview-content');
+  const gallery = previewContent.querySelector('.publish-preview-gallery-section') as HTMLElement;
+  const noteTitle = $(w, '#publish-preview-title');
+  const body = previewContent.querySelector('.publish-preview-body') as HTMLElement;
+  assert.ok((gallery.compareDocumentPosition(noteTitle) & w.Node.DOCUMENT_POSITION_FOLLOWING) !== 0, '配图应位于标题之前');
+  assert.ok((noteTitle.compareDocumentPosition(body) & w.Node.DOCUMENT_POSITION_FOLLOWING) !== 0, '标题应位于正文之前');
   assert.match($(w, '#publish-preview-content').textContent ?? '', /第一段正文/);
   assert.match($(w, '#publish-preview-content').textContent ?? '', /#生活方式/);
   assert.equal($(w, '#publish-preview-content img').getAttribute('src'), 'https://cdn.example.com/1.jpg');

@@ -92,7 +92,7 @@ const fields = {
   publishPreviewPanel: document.querySelector('#publish-preview-panel'),
   publishPreviewClose: document.querySelector('#publish-preview-close'),
   publishPreviewKind: document.querySelector('#publish-preview-kind'),
-  publishPreviewTitle: document.querySelector('#publish-preview-title'),
+  publishPreviewTitle: null,
   publishPreviewContent: document.querySelector('#publish-preview-content'),
   drawer: document.querySelector('#drawer'),
   drawerMask: document.querySelector('#drawer-mask'),
@@ -766,8 +766,40 @@ function renderPublishPreviewContent(status) {
   const preview = status && status.publishPreview;
   if (!preview || !fields.publishPreviewContent) return;
   fields.publishPreviewKind.textContent = preview.kind === 'rewrite' ? '洗稿稿件' : 'AI 稿件';
-  fields.publishPreviewTitle.textContent = preview.title || '未命名稿件';
   fields.publishPreviewContent.replaceChildren();
+
+  // 按小红书稿件阅读顺序：先看配图，再看标题、状态、正文和话题。
+  const images = Array.isArray(preview.images) ? preview.images : [];
+  const imagesSection = document.createElement('section');
+  imagesSection.className = 'publish-preview-section publish-preview-gallery-section';
+  appendPreviewText(imagesSection, `配图（${images.length} 张）`, 'publish-preview-label publish-preview-gallery-label');
+  if (images.length === 0) {
+    appendPreviewText(imagesSection, '暂无可用配图', 'publish-preview-empty');
+  } else {
+    const imageWrap = document.createElement('div');
+    imageWrap.className = 'publish-preview-images';
+    imageWrap.dataset.count = String(images.length);
+    images.forEach((url, index) => {
+      const item = document.createElement('div');
+      item.className = 'publish-preview-image';
+      const img = document.createElement('img');
+      img.src = String(url);
+      img.alt = `配图 ${index + 1}`;
+      img.addEventListener('error', () => item.classList.add('failed'), { once: true });
+      item.appendChild(img);
+      appendPreviewText(item, '图片暂不可用', 'publish-preview-image-fallback');
+      imageWrap.appendChild(item);
+    });
+    imagesSection.appendChild(imageWrap);
+  }
+  fields.publishPreviewContent.appendChild(imagesSection);
+
+  const noteTitle = document.createElement('h2');
+  noteTitle.id = 'publish-preview-title';
+  noteTitle.className = 'publish-preview-note-title';
+  noteTitle.textContent = preview.title || '未命名稿件';
+  fields.publishPreviewTitle = noteTitle;
+  fields.publishPreviewContent.appendChild(noteTitle);
 
   const state = status.publish && status.publish.state ? status.publish.state : 'pending';
   const statusRow = document.createElement('div');
@@ -810,30 +842,6 @@ function renderPublishPreviewContent(status) {
     topicsSection.appendChild(topicWrap);
   }
   fields.publishPreviewContent.appendChild(topicsSection);
-
-  const imagesSection = document.createElement('section');
-  imagesSection.className = 'publish-preview-section';
-  appendPreviewText(imagesSection, `配图（${Array.isArray(preview.images) ? preview.images.length : 0} 张）`, 'publish-preview-label');
-  const images = Array.isArray(preview.images) ? preview.images : [];
-  if (images.length === 0) {
-    appendPreviewText(imagesSection, '暂无可用配图', 'publish-preview-empty');
-  } else {
-    const imageWrap = document.createElement('div');
-    imageWrap.className = 'publish-preview-images';
-    images.forEach((url, index) => {
-      const item = document.createElement('div');
-      item.className = 'publish-preview-image';
-      const img = document.createElement('img');
-      img.src = String(url);
-      img.alt = `配图 ${index + 1}`;
-      img.addEventListener('error', () => item.classList.add('failed'), { once: true });
-      item.appendChild(img);
-      appendPreviewText(item, '图片暂不可用', 'publish-preview-image-fallback');
-      imageWrap.appendChild(item);
-    });
-    imagesSection.appendChild(imageWrap);
-  }
-  fields.publishPreviewContent.appendChild(imagesSection);
 
   const audit = preview.imageReferenceAudit;
   if (audit && audit.requestedCount > 0) {
