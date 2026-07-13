@@ -57,6 +57,34 @@ const DEFAULTS: Required<FacebookPostReaderOptions> = {
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Facebook 某些帖子路由在 CDP 的 Page.navigate 上可能迟迟不回 ACK，但页面仍能接受脚本导航。
+ * 只在主导航失败后尝试一次 location.assign；兜底也失败时继续向上返回原始错误，保持诚实失败。
+ */
+export async function navigateFacebookPost(
+  cdp: BrowseCdp,
+  permalink: string,
+  logger: (message: string) => void = () => {},
+): Promise<'page.navigate' | 'runtime.assign'> {
+  try {
+    await cdp.send('Page.navigate', { url: permalink });
+    return 'page.navigate';
+  } catch (primaryError) {
+    logger(`[fb-detail] Page.navigate 失败，尝试脚本导航兜底：${(primaryError as Error).message}`);
+    try {
+      await cdp.send('Runtime.evaluate', {
+        expression: `void window.location.assign(${JSON.stringify(permalink)})`,
+        returnByValue: true,
+      });
+      logger('[fb-detail] 脚本导航兜底已派发');
+      return 'runtime.assign';
+    } catch (fallbackError) {
+      logger(`[fb-detail] 脚本导航兜底失败：${(fallbackError as Error).message}`);
+      throw primaryError;
+    }
+  }
+}
+
 interface RawPostDetail {
   body: string | null;
   comments: string[];
@@ -96,7 +124,7 @@ export class FacebookPostReader {
       isVideo: false,
     });
     try {
-      await this.cdp.send('Page.navigate', { url: permalink });
+      await navigateFacebookPost(this.cdp, permalink, this.log);
     } catch (err) {
       this.log(`[fb-detail] 开帖导航失败：${(err as Error).message}`);
       return empty('nav_error');
