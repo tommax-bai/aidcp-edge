@@ -60,6 +60,8 @@ function publishPresence(publish) {
       return `${subject}还在等确认，飞书已再次提醒…`;
     case 'approved':
       return `${subject}已通过，正在择时发布…`;
+    case 'submitted':
+      return `${subject}已提交，待链接确认…`;
     case 'published':
       return `${subject}已发布，准备回到浏览…`;
     case 'rejected':

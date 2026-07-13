@@ -28,7 +28,7 @@ function parseLine(line: string): Record<string, any> {
   return JSON.parse(line.slice(UI_EVENT_PREFIX.length + 1));
 }
 
-test('ui-event-lines: submit_publish 成功 → published 行，带 fill_field 截获的标题与编号', () => {
+test('ui-event-lines: submit 成功先报 submitted，同页 postId 成功才报 published', () => {
   const t = new PublishUiEventTracker();
   const fill = cmd('fill_field', 3, { fieldType: 'title', value: '春日手作分享' });
   t.observe(fill);
@@ -36,13 +36,18 @@ test('ui-event-lines: submit_publish 成功 → published 行，带 fill_field �
 
   const submit = cmd('submit_publish', 8);
   t.observe(submit);
-  const line = t.onResult(submit, res(submit, true));
-  assert.ok(line, 'submit 成功必须产 published 行');
-  const evt = parseLine(line!);
+  const submitted = t.onResult(submit, res(submit, true));
+  assert.ok(submitted, '页面接受提交必须产 submitted 行');
+  const evt = parseLine(submitted!);
   assert.equal(evt.kind, 'publish');
-  assert.equal(evt.publish?.state, 'published');
+  assert.equal(evt.publish?.state, 'submitted');
   assert.equal(evt.publish?.title, '春日手作分享');
   assert.equal(evt.publish?.code, publishCode(83));
+
+  const capture = cmd('capture_postId', 9);
+  const published = t.onResult(capture, res(capture, true));
+  assert.ok(published, '同页取得 postId 才产 published 行');
+  assert.equal(parseLine(published!).publish?.state, 'published');
 });
 
 test('ui-event-lines: 发布指令执行期间产出写笔记 loopStage presence', () => {
@@ -63,7 +68,7 @@ test('ui-event-lines: 单条指令失败不在边缘抢判 failed（云端序列
   assert.equal(t.onResult(submit, res(submit, false, 'post_validation_failed')), null, 'submit 失败也由云端终判推 failed');
 });
 
-test('ui-event-lines: 在途回收 → failed 行；终态只发一次、published 后不改口', () => {
+test('ui-event-lines: 在途回收 → failed 行；已 submitted 不倒写失败，published 后不改口', () => {
   const t = new PublishUiEventTracker();
   const fill = cmd('fill_field', 3, { fieldType: 'title', value: '标题' });
   t.observe(fill);
@@ -76,20 +81,25 @@ test('ui-event-lines: 在途回收 → failed 行；终态只发一次、publish
 
   const t2 = new PublishUiEventTracker();
   const submit = cmd('submit_publish', 8, {}, 99);
-  const published = t2.onResult(submit, res(submit, true));
-  assert.ok(published);
+  const submitted = t2.onResult(submit, res(submit, true));
+  assert.ok(submitted);
   const capture = cmd('capture_postId', 9, {}, 99);
-  assert.equal(t2.onRecycled(capture), null, 'published 后同 recordId 不再改口 failed');
+  assert.equal(t2.onRecycled(capture), null, 'submitted 后同 recordId 不倒写 failed');
 });
 
-test('ui-event-lines: 标题未知时 published 行不带 title（宁缺毋假）', () => {
+test('ui-event-lines: 标题未知时 submitted/published 行都不带 title（宁缺毋假）', () => {
   const t = new PublishUiEventTracker();
   const submit = cmd('submit_publish', 8);
-  const line = t.onResult(submit, res(submit, true));
-  const evt = parseLine(line!);
-  assert.equal(evt.publish?.state, 'published');
+  const submitted = t.onResult(submit, res(submit, true));
+  const evt = parseLine(submitted!);
+  assert.equal(evt.publish?.state, 'submitted');
   assert.equal('title' in (evt.publish ?? {}), false);
-  assert.equal(evt.publish?.code, '#83');
+  const capture = cmd('capture_postId', 9);
+  const line = t.onResult(capture, res(capture, true));
+  const published = parseLine(line!);
+  assert.equal(published.publish?.state, 'published');
+  assert.equal('title' in (published.publish ?? {}), false);
+  assert.equal(published.publish?.code, '#83');
 });
 
 test('ui-event-lines: uiSnapshotToLines 全量快照 → identity + lastPublish 两行', () => {

@@ -753,6 +753,7 @@ const PUBLISH_PREVIEW_STATES = {
   pending: '待确认',
   reminded: '待确认',
   approved: '已通过，等待发布',
+  submitted: '已提交，待链接确认',
   published: '已发布',
   rejected: '已驳回',
   failed: '发布失败',

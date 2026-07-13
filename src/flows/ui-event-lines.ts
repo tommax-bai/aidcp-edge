@@ -5,7 +5,8 @@
  * **已确知的事实**构造成单行 JSON，红线：
  *  - 一事一行、绝不含换行（壳按行切分解析）；
  *  - 宁缺毋假：标题未知就不带 title、昵称为空就不发 identity；
- *  - 边缘只发本地无歧义的发布终态：`submit_publish` 成功 → published、在途发布被回收 → failed。
+ *  - `submit_publish` 成功只表示当前页面已接受提交 → submitted；同页 `capture_postId` 成功才是 published。
+ *    已 submitted 的在途被回收不改口为 failed，避免把用户已看到的提交成功倒写成失败。
  *    其余审批态（pending/approved/rejected）与云端终判 failed 由云端经 `ui.snapshot` 推送、
  *    经 uiSnapshotToLines 转发——单条指令 ok:false 不在边缘判 failed（云端序列可能对
  *    best-effort 步骤容错继续，边缘抢判会虚报失败）。
@@ -168,11 +169,12 @@ export function writeNoteStageLine(): string {
 /**
  * 发布链路 UI 事件跟踪器（边缘本地部分）：
  *  - 从 fill_field(title) 指令里记住每个 recordId 的标题（终态行带上）；
- *  - submit_publish 成功 → published 行；在途回收 → failed 行；
- *  - 每个 recordId 终态只发一次（published 之后 capture_postId 失败等不再改口）。
+ *  - submit_publish 成功 → submitted 行；同页 capture_postId 成功 → published 行；在途回收 → failed 行；
+ *  - submitted 后的 capture 失败或在途回收不改口为 failed；published/failed 终态只发一次。
  */
 export class PublishUiEventTracker {
   private readonly titles = new Map<number, string>();
+  private readonly submitted = new Set<number>();
   private readonly terminal = new Set<number>();
 
   /** 每条 publish.command 下发执行前调用：截获标题。 */
@@ -187,7 +189,11 @@ export class PublishUiEventTracker {
   /** 指令执行结果已知后调用：返回应打印的 [ui-event] 行，无事发生返回 null。 */
   onResult(payload: PublishCommandPayload, result: PublishCommandResultPayload): string | null {
     if (this.terminal.has(payload.recordId)) return null;
-    if (payload.kind === 'submit_publish' && result.ok === true) {
+    if (payload.kind === 'submit_publish' && result.ok === true && !this.submitted.has(payload.recordId)) {
+      this.submitted.add(payload.recordId);
+      return this.emitState(payload.recordId, 'submitted');
+    }
+    if (payload.kind === 'capture_postId' && result.ok === true) {
       return this.emitTerminal(payload.recordId, 'published');
     }
     return null;
@@ -196,11 +202,25 @@ export class PublishUiEventTracker {
   /** 在途发布被回收（关停/会话回收）时调用：这是边缘视角确定的终态失败。 */
   onRecycled(payload: PublishCommandPayload): string | null {
     if (this.terminal.has(payload.recordId)) return null;
+    if (this.submitted.has(payload.recordId)) {
+      this.terminal.add(payload.recordId);
+      this.submitted.delete(payload.recordId);
+      this.titles.delete(payload.recordId);
+      return null;
+    }
     return this.emitTerminal(payload.recordId, 'failed');
+  }
+
+  private emitState(recordId: number, state: 'submitted'): string {
+    const title = this.titles.get(recordId);
+    const publish: Record<string, unknown> = { state, code: publishCode(recordId) };
+    if (title) publish.title = title;
+    return line({ kind: 'publish', publish });
   }
 
   private emitTerminal(recordId: number, state: 'published' | 'failed'): string {
     this.terminal.add(recordId);
+    this.submitted.delete(recordId);
     const title = this.titles.get(recordId);
     this.titles.delete(recordId);
     const publish: Record<string, unknown> = { state, code: publishCode(recordId) };

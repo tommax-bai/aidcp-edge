@@ -236,6 +236,14 @@ test('发布卡：已发布 → 折进活动流 + 卡片转「上次发布」（
   assert.equal(pub.showLink, false, '卡片不再展示打开飞书入口');
 });
 
+test('发布卡：已提交但链接待确认 → 折进活动流，不伪造为上次发布', () => {
+  const now = Date.now();
+  const submitted = uiLogic.publishView({ state: 'submitted', title: '秋日漫步', at: new Date(now).toISOString() }, null, now);
+  assert.match(submitted.collapsed?.sentence ?? '', /已提交，待链接确认/);
+  assert.equal(submitted.mode, 'empty');
+  assert.ok(!(submitted.collapsed?.sentence ?? '').includes('已发布'));
+});
+
 test('发布卡：拒绝 → 折进活动流（不渲染成失败）+ 回落上次发布/空态', () => {
   const now = Date.now();
   const rej = uiLogic.publishView({ state: 'rejected', at: new Date(now).toISOString() }, { title: '旧文', at: new Date(now - 86_400_000).toISOString() }, now);
