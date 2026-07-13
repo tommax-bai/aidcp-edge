@@ -1,4 +1,4 @@
-import { dispatchClick, evalJson, evalRaw, insertText, type BrowseCdp } from '../browse/cdp-util.js';
+import { dispatchClick, dispatchKeystrokes, evalJson, evalRaw, type BrowseCdp } from '../browse/cdp-util.js';
 import type { ImageUploader } from '../flows/image-uploader.js';
 import type { PublishCommandPayload, PublishCommandResultPayload } from '../comm/protocol.js';
 
@@ -249,7 +249,7 @@ export class FacebookPublishExecutor {
         `(function(){${FB_PUBLISH_HELPERS_JS} var el = fbPublishEditor(); if (!el) return false; try { el.scrollIntoView({ block:'center' }); } catch(e) {} try { el.focus(); el.click && el.click(); } catch(e) {} return document.activeElement === el || true; })()`,
       );
       if (!focused) return { ...base(payload), ok: false, error: 'no_target' };
-      await insertText(this.cdp, value);
+      await dispatchKeystrokes(this.cdp, value, { sleep: this.opts.sleep });
       if (!probe) return { ...base(payload), ok: true };
       const accepted = await this.waitUntil(5_000, async () =>
         evalRaw<boolean>(

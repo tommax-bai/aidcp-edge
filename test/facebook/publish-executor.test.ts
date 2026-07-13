@@ -128,9 +128,16 @@ test('FacebookPublishExecutor: opens composer, fills content, uploads image, sub
     true,
   );
 
-  const filled = await executor.dispatch(command('fill_field', { fieldType: 'content', value: 'hello facebook' }, 2));
+  const content = 'hello facebook';
+  const filled = await executor.dispatch(command('fill_field', { fieldType: 'content', value: content }, 2));
   assert.equal(filled.ok, true);
-  assert.equal(cdp.editorText, 'hello facebook');
+  assert.equal(cdp.editorText, content);
+  const textInserts = cdp.calls
+    .filter((call) => call.method === 'Input.insertText')
+    .map((call) => String(call.params?.text ?? ''));
+  assert.equal(textInserts.length, Array.from(content).length);
+  assert.equal(textInserts.join(''), content);
+  assert.equal(textInserts.some((text) => text === content), false);
 
   const uploadedResult = await executor.dispatch(command('upload_image', { imageUrl: 'https://cdn.example/one.png' }, 3));
   assert.equal(uploadedResult.ok, true);
