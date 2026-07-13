@@ -162,6 +162,24 @@
     var btn = document.getElementById('btn');
     var gmsg = document.getElementById('gmsg');
     var col = document.getElementById('col');
+    var userEdited = false;
+
+    function clearRememberedCredentials() {
+      try {
+        if (api.clearClientLoginPrefill) Promise.resolve(api.clearClientLoginPrefill()).catch(function () { /* best-effort */ });
+      } catch (e) { /* best-effort */ }
+    }
+
+    // 回填只来自主进程的本地加密副本；用户开始编辑后不覆盖手动输入。
+    try {
+      if (api.clientLoginPrefill) {
+        Promise.resolve(api.clientLoginPrefill()).then(function (prefill) {
+          if (userEdited || !prefill) return;
+          nameEl.value = typeof prefill.name === 'string' ? prefill.name : '';
+          key.value = typeof prefill.key === 'string' ? prefill.key : '';
+        }).catch(function () { /* 没有可用记忆时保持空白 */ });
+      }
+    } catch (e) { /* 没有可用记忆时保持空白 */ }
 
     eye.addEventListener('click', function () {
       var show = key.type === 'password';
@@ -176,7 +194,12 @@
       var el = document.getElementById(id), f = el.closest('.f');
       el.addEventListener('focus', function () { f.classList.add('focused'); });
       el.addEventListener('blur', function () { f.classList.remove('focused'); });
-      el.addEventListener('input', function () { f.classList.remove('err'); });
+      el.addEventListener('input', function () {
+        userEdited = true;
+        f.classList.remove('err');
+        // 清空任一字段即表示用户不再希望下次回填旧凭据。
+        if (!nameEl.value.trim() || !key.value.trim()) clearRememberedCredentials();
+      });
     });
     function shake() { if (reduce) return; col.classList.remove('shake'); void col.offsetWidth; col.classList.add('shake'); }
 

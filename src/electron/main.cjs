@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, Notification, shell, screen } = require('electron');
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, Notification, shell, screen, safeStorage } = require('electron');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -271,6 +271,41 @@ function clientAuthEnabled() {
 function clientSessionFile() {
   return path.join(app.getPath('userData'), 'client-session.json');
 }
+function clientLoginPrefillFile() {
+  return path.join(app.getPath('userData'), 'client-login-prefill.json');
+}
+function clientLoginPrefillEncryptionAvailable() {
+  try { return Boolean(safeStorage && safeStorage.isEncryptionAvailable()); } catch { return false; }
+}
+function loadClientLoginPrefill() {
+  if (!clientLoginPrefillEncryptionAvailable()) return null;
+  try {
+    const stored = JSON.parse(fs.readFileSync(clientLoginPrefillFile(), 'utf8'));
+    if (!stored || typeof stored.ciphertext !== 'string' || !stored.ciphertext) return null;
+    const value = JSON.parse(safeStorage.decryptString(Buffer.from(stored.ciphertext, 'base64')));
+    if (!value || typeof value.name !== 'string' || !value.name.trim() || typeof value.key !== 'string' || !value.key) return null;
+    return { name: value.name, key: value.key };
+  } catch {
+    return null;
+  }
+}
+function saveClientLoginPrefill({ name, key } = {}) {
+  const normalizedName = String(name || '').trim();
+  const normalizedKey = String(key || '');
+  if (!normalizedName || !normalizedKey || !clientLoginPrefillEncryptionAvailable()) return false;
+  try {
+    const ciphertext = safeStorage.encryptString(JSON.stringify({ name: normalizedName, key: normalizedKey }));
+    const file = clientLoginPrefillFile();
+    fs.writeFileSync(file, JSON.stringify({ version: 1, ciphertext: ciphertext.toString('base64') }), { encoding: 'utf8', mode: 0o600 });
+    try { fs.chmodSync(file, 0o600); } catch { /* best-effort permissions on platforms that do not support them */ }
+    return true;
+  } catch {
+    return false;
+  }
+}
+function clearClientLoginPrefill() {
+  try { fs.unlinkSync(clientLoginPrefillFile()); } catch { /* already absent / best-effort */ }
+}
 function loadClientSession() {
   try {
     const s = JSON.parse(fs.readFileSync(clientSessionFile(), 'utf8'));
@@ -286,6 +321,7 @@ function saveClientSession(s) {
 function clearClientSession() {
   clientSession = null;
   try { fs.unlinkSync(clientSessionFile()); } catch { /* ignore */ }
+  clearClientLoginPrefill();
 }
 function hasValidSession() {
   return Boolean(clientSession && clientSession.token && (!clientSession.expiresAt || Date.now() < clientSession.expiresAt));
@@ -2493,6 +2529,7 @@ ipcMain.handle('client-auth:login', async (_event, creds) => {
   const r = await clientAuthFetch('/login', { method: 'POST', body: { name, key } });
   if (r.status === 200 && r.data && r.data.token) {
     const ttl = Number(r.data.expiresIn) || 900;
+    saveClientLoginPrefill({ name, key });
     saveClientSession({ token: r.data.token, name, expiresAt: Date.now() + ttl * 1000 });
     await proceedAfterAuth();
     if (loginWindow) { try { loginWindow.close(); } catch { /* ignore */ } loginWindow = null; }
@@ -2514,6 +2551,11 @@ ipcMain.handle('client-auth:session', () => ({
   enabled: clientAuthEnabled(),
   name: (clientSession && clientSession.name) || null,
 }));
+ipcMain.handle('client-auth:prefill', () => loadClientLoginPrefill());
+ipcMain.handle('client-auth:prefill:clear', () => {
+  clearClientLoginPrefill();
+  return { ok: true };
+});
 ipcMain.handle('settings:save', (_event, patch) => {
   const beforeIds = new Set((settings.environments || []).map((e) => e.profileId).filter(Boolean));
   const res = saveSettings(patch);

@@ -61,4 +61,6 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   clientLogin: (creds) => ipcRenderer.invoke('client-auth:login', creds),
   clientLogout: () => ipcRenderer.invoke('client-auth:logout'),
   clientSession: () => ipcRenderer.invoke('client-auth:session'),
+  clientLoginPrefill: () => ipcRenderer.invoke('client-auth:prefill'),
+  clearClientLoginPrefill: () => ipcRenderer.invoke('client-auth:prefill:clear'),
 });
