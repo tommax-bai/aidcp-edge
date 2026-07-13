@@ -14,7 +14,7 @@
 - **下载地址是自有服务器，不是 GitHub**。安装包托管在 ECS `/opt/aidcp/downloads/`，Nginx 以 `/downloads/` 提供；后台「下载客户端」按钮的地址 **写死在前端** `aidcp-console/src/config/downloads.ts`。
 - **mac 的 dmg 必须在 macOS 上构建**（依赖 `hdiutil` 等 mac 专有工具），本机 Windows 打不了 → 走 **GitHub Actions** 的 macOS runner。
 - **分发用的 mac 包走 CI 签名 + 公证**（Developer ID 签名 + Apple notarytool 公证 + staple）：这样用户下载安装**不会被 Gatekeeper 拦成「非法软件 / 无法验证开发者」**。签名凭据只在 GitHub Actions 里（仓库 secret），**本机没有证书、本机打的包仍是 unsigned**（只适合本机自测，下载分发会被拦）。所需 secret 见第 1 步。
-- **无自动更新**：没接 electron-updater → 用户升级要 **重新下载安装**。
+- **OL macOS 客户端支持提示式自动更新**：仅限已签名/公证的 `cloud_default_env=ol` macOS 包。客户端只读取其打包时固化的 HTTPS 更新地址；发现新版本后由用户选择下载和重启安装，绝不静默更新。Windows 暂不支持自动更新，仍需重新下载安装。
 - **红线**：生产机上 **只碰 `/opt/aidcp/downloads` 和 `/opt/aidcp/console`，绝不碰同机 isales**。
 - **SSH**：`ssh -i ~/codes/isales-4.pem root@121.89.85.150`（私钥须存在；在 harness 里跑 ssh/scp 命令要 `dangerouslyDisableSandbox`，且可能被 auto-mode 分类器要二次确认，正常放行）。
 
@@ -56,9 +56,27 @@ npm run electron:build:win
       ```bash
       gh run download <run-id> --name aidcp-macos --dir <某临时目录>
       ```
-      得到：`AIDCP-<版本>-arm64.dmg`（Apple 芯片）、`AIDCP-<版本>.dmg`（Intel），外加 zip/blockmap（下载页用不到，忽略）。
+      得到：`AIDCP-<版本>-arm64.dmg`（Apple 芯片）、`AIDCP-<版本>.dmg`（Intel），以及 `AIDCP-<版本>{,-arm64}-mac.zip`、对应 `.blockmap`、`latest-mac.yml`。后四类是 OL 自动更新的必需物，不能丢弃。
 
 > **Windows 默认不出**（`include_windows` 关）：Windows job 尚未接自包含运行时的 staging，开了会因缺 `extraResources` 失败。等 Windows 自包含打包接好再开。
+
+### 2C. OL macOS 自动更新（安装包上架之外的独立发布闸）
+
+> 此步骤只适用于 `cloud_default_env=ol` 的 macOS 正式包。普通下载页仍然要继续上架两个 dmg，供首次安装和无法自动更新的客户端使用；**GitHub Release 只是 CI 产物中转，已安装客户端不会从 GitHub 拉更新。**
+
+- [ ] 触发 CI 时确认 `update_url` 是 OL 的固定 HTTPS 静态目录（默认 `https://aidcp.oss-cn-beijing.aliyuncs.com/updates/ol/stable`），并保持 `cloud_default_env=ol`。不得把用户运行时选择的 dev/custom 云端地址当作更新源。
+- [ ] CI 通过后，在中控仓 macOS 发版机运行只读预检（不写 OSS）：
+      ```bash
+      cd ../aidcp
+      scripts/promote-ol-auto-update <版本>
+      ```
+      它会下载完整 CI 资产，校验 `latest-mac.yml` 的版本、大小、SHA-512，挂载两个 dmg 检查 Developer ID / Gatekeeper / 公证票据，并检查包内固定为 OL 的 `generic` 更新配置。
+- [ ] 仅在 OSS 对该更新目录的匿名 HTTPS `GET/HEAD` 已可用后，明确执行提升：
+      ```bash
+      scripts/promote-ol-auto-update <版本> --yes
+      ```
+      脚本先上传 staging，再验证公开下载内容、长度、缓存头和 SHA-512；所有版本化文件验证成功后，才最后写入 `latest-mac.yml`。该 manifest 是唯一切换点；失败时旧 manifest 仍保持生效。
+- [ ] 用上一稳定版的 Apple 芯片和 Intel 真机各验证一次：启动后看到版本说明与「下载更新」，确认下载完成，选择「停止并更新」时活动 edge 子进程会先安全停止，重启后版本变为新版本。只接受一次真实升级结论，不要以 CI 通过代替该验收。
 
 ### 2C. 打包后本机冒烟（发版前必做，别省）
 
@@ -128,7 +146,7 @@ ssh -i ~/codes/isales-4.pem root@121.89.85.150 '
 ## 7. 收尾 / 已知边界
 
 - 真机访问后台走 **:8088 或 IP**（:80 域名 `aidcp.tommax.cc` 未备案前打不开）。
-- 用户升级需 **重新下载安装**（无自动更新）。
+- OL macOS 受支持版本会在发现新版本后提示用户下载和重启安装；首次安装、Windows 与不满足更新条件的客户端仍需通过下载页手动安装。
 - **CI 分发包已签名 + 公证**：mac 用户下载安装不再被 Gatekeeper 拦成「非法软件 / 无法验证开发者」，正常双击即可（首次仍可能有「从网络下载」的普通提示）。本机 unsigned 包不具备此性质，仅供自测。
 
 ---
@@ -138,10 +156,11 @@ ssh -i ~/codes/isales-4.pem root@121.89.85.150 '
 - **手动触发**（`workflow_dispatch`）；`macos-latest` 出签名+公证的 x64+arm64 dmg/zip；`include_windows=true` 时 `windows-latest` 才出 nsis exe（默认关，见 §2B）。产物作为 run artifact，保留 14 天。
 - **输入 `cloud_default_env`（dev|ol）**：经 `-c.extraMetadata.aidcpCloudDefaultEnv` 注入打包 package.json，客户端「无界面选择、无启动环境变量」时据此连指定云（`ol`=装完默认连线上）。不注入=沿用客户端自身缺省 dev。
 - **输入 `client_auth_url`（http(s)://.../capi）**：经 `-c.extraMetadata.aidcpClientAuthUrl` 注入打包 package.json，客户端启动即开启客户登录门。`cloud_default_env=ol` 且该输入留空时，workflow 默认使用 `https://aidcp.tommax.cc/capi`。
+- **输入 `update_url`（https://...）**：仅 OL macOS 构建使用，经 `-c.extraMetadata.aidcpUpdateChannel=ol`、`aidcpUpdateUrl` 与 `generic` publish 配置固化到包内；客户端不从运行时云端配置、环境变量或服务端下发内容推导此地址。
 - **必须 `electron-builder --publish never`**（脚本内已强制）：CI 环境里 electron-builder 会自动尝试把产物发布到 GitHub release，缺 `GH_TOKEN` 直接报错。
 - **mac 签名 / 公证**：`scripts/build-desktop-macos.sh` 先构建签名 `.app`（`forceCodeSigning` + hardened runtime + entitlements + 关内置 notarize），再用 `scripts/notarize-and-staple.sh` 显式 `notarytool` 公证 / staple `.app`，随后生成并公证 / staple dmg/zip，最后 Gatekeeper 校验。任一闸失败 → job 非零退出，绝不上传坏包。
 - **自包含运行时进 CI**：build 前 `npm run build:ads-runtime`（stage 随包 AdsPower CLI）+ 从 `ADS_RUNTIME_JSON_BASE64` secret 还原 `resources/ads-runtime.json`（baked key），缺任一即诚实失败。
-- **CI 产物 ≠ 下载地址**：14 天过期、私有仓要 GitHub 登录、是临时签名 URL、还套了一层 zip → **不能**直接挂后台，只能下载下来再转存到 ECS `/downloads/`（即第 3 步）。后台始终用自有服务器的固定地址。
+- **GitHub CI 资产 ≠ 已安装客户端的更新地址**：CI 产物会过期且私有仓需要 GitHub 登录，不能作为 `electron-updater` feed。两份 dmg 仍须转存到 ECS `/downloads/`；OL 自动更新所需的 zip/blockmap/manifest 必须经中控脚本校验后发布到固定 OSS HTTPS 目录。
 - `gh` 本机已登录（含 `repo` 权限），可直接 `gh workflow run` / `gh run watch` / `gh run download`。
 
 ## 相关文档

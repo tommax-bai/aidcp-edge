@@ -45,8 +45,15 @@ test('browser cold standby uses lifecycle.standby and manual controls cancel tim
 });
 
 test('application quit still uses final SIGTERM for every retained core', () => {
-  const quit = functionSource('gracefulStopAllAndQuit', 'quitApp');
+  const quit = functionSource('stopAllEdgeChildren', 'gracefulStopAllAndQuit');
   assert.match(quit, /kill\('SIGTERM'\)/);
+});
+
+test('automatic update stops all retained cores before calling quitAndInstall', () => {
+  const install = functionSource('installDownloadedOlUpdate', 'showOlUpdateDownloaded');
+  assert.match(install, /await stopAllEdgeChildren\(\)/, 'update install must await the shared stop gate');
+  assert.match(install, /if \(!stopped\.ok\)/, 'update install must cancel when a child remains');
+  assert.match(install, /autoUpdateService\.quitAndInstall\(\)/, 'only the safe path may invoke updater restart');
 });
 
 // Regression guard for a recurring packaged-only failure: in an asar:true build

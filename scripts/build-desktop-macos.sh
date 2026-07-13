@@ -119,6 +119,7 @@ fi
 # 未设置则不注入 → 客户端回落其自身缺省 dev + 登录门关闭（零回归）。注入到 dir 构建（写 .app 内
 # package.json）即可，后续 --prepackaged 复用已建 .app、无需重复。
 builder_dir_args=("${builder_arch_args[@]}")
+update_publish_args=()
 if [ -n "${AIDCP_CLOUD_DEFAULT_ENV:-}" ]; then
   case "$AIDCP_CLOUD_DEFAULT_ENV" in
     dev|ol)
@@ -130,6 +131,27 @@ if [ -n "${AIDCP_CLOUD_DEFAULT_ENV:-}" ]; then
       exit 2
       ;;
   esac
+fi
+
+# OL 分发包的更新供应链在构建期固定：客户端只读 app 内 package.json / app-update.yml，绝不
+# 根据运行时 dev/custom 云端选择更新源。仅 ol 才写入 generic provider；dev 包沿用无更新配置。
+if [ "${AIDCP_CLOUD_DEFAULT_ENV:-}" = "ol" ]; then
+  update_url="${AIDCP_UPDATE_URL:-https://aidcp.oss-cn-beijing.aliyuncs.com/updates/ol/stable}"
+  while [ -n "$update_url" ] && [ "${update_url%/}" != "$update_url" ]; do
+    update_url="${update_url%/}"
+  done
+  case "$update_url" in
+    https://*) ;;
+    *) echo "AIDCP_UPDATE_URL must be an https:// URL for OL builds" >&2; exit 2 ;;
+  esac
+  builder_dir_args+=(
+    "-c.extraMetadata.aidcpUpdateChannel=ol"
+    "-c.extraMetadata.aidcpUpdateUrl=$update_url"
+  )
+  update_publish_args=("-c.publish.provider=generic" "-c.publish.url=$update_url")
+  echo "Baking OL auto-update channel: $update_url"
+elif [ -n "${AIDCP_UPDATE_URL:-}" ]; then
+  echo "Ignoring AIDCP_UPDATE_URL because this is not an OL build."
 fi
 client_auth_url="${AIDCP_CLIENT_AUTH_URL:-}"
 while [ -n "$client_auth_url" ] && [ "${client_auth_url%/}" != "$client_auth_url" ]; do
@@ -151,7 +173,7 @@ fi
 # forceCodeSigning 只在 CI（此脚本）施加、不写进 package.json：CSC_LINK 在位时 electron-builder 会签名，
 # forceCodeSigning=true 让「签不成」直接失败（fail-closed，绝不静默出 unsigned 包）；而本机无证书跑
 # electron:build:mac 时 package.json 不带此项 → 默认跳过签名、照出 unsigned 自测包（本机打包能力零回归）。
-npx electron-builder --mac dir "${builder_dir_args[@]}" --publish never -c.mac.notarize=false -c.mac.forceCodeSigning=true
+npx electron-builder --mac dir "${builder_dir_args[@]}" "${update_publish_args[@]}" --publish never -c.mac.notarize=false -c.mac.forceCodeSigning=true
 
 for arch in $arch_list; do
   app_dir="$(app_dir_for_arch "$arch")"
@@ -169,7 +191,7 @@ notarize_parallel "${app_artifacts[@]}"
 echo "Building macOS dmg/zip distributables"
 for arch in $arch_list; do
   app_dir="$(app_dir_for_arch "$arch")"
-  npx electron-builder --mac "--$arch" --prepackaged "$app_dir" --publish never -c.mac.notarize=false -c.mac.forceCodeSigning=true
+  npx electron-builder --mac "--$arch" --prepackaged "$app_dir" "${update_publish_args[@]}" --publish never -c.mac.notarize=false -c.mac.forceCodeSigning=true
 done
 
 shopt -s nullglob
@@ -184,3 +206,8 @@ notarize_parallel "${dmg_artifacts[@]}"
 
 echo "Verifying macOS trust gates"
 verify_trust_gates "${app_artifacts[@]}" "${dmg_artifacts[@]}"
+
+if [ "${AIDCP_CLOUD_DEFAULT_ENV:-}" = "ol" ]; then
+  echo "Verifying OL automatic-update artifacts"
+  node scripts/verify-ol-auto-update-artifacts.mjs --dir dist-electron --update-url "$update_url"
+fi

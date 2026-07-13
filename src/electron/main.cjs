@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, Notification, shell, screen, safeStorage } = require('electron');
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, Notification, shell, screen, safeStorage, dialog } = require('electron');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -39,6 +39,10 @@ const {
   browserPersonaNoticeForStatus,
   browserPersonaNoticeKey,
 } = require('./persona-notice.cjs');
+const {
+  normalizeOlUpdateConfig,
+  createAutoUpdateService,
+} = require('./auto-update.cjs');
 
 // ── 实例级 userData 隔离（change edge-multi-instance-userdata-isolation）──────
 // 同机并行多个监督者（如一个连 dev、一个连 ol）时，各实例需独立的单实例锁 /
@@ -69,6 +73,11 @@ let isQuitting = false;
 // 优雅全停已完成、允许本次 quit 直落（before-quit 二次进入不再拦截）。
 let quitFinal = false;
 let quitStopAllInFlight = false;
+let autoUpdateService;
+let updateAvailableDialogOpen = false;
+let updateDownloadedDialogOpen = false;
+let lastUpdateFailureNotice = '';
+let lastUpdateProgressPercent = -1;
 // 运行时确保后解析出的 Local API base（非默认端口时覆盖 AIDCP_ADS_API_BASE 喂核心）；
 // 这是主进程读写 + 全部核心子进程的**单一 base 权威**（P0-A：resolveAdsOpts 亦优先采用它，
 // 杜绝「解析出非 50325 端口、主进程却仍发 50325」的串台）。未确保前保持 null，回落 settings.adsApiBase 或核心默认 50325。
@@ -148,6 +157,22 @@ function readBakedClientAuthUrl() {
   }
 }
 const BAKED_CLIENT_AUTH_URL = readBakedClientAuthUrl();
+// OL 自动更新和运行时云端选择是两条独立边界：更新源只能由打包 metadata 固定，不能
+// 跟随用户在设置里选择的 dev/custom 云端变化。开发态、Windows 或字段非法时该配置失效。
+function readBakedOlUpdateConfig() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8'));
+    return normalizeOlUpdateConfig({
+      isPackaged: app.isPackaged,
+      platform: process.platform,
+      channel: pkg && pkg.aidcpUpdateChannel,
+      url: pkg && pkg.aidcpUpdateUrl,
+    });
+  } catch {
+    return normalizeOlUpdateConfig({ isPackaged: app.isPackaged, platform: process.platform });
+  }
+}
+const BAKED_OL_UPDATE_CONFIG = readBakedOlUpdateConfig();
 const DEFAULT_CLOUD_URL = CLOUD_ENV_URLS[BAKED_DEFAULT_CLOUD_ENV] || CLOUD_ENV_URLS.dev;
 const CLOUD_ENV_LABELS = { dev: 'dev', ol: 'ol（线上）', custom: '自定义', '': '默认' };
 function isWsUrl(u) {
@@ -426,6 +451,7 @@ async function proceedAfterAuth() {
   }
   if (settings.provider === 'adspower' && envs.size === 0) broadcastFleet();
   if (!mainWindow) createWindow();
+  initializeOlAutoUpdate();
   if (!proceededOnce) {
     proceededOnce = true;
     createTray();
@@ -1159,6 +1185,181 @@ function surfaceNotification(title, body) {
   } catch {
     /* best-effort */
   }
+}
+
+function updateDialogWindow() {
+  return mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+}
+
+function updateVersionOf(info) {
+  return String((info && info.version) || '新版本').trim() || '新版本';
+}
+
+function reportOlUpdateError({ phase, error }) {
+  const message = (error && error.message) || String(error || '未知错误');
+  const line = `OL 更新${phase}失败：${message}`;
+  appendEdgeLog('updater', line, true);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setProgressBar(-1);
+  // electron-updater 可能对同一网络错误同时抛出 promise rejection 和 error event；只打扰一次。
+  const noticeKey = `${phase}:${message}`;
+  if (noticeKey === lastUpdateFailureNotice) return;
+  lastUpdateFailureNotice = noticeKey;
+  surfaceNotification('AIDCP Edge 更新检查失败', '当前版本可继续使用；请稍后再次检查或联系管理员。');
+}
+
+function reportOlUpdateProgress(progress) {
+  const rawPercent = Number(progress && progress.percent);
+  if (!Number.isFinite(rawPercent)) return;
+  const percent = Math.max(0, Math.min(100, Math.floor(rawPercent)));
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setProgressBar(percent / 100);
+  if (percent === lastUpdateProgressPercent || (percent < 100 && percent - lastUpdateProgressPercent < 10)) return;
+  lastUpdateProgressPercent = percent;
+  appendEdgeLog('updater', `正在下载 OL 更新：${percent}%`, false);
+}
+
+async function showOlUpdateAvailable(info) {
+  if (updateAvailableDialogOpen || !autoUpdateService || !autoUpdateService.enabled) return;
+  updateAvailableDialogOpen = true;
+  const version = updateVersionOf(info);
+  try {
+    const result = await dialog.showMessageBox(updateDialogWindow(), {
+      type: 'info',
+      title: '发现 AIDCP Edge 更新',
+      message: `发现 OL 客户端新版本 ${version}`,
+      detail: `当前版本 ${app.getVersion()}。下载不会中断正在运行的环境；安装重启前会再次征求确认。`,
+      buttons: ['下载更新', '稍后提醒'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (result.response !== 0) {
+      appendEdgeLog('updater', `用户暂不下载 OL 更新 ${version}`, false);
+      return;
+    }
+    lastUpdateProgressPercent = -1;
+    surfaceNotification('AIDCP Edge 正在下载更新', `正在下载 ${version}；Dock 中会显示进度。`);
+    const downloaded = await autoUpdateService.downloadUpdate();
+    if (!downloaded) appendEdgeLog('updater', `OL 更新 ${version} 未完成下载`, true);
+  } finally {
+    updateAvailableDialogOpen = false;
+  }
+}
+
+async function stopAllEdgeChildren() {
+  if (quitStopAllInFlight) return { ok: false, reason: '已有停止流程正在进行' };
+  quitStopAllInFlight = true;
+  isQuitting = true; // 阻止队列中尚未执行的启动与任何重起，防更新期遗留孤儿。
+  for (const handle of envs.values()) {
+    clearRespawnTimer(handle);
+    clearColdStandbyTimer(handle);
+  }
+  const running = [...envs.values()].filter((h) => h.child);
+  for (const handle of running) {
+    await queueLifecycle(() => {
+      try {
+        handle.child?.kill('SIGTERM');
+      } catch { /* close handler will report the real remaining state */ }
+    });
+  }
+  // 最多等待约 10 秒；更新路径绝不在仍有子进程时继续 quitAndInstall。
+  for (let i = 0; i < 100; i++) {
+    if (![...envs.values()].some((h) => h.child)) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const remaining = [...envs.values()].filter((h) => h.child).map((h) => h.name || h.envId);
+  if (remaining.length > 0) {
+    quitStopAllInFlight = false;
+    isQuitting = false;
+    return { ok: false, reason: `仍在停止中的环境：${remaining.join('、')}` };
+  }
+  return { ok: true, stopped: running.length };
+}
+
+async function installDownloadedOlUpdate(info) {
+  if (!autoUpdateService || !autoUpdateService.enabled) return;
+  const running = [...envs.values()].filter((h) => h.child);
+  const version = updateVersionOf(info);
+  const detail = running.length > 0
+    ? `继续会停止 ${running.length} 个正在运行的环境，等待它们全部退出后再安装 ${version}。`
+    : `应用将立即重启并安装 ${version}。`;
+  const result = await dialog.showMessageBox(updateDialogWindow(), {
+    type: 'question',
+    title: '安装 AIDCP Edge 更新',
+    message: `立即重启并安装 ${version}？`,
+    detail,
+    buttons: ['取消', '停止并更新'],
+    defaultId: 1,
+    cancelId: 0,
+    noLink: true,
+  });
+  if (result.response !== 1) {
+    appendEdgeLog('updater', `用户暂不安装已下载的 OL 更新 ${version}`, false);
+    return;
+  }
+  const stopped = await stopAllEdgeChildren();
+  if (!stopped.ok) {
+    appendEdgeLog('updater', `安装 OL 更新 ${version} 已取消：${stopped.reason}`, true);
+    await dialog.showMessageBox(updateDialogWindow(), {
+      type: 'error',
+      title: '无法安全安装更新',
+      message: '仍有环境未能在规定时间内停止，当前版本将继续运行。',
+      detail: stopped.reason,
+      buttons: ['知道了'],
+      noLink: true,
+    });
+    return;
+  }
+  appendEdgeLog('updater', `全部 ${stopped.stopped} 个环境已停止，开始安装 OL 更新 ${version}`, false);
+  autoUpdateService.quitAndInstall();
+}
+
+async function showOlUpdateDownloaded(info) {
+  if (updateDownloadedDialogOpen || !autoUpdateService || !autoUpdateService.enabled) return;
+  updateDownloadedDialogOpen = true;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setProgressBar(-1);
+  const version = updateVersionOf(info);
+  appendEdgeLog('updater', `OL 更新 ${version} 已下载，等待用户安装`, false);
+  try {
+    const result = await dialog.showMessageBox(updateDialogWindow(), {
+      type: 'info',
+      title: 'AIDCP Edge 更新已就绪',
+      message: `${version} 已下载完成`,
+      detail: '立即更新会停止所有运行环境并重启应用；也可以稍后再安装。',
+      buttons: ['稍后', '立即重启更新'],
+      defaultId: 1,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (result.response === 1) await installDownloadedOlUpdate(info);
+  } finally {
+    updateDownloadedDialogOpen = false;
+  }
+}
+
+function initializeOlAutoUpdate() {
+  if (autoUpdateService) return autoUpdateService;
+  if (!BAKED_OL_UPDATE_CONFIG.enabled) {
+    appendEdgeLog('updater', `OL 自动更新未启用：${BAKED_OL_UPDATE_CONFIG.reason}`, false);
+    return null;
+  }
+  try {
+    const { autoUpdater } = require('electron-updater');
+    autoUpdateService = createAutoUpdateService({
+      autoUpdater,
+      config: BAKED_OL_UPDATE_CONFIG,
+      onAvailable: (info) => { void showOlUpdateAvailable(info); },
+      onProgress: reportOlUpdateProgress,
+      onDownloaded: (info) => { void showOlUpdateDownloaded(info); },
+      onError: reportOlUpdateError,
+    });
+    if (autoUpdateService.enabled) {
+      appendEdgeLog('updater', `OL 自动更新已启用：${BAKED_OL_UPDATE_CONFIG.url}`, false);
+      autoUpdateService.start();
+    }
+  } catch (error) {
+    reportOlUpdateError({ phase: 'initialize', error });
+  }
+  return autoUpdateService || null;
 }
 
 const BROWSER_PERMISSION_LABELS = {
@@ -2659,31 +2860,17 @@ function stopAllEnvs() {
   return { ok: true, stopped: running.length + backoff.length };
 }
 
-/** 应用退出：对全部在跑环境经串行队列有序 SIGTERM + 有界等待确认退出，不留孤儿。 */
+/** 应用退出：复用更新同一条有界停机流程，确认没有保留子进程后才真正退出。 */
 async function gracefulStopAllAndQuit() {
-  if (quitStopAllInFlight) return;
-  quitStopAllInFlight = true;
-  isQuitting = true;
+  const stopped = await stopAllEdgeChildren();
+  if (!stopped.ok) {
+    surfaceFailure('AIDCP Edge 未能安全退出', `${stopped.reason}。当前应用继续运行，请检查后重试。`);
+    return stopped;
+  }
   stopLoginPoller();
-  for (const handle of envs.values()) {
-    clearRespawnTimer(handle);
-    clearColdStandbyTimer(handle);
-  }
-  const running = [...envs.values()].filter((h) => h.child);
-  for (const handle of running) {
-    await queueLifecycle(() => {
-      try {
-        handle.child?.kill('SIGTERM');
-      } catch { /* ignore */ }
-    });
-  }
-  // 有界等待（迭代计数限界，最多 ~10s）：等核心的诚实关机（browser/stop + 确认浏览器死）跑完。
-  for (let i = 0; i < 100; i++) {
-    if (![...envs.values()].some((h) => h.child)) break;
-    await new Promise((r) => setTimeout(r, 100));
-  }
   quitFinal = true;
   app.quit();
+  return stopped;
 }
 
 function quitApp() {
@@ -3105,9 +3292,9 @@ process.on('unhandledRejection', (reason) => {
 
 app.on('before-quit', (event) => {
   if (quitFinal) return; // 优雅全停已完成，放行退出
-  isQuitting = true;
   const anyRunning = [...envs.values()].some((h) => h.child);
   if (!anyRunning) {
+    isQuitting = true;
     quitFinal = true;
     return;
   }

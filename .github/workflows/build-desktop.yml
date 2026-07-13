@@ -43,6 +43,10 @@ on:
         description: 'Optional client auth base URL to bake into mac app. Empty + ol => https://aidcp.tommax.cc/capi.'
         type: string
         default: ''
+      update_url:
+        description: 'OL automatic-update HTTPS base URL. Ignored for dev builds; do not use the cloud WebSocket URL.'
+        type: string
+        default: 'https://aidcp.oss-cn-beijing.aliyuncs.com/updates/ol/stable'
 
 jobs:
   build-mac:
@@ -147,6 +151,8 @@ jobs:
           NOTARY_POLL_SECONDS: '30'
           # Bake the default cloud env chosen at dispatch (dev|ol) into this build.
           AIDCP_CLOUD_DEFAULT_ENV: ${{ inputs.cloud_default_env }}
+          # Only the OL path consumes this; the build script rejects non-HTTPS values and keeps dev packages update-free.
+          AIDCP_UPDATE_URL: ${{ inputs.update_url }}
       # Best-effort Actions artifact (kept lean). This can fail with "Artifact storage
       # quota has been hit" — that quota is recalculated only every 6-12h, so freeing space
       # does not immediately unblock it. The GitHub Release step below is the reliable
@@ -160,9 +166,12 @@ jobs:
           retention-days: 7
           path: |
             dist-electron/*.dmg
+            dist-electron/*-mac.zip
+            dist-electron/*-mac.zip.blockmap
+            dist-electron/latest-mac.yml
       # Reliable delivery: publish the signed+notarized dmgs to a GitHub prerelease.
       # Release assets do NOT count against the Actions artifact storage quota.
-      - name: Publish dmgs to GitHub prerelease
+      - name: Publish macOS release and update artifacts to GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -170,15 +179,18 @@ jobs:
           set -euo pipefail
           version=$(node -p "require('./package.json').version")
           tag="desktop-v${version}"
-          echo "Publishing dmgs to prerelease $tag"
+          echo "Publishing macOS release and update artifacts to prerelease $tag"
           # Recreate so re-runs replace assets cleanly.
           gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$tag" \
             --target "${GITHUB_SHA}" \
             --title "AIDCP Edge desktop ${version} (signed + notarized)" \
-            --notes "Signed + notarized macOS build (cloud_default_env and optional client_auth_url baked at dispatch). Not for permanent release — download channel for the ECS download page." \
+            --notes "Signed + notarized macOS build (OL builds also carry generic HTTPS update metadata). GitHub is a transfer channel; the client update feed is promoted from a separately verified static OL source." \
             --prerelease \
-            dist-electron/*.dmg
+            dist-electron/*.dmg \
+            dist-electron/*-mac.zip \
+            dist-electron/*-mac.zip.blockmap \
+            dist-electron/latest-mac.yml
           echo "Published assets:"
           gh release view "$tag" --json assets --jq '.assets[] | "  \(.name) \(.size)"'
 
