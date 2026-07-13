@@ -177,6 +177,7 @@
         </div>
         <div class="pub-foot">
           <p id="pub-foot">全文和「通过 / 驳回」按钮在飞书里，审批结果会自动同步到这里。</p>
+          <span id="pub-preview-link" class="pub-preview-link hidden" role="button" tabindex="0">查看稿件</span>
           <span class="pub-link" id="pub-link" role="link" tabindex="0">打开飞书 ↗</span>
         </div>
         </div>
@@ -547,6 +548,19 @@
         <span id="client-session-name" class="client-session-name"></span>
         <button id="client-logout" class="secondary" type="button" title="退出当前客户端登录，回到登录页可重新登录账号">退出登录</button>
       </div>
+    </aside>
+
+    <!-- 洗稿稿件只读预览：内容来自云端 publish_log；审批按钮不在客户端。 -->
+    <div id="publish-preview-mask" class="publish-preview-mask hidden"></div>
+    <aside id="publish-preview-panel" class="publish-preview-panel" aria-hidden="true" aria-label="稿件预览">
+      <div class="publish-preview-head">
+        <div>
+          <span id="publish-preview-kind" class="publish-preview-eyebrow">洗稿稿件</span>
+          <h2 id="publish-preview-title">稿件预览</h2>
+        </div>
+        <button id="publish-preview-close" class="drawer-x nodrag" type="button" aria-label="关闭稿件预览">×</button>
+      </div>
+      <div id="publish-preview-content" class="publish-preview-content"></div>
     </aside>
 
     <!-- 悬浮会话控制：运行→暂停；暂停→关闭/恢复；关闭→启动。 -->

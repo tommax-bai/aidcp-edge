@@ -13,6 +13,7 @@
 import type {
   PublishCommandPayload,
   PublishCommandResultPayload,
+  UiPublishPreviewPayload,
   UiSnapshotPayload,
 } from '../comm/protocol.js';
 
@@ -22,6 +23,40 @@ const DAILY_USAGE_WINDOWS = ['session', 'minute', 'hour', 'day'] as const;
 
 function line(obj: Record<string, unknown>): string {
   return `${UI_EVENT_PREFIX} ${JSON.stringify(obj)}`;
+}
+
+function sanitizePublishPreview(input: UiSnapshotPayload['publishPreview']): UiPublishPreviewPayload | null {
+  if (!input || typeof input !== 'object') return null;
+  if (!Number.isInteger(input.recordId) || input.recordId <= 0) return null;
+  if (input.kind !== 'rewrite' && input.kind !== 'generated') return null;
+  if (typeof input.content !== 'string' || input.content.length > 20_000) return null;
+  const images = Array.isArray(input.images)
+    ? input.images.filter((url): url is string => typeof url === 'string' && /^(https?:|data:image\/)/i.test(url)).slice(0, 9)
+    : [];
+  const topics = Array.isArray(input.topics)
+    ? input.topics.filter((topic): topic is string => typeof topic === 'string' && topic.trim().length > 0).slice(0, 20)
+    : [];
+  const audit = input.imageReferenceAudit;
+  const imageReferenceAudit = audit && typeof audit === 'object' && ['none', 'used', 'unsupported', 'unavailable', 'skipped'].includes(audit.status)
+    ? {
+        requestedCount: Number.isFinite(audit.requestedCount) ? Math.max(0, Math.floor(audit.requestedCount)) : 0,
+        usableCount: Number.isFinite(audit.usableCount) ? Math.max(0, Math.floor(audit.usableCount)) : 0,
+        status: audit.status,
+        generatedCount: Number.isFinite(audit.generatedCount) ? Math.max(0, Math.floor(audit.generatedCount)) : 0,
+      }
+    : undefined;
+  return {
+    recordId: input.recordId,
+    code: typeof input.code === 'string' && input.code ? input.code : `#${input.recordId}`,
+    kind: input.kind,
+    title: typeof input.title === 'string' ? input.title.slice(0, 200) : '',
+    content: input.content,
+    topics,
+    images,
+    contentVersion: Number.isInteger(input.contentVersion) && input.contentVersion >= 0 ? input.contentVersion : 0,
+    updatedAt: Number.isFinite(input.updatedAt) ? input.updatedAt : Date.now(),
+    ...(imageReferenceAudit ? { imageReferenceAudit } : {}),
+  };
 }
 
 function sanitizeCounts(input: Record<string, unknown> | undefined): Record<string, number> {
@@ -144,7 +179,7 @@ export class PublishUiEventTracker {
 }
 
 /**
- * 云端 ui.snapshot → [ui-event] 行（0..3 行）。
+ * 云端 ui.snapshot → [ui-event] 行（按实际存在字段逐行转发）。
  * 缺失字段即不发对应行；昵称为空绝不发 identity（壳有环境名/尾4位兜底链，空名会顶掉兜底）。
  */
 export function uiSnapshotToLines(p: UiSnapshotPayload): string[] {
@@ -162,6 +197,8 @@ export function uiSnapshotToLines(p: UiSnapshotPayload): string[] {
     if (typeof p.publish.code === 'string' && p.publish.code) publish.code = p.publish.code;
     lines.push(line({ kind: 'publish', publish }));
   }
+  const publishPreview = sanitizePublishPreview(p.publishPreview);
+  if (publishPreview) lines.push(line({ kind: 'publishPreview', publishPreview }));
   const dailyUsage = sanitizeDailyUsage(p.dailyUsage);
   if (dailyUsage) lines.push(line({ kind: 'dailyUsage', dailyUsage }));
   // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在 true 时下发，转成 ui-event 行给壳，

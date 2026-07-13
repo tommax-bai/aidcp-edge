@@ -87,6 +87,13 @@ const fields = {
   pubMain: document.querySelector('#pub-main'),
   pubBar: document.querySelector('#pub-bar'),
   pubBarSum: document.querySelector('#pub-bar-sum'),
+  pubPreviewLink: document.querySelector('#pub-preview-link'),
+  publishPreviewMask: document.querySelector('#publish-preview-mask'),
+  publishPreviewPanel: document.querySelector('#publish-preview-panel'),
+  publishPreviewClose: document.querySelector('#publish-preview-close'),
+  publishPreviewKind: document.querySelector('#publish-preview-kind'),
+  publishPreviewTitle: document.querySelector('#publish-preview-title'),
+  publishPreviewContent: document.querySelector('#publish-preview-content'),
   drawer: document.querySelector('#drawer'),
   drawerMask: document.querySelector('#drawer-mask'),
   drawerClose: document.querySelector('#drawer-close'),
@@ -697,6 +704,9 @@ const lastPublishSigByEnv = new Map();
 let pubManualOpen = false;
 function renderPublish(status, nowMs) {
   const view = uiLogic.publishView(status.publish, status.lastPublish, nowMs);
+  const preview = status && status.publishPreview && typeof status.publishPreview === 'object'
+    ? status.publishPreview
+    : null;
   // 终态折流 + 去重已收口到 absorbPublishTerminal（在 routeStatus 里对每个环境跑，含未选中环境），
   // 这里只负责发布卡的视觉渲染，绝不再自己 prependActivity（否则选中环境会重复记一条）。
   fields.pubCard.classList.remove('hidden'); // 常驻
@@ -711,17 +721,21 @@ function renderPublish(status, nowMs) {
   fields.pubHead.textContent = view.head;
   fields.pubCorner.textContent = view.corner;
   fields.pubCorner.classList.toggle('hot', Boolean(view.cornerHot));
-  fields.pubTitle.textContent = view.title || '（新笔记）';
+  fields.pubTitle.textContent = view.title || (preview && preview.title) || '（新笔记）';
   fields.pubTitle.classList.toggle('muted', view.mode === 'empty');
   // 编号默认形态：无真编号时以「—」占位（云端飞书卡印上 requestId 后自动点亮真编号）；编号值带灰底小片（设计稿）。
   fields.pubMeta.textContent = '';
-  fields.pubMeta.appendChild(document.createTextNode(view.mode === 'empty' ? '等待第一条笔记 · 编号 ' : '图文笔记 · 编号 '));
+  const previewMeta = preview && view.mode === 'flow'
+    ? `${preview.kind === 'rewrite' ? '洗稿稿件' : 'AI 稿件'} · 正文 ${String(preview.content || '').length} 字 · 配图 ${Array.isArray(preview.images) ? preview.images.length : 0} 张 · 编号 `
+    : (view.mode === 'empty' ? '等待第一条笔记 · 编号 ' : '图文笔记 · 编号 ');
+  fields.pubMeta.appendChild(document.createTextNode(previewMeta));
   const codeChip = document.createElement('span');
   codeChip.className = 'no';
-  codeChip.textContent = view.code || '—';
+  codeChip.textContent = view.code || (preview && preview.code) || '—';
   fields.pubMeta.appendChild(codeChip);
   renderFootRich(fields.pubFoot, view.foot); // 固定模板内 **…** 加粗，破掉整片灰
   fields.pubLink.classList.toggle('hidden', !view.showLink);
+  fields.pubPreviewLink.classList.toggle('hidden', !(preview && view.mode === 'flow'));
   const steps = fields.pubSteps.querySelectorAll('.j-step');
   view.stepStates.forEach((state, i) => {
     const el = steps[i];
@@ -729,6 +743,139 @@ function renderPublish(status, nowMs) {
     el.className = `j-step ${state}${state === 'cur' && view.curCalm ? ' calm' : ''}`;
   });
 }
+
+const PUBLISH_PREVIEW_STATES = {
+  pending: '待确认',
+  reminded: '待确认',
+  approved: '已通过，等待发布',
+  published: '已发布',
+  rejected: '已驳回',
+  failed: '发布失败',
+};
+
+function appendPreviewText(parent, text, className) {
+  const el = document.createElement('div');
+  if (className) el.className = className;
+  el.textContent = text;
+  parent.appendChild(el);
+  return el;
+}
+
+function renderPublishPreviewContent(status) {
+  const preview = status && status.publishPreview;
+  if (!preview || !fields.publishPreviewContent) return;
+  fields.publishPreviewKind.textContent = preview.kind === 'rewrite' ? '洗稿稿件' : 'AI 稿件';
+  fields.publishPreviewTitle.textContent = preview.title || '未命名稿件';
+  fields.publishPreviewContent.replaceChildren();
+
+  const state = status.publish && status.publish.state ? status.publish.state : 'pending';
+  const statusRow = document.createElement('div');
+  statusRow.className = 'publish-preview-status';
+  const stateText = document.createElement('span');
+  stateText.className = 'publish-preview-state';
+  stateText.textContent = PUBLISH_PREVIEW_STATES[state] || state;
+  statusRow.appendChild(stateText);
+  const metaText = document.createElement('span');
+  const version = Number.isInteger(preview.contentVersion) ? preview.contentVersion : 0;
+  const updatedAt = Number.isFinite(preview.updatedAt) ? new Date(preview.updatedAt).toLocaleString() : '';
+  metaText.textContent = `${preview.code || '—'} · v${version}${updatedAt ? ` · 更新于 ${updatedAt}` : ''}`;
+  statusRow.appendChild(metaText);
+  fields.publishPreviewContent.appendChild(statusRow);
+
+  if (version > 0) {
+    appendPreviewText(
+      fields.publishPreviewContent,
+      `这份稿件已在管理后台修改至 v${version}；原飞书审核卡片可能已失效，请以管理后台当前稿件为准。`,
+      'publish-preview-version',
+    );
+  }
+
+  const bodySection = document.createElement('section');
+  bodySection.className = 'publish-preview-section';
+  appendPreviewText(bodySection, '正文', 'publish-preview-label');
+  appendPreviewText(bodySection, typeof preview.content === 'string' && preview.content ? preview.content : '暂无正文', 'publish-preview-body');
+  fields.publishPreviewContent.appendChild(bodySection);
+
+  const topicsSection = document.createElement('section');
+  topicsSection.className = 'publish-preview-section';
+  appendPreviewText(topicsSection, '话题', 'publish-preview-label');
+  const topics = Array.isArray(preview.topics) ? preview.topics.filter((topic) => String(topic).trim()) : [];
+  if (topics.length === 0) {
+    appendPreviewText(topicsSection, '暂无话题', 'publish-preview-empty');
+  } else {
+    const topicWrap = document.createElement('div');
+    topicWrap.className = 'publish-preview-topics';
+    topics.forEach((topic) => appendPreviewText(topicWrap, `#${String(topic).replace(/^#/, '')}`, 'publish-preview-topic'));
+    topicsSection.appendChild(topicWrap);
+  }
+  fields.publishPreviewContent.appendChild(topicsSection);
+
+  const imagesSection = document.createElement('section');
+  imagesSection.className = 'publish-preview-section';
+  appendPreviewText(imagesSection, `配图（${Array.isArray(preview.images) ? preview.images.length : 0} 张）`, 'publish-preview-label');
+  const images = Array.isArray(preview.images) ? preview.images : [];
+  if (images.length === 0) {
+    appendPreviewText(imagesSection, '暂无可用配图', 'publish-preview-empty');
+  } else {
+    const imageWrap = document.createElement('div');
+    imageWrap.className = 'publish-preview-images';
+    images.forEach((url, index) => {
+      const item = document.createElement('div');
+      item.className = 'publish-preview-image';
+      const img = document.createElement('img');
+      img.src = String(url);
+      img.alt = `配图 ${index + 1}`;
+      img.addEventListener('error', () => item.classList.add('failed'), { once: true });
+      item.appendChild(img);
+      appendPreviewText(item, '图片暂不可用', 'publish-preview-image-fallback');
+      imageWrap.appendChild(item);
+    });
+    imagesSection.appendChild(imageWrap);
+  }
+  fields.publishPreviewContent.appendChild(imagesSection);
+
+  const audit = preview.imageReferenceAudit;
+  if (audit && audit.requestedCount > 0) {
+    const auditSection = document.createElement('section');
+    auditSection.className = 'publish-preview-section';
+    const statusLabel = audit.status === 'used'
+      ? '图片模型已实际使用参考图生成'
+      : audit.status === 'unsupported'
+        ? '当前图片厂商不支持参考图，已按文本生成'
+        : audit.status === 'unavailable'
+          ? '参考图不可用，已按文本生成'
+          : '本次未使用参考图，已按文本生成';
+    appendPreviewText(auditSection, `配图说明：参考图 ${audit.requestedCount} 张；${statusLabel}。`, 'publish-preview-empty');
+    fields.publishPreviewContent.appendChild(auditSection);
+  }
+}
+
+function openPublishPreview() {
+  if (!currentStatus || !currentStatus.publishPreview) return;
+  renderPublishPreviewContent(currentStatus);
+  fields.publishPreviewMask.classList.remove('hidden');
+  fields.publishPreviewPanel.classList.add('open');
+  fields.publishPreviewPanel.setAttribute('aria-hidden', 'false');
+}
+
+function closePublishPreview() {
+  fields.publishPreviewPanel.classList.remove('open');
+  fields.publishPreviewPanel.setAttribute('aria-hidden', 'true');
+  fields.publishPreviewMask.classList.add('hidden');
+}
+
+fields.pubPreviewLink.addEventListener('click', openPublishPreview);
+fields.pubPreviewLink.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    openPublishPreview();
+  }
+});
+fields.publishPreviewClose.addEventListener('click', closePublishPreview);
+fields.publishPreviewMask.addEventListener('click', closePublishPreview);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && fields.publishPreviewPanel.classList.contains('open')) closePublishPreview();
+});
 
 // foot 富文本：仅解析固定文案模板里的 **加粗** 标记（无任何插值，无注入面）。
 function renderFootRich(el, text) {
@@ -1066,6 +1213,7 @@ function render(status) {
   // 此处不再按选中环境渲染，避免选中的非下载环境把进度条误藏。
   renderLoop(status);
   renderPublish(status, now);
+  if (fields.publishPreviewPanel.classList.contains('open')) renderPublishPreviewContent(status);
   renderFab(status);
   renderNotice(status);
   renderSameAccount(status); // 同账号铺多环境告警（多环境 fleet；无告警字段时隐藏，零回归）
@@ -1168,6 +1316,7 @@ function applyFleetSnapshot(snap) {
   if (!fleetView.selected || !fleetView.envs.has(fleetView.selected)) fleetView.selected = fleetView.order[0] || null;
   if (fleetView.selected && fleetView.selected !== prevSelected) {
     pubManualOpen = false;
+    closePublishPreview();
     resetPersonaDraft();
     const env = fleetView.envs.get(fleetView.selected);
     if (env && env.status) render(env.status);
@@ -1189,6 +1338,7 @@ function selectEnv(envId) {
   fleetView.selected = envId;
   fleetView.shownEnv = null; // 切到另一个环境：头像三态从头开始，绝不留着旧环境的「已显示」指针
   pubManualOpen = false;
+  closePublishPreview();
   resetPersonaDraft(); // 人设向导每环境独立：切换即清草稿，绝不把 A 的草稿误确认到 B
   window.aidcpEdge.fleetSelect?.(envId);
   const env = fleetView.envs.get(envId);

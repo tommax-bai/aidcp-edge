@@ -119,6 +119,28 @@ test('ui-event-lines: 审批状态推送 → publish 行透传 state/title/code'
   assert.deepEqual(evt.publish, { state: 'pending', title: '候审笔记', code: '#84' });
 });
 
+test('ui-event-lines: 稿件预览转发正文/话题/配图，并限制图片协议与数量', () => {
+  const lines = uiSnapshotToLines({
+    publish: { state: 'pending', title: '洗稿标题', code: '#85' },
+    publishPreview: {
+      recordId: 85,
+      code: '#85',
+      kind: 'rewrite',
+      title: '洗稿标题',
+      content: '正文第一段\n正文第二段',
+      topics: ['生活', '旅行'],
+      images: ['https://cdn.example.com/1.jpg', 'javascript:alert(1)', 'https://cdn.example.com/2.jpg'],
+      contentVersion: 1,
+      updatedAt: 1730000000000,
+    },
+  });
+  const preview = lines.map(parseLine).find((line) => line.kind === 'publishPreview');
+  assert.ok(preview);
+  assert.deepEqual(preview.publishPreview.images, ['https://cdn.example.com/1.jpg', 'https://cdn.example.com/2.jpg']);
+  assert.equal(preview.publishPreview.content, '正文第一段\n正文第二段');
+  assert.equal(preview.publishPreview.contentVersion, 1);
+});
+
 test('ui-event-lines: uiSnapshotToLines forwards account daily usage for Electron summary', () => {
   const lines = uiSnapshotToLines({
     dailyUsage: {

@@ -655,6 +655,7 @@ function makeStatus(provider) {
     account: null,
     presence: { text: '等待启动…', at: new Date().toISOString() },
     publish: null,
+    publishPreview: null,
     kernelPrep: null,
     lastPublish: null,
     // 多环境新增（旧渲染层忽略即可）：有界重起放弃终态 + 同账号铺多环境告警 + 阻断浮层待人工。
@@ -1513,6 +1514,7 @@ function startEdge(handle) {
     edge: 'starting',
     session: 'running',
     publish: null,
+    publishPreview: null,
     respawnGaveUp: false,
     connectedCloudKey: handle.connectedCloudKey || '',
     lastMessage: '正在启动 aidcp-edge…',
@@ -2171,6 +2173,9 @@ function handleEdgeLogLine(handle, message, isError = false) {
       if (evt.publish.state === 'published' && evt.publish.title) {
         next.lastPublish = { title: evt.publish.title, at: next.publish.at };
       }
+    }
+    if (evt.publishPreview && typeof evt.publishPreview === 'object') {
+      next.publishPreview = evt.publishPreview;
     }
     if (evt.lastPublish && typeof evt.lastPublish.title === 'string' && evt.lastPublish.title) {
       // 云端快照回填「上次发布」（edge-companion-ui 8.1）：以云端为准覆盖本地 ui-state；

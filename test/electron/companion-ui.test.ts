@@ -243,6 +243,34 @@ test('发布卡候审：可见、第三节点琥珀、卡内零按钮（审批�
   assert.ok(!($(w, '#pub-foot').textContent ?? '').includes('再次提醒'), '未收到再提醒事件绝不谎称');
 });
 
+test('洗稿稿件预览：发布卡显示查看入口，打开抽屉展示正文/话题/配图且无原稿字段', async () => {
+  const { w } = await boot({
+    publish: { state: 'pending', title: '洗稿标题', code: '#89', at: new Date().toISOString() },
+    publishPreview: {
+      recordId: 89,
+      code: '#89',
+      kind: 'rewrite',
+      title: '洗稿标题',
+      content: '第一段正文\n第二段正文',
+      topics: ['生活方式', '周末去哪儿'],
+      images: ['https://cdn.example.com/1.jpg'],
+      contentVersion: 0,
+      updatedAt: Date.now(),
+    },
+  });
+  assert.equal(hidden($(w, '#pub-preview-link')), false);
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  assert.ok($(w, '#publish-preview-panel').classList.contains('open'));
+  assert.equal($(w, '#publish-preview-kind').textContent, '洗稿稿件');
+  assert.equal($(w, '#publish-preview-title').textContent, '洗稿标题');
+  assert.match($(w, '#publish-preview-content').textContent ?? '', /第一段正文/);
+  assert.match($(w, '#publish-preview-content').textContent ?? '', /#生活方式/);
+  assert.equal($(w, '#publish-preview-content img').getAttribute('src'), 'https://cdn.example.com/1.jpg');
+  assert.doesNotMatch($(w, '#publish-preview-content').textContent ?? '', /原稿|作者|链接/);
+  $(w, '#publish-preview-close').dispatchEvent(new w.Event('click'));
+  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false);
+});
+
 test('发布卡已通过 → 第四节点平静色 + 无需操作', async () => {
   const { w } = await boot({ publish: { state: 'approved', title: 't', at: new Date().toISOString() } });
   const steps = Array.from($(w, '#pub-card').querySelectorAll('.j-step'));
