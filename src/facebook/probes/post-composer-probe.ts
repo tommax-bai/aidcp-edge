@@ -66,11 +66,12 @@ function fbPostDialog(){
   return dialogs[0] || null;
 }
 function fbPostTrigger(){
-  var nodes = Array.from(document.querySelectorAll('button,[role="button"],div[aria-label],span[aria-label],a[role="link"]')).filter(fbPostVisible);
-  var re = /(what('|’)s on your mind|create post|create a post|write something|写点什么|在想什么|发帖|帖子|bạn đang nghĩ gì|crear publicación|crear una publicación|post something)/i;
+  var nodes = Array.from(document.querySelectorAll('[role="region"][aria-label],button,[role="button"],div[aria-label],span[aria-label],a[role="link"]')).filter(fbPostVisible);
+  var re = /(what('|’)s on your mind|create post|create a post|write something|写点什么|在想什么|创建帖子|分享你的新鲜事|bạn đang nghĩ gì|crear publicación|crear una publicación|post something)/i;
   var scored = [];
   for (var i = 0; i < nodes.length; i++) {
     var el = nodes[i];
+    if (el.closest('[role="menu"]')) continue;
     var label = fbPostLabel(el);
     var text = fbPostText(el);
     var hay = label + ' ' + text;
@@ -94,7 +95,7 @@ function fbPostEditor(){
 function fbPostSubmitControl(){
   var root = fbPostDialog() || document;
   var nodes = Array.from(root.querySelectorAll('button,[role="button"],div[aria-label],span[aria-label]')).filter(fbPostVisible);
-  var exact = /^(post|发布|發佈|đăng|publicar|compartir)$/i;
+  var exact = /^(post|发布|發佈|发帖|đăng|publicar|compartir)$/i;
   for (var i = nodes.length - 1; i >= 0; i--) {
     var el = nodes[i];
     var label = (fbPostLabel(el) || fbPostText(el)).replace(/\s+/g, ' ').trim();

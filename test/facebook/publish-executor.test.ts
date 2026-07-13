@@ -28,8 +28,12 @@ class FakeFacebookPublishCdp implements BrowseCdp {
       return {} as T;
     }
     if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
-      this.submitted = true;
-      this.composerOpen = false;
+      if (!this.composerOpen) {
+        this.composerOpen = true;
+      } else {
+        this.submitted = true;
+        this.composerOpen = false;
+      }
       return {} as T;
     }
     if (method !== 'Runtime.evaluate') return {} as T;
@@ -75,8 +79,11 @@ class FakeFacebookPublishCdp implements BrowseCdp {
       return { result: { value: this.composerOpen } } as T;
     }
     if (expression.includes('var el = fbPublishComposerTrigger')) {
-      this.composerOpen = true;
-      return { result: { value: true } } as T;
+      return {
+        result: {
+          value: JSON.stringify({ found: true, x: 100, y: 120 }),
+        },
+      } as T;
     }
     return { result: { value: false } } as T;
   }
@@ -116,6 +123,10 @@ test('FacebookPublishExecutor: opens composer, fills content, uploads image, sub
 
   assert.equal((await executor.dispatch(command('select_mode', { value: 'facebook_personal_timeline' }, 1))).ok, true);
   assert.equal(cdp.composerOpen, true);
+  assert.equal(
+    cdp.calls.some((call) => call.method === 'Input.dispatchMouseEvent' && call.params?.type === 'mouseReleased'),
+    true,
+  );
 
   const filled = await executor.dispatch(command('fill_field', { fieldType: 'content', value: 'hello facebook' }, 2));
   assert.equal(filled.ok, true);
