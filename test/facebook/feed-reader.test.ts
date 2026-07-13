@@ -92,3 +92,39 @@ test('fb-feed: 扫描异常/非数组 → 空数组（绝不臆造卡片）', as
   const cards = await reader.scanCards();
   assert.deepEqual(cards, []);
 });
+
+test('fb-feed: 默认滚动走 650px 多帧手势，wheel 生效后不再补 scrollBy', async () => {
+  let scrollY = 0;
+  const wheels: Array<Record<string, unknown>> = [];
+  let fallbackCalls = 0;
+  const cdp: BrowseCdp = {
+    send: async (method, params: Record<string, unknown> = {}) => {
+      if (method === 'Input.dispatchMouseEvent') {
+        if (params.type === 'mouseWheel') {
+          wheels.push(params);
+          scrollY += Number(params.deltaY);
+        }
+        return {} as never;
+      }
+      if (method !== 'Runtime.evaluate') return {} as never;
+      const expression = String(params.expression ?? '');
+      if (expression.includes('window.scrollBy')) {
+        fallbackCalls += 1;
+        return { result: { value: true } } as never;
+      }
+      if (expression.includes('window.innerWidth')) {
+        return { result: { value: JSON.stringify({ w: 1280, h: 800 }) } } as never;
+      }
+      if (expression.includes('window.scrollY')) {
+        return { result: { value: JSON.stringify({ y: scrollY }) } } as never;
+      }
+      return { result: { value: JSON.stringify(true) } } as never;
+    },
+  };
+  const reader = new FacebookFeedReader({ cdp, random: () => 0.5, sleep: async () => {} });
+  await reader.scrollNext();
+
+  assert.ok(wheels.length >= 8 && wheels.length <= 15, `wheel 帧数 ${wheels.length}`);
+  assert.equal(wheels.reduce((sum, wheel) => sum + Number(wheel.deltaY), 0), 650);
+  assert.equal(fallbackCalls, 0);
+});

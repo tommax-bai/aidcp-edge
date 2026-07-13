@@ -18,6 +18,8 @@ import { evalJson, type BrowseCdp } from '../browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../browse/overlay-monitor.js';
 import { normalizeFacebookPermalinks } from './probes/page-structure.js';
 import type { FacebookConsentAccepter } from './consent.js';
+import { scrollFacebookViewport } from './viewport-scroll.js';
+import type { RandomFn } from '../humanize/index.js';
 
 /** 一张 Facebook feed 卡片（映射 page.cards 的一项）。 */
 export interface FacebookFeedCard {
@@ -48,6 +50,7 @@ export interface FacebookFeedReaderDeps {
   /** cookie 同意浮层拟人接受（feed 前置门之一）。缺省=不处理（退化，可能卡在同意条）。 */
   acceptConsent?: FacebookConsentAccepter;
   sleep?: (ms: number) => Promise<void>;
+  random?: RandomFn;
   logger?: (msg: string) => void;
 }
 
@@ -55,7 +58,7 @@ export interface FacebookFeedReaderOptions {
   /** 导航后等 feed 水合的复探轮数（每轮间隔 pollMs）。FB 渲染 ~7-12s，给足。 */
   hydrateRounds?: number;
   pollMs?: number;
-  /** 一次 scrollNext 的位移（CSS 像素）。 */
+  /** 一次 scrollNext 的基准位移（CSS 像素；手势会在 +/-20% 内抖动）。 */
   scrollDistancePx?: number;
   /** 单次快照最多上报的卡片数。 */
   maxCards?: number;
@@ -64,7 +67,7 @@ export interface FacebookFeedReaderOptions {
 const DEFAULTS: Required<FacebookFeedReaderOptions> = {
   hydrateRounds: 14,
   pollMs: 900,
-  scrollDistancePx: 900,
+  scrollDistancePx: 650,
   maxCards: 12,
 };
 
@@ -154,6 +157,7 @@ export class FacebookFeedReader {
   private readonly overlayMonitor?: OverlayMonitor;
   private readonly acceptConsent?: FacebookConsentAccepter;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly random?: RandomFn;
   private readonly log: (msg: string) => void;
   private readonly opts: Required<FacebookFeedReaderOptions>;
 
@@ -162,6 +166,7 @@ export class FacebookFeedReader {
     this.overlayMonitor = deps.overlayMonitor;
     this.acceptConsent = deps.acceptConsent;
     this.sleep = deps.sleep ?? defaultSleep;
+    this.random = deps.random;
     this.log = deps.logger ?? (() => {});
     this.opts = { ...DEFAULTS, ...options };
   }
@@ -235,26 +240,14 @@ export class FacebookFeedReader {
     return cards;
   }
 
-  /** feed 翻页：window 滚动（FB feed = 窗口滚动，非内层容器）。真 wheel 优先，scrollBy 兜底。 */
+  /** feed 翻页：惯性 wheel 手势；只有实测 document 未动时才一次 JS 兜底。 */
   async scrollNext(): Promise<void> {
-    const distance = this.opts.scrollDistancePx;
-    try {
-      const vp = await evalJson<{ w: number; h: number }>(
-        this.cdp,
-        '(function(){ return JSON.stringify({ w: window.innerWidth||1280, h: window.innerHeight||800 }); })()',
-      ).catch(() => ({ w: 1280, h: 800 }));
-      const cx = Math.round(vp.w / 2);
-      const cy = Math.round(vp.h / 2);
-      await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: cx, y: cy });
-      await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: cx, y: cy, deltaX: 0, deltaY: distance });
-    } catch (err) {
-      this.log(`[fb-feed] wheel 滚动中止（本轮跳过，不中断）：${(err as Error).message}`);
-    }
-    try {
-      await evalJson<unknown>(this.cdp, `(function(){ window.scrollBy(0, ${Math.round(distance)}); return "1"; })()`);
-    } catch {
-      /* best-effort */
-    }
+    await scrollFacebookViewport(this.cdp, {
+      distancePx: this.opts.scrollDistancePx,
+      random: this.random,
+      sleep: this.sleep,
+      logger: this.log,
+    });
     await this.sleep(this.opts.pollMs);
   }
 

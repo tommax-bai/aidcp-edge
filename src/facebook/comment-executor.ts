@@ -29,6 +29,7 @@ import {
   type FacebookPageStructureSummary,
 } from './probes/page-structure.js';
 import { isUrlAllowedByTargetDescriptor } from '../platform/driver.js';
+import { scrollFacebookViewport } from './viewport-scroll.js';
 
 /**
  * Facebook 评论编辑框的 aria-label / placeholder 识别（跨 UI 语言 + 文案变体）。
@@ -206,6 +207,7 @@ export class FacebookCommentExecutor {
   private readonly overlayMonitor?: OverlayMonitor;
   private readonly acceptConsent: FacebookConsentAccepter;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly random?: () => number;
   private readonly log: (msg: string) => void;
   private readonly opts: Required<FacebookCommentExecutorOptions>;
 
@@ -215,6 +217,7 @@ export class FacebookCommentExecutor {
     this.overlayMonitor = deps.overlayMonitor;
     this.acceptConsent = deps.acceptConsent ?? defaultFacebookConsentAccepter();
     this.sleep = deps.sleep ?? defaultSleep;
+    this.random = deps.random;
     this.log = deps.logger ?? (() => {});
     this.opts = { ...DEFAULTS, ...options };
   }
@@ -575,24 +578,14 @@ export class FacebookCommentExecutor {
     }
   }
 
-  /** 视口滚动催拉懒加载：真 wheel 事件优先，JS scrollBy 兜底。 */
+  /** 视口滚动催拉懒加载：复用 FB 惯性手势，且不在 wheel 已生效后双滚。 */
   private async scrollViewport(distance: number): Promise<void> {
-    try {
-      await this.cdp.send('Input.dispatchMouseEvent', {
-        type: 'mouseWheel',
-        x: 400,
-        y: 400,
-        deltaX: 0,
-        deltaY: distance,
-      });
-    } catch {
-      /* 桩/无 Input 域时忽略 */
-    }
-    try {
-      await evalRaw<unknown>(this.cdp, `window.scrollBy(0, ${Math.round(distance)})`);
-    } catch {
-      /* best-effort */
-    }
+    await scrollFacebookViewport(this.cdp, {
+      distancePx: distance,
+      random: this.random,
+      sleep: this.sleep,
+      logger: this.log,
+    });
     await this.sleep(500);
   }
 }

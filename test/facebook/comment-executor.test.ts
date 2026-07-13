@@ -83,6 +83,7 @@ class FakeCdp implements BrowseCdp {
   backspaces = 0;
   enters = 0;
   verifyCalls = 0;
+  scrollY = 0;
   constructor(private readonly cfg: FakeConfig = {}) {}
 
   async send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
@@ -95,7 +96,10 @@ class FakeCdp implements BrowseCdp {
       return {} as T;
     }
     if (method === 'Input.dispatchMouseEvent') {
-      if (params.type === 'mouseWheel') this.scrolls++;
+      if (params.type === 'mouseWheel') {
+        this.scrolls++;
+        this.scrollY += Number(params.deltaY);
+      }
       if (params.type === 'mousePressed') this.clicks.push({ x: Number(params.x), y: Number(params.y) });
       return {} as T;
     }
@@ -124,6 +128,8 @@ class FakeCdp implements BrowseCdp {
       if (expr.includes('blockTexts')) {
         return val(JSON.stringify(this.cfg.postContent ?? { postText: null, comments: [] }));
       }
+      if (expr.includes('window.innerWidth')) return val(JSON.stringify({ w: 1280, h: 800 }));
+      if (expr.includes('window.scrollY')) return val(JSON.stringify({ y: this.scrollY }));
       if (expr.includes('window.scrollBy')) return val(undefined);
       if (expr.includes('focused:focused')) {
         return val(JSON.stringify(this.cfg.focus ?? { found: true, focused: true, permissionGated: false }));
@@ -289,7 +295,7 @@ test('fb-executor: 评论框在首屏下、滚动催拉后就绪（F1 补丁①�
   const r = await ex.openPost('https://www.facebook.com/groups/1/posts/2/');
   assert.equal(r.ok, true);
   assert.equal(r.editorReady, true);
-  assert.ok(cdp.scrolls >= 1, '应发生过滚动催拉');
+  assert.ok(cdp.scrolls >= 8 && cdp.scrolls <= 15, `应走一次多帧惯性滚动，实际 ${cdp.scrolls} 帧`);
 });
 
 test('fb-executor: 开帖读了再写——回读帖子正文 + 他人评论', async () => {
