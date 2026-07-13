@@ -124,6 +124,30 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
 const FEED_CARD_HYDRATION_RETRY_ROUNDS = 6;
 const FEED_CARD_HYDRATION_RETRY_MS = 700;
 
+/**
+ * 把帖子详情压成活动流可读的一行：仅使用已成功读取的作者和正文，清掉换行并按字符截断。
+ * 元数据缺失时宁可退回通用文案，绝不把 permalink / noteId 当作可读标题展示。
+ */
+function clipFacebookUiText(value: string | undefined, max: number): string {
+  const normalized = String(value ?? '').replace(/\s+/g, ' ').trim();
+  const characters = Array.from(normalized);
+  return characters.length > max ? `${characters.slice(0, max).join('')}…` : normalized;
+}
+
+function facebookReadUiText(payload: NoteDetailPayload): Pick<FacebookCompanionUiEvent, 'sentence' | 'presence'> {
+  const excerpt = clipFacebookUiText(payload.content || payload.title, 24);
+  const author = clipFacebookUiText(payload.author, 18);
+  if (excerpt && author) {
+    return {
+      sentence: `打开「${excerpt}」 · ${author}`,
+      presence: `正在读 ${author} 的「${excerpt}」…`,
+    };
+  }
+  if (excerpt) return { sentence: `打开「${excerpt}」`, presence: `正在认真阅读「${excerpt}」…` };
+  if (author) return { sentence: `打开了 ${author} 的一条内容`, presence: `正在认真阅读 ${author} 的一条内容…` };
+  return { sentence: '打开了一条内容', presence: '正在认真阅读一条内容…' };
+}
+
 export class FacebookBrowseSession implements EdgeBrowseSession {
   private readonly cdp: BrowseCdp;
   private readonly client: FacebookSessionClient;
@@ -380,11 +404,11 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     }
     else if (r.type === 'detail') {
       this.client.reportNoteDetail(r.payload);
+      const readText = facebookReadUiText(r.payload);
       this.emitCompanionUiEvent({
         kind: 'activity',
         type: 'note_open',
-        sentence: '打开了一条内容',
-        presence: '正在认真阅读一条内容…',
+        ...readText,
         loopStage: 'read',
         statsDelta: { views: 1 },
       });

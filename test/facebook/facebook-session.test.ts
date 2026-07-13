@@ -217,12 +217,40 @@ test('confirmed Facebook session/read/like → structured companion UI events；
     .filter((line) => line.startsWith('[ui-event] '))
     .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as Record<string, unknown>);
   assert.deepEqual(events.map((event) => event.type), ['session_start', 'feed', 'note_open', 'like']);
+  assert.equal(events[2].sentence, '打开「the post body」 · Alice');
+  assert.equal(events[2].presence, '正在读 Alice 的「the post body」…');
   assert.deepEqual(events[2].statsDelta, { views: 1 });
   assert.deepEqual(events[3].statsDelta, { likes: 1 });
 
   const shadow = makeSession({ mode: 'shadow' });
   await shadow.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'x' }));
   assert.equal(shadow.logs.some((line) => line.includes('"type":"like"')), false, 'shadow 不得伪报点赞成功');
+});
+
+test('Facebook read UI event: 作者或正文缺失时诚实降级，不泄露 permalink', async () => {
+  const h = makeSession({ mode: 'on', detail: { body: '', author: undefined } });
+  await h.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  const event = h.logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as Record<string, unknown>)
+    .find((line) => line.type === 'note_open');
+  assert.equal(event?.sentence, '打开了一条内容');
+  assert.equal(event?.presence, '正在认真阅读一条内容…');
+  assert.ok(!String(event?.sentence).includes('pfbid0ONE'));
+});
+
+test('Facebook read UI event: 正文与昵称规范化后按活动流宽度截断', async () => {
+  const h = makeSession({
+    mode: 'on',
+    detail: { body: '  01234567890123456789012345\nnext ', author: ' Alice\nSmith ' },
+  });
+  await h.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  const event = h.logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as Record<string, unknown>)
+    .find((line) => line.type === 'note_open');
+  assert.equal(event?.sentence, '打开「012345678901234567890123…」 · Alice Smith');
+  assert.equal(event?.presence, '正在读 Alice Smith 的「012345678901234567890123…」…');
 });
 
 test('page.scroll → 翻页扫卡 page.cards（collectCount=0）', async () => {
