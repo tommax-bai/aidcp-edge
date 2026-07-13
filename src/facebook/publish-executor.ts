@@ -47,11 +47,12 @@ function fbPublishDialog(){
   return dialogs[0] || null;
 }
 function fbPublishComposerTrigger(){
-  var nodes = Array.from(document.querySelectorAll('button,[role="button"],div[aria-label],span[aria-label],a[role="link"]')).filter(fbPublishVisible);
-  var re = /(what('|’)s on your mind|create post|create a post|write something|写点什么|在想什么|发帖|帖子|bạn đang nghĩ gì|crear publicación|crear una publicación|post something)/i;
+  var nodes = Array.from(document.querySelectorAll('[role="region"][aria-label],button,[role="button"],div[aria-label],span[aria-label],a[role="link"]')).filter(fbPublishVisible);
+  var re = /(what('|’)s on your mind|create post|create a post|write something|写点什么|在想什么|创建帖子|分享你的新鲜事|bạn đang nghĩ gì|crear publicación|crear una publicación|post something)/i;
   var scored = [];
   for (var i = 0; i < nodes.length; i++) {
     var el = nodes[i];
+    if (el.closest('[role="menu"]')) continue;
     var label = fbPublishLabel(el);
     var text = fbPublishText(el);
     var hay = label + ' ' + text;
@@ -84,12 +85,12 @@ function fbPublishHasImageAttachment(){
   var root = fbPublishDialog() || document;
   if (Array.from(root.querySelectorAll('img[src], video')).some(function(el){ return fbPublishVisible(el); })) return true;
   var body = fbPublishText(root);
-  return /(remove photo|移除照片|删除照片|photo attached|已添加照片|ảnh)/i.test(body);
+  return /(remove (photo|attachment)|移除(照片|帖子附件)|删除照片|photo attached|attachment attached|已添加照片|已添加附件|ảnh)/i.test(body);
 }
 function fbPublishSubmitControl(){
   var root = fbPublishDialog() || document;
   var nodes = Array.from(root.querySelectorAll('button,[role="button"],div[aria-label],span[aria-label]')).filter(fbPublishVisible);
-  var exact = /^(post|发布|發佈|đăng|publicar|compartir)$/i;
+  var exact = /^(post|发布|發佈|发帖|đăng|publicar|compartir)$/i;
   for (var i = nodes.length - 1; i >= 0; i--) {
     var el = nodes[i];
     var label = fbPublishLabel(el) || fbPublishText(el);
@@ -202,11 +203,14 @@ export class FacebookPublishExecutor {
     try {
       const readyBefore = await this.editorReady();
       if (!readyBefore) {
-        const clicked = await evalRaw<boolean>(
+        const target = await evalJson<{ found: boolean; x: number | null; y: number | null }>(
           this.cdp,
-          `(function(){${FB_PUBLISH_HELPERS_JS} var el = fbPublishComposerTrigger(); if (!el) return false; try { el.scrollIntoView({ block:'center' }); } catch(e) {} try { el.click(); } catch(e) { return false; } return true; })()`,
+          `(function(){${FB_PUBLISH_HELPERS_JS} var el = fbPublishComposerTrigger(); if (!el) return JSON.stringify({ found:false, x:null, y:null }); try { el.scrollIntoView({ block:'center' }); } catch(e) {} var r = el.getBoundingClientRect(); return JSON.stringify({ found:true, x:Math.round(r.left + r.width / 2), y:Math.round(r.top + r.height / 2) }); })()`,
         );
-        if (!clicked) return { ...base(payload), ok: false, error: 'no_target' };
+        if (!target.found || typeof target.x !== 'number' || typeof target.y !== 'number') {
+          return { ...base(payload), ok: false, error: 'no_target' };
+        }
+        await dispatchClick(this.cdp, target.x, target.y, { overshoot: false, jitter: 0 });
       }
       const ready = await this.waitUntil(this.opts.composerTimeoutMs, () => this.editorReady());
       return ready ? { ...base(payload), ok: true } : { ...base(payload), ok: false, error: 'post_validate_failed' };

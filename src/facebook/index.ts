@@ -17,4 +17,5 @@ export * from './probes/fingerprint.js';
 export * from './probes/gated-submit.js';
 export * from './probes/page-structure.js';
 export * from './probes/post-composer-probe.js';
+export * from './probes/post-media-probe.js';
 export * from './probes/storage-summary.js';

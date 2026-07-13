@@ -41,6 +41,7 @@ import {
   facebookPlatformDriver,
   probeFacebookCommentEditorReadOnly,
   probeFacebookPostComposerReadOnly,
+  probeFacebookPostMediaReadOnly,
   readFacebookIdentity,
   classifyFacebookOverlay,
   runFacebookGatedSubmitProbe,
@@ -52,6 +53,8 @@ import {
   type FacebookStorageSummary,
   type FacebookFingerprintSummary,
 } from '../../src/facebook/index.js';
+import { CdpFileInputSetter } from '../../src/cdp/file-input-setter.js';
+import { ImageUploader } from '../../src/flows/image-uploader.js';
 
 interface SafeIdentitySummary {
   ok: boolean;
@@ -79,6 +82,7 @@ interface Phase0ProbeReport {
   pageStructure: FacebookPageStructureSummary;
   editorProbe?: FacebookEditorProbeResult;
   postComposerProbe?: FacebookPostComposerProbeResult;
+  postMediaProbe?: Awaited<ReturnType<typeof probeFacebookPostMediaReadOnly>>;
   gatedSubmitPreflight: FacebookGatedSubmitPreflightResult;
   gatedSubmitProbe?: FacebookGatedSubmitProbeResult;
   blockingProbes: BlockingProbeResult[];
@@ -182,6 +186,8 @@ async function main(): Promise<void> {
   const waitMs = Number(process.env.AIDCP_FB_WAIT_MS ?? 3500);
   const runEditorProbe = boolEnv('AIDCP_FB_RUN_EDITOR_PROBE');
   const runPostComposerProbe = boolEnv('AIDCP_FB_RUN_POST_COMPOSER_PROBE');
+  const runPostMediaProbe = boolEnv('AIDCP_FB_RUN_POST_MEDIA_PROBE');
+  const mediaProbeImageUrl = process.env.AIDCP_FB_MEDIA_PROBE_IMAGE_URL?.trim();
   const runF2 = boolEnv('AIDCP_FB_RUN_F2');
   const f2Urls = runF2 ? splitUrls(process.env.AIDCP_FB_F2_URLS) : [];
   const keepBrowser = boolEnv('AIDCP_FB_KEEP_BROWSER');
@@ -197,6 +203,12 @@ async function main(): Promise<void> {
   }
   if (executeGatedSubmit && runF2) {
     throw new Error('AIDCP_FB_EXECUTE_GATED_SUBMIT=1 cannot be combined with AIDCP_FB_RUN_F2');
+  }
+  if (runPostMediaProbe && !runPostComposerProbe) {
+    throw new Error('AIDCP_FB_RUN_POST_MEDIA_PROBE=1 requires AIDCP_FB_RUN_POST_COMPOSER_PROBE=1');
+  }
+  if (runPostMediaProbe && !mediaProbeImageUrl) {
+    throw new Error('AIDCP_FB_RUN_POST_MEDIA_PROBE=1 requires AIDCP_FB_MEDIA_PROBE_IMAGE_URL');
   }
 
   const provider = selectProvider(targetUrl, userId);
@@ -227,6 +239,43 @@ async function main(): Promise<void> {
     const pageStructure = await collectFacebookPageStructure(session.cdp);
     const editorProbe = runEditorProbe ? await probeFacebookCommentEditorReadOnly(session.cdp) : undefined;
     const postComposerProbe = runPostComposerProbe ? await probeFacebookPostComposerReadOnly(session.cdp) : undefined;
+    const postMediaProbe = runPostMediaProbe
+      ? await probeFacebookPostMediaReadOnly(
+        session.cdp,
+        new ImageUploader({
+          fileInputSetter: new CdpFileInputSetter(session.cdp, {
+            inputSelector: String.raw`(() => {
+              const visible = (el) => {
+                if (!el || !el.getBoundingClientRect) return false;
+                const r = el.getBoundingClientRect();
+                const s = window.getComputedStyle ? getComputedStyle(el) : null;
+                return r.width > 0 && r.height > 0 && (!s || (s.display !== 'none' && s.visibility !== 'hidden'));
+              };
+              const dialogs = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).filter(visible);
+              const root = dialogs[0] || document;
+              const inputs = Array.from(root.querySelectorAll('input[type=file]'));
+              return inputs.find((input) => /image|jpg|jpeg|png|webp|gif/i.test(input.getAttribute('accept') || '')) || inputs[0] || null;
+            })()`,
+          }),
+          dom: session.dom,
+          tempDirPrefix: 'aidcp-fb-media-probe-',
+          hasThumbnail: (root) => {
+            try {
+              const labels = Array.from(root.querySelectorAll('[aria-label],[title]')).map((el) =>
+                `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`,
+              );
+              if (labels.some((label) => /(remove|delete|移除|删除|刪除).{0,12}(photo|image|attachment|照片|图片|圖片|附件)/i.test(label))) return true;
+              const docBody = 'body' in root ? root.body : null;
+              const text = (docBody?.innerText ?? root.textContent ?? '').replace(/\s+/g, ' ');
+              return /(photo attached|image attached|attachment attached|已添加照片|已加入照片|已添加图片|已添加附件|đã thêm ảnh)/i.test(text);
+            } catch {
+              return false;
+            }
+          },
+        }),
+        { imageUrl: mediaProbeImageUrl! },
+      )
+      : undefined;
     const gatedSubmitPreflight = await facebookGatedSubmitPreflight(session.cdp, {
       enabled: boolEnv('AIDCP_FB_GATED_SUBMIT'),
       disposableAccountConfirmed: boolEnv('AIDCP_FB_DISPOSABLE_CONFIRMED'),
@@ -257,6 +306,7 @@ async function main(): Promise<void> {
       pageStructure,
       ...(editorProbe ? { editorProbe } : {}),
       ...(postComposerProbe ? { postComposerProbe } : {}),
+      ...(postMediaProbe ? { postMediaProbe } : {}),
       gatedSubmitPreflight,
       ...(gatedSubmitProbe ? { gatedSubmitProbe } : {}),
       blockingProbes,

@@ -517,10 +517,10 @@ async function main(): Promise<void> {
         const labels = Array.from(root.querySelectorAll('[aria-label],[title]')).map((el) =>
           `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`,
         );
-        if (labels.some((label) => /(remove|delete|移除|删除|刪除).{0,12}(photo|image|照片|图片|圖片)/i.test(label))) return true;
+        if (labels.some((label) => /(remove|delete|移除|删除|刪除).{0,12}(photo|image|attachment|照片|图片|圖片|附件)/i.test(label))) return true;
         const docBody = 'body' in root ? root.body : null;
         const text = (docBody?.innerText ?? root.textContent ?? '').replace(/\s+/g, ' ');
-        return /(photo attached|image attached|已添加照片|已加入照片|已添加图片|đã thêm ảnh)/i.test(text);
+        return /(photo attached|image attached|attachment attached|已添加照片|已加入照片|已添加图片|已添加附件|đã thêm ảnh)/i.test(text);
       } catch {
         return false;
       }
