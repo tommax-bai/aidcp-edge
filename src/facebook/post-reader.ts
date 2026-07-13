@@ -50,7 +50,8 @@ export interface FacebookPostReaderOptions {
 
 const DEFAULTS: Required<FacebookPostReaderOptions> = {
   settleMs: 2_500,
-  surfaceProbeRounds: 8,
+  // Facebook 详情 article 的水合通常晚于 feed，真机探针观察到 7-12s；留出约 10s 探测窗口，避免误报 open_failed。
+  surfaceProbeRounds: 14,
   pollMs: 700,
   maxComments: 6,
 };
