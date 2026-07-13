@@ -12,6 +12,8 @@ export interface EdgeTaskBrowseGate {
 
 export interface EdgeTaskCoordinatorOptions {
   browse: EdgeTaskBrowseGate;
+  /** 浏览器控制面是否可安全接管。false 时必须快速明确拒绝，不能占住普通浏览再等云端超时。 */
+  canAcquire?: () => boolean;
   onAcquired: (payload: EdgeTaskAcquiredPayload) => void;
   onReleased: (payload: EdgeTaskReleasedPayload) => void;
   logger?: (message: string) => void;
@@ -51,6 +53,7 @@ const MIN_ACQUIRE_TIMEOUT_MS = 1;
  */
 export class EdgeTaskCoordinator {
   private readonly browse: EdgeTaskBrowseGate;
+  private readonly canAcquire: () => boolean;
   private readonly onAcquired: (payload: EdgeTaskAcquiredPayload) => void;
   private readonly onReleased: (payload: EdgeTaskReleasedPayload) => void;
   private readonly logger: (message: string) => void;
@@ -65,6 +68,7 @@ export class EdgeTaskCoordinator {
 
   constructor(options: EdgeTaskCoordinatorOptions) {
     this.browse = options.browse;
+    this.canAcquire = options.canAcquire ?? (() => true);
     this.onAcquired = options.onAcquired;
     this.onReleased = options.onReleased;
     this.logger = options.logger ?? (() => {});
@@ -86,6 +90,12 @@ export class EdgeTaskCoordinator {
     if (this.queue.some((entry) => entry.payload.taskId === payload.taskId)) return;
     if (this.terminal.has(payload.taskId)) {
       this.onReleased({ taskId: payload.taskId, reason: 'duplicate' });
+      return;
+    }
+    if (!this.canAcquire()) {
+      this.rememberTerminal(payload.taskId, 'cdp_unhealthy');
+      this.onReleased({ taskId: payload.taskId, reason: 'cdp_unhealthy' });
+      this.logger(`[task] rejected taskId=${payload.taskId} reason=cdp_unhealthy`);
       return;
     }
     const queued: QueuedAcquire = { payload: this.normalise(payload), order: this.order++ };
@@ -116,6 +126,7 @@ export class EdgeTaskCoordinator {
 
   /** 当前业务命令是否拥有页面写权。普通浏览仅在协调器完全空闲时允许。 */
   canExecute(taskId?: string): boolean {
+    if (!this.canAcquire()) return false;
     if (this.active) return !!taskId && this.active.payload.taskId === taskId;
     if (this.quiescing || this.queue.length > 0 || this.browseBlocked) return false;
     return !taskId;
@@ -133,6 +144,13 @@ export class EdgeTaskCoordinator {
 
   get blocksBrowse(): boolean {
     return this.browseBlocked || this.quiescing || !!this.active || this.queue.length > 0;
+  }
+
+  /** CDP 软重连已完成后的恢复钩子；只在没有既有任务 owner 时解除此前让位留下的 browse 冻结。 */
+  resumeAfterControlRecovery(): void {
+    if (!this.canAcquire() || this.active || this.quiescing || this.queue.length > 0 || this.browseBlocked) return;
+    this.browseBlocked = true;
+    void this.resumeBrowseIfIdle();
   }
 
   /** 云端连接/进程关闭时本地立即作废全部旧所有权。 */
@@ -195,6 +213,12 @@ export class EdgeTaskCoordinator {
 
   private async drain(): Promise<void> {
     if (this.active || this.quiescing) return;
+    if (!this.canAcquire()) {
+      this.rejectQueuedForUnhealthyCdp();
+      // 浏览器控制未恢复时绝不能为了清理租约而调用 resumeAfterTask；那会再次触碰不可信的页面。
+      this.browseBlocked = false;
+      return;
+    }
     if (this.queue.length === 0) {
       await this.resumeBrowseIfIdle();
       return;
@@ -207,6 +231,12 @@ export class EdgeTaskCoordinator {
       this.logger(`[task] quiesce failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       this.quiescing = false;
+    }
+    if (!this.canAcquire()) {
+      this.rejectQueuedForUnhealthyCdp();
+      // 等 cdp.control_recovered 通过 resumeAfterControlRecovery() 再恢复浏览。
+      this.browseBlocked = false;
+      return;
     }
     // 高优先级申请可能在 quiesce 等待期间到达；到安全边界后重新选队头。
     const next = this.pickNext();
@@ -268,5 +298,17 @@ export class EdgeTaskCoordinator {
     if (this.terminal.size <= 256) return;
     const first = this.terminal.keys().next().value as string | undefined;
     if (first) this.terminal.delete(first);
+  }
+
+  /** CDP 在让位过程中失去可靠控制时，所有尚未授予的任务都必须即时显式失败。 */
+  private rejectQueuedForUnhealthyCdp(): void {
+    const queued = this.queue;
+    this.queue = [];
+    for (const entry of queued) {
+      this.clearAcquireExpiry(entry);
+      this.rememberTerminal(entry.payload.taskId, 'cdp_unhealthy');
+      this.onReleased({ taskId: entry.payload.taskId, reason: 'cdp_unhealthy' });
+      this.logger(`[task] rejected taskId=${entry.payload.taskId} reason=cdp_unhealthy`);
+    }
   }
 }

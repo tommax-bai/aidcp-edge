@@ -378,6 +378,10 @@ export class BrowseSession {
 
   /** CDP 断线重连：等待重连结果的 waiter（reconnected→true / unrecoverable→false） */
   private cdpReconnectWaiters: Array<(ok: boolean) => void> = [];
+  /** 慢 CDP 输入触发的软恢复完成后，必须重报一次当前页面，不沿用恢复前的 DOM/坐标快照。 */
+  private cdpControlRecoveryRefreshPending = false;
+  /** 同一轮 CDP 恢复只允许一个续跑/重报，命令异常恢复与生命周期回调会在此汇合。 */
+  private cdpResumePromise: Promise<void> | null = null;
   /** CDP 生命周期事件订阅的退订句柄（start 订阅，结束时退订） */
   private cdpUnsub: Array<() => void> = [];
 
@@ -755,8 +759,10 @@ export class BrowseSession {
     const on = this.deps.cdp.on?.bind(this.deps.cdp);
     if (!on) return;
     this.cdpUnsub.push(
+      on('cdp.control_recovering', () => this.onCdpControlRecovering()),
       on('cdp.reconnected', () => this.onCdpReconnected()),
       on('cdp.unrecoverable', () => this.onCdpUnrecoverable()),
+      on('cdp.control_unavailable', () => this.onCdpControlUnavailable()),
     );
   }
 
@@ -766,20 +772,49 @@ export class BrowseSession {
     // 同处清最小间隔锚点：重连页面已变、间隔重置，首操作跳过间隔（设计 §4.3）。
     this.lastActionEndAt = null;
     this.logger('[browse] CDP 已重连，准备续跑');
+    // 慢输入的软恢复可能发生在一条命令的最后一个 CDP 调用之后；这时没有
+    // CdpDisconnectedError 可驱动 loop 续跑。仍要主动按新连接上的真实页面重报，
+    // 让云端重新决定下一步，而不是继续使用恢复前的页面判断。
+    if (this.cdpControlRecoveryRefreshPending && this.running && !this.stopRequested && !this.closing) {
+      this.cdpControlRecoveryRefreshPending = false;
+      void this.resumeAfterReconnect();
+    }
     const waiters = this.cdpReconnectWaiters;
     this.cdpReconnectWaiters = [];
     for (const w of waiters) w(true);
+  }
+
+  private onCdpControlRecovering(): void {
+    // 软恢复前已有的坐标/DOM 快照不可跨新 CDP 连接使用；普通新命令会由 task coordinator 的
+    // control readiness 闸拦住，此处只清理已在本地排队、尚未开始的旧命令。
+    const cancelled = this.commandQueue.length;
+    this.commandQueue = [];
+    this.cdpControlRecoveryRefreshPending = true;
+    if (cancelled > 0) this.logger(`[browse] CDP 控制恢复中，取消 ${cancelled} 条未开始浏览命令`);
   }
 
   private onCdpUnrecoverable(): void {
     // 重连耗尽：停止上报、退出循环（诚实失败），交云端 idle 看门狗兜底结束会话；绝不假装在跑。
     // CDP 死局是终态：置 closing，绝不让云端迟到命令（如看门狗 nudge）唤醒重启到一个已死的 CDP 上。
     this.closing = true;
+    this.cdpControlRecoveryRefreshPending = false;
     this.logger('[browse] CDP 重连不可恢复，停止浏览循环（交云端看门狗兜底）');
     const waiters = this.cdpReconnectWaiters;
     this.cdpReconnectWaiters = [];
     for (const w of waiters) w(false);
     this.stopForReason('cdp_unrecoverable');
+  }
+
+  private onCdpControlUnavailable(): void {
+    // 输入超时的真实结果不确定：不能继续执行队列里的页面写操作，也不能在同一进程内自动重放。
+    const cancelled = this.commandQueue.length;
+    this.commandQueue = [];
+    this.taskBlocked = true;
+    this.taskBlockEpoch++;
+    this.closing = true;
+    this.cdpControlRecoveryRefreshPending = false;
+    this.logger(`[browse] CDP 输入控制不可用，停止浏览并取消 ${cancelled} 条未开始命令；请重启浏览器客户端后恢复`);
+    this.stopForReason('cdp_control_unavailable');
   }
 
   /** 云端 WS 断开时丢弃旧连接上已经排队、尚未执行的云端命令，避免重连后盲目重放。 */
@@ -807,6 +842,7 @@ export class BrowseSession {
 
   /** 最后一个独占任务释放：回真实 feed/search，再解除冻结并重报快照。 */
   async resumeAfterTask(): Promise<void> {
+    if (this.closing) return;
     if (!this.taskBlocked) return;
     const resumeEpoch = this.taskBlockEpoch;
     if (!this.running) {
@@ -864,6 +900,17 @@ export class BrowseSession {
    * 再按当前页确保回 feed 并重报快照让云端重判。不重放断连前的 in-flight 命令（坐标可能已失效）。
    */
   private async resumeAfterReconnect(): Promise<void> {
+    if (this.cdpResumePromise) return this.cdpResumePromise;
+    const work = this.resumeAfterReconnectOnce();
+    this.cdpResumePromise = work;
+    try {
+      return await work;
+    } finally {
+      if (this.cdpResumePromise === work) this.cdpResumePromise = null;
+    }
+  }
+
+  private async resumeAfterReconnectOnce(): Promise<void> {
     try {
       await this.waitWhileBlocked();
       if (this.stopRequested) return;
@@ -1158,6 +1205,8 @@ export class BrowseSession {
           await this.resumeAfterReconnect();
           continue;
         }
+        // 输入超时会先同步宣告 control unavailable 并请求终止；此处不得再把已请求停止的会话翻成未处理异常。
+        if (this.stopRequested) return;
         throw err; // 其他业务异常保持现状（冒泡 → 会话结束）
       }
     }

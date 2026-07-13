@@ -1518,6 +1518,72 @@ test('browse-session: cdp.unrecoverable → 停止浏览循环（诚实失败，
   assert.equal(sess.isRunning(), false, 'unrecoverable 应干净停止会话');
 });
 
+test('browse-session: 输入控制不可用 → 停止浏览并丢弃未开始命令，不能在同一进程自动重放', async () => {
+  const h = makeHarness();
+  const emit = withCdpEvents(h);
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  (sess as unknown as { commandQueue: Envelope[] }).commandQueue = [
+    makeEnvelope('page.scroll', 'stale-after-timeout', 0, { reason: 'unsafe' }),
+  ];
+  emit('cdp.control_unavailable');
+  await Promise.race([
+    done,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('control unavailable 未能停止会话')), 1500)),
+  ]);
+  assert.equal(sess.isRunning(), false);
+  assert.equal((sess as unknown as { commandQueue: Envelope[] }).commandQueue.length, 0);
+});
+
+test('browse-session: CDP 软恢复开始时丢弃本地旧浏览队列，避免跨连接复用坐标', async () => {
+  const h = makeHarness();
+  const emit = withCdpEvents(h);
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  (sess as unknown as { commandQueue: Envelope[] }).commandQueue = [
+    makeEnvelope('page.scroll', 'queued-before-reconnect', 0, { reason: 'stale' }),
+  ];
+  emit('cdp.control_recovering');
+  assert.equal((sess as unknown as { commandQueue: Envelope[] }).commandQueue.length, 0);
+  await sess.onCloudCommand(makeEnvelope('session.end', 'end-after-recovery', 0, { reason: 'done' }));
+  await done;
+});
+
+test('browse-session: 慢输入软恢复完成后主动重报当前页面，且不与命令恢复重复续跑', async () => {
+  const h = makeHarness();
+  const emit = withCdpEvents(h);
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  const before = h.reportedCards.length;
+  emit('cdp.control_recovering');
+  emit('cdp.reconnected');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(h.reportedCards.length, before + 1, '软恢复完成后应仅重报一次当前 page.cards');
+  await sess.onCloudCommand(makeEnvelope('session.end', 'end-after-soft-recovery', 0, { reason: 'done' }));
+  await done;
+});
+
+test('browse-session: 输入超时触发的终止与原子操作报错并发时，循环干净结束而非抛未处理异常', async () => {
+  const h = makeHarness();
+  const emit = withCdpEvents(h);
+  h.deps.scroller = {
+    ...h.deps.scroller,
+    scrollNext: async () => {
+      emit('cdp.control_unavailable');
+      throw new Error('CDP 命令超时: Input.dispatchMouseEvent');
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  await sess.onCloudCommand(makeEnvelope('browse.scroll', 'timeout-in-flight', 0, { reason: 'unsafe' }));
+  await assert.doesNotReject(done);
+  assert.equal(sess.isRunning(), false);
+});
+
 test('overlayMonitor 提交前复检: like 命中 captcha → 放弃点击并上报 blocked_by_captcha', async () => {
   const h = makeHarness();
   let clickCount = 0;

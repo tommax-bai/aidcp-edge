@@ -83,6 +83,12 @@ export interface CdpReconnectOptions {
 export interface CdpClientOptions {
   /** 命令超时（毫秒） */
   timeoutMs?: number;
+  /** 单次输入控制命令超过此时长仍成功时，计为一次 CDP 迟滞（默认 2500ms）。 */
+  slowInputMs?: number;
+  /** 连续多少次输入迟滞后主动重连并重新初始化 CDP（默认 3）。 */
+  slowInputStreak?: number;
+  /** 注入时钟（测试/观测输入命令耗时）。 */
+  now?: () => number;
   /**
    * WebSocket 工厂。默认用全局 WebSocket（Node>=22 / 浏览器）。
    * Node20 环境可传入基于 `ws` 包的适配器。
@@ -96,7 +102,23 @@ interface Pending {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  method: string;
+  startedAt: number;
 }
+
+type CdpControlState = 'healthy' | 'recovering' | 'unavailable';
+
+interface CdpControlEvent {
+  state: CdpControlState;
+  reason: 'transport_closed' | 'slow_input' | 'input_timeout' | 'recovery_exhausted' | 'recovery_not_configured';
+  /** 同一轮 CDP 控制恢复/不可用事件的关联编号，仅进程内有效。 */
+  recoveryId?: number;
+  method?: string;
+  durationMs?: number;
+}
+
+const DEFAULT_SLOW_INPUT_MS = 2_500;
+const DEFAULT_SLOW_INPUT_STREAK = 3;
 
 /** 默认 WebSocket 工厂：使用运行时全局 WebSocket */
 function defaultWsFactory(url: string): MinimalWebSocket {
@@ -115,17 +137,26 @@ export class CdpClient {
   private readonly pending = new Map<number, Pending>();
   private readonly listeners = new Map<string, Set<CdpEventListener>>();
   private readonly timeoutMs: number;
+  private readonly slowInputMs: number;
+  private readonly slowInputStreak: number;
+  private readonly now: () => number;
   private readonly wsFactory: WebSocketFactory;
   private connected = false;
   private readonly reconnectOpts?: CdpReconnectOptions;
   private intentionalClose = false;
   private reconnecting = false;
+  private controlState: CdpControlState = 'healthy';
+  private consecutiveSlowInputs = 0;
+  private recoveryId = 0;
 
   constructor(
     private wsUrl: string,
     options: CdpClientOptions = {},
   ) {
     this.timeoutMs = options.timeoutMs ?? 10_000;
+    this.slowInputMs = Math.max(1, options.slowInputMs ?? DEFAULT_SLOW_INPUT_MS);
+    this.slowInputStreak = Math.max(1, options.slowInputStreak ?? DEFAULT_SLOW_INPUT_STREAK);
+    this.now = options.now ?? Date.now;
     this.wsFactory = options.wsFactory ?? defaultWsFactory;
     this.reconnectOpts = options.reconnect;
   }
@@ -162,6 +193,9 @@ export class CdpClient {
         if (this.ws !== ws) return; // 已被弃用的旧 ws，忽略其 close
         this.connected = false;
         this.failAllPending(new CdpDisconnectedError('CDP WS 已关闭'));
+        if (!this.intentionalClose && this.controlState === 'healthy') {
+          this.setControlState('recovering', { state: 'recovering', reason: 'transport_closed' });
+        }
         // 意外丢失（非主动 close）且配置了重连 → 启动有界重连
         if (!this.intentionalClose && this.reconnectOpts && !this.reconnecting) {
           void this.runReconnect();
@@ -178,15 +212,22 @@ export class CdpClient {
     }
     const id = this.nextId++;
     const payload = JSON.stringify({ id, method, params });
+    const startedAt = this.now();
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        if (isInputControlMethod(method)) {
+          // 超时不代表浏览器一定没有执行；从此刻起必须禁止继续写页面，不能把“连接仍在线”误当可安全接管。
+          this.markControlUnavailable({ state: 'unavailable', reason: 'input_timeout', method, durationMs: this.now() - startedAt });
+        }
         reject(new Error(`CDP 命令超时: ${method}`));
       }, this.timeoutMs);
       this.pending.set(id, {
         resolve: resolve as (v: unknown) => void,
         reject,
         timer,
+        method,
+        startedAt,
       });
       this.ws!.send(payload);
     });
@@ -215,6 +256,11 @@ export class CdpClient {
     return this.connected;
   }
 
+  /** 只有 CDP 已连接、未重连且未出现输入超时不确定性时，才允许接管或下发页面写命令。 */
+  isControlReady(): boolean {
+    return this.connected && !this.reconnecting && this.controlState === 'healthy';
+  }
+
   private onMessage(data: unknown): void {
     let msg: CdpResponse & Partial<CdpEvent>;
     try {
@@ -232,6 +278,7 @@ export class CdpClient {
         p.reject(new Error(`CDP 错误[${msg.error.code}]: ${msg.error.message}`));
       } else {
         p.resolve(msg.result);
+        this.observeSuccessfulInput(p.method, this.now() - p.startedAt);
       }
       return;
     }
@@ -290,12 +337,17 @@ export class CdpClient {
           if (this.intentionalClose) return;
           await this.connect(); // 建新 ws；open 后 connected=true
           if (opts.onReconnected) await opts.onReconnected(this);
+          if (this.controlState === 'recovering') {
+            this.consecutiveSlowInputs = 0;
+            this.setControlState('healthy', { state: 'healthy', reason: 'slow_input' });
+          }
           this.emitEvent('cdp.reconnected', { attempt });
           return; // 成功
         } catch {
           this.connected = false; // 本次失败，继续下个 attempt
         }
       }
+      this.markControlUnavailable({ state: 'unavailable', reason: 'recovery_exhausted' });
       this.emitEvent('cdp.unrecoverable', {}); // 次数/总时长耗尽
     } finally {
       this.reconnecting = false;
@@ -309,6 +361,49 @@ export class CdpClient {
     }
     this.pending.clear();
   }
+
+  private observeSuccessfulInput(method: string, durationMs: number): void {
+    if (!isInputControlMethod(method) || this.controlState !== 'healthy') return;
+    if (durationMs < this.slowInputMs) {
+      this.consecutiveSlowInputs = 0;
+      return;
+    }
+    this.consecutiveSlowInputs++;
+    if (this.consecutiveSlowInputs < this.slowInputStreak) return;
+
+    this.consecutiveSlowInputs = 0;
+    this.setControlState('recovering', { state: 'recovering', reason: 'slow_input', method, durationMs });
+    if (!this.reconnectOpts || !this.ws || !this.connected) {
+      this.markControlUnavailable({ state: 'unavailable', reason: 'recovery_not_configured', method, durationMs });
+      return;
+    }
+    // 这些输入都已经收到明确成功响应，才允许软重连；绝不对超时输入做重试或重放。
+    try {
+      this.ws.close(); // close 监听器接管有界重连与重初始化
+    } catch {
+      this.markControlUnavailable({ state: 'unavailable', reason: 'recovery_exhausted', method, durationMs });
+    }
+  }
+
+  private markControlUnavailable(event: CdpControlEvent): void {
+    if (this.controlState === 'unavailable') return;
+    this.setControlState('unavailable', event);
+  }
+
+  private setControlState(next: CdpControlState, event: CdpControlEvent): void {
+    if (this.controlState === next && next !== 'healthy') return;
+    const previous = this.controlState;
+    if (next === 'recovering' || (next === 'unavailable' && previous !== 'recovering')) this.recoveryId++;
+    this.controlState = next;
+    const diagnostic = { ...event, recoveryId: this.recoveryId };
+    if (next === 'recovering') this.emitEvent('cdp.control_recovering', diagnostic);
+    if (next === 'healthy') this.emitEvent('cdp.control_recovered', diagnostic);
+    if (next === 'unavailable') this.emitEvent('cdp.control_unavailable', diagnostic);
+  }
+}
+
+function isInputControlMethod(method: string): boolean {
+  return method.startsWith('Input.');
 }
 
 function describeError(ev: unknown): string {

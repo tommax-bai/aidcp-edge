@@ -90,6 +90,57 @@ test('未连接时 send() 直接 reject', async () => {
   await assert.rejects(client.send('Runtime.evaluate'), /未连接/);
 });
 
+test('输入控制命令超时后标记 control unavailable，禁止继续把在线 WS 当成可安全控制', async () => {
+  const ws = new FakeWs();
+  const events: unknown[] = [];
+  const client = new CdpClient('ws://x', { timeoutMs: 1, wsFactory: () => ws.asWs() });
+  const cp = client.connect();
+  ws.emit('open', undefined);
+  await cp;
+  client.on('cdp.control_unavailable', (event) => events.push(event));
+
+  await assert.rejects(client.send('Input.dispatchMouseEvent'), /CDP 命令超时/);
+  assert.equal(client.isConnected(), true, 'transport 可以仍连着');
+  assert.equal(client.isControlReady(), false, '但不得继续下发页面写命令');
+  assert.equal(events.length, 1);
+  const event = events[0] as { state: string; reason: string; recoveryId?: number; method?: string; durationMs?: number };
+  assert.equal(event.state, 'unavailable');
+  assert.equal(event.reason, 'input_timeout');
+  assert.equal(event.method, 'Input.dispatchMouseEvent');
+  assert.equal(typeof event.durationMs, 'number');
+  assert.equal(typeof event.recoveryId, 'number');
+});
+
+test('连续慢输入在均收到成功响应后触发软重连并恢复控制', async () => {
+  const list: FakeWs[] = [];
+  const client = new CdpClient('ws://x', {
+    wsFactory: seqFactory(list),
+    slowInputMs: 1,
+    slowInputStreak: 2,
+    reconnect: { baseDelayMs: 1, maxDelayMs: 1, sleepImpl: () => Promise.resolve(), rediscoverTarget: async () => 'ws://new' },
+  });
+  await client.connect();
+  let recovering = 0;
+  let recovered = 0;
+  let recoveryId: number | undefined;
+  client.on('cdp.control_recovering', (event) => { recovering++; recoveryId = (event as { recoveryId?: number }).recoveryId; });
+  client.on('cdp.control_recovered', (event) => { recovered++; assert.equal((event as { recoveryId?: number }).recoveryId, recoveryId); });
+
+  for (let i = 0; i < 2; i++) {
+    const pending = client.send('Input.dispatchMouseEvent');
+    const frame = JSON.parse(list[0]!.sent.at(-1)!);
+    await tick(2);
+    list[0]!.reply({ id: frame.id, result: {} });
+    await pending;
+  }
+  await tick();
+  assert.equal(recovering, 1);
+  assert.equal(recovered, 1);
+  assert.equal(typeof recoveryId, 'number');
+  assert.equal(client.isControlReady(), true);
+  assert.ok(list.length >= 2, '软重连应建立新 CDP WebSocket');
+});
+
 // —— CDP 断线有界重连 ——
 
 /** 工厂：每次 connect 发一个新 FakeWs，自动在下个 microtask 触发 open（模拟建连成功）。 */

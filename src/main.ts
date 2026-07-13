@@ -354,6 +354,7 @@ async function main(): Promise<void> {
       quiesceForTask: () => browse?.quiesceForTask() ?? Promise.resolve(0),
       resumeAfterTask: () => browse?.resumeAfterTask() ?? Promise.resolve(),
     },
+    canAcquire: () => session.cdp.isControlReady(),
     onAcquired: (payload) => {
       try {
         client.send('edge.task.acquired', payload);
@@ -370,6 +371,7 @@ async function main(): Promise<void> {
     },
     logger: (message) => console.log(message),
   });
+  session.cdp.on('cdp.control_recovered', () => taskCoordinator.resumeAfterControlRecovery());
 
   // §7 回收契约：把全部在途发布诚实判失败（须在关闭云端连接之前发，确保失败回执发得出去）。
   // 云端 WS 已断时 send 会 best-effort 失败，但本地 in-flight 必须立刻清掉，避免重连后重放旧发布。
@@ -1192,6 +1194,20 @@ async function main(): Promise<void> {
     recycleRequested = true;
     void shutdown({ exitCode: EXIT_RECYCLE, recycle: true, reason });
   };
+
+  // Input 超时的结果不确定：已由 CdpClient 封住后续页面写。若浏览器由本节点启动并拥有，则回收并让看护
+  // 建一个新的 CDP 安全边界；复用的外部浏览器绝不强杀，只保留 unavailable 供操作者显式重启。
+  const recycleOrHoldUnavailableBrowser = (): void => {
+    if (chrome.reused) {
+      console.warn('[aidcp-edge] CDP 输入控制不可用：复用的外部浏览器不会被自动关闭；请人工重启浏览器客户端后恢复');
+      return;
+    }
+    console.warn('[aidcp-edge] CDP 输入控制不可用：浏览器由本节点拥有，诚实下线并回收重启以建立新的控制边界');
+    requestShutdown?.('cdp_control_unavailable');
+  };
+  session.cdp.on('cdp.control_unavailable', recycleOrHoldUnavailableBrowser);
+  // attach 初始 enable 阶段若已经发生输入超时，订阅发生得较晚也必须按同一所有权边界处理。
+  if (!session.cdp.isControlReady()) recycleOrHoldUnavailableBrowser();
 
   // CDP 终态（重连不可恢复）→ 诚实下线 + 回收退出（请重起）。autoBrowse 与否都接，节点失去浏览器即回收。
   session.cdp.on('cdp.unrecoverable', () => {
