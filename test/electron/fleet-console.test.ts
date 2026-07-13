@@ -18,6 +18,7 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
 const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
+const rendererCss = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -543,6 +544,8 @@ test('平台标识：FB 环境行染平台类、顶栏徽标随选中环境切�
   const rowOf = (id: string) => [...w.document.querySelectorAll('.rail-row')].find((r) => (r as HTMLElement).dataset.envId === id) as HTMLElement;
   assert.ok(rowOf('ads-p1').className.includes('plat-facebook'), 'FB 环境行带 plat-facebook 类');
   assert.ok(rowOf('ads-p2').className.includes('plat-xiaohongshu'), '小红书环境行带 plat-xiaohongshu 类');
+  assert.ok(rendererCss.includes('.env-rail.collapsed .rail-row.plat-xiaohongshu .rail-ava { background: #fff1f4; color: var(--coral); }'), '收起态小红书首字使用红色');
+  assert.ok(rendererCss.includes('.env-rail.collapsed .rail-row.plat-facebook .rail-ava { background: #e7f0fe; color: var(--plat-fb); }'), '收起态 Facebook 首字使用蓝色');
   // 顶栏身份区随选中环境（ads-p1 = FB）切换文案与配色，健康浮层登录行同步
   pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一' }));
   await tick();

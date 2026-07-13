@@ -187,6 +187,11 @@ body { margin: 0; }
   gap: 8px;
 }
 .rg-copy { min-width: 0; }
+.runtime-guidance[data-mode="running"] .rg-main {
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 10px;
+}
+.runtime-guidance[data-mode="running"] .rg-copy { grid-column: 2; grid-row: 1; }
 .rg-kicker {
   color: #5270ad;
   font-size: 10.5px;
@@ -235,6 +240,13 @@ body { margin: 0; }
   height: 82px;
   object-fit: contain;
   justify-self: end;
+}
+.runtime-guidance[data-mode="running"] .rg-mascot {
+  grid-column: 1;
+  grid-row: 1;
+  width: 66px;
+  height: 66px;
+  justify-self: start;
 }
 .rg-mascot.animate { animation: rg-mascot-work 4.2s ease-in-out infinite; }
 .rg-flow {
@@ -315,6 +327,8 @@ body { margin: 0; }
   .runtime-guidance { padding: 11px 12px 10px; }
   .rg-main { grid-template-columns: minmax(0, 1fr) 68px; gap: 5px; }
   .rg-mascot { width: 68px; height: 68px; }
+  .runtime-guidance[data-mode="running"] .rg-main { grid-template-columns: 54px minmax(0, 1fr); gap: 8px; }
+  .runtime-guidance[data-mode="running"] .rg-mascot { width: 52px; height: 52px; }
   .rg-flow { gap: 5px; }
   .rg-flow-step { grid-template-columns: 16px minmax(0, 1fr); gap: 3px; }
   .rg-flow-icon { width: 16px; height: 16px; }
@@ -1588,6 +1602,7 @@ body { margin: 0; }
   background: #f1f5fb; color: #2563eb;
   box-shadow: 0 0 0 2px #f7f9fd, 0 0 0 3.5px var(--ring, #cbd5e1);
 }
+.env-rail.collapsed .rail-row.plat-xiaohongshu .rail-ava { background: #fff1f4; color: var(--coral); }
 .rail-row.lv-running .rail-ava { --ring: #16a34a; }
 .rail-row.lv-attention .rail-ava { --ring: #d97706; }
 .rail-row.lv-error .rail-ava { --ring: #dc2626; }

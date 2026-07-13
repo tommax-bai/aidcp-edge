@@ -12,6 +12,7 @@ const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
 const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
+const rendererCss = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -167,9 +168,12 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.match($(w, '#presence-fresh').textContent ?? '', /刚刚更新/);
   assert.equal(hidden($(w, '#runtime-guidance')), false);
   assert.equal($(w, '#runtime-guidance').dataset.mode, 'running');
+  assert.equal($(w, '#runtime-guidance-kicker').textContent, '为你探索');
   assert.match($(w, '#runtime-guidance-title').textContent ?? '', /内容灵感/);
-  assert.match($(w, '#runtime-guidance-detail').textContent ?? '', /目标人群/);
+  assert.equal($(w, '#runtime-guidance-detail').textContent, '观察平台推荐的内容，寻找正在上升的话题。');
   assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-task-execution/);
+  assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-main/);
+  assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-mascot/);
 });
 
 test('红线：停止 / 事件过期时动效止息、如实待命', async () => {
@@ -664,6 +668,15 @@ test('未运行时发布卡保持展开（空态旅程有引导价值）', async
 });
 
 // ── 循环 chip ──
+test('循环 chip 位于在场感下方、运行价值说明上方', async () => {
+  const { w } = await boot();
+  const presence = $(w, '.presence');
+  const loop = $(w, '#loop');
+  const guidance = $(w, '#runtime-guidance');
+  assert.ok(presence.compareDocumentPosition(loop) & w.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.ok(loop.compareDocumentPosition(guidance) & w.Node.DOCUMENT_POSITION_FOLLOWING);
+});
+
 test('循环 chip 随阶段点亮，停止时全灭', async () => {
   const { w, pushStatus } = await boot({ loopStage: 'read' });
   const on = () => Array.from(w.document.querySelectorAll('.loop-step.on')).map((el) => (el as HTMLElement).dataset.stage);

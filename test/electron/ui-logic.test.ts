@@ -11,6 +11,7 @@ interface RuntimeGuidanceV {
   mode: 'running' | 'session' | 'hour' | 'day';
   mascot: string;
   animate: boolean;
+  kicker: string;
   title: string;
   value?: string;
   detail: string;
@@ -146,8 +147,9 @@ test('运行价值说明：新鲜浏览事件先说明正在寻找内容灵感',
   assert.equal(v?.mode, 'running');
   assert.equal(v?.mascot, 'task-execution');
   assert.equal(v?.animate, true);
+  assert.equal(v?.kicker, '为你探索');
   assert.match(v?.title ?? '', /内容灵感/);
-  assert.match(v?.detail ?? '', /目标人群/);
+  assert.equal(v?.detail, '观察平台推荐的内容，寻找正在上升的话题。');
 });
 
 test('运行价值说明：本轮浏览完成才展示自然间隔与三步说明', () => {
