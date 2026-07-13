@@ -69,15 +69,6 @@
   // ── 在场感动效门（红线：绝不用动效盖住停滞会话）──
   // 只有「会话在跑 + 引擎在跑 + 最近事件足够新鲜（与看门狗有界 idle 对齐，5 分钟）」才允许动。
   const PRESENCE_FRESH_MS = 5 * 60_000;
-  const QUOTA_ACTION_LABELS = {
-    view: '内容观察',
-    like: '点赞互动',
-    collect: '收藏互动',
-    comment: '评论互动',
-    follow: '关注互动',
-    publish: '内容发布',
-  };
-  const QUOTA_WINDOW_PRIORITY = ['session', 'minute', 'hour', 'day'];
   const QUOTA_ACTION_PRIORITY = ['view', 'like', 'collect', 'comment', 'follow', 'publish'];
 
   function finiteNumber(value) {
@@ -106,38 +97,116 @@
     return `${Math.ceil(hours / 24)} 天后`;
   }
 
-  function quotaCompletionPresence(status, nowMs) {
+  // ── 运行价值说明：只把已确认的浏览阶段转为成果与下一步，不推断单项互动会暂停整轮浏览。──
+  function guidanceWindow(status, key, nowMs) {
     const windows = status && status.dailyUsage && objectOrEmpty(status.dailyUsage).windows;
-    if (!windows || typeof windows !== 'object') return '';
-    for (const windowKey of QUOTA_WINDOW_PRIORITY) {
-      const window = objectOrEmpty(windows[windowKey]);
-      if (!Object.keys(window).length) continue;
-      if (windowKey === 'session' && window.active === false) continue;
-      const expiresAt = finiteNumber(window.expiresAt);
-      if ((windowKey === 'minute' || windowKey === 'hour' || windowKey === 'day') && expiresAt !== null && expiresAt <= nowMs) continue;
-      const totals = objectOrEmpty(window.totals);
-      const quotas = objectOrEmpty(window.quotas);
-      const saturated = new Set(Array.isArray(window.saturated) ? window.saturated : []);
-      for (const action of QUOTA_ACTION_PRIORITY) {
-        const cap = finiteNumber(quotas[action]);
-        if (cap === null) continue;
-        const used = count(totals[action]);
-        if (!saturated.has(action) && used < count(cap)) continue;
-        const activity = QUOTA_ACTION_LABELS[action];
-        const wait = futureWaitText(finiteNumber(window.releaseAt), nowMs);
-        const text = windowKey === 'day'
-          ? `今日${activity}计划已完成`
-          : windowKey === 'session'
-            ? `本轮${activity}计划已完成`
-            : `${activity}完成一轮`;
-        return {
-          text,
-          animate: false,
-          fresh: `先让平台认识你一点${wait ? ` · 预计 ${wait}继续` : ''}`,
-        };
-      }
+    const window = windows && objectOrEmpty(windows)[key];
+    if (!window || typeof window !== 'object') return null;
+    const totals = objectOrEmpty(window.totals);
+    const quotas = objectOrEmpty(window.quotas);
+    const active = key === 'session' ? window.active !== false : true;
+    const expiresAt = finiteNumber(window.expiresAt);
+    const expired = key !== 'session' && expiresAt !== null && expiresAt <= nowMs;
+    const saturated = new Set(Array.isArray(window.saturated) ? window.saturated : []);
+    const capped = [];
+    for (const action of QUOTA_ACTION_PRIORITY) {
+      const cap = finiteNumber(quotas[action]);
+      if (cap === null) continue;
+      const used = count(totals[action]);
+      capped.push({
+        action,
+        used,
+        cap: count(cap),
+        complete: saturated.has(action) || used >= count(cap),
+      });
+    }
+    return {
+      key,
+      active,
+      expired,
+      expiresAt,
+      releaseAt: finiteNumber(window.releaseAt),
+      capped,
+      view: capped.find((entry) => entry.action === 'view') || null,
+    };
+  }
+
+  function guidanceSteps(observed) {
+    return [
+      { icon: 'browse', state: 'done', label: '浏览与互动', detail: `${observed} 条首页内容已观察` },
+      { icon: 'pause', state: 'current', label: '留出自然间隔', detail: '让账号信号更清晰' },
+      { icon: 'search', state: 'next', label: '继续寻找灵感', detail: '推荐内容更聚焦' },
+    ];
+  }
+
+  function runtimeGuidanceView(status, nowMs) {
+    const s = status || {};
+    const p = s.presence || null;
+    const at = p && p.at ? Date.parse(p.at) : NaN;
+    const running = s.edge === 'running' && s.session === 'running';
+    const fresh = Number.isFinite(at) && nowMs - at < PRESENCE_FRESH_MS;
+    if (running && p && p.text && fresh) {
+      return {
+        mode: 'running',
+        mascot: 'task-execution',
+        animate: true,
+        kicker: '正在为你探索',
+        title: '正在首页为你寻找更容易被看见的内容灵感',
+        detail: '观察平台正在推荐给目标人群的内容，寻找正在上升的话题。',
+        steps: [],
+        resume: '',
+      };
+    }
+
+    const day = guidanceWindow(s, 'day', nowMs);
+    if (day && day.active && !day.expired && day.capped.length > 0 && day.capped.every((entry) => entry.cap > 0 && entry.complete)) {
+      const wait = futureWaitText(day.expiresAt, nowMs);
+      return {
+        mode: 'day',
+        mascot: 'celebration',
+        animate: false,
+        kicker: '今日探索完成',
+        title: '今天先到这里，明天继续。',
+        value: '今天累积的信号，会让下一次开始更容易找到方向。',
+        detail: '',
+        steps: [
+          { icon: 'browse', state: 'done', label: '浏览与互动', detail: `${day.capped.length} 项今日计划已完成` },
+          { icon: 'pause', state: 'done', label: '自然沉淀', detail: '让账号信号持续积累' },
+          { icon: 'search', state: 'next', label: '继续寻找灵感', detail: '明天继续探索新机会' },
+        ],
+        resume: wait ? `预计约 ${wait}开启新一天计划` : '',
+      };
+    }
+
+    for (const key of ['session', 'hour']) {
+      const window = guidanceWindow(s, key, nowMs);
+      const wait = window && futureWaitText(window.releaseAt, nowMs);
+      if (!window || !window.active || window.expired || !window.view || window.view.cap <= 0 || !window.view.complete || !wait) continue;
+      const isSession = key === 'session';
+      return {
+        mode: key,
+        mascot: 'monitoring',
+        animate: false,
+        kicker: isSession ? '本轮浏览完成' : '这一小时的探索告一段落',
+        title: isSession ? '先整理一下刚才发现的方向。' : '先让平台认识你一点。',
+        value: '停一停不是失去进度，而是为下一轮寻找留出自然节奏。',
+        detail: '',
+        steps: guidanceSteps(window.view.used),
+        resume: `预计约 ${wait}自动继续`,
+      };
     }
     return null;
+  }
+
+  function quotaCompletionPresence(status, nowMs) {
+    const guidance = runtimeGuidanceView(status, nowMs);
+    if (!guidance || guidance.mode === 'running') return null;
+    const text = guidance.mode === 'day'
+      ? '今日内容探索已经完成'
+      : guidance.mode === 'session'
+        ? '本轮浏览完成，正在为下一轮留出自然节奏'
+        : '这一小时的探索告一段落，稍后会继续';
+    return { text, animate: false, fresh: guidance.resume || '' };
   }
 
   function presenceView(status, nowMs) {
@@ -370,5 +439,5 @@
     return { rows, pendingCount: rows.filter((r) => r.needsAction).length };
   }
 
-  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, loopIndex, LOOP_STAGES, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, railDisplayName, FLEET_STALE_MS };
+  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, loopIndex, LOOP_STAGES, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, railDisplayName, FLEET_STALE_MS };
 });

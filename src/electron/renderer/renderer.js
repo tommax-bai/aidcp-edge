@@ -64,9 +64,19 @@ const fields = {
   // 标题带常驻「当前云端」chip（change edge-cloud-env-selector）
   cloudEnvChip: document.querySelector('#cloud-env-chip'),
   cloudEnvChipLabel: document.querySelector('#cloud-env-chip-label'),
+  presence: document.querySelector('.presence'),
   presenceText: document.querySelector('#presence-text'),
   presenceFresh: document.querySelector('#presence-fresh'),
   presenceCore: document.querySelector('#presence-core'),
+  runtimeGuidance: document.querySelector('#runtime-guidance'),
+  runtimeGuidanceKicker: document.querySelector('#runtime-guidance-kicker'),
+  runtimeGuidanceTitle: document.querySelector('#runtime-guidance-title'),
+  runtimeGuidanceValue: document.querySelector('#runtime-guidance-value'),
+  runtimeGuidanceValueText: document.querySelector('#runtime-guidance-value-text'),
+  runtimeGuidanceDetail: document.querySelector('#runtime-guidance-detail'),
+  runtimeGuidanceMascot: document.querySelector('#runtime-guidance-mascot'),
+  runtimeGuidanceFlow: document.querySelector('#runtime-guidance-flow'),
+  runtimeGuidanceResume: document.querySelector('#runtime-guidance-resume'),
   kernelPrep: document.querySelector('#kernel-prep'),
   kernelPrepLabel: document.querySelector('#kernel-prep-label'),
   kernelPrepPct: document.querySelector('#kernel-prep-pct'),
@@ -684,8 +694,65 @@ function renderTitlebar(status) {
   fields.titlebar.className = `titlebar tone-${uiLogic.bandTone(status)}`;
 }
 
+// ─── 运行价值说明：浏览目标 / 自然间隔 / 今日成果，全部来自真实在场与窗口数据。───
+const RUNTIME_GUIDANCE_MASCOTS = {
+  'task-execution': './assets/mascot-task-execution-512.png',
+  monitoring: './assets/mascot-monitoring-512.png',
+  celebration: './assets/mascot-celebration-512.png',
+};
+const RUNTIME_GUIDANCE_ICONS = {
+  browse: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 4 7.1 17 2.5-7.4L21 11.1 4 4Z"/><path d="m13 13 6 6"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12c2.1-2.4 4.3-2.4 6.4 0s4.3 2.4 6.4 0 4.3-2.4 5.2-1.3"/><path d="M3 17c2.1-2.4 4.3-2.4 6.4 0s4.3 2.4 6.4 0 4.3-2.4 5.2-1.3"/></svg>',
+  search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.2 4.2"/></svg>',
+};
+
+function renderRuntimeGuidance(status, nowMs) {
+  const view = uiLogic.runtimeGuidanceView(status, nowMs);
+  if (!fields.runtimeGuidance) return view;
+  if (!view) {
+    fields.runtimeGuidance.className = 'runtime-guidance hidden';
+    delete fields.runtimeGuidance.dataset.mode;
+    return null;
+  }
+  fields.runtimeGuidance.className = 'runtime-guidance';
+  fields.runtimeGuidance.dataset.mode = view.mode;
+  fields.runtimeGuidanceKicker.textContent = view.kicker || '';
+  fields.runtimeGuidanceTitle.textContent = view.title || '';
+  fields.runtimeGuidanceValueText.textContent = view.value || '';
+  fields.runtimeGuidanceValue.classList.toggle('hidden', !view.value);
+  fields.runtimeGuidanceDetail.textContent = view.detail || '';
+  fields.runtimeGuidanceDetail.classList.toggle('hidden', !view.detail);
+  fields.runtimeGuidanceResume.textContent = view.resume || '';
+  fields.runtimeGuidanceResume.classList.toggle('hidden', !view.resume);
+  fields.runtimeGuidanceMascot.src = RUNTIME_GUIDANCE_MASCOTS[view.mascot] || '';
+  fields.runtimeGuidanceMascot.classList.toggle('animate', Boolean(view.animate));
+
+  fields.runtimeGuidanceFlow.replaceChildren();
+  fields.runtimeGuidanceFlow.classList.toggle('hidden', !Array.isArray(view.steps) || view.steps.length === 0);
+  for (const step of view.steps || []) {
+    const el = document.createElement('div');
+    el.className = `rg-flow-step ${step.state || 'next'}`;
+    const icon = document.createElement('span');
+    icon.className = 'rg-flow-icon';
+    icon.innerHTML = RUNTIME_GUIDANCE_ICONS[step.icon] || '';
+    const copy = document.createElement('span');
+    copy.className = 'rg-flow-copy';
+    const label = document.createElement('strong');
+    label.textContent = step.label || '';
+    const detail = document.createElement('small');
+    detail.textContent = step.detail || '';
+    copy.append(label, detail);
+    el.append(icon, copy);
+    fields.runtimeGuidanceFlow.appendChild(el);
+  }
+  return view;
+}
+
 // ─── 在场感行（动效只由真实事件驱动；诚实待命）───
-function renderPresence(status, nowMs) {
+function renderPresence(status, nowMs, runtimeGuidance) {
+  const hideForInterval = runtimeGuidance && runtimeGuidance.mode !== 'running';
+  fields.presence?.classList.toggle('hidden', Boolean(hideForInterval));
+  if (hideForInterval) return;
   const view = uiLogic.presenceView(status, nowMs);
   fields.presenceText.textContent = view.text;
   fields.presenceText.classList.toggle('shimmer', view.animate);
@@ -694,7 +761,8 @@ function renderPresence(status, nowMs) {
 }
 
 // ─── 浏览循环 chip ───
-function renderLoop(status) {
+function renderLoop(status, runtimeGuidance) {
+  fields.loop.classList.toggle('hidden', Boolean(runtimeGuidance && runtimeGuidance.mode !== 'running'));
   const running = status.edge === 'running' && status.session === 'running';
   const active = running ? uiLogic.loopIndex(status.loopStage) : -1;
   fields.loop.querySelectorAll('.loop-step').forEach((el) => {
@@ -1009,6 +1077,19 @@ function evIcon(type) {
   for (const [re, spec] of EV_ICONS) if (re.test(type || '')) return spec;
   return ['·', 'ic-sys'];
 }
+function appendActivitySentence(element, sentence) {
+  const text = String(sentence || '');
+  const match = text.match(/^(.*?)(「[^」]+」)(.*)$/);
+  if (!match) {
+    element.textContent = text;
+    return;
+  }
+  element.append(document.createTextNode(match[1]));
+  const subject = document.createElement('span');
+  subject.className = 'ev-subject';
+  subject.textContent = match[2];
+  element.append(subject, document.createTextNode(match[3]));
+}
 function domPrependActivity(entry, extraClass) {
   if (!entry || !entry.sentence) return;
   if (fields.streamEmpty) fields.streamEmpty.classList.add('hidden');
@@ -1024,7 +1105,7 @@ function domPrependActivity(entry, extraClass) {
   ic.textContent = glyph;
   const x = document.createElement('span');
   x.className = 'ev-x';
-  x.textContent = entry.sentence;
+  appendActivitySentence(x, entry.sentence);
   row.appendChild(t);
   row.appendChild(ic);
   row.appendChild(x);
@@ -1071,7 +1152,9 @@ setInterval(() => {
   if (!currentStatus) return;
   const now = Date.now();
   renderUsageSummary(currentStatus);
-  renderPresence(currentStatus, now);
+  const runtimeGuidance = renderRuntimeGuidance(currentStatus, now);
+  renderPresence(currentStatus, now, runtimeGuidance);
+  renderLoop(currentStatus, runtimeGuidance);
   renderPublish(currentStatus, now);
   fields.stream.querySelectorAll('.ev').forEach((row) => {
     const ts = Date.parse(row.dataset.ts || '');
@@ -1280,10 +1363,11 @@ function render(status) {
   renderLog();
   renderEdgeFailure(status);
   renderTitlebar(status);
-  renderPresence(status, now);
+  const runtimeGuidance = renderRuntimeGuidance(status, now);
+  renderPresence(status, now, runtimeGuidance);
   // 内核首启进度条改由 renderKernelPrepGlobal 全局驱动（内核机器级共享、下载环境未必是当前选中环境）；
   // 此处不再按选中环境渲染，避免选中的非下载环境把进度条误藏。
-  renderLoop(status);
+  renderLoop(status, runtimeGuidance);
   renderPublish(status, now);
   if (fields.publishPreviewPanel.classList.contains('open')) renderPublishPreviewContent(status);
   renderFab(status);

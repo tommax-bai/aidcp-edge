@@ -165,6 +165,11 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.ok($(w, '#presence-text').classList.contains('shimmer'));
   assert.match($(w, '#presence-text').textContent ?? '', /正在认真读/);
   assert.match($(w, '#presence-fresh').textContent ?? '', /刚刚更新/);
+  assert.equal(hidden($(w, '#runtime-guidance')), false);
+  assert.equal($(w, '#runtime-guidance').dataset.mode, 'running');
+  assert.match($(w, '#runtime-guidance-title').textContent ?? '', /内容灵感/);
+  assert.match($(w, '#runtime-guidance-detail').textContent ?? '', /目标人群/);
+  assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-task-execution/);
 });
 
 test('红线：停止 / 事件过期时动效止息、如实待命', async () => {
@@ -178,7 +183,7 @@ test('红线：停止 / 事件过期时动效止息、如实待命', async () =>
   assert.match($(w, '#presence-text').textContent ?? '', /没有新动态/);
 });
 
-test('运行中 + 事件过期 + 阶段计划完成 → 在场感说明成果和预计继续时间', async () => {
+test('运行中 + 事件过期 + 阶段计划完成 → 说明自然间隔的成果与继续时间', async () => {
   const now = 1730000000000;
   const stale = new Date(now - 6 * 60_000).toISOString();
   const { w, pushStatus } = await boot();
@@ -206,10 +211,15 @@ test('运行中 + 事件过期 + 阶段计划完成 → 在场感说明成果和
         },
       },
     }));
-    assert.equal($(w, '#presence-text').classList.contains('shimmer'), false);
-    assert.match($(w, '#presence-text').textContent ?? '', /内容观察完成一轮/);
-    assert.match($(w, '#presence-fresh').textContent ?? '', /先让平台认识你一点/);
-    assert.match($(w, '#presence-fresh').textContent ?? '', /预计 36 分钟后继续/);
+    assert.equal(hidden($(w, '.presence')), true, '间隔说明取代重复的静态在场感行');
+    assert.equal(hidden($(w, '#runtime-guidance')), false);
+    assert.equal($(w, '#runtime-guidance').dataset.mode, 'hour');
+    assert.match($(w, '#runtime-guidance-title').textContent ?? '', /先让平台认识你一点/);
+    assert.match($(w, '#runtime-guidance-value').textContent ?? '', /自然节奏/);
+    assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /浏览与互动/);
+    assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /38 条首页内容已观察/);
+    assert.match($(w, '#runtime-guidance-resume').textContent ?? '', /36 分钟后自动继续/);
+    assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-monitoring/);
   } finally {
     w.Date.now = originalNow;
   }
@@ -225,6 +235,41 @@ test('活动流：事件进流、最新在上、空态隐藏', async () => {
   const rows = Array.from(w.document.querySelectorAll('#activity-stream .ev'));
   assert.equal(rows.length, 2);
   assert.match((rows[0] as HTMLElement).textContent ?? '', /秋日漫步/, '最新在上');
+  assert.equal((rows[0] as HTMLElement).querySelector('.ev-subject')?.textContent, '「秋日漫步」');
+});
+
+test('单项评论节奏完成时不展示全局浏览间隔，今日进展仍保留', async () => {
+  const now = 1730000000000;
+  const stale = new Date(now - 6 * 60_000).toISOString();
+  const { w, pushStatus } = await boot();
+  const originalNow = w.Date.now;
+  w.Date.now = () => now;
+  try {
+    pushStatus(makeStatus({
+      session: 'resting',
+      presence: { text: '旧事件', at: stale },
+      dailyUsage: {
+        asOf: now,
+        totals: { view: 7, comment: 1 },
+        quotas: { view: 150, comment: 8 },
+        saturated: [],
+        windows: {
+          hour: {
+            expiresAt: now + 30 * 60_000,
+            releaseAt: now + 30 * 60_000,
+            totals: { view: 7, comment: 1 },
+            quotas: { view: 8, comment: 1 },
+            saturated: ['comment'],
+          },
+        },
+      },
+    }));
+    assert.equal(hidden($(w, '#runtime-guidance')), true);
+    assert.equal(hidden($(w, '#daily-summary')), false);
+    assert.equal($(w, '#comments').textContent, '1');
+  } finally {
+    w.Date.now = originalNow;
+  }
 });
 
 // ── 发布卡：卡片入口 + 预览内动作 ──

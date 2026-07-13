@@ -7,6 +7,16 @@ const require = createRequire(import.meta.url);
 
 interface Health { code: string; label: string; detail: string }
 interface PresenceV { text: string; animate: boolean; fresh: string }
+interface RuntimeGuidanceV {
+  mode: 'running' | 'session' | 'hour' | 'day';
+  mascot: string;
+  animate: boolean;
+  title: string;
+  value?: string;
+  detail: string;
+  resume: string;
+  steps: Array<{ label: string; detail: string; state: string }>;
+}
 interface PublishV {
   mode: string;
   collapsed: { type: string; sentence: string } | null;
@@ -25,6 +35,7 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   bandTone: (s: Record<string, unknown>) => string;
   detailRows: (s: Record<string, unknown>) => Array<{ key: string; label: string; value: string }>;
   presenceView: (s: Record<string, unknown>, now: number) => PresenceV;
+  runtimeGuidanceView: (s: Record<string, unknown>, now: number) => RuntimeGuidanceV | null;
   loopIndex: (stage: string) => number;
   publishView: (p: Record<string, unknown> | null, last: Record<string, unknown> | null, now: number) => PublishV;
   railDisplayName: (row: Record<string, unknown>) => string;
@@ -123,9 +134,89 @@ test('在场感：运行中但事件过期 + 当前阶段完成 → 文案说明
     },
   }), now);
   assert.equal(v.animate, false);
-  assert.match(v.text, /内容观察完成一轮/);
-  assert.match(v.fresh, /先让平台认识你一点/);
-  assert.match(v.fresh, /预计 36 分钟后继续/);
+  assert.match(v.text, /这一小时的探索告一段落/);
+  assert.match(v.fresh, /预计约 36 分钟后自动继续/);
+});
+
+test('运行价值说明：新鲜浏览事件先说明正在寻找内容灵感', () => {
+  const now = Date.now();
+  const v = uiLogic.runtimeGuidanceView(st({
+    presence: { text: '正在认真读「x」…', at: new Date(now - 10_000).toISOString() },
+  }), now);
+  assert.equal(v?.mode, 'running');
+  assert.equal(v?.mascot, 'task-execution');
+  assert.equal(v?.animate, true);
+  assert.match(v?.title ?? '', /内容灵感/);
+  assert.match(v?.detail ?? '', /目标人群/);
+});
+
+test('运行价值说明：本轮浏览完成才展示自然间隔与三步说明', () => {
+  const now = Date.now();
+  const v = uiLogic.runtimeGuidanceView(st({
+    session: 'resting',
+    presence: { text: '旧事件', at: new Date(now - 6 * 60_000).toISOString() },
+    dailyUsage: {
+      windows: {
+        session: {
+          active: true,
+          releaseAt: now + 42 * 60_000,
+          totals: { view: 12, like: 1 },
+          quotas: { view: 12, like: 3 },
+          saturated: ['view'],
+        },
+      },
+    },
+  }), now);
+  assert.equal(v?.mode, 'session');
+  assert.equal(v?.mascot, 'monitoring');
+  assert.equal(v?.animate, false);
+  assert.match(v?.title ?? '', /整理/);
+  assert.match(v?.value ?? '', /自然节奏/);
+  assert.deepEqual(v?.steps.map((step) => step.label), ['浏览与互动', '留出自然间隔', '继续寻找灵感']);
+  assert.match(v?.steps[0].detail ?? '', /12 条首页内容已观察/);
+  assert.match(v?.resume ?? '', /42 分钟后自动继续/);
+});
+
+test('运行价值说明：单项互动完成不升级为全局浏览间隔', () => {
+  const now = Date.now();
+  const v = uiLogic.runtimeGuidanceView(st({
+    session: 'resting',
+    presence: { text: '旧事件', at: new Date(now - 6 * 60_000).toISOString() },
+    dailyUsage: {
+      windows: {
+        hour: {
+          expiresAt: now + 30 * 60_000,
+          releaseAt: now + 30 * 60_000,
+          totals: { view: 7, comment: 1 },
+          quotas: { view: 8, comment: 1 },
+          saturated: ['comment'],
+        },
+      },
+    },
+  }), now);
+  assert.equal(v, null);
+});
+
+test('运行价值说明：所有今日计划完成后才展示今日成果', () => {
+  const now = Date.now();
+  const v = uiLogic.runtimeGuidanceView(st({
+    session: 'resting',
+    presence: { text: '旧事件', at: new Date(now - 6 * 60_000).toISOString() },
+    dailyUsage: {
+      windows: {
+        day: {
+          expiresAt: now + 8 * 60 * 60_000,
+          totals: { view: 20, like: 3, collect: 2 },
+          quotas: { view: 20, like: 3, collect: 2 },
+          saturated: ['view', 'like', 'collect'],
+        },
+      },
+    },
+  }), now);
+  assert.equal(v?.mode, 'day');
+  assert.equal(v?.mascot, 'celebration');
+  assert.match(v?.title ?? '', /明天继续/);
+  assert.match(v?.steps[0].detail ?? '', /3 项今日计划已完成/);
 });
 
 test('在场感：过期限额窗口不再解释为当前上限休息', () => {
