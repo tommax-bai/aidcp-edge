@@ -27,6 +27,7 @@ interface Harness {
   actions: ActionCompletedPayload[];
   delegated: Envelope[];
   ensureCalls: number;
+  ensureUrls: string[];
   scanCalls: number;
   likeShadowFlags: Array<boolean | undefined>;
 }
@@ -48,7 +49,7 @@ function makeSession(opts: {
   const actions: ActionCompletedPayload[] = [];
   const delegated: Envelope[] = [];
   const likeShadowFlags: Array<boolean | undefined> = [];
-  const state = { ensureCalls: 0, scanCalls: 0 };
+  const state = { ensureCalls: 0, ensureUrls: [] as string[], scanCalls: 0 };
 
   const card: FacebookFeedCard = opts.card ?? {
     index: 0,
@@ -79,8 +80,9 @@ function makeSession(opts: {
     },
   } as unknown as FacebookCommentHandler;
   const feedReader = {
-    ensureFeed: async () => {
+    ensureFeed: async (url: string) => {
       state.ensureCalls++;
+      state.ensureUrls.push(url);
       return { ok: true as const };
     },
     scanCards: async () => {
@@ -138,6 +140,9 @@ function makeSession(opts: {
     likeShadowFlags,
     get ensureCalls() {
       return state.ensureCalls;
+    },
+    get ensureUrls() {
+      return state.ensureUrls;
     },
     get scanCalls() {
       return state.scanCalls;
@@ -227,13 +232,24 @@ test('navigation.back → 回 feed 重报 page.cards（驱动下一轮 feed.ente
 
 // ─────────────────────────── 评论/加群委托 ───────────────────────────
 
+test('普通浏览 search.execute（无 taskId/container）→ FB 搜索页读卡，不误走定向评论处理器', async () => {
+  const h = makeSession({ mode: 'on' });
+  await h.session.onCloudCommand(makeEnv('search.execute', { keyword: '意大利本地生活', maxResults: 1 }));
+  assert.equal(h.delegated.length, 0);
+  assert.equal(h.cards.length, 1);
+  assert.equal(h.cards[0].cards.length, 1);
+  assert.match(h.ensureUrls[0], /\/search\/posts\/\?q=/);
+  assert.match(h.ensureUrls[0], /%E6%84%8F%E5%A4%A7%E5%88%A9/);
+});
+
 test('评论/搜索/加群/按url开帖 → 委托 commentHandler（不走浏览路径）', async () => {
   const h = makeSession({ mode: 'on' });
   await h.session.onCloudCommand(makeEnv('search.execute', { container: 'https://www.facebook.com/groups/x' }));
+  await h.session.onCloudCommand(makeEnv('search.execute', { keyword: '咖啡', taskId: 'task-1' }));
   await h.session.onCloudCommand(makeEnv('interaction.comment', { noteId: 'x', text: 'hi' }));
   await h.session.onCloudCommand(makeEnv('group.join', { groupUrl: 'https://www.facebook.com/groups/x' }));
   await h.session.onCloudCommand(makeEnv('note.open', { url: 'https://www.facebook.com/a/posts/pfbid0URL', taskId: 't1' }));
-  assert.deepEqual(h.delegated.map((e) => e.type), ['search.execute', 'interaction.comment', 'group.join', 'note.open']);
+  assert.deepEqual(h.delegated.map((e) => e.type), ['search.execute', 'search.execute', 'interaction.comment', 'group.join', 'note.open']);
   assert.equal(h.details.length, 0, '委托路径不走浏览深读');
 });
 

@@ -31,6 +31,7 @@ import type {
   InteractionLikePayload,
   PageCardsPayload,
   PageScrollPayload,
+  SearchExecutePayload,
   ProfileDetailPayload,
   ProfileOpenPayload,
   PacingOp,
@@ -218,8 +219,18 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       return;
     }
     switch (env.type) {
-      // —— 委托给评论处理器（评论/搜索/加群；已测、自带诚实回执与单飞）——
-      case 'search.execute':
+      // —— 委托给评论处理器（定向评论搜索/评论/加群；已测、自带诚实回执与单飞）——
+      // 普通浏览搜索没有 taskId/container，走 FB BrowseSession 自己的全站搜索；
+      // 定向评论搜索必须带 taskId 或 container，仍由 commentHandler fail-closed 处理。
+      case 'search.execute': {
+        const payload = (env.payload ?? {}) as SearchExecutePayload;
+        if (!payload.taskId && !payload.container) {
+          await this.runBrowseCommand('search', () => this.searchBrowse(payload));
+          return;
+        }
+        await this.commentHandler.handle(env);
+        return;
+      }
       case 'interaction.comment':
       case 'group.join':
         await this.commentHandler.handle(env);
@@ -406,6 +417,32 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     return { type: 'cards', payload: this.toPageCards(cards) };
   }
 
+  /** 普通浏览搜索：导航 FB 全站帖子搜索页，再复用同一 feed 扫描器读结果。 */
+  private async searchBrowse(payload: SearchExecutePayload): Promise<TerminalReport> {
+    const keyword = String(payload.keyword ?? '').trim();
+    if (!keyword) return { type: 'action', payload: { action: 'search', ok: false, reason: 'no_target' } };
+
+    let searchUrl: string;
+    try {
+      const url = new URL('/search/posts/', this.feedUrl);
+      url.searchParams.set('q', keyword);
+      searchUrl = url.toString();
+    } catch {
+      return { type: 'action', payload: { action: 'search', ok: false, reason: 'nav_error' } };
+    }
+
+    const ensure = await this.feedReader.ensureFeed(searchUrl);
+    if (!ensure.ok) {
+      return { type: 'action', payload: { action: 'search', ok: false, reason: ensure.reason ?? 'search_unavailable' } };
+    }
+    const cards = await this.scanFeedCardsWithHydrationRetry('search');
+    if (cards.length === 0) return { type: 'action', payload: { action: 'search', ok: false, reason: 'no_candidates' } };
+    const maxResults = Number.isFinite(payload.maxResults) && (payload.maxResults ?? 0) > 0
+      ? Math.floor(payload.maxResults as number)
+      : cards.length;
+    return { type: 'cards', payload: this.toPageCards(cards.slice(0, maxResults)) };
+  }
+
   /** 返回 feed：导航回 feed → 重扫 → page.cards（驱动云端下一轮 feed.entered）。 */
   private async backToFeed(): Promise<TerminalReport> {
     const ensure = await this.feedReader.ensureFeed(this.feedUrl);
@@ -429,7 +466,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
    * FB feed 常先水合作者/正文，permalink 链接晚一拍出现。page.cards 必须有可开 permalink，
    * 所以这里只做短有界重试，不造卡、不放宽候选规则。
    */
-  private async scanFeedCardsWithHydrationRetry(context: 'initial' | 'scroll' | 'back'): Promise<FacebookFeedCard[]> {
+  private async scanFeedCardsWithHydrationRetry(context: 'initial' | 'scroll' | 'back' | 'search'): Promise<FacebookFeedCard[]> {
     for (let i = 0; i < FEED_CARD_HYDRATION_RETRY_ROUNDS; i++) {
       const cards = await this.feedReader.scanCards();
       if (cards.length > 0) {
