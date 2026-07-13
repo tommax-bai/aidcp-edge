@@ -51,6 +51,20 @@ test('顺序不变量：覆盖发生在 spawnEnv 合并之后（否则被继承�
   assert.ok(injectIdx < spawnCallIdx, '覆盖必须在 spawn 调用之前生效');
 });
 
+test('Facebook 浏览模式由最终云端 key 统一注入，且只发生在启动子进程前', () => {
+  const cloudResolveIdx = code.indexOf('const cloudSel = resolveCloudUrl();');
+  const browseInjectIdx = code.indexOf('spawnEnv.AIDCP_FB_BROWSE_AUTO = fleet.facebookBrowseModeFor');
+  const spawnCallIdx = code.indexOf('spawn(process.execPath');
+  assert.ok(cloudResolveIdx >= 0, '必须先解析实际云端');
+  assert.ok(browseInjectIdx > cloudResolveIdx, '浏览模式必须使用解析后的云端 key');
+  assert.ok(browseInjectIdx < spawnCallIdx, '浏览模式必须在子进程启动前注入');
+  assert.match(
+    code,
+    /const resolvedCloudKey = cloudSel\.fromSelection[\s\S]*?spawnEnv\.AIDCP_FB_BROWSE_AUTO = fleet\.facebookBrowseModeFor\([\s\S]*?cloudEnvKey: resolvedCloudKey/,
+    'Facebook 模式必须取同一条实际连接的 resolvedCloudKey',
+  );
+});
+
 test('custom 非法地址被降级为未选择、绝不注入垃圾（诚实回落）', () => {
   assert.match(
     code,

@@ -76,6 +76,18 @@ function legacyMirrorOf(environments) {
   };
 }
 
+/**
+ * Facebook 自动浏览策略：只允许已解析为 dev 的 Facebook 子进程真浏览/点赞。
+ * 此处刻意不读取 process.env，调用方会把结果写入最终 spawn env，以阻断外壳残留值泄漏到 ol/custom。
+ */
+function facebookBrowseModeFor({ platform, cloudEnvKey } = {}) {
+  const normalizedPlatform = String(platform ?? '').trim().toLowerCase();
+  const normalizedCloudEnvKey = String(cloudEnvKey ?? '').trim().toLowerCase();
+  return (normalizedPlatform === 'facebook' || normalizedPlatform === 'fb') && normalizedCloudEnvKey === 'dev'
+    ? 'on'
+    : 'off';
+}
+
 /** spawn 时必须从继承环境里剔除的键：任何一个泄漏进多环境子进程都会让身份/端口被钉死而串号。 */
 const ENV_KEYS_MUST_DROP = [
   'AIDCP_ACCOUNT_ID', // 身份由登录读出，绝不由启动方指派
@@ -238,6 +250,7 @@ module.exports = {
   normalizeEnvironments,
   migrateEnvironments,
   legacyMirrorOf,
+  facebookBrowseModeFor,
   buildEnvSpawnEnv,
   createStaggerQueue,
   ramAdmission,

@@ -1470,9 +1470,16 @@ function startEdge(handle) {
   // 未选择则不动、沿用继承 / 缺省（零回归）。stamp 本次实际连接的云端 key，供界面「当前云端」显示与实际一致。
   const cloudSel = resolveCloudUrl();
   if (cloudSel.fromSelection) spawnEnv.AIDCP_CLOUD_URL = cloudSel.url;
-  handle.connectedCloudKey = cloudSel.fromSelection
+  const resolvedCloudKey = cloudSel.fromSelection
     ? cloudSel.key
     : cloudKeyForUrl(String(process.env.AIDCP_CLOUD_URL || '').trim() || DEFAULT_CLOUD_URL);
+  handle.connectedCloudKey = resolvedCloudKey;
+  // Facebook 真浏览/点赞只对 dev 生效。必须放在两路 env 合并与云端解析之后，避免外壳遗留 on/shadow
+  // 泄漏到 ol/custom；所有 Facebook 分身共享此策略，不再按分身单独放行。
+  spawnEnv.AIDCP_FB_BROWSE_AUTO = fleet.facebookBrowseModeFor({
+    platform: handle.platform,
+    cloudEnvKey: resolvedCloudKey,
+  });
 
   handle.browserParkingReady = false;
   handle.browserPersonaNoticeState = null;

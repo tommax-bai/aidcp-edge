@@ -44,6 +44,15 @@ test('legacyMirrorOf：首成员镜像回旧字段（回滚兼容）；空花名
   assert.equal(fleet.legacyMirrorOf([]).adsProfileId, '');
 });
 
+test('facebookBrowseModeFor：仅 dev 的 Facebook 分身真浏览，其他环境显式关闭', () => {
+  assert.equal(fleet.facebookBrowseModeFor({ platform: 'facebook', cloudEnvKey: 'dev' }), 'on');
+  assert.equal(fleet.facebookBrowseModeFor({ platform: 'fb', cloudEnvKey: 'DEV' }), 'on');
+  assert.equal(fleet.facebookBrowseModeFor({ platform: 'facebook', cloudEnvKey: 'ol' }), 'off');
+  assert.equal(fleet.facebookBrowseModeFor({ platform: 'facebook', cloudEnvKey: 'custom' }), 'off');
+  assert.equal(fleet.facebookBrowseModeFor({ platform: 'xiaohongshu', cloudEnvKey: 'dev' }), 'off');
+  assert.equal(fleet.facebookBrowseModeFor({}), 'off');
+});
+
 // ── 冻结 spawn env + 身份闸 ──
 
 test('buildEnvSpawnEnv：注入 AIDCP_ADS_USER_ID、剔除继承的身份/端口键（防串号）', () => {
