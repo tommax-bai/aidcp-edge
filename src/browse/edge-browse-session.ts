@@ -33,8 +33,14 @@ export interface EdgeBrowseSession {
    * 但**非终态**——唤醒后可再 start() 重新开跑。与 closeAndWait 的差别只在「还回不回得来」。
    */
   stopAndWait(timeoutMs?: number): Promise<boolean>;
-  /** 独占任务接管前静默到原子边界，返回等待毫秒数。 */
-  quiesceForTask(): Promise<number>;
+  /**
+   * 独占任务接管前静默到原子边界，返回被取消的未开始命令数。
+   *
+   * **有界 + 诚实**（change lease-strict-preemption）：纯等待（阻断浮层 / 犹豫 / 停留）被当场唤醒作废；
+   * 只等「真正在改写页面」的执行体。预算内未收敛 MUST 抛出 BrowseQuiesceTimeoutError，
+   * **MUST NOT 谎称已静默** —— 否则抢占者会在仍在写页面的执行体之上拿到执行权（双写）。
+   */
+  quiesceForTask(timeoutMs?: number): Promise<number>;
   /** 独占任务释放后恢复。 */
   resumeAfterTask(): Promise<void>;
   /** 丢弃队列里的云端命令（断连时避免重放旧命令）。 */

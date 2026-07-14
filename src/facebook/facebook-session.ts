@@ -23,6 +23,7 @@ import { evalJson, type BrowseCdp } from '../browse/cdp-util.js';
 import type { OverlayMonitor } from '../browse/overlay-monitor.js';
 import { jitterAround } from '../humanize/index.js';
 import type { EdgeBrowseSession } from '../browse/edge-browse-session.js';
+import { TaskTakeoverError, BrowseQuiesceTimeoutError, DEFAULT_TASK_QUIESCE_MS } from '../browse/browse-session.js';
 import type {
   Envelope,
   ActionCompletedPayload,
@@ -164,6 +165,8 @@ const FEED_SETTLE_NAV_MS = 6_000;
 const FEED_SETTLE_INPLACE_MS = 3_500;
 /** refresh 的 Page.reload 兜底频率下限（毫秒）。 */
 const REFRESH_RELOAD_FLOOR_MS = 3 * 60_000;
+/** 孤儿写者排空的轮询间隔（change lease-strict-preemption）。 */
+const WRITER_DRAIN_POLL_MS = 100;
 
 /** refresh 的 Page.reload 兜底频率闸：距上次兜底达到下限才放行（纯函数，便于单测）。 */
 export function refreshReloadAllowed(lastReloadAt: number, now: number, floorMs: number): boolean {
@@ -220,6 +223,24 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private readonly startupId?: string;
   /** 命令串行链：一次只处理一条，避免并发争抢同一浏览器会话。 */
   private chain: Promise<void> = Promise.resolve();
+
+  // —— 任务接管（change lease-strict-preemption）——
+  /**
+   * **在飞页面写者计数**：只在执行体**真正结束**时才减 —— 绝不随「命令超时放行串行链」而减。
+   *
+   * 这是让位探针的唯一事实源。历史缺陷：让位问的是「串行链空了没有」，而命令超时会在执行体
+   * 仍在写页面时就 resolve 并放行链（见 runBrowseCommand 的超时兜底）⇒ 让位回「页面已静默」是**谎话**，
+   * 抢占者会在一个仍在写页面的孤儿动作之上拿到执行权（双写）。
+   */
+  private activePageWriters = 0;
+  /** 孤儿写者：命令已超时放行串行链、执行体仍在写页面。计数>0 期间让位一律如实回「未静默」。 */
+  private orphanWriters = 0;
+  /** 任务接管世代号：每次交接 +1。判据必须是世代号，不能是「已让位」标志（持权任务自己的命令就跑在让位期内）。 */
+  private taskBlockEpoch = 0;
+  /** 当前在执行的命令拍下的世代号；为 null 表示无命令在执行。 */
+  private activeCommandEpoch: number | null = null;
+  /** 可打断 sleep 的唤醒器集合（接管时全部唤醒，让安全取消点当场让路）。 */
+  private readonly sleepWakers = new Set<() => void>();
 
   constructor(deps: FacebookBrowseSessionDeps, options: FacebookBrowseSessionOptions = {}) {
     this.cdp = deps.cdp;
@@ -291,26 +312,103 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     return this.waitDrained(timeoutMs);
   }
 
+  /**
+   * 有界等待**页面真正静默**：串行链排空 **且** 在飞写者归零。
+   *
+   * 串行链排空 ≠ 页面已静默 —— 命令超时会在执行体仍在写页面时放行链（孤儿写者）。只等链 = 撒谎。
+   */
   private async waitDrained(timeoutMs: number): Promise<boolean> {
+    const budget = Math.max(0, timeoutMs);
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const drained = await Promise.race([
+    const chainDrained = await Promise.race([
       this.chain.then(() => true, () => true),
       new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        timer = setTimeout(() => resolve(false), budget);
         (timer as { unref?: () => void }).unref?.();
       }),
     ]);
     if (timer) clearTimeout(timer);
-    return drained;
+    if (!chainDrained) return false;
+    if (this.activePageWriters === 0) return true;
+
+    // 链空了但还有写者在飞 = 孤儿。按**迭代次数**限界（不用墙钟：注入的 sleep 桩可能立即 resolve）。
+    const maxIters = Math.ceil(budget / WRITER_DRAIN_POLL_MS) + 1;
+    for (let i = 0; i < maxIters; i++) {
+      if (this.activePageWriters === 0) return true;
+      await this.sleep(WRITER_DRAIN_POLL_MS);
+    }
+    return this.activePageWriters === 0;
   }
 
-  async quiesceForTask(): Promise<number> {
-    await this.chain.catch(() => {});
+  /**
+   * 交接：唤醒安全取消点上的纯等待让路 → 有界等真写段收敛。**未收敛即抛出，绝不谎称已静默**。
+   * 协调器据此不授予、诚实终结排队申请（见 edge-task-coordinator）。
+   */
+  async quiesceForTask(timeoutMs = DEFAULT_TASK_QUIESCE_MS): Promise<number> {
+    this.taskBlockEpoch++;
+    this.wakeInterruptibleSleeps(); // 让路：停在犹豫/停留上的命令当场作废，不必等它睡完
+    const drained = await this.waitDrained(timeoutMs);
+    if (!drained) {
+      this.log(
+        `[fb-session] 交接未在 ${timeoutMs}ms 内收敛（在飞写者 ${this.activePageWriters}，其中孤儿 ${this.orphanWriters}）→ 如实抛出，不授予`,
+      );
+      throw new BrowseQuiesceTimeoutError(timeoutMs);
+    }
     return 0;
   }
 
   async resumeAfterTask(): Promise<void> {
     /* FB 会话无独立恢复态：命令到达即处理。 */
+  }
+
+  /**
+   * 可打断 sleep：正常到时或被 wakeInterruptibleSleeps() 提前唤醒即 resolve。
+   * 用注入的 this.sleep 计时（测试可控）。唤醒后调用方须立刻 throwIfTakeover()，否则会当作睡完继续写页面。
+   */
+  private sleepInterruptible(ms: number): Promise<void> {
+    if (ms <= 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        this.sleepWakers.delete(waker);
+        resolve();
+      };
+      const waker = (): void => finish();
+      this.sleepWakers.add(waker);
+      void this.sleep(ms).then(finish); // 到时自然 resolve；finish 幂等，多余定时器无害空转
+    });
+  }
+
+  private wakeInterruptibleSleeps(): void {
+    if (this.sleepWakers.size === 0) return;
+    const wakers = [...this.sleepWakers];
+    this.sleepWakers.clear();
+    for (const w of wakers) w();
+  }
+
+  /** 当前命令是否已被更高优先级的独占任务接管：仅在命令执行中且交接已推进世代号时为真。 */
+  private takeoverRequested(): boolean {
+    return this.activeCommandEpoch !== null && this.taskBlockEpoch !== this.activeCommandEpoch;
+  }
+
+  /** 在安全取消点检查接管：已被接管即抛出，令本命令零页面副作用地作废。 */
+  private throwIfTakeover(): void {
+    if (this.takeoverRequested()) throw new TaskTakeoverError();
+  }
+
+  /**
+   * 页面写者记账：**只在 fn 真正 settle 时才减计数**。命令超时放行串行链不减 —— 那正是孤儿写者。
+   */
+  private trackWriter<T>(fn: () => Promise<T>): Promise<T> {
+    this.activePageWriters++;
+    const epoch = this.taskBlockEpoch;
+    this.activeCommandEpoch = epoch;
+    return fn().finally(() => {
+      this.activePageWriters--;
+      if (this.activeCommandEpoch === epoch) this.activeCommandEpoch = null;
+    });
   }
 
   discardQueuedCloudCommands(_reason?: string): void {
@@ -351,18 +449,18 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
           await this.runBrowseCommand('search', () => this.searchBrowse(payload));
           return;
         }
-        await this.commentHandler.handle(env);
+        await this.trackWriter(() => this.commentHandler.handle(env)); // 委托执行体同样是页面写者：让位必须等它真停
         return;
       }
       case 'interaction.comment':
       case 'group.join':
-        await this.commentHandler.handle(env);
+        await this.trackWriter(() => this.commentHandler.handle(env)); // 委托执行体同样是页面写者：让位必须等它真停
         return;
       case 'note.open': {
         const payload = (env.payload ?? {}) as NoteOpenPayload;
         // url 存在 = 评论支线按 permalink 开帖（读评论供撰写）；否则 = 浏览闭环按卡片 noteId 深读。
         if (payload.url) {
-          await this.commentHandler.handle(env);
+          await this.trackWriter(() => this.commentHandler.handle(env)); // 委托执行体同样是页面写者：让位必须等它真停
           return;
         }
         await this.runBrowseCommand('open_note', async () => {
@@ -460,15 +558,26 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       settled = true;
       this.emit(r);
     };
+    // 执行体登记为页面写者：计数只在 fn **真正 settle** 时才减 —— 下面的超时兜底会放行串行链，
+    // 但绝不代表页面已静默。让位探针只认这个计数（change lease-strict-preemption task 2.1）。
+    const running = this.trackWriter(fn);
     // 有界超时【race】fn：超时即回诚实 timeout 并**放行串行链**（哪怕 fn 卡死 CDP 仍挂着）——
     // 否则一个卡死命令会永久阻塞后续命令与云端 nudge，整会话活锁（task 4.3 红线）。
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
-        this.log(`[fb-session] 命令 ${action} 超时（${this.commandTimeoutMs}ms），回诚实 timeout 并放行链`);
+        // 放行链 ≠ 页面静默：登记孤儿写者，让位期间据此如实回「未静默、不可接管」（task 2.2）。
+        this.orphanWriters++;
+        void running.finally(() => {
+          this.orphanWriters--;
+        });
+        this.log(
+          `[fb-session] 命令 ${action} 超时（${this.commandTimeoutMs}ms），回诚实 timeout 并放行链；` +
+            `执行体仍可能在写页面 → 登记孤儿写者（当前 ${this.orphanWriters}）`,
+        );
         emitOnce({ type: 'action', payload: { action, ok: false, reason: 'timeout' } });
         resolve();
       }, this.commandTimeoutMs);
-      fn()
+      running
         .then((report) => {
           clearTimeout(timer);
           emitOnce(report);
@@ -476,26 +585,41 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         })
         .catch((err) => {
           clearTimeout(timer);
+          // 安全取消点上被独占任务接管：零页面副作用作废，回诚实失败回执，绝不重放、绝不假成功。
+          if (err instanceof TaskTakeoverError) {
+            this.log(`[fb-session] 命令 ${action} 在安全取消点被独占任务接管 → 零副作用作废`);
+            emitOnce({ type: 'action', payload: { action, ok: false, reason: 'preempted_by_task' } });
+            resolve();
+            return;
+          }
           emitOnce({ type: 'action', payload: { action, ok: false, reason: `handler_error:${(err as Error).message}` } });
           resolve();
         });
     });
   }
 
-  /** 动作前犹豫：云端下发的中心值 thinkMs × 风控 tempo，叠 lognormal 抖动（边缘只叠抖动，不自造系数）。 */
+  /**
+   * 动作前犹豫：云端下发的中心值 thinkMs × 风控 tempo，叠 lognormal 抖动（边缘只叠抖动，不自造系数）。
+   * **安全取消点**：纯等待、平台侧零副作用 → 被接管即当场作废，不必睡完。
+   */
   private async thinkBefore(thinkMs?: number): Promise<void> {
     if (!thinkMs || thinkMs <= 0) return;
     const ms = jitterAround(thinkMs * this.tempo, 0.25);
-    if (ms > 0) await this.sleep(ms);
+    if (ms > 0) await this.sleepInterruptible(ms);
+    this.throwIfTakeover();
   }
 
-  /** feed 翻页前确保本批卡片已停留到云端目标；已花掉的 LLM/网络时间会被吸收，不双重叠加。 */
+  /**
+   * feed 翻页前确保本批卡片已停留到云端目标；已花掉的 LLM/网络时间会被吸收，不双重叠加。
+   * **安全取消点**：同上。停留是「离页前的等待」，让路时不改任何页面状态。
+   */
   private async ensureFeedDwell(dwellMs?: number): Promise<void> {
     if (!dwellMs || dwellMs <= 0 || this.lastCardsAt <= 0) return;
     const target = jitterAround(dwellMs * this.tempo, 0.2);
     const elapsed = Date.now() - this.lastCardsAt;
     const remaining = Math.max(0, target - elapsed);
-    if (remaining > 0) await this.sleep(remaining);
+    if (remaining > 0) await this.sleepInterruptible(remaining);
+    this.throwIfTakeover();
   }
 
   private emit(r: TerminalReport): void {
@@ -722,13 +846,21 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       settled = true;
       this.emit(report);
     };
+    const running = this.trackWriter(() => this.openDirectProfile(payload));
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
-        this.log(`[fb-session] profile.open direct 超时（${this.commandTimeoutMs}ms），回 extracted:false`);
+        this.orphanWriters++;
+        void running.finally(() => {
+          this.orphanWriters--;
+        });
+        this.log(
+          `[fb-session] profile.open direct 超时（${this.commandTimeoutMs}ms），回 extracted:false；` +
+            `执行体仍可能在写页面 → 登记孤儿写者（当前 ${this.orphanWriters}）`,
+        );
         emitOnce({ type: 'profile', payload: this.profileFallback(payload.authorId) });
         resolve();
       }, this.commandTimeoutMs);
-      this.openDirectProfile(payload)
+      running
         .then((report) => {
           clearTimeout(timer);
           emitOnce(report);
@@ -736,6 +868,12 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         })
         .catch((err) => {
           clearTimeout(timer);
+          if (err instanceof TaskTakeoverError) {
+            this.log('[fb-session] profile.open direct 在安全取消点被独占任务接管 → 零副作用作废');
+            emitOnce({ type: 'action', payload: { action: 'profile_open', ok: false, reason: 'preempted_by_task' } });
+            resolve();
+            return;
+          }
           this.log(`[fb-session] profile.open direct 失败：${(err as Error).message}`);
           emitOnce({ type: 'profile', payload: this.profileFallback(payload.authorId) });
           resolve();

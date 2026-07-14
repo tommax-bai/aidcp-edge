@@ -1066,7 +1066,13 @@ async function main(): Promise<void> {
         console.error(`[aidcp-edge] 执行 Facebook 命令 ${env.type} 失败:`, err);
       });
     });
-    if (taskCoordinator.blocksBrowse) await browse.quiesceForTask();
+    // 交接现在有界且会诚实抛出（change lease-strict-preemption）。此处是**全新会话**（零在飞写者），
+    // 必然瞬时收敛；catch 只为不让一个诚实异常炸掉装配流程。
+    if (taskCoordinator.blocksBrowse) {
+      await browse.quiesceForTask().catch((err) => {
+        console.warn(`[aidcp-edge] 注册 Facebook 会话时交接未收敛：${(err as Error).message}`);
+      });
+    }
     // 不 await：会话长跑，与命令收发并行。start() 内部据 AIDCP_FB_BROWSE_AUTO 决定是否自动进 feed。
     browse.start().catch((err) => {
       console.error('[aidcp-edge] Facebook 浏览会话异常:', err);
@@ -1130,7 +1136,12 @@ async function main(): Promise<void> {
         console.error(`[aidcp-edge] 执行云端命令 ${env.type} 失败:`, err);
       });
     });
-    if (taskCoordinator.blocksBrowse) await browse.quiesceForTask();
+    // 同上：全新会话必然瞬时收敛，catch 只为不让诚实异常炸掉装配流程。
+    if (taskCoordinator.blocksBrowse) {
+      await browse.quiesceForTask().catch((err) => {
+        console.warn(`[aidcp-edge] 注册浏览会话时交接未收敛：${(err as Error).message}`);
+      });
+    }
     // 不 await：浏览循环长跑，与命令收发并行
     browse.start().catch((err) => {
       console.error('[aidcp-edge] 浏览会话异常:', err);

@@ -336,7 +336,7 @@ export class BrowseQuiesceTimeoutError extends Error {
  * 交接上界：只覆盖「真正在改写页面」的动作（纯等待已由安全取消点当场让路）。
  * 云端的受理预算 MUST 大于本值 + 一个消息往返余量，否则边缘按时交接了、云端已判死走人。
  */
-const DEFAULT_TASK_QUIESCE_MS = Number(process.env.AIDCP_TASK_QUIESCE_MS ?? 30_000);
+export const DEFAULT_TASK_QUIESCE_MS = Number(process.env.AIDCP_TASK_QUIESCE_MS ?? 30_000);
 
 /**
  * 关注按钮选择器（笔记 modal 作者区 + 作者主页两种上下文）。

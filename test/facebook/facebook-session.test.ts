@@ -561,3 +561,51 @@ test('session_closing：close 后命令诚实回执，绝不静默', async () =>
   await h.session.onCloudCommand(makeEnv('page.scroll', {}));
   assert.equal(h.actions.at(-1)?.reason, 'session_closing');
 });
+
+// ─────────── 让位探针不许撒谎（change lease-strict-preemption task 2）───────────
+
+test('让位探针不许撒谎：命令超时放行串行链后执行体仍在写页面 → 交接 MUST 抛出，绝不回「已静默」', async () => {
+  // hangOpen：读帖执行体永不返回（真实对应 CDP 卡死）。commandTimeoutMs=50 → 命令超时回诚实 timeout
+  // 并**放行串行链**，但执行体仍挂在页面上 = 孤儿写者。
+  const h = makeSession({ mode: 'on', hangOpen: true, commandTimeoutMs: 50 });
+  await h.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  assert.equal(h.actions.at(-1)?.reason, 'timeout', '命令已超时并放行链');
+  assert.ok(
+    h.logs.some((l) => l.includes('孤儿写者')),
+    '超时放行链时 MUST 登记孤儿写者',
+  );
+
+  // 修复前：quiesceForTask 只 await 串行链 → 链已被超时放行 → 回 0（「页面已静默」）＝**谎话**，
+  // 抢占者会在一个仍在写页面的执行体之上拿到执行权（双写）。修复后必须诚实抛出。
+  await assert.rejects(
+    () => h.session.quiesceForTask(200),
+    (err: Error) => err.name === 'BrowseQuiesceTimeoutError',
+    '孤儿写者在飞时 MUST NOT 谎称已静默',
+  );
+});
+
+test('让位：命令停在动作前犹豫（安全取消点）被接管 → 秒收敛、零页面写、回诚实 preempted_by_task', async () => {
+  const h = makeSession({ mode: 'on' });
+  // 60s 犹豫：纯等待、平台侧零副作用。被接管应当场作废，绝不等它睡完。
+  const running = h.session.onCloudCommand(
+    makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE', thinkMs: 60_000 }),
+  );
+  await sleep(20); // 让命令跑进 thinkBefore
+
+  const t0 = Date.now();
+  assert.equal(await h.session.quiesceForTask(2_000), 0, '安全取消点上的纯等待 MUST 当场让路');
+  assert.ok(Date.now() - t0 < 1_000, `交接必须秒收敛，实测 ${Date.now() - t0}ms`);
+  await running;
+
+  assert.equal(h.details.length, 0, '零页面写：帖子根本没被打开');
+  assert.equal(h.actions.at(-1)?.ok, false);
+  assert.equal(h.actions.at(-1)?.reason, 'preempted_by_task', '诚实回执，绝不假成功、绝不静默丢弃');
+});
+
+test('让位：无在飞命令 / 命令已正常跑完 → 交接照常收敛回 0（不引入回归）', async () => {
+  const h = makeSession({ mode: 'on' });
+  assert.equal(await h.session.quiesceForTask(500), 0);
+  await h.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  assert.equal(h.details.length, 1, '正常命令照常执行');
+  assert.equal(await h.session.quiesceForTask(500), 0);
+});
