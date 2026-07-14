@@ -27,7 +27,10 @@ export const facebookPlatformDriver: PlatformDriver = {
   // 'publish'：Facebook 个人时间线发帖原子执行能力（manual media pool + approval gate）。
   // 'identity'/'overlay' 为 driver 运行时能力（读身份 / 监测浮层），非编排词表——不进云端 registry 能力集。
   capabilities: ['identity', 'overlay', 'browse', 'comment', 'join', 'publish', 'interact'],
-  edgeCapabilities: ['locating', 'cdp'],
+  // 'inline_targeting'：本构建能处理 note.open{surface:'feed'} 就地读 + feed 两段点赞（change
+  //   facebook-feed-inline-browse）。云端**版本偏斜闸**（change platform-browse-protocol）只对声明此位的边缘
+  //   开 inline 旗标；声明它只表示「我能」，真开与否由云端旗标 gate（默认全关 = 逐位等于今天）。
+  edgeCapabilities: ['locating', 'cdp', 'inline_targeting'],
   target: FACEBOOK_TARGET,
   defaultStartUrl: FACEBOOK_TARGET.startUrl,
   attachUrlIncludes: FACEBOOK_TARGET.attachUrlIncludes,

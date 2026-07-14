@@ -29,7 +29,9 @@ test('selectPlatformDriver: facebook declares browse/interact (co-landed with Fa
   assert.equal(driver.app, 'facebook');
   assert.equal(driver.defaultStartUrl, 'https://www.facebook.com/');
   assert.equal(driver.attachUrlIncludes, 'facebook.com');
-  assert.deepEqual(driver.edgeCapabilities, ['locating', 'cdp']);
+  // change facebook-feed-inline-browse：'inline_targeting' 声明「本构建能处理 note.open{surface:'feed'} + feed 两段点赞」，
+  // 供云端版本偏斜闸只对声明该位的边缘开 inline 旗标（默认全关 = 逐位等于今天）。
+  assert.deepEqual(driver.edgeCapabilities, ['locating', 'cdp', 'inline_targeting']);
   // change facebook-browse-and-like-loop：'browse'/'interact' 已声明——但仅因 FacebookBrowseSession 在同一 change
   // 原子同落（co-landing），装配闸据此解析到 FB 浏览会话而非小红书 BrowseSession。'comment'/'join' 为既有能力。
   // change facebook-post-publish：'publish' 与 FacebookPublishExecutor 同落，不能裸声明。

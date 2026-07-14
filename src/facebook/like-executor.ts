@@ -51,6 +51,26 @@ export interface FacebookLikeResult {
   reason?: FacebookLikeReason;
   /** 是否真的派发了点击（shadow / 跳过 / 已赞 = false）。 */
   executed: boolean;
+  /**
+   * 被作用卡的独立见证（change platform-browse-protocol N4）：从**实际被点的 article DOM** 现读，
+   * 供云端归账仲裁逐字段比对选中卡。ok（真点）与 shadow（只定位）都会带；解析失败/异常则缺省。
+   * `surface` 由作用域根类型现判（dialog/permalink 全页=detail、feed 容器=feed）——会话据此决定是否
+   * 把 noteId/observation 挂到回执上：feed 才挂（激活云端仲裁），detail 不挂（逐位等于今天、零回归）。
+   */
+  observation?: FacebookLikeObservation;
+}
+
+/** 点赞独立见证包（N4）：全部页面派生，绝不复制命令 payload。 */
+export interface FacebookLikeObservation {
+  /** 重新派生的规范帖身份 `fb:<postId>`（作 action.completed.noteId）。 */
+  noteId?: string;
+  /** 观测到的作用面：'feed'=信息流就地、'detail'=详情/permalink。会话用它 gate 是否上挂见证。 */
+  surface: 'feed' | 'detail';
+  author?: string;
+  textPreviewHead?: string;
+  reactionText?: string;
+  /** 目标卡在顶层可见卡序中的 index（feed 才有意义）。 */
+  articleIndex?: number;
 }
 
 export interface FacebookLikeOptions {
@@ -130,6 +150,25 @@ interface VerifyResult {
   reacted: boolean;
   label?: string;
   text?: string;
+}
+
+interface PickerProbeResult {
+  overlay: boolean;
+}
+
+interface PickerCommitResult {
+  clicked: boolean;
+  label?: string;
+}
+
+interface RawObservation {
+  found: boolean;
+  surface?: 'feed' | 'detail';
+  noteId?: string | null;
+  author?: string | null;
+  textPreviewHead?: string | null;
+  reactionText?: string | null;
+  articleIndex?: number;
 }
 
 export class FacebookLikeExecutor {
@@ -222,8 +261,10 @@ export class FacebookLikeExecutor {
 
     if (shadow) {
       // Shadow：目标已确认存在但**不执行**——回诚实 shadow，云端据此不记账（无 ⚠ 前缀，不触发风控）。
-      this.log(`[fb-like][shadow] 目标存在（label="${locate.label ?? ''}"），影子模式不点击，回 shadow`);
-      return { ok: false, reason: 'shadow', executed: false };
+      // 但仍现读独立见证：shadow 阶段云端就是靠它比对「定位到的卡 == 选中卡」（N4 唯一非同义反复通道）。
+      const obs = await this.readObservation(runId);
+      this.log(`[fb-like][shadow] 目标存在（label="${locate.label ?? ''}" surface=${obs?.surface ?? '-'}），影子模式不点击，回 shadow`);
+      return { ok: false, reason: 'shadow', executed: false, ...(obs ? { observation: obs } : {}) };
     }
 
     let click: ClickResult;
@@ -243,9 +284,13 @@ export class FacebookLikeExecutor {
     }
 
     // 后置校验：**只读标记节点**，有界复读；命中「已反应」正向信号才 ok；否则诚实 state_unchanged。
+    // 【两段兜底（探针 P4）】feed 态单击「留下心情」只**弹反应选择器浮层**、按钮不翻转——此时补第二段
+    // （点浮层「赞」项）才真正提交。detail 态单击即翻转、picker 不弹，故 directToggle 路径不触发第二段。
+    // 两段只补一次（pickerCommitted 守卫），避免把已提交的赞又点成撤销。
     await this.sleep(this.opts.settleMs);
     const start = Date.now();
     let last: VerifyResult | undefined;
+    let pickerCommitted = false;
     while (Date.now() - start < this.opts.verifyTimeoutMs) {
       try {
         last = await evalJson<VerifyResult>(this.cdp, buildVerifyJs(targetId, runId));
@@ -258,8 +303,18 @@ export class FacebookLikeExecutor {
           return { ok: false, reason: 'verify_indeterminate', executed: true };
         }
         if (last?.reacted === true) {
-          this.log('[fb-like] ✓ 点赞成功（目标卡按钮状态已翻转）');
-          return { ok: true, executed: true };
+          const obs = await this.readObservation(runId);
+          this.log(`[fb-like] ✓ 点赞成功（目标卡按钮状态已翻转${pickerCommitted ? '，feed 两段提交' : ''}）`);
+          return { ok: true, executed: true, ...(obs ? { observation: obs } : {}) };
+        }
+        // 未翻转 + 弹了反应选择器浮层 ⇒ 补第二段（feed 两段点赞）。只补一次。
+        if (!pickerCommitted) {
+          const committed = await this.commitFeedPicker();
+          if (committed) {
+            pickerCommitted = true;
+            await this.sleep(this.opts.settleMs);
+            continue;
+          }
         }
       } catch {
         /* 下一轮重试 */
@@ -299,6 +354,48 @@ export class FacebookLikeExecutor {
       });
     }
     return false;
+  }
+
+  /**
+   * feed 两段兜底：探到反应选择器浮层就点其中「赞」项提交（探针 P4）。浮层常渲染在 portal（article 外），
+   * 故在全局可见项里找唯一「赞」项（数字守卫不适用——picker 项文案是纯反应词、无计数）。无浮层 → false（不点）。
+   */
+  private async commitFeedPicker(): Promise<boolean> {
+    let probe: PickerProbeResult;
+    try {
+      probe = await evalJson<PickerProbeResult>(this.cdp, buildPickerProbeJs());
+    } catch {
+      return false;
+    }
+    if (probe?.overlay !== true) return false;
+    let commit: PickerCommitResult;
+    try {
+      commit = await evalJson<PickerCommitResult>(this.cdp, buildPickerCommitJs());
+    } catch {
+      return false;
+    }
+    if (commit?.clicked === true) this.log(`[fb-like] feed 两段提交：点反应选择器「${commit.label ?? '赞'}」项`);
+    return commit?.clicked === true;
+  }
+
+  /** 现读被作用卡的独立见证（N4）：page-derived postId + surface + author/textHead/reactionText/articleIndex。 */
+  private async readObservation(runId: string): Promise<FacebookLikeObservation | undefined> {
+    let raw: RawObservation;
+    try {
+      raw = await evalJson<RawObservation>(this.cdp, buildObservationJs(runId));
+    } catch {
+      return undefined;
+    }
+    if (raw?.found !== true) return undefined;
+    const obs: FacebookLikeObservation = { surface: raw.surface === 'feed' ? 'feed' : 'detail' };
+    if (raw.noteId) obs.noteId = raw.noteId;
+    const author = (raw.author ?? '').trim();
+    if (author) obs.author = author;
+    const head = (raw.textPreviewHead ?? '').trim();
+    if (head) obs.textPreviewHead = head;
+    if (raw.reactionText) obs.reactionText = raw.reactionText;
+    if (typeof raw.articleIndex === 'number' && raw.articleIndex >= 0) obs.articleIndex = raw.articleIndex;
+    return obs;
   }
 
   /** 清理临时标记（best-effort：留下来会污染下一轮解析）。 */
@@ -454,5 +551,57 @@ function buildClearTagJs(runId: string): string {
   var els=document.querySelectorAll('[data-aidcp-target="'+${JSON.stringify(runId)}+'"]');
   for(var i=0;i<els.length;i++){ els[i].removeAttribute('data-aidcp-target'); }
   return JSON.stringify({cleared:true});
+})()`;
+}
+
+/**
+ * 反应选择器浮层探测（/*aidcp:picker-probe*\/）：可见 dialog / 反应容器内 ≥2 个反应项即判浮层已弹。
+ * 探针 P4：单击「留下心情」后弹此浮层、按钮不翻转，需二段点其中「赞」项才提交。
+ */
+function buildPickerProbeJs(): string {
+  return `(function(){/*aidcp:picker-probe*/${FB_TARGET_HELPERS_JS}
+  var dls=document.querySelectorAll('[role="dialog"],[aria-label*="反应"],[aria-label*="Reaction"],[aria-label*="心情"]');
+  for(var j=0;j<dls.length;j++){ var d=dls[j]; if(!fbTgtVisible(d)) continue;
+    if(d.querySelectorAll('[aria-label*="赞"],[aria-label*="Like"],[aria-label*="大爱"],[aria-label*="Love"]').length>=2) return JSON.stringify({overlay:true});
+  }
+  return JSON.stringify({overlay:false});
+})()`;
+}
+
+/**
+ * 反应选择器浮层里点「赞」项提交（/*aidcp:picker-commit*\/）。picker 常渲染在 portal（article 外），
+ * 故在全局可见 [role=button] 里找唯一「赞」反应项 el.click()。反应项文案是纯反应词、无计数——不需数字守卫。
+ */
+function buildPickerCommitJs(): string {
+  return `(function(){/*aidcp:picker-commit*/${FB_TARGET_HELPERS_JS}
+  var LIKEITEM=/^(赞|讚|Like|Me gusta)$/i;
+  var btns=document.querySelectorAll('[role="button"][aria-label]');
+  for(var i=0;i<btns.length;i++){ var el=btns[i]; if(!fbTgtVisible(el)) continue;
+    var l=String(el.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
+    if(LIKEITEM.test(l)){ try{ el.click(); return JSON.stringify({clicked:true, label:l}); }catch(e){ return JSON.stringify({clicked:false}); } }
+  }
+  return JSON.stringify({clicked:false});
+})()`;
+}
+
+/**
+ * 被作用卡独立见证现读（/*aidcp:observation*\/）：只读标记节点，重新派生 postId + 判 surface + 取
+ * author/textPreviewHead/reactionText/articleIndex。surface 由标记卡的祖先判：dialog→detail、feed 容器→feed。
+ */
+function buildObservationJs(runId: string): string {
+  return `(function(){/*aidcp:observation*/${FB_TARGET_HELPERS_JS}
+  function obsText(el){ return String((el&&el.innerText)||(el&&el.textContent)||'').replace(/\\s+/g,' ').trim(); }
+  var el=document.querySelector('[data-aidcp-target="'+${JSON.stringify(runId)}+'"]');
+  if(!el) return JSON.stringify({found:false});
+  var surface=(el.closest && el.closest('[role="dialog"]')) ? 'detail' : ((el.closest && el.closest('div[role="feed"]')) ? 'feed' : 'detail');
+  var al=el.querySelector('h2 a, h3 a, h4 a');
+  var msg=el.querySelector('[data-ad-comet-preview="message"],[data-ad-preview="message"],[data-ad-rendering-role="story_message"]');
+  var head=msg?obsText(msg):'';
+  var reactionText='';
+  var btns=el.querySelectorAll('[role="button"][aria-label]');
+  for(var b=0;b<btns.length;b++){ var lab=(btns[b].getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim(); var bt=obsText(btns[b]); if(/^(赞|讚|Like|Me gusta)/i.test(lab)&&/\\d/.test(bt)){ reactionText=bt; break; } }
+  var tops=fbTgtTopArticles(fbTgtScopeRoot()); var idx=-1;
+  for(var i=0;i<tops.length;i++){ if(tops[i]===el){ idx=i; break; } }
+  return JSON.stringify({found:true, surface:surface, noteId:fbTgtArticlePostId(el), author:al?obsText(al):null, textPreviewHead:head.slice(0,40)||null, reactionText:reactionText||null, articleIndex:idx});
 })()`;
 }

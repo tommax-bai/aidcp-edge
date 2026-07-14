@@ -42,7 +42,9 @@ import { FACEBOOK_DEFAULT_START_URL } from './driver.js';
 import { FacebookFeedReader, type FacebookFeedCard } from './feed-reader.js';
 import { FacebookPostReader } from './post-reader.js';
 import { FacebookLikeExecutor } from './like-executor.js';
+import { FacebookInlineReader } from './inline-reader.js';
 import { FacebookCommentHandler } from './comment-handler.js';
+import { canonicalPostId } from './post-identity.js';
 import { defaultFacebookConsentAccepter, type FacebookConsentAccepter } from './consent.js';
 
 export type FacebookBrowseMode = 'off' | 'shadow' | 'on';
@@ -118,6 +120,7 @@ export interface FacebookBrowseSessionDeps {
   feedReader?: FacebookFeedReader;
   postReader?: FacebookPostReader;
   likeExecutor?: FacebookLikeExecutor;
+  inlineReader?: FacebookInlineReader;
   sleep?: (ms: number) => Promise<void>;
   logger?: (msg: string) => void;
 }
@@ -164,11 +167,24 @@ const FEED_SETTLE_NAV_MS = 6_000;
 const FEED_SETTLE_INPLACE_MS = 3_500;
 /** refresh 的 Page.reload 兜底频率下限（毫秒）。 */
 const REFRESH_RELOAD_FLOOR_MS = 3 * 60_000;
+/** page.scroll 有界续滚找新卡的额外轮次上限：本次滚动 0 新卡时再滚几次，仍 0 才诚实 feed_exhausted。 */
+const FEED_SCROLL_EXTRA_ROUNDS = 2;
+/** 就地读停留地板：base + 每字符增量，封顶（× tempo 由调用点乘）。 */
+const INLINE_READ_FLOOR_BASE_MS = 1_200;
+const INLINE_READ_FLOOR_PER_CHAR_MS = 20;
+const INLINE_READ_FLOOR_CAP_MS = 9_000;
 
 /** refresh 的 Page.reload 兜底频率闸：距上次兜底达到下限才放行（纯函数，便于单测）。 */
 export function refreshReloadAllowed(lastReloadAt: number, now: number, floorMs: number): boolean {
   if (!lastReloadAt || lastReloadAt <= 0) return true;
   return now - lastReloadAt >= floorMs;
+}
+
+/** 就地读停留地板（纯函数，便于单测）：按正文字数线性、封顶，再乘 tempo。 */
+export function computeInlineReadFloorMs(bodyLen: number, tempo: number): number {
+  const raw = INLINE_READ_FLOOR_BASE_MS + Math.max(0, bodyLen) * INLINE_READ_FLOOR_PER_CHAR_MS;
+  const capped = Math.min(INLINE_READ_FLOOR_CAP_MS, raw);
+  return Math.round(capped * (tempo > 0 ? tempo : 1));
 }
 
 /**
@@ -202,6 +218,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private readonly feedReader: FacebookFeedReader;
   private readonly postReader: FacebookPostReader;
   private readonly likeExecutor: FacebookLikeExecutor;
+  private readonly inlineReader: FacebookInlineReader;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: (msg: string) => void;
   private readonly feedUrl: string;
@@ -217,6 +234,15 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private lastCardsAt = 0;
   /** 最近一次 refresh 的 Page.reload 兜底时刻；配 REFRESH_RELOAD_FLOOR_MS 做频率下限。 */
   private lastReloadAt = 0;
+  /**
+   * 会话级已上报 postId 游标（规范 `fb:<id>`，change facebook-feed-inline-browse task 1.2）。
+   * page.scroll 只上报**未见过**的顶层新卡；FB feed 回收已滚过的卡（探针 P7），DOM 序水位不可靠，必用身份集合。
+   * 首屏 / 刷新 / 返回是「新批」——重置后按当前批重新播种。
+   */
+  private seenPostIds = new Set<string>();
+  /** 最近一次就地读的时刻 + 读地板（毫秒）：inline read 停留兜底（task 4.2），下一条 scroll 前 max（不累加）。 */
+  private inlineReadStartedAt = 0;
+  private inlineReadFloorMs = 0;
   private readonly startupId?: string;
   /** 命令串行链：一次只处理一条，避免并发争抢同一浏览器会话。 */
   private chain: Promise<void> = Promise.resolve();
@@ -242,6 +268,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       new FacebookPostReader({ cdp: this.cdp, overlayMonitor: deps.overlayMonitor, acceptConsent: accept, sleep: this.sleep, logger: this.log });
     this.likeExecutor =
       deps.likeExecutor ?? new FacebookLikeExecutor({ cdp: this.cdp, overlayMonitor: deps.overlayMonitor, sleep: this.sleep, logger: this.log });
+    this.inlineReader =
+      deps.inlineReader ?? new FacebookInlineReader({ cdp: this.cdp, overlayMonitor: deps.overlayMonitor, sleep: this.sleep, logger: this.log });
   }
 
   isRunning(): boolean {
@@ -367,7 +395,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         }
         await this.runBrowseCommand('open_note', async () => {
           await this.thinkBefore(payload.thinkMs); // 开帖前犹豫（云端中心值 × tempo + 抖动）
-          return this.openBrowseNote(payload.noteId);
+          return this.openNoteRouted(payload);
         });
         return;
       }
@@ -489,12 +517,23 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (ms > 0) await this.sleep(ms);
   }
 
-  /** feed 翻页前确保本批卡片已停留到云端目标；已花掉的 LLM/网络时间会被吸收，不双重叠加。 */
+  /**
+   * feed 翻页前确保停留达标；已花掉的 LLM/网络时间会被吸收，不双重叠加。
+   * 两个来源取 **max（不累加）**：① 云端 dwellMs（锚点 lastCardsAt）；② 就地读地板（锚点 inlineReadStartedAt）——
+   * 上一步若是 surface='feed' 就地读、读完不导航，靠这里补足最小阅读停留（task 4.2），消费一次即清。
+   */
   private async ensureFeedDwell(dwellMs?: number): Promise<void> {
-    if (!dwellMs || dwellMs <= 0 || this.lastCardsAt <= 0) return;
-    const target = jitterAround(dwellMs * this.tempo, 0.2);
-    const elapsed = Date.now() - this.lastCardsAt;
-    const remaining = Math.max(0, target - elapsed);
+    const now = Date.now();
+    let remaining = 0;
+    if (dwellMs && dwellMs > 0 && this.lastCardsAt > 0) {
+      const target = jitterAround(dwellMs * this.tempo, 0.2);
+      remaining = Math.max(remaining, target - (now - this.lastCardsAt));
+    }
+    if (this.inlineReadStartedAt > 0) {
+      remaining = Math.max(remaining, this.inlineReadFloorMs - (now - this.inlineReadStartedAt));
+      this.inlineReadStartedAt = 0; // 消费一次
+      this.inlineReadFloorMs = 0;
+    }
     if (remaining > 0) await this.sleep(remaining);
   }
 
@@ -554,8 +593,85 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       return;
     }
     if (settle.degraded) this.log(`[fb-session] initial settle degraded：上报 ${settle.cards.length} 张（未完全稳定，卡为真抽）`);
-    this.emit({ type: 'cards', payload: this.toPageCards(settle.cards) });
+    this.resetCursor(); // 首屏 = 全新一批，重置游标后按本批播种
+    this.emit({ type: 'cards', payload: this.toPageCards(this.seedCursor(settle.cards)) });
     this.log(`[fb-session] 已上报首屏 ${settle.cards.length} 张 feed 卡片`);
+  }
+
+  /**
+   * note.open 按 surface / purpose 分流（change facebook-feed-inline-browse task 3.1）：
+   *  - purpose='navigate' → 只把浏览器带到详情供后续评论迁移，**MUST NOT 上报 note.detail**（避免 0 覆盖真实反应数），
+   *    只回 action.completed{ok, observation, page-derived noteId}。
+   *  - surface='feed' → 就地展开读全文（不离 feed）；环境变化则回落 detail 导航。
+   *  - 缺省（surface='detail' + purpose='read'）→ 今天行为：导航进详情页深读。
+   */
+  private async openNoteRouted(payload: NoteOpenPayload): Promise<TerminalReport> {
+    const noteId = String(payload.noteId ?? '').trim();
+    const surface = payload.surface === 'feed' ? 'feed' : 'detail';
+    const purpose = payload.purpose === 'navigate' ? 'navigate' : 'read';
+    if (purpose === 'navigate') return this.navigateForMigration(noteId);
+    if (surface === 'feed') return this.openInlineNote(noteId);
+    return this.openBrowseNote(noteId);
+  }
+
+  /**
+   * surface='feed' 就地深读：inline-reader 按 noteId 三段式锁卡、就地读全文（展开/textContent 捷径），
+   * 成功回 note.detail（noteId 用卡自身 DOM permalink，页面派生）。环境变化 → 回落 detail 导航（诚实读详情）。
+   */
+  private async openInlineNote(noteId: string): Promise<TerminalReport> {
+    if (!noteId) return { type: 'action', payload: { action: 'open_note', ok: false, reason: 'no_target' } };
+    const r = await this.inlineReader.openAndReadInline(noteId);
+    if (!r.ok) {
+      if (r.reason === 'context_changed') {
+        this.log('[fb-session] 就地读环境变化 → 回落 detail 导航深读');
+        return this.openBrowseNote(noteId);
+      }
+      return { type: 'action', payload: { action: 'open_note', ok: false, reason: r.reason ?? 'open_failed' } };
+    }
+    // 就地读停留地板（edge-local，task 4.2）：锚定 inlineReadStartedAt，下一条 scroll 前与云端 dwell 取 max（不累加）。
+    this.inlineReadFloorMs = computeInlineReadFloorMs(r.body?.length ?? 0, this.tempo);
+    this.inlineReadStartedAt = Date.now();
+    const noteIdOut = r.permalinkHref || noteId;
+    const payloadOut: NoteDetailPayload = {
+      noteId: noteIdOut,
+      title: r.body ? r.body.slice(0, 60) : '',
+      content: r.body ?? '',
+      mediaType: r.isVideo ? 'video' : 'image_text',
+      likeCount: r.reactionCount ?? 0,
+      collectCount: 0, // FB 无收藏：诚实缺省
+      url: noteIdOut,
+      ...(r.author ? { author: r.author } : {}),
+      ...(r.comments && r.comments.length > 0 ? { comments: r.comments } : {}),
+    };
+    this.log(
+      `[fb-session] note.detail(inline) noteId=${noteIdOut} 👍${r.reactionCount ?? 0} ` +
+        `正文:${(r.body ?? '').slice(0, 40).replace(/\s+/g, ' ')}…`,
+    );
+    return { type: 'detail', payload: payloadOut };
+  }
+
+  /**
+   * purpose='navigate'（评论迁移第一步）：按 noteId 导航进详情页、**不上报 note.detail**，
+   * 只回 action.completed{ok, observation{surface:'detail'}, noteId=落地页派生}。落地失败 → 诚实 ok:false。
+   */
+  private async navigateForMigration(noteId: string): Promise<TerminalReport> {
+    if (!noteId) return { type: 'action', payload: { action: 'open_note', ok: false, reason: 'no_target' } };
+    const detail = await this.postReader.openAndRead(noteId);
+    if (!detail.ok) {
+      return { type: 'action', payload: { action: 'open_note', ok: false, reason: detail.reason ?? 'open_failed' } };
+    }
+    const observation = {
+      surface: 'detail' as const,
+      noteId: detail.permalink,
+      ...(detail.author ? { author: detail.author } : {}),
+      ...(detail.body ? { textPreviewHead: detail.body.slice(0, 40) } : {}),
+      reactionText: String(detail.reactionCount),
+    };
+    this.log(`[fb-session] open_note(navigate) 落地详情 noteId=${detail.permalink}（不报 note.detail，供评论迁移）`);
+    return {
+      type: 'action',
+      payload: { action: 'open_note', ok: true, noteId: detail.permalink, observation },
+    };
   }
 
   /** 浏览闭环：按 permalink（noteId）深读 → note.detail。 */
@@ -593,10 +709,27 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     const noteId = String(payload?.noteId ?? '').trim();
     const r = await this.likeExecutor.like({ shadow, ...(noteId ? { noteId } : {}) });
     // ok:true 才让云端经 RiskController.record 记账；shadow/失败一律 ok:false（云端不记、不扣风控）。
-    return { type: 'action', payload: { action: 'like', ok: r.ok, ...(r.reason ? { reason: r.reason } : {}) } };
+    // 独立见证（noteId + observation）**只在 feed 就地作用面上挂**——detail 面（今天）逐位回落会话当前笔记、
+    // 逐位等于今天（零回归）；feed 面才激活云端归账仲裁（N4，shadow/真点均带）。
+    const obs = r.observation;
+    const attachWitness = obs?.surface === 'feed';
+    return {
+      type: 'action',
+      payload: {
+        action: 'like',
+        ok: r.ok,
+        ...(r.reason ? { reason: r.reason } : {}),
+        ...(attachWitness && obs?.noteId ? { noteId: obs.noteId } : {}),
+        ...(attachWitness && obs ? { observation: obs } : {}),
+      },
+    };
   }
 
-  /** feed 翻页 → 判稳扫卡 → page.cards。ensureFeed 幂等：已在 feed 就不重新导航（不重置滚动位置）。 */
+  /**
+   * feed 翻页 → 判稳扫卡 → 只上报**未见过的新卡**（游标去回收重现）。ensureFeed 幂等：已在 feed 就不重新导航。
+   * 本次滚动 0 新卡（回收的旧卡重现，不算新）⇒ 有界续滚；仍 0 ⇒ 诚实 `feed_exhausted`（云端映射为 refresh，
+   * 见 change platform-browse-protocol），绝不把回收重现当新内容重复上报。
+   */
   private async scrollFeed(): Promise<TerminalReport> {
     // 只有确认已在目标列表面后才能滚动。ensureFeed 幂等——已在首页/搜索页且无 dialog 时直接放行、不导航，
     // 因此连续滚动能真正累积深度，而非每次被整页重载钉回第一屏。
@@ -604,13 +737,25 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (!ensure.ok) {
       return { type: 'action', payload: { action: 'scroll', ok: false, reason: ensure.reason ?? 'no_feed' } };
     }
-    await this.feedReader.scrollNext();
-    const settle = await this.feedReader.settleCards({ wallClockMs: FEED_SETTLE_INPLACE_MS });
-    if (settle.cards.length === 0) {
-      return { type: 'action', payload: { action: 'scroll', ok: false, reason: settle.reason ?? 'no_target' } };
+    for (let attempt = 0; attempt <= FEED_SCROLL_EXTRA_ROUNDS; attempt++) {
+      await this.feedReader.scrollNext();
+      const settle = await this.feedReader.settleCards({ wallClockMs: FEED_SETTLE_INPLACE_MS });
+      if (settle.cards.length === 0) {
+        // 完全扫不到卡（loading/no_feed）：照实回，不当 exhausted（区分「没内容」与「没新内容」）。
+        if (attempt >= FEED_SCROLL_EXTRA_ROUNDS) {
+          return { type: 'action', payload: { action: 'scroll', ok: false, reason: settle.reason ?? 'no_target' } };
+        }
+        continue;
+      }
+      const fresh = this.takeNewCards(settle.cards);
+      if (fresh.length > 0) {
+        if (settle.degraded) this.log(`[fb-session] scroll settle degraded：上报 ${fresh.length} 张新卡（未完全稳定，卡为真抽）`);
+        return { type: 'cards', payload: this.toPageCards(fresh) };
+      }
+      // 0 新卡（本屏全是已上报/回收重现）——继续有界续滚找下沉的新卡。
     }
-    if (settle.degraded) this.log(`[fb-session] scroll settle degraded：上报 ${settle.cards.length} 张（未完全稳定，卡为真抽）`);
-    return { type: 'cards', payload: this.toPageCards(settle.cards) };
+    this.log('[fb-session] 连续滚动无新卡 → feed_exhausted（云端映射为 refresh）');
+    return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'feed_exhausted' } };
   }
 
   /** 普通浏览搜索：导航 FB 全站帖子搜索页，再复用同一 feed 扫描器读结果。 */
@@ -638,7 +783,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     const maxResults = Number.isFinite(payload.maxResults) && (payload.maxResults ?? 0) > 0
       ? Math.floor(payload.maxResults as number)
       : cards.length;
-    return { type: 'cards', payload: this.toPageCards(cards.slice(0, maxResults)) };
+    this.resetCursor(); // 搜索结果 = 全新一批，重置游标后按本批播种
+    return { type: 'cards', payload: this.toPageCards(this.seedCursor(cards.slice(0, maxResults))) };
   }
 
   /**
@@ -654,7 +800,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (settle.cards.length === 0) {
       return { type: 'action', payload: { action: 'back', ok: false, reason: settle.reason ?? 'no_feed' } };
     }
-    return { type: 'cards', payload: this.toPageCards(settle.cards) };
+    // 返回列表面 = 给云端一份当前位置的完整候选（不过滤，避免返回后无候选），并把它们并入游标供后续 scroll 去重。
+    return { type: 'cards', payload: this.toPageCards(this.seedCursor(settle.cards)) };
   }
 
   /** 关闭当前帖（详情态 dialog）：导航回 feed 关闭 dialog，诚实回 close ok。 */
@@ -691,7 +838,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (settle.cards.length === 0 || !afterTop || afterTop === beforeTop) {
       return { type: 'action', payload: { action: 'refresh', ok: false, reason: settle.reason ?? 'not_refreshed' } };
     }
-    return { type: 'cards', payload: this.toPageCards(settle.cards) };
+    this.resetCursor(); // 换批成功 = 全新一批，重置游标后按本批播种
+    return { type: 'cards', payload: this.toPageCards(this.seedCursor(settle.cards)) };
   }
 
   /** refresh 的整页重载兜底：仅页内换批不可用时用，带频率下限（≥3min），仅本方法可达（恢复/滚动路径永不触发）。 */
@@ -823,6 +971,34 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     } catch {
       /* best-effort：关 dialog 失败不影响回执 */
     }
+  }
+
+  /** 「新批」重置游标（首屏 / 刷新 / 搜索结果 = 全新列表）。 */
+  private resetCursor(): void {
+    this.seenPostIds.clear();
+  }
+
+  /** 播种：把整批卡标记为已上报并连续重排 index（不过滤）。首屏/刷新/返回用——保证云端总有候选。 */
+  private seedCursor(cards: FacebookFeedCard[]): FacebookFeedCard[] {
+    const out: FacebookFeedCard[] = [];
+    for (const c of cards) {
+      const key = canonicalPostId(c.noteId);
+      if (key) this.seenPostIds.add(key);
+      out.push({ ...c, index: out.length });
+    }
+    return out;
+  }
+
+  /** 只取**未见过**的顶层新卡、标记为已见、连续重排 index（page.scroll 用；回收的旧卡重现被滤掉）。 */
+  private takeNewCards(cards: FacebookFeedCard[]): FacebookFeedCard[] {
+    const fresh: FacebookFeedCard[] = [];
+    for (const c of cards) {
+      const key = canonicalPostId(c.noteId);
+      if (key && this.seenPostIds.has(key)) continue; // 已上报过（含回收重现）→ 不重复作候选
+      if (key) this.seenPostIds.add(key);
+      fresh.push({ ...c, index: fresh.length });
+    }
+    return fresh;
   }
 
   private toPageCards(cards: FacebookFeedCard[]): PageCardsPayload {

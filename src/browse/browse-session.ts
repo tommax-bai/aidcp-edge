@@ -1357,6 +1357,13 @@ export class BrowseSession {
       case 'note.open': {
         const payload = env.payload as NoteOpenPayload;
         this.logger(`[browse] 命令: note.open (index=${payload.index}, noteId=${payload.noteId ?? '?'})`);
+        // 小红书页面模型无「feed 就地读全文」——收到 surface='feed' 绝不静默回落 detail，
+        // 诚实 capability_unsupported（change facebook-feed-inline-browse task 4.4 / N7）。
+        if (payload.surface === 'feed') {
+          this.logger('[browse] note.open surface=feed 小红书不支持就地读，诚实回 capability_unsupported（不回落 detail）');
+          this.deps.client.reportActionCompleted?.({ action: 'open_note', ok: false, reason: 'capability_unsupported' });
+          break;
+        }
         if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 打开前犹豫（max，非累加）
         await this.openAndReportNote(payload.index ?? 0, payload.noteId);
         break;

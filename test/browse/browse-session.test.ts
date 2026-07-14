@@ -325,6 +325,23 @@ test('browse-session: note.open 命令打开卡片并上报 note.detail', async 
   assert.equal(h.reportedDetails[0].mediaType, 'image_text');
 });
 
+test('browse-session: note.open surface=feed 小红书诚实拒 capability_unsupported（不回落 detail 开卡）', async () => {
+  // change facebook-feed-inline-browse task 4.4 / N7：小红书页面模型无 feed 就地读，收到 surface=feed
+  // MUST NOT 静默回落 detail——诚实 capability_unsupported，且绝不打开任何卡。
+  const h = makeHarness();
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('note.open', 'n-feed', 0, { index: 0, surface: 'feed' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  assert.equal(h.openedCards.length, 0, '绝不回落打开卡片');
+  assert.equal(h.reportedDetails.length, 0, '不假 note.detail');
+  const refusal = h.completedActions.find((a) => a.action === 'open_note');
+  assert.ok(refusal, '必有 open_note 回执');
+  assert.equal(refusal?.ok, false);
+  assert.equal(refusal?.reason, 'capability_unsupported');
+});
+
 test('browse-session: note.open 预算耗尽后如实失败，接管等待到安全边界才结束', async () => {
   const h = makeHarness();
   let clock = 0;

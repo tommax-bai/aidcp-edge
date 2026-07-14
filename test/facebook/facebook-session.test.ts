@@ -277,7 +277,14 @@ test('page.scroll → 翻页扫卡 page.cards（collectCount=0）', async () => 
 
 test('page.scroll 带 dwellMs → FB 翻页前先按卡片停留兜底等待', async () => {
   const sleeps: number[] = [];
-  const h = makeSession({ mode: 'on', sleep: async (ms) => { sleeps.push(ms); } });
+  // 首屏与滚动给**不同**卡（滚动带出真新卡）——同卡在游标下会被当回收重现滤掉（见 feed_exhausted 语义）。
+  const cardA: FacebookFeedCard = { index: 0, noteId: 'https://www.facebook.com/a/posts/pfbidONE', author: 'Alice', textPreview: 'one', reactionCount: 1, isVideo: false };
+  const cardB: FacebookFeedCard = { index: 0, noteId: 'https://www.facebook.com/b/posts/pfbidTWO', author: 'Bob', textPreview: 'two', reactionCount: 2, isVideo: false };
+  const h = makeSession({
+    mode: 'on',
+    sleep: async (ms) => { sleeps.push(ms); },
+    settleBatches: [{ cards: [cardA], degraded: false }, { cards: [cardB], degraded: false }],
+  });
   await h.session.start();
   assert.equal(h.cards.length, 1, 'start 应先上报首屏，建立 dwell 锚点');
 
@@ -285,6 +292,7 @@ test('page.scroll 带 dwellMs → FB 翻页前先按卡片停留兜底等待', a
 
   assert.ok(sleeps.some((ms) => ms > 0), `应消费 dwellMs 产生等待，实际=${JSON.stringify(sleeps)}`);
   assert.equal(h.cards.length, 2, '等待后仍应执行 scroll 并上报新 page.cards');
+  assert.equal(h.cards[1].cards[0].noteId, 'https://www.facebook.com/b/posts/pfbidTWO', '滚动报的是新卡 B');
 });
 
 test('navigation.back → 回 feed 重报 page.cards（驱动下一轮 feed.entered）', async () => {
