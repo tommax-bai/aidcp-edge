@@ -1502,7 +1502,7 @@ devToggle.addEventListener('change', () => {
   window.aidcpEdge.saveSettings({ devDetails: devToggle.checked }); // 独立持久化，不打断在跑核心
 });
 
-// 悬浮会话控制：已暂停→关闭+恢复 / 已关闭或停止→启动 / 其余（运行·启动中）→暂停。
+// 今日进展内的会话控制：已暂停→关闭+恢复 / 已关闭或停止→启动 / 其余（运行·启动中）→暂停。
 function renderFab(status) {
   const fab = fields.sessionFab;
   let text;
@@ -2996,7 +2996,7 @@ settingsUi.applyRestart.addEventListener('click', async () => {
   }
 });
 
-// 悬浮会话按钮：三态触发 恢复 / 启动（=先保存再启动） / 暂停。无独立「保存」按钮。
+// 今日进展会话按钮：三态触发 恢复 / 启动（=先保存再启动） / 暂停。无独立「保存」按钮。
 fields.sessionFab.addEventListener('click', async () => {
   const action = fields.sessionFab.dataset.action;
   fields.sessionFab.disabled = true;

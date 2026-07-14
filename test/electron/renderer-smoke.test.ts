@@ -284,7 +284,7 @@ test('窗口停放：无可控浏览器时显示浏览器诚实失败', async ()
   assert.match($(w, '#settings-msg').textContent ?? '', /引擎未运行或浏览器尚未就绪，请先启动引擎再操作/);
 });
 
-test('悬浮生命周期控制：关闭/停止→启动，运行→暂停，暂停→关闭+恢复', async () => {
+test('今日进展生命周期控制：关闭/停止→启动，运行→暂停，暂停→关闭+恢复', async () => {
   const stopped = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'stopped' }) }));
   assert.equal($(stopped, '#session-fab').textContent, '启动');
   const closed = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'stopped', session: 'closed' }) }));

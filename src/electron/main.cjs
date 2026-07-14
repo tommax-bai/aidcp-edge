@@ -1165,9 +1165,9 @@ function saveUiState() {
 
 // Windows 叠加窗控随风控状态染色（mac 红绿灯为系统绘制、无需管）。仅对**选中环境**生效。
 const OVERLAY_TONES = {
-  normal: { color: '#eef4ff', symbolColor: '#1a2233', height: 46 },
-  warned: { color: '#fdf3e0', symbolColor: '#5b4708', height: 46 },
-  danger: { color: '#fde8e8', symbolColor: '#7f1d1d', height: 46 },
+  normal: { color: '#ffffff', symbolColor: '#172238', height: 46 },
+  warned: { color: '#fff8ec', symbolColor: '#5b4708', height: 46 },
+  danger: { color: '#fff0f1', symbolColor: '#7f1d1d', height: 46 },
 };
 
 function applyOverlayTone(risk) {
@@ -1499,7 +1499,7 @@ function frameOptions() {
   if (process.platform === 'win32') {
     return {
       titleBarStyle: 'hidden',
-      titleBarOverlay: { color: '#eef4ff', symbolColor: '#1a2233', height: 46 },
+      titleBarOverlay: { color: '#ffffff', symbolColor: '#172238', height: 46 },
     };
   }
   return {};

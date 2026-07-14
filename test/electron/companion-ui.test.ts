@@ -565,6 +565,16 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
   }
 });
 
+test('生命周期控制收进今日进展，不再悬浮遮挡活动流', async () => {
+  const { w } = await boot();
+  const actions = $(w, '#daily-summary .summary-actions');
+  assert.ok(actions.contains($(w, '#session-fab')));
+  assert.ok(actions.contains($(w, '#session-close')));
+  assert.ok(actions.contains($(w, '#updated-at')));
+  assert.match(rendererCss, /\.summary-actions\s*\{/);
+  assert.doesNotMatch(rendererCss, /\.fab-group\s*\{[^}]*position:\s*fixed/s);
+});
+
 test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并标记已完成计划', async () => {
   const { w, pushStatus } = await boot();
   const originalNow = w.Date.now;

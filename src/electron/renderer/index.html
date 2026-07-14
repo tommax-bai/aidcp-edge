@@ -208,6 +208,11 @@
           </div>
           <span id="usage-limit" class="summary-limit hidden"></span>
           <button id="quota-toggle" class="quota-toggle" type="button" aria-label="查看今日节奏" aria-expanded="false">⌄</button>
+          <div class="summary-actions" aria-label="环境生命周期控制">
+            <time id="updated-at" class="summary-time"></time>
+            <button id="session-close" class="fab close hidden" type="button">关闭</button>
+            <button id="session-fab" class="fab" type="button">启动</button>
+          </div>
         </div>
         <div class="usage-grid">
           <div class="kpi" data-action="view">
@@ -236,7 +241,6 @@
           </div>
         </div>
         <div id="quota-windows" class="quota-windows hidden"></div>
-        <time id="updated-at" class="summary-time"></time>
       </section>
 
       <!-- 叙述式活动流：一句人话一条、最新在上 -->
@@ -635,11 +639,6 @@
       </div>
     </aside>
 
-    <!-- 悬浮会话控制：运行→暂停；暂停→关闭/恢复；关闭→启动。 -->
-    <div class="fab-group" aria-label="环境生命周期控制">
-      <button id="session-close" class="fab close hidden" type="button">关闭</button>
-      <button id="session-fab" class="fab" type="button">启动</button>
-    </div>
     <script src="./ui-logic.js"></script>
     <script src="./renderer.js"></script>
   </body>

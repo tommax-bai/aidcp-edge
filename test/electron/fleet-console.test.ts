@@ -613,8 +613,12 @@ test('平台标识：FB 环境行染平台类、顶栏徽标随选中环境切�
   const rowOf = (id: string) => [...w.document.querySelectorAll('.rail-row')].find((r) => (r as HTMLElement).dataset.envId === id) as HTMLElement;
   assert.ok(rowOf('ads-p1').className.includes('plat-facebook'), 'FB 环境行带 plat-facebook 类');
   assert.ok(rowOf('ads-p2').className.includes('plat-xiaohongshu'), '小红书环境行带 plat-xiaohongshu 类');
-  assert.ok(rendererCss.includes('.env-rail.collapsed .rail-row.plat-xiaohongshu .rail-ava { background: #fff1f4; color: var(--coral); }'), '收起态小红书首字使用红色');
-  assert.ok(rendererCss.includes('.env-rail.collapsed .rail-row.plat-facebook .rail-ava { background: #e7f0fe; color: var(--plat-fb); }'), '收起态 Facebook 首字使用蓝色');
+  assert.ok(rendererCss.includes('.rail-row.selected { background: var(--accent-soft); border-left-color: var(--accent); }'), '选中态统一使用交互蓝，不复用平台红');
+  assert.ok(rendererCss.includes('.env-rail.collapsed .rail-row.plat-xiaohongshu .rail-ava { background: linear-gradient(135deg, #ff5773, var(--coral)); color: #fff; }'), '收起态小红书头像保持平台红实色');
+  assert.ok(rendererCss.includes('.env-rail.collapsed .rail-row.plat-facebook .rail-ava { background: linear-gradient(135deg, #4a99ff, var(--plat-fb)); color: #fff; }'), '收起态 Facebook 头像保持平台蓝实色');
+  assert.ok(rendererCss.includes('.env-rail.collapsed .rail-ava::after {'), '收起态用头像右下角状态点表达运行状态');
+  assert.ok(rendererCss.includes('.env-rail.collapsed .rail-row.selected::before,'), '收起态选中环境使用单层蓝色侧边标记');
+  assert.doesNotMatch(rendererCss, /rail-ringblink|--ring/, '收起态不再用多层状态色环包围头像');
   // 顶栏身份区随选中环境（ads-p1 = FB）切换文案与配色，健康浮层登录行同步
   pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一' }));
   await tick();
