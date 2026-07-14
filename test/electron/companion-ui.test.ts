@@ -193,6 +193,10 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-mascot\s*\{[^}]*display:\s*none/s);
   assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-main::before/);
   assert.match(rendererCss, /\.rg-progress\s*\{/);
+  assert.match(rendererSrc, /browse: '<svg[\s\S]*<path d="M9 9 5 5l1\.8 11\.7/);
+  assert.match(rendererSrc, /match: '<svg[\s\S]*<path d="M7 3H5/);
+  assert.doesNotMatch(rendererSrc, /browse: '<svg[\s\S]*m4 4 7\.1 17/);
+  assert.doesNotMatch(rendererSrc, /match: '<svg[\s\S]*m8\.5 12\.2 2\.2 2\.2 4\.8-5\.1/);
   assert.match(rendererCss, /\.rg-flow-step\.flow-active:not\(:last-child\)::after/);
   assert.match(rendererCss, /@keyframes rg-flow-spark/);
   assert.match(rendererCss, /\.rg-flow-step:not\(:last-child\)::after\s*\{[\s\S]*right: -4px;[\s\S]*width: 28px;/);
@@ -277,6 +281,7 @@ test('运行中 + 事件过期 + 阶段计划完成 → 说明自然间隔的成
     assert.equal(hourSteps.length, 3);
     assert.ok(hourSteps[0].classList.contains('flow-active'), '小时间隔：浏览成果 → 自然间隔需要动态推进');
     assert.ok(hourSteps[1].classList.contains('flow-active'), '小时间隔：自然间隔 → 继续寻找灵感需要动态推进');
+    assert.match(rendererSrc, /pause: '<svg[\s\S]*<path d="M2 6c\.6\.5/);
     assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
     assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /本轮已查看 38 条推荐内容/);
     assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /38\/150/);
@@ -624,6 +629,8 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
     assert.match($(w, '#runtime-guidance-harvest').textContent ?? '', /来源热度 1\.2 万赞/);
     assert.equal(w.document.querySelectorAll('#runtime-guidance-harvest b').length, 2);
     assert.match(rendererCss, /\.rg-harvest\s*\{/);
+    assert.match(rendererSrc, /harvest: '<svg[\s\S]*<path d="m19 21-7-4-7 4V5/);
+    assert.match(rendererSrc, /harvest: '<svg[\s\S]*<path d="m9 10 2 2 4-4"/);
     assert.match(rendererCss, /\.runtime-guidance\[data-mode="day"\] \.rg-flow\s*\{[\s\S]*--rg-step-next: #22a875;/);
     assert.match(rendererCss, /\.rg-flow-copy small \{[\s\S]*color: var\(--rg-step-detail\);/);
     assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="day"\] \.rg-flow-step\.next \.rg-flow-copy small/);

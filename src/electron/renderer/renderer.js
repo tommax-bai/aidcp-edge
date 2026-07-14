@@ -718,11 +718,11 @@ const RUNTIME_GUIDANCE_MASCOTS = {
   celebration: './assets/mascot-celebration-512.png',
 };
 const RUNTIME_GUIDANCE_ICONS = {
-  browse: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 4 7.1 17 2.5-7.4L21 11.1 4 4Z"/><path d="m13 13 6 6"/></svg>',
-  pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12c2.1-2.4 4.3-2.4 6.4 0s4.3 2.4 6.4 0 4.3-2.4 5.2-1.3"/><path d="M3 17c2.1-2.4 4.3-2.4 6.4 0s4.3 2.4 6.4 0 4.3-2.4 5.2-1.3"/></svg>',
-  match: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="m8.5 12.2 2.2 2.2 4.8-5.1"/></svg>',
-  search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.2 4.2"/></svg>',
-  harvest: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 4.5h11a1.5 1.5 0 0 1 1.5 1.5v14l-7-3.7L5 20V6a1.5 1.5 0 0 1 1.5-1.5Z"/><path d="M9 9h6"/><path d="M9 12h4"/></svg>',
+  browse: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 9 5 5l1.8 11.7L10 13.6l2.4 5.4 3-1.3-2.4-5.4h4.4L9 9Z"/><path d="M7.2 2.2 8 5.1"/><path d="m5.1 8-2.9-.8"/><path d="M14 4.1 12 6"/><path d="m6 12-1.9 2"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5s2.5 2 5 2 2.5-2 5-2c1.3 0 1.9.5 2.5 1"/><path d="M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2c1.3 0 1.9.5 2.5 1"/><path d="M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2c1.3 0 1.9.5 2.5 1"/></svg>',
+  match: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3H5a2 2 0 0 0-2 2v2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="11" cy="11" r="4"/><path d="m15 15 4 4"/></svg>',
+  search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>',
+  harvest: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16Z"/><path d="m9 10 2 2 4-4"/></svg>',
 };
 
 function renderRuntimeGuidanceProgress(progress) {
