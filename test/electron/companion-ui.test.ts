@@ -215,7 +215,9 @@ test('运行中 + 事件过期 + 阶段计划完成 → 说明自然间隔的成
         },
       },
     }));
-    assert.equal(hidden($(w, '.presence')), true, '间隔说明取代重复的静态在场感行');
+    assert.equal(hidden($(w, '.presence')), false, '间隔说明出现时仍保留第一块在场感');
+    assert.equal(hidden($(w, '#loop')), false, '间隔说明出现时仍保留浏览循环步骤');
+    assert.ok($(w, '#loop .loop-step[data-stage="read"]').classList.contains('on'), '运行态间隔仍点亮当前阶段');
     assert.equal(hidden($(w, '#runtime-guidance')), false);
     assert.equal($(w, '#runtime-guidance').dataset.mode, 'hour');
     assert.match($(w, '#runtime-guidance-title').textContent ?? '', /先让平台认识你一点/);
@@ -252,7 +254,13 @@ test('本轮等待缺少浏览配额字段时仍渲染自然间隔进度卡', as
         },
       },
     }));
-    assert.equal(hidden($(w, '.presence')), true, '完整进度卡出现时隐藏旧的简短状态行');
+    assert.equal(hidden($(w, '.presence')), false, '完整进度卡出现时仍保留第一块在场感');
+    assert.equal(hidden($(w, '#loop')), false, '休息态仍保留浏览循环步骤');
+    assert.equal(
+      Array.from(w.document.querySelectorAll('#loop .loop-step')).some((el) => (el as HTMLElement).classList.contains('on')),
+      false,
+      '休息态没有正在执行的步骤，但循环结构仍在'
+    );
     assert.equal(hidden($(w, '#runtime-guidance')), false);
     assert.equal($(w, '#runtime-guidance').dataset.mode, 'session');
     assert.equal($(w, '#runtime-guidance-title').textContent, '先整理一下刚才发现的方向。');

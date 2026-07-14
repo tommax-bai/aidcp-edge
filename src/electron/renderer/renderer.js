@@ -753,10 +753,8 @@ function renderRuntimeGuidance(status, nowMs) {
 }
 
 // ─── 在场感行（动效只由真实事件驱动；诚实待命）───
-function renderPresence(status, nowMs, runtimeGuidance) {
-  const hideForInterval = runtimeGuidance && runtimeGuidance.mode !== 'running';
-  fields.presence?.classList.toggle('hidden', Boolean(hideForInterval));
-  if (hideForInterval) return;
+function renderPresence(status, nowMs) {
+  fields.presence?.classList.remove('hidden');
   const view = uiLogic.presenceView(status, nowMs);
   fields.presenceText.textContent = view.text;
   fields.presenceText.classList.toggle('shimmer', view.animate);
@@ -765,8 +763,8 @@ function renderPresence(status, nowMs, runtimeGuidance) {
 }
 
 // ─── 浏览循环 chip ───
-function renderLoop(status, runtimeGuidance) {
-  fields.loop.classList.toggle('hidden', Boolean(runtimeGuidance && runtimeGuidance.mode !== 'running'));
+function renderLoop(status) {
+  fields.loop.classList.remove('hidden');
   const running = status.edge === 'running' && status.session === 'running';
   const active = running ? uiLogic.loopIndex(status.loopStage) : -1;
   fields.loop.querySelectorAll('.loop-step').forEach((el) => {
@@ -1160,8 +1158,8 @@ setInterval(() => {
   const now = Date.now();
   renderUsageSummary(currentStatus);
   const runtimeGuidance = renderRuntimeGuidance(currentStatus, now);
-  renderPresence(currentStatus, now, runtimeGuidance);
-  renderLoop(currentStatus, runtimeGuidance);
+  renderPresence(currentStatus, now);
+  renderLoop(currentStatus);
   renderPublish(currentStatus, now);
   fields.stream.querySelectorAll('.ev').forEach((row) => {
     const ts = Date.parse(row.dataset.ts || '');
@@ -1376,10 +1374,10 @@ function render(status) {
   renderEdgeFailure(status);
   renderTitlebar(status);
   const runtimeGuidance = renderRuntimeGuidance(status, now);
-  renderPresence(status, now, runtimeGuidance);
+  renderPresence(status, now);
   // 内核首启进度条改由 renderKernelPrepGlobal 全局驱动（内核机器级共享、下载环境未必是当前选中环境）；
   // 此处不再按选中环境渲染，避免选中的非下载环境把进度条误藏。
-  renderLoop(status, runtimeGuidance);
+  renderLoop(status);
   renderPublish(status, now);
   if (fields.publishPreviewPanel.classList.contains('open')) renderPublishPreviewContent(status);
   renderFab(status);
