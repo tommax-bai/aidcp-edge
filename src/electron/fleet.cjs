@@ -262,6 +262,29 @@ function usableMemoryBytes(deps = {}) {
 const ACCOUNTS_PER_SLOT = 2;
 
 /**
+ * 槽位/内存不够时：该**排队等**还是该**当场拒**？
+ *
+ * 判据是「**有没有人在死线上等这个结果**」，不是「哪道闸满了」：
+ *
+ *  · task（云端派了任务来唤醒）/ manual（手动任务）→ **fail**。云端那头 45s 就 acquire 超时了；
+ *    排队等半小时后才把浏览器开起来，是给一个早已没人要的结果开机器——白占槽位，还把真正在等的
+ *    账号挤到后面。诚实失败，让调用方立刻知道。
+ *  · resume（运维点启动 / 全部启动 / 续场恢复 / 到点的普通唤醒）→ **wait**。没人等结果，「等」就是
+ *    正确答案：挂 12 个账号只有 6 个槽位，本来就该有 6 个在等别人进冷待机让出槽位。
+ *    在这里判「拒」等于把 1:2 废掉——多挂的账号会永久趴窝，槽位空出来也没人去取。
+ *
+ * 真正该硬拒的是**挂载账号数**超上限（这台机器不该再多带一个），那是配置期的闸、不在这里。
+ */
+function slotRefusalPolicy(kind) {
+  return kind === 'task' || kind === 'manual' ? 'fail' : 'wait';
+}
+
+/** 等槽位队列 FIFO：按入队时刻排。队头过不了闸就整队等，绝不让后面的插队（先来的会被反复挤掉、饿死）。 */
+function orderSlotWaiters(waiters) {
+  return [...(waiters || [])].sort((a, b) => (a.slotWaitingSince || 0) - (b.slotWaitingSince || 0));
+}
+
+/**
  * 槽位上限 = ⌊可用内存 ÷ 单环境估值⌋（change browser-slot-scheduling）。
  *
  * 同机能同时开几个浏览器，是**内存**顶死的（AdsPower 本身不限并发）。槽位就是这个物理事实的名字。
@@ -497,6 +520,8 @@ module.exports = {
   normalizeSlotLimit,
   ACCOUNTS_PER_SLOT,
   LAUNCH_PRIORITY,
+  slotRefusalPolicy,
+  orderSlotWaiters,
   ramAdmission,
   availableMemoryBytes,
   usableMemoryBytes,

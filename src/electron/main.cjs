@@ -1002,6 +1002,102 @@ function admitBrowserSlot(handle, { force = false } = {}) {
   return { ok: true };
 }
 
+// ── 等槽位队列（change browser-slot-scheduling）──────────────────────────────────
+//
+// 「槽位满了该排队还是该拒绝」不取决于哪道闸满了，而取决于**有没有人在死线上等这个结果**：
+//
+//   · 没人等（运维点启动 / 全部启动 / 续场恢复 / 到点的普通唤醒）→ **排队等**。
+//     多挂的账号本来就该等——1:2 的全部意义就是「一半在跑、一半在等槽位」。等到有账号进冷待机
+//     让出槽位，队头自动顶上。旧版在这里直接丢弃启动请求，环境永久停在「未启动」，槽位后来空出来
+//     也没人去取，等于把 1:2 废掉：多挂的账号一天都跑不了。
+//   · 有人等（云端派了任务来唤醒、手动任务）→ **当场诚实失败**，绝不排队。云端那头 45s 就超时了，
+//     等半小时后把浏览器开起来，是给一个早已没人要的结果开机器。这条在唤醒路径上单独守。
+//
+// 排队 MUST NOT 变成静默：界面如实显示「排队等槽位 · 前面还有 k 个」，绝不装成正在启动。
+// FIFO 按入队时刻，且**队头卡住就不让后面的插队**——否则先来的账号会被反复挤掉、永远排不上。
+
+/** 等槽位重扫间隔：槽位释放会立即触发一次；这个定时器兜住「内存被别的进程放开」这类无事件的变化。 */
+const SLOT_WAIT_RESCAN_MS = 15_000;
+let slotWaitTimer = null;
+
+/**
+ * 当前在等槽位的环境，FIFO。
+ *
+ * 队列成员资格在这里**一处**判定：被暂停 / 停止 / 移出 / 已经起来了的，就地退出队列并清掉资历
+ * ——不然一个暂停了几小时的环境再恢复时，会拿着几小时前的入队时刻直接空降队头，把一直在等的人挤掉。
+ */
+function slotWaiters() {
+  const out = [];
+  for (const h of envs.values()) {
+    if (!h.slotWaitingSince) continue;
+    const parked = h.coldStandbyActive || h.coldStandbyPending; // 待机中的核心还活着，但浏览器已关 = 不占槽位
+    const running = h.child && !parked;
+    if (h.removed || running || h.stopRequested || h.status.session === 'paused') {
+      clearSlotWaiting(h);
+      continue;
+    }
+    out.push(h);
+  }
+  return fleet.orderSlotWaiters(out);
+}
+
+/** 进等槽位队列。已在队列里的保留原入队时刻——重扫不该让它丢掉排在前面的资历。 */
+function parkForSlot(handle, admitted) {
+  if (!handle.slotWaitingSince) handle.slotWaitingSince = Date.now();
+  handle.slotWaitReason = admitted.message;
+  const ahead = slotWaiters().filter((h) => h.slotWaitingSince < handle.slotWaitingSince).length;
+  const place = ahead > 0 ? `前面还有 ${ahead} 个` : '下一个就是它';
+  console.log(`[slots] ${handle.envId} 排队等槽位（${place}）：${admitted.message}`);
+  // 待机中的环境（核心与云端连接都还在，只是浏览器关了）保持它的待机态——它并没有「停掉」，
+  // 只是这次唤醒没抢到槽位；把它改写成 idle 会让界面看起来像整个环境掉了。
+  const parked = handle.coldStandbyActive || handle.coldStandbyPending;
+  updateStatus(handle, {
+    ...(parked ? {} : { edge: 'idle', session: 'idle' }),
+    lastMessage: `排队等槽位（${place}）：${admitted.message}。有账号进入待机让出槽位后会自动${parked ? '唤醒' : '启动'}。`,
+    ...presencePatch(`排队等槽位（${place}）`),
+  });
+  startSlotWaitTimer();
+}
+
+function clearSlotWaiting(handle) {
+  if (!handle) return;
+  handle.slotWaitingSince = 0;
+  handle.slotWaitReason = '';
+}
+
+/**
+ * 槽位可能空出来了 → 按 FIFO 放行队头。
+ *
+ * 一次只放一个：准入闸是按**当下**的内存算的，一口气把队列全放出去等于回到「10 个环境一起冷启」。
+ * 队头过不了闸就整队停住（不许后面的插队）——先来的账号必须先上，否则它会被后来者反复挤掉、饿死。
+ */
+function drainSlotWaiters() {
+  const waiting = slotWaiters();
+  if (waiting.length === 0) {
+    stopSlotWaitTimer();
+    return;
+  }
+  const head = waiting[0];
+  if (!admitBrowserSlot(head).ok) return; // 队头还进不来 → 整队继续等，绝不让后面的插队
+  console.log(`[slots] 槽位空出来了 → 放行队头 ${head.envId}（还有 ${waiting.length - 1} 个在等）`);
+  clearSlotWaiting(head);
+  // 两种等法：核心还活着、只是待机中（浏览器已关）→ 原地唤醒；核心也没了 → 完整启动。
+  if (head.child && (head.coldStandbyActive || head.coldStandbyPending)) wakeColdStandby(head, 'slot_available');
+  else startEdge(head);
+}
+
+function startSlotWaitTimer() {
+  if (slotWaitTimer) return;
+  slotWaitTimer = setInterval(() => drainSlotWaiters(), SLOT_WAIT_RESCAN_MS);
+  if (typeof slotWaitTimer.unref === 'function') slotWaitTimer.unref();
+}
+
+function stopSlotWaitTimer() {
+  if (!slotWaitTimer) return;
+  clearInterval(slotWaitTimer);
+  slotWaitTimer = null;
+}
+
 // ── 每环境有界重起（复用 respawn-policy 语义；CJS 副本见 fleet.cjs，parity 用例锁一致）──
 const RESPAWN_OPTS = {
   maxConsecutiveFailures: Number(process.env.AIDCP_EDGE_RESPAWN_MAX ?? 5),
@@ -1804,6 +1900,8 @@ function onColdStandbyAck(handle) {
   if (!handle || !handle.coldStandbyPending) return;
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = true;
+  // 浏览器关掉了 = 一个槽位空出来了：立刻叫等槽位队列的队头，别让它白等到下一次重扫。
+  setTimeout(() => drainSlotWaiters(), 0);
   const hint = handle.status.browserStandby && handle.status.browserStandby.hint;
   const decision = shouldEnterColdStandby({
     status: { ...handle.status, edge: 'running', cloud: 'connected', session: 'resting' },
@@ -1906,10 +2004,20 @@ function wakeColdStandby(handle, reason) {
           // 准入闸：唤醒同样不得绕过（「只是唤醒一下」不是超额开浏览器的理由）。
           const admitted = admitBrowserSlot(handle);
           if (!admitted.ok) {
-            onColdStandbyWakeFailed(handle, admitted.message);
+            handle.coldStandbyWaking = false;
+            if (fleet.slotRefusalPolicy(kind) === 'fail') {
+              // 云端派了任务、正卡在死线上等这个浏览器 → **当场诚实失败**，绝不排队。
+              // 排队的结果是它 45s 后超时判失败，而我们半小时后才把浏览器开起来——
+              // 给一个早已没人要的结果开机器，纯浪费槽位，还会把真正在等的账号挤到后面。
+              onColdStandbyWakeFailed(handle, admitted.message);
+            } else {
+              // 到点的普通唤醒：没人在死线上等 → 进等槽位队列，槽位一空就自动顶上。
+              parkForSlot(handle, admitted);
+            }
             resolve(false);
             return;
           }
+          clearSlotWaiting(handle);
           let done = false;
           const finish = (ok) => {
             if (done) return;
@@ -2008,9 +2116,11 @@ function startEdge(handle, { kind = 'resume', force = false } = {}) {
       // 轮到它时再复核取消闸：排队期间可能已被暂停 / 移出 / 退出。
       if (!handle || handle.child || handle.removed || handle.stopRequested || isQuitting) return false;
       if (handle.status.session === 'paused') return false;
-      const admitted = admitBrowserSlot(handle, { force });
-      if (!admitted.ok) {
-        // 诚实拦阻：绝不静默超额拉起，也绝不假装已启动。
+      const forceLaunch = force || Boolean(handle.forceLaunch);
+      handle.forceLaunch = false; // 一次性：force 只对这一次启动有效，绝不粘在环境上永久免检
+      const admitted = admitBrowserSlot(handle, { force: forceLaunch });
+      if (!admitted.ok && fleet.slotRefusalPolicy(kind) === 'fail') {
+        // 有人在死线上等（手动任务）→ 当场诚实失败，绝不排队让它干等到超时。
         console.warn(`[slots] 拒绝启动 ${handle.envId}：${admitted.message}`);
         updateStatus(handle, {
           edge: 'warning',
@@ -2021,6 +2131,18 @@ function startEdge(handle, { kind = 'resume', force = false } = {}) {
         });
         return false;
       }
+      if (!admitted.ok) {
+        // 槽位/内存不够 → **进等槽位队列**，绝不丢弃这次启动请求。
+        //
+        // 没人在死线上等这次启动（是运维点的启动 / 续场恢复），所以「等」是正确答案而不是「拒」：
+        // 挂 12 个账号、只有 6 个槽位，本来就该有 6 个在等——等别人进冷待机让出槽位再顶上，
+        // 这正是 1:2 能成立的前提。旧版在这里直接丢弃请求、环境永久趴在 warning 态，
+        // 后来槽位空出来也没人去取，等于把 1:2 废掉了（多挂的账号一天都跑不了）。
+        // 有死线的请求（云端派任务来唤醒 / 手动任务）**不走这里**，它们仍在唤醒路径上当场诚实失败。
+        parkForSlot(handle, admitted);
+        return false;
+      }
+      clearSlotWaiting(handle);
       return await spawnEdgeChild(handle);
     },
   });
@@ -2255,6 +2377,8 @@ function spawnEdgeChild(handle) {
     const wasRestarting = handle.restartPending;
     const wasColdStandby = handle.coldStandbyPending || handle.coldStandbyActive;
     handle.child = undefined;
+    // 核心退出 = 它的浏览器也没了 = 槽位空出来了：立刻叫队头（停止 / 暂停 / 崩溃都算）。
+    setTimeout(() => drainSlotWaiters(), 0);
     handle.browserParkingReady = false;
     handle.browserPersonaNoticeState = null;
     resetPersonaNoticeGrace(handle);
@@ -3105,31 +3229,20 @@ function relogin(handle) {
 }
 
 /**
- * 「全部启动」：预检 → 诚实拦阻（force 才放行）→ 全部未在跑环境进**串行启动队列**（起完一个再起下一个）。
+ * 「全部启动」：全部未在跑环境进**串行启动队列**（起完一个再起下一个）；装不下的**进等槽位队列**。
  *
- * 注意（change browser-slot-scheduling）：真正的准入闸已经搬进启动队列里、每个环境逐个过——**没有任何
- * 路径能绕过它**（旧版这道闸只长在这一个按钮上，单启 / 唤醒 / 崩溃重起全部绕过去了）。这里保留的整体
- * 预检只是为了**提前**告诉运维「这一批肯定装不下」，而不是最后一道防线。
+ * 注意（change browser-slot-scheduling）：真正的准入闸在启动队列里、每个环境逐个过——**没有任何路径
+ * 能绕过它**（旧版这道闸只长在这一个按钮上，单启 / 唤醒 / 崩溃重起全部绕过去了）。
+ *
+ * 这里**不再整批拦阻**：挂 12 个账号、只有 6 个槽位，正确结果是「起 6 个、另 6 个排队等槽位」，
+ * 而不是「一个都不给起」。哪些起得来由逐个过的准入闸说了算，起不来的不丢弃、进等槽位队列。
+ * （force 仍保留：运维明确要求越过内存闸时逐个 force 放行。）
  */
 function startAllEnvs({ force = false } = {}) {
   const paused = [...envs.values()].filter((h) => h.child && h.status.session === 'paused' && !h.removed);
   const targets = [...envs.values()].filter((h) => !h.child && !h.removed);
   if (targets.length === 0 && paused.length === 0) return { ok: true, queued: 0 };
   const cap = slotCapacity();
-  const admission = fleet.ramAdmission({
-    plannedCount: Math.min(targets.length, cap),
-    freeBytes: fleet.usableMemoryBytes(),
-    perEnvBytes: PER_ENV_BYTES,
-  });
-  if (!admission.ok && !force) {
-    return {
-      ok: false,
-      reason: 'ram',
-      requiredMB: admission.requiredMB,
-      freeMB: admission.freeMB,
-      plannedCount: targets.length,
-    };
-  }
   // 账号上限（缺省 = 2 × 槽位，可在设置里改）：超过即存在「永远排不上」的风险，必须诚实告警而非静默接受。
   const accountCap = maxAccounts();
   const configured = [...envs.values()].filter((h) => !h.removed).length;
@@ -3140,7 +3253,12 @@ function startAllEnvs({ force = false } = {}) {
     );
   }
   paused.forEach((h) => resumeEdge(h));
-  targets.forEach((h, i) => queueStartEnv(h, i + 1));
+  // force = 运维明确要求越过内存闸超额拉起。经 handle 上的一次性标记传到队列里的准入闸
+  // （启动流程中间隔着 AdsPower 运行时准备等好几层，不值得为它一路加参数）。
+  targets.forEach((h, i) => {
+    if (force) h.forceLaunch = true;
+    queueStartEnv(h, i + 1);
+  });
   const all = [...paused, ...targets];
   return { ok: true, queued: all.length, envIds: all.map((h) => h.envId) };
 }
@@ -3479,6 +3597,18 @@ ipcMain.handle('ads:templates', () =>
 // 代理可选（缺省 no_proxy）；FB 支持批量账号导入（每行一个环境，共用同一份代理输入）。
 ipcMain.handle('ads:createEnv', async (_event, opts) => {
   if (adsCreateInFlight) return { ok: false, error: '创建进行中，请等当前创建完成' };
+  // 账号上限是**唯一**该硬性拒绝的地方（change browser-slot-scheduling）：
+  // 槽位不够只是「现在轮不到你」——该排队；账号挂满了才是「这台机器不该再多带一个」——该拒绝。
+  // 上限可在设置里改，所以这不是死路，运维知道该去哪调。
+  const accountCap = maxAccounts();
+  const configured = [...envs.values()].filter((h) => !h.removed).length;
+  if (configured >= accountCap) {
+    return {
+      ok: false,
+      error: `已挂载 ${configured} 个账号，达到上限 ${accountCap}（${slotCapacity()} 个浏览器槽位 × 2）。`
+        + '如确要再挂，请到设置「浏览器并发」里调高「最多挂载账号数」——但超出后部分账号可能长期排不到槽位。',
+    };
+  }
   adsCreateInFlight = true;
   try {
     // 先确保指纹浏览器服务就绪（仅服务、不下内核）——冷机不再裸抛 group/create 的 fetch failed。
