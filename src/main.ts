@@ -314,6 +314,7 @@ async function main(): Promise<void> {
       },
     },
   });
+  const browserStartupId = `${edgeId}:${process.pid}:${Date.now().toString(36)}`;
 
   // 建号自助人设 stdin 桥（change edge-persona-keyword-generation）：身份已确立、client 就绪后装上，
   // 桌面壳经 stdin 下发 persona.generate/persist → 打到云端 → stdout [persona-reply] 回桥。
@@ -343,13 +344,56 @@ async function main(): Promise<void> {
   let requestShutdown: ((reason: string) => void) | undefined;
   let coldStandbyActive = false;
   let coldStandbyWakeRequested = false;
+  let coldStandbyCloudRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  let coldStandbyCloudRetrying = false;
+  const coldStandbyCloudRetryMs = Math.max(
+    5_000,
+    Number(process.env.AIDCP_STANDBY_CLOUD_RETRY_MS ?? 30_000) || 30_000,
+  );
+  const sendLifecycleIpc = (payload: Record<string, unknown>): void => {
+    if (typeof process.send === 'function' && process.connected) process.send(payload);
+  };
+  const clearColdStandbyCloudRetry = (): void => {
+    if (coldStandbyCloudRetryTimer) clearTimeout(coldStandbyCloudRetryTimer);
+    coldStandbyCloudRetryTimer = undefined;
+    coldStandbyCloudRetrying = false;
+  };
+  const notifyColdStandbyCloudDegraded = (reason: string): void => {
+    sendLifecycleIpc({ type: 'lifecycle.standby_cloud_degraded', reason });
+  };
+  const notifyColdStandbyCloudReconnected = (): void => {
+    sendLifecycleIpc({ type: 'lifecycle.standby_cloud_reconnected' });
+  };
+  const scheduleColdStandbyCloudReconnect = (reason: string): void => {
+    if (!coldStandbyActive || coldStandbyCloudRetryTimer || coldStandbyCloudRetrying) return;
+    notifyColdStandbyCloudDegraded(reason);
+    coldStandbyCloudRetryTimer = setTimeout(() => {
+      coldStandbyCloudRetryTimer = undefined;
+      if (!coldStandbyActive) return;
+      coldStandbyCloudRetrying = true;
+      client.connect()
+        .then(() => {
+          coldStandbyCloudRetrying = false;
+          if (!coldStandbyActive) return;
+          console.log('[aidcp-edge] 冷待机期间云端后台重连成功；继续保持待机，等待唤醒');
+          notifyColdStandbyCloudReconnected();
+        })
+        .catch((err) => {
+          coldStandbyCloudRetrying = false;
+          if (!coldStandbyActive) return;
+          const message = (err as Error)?.message || String(err);
+          console.warn(`[aidcp-edge] 冷待机期间云端后台重连失败：${message}；继续待机并稍后重试`);
+          scheduleColdStandbyCloudReconnect('standby_cloud_retry_failed');
+        });
+    }, coldStandbyCloudRetryMs);
+    (coldStandbyCloudRetryTimer as { unref?: () => void }).unref?.();
+  };
   const requestColdStandbyWake = (reason: string): void => {
     if (!coldStandbyActive || coldStandbyWakeRequested) return;
     coldStandbyWakeRequested = true;
+    clearColdStandbyCloudRetry();
     console.log(`[aidcp-edge] 冷待机期间收到唤醒触发 (${reason})，请求外壳恢复浏览器`);
-    if (typeof process.send === 'function' && process.connected) {
-      process.send({ type: 'lifecycle.wake_requested', reason });
-    }
+    sendLifecycleIpc({ type: 'lifecycle.wake_requested', reason });
   };
   const taskCoordinator = new EdgeTaskCoordinator({
     browse: {
@@ -389,6 +433,7 @@ async function main(): Promise<void> {
   });
   client.on('cloud.reconnected', () => {
     if (coldStandbyActive) {
+      clearColdStandbyCloudRetry();
       console.log('[aidcp-edge] 冷待机期间云端已重连；继续保持待机，等待唤醒');
       return;
     }
@@ -399,6 +444,11 @@ async function main(): Promise<void> {
     });
   });
   client.on('cloud.unrecoverable', () => {
+    if (coldStandbyActive) {
+      console.warn('[aidcp-edge] 冷待机期间云端重连耗尽；保持冷待机，不回收重启浏览器');
+      scheduleColdStandbyCloudReconnect('cloud_reconnect_exhausted');
+      return;
+    }
     console.warn('[aidcp-edge] 云端重连耗尽 → 诚实下线 + 回收退出（请重起）');
     if (requestShutdown) {
       requestShutdown('cloud_ws_unrecoverable');
@@ -875,6 +925,7 @@ async function main(): Promise<void> {
       },
       {
         feedUrl: process.env.AIDCP_EXPLORE_URL ?? platformDriver.defaultStartUrl,
+        startupId: browserStartupId,
         tempo: client.getPacing()?.tempo,
       },
     );
@@ -907,6 +958,7 @@ async function main(): Promise<void> {
   if (autoBrowse) {
     const browseOpts: BrowseSessionOptions = {};
     browseOpts.exploreUrl = process.env.AIDCP_EXPLORE_URL ?? platformDriver.defaultStartUrl;
+    browseOpts.startupId = browserStartupId;
     // 节奏快照（pacing-floor-config-min-interval 设计 §4.3）：welcome 下发的每类操作 floor 区间 + tempo
     // 透传进 BrowseSession；detail_dwell 区间复活死参数 dwellFloorMs（详情页停留兜底 floor 源）。
     // 缺省（旧云端未下发）→ 全用内置默认、非零降级、无回归。
@@ -1101,6 +1153,7 @@ async function main(): Promise<void> {
   const lifecycle = new CoreLifecycleController({
     deactivate: async (reason) => {
       coldStandbyActive = false;
+      clearColdStandbyCloudRetry();
       console.log(`\n[aidcp-edge] 自动运营停用流程启动（reason=${reason}）...`);
       // 暂停/关闭/回收都先诚实终止在途发布，绝不让半截命令跨恢复重放。
       failInFlightPublishesHonestly(reason);
@@ -1136,6 +1189,7 @@ async function main(): Promise<void> {
     },
     enterStandby: async () => {
       console.log('\n[aidcp-edge] 冷待机流程启动：停止自动化、关闭浏览器、保留云端连接...');
+      clearColdStandbyCloudRetry();
       coldStandbyActive = true;
       coldStandbyWakeRequested = false;
       failInFlightPublishesHonestly('cold_standby');
@@ -1144,6 +1198,7 @@ async function main(): Promise<void> {
       if (chrome.reused) {
         console.log('[aidcp-edge] 复用模式：不回收本进程不拥有的外部 Chrome，拒绝进入冷待机');
         coldStandbyActive = false;
+        clearColdStandbyCloudRetry();
         return false;
       }
       try {
@@ -1151,12 +1206,14 @@ async function main(): Promise<void> {
         if (!freed) {
           console.warn('[aidcp-edge] ⚠ 冷待机浏览器关闭状态未能确认，拒绝进入冷待机');
           coldStandbyActive = false;
+          clearColdStandbyCloudRetry();
           return false;
         }
         return true;
       } catch (error) {
         console.warn(`[aidcp-edge] ⚠ 冷待机关闭浏览器异常：${(error as Error)?.message || String(error)}`);
         coldStandbyActive = false;
+        clearColdStandbyCloudRetry();
         return false;
       }
     },

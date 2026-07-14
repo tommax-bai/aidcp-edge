@@ -124,6 +124,8 @@ export interface FacebookBrowseSessionDeps {
 
 export interface FacebookBrowseSessionOptions {
   feedUrl?: string;
+  /** 完整核心/浏览器启动代号；随 page.cards 上报，供云端限定首次启动采集。 */
+  startupId?: string;
   mode?: FacebookBrowseMode;
   /** 单条浏览命令的兜底超时（毫秒）；超时回诚实 timeout 回执，绝不挂死。 */
   commandTimeoutMs?: number;
@@ -204,6 +206,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private activeFeedUrl: string;
   /** 最近一次 page.cards 到达时间；用于吸收云端评估耗时，避免 dwellMs 变成额外固定等待。 */
   private lastCardsAt = 0;
+  private readonly startupId?: string;
   /** 命令串行链：一次只处理一条，避免并发争抢同一浏览器会话。 */
   private chain: Promise<void> = Promise.resolve();
 
@@ -218,6 +221,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     this.mode = options.mode ?? parseFacebookBrowseMode();
     this.commandTimeoutMs = options.commandTimeoutMs ?? 90_000;
     this.tempo = options.tempo && options.tempo > 0 ? options.tempo : 1.0;
+    this.startupId = options.startupId;
     const accept = deps.acceptConsent ?? defaultFacebookConsentAccepter();
     this.feedReader =
       deps.feedReader ??
@@ -752,6 +756,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         isVideo: c.isVideo,
         ...(c.author ? { author: c.author } : {}),
       })),
+      ...(this.startupId ? { startupId: this.startupId } : {}),
     };
   }
 

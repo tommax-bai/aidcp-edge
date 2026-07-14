@@ -1612,6 +1612,26 @@ function onColdStandbyAck(handle) {
   });
 }
 
+function updateColdStandbyCloudRecovery(handle, state, reason) {
+  if (!handle || (!handle.coldStandbyPending && !handle.coldStandbyActive)) return;
+  const hint = handle.status.browserStandby && handle.status.browserStandby.hint;
+  const reconnected = state === 'reconnected';
+  updateStatus(handle, {
+    session: 'resting',
+    ...(reconnected ? { cloud: 'connected' } : {}),
+    overlayBlocked: false,
+    browserStandby: coldStandbyStatus('sleeping', hint, {
+      reason: reconnected ? 'cloud_reconnected' : 'cloud_reconnecting',
+      ...(reason ? { detailReason: reason } : {}),
+    }),
+    lastMessage: reconnected
+      ? '冷待机中，云端连接已恢复。'
+      : '冷待机中，正在后台恢复云端连接；浏览器保持待机。',
+    ...presencePatch(reconnected ? '长时间等待中，云端连接已恢复' : '长时间等待中，云端连接恢复中'),
+    ...clearEdgeFailurePatch(handle),
+  });
+}
+
 function scheduleColdStandbyWake(handle, decision) {
   if (!handle || !decision.ok) return;
   if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
@@ -1762,6 +1782,14 @@ function startEdge(handle) {
       wakeColdStandby(handle, 'cloud_command');
       return;
     }
+    if (message.type === 'lifecycle.standby_cloud_degraded') {
+      updateColdStandbyCloudRecovery(handle, 'degraded', message.reason);
+      return;
+    }
+    if (message.type === 'lifecycle.standby_cloud_reconnected') {
+      updateColdStandbyCloudRecovery(handle, 'reconnected');
+      return;
+    }
     if (message.type === 'lifecycle.paused') {
       clearColdStandbyTimer(handle);
       handle.pausePending = false;
@@ -1849,18 +1877,36 @@ function startEdge(handle) {
     const wasParked = handle.coreParked;
     const wasPausing = handle.pausePending;
     const wasRestarting = handle.restartPending;
+    const wasColdStandby = handle.coldStandbyPending || handle.coldStandbyActive;
     handle.child = undefined;
     handle.browserParkingReady = false;
     handle.browserPersonaNoticeState = null;
     resetPersonaNoticeGrace(handle);
-    // 主动重启、暂停驻留、显式关闭、移出花名册、退出应用都是「有意停止」，不算异常。
-    const intentional = isQuitting || wasRestarting || wasPausing || wasParked || wasClosing || handle.removed;
+    // 主动重启、暂停驻留、冷待机、显式关闭、移出花名册、退出应用都是「有意停止」，不算异常。
+    const intentional = isQuitting || wasRestarting || wasPausing || wasParked || wasColdStandby || wasClosing || handle.removed;
     handle.pausePending = false;
     handle.coreParked = false;
     handle.closePending = false;
     const exitedAbnormally = !intentional && (signal != null || (code != null && code !== 0));
     const message = exitMessage(code, signal);
     if (handle.removed) return; // 已摘除的环境不再投影状态
+
+    if (wasColdStandby && !isQuitting && !wasRestarting && !wasPausing && !wasParked && !wasClosing) {
+      handle.coldStandbyPending = false;
+      handle.coldStandbyActive = true;
+      updateStatus(handle, {
+        edge: 'stopped',
+        session: 'resting',
+        overlayBlocked: false,
+        browserStandby: coldStandbyStatus('sleeping', handle.status.browserStandby && handle.status.browserStandby.hint, {
+          reason: 'core_exited_during_standby',
+        }),
+        lastMessage: '冷待机中，核心进程已退出；将等待唤醒时恢复浏览器。',
+        ...presencePatch('长时间等待中，浏览器已关闭'),
+        ...clearEdgeFailurePatch(handle),
+      });
+      return;
+    }
 
     // 同账号并发占用拒启 = 不可重起终局：重起不会自愈（分身正被同账号在别处打开、不允许并发打开）。
     // 识别后强制停止、不进重起、不消耗连续失败预算。红线：本分支 MUST NOT 对该分身发起任何

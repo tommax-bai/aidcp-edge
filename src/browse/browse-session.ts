@@ -130,6 +130,8 @@ export interface BrowseSessionOptions {
   loginGatePollMs?: number;
   /** explore 页 URL（不在该页时导航过去，默认小红书 explore） */
   exploreUrl?: string;
+  /** 完整核心/浏览器启动代号；随 page.cards 上报，供云端限定首次启动采集。 */
+  startupId?: string;
   /** 会话节奏曲线（默认热身→正常→加速→疲劳） */
   rhythm?: SessionRhythm;
   /**
@@ -335,6 +337,7 @@ export class BrowseSession {
   /** 阻断弹窗当前是否处于"已暂停"状态（用于出现/消失各只记一次日志） */
   private blockingOverlayActive = false;
   private readonly exploreUrl: string;
+  private readonly startupId?: string;
   private readonly rhythm: SessionRhythm;
   private readonly rhythmTotal: number;
   private readonly logger: (msg: string) => void;
@@ -399,6 +402,7 @@ export class BrowseSession {
     this.initialScanTimeoutMs = options.initialScanTimeoutMs ?? 12000;
     this.loginGatePollMs = options.loginGatePollMs ?? 2000;
     this.exploreUrl = options.exploreUrl ?? DEFAULT_EXPLORE_URL;
+    this.startupId = options.startupId;
     this.rhythm = options.rhythm ?? createDefaultRhythm();
     this.rhythmTotal = options.rhythmTotal ?? DEFAULT_RHYTHM_TOTAL;
     this.logger = options.logger ?? ((m) => console.log(m));
@@ -1526,6 +1530,7 @@ export class BrowseSession {
         noteId: card.noteId,
         isVideo: card.isVideo,
       })),
+      ...(this.startupId ? { startupId: this.startupId } : {}),
     };
     // 解析 likes 字符串为数字
     for (let i = 0; i < cards.length; i++) {

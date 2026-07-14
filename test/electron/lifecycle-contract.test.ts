@@ -8,6 +8,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const main = readFileSync(join(electronDir, 'main.cjs'), 'utf8');
 const preload = readFileSync(join(electronDir, 'preload.cjs'), 'utf8');
+const edgeMain = readFileSync(join(here, '../../src/main.ts'), 'utf8');
 
 function functionSource(name: string, nextName: string): string {
   const start = main.indexOf(`function ${name}(`);
@@ -42,6 +43,32 @@ test('browser cold standby uses lifecycle.standby and manual controls cancel tim
   assert.match(close, /clearColdStandbyTimer\(handle\)/, 'manual close must cancel cold standby timers');
   const restart = functionSource('stopAndRestart', 'handleEdgeOutput');
   assert.match(restart, /clearColdStandbyTimer\(handle\)/, 'manual restart must cancel cold standby timers');
+});
+
+test('cold standby cloud reconnect exhaustion keeps the core alive', () => {
+  assert.match(edgeMain, /lifecycle\.standby_cloud_degraded/);
+  assert.match(edgeMain, /lifecycle\.standby_cloud_reconnected/);
+
+  const start = edgeMain.indexOf("client.on('cloud.unrecoverable'");
+  const end = edgeMain.indexOf("client.onEdgeTaskCommand", start);
+  assert.ok(start >= 0 && end > start, 'missing cloud.unrecoverable handler');
+  const unrecoverable = edgeMain.slice(start, end);
+  const standbyBranch = unrecoverable.slice(0, unrecoverable.indexOf("console.warn('[aidcp-edge] 云端重连耗尽"));
+
+  assert.match(standbyBranch, /if \(coldStandbyActive\)/);
+  assert.match(standbyBranch, /scheduleColdStandbyCloudReconnect\('cloud_reconnect_exhausted'\)/);
+  assert.doesNotMatch(standbyBranch, /requestShutdown\('cloud_ws_unrecoverable'\)/);
+  assert.doesNotMatch(standbyBranch, /process\.exitCode = EXIT_RECYCLE/);
+});
+
+test('cold standby child close stays in standby rather than respawning as a crash', () => {
+  const startEdge = functionSource('startEdge', 'stopLoginPoller');
+
+  assert.match(startEdge, /message\.type === 'lifecycle\.standby_cloud_degraded'/);
+  assert.match(startEdge, /message\.type === 'lifecycle\.standby_cloud_reconnected'/);
+  assert.match(startEdge, /const wasColdStandby = handle\.coldStandbyPending \|\| handle\.coldStandbyActive/);
+  assert.match(startEdge, /const intentional = [^;]*wasColdStandby[^;]*;/);
+  assert.match(startEdge, /core_exited_during_standby/);
 });
 
 test('application quit still uses final SIGTERM for every retained core', () => {
