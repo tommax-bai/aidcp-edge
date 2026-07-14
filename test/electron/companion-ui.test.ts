@@ -178,6 +178,10 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.match($(w, '#runtime-guidance-value').textContent ?? '', /刷首页不是漫无目的/);
   assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /浏览与互动/);
   assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /正在查看第 3 条/);
+  const runningSteps = Array.from(w.document.querySelectorAll('#runtime-guidance-flow .rg-flow-step')) as HTMLElement[];
+  assert.equal(runningSteps.length, 3);
+  assert.ok(runningSteps[0].classList.contains('flow-active'), '运行态：浏览与互动 → 判断匹配度需要动态推进');
+  assert.ok(runningSteps[1].classList.contains('flow-active'), '运行态：判断匹配度 → 继续寻找灵感需要动态推进');
   assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
   assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /正在查看第 3 条推荐内容/);
   assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /3\/150/);
@@ -189,6 +193,8 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-mascot\s*\{[^}]*display:\s*none/s);
   assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-main::before/);
   assert.match(rendererCss, /\.rg-progress\s*\{/);
+  assert.match(rendererCss, /\.rg-flow-step\.flow-active:not\(:last-child\)::after/);
+  assert.match(rendererCss, /@keyframes rg-flow-spark/);
 });
 
 test('红线：停止 / 事件过期时动效止息、如实待命', async () => {
@@ -239,6 +245,10 @@ test('运行中 + 事件过期 + 阶段计划完成 → 说明自然间隔的成
     assert.match($(w, '#runtime-guidance-value').textContent ?? '', /自然节奏/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /浏览与互动/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /38 条首页内容已观察/);
+    const hourSteps = Array.from(w.document.querySelectorAll('#runtime-guidance-flow .rg-flow-step')) as HTMLElement[];
+    assert.equal(hourSteps.length, 3);
+    assert.ok(hourSteps[0].classList.contains('flow-active'), '小时间隔：浏览成果 → 自然间隔需要动态推进');
+    assert.ok(hourSteps[1].classList.contains('flow-active'), '小时间隔：自然间隔 → 继续寻找灵感需要动态推进');
     assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
     assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /本轮已查看 38 条推荐内容/);
     assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /38\/150/);
@@ -287,6 +297,10 @@ test('本轮等待缺少浏览配额字段时仍渲染自然间隔进度卡', as
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /2 条灵感已记录/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /让账号信号更清晰/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /推荐内容更聚焦/);
+    const sessionSteps = Array.from(w.document.querySelectorAll('#runtime-guidance-flow .rg-flow-step')) as HTMLElement[];
+    assert.equal(sessionSteps.length, 3);
+    assert.ok(sessionSteps[0].classList.contains('flow-active'), '场次间隔：浏览成果 → 自然间隔需要动态推进');
+    assert.ok(sessionSteps[1].classList.contains('flow-active'), '场次间隔：自然间隔 → 继续寻找灵感需要动态推进');
     assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
     assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /本轮已查看 12 条推荐内容/);
     assert.doesNotMatch($(w, '#runtime-guidance-progress').textContent ?? '', /12\/20/);
@@ -569,6 +583,11 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
     assert.match($(w, '#runtime-guidance-title').textContent ?? '', /明天继续/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /今日浏览计划已完成/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /继续寻找灵感/);
+    const daySteps = Array.from(w.document.querySelectorAll('#runtime-guidance-flow .rg-flow-step')) as HTMLElement[];
+    assert.equal(daySteps.length, 3);
+    assert.ok(daySteps[0].classList.contains('flow-complete'), '今日完成：浏览与互动 → 自然沉淀应是完成连接');
+    assert.ok(daySteps[1].classList.contains('flow-complete'), '今日完成：自然沉淀 → 继续寻找灵感应是完成连接');
+    assert.equal(daySteps.some((step) => step.classList.contains('flow-active')), false);
     assert.equal(hidden($(w, '#runtime-guidance-progress')), true);
     assert.equal(hidden($(w, '#runtime-guidance-resume')), true);
     assert.equal(hidden($(w, '#runtime-guidance-harvest')), false);
@@ -577,8 +596,8 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
     assert.match($(w, '#runtime-guidance-harvest').textContent ?? '', /来源热度 1\.2 万赞/);
     assert.equal(w.document.querySelectorAll('#runtime-guidance-harvest b').length, 2);
     assert.match(rendererCss, /\.rg-harvest\s*\{/);
-    assert.match(rendererCss, /\.runtime-guidance\[data-mode="day"\] \.rg-flow-step\.next \.rg-flow-icon \{ color: #22a875; \}/);
-    assert.match(rendererCss, /\.rg-flow-copy small \{[\s\S]*color: #8794a9;/);
+    assert.match(rendererCss, /\.runtime-guidance\[data-mode="day"\] \.rg-flow\s*\{[\s\S]*--rg-step-next: #22a875;/);
+    assert.match(rendererCss, /\.rg-flow-copy small \{[\s\S]*color: var\(--rg-step-detail\);/);
     assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="day"\] \.rg-flow-step\.next \.rg-flow-copy small/);
     assert.equal($(w, '#usage-limit').textContent, '今日任务已完成');
     assert.ok($(w, '#usage-limit').classList.contains('complete'));

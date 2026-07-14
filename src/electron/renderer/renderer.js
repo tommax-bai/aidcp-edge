@@ -818,9 +818,20 @@ function renderRuntimeGuidance(status, nowMs) {
 
   fields.runtimeGuidanceFlow.replaceChildren();
   fields.runtimeGuidanceFlow.classList.toggle('hidden', !Array.isArray(view.steps) || view.steps.length === 0);
-  for (const step of view.steps || []) {
+  const steps = Array.isArray(view.steps) ? view.steps : [];
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index];
+    const state = step.state || 'next';
+    const nextState = steps[index + 1] && (steps[index + 1].state || 'next');
     const el = document.createElement('div');
-    el.className = `rg-flow-step ${step.state || 'next'}`;
+    el.className = `rg-flow-step ${state}`;
+    if (nextState) {
+      const activeFlow = (state === 'current' && (nextState === 'current' || nextState === 'done' || nextState === 'next'))
+        || (state === 'done' && nextState === 'current');
+      const completeFlow = state === 'done' && (nextState === 'done' || nextState === 'next');
+      if (activeFlow) el.classList.add('flow-active');
+      else if (completeFlow) el.classList.add('flow-complete');
+    }
     const icon = document.createElement('span');
     icon.className = 'rg-flow-icon';
     icon.innerHTML = RUNTIME_GUIDANCE_ICONS[step.icon] || '';
