@@ -702,15 +702,19 @@ export class BrowseSession {
       if (!this.taskBlocked) {
         await this.trackOperation(async () => {
           await this.ensureExplore();
+          if (this.stopRequested || this.closing) return;
           // 初始扫描延迟：真人打开页面后会先扫一眼 feed 再点击（3-6s）
           const scanDelay = sampleDelay(
             { mu: Math.log(4500), sigma: 0.3, min: 3000, max: 7000 },
             this.random,
           );
           this.logger(`[browse] 扫描 feed（${Math.round(scanDelay / 1000)}s）...`);
-          await this.sleep(scanDelay);
+          // 可打断：停止请求（冷待机 / 退出）必须能立刻叫醒它，否则醒来时浏览器已被关掉。
+          await this.sleepInterruptible(scanDelay);
         });
       }
+      // 启动段的每个 await 之后都要复核停止请求：close() 只置标志，不会把我们从 await 里拽出来。
+      if (this.stopRequested || this.closing) return;
 
       await this.loop();
     } finally {
@@ -744,6 +748,34 @@ export class BrowseSession {
   close(): void {
     this.closing = true;
     this.stop();
+  }
+
+  /**
+   * 终态关闭 + 等待在途原子操作排空。**关浏览器之前必须走这条**（冷待机 / 退出 / 回收）。
+   *
+   * close() 只是「请求」停止：循环可能正卡在某个 await 里，醒来后还会继续摸页面。若此时浏览器已被关掉，
+   * 那些调用就会打在死 CDP 上（冷待机实测：循环停在首屏扫描里，对着已关闭的浏览器空转 12s 后抛
+   * CdpDisconnectedError）。故关浏览器前必须等循环真正退出原子区。
+   *
+   * 有界：CDP 已死时页面调用会立刻 reject，但停留 / 轮询类等待未必；无界等待会把冷待机本身卡死
+   * （浏览器关不掉 = 待机失效），比原 bug 更糟。超时返回 false，由调用方诚实告知并照常关浏览器。
+   */
+  async closeAndWait(timeoutMs = 5000): Promise<boolean> {
+    this.close();
+    if (!this.running && this.activeOperationCount === 0) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const drained = await Promise.race([
+      new Promise<boolean>((resolve) => {
+        if (this.activeOperationCount === 0) resolve(true);
+        else this.operationIdleWaiters.add(() => resolve(true));
+      }),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    return drained;
   }
 
   /** 请求停止并附带理由（local_stop / cdp_unrecoverable）。唤醒可能正在等待命令的 loop。 */
@@ -1050,6 +1082,7 @@ export class BrowseSession {
   private async waitForCards(timeout: number): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < timeout) {
+      if (this.stopRequested || this.closing) return; // 已请求停止：不再对页面轮询（浏览器可能正被关闭）
       try {
         const res = await this.deps.cdp.send<{ result?: { value?: unknown } }>(
           'Runtime.evaluate',
@@ -1057,8 +1090,12 @@ export class BrowseSession {
         );
         const count = (res as any).result?.value ?? 0;
         if (count >= 4) return; // 至少 4 张卡片出现
-      } catch { /* ignore */ }
-      await this.sleep(1000);
+      } catch (err) {
+        // 「浏览器没了」绝不能被读成「卡片还没渲染出来」：断连必须立刻上抛给会有界重连 / 诚实终止的调用方，
+        // 否则会对着死 CDP 空转满整个墙钟预算（冷待机实测静默 12s）。其余异常（导航期 context 丢失等）仍宽容。
+        if (err instanceof CdpDisconnectedError) throw err;
+      }
+      await this.sleepInterruptible(1000);
     }
     this.logger('[browse] 页面加载超时，继续尝试');
   }
@@ -1074,11 +1111,15 @@ export class BrowseSession {
   ): Promise<boolean> {
     const start = Date.now();
     while (Date.now() - start < timeout) {
+      if (this.stopRequested || this.closing) return false; // 已请求停止：不再对页面轮询
       try {
         const cards = await this.deps.scroller.getVisibleCards();
         if (cards.length >= min && (!isReady || isReady(cards))) return true;
-      } catch { /* ignore */ }
-      await this.sleep(500);
+      } catch (err) {
+        // 同 waitForCards：断连立刻上抛，绝不吞成「还没渲染好」（见该处注释）。
+        if (err instanceof CdpDisconnectedError) throw err;
+      }
+      await this.sleepInterruptible(500);
     }
     return false;
   }
@@ -1177,11 +1218,8 @@ export class BrowseSession {
     if (!this.taskBlocked) {
       // 阻断等待本身不占页面写原子区：system_recovery 租约必须能穿透验证码等待并执行人工点击。
       await this.waitWhileBlocked();
-      if (!this.taskBlocked) await this.trackOperation(async () => {
-        await this.waitForVisibleCards(this.initialScanTimeoutMs);
-        // 上报初始可见卡片
-        await this.reportVisibleCards();
-      });
+      if (this.stopRequested || this.closing) return;
+      if (!this.taskBlocked && !(await this.runInitialScan())) return;
     }
 
     while (!this.stopRequested) {
@@ -1196,11 +1234,20 @@ export class BrowseSession {
       } catch (err) {
         // CDP 断线：不当业务失败，等有界重连；成功→续跑重报，耗尽→已请求停止退出。
         if (err instanceof CdpDisconnectedError) {
-          this.logger('[browse] 命令执行中 CDP 断连，等待有界重连…');
           // 断连中止的若是通知巡视命令：重连后必须给云端一个诚实的 ok:false 终止回执，触发 excursion_resumer
           // 关暂停 + 回 feed。否则云端 excursionActive 永真 → 发命令暂停出口扣住 feed 命令 → 看门狗 ~240s 杀整会话，
           // 且 gatekeeper 此后永久忽略新通知。reason 如实 = cdp_reconnect_aborted（非伪造成功）。
           const wasExcursion = typeof cmd?.type === 'string' && cmd.type.startsWith('notification.');
+          // 终态关闭（冷待机 / 退出）：浏览器是我们自己关的，等重连毫无意义。但云端连接还活着，
+          // 在途巡视必须照样收到诚实的终止回执，否则云端 excursionActive 永真、看门狗随后杀会话。
+          if (this.closing) {
+            this.logger('[browse] 停止请求期间浏览器已关闭 → 中止在途命令，浏览循环干净退出');
+            if (wasExcursion) {
+              this.deps.client.reportActionCompleted?.({ action: 'notification_back_home', ok: false, reason: 'browser_closed' });
+            }
+            return;
+          }
+          this.logger('[browse] 命令执行中 CDP 断连，等待有界重连…');
           const ok = await this.waitForReconnect();
           if (!ok || this.stopRequested) return;
           if (wasExcursion) {
@@ -1213,6 +1260,37 @@ export class BrowseSession {
         if (this.stopRequested) return;
         throw err; // 其他业务异常保持现状（冒泡 → 会话结束）
       }
+    }
+  }
+
+  /**
+   * 首屏扫描 + 初始上报。返回 false = 循环应就此终止。
+   *
+   * 这段过去裸跑在 while 体之外：既不看停止标志、也不在 while 体那套 CdpDisconnectedError 处理域里。
+   * 于是「冷待机关浏览器」撞上「循环刚启动」时，它会对着已经死掉的 CDP 发调用，异常一路冒到 main.ts
+   * 的裸 catch，打成「浏览会话异常」。现在与命令路径同规矩：停止即退、断连走有界重连、绝不静默。
+   */
+  private async runInitialScan(): Promise<boolean> {
+    try {
+      await this.trackOperation(async () => {
+        await this.waitForVisibleCards(this.initialScanTimeoutMs);
+        if (this.stopRequested || this.closing) return;
+        await this.reportVisibleCards(); // 上报初始可见卡片
+      });
+      return true;
+    } catch (err) {
+      if (!(err instanceof CdpDisconnectedError)) throw err;
+      // 我们自己请求了停止（冷待机 / 退出）：浏览器被有意关掉，断连是预期终局而非故障。
+      // 干净退出——不重连、不上报、也不冒成「会话异常」（那是把自伤读成外部故障）。
+      if (this.stopRequested || this.closing) {
+        this.logger('[browse] 停止请求期间浏览器已关闭 → 首屏扫描中止，浏览循环干净退出');
+        return false;
+      }
+      this.logger('[browse] 首屏扫描中 CDP 断连，等待有界重连…');
+      const ok = await this.waitForReconnect();
+      if (!ok || this.stopRequested) return false;
+      await this.resumeAfterReconnect(); // 重连成功：按当前真实页面重报，再进命令循环
+      return true;
     }
   }
 

@@ -22,6 +22,12 @@ export interface EdgeBrowseSession {
   stop(): void;
   /** 终态关闭（进程下线 / CDP 死局）：永不复活。 */
   close(): void;
+  /**
+   * 终态关闭 + 有界等待在途原子操作排空；返回是否在预算内排空完。
+   * **关浏览器之前必须用这条、而不是 close()**：close() 只置停止标志，循环醒来后还会继续摸页面；
+   * 浏览器若已被关掉，那些调用就打在死 CDP 上（冷待机实测：首屏扫描对着死 CDP 空转 12s 后抛断连异常）。
+   */
+  closeAndWait(timeoutMs?: number): Promise<boolean>;
   /** 独占任务接管前静默到原子边界，返回等待毫秒数。 */
   quiesceForTask(): Promise<number>;
   /** 独占任务释放后恢复。 */

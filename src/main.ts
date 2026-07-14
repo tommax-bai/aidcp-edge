@@ -338,6 +338,17 @@ async function main(): Promise<void> {
   const EXIT_RECYCLE = 75;
   // 平台无关的命令会话句柄：小红书=BrowseSession，Facebook=FacebookBrowseSession（EdgeBrowseSession 契约）。
   let browse: EdgeBrowseSession | undefined;
+  // 关浏览器前等浏览循环排空的预算。有界是刚性要求：某个动作卡住时，无界等待会把冷待机 / 退出本身卡死
+  // （浏览器关不掉 = 待机失效、回收挂僵尸），比原 bug 更糟。超时即诚实告警后照常关。
+  const BROWSE_DRAIN_MS = Math.max(0, Number(process.env.AIDCP_BROWSE_DRAIN_MS ?? 5_000) || 5_000);
+  // 排空超时绝不静默：浏览器即将在一个仍在进行的原子操作下被关掉，这是操作者需要知道的事实。
+  const reportBrowseDrainTimeout = (drained: boolean, reason: string): void => {
+    if (drained) return;
+    console.warn(
+      `[aidcp-edge] ⚠ 浏览循环未在 ${BROWSE_DRAIN_MS}ms 内排空（reason=${reason}）：仍按计划关闭浏览器，` +
+        '在途动作会被中止并如实回执（不伪造成功）。',
+    );
+  };
   let overlayMonitor: OverlayMonitor | undefined;
   let watcherSupervisor: WatcherSupervisor | undefined;
   let identityWatcher: IdentityWatcher | undefined;
@@ -1158,8 +1169,10 @@ async function main(): Promise<void> {
       // 暂停/关闭/回收都先诚实终止在途发布，绝不让半截命令跨恢复重放。
       failInFlightPublishesHonestly(reason);
       watcherSupervisor?.stopAll();
-      // 终态关闭：用 close()（非 stop()）置 closing，使停用异步窗口内迟到的云端命令绝不唤醒浏览循环。
-      browse?.close();
+      // 终态关闭：用 closeAndWait()（非 close()/stop()）——置 closing 使停用窗口内迟到的云端命令绝不唤醒
+      // 浏览循环，并**等循环真正退出原子区再往下走**。下面 session.close() 会切 CDP、随后 closeOwnedBrowser()
+      // 杀浏览器；若不等排空，循环醒来还会摸页面，调用直接打在死 CDP 上（同冷待机那条 bug）。
+      reportBrowseDrainTimeout((await browse?.closeAndWait(BROWSE_DRAIN_MS)) ?? true, reason);
       // 诚实下线：等边-云连接真正关闭再继续（有界），使云端立即停止把本节点当路由目标。
       try {
         await client.closeAndWait(1500);
@@ -1194,7 +1207,9 @@ async function main(): Promise<void> {
       coldStandbyWakeRequested = false;
       failInFlightPublishesHonestly('cold_standby');
       watcherSupervisor?.stopAll();
-      browse?.close();
+      // 关浏览器前必须等浏览循环真正退出原子区（红线）：close() 只是请求停止，循环可能正卡在首屏扫描 /
+      // 停留等待里，醒来后照样摸页面——那时浏览器已被下面 killAndConfirmDead() 杀掉，调用直接打在死 CDP 上。
+      reportBrowseDrainTimeout((await browse?.closeAndWait(BROWSE_DRAIN_MS)) ?? true, 'cold_standby');
       if (chrome.reused) {
         console.log('[aidcp-edge] 复用模式：不回收本进程不拥有的外部 Chrome，拒绝进入冷待机');
         coldStandbyActive = false;
@@ -1257,6 +1272,12 @@ async function main(): Promise<void> {
   // Input 超时的结果不确定：已由 CdpClient 封住后续页面写。若浏览器由本节点启动并拥有，则回收并让看护
   // 建一个新的 CDP 安全边界；复用的外部浏览器绝不强杀，只保留 unavailable 供操作者显式重启。
   const recycleOrHoldUnavailableBrowser = (): void => {
+    // 冷待机：浏览器是我们自己关的，"控制不可用"是预期终局而非故障——绝不据此回收自杀
+    // （与下方 cdp.unrecoverable 的守卫同口径；缺了它，待机期一条在途 Input 就能把核心杀掉）。
+    if (coldStandbyActive) {
+      console.log('[aidcp-edge] CDP 控制不可用发生在冷待机期间（浏览器已被有意关闭）；保留云端连接，等待外壳唤醒');
+      return;
+    }
     if (chrome.reused) {
       console.warn('[aidcp-edge] CDP 输入控制不可用：复用的外部浏览器不会被自动关闭；请人工重启浏览器客户端后恢复');
       return;

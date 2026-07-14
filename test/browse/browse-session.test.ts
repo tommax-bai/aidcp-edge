@@ -2090,3 +2090,65 @@ test('feed.refresh: 不在 explore feed → ok:false wrong_context（不点、�
   assert.equal(r!.ok, false);
   assert.equal(r!.reason, 'wrong_context');
 });
+
+// ======== 冷待机 / 退出：关浏览器前必须先把浏览循环排空（绝不对死 CDP 发调用）========
+// 真机症状：外壳打「浏览器已关闭进入冷待机」后 13s，循环仍在首屏扫描里对死 CDP 发调用 →
+// CdpDisconnectedError 冒到 main.ts 裸 catch，打成「浏览会话异常」。根因是 close() 只置标志、
+// 启动段不看标志、且 waitForVisibleCards 把断连吞成「卡片还没渲染」空转满 12s 预算。
+
+test('冷待机：closeAndWait 返回后循环已排空 → 之后关浏览器，绝不再有 CDP 调用、start() 不抛', async () => {
+  const h = makeHarness();
+  let browserClosed = false;
+  let cdpCallsAfterBrowserClosed = 0;
+  h.deps.scroller.getVisibleCards = async () => {
+    if (browserClosed) {
+      cdpCallsAfterBrowserClosed++;
+      throw new CdpDisconnectedError('CDP 未连接，请先 connect()');
+    }
+    return [CARD];
+  };
+  // 真 sleep（有界）：让循环真的停在启动段的扫描延迟里，复现「close 撞上启动段」这条真机时序。
+  const sess = new BrowseSession(h.deps, {
+    random: () => 0.99,
+    sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 50))),
+    logger: () => {},
+  });
+
+  const done = sess.start();
+  await new Promise((r) => setTimeout(r, 5)); // 循环此刻卡在 ensureExplore / 扫描延迟里
+
+  const drained = await sess.closeAndWait(2000);
+  browserClosed = true; // 外壳在这之后才真正杀浏览器（冷待机的正确时序）
+  await done; // 绝不 reject：不再有「浏览会话异常」
+
+  assert.equal(drained, true, 'closeAndWait 应在预算内排空');
+  assert.equal(cdpCallsAfterBrowserClosed, 0, '关闭请求排空后绝不再对 CDP 发任何调用');
+});
+
+test('冷待机：浏览器真在首屏扫描中途死掉 → 干净退出，不抛异常、不空转满扫描预算', async () => {
+  const h = makeHarness();
+  let cardCalls = 0;
+  h.deps.scroller.getVisibleCards = async () => {
+    cardCalls++;
+    throw new CdpDisconnectedError('CDP 未连接，请先 connect()'); // 浏览器已被关掉
+  };
+  const sess = new BrowseSession(h.deps, { ...noOpts(), initialScanTimeoutMs: 12000 });
+  const t0 = Date.now();
+  await sess.start(); // 旧行为：轮询吞异常满 12s，然后抛 CdpDisconnectedError 出来
+  const elapsed = Date.now() - t0;
+
+  assert.ok(elapsed < 2000, `断连必须立刻上抛、不得空转满扫描预算（实测 ${elapsed}ms）`);
+  assert.equal(cardCalls, 1, '断连后不再重复轮询死 CDP');
+  assert.equal(h.reportedCards.length, 0, '拿不到卡片就绝不上报（不静默假成功）');
+});
+
+test('冷待机：在途动作卡住时 closeAndWait 有界超时并如实返回 false（绝不把待机本身挂死）', async () => {
+  const h = makeHarness();
+  h.deps.scroller.getVisibleCards = () => new Promise(() => {}); // 永不 settle 的在途操作
+  const sess = new BrowseSession(h.deps, { ...noOpts(), initialScanTimeoutMs: 12000 });
+  void sess.start();
+  await new Promise((r) => setTimeout(r, 5));
+
+  const drained = await sess.closeAndWait(60);
+  assert.equal(drained, false, '排空超时必须如实返回 false，由调用方诚实告警后照常关浏览器');
+});

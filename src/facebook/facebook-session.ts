@@ -268,6 +268,21 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     this.running = false;
   }
 
+  /** 终态关闭 + 有界等待在途命令链排空（关浏览器前必须走这条；语义见 BrowseSession.closeAndWait）。 */
+  async closeAndWait(timeoutMs = 5000): Promise<boolean> {
+    this.close();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const drained = await Promise.race([
+      this.chain.then(() => true, () => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    return drained;
+  }
+
   async quiesceForTask(): Promise<number> {
     await this.chain.catch(() => {});
     return 0;
