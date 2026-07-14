@@ -162,7 +162,12 @@ test('待配置 → 首屏主动步骤，点「添加环境」直达左栏添加
 
 // ── 在场感：动效只由真实事件驱动 ──
 test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async () => {
-  const { w } = await boot();
+  const { w } = await boot({
+    dailyUsage: {
+      totals: { view: 3, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
+      quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+    },
+  });
   assert.ok($(w, '#presence-text').classList.contains('shimmer'));
   assert.match($(w, '#presence-text').textContent ?? '', /正在认真读/);
   assert.match($(w, '#presence-fresh').textContent ?? '', /刚刚更新/);
@@ -175,9 +180,9 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /正在查看第 3 条/);
   assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
   assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /正在查看第 3 条推荐内容/);
-  assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /3\/20/);
+  assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /3\/150/);
   assert.equal($(w, '#runtime-guidance-progress .rg-progress-track').getAttribute('aria-valuenow'), '3');
-  assert.equal(($(w, '#runtime-guidance-progress .rg-progress-fill') as HTMLElement).style.width, '15%');
+  assert.equal(($(w, '#runtime-guidance-progress .rg-progress-fill') as HTMLElement).style.width, '2%');
   assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-task-execution/);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-main/);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-mascot/);
@@ -236,7 +241,7 @@ test('运行中 + 事件过期 + 阶段计划完成 → 说明自然间隔的成
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /38 条首页内容已观察/);
     assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
     assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /本轮已查看 38 条推荐内容/);
-    assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /38\/38/);
+    assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /38\/150/);
     assert.match($(w, '#runtime-guidance-resume').textContent ?? '', /36 分钟后自动继续/);
     assert.equal($(w, '#runtime-guidance-note').textContent, '本小时进展已记录');
     assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-monitoring/);
@@ -284,7 +289,7 @@ test('本轮等待缺少浏览配额字段时仍渲染自然间隔进度卡', as
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /推荐内容更聚焦/);
     assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
     assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /本轮已查看 12 条推荐内容/);
-    assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /12\/20/);
+    assert.doesNotMatch($(w, '#runtime-guidance-progress').textContent ?? '', /12\/20/);
     assert.equal($(w, '#runtime-guidance-resume').textContent, '约 8 分钟后自动继续');
     assert.equal($(w, '#runtime-guidance-note').textContent, '本轮进展已记录');
   } finally {

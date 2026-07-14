@@ -173,6 +173,8 @@ test('运行价值说明：新鲜浏览事件先说明正在寻找内容灵感',
   const v = uiLogic.runtimeGuidanceView(st({
     presence: { text: '正在认真读「x」…', at: new Date(now - 10_000).toISOString() },
     dailyUsage: {
+      totals: { view: 12, collect: 2 },
+      quotas: { view: 150 },
       windows: {
         session: {
           active: true,
@@ -195,10 +197,10 @@ test('运行价值说明：新鲜浏览事件先说明正在寻找内容灵感',
   ]);
   assert.deepEqual(v?.progress, {
     current: 12,
-    target: 20,
-    percent: 60,
+    target: 150,
+    percent: 8,
     title: '正在查看第 12 条推荐内容',
-    counter: '12/20',
+    counter: '12/150',
     meta: '进展实时记录',
   });
 });
@@ -265,10 +267,10 @@ test('运行价值说明：本轮等待缺少浏览配额字段时仍展示完�
   ]);
   assert.deepEqual(v?.progress, {
     current: 12,
-    target: 20,
-    percent: 60,
+    target: 12,
+    percent: 0,
     title: '本轮已查看 12 条推荐内容',
-    counter: '12/20',
+    counter: '',
     meta: '进展已记录',
   });
   assert.equal(v?.resume, '约 8 分钟后自动继续');

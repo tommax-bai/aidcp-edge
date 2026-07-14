@@ -113,8 +113,6 @@
   }
 
   // ── 运行价值说明：只把已确认的浏览阶段转为成果与下一步，不推断单项互动会暂停整轮浏览。──
-  const EXPLORATION_PROGRESS_FALLBACK_TARGET = 20;
-
   function guidanceWindow(status, key, nowMs) {
     const windows = status && status.dailyUsage && objectOrEmpty(status.dailyUsage).windows;
     const window = windows && objectOrEmpty(windows)[key];
@@ -193,11 +191,13 @@
     return null;
   }
 
-  function explorationProgress(status, window, resting) {
+  function explorationProgress(status, window, resting, dayWindow) {
     const observed = observedCount(status, window);
-    const configuredTarget = firstPositiveCount([window && window.view], ['cap']);
-    const target = Math.max(observed, configuredTarget > 0 ? configuredTarget : EXPLORATION_PROGRESS_FALLBACK_TARGET);
-    const percent = target > 0 ? Math.min(100, Math.round((observed / target) * 100)) : 0;
+    const daily = objectOrEmpty(objectOrEmpty(status).dailyUsage);
+    const configuredTarget = firstPositiveCount([dayWindow && dayWindow.view, daily.quotas, window && window.view], ['cap', 'view', 'views']);
+    const hasTarget = configuredTarget > 0;
+    const target = hasTarget ? Math.max(observed, configuredTarget) : Math.max(observed, 1);
+    const percent = hasTarget && target > 0 ? Math.min(100, Math.round((observed / target) * 100)) : 0;
     const title = resting
       ? (observed > 0 ? `本轮已查看 ${observed} 条推荐内容` : '本轮探索进展已记录')
       : (observed > 0 ? `正在查看第 ${observed} 条推荐内容` : '正在观察推荐内容');
@@ -206,7 +206,7 @@
       target,
       percent,
       title,
-      counter: target > 0 ? `${observed}/${target}` : '',
+      counter: hasTarget ? `${observed}/${target}` : '',
       meta: resting ? '进展已记录' : '进展实时记录',
     };
   }
@@ -272,6 +272,7 @@
     const isSession = key === 'session';
     const observed = observedCount(status, window);
     const inspirations = inspirationCount(status, window);
+    const day = guidanceWindow(status, 'day', nowMs);
     return {
       mode: key,
       mascot: 'monitoring',
@@ -281,7 +282,7 @@
       value: '停一停不是失去进度，而是为下一轮寻找留出自然节奏。',
       detail: '',
       steps: guidanceSteps(observed, inspirations),
-      progress: explorationProgress(status, window, true),
+      progress: explorationProgress(status, window, true, day),
       resume: `约 ${wait}自动继续`,
       note: isSession ? '本轮进展已记录' : '本小时进展已记录',
     };
@@ -341,7 +342,7 @@
         value: '刷首页不是漫无目的，而是在寻找目标人群已经验证过的方向。',
         detail: '',
         steps: runningGuidanceSteps(observed, inspirations),
-        progress: explorationProgress(s, window, false),
+        progress: explorationProgress(s, window, false, day),
         resume: '',
       };
     }
