@@ -28,6 +28,10 @@
     if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需要协助', detail: AUTH_ATTENTION[s.auth] };
     if (s.risk === 'restricted') return { code: 'attention', label: '节奏已调整', detail: '账号互动暂时受限，已自动放慢节奏' };
     if (s.edge === 'running' && s.session === 'running' && s.cloud !== 'connected') {
+      // 「**重**新连接」断言的是「曾经连上过、现在断了」。本轮核心从没连上过 = 还在冷启动：核心一打印日志
+      // edge 就翻成 running，但它 main() 里连云端排在「起浏览器 → CDP attach → 登录闸」之后，中间整个窗口
+      // cloud 都还是 disconnected。这时讲「重新连接」＝断言一个从未发生过的连接，把「还没」读成「否」。
+      if (!s.cloudEverConnected) return { code: 'ready', label: '正在启动…', detail: '正在准备浏览器并连接云端' };
       return { code: 'attention', label: '正在重新连接', detail: '连接恢复后会自动继续' };
     }
     if (s.session === 'paused') return { code: 'paused', label: '已暂停', detail: '浏览器保持打开；可恢复或关闭' };
@@ -503,8 +507,8 @@
   // ── 多环境 fleet（edge-multi-environment-fleet）：环境栏状态环分级 / 紧迫度排序 / 待处理计数 ──
   // 分级（收起态由头像外圈色环承担）：
   //   error(红,需处理)     放弃重启终态 / 引擎异常
-  //   attention(琥珀,需处理) 需登录 / 待配置 / 风控受限 / 账号重复运行 / 云端重连
-  //   launching(蓝)        启动中
+  //   attention(琥珀,需处理) 需登录 / 待配置 / 风控受限 / 账号重复运行 / 云端**断线**重连（连上过才算）
+  //   launching(蓝)        启动中（含「本轮核心还没连上过云端」的首次连接窗口——那是启动，不是断线）
   //   stale(深黄)          状态心跳超阈值——失联，MUST NOT 呈现为在线
   //   running(绿)          运行中
   //   offline(灰)          已停止 / 已暂停
@@ -529,7 +533,13 @@
       if (Number.isFinite(at) && Number.isFinite(nowMs) && nowMs - at > FLEET_STALE_MS) {
         return { level: 'stale', needsAction: false, label: '失联' };
       }
-      if (s.session === 'running' && s.cloud !== 'connected') return { level: 'attention', needsAction: true, label: '正在重新连接' };
+      // 同 synthesizeHealth：没连上过 ≠ 断线。冷启动窗口必须留在 launching（蓝、不 needsAction、不浮顶），
+      // 否则每次正常启动都会被染成琥珀「需要你处理」并挤到列表顶部，与真正待人工的登录 / 验证码 / 风控
+      // 受限混作一谈——那正好毁掉环境栏存在的理由（一眼看出谁真的需要我）。
+      if (s.session === 'running' && s.cloud !== 'connected') {
+        if (!s.cloudEverConnected) return { level: 'launching', needsAction: false, label: '启动中' };
+        return { level: 'attention', needsAction: true, label: '正在重新连接' };
+      }
       return { level: 'running', needsAction: false, label: s.session === 'paused' ? '已暂停' : s.session === 'resting' ? '等待下一轮' : '运行中' };
     }
     if (s.session === 'paused') return { level: 'offline', needsAction: false, label: '已暂停' };

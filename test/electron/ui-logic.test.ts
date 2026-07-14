@@ -51,6 +51,9 @@ function st(over: Record<string, unknown> = {}) {
   return {
     auth: 'logged in',
     cloud: 'connected',
+    // 一个正常在跑的环境，按定义就是**连上过**的。基线带上这一位，下面「云端掉线 → 需处理」那条断言
+    // 才真的在测「断线」；否则它测的是「从没连上过」，而那是启动，不是故障。
+    cloudEverConnected: true,
     session: 'running',
     risk: 'normal',
     edge: 'running',
@@ -73,6 +76,27 @@ test('健康合成：可恢复状态需要协助，真正中断状态为错误',
   assert.equal(uiLogic.synthesizeHealth(st({ risk: 'frozen' })).code, 'error');
   assert.equal(uiLogic.synthesizeHealth(st({ cloud: 'disconnected' })).code, 'attention');
   assert.equal(uiLogic.synthesizeHealth(st({ risk: 'restricted' })).code, 'attention');
+});
+
+// ── 首次连接 ≠ 断线重连（change honest-first-connect-label）──
+// 冷启动窗口的真实形状：核心一打印日志 edge 就被翻成 running，spawn 时 session 已乐观写成 running，
+// 而核心 main() 里连云端排在「起浏览器 → CDP attach → 登录闸」之后——于是 cloud 还是 disconnected。
+// 这三者凑齐正好命中断连分支。它必须被读成「还在启动」，而不是「连接掉了」。
+test('健康合成：本轮核心从没连上过云端 → 是启动中，绝不冒充「正在重新连接」', () => {
+  const booting = uiLogic.synthesizeHealth(
+    st({ edge: 'running', session: 'running', cloud: 'disconnected', cloudEverConnected: false }),
+  );
+  assert.equal(booting.code, 'ready');
+  assert.doesNotMatch(booting.label, /重新连接/); // 「重」断言了一次从未发生过的连接
+  assert.match(booting.label, /启动/);
+});
+
+test('健康合成：连上过之后掉线 → 才是真的「正在重新连接」', () => {
+  const dropped = uiLogic.synthesizeHealth(
+    st({ edge: 'running', session: 'running', cloud: 'disconnected', cloudEverConnected: true }),
+  );
+  assert.equal(dropped.code, 'attention');
+  assert.match(dropped.label, /正在重新连接/);
 });
 
 test('健康合成：暂停 / 启动中 / 停止', () => {

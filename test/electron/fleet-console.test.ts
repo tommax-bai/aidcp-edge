@@ -130,6 +130,30 @@ test('fleetLevel：失联（心跳超阈值）绝不呈现为在线', () => {
   assert.equal(stale.label, '失联');
 });
 
+// change honest-first-connect-label：环境栏存在的理由是「一眼看出谁真的需要我」。把每一次正常冷启动
+// 都染成琥珀「需要你处理」并浮到顶部，会让这个信号和真正待人工的登录 / 验证码 / 风控受限混作一谈。
+test('fleetLevel：冷启动窗口留在 launching，绝不冒充需要人工', () => {
+  const now = Date.now();
+  const booting = uiLogic.fleetLevel(
+    { edge: 'running', session: 'running', cloud: 'disconnected', cloudEverConnected: false, updatedAt: new Date(now).toISOString() },
+    now,
+  );
+  assert.equal(booting.level, 'launching');
+  assert.equal(booting.needsAction, false); // 正常启动不是待办事项
+  assert.equal(booting.label, '启动中');
+});
+
+test('fleetLevel：连上过之后掉线才升为需处理的「正在重新连接」', () => {
+  const now = Date.now();
+  const dropped = uiLogic.fleetLevel(
+    { edge: 'running', session: 'running', cloud: 'disconnected', cloudEverConnected: true, updatedAt: new Date(now).toISOString() },
+    now,
+  );
+  assert.equal(dropped.level, 'attention');
+  assert.equal(dropped.needsAction, true);
+  assert.equal(dropped.label, '正在重新连接');
+});
+
 test('fleetLevel：放弃重启和冻结为 error；账号重复运行为 attention', () => {
   const now = Date.now();
   assert.equal(uiLogic.fleetLevel({ respawnGaveUp: true, edge: 'stopped' }, now).level, 'error');

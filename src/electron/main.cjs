@@ -715,6 +715,10 @@ function makeStatus(provider) {
   return {
     provider,
     cloud: 'disconnected',
+    // 本轮核心是否**曾经**连上过云端（change honest-first-connect-label）。呈现层据此区分两种截然不同的处境：
+    // 「还没连上」（冷启动的正常一步）vs「连上过又断了」（只有后者配叫「重新连接」）。缺了这个事实，
+    // `cloud !== 'connected'` 会把整个浏览器冷启动窗口讲成断线重连——把「还没」读成「否」。
+    cloudEverConnected: false,
     auth: 'checking',
     session: 'idle',
     stats: { views: 0, likes: 0, collects: 0, comments: 0, follows: 0, publishes: 0 },
@@ -2248,6 +2252,9 @@ function spawnEdgeChild(handle) {
   updateStatus(handle, {
     edge: 'starting',
     session: 'running',
+    // 新核心 = 还没连上过云端，哪怕上一个核心连上过（change honest-first-connect-label）。不复位这一位，
+    // 崩溃重起 / 显式重启的整个冷启动窗口会顶着上一轮的「连过」资格，被讲成「正在重新连接」。
+    cloudEverConnected: false,
     browserStandby: null,
     publish: null,
     publishPreview: null,
@@ -2829,7 +2836,8 @@ function stopAndRestart(handle, message, patch = {}) {
   handle.stopRequested = false; // 显式重启意图：解除任何在途取消闸
   clearRespawnTimer(handle);
   clearColdStandbyTimer(handle);
-  updateStatus(handle, { cloud: 'disconnected', session: 'running', respawnGaveUp: false, lastMessage: message, ...presencePatch('正在重启引擎…'), ...clearEdgeFailurePatch(handle), ...patch });
+  // cloudEverConnected 复位：正要换核心，新核心没连过（change honest-first-connect-label）。
+  updateStatus(handle, { cloud: 'disconnected', cloudEverConnected: false, session: 'running', respawnGaveUp: false, lastMessage: message, ...presencePatch('正在重启引擎…'), ...clearEdgeFailurePatch(handle), ...patch });
   if (handle.child) {
     handle.restartPending = true;
     void queueLifecycle(() => { try { handle.child?.kill('SIGTERM'); } catch { /* ignore */ } });
@@ -2912,6 +2920,9 @@ function handleEdgeLogLine(handle, message, isError = false) {
   }
   if (message.includes('已连接云端') || message.includes('已握手') || message.includes('云端已重连')) {
     next.cloud = 'connected';
+    // 本轮核心已确凿连上过云端：此后再断，才配讲「正在重新连接」（change honest-first-connect-label）。
+    // 只在此置位、只在换核心时复位——冷待机唤醒不复位（云端连接全程未断，唤醒的是浏览器不是连接）。
+    next.cloudEverConnected = true;
     // 就绪信号（change browser-slot-scheduling）：串行启动队列等的就是这一刻——浏览器起来了、云端连上了。
     // 到此才放行队列里的下一个环境；不等就绪就放行，10 个环境仍会几乎同时冷启、把内存打爆。
     settleLaunchReady(handle, true);
