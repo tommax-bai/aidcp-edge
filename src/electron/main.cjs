@@ -388,7 +388,7 @@ function createLoginWindow() {
   if (loginWindow) { try { loginWindow.show(); loginWindow.focus(); } catch { /* ignore */ } return; }
   loginWindow = new BrowserWindow({
     width: 820,
-    height: 640,
+    height: 720,
     minWidth: 640,
     minHeight: 520,
     title: 'AIDCP',
@@ -1219,7 +1219,7 @@ function frameOptions() {
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 820,
-    height: 640,
+    height: 720,
     minWidth: 640,
     minHeight: 520,
     title: 'AIDCP Edge',
