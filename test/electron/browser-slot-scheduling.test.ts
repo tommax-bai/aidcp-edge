@@ -137,3 +137,52 @@ test('排队等待计入唤醒死线：轮到它时已超死线 → 立刻诚实
   assert.equal(b.reason, 'deadline_exceeded');
   assert.equal(launched, 1, '超死线的那个绝不启动——它会白占一个槽位，而且早已没人在等它了');
 });
+
+// ---------------------------------------------------------------------------
+// 界面可设的两个上限（并发数 / 最大账号数）。
+//
+// 权威口径只有一处（主进程），渲染层只显示不重算。优先级 界面设置 > 启动环境变量 > 按内存自动推——
+// 与云端环境选择同一套。0 / 空 = 未设 = 自动，绝不能被读成「上限 0」（那等于整机停摆）。
+// ---------------------------------------------------------------------------
+
+const MB = 1024 * 1024;
+
+test('两个上限：界面设置 > 启动环境变量 > 按内存自动推', () => {
+  const auto = fleet.resolveSlotSettings({ freeBytes: 7000 * MB, perEnvBytes: 700 * MB });
+  assert.equal(auto.capacity, 10);
+  assert.equal(auto.capacitySource, 'auto');
+  assert.equal(auto.maxAccounts, 20, '未设时账号上限 = 2 × 槽位');
+  assert.equal(auto.maxAccountsSource, 'auto');
+
+  const byEnv = fleet.resolveSlotSettings({ freeBytes: 7000 * MB, perEnvBytes: 700 * MB, slotEnv: 6 });
+  assert.equal(byEnv.capacity, 6);
+  assert.equal(byEnv.capacitySource, 'env');
+  assert.equal(byEnv.maxAccounts, 12, '账号上限跟着实际生效的槽位走，而不是自动推算值');
+
+  const bySetting = fleet.resolveSlotSettings({ freeBytes: 7000 * MB, perEnvBytes: 700 * MB, slotEnv: 6, slotSetting: 3 });
+  assert.equal(bySetting.capacity, 3, '界面设置压过启动参数');
+  assert.equal(bySetting.capacitySource, 'setting');
+  assert.equal(bySetting.autoCapacity, 10, '自动推算值仍如实带出，供界面说明「自动会是多少」');
+});
+
+test('账号上限可单独设定；设到 1:2 之上必须诚实告警而非静默接受', () => {
+  const v = fleet.resolveSlotSettings({ freeBytes: 3500 * MB, perEnvBytes: 700 * MB, maxAccountsSetting: 20 });
+  assert.equal(v.capacity, 5);
+  assert.equal(v.maxAccounts, 20);
+  assert.equal(v.maxAccountsSource, 'setting');
+  assert.equal(v.autoMaxAccounts, 10);
+  assert.equal(v.maxAccountsExceedsRatio, true, '20 个账号抢 5 个槽位：部分账号可能永远排不上，必须说出来');
+
+  const within = fleet.resolveSlotSettings({ freeBytes: 3500 * MB, perEnvBytes: 700 * MB, maxAccountsSetting: 8 });
+  assert.equal(within.maxAccountsExceedsRatio, false);
+});
+
+test('0 / 空 / 负数 = 未设 = 自动，绝不解读成「上限 0」', () => {
+  for (const v of [0, '', null, undefined, -3, 'abc']) {
+    assert.equal(fleet.normalizeSlotLimit(v), 0, `${JSON.stringify(v)} 应归一为 0（自动）`);
+  }
+  const zeroed = fleet.resolveSlotSettings({ freeBytes: 7000 * MB, perEnvBytes: 700 * MB, slotSetting: 0, maxAccountsSetting: 0 });
+  assert.equal(zeroed.capacity, 10, '0 是「自动」不是「不许开浏览器」');
+  assert.equal(zeroed.maxAccounts, 20);
+  assert.equal(fleet.normalizeSlotLimit(999), 64, '上界 64：防手滑多打一个零把机器拖垮');
+});

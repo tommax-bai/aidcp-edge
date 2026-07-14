@@ -192,6 +192,50 @@ function maxAccountsForSlots(slots) {
 }
 
 /**
+ * 两个上限的最终取值（界面可设，change browser-slot-scheduling 追加）。
+ *
+ * 优先级 **界面设置 > 启动环境变量 > 按内存自动推**——与云端环境选择同一套口径（界面是权威，env 只是
+ * 没界面时的兜底）。0 / 空 = 未设 = 自动，绝不解读成「上限 0」（那等于整机停摆）。
+ *
+ * 两个数是不同的事实，各自独立可设：**槽位**是物理上限（同时开几个浏览器，由内存顶死），**账号上限**
+ * 是排班上限（挂几个账号，靠冷待机轮流用槽位）。1:2 是缺省比例、不是物理常数——可以设高，但设高了就
+ * 存在「部分账号长期排不到槽位」的风险，必须诚实告警（`maxAccountsExceedsRatio`），MUST NOT 静默接受。
+ */
+function resolveSlotSettings({
+  freeBytes,
+  perEnvBytes = PER_ENV_BYTES_DEFAULT,
+  slotSetting,
+  slotEnv,
+  maxAccountsSetting,
+} = {}) {
+  const per = Math.max(1, Math.floor(Number(perEnvBytes) || PER_ENV_BYTES_DEFAULT));
+  const autoCapacity = resolveSlotCapacity({ freeBytes, perEnvBytes: per });
+  const fromSetting = normalizeSlotLimit(slotSetting);
+  const fromEnv = Math.floor(Number(slotEnv) || 0);
+  const capacity = fromSetting > 0 ? fromSetting : fromEnv > 0 ? fromEnv : autoCapacity;
+  const autoMaxAccounts = maxAccountsForSlots(capacity);
+  const maxSetting = normalizeSlotLimit(maxAccountsSetting);
+  const maxAccounts = maxSetting > 0 ? maxSetting : autoMaxAccounts;
+  return {
+    capacity,
+    capacitySource: fromSetting > 0 ? 'setting' : fromEnv > 0 ? 'env' : 'auto',
+    autoCapacity,
+    maxAccounts,
+    maxAccountsSource: maxSetting > 0 ? 'setting' : 'auto',
+    autoMaxAccounts,
+    maxAccountsExceedsRatio: maxAccounts > autoMaxAccounts,
+    perEnvMB: Math.round(per / (1024 * 1024)),
+  };
+}
+
+/** 界面输入归一：空 / 非数 / ≤0 → 0（= 自动）；上界 64，防手滑多打一个零把机器拖垮。 */
+function normalizeSlotLimit(value) {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(64, n);
+}
+
+/**
  * 串行启动队列（change browser-slot-scheduling）：**所有会打开浏览器的动作**都排这一条队——
  * 自动续场恢复、冷待机唤醒、崩溃重起、手动任务、排期任务。
  *
@@ -360,6 +404,8 @@ module.exports = {
   createSerialLaunchQueue,
   resolveSlotCapacity,
   maxAccountsForSlots,
+  resolveSlotSettings,
+  normalizeSlotLimit,
   ACCOUNTS_PER_SLOT,
   LAUNCH_PRIORITY,
   ramAdmission,

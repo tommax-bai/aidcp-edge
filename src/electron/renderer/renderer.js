@@ -211,6 +211,11 @@ const settingsUi = {
   browserShow: document.querySelector('#browser-show'),
   browserResetParking: document.querySelector('#browser-reset-parking'),
   browserColdStandby: document.querySelector('#browser-cold-standby'),
+  // 浏览器并发卡（change browser-slot-scheduling）
+  slotLimit: document.querySelector('#slot-limit'),
+  maxAccountLimit: document.querySelector('#max-account-limit'),
+  slotsHint: document.querySelector('#slots-hint'),
+  slotsWarn: document.querySelector('#slots-warn'),
   applyRestart: document.querySelector('#apply-restart'),
   msg: document.querySelector('#settings-msg'),
   // 云端环境卡（change edge-cloud-env-selector）
@@ -2255,6 +2260,10 @@ function applySettings(s) {
   settingsUi.adsApiBase.value = s.adsApiBase || '';
   applyParkingSelection(s.browserParkingMode || 'primary-screen');
   if (settingsUi.browserColdStandby) settingsUi.browserColdStandby.checked = s.browserColdStandbyEnabled !== false;
+  // 浏览器并发（change browser-slot-scheduling）：0 = 自动 → 输入框留空，让占位文案说清自动是怎么算的。
+  if (settingsUi.slotLimit) settingsUi.slotLimit.value = Number(s.browserSlotLimit) > 0 ? String(s.browserSlotLimit) : '';
+  if (settingsUi.maxAccountLimit) settingsUi.maxAccountLimit.value = Number(s.maxAccountLimit) > 0 ? String(s.maxAccountLimit) : '';
+  applySlotsView(s.slots);
   updateProfileDisplay();
   // 云端环境（change edge-cloud-env-selector）：回填已选 key、自定义地址、目标云端视图。
   cloudSelKey = typeof s.cloudEnvKey === 'string' ? s.cloudEnvKey : '';
@@ -2267,6 +2276,55 @@ function applySettings(s) {
   applyProviderSelection(s.provider || 'adspower');
   updateApplyRestart();
 }
+
+// ── 浏览器并发卡（change browser-slot-scheduling）────────────────────────────────
+// 两个上限的**算出来的**取值一律由主进程给（settings.slots），渲染层只显示、绝不自己再算一遍——
+// 两处各算一遍必然漂移，界面说 5 个槽位、实际闸放行 3 个，是最难查的一类不一致。
+function applySlotsView(view) {
+  if (!settingsUi.slotsHint || !view) return;
+  const capSrc = view.capacitySource === 'setting'
+    ? '你设定'
+    : view.capacitySource === 'env'
+      ? '启动参数'
+      : `自动推算（可用内存 ÷ 单环境约 ${view.perEnvMB}MB）`;
+  const accSrc = view.maxAccountsSource === 'setting' ? '你设定' : '自动（并发 × 2）';
+  settingsUi.slotsHint.textContent =
+    `并发上限 ${view.capacity}（${capSrc}）· 账号上限 ${view.maxAccounts}（${accSrc}）· `
+    + `此刻 ${view.occupied} 个浏览器在跑、已挂 ${view.configured} 个账号。改完立即生效，不必重启环境。`;
+  // 两类风险都如实说出来，绝不静默接受：账号挂太多（排不上）、或已挂的已经超过上限。
+  const warns = [];
+  if (view.maxAccountsExceedsRatio) {
+    warns.push(`⚠ 账号上限 ${view.maxAccounts} 超过并发数的 2 倍（${view.autoMaxAccounts}）：部分账号可能长期排不到浏览器。`);
+  }
+  if (Number(view.configured) > Number(view.maxAccounts)) {
+    warns.push(`⚠ 已挂 ${view.configured} 个账号，超过账号上限 ${view.maxAccounts}。`);
+  }
+  if (settingsUi.slotsWarn) {
+    settingsUi.slotsWarn.textContent = warns.join('　');
+    settingsUi.slotsWarn.classList.toggle('hidden', warns.length === 0);
+  }
+}
+
+// 空 / 非数 / ≤0 → 0（= 自动）；上界 64（与主进程 fleet.normalizeSlotLimit 同口径，权威仍在主进程）。
+function readSlotInput(el) {
+  const n = Math.floor(Number((el && el.value) || 0));
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(64, n);
+}
+
+// 并发上限即改即存：这是壳层的闸，不动在跑核心，所以不走 dirty / 「按新设置重启」那条路。
+async function persistSlotLimits() {
+  const saved = await window.aidcpEdge.saveSettings({
+    browserSlotLimit: readSlotInput(settingsUi.slotLimit),
+    maxAccountLimit: readSlotInput(settingsUi.maxAccountLimit),
+  });
+  if (!saved) return;
+  if (settingsUi.slotLimit) settingsUi.slotLimit.value = Number(saved.browserSlotLimit) > 0 ? String(saved.browserSlotLimit) : '';
+  if (settingsUi.maxAccountLimit) settingsUi.maxAccountLimit.value = Number(saved.maxAccountLimit) > 0 ? String(saved.maxAccountLimit) : '';
+  applySlotsView(saved.slots);
+}
+settingsUi.slotLimit?.addEventListener('change', () => { void persistSlotLimits(); });
+settingsUi.maxAccountLimit?.addEventListener('change', () => { void persistSlotLimits(); });
 
 // 云端环境卡交互（change edge-cloud-env-selector）
 for (const btn of settingsUi.cloudEnvButtons) {

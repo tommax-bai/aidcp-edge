@@ -1205,6 +1205,10 @@ body { margin: 0; }
 .parking-hint { color: var(--mute); font-size: 12px; line-height: 1.45; }
 .parking-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
+/* 浏览器并发卡（change browser-slot-scheduling）：两个数字上限 + 现状提示 + 风险告警。 */
+.slots-field { display: flex; flex-direction: column; gap: 10px; }
+.slots-warn { color: var(--warn-fg); }
+
 .ads-probe { display: flex; align-items: center; gap: 10px; }
 .ads-full { grid-column: 1 / -1; }
 .ads-env-head, .ads-id-head { display: flex; align-items: center; justify-content: space-between; }

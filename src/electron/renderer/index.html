@@ -575,6 +575,29 @@
           </div>
         </div>
 
+        <!-- 浏览器并发（change browser-slot-scheduling）：两个上限都可显式设定，留空 = 自动推算。
+             并发数是物理上限（同时开几个浏览器，由内存顶死）；账号数是排班上限（挂几个账号，靠冷待机轮流用槽位）。 -->
+        <div class="set-card">
+          <div class="set-card-head">
+            <div class="set-card-title">
+              <span>浏览器并发</span>
+              <span class="set-card-sub">同时能开几个浏览器、最多挂几个账号；留空按本机可用内存自动推算</span>
+            </div>
+          </div>
+          <div class="slots-field">
+            <label class="field">
+              <span class="field-label">同时打开的浏览器数 <em class="opt">留空自动</em></span>
+              <input id="slot-limit" type="number" min="1" max="64" step="1" placeholder="自动（按可用内存推算）" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span class="field-label">最多挂载账号数 <em class="opt">留空自动</em></span>
+              <input id="max-account-limit" type="number" min="1" max="64" step="1" placeholder="自动（并发数 × 2）" autocomplete="off" />
+            </label>
+            <span id="slots-hint" class="parking-hint">—</span>
+            <span id="slots-warn" class="parking-hint slots-warn hidden"></span>
+          </div>
+        </div>
+
         <div class="settings-actions">
           <span id="settings-msg" class="settings-msg"></span>
           <button id="apply-restart" class="secondary hidden" type="button">按新设置重启</button>

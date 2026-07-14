@@ -182,6 +182,11 @@ const DEFAULT_SETTINGS = {
   browserColdStandbyEnabled: DEFAULT_BROWSER_COLD_STANDBY_ENABLED,
   browserColdStandbyMinWaitMs: DEFAULT_BROWSER_COLD_STANDBY_MIN_WAIT_MS,
   browserColdStandbyWarmupMs: DEFAULT_BROWSER_COLD_STANDBY_WARMUP_MS,
+  // 浏览器并发（change browser-slot-scheduling）：两个上限都可在设置里显式给定，0 = 未设 = 自动。
+  //  - browserSlotLimit：同时打开的浏览器数上限（槽位）。自动 = ⌊可用内存 ÷ 单环境估值⌋。
+  //  - maxAccountLimit：可挂载的账号数上限。自动 = 2 × 槽位（1:2 缺省比例）。
+  browserSlotLimit: 0,
+  maxAccountLimit: 0,
   // 「开发者详情」（原始日志区）默认不展示，在设置抽屉里开关（客户版首屏零技术噪音）。
   devDetails: false,
   // 环境栏（fleet rail）收起态与上次选中环境（跨重启保留）。
@@ -209,6 +214,7 @@ function loadSettings() {
   if (settings.provider !== 'self' && settings.provider !== 'adspower') settings.provider = 'adspower';
   settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
   normalizeColdStandbySettingsIntoSettings();
+  normalizeSlotSettingsIntoSettings();
   // 花名册迁移（向后兼容）：旧单值 adsProfileId → 单元素花名册；镜像回写旧字段（回滚兼容）。
   settings.environments = fleet.migrateEnvironments(parsed && typeof parsed === 'object' ? { ...parsed, environments: settings.environments } : settings);
   applyLegacyMirror();
@@ -514,6 +520,7 @@ function saveSettings(patch) {
   if (settings.provider !== 'self' && settings.provider !== 'adspower') settings.provider = 'adspower';
   settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
   normalizeColdStandbySettingsIntoSettings();
+  normalizeSlotSettingsIntoSettings();
   settings.environments = fleet.normalizeEnvironments(settings.environments);
   applyLegacyMirror();
   normalizeCloudSettings();
@@ -532,6 +539,15 @@ function normalizeColdStandbySettingsIntoSettings() {
   settings.browserColdStandbyEnabled = normalized.enabled;
   settings.browserColdStandbyMinWaitMs = normalized.minWaitMs;
   settings.browserColdStandbyWarmupMs = normalized.warmupMs;
+}
+
+// 浏览器并发两个上限的归一（0 = 自动）。改动即作废槽位缓存——设置改了就该立刻生效，
+// 不该等下次开应用（缓存的存在是为了不让「边启动边算」随内存下降自我缩水，不是为了钉死用户的选择）。
+function normalizeSlotSettingsIntoSettings() {
+  settings.browserSlotLimit = fleet.normalizeSlotLimit(settings.browserSlotLimit);
+  settings.maxAccountLimit = fleet.normalizeSlotLimit(settings.maxAccountLimit);
+  slotCapacityCache = 0;
+  slotViewCache = null;
 }
 
 function currentParkingPlan(mode = settings.browserParkingMode) {
@@ -883,20 +899,41 @@ const PER_ENV_BYTES = Number(process.env.AIDCP_PER_ENV_MB) > 0
   ? Number(process.env.AIDCP_PER_ENV_MB) * 1024 * 1024
   : fleet.PER_ENV_BYTES_DEFAULT;
 let slotCapacityCache = 0;
-/** 槽位上限：进程启动时按当时可用内存算一次并缓存（边启动边算会随内存下降而自我缩水）。 */
-function slotCapacity() {
-  if (!slotCapacityCache) {
-    slotCapacityCache = fleet.resolveSlotCapacity({
+let slotViewCache = null;
+/**
+ * 两个上限的当前取值（界面设置 > 启动环境变量 > 按可用内存自动推）。
+ *
+ * 自动值按**进程启动时**的可用内存算一次并缓存：边启动边算会随内存下降而自我缩水（起到第 3 个时
+ * 剩余内存已被前 2 个吃掉，算出来的上限反而变小）。设置一改即作废缓存、立刻重算。
+ */
+function slotSettingsView() {
+  if (!slotViewCache) {
+    slotViewCache = fleet.resolveSlotSettings({
       freeBytes: os.freemem(),
       perEnvBytes: PER_ENV_BYTES,
-      override: Number(process.env.AIDCP_BROWSER_SLOTS) || 0,
+      slotSetting: settings.browserSlotLimit,
+      slotEnv: Number(process.env.AIDCP_BROWSER_SLOTS) || 0,
+      maxAccountsSetting: settings.maxAccountLimit,
     });
+    slotCapacityCache = slotViewCache.capacity;
     console.log(
-      `[slots] 槽位上限 ${slotCapacityCache}（单环境约 ${Math.round(PER_ENV_BYTES / (1024 * 1024))}MB，` +
-        `可设置账号上限 ${fleet.maxAccountsForSlots(slotCapacityCache)}）`,
+      `[slots] 槽位上限 ${slotViewCache.capacity}（${slotViewCache.capacitySource}；单环境约 ${slotViewCache.perEnvMB}MB，` +
+        `自动推算 ${slotViewCache.autoCapacity}）· 账号上限 ${slotViewCache.maxAccounts}（${slotViewCache.maxAccountsSource}）`,
     );
+    if (slotViewCache.maxAccountsExceedsRatio) {
+      console.warn(
+        `[slots] ⚠ 账号上限 ${slotViewCache.maxAccounts} 超过 ${slotViewCache.capacity} 槽位对应的 1:2 上限 ` +
+          `${slotViewCache.autoMaxAccounts}：部分账号可能长期排不到浏览器槽位。`,
+      );
+    }
   }
-  return slotCapacityCache;
+  return slotViewCache;
+}
+function slotCapacity() {
+  return slotSettingsView().capacity;
+}
+function maxAccounts() {
+  return slotSettingsView().maxAccounts;
 }
 /** 当前真正占着浏览器的环境数：有核心子进程 且 不在冷待机（待机中浏览器已被释放、槽位已还回池子）。 */
 function occupiedSlots() {
@@ -3086,12 +3123,12 @@ function startAllEnvs({ force = false } = {}) {
       plannedCount: targets.length,
     };
   }
-  // 1:2 上限（用户定案）：账号数超过槽位两倍即存在「永远排不上」的风险，必须诚实告警而非静默接受。
-  const maxAccounts = fleet.maxAccountsForSlots(cap);
+  // 账号上限（缺省 = 2 × 槽位，可在设置里改）：超过即存在「永远排不上」的风险，必须诚实告警而非静默接受。
+  const accountCap = maxAccounts();
   const configured = [...envs.values()].filter((h) => !h.removed).length;
-  if (configured > maxAccounts) {
+  if (configured > accountCap) {
     console.warn(
-      `[slots] ⚠ 已配置 ${configured} 个环境，超过 ${cap} 槽位对应的上限 ${maxAccounts}（1:2）：` +
+      `[slots] ⚠ 已配置 ${configured} 个环境，超过账号上限 ${accountCap}（${cap} 槽位）：` +
         '部分账号可能长期排不到浏览器槽位。',
     );
   }
@@ -3191,7 +3228,19 @@ ipcMain.handle('auth:relogin', (_event, envId) => {
   relogin(handle);
   return statusOf(handle);
 });
-ipcMain.handle('settings:get', () => ({ ...settings, adsDownloadUrl: ADS_DOWNLOAD_URL, cloudEnv: cloudSelectionView(), appVersion: app.getVersion() }));
+ipcMain.handle('settings:get', () => ({
+  ...settings,
+  adsDownloadUrl: ADS_DOWNLOAD_URL,
+  cloudEnv: cloudSelectionView(),
+  // 浏览器并发：把**算出来的**两个上限连同来源一起给界面，让它能如实说「自动推算 N」还是「你设的 N」，
+  // 而不是让渲染层自己再算一遍（两处各算一遍必然漂移）。
+  slots: {
+    ...slotSettingsView(),
+    occupied: occupiedSlots(),
+    configured: [...envs.values()].filter((h) => !h.removed).length,
+  },
+  appVersion: app.getVersion(),
+}));
 
 // 对外客户鉴权（change edge-client-customer-auth）：登录窗口调 login；主进程做 HTTP，成功后拉可见环境 + 建主窗 + 关登录窗。
 ipcMain.handle('client-auth:login', async (_event, creds) => {
@@ -3261,6 +3310,12 @@ ipcMain.handle('settings:save', async (_event, patch) => {
     ...settings,
     adsDownloadUrl: ADS_DOWNLOAD_URL,
     cloudEnv: cloudSelectionView(),
+    // 并发上限改了要立刻回给界面**重算后的**值（缓存已在归一时作废）——否则界面还显示旧的推算数。
+    slots: {
+      ...slotSettingsView(),
+      occupied: occupiedSlots(),
+      configured: [...envs.values()].filter((h) => !h.removed).length,
+    },
     saveOk: res.ok && attachErrors.length === 0,
     saveError: res.error || attachErrors[0],
   };
