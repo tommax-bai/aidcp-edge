@@ -163,8 +163,112 @@ function createStaggerQueue(opts = {}) {
   return { enqueue, pendingCount: () => pending };
 }
 
-/** headful 单环境内存估值（Phase 0 未实测前取设计缺省 ~1GB；实测后可在此收口调参）。 */
-const PER_ENV_BYTES_DEFAULT = 1024 * 1024 * 1024;
+/**
+ * headful 单环境内存估值。运营实测口径 ~700MB（change browser-slot-scheduling；旧值 1GB 是没量过的
+ * 设计缺省，偏保守会白白少开 2–3 个环境）。可用 AIDCP_PER_ENV_MB 覆盖。
+ */
+const PER_ENV_BYTES_DEFAULT = 700 * 1024 * 1024;
+
+/** 并行槽位 : 可设置账号数 = 1:2（用户定案）。 */
+const ACCOUNTS_PER_SLOT = 2;
+
+/**
+ * 槽位上限 = ⌊可用内存 ÷ 单环境估值⌋（change browser-slot-scheduling）。
+ *
+ * 同机能同时开几个浏览器，是**内存**顶死的（AdsPower 本身不限并发）。槽位就是这个物理事实的名字。
+ * override（AIDCP_BROWSER_SLOTS）优先，供运维在实测后收口。至少 1——0 槽位等于整台机器停摆。
+ */
+function resolveSlotCapacity({ freeBytes, perEnvBytes = PER_ENV_BYTES_DEFAULT, override } = {}) {
+  const forced = Math.floor(Number(override) || 0);
+  if (forced > 0) return forced;
+  const per = Math.max(1, Math.floor(Number(perEnvBytes) || PER_ENV_BYTES_DEFAULT));
+  const free = Math.max(0, Number(freeBytes) || 0);
+  return Math.max(1, Math.floor(free / per));
+}
+
+/** 可设置账号数上限 = 2 × 槽位（超过即存在「永远排不上」的风险，必须诚实告警）。 */
+function maxAccountsForSlots(slots) {
+  return Math.max(0, Math.floor(Number(slots) || 0)) * ACCOUNTS_PER_SLOT;
+}
+
+/**
+ * 串行启动队列（change browser-slot-scheduling）：**所有会打开浏览器的动作**都排这一条队——
+ * 自动续场恢复、冷待机唤醒、崩溃重起、手动任务、排期任务。
+ *
+ * 与旧的 createStaggerQueue 的关键区别：那条只保证「相邻**开始**间隔 ≥1.1s」，10 个环境仍会几乎同时
+ * 冷启、把内存打爆。这条是**起完一个再起下一个**——run() 要等到环境真正就绪（浏览器起来 + 云端连上）
+ * 或诚实失败才 resolve。用户明确否决了抖动错峰方案，选了这个确定性的做法。
+ *
+ * 优先级：手动任务 > 带任务的唤醒 > 普通续场恢复；同级 FIFO。
+ * 死线：排队等待**计入**调用方的唤醒死线。轮到它时若已超死线，立刻诚实失败——绝不再花 90 秒去启动一个
+ * 早已没人等的浏览器。
+ */
+const LAUNCH_PRIORITY = { manual: 3, task: 2, resume: 1 };
+
+function createSerialLaunchQueue(opts = {}) {
+  const now = opts.now || Date.now;
+  const sleep = opts.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  // AdsPower 本地 API ~1req/s：即便串行，相邻启动之间也保留最小间隔。
+  const spacingMs = Number.isFinite(opts.spacingMs) ? opts.spacingMs : DEFAULT_STAGGER_MS;
+  const logger = opts.logger || (() => {});
+  const queue = [];
+  let running = false;
+  let lastStartAt = -Infinity;
+  let order = 0;
+
+  function enqueue({ key, kind = 'resume', deadlineAt, run }) {
+    return new Promise((resolve) => {
+      queue.push({
+        key,
+        priority: LAUNCH_PRIORITY[kind] || LAUNCH_PRIORITY.resume,
+        kind,
+        deadlineAt: Number.isFinite(deadlineAt) ? deadlineAt : Infinity,
+        order: order++,
+        run,
+        resolve,
+      });
+      void drain();
+    });
+  }
+
+  async function drain() {
+    if (running) return;
+    running = true;
+    try {
+      while (queue.length > 0) {
+        queue.sort((a, b) => b.priority - a.priority || a.order - b.order);
+        const item = queue.shift();
+        // 死线已过：绝不再启动一个没人等的浏览器（它会白占一个槽位）。
+        if (now() >= item.deadlineAt) {
+          logger(`[launch-queue] 放弃 ${item.key}（${item.kind}）：排队期间已超唤醒死线`);
+          item.resolve({ ok: false, reason: 'deadline_exceeded' });
+          continue;
+        }
+        const wait = lastStartAt + spacingMs - now();
+        if (wait > 0) await sleep(wait);
+        lastStartAt = now();
+        logger(`[launch-queue] 启动 ${item.key}（${item.kind}），队列剩余 ${queue.length}`);
+        try {
+          // 起完一个再起下一个：run() 必须等到真正就绪 / 诚实失败才 resolve。
+          const ok = await item.run();
+          item.resolve({ ok: ok !== false, reason: ok === false ? 'launch_failed' : undefined });
+        } catch (e) {
+          // 一个环境启动失败绝不阻塞队列中其余环境。
+          logger(`[launch-queue] ${item.key} 启动失败：${(e && e.message) || String(e)}`);
+          item.resolve({ ok: false, reason: (e && e.message) || String(e) });
+        }
+      }
+    } finally {
+      running = false;
+    }
+  }
+
+  return {
+    enqueue,
+    pendingCount: () => queue.length,
+    isRunning: () => running,
+  };
+}
 
 /**
  * 「全部启动」内存上限预检：预计新增在跑数 × 单环境估值 是否超过本机可用内存。
@@ -253,6 +357,11 @@ module.exports = {
   facebookBrowseModeFor,
   buildEnvSpawnEnv,
   createStaggerQueue,
+  createSerialLaunchQueue,
+  resolveSlotCapacity,
+  maxAccountsForSlots,
+  ACCOUNTS_PER_SLOT,
+  LAUNCH_PRIORITY,
   ramAdmission,
   duplicateAccountGroups,
   decideRespawn,

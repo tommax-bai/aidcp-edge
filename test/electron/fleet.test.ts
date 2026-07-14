@@ -127,9 +127,11 @@ test('createStaggerQueue：相邻任务开始间隔 ≥ spacing；单任务失�
 
 test('ramAdmission：超限诚实拦阻（ok=false 且带需用/可用数）', () => {
   const gb = 1024 * 1024 * 1024;
+  // 单环境估值 = 运营实测口径 700MB（change browser-slot-scheduling）。旧的 1GB 是没量过的设计缺省，
+  // 偏保守会白白少开 2–3 个环境。
   const over = fleet.ramAdmission({ plannedCount: 4, freeBytes: 2 * gb });
   assert.equal(over.ok, false);
-  assert.equal(over.requiredMB, 4096);
+  assert.equal(over.requiredMB, 4 * 700);
   assert.equal(over.freeMB, 2048);
   const under = fleet.ramAdmission({ plannedCount: 2, freeBytes: 3 * gb });
   assert.equal(under.ok, true);

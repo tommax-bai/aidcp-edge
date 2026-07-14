@@ -867,6 +867,97 @@ function queueLifecycle(fn) {
   return lifecycleQueue.enqueue(fn);
 }
 
+// ── 浏览器槽位池 + 串行启动队列（change browser-slot-scheduling）──
+//
+// 同机能同时开几个浏览器由**内存**顶死（每个 headful 环境约 700MB；AdsPower 本身不限并发）。
+// 所有会打开浏览器的动作——续场恢复 / 冷待机唤醒 / 崩溃重起 / 手动任务 / 排期任务——都必须排这一条队：
+// **起完一个再起下一个**，而且内存准入闸就长在队列里，任何路径都绕不过去。
+//
+// 旧行为的两个洞：① 准入闸只在「全部启动」按钮上调（单启 / 唤醒 / 重起全部绕过）；② 冷待机唤醒定时器
+// 零抖动——撞日额的账号会在上海零点**同一秒**一起冷启，没有任何东西拦得住。
+const launchQueue = fleet.createSerialLaunchQueue({
+  spacingMs: Number(process.env.AIDCP_FLEET_STAGGER_MS) > 0 ? Number(process.env.AIDCP_FLEET_STAGGER_MS) : undefined,
+  logger: (m) => console.log(m),
+});
+const PER_ENV_BYTES = Number(process.env.AIDCP_PER_ENV_MB) > 0
+  ? Number(process.env.AIDCP_PER_ENV_MB) * 1024 * 1024
+  : fleet.PER_ENV_BYTES_DEFAULT;
+let slotCapacityCache = 0;
+/** 槽位上限：进程启动时按当时可用内存算一次并缓存（边启动边算会随内存下降而自我缩水）。 */
+function slotCapacity() {
+  if (!slotCapacityCache) {
+    slotCapacityCache = fleet.resolveSlotCapacity({
+      freeBytes: os.freemem(),
+      perEnvBytes: PER_ENV_BYTES,
+      override: Number(process.env.AIDCP_BROWSER_SLOTS) || 0,
+    });
+    console.log(
+      `[slots] 槽位上限 ${slotCapacityCache}（单环境约 ${Math.round(PER_ENV_BYTES / (1024 * 1024))}MB，` +
+        `可设置账号上限 ${fleet.maxAccountsForSlots(slotCapacityCache)}）`,
+    );
+  }
+  return slotCapacityCache;
+}
+/** 当前真正占着浏览器的环境数：有核心子进程 且 不在冷待机（待机中浏览器已被释放、槽位已还回池子）。 */
+function occupiedSlots() {
+  let n = 0;
+  for (const h of envs.values()) {
+    if (h.child && !h.coldStandbyActive && !h.removed) n += 1;
+  }
+  return n;
+}
+/**
+ * 单个环境从 spawn 到「云端已连上」的就绪预算。超时不杀进程——只是**放行队列里的下一个**，
+ * 免得一个起不来的环境把整条启动队列堵死（有界是刚性要求）。
+ */
+const LAUNCH_READY_TIMEOUT_MS = Math.max(60_000, Number(process.env.AIDCP_LAUNCH_READY_TIMEOUT_MS) || 180_000);
+/** 等这个环境真正就绪（浏览器起来 + 云端连上）或诚实失败。串行启动队列靠它「起完一个再起下一个」。 */
+function awaitLaunchReady(handle) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      handle.launchReady = null;
+      resolve(ok);
+    };
+    const timer = setTimeout(() => {
+      console.warn(
+        `[launch-queue] ${handle.envId} 未在 ${LAUNCH_READY_TIMEOUT_MS}ms 内就绪；放行队列下一个（不杀它，它可以继续自己起）`,
+      );
+      finish(false);
+    }, LAUNCH_READY_TIMEOUT_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+    handle.launchReady = finish;
+  });
+}
+function settleLaunchReady(handle, ok) {
+  if (handle && typeof handle.launchReady === 'function') handle.launchReady(ok);
+}
+
+/**
+ * 内存 / 槽位准入。**队列内部统一过闸，任何开浏览器的路径都不得绕过。**
+ * 不通过即诚实拒绝——绝不静默超额拉起（换页抖动 / OOM 杀掉某个浏览器，看起来就成了「莫名其妙的不稳定」）。
+ */
+function admitBrowserSlot(handle, { force = false } = {}) {
+  if (force) return { ok: true };
+  const cap = slotCapacity();
+  const used = occupiedSlots();
+  if (used >= cap) {
+    return { ok: false, reason: 'slots_full', message: `槽位已满（${used}/${cap}）：需等其它账号进入待机让出槽位` };
+  }
+  const admission = fleet.ramAdmission({ plannedCount: 1, freeBytes: os.freemem(), perEnvBytes: PER_ENV_BYTES });
+  if (!admission.ok) {
+    return {
+      ok: false,
+      reason: 'ram',
+      message: `本机可用内存不足（需约 ${admission.requiredMB}MB，仅剩 ${admission.freeMB}MB）`,
+    };
+  }
+  return { ok: true };
+}
+
 // ── 每环境有界重起（复用 respawn-policy 语义；CJS 副本见 fleet.cjs，parity 用例锁一致）──
 const RESPAWN_OPTS = {
   maxConsecutiveFailures: Number(process.env.AIDCP_EDGE_RESPAWN_MAX ?? 5),
@@ -1731,17 +1822,59 @@ function wakeColdStandby(handle, reason) {
     ...clearEdgeFailurePatch(handle),
   });
 
-  // 待机中且核心还活着 → 原地重建（进程与云端连接不动）。
+  // 待机中且核心还活着 → 原地重建（进程与云端连接不动），**经串行启动队列**。
+  //
+  // 为什么唤醒也要排队：重开浏览器就是开浏览器，一样吃 700MB。撞日额的账号唤醒定时器零抖动，会在
+  // 上海零点**同一秒**全部到点——不排队就是所有账号一起冷启，机器直接被打爆。用户否决了抖动方案，
+  // 这里用确定性的串行队列达到同样的削峰效果：逐个唤醒，起完一个再叫下一个。
   if (handle.child && (handle.coldStandbyActive || handle.coldStandbyPending)) {
     handle.coldStandbyWaking = true;
     const child = handle.child;
-    const sent = sendCoreLifecycle(handle, 'wake', (error) => {
-      if (handle.child !== child) return;
-      handle.coldStandbyWaking = false;
-      onColdStandbyWakeFailed(handle, `唤醒指令未送达：${error.message}`);
+    // 带任务的唤醒（云端有活等着）优先于到点的普通唤醒。
+    const kind = reason === 'cloud_command' ? 'task' : 'resume';
+    void launchQueue.enqueue({
+      key: `${handle.envId}:wake`,
+      kind,
+      run: () =>
+        new Promise((resolve) => {
+          if (handle.child !== child || handle.removed || isQuitting) {
+            handle.coldStandbyWaking = false;
+            resolve(false);
+            return;
+          }
+          // 准入闸：唤醒同样不得绕过（「只是唤醒一下」不是超额开浏览器的理由）。
+          const admitted = admitBrowserSlot(handle);
+          if (!admitted.ok) {
+            onColdStandbyWakeFailed(handle, admitted.message);
+            resolve(false);
+            return;
+          }
+          let done = false;
+          const finish = (ok) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            handle.wakeSettle = null;
+            resolve(ok);
+          };
+          const timer = setTimeout(() => {
+            onColdStandbyWakeFailed(handle, `唤醒超时（${LAUNCH_READY_TIMEOUT_MS}ms）`);
+            finish(false);
+          }, LAUNCH_READY_TIMEOUT_MS);
+          if (typeof timer.unref === 'function') timer.unref();
+          handle.wakeSettle = finish;
+          const sent = sendCoreLifecycle(handle, 'wake', (error) => {
+            if (handle.child !== child) return;
+            onColdStandbyWakeFailed(handle, `唤醒指令未送达：${error.message}`);
+            finish(false);
+          });
+          if (!sent) {
+            onColdStandbyWakeFailed(handle, '核心进程 IPC 不可用');
+            finish(false);
+          }
+        }),
     });
-    if (sent) return;
-    handle.coldStandbyWaking = false;
+    return;
   }
 
   // 核心已经不在了：只能冷启（此路径下浏览器与进程都要重建）。
@@ -1754,6 +1887,7 @@ function wakeColdStandby(handle, reason) {
 function onColdStandbyWoken(handle) {
   if (!handle) return;
   handle.coldStandbyWaking = false;
+  if (typeof handle.wakeSettle === 'function') handle.wakeSettle(true); // 放行启动队列的下一个
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = false;
   clearColdStandbyTimer(handle);
@@ -1774,6 +1908,7 @@ function onColdStandbyWoken(handle) {
 function onColdStandbyWakeFailed(handle, reason) {
   if (!handle) return;
   handle.coldStandbyWaking = false;
+  if (typeof handle.wakeSettle === 'function') handle.wakeSettle(false); // 放行启动队列的下一个
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = true; // 仍在待机：浏览器没起来
   updateStatus(handle, {
@@ -1785,15 +1920,60 @@ function onColdStandbyWakeFailed(handle, reason) {
   });
 }
 
-/** spawn 一个环境的核心子进程（非 detached，随外壳退出终止）。身份闸在此强制执行。 */
-function startEdge(handle) {
-  // 取消闸（红线）：排队等待期间被退出 / 移出 / 暂停的启动到点也绝不拉起子进程——
-  // 否则退出期会 spawn 孤儿 Chrome（gracefulStopAllAndQuit 已快照 SIGTERM 集、抓不到它），
-  // 或把用户的暂停 / 移出静默覆盖回运行。
+/**
+ * 启动一个环境（change browser-slot-scheduling）：**经串行启动队列**——起完一个再起下一个，
+ * 内存 / 槽位准入闸长在队列里，绕不过去。
+ *
+ * kind 决定队列优先级：manual（手动任务）> task（带任务的唤醒）> resume（普通续场恢复）。
+ */
+function startEdge(handle, { kind = 'resume', force = false } = {}) {
   if (!handle || handle.child || handle.removed || handle.stopRequested || isQuitting) return;
   if (handle.status.session === 'paused') return;
+  if (handle.launchQueued) return; // 已在队列里：绝不重复入队、绝不开出第二个浏览器
+  handle.launchQueued = true;
   clearRespawnTimer(handle);
   clearColdStandbyTimer(handle);
+  const cap = slotCapacity();
+  updateStatus(handle, {
+    edge: 'starting',
+    lastMessage: `排队等待启动槽位（当前 ${occupiedSlots()}/${cap} 个浏览器在跑）…`,
+    ...presencePatch('排队等待启动…'),
+  });
+  void launchQueue.enqueue({
+    key: handle.envId,
+    kind,
+    run: async () => {
+      handle.launchQueued = false;
+      // 轮到它时再复核取消闸：排队期间可能已被暂停 / 移出 / 退出。
+      if (!handle || handle.child || handle.removed || handle.stopRequested || isQuitting) return false;
+      if (handle.status.session === 'paused') return false;
+      const admitted = admitBrowserSlot(handle, { force });
+      if (!admitted.ok) {
+        // 诚实拦阻：绝不静默超额拉起，也绝不假装已启动。
+        console.warn(`[slots] 拒绝启动 ${handle.envId}：${admitted.message}`);
+        updateStatus(handle, {
+          edge: 'warning',
+          session: 'idle',
+          lastMessage: `未启动：${admitted.message}`,
+          ...presencePatch('未启动（槽位/内存不足）'),
+          ...edgeFailurePatch(admitted.message),
+        });
+        return false;
+      }
+      return await spawnEdgeChild(handle);
+    },
+  });
+}
+
+/**
+ * spawn 一个环境的核心子进程（非 detached，随外壳退出终止）。身份闸在此强制执行。
+ *
+ * 返回一个在环境**真正就绪**（云端已连上）或诚实失败时才 settle 的 promise——串行启动队列靠它
+ * 实现「起完一个再起下一个」；不等就绪就放行下一个，10 个环境仍会几乎同时冷启、把内存打爆。
+ */
+function spawnEdgeChild(handle) {
+  if (!handle || handle.child || handle.removed || handle.stopRequested || isQuitting) return false;
+  if (handle.status.session === 'paused') return false;
   // 打包后用 Electron 自带的 Node 运行预编译产物（ELECTRON_RUN_AS_NODE），
   // 不依赖目标机装 Node/npx/tsx。entry 为 build:dist 编译出的 dist/main.js。
   const appRoot = app.getAppPath();
@@ -1961,6 +2141,7 @@ function startEdge(handle) {
   // 互斥，谁先触发谁处理、另一个 no-op。
   child.on('error', (err) => {
     if (handle.child !== child) return;
+    settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
     handle.child = undefined;
     handle.browserParkingReady = false;
     handle.browserPersonaNoticeState = null;
@@ -2006,6 +2187,7 @@ function startEdge(handle) {
   // 读 handle.child、'close' 仅晚 'exit' 数毫秒，远在 ~10s 预算内。）
   child.on('close', (code, signal) => {
     if (handle.child !== child) return; // 已被 'error' 处理器接管
+    settleLaunchReady(handle, false); // 进程没了：放行启动队列的下一个
     const wasClosing = handle.closePending;
     const wasParked = handle.coreParked;
     const wasPausing = handle.pausePending;
@@ -2153,6 +2335,9 @@ function startEdge(handle) {
       if (!isQuitting) void queueLifecycle(() => startFlowForEnv(handle));
     }
   });
+
+  // 串行启动队列在此等待：起完一个（云端已连上）或诚实失败，才放行下一个。
+  return awaitLaunchReady(handle);
 }
 
 function stopLoginPoller() {
@@ -2540,7 +2725,12 @@ function handleEdgeLogLine(handle, message, isError = false) {
     next.auth = 'login required';
     next.presence = { text: '请在浏览器里扫码登录', at: new Date().toISOString() };
   }
-  if (message.includes('已连接云端') || message.includes('已握手') || message.includes('云端已重连')) next.cloud = 'connected';
+  if (message.includes('已连接云端') || message.includes('已握手') || message.includes('云端已重连')) {
+    next.cloud = 'connected';
+    // 就绪信号（change browser-slot-scheduling）：串行启动队列等的就是这一刻——浏览器起来了、云端连上了。
+    // 到此才放行队列里的下一个环境；不等就绪就放行，10 个环境仍会几乎同时冷启、把内存打爆。
+    settleLaunchReady(handle, true);
+  }
   if (message.includes('连接失败') || message.includes('WS 已关闭') || message.includes('启动失败')) next.cloud = 'disconnected';
   if (message.includes('云端重连中')) next.cloud = 'disconnected';
   if (message.includes('云端重连耗尽')) {
@@ -2854,14 +3044,22 @@ function relogin(handle) {
 }
 
 /**
- * 「全部启动」：内存上限预检（headful 每环境 ~1GB vs 本机可用）→ 超限诚实拦阻（force 才放行）→
- * 对全部未在跑环境错峰入队。返回 { ok, queued } 或 { ok:false, reason:'ram', ... }。
+ * 「全部启动」：预检 → 诚实拦阻（force 才放行）→ 全部未在跑环境进**串行启动队列**（起完一个再起下一个）。
+ *
+ * 注意（change browser-slot-scheduling）：真正的准入闸已经搬进启动队列里、每个环境逐个过——**没有任何
+ * 路径能绕过它**（旧版这道闸只长在这一个按钮上，单启 / 唤醒 / 崩溃重起全部绕过去了）。这里保留的整体
+ * 预检只是为了**提前**告诉运维「这一批肯定装不下」，而不是最后一道防线。
  */
 function startAllEnvs({ force = false } = {}) {
   const paused = [...envs.values()].filter((h) => h.child && h.status.session === 'paused' && !h.removed);
   const targets = [...envs.values()].filter((h) => !h.child && !h.removed);
   if (targets.length === 0 && paused.length === 0) return { ok: true, queued: 0 };
-  const admission = fleet.ramAdmission({ plannedCount: targets.length, freeBytes: os.freemem() });
+  const cap = slotCapacity();
+  const admission = fleet.ramAdmission({
+    plannedCount: Math.min(targets.length, cap),
+    freeBytes: os.freemem(),
+    perEnvBytes: PER_ENV_BYTES,
+  });
   if (!admission.ok && !force) {
     return {
       ok: false,
@@ -2870,6 +3068,15 @@ function startAllEnvs({ force = false } = {}) {
       freeMB: admission.freeMB,
       plannedCount: targets.length,
     };
+  }
+  // 1:2 上限（用户定案）：账号数超过槽位两倍即存在「永远排不上」的风险，必须诚实告警而非静默接受。
+  const maxAccounts = fleet.maxAccountsForSlots(cap);
+  const configured = [...envs.values()].filter((h) => !h.removed).length;
+  if (configured > maxAccounts) {
+    console.warn(
+      `[slots] ⚠ 已配置 ${configured} 个环境，超过 ${cap} 槽位对应的上限 ${maxAccounts}（1:2）：` +
+        '部分账号可能长期排不到浏览器槽位。',
+    );
   }
   paused.forEach((h) => resumeEdge(h));
   targets.forEach((h, i) => queueStartEnv(h, i + 1));
