@@ -4,14 +4,14 @@
 > 跨两个仓：构建在 **aidcp-edge**，下载配置与后台部署在 **aidcp-console**，托管在 **ECS**。
 > 部署铁律与生产机细节以中控仓 `../aidcp/CLAUDE.md` §5/§6 为权威。
 >
-> **交付半段（§3–6）已脚本化**：CI 出包后（下载 dmg → 静态校验 → 改 `downloads.ts` → 构建 → 传包/部署/验活/提交），
+> **交付半段（§3–4）已脚本化**：CI 出包后（下载 dmg → 静态校验 → 传包 → 验活），
 > 可用中控仓 `scripts/release-desktop-macos <版本>`（默认只做本地只读段并打印剩余命令，加 `--yes` 才做对外动作）。
 > **构建/签名/公证半段仍是 CI 专属**（§1–2），脚本不碰。判断点（版本号、CI 红了怎么办）也仍留人工。
 
 ## 0. 先搞清楚的几个事实（为什么要这么做）
 
 - **桌面包 = aidcp-edge 的 Electron 应用**。外壳启动后拉起编译产物 `dist/main.js` 跑整个边缘运行时，所以 **任何 edge 源码改动都要重打安装包才进包**，光改代码不重打没用。
-- **下载地址是自有服务器，不是 GitHub**。安装包托管在 ECS `/opt/aidcp/downloads/`，Nginx 以 `/downloads/` 提供；后台「下载客户端」按钮的地址 **写死在前端** `aidcp-console/src/config/downloads.ts`。
+- **下载地址是自有服务器，不是 GitHub**。安装包托管在 ECS `/opt/aidcp/downloads/`，Nginx 以 `/downloads/` 提供。后台「下载客户端」按钮**不再写死版本号**（change `downloads-manifest-from-host`）：云端面板 `GET /api/downloads` **现扫该机的 downloads 目录**得出清单，页面只可能提供确实存在的包。**所以「发布」= 把包放到那台机器上——不改代码、不重新构建 console。**
 - **mac 的 dmg 必须在 macOS 上构建**（依赖 `hdiutil` 等 mac 专有工具），本机 Windows 打不了 → 走 **GitHub Actions** 的 macOS runner。
 - **分发用的 mac 包走 CI 签名 + 公证**（Developer ID 签名 + Apple notarytool 公证 + staple）：这样用户下载安装**不会被 Gatekeeper 拦成「非法软件 / 无法验证开发者」**。签名凭据只在 GitHub Actions 里（仓库 secret），**本机没有证书、本机打的包仍是 unsigned**（只适合本机自测，下载分发会被拦）。所需 secret 见第 1 步。
 - **无自动更新**：没接 electron-updater → 用户升级要 **重新下载安装**。
@@ -84,33 +84,15 @@ npm run electron:build:win
       ```
 - [ ] 旧版本文件可留可删（后台不再引用即无害）。
 
-## 4. 改后台下载配置（aidcp-console）
+## 4. （已删除）改后台下载配置
 
-改 `aidcp-console/src/config/downloads.ts`：
+**这一步没有了。** 下载页版本曾经写死在 `aidcp-console/src/config/downloads.ts` 里，可它描述的是「**这台机器的 downloads 目录里放了哪个包**」——一个每台机器各不相同的部署状态。写进源码，就保证了它对除了一台之外的所有机器都是谎话（主干指向 ol 的包 → dev 下载页死链；主干停在 dev 的包 → 部署 ol 时线上页回退）。
 
-- [ ] `version` → `<版本>`。
-- [ ] 三个 `file` 名 → 新文件名（**必须与第 3 步实际上传的文件名逐字一致**）。
-- [ ] 提交并推 `master`。
+现在清单由云端现扫目录得出，**第 3 步把包传上去，页面下次打开就显示它**。不需要改代码、不需要重新构建部署 console、不需要提交任何版本号。
 
-## 5. 重新构建并部署 console（aidcp-console）
+## 5. （已删除）重新构建并部署 console
 
-本机无 rsync，走 tar-over-ssh，**先备份再覆盖**。
-
-```bash
-cd aidcp-console
-npm run build            # tsc --noEmit && vite build → dist/
-tar czf /tmp/console-dist.tar.gz -C dist .
-scp -i ~/codes/isales-4.pem /tmp/console-dist.tar.gz root@121.89.85.150:/tmp/
-ssh -i ~/codes/isales-4.pem root@121.89.85.150 'set -e; \
-  ts=$(date +%Y%m%d-%H%M%S); cd /opt/aidcp; \
-  tar czf console.bak.$ts.tar.gz console; \
-  rm -rf console/assets; \
-  tar xzf /tmp/console-dist.tar.gz -C console; \
-  rm -f /tmp/console-dist.tar.gz; \
-  echo "deployed; bundle ->"; grep -o "assets/index-[A-Za-z0-9_-]*\.js" console/index.html'
-```
-
-- [ ] 回显里能看到 `index.html` 指向新的 bundle hash。
+同上：下载页不再随发版变化，无需重新构建部署。（console 本身有代码改动时才照常部署，与发版无关。）
 
 ## 6. 验活（HTTP，在 ECS 本机 curl :8088）
 
@@ -147,5 +129,5 @@ ssh -i ~/codes/isales-4.pem root@121.89.85.150 '
 ## 相关文档
 
 - 部署铁律 / 生产机 / isales 红线：`../aidcp/CLAUDE.md` §5/§6。
-- 后台下载配置内联说明：`aidcp-console/src/config/downloads.ts` 顶部注释。
+- 后台下载清单来源：cloud `src/panel/downloads-manifest.ts`（现扫该机 downloads 目录）+ console `src/config/downloads.ts` 顶部注释。
 - Nginx 下载 location：`aidcp-console/deploy/aidcp-console.conf`（`location /downloads/`）。
