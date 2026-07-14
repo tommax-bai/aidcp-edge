@@ -24,6 +24,13 @@ class FakeFacebookPublishCdp implements BrowseCdp {
   swallowAfterChars: number | null = null;
   /** 故障注入：编辑器拒绝被清空（模拟清场失败）。 */
   refuseClear = false;
+  /** 故障注入：打完字后才开始拒绝清空（模拟真脏页）。 */
+  refuseClearAfterTyping = false;
+  /** 故障注入：打完字后编辑器消失（页面被导航走 / 弹层关闭）。 */
+  closeComposerAfterTyping = false;
+  /** 故障注入：第 N 个字符之后 Input.insertText 抛错（CDP 命令超时 / 协议错误 / 断连）。 */
+  throwOnInsertAfter: number | null = null;
+  private typedCount = 0;
 
   async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ method, params });
@@ -33,9 +40,15 @@ class FakeFacebookPublishCdp implements BrowseCdp {
     }
     if (method === 'Input.insertText') {
       this.selectedAll = false;
+      if (this.throwOnInsertAfter !== null && this.typedCount >= this.throwOnInsertAfter) {
+        throw new Error('CDP 命令超时: Input.insertText');
+      }
+      this.typedCount++;
       const swallowed =
         this.swallowAfterChars !== null && Array.from(this.editorText).length >= this.swallowAfterChars;
       if (!swallowed) this.editorText += String(params?.text ?? '');
+      if (this.typedCount >= 1 && this.refuseClearAfterTyping) this.refuseClear = true;
+      if (this.typedCount >= 1 && this.closeComposerAfterTyping) this.composerOpen = false;
       return {} as T;
     }
     if (method === 'Input.dispatchKeyEvent' && params?.key === 'Backspace') {
@@ -109,9 +122,11 @@ class FakeFacebookPublishCdp implements BrowseCdp {
         result: { value: JSON.stringify({ found: this.composerOpen, focused: this.composerOpen }) },
       } as T;
     }
-    if (expression.includes('return fbPublishSelectEditorContents()')) {
+    if (expression.includes('return JSON.stringify(fbPublishSelectEditorContents())')) {
       if (this.composerOpen) this.selectedAll = true;
-      return { result: { value: this.composerOpen } } as T;
+      return {
+        result: { value: JSON.stringify({ found: this.composerOpen, selected: this.composerOpen }) },
+      } as T;
     }
     if (expression.includes('return !!fbPublishEditor()')) {
       return { result: { value: this.composerOpen } } as T;
@@ -323,4 +338,44 @@ test('FacebookPublishExecutor: composer 清不干净 → 诚实失败，绝不�
   assert.match(String(filled.error), /^composer_not_clean/);
   assert.equal(cdp.calls.some((c) => c.method === 'Input.insertText'), false, '清不干净就绝不能开始打字');
   assert.equal(cdp.submitted, false);
+});
+
+test('FacebookPublishExecutor: 打字途中抛 CDP 异常 → 同样清场并诚实回报，绝不把脏 composer 报成干净失败', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 50, fillVerifyTimeoutMs: 20 },
+  );
+  await openComposer(cdp, executor);
+
+  const content = '这是一篇会在打字途中撞上 CDP 命令超时的正文';
+  cdp.throwOnInsertAfter = 8; // 打到第 9 个字时 CDP 抛错（命令超时 / 断连）
+
+  const filled = await executor.dispatch(command('fill_field', { fieldType: 'content', value: content }, 2));
+
+  assert.equal(filled.ok, false);
+  assert.match(String(filled.error), /^engine_error/);
+  assert.equal(/_dirty_composer/.test(String(filled.error)), false, '清得干净就不该标 dirty');
+  assert.equal(cdp.editorText, '', '半篇正文必须被清掉，不能留给下一篇拼接');
+  assert.equal(cdp.submitted, false);
+});
+
+test('FacebookPublishExecutor: 清不干净时标 dirty；编辑器已消失时标 composer_gone（两者不得混为一谈）', async () => {
+  const dirty = new FakeFacebookPublishCdp();
+  const e1 = new FacebookPublishExecutor({ cdp: dirty }, { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 50, fillVerifyTimeoutMs: 20 });
+  await openComposer(dirty, e1);
+  dirty.swallowAfterChars = 3;
+  dirty.refuseClearAfterTyping = true;
+  const r1 = await e1.dispatch(command('fill_field', { fieldType: 'content', value: '一段会被吞掉大半的正文内容' }, 2));
+  assert.equal(r1.ok, false);
+  assert.match(String(r1.error), /_dirty_composer$/);
+
+  const gone = new FakeFacebookPublishCdp();
+  const e2 = new FacebookPublishExecutor({ cdp: gone }, { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 50, fillVerifyTimeoutMs: 20 });
+  await openComposer(gone, e2);
+  gone.swallowAfterChars = 3;
+  gone.closeComposerAfterTyping = true; // 页面被导航走 / 弹层关闭 → 没有残文可留
+  const r2 = await e2.dispatch(command('fill_field', { fieldType: 'content', value: '一段会被吞掉大半的正文内容' }, 2));
+  assert.equal(r2.ok, false);
+  assert.match(String(r2.error), /_composer_gone$/);
 });

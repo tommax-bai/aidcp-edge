@@ -144,7 +144,7 @@ function fbPublishFocusEditor(){
 }
 function fbPublishSelectEditorContents(){
   var el = fbPublishEditor();
-  if (!el) return false;
+  if (!el) return { found:false, selected:false };
   try {
     el.focus();
     var range = document.createRange();
@@ -152,8 +152,8 @@ function fbPublishSelectEditorContents(){
     var sel = getSelection();
     sel.removeAllRanges();
     sel.addRange(range);
-    return true;
-  } catch(e) { return false; }
+    return { found:true, selected:true };
+  } catch(e) { return { found:true, selected:false }; }
 }
 function fbPublishEditorText(){
   var el = fbPublishEditor();
@@ -194,6 +194,13 @@ function normalizeEditorText(value: string): string {
  * 那样的正文 MUST NOT 发出去。
  */
 const FILL_EXTRA_CHAR_TOLERANCE = 4;
+
+interface ClearResult {
+  cleared: boolean;
+  residual: string | null;
+  /** 编辑器是否还在页面上。false = 已被导航走 / 弹层已关，没有残文可留（≠ 脏页）。 */
+  editorFound: boolean;
+}
 
 export class FacebookPublishExecutor {
   private readonly cdp: BrowseCdp;
@@ -309,32 +316,43 @@ export class FacebookPublishExecutor {
    * 必要性：openComposer 见到已存在的编辑区会直接复用，而输入是在光标处**追加**——
    * 上一次失败留下的脏正文不清掉，就会和这一篇拼在一起发出去。
    */
-  private async clearEditor(): Promise<{ cleared: boolean; residual: string | null }> {
+  private async clearEditor(): Promise<ClearResult> {
     let residual: string | null = null;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const selected = await evalRaw<boolean>(
+      const sel = await evalJson<{ found: boolean; selected: boolean }>(
         this.cdp,
-        `(function(){${FB_PUBLISH_HELPERS_JS} return fbPublishSelectEditorContents(); })()`,
-      ).catch(() => false);
-      if (!selected) return { cleared: false, residual: null };
+        `(function(){${FB_PUBLISH_HELPERS_JS} return JSON.stringify(fbPublishSelectEditorContents()); })()`,
+      ).catch(() => ({ found: false, selected: false }));
+      // 编辑器不在（页面被导航走 / 弹层已关）≠ 编辑器里有清不掉的残文。两者 MUST 区分上报。
+      if (!sel.found) return { cleared: false, residual: null, editorFound: false };
+      if (!sel.selected) return { cleared: false, residual: await this.readEditorText(), editorFound: true };
       await dispatchKey(this.cdp, 'Backspace', 'Backspace', 8);
       residual = await this.readEditorText();
-      if (residual === '') return { cleared: true, residual: '' };
+      if (residual === '') return { cleared: true, residual: '', editorFound: true };
+      if (residual === null) return { cleared: false, residual: null, editorFound: false };
     }
-    return { cleared: false, residual };
+    return { cleared: false, residual, editorFound: true };
   }
 
   /**
    * 放弃这一步：清场 + 诚实回报。绝不把「清不干净」谎报成干净页——运维据此知道
    * 浏览器里还躺着残文，而不是以为下一篇能干净地开工。
+   *
+   * 三态 MUST 分开：清干净了 / 编辑器已不在（无残文可留）/ 编辑器还在但清不掉（真脏页）。
    */
   private async abandonFill(
     payload: PublishCommandPayload,
     error: string,
   ): Promise<PublishCommandResultPayload> {
-    const cleanup = await this.clearEditor().catch(() => ({ cleared: false, residual: null }));
-    const suffix = cleanup.cleared ? '' : '_dirty_composer';
-    this.log(`[facebook-publish] 放弃正文填写 error=${error} composerCleared=${cleanup.cleared}`);
+    const cleanup: ClearResult = await this.clearEditor().catch(() => ({
+      cleared: false,
+      residual: null,
+      editorFound: true,
+    }));
+    const suffix = cleanup.cleared ? '' : cleanup.editorFound ? '_dirty_composer' : '_composer_gone';
+    this.log(
+      `[facebook-publish] 放弃正文填写 error=${error} cleared=${cleanup.cleared} editorFound=${cleanup.editorFound}`,
+    );
     return { ...base(payload), ok: false, error: `${error}${suffix}` };
   }
 
@@ -370,6 +388,7 @@ export class FacebookPublishExecutor {
       }
 
       const before = await this.clearEditor();
+      if (!before.editorFound) return { ...base(payload), ok: false, error: 'no_target' };
       if (!before.cleared) {
         const residual = (before.residual ?? '').slice(0, 40);
         return { ...base(payload), ok: false, error: `composer_not_clean: ${JSON.stringify(residual)}` };
@@ -384,7 +403,10 @@ export class FacebookPublishExecutor {
       if (err instanceof InputDispatchDeadlineError) {
         return this.abandonFill(payload, `fill_deadline_exceeded: budget=${budgetMs}ms chars=${Array.from(value).length}`);
       }
-      return { ...base(payload), ok: false, error: `engine_error: ${err instanceof Error ? err.message : String(err)}` };
+      // 打字途中抛出的任何异常（CDP 命令超时 / 协议错误 / 断连）同样把半篇正文留在活着的编辑器里，
+      // MUST 走同一条清场 + 诚实回报的路径——否则脏 composer 会被报成一次「干净的失败」，
+      // 下一篇稿在复用的编辑区里接着追加。
+      return this.abandonFill(payload, `engine_error: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     const actual = await this.waitUntil(this.opts.fillVerifyTimeoutMs, async () => {
