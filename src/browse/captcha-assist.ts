@@ -240,6 +240,12 @@ export class CaptchaAssistHandler {
     // 点击全程暂停实时 tick（互斥），避免抓到点击派发中途 / settle / 复检期间的画面。
     this.clicking.add(payload.incidentId);
     try {
+      // 落点回放前强制复检（change lease-strict-preemption 5.7）：快照是运营几十秒前看到的那一帧，
+      // 落点按那一帧标定。回放前若页面已不是那一刻——阻断自行消失 / 换了阻断类型 / 页面被导航走——
+      // 照旧坐标盲点就是在错误页面上乱点（抢占落地后那"错误页面"很可能正是发布编辑页）。今天靠
+      // "验证码协助命令拿不到租约"挡着（安全的失败）；抢占之后会变成"抢到了 → 盲点"（不安全的成功）。
+      // 不一致一律诚实拒绝 + 重抓帧让运营在新帧上重标，绝不盲点。
+      if (await this.recheckStaleBeforeReplay(payload, snapshot)) return;
       if (traj) {
         // 落点权威取 points（按被点帧 crop 缩放）；样本供移动/时序；每次 press 前补 move 到权威点。
         await replayTrajectory(this.deps.cdp, snapshot.crop, payload.points, traj, this.random, this.sleep);
@@ -471,6 +477,67 @@ export class CaptchaAssistHandler {
       ...(this.deps.getAccountId?.() ? { accountId: this.deps.getAccountId?.() } : {}),
     });
   }
+
+  /**
+   * 落点回放前强制复检（change lease-strict-preemption 5.7）。
+   * 返回 true = 页面已不是快照那一刻、已发诚实回执，调用方 MUST return（绝不回放）；
+   * 返回 false = 同类阻断仍在且页面一致，可安全回放。
+   */
+  private async recheckStaleBeforeReplay(
+    payload: CaptchaAssistClickPayload,
+    snapshot: CaptchaAssistSnapshotPayload,
+  ): Promise<boolean> {
+    let kind: BlockingOverlayKind | null;
+    let currentUrl: string | undefined;
+    try {
+      kind = await this.probeBlockingKind();
+      currentUrl = (await readViewport(this.deps.cdp)).url;
+    } catch (err) {
+      // 复检本身失败 = 无法确认页面仍安全 → 绝不盲点，诚实回 failed。
+      this.sendClickResult({
+        incidentId: payload.incidentId,
+        snapshotId: payload.snapshotId,
+        status: 'failed',
+        reason: `recheck_failed:${(err as Error).message}`,
+        checkedAt: this.now(),
+      });
+      return true;
+    }
+    // (a) 阻断已自行消失：页面上已无验证码 → 绝不在其上盲点（那可能已经导航到别的页面）。
+    if (!kind) {
+      this.stopLive(payload.incidentId);
+      this.sendClickResult({
+        incidentId: payload.incidentId,
+        snapshotId: payload.snapshotId,
+        status: 'not_blocked',
+        reason: 'cleared_before_replay',
+        checkedAt: this.now(),
+      });
+      this.sendRiskCleared();
+      return true;
+    }
+    // (b) 页面已换（阻断类型变了，或 URL 变了）：快照过期 → 重抓帧让运营在新帧上重标，绝不按旧坐标盲点。
+    const kindChanged = kind !== snapshot.kind;
+    const urlChanged = !!snapshot.url && !!currentUrl && !sameLocation(snapshot.url, currentUrl);
+    if (kindChanged || urlChanged) {
+      try {
+        const next = await this.captureSnapshot(payload.incidentId, kind, {});
+        this.pushSnapshot(payload.incidentId, next);
+        this.deps.client.send('captcha.assist.snapshot', next);
+      } catch (err) {
+        this.logger(`[captcha-assist] 回放前复检重抓帧失败 incident=${payload.incidentId}: ${(err as Error).message}`);
+      }
+      this.sendClickResult({
+        incidentId: payload.incidentId,
+        snapshotId: payload.snapshotId,
+        status: 'stale_snapshot',
+        reason: kindChanged ? 'kind_changed_before_replay' : 'page_moved_before_replay',
+        checkedAt: this.now(),
+      });
+      return true;
+    }
+    return false;
+  }
 }
 
 async function readViewport(cdp: BrowseCdp): Promise<ViewportInfo> {
@@ -489,6 +556,17 @@ async function readViewport(cdp: BrowseCdp): Promise<ViewportInfo> {
     ...(typeof value?.deviceScaleFactor === 'number' && value.deviceScaleFactor > 0 ? { deviceScaleFactor: value.deviceScaleFactor } : {}),
     ...(typeof value?.url === 'string' && value.url ? { url: value.url } : {}),
   };
+}
+
+/** 仅比 origin+pathname：验证码页的 query/token 每次刷新都不同，纳入比对会把同一页误判成"变了"。 */
+function sameLocation(a: string, b: string): boolean {
+  try {
+    const ua = new URL(a);
+    const ub = new URL(b);
+    return ua.origin === ub.origin && ua.pathname === ub.pathname;
+  } catch {
+    return a === b;
+  }
 }
 
 function computeCrop(viewport: ViewportInfo, overlay: BlockingOverlaySnapshot | undefined): CropRect {

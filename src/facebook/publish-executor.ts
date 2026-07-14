@@ -257,12 +257,16 @@ export class FacebookPublishExecutor {
     fn: () => Promise<T | null | undefined | false>,
   ): Promise<T | null> {
     const deadline = this.opts.now() + timeoutMs;
-    for (;;) {
+    // 双闸=墙钟 + 迭代帽（同 flows/bounded-poll 的护栏）：注入恒定 now 的测试桩会让墙钟永不到期，
+    // 裸 for(;;) 就成死循环。迭代帽是唯一能终止它的机械保证（change lease-strict-preemption 5.10）。
+    const cap = Math.ceil(timeoutMs / Math.max(1, this.opts.pollMs)) + 2;
+    for (let i = 0; i < cap; i++) {
       const value = await fn();
       if (value) return value;
       if (this.opts.now() >= deadline) return null;
       await this.opts.sleep(this.opts.pollMs);
     }
+    return null;
   }
 
   private async navigate(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
