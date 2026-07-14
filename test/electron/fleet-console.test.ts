@@ -598,7 +598,7 @@ test('人设浮层：未就绪环境出空态面板（向导收起）；生成�
   await tick();
   assert.deepEqual(calls.persist, ['ads-p1'], '草稿未因回退丢失，确认仍打回生成时环境');
   assert.equal(w.document.querySelector('#persona-growth')!.classList.contains('hidden'), false, '确认成功后展示一次成长引导');
-  assert.match(w.document.querySelector('#persona-growth')!.textContent || '', /更容易被看见的内容灵感/);
+  assert.match(w.document.querySelector('#persona-growth')!.textContent || '', /容易被看见的内容灵感/);
   assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), true, '成长引导期间不同时显示已设置卡片');
   assert.equal(w.document.querySelector('#persona-growth-start')!.classList.contains('hidden'), false, '底部 CTA 切到开始生成');
 });
