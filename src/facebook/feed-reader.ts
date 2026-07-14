@@ -1,7 +1,7 @@
 /**
  * Facebook feed 卡片识别（浏览闭环 page.cards 的数据源）。
  *
- * 选择器全部由真机探针钉死（facebook-browse-and-like-loop-probe-findings.md）：
+ * 选择器全部由真机探针钉死（docs/facebook-browse-and-like-loop-probe-findings.md）：
  *  - feed 容器 `div[role="feed"]`，卡片 `[role="article"]`；window/document 滚动（非内层容器）。
  *  - FB **虚拟化** feed：视口外 article 是空壳（无作者/permalink/按钮）——**抽取必须跳过空壳**
  *    （无作者链接即跳过，绝不臆造），水合判据 = 存在 `h2/h3/h4 a` 作者链接。

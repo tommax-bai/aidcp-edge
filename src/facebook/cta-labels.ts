@@ -1,7 +1,7 @@
 /**
  * Facebook 反应（点赞）按钮的多语言 aria-label / 文案匹配。
  *
- * 背景（真机探针 facebook-browse-and-like-loop-probe-findings.md §「Action bar / LIKE DISAMBIGUATION」）：
+ * 背景（真机探针 docs/facebook-browse-and-like-loop-probe-findings.md §「Action bar / LIKE DISAMBIGUATION」）：
  *  - 帖级「点赞动作」按钮 = `[role=button][aria-label="留下心情"]` 或
  *    `[aria-label="给<作者>的帖子留下心情"]`（zh-CN），**文案为空**；单击即「赞/Like」。
  *    它与「赞：N」反应【计数汇总】按钮、以及反应项「给<作者>的帖子留下心情：赞」不同——后两者不是 toggle。
