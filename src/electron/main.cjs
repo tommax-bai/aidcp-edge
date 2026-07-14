@@ -792,6 +792,11 @@ function makeEnvHandle({ envId, kind, profileId, name, platform, cascadeIndex })
     coldStandbyWakeAt: 0,
     coldStandbyActive: false,
     coldStandbyPending: false,
+    // 最短持有时长（change standby-covers-idle-waits）：上次唤醒完成的时刻 + 一个「持有满足后重新判定」
+    // 的定时器。被 min_hold 拦下时**绝不能把提示丢掉**——否则一次拦截就把该环境永久留在开启态、
+    // 再也不会让出槽位（外层 !decision.ok 分支对「不在待机中」的普通 skip 是直接 return、什么都不做的）。
+    coldStandbyLastWokenAt: 0,
+    coldStandbyHoldTimer: null,
     // 正在原地重建浏览器（change browser-slot-scheduling）。唤醒是异步有界的：待机态只在核心回报
     // lifecycle.woken 后才解除，绝不在下发唤醒的那一刻就乐观标成已醒。
     coldStandbyWaking: false,
@@ -1872,6 +1877,14 @@ function clearColdStandbyTimer(handle) {
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = false;
   handle.coldStandbyWaking = false;
+  clearColdStandbyHoldTimer(handle);
+}
+
+/** 清掉「最短持有时长满足后重新判定」的定时器。不清 coldStandbyLastWokenAt——那是唤醒时刻的事实、不是定时器。 */
+function clearColdStandbyHoldTimer(handle) {
+  if (!handle) return;
+  if (handle.coldStandbyHoldTimer) clearTimeout(handle.coldStandbyHoldTimer);
+  handle.coldStandbyHoldTimer = null;
 }
 
 function coldStandbyStatus(mode, hint, extra = {}) {
@@ -1900,14 +1913,36 @@ function applyBrowserStandbyHint(handle, rawHint) {
   if (!handle) return;
   const hint = normalizeBrowserStandbyHint(rawHint);
   const settingsView = normalizeColdStandbySettings(settings, process.env);
+  // 重新判定 → 先撤掉上一次 min_hold 排的重判定时器（本次会按最新提示重排）。
+  clearColdStandbyHoldTimer(handle);
   const decision = shouldEnterColdStandby({
     status: handle.status,
     flags: coldStandbyFlags(handle),
     hint,
     settings: settingsView,
     now: Date.now(),
+    // 已在待机中的环境不受最短持有时长约束（它没有「刚醒来」这回事）——只有醒着的环境才谈得上「持有多久」。
+    lastWokenAt: (handle.coldStandbyActive || handle.coldStandbyPending)
+      ? undefined
+      : (handle.coldStandbyLastWokenAt || undefined),
   });
   if (!decision.ok) {
+    // 最短持有时长未满：**绝不能把这条提示丢掉**。外层那个 if 只处理「待机中」与「disabled」两种情形，
+    // 普通 skip 是直接 return、什么都不做的——若在此丢弃，该环境就永远留在开启态、再也不会让出槽位
+    // （云端 60s 周期链虽会再推，但那只是碰运气：提示内容不变时判定结果同样是 min_hold，直到某一跳恰好
+    // 落在持有期之后。显式排一个到点重判的定时器才是确定性的）。
+    if (decision.reason === 'min_hold') {
+      const delay = Math.max(1_000, Math.ceil(decision.holdRemainingMs || 0));
+      handle.coldStandbyHoldTimer = setTimeout(() => {
+        handle.coldStandbyHoldTimer = null;
+        applyBrowserStandbyHint(handle, hint);
+      }, delay);
+      if (typeof handle.coldStandbyHoldTimer.unref === 'function') handle.coldStandbyHoldTimer.unref();
+      updateStatus(handle, {
+        browserStandby: coldStandbyStatus('skipped', hint, { reason: 'min_hold', holdRemainingMs: delay }),
+      });
+      return;
+    }
     if (handle.coldStandbyActive || handle.coldStandbyPending || decision.reason === 'disabled') {
       if (handle.coldStandbyActive || handle.coldStandbyPending) {
         wakeColdStandby(handle, decision.reason);
@@ -2151,6 +2186,9 @@ function onColdStandbyWoken(handle) {
   clearWakeDeadline(handle);
   clearSlotWaiting(handle);
   clearColdStandbyTimer(handle);
+  // 最短持有时长的起点：从「浏览器真的重建好了」这一刻起算，而非下发唤醒那一刻——否则冷启那 30–45s
+  // 会被算进持有期，闸就形同虚设。必须在 clearColdStandbyTimer 之后写（它会清掉 hold timer，但不碰这个时刻）。
+  handle.coldStandbyLastWokenAt = Date.now();
   updateStatus(handle, {
     edge: 'running',
     session: 'running',
