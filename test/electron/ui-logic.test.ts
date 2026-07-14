@@ -231,7 +231,7 @@ test('运行价值说明：单项互动完成不升级为全局浏览间隔', ()
   assert.equal(v, null);
 });
 
-test('运行价值说明：所有今日计划完成后才展示今日成果', () => {
+test('运行价值说明：今日浏览计划完成后展示今日成果', () => {
   const now = Date.now();
   const v = uiLogic.runtimeGuidanceView(st({
     session: 'resting',
@@ -240,9 +240,9 @@ test('运行价值说明：所有今日计划完成后才展示今日成果', ()
       windows: {
         day: {
           expiresAt: now + 8 * 60 * 60_000,
-          totals: { view: 20, like: 3, collect: 2 },
-          quotas: { view: 20, like: 3, collect: 2 },
-          saturated: ['view', 'like', 'collect'],
+          totals: { view: 300, like: 16, collect: 9, comment: 4, follow: 0, publish: 0 },
+          quotas: { view: 300, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+          saturated: ['view'],
         },
       },
     },
@@ -250,7 +250,28 @@ test('运行价值说明：所有今日计划完成后才展示今日成果', ()
   assert.equal(v?.mode, 'day');
   assert.equal(v?.mascot, 'celebration');
   assert.match(v?.title ?? '', /明天继续/);
-  assert.match(v?.steps[0].detail ?? '', /3 项今日计划已完成/);
+  assert.equal(v?.steps[0].detail, '今日浏览计划已完成');
+  assert.match(v?.resume ?? '', /开启新一天计划/);
+});
+
+test('在场感：本轮等待缺少完整进度卡时仍展示预计等待时间', () => {
+  const now = Date.now();
+  const v = uiLogic.presenceView(st({
+    session: 'resting',
+    presence: { text: '这一轮已经完成，稍作等待后会自动继续', at: new Date(now - 38_000).toISOString() },
+    dailyUsage: {
+      windows: {
+        session: {
+          active: true,
+          releaseAt: now + 28 * 60_000,
+          totals: {},
+        },
+      },
+    },
+  }), now);
+  assert.equal(v.animate, false);
+  assert.match(v.text, /这一轮已经完成/);
+  assert.equal(v.fresh, '约 28 分钟后自动继续');
 });
 
 test('在场感：过期限额窗口不再解释为当前上限休息', () => {

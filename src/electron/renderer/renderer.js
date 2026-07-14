@@ -450,12 +450,18 @@ function quotaCompletionSummary(windowViews) {
   const daily = [];
   const rounds = [];
   const title = [];
+  let dailyBrowseDone = false;
   for (const entry of byAction.values()) {
-    if (entry.windows.some((window) => window.key === 'day')) daily.push(entry.label);
-    else rounds.push(entry.label);
+    if (entry.windows.some((window) => window.key === 'day')) {
+      if (entry.label === '浏览') dailyBrowseDone = true;
+      else daily.push(entry.label);
+    } else {
+      rounds.push(entry.label);
+    }
     title.push(`${entry.label}：${entry.windows.map((window) => window.label).join('、')}已完成`);
   }
   const text = [];
+  if (dailyBrowseDone) text.push('今日任务已完成');
   if (daily.length > 0) text.push(`今日${compactLabels(daily)}计划已完成`);
   if (rounds.length > 0) text.push(`${compactLabels(rounds)}完成一轮`);
   return { text, title };
@@ -477,7 +483,7 @@ function usageProgressLabel(usage) {
     if (usage.saturated.has(item.action) || used >= cap) limited.push(item.label);
   }
   return limited.length > 0
-    ? { tone: 'complete', text: `今日${compactLabels(limited)}计划已完成` }
+    ? { tone: 'complete', text: limited.includes('浏览') ? '今日任务已完成' : `今日${compactLabels(limited)}计划已完成` }
     : { tone: 'ok', text: '按计划进行中' };
 }
 

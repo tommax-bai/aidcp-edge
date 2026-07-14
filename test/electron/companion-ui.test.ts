@@ -255,6 +255,7 @@ test('本轮等待缺少浏览配额字段时仍渲染自然间隔进度卡', as
       },
     }));
     assert.equal(hidden($(w, '.presence')), false, '完整进度卡出现时仍保留第一块在场感');
+    assert.equal($(w, '#presence-fresh').textContent, '约 8 分钟后自动继续');
     assert.equal(hidden($(w, '#loop')), false, '休息态仍保留浏览循环步骤');
     assert.equal(
       Array.from(w.document.querySelectorAll('#loop .loop-step')).some((el) => (el as HTMLElement).classList.contains('on')),
@@ -509,6 +510,47 @@ test('今日进展位于「今天做了这些」活动流标题上方', async ()
   const streamHead = $(w, '.stream-h');
   assert.equal(streamHead.textContent, '今天做了这些');
   assert.ok(summary.compareDocumentPosition(streamHead) & w.Node.DOCUMENT_POSITION_FOLLOWING);
+});
+
+test('今日浏览完成即展示今日完成价值卡和任务完成标签', async () => {
+  const { w, pushStatus } = await boot();
+  const originalNow = w.Date.now;
+  const now = 1730000000000;
+  w.Date.now = () => now;
+  try {
+    pushStatus(makeStatus({
+      session: 'resting',
+      presence: { text: '这一轮已经完成，稍作等待后会自动继续', at: new Date(now - 38_000).toISOString() },
+      dailyUsage: {
+        asOf: now,
+        quotaLevel: 'normal',
+        totals: { view: 300, like: 16, collect: 9, comment: 4, follow: 0, publish: 0 },
+        quotas: { view: 300, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+        saturated: ['view'],
+        windows: {
+          day: {
+            startedAt: now - 8 * 60 * 60_000,
+            windowMs: 24 * 60 * 60_000,
+            expiresAt: now + 8 * 60 * 60_000,
+            totals: { view: 300, like: 16, collect: 9, comment: 4, follow: 0, publish: 0 },
+            quotas: { view: 300, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+            saturated: ['view'],
+          },
+        },
+      },
+    }));
+    assert.equal($(w, '#presence-text').textContent, '今日内容探索已经完成');
+    assert.match($(w, '#presence-fresh').textContent ?? '', /开启新一天计划/);
+    assert.equal(hidden($(w, '#runtime-guidance')), false);
+    assert.equal($(w, '#runtime-guidance').dataset.mode, 'day');
+    assert.equal($(w, '#runtime-guidance-kicker').textContent, '今日探索完成');
+    assert.match($(w, '#runtime-guidance-title').textContent ?? '', /明天继续/);
+    assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /今日浏览计划已完成/);
+    assert.equal($(w, '#usage-limit').textContent, '今日任务已完成');
+    assert.ok($(w, '#usage-limit').classList.contains('complete'));
+  } finally {
+    w.Date.now = originalNow;
+  }
 });
 
 test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并标记已完成计划', async () => {
