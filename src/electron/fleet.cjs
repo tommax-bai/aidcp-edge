@@ -501,6 +501,74 @@ function classifyAdsInUse(line) {
   return { inUse: true, account };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 核心日志行的语义分类（change honest-core-log-severity）
+//
+// 背景红线：**「这行走了哪根管子」是传输事实，不是语义事实。** Node 的 console.warn / console.error
+// 一律写 stderr，核心里有 30+ 条良性的诊断 / 进度 / 排队说明走这条路。外壳曾把 stderr 整条通道硬认成
+// 「出错了」（edge: isError ? 'warning' : 'running'），于是每来一条良性 warn 就把环境徽标染红、讲出
+// 「引擎已停止，请查看详情或重新启动」——而核心根本没停，下一行正常日志一到又翻回绿。
+//
+// 判据必须是**结构性**的：核心里每条致命路径都**必然退出进程**（启动失败 → process.exit(1)；
+// 身份确立失败 → terminateNow()；CDP 终态 / 云端重连耗尽 → requestShutdown()），而外壳的
+// child.on('close') 异常退出分支才是权威判据——core 自己的注释写得很清楚：「致命启动失败立即非零退出，
+// 让桌面外壳的 edgeProcess.on('exit') 立刻看见」。所以日志行**不需要**去猜谁是错误。
+//
+// 唯一的例外是「核心还活着、但已经没法继续、必须人来」——CDP 输入控制不可用且浏览器是复用的外部浏览器
+// 时，核心打印一行说明后直接 return、不退出。这一类必须仍能翻红，否则「边缘在线但浏览器驱不动」的哑状态
+// 就没人报了。故留一份**核心自己写的终态措辞白名单**（不是「看着像不像错误」的猜测）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 这行日志是否是核心**自己声明**的终态 —— 「我要停了」或「我没法继续、需要人工介入」。
+ *
+ * 只有这类行配把边缘进程徽标翻成异常态（呈现层据此讲「引擎已停止 / 运行异常 / 需处理」）。
+ * 它是一份**白名单**：匹配的是核心源码里写死的那几句终态措辞，而不是对任意散文做「像不像错误」的猜测。
+ * 白名单里的每一句，核心要么随即退出（此时外壳退出处的权威判据也会红，本函数只是让红早到几百毫秒、
+ * 不会造成**持久**的假红），要么活着但明确要求人工介入（CDP 输入控制不可用 → 复用外部浏览器分支）。
+ *
+ * MUST NOT 依据该行走 stdout 还是 stderr 判定 —— 通道不承载语义。
+ * 纯函数、可单测。
+ */
+function declaresCoreHalt(line) {
+  const raw = String(line || '');
+  if (!raw) return false;
+  return (
+    // 核心活着但驱不动浏览器、要求人工重启（唯一「不退出」的终态；见 src/main.ts cdp.control_unavailable）
+    /CDP 输入控制不可用/.test(raw) ||
+    // 以下各句核心随即退出；退出处仍是权威判据，这里只是让红早到
+    /CDP 重连不可恢复/.test(raw) ||
+    /诚实下线/.test(raw) ||
+    /回收退出/.test(raw) ||
+    /身份确立失败/.test(raw) ||
+    /^\[aidcp-edge\] 启动失败[:：]/.test(raw)
+  );
+}
+
+/**
+ * 这行日志能否作为**失败归因候选** —— 即核心真的异常退出时，呈现给运营的那句「失败原因」。
+ *
+ * 回归前这里被 isError 短路（`if (!isError && !FAILURE_RE.test(raw)) return;`）：任何一条良性 stderr
+ * 都会被记成 lastEdgeFailureLine，于是核心**真出事**时，界面给的归因是最后那条**无关**的良性 warn。
+ * 现在一律按内容判定，并显式排除几类「引擎照跑、不构成运行失败」的行：
+ *   - 诊断 / 观测日志（自称只观测、不改行为）
+ *   - 遥测上报 / 回传失败（发不出去一条事件而已，引擎照跑）
+ *   - 排队 / 租约抑制（资源暂时被占是机器行为，不是失败 —— 失败判据只能是结构上做不到）
+ *
+ * 纯函数、可单测。
+ */
+function isFailureShapedLine(line) {
+  const raw = String(line || '');
+  if (!raw) return false;
+  const benign =
+    /\[publish-submit-diag\]/.test(raw) ||
+    /上报失败|回传失败/.test(raw) ||
+    /给不出浏览器槽位/.test(raw) ||
+    /租约抑制/.test(raw);
+  if (benign) return false;
+  return /(启动失败|失败|不可达|not allowed|being used|no_target|code=-?\d+)/i.test(raw);
+}
+
 /** 配图临时目录命名空间（与 src/main.ts 的 imageTempPrefix 同公式；见 fleet.test.ts 契约用例）。 */
 function imageTempNamespace(edgeId) {
   const safe = String(edgeId || '').replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48);
@@ -536,5 +604,7 @@ module.exports = {
   duplicateAccountGroups,
   decideRespawn,
   classifyAdsInUse,
+  declaresCoreHalt,
+  isFailureShapedLine,
   imageTempNamespace,
 };

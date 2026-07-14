@@ -1448,9 +1448,13 @@ function conciseFailureLine(message) {
   return summary;
 }
 
-function rememberEdgeFailureCandidate(handle, message, isError) {
+// 失败归因候选 = 核心真的异常退出时，呈现给运营的那句「失败原因」。
+// 回归前这里按 isError 短路：走 stderr 的行**一律**被采信，于是任何一条良性 warn（诊断 / 遥测上报失败 /
+// 槽位排队）都会覆盖掉 lastEdgeFailureLine —— 等核心真出事，界面给的归因是最后那条**无关**的良性 warn。
+// 现在一律按内容判定（fleet.isFailureShapedLine，纯函数、带良性排除表），与该行走哪根管子无关。
+function rememberEdgeFailureCandidate(handle, message) {
   const raw = String(message || '');
-  if (!isError && !/(启动失败|失败|不可达|not allowed|being used|no_target|code=-?\d+)/i.test(raw)) return;
+  if (!fleet.isFailureShapedLine(raw)) return;
   const summary = conciseFailureLine(raw);
   if (summary) handle.lastEdgeFailureLine = summary;
 }
@@ -2979,7 +2983,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
   // 核心正被有意停止 / 已暂停 / 已退出：其关闭期 stdout/stderr 只作为日志行展示，绝不据以翻转
   // edge / session / risk 徽标，也不产 UI 事件。正常在跑时才做状态推断。
   const stopping = isQuitting || handle.restartPending || handle.pausePending || handle.removed || !handle.child || handle.status.session === 'paused';
-  if (!stopping) rememberEdgeFailureCandidate(handle, message, isError);
+  if (!stopping) rememberEdgeFailureCandidate(handle, message);
   // AdsPower「同账号并发占用拒启」= 不可重起终局：该分身已被同一账号在别处打开、不允许并发打开，
   // 重起一万次也开不了。置标志，退出处（child.on('close')）据此强制停止、不进重起、不消耗失败预算，
   // 并呈现「环境被占用」而非通用文案。与缺内核特判同构（都靠退出处读本次运行标志）。
@@ -2994,8 +2998,24 @@ function handleEdgeLogLine(handle, message, isError = false) {
     if (!handle.removed) updateStatus(handle, { lastMessage: message });
     return;
   }
-  const next = { edge: isError ? 'warning' : 'running', lastMessage: message };
-  if (!isError && handle.status.edgeFailure) next.edgeFailure = null;
+  // 边缘进程徽标：MUST 按**内容**判定，MUST NOT 按输出通道判定（change honest-core-log-severity）。
+  //
+  // 回归前是 `edge: isError ? 'warning' : 'running'`，而 isError 只说明「这行走了 stderr」。Node 的
+  // console.warn / console.error 一律写 stderr，核心里 30+ 条良性诊断（[publish-submit-diag] 观测日志、
+  // 租约抑制说明、「外壳暂时给不出浏览器槽位…环境仍在等槽位队列里」）全走这根管子 —— 每来一条，这里就
+  // 把徽标翻成 warning，呈现层随即讲出「异常 / 运行异常 / 引擎已停止，请查看详情或重新启动」，并给该环境
+  // 加「需处理」角标、浮到环境栏顶部，与真正待人工的登录 / 验证码 / 风控受限混作一谈。核心根本没停：
+  // 下一行正常日志一到又翻回 running —— 这就是运营看到的「发布时闪红、又秒恢复」。
+  //
+  // 现在只认核心**自己声明**的终态（fleet.declaresCoreHalt 白名单）。这样做是安全的，因为核心里每条
+  // 致命路径都必然退出进程（启动失败 → process.exit(1)；身份确立失败 → terminateNow()；CDP 终态 /
+  // 云端重连耗尽 → requestShutdown()），而 child.on('close') 的异常退出分支才是权威判据 —— 核心自己的
+  // 注释写着「致命启动失败立即非零退出，让桌面外壳的 edgeProcess.on('exit') 立刻看见」。日志行只做预测、
+  // 退出码才是权威；把预测调准，权威一分不动。白名单里保留「CDP 输入控制不可用」是因为那条是唯一
+  // **不退出**的终态（核心活着但驱不动浏览器、要求人工重启），少了它「边缘在线但浏览器驱不动」就没人报。
+  const halting = fleet.declaresCoreHalt(message);
+  const next = { edge: halting ? 'warning' : 'running', lastMessage: message };
+  if (!halting && handle.status.edgeFailure) next.edgeFailure = null;
   if (message.includes('[browser-parking] awaiting-login')) {
     // adspower 首登有界等待门（change adspower-first-login-wait-gate）：核心在等操作者扫码登录、浏览器与 CDP 仍在。
     // 诚实呈现「待登录」，绝不加任何 respawn 抑制（核心不退出，respawn 本就不触发；超时走干净停止码亦不重起）。
