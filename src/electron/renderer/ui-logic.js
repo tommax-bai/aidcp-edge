@@ -410,16 +410,24 @@
     };
   }
 
-  // 发布卡收展（dock）：进行中审批永远展开；运行中且无在途审批 → 自动收起成薄条（版面让给活动流）；
-  // 未运行时保持展开（空态旅程有引导价值）。manualOpen 为用户点薄条的临时展开。
+  // 发布卡收展（dock）：进行中审批永远展开；已发布历史默认收起成薄条；
+  // 空态仅运行中收起，未运行时保持展开（空态旅程有引导价值）。manualOpen 为用户点薄条的临时展开。
   function publishDock(view, status, manualOpen) {
     const s = status || {};
     const running = s.edge === 'running' && s.session === 'running';
-    if (view.mode === 'flow') return { collapsed: false, summary: '' };
-    const summary = view.mode === 'last'
-      ? `上次发布 · ${view.corner || ''}`.replace(/ · $/, '')
-      : '还没有发布过内容';
-    return { collapsed: running && !manualOpen, summary };
+    if (view.mode === 'flow') return { collapsed: false, label: '', summary: '' };
+    if (view.mode === 'last') {
+      return {
+        collapsed: !manualOpen,
+        label: view.title ? `已发布：${view.title}` : '已发布',
+        summary: view.corner || '',
+      };
+    }
+    return {
+      collapsed: running && !manualOpen,
+      label: '发布过的 AI 写好的笔记',
+      summary: '还没有发布过内容',
+    };
   }
 
   // ── 多环境 fleet（edge-multi-environment-fleet）：环境栏状态环分级 / 紧迫度排序 / 待处理计数 ──

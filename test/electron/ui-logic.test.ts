@@ -31,6 +31,7 @@ interface PublishV {
   curCalm?: boolean;
   foot?: string;
 }
+interface PublishDockV { collapsed: boolean; label: string; summary: string }
 const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   relTime: (from: number, now: number) => string;
   synthesizeHealth: (s: Record<string, unknown>) => Health;
@@ -40,6 +41,7 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   runtimeGuidanceView: (s: Record<string, unknown>, now: number) => RuntimeGuidanceV | null;
   loopIndex: (stage: string) => number;
   publishView: (p: Record<string, unknown> | null, last: Record<string, unknown> | null, now: number) => PublishV;
+  publishDock: (v: PublishV, s: Record<string, unknown>, manualOpen: boolean) => PublishDockV;
   railDisplayName: (row: Record<string, unknown>) => string;
   PRESENCE_FRESH_MS: number;
 };
@@ -390,6 +392,18 @@ test('发布卡常驻：无进行中有历史 → last；两者皆无 → empty 
   assert.equal(empty.showLink, false, '空态也不展示打开飞书入口');
   assert.match(empty.foot ?? '', /\*\*发布 \/ 取消\*\*/, '只加粗「发布 / 取消」');
   assert.ok(!(empty.foot ?? '').includes('**通过后才会发布**'), '其余不加粗');
+});
+
+test('发布卡收起态：已发布历史默认收起为「已发布：标题」', () => {
+  const now = Date.now();
+  const last = uiLogic.publishView(null, { title: '秋日漫步', at: new Date(now - 3_600_000).toISOString() }, now);
+  const dock = uiLogic.publishDock(last, { edge: 'stopped', session: 'idle' }, false);
+  assert.equal(dock.collapsed, true);
+  assert.equal(dock.label, '已发布：秋日漫步');
+  assert.match(dock.summary, /小时前/);
+  const empty = uiLogic.publishView(null, null, now);
+  const emptyDock = uiLogic.publishDock(empty, { edge: 'stopped', session: 'idle' }, false);
+  assert.equal(emptyDock.collapsed, false, '空态未运行时仍展开');
 });
 
 test('相对时间走字', () => {

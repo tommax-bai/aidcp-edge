@@ -320,6 +320,8 @@ test('发布卡候审：可见、第三节点琥珀，提示从稿件预览处�
   const { w } = await boot({ publish: { state: 'pending', title: '秋日城市漫步', at } });
   const card = $(w, '#pub-card');
   assert.equal(hidden(card), false);
+  assert.equal(card.dataset.pubMode, 'flow');
+  assert.equal(card.dataset.pubState, 'pending');
   assert.equal(card.querySelectorAll('button').length, 0, '发布卡 MUST 零按钮');
   assert.match($(w, '#pub-title').textContent ?? '', /秋日城市漫步/);
   assert.match($(w, '#pub-corner').textContent ?? '', /已等 3 分钟/);
@@ -413,6 +415,7 @@ test('洗稿稿件预览：点击取消后立即关闭抽屉并提交驳回', as
 
 test('发布卡已通过 → 第四节点平静色 + 无需操作', async () => {
   const { w } = await boot({ publish: { state: 'approved', title: 't', at: new Date().toISOString() } });
+  assert.equal($(w, '#pub-card').dataset.pubState, 'approved');
   const steps = Array.from($(w, '#pub-card').querySelectorAll('.j-step'));
   assert.ok((steps[3] as HTMLElement).classList.contains('cur'));
   assert.ok((steps[3] as HTMLElement).classList.contains('calm'));
@@ -423,6 +426,7 @@ test('发布终态 → 折进活动流 + 卡片常驻转「上次发布」', asy
   const { w, pushStatus } = await boot({ publish: { state: 'pending', title: '秋日漫步', at: new Date().toISOString() } });
   pushStatus(makeStatus({ publish: { state: 'published', title: '秋日漫步', at: new Date().toISOString() } }));
   assert.equal(hidden($(w, '#pub-card')), false, '卡片常驻不消失');
+  assert.equal($(w, '#pub-card').dataset.pubMode, 'last');
   assert.equal($(w, '#pub-head').textContent, '上次发布');
   assert.match($(w, '#pub-title').textContent ?? '', /秋日漫步/);
   assert.equal(w.document.querySelector('#pub-link'), null, '不再展示打开飞书入口');
@@ -437,6 +441,7 @@ test('发布卡常驻：从未发布 → 空态幽灵旅程（同设计语言、
   const { w } = await boot(); // publish: null, lastPublish 无
   const card = $(w, '#pub-card');
   assert.equal(hidden(card), false, '空态也常驻');
+  assert.equal(card.dataset.pubMode, 'empty');
   assert.ok(card.classList.contains('empty'));
   assert.match($(w, '#pub-title').textContent ?? '', /还没有发布过/);
   assert.equal(card.querySelectorAll('button').length, 0, '空态同样零按钮');
@@ -448,11 +453,15 @@ test('发布卡常驻：从未发布 → 空态幽灵旅程（同设计语言、
   assert.ok(!($(w, '#pub-foot').textContent ?? '').includes('**'), '加粗标记不外露');
   const dots = Array.from(card.querySelectorAll('.j-step'));
   assert.ok(dots.every((el) => (el as HTMLElement).classList.contains('todo')), '幽灵旅程全 todo');
+  assert.match(rendererCss, /\.pub\[data-pub-mode="empty"\] \.pub-thumb/);
+  assert.match(rendererCss, /\.pub\[data-pub-mode="last"\] \.pub-thumb/);
+  assert.match(rendererCss, /\.pub\[data-pub-state="approved"\] \.pub-thumb/);
 });
 
 test('发布卡常驻：带本地历史 → 直接呈现上次发布', async () => {
   const at = new Date(Date.now() - 2 * 3_600_000).toISOString();
   const { w } = await boot({ lastPublish: { title: '上周的咖啡馆合集', at } });
+  assert.equal($(w, '#pub-card').dataset.pubMode, 'last');
   assert.equal($(w, '#pub-head').textContent, '上次发布');
   assert.match($(w, '#pub-title').textContent ?? '', /咖啡馆合集/);
   assert.match($(w, '#pub-corner').textContent ?? '', /小时前/);
@@ -484,6 +493,14 @@ test('回归：今日进展数字永不为空（缺字段兜 0 + 零值弱化）
   assert.ok($(w, '#usage-limit').classList.contains('hidden'), '本机实时没有权威计划数据，不展示完成判断');
   assert.ok($(w, '#likes').classList.contains('zero'), '零值应弱化显示');
   assert.ok(!$(w, '#views').classList.contains('zero'), '非零值不弱化');
+});
+
+test('今日进展位于「今天做了这些」活动流标题上方', async () => {
+  const { w } = await boot();
+  const summary = $(w, '#daily-summary');
+  const streamHead = $(w, '.stream-h');
+  assert.equal(streamHead.textContent, '今天做了这些');
+  assert.ok(summary.compareDocumentPosition(streamHead) & w.Node.DOCUMENT_POSITION_FOLLOWING);
 });
 
 test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并标记已完成计划', async () => {
@@ -672,6 +689,7 @@ test('运行中且无审批 → 发布卡自动收起为薄条；点击可临时
   const card = $(w, '#pub-card');
   assert.ok(card.classList.contains('collapsed'), '运行中空态应收起');
   assert.equal(hidden($(w, '#pub-bar')), false, '薄条可见');
+  assert.equal($(w, '#pub-bar-label').textContent, '发布过的 AI 写好的笔记');
   assert.match($(w, '#pub-bar-sum').textContent ?? '', /还没有发布过/);
   assert.ok($(w, '#pub-main').classList.contains('folded'));
   $(w, '#pub-bar').dispatchEvent(new w.Event('click'));
@@ -688,7 +706,7 @@ test('发布卡薄条展开后，点击卡头可收起', async () => {
   assert.ok(card.classList.contains('collapsed'), '点击卡头应收起');
 });
 
-test('审批到来 → 自动展开；审批落地（仍在运行）→ 再收起为「上次发布」薄条', async () => {
+test('审批到来 → 自动展开；审批落地（仍在运行）→ 收起为「已发布：标题」薄条', async () => {
   const { w, pushStatus } = await boot(); // running + empty → collapsed
   pushStatus(makeStatus({ publish: { state: 'pending', title: '秋日漫步', at: new Date().toISOString() } }));
   const card = $(w, '#pub-card');
@@ -696,7 +714,19 @@ test('审批到来 → 自动展开；审批落地（仍在运行）→ 再收�
   assert.equal(hidden($(w, '#pub-bar')), true);
   pushStatus(makeStatus({ publish: { state: 'published', title: '秋日漫步', at: new Date().toISOString() } }));
   assert.ok(card.classList.contains('collapsed'), '审批落地后收回薄条');
-  assert.match($(w, '#pub-bar-sum').textContent ?? '', /上次发布/);
+  assert.equal($(w, '#pub-bar-label').textContent, '已发布：秋日漫步');
+  assert.doesNotMatch($(w, '#pub-bar-sum').textContent ?? '', /上次发布/);
+});
+
+test('已发布历史即使未运行也默认收起为薄条', async () => {
+  const { w } = await boot({
+    edge: 'stopped',
+    session: 'idle',
+    lastPublish: { title: '上周的咖啡馆合集', at: new Date().toISOString() },
+  });
+  assert.ok($(w, '#pub-card').classList.contains('collapsed'));
+  assert.equal(hidden($(w, '#pub-bar')), false);
+  assert.equal($(w, '#pub-bar-label').textContent, '已发布：上周的咖啡馆合集');
 });
 
 test('未运行时发布卡保持展开（空态旅程有引导价值）', async () => {

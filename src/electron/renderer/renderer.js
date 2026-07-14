@@ -96,6 +96,7 @@ const fields = {
   pubFoot: document.querySelector('#pub-foot'),
   pubMain: document.querySelector('#pub-main'),
   pubBar: document.querySelector('#pub-bar'),
+  pubBarLabel: document.querySelector('#pub-bar-label'),
   pubBarSum: document.querySelector('#pub-bar-sum'),
   pubPreviewLink: document.querySelector('#pub-preview-link'),
   publishPreviewMask: document.querySelector('#publish-preview-mask'),
@@ -787,13 +788,16 @@ function renderPublish(status, nowMs) {
   // 这里只负责发布卡的视觉渲染，绝不再自己 prependActivity（否则选中环境会重复记一条）。
   fields.pubCard.classList.remove('hidden'); // 常驻
   fields.pubCard.classList.toggle('empty', view.mode === 'empty');
-  // 收展：flow 永远展开；运行中且无在途审批自动收起为薄条（点击可临时展开）。
+  fields.pubCard.dataset.pubMode = view.mode;
+  fields.pubCard.dataset.pubState = status.publish && status.publish.state ? status.publish.state : view.mode;
+  // 收展：flow 永远展开；已发布历史默认收起，空态运行中收起（点击薄条可临时展开）。
   const dock = uiLogic.publishDock(view, status, pubManualOpen);
   if (view.mode === 'flow') pubManualOpen = false; // 新审批到来自动展开并复位手动态
   fields.pubCard.classList.toggle('collapsed', dock.collapsed);
   fields.pubBar.classList.toggle('hidden', !dock.collapsed);
   fields.pubMain.classList.toggle('folded', dock.collapsed);
-  if (dock.collapsed) fields.pubBarSum.textContent = dock.summary;
+  fields.pubBarLabel.textContent = dock.label || '发布过的 AI 写好的笔记';
+  fields.pubBarSum.textContent = dock.summary || '';
   fields.pubHead.textContent = view.head;
   fields.pubCorner.textContent = view.corner;
   fields.pubCorner.classList.toggle('hot', Boolean(view.cornerHot));
