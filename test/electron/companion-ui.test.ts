@@ -197,6 +197,7 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.match(rendererSrc, /match: '<svg[\s\S]*<path d="M7 3H5/);
   assert.doesNotMatch(rendererSrc, /browse: '<svg[\s\S]*m4 4 7\.1 17/);
   assert.doesNotMatch(rendererSrc, /match: '<svg[\s\S]*m8\.5 12\.2 2\.2 2\.2 4\.8-5\.1/);
+  assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-flow-step\s*\{\s*--rg-step-color: var\(--rg-step-current\);/);
   assert.match(rendererCss, /\.rg-flow-step\.flow-active:not\(:last-child\)::after/);
   assert.match(rendererCss, /@keyframes rg-flow-spark/);
   assert.match(rendererCss, /--rg-step-line-right: -4px;/);
@@ -625,9 +626,12 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /继续寻找灵感/);
     const daySteps = Array.from(w.document.querySelectorAll('#runtime-guidance-flow .rg-flow-step')) as HTMLElement[];
     assert.equal(daySteps.length, 3);
-    assert.ok(daySteps[0].classList.contains('flow-complete'), '今日完成：浏览与互动 → 自然沉淀应是完成连接');
-    assert.ok(daySteps[1].classList.contains('flow-complete'), '今日完成：自然沉淀 → 继续寻找灵感应是完成连接');
-    assert.equal(daySteps.some((step) => step.classList.contains('flow-active')), false);
+    assert.ok(daySteps[0].classList.contains('flow-active'), '今日完成：浏览与互动 → 自然沉淀需要动态连接');
+    assert.ok(daySteps[1].classList.contains('flow-active'), '今日完成：自然沉淀 → 继续寻找灵感需要动态连接');
+    assert.equal(daySteps.some((step) => step.classList.contains('flow-complete')), false);
+    assert.match(daySteps[0].querySelector('.rg-flow-icon')?.innerHTML ?? '', /<circle cx="12" cy="12" r="9"/);
+    assert.match(daySteps[1].querySelector('.rg-flow-icon')?.innerHTML ?? '', /m19 21-7-4-7 4V5/);
+    assert.match(daySteps[2].querySelector('.rg-flow-icon')?.innerHTML ?? '', /M12 2v8/);
     assert.equal(hidden($(w, '#runtime-guidance-progress')), true);
     assert.equal(hidden($(w, '#runtime-guidance-resume')), true);
     assert.equal(hidden($(w, '#runtime-guidance-harvest')), false);

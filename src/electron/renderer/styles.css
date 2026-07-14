@@ -390,6 +390,9 @@ body { margin: 0; }
 .rg-flow-step.done { --rg-step-color: var(--rg-step-done); }
 .rg-flow-step.current { --rg-step-color: var(--rg-step-current); }
 .rg-flow-step.next { --rg-step-color: var(--rg-step-next); }
+.runtime-guidance[data-mode="running"] .rg-flow-step {
+  --rg-step-color: var(--rg-step-current);
+}
 .rg-progress {
   margin-top: 9px;
   padding: 2px 0 1px;
