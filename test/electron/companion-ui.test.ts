@@ -252,8 +252,8 @@ test('运行中 + 事件过期 + 阶段计划完成 → 说明自然间隔的成
     assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
     assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /本轮已查看 38 条推荐内容/);
     assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /38\/150/);
-    assert.match($(w, '#runtime-guidance-resume').textContent ?? '', /36 分钟后自动继续/);
-    assert.equal($(w, '#runtime-guidance-note').textContent, '本小时进展已记录');
+    assert.equal(hidden($(w, '#runtime-guidance-resume')), true);
+    assert.equal(hidden($(w, '#runtime-guidance-note')), true);
     assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-monitoring/);
   } finally {
     w.Date.now = originalNow;
@@ -304,8 +304,8 @@ test('本轮等待缺少浏览配额字段时仍渲染自然间隔进度卡', as
     assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
     assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /本轮已查看 12 条推荐内容/);
     assert.doesNotMatch($(w, '#runtime-guidance-progress').textContent ?? '', /12\/20/);
-    assert.equal($(w, '#runtime-guidance-resume').textContent, '约 8 分钟后自动继续');
-    assert.equal($(w, '#runtime-guidance-note').textContent, '本轮进展已记录');
+    assert.equal(hidden($(w, '#runtime-guidance-resume')), true);
+    assert.equal(hidden($(w, '#runtime-guidance-note')), true);
   } finally {
     w.Date.now = originalNow;
   }

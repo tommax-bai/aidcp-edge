@@ -237,8 +237,8 @@ test('运行价值说明：本轮浏览完成才展示自然间隔与三步说�
     counter: '12/12',
     meta: '进展已记录',
   });
-  assert.match(v?.resume ?? '', /约 42 分钟后自动继续/);
-  assert.equal(v?.note, '本轮进展已记录');
+  assert.equal(v?.resume, '');
+  assert.equal(v?.note, '');
 });
 
 test('运行价值说明：本轮等待缺少浏览配额字段时仍展示完整进度', () => {
@@ -273,8 +273,8 @@ test('运行价值说明：本轮等待缺少浏览配额字段时仍展示完�
     counter: '',
     meta: '进展已记录',
   });
-  assert.equal(v?.resume, '约 8 分钟后自动继续');
-  assert.equal(v?.note, '本轮进展已记录');
+  assert.equal(v?.resume, '');
+  assert.equal(v?.note, '');
 });
 
 test('运行价值说明：单项互动完成不升级为全局浏览间隔', () => {

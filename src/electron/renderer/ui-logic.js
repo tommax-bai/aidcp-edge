@@ -283,8 +283,8 @@
       detail: '',
       steps: guidanceSteps(observed, inspirations),
       progress: explorationProgress(status, window, true, day),
-      resume: `约 ${wait}自动继续`,
-      note: isSession ? '本轮进展已记录' : '本小时进展已记录',
+      resume: '',
+      note: '',
     };
   }
 
@@ -391,7 +391,7 @@
       : guidance.mode === 'session'
         ? '本轮浏览完成，正在为下一轮留出自然节奏'
         : '这一小时的探索告一段落，稍后会继续';
-    const fresh = guidance.mode === 'day' ? dayCompletionFresh(status, nowMs) : guidance.resume || '';
+    const fresh = guidance.mode === 'day' ? dayCompletionFresh(status, nowMs) : fallbackResumeText(status, nowMs);
     return { text, animate: false, fresh };
   }
 
