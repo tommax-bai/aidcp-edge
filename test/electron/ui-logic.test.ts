@@ -17,6 +17,7 @@ interface RuntimeGuidanceV {
   detail: string;
   resume: string;
   note?: string;
+  harvest?: { title: string; countText: string; heatText: string; hasHeat: boolean } | null;
   steps: Array<{ label: string; detail: string; state: string }>;
 }
 interface PublishV {
@@ -217,6 +218,7 @@ test('运行价值说明：单项互动完成不升级为全局浏览间隔', ()
     session: 'resting',
     presence: { text: '旧事件', at: new Date(now - 6 * 60_000).toISOString() },
     dailyUsage: {
+      inspirationSummary: { count: 3, sourceLikeCount: 12_345 },
       windows: {
         hour: {
           expiresAt: now + 30 * 60_000,
@@ -237,6 +239,7 @@ test('运行价值说明：今日浏览计划完成后展示今日成果', () =>
     session: 'resting',
     presence: { text: '旧事件', at: new Date(now - 6 * 60_000).toISOString() },
     dailyUsage: {
+      inspirationSummary: { count: 3, sourceLikeCount: 12_345 },
       windows: {
         day: {
           expiresAt: now + 8 * 60 * 60_000,
@@ -253,6 +256,12 @@ test('运行价值说明：今日浏览计划完成后展示今日成果', () =>
   assert.match(v?.title ?? '', /明天继续/);
   assert.equal(v?.steps[0].detail, '今日浏览计划已完成');
   assert.equal(v?.resume, '');
+  assert.deepEqual(v?.harvest, {
+    title: '本轮收获已保存',
+    countText: '3 条创作灵感',
+    heatText: '1.2 万赞',
+    hasHeat: true,
+  });
 });
 
 test('在场感：本轮等待缺少完整进度卡时仍展示预计等待时间', () => {

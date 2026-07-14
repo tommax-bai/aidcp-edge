@@ -1043,6 +1043,10 @@ function cleanCount(value) {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
 }
 
+function cleanOptionalCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : null;
+}
+
 function cleanRequiredCounts(input) {
   const source = input && typeof input === 'object' ? input : {};
   const counts = {};
@@ -1060,6 +1064,17 @@ function cleanOptionalCounts(input) {
     }
   }
   return Object.keys(counts).length > 0 ? counts : null;
+}
+
+function cleanInspirationSummary(input) {
+  const source = input && typeof input === 'object' ? input : null;
+  if (!source) return null;
+  const count = cleanOptionalCount(source.count);
+  if (!count || count <= 0) return null;
+  const out = { count };
+  const sourceLikeCount = cleanOptionalCount(source.sourceLikeCount);
+  if (sourceLikeCount !== null && sourceLikeCount > 0) out.sourceLikeCount = sourceLikeCount;
+  return out;
 }
 
 function saturatedActions(totals, quotas, explicit) {
@@ -1111,6 +1126,7 @@ function normalizeDailyUsage(input) {
   const totals = cleanRequiredCounts(input.totals);
   const quotas = cleanOptionalCounts(input.quotas);
   const windows = normalizeUsageWindows(input.windows);
+  const inspirationSummary = cleanInspirationSummary(input.inspirationSummary);
   const out = {
     asOf,
     totals,
@@ -1118,6 +1134,7 @@ function normalizeDailyUsage(input) {
   };
   if (['conservative', 'normal', 'aggressive'].includes(input.quotaLevel)) out.quotaLevel = input.quotaLevel;
   if (quotas) out.quotas = quotas;
+  if (inspirationSummary) out.inspirationSummary = inspirationSummary;
   if (windows) out.windows = windows;
   return out;
 }

@@ -313,6 +313,64 @@ body { margin: 0; }
 .runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-icon { color: #22a875; }
 .runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-copy strong { color: #267b5d; }
 .runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-copy small { color: #5e8b75; }
+.rg-harvest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid #c8ead9;
+  border-radius: 9px;
+  background: linear-gradient(180deg, #f2fbf6, #ffffff);
+  color: #386a54;
+}
+.rg-harvest-icon {
+  flex: 0 0 auto;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 8px;
+  background: #e3f6ec;
+  color: #22a875;
+}
+.rg-harvest-icon svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.rg-harvest-copy {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  line-height: 1.35;
+}
+.rg-harvest-title {
+  flex: 0 0 auto;
+  color: #247553;
+  font-size: 11px;
+  font-weight: 800;
+}
+.rg-harvest-body {
+  min-width: 0;
+  color: #627487;
+  font-size: 11px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.rg-harvest-body b {
+  color: #17865c;
+  font-size: 12px;
+  font-weight: 820;
+  white-space: nowrap;
+}
 .rg-resume {
   margin-top: 8px;
   color: #58718c;
@@ -344,6 +402,9 @@ body { margin: 0; }
   .rg-flow-icon svg { width: 14px; height: 14px; }
   .rg-flow-copy strong { font-size: 10px; }
   .rg-flow-copy small { font-size: 9.5px; }
+  .rg-harvest { align-items: flex-start; padding: 8px 9px; }
+  .rg-harvest-copy { display: block; }
+  .rg-harvest-body { display: block; margin-top: 1px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .rg-mascot.animate { animation: none; }

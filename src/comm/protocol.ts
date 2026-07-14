@@ -203,6 +203,13 @@ export type UiDailyUsageAction = 'view' | 'like' | 'collect' | 'comment' | 'foll
 export type UiDailyUsageCounts = Partial<Record<UiDailyUsageAction, number>>;
 export type UiDailyUsageWindow = 'session' | 'minute' | 'hour' | 'day';
 
+export interface UiDailyUsageInspirationSummary {
+  /** Count of account-scoped notes saved into the curated inspiration pool. */
+  count: number;
+  /** Sum of source-note likes for the saved inspirations, when observed by cloud. */
+  sourceLikeCount?: number;
+}
+
 export interface UiDailyUsageWindowStatus {
   active?: boolean;
   startedAt?: number;
@@ -225,6 +232,8 @@ export interface UiDailyUsagePayload {
   quotas?: UiDailyUsageCounts;
   /** Backward-compatible alias for the day window saturated actions. */
   saturated?: UiDailyUsageAction[];
+  /** Optional curated inspiration result summary for value-oriented completion UI. */
+  inspirationSummary?: UiDailyUsageInspirationSummary;
   windows?: Partial<Record<UiDailyUsageWindow, UiDailyUsageWindowStatus>>;
 }
 

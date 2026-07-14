@@ -80,6 +80,17 @@
     return n === null ? 0 : Math.max(0, Math.floor(n));
   }
 
+  function compactCount(value) {
+    const n = count(value);
+    const format = (num) => {
+      const rounded = num >= 10 ? Math.round(num) : Math.round(num * 10) / 10;
+      return String(rounded).replace(/\.0$/, '');
+    };
+    if (n >= 100_000_000) return `${format(n / 100_000_000)} 亿`;
+    if (n >= 10_000) return `${format(n / 10_000)} 万`;
+    return String(n);
+  }
+
   function objectOrEmpty(value) {
     return value && typeof value === 'object' ? value : {};
   }
@@ -156,6 +167,20 @@
     return usageCount(status, window, ['inspiration', 'inspirations', 'candidate', 'candidates', 'collect', 'collects']);
   }
 
+  function inspirationHarvest(status) {
+    const daily = objectOrEmpty(objectOrEmpty(status).dailyUsage);
+    const summary = objectOrEmpty(daily.inspirationSummary);
+    const savedCount = firstCount([summary], ['count', 'inspirationCount', 'savedCount', 'curatedCount']);
+    if (savedCount <= 0) return null;
+    const sourceLikeCount = firstCount([summary], ['sourceLikeCount', 'sourceLikes', 'likeCount', 'likes']);
+    return {
+      title: '本轮收获已保存',
+      countText: `${compactCount(savedCount)} 条创作灵感`,
+      heatText: sourceLikeCount > 0 ? `${compactCount(sourceLikeCount)}赞` : '',
+      hasHeat: sourceLikeCount > 0,
+    };
+  }
+
   function guidanceReleaseAt(window) {
     if (!window) return null;
     return window.releaseAt !== null ? window.releaseAt : window.expiresAt;
@@ -223,6 +248,7 @@
     const running = s.edge === 'running' && s.session === 'running';
     const fresh = Number.isFinite(at) && nowMs - at < PRESENCE_FRESH_MS;
     const day = guidanceWindow(s, 'day', nowMs);
+    const harvest = inspirationHarvest(s);
     if (dayBrowseComplete(day)) {
       return {
         mode: 'day',
@@ -238,6 +264,7 @@
           { icon: 'search', state: 'next', label: '继续寻找灵感', detail: '明天继续探索新机会' },
         ],
         resume: '',
+        harvest,
       };
     }
     if (running && p && p.text && fresh) {
@@ -268,6 +295,7 @@
           { icon: 'search', state: 'next', label: '继续寻找灵感', detail: '明天继续探索新机会' },
         ],
         resume: '',
+        harvest,
       };
     }
 

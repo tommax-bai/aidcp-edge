@@ -70,6 +70,20 @@ function sanitizeCounts(input: Record<string, unknown> | undefined): Record<stri
   return output;
 }
 
+function sanitizeOptionalCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : null;
+}
+
+function sanitizeInspirationSummary(input: NonNullable<UiSnapshotPayload['dailyUsage']>['inspirationSummary']): Record<string, number> | null {
+  if (!input || typeof input !== 'object') return null;
+  const count = sanitizeOptionalCount(input.count);
+  if (!count || count <= 0) return null;
+  const output: Record<string, number> = { count };
+  const sourceLikeCount = sanitizeOptionalCount(input.sourceLikeCount);
+  if (sourceLikeCount !== null && sourceLikeCount > 0) output.sourceLikeCount = sourceLikeCount;
+  return output;
+}
+
 function sanitizeDailyUsage(input: UiSnapshotPayload['dailyUsage']): Record<string, unknown> | null {
   if (!input || !Number.isFinite(input.asOf)) return null;
   const totals = sanitizeCounts(input.totals as Record<string, unknown> | undefined);
@@ -78,6 +92,8 @@ function sanitizeDailyUsage(input: UiSnapshotPayload['dailyUsage']): Record<stri
   const dailyUsage: Record<string, unknown> = { asOf: input.asOf, totals };
   if (input.quotaLevel) dailyUsage.quotaLevel = input.quotaLevel;
   if (Object.keys(quotas).length > 0) dailyUsage.quotas = quotas;
+  const inspirationSummary = sanitizeInspirationSummary(input.inspirationSummary);
+  if (inspirationSummary) dailyUsage.inspirationSummary = inspirationSummary;
   if (Array.isArray(input.saturated)) {
     dailyUsage.saturated = input.saturated.filter((action) =>
       (DAILY_USAGE_ACTIONS as readonly string[]).includes(action),

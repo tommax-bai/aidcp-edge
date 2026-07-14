@@ -527,6 +527,7 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
         totals: { view: 300, like: 16, collect: 9, comment: 4, follow: 0, publish: 0 },
         quotas: { view: 300, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
         saturated: ['view'],
+        inspirationSummary: { count: 3, sourceLikeCount: 12_345 },
         windows: {
           day: {
             startedAt: now - 8 * 60 * 60_000,
@@ -548,6 +549,12 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /今日浏览计划已完成/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /继续寻找灵感/);
     assert.equal(hidden($(w, '#runtime-guidance-resume')), true);
+    assert.equal(hidden($(w, '#runtime-guidance-harvest')), false);
+    assert.match($(w, '#runtime-guidance-harvest').textContent ?? '', /本轮收获已保存/);
+    assert.match($(w, '#runtime-guidance-harvest').textContent ?? '', /3 条创作灵感/);
+    assert.match($(w, '#runtime-guidance-harvest').textContent ?? '', /来源热度 1\.2 万赞/);
+    assert.equal(w.document.querySelectorAll('#runtime-guidance-harvest b').length, 2);
+    assert.match(rendererCss, /\.rg-harvest\s*\{/);
     assert.match(rendererCss, /\.runtime-guidance\[data-mode="day"\] \.rg-flow-step\.next \.rg-flow-icon \{ color: #22a875; \}/);
     assert.equal($(w, '#usage-limit').textContent, '今日任务已完成');
     assert.ok($(w, '#usage-limit').classList.contains('complete'));

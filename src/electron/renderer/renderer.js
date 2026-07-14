@@ -76,6 +76,7 @@ const fields = {
   runtimeGuidanceDetail: document.querySelector('#runtime-guidance-detail'),
   runtimeGuidanceMascot: document.querySelector('#runtime-guidance-mascot'),
   runtimeGuidanceFlow: document.querySelector('#runtime-guidance-flow'),
+  runtimeGuidanceHarvest: document.querySelector('#runtime-guidance-harvest'),
   runtimeGuidanceResume: document.querySelector('#runtime-guidance-resume'),
   runtimeGuidanceNote: document.querySelector('#runtime-guidance-note'),
   kernelPrep: document.querySelector('#kernel-prep'),
@@ -714,7 +715,38 @@ const RUNTIME_GUIDANCE_ICONS = {
   browse: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 4 7.1 17 2.5-7.4L21 11.1 4 4Z"/><path d="m13 13 6 6"/></svg>',
   pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12c2.1-2.4 4.3-2.4 6.4 0s4.3 2.4 6.4 0 4.3-2.4 5.2-1.3"/><path d="M3 17c2.1-2.4 4.3-2.4 6.4 0s4.3 2.4 6.4 0 4.3-2.4 5.2-1.3"/></svg>',
   search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.2 4.2"/></svg>',
+  harvest: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 4.5h11a1.5 1.5 0 0 1 1.5 1.5v14l-7-3.7L5 20V6a1.5 1.5 0 0 1 1.5-1.5Z"/><path d="M9 9h6"/><path d="M9 12h4"/></svg>',
 };
+
+function renderRuntimeGuidanceHarvest(harvest) {
+  if (!fields.runtimeGuidanceHarvest) return;
+  fields.runtimeGuidanceHarvest.replaceChildren();
+  fields.runtimeGuidanceHarvest.classList.toggle('hidden', !harvest);
+  if (!harvest) return;
+
+  const icon = document.createElement('span');
+  icon.className = 'rg-harvest-icon';
+  icon.innerHTML = RUNTIME_GUIDANCE_ICONS.harvest;
+  const copy = document.createElement('span');
+  copy.className = 'rg-harvest-copy';
+  const title = document.createElement('strong');
+  title.className = 'rg-harvest-title';
+  title.textContent = harvest.title || '本轮收获已保存';
+  const body = document.createElement('span');
+  body.className = 'rg-harvest-body';
+  const count = document.createElement('b');
+  count.textContent = harvest.countText || '';
+  body.append(document.createTextNode('已记录 '), count);
+  if (harvest.hasHeat && harvest.heatText) {
+    const heat = document.createElement('b');
+    heat.textContent = harvest.heatText;
+    body.append(document.createTextNode(' · 来源热度 '), heat);
+  } else {
+    body.append(document.createTextNode('，明天继续从这里创作'));
+  }
+  copy.append(title, body);
+  fields.runtimeGuidanceHarvest.append(icon, copy);
+}
 
 function renderRuntimeGuidance(status, nowMs) {
   const view = uiLogic.runtimeGuidanceView(status, nowMs);
@@ -722,6 +754,7 @@ function renderRuntimeGuidance(status, nowMs) {
   if (!view) {
     fields.runtimeGuidance.className = 'runtime-guidance hidden';
     delete fields.runtimeGuidance.dataset.mode;
+    renderRuntimeGuidanceHarvest(null);
     return null;
   }
   fields.runtimeGuidance.className = 'runtime-guidance';
@@ -736,6 +769,7 @@ function renderRuntimeGuidance(status, nowMs) {
   fields.runtimeGuidanceResume.classList.toggle('hidden', !view.resume);
   fields.runtimeGuidanceNote.textContent = view.note || '';
   fields.runtimeGuidanceNote.classList.toggle('hidden', !view.note);
+  renderRuntimeGuidanceHarvest(view.harvest || null);
   fields.runtimeGuidanceMascot.src = RUNTIME_GUIDANCE_MASCOTS[view.mascot] || '';
   fields.runtimeGuidanceMascot.classList.toggle('animate', Boolean(view.animate));
 
