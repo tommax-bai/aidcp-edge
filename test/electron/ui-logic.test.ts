@@ -18,6 +18,7 @@ interface RuntimeGuidanceV {
   resume: string;
   note?: string;
   harvest?: { title: string; countText: string; heatText: string; hasHeat: boolean } | null;
+  progress?: { current: number; target: number; percent: number; title: string; counter: string; meta: string } | null;
   steps: Array<{ label: string; detail: string; state: string }>;
 }
 interface PublishV {
@@ -171,13 +172,35 @@ test('运行价值说明：新鲜浏览事件先说明正在寻找内容灵感',
   const now = Date.now();
   const v = uiLogic.runtimeGuidanceView(st({
     presence: { text: '正在认真读「x」…', at: new Date(now - 10_000).toISOString() },
+    dailyUsage: {
+      windows: {
+        session: {
+          active: true,
+          totals: { view: 12, collect: 2 },
+          quotas: { view: 20 },
+        },
+      },
+    },
   }), now);
   assert.equal(v?.mode, 'running');
   assert.equal(v?.mascot, 'task-execution');
   assert.equal(v?.animate, true);
-  assert.equal(v?.kicker, '为你探索');
-  assert.match(v?.title ?? '', /内容灵感/);
-  assert.equal(v?.detail, '观察平台推荐的内容，寻找正在上升的话题。');
+  assert.equal(v?.kicker, '正在理解目标人群喜欢什么');
+  assert.equal(v?.title, '正在缩小创作方向。');
+  assert.equal(v?.value, '刷首页不是漫无目的，而是在寻找目标人群已经验证过的方向。');
+  assert.deepEqual(v?.steps.map((step) => [step.label, step.detail]), [
+    ['浏览与互动', '正在查看第 12 条'],
+    ['判断匹配度', '2 条进入候选'],
+    ['继续寻找灵感', '持续筛选中'],
+  ]);
+  assert.deepEqual(v?.progress, {
+    current: 12,
+    target: 20,
+    percent: 60,
+    title: '正在查看第 12 条推荐内容',
+    counter: '12/20',
+    meta: '进展实时记录',
+  });
 });
 
 test('运行价值说明：本轮浏览完成才展示自然间隔与三步说明', () => {
@@ -204,6 +227,14 @@ test('运行价值说明：本轮浏览完成才展示自然间隔与三步说�
   assert.match(v?.value ?? '', /自然节奏/);
   assert.deepEqual(v?.steps.map((step) => step.label), ['浏览与互动', '留出自然间隔', '继续寻找灵感']);
   assert.equal(v?.steps[0].detail, '2 条灵感已记录');
+  assert.deepEqual(v?.progress, {
+    current: 12,
+    target: 12,
+    percent: 100,
+    title: '本轮已查看 12 条推荐内容',
+    counter: '12/12',
+    meta: '进展已记录',
+  });
   assert.match(v?.resume ?? '', /约 42 分钟后自动继续/);
   assert.equal(v?.note, '本轮进展已记录');
 });
@@ -232,6 +263,14 @@ test('运行价值说明：本轮等待缺少浏览配额字段时仍展示完�
     ['留出自然间隔', '让账号信号更清晰'],
     ['继续寻找灵感', '推荐内容更聚焦'],
   ]);
+  assert.deepEqual(v?.progress, {
+    current: 12,
+    target: 20,
+    percent: 60,
+    title: '本轮已查看 12 条推荐内容',
+    counter: '12/20',
+    meta: '进展已记录',
+  });
   assert.equal(v?.resume, '约 8 分钟后自动继续');
   assert.equal(v?.note, '本轮进展已记录');
 });

@@ -168,12 +168,20 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.match($(w, '#presence-fresh').textContent ?? '', /刚刚更新/);
   assert.equal(hidden($(w, '#runtime-guidance')), false);
   assert.equal($(w, '#runtime-guidance').dataset.mode, 'running');
-  assert.equal($(w, '#runtime-guidance-kicker').textContent, '为你探索');
-  assert.match($(w, '#runtime-guidance-title').textContent ?? '', /内容灵感/);
-  assert.equal($(w, '#runtime-guidance-detail').textContent, '观察平台推荐的内容，寻找正在上升的话题。');
+  assert.equal($(w, '#runtime-guidance-kicker').textContent, '正在理解目标人群喜欢什么');
+  assert.equal($(w, '#runtime-guidance-title').textContent, '正在缩小创作方向。');
+  assert.match($(w, '#runtime-guidance-value').textContent ?? '', /刷首页不是漫无目的/);
+  assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /浏览与互动/);
+  assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /正在查看第 3 条/);
+  assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
+  assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /正在查看第 3 条推荐内容/);
+  assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /3\/20/);
+  assert.equal($(w, '#runtime-guidance-progress .rg-progress-track').getAttribute('aria-valuenow'), '3');
+  assert.equal(($(w, '#runtime-guidance-progress .rg-progress-fill') as HTMLElement).style.width, '15%');
   assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-task-execution/);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-main/);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-mascot/);
+  assert.match(rendererCss, /\.rg-progress\s*\{/);
 });
 
 test('红线：停止 / 事件过期时动效止息、如实待命', async () => {
@@ -224,6 +232,9 @@ test('运行中 + 事件过期 + 阶段计划完成 → 说明自然间隔的成
     assert.match($(w, '#runtime-guidance-value').textContent ?? '', /自然节奏/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /浏览与互动/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /38 条首页内容已观察/);
+    assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
+    assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /本轮已查看 38 条推荐内容/);
+    assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /38\/38/);
     assert.match($(w, '#runtime-guidance-resume').textContent ?? '', /36 分钟后自动继续/);
     assert.equal($(w, '#runtime-guidance-note').textContent, '本小时进展已记录');
     assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-monitoring/);
@@ -269,6 +280,9 @@ test('本轮等待缺少浏览配额字段时仍渲染自然间隔进度卡', as
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /2 条灵感已记录/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /让账号信号更清晰/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /推荐内容更聚焦/);
+    assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
+    assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /本轮已查看 12 条推荐内容/);
+    assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /12\/20/);
     assert.equal($(w, '#runtime-guidance-resume').textContent, '约 8 分钟后自动继续');
     assert.equal($(w, '#runtime-guidance-note').textContent, '本轮进展已记录');
   } finally {
@@ -548,6 +562,7 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
     assert.match($(w, '#runtime-guidance-title').textContent ?? '', /明天继续/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /今日浏览计划已完成/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /继续寻找灵感/);
+    assert.equal(hidden($(w, '#runtime-guidance-progress')), true);
     assert.equal(hidden($(w, '#runtime-guidance-resume')), true);
     assert.equal(hidden($(w, '#runtime-guidance-harvest')), false);
     assert.match($(w, '#runtime-guidance-harvest').textContent ?? '', /本轮收获已保存/);

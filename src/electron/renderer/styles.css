@@ -326,6 +326,64 @@ body { margin: 0; }
 .rg-flow-step.current .rg-flow-copy strong { color: #3159bd; }
 .runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-icon { color: #22a875; }
 .runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-copy strong { color: #267b5d; }
+.rg-progress {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(113, 143, 205, 0.22);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.66);
+}
+.runtime-guidance[data-mode="session"] .rg-progress,
+.runtime-guidance[data-mode="hour"] .rg-progress {
+  border-color: rgba(84, 157, 164, 0.2);
+  background: rgba(255, 255, 255, 0.7);
+}
+.rg-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.rg-progress-title {
+  min-width: 0;
+  color: #2f4269;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.rg-progress-meta {
+  flex: 0 0 auto;
+  color: #74849c;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.rg-progress-track {
+  position: relative;
+  height: 6px;
+  margin-top: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dce6f4;
+}
+.rg-progress-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4c7df2 0%, #21aa77 100%);
+  transition: width 360ms ease;
+}
+.runtime-guidance[data-mode="session"] .rg-progress-title,
+.runtime-guidance[data-mode="hour"] .rg-progress-title { color: #37686f; }
+.runtime-guidance[data-mode="session"] .rg-progress-fill,
+.runtime-guidance[data-mode="hour"] .rg-progress-fill {
+  background: linear-gradient(90deg, #4f7feb 0%, #22a875 100%);
+}
 .rg-harvest {
   display: flex;
   align-items: center;

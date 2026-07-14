@@ -76,6 +76,7 @@ const fields = {
   runtimeGuidanceDetail: document.querySelector('#runtime-guidance-detail'),
   runtimeGuidanceMascot: document.querySelector('#runtime-guidance-mascot'),
   runtimeGuidanceFlow: document.querySelector('#runtime-guidance-flow'),
+  runtimeGuidanceProgress: document.querySelector('#runtime-guidance-progress'),
   runtimeGuidanceHarvest: document.querySelector('#runtime-guidance-harvest'),
   runtimeGuidanceResume: document.querySelector('#runtime-guidance-resume'),
   runtimeGuidanceNote: document.querySelector('#runtime-guidance-note'),
@@ -719,9 +720,44 @@ const RUNTIME_GUIDANCE_MASCOTS = {
 const RUNTIME_GUIDANCE_ICONS = {
   browse: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 4 7.1 17 2.5-7.4L21 11.1 4 4Z"/><path d="m13 13 6 6"/></svg>',
   pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12c2.1-2.4 4.3-2.4 6.4 0s4.3 2.4 6.4 0 4.3-2.4 5.2-1.3"/><path d="M3 17c2.1-2.4 4.3-2.4 6.4 0s4.3 2.4 6.4 0 4.3-2.4 5.2-1.3"/></svg>',
+  match: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="m8.5 12.2 2.2 2.2 4.8-5.1"/></svg>',
   search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.2 4.2"/></svg>',
   harvest: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 4.5h11a1.5 1.5 0 0 1 1.5 1.5v14l-7-3.7L5 20V6a1.5 1.5 0 0 1 1.5-1.5Z"/><path d="M9 9h6"/><path d="M9 12h4"/></svg>',
 };
+
+function renderRuntimeGuidanceProgress(progress) {
+  if (!fields.runtimeGuidanceProgress) return;
+  fields.runtimeGuidanceProgress.replaceChildren();
+  fields.runtimeGuidanceProgress.classList.toggle('hidden', !progress);
+  if (!progress) return;
+
+  const current = Math.max(0, Number(progress.current) || 0);
+  const target = Math.max(0, Number(progress.target) || 0);
+  const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  const head = document.createElement('div');
+  head.className = 'rg-progress-head';
+  const title = document.createElement('span');
+  title.className = 'rg-progress-title';
+  title.textContent = progress.title || '';
+  const meta = document.createElement('span');
+  meta.className = 'rg-progress-meta';
+  meta.textContent = [progress.counter, progress.meta].filter(Boolean).join(' · ');
+  head.append(title, meta);
+
+  const track = document.createElement('div');
+  track.className = 'rg-progress-track';
+  track.setAttribute('role', 'progressbar');
+  track.setAttribute('aria-label', '探索进度');
+  track.setAttribute('aria-valuemin', '0');
+  track.setAttribute('aria-valuemax', String(target));
+  track.setAttribute('aria-valuenow', String(Math.min(current, target || current)));
+  const fill = document.createElement('span');
+  fill.className = 'rg-progress-fill';
+  fill.style.width = `${percent}%`;
+  track.append(fill);
+
+  fields.runtimeGuidanceProgress.append(head, track);
+}
 
 function renderRuntimeGuidanceHarvest(harvest) {
   if (!fields.runtimeGuidanceHarvest) return;
@@ -759,6 +795,7 @@ function renderRuntimeGuidance(status, nowMs) {
   if (!view) {
     fields.runtimeGuidance.className = 'runtime-guidance hidden';
     delete fields.runtimeGuidance.dataset.mode;
+    renderRuntimeGuidanceProgress(null);
     renderRuntimeGuidanceHarvest(null);
     return null;
   }
@@ -774,6 +811,7 @@ function renderRuntimeGuidance(status, nowMs) {
   fields.runtimeGuidanceResume.classList.toggle('hidden', !view.resume);
   fields.runtimeGuidanceNote.textContent = view.note || '';
   fields.runtimeGuidanceNote.classList.toggle('hidden', !view.note);
+  renderRuntimeGuidanceProgress(view.progress || null);
   renderRuntimeGuidanceHarvest(view.harvest || null);
   fields.runtimeGuidanceMascot.src = RUNTIME_GUIDANCE_MASCOTS[view.mascot] || '';
   fields.runtimeGuidanceMascot.classList.toggle('animate', Boolean(view.animate));

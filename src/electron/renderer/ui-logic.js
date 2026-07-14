@@ -113,6 +113,8 @@
   }
 
   // ── 运行价值说明：只把已确认的浏览阶段转为成果与下一步，不推断单项互动会暂停整轮浏览。──
+  const EXPLORATION_PROGRESS_FALLBACK_TARGET = 20;
+
   function guidanceWindow(status, key, nowMs) {
     const windows = status && status.dailyUsage && objectOrEmpty(status.dailyUsage).windows;
     const window = windows && objectOrEmpty(windows)[key];
@@ -158,6 +160,18 @@
     return 0;
   }
 
+  function firstPositiveCount(sources, keys) {
+    for (const source of sources) {
+      const obj = objectOrEmpty(source);
+      for (const key of keys) {
+        if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
+        const value = count(obj[key]);
+        if (value > 0) return value;
+      }
+    }
+    return 0;
+  }
+
   function usageCount(status, window, keys) {
     const daily = objectOrEmpty(objectOrEmpty(status).dailyUsage);
     return firstCount([window && window.totals, daily.totals, objectOrEmpty(status).stats], keys);
@@ -169,6 +183,40 @@
 
   function inspirationCount(status, window) {
     return usageCount(status, window, ['inspiration', 'inspirations', 'candidate', 'candidates', 'collect', 'collects']);
+  }
+
+  function explorationWindow(status, nowMs) {
+    for (const key of ['session', 'hour']) {
+      const window = guidanceWindow(status, key, nowMs);
+      if (window && window.active && !window.expired) return window;
+    }
+    return null;
+  }
+
+  function explorationProgress(status, window, resting) {
+    const observed = observedCount(status, window);
+    const configuredTarget = firstPositiveCount([window && window.view], ['cap']);
+    const target = Math.max(observed, configuredTarget > 0 ? configuredTarget : EXPLORATION_PROGRESS_FALLBACK_TARGET);
+    const percent = target > 0 ? Math.min(100, Math.round((observed / target) * 100)) : 0;
+    const title = resting
+      ? (observed > 0 ? `本轮已查看 ${observed} 条推荐内容` : '本轮探索进展已记录')
+      : (observed > 0 ? `正在查看第 ${observed} 条推荐内容` : '正在观察推荐内容');
+    return {
+      current: observed,
+      target,
+      percent,
+      title,
+      counter: target > 0 ? `${observed}/${target}` : '',
+      meta: resting ? '进展已记录' : '进展实时记录',
+    };
+  }
+
+  function runningGuidanceSteps(observed, inspirations) {
+    return [
+      { icon: 'browse', state: 'current', label: '浏览与互动', detail: observed > 0 ? `正在查看第 ${observed} 条` : '正在观察推荐流' },
+      { icon: 'match', state: inspirations > 0 ? 'done' : 'current', label: '判断匹配度', detail: inspirations > 0 ? `${inspirations} 条进入候选` : '持续判断中' },
+      { icon: 'search', state: 'next', label: '继续寻找灵感', detail: '持续筛选中' },
+    ];
   }
 
   function inspirationHarvest(status) {
@@ -222,6 +270,8 @@
     const wait = futureWaitText(guidanceReleaseAt(window), nowMs);
     if (!wait) return null;
     const isSession = key === 'session';
+    const observed = observedCount(status, window);
+    const inspirations = inspirationCount(status, window);
     return {
       mode: key,
       mascot: 'monitoring',
@@ -230,7 +280,8 @@
       title: isSession ? '先整理一下刚才发现的方向。' : '先让平台认识你一点。',
       value: '停一停不是失去进度，而是为下一轮寻找留出自然节奏。',
       detail: '',
-      steps: guidanceSteps(observedCount(status, window), inspirationCount(status, window)),
+      steps: guidanceSteps(observed, inspirations),
+      progress: explorationProgress(status, window, true),
       resume: `约 ${wait}自动继续`,
       note: isSession ? '本轮进展已记录' : '本小时进展已记录',
     };
@@ -278,14 +329,19 @@
       };
     }
     if (running && p && p.text && fresh) {
+      const window = explorationWindow(s, nowMs);
+      const observed = observedCount(s, window);
+      const inspirations = inspirationCount(s, window);
       return {
         mode: 'running',
         mascot: 'task-execution',
         animate: true,
-        kicker: '为你探索',
-        title: '正在首页寻找容易被看见的内容灵感',
-        detail: '观察平台推荐的内容，寻找正在上升的话题。',
-        steps: [],
+        kicker: '正在理解目标人群喜欢什么',
+        title: '正在缩小创作方向。',
+        value: '刷首页不是漫无目的，而是在寻找目标人群已经验证过的方向。',
+        detail: '',
+        steps: runningGuidanceSteps(observed, inspirations),
+        progress: explorationProgress(s, window, false),
         resume: '',
       };
     }
