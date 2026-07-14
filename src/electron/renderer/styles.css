@@ -170,19 +170,40 @@ body { margin: 0; }
 
 /* 运行价值说明：嵌入主运行区，不改变发布卡和今日进展的层级。 */
 .runtime-guidance {
-  padding: 16px 18px;
-  border: 1px solid #cbdcf8;
-  border-radius: 16px;
-  background: linear-gradient(120deg, var(--surface-blue), #fbfcff 82%);
+  position: relative;
+  padding: 14px 16px 13px;
+  border: 1px solid rgba(150, 177, 222, 0.42);
+  border-radius: 15px;
+  background: linear-gradient(118deg, rgba(239, 246, 255, 0.86), rgba(251, 253, 255, 0.96) 78%);
+  overflow: hidden;
+}
+.runtime-guidance::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 2px;
+  background: linear-gradient(90deg, #4d7df1, rgba(77, 125, 241, 0));
+  opacity: 0.58;
+  transform-origin: left;
+  animation: rg-value-line 4s ease-in-out infinite;
 }
 .runtime-guidance[data-mode="session"],
 .runtime-guidance[data-mode="hour"] {
   border-color: #cfe4e6;
   background: #f5fbfb;
 }
+.runtime-guidance[data-mode="session"]::after,
+.runtime-guidance[data-mode="hour"]::after {
+  background: linear-gradient(90deg, #3f9aa3, rgba(63, 154, 163, 0));
+}
 .runtime-guidance[data-mode="day"] {
   border-color: #cce9da;
   background: #f5fcf8;
+}
+.runtime-guidance[data-mode="day"]::after {
+  background: linear-gradient(90deg, #22a875, rgba(34, 168, 117, 0));
+  transform: scaleX(1);
+  animation: none;
 }
 .rg-main {
   display: grid;
@@ -192,24 +213,10 @@ body { margin: 0; }
 }
 .rg-copy { min-width: 0; }
 .runtime-guidance[data-mode="running"] .rg-main {
-  grid-template-columns: 46px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 66px minmax(0, 1fr);
+  gap: 12px;
 }
 .runtime-guidance[data-mode="running"] .rg-copy { grid-column: 2; grid-row: 1; }
-.runtime-guidance[data-mode="running"] .rg-main::before {
-  content: "✦";
-  grid-column: 1;
-  grid-row: 1;
-  width: 46px;
-  height: 46px;
-  display: grid;
-  place-items: center;
-  border-radius: 14px;
-  color: #fff;
-  background: linear-gradient(145deg, #65a0ff, var(--accent));
-  box-shadow: 0 8px 18px rgba(52, 120, 246, 0.2);
-  font-size: 20px;
-}
 .rg-kicker {
   color: #5270ad;
   font-size: 11px;
@@ -231,11 +238,15 @@ body { margin: 0; }
   display: flex;
   align-items: flex-start;
   gap: 5px;
-  margin-top: 7px;
+  margin-top: 6px;
   color: #3262bd;
   font-size: 12px;
   font-weight: 650;
   line-height: 1.5;
+}
+.runtime-guidance[data-mode="running"] .rg-value {
+  color: #365070;
+  font-weight: 670;
 }
 .runtime-guidance[data-mode="day"] .rg-value { color: #217a59; }
 .rg-star {
@@ -260,16 +271,21 @@ body { margin: 0; }
   justify-self: end;
 }
 .runtime-guidance[data-mode="running"] .rg-mascot {
-  display: none;
+  grid-column: 1;
+  grid-row: 1;
+  width: 64px;
+  height: 64px;
+  justify-self: center;
+  filter: drop-shadow(0 6px 8px rgba(31, 47, 77, 0.13));
 }
 .rg-mascot.animate { animation: rg-mascot-work 4.2s ease-in-out infinite; }
 .rg-flow {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(156, 178, 205, 0.34);
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(156, 178, 205, 0.28);
 }
 .rg-flow-step {
   position: relative;
@@ -327,16 +343,14 @@ body { margin: 0; }
 .runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-icon { color: #22a875; }
 .runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-copy strong { color: #267b5d; }
 .rg-progress {
-  margin-top: 10px;
-  padding: 9px 10px;
-  border: 1px solid rgba(113, 143, 205, 0.22);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.66);
+  margin-top: 9px;
+  padding: 2px 0 1px;
+  border: 0;
+  background: transparent;
 }
 .runtime-guidance[data-mode="session"] .rg-progress,
 .runtime-guidance[data-mode="hour"] .rg-progress {
-  border-color: rgba(84, 157, 164, 0.2);
-  background: rgba(255, 255, 255, 0.7);
+  background: transparent;
 }
 .rg-progress-head {
   display: flex;
@@ -348,7 +362,7 @@ body { margin: 0; }
 .rg-progress-title {
   min-width: 0;
   color: #2f4269;
-  font-size: 11px;
+  font-size: 10.8px;
   font-weight: 750;
   line-height: 1.35;
   overflow-wrap: anywhere;
@@ -364,11 +378,11 @@ body { margin: 0; }
 }
 .rg-progress-track {
   position: relative;
-  height: 6px;
-  margin-top: 7px;
+  height: 5px;
+  margin-top: 6px;
   overflow: hidden;
   border-radius: 999px;
-  background: #dce6f4;
+  background: rgba(181, 198, 224, 0.46);
 }
 .rg-progress-fill {
   display: block;
@@ -461,13 +475,16 @@ body { margin: 0; }
   45% { transform: translateY(-2px); }
   55% { transform: translateY(0); }
 }
+@keyframes rg-value-line {
+  0%, 100% { transform: scaleX(.34); opacity: .34; }
+  50% { transform: scaleX(1); opacity: .72; }
+}
 @media (max-width: 430px) {
   .runtime-guidance { padding: 11px 12px 10px; }
   .rg-main { grid-template-columns: minmax(0, 1fr) 68px; gap: 5px; }
   .rg-mascot { width: 68px; height: 68px; }
   .runtime-guidance[data-mode="running"] .rg-main { grid-template-columns: 54px minmax(0, 1fr); gap: 8px; }
   .runtime-guidance[data-mode="running"] .rg-mascot { width: 52px; height: 52px; }
-  .runtime-guidance[data-mode="running"] .rg-main::before { width: 42px; height: 42px; border-radius: 12px; }
   .rg-flow { gap: 5px; }
   .rg-flow-step { grid-template-columns: 16px minmax(0, 1fr); gap: 3px; }
   .rg-flow-icon { width: 16px; height: 16px; }
@@ -479,6 +496,7 @@ body { margin: 0; }
   .rg-harvest-body { display: block; margin-top: 1px; }
 }
 @media (prefers-reduced-motion: reduce) {
+  .runtime-guidance::after,
   .rg-mascot.animate { animation: none; }
 }
 

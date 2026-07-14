@@ -181,6 +181,8 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-task-execution/);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-main/);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-mascot/);
+  assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-mascot\s*\{[^}]*display:\s*none/s);
+  assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-main::before/);
   assert.match(rendererCss, /\.rg-progress\s*\{/);
 });
 
