@@ -2416,6 +2416,34 @@ export class BrowseSession {
       await dispatchClick(this.deps.cdp, editor.x, editor.y, { random: this.random });
       await this.sleep(250);
 
+      // 2b) 清场前置（change lease-strict-preemption task 3.2）：输入是**在光标处追加**——
+      //     上一次被抢占 / 失败留在编辑器里的半截评论不清掉，就会和这一条拼在一起发出去。
+      //     清干净了才往下走；清不掉 = 真脏页，诚实终止（绝不带着残文提交）。
+      const clearJs = `(function(){
+        var el = document.querySelector('#content-textarea') || document.querySelector('.engage-bar.active [contenteditable="true"]') || document.querySelector('.engage-bar [contenteditable="true"]');
+        if (!el) return JSON.stringify({found:false, residual:''});
+        try {
+          el.focus();
+          var range = document.createRange(); range.selectNodeContents(el);
+          var sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+          document.execCommand('delete');
+        } catch (e) {}
+        if ((el.textContent || '').trim()) { el.textContent = ''; }
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        return JSON.stringify({found:true, residual: (el.textContent || '').trim()});
+      })()`;
+      const clearRaw = await evalRaw<string>(this.deps.cdp, clearJs);
+      const clear = typeof clearRaw === 'string' ? JSON.parse(clearRaw) : clearRaw;
+      if (!clear?.found) {
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'no_target' });
+        return;
+      }
+      if (clear.residual) {
+        this.logger(`[browse] comment 编辑器清不干净（残留 ${String(clear.residual).slice(0, 20)}…）→ 诚实终止，绝不拼接发出`);
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'editor_not_clean' });
+        return;
+      }
+
       // 3) 拟人逐字输入正文（文字部分手动输入）
       await dispatchKeystrokes(this.deps.cdp, body, { random: this.random });
       // 3b) 联系方式（change account-group-chat-injection）：串码部分**单次整段插入**（Input.insertText），
@@ -2478,8 +2506,12 @@ export class BrowseSession {
         this.logger(`[browse] ✓ 评论发布成功（编辑器清空 + 自己的评论行出现，耗时 ${elapsed()}）`);
         this.deps.client.reportActionCompleted?.({ action, ok: true });
       } else {
-        this.logger(`[browse] ⚠ 评论提交后未确认生效 (cleared=${v?.cleared}, ownRow=${v?.ownRow}，耗时 ${elapsed()})`);
-        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'state_unchanged' });
+        // 提交三态（change lease-strict-preemption task 3.2）：**提交动作已经派发出去了**。
+        // 这一条评论可能真已发出（网络在途 / 页面渲染慢），也可能没发出——我们分不清。
+        // 谎报「未提交」会让上游重试 ⇒ 重复评论。故 MUST 用可区分的「已提交、结果未知」，
+        // 上游据此 MUST NOT 自动重试（去重账本 + 人工确认），见 cloud task 7.6。
+        this.logger(`[browse] ⚠ 评论已提交但未确认生效 (cleared=${v?.cleared}, ownRow=${v?.ownRow}，耗时 ${elapsed()}) → 已提交、结果未知，绝不重试`);
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'submitted_unconfirmed' });
       }
     } catch (err) {
       this.logger(`[browse] comment 执行失败（耗时 ${elapsed()}）：${(err as Error).message}`);

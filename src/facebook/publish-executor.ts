@@ -159,6 +159,16 @@ function fbPublishEditorText(){
   var el = fbPublishEditor();
   return { found: !!el, text: el ? fbPublishText(el) : '' };
 }
+function fbPublishCloseComposer(){
+  var dlg = fbPublishDialog();
+  if (!dlg) return { dialogFound:false, clicked:false };
+  var re = /^(close|关闭|關閉|đóng|cerrar|fermer|schließen)$/i;
+  var nodes = Array.from(dlg.querySelectorAll('[aria-label],[role="button"],button')).filter(fbPublishVisible);
+  var btn = nodes.find(function(el){ return re.test((fbPublishLabel(el) || '').trim()); });
+  if (!btn) return { dialogFound:true, clicked:false };
+  try { btn.click(); } catch(e) { return { dialogFound:true, clicked:false }; }
+  return { dialogFound:true, clicked:true };
+}
 function fbPublishExtractPost(){
   var links = Array.from(document.querySelectorAll('a[href]')).map(function(a){ return a.href; });
   var hit = links.find(function(h){ return /\/posts\/|story_fbid=|\/permalink\//i.test(h); }) || location.href;
@@ -350,10 +360,36 @@ export class FacebookPublishExecutor {
       editorFound: true,
     }));
     const suffix = cleanup.cleared ? '' : cleanup.editorFound ? '_dirty_composer' : '_composer_gone';
+    // 清空 ≠ 让位（change lease-strict-preemption task 3.3）：发帖弹层还盖在页面上，抢占者拿到执行权
+    // 也看不见底下的 feed / 验证码。清干净之后 MUST 把弹层关掉，并回读确认它真的没了。
+    const closed = await this.closeComposer();
     this.log(
-      `[facebook-publish] 放弃正文填写 error=${error} cleared=${cleanup.cleared} editorFound=${cleanup.editorFound}`,
+      `[facebook-publish] 放弃正文填写 error=${error} cleared=${cleanup.cleared} editorFound=${cleanup.editorFound} composerClosed=${closed}`,
     );
     return { ...base(payload), ok: false, error: `${error}${suffix}` };
+  }
+
+  /**
+   * 关闭发帖弹层并**回读确认真的关掉了**。返回 false = 弹层还在（页面没让干净）。
+   * 关不掉不改写回执结论（这一步已经是失败路径），但日志必须说实话，让运维知道页面上还盖着弹层。
+   */
+  private async closeComposer(): Promise<boolean> {
+    const r = await evalJson<{ dialogFound: boolean; clicked: boolean }>(
+      this.cdp,
+      `(function(){${FB_PUBLISH_HELPERS_JS} return JSON.stringify(fbPublishCloseComposer()); })()`,
+    ).catch(() => ({ dialogFound: true, clicked: false }));
+    if (!r.dialogFound) return true; // 本来就没有弹层
+    if (!r.clicked) return false; // 找不到关闭键 / 点不动
+    // 回读：点了 ≠ 关掉了。关闭本身可能再触发一个「放弃帖子？」确认框——那个由 CDP 层的对话框接管
+    // 统一 accept（见 cdp/session.ts），此处只需等弹层消失。
+    const gone = await this.waitUntil(this.opts.fillVerifyTimeoutMs, async () => {
+      const still = await evalJson<{ dialogFound: boolean }>(
+        this.cdp,
+        `(function(){${FB_PUBLISH_HELPERS_JS} return JSON.stringify({ dialogFound: !!fbPublishDialog() }); })()`,
+      ).catch(() => ({ dialogFound: true }));
+      return still.dialogFound ? null : { gone: true };
+    });
+    return gone !== null;
   }
 
   /**

@@ -167,7 +167,13 @@ async function startAndPush(sess: BrowseSession, commands: Envelope[]): Promise<
 
 // ======== executeComment（发评论）测试：绝不静默假成功 ========
 
-function commentHarness(opts: { editorError?: boolean; verify?: { cleared: boolean; ownRow: boolean }; pageUrl?: string }): Harness {
+function commentHarness(opts: {
+  editorError?: boolean;
+  verify?: { cleared: boolean; ownRow: boolean };
+  pageUrl?: string;
+  /** 清场后仍有残文（真脏页）：change lease-strict-preemption task 3.2。 */
+  clearResidual?: string;
+}): Harness {
   const h = makeHarness();
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
@@ -175,6 +181,12 @@ function commentHarness(opts: { editorError?: boolean; verify?: { cleared: boole
       const expr = String(params.expression ?? '');
       if (expr.includes('ownRow')) {
         return { result: { value: JSON.stringify(opts.verify ?? { cleared: true, ownRow: true }) } } as never;
+      }
+      // 清场前置（必须排在 content-textarea 之前——两条 expr 都含该选择器）。
+      if (expr.includes('residual')) {
+        return {
+          result: { value: JSON.stringify({ found: !opts.editorError, residual: opts.clearResidual ?? '' }) },
+        } as never;
       }
       if (expr.includes('content-textarea')) {
         return { result: { value: opts.editorError ? '{"error":"no-editor"}' : '{"x":200,"y":200}' } } as never;
@@ -221,7 +233,7 @@ test('executeComment: 找不到编辑器 → ok:false reason no_target（不假�
   assert.equal(c!.reason, 'no_target');
 });
 
-test('executeComment: 提交后未确认生效 → ok:false reason state_unchanged（不假成功）', async () => {
+test('executeComment: 提交后未确认生效 → ok:false reason submitted_unconfirmed（已提交、结果未知，绝不谎报未提交）', async () => {
   const h = commentHarness({ verify: { cleared: false, ownRow: false } });
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
@@ -231,7 +243,21 @@ test('executeComment: 提交后未确认生效 → ok:false reason state_unchang
   const c = h.completedActions.find((a) => a.action === 'comment');
   assert.ok(c);
   assert.equal(c!.ok, false);
-  assert.equal(c!.reason, 'state_unchanged');
+  // 提交动作已经派发出去了：这条评论可能真已发出。谎报「未提交」会让上游重试 ⇒ 重复评论。
+  assert.equal(c!.reason, 'submitted_unconfirmed');
+});
+
+test('executeComment 清场：编辑器里有残文且清不掉 → 诚实 editor_not_clean，绝不拼接发出（task 3.2）', async () => {
+  const h = commentHarness({ clearResidual: '上一条被抢占时留下的半截评论' });
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '这一条' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const c = h.completedActions.find((a) => a.action === 'comment');
+  assert.ok(c);
+  assert.equal(c!.ok, false);
+  assert.equal(c!.reason, 'editor_not_clean');
 });
 
 // keep-open 发前就地核对（change comment-keep-open-through-approval，取舍2）

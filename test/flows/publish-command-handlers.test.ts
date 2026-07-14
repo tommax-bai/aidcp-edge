@@ -307,12 +307,50 @@ test('AC-CMD-S4 set_schedule → 定位定时控件 + 值写入', async () => {
 
 // ── change publish-fill-humanization（Phase A）：CDP 路径填写拟人化 ──────────────
 
-/** 记录 CDP 调用的最小 fake；Runtime.evaluate（FOCUS/CHECK）恒返回 true，使填写后置校验通过。 */
+/**
+ * 编辑器模型 fake（change lease-strict-preemption 升级）。
+ *
+ * 旧桩对任何 Runtime.evaluate 恒回 true —— 它验不出这条路径真正的语义：**输入是追加**。
+ * 现在照真页面建模：insertText 追加到 text；全选 + Backspace 才清空；回读返回 text。
+ * 这样「残文没清掉 → 拼接发出」才有可能在单测里被断言到。
+ */
 class FakeCdp {
   readonly calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  text: string;
+  private selected = false;
+  /** unclearable：模拟「全选做不到」的脏页（框架吃掉了选区）。 */
+  private accepted = 0;
+  constructor(private readonly opts: { initialText?: string; unclearable?: boolean; swallowAfter?: number } = {}) {
+    this.text = opts.initialText ?? '';
+  }
   async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ method, params });
-    if (method === 'Runtime.evaluate') return { result: { value: true } } as T;
+    if (method === 'Runtime.evaluate') {
+      const expr = String(params?.expression ?? '');
+      if (expr.includes('text: raw')) {
+        return { result: { value: JSON.stringify({ found: true, text: this.text.replace(/\s+/g, ' ').trim() }) } } as T;
+      }
+      if (expr.includes('selected: true')) {
+        if (this.opts.unclearable) return { result: { value: JSON.stringify({ found: true, selected: false }) } } as T;
+        this.selected = true;
+        return { result: { value: JSON.stringify({ found: true, selected: true }) } } as T;
+      }
+      return { result: { value: true } } as T; // FOCUS
+    }
+    if (method === 'Input.insertText') {
+      const chunk = String(params?.text ?? '');
+      // swallowAfter：编辑器只接收前 N 个字符，之后全吞（真机见过的「吞正文」）。
+      const chars = Array.from(chunk);
+      const room = this.opts.swallowAfter === undefined ? chars.length : Math.max(0, this.opts.swallowAfter - this.accepted);
+      const kept = chars.slice(0, room);
+      this.accepted += kept.length;
+      this.text += kept.join('');
+      this.selected = false;
+    }
+    if (method === 'Input.dispatchKeyEvent' && params?.key === 'Backspace' && this.selected) {
+      this.text = '';
+      this.selected = false;
+    }
     return {} as T;
   }
   inserts(): string[] {
@@ -352,6 +390,58 @@ test('拟人填写：pacing 关 → 回退一次性 insertText（旧快路径，
   const inserts = cdp.inserts();
   assert.equal(inserts.length, 1, 'pacing 关时一次性灌入');
   assert.equal(inserts[0], value);
+});
+
+// ── change lease-strict-preemption task 3.1：清场协议（抢占的硬前置）──────────────
+
+test('清场：编辑器里有上一篇的残文 → 先清空再填，正文 MUST NOT 拼接', async () => {
+  // 被抢占 / 失败留下的半截正文。旧代码无清空前置 + 只比对前 8 字 → 残文 + 新文照样放行，
+  // 真发出一篇拼接的帖子。这条断言就是那个 bug 的坟。
+  const cdp = new FakeCdp({ initialText: '上一篇被抢占时留下的半截正文' });
+  const dispatcher = dispatcherWithCdp(cdp);
+  const value = '这一篇的正文';
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, true);
+  assert.equal(cdp.text, value, '编辑器里 MUST 只剩这一篇的正文，绝不与残文拼接');
+});
+
+test('清场：残文清不掉（选区被框架吃掉）→ 诚实 editor_not_clean，绝不带着残文往下发', async () => {
+  const cdp = new FakeCdp({ initialText: '清不掉的残文', unclearable: true });
+  const dispatcher = dispatcherWithCdp(cdp);
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value: '新正文' }));
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^editor_not_clean/);
+  assert.equal(cdp.inserts().length, 0, '清不干净就 MUST NOT 往里打字');
+});
+
+test('全文回读：编辑器只吃进前 8 个字 → post_validate_failed（旧的前 8 字探针恰好会放行）', async () => {
+  // 刻意卡在旧探针的盲点上：前 8 字进去了，后面全被吞。旧的「includes(前8字)」判定为真
+  // → 真发出一篇被截断的帖子。全文回读必须抓到。
+  const value = '一二三四五六七八九十甲乙丙丁戊己庚辛壬癸';
+  const cdp = new FakeCdp({ swallowAfter: 8 });
+  const dispatcher = dispatcherWithCdp(cdp);
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^post_validate_failed/);
+  assert.equal(cdp.text, '', '放弃这一步 MUST 清场，绝不把半截正文留在活着的编辑器里');
+});
+
+test('全文回读：正文被塞入多余字符（超容差）→ field_polluted + 清场，绝不发出去', async () => {
+  const cdp = new FakeCdp();
+  const dispatcher = dispatcherWithCdp(cdp);
+  const value = '干净正文';
+  // 打完之后页面被联想/输入法塞了一长串（远超 4 字容差）。
+  const orig = cdp.send.bind(cdp);
+  let typed = 0;
+  (cdp as unknown as { send: typeof orig }).send = async (method, params) => {
+    const r = await orig(method, params);
+    if (method === 'Input.insertText' && ++typed === Array.from(value).length) cdp.text += '被话题联想塞进来的一长串脏东西';
+    return r as never;
+  };
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^field_polluted/);
+  assert.equal(cdp.text, '', '同样 MUST 清场');
 });
 
 // ── change split-topic-roles：真话题 token 校验 + runAddTopic CDP 直驱（实机校准选择器）──

@@ -35,7 +35,7 @@ import {
   extractPostId,
   extractPostUrl,
 } from './publish-post.js';
-import { dispatchClick } from '../browse/cdp-util.js';
+import { dispatchClick, dispatchKey } from '../browse/cdp-util.js';
 import { jitterAround, type RandomFn } from '../humanize/timing.js';
 
 /** 指令运行时依赖（EngineDeps 去掉 validator——validator 由各处理器按 kind 提供）。 */
@@ -79,6 +79,24 @@ const PACING_MS = {
 } as const;
 
 const CAPTURE_POST_ID_ACTION = 'note.capture_post_id';
+
+/** 与页面侧读回同口径归一（折叠空白、去首尾），供全文比对（change lease-strict-preemption）。 */
+function normalizeFieldText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * 允许「多出来的字符数」。编辑器可能带入零宽字符/不间断空格之类的无害残留；
+ * 超出这个容差就是真被塞了东西（残文没清干净 / 话题联想劫持插入），这样的正文 MUST NOT 发出去。
+ */
+const FILL_EXTRA_CHAR_TOLERANCE = 4;
+
+/** 清场三态：清干净 / 字段已不在（无残文可留）/ 字段还在但清不掉（真脏页）。 */
+interface FieldClearResult {
+  cleared: boolean;
+  residual: string | null;
+  fieldFound: boolean;
+}
 
 /** 由指令参数合成最小 PublishRequestPayload，供复用 PublishStepValidator 的字段读取。 */
 function synthPayload(payload: PublishCommandPayload): PublishRequestPayload {
@@ -552,9 +570,88 @@ export class PublishCommandDispatcher {
     this.inputEnabled = true;
   }
 
+  /** 页面侧读回字段当前文本（与 normalizeFieldText 同口径归一）。字段不在 → null。 */
+  private async readFieldText(findExpr: string, isContent: boolean): Promise<string | null> {
+    if (!this.cdp) return null;
+    const READ = String.raw`(() => { const el = ${findExpr}; if (!el) return JSON.stringify({ found: false, text: '' });
+      const raw = ${isContent ? `(el.innerText || '')` : `(el.value || '')`};
+      return JSON.stringify({ found: true, text: raw.replace(/\s+/g, ' ').trim() }); })()`;
+    try {
+      const r = await this.cdp.send<{ result?: { value?: string } }>('Runtime.evaluate', { expression: READ, returnByValue: true });
+      const parsed = JSON.parse(r?.result?.value ?? '{"found":false,"text":""}') as { found: boolean; text: string };
+      return parsed.found ? parsed.text : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 清空字段（全选 + Backspace）并回读确认真的空了。
+   *
+   * 必要性（change lease-strict-preemption）：输入是在光标处**追加**，而小红书这条路径过去
+   * **没有任何清空前置**——上一次被抢占 / 失败留下的半截正文不清掉，就会和这一篇拼在一起发出去。
+   *
+   * 三态 MUST 分开：清干净了 / 字段已不在（无残文可留）/ 字段还在但清不掉（真脏页）。
+   */
+  private async clearField(findExpr: string, isContent: boolean): Promise<FieldClearResult> {
+    if (!this.cdp) return { cleared: false, residual: null, fieldFound: false };
+    const SELECT = String.raw`(() => { const el = ${findExpr}; if (!el) return JSON.stringify({ found: false, selected: false });
+      try {
+        el.focus();
+        ${
+          isContent
+            ? `const range = document.createRange(); range.selectNodeContents(el); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);`
+            : `el.select();`
+        }
+        return JSON.stringify({ found: true, selected: true });
+      } catch (e) { return JSON.stringify({ found: true, selected: false }); } })()`;
+    let residual: string | null = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let sel: { found: boolean; selected: boolean };
+      try {
+        const r = await this.cdp.send<{ result?: { value?: string } }>('Runtime.evaluate', { expression: SELECT, returnByValue: true });
+        sel = JSON.parse(r?.result?.value ?? '{"found":false,"selected":false}') as { found: boolean; selected: boolean };
+      } catch {
+        sel = { found: false, selected: false };
+      }
+      // 字段不在（页面被导航走）≠ 字段里有清不掉的残文。两者 MUST 区分上报。
+      if (!sel.found) return { cleared: false, residual: null, fieldFound: false };
+      if (!sel.selected) return { cleared: false, residual: await this.readFieldText(findExpr, isContent), fieldFound: true };
+      await dispatchKey(this.cdp as unknown as Parameters<typeof dispatchKey>[0], 'Backspace', 'Backspace', 8);
+      residual = await this.readFieldText(findExpr, isContent);
+      if (residual === '') return { cleared: true, residual: '', fieldFound: true };
+      if (residual === null) return { cleared: false, residual: null, fieldFound: false };
+    }
+    return { cleared: false, residual, fieldFound: true };
+  }
+
+  /**
+   * 放弃这一步：清场 + 诚实回报。绝不把「清不干净」谎报成干净页——上游据此知道浏览器里
+   * 还躺着残文，而不是以为下一篇能干净地开工。（与 Facebook 侧 abandonFill 同形）
+   */
+  private async abandonFill(
+    base: Pick<PublishCommandResultPayload, 'recordId' | 'seq' | 'kind'>,
+    details: { actionId: string; durationMs: number },
+    findExpr: string,
+    isContent: boolean,
+    error: string,
+  ): Promise<PublishCommandResultPayload> {
+    const cleanup = await this.clearField(findExpr, isContent).catch<FieldClearResult>(() => ({
+      cleared: false,
+      residual: null,
+      fieldFound: true,
+    }));
+    const suffix = cleanup.cleared ? '' : cleanup.fieldFound ? '_dirty_editor' : '_editor_gone';
+    return { ...base, ok: false, error: `${error}${suffix}`, details };
+  }
+
   /**
    * 填标题/正文：标题是 React 受控 input、正文是 tiptap contenteditable——JS 直接赋 value/textContent 都不被框架接收。
-   * 用 CDP 真实输入：聚焦目标（校准选择器）→ Input.insertText（React/tiptap 都正确响应）→ 后置校验值真进去。
+   * 用 CDP 真实输入：聚焦目标（校准选择器）→ **清空并回读确认为空** → Input.insertText 逐块输入 → **全文回读校验**。
+   *
+   * 红线（不假成功）：校验 MUST 回读**全文**。老的「前 8 字」探针有两个致命面——
+   * ① 被抢占 / 失败留下的残文 + 新正文追加，探针只看新正文的前 8 字，照样放行 ⇒ 真发出一篇拼接的帖子；
+   * ② 正文被吞掉 90% 也判成功 ⇒ 真发出截断的帖子。
    */
   private async runFillField(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
     const isContent = payload.params.fieldType === 'content';
@@ -570,20 +667,25 @@ export class PublishCommandDispatcher {
     const startedAt = this.clock();
     const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
     const details = { actionId: isContent ? 'note.publish_content' : 'note.publish_title', durationMs: 0 };
+    const finish = (): { actionId: string; durationMs: number } => ({ ...details, durationMs: this.clock() - startedAt });
     // 校准选择器：标题=placeholder「填写标题会有更多赞哦」的 input；正文=tiptap.ProseMirror。
     const findExpr = isContent
       ? `document.querySelector('.tiptap.ProseMirror') || document.querySelector('[contenteditable="true"]')`
       : `document.querySelector('input[placeholder="填写标题会有更多赞哦"]') || document.querySelector('div.edit-container input.d-text') || document.querySelector('input.d-text')`;
     const FOCUS = String.raw`(() => { const el = ${findExpr}; if (!el) return false; try { el.scrollIntoView({ block: 'center' }); } catch (e) {} el.focus(); try { el.click && el.click(); } catch (e) {} return true; })()`;
-    const probe = JSON.stringify(value.slice(0, 8));
-    const CHECK = isContent
-      ? String.raw`(() => { const el = ${findExpr}; return !!el && (el.innerText || '').includes(${probe}); })()`
-      : String.raw`(() => { const el = ${findExpr}; return !!el && (el.value || '').includes(${probe}); })()`;
+    const expected = normalizeFieldText(value);
     try {
       await this.ensureInputEnabled();
       const f = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: FOCUS, returnByValue: true });
       if (f?.result?.value !== true) {
-        return { ...base, ok: false, error: 'no_target', details: { ...details, durationMs: this.clock() - startedAt } };
+        return { ...base, ok: false, error: 'no_target', details: finish() };
+      }
+      // 清场前置：输入是追加，不先清空就会把残文和这一篇拼在一起发出去。
+      const before = await this.clearField(findExpr, isContent);
+      if (!before.fieldFound) return { ...base, ok: false, error: 'no_target', details: finish() };
+      if (!before.cleared) {
+        const residual = (before.residual ?? '').slice(0, 40);
+        return { ...base, ok: false, error: `editor_not_clean: ${JSON.stringify(residual)}`, details: finish() };
       }
       // 拟人：聚焦后短停顿（手移到输入框）→ 逐字打字（替代一次性灌入，标题/正文都逐字）→ 填完微停顿。
       await this.pause(PACING_MS.fieldFocus);
@@ -591,17 +693,23 @@ export class PublishCommandDispatcher {
       await this.pause(PACING_MS.fieldDone);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return { ...base, ok: false, error: `engine_error: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
+      // 打字途中抛出的任何异常同样把半截正文留在活着的编辑器里 → MUST 走清场 + 诚实回报。
+      return this.abandonFill(base, finish(), findExpr, isContent, `engine_error: ${message}`);
     }
     const deadline = this.clock() + 5_000;
     for (;;) {
-      try {
-        const c = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: CHECK, returnByValue: true });
-        if (c?.result?.value === true) return { ...base, ok: true, details: { ...details, durationMs: this.clock() - startedAt } };
-      } catch {
-        // 忽略瞬时失败，继续轮询
+      const text = await this.readFieldText(findExpr, isContent);
+      if (text !== null && text.includes(expected)) {
+        const extra = text.length - expected.length;
+        // 多出来的字符 = 残文没清干净 / 被输入法或话题联想塞了东西 → 这样的正文 MUST NOT 发出去。
+        if (extra > FILL_EXTRA_CHAR_TOLERANCE) {
+          return this.abandonFill(base, finish(), findExpr, isContent, `field_polluted: extra=${extra}`);
+        }
+        return { ...base, ok: true, details: finish() };
       }
-      if (this.clock() >= deadline) return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
+      if (this.clock() >= deadline) {
+        return this.abandonFill(base, finish(), findExpr, isContent, 'post_validate_failed');
+      }
       await new Promise((r) => setTimeout(r, 300));
     }
   }
