@@ -199,8 +199,15 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.doesNotMatch(rendererSrc, /match: '<svg[\s\S]*m8\.5 12\.2 2\.2 2\.2 4\.8-5\.1/);
   assert.match(rendererCss, /\.rg-flow-step\.flow-active:not\(:last-child\)::after/);
   assert.match(rendererCss, /@keyframes rg-flow-spark/);
-  assert.match(rendererCss, /\.rg-flow-step:not\(:last-child\)::after\s*\{[\s\S]*right: -4px;[\s\S]*width: 28px;/);
-  assert.match(rendererCss, /\.rg-flow-step:not\(:last-child\)::after \{ right: -3px; width: 20px; \}/);
+  assert.match(rendererCss, /--rg-step-line-right: -4px;/);
+  assert.match(rendererCss, /--rg-step-line-width: 28px;/);
+  assert.match(rendererCss, /--rg-step-spark-right: 19px;/);
+  assert.match(rendererCss, /--rg-step-spark-travel: 23px;/);
+  assert.match(rendererCss, /\.rg-flow-step\.flow-active:not\(:last-child\)::before\s*\{[\s\S]*top: 6\.5px;[\s\S]*right: var\(--rg-step-spark-right\);/);
+  assert.match(rendererCss, /100% \{ transform: translateX\(var\(--rg-step-spark-travel\)\) scale\(\.88\); opacity: 0; \}/);
+  assert.match(rendererCss, /--rg-step-line-width: 20px;/);
+  assert.match(rendererCss, /--rg-step-spark-travel: 15px;/);
+  assert.doesNotMatch(rendererCss, /translateX\(-30px\)/);
   assert.doesNotMatch(rendererCss, /right: -22px;[\s\S]*width: 38px;/);
 });
 
