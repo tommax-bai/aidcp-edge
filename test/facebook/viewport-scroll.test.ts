@@ -107,3 +107,19 @@ test('fb-scroll: wheel 起步即失败时，仍有一次受限兜底且不抛出
   assert.equal(result.fallbackUsed, true);
   assert.equal(cdp.fallbackCalls, 1);
 });
+
+// 带符号位移（change facebook-note-scoped-targeting）：点赞前把视口**上方**的目标卡拟人滚回视野，
+// 需要向上滚。旧实现 Math.max(1, …) 把负位移夹成 +1px，永远只能往下滚、够不着上方的目标。
+test('scrollFacebookViewport: 负位移 → wheel 全部向上，回执位移带负号', async () => {
+  const cdp = new ScrollCdp();
+  const before = cdp.scrollY;
+  const result = await scrollFacebookViewport(cdp, { distancePx: -600, random: () => 0.5, sleep: async () => {} });
+  assert.ok(result.targetDistancePx < 0, '目标位移必须保留方向（负=向上）');
+  assert.ok(result.wheelFrames > 0);
+  assert.ok(
+    cdp.wheelCalls.every((w) => Number(w.deltaY) < 0),
+    '每一帧 wheel 都必须是向上的负 deltaY',
+  );
+  assert.ok(cdp.scrollY < before, '文档真的向上滚了');
+  assert.equal(result.fallbackUsed, false);
+});

@@ -1,4 +1,5 @@
 import { evalRaw, type BrowseCdp } from '../../browse/cdp-util.js';
+import { canonicalPostId } from '../post-identity.js';
 
 export type FacebookSurfaceType =
   | 'home'
@@ -128,6 +129,14 @@ export function sanitizeFacebookPermalinkHref(href: string): string {
   return clean.href;
 }
 
+/**
+ * 规范化 + 去重 permalink 候选。
+ *
+ * href 仍是**可导航的规范化链接**（云端 noteId / note.open 用它），但**去重键是规范帖身份**
+ * `canonicalPostId`（change facebook-note-scoped-targeting）：同一帖的多种形态（`/groups/g/posts/p`
+ * 与 `/groups/g/?multi_permalinks=p`）过去会被当成两条候选、把同一帖重复喂给云端；派生不出身份时
+ * 退回按规范化 href 去重（诚实降级，不合并未知）。
+ */
 export function normalizeFacebookPermalinks(hrefs: string[]): FacebookPermalinkCandidate[] {
   const out: FacebookPermalinkCandidate[] = [];
   const seen = new Set<string>();
@@ -142,8 +151,9 @@ export function normalizeFacebookPermalinks(hrefs: string[]): FacebookPermalinkC
     } catch {
       continue;
     }
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
+    const key = canonicalPostId(normalized) ?? normalized;
+    if (seen.has(key)) continue;
+    seen.add(key);
     out.push({ href: normalized, kind });
   }
   return out;

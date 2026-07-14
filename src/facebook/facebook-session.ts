@@ -583,10 +583,15 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     return { type: 'detail', payload };
   }
 
-  /** 点赞当前帖：mode=shadow → 只记不执行（诚实 shadow）；on → 真点赞 + 后置校验。 */
-  private async likeCurrent(_payload: InteractionLikePayload): Promise<TerminalReport> {
+  /**
+   * 点赞**命令指定的那张卡**（change facebook-note-scoped-targeting）：noteId → 规范帖身份 →
+   * 页内三段式解析出唯一目标 article 再动手。绝不再靠「当前页」的隐式假设 + DOM 序第一个反应按钮
+   * （那在信息流态会点错卡）。mode=shadow → 只记不执行（诚实 shadow）；on → 真点赞 + 绑定同卡的后置校验。
+   */
+  private async likeCurrent(payload: InteractionLikePayload): Promise<TerminalReport> {
     const shadow = this.mode === 'shadow';
-    const r = await this.likeExecutor.like({ shadow });
+    const noteId = String(payload?.noteId ?? '').trim();
+    const r = await this.likeExecutor.like({ shadow, ...(noteId ? { noteId } : {}) });
     // ok:true 才让云端经 RiskController.record 记账；shadow/失败一律 ok:false（云端不记、不扣风控）。
     return { type: 'action', payload: { action: 'like', ok: r.ok, ...(r.reason ? { reason: r.reason } : {}) } };
   }

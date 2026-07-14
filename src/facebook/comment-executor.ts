@@ -29,6 +29,7 @@ import {
   type FacebookPageStructureSummary,
 } from './probes/page-structure.js';
 import { isUrlAllowedByTargetDescriptor } from '../platform/driver.js';
+import { canonicalPostId, FB_TARGET_HELPERS_JS } from './post-identity.js';
 import { scrollFacebookViewport } from './viewport-scroll.js';
 
 /**
@@ -466,15 +467,23 @@ export class FacebookCommentExecutor {
     const blockedPre = await this.blockingReason();
     if (blockedPre) return { ok: false, reason: blockedPre, submitted: false, serverConfirmed: false };
 
-    // 催拉 + 聚焦评论框（F1 补丁①再保险：submit 独立入口也需自证评论框在位）。
-    const focus = await this.focusEditorWithScroll();
+    // 目标帖的规范身份：评论框、marker 验收、清空、服务器确认**全部**收窄到这一帖的作用域内，
+    // 绝不再 document 级取第一个编辑框（那会把一次真实的对外写入落到别人帖子底下）。
+    const targetPostId = canonicalPostId(targetUrl);
+    if (!targetPostId) {
+      this.log(`[fb-comment] 目标帖 URL 派生不出规范帖身份（${targetUrl}）——无法收窄评论框，editor_not_found（不提交）`);
+      return { ok: false, reason: 'editor_not_found', submitted: false, serverConfirmed: false };
+    }
+
+    // 催拉 + 聚焦**目标帖作用域内**的评论框（F1 补丁①再保险：submit 独立入口也需自证评论框在位）。
+    const focus = await this.focusEditorWithScroll(targetPostId);
     if (focus.reason) return { ok: false, reason: focus.reason, submitted: false, serverConfirmed: false };
 
     // 受控输入（逐字符拟人）。
     await dispatchKeystrokes(this.cdp, body, { sleep: this.sleep });
-    const accepted = await evalJson<{ accepted: boolean }>(this.cdp, buildMarkerAcceptedJs(body));
+    const accepted = await evalJson<{ accepted: boolean }>(this.cdp, buildMarkerAcceptedJs(body, targetPostId));
     if (!accepted?.accepted) {
-      await this.clearEditorBestEffort();
+      await this.clearEditorBestEffort(targetPostId);
       return { ok: false, reason: 'marker_not_accepted', submitted: false, serverConfirmed: false };
     }
     const code = contactInfo && contactInfo.length > 0 ? contactInfo : '';
@@ -483,10 +492,13 @@ export class FacebookCommentExecutor {
       // 真机探针实证：正文逐字输入后，再用单次 Input.insertText 灌入 "\n+联系方式" 会被 FB/React
       // 编辑器吞掉整段；换行和联系方式逐字符输入可稳定进入编辑器。
       await dispatchKeystrokes(this.cdp, `\n${code}`, { sleep: this.sleep });
-      const contactAccepted = await evalJson<{ accepted: boolean }>(this.cdp, buildEditorContainsFragmentsJs(requiredFragments));
+      const contactAccepted = await evalJson<{ accepted: boolean }>(
+        this.cdp,
+        buildEditorContainsFragmentsJs(requiredFragments, targetPostId),
+      );
       if (!contactAccepted?.accepted) {
         this.log(`[fb-comment] 联系方式追加后未被编辑器验收（${code.length} 字）——不提交，避免裸发`);
-        await this.clearEditorBestEffort();
+        await this.clearEditorBestEffort(targetPostId);
         return { ok: false, reason: 'marker_not_accepted', submitted: false, serverConfirmed: false };
       }
       this.log(`[fb-comment] 联系方式逐字符追加并验收通过（${code.length} 字）`);
@@ -495,18 +507,18 @@ export class FacebookCommentExecutor {
     // 提交前二次 fresh 复检验证码：真验证码绝不硬提交（清空编辑器不留痕）。
     const blockedMid = await this.blockingReason();
     if (blockedMid) {
-      await this.clearEditorBestEffort();
+      await this.clearEditorBestEffort(targetPostId);
       return { ok: false, reason: blockedMid, submitted: false, serverConfirmed: false };
     }
 
     // 提交：FB 评论/回答框**回车即发**（语言无关，不依赖按钮文案；Shift+Enter 才换行）。
     // 受控输入后可能失焦——先再聚焦一次，确保 Enter 落在编辑器上；随后按 Enter 提交。
     // （旧版按按钮文案 `发布评论|Post|…` 定位提交控件在西语/问答帖上会 submit_control_not_found；回车更稳。）
-    await evalJson<FocusEditorResult>(this.cdp, FOCUS_EDITOR_JS);
+    await evalJson<FocusEditorResult>(this.cdp, buildFocusEditorJs(targetPostId));
     await dispatchKey(this.cdp, 'Enter', 'Enter', 13);
 
     // (1) 就地 ack 门控快确认（不刷新，抓服务器点头即成功、比刷新又快又准）。
-    if (await this.inPlaceAckConfirm(requiredFragments, ownId, targetUrl)) {
+    if (await this.inPlaceAckConfirm(requiredFragments, ownId, targetPostId)) {
       return { ok: true, submitted: true, serverConfirmed: true };
     }
     // (2) 兜底：刷新一次 + 有界轮询三重收窄确认（治慢渲染假阴性；提交后误导性报错浮层不当作失败，确认信号权威）。
@@ -516,7 +528,7 @@ export class FacebookCommentExecutor {
       this.log(`[fb-comment] reload 失败：${(err as Error).message}`);
       return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
     }
-    if (await this.reloadScopedConfirm(requiredFragments, ownId, targetUrl)) {
+    if (await this.reloadScopedConfirm(requiredFragments, ownId, targetPostId)) {
       return { ok: true, submitted: true, serverConfirmed: true };
     }
     return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
@@ -526,12 +538,12 @@ export class FacebookCommentExecutor {
    * 就地 ack 门控确认（不刷新）：有界轮询，命中「服务器正式评论 id 或 点赞/回复交互控件」即成功。
    * 有界轮次 + 注入式 sleep（不用 wall-clock 循环），测试可确定性驱动。
    */
-  private async inPlaceAckConfirm(requiredFragments: string[], ownId: string, targetUrl: string): Promise<boolean> {
+  private async inPlaceAckConfirm(requiredFragments: string[], ownId: string, targetPostId: string | null): Promise<boolean> {
     await this.sleep(this.opts.waitAfterSubmitMs);
     for (let i = 0; i < this.opts.inPlaceVerifyRounds; i++) {
       if (i > 0) await this.sleep(this.opts.inPlaceVerifyIntervalMs);
       try {
-        const v = await evalJson<AckVerifyResult>(this.cdp, buildAckVerifyJs(requiredFragments, ownId, targetUrl));
+        const v = await evalJson<AckVerifyResult>(this.cdp, buildAckVerifyJs(requiredFragments, ownId, targetPostId));
         if (v?.ackConfirmed) return true;
       } catch (err) {
         this.log(`[fb-comment] 就地 ack 确认探测失败：${(err as Error).message}`);
@@ -544,12 +556,12 @@ export class FacebookCommentExecutor {
    * 刷新兜底后有界轮询三重收窄确认（own-identity + 目标帖评论区 + 文本片段）。
    * 替代旧「reload 后死等一次」：慢渲染下评论已在服务器却没在单次窗口重渲染 → 多查几眼即命中（治 P2② 假阴性）。
    */
-  private async reloadScopedConfirm(requiredFragments: string[], ownId: string, targetUrl: string): Promise<boolean> {
+  private async reloadScopedConfirm(requiredFragments: string[], ownId: string, targetPostId: string | null): Promise<boolean> {
     await this.sleep(this.opts.waitAfterReloadMs);
     for (let i = 0; i < this.opts.reloadVerifyRounds; i++) {
       if (i > 0) await this.sleep(this.opts.reloadVerifyIntervalMs);
       try {
-        const v = await evalJson<ScopedVerifyResult>(this.cdp, buildScopedVerifyJs(requiredFragments, ownId, targetUrl));
+        const v = await evalJson<ScopedVerifyResult>(this.cdp, buildScopedVerifyJs(requiredFragments, ownId, targetPostId));
         if (v?.confirmed) return true;
       } catch (err) {
         this.log(`[fb-comment] 刷新确认探测失败：${(err as Error).message}`);
@@ -558,10 +570,13 @@ export class FacebookCommentExecutor {
     return false;
   }
 
-  /** 催拉 + 聚焦评论框；返回 reason 表示失败（editor_not_found / permission_gated）。 */
-  private async focusEditorWithScroll(): Promise<{ reason?: FacebookCommentStepReason }> {
+  /**
+   * 催拉 + 聚焦**目标帖作用域内**的评论框；返回 reason 表示失败（editor_not_found / permission_gated）。
+   * 作用域内 0 个评论框 → editor_not_found，**绝不回落 document 第一个编辑框**（红线：不评错帖）。
+   */
+  private async focusEditorWithScroll(targetPostId: string | null): Promise<{ reason?: FacebookCommentStepReason }> {
     for (let i = 0; i <= this.opts.editorScrollRounds; i++) {
-      const focus = await evalJson<FocusEditorResult>(this.cdp, FOCUS_EDITOR_JS);
+      const focus = await evalJson<FocusEditorResult>(this.cdp, buildFocusEditorJs(targetPostId));
       if (focus?.permissionGated) return { reason: 'permission_gated' };
       if (focus?.focused) return {};
       if (i < this.opts.editorScrollRounds) await this.scrollViewport(this.opts.editorScrollDistancePx);
@@ -569,9 +584,9 @@ export class FacebookCommentExecutor {
     return { reason: 'editor_not_found' };
   }
 
-  private async clearEditorBestEffort(): Promise<void> {
+  private async clearEditorBestEffort(targetPostId: string | null): Promise<void> {
     try {
-      await evalRaw<string>(this.cdp, SELECT_EDITOR_CONTENTS_JS);
+      await evalRaw<string>(this.cdp, buildSelectEditorContentsJs(targetPostId));
       await dispatchKey(this.cdp, 'Backspace', 'Backspace', 8);
     } catch {
       /* best-effort：清空失败不影响诚实回执 */
@@ -620,8 +635,41 @@ const FB_EXEC_HELPERS_JS = `
   function fbIsCommentEditor(el){ if(!el) return false; var lab=((el.getAttribute&&(el.getAttribute('aria-label')||el.getAttribute('data-placeholder')||el.getAttribute('placeholder')))||''); var re=/${FB_COMMENT_EDITOR_LABEL_RE.source}/i; if(re.test(lab)) return true; return re.test(fbText(el)); }
   function fbIsGroupQuestionEditor(el){ var lab=((el&&el.getAttribute&&el.getAttribute('aria-label'))||''); return /输入回答|Answer/i.test(lab); }
   function fbJoinSignalVisible(){ try{ if(!/\\/groups\\//.test(location.pathname)) return false; return /(加入小组|Join group|\\bJoin\\b|待批准|Pending|回答问题|Answer questions)/i.test(document.body.innerText||''); }catch(e){ return false; } }
-  function fbEditors(){ return Array.prototype.slice.call(document.querySelectorAll('[contenteditable="true"][role="textbox"]')).filter(function(el){ return fbVisible(el)&&fbIsCommentEditor(el); }); }
 `;
+
+/**
+ * 目标帖作用域内的评论框（change facebook-note-scoped-targeting）。
+ *
+ * 旧实现 `fbEditors()` 是 **document 级**取第一个可见评论框（`eds[0]`）——多编辑框页面（详情页下方还挂着
+ * 别的帖 / 评论回复框）会把一次**真实的对外写入**落到别人帖子底下。这里按命令携带的规范帖身份把编辑框
+ * 收窄到目标帖：
+ *  1. 目标卡（三段式解析出的**唯一** article）子树内的评论框——首选；
+ *  2. 子树内没有（FB 常把评论输入框渲染在 article 之外、同一帖容器之内）→ 退到目标帖的**排他区域**
+ *     （从目标卡向上爬、不混进任何别的顶层帖 article 的最大祖先），只取该区域内**不属于任何 article** 的
+ *     评论框——区域内没有第二张帖，故它只可能属于目标帖。这**不是**「取 document 第一个」，而是唯一性可证的作用域；
+ *     嵌套评论条目里的**回复框**因 `closest('[role=article]')!==null` 被排除，不会把评论发成回复。
+ *  3. 都没有 → 空数组 → 调用方诚实 `editor_not_found`，**绝不回落 `eds[0]`**。
+ */
+export function buildScopedEditorHelpersJs(targetPostId: string | null): string {
+  return `${FB_TARGET_HELPERS_JS}${FB_EXEC_HELPERS_JS}
+  var FB_TARGET_POST_ID=${targetPostId ? jsString(targetPostId) : 'null'};
+  function fbAllEditors(){ return Array.prototype.slice.call(document.querySelectorAll('[contenteditable="true"][role="textbox"]')).filter(function(el){ return fbVisible(el)&&fbIsCommentEditor(el); }); }
+  function fbEditors(){
+    var target=fbTgtResolve(FB_TARGET_POST_ID).el;
+    if(!target) return [];                                             // 目标帖解析不出 → 诚实空，绝不乱写
+    var all=fbAllEditors();
+    // ① 目标卡子树内的评论框（嵌套评论条目里的**回复框** closest!==target，天然排除）。
+    var inArticle=all.filter(function(el){ return fbTgtClosestArticle(el)===target; });
+    if(inArticle.length>0) return inArticle;
+    // ② 退到目标帖的排他区域（区域内没有第二张帖）。区域内**必须唯一**——多于一个就诚实拒，
+    //    绝不「取第一个」（那正是本 change 要根除的 DOM 序回落）。
+    var region=fbTgtExclusiveRegion(target);
+    if(!region) return [];
+    var inRegion=all.filter(function(el){ return region.contains(el) && fbTgtClosestArticle(el)===null; });
+    return inRegion.length===1 ? inRegion : [];
+  }
+`;
+}
 
 /**
  * 读容器真实群名。真机实证：群内**搜索页与群主页**的 document.title 都是「(N) <群名> | Facebook」形态
@@ -701,7 +749,8 @@ function buildPostContentJs(maxComments: number): string {
  * 但那是合法的回帖框、答一条即评论。成员身份已在搜索期由 membership 闸核过（搜到候选=可访问该群帖），
  * 且此处已找到真实可聚焦的评论框——直接聚焦。真正的入群/待批准在搜索期就 permission_gated 了。
  */
-const FOCUS_EDITOR_JS = `(function(){${FB_EXEC_HELPERS_JS}
+function buildFocusEditorJs(targetPostId: string | null): string {
+  return `(function(){${buildScopedEditorHelpersJs(targetPostId)}
   var eds=fbEditors();
   if(eds.length===0) return JSON.stringify({found:false,focused:false,permissionGated:false});
   var el=eds[0];
@@ -710,18 +759,19 @@ const FOCUS_EDITOR_JS = `(function(){${FB_EXEC_HELPERS_JS}
   var focused=document.activeElement===el;
   return JSON.stringify({found:true,focused:focused,permissionGated:false});
 })()`;
+}
 
-/** 受控输入后校验 marker 已被编辑器接受（编辑器文本含该片段）。 */
-function buildMarkerAcceptedJs(text: string): string {
-  return `(function(){${FB_EXEC_HELPERS_JS}
+/** 受控输入后校验 marker 已被编辑器接受（**目标帖作用域内**的编辑器文本含该片段）。 */
+function buildMarkerAcceptedJs(text: string, targetPostId: string | null): string {
+  return `(function(){${buildScopedEditorHelpersJs(targetPostId)}
     var eds=fbEditors(); var el=eds[0]||document.activeElement;
     var t=fbText(el);
     return JSON.stringify({accepted: t.indexOf(${jsString(text.trim())})>=0});
   })()`;
 }
 
-function buildEditorContainsFragmentsJs(fragments: string[]): string {
-  return `(function(){${FB_EXEC_HELPERS_JS}
+function buildEditorContainsFragmentsJs(fragments: string[], targetPostId: string | null): string {
+  return `(function(){${buildScopedEditorHelpersJs(targetPostId)}
     var eds=fbEditors(); var el=eds[0]||document.activeElement;
     var t=fbText(el);
     var fragments=${JSON.stringify(fragments)};
@@ -731,35 +781,38 @@ function buildEditorContainsFragmentsJs(fragments: string[]): string {
 }
 
 /** 全选评论编辑器内容（配合 Backspace 清空，不提交）。 */
-const SELECT_EDITOR_CONTENTS_JS = `(function(){${FB_EXEC_HELPERS_JS}
+function buildSelectEditorContentsJs(targetPostId: string | null): string {
+  return `(function(){${buildScopedEditorHelpersJs(targetPostId)}
   var eds=fbEditors(); var el=eds[0]||document.activeElement; if(!el) return 'no-editor';
   try{ el.focus(); var range=document.createRange(); range.selectNodeContents(el); var sel=getSelection(); sel.removeAllRanges(); sel.addRange(range); return 'selected'; }catch(e){ return 'err:'+e.message; }
 })()`;
+}
 
 /**
  * F1 补丁②：own-identity + 目标帖评论区 + 文本片段 三重收窄确认。
- * - 目标帖优选：article 内含指向 targetUrl 的链接，否则退到首个 article。
- * - 在其评论区找评论节点：文本含片段（前 60 字）且节点内有指向本人数字 id 的作者链接。
- * - 全页文本命中（旧探针）不作数；缺任一命中 → confirmed=false。
+ * - 目标帖：先按**规范帖身份**三段式解析（唯一命中才算）；解析不出再退到「全文档里唯一一张**携带目标身份锚**的
+ *   article」。两者都落空 → confirmed=false（诚实）。**不再退到首个 article、也不再按 URL pathname 子串挑**——
+ *   `multi_permalinks` 形态的 targetUrl 其 pathname 只是 `/groups/<id>`，子串命中群页里几乎任何链接 → 又变成
+ *   「取 DOM 序第一张卡」（对抗性评审复现）。
+ * - 在其评论区找**评论行**：文本含片段（前 60 字）且节点内有指向本人数字 id 的作者链接。
+ * - **绝不退化成整帖 article**（见 buildAckVerifyJs 的同款说明）：那会拿编辑器里还没发出去的正文冒充成功。
  */
-function buildScopedVerifyJs(requiredFragments: string[], ownId: string, targetUrl: string): string {
-  let targetPath = '';
-  try {
-    targetPath = new URL(targetUrl).pathname;
-  } catch {
-    targetPath = '';
-  }
-  return `(function(){${FB_EXEC_HELPERS_JS}
-    var fragments=${JSON.stringify(requiredFragments)}; var ownId=${jsString(ownId)}; var targetPath=${jsString(targetPath)};
+function buildScopedVerifyJs(requiredFragments: string[], ownId: string, targetPostId: string | null): string {
+  return `(function(){${buildScopedEditorHelpersJs(targetPostId)}
+    var fragments=${JSON.stringify(requiredFragments)}; var ownId=${jsString(ownId)};
     function hasAllFragments(txt){ return fragments.length>0 && fragments.every(function(f){ return f && txt.indexOf(f)>=0; }); }
     var articles=Array.prototype.slice.call(document.querySelectorAll('[role="article"], article'));
     if(articles.length===0) return JSON.stringify({confirmed:false,matchedText:false,matchedOwnIdentity:false,articleCount:0});
-    var target=null;
-    if(targetPath){ for(var i=0;i<articles.length;i++){ var links=articles[i].querySelectorAll('a[href]'); for(var j=0;j<links.length;j++){ if((links[j].getAttribute('href')||'').indexOf(targetPath)>=0){ target=articles[i]; break; } } if(target) break; } }
-    if(!target) target=articles[0];
-    // 评论节点：article 内的评论条目（role=article 嵌套 / [aria-label*=Comment/评论]），退化为整个 target。
-    var commentNodes=Array.prototype.slice.call(target.querySelectorAll('[role="article"], [aria-label*="评论"], [aria-label*="Comment"]'));
-    if(commentNodes.length===0) commentNodes=[target];
+    var target=fbTgtResolve(FB_TARGET_POST_ID).el;
+    if(!target){ var carriers=[];
+      for(var i=0;i<articles.length;i++){ if(fbTgtArticleCarriesId(articles[i], FB_TARGET_POST_ID)) carriers.push(articles[i]); }
+      if(carriers.length===1) target=carriers[0];
+    }
+    if(!target) return JSON.stringify({confirmed:false,matchedText:false,matchedOwnIdentity:false,articleCount:articles.length});
+    // 评论行：目标帖内的评论条目（嵌套 role=article / [aria-label*=Comment/评论]），排除编辑框本身。
+    var commentNodes=Array.prototype.slice.call(target.querySelectorAll('[role="article"], [aria-label*="评论"], [aria-label*="Comment"]'))
+      .filter(function(n){ return n.getAttribute('contenteditable')!=='true'; });
+    if(commentNodes.length===0) return JSON.stringify({confirmed:false,matchedText:false,matchedOwnIdentity:false,articleCount:articles.length});
     var matchedText=false, matchedOwn=false;
     for(var k=0;k<commentNodes.length;k++){ var node=commentNodes[k];
       var txt=fbText(node); var hasText=hasAllFragments(txt); if(!hasText) continue; matchedText=true;
@@ -776,24 +829,25 @@ function buildScopedVerifyJs(requiredFragments: string[], ownId: string, targetU
  * ① 服务器正式评论 id（非 client 乐观占位，与 isServerFacebookCommentId 同源）；② 点赞/回复交互控件（乐观阶段为 0）。
  * 任一命中即 ackConfirmed。语言无关（不吃任何 locale 文案）。红线：绝不据乐观渲染/占位 id 冒充成功。
  */
-function buildAckVerifyJs(requiredFragments: string[], ownId: string, targetUrl: string): string {
-  let targetPath = '';
-  try {
-    targetPath = new URL(targetUrl).pathname;
-  } catch {
-    targetPath = '';
-  }
-  return `(function(){${FB_EXEC_HELPERS_JS}
-    var fragments=${JSON.stringify(requiredFragments)}; var ownId=${jsString(ownId)}; var targetPath=${jsString(targetPath)};
+export function buildAckVerifyJs(requiredFragments: string[], ownId: string, targetPostId: string | null): string {
+  return `(function(){${buildScopedEditorHelpersJs(targetPostId)}
+    var fragments=${JSON.stringify(requiredFragments)}; var ownId=${jsString(ownId)};
     function hasAllFragments(txt){ return fragments.length>0 && fragments.every(function(f){ return f && txt.indexOf(f)>=0; }); }
     var CLIENT_RE=/${FB_CLIENT_COMMENT_ID_RE.source}/i; var SERVER_RE=/${FB_SERVER_COMMENT_ID_RE.source}/;
     function serverId(href){ var m=/[?&](?:reply_comment_id|comment_id)=([^&]+)/i.exec(href||''); if(!m) return false; var v=''; try{ v=decodeURIComponent(m[1]); }catch(e){ v=m[1]; } if(!v||CLIENT_RE.test(v)) return false; return SERVER_RE.test(v); }
     var articles=Array.prototype.slice.call(document.querySelectorAll('[role="article"], article'));
     if(articles.length===0) return JSON.stringify({ackConfirmed:false,serverId:false,reactions:0});
-    var target=null;
-    if(targetPath){ for(var i=0;i<articles.length;i++){ var ls=articles[i].querySelectorAll('a[href]'); for(var j=0;j<ls.length;j++){ if((ls[j].getAttribute('href')||'').indexOf(targetPath)>=0){ target=articles[i]; break; } } if(target) break; } }
-    if(!target) target=articles[0];
-    var nodes=Array.prototype.slice.call(target.querySelectorAll('[role="article"]')); if(nodes.length===0) nodes=[target];
+    var target=fbTgtResolve(FB_TARGET_POST_ID).el;
+    if(!target){ var carriers=[];
+      for(var i=0;i<articles.length;i++){ if(fbTgtArticleCarriesId(articles[i], FB_TARGET_POST_ID)) carriers.push(articles[i]); }
+      if(carriers.length===1) target=carriers[0];
+    }
+    if(!target) return JSON.stringify({ackConfirmed:false,serverId:false,reactions:0});
+    // 评论行 = 目标帖内的**嵌套 article**。**绝不退化成整帖 article**：帖子还没有任何评论时，整帖节点里
+    // 既有编辑器里那段还没发出去的正文、又有本人头像链接、还有帖级动作栏的 3 个 role=button（≥2）——
+    // 三条全中 → 一个字都没发出去也会被判成「服务器已点头」（假成功，对抗性评审复现）。
+    var nodes=Array.prototype.slice.call(target.querySelectorAll('[role="article"]'));
+    if(nodes.length===0) return JSON.stringify({ackConfirmed:false,serverId:false,reactions:0});
     for(var k=0;k<nodes.length;k++){ var node=nodes[k];
       var txt=fbText(node); if(!hasAllFragments(txt)) continue;
       var owns=node.querySelectorAll('a[href*="/profile.php?id="], a[href*="/people/"], a[href*="user/"]'); var ownHit=false;

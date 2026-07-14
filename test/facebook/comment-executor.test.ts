@@ -1,9 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { JSDOM } from 'jsdom';
+
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monitor.js';
-import { FacebookCommentExecutor, isFacebookCommentEditorLabel, isServerFacebookCommentId } from '../../src/facebook/comment-executor.js';
+import {
+  FacebookCommentExecutor,
+  buildAckVerifyJs,
+  buildScopedEditorHelpersJs,
+  isFacebookCommentEditorLabel,
+  isServerFacebookCommentId,
+} from '../../src/facebook/comment-executor.js';
 
 // ── raw page-structure builder (matches RawPageStructure the scan JS returns) ──
 interface RawStruct {
@@ -489,4 +497,155 @@ test('fb-executor: 评论框标签识别覆盖真机变体与多语言（回归 
   for (const l of ['你在想什么？', "What's on your mind?", '输入消息…', 'Message', 'Search Facebook', '', null, undefined]) {
     assert.equal(isFacebookCommentEditorLabel(l), false, String(l));
   }
+});
+
+// ─────────────────── 评论编辑框收窄到目标帖（change facebook-note-scoped-targeting）───────────────────
+// 旧实现 fbEditors() 是 document 级取第一个可见评论框（eds[0]）——多编辑框页面会把一次**真实的对外写入**
+// 落到别人帖子底下。这里对真实 DOM 跑页内脚本，验作用域收窄与 fail-closed（绝不回落 eds[0]）。
+
+function editorScopeDom(html: string, url: string): JSDOM {
+  const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, { runScripts: 'outside-only', url });
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value() {
+      return { left: 0, top: 100, right: 300, bottom: 140, width: 300, height: 40 };
+    },
+  });
+  // jsdom 不实现 innerText（生产 Chrome 有）——页内脚本读的正是 innerText，不补的话文本类断言会
+  // 因为「读到空串」而全部「通过」，等于什么都没验（本用例组的正例暴露了这一点）。
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'innerText', {
+    configurable: true,
+    get(this: HTMLElement) {
+      return this.textContent ?? '';
+    },
+  });
+  return dom;
+}
+
+/** 在页面里跑收窄后的 fbEditors()，回其命中的编辑框 id 列表。 */
+function scopedEditorIds(dom: JSDOM, targetPostId: string | null): string[] {
+  const js = `(function(){${buildScopedEditorHelpersJs(targetPostId)}
+    return JSON.stringify(fbEditors().map(function(e){ return e.id; }));
+  })()`;
+  return JSON.parse(String(dom.window.eval(js))) as string[];
+}
+
+const editor = (id: string, label = '发表公开评论…') =>
+  `<div id="${id}" contenteditable="true" role="textbox" aria-label="${label}"></div>`;
+const postCard = (id: string, href: string, inner = '') =>
+  `<div class="wrap"><div role="article" id="${id}"><a href="${href}">1天</a>${inner}</div></div>`;
+
+test('fb-editor-scope: 多编辑框页面 → 只命中目标帖 article 内的编辑框（绝不回落 document 第一个）', () => {
+  const dom = editorScopeDom(
+    '<div role="feed">' +
+      postCard('p1', 'https://www.facebook.com/groups/111/posts/AAA/', editor('ed-A')) +
+      postCard('p2', 'https://www.facebook.com/groups/111/posts/BBB/', editor('ed-B')) +
+      '</div>',
+    'https://www.facebook.com/groups/111',
+  );
+  assert.deepEqual(scopedEditorIds(dom, 'fb:BBB'), ['ed-B'], '目标是 BBB，就绝不能落到 DOM 序在前的 AAA 编辑框');
+  assert.deepEqual(scopedEditorIds(dom, 'fb:AAA'), ['ed-A']);
+});
+
+test('fb-editor-scope: 目标帖不在页面上 → 空（调用方诚实 editor_not_found，绝不用别人帖子的编辑框）', () => {
+  const dom = editorScopeDom(
+    '<div role="feed">' + postCard('p1', 'https://www.facebook.com/groups/111/posts/AAA/', editor('ed-A')) + '</div>',
+    'https://www.facebook.com/groups/111',
+  );
+  assert.deepEqual(scopedEditorIds(dom, 'fb:BBB'), []);
+  assert.deepEqual(scopedEditorIds(dom, null), [], '身份派生不出 → 空，绝不乱写');
+});
+
+test('fb-editor-scope: 评论框渲染在 article 之外（同一帖容器内）→ 由排他区域命中；嵌套评论的回复框不算', () => {
+  // 真机常见：详情页的评论输入框是主帖 article 的兄弟节点，而每条评论 article 里还挂着「回复」框。
+  const replyBox = '<div role="article" id="cmt"><a href="https://www.facebook.com/groups/111/posts/BBB/?comment_id=9">2小时</a>' + editor('ed-reply') + '</div>';
+  const dom = editorScopeDom(
+    '<div class="post-container">' +
+      '<div role="article" id="main"><a href="https://www.facebook.com/groups/111/posts/BBB/">1天</a>' + replyBox + '</div>' +
+      editor('ed-composer') +
+      '</div>',
+    'https://www.facebook.com/groups/111/posts/BBB/',
+  );
+  assert.deepEqual(
+    scopedEditorIds(dom, 'fb:BBB'),
+    ['ed-composer'],
+    'article 子树内只有评论条目的回复框（会把评论发成回复）→ 排除；退到排他区域拿到本帖的评论框',
+  );
+});
+
+test('fb-editor-scope: 排他区域不越界——区域里混进别的帖 article 时不认（宁可 editor_not_found）', () => {
+  // 目标帖 article 内无编辑框，页面上唯一的编辑框属于另一张帖的容器 → 绝不能拿来用。
+  const dom = editorScopeDom(
+    '<div role="feed">' +
+      '<div role="article" id="main"><a href="https://www.facebook.com/groups/111/posts/BBB/">1天</a></div>' +
+      postCard('p2', 'https://www.facebook.com/groups/111/posts/AAA/', editor('ed-A')) +
+      '</div>',
+    'https://www.facebook.com/groups/111',
+  );
+  assert.deepEqual(scopedEditorIds(dom, 'fb:BBB'), [], '别人帖子的编辑框 → 一个都不给（fail-closed）');
+});
+
+test('fb-editor-scope: 弹层里开目标帖、背后 feed 还有别人的帖 → 绝不把评论打进别人帖子的输入框（红线回归）', () => {
+  // 对抗性评审复现的 critical：排他区域一路爬到 <body> → eds[0] 变成背景 feed 里**别人那张卡**的评论框，
+  // 逐字输入 + 回车 = 评论真发到别的帖子下（假阳性，最严重那一类）。
+  const dom = editorScopeDom(
+    '<div role="feed">' +
+      '<div class="wrap"><div role="article" id="pA"><a href="https://www.facebook.com/groups/111/posts/AAA/">1天</a></div>' +
+      editor('ed-feed-A') + // 别人帖子的评论框，渲染在 article 之外
+      '</div></div>' +
+      '<div role="dialog"><div class="wrap"><div role="article" id="pT"><a href="https://www.facebook.com/groups/111/posts/BBB/">1天</a></div>' +
+      editor('ed-dialog-T') +
+      '</div></div>',
+    'https://www.facebook.com/groups/111',
+  );
+  assert.deepEqual(scopedEditorIds(dom, 'fb:BBB'), ['ed-dialog-T'], '只能是弹层里目标帖的评论框');
+});
+
+test('fb-editor-scope: 排他区域里出现多个候选编辑框 → 空（诚实 editor_not_found，绝不取第一个）', () => {
+  const dom = editorScopeDom(
+    '<div class="post-container">' +
+      '<div role="article" id="main"><a href="https://www.facebook.com/groups/111/posts/BBB/">1天</a></div>' +
+      editor('ed-1') +
+      editor('ed-2') +
+      '</div>',
+    'https://www.facebook.com/groups/111/posts/BBB/',
+  );
+  assert.deepEqual(scopedEditorIds(dom, 'fb:BBB'), []);
+});
+
+// ─── 就地 ack 确认：绝不拿「还在编辑器里没发出去的正文」冒充服务器点头（对抗性评审复现的假成功雷）───
+
+function ackVerify(dom: JSDOM, fragments: string[], ownId: string, targetPostId: string | null): { ackConfirmed: boolean } {
+  return JSON.parse(String(dom.window.eval(buildAckVerifyJs(fragments, ownId, targetPostId)))) as { ackConfirmed: boolean };
+}
+
+const OWN = '100000123456789';
+const ownLink = `<a href="https://www.facebook.com/profile.php?id=${OWN}">我</a>`;
+const postBar = '<div role="button" aria-label="留下心情"></div><div role="button" aria-label="评论">评论</div><div role="button" aria-label="分享">分享</div>';
+
+test('fb-ack: 帖子还没有任何评论行、正文仍留在编辑器里 → 绝不 ackConfirmed（一个字都没发出去）', () => {
+  // 旧逻辑：目标帖内找不到嵌套评论 article 就退化成「整帖 article」→ 编辑器里的正文 + 本人头像 + 帖级动作栏
+  // 三条全中 → 判成「服务器已点头」→ 云端记一条根本不存在的评论。
+  const dom = editorScopeDom(
+    '<div role="article" id="main"><a href="https://www.facebook.com/groups/111/posts/BBB/">1天</a>' +
+      ownLink +
+      postBar +
+      '<div id="ed" contenteditable="true" role="textbox" aria-label="发表公开评论…">这条评论还没发出去</div>' +
+      '</div>',
+    'https://www.facebook.com/groups/111/posts/BBB/',
+  );
+  assert.equal(ackVerify(dom, ['这条评论还没发出去'], OWN, 'fb:BBB').ackConfirmed, false);
+});
+
+test('fb-ack: 真评论行（本人 + 文本 + 服务器正式 comment_id）→ ackConfirmed', () => {
+  const serverId = 'Y29tbWVudDoxMjM0'; // base64 "comment:…" 前缀 = 服务器点头后才有
+  const dom = editorScopeDom(
+    '<div role="article" id="main"><a href="https://www.facebook.com/groups/111/posts/BBB/">1天</a>' +
+      postBar +
+      `<div role="article" id="my-comment">${ownLink}<div>我发的评论正文</div>` +
+      `<a href="https://www.facebook.com/groups/111/posts/BBB/?comment_id=${serverId}">2秒</a></div>` +
+      '</div>',
+    'https://www.facebook.com/groups/111/posts/BBB/',
+  );
+  assert.equal(ackVerify(dom, ['我发的评论正文'], OWN, 'fb:BBB').ackConfirmed, true);
 });

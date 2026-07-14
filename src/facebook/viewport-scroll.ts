@@ -9,7 +9,10 @@ import { evalJson, evalRaw, type BrowseCdp } from '../browse/cdp-util.js';
 import { generateScrollSequence, defaultRandom, type RandomFn } from '../humanize/index.js';
 
 export interface FacebookViewportScrollOptions {
-  /** 本次手势的基准总位移（CSS 像素）。实际目标在 +/-20% 内抖动。 */
+  /**
+   * 本次手势的基准总位移（CSS 像素）。实际目标在 +/-20% 内抖动。
+   * **带符号**：正=向下、负=向上（点赞前把视口外的目标卡拟人地滚进视野需要能向上滚）。
+   */
   distancePx: number;
   random?: RandomFn;
   sleep?: (ms: number) => Promise<void>;
@@ -57,9 +60,12 @@ export async function scrollFacebookViewport(
   const random = options.random ?? defaultRandom;
   const sleep = options.sleep ?? defaultSleep;
   const log = options.logger ?? (() => {});
-  const baseline = Math.max(1, Math.round(options.distancePx));
-  const targetDistancePx = Math.max(1, Math.round(baseline * (1 + (random() - 0.5) * 0.4)));
-  const sequence = generateScrollSequence(targetDistancePx, { random });
+  const signed = Math.round(options.distancePx);
+  const direction = signed < 0 ? -1 : 1;
+  const baseline = Math.max(1, Math.abs(signed));
+  const magnitudePx = Math.max(1, Math.round(baseline * (1 + (random() - 0.5) * 0.4)));
+  const targetDistancePx = direction * magnitudePx;
+  const sequence = generateScrollSequence(magnitudePx, { random });
   const beforeY = await readDocumentScrollY(cdp);
   let wheelFrames = 0;
 
@@ -74,7 +80,7 @@ export async function scrollFacebookViewport(
         x,
         y,
         deltaX: 0,
-        deltaY: frame.deltaY,
+        deltaY: direction * frame.deltaY,
       });
       wheelFrames += 1;
       if (frame.delay > 0) await sleep(frame.delay);
