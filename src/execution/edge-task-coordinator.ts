@@ -6,7 +6,12 @@ import type {
 } from '../comm/protocol.js';
 
 export interface EdgeTaskBrowseGate {
-  quiesceForTask(): Promise<number>;
+  /**
+   * 接管：让路 + **有界**等待真写段收敛，返回被取消的未开始浏览命令数。
+   * 未在预算内收敛 MUST 抛出——调用方据此不授予、诚实终结排队申请，MUST NOT 谎称已收敛
+   * （change lease-strict-preemption）。
+   */
+  quiesceForTask(timeoutMs?: number): Promise<number>;
   resumeAfterTask(): Promise<void>;
 }
 
@@ -302,7 +307,15 @@ export class EdgeTaskCoordinator {
     try {
       cancelled = await this.browse.quiesceForTask();
     } catch (err) {
-      this.logger(`[task] quiesce failed: ${err instanceof Error ? err.message : String(err)}`);
+      // 交接未收敛 = 真写段里有个动作超预算，页面可能仍在被它改写。
+      // **绝不能吞掉异常后继续往下授予**（既有隐患：catch 只打日志、随即照常 acquire ⇒ 在一个仍在
+      // 写页面的孤儿动作之上授权，两个写者交错打进同一个页面）。诚实终结排队申请、解除浏览冻结、
+      // 回到可继续协调的状态（change lease-strict-preemption）。
+      this.logger(`[task] quiesce failed: ${err instanceof Error ? err.message : String(err)} → 不授予、诚实终结排队申请`);
+      this.quiescing = false;
+      this.rejectQueuedForQuiesceTimeout();
+      this.browseBlocked = false;
+      return;
     } finally {
       this.quiescing = false;
     }
@@ -383,6 +396,25 @@ export class EdgeTaskCoordinator {
       this.rememberTerminal(entry.payload.taskId, 'cdp_unhealthy');
       this.onReleased({ taskId: entry.payload.taskId, reason: 'cdp_unhealthy' });
       this.logger(`[task] rejected taskId=${entry.payload.taskId} reason=cdp_unhealthy`);
+    }
+  }
+
+  /**
+   * 交接未在预算内收敛：真写段里有一个超出预算的动作，页面可能仍在被它改写。
+   * MUST NOT 授予（绝不在一个仍在写页面的动作头上再放一个人进来）、MUST NOT 谎称已收敛。
+   *
+   * 终态用已有的 `expired`（申请没能在预算内被受理），**绝不复用 `cdp_unhealthy`**——那是假话：
+   * 浏览器控制面是健康的，只是有个动作跑太久；而云端会据此对运营发出「请重启浏览器客户端」的
+   * 误导指令。零协议改动（change lease-strict-preemption）。
+   */
+  private rejectQueuedForQuiesceTimeout(): void {
+    const queued = this.queue;
+    this.queue = [];
+    for (const entry of queued) {
+      this.clearAcquireExpiry(entry);
+      this.rememberTerminal(entry.payload.taskId, 'expired');
+      this.onReleased({ taskId: entry.payload.taskId, reason: 'expired' });
+      this.logger(`[task] rejected taskId=${entry.payload.taskId} reason=quiesce_timeout（回执 expired）`);
     }
   }
 }
