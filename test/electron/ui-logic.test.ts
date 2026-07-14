@@ -205,6 +205,63 @@ test('运行价值说明：新鲜浏览事件先说明正在寻找内容灵感',
   });
 });
 
+test('运行价值说明：日常进度分母来自今日目标时，分子也使用今日浏览累计', () => {
+  const now = Date.now();
+  const v = uiLogic.runtimeGuidanceView(st({
+    presence: { text: '正在继续浏览…', at: new Date(now - 10_000).toISOString() },
+    dailyUsage: {
+      totals: { view: 95, collect: 2 },
+      quotas: { view: 120 },
+      windows: {
+        session: {
+          active: true,
+          totals: { view: 0, collect: 0 },
+          quotas: { view: 20 },
+        },
+      },
+    },
+  }), now);
+  assert.equal(v?.mode, 'running');
+  assert.deepEqual(v?.steps.map((step) => [step.label, step.detail]), [
+    ['浏览与互动', '正在查看第 95 条'],
+    ['判断匹配度', '2 条进入候选'],
+    ['继续寻找灵感', '持续筛选中'],
+  ]);
+  assert.deepEqual(v?.progress, {
+    current: 95,
+    target: 120,
+    percent: 79,
+    title: '正在查看第 95 条推荐内容',
+    counter: '95/120',
+    meta: '进展实时记录',
+  });
+});
+
+test('运行价值说明：没有今日目标时保留当前窗口进度，避免覆盖新手首轮 20 条', () => {
+  const now = Date.now();
+  const v = uiLogic.runtimeGuidanceView(st({
+    presence: { text: '正在继续浏览…', at: new Date(now - 10_000).toISOString() },
+    dailyUsage: {
+      windows: {
+        session: {
+          active: true,
+          totals: { view: 0, collect: 0 },
+          quotas: { view: 20 },
+        },
+      },
+    },
+  }), now);
+  assert.equal(v?.mode, 'running');
+  assert.deepEqual(v?.progress, {
+    current: 0,
+    target: 20,
+    percent: 0,
+    title: '正在观察推荐内容',
+    counter: '0/20',
+    meta: '进展实时记录',
+  });
+});
+
 test('运行价值说明：本轮浏览完成才展示自然间隔与三步说明', () => {
   const now = Date.now();
   const v = uiLogic.runtimeGuidanceView(st({

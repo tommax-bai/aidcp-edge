@@ -175,12 +175,25 @@
     return firstCount([window && window.totals, daily.totals, objectOrEmpty(status).stats], keys);
   }
 
+  function dailyUsageCount(status, dayWindow, keys) {
+    const daily = objectOrEmpty(objectOrEmpty(status).dailyUsage);
+    return firstCount([dayWindow && dayWindow.totals, daily.totals, objectOrEmpty(status).stats], keys);
+  }
+
   function observedCount(status, window) {
     return usageCount(status, window, ['view', 'views']);
   }
 
+  function dailyObservedCount(status, dayWindow) {
+    return dailyUsageCount(status, dayWindow, ['view', 'views']);
+  }
+
   function inspirationCount(status, window) {
     return usageCount(status, window, ['inspiration', 'inspirations', 'candidate', 'candidates', 'collect', 'collects']);
+  }
+
+  function dailyInspirationCount(status, dayWindow) {
+    return dailyUsageCount(status, dayWindow, ['inspiration', 'inspirations', 'candidate', 'candidates', 'collect', 'collects']);
   }
 
   function explorationWindow(status, nowMs) {
@@ -192,10 +205,13 @@
   }
 
   function explorationProgress(status, window, resting, dayWindow) {
-    const observed = observedCount(status, window);
     const daily = objectOrEmpty(objectOrEmpty(status).dailyUsage);
-    const configuredTarget = firstPositiveCount([dayWindow && dayWindow.view, daily.quotas, window && window.view], ['cap', 'view', 'views']);
+    const dailyTarget = firstPositiveCount([dayWindow && dayWindow.view, daily.quotas], ['cap', 'view', 'views']);
+    const windowTarget = firstPositiveCount([window && window.view], ['cap', 'view', 'views']);
+    const useDailyProgress = dailyTarget > 0;
+    const configuredTarget = useDailyProgress ? dailyTarget : windowTarget;
     const hasTarget = configuredTarget > 0;
+    const observed = useDailyProgress ? dailyObservedCount(status, dayWindow) : observedCount(status, window);
     const target = hasTarget ? Math.max(observed, configuredTarget) : Math.max(observed, 1);
     const percent = hasTarget && target > 0 ? Math.min(100, Math.round((observed / target) * 100)) : 0;
     const title = resting
@@ -331,8 +347,11 @@
     }
     if (running && p && p.text && fresh) {
       const window = explorationWindow(s, nowMs);
-      const observed = observedCount(s, window);
-      const inspirations = inspirationCount(s, window);
+      const progress = explorationProgress(s, window, false, day);
+      const observed = progress.current;
+      const daily = objectOrEmpty(objectOrEmpty(s).dailyUsage);
+      const useDailyProgress = firstPositiveCount([day && day.view, daily.quotas], ['cap', 'view', 'views']) > 0;
+      const inspirations = useDailyProgress ? dailyInspirationCount(s, day) : inspirationCount(s, window);
       return {
         mode: 'running',
         mascot: 'task-execution',
@@ -342,7 +361,7 @@
         value: '刷首页不是漫无目的，而是在寻找目标人群已经验证过的方向。',
         detail: '',
         steps: runningGuidanceSteps(observed, inspirations),
-        progress: explorationProgress(s, window, false, day),
+        progress,
         resume: '',
       };
     }

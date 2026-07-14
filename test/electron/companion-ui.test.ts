@@ -197,6 +197,31 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.match(rendererCss, /@keyframes rg-flow-spark/);
 });
 
+test('运行中 + 今日已有浏览累计 → 获得感进度使用账号今日累计，不被当前窗口 0 覆盖', async () => {
+  const { w } = await boot({
+    dailyUsage: {
+      totals: { view: 95, like: 4, collect: 2, comment: 0, follow: 0, publish: 0 },
+      quotas: { view: 120, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+      windows: {
+        session: {
+          active: true,
+          totals: { view: 0, collect: 0 },
+          quotas: { view: 20 },
+        },
+      },
+    },
+  });
+  assert.equal(hidden($(w, '#runtime-guidance')), false);
+  assert.equal($(w, '#runtime-guidance').dataset.mode, 'running');
+  assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /正在查看第 95 条/);
+  assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /2 条进入候选/);
+  assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /正在查看第 95 条推荐内容/);
+  assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /95\/120/);
+  assert.doesNotMatch($(w, '#runtime-guidance-progress').textContent ?? '', /0\/120/);
+  assert.equal($(w, '#runtime-guidance-progress .rg-progress-track').getAttribute('aria-valuenow'), '95');
+  assert.equal(($(w, '#runtime-guidance-progress .rg-progress-fill') as HTMLElement).style.width, '79%');
+});
+
 test('红线：停止 / 事件过期时动效止息、如实待命', async () => {
   const stale = new Date(Date.now() - 6 * 60_000).toISOString();
   const { w, pushStatus } = await boot({ edge: 'stopped', session: 'idle', presence: { text: 'x', at: stale } });
