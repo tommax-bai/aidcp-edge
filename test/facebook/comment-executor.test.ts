@@ -649,3 +649,33 @@ test('fb-ack: 真评论行（本人 + 文本 + 服务器正式 comment_id）→ 
   );
   assert.equal(ackVerify(dom, ['我发的评论正文'], OWN, 'fb:BBB').ackConfirmed, true);
 });
+
+test('fb-editor-scope: 旁边的帖 article 0 尺寸（折叠/动画中）但其评论框仍渲染 → 绝不纳入（round-2 回归）', () => {
+  // 排他区域的污染源必须含**不可见**的 article，否则 0 尺寸旁帖不算污染 → 区域爬到 body → 取到它的评论框。
+  const dom = new JSDOM(
+    '<!doctype html><html><body>' +
+      '<div class="wrap"><div role="article" id="pA" data-zero="1"><a href="https://www.facebook.com/groups/111/posts/AAA/">1天</a></div>' +
+      editor('ed-A') +
+      '</div>' +
+      '<div class="wrap"><div role="article" id="pT"><a href="https://www.facebook.com/groups/111/posts/BBB/">1天</a></div>' +
+      editor('ed-T') +
+      '</div>' +
+      '</body></html>',
+    { runScripts: 'outside-only', url: 'https://www.facebook.com/groups/111/posts/BBB/' },
+  );
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value(this: HTMLElement) {
+      // pA 的 article 外壳 0 尺寸；其余（含 ed-A composer）正常有布局。
+      if (this.getAttribute?.('data-zero') === '1') return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+      return { left: 0, top: 100, right: 300, bottom: 140, width: 300, height: 40 };
+    },
+  });
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'innerText', {
+    configurable: true,
+    get(this: HTMLElement) {
+      return this.textContent ?? '';
+    },
+  });
+  assert.deepEqual(scopedEditorIds(dom, 'fb:BBB'), ['ed-T'], '0 尺寸旁帖的评论框绝不能被当成目标帖的');
+});

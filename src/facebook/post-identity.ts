@@ -190,8 +190,14 @@ export const FB_TARGET_HELPERS_JS = `${POST_IDENTITY_JS}
     var scope=fbTgtScopeRoot();
     var rootEl=(scope===document)?(document.body||document.documentElement):scope;
     if(!rootEl||!rootEl.contains(article)) return null;
-    var tops=fbTgtTopArticles(document);                                                 // 污染源 = 全文档的顶层帖
-    var others=[]; for(var i=0;i<tops.length;i++){ if(tops[i]!==article) others.push(tops[i]); }
+    // 污染源 = 全文档里**除目标外的所有** [role=article]（**含 0 尺寸 / 隐藏**）。绝不用「可见顶层帖」——
+    // 一张 0 尺寸 / 折叠 / 动画中的旁帖若因不可见被漏算，区域会一路爬到 body、把它的评论框纳入 → 评错帖
+    // （round-2 对抗性评审在真实注入产物上复现）。这里排他性证明要的是「区域内**物理上**没有第二张帖」，
+    // 与可见性无关。
+    var allArts=document.querySelectorAll('[role="article"], article');
+    var others=[]; for(var i=0;i<allArts.length;i++){ var a=allArts[i];
+      if(a===article || article.contains(a) || a.contains(article)) continue;            // 目标自身 / 其嵌套评论 / 其祖先不算污染
+      others.push(a); }
     var region=article;
     while(region!==rootEl && region.parentElement){
       var p=region.parentElement;
@@ -201,6 +207,9 @@ export const FB_TARGET_HELPERS_JS = `${POST_IDENTITY_JS}
       if(polluted) break;
       region=p;
     }
+    // 区域退化成 body / documentElement 而文档里**还有别的帖**（others 已含隐藏帖）→ 拒（宁可
+    // editor_not_found，绝不放开全文档）。用 others.length 而非 allArts.length：后者含目标自己的嵌套评论
+    // article，会把「本帖评论框渲染在 article 外、页面上就这一张帖」的正常场景误杀成 editor_not_found。
     if(others.length>0 && (region===document.body || region===document.documentElement)) return null;
     return region; }
 `;
