@@ -209,7 +209,7 @@
         mascot: 'task-execution',
         animate: true,
         kicker: '为你探索',
-        title: '正在首页为你寻找更容易被看见的内容灵感',
+        title: '正在首页寻找容易被看见的内容灵感',
         detail: '观察平台推荐的内容，寻找正在上升的话题。',
         steps: [],
         resume: '',
