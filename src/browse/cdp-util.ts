@@ -126,7 +126,13 @@ export class InputDispatchDeadlineError extends Error {
   }
 }
 
-function assertInputDeadline(options: DispatchClickOptions): void {
+/** 截止时刻契约：点击与逐字输入共用。缺省（无 deadlineAt）即完全不设限，行为与历史一致。 */
+interface InputDeadlineOptions {
+  deadlineAt?: number;
+  clock?: () => number;
+}
+
+function assertInputDeadline(options: InputDeadlineOptions): void {
   if (options.deadlineAt === undefined) return;
   const clock = options.clock ?? Date.now;
   if (clock() >= options.deadlineAt) throw new InputDispatchDeadlineError(options.deadlineAt);
@@ -245,6 +251,18 @@ export interface DispatchKeystrokesOptions {
   random?: HumanRandomFn;
   /** 注入 sleep */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * 可选的整体输入截止时刻。逐字输入是 O(文本长度) 的操作，调用方（云端下发的单步预算）需要
+   * 能让它**在安全边界内停手**——否则调用方放弃后这条循环仍在往活着的编辑器里写字，
+   * 造成「上游已判失败、页面上却躺着半篇正文」的错位。
+   *
+   * 语义：只在下一个字符尚未发出时检查，绝不取消已经发出的 CDP 命令；超时即抛
+   * InputDispatchDeadlineError，**已输入的部分留在编辑器里**，由调用方负责清场并诚实回报。
+   * 缺省（不传）＝完全不设限，行为与历史逐字节一致。
+   */
+  deadlineAt?: number;
+  /** deadlineAt 对应的墙钟（测试可注入，默认 Date.now）。 */
+  clock?: () => number;
 }
 
 /**
@@ -252,19 +270,26 @@ export interface DispatchKeystrokesOptions {
  *
  * 为每个字符按键盘节奏采样"距上一键的延迟"，先 sleep 再用 Input.insertText 输入单字符，
  * 形成不均匀的真人打字节奏（替代一次性 insertText）。
+ *
+ * @returns 实际已输入的字符数（未设 deadlineAt 时恒等于文本长度）。
+ * @throws InputDispatchDeadlineError 设了 deadlineAt 且在输完前耗尽。
  */
 export async function dispatchKeystrokes(
   cdp: BrowseCdp,
   text: string,
   options: DispatchKeystrokesOptions = {},
-): Promise<void> {
+): Promise<number> {
   const random = options.random ?? humanDefaultRandom;
   const sleep = options.sleep ?? defaultSleep;
   const strokes = generateKeyStrokes(text, { random });
+  let typed = 0;
   for (const stroke of strokes) {
     if (stroke.delay > 0) await sleep(stroke.delay);
+    assertInputDeadline(options);
     await cdp.send('Input.insertText', { text: stroke.char });
+    typed++;
   }
+  return typed;
 }
 
 /**

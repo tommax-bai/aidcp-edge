@@ -1,4 +1,12 @@
-import { dispatchClick, dispatchKeystrokes, evalJson, evalRaw, type BrowseCdp } from '../browse/cdp-util.js';
+import {
+  dispatchClick,
+  dispatchKey,
+  dispatchKeystrokes,
+  evalJson,
+  evalRaw,
+  InputDispatchDeadlineError,
+  type BrowseCdp,
+} from '../browse/cdp-util.js';
 import type { ImageUploader } from '../flows/image-uploader.js';
 import type { PublishCommandPayload, PublishCommandResultPayload } from '../comm/protocol.js';
 
@@ -8,7 +16,19 @@ export interface FacebookPublishExecutorOptions {
   composerTimeoutMs?: number;
   submitVerifyTimeoutMs?: number;
   capturePostTimeoutMs?: number;
+  /**
+   * 云端未下发单步预算时（旧云端 / 兼容路径），正文填写自己的兜底预算。
+   * MUST 小于云端的常数单步窗口 30s——这样即使对端没升级，也是**边缘先答**（诚实失败），
+   * 而不是云端先超时、边缘还在往活着的编辑器里打字。
+   */
+  fillFallbackTimeoutMs?: number;
+  /** 从预算里为「聚焦 + 清场 + 全文回读」预留的部分；其余才是逐字输入可用的时间。 */
+  fillReserveMs?: number;
+  /** 打完字后等待编辑器接受全文的窗口。 */
+  fillVerifyTimeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /** 墙钟（测试可注入）。 */
+  now?: () => number;
 }
 
 export interface FacebookPublishExecutorDeps {
@@ -25,7 +45,11 @@ const DEFAULTS: Required<FacebookPublishExecutorOptions> = {
   composerTimeoutMs: 20_000,
   submitVerifyTimeoutMs: 20_000,
   capturePostTimeoutMs: 20_000,
+  fillFallbackTimeoutMs: 25_000,
+  fillReserveMs: 8_000,
+  fillVerifyTimeoutMs: 5_000,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now: () => Date.now(),
 };
 
 const FB_PUBLISH_HELPERS_JS = String.raw`
@@ -111,6 +135,30 @@ function fbPublishSubmittedSignal(){
   var text = fbPublishText(document.body);
   return /(your post is being processed|your post has been shared|post shared|已发布|发布中|發佈中|đã đăng|publicación compartida)/i.test(text);
 }
+function fbPublishFocusEditor(){
+  var el = fbPublishEditor();
+  if (!el) return { found:false, focused:false };
+  try { el.scrollIntoView({ block:'center' }); } catch(e) {}
+  try { el.focus(); if (el.click) el.click(); } catch(e) {}
+  return { found:true, focused: document.activeElement === el };
+}
+function fbPublishSelectEditorContents(){
+  var el = fbPublishEditor();
+  if (!el) return false;
+  try {
+    el.focus();
+    var range = document.createRange();
+    range.selectNodeContents(el);
+    var sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return true;
+  } catch(e) { return false; }
+}
+function fbPublishEditorText(){
+  var el = fbPublishEditor();
+  return { found: !!el, text: el ? fbPublishText(el) : '' };
+}
 function fbPublishExtractPost(){
   var links = Array.from(document.querySelectorAll('a[href]')).map(function(a){ return a.href; });
   var hit = links.find(function(h){ return /\/posts\/|story_fbid=|\/permalink\//i.test(h); }) || location.href;
@@ -135,9 +183,17 @@ function base(payload: PublishCommandPayload): Pick<PublishCommandResultPayload,
   return { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
 }
 
-function valueSnippet(value: string): string {
-  return value.replace(/\s+/g, ' ').trim().slice(0, 20);
+/** 与页面侧 fbPublishText 同口径归一（折叠空白、去首尾），供全文比对。 */
+function normalizeEditorText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
 }
+
+/**
+ * 允许的「多出来的字符数」。编辑器可能带入零宽字符/不间断空格之类的无害残留；
+ * 超出这个容差就是真被塞了东西（如打字途中被 typeahead 劫持插入了 @提及），
+ * 那样的正文 MUST NOT 发出去。
+ */
+const FILL_EXTRA_CHAR_TOLERANCE = 4;
 
 export class FacebookPublishExecutor {
   private readonly cdp: BrowseCdp;
@@ -175,11 +231,11 @@ export class FacebookPublishExecutor {
     timeoutMs: number,
     fn: () => Promise<T | null | undefined | false>,
   ): Promise<T | null> {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = this.opts.now() + timeoutMs;
     for (;;) {
       const value = await fn();
       if (value) return value;
-      if (Date.now() >= deadline) return null;
+      if (this.opts.now() >= deadline) return null;
       await this.opts.sleep(this.opts.pollMs);
     }
   }
@@ -237,32 +293,111 @@ export class FacebookPublishExecutor {
     return { ...base(payload), ok: true };
   }
 
+  /** 读回编辑器当前文本（已按 fbPublishText 折叠空白）。编辑器不在 → null。 */
+  private async readEditorText(): Promise<string | null> {
+    const r = await evalJson<{ found: boolean; text: string }>(
+      this.cdp,
+      `(function(){${FB_PUBLISH_HELPERS_JS} return JSON.stringify(fbPublishEditorText()); })()`,
+    ).catch(() => null);
+    if (!r || !r.found) return null;
+    return r.text;
+  }
+
+  /**
+   * 清空编辑器（全选 + Backspace），并回读确认真的空了。
+   *
+   * 必要性：openComposer 见到已存在的编辑区会直接复用，而输入是在光标处**追加**——
+   * 上一次失败留下的脏正文不清掉，就会和这一篇拼在一起发出去。
+   */
+  private async clearEditor(): Promise<{ cleared: boolean; residual: string | null }> {
+    let residual: string | null = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const selected = await evalRaw<boolean>(
+        this.cdp,
+        `(function(){${FB_PUBLISH_HELPERS_JS} return fbPublishSelectEditorContents(); })()`,
+      ).catch(() => false);
+      if (!selected) return { cleared: false, residual: null };
+      await dispatchKey(this.cdp, 'Backspace', 'Backspace', 8);
+      residual = await this.readEditorText();
+      if (residual === '') return { cleared: true, residual: '' };
+    }
+    return { cleared: false, residual };
+  }
+
+  /**
+   * 放弃这一步：清场 + 诚实回报。绝不把「清不干净」谎报成干净页——运维据此知道
+   * 浏览器里还躺着残文，而不是以为下一篇能干净地开工。
+   */
+  private async abandonFill(
+    payload: PublishCommandPayload,
+    error: string,
+  ): Promise<PublishCommandResultPayload> {
+    const cleanup = await this.clearEditor().catch(() => ({ cleared: false, residual: null }));
+    const suffix = cleanup.cleared ? '' : '_dirty_composer';
+    this.log(`[facebook-publish] 放弃正文填写 error=${error} composerCleared=${cleanup.cleared}`);
+    return { ...base(payload), ok: false, error: `${error}${suffix}` };
+  }
+
+  /**
+   * 正文填写。Facebook 的编辑器要逐字符输入（拒整段灌入），这是 O(正文长度) 的操作——
+   * 因此它 MUST 在云端下发的单步预算（payload.timeoutMs）内自我掐表停手，否则上游放弃后
+   * 这条循环仍在往活着的编辑器里写字，造成「上游已判失败、页面上却躺着半篇正文」的错位。
+   *
+   * 红线（不假成功）：插入调用没报错 ≠ 文本进去了。校验 MUST 回读**全文**——
+   * 老的「前 20 字」探针会把「被吞掉 90%」判成成功，长正文一旦跑得完就会真发出截断的帖子。
+   */
   private async fillContent(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
     if (payload.params.fieldType && payload.params.fieldType !== 'content') {
       this.log(`[facebook-publish] ignore unsupported fieldType=${payload.params.fieldType}`);
       return { ...base(payload), ok: true };
     }
     const value = payload.params.value ?? '';
-    const probe = valueSnippet(value);
     if (!value.trim()) return { ...base(payload), ok: false, error: 'empty_content' };
+
+    const expected = normalizeEditorText(value);
+    const budgetMs = payload.timeoutMs ?? this.opts.fillFallbackTimeoutMs;
+    const typingDeadlineAt = this.opts.now() + Math.max(1_000, budgetMs - this.opts.fillReserveMs);
+
     try {
-      const focused = await evalRaw<boolean>(
+      const focus = await evalJson<{ found: boolean; focused: boolean }>(
         this.cdp,
-        `(function(){${FB_PUBLISH_HELPERS_JS} var el = fbPublishEditor(); if (!el) return false; try { el.scrollIntoView({ block:'center' }); } catch(e) {} try { el.focus(); el.click && el.click(); } catch(e) {} return document.activeElement === el || true; })()`,
+        `(function(){${FB_PUBLISH_HELPERS_JS} return JSON.stringify(fbPublishFocusEditor()); })()`,
       );
-      if (!focused) return { ...base(payload), ok: false, error: 'no_target' };
-      await dispatchKeystrokes(this.cdp, value, { sleep: this.opts.sleep });
-      if (!probe) return { ...base(payload), ok: true };
-      const accepted = await this.waitUntil(5_000, async () =>
-        evalRaw<boolean>(
-          this.cdp,
-          `(function(){${FB_PUBLISH_HELPERS_JS} var el = fbPublishEditor(); return !!el && fbPublishText(el).indexOf(${JSON.stringify(probe)}) >= 0; })()`,
-        ).catch(() => false),
-      );
-      return accepted ? { ...base(payload), ok: true } : { ...base(payload), ok: false, error: 'marker_not_accepted' };
+      if (!focus.found) return { ...base(payload), ok: false, error: 'no_target' };
+      if (!focus.focused) {
+        // 聚焦是尽力而为、不是判据：Lexical 可能把焦点落在子节点上。真正的判据是打完后的全文回读。
+        this.log('[facebook-publish] 编辑器已找到但焦点未落在其上，继续输入，以全文回读为准');
+      }
+
+      const before = await this.clearEditor();
+      if (!before.cleared) {
+        const residual = (before.residual ?? '').slice(0, 40);
+        return { ...base(payload), ok: false, error: `composer_not_clean: ${JSON.stringify(residual)}` };
+      }
+
+      await dispatchKeystrokes(this.cdp, value, {
+        sleep: this.opts.sleep,
+        deadlineAt: typingDeadlineAt,
+        clock: this.opts.now,
+      });
     } catch (err) {
+      if (err instanceof InputDispatchDeadlineError) {
+        return this.abandonFill(payload, `fill_deadline_exceeded: budget=${budgetMs}ms chars=${Array.from(value).length}`);
+      }
       return { ...base(payload), ok: false, error: `engine_error: ${err instanceof Error ? err.message : String(err)}` };
     }
+
+    const actual = await this.waitUntil(this.opts.fillVerifyTimeoutMs, async () => {
+      const text = await this.readEditorText();
+      return text !== null && text.includes(expected) ? { text } : null;
+    });
+    if (!actual) return this.abandonFill(payload, 'content_not_accepted');
+
+    const extra = actual.text.length - expected.length;
+    if (extra > FILL_EXTRA_CHAR_TOLERANCE) {
+      return this.abandonFill(payload, `content_polluted: expected=${expected.length} actual=${actual.text.length}`);
+    }
+    return { ...base(payload), ok: true };
   }
 
   private async submit(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {

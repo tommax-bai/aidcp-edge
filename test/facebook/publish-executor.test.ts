@@ -18,6 +18,12 @@ class FakeFacebookPublishCdp implements BrowseCdp {
   navigatedUrl = '';
   extractPostCalls = 0;
   postAvailableAfterExtractCalls = 1;
+  /** 编辑器已全选（fbPublishSelectEditorContents 置位；Backspace 据此整体清空）。 */
+  selectedAll = false;
+  /** 故障注入：编辑器只吃前 N 个字符（模拟 FB 吞字），其余静默丢弃。 */
+  swallowAfterChars: number | null = null;
+  /** 故障注入：编辑器拒绝被清空（模拟清场失败）。 */
+  refuseClear = false;
 
   async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ method, params });
@@ -26,7 +32,14 @@ class FakeFacebookPublishCdp implements BrowseCdp {
       return {} as T;
     }
     if (method === 'Input.insertText') {
-      this.editorText += String(params?.text ?? '');
+      this.selectedAll = false;
+      const swallowed =
+        this.swallowAfterChars !== null && Array.from(this.editorText).length >= this.swallowAfterChars;
+      if (!swallowed) this.editorText += String(params?.text ?? '');
+      return {} as T;
+    }
+    if (method === 'Input.dispatchKeyEvent' && params?.key === 'Backspace') {
+      if (params?.type === 'keyDown' && this.selectedAll && !this.refuseClear) this.editorText = '';
       return {} as T;
     }
     if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
@@ -81,11 +94,23 @@ class FakeFacebookPublishCdp implements BrowseCdp {
         },
       } as T;
     }
-    if (expression.includes('fbPublishText(el).indexOf')) {
-      const marker = expression.includes('hello facebook') ? 'hello facebook' : '';
-      return { result: { value: !!marker && this.editorText.includes(marker) } } as T;
+    if (expression.includes('return JSON.stringify(fbPublishEditorText())')) {
+      return {
+        result: {
+          value: JSON.stringify({
+            found: this.composerOpen,
+            text: this.editorText.replace(/\s+/g, ' ').trim(),
+          }),
+        },
+      } as T;
     }
-    if (expression.includes('var el = fbPublishEditor()') && expression.includes('el.focus')) {
+    if (expression.includes('return JSON.stringify(fbPublishFocusEditor())')) {
+      return {
+        result: { value: JSON.stringify({ found: this.composerOpen, focused: this.composerOpen }) },
+      } as T;
+    }
+    if (expression.includes('return fbPublishSelectEditorContents()')) {
+      if (this.composerOpen) this.selectedAll = true;
       return { result: { value: this.composerOpen } } as T;
     }
     if (expression.includes('return !!fbPublishEditor()')) {
@@ -190,5 +215,112 @@ test('FacebookPublishExecutor: disabled submit is an honest failure', async () =
   const result = await executor.dispatch(command('submit_publish'));
   assert.equal(result.ok, false);
   assert.equal(result.error, 'submit_control_disabled');
+  assert.equal(cdp.submitted, false);
+});
+
+/**
+ * 假时钟：sleep 推进虚拟墙钟，让「逐字输入撞上预算」这条分支可测。
+ * 老用例用的 instantSleep 让墙钟恒为 0——deadline 分支在那种桩下永远走不到。
+ */
+function fakeClock(): { now: () => number; sleep: (ms: number) => Promise<void> } {
+  let t = 0;
+  return { now: () => t, sleep: async (ms: number) => { t += ms; } };
+}
+
+async function openComposer(cdp: FakeFacebookPublishCdp, executor: FacebookPublishExecutor): Promise<void> {
+  await executor.dispatch(command('select_mode', { value: 'facebook_personal_timeline' }, 1));
+  assert.equal(cdp.composerOpen, true);
+}
+
+test('FacebookPublishExecutor: 编辑器吞掉正文尾部 → 诚实失败 + 清场，绝不判成功', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 50, fillVerifyTimeoutMs: 20 },
+  );
+  await openComposer(cdp, executor);
+
+  const content = '第一句足够长的正文开头，后面这些字会被编辑器吞掉。';
+  // 只吃前 12 个字符：老的「前 20 字」探针会把这判成 ok:true 并继续走到提交。
+  cdp.swallowAfterChars = 12;
+
+  const filled = await executor.dispatch(command('fill_field', { fieldType: 'content', value: content }, 2));
+  assert.equal(filled.ok, false);
+  assert.match(String(filled.error), /^content_not_accepted$/);
+  assert.equal(cdp.editorText, '', '失败后 composer 必须已清场，不给下一篇留残文');
+  assert.equal(cdp.submitted, false);
+});
+
+test('FacebookPublishExecutor: 正文打不完预算 → 停手、清场、诚实回报，绝不留孤儿打字循环', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  const clock = fakeClock();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: clock.sleep, now: clock.now, pollMs: 1, composerTimeoutMs: 50_000, fillReserveMs: 1_000 },
+  );
+  await openComposer(cdp, executor);
+
+  const content = '很长的正文'.repeat(60); // 300 字，按 ~110ms/字远超下面这点预算
+  const filled = await executor.dispatch(
+    { ...command('fill_field', { fieldType: 'content', value: content }, 2), timeoutMs: 3_000 },
+  );
+
+  assert.equal(filled.ok, false);
+  assert.match(String(filled.error), /^fill_deadline_exceeded/);
+  const typed = cdp.calls.filter((c) => c.method === 'Input.insertText').length;
+  assert.ok(typed > 0 && typed < Array.from(content).length, `应打到一半就停手，实际 typed=${typed}`);
+  assert.equal(cdp.editorText, '', '放弃后 composer 必须已清场');
+  assert.equal(cdp.submitted, false);
+});
+
+test('FacebookPublishExecutor: 云端下发的预算够用时，长正文能完整打完并通过全文回读', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  const clock = fakeClock();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: clock.sleep, now: clock.now, pollMs: 1, composerTimeoutMs: 50_000 },
+  );
+  await openComposer(cdp, executor);
+
+  const content = '很长的正文'.repeat(60);
+  const filled = await executor.dispatch(
+    { ...command('fill_field', { fieldType: 'content', value: content }, 2), timeoutMs: 20_000 + 300 * 250 },
+  );
+
+  assert.equal(filled.ok, true);
+  assert.equal(cdp.editorText, content);
+});
+
+test('FacebookPublishExecutor: 复用到脏 composer 时先清空再打字，绝不与上一篇残稿拼接', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 50, fillVerifyTimeoutMs: 20 },
+  );
+  await openComposer(cdp, executor);
+  cdp.editorText = '上一篇失败留下的残稿';
+
+  const content = '这一篇的正文';
+  const filled = await executor.dispatch(command('fill_field', { fieldType: 'content', value: content }, 2));
+
+  assert.equal(filled.ok, true);
+  assert.equal(cdp.editorText, content, '编辑器里只能有这一篇的正文');
+});
+
+test('FacebookPublishExecutor: composer 清不干净 → 诚实失败，绝不在残文之上追加', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 50, fillVerifyTimeoutMs: 20 },
+  );
+  await openComposer(cdp, executor);
+  cdp.editorText = '清不掉的残稿';
+  cdp.refuseClear = true;
+
+  const filled = await executor.dispatch(command('fill_field', { fieldType: 'content', value: '这一篇的正文' }, 2));
+
+  assert.equal(filled.ok, false);
+  assert.match(String(filled.error), /^composer_not_clean/);
+  assert.equal(cdp.calls.some((c) => c.method === 'Input.insertText'), false, '清不干净就绝不能开始打字');
   assert.equal(cdp.submitted, false);
 });
