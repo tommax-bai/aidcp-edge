@@ -168,14 +168,14 @@
   function fallbackResumeText(status, nowMs) {
     const windows = status && status.dailyUsage && objectOrEmpty(status.dailyUsage).windows;
     if (!windows || typeof windows !== 'object') return '';
-    for (const key of ['session', 'hour', 'minute', 'day']) {
+    for (const key of ['session', 'hour', 'minute']) {
       const raw = objectOrEmpty(windows)[key];
       if (!raw || typeof raw !== 'object') continue;
       const releaseAt = finiteNumber(raw.releaseAt);
       const expiresAt = finiteNumber(raw.expiresAt);
       const wait = futureWaitText(releaseAt !== null ? releaseAt : expiresAt, nowMs);
       if (!wait) continue;
-      return key === 'day' ? `预计约 ${wait}开启新一天计划` : `约 ${wait}自动继续`;
+      return `约 ${wait}自动继续`;
     }
     return '';
   }
@@ -224,12 +224,11 @@
     const fresh = Number.isFinite(at) && nowMs - at < PRESENCE_FRESH_MS;
     const day = guidanceWindow(s, 'day', nowMs);
     if (dayBrowseComplete(day)) {
-      const wait = futureWaitText(day.expiresAt, nowMs);
       return {
         mode: 'day',
         mascot: 'celebration',
         animate: false,
-        kicker: '今日探索完成',
+        kicker: '探索完成',
         title: '今天先到这里，明天继续。',
         value: '今天累积的信号，会让下一次开始更容易找到方向。',
         detail: '',
@@ -238,7 +237,7 @@
           { icon: 'pause', state: 'done', label: '自然沉淀', detail: '让账号信号持续积累' },
           { icon: 'search', state: 'next', label: '继续寻找灵感', detail: '明天继续探索新机会' },
         ],
-        resume: wait ? `预计约 ${wait}开启新一天计划` : '',
+        resume: '',
       };
     }
     if (running && p && p.text && fresh) {
@@ -255,12 +254,11 @@
     }
 
     if (day && day.active && !day.expired && day.capped.length > 0 && day.capped.every((entry) => entry.cap > 0 && entry.complete)) {
-      const wait = futureWaitText(day.expiresAt, nowMs);
       return {
         mode: 'day',
         mascot: 'celebration',
         animate: false,
-        kicker: '今日探索完成',
+        kicker: '探索完成',
         title: '今天先到这里，明天继续。',
         value: '今天累积的信号，会让下一次开始更容易找到方向。',
         detail: '',
@@ -269,7 +267,7 @@
           { icon: 'pause', state: 'done', label: '自然沉淀', detail: '让账号信号持续积累' },
           { icon: 'search', state: 'next', label: '继续寻找灵感', detail: '明天继续探索新机会' },
         ],
-        resume: wait ? `预计约 ${wait}开启新一天计划` : '',
+        resume: '',
       };
     }
 

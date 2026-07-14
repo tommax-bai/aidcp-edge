@@ -310,6 +310,9 @@ body { margin: 0; }
 .rg-flow-step.done .rg-flow-copy strong { color: #267b5d; }
 .rg-flow-step.current .rg-flow-icon { color: #3b6ff0; }
 .rg-flow-step.current .rg-flow-copy strong { color: #3159bd; }
+.runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-icon { color: #22a875; }
+.runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-copy strong { color: #267b5d; }
+.runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-copy small { color: #5e8b75; }
 .rg-resume {
   margin-top: 8px;
   color: #58718c;

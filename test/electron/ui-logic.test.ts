@@ -249,9 +249,10 @@ test('运行价值说明：今日浏览计划完成后展示今日成果', () =>
   }), now);
   assert.equal(v?.mode, 'day');
   assert.equal(v?.mascot, 'celebration');
+  assert.equal(v?.kicker, '探索完成');
   assert.match(v?.title ?? '', /明天继续/);
   assert.equal(v?.steps[0].detail, '今日浏览计划已完成');
-  assert.match(v?.resume ?? '', /开启新一天计划/);
+  assert.equal(v?.resume, '');
 });
 
 test('在场感：本轮等待缺少完整进度卡时仍展示预计等待时间', () => {

@@ -540,12 +540,15 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
       },
     }));
     assert.equal($(w, '#presence-text').textContent, '今日内容探索已经完成');
-    assert.match($(w, '#presence-fresh').textContent ?? '', /开启新一天计划/);
+    assert.equal($(w, '#presence-fresh').textContent, '');
     assert.equal(hidden($(w, '#runtime-guidance')), false);
     assert.equal($(w, '#runtime-guidance').dataset.mode, 'day');
-    assert.equal($(w, '#runtime-guidance-kicker').textContent, '今日探索完成');
+    assert.equal($(w, '#runtime-guidance-kicker').textContent, '探索完成');
     assert.match($(w, '#runtime-guidance-title').textContent ?? '', /明天继续/);
     assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /今日浏览计划已完成/);
+    assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /继续寻找灵感/);
+    assert.equal(hidden($(w, '#runtime-guidance-resume')), true);
+    assert.match(rendererCss, /\.runtime-guidance\[data-mode="day"\] \.rg-flow-step\.next \.rg-flow-icon \{ color: #22a875; \}/);
     assert.equal($(w, '#usage-limit').textContent, '今日任务已完成');
     assert.ok($(w, '#usage-limit').classList.contains('complete'));
   } finally {
