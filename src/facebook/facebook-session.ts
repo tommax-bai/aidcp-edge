@@ -23,6 +23,7 @@ import { evalJson, type BrowseCdp } from '../browse/cdp-util.js';
 import type { OverlayMonitor } from '../browse/overlay-monitor.js';
 import { jitterAround } from '../humanize/index.js';
 import type { EdgeBrowseSession } from '../browse/edge-browse-session.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { TaskTakeoverError, BrowseQuiesceTimeoutError, DEFAULT_TASK_QUIESCE_MS } from '../browse/browse-session.js';
 import type {
   Envelope,
@@ -237,8 +238,16 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private orphanWriters = 0;
   /** 任务接管世代号：每次交接 +1。判据必须是世代号，不能是「已让位」标志（持权任务自己的命令就跑在让位期内）。 */
   private taskBlockEpoch = 0;
-  /** 当前在执行的命令拍下的世代号；为 null 表示无命令在执行。 */
-  private activeCommandEpoch: number | null = null;
+  /**
+   * 「我这条命令启动时的世代号」——**按写者隔离，不能是一个共享标量**。
+   *
+   * 本会话**允许写者重叠**：命令超时会放行串行链、执行体变成孤儿仍在写页面（见 runBrowseCommand），
+   * 此时下一条命令已经开跑。用一个共享标量记世代，孤儿收尾时会把**正在跑的那条命令**的判据一起清掉
+   * ⇒ 它的取消点全部静默失效（评论会一路打完并按下回车，让位退化成「等满整条命令」）。
+   *
+   * AsyncLocalStorage 天然沿 await 链传播，每个写者各拿一份、互不覆盖，孤儿结束也动不了别人的。
+   */
+  private readonly writerEpoch = new AsyncLocalStorage<number>();
   /** 可打断 sleep 的唤醒器集合（接管时全部唤醒，让安全取消点当场让路）。 */
   private readonly sleepWakers = new Set<() => void>();
 
@@ -388,9 +397,13 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     for (const w of wakers) w();
   }
 
-  /** 当前命令是否已被更高优先级的独占任务接管：仅在命令执行中且交接已推进世代号时为真。 */
+  /**
+   * **本条命令**是否已被更高优先级的独占任务接管：仅在写者执行域内（拿得到自己那份世代号）
+   * 且交接已推进世代号时为真。域外（无在飞写者）恒 false —— 与「无命令在执行」同义。
+   */
   private takeoverRequested(): boolean {
-    return this.activeCommandEpoch !== null && this.taskBlockEpoch !== this.activeCommandEpoch;
+    const mine = this.writerEpoch.getStore();
+    return mine !== undefined && mine !== this.taskBlockEpoch;
   }
 
   /** 在安全取消点检查接管：已被接管即抛出，令本命令零页面副作用地作废。 */
@@ -400,14 +413,15 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
 
   /**
    * 页面写者记账：**只在 fn 真正 settle 时才减计数**。命令超时放行串行链不减 —— 那正是孤儿写者。
+   *
+   * fn 跑在自己的 writerEpoch 域里 ⇒ 它内部任何深度的 throwIfTakeover() 读到的都是**它自己**启动时
+   * 的世代号。重叠写者（孤儿 + 新命令）各看各的，谁也清不掉谁。
    */
   private trackWriter<T>(fn: () => Promise<T>): Promise<T> {
     this.activePageWriters++;
-    const epoch = this.taskBlockEpoch;
-    this.activeCommandEpoch = epoch;
-    return fn().finally(() => {
+    const running = this.writerEpoch.run(this.taskBlockEpoch, () => fn());
+    return running.finally(() => {
       this.activePageWriters--;
-      if (this.activeCommandEpoch === epoch) this.activeCommandEpoch = null;
     });
   }
 
@@ -449,18 +463,18 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
           await this.runBrowseCommand('search', () => this.searchBrowse(payload));
           return;
         }
-        await this.trackWriter(() => this.commentHandler.handle(env)); // 委托执行体同样是页面写者：让位必须等它真停
+        await this.trackWriter(() => this.commentHandler.handle(env, () => this.throwIfTakeover())); // 委托执行体同样是页面写者：让位必须等它真停
         return;
       }
       case 'interaction.comment':
       case 'group.join':
-        await this.trackWriter(() => this.commentHandler.handle(env)); // 委托执行体同样是页面写者：让位必须等它真停
+        await this.trackWriter(() => this.commentHandler.handle(env, () => this.throwIfTakeover())); // 委托执行体同样是页面写者：让位必须等它真停
         return;
       case 'note.open': {
         const payload = (env.payload ?? {}) as NoteOpenPayload;
         // url 存在 = 评论支线按 permalink 开帖（读评论供撰写）；否则 = 浏览闭环按卡片 noteId 深读。
         if (payload.url) {
-          await this.trackWriter(() => this.commentHandler.handle(env)); // 委托执行体同样是页面写者：让位必须等它真停
+          await this.trackWriter(() => this.commentHandler.handle(env, () => this.throwIfTakeover())); // 委托执行体同样是页面写者：让位必须等它真停
           return;
         }
         await this.runBrowseCommand('open_note', async () => {

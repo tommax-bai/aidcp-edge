@@ -51,6 +51,11 @@ export interface FeedScroller {
 export interface OpenCardOptions {
   deadlineAt?: number;
   clock?: () => number;
+  /**
+   * 安全取消点（change lease-strict-preemption 4.1）：被独占任务接管即抛出。
+   * 语义同 deadlineAt——只在下一条 CDP 输入尚未发出时检查；按下与松开是原子区，绝不从中间掰开。
+   */
+  checkpoint?: () => void;
 }
 
 export interface FeedScrollerOptions {
@@ -215,6 +220,7 @@ export class CdpFeedScroller implements FeedScroller {
       sleep: this.sleep,
       deadlineAt: options.deadlineAt,
       clock: options.clock,
+      checkpoint: options.checkpoint,
     };
     if (this.lastCursor) opts.from = this.lastCursor;
     await dispatchClick(this.cdp, x, y, opts);

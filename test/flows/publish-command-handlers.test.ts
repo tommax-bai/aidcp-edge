@@ -11,6 +11,7 @@ import type {
 } from '../../src/locating/index.js';
 import type { ActionExecutor } from '../../src/locating/engine.js';
 import { PublishCommandDispatcher } from '../../src/flows/publish-command-handlers.js';
+import { TaskTakeoverError, type TakeoverCtx } from '../../src/execution/takeover.js';
 import type { PublishCommandPayload } from '../../src/comm/protocol.js';
 import {
   XHS_PUBLISH_CONTENT_ACTION_ID,
@@ -711,4 +712,127 @@ test('select_mode 红线：模式判据保守（激活 tab 文本含「图文」
   assert.ok(modeJs, '应有 MODE_STATE 表达式被下发');
   assert.ok(modeJs!.includes('图文') && modeJs!.includes('视频'), '模式判据须同时约束「图文」与「视频」两侧');
   assert.ok(/aria-selected|active|selected|current/.test(modeJs!), '模式判据须限定激活态 tab');
+});
+
+// ── change lease-strict-preemption task 4：取消点补齐（安全取消点让位；提交点之后是禁区）──────
+//
+// 两侧各一条红线，缺一条都会出人命：
+//  ① 安全取消点（下一个页面写尚未发出）MUST 能让位，且让位前 MUST 清场 —— 半截正文留在活着的
+//     编辑器里，会和下一篇拼在一起发出去；且回执是 preempted_by_task（「未开始 / 已作废」），
+//     不是 engine_error（「发布失败」），云端据此绝不写不可逆 failed 终态。
+//  ② 提交点之后（发布按钮已点下去）MUST NOT 取消 —— 中止 = 把一篇**可能已经发出去的帖子**当成
+//     没发生 → 云端重投 → 发两遍。后置校验必须照跑到底、按页面真实状态回报。
+
+/**
+ * submit_publish 专用 fake cdp：闭合 shadow 里的「发布」按钮（DOM.getDocument 穿透 + getBoxModel 取中心点）
+ * + 提交后的成功态回读（CHECK）。
+ *
+ * 🔴 成功证据**只用页面成功文案**（body 出现「发布成功」）。CHECK 里另一条「URL 已离开 /publish/publish」
+ * 判据本身是一个**尚未修复的假成功**——抢占方会在这 15s 窗口里把页面导航走，于是一篇可能根本没发出去的
+ * 稿被记成已发布（修法属第 5/6/7 节）。故本桩把 href **钉死在发布页上**（URL 判据恒为假），
+ * 保证下面的断言绝不给那条假成功背书。
+ */
+class SubmitFakeCdp {
+  readonly calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  /** 页面全程停在发布页 → CHECK 的 URL 判据恒 false。 */
+  private readonly href = 'https://creator.xiaohongshu.com/publish/publish?source=official';
+  private bodyText = '正在编辑';
+  private checkProbes = 0;
+  /** 第几次 CHECK 轮询时页面才出现「发布成功」（缺省第 2 次：toast 晚一拍，逼后置校验真的轮询）。 */
+  constructor(private readonly opts: { successAtProbe?: number } = {}) {}
+  async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+    this.calls.push({ method, params });
+    if (method === 'DOM.getDocument') {
+      // 文本恰为「发布」的元素节点（nodeId=7）；walk() 按 children 里的文本节点命中。
+      return { root: { nodeType: 9, children: [{ nodeType: 1, nodeId: 7, children: [{ nodeType: 3, nodeValue: '发布' }] }] } } as T;
+    }
+    if (method === 'DOM.getBoxModel') return { model: { content: [100, 200, 140, 200, 140, 220, 100, 220] } } as T; // center=(120,210)
+    if (method === 'DOM.getAttributes') return { attributes: [] } as T;
+    if (method === 'Runtime.evaluate') {
+      const expr = String(params?.expression ?? '');
+      if (expr.includes('发布成功')) {
+        // CHECK（提交后的后置校验）：按页面真实状态判定——成功文案命中，URL 判据恒假。
+        if (++this.checkProbes >= (this.opts.successAtProbe ?? 2)) this.bodyText = '发布成功，稍后可在笔记里查看';
+        const byText = /发布成功|发布中|笔记已?发布|成功发布|稍后可在/.test(this.bodyText);
+        const byUrl = !this.href.includes('/publish/publish'); // 恒 false：页面没被导航走
+        return { result: { value: byText || byUrl } } as T;
+      }
+      return { result: { value: '{}' } } as T; // 诊断快照（只观测，不改行为）
+    }
+    return {} as T;
+  }
+  countOf(method: string, type?: string): number {
+    return this.calls.filter((c) => c.method === method && (!type || (c.params as { type?: string })?.type === type)).length;
+  }
+  pressed(): number {
+    return this.countOf('Input.dispatchMouseEvent', 'mousePressed');
+  }
+  checkProbeCount(): number {
+    return this.checkProbes;
+  }
+}
+
+function mkSubmit(cdp: SubmitFakeCdp): PublishCommandDispatcher {
+  const doc = buildDom(publishPageHtml());
+  return new PublishCommandDispatcher(
+    depsFor(doc, new FakeExecutor(doc)),
+    {},
+    selectStepClock(50), // 小步时钟：15s 后置校验窗口在桩里瞬间跑完，绝不真等
+    undefined,
+    cdp as unknown as ConstructorParameters<typeof PublishCommandDispatcher>[4],
+    { sleep: instantSleep, random: () => 0.5 },
+  );
+}
+
+test('取消点：fill_field 打字中途被接管 → 插入停在半途 + 让位前清场 + preempted_by_task（非 engine_error）', async () => {
+  const cdp = new FakeCdp();
+  const value = '这一篇被抢占的正文内容';
+  // 抢占发生在「已打进去 3 个字、第 4 块的 CDP 写尚未发出」的那道缝（typeHumanized 里唯一正确的取消缝）。
+  const takeover: TakeoverCtx = {
+    checkpoint: () => {
+      if (cdp.inserts().length >= 3) throw new TaskTakeoverError();
+    },
+  };
+  const res = await dispatcherWithCdp(cdp).dispatch(cmd('fill_field', { fieldType: 'content', value }), takeover);
+
+  const typed = cdp.inserts().join('');
+  assert.ok(typed.length > 0 && typed.length < Array.from(value).length, '插入 MUST 停在半途（既不是零字，也不是整篇打完）');
+  assert.equal(cdp.text, '', '让位前 MUST 清场：半截正文留在活着的编辑器里会和下一篇拼在一起发出去');
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'preempted_by_task', '被接管 = 未开始/已作废，MUST NOT 降级成 engine_error（云端会据此写不可逆 failed）');
+});
+
+test('取消点：submit_publish 在「通读停留」期间被接管 → 零 mousePressed（一个字节都没提交出去）+ preempted_by_task', async () => {
+  const cdp = new SubmitFakeCdp();
+  // 抢占发生在「发布按钮已定位、点击尚未发出」的那道缝 —— 整条发布流的最后一个安全取消点。
+  const takeover: TakeoverCtx = {
+    checkpoint: () => {
+      if (cdp.countOf('DOM.getBoxModel') > 0) throw new TaskTakeoverError();
+    },
+  };
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 7), takeover);
+
+  assert.equal(cdp.pressed(), 0, '提交点之前让位 MUST 零 mousePressed：帖子一个字节都没提交出去');
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'preempted_by_task');
+});
+
+test('🔴 禁区：submit_publish 点击已发出后被接管 → 15s 后置校验照跑到底，按页面真实成功态回 ok:true（绝不改写成 preempted）', async () => {
+  // 抢占方在**点击落地之后**才翻世代：此后任何 checkpoint 调用都会抛。实现若在这 15s 窗口里取消，
+  // 就是把一篇**可能已经发出去的帖子**当成没发生 → 云端重投 → 发两遍。
+  // 成功证据只认页面成功文案（桩把 URL 钉死在发布页上，见 SubmitFakeCdp 注释：URL 判据是尚未修复的假成功）。
+  const cdp = new SubmitFakeCdp({ successAtProbe: 2 });
+  const takeover: TakeoverCtx = {
+    checkpoint: () => {
+      if (cdp.pressed() > 0) throw new TaskTakeoverError();
+    },
+  };
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 8), takeover);
+
+  assert.equal(cdp.pressed(), 1, '确实点了发布（提交点已跨过）');
+  assert.equal(res.ok, true, '提交点之后 MUST NOT 取消：后置校验照跑到底、按页面真实成功态回报');
+  assert.equal(res.error, undefined, '绝不改写成 preempted_by_task —— 那会让云端重投、发两遍');
+  assert.ok(cdp.checkProbeCount() >= 2, '后置校验确实轮询到成功文案出现（而非一探就返回）');
+  // 反「空测」自证：接管确实是「已发生」态——实现只是（正确地）在禁区里从不调用它。
+  assert.throws(() => takeover.checkpoint(), TaskTakeoverError);
 });

@@ -84,8 +84,30 @@ export async function evalRaw<T = unknown>(cdp: BrowseCdp, expression: string): 
   return res.result?.value as T;
 }
 
+/**
+ * 输入安全契约：点击与逐字输入共用。三个字段都缺省 = 完全不设限，行为与历史逐字节一致。
+ *
+ * 语义（deadlineAt 与 checkpoint 完全一致）：**只在下一条 CDP 输入尚未发出时检查，绝不取消已经
+ * 发出的命令**。已输入/已点下的部分留在页面上，由调用方负责清场并诚实回报。
+ */
+export interface InputSafetyOptions {
+  /**
+   * 可选的整体操作截止时刻。调用方（云端下发的单步预算）据此让长输入在安全边界内停手——否则
+   * 调用方放弃后这条循环仍在往活着的编辑器里写字，造成「上游已判失败、页面上却躺着半篇正文」的错位。
+   */
+  deadlineAt?: number;
+  /** deadlineAt 对应的墙钟（测试可注入，默认 Date.now）。 */
+  clock?: () => number;
+  /**
+   * 取消令牌（change lease-strict-preemption 4.1）：已被独占任务接管即抛出。
+   * **调用方自己抛 TaskTakeoverError**——本模块只调用、不认识它的类型，依赖闭包因此仍只有
+   * ../humanize/index.js，零业务依赖。
+   */
+  checkpoint?: () => void;
+}
+
 /** 拟人化点击选项 */
-export interface DispatchClickOptions {
+export interface DispatchClickOptions extends InputSafetyOptions {
   /** 起始光标位置（默认从目标左上方一段距离处起步） */
   from?: Point;
   /** 是否模拟 overshoot（默认 15% 概率，由调用方决定时可显式传 true/false） */
@@ -109,13 +131,6 @@ export interface DispatchClickOptions {
    *（现有 click 零回归）。>0 时在 hover 与 press 之间插一段可注入 sleep 的 dwell。
    */
   hoverDwellMs?: number;
-  /**
-   * 可选的整体操作截止时刻。只在下一条输入尚未发出时检查，绝不取消已经发出的 CDP 命令；
-   * 这样调用方可在安全边界收敛长点击，而不会让页面写操作与后续任务并发。
-   */
-  deadlineAt?: number;
-  /** deadlineAt 对应的墙钟（测试可注入，默认 Date.now）。 */
-  clock?: () => number;
 }
 
 /** 拟人化输入在发送下一条 CDP 事件前发现预算已耗尽。 */
@@ -126,16 +141,19 @@ export class InputDispatchDeadlineError extends Error {
   }
 }
 
-/** 截止时刻契约：点击与逐字输入共用。缺省（无 deadlineAt）即完全不设限，行为与历史一致。 */
-interface InputDeadlineOptions {
-  deadlineAt?: number;
-  clock?: () => number;
-}
-
-function assertInputDeadline(options: InputDeadlineOptions): void {
+function assertInputDeadline(options: InputSafetyOptions): void {
   if (options.deadlineAt === undefined) return;
   const clock = options.clock ?? Date.now;
   if (clock() >= options.deadlineAt) throw new InputDispatchDeadlineError(options.deadlineAt);
+}
+
+/**
+ * 安全取消点：**接管优先于死线**——「我被抢走了」比「我超预算了」更接近事实，而下游要靠异常类型
+ * 区分「未开始（可重派）」与「超预算失败」。顺序写反 = 一次接管被报成 fill_deadline_exceeded。
+ */
+function assertInputSafety(options: InputSafetyOptions): void {
+  options.checkpoint?.();
+  assertInputDeadline(options);
 }
 
 /**
@@ -171,7 +189,7 @@ export async function dispatchHover(
 
   let last: Point = from;
   for (const pt of path) {
-    assertInputDeadline(options);
+    assertInputSafety(options);
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pt.x, y: pt.y });
     last = pt;
     // 逐帧延迟：默认固定；开抖动时每帧走 lognormal（消 dt 方差=0 的机器特征）。
@@ -202,16 +220,34 @@ export async function dispatchClick(
   // 落点前读图/瞄准停顿（默认 0，普通 click 零回归）。
   const dwell = options.hoverDwellMs ?? 0;
   if (dwell > 0) {
-    assertInputDeadline(options);
+    assertInputSafety(options);
     await (options.sleep ?? defaultSleep)(dwell);
   }
-  const base = { x: last.x, y: last.y, button: 'left' as const, clickCount: 1 };
-  assertInputDeadline(options);
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...base });
-  assertInputDeadline(options);
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base });
+  // 按下之前是点击路径的**最后一个安全边界**：过了这一行，点击必须原子完成。
+  assertInputSafety(options);
+  await commitLeftClick(cdp, last);
   // 返回真实落点（含 jitter/overshoot 残差），供多点循环把上一落点作下一点起点、保光标连续。
   return last;
+}
+
+/**
+ * 提交式左键（mousePressed → mouseReleased 原子区）。
+ *
+ * **签名里没有 options** —— 词法上就插不进取消点。这里是「已执行、未后置校验」窗口的最恶形态：
+ * press 发了、release 没发即抛出 = **左键按下不松开**，此后所有 mouseMoved 都变成拖拽 / 框选，
+ * 页面被不可见地污染，而调用方只看到一个普通异常。
+ *
+ * try/finally 保证 press 抛错也补发 release，且不覆盖原始异常。
+ */
+async function commitLeftClick(cdp: BrowseCdp, at: Point): Promise<void> {
+  const base = { x: at.x, y: at.y, button: 'left' as const, clickCount: 1 };
+  try {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...base });
+  } finally {
+    await cdp
+      .send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
+      .catch(() => undefined);
+  }
 }
 
 /** 派发一次按键（press + release），key/code 形如 'Escape' / 'Enter'。 */
@@ -246,23 +282,11 @@ export async function insertText(cdp: BrowseCdp, text: string): Promise<void> {
 }
 
 /** 拟人化逐字符输入选项 */
-export interface DispatchKeystrokesOptions {
+export interface DispatchKeystrokesOptions extends InputSafetyOptions {
   /** 随机源 */
   random?: HumanRandomFn;
   /** 注入 sleep */
   sleep?: (ms: number) => Promise<void>;
-  /**
-   * 可选的整体输入截止时刻。逐字输入是 O(文本长度) 的操作，调用方（云端下发的单步预算）需要
-   * 能让它**在安全边界内停手**——否则调用方放弃后这条循环仍在往活着的编辑器里写字，
-   * 造成「上游已判失败、页面上却躺着半篇正文」的错位。
-   *
-   * 语义：只在下一个字符尚未发出时检查，绝不取消已经发出的 CDP 命令；超时即抛
-   * InputDispatchDeadlineError，**已输入的部分留在编辑器里**，由调用方负责清场并诚实回报。
-   * 缺省（不传）＝完全不设限，行为与历史逐字节一致。
-   */
-  deadlineAt?: number;
-  /** deadlineAt 对应的墙钟（测试可注入，默认 Date.now）。 */
-  clock?: () => number;
 }
 
 /**
@@ -271,8 +295,12 @@ export interface DispatchKeystrokesOptions {
  * 为每个字符按键盘节奏采样"距上一键的延迟"，先 sleep 再用 Input.insertText 输入单字符，
  * 形成不均匀的真人打字节奏（替代一次性 insertText）。
  *
- * @returns 实际已输入的字符数（未设 deadlineAt 时恒等于文本长度）。
+ * 循环边界是 generateKeyStrokes 返回的数组长度 ⇒ 天然按迭代次数限界，不存在「恒定 now 死循环」。
+ *
+ * @returns 实际已输入的字符数（未设 deadlineAt / checkpoint 时恒等于文本长度）。
  * @throws InputDispatchDeadlineError 设了 deadlineAt 且在输完前耗尽。
+ * @throws 调用方的 checkpoint 抛出的异常（TaskTakeoverError）——已输入的部分留在编辑器里，
+ *         调用方 MUST 清场后再让位，否则半截正文会与下一篇拼在一起发出去。
  */
 export async function dispatchKeystrokes(
   cdp: BrowseCdp,
@@ -285,7 +313,8 @@ export async function dispatchKeystrokes(
   let typed = 0;
   for (const stroke of strokes) {
     if (stroke.delay > 0) await sleep(stroke.delay);
-    assertInputDeadline(options);
+    // 唯一正确的取消缝：这一字符的等待已结束、它的 CDP 写尚未发出。
+    assertInputSafety(options);
     await cdp.send('Input.insertText', { text: stroke.char });
     typed++;
   }

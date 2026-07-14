@@ -9,6 +9,7 @@ import {
 } from '../browse/cdp-util.js';
 import type { ImageUploader } from '../flows/image-uploader.js';
 import type { PublishCommandPayload, PublishCommandResultPayload } from '../comm/protocol.js';
+import { TaskTakeoverError, type TakeoverCtx } from '../execution/takeover.js';
 
 export interface FacebookPublishExecutorOptions {
   settleMs?: number;
@@ -225,16 +226,23 @@ export class FacebookPublishExecutor {
     this.log = deps.logger ?? (() => {});
   }
 
-  async dispatch(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+  /**
+   * `takeover`（change lease-strict-preemption 第 4 节）：可选取消上下文。接管只由 TaskTakeoverError 表达，
+   * 由上层 dispatch 统一分类成「未开始」。取消点只落在逐字输入与上传下载段；**提交点击之后一格都不加**。
+   */
+  async dispatch(
+    payload: PublishCommandPayload,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload> {
     switch (payload.kind) {
       case 'navigate_entry':
         return this.navigate(payload);
       case 'select_mode':
         return this.openComposer(payload);
       case 'upload_image':
-        return this.uploadImage(payload);
+        return this.uploadImage(payload, takeover);
       case 'fill_field':
-        return this.fillContent(payload);
+        return this.fillContent(payload, takeover);
       case 'submit_publish':
         return this.submit(payload);
       case 'capture_postId':
@@ -301,11 +309,15 @@ export class FacebookPublishExecutor {
     ).catch(() => false);
   }
 
-  private async uploadImage(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+  private async uploadImage(
+    payload: PublishCommandPayload,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload> {
     const imageUrl = payload.params.imageUrl;
     if (!this.uploader) return { ...base(payload), ok: false, error: 'kind_not_implemented' };
     if (!imageUrl) return { ...base(payload), ok: false, error: 'no_target' };
-    const result = await this.uploader.upload(imageUrl);
+    // 上传器自管取消边界：下载段可取消、塞文件之后不可取消。
+    const result = await this.uploader.upload(imageUrl, takeover);
     if (!result.ok) return { ...base(payload), ok: false, error: result.error ?? 'upload_failed' };
     return { ...base(payload), ok: true };
   }
@@ -400,7 +412,10 @@ export class FacebookPublishExecutor {
    * 红线（不假成功）：插入调用没报错 ≠ 文本进去了。校验 MUST 回读**全文**——
    * 老的「前 20 字」探针会把「被吞掉 90%」判成成功，长正文一旦跑得完就会真发出截断的帖子。
    */
-  private async fillContent(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+  private async fillContent(
+    payload: PublishCommandPayload,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload> {
     if (payload.params.fieldType && payload.params.fieldType !== 'content') {
       this.log(`[facebook-publish] ignore unsupported fieldType=${payload.params.fieldType}`);
       return { ...base(payload), ok: true };
@@ -434,8 +449,16 @@ export class FacebookPublishExecutor {
         sleep: this.opts.sleep,
         deadlineAt: typingDeadlineAt,
         clock: this.opts.now,
+        checkpoint: takeover?.checkpoint,
       });
     } catch (err) {
+      // 🔴 顺序不能反：被接管必须先于死线分类。写反了，一次「让路」会被报成
+      //    fill_deadline_exceeded（「我超预算了」≠「我没开始」），触上游的诚实闸。
+      if (err instanceof TaskTakeoverError) {
+        // 清场（清空 composer + 关弹层）后原样重抛，由上层 dispatch 统一分类成「未开始」。
+        await this.abandonFill(payload, 'preempted_by_task').catch(() => undefined);
+        throw err;
+      }
       if (err instanceof InputDispatchDeadlineError) {
         return this.abandonFill(payload, `fill_deadline_exceeded: budget=${budgetMs}ms chars=${Array.from(value).length}`);
       }

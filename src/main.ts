@@ -76,6 +76,7 @@ import { PublishUiEventTracker, uiSnapshotToLines, writeNoteStageLine } from './
 import { ImageUploader, imageTempPrefixFor, sweepImageTempDirs } from './flows/image-uploader.js';
 import { CdpFileInputSetter } from './cdp/file-input-setter.js';
 import { AnchorCache } from './locating/cache.js';
+import type { EngineOptions } from './locating/engine.js';
 import { buildPublishApprovalRequestId } from './publish/approval-gate.js';
 import type {
   PublishResultPayload,
@@ -102,6 +103,22 @@ import {
   type EdgeBrowseSession,
 } from './browse/index.js';
 import type { IdentityDecision, SelfIdentityResult } from './cdp/self-identity.js';
+
+/**
+ * 发布路径的定位引擎参数（change lease-strict-preemption 4.3）。
+ *
+ * **值 = 今天的默认值，行为逐字节不变**。意义在于把这条路径的等待上界从「两处默认值意外相乘」
+ * （引擎默认最多 3 轮 × 云端选元素默认 200s 上限）变成**发布路径自己写下的一个数**，给后续的
+ * 边-云预算对齐留一个单点。
+ *
+ * selectTimeoutMs MUST > 云端单次模型调用天花板 180s：压小了会把一次尚在进行的合法 thinking 选择
+ * 误判成 llm_error，而引擎见 llm_error 立刻升级上报、不再重试 ⇒ 一条本可成功的发布指令被判失败，
+ * 而发布失败在云端是不可逆终态。
+ *
+ * 注：真实等待上界并非 3×200s——云端挂起时选择器转 llm_error、引擎立刻停手不进第 2 轮，所以
+ * 「云端不回话」这一档的上界是 1×200s；三轮相乘只在「每轮都在 200s 内成功回一个没匹配上」时才凑得齐。
+ */
+const PUBLISH_ENGINE_OPTIONS: EngineOptions = { maxAttempts: 3, selectTimeoutMs: 200_000 };
 
 function verifiedAccountNickname(idRes: SelfIdentityResult, decision: IdentityDecision): string | undefined {
   if (!idRes.ok || decision.kind !== 'use') return undefined;
@@ -615,7 +632,7 @@ async function main(): Promise<void> {
             selector,
             cache: publishCache,
           },
-          {},
+          PUBLISH_ENGINE_OPTIONS,
           env.payload,
           // A 阶段4：人审默认必过（AC-PUB）——缺省/任何非 'false' 值都挂闸；仅显式 AIDCP_REAL_PUBLISH=false 才跳过（本地开发）。
           process.env.AIDCP_REAL_PUBLISH !== 'false'
@@ -705,7 +722,7 @@ async function main(): Promise<void> {
       selector,
       cache: publishCache,
     },
-    {},
+    PUBLISH_ENGINE_OPTIONS,
     Date.now,
     imageUploader,
     // 注入原始 CDP：navigate_entry 直达发布页 + select_mode 直驱点「上传图文」（发布页特殊 UI，通用选择器不可靠）。

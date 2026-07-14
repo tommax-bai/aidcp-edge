@@ -23,8 +23,24 @@ export interface SelectionResult {
   reason: string;
 }
 
+/** 选元素的可选调用参数（change lease-strict-preemption 4.3）。缺省 = 与历史行为逐字节一致。 */
+export interface SelectOptions {
+  /**
+   * 就地作废「已经发出的远端等待」。云端选元素单次上限 200s，而定位是一段**纯等待、平台侧零副作用**
+   * 的操作 —— 独占任务接管时 MUST 立刻作废在飞请求，不能傻等它自己的计时器。
+   * abort reason MUST 是 TaskTakeoverError（见 execution/takeover.ts），否则会被降级成 llm_error。
+   */
+  signal?: AbortSignal;
+  /** 单次等待上限。MUST > 云端单次模型调用天花板 180s（见 client/cloud-selector.ts 的不变量）。 */
+  timeoutMs?: number;
+}
+
 export interface ElementSelector {
-  select(goal: string, elements: ElementDescriptor[]): Promise<SelectionResult>;
+  select(
+    goal: string,
+    elements: ElementDescriptor[],
+    options?: SelectOptions,
+  ): Promise<SelectionResult>;
 }
 
 /** 把元素清单渲染为给 LLM 的编号列表 */

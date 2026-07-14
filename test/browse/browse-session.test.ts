@@ -2311,3 +2311,120 @@ test('交接有界且不撒谎: 真写段永不收敛 → quiesce 抛出（MUST 
   sess.stop();
   void running.catch(() => {});
 });
+
+// ======== 评论流的取消点补齐（change lease-strict-preemption 第 4 节）========
+//
+// 评论是唯一「一条命令里跨越安全区与禁区」的浏览动作：逐字输入期间的每个字符间隙都是安全取消点
+// （下一个字符的 CDP 写尚未发出），而提交键一旦点下就进入禁区（已提交、结果未知）。两条用例各钉一端。
+
+test('取消点: 评论逐字输入中途被接管 → 立刻停手 + 清场 + 诚实回 preempted_by_task（半截评论绝不留在框里）', async () => {
+  const h = commentHarness({ verify: { cleared: true, ownRow: true } });
+  const base = h.deps.cdp.send.bind(h.deps.cdp);
+  const body = '这条评论刚打到一半就被独占任务接管了';
+  // 逐字输入一旦开始，字符间隙的等待就**只能被接管唤醒**（永不自然到时）：接管若不唤醒可打断 sleep，
+  // 本用例直接挂死超时——绝不靠真等墙钟把它蒙混过去。清场脚本发出后解除，让停止路径能正常收尾。
+  const ctl = { typingArmed: false };
+  let typed = 0;
+  let editorCleared = 0;
+  let signalTyping!: () => void;
+  const typingStarted = new Promise<void>((resolve) => { signalTyping = resolve; });
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Input.insertText') {
+        typed++;
+        ctl.typingArmed = true;
+        signalTyping();
+      }
+      // 让位前的清场脚本（CLEAR_COMMENT_EDITOR_JS，唯一 `return 'ok'` 的那条）；2b 的清场前置返回 JSON，不会误计。
+      if (method === 'Runtime.evaluate' && String(params.expression ?? '').includes("return 'ok'")) {
+        editorCleared++;
+        ctl.typingArmed = false;
+      }
+      return base(method, params);
+    },
+  };
+  const sess = new BrowseSession(h.deps, {
+    random: () => 0.99,
+    sleep: () => (ctl.typingArmed ? new Promise<void>(() => {}) : new Promise<void>((r) => { setTimeout(r, 1); })),
+    logger: () => {},
+  });
+  const running = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  await sess.onCloudCommand(makeEnvelope('interaction.comment', 'c-mid-typing', 0, { noteId: 'n1', text: body }));
+  await typingStarted;
+  await new Promise((r) => setTimeout(r, 10)); // 让它真正停在「下一个字符前」的那个等待里
+
+  const t0 = Date.now();
+  await sess.quiesceForTask(2_000);
+  assert.ok(Date.now() - t0 < 1_000, '字符间隙是安全取消点：交接必须毫秒级收敛，绝不等这条评论敲完');
+  assert.ok(typed >= 1 && typed < Array.from(body).length, `必须真的停在打字中途（已打 ${typed} / 共 ${Array.from(body).length} 字）`);
+  assert.equal(editorCleared, 1, '让位前 MUST 清场：半截评论留在框里，下一条评论会被清场闸判 editor_not_clean（清不掉时更会拼接发出）');
+  assert.equal(h.completedActions.length, 1, '被接管的评论命令只回一条回执（MUST NOT 静默丢弃、也不重复上报）');
+  assert.deepEqual(
+    h.completedActions[0],
+    { action: 'interaction.comment', ok: false, reason: 'preempted_by_task' },
+    '被接管 = 诚实失败回执，绝不降级成中文 message / engine_error 之类的别的分类',
+  );
+
+  sess.stop();
+  await running.catch(() => {});
+});
+
+test('🔴 禁区: 提交键点下之后被接管 → 后置校验照跑完，回 ok / submitted_unconfirmed，绝不回 preempted、绝不重发', async () => {
+  // 提交动作已经派发出去了：这条评论可能真已发出。谎报「未提交」会让上游重试 ⇒ 重复评论。
+  const h = commentHarness({ verify: { cleared: true, ownRow: true } });
+  const base = h.deps.cdp.send.bind(h.deps.cdp);
+  let submitLocated = false;
+  let submitPresses = 0;
+  let verifyProbes = 0;
+  let signalSubmitClicked!: () => void;
+  const submitClicked = new Promise<void>((resolve) => { signalSubmitClicked = resolve; });
+  let armTakeover!: () => void;
+  const takeoverArmed = new Promise<void>((resolve) => { armTakeover = resolve; });
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('btn.submit')) submitLocated = true;
+        if (expr.includes('ownRow')) {
+          verifyProbes++;
+          await takeoverArmed; // 后置校验只在接管已生效后才作答 ⇒ 用例钉的确实是「禁区里被接管」这一刻
+        }
+      }
+      if (method === 'Input.dispatchMouseEvent' && submitLocated) {
+        if (params.type === 'mousePressed') submitPresses++;
+        if (params.type === 'mouseReleased') signalSubmitClicked();
+      }
+      return base(method, params);
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  const running = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  await sess.onCloudCommand(makeEnvelope('interaction.comment', 'c-submitted', 0, { noteId: 'n1', text: '提交之后才被接管' }));
+  await submitClicked;
+
+  const quiesced = sess.quiesceForTask(2_000);
+  armTakeover(); // 世代号已在 quiesceForTask 的同步段推进 ⇒ 此后的后置校验跑在「已被接管」态里
+  await quiesced;
+
+  assert.equal(submitPresses, 1, '提交只许点一次：接管绝不能让这条评论被重发');
+  assert.ok(verifyProbes >= 1, '提交后的后置校验 MUST 跑完（禁区里不许取消）');
+  const c = h.completedActions.find((a) => a.action === 'comment');
+  assert.ok(c, '提交后被接管仍 MUST 回一条评论结果回执');
+  assert.notEqual(c!.reason, 'preempted_by_task', '提交已派发：谎报「未提交」会让上游重试 ⇒ 重复评论');
+  assert.equal(
+    h.completedActions.some((a) => a.reason === 'preempted_by_task'),
+    false,
+    '禁区里的取消点 = 把一次可能已生效的写当成没发生，绝不允许',
+  );
+  // 只准落在「已确认生效」或「已提交、结果未知」两态之一——本用例 MUST NOT 断言必须是成功那一态
+  // （那等于给「接管后后置校验回成功」背书 = 假成功的口子）。
+  assert.ok(
+    c!.ok === true || c!.reason === 'submitted_unconfirmed',
+    `提交后的回执只能是 ok 或 submitted_unconfirmed，实际 ${JSON.stringify(c)}`,
+  );
+
+  sess.stop();
+  await running.catch(() => {});
+});
