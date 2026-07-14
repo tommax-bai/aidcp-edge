@@ -12,6 +12,8 @@
  *    （Electron 主进程是 CJS、无法 require 编译后的 ESM；由 test/electron/fleet.test.ts
  *    的 parity 用例锁住两份不漂移）。
  */
+
+const os = require('node:os');
 'use strict';
 
 /** envId 公式（与核心 deriveEdgeId 的 adspower 分支同构；唯一 + 跨重启稳定）。 */
@@ -168,6 +170,93 @@ function createStaggerQueue(opts = {}) {
  * 设计缺省，偏保守会白白少开 2–3 个环境）。可用 AIDCP_PER_ENV_MB 覆盖。
  */
 const PER_ENV_BYTES_DEFAULT = 700 * 1024 * 1024;
+
+// ── 可用内存读数 ────────────────────────────────────────────────────────────────
+//
+// 红线：**不要用 os.freemem() 当「可用内存」**。它只统计完全空闲的物理页；macOS / Linux 都会把
+// 绝大部分空闲内存拿去做文件缓存（inactive / page cache），这些页随时可回收、却不计入 freemem。
+// 后果不是少开几个浏览器，而是**整台机器一个浏览器都开不了**：一台 16GB、系统自报可用 48% 的 Mac，
+// os.freemem() 只报 ~220MB < 单环境 700MB → 每一条开浏览器路径都被内存闸拦死。
+// （browser-slot-scheduling 把内存闸从「只在全部启动、可 force 越过」收成「全路径必经、无绕过口」
+//  之后，这个一直存在的错误读数才第一次真的把机器锁死。）
+//
+// 正确读法按平台取「可回收后真正能用的量」：
+//   linux  → /proc/meminfo 的 MemAvailable（内核自己算好的，最权威）
+//   darwin → vm_stat 的 free + inactive + speculative（inactive 是干净可回收的文件缓存）
+//   其它   → 回落 os.freemem()（宁可保守拦阻，也不假装内存充裕）
+
+/** 读数缓存 TTL：准入闸每次开浏览器都会问一次，别每次都 spawn 一个 vm_stat。 */
+const MEM_READ_TTL_MS = 3_000;
+
+/**
+ * 给操作系统与外壳自身留的余量：准入闸放行「最后一个」浏览器时，不该把机器压到一点余地都没有
+ * （macOS 会转而狂压缩 / 换页，表现成「莫名其妙的卡顿与掉浏览器」）。AIDCP_MEM_RESERVE_MB 可覆盖，
+ * 设 0 即不留。
+ */
+const MEM_RESERVE_BYTES_DEFAULT = 512 * 1024 * 1024;
+
+/** 解析 `vm_stat` 输出 → 可用字节数。纯函数，供单测直接喂样本。解析失败返回 0（调用方回落）。 */
+function parseVmStatAvailableBytes(text) {
+  const s = String(text || '');
+  const pageSize = Number(/page size of (\d+) bytes/.exec(s)?.[1]) || 4096;
+  const pages = (label) => Number(new RegExp(`Pages ${label}:\\s+(\\d+)`).exec(s)?.[1]) || 0;
+  const free = pages('free');
+  const inactive = pages('inactive');
+  const speculative = pages('speculative');
+  if (free + inactive + speculative <= 0) return 0;
+  return (free + inactive + speculative) * pageSize;
+}
+
+/** 解析 `/proc/meminfo` → MemAvailable 字节数。纯函数。解析失败返回 0（调用方回落）。 */
+function parseMemAvailableBytes(text) {
+  const kb = Number(/^MemAvailable:\s+(\d+) kB$/m.exec(String(text || ''))?.[1]) || 0;
+  return kb > 0 ? kb * 1024 : 0;
+}
+
+let memCache = { at: -Infinity, bytes: 0 };
+
+/**
+ * 本机**真实可用内存**（含可回收缓存），带 TTL 缓存。deps 可注入，供单测脱离真机。
+ * 任何平台探测失败一律回落 os.freemem()——读数只能偏保守，绝不能假装内存充裕。
+ */
+function availableMemoryBytes(deps = {}) {
+  const now = typeof deps.now === 'function' ? deps.now : Date.now;
+  const platform = deps.platform || process.platform;
+  const freemem = typeof deps.freemem === 'function' ? deps.freemem : os.freemem;
+  const exec = typeof deps.exec === 'function' ? deps.exec : null;
+  const readFile = typeof deps.readFile === 'function' ? deps.readFile : null;
+  const cache = deps.cache || memCache;
+
+  const t = now();
+  if (cache.bytes > 0 && t - cache.at < MEM_READ_TTL_MS) return cache.bytes;
+
+  let bytes = 0;
+  try {
+    if (platform === 'linux') {
+      const read = readFile || ((p) => require('node:fs').readFileSync(p, 'utf8'));
+      bytes = parseMemAvailableBytes(read('/proc/meminfo'));
+    } else if (platform === 'darwin') {
+      const run = exec || ((cmd) => require('node:child_process').execFileSync(cmd, { encoding: 'utf8', timeout: 2_000 }));
+      bytes = parseVmStatAvailableBytes(run('vm_stat'));
+    }
+  } catch {
+    bytes = 0; // 探测失败 → 回落
+  }
+  if (!(bytes > 0)) bytes = Math.max(0, Number(freemem()) || 0);
+
+  cache.at = t;
+  cache.bytes = bytes;
+  return bytes;
+}
+
+/** 扣掉给系统留的余量后、真正可拿来开浏览器的内存。 */
+function usableMemoryBytes(deps = {}) {
+  const envReserve = Number(process.env.AIDCP_MEM_RESERVE_MB);
+  const reserve = Number.isFinite(envReserve) && envReserve >= 0
+    ? envReserve * 1024 * 1024
+    : MEM_RESERVE_BYTES_DEFAULT;
+  return Math.max(0, availableMemoryBytes(deps) - reserve);
+}
 
 /** 并行槽位 : 可设置账号数 = 1:2（用户定案）。 */
 const ACCOUNTS_PER_SLOT = 2;
@@ -409,6 +498,11 @@ module.exports = {
   ACCOUNTS_PER_SLOT,
   LAUNCH_PRIORITY,
   ramAdmission,
+  availableMemoryBytes,
+  usableMemoryBytes,
+  parseVmStatAvailableBytes,
+  parseMemAvailableBytes,
+  MEM_RESERVE_BYTES_DEFAULT,
   duplicateAccountGroups,
   decideRespawn,
   classifyAdsInUse,

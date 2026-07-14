@@ -2286,7 +2286,7 @@ function applySlotsView(view) {
     ? '你设定'
     : view.capacitySource === 'env'
       ? '启动参数'
-      : `自动推算（可用内存 ÷ 单环境约 ${view.perEnvMB}MB）`;
+      : `自动推算（可用内存约 ${view.usableMB}MB ÷ 单环境约 ${view.perEnvMB}MB）`;
   const accSrc = view.maxAccountsSource === 'setting' ? '你设定' : '自动（并发 × 2）';
   settingsUi.slotsHint.textContent =
     `并发上限 ${view.capacity}（${capSrc}）· 账号上限 ${view.maxAccounts}（${accSrc}）· `

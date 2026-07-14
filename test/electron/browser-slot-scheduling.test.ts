@@ -186,3 +186,106 @@ test('0 / 空 / 负数 = 未设 = 自动，绝不解读成「上限 0」', () =>
   assert.equal(zeroed.maxAccounts, 20);
   assert.equal(fleet.normalizeSlotLimit(999), 64, '上界 64：防手滑多打一个零把机器拖垮');
 });
+
+// ---------------------------------------------------------------------------
+// 可用内存读数：MUST NOT 用 os.freemem() 当「可用内存」。
+//
+// 真机复现（16GB MacBook，系统自报可用 48%）：os.freemem() 只报 221MB —— 它不含 inactive
+// 那 3.6GB 可回收的文件缓存。单环境估值 700MB，于是**每一条开浏览器路径**都被内存闸拦死，
+// 客户端报「本机可用内存不足（需约 700MB，仅剩 418MB）」、整台机器一个浏览器都开不起来。
+// 下面的样本就是那台机器上 `vm_stat` 的真实输出。
+
+const VM_STAT_REAL = `Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               13388.
+Pages active:                            236265.
+Pages inactive:                          236028.
+Pages speculative:                         1538.
+Pages throttled:                              0.
+Pages wired down:                        168628.
+Pages purgeable:                           6953.
+`;
+
+test('darwin：可用内存按 free + inactive + speculative 算，不是 os.freemem()', () => {
+  const bytes = fleet.parseVmStatAvailableBytes(VM_STAT_REAL);
+  const mb = Math.round(bytes / MB);
+  // (13388 + 236028 + 1538) × 16384B ≈ 3921MB —— 而 os.freemem() 在这台机器上只报 221MB。
+  assert.equal(mb, 3921);
+  assert.ok(mb > 700, '这台机器明明开得起浏览器，旧读数却把它判成开不起');
+
+  const available = fleet.availableMemoryBytes({
+    platform: 'darwin',
+    exec: () => VM_STAT_REAL,
+    freemem: () => 221 * MB,
+    now: () => 1_000,
+    cache: { at: -Infinity, bytes: 0 },
+  });
+  assert.equal(Math.round(available / MB), 3921, 'darwin 走 vm_stat，绝不回落到 freemem');
+});
+
+test('linux：可用内存取 /proc/meminfo 的 MemAvailable', () => {
+  const meminfo = 'MemTotal:       16316420 kB\nMemFree:          221000 kB\nMemAvailable:    4014080 kB\n';
+  assert.equal(fleet.parseMemAvailableBytes(meminfo), 4014080 * 1024);
+  const available = fleet.availableMemoryBytes({
+    platform: 'linux',
+    readFile: () => meminfo,
+    freemem: () => 221 * MB,
+    now: () => 1_000,
+    cache: { at: -Infinity, bytes: 0 },
+  });
+  assert.equal(available, 4014080 * 1024);
+});
+
+test('探测失败 / 未知平台 → 回落 os.freemem()（只许偏保守，绝不假装内存充裕）', () => {
+  const boom = fleet.availableMemoryBytes({
+    platform: 'darwin',
+    exec: () => { throw new Error('vm_stat not found'); },
+    freemem: () => 900 * MB,
+    now: () => 1_000,
+    cache: { at: -Infinity, bytes: 0 },
+  });
+  assert.equal(Math.round(boom / MB), 900);
+
+  const unknown = fleet.availableMemoryBytes({
+    platform: 'sunos',
+    freemem: () => 900 * MB,
+    now: () => 1_000,
+    cache: { at: -Infinity, bytes: 0 },
+  });
+  assert.equal(Math.round(unknown / MB), 900);
+
+  const garbage = fleet.availableMemoryBytes({
+    platform: 'darwin',
+    exec: () => 'not vm_stat output at all',
+    freemem: () => 900 * MB,
+    now: () => 1_000,
+    cache: { at: -Infinity, bytes: 0 },
+  });
+  assert.equal(Math.round(garbage / MB), 900, '解析不出来也要回落，不能当成 0 把机器锁死');
+});
+
+test('读数带 TTL 缓存：准入闸每次开浏览器都问，不该每次都 spawn 一个 vm_stat', () => {
+  let calls = 0;
+  const cache = { at: -Infinity, bytes: 0 };
+  let clock = 1_000;
+  const read = () => fleet.availableMemoryBytes({
+    platform: 'darwin',
+    exec: () => { calls += 1; return VM_STAT_REAL; },
+    freemem: () => 0,
+    now: () => clock,
+    cache,
+  });
+  read();
+  read();
+  assert.equal(calls, 1, 'TTL 内复用缓存');
+  clock += 5_000;
+  read();
+  assert.equal(calls, 2, '过了 TTL 重新读——内存是会变的，不能一辈子只读一次');
+});
+
+test('真机上这台 16GB Mac 必须能开浏览器（端到端：读数 → 准入闸）', () => {
+  const usable = fleet.parseVmStatAvailableBytes(VM_STAT_REAL) - fleet.MEM_RESERVE_BYTES_DEFAULT;
+  const admission = fleet.ramAdmission({ plannedCount: 1, freeBytes: usable, perEnvBytes: 700 * MB });
+  assert.equal(admission.ok, true, '3.9GB 可用、留 512MB 余量后仍装得下一个 700MB 的浏览器');
+  const cap = fleet.resolveSlotCapacity({ freeBytes: usable, perEnvBytes: 700 * MB });
+  assert.equal(cap, 4, '≈3409MB ÷ 700MB = 4 个槽位');
+});

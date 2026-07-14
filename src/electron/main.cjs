@@ -908,17 +908,20 @@ let slotViewCache = null;
  */
 function slotSettingsView() {
   if (!slotViewCache) {
+    const usableBytes = fleet.usableMemoryBytes();
     slotViewCache = fleet.resolveSlotSettings({
-      freeBytes: os.freemem(),
+      freeBytes: usableBytes,
       perEnvBytes: PER_ENV_BYTES,
       slotSetting: settings.browserSlotLimit,
       slotEnv: Number(process.env.AIDCP_BROWSER_SLOTS) || 0,
       maxAccountsSetting: settings.maxAccountLimit,
     });
+    slotViewCache.usableMB = Math.round(usableBytes / (1024 * 1024));
     slotCapacityCache = slotViewCache.capacity;
     console.log(
-      `[slots] 槽位上限 ${slotViewCache.capacity}（${slotViewCache.capacitySource}；单环境约 ${slotViewCache.perEnvMB}MB，` +
-        `自动推算 ${slotViewCache.autoCapacity}）· 账号上限 ${slotViewCache.maxAccounts}（${slotViewCache.maxAccountsSource}）`,
+      `[slots] 槽位上限 ${slotViewCache.capacity}（${slotViewCache.capacitySource}；可用内存约 ${slotViewCache.usableMB}MB、` +
+        `单环境约 ${slotViewCache.perEnvMB}MB，自动推算 ${slotViewCache.autoCapacity}）· ` +
+        `账号上限 ${slotViewCache.maxAccounts}（${slotViewCache.maxAccountsSource}）`,
     );
     if (slotViewCache.maxAccountsExceedsRatio) {
       console.warn(
@@ -984,12 +987,16 @@ function admitBrowserSlot(handle, { force = false } = {}) {
   if (used >= cap) {
     return { ok: false, reason: 'slots_full', message: `槽位已满（${used}/${cap}）：需等其它账号进入待机让出槽位` };
   }
-  const admission = fleet.ramAdmission({ plannedCount: 1, freeBytes: os.freemem(), perEnvBytes: PER_ENV_BYTES });
+  const admission = fleet.ramAdmission({
+    plannedCount: 1,
+    freeBytes: fleet.usableMemoryBytes(),
+    perEnvBytes: PER_ENV_BYTES,
+  });
   if (!admission.ok) {
     return {
       ok: false,
       reason: 'ram',
-      message: `本机可用内存不足（需约 ${admission.requiredMB}MB，仅剩 ${admission.freeMB}MB）`,
+      message: `本机可用内存不足（需约 ${admission.requiredMB}MB，可用 ${admission.freeMB}MB）`,
     };
   }
   return { ok: true };
@@ -3111,7 +3118,7 @@ function startAllEnvs({ force = false } = {}) {
   const cap = slotCapacity();
   const admission = fleet.ramAdmission({
     plannedCount: Math.min(targets.length, cap),
-    freeBytes: os.freemem(),
+    freeBytes: fleet.usableMemoryBytes(),
     perEnvBytes: PER_ENV_BYTES,
   });
   if (!admission.ok && !force) {
