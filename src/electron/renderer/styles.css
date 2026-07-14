@@ -1544,13 +1544,21 @@ body { margin: 0; }
 .fleet-row.with-rail > .shell { width: auto; max-width: 720px; flex: 1; min-width: 0; padding-left: 14px; padding-right: 14px; }
 
 /* 环境栏：默认收起为 ~56px 窄图标条；展开出名字/人设图标/状态文字 + 环境管理 */
+/* 定高（曾是 min-height：无上界 → 环境一多整栏撑高整页、.rail-list 的 overflow 永不生效、栏尾被顶出折叠线）。
+   height 是承重项：只有高度确定，flex 子项才收缩、列表才滚得起来；align-self 只是护栏（定高后 stretch 本就不生效）。
+   sticky top:46px 贴在 .titlebar（sticky/46px 高/border-box）之下：主列滚动时整栏钉住不动。
+   绝不给本元素加 overflow / transform / filter / contain —— 前者裁掉溢出栏外的 #rail-badge，后三者会让本栏
+   变成所有 position:fixed 浮层（浮层 / 抽屉 / 遮罩）的包含块。 */
 .env-rail {
   display: flex; flex-direction: column; gap: 6px;
   width: 56px; flex-shrink: 0;
   padding: 8px 6px 12px;
   border-right: 1px solid #e5eaf2;
   background: linear-gradient(180deg, #f7f9fd, #fdfdff);
-  min-height: calc(100vh - 46px);
+  height: calc(100vh - 46px);
+  position: sticky; top: 46px;
+  align-self: flex-start;
+  z-index: 30; /* < .titlebar / .pop-mask(40)：绝不盖在遮罩之上 */
   box-sizing: border-box;
   transition: width 0.15s ease;
 }
@@ -1558,7 +1566,9 @@ body { margin: 0; }
 .env-rail.hidden { display: none; }
 
 /* 栏头：环境计数 + 添加 + 收起（带徽标） */
-.rail-head { display: flex; align-items: center; justify-content: space-between; padding: 3px 4px 2px; }
+/* 栏头 / 汇总 / 栏尾一律 flex-shrink:0：栏高定死后，可被压缩的只能是列表区；
+   否则高度不够时挤的是栏尾动作区（「全部启动」「引导处理」），那是最不该消失的东西。 */
+.rail-head { display: flex; align-items: center; justify-content: space-between; padding: 3px 4px 2px; flex-shrink: 0; }
 .env-rail.collapsed .rail-head { justify-content: center; }
 .rail-title { font-size: 12px; font-weight: 700; color: #1a2233; }
 .env-rail.collapsed .rail-title { display: none; }
@@ -1593,14 +1603,35 @@ body { margin: 0; }
 .rail-badge.hidden { display: none !important; }
 
 /* 汇总 chip（展开态） */
-.rail-sum { display: flex; gap: 6px; padding: 0 4px 4px; }
+.rail-sum { display: flex; gap: 6px; padding: 0 4px 4px; flex-shrink: 0; }
 .rail-sum.hidden { display: none; }
 .sum-chip { flex: 1; text-align: center; border-radius: 7px; padding: 4px 0; font-size: 11px; font-weight: 650; }
 .sum-chip.run { color: #137a58; background: #e3f7ef; }
 .sum-chip.attn { color: #991b1b; background: #fee2e2; }
 .sum-chip.idle { color: #3f4c68; background: #e8edf6; }
 
-.rail-list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; flex: 1; min-height: 0; }
+/* 栏内唯一滚动区：环境超出一屏就在这里滚，栏头 / 汇总 / 栏尾都不动（微信选联系人手感）。
+   min-height 必须保持 0：宁可列表被压到很矮，也绝不允许它把栏尾顶出视口——栏是 sticky 定高的，
+   溢出到栏底以下的东西滚多少页都够不着（永久失联）。
+   overflow-x 必须显式 hidden：只写 overflow-y 时 x 按规范算成 auto，Windows 上会冒出横条。 */
+.rail-list {
+  display: flex; flex-direction: column; gap: 2px;
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto; overflow-x: hidden;
+  overscroll-behavior: contain; /* 滚到底不再把整页一起带滚 */
+  padding-bottom: 4px;
+}
+/* 细滚动条：静息隐形，指针进栏才显形。绝不加 scroll-behavior: smooth——
+   每次重建都要还原 scrollTop，平滑动画会和下一次重建互相追着抖。 */
+.rail-list::-webkit-scrollbar { width: 6px; }
+.rail-list::-webkit-scrollbar-track { background: transparent; }
+.rail-list::-webkit-scrollbar-thumb { background: transparent; border-radius: 999px; }
+.env-rail:hover .rail-list::-webkit-scrollbar-thumb { background: rgba(100, 116, 139, 0.28); }
+.rail-list::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 0.48); }
+/* 收起态窄条不留滚动条槽：Chromium 样式化滚动条是「经典条」会实占布局宽（栏内容宽 43→37px），
+   会把行右侧的状态色环裁掉一截——而色环正是收起态唯一的状态信号。 */
+.env-rail.collapsed .rail-list { scrollbar-width: none; }
+.env-rail.collapsed .rail-list::-webkit-scrollbar { width: 0; }
 /* 空名册空态：常驻环境栏里的「添加第一个环境」按钮（仅展开态出现；空名册本就强制展开） */
 .rail-empty {
   margin: 10px 8px; padding: 12px 10px; width: calc(100% - 16px);
@@ -1610,10 +1641,19 @@ body { margin: 0; }
 }
 .rail-empty:hover { background: #e9f1ff; border-color: #9db6e8; }
 .env-rail.collapsed .rail-empty { display: none; }
-.rail-group { font-size: 10px; letter-spacing: .06em; color: #98a2b8; font-weight: 700; padding: 8px 8px 3px; display: flex; align-items: center; gap: 6px; }
+.rail-group { font-size: 10px; letter-spacing: .06em; color: #98a2b8; font-weight: 700; padding: 8px 8px 3px; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .rail-group.crit { color: #a16207; }
 .rail-group .n { opacity: .8; }
-.env-rail.collapsed .rail-group { padding: 0; margin: 6px 12px; height: 1px; background: #e5eaf2; font-size: 0; overflow: hidden; }
+/* 分组头吸顶（仅展开态）：长列表滚动时始终看得见当前处在哪一组。
+   .rail-list 自身无背景 → 吸顶头必须自带不透明底色，否则行会从字底下透过去；#f8fafd 取自栏顶渐变，肉眼不可辨。
+   收起态该元素被下面的规则改造成 1px 分隔线，绝不能 sticky（会在列表顶永久钉一条线），故 sticky 只挂展开态、
+   并在收起态显式复位 position。 */
+.env-rail.expanded .rail-group {
+  position: sticky; top: 0; z-index: 2;
+  background: #f8fafd;
+  box-shadow: 0 6px 6px -6px rgba(15, 23, 42, 0.06);
+}
+.env-rail.collapsed .rail-group { position: static; box-shadow: none; padding: 0; margin: 6px 12px; height: 1px; background: #e5eaf2; font-size: 0; overflow: hidden; }
 .env-rail.collapsed .rail-list > .rail-group:first-child { display: none; }
 
 .rail-row {
@@ -1631,9 +1671,12 @@ body { margin: 0; }
 .rail-row.lv-attention { border-left-color: #d97706; }
 /* 收起态：每行是一个 44px 见方的居中格，只放头像；名字/状态块强制隐藏（!important 压过任何残留），
    杜绝「头像比行大、名字框压在行上」的重叠。 */
+/* 宽度 42px（原 44px）：栏内容宽只有 43px（56 - 12 padding - 1 border），44px 本就压线；
+   列表成为滚动容器后 overflow-x:hidden 会真的裁掉溢出的那一截（连带右侧状态色环）。
+   绝不改成 width:auto —— margin 左右为 auto 时 flex 不再拉伸子项，行会缩成头像那么宽（28px），点击区跟着塌掉。 */
 .env-rail.collapsed .rail-row {
   justify-content: center; align-items: center; gap: 0;
-  width: 44px; height: 40px; margin: 3px auto; padding: 0; border-left: 0; border-radius: 11px;
+  width: 42px; height: 40px; flex-shrink: 0; margin: 3px auto; padding: 0; border-left: 0; border-radius: 11px;
 }
 .env-rail.collapsed .rail-meta { display: none !important; }
 .env-rail.collapsed .rail-row.selected { background: rgba(255,46,77,.10); box-shadow: inset 0 0 0 1px rgba(255,46,77,.42); }
@@ -1689,12 +1732,12 @@ body { margin: 0; }
 .rail-row.lv-error .rail-state { color: #b91c1c; font-weight: 650; }
 
 /* 栏尾添加（收起态） + 引导/全部启动/内存确认 */
-.rail-foot-add { display: none; }
+.rail-foot-add { display: none; flex-shrink: 0; }
 .env-rail.collapsed .rail-foot-add {
-  display: grid; place-items: center; width: 30px; height: 30px; margin: 6px auto 2px;
+  display: grid; place-items: center; width: 30px; height: 30px; margin: 6px auto 2px; flex-shrink: 0;
   border: 1px dashed #c8d5ee; background: #fff; color: #2563eb; border-radius: 8px; font-size: 16px; cursor: pointer;
 }
-.rail-foot { display: none; flex-direction: column; gap: 6px; padding: 0 4px; }
+.rail-foot { display: none; flex-direction: column; gap: 6px; padding: 0 4px; flex-shrink: 0; }
 .env-rail.expanded .rail-foot { display: flex; }
 .rail-btn {
   border: 1px solid #dbe3ef; border-radius: 8px; background: #fff;
@@ -1706,7 +1749,8 @@ body { margin: 0; }
 .rail-ram.hidden { display: none; }
 .rail-ram p { margin: 0 0 6px; font-size: 11.5px; line-height: 1.5; color: #7a5410; }
 .rail-ram-actions { display: flex; gap: 6px; }
-.rail-msg { margin: 0; font-size: 11px; color: #64748b; line-height: 1.5; }
+/* 栏尾提示不设上限会把定高的栏尾撑爆、把列表挤没：长文案自己滚 */
+.rail-msg { margin: 0; font-size: 11px; color: #64748b; line-height: 1.5; max-height: 64px; overflow-y: auto; }
 .rail-msg:empty { display: none; }
 
 /* 引导处理面板与提示 */

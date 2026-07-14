@@ -690,3 +690,95 @@ test('人设浮层：宽限到点未绑账号自动弹出并通知；偏好面�
   assert.deepEqual(generateCalls[0].payload.keywordSelections.includes('招聘求职'), true, '选择内容偏好时应带上行业标题');
   assert.deepEqual(generateCalls[0].payload.keywordSelections.includes('直播招聘'), true, '自定义兴趣应进入生成关键词');
 });
+
+// ═══ 环境栏定高 + 栏内滚动（edge-rail-fixed-height-scroll）═══
+// index.html 外链 styles.css，jsdom 不会去取；把真实样式表注入成 <style> 后 jsdom 会解析级联，
+// 于是断言的是「这条规则真的命中了这个元素」，而不只是「文件里有这段文本」。
+function cssWindow(): DOMWindow {
+  const dom = new JSDOM(html);
+  const { window } = dom;
+  openWindows.push(window);
+  const style = window.document.createElement('style');
+  style.textContent = rendererCss;
+  window.document.head.appendChild(style);
+  return window;
+}
+
+// jsdom 没有布局：scrollTop 只是元素上存的一个数，永远不会被夹回 0。真浏览器在列表被清空
+// （innerHTML=''）时会把滚动位夹回 0 —— 只补这一条行为，否则「重建后仍是 120」在完全没写保位
+// 代码时也会假绿（判别性已实测：无实现 after=0 / 有实现 after=120）。
+function stubScrollable(win: DOMWindow, el: Element) {
+  let top = 0;
+  const writes: number[] = [];
+  const innerHTMLDesc = Object.getOwnPropertyDescriptor(win.Element.prototype, 'innerHTML')!;
+  Object.defineProperty(el, 'scrollTop', {
+    configurable: true,
+    get: () => top,
+    set: (v: number) => { top = Number(v) || 0; writes.push(top); },
+  });
+  Object.defineProperty(el, 'innerHTML', {
+    configurable: true,
+    get() { return innerHTMLDesc.get!.call(this); },
+    set(v: string) { innerHTMLDesc.set!.call(this, v); top = 0; },
+  });
+  return { writes };
+}
+
+test('环境栏定高：有高度上限，环境多了只在列表区滚（不再撑长整页、把栏尾顶出视野）', () => {
+  const w = cssWindow();
+  const d = w.document;
+  const rail = d.querySelector('#env-rail') as HTMLElement;
+  const railCs = w.getComputedStyle(rail);
+  assert.ok(
+    (railCs.height && railCs.height !== 'auto') || (railCs.maxHeight && railCs.maxHeight !== 'none'),
+    '环境栏必须有高度上限；只剩 min-height 时内容会把整页撑长，列表的 overflow 永不触发',
+  );
+  assert.equal(railCs.position, 'sticky', '主列滚动时环境栏须钉住不动');
+  assert.equal(railCs.flexDirection, 'column', '栏内竖排：头 / 汇总 / 列表 / 栏尾');
+  const listCs = w.getComputedStyle(d.querySelector('#rail-list') as HTMLElement);
+  assert.equal(listCs.overflowY, 'auto', '溢出必须由列表区自己滚');
+  assert.equal(listCs.overscrollBehavior, 'contain', '滚到底不得把整页一起带滚');
+  assert.equal(listCs.flexGrow, '1', '列表区吃掉剩余高度');
+  // min-height:0 是红线：列表宁可被压到 0，也绝不能把栏尾挤到 sticky 栏的底边以下——
+  // 那片区域滚多少页都够不着（「全部启动」「引导处理」永久失联）。
+  assert.ok(['0', '0px'].includes(listCs.minHeight), '列表须 min-height:0，否则不收缩、滚不起来，且会把栏尾顶出视口');
+});
+
+test('环境栏结构：只有环境列表是滚动容器，栏头与栏尾不落进去（永远够得着）', async () => {
+  const { w } = await boot();
+  const d = w.document;
+  const rail = d.querySelector('#env-rail') as HTMLElement;
+  const list = d.querySelector('#rail-list') as HTMLElement;
+  assert.equal(list.parentElement, rail, '列表须是环境栏的直接子节点，否则 flex 高度链断、滚不起来');
+  for (const id of ['#rail-add', '#rail-toggle', '#rail-guide', '#rail-start-all', '#rail-msg', '#rail-foot-add']) {
+    const el = d.querySelector(id) as HTMLElement;
+    assert.ok(rail.contains(el), `${id} 仍在环境栏内`);
+    assert.equal(list.contains(el), false, `${id} MUST NOT 落进滚动容器，否则环境一多就被滚出视野`);
+  }
+});
+
+test('环境栏滚动保位：状态变化触发重建时，用户滚到的位置不被甩回顶部', async () => {
+  const { w, pushStatus } = await boot();
+  const list = w.document.querySelector('#rail-list') as HTMLElement;
+  const scroll = stubScrollable(w, list);
+  list.scrollTop = 120;
+  assert.equal(w.document.querySelectorAll('.rail-row').length, 2);
+  pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二' })); // 环境二 离线→运行：签名变、列表重建
+  await tick();
+  assert.equal(w.document.querySelectorAll('.rail-row').length, 2, '确已重建');
+  assert.equal(list.scrollTop, 120, '重建后必须把滚动位放回原处');
+  assert.ok(scroll.writes.includes(120), '须是显式写回，而非碰巧没动过');
+});
+
+test('环境栏不打扰用户：模型没变的每秒重估不重建、不动滚动位', async () => {
+  const { w, pushStatus } = await boot();
+  const list = w.document.querySelector('#rail-list') as HTMLElement;
+  const scroll = stubScrollable(w, list);
+  list.scrollTop = 90;
+  const before = w.document.querySelector('.rail-row') as HTMLElement;
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一' })); // 与初始快照同级：签名不变
+  await tick();
+  assert.equal(w.document.querySelector('.rail-row'), before, '签名未变不得重建 DOM');
+  assert.equal(list.scrollTop, 90, '不得在用户滚动途中改掉位置');
+  assert.deepEqual(scroll.writes, [90], '除用户那一次外不应有多余写入');
+});

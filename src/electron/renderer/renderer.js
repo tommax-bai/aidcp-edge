@@ -262,6 +262,8 @@ const fleetView = {
   logs: new Map(), // envId -> { entries:[{time,message}], last }（每环境开发者原始日志，绝不串号）
   guided: null, // 引导处理态 { done:Set, current }
   lastRailSig: '', // 环境栏 DOM 变更签名（每秒 stale 重估时避免无谓重建，见 renderRail）
+  lastRailSel: null, // 上次渲染时的选中 envId：只有「选中真的变了」才把选中行滚进视野，绝不与用户手滚打架
+  lastRailCollapsed: null, // 上次渲染时的收 / 展态：行高体系不同，旧滚动位在新布局里没有意义
 };
 function currentEnvId() {
   return fleetView.selected && fleetView.selected !== '__local__' ? fleetView.selected : undefined;
@@ -1600,6 +1602,14 @@ function renderRail() {
     fields.railGuide.textContent = model.pendingCount > 0 ? `引导处理（${model.pendingCount}）` : '引导处理';
   }
   if (!fields.railList) return;
+  // 列表现在是栏内定高滚动区：签名一变就整块重建，重建会把滚动位清零。不接管的话，用户往下滚去看后面的
+  // 环境时，任何一个环境的状态心跳都会把他甩回顶部。收↔展换的是行高体系（窄图标 vs 宽行），旧滚动位在
+  // 新布局里没有意义 → 那一次不还原，改用「把选中行滚进视野」兜底。
+  const layoutChanged = collapsed !== fleetView.lastRailCollapsed;
+  const selChanged = fleetView.selected !== fleetView.lastRailSel;
+  const prevScroll = layoutChanged ? 0 : fields.railList.scrollTop; // 必须在清空之前读（清空后恒为 0）
+  fleetView.lastRailCollapsed = collapsed;
+  fleetView.lastRailSel = fleetView.selected;
   fields.railList.innerHTML = '';
   if (empty) {
     // 空名册空态：直接给一个「添加第一个环境」按钮（点开加入 / 新建面板），别让用户找那个小「＋」。
@@ -1609,7 +1619,7 @@ function renderRail() {
     cta.textContent = '＋ 添加第一个环境';
     cta.addEventListener('click', () => openEnvAddPanel('join'));
     fields.railList.appendChild(cta);
-    return;
+    return; // 空态无可滚内容，滚动位天然为 0
   }
   for (const g of RAIL_GROUPS) {
     const groupRows = model.rows.filter(g.has);
@@ -1620,6 +1630,26 @@ function renderRail() {
     fields.railList.appendChild(head);
     for (const row of groupRows) fields.railList.appendChild(makeRailRow(row));
   }
+  // ① 先还原滚动位：内容变矮（环境被移出）时浏览器自动把赋值夹回 [0, max]，不会悬空成空白。
+  fields.railList.scrollTop = prevScroll;
+  // ② 再按需把选中行滚进视野：只在选中真的变了、或收展换了布局时做。选中变更的三个入口
+  //    （selectEnv / 引导流 showGuideStep / 快照恢复 applyFleetSnapshot）最后都落到这里，一处收口即可；
+  //    绝不每次重建都滚——那会跟用户的手动滚动打架。
+  if (selChanged || layoutChanged) scrollRailRowIntoView(fields.railList.querySelector('.rail-row.selected'));
+}
+
+/** 把某一行滚进环境栏视野（只滚列表容器自己）。
+ * 不用 element.scrollIntoView：它会连带滚动所有可滚祖先（文档本身仍可滚），整页会跟着抖一下；
+ * 且 jsdom 里根本没有这个方法（裸调会在渲染层抛异常、连带打死整套无头渲染测试）。
+ * 这里只改容器 scrollTop，浏览器自动夹在 [0, max]；行已完整可见则一动不动。 */
+function scrollRailRowIntoView(row) {
+  const list = fields.railList;
+  if (!list || !row || list.clientHeight === 0) return; // 尚未布局（高度 0）时不做无意义计算
+  const lr = list.getBoundingClientRect();
+  const rr = row.getBoundingClientRect();
+  if (rr.top >= lr.top && rr.bottom <= lr.bottom) return; // 已完整可见
+  const pad = 6; // 留一点呼吸位，别贴边
+  list.scrollTop += rr.top < lr.top ? rr.top - lr.top - pad : rr.bottom - lr.bottom + pad;
 }
 
 function makeRailRow(row) {
@@ -1789,6 +1819,9 @@ function showGuideStep() {
   const target = q[0];
   fleetView.guided.current = target.envId;
   selectEnv(target.envId);
+  // 引导目标若本就是当前选中项，selectEnv 会早退（不重建、不滚动）——这里补一次「确保可见」，
+  // 否则正在引导的那一行可能停在滚动区外、用户对着看不见的行找不到北。幂等：已完整可见就不动。
+  scrollRailRowIntoView(fields.railList?.querySelector('.rail-row.selected'));
   const displayName = target.name || `环境 …${String(target.envId).slice(-4)}`;
   if (fields.guideTitle) fields.guideTitle.textContent = `引导处理（剩 ${q.length} 个）：${displayName}`;
   if (fields.guideBody) {
