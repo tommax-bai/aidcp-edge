@@ -541,7 +541,7 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
       },
     }));
     assert.equal($(w, '#presence-text').textContent, '今日内容探索已经完成');
-    assert.equal($(w, '#presence-fresh').textContent, '');
+    assert.equal($(w, '#presence-fresh').textContent, '预计约 8 小时后开启新一天计划');
     assert.equal(hidden($(w, '#runtime-guidance')), false);
     assert.equal($(w, '#runtime-guidance').dataset.mode, 'day');
     assert.equal($(w, '#runtime-guidance-kicker').textContent, '探索完成');

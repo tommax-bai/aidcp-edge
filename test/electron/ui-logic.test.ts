@@ -264,6 +264,27 @@ test('运行价值说明：今日浏览计划完成后展示今日成果', () =>
   });
 });
 
+test('在场感：今日完成顶部保留开启新一天预计时间', () => {
+  const now = Date.now();
+  const v = uiLogic.presenceView(st({
+    session: 'resting',
+    presence: { text: '旧事件', at: new Date(now - 6 * 60_000).toISOString() },
+    dailyUsage: {
+      inspirationSummary: { count: 3, sourceLikeCount: 12_345 },
+      windows: {
+        day: {
+          expiresAt: now + 9 * 60 * 60_000,
+          totals: { view: 300, like: 16, collect: 9, comment: 4, follow: 0, publish: 0 },
+          quotas: { view: 300, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+          saturated: ['view'],
+        },
+      },
+    },
+  }), now);
+  assert.equal(v.text, '今日内容探索已经完成');
+  assert.equal(v.fresh, '预计约 9 小时后开启新一天计划');
+});
+
 test('在场感：本轮等待缺少完整进度卡时仍展示预计等待时间', () => {
   const now = Date.now();
   const v = uiLogic.presenceView(st({

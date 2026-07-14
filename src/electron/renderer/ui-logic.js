@@ -232,6 +232,12 @@
     };
   }
 
+  function dayCompletionFresh(status, nowMs) {
+    const day = guidanceWindow(status || {}, 'day', nowMs);
+    const wait = futureWaitText(guidanceReleaseAt(day), nowMs);
+    return wait ? `预计约 ${wait}开启新一天计划` : '';
+  }
+
   function guidanceSteps(observed, inspirations) {
     const browseDetail = inspirations > 0 ? `${inspirations} 条灵感已记录` : `${observed} 条首页内容已观察`;
     return [
@@ -324,7 +330,8 @@
       : guidance.mode === 'session'
         ? '本轮浏览完成，正在为下一轮留出自然节奏'
         : '这一小时的探索告一段落，稍后会继续';
-    return { text, animate: false, fresh: guidance.resume || '' };
+    const fresh = guidance.mode === 'day' ? dayCompletionFresh(status, nowMs) : guidance.resume || '';
+    return { text, animate: false, fresh };
   }
 
   function presenceView(status, nowMs) {
