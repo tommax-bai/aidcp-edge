@@ -254,8 +254,9 @@ export function uiSnapshotToLines(p: UiSnapshotPayload): string[] {
   if (dailyUsage) lines.push(line({ kind: 'dailyUsage', dailyUsage }));
   const browserStandby = sanitizeBrowserStandby(p.browserStandby);
   if (browserStandby) lines.push(line({ kind: 'browserStandby', browserStandby }));
-  // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在 true 时下发，转成 ui-event 行给壳，
-  // 边缘据此把已绑账号徽标翻「已设置」并跳过向导（修「已绑仍显示未设置」bug）。
-  if (p.personaBound === true) lines.push(line({ kind: 'personaBound', personaBound: true }));
+  // 人设绑定态（change persona-bound-tristate）：云端 true / false 都下发，两者都必须转成 ui-event 行给壳。
+  // 只转 true 的话，权威的「未绑」在这里就被吞掉，外壳只能靠「等了 6 秒还没收到」去猜——猜错就误弹向导。
+  // 字段缺省（未知）不发行：外壳保持「未知」，而未知永不触发弹窗。
+  if (typeof p.personaBound === 'boolean') lines.push(line({ kind: 'personaBound', personaBound: p.personaBound }));
   return lines;
 }

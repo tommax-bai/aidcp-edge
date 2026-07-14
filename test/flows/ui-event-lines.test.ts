@@ -273,3 +273,18 @@ test('ui-event-lines: 空快照 / 坏 at → 不产行（缺数据不造数据�
   );
   assert.deepEqual(uiSnapshotToLines({ lastPublish: { title: '  ', at: 1 } }), [], '空标题不发 lastPublish');
 });
+
+// 人设绑定态三态（change persona-bound-tristate）：true / false 都必须转成行给外壳；
+// 只转 true 的话，权威的「未绑」在核心里就被吞掉，外壳只能靠计时猜——猜错就给已设置人设的账号误弹向导。
+test('ui-event-lines: personaBound 三态 → true/false 都出行，缺省不出行', () => {
+  const boundLine = uiSnapshotToLines({ personaBound: true });
+  assert.equal(boundLine.length, 1);
+  assert.match(boundLine[0], /"kind":"personaBound"/);
+  assert.match(boundLine[0], /"personaBound":true/);
+
+  const unboundLine = uiSnapshotToLines({ personaBound: false });
+  assert.equal(unboundLine.length, 1, '权威「未绑」必须发出去，绝不吞掉');
+  assert.match(unboundLine[0], /"personaBound":false/);
+
+  assert.deepEqual(uiSnapshotToLines({}), [], '未知（字段缺省）不发行：外壳保持未知，未知永不弹窗');
+});

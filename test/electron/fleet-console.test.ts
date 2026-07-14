@@ -254,11 +254,9 @@ test('环境头像三态：键盘落在人设 ✦ 图标上不触发浏览器抬
   assert.equal(calls.resetParking.length, 0, '键盘落在 ✦ 上不得归位浏览器');
 });
 
-test('人设弹窗：账号已绑人设时绝不自动弹（宽限内翻已绑即跳过）', async () => {
-  // 大宽限：到点复评定时器不在测试内触发，弹与不弹只由「是否已绑」决定。
-  const { w, calls, pushStatus } = await boot({}, { personaPromptGraceMs: 60_000 });
+test('人设弹窗：账号已绑人设时绝不自动弹', async () => {
+  const { w, calls, pushStatus } = await boot();
   await tick();
-  // 宽限窗口内 personaBound 权威信号到达 → 判已绑，永不弹、不通知。
   pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: true }));
   await tick();
   assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), false, '已绑账号不得自动弹出人设浮层');
@@ -385,15 +383,16 @@ test('红线：人设草稿绑定生成时的环境，中途切换环境后确�
   const { w } = await boot({
     personaGenerate: async (envId: string) => { calls.gen.push(envId); return { ok: true, soulYaml: 'soul: A', identitySummary: 'A 人设' }; },
     personaPersist: async (envId: string) => { calls.persist.push(envId); return { ok: true }; },
-    getStatus: async () => makeStatus({ envId: 'ads-p1', envName: '环境一', auth: 'logged in', cloud: 'connected' }),
+    // personaBound:false = 云端权威说未绑（向导只对权威未绑的账号开放；未知态出空态面板，见三态用例）。
+    getStatus: async () => makeStatus({ envId: 'ads-p1', envName: '环境一', auth: 'logged in', cloud: 'connected', personaBound: false }),
   });
   // 环境一登录+连云 → 可生成
   (w as unknown as { pushStatus?: unknown }); // noop
   const gen = w.document.querySelector('#persona-generate') as HTMLButtonElement;
   // 选一个单选关键词组的项，令生成通过校验
   (w.document.querySelector('.persona-kw-group[data-dim="content"][data-category="招聘求职"] .kw-btn') as HTMLElement).click();
-  // 不再手动放行：boot 首个 status 已 logged in+connected，闸必须自然打开（回归主进程 auth 链路的渲染侧契约）
-  assert.equal(gen.disabled, false, '登录+连云后生成按钮必须自然可点（gate 不得永久 disabled）');
+  // 不再手动放行：boot 首个 status 已 logged in+connected+权威未绑，闸必须自然打开（回归主进程 auth 链路的渲染侧契约）
+  assert.equal(gen.disabled, false, '登录+连云+权威未绑后生成按钮必须自然可点（gate 不得永久 disabled）');
   gen.click();
   await tick();
   assert.deepEqual(calls.gen, ['ads-p1'], '生成打到当前环境');
@@ -578,7 +577,9 @@ test('人设浮层：未就绪环境出空态面板（向导收起）；生成�
   assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), true, '未就绪收起向导');
   assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '待启动');
   assert.equal((w.document.querySelector('#persona-empty-action') as HTMLElement).textContent, '去启动');
-  // 切回已登录+连云的环境一 → 向导可用
+  // 切回已登录+连云、且云端权威说未绑的环境一 → 向导可用
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: false }));
+  await tick();
   (rowOf('ads-p1').querySelector('.rail-persona') as HTMLElement).click();
   await tick();
   assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), false);
@@ -605,11 +606,11 @@ test('人设浮层：未就绪环境出空态面板（向导收起）；生成�
 
 test('人设成长引导：点击开始生成复用现有启动按钮并关闭浮层', async () => {
   const { w, calls, pushStatus } = await boot({
-    getStatus: async () => makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'stopped', session: 'idle', auth: 'logged in', cloud: 'connected' }),
+    getStatus: async () => makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'stopped', session: 'idle', auth: 'logged in', cloud: 'connected', personaBound: false }),
     personaGenerate: async () => ({ ok: true, soulYaml: 'soul: Start', identitySummary: 'Start 人设' }),
     personaPersist: async () => ({ ok: true }),
   });
-  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'stopped', session: 'idle', auth: 'logged in', cloud: 'connected' }));
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'stopped', session: 'idle', auth: 'logged in', cloud: 'connected', personaBound: false }));
   await tick();
 
   (w.document.querySelector('.persona-kw-group[data-dim="content"][data-category="招聘求职"] .kw-btn') as HTMLElement).click();
@@ -642,29 +643,60 @@ test('暂停态显式关闭只路由当前选中环境并切到已关闭', async
   assert.equal(close.classList.contains('hidden'), true);
 });
 
-test('人设浮层：已就绪未绑账号在宽限期内不自动弹（不发通知）', async () => {
-  // 大宽限：断言时一定仍在窗口内，与 boot 耗时无竞态。
-  const { w, calls } = await boot({}, { personaPromptGraceMs: 60_000 });
+// ── 人设弹窗三态（change persona-bound-tristate）────────────────────────────────────────────
+// 红线：弹窗只能由云端权威的「未绑」触发。「信号还没到」必须是一个独立的「未知」态，绝不当成未绑——
+// 旧实现把两者压成同一个 false，靠 6 秒宽限去猜，已设置人设的账号被反复误弹（真机：工程师大白）。
+
+test('人设浮层：权威信号未到（未知态）时**永不**自动弹，也不发通知', async () => {
+  const { w, calls } = await boot(); // 已登录 + 已连云，但 personaBound 缺省 = 云端还没说
   await tick();
-  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), false, '宽限期内不得自动弹出人设浮层');
-  assert.equal(calls.notify.length, 0, '宽限期内不得发系统通知');
+  await new Promise((r) => setTimeout(r, 300)); // 等再久也不该弹：未知不是未绑，没有任何计时器会把它翻成未绑
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), false, '未知态不得自动弹出人设浮层');
+  assert.equal(calls.notify.length, 0, '未知态不得发系统通知');
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '待启动', '未知态徽标须为「待启动」，绝不谎称「未设置」');
 });
 
-test('人设浮层：宽限到点未绑账号自动弹出并通知；偏好面板为语气调性 + 内容偏好，招聘求职置顶且支持自定义', async () => {
+test('人设浮层：已绑账号在核心重启后（绑定态回落未知）绝不被误弹', async () => {
+  // 真机复发链：冷待机唤醒 → 核心重启 → 外壳把 personaBound 归零 → 渲染层若把「未知」当「未绑」就误弹。
+  const { w, calls, pushStatus } = await boot();
+  await tick();
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: true })); // 首次会话：云端说已绑
+  await tick();
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: null })); // 核心重启：回落未知
+  await tick();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), false, '重启后的未知态绝不得弹窗');
+  assert.equal(calls.notify.length, 0, '重启后的未知态绝不得发通知');
+});
+
+test('人设浮层：系统误弹的窗在权威「已绑」到达时自动收起（用户手动打开的不动）', async () => {
+  const { w, pushStatus } = await boot();
+  await tick();
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: false })); // 云端权威说未绑 → 自动弹
+  await tick();
+  const pop = w.document.querySelector('#persona-pop')!;
+  assert.equal(pop.classList.contains('open'), true, '权威未绑应自动弹出');
+
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: true })); // 权威改口：其实已绑
+  await tick();
+  assert.equal(pop.classList.contains('open'), false, '自动弹出的窗应在权威「已绑」到达时自动收起');
+});
+
+test('人设浮层：云端权威说未绑 → 自动弹出并通知；偏好面板为语气调性 + 内容偏好，招聘求职置顶且支持自定义', async () => {
   const generateCalls: Array<{ envId: string; payload: { keywordSelections: string[] } }> = [];
   const { w, calls, pushStatus } = await boot({
     personaGenerate: async (envId: string, payload: { keywordSelections: string[] }) => {
       generateCalls.push({ envId, payload });
       return { ok: true, soulYaml: 'soul: custom', identitySummary: '自定义人设' };
     },
-  }, { personaPromptGraceMs: 30 });
-  // 只等「最终弹出」，不抢在时钟前断言关闭（避免与 boot 耗时竞态；宽限到点复评定时器负责弹出）。
-  await new Promise((r) => setTimeout(r, 300));
+  });
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: false }));
+  await tick();
 
   const pop = w.document.querySelector('#persona-pop')!;
-  assert.equal(pop.classList.contains('open'), true, '宽限到点后未绑账号应自动弹出人设浮层');
-  assert.equal(calls.notify.length, 1, '未绑已就绪账号应发一次系统通知');
-  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一' }));
+  assert.equal(pop.classList.contains('open'), true, '云端权威说未绑 → 应自动弹出人设浮层');
+  assert.equal(calls.notify.length, 1, '权威未绑账号应发一次系统通知');
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: false }));
   await tick();
   assert.equal(calls.notify.length, 1, '重复状态更新不得刷通知');
 

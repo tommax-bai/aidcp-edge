@@ -689,9 +689,11 @@ function makeStatus(provider) {
     // 核心遇登录/验证码/未知阻断弹窗、已本地暂停等待人工处理（红线：绝不呈现为在线健康）。
     // 由核心成对信号驱动：`检测到X弹窗，暂停操作`(置真) / `阻断弹窗已清除，恢复浏览`(置假)。
     overlayBlocked: false,
-    // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在已绑时下发（sticky true），
-    // 渲染层据此把徽标翻「已设置」并跳过向导。按环境隔离（账号级信号）。
-    personaBound: false,
+    // 人设绑定态（change persona-bound-tristate）：**三态** true=云端确认已绑 / false=云端确认未绑 /
+    // null=未知（云端还没说）。默认 null 而非 false 是这条 bug 的要害——默认 false 等于「有罪推定」，
+    // 任何一次重启把它归零，渲染层就会在快照到达前把已设置人设的账号判成未设置并弹向导。
+    // 按环境隔离（账号级信号）。
+    personaBound: null,
     // 本环境核心本次实际被派生去连的云端 key（change edge-cloud-env-selector）：''=未启动/未知。
     // 界面据此与「目标云端」比对，运行中且不一致即显示「待重启生效」（红线：显示=实际连接）。
     connectedCloudKey: '',
@@ -1742,9 +1744,10 @@ function startEdge(handle) {
   handle.envInUseThisRun = false;
   handle.envInUseHolder = null;
   handle.spawnedAtMs = Date.now();
-  // 换会话重置已绑人设信号（change persona-badge-preconnect-neutral）：云端只在为真时下发 personaBound、从不发 false，
-  // 若上一会话该环境曾已绑、随后被解绑再重启，stale-true 会残留成误显示「已设置」——每次启动清零、待新会话权威信号重建。
-  handle.status.personaBound = false;
+  // 换会话把人设绑定态重置回**未知**（change persona-bound-tristate）：上一会话的 stale-true 不能残留成
+  // 误显示「已设置」，但也绝不能归零成 false——那等于替云端宣布「未绑」，正是「已设置账号被反复误弹向导」
+  // 的根因（每次冷待机唤醒都会重启核心、走到这一行）。重置成 null=未知，等新会话的权威信号重建。
+  handle.status.personaBound = null;
   const child = spawn(process.execPath, [edgeEntry], {
     cwd: edgeCwd,
     env: spawnEnv,
@@ -2450,8 +2453,9 @@ function handleEdgeLogLine(handle, message, isError = false) {
       // 不 await（受写客户端 ≥1.1s 串行节流，不阻塞消息处理）。
       if (evt.account.name) maybeRenameEnvToNickname(handle, evt.account.name);
     }
-    // 已绑人设信号（change persona-wizard-onboarding-fixes）：云端仅在已绑时下发（sticky true）。
-    if (evt.personaBound === true) next.personaBound = true;
+    // 人设绑定态（change persona-bound-tristate）：云端 true / false 都下发，双向采纳——云端是单写方，
+    // 解绑必须能传下来（否则客户端会一直显示「已设置」，而云端早已按未绑停了这个号）。
+    if (typeof evt.personaBound === 'boolean') next.personaBound = evt.personaBound;
     if (evt.presence) next.presence = { text: evt.presence, at: new Date().toISOString() };
     if (evt.publish && evt.publish.state) {
       next.publish = { ...evt.publish, at: new Date().toISOString() };

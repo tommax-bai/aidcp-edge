@@ -1249,7 +1249,7 @@ fields.noticeAction.addEventListener('click', () => openEnvAddPanel('join'));
 // ─── 账号人设浮层（左栏行内人设图标拉起，对「该行环境」做人设）───
 // 打开即把该环境设为选中（右侧陪伴视图 + 状态随之切过去），使人设向导的 gate（登录+连云）与草稿归属
 // 都锚定这个环境（persist 打回它，绝不跨账号）。头部身份锚点（头像 + 平台小标）把这个事实可视化。
-function openPersonaPop(envId) {
+function openPersonaPop(envId, reason = 'manual') {
   if (!fields.personaPop) return;
   if (envId && envId !== fleetView.selected && fleetView.envs.has(envId)) selectEnv(envId);
   const env = fleetView.envs.get(fleetView.selected);
@@ -1267,6 +1267,9 @@ function openPersonaPop(envId) {
   fields.personaPop.classList.add('open');
   fields.personaPop.setAttribute('aria-hidden', 'false');
   fields.personaMask?.classList.remove('hidden');
+  // 记下「谁弹的」：只有系统自动弹的窗才允许在权威「已绑」到达时被自动收起（见 updatePersonaGate）。
+  personaPopOpenReason = reason === 'auto' ? 'auto' : 'manual';
+  personaPopOpenEnvId = currentEnvId() || envId || null;
   // 用目标环境**自身**的状态评闸：此前用 currentStatus，目标环境尚无状态推送时会拿上一环境的状态误开闸。
   updatePersonaGate((env && env.status) || null);
 }
@@ -1281,6 +1284,8 @@ function closePersonaPop(force) {
   fields.personaPop.classList.add('hidden');
   fields.personaPop.setAttribute('aria-hidden', 'true');
   fields.personaMask?.classList.add('hidden');
+  personaPopOpenReason = null;
+  personaPopOpenEnvId = null;
   if (isPersonaGrowthActive()) {
     clearPersonaGrowth();
     personaUi.boundNote?.classList.remove('hidden');
@@ -1473,9 +1478,6 @@ function applyFleetSnapshot(snap) {
     fleetView.buffers.delete(key);
     fleetView.logs.delete(key);
     lastPublishSigByEnv.delete(key);
-    // 人设弹窗宽限的每环境时间戳也要清：adspower envId 由分身确定性派生，移出再加回会复用同一 key，
-    // 残留的旧 since 会让 elapsed 远超宽限 → 跳过宽限、对（可能已绑的）账号立刻误弹。顺带清显示态指针。
-    personaUnboundSince.delete(key);
     if (fleetView.shownEnv === key) fleetView.shownEnv = null;
   }
   if (typeof snap.railCollapsed === 'boolean') fleetView.collapsed = snap.railCollapsed;
@@ -2055,7 +2057,8 @@ function updateCloudPending() {
 
 function applySettings(s) {
   if (!s) return;
-  if (Number.isFinite(Number(s.personaPromptGraceMs))) personaPromptGraceMs = Math.max(0, Number(s.personaPromptGraceMs));
+  // settings.personaPromptGraceMs 已废弃（change persona-bound-tristate 删除了整套宽限期机制：弹窗不再靠
+  // 「等多久算未绑」去猜，而是只由云端权威的 personaBound===false 触发）。旧设置里残留该键时静默忽略。
   selectedProfileName = s.adsProfileName || '';
   selectedPlatform = normPlatform(s.platform);
   // 花名册：新形状 environments 优先；旧单值 adsProfileId 向后兼容加载为单元素花名册。
@@ -2956,14 +2959,19 @@ let personaStage = 'pick'; // 两步向导阶段：pick（选关键词）| previ
 let personaInFlight = false; // 生成请求在途（骨架 + 按钮禁用 + 遮罩误点不关层）
 let personaGrowthEnvId = null; // 本次刚确认成功的人设所属环境；只让该环境出现一次成长引导
 const personaPrompted = new Set();
-// 人设弹窗判定时机（用户反馈：已设置人设的账号被误弹）：账号刚「登录+连云」的空窗里，云端「已绑人设」
-// 信号（sticky true、只在已绑时下发、要等下一次心跳）可能还没到，此刻按未绑弹窗会误扰已设置的账号。
-// 给一个宽限期——先记下每个环境首次进入「已连云且暂判未绑」的时刻；宽限内不弹、只挂一个到点复评的
-// 定时器；宽限到点仍未绑才认定为真未设置并弹。已设置的账号会在这个窗口内翻成已绑，从而永不被弹。
-const PERSONA_PROMPT_GRACE_MS = 6000;
-let personaPromptGraceMs = PERSONA_PROMPT_GRACE_MS; // 可经 settings.personaPromptGraceMs 覆盖（默认 6s；主要供测试注入短值 / 高级调优）
-const personaUnboundSince = new Map(); // envId -> ts：首次观察到 known && !bound
-let personaPromptReevalTimer = null; // 单个待触发的到点复评定时器（针对当前环境）
+// 人设弹窗触发判据（change persona-bound-tristate）：**只由云端权威的「未绑」触发**。
+//
+// 旧实现按「!bound」触发，而 bound=false 同时承载了两个互斥的含义——「云端说没有」和「云端还没说」。
+// 于是只能拿一个 6 秒宽限去猜，猜错就给已设置人设的账号弹向导。历史上修了三次（加宽限、bound 时清去重集、
+// 移出环境时清 since），每次都只封住当时那条路径；只要再出现一条把信号归零的新路径（核心重启 / 冷待机
+// 唤醒 / 环境移出再加回），就复发一次——而 `personaUnboundSince` 的两处清理还写在只有「未绑」才走得到的
+// 分支里，等于死代码，宽限期在第二次之后根本不再生效，弹窗变成必然。
+//
+// 现在三态：true=已绑 / false=云端确认未绑 / null|undefined=未知。触发条件是 `=== false` —— 一个只有云端
+// 能写入的值。「没收到信号」在类型上是未知，而未知永不满足触发条件。于是无论将来新增多少条重置路径，
+// 它们最坏只能把状态打回「未知」，而不会打成「未绑」。宽限期机制随之整体删除：它是那个错误推断的载体。
+let personaPopOpenReason = null; // manual | auto：只自动收起「系统误弹」的窗，不动用户手动打开的
+let personaPopOpenEnvId = null;
 
 // 底部操作栏按阶段/形态切换主 CTA：向导态 pick=「生成人设」、preview=「重新生成 + 确认使用」；
 // 空态/已绑态收起全部按钮（空态面板自带「去启动」）。
@@ -3099,25 +3107,10 @@ function clearPersonaPromptForCurrentEnv() {
   }
 }
 
-function maybePromptPersonaSetup(status, known, bound) {
-  const trackKey = currentEnvId() || '__local__';
-  if (!known) { personaUnboundSince.delete(trackKey); return; }
-  if (bound) {
-    clearPersonaPromptForCurrentEnv();
-    personaUnboundSince.delete(trackKey);
-    return;
-  }
+// 只在云端权威地说「这个账号没有人设」时才弹。调用方已保证 status.personaBound === false。
+function maybePromptPersonaSetup(status) {
   const key = personaPromptKey(status);
   if (personaPrompted.has(key)) return;
-  // known && !bound：可能只是 personaBound 权威信号尚未到达的空窗——先过宽限期再认定未绑。
-  let since = personaUnboundSince.get(trackKey);
-  if (since == null) { since = Date.now(); personaUnboundSince.set(trackKey, since); }
-  const elapsed = Date.now() - since;
-  if (elapsed < personaPromptGraceMs) {
-    schedulePersonaPromptReeval(trackKey, personaPromptGraceMs - elapsed);
-    return;
-  }
-  // 宽限到点仍未绑：认定为真未设置，弹窗 + 系统通知。
   personaPrompted.add(key);
   const envId = currentEnvId();
   const env = fleetView.envs.get(envId);
@@ -3131,19 +3124,7 @@ function maybePromptPersonaSetup(status, known, bound) {
   } catch {
     /* old preload without notify */
   }
-  if (!fields.personaPop || !fields.personaPop.classList.contains('open')) openPersonaPop(envId);
-}
-
-// 到点复评：宽限期内若无后续状态推送触发，也主动再判一次。只对「仍是当前环境」生效，
-// 用其最新状态重跑 updatePersonaGate（内部会再走到 maybePromptPersonaSetup，此时宽限已过 →
-// 认定并弹；若期间已绑则自然跳过）。
-function schedulePersonaPromptReeval(envId, delay) {
-  if (personaPromptReevalTimer) clearTimeout(personaPromptReevalTimer);
-  personaPromptReevalTimer = setTimeout(() => {
-    personaPromptReevalTimer = null;
-    if ((currentEnvId() || '__local__') !== envId) return; // 已切走：交给新环境自己的评估
-    updatePersonaGate(currentStatus || null);
-  }, Math.max(0, delay));
+  if (!fields.personaPop || !fields.personaPop.classList.contains('open')) openPersonaPop(envId, 'auto');
 }
 
 function collectPersonaKeywords() {
@@ -3170,13 +3151,16 @@ function updatePersonaGate(status) {
   const connected = Boolean(status && status.cloud === 'connected');
   personaReady = loggedIn && connected;
 
-  // 「是否已绑」仅在已连云（权威可知该环境对应哪个真实账号 + personaBound 已到）时判定；之前一律中立。
-  // 切环境泄漏由 resetPersonaDraft() 清 personaLocallyBound 处理；断连时 known=false 已让其无关，无需额外清。
-  const known = personaReady;
-  const bound = known && (Boolean(status && status.personaBound) || personaLocallyBound);
+  // 绑定态三态（change persona-bound-tristate）：true=云端确认已绑 / false=云端确认未绑 / 未知=还没收到。
+  // known 必须同时要求「已连云」和「权威信号已到」——只要信号没到，一律按未知处理（宁缺毋假）。
+  const authoritative = personaReady && typeof (status && status.personaBound) === 'boolean';
+  const bound = (authoritative && status.personaBound === true) || (personaReady && personaLocallyBound);
+  // 「云端确认未绑」是弹窗与「未设置」徽标的**唯一**依据；未知既不弹窗、也不谎称未设置。
+  const knownUnbound = authoritative && status.personaBound === false && !personaLocallyBound;
+  const known = bound || knownUnbound;
   const growthActive = bound && isPersonaGrowthActive();
 
-  // 四形态显隐一处收口：刚绑=成长引导 / 已绑=绿卡 / 未就绪=空态面板 / 已连未绑=向导。
+  // 四形态显隐一处收口：刚绑=成长引导 / 已绑=绿卡 / 未就绪=空态面板 / 已连且确认未绑=向导。
   if (personaUi.growth) personaUi.growth.classList.toggle('hidden', !growthActive);
   if (personaUi.boundNote) personaUi.boundNote.classList.toggle('hidden', !bound || growthActive);
   if (personaUi.wizardBody) personaUi.wizardBody.classList.toggle('hidden', bound || !known);
@@ -3187,15 +3171,25 @@ function updatePersonaGate(status) {
     setPersonaBadge('已设置', 'normal');
     syncPersonaFoot(growthActive ? 'growth' : 'hidden');
     clearPersonaPromptForCurrentEnv();
+    // 纵深防御：万一还有别的路径把窗自动弹了出来，权威「已绑」一到就把它收起来（只收系统自动弹的，
+    // 用户手动打开查看/更新的绝不替他关掉）。
+    if (
+      fields.personaPop
+      && fields.personaPop.classList.contains('open')
+      && personaPopOpenReason === 'auto'
+      && (!personaPopOpenEnvId || personaPopOpenEnvId === (currentEnvId() || '__local__'))
+    ) {
+      closePersonaPop(true);
+    }
     return;
   }
-  // 未绑或未知：徽标区分——权威已知未绑=「未设置」；未连云尚不知道=「待启动」（宁缺毋假，不谎称未设置）。
+  // 未绑或未知：徽标区分——云端权威说未绑=「未设置」；信号未到=「待启动」（宁缺毋假，不谎称未设置）。
   // 本会话刚生成的「待确认」草稿态不被状态推送覆盖。
   if (personaUi.stateBadge && personaUi.stateBadge.textContent !== '待确认') {
-    setPersonaBadge(known ? '未设置' : '待启动', 'checking');
+    setPersonaBadge(knownUnbound ? '未设置' : '待启动', 'checking');
   }
 
-  // ② 闸未就绪：空态面板分两态（未登录 / 连云中），替代旧版「改写一行小字 + 一屏灰按钮」。
+  // ② 闸未就绪（未登录 / 未连云 / 权威信号还没到）：空态面板，绝不弹窗。
   if (!known) {
     const running = Boolean(status && (status.edge === 'running' || status.edge === 'starting'));
     if (personaUi.emptyTitle) personaUi.emptyTitle.textContent = loggedIn ? '正在连接云端…' : '先启动并登录这个账号';
@@ -3214,11 +3208,11 @@ function updatePersonaGate(status) {
     return;
   }
 
-  // ③ 已连云且未绑：向导可用（生成 gate 判据不变）。
+  // ③ 云端权威确认未绑：向导可用，并弹一次设置向导（这是弹窗的唯一入口）。
   if (personaUi.generate) personaUi.generate.disabled = personaInFlight || !personaReady;
   if (personaUi.hint) personaUi.hint.textContent = '设置语气和内容偏好，自动生成这个账号的人设；确认后账号才会开始自动运营。';
   syncPersonaFoot('wizard');
-  maybePromptPersonaSetup(status, known, bound);
+  maybePromptPersonaSetup(status);
 }
 
 // 关键词 toggle：单选组互斥、多选组可叠加；同步 aria-pressed 与「已选 n」计数。
