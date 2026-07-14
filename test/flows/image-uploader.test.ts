@@ -64,10 +64,10 @@ function makeUploader(d: Document, setter: FileInputSetter, fetchImpl: typeof fe
   });
 }
 
-test('AC-MEDIA upload 成功 → ok:true，FileInputSetter 收到临时路径，缩略图见，临时文件已清理', async () => {
+test('AC-MEDIA upload 成功 → ok:true，FileInputSetter 收到临时路径，缩略图见，临时文件可配置为立即清理', async () => {
   const d = doc();
   const setter = new FakeFileInputSetter(d, { ok: true }, true);
-  const up = makeUploader(d, setter, fetchReturning(PNG));
+  const up = makeUploader(d, setter, fetchReturning(PNG), { tempRetainMs: 0 });
   const r = await up.upload('https://cdn.example.com/a.png');
   assert.equal(r.ok, true);
   assert.equal(setter.received.length, 1, 'setFiles 被调用一次');
@@ -146,7 +146,7 @@ test('AC-MEDIA 红线反例：设了 files 但无缩略图（成功态缺）→ 
   const d = doc();
   // setter 成功但 injectThumb=false：files 设了，但控件成功态从不出现。
   const setter = new FakeFileInputSetter(d, { ok: true }, false);
-  const up = makeUploader(d, setter, fetchReturning(PNG), { verifyTimeoutMs: 40, verifyPollMs: 10 });
+  const up = makeUploader(d, setter, fetchReturning(PNG), { verifyTimeoutMs: 40, verifyPollMs: 10, tempRetainMs: 0 });
   const r = await up.upload('https://cdn.example.com/a.png');
   assert.equal(r.ok, false);
   assert.equal(r.error, 'image_not_attached', '后置校验须以控件成功态为准，绝不以 files.length 充数');

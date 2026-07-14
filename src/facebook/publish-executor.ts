@@ -7,6 +7,7 @@ export interface FacebookPublishExecutorOptions {
   pollMs?: number;
   composerTimeoutMs?: number;
   submitVerifyTimeoutMs?: number;
+  capturePostTimeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -23,6 +24,7 @@ const DEFAULTS: Required<FacebookPublishExecutorOptions> = {
   pollMs: 400,
   composerTimeoutMs: 20_000,
   submitVerifyTimeoutMs: 20_000,
+  capturePostTimeoutMs: 20_000,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
@@ -288,11 +290,15 @@ export class FacebookPublishExecutor {
 
   private async capturePostId(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
     try {
-      const found = await evalJson<{ postId: string; postUrl: string }>(
-        this.cdp,
-        `(function(){${FB_PUBLISH_HELPERS_JS} return JSON.stringify(fbPublishExtractPost()); })()`,
+      const found = await this.waitUntil(this.opts.capturePostTimeoutMs, async () => {
+        const post = await evalJson<{ postId: string; postUrl: string }>(
+          this.cdp,
+          `(function(){${FB_PUBLISH_HELPERS_JS} return JSON.stringify(fbPublishExtractPost()); })()`,
+        ).catch(() => ({ postId: '', postUrl: '' }));
+        return post.postId ? post : null;
+      },
       );
-      if (!found.postId) return { ...base(payload), ok: false, error: 'no_target' };
+      if (!found?.postId) return { ...base(payload), ok: false, error: 'no_target' };
       return {
         ...base(payload),
         ok: true,

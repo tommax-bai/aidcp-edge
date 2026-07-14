@@ -16,6 +16,8 @@ class FakeFacebookPublishCdp implements BrowseCdp {
   submitted = false;
   disabledSubmit = false;
   navigatedUrl = '';
+  extractPostCalls = 0;
+  postAvailableAfterExtractCalls = 1;
 
   async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ method, params });
@@ -59,6 +61,17 @@ class FakeFacebookPublishCdp implements BrowseCdp {
       return { result: { value: this.submitted } } as T;
     }
     if (expression.includes('return JSON.stringify(fbPublishExtractPost())')) {
+      this.extractPostCalls++;
+      if (this.extractPostCalls < this.postAvailableAfterExtractCalls) {
+        return {
+          result: {
+            value: JSON.stringify({
+              postId: '',
+              postUrl: '',
+            }),
+          },
+        } as T;
+      }
       return {
         result: {
           value: JSON.stringify({
@@ -151,6 +164,21 @@ test('FacebookPublishExecutor: opens composer, fills content, uploads image, sub
   assert.equal(capture.ok, true);
   assert.equal(capture.value, 'pfbid123');
   assert.equal(capture.postUrl, 'https://www.facebook.com/me/posts/pfbid123');
+});
+
+test('FacebookPublishExecutor: waits for current-page permalink hydration after submit', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  cdp.submitted = true;
+  cdp.postAvailableAfterExtractCalls = 3;
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: instantSleep, pollMs: 1, capturePostTimeoutMs: 50 },
+  );
+
+  const capture = await executor.dispatch(command('capture_postId', {}, 5));
+  assert.equal(capture.ok, true);
+  assert.equal(capture.value, 'pfbid123');
+  assert.equal(cdp.extractPostCalls, 3);
 });
 
 test('FacebookPublishExecutor: disabled submit is an honest failure', async () => {

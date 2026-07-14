@@ -3,7 +3,7 @@
  *
  * URL 校验 → 下载到边缘本机临时文件（注入 fetchImpl、redirect:'error'、AbortController 超时、
  * 流式字节上限、magic-byte 格式校验）→ 经 FileInputSetter 设置文件 → 后置校验控件成功态（缩略图，
- * 绑定式轮询，**绝不以 input.files.length>0 为足够条件**）→ finally 清理临时文件。
+ * 绑定式轮询，**绝不以 input.files.length>0 为足够条件**）→ finally 安排临时文件清理。
  *
  * 红线：失败/不可校验 → ok:false + 真实分类 error，绝不伪造 ok:true、绝不伪造有图。
  * download 设为私有方法（单调用方，无复用，按 YAGNI 不拆独立 module）；唯一接缝是 FileInputSetter。
@@ -42,6 +42,11 @@ export interface ImageUploaderDeps {
   /** 成功态轮询超时 / 间隔。 */
   verifyTimeoutMs?: number;
   verifyPollMs?: number;
+  /**
+   * DOM.setFileInputFiles 后文件可能仍被页面异步读取；默认延迟清理，避免缩略图出现后
+   * 页面继续上传时本地文件已被删除。设 0 可恢复立即清理（测试/受控路径）。
+   */
+  tempRetainMs?: number;
   /** 成功态判定（缺省 best-effort 选择器，待实机校准）。 */
   hasThumbnail?: (root: Element | Document) => boolean;
   clock?: () => number;
@@ -113,6 +118,7 @@ const DEFAULT_DOWNLOAD_TIMEOUT_MS = Number(process.env.AIDCP_IMAGE_DOWNLOAD_TIME
 const DEFAULT_MAX_BYTES = Number(process.env.AIDCP_IMAGE_MAX_BYTES ?? 10 * 1024 * 1024);
 const DEFAULT_VERIFY_TIMEOUT_MS = Number(process.env.AIDCP_IMAGE_VERIFY_TIMEOUT_MS ?? 8_000);
 const DEFAULT_VERIFY_POLL_MS = Number(process.env.AIDCP_IMAGE_VERIFY_POLL_MS ?? 300);
+const DEFAULT_TEMP_RETAIN_MS = Number(process.env.AIDCP_IMAGE_TEMP_RETAIN_MS ?? 5 * 60_000);
 
 export class ImageUploader {
   private readonly fileInputSetter: FileInputSetter;
@@ -123,6 +129,7 @@ export class ImageUploader {
   private readonly allowHttp: boolean;
   private readonly verifyTimeoutMs: number;
   private readonly verifyPollMs: number;
+  private readonly tempRetainMs: number;
   private readonly hasThumbnail: (root: Element | Document) => boolean;
   private readonly clock: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -138,6 +145,7 @@ export class ImageUploader {
     this.allowHttp = deps.allowHttp ?? false;
     this.verifyTimeoutMs = deps.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS;
     this.verifyPollMs = deps.verifyPollMs ?? DEFAULT_VERIFY_POLL_MS;
+    this.tempRetainMs = deps.tempRetainMs ?? DEFAULT_TEMP_RETAIN_MS;
     this.hasThumbnail = deps.hasThumbnail ?? defaultHasThumbnail;
     this.clock = deps.clock ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -174,8 +182,17 @@ export class ImageUploader {
     } catch (err) {
       return { ok: false, error: `engine_error: ${err instanceof Error ? err.message : String(err)}` };
     } finally {
-      if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
+      if (dir) await this.cleanupTempDir(dir);
     }
+  }
+
+  private async cleanupTempDir(dir: string): Promise<void> {
+    const remove = () => rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    if (this.tempRetainMs <= 0) {
+      await remove();
+      return;
+    }
+    setTimeout(remove, this.tempRetainMs).unref?.();
   }
 
   private async downloadToTemp(
