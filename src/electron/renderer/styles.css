@@ -312,7 +312,6 @@ body { margin: 0; }
 .rg-flow-step.current .rg-flow-copy strong { color: #3159bd; }
 .runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-icon { color: #22a875; }
 .runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-copy strong { color: #267b5d; }
-.runtime-guidance[data-mode="day"] .rg-flow-step.next .rg-flow-copy small { color: #5e8b75; }
 .rg-harvest {
   display: flex;
   align-items: center;

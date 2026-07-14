@@ -556,6 +556,8 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
     assert.equal(w.document.querySelectorAll('#runtime-guidance-harvest b').length, 2);
     assert.match(rendererCss, /\.rg-harvest\s*\{/);
     assert.match(rendererCss, /\.runtime-guidance\[data-mode="day"\] \.rg-flow-step\.next \.rg-flow-icon \{ color: #22a875; \}/);
+    assert.match(rendererCss, /\.rg-flow-copy small \{[\s\S]*color: #8794a9;/);
+    assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="day"\] \.rg-flow-step\.next \.rg-flow-copy small/);
     assert.equal($(w, '#usage-limit').textContent, '今日任务已完成');
     assert.ok($(w, '#usage-limit').classList.contains('complete'));
   } finally {
