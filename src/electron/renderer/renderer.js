@@ -852,10 +852,35 @@ function publishPreviewActionReason(reason) {
   }
 }
 
+// 删配图拒因（change client-preview-image-delete）：云端拒因逐条译成人话，绝不用成功措辞掩盖失败。
+function publishPreviewImageRemoveReason(reason) {
+  switch (reason) {
+    case 'last_image': return '至少保留一张配图。';
+    case 'image_not_found': return '这张配图已经不在稿件里了。';
+    case 'version_stale': return '稿件已更新，请关闭后重新查看。';
+    case 'already_decided': return '这份稿件已被处理，无法再修改。';
+    case 'not_pending': return '这份稿件已不在待确认状态。';
+    case 'account_mismatch': return '当前环境与稿件账号不一致。';
+    case 'account_unavailable': return '登录状态异常，请重新登录。';
+    case 'edge_not_running':
+    case 'edge_request_timeout':
+    case 'edge_request_failed': return '暂时没能连上云端，请稍后重试。';
+    default: return '删除未完成，请稍后重试。';
+  }
+}
+
+// 待确认删除的那张配图 URL。存模块级而非 DOM：抽屉每帧云端快照到达时整体重建，
+// 只存 DOM 的确认态会被下一次心跳抹掉。
+let publishPreviewPendingDeleteUrl = null;
+
+function publishPreviewIsPending(status) {
+  const state = status && status.publish && status.publish.state;
+  return Boolean(status && status.publishPreview && (state === 'pending' || state === 'reminded'));
+}
+
 function syncPublishPreviewActions(status) {
   if (!fields.publishPreviewActions) return;
-  const state = status && status.publish && status.publish.state;
-  const pending = Boolean(status && status.publishPreview && (state === 'pending' || state === 'reminded'));
+  const pending = publishPreviewIsPending(status);
   fields.publishPreviewActions.classList.toggle('hidden', !pending && !publishPreviewActionBusy);
   const disabled = publishPreviewActionBusy || !pending;
   fields.publishPreviewApprove.disabled = disabled;
@@ -875,6 +900,110 @@ function appendPreviewText(parent, text, className) {
   return el;
 }
 
+// 上一次删配图失败的原因（诚实呈现；成功后清空）。同样存模块级——抽屉每帧重建。
+let publishPreviewImageRemoveHint = '';
+
+function repaintPublishPreview() {
+  if (fields.publishPreviewPanel && fields.publishPreviewPanel.classList.contains('open')) {
+    renderPublishPreviewContent(currentStatus);
+  }
+}
+
+/** 给一张缩略图挂删除入口：常态是右上角 × 角标，点一下切成就地二次确认（绝不单击即删）。 */
+function appendPublishPreviewImageDelete(item, url, index) {
+  const confirming = publishPreviewPendingDeleteUrl === url;
+  if (confirming) {
+    const confirm = document.createElement('div');
+    confirm.className = 'publish-preview-image-confirm';
+    appendPreviewText(confirm, '删除这张？', 'publish-preview-image-confirm-text');
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'publish-preview-image-confirm-ok';
+    ok.textContent = '删除';
+    ok.disabled = publishPreviewActionBusy;
+    ok.addEventListener('click', () => { void submitPublishPreviewImageRemove(url); });
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'publish-preview-image-confirm-cancel';
+    cancel.textContent = '取消';
+    cancel.disabled = publishPreviewActionBusy;
+    cancel.addEventListener('click', () => {
+      publishPreviewPendingDeleteUrl = null;
+      repaintPublishPreview();
+    });
+    confirm.appendChild(ok);
+    confirm.appendChild(cancel);
+    item.appendChild(confirm);
+    item.classList.add('confirming');
+    return;
+  }
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'publish-preview-image-delete';
+  btn.textContent = '×';
+  btn.title = '删除该张配图';
+  btn.setAttribute('aria-label', `删除配图 ${index + 1}`);
+  btn.disabled = publishPreviewActionBusy;
+  btn.addEventListener('click', () => {
+    publishPreviewPendingDeleteUrl = url;
+    publishPreviewImageRemoveHint = '';
+    repaintPublishPreview();
+  });
+  item.appendChild(btn);
+}
+
+/**
+ * 删除一张配图：非乐观——不先行移除缩略图，等云端应答后按写后真态重绘。
+ * 删除在途时复用 publishPreviewActionBusy，把「发布 / 取消 / 其余角标」一并禁用：
+ * 否则用户能在删除在途时点发布，云端会拿旧版本号去审批而撞版本闸，看到一个莫名其妙的失败。
+ */
+async function submitPublishPreviewImageRemove(url) {
+  const preview = currentStatus && currentStatus.publishPreview;
+  if (!preview || publishPreviewActionBusy) return;
+  const publishImageRemove = window.aidcpEdge && window.aidcpEdge.publishImageRemove;
+  if (typeof publishImageRemove !== 'function') {
+    publishPreviewImageRemoveHint = '当前客户端不支持删除配图。';
+    publishPreviewPendingDeleteUrl = null;
+    repaintPublishPreview();
+    return;
+  }
+  publishPreviewActionBusy = true;
+  publishPreviewImageRemoveHint = '';
+  syncPublishPreviewActions(currentStatus);
+  repaintPublishPreview();
+
+  let result;
+  try {
+    result = await publishImageRemove(currentStatus.envId, {
+      requestId: `publish-${preview.recordId}`,
+      contentVersion: Number.isInteger(preview.contentVersion) ? preview.contentVersion : 0,
+      imageUrl: url,
+    });
+  } catch {
+    result = { ok: false, reason: 'request_failed' };
+  }
+  publishPreviewActionBusy = false;
+  publishPreviewPendingDeleteUrl = null;
+
+  if (!result || result.ok !== true) {
+    // 诚实：该张仍在界面上，只补一行拒因。
+    publishPreviewImageRemoveHint = publishPreviewImageRemoveReason(result && result.reason);
+    syncPublishPreviewActions(currentStatus);
+    repaintPublishPreview();
+    return;
+  }
+  // 成功：主进程已按应答的写后真态更新 publishPreview 并广播；这里同步本地副本以免等下一帧广播。
+  if (Array.isArray(result.images) && Number.isInteger(result.contentVersion)) {
+    currentStatus = {
+      ...currentStatus,
+      publishPreview: { ...preview, images: result.images.slice(), contentVersion: result.contentVersion },
+    };
+  }
+  syncPublishPreviewActions(currentStatus);
+  repaintPublishPreview();
+  renderPublish(currentStatus, Date.now());
+}
+
 function renderPublishPreviewContent(status) {
   const preview = status && status.publishPreview;
   if (!preview || !fields.publishPreviewContent) return;
@@ -889,6 +1018,8 @@ function renderPublishPreviewContent(status) {
   if (images.length === 0) {
     appendPreviewText(imagesSection, '暂无可用配图', 'publish-preview-empty');
   } else {
+    // 可删条件：稿件待确认 且 至少 2 张（最后一张不可删——无图的图文帖会被发布链路诚实判失败）。
+    const canDelete = publishPreviewIsPending(status) && images.length >= 2;
     const imageWrap = document.createElement('div');
     imageWrap.className = 'publish-preview-images';
     imageWrap.dataset.count = String(images.length);
@@ -901,9 +1032,18 @@ function renderPublishPreviewContent(status) {
       img.addEventListener('error', () => item.classList.add('failed'), { once: true });
       item.appendChild(img);
       appendPreviewText(item, '图片暂不可用', 'publish-preview-image-fallback');
+      if (canDelete) appendPublishPreviewImageDelete(item, String(url), index);
       imageWrap.appendChild(item);
     });
     imagesSection.appendChild(imageWrap);
+    if (canDelete) {
+      appendPreviewText(imagesSection, '点右上角 × 可删除该张配图（只能删、不能加）', 'publish-preview-hint');
+    } else if (images.length === 1 && publishPreviewIsPending(status)) {
+      appendPreviewText(imagesSection, '至少保留一张配图', 'publish-preview-hint');
+    }
+    if (publishPreviewImageRemoveHint) {
+      appendPreviewText(imagesSection, publishPreviewImageRemoveHint, 'publish-preview-hint publish-preview-hint-warn');
+    }
   }
   fields.publishPreviewContent.appendChild(imagesSection);
 
@@ -985,6 +1125,9 @@ function closePublishPreview() {
   fields.publishPreviewPanel.classList.remove('open');
   fields.publishPreviewPanel.setAttribute('aria-hidden', 'true');
   fields.publishPreviewMask.classList.add('hidden');
+  // 关抽屉即丢弃未提交的删除确认态与上一次拒因（下次打开是干净的）。
+  publishPreviewPendingDeleteUrl = null;
+  publishPreviewImageRemoveHint = '';
 }
 
 fields.pubPreviewLink.addEventListener('click', openPublishPreview);

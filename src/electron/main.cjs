@@ -1406,7 +1406,11 @@ function sendPersonaCommand(envId, type, payload) {
   });
 }
 
-function sendPublishApprovalCommand(envId, payload) {
+/**
+ * 客户端发起的 publish RPC 统一出口（审批 / 删配图共用一张 pending 表与同一条回执前缀）。
+ * 超时阶梯必须保持 35s > core 侧 30s：主进程若先超时，core 的诚实拒因就再也送不回来了。
+ */
+function sendPublishClientCommand(envId, type, payload) {
   return new Promise((resolve) => {
     const handle = envId ? envs.get(envId) : selectedHandle();
     if (!handle || !handle.child || !handle.child.stdin || handle.child.stdin.destroyed) {
@@ -1420,12 +1424,34 @@ function sendPublishApprovalCommand(envId, payload) {
     }, 35_000);
     publishApprovalPending.set(id, { resolve, timer });
     try {
-      handle.child.stdin.write(`${JSON.stringify({ type: 'publish.approval_action', id, payload })}\n`);
+      handle.child.stdin.write(`${JSON.stringify({ type, id, payload })}\n`);
     } catch {
       clearTimeout(timer);
       publishApprovalPending.delete(id);
       resolve({ ok: false, reason: 'edge_write_failed' });
     }
+  });
+}
+
+function sendPublishApprovalCommand(envId, payload) {
+  return sendPublishClientCommand(envId, 'publish.approval_action', payload);
+}
+
+/**
+ * 删配图成功后就地更新该环境的稿件预览真态。
+ *
+ * MUST 在主进程改：status.publishPreview 的唯一写者是主进程，渲染层任何本地补丁都会被下一帧
+ * status:update 广播整体顶掉（抽屉每帧重建）——只改渲染层的话，删掉的图过几秒会「长回来」。
+ * 只在应答的 recordId 与当前预览一致时才写，防过期应答污染新草稿。
+ */
+function applyPublishPreviewImages(envId, recordId, images, contentVersion) {
+  const handle = envId ? envs.get(envId) : selectedHandle();
+  const preview = handle && handle.status ? handle.status.publishPreview : null;
+  if (!preview || typeof preview !== 'object') return;
+  if (Number(preview.recordId) !== Number(recordId)) return;
+  if (!Array.isArray(images) || !Number.isInteger(contentVersion)) return;
+  updateStatus(handle, {
+    publishPreview: { ...preview, images: images.slice(), contentVersion },
   });
 }
 
@@ -3011,6 +3037,29 @@ ipcMain.handle('publish:approval', (_event, envId, payload) => {
     approved,
     contentVersion: contentVersion === undefined ? 0 : contentVersion,
   });
+});
+// 预览内删除某张配图（change client-preview-image-delete）。云端才是权限 / 版本 / 只删不注入 /
+// 最后一张不可删的权威；这里只做入参形状校验 + 成功后就地刷新预览真态。
+ipcMain.handle('publish:image-remove', async (_event, envId, payload) => {
+  const requestId = String((payload && payload.requestId) || '').trim();
+  const imageUrl = typeof (payload && payload.imageUrl) === 'string' ? payload.imageUrl.trim() : '';
+  const contentVersion = payload && payload.contentVersion;
+  if (!/^publish-\d+$/.test(requestId) || !imageUrl) {
+    return { ok: false, reason: 'invalid_request' };
+  }
+  if (!Number.isInteger(contentVersion) || contentVersion < 0) {
+    return { ok: false, reason: 'invalid_version' };
+  }
+  const result = await sendPublishClientCommand(envId, 'publish.draft_image_remove', {
+    requestId,
+    contentVersion,
+    imageUrl,
+  });
+  if (result && result.ok) {
+    const recordId = Number(requestId.slice('publish-'.length));
+    applyPublishPreviewImages(envId, recordId, result.images, result.contentVersion);
+  }
+  return result;
 });
 ipcMain.handle('notify:show', (_event, payload) => {
   const title = payload && typeof payload.title === 'string' ? payload.title : 'AIDCP Edge';

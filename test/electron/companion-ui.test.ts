@@ -804,3 +804,116 @@ test('循环 chip 随阶段点亮，停止时全灭', async () => {
   pushStatus(makeStatus({ edge: 'stopped', session: 'idle' }));
   assert.deepEqual(on(), [], '停止时不点亮任何阶段');
 });
+
+// ── 稿件预览逐张删配图（change client-preview-image-delete）──
+const IMGS3 = ['https://cdn.example.com/1.jpg', 'https://cdn.example.com/2.jpg', 'https://cdn.example.com/3.jpg'];
+
+function previewStatus(images: string[], over: Record<string, unknown> = {}) {
+  return {
+    publish: { state: 'pending', title: '洗稿标题', code: '#89', at: new Date().toISOString() },
+    publishPreview: {
+      recordId: 89,
+      code: '#89',
+      kind: 'rewrite',
+      title: '洗稿标题',
+      content: '正文',
+      topics: [],
+      images,
+      contentVersion: 0,
+      updatedAt: Date.now(),
+    },
+    ...over,
+  };
+}
+
+const deleteBtns = (w: DOMWindow) =>
+  Array.from(w.document.querySelectorAll('.publish-preview-image-delete')) as unknown as HTMLButtonElement[];
+const imgSrcs = (w: DOMWindow) =>
+  Array.from(w.document.querySelectorAll('#publish-preview-content img')).map((el) =>
+    (el as unknown as HTMLImageElement).getAttribute('src'),
+  );
+
+test('删配图：待审多图 → 每张有删除角标；二次确认后才提交，成功按写后真态重绘', async () => {
+  const calls: unknown[] = [];
+  const { w } = await boot(previewStatus(IMGS3), {
+    publishImageRemove: async (_envId: unknown, payload: unknown) => {
+      calls.push(payload);
+      return { ok: true, images: [IMGS3[0], IMGS3[2]], contentVersion: 1 };
+    },
+  });
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  assert.equal(deleteBtns(w).length, 3, '三张图各有删除角标');
+  assert.equal(deleteBtns(w)[1].getAttribute('aria-label'), '删除配图 2');
+
+  // 点角标：只进确认态，绝不单击即删。
+  deleteBtns(w)[1].dispatchEvent(new w.Event('click'));
+  await tick();
+  assert.equal(calls.length, 0, '未确认前绝不提交');
+  const confirmOk = w.document.querySelector('.publish-preview-image-confirm-ok') as unknown as HTMLButtonElement;
+  assert.ok(confirmOk, '出现就地二次确认');
+  assert.deepEqual(imgSrcs(w), IMGS3, '确认前不乐观移除缩略图');
+
+  confirmOk.dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  // 逐字段断言：jsdom 里造的对象跨 realm，deepStrictEqual 会因原型不同而误报。
+  assert.equal(calls.length, 1);
+  const sent = calls[0] as { requestId: string; contentVersion: number; imageUrl: string };
+  assert.equal(sent.requestId, 'publish-89');
+  assert.equal(sent.contentVersion, 0);
+  assert.equal(sent.imageUrl, IMGS3[1]);
+  assert.deepEqual(imgSrcs(w), [IMGS3[0], IMGS3[2]], '按服务端回读真态重绘');
+  assert.match($(w, '#publish-preview-content').textContent ?? '', /配图（2 张）/);
+});
+
+test('删配图：只剩一张 → 无删除入口 + 明示至少保留一张', async () => {
+  const { w } = await boot(previewStatus([IMGS3[0]]), { publishImageRemove: async () => ({ ok: true }) });
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  assert.equal(deleteBtns(w).length, 0, '最后一张不给删除入口');
+  assert.match($(w, '#publish-preview-content').textContent ?? '', /至少保留一张配图/);
+});
+
+test('删配图：非待审稿件（已通过）不显示删除入口', async () => {
+  const { w } = await boot(
+    previewStatus(IMGS3, { publish: { state: 'approved', title: '洗稿标题', code: '#89', at: new Date().toISOString() } }),
+    { publishImageRemove: async () => ({ ok: true }) },
+  );
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  assert.equal(deleteBtns(w).length, 0);
+});
+
+test('删配图：删除在途时发布/取消一并禁用（防拿旧版本号去审批）', async () => {
+  const gate: { release?: (v: unknown) => void } = {};
+  const { w } = await boot(previewStatus(IMGS3), {
+    publishImageRemove: () => new Promise((r) => { gate.release = r; }),
+  });
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  deleteBtns(w)[0].dispatchEvent(new w.Event('click'));
+  await tick();
+  (w.document.querySelector('.publish-preview-image-confirm-ok') as unknown as HTMLButtonElement)
+    .dispatchEvent(new w.Event('click'));
+  await tick();
+  assert.equal(($(w, '#publish-preview-approve') as unknown as HTMLButtonElement).disabled, true);
+  assert.equal(($(w, '#publish-preview-cancel') as unknown as HTMLButtonElement).disabled, true);
+  gate.release?.({ ok: true, images: [IMGS3[1], IMGS3[2]], contentVersion: 1 });
+  await tick();
+  await tick();
+  assert.equal(($(w, '#publish-preview-approve') as unknown as HTMLButtonElement).disabled, false);
+});
+
+test('删配图：云端拒绝 → 该张仍在界面上 + 诚实拒因，绝无成功措辞', async () => {
+  const { w } = await boot(previewStatus(IMGS3), {
+    publishImageRemove: async () => ({ ok: false, reason: 'version_stale', currentVersion: 2 }),
+  });
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  deleteBtns(w)[1].dispatchEvent(new w.Event('click'));
+  await tick();
+  (w.document.querySelector('.publish-preview-image-confirm-ok') as unknown as HTMLButtonElement)
+    .dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.deepEqual(imgSrcs(w), IMGS3, '失败后该张仍在，绝不抹掉');
+  const text = $(w, '#publish-preview-content').textContent ?? '';
+  assert.match(text, /稿件已更新/);
+  assert.doesNotMatch(text, /已删除|删除成功/);
+});

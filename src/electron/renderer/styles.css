@@ -1001,6 +1001,33 @@ body { margin: 0; }
 .publish-preview-image.failed img { display: none; }
 .publish-preview-image.failed .publish-preview-image-fallback { display: flex; }
 .publish-preview-empty { color: var(--faint); font-size: 12.5px; }
+/* 逐张删配图（change client-preview-image-delete）：右上角 × 角标 + 就地二次确认。 */
+.publish-preview-image-delete {
+  position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: none; border-radius: 999px; cursor: pointer;
+  background: rgba(15, 23, 42, 0.55); color: #fff; font-size: 13px; line-height: 1;
+  opacity: 0; transition: opacity 120ms ease, background 120ms ease;
+}
+.publish-preview-image:hover .publish-preview-image-delete,
+.publish-preview-image-delete:focus-visible { opacity: 1; }
+.publish-preview-image-delete:hover { background: #dc2626; }
+.publish-preview-image-delete:disabled { cursor: not-allowed; opacity: 0.35; }
+.publish-preview-image-confirm {
+  position: absolute; inset: 0; z-index: 1;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  padding: 6px; background: rgba(15, 23, 42, 0.72); color: #fff; text-align: center;
+}
+.publish-preview-image-confirm-text { font-size: 12px; }
+.publish-preview-image-confirm button {
+  min-width: 44px; padding: 3px 10px; border-radius: 999px; border: none;
+  font-size: 11.5px; cursor: pointer;
+}
+.publish-preview-image-confirm button:disabled { cursor: not-allowed; opacity: 0.5; }
+.publish-preview-image-confirm-ok { background: #dc2626; color: #fff; }
+.publish-preview-image-confirm-cancel { background: rgba(255, 255, 255, 0.86); color: #1f2937; }
+.publish-preview-hint { margin-top: 6px; color: var(--faint); font-size: 11.5px; line-height: 1.45; }
+.publish-preview-hint-warn { color: #b91c1c; }
 .publish-preview-actions {
   display: flex; align-items: center; justify-content: space-between; gap: 14px;
   margin: 24px 0 4px; padding: 13px 0 0;

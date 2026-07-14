@@ -56,6 +56,8 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   },
   // 稿件预览内的发布/取消审批动作（经目标环境 core → cloud，渲染层不直连网络）。
   publishApproval: (envId, payload) => ipcRenderer.invoke('publish:approval', envId, payload),
+  // 稿件预览内删除某张配图（同一条链路；云端持权限 / 版本 / 只删不注入 / 最后一张不可删的权威）。
+  publishImageRemove: (envId, payload) => ipcRenderer.invoke('publish:image-remove', envId, payload),
   // 对外客户鉴权（change edge-client-customer-auth）：登录窗口用 clientLogin；主界面/托盘用 clientLogout。
   // 主进程做实际 HTTP，渲染层不直连网络（避免 CORS / 凭据落渲染层）。
   clientLogin: (creds) => ipcRenderer.invoke('client-auth:login', creds),
