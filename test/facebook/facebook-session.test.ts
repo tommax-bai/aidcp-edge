@@ -5,11 +5,17 @@ import {
   facebookActionNameForCommand,
   parseFacebookBrowseMode,
   usesFacebookBrowseSession,
+  refreshReloadAllowed,
   type FacebookBrowseSessionDeps,
   type FacebookBrowseMode,
 } from '../../src/facebook/facebook-session.js';
 import type { FacebookCommentHandler } from '../../src/facebook/comment-handler.js';
-import type { FacebookFeedReader, FacebookFeedCard } from '../../src/facebook/feed-reader.js';
+import type {
+  FacebookFeedReader,
+  FacebookFeedCard,
+  FacebookFeedSettleResult,
+  FacebookHomeRefreshResult,
+} from '../../src/facebook/feed-reader.js';
 import type { FacebookPostReader, FacebookPostDetail } from '../../src/facebook/post-reader.js';
 import type { FacebookLikeExecutor, FacebookLikeResult } from '../../src/facebook/like-executor.js';
 import { selectPlatformDriver } from '../../src/platform/index.js';
@@ -41,6 +47,8 @@ function makeSession(opts: {
   detail?: Partial<FacebookPostDetail>;
   like?: (shadow?: boolean) => FacebookLikeResult;
   cardBatches?: FacebookFeedCard[][];
+  settleBatches?: FacebookFeedSettleResult[];
+  clickHome?: FacebookHomeRefreshResult;
   sleep?: (ms: number) => Promise<void>;
   hangOpen?: boolean;
   cdpSend?: BrowseCdp['send'];
@@ -94,6 +102,11 @@ function makeSession(opts: {
       return [card];
     },
     scrollNext: async () => {},
+    settleCards: async () => {
+      if (opts.settleBatches) return opts.settleBatches.shift() ?? { cards: [], degraded: false, reason: 'no_feed' as const };
+      return { cards: [card], degraded: false };
+    },
+    clickHomeAndScrollTop: async () => opts.clickHome ?? { ok: true as const },
   } as unknown as FacebookFeedReader;
   const postReader = {
     openAndRead: async (permalink: string): Promise<FacebookPostDetail> => {
@@ -458,31 +471,88 @@ test('start(): mode=off 不进 feed（不 ensureFeed/不报卡）；mode=on 进 
   assert.equal(on.cards.length, 1, 'on 模式上报首屏 page.cards');
 });
 
-test('start(): feed 已就绪但 permalink 晚水合 → 短重试后上报 page.cards', async () => {
-  let sleepCalls = 0;
+test('start(): settleCards 判稳后上报（晚水合的卡由 settle 承担，非会话再叠一层重试）', async () => {
   const h = makeSession({
     mode: 'shadow',
-    cardBatches: [
-      [],
-      [],
-      [{
-        index: 0,
-        noteId: 'https://www.facebook.com/a/posts/pfbid0LATE',
-        author: 'Late',
-        textPreview: 'hydrated later',
-        reactionCount: 0,
-        isVideo: false,
-      }],
+    settleBatches: [
+      {
+        cards: [{
+          index: 0,
+          noteId: 'https://www.facebook.com/a/posts/pfbid0LATE',
+          author: 'Late',
+          textPreview: 'hydrated later',
+          reactionCount: 0,
+          isVideo: false,
+        }],
+        degraded: false,
+      },
     ],
-    sleep: async () => {
-      sleepCalls++;
-    },
   });
   await h.session.start();
-  assert.equal(h.scanCalls, 3);
-  assert.equal(sleepCalls, 2);
   assert.equal(h.cards.length, 1);
   assert.equal(h.cards[0].cards[0].noteId, 'https://www.facebook.com/a/posts/pfbid0LATE');
+});
+
+// ─────────────────────────── split-brain：返回落回当前列表面（task 1.4/1.5）───────────────────────────
+
+test('navigation.back 从搜索结果开帖后回落搜索页而非会话初始首页（修 split-brain）', async () => {
+  const h = makeSession({ mode: 'on' });
+  await h.session.onCloudCommand(makeEnv('search.execute', { keyword: 'Puerto Rico' }));
+  await h.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/x/posts/pfbid0Z' }));
+  await h.session.onCloudCommand(makeEnv('navigation.back', {}));
+  assert.equal(h.ensureUrls.at(-1), 'https://www.facebook.com/search/posts/?q=Puerto+Rico', 'back 回搜索页而非首页');
+});
+
+// ─────────────────────────── feed.refresh 实装（task 3.5）───────────────────────────
+
+test('feed.refresh 成功：点首页图标换批 + 首卡变更 → 回新一批 page.cards（单一终态，无 action.completed）', async () => {
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [{
+      cards: [{ index: 0, noteId: 'https://www.facebook.com/x/posts/pfbid0NEW', author: 'N', reactionCount: 0, isVideo: false }],
+      degraded: false,
+    }],
+  });
+  await h.session.onCloudCommand(makeEnv('feed.refresh', {}));
+  assert.equal(h.cards.length, 1);
+  assert.equal(h.cards[0].cards[0].noteId, 'https://www.facebook.com/x/posts/pfbid0NEW');
+  assert.equal(h.actions.length, 0, '成功刷新回 cards，不另发 action.completed');
+});
+
+test('feed.refresh 首卡未变 → not_refreshed，绝不报陈旧卡', async () => {
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [{
+      cards: [{ index: 0, noteId: 'https://www.facebook.com/a/posts/pfbid0ONE', author: 'A', reactionCount: 0, isVideo: false }],
+      degraded: false,
+    }],
+  });
+  await h.session.onCloudCommand(makeEnv('feed.refresh', {}));
+  assert.equal(h.cards.length, 0);
+  assert.equal(h.actions.at(-1)?.action, 'refresh');
+  assert.equal(h.actions.at(-1)?.ok, false);
+  assert.equal(h.actions.at(-1)?.reason, 'not_refreshed');
+});
+
+test('feed.refresh 无首页锚点且 reload 兜底失败 → no_home_link（不假成功）', async () => {
+  const h = makeSession({
+    mode: 'on',
+    clickHome: { ok: false, reason: 'no_home_link' },
+    cdpSend: async (method: string) => {
+      if (method === 'Page.reload') throw new Error('reload boom');
+      return {} as never;
+    },
+  });
+  await h.session.onCloudCommand(makeEnv('feed.refresh', {}));
+  assert.equal(h.cards.length, 0);
+  assert.equal(h.actions.at(-1)?.action, 'refresh');
+  assert.equal(h.actions.at(-1)?.reason, 'no_home_link');
+});
+
+test('refreshReloadAllowed: 首次放行；下限内拒绝；超下限放行', () => {
+  assert.equal(refreshReloadAllowed(0, 1_000, 180_000), true);
+  assert.equal(refreshReloadAllowed(1_000, 1_000 + 179_999, 180_000), false);
+  assert.equal(refreshReloadAllowed(1_000, 1_000 + 180_000, 180_000), true);
 });
 
 test('session_closing：close 后命令诚实回执，绝不静默', async () => {

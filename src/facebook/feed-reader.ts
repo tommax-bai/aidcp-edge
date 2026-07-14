@@ -16,7 +16,7 @@
 
 import { evalJson, type BrowseCdp } from '../browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../browse/overlay-monitor.js';
-import { normalizeFacebookPermalinks } from './probes/page-structure.js';
+import { normalizeFacebookPermalinks, classifyFacebookSurface, type FacebookSurfaceType } from './probes/page-structure.js';
 import type { FacebookConsentAccepter } from './consent.js';
 import { scrollFacebookViewport } from './viewport-scroll.js';
 import type { RandomFn } from '../humanize/index.js';
@@ -43,6 +43,43 @@ export interface FacebookFeedEnsureResult {
   reason?: 'login_required' | 'blocked_by_captcha' | 'blocked_by_consent' | 'no_feed' | 'nav_error';
 }
 
+/** 当前页面 surface 探测结果（幂等 ensureFeed 的判据）。 */
+export interface FacebookFeedSurface {
+  href: string;
+  surface: FacebookSurfaceType;
+  hasFeed: boolean;
+  hydratedArticles: number;
+  dialogOpen: boolean;
+}
+
+/** loading-aware 累积判稳结果。cards 为真抽卡（绝不含空壳）；degraded=到 wall-clock 仍未完全稳但有真卡。 */
+export interface FacebookFeedSettleResult {
+  cards: FacebookFeedCard[];
+  degraded: boolean;
+  /** 仅当 cards 为空时给出失败原因。 */
+  reason?: 'feed_still_loading' | 'no_feed' | 'login_required' | 'blocked_by_captcha';
+}
+
+export interface FacebookFeedSettleOptions {
+  /** 至少多少张真卡才算稳（默认 1）。 */
+  minCards?: number;
+  /** 硬 wall-clock 上限（毫秒）；导航后~6000、滚动/刷新后~3500。 */
+  wallClockMs?: number;
+  /** 每轮复扫间隔（毫秒，默认 500）。 */
+  roundMs?: number;
+}
+
+/** 点顶栏首页图标换批的诚实结果。 */
+export interface FacebookHomeRefreshResult {
+  ok: boolean;
+  reason?: 'no_home_link' | 'click_error';
+}
+
+/** 可滚动的列表 surface（首页 / 搜索结果 / 群组 feed）——ensureFeed 幂等放行仅限这些。 */
+function isFacebookListSurface(surface: FacebookSurfaceType): boolean {
+  return surface === 'home' || surface === 'search' || surface === 'group';
+}
+
 export interface FacebookFeedReaderDeps {
   cdp: BrowseCdp;
   /** 旁路弹窗监测体；导航后 fresh 复检登录/验证码（fail-closed）。 */
@@ -55,8 +92,7 @@ export interface FacebookFeedReaderDeps {
 }
 
 export interface FacebookFeedReaderOptions {
-  /** 导航后等 feed 水合的复探轮数（每轮间隔 pollMs）。FB 渲染 ~7-12s，给足。 */
-  hydrateRounds?: number;
+  /** 导航后短暂等待页面接手的间隔（毫秒）；等 feed 水合的耗时改由 settleCards 承担。 */
   pollMs?: number;
   /** 一次 scrollNext 的基准位移（CSS 像素；手势会在 +/-20% 内抖动）。 */
   scrollDistancePx?: number;
@@ -65,11 +101,14 @@ export interface FacebookFeedReaderOptions {
 }
 
 const DEFAULTS: Required<FacebookFeedReaderOptions> = {
-  hydrateRounds: 14,
   pollMs: 900,
   scrollDistancePx: 650,
   maxCards: 12,
 };
+
+/** settleCards 兜底默认（wall-clock 上限 / 每轮间隔）。 */
+const SETTLE_DEFAULT_WALL_CLOCK_MS = 3_500;
+const SETTLE_DEFAULT_ROUND_MS = 500;
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -143,13 +182,33 @@ const FEED_SCAN_JS = String.raw`(function(){
   return JSON.stringify(out);
 })()`;
 
-/** 探测 feed 是否已水合（存在 role=feed 且至少一张带作者链接的 article）。 */
-const FEED_READY_JS = String.raw`(function(){
+/** 探测当前 surface：URL / 是否有 feed 容器 / 已水合文章数 / 是否有打开的 dialog。用于幂等 ensureFeed。 */
+const SURFACE_PROBE_JS = String.raw`(function(){
   var feed=document.querySelector('div[role="feed"]');
   var scope=feed||document;
   var arts=Array.prototype.slice.call(scope.querySelectorAll('[role="article"]'));
-  for(var i=0;i<arts.length;i++){ if(arts[i].querySelector('h2 a, h3 a, h4 a')) return true; }
+  var hydrated=0;
+  for(var i=0;i<arts.length;i++){ if(arts[i].querySelector('h2 a, h3 a, h4 a')) hydrated++; }
+  return JSON.stringify({ href: location.href, hasFeed: !!feed, hydratedArticles: hydrated, dialogOpen: !!document.querySelector('[role="dialog"]') });
+})()`;
+
+/** feed 区域内是否有 loading 信号——只按可访问性语义（progressbar / aria-busy），绝不认骨架屏 CSS 类名。 */
+const LOADING_SIGNAL_JS = String.raw`(function(){
+  var scope=document.querySelector('div[role="feed"]')||document.querySelector('[role="main"]')||document.body;
+  if(!scope) return false;
+  if(scope.querySelector('[role="progressbar"]')) return true;
+  if(scope.querySelector('[aria-busy="true"]')) return true;
   return false;
+})()`;
+
+/** 页内点顶栏首页图标（结构性定位 [role=banner] a[href="/"]，绝不按「Home/首页」文案）换批，随后显式回顶。 */
+const HOME_CLICK_JS = String.raw`(function(){
+  var banner=document.querySelector('[role="banner"]');
+  var a=(banner&&banner.querySelector('a[href="/"]'))||document.querySelector('[role="banner"] a[href="/"]');
+  if(!a) return JSON.stringify({ ok:false, reason:'no_home_link' });
+  try { a.click(); } catch(e) { return JSON.stringify({ ok:false, reason:'click_error' }); }
+  try { window.scrollTo(0,0); } catch(e) {}
+  return JSON.stringify({ ok:true });
 })()`;
 
 export class FacebookFeedReader {
@@ -172,18 +231,32 @@ export class FacebookFeedReader {
   }
 
   /**
-   * 导航到 feed 并过前置门（cookie 同意 → 登录/验证码复检 → 等水合）。
-   * 诚实回执：阻断/无 feed 各有 reason，绝不假成功。
+   * 幂等确保在目标 feed surface：先探一次当前页；已在目标列表面（首页/搜索/群）且有 feed 容器、无 dialog
+   * 时直接过前置门返回（**不导航**，消掉「滚动前整页重载」回归）；否则导航到目标 URL。
+   *
+   * 红线（fail-closed）：无论是否导航，consent 预清理 + 登录/验证码复检都必须跑——它们现搭在导航步骤里，
+   * 绝不因省导航而漏掉。等 feed 水合的耗时改由 settleCards 承担（三段合一，避免逼近命令超时）。
    */
   async ensureFeed(feedUrl: string): Promise<FacebookFeedEnsureResult> {
+    let onTarget = false;
     try {
-      await this.cdp.send('Page.navigate', { url: feedUrl });
+      const s = await this.probeSurface();
+      const want = classifyFacebookSurface(feedUrl);
+      onTarget = isFacebookListSurface(s.surface) && s.surface === want && s.hasFeed && !s.dialogOpen;
     } catch (err) {
-      this.log(`[fb-feed] 导航 feed 失败：${(err as Error).message}`);
-      return { ok: false, reason: 'nav_error' };
+      this.log(`[fb-feed] surface 探测失败，按需导航：${(err as Error).message}`);
+      onTarget = false;
     }
-    await this.sleep(this.opts.pollMs);
-    // cookie 同意浮层拟人接受（良性合规横幅）：清不掉则诚实 blocked_by_consent。
+    if (!onTarget) {
+      try {
+        await this.cdp.send('Page.navigate', { url: feedUrl });
+      } catch (err) {
+        this.log(`[fb-feed] 导航 feed 失败：${(err as Error).message}`);
+        return { ok: false, reason: 'nav_error' };
+      }
+      await this.sleep(this.opts.pollMs);
+    }
+    // cookie 同意浮层拟人接受（良性合规横幅）：清不掉则诚实 blocked_by_consent。两条路径都必须跑，绝不因省导航而漏。
     if (this.acceptConsent) {
       try {
         const consent = await this.acceptConsent(this.cdp);
@@ -194,15 +267,22 @@ export class FacebookFeedReader {
     }
     const blocked = await this.blockingReason();
     if (blocked) return { ok: false, reason: blocked };
-    // 等 feed 水合（FB ~7-12s）：有界复探，命中即返回。
-    for (let i = 0; i < this.opts.hydrateRounds; i++) {
-      if (await this.feedReady()) return { ok: true };
-      await this.sleep(this.opts.pollMs);
-      // 每轮再顺手复检一次阻断（同意条/登录可能延迟弹出）。
-      const b = await this.blockingReason();
-      if (b) return { ok: false, reason: b };
-    }
-    return await this.feedReady() ? { ok: true } : { ok: false, reason: 'no_feed' };
+    return { ok: true };
+  }
+
+  /** 探测当前页 surface（URL 归类 + feed/dialog/水合数）。 */
+  async probeSurface(): Promise<FacebookFeedSurface> {
+    const raw = await evalJson<{ href: string; hasFeed: boolean; hydratedArticles: number; dialogOpen: boolean }>(
+      this.cdp,
+      SURFACE_PROBE_JS,
+    );
+    return {
+      href: raw.href,
+      surface: classifyFacebookSurface(raw.href),
+      hasFeed: raw.hasFeed === true,
+      hydratedArticles: Number(raw.hydratedArticles) || 0,
+      dialogOpen: raw.dialogOpen === true,
+    };
   }
 
   /** 扫描当前视口 feed 卡片 → 规范化 → 去重 → FacebookFeedCard[]（跳过未水合空壳）。 */
@@ -251,12 +331,58 @@ export class FacebookFeedReader {
     await this.sleep(this.opts.pollMs);
   }
 
-  private async feedReady(): Promise<boolean> {
+  /** feed 区域内是否有 loading 信号（progressbar / aria-busy）。探测异常保守当无信号（交给 wall-clock 兜底）。 */
+  private async feedLoading(): Promise<boolean> {
     try {
-      const raw = await evalJson<boolean>(this.cdp, FEED_READY_JS);
-      return raw === true;
+      return (await evalJson<boolean>(this.cdp, LOADING_SIGNAL_JS)) === true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * loading-aware 累积判稳：每轮复扫同一 scanCards，比对相邻两轮真卡 noteId 集合；
+   * 三条件全满足（≥minCards 真卡 / 相邻两轮集合相等 / feed 区域无 loading 信号）才返回稳定批。
+   * loading 信号是单向「继续等」否决票。有界迭代（maxRounds = ceil(wallClock/round)）兜底，绝不空转死循环。
+   */
+  async settleCards(options: FacebookFeedSettleOptions = {}): Promise<FacebookFeedSettleResult> {
+    const minCards = Math.max(1, options.minCards ?? 1);
+    const wallClockMs = options.wallClockMs ?? SETTLE_DEFAULT_WALL_CLOCK_MS;
+    const roundMs = options.roundMs ?? SETTLE_DEFAULT_ROUND_MS;
+    const maxRounds = Math.max(2, Math.ceil(wallClockMs / Math.max(1, roundMs)));
+    let prevKey: string | null = null;
+    let lastCards: FacebookFeedCard[] = [];
+    let lastLoading = false;
+    for (let round = 0; round < maxRounds; round++) {
+      // 等待期间弹登录/验证码也 fail-closed。
+      const blocked = await this.blockingReason();
+      if (blocked) return { cards: [], degraded: false, reason: blocked };
+      const cards = await this.scanCards();
+      const loading = await this.feedLoading();
+      lastCards = cards;
+      lastLoading = loading;
+      const key = cards.map((c) => c.noteId).join('|');
+      const stable = prevKey !== null && key === prevKey;
+      if (cards.length >= minCards && stable && !loading) {
+        return { cards, degraded: false };
+      }
+      prevKey = key;
+      if (round < maxRounds - 1) await this.sleep(roundMs);
+    }
+    // 触达 wall-clock：有真卡则照实上报 + degraded（非假成功，卡为真抽）；否则按 loading 与否分可重试 / 无 feed。
+    if (lastCards.length >= 1) return { cards: lastCards, degraded: true };
+    if (lastLoading) return { cards: [], degraded: false, reason: 'feed_still_loading' };
+    return { cards: [], degraded: false, reason: 'no_feed' };
+  }
+
+  /** 页内点顶栏首页图标换批（SPA、不整页重载），随后回顶。诚实回执，定位不到不假点。 */
+  async clickHomeAndScrollTop(): Promise<FacebookHomeRefreshResult> {
+    try {
+      const r = await evalJson<{ ok: boolean; reason?: 'no_home_link' | 'click_error' }>(this.cdp, HOME_CLICK_JS);
+      return r?.ok ? { ok: true } : { ok: false, reason: r?.reason ?? 'no_home_link' };
+    } catch (err) {
+      this.log(`[fb-feed] 首页图标点击失败：${(err as Error).message}`);
+      return { ok: false, reason: 'click_error' };
     }
   }
 

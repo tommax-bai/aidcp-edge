@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FacebookFeedReader, parseFacebookCount } from '../../src/facebook/feed-reader.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
+import type { OverlayMonitor } from '../../src/browse/overlay-monitor.js';
 
 /** CDP 桩：FEED_SCAN（含 permalinkHrefs）返回预置原始 article 数组。 */
 function scanCdp(rawArticles: unknown[]): BrowseCdp {
@@ -127,4 +128,166 @@ test('fb-feed: 默认滚动走 650px 多帧手势，wheel 生效后不再补 scr
   assert.ok(wheels.length >= 8 && wheels.length <= 15, `wheel 帧数 ${wheels.length}`);
   assert.equal(wheels.reduce((sum, wheel) => sum + Number(wheel.deltaY), 0), 650);
   assert.equal(fallbackCalls, 0);
+});
+
+// ─────────────────────────── 幂等 ensureFeed（Q4）───────────────────────────
+
+/** SURFACE_PROBE 返回预置 surface；记录 Page.navigate 调用；其它 evaluate 返回 false。 */
+function surfaceCdp(
+  surface: { href: string; hasFeed: boolean; hydratedArticles: number; dialogOpen: boolean },
+  navs: string[],
+): BrowseCdp {
+  return {
+    send: async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Page.navigate') {
+        navs.push(String(params?.url ?? ''));
+        return {} as never;
+      }
+      if (method !== 'Runtime.evaluate') return {} as never;
+      const e = String(params?.expression ?? '');
+      if (e.includes('dialogOpen')) return { result: { value: JSON.stringify(surface) } } as never;
+      return { result: { value: JSON.stringify(false) } } as never;
+    },
+  };
+}
+
+test('ensureFeed 幂等：已在首页且有 feed、无 dialog → 不导航', async () => {
+  const navs: string[] = [];
+  const reader = new FacebookFeedReader({
+    cdp: surfaceCdp({ href: 'https://www.facebook.com/', hasFeed: true, hydratedArticles: 2, dialogOpen: false }, navs),
+    sleep: async () => {},
+  });
+  const r = await reader.ensureFeed('https://www.facebook.com/');
+  assert.equal(r.ok, true);
+  assert.deepEqual(navs, [], '已在首页不重新导航（消掉滚动重置回归）');
+});
+
+test('ensureFeed 幂等：在详情页（page_post）→ 导航回目标 feed', async () => {
+  const navs: string[] = [];
+  const reader = new FacebookFeedReader({
+    cdp: surfaceCdp({ href: 'https://www.facebook.com/x/posts/pfbid0Z', hasFeed: false, hydratedArticles: 0, dialogOpen: false }, navs),
+    sleep: async () => {},
+  });
+  const r = await reader.ensureFeed('https://www.facebook.com/');
+  assert.equal(r.ok, true);
+  assert.deepEqual(navs, ['https://www.facebook.com/']);
+});
+
+test('ensureFeed 幂等：搜索页放行搜索、不被带回首页', async () => {
+  const navs: string[] = [];
+  const searchUrl = 'https://www.facebook.com/search/posts/?q=Puerto+Rico';
+  const reader = new FacebookFeedReader({
+    cdp: surfaceCdp({ href: searchUrl, hasFeed: true, hydratedArticles: 1, dialogOpen: false }, navs),
+    sleep: async () => {},
+  });
+  const r = await reader.ensureFeed(searchUrl);
+  assert.equal(r.ok, true);
+  assert.deepEqual(navs, [], '搜索页 surface 匹配则不导航');
+});
+
+test('ensureFeed 红线：已在首页但验证码浮层在 → blocked_by_captcha 且不导航（fail-closed 不因省导航而漏）', async () => {
+  const navs: string[] = [];
+  const overlayMonitor = { probeNow: async () => 'captcha' } as unknown as OverlayMonitor;
+  const reader = new FacebookFeedReader({
+    cdp: surfaceCdp({ href: 'https://www.facebook.com/', hasFeed: true, hydratedArticles: 1, dialogOpen: false }, navs),
+    overlayMonitor,
+    sleep: async () => {},
+  });
+  const r = await reader.ensureFeed('https://www.facebook.com/');
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'blocked_by_captcha');
+  assert.deepEqual(navs, [], '不导航路径仍复检验证码');
+});
+
+// ─────────────────────────── loading-aware 累积判稳（Q1）───────────────────────────
+
+const RAW_ABC = {
+  hydrated: true,
+  author: 'Alice',
+  textPreview: 'hi',
+  reactionText: null,
+  permalinkHrefs: ['https://www.facebook.com/alice/posts/pfbid0ABC'],
+  hasVideo: false,
+};
+const NOTE_ABC = 'https://www.facebook.com/alice/posts/pfbid0ABC';
+
+/** 按轮脚本化 scanCards（permalinkHrefs）与 loading（progressbar）；loading 调用后进入下一轮。 */
+function settleCdp(rounds: Array<{ scan: unknown[]; loading: boolean }>): BrowseCdp {
+  let round = 0;
+  return {
+    send: async (method: string, params?: Record<string, unknown>) => {
+      if (method !== 'Runtime.evaluate') return {} as never;
+      const e = String(params?.expression ?? '');
+      const r = rounds[Math.min(round, rounds.length - 1)];
+      if (e.includes('permalinkHrefs')) return { result: { value: JSON.stringify(r.scan) } } as never;
+      if (e.includes('progressbar')) {
+        const loading = r.loading;
+        round++;
+        return { result: { value: JSON.stringify(loading) } } as never;
+      }
+      return { result: { value: JSON.stringify(false) } } as never;
+    },
+  };
+}
+
+test('settleCards：集合连续两轮相等且无 loading 才上报（loading 是单向继续等否决票）', async () => {
+  const reader = new FacebookFeedReader({
+    cdp: settleCdp([
+      { scan: [RAW_ABC], loading: true }, // 有卡但 loading → 等
+      { scan: [RAW_ABC], loading: true }, // 集合已稳但仍 loading → 继续等
+      { scan: [RAW_ABC], loading: false }, // 稳 + 无 loading → 上报
+    ]),
+    sleep: async () => {},
+  });
+  const r = await reader.settleCards({ wallClockMs: 6_000, roundMs: 100 });
+  assert.equal(r.degraded, false);
+  assert.equal(r.cards.length, 1);
+  assert.equal(r.cards[0].noteId, NOTE_ABC);
+});
+
+test('settleCards：触达 wall-clock 仍 loading 但有真卡 → 照实上报 + degraded（非假成功）', async () => {
+  const reader = new FacebookFeedReader({
+    cdp: settleCdp([{ scan: [RAW_ABC], loading: true }]),
+    sleep: async () => {},
+  });
+  const r = await reader.settleCards({ wallClockMs: 200, roundMs: 100 }); // maxRounds=2
+  assert.equal(r.degraded, true);
+  assert.equal(r.cards.length, 1);
+  assert.equal(r.cards[0].noteId, NOTE_ABC);
+});
+
+test('settleCards：触达上限 0 卡 + 仍 loading → feed_still_loading 可重试（不报空批）', async () => {
+  const reader = new FacebookFeedReader({
+    cdp: settleCdp([{ scan: [], loading: true }]),
+    sleep: async () => {},
+  });
+  const r = await reader.settleCards({ wallClockMs: 200, roundMs: 100 });
+  assert.equal(r.cards.length, 0);
+  assert.equal(r.reason, 'feed_still_loading');
+});
+
+test('settleCards：触达上限 0 真卡（只有空壳）+ 无 loading → no_feed（空壳绝不当卡）', async () => {
+  const reader = new FacebookFeedReader({
+    cdp: settleCdp([{ scan: [{ hydrated: false }], loading: false }]),
+    sleep: async () => {},
+  });
+  const r = await reader.settleCards({ wallClockMs: 200, roundMs: 100 });
+  assert.equal(r.cards.length, 0);
+  assert.equal(r.reason, 'no_feed');
+});
+
+// ─────────────────────────── 首页图标点击换批（Q3）───────────────────────────
+
+test('clickHomeAndScrollTop：找到首页锚点 → ok；找不到 → no_home_link', async () => {
+  const okReader = new FacebookFeedReader({
+    cdp: { send: async () => ({ result: { value: JSON.stringify({ ok: true }) } }) } as unknown as BrowseCdp,
+    sleep: async () => {},
+  });
+  assert.deepEqual(await okReader.clickHomeAndScrollTop(), { ok: true });
+
+  const noReader = new FacebookFeedReader({
+    cdp: { send: async () => ({ result: { value: JSON.stringify({ ok: false, reason: 'no_home_link' }) } }) } as unknown as BrowseCdp,
+    sleep: async () => {},
+  });
+  assert.deepEqual(await noReader.clickHomeAndScrollTop(), { ok: false, reason: 'no_home_link' });
 });
