@@ -1,7 +1,7 @@
 /**
  * Facebook 帖子详情深读（浏览闭环 note.detail 的数据源）。
  *
- * 真机探针（facebook-browse-and-like-loop-probe-findings.md §Detail）：导航到 `/posts/pfbid…` permalink
+ * 真机探针（docs/facebook-browse-and-like-loop-probe-findings.md §Detail）：导航到 `/posts/pfbid…` permalink
  * 会在 feed 之上打开 `role="dialog"` 模态；主帖正文 `[data-ad-comet-preview="message"]|[data-ad-preview="message"]`，
  * 兜底 `div[dir="auto"]`；评论是 dialog 内嵌套 `[role="article"]`（懒加载）；反应/评论计数在动作栏按钮文案里。
  *
