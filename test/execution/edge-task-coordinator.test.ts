@@ -181,3 +181,122 @@ describe('EdgeTaskCoordinator', () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// change browser-slot-scheduling：停泊 ≠ 故障
+//
+// 冷待机把浏览器主动收起来后，旧行为对任务请求回一句 cdp_unhealthy——那是**假话**：浏览器没坏，
+// 是我们自己收起来的，而且叫得醒。云端据此以为边缘出了故障，任务就此丢失。
+// ---------------------------------------------------------------------------
+describe('EdgeTaskCoordinator：浏览器停泊走唤醒路径', () => {
+  const mk = (opts: {
+    browserAbsent: () => boolean;
+    requestWake: () => Promise<boolean>;
+    canAcquire: () => boolean;
+  }) => {
+    const acquired: EdgeTaskAcquiredPayload[] = [];
+    const released: EdgeTaskReleasedPayload[] = [];
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      canAcquire: opts.canAcquire,
+      browserAbsent: opts.browserAbsent,
+      requestWake: opts.requestWake,
+      onAcquired: (p) => acquired.push(p),
+      onReleased: (p) => released.push(p),
+    });
+    return { coordinator, acquired, released };
+  };
+
+  it('停泊中收到任务 → 唤醒成功后正常授予租约（绝不回假的 cdp_unhealthy）', async () => {
+    let parked = true;
+    let wakes = 0;
+    const { coordinator, acquired, released } = mk({
+      canAcquire: () => !parked,
+      browserAbsent: () => parked,
+      requestWake: async () => {
+        wakes++;
+        parked = false; // 浏览器起来了
+        return true;
+      },
+    });
+
+    coordinator.acquire({ taskId: 't-1', kind: 'publish', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    await tick();
+
+    assert.equal(wakes, 1, '触发了一次唤醒');
+    assert.deepEqual(acquired.map((a) => a.taskId), ['t-1'], '唤醒后正常拿到租约');
+    assert.deepEqual(released, [], '绝不回 cdp_unhealthy');
+  });
+
+  it('唤醒失败 → 回 browser_wake_failed（与 cdp_unhealthy 明确区分）', async () => {
+    const { coordinator, acquired, released } = mk({
+      canAcquire: () => false,
+      browserAbsent: () => true,
+      requestWake: async () => false, // 唤不醒（内存不足 / 冷启失败 / 超死线）
+    });
+
+    coordinator.acquire({ taskId: 't-2', kind: 'comment_prepare', priority: 'automatic', leaseMs: 60_000 });
+    await tick();
+    await tick();
+
+    assert.deepEqual(acquired, [], '没起来就绝不授予租约');
+    assert.deepEqual(released, [{ taskId: 't-2', reason: 'browser_wake_failed' }], '诚实的、可恢复的失败原因');
+  });
+
+  it('浏览器在、但控制不健康 → 仍是 cdp_unhealthy（不误走唤醒路径）', async () => {
+    let wakes = 0;
+    const { coordinator, released } = mk({
+      canAcquire: () => false,
+      browserAbsent: () => false, // 浏览器在，只是控制面坏了
+      requestWake: async () => {
+        wakes++;
+        return true;
+      },
+    });
+
+    coordinator.acquire({ taskId: 't-3', kind: 'publish', priority: 'human', leaseMs: 60_000 });
+    await tick();
+
+    assert.equal(wakes, 0, '真故障绝不去叫醒一个本来就开着的浏览器');
+    assert.deepEqual(released, [{ taskId: 't-3', reason: 'cdp_unhealthy' }]);
+  });
+
+  it('唤醒期间重复 acquire 绝不触发第二次唤醒（不会开出第二个浏览器）', async () => {
+    let wakes = 0;
+    const gate = deferred<boolean>();
+    let parked = true;
+    const { coordinator, acquired } = mk({
+      canAcquire: () => !parked,
+      browserAbsent: () => parked,
+      requestWake: () => {
+        wakes++;
+        return gate.promise;
+      },
+    });
+
+    const req = { taskId: 't-4', kind: 'publish', priority: 'human', leaseMs: 60_000 } as const;
+    coordinator.acquire({ ...req });
+    coordinator.acquire({ ...req }); // 云端重发
+    coordinator.acquire({ ...req });
+    await tick();
+    assert.equal(wakes, 1, '唤醒中：重复请求绝不再叫一次');
+
+    parked = false;
+    gate.resolve(true);
+    await tick();
+    await tick();
+    assert.deepEqual(acquired.map((a) => a.taskId), ['t-4']);
+  });
+
+  it('租约在跑 / 排队中 → hasActiveLease 为真（冷待机据此拒绝抽走浏览器）', async () => {
+    const { coordinator } = mk({ canAcquire: () => true, browserAbsent: () => false, requestWake: async () => true });
+    assert.equal(coordinator.hasActiveLease(), false, '空闲时可以进待机');
+    coordinator.acquire({ taskId: 't-5', kind: 'publish', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    assert.equal(coordinator.hasActiveLease(), true, '有任务在跑就绝不释放浏览器');
+    coordinator.release({ taskId: 't-5' });
+    await tick();
+    assert.equal(coordinator.hasActiveLease(), false, '任务结束后才可以进待机');
+  });
+});

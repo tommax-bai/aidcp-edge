@@ -15,8 +15,13 @@ export interface EdgeSession {
   cdp: CdpClient;
   dom: CdpDomProvider;
   executor: CdpActionExecutor;
-  /** 关闭底层 CDP 连接 */
+  /** 关闭底层 CDP 连接（终局：进程要退出了） */
   close(): void;
+  /**
+   * 冷待机释放浏览器层（change browser-slot-scheduling）：断开连接、进入「浏览器缺席」态，
+   * 之后任何页面命令都会**响亮失败**而非静默假成功。可由 reattachSession() 原地复活。
+   */
+  detach(): void;
 }
 
 export interface AttachOptions extends DiscoverOptions {
@@ -84,51 +89,59 @@ async function reEnableAndInject(
  * attach 完成后会立即注入反检测脚本（除非 options.stealth === false），
  * 确保后续每个新 document 在任何页面脚本之前被打补丁。
  */
-export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSession> {
-  const target = await firstPageTarget(options);
-  const injector = options.stealthInjector ?? new CdpStealthInjector();
-
-  // 断线重连配置（缺省启用）：重发现按域名硬过滤（默认 xiaohongshu.com，绝不落无关 tab），
-  // 重连后用 reEnableAndInject 重启用域 + 重注入反检测。
-  let reconnect: CdpReconnectOptions | undefined;
-  if (options.reconnect !== false) {
-    const host = options.host ?? '127.0.0.1';
-    const port = options.port ?? 9222;
-    const doFetch = options.fetchImpl ?? globalThis.fetch;
-    reconnect = {
-      ...(typeof options.reconnect === 'object' ? options.reconnect : {}),
-      rediscoverTarget: async () => {
-        const t = await firstPageTarget({
+/**
+ * 断线重连配置（缺省启用）：重发现按域名硬过滤（默认 xiaohongshu.com，绝不落无关 tab），
+ * 重连后用 reEnableAndInject 重启用域 + 重注入反检测。
+ *
+ * **必须是函数、不能内联**（change browser-slot-scheduling）：它的 classify 闭包把 host:port 焊死在
+ * 里面，而 AdsPower 每次启动的调试端口都不同。冷待机唤醒后浏览器是新起的、端口变了，必须拿**新的**
+ * AttachOptions 重新构造一份——沿用旧的，唤醒后第一次瞬断就会拿旧端口探活、探不到即误判「进程已死 =
+ * 终局」，把一个本可续跑的连接直接判死并触发整进程回收。
+ */
+function buildReconnect(options: AttachOptions, injector: StealthInjector): CdpReconnectOptions | undefined {
+  if (options.reconnect === false) return undefined;
+  const host = options.host ?? '127.0.0.1';
+  const port = options.port ?? 9222;
+  const doFetch = options.fetchImpl ?? globalThis.fetch;
+  return {
+    ...(typeof options.reconnect === 'object' ? options.reconnect : {}),
+    rediscoverTarget: async () => {
+      const t = await firstPageTarget({
+        ...options,
+        urlIncludes: options.urlIncludes ?? 'xiaohongshu.com',
+      });
+      return t.webSocketDebuggerUrl;
+    },
+    onReconnected: async (c) => {
+      await reEnableAndInject(c, { stealth: options.stealth, injector });
+    },
+    // 终态快判（进入退避循环前）：① 浏览器进程级端点 /json/version 不可达 → 进程已死 = 终态；
+    // ② 进程在但找不到可用 page target → 页面归零（窗口被关/标签崩，经验不可恢复）= 终态；
+    // ③ 进程在且页面 target 仍在 → 'retry' 走有界重连透明续跑。
+    classify: async () => {
+      try {
+        const res = await doFetch(`http://${host}:${port}/json/version`);
+        if (!res.ok) return 'terminal';
+      } catch {
+        return 'terminal'; // 端口拒连：进程级终态
+      }
+      try {
+        await firstPageTarget({
           ...options,
           urlIncludes: options.urlIncludes ?? 'xiaohongshu.com',
         });
-        return t.webSocketDebuggerUrl;
-      },
-      onReconnected: async (c) => {
-        await reEnableAndInject(c, { stealth: options.stealth, injector });
-      },
-      // 终态快判（进入退避循环前）：① 浏览器进程级端点 /json/version 不可达 → 进程已死 = 终态；
-      // ② 进程在但找不到可用 page target → 页面归零（窗口被关/标签崩，经验不可恢复）= 终态；
-      // ③ 进程在且页面 target 仍在 → 'retry' 走有界重连透明续跑。
-      classify: async () => {
-        try {
-          const res = await doFetch(`http://${host}:${port}/json/version`);
-          if (!res.ok) return 'terminal';
-        } catch {
-          return 'terminal'; // 端口拒连：进程级终态
-        }
-        try {
-          await firstPageTarget({
-            ...options,
-            urlIncludes: options.urlIncludes ?? 'xiaohongshu.com',
-          });
-          return 'retry'; // 页面 target 在，可重连
-        } catch {
-          return 'terminal'; // 页面归零，经验不可恢复
-        }
-      },
-    };
-  }
+        return 'retry'; // 页面 target 在，可重连
+      } catch {
+        return 'terminal'; // 页面归零，经验不可恢复
+      }
+    },
+  };
+}
+
+export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSession> {
+  const target = await firstPageTarget(options);
+  const injector = options.stealthInjector ?? new CdpStealthInjector();
+  const reconnect = buildReconnect(options, injector);
 
   const cdp = new CdpClient(target.webSocketDebuggerUrl, { ...options.client, reconnect });
   await cdp.connect();
@@ -140,5 +153,23 @@ export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSes
     dom: new CdpDomProvider(cdp),
     executor: new CdpActionExecutor(cdp),
     close: () => cdp.close(),
+    detach: () => cdp.detach(),
   };
+}
+
+/**
+ * 唤醒重建（change browser-slot-scheduling）：把**已有的** EdgeSession 重新附着到新一代浏览器。
+ *
+ * 不新建 CdpClient / DomProvider / ActionExecutor —— 十几个长期存活的组件在构造时就攥住了这三个对象，
+ * 新建它们等于让所有持有者拿着过期句柄。这里保住对象身份，只换连接内层（socket + target + 重连配置）
+ * 并重启用 CDP 域、重注入反检测。持有者与订阅者全程无感。
+ *
+ * `options` MUST 是**新一代浏览器**的 AttachOptions（新的 host/port）。
+ * 失败即抛：调用方据此诚实报「唤醒失败」，会话保持待机、可再次唤醒；绝不把半死的连接当就绪。
+ */
+export async function reattachSession(session: EdgeSession, options: AttachOptions = {}): Promise<void> {
+  const target = await firstPageTarget(options);
+  const injector = options.stealthInjector ?? new CdpStealthInjector();
+  await session.cdp.reattach(target.webSocketDebuggerUrl, buildReconnect(options, injector));
+  await reEnableAndInject(session.cdp, { stealth: options.stealth, injector });
 }

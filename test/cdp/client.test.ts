@@ -263,3 +263,81 @@ test('重连退避进行中 close() → 抢占，不再建新 ws / 不重连', a
   assert.equal(reconnected, 0, '主动 close 后不应重连成功');
   assert.equal(list.length, 1, '不应建新 ws');
 });
+
+// ---------------------------------------------------------------------------
+// change browser-slot-scheduling：待机即释放、唤醒即重建
+//
+// 核心安全性质：浏览器被收起期间，任何页面命令都必须**响亮失败**——绝不静默假成功、也绝不
+// 因为「连接对象还在」就以为还能用。重建则必须保住对象身份，否则十几个长期持有者全部拿到过期句柄。
+// ---------------------------------------------------------------------------
+
+test('detach(): 释放后页面命令响亮失败，且绝不触发重连（浏览器是我们自己收起来的）', async () => {
+  const ws = new FakeWs();
+  let reconnects = 0;
+  const client = new CdpClient('ws://old', {
+    wsFactory: () => ws.asWs(),
+    reconnect: { rediscoverTarget: async () => { reconnects++; return 'ws://new'; } },
+  });
+  const p = client.connect();
+  ws.emit('open', undefined);
+  await p;
+
+  client.detach();
+
+  assert.equal(client.isDetached(), true);
+  assert.equal(client.isControlReady(), false, '缺席的浏览器绝不报「可接管」');
+  await assert.rejects(client.send('Runtime.evaluate'), CdpDisconnectedError, '页面命令必须响亮失败');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(reconnects, 0, '主动释放绝不被当成掉线去重连（否则连接对象会被搞成 recovering 僵尸）');
+});
+
+test('reattach(): 保住实例身份 → 既有订阅者全程无感；并换掉重连配置（AdsPower 端口每次都变）', async () => {
+  const first = new FakeWs();
+  const second = new FakeWs();
+  let made = 0;
+  const client = new CdpClient('ws://gen1', {
+    wsFactory: () => (made++ === 0 ? first.asWs() : second.asWs()),
+    reconnect: { rediscoverTarget: async () => 'ws://gen1-target' },
+  });
+  const p = client.connect();
+  first.emit('open', undefined);
+  await p;
+
+  // 长期存活的组件在构造时就挂上了订阅——重建绝不能让它们掉线。
+  const recovered: unknown[] = [];
+  client.on('cdp.control_recovered', (e) => recovered.push(e));
+
+  client.detach();
+
+  // 新一代浏览器：新的 wsUrl + 新的重连配置（旧的把首次的 host:port 焊在闭包里）。
+  let rediscovered = 0;
+  const reattached = client.reattach('ws://gen2', {
+    rediscoverTarget: async () => { rediscovered++; return 'ws://gen2-target'; },
+  });
+  second.emit('open', undefined);
+  await reattached;
+
+  assert.equal(client.isDetached(), false);
+  assert.equal(client.isControlReady(), true, '重建后可安全接管');
+  assert.equal(recovered.length, 1, '重建发出 control_recovered → 既有订阅者自行重新同步（订阅未丢）');
+
+  // 重建后真的用的是新一代的重连配置：断线时应去找 gen2 的 target。
+  second.emit('close', undefined);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.ok(rediscovered >= 1, '断线走的是新一代重连配置，绝不拿旧端口去探活');
+});
+
+test('reattach() 失败 → 回到缺席态并抛出（绝不把半死的连接当就绪）', async () => {
+  const ws = new FakeWs();
+  const client = new CdpClient('ws://gen1', {
+    wsFactory: () => {
+      throw new Error('浏览器没起来');
+    },
+  });
+  // 首连也失败，直接测重建路径的诚实性
+  await assert.rejects(client.reattach('ws://gen2'), /浏览器没起来/);
+  assert.equal(client.isDetached(), true, '失败后留在缺席态，可再次唤醒');
+  assert.equal(client.isControlReady(), false);
+  await assert.rejects(client.send('Runtime.evaluate'), CdpDisconnectedError);
+  assert.equal(ws.sent.length, 0);
+});

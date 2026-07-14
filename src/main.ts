@@ -38,6 +38,7 @@ import './websocket-polyfill.js';
 import {
   applyBrowserParking,
   attachToPage,
+  reattachSession,
   browserParkingConfigFromEnv,
   installBrowserParkingStdinControl,
   selectBrowserProvider,
@@ -180,7 +181,9 @@ async function main(): Promise<void> {
   if (process.env.AIDCP_CHROME_LOGIN_TIMEOUT_MS) {
     launchOpts.loginTimeoutMs = Number(process.env.AIDCP_CHROME_LOGIN_TIMEOUT_MS);
   }
-  const { instance: chrome, endpoint } = await provider.launch(launchOpts);
+  // let（非 const）：冷待机唤醒会**重开浏览器**，新一代的 ChromeInstance 与调试端口必须整体换掉——
+  // AdsPower 每次启动的 debug_port 都不同，留着旧的会让后续所有生命周期闭包对着一个死端口操作。
+  let { instance: chrome, endpoint } = await provider.launch(launchOpts);
 
   // 反检测恰一层生效：self 默认开 edge 自研 stealth；adspower 默认关、反检测整层交 AdsPower——
   // 自动化痕迹由 cdp_mask（browser/start 字段，藏 navigator.webdriver 等 CDP 特征）掩盖、
@@ -406,12 +409,53 @@ async function main(): Promise<void> {
     console.log(`[aidcp-edge] 冷待机期间收到唤醒触发 (${reason})，请求外壳恢复浏览器`);
     sendLifecycleIpc({ type: 'lifecycle.wake_requested', reason });
   };
+  /**
+   * 唤醒死线（change browser-slot-scheduling）：冷启 30–90s + 外壳串行启动队列的排队时间 + 余量。
+   * **必须小于云端 240s 空转看门狗**——否则一个正在正常唤醒的账号会被云端当成卡死、杀掉整个会话。
+   */
+  const WAKE_DEADLINE_MS = Math.max(30_000, Number(process.env.AIDCP_WAKE_DEADLINE_MS ?? 180_000) || 180_000);
+  let wakeWaiters: Array<(ok: boolean) => void> = [];
+  /** 唤醒有了结论（成功 / 失败 / 外壳拒绝）→ 一次性放行所有等待者。绝不让任何一个吊死到死线。 */
+  const settleWake = (ok: boolean): void => {
+    const waiters = wakeWaiters;
+    wakeWaiters = [];
+    for (const w of waiters) w(ok);
+  };
+  /**
+   * **唯一的浏览器闸**（change browser-slot-scheduling）：所有要碰浏览器的动作都走它。
+   *
+   * 浏览器在 → 直接放行。浏览器被冷待机收起 → 请求外壳唤醒（外壳持槽位池与串行启动队列，唤醒必须
+   * 经它过内存准入，核心不得自己偷偷开浏览器）→ 有界等待 → 就绪则放行，否则**诚实失败**。
+   * MUST NOT 静默无动作，MUST NOT 回一句假的「浏览器故障」。
+   */
+  const ensureBrowserAwake = (reason: string): Promise<boolean> => {
+    if (!coldStandbyActive) return Promise.resolve(true);
+    requestColdStandbyWake(reason); // 幂等：已请求过就不再重复打扰外壳
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const finish = (ok: boolean): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => {
+        console.warn(`[aidcp-edge] ⚠ 唤醒未在 ${WAKE_DEADLINE_MS}ms 死线内完成（reason=${reason}）：诚实判失败`);
+        finish(false);
+      }, WAKE_DEADLINE_MS);
+      (timer as { unref?: () => void }).unref?.();
+      wakeWaiters.push(finish);
+    });
+  };
   const taskCoordinator = new EdgeTaskCoordinator({
     browse: {
       quiesceForTask: () => browse?.quiesceForTask() ?? Promise.resolve(0),
       resumeAfterTask: () => browse?.resumeAfterTask() ?? Promise.resolve(),
     },
     canAcquire: () => session.cdp.isControlReady(),
+    // 「浏览器被我们自己收起来了」≠「浏览器坏了」。前者叫得醒，后者才是 cdp_unhealthy。
+    browserAbsent: () => coldStandbyActive,
+    requestWake: () => ensureBrowserAwake('edge_task'),
     onAcquired: (payload) => {
       try {
         client.send('edge.task.acquired', payload);
@@ -483,6 +527,17 @@ async function main(): Promise<void> {
   client.onPublishCommand((env) => {
     void (async () => {
       console.log(writeNoteStageLine());
+      // 浏览器闸（change browser-slot-scheduling）：发布是第二个「没有唤醒守卫」的入口——冷待机中
+      // 它此前会直接摸一个已被关掉的浏览器。先唤醒、有界等；唤不醒就**诚实回失败**，绝不静默无动作。
+      if (!(await ensureBrowserAwake(`publish:${env.id}`))) {
+        console.warn('[aidcp-edge] 发布命令到达时浏览器处于冷待机且唤醒失败 → 诚实回执失败（未发布）');
+        try {
+          client.send('publish.result', { ok: false, error: '[browser_wake_failed] 浏览器处于待机且未能唤醒，本次未发布' }, env.id);
+        } catch {
+          /* best-effort */
+        }
+        return;
+      }
       // §7 在途登记：回收若撞上这条在途发布，按 publish.result 形状诚实判失败（同 env.id 回执）。
       inFlightPublishes.set(env.id, (reason) => {
         try {
@@ -1201,21 +1256,30 @@ async function main(): Promise<void> {
       }
     },
     enterStandby: async () => {
-      console.log('\n[aidcp-edge] 冷待机流程启动：停止自动化、关闭浏览器、保留云端连接...');
+      console.log('\n[aidcp-edge] 冷待机流程启动：停止自动化、释放浏览器层、关闭浏览器、保留云端连接...');
       clearColdStandbyCloudRetry();
+      // 释放 ⊥ 在跑租约（change browser-slot-scheduling）：任务持着执行权时绝不把浏览器从它底下抽走。
+      // 待机请求推迟到租约结束后由外壳再判（这里如实拒绝，不静默降级成「等一会儿再偷偷关」）。
+      if (taskCoordinator.hasActiveLease()) {
+        console.log('[aidcp-edge] 有任务租约在跑，拒绝进入冷待机（绝不把浏览器从正在执行的任务底下抽走）');
+        return false;
+      }
+      if (chrome.reused) {
+        console.log('[aidcp-edge] 复用模式：不回收本进程不拥有的外部 Chrome，拒绝进入冷待机');
+        return false;
+      }
       coldStandbyActive = true;
       coldStandbyWakeRequested = false;
       failInFlightPublishesHonestly('cold_standby');
       watcherSupervisor?.stopAll();
-      // 关浏览器前必须等浏览循环真正退出原子区（红线）：close() 只是请求停止，循环可能正卡在首屏扫描 /
+      // 关浏览器前必须等浏览循环真正退出原子区（红线）：stop() 只是请求停止，循环可能正卡在首屏扫描 /
       // 停留等待里，醒来后照样摸页面——那时浏览器已被下面 killAndConfirmDead() 杀掉，调用直接打在死 CDP 上。
-      reportBrowseDrainTimeout((await browse?.closeAndWait(BROWSE_DRAIN_MS)) ?? true, 'cold_standby');
-      if (chrome.reused) {
-        console.log('[aidcp-edge] 复用模式：不回收本进程不拥有的外部 Chrome，拒绝进入冷待机');
-        coldStandbyActive = false;
-        clearColdStandbyCloudRetry();
-        return false;
-      }
+      // 用 stopAndWait（非 closeAndWait）：待机是**可回来的**，close() 的 closing 是终态、唤醒后就再也起不来了。
+      reportBrowseDrainTimeout((await browse?.stopAndWait(BROWSE_DRAIN_MS)) ?? true, 'cold_standby');
+      // 释放浏览器层：断开 CDP 并进入「浏览器缺席」态。必须**在杀浏览器之前**——否则 WS 被动断开会被
+      // 当成意外掉线、触发有界重连，最后把连接对象搞成一个 recovering/unavailable 的僵尸（今天的 bug）。
+      // 释放后任何页面命令都会响亮失败，绝不静默假成功。
+      session.detach();
       try {
         const freed = await chrome.killAndConfirmDead();
         if (!freed) {
@@ -1229,6 +1293,78 @@ async function main(): Promise<void> {
         console.warn(`[aidcp-edge] ⚠ 冷待机关闭浏览器异常：${(error as Error)?.message || String(error)}`);
         coldStandbyActive = false;
         clearColdStandbyCloudRetry();
+        return false;
+      }
+    },
+    /**
+     * 冷待机唤醒：**原地重建浏览器层**（change browser-slot-scheduling）。核心进程不重启、云端连接不断开。
+     *
+     * 重建当作**新的一代浏览器**：绝不假设还登着——重新确认登录态与账号身份。身份读不出来（未登录 /
+     * 需验证）即诚实判唤醒失败、留在待机态，绝不把一个没登录的浏览器当就绪、更不回落默认账号。
+     */
+    wakeFromStandby: async () => {
+      console.log('\n[aidcp-edge] 唤醒：重开浏览器 + 原地重建浏览器层（核心进程与云端连接不动）...');
+      try {
+        // 1) 重开浏览器。新一代 = 新的调试端口，整体换掉 chrome / endpoint / attachOpts。
+        const relaunched = await provider.launch(launchOpts);
+        chrome = relaunched.instance;
+        endpoint = relaunched.endpoint;
+        attachOpts.host = endpoint.host;
+        attachOpts.port = endpoint.port;
+
+        // 2) 把既有的会话对象重新附着上去（保住 CdpClient 身份 → 十几个持有者与订阅者全程无感）。
+        //    重连配置在这里被重新构造，classify/rediscover 闭包里的端口随之更新——不换它，唤醒后第一次
+        //    瞬断就会拿旧端口探活、探不到即误判「进程已死 = 终局」，把可续跑的连接直接判死。
+        await reattachSession(session, attachOpts);
+
+        // 3) 停放（最小化 / 移出视野）要重新施加：新浏览器窗口不继承上一代的位置。
+        try {
+          await applyBrowserParking(session.cdp, parkingConfig, (m) => console.log(m));
+        } catch (e) {
+          console.log(`[browser-parking] apply failed after wake: ${(e as Error).message}`);
+        }
+
+        // 4) 重新确认登录态与身份（红线：新一代浏览器，绝不假设还登着）。
+        const idRes = await platformDriver.readIdentity(session.cdp, { logger: (m) => console.log(m) });
+        const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
+        if (decision.kind === 'halt') {
+          console.error(
+            `[aidcp-edge] ✗ 唤醒后身份确认失败（${decision.reason}）：浏览器起来了但读不出登录身份。` +
+              '如实判唤醒失败、留在待机态（可再次唤醒），绝不以默认账号开跑。',
+          );
+          session.detach();
+          await chrome.killAndConfirmDead().catch(() => undefined);
+          return false;
+        }
+        if (decision.accountId !== accountId) {
+          // 换号：走既有的身份重建路径（它会按新 id 重连云端、rebaseline 监测体、重启浏览循环）。
+          console.warn(`[aidcp-edge] 唤醒后发现账号已变（${accountId} → ${decision.accountId}），走身份重新确立路径`);
+          coldStandbyActive = false;
+          coldStandbyWakeRequested = false;
+          await reestablishIdentity();
+          return true;
+        }
+
+        // 5) 恢复自动化：监测体重挂、浏览循环重开（注意顺序——先出待机态，否则循环起手就被待机守卫挡回）。
+        coldStandbyActive = false;
+        coldStandbyWakeRequested = false;
+        clearColdStandbyCloudRetry();
+        identityWatcher?.rebaseline(accountId!);
+        watcherSupervisor?.startAll();
+        const wakePacing = client.getPacing();
+        browse?.applyPacingSnapshot(wakePacing?.opFloorsMs, wakePacing?.tempo);
+        browse?.start().catch((err) => console.error('[aidcp-edge] 唤醒后浏览会话异常:', err));
+        console.log('[aidcp-edge] ✓ 唤醒完成：浏览器已重建、身份已确认、自动化已恢复');
+        return true;
+      } catch (error) {
+        console.warn(`[aidcp-edge] ⚠ 唤醒失败：${(error as Error)?.message || String(error)}；留在待机态，可再次唤醒`);
+        // 半开的浏览器绝不留着占内存槽位——它既不能干活、又挡着别的账号。
+        try {
+          session.detach();
+          await chrome.killAndConfirmDead().catch(() => undefined);
+        } catch {
+          /* best-effort */
+        }
         return false;
       }
     },
@@ -1247,6 +1383,15 @@ async function main(): Promise<void> {
       if (typeof process.send === 'function' && process.connected) {
         process.send({ type: 'lifecycle.standby' });
       }
+    },
+    onWoken: () => {
+      settleWake(true); // 放行所有卡在浏览器闸上的动作
+      sendLifecycleIpc({ type: 'lifecycle.woken' });
+    },
+    // 唤醒失败必须让外壳知道：它要如实呈现「唤醒失败」并把槽位还回池子，绝不把这个环境当成已就绪。
+    onWakeFailed: (reason) => {
+      settleWake(false); // 立刻放行等待者去诚实失败，绝不让它们吊到 180s 死线
+      sendLifecycleIpc({ type: 'lifecycle.wake_failed', reason });
     },
     logger: (message) => console.log(message),
   });

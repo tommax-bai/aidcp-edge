@@ -28,6 +28,11 @@ export interface EdgeBrowseSession {
    * 浏览器若已被关掉，那些调用就打在死 CDP 上（冷待机实测：首屏扫描对着死 CDP 空转 12s 后抛断连异常）。
    */
   closeAndWait(timeoutMs?: number): Promise<boolean>;
+  /**
+   * 冷待机排空（change browser-slot-scheduling）：同样等在途原子操作退出原子区再关浏览器，
+   * 但**非终态**——唤醒后可再 start() 重新开跑。与 closeAndWait 的差别只在「还回不回得来」。
+   */
+  stopAndWait(timeoutMs?: number): Promise<boolean>;
   /** 独占任务接管前静默到原子边界，返回等待毫秒数。 */
   quiesceForTask(): Promise<number>;
   /** 独占任务释放后恢复。 */

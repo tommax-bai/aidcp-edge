@@ -110,7 +110,15 @@ type CdpControlState = 'healthy' | 'recovering' | 'unavailable';
 
 interface CdpControlEvent {
   state: CdpControlState;
-  reason: 'transport_closed' | 'slow_input' | 'input_timeout' | 'recovery_exhausted' | 'recovery_not_configured';
+  reason:
+    | 'transport_closed'
+    | 'slow_input'
+    | 'input_timeout'
+    | 'recovery_exhausted'
+    | 'recovery_not_configured'
+    /** change browser-slot-scheduling：冷待机主动释放浏览器 / 唤醒后重新附着到新一代浏览器。 */
+    | 'browser_released'
+    | 'browser_reattached';
   /** 同一轮 CDP 控制恢复/不可用事件的关联编号，仅进程内有效。 */
   recoveryId?: number;
   method?: string;
@@ -142,8 +150,16 @@ export class CdpClient {
   private readonly now: () => number;
   private readonly wsFactory: WebSocketFactory;
   private connected = false;
-  private readonly reconnectOpts?: CdpReconnectOptions;
+  /**
+   * 非 readonly（change browser-slot-scheduling）：唤醒重建时必须整体换掉。
+   * 它的 classify / rediscoverTarget 闭包把**首次启动**的 host:port 焊在里面，而 AdsPower 每次启动的
+   * 调试端口是变的——唤醒后不换它，下一次瞬断会拿旧端口去探活、探不到就误判「进程已死 = 终局」，
+   * 把一个本可续跑的连接直接判死、触发整进程回收。
+   */
+  private reconnectOpts?: CdpReconnectOptions;
   private intentionalClose = false;
+  /** 浏览器已被主动释放（冷待机）。可由 reattach() 原地复活，无需重建本实例。 */
+  private detached = false;
   private reconnecting = false;
   private controlState: CdpControlState = 'healthy';
   private consecutiveSlowInputs = 0;
@@ -207,6 +223,10 @@ export class CdpClient {
 
   /** 发送一条 CDP 命令并等待结果 */
   send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    if (this.detached) {
+      // 红线：浏览器被冷待机收起时，页面命令必须**响亮失败**——绝不静默假成功，也绝不假装连接还在。
+      return Promise.reject(new CdpDisconnectedError('浏览器已释放（冷待机）；需先唤醒重建再下发页面命令'));
+    }
     if (!this.ws || !this.connected) {
       return Promise.reject(new CdpDisconnectedError('CDP 未连接，请先 connect()'));
     }
@@ -252,8 +272,64 @@ export class CdpClient {
     this.connected = false;
   }
 
+  /**
+   * 冷待机释放浏览器层（change browser-slot-scheduling）：主动断开 WS、进入「浏览器缺席」态，
+   * 且**绝不触发重连**（浏览器是我们自己收起来的，不是它掉线了）。
+   *
+   * 为什么是「原地释放」而不是「丢弃本实例、唤醒时新建一个」：本实例的事件订阅表（listeners）挂着
+   * 十几个长期存活的组件（浏览会话 / 各监测体 / 发布执行器 / 任务协调器）。丢弃实例 = 那些订阅全部
+   * 失效，且各持有者手里的引用变成过期句柄。保住实例身份、只换里面的 socket 与 target，所有持有者
+   * 与订阅者全程无感——这正是既有断线重连已经证明可行的做法。
+   */
+  detach(): void {
+    if (this.detached) return;
+    this.detached = true;
+    this.intentionalClose = true; // 抢占任何在跑的重连退避循环，并阻止 close 事件再触发重连
+    this.failAllPending(new CdpDisconnectedError('浏览器已释放（冷待机）'));
+    try {
+      this.ws?.close();
+    } catch {
+      /* ignore */
+    }
+    this.connected = false;
+    this.markControlUnavailable({ state: 'unavailable', reason: 'browser_released' });
+  }
+
+  /**
+   * 唤醒重建：把本实例重新附着到**新一代浏览器**（change browser-slot-scheduling）。
+   *
+   * `reconnect` MUST 传新一代的重连配置——它的 classify / rediscoverTarget 闭包里焊着 host:port，
+   * 而 AdsPower 每次启动的调试端口都不同。沿用旧的 = 唤醒后第一次瞬断就被误判成终局失败。
+   *
+   * 失败则回到「浏览器缺席」态并抛出：调用方据此诚实报「唤醒失败」，绝不把半死的连接当就绪。
+   */
+  async reattach(wsUrl: string, reconnect?: CdpReconnectOptions): Promise<void> {
+    this.detached = false;
+    this.intentionalClose = false;
+    this.reconnecting = false;
+    this.consecutiveSlowInputs = 0;
+    this.wsUrl = wsUrl;
+    this.reconnectOpts = reconnect;
+    this.connected = false; // 旧 ws 已随浏览器一起死了；connect() 会弃用它
+    try {
+      await this.connect();
+    } catch (err) {
+      this.detached = true;
+      this.intentionalClose = true;
+      throw err;
+    }
+    // 新一代浏览器：旧的 recovering / unavailable 判定全部作废。转 healthy 会发 'cdp.control_recovered'，
+    // 既有订阅者（任务协调器、浏览会话）据此自行重新同步——不需要它们知道「刚才其实是待机」。
+    this.setControlState('healthy', { state: 'healthy', reason: 'browser_reattached' });
+  }
+
   isConnected(): boolean {
     return this.connected;
+  }
+
+  /** 浏览器是否已被主动释放（冷待机中）。区别于「浏览器在、但控制不健康」。 */
+  isDetached(): boolean {
+    return this.detached;
   }
 
   /** 只有 CDP 已连接、未重连且未出现输入超时不确定性时，才允许接管或下发页面写命令。 */

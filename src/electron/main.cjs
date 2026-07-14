@@ -772,6 +772,9 @@ function makeEnvHandle({ envId, kind, profileId, name, platform, cascadeIndex })
     coldStandbyWakeAt: 0,
     coldStandbyActive: false,
     coldStandbyPending: false,
+    // 正在原地重建浏览器（change browser-slot-scheduling）。唤醒是异步有界的：待机态只在核心回报
+    // lifecycle.woken 后才解除，绝不在下发唤醒的那一刻就乐观标成已醒。
+    coldStandbyWaking: false,
   };
 }
 
@@ -1552,6 +1555,7 @@ function clearColdStandbyTimer(handle) {
   handle.coldStandbyWakeAt = 0;
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = false;
+  handle.coldStandbyWaking = false;
 }
 
 function coldStandbyStatus(mode, hint, extra = {}) {
@@ -1703,12 +1707,20 @@ function scheduleColdStandbyWake(handle, decision) {
   if (handle.coldStandbyTimer && typeof handle.coldStandbyTimer.unref === 'function') handle.coldStandbyTimer.unref();
 }
 
+/**
+ * 冷待机唤醒（change browser-slot-scheduling）：**下发原地重建，不再 SIGTERM 核心重启整个进程**。
+ *
+ * 旧行为：resumeEdge 在浏览器已关时走不了快路径 → stopAndRestart → 杀核心 → 完整冷启，云端连接断一次
+ * 重连一次、启动时间线整条重放。唤醒会变成高频动作（每小时都可能发生），不能每次都掀一次桌子。
+ *
+ * 待机态只在核心回报 `lifecycle.woken` 后才解除——绝不在下发的那一刻就乐观地把它标成已醒（那是假成功）。
+ * 核心不在（IPC 不可用）才退回 stopAndRestart：那时确实只能冷启。
+ */
 function wakeColdStandby(handle, reason) {
   if (!handle || (!handle.coldStandbyActive && !handle.coldStandbyPending)) return;
+  if (handle.coldStandbyWaking) return; // 幂等：已在唤醒中，绝不重开第二个浏览器
   if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
   handle.coldStandbyTimer = null;
-  handle.coldStandbyPending = false;
-  handle.coldStandbyActive = false;
   handle.stopRequested = false;
   updateStatus(handle, {
     browserStandby: coldStandbyStatus('waking', handle.status.browserStandby && handle.status.browserStandby.hint, { reason }),
@@ -1718,7 +1730,59 @@ function wakeColdStandby(handle, reason) {
     ...presencePatch('正在恢复浏览器…'),
     ...clearEdgeFailurePatch(handle),
   });
+
+  // 待机中且核心还活着 → 原地重建（进程与云端连接不动）。
+  if (handle.child && (handle.coldStandbyActive || handle.coldStandbyPending)) {
+    handle.coldStandbyWaking = true;
+    const child = handle.child;
+    const sent = sendCoreLifecycle(handle, 'wake', (error) => {
+      if (handle.child !== child) return;
+      handle.coldStandbyWaking = false;
+      onColdStandbyWakeFailed(handle, `唤醒指令未送达：${error.message}`);
+    });
+    if (sent) return;
+    handle.coldStandbyWaking = false;
+  }
+
+  // 核心已经不在了：只能冷启（此路径下浏览器与进程都要重建）。
+  handle.coldStandbyPending = false;
+  handle.coldStandbyActive = false;
   resumeEdge(handle);
+}
+
+/** 核心已完成原地重建：解除待机态。 */
+function onColdStandbyWoken(handle) {
+  if (!handle) return;
+  handle.coldStandbyWaking = false;
+  handle.coldStandbyPending = false;
+  handle.coldStandbyActive = false;
+  clearColdStandbyTimer(handle);
+  updateStatus(handle, {
+    edge: 'running',
+    session: 'running',
+    browserStandby: coldStandbyStatus('awake', handle.status.browserStandby && handle.status.browserStandby.hint, {}),
+    lastMessage: '已从待机唤醒：浏览器已重建，引擎与云端连接全程未断。',
+    ...presencePatch('运行中'),
+    ...clearEdgeFailurePatch(handle),
+  });
+}
+
+/**
+ * 唤醒失败：**留在待机态**（可再次唤醒），并如实告知。
+ * 绝不把一个没起来的浏览器标成已就绪——那正是「静默假成功」。
+ */
+function onColdStandbyWakeFailed(handle, reason) {
+  if (!handle) return;
+  handle.coldStandbyWaking = false;
+  handle.coldStandbyPending = false;
+  handle.coldStandbyActive = true; // 仍在待机：浏览器没起来
+  updateStatus(handle, {
+    browserStandby: coldStandbyStatus('sleeping', handle.status.browserStandby && handle.status.browserStandby.hint, {
+      reason: `wake_failed:${reason}`,
+    }),
+    lastMessage: `唤醒失败：${reason}。仍保持待机，可再次唤醒。`,
+    ...presencePatch('待机中（唤醒失败）'),
+  });
 }
 
 /** spawn 一个环境的核心子进程（非 detached，随外壳退出终止）。身份闸在此强制执行。 */
@@ -1841,6 +1905,14 @@ function startEdge(handle) {
     }
     if (message.type === 'lifecycle.wake_requested') {
       wakeColdStandby(handle, 'cloud_command');
+      return;
+    }
+    if (message.type === 'lifecycle.woken') {
+      onColdStandbyWoken(handle);
+      return;
+    }
+    if (message.type === 'lifecycle.wake_failed') {
+      onColdStandbyWakeFailed(handle, message.reason || 'unknown');
       return;
     }
     if (message.type === 'lifecycle.standby_cloud_degraded') {

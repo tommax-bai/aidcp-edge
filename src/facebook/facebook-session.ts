@@ -282,6 +282,16 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   /** 终态关闭 + 有界等待在途命令链排空（关浏览器前必须走这条；语义见 BrowseSession.closeAndWait）。 */
   async closeAndWait(timeoutMs = 5000): Promise<boolean> {
     this.close();
+    return this.waitDrained(timeoutMs);
+  }
+
+  /** 冷待机排空（change browser-slot-scheduling）：等在途命令链排空但**非终态**，唤醒后可再 start()。 */
+  async stopAndWait(timeoutMs = 5000): Promise<boolean> {
+    this.stop();
+    return this.waitDrained(timeoutMs);
+  }
+
+  private async waitDrained(timeoutMs: number): Promise<boolean> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const drained = await Promise.race([
       this.chain.then(() => true, () => true),

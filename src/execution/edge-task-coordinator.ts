@@ -14,6 +14,17 @@ export interface EdgeTaskCoordinatorOptions {
   browse: EdgeTaskBrowseGate;
   /** 浏览器控制面是否可安全接管。false 时必须快速明确拒绝，不能占住普通浏览再等云端超时。 */
   canAcquire?: () => boolean;
+  /**
+   * 浏览器是否被**主动收起**（冷待机已释放浏览器层）——区别于「浏览器在、但控制不健康」。
+   * 这两件事今天被压成同一个 `cdp_unhealthy`，那是**假话**：停泊是我们自己干的，而且叫得醒。
+   * change browser-slot-scheduling。
+   */
+  browserAbsent?: () => boolean;
+  /**
+   * 请求唤醒并**有界等待**浏览器就绪；返回是否真的就绪。
+   * 未注入时，浏览器缺席按不可唤醒处理（诚实拒绝，绝不假装能干）。
+   */
+  requestWake?: () => Promise<boolean>;
   onAcquired: (payload: EdgeTaskAcquiredPayload) => void;
   onReleased: (payload: EdgeTaskReleasedPayload) => void;
   logger?: (message: string) => void;
@@ -54,6 +65,10 @@ const MIN_ACQUIRE_TIMEOUT_MS = 1;
 export class EdgeTaskCoordinator {
   private readonly browse: EdgeTaskBrowseGate;
   private readonly canAcquire: () => boolean;
+  private readonly browserAbsent: () => boolean;
+  private readonly requestWake: () => Promise<boolean>;
+  /** 正在为其唤醒浏览器的 taskId（唤醒是异步有界的；期间重复 acquire 绝不重复触发唤醒）。 */
+  private readonly waking = new Set<string>();
   private readonly onAcquired: (payload: EdgeTaskAcquiredPayload) => void;
   private readonly onReleased: (payload: EdgeTaskReleasedPayload) => void;
   private readonly logger: (message: string) => void;
@@ -69,6 +84,8 @@ export class EdgeTaskCoordinator {
   constructor(options: EdgeTaskCoordinatorOptions) {
     this.browse = options.browse;
     this.canAcquire = options.canAcquire ?? (() => true);
+    this.browserAbsent = options.browserAbsent ?? (() => false);
+    this.requestWake = options.requestWake ?? (() => Promise.resolve(false));
     this.onAcquired = options.onAcquired;
     this.onReleased = options.onReleased;
     this.logger = options.logger ?? (() => {});
@@ -78,6 +95,8 @@ export class EdgeTaskCoordinator {
 
   acquire(payload: EdgeTaskAcquirePayload): void {
     if (!payload.taskId) return;
+    // 已在为它唤醒浏览器：唤醒是异步有界的，重复的 acquire 绝不再触发第二次唤醒、也绝不当成新请求。
+    if (this.waking.has(payload.taskId)) return;
     if (this.active?.payload.taskId === payload.taskId) {
       this.touch(payload.taskId);
       this.onAcquired({
@@ -93,6 +112,11 @@ export class EdgeTaskCoordinator {
       return;
     }
     if (!this.canAcquire()) {
+      // 浏览器被冷待机主动收起 → 它不是坏了，是叫得醒的。走唤醒路径，绝不回一句假的 cdp_unhealthy。
+      if (this.browserAbsent()) {
+        void this.acquireAfterWake(payload);
+        return;
+      }
       this.rememberTerminal(payload.taskId, 'cdp_unhealthy');
       this.onReleased({ taskId: payload.taskId, reason: 'cdp_unhealthy' });
       this.logger(`[task] rejected taskId=${payload.taskId} reason=cdp_unhealthy`);
@@ -104,6 +128,45 @@ export class EdgeTaskCoordinator {
     this.browseBlocked = true;
     this.logger(`[task] queued taskId=${payload.taskId} kind=${payload.kind} priority=${payload.priority} acquireTimeoutMs=${queued.payload.acquireTimeoutMs}`);
     void this.drain();
+  }
+
+  /**
+   * 浏览器缺席（冷待机）→ 请求唤醒、有界等待、就绪后走正常授予路径（change browser-slot-scheduling）。
+   *
+   * 唤醒失败回 `browser_wake_failed`——一个**独立于** `cdp_unhealthy` 的诚实原因：前者可恢复（浏览器
+   * 是我们自己收起来的），后者是控制面故障。云端据此区分「该重试」与「该报警」。
+   */
+  private async acquireAfterWake(payload: EdgeTaskAcquirePayload): Promise<void> {
+    const taskId = payload.taskId;
+    this.waking.add(taskId);
+    this.logger(`[task] browser parked; requesting wake taskId=${taskId} kind=${payload.kind}`);
+    let ready = false;
+    try {
+      ready = await this.requestWake();
+    } catch (error) {
+      this.logger(`[task] wake threw taskId=${taskId}: ${(error as Error)?.message || String(error)}`);
+      ready = false;
+    }
+    this.waking.delete(taskId);
+    // 唤醒期间可能已被 release / 超时判终态：不复活一个已经了结的任务。
+    if (this.terminal.has(taskId)) return;
+    if (!ready || !this.canAcquire()) {
+      this.rememberTerminal(taskId, 'browser_wake_failed');
+      this.onReleased({ taskId, reason: 'browser_wake_failed' });
+      this.logger(`[task] rejected taskId=${taskId} reason=browser_wake_failed`);
+      return;
+    }
+    this.logger(`[task] browser woken; resuming acquire taskId=${taskId}`);
+    this.acquire(payload);
+  }
+
+  /**
+   * 是否有任务持着执行权（含排队中 / 正在让位）。
+   *
+   * 释放浏览器与在跑租约**必须互斥**：绝不把浏览器从一个正在执行的任务底下抽走。冷待机据此拒绝进入。
+   */
+  hasActiveLease(): boolean {
+    return !!this.active || this.queue.length > 0 || this.quiescing || this.waking.size > 0;
   }
 
   release(payload: EdgeTaskReleasePayload): void {

@@ -762,6 +762,22 @@ export class BrowseSession {
    */
   async closeAndWait(timeoutMs = 5000): Promise<boolean> {
     this.close();
+    return this.waitDrained(timeoutMs);
+  }
+
+  /**
+   * 冷待机排空（change browser-slot-scheduling）：与 closeAndWait 一样等在途原子操作真正退出原子区
+   * （关浏览器前的硬要求），但**非终态**——不置 closing，唤醒后可再 start() 重新开跑。
+   *
+   * 终态关闭（进程退出 / 回收）仍走 closeAndWait()；两者的差别只在「还回不回得来」。
+   */
+  async stopAndWait(timeoutMs = 5000): Promise<boolean> {
+    this.stop();
+    return this.waitDrained(timeoutMs);
+  }
+
+  /** 有界等待在途原子操作排空。超时返回 false，由调用方诚实告知并照常关浏览器（无界等待会把待机本身卡死）。 */
+  private async waitDrained(timeoutMs: number): Promise<boolean> {
     if (!this.running && this.activeOperationCount === 0) return true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const drained = await Promise.race([
