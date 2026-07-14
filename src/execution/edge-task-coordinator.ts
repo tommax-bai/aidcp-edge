@@ -22,9 +22,11 @@ export interface EdgeTaskCoordinatorOptions {
   browserAbsent?: () => boolean;
   /**
    * 请求唤醒并**有界等待**浏览器就绪；返回是否真的就绪。
+   * `deadlineAt` = 调用方（云端 acquire 计时器）等不下去的绝对时刻——外壳据此决定何时回话，
+   * **但绝不据此放弃开浏览器**：那台浏览器正是下一次重试要命中的东西。
    * 未注入时，浏览器缺席按不可唤醒处理（诚实拒绝，绝不假装能干）。
    */
-  requestWake?: () => Promise<boolean>;
+  requestWake?: (deadlineAt?: number) => Promise<boolean>;
   onAcquired: (payload: EdgeTaskAcquiredPayload) => void;
   onReleased: (payload: EdgeTaskReleasedPayload) => void;
   logger?: (message: string) => void;
@@ -55,6 +57,12 @@ const DEFAULT_MAX_ABSOLUTE_LEASE_MS = 30 * 60_000;
 const MIN_LEASE_MS = 1_000;
 const DEFAULT_ACQUIRE_TIMEOUT_MS = 45_000;
 const MIN_ACQUIRE_TIMEOUT_MS = 1;
+/**
+ * 唤醒作答的往返余量：云端在**推送前**就 arm 了自己的 acquire 计时器，所以边缘天然落后。
+ * 迟一步作答 = 对着一个已经判超时走人的调用方说话（云端那头这条任务已经算「没开始」了）。
+ * 宁可早答，绝不迟答。
+ */
+const WAKE_RTT_MARGIN_MS = 5_000;
 
 /**
  * 同一 edge/CDP 的页面写执行权事实源。
@@ -66,7 +74,7 @@ export class EdgeTaskCoordinator {
   private readonly browse: EdgeTaskBrowseGate;
   private readonly canAcquire: () => boolean;
   private readonly browserAbsent: () => boolean;
-  private readonly requestWake: () => Promise<boolean>;
+  private readonly requestWake: (deadlineAt?: number) => Promise<boolean>;
   /** 正在为其唤醒浏览器的 taskId（唤醒是异步有界的；期间重复 acquire 绝不重复触发唤醒）。 */
   private readonly waking = new Set<string>();
   private readonly onAcquired: (payload: EdgeTaskAcquiredPayload) => void;
@@ -139,10 +147,13 @@ export class EdgeTaskCoordinator {
   private async acquireAfterWake(payload: EdgeTaskAcquirePayload): Promise<void> {
     const taskId = payload.taskId;
     this.waking.add(taskId);
-    this.logger(`[task] browser parked; requesting wake taskId=${taskId} kind=${payload.kind}`);
+    // 调用方（云端）的死线是唯一权威：它在 push **之前**就 arm 了自己的计时器，我们只准**提前**作答、
+    // 绝不迟答（迟答 = 对着一个已经走人的调用方说话）。扣一个往返余量，把这场竞速让给云端。
+    const deadlineAt = this.now() + Math.max(0, (this.normalise(payload).acquireTimeoutMs ?? 0) - WAKE_RTT_MARGIN_MS);
+    this.logger(`[task] browser parked; requesting wake taskId=${taskId} kind=${payload.kind} budgetMs=${deadlineAt - this.now()}`);
     let ready = false;
     try {
-      ready = await this.requestWake();
+      ready = await this.requestWake(deadlineAt);
     } catch (error) {
       this.logger(`[task] wake threw taskId=${taskId}: ${(error as Error)?.message || String(error)}`);
       ready = false;

@@ -115,7 +115,26 @@ async function main(): Promise<void> {
   // 全部就绪后按原顺序交付。绝不把未知 IPC 当生命周期命令。
   const pendingLifecycleCommands: CoreLifecycleCommand[] = [];
   let dispatchLifecycleCommand: ((command: CoreLifecycleCommand) => void) | undefined;
+  /**
+   * 外壳说「这次没轮到你」（槽位/内存暂时不够，你排在队列里，但你的调用方等不到了）。
+   *
+   * **不是生命周期命令**（不进 parseCoreLifecycleCommand，不动状态机）：浏览器该起还是会起、
+   * 这个环境仍在等槽位队列里。它只做一件事——**立刻放行所有卡在浏览器闸上的等待者去诚实作答**，
+   * 而不是让它们对着空气干等满 180s 的唤醒死线。外壳槽位拒绝时一言不发，正是旧版把调用方吊死的根因。
+   */
+  let onWakeDenied: ((detail: string) => void) | undefined;
+  const parseWakeDenied = (message: unknown): string | undefined => {
+    if (!message || typeof message !== 'object') return undefined;
+    const m = message as { type?: unknown; detail?: unknown };
+    if (m.type !== 'lifecycle.wake_denied') return undefined;
+    return typeof m.detail === 'string' && m.detail ? m.detail : 'wake_denied';
+  };
   process.on('message', (message: unknown) => {
+    const denied = parseWakeDenied(message);
+    if (denied !== undefined) {
+      onWakeDenied?.(denied);
+      return;
+    }
     const command = parseCoreLifecycleCommand(message);
     if (!command) return;
     if (dispatchLifecycleCommand) dispatchLifecycleCommand(command);
@@ -358,6 +377,8 @@ async function main(): Promise<void> {
   let requestShutdown: ((reason: string) => void) | undefined;
   let coldStandbyActive = false;
   let coldStandbyWakeRequested = false;
+  /** 当前唤醒请求所携带的最早死线（调用方等不下去的时刻）。见 requestColdStandbyWake 的闩升级语义。 */
+  let coldStandbyWakeDeadlineAt: number | undefined;
   let coldStandbyCloudRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let coldStandbyCloudRetrying = false;
   const coldStandbyCloudRetryMs = Math.max(
@@ -402,12 +423,33 @@ async function main(): Promise<void> {
     }, coldStandbyCloudRetryMs);
     (coldStandbyCloudRetryTimer as { unref?: () => void }).unref?.();
   };
-  const requestColdStandbyWake = (reason: string): void => {
-    if (!coldStandbyActive || coldStandbyWakeRequested) return;
+  /**
+   * 请求外壳恢复浏览器。
+   *
+   * 闩（`coldStandbyWakeRequested`）防的是「反复打扰外壳」，**不是**「一个 reason 赢了就永远不许别人说话」。
+   * 旧写法是后者：一条待机期的浏览命令先把闩锁上，随后**带死线**的云端任务请求就一个字节都发不出去，
+   * 外壳永远不知道有人正在死线上等——于是那个任务只能干等到自己的死线。
+   * 所以：闩记住当前死线；**新请求带来更早的死线就重发 IPC 升级**（外壳幂等更新已有等待者，不重复入队）。
+   */
+  const requestColdStandbyWake = (reason: string, deadlineAt?: number): void => {
+    if (!coldStandbyActive) return;
+    const earlier = deadlineAt !== undefined
+      && (coldStandbyWakeDeadlineAt === undefined || deadlineAt < coldStandbyWakeDeadlineAt);
+    if (coldStandbyWakeRequested && !earlier) return;
     coldStandbyWakeRequested = true;
+    if (earlier) coldStandbyWakeDeadlineAt = deadlineAt;
+    else if (coldStandbyWakeDeadlineAt === undefined) coldStandbyWakeDeadlineAt = deadlineAt;
     clearColdStandbyCloudRetry();
-    console.log(`[aidcp-edge] 冷待机期间收到唤醒触发 (${reason})，请求外壳恢复浏览器`);
-    sendLifecycleIpc({ type: 'lifecycle.wake_requested', reason });
+    console.log(
+      `[aidcp-edge] 冷待机期间收到唤醒触发 (${reason})，请求外壳恢复浏览器`
+        + (coldStandbyWakeDeadlineAt !== undefined ? `（死线还剩 ${Math.max(0, coldStandbyWakeDeadlineAt - Date.now())}ms）` : ''),
+    );
+    sendLifecycleIpc({ type: 'lifecycle.wake_requested', reason, deadlineAt: coldStandbyWakeDeadlineAt });
+  };
+  /** 唤醒有了结论（成功 / 失败 / 外壳说这次没轮到）→ 复位闩，否则这个账号此后再也不会请求唤醒 = 永久停摆。 */
+  const clearColdStandbyWakeLatch = (): void => {
+    coldStandbyWakeRequested = false;
+    coldStandbyWakeDeadlineAt = undefined;
   };
   /**
    * 唤醒死线（change browser-slot-scheduling）：冷启 30–90s + 外壳串行启动队列的排队时间 + 余量。
@@ -415,11 +457,16 @@ async function main(): Promise<void> {
    */
   const WAKE_DEADLINE_MS = Math.max(30_000, Number(process.env.AIDCP_WAKE_DEADLINE_MS ?? 180_000) || 180_000);
   let wakeWaiters: Array<(ok: boolean) => void> = [];
-  /** 唤醒有了结论（成功 / 失败 / 外壳拒绝）→ 一次性放行所有等待者。绝不让任何一个吊死到死线。 */
+  /** 唤醒有了结论（成功 / 失败 / 外壳说这次没轮到）→ 一次性放行所有等待者。绝不让任何一个吊死到死线。 */
   const settleWake = (ok: boolean): void => {
     const waiters = wakeWaiters;
     wakeWaiters = [];
     for (const w of waiters) w(ok);
+  };
+  onWakeDenied = (detail: string): void => {
+    console.warn(`[aidcp-edge] 外壳暂时给不出浏览器槽位（${detail}）：本次诚实作答，环境仍在等槽位队列里`);
+    clearColdStandbyWakeLatch(); // 否则此后再无任何唤醒请求发得出去 = 这个账号永久停摆
+    settleWake(false);
   };
   /**
    * **唯一的浏览器闸**（change browser-slot-scheduling）：所有要碰浏览器的动作都走它。
@@ -428,9 +475,14 @@ async function main(): Promise<void> {
    * 经它过内存准入，核心不得自己偷偷开浏览器）→ 有界等待 → 就绪则放行，否则**诚实失败**。
    * MUST NOT 静默无动作，MUST NOT 回一句假的「浏览器故障」。
    */
-  const ensureBrowserAwake = (reason: string): Promise<boolean> => {
+  const ensureBrowserAwake = (reason: string, deadlineAt?: number): Promise<boolean> => {
     if (!coldStandbyActive) return Promise.resolve(true);
-    requestColdStandbyWake(reason); // 幂等：已请求过就不再重复打扰外壳
+    requestColdStandbyWake(reason, deadlineAt);
+    // 等待上界 = 自己的死线与调用方死线取小。调用方（云端 acquire）的死线是外部的、不可谈判的：
+    // 它到点就走人，我们再等下去只是对着空气等。
+    const budgetMs = deadlineAt === undefined
+      ? WAKE_DEADLINE_MS
+      : Math.max(0, Math.min(WAKE_DEADLINE_MS, deadlineAt - Date.now()));
     return new Promise<boolean>((resolve) => {
       let done = false;
       const finish = (ok: boolean): void => {
@@ -440,9 +492,9 @@ async function main(): Promise<void> {
         resolve(ok);
       };
       const timer = setTimeout(() => {
-        console.warn(`[aidcp-edge] ⚠ 唤醒未在 ${WAKE_DEADLINE_MS}ms 死线内完成（reason=${reason}）：诚实判失败`);
+        console.warn(`[aidcp-edge] ⚠ 唤醒未在 ${budgetMs}ms 死线内完成（reason=${reason}）：诚实判失败`);
         finish(false);
-      }, WAKE_DEADLINE_MS);
+      }, budgetMs);
       (timer as { unref?: () => void }).unref?.();
       wakeWaiters.push(finish);
     });
@@ -455,7 +507,7 @@ async function main(): Promise<void> {
     canAcquire: () => session.cdp.isControlReady(),
     // 「浏览器被我们自己收起来了」≠「浏览器坏了」。前者叫得醒，后者才是 cdp_unhealthy。
     browserAbsent: () => coldStandbyActive,
-    requestWake: () => ensureBrowserAwake('edge_task'),
+    requestWake: (deadlineAt) => ensureBrowserAwake('edge_task', deadlineAt),
     onAcquired: (payload) => {
       try {
         client.send('edge.task.acquired', payload);
@@ -1269,7 +1321,7 @@ async function main(): Promise<void> {
         return false;
       }
       coldStandbyActive = true;
-      coldStandbyWakeRequested = false;
+      clearColdStandbyWakeLatch();
       failInFlightPublishesHonestly('cold_standby');
       watcherSupervisor?.stopAll();
       // 关浏览器前必须等浏览循环真正退出原子区（红线）：stop() 只是请求停止，循环可能正卡在首屏扫描 /
@@ -1340,14 +1392,14 @@ async function main(): Promise<void> {
           // 换号：走既有的身份重建路径（它会按新 id 重连云端、rebaseline 监测体、重启浏览循环）。
           console.warn(`[aidcp-edge] 唤醒后发现账号已变（${accountId} → ${decision.accountId}），走身份重新确立路径`);
           coldStandbyActive = false;
-          coldStandbyWakeRequested = false;
+          clearColdStandbyWakeLatch();
           await reestablishIdentity();
           return true;
         }
 
         // 5) 恢复自动化：监测体重挂、浏览循环重开（注意顺序——先出待机态，否则循环起手就被待机守卫挡回）。
         coldStandbyActive = false;
-        coldStandbyWakeRequested = false;
+        clearColdStandbyWakeLatch();
         clearColdStandbyCloudRetry();
         identityWatcher?.rebaseline(accountId!);
         watcherSupervisor?.startAll();
@@ -1390,6 +1442,9 @@ async function main(): Promise<void> {
     },
     // 唤醒失败必须让外壳知道：它要如实呈现「唤醒失败」并把槽位还回池子，绝不把这个环境当成已就绪。
     onWakeFailed: (reason) => {
+      // 闩必须复位。不复位 = requestColdStandbyWake 此后永远早退 = 这个账号在本进程生命周期内
+      // 对所有后续云端任务静默停摆（比槽位争用严重一个量级：它连「排队」都排不上）。
+      clearColdStandbyWakeLatch();
       settleWake(false); // 立刻放行等待者去诚实失败，绝不让它们吊到 180s 死线
       sendLifecycleIpc({ type: 'lifecycle.wake_failed', reason });
     },

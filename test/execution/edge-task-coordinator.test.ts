@@ -191,7 +191,7 @@ describe('EdgeTaskCoordinator', () => {
 describe('EdgeTaskCoordinator：浏览器停泊走唤醒路径', () => {
   const mk = (opts: {
     browserAbsent: () => boolean;
-    requestWake: () => Promise<boolean>;
+    requestWake: (deadlineAt?: number) => Promise<boolean>;
     canAcquire: () => boolean;
   }) => {
     const acquired: EdgeTaskAcquiredPayload[] = [];
@@ -298,5 +298,53 @@ describe('EdgeTaskCoordinator：浏览器停泊走唤醒路径', () => {
     coordinator.release({ taskId: 't-5' });
     await tick();
     assert.equal(coordinator.hasActiveLease(), false, '任务结束后才可以进待机');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 调用方的死线必须原样传给外壳（change browser-slot-scheduling）。
+//
+// 外壳靠它决定**什么时候回话**（「这次没轮到你」），而不是决定**要不要开浏览器**。
+// 不传 = 外壳不知道有人在死线上等 → 那个任务只能干等到自己的死线超时。
+describe('EdgeTaskCoordinator：把调用方的 acquire 死线传给外壳', () => {
+  it('唤醒时带上绝对死线 = now + acquireTimeoutMs − 往返余量（宁可早答，绝不迟答）', async () => {
+    const seen: Array<number | undefined> = [];
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      canAcquire: () => false,
+      browserAbsent: () => true,
+      requestWake: async (deadlineAt) => { seen.push(deadlineAt); return false; },
+      onAcquired: () => {},
+      onReleased: () => {},
+      now: () => 1_000_000,
+    });
+
+    coordinator.acquire({ taskId: 't-dl', kind: 'comment_prepare', priority: 'automatic', leaseMs: 60_000, acquireTimeoutMs: 200_000 });
+    await tick();
+    await tick();
+
+    assert.equal(seen.length, 1, '唤醒被触发一次');
+    // 云端在 push **之前**就 arm 了自己的计时器，所以边缘天然落后：扣 5s 余量，把竞速让给云端。
+    assert.equal(seen[0], 1_000_000 + 200_000 - 5_000, '死线 = now + acquireTimeoutMs − 5s');
+  });
+
+  it('预算已耗尽（死线早于现在）→ 传下去的死线不会是负预算的将来时刻', async () => {
+    const seen: Array<number | undefined> = [];
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      canAcquire: () => false,
+      browserAbsent: () => true,
+      requestWake: async (deadlineAt) => { seen.push(deadlineAt); return false; },
+      onAcquired: () => {},
+      onReleased: () => {},
+      now: () => 500,
+    });
+
+    // acquireTimeoutMs 小于往返余量 → 预算按 0 算，绝不倒推出一个「过去」的死线让外壳误判。
+    coordinator.acquire({ taskId: 't-tight', kind: 'comment_prepare', priority: 'automatic', leaseMs: 60_000, acquireTimeoutMs: 1_000 });
+    await tick();
+    await tick();
+
+    assert.equal(seen[0], 500, '预算 clamp 到 0：死线 = 此刻，外壳据此立刻诚实作答');
   });
 });

@@ -291,23 +291,22 @@ test('真机上这台 16GB Mac 必须能开浏览器（端到端：读数 → �
 });
 
 // ---------------------------------------------------------------------------
-// 槽位不够时：排队等，还是当场拒？
+// 「槽位被别人占着」不是失败原因，是排队原因。
 //
-// 判据是「有没有人在死线上等这个结果」，不是「哪道闸满了」。旧版一律当场拒 + 丢弃请求，
-// 结果把 1:2 废掉了：挂 12 个账号、6 个槽位 → 点全部启动，6 个起来、另 6 个永久停在
-// 「未启动（槽位不足）」，后来有账号进冷待机把槽位让出来，也没有任何人去取。
+// 一版之前：一律当场拒 + 丢弃请求 → 把 1:2 废掉（12 账号 6 槽位，6 个账号永久趴在「未启动」，
+// 后来槽位空出来也没人取）。
+// 上一版：按「有没有人在死线上等」分流，有人等就当场判失败 → 把「有人在等」误当成「所以该失败」。
+// 现在：**谁都不判失败**。调用方的死线只决定「什么时候回话」，绝不决定「要不要把浏览器开起来」。
 
-test('没人在死线上等的启动（点启动 / 恢复 / 到点唤醒）→ 排队等槽位，绝不丢弃', () => {
-  assert.equal(fleet.slotRefusalPolicy('resume'), 'wait');
-  assert.equal(fleet.slotRefusalPolicy(undefined), 'wait', '缺省即普通启动');
+test('槽位拒绝不再按 kind 分流：那个 policy 函数必须不存在', () => {
+  assert.equal(
+    (fleet as { slotRefusalPolicy?: unknown }).slotRefusalPolicy,
+    undefined,
+    '按「你是谁」判失败是错的：排在队里的任务 ≠ 不可能完成的任务',
+  );
 });
 
-test('有人在死线上等的（云端派任务唤醒 / 手动任务）→ 当场诚实失败，绝不排队', () => {
-  assert.equal(fleet.slotRefusalPolicy('task'), 'fail', '云端 45s 就 acquire 超时，排队等于给没人要的结果开浏览器');
-  assert.equal(fleet.slotRefusalPolicy('manual'), 'fail');
-});
-
-test('等槽位 FIFO：先来的先上，绝不让后来的插队（否则先来的会被反复挤掉、饿死）', () => {
+test('等槽位 FIFO：严格先来后到，带死线者也不许插队（否则纯等待者永远排不上、饿死）', () => {
   const waiters = [
     { envId: 'c', slotWaitingSince: 3_000 },
     { envId: 'a', slotWaitingSince: 1_000 },
@@ -315,6 +314,12 @@ test('等槽位 FIFO：先来的先上，绝不让后来的插队（否则先来
   ];
   const order = fleet.orderSlotWaiters(waiters) as Array<{ envId: string }>;
   assert.deepEqual(order.map((w) => w.envId), ['a', 'b', 'c']);
-  // 队头拿不到槽位时整队停住 —— 调用方只看队头，不会跳过它去放行 b/c。
-  assert.equal(fleet.orderSlotWaiters(waiters)[0].envId, 'a');
+  // 12 账号的机器上带死线的唤醒是**连续到达**的：一旦让它们按优先级插队，1:2 里多挂的那一半
+  // （纯等待者）会被无限期挤到后面。死线只换「早点回话」，不换「插到别人前面」。
+  const withDeadline = [
+    { envId: 'waiter', slotWaitingSince: 1_000 },
+    { envId: 'urgent', slotWaitingSince: 9_000, wakeDeadlineAt: 1 },
+  ];
+  const ordered = fleet.orderSlotWaiters(withDeadline) as Array<{ envId: string }>;
+  assert.equal(ordered[0].envId, 'waiter', '带死线也不插队');
 });

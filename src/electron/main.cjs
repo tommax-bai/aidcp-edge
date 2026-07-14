@@ -1008,20 +1008,33 @@ function admitBrowserSlot(handle, { force = false } = {}) {
 
 // ── 等槽位队列（change browser-slot-scheduling）──────────────────────────────────
 //
-// 「槽位满了该排队还是该拒绝」不取决于哪道闸满了，而取决于**有没有人在死线上等这个结果**：
+// **「槽位被别人占着」不是失败原因，是排队原因。** 任何开浏览器的请求都进这条队，谁都不判失败。
 //
-//   · 没人等（运维点启动 / 全部启动 / 续场恢复 / 到点的普通唤醒）→ **排队等**。
-//     多挂的账号本来就该等——1:2 的全部意义就是「一半在跑、一半在等槽位」。等到有账号进冷待机
-//     让出槽位，队头自动顶上。旧版在这里直接丢弃启动请求，环境永久停在「未启动」，槽位后来空出来
-//     也没人去取，等于把 1:2 废掉：多挂的账号一天都跑不了。
-//   · 有人等（云端派了任务来唤醒、手动任务）→ **当场诚实失败**，绝不排队。云端那头 45s 就超时了，
-//     等半小时后把浏览器开起来，是给一个早已没人要的结果开机器。这条在唤醒路径上单独守。
+// 关键分离（上一版就错在这里）：**调用方的死线只决定「什么时候回话」，绝不决定「要不要把浏览器开起来」。**
 //
-// 排队 MUST NOT 变成静默：界面如实显示「排队等槽位 · 前面还有 k 个」，绝不装成正在启动。
-// FIFO 按入队时刻，且**队头卡住就不让后面的插队**——否则先来的账号会被反复挤掉、永远排不上。
+//   · 排队 = 机器行为。唤醒一旦发起，就一定走到「浏览器起来」或「浏览器真的起不来」。
+//     绝不因为某个调用方等不及了，就把一台马上要起来的浏览器撤销掉——它正是下一次重试要命中的东西。
+//     撤销是双输：这次没做成，下次还得从冷启重来。
+//   · 死线到了 = 回话时机。诚实告诉调用方「这次没轮到你」（云端已按可恢复处理：归还小时格 + 格内重试），
+//     **但环境留在队列里、浏览器继续起**。下一次重试大概率直接命中一个已经热好的浏览器。
+//
+// 上一版按「有没有人在死线上等」分流（有人等 → 当场判失败），把两件不同的事压成了一件；更糟的是那个
+// 「失败」还是假的：外壳槽位拒绝时**一个字节都不回核心**，核心在浏览器闸上干等满 180s 唤醒死线，
+// 云端早已超时走人——先把调用方吊死，再对着空气说失败，顺手把这个环境做成一块砖（不在队列里、
+// 待机定时器被清掉不还、核心的唤醒闩永久置位 → 此后再不请求唤醒）。三个 bug 一起修。
+//
+// 排队 MUST NOT 变成静默：界面如实显示「排队等槽位 · 前面还有 k 个」，MUST NOT 显示成「唤醒失败」。
+// FIFO 严格按入队时刻，**不设优先级**：带死线的唤醒是连续到达的，让它们插队 = 1:2 里多挂的那一半
+// 被无限期挤到后面、永远排不上。死线只换「早点回话」，不换「插到别人前面」。
 
 /** 等槽位重扫间隔：槽位释放会立即触发一次；这个定时器兜住「内存被别的进程放开」这类无事件的变化。 */
 const SLOT_WAIT_RESCAN_MS = 15_000;
+/**
+ * 冷启地板：从零把一个浏览器起来的最短现实耗时（AdsPower start + CDP ready + 身份 + 云端握手）。
+ * 调用方剩余预算低于它 → 我们**在第 0 秒就知道做不到**，当场诚实作答，绝不让它干等到自己超时。
+ * （但仍然排队、仍然把浏览器起起来——见上面那条分离。）
+ */
+const COLD_START_FLOOR_MS = Math.max(1_000, Number(process.env.AIDCP_COLD_START_FLOOR_MS) || 30_000);
 let slotWaitTimer = null;
 
 /**
@@ -1045,13 +1058,19 @@ function slotWaiters() {
   return fleet.orderSlotWaiters(out);
 }
 
-/** 进等槽位队列。已在队列里的保留原入队时刻——重扫不该让它丢掉排在前面的资历。 */
+/**
+ * 进等槽位队列。已在队列里的保留原入队时刻——重扫不该让它丢掉排在前面的资历。
+ *
+ * `deadlineAt`（可选）= 有调用方在这个时刻之后就不要结果了。它**只**用来挂一个到点定时器，
+ * 到点如实回一句「这次没轮到你」给核心；**环境不出队、唤醒不撤销、浏览器照常起**。
+ */
 function parkForSlot(handle, admitted) {
   if (!handle.slotWaitingSince) handle.slotWaitingSince = Date.now();
   handle.slotWaitReason = admitted.message;
   const ahead = slotWaiters().filter((h) => h.slotWaitingSince < handle.slotWaitingSince).length;
   const place = ahead > 0 ? `前面还有 ${ahead} 个` : '下一个就是它';
   console.log(`[slots] ${handle.envId} 排队等槽位（${place}）：${admitted.message}`);
+  armWakeDeadline(handle, `${admitted.reason}:queued#${ahead + 1}`);
   // 待机中的环境（核心与云端连接都还在，只是浏览器关了）保持它的待机态——它并没有「停掉」，
   // 只是这次唤醒没抢到槽位；把它改写成 idle 会让界面看起来像整个环境掉了。
   const parked = handle.coldStandbyActive || handle.coldStandbyPending;
@@ -1061,6 +1080,45 @@ function parkForSlot(handle, admitted) {
     ...presencePatch(`排队等槽位（${place}）`),
   });
   startSlotWaitTimer();
+}
+
+/**
+ * 到点告诉核心「这次没轮到你」——**只是回话，不是放弃**。
+ *
+ * 核心据此立刻让在等浏览器的动作诚实作答（云端拿到 `browser_wake_failed` 会归还小时格并在格内重试）。
+ * 这个环境**仍在 FIFO 队列里**，浏览器该起还是会起；下一次重试大概率直接命中一个已经热好的浏览器。
+ * 不发这条 = 核心在浏览器闸上空转满 180s 唤醒死线（旧版的真实行为）。
+ */
+function denyWakeNow(handle, detail) {
+  clearWakeDeadline(handle);
+  if (!handle.child) return;
+  try {
+    handle.child.send({ type: 'lifecycle.wake_denied', detail });
+    console.log(`[slots] ${handle.envId} 告知核心「这次没轮到」（${detail}）：仍在队列中，浏览器继续起`);
+  } catch (error) {
+    console.warn(`[slots] ${handle.envId} wake_denied 未送达：${error.message}`);
+  }
+}
+
+/** 挂调用方死线的到点定时器。剩余预算已低于冷启地板 → 第 0 秒就作答（绝不让它干等到自己超时）。 */
+function armWakeDeadline(handle, detail) {
+  const deadlineAt = handle.wakeDeadlineAt;
+  if (!deadlineAt) return;
+  clearWakeDeadline(handle);
+  const budgetMs = deadlineAt - Date.now();
+  if (budgetMs < COLD_START_FLOOR_MS) {
+    // 冷启至少要 30s，调用方却只剩这么点——**现在就知道做不到**，当场诚实作答。
+    denyWakeNow(handle, budgetMs <= 0 ? `${detail}:deadline_passed` : `${detail}:deadline_below_cold_start`);
+    return;
+  }
+  handle.wakeDeadlineTimer = setTimeout(() => denyWakeNow(handle, detail), budgetMs);
+  if (typeof handle.wakeDeadlineTimer.unref === 'function') handle.wakeDeadlineTimer.unref();
+}
+
+function clearWakeDeadline(handle) {
+  if (!handle || !handle.wakeDeadlineTimer) return;
+  clearTimeout(handle.wakeDeadlineTimer);
+  handle.wakeDeadlineTimer = null;
 }
 
 function clearSlotWaiting(handle) {
@@ -1086,7 +1144,9 @@ function drainSlotWaiters() {
   console.log(`[slots] 槽位空出来了 → 放行队头 ${head.envId}（还有 ${waiting.length - 1} 个在等）`);
   clearSlotWaiting(head);
   // 两种等法：核心还活着、只是待机中（浏览器已关）→ 原地唤醒；核心也没了 → 完整启动。
-  if (head.child && (head.coldStandbyActive || head.coldStandbyPending)) wakeColdStandby(head, 'slot_available');
+  // 用**存下来的原始 reason** 重新驱动唤醒：即使调用方的死线早就到了（我们已如实回过话），浏览器也要起——
+  // 云端的下一次重试正等着命中它。
+  if (head.child && (head.coldStandbyActive || head.coldStandbyPending)) wakeColdStandby(head, head.wakeReason || 'slot_available');
   else startEdge(head);
 }
 
@@ -1962,6 +2022,26 @@ function scheduleColdStandbyWake(handle, decision) {
 }
 
 /**
+ * 唤醒失败后重挂自唤醒定时器（退避 1min → 2min → 5min 封顶）。
+ *
+ * `wakeColdStandby` 一进门就把待机定时器清了。旧版失败时不还——于是**一次唤醒失败 = 这个环境永久停摆**：
+ * 它既没有自唤醒定时器，核心那边的唤醒闩也永久置位（再不会向外壳请求），云端的任务全部打空。
+ * 退避是刚性的：AdsPower 真坏掉时，绝不 60s 一次地无限重敲它。
+ */
+function rearmWakeAfterFailure(handle) {
+  if (!handle || handle.removed || isQuitting) return;
+  if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
+  handle.wakeRetryStreak = Math.min((handle.wakeRetryStreak || 0) + 1, 3);
+  const delayMs = [60_000, 120_000, 300_000][handle.wakeRetryStreak - 1];
+  handle.coldStandbyTimer = setTimeout(() => {
+    handle.coldStandbyTimer = null;
+    wakeColdStandby(handle, 'wake_retry');
+  }, delayMs);
+  if (typeof handle.coldStandbyTimer.unref === 'function') handle.coldStandbyTimer.unref();
+  console.log(`[standby] ${handle.envId} 唤醒失败，${Math.round(delayMs / 1000)}s 后自动重试（仍保持待机）`);
+}
+
+/**
  * 冷待机唤醒（change browser-slot-scheduling）：**下发原地重建，不再 SIGTERM 核心重启整个进程**。
  *
  * 旧行为：resumeEdge 在浏览器已关时走不了快路径 → stopAndRestart → 杀核心 → 完整冷启，云端连接断一次
@@ -1976,6 +2056,7 @@ function wakeColdStandby(handle, reason) {
   if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
   handle.coldStandbyTimer = null;
   handle.stopRequested = false;
+  handle.wakeReason = reason; // 排队后槽位空出来时，用原始 reason 重新驱动这次唤醒
   updateStatus(handle, {
     browserStandby: coldStandbyStatus('waking', handle.status.browserStandby && handle.status.browserStandby.hint, { reason }),
     lastMessage: reason === 'cloud_command'
@@ -2008,20 +2089,18 @@ function wakeColdStandby(handle, reason) {
           // 准入闸：唤醒同样不得绕过（「只是唤醒一下」不是超额开浏览器的理由）。
           const admitted = admitBrowserSlot(handle);
           if (!admitted.ok) {
+            // **一律排队，谁都不判失败**——包括云端派了任务来唤醒的那种。
+            // 槽位被占是「还没轮到你」，不是「这件事办不成」。若确有调用方在死线上等，
+            // parkForSlot 里挂的死线定时器会到点如实回它一句「这次没轮到」（云端按可恢复处理、
+            // 归还小时格并在格内重试），**但这个环境仍留在队列里，浏览器该起还是会起**——
+            // 下一次重试正好命中它。撤销唤醒是双输：这次没做成，下次还得从冷启重来。
             handle.coldStandbyWaking = false;
-            if (fleet.slotRefusalPolicy(kind) === 'fail') {
-              // 云端派了任务、正卡在死线上等这个浏览器 → **当场诚实失败**，绝不排队。
-              // 排队的结果是它 45s 后超时判失败，而我们半小时后才把浏览器开起来——
-              // 给一个早已没人要的结果开机器，纯浪费槽位，还会把真正在等的账号挤到后面。
-              onColdStandbyWakeFailed(handle, admitted.message);
-            } else {
-              // 到点的普通唤醒：没人在死线上等 → 进等槽位队列，槽位一空就自动顶上。
-              parkForSlot(handle, admitted);
-            }
+            parkForSlot(handle, admitted);
             resolve(false);
             return;
           }
           clearSlotWaiting(handle);
+          clearWakeDeadline(handle); // 抢到槽位了：死线定时器作废（真在起了，不该再回「没轮到」）
           let done = false;
           const finish = (ok) => {
             if (done) return;
@@ -2063,6 +2142,10 @@ function onColdStandbyWoken(handle) {
   if (typeof handle.wakeSettle === 'function') handle.wakeSettle(true); // 放行启动队列的下一个
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = false;
+  handle.wakeRetryStreak = 0;
+  handle.wakeDeadlineAt = 0;
+  clearWakeDeadline(handle);
+  clearSlotWaiting(handle);
   clearColdStandbyTimer(handle);
   updateStatus(handle, {
     edge: 'running',
@@ -2084,6 +2167,11 @@ function onColdStandbyWakeFailed(handle, reason) {
   if (typeof handle.wakeSettle === 'function') handle.wakeSettle(false); // 放行启动队列的下一个
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = true; // 仍在待机：浏览器没起来
+  // 核心必须当场知道结论，否则它在浏览器闸上空转满 180s 唤醒死线（旧版：外壳一言不发）。
+  denyWakeNow(handle, `wake_failed:${reason}`);
+  // 待机定时器在 wakeColdStandby 里被清掉了，这里**必须还回去**——不还，这个环境此后再无任何
+  // 自唤醒路径，会一直待机到天荒地老（一次唤醒失败 = 永久停摆）。
+  rearmWakeAfterFailure(handle);
   updateStatus(handle, {
     browserStandby: coldStandbyStatus('sleeping', handle.status.browserStandby && handle.status.browserStandby.hint, {
       reason: `wake_failed:${reason}`,
@@ -2123,30 +2211,17 @@ function startEdge(handle, { kind = 'resume', force = false } = {}) {
       const forceLaunch = force || Boolean(handle.forceLaunch);
       handle.forceLaunch = false; // 一次性：force 只对这一次启动有效，绝不粘在环境上永久免检
       const admitted = admitBrowserSlot(handle, { force: forceLaunch });
-      if (!admitted.ok && fleet.slotRefusalPolicy(kind) === 'fail') {
-        // 有人在死线上等（手动任务）→ 当场诚实失败，绝不排队让它干等到超时。
-        console.warn(`[slots] 拒绝启动 ${handle.envId}：${admitted.message}`);
-        updateStatus(handle, {
-          edge: 'warning',
-          session: 'idle',
-          lastMessage: `未启动：${admitted.message}`,
-          ...presencePatch('未启动（槽位/内存不足）'),
-          ...edgeFailurePatch(admitted.message),
-        });
-        return false;
-      }
       if (!admitted.ok) {
-        // 槽位/内存不够 → **进等槽位队列**，绝不丢弃这次启动请求。
+        // 槽位/内存不够 → **进等槽位队列**，绝不丢弃这次启动请求，也绝不判失败。
         //
-        // 没人在死线上等这次启动（是运维点的启动 / 续场恢复），所以「等」是正确答案而不是「拒」：
         // 挂 12 个账号、只有 6 个槽位，本来就该有 6 个在等——等别人进冷待机让出槽位再顶上，
         // 这正是 1:2 能成立的前提。旧版在这里直接丢弃请求、环境永久趴在 warning 态，
         // 后来槽位空出来也没人去取，等于把 1:2 废掉了（多挂的账号一天都跑不了）。
-        // 有死线的请求（云端派任务来唤醒 / 手动任务）**不走这里**，它们仍在唤醒路径上当场诚实失败。
         parkForSlot(handle, admitted);
         return false;
       }
       clearSlotWaiting(handle);
+      clearWakeDeadline(handle);
       return await spawnEdgeChild(handle);
     },
   });
@@ -2274,6 +2349,15 @@ function spawnEdgeChild(handle) {
       return;
     }
     if (message.type === 'lifecycle.wake_requested') {
+      // 核心带来的 deadlineAt = 有调用方（云端 acquire）在那个时刻之后就不要结果了。
+      // 它**只**决定我们何时回话，不决定要不要开浏览器。取更早的那个：多个请求叠在同一次唤醒上时，
+      // 最急的那个说了算（晚的那个自然也就被照顾到了）。
+      const deadlineAt = Number(message.deadlineAt) || 0;
+      if (deadlineAt > 0 && (!handle.wakeDeadlineAt || deadlineAt < handle.wakeDeadlineAt)) {
+        handle.wakeDeadlineAt = deadlineAt;
+        // 已经在等槽位队列里了 → 幂等更新死线，不重复入队（会白白丢掉排队资历）。
+        if (handle.slotWaitingSince) armWakeDeadline(handle, 'slots_full:requeued');
+      }
       wakeColdStandby(handle, 'cloud_command');
       return;
     }
