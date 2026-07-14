@@ -2940,6 +2940,7 @@ const personaUi = {
   stateBadge: document.querySelector('#persona-state-badge'),
   hint: document.querySelector('#persona-hint'),
   boundNote: document.querySelector('#persona-bound-note'),
+  update: document.querySelector('#persona-update'),
   wizardBody: document.querySelector('#persona-wizard-body'),
   kwGroups: Array.from(document.querySelectorAll('.persona-kw-group')),
   generate: document.querySelector('#persona-generate'),
@@ -2971,6 +2972,7 @@ let personaDraftEnvId; // 草稿所属环境（多环境：persist MUST 打回�
 let personaStage = 'pick'; // 两步向导阶段：pick（选关键词）| preview（预览确认）
 let personaInFlight = false; // 生成请求在途（骨架 + 按钮禁用 + 遮罩误点不关层）
 let personaGrowthEnvId = null; // 本次刚确认成功的人设所属环境；只让该环境出现一次成长引导
+let personaUpdateMode = false; // 已绑账号手动进入更新流程：生成新草稿，确认后覆盖当前人设
 const personaPrompted = new Set();
 // 人设弹窗触发判据（change persona-bound-tristate）：**只由云端权威的「未绑」触发**。
 //
@@ -2992,6 +2994,9 @@ function syncPersonaFoot(mode) {
   const wizard = mode === 'wizard';
   const growth = mode === 'growth';
   const inPick = personaStage === 'pick';
+  // 更新流程复用同一套向导按钮，只改文案：让「这次是覆盖已有人设」在按钮上就看得见。
+  if (personaUi.generate) personaUi.generate.textContent = personaUpdateMode ? '生成新草稿' : '生成人设';
+  if (personaUi.confirm) personaUi.confirm.textContent = personaUpdateMode ? '确认更新' : '确认使用';
   personaUi.generate?.classList.toggle('hidden', !wizard || !inPick);
   personaUi.regenerate?.classList.toggle('hidden', !wizard || inPick);
   personaUi.confirm?.classList.toggle('hidden', !wizard || inPick);
@@ -3062,16 +3067,22 @@ personaUi.growthStart?.addEventListener('click', () => {
   if (action === 'start' || action === 'resume') fields.sessionFab.click();
 });
 
-// 切换环境时清空人设草稿（向导是每环境独立的）：绝不让 A 生成的草稿留在界面上被误确认到 B 的账号。
-// 同时清本会话「已绑」态（personaLocallyBound 是账号级、随环境切换失效，等新环境自己的 hello 信号）。
-function resetPersonaDraft() {
+// 只清草稿本身（更新流程复用：进更新模式时要清掉上一次的草稿，但绝不能连「已绑」态一起清掉）。
+function clearPersonaDraft() {
   personaDraftYaml = '';
   personaDraftEnvId = undefined;
-  personaLocallyBound = false;
-  clearPersonaGrowth();
   personaUi.draft?.classList.add('hidden');
   personaUi.skeleton?.classList.add('hidden');
   setPersonaStage('pick'); // 草稿已清，预览页无意义：切回第一步
+}
+
+// 切换环境时清空人设草稿（向导是每环境独立的）：绝不让 A 生成的草稿留在界面上被误确认到 B 的账号。
+// 同时清本会话「已绑」态与更新模式（都是账号级、随环境切换失效，等新环境自己的权威信号）。
+function resetPersonaDraft() {
+  clearPersonaDraft();
+  personaLocallyBound = false;
+  personaUpdateMode = false;
+  clearPersonaGrowth();
 }
 
 const PERSONA_GEN_FAIL = {
@@ -3157,6 +3168,17 @@ function newIdempotencyKey() {
   return `persona-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
 
+// 已绑账号手动进入更新流程：保持「已绑」为真（生成失败也绝不把账号显示成未设置），只是把向导重新打开。
+function beginPersonaUpdate() {
+  personaUpdateMode = true;
+  personaLocallyBound = true; // 更新期间本地锚住已绑：状态推送不得把向导藏回去，也不得触发未设置提醒
+  clearPersonaDraft();
+  const env = fleetView.envs.get(currentEnvId());
+  updatePersonaGate((env && env.status) || currentStatus || null);
+  setPersonaMsg('重新选择偏好并生成新草稿；确认后会覆盖当前人设。', false);
+}
+personaUi.update?.addEventListener('click', beginPersonaUpdate);
+
 // onboarding 三态（change persona-wizard-onboarding-fixes）：已绑→已设置跳过 / 未绑未连→空态面板 / 未绑已连→启用向导。
 // 只改 disabled/显隐/面板文案，绝不触碰已选关键词与草稿（状态推送不重置向导进度）。
 function updatePersonaGate(status) {
@@ -3171,18 +3193,19 @@ function updatePersonaGate(status) {
   // 「云端确认未绑」是弹窗与「未设置」徽标的**唯一**依据；未知既不弹窗、也不谎称未设置。
   const knownUnbound = authoritative && status.personaBound === false && !personaLocallyBound;
   const known = bound || knownUnbound;
-  const growthActive = bound && isPersonaGrowthActive();
+  // 已绑账号手动点「更新人设」：保持已绑为真（生成失败也绝不显示成未设置），但把向导重新打开。
+  const updatingBound = bound && personaUpdateMode;
+  const growthActive = bound && !updatingBound && isPersonaGrowthActive();
 
-  // 四形态显隐一处收口：刚绑=成长引导 / 已绑=绿卡 / 未就绪=空态面板 / 已连且确认未绑=向导。
+  // 五形态显隐一处收口：刚绑=成长引导 / 已绑=绿卡 / 已绑且更新中=向导 / 未就绪=空态面板 / 已连且确认未绑=向导。
   if (personaUi.growth) personaUi.growth.classList.toggle('hidden', !growthActive);
-  if (personaUi.boundNote) personaUi.boundNote.classList.toggle('hidden', !bound || growthActive);
-  if (personaUi.wizardBody) personaUi.wizardBody.classList.toggle('hidden', bound || !known);
+  if (personaUi.boundNote) personaUi.boundNote.classList.toggle('hidden', !bound || growthActive || updatingBound);
+  if (personaUi.wizardBody) personaUi.wizardBody.classList.toggle('hidden', (bound && !updatingBound) || !known);
   if (personaUi.empty) personaUi.empty.classList.toggle('hidden', bound || known);
 
-  // ① 已绑人设：显示「已设置」、收起向导与底部按钮（修「已绑仍显示未设置」）。
+  // ① 已绑人设：默认显示「已设置」并收起向导；手动进入更新时保留已绑态但打开向导，确认后覆盖当前人设。
   if (bound) {
-    setPersonaBadge('已设置', 'normal');
-    syncPersonaFoot(growthActive ? 'growth' : 'hidden');
+    setPersonaBadge(updatingBound ? '待更新' : '已设置', updatingBound ? 'warning' : 'normal');
     clearPersonaPromptForCurrentEnv();
     // 纵深防御：万一还有别的路径把窗自动弹了出来，权威「已绑」一到就把它收起来（只收系统自动弹的，
     // 用户手动打开查看/更新的绝不替他关掉）。
@@ -3194,11 +3217,15 @@ function updatePersonaGate(status) {
     ) {
       closePersonaPop(true);
     }
-    return;
+    if (!updatingBound) {
+      syncPersonaFoot(growthActive ? 'growth' : 'hidden');
+      return;
+    }
+    // 更新中：继续往下走到向导分支（③），但绝不改徽标、绝不弹提醒。
   }
   // 未绑或未知：徽标区分——云端权威说未绑=「未设置」；信号未到=「待启动」（宁缺毋假，不谎称未设置）。
   // 本会话刚生成的「待确认」草稿态不被状态推送覆盖。
-  if (personaUi.stateBadge && personaUi.stateBadge.textContent !== '待确认') {
+  if (!bound && personaUi.stateBadge && personaUi.stateBadge.textContent !== '待确认') {
     setPersonaBadge(knownUnbound ? '未设置' : '待启动', 'checking');
   }
 
@@ -3221,11 +3248,16 @@ function updatePersonaGate(status) {
     return;
   }
 
-  // ③ 云端权威确认未绑：向导可用，并弹一次设置向导（这是弹窗的唯一入口）。
+  // ③ 云端权威确认未绑（或已绑但手动进入更新）：向导可用；确认时复用同一条 persist 路径覆盖。
   if (personaUi.generate) personaUi.generate.disabled = personaInFlight || !personaReady;
-  if (personaUi.hint) personaUi.hint.textContent = '设置语气和内容偏好，自动生成这个账号的人设；确认后账号才会开始自动运营。';
+  if (personaUi.hint) {
+    personaUi.hint.textContent = updatingBound
+      ? '重新选择偏好并生成新草稿，确认后会覆盖当前账号的人设；生成失败不会影响现有人设。'
+      : '设置语气和内容偏好，自动生成这个账号的人设；确认后账号才会开始自动运营。';
+  }
   syncPersonaFoot('wizard');
-  maybePromptPersonaSetup(status);
+  // 自动弹窗只对「云端权威说未绑」的账号；已绑账号手动进入更新时绝不再弹、也绝不发未设置通知。
+  if (!bound) maybePromptPersonaSetup(status);
 }
 
 // 关键词 toggle：单选组互斥、多选组可叠加；同步 aria-pressed 与「已选 n」计数。
@@ -3319,7 +3351,7 @@ async function runPersonaGenerate() {
   personaUi.generate.disabled = true;
   if (personaUi.regenerate) { personaUi.regenerate.disabled = true; personaUi.regenerate.textContent = '正在生成…'; }
   if (personaUi.confirm) personaUi.confirm.disabled = true;
-  setPersonaMsg('正在生成人设…（可能需要十几秒）', false);
+  setPersonaMsg(personaUpdateMode ? '正在生成新人设…（可能需要十几秒）' : '正在生成人设…（可能需要十几秒）', false);
   const genEnvId = currentEnvId(); // 生成时锁定目标环境；persist 打回它，绝不随后续切换漂移
   try {
     const r = await window.aidcpEdge.personaGenerate(genEnvId, { keywordSelections, idempotencyKey: newIdempotencyKey() });
@@ -3331,7 +3363,12 @@ async function runPersonaGenerate() {
       if (personaUi.draftBody) personaUi.draftBody.textContent = r.soulYaml;
       personaUi.draft?.classList.remove('hidden');
       setPersonaBadge('待确认', 'warning');
-      setPersonaMsg('已生成草稿，确认后即绑定；不满意可「重新生成」。', false);
+      setPersonaMsg(
+        personaUpdateMode
+          ? '已生成新草稿，确认后会覆盖当前人设；不满意可「重新生成」。'
+          : '已生成草稿，确认后即绑定；不满意可「重新生成」。',
+        false,
+      );
     } else {
       personaDraftYaml = '';
       personaUi.draft?.classList.add('hidden');
@@ -3353,20 +3390,29 @@ personaUi.regenerate?.addEventListener('click', runPersonaGenerate);
 personaUi.confirm?.addEventListener('click', async () => {
   if (!personaDraftYaml) return;
   if (!window.aidcpEdge || typeof window.aidcpEdge.personaPersist !== 'function') return;
+  const wasUpdate = personaUpdateMode;
   personaUi.confirm.disabled = true;
-  setPersonaMsg('正在保存人设…', false);
+  setPersonaMsg(wasUpdate ? '正在更新人设…' : '正在保存人设…', false);
   try {
     // 打回草稿所属环境（personaDraftEnvId），不是「当前选中环境」——防中途切换环境把 A 的人设写进 B 的账号。
     const r = await window.aidcpEdge.personaPersist(personaDraftEnvId, { soulYaml: personaDraftYaml });
     if (r && r.ok) {
       // 确认成功即本地视为已绑（personaBound 信号要等下次 hello 才到）：立即折叠向导为「已设置」态。
       personaLocallyBound = true;
+      personaUpdateMode = false;
       setPersonaBadge('已设置', 'normal');
       const growthEnvId = personaDraftEnvId || currentEnvId() || '__local__';
       personaDraftYaml = '';
       personaUi.draft?.classList.add('hidden');
       personaUi.wizardBody?.classList.add('hidden');
-      showPersonaGrowth(growthEnvId);
+      if (wasUpdate) {
+        // 更新既有人设：这个号本来就在跑，不该再出「开始运营」的成长引导——收回已设置绿卡即可。
+        personaUi.boundNote?.classList.remove('hidden');
+        syncPersonaFoot('hidden');
+        setPersonaMsg('人设已更新，后续浏览 / 发布会使用新人设。', false);
+      } else {
+        showPersonaGrowth(growthEnvId);
+      }
     } else {
       setPersonaMsg(PERSONA_PERSIST_FAIL[(r && r.reason) || ''] || `保存失败：${(r && r.reason) || '未知'}`, true);
     }
