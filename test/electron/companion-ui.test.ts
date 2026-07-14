@@ -195,6 +195,9 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.match(rendererCss, /\.rg-progress\s*\{/);
   assert.match(rendererCss, /\.rg-flow-step\.flow-active:not\(:last-child\)::after/);
   assert.match(rendererCss, /@keyframes rg-flow-spark/);
+  assert.match(rendererCss, /\.rg-flow-step:not\(:last-child\)::after\s*\{[\s\S]*right: -4px;[\s\S]*width: 28px;/);
+  assert.match(rendererCss, /\.rg-flow-step:not\(:last-child\)::after \{ right: -3px; width: 20px; \}/);
+  assert.doesNotMatch(rendererCss, /right: -22px;[\s\S]*width: 38px;/);
 });
 
 test('运行中 + 今日已有浏览累计 → 获得感进度使用账号今日累计，不被当前窗口 0 覆盖', async () => {
