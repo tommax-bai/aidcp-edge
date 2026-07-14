@@ -17,6 +17,14 @@
     return `${Math.floor(diff / 86_400_000)} 天前`;
   }
 
+  // 已等待时长：与 relTime 的「N 分钟前」不同，这里说的是「等了多久」，不是「多久之前发生」。
+  function waitedText(fromMs, nowMs) {
+    const diff = Math.max(0, nowMs - fromMs);
+    if (diff < 60_000) return `${Math.floor(diff / 1000)} 秒`;
+    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟`;
+    return `${Math.floor(diff / 3_600_000)} 小时`;
+  }
+
   // ── 健康合成：五路技术状态 → 一句结论 + 色调。真正中断与可恢复协助分级。──
   const AUTH_ATTENTION = { 'login required': '需要登录小红书', 'chrome missing': '本机缺少 Chrome', 'config required': '需要完成初始设置' };
 
@@ -73,6 +81,9 @@
   // ── 在场感动效门（红线：绝不用动效盖住停滞会话）──
   // 只有「会话在跑 + 引擎在跑 + 最近事件足够新鲜（与看门狗有界 idle 对齐，5 分钟）」才允许动。
   const PRESENCE_FRESH_MS = 5 * 60_000;
+  // 「正在做」与「已做完、在等云端下一步」的分界。超过这条线，动作文案仍然保留（运营要知道最后
+  // 推进到哪一步），但动效与「刚刚更新」必须撤掉——那两样是在向用户承诺「此刻正在做这件事」。
+  const PRESENCE_LIVE_MS = 60_000;
   const QUOTA_ACTION_PRIORITY = ['view', 'like', 'collect', 'comment', 'follow', 'publish'];
 
   function finiteNumber(value) {
@@ -436,15 +447,25 @@
     }
     if (!running) return { text: '待命中', animate: false, fresh: staticFresh };
 
-    if (p && p.text && hasFresh) {
-      return { text: p.text, animate: true, fresh: `刚刚更新 · ${relTime(at, nowMs)}` };
-    }
+    // 终态优先：当日浏览额度已跑满时，终态压过仍在新鲜期内的中途动作文案——否则同屏的探索进度卡
+    // 已经在说「今天先到这里」，这一行还在说「顺路去作者主页看看…」，两块 UI 就同一份数据互相打脸。
+    // 只在云端下发的当日额度真跑满时才出终态（quotaCompletionPresence 拿不到依据就返回 null），
+    // 客户端绝不自行推断「今日已完成」——那是新造一次假成功。
     if (quotaCompletion) {
       return {
         text: quotaCompletion.text,
         animate: false,
         fresh: quotaCompletion.fresh,
       };
+    }
+
+    if (p && p.text && hasFresh) {
+      // 一分钟内才算「此刻正在做」；之后动作文案照留，但动效与「刚刚更新」撤掉、改说等了多久。
+      // 这一格正是「执行端已做完、球在云端」（如进主页后要过一次大模型决定是否关注）的真实处境。
+      if (nowMs - at < PRESENCE_LIVE_MS) {
+        return { text: p.text, animate: true, fresh: `刚刚更新 · ${relTime(at, nowMs)}` };
+      }
+      return { text: p.text, animate: false, fresh: `已等待 · ${waitedText(at, nowMs)}` };
     }
     // 在跑但事件已不新鲜：如实说「没有新动态」，绝不假装仍在忙。
     return {

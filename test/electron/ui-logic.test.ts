@@ -136,6 +136,41 @@ test('在场感：运行中 + 事件新鲜 → 动效开、文案为当前动作
   assert.match(v.fresh, /秒前/);
 });
 
+// 用户实况（change presence-terminal-honesty）：会话仍报运行中、动作文案还在新鲜期内、当日浏览额度已跑满。
+// 修前这一格里在场感照播「顺路去作者主页看看…」+「刚刚更新」，同屏的探索进度卡却已经在说「今天先到这里」。
+test('在场感：运行中 + 动作文案仍新鲜 + 当日额度已满 → 终态压过中途动作文案', () => {
+  const now = Date.now();
+  const status = st({
+    presence: { text: '顺路去作者主页看看…', at: new Date(now - 2 * 60_000).toISOString() },
+    dailyUsage: {
+      windows: {
+        day: {
+          expiresAt: now + 9 * 60 * 60_000,
+          totals: { view: 300, like: 16, collect: 9, comment: 4, follow: 0, publish: 0 },
+          quotas: { view: 300, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+          saturated: ['view'],
+        },
+      },
+    },
+  });
+  const v = uiLogic.presenceView(status, now);
+  assert.equal(v.text, '今日内容探索已经完成');
+  assert.equal(v.animate, false);
+  // 同一份数据下两块 UI 必须同口径，绝不同屏互相打脸（进度卡说今天先到这里、在场感说顺路去作者主页）。
+  assert.equal(uiLogic.runtimeGuidanceView(status, now)?.mode, 'day');
+});
+
+// 额度未满 + 动作文案过了「正在做」那条线：文案保留（要知道最后推进到哪一步），但动效与「刚刚更新」撤掉。
+// 这一格就是「执行端已做完、球在云端」（进主页后要过一次大模型定夺是否关注）的真实处境。
+test('在场感：额度未满 + 动作文案已过 1 分钟 → 保留文案但如实说已等待、绝不自称今日完成', () => {
+  const now = Date.now();
+  const v = uiLogic.presenceView(st({ presence: { text: '顺路去作者主页看看…', at: new Date(now - 2 * 60_000).toISOString() } }), now);
+  assert.equal(v.text, '顺路去作者主页看看…');
+  assert.equal(v.animate, false);
+  assert.equal(v.fresh, '已等待 · 2 分钟');
+  assert.doesNotMatch(v.text, /完成/);
+});
+
 test('在场感：运行中但事件过期（>5min）→ 动效关、如实说没有新动态', () => {
   const now = Date.now();
   const v = uiLogic.presenceView(st({ presence: { text: '正在认真读「x」…', at: new Date(now - 6 * 60_000).toISOString() } }), now);

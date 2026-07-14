@@ -3065,12 +3065,21 @@ function handleEdgeLogLine(handle, message, isError = false) {
     // 本轮核心已确凿连上过云端：此后再断，才配讲「正在重新连接」（change honest-first-connect-label）。
     // 只在此置位、只在换核心时复位——冷待机唤醒不复位（云端连接全程未断，唤醒的是浏览器不是连接）。
     next.cloudEverConnected = true;
+    // 连上就把「与云端连接中断」那句翻走（'云端已重连' 在翻译规则表里没有条目、不会自己被顶掉）。
+    // 后续若有带在场感的事件，会在下面按事件覆盖，这里只保证不把断连文案挂死。
+    next.presence = { text: '已连接云端，等待安排…', at: new Date().toISOString() };
     // 就绪信号（change browser-slot-scheduling）：串行启动队列等的就是这一刻——浏览器起来了、云端连上了。
     // 到此才放行队列里的下一个环境；不等就绪就放行，10 个环境仍会几乎同时冷启、把内存打爆。
     settleLaunchReady(handle, true);
   }
   if (message.includes('连接失败') || message.includes('WS 已关闭') || message.includes('启动失败')) next.cloud = 'disconnected';
   if (message.includes('云端重连中')) next.cloud = 'disconnected';
+  // 断连时把在场感一起翻掉（change presence-terminal-honesty）：此前只翻云端徽标，在场感行仍挂着断连前
+  // 的中途动作文案（如「顺路去作者主页看看…」）继续演——云端都断了，决策端不可能再推进任何一步。
+  // 只认真正的云端断连信号，不含 '启动失败'（那是引擎起不来、另有文案）。
+  if (message.includes('连接失败') || message.includes('WS 已关闭') || message.includes('云端重连中')) {
+    next.presence = { text: '与云端连接中断，正在重连…', at: new Date().toISOString() };
+  }
   if (message.includes('云端重连耗尽')) {
     next.edge = 'warning';
     next.cloud = 'disconnected';

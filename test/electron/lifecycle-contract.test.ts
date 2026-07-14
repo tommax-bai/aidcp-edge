@@ -24,6 +24,16 @@ test('Electron core child has IPC and pause uses lifecycle.pause rather than SIG
   assert.doesNotMatch(pause, /kill\(['"]SIGTERM['"]\)/, 'pause must never fall back to final-close SIGTERM');
 });
 
+// change presence-terminal-honesty：断连时只翻云端徽标、不翻在场感，那一行会挂着断连前的中途动作文案
+// （如「顺路去作者主页看看…」）继续演——云端都断了，决策端不可能再推进任何一步。Electron 起不来，
+// 按本文件既有做法对源码设契约。
+test('cloud disconnect rewrites the presence line instead of leaving the last action narrating', () => {
+  const handler = functionSource('handleEdgeLogLine', 'pauseEdge');
+  assert.match(handler, /WS 已关闭[\s\S]{0,120}?next\.presence = \{ text: '与云端连接中断，正在重连…'/);
+  // 重连回来必须把中断文案翻走（'云端已重连' 在翻译规则表里没有条目、不会自己被顶掉）。
+  assert.match(handler, /云端已重连[\s\S]{0,400}?next\.presence = \{ text: '已连接云端，等待安排…'/);
+});
+
 test('explicit close is exposed through preload and routed by envId', () => {
   assert.match(preload, /close:\s*\(envId\)\s*=>\s*ipcRenderer\.invoke\('edge:close', envId\)/);
   assert.match(main, /ipcMain\.handle\('edge:close'/);
