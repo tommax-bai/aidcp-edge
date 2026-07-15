@@ -192,6 +192,14 @@
       return !auth || auth.status !== 'active' || WRITE_BLOCKING_AUTH.has(auth.status);
     }
 
+    function connectivityWriteBlocked() {
+      return state.stale || !env || env.connectivity !== 'connected';
+    }
+
+    function writeBlocked() {
+      return authWriteBlocked() || connectivityWriteBlocked();
+    }
+
     function channelCapabilityBlocked(channel) {
       const caps = state.auth && state.auth.capabilities;
       if (!caps) return true;
@@ -205,9 +213,10 @@
       let summary = '正在读取当前环境的评论和私信。';
       let tone = 'neutral';
       if (status === 'active') {
-        title = state.stale ? '同步暂时中断' : '互动托管中';
-        summary = state.stale ? '正在使用上次成功数据；Cloud 恢复后可局部刷新。' : '评论和私信通过接口同步，发送结果以平台确认状态为准。';
-        tone = state.stale ? 'attention' : 'success';
+        const connectivityStale = connectivityWriteBlocked();
+        title = connectivityStale ? '同步暂时中断' : '互动托管中';
+        summary = connectivityStale ? '正在使用上次成功数据；Cloud 恢复后可局部刷新。' : '评论和私信通过接口同步，发送结果以平台确认状态为准。';
+        tone = connectivityStale ? 'attention' : 'success';
       } else if (status === 'login_required') {
         title = '等待首次登录';
         summary = '已同步历史仍可阅读；完成视频号登录后才能生成或发送回复。';
@@ -397,7 +406,8 @@
       const riskReasons = job && Array.isArray(job.riskReasons) && job.riskReasons.length > 0
         ? job.riskReasons.map((reason) => RISK_REASON_LABEL[reason] || reason).join('、')
         : '未发现额外风险标签';
-      const textLocked = !job || LOCKED_TEXT_STATES.has(job.state) || authWriteBlocked();
+      const textStateLocked = !job || LOCKED_TEXT_STATES.has(job.state);
+      const textLocked = textStateLocked || writeBlocked();
       const capabilityBlocked = channelCapabilityBlocked(thread.channel);
       const primary = actionButtonModel(job);
       const busy = Boolean(state.actionBusy);
@@ -423,18 +433,18 @@
           </div>
           <label class="iw-editor"><span>可编辑的最终文字</span><textarea id="iw-final-text" rows="4" maxlength="4000" ${textLocked ? 'disabled' : ''}>${escapeHtml(state.draftText)}</textarea><small id="iw-draft-count">${state.draftText.length}/4000${state.draftDirty ? ' · 尚未保存' : ''}</small></label>
           <div class="iw-risk-card ${job.riskLevel === 'high' ? 'danger' : job.riskLevel === 'unknown' ? 'attention' : 'neutral'}"><strong>风险检查：${escapeHtml(risk)}</strong><span>${escapeHtml(riskReasons)}</span></div>
-          ${authWriteBlocked() ? '<div class="iw-write-block">登录或能力状态未就绪，历史保持可读，写操作已禁用。</div>' : capabilityBlocked ? '<div class="iw-write-block">当前账号没有这个渠道的发送能力，写操作已禁用。</div>' : ''}
+          ${authWriteBlocked() ? '<div class="iw-write-block">登录或能力状态未就绪，历史保持可读，写操作已禁用。</div>' : connectivityWriteBlocked() ? '<div class="iw-write-block">Cloud 离线或当前数据已过期，历史保持可读；刷新成功前写操作已禁用。</div>' : capabilityBlocked ? '<div class="iw-write-block">当前账号没有这个渠道的发送能力，写操作已禁用。</div>' : ''}
           ${state.actionError ? `<div class="iw-action-error" role="alert">${escapeHtml(friendlyError(state.actionError))}${state.actionError.code === 'INTERACTION_VERSION_CONFLICT' || state.actionError.code === 'INTERACTION_STATE_CONFLICT' ? '<button class="iw-button ghost" type="button" data-iw-action="refresh-detail">重新加载详情</button>' : ''}</div>` : ''}
           ${state.actionNotice ? `<div class="iw-action-notice" role="status">${escapeHtml(state.actionNotice)}</div>` : ''}
           <footer class="iw-reply-actions">
             <div>
-              <button class="iw-button ghost" type="button" data-iw-action="ignore" ${busy || TERMINAL_STATES.has(job.state) || authWriteBlocked() ? 'disabled' : ''}>忽略</button>
-              <button class="iw-button ghost" type="button" data-iw-action="escalate" ${busy || TERMINAL_STATES.has(job.state) || authWriteBlocked() ? 'disabled' : ''}>转人工</button>
-              <button class="iw-button secondary" type="button" data-iw-action="regenerate" ${busy || TERMINAL_STATES.has(job.state) || authWriteBlocked() ? 'disabled' : ''}>${state.actionBusy === 'regenerate' ? '重新生成中' : '重新生成'}</button>
+              <button class="iw-button ghost" type="button" data-iw-action="ignore" ${busy || TERMINAL_STATES.has(job.state) || writeBlocked() ? 'disabled' : ''}>忽略</button>
+              <button class="iw-button ghost" type="button" data-iw-action="escalate" ${busy || TERMINAL_STATES.has(job.state) || writeBlocked() ? 'disabled' : ''}>转人工</button>
+              <button class="iw-button secondary" type="button" data-iw-action="regenerate" ${busy || TERMINAL_STATES.has(job.state) || writeBlocked() ? 'disabled' : ''}>${state.actionBusy === 'regenerate' ? '重新生成中' : '重新生成'}</button>
             </div>
             <div>
-              ${!textLocked ? `<button class="iw-button secondary" type="button" data-iw-action="save" ${busy || !state.draftDirty ? 'disabled' : ''}>${state.actionBusy === 'save' ? '保存中' : '保存修改'}</button>` : ''}
-              ${primary ? `<button class="iw-button primary" type="button" data-iw-action="${primary.action}" ${busy || primary.disabled || authWriteBlocked() || capabilityBlocked ? 'disabled' : ''}>${state.actionBusy === primary.action ? '处理中' : primary.label}</button>` : ''}
+              ${!textStateLocked ? `<button class="iw-button secondary" type="button" data-iw-action="save" ${busy || !state.draftDirty || writeBlocked() ? 'disabled' : ''}>${state.actionBusy === 'save' ? '保存中' : '保存修改'}</button>` : ''}
+              ${primary ? `<button class="iw-button primary" type="button" data-iw-action="${primary.action}" ${busy || primary.disabled || writeBlocked() || capabilityBlocked ? 'disabled' : ''}>${state.actionBusy === primary.action ? '处理中' : primary.label}</button>` : ''}
             </div>
           </footer>
         </section>` : '<section class="iw-empty-inline">这条互动尚未生成回复任务，可保留查看并等待 Cloud 工作流。</section>'}
@@ -448,7 +458,7 @@
           const count = dom.detail.querySelector('#iw-draft-count');
           if (count) count.textContent = `${state.draftText.length}/4000${state.draftDirty ? ' · 尚未保存' : ''}`;
           const save = dom.detail.querySelector('[data-iw-action="save"]');
-          if (save) save.disabled = !state.draftDirty || Boolean(state.actionBusy);
+          if (save) save.disabled = !state.draftDirty || Boolean(state.actionBusy) || writeBlocked();
           const approve = dom.detail.querySelector('[data-iw-action="approve"]');
           if (approve) approve.textContent = state.draftDirty ? '保存并批准' : '批准回复';
         });
@@ -474,7 +484,6 @@
       else {
         state.listLoading = true;
         state.listError = null;
-        state.stale = false;
         if (!preserveSelection) {
           state.selectedThreadId = null;
           state.detail = null;
@@ -515,7 +524,7 @@
       } catch (error) {
         if (!isCurrent(capturedEpoch, envKey) || request !== listRequest) return;
         state.listError = error;
-        state.stale = state.items.length > 0;
+        state.stale = Boolean(state.items.length || state.detail);
       } finally {
         if (isCurrent(capturedEpoch, envKey) && request === listRequest) {
           state.listLoading = false;
@@ -550,6 +559,7 @@
         state.detail = envelope.data;
         state.auth = envelope.data.auth;
         state.asOf = envelope.meta && envelope.meta.asOf;
+        if (env && env.connectivity === 'connected') state.stale = false;
         state.detailError = null;
         state.draftText = safeText(envelope.data.replyJob && envelope.data.replyJob.finalText, '');
         state.draftDirty = false;
@@ -563,6 +573,7 @@
       } catch (error) {
         if (!isCurrent(capturedEpoch, envKey) || request !== detailRequest) return;
         state.detailError = error;
+        if (state.detail) state.stale = true;
       } finally {
         if (isCurrent(capturedEpoch, envKey) && request === detailRequest) {
           state.detailLoading = false;
@@ -628,7 +639,7 @@
         return;
       }
       const job = state.detail && state.detail.replyJob;
-      if (!job || state.actionBusy || authWriteBlocked() || channelCapabilityBlocked(state.detail.thread.channel)) return;
+      if (!job || state.actionBusy || writeBlocked() || channelCapabilityBlocked(state.detail.thread.channel)) return;
       if (kind === 'save' && !state.draftDirty) return;
       const capturedEpoch = epoch;
       const envKey = env.envKey;
@@ -692,7 +703,7 @@
       } catch (error) {
         if (!isCurrent(capturedEpoch, envKey)) return;
         state.listError = error;
-        state.stale = state.items.length > 0;
+        state.stale = Boolean(state.items.length || state.detail);
       } finally {
         if (isCurrent(capturedEpoch, envKey)) {
           state.syncBusy = false;
@@ -735,11 +746,18 @@
         setVisible(false);
         return;
       }
-      if (env && env.envKey === next.envKey && active) return;
+      if (env && env.envKey === next.envKey && active) {
+        const connectivityChanged = env.connectivity !== next.connectivity;
+        env = { ...next };
+        if (next.connectivity !== 'connected') state.stale = Boolean(state.items.length || state.detail || state.stale);
+        if (connectivityChanged) renderAll();
+        return;
+      }
       if (env && api.interactionCancelReads) void api.interactionCancelReads(env.envKey);
       epoch += 1;
       env = { ...next };
       state = freshState();
+      if (env.connectivity !== 'connected') state.stale = true;
       clearPoll();
       setVisible(true);
       renderAll();

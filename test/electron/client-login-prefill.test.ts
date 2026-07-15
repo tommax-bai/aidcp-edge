@@ -22,6 +22,9 @@ test('登录记忆使用 safeStorage 加密文件，不写明文回退', () => {
 test('成功登录保存完整输入，session 文件仍只承载会话', () => {
   assert.match(main, /saveClientLoginPrefill\(\{\s*name,\s*key\s*\}\)/, '登录成功后必须保存账户名和访问密钥');
   assert.match(main, /saveClientSession\(\{\s*token:\s*r\.data\.token/, '客户会话仍独立保存 token');
+  assert.match(main, /sealClientSession\(s, safeStorage\)/, 'JWT 会话优先经 safeStorage 整包加密');
+  assert.match(main, /writePrivateJsonAtomic\(clientSessionFile\(\)/, '会话必须走原子 0600 私有文件写入');
+  assert.doesNotMatch(main, /writeFileSync\(clientSessionFile\(\)/, '不得再直接明文 writeFile 会话');
 });
 
 test('退出或会话失效统一清除凭据记忆', () => {

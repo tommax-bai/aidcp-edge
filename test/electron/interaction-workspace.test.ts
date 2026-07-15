@@ -101,7 +101,7 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
   const label = options.label || '轻享生活号';
   const platform = options.platform || 'wechat_channels';
   const currentStatus = status(envKey, label);
-  const calls: Record<string, any[]> = { list: [], detail: [], cancel: [], approve: [], send: [], sync: [], reopen: [] };
+  const calls: Record<string, any[]> = { list: [], detail: [], cancel: [], save: [], approve: [], send: [], sync: [], reopen: [] };
   let pushFleet: (snapshot: any) => void = () => undefined;
   const defaultApi: Record<string, any> = {
     onStatusUpdate: () => undefined,
@@ -148,6 +148,7 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
       return apiResult(scopeEnvelope(args.threadId.includes('_dm_') ? dmFixture : commentFixture, args.envKey, '示例'));
     },
     interactionUpdateDraft: async (args: any) => {
+      calls.save.push(args);
       const detail = scopeEnvelope(commentFixture, args.envKey).data;
       detail.replyJob.finalText = args.finalText;
       detail.replyJob.version = args.expectedVersion + 1;
@@ -389,4 +390,56 @@ test('Cloud 离线局部刷新保留已读历史并标记上次成功数据', as
   assert.equal(syncOffline, true);
   assert.match($(window, '#iw-list').textContent || '', /示例观众/);
   assert.match($(window, '#iw-summary').textContent || '', /上次成功数据/);
+});
+
+test('Cloud offline/stale 禁止 save/approve/send，成功刷新后才恢复写动作', async () => {
+  const { window, pushFleet, calls } = await boot({
+    api: {
+      interactionSync: async () => ({ status: 0, ok: false, data: null, error: 'offline' }),
+    },
+  });
+
+  const textarea = $(window, '#iw-final-text') as HTMLTextAreaElement;
+  textarea.value = '离线期间不得提交的修改';
+  textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.equal(($(window, '[data-iw-action="save"]') as HTMLButtonElement).disabled, false);
+
+  $(window, '#iw-sync').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(($(window, '#iw-final-text') as HTMLTextAreaElement).disabled, true, 'stale 时编辑器必须锁定');
+  assert.match($(window, '#iw-detail').textContent || '', /刷新成功前写操作已禁用/);
+  const staleSave = $(window, '[data-iw-action="save"]') as HTMLButtonElement;
+  const staleApprove = $(window, '[data-iw-action="approve"]') as HTMLButtonElement;
+  assert.equal(staleSave.disabled, true, 'stale 时 save 明确 disabled');
+  assert.equal(staleApprove.disabled, true, 'stale 时 approve 不可用');
+  staleSave.dispatchEvent(new window.Event('click', { bubbles: true }));
+  staleApprove.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(calls.save.length, 0, 'disabled 之外 handler guard 也必须拦 save');
+  assert.equal(calls.approve.length, 0, 'disabled 之外 handler guard 也必须拦 approve');
+
+  $(window, '[data-iw-action="refresh-detail"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(($(window, '#iw-final-text') as HTMLTextAreaElement).disabled, false, '成功刷新当前详情后恢复编辑');
+  assert.equal(($(window, '[data-iw-action="approve"]') as HTMLButtonElement).disabled, false, '成功刷新后恢复 approve');
+  const recoveredTextarea = $(window, '#iw-final-text') as HTMLTextAreaElement;
+  recoveredTextarea.value = 'Cloud 恢复后的可提交修改';
+  recoveredTextarea.dispatchEvent(new window.Event('input', { bubbles: true }));
+  $(window, '[data-iw-action="approve"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(calls.save.length, 1, '恢复后保存修改可正常发出');
+  assert.equal(calls.approve.length, 1, '恢复后批准可正常发出');
+
+  const disconnected = status('env_wc_demo', '轻享生活号');
+  disconnected.cloud = 'disconnected';
+  pushFleet({
+    provider: 'adspower', selectedEnvId: 'env_wc_demo', railCollapsed: true,
+    environments: [{ envId: 'env_wc_demo', kind: 'adspower', profileId: 'env_wc_demo', name: '轻享生活号', platform: 'wechat_channels', status: disconnected }],
+  });
+  await flush();
+  const send = $(window, '[data-iw-action="send"]') as HTMLButtonElement;
+  assert.equal(send.disabled, true, '显式 Cloud disconnected 时 send 不可用');
+  send.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(calls.send.length, 0, 'disabled 之外 handler guard 也必须拦 send');
 });

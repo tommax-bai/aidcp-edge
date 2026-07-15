@@ -209,6 +209,7 @@ function syncInteractionWorkspace() {
     envKey: selected.envId,
     platform: normPlatform(selected.platform),
     label: selected.name || '',
+    connectivity: selected.status && selected.status.cloud,
   } : null);
 }
 

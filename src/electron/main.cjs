@@ -2,6 +2,15 @@ const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, Notification, shel
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
+const {
+  CustomerAuthResponseError,
+  readBoundedJsonResponse,
+  safeStorageAvailable,
+  sealClientSession,
+  unsealClientSession,
+  isEncryptedClientSessionRecord,
+  writePrivateJsonAtomic,
+} = require('./customer-auth-security.cjs');
 const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
 const { createAdsLocalApi } = require('./ads-local-api.cjs');
 const { createAdsWriteApi } = require('./ads-write-api.cjs');
@@ -297,7 +306,7 @@ function clientLoginPrefillFile() {
   return path.join(app.getPath('userData'), 'client-login-prefill.json');
 }
 function clientLoginPrefillEncryptionAvailable() {
-  try { return Boolean(safeStorage && safeStorage.isEncryptionAvailable()); } catch { return false; }
+  return safeStorageAvailable(safeStorage);
 }
 function loadClientLoginPrefill() {
   if (!clientLoginPrefillEncryptionAvailable()) return null;
@@ -318,8 +327,7 @@ function saveClientLoginPrefill({ name, key } = {}) {
   try {
     const ciphertext = safeStorage.encryptString(JSON.stringify({ name: normalizedName, key: normalizedKey }));
     const file = clientLoginPrefillFile();
-    fs.writeFileSync(file, JSON.stringify({ version: 1, ciphertext: ciphertext.toString('base64') }), { encoding: 'utf8', mode: 0o600 });
-    try { fs.chmodSync(file, 0o600); } catch { /* best-effort permissions on platforms that do not support them */ }
+    writePrivateJsonAtomic(file, { version: 1, ciphertext: ciphertext.toString('base64') });
     return true;
   } catch {
     return false;
@@ -330,15 +338,21 @@ function clearClientLoginPrefill() {
 }
 function loadClientSession() {
   try {
-    const s = JSON.parse(fs.readFileSync(clientSessionFile(), 'utf8'));
+    const file = clientSessionFile();
+    const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const s = unsealClientSession(stored, safeStorage);
     clientSession = s && typeof s.token === 'string' && s.token ? s : null;
+    try { fs.chmodSync(file, 0o600); } catch { /* best-effort on filesystems without POSIX modes */ }
+    if (clientSession && safeStorageAvailable(safeStorage) && !isEncryptedClientSessionRecord(stored)) {
+      saveClientSession(clientSession); // 旧明文/0600 fallback 在系统加密可用时立即迁移。
+    }
   } catch {
     clientSession = null;
   }
 }
 function saveClientSession(s) {
   clientSession = s;
-  try { fs.writeFileSync(clientSessionFile(), JSON.stringify(s), 'utf8'); } catch { /* best-effort */ }
+  try { writePrivateJsonAtomic(clientSessionFile(), sealClientSession(s, safeStorage)); } catch { /* best-effort */ }
 }
 function clearClientSession() {
   clientSession = null;
@@ -369,7 +383,29 @@ async function clientAuthFetch(pathname, { method = 'GET', token, body, idempote
       signal: requestSignal,
     });
     let data = null;
-    try { data = await res.json(); } catch { /* 非 JSON 忽略 */ }
+    try {
+      data = await readBoundedJsonResponse(res);
+    } catch (error) {
+      if (error instanceof CustomerAuthResponseError) {
+        return {
+          status: 502,
+          ok: false,
+          data: {
+            error: {
+              code: 'WECHAT_SCHEMA_CHANGED',
+              message: error.code === 'CUSTOMER_AUTH_RESPONSE_TOO_LARGE'
+                ? 'customer-auth 响应超过本地安全上限，已拒绝解析。'
+                : 'customer-auth 响应格式不合法，已拒绝解析。',
+              requestId: `edge-customer-auth-${Date.now().toString(36)}`,
+              retryable: false,
+              details: { reason: error.code, ...(error.details || {}) },
+            },
+          },
+          error: error.code,
+        };
+      }
+      throw error;
+    }
     return { status: res.status, ok: res.ok, data };
   } catch (e) {
     return { status: 0, ok: false, data: null, error: String((e && e.message) || e) };

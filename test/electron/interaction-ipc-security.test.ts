@@ -38,6 +38,10 @@ test('main 锁定 customer-auth 路径和方法，并对白名单参数与 envKe
   assert.match(main, /interaction:send[\s\S]*body: \{ expectedVersion \},[\s\S]*idempotencyKey/, '发送必须同时带 CAS 与幂等键');
   assert.match(main, /interaction:sync[\s\S]*idempotencyKey/, '同步必须带幂等键');
   assert.match(main, /interaction:auth:reopen[\s\S]*idempotencyKey/, '重新登录动作必须带幂等键');
+  const clientAuthFetch = main.slice(main.indexOf('async function clientAuthFetch'), main.indexOf('// ── 视频号 InteractionWorkspace'));
+  assert.match(clientAuthFetch, /readBoundedJsonResponse\(res\)/, 'customer-auth 响应必须走有界 reader');
+  assert.doesNotMatch(clientAuthFetch, /res\.json\(/, '不得用 res.json() 无界聚合响应体');
+  assert.match(clientAuthFetch, /code: 'WECHAT_SCHEMA_CHANGED'[\s\S]*CUSTOMER_AUTH_RESPONSE_TOO_LARGE/, '过大响应必须返回结构化 schema error');
 });
 
 test('环境切换取消读取、renderer 丢弃迟到响应且写操作防重复点击', () => {
