@@ -1868,7 +1868,7 @@ body { margin: 0; }
   justify-self: end;
   transform-origin: center bottom;
 }
-.persona-growth.play .pg-mascot { animation: pg-mascot-scale 1400ms cubic-bezier(.2,.72,.24,1) 260ms both; }
+.persona-growth.play .pg-mascot { animation: pg-mascot-scale 2100ms cubic-bezier(.2,.72,.24,1) 260ms both; }
 .pg-lead {
   position: relative;
   z-index: 1;
@@ -1946,7 +1946,7 @@ body { margin: 0; }
   pointer-events: none;
   transform: translateX(-180%) skewX(-18deg);
 }
-.persona-growth.play .pg-expectation::after { animation: pg-expectation-shimmer 1700ms cubic-bezier(.35,0,.2,1) 1980ms both; }
+.persona-growth.play .pg-expectation::after { animation: pg-expectation-shimmer 2800ms cubic-bezier(.35,0,.2,1) 2680ms both; }
 .pg-expectation > span,
 .pg-expectation > .pg-expectation-arrow { position: relative; z-index: 1; }
 .pg-expectation > span { display: inline-flex; align-items: center; gap: 4px; }
