@@ -960,8 +960,11 @@ export class PublishCommandDispatcher {
     await this.logSubmitDiag(x, y, 'after-click');
     // 🔴 提交点已跨过：以下 MUST NOT 取消（全仓代价最高的禁区）。中止 = 一篇**可能已经发出去的帖子**
     //    被当成没发生 → 云端重投 → 发两遍。pollBounded 签名里没有取消入参，编译器焊死。
-    // 后置校验：发布成功信号（出现成功提示 / 离开发布编辑页）。
-    const CHECK = String.raw`(() => { const b = (document.body && document.body.innerText) || ''; return /发布成功|发布中|笔记已?发布|成功发布|稍后可在/.test(b) || !location.href.includes('/publish/publish'); })()`;
+    // 后置校验：**只认正证据**——页面成功文案（5.9 收紧）。原「离开发布编辑页(!href.includes('/publish/publish'))」
+    // 判据是已上膛的假成功：抢占方 / 恢复导航会在这 15s 窗口内把发布页导走 → 一篇可能根本没发出去的稿被记成已发布。
+    // 该假成功由 5.2/5.3（publishInFlight 闸封住恢复导航）从根上堵住，这里再去掉 URL 判据做纵深防御（URL 缺失单独不得判成功）。
+    // 真机项 F/D 待核：若确有成功后跳转的落地帖 URL 正证据，可再补为「成功文案 OR 落地帖 URL」白名单。
+    const CHECK = String.raw`(() => { const b = (document.body && document.body.innerText) || ''; return /发布成功|发布中|笔记已?发布|成功发布|稍后可在/.test(b); })()`;
     const ok = await pollBounded<true>({
       probe: async () => {
         try {

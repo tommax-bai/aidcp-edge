@@ -72,7 +72,8 @@ import { LikeStepRunner } from './client/like-runner.js';
 import { publishPost } from './flows/publish-post.js';
 import { PublishCommandDispatcher } from './flows/publish-command-handlers.js';
 import { EdgeTaskCoordinator } from './execution/edge-task-coordinator.js';
-import { CommitWindowGuard } from './execution/commit-window.js';
+import { CommitWindowGuard, combineCommitWindows } from './execution/commit-window.js';
+import { abortForTakeover, TaskTakeoverError, type TakeoverCtx } from './execution/takeover.js';
 import { PublishUiEventTracker, uiSnapshotToLines, writeNoteStageLine } from './flows/ui-event-lines.js';
 import { ImageUploader, imageTempPrefixFor, sweepImageTempDirs } from './flows/image-uploader.js';
 import { CdpFileInputSetter } from './cdp/file-input-setter.js';
@@ -372,6 +373,11 @@ async function main(): Promise<void> {
   // §7 在途发布追踪：回收若撞上在途发布，先把它诚实判失败（让审批/通知侧看到失败而非半成品），
   // 绝不静默丢弃让其跨重起被重复触发 → 真账号重复发帖。值为「按各自结果形状诚实判失败」的闭包。
   const inFlightPublishes = new Map<string, (reason: string) => void>();
+  // 抢占取消登记（change lease-strict-preemption 5.3）：每条在途发布 dispatch 的**真取消**句柄——
+  //   abort() 触发本命令的接管（abortForTakeover），settled 在 dispatch 真收敛时 resolve。
+  //   协调器 writers.cancelPublish 遍历触发 abort + 有界等 settled；未收敛即抛（判控制面故障 yield_timeout）。
+  //   与 inFlightPublishes（断连/回收路径的诚实失败回执）分工不同：前者取消、后者只发回执。
+  const inFlightPublishCancels = new Map<string, { abort: () => void; settled: Promise<void> }>();
   // 提交窗口守卫（change lease-strict-preemption 5.1）：页面写者进入不可逆提交动作前 enter()、确认后 dispose()。
   //   publishGuard 归发布写者（XHS runSubmit + FB publish-executor）；browseGuard 归浏览写者（XHS 评论/通知分类、FB 评论/加群）。
   //   在此集中创建、下注入各写者（enter/exit），并（批 B-2b 激活时）经 combineCommitWindows 聚合喂给协调器 writers 探针。
@@ -527,6 +533,32 @@ async function main(): Promise<void> {
     browse: {
       quiesceForTask: () => browse?.quiesceForTask() ?? Promise.resolve(0),
       resumeAfterTask: () => browse?.resumeAfterTask() ?? Promise.resolve(),
+    },
+    // 页面写者注册表探针（change lease-strict-preemption 5.2/5.3/5.9）：**接线即激活抢占引擎**。
+    //   - inCommitWindow/commitWindowRemainingMs：六站提交窗口聚合（enter/exit 在各写者内）；窗口内绝不强杀，回 window_busy + 剩余预算。
+    //   - publishInFlight：在途发布写（独立于租约）→ 封住普通浏览导航，绝不让恢复导航把发布页导走（治 5.9 假成功）。
+    //   - cancelPublish：抢占/让位时真取消在途发布并有界等收敛；未收敛即抛（协调器判控制面故障 yield_timeout）。
+    writers: {
+      ...combineCommitWindows([publishGuard, browseGuard]),
+      publishInFlight: () => inFlightPublishes.size > 0,
+      cancelPublish: async (timeoutMs?: number): Promise<number> => {
+        const entries = [...inFlightPublishCancels.values()];
+        if (entries.length === 0) return 0;
+        for (const entry of entries) entry.abort(); // 触发接管（abortForTakeover）：下一个安全取消点抛出、dispatch 就地作废
+        const budget = timeoutMs && timeoutMs > 0 ? timeoutMs : Number(process.env.AIDCP_TASK_QUIESCE_MS) || 30_000;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`publish_cancel_timeout_${budget}ms`)), budget);
+          timer.unref?.();
+        });
+        try {
+          // allSettled 在全部 dispatch 真收敛时 resolve；超预算未收敛 → timeout 抛出 → 协调器判控制面故障。
+          await Promise.race([Promise.allSettled(entries.map((entry) => entry.settled)), timeout]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+        return entries.length;
+      },
     },
     canAcquire: () => session.cdp.isControlReady(),
     // 「浏览器被我们自己收起来了」≠「浏览器坏了」。前者叫得醒，后者才是 cdp_unhealthy。
@@ -760,7 +792,15 @@ async function main(): Promise<void> {
       return;
     }
     taskCoordinator.touch(env.payload.taskId);
-    void (async () => {
+    // 抢占取消上下文（5.3）：per-command AbortController = 本命令的接管世代令牌（局部，绝不存进单例字段 → 见 takeover.ts 契约）。
+    const abort = new AbortController();
+    const takeoverCtx: TakeoverCtx = {
+      checkpoint: () => {
+        if (abort.signal.aborted) throw new TaskTakeoverError();
+      },
+      signal: abort.signal,
+    };
+    const settled = (async () => {
       console.log(writeNoteStageLine());
       publishUiEvents.observe(env.payload);
       // §7 在途登记：按 publish.command.result 形状诚实判失败（带 recordId/seq/kind，同 env.id 回执）。
@@ -785,7 +825,7 @@ async function main(): Promise<void> {
       });
       let result: PublishCommandResultPayload;
       try {
-        result = await publishDispatcher.dispatch(env.payload);
+        result = await publishDispatcher.dispatch(env.payload, takeoverCtx);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         result = {
@@ -797,6 +837,9 @@ async function main(): Promise<void> {
         };
       } finally {
         inFlightPublishes.delete(env.id);
+        inFlightPublishCancels.delete(env.id);
+        // 在途发布收敛 → 若协调器空闲则恢复浏览（否则 publishInFlight 闸会让浏览在 dispatch 结束后永久冻结，复核 finding C）。
+        taskCoordinator.notifyPublishSettled();
       }
       const uiLine = publishUiEvents.onResult(env.payload, result);
       if (uiLine) console.log(uiLine);
@@ -806,6 +849,8 @@ async function main(): Promise<void> {
         console.error('[aidcp-edge] publish.command.result 回传失败:', sendErr);
       }
     })();
+    settled.catch(() => {}); // IIFE 自包含（内部已 try/catch）不应抛；防御性避免意外 unhandledRejection
+    inFlightPublishCancels.set(env.id, { abort: () => abortForTakeover(abort), settled });
   });
 
   // 陪伴界面数据快照（edge-companion-ui 8.1）：云端 ui.snapshot（昵称/最近发布/审批状态）

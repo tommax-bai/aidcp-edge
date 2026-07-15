@@ -727,15 +727,13 @@ test('select_mode 红线：模式判据保守（激活 tab 文本含「图文」
  * submit_publish 专用 fake cdp：闭合 shadow 里的「发布」按钮（DOM.getDocument 穿透 + getBoxModel 取中心点）
  * + 提交后的成功态回读（CHECK）。
  *
- * 🔴 成功证据**只用页面成功文案**（body 出现「发布成功」）。CHECK 里另一条「URL 已离开 /publish/publish」
- * 判据本身是一个**尚未修复的假成功**——抢占方会在这 15s 窗口里把页面导航走，于是一篇可能根本没发出去的
- * 稿被记成已发布（修法属第 5/6/7 节）。故本桩把 href **钉死在发布页上**（URL 判据恒为假），
- * 保证下面的断言绝不给那条假成功背书。
+ * 🔴 5.9 收紧后成功证据**只认页面成功文案**（body 出现「发布成功」）。原「URL 已离开 /publish/publish」判据是
+ * 一颗已上膛的假成功（抢占方 / 恢复导航会在 15s 窗口内把发布页导走 → 一篇可能没发出的稿被记成已发布），已由
+ * 5.2/5.3 的 publishInFlight 闸封住恢复导航、再由本 CHECK 去除 URL 判据做纵深防御。故本桩镜像收紧后的 CHECK：
+ * **只按成功文案返回**——「已离开发布页」单独存在（无成功文案）绝不判成功。回归 checkExpr() 另断言 CHECK 串已无 URL 判据。
  */
 class SubmitFakeCdp {
   readonly calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
-  /** 页面全程停在发布页 → CHECK 的 URL 判据恒 false。 */
-  private readonly href = 'https://creator.xiaohongshu.com/publish/publish?source=official';
   private bodyText = '正在编辑';
   private checkProbes = 0;
   /**
@@ -744,6 +742,11 @@ class SubmitFakeCdp {
    * noButton：DOM 里没有「发布」按钮 → findShadowButtonCenter 返回 null → no_target（点击之前失败）。
    */
   constructor(private readonly opts: { successAtProbe?: number; noButton?: boolean } = {}) {}
+  /** 捕获后置校验 CHECK 表达式串（回归断言 5.9：不得含 location.href / URL 判据）。 */
+  checkExpr(): string {
+    const call = this.calls.find((c) => c.method === 'Runtime.evaluate' && String((c.params as { expression?: string })?.expression ?? '').includes('发布成功'));
+    return String((call?.params as { expression?: string })?.expression ?? '');
+  }
   async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ method, params });
     if (method === 'DOM.getDocument') {
@@ -756,11 +759,10 @@ class SubmitFakeCdp {
     if (method === 'Runtime.evaluate') {
       const expr = String(params?.expression ?? '');
       if (expr.includes('发布成功')) {
-        // CHECK（提交后的后置校验）：按页面真实状态判定——成功文案命中，URL 判据恒假。
+        // CHECK（5.9 收紧）：**只认成功文案**。leftPublishPage（已离开发布页但无成功文案）MUST NOT 判成功。
         if (++this.checkProbes >= (this.opts.successAtProbe ?? 2)) this.bodyText = '发布成功，稍后可在笔记里查看';
         const byText = /发布成功|发布中|笔记已?发布|成功发布|稍后可在/.test(this.bodyText);
-        const byUrl = !this.href.includes('/publish/publish'); // 恒 false：页面没被导航走
-        return { result: { value: byText || byUrl } } as T;
+        return { result: { value: byText } } as T;
       }
       return { result: { value: '{}' } } as T; // 诊断快照（只观测，不改行为）
     }
@@ -855,6 +857,17 @@ test('🔴 6.2 已派发提交位：点击已发出但后置校验超时未确�
   assert.equal(res.ok, false);
   assert.match(String(res.error), /^post_validate_failed/, '成功证据未命中 → 诚实 post_validate_failed（绝不假成功）');
   assert.equal(res.submitDispatched, true, '已点未确认 MUST submitDispatched=true —— 与「压根没点」回执面区分开');
+});
+
+test('🔴 5.9 收紧假成功 CHECK：后置校验只认成功文案，绝不含「离开发布页」URL 判据（那颗已上膛的假成功）', async () => {
+  // 成功文案在第 2 次探到 → ok:true。关键回归：下发的 CHECK 表达式**不得**含 location.href / URL 判据——
+  // 否则抢占方/恢复导航在 15s 窗口内把发布页导走 → 一篇可能没发出的稿被判已发布（5.9 根治点）。
+  const cdp = new SubmitFakeCdp({ successAtProbe: 2 });
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 11));
+  assert.equal(res.ok, true, '成功文案命中 → ok:true');
+  const expr = cdp.checkExpr();
+  assert.ok(expr.length > 0 && expr.includes('发布成功'), '确实下发了 CHECK 表达式');
+  assert.ok(!/location\.href|\/publish\/publish/.test(expr), 'CHECK MUST NOT 含 URL 判据——「已离开发布页」绝不单独判成功（5.9）');
 });
 
 test('🔴 6.2 已派发提交位：发布按钮找不到（no_target，压根没点）→ submitDispatched 保持假', async () => {
