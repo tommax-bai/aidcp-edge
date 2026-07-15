@@ -348,26 +348,166 @@ function clearClientSession() {
 function hasValidSession() {
   return Boolean(clientSession && clientSession.token && (!clientSession.expiresAt || Date.now() < clientSession.expiresAt));
 }
-async function clientAuthFetch(pathname, { method = 'GET', token, body } = {}) {
+async function clientAuthFetch(pathname, { method = 'GET', token, body, idempotencyKey, signal } = {}) {
   const base = resolveClientAuthBase();
   if (!base) return { status: 0, ok: false, data: null };
   const headers = { 'content-type': 'application/json' };
   if (token) headers.authorization = `Bearer ${token}`;
+  if (idempotencyKey) headers['idempotency-key'] = idempotencyKey;
   try {
     // 有界超时：登录/刷新/拉可见环境都经此出口，refreshAllowedEnvironments 现随每次「刷新」列表调用——面板挂起时
     // 绝不能让裸 fetch 无限吊住按钮。超时按 status:0（非 401）处理：refreshAllowedEnvironments 据此保留上次已知集、
     // 不误登出、不清空（与网络抖动同路径）。
+    const timeoutOptions = { signal: AbortSignal.timeout(12000) };
+    const requestSignal = signal && typeof AbortSignal.any === 'function'
+      ? AbortSignal.any([signal, timeoutOptions.signal])
+      : signal || timeoutOptions.signal;
     const res = await fetch(base + pathname, {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(12000),
+      signal: requestSignal,
     });
     let data = null;
     try { data = await res.json(); } catch { /* 非 JSON 忽略 */ }
     return { status: res.status, ok: res.ok, data };
   } catch (e) {
     return { status: 0, ok: false, data: null, error: String((e && e.message) || e) };
+  }
+}
+
+// ── 视频号 InteractionWorkspace customer-auth bridge ────────────────────────
+// renderer 只能调用下方具名 IPC；路径、方法、query、body 与幂等 header 全部由主进程组装。
+// 这里不暴露通用 URL/fetch，也不把客户 token 或 Cloud 原始请求能力交给 renderer。
+const INTERACTION_CHANNELS = new Set(['comment', 'dm']);
+const INTERACTION_LIST_STATES = new Set(['pending', 'sent']);
+const interactionReadControllers = new Map(); // envKey -> Set<AbortController>（仅取消 list/detail 读请求）
+
+function interactionLocalError(code, message, status = 400, details) {
+  return {
+    status,
+    ok: false,
+    data: {
+      error: {
+        code,
+        message,
+        requestId: `edge-ipc-${Date.now().toString(36)}`,
+        retryable: status === 0 || status >= 500,
+        ...(details ? { details } : {}),
+      },
+    },
+  };
+}
+
+function interactionObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('参数必须是对象');
+  return value;
+}
+
+function interactionArgs(value, allowedKeys) {
+  const object = interactionObject(value);
+  for (const key of Object.keys(object)) {
+    if (!allowedKeys.has(key)) throw new Error(`不支持的参数：${key}`);
+  }
+  return object;
+}
+
+function interactionId(value, label) {
+  const text = String(value == null ? '' : value).trim();
+  if (!text || text.length > 256 || /[\u0000-\u001f\u007f]/.test(text)) throw new Error(`${label} 不合法`);
+  return text;
+}
+
+function interactionOptionalString(value, label, maxLength) {
+  if (value == null || value === '') return null;
+  const text = String(value);
+  if (text.length > maxLength || /[\u0000-\u001f\u007f]/.test(text)) throw new Error(`${label} 不合法`);
+  return text;
+}
+
+function interactionExpectedVersion(value) {
+  if (!Number.isInteger(value) || value < 0) throw new Error('expectedVersion 不合法');
+  return value;
+}
+
+function interactionLimit(value) {
+  if (value == null) return 30;
+  if (!Number.isInteger(value) || value < 1 || value > 100) throw new Error('limit 必须在 1 到 100 之间');
+  return value;
+}
+
+function interactionIdempotencyKey(value) {
+  const text = String(value == null ? '' : value);
+  if (text.length < 8 || text.length > 256 || !/^[A-Za-z0-9._:-]+$/.test(text)) throw new Error('Idempotency-Key 不合法');
+  return text;
+}
+
+function interactionQuery(params, keys) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (keys.has(key) && value != null && value !== '') query.set(key, String(value));
+  }
+  const text = query.toString();
+  return text ? `?${text}` : '';
+}
+
+function trackInteractionRead(envKey, controller) {
+  let set = interactionReadControllers.get(envKey);
+  if (!set) { set = new Set(); interactionReadControllers.set(envKey, set); }
+  set.add(controller);
+  return () => {
+    set.delete(controller);
+    if (set.size === 0) interactionReadControllers.delete(envKey);
+  };
+}
+
+function cancelInteractionReads(envKey) {
+  const set = interactionReadControllers.get(envKey);
+  if (!set) return 0;
+  let count = 0;
+  for (const controller of set) {
+    count += 1;
+    try { controller.abort(); } catch { /* already settled */ }
+  }
+  interactionReadControllers.delete(envKey);
+  return count;
+}
+
+async function interactionCustomerRequest({ envKey, pathname, method = 'GET', body, idempotencyKey, cancellable = false }) {
+  if (!clientAuthEnabled()) return interactionLocalError('INTERACTION_FEATURE_DISABLED', '当前构建未启用 customer-auth API。', 503);
+  if (!hasValidSession()) return interactionLocalError('INTERACTION_AUTH_REQUIRED', '客户端登录已失效。', 401);
+  const controller = cancellable ? new AbortController() : null;
+  const cleanup = controller ? trackInteractionRead(envKey, controller) : () => undefined;
+  try {
+    const result = await clientAuthFetch(pathname, {
+      method,
+      token: clientSession.token,
+      body,
+      idempotencyKey,
+      signal: controller && controller.signal,
+    });
+    if (result.status === 401) {
+      // customer-auth token 失效沿用既有安全机制回登录门；平台 reauth 则由 API data.auth 表达，不走此分支。
+      onSessionInvalid();
+      return result;
+    }
+    if (result.ok) {
+      const responseEnvKey = result.data && result.data.data && result.data.data.envKey;
+      if (responseEnvKey !== envKey) {
+        return interactionLocalError('INTERACTION_SCOPE_MISMATCH', 'Cloud 响应环境与请求环境不一致，已拒绝转交 renderer。', 502);
+      }
+    }
+    return result;
+  } finally {
+    cleanup();
+  }
+}
+
+async function handleInteractionIpc(handler) {
+  try {
+    return await handler();
+  } catch (error) {
+    return interactionLocalError('INTERACTION_VALIDATION_FAILED', String((error && error.message) || error || '参数不合法'), 400);
   }
 }
 // 拉该客户可见环境 → 设 allowedProfileIds。返回 false 表示会话已失效（401），由调用方决定登出。
@@ -3577,6 +3717,147 @@ ipcMain.handle('client-auth:prefill:clear', () => {
   clearClientLoginPrefill();
   return { ok: true };
 });
+
+// 视频号互动工作区具名 IPC。每个 handler 都锁定唯一 HTTP method/path 与参数白名单；
+// renderer 无法传 URL、method、authorization/header 或任意 body。
+ipcMain.handle('interaction:list', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'channel', 'state', 'cursor', 'limit']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const channel = args.channel == null ? null : String(args.channel);
+  const state = args.state == null ? null : String(args.state);
+  if (channel && !INTERACTION_CHANNELS.has(channel)) throw new Error('channel 不合法');
+  if (state && !INTERACTION_LIST_STATES.has(state)) throw new Error('state 不合法');
+  const cursor = interactionOptionalString(args.cursor, 'cursor', 4096);
+  const limit = interactionLimit(args.limit);
+  const query = interactionQuery({ channel, state, cursor, limit }, new Set(['channel', 'state', 'cursor', 'limit']));
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/interactions${query}`,
+    cancellable: true,
+  });
+}));
+
+ipcMain.handle('interaction:detail', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'threadId', 'cursor', 'limit']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const threadId = interactionId(args.threadId, 'threadId');
+  const cursor = interactionOptionalString(args.cursor, 'cursor', 4096);
+  const limit = interactionLimit(args.limit);
+  const query = interactionQuery({ cursor, limit }, new Set(['cursor', 'limit']));
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/interactions/${encodeURIComponent(threadId)}${query}`,
+    cancellable: true,
+  });
+}));
+
+ipcMain.handle('interaction:draft:update', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'jobId', 'expectedVersion', 'finalText']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const jobId = interactionId(args.jobId, 'jobId');
+  const expectedVersion = interactionExpectedVersion(args.expectedVersion);
+  if (typeof args.finalText !== 'string' || !args.finalText.trim() || args.finalText.length > 4000) throw new Error('finalText 不合法');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/replies/${encodeURIComponent(jobId)}/draft`,
+    method: 'PUT',
+    body: { expectedVersion, finalText: args.finalText },
+  });
+}));
+
+for (const action of ['approve', 'regenerate']) {
+  ipcMain.handle(`interaction:${action}`, (_event, raw) => handleInteractionIpc(async () => {
+    const args = interactionArgs(raw, new Set(['envKey', 'jobId', 'expectedVersion']));
+    const envKey = interactionId(args.envKey, 'envKey');
+    const jobId = interactionId(args.jobId, 'jobId');
+    const expectedVersion = interactionExpectedVersion(args.expectedVersion);
+    return interactionCustomerRequest({
+      envKey,
+      pathname: `/environments/${encodeURIComponent(envKey)}/replies/${encodeURIComponent(jobId)}/${action}`,
+      method: 'POST',
+      body: { expectedVersion },
+    });
+  }));
+}
+
+ipcMain.handle('interaction:send', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'jobId', 'expectedVersion', 'idempotencyKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const jobId = interactionId(args.jobId, 'jobId');
+  const expectedVersion = interactionExpectedVersion(args.expectedVersion);
+  const idempotencyKey = interactionIdempotencyKey(args.idempotencyKey);
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/replies/${encodeURIComponent(jobId)}/send`,
+    method: 'POST',
+    body: { expectedVersion },
+    idempotencyKey,
+  });
+}));
+
+ipcMain.handle('interaction:ignore', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'messageId', 'expectedVersion']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const messageId = interactionId(args.messageId, 'messageId');
+  const expectedVersion = interactionExpectedVersion(args.expectedVersion);
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/interactions/${encodeURIComponent(messageId)}/ignore`,
+    method: 'POST',
+    body: { expectedVersion },
+  });
+}));
+
+ipcMain.handle('interaction:escalate', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'messageId', 'expectedVersion', 'reason']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const messageId = interactionId(args.messageId, 'messageId');
+  const expectedVersion = interactionExpectedVersion(args.expectedVersion);
+  const reason = String(args.reason == null ? '' : args.reason).trim();
+  if (!reason || reason.length > 512 || /[\u0000-\u001f\u007f]/.test(reason)) throw new Error('reason 不合法');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/interactions/${encodeURIComponent(messageId)}/escalate`,
+    method: 'POST',
+    body: { expectedVersion, reason },
+  });
+}));
+
+ipcMain.handle('interaction:sync', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'channel', 'scopeExternalId', 'idempotencyKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const channel = args.channel == null ? null : String(args.channel);
+  if (channel && !INTERACTION_CHANNELS.has(channel)) throw new Error('channel 不合法');
+  const scopeExternalId = args.scopeExternalId == null ? null : interactionId(args.scopeExternalId, 'scopeExternalId');
+  const idempotencyKey = interactionIdempotencyKey(args.idempotencyKey);
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/interactions/sync`,
+    method: 'POST',
+    body: { channel, scopeExternalId },
+    idempotencyKey,
+  });
+}));
+
+ipcMain.handle('interaction:auth:reopen', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'idempotencyKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const idempotencyKey = interactionIdempotencyKey(args.idempotencyKey);
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/interactions/auth/reopen`,
+    method: 'POST',
+    body: {},
+    idempotencyKey,
+  });
+}));
+
+ipcMain.handle('interaction:reads:cancel', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  return { ok: true, cancelled: cancelInteractionReads(envKey) };
+}));
+
 ipcMain.handle('settings:save', async (_event, patch) => {
   const beforeIds = new Set((settings.environments || []).map((e) => e.profileId).filter(Boolean));
   const res = saveSettings(patch);

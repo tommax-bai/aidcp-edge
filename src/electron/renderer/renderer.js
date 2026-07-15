@@ -194,6 +194,24 @@ const fields = {
   proxySave: document.querySelector('#proxy-save'),
 };
 
+// 视频号互动工作区使用独立 renderer 模块；旧测试桩/旧包未加载该模块时安全降级为原工作区。
+const interactionWorkspace = window.InteractionWorkspace?.create({
+  root: document.querySelector('#interaction-workspace'),
+  legacyRoot: document.querySelector('#legacy-workspace'),
+  shell: document.querySelector('.shell'),
+  api: window.aidcpEdge,
+}) || null;
+
+function syncInteractionWorkspace() {
+  if (!interactionWorkspace) return;
+  const selected = fleetView.envs.get(fleetView.selected);
+  interactionWorkspace.selectEnvironment(selected ? {
+    envKey: selected.envId,
+    platform: normPlatform(selected.platform),
+    label: selected.name || '',
+  } : null);
+}
+
 const settingsUi = {
   useChrome: document.querySelector('#use-chrome'),
   adsConfig: document.querySelector('#ads-config'),
@@ -324,11 +342,14 @@ function rosterHas(profileId) {
 let selectedPlatform = 'xiaohongshu';
 function normPlatform(raw) {
   const v = String(raw == null ? '' : raw).trim().toLowerCase();
+  if (v === 'wechat_channels' || v === 'wechat-channels' || v === 'wechat' || v === 'channels') return 'wechat_channels';
   if (v === 'facebook' || v === 'fb') return 'facebook';
   return 'xiaohongshu';
 }
 function platformLabel(p) {
-  return normPlatform(p) === 'facebook' ? 'Facebook' : '小红书';
+  const platform = normPlatform(p);
+  if (platform === 'wechat_channels') return '视频号';
+  return platform === 'facebook' ? 'Facebook' : '小红书';
 }
 function updateFacebookImportVisibility() {
   if (!settingsUi.adsFbImportWrap) return;
@@ -954,24 +975,27 @@ function renderEdgeFailure(status) {
 function renderTitlebar(status) {
   const plat = selectedEnvPlatform();
   const fb = plat === 'facebook';
+  const wechat = plat === 'wechat_channels';
   const acct = status.account;
   if (acct && (acct.name || acct.id)) {
     // 标签兜底链：平台昵称（@ 前缀）> AdsPower 环境名（平铺，不冒充平台昵称）> 账号 …尾4位。
     const nick = (acct.name || '').replace(/^@/, '');
     const isPlatNick = nick && acct.source !== 'env';
     fields.acctName.textContent = nick ? (isPlatNick ? `@${nick}` : nick) : `账号 …${String(acct.id).slice(-4)}`;
-    fields.acctAva.textContent = nick ? nick.slice(0, 1) : (fb ? 'f' : '书');
+    fields.acctAva.textContent = nick ? nick.slice(0, 1) : (fb ? 'f' : wechat ? '视' : '书');
   } else {
     // 无账号信息时按平台给默认身份占位（此前写死小红书，FB 环境也顶着「书」——问题 3）。
-    fields.acctAva.textContent = fb ? 'f' : '书';
-    fields.acctName.textContent = fb ? 'Facebook 账号' : '小红书账号';
+    fields.acctAva.textContent = fb ? 'f' : wechat ? '视' : '书';
+    fields.acctName.textContent = fb ? 'Facebook 账号' : wechat ? '视频号账号' : '小红书账号';
   }
   fields.acctAva.classList.toggle('plat-facebook', fb);
+  fields.acctAva.classList.toggle('plat-wechat', wechat);
   if (fields.acctPlat) {
     fields.acctPlat.textContent = platformLabel(plat);
     fields.acctPlat.classList.toggle('plat-facebook', fb);
+    fields.acctPlat.classList.toggle('plat-wechat', wechat);
   }
-  if (fields.authLabel) fields.authLabel.textContent = fb ? 'Facebook 登录' : '小红书登录';
+  if (fields.authLabel) fields.authLabel.textContent = fb ? 'Facebook 登录' : wechat ? '视频号登录' : '小红书登录';
   const health = uiLogic.synthesizeHealth(status);
   fields.healthLabel.textContent = health.label;
   fields.healthPill.className = `health-pill nodrag ${health.code}`;
@@ -1918,6 +1942,7 @@ function render(status) {
   // 表单未在编辑时，让 provider 分段跟随实际运行 provider。
   if (status.provider && !editingProvider) applyProviderSelection(status.provider);
   updatePersonaGate(status); // 建号人设：仅登录+云端已连接才可生成（不触碰已选关键词/草稿，避免状态推送重置向导）
+  syncInteractionWorkspace();
 }
 
 // ─── 多环境 fleet：状态路由 / 环境栏 / 引导处理 / 全部启动（edge-multi-environment-fleet）───
@@ -2023,6 +2048,8 @@ function applyFleetSnapshot(snap) {
     const env = fleetView.envs.get(fleetView.selected);
     if (env && env.status) render(env.status);
   }
+  // 即使新环境尚无 status，也必须原子切成它自己的 loading workspace，不能短暂复用上一账号内容。
+  syncInteractionWorkspace();
   // 云端环境（change edge-cloud-env-selector）：目标云端随快照更新；刷新 chip / 当前连接 / 待重启。
   if (snap.cloudEnv) targetCloud = snap.cloudEnv;
   updateCloudPending();
@@ -2039,6 +2066,7 @@ function selectEnv(envId) {
   pubManualOpen = false;
   closePublishPreview();
   resetPersonaDraft(); // 人设向导每环境独立：切换即清草稿，绝不把 A 的草稿误确认到 B
+  syncInteractionWorkspace();
   window.aidcpEdge.fleetSelect?.(envId);
   const env = fleetView.envs.get(envId);
   if (env && env.status) render(env.status);

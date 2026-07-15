@@ -76,6 +76,7 @@
       </aside>
 
       <main class="shell">
+      <div id="legacy-workspace" class="legacy-workspace">
       <!-- 引导式登录/验证码流：把全部待处理环境排队、一次引导一个 -->
       <section id="guide-panel" class="setup guide hidden">
         <div class="setup-txt">
@@ -318,6 +319,60 @@
         <summary>开发者详情</summary>
         <pre id="last-message">等待状态…</pre>
       </details>
+      </div>
+
+      <!-- 视频号互动工作区：只替换右侧当前环境内容，标题栏与环境栏继续复用现有应用壳。 -->
+      <section id="interaction-workspace" class="interaction-workspace hidden" aria-label="视频号互动工作区">
+        <header class="iw-overview">
+          <div class="iw-overview-copy">
+            <span class="iw-kicker">视频号互动</span>
+            <h1 id="iw-title">正在加载互动状态</h1>
+            <p id="iw-summary">正在读取当前环境的评论和私信。</p>
+          </div>
+          <div class="iw-overview-actions">
+            <span id="iw-browser" class="iw-status-chip neutral">浏览器状态待确认</span>
+            <button id="iw-reauth" class="iw-button secondary hidden" type="button">重新登录</button>
+            <button id="iw-sync" class="iw-button secondary" type="button">局部刷新</button>
+          </div>
+          <div class="iw-status-line" aria-live="polite">
+            <span id="iw-sync-status">同步状态待确认</span>
+            <span id="iw-as-of">—</span>
+          </div>
+        </header>
+
+        <nav id="iw-tabs" class="iw-tabs" aria-label="互动分类">
+          <button class="iw-tab active" type="button" data-interaction-tab="pending" aria-pressed="true">待处理</button>
+          <button class="iw-tab" type="button" data-interaction-tab="comment" aria-pressed="false">评论</button>
+          <button class="iw-tab" type="button" data-interaction-tab="dm" aria-pressed="false">私信</button>
+          <button class="iw-tab" type="button" data-interaction-tab="replied" aria-pressed="false">已回复</button>
+        </nav>
+
+        <div class="iw-toolbar">
+          <label class="iw-search">
+            <span class="sr-only">搜索当前已加载互动</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+            <input id="iw-search" type="search" placeholder="搜索当前已加载内容" autocomplete="off" />
+          </label>
+          <span id="iw-list-meta" class="iw-list-meta">正在加载</span>
+        </div>
+
+        <div class="iw-inbox">
+          <section class="iw-list-pane" aria-label="互动列表">
+            <div id="iw-list" class="iw-list" role="listbox" aria-label="互动列表" aria-busy="true"></div>
+            <div class="iw-list-footer">
+              <span id="iw-list-error" class="iw-inline-error hidden" role="alert"></span>
+              <button id="iw-load-more" class="iw-button ghost hidden" type="button">加载更多</button>
+            </div>
+          </section>
+          <section id="iw-detail" class="iw-detail" aria-label="互动详情" aria-live="polite" aria-busy="false">
+            <div class="iw-empty-state">
+              <span class="iw-empty-icon" aria-hidden="true">···</span>
+              <strong>选择一条互动查看详情</strong>
+              <span>消息上下文、回复依据和发送状态会显示在这里。</span>
+            </div>
+          </section>
+        </div>
+      </section>
       </main>
     </div>
 
@@ -742,6 +797,7 @@
     </aside>
 
     <script src="./ui-logic.js"></script>
+    <script src="./interaction-workspace.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

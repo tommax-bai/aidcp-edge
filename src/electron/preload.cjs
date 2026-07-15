@@ -70,4 +70,16 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   clientSession: () => ipcRenderer.invoke('client-auth:session'),
   clientLoginPrefill: () => ipcRenderer.invoke('client-auth:prefill'),
   clearClientLoginPrefill: () => ipcRenderer.invoke('client-auth:prefill:clear'),
+  // 视频号互动工作区：逐端点具名 IPC。renderer 只能提交冻结 DTO，不能传 URL/method/header/token。
+  interactionList: (args) => ipcRenderer.invoke('interaction:list', args),
+  interactionDetail: (args) => ipcRenderer.invoke('interaction:detail', args),
+  interactionUpdateDraft: (args) => ipcRenderer.invoke('interaction:draft:update', args),
+  interactionApprove: (args) => ipcRenderer.invoke('interaction:approve', args),
+  interactionSend: (args) => ipcRenderer.invoke('interaction:send', args),
+  interactionRegenerate: (args) => ipcRenderer.invoke('interaction:regenerate', args),
+  interactionIgnore: (args) => ipcRenderer.invoke('interaction:ignore', args),
+  interactionEscalate: (args) => ipcRenderer.invoke('interaction:escalate', args),
+  interactionSync: (args) => ipcRenderer.invoke('interaction:sync', args),
+  interactionReopenAuth: (args) => ipcRenderer.invoke('interaction:auth:reopen', args),
+  interactionCancelReads: (envKey) => ipcRenderer.invoke('interaction:reads:cancel', { envKey }),
 });
