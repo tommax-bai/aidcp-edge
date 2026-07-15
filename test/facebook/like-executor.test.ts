@@ -476,8 +476,17 @@ test('fb-like[jsdom] 两段: 反应浮层「赞」项走 CDP 坐标点击、落�
       return {} as never;
     },
   };
-  const exec = new FacebookLikeExecutor({ cdp, ...noSleep }, fastOpts);
+  // 确定性制造“第二段坐标轨迹耗尽 60ms 确认窗口”：写已派发后仍必须至少复读一次，不能误报 state_unchanged。
+  let delayedPickerPointer = false;
+  const slowPickerSleep = async (ms: number) => {
+    if (!delayedPickerPointer && ms > 0 && doc.querySelector('[role="dialog"][aria-label="心情"]')) {
+      delayedPickerPointer = true;
+      await new Promise<void>((resolve) => setTimeout(resolve, fastOpts.verifyTimeoutMs + 20));
+    }
+  };
+  const exec = new FacebookLikeExecutor({ cdp, sleep: slowPickerSleep, random: noSleep.random }, fastOpts);
   const r = await exec.like({ noteId: 'https://www.facebook.com/groups/111/posts/BBB/' });
+  assert.equal(delayedPickerPointer, true, '回归夹具必须让第二段坐标轨迹越过原确认窗口');
   assert.equal(r.ok, true, '坐标点击浮层「赞」项 → 目标卡翻转');
   assert.equal(c2toggle.textContent, '赞');
   const hitPicker = pressed.find((p) => Math.abs(p.x - 620) <= 20 && Math.abs(p.y - 400) <= 20);

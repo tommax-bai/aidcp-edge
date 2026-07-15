@@ -293,7 +293,11 @@ export class FacebookLikeExecutor {
     const start = Date.now();
     let last: VerifyResult | undefined;
     let pickerCommitted = false;
-    while (Date.now() - start < this.opts.verifyTimeoutMs) {
+    // 第二段写已经派发后，即使坐标轨迹耗尽了原确认窗口，也必须至少再读一次目标卡状态。
+    // 否则慢机器会把“平台已接受、但来不及复读”误报为 state_unchanged。
+    let verifyPickerCommitOnce = false;
+    while (Date.now() - start < this.opts.verifyTimeoutMs || verifyPickerCommitOnce) {
+      verifyPickerCommitOnce = false;
       try {
         last = await evalJson<VerifyResult>(this.cdp, buildVerifyJs(targetId, runId));
         if (last?.tagged === false) {
@@ -315,6 +319,7 @@ export class FacebookLikeExecutor {
           if (committed) {
             pickerCommitted = true;
             await this.sleep(this.opts.settleMs);
+            verifyPickerCommitOnce = true;
             continue;
           }
         }
