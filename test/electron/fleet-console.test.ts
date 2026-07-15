@@ -748,15 +748,18 @@ test('人设成长引导：personaBound 状态先于 persist 回执到达时弹�
   assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), true, '首作卡活跃期间后续绑定态不得关闭弹窗');
 });
 
-test('人设成长引导：吉祥物放大撒花后延迟强调首轮预期，且支持 reduced motion', () => {
+test('人设成长引导：慢节奏放大撒花后用流光强调首轮预期，且支持 reduced motion', () => {
   assert.match(html, /mascot-celebration-512\.png/);
   assert.match(html, /<span class="pg-confetti"[^>]*>[\s\S]*?(?:<i><\/i>){10}[\s\S]*?<\/span>/);
-  assert.match(rendererCss, /\.persona-growth\.play \.pg-mascot\s*\{\s*animation:\s*pg-mascot-scale 840ms[^;]*both;/);
+  assert.match(rendererCss, /\.persona-growth\.play \.pg-mascot\s*\{\s*animation:\s*pg-mascot-scale 1400ms[^;]*260ms both;/);
   assert.match(rendererCss, /@keyframes pg-mascot-scale\s*\{[\s\S]*scale\(1\.12\)[\s\S]*\}/);
-  assert.match(rendererCss, /\.persona-growth\.play \.pg-expectation\s*\{\s*animation:\s*pg-expectation-focus 640ms[^;]*1080ms both;/);
-  assert.match(rendererCss, /@keyframes pg-expectation-focus\s*\{[\s\S]*scale\(1\.025\)[\s\S]*\}/);
+  assert.match(rendererCss, /\.persona-growth\.play \.pg-confetti i\s*\{[^}]*animation-duration:\s*1250ms;[^}]*animation-delay:\s*calc\(300ms \+ var\(--pg-delay, 0ms\)\);/);
+  assert.match(rendererCss, /\.persona-growth\.play \.pg-expectation::after\s*\{\s*animation:\s*pg-expectation-shimmer 1700ms[^;]*1980ms both;/);
+  const shimmerFrames = rendererCss.match(/@keyframes pg-expectation-shimmer\s*\{([\s\S]*?)\n\}/)?.[1] ?? '';
+  assert.match(shimmerFrames, /translateX/);
+  assert.doesNotMatch(shimmerFrames, /translateY|scale\(/, '文字流光不得再做弹跳或缩放');
   assert.doesNotMatch(rendererCss, /\.persona-growth\.play \.pg-mascot[^}]*infinite/);
-  assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.persona-growth\.play \.pg-mascot[\s\S]*\.persona-growth\.play \.pg-expectation\s*\{[\s\S]*animation:\s*none;/);
+  assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.persona-growth\.play \.pg-mascot[\s\S]*\.persona-growth\.play \.pg-expectation::after\s*\{[\s\S]*animation:\s*none;/);
   assert.match(rendererCss, /\.pg-step-icon\s*\{[^}]*color:\s*#2d8fa4;[^}]*\}/);
   assert.doesNotMatch(rendererCss, /\.pg-step-icon\s*\{[^}]*background:/);
 });
