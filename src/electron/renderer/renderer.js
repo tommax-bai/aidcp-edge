@@ -850,11 +850,21 @@ async function draftDelegatedTask(action, targetConstraints = {}, opts = {}) {
     priority: fields.delegatedPriority && fields.delegatedPriority.checked ? 'high' : 'normal',
     sourceRef: `edge:${envId}:${action}:${Math.floor(Date.now() / 60000)}`,
   };
-  setDelegatedMessage('正在生成结构化确认…');
+  setDelegatedMessage('正在提交…');
   const result = await window.aidcpEdge.delegatedTaskDraft(envId, payload);
   if (!result || !result.ok) {
     setDelegatedMessage(delegatedErrorText(result), true);
     return false;
+  }
+  // 结构化精确入口（edge 快捷入口）无可推断歧义 → 云端直接确认入队，不再出「请确认用户委托任务」卡；
+  // 结果由飞书结果卡按真实验证结果回报。仅当云端仍回未确认态（自然语言路径，edge 不会命中）才展示确认卡。
+  const task = result.data && result.data.task;
+  if (result.data && (result.data.autoQueued || (task && task.status && task.status !== 'awaiting_confirmation'))) {
+    pendingDelegatedTask = null;
+    const shortId = task && task.id ? String(task.id).slice(0, 8) : '—';
+    setDelegatedMessage(`已排队（任务 ${shortId}…）；只按真实验证结果计数，非平台成功回执。`);
+    void refreshDelegatedTasks(true, envId);
+    return true;
   }
   showDelegatedConfirmation(result.data, envId);
   setDelegatedMessage('任务尚未执行，请核对确认卡。');
