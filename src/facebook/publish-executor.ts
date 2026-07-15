@@ -10,6 +10,7 @@ import {
 import type { ImageUploader } from '../flows/image-uploader.js';
 import type { PublishCommandPayload, PublishCommandResultPayload } from '../comm/protocol.js';
 import { TaskTakeoverError, type TakeoverCtx } from '../execution/takeover.js';
+import type { CommitWindowGuard } from '../execution/commit-window.js';
 
 export interface FacebookPublishExecutorOptions {
   settleMs?: number;
@@ -36,6 +37,11 @@ export interface FacebookPublishExecutorDeps {
   cdp: BrowseCdp;
   uploader?: ImageUploader;
   logger?: (message: string) => void;
+  /**
+   * 提交窗口守卫（change lease-strict-preemption 5.1）：发布提交点击前 `enter()`、确认后 `dispose()`。
+   * 未注入 = 抢占能力休眠、行为逐字不变（保守缺省，同 EdgeTaskPageWriterProbe）。与 XHS 发布共用同一实例。
+   */
+  commitWindow?: CommitWindowGuard;
 }
 
 const FACEBOOK_HOME_URL = 'https://www.facebook.com/';
@@ -218,12 +224,14 @@ export class FacebookPublishExecutor {
   private readonly uploader?: ImageUploader;
   private readonly opts: Required<FacebookPublishExecutorOptions>;
   private readonly log: (message: string) => void;
+  private readonly commitWindow?: CommitWindowGuard;
 
   constructor(deps: FacebookPublishExecutorDeps, options: FacebookPublishExecutorOptions = {}) {
     this.cdp = deps.cdp;
     this.uploader = deps.uploader;
     this.opts = { ...DEFAULTS, ...options };
     this.log = deps.logger ?? (() => {});
+    this.commitWindow = deps.commitWindow;
   }
 
   /**
@@ -486,6 +494,10 @@ export class FacebookPublishExecutor {
   }
 
   private async submit(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+    // 已派发提交动作（6.2）：按下事件真正发出那一刻置真。center 查找 / no_target / 控件禁用等**点击之前**的失败保持 false。
+    let submitDispatched = false;
+    // 提交窗口守卫（5.1）：点「发布」前 enter、确认段内绝不被强杀，disposer 在 finally 关窗（时基兜底自动过期兜底）。
+    let disposeCommit: (() => void) | undefined;
     try {
       const target = await evalJson<{ found: boolean; disabled: boolean; label: string | null; x: number | null; y: number | null }>(
         this.cdp,
@@ -495,16 +507,24 @@ export class FacebookPublishExecutor {
         return { ...base(payload), ok: false, error: 'no_target' };
       }
       if (target.disabled) return { ...base(payload), ok: false, error: 'submit_control_disabled' };
+      // 🔴 不可逆提交窗口开启（5.1）：点击 → 确认段整体受保护，协调器此间不强杀（回 window_busy + 剩余预算）。
+      disposeCommit = this.commitWindow?.enter(this.opts.submitVerifyTimeoutMs, 'fb_publish_submit');
       await dispatchClick(this.cdp, target.x, target.y, { overshoot: false, jitter: 0 });
+      // 🔴 点击已派发：帖子可能已发出。即便下方确认失败，云端 MUST NOT 当「提交前失败」重投（6.2；否则双发）。
+      submitDispatched = true;
       const submitted = await this.waitUntil(this.opts.submitVerifyTimeoutMs, () =>
         evalRaw<boolean>(
           this.cdp,
           `(function(){${FB_PUBLISH_HELPERS_JS} return fbPublishSubmittedSignal(); })()`,
         ).catch(() => false),
       );
-      return submitted ? { ...base(payload), ok: true } : { ...base(payload), ok: false, error: 'post_validate_failed' };
+      return submitted
+        ? { ...base(payload), ok: true, submitDispatched }
+        : { ...base(payload), ok: false, error: 'post_validate_failed', submitDispatched };
     } catch (err) {
-      return { ...base(payload), ok: false, error: `engine_error: ${err instanceof Error ? err.message : String(err)}` };
+      return { ...base(payload), ok: false, error: `engine_error: ${err instanceof Error ? err.message : String(err)}`, submitDispatched };
+    } finally {
+      disposeCommit?.();
     }
   }
 

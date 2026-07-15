@@ -68,7 +68,7 @@ export class FacebookCommentHandler {
           await this.onComment(env.payload as InteractionCommentPayload, checkpoint);
           return;
         case 'group.join':
-          await this.onJoin(env.payload as GroupJoinPayload);
+          await this.onJoin(env.payload as GroupJoinPayload, checkpoint);
           return;
         default:
           // 白名单命中但本平台不支持：显式诚实回执，绝不静默丢弃。
@@ -163,7 +163,7 @@ export class FacebookCommentHandler {
     }
   }
 
-  private async onJoin(payload: GroupJoinPayload): Promise<void> {
+  private async onJoin(payload: GroupJoinPayload, checkpoint?: () => void): Promise<void> {
     if (!this.joinExecutor) {
       this.client.reportActionCompleted({ action: 'join_group', ok: false, reason: 'capability_unsupported' });
       return;
@@ -174,7 +174,8 @@ export class FacebookCommentHandler {
     }
     this.busy = true;
     try {
-      const r = await this.joinExecutor.joinGroup(payload.groupUrl, { click: payload.click, thinkMs: payload.thinkMs });
+      // checkpoint（5.10b）：加群点击后短确认窗口过后的观察尾段可被接管中断，被接管即抛 → handle catch 转 preempted_by_task。
+      const r = await this.joinExecutor.joinGroup(payload.groupUrl, { click: payload.click, thinkMs: payload.thinkMs }, checkpoint);
       this.client.reportActionCompleted({
         action: 'join_group',
         ok: r.ok,

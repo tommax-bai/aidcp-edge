@@ -43,6 +43,7 @@ import {
   type Checkpoint,
   type TakeoverCtx,
 } from '../execution/takeover.js';
+import type { CommitWindowGuard } from '../execution/commit-window.js';
 import { pollBounded } from './bounded-poll.js';
 
 /** 指令运行时依赖（EngineDeps 去掉 validator——validator 由各处理器按 kind 提供）。 */
@@ -263,6 +264,11 @@ export class PublishCommandDispatcher {
     pacing: PublishPacing = {},
     /** Facebook 发布执行器；未注入时 Facebook 指令诚实回 kind_not_implemented。 */
     private readonly facebookPublisher?: PlatformPublishCommandExecutor,
+    /**
+     * 提交窗口守卫（change lease-strict-preemption 5.1）：XHS `runSubmit` 点「发布」前 `enter()`、确认后 `dispose()`。
+     * 未注入 = 抢占能力休眠、行为逐字不变。与 Facebook 发布执行器共用同一实例（同一发布写者的两个平台分支）。
+     */
+    private readonly publishGuard?: CommitWindowGuard,
   ) {
     this.clock = clock;
     this.pacingEnabled = pacing.enabled !== false;
@@ -899,6 +905,10 @@ export class PublishCommandDispatcher {
     const startedAt = this.clock();
     const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
     const details = { actionId: 'note.publish_submit', durationMs: 0 };
+    // 已派发提交动作（6.2）：点击真正发出那一刻置真；center 查找 / no_target 等**点击之前**的失败保持 false。
+    let submitDispatched = false;
+    // 提交窗口守卫（5.1）：点「发布」前 enter、确认段（≤15s poll）内绝不被强杀，disposer 关窗（时基兜底自动过期）。
+    let closeWindow: (() => void) | undefined;
     // 发布按钮在 <xhs-publish-btn> 闭合 shadow 内（BUTTON.ce-btn.bg-red，文本「发布」）；CDP DOM 穿透闭合 shadow 取精确盒模型中心点。
     let center: { x: number; y: number } | null = null;
     try {
@@ -920,6 +930,8 @@ export class PublishCommandDispatcher {
         await this.pause(PACING_MS.submitReview);
         // 🔴 整条发布流的**最后一个安全取消点**：帖子一个字节都还没提交出去。
         takeover?.checkpoint();
+        // 🔴 提交窗口开启（5.1）：越过此点即不可逆，协调器此间不强杀（回 window_busy + 剩余预算）。
+        closeWindow = this.publishGuard?.enter(15_000, 'xhs_publish_submit');
         await dispatchClick(this.cdp, x, y, {
           random: this.random,
           sleep: this.sleep,
@@ -930,15 +942,20 @@ export class PublishCommandDispatcher {
         });
       } else {
         takeover?.checkpoint();
+        // 🔴 提交窗口开启（5.1）：同 pacing 路径，越过此点即不可逆。
+        closeWindow = this.publishGuard?.enter(15_000, 'xhs_publish_submit');
         await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
         await this.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
         await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
       }
     } catch (err) {
+      closeWindow?.(); // 点击段抛错（含被接管前的 CDP 故障）：关窗，别让一个已作废的提交窗口挡住后续抢占。
       rethrowIfTakeover(err);
       const message = err instanceof Error ? err.message : String(err);
       return { ...base, ok: false, error: `engine_error: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
     }
+    // 🔴 点击已派发：帖子可能已发出。即便下方确认失败，云端 MUST NOT 当「提交前失败」重投（6.2；否则双发）。
+    submitDispatched = true;
     // 诊断（只观测）：点击后立即快照页面状态（在 deadline 计算之前，不占用 15s 校验窗口）。
     await this.logSubmitDiag(x, y, 'after-click');
     // 🔴 提交点已跨过：以下 MUST NOT 取消（全仓代价最高的禁区）。中止 = 一篇**可能已经发出去的帖子**
@@ -959,10 +976,11 @@ export class PublishCommandDispatcher {
       clock: this.clock,
       sleep: this.sleep,
     });
-    if (ok) return { ...base, ok: true, details: { ...details, durationMs: this.clock() - startedAt } };
+    closeWindow?.(); // 确认段结束：关窗（成功/超时都在此后回执，窗口不再需要保护）。
+    if (ok) return { ...base, ok: true, submitDispatched, details: { ...details, durationMs: this.clock() - startedAt } };
     // 诊断（只观测）：超时时快照终态——区分 仍在编辑页有弹层/toast vs 已跳但晚于窗口。
     await this.logSubmitDiag(x, y, 'timeout');
-    return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
+    return { ...base, ok: false, error: 'post_validate_failed', submitDispatched, details: { ...details, durationMs: this.clock() - startedAt } };
   }
 
   /**

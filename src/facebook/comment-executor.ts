@@ -31,6 +31,7 @@ import {
 import { isUrlAllowedByTargetDescriptor } from '../platform/driver.js';
 import { canonicalPostId, FB_TARGET_HELPERS_JS } from './post-identity.js';
 import { TaskTakeoverError } from '../execution/takeover.js';
+import type { CommitWindowGuard } from '../execution/commit-window.js';
 import { scrollFacebookViewport } from './viewport-scroll.js';
 
 /**
@@ -130,6 +131,11 @@ export interface FacebookCommentExecutorDeps {
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
   logger?: (msg: string) => void;
+  /**
+   * 提交窗口守卫（change lease-strict-preemption 5.1）：评论回车提交前 `enter()`、确认后 `dispose()`。
+   * 未注入 = 抢占能力休眠、行为逐字不变。与浏览会话共用同一 browse 侧实例。
+   */
+  commitWindow?: CommitWindowGuard;
 }
 
 export interface FacebookCommentExecutorOptions {
@@ -212,6 +218,7 @@ export class FacebookCommentExecutor {
   private readonly random?: () => number;
   private readonly log: (msg: string) => void;
   private readonly opts: Required<FacebookCommentExecutorOptions>;
+  private readonly commitWindow?: CommitWindowGuard;
 
   constructor(deps: FacebookCommentExecutorDeps, options: FacebookCommentExecutorOptions = {}) {
     this.cdp = deps.cdp;
@@ -222,6 +229,7 @@ export class FacebookCommentExecutor {
     this.random = deps.random;
     this.log = deps.logger ?? (() => {});
     this.opts = { ...DEFAULTS, ...options };
+    this.commitWindow = deps.commitWindow;
   }
 
   /**
@@ -489,6 +497,9 @@ export class FacebookCommentExecutor {
 
     const code = contactInfo && contactInfo.length > 0 ? contactInfo : '';
     const requiredFragments = requiredTextFragments(body, code);
+    // 提交窗口守卫（5.1）：回车（536）前 enter，确认段（禁区）内绝不被强杀；enter 在最后取消点之后赋值，
+    // 取消/失败早退时仍为 undefined ⇒ dispose 为 no-op、绝不干扰既有清场。
+    let disposeCommit: (() => void) | undefined;
     try {
       checkpoint?.(); // 聚焦/滚动是页面写 → 查在它之前（此刻零副作用）
 
@@ -533,8 +544,11 @@ export class FacebookCommentExecutor {
       // 受控输入后可能失焦——先再聚焦一次，确保 Enter 落在编辑器上；随后按 Enter 提交。
       // （旧版按按钮文案 `发布评论|Post|…` 定位提交控件在西语/问答帖上会 submit_control_not_found；回车更稳。）
       await evalJson<FocusEditorResult>(this.cdp, buildFocusEditorJs(targetPostId));
+      // 🔴 提交窗口开启（5.1）：回车即发，确认段整体受保护，协调器此间不强杀（回 window_busy + 剩余预算）。
+      disposeCommit = this.commitWindow?.enter(20000, 'fb_comment_enter');
       await dispatchKey(this.cdp, 'Enter', 'Enter', 13);
     } catch (err) {
+      disposeCommit?.(); // 回车派发时的 CDP 故障：关窗（takeover 早退时 disposeCommit 仍 undefined、no-op）。
       if (err instanceof TaskTakeoverError) {
         // 让位前 MUST 清场：FB 侧打字前**只聚焦、不清空**，半截评论留在编辑器里会直接接在下一条
         // 前面发出去（真·对外内容污染）。三条既有失败分支都是这么干的，照抄。
@@ -542,23 +556,26 @@ export class FacebookCommentExecutor {
       }
       throw err;
     }
-    // 🔴 回车已发出：以下确认段 MUST NOT 取消（禁区）。
-
-    // (1) 就地 ack 门控快确认（不刷新，抓服务器点头即成功、比刷新又快又准）。
-    if (await this.inPlaceAckConfirm(requiredFragments, ownId, targetPostId)) {
-      return { ok: true, submitted: true, serverConfirmed: true };
-    }
-    // (2) 兜底：刷新一次 + 有界轮询三重收窄确认（治慢渲染假阴性；提交后误导性报错浮层不当作失败，确认信号权威）。
+    // 🔴 回车已发出：以下确认段 MUST NOT 取消（禁区）。窗口在确认段结束（四条出口）由 finally 关闭。
     try {
-      await this.cdp.send('Page.reload', { ignoreCache: true });
-    } catch (err) {
-      this.log(`[fb-comment] reload 失败：${(err as Error).message}`);
+      // (1) 就地 ack 门控快确认（不刷新，抓服务器点头即成功、比刷新又快又准）。
+      if (await this.inPlaceAckConfirm(requiredFragments, ownId, targetPostId)) {
+        return { ok: true, submitted: true, serverConfirmed: true };
+      }
+      // (2) 兜底：刷新一次 + 有界轮询三重收窄确认（治慢渲染假阴性；提交后误导性报错浮层不当作失败，确认信号权威）。
+      try {
+        await this.cdp.send('Page.reload', { ignoreCache: true });
+      } catch (err) {
+        this.log(`[fb-comment] reload 失败：${(err as Error).message}`);
+        return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
+      }
+      if (await this.reloadScopedConfirm(requiredFragments, ownId, targetPostId)) {
+        return { ok: true, submitted: true, serverConfirmed: true };
+      }
       return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
+    } finally {
+      disposeCommit?.();
     }
-    if (await this.reloadScopedConfirm(requiredFragments, ownId, targetPostId)) {
-      return { ok: true, submitted: true, serverConfirmed: true };
-    }
-    return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
   }
 
   /**

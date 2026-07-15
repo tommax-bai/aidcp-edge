@@ -738,11 +738,16 @@ class SubmitFakeCdp {
   private readonly href = 'https://creator.xiaohongshu.com/publish/publish?source=official';
   private bodyText = '正在编辑';
   private checkProbes = 0;
-  /** 第几次 CHECK 轮询时页面才出现「发布成功」（缺省第 2 次：toast 晚一拍，逼后置校验真的轮询）。 */
-  constructor(private readonly opts: { successAtProbe?: number } = {}) {}
+  /**
+   * successAtProbe：第几次 CHECK 轮询时页面才出现「发布成功」（缺省第 2 次：toast 晚一拍，逼后置校验真的轮询；
+   *   传 Infinity = 成功文案永不出现，逼出 post_validate_failed）。
+   * noButton：DOM 里没有「发布」按钮 → findShadowButtonCenter 返回 null → no_target（点击之前失败）。
+   */
+  constructor(private readonly opts: { successAtProbe?: number; noButton?: boolean } = {}) {}
   async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ method, params });
     if (method === 'DOM.getDocument') {
+      if (this.opts.noButton) return { root: { nodeType: 9, children: [] } } as T; // 无「发布」按钮 → no_target
       // 文本恰为「发布」的元素节点（nodeId=7）；walk() 按 children 里的文本节点命中。
       return { root: { nodeType: 9, children: [{ nodeType: 1, nodeId: 7, children: [{ nodeType: 3, nodeValue: '发布' }] }] } } as T;
     }
@@ -815,6 +820,7 @@ test('取消点：submit_publish 在「通读停留」期间被接管 → 零 mo
   assert.equal(cdp.pressed(), 0, '提交点之前让位 MUST 零 mousePressed：帖子一个字节都没提交出去');
   assert.equal(res.ok, false);
   assert.equal(res.error, 'preempted_by_task');
+  assert.ok(!res.submitDispatched, '点击之前被接管 = 压根没点：submitDispatched MUST 为假（否则云端记成「已提交待确认」丢稿）');
 });
 
 test('🔴 禁区：submit_publish 点击已发出后被接管 → 15s 后置校验照跑到底，按页面真实成功态回 ok:true（绝不改写成 preempted）', async () => {
@@ -832,7 +838,32 @@ test('🔴 禁区：submit_publish 点击已发出后被接管 → 15s 后置校
   assert.equal(cdp.pressed(), 1, '确实点了发布（提交点已跨过）');
   assert.equal(res.ok, true, '提交点之后 MUST NOT 取消：后置校验照跑到底、按页面真实成功态回报');
   assert.equal(res.error, undefined, '绝不改写成 preempted_by_task —— 那会让云端重投、发两遍');
+  assert.equal(res.submitDispatched, true, '点击已发出 → submitDispatched=true（6.2）');
   assert.ok(cdp.checkProbeCount() >= 2, '后置校验确实轮询到成功文案出现（而非一探就返回）');
   // 反「空测」自证：接管确实是「已发生」态——实现只是（正确地）在禁区里从不调用它。
   assert.throws(() => takeover.checkpoint(), TaskTakeoverError);
+});
+
+test('🔴 6.2 已派发提交位：点击已发出但后置校验超时未确认 → ok:false/post_validate_failed 且 submitDispatched=true（云端 MUST NOT 当「提交前失败」重投）', async () => {
+  // 成功文案永不出现（successAtProbe=Infinity）+ URL 钉在发布页 → CHECK 全程为假 → post_validate_failed。
+  // 关键：点击已经发出去了，帖子可能已发出。此回执必须携 submitDispatched=true，区别于「压根没点」的
+  // no_target/engine_error（那些保持假）——否则云端把一篇可能已发出的稿判成提交前失败、重投 = 双发。
+  const cdp = new SubmitFakeCdp({ successAtProbe: Number.POSITIVE_INFINITY });
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 9));
+
+  assert.equal(cdp.pressed(), 1, '确实点了发布');
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^post_validate_failed/, '成功证据未命中 → 诚实 post_validate_failed（绝不假成功）');
+  assert.equal(res.submitDispatched, true, '已点未确认 MUST submitDispatched=true —— 与「压根没点」回执面区分开');
+});
+
+test('🔴 6.2 已派发提交位：发布按钮找不到（no_target，压根没点）→ submitDispatched 保持假', async () => {
+  // center 查找类失败在点击之前返回，MUST NOT 携 submitDispatched（否则一篇从未提交的稿被记成已提交待确认、永久丢失）。
+  const cdp = new SubmitFakeCdp({ noButton: true });
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 10));
+
+  assert.equal(cdp.pressed(), 0, '没找到发布按钮 → 一次点击都没发出');
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'no_target');
+  assert.ok(!res.submitDispatched, 'no_target = 压根没点：submitDispatched MUST 为假');
 });

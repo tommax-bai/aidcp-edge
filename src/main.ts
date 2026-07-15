@@ -72,6 +72,7 @@ import { LikeStepRunner } from './client/like-runner.js';
 import { publishPost } from './flows/publish-post.js';
 import { PublishCommandDispatcher } from './flows/publish-command-handlers.js';
 import { EdgeTaskCoordinator } from './execution/edge-task-coordinator.js';
+import { CommitWindowGuard } from './execution/commit-window.js';
 import { PublishUiEventTracker, uiSnapshotToLines, writeNoteStageLine } from './flows/ui-event-lines.js';
 import { ImageUploader, imageTempPrefixFor, sweepImageTempDirs } from './flows/image-uploader.js';
 import { CdpFileInputSetter } from './cdp/file-input-setter.js';
@@ -371,6 +372,12 @@ async function main(): Promise<void> {
   // §7 在途发布追踪：回收若撞上在途发布，先把它诚实判失败（让审批/通知侧看到失败而非半成品），
   // 绝不静默丢弃让其跨重起被重复触发 → 真账号重复发帖。值为「按各自结果形状诚实判失败」的闭包。
   const inFlightPublishes = new Map<string, (reason: string) => void>();
+  // 提交窗口守卫（change lease-strict-preemption 5.1）：页面写者进入不可逆提交动作前 enter()、确认后 dispose()。
+  //   publishGuard 归发布写者（XHS runSubmit + FB publish-executor）；browseGuard 归浏览写者（XHS 评论/通知分类、FB 评论/加群）。
+  //   在此集中创建、下注入各写者（enter/exit），并（批 B-2b 激活时）经 combineCommitWindows 聚合喂给协调器 writers 探针。
+  //   系统同一时刻至多一个独占写者在跑 ⇒ 至多一个窗口开着。
+  const publishGuard = new CommitWindowGuard();
+  const browseGuard = new CommitWindowGuard();
   // 退出码契约（看护进程 launch-multinode 据此决定是否重起）：
   //   0            = 关机（SIGINT/SIGTERM），不重起；
   //   EXIT_RECYCLE = 可恢复终态回收，请重起（sysexits EX_TEMPFAIL=75：临时失败、邀请重试）。
@@ -714,6 +721,7 @@ async function main(): Promise<void> {
   const facebookPublishExecutor = new FacebookPublishExecutor({
     cdp: session.cdp,
     uploader: facebookImageUploader,
+    commitWindow: publishGuard, // 5.1：FB 发布提交窗口与 XHS 共用同一 publishGuard
   });
   const publishDispatcher = new PublishCommandDispatcher(
     {
@@ -729,6 +737,7 @@ async function main(): Promise<void> {
     session.cdp,
     undefined,
     facebookPublishExecutor,
+    publishGuard, // 5.1：XHS runSubmit 提交窗口
   );
   // 陪伴界面事件（edge-companion-ui 6.4）：发布终态的本地事实经 [ui-event] 行直达桌面壳。
   const publishUiEvents = new PublishUiEventTracker();
@@ -855,12 +864,14 @@ async function main(): Promise<void> {
       getAccountId: () => accountId,
       overlayMonitor,
       logger: (m) => console.log(m),
+      commitWindow: browseGuard, // 5.1：FB 评论回车提交窗口
     });
     const fbJoinExecutor = platformDriver.capabilities.includes('join')
       ? new FacebookJoinExecutor({
           cdp: session.cdp,
           overlayMonitor,
           logger: (m) => console.log(m),
+          commitWindow: browseGuard, // 5.1/5.10b：FB 加群短确认窗口
         })
       : undefined;
     const fbCommentHandler = new FacebookCommentHandler({
@@ -1038,11 +1049,13 @@ async function main(): Promise<void> {
       getAccountId: () => accountId,
       overlayMonitor,
       logger: (m) => console.log(m),
+      commitWindow: browseGuard, // 5.1：FB 评论回车提交窗口
     });
     const fbJoinExecutor = new FacebookJoinExecutor({
       cdp: session.cdp,
       overlayMonitor,
       logger: (m) => console.log(m),
+      commitWindow: browseGuard, // 5.1/5.10b：FB 加群短确认窗口
     });
     const fbCommentHandler = new FacebookCommentHandler({
       executor: fbCommentExecutor,
@@ -1124,6 +1137,7 @@ async function main(): Promise<void> {
         modalCtrl: new CdpModalController(session.cdp),
         overlayMonitor,
         stepRunner: runner,
+        commitWindow: browseGuard, // 5.1：XHS 评论提交 + 通知分类栏目点击窗口
       },
       browseOpts,
     );

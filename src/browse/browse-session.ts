@@ -57,6 +57,7 @@ import { NOTE_BODY_SELECTORS, parseCount } from './note-extractor.js';
 import { executeSearch, applySearchFilters, SEARCH_RESULT_URL_RE, searchResultMatchesKeyword } from './search-handler.js';
 import { evalRaw, InputDispatchDeadlineError, type RandomFn, type BrowseCdp } from './cdp-util.js';
 import { TaskTakeoverError } from '../execution/takeover.js';
+import type { CommitWindowGuard } from '../execution/commit-window.js';
 import { CdpDisconnectedError } from '../cdp/client.js';
 import { buildNotificationHomeJs, buildNotificationItemsJs, buildNotificationCategoryItemsJs } from './notification-monitor.js';
 import type { DomProvider } from '../locating/engine.js';
@@ -110,6 +111,11 @@ export interface BrowseSessionDeps {
    * 同时注入 overlayMonitor 与 loginGate 时，优先用 overlayMonitor。
    */
   overlayMonitor?: OverlayMonitor;
+  /**
+   * 提交窗口守卫（change lease-strict-preemption 5.1）：不可逆提交动作（评论提交 / 通知分类栏目点击）前
+   * `enter()`、确认后 `dispose()`。未注入 = 抢占能力休眠、行为逐字不变（保守缺省，同 EdgeTaskPageWriterProbe）。
+   */
+  commitWindow?: CommitWindowGuard;
 }
 
 export interface BrowseSessionOptions {
@@ -2398,6 +2404,8 @@ export class BrowseSession {
       this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'empty_text' });
       return;
     }
+    // 提交窗口守卫（5.1）：评论提交点击前 enter、确认段（≤2s poll）内绝不被强杀，finally dispose（时基兜底自动过期）。
+    let disposeCommit: (() => void) | undefined;
     try {
       const { dispatchClick, dispatchKeystrokes, insertText } = await import('./cdp-util.js');
 
@@ -2508,6 +2516,8 @@ export class BrowseSession {
         this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'no_target' });
         return;
       }
+      // 🔴 提交窗口开启（5.1）：点下即进入禁区，协调器此间不强杀（回 window_busy + 剩余预算）。
+      disposeCommit = this.deps.commitWindow?.enter(4000, 'xhs_comment_submit');
       await dispatchClick(this.deps.cdp, submit.x, submit.y, { random: this.random });
       // 🔴 提交键已点下：以下后置校验 MUST NOT 取消（禁区）。
 
@@ -2553,6 +2563,8 @@ export class BrowseSession {
       }
       this.logger(`[browse] comment 执行失败（耗时 ${elapsed()}）：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action, ok: false, reason: (err as Error).message });
+    } finally {
+      disposeCommit?.(); // 关窗（enter 只在提交点击后被赋值 ⇒ 取消/失败早退时为 no-op，绝不覆盖 takeover 清场）。
     }
   }
 
@@ -3011,8 +3023,11 @@ export class BrowseSession {
    * scrollMax 由云端下发，此处当作硬上限的下限参考（实际上限取 max(scrollMax, HARD_CAP_FLOOR)）。
    */
   private async browseNotificationComments(scrollMax: number): Promise<void> {
+    // 提交窗口守卫（5.1）：分类栏目点击**消费未读、无回滚** ⇒ 窗口 MUST 覆盖点击那一刻；确认/滚动尾段只读，超预算自动过期也安全。
+    let disposeCommit: (() => void) | undefined;
     try {
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
+      disposeCommit = this.deps.commitWindow?.enter(20000, 'xhs_notification_comments');
       await evalRawFn<boolean>(
         this.deps.cdp,
         // 真机校准（2026-06-24）：真实分类 tab = [class*="tab-item"]（叶子），点它而非全页文本匹配（避免点到包裹容器）。
@@ -3047,6 +3062,8 @@ export class BrowseSession {
       if (err instanceof CdpDisconnectedError) throw err; // 断连不当业务失败：冒泡到主循环重连，绝不假报「空 items」
       this.logger(`[browse] notification.browse_comments 失败（上报空 items 以便云端收尾）：${(err as Error).message}`);
       this.deps.client.send?.('notification.items', { items: [] });
+    } finally {
+      disposeCommit?.();
     }
   }
 
@@ -3057,11 +3074,14 @@ export class BrowseSession {
    */
   private async viewNotificationCategory(kind: 'likes' | 'follows'): Promise<void> {
     const action = kind === 'likes' ? 'browse_notification_likes' : 'browse_notification_follows';
+    // 提交窗口守卫（5.1）：分类栏目点击消费未读、无回滚 ⇒ 窗口 MUST 覆盖点击；早退(no_target)/尾段都由 finally 关窗。
+    let disposeCommit: (() => void) | undefined;
     try {
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
       const labelRe = kind === 'likes' ? '赞|收藏' : '关注|粉丝';
       // 捕获点击命中布尔：未命中分类 tab（选择器漂移/页面未渲染/单合并 tab）→ 诚实 no_target，
       // **绝不**像旧码那样丢弃返回值、无条件报 viewed（那是静默假成功，且掩盖了 6.5.4 本要暴露的选择器漂移）。
+      disposeCommit = this.deps.commitWindow?.enter(20000, kind === 'likes' ? 'xhs_notification_likes' : 'xhs_notification_follows');
       const clicked = await evalRawFn<boolean>(
         this.deps.cdp,
         // 真机校准（2026-06-24）：分类 tab = [class*="tab-item"]（叶子，文本如「赞和收藏1」含角标数字故放宽到 <=8）。
@@ -3108,6 +3128,8 @@ export class BrowseSession {
       if (err instanceof CdpDisconnectedError) throw err; // 断连不当业务失败：冒泡到主循环重连，绝不假报「已看」
       this.logger(`[browse] ${action} 失败：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action, ok: false, reason: (err as Error).message });
+    } finally {
+      disposeCommit?.();
     }
   }
 

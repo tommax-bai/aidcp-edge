@@ -3,6 +3,8 @@ import type { OverlayKind, OverlayMonitor } from '../browse/overlay-monitor.js';
 import { isUrlAllowedByTargetDescriptor } from '../platform/driver.js';
 import { FACEBOOK_TARGET } from './driver.js';
 import { defaultFacebookConsentAccepter, type FacebookConsentAccepter } from './consent.js';
+import { rethrowIfTakeover } from '../execution/takeover.js';
+import type { CommitWindowGuard } from '../execution/commit-window.js';
 
 export type FacebookJoinReason =
   | 'observation_only'
@@ -88,6 +90,11 @@ export interface FacebookJoinExecutorDeps {
   acceptConsent?: FacebookConsentAccepter;
   sleep?: (ms: number) => Promise<void>;
   logger?: (msg: string) => void;
+  /**
+   * 提交窗口守卫（change lease-strict-preemption 5.1 + 5.10b）：加群点击前 `enter()` 开 ≤18.5s 短确认窗口
+   * （窗口内协调器不抢占），之后的观察尾段可被接管中断。未注入 = 抢占能力休眠。与浏览会话共用同一 browse 侧实例。
+   */
+  commitWindow?: CommitWindowGuard;
 }
 
 export interface FacebookJoinExecutorOptions {
@@ -600,6 +607,7 @@ export class FacebookJoinExecutor {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: (msg: string) => void;
   private readonly opts: Required<FacebookJoinExecutorOptions>;
+  private readonly commitWindow?: CommitWindowGuard;
 
   constructor(deps: FacebookJoinExecutorDeps, options: FacebookJoinExecutorOptions = {}) {
     this.cdp = deps.cdp;
@@ -608,14 +616,26 @@ export class FacebookJoinExecutor {
     this.sleep = deps.sleep ?? defaultSleep;
     this.log = deps.logger ?? (() => {});
     this.opts = { ...DEFAULTS, ...options };
+    this.commitWindow = deps.commitWindow;
   }
 
-  async joinGroup(groupUrlInput: string, options: { click?: boolean; thinkMs?: number } = {}): Promise<FacebookJoinResult> {
+  async joinGroup(
+    groupUrlInput: string,
+    options: { click?: boolean; thinkMs?: number } = {},
+    /**
+     * 安全取消点（change lease-strict-preemption 5.10b）：加群点击后的**短确认窗口（≤18.5s）内绝不触发**
+     * （协调器此间不抢占 ⇒ 世代号不变 ⇒ 门控 no-op）；窗口过后进入可中断尾段——被独占任务接管即抛
+     * `TaskTakeoverError`，放弃「等成员态确认」（加群点击本身已发生、不回滚），交由 handle 转 preempted_by_task。
+     */
+    checkpoint?: () => void,
+  ): Promise<FacebookJoinResult> {
     const groupUrl = canonicalGroupUrl(groupUrlInput);
     if (!groupUrl) {
       return { ok: false, reason: 'not_facebook', groupUrl: groupUrlInput, clicked: false };
     }
     let observation: FacebookGroupJoinObservation | undefined;
+    // 提交窗口守卫（5.1）：加群点击前赋值，观察尾段用时基自动过期（18.5s）划出「短确认 vs 可中断尾巴」；finally 关窗。
+    let disposeCommit: (() => void) | undefined;
     try {
       await this.cdp.send('Page.navigate', { url: groupUrl });
       if (this.opts.settleMs > 0) await this.sleep(this.opts.settleMs);
@@ -674,6 +694,8 @@ export class FacebookJoinExecutor {
       } catch {
         /* hover 仅拟人化，失败不影响后续 JS 点击。 */
       }
+      // 🔴 提交窗口开启（5.1）：加群点击 → 短确认（≤18.5s）受保护，协调器此间不强杀（回 window_busy + 剩余预算）。
+      disposeCommit = this.commitWindow?.enter(18_500, 'fb_join_click');
       const clickResult = await evalJson<{ clicked?: boolean; reason?: string }>(this.cdp, GROUP_JOIN_CLICK_JS);
       if (!clickResult?.clicked) {
         const bail = clickResult?.reason;
@@ -690,7 +712,7 @@ export class FacebookJoinExecutor {
       if (this.opts.waitAfterClickMs > 0) await this.sleep(this.opts.waitAfterClickMs);
       // 点击后轮询（change fb-group-join-postclick-wait）：等成员态真渲染出来再判——FB 常在点击后数秒才把按钮从「加入小组」
       // 翻成「已加入」，死等一次会把已成功的加入误判成 join_failed。轮询到 已加入/待审/问卷/登录/验证码 或触上限。
-      const post = await this.observePostClickUntilSettled(groupUrl, observation);
+      const post = await this.observePostClickUntilSettled(groupUrl, observation, checkpoint);
       const postObservation = post.observation;
       if (post.reason === 'joined') return { ok: true, groupUrl, clicked: true, observation, postObservation };
       if (post.reason) return { ok: false, reason: post.reason, groupUrl, clicked: true, observation, postObservation };
@@ -699,6 +721,9 @@ export class FacebookJoinExecutor {
       const settled = isMinimallyReady(postObservation);
       return { ok: false, reason: settled ? 'join_failed' : 'post_not_confirmed_slow', groupUrl, clicked: true, observation, postObservation };
     } catch (err) {
+      // 被接管（5.10b 尾段）绝不降级成 nav_error：MUST 冒泡到 handle 的 catch 转 preempted_by_task
+      // （降级成 nav_error 会让云端把「已发生的加群 + 主动让位」误判成一次业务失败）。
+      rethrowIfTakeover(err);
       const message = err instanceof Error ? err.message : String(err);
       this.log(`[fb-join] joinGroup failed: ${message}`);
       return {
@@ -708,6 +733,8 @@ export class FacebookJoinExecutor {
         clicked: false,
         observation: observation ?? { groupUrl, navError: message },
       };
+    } finally {
+      disposeCommit?.();
     }
   }
 
@@ -778,6 +805,11 @@ export class FacebookJoinExecutor {
     groupUrl: string,
     /** 同一次 click 导航内的点前观测——供 L3「跃迁」判据（composer 点前无、点后有）。 */
     preObservation: FacebookGroupJoinObservation | undefined,
+    /**
+     * 5.10b 可中断尾段：**短确认窗口过后**（提交窗口时基自动过期，isOpen()===false）每轮检查接管，被接管即抛出。
+     * 窗口内（协调器不抢占 ⇒ 世代号不变）门控为 no-op；无窗口/无 checkpoint 时同样安全（checkpoint?. 空转）。
+     */
+    checkpoint?: () => void,
   ): Promise<{
     observation: FacebookGroupJoinObservation;
     reason?: 'joined' | 'pending' | 'questionnaire_required' | 'login_required' | 'blocked_by_captcha';
@@ -802,6 +834,8 @@ export class FacebookJoinExecutor {
       if (structuralJoinConfirmed(preObservation, obs)) return { observation: obs, reason: 'joined' };
       if (Date.now() >= deadline) break;
       await this.sleep(pollMs);
+      // 5.10b：短确认窗口过后（提交窗口自动过期）尾段可被抢占中断；窗口内世代号未变 ⇒ 门控 no-op。
+      if (!this.commitWindow?.isOpen()) checkpoint?.();
     }
     return { observation: last };
   }
