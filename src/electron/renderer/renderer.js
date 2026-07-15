@@ -111,7 +111,10 @@ const fields = {
   publishPreviewActionHint: document.querySelector('#publish-preview-action-hint'),
   publishPreviewApprove: document.querySelector('#publish-preview-approve'),
   publishPreviewCancel: document.querySelector('#publish-preview-cancel'),
+  delegatedTrigger: document.querySelector('#delegated-trigger'),
+  delegatedIndicator: document.querySelector('#delegated-indicator'),
   delegatedCard: document.querySelector('#delegated-card'),
+  delegatedClose: document.querySelector('#delegated-close'),
   delegatedCount: document.querySelector('#delegated-count'),
   delegatedSchedule: document.querySelector('#delegated-schedule'),
   delegatedPriority: document.querySelector('#delegated-priority'),
@@ -655,6 +658,43 @@ const DELEGATED_STATUS_LABELS = {
 let pendingDelegatedTask = null;
 let pendingDelegatedEnvId = null;
 let delegatedLoading = false;
+let delegatedPopoverOpen = false;
+let delegatedActiveCount = 0;
+const DELEGATED_TERMINAL_STATUSES = new Set(['completed', 'partially_completed', 'cancelled', 'failed']);
+
+function syncDelegatedTriggerLabel() {
+  if (!fields.delegatedTrigger) return;
+  const action = delegatedPopoverOpen ? '关闭' : '打开';
+  const active = delegatedActiveCount > 0 ? `，${delegatedActiveCount} 个未结束任务` : '';
+  fields.delegatedTrigger.setAttribute('aria-label', `${action}委派任务${active}`);
+}
+
+function syncDelegatedTriggerTasks(tasks) {
+  delegatedActiveCount = Array.isArray(tasks)
+    ? tasks.filter((task) => task && !DELEGATED_TERMINAL_STATUSES.has(String(task.status || ''))).length
+    : 0;
+  fields.delegatedIndicator?.classList.toggle('hidden', delegatedActiveCount === 0);
+  syncDelegatedTriggerLabel();
+}
+
+function setDelegatedPopoverOpen(open, restoreFocus = false) {
+  if (!fields.delegatedCard || !fields.delegatedTrigger) return;
+  delegatedPopoverOpen = Boolean(open);
+  fields.delegatedCard.classList.toggle('hidden', !delegatedPopoverOpen);
+  fields.delegatedCard.setAttribute('aria-hidden', delegatedPopoverOpen ? 'false' : 'true');
+  fields.delegatedTrigger.setAttribute('aria-expanded', delegatedPopoverOpen ? 'true' : 'false');
+  syncDelegatedTriggerLabel();
+  if (delegatedPopoverOpen) {
+    fields.delegatedClose?.focus();
+    void refreshDelegatedTasks(false);
+  } else if (restoreFocus) {
+    fields.delegatedTrigger.focus();
+  }
+}
+
+function closeDelegatedPopover(restoreFocus = false) {
+  setDelegatedPopoverOpen(false, restoreFocus);
+}
 
 function setDelegatedMessage(text, error = false) {
   if (!fields.delegatedMessage) return;
@@ -672,6 +712,7 @@ function delegatedErrorText(result) {
 
 function renderDelegatedTasks(tasks) {
   if (!fields.delegatedList) return;
+  syncDelegatedTriggerTasks(tasks);
   if (!Array.isArray(tasks) || tasks.length === 0) {
     fields.delegatedList.innerHTML = '<span class="delegated-empty">当前环境暂无委托任务</span>';
     return;
@@ -699,7 +740,7 @@ function renderDelegatedTasks(tasks) {
     if (task.terminalOutcome && task.terminalOutcome.message) {
       appendPreviewText(row, task.terminalOutcome.message, 'delegated-task-reason');
     }
-    const terminal = ['completed', 'partially_completed', 'cancelled', 'failed'].includes(status);
+    const terminal = DELEGATED_TERMINAL_STATUSES.has(status);
     if (!terminal) {
       const controls = document.createElement('div');
       controls.className = 'delegated-task-controls';
@@ -814,7 +855,22 @@ async function controlDelegatedTask(task, action) {
 fields.delegatedActionButtons.forEach((button) => button.addEventListener('click', () => {
   void draftDelegatedTask(button.dataset.delegatedAction);
 }));
+fields.delegatedTrigger?.addEventListener('click', () => {
+  setDelegatedPopoverOpen(!delegatedPopoverOpen, delegatedPopoverOpen);
+});
+fields.delegatedClose?.addEventListener('click', () => { closeDelegatedPopover(true); });
 fields.delegatedRefresh?.addEventListener('click', () => { void refreshDelegatedTasks(false); });
+document.addEventListener('click', (event) => {
+  if (!delegatedPopoverOpen || fields.delegatedConfirm?.open) return;
+  const target = event.target;
+  if (fields.delegatedTrigger?.contains(target) || fields.delegatedCard?.contains(target)) return;
+  closeDelegatedPopover(false);
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || !delegatedPopoverOpen || fields.delegatedConfirm?.open) return;
+  event.preventDefault();
+  closeDelegatedPopover(true);
+});
 fields.delegatedConfirmSubmit?.addEventListener('click', async () => {
   if (!pendingDelegatedTask || !pendingDelegatedEnvId || fields.delegatedConfirmSubmit.disabled) return;
   fields.delegatedConfirmSubmit.disabled = true;
@@ -1950,6 +2006,10 @@ function applyFleetSnapshot(snap) {
   const prevSelected = fleetView.selected;
   if (snap.selectedEnvId && fleetView.envs.has(snap.selectedEnvId)) fleetView.selected = snap.selectedEnvId;
   if (!fleetView.selected || !fleetView.envs.has(fleetView.selected)) fleetView.selected = fleetView.order[0] || null;
+  if (fleetView.selected !== prevSelected) {
+    closeDelegatedPopover(false);
+    syncDelegatedTriggerTasks([]);
+  }
   if (fleetView.selected && fleetView.selected !== prevSelected) {
     pubManualOpen = false;
     closePublishPreview();
@@ -1972,6 +2032,8 @@ function applyFleetSnapshot(snap) {
 /** 点选环境：右侧主区域整体切到该环境的陪伴视图（状态 + 活动流 + 发布卡投影一起换，绝不残留）。 */
 function selectEnv(envId) {
   if (!envId || !fleetView.envs.has(envId) || envId === fleetView.selected) return;
+  closeDelegatedPopover(false);
+  syncDelegatedTriggerTasks([]);
   fleetView.selected = envId;
   fleetView.shownEnv = null; // 切到另一个环境：头像三态从头开始，绝不留着旧环境的「已显示」指针
   pubManualOpen = false;

@@ -1067,6 +1067,109 @@ test('未运行空态默认收起；点击可展开；真实发布流程到来�
   assert.equal(hidden($(w, '#pub-bar')), true);
 });
 
+test('委派入口收进状态区右侧浮层，默认不占主列并同步可访问状态', async () => {
+  let listCalls = 0;
+  const { w } = await boot({ envId: 'u1' }, {
+    delegatedTaskList: async () => {
+      listCalls += 1;
+      return { ok: true, data: { tasks: [] } };
+    },
+  });
+  const presence = $(w, '.presence');
+  const trigger = $(w, '#delegated-trigger') as unknown as HTMLButtonElement;
+  const popover = $(w, '#delegated-card');
+  assert.equal(presence.contains(trigger), true, '入口应在当前状态行最右侧');
+  assert.equal(presence.contains(popover), true, '浮层应锚定状态行，而不是主列常驻卡片');
+  assert.equal(hidden(popover), true);
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+  assert.equal(popover.getAttribute('aria-hidden'), 'true');
+  assert.doesNotMatch(html, /class="delegated-card"/, '旧常驻大卡片样式入口应移除');
+  assert.match(rendererCss, /\.delegated-popover\s*\{[^}]*position:\s*absolute/s);
+  assert.match(rendererCss, /max-height:\s*min\(560px, calc\(100vh - 132px\)\)/);
+  assert.match(rendererCss, /\.delegated-body\s*\{[^}]*overflow-y:\s*auto/s);
+
+  const callsBeforeOpen = listCalls;
+  trigger.click();
+  await tick();
+  assert.equal(hidden(popover), false);
+  assert.equal(trigger.getAttribute('aria-expanded'), 'true');
+  assert.equal(popover.getAttribute('aria-hidden'), 'false');
+  assert.equal(w.document.activeElement, $(w, '#delegated-close'));
+  assert.ok(listCalls > callsBeforeOpen, '打开浮层应刷新当前环境任务');
+
+  trigger.click();
+  assert.equal(hidden(popover), true, '再次点击入口应关闭');
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+  assert.equal(w.document.activeElement, trigger);
+});
+
+test('委派浮层支持关闭按钮、外部点击和 Escape，Escape 后焦点回入口', async () => {
+  const { w } = await boot({}, {
+    delegatedTaskList: async () => ({ ok: true, data: { tasks: [] } }),
+  });
+  const trigger = $(w, '#delegated-trigger') as unknown as HTMLButtonElement;
+  const popover = $(w, '#delegated-card');
+  trigger.click();
+  ($(w, '#delegated-close') as unknown as HTMLButtonElement).click();
+  assert.equal(hidden(popover), true, '关闭按钮应收起浮层');
+
+  trigger.click();
+  w.document.body.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  assert.equal(hidden(popover), true, '点击浮层外部应收起');
+
+  trigger.click();
+  w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.equal(hidden(popover), true, 'Escape 应收起');
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+  assert.equal(w.document.activeElement, trigger, 'Escape 关闭后焦点应回到入口');
+});
+
+test('当前环境有未结束委派时入口只显示克制蓝点和真实任务数量', async () => {
+  const { w } = await boot({ envId: 'u1' }, {
+    delegatedTaskList: async () => ({
+      ok: true,
+      data: { tasks: [
+        { id: TASK_ID, status: 'executing', action: 'comment_batch', progress: {}, targetSuccessCount: 3, maxAttempts: 6 },
+        { id: '22222222-2222-4222-8222-222222222222', status: 'completed', action: 'publish_post', progress: {}, targetSuccessCount: 1, maxAttempts: 2 },
+      ] },
+    }),
+  });
+  const trigger = $(w, '#delegated-trigger') as unknown as HTMLButtonElement;
+  trigger.click();
+  await tick();
+  assert.equal(hidden($(w, '#delegated-indicator')), false);
+  assert.match(trigger.getAttribute('aria-label') ?? '', /1 个未结束任务/);
+  assert.match(rendererCss, /\.delegated-indicator\s*\{[^}]*background:\s*var\(--accent\)/s);
+});
+
+test('切换当前环境会关闭委派浮层并清空旧环境任务指示', async () => {
+  const statusA = makeStatus({ envId: 'u1', account: { id: 'u1', name: '晚风手作' } });
+  const statusB = makeStatus({ envId: 'u2', account: { id: 'u2', name: '山野咖啡' } });
+  const { w } = await boot({}, {
+    fleetGet: async () => ({
+      environments: [
+        { envId: 'u1', name: '晚风手作', platform: 'xiaohongshu', status: statusA },
+        { envId: 'u2', name: '山野咖啡', platform: 'xiaohongshu', status: statusB },
+      ],
+      selectedEnvId: 'u1',
+    }),
+    delegatedTaskList: async (envId: unknown) => ({
+      ok: true,
+      data: { tasks: envId === 'u1' ? [{ id: TASK_ID, status: 'queued', action: 'comment_batch', progress: {}, targetSuccessCount: 3, maxAttempts: 6 }] : [] },
+    }),
+  });
+  const trigger = $(w, '#delegated-trigger') as unknown as HTMLButtonElement;
+  trigger.click();
+  await tick();
+  assert.equal(hidden($(w, '#delegated-card')), false);
+  assert.equal(hidden($(w, '#delegated-indicator')), false);
+
+  ($(w, '[data-env-id="u2"]') as unknown as HTMLElement).click();
+  assert.equal(hidden($(w, '#delegated-card')), true);
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+  assert.equal(hidden($(w, '#delegated-indicator')), true, '切换后不得短暂沿用旧环境指示');
+});
+
 test('用户委托快捷入口绑定当前选中环境，先确认再排队并展示真实进度', async () => {
   const drafts: unknown[][] = [];
   const actions: unknown[][] = [];

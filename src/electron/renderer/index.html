@@ -115,6 +115,71 @@
           <div class="presence-txt"><span id="presence-text">等待启动…</span></div>
           <div class="fresh" id="presence-fresh"></div>
         </div>
+        <button
+          id="delegated-trigger"
+          class="delegated-trigger"
+          type="button"
+          aria-label="打开委派任务"
+          aria-expanded="false"
+          aria-controls="delegated-card"
+          title="委派任务"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M4.5 5.5h9.25a2 2 0 0 1 2 2v1.25" />
+            <path d="M4.5 5.5 3 15.75a2 2 0 0 0 2 2.25h12a2 2 0 0 0 2-2.25l-.35-2.25" />
+            <path d="M3.35 14h4.1l1.5 2h4.1l1.5-2h4.1" />
+            <path d="M14 9.5h6m0 0-2.25-2.25M20 9.5l-2.25 2.25" />
+          </svg>
+          <span id="delegated-indicator" class="delegated-indicator hidden" aria-hidden="true"></span>
+        </button>
+
+        <!-- 用户委派按需浮层：绑定当前选中环境；所有公开写操作仍先生成结构化确认。 -->
+        <section
+          id="delegated-card"
+          class="delegated-popover hidden"
+          role="dialog"
+          aria-modal="false"
+          aria-labelledby="delegated-title"
+          aria-hidden="true"
+        >
+          <div class="delegated-head">
+            <div class="delegated-head-copy">
+              <span class="delegated-kicker">委派任务</span>
+              <strong id="delegated-title">交给 AIDCP</strong>
+              <p>说目标，不用记命令。确认后排队，成功数只认平台验证。</p>
+            </div>
+            <div class="delegated-head-actions">
+              <button id="delegated-refresh" class="delegated-refresh" type="button" aria-label="刷新委派任务" title="刷新委派任务">
+                <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                  <path d="M15.8 7.1A6.2 6.2 0 1 0 16 12" />
+                  <path d="M12.7 4.3h3.6v3.6" />
+                </svg>
+                <span>刷新</span>
+              </button>
+              <button id="delegated-close" class="delegated-close" type="button" aria-label="关闭委派任务" title="关闭">×</button>
+            </div>
+          </div>
+          <div class="delegated-body">
+            <div class="delegated-compose">
+              <label>目标数 <input id="delegated-count" type="number" min="1" max="20" value="3" /></label>
+              <label>执行
+                <select id="delegated-schedule">
+                  <option value="immediate">立即排队</option>
+                  <option value="next_safe_slot">下一安全空档</option>
+                </select>
+              </label>
+              <label class="delegated-priority"><input id="delegated-priority" type="checkbox" /> 优先执行</label>
+            </div>
+            <div class="delegated-actions">
+              <button type="button" data-delegated-action="comment_batch">完成评论</button>
+              <button type="button" data-delegated-action="publish_post">发布一篇</button>
+              <button type="button" data-delegated-action="publish_from_inspiration">参考今日灵感发布</button>
+              <button type="button" data-delegated-action="generate_candidates">只生成候选稿</button>
+            </div>
+            <p id="delegated-message" class="delegated-message"></p>
+            <div id="delegated-list" class="delegated-list"><span class="delegated-empty">暂无委托任务</span></div>
+          </div>
+        </section>
       </section>
 
       <!-- 运行价值说明：仅由真实在场事件和浏览阶段数据驱动；发布卡与今日进展保持原职责。 -->
@@ -187,35 +252,6 @@
           <span id="pub-preview-link" class="pub-preview-link hidden" role="button" tabindex="0">查看稿件 ↗</span>
         </div>
         </div>
-      </section>
-
-      <!-- 第一批用户委托：快捷入口绑定当前选中环境；所有公开写操作先生成结构化确认。 -->
-      <section id="delegated-card" class="delegated-card">
-        <div class="delegated-head">
-          <div>
-            <strong>交给 AIDCP</strong>
-            <p>说目标，不用记命令。确认后排队，成功数只认平台验证。</p>
-          </div>
-          <button id="delegated-refresh" class="delegated-link" type="button">刷新任务</button>
-        </div>
-        <div class="delegated-compose">
-          <label>目标数 <input id="delegated-count" type="number" min="1" max="20" value="3" /></label>
-          <label>执行
-            <select id="delegated-schedule">
-              <option value="immediate">立即排队</option>
-              <option value="next_safe_slot">下一安全空档</option>
-            </select>
-          </label>
-          <label class="delegated-priority"><input id="delegated-priority" type="checkbox" /> 优先执行</label>
-        </div>
-        <div class="delegated-actions">
-          <button type="button" data-delegated-action="comment_batch">完成评论</button>
-          <button type="button" data-delegated-action="publish_post">发布一篇</button>
-          <button type="button" data-delegated-action="publish_from_inspiration">参考今日灵感发布</button>
-          <button type="button" data-delegated-action="generate_candidates">只生成候选稿</button>
-        </div>
-        <p id="delegated-message" class="delegated-message"></p>
-        <div id="delegated-list" class="delegated-list"><span class="delegated-empty">暂无委托任务</span></div>
       </section>
 
       <!-- 今日进展条（计数从门面降级至此） -->
