@@ -22,6 +22,13 @@ export interface ReplySenderOptions {
   verificationPages?: number;
 }
 
+interface ActiveReplyFlight {
+  attemptId: string;
+  promise: Promise<InteractionReplyResultPayload>;
+}
+
+const ACTIVE_REPLY_FLIGHTS = new Map<string, ActiveReplyFlight>();
+
 export class WechatReplySender {
   private readonly now: () => number;
   private readonly verificationPages: number;
@@ -31,39 +38,46 @@ export class WechatReplySender {
     this.verificationPages = options.verificationPages ?? 3;
   }
 
-  async send(command: InteractionReplySendPayload): Promise<InteractionReplyResultPayload> {
+  send(command: InteractionReplySendPayload): Promise<InteractionReplyResultPayload> {
     if (!this.scopeMatches(command)) {
       // A foreign scope must never write into this account's idempotency namespace.
-      return resultFor(command, {
+      return Promise.resolve(resultFor(command, {
         status: 'failed',
         errorCategory: 'invalid_scope',
         errorCode: 'INTERACTION_SCOPE_MISMATCH',
         verification: 'not_verified',
         finishedAt: this.now(),
-      });
+      }));
     }
     if (!this.commandValid(command)) {
-      return resultFor(command, {
-        status: 'failed',
-        errorCategory: 'invalid_command',
-        errorCode: 'INTERACTION_VALIDATION_FAILED',
-        verification: 'not_verified',
-        finishedAt: this.now(),
-      });
+      return Promise.resolve(this.invalidCommandResult(command));
     }
-    const existing = await this.options.state.getReply(command.idempotencyKey);
-    if (existing) return existing.result;
-    const existingAttemptKey = await this.options.state.idempotencyKeyForAttempt(command.attemptId);
-    if (existingAttemptKey && existingAttemptKey !== command.idempotencyKey) {
-      // The attempt is already durably owned by another key; do not mutate either idempotency record.
-      return resultFor(command, {
-        status: 'failed',
-        errorCategory: 'invalid_command',
-        errorCode: 'INTERACTION_VALIDATION_FAILED',
-        verification: 'not_verified',
-        finishedAt: this.now(),
-      });
+
+    const flightKey = `${this.options.accountId}\u0000${command.idempotencyKey}`;
+    const active = ACTIVE_REPLY_FLIGHTS.get(flightKey);
+    if (active) {
+      return active.attemptId === command.attemptId
+        ? active.promise
+        : Promise.resolve(this.invalidCommandResult(command));
     }
+
+    const promise = this.executeClaimed(command).finally(() => {
+      if (ACTIVE_REPLY_FLIGHTS.get(flightKey)?.promise === promise) ACTIVE_REPLY_FLIGHTS.delete(flightKey);
+    });
+    ACTIVE_REPLY_FLIGHTS.set(flightKey, { attemptId: command.attemptId, promise });
+    return promise;
+  }
+
+  private async executeClaimed(command: InteractionReplySendPayload): Promise<InteractionReplyResultPayload> {
+    const claim = await this.options.state.claimReplyExecution(
+      command.idempotencyKey,
+      command.attemptId,
+      this.now(),
+    );
+    if (claim.status === 'conflict') return this.invalidCommandResult(command);
+    if (claim.status === 'completed') return claim.result;
+    if (claim.status === 'executing') return this.reconcileExecuting(command, claim.result);
+
     if (command.expiresAt <= this.now()) {
       return this.persistFailure(command, 'expired_command', 'INTERACTION_VALIDATION_FAILED');
     }
@@ -99,19 +113,23 @@ export class WechatReplySender {
     }
 
     const dispatchedAt = this.now();
-    // Write-ahead ambiguous result: after this durable point a crash/replay can never call the platform twice.
-    await this.options.state.putReply(
+    const executingResult = resultFor(command, {
+      status: 'ambiguous',
+      errorCategory: 'transient_network',
+      errorCode: 'INTERACTION_UPSTREAM_UNAVAILABLE',
+      verification: 'not_verified',
+      finishedAt: dispatchedAt,
+    });
+    // The platform call is allowed only after the claim and executing marker are durably bound together.
+    const start = await this.options.state.markReplyExecuting(
       command.idempotencyKey,
       command.attemptId,
-      resultFor(command, {
-        status: 'ambiguous',
-        errorCategory: 'transient_network',
-        errorCode: 'INTERACTION_UPSTREAM_UNAVAILABLE',
-        verification: 'not_verified',
-        finishedAt: dispatchedAt,
-      }),
+      executingResult,
       dispatchedAt,
     );
+    if (start.status === 'conflict') return this.invalidCommandResult(command);
+    if (start.status === 'completed') return start.result;
+    if (start.status === 'executing') return this.reconcileExecuting(command, start.result);
 
     try {
       const ack = command.channel === 'comment'
@@ -130,8 +148,12 @@ export class WechatReplySender {
         verification: 'platform_ack',
         finishedAt: this.now(),
       });
-      await this.options.state.putReply(command.idempotencyKey, command.attemptId, confirmed, this.now());
-      return confirmed;
+      return this.options.state.completeReplyExecution(
+        command.idempotencyKey,
+        command.attemptId,
+        confirmed,
+        this.now(),
+      );
     } catch (error) {
       const safe = error instanceof WechatChannelsError
         ? error
@@ -146,13 +168,21 @@ export class WechatReplySender {
           verification: 'not_verified',
           finishedAt: this.now(),
         });
-        await this.options.state.putReply(command.idempotencyKey, command.attemptId, failed, this.now());
-        return failed;
+        return this.options.state.completeReplyExecution(
+          command.idempotencyKey,
+          command.attemptId,
+          failed,
+          this.now(),
+        );
       }
       const verified = await this.verifyAmbiguous(command, session, commentPostExternalId, dispatchedAt);
       if (verified) {
-        await this.options.state.putReply(command.idempotencyKey, command.attemptId, verified, this.now());
-        return verified;
+        return this.options.state.completeReplyExecution(
+          command.idempotencyKey,
+          command.attemptId,
+          verified,
+          this.now(),
+        );
       }
       const ambiguous = resultFor(command, {
         status: 'ambiguous',
@@ -162,9 +192,65 @@ export class WechatReplySender {
         retryAfterMs: safe.retryAfterMs,
         finishedAt: this.now(),
       });
-      await this.options.state.putReply(command.idempotencyKey, command.attemptId, ambiguous, this.now());
-      return ambiguous;
+      return this.options.state.completeReplyExecution(
+        command.idempotencyKey,
+        command.attemptId,
+        ambiguous,
+        this.now(),
+      );
     }
+  }
+
+  private async reconcileExecuting(
+    command: InteractionReplySendPayload,
+    executingResult: InteractionReplyResultPayload,
+  ): Promise<InteractionReplyResultPayload> {
+    let identityOk = false;
+    try {
+      identityOk = await this.options.auth.verifyIdentity();
+    } catch {
+      return executingResult;
+    }
+    const session = identityOk ? this.options.auth.getSession() : null;
+    if (!session) return executingResult;
+
+    let commentPostExternalId: string | null = null;
+    if (command.channel === 'comment') {
+      commentPostExternalId =
+        (await this.options.state.getThreadSource('comment', command.target.threadExternalId)) ?? null;
+      if (!commentPostExternalId) return executingResult;
+    }
+
+    const verified = await this.verifyAmbiguous(
+      command,
+      session,
+      commentPostExternalId,
+      executingResult.finishedAt,
+    );
+    const recovered = verified ?? resultFor(command, {
+      status: 'ambiguous',
+      errorCategory: executingResult.errorCategory ?? 'transient_network',
+      errorCode: executingResult.errorCode ?? 'INTERACTION_UPSTREAM_UNAVAILABLE',
+      verification: 'not_verified',
+      retryAfterMs: executingResult.retryAfterMs,
+      finishedAt: this.now(),
+    });
+    return this.options.state.completeReplyExecution(
+      command.idempotencyKey,
+      command.attemptId,
+      recovered,
+      this.now(),
+    );
+  }
+
+  private invalidCommandResult(command: InteractionReplySendPayload): InteractionReplyResultPayload {
+    return resultFor(command, {
+      status: 'failed',
+      errorCategory: 'invalid_command',
+      errorCode: 'INTERACTION_VALIDATION_FAILED',
+      verification: 'not_verified',
+      finishedAt: this.now(),
+    });
   }
 
   private scopeMatches(command: InteractionReplySendPayload): boolean {
@@ -195,8 +281,12 @@ export class WechatReplySender {
       verification: 'not_verified',
       finishedAt: this.now(),
     });
-    await this.options.state.putReply(command.idempotencyKey, command.attemptId, result, this.now());
-    return result;
+    return this.options.state.completeReplyExecution(
+      command.idempotencyKey,
+      command.attemptId,
+      result,
+      this.now(),
+    );
   }
 
   private async verifyAmbiguous(

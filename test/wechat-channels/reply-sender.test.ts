@@ -1,12 +1,13 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { InteractionReplySendPayload } from '../../src/comm/protocol.js';
+import type { InteractionReplyResultPayload, InteractionReplySendPayload } from '../../src/comm/protocol.js';
 import type { WechatChannelsApiClient } from '../../src/wechat-channels/api-client.js';
 import type { WechatAuthCoordinator } from '../../src/wechat-channels/auth-session.js';
 import { WechatChannelsError } from '../../src/wechat-channels/error-classifier.js';
+import { runtimeStatePath } from '../../src/wechat-channels/local-paths.js';
 import { WechatReplySender } from '../../src/wechat-channels/reply-sender.js';
 import { WechatRuntimeStateStore } from '../../src/wechat-channels/state-store.js';
 import type { WechatSessionMaterial } from '../../src/wechat-channels/types.js';
@@ -38,6 +39,25 @@ function command(channel: 'comment' | 'dm', keyChar = 'a'): InteractionReplySend
   };
 }
 
+function ambiguousResultFor(pending: InteractionReplySendPayload): InteractionReplyResultPayload {
+  return {
+    jobId: pending.jobId,
+    attemptId: pending.attemptId,
+    idempotencyKey: pending.idempotencyKey,
+    envKey: pending.envKey,
+    accountId: pending.accountId,
+    platform: 'wechat_channels',
+    channel: pending.channel,
+    status: 'ambiguous',
+    externalMessageId: null,
+    errorCategory: 'transient_network',
+    errorCode: 'INTERACTION_UPSTREAM_UNAVAILABLE',
+    verification: 'not_verified',
+    retryAfterMs: null,
+    finishedAt: NOW,
+  };
+}
+
 function activeAuth(overrides: { verifyIdentity?: () => Promise<boolean>; reasonCode?: 'WECHAT_IDENTITY_MISMATCH' } = {}): WechatAuthCoordinator {
   return {
     verifyIdentity: overrides.verifyIdentity ?? (async () => true),
@@ -56,12 +76,12 @@ function activeAuth(overrides: { verifyIdentity?: () => Promise<boolean>; reason
   } as unknown as WechatAuthCoordinator;
 }
 
-async function withState(run: (state: WechatRuntimeStateStore) => Promise<void>): Promise<void> {
+async function withState(run: (state: WechatRuntimeStateStore, root: string) => Promise<void>): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'aidcp-wc-reply-'));
   try {
     const state = new WechatRuntimeStateStore(SCOPE, root);
     await state.putThreadSource('comment', 'comment-root-1', 'post-1');
-    await run(state);
+    await run(state, root);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -107,6 +127,46 @@ test('wechat reply: platform ack confirms once; duplicate command reuses durable
     assert.equal(first.externalMessageId, 'reply-1');
     assert.deepEqual(replay, first);
     assert.equal(wrongScopeReplay.errorCode, 'INTERACTION_SCOPE_MISMATCH');
+    assert.equal(sends, 1);
+  });
+});
+
+test('wechat reply: concurrent duplicate commands share one in-process platform send', async () => {
+  await withState(async (state) => {
+    let sends = 0;
+    let verifications = 0;
+    let releaseVerification!: () => void;
+    let firstVerificationEntered!: () => void;
+    const verificationBarrier = new Promise<void>((resolve) => { releaseVerification = resolve; });
+    const entered = new Promise<void>((resolve) => { firstVerificationEntered = resolve; });
+    const api = {
+      sendDmText: async () => {
+        sends++;
+        return { accepted: true, externalMessageId: `mock-${sends}` };
+      },
+    } as unknown as WechatChannelsApiClient;
+    const auth = activeAuth({
+      verifyIdentity: async () => {
+        verifications++;
+        firstVerificationEntered();
+        await verificationBarrier;
+        return true;
+      },
+    });
+    const firstSender = sender(state, api, auth);
+    const secondSender = sender(state, api, auth);
+    const duplicate = command('dm', '0');
+
+    const first = firstSender.send(duplicate);
+    const second = secondSender.send(duplicate);
+    await entered;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(verifications, 1, 'the duplicate must join before pre-send verification');
+    releaseVerification();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    assert.deepEqual(secondResult, firstResult);
+    assert.equal(firstResult.externalMessageId, 'mock-1');
     assert.equal(sends, 1);
   });
 });
@@ -173,6 +233,98 @@ test('wechat reply: unresolved timeout stays ambiguous and restart/replay never 
   });
 });
 
+test('wechat reply: durable executing state reconciles after restart and never reissues the platform write', async () => {
+  await withState(async (state, root) => {
+    const pending = command('dm', '9');
+    const executingResult = ambiguousResultFor(pending);
+    assert.deepEqual(
+      await state.claimReplyExecution(pending.idempotencyKey, pending.attemptId, NOW),
+      { status: 'claimed' },
+    );
+    assert.equal(
+      (await state.markReplyExecuting(pending.idempotencyKey, pending.attemptId, executingResult, NOW)).status,
+      'started',
+    );
+
+    let sends = 0;
+    let historyReads = 0;
+    const api = {
+      sendDmText: async () => {
+        sends++;
+        return { accepted: true, externalMessageId: 'must-not-send' };
+      },
+      listDmHistory: async () => {
+        historyReads++;
+        return { items: [], nextCursor: null, hasMore: false };
+      },
+    } as unknown as WechatChannelsApiClient;
+    const restartedState = new WechatRuntimeStateStore(SCOPE, root);
+    const recovered = await sender(restartedState, api).send(pending);
+
+    assert.equal(recovered.status, 'ambiguous');
+    assert.equal(recovered.verification, 'not_verified');
+    assert.equal(historyReads, 1);
+    assert.equal(sends, 0);
+  });
+});
+
+test('wechat reply: version-1 completed records migrate without replaying the platform write', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aidcp-wc-reply-v1-'));
+  try {
+    const pending = command('dm', '5');
+    const result = ambiguousResultFor(pending);
+    const path = runtimeStatePath(root, SCOPE);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, `${JSON.stringify({
+      version: 1,
+      checkpoints: {},
+      replies: {
+        [pending.idempotencyKey]: { attemptId: pending.attemptId, result, updatedAt: NOW },
+      },
+      attempts: { [pending.attemptId]: pending.idempotencyKey },
+      threadSources: {},
+    })}\n`, 'utf8');
+    let sends = 0;
+    const api = {
+      sendDmText: async () => {
+        sends++;
+        return { accepted: true, externalMessageId: 'must-not-send' };
+      },
+    } as unknown as WechatChannelsApiClient;
+
+    const replay = await sender(new WechatRuntimeStateStore(SCOPE, root), api).send(pending);
+
+    assert.deepEqual(replay, result);
+    assert.equal(sends, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('wechat reply: durable claimed state can resume once because no platform write was admitted', async () => {
+  await withState(async (state, root) => {
+    const pending = command('dm', '8');
+    assert.deepEqual(
+      await state.claimReplyExecution(pending.idempotencyKey, pending.attemptId, NOW),
+      { status: 'claimed' },
+    );
+    let sends = 0;
+    const api = {
+      sendDmText: async () => {
+        sends++;
+        return { accepted: true, externalMessageId: 'resumed-1' };
+      },
+    } as unknown as WechatChannelsApiClient;
+    const restartedState = new WechatRuntimeStateStore(SCOPE, root);
+
+    const recovered = await sender(restartedState, api).send(pending);
+
+    assert.equal(recovered.status, 'confirmed');
+    assert.equal(recovered.externalMessageId, 'resumed-1');
+    assert.equal(sends, 1);
+  });
+});
+
 test('wechat reply: invalid scope, expired command, disabled capability, and identity mismatch fail before write', async () => {
   await withState(async (state) => {
     let sends = 0;
@@ -224,6 +376,40 @@ test('wechat reply: one attempt id cannot be rebound to a different idempotency 
     const conflict = await replies.send(conflicting);
     assert.equal(conflict.status, 'failed');
     assert.equal(conflict.errorCategory, 'invalid_command');
+    assert.equal(sends, 1);
+  });
+});
+
+test('wechat reply: concurrent keys bind one attempt atomically before either platform write', async () => {
+  await withState(async (state) => {
+    let sends = 0;
+    let releaseVerification!: () => void;
+    let verificationEntered!: () => void;
+    const barrier = new Promise<void>((resolve) => { releaseVerification = resolve; });
+    const entered = new Promise<void>((resolve) => { verificationEntered = resolve; });
+    const api = {
+      sendDmText: async () => {
+        sends++;
+        return { accepted: true, externalMessageId: `message-${sends}` };
+      },
+    } as unknown as WechatChannelsApiClient;
+    const replies = sender(state, api, activeAuth({
+      verifyIdentity: async () => {
+        verificationEntered();
+        await barrier;
+        return true;
+      },
+    }));
+    const first = command('dm', '6');
+    const conflicting = { ...first, idempotencyKey: '7'.repeat(64) };
+
+    const firstResult = replies.send(first);
+    await entered;
+    const conflictResult = await replies.send(conflicting);
+    assert.equal(conflictResult.status, 'failed');
+    assert.equal(conflictResult.errorCategory, 'invalid_command');
+    releaseVerification();
+    assert.equal((await firstResult).status, 'confirmed');
     assert.equal(sends, 1);
   });
 });

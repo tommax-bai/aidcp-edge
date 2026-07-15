@@ -12,22 +12,34 @@ export interface SyncCheckpoint {
 
 interface StoredReplyExecution {
   attemptId: string;
-  result: InteractionReplyResultPayload;
+  state: 'claimed' | 'executing' | 'completed';
+  result: InteractionReplyResultPayload | null;
   updatedAt: number;
 }
 
 interface RuntimeState {
-  version: 1;
+  version: 2;
   checkpoints: Record<string, SyncCheckpoint>;
   replies: Record<string, StoredReplyExecution>;
   attempts: Record<string, string>;
   threadSources: Record<string, string | null>;
 }
 
+export type ReplyExecutionClaim =
+  | { status: 'claimed' }
+  | { status: 'executing' | 'completed'; result: InteractionReplyResultPayload }
+  | { status: 'conflict' };
+
+export type ReplyExecutionStart =
+  | { status: 'started'; result: InteractionReplyResultPayload }
+  | { status: 'executing' | 'completed'; result: InteractionReplyResultPayload }
+  | { status: 'conflict' };
+
 export class WechatRuntimeStateStore {
-  private state: RuntimeState = { version: 1, checkpoints: {}, replies: {}, attempts: {}, threadSources: {} };
+  private state: RuntimeState = emptyRuntimeState();
   private loaded = false;
-  private writeChain: Promise<void> = Promise.resolve();
+  private loadPromise?: Promise<void>;
+  private mutationChain: Promise<void> = Promise.resolve();
   private readonly path: string;
 
   constructor(
@@ -39,10 +51,49 @@ export class WechatRuntimeStateStore {
 
   async load(): Promise<void> {
     if (this.loaded) return;
+    this.loadPromise ??= this.loadFromDisk();
     try {
-      const parsed = JSON.parse(await readFile(this.path, 'utf8')) as RuntimeState;
-      if (parsed.version === 1 && parsed.checkpoints && parsed.replies && parsed.attempts) {
-        this.state = { ...parsed, threadSources: parsed.threadSources ?? {} };
+      await this.loadPromise;
+    } catch (error) {
+      this.loadPromise = undefined;
+      throw error;
+    }
+  }
+
+  private async loadFromDisk(): Promise<void> {
+    try {
+      const parsed = JSON.parse(await readFile(this.path, 'utf8')) as {
+        version?: number;
+        checkpoints?: Record<string, SyncCheckpoint>;
+        replies?: Record<string, Partial<StoredReplyExecution> & { attemptId?: string }>;
+        attempts?: Record<string, string>;
+        threadSources?: Record<string, string | null>;
+      };
+      if ((parsed.version === 1 || parsed.version === 2) && parsed.checkpoints && parsed.replies && parsed.attempts) {
+        const attempts = { ...parsed.attempts };
+        const replies: Record<string, StoredReplyExecution> = {};
+        for (const [idempotencyKey, stored] of Object.entries(parsed.replies)) {
+          if (typeof stored.attemptId !== 'string') continue;
+          const state = parsed.version === 2 && (
+            stored.state === 'claimed' || stored.state === 'executing' || stored.state === 'completed'
+          ) ? stored.state : 'completed';
+          const result = stored.result ?? null;
+          if (state !== 'claimed' && !result) continue;
+          replies[idempotencyKey] = {
+            attemptId: stored.attemptId,
+            state,
+            result,
+            updatedAt: typeof stored.updatedAt === 'number' ? stored.updatedAt : 0,
+          };
+          attempts[stored.attemptId] ??= idempotencyKey;
+        }
+        this.state = {
+          version: 2,
+          checkpoints: parsed.checkpoints,
+          replies,
+          attempts,
+          threadSources: parsed.threadSources ?? {},
+        };
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -51,7 +102,7 @@ export class WechatRuntimeStateStore {
   }
 
   async getCheckpoint(channel: InteractionChannel, scopeExternalId: string | null): Promise<SyncCheckpoint> {
-    await this.load();
+    await this.waitForMutations();
     return this.state.checkpoints[checkpointKey(channel, scopeExternalId)] ?? { cursor: null, batchId: null, updatedAt: 0 };
   }
 
@@ -60,14 +111,9 @@ export class WechatRuntimeStateStore {
     scopeExternalId: string | null,
     checkpoint: SyncCheckpoint,
   ): Promise<void> {
-    await this.load();
-    this.state.checkpoints[checkpointKey(channel, scopeExternalId)] = checkpoint;
-    await this.persist();
-  }
-
-  async getReply(idempotencyKey: string): Promise<StoredReplyExecution | null> {
-    await this.load();
-    return this.state.replies[idempotencyKey] ?? null;
+    await this.mutate((state) => {
+      state.checkpoints[checkpointKey(channel, scopeExternalId)] = checkpoint;
+    });
   }
 
   async putThreadSource(
@@ -75,47 +121,122 @@ export class WechatRuntimeStateStore {
     externalThreadId: string,
     sourceExternalId: string | null,
   ): Promise<void> {
-    await this.load();
-    this.state.threadSources[`${channel}:${externalThreadId}`] = sourceExternalId;
-    await this.persist();
+    await this.mutate((state) => {
+      state.threadSources[`${channel}:${externalThreadId}`] = sourceExternalId;
+    });
   }
 
   async getThreadSource(channel: InteractionChannel, externalThreadId: string): Promise<string | null | undefined> {
-    await this.load();
+    await this.waitForMutations();
     return this.state.threadSources[`${channel}:${externalThreadId}`];
   }
 
-  async idempotencyKeyForAttempt(attemptId: string): Promise<string | null> {
-    await this.load();
-    return this.state.attempts[attemptId] ?? null;
+  async claimReplyExecution(idempotencyKey: string, attemptId: string, now: number): Promise<ReplyExecutionClaim> {
+    return this.mutate((state) => {
+      if (replyBindingConflicts(state, idempotencyKey, attemptId)) return { status: 'conflict' };
+      const existing = state.replies[idempotencyKey];
+      if (existing) {
+        if (existing.state === 'claimed') return { status: 'claimed' };
+        if (!existing.result) return { status: 'conflict' };
+        return { status: existing.state, result: existing.result };
+      }
+      state.attempts[attemptId] = idempotencyKey;
+      state.replies[idempotencyKey] = { attemptId, state: 'claimed', result: null, updatedAt: now };
+      return { status: 'claimed' };
+    });
   }
 
-  async putReply(
+  async markReplyExecuting(
     idempotencyKey: string,
     attemptId: string,
     result: InteractionReplyResultPayload,
     now: number,
-  ): Promise<void> {
-    await this.load();
-    const existingAttempt = this.state.attempts[attemptId];
-    if (existingAttempt && existingAttempt !== idempotencyKey) throw new Error('attempt_idempotency_conflict');
-    this.state.attempts[attemptId] = idempotencyKey;
-    this.state.replies[idempotencyKey] = { attemptId, result, updatedAt: now };
-    await this.persist();
+  ): Promise<ReplyExecutionStart> {
+    return this.mutate((state) => {
+      if (replyBindingConflicts(state, idempotencyKey, attemptId)) return { status: 'conflict' };
+      const existing = state.replies[idempotencyKey];
+      if (!existing) return { status: 'conflict' };
+      if (existing.state === 'executing' || existing.state === 'completed') {
+        if (!existing.result) return { status: 'conflict' };
+        return { status: existing.state, result: existing.result };
+      }
+      existing.state = 'executing';
+      existing.result = result;
+      existing.updatedAt = now;
+      return { status: 'started', result };
+    });
   }
 
-  private persist(): Promise<void> {
-    const snapshot = `${JSON.stringify(this.state)}\n`;
-    const write = async (): Promise<void> => {
-      await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-      const temp = `${this.path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-      await writeFile(temp, snapshot, { encoding: 'utf8', mode: 0o600 });
-      await rename(temp, this.path);
-      await chmod(this.path, 0o600).catch(() => undefined);
-    };
-    this.writeChain = this.writeChain.then(write, write);
-    return this.writeChain;
+  async completeReplyExecution(
+    idempotencyKey: string,
+    attemptId: string,
+    result: InteractionReplyResultPayload,
+    now: number,
+  ): Promise<InteractionReplyResultPayload> {
+    return this.mutate((state) => {
+      if (replyBindingConflicts(state, idempotencyKey, attemptId)) throw new Error('attempt_idempotency_conflict');
+      const existing = state.replies[idempotencyKey];
+      if (!existing) throw new Error('reply_execution_not_claimed');
+      if (existing.state === 'completed' && existing.result) return existing.result;
+      existing.state = 'completed';
+      existing.result = result;
+      existing.updatedAt = now;
+      return result;
+    });
   }
+
+  private async waitForMutations(): Promise<void> {
+    await this.load();
+    await this.mutationChain;
+  }
+
+  private async mutate<T>(update: (state: RuntimeState) => T): Promise<T> {
+    await this.load();
+    const operation = this.mutationChain.then(async () => {
+      const next = cloneRuntimeState(this.state);
+      const result = update(next);
+      await this.persistState(next);
+      this.state = next;
+      return result;
+    });
+    this.mutationChain = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private async persistState(state: RuntimeState): Promise<void> {
+    const snapshot = `${JSON.stringify(state)}\n`;
+    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
+    const temp = `${this.path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+    await writeFile(temp, snapshot, { encoding: 'utf8', mode: 0o600 });
+    await rename(temp, this.path);
+    await chmod(this.path, 0o600).catch(() => undefined);
+  }
+}
+
+function emptyRuntimeState(): RuntimeState {
+  return { version: 2, checkpoints: {}, replies: {}, attempts: {}, threadSources: {} };
+}
+
+function cloneRuntimeState(state: RuntimeState): RuntimeState {
+  return {
+    version: 2,
+    checkpoints: { ...state.checkpoints },
+    replies: Object.fromEntries(Object.entries(state.replies).map(([key, value]) => [
+      key,
+      { ...value, result: value.result ? { ...value.result } : null },
+    ])),
+    attempts: { ...state.attempts },
+    threadSources: { ...state.threadSources },
+  };
+}
+
+function replyBindingConflicts(state: RuntimeState, idempotencyKey: string, attemptId: string): boolean {
+  const attemptOwner = state.attempts[attemptId];
+  const reply = state.replies[idempotencyKey];
+  return Boolean(
+    (attemptOwner && attemptOwner !== idempotencyKey) ||
+    (reply && reply.attemptId !== attemptId),
+  );
 }
 
 function checkpointKey(channel: InteractionChannel, scopeExternalId: string | null): string {
