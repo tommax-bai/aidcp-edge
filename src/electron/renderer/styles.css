@@ -285,12 +285,15 @@ body { margin: 0; }
   --rg-step-next: #7f8ea6;
   --rg-step-detail: #8794a9;
   --rg-step-line: rgba(151, 169, 196, 0.32);
-  --rg-step-line-active-start: rgba(72, 118, 238, 0.9);
-  --rg-step-line-active-end: rgba(34, 168, 117, 0.86);
+  --rg-step-line-active-start: rgba(72, 118, 238, 0.92);
+  --rg-step-line-active-end: rgba(111, 154, 246, 0.9);
   --rg-step-line-right: -4px;
   --rg-step-line-width: 28px;
-  --rg-step-spark-right: 19px;
-  --rg-step-spark-travel: 23px;
+  --rg-step-spark-size: 5px;
+  --rg-step-spark-ring: rgba(77, 125, 241, 0.22);
+  --rg-step-spark-glow: rgba(77, 125, 241, 0.5);
+  --rg-step-spark-right: calc(var(--rg-step-line-right) + var(--rg-step-line-width) - var(--rg-step-spark-size));
+  --rg-step-spark-travel: calc(var(--rg-step-line-width) - var(--rg-step-spark-size));
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
@@ -302,7 +305,9 @@ body { margin: 0; }
 .runtime-guidance[data-mode="hour"] .rg-flow {
   --rg-step-current: #2d858d;
   --rg-step-line-active-start: rgba(63, 154, 163, 0.92);
-  --rg-step-line-active-end: rgba(34, 168, 117, 0.88);
+  --rg-step-line-active-end: rgba(104, 183, 189, 0.88);
+  --rg-step-spark-ring: rgba(63, 154, 163, 0.2);
+  --rg-step-spark-glow: rgba(63, 154, 163, 0.46);
 }
 .runtime-guidance[data-mode="day"] .rg-flow {
   --rg-step-current: #22a875;
@@ -311,6 +316,8 @@ body { margin: 0; }
   --rg-step-line: rgba(34, 168, 117, 0.22);
   --rg-step-line-active-start: rgba(34, 168, 117, 0.78);
   --rg-step-line-active-end: rgba(34, 168, 117, 0.56);
+  --rg-step-spark-ring: rgba(34, 168, 117, 0.2);
+  --rg-step-spark-glow: rgba(34, 168, 117, 0.44);
 }
 .rg-flow-step {
   --rg-step-color: var(--rg-step-next);
@@ -345,11 +352,11 @@ body { margin: 0; }
   z-index: 1;
   top: 6.5px;
   right: var(--rg-step-spark-right);
-  width: 5px;
-  height: 5px;
+  width: var(--rg-step-spark-size);
+  height: var(--rg-step-spark-size);
   border-radius: 999px;
   background: #ffffff;
-  box-shadow: 0 0 0 2px rgba(77, 125, 241, 0.18), 0 0 10px rgba(34, 168, 117, 0.42);
+  box-shadow: 0 0 0 2px var(--rg-step-spark-ring), 0 0 10px var(--rg-step-spark-glow);
   animation: rg-flow-spark 2.2s ease-in-out infinite;
 }
 .rg-flow-step.flow-complete:not(:last-child)::after {
@@ -419,36 +426,15 @@ body { margin: 0; }
   overflow-wrap: anywhere;
 }
 .rg-progress-meta {
-  flex: 0 1 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
   color: #74849c;
   font-size: 10px;
   font-weight: 700;
   line-height: 1.3;
   font-variant-numeric: tabular-nums;
   text-align: right;
+  white-space: nowrap;
 }
-.rg-progress-meta > span,
-.rg-loop-toggle { white-space: nowrap; }
-.rg-progress-separator { color: #a3afc1; }
-.rg-loop-toggle {
-  min-height: 24px;
-  margin: -5px -5px -5px 0;
-  padding: 0 5px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: #3d6dca;
-  font: inherit;
-  cursor: pointer;
-  transition: color 0.18s ease, background-color 0.18s ease;
-}
-.rg-loop-toggle:hover { color: #2759b8; background: rgba(59, 111, 240, 0.08); }
-.rg-loop-toggle:focus-visible { outline: 2px solid rgba(59, 111, 240, 0.34); outline-offset: 1px; }
 .rg-progress-track {
   position: relative;
   height: 5px;
@@ -558,10 +544,11 @@ body { margin: 0; }
   100% { background-position: 220% 0; opacity: .48; }
 }
 @keyframes rg-flow-spark {
-  0% { transform: translateX(0) scale(.72); opacity: 0; }
-  28% { opacity: .9; }
-  72% { opacity: .9; }
-  100% { transform: translateX(var(--rg-step-spark-travel)) scale(.88); opacity: 0; }
+  0% { transform: translateX(0) scale(.82); opacity: 0; }
+  4% { transform: translateX(0) scale(.82); opacity: .9; }
+  88% { transform: translateX(var(--rg-step-spark-travel)) scale(.88); opacity: .9; }
+  96% { transform: translateX(var(--rg-step-spark-travel)) scale(.88); opacity: 0; }
+  100% { transform: translateX(0) scale(.82); opacity: 0; }
 }
 @media (max-width: 430px) {
   .runtime-guidance { padding: 11px 12px 10px; }
@@ -572,8 +559,6 @@ body { margin: 0; }
   .rg-flow {
     --rg-step-line-right: -3px;
     --rg-step-line-width: 20px;
-    --rg-step-spark-right: 12px;
-    --rg-step-spark-travel: 15px;
     gap: 5px;
   }
   .rg-flow-step { grid-template-columns: 16px minmax(0, 1fr); gap: 3px; }
@@ -665,24 +650,6 @@ body { margin: 0; }
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-
-/* 详细浏览步骤：收进运行价值卡，默认由进度元信息入口按需展开。 */
-.loop {
-  display: flex; align-items: center; gap: 5px; flex-wrap: nowrap;
-  overflow-x: auto; overscroll-behavior-inline: contain; scrollbar-width: none;
-  margin-top: 9px;
-  padding: 7px 9px;
-  border: 1px solid rgba(156, 178, 205, 0.24);
-  border-radius: 9px;
-  background: rgba(239, 244, 252, 0.62);
-}
-.loop::-webkit-scrollbar { display: none; }
-.loop-step { flex: 0 0 auto; font-size: 11.5px; color: var(--faint); font-weight: 650; }
-.loop-step.on {
-  color: var(--accent); background: #fff; border-radius: 6px;
-  padding: 4px 9px; box-shadow: 0 2px 6px rgba(52, 120, 246, 0.12);
-}
-.loop-sep { flex: 0 0 auto; color: #b3bfd0; font-size: 10px; }
 
 /* ═══ 发布等待卡（稿件入口）═══ */
 .pub {
@@ -1868,7 +1835,6 @@ body { margin: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; }
-  .rg-loop-toggle,
   .quota-toggle,
   .quota-toggle-icon { transition: none; }
   #presence-text.shimmer {

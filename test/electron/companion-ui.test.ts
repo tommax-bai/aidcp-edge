@@ -187,15 +187,8 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /3\/150/);
   assert.equal($(w, '#runtime-guidance-progress .rg-progress-track').getAttribute('aria-valuenow'), '3');
   assert.equal(($(w, '#runtime-guidance-progress .rg-progress-fill') as HTMLElement).style.width, '2%');
-  assert.equal(hidden($(w, '#loop')), true, '详细运行步骤默认收起');
-  const loopToggle = $(w, '.rg-loop-toggle');
-  assert.equal(loopToggle.textContent, '查看运行步骤');
-  assert.equal(loopToggle.getAttribute('aria-expanded'), 'false');
-  loopToggle.click();
-  assert.equal(hidden($(w, '#loop')), false, '点击入口后在运行价值卡内展开步骤');
-  assert.equal($(w, '.rg-loop-toggle').textContent, '收起运行步骤');
-  assert.equal($(w, '.rg-loop-toggle').getAttribute('aria-expanded'), 'true');
-  assert.ok($(w, '#loop .loop-step[data-stage="read"]').classList.contains('on'), '展开后仍点亮真实当前阶段');
+  assert.equal(w.document.querySelector('#loop'), null, '运行态不保留七段详细步骤');
+  assert.equal(w.document.querySelector('.rg-loop-toggle'), null, '运行态不提供查看运行步骤入口');
   assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-task-execution/);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-main/);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-mascot/);
@@ -209,16 +202,22 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-flow-step\s*\{\s*--rg-step-color: var\(--rg-step-current\);/);
   assert.match(rendererCss, /\.rg-flow-step\.flow-active:not\(:last-child\)::after/);
   assert.match(rendererCss, /@keyframes rg-flow-spark/);
+  assert.match(rendererCss, /--rg-step-line-active-start: rgba\(72, 118, 238, 0\.92\);/);
+  assert.match(rendererCss, /--rg-step-line-active-end: rgba\(111, 154, 246, 0\.9\);/);
   assert.match(rendererCss, /--rg-step-line-right: -4px;/);
   assert.match(rendererCss, /--rg-step-line-width: 28px;/);
-  assert.match(rendererCss, /--rg-step-spark-right: 19px;/);
-  assert.match(rendererCss, /--rg-step-spark-travel: 23px;/);
+  assert.match(rendererCss, /--rg-step-spark-size: 5px;/);
+  assert.match(rendererCss, /--rg-step-spark-right: calc\(var\(--rg-step-line-right\) \+ var\(--rg-step-line-width\) - var\(--rg-step-spark-size\)\);/);
+  assert.match(rendererCss, /--rg-step-spark-travel: calc\(var\(--rg-step-line-width\) - var\(--rg-step-spark-size\)\);/);
   assert.match(rendererCss, /\.rg-flow-step\.flow-active:not\(:last-child\)::before\s*\{[\s\S]*top: 6\.5px;[\s\S]*right: var\(--rg-step-spark-right\);/);
-  assert.match(rendererCss, /100% \{ transform: translateX\(var\(--rg-step-spark-travel\)\) scale\(\.88\); opacity: 0; \}/);
+  assert.match(rendererCss, /4% \{ transform: translateX\(0\) scale\(\.82\); opacity: \.9; \}/);
+  assert.match(rendererCss, /88% \{ transform: translateX\(var\(--rg-step-spark-travel\)\) scale\(\.88\); opacity: \.9; \}/);
+  assert.match(rendererCss, /96% \{ transform: translateX\(var\(--rg-step-spark-travel\)\) scale\(\.88\); opacity: 0; \}/);
+  assert.match(rendererCss, /100% \{ transform: translateX\(0\) scale\(\.82\); opacity: 0; \}/);
   assert.match(rendererCss, /--rg-step-line-width: 20px;/);
-  assert.match(rendererCss, /--rg-step-spark-travel: 15px;/);
-  assert.doesNotMatch(rendererCss, /translateX\(-30px\)/);
-  assert.doesNotMatch(rendererCss, /right: -22px;[\s\S]*width: 38px;/);
+  assert.doesNotMatch(rendererCss, /--rg-step-spark-travel: (?:15|23)px;/);
+  assert.doesNotMatch(rendererSrc, /查看运行步骤|收起运行步骤|loopDetailsOpen|renderLoop/);
+  assert.doesNotMatch(rendererCss, /rg-loop-toggle|\.loop-step|\.loop-sep/);
 });
 
 test('运行中 + 今日已有浏览累计 → 获得感进度使用账号今日累计，不被当前窗口 0 覆盖', async () => {
@@ -286,8 +285,8 @@ test('运行中 + 事件过期 + 阶段计划完成 → 说明自然间隔的成
       },
     }));
     assert.equal(hidden($(w, '.presence')), false, '间隔说明出现时仍保留第一块在场感');
-    assert.equal(hidden($(w, '#loop')), true, '间隔说明出现时详细步骤仍默认收起');
-    assert.ok($(w, '#loop .loop-step[data-stage="read"]').classList.contains('on'), '收起态仍同步真实当前阶段');
+    assert.equal(w.document.querySelector('#loop'), null, '小时间隔不保留七段详细步骤');
+    assert.equal(w.document.querySelector('.rg-loop-toggle'), null, '小时间隔不提供查看运行步骤入口');
     assert.equal(hidden($(w, '#runtime-guidance')), false);
     assert.equal($(w, '#runtime-guidance').dataset.mode, 'hour');
     assert.match($(w, '#runtime-guidance-title').textContent ?? '', /先让平台认识你一点/);
@@ -298,6 +297,7 @@ test('运行中 + 事件过期 + 阶段计划完成 → 说明自然间隔的成
     assert.equal(hourSteps.length, 3);
     assert.ok(hourSteps[0].classList.contains('flow-active'), '小时间隔：浏览成果 → 自然间隔需要动态推进');
     assert.ok(hourSteps[1].classList.contains('flow-active'), '小时间隔：自然间隔 → 继续寻找灵感需要动态推进');
+    assert.match(rendererCss, /\.runtime-guidance\[data-mode="session"\] \.rg-flow,[\s\S]*--rg-step-line-active-start: rgba\(63, 154, 163, 0\.92\);[\s\S]*--rg-step-line-active-end: rgba\(104, 183, 189, 0\.88\);/);
     assert.match(rendererSrc, /pause: '<svg[\s\S]*<path d="M2 6c\.6\.5/);
     assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
     assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /本轮已查看 38 条推荐内容/);
@@ -334,12 +334,8 @@ test('本轮等待缺少浏览配额字段时仍渲染自然间隔进度卡', as
     }));
     assert.equal(hidden($(w, '.presence')), false, '完整进度卡出现时仍保留第一块在场感');
     assert.equal($(w, '#presence-fresh').textContent, '约 8 分钟后自动继续');
-    assert.equal(hidden($(w, '#loop')), true, '休息态详细浏览步骤默认收起');
-    assert.equal(
-      Array.from(w.document.querySelectorAll('#loop .loop-step')).some((el) => (el as HTMLElement).classList.contains('on')),
-      false,
-      '休息态没有正在执行的步骤，但循环结构仍在'
-    );
+    assert.equal(w.document.querySelector('#loop'), null, '场次间隔不保留七段详细步骤');
+    assert.equal(w.document.querySelector('.rg-loop-toggle'), null, '场次间隔不提供查看运行步骤入口');
     assert.equal(hidden($(w, '#runtime-guidance')), false);
     assert.equal($(w, '#runtime-guidance').dataset.mode, 'session');
     assert.equal($(w, '#runtime-guidance-title').textContent, '先整理一下刚才发现的方向。');
@@ -638,6 +634,8 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
     assert.ok(daySteps[0].classList.contains('flow-active'), '今日完成：浏览与互动 → 自然沉淀需要动态连接');
     assert.ok(daySteps[1].classList.contains('flow-active'), '今日完成：自然沉淀 → 继续寻找灵感需要动态连接');
     assert.equal(daySteps.some((step) => step.classList.contains('flow-complete')), false);
+    assert.equal(w.document.querySelector('#loop'), null, '今日完成不保留七段详细步骤');
+    assert.equal(w.document.querySelector('.rg-loop-toggle'), null, '今日完成不提供查看运行步骤入口');
     assert.match(daySteps[0].querySelector('.rg-flow-icon')?.innerHTML ?? '', /<circle cx="12" cy="12" r="9"/);
     assert.match(daySteps[1].querySelector('.rg-flow-icon')?.innerHTML ?? '', /m19 21-7-4-7 4V5/);
     assert.match(daySteps[2].querySelector('.rg-flow-icon')?.innerHTML ?? '', /M12 2v8/);
@@ -652,6 +650,7 @@ test('今日浏览完成即展示今日完成价值卡和任务完成标签', as
     assert.match(rendererSrc, /harvest: '<svg[\s\S]*<path d="m19 21-7-4-7 4V5/);
     assert.match(rendererSrc, /harvest: '<svg[\s\S]*<path d="m9 10 2 2 4-4"/);
     assert.match(rendererCss, /\.runtime-guidance\[data-mode="day"\] \.rg-flow\s*\{[\s\S]*--rg-step-next: #22a875;/);
+    assert.match(rendererCss, /\.runtime-guidance\[data-mode="day"\] \.rg-flow\s*\{[\s\S]*--rg-step-line-active-start: rgba\(34, 168, 117, 0\.78\);[\s\S]*--rg-step-line-active-end: rgba\(34, 168, 117, 0\.56\);/);
     assert.match(rendererCss, /\.rg-flow-copy small \{[\s\S]*color: var\(--rg-step-detail\);/);
     assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="day"\] \.rg-flow-step\.next \.rg-flow-copy small/);
     assert.equal($(w, '#usage-limit').textContent, '今日任务已完成');
@@ -990,29 +989,14 @@ test('未运行空态默认收起；点击可展开；真实发布流程到来�
   assert.equal(hidden($(w, '#pub-bar')), true);
 });
 
-// ── 详细运行步骤 ──
-test('详细运行步骤收进运行价值卡且默认收起', async () => {
+// ── 三段价值流程不再附带七段详细步骤 ──
+test('运行步骤入口与七段详细步骤从 DOM、脚本和样式中彻底移除', async () => {
   const { w } = await boot();
-  const loop = $(w, '#loop');
-  const guidance = $(w, '#runtime-guidance');
-  assert.equal(guidance.contains(loop), true);
-  assert.equal(hidden(loop), true);
-  assert.equal($(w, '.rg-loop-toggle').textContent, '查看运行步骤');
-  assert.doesNotMatch(html, /<div class="loop" id="loop">/);
-  assert.match(rendererCss, /\.rg-loop-toggle\s*\{/);
-});
-
-test('按需展开的运行步骤随阶段点亮，停止时收起并全灭', async () => {
-  const { w, pushStatus } = await boot({ loopStage: 'read' });
-  const on = () => Array.from(w.document.querySelectorAll('.loop-step.on')).map((el) => (el as HTMLElement).dataset.stage);
-  $(w, '.rg-loop-toggle').click();
-  assert.equal(hidden($(w, '#loop')), false);
-  assert.deepEqual(on(), ['read']);
-  pushStatus(makeStatus({ loopStage: 'interact' }));
-  assert.deepEqual(on(), ['interact']);
-  pushStatus(makeStatus({ edge: 'stopped', session: 'idle' }));
-  assert.equal(hidden($(w, '#loop')), true, '运行价值卡消失时步骤一并收起');
-  assert.deepEqual(on(), [], '停止时不点亮任何阶段');
+  assert.equal(w.document.querySelector('#loop'), null);
+  assert.equal(w.document.querySelector('.rg-loop-toggle'), null);
+  assert.doesNotMatch(html, /id="loop"|查看运行步骤|收起运行步骤/);
+  assert.doesNotMatch(rendererSrc, /loopDetailsOpen|renderLoop|查看运行步骤|收起运行步骤/);
+  assert.doesNotMatch(rendererCss, /rg-loop-toggle|\.loop-step|\.loop-sep/);
 });
 
 // ── 稿件预览逐张删配图（change client-preview-image-delete）──

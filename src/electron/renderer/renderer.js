@@ -85,7 +85,6 @@ const fields = {
   kernelPrepLabel: document.querySelector('#kernel-prep-label'),
   kernelPrepPct: document.querySelector('#kernel-prep-pct'),
   kernelPrepBar: document.querySelector('#kernel-prep-bar'),
-  loop: document.querySelector('#loop'),
   stream: document.querySelector('#activity-stream'),
   streamEmpty: document.querySelector('#stream-empty'),
   pubCard: document.querySelector('#pub-card'),
@@ -322,7 +321,6 @@ function updateFacebookImportVisibility() {
 }
 const LOG_RETENTION_MS = 2 * 60 * 1000; // 开发者详情原始日志保留 2 分钟
 let quotaDetailsOpen = false;
-let loopDetailsOpen = false;
 
 // 平台占位：mac 红绿灯内嵌预留左侧；Windows 叠加窗控预留右侧。其余平台两侧归零。
 (function initPlatformPads() {
@@ -716,11 +714,7 @@ function renderRuntimeGuidanceProgress(progress) {
   if (!fields.runtimeGuidanceProgress) return;
   fields.runtimeGuidanceProgress.replaceChildren();
   fields.runtimeGuidanceProgress.classList.toggle('hidden', !progress);
-  if (!progress) {
-    loopDetailsOpen = false;
-    fields.loop?.classList.add('hidden');
-    return;
-  }
+  if (!progress) return;
 
   const current = Math.max(0, Number(progress.current) || 0);
   const target = Math.max(0, Number(progress.target) || 0);
@@ -732,26 +726,7 @@ function renderRuntimeGuidanceProgress(progress) {
   title.textContent = progress.title || '';
   const meta = document.createElement('span');
   meta.className = 'rg-progress-meta';
-  const metaCopy = document.createElement('span');
-  metaCopy.textContent = [progress.counter, progress.meta].filter(Boolean).join(' · ');
-  meta.append(metaCopy);
-  if (fields.loop) {
-    const separator = document.createElement('span');
-    separator.className = 'rg-progress-separator';
-    separator.textContent = '·';
-    const toggle = document.createElement('button');
-    toggle.className = 'rg-loop-toggle';
-    toggle.type = 'button';
-    toggle.textContent = loopDetailsOpen ? '收起运行步骤' : '查看运行步骤';
-    toggle.setAttribute('aria-controls', 'loop');
-    toggle.setAttribute('aria-expanded', loopDetailsOpen ? 'true' : 'false');
-    toggle.addEventListener('click', () => {
-      loopDetailsOpen = !loopDetailsOpen;
-      renderRuntimeGuidanceProgress(progress);
-      if (currentStatus) renderLoop(currentStatus);
-    });
-    meta.append(separator, toggle);
-  }
+  meta.textContent = [progress.counter, progress.meta].filter(Boolean).join(' · ');
   head.append(title, meta);
 
   const track = document.createElement('div');
@@ -805,8 +780,6 @@ function renderRuntimeGuidance(status, nowMs) {
   if (!view) {
     fields.runtimeGuidance.className = 'runtime-guidance hidden';
     delete fields.runtimeGuidance.dataset.mode;
-    loopDetailsOpen = false;
-    fields.loop?.classList.add('hidden');
     renderRuntimeGuidanceProgress(null);
     renderRuntimeGuidanceHarvest(null);
     return null;
@@ -869,17 +842,6 @@ function renderPresence(status, nowMs) {
   fields.presenceText.classList.toggle('shimmer', view.animate);
   fields.presenceCore.classList.toggle('live', view.animate);
   fields.presenceFresh.textContent = view.fresh || '';
-}
-
-// ─── 详细运行步骤：默认收起，展开时仍由真实浏览阶段点亮。───
-function renderLoop(status) {
-  const guidanceVisible = fields.runtimeGuidance && !fields.runtimeGuidance.classList.contains('hidden');
-  fields.loop.classList.toggle('hidden', !loopDetailsOpen || !guidanceVisible);
-  const running = status.edge === 'running' && status.session === 'running';
-  const active = running ? uiLogic.loopIndex(status.loopStage) : -1;
-  fields.loop.querySelectorAll('.loop-step').forEach((el) => {
-    el.classList.toggle('on', running && el.dataset.stage === status.loopStage && active !== -1);
-  });
 }
 
 // ─── 发布卡（常驻三态：flow 进行中 / last 上次发布 / empty 从未发布；审批在预览内完成）───
@@ -1410,9 +1372,8 @@ setInterval(() => {
   if (!currentStatus) return;
   const now = Date.now();
   renderUsageSummary(currentStatus);
-  const runtimeGuidance = renderRuntimeGuidance(currentStatus, now);
+  renderRuntimeGuidance(currentStatus, now);
   renderPresence(currentStatus, now);
-  renderLoop(currentStatus);
   renderPublish(currentStatus, now);
   fields.stream.querySelectorAll('.ev').forEach((row) => {
     const ts = Date.parse(row.dataset.ts || '');
@@ -1631,11 +1592,10 @@ function render(status) {
   renderLog();
   renderEdgeFailure(status);
   renderTitlebar(status);
-  const runtimeGuidance = renderRuntimeGuidance(status, now);
+  renderRuntimeGuidance(status, now);
   renderPresence(status, now);
   // 内核首启进度条改由 renderKernelPrepGlobal 全局驱动（内核机器级共享、下载环境未必是当前选中环境）；
   // 此处不再按选中环境渲染，避免选中的非下载环境把进度条误藏。
-  renderLoop(status);
   renderPublish(status, now);
   if (fields.publishPreviewPanel.classList.contains('open')) renderPublishPreviewContent(status);
   renderFab(status);

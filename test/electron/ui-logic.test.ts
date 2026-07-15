@@ -41,7 +41,6 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   detailRows: (s: Record<string, unknown>) => Array<{ key: string; label: string; value: string }>;
   presenceView: (s: Record<string, unknown>, now: number) => PresenceV;
   runtimeGuidanceView: (s: Record<string, unknown>, now: number) => RuntimeGuidanceV | null;
-  loopIndex: (stage: string) => number;
   publishView: (p: Record<string, unknown> | null, last: Record<string, unknown> | null, now: number) => PublishV;
   publishDock: (v: PublishV, s: Record<string, unknown>, manualOpen: boolean) => PublishDockV;
   railDisplayName: (row: Record<string, unknown>) => string;

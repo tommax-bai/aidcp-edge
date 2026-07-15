@@ -475,13 +475,6 @@
     };
   }
 
-  // ── 浏览循环 chip：feed → select → read → write/comment/interact → return ──
-  const LOOP_STAGES = ['feed', 'select', 'read', 'write', 'comment', 'interact', 'return'];
-  function loopIndex(stage) {
-    const i = LOOP_STAGES.indexOf(stage);
-    return i === -1 ? -1 : i;
-  }
-
   // ── 发布卡（常驻，三个内容态，只读投影）──
   // flow：进行中（pending →(30min 琥珀化)→ [reminded 仅收到明确事件] → approved）
   // last：上次已确认发布（published / 本地或云端带回的最近发布记录），四节点全勾
@@ -677,5 +670,5 @@
     return { rows, pendingCount: rows.filter((r) => r.needsAction).length };
   }
 
-  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, loopIndex, LOOP_STAGES, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, railDisplayName, FLEET_STALE_MS };
+  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, railDisplayName, FLEET_STALE_MS };
 });
