@@ -69,7 +69,6 @@ import {
 import { deriveEdgeId } from './client/edge-id.js';
 import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
-import { publishPost } from './flows/publish-post.js';
 import { PublishCommandDispatcher } from './flows/publish-command-handlers.js';
 import { EdgeTaskCoordinator } from './execution/edge-task-coordinator.js';
 import { CommitWindowGuard, combineCommitWindows } from './execution/commit-window.js';
@@ -79,9 +78,7 @@ import { ImageUploader, imageTempPrefixFor, sweepImageTempDirs } from './flows/i
 import { CdpFileInputSetter } from './cdp/file-input-setter.js';
 import { AnchorCache } from './locating/cache.js';
 import type { EngineOptions } from './locating/engine.js';
-import { buildPublishApprovalRequestId } from './publish/approval-gate.js';
 import type {
-  PublishResultPayload,
   PublishCommandResultPayload,
   EdgeTaskAcquirePayload,
   EdgeTaskReleasePayload,
@@ -632,73 +629,9 @@ async function main(): Promise<void> {
     }
   });
 
-  client.onPublishCommand((env) => {
-    void (async () => {
-      console.log(writeNoteStageLine());
-      // 浏览器闸（change browser-slot-scheduling）：发布是第二个「没有唤醒守卫」的入口——冷待机中
-      // 它此前会直接摸一个已被关掉的浏览器。先唤醒、有界等；唤不醒就**诚实回失败**，绝不静默无动作。
-      if (!(await ensureBrowserAwake(`publish:${env.id}`))) {
-        console.warn('[aidcp-edge] 发布命令到达时浏览器处于冷待机且唤醒失败 → 诚实回执失败（未发布）');
-        try {
-          client.send('publish.result', { ok: false, error: '[browser_wake_failed] 浏览器处于待机且未能唤醒，本次未发布' }, env.id);
-        } catch {
-          /* best-effort */
-        }
-        return;
-      }
-      // §7 在途登记：回收若撞上这条在途发布，按 publish.result 形状诚实判失败（同 env.id 回执）。
-      inFlightPublishes.set(env.id, (reason) => {
-        try {
-          client.send('publish.result', { ok: false, error: `[recycled] ${reason}` }, env.id);
-        } catch {
-          /* 连接可能已在关闭中；best-effort */
-        }
-      });
-      let result: PublishResultPayload;
-      try {
-        const requestId = buildPublishApprovalRequestId();
-        client.send('publish.approval_request', {
-          requestId,
-          title: env.payload.title,
-          content: env.payload.content,
-          tags: env.payload.tags,
-          edgeId,
-        });
-        result = await publishPost(
-          {
-            dom: session.dom,
-            executor: session.executor,
-            selector,
-            cache: publishCache,
-          },
-          PUBLISH_ENGINE_OPTIONS,
-          env.payload,
-          // A 阶段4：人审默认必过（AC-PUB）——缺省/任何非 'false' 值都挂闸；仅显式 AIDCP_REAL_PUBLISH=false 才跳过（本地开发）。
-          process.env.AIDCP_REAL_PUBLISH !== 'false'
-            ? {
-                requestId,
-                pollIntervalMs: Number(process.env.AIDCP_PUBLISH_APPROVAL_POLL_MS ?? 2_000),
-                timeoutMs: Number(process.env.AIDCP_PUBLISH_APPROVAL_TIMEOUT_MS ?? 300_000),
-                consumeSignal: process.env.AIDCP_PUBLISH_APPROVAL_CONSUME !== 'false',
-              }
-            : undefined,
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        result = { ok: false, error: `[unknown] ${message}` };
-      } finally {
-        inFlightPublishes.delete(env.id);
-      }
-      try {
-        client.send('publish.result', result, env.id);
-      } catch (sendErr) {
-        console.error('[aidcp-edge] publish.result 回传失败:', sendErr);
-      }
-    })();
-  });
-
-  // A 阶段1 指令驱动发布：云端逐条下发 publish.command，边缘逐条执行 + 后置校验 + 如实回报。
-  // 与上面 publish.request 旧整页路径并行（地基阶段不删旧路）。
+  // 指令驱动发布：云端逐条下发 publish.command，边缘逐条执行 + 后置校验 + 如实回报（onPublishAtomCommand，见下）。
+  // 遗留整页发布处理器 client.onPublishCommand（publish.request）已删除（change lease-strict-preemption 5.8）：
+  //   全程不过租约闸、云端已无发送方（只发 publish.command），保留只会绕过抢占/租约在途发布假成功修复链。
   // 配图收口：CDP 文件输入桥 + 上传器（复用 session.cdp 单例，绝不重建）。
   // task-0 实机校准（小红书创作平台发布页，图文模式）注入真实选择器：
   // - 文件输入：图文模式下页面唯一 input[type=file] 是 input.upload-input（accept jpg/png/webp）。
