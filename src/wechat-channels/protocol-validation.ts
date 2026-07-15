@@ -3,7 +3,13 @@ import type {
   InteractionAuthReopenPayload,
   InteractionAuthStatusPayload,
   InteractionErrorCode,
+  InteractionOffboardAckPayload,
+  InteractionOffboardCommandPayload,
+  InteractionOffboardResultPayload,
+  InteractionReplyReconcilePayload,
+  InteractionReplyReconcileResultPayload,
   InteractionReplyResultPayload,
+  InteractionReplyResultAckPayload,
   InteractionReplySendPayload,
   InteractionSyncAckPayload,
   InteractionSyncBatchPayload,
@@ -18,9 +24,15 @@ const INTERACTION_TYPES = new Set<MessageType>([
   'interaction.sync.batch',
   'interaction.sync.ack',
   'interaction.reply.result',
+  'interaction.reply.result.ack',
+  'interaction.reply.reconcile',
+  'interaction.reply.reconcile.result',
   'interaction.sync.request',
   'interaction.reply.send',
   'interaction.auth.reopen',
+  'interaction.offboard.command',
+  'interaction.offboard.result',
+  'interaction.offboard.ack',
 ]);
 
 const ERROR_CODES = new Set<InteractionErrorCode>([
@@ -385,6 +397,116 @@ export function validateInteractionReplyResult(value: unknown): InteractionReply
   };
 }
 
+export function validateInteractionReplyResultAck(value: unknown): InteractionReplyResultAckPayload {
+  const path = 'payload';
+  const v = record(value, path);
+  exact(v, ['jobId', 'attemptId', 'idempotencyKey', 'envKey', 'accountId', 'platform', 'status', 'errorCode', 'receivedAt'], path);
+  const idempotencyKey = str(v.idempotencyKey, `${path}.idempotencyKey`, 64);
+  if (!/^[a-f0-9]{64}$/.test(idempotencyKey)) fail(`${path}.idempotencyKey`, 'expected lowercase sha256');
+  const status = oneOf(v.status, ['accepted', 'duplicate', 'rejected'] as const, `${path}.status`);
+  const errorCode = nullableErrorCode(v.errorCode, `${path}.errorCode`);
+  if (status === 'rejected' ? errorCode === null : errorCode !== null) fail(path, 'ack errorCode does not match status');
+  return {
+    jobId: str(v.jobId, `${path}.jobId`), attemptId: str(v.attemptId, `${path}.attemptId`), idempotencyKey,
+    envKey: str(v.envKey, `${path}.envKey`), accountId: str(v.accountId, `${path}.accountId`),
+    platform: platform(v.platform, `${path}.platform`), status, errorCode,
+    receivedAt: timestamp(v.receivedAt, `${path}.receivedAt`),
+  };
+}
+
+export function validateInteractionReplyReconcile(value: unknown): InteractionReplyReconcilePayload {
+  const path = 'payload';
+  const v = record(value, path);
+  exact(v, ['reconcileId', 'envKey', 'accountId', 'platform', 'attempts', 'requestedAt'], path);
+  if (!Array.isArray(v.attempts) || v.attempts.length < 1 || v.attempts.length > 100) {
+    fail(`${path}.attempts`, 'expected array 1..100');
+  }
+  const attempts = v.attempts.map((item, index) => {
+    const itemPath = `${path}.attempts[${index}]`;
+    const entry = record(item, itemPath);
+    exact(entry, ['cloudStatus', 'command'], itemPath);
+    return {
+      cloudStatus: oneOf(entry.cloudStatus, ['created', 'dispatched', 'ambiguous'] as const, `${itemPath}.cloudStatus`),
+      command: validateInteractionReplySend(entry.command),
+    };
+  });
+  return {
+    reconcileId: str(v.reconcileId, `${path}.reconcileId`), envKey: str(v.envKey, `${path}.envKey`),
+    accountId: str(v.accountId, `${path}.accountId`), platform: platform(v.platform, `${path}.platform`),
+    attempts, requestedAt: timestamp(v.requestedAt, `${path}.requestedAt`),
+  };
+}
+
+export function validateInteractionReplyReconcileResult(value: unknown): InteractionReplyReconcileResultPayload {
+  const path = 'payload';
+  const v = record(value, path);
+  exact(v, ['reconcileId', 'envKey', 'accountId', 'platform', 'attempts', 'finishedAt'], path);
+  if (!Array.isArray(v.attempts) || v.attempts.length < 1 || v.attempts.length > 100) {
+    fail(`${path}.attempts`, 'expected array 1..100');
+  }
+  const attempts = v.attempts.map((item, index) => {
+    const itemPath = `${path}.attempts[${index}]`;
+    const entry = record(item, itemPath);
+    exact(entry, ['jobId', 'attemptId', 'idempotencyKey', 'state', 'observedAt'], itemPath);
+    const idempotencyKey = str(entry.idempotencyKey, `${itemPath}.idempotencyKey`, 64);
+    if (!/^[a-f0-9]{64}$/.test(idempotencyKey)) fail(`${itemPath}.idempotencyKey`, 'expected lowercase sha256');
+    return {
+      jobId: str(entry.jobId, `${itemPath}.jobId`), attemptId: str(entry.attemptId, `${itemPath}.attemptId`),
+      idempotencyKey,
+      state: oneOf(entry.state, ['result_replayed', 'not_found', 'binding_conflict'] as const, `${itemPath}.state`),
+      observedAt: timestamp(entry.observedAt, `${itemPath}.observedAt`),
+    };
+  });
+  return {
+    reconcileId: str(v.reconcileId, `${path}.reconcileId`), envKey: str(v.envKey, `${path}.envKey`),
+    accountId: str(v.accountId, `${path}.accountId`), platform: platform(v.platform, `${path}.platform`),
+    attempts, finishedAt: timestamp(v.finishedAt, `${path}.finishedAt`),
+  };
+}
+
+export function validateInteractionOffboardCommand(value: unknown): InteractionOffboardCommandPayload {
+  const path = 'payload';
+  const v = record(value, path);
+  exact(v, ['offboardId', 'envKey', 'accountId', 'platform', 'reason', 'requestedAt', 'expiresAt'], path);
+  const requestedAt = timestamp(v.requestedAt, `${path}.requestedAt`);
+  const expiresAt = timestamp(v.expiresAt, `${path}.expiresAt`);
+  if (expiresAt < requestedAt) fail(path, 'expiresAt must not precede requestedAt');
+  return {
+    offboardId: str(v.offboardId, `${path}.offboardId`), envKey: str(v.envKey, `${path}.envKey`),
+    accountId: str(v.accountId, `${path}.accountId`), platform: platform(v.platform, `${path}.platform`),
+    reason: oneOf(v.reason, ['environment_unbind', 'customer_terminated', 'admin_revoked'] as const, `${path}.reason`),
+    requestedAt, expiresAt,
+  };
+}
+
+export function validateInteractionOffboardResult(value: unknown): InteractionOffboardResultPayload {
+  const path = 'payload';
+  const v = record(value, path);
+  exact(v, ['offboardId', 'envKey', 'accountId', 'platform', 'status', 'errorCode', 'finishedAt'], path);
+  const status = oneOf(v.status, ['cleared', 'already_cleared', 'failed'] as const, `${path}.status`);
+  const errorCode = nullableErrorCode(v.errorCode, `${path}.errorCode`);
+  if (status === 'failed' ? errorCode === null : errorCode !== null) fail(path, 'result errorCode does not match status');
+  return {
+    offboardId: str(v.offboardId, `${path}.offboardId`), envKey: str(v.envKey, `${path}.envKey`),
+    accountId: str(v.accountId, `${path}.accountId`), platform: platform(v.platform, `${path}.platform`),
+    status, errorCode, finishedAt: timestamp(v.finishedAt, `${path}.finishedAt`),
+  };
+}
+
+export function validateInteractionOffboardAck(value: unknown): InteractionOffboardAckPayload {
+  const path = 'payload';
+  const v = record(value, path);
+  exact(v, ['offboardId', 'envKey', 'accountId', 'platform', 'status', 'errorCode', 'receivedAt'], path);
+  const status = oneOf(v.status, ['accepted', 'duplicate', 'rejected'] as const, `${path}.status`);
+  const errorCode = nullableErrorCode(v.errorCode, `${path}.errorCode`);
+  if (status === 'rejected' ? errorCode === null : errorCode !== null) fail(path, 'ack errorCode does not match status');
+  return {
+    offboardId: str(v.offboardId, `${path}.offboardId`), envKey: str(v.envKey, `${path}.envKey`),
+    accountId: str(v.accountId, `${path}.accountId`), platform: platform(v.platform, `${path}.platform`),
+    status, errorCode, receivedAt: timestamp(v.receivedAt, `${path}.receivedAt`),
+  };
+}
+
 export function validateInteractionAuthReopen(value: unknown): InteractionAuthReopenPayload {
   const path = 'payload';
   const v = record(value, path);
@@ -409,9 +531,15 @@ export function validateInteractionPayload(type: MessageType, payload: unknown):
     case 'interaction.sync.batch': return validateInteractionSyncBatch(payload);
     case 'interaction.sync.ack': return validateInteractionSyncAck(payload);
     case 'interaction.reply.result': return validateInteractionReplyResult(payload);
+    case 'interaction.reply.result.ack': return validateInteractionReplyResultAck(payload);
+    case 'interaction.reply.reconcile': return validateInteractionReplyReconcile(payload);
+    case 'interaction.reply.reconcile.result': return validateInteractionReplyReconcileResult(payload);
     case 'interaction.sync.request': return validateInteractionSyncRequest(payload);
     case 'interaction.reply.send': return validateInteractionReplySend(payload);
     case 'interaction.auth.reopen': return validateInteractionAuthReopen(payload);
+    case 'interaction.offboard.command': return validateInteractionOffboardCommand(payload);
+    case 'interaction.offboard.result': return validateInteractionOffboardResult(payload);
+    case 'interaction.offboard.ack': return validateInteractionOffboardAck(payload);
     default: fail('type', 'not an interaction message');
   }
 }

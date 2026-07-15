@@ -42,6 +42,7 @@ export class WechatChannelsConnector implements InteractionConnector {
   private readonly replies: WechatReplySender;
   private readonly timers: Array<ReturnType<typeof setInterval>> = [];
   private readonly syncLocks = new Map<'comment' | 'dm', Promise<void>>();
+  private readonly replyLocks = new Set<Promise<InteractionReplyResultPayload>>();
   private readonly pendingBatches = new Map<string, InteractionSyncBatchPayload>();
   private unsubscribeAuth?: () => void;
   private started = false;
@@ -91,7 +92,7 @@ export class WechatChannelsConnector implements InteractionConnector {
     this.unsubscribeAuth?.();
     this.unsubscribeAuth = undefined;
     for (const timer of this.timers.splice(0)) clearInterval(timer);
-    await Promise.allSettled(this.syncLocks.values());
+    await Promise.allSettled([...this.syncLocks.values(), ...this.replyLocks]);
   }
 
   getAuthStatus(): InteractionAuthStatusPayload {
@@ -149,7 +150,30 @@ export class WechatChannelsConnector implements InteractionConnector {
   }
 
   send(command: InteractionReplySendPayload): Promise<InteractionReplyResultPayload> {
-    return this.replies.send(command);
+    if (!this.started) return Promise.resolve({
+      jobId: command.jobId,
+      attemptId: command.attemptId,
+      idempotencyKey: command.idempotencyKey,
+      envKey: command.envKey,
+      accountId: command.accountId,
+      platform: 'wechat_channels',
+      channel: command.channel,
+      status: 'failed',
+      externalMessageId: null,
+      errorCategory: 'invalid_command',
+      errorCode: 'INTERACTION_FEATURE_DISABLED',
+      verification: 'not_verified',
+      retryAfterMs: null,
+      finishedAt: this.now(),
+    });
+    const running = this.replies.send(command);
+    this.replyLocks.add(running);
+    void running.then(() => this.replyLocks.delete(running), () => this.replyLocks.delete(running));
+    return running;
+  }
+
+  reconcileReply(command: InteractionReplySendPayload): Promise<'result_replayed' | 'not_found' | 'binding_conflict'> {
+    return this.replies.reconcile(command);
   }
 
   async reopenAuth(request: InteractionAuthReopenPayload): Promise<void> {

@@ -1,10 +1,20 @@
 import type {
   Envelope,
   InteractionAuthReopenPayload,
+  InteractionOffboardAckPayload,
+  InteractionOffboardCommandPayload,
+  InteractionOffboardResultPayload,
+  InteractionReplyReconcilePayload,
+  InteractionReplyReconcileResultPayload,
   InteractionReplyResultPayload,
+  InteractionReplyResultAckPayload,
   InteractionReplySendPayload,
   InteractionSyncAckPayload,
   InteractionSyncRequestPayload,
+} from '../comm/protocol.js';
+import {
+  INTERACTION_OFFBOARDING_CAPABILITY,
+  INTERACTION_REPLY_RECOVERY_CAPABILITY,
 } from '../comm/protocol.js';
 import { EdgeClient } from '../client/edge-client.js';
 import { deriveEdgeId } from '../client/edge-id.js';
@@ -22,7 +32,11 @@ import {
 import { resolveWechatStateRoot } from './local-paths.js';
 import {
   validateInteractionAuthStatus,
+  validateInteractionOffboardAck,
+  validateInteractionOffboardResult,
+  validateInteractionReplyReconcileResult,
   validateInteractionReplyResult,
+  validateInteractionReplyResultAck,
   validateInteractionSyncAck,
   validateInteractionSyncBatch,
 } from './protocol-validation.js';
@@ -129,18 +143,92 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     logger: safeLog,
   });
 
+  let replyFlush: Promise<void> | undefined;
+  const flushReplyResultOutbox = (): Promise<void> => {
+    if (replyFlush) return replyFlush;
+    replyFlush = (async () => {
+      if (!client.isInteractionInboxNegotiated()) return;
+      if (!client.supportsCapability(INTERACTION_REPLY_RECOVERY_CAPABILITY)) {
+        for (const result of await state.pendingReplyResults()) {
+          try {
+            validateInteractionReplyResult(result);
+            client.send('interaction.reply.result', result);
+          } catch (error) {
+            safeLog(`[wechat-channels] reply result remains durable: ${safeCode(error)}`);
+            break;
+          }
+        }
+        return;
+      }
+      while (true) {
+        const pending = await state.pendingReplyResults();
+        if (pending.length === 0) return;
+        for (const result of pending) {
+          try {
+            validateInteractionReplyResult(result);
+            const response = await client.request(
+              'interaction.reply.result', result, envMs(env.AIDCP_WECHAT_RESULT_ACK_TIMEOUT_MS, 30_000),
+            );
+            if (response.type !== 'interaction.reply.result.ack') throw new Error(`unexpected result ack type=${response.type}`);
+            const ack = validateInteractionReplyResultAck(response.payload);
+            if (!(await state.acknowledgeReplyResult(ack))) return;
+          } catch (error) {
+            safeLog(`[wechat-channels] reply result remains durable: ${safeCode(error)}`);
+            return;
+          }
+        }
+      }
+    })().finally(() => { replyFlush = undefined; });
+    return replyFlush;
+  };
+
+  let offboardFlush: Promise<void> | undefined;
+  const offboardFlights = new Map<string, Promise<void>>();
+  const flushOffboardResultOutbox = (): Promise<void> => {
+    if (offboardFlush) return offboardFlush;
+    offboardFlush = (async () => {
+      if (!client.supportsCapability(INTERACTION_OFFBOARDING_CAPABILITY)) return;
+      while (true) {
+        const pending = await state.pendingOffboardResults();
+        if (pending.length === 0) return;
+        for (const result of pending) {
+          try {
+            validateInteractionOffboardResult(result);
+            const response = await client.request(
+              'interaction.offboard.result', result, envMs(env.AIDCP_WECHAT_OFFBOARD_ACK_TIMEOUT_MS, 30_000),
+            );
+            if (response.type !== 'interaction.offboard.ack') throw new Error(`unexpected offboard ack type=${response.type}`);
+            const ack = validateInteractionOffboardAck(response.payload);
+            if (!(await state.acknowledgeOffboard(ack))) return;
+          } catch (error) {
+            safeLog(`[wechat-channels] offboard result remains durable: ${safeCode(error)}`);
+            return;
+          }
+        }
+      }
+    })().finally(() => { offboardFlush = undefined; });
+    return offboardFlush;
+  };
+
   client.onInteractionCommand((envelope) => {
-    void handleInteractionCommand(client, connector!, envelope);
+    void handleInteractionCommand({ client, connector: connector!, state, auth, sidecar,
+      flushReplyResultOutbox, flushOffboardResultOutbox, offboardFlights }, envelope);
   });
   client.on('cloud.reconnected', () => {
     void (async () => {
-      if (client.isInteractionInboxNegotiated()) await connector!.start();
+      await flushReplyResultOutbox();
+      await flushOffboardResultOutbox();
+      if (client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
+          !(await state.isOffboarded())) await connector!.start();
       else await connector!.stop();
     })();
   });
 
   await client.connect();
-  if (client.isInteractionInboxNegotiated()) {
+  await flushReplyResultOutbox();
+  await flushOffboardResultOutbox();
+  if (client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
+      !(await state.isOffboarded())) {
     await connector.start();
     safeLog('[wechat-channels] interaction_inbox_v1 negotiated; API-only connector is online');
   } else {
@@ -184,13 +272,24 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   }
 }
 
-async function handleInteractionCommand(
-  client: EdgeClient,
-  connector: WechatChannelsConnector,
+export async function handleInteractionCommand(
+  deps: {
+    client: EdgeClient;
+    connector: WechatChannelsConnector;
+    state: WechatRuntimeStateStore;
+    auth: WechatAuthCoordinator;
+    sidecar: CdpWechatChannelsBrowserSidecar;
+    flushReplyResultOutbox: () => Promise<void>;
+    flushOffboardResultOutbox: () => Promise<void>;
+    offboardFlights: Map<string, Promise<void>>;
+  },
   envelope: Envelope<
-    InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload
+    InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload |
+    InteractionReplyResultAckPayload | InteractionReplyReconcilePayload | InteractionOffboardCommandPayload |
+    InteractionOffboardAckPayload
   >,
 ): Promise<void> {
+  const { client, connector, state, auth, sidecar } = deps;
   if (envelope.type === 'interaction.sync.ack') {
     connector.acceptSyncAck(envelope.payload as InteractionSyncAckPayload);
     return;
@@ -228,7 +327,36 @@ async function handleInteractionCommand(
       };
     }
     validateInteractionReplyResult(result);
-    client.send('interaction.reply.result', result, envelope.id);
+    try {
+      result = await state.completeReplyExecution(command.idempotencyKey, command.attemptId, result, Date.now());
+    } catch {
+      // Normal sender paths have already completed atomically; this only catches an unexpected runtime error path.
+    }
+    await deps.flushReplyResultOutbox();
+    return;
+  }
+  if (envelope.type === 'interaction.reply.result.ack') {
+    await state.acknowledgeReplyResult(envelope.payload as InteractionReplyResultAckPayload);
+    return;
+  }
+  if (envelope.type === 'interaction.reply.reconcile') {
+    const request = envelope.payload as InteractionReplyReconcilePayload;
+    const attempts: InteractionReplyReconcileResultPayload['attempts'] = [];
+    for (const entry of request.attempts) {
+      const command = entry.command;
+      const outerScopeMatches = request.envKey === command.envKey && request.accountId === command.accountId &&
+        request.platform === command.platform;
+      const stateResult = outerScopeMatches ? await connector.reconcileReply(command) : 'binding_conflict';
+      attempts.push({ jobId: command.jobId, attemptId: command.attemptId,
+        idempotencyKey: command.idempotencyKey, state: stateResult, observedAt: Date.now() });
+    }
+    await deps.flushReplyResultOutbox();
+    const result: InteractionReplyReconcileResultPayload = {
+      reconcileId: request.reconcileId, envKey: request.envKey, accountId: request.accountId,
+      platform: 'wechat_channels', attempts, finishedAt: Date.now(),
+    };
+    validateInteractionReplyReconcileResult(result);
+    client.send('interaction.reply.reconcile.result', result, envelope.id);
     return;
   }
   if (envelope.type === 'interaction.auth.reopen') {
@@ -238,6 +366,45 @@ async function handleInteractionCommand(
       safeLog(`[wechat-channels] auth reopen did not complete: ${safeCode(error)}`);
       connector.reportStatus();
     }
+    return;
+  }
+  if (envelope.type === 'interaction.offboard.command') {
+    const command = envelope.payload as InteractionOffboardCommandPayload;
+    const active = deps.offboardFlights.get(command.offboardId);
+    if (active) {
+      await active;
+      await deps.flushOffboardResultOutbox();
+      return;
+    }
+    const execution = (async () => {
+      const scope = connector.getAuthStatus();
+      if (command.envKey !== scope.envKey || command.accountId !== scope.accountId || command.platform !== scope.platform) return;
+      const claim = await state.claimOffboard(command, Date.now());
+      if (claim.status === 'conflict' || claim.status === 'completed') return;
+      let result: InteractionOffboardResultPayload;
+      try {
+        await connector.stop();
+        await auth.clear();
+        await sidecar.close();
+        result = { offboardId: command.offboardId, envKey: command.envKey, accountId: command.accountId,
+          platform: 'wechat_channels', status: 'cleared', errorCode: null, finishedAt: Date.now() };
+      } catch {
+        result = { offboardId: command.offboardId, envKey: command.envKey, accountId: command.accountId,
+          platform: 'wechat_channels', status: 'failed', errorCode: 'INTERACTION_INTERNAL_ERROR', finishedAt: Date.now() };
+      }
+      await state.completeOffboard(command, result, Date.now());
+    })();
+    deps.offboardFlights.set(command.offboardId, execution);
+    try {
+      await execution;
+    } finally {
+      deps.offboardFlights.delete(command.offboardId);
+    }
+    await deps.flushOffboardResultOutbox();
+    return;
+  }
+  if (envelope.type === 'interaction.offboard.ack') {
+    await state.acknowledgeOffboard(envelope.payload as InteractionOffboardAckPayload);
   }
 }
 

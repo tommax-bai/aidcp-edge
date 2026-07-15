@@ -33,6 +33,8 @@ test('selectPlatformDriver: wechat_channels registers API-only interaction capab
   assert.equal(driver.capabilities.includes('interaction.dm.send_image'), false);
   assert.equal(driver.capabilities.includes('browse'), false);
   assert.equal(driver.edgeCapabilities.includes('interaction_inbox_v1'), true);
+  assert.equal(driver.edgeCapabilities.includes('interaction_reply_recovery_v1'), true);
+  assert.equal(driver.edgeCapabilities.includes('interaction_offboarding_v1'), true);
   assert.equal(driver.isAllowedTargetUrl('https://channels.weixin.qq.com/platform/post/list'), true);
   assert.equal(driver.isAllowedTargetUrl('https://www.xiaohongshu.com/explore'), false);
 });

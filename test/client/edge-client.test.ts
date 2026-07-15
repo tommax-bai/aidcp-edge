@@ -77,13 +77,15 @@ async function connectInteractionClient(
   ws: FakeWebSocket,
   negotiated: boolean,
   logger: (message: string) => void = () => {},
+  extensions = true,
 ): Promise<EdgeClient> {
   const client = new EdgeClient({
     url: 'ws://test',
     edgeId: 'edge-wc-1',
     platform: 'wechat_channels',
     app: 'wechat_channels',
-    capabilities: ['identity', 'auth.browser_sidecar', 'interaction_inbox_v1'],
+    capabilities: ['identity', 'auth.browser_sidecar', 'interaction_inbox_v1',
+      'interaction_reply_recovery_v1', 'interaction_offboarding_v1'],
     accountId: 'finder-a',
     runner: {
       run: async () => ({ actionId: 'noop', ok: false, outcome: 'escalated', attempts: 0, reason: 'api_only' }),
@@ -99,7 +101,12 @@ async function connectInteractionClient(
   ws.emitMessage(makeEnvelope('welcome', 'hello-wc-1', 1, {
     sessionId: 'session-wc-1',
     serverVersion: 'v1',
-    ...(negotiated ? { capabilities: ['interaction_inbox_v1'] } : {}),
+    ...(negotiated ? {
+      capabilities: extensions
+        ? ['interaction_inbox_v1', 'interaction_reply_recovery_v1', 'interaction_offboarding_v1']
+        : ['interaction_inbox_v1'],
+      ...(extensions ? { interactionRecovery: { offboardPending: false } } : {}),
+    } : {}),
   }));
   await connecting;
   ws.sent.length = 0;
@@ -188,14 +195,14 @@ test('edge-client: hello carries optional account nickname for display enrichmen
   await connecting;
 });
 
-test('edge-client: wechat_channels hello declares frozen capability and welcome must echo it', async () => {
+test('edge-client: wechat_channels hello declares base/recovery/offboard capabilities and welcome echoes them', async () => {
   const ws = new FakeWebSocket();
   const client = new EdgeClient({
     url: 'ws://test',
     edgeId: 'edge-wc-1',
     platform: 'wechat_channels',
     app: 'wechat_channels',
-    capabilities: ['identity', 'interaction_inbox_v1'],
+    capabilities: ['identity', 'interaction_inbox_v1', 'interaction_reply_recovery_v1', 'interaction_offboarding_v1'],
     runner: { run: async () => ({ actionId: 'noop', ok: false, outcome: 'escalated', attempts: 0, reason: 'api_only' }) },
     wsFactory: () => ws,
     idGen: () => 'hello-wc-1',
@@ -208,13 +215,19 @@ test('edge-client: wechat_channels hello declares frozen capability and welcome 
   const hello = JSON.parse(ws.sent[0]) as Envelope<{ capabilities: string[]; platform: string }>;
   assert.equal(hello.payload.platform, 'wechat_channels');
   assert.ok(hello.payload.capabilities.includes('interaction_inbox_v1'));
+  assert.ok(hello.payload.capabilities.includes('interaction_reply_recovery_v1'));
+  assert.ok(hello.payload.capabilities.includes('interaction_offboarding_v1'));
   ws.emitMessage(makeEnvelope('welcome', 'hello-wc-1', 1, {
     sessionId: 'session-wc-1',
     serverVersion: 'v1',
-    capabilities: ['interaction_inbox_v1'],
+    capabilities: ['interaction_inbox_v1', 'interaction_reply_recovery_v1', 'interaction_offboarding_v1'],
+    interactionRecovery: { offboardPending: false },
   }));
   await connecting;
   assert.equal(client.isInteractionInboxNegotiated(), true);
+  assert.equal(client.supportsCapability('interaction_reply_recovery_v1'), true);
+  assert.equal(client.supportsCapability('interaction_offboarding_v1'), true);
+  assert.equal(client.hasPendingInteractionOffboard(), false);
 });
 
 test('edge-client: old Cloud cannot activate interaction commands or cause a retry loop', async () => {
@@ -237,6 +250,25 @@ test('edge-client: old Cloud cannot activate interaction commands or cause a ret
   assert.equal(calls.length, 0);
   assert.equal(ws.sent.length, 0);
   assert.ok(logs.some((line) => line.includes('未协商')));
+});
+
+test('edge-client: negotiated offboarding without an explicit false welcome barrier is fail-closed', async () => {
+  const ws = new FakeWebSocket();
+  const client = new EdgeClient({
+    url: 'ws://test', edgeId: 'edge-wc-1', platform: 'wechat_channels', app: 'wechat_channels',
+    capabilities: ['interaction_inbox_v1', 'interaction_offboarding_v1'], accountId: 'finder-a',
+    runner: { run: async () => ({ actionId: 'noop', ok: false, outcome: 'escalated', attempts: 0, reason: 'api_only' }) },
+    wsFactory: () => ws, idGen: () => 'hello-wc-1', clock: () => 1, logger: () => {},
+  });
+  const connecting = client.connect();
+  ws.emitOpen();
+  await Promise.resolve();
+  ws.emitMessage(makeEnvelope('welcome', 'hello-wc-1', 1, {
+    sessionId: 'session-wc-1', serverVersion: 'v1',
+    capabilities: ['interaction_inbox_v1', 'interaction_offboarding_v1'],
+  }));
+  await connecting;
+  assert.equal(client.hasPendingInteractionOffboard(), true);
 });
 
 test('edge-client: negotiated interaction sync/send/reopen and late ack reach the dedicated active route', async () => {
@@ -269,6 +301,45 @@ test('edge-client: negotiated interaction sync/send/reopen and late ack reach th
     'interaction.auth.reopen',
     'interaction.sync.ack',
   ]);
+});
+
+test('edge-client: recovery/offboard commands require their negotiated extension capabilities', async () => {
+  const ws = new FakeWebSocket();
+  const client = await connectInteractionClient(ws, true);
+  const calls: Envelope[] = [];
+  client.onInteractionCommand((env) => calls.push(env));
+  ws.emitMessage(makeEnvelope('interaction.reply.result.ack', 'ack-1', 2, {
+    jobId: 'job-1', attemptId: 'attempt-1', idempotencyKey: 'a'.repeat(64), envKey: 'env-a',
+    accountId: 'finder-a', platform: 'wechat_channels', status: 'accepted', errorCode: null, receivedAt: 2,
+  }));
+  ws.emitMessage(makeEnvelope('interaction.offboard.command', 'offboard-1', 2, {
+    offboardId: 'offboard-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
+    reason: 'environment_unbind', requestedAt: 2, expiresAt: 100,
+  }));
+  assert.deepEqual(calls.map((env) => env.type), [
+    'interaction.reply.result.ack', 'interaction.offboard.command',
+  ]);
+});
+
+test('edge-client: base-only Cloud cannot activate recovery/offboard commands', async () => {
+  const ws = new FakeWebSocket();
+  const logs: string[] = [];
+  const client = await connectInteractionClient(ws, true, (message) => logs.push(message), false);
+  const calls: Envelope[] = [];
+  client.onInteractionCommand((env) => calls.push(env));
+  ws.emitMessage(makeEnvelope('interaction.reply.reconcile', 'reconcile-unsupported', 2, {
+    reconcileId: 'reconcile-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
+    attempts: [], requestedAt: 2,
+  }));
+  ws.emitMessage(makeEnvelope('interaction.offboard.command', 'offboard-unsupported', 2, {
+    offboardId: 'offboard-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
+    reason: 'environment_unbind', requestedAt: 2, expiresAt: 100,
+  }));
+  assert.equal(calls.length, 0);
+  assert.equal(client.isInteractionInboxNegotiated(), true);
+  assert.equal(client.supportsCapability('interaction_reply_recovery_v1'), false);
+  assert.equal(client.supportsCapability('interaction_offboarding_v1'), false);
+  assert.ok(logs.some((line) => line.includes('未协商')));
 });
 
 test('edge-client: malformed negotiated interaction payload is rejected before the handler', async () => {

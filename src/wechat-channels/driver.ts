@@ -35,6 +35,8 @@ export const wechatChannelsPlatformDriver: InteractionPlatformDriver = {
     'overlay',
     'auth.browser_sidecar',
     'interaction_inbox_v1',
+    'interaction_reply_recovery_v1',
+    'interaction_offboarding_v1',
     'interaction.comment.read',
     'interaction.comment.reply',
     'interaction.dm.read',

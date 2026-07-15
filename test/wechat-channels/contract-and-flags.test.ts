@@ -14,6 +14,12 @@ import {
 import {
   InteractionProtocolValidationError,
   validateInteractionAuthStatus,
+  validateInteractionOffboardAck,
+  validateInteractionOffboardCommand,
+  validateInteractionOffboardResult,
+  validateInteractionReplyReconcile,
+  validateInteractionReplyReconcileResult,
+  validateInteractionReplyResultAck,
   validateInteractionReplySend,
   validateInteractionSyncBatch,
 } from '../../src/wechat-channels/protocol-validation.js';
@@ -157,6 +163,44 @@ test('wechat contract validator: strict frozen payloads reject extra fields, sco
     }),
     InteractionProtocolValidationError,
   );
+});
+
+test('wechat contract validator: recovery/offboard payloads are exact and body-free', () => {
+  const reply = {
+    jobId: 'job-1', attemptId: 'attempt-1', idempotencyKey: 'b'.repeat(64),
+    envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels' as const, channel: 'dm' as const,
+    target: { threadExternalId: 'thread-1', inboundMessageExternalId: 'm-1', parentExternalId: null },
+    content: { type: 'text' as const, text: 'hello' }, expiresAt: 100,
+  };
+  assert.deepEqual(validateInteractionReplyResultAck({
+    jobId: reply.jobId, attemptId: reply.attemptId, idempotencyKey: reply.idempotencyKey,
+    envKey: reply.envKey, accountId: reply.accountId, platform: 'wechat_channels',
+    status: 'accepted', errorCode: null, receivedAt: 2,
+  }).status, 'accepted');
+  assert.deepEqual(validateInteractionReplyReconcile({
+    reconcileId: 'reconcile-1', envKey: reply.envKey, accountId: reply.accountId, platform: 'wechat_channels',
+    attempts: [{ cloudStatus: 'dispatched', command: reply }], requestedAt: 2,
+  }).attempts[0].command, reply);
+  assert.equal(validateInteractionReplyReconcileResult({
+    reconcileId: 'reconcile-1', envKey: reply.envKey, accountId: reply.accountId, platform: 'wechat_channels',
+    attempts: [{ jobId: reply.jobId, attemptId: reply.attemptId, idempotencyKey: reply.idempotencyKey,
+      state: 'not_found', observedAt: 3 }], finishedAt: 3,
+  }).attempts[0].state, 'not_found');
+  const command = validateInteractionOffboardCommand({
+    offboardId: 'offboard-1', envKey: reply.envKey, accountId: reply.accountId, platform: 'wechat_channels',
+    reason: 'environment_unbind', requestedAt: 4, expiresAt: 100,
+  });
+  assert.equal(command.reason, 'environment_unbind');
+  assert.equal(validateInteractionOffboardResult({
+    offboardId: command.offboardId, envKey: command.envKey, accountId: command.accountId,
+    platform: 'wechat_channels', status: 'cleared', errorCode: null, finishedAt: 5,
+  }).status, 'cleared');
+  assert.equal(validateInteractionOffboardAck({
+    offboardId: command.offboardId, envKey: command.envKey, accountId: command.accountId,
+    platform: 'wechat_channels', status: 'duplicate', errorCode: null, receivedAt: 6,
+  }).status, 'duplicate');
+  assert.throws(() => validateInteractionOffboardCommand({ ...command, credential: 'secret' }),
+    InteractionProtocolValidationError);
 });
 
 test('wechat write probes: exact disposable target approval is mandatory and no implicit target is accepted', () => {

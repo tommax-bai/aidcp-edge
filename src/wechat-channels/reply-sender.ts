@@ -68,6 +68,26 @@ export class WechatReplySender {
     return promise;
   }
 
+  /** Recovery is verification-only: a missing durable claim is reported and never becomes a platform write. */
+  async reconcile(command: InteractionReplySendPayload): Promise<'result_replayed' | 'not_found' | 'binding_conflict'> {
+    if (!this.scopeMatches(command) || !this.commandValid(command)) return 'binding_conflict';
+    const stored = await this.options.state.inspectReplyExecution(command.idempotencyKey, command.attemptId);
+    if (stored.status === 'not_found') return 'not_found';
+    if (stored.status === 'conflict') return 'binding_conflict';
+    if (stored.status === 'completed') {
+      await this.options.state.ensureReplyResultOutbox(stored.result);
+      return 'result_replayed';
+    }
+    if (stored.status === 'executing') {
+      const result = await this.reconcileExecuting(command, stored.result);
+      await this.options.state.ensureReplyResultOutbox(result);
+      return 'result_replayed';
+    }
+    // `claimed` is durably before the executing marker and therefore before any platform call.
+    await this.persistFailure(command, 'transient_network', 'INTERACTION_UPSTREAM_UNAVAILABLE');
+    return 'result_replayed';
+  }
+
   private async executeClaimed(command: InteractionReplySendPayload): Promise<InteractionReplyResultPayload> {
     const claim = await this.options.state.claimReplyExecution(
       command.idempotencyKey,

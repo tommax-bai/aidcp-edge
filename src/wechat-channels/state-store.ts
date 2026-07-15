@@ -1,7 +1,14 @@
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { InteractionChannel, InteractionReplyResultPayload } from '../comm/protocol.js';
+import type {
+  InteractionChannel,
+  InteractionOffboardAckPayload,
+  InteractionOffboardCommandPayload,
+  InteractionOffboardResultPayload,
+  InteractionReplyResultAckPayload,
+  InteractionReplyResultPayload,
+} from '../comm/protocol.js';
 import { resolveWechatStateRoot, runtimeStatePath, type WechatRuntimeScope } from './local-paths.js';
 
 export interface SyncCheckpoint {
@@ -17,11 +24,21 @@ interface StoredReplyExecution {
   updatedAt: number;
 }
 
+interface StoredOffboardExecution {
+  command: InteractionOffboardCommandPayload;
+  state: 'claimed' | 'completed';
+  result: InteractionOffboardResultPayload | null;
+  updatedAt: number;
+}
+
 interface RuntimeState {
-  version: 2;
+  version: 3;
   checkpoints: Record<string, SyncCheckpoint>;
   replies: Record<string, StoredReplyExecution>;
   attempts: Record<string, string>;
+  resultOutbox: Record<string, InteractionReplyResultPayload>;
+  offboards: Record<string, StoredOffboardExecution>;
+  offboardOutbox: Record<string, InteractionOffboardResultPayload>;
   threadSources: Record<string, string | null>;
 }
 
@@ -33,6 +50,16 @@ export type ReplyExecutionClaim =
 export type ReplyExecutionStart =
   | { status: 'started'; result: InteractionReplyResultPayload }
   | { status: 'executing' | 'completed'; result: InteractionReplyResultPayload }
+  | { status: 'conflict' };
+
+export type StoredReplyState =
+  | { status: 'claimed' }
+  | { status: 'executing' | 'completed'; result: InteractionReplyResultPayload }
+  | { status: 'not_found' | 'conflict' };
+
+export type OffboardExecutionClaim =
+  | { status: 'claimed' }
+  | { status: 'completed'; result: InteractionOffboardResultPayload }
   | { status: 'conflict' };
 
 export class WechatRuntimeStateStore {
@@ -67,14 +94,17 @@ export class WechatRuntimeStateStore {
         checkpoints?: Record<string, SyncCheckpoint>;
         replies?: Record<string, Partial<StoredReplyExecution> & { attemptId?: string }>;
         attempts?: Record<string, string>;
+        resultOutbox?: Record<string, InteractionReplyResultPayload>;
+        offboards?: Record<string, StoredOffboardExecution>;
+        offboardOutbox?: Record<string, InteractionOffboardResultPayload>;
         threadSources?: Record<string, string | null>;
       };
-      if ((parsed.version === 1 || parsed.version === 2) && parsed.checkpoints && parsed.replies && parsed.attempts) {
+      if ((parsed.version === 1 || parsed.version === 2 || parsed.version === 3) && parsed.checkpoints && parsed.replies && parsed.attempts) {
         const attempts = { ...parsed.attempts };
         const replies: Record<string, StoredReplyExecution> = {};
         for (const [idempotencyKey, stored] of Object.entries(parsed.replies)) {
           if (typeof stored.attemptId !== 'string') continue;
-          const state = parsed.version === 2 && (
+          const state = (parsed.version === 2 || parsed.version === 3) && (
             stored.state === 'claimed' || stored.state === 'executing' || stored.state === 'completed'
           ) ? stored.state : 'completed';
           const result = stored.result ?? null;
@@ -88,10 +118,18 @@ export class WechatRuntimeStateStore {
           attempts[stored.attemptId] ??= idempotencyKey;
         }
         this.state = {
-          version: 2,
+          version: 3,
           checkpoints: parsed.checkpoints,
           replies,
           attempts,
+          resultOutbox: parsed.version === 3 && parsed.resultOutbox
+            ? { ...parsed.resultOutbox }
+            : Object.fromEntries(Object.values(replies)
+              .filter((entry): entry is StoredReplyExecution & { result: InteractionReplyResultPayload } =>
+                entry.state === 'completed' && entry.result !== null)
+              .map((entry) => [entry.attemptId, entry.result])),
+          offboards: parsed.version === 3 && parsed.offboards ? { ...parsed.offboards } : {},
+          offboardOutbox: parsed.version === 3 && parsed.offboardOutbox ? { ...parsed.offboardOutbox } : {},
           threadSources: parsed.threadSources ?? {},
         };
       }
@@ -175,14 +213,121 @@ export class WechatRuntimeStateStore {
   ): Promise<InteractionReplyResultPayload> {
     return this.mutate((state) => {
       if (replyBindingConflicts(state, idempotencyKey, attemptId)) throw new Error('attempt_idempotency_conflict');
+      if (result.attemptId !== attemptId || result.idempotencyKey !== idempotencyKey) {
+        throw new Error('reply_result_binding_conflict');
+      }
       const existing = state.replies[idempotencyKey];
       if (!existing) throw new Error('reply_execution_not_claimed');
+      if (existing.state === 'completed' && existing.result) {
+        state.resultOutbox[attemptId] = existing.result;
+        return existing.result;
+      }
+      existing.state = 'completed';
+      existing.result = result;
+      existing.updatedAt = now;
+      state.resultOutbox[attemptId] = result;
+      return result;
+    });
+  }
+
+  async inspectReplyExecution(idempotencyKey: string, attemptId: string): Promise<StoredReplyState> {
+    await this.waitForMutations();
+    if (replyBindingConflicts(this.state, idempotencyKey, attemptId)) return { status: 'conflict' };
+    const existing = this.state.replies[idempotencyKey];
+    if (!existing) return { status: 'not_found' };
+    if (existing.state === 'claimed') return { status: 'claimed' };
+    if (!existing.result) return { status: 'conflict' };
+    return { status: existing.state, result: existing.result };
+  }
+
+  async ensureReplyResultOutbox(result: InteractionReplyResultPayload): Promise<void> {
+    await this.mutate((state) => {
+      const existing = state.replies[result.idempotencyKey];
+      if (!existing || existing.attemptId !== result.attemptId || existing.state !== 'completed') {
+        throw new Error('reply_result_not_completed');
+      }
+      state.resultOutbox[result.attemptId] = result;
+    });
+  }
+
+  async pendingReplyResults(): Promise<InteractionReplyResultPayload[]> {
+    await this.waitForMutations();
+    return Object.values(this.state.resultOutbox).map((result) => ({ ...result }));
+  }
+
+  async acknowledgeReplyResult(ack: InteractionReplyResultAckPayload): Promise<boolean> {
+    if (ack.status === 'rejected') return false;
+    return this.mutate((state) => {
+      const result = state.resultOutbox[ack.attemptId];
+      if (!result || result.jobId !== ack.jobId || result.idempotencyKey !== ack.idempotencyKey ||
+          result.envKey !== ack.envKey || result.accountId !== ack.accountId || result.platform !== ack.platform) return false;
+      delete state.resultOutbox[ack.attemptId];
+      return true;
+    });
+  }
+
+  async claimOffboard(command: InteractionOffboardCommandPayload, now: number): Promise<OffboardExecutionClaim> {
+    return this.mutate((state) => {
+      const existing = state.offboards[command.offboardId];
+      if (existing) {
+        if (!sameOffboardScope(existing.command, command)) return { status: 'conflict' };
+        if (existing.state === 'completed' && existing.result) {
+          if (existing.result.status === 'failed') {
+            existing.state = 'claimed';
+            existing.result = null;
+            existing.updatedAt = now;
+            delete state.offboardOutbox[command.offboardId];
+            return { status: 'claimed' };
+          }
+          state.offboardOutbox[command.offboardId] = existing.result;
+          return { status: 'completed', result: existing.result };
+        }
+        return { status: 'claimed' };
+      }
+      state.offboards[command.offboardId] = { command, state: 'claimed', result: null, updatedAt: now };
+      return { status: 'claimed' };
+    });
+  }
+
+  async completeOffboard(
+    command: InteractionOffboardCommandPayload,
+    result: InteractionOffboardResultPayload,
+    now: number,
+  ): Promise<InteractionOffboardResultPayload> {
+    return this.mutate((state) => {
+      const existing = state.offboards[command.offboardId];
+      if (!existing || !sameOffboardScope(existing.command, command)) throw new Error('offboard_scope_conflict');
+      if (!sameOffboardResultScope(command, result)) throw new Error('offboard_result_scope_conflict');
       if (existing.state === 'completed' && existing.result) return existing.result;
       existing.state = 'completed';
       existing.result = result;
       existing.updatedAt = now;
+      state.offboardOutbox[command.offboardId] = result;
       return result;
     });
+  }
+
+  async pendingOffboardResults(): Promise<InteractionOffboardResultPayload[]> {
+    await this.waitForMutations();
+    return Object.values(this.state.offboardOutbox).map((result) => ({ ...result }));
+  }
+
+  async acknowledgeOffboard(ack: InteractionOffboardAckPayload): Promise<boolean> {
+    if (ack.status === 'rejected') return false;
+    return this.mutate((state) => {
+      const result = state.offboardOutbox[ack.offboardId];
+      if (!result || result.envKey !== ack.envKey || result.accountId !== ack.accountId || result.platform !== ack.platform) {
+        return false;
+      }
+      delete state.offboardOutbox[ack.offboardId];
+      return true;
+    });
+  }
+
+  async isOffboarded(): Promise<boolean> {
+    await this.waitForMutations();
+    return Object.values(this.state.offboards).some((entry) => entry.state === 'completed' &&
+      (entry.result?.status === 'cleared' || entry.result?.status === 'already_cleared'));
   }
 
   private async waitForMutations(): Promise<void> {
@@ -214,18 +359,24 @@ export class WechatRuntimeStateStore {
 }
 
 function emptyRuntimeState(): RuntimeState {
-  return { version: 2, checkpoints: {}, replies: {}, attempts: {}, threadSources: {} };
+  return { version: 3, checkpoints: {}, replies: {}, attempts: {}, resultOutbox: {},
+    offboards: {}, offboardOutbox: {}, threadSources: {} };
 }
 
 function cloneRuntimeState(state: RuntimeState): RuntimeState {
   return {
-    version: 2,
+    version: 3,
     checkpoints: { ...state.checkpoints },
     replies: Object.fromEntries(Object.entries(state.replies).map(([key, value]) => [
       key,
       { ...value, result: value.result ? { ...value.result } : null },
     ])),
     attempts: { ...state.attempts },
+    resultOutbox: Object.fromEntries(Object.entries(state.resultOutbox).map(([key, value]) => [key, { ...value }])),
+    offboards: Object.fromEntries(Object.entries(state.offboards).map(([key, value]) => [key, {
+      ...value, command: { ...value.command }, result: value.result ? { ...value.result } : null,
+    }])),
+    offboardOutbox: Object.fromEntries(Object.entries(state.offboardOutbox).map(([key, value]) => [key, { ...value }])),
     threadSources: { ...state.threadSources },
   };
 }
@@ -241,4 +392,17 @@ function replyBindingConflicts(state: RuntimeState, idempotencyKey: string, atte
 
 function checkpointKey(channel: InteractionChannel, scopeExternalId: string | null): string {
   return `${channel}:${scopeExternalId ?? '__global__'}`;
+}
+
+function sameOffboardScope(a: InteractionOffboardCommandPayload, b: InteractionOffboardCommandPayload): boolean {
+  return a.offboardId === b.offboardId && a.envKey === b.envKey && a.accountId === b.accountId &&
+    a.platform === b.platform && a.reason === b.reason && a.requestedAt === b.requestedAt && a.expiresAt === b.expiresAt;
+}
+
+function sameOffboardResultScope(
+  command: InteractionOffboardCommandPayload,
+  result: InteractionOffboardResultPayload,
+): boolean {
+  return command.offboardId === result.offboardId && command.envKey === result.envKey &&
+    command.accountId === result.accountId && command.platform === result.platform;
 }

@@ -3,7 +3,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { InteractionReplyResultPayload, InteractionReplySendPayload } from '../../src/comm/protocol.js';
+import type {
+  InteractionOffboardCommandPayload,
+  InteractionReplyResultPayload,
+  InteractionReplySendPayload,
+} from '../../src/comm/protocol.js';
 import type { WechatChannelsApiClient } from '../../src/wechat-channels/api-client.js';
 import type { WechatAuthCoordinator } from '../../src/wechat-channels/auth-session.js';
 import { WechatChannelsError } from '../../src/wechat-channels/error-classifier.js';
@@ -128,6 +132,69 @@ test('wechat reply: platform ack confirms once; duplicate command reuses durable
     assert.deepEqual(replay, first);
     assert.equal(wrongScopeReplay.errorCode, 'INTERACTION_SCOPE_MISMATCH');
     assert.equal(sends, 1);
+  });
+});
+
+test('wechat reply: durable result outbox survives restart and clears only on an exact accepted Cloud ack', async () => {
+  await withState(async (state, root) => {
+    const api = { sendDmText: async () => ({ accepted: true, externalMessageId: 'reply-outbox-1' }) } as unknown as WechatChannelsApiClient;
+    const result = await sender(state, api).send(command('dm', '7'));
+    const restarted = new WechatRuntimeStateStore(SCOPE, root);
+    assert.deepEqual(await restarted.pendingReplyResults(), [result]);
+    assert.equal(await restarted.acknowledgeReplyResult({
+      jobId: result.jobId, attemptId: result.attemptId, idempotencyKey: result.idempotencyKey,
+      envKey: result.envKey, accountId: 'foreign-account', platform: 'wechat_channels',
+      status: 'accepted', errorCode: null, receivedAt: NOW,
+    }), false);
+    assert.equal((await restarted.pendingReplyResults()).length, 1);
+    assert.equal(await restarted.acknowledgeReplyResult({
+      jobId: result.jobId, attemptId: result.attemptId, idempotencyKey: result.idempotencyKey,
+      envKey: result.envKey, accountId: result.accountId, platform: 'wechat_channels',
+      status: 'rejected', errorCode: 'INTERACTION_STATE_CONFLICT', receivedAt: NOW,
+    }), false);
+    assert.equal(await restarted.acknowledgeReplyResult({
+      jobId: result.jobId, attemptId: result.attemptId, idempotencyKey: result.idempotencyKey,
+      envKey: result.envKey, accountId: result.accountId, platform: 'wechat_channels',
+      status: 'accepted', errorCode: null, receivedAt: NOW,
+    }), true);
+    assert.deepEqual(await restarted.pendingReplyResults(), []);
+  });
+});
+
+test('wechat reply: reconciliation never turns a missing or merely claimed attempt into a platform write', async () => {
+  await withState(async (state) => {
+    let sends = 0;
+    const api = { sendDmText: async () => { sends++; return { accepted: true, externalMessageId: 'must-not-send' }; } } as unknown as WechatChannelsApiClient;
+    const replies = sender(state, api);
+    const missing = command('dm', '3');
+    assert.equal(await replies.reconcile(missing), 'not_found');
+    await state.claimReplyExecution(missing.idempotencyKey, missing.attemptId, NOW);
+    assert.equal(await replies.reconcile(missing), 'result_replayed');
+    const pending = await state.pendingReplyResults();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].status, 'failed');
+    assert.equal(sends, 0);
+  });
+});
+
+test('wechat offboard: cleanup result is durable and duplicate command is replayed until exact Cloud ack', async () => {
+  await withState(async (state, root) => {
+    const command: InteractionOffboardCommandPayload = {
+      offboardId: 'offboard-1', envKey: SCOPE.envKey, accountId: SCOPE.accountId,
+      platform: 'wechat_channels', reason: 'environment_unbind', requestedAt: NOW, expiresAt: NOW + 86_400_000,
+    };
+    assert.deepEqual(await state.claimOffboard(command, NOW), { status: 'claimed' });
+    const result = { offboardId: command.offboardId, envKey: command.envKey, accountId: command.accountId,
+      platform: 'wechat_channels' as const, status: 'cleared' as const, errorCode: null, finishedAt: NOW };
+    await state.completeOffboard(command, result, NOW);
+    const restarted = new WechatRuntimeStateStore(SCOPE, root);
+    assert.deepEqual(await restarted.pendingOffboardResults(), [result]);
+    assert.equal((await restarted.claimOffboard(command, NOW)).status, 'completed');
+    assert.equal(await restarted.acknowledgeOffboard({ offboardId: result.offboardId, envKey: result.envKey,
+      accountId: result.accountId, platform: 'wechat_channels', status: 'accepted', errorCode: null,
+      receivedAt: NOW }), true);
+    assert.deepEqual(await restarted.pendingOffboardResults(), []);
+    assert.equal(await restarted.isOffboarded(), true);
   });
 });
 

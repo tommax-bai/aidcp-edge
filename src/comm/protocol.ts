@@ -107,9 +107,15 @@ export type MessageType =
   | 'interaction.sync.batch' // edge → cloud：可重放的增量同步批次
   | 'interaction.sync.ack' // cloud → edge：整批 accepted/duplicate/rejected
   | 'interaction.reply.result' // edge → cloud：confirmed/failed/ambiguous 发送真态
+  | 'interaction.reply.result.ack' // cloud → edge：持久结果确认；ack 后才清 Edge outbox
+  | 'interaction.reply.reconcile' // cloud → edge：只核验既有 attempt，绝不发起新平台写
+  | 'interaction.reply.reconcile.result' // edge → cloud：重放/缺失/绑定冲突观察
   | 'interaction.sync.request' // cloud → edge：触发按 channel/scope 同步
   | 'interaction.reply.send' // cloud → edge：带稳定幂等键的文本回复
   | 'interaction.auth.reopen' // cloud → edge：请求原环境重开登录 sidecar
+  | 'interaction.offboard.command' // cloud → edge：撤权后清理所属加密会话
+  | 'interaction.offboard.result' // edge → cloud：可重放的凭证清理结果
+  | 'interaction.offboard.ack' // cloud → edge：结果持久化确认；ack 后清 Edge outbox
   // —— 通用 ——
   | 'error' // 任一方 → 对方：错误信息
   | 'ping'
@@ -202,11 +208,15 @@ export interface WelcomePayload {
   pacing?: PacingSnapshotPayload;
   /** Optional negotiated capabilities; old Cloud peers omit this field. */
   capabilities?: string[];
+  /** Account-bound recovery barrier; missing is fail-closed when offboarding was negotiated. */
+  interactionRecovery?: { offboardPending: boolean };
 }
 
 // ————————————————— 视频号入站互动 v1（Session 00 frozen contract）—————————————————
 
 export const INTERACTION_INBOX_CAPABILITY = 'interaction_inbox_v1' as const;
+export const INTERACTION_REPLY_RECOVERY_CAPABILITY = 'interaction_reply_recovery_v1' as const;
+export const INTERACTION_OFFBOARDING_CAPABILITY = 'interaction_offboarding_v1' as const;
 export type InteractionPlatform = 'wechat_channels';
 export type InteractionChannel = 'comment' | 'dm';
 export type InteractionMessageType = 'text' | 'image' | 'unknown';
@@ -405,6 +415,77 @@ export interface InteractionReplyResultPayload {
   verification: 'platform_ack' | 'history_lookup' | 'comment_lookup' | 'not_verified';
   retryAfterMs: number | null;
   finishedAt: number;
+}
+
+export interface InteractionReplyResultAckPayload {
+  jobId: string;
+  attemptId: string;
+  idempotencyKey: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  status: 'accepted' | 'duplicate' | 'rejected';
+  errorCode: InteractionErrorCode | null;
+  receivedAt: number;
+}
+
+export interface InteractionReplyReconcilePayload {
+  reconcileId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  attempts: Array<{
+    cloudStatus: 'created' | 'dispatched' | 'ambiguous';
+    command: InteractionReplySendPayload;
+  }>;
+  requestedAt: number;
+}
+
+export interface InteractionReplyReconcileResultPayload {
+  reconcileId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  attempts: Array<{
+    jobId: string;
+    attemptId: string;
+    idempotencyKey: string;
+    state: 'result_replayed' | 'not_found' | 'binding_conflict';
+    observedAt: number;
+  }>;
+  finishedAt: number;
+}
+
+export type InteractionOffboardReason = 'environment_unbind' | 'customer_terminated' | 'admin_revoked';
+
+export interface InteractionOffboardCommandPayload {
+  offboardId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  reason: InteractionOffboardReason;
+  requestedAt: number;
+  expiresAt: number;
+}
+
+export interface InteractionOffboardResultPayload {
+  offboardId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  status: 'cleared' | 'already_cleared' | 'failed';
+  errorCode: InteractionErrorCode | null;
+  finishedAt: number;
+}
+
+export interface InteractionOffboardAckPayload {
+  offboardId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  status: 'accepted' | 'duplicate' | 'rejected';
+  errorCode: InteractionErrorCode | null;
+  receivedAt: number;
 }
 
 export interface InteractionAuthReopenPayload {
@@ -1648,9 +1729,15 @@ export interface PayloadMap {
   'interaction.sync.batch': InteractionSyncBatchPayload;
   'interaction.sync.ack': InteractionSyncAckPayload;
   'interaction.reply.result': InteractionReplyResultPayload;
+  'interaction.reply.result.ack': InteractionReplyResultAckPayload;
+  'interaction.reply.reconcile': InteractionReplyReconcilePayload;
+  'interaction.reply.reconcile.result': InteractionReplyReconcileResultPayload;
   'interaction.sync.request': InteractionSyncRequestPayload;
   'interaction.reply.send': InteractionReplySendPayload;
   'interaction.auth.reopen': InteractionAuthReopenPayload;
+  'interaction.offboard.command': InteractionOffboardCommandPayload;
+  'interaction.offboard.result': InteractionOffboardResultPayload;
+  'interaction.offboard.ack': InteractionOffboardAckPayload;
   error: ErrorPayload;
   ping: Record<string, never>;
   pong: Record<string, never>;

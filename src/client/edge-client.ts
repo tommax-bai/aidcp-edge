@@ -41,7 +41,13 @@ import {
   type EdgeTaskAcquirePayload,
   type EdgeTaskReleasePayload,
   INTERACTION_INBOX_CAPABILITY,
+  INTERACTION_OFFBOARDING_CAPABILITY,
+  INTERACTION_REPLY_RECOVERY_CAPABILITY,
   type InteractionAuthReopenPayload,
+  type InteractionOffboardAckPayload,
+  type InteractionOffboardCommandPayload,
+  type InteractionReplyReconcilePayload,
+  type InteractionReplyResultAckPayload,
   type InteractionReplySendPayload,
   type InteractionSyncAckPayload,
   type InteractionSyncRequestPayload,
@@ -83,7 +89,9 @@ export type CaptchaAssistCommandHandler = (
 export type UiSnapshotHandler = (env: Envelope<UiSnapshotPayload>) => void;
 export type InteractionCommandHandler = (
   env: Envelope<
-    InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload
+    InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload |
+    InteractionReplyResultAckPayload | InteractionReplyReconcilePayload | InteractionOffboardCommandPayload |
+    InteractionOffboardAckPayload
   >,
 ) => void;
 export type CloudConnectionEvent = 'cloud.disconnected' | 'cloud.reconnecting' | 'cloud.reconnected' | 'cloud.unrecoverable';
@@ -167,6 +175,7 @@ export class EdgeClient {
   /** welcome 握手下发的节奏快照（每类操作 floor 区间 + tempo）；重连（新 connect）后被最新 welcome 覆盖。 */
   private pacing?: PacingSnapshotPayload;
   private peerCapabilities = new Set<string>();
+  private interactionRecovery?: WelcomePayload['interactionRecovery'];
   private connected = false;
   private intentionalClose = false;
   private reconnecting = false;
@@ -266,6 +275,7 @@ export class EdgeClient {
     const p = welcome.payload as WelcomePayload;
     this.sessionId = p.sessionId;
     this.peerCapabilities = new Set(Array.isArray(p.capabilities) ? p.capabilities : []);
+    this.interactionRecovery = p.interactionRecovery;
     // 节奏快照（pacing-floor-config-min-interval 设计 §4.3）：welcome 是 hello 的请求/响应，按 pending-id
     // 命中返回、永不经过主动命令白名单，故此处直接取用零白名单遗漏风险。缺省（旧云端）→ undefined，边缘用内置默认。
     this.pacing = p.pacing;
@@ -295,6 +305,12 @@ export class EdgeClient {
 
   isInteractionInboxNegotiated(): boolean {
     return this.supportsCapability(INTERACTION_INBOX_CAPABILITY);
+  }
+
+  /** Negotiated offboarding requires an explicit false barrier before the connector may resume. */
+  hasPendingInteractionOffboard(): boolean {
+    return this.supportsCapability(INTERACTION_OFFBOARDING_CAPABILITY) &&
+      this.interactionRecovery?.offboardPending !== false;
   }
 
   /**
@@ -538,6 +554,11 @@ export class EdgeClient {
         this.opts.logger(`[edge-client] 忽略未协商的 interaction type=${env.type}`);
         return;
       }
+      const extension = interactionExtensionCapability(env.type);
+      if (extension && !this.supportsCapability(extension)) {
+        this.opts.logger(`[edge-client] 忽略未协商扩展 capability=${extension} type=${env.type}`);
+        return;
+      }
       try {
         validateInteractionEnvelope(env);
       } catch (error) {
@@ -550,11 +571,17 @@ export class EdgeClient {
         env.type === 'interaction.sync.ack' ||
         env.type === 'interaction.sync.request' ||
         env.type === 'interaction.reply.send' ||
-        env.type === 'interaction.auth.reopen'
+        env.type === 'interaction.auth.reopen' ||
+        env.type === 'interaction.reply.result.ack' ||
+        env.type === 'interaction.reply.reconcile' ||
+        env.type === 'interaction.offboard.command' ||
+        env.type === 'interaction.offboard.ack'
       ) {
         this.interactionHandler?.(
           env as Envelope<
-            InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload
+            InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload |
+            InteractionReplyResultAckPayload | InteractionReplyReconcilePayload | InteractionOffboardCommandPayload |
+            InteractionOffboardAckPayload
           >,
         );
       }
@@ -722,6 +749,14 @@ export class EdgeClient {
       this.reconnecting = false;
     }
   }
+}
+
+function interactionExtensionCapability(type: string): string | null {
+  if (type.startsWith('interaction.reply.result.') || type.startsWith('interaction.reply.reconcile')) {
+    return INTERACTION_REPLY_RECOVERY_CAPABILITY;
+  }
+  if (type.startsWith('interaction.offboard.')) return INTERACTION_OFFBOARDING_CAPABILITY;
+  return null;
 }
 
 function describeError(ev: unknown): string {

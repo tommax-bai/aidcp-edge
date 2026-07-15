@@ -68,8 +68,11 @@ const ALL_MESSAGE_TYPES: Record<MessageType, true> = {
   'interaction.auth.status': true,
   'interaction.sync.batch': true, 'interaction.sync.ack': true,
   'interaction.reply.result': true,
+  'interaction.reply.result.ack': true,
+  'interaction.reply.reconcile': true, 'interaction.reply.reconcile.result': true,
   'interaction.sync.request': true, 'interaction.reply.send': true,
   'interaction.auth.reopen': true,
+  'interaction.offboard.command': true, 'interaction.offboard.result': true, 'interaction.offboard.ack': true,
   error: true, ping: true, pong: true,
 };
 const ALL_TYPES = Object.keys(ALL_MESSAGE_TYPES) as MessageType[];
@@ -79,8 +82,8 @@ describe('AC-PROTO 协议契约一致性（edge）', () => {
     assert.equal(PROTOCOL_VERSION, 2);
   });
 
-  it('AC-PROTO-02 消息类型总数为 83（增删消息须同步两端 + 本断言）', () => {
-    assert.equal(ALL_TYPES.length, 83);
+  it('AC-PROTO-02 消息类型总数为 89（增删消息须同步两端 + 本断言）', () => {
+    assert.equal(ALL_TYPES.length, 89);
   });
 
   it('AC-PROTO-03 每个消息类型都能构造合法信封且版本一致', () => {
