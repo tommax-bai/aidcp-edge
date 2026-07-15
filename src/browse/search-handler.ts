@@ -553,6 +553,23 @@ export async function waitForSearchNavigation(
   return false;
 }
 
+/** 输入完成到回车的停顿地板（毫秒）：AI 搜索框需内部状态就绪，输入后立即回车会被忽略（真机实证）。 */
+const SEARCH_SUBMIT_SETTLE_FLOOR_MS = 700;
+/** 回车提交未跳转时的有界重试次数（AI 搜索框回车提交时灵时不灵，真人也会再按一次）。 */
+const SEARCH_SUBMIT_MAX_RETRY = 3;
+
+/** 取【可见】搜索框中心坐标的 JS（宽/窄双实例只有一个可见）；返回 JSON 字符串 {x,y} 或 null。 */
+function buildVisibleBoxRectJs(selector: string): string {
+  return `(function(){
+    var cands = Array.prototype.slice.call(document.querySelectorAll(${JSON.stringify(selector)}));
+    var el = cands.filter(function(e){ return e.offsetWidth > 0 && e.offsetParent !== null; })[0];
+    if (!el) return null;
+    var r = el.getBoundingClientRect();
+    if (r.width <= 0 && r.height <= 0) return null;
+    return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+  })()`;
+}
+
 /**
  * 执行一次搜索。
  * @throws 当页面上找不到搜索框时抛错（调用方可据此降级/上报）。
@@ -577,26 +594,45 @@ export async function executeSearch(
     await expandSearchBar(cdp, sleep, { inputSelector: selector, iconSelector, random });
   }
 
-  // 2. 聚焦并清空搜索框。
+  // 2. 真实指针点击聚焦：AI 搜索框（textarea[name=aiSearchTextarea]）的回车导航不认程序化
+  //    `el.focus()`，需真实用户手势才响应（真机实证）。取不到可见框坐标时跳过点击、靠下面的
+  //    程序化聚焦兜底（诚实降级，不静默假成功）。
+  const rectRaw = await evalRaw<string | null>(cdp, buildVisibleBoxRectJs(selector));
+  if (rectRaw) {
+    try {
+      const rect = typeof rectRaw === 'string' ? (JSON.parse(rectRaw) as Point) : (rectRaw as Point);
+      await dispatchClick(cdp, rect.x, rect.y, { random, sleep });
+    } catch {
+      // 坐标解析失败 → 不点击，继续用程序化聚焦兜底。
+    }
+  }
+
+  // 3. 聚焦并清空搜索框（真实点击后再 focus/clear：清掉残留值、确保插入点在框内）。
   const focused = await evalRaw<boolean>(cdp, buildFocusClearJs(selector));
   if (focused !== true) {
     throw new Error(`搜索框未找到（selector: ${selector}）`);
   }
   // 逐字符拟人化输入（不再一次性 insertText 整段）。
   await dispatchKeystrokes(cdp, keyword, { random, sleep });
-  // 输入完到回车的"想一下"停顿（操作间对数正态）。
-  await sleep(sampleDelay(TIMING_PRESETS.action, random));
+  // 输入完到回车的停顿：既有 action 抖动与一个停顿地板取 max——AI 搜索框需内部状态就绪，
+  // 输入后立即回车会被忽略（真机实证）。
+  await sleep(Math.max(SEARCH_SUBMIT_SETTLE_FLOOR_MS, sampleDelay(TIMING_PRESETS.action, random)));
   await pressEnter(cdp);
 
-  // 3. 等待导航到搜索结果页。先给 Enter 一个短窗口；AI 搜索 textarea 上 Enter 可能只换行不导航，
-  //    未跳转则点提交按钮兜底（当前真机 .bottom-box-right-submit-button）。
+  // 4. 等待导航到结果页；未确认则有界重试回车。AI 搜索框回车提交本身时灵时不灵，真人也会再按一次；
+  //    提交按钮仅在其【确可见】时作附加尝试——AI 框上 .bottom-box-right-submit-button 常不可见(0×0)、
+  //    clickSearchSubmit 取不到坐标即返回 false，绝不作唯一/必需兜底（否则大面积 not_on_search_page 假阴性）。
   let navigated = await waitForSearchNavigation(cdp, sleep, 1800, { keyword });
   if (!navigated) {
     const submitSelector = deps.searchSubmitSelector ?? XHS_SEARCH_SUBMIT_SELECTOR;
-    const clicked = await clickSearchSubmit(cdp, submitSelector, { random, sleep });
-    // change comment-keep-open-through-approval：提交按钮未找到时诚实记录（便于真机定位），不静默。
-    logger(clicked ? '[search] Enter 未跳转，点击搜索提交按钮兜底' : '[search] Enter 未跳转，且提交按钮未找到，无法兜底提交');
-    navigated = await waitForSearchNavigation(cdp, sleep, 4000, { keyword });
+    for (let attempt = 1; attempt <= SEARCH_SUBMIT_MAX_RETRY && !navigated; attempt++) {
+      const clicked = await clickSearchSubmit(cdp, submitSelector, { random, sleep });
+      await pressEnter(cdp);
+      logger(
+        `[search] Enter 未跳转，重试提交（第 ${attempt}/${SEARCH_SUBMIT_MAX_RETRY} 次；提交按钮${clicked ? '已点' : '不可见/未点'}）`,
+      );
+      navigated = await waitForSearchNavigation(cdp, sleep, 2500, { keyword });
+    }
   }
   if (navigated) {
     const href = await evalRaw<string>(cdp, `(function(){ return location.href; })()`);

@@ -114,6 +114,51 @@ test('executeSearch: 未确认导航（恒停 /explore、提交按钮找不到�
   assert.equal(ok, false, '未跳转结果页（仍在 feed）MUST 返回 false，供调用方诚实回失败');
 });
 
+// change xhs-search-submit-gesture：AI 搜索框（textarea[name=aiSearchTextarea]）的回车导航需真实用户手势。
+// 三条守卫：① 提交前先派发真实鼠标点击聚焦；② 回车事件携带 text:'\r' 产生真实 keypress；③ 首次未跳转须重试回车。
+function searchOkCdp(urlWhen: (enterCount: number) => string) {
+  let enterCount = 0;
+  return fakeCdp((method, params) => {
+    if (method === 'Input.dispatchKeyEvent' && params.type === 'keyDown' && params.key === 'Enter') enterCount++;
+    if (method === 'Runtime.evaluate') {
+      const expr = String(params.expression ?? '');
+      if (expr.includes('getBoundingClientRect')) return { result: { value: JSON.stringify({ x: 100, y: 50 }) } };
+      if (expr.includes('location.href')) return { result: { value: urlWhen(enterCount) } };
+      return { result: { value: true } }; // 搜索框可见 + 聚焦成功
+    }
+    return {};
+  });
+}
+const RESULT_URL = 'https://www.xiaohongshu.com/search_result_ai?keyword=%E5%A5%B6%E8%8C%B6';
+
+test('executeSearch: 提交前派发真实鼠标点击聚焦搜索框（AI 框回车不认程序化聚焦）', async () => {
+  const { cdp, calls } = searchOkCdp(() => RESULT_URL);
+  await executeSearch('奶茶', { cdp, sleep: async () => {}, random: () => 0.5 });
+  const presses = calls.filter((c) => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mousePressed');
+  assert.ok(presses.length >= 1, '提交搜索前 MUST 有真实鼠标按下（点击聚焦），而非仅程序化 el.focus()');
+});
+
+test('executeSearch: 回车 keyDown 携带 text:\\r（产生真实 keypress，AI 搜索框才导航）', async () => {
+  const { cdp, calls } = searchOkCdp(() => RESULT_URL);
+  await executeSearch('奶茶', { cdp, sleep: async () => {}, random: () => 0.5 });
+  const enterDown = calls.find(
+    (c) => c.method === 'Input.dispatchKeyEvent' && c.params.type === 'keyDown' && c.params.key === 'Enter',
+  );
+  assert.ok(enterDown, '应派发 Enter keyDown');
+  assert.equal(enterDown!.params.text, '\r', 'Enter keyDown MUST 携带 text:\\r（裸回车在 AI 搜索框上是空操作）');
+});
+
+test('executeSearch: 首次回车未跳转 → 有界重试回车，命中后返回 true', async () => {
+  // URL 仅在第 2 次回车后才变结果页：模拟 AI 搜索框回车时灵时不灵、重试补上。
+  const { cdp, calls } = searchOkCdp((enterCount) => (enterCount >= 2 ? RESULT_URL : 'https://www.xiaohongshu.com/explore'));
+  const ok = await executeSearch('奶茶', { cdp, sleep: async () => {}, random: () => 0.5 });
+  assert.equal(ok, true, '重试回车命中结果页 MUST 返回 true');
+  const enters = calls.filter(
+    (c) => c.method === 'Input.dispatchKeyEvent' && c.params.type === 'keyDown' && c.params.key === 'Enter',
+  );
+  assert.ok(enters.length >= 2, '首次回车未跳转 MUST 重试回车（≥2 次），而非仅点一个不可见提交按钮就放弃');
+});
+
 // ---------------------------------------------------------------------------
 // applySearchFilters（task 5.4 重构：幂等应用 + 权威复核 + 有界重试，治「点击未提交的瞬态竞态」）
 //

@@ -214,19 +214,26 @@ export async function dispatchClick(
   return last;
 }
 
-/** 派发一次按键（press + release），key/code 形如 'Escape' / 'Enter'。 */
+/**
+ * 派发一次按键（press + release），key/code 形如 'Escape' / 'Enter'。
+ * 传 `text`（如 Enter 的 '\r'）时 keyDown 携带字符文本，使其产生**真实 keypress 形态**——
+ * 小红书 AI 搜索框（textarea[name=aiSearchTextarea]）的「回车导航」只认带 keypress 的回车，
+ * 不带 text 的裸 keyDown 在该框上是空操作（真机实证）。不传则行为与历史一致（裸按键）。
+ */
 export async function dispatchKey(
   cdp: BrowseCdp,
   key: string,
   code: string,
   windowsVirtualKeyCode?: number,
+  text?: string,
 ): Promise<void> {
   const common: Record<string, unknown> = { key, code };
   if (windowsVirtualKeyCode !== undefined) {
     common.windowsVirtualKeyCode = windowsVirtualKeyCode;
     common.nativeVirtualKeyCode = windowsVirtualKeyCode;
   }
-  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', ...common });
+  const keyDown = text !== undefined ? { ...common, text, unmodifiedText: text } : common;
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', ...keyDown });
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common });
 }
 
@@ -235,9 +242,9 @@ export function pressEscape(cdp: BrowseCdp): Promise<void> {
   return dispatchKey(cdp, 'Escape', 'Escape', 27);
 }
 
-/** 派发 Enter 键 */
+/** 派发 Enter 键（携带 '\r' 产生真实 keypress——AI 搜索框回车导航需要，见 dispatchKey 注释）。 */
 export function pressEnter(cdp: BrowseCdp): Promise<void> {
-  return dispatchKey(cdp, 'Enter', 'Enter', 13);
+  return dispatchKey(cdp, 'Enter', 'Enter', 13, '\r');
 }
 
 /** 把一段文本一次性插入（Input.insertText，简单可靠；仅在不需要拟人节奏时用）。 */
