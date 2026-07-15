@@ -718,6 +718,36 @@ test('人设成长引导：点击开始找灵感复用现有启动按钮并关�
   assert.equal(w.document.querySelector('#persona-growth')!.classList.contains('hidden'), true, '成长引导只出现一次');
 });
 
+test('人设成长引导：personaBound 状态先于 persist 回执到达时弹窗仍保持并展示首作卡', async () => {
+  let pushBoundStatus: () => void = () => undefined;
+  const { w, pushStatus } = await boot({
+    getStatus: async () => makeStatus({ envId: 'ads-p1', envName: '环境一', auth: 'logged in', cloud: 'connected', personaBound: false }),
+    personaGenerate: async () => ({ ok: true, soulYaml: 'soul: Race', identitySummary: 'Race 人设' }),
+    personaPersist: async () => {
+      pushBoundStatus(); // 复现真实 main IPC：先 updateStatus(personaBound=true)，再把 persist 结果回 renderer。
+      await tick();
+      return { ok: true, firstPostOnboarding: true };
+    },
+  });
+  pushBoundStatus = () => pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: true }));
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: false }));
+  await tick();
+
+  (w.document.querySelector('.persona-kw-group[data-dim="content"][data-category="招聘求职"] .kw-btn') as HTMLElement).click();
+  (w.document.querySelector('#persona-generate') as HTMLElement).click();
+  await tick();
+  (w.document.querySelector('#persona-confirm') as HTMLElement).click();
+  await tick();
+  await tick();
+
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), true, '先到的绑定态不得关闭正在收敛的首次引导');
+  assert.equal(w.document.querySelector('#persona-growth')!.classList.contains('hidden'), false, 'persist 回执到达后必须展示首作卡');
+
+  pushBoundStatus(); // 后续心跳仍会携带 personaBound=true，也不得把正在阅读的首作卡收走。
+  await tick();
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), true, '首作卡活跃期间后续绑定态不得关闭弹窗');
+});
+
 test('人设成长引导：沿用旧庆祝吉祥物，撒花与缩放均为一次性且支持 reduced motion', () => {
   assert.match(html, /mascot-celebration-512\.png/);
   assert.match(rendererCss, /\.persona-growth\.play \.pg-mascot\s*\{\s*animation:\s*pg-mascot-scale 800ms[^;]*both;/);

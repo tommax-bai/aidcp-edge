@@ -3549,6 +3549,7 @@ let personaDraftEnvId; // 草稿所属环境（多环境：persist MUST 打回�
 let personaStage = 'pick'; // 两步向导阶段：pick（选关键词）| preview（预览确认）
 let personaInFlight = false; // 生成请求在途（骨架 + 按钮禁用 + 遮罩误点不关层）
 let personaGrowthEnvId = null; // 本次刚确认成功的人设所属环境；只让该环境出现一次成长引导
+let personaPersistPendingEnvId = null; // persist IPC 收敛中的环境；main 可能先推 personaBound=true，期间不得把自动弹窗收走
 let personaUpdateMode = false; // 已绑账号手动进入更新流程：生成新草稿，确认后覆盖当前人设
 const personaPrompted = new Set();
 // 人设弹窗触发判据（change persona-bound-tristate）：**只由云端权威的「未绑」触发**。
@@ -3790,6 +3791,8 @@ function updatePersonaGate(status) {
   // 已绑账号手动点「更新人设」：保持已绑为真（生成失败也绝不显示成未设置），但把向导重新打开。
   const updatingBound = bound && personaUpdateMode;
   const growthActive = bound && !updatingBound && isPersonaGrowthActive();
+  const popEnvId = personaPopOpenEnvId || currentEnvId() || '__local__';
+  const persistSettling = Boolean(personaPersistPendingEnvId && personaPersistPendingEnvId === popEnvId);
 
   // 五形态显隐一处收口：刚绑=成长引导 / 已绑=绿卡 / 已绑且更新中=向导 / 未就绪=空态面板 / 已连且确认未绑=向导。
   if (personaUi.growth) personaUi.growth.classList.toggle('hidden', !growthActive);
@@ -3807,6 +3810,8 @@ function updatePersonaGate(status) {
       fields.personaPop
       && fields.personaPop.classList.contains('open')
       && personaPopOpenReason === 'auto'
+      && !persistSettling
+      && !growthActive
       && (!personaPopOpenEnvId || personaPopOpenEnvId === (currentEnvId() || '__local__'))
     ) {
       closePersonaPop(true);
@@ -3985,6 +3990,8 @@ personaUi.confirm?.addEventListener('click', async () => {
   if (!personaDraftYaml) return;
   if (!window.aidcpEdge || typeof window.aidcpEdge.personaPersist !== 'function') return;
   const wasUpdate = personaUpdateMode;
+  const persistEnvId = personaDraftEnvId || currentEnvId() || '__local__';
+  personaPersistPendingEnvId = persistEnvId;
   personaUi.confirm.disabled = true;
   setPersonaMsg(wasUpdate ? '正在更新人设…' : '正在保存人设…', false);
   try {
@@ -4004,6 +4011,10 @@ personaUi.confirm?.addEventListener('click', async () => {
         personaUi.boundNote?.classList.remove('hidden');
         syncPersonaFoot('hidden');
         setPersonaMsg(wasUpdate ? '人设已更新，后续浏览 / 发布会使用新人设。' : '人设已保存，后续浏览 / 发布会使用这份人设。', false);
+        if (
+          personaPopOpenReason === 'auto'
+          && (!personaPopOpenEnvId || personaPopOpenEnvId === persistEnvId)
+        ) closePersonaPop(true);
       } else {
         projectFirstPostStart(growthEnvId);
         showPersonaGrowth(growthEnvId);
@@ -4012,6 +4023,7 @@ personaUi.confirm?.addEventListener('click', async () => {
       setPersonaMsg(PERSONA_PERSIST_FAIL[(r && r.reason) || ''] || `保存失败：${(r && r.reason) || '未知'}`, true);
     }
   } finally {
+    if (personaPersistPendingEnvId === persistEnvId) personaPersistPendingEnvId = null;
     personaUi.confirm.disabled = false;
   }
 });
