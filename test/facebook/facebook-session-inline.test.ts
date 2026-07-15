@@ -11,7 +11,7 @@ import type { FacebookFeedReader, FacebookFeedCard, FacebookFeedSettleResult } f
 import type { FacebookPostReader, FacebookPostDetail } from '../../src/facebook/post-reader.js';
 import type { FacebookLikeExecutor, FacebookLikeResult } from '../../src/facebook/like-executor.js';
 import type { FacebookInlineReader, FacebookInlineReadResult } from '../../src/facebook/inline-reader.js';
-import type { Envelope, ActionCompletedPayload, NoteDetailPayload, PageCardsPayload } from '../../src/comm/protocol.js';
+import type { Envelope, ActionCompletedPayload, NoteDetailPayload, PageCardsPayload, ProfileDetailPayload } from '../../src/comm/protocol.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
 /**
@@ -35,6 +35,7 @@ interface Harness {
   cards: PageCardsPayload[];
   details: NoteDetailPayload[];
   actions: ActionCompletedPayload[];
+  profiles: ProfileDetailPayload[];
   postOpenCalls: string[];
   inlineCalls: string[];
 }
@@ -45,10 +46,12 @@ function makeSession(opts: {
   inline?: FacebookInlineReadResult;
   like?: FacebookLikeResult;
   detail?: Partial<FacebookPostDetail>;
+  cdp?: BrowseCdp;
 }): Harness {
   const cards: PageCardsPayload[] = [];
   const details: NoteDetailPayload[] = [];
   const actions: ActionCompletedPayload[] = [];
+  const profiles: ProfileDetailPayload[] = [];
   const postOpenCalls: string[] = [];
   const inlineCalls: string[] = [];
   let settleCall = 0;
@@ -56,7 +59,7 @@ function makeSession(opts: {
   const client = {
     reportPageCards: (p: PageCardsPayload) => cards.push(p),
     reportNoteDetail: (p: NoteDetailPayload) => details.push(p),
-    reportProfileDetail: () => {},
+    reportProfileDetail: (p: ProfileDetailPayload) => profiles.push(p),
     reportActionCompleted: (p: ActionCompletedPayload) => actions.push(p),
   };
   const commentHandler = { handle: async () => {} } as unknown as FacebookCommentHandler;
@@ -95,7 +98,7 @@ function makeSession(opts: {
   } as unknown as FacebookInlineReader;
 
   const deps: FacebookBrowseSessionDeps = {
-    cdp: { send: async () => ({}) } as unknown as BrowseCdp,
+    cdp: opts.cdp ?? ({ send: async () => ({}) } as unknown as BrowseCdp),
     client,
     commentHandler,
     feedReader,
@@ -106,8 +109,57 @@ function makeSession(opts: {
     sleep: async () => {},
   };
   const session = new FacebookBrowseSession(deps, { mode: opts.mode ?? 'on', commandTimeoutMs: 90_000, feedUrl: 'https://www.facebook.com/' });
-  return { session, cards, details, actions, postOpenCalls, inlineCalls };
+  return { session, cards, details, actions, profiles, postOpenCalls, inlineCalls };
 }
+
+// ─────────────────── profile.open{direct} 本人昵称采集：就地读、绝不导航（change facebook-nickname-capture-timing）───────────────────
+
+function selfIdentityCdp(scan: string, cUser = '1234567890'): { cdp: BrowseCdp; sendCalls: string[] } {
+  const sendCalls: string[] = [];
+  const cdp = {
+    send: async (method: string) => {
+      sendCalls.push(method);
+      if (method === 'Network.getAllCookies') return { cookies: [{ name: 'c_user', value: cUser, domain: '.facebook.com' }] } as never;
+      if (method === 'Runtime.evaluate') return { result: { value: scan } } as never;
+      return {} as never;
+    },
+  } as unknown as BrowseCdp;
+  return { cdp, sendCalls };
+}
+
+test('profile.open{direct}：就地读身份（id 锚定头像标签），绝不 Page.navigate，上报就地读到的 profile.detail', async () => {
+  const scan = JSON.stringify({
+    href: 'https://www.facebook.com/',
+    profileHrefs: ['https://www.facebook.com/profile.php?id=1234567890'],
+    profileAnchors: [{ href: 'https://www.facebook.com/profile.php?id=1234567890', ariaLabel: '工程师大白的头像' }],
+    displayName: null, h1: null, ogTitle: null, title: 'Facebook',
+  });
+  const { cdp, sendCalls } = selfIdentityCdp(scan);
+  const h = makeSession({ cdp });
+  await h.session.onCloudCommand(makeEnv('profile.open', { direct: true, authorId: '1234567890' }));
+
+  assert.ok(!sendCalls.includes('Page.navigate'), `本人昵称采集绝不导航，实际 send=${sendCalls.join(',')}`);
+  assert.equal(h.profiles.length, 1, '应上报一次 profile.detail');
+  assert.equal(h.profiles[0].authorId, '1234567890', 'authorId 用就地读到的数字 id（自校验）');
+  assert.equal(h.profiles[0].nickname, '工程师大白', '就地读到的昵称经 profile.detail 上报');
+});
+
+test('profile.open{direct}：就地读到 id 但昵称留空 → 上报空昵称（不导航、不写垃圾）', async () => {
+  const scan = JSON.stringify({
+    href: 'https://www.facebook.com/',
+    profileHrefs: ['https://www.facebook.com/profile.php?id=1234567890'],
+    profileAnchors: [{ href: 'https://www.facebook.com/profile.php?id=1234567890', ariaLabel: '你的个人主页' }],
+    displayName: null, h1: null, ogTitle: null, title: '(4) Facebook',
+  });
+  const { cdp, sendCalls } = selfIdentityCdp(scan);
+  const h = makeSession({ cdp });
+  await h.session.onCloudCommand(makeEnv('profile.open', { direct: true, authorId: '1234567890' }));
+
+  assert.ok(!sendCalls.includes('Page.navigate'), '就地读空仍绝不导航');
+  assert.equal(h.profiles.length, 1, '仍诚实上报一次 profile.detail');
+  assert.equal(h.profiles[0].authorId, '1234567890');
+  assert.equal(h.profiles[0].nickname, undefined, '通用外壳/未读数标题被清洗判空 → 昵称留空、不写垃圾');
+});
 
 // ─────────────────────────── note.open surface / purpose 分流 ───────────────────────────
 

@@ -428,8 +428,14 @@ test('mode=shadow：点赞只记不执行 → ok:false reason=shadow（云端不
   assert.equal(h.actions[0].reason, 'shadow');
 });
 
-test('profile.open direct：采本人主页昵称 → 上报 profile.detail，不走 action.completed', async () => {
+test('profile.open direct：就地读本人昵称（id 锚定头像标签）→ 上报 profile.detail，绝不导航、不走 action.completed（change facebook-nickname-capture-timing）', async () => {
   const navUrls: string[] = [];
+  const scan = JSON.stringify({
+    href: 'https://www.facebook.com/',
+    profileHrefs: ['https://www.facebook.com/profile.php?id=61591701813509'],
+    profileAnchors: [{ href: 'https://www.facebook.com/profile.php?id=61591701813509', ariaLabel: "Dennis Scott's profile picture" }],
+    displayName: null, h1: null, ogTitle: null, title: 'Facebook',
+  });
   const h = makeSession({
     mode: 'shadow',
     cdpSend: async <T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> => {
@@ -437,25 +443,19 @@ test('profile.open direct：采本人主页昵称 → 上报 profile.detail，�
         navUrls.push(String(params?.url ?? ''));
         return {} as T;
       }
+      if (method === 'Network.getAllCookies') {
+        return { cookies: [{ name: 'c_user', value: '61591701813509', domain: '.facebook.com' }] } as T;
+      }
       if (method === 'Runtime.evaluate') {
-        return {
-          result: {
-            value: JSON.stringify({
-              url: 'https://www.facebook.com/profile.php?id=61591701813509',
-              title: 'Dennis Scott | Facebook',
-              nickname: 'Dennis Scott',
-              bodyTextLen: 100,
-            }),
-          },
-        } as T;
+        return { result: { value: scan } } as T;
       }
       return {} as T;
     },
   });
   await h.session.onCloudCommand(makeEnv('profile.open', { authorId: '61591701813509', direct: true }));
-  assert.deepEqual(navUrls, ['https://www.facebook.com/profile.php?id=61591701813509']);
+  assert.deepEqual(navUrls, [], '本人昵称采集就地读、绝不导航（facebook-identity「取昵称绝不导航」契约）');
   assert.equal(h.profiles.length, 1);
-  assert.equal(h.profiles[0].authorId, '61591701813509');
+  assert.equal(h.profiles[0].authorId, '61591701813509', 'authorId 用就地读到的数字 id（自校验）');
   assert.equal(h.profiles[0].nickname, 'Dennis Scott');
   assert.equal(h.profiles[0].extracted, false, 'FB v1 不臆造主页数字');
   assert.equal(h.actions.length, 0, 'profile.detail 即回执，不额外 action.completed');
