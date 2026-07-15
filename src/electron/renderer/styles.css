@@ -303,16 +303,16 @@ body { margin: 0; }
   --rg-step-line: rgba(151, 169, 196, 0.32);
   --rg-step-line-active-start: rgba(72, 118, 238, 0.92);
   --rg-step-line-active-end: rgba(111, 154, 246, 0.9);
-  --rg-step-line-right: -4px;
-  --rg-step-line-width: 28px;
   --rg-step-spark-size: 5px;
   --rg-step-spark-ring: rgba(77, 125, 241, 0.22);
   --rg-step-spark-glow: rgba(77, 125, 241, 0.5);
-  --rg-step-spark-right: calc(var(--rg-step-line-right) + var(--rg-step-line-width) - var(--rg-step-spark-size));
-  --rg-step-spark-travel: calc(var(--rg-step-line-width) - var(--rg-step-spark-size));
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns:
+    minmax(0, 1fr) minmax(36px, .32fr)
+    minmax(0, 1fr) minmax(36px, .32fr)
+    minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: start;
   margin-top: 9px;
   padding-top: 9px;
   border-top: 1px solid rgba(156, 178, 205, 0.28);
@@ -352,32 +352,44 @@ body { margin: 0; }
   grid-template-columns: 18px minmax(0, 1fr);
   align-items: start;
   gap: 5px;
+  width: max-content;
+  max-width: 100%;
   min-width: 0;
   overflow: visible;
+  justify-self: center;
 }
-.rg-flow-step:not(:last-child)::after {
+.rg-flow-step:first-child { justify-self: start; }
+.rg-flow-step:last-child { justify-self: end; }
+.rg-flow-connector {
+  position: relative;
+  align-self: start;
+  width: 100%;
+  min-width: 0;
+  height: 18px;
+}
+.rg-flow-connector::before {
   content: "";
   position: absolute;
   z-index: 0;
   top: 8px;
-  right: var(--rg-step-line-right);
-  width: var(--rg-step-line-width);
+  left: 0;
+  right: 0;
   height: 2px;
   border-radius: 999px;
   background: var(--rg-step-line);
 }
-.rg-flow-step.flow-active:not(:last-child)::after {
+.rg-flow-connector.flow-active::before {
   background: linear-gradient(90deg, var(--rg-step-line-active-start), var(--rg-step-line-active-end), var(--rg-step-line-active-start));
   background-size: 220% 100%;
   opacity: 0.78;
   animation: rg-flow-line 2.2s linear infinite;
 }
-.rg-flow-step.flow-active:not(:last-child)::before {
+.rg-flow-connector.flow-active::after {
   content: "";
   position: absolute;
   z-index: 1;
   top: 6.5px;
-  right: var(--rg-step-spark-right);
+  left: 0;
   width: var(--rg-step-spark-size);
   height: var(--rg-step-spark-size);
   border-radius: 999px;
@@ -385,7 +397,7 @@ body { margin: 0; }
   box-shadow: 0 0 0 2px var(--rg-step-spark-ring), 0 0 10px var(--rg-step-spark-glow);
   animation: rg-flow-spark 2.2s ease-in-out infinite;
 }
-.rg-flow-step.flow-complete:not(:last-child)::after {
+.rg-flow-connector.flow-complete::before {
   background: linear-gradient(90deg, rgba(34, 168, 117, 0.5), rgba(34, 168, 117, 0.24));
 }
 .rg-flow-icon {
@@ -578,11 +590,11 @@ body { margin: 0; }
   100% { background-position: 220% 0; opacity: .48; }
 }
 @keyframes rg-flow-spark {
-  0% { transform: translateX(0) scale(.82); opacity: 0; }
-  4% { transform: translateX(0) scale(.82); opacity: .9; }
-  88% { transform: translateX(var(--rg-step-spark-travel)) scale(.88); opacity: .9; }
-  96% { transform: translateX(var(--rg-step-spark-travel)) scale(.88); opacity: 0; }
-  100% { transform: translateX(0) scale(.82); opacity: 0; }
+  0% { left: 0; transform: translateX(-50%) scale(.82); opacity: 0; }
+  4% { left: 0; transform: translateX(-50%) scale(.82); opacity: .9; }
+  88% { left: 100%; transform: translateX(-50%) scale(.88); opacity: .9; }
+  96% { left: 100%; transform: translateX(-50%) scale(.88); opacity: 0; }
+  100% { left: 0; transform: translateX(-50%) scale(.82); opacity: 0; }
 }
 @media (max-width: 430px) {
   .runtime-guidance { padding: 11px 12px 10px; }
@@ -591,9 +603,11 @@ body { margin: 0; }
   .runtime-guidance[data-mode="running"] .rg-main { grid-template-columns: 54px minmax(0, 1fr); gap: 8px; }
   .runtime-guidance[data-mode="running"] .rg-mascot { width: 52px; height: 52px; }
   .rg-flow {
-    --rg-step-line-right: -3px;
-    --rg-step-line-width: 20px;
-    gap: 5px;
+    grid-template-columns:
+      minmax(0, 1fr) minmax(20px, .24fr)
+      minmax(0, 1fr) minmax(20px, .24fr)
+      minmax(0, 1fr);
+    column-gap: 5px;
   }
   .rg-flow-step { grid-template-columns: 16px minmax(0, 1fr); gap: 3px; }
   .rg-flow-icon { width: 16px; height: 16px; }
@@ -607,9 +621,9 @@ body { margin: 0; }
 @media (prefers-reduced-motion: reduce) {
   .runtime-guidance::after,
   .rg-mascot.animate,
-  .rg-flow-step.flow-active:not(:last-child)::after,
-  .rg-flow-step.flow-active:not(:last-child)::before { animation: none; }
-  .rg-flow-step.flow-active:not(:last-child)::before { opacity: 0; }
+  .rg-flow-connector.flow-active::before,
+  .rg-flow-connector.flow-active::after { animation: none; }
+  .rg-flow-connector.flow-active::after { opacity: 0; }
 }
 
 .kernel-prep {

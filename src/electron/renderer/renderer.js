@@ -812,14 +812,6 @@ function renderRuntimeGuidance(status, nowMs) {
     const el = document.createElement('div');
     el.className = `rg-flow-step ${state}`;
     el.dataset.stepIndex = String(index);
-    if (nextState) {
-      const activeFlow = (state === 'current' && (nextState === 'current' || nextState === 'done' || nextState === 'next'))
-        || (state === 'done' && nextState === 'current');
-      const activeDayFlow = view.mode === 'day' && state === 'done' && (nextState === 'done' || nextState === 'next');
-      const completeFlow = state === 'done' && (nextState === 'done' || nextState === 'next');
-      if (activeFlow || activeDayFlow) el.classList.add('flow-active');
-      else if (completeFlow) el.classList.add('flow-complete');
-    }
     const icon = document.createElement('span');
     icon.className = 'rg-flow-icon';
     icon.innerHTML = RUNTIME_GUIDANCE_ICONS[step.icon] || '';
@@ -832,6 +824,20 @@ function renderRuntimeGuidance(status, nowMs) {
     copy.append(label, detail);
     el.append(icon, copy);
     fields.runtimeGuidanceFlow.appendChild(el);
+    if (nextState) {
+      const activeFlow = (state === 'current' && (nextState === 'current' || nextState === 'done' || nextState === 'next'))
+        || (state === 'done' && nextState === 'current');
+      const activeDayFlow = view.mode === 'day' && state === 'done' && (nextState === 'done' || nextState === 'next');
+      const completeFlow = state === 'done' && (nextState === 'done' || nextState === 'next');
+      const connector = document.createElement('span');
+      connector.className = 'rg-flow-connector';
+      connector.setAttribute('aria-hidden', 'true');
+      connector.dataset.fromState = state;
+      connector.dataset.toState = nextState;
+      if (activeFlow || activeDayFlow) connector.classList.add('flow-active');
+      else if (completeFlow) connector.classList.add('flow-complete');
+      fields.runtimeGuidanceFlow.appendChild(connector);
+    }
   }
   return view;
 }
