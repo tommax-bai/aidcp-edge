@@ -9,7 +9,7 @@ import {
 } from '../browse/cdp-util.js';
 import type { ImageUploader } from '../flows/image-uploader.js';
 import type { PublishCommandPayload, PublishCommandResultPayload } from '../comm/protocol.js';
-import { TaskTakeoverError, type TakeoverCtx } from '../execution/takeover.js';
+import { rethrowIfTakeover, TaskTakeoverError, type TakeoverCtx } from '../execution/takeover.js';
 import type { CommitWindowGuard } from '../execution/commit-window.js';
 
 export interface FacebookPublishExecutorOptions {
@@ -252,7 +252,7 @@ export class FacebookPublishExecutor {
       case 'fill_field':
         return this.fillContent(payload, takeover);
       case 'submit_publish':
-        return this.submit(payload);
+        return this.submit(payload, takeover);
       case 'capture_postId':
         return this.capturePostId(payload);
       default:
@@ -493,7 +493,7 @@ export class FacebookPublishExecutor {
     return { ...base(payload), ok: true };
   }
 
-  private async submit(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+  private async submit(payload: PublishCommandPayload, takeover?: TakeoverCtx): Promise<PublishCommandResultPayload> {
     // 已派发提交动作（6.2）：按下事件真正发出那一刻置真。center 查找 / no_target / 控件禁用等**点击之前**的失败保持 false。
     let submitDispatched = false;
     // 提交窗口守卫（5.1）：点「发布」前 enter、确认段内绝不被强杀，disposer 在 finally 关窗（时基兜底自动过期兜底）。
@@ -507,11 +507,20 @@ export class FacebookPublishExecutor {
         return { ...base(payload), ok: false, error: 'no_target' };
       }
       if (target.disabled) return { ...base(payload), ok: false, error: 'submit_control_disabled' };
+      // 🔴 提交窗口未开时的抢占在此被接住（复核 wf_1657e89b BLOCKER：FB submit 此前全程无取消点，
+      //    target 查找期间被抢占→abort 对它无效→点击照发→云端却按 preempted 重投=双发）。
+      //    checkpoint 与 enter() 之间**无 await**：抛出即点击前作废、零副作用；窗口一开协调器改回 window_busy、不再抢占。
+      takeover?.checkpoint();
       // 🔴 不可逆提交窗口开启（5.1）：点击 → 确认段整体受保护，协调器此间不强杀（回 window_busy + 剩余预算）。
       disposeCommit = this.commitWindow?.enter(this.opts.submitVerifyTimeoutMs, 'fb_publish_submit');
-      await dispatchClick(this.cdp, target.x, target.y, { overshoot: false, jitter: 0 });
-      // 🔴 点击已派发：帖子可能已发出。即便下方确认失败，云端 MUST NOT 当「提交前失败」重投（6.2；否则双发）。
-      submitDispatched = true;
+      // 🔴 6.2：press 派发那一刻置真（onPressDispatched），即便 press 超时/release 抛出（点击可能已生效）也不谎报「压根没点」。
+      await dispatchClick(this.cdp, target.x, target.y, {
+        overshoot: false,
+        jitter: 0,
+        onPressDispatched: () => {
+          submitDispatched = true;
+        },
+      });
       const submitted = await this.waitUntil(this.opts.submitVerifyTimeoutMs, () =>
         evalRaw<boolean>(
           this.cdp,
@@ -522,6 +531,8 @@ export class FacebookPublishExecutor {
         ? { ...base(payload), ok: true, submitDispatched }
         : { ...base(payload), ok: false, error: 'post_validate_failed', submitDispatched };
     } catch (err) {
+      // 被接管（提交窗口前的 checkpoint）绝不降级成 engine_error：冒泡到 dispatch 顶层 catch 转 preempted_by_task。
+      rethrowIfTakeover(err);
       return { ...base(payload), ok: false, error: `engine_error: ${err instanceof Error ? err.message : String(err)}`, submitDispatched };
     } finally {
       disposeCommit?.();

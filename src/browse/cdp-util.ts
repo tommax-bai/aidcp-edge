@@ -131,6 +131,13 @@ export interface DispatchClickOptions extends InputSafetyOptions {
    *（现有 click 零回归）。>0 时在 hover 与 press 之间插一段可注入 sleep 的 dwell。
    */
   hoverDwellMs?: number;
+  /**
+   * 「按下事件即将派发」回调（change lease-strict-preemption 6.2）：在 commitLeftClick（press→release 原子区）
+   * **之前**、通过安全边界（checkpoint/deadline）**之后**触发一次——此刻 press 已在飞往浏览器的路上。
+   * 用于把「已派发提交 submitDispatched」诚实置真：即便随后 press 响应超时 / release 抛出（点击可能已生效），
+   * 也已标记为已派发，绝不谎报「压根没点」→ 云端按提交前失败重投 → 双发。**MUST NOT 在此抛出**（非取消点）。
+   */
+  onPressDispatched?: () => void;
 }
 
 /** 拟人化输入在发送下一条 CDP 事件前发现预算已耗尽。 */
@@ -225,6 +232,8 @@ export async function dispatchClick(
   }
   // 按下之前是点击路径的**最后一个安全边界**：过了这一行，点击必须原子完成。
   assertInputSafety(options);
+  // 6.2：安全边界已过、press 即将原子提交 → 标记已派发（在 commitLeftClick 之前，故 press 超时/release 抛出也已置真）。
+  options.onPressDispatched?.();
   await commitLeftClick(cdp, last);
   // 返回真实落点（含 jitter/overshoot 残差），供多点循环把上一落点作下一点起点、保光标连续。
   return last;

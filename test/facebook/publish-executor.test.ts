@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { FacebookPublishExecutor } from '../../src/facebook/publish-executor.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import type { PublishCommandPayload } from '../../src/comm/protocol.js';
+import { TaskTakeoverError, type TakeoverCtx } from '../../src/execution/takeover.js';
 
 interface Call {
   method: string;
@@ -14,6 +15,8 @@ class FakeFacebookPublishCdp implements BrowseCdp {
   composerOpen = false;
   editorText = '';
   submitted = false;
+  /** 故障注入：点击照发（submitted 可为 true）但 fbPublishSubmittedSignal 恒回 false → 复现「已点未确认」post_validate_failed。 */
+  reportSubmitSignal = true;
   disabledSubmit = false;
   navigatedUrl = '';
   extractPostCalls = 0;
@@ -84,7 +87,7 @@ class FakeFacebookPublishCdp implements BrowseCdp {
       } as T;
     }
     if (expression.includes('return fbPublishSubmittedSignal()')) {
-      return { result: { value: this.submitted } } as T;
+      return { result: { value: this.submitted && this.reportSubmitSignal } } as T;
     }
     if (expression.includes('return JSON.stringify(fbPublishExtractPost())')) {
       this.extractPostCalls++;
@@ -378,4 +381,38 @@ test('FacebookPublishExecutor: 清不干净时标 dirty；编辑器已消失时�
   const r2 = await e2.dispatch(command('fill_field', { fieldType: 'content', value: '一段会被吞掉大半的正文内容' }, 2));
   assert.equal(r2.ok, false);
   assert.match(String(r2.error), /_composer_gone$/);
+});
+
+test('🔴 复核 wf_1657e89b BLOCKER：FB submit 提交窗口打开前被接管 → 零点击（帖子未发出）+ 抛 TaskTakeoverError', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  const executor = new FacebookPublishExecutor({ cdp }, { sleep: instantSleep, pollMs: 1, submitVerifyTimeoutMs: 50 });
+  // 抢占落在提交窗口打开之前：submit 的 checkpoint 在 target 查找之后、enter 之前——此刻抛出即点击前作废。
+  let checkpointCalls = 0;
+  const takeover: TakeoverCtx = {
+    checkpoint: () => {
+      checkpointCalls++;
+      throw new TaskTakeoverError();
+    },
+  };
+  await assert.rejects(
+    () => executor.dispatch(command('submit_publish', {}, 4), takeover),
+    (e) => e instanceof TaskTakeoverError,
+    '被接管 MUST 抛 TaskTakeoverError（由上层 PublishCommandDispatcher.dispatch 转 preempted_by_task），绝不吞成 engine_error',
+  );
+  assert.equal(checkpointCalls, 1, 'submit 确实在 target 查找后、enter 前检查了接管');
+  assert.equal(cdp.submitted, false, '提交窗口前被接管 MUST 零点击：帖子一个字节没发出（否则协调器判 preempted 可重投 → 双发）');
+  // 反「空测」自证：换回旧的「submit 不接 takeover / enter 前无 checkpoint」实现，checkpoint 永不被调用 → 点击照发 → cdp.submitted===true（本断言变红）。
+});
+
+test('🔴 6.2：FB submit press 已派发但确认超时未命中 → post_validate_failed 且 submitDispatched=true（区分「已点未确认」与「压根没点」）', async () => {
+  // reportSubmitSignal=false：mouseReleased 照发（点击真发出、submitted=true），但 fbPublishSubmittedSignal 恒回 false → waitUntil 超时。
+  const cdp = new FakeFacebookPublishCdp();
+  cdp.composerOpen = true; // 桩：composer 已开，submit 的 mouseReleased 才置 submitted（否则首个 release 只开 composer）
+  cdp.reportSubmitSignal = false;
+  const executor = new FacebookPublishExecutor({ cdp }, { sleep: instantSleep, pollMs: 1, submitVerifyTimeoutMs: 20 });
+  const res = await executor.dispatch(command('submit_publish', {}, 4));
+  assert.equal(cdp.submitted, true, '点击确实发出（mouseReleased 到达）');
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'post_validate_failed');
+  assert.equal(res.submitDispatched, true, 'press 派发那一刻即置真（onPressDispatched）——即便确认失败，云端 MUST NOT 当提交前失败重投');
 });

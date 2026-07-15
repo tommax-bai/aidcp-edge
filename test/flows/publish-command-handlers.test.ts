@@ -741,7 +741,7 @@ class SubmitFakeCdp {
    *   传 Infinity = 成功文案永不出现，逼出 post_validate_failed）。
    * noButton：DOM 里没有「发布」按钮 → findShadowButtonCenter 返回 null → no_target（点击之前失败）。
    */
-  constructor(private readonly opts: { successAtProbe?: number; noButton?: boolean } = {}) {}
+  constructor(private readonly opts: { successAtProbe?: number; noButton?: boolean; throwOnMousePressed?: boolean } = {}) {}
   /** 捕获后置校验 CHECK 表达式串（回归断言 5.9：不得含 location.href / URL 判据）。 */
   checkExpr(): string {
     const call = this.calls.find((c) => c.method === 'Runtime.evaluate' && String((c.params as { expression?: string })?.expression ?? '').includes('发布成功'));
@@ -756,6 +756,10 @@ class SubmitFakeCdp {
     }
     if (method === 'DOM.getBoxModel') return { model: { content: [100, 200, 140, 200, 140, 220, 100, 220] } } as T; // center=(120,210)
     if (method === 'DOM.getAttributes') return { attributes: [] } as T;
+    // 故障注入：mousePressed 已注入浏览器（mousedown 已触发）但其 CDP 响应超时/reject——点击可能已生效。
+    if (method === 'Input.dispatchMouseEvent' && (params as { type?: string })?.type === 'mousePressed' && this.opts.throwOnMousePressed) {
+      throw new Error('CDP 命令超时: Input.dispatchMouseEvent mousePressed');
+    }
     if (method === 'Runtime.evaluate') {
       const expr = String(params?.expression ?? '');
       if (expr.includes('发布成功')) {
@@ -879,4 +883,15 @@ test('🔴 6.2 已派发提交位：发布按钮找不到（no_target，压根�
   assert.equal(res.ok, false);
   assert.equal(res.error, 'no_target');
   assert.ok(!res.submitDispatched, 'no_target = 压根没点：submitDispatched MUST 为假');
+});
+
+test('🔴 复核 wf_1657e89b MEDIUM：mousePressed 已发出但其响应抛错（点击可能已生效）→ engine_error 且 submitDispatched=true（press 时机）', async () => {
+  // 修前：submitDispatched 在 dispatchClick 整体返回后才置真 → press 已注入但 send 抛错 → 回执 submitDispatched=false
+  //       → 云端按提交前失败重投 → 双发。修后：onPressDispatched 在 commitLeftClick 之前触发，press 一派发即置真。
+  const cdp = new SubmitFakeCdp({ throwOnMousePressed: true });
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 12));
+  assert.equal(cdp.pressed(), 1, 'mousePressed 确实发往浏览器（mousedown 已触发）');
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^engine_error/, 'press 响应抛错 → 诚实 engine_error');
+  assert.equal(res.submitDispatched, true, '🔴 press 已派发即置真：即便 click 调用抛错也 MUST NOT 报「压根没点」→ 防双发');
 });

@@ -642,7 +642,7 @@ export class FacebookJoinExecutor {
       // 就绪轮询（change fb-group-join-wait-render）：反复观察，直到出现决定性信号（加入按钮已渲染 / 已是成员 /
       // 需登录 / 验证码 / 问卷 / 待审 / 同意浮层清不掉）或触上限——按「页面真加载出来」判定，而非死等固定时长
       // （FB 群页头部+按钮实测常需数秒、且网络不稳）。同意/阻断浮层在轮询内每轮幂等处理。触上限仍无信号 → 用最后一次观察诚实交云端判定。
-      const ready = await this.observeUntilReady(groupUrl);
+      const ready = await this.observeUntilReady(groupUrl, checkpoint);
       if (ready.consentBlocked) {
         observation = ready.observation;
         return { ok: false, reason: 'blocked_by_consent', groupUrl, clicked: false, observation };
@@ -694,6 +694,9 @@ export class FacebookJoinExecutor {
       } catch {
         /* hover 仅拟人化，失败不影响后续 JS 点击。 */
       }
+      // 🔴 点击前最后一个安全取消点（复核 wf_1657e89b BLOCKER）：窗口尚未 enter，此刻被抢占即抛、点击前零副作用作废；
+      //    checkpoint 与 enter() 之间**无 await**——一旦窗口开，协调器改回 window_busy、不再抢占这段短确认。
+      checkpoint?.();
       // 🔴 提交窗口开启（5.1）：加群点击 → 短确认（≤18.5s）受保护，协调器此间不强杀（回 window_busy + 剩余预算）。
       disposeCommit = this.commitWindow?.enter(18_500, 'fb_join_click');
       const clickResult = await evalJson<{ clicked?: boolean; reason?: string }>(this.cdp, GROUP_JOIN_CLICK_JS);
@@ -744,7 +747,15 @@ export class FacebookJoinExecutor {
    * 头部与按钮（实测常需数秒、网络不稳）时就过早观察到空页面而误判 ambiguous。触上限仍无信号 → 返回最后一次
    * 观察（诚实交云端判定，绝不假成功）。同意/阻断浮层每轮幂等处理，任意时刻出现都能捕获。
    */
-  private async observeUntilReady(groupUrl: string): Promise<{
+  private async observeUntilReady(
+    groupUrl: string,
+    /**
+     * 点击前安全取消点（复核 wf_1657e89b BLOCKER）：本轮询最长 readyTimeout（默认 30s）且**完全可取消**（点击未发、零副作用）。
+     * 每轮开头检查接管——被独占任务抢占即抛 TaskTakeoverError，点击前干净作废。**不加则**慢页面 observe 超过 30s 让位预算
+     * → quiesce timeout → 误判控制面故障 yield_timeout + 浏览永久冻结（点击后的 5.10b 尾巴门控管不到点击前这段）。
+     */
+    checkpoint?: () => void,
+  ): Promise<{
     raw?: RawJoinObservation;
     observation: FacebookGroupJoinObservation;
     block?: 'login_required' | 'blocked_by_captcha';
@@ -756,6 +767,7 @@ export class FacebookJoinExecutor {
     let lastRaw: RawJoinObservation | undefined;
     let lastObs: FacebookGroupJoinObservation = { groupUrl };
     for (let i = 0; i < maxPolls; i++) {
+      checkpoint?.(); // 点击前完全可取消：被接管即抛，绝不拖满 readyTimeout 阻塞让位（无窗口门控——此刻窗口尚未 enter）
       const consent = await this.acceptConsent(this.cdp);
       if (consent.handled && !consent.cleared) {
         return { observation: await this.collectObservation(groupUrl, {}), consentBlocked: true };

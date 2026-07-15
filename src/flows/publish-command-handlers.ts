@@ -939,6 +939,10 @@ export class PublishCommandDispatcher {
           jitter: 0,
           // 贝塞尔轨迹途中也能让路——但只在按下之前（cdp-util 的按下-松开是原子区）。
           checkpoint: takeover?.checkpoint,
+          // 🔴 6.2：press 派发那一刻置真——即便 press 响应超时/release 抛出（点击可能已生效），也不谎报「压根没点」→ 双发。
+          onPressDispatched: () => {
+            submitDispatched = true;
+          },
         });
       } else {
         takeover?.checkpoint();
@@ -946,16 +950,19 @@ export class PublishCommandDispatcher {
         closeWindow = this.publishGuard?.enter(15_000, 'xhs_publish_submit');
         await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
         await this.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+        // 🔴 6.2：mousePressed 已发出即置真（此后 mouseReleased 抛出，点击也可能已生效）；mousePressed 抛出则跳 catch、保持假（正确）。
+        submitDispatched = true;
         await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
       }
     } catch (err) {
       closeWindow?.(); // 点击段抛错（含被接管前的 CDP 故障）：关窗，别让一个已作废的提交窗口挡住后续抢占。
       rethrowIfTakeover(err);
       const message = err instanceof Error ? err.message : String(err);
-      return { ...base, ok: false, error: `engine_error: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
+      // 🔴 MUST 带 submitDispatched：若 press 已派发（onPressDispatched 已置真）但 CDP 响应抛错，回执必须如实告知「已点」，
+      //    否则云端按提交前失败重投 → 双发（复核 wf_1657e89b MEDIUM）。press 未发时它仍为 false（正确）。
+      return { ...base, ok: false, error: `engine_error: ${message}`, submitDispatched, details: { ...details, durationMs: this.clock() - startedAt } };
     }
-    // 🔴 点击已派发：帖子可能已发出。即便下方确认失败，云端 MUST NOT 当「提交前失败」重投（6.2；否则双发）。
-    submitDispatched = true;
+    // 点击已派发（submitDispatched 由上面两分支在 press 派发那一刻各自置真，覆盖 press 已发/release 抛出的窗口）。
     // 诊断（只观测）：点击后立即快照页面状态（在 deadline 计算之前，不占用 15s 校验窗口）。
     await this.logSubmitDiag(x, y, 'after-click');
     // 🔴 提交点已跨过：以下 MUST NOT 取消（全仓代价最高的禁区）。中止 = 一篇**可能已经发出去的帖子**
