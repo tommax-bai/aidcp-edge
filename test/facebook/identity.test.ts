@@ -161,15 +161,47 @@ test('deriveFacebookIdentity: matching c_user and profile URL succeeds with prof
   );
 });
 
-test('deriveFacebookIdentity: mismatched c_user and profile link fails honestly', () => {
+test('deriveFacebookIdentity: c_user 权威——页面他人 profile 链接（id 不同）不判 mismatch，取 cookie id、昵称由 id 锚定保护（change facebook-self-identity-cookie-authoritative）', () => {
   const res = deriveFacebookIdentity({
     href: 'https://www.facebook.com/',
+    // 页面上只有【他人】的 profile 链接（id≠cookie），且带他人头像标签
     profileHrefs: ['https://www.facebook.com/profile.php?id=1234567890'],
-    cookieUserId: '9876543210',
-    displayName: 'Test User',
+    profileAnchors: [{ href: 'https://www.facebook.com/profile.php?id=1234567890', ariaLabel: '别人的头像' }],
+    cookieUserId: '9876543210', // 登录态权威自我 id
+    displayName: null,
   });
-  assert.equal(res.ok, false);
-  if (!res.ok) assert.match(res.reason, /mismatch/);
+  assert.equal(res.ok, true); // cookie 权威 → 不再因他人链接 mismatch 失败
+  if (res.ok) {
+    assert.equal(res.accountId, '9876543210'); // 取 cookie 的自我 id
+    assert.equal(res.displayName, null); // id 锚定：他人锚点 id 不匹配 → 昵称留空，绝不把「别人」当自己
+    assert.equal(res.source, 'cookie'); // cookie 不在页面 profile 链接里 → source=cookie
+  }
+});
+
+test('deriveFacebookIdentity: 真实 feed（cookie=self + 多个他人作者链接 + 本人「的时间线」锚点）→ 读出本人昵称，不判冲突（真机 Nancy Terry 复现）', () => {
+  const res = deriveFacebookIdentity({
+    href: 'https://www.facebook.com/',
+    // feed 上：本人链接 + 3 个帖子作者/评论者链接（真机 CDP 实测 id）
+    profileHrefs: [
+      'https://www.facebook.com/profile.php?id=61591803599213',
+      'https://www.facebook.com/profile.php?id=100079765790323',
+      'https://www.facebook.com/profile.php?id=100059775181406',
+      'https://www.facebook.com/profile.php?id=100044193681253',
+    ],
+    profileAnchors: [
+      { href: 'https://www.facebook.com/profile.php?id=61591803599213', ariaLabel: 'Nancy Terry的时间线' },
+      { href: 'https://www.facebook.com/profile.php?id=100079765790323', ariaLabel: '某作者的头像' },
+    ],
+    cookieUserId: '61591803599213',
+    displayName: null,
+    title: '(1) Facebook',
+  });
+  assert.equal(res.ok, true); // 他人作者链接不再触发 candidates conflict
+  if (res.ok) {
+    assert.equal(res.accountId, '61591803599213');
+    assert.equal(res.displayName, 'Nancy Terry'); // id 锚定 + 时间线后缀 → 本人昵称
+    assert.equal(res.source, 'cookie+profile-link');
+  }
 });
 
 test('deriveFacebookIdentity: conflicting stable candidates are rejected', () => {

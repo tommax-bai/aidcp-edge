@@ -179,19 +179,23 @@ export function deriveFacebookIdentity(signals: FacebookIdentitySignals): Facebo
     };
   }
 
-  if (unique.length > 1) return { ok: false, reason: `facebook identity candidates conflict: ${unique.join(',')}` };
-  const profileId = unique[0] ?? null;
-  if (cookieUserId && profileId && cookieUserId !== profileId) {
-    return { ok: false, reason: 'facebook identity cookie/profile mismatch' };
-  }
+  // 非本人主页页（首页/信息流/群/详情等）：c_user cookie 是登录态【权威】数字自我 id。
+  // 在场即以其为准——按 id 锚定取本人昵称；页面上其他用户的 profile 链接（帖子作者/评论者/群成员）
+  // 与自我 id 确立无关，MUST NOT 计入候选、MUST NOT 触发 conflict。id 锚定保证绝不把他人名字当自己
+  // （读到别人链接 → avatarNameForId 不匹配 → 留空、id 仍取 cookie）。
+  // change facebook-self-identity-cookie-authoritative：采集时机迁到「首批 feed 卡片」后，feed 上必有
+  // 他人 profile.php?id= 链接，旧的 unique.length>1 会把他人链接误判成自我 id 候选冲突 → 读身份失败 → 昵称空。
   if (cookieUserId) {
     return {
       ok: true,
       accountId: cookieUserId,
       displayName: nameForId(cookieUserId, false),
-      source: profileId ? 'cookie+profile-link' : 'cookie',
+      source: unique.includes(cookieUserId) ? 'cookie+profile-link' : 'cookie',
     };
   }
+  // 无权威 cookie：只能靠页面 profile 链接确立 id —— 此时多个互异候选才是真歧义，诚实失败。
+  if (unique.length > 1) return { ok: false, reason: `facebook identity candidates conflict: ${unique.join(',')}` };
+  const profileId = unique[0] ?? null;
   if (profileId) {
     return {
       ok: true,
