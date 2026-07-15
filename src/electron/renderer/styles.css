@@ -1953,7 +1953,7 @@ body { margin: 0; }
   pointer-events: none;
   transform: translateX(-180%) skewX(-18deg);
 }
-.persona-growth.play .pg-expectation::after { animation: pg-expectation-shimmer 2800ms cubic-bezier(.35,0,.2,1) 2680ms both; }
+.persona-growth.play .pg-expectation::after { animation: pg-expectation-shimmer 5600ms cubic-bezier(.35,0,.2,1) 2680ms both; }
 .pg-expectation > span,
 .pg-expectation > .pg-expectation-arrow { position: relative; z-index: 1; }
 .pg-expectation > span { display: inline-flex; align-items: center; gap: 4px; }
