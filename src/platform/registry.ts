@@ -58,9 +58,22 @@ const FACEBOOK_DELEGATED_ACTIONS: Record<DelegatedAction, DelegatedActionSupport
   },
 };
 
+const WECHAT_CHANNELS_DELEGATED_ACTIONS: Record<DelegatedAction, DelegatedActionSupport> = {
+  comment_batch: { level: 'unsupported', reason: 'inbound_interaction_only' },
+  publish_post: { level: 'unsupported', reason: 'inbound_interaction_only' },
+  publish_from_inspiration: { level: 'unsupported', reason: 'inbound_interaction_only' },
+  comment_curated: { level: 'unsupported', reason: 'inbound_interaction_only' },
+  generate_candidates: { level: 'unsupported', reason: 'inbound_interaction_only' },
+  approve_candidate: { level: 'unsupported', reason: 'inbound_interaction_only' },
+  reject_candidate: { level: 'unsupported', reason: 'inbound_interaction_only' },
+  modify_candidate: { level: 'unsupported', reason: 'inbound_interaction_only' },
+  facebook_group_comment: { level: 'unsupported', reason: 'facebook_only' },
+};
+
 export const DELEGATED_ACTIONS_BY_PLATFORM: Record<PlatformId, Record<DelegatedAction, DelegatedActionSupport>> = {
   xiaohongshu: XHS_DELEGATED_ACTIONS,
   facebook: FACEBOOK_DELEGATED_ACTIONS,
+  wechat_channels: WECHAT_CHANNELS_DELEGATED_ACTIONS,
 };
 
 export const PLATFORM_DRIVERS: Partial<Record<PlatformId, PlatformDriver>> = {

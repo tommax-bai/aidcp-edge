@@ -88,6 +88,30 @@ test('delegated actions: Facebook remains beta and does not advertise unsupporte
   });
 });
 
+test('delegated actions: wechat_channels advertises no outbound delegation capability', () => {
+  const inboundOnlyActions = [
+    'comment_batch',
+    'publish_post',
+    'publish_from_inspiration',
+    'comment_curated',
+    'generate_candidates',
+    'approve_candidate',
+    'reject_candidate',
+    'modify_candidate',
+  ] as const;
+
+  for (const action of inboundOnlyActions) {
+    assert.deepEqual(delegatedActionSupportForPlatform('wechat_channels', action), {
+      level: 'unsupported',
+      reason: 'inbound_interaction_only',
+    });
+  }
+  assert.deepEqual(delegatedActionSupportForPlatform('wechat_channels', 'facebook_group_comment'), {
+    level: 'unsupported',
+    reason: 'facebook_only',
+  });
+});
+
 test('assertPlatformCapability: missing capability does not fall back to xhs path', () => {
   const driver = {
     ...selectPlatformDriver({ env: {} as NodeJS.ProcessEnv }),
