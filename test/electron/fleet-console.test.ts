@@ -748,12 +748,15 @@ test('人设成长引导：personaBound 状态先于 persist 回执到达时弹�
   assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), true, '首作卡活跃期间后续绑定态不得关闭弹窗');
 });
 
-test('人设成长引导：沿用旧庆祝吉祥物，撒花与缩放均为一次性且支持 reduced motion', () => {
+test('人设成长引导：吉祥物放大撒花后延迟强调首轮预期，且支持 reduced motion', () => {
   assert.match(html, /mascot-celebration-512\.png/);
-  assert.match(rendererCss, /\.persona-growth\.play \.pg-mascot\s*\{\s*animation:\s*pg-mascot-scale 800ms[^;]*both;/);
-  assert.match(rendererCss, /@keyframes pg-mascot-scale\s*\{[\s\S]*scale\(1\.09\)[\s\S]*\}/);
+  assert.match(html, /<span class="pg-confetti"[^>]*>[\s\S]*?(?:<i><\/i>){10}[\s\S]*?<\/span>/);
+  assert.match(rendererCss, /\.persona-growth\.play \.pg-mascot\s*\{\s*animation:\s*pg-mascot-scale 840ms[^;]*both;/);
+  assert.match(rendererCss, /@keyframes pg-mascot-scale\s*\{[\s\S]*scale\(1\.12\)[\s\S]*\}/);
+  assert.match(rendererCss, /\.persona-growth\.play \.pg-expectation\s*\{\s*animation:\s*pg-expectation-focus 640ms[^;]*1080ms both;/);
+  assert.match(rendererCss, /@keyframes pg-expectation-focus\s*\{[\s\S]*scale\(1\.025\)[\s\S]*\}/);
   assert.doesNotMatch(rendererCss, /\.persona-growth\.play \.pg-mascot[^}]*infinite/);
-  assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.persona-growth\.play \.pg-mascot\s*\{[\s\S]*animation:\s*none;/);
+  assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.persona-growth\.play \.pg-mascot[\s\S]*\.persona-growth\.play \.pg-expectation\s*\{[\s\S]*animation:\s*none;/);
   assert.match(rendererCss, /\.pg-step-icon\s*\{[^}]*color:\s*#2d8fa4;[^}]*\}/);
   assert.doesNotMatch(rendererCss, /\.pg-step-icon\s*\{[^}]*background:/);
 });
