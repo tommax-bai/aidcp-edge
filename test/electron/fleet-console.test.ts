@@ -625,6 +625,12 @@ test('平台标识：FB 环境行染平台类、顶栏徽标随选中环境切�
   assert.equal(w.document.querySelector('#acct-plat')!.textContent, 'Facebook');
   assert.equal(w.document.querySelector('#acct-plat')!.classList.contains('plat-facebook'), true);
   assert.equal(w.document.querySelector('#auth-label')!.textContent, 'Facebook 登录');
+  (rowOf('ads-p1').querySelector('.rail-persona') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-plat')!.textContent, 'Facebook', 'FB 环境的人设浮层必须显示 Facebook');
+  assert.equal(w.document.querySelector('#persona-plat')!.classList.contains('plat-facebook'), true, 'FB 人设平台签保留平台蓝类');
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('plat-facebook'), true, 'FB 人设头像保留平台蓝类');
+  (w.document.querySelector('#persona-close') as HTMLElement).click();
   // 平台变化必须触发 rail 重建（platform 在变更签名里；漏掉则 UI 停留旧平台）
   pushFleet(snap('xiaohongshu'));
   await tick();
@@ -633,6 +639,11 @@ test('平台标识：FB 环境行染平台类、顶栏徽标随选中环境切�
   await tick();
   assert.equal(w.document.querySelector('#acct-plat')!.textContent, '小红书');
   assert.equal(w.document.querySelector('#acct-plat')!.classList.contains('plat-facebook'), false);
+  (rowOf('ads-p1').querySelector('.rail-persona') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-plat')!.textContent, '小红书', '小红书环境的人设浮层不得残留 Facebook 文案');
+  assert.equal(w.document.querySelector('#persona-plat')!.classList.contains('plat-facebook'), false, '小红书平台签不得残留 FB 类');
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('plat-facebook'), false, '小红书人设头像不得残留 FB 类');
 });
 
 test('人设浮层：未就绪环境出空态面板（向导收起）；生成后进预览页、「改关键词」回第一步草稿保留', async () => {
@@ -777,13 +788,19 @@ test('人设浮层：云端权威说未绑 → 自动弹出并通知；偏好面
   const cards = [...w.document.querySelectorAll('#persona-stage-pick .persona-card')];
   assert.match(cards[0].textContent || '', /语气调性/, '语气调性必须是第一个面板');
   assert.match(cards[1].textContent || '', /内容偏好/, '内容偏好必须是第二个面板');
+  assert.match(rendererCss, /\.persona-pop \{[\s\S]*--persona-accent: #1496a5;/, '人设浮层必须使用吉祥物青绿局部令牌');
+  assert.match(rendererCss, /\.persona-kw-group \.kw-btn \{[\s\S]*font-weight: 500;/, '选择项字重应低于区块标题');
+  assert.doesNotMatch(rendererCss, /\.persona-pref-group \.kw-btn:not\(\.active\)::before\s*\{[^}]*content:\s*["']\+["']/, '内容项加号不得依赖字体字形');
   const firstGroup = w.document.querySelector('.persona-pref-group')!;
   assert.match(firstGroup.textContent || '', /招聘求职/);
   for (const item of ['骑手外卖', '蓝领零工', '数据标注', '自有兼职', '在校实习']) {
     assert.match(firstGroup.textContent || '', new RegExp(item));
   }
 
-  (firstGroup.querySelector('.persona-add-custom') as HTMLElement).click();
+  const addCustom = firstGroup.querySelector('.persona-add-custom') as HTMLElement;
+  assert.equal(addCustom.textContent, '', '自定义入口的可见加号交由 CSS 几何绘制');
+  assert.match(addCustom.getAttribute('aria-label') || '', /自定义招聘求职偏好/, '几何加号仍须保留可访问名称');
+  addCustom.click();
   const customInput = firstGroup.querySelector('.persona-custom-input') as HTMLInputElement;
   customInput.value = '直播招聘';
   (firstGroup.querySelector('.persona-custom-add') as HTMLElement).click();

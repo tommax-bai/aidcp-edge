@@ -3223,7 +3223,7 @@ function renderPersonaContentGroups() {
     const add = document.createElement('button');
     add.className = 'persona-add-custom';
     add.type = 'button';
-    add.textContent = '+';
+    // 可见加号由 CSS 几何线条绘制，避免系统字体的 + 字形基线导致偏心；可访问名称保留在 aria-label。
     add.title = `自定义${group.title}偏好`;
     add.setAttribute('aria-label', `自定义${group.title}偏好`);
     add.setAttribute('aria-expanded', 'false'); // 展开态用于无障碍：指向下方就地输入框
