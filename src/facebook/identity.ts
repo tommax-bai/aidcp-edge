@@ -89,13 +89,20 @@ export function cleanFacebookDisplayName(value: string | null | undefined): stri
   return s || null;
 }
 
-/** 头像 aria-label 的多语后缀：仅当命中才认定这是「头像标签」、剥离后取名；否则不信为昵称。 */
-const AVATAR_ARIA_SUFFIX_RE = /\s*(?:的大?头像|的大頭貼|['’‘]s\s+(?:profile picture|profile photo|avatar))\s*$/i;
+/**
+ * 本人自链 aria-label 的多语后缀：仅当命中才认定这是「本人主页/头像自链标签」、剥离后取名；否则不信为昵称。
+ * 覆盖两类本人自链后缀：
+ *  - 头像后缀：的头像 / 的大头像 / 的大頭貼 / 's profile picture|photo|avatar
+ *  - 时间线后缀：的时间线 / 的時間線 / 's timeline —— 中文界面下个人主页链接常用「<名>的时间线」而非「<名>的头像」
+ *    （change facebook-nickname-aria-timeline-suffix：真机中文号「Nancy Terry的时间线」曾因此读空）。
+ */
+const AVATAR_ARIA_SUFFIX_RE = /\s*(?:的大?头像|的大頭貼|的时间线|的時間線|['’‘]s\s+(?:profile picture|profile photo|avatar|timeline))\s*$/i;
 
 /**
- * 从本人头像锚点的 aria-label 提取昵称（纯函数）。
- * 仅当 aria 含已知「头像 / 's profile picture」后缀时才剥后缀取名——无后缀的 aria（如「你的个人主页」）一律返回 null，
- * 避免把通用外壳标签误当昵称。剥后结果再过 cleanFacebookDisplayName（拒 Facebook/(N) Facebook/通用词）。
+ * 从本人 profile 自链锚点的 aria-label 提取昵称（纯函数）。
+ * 仅当 aria 含已知本人自链后缀（头像 / 's profile picture / 时间线 / 's timeline）时才剥后缀取名——
+ * 无后缀的 aria（如「你的个人主页」）一律返回 null，避免把通用外壳标签误当昵称。
+ * 剥后结果再过 cleanFacebookDisplayName（拒 Facebook/(N) Facebook/通用词）。
  */
 export function extractNameFromAvatarAria(aria: string | null | undefined): string | null {
   const s = String(aria ?? '').replace(/\s+/g, ' ').trim();

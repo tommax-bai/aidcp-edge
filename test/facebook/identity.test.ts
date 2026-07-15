@@ -327,6 +327,15 @@ test('extractNameFromAvatarAria: strips avatar suffix, rejects non-avatar/generi
   assert.equal(extractNameFromAvatarAria(null), null);
 });
 
+test('extractNameFromAvatarAria: strips timeline suffix（change facebook-nickname-aria-timeline-suffix，中文界面本人主页链接变体）', () => {
+  // 真机中文号：本人主页锚点 aria 是「<名>的时间线」而非「<名>的头像」（曾因此读空）
+  assert.equal(extractNameFromAvatarAria('Nancy Terry的时间线'), 'Nancy Terry');
+  assert.equal(extractNameFromAvatarAria('大白的時間線'), '大白'); // zh-TW 繁体
+  assert.equal(extractNameFromAvatarAria("Nancy Terry's timeline"), 'Nancy Terry'); // en 变体
+  assert.equal(extractNameFromAvatarAria('管理Nancy Terry通知设置'), null); // 非自链后缀（通知设置）→ 仍不当昵称
+  assert.equal(extractNameFromAvatarAria('Facebook的时间线'), null); // 剥后缀后是通用词 → clean 判空
+});
+
 test('avatarNameForId: id-anchored, ignores other ids and honors /me self-link', () => {
   const anchors = [
     { href: 'https://www.facebook.com/profile.php?id=9876543210', ariaLabel: 'Someone Else的头像' },
@@ -338,6 +347,27 @@ test('avatarNameForId: id-anchored, ignores other ids and honors /me self-link',
     avatarNameForId([{ href: 'https://www.facebook.com/me', ariaLabel: 'Test User的头像' }], '1234567890'),
     'Test User',
   ); // /me 自链命中
+});
+
+test('deriveFacebookIdentity: 中文界面本人主页链接「<名>的时间线」→ 读出昵称（真机 Nancy Terry 复现，change facebook-nickname-aria-timeline-suffix）', () => {
+  // 复现真机 CDP 就地扫描：首页、c_user=本账号、本人主页锚点 aria="Nancy Terry的时间线"
+  const derived = deriveFacebookIdentity({
+    href: 'https://www.facebook.com/',
+    profileHrefs: ['https://www.facebook.com/profile.php?id=61591803599213'],
+    profileAnchors: [
+      { href: 'https://www.facebook.com/profile.php?id=61591803599213', ariaLabel: null },
+      { href: 'https://www.facebook.com/profile.php?id=61591803599213', ariaLabel: 'Nancy Terry的时间线' },
+    ],
+    cookieUserId: '61591803599213',
+    displayName: null,
+    title: '(1) Facebook',
+  });
+  assert.deepEqual(derived, {
+    ok: true,
+    accountId: '61591803599213',
+    displayName: 'Nancy Terry',
+    source: 'cookie+profile-link',
+  });
 });
 
 test('cleanFacebookDisplayName: rejects unread-count tab titles and generic shell labels', () => {
