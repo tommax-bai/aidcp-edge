@@ -65,6 +65,28 @@ export async function denyPermissionPrompts(cdp: CdpClient): Promise<void> {
 }
 
 /**
+ * 页面级 JS 对话框接管（change lease-strict-preemption task 3.4）。
+ *
+ * **Page.enable 一旦开着，浏览器就不再自动处理 alert / confirm / beforeunload —— 页面会一直阻塞，
+ * 直到有人显式 handleJavaScriptDialog。而我们全仓从来没有任何处理器。**
+ * 后果：离开一个填了字的编辑器页触发「离开此页 / 保存草稿？」确认框 → 浏览器就此冻住，
+ * 连最高优先级的抢占者拿到执行权后也只能对着一个死页面。这是今天就在的雷，抢占会把它踩成常态。
+ *
+ * 一律 accept（= 放弃编辑、允许离开）：我们从不主动使用 JS 对话框，任何弹出的对话框都是平台侧的
+ * 离开确认 / 提示。相比「让浏览器永久冻住」，接受它永远是更小的代价。每一次都记日志，绝不静默。
+ */
+function takeOverJavaScriptDialogs(cdp: CdpClient, log: (m: string) => void): void {
+  cdp.on('Page.javascriptDialogOpening', (params) => {
+    const p = (params ?? {}) as { type?: string; message?: string };
+    log(
+      `[cdp] 页面弹出 JS 对话框（type=${p.type ?? '?'} message=${JSON.stringify((p.message ?? '').slice(0, 60))}）→ accept（放弃编辑、允许离开）。` +
+        `不接管的话页面会一直阻塞在这里。`,
+    );
+    void cdp.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => undefined);
+  });
+}
+
+/**
  * 启用定位/执行所需 CDP 域 + 注入反检测 + 权限弹窗兜底。首次 attach 与断线重连共用，避免口径漂移。
  * Input.enable（坐标点击/按键所需）也在此——重连后新 WS 必须重启用，否则点击/输入失效。
  */
@@ -145,6 +167,9 @@ export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSes
 
   const cdp = new CdpClient(target.webSocketDebuggerUrl, { ...options.client, reconnect });
   await cdp.connect();
+  // 对话框接管**只注册一次**：事件订阅表随 CdpClient 存活、跨重连保留（见 CdpClient 的原地释放注释），
+  // 放进 reEnableAndInject 会每次重连叠一个监听器。
+  takeOverJavaScriptDialogs(cdp, (m) => console.log(m));
   // 启用所需域 + 注入反检测（与重连共用同一函数）。
   await reEnableAndInject(cdp, { stealth: options.stealth, injector });
 

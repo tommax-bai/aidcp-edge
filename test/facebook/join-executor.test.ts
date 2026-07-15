@@ -5,6 +5,7 @@ import { JSDOM } from 'jsdom';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monitor.js';
 import { FacebookJoinExecutor, classifyCtaLabel, hasMemberSignal, structuralJoinConfirmed } from '../../src/facebook/join-executor.js';
+import { TaskTakeoverError } from '../../src/execution/takeover.js';
 
 interface RawJoinObservation {
   pageUrl?: string;
@@ -940,4 +941,21 @@ test('scope-guard[jsdom]: 双列推荐卡片内容列显示异群「已加入」
     !(r.observation?.membershipSignals ?? []).some((s) => s.includes('已加入')),
     'membershipSignals 不含推荐卡片异群「已加入」',
   );
+});
+
+test('🔴 复核 wf_1657e89b BLOCKER：join 点击前（observe 阶段）被接管 → 零加群点击 + 抛 TaskTakeoverError（不拖满 readyTimeout 冻结浏览）', async () => {
+  const cdp = new FakeCdp(); // 默认 observe = 就绪、有 join 按钮
+  let checkpointCalls = 0;
+  const checkpoint = (): void => {
+    checkpointCalls++;
+    throw new TaskTakeoverError();
+  };
+  await assert.rejects(
+    () => makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true }, checkpoint),
+    (e) => e instanceof TaskTakeoverError,
+    '被接管 MUST 抛 TaskTakeoverError（冒泡到 handle 转 preempted_by_task），绝不降级成 nav_error',
+  );
+  assert.ok(checkpointCalls > 0, 'observe 阶段确实检查了接管（点击前可取消）');
+  assert.equal(cdp.clicks.length, 0, '点击前被接管 MUST 零加群点击：未加群');
+  // 反「空测」自证：换回旧的「observeUntilReady 无 checkpoint」实现，observe 会跑完并点击 → clicks.length===1、且不抛（两断言都变红）。
 });

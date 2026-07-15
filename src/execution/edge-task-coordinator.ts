@@ -6,12 +6,49 @@ import type {
 } from '../comm/protocol.js';
 
 export interface EdgeTaskBrowseGate {
-  quiesceForTask(): Promise<number>;
+  /**
+   * 接管：让路 + **有界**等待真写段收敛，返回被取消的未开始浏览命令数。
+   * 未在预算内收敛 MUST 抛出——调用方据此不授予、诚实终结排队申请，MUST NOT 谎称已收敛
+   * （change lease-strict-preemption）。
+   */
+  quiesceForTask(timeoutMs?: number): Promise<number>;
   resumeAfterTask(): Promise<void>;
+}
+
+/**
+ * 页面写者注册表探针（change lease-strict-preemption 5.2）。
+ *
+ * 协调器原本只认识**一个**页面写者（browse gate）；发布执行流是**第二个**写者，今天游离在协调器视野
+ * 之外。本探针把「当前在跑写者」的两类事实喂给协调器，用于两处抢占安全判定：
+ *   ① 抢占前问「在跑写者是否处于不可逆提交窗口」（六处提交点，5.1）——是则**拒绝抢占**、回
+ *      `window_busy` + 剩余预算（不强杀已提交动作、也不让抢占者空等）；否则可抢占。
+ *   ② 恢复浏览 / 放行普通浏览命令前问「是否有在途发布写」（5.9）——有则封住，绝不让浏览恢复把发布页
+ *      导航走（否则发布后置校验会把「已离开发布页」误判成发布成功）。
+ *
+ * **保守缺省**：全部方法可选。`inCommitWindow` 返回 `undefined`（探针未接线）时，协调器**无法确认
+ * 「不在窗口」→ 一律不抢占**（回落到今日排队等待行为）；`publishInFlight` 缺省视为无在途发布写、不额外
+ * 封锁。因此本探针未注入时，协调器行为与抢占前**逐字不变**（抢占能力休眠、待 5.1/5.3 接线真探针才生效）。
+ */
+export interface EdgeTaskPageWriterProbe {
+  /** 当前在跑的独占写者是否处于不可逆提交窗口（六处提交点，5.1）。`undefined` = 无法确认（→ 不抢占）。 */
+  inCommitWindow?(): boolean | undefined;
+  /** 当前提交窗口的剩余毫秒（`window_busy` 回执携带，供云端精确等待后重排 acquire，不空转轮询）。 */
+  commitWindowRemainingMs?(): number | undefined;
+  /** 是否有在途发布写（独立于租约；治 5.9 假成功）。 */
+  publishInFlight?(): boolean | undefined;
+  /**
+   * 取消在途发布写并**有界等待**其收敛（真取消，5.3）；返回被取消数（0 或 1）。
+   * 未在预算内收敛 MUST 抛出（与 browse gate 同构）——协调器据此判控制面故障。缺省视为无在途发布可取消。
+   */
+  cancelPublish?(timeoutMs?: number): Promise<number>;
 }
 
 export interface EdgeTaskCoordinatorOptions {
   browse: EdgeTaskBrowseGate;
+  /**
+   * 页面写者注册表探针（change lease-strict-preemption 5.2/5.3/5.9）。未注入 = 抢占能力休眠、行为与今日逐字不变。
+   */
+  writers?: EdgeTaskPageWriterProbe;
   /** 浏览器控制面是否可安全接管。false 时必须快速明确拒绝，不能占住普通浏览再等云端超时。 */
   canAcquire?: () => boolean;
   /**
@@ -72,6 +109,7 @@ const WAKE_RTT_MARGIN_MS = 5_000;
  */
 export class EdgeTaskCoordinator {
   private readonly browse: EdgeTaskBrowseGate;
+  private readonly writers?: EdgeTaskPageWriterProbe;
   private readonly canAcquire: () => boolean;
   private readonly browserAbsent: () => boolean;
   private readonly requestWake: (deadlineAt?: number) => Promise<boolean>;
@@ -84,6 +122,13 @@ export class EdgeTaskCoordinator {
   private readonly maxAbsoluteLeaseMs: number;
   private queue: QueuedAcquire[] = [];
   private active?: ActiveLease;
+  /**
+   * 抢占中：已从 active 摘下、写者取消尚未确认的被抢占租约（change lease-strict-preemption，复核 wf_3a8e8996 BLOCKER）。
+   * **关键**：被抢占任务的 `preempted_by_task`（可重投）终态**只在 quiesce 确认写者真停之后**才由 settlePreempted 发出；
+   * 若 cancel 未收敛（写者不停手 / 控制面丢失）则发 yield_timeout / cdp_unhealthy——绝不谎称干净让位，否则云端会重投一个
+   * 写者仍在跑的发布 → 不可逆双发。
+   */
+  private preemptedPending?: ActiveLease;
   private quiescing = false;
   private browseBlocked = false;
   private order = 0;
@@ -91,6 +136,7 @@ export class EdgeTaskCoordinator {
 
   constructor(options: EdgeTaskCoordinatorOptions) {
     this.browse = options.browse;
+    this.writers = options.writers;
     this.canAcquire = options.canAcquire ?? (() => true);
     this.browserAbsent = options.browserAbsent ?? (() => false);
     this.requestWake = options.requestWake ?? (() => Promise.resolve(false));
@@ -135,7 +181,57 @@ export class EdgeTaskCoordinator {
     this.queue.push(queued);
     this.browseBlocked = true;
     this.logger(`[task] queued taskId=${payload.taskId} kind=${payload.kind} priority=${payload.priority} acquireTimeoutMs=${queued.payload.acquireTimeoutMs}`);
+    this.drainOrPreempt(queued);
+  }
+
+  /**
+   * 严格高档位可抢占在跑的低档位任务（5.4）；同档 / 低档一律排队等待（FIFO，事实源＝申请到达顺序）。
+   *
+   * 抢占三态（由「在跑写者是否在提交窗口」决定，5.4 + 5.5 窗口豁免判据）：
+   *  - `preempt`：确认不在提交窗口 → 释放在跑任务（`preempted_by_task`）→ 后续 `drain` 取消其在途写者并授予 challenger；
+   *  - `window_busy`：确认在提交窗口 → **绝不强杀已提交动作**，立刻回 challenger `window_busy` + 剩余预算（不空等）；
+   *  - `unknown`：探针未接线 / 无法确认 → **保守不抢占**，challenger 排队等待（回落今日行为）。
+   */
+  private drainOrPreempt(challenger: QueuedAcquire): void {
+    if (this.active && !this.quiescing && this.strictlyOutranks(challenger.payload, this.active.payload)) {
+      const inWindow = this.writers?.inCommitWindow?.();
+      if (inWindow === false) {
+        const lease = this.active;
+        this.logger(`[task] preempting active=${lease.payload.taskId} for challenger=${challenger.payload.taskId}（严格高档位、不在提交窗口）`);
+        // **先摘下、先不 onReleased**：把被抢占租约挂到 preemptedPending，交给 drain 的 quiesce 取消其写者
+        // （browse 让路 + 取消在途发布）。只有 quiesce 确认写者真停了，settlePreempted 才发 preempted_by_task
+        // （可重投、不进 terminal）；cancel 未收敛则发 yield_timeout/cdp_unhealthy——绝不先宣布干净让位、cancel
+        // 却失败（那会让云端重投一个写者仍在跑的发布 = 双发。复核 wf_3a8e8996 BLOCKER）。
+        if (lease.timer) clearTimeout(lease.timer);
+        this.preemptedPending = lease;
+        this.active = undefined;
+        void this.drain();
+        return;
+      }
+      if (inWindow === true) {
+        this.rejectChallengerWindowBusy(challenger, this.writers?.commitWindowRemainingMs?.());
+        return;
+      }
+      // inWindow === undefined：无法确认「不在窗口」→ 保守不抢占，challenger 落到下面 drain（active 在跑时 drain 立即返回、challenger 排队）。
+    }
     void this.drain();
+  }
+
+  private strictlyOutranks(a: EdgeTaskAcquirePayload, b: EdgeTaskAcquirePayload): boolean {
+    return PRIORITY[a.priority] > PRIORITY[b.priority];
+  }
+
+  /**
+   * 在跑写者处于不可逆提交窗口：拒绝抢占、回 `window_busy` + 剩余预算。
+   * **绝不 rememberTerminal**——`window_busy` 是可重试的「稍后再来」而非终态；进 terminal 会让云端按剩余预算
+   * 重排的 acquire 被当 `duplicate` 摘掉，抢占永远发不出去。在跑任务保持不动、继续持租约。
+   */
+  private rejectChallengerWindowBusy(challenger: QueuedAcquire, remainingMs?: number): void {
+    const idx = this.queue.indexOf(challenger);
+    if (idx >= 0) this.queue.splice(idx, 1);
+    this.clearAcquireExpiry(challenger);
+    this.onReleased({ taskId: challenger.payload.taskId, reason: 'window_busy', windowRemainingMs: remainingMs });
+    this.logger(`[task] window_busy challenger=${challenger.payload.taskId} remainingMs=${remainingMs ?? '-'}（提交窗口占用，不强杀在跑写者）`);
   }
 
   /**
@@ -177,7 +273,7 @@ export class EdgeTaskCoordinator {
    * 释放浏览器与在跑租约**必须互斥**：绝不把浏览器从一个正在执行的任务底下抽走。冷待机据此拒绝进入。
    */
   hasActiveLease(): boolean {
-    return !!this.active || this.queue.length > 0 || this.quiescing || this.waking.size > 0;
+    return !!this.active || !!this.preemptedPending || this.queue.length > 0 || this.quiescing || this.waking.size > 0 || this.publishInFlight();
   }
 
   release(payload: EdgeTaskReleasePayload): void {
@@ -201,7 +297,16 @@ export class EdgeTaskCoordinator {
   /** 当前业务命令是否拥有页面写权。普通浏览仅在协调器完全空闲时允许。 */
   canExecute(taskId?: string): boolean {
     if (!this.canAcquire()) return false;
-    if (this.active) return !!taskId && this.active.payload.taskId === taskId;
+    if (this.active) {
+      // 在途发布写是**独立于租约的第二写者**：若在跑租约本身不是发布任务，它的浏览命令绝不能在发布在途时
+      // 导航走发布页（治 5.9 假成功；publishInFlight 闸此前只覆盖「无 active」分支，active 持有者会绕过它——
+      // 复核 wf_3a8e8996 finding A 的防御纵深）。发布任务自己的命令不受此限（它就是那个写者）。
+      if (this.publishInFlight() && this.active.payload.kind !== 'publish') return false;
+      return !!taskId && this.active.payload.taskId === taskId;
+    }
+    // 在途发布写（租约已释放但 dispatch/后置校验仍在跑）：普通浏览命令必须让位，绝不导航走发布页
+    // （治 5.9「已离开发布页 = 发布成功」假成功——抢占方 / 恢复导航会替发布把页面导走）。
+    if (this.publishInFlight()) return false;
     if (this.quiescing || this.queue.length > 0 || this.browseBlocked) return false;
     return !taskId;
   }
@@ -217,7 +322,7 @@ export class EdgeTaskCoordinator {
   }
 
   get blocksBrowse(): boolean {
-    return this.browseBlocked || this.quiescing || !!this.active || this.queue.length > 0;
+    return this.browseBlocked || this.quiescing || !!this.active || !!this.preemptedPending || this.queue.length > 0 || this.publishInFlight();
   }
 
   /** CDP 软重连已完成后的恢复钩子；只在没有既有任务 owner 时解除此前让位留下的 browse 冻结。 */
@@ -230,8 +335,10 @@ export class EdgeTaskCoordinator {
   /** 云端连接/进程关闭时本地立即作废全部旧所有权。 */
   reset(reason = 'connection_reset'): void {
     if (this.active?.timer) clearTimeout(this.active.timer);
+    if (this.preemptedPending?.timer) clearTimeout(this.preemptedPending.timer);
     const activeId = this.active?.payload.taskId;
     this.active = undefined;
+    this.preemptedPending = undefined;
     for (const queued of this.queue) this.clearAcquireExpiry(queued);
     this.queue = [];
     this.quiescing = false;
@@ -288,30 +395,57 @@ export class EdgeTaskCoordinator {
   private async drain(): Promise<void> {
     if (this.active || this.quiescing) return;
     if (!this.canAcquire()) {
+      // 抢占途中控制面就没了、写者取消尚未确认 → 被抢占任务按 cdp_unhealthy 收敛（绝不谎称干净让位）。
+      this.settlePreempted('cdp_unhealthy');
       this.rejectQueuedForUnhealthyCdp();
       // 浏览器控制未恢复时绝不能为了清理租约而调用 resumeAfterTask；那会再次触碰不可信的页面。
       this.browseBlocked = false;
       return;
     }
-    if (this.queue.length === 0) {
+    // preemptedPending 存在＝抢占中：即便队列此刻空了，也必须 quiesce 取消被抢占写者并 settle，绝不直接恢复浏览。
+    if (this.queue.length === 0 && !this.preemptedPending) {
       await this.resumeBrowseIfIdle();
       return;
     }
     this.quiescing = true;
     let cancelled = 0;
     try {
-      cancelled = await this.browse.quiesceForTask();
+      cancelled = await this.quiesceAllWriters();
     } catch (err) {
-      this.logger(`[task] quiesce failed: ${err instanceof Error ? err.message : String(err)}`);
+      // 交接未收敛 = 某个页面写者（browse 真写段 / 在途发布）超预算，页面可能仍在被它改写。
+      // **绝不能吞掉异常后继续往下授予**（既有隐患：catch 只打日志、随即照常 acquire ⇒ 在一个仍在
+      // 写页面的孤儿动作之上授权，两个写者交错打进同一个页面）。诚实终结排队申请、按结构判据收敛。
+      this.quiescing = false;
+      // 结构判据（memory failure-must-be-structural）：先分清「控制面丢失」还是「写者收到取消仍不停手」。
+      if (!this.canAcquire()) {
+        this.logger(`[task] quiesce failed 且控制面已失: ${err instanceof Error ? err.message : String(err)} → cdp_unhealthy`);
+        // 被抢占写者取消未确认 + 控制丢失 → cdp_unhealthy（绝不谎称干净让位）。
+        this.settlePreempted('cdp_unhealthy');
+        this.rejectQueuedForUnhealthyCdp();
+        // 控制面丢失时 canExecute 的 !canAcquire 闸已封住浏览；解冻等 control_recovered。
+        this.browseBlocked = false;
+      } else {
+        this.logger(`[task] quiesce failed（写者收到取消仍不停手）: ${err instanceof Error ? err.message : String(err)} → 判控制面故障 yield_timeout`);
+        // 被抢占写者**收到取消仍不停手** → yield_timeout，绝不当「干净让位可重投」（否则云端重投一个未停的发布 = 双发。BLOCKER）。
+        this.settlePreempted('yield_timeout');
+        this.rejectQueuedForControlPlaneFault();
+        // **绝不解除 browseBlocked**：写者仍在改页面，普通浏览必须保持冻结，直到运营重启客户端 / 云端重连 reset
+        // （§5.5/§10.4；复核 wf_3a8e8996 finding #1——yield_timeout 分支此前唯一的闸被误清、浏览会与失控写者交错）。
+      }
+      return;
     } finally {
       this.quiescing = false;
     }
     if (!this.canAcquire()) {
+      // quiesce 成功 = 被抢占写者已确认停 → 干净让位（可重投）；随后控制丢失只影响 challenger。
+      this.settlePreempted('preempted_by_task');
       this.rejectQueuedForUnhealthyCdp();
       // 等 cdp.control_recovered 通过 resumeAfterControlRecovery() 再恢复浏览。
       this.browseBlocked = false;
       return;
     }
+    // quiesce 成功 = 被抢占写者已确认停 → 此刻才宣布干净让位（preempted_by_task，可重投、不进 terminal）。
+    this.settlePreempted('preempted_by_task');
     // 高优先级申请可能在 quiesce 等待期间到达；到安全边界后重新选队头。
     const next = this.pickNext();
     if (!next) {
@@ -356,8 +490,28 @@ export class EdgeTaskCoordinator {
     void this.drain();
   }
 
+  /**
+   * 结算被抢占任务（preemptedPending）的终态——**只在 quiesce 结果已知后调用**（复核 wf_3a8e8996 BLOCKER 修法）：
+   *  - `preempted_by_task`：quiesce 已确认写者停手 → 干净让位、可重投、**绝不进 terminal**（否则云端重投的同
+   *    taskId acquire 被当 duplicate 摘掉、白抢占）；
+   *  - `yield_timeout` / `cdp_unhealthy`：写者未确认停 / 控制面丢失 → 故障终态、进 terminal，绝不谎称干净让位
+   *    （否则云端会重投一个写者仍在跑的发布 = 不可逆双发）。
+   * 无 preemptedPending（普通非抢占 drain）时为 no-op。
+   */
+  private settlePreempted(reason: EdgeTaskReleasedPayload['reason']): void {
+    const lease = this.preemptedPending;
+    if (!lease) return;
+    this.preemptedPending = undefined;
+    if (reason !== 'preempted_by_task') this.rememberTerminal(lease.payload.taskId, reason);
+    this.onReleased({ taskId: lease.payload.taskId, reason });
+    this.logger(`[task] preempted-settle taskId=${lease.payload.taskId} reason=${reason}`);
+  }
+
   private async resumeBrowseIfIdle(): Promise<void> {
     if (this.active || this.quiescing || this.queue.length > 0 || !this.browseBlocked) return;
+    // 在途发布写未收敛前绝不恢复浏览导航（否则恢复的导航把发布页导走 → 发布后置校验误判成功，5.9）。
+    // 发布 dispatch 收敛后由 notifyPublishSettled() 再触发一次本方法。
+    if (this.publishInFlight()) return;
     try {
       await this.browse.resumeAfterTask();
     } catch (err) {
@@ -365,6 +519,40 @@ export class EdgeTaskCoordinator {
     }
     // 恢复导航/重报期间继续封住迟到的旧普通命令；只有恢复收敛且没有新接管申请才真正放行。
     if (!this.active && !this.quiescing && this.queue.length === 0) this.browseBlocked = false;
+  }
+
+  /** 在途发布写收敛后调用（5.3/5.9 配套）：若协调器空闲则恢复浏览，避免发布 dispatch 结束后浏览永久冻结。 */
+  notifyPublishSettled(): void {
+    void this.resumeBrowseIfIdle();
+  }
+
+  private publishInFlight(): boolean {
+    return this.writers?.publishInFlight?.() === true;
+  }
+
+  /**
+   * 让位 / 抢占时取消**全部**在跑页面写者并有界等待收敛：browse 让路 + 取消在途发布（真取消，5.3）。
+   * 用 `allSettled` 保证两个写者的取消**都被下发**（一个抛出不能让另一个漏取消）；任一未收敛即抛出 →
+   * drain 据此判控制面故障。返回被取消的命令 / 发布总数。
+   */
+  private async quiesceAllWriters(): Promise<number> {
+    // 两个写者的取消**都用 `Promise.resolve().then` 包一层再进 allSettled**：即便某个探针**同步抛出**（契约是
+    // 返回 Promise、但坏实现可能 sync-throw），也转成 rejection 被 allSettled 捕获，绝不因一个漏掉另一个的取消
+    // （复核 wf_3a8e8996 low finding——先前 cancelPublish() 在构造 ternary 时同步抛出会跳过 browse 让路）。
+    const browseP = Promise.resolve().then(() => this.browse.quiesceForTask());
+    // 仅在**确有在途发布写**时下发发布取消——无在途发布时不空跑 cancelPublish（普通首次让位路径不触发）。
+    const publishP = this.publishInFlight() && this.writers?.cancelPublish
+      ? Promise.resolve().then(() => this.writers!.cancelPublish!())
+      : Promise.resolve(0);
+    const results = await Promise.allSettled([browseP, publishP]);
+    let cancelled = 0;
+    let firstError: unknown;
+    for (const r of results) {
+      if (r.status === 'fulfilled') cancelled += r.value ?? 0;
+      else if (firstError === undefined) firstError = r.reason;
+    }
+    if (firstError !== undefined) throw firstError;
+    return cancelled;
   }
 
   private rememberTerminal(taskId: string, reason: EdgeTaskReleasedPayload['reason']): void {
@@ -383,6 +571,26 @@ export class EdgeTaskCoordinator {
       this.rememberTerminal(entry.payload.taskId, 'cdp_unhealthy');
       this.onReleased({ taskId: entry.payload.taskId, reason: 'cdp_unhealthy' });
       this.logger(`[task] rejected taskId=${entry.payload.taskId} reason=cdp_unhealthy`);
+    }
+  }
+
+  /**
+   * 让位交接未在预算内收敛：某个页面写者**收到取消后仍不停手**——本质是控制面故障（§5.5 语义判据，
+   * 而非算术边界；参照 memory failure-must-be-structural）。MUST NOT 授予（绝不在仍在写页面的动作头上
+   * 再放一个人进来）、MUST NOT 谎称已收敛。
+   *
+   * 终态用 `yield_timeout`（change lease-strict-preemption 6.1 新增）——它明确指向**人工动作「请运营重启
+   * 浏览器客户端」**（§10.4），不是自愈、也不是「一个动作跑太久」的良性 expired。控制面**丢失**（CDP 不可
+   * 用）是另一回事，由调用方在 catch 里先分流到 `rejectQueuedForUnhealthyCdp`（cdp_unhealthy）。
+   */
+  private rejectQueuedForControlPlaneFault(): void {
+    const queued = this.queue;
+    this.queue = [];
+    for (const entry of queued) {
+      this.clearAcquireExpiry(entry);
+      this.rememberTerminal(entry.payload.taskId, 'yield_timeout');
+      this.onReleased({ taskId: entry.payload.taskId, reason: 'yield_timeout' });
+      this.logger(`[task] rejected taskId=${entry.payload.taskId} reason=yield_timeout（写者收到取消仍不停手 → 请运营重启浏览器客户端）`);
     }
   }
 }

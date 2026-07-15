@@ -19,6 +19,7 @@ import { extractInteractiveElements } from './extractor.js';
 import { DEFAULT_THRESHOLDS, matchAnchor, type MatchThresholds } from './matcher.js';
 import type { ElementSelector } from './selector.js';
 import { DEFAULT_GUARD_RULES, scanInterrupts, type GuardRule } from './guard.js';
+import { rethrowIfTakeover, type TakeoverCtx } from '../execution/takeover.js';
 
 /** 提供当前 DOM 根（真实边缘下由 CDP 快照，单测下为 jsdom document） */
 export interface DomProvider {
@@ -44,6 +45,17 @@ export interface EngineOptions {
   maxGuardRounds?: number;
   thresholds?: MatchThresholds;
   guardRules?: GuardRule[];
+  /**
+   * 单次云端选元素上限（change lease-strict-preemption 4.3）。缺省沿用选择器自己的默认值（200s）。
+   *
+   * MUST > 云端单次模型调用天花板 180s（见 client/cloud-selector.ts 的不变量）：压小了会把一次
+   * **尚在进行的合法 thinking 选择**误判成 llm_error，而引擎见 llm_error 立刻升级上报、不再重试
+   * ⇒ 一条本可成功的发布指令被判失败。
+   *
+   * 取消信号 MUST NOT 放这里：EngineOptions 在指令运行时是**构造期字段**，塞进来就退化成跨命令
+   * 共享的状态（布尔冻结标志那个坑的换皮版）。取消按调用传 TakeoverCtx。
+   */
+  selectTimeoutMs?: number;
 }
 
 export interface EngineDeps {
@@ -82,6 +94,7 @@ export class LocatingEngine {
   private readonly maxGuardRounds: number;
   private readonly thresholds: MatchThresholds;
   private readonly guardRules: GuardRule[];
+  private readonly selectTimeoutMs?: number;
 
   constructor(
     private readonly deps: EngineDeps,
@@ -91,9 +104,18 @@ export class LocatingEngine {
     this.maxGuardRounds = Math.max(1, options.maxGuardRounds ?? 2);
     this.thresholds = options.thresholds ?? DEFAULT_THRESHOLDS;
     this.guardRules = options.guardRules ?? DEFAULT_GUARD_RULES;
+    this.selectTimeoutMs = options.selectTimeoutMs;
   }
 
-  async resolveAndAct(req: ActionRequest): Promise<ActionResult> {
+  /**
+   * @param takeover 可选的取消上下文（change lease-strict-preemption 4.3）。**接管只由异常表达**
+   *        （ActionResult.outcome 绝不新增 'preempted'——该联合在协议里有一份逐字重复，是热点文件）。
+   *        取消点**恰好 2 处**：进守卫之前、每轮重试边界。`executor.execute` 返回到 `validator.validate`
+   *        返回之间**一格都不能加**——那会把一次可能已经生效的写当成没发生，且造成「写了页面、缓存不
+   *        记账」的漂移。
+   */
+  async resolveAndAct(req: ActionRequest, takeover?: TakeoverCtx): Promise<ActionResult> {
+    takeover?.checkpoint(); // 安全点 ①：进守卫之前（守卫会关浮层 = 页面写）
     // ---- 守卫层：清理偶现干扰 ----
     const guard = await this.handleGuards();
     if (!guard.ok) {
@@ -114,6 +136,8 @@ export class LocatingEngine {
 
     while (attempts < this.maxAttempts) {
       attempts++;
+      // 安全点 ②：重试边界——上一轮的写要么已被后置校验、要么根本没发出。
+      takeover?.checkpoint();
       const root = await this.deps.dom.getRoot();
 
       let source: ResolutionSource | undefined;
@@ -141,7 +165,13 @@ export class LocatingEngine {
         const els = extractInteractiveElements(root, scope, {
           scopeFallback: 'root',
         });
-        const sel = await this.deps.selector.select(req.goal, els);
+        // 选元素是一段**纯等待**（平台侧零副作用）：接管时就地作废在飞请求。选择器 MUST 让
+        // TaskTakeoverError 原样穿出——吞成 llm_error 会走下面的 escalated 分支，把一次「让路」
+        // 谎报成「模型不可用、已升级」。
+        const sel = await this.deps.selector.select(req.goal, els, {
+          signal: takeover?.signal,
+          timeoutMs: this.selectTimeoutMs,
+        });
         if (sel.reason.startsWith('llm_error')) {
           return {
             ok: false,
@@ -173,12 +203,15 @@ export class LocatingEngine {
         await this.deps.executor.execute(req.op, element, req.value);
         executedAtLeastOnce = true;
       } catch (err) {
+        rethrowIfTakeover(err); // 被接管 ≠ 执行失败：绝不降级成 exec_error 再重试
         lastReason = `exec_error:${(err as Error).message}`;
         if (source === 'cache') forceLlm = true;
         else this.deps.cache.dropStaged(req.actionId);
         continue;
       }
 
+      // 🔴 从这里到 validate 返回，**MUST NOT 取消**：页面已经被写、结果尚未校验，
+      //    中止 = 把一次可能已生效的写当成没发生（且缓存记账全在校验之后，会一并漂移）。
       // ---- 校验层（第一道闸：后置校验） ----
       const rootAfter = await this.deps.dom.getRoot();
       const valid = await this.deps.validator.validate(req, rootAfter);
@@ -246,6 +279,7 @@ export class LocatingEngine {
         try {
           await this.deps.executor.execute('click', hit.element);
         } catch (err) {
+          rethrowIfTakeover(err); // 被接管 ≠ 关不掉浮层：绝不降级成 guard_blocked
           return { ok: false, reason: `dismiss_failed:${hit.ruleId}:${(err as Error).message}` };
         }
       }

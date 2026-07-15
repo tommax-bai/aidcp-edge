@@ -167,7 +167,13 @@ async function startAndPush(sess: BrowseSession, commands: Envelope[]): Promise<
 
 // ======== executeComment（发评论）测试：绝不静默假成功 ========
 
-function commentHarness(opts: { editorError?: boolean; verify?: { cleared: boolean; ownRow: boolean }; pageUrl?: string }): Harness {
+function commentHarness(opts: {
+  editorError?: boolean;
+  verify?: { cleared: boolean; ownRow: boolean };
+  pageUrl?: string;
+  /** 清场后仍有残文（真脏页）：change lease-strict-preemption task 3.2。 */
+  clearResidual?: string;
+}): Harness {
   const h = makeHarness();
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
@@ -175,6 +181,12 @@ function commentHarness(opts: { editorError?: boolean; verify?: { cleared: boole
       const expr = String(params.expression ?? '');
       if (expr.includes('ownRow')) {
         return { result: { value: JSON.stringify(opts.verify ?? { cleared: true, ownRow: true }) } } as never;
+      }
+      // 清场前置（必须排在 content-textarea 之前——两条 expr 都含该选择器）。
+      if (expr.includes('residual')) {
+        return {
+          result: { value: JSON.stringify({ found: !opts.editorError, residual: opts.clearResidual ?? '' }) },
+        } as never;
       }
       if (expr.includes('content-textarea')) {
         return { result: { value: opts.editorError ? '{"error":"no-editor"}' : '{"x":200,"y":200}' } } as never;
@@ -221,7 +233,7 @@ test('executeComment: 找不到编辑器 → ok:false reason no_target（不假�
   assert.equal(c!.reason, 'no_target');
 });
 
-test('executeComment: 提交后未确认生效 → ok:false reason state_unchanged（不假成功）', async () => {
+test('executeComment: 提交后未确认生效 → ok:false reason submitted_unconfirmed（已提交、结果未知，绝不谎报未提交）', async () => {
   const h = commentHarness({ verify: { cleared: false, ownRow: false } });
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
@@ -231,7 +243,21 @@ test('executeComment: 提交后未确认生效 → ok:false reason state_unchang
   const c = h.completedActions.find((a) => a.action === 'comment');
   assert.ok(c);
   assert.equal(c!.ok, false);
-  assert.equal(c!.reason, 'state_unchanged');
+  // 提交动作已经派发出去了：这条评论可能真已发出。谎报「未提交」会让上游重试 ⇒ 重复评论。
+  assert.equal(c!.reason, 'submitted_unconfirmed');
+});
+
+test('executeComment 清场：编辑器里有残文且清不掉 → 诚实 editor_not_clean，绝不拼接发出（task 3.2）', async () => {
+  const h = commentHarness({ clearResidual: '上一条被抢占时留下的半截评论' });
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '这一条' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const c = h.completedActions.find((a) => a.action === 'comment');
+  assert.ok(c);
+  assert.equal(c!.ok, false);
+  assert.equal(c!.reason, 'editor_not_clean');
 });
 
 // keep-open 发前就地核对（change comment-keep-open-through-approval，取舍2）
@@ -2168,4 +2194,254 @@ test('冷待机：在途动作卡住时 closeAndWait 有界超时并如实返回
 
   const drained = await sess.closeAndWait(60);
   assert.equal(drained, false, '排空超时必须如实返回 false，由调用方诚实告警后照常关浏览器');
+});
+
+// ======== 安全取消点 / 任务接管让路（change lease-strict-preemption）========
+//
+// 死锁背景：浏览命令停在阻断浮层闸里（executeCommand 的第一句，任何页面写之前），交接无界地等它
+// 「跑完」，而它等的验证码只有这次交接要授予的 system_recovery 协助任务才能点掉 → 闭环死锁。
+// 修法：纯等待 = 安全取消点，被接管即当场让路（零页面副作用 + 诚实回执 + 不重放）。
+
+/**
+ * 让路用例专用 opts：sleep 必须让出**宏任务**。
+ * 别的用例用「立即 resolve」的 sleep 桩，但浮层闸是个轮询循环——sleep 立即 resolve 会让它退化成纯微任务
+ * 忙循环，把事件循环饿死，用例自己的 setTimeout 永远排不上（是测试桩的坑，不是产品代码的）。
+ * armDwellBlock 置真后，超长停留（>60s；本用例下发 90s 预算）挂起不返回，用来验证「停留被接管唤醒」这条路径。
+ * 阈值取 60s 只为挡住停留本身——别的等待（开笔记预算 30s、等卡 5s）都在其下；误挡会让用例假失败。
+ */
+function yieldingOpts(ctl: { armDwellBlock?: boolean } = {}) {
+  return {
+    random: () => 0.99,
+    sleep: (ms: number) =>
+      ctl.armDwellBlock && ms > 60_000
+        ? new Promise<void>(() => {}) // 永不自然到时：只能被接管唤醒
+        : new Promise<void>((r) => { setTimeout(r, 1); }),
+    logger: () => {},
+    loginGatePollMs: 5,
+  };
+}
+
+test('让路: 命令停在阻断浮层闸时被接管 → 交接立即收敛、零页面写、回诚实失败回执', async () => {
+  const h = makeHarness();
+  let scrolled = 0;
+  h.deps.scroller = { ...h.deps.scroller, scrollNext: async () => { scrolled++; } };
+  // 首屏放行一次（loop 启动），之后恒 captcha：page.scroll 将永久停在浮层闸里。
+  let n = 0;
+  h.deps.overlayMonitor = fakeMonitor({ stateSeq: () => (++n > 1 ? 'captcha' : 'none') });
+  const sess = new BrowseSession(h.deps, yieldingOpts());
+  const running = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  await sess.onCloudCommand(makeEnvelope('page.scroll', 'stuck-scroll', 0, { reason: 'active' }));
+  await new Promise((r) => setTimeout(r, 10)); // 让它真正进到浮层闸里等着
+
+  // 关键断言：交接必须立即收敛——绝不等那个永不消失的验证码。
+  const cancelled = await sess.quiesceForTask(1_000);
+  assert.equal(cancelled, 0, '没有未开始的旧命令');
+
+  const preempted = h.completedActions.filter((a) => a.reason === 'preempted_by_task');
+  assert.equal(preempted.length, 1, '被接管的命令必须回恰好一条诚实失败回执（MUST NOT 静默丢弃）');
+  assert.equal(preempted[0].ok, false, '被接管 = 失败，绝不假装成功');
+  assert.equal(preempted[0].action, 'page.scroll', '回执动作名 = 协议消息名（边缘不建映射表）');
+  assert.equal(scrolled, 0, '接管信号之后 MUST 记录到零次页面改写调用');
+
+  sess.stop();
+  await running.catch(() => {});
+});
+
+test('让路: 命令停在翻页前停留时被接管 → 交接毫秒级收敛、零页面写（长停留预算不得撑爆受理预算）', async () => {
+  const h = makeHarness();
+  let scrolled = 0;
+  h.deps.scroller = { ...h.deps.scroller, scrollNext: async () => { scrolled++; } };
+  // 停留阻塞只在启动完成后才武装——否则启动期的首屏扫描等待也会被挡住、start() 永不返回。
+  const ctl = { armDwellBlock: false };
+  const sess = new BrowseSession(h.deps, yieldingOpts(ctl));
+  const running = sess.start();
+  await new Promise((r) => setTimeout(r, 30));
+
+  // 翻页前的「看完本批新卡」停留：下发 90s 预算，命令会停在停留里、尚未滚动。
+  ctl.armDwellBlock = true;
+  await sess.onCloudCommand(makeEnvelope('page.scroll', 'dwelling-scroll', 0, { reason: 'active', dwellMs: 90_000 }));
+  await new Promise((r) => setTimeout(r, 30));
+
+  const t0 = Date.now();
+  await sess.quiesceForTask(2_000);
+  assert.ok(Date.now() - t0 < 1_000, '交接必须毫秒级收敛，绝不等停留跑满');
+  assert.equal(scrolled, 0, '停留是安全取消点：让路时一次页面写都不许发生');
+  assert.ok(
+    h.completedActions.some((a) => a.reason === 'preempted_by_task'),
+    '停在停留里的命令同样要回诚实回执',
+  );
+
+  ctl.armDwellBlock = false;
+  sess.stop();
+  await running.catch(() => {});
+});
+
+test('让路判据是接管世代号，不是「浏览已冻结」标志：持权任务自己的命令绝不自尽', async () => {
+  const h = makeHarness();
+  let scrolled = 0;
+  h.deps.scroller = { ...h.deps.scroller, scrollNext: async () => { scrolled++; } };
+  const sess = new BrowseSession(h.deps, yieldingOpts());
+  const running = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+
+  // 交接完成 → taskBlocked=true（冻结普通浏览），世代号推进到 N。
+  await sess.quiesceForTask(1_000);
+
+  // 独占任务自己的命令（带 taskId）跑在冻结期内：世代号仍是 N ⇒ MUST 正常执行。
+  // 若判据误用 taskBlocked 标志，这条命令会在自己的第一个安全取消点当场自尽。
+  await sess.onCloudCommand({
+    ...makeEnvelope('page.scroll', 'task-owned-scroll', 0, { reason: 'task' }),
+    payload: { reason: 'task', taskId: 'T1' },
+  } as unknown as Envelope);
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.equal(scrolled, 1, '持权任务自己的命令 MUST 正常执行（不因冻结标志自尽）');
+  assert.equal(
+    h.completedActions.some((a) => a.reason === 'preempted_by_task'),
+    false,
+    '持权任务的命令绝不能被判成「被接管」',
+  );
+
+  sess.stop();
+  await running.catch(() => {});
+});
+
+test('交接有界且不撒谎: 真写段永不收敛 → quiesce 抛出（MUST NOT 谎称已收敛）', async () => {
+  const h = makeHarness();
+  // 注入一个永不返回的真实页面写（滚动），它在浮层闸之后、属于真写段。
+  h.deps.scroller = { ...h.deps.scroller, scrollNext: () => new Promise<void>(() => {}) };
+  const sess = new BrowseSession(h.deps, yieldingOpts());
+  const running = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  await sess.onCloudCommand(makeEnvelope('page.scroll', 'never-ends', 0, { reason: 'active' }));
+  await new Promise((r) => setTimeout(r, 10));
+
+  await assert.rejects(
+    () => sess.quiesceForTask(50),
+    (err: Error) => err.name === 'BrowseQuiesceTimeoutError',
+    '真写段未在预算内收敛 MUST 抛出，绝不谎称已收敛',
+  );
+
+  // 注：这里刻意**不** await running —— 那条滚动被注入成永不返回，主循环也就永远走不出这条命令。
+  // 这正是本用例要证明的东西：真写段确实卡死了，而交接必须有界地抛出、绝不陪它一起卡死。
+  sess.stop();
+  void running.catch(() => {});
+});
+
+// ======== 评论流的取消点补齐（change lease-strict-preemption 第 4 节）========
+//
+// 评论是唯一「一条命令里跨越安全区与禁区」的浏览动作：逐字输入期间的每个字符间隙都是安全取消点
+// （下一个字符的 CDP 写尚未发出），而提交键一旦点下就进入禁区（已提交、结果未知）。两条用例各钉一端。
+
+test('取消点: 评论逐字输入中途被接管 → 立刻停手 + 清场 + 诚实回 preempted_by_task（半截评论绝不留在框里）', async () => {
+  const h = commentHarness({ verify: { cleared: true, ownRow: true } });
+  const base = h.deps.cdp.send.bind(h.deps.cdp);
+  const body = '这条评论刚打到一半就被独占任务接管了';
+  // 逐字输入一旦开始，字符间隙的等待就**只能被接管唤醒**（永不自然到时）：接管若不唤醒可打断 sleep，
+  // 本用例直接挂死超时——绝不靠真等墙钟把它蒙混过去。清场脚本发出后解除，让停止路径能正常收尾。
+  const ctl = { typingArmed: false };
+  let typed = 0;
+  let editorCleared = 0;
+  let signalTyping!: () => void;
+  const typingStarted = new Promise<void>((resolve) => { signalTyping = resolve; });
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Input.insertText') {
+        typed++;
+        ctl.typingArmed = true;
+        signalTyping();
+      }
+      // 让位前的清场脚本（CLEAR_COMMENT_EDITOR_JS，唯一 `return 'ok'` 的那条）；2b 的清场前置返回 JSON，不会误计。
+      if (method === 'Runtime.evaluate' && String(params.expression ?? '').includes("return 'ok'")) {
+        editorCleared++;
+        ctl.typingArmed = false;
+      }
+      return base(method, params);
+    },
+  };
+  const sess = new BrowseSession(h.deps, {
+    random: () => 0.99,
+    sleep: () => (ctl.typingArmed ? new Promise<void>(() => {}) : new Promise<void>((r) => { setTimeout(r, 1); })),
+    logger: () => {},
+  });
+  const running = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  await sess.onCloudCommand(makeEnvelope('interaction.comment', 'c-mid-typing', 0, { noteId: 'n1', text: body }));
+  await typingStarted;
+  await new Promise((r) => setTimeout(r, 10)); // 让它真正停在「下一个字符前」的那个等待里
+
+  const t0 = Date.now();
+  await sess.quiesceForTask(2_000);
+  assert.ok(Date.now() - t0 < 1_000, '字符间隙是安全取消点：交接必须毫秒级收敛，绝不等这条评论敲完');
+  assert.ok(typed >= 1 && typed < Array.from(body).length, `必须真的停在打字中途（已打 ${typed} / 共 ${Array.from(body).length} 字）`);
+  assert.equal(editorCleared, 1, '让位前 MUST 清场：半截评论留在框里，下一条评论会被清场闸判 editor_not_clean（清不掉时更会拼接发出）');
+  assert.equal(h.completedActions.length, 1, '被接管的评论命令只回一条回执（MUST NOT 静默丢弃、也不重复上报）');
+  assert.deepEqual(
+    h.completedActions[0],
+    { action: 'interaction.comment', ok: false, reason: 'preempted_by_task' },
+    '被接管 = 诚实失败回执，绝不降级成中文 message / engine_error 之类的别的分类',
+  );
+
+  sess.stop();
+  await running.catch(() => {});
+});
+
+test('🔴 禁区: 提交键点下之后被接管 → 后置校验照跑完，回 ok / submitted_unconfirmed，绝不回 preempted、绝不重发', async () => {
+  // 提交动作已经派发出去了：这条评论可能真已发出。谎报「未提交」会让上游重试 ⇒ 重复评论。
+  const h = commentHarness({ verify: { cleared: true, ownRow: true } });
+  const base = h.deps.cdp.send.bind(h.deps.cdp);
+  let submitLocated = false;
+  let submitPresses = 0;
+  let verifyProbes = 0;
+  let signalSubmitClicked!: () => void;
+  const submitClicked = new Promise<void>((resolve) => { signalSubmitClicked = resolve; });
+  let armTakeover!: () => void;
+  const takeoverArmed = new Promise<void>((resolve) => { armTakeover = resolve; });
+  h.deps.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params.expression ?? '');
+        if (expr.includes('btn.submit')) submitLocated = true;
+        if (expr.includes('ownRow')) {
+          verifyProbes++;
+          await takeoverArmed; // 后置校验只在接管已生效后才作答 ⇒ 用例钉的确实是「禁区里被接管」这一刻
+        }
+      }
+      if (method === 'Input.dispatchMouseEvent' && submitLocated) {
+        if (params.type === 'mousePressed') submitPresses++;
+        if (params.type === 'mouseReleased') signalSubmitClicked();
+      }
+      return base(method, params);
+    },
+  };
+  const sess = new BrowseSession(h.deps, noOpts());
+  const running = sess.start();
+  await new Promise((r) => setTimeout(r, 10));
+  await sess.onCloudCommand(makeEnvelope('interaction.comment', 'c-submitted', 0, { noteId: 'n1', text: '提交之后才被接管' }));
+  await submitClicked;
+
+  const quiesced = sess.quiesceForTask(2_000);
+  armTakeover(); // 世代号已在 quiesceForTask 的同步段推进 ⇒ 此后的后置校验跑在「已被接管」态里
+  await quiesced;
+
+  assert.equal(submitPresses, 1, '提交只许点一次：接管绝不能让这条评论被重发');
+  assert.ok(verifyProbes >= 1, '提交后的后置校验 MUST 跑完（禁区里不许取消）');
+  const c = h.completedActions.find((a) => a.action === 'comment');
+  assert.ok(c, '提交后被接管仍 MUST 回一条评论结果回执');
+  assert.notEqual(c!.reason, 'preempted_by_task', '提交已派发：谎报「未提交」会让上游重试 ⇒ 重复评论');
+  assert.equal(
+    h.completedActions.some((a) => a.reason === 'preempted_by_task'),
+    false,
+    '禁区里的取消点 = 把一次可能已生效的写当成没发生，绝不允许',
+  );
+  // 只准落在「已确认生效」或「已提交、结果未知」两态之一——本用例 MUST NOT 断言必须是成功那一态
+  // （那等于给「接管后后置校验回成功」背书 = 假成功的口子）。
+  assert.ok(
+    c!.ok === true || c!.reason === 'submitted_unconfirmed',
+    `提交后的回执只能是 ok 或 submitted_unconfirmed，实际 ${JSON.stringify(c)}`,
+  );
+
+  sess.stop();
+  await running.catch(() => {});
 });

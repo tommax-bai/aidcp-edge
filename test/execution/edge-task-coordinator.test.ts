@@ -348,3 +348,297 @@ describe('EdgeTaskCoordinator：把调用方的 acquire 死线传给外壳', () 
     assert.equal(seen[0], 500, '预算 clamp 到 0：死线 = 此刻，外壳据此立刻诚实作答');
   });
 });
+
+// ---------------------------------------------------------------------------
+// 抢占核心（change lease-strict-preemption 5.2 写者注册表探针 / 5.4 严格抢占 + 提交窗口豁免 /
+// 5.5 让位超时 = 控制面故障 / 5.9 在途发布写让位）。
+//
+// 关键安全属性：一切抢占行为**由可选探针门控**。探针未接线（无 writers）时 inCommitWindow 永不 === false
+// → 绝不抢占 → 与抢占前逐字同行为（休眠，待 5.1/5.3 接真探针才生效）。
+// ---------------------------------------------------------------------------
+describe('EdgeTaskCoordinator：抢占核心', () => {
+  it('5.4 严格高档位抢占低档位在跑任务：被抢占回 preempted_by_task 且可重投、challenger 被授予', async () => {
+    const acquired: EdgeTaskAcquiredPayload[] = [];
+    const released: EdgeTaskReleasedPayload[] = [];
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      writers: { inCommitWindow: () => false }, // 确认不在提交窗口 → 可抢占
+      onAcquired: (p) => acquired.push(p),
+      onReleased: (p) => released.push(p),
+    });
+
+    coordinator.acquire({ taskId: 'auto-pub', kind: 'publish', priority: 'automatic', leaseMs: 60_000 });
+    await tick();
+    assert.deepEqual(acquired.map((a) => a.taskId), ['auto-pub'], '低档发布先拿到租约');
+
+    coordinator.acquire({ taskId: 'human-cmt', kind: 'comment_commit', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    await tick();
+    assert.equal(released.some((r) => r.taskId === 'auto-pub' && r.reason === 'preempted_by_task'), true, '被抢占任务回 preempted_by_task');
+    assert.deepEqual(acquired.map((a) => a.taskId), ['auto-pub', 'human-cmt'], 'challenger 被授予');
+    assert.equal(coordinator.canExecute('human-cmt'), true);
+    assert.equal(coordinator.canExecute('auto-pub'), false, '被抢占任务不再持写权');
+
+    // 被抢占任务由云端事件驱动重投（7.1）——同 taskId 绝不被当 duplicate 摘掉。
+    coordinator.release({ taskId: 'human-cmt', outcome: 'completed' });
+    await tick();
+    coordinator.acquire({ taskId: 'auto-pub', kind: 'publish', priority: 'automatic', leaseMs: 60_000 });
+    await tick();
+    await tick();
+    assert.equal(acquired.filter((a) => a.taskId === 'auto-pub').length, 2, '被抢占任务重投拿回租约');
+    assert.equal(released.some((r) => r.taskId === 'auto-pub' && r.reason === 'duplicate'), false, '重投绝不回 duplicate');
+  });
+
+  it('5.4 同档位不抢占：排队 FIFO', async () => {
+    const acquired: EdgeTaskAcquiredPayload[] = [];
+    const released: EdgeTaskReleasedPayload[] = [];
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      writers: { inCommitWindow: () => false },
+      onAcquired: (p) => acquired.push(p),
+      onReleased: (p) => released.push(p),
+    });
+    coordinator.acquire({ taskId: 'human-1', kind: 'publish', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    coordinator.acquire({ taskId: 'human-2', kind: 'comment_commit', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    await tick();
+    assert.deepEqual(acquired.map((a) => a.taskId), ['human-1'], '同档不抢占：human-2 排队等待');
+    assert.equal(released.some((r) => r.reason === 'preempted_by_task'), false);
+    coordinator.release({ taskId: 'human-1' });
+    await tick();
+    assert.deepEqual(acquired.map((a) => a.taskId), ['human-1', 'human-2'], '在跑任务释放后按 FIFO 授予');
+  });
+
+  it('5.4 低档位不抢高档位：排队等待', async () => {
+    const acquired: EdgeTaskAcquiredPayload[] = [];
+    const released: EdgeTaskReleasedPayload[] = [];
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      writers: { inCommitWindow: () => false },
+      onAcquired: (p) => acquired.push(p),
+      onReleased: (p) => released.push(p),
+    });
+    coordinator.acquire({ taskId: 'human-1', kind: 'comment_commit', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    coordinator.acquire({ taskId: 'auto-1', kind: 'publish', priority: 'automatic', leaseMs: 60_000 });
+    await tick();
+    await tick();
+    assert.deepEqual(acquired.map((a) => a.taskId), ['human-1'], '低档不抢高档：auto-1 排队');
+    assert.equal(released.some((r) => r.reason === 'preempted_by_task'), false);
+  });
+
+  it('5.4 在跑写者处于提交窗口：拒绝抢占、回 window_busy + 剩余预算、不强杀、可重试', async () => {
+    const acquired: EdgeTaskAcquiredPayload[] = [];
+    const released: EdgeTaskReleasedPayload[] = [];
+    let inWindow = true;
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      writers: { inCommitWindow: () => inWindow, commitWindowRemainingMs: () => 4_200 },
+      onAcquired: (p) => acquired.push(p),
+      onReleased: (p) => released.push(p),
+    });
+    coordinator.acquire({ taskId: 'auto-pub', kind: 'publish', priority: 'automatic', leaseMs: 60_000 });
+    await tick();
+    coordinator.acquire({ taskId: 'human-cmt', kind: 'comment_commit', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    await tick();
+    const wb = released.find((r) => r.taskId === 'human-cmt');
+    assert.equal(wb?.reason, 'window_busy', '提交窗口占用 → challenger 回 window_busy');
+    assert.equal(wb?.windowRemainingMs, 4_200, '携带剩余预算，不让抢占者空等');
+    assert.equal(released.some((r) => r.taskId === 'auto-pub'), false, '在跑发布不被强杀');
+    assert.deepEqual(acquired.map((a) => a.taskId), ['auto-pub']);
+    assert.equal(coordinator.canExecute('auto-pub'), true, '在跑发布仍持租约');
+
+    // 窗口关闭后重试成功抢占（window_busy 未进 terminal，绝不被当 duplicate）。
+    inWindow = false;
+    coordinator.acquire({ taskId: 'human-cmt', kind: 'comment_commit', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    await tick();
+    assert.equal(released.some((r) => r.taskId === 'auto-pub' && r.reason === 'preempted_by_task'), true, '窗口关闭后重试抢占成功');
+    assert.deepEqual(acquired.map((a) => a.taskId), ['auto-pub', 'human-cmt']);
+  });
+
+  it('5.3/5.4 抢占取消在途发布写：cancelPublish 仅在确有在途发布时调用、取消数计入授予回执', async () => {
+    const acquired: EdgeTaskAcquiredPayload[] = [];
+    let cancelPublishCalls = 0;
+    let publishing = false; // 发布 dispatch 尚未开跑
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      writers: {
+        inCommitWindow: () => false,
+        publishInFlight: () => publishing,
+        cancelPublish: async () => { cancelPublishCalls++; publishing = false; return 1; },
+      },
+      onAcquired: (p) => acquired.push(p),
+      onReleased: () => {},
+    });
+    coordinator.acquire({ taskId: 'auto-pub', kind: 'publish', priority: 'automatic', leaseMs: 60_000 });
+    await tick();
+    assert.equal(cancelPublishCalls, 0, '首次授予（无在途发布）不空跑 cancelPublish');
+    publishing = true; // 发布 dispatch 开跑
+    coordinator.acquire({ taskId: 'human-cmt', kind: 'comment_commit', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    await tick();
+    assert.equal(cancelPublishCalls, 1, '抢占在途发布时下发一次真取消');
+    const granted = acquired.find((a) => a.taskId === 'human-cmt');
+    assert.equal(granted?.cancelledBrowseCommands, 1, '取消总数计入（browse 0 + publish 1）');
+  });
+
+  it('5.5 让位写者收到取消仍不停手 → yield_timeout（控制面故障，非 expired）', async () => {
+    const released: EdgeTaskReleasedPayload[] = [];
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => { throw new Error('quiesce timeout'); }, resumeAfterTask: async () => {} },
+      canAcquire: () => true,
+      onAcquired: () => assert.fail('未收敛绝不授予'),
+      onReleased: (p) => released.push(p),
+    });
+    coordinator.acquire({ taskId: 'stuck-writer', kind: 'comment_prepare', priority: 'automatic', leaseMs: 60_000 });
+    await tick();
+    await tick();
+    assert.deepEqual(released, [{ taskId: 'stuck-writer', reason: 'yield_timeout' }], '控制面故障 → yield_timeout（请运营重启客户端），绝不 expired');
+    // 复核 wf_3a8e8996 finding #1：yield_timeout 后 browse **保持冻结**——写者收到取消仍在改页面，
+    // 普通浏览绝不能恢复（否则与失控写者交错、后置校验误判导航走的 DOM 为成功）。
+    assert.equal(coordinator.canExecute(), false, 'yield_timeout 后普通浏览仍冻结（写者仍在改页面，待运营重启）');
+    assert.equal(coordinator.blocksBrowse, true, 'yield_timeout 后 blocksBrowse 仍为真');
+  });
+
+  it('5.5 让位期间控制面丢失（CDP 不可用）→ cdp_unhealthy（不误判 yield_timeout）', async () => {
+    const released: EdgeTaskReleasedPayload[] = [];
+    let ready = true;
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => { ready = false; throw new Error('cdp lost mid-quiesce'); }, resumeAfterTask: async () => {} },
+      canAcquire: () => ready,
+      onAcquired: () => assert.fail('控制面丢失绝不授予'),
+      onReleased: (p) => released.push(p),
+    });
+    coordinator.acquire({ taskId: 'lost', kind: 'publish', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    await tick();
+    assert.deepEqual(released, [{ taskId: 'lost', reason: 'cdp_unhealthy' }], 'quiesce 抛出但控制面已失 → cdp_unhealthy 而非 yield_timeout');
+  });
+
+  it('5.9 在途发布写期间普通浏览让位（canExecute/blocksBrowse/hasActiveLease），收敛后放行', () => {
+    let publishing = true;
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      writers: { publishInFlight: () => publishing },
+      onAcquired: () => {},
+      onReleased: () => {},
+    });
+    assert.equal(coordinator.canExecute(), false, '在途发布写时普通浏览命令让位（治「已离开发布页=成功」假成功）');
+    assert.equal(coordinator.blocksBrowse, true);
+    assert.equal(coordinator.hasActiveLease(), true, '在途发布写时不释放浏览器（冷待机据此拒绝）');
+    publishing = false;
+    assert.equal(coordinator.canExecute(), true, '发布收敛后普通浏览放行');
+    assert.equal(coordinator.blocksBrowse, false);
+    assert.equal(coordinator.hasActiveLease(), false);
+  });
+
+  it('5.9 发布 dispatch 结束后 notifyPublishSettled 恢复浏览（不永久冻结）', async () => {
+    let publishing = true;
+    let resumes = 0;
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => { resumes++; } },
+      writers: { publishInFlight: () => publishing },
+      onAcquired: () => {},
+      onReleased: () => {},
+    });
+    coordinator.acquire({ taskId: 'pub', kind: 'publish', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    coordinator.release({ taskId: 'pub' });
+    await tick();
+    assert.equal(resumes, 0, '在途发布写未收敛前绝不恢复浏览');
+    publishing = false;
+    coordinator.notifyPublishSettled();
+    await tick();
+    assert.equal(resumes, 1, '发布收敛后恰恢复一次浏览');
+  });
+
+  it('5.2 探针未接线时抢占休眠：严格高档到达也不抢占（行为与今日逐字一致）', async () => {
+    const acquired: EdgeTaskAcquiredPayload[] = [];
+    const released: EdgeTaskReleasedPayload[] = [];
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      // 无 writers 探针
+      onAcquired: (p) => acquired.push(p),
+      onReleased: (p) => released.push(p),
+    });
+    coordinator.acquire({ taskId: 'auto', kind: 'publish', priority: 'automatic', leaseMs: 60_000 });
+    await tick();
+    coordinator.acquire({ taskId: 'human', kind: 'comment_commit', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    await tick();
+    assert.deepEqual(acquired.map((a) => a.taskId), ['auto'], '探针未接线 → 不抢占，human 排队');
+    assert.equal(released.some((r) => r.reason === 'preempted_by_task' || r.reason === 'window_busy'), false);
+  });
+
+  it('5.4 inCommitWindow 返回 undefined（无法确认）→ 保守不抢占', async () => {
+    const acquired: EdgeTaskAcquiredPayload[] = [];
+    const released: EdgeTaskReleasedPayload[] = [];
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      writers: { inCommitWindow: () => undefined },
+      onAcquired: (p) => acquired.push(p),
+      onReleased: (p) => released.push(p),
+    });
+    coordinator.acquire({ taskId: 'auto', kind: 'publish', priority: 'automatic', leaseMs: 60_000 });
+    await tick();
+    coordinator.acquire({ taskId: 'human', kind: 'comment_commit', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    await tick();
+    assert.deepEqual(acquired.map((a) => a.taskId), ['auto'], '无法确认窗口 → 保守不抢占');
+    assert.equal(released.some((r) => r.reason === 'preempted_by_task'), false);
+  });
+
+  it('BLOCKER 抢占时 cancelPublish 不停手 → 被抢占任务回 yield_timeout（绝非 preempted，防云端重投未停发布=双发）', async () => {
+    // 复核 wf_3a8e8996 BLOCKER：被抢占任务的「干净让位·可重投」终态 MUST 只在写者取消**确认收敛后**才发；
+    // 若 cancelPublish 抛出（写者收到取消仍不停手），被抢占发布 MUST 回 yield_timeout 而非 preempted_by_task，
+    // 否则云端会重投一个可能已提交的发布 → 不可逆双发。
+    const acquired: EdgeTaskAcquiredPayload[] = [];
+    const released: EdgeTaskReleasedPayload[] = [];
+    let publishing = false;
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      canAcquire: () => true,
+      writers: {
+        inCommitWindow: () => false, // 不在提交窗口 → 允许抢占
+        publishInFlight: () => publishing,
+        cancelPublish: async () => { throw new Error('publish writer 收到取消仍不停手'); },
+      },
+      onAcquired: (p) => acquired.push(p),
+      onReleased: (p) => released.push(p),
+    });
+    coordinator.acquire({ taskId: 'auto-pub', kind: 'publish', priority: 'automatic', leaseMs: 60_000 });
+    await tick();
+    assert.deepEqual(acquired.map((a) => a.taskId), ['auto-pub'], '发布先拿到租约（此时无在途发布，grant quiesce 不触发 cancelPublish）');
+    publishing = true; // 发布 dispatch 开跑
+    coordinator.acquire({ taskId: 'human-cmt', kind: 'comment_commit', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    await tick();
+    const pub = released.find((r) => r.taskId === 'auto-pub');
+    assert.equal(pub?.reason, 'yield_timeout', '取消不收敛 → 被抢占发布回 yield_timeout（控制面故障），绝不谎称干净让位');
+    assert.equal(released.some((r) => r.taskId === 'auto-pub' && r.reason === 'preempted_by_task'), false, '绝不 preempted_by_task（否则云端重投 = 双发）');
+    assert.equal(released.find((r) => r.taskId === 'human-cmt')?.reason, 'yield_timeout', '控制面故障整队回收：challenger 也 yield_timeout');
+    assert.equal(acquired.some((a) => a.taskId === 'human-cmt'), false, '控制面故障绝不授予 challenger');
+    assert.equal(coordinator.canExecute(), false, 'browse 保持冻结（失控写者仍在改页面）');
+  });
+
+  it('finding-A 非发布任务持租约 + 发布在途 → 其命令也让位（防御纵深，publishInFlight 闸不被 active 持有者绕过）', async () => {
+    // 复核 wf_3a8e8996 finding A：canExecute 的 active 分支此前先返回、绕过了 publishInFlight 闸。
+    // 构造「comment 任务持租约 + 发布在途（无 cancelPublish → acquire 不清它）」的边缘态，验证防御纵深生效。
+    let publishing = true;
+    const coordinator = new EdgeTaskCoordinator({
+      browse: { quiesceForTask: async () => 0, resumeAfterTask: async () => {} },
+      writers: { publishInFlight: () => publishing }, // 无 cancelPublish → 授予时不清在途发布
+      onAcquired: () => {},
+      onReleased: () => {},
+    });
+    coordinator.acquire({ taskId: 'cmt-task', kind: 'comment_commit', priority: 'human', leaseMs: 60_000 });
+    await tick();
+    assert.equal(coordinator.currentTaskId, 'cmt-task', '非发布任务持租约');
+    assert.equal(coordinator.canExecute('cmt-task'), false, '发布在途时，非发布租约持有者的命令也让位（防止导航走发布页 → 假成功）');
+    publishing = false;
+    assert.equal(coordinator.canExecute('cmt-task'), true, '发布收敛后，该租约持有者命令恢复放行');
+  });
+});

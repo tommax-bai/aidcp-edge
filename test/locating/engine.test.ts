@@ -5,12 +5,17 @@ import { AnchorCache, LocatingEngine } from '../../src/locating/index.js';
 import type {
   ActionExecutor,
   ActionRequest,
+  Anchor,
   DomProvider,
   ElementDescriptor,
   ElementSelector,
   PostValidator,
+  PromotionResult,
   SelectionResult,
 } from '../../src/locating/index.js';
+import { CloudElementSelector } from '../../src/client/cloud-selector.js';
+import type { EdgeClient } from '../../src/client/edge-client.js';
+import { TaskTakeoverError, abortForTakeover } from '../../src/execution/takeover.js';
 
 class LiveDom implements DomProvider {
   constructor(private readonly doc: Document) {}
@@ -208,4 +213,122 @@ test('LLM 选不出且无缓存 → no_target（不伪造成功）', async () =>
   assert.equal(res.ok, false);
   assert.equal(res.outcome, 'no_target');
   assert.equal(executor.calls.length, 0, '没定位到就不应执行任何操作');
+});
+
+// ---- change lease-strict-preemption 第 4 节：取消点 ----
+
+/** 记账探针：接管作废必须是"零页面副作用"，缓存写入也算副作用（记账会随之漂移） */
+class SpyCache extends AnchorCache {
+  readonly writes: string[] = [];
+  override stage(anchor: Anchor): boolean {
+    this.writes.push('stage');
+    return super.stage(anchor);
+  }
+  override confirmStaged(actionId: string): PromotionResult {
+    this.writes.push('confirmStaged');
+    return super.confirmStaged(actionId);
+  }
+  override recordHit(actionId: string): void {
+    this.writes.push('recordHit');
+    super.recordHit(actionId);
+  }
+}
+
+test('云端选元素在飞时被接管 → 就地作废抛 TaskTakeoverError，不等满 200s、零页面副作用', async () => {
+  const { document } = buildDom(`<button aria-label="关注" data-id="follow1">关注</button>`);
+  const executor = new FakeExecutor();
+  const cache = new SpyCache();
+
+  // 桩按 EdgeClient.request 的 signal 契约：**永不 resolve**（模拟云端仍在 thinking，绝不真等 200s），
+  // 只有 abort 能作废它，且 reject 用 signal.reason。
+  let selectSent!: () => void;
+  const selectInFlight = new Promise<void>((r) => {
+    selectSent = r;
+  });
+  const hangingClient = {
+    request(_type: string, _payload: unknown, _timeoutMs?: number, signal?: AbortSignal): Promise<never> {
+      selectSent();
+      return new Promise<never>((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    },
+  };
+
+  const engine = new LocatingEngine({
+    dom: new LiveDom(document),
+    executor,
+    selector: new CloudElementSelector(hangingClient as unknown as EdgeClient),
+    validator: new FakeValidator(() => true), // 一旦被吞成"继续往下走"，这里会把它染成假成功
+    cache,
+  });
+
+  const controller = new AbortController();
+  const started = Date.now();
+  const pending = engine.resolveAndAct(
+    { actionId: 'follow', op: 'click', goal: '关注作者' },
+    { checkpoint: () => {}, signal: controller.signal },
+  );
+
+  await selectInFlight; // 等到请求真的在飞（不是 abort 抢在发出之前）
+  abortForTakeover(controller);
+
+  await assert.rejects(
+    pending,
+    (err: unknown) => err instanceof TaskTakeoverError,
+    '被接管 MUST 原样抛出；吞成 llm_error 会让引擎回 escalated(llm_unavailable)——把一次让路谎报成模型不可用',
+  );
+  assert.ok(Date.now() - started < 2_000, '必须毫秒级作废在飞请求，绝不空等 200s 超时');
+  assert.equal(executor.calls.length, 0, '接管发生在页面写之前：零执行');
+  assert.deepEqual(cache.writes, [], '零页面副作用作废：缓存记账也不得发生');
+});
+
+test('取消点恰好两处（进守卫前 / 每轮重试边界）：execute → validate 之间是禁区', async () => {
+  const { document } = buildDom(`
+    <button aria-label="关注" data-id="decoy">关注</button>
+    <button aria-label="关注作者" data-id="real">关注作者</button>
+  `);
+  let followed = false;
+  let checkpoints = 0;
+  const atExecute: number[] = [];
+  const atValidate: number[] = [];
+
+  const executor: ActionExecutor = {
+    execute(_op: ActionRequest['op'], el: ElementDescriptor): void {
+      atExecute.push(checkpoints); // 页面已被写的那一刻，取消点计数
+      if (el.attributes['data-id'] === 'real') followed = true;
+    },
+  };
+  const validator: PostValidator = {
+    validate(): boolean {
+      atValidate.push(checkpoints); // 后置校验读到的计数：与上面相等 ⇒ 中间一格取消点都没有
+      return followed;
+    },
+  };
+
+  const cache = new AnchorCache();
+  cache.put({ actionId: 'follow', role: 'button', text: '关注', textMatch: 'exact' }); // 误命中 decoy
+  const selector = new FakeSelector((els) => {
+    const real = els.find((e) => e.attributes['data-id'] === 'real')!;
+    return { index: real.index, element: real, reason: 'llm_selected' };
+  });
+
+  const engine = new LocatingEngine({ dom: new LiveDom(document), executor, selector, validator, cache });
+  const res = await engine.resolveAndAct(
+    { actionId: 'follow', op: 'click', goal: '关注作者' },
+    { checkpoint: () => void checkpoints++ },
+  );
+
+  assert.equal(res.ok, true);
+  assert.equal(res.attempts, 2, '第一轮缓存误命中被校验拦下，第二轮走 LLM');
+  assert.equal(checkpoints, 3, '取消点只有两类位置：进守卫前 1 次 + 每轮重试边界 2 次');
+  assert.deepEqual(atExecute, [2, 3], '每轮的取消点都落在这一轮的写动作发出之前');
+  assert.deepEqual(
+    atValidate,
+    atExecute,
+    'execute 返回到 validate 返回之间 MUST NOT 有取消点：那个窗口取消 = 把一次可能已生效的写当成没发生（且缓存记账在校验之后，会一并漂移）',
+  );
 });

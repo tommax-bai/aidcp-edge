@@ -7,10 +7,11 @@
  * 实现 locating 层的 ElementSelector 接口，可直接注入 LocatingEngine。
  */
 
-import type { ElementSelector, SelectionResult } from '../locating/selector.js';
+import type { ElementSelector, SelectionResult, SelectOptions } from '../locating/selector.js';
 import type { ElementDescriptor } from '../locating/types.js';
 import type { RemoteElement, SelectResponsePayload } from '../comm/protocol.js';
 import type { EdgeClient } from './edge-client.js';
+import { rethrowIfTakeover } from '../execution/takeover.js';
 
 /** 把边缘的 ElementDescriptor 投影成跨网传输的 RemoteElement */
 export function toRemoteElement(el: ElementDescriptor): RemoteElement {
@@ -34,7 +35,11 @@ const SELECT_TIMEOUT_MS = 200_000;
 export class CloudElementSelector implements ElementSelector {
   constructor(private readonly client: EdgeClient) {}
 
-  async select(goal: string, elements: ElementDescriptor[]): Promise<SelectionResult> {
+  async select(
+    goal: string,
+    elements: ElementDescriptor[],
+    options?: SelectOptions,
+  ): Promise<SelectionResult> {
     if (elements.length === 0) {
       return { index: null, reason: 'empty_element_list' };
     }
@@ -43,9 +48,12 @@ export class CloudElementSelector implements ElementSelector {
       const res = await this.client.request('select.request', {
         goal,
         elements: elements.map(toRemoteElement),
-      }, SELECT_TIMEOUT_MS);
+      }, options?.timeoutMs ?? SELECT_TIMEOUT_MS, options?.signal);
       payload = res.payload as SelectResponsePayload;
     } catch (err) {
+      // 被独占任务接管 MUST 原样穿出：吞成 llm_error 会让定位引擎立刻回「已升级、模型不可用」
+      // ——一次「让路」被谎报成一次「失败」，而这条路径的失败在云端是不可逆终态。
+      rethrowIfTakeover(err);
       return { index: null, reason: `llm_error:${(err as Error).message}` };
     }
     if (payload.index === null || payload.index === undefined) {

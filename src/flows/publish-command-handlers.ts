@@ -35,8 +35,16 @@ import {
   extractPostId,
   extractPostUrl,
 } from './publish-post.js';
-import { dispatchClick } from '../browse/cdp-util.js';
+import { dispatchClick, dispatchKey } from '../browse/cdp-util.js';
 import { jitterAround, type RandomFn } from '../humanize/timing.js';
+import {
+  rethrowIfTakeover,
+  TaskTakeoverError,
+  type Checkpoint,
+  type TakeoverCtx,
+} from '../execution/takeover.js';
+import type { CommitWindowGuard } from '../execution/commit-window.js';
+import { pollBounded } from './bounded-poll.js';
 
 /** 指令运行时依赖（EngineDeps 去掉 validator——validator 由各处理器按 kind 提供）。 */
 export type PublishCommandDeps = Omit<EngineDeps, 'validator'>;
@@ -56,7 +64,10 @@ export interface PublishPacing {
 }
 
 export interface PlatformPublishCommandExecutor {
-  dispatch(payload: PublishCommandPayload): Promise<PublishCommandResultPayload>;
+  dispatch(
+    payload: PublishCommandPayload,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload>;
 }
 
 /**
@@ -79,6 +90,24 @@ const PACING_MS = {
 } as const;
 
 const CAPTURE_POST_ID_ACTION = 'note.capture_post_id';
+
+/** 与页面侧读回同口径归一（折叠空白、去首尾），供全文比对（change lease-strict-preemption）。 */
+function normalizeFieldText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * 允许「多出来的字符数」。编辑器可能带入零宽字符/不间断空格之类的无害残留；
+ * 超出这个容差就是真被塞了东西（残文没清干净 / 话题联想劫持插入），这样的正文 MUST NOT 发出去。
+ */
+const FILL_EXTRA_CHAR_TOLERANCE = 4;
+
+/** 清场三态：清干净 / 字段已不在（无残文可留）/ 字段还在但清不掉（真脏页）。 */
+interface FieldClearResult {
+  cleared: boolean;
+  residual: string | null;
+  fieldFound: boolean;
+}
 
 /** 由指令参数合成最小 PublishRequestPayload，供复用 PublishStepValidator 的字段读取。 */
 function synthPayload(payload: PublishCommandPayload): PublishRequestPayload {
@@ -235,6 +264,11 @@ export class PublishCommandDispatcher {
     pacing: PublishPacing = {},
     /** Facebook 发布执行器；未注入时 Facebook 指令诚实回 kind_not_implemented。 */
     private readonly facebookPublisher?: PlatformPublishCommandExecutor,
+    /**
+     * 提交窗口守卫（change lease-strict-preemption 5.1）：XHS `runSubmit` 点「发布」前 `enter()`、确认后 `dispose()`。
+     * 未注入 = 抢占能力休眠、行为逐字不变。与 Facebook 发布执行器共用同一实例（同一发布写者的两个平台分支）。
+     */
+    private readonly publishGuard?: CommitWindowGuard,
   ) {
     this.clock = clock;
     this.pacingEnabled = pacing.enabled !== false;
@@ -260,38 +294,72 @@ export class PublishCommandDispatcher {
     await this.pause(PACING_MS.stepThink);
   }
 
-  /** 按 kind 路由并执行一条发布指令，返回结果（绝不抛——异常也转成诚实的 ok:false）。 */
-  async dispatch(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+  /**
+   * 按 kind 路由并执行一条发布指令，返回结果（绝不抛业务异常——异常也转成诚实的 ok:false）。
+   *
+   * `takeover`（change lease-strict-preemption 第 4 节）：可选的取消上下文。**接管只由异常表达**，
+   * 在这里统一分类成 `preempted_by_task` —— 它的语义是「**未开始 / 已作废**」，不是发布失败。
+   * 云端 MUST NOT 据此写不可逆的 failed 终态（cloud 侧接线见 tasks 7.1 / 7.4）。
+   *
+   * 注：本节生产路径**不注入** takeover（main.ts 的调用点不传）；管道先铺好，抢占在第 5 节接线。
+   */
+  async dispatch(
+    payload: PublishCommandPayload,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload> {
+    try {
+      return await this.route(payload, takeover);
+    } catch (err) {
+      if (err instanceof TaskTakeoverError) {
+        return {
+          recordId: payload.recordId,
+          seq: payload.seq,
+          kind: payload.kind,
+          ok: false,
+          error: 'preempted_by_task',
+        };
+      }
+      throw err; // 其余异常原样上抛 ⇒ 上层既有的 dispatch_error 兜底路径不变
+    }
+  }
+
+  private async route(
+    payload: PublishCommandPayload,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload> {
     if (payload.platform === 'facebook') {
       if (!this.facebookPublisher) return this.notImplemented(payload);
-      return this.facebookPublisher.dispatch(payload);
+      return this.facebookPublisher.dispatch(payload, takeover);
     }
+    takeover?.checkpoint(); // 入口：零页面副作用
     // 拟人：动作前"想一下"，给整条发布序列加上逐项填写的节奏（治"指令间零节奏一气呵成"）。
     await this.thinkBeforeStep(payload.kind);
+    takeover?.checkpoint(); // 犹豫之后、第一个页面写之前
     switch (payload.kind) {
       case 'navigate_entry':
-        return this.runNavigateEntry(payload);
+        return this.runNavigateEntry(payload, takeover);
       case 'select_mode':
-        return this.runSelectMode(payload);
+        return this.runSelectMode(payload, takeover);
       case 'fill_field':
-        return this.runFillField(payload);
+        return this.runFillField(payload, takeover);
       case 'add_with_candidate': {
         const value = payload.params.value ?? '';
         const candidateKind = payload.params.candidateKind;
         // change split-topic-roles：topic 优先走 CDP 直驱真实加话题（#→下拉→选建议→校验真 token），
         //   由 AIDCP_PUBLISH_TOPIC_CDP 门控（默认 OFF、非按 cdp 存在与否）；OFF 或无 cdp 回退旧 buildTagInputRequest 兜底。
         if (!candidateKind || candidateKind === 'topic') {
-          if (this.topicCdpEnabled && this.cdp) return this.runAddTopic(payload, value);
+          if (this.topicCdpEnabled && this.cdp) return this.runAddTopic(payload, value, takeover);
           return this.runAtom(
             payload,
             buildTagInputRequest(value),
             new PublishStepValidator({ step: 'input_tag', currentTag: value, payload: synthPayload(payload) }),
+            takeover,
           );
         }
-        return this.runAtom(payload, buildCandidateRequest(candidateKind, value), valueValidator(value));
+        return this.runAtom(payload, buildCandidateRequest(candidateKind, value), valueValidator(value), takeover);
       }
       case 'submit_publish':
-        return this.runSubmit(payload);
+        return this.runSubmit(payload, takeover);
       case 'capture_postId':
         return this.runCapturePostId(payload);
       case 'set_option': {
@@ -300,17 +368,18 @@ export class PublishCommandDispatcher {
           payload,
           buildSetOptionRequest(payload.params.optionKind, optionValue),
           valueValidator(optionValue),
+          takeover,
         );
       }
       case 'set_schedule': {
         const publishTime = payload.params.publishTime ?? 0;
-        return this.runAtom(payload, buildSetScheduleRequest(publishTime), valueValidator('定时'));
+        return this.runAtom(payload, buildSetScheduleRequest(publishTime), valueValidator('定时'), takeover);
       }
       case 'upload_image':
-        return this.runUploadImage(payload);
+        return this.runUploadImage(payload, takeover);
       case 'set_cover':
         // 封面：定位封面入口 + 点击 + 封面激活态后置校验（断言真成为封面，非仅点到）。
-        return this.runAtom(payload, buildSetCoverRequest(), coverActiveValidator());
+        return this.runAtom(payload, buildSetCoverRequest(), coverActiveValidator(), takeover);
       default:
         return this.notImplemented(payload);
     }
@@ -320,45 +389,55 @@ export class PublishCommandDispatcher {
    * 进入发布页：优先 CDP Page.navigate 直达创作发布页（跨子域点击入口会开新标签、edge 看不到）。
    * 导航后绑定式轮询 isPublishPage 后置校验；未注入 navigate 时回退原点击入口逻辑。
    */
-  private async runNavigateEntry(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+  private async runNavigateEntry(
+    payload: PublishCommandPayload,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload> {
     if (!this.cdp) {
       // 回退：无 CDP 直驱能力时，沿用点击入口 + 后置校验。
       return this.runAtom(
         payload,
         buildEnterPublishPageRequest(),
         new PublishStepValidator({ step: 'enter_publish_page', payload: synthPayload(payload) }),
+        takeover,
       );
     }
     const startedAt = this.clock();
     const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
     const details = { actionId: 'note.publish_entry', durationMs: 0 };
     try {
+      takeover?.checkpoint(); // 唯一安全取消点：导航尚未发出
       await this.cdp.send('Page.navigate', { url: XHS_CREATOR_PUBLISH_URL });
     } catch (err) {
+      rethrowIfTakeover(err);
       const message = err instanceof Error ? err.message : String(err);
       return { ...base, ok: false, error: `navigate_failed: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
     }
+    // 🔴 导航已提交：以下后置校验 MUST NOT 取消（pollBounded 签名里也没有取消入参）。
     // 绑定式轮询：等创作发布页渲染出来（isPublishPage 命中）。
     const validator = new PublishStepValidator({ step: 'enter_publish_page', payload: synthPayload(payload) });
     const req = buildEnterPublishPageRequest();
-    const deadline = this.clock() + 20_000;
-    for (;;) {
-      let root: Element | Document | undefined;
-      try {
-        root = await this.deps.dom.getRoot();
-      } catch {
-        root = undefined;
-      }
-      if (root && validator.validate(req, root)) {
-        // 拟人：发布页渲染好后"环顾/定位输入框"再动手。
-        await this.pause(PACING_MS.navigateSettle);
-        return { ...base, ok: true, details: { ...details, durationMs: this.clock() - startedAt } };
-      }
-      if (this.clock() >= deadline) {
-        return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
-      }
-      await new Promise((r) => setTimeout(r, 500));
+    const entered = await pollBounded<true>({
+      probe: async () => {
+        let root: Element | Document | undefined;
+        try {
+          root = await this.deps.dom.getRoot();
+        } catch {
+          root = undefined;
+        }
+        return root && validator.validate(req, root) ? true : undefined;
+      },
+      timeoutMs: 20_000,
+      intervalMs: 500,
+      clock: this.clock,
+      sleep: this.sleep,
+    });
+    if (!entered) {
+      return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
     }
+    // 拟人：发布页渲染好后"环顾/定位输入框"再动手。
+    await this.pause(PACING_MS.navigateSettle);
+    return { ...base, ok: true, details: { ...details, durationMs: this.clock() - startedAt } };
   }
 
   /**
@@ -376,12 +455,16 @@ export class PublishCommandDispatcher {
    * 注：窄布局下「上传图文」的精确形态（是否收成图标 / 换文案）**待真机标定**，当前窄布局候选为 best-effort、
    * 不死绑精确中文文案；命中不了如实 `no_target`。校准入口见 `docs/xhs-layout-states.md`「创作发布页双布局」一节。
    */
-  private async runSelectMode(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+  private async runSelectMode(
+    payload: PublishCommandPayload,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload> {
     if (!this.cdp) {
       return this.runAtom(
         payload,
         buildSelectModeRequest(),
         new PublishStepValidator({ step: 'enter_publish_page', payload: synthPayload(payload) }),
+        takeover,
       );
     }
     const cdp = this.cdp; // 越过 guard 后固化为非空局部，供下方闭包捕获（class 属性不跨闭包收窄）。
@@ -484,27 +567,34 @@ export class PublishCommandDispatcher {
     };
 
     // 统一有界重试：每轮先判「已在图文模式」（幂等早退 + 后置校验二合一）→ 否则点可见 tab（点后 grace 再重点）。
-    const deadline = this.clock() + 20_000;
     const RECLICK_GRACE_MS = 1_500;
     let everClicked = false;
     let lastClickAt = Number.NEGATIVE_INFINITY;
-    for (;;) {
-      if (await inImageMode(everClicked)) return done({ ok: true });
-      const now = this.clock();
-      if (!everClicked || now - lastClickAt >= RECLICK_GRACE_MS) {
-        try {
-          const r = await cdp.send<{ result?: { value?: { clicked?: boolean } } }>('Runtime.evaluate', {
-            expression: CLICK_TAB,
-            returnByValue: true,
-          });
-          if (r?.result?.value?.clicked) { everClicked = true; lastClickAt = now; }
-        } catch {
-          // 瞬时 evaluate 失败，下一轮重试
+    const hit = await pollBounded<true>({
+      probe: async () => ((await inImageMode(everClicked)) ? true : undefined),
+      onMiss: async () => {
+        // 六个轮询里**唯一**存在安全取消窗口的一处：上一次点击刚被 probe 判为「尚未生效」、
+        // 下一次点击尚未发出。everClicked 之后本轮起不可取消——有一次未被后置校验的写在飞。
+        if (!everClicked) takeover?.checkpoint();
+        const now = this.clock();
+        if (!everClicked || now - lastClickAt >= RECLICK_GRACE_MS) {
+          try {
+            const r = await cdp.send<{ result?: { value?: { clicked?: boolean } } }>('Runtime.evaluate', {
+              expression: CLICK_TAB,
+              returnByValue: true,
+            });
+            if (r?.result?.value?.clicked) { everClicked = true; lastClickAt = now; }
+          } catch {
+            // 瞬时 evaluate 失败，下一轮重试
+          }
         }
-      }
-      if (this.clock() >= deadline) break;
-      await new Promise((r) => setTimeout(r, 400));
-    }
+      },
+      timeoutMs: 20_000,
+      intervalMs: 400,
+      clock: this.clock,
+      sleep: this.sleep,
+    });
+    if (hit) return done({ ok: true });
     // 收尾一次模式判定（末次点击可能刚落）。
     if (await inImageMode(everClicked)) return done({ ok: true });
     // 诚实分类：点过但模式没切上 → post_validate_failed；从未点中任何可见 tab → no_target。
@@ -520,9 +610,10 @@ export class PublishCommandDispatcher {
    * 故用 maxSends 封顶往返数、PAUSE_BUDGET 封顶总停顿——任意长度都稳在 30s 内，又不再是瞬时灌入。
    * 红线：全部字符都会输入（封顶只缩时间/往返，不丢内容）。
    */
-  private async typeHumanized(text: string): Promise<void> {
+  private async typeHumanized(text: string, checkpoint?: Checkpoint): Promise<void> {
     if (!this.cdp) return;
     if (!this.pacingEnabled) {
+      checkpoint?.(); // 快路径是一次性整段灌入、中途无粒度 → 进入前查一次
       await this.cdp.send('Input.insertText', { text });
       return;
     }
@@ -538,6 +629,9 @@ export class PublishCommandDispatcher {
     const perPause = Math.min(220, Math.floor(PAUSE_BUDGET / chunks.length));
     for (const chunk of chunks) {
       await this.sleep(jitterAround(perPause, 0.4, this.random));
+      // 唯一正确的取消缝：这一块的停顿已结束、它的 CDP 写尚未发出（与逐字输入原语逐行同形）。
+      // 已写入的部分留在编辑器里，调用方 MUST 清场后再让位。
+      checkpoint?.();
       await this.cdp.send('Input.insertText', { text: chunk });
     }
   }
@@ -552,11 +646,93 @@ export class PublishCommandDispatcher {
     this.inputEnabled = true;
   }
 
+  /** 页面侧读回字段当前文本（与 normalizeFieldText 同口径归一）。字段不在 → null。 */
+  private async readFieldText(findExpr: string, isContent: boolean): Promise<string | null> {
+    if (!this.cdp) return null;
+    const READ = String.raw`(() => { const el = ${findExpr}; if (!el) return JSON.stringify({ found: false, text: '' });
+      const raw = ${isContent ? `(el.innerText || '')` : `(el.value || '')`};
+      return JSON.stringify({ found: true, text: raw.replace(/\s+/g, ' ').trim() }); })()`;
+    try {
+      const r = await this.cdp.send<{ result?: { value?: string } }>('Runtime.evaluate', { expression: READ, returnByValue: true });
+      const parsed = JSON.parse(r?.result?.value ?? '{"found":false,"text":""}') as { found: boolean; text: string };
+      return parsed.found ? parsed.text : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 清空字段（全选 + Backspace）并回读确认真的空了。
+   *
+   * 必要性（change lease-strict-preemption）：输入是在光标处**追加**，而小红书这条路径过去
+   * **没有任何清空前置**——上一次被抢占 / 失败留下的半截正文不清掉，就会和这一篇拼在一起发出去。
+   *
+   * 三态 MUST 分开：清干净了 / 字段已不在（无残文可留）/ 字段还在但清不掉（真脏页）。
+   */
+  private async clearField(findExpr: string, isContent: boolean): Promise<FieldClearResult> {
+    if (!this.cdp) return { cleared: false, residual: null, fieldFound: false };
+    const SELECT = String.raw`(() => { const el = ${findExpr}; if (!el) return JSON.stringify({ found: false, selected: false });
+      try {
+        el.focus();
+        ${
+          isContent
+            ? `const range = document.createRange(); range.selectNodeContents(el); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);`
+            : `el.select();`
+        }
+        return JSON.stringify({ found: true, selected: true });
+      } catch (e) { return JSON.stringify({ found: true, selected: false }); } })()`;
+    let residual: string | null = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let sel: { found: boolean; selected: boolean };
+      try {
+        const r = await this.cdp.send<{ result?: { value?: string } }>('Runtime.evaluate', { expression: SELECT, returnByValue: true });
+        sel = JSON.parse(r?.result?.value ?? '{"found":false,"selected":false}') as { found: boolean; selected: boolean };
+      } catch {
+        sel = { found: false, selected: false };
+      }
+      // 字段不在（页面被导航走）≠ 字段里有清不掉的残文。两者 MUST 区分上报。
+      if (!sel.found) return { cleared: false, residual: null, fieldFound: false };
+      if (!sel.selected) return { cleared: false, residual: await this.readFieldText(findExpr, isContent), fieldFound: true };
+      await dispatchKey(this.cdp as unknown as Parameters<typeof dispatchKey>[0], 'Backspace', 'Backspace', 8);
+      residual = await this.readFieldText(findExpr, isContent);
+      if (residual === '') return { cleared: true, residual: '', fieldFound: true };
+      if (residual === null) return { cleared: false, residual: null, fieldFound: false };
+    }
+    return { cleared: false, residual, fieldFound: true };
+  }
+
+  /**
+   * 放弃这一步：清场 + 诚实回报。绝不把「清不干净」谎报成干净页——上游据此知道浏览器里
+   * 还躺着残文，而不是以为下一篇能干净地开工。（与 Facebook 侧 abandonFill 同形）
+   */
+  private async abandonFill(
+    base: Pick<PublishCommandResultPayload, 'recordId' | 'seq' | 'kind'>,
+    details: { actionId: string; durationMs: number },
+    findExpr: string,
+    isContent: boolean,
+    error: string,
+  ): Promise<PublishCommandResultPayload> {
+    const cleanup = await this.clearField(findExpr, isContent).catch<FieldClearResult>(() => ({
+      cleared: false,
+      residual: null,
+      fieldFound: true,
+    }));
+    const suffix = cleanup.cleared ? '' : cleanup.fieldFound ? '_dirty_editor' : '_editor_gone';
+    return { ...base, ok: false, error: `${error}${suffix}`, details };
+  }
+
   /**
    * 填标题/正文：标题是 React 受控 input、正文是 tiptap contenteditable——JS 直接赋 value/textContent 都不被框架接收。
-   * 用 CDP 真实输入：聚焦目标（校准选择器）→ Input.insertText（React/tiptap 都正确响应）→ 后置校验值真进去。
+   * 用 CDP 真实输入：聚焦目标（校准选择器）→ **清空并回读确认为空** → Input.insertText 逐块输入 → **全文回读校验**。
+   *
+   * 红线（不假成功）：校验 MUST 回读**全文**。老的「前 8 字」探针有两个致命面——
+   * ① 被抢占 / 失败留下的残文 + 新正文追加，探针只看新正文的前 8 字，照样放行 ⇒ 真发出一篇拼接的帖子；
+   * ② 正文被吞掉 90% 也判成功 ⇒ 真发出截断的帖子。
    */
-  private async runFillField(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+  private async runFillField(
+    payload: PublishCommandPayload,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload> {
     const isContent = payload.params.fieldType === 'content';
     const rawValue = payload.params.value ?? '';
     // 标题/正文均原样填入：长度策略收口云端一处（TitleCreator 已保证标题 ≤18、字形安全）。
@@ -564,46 +740,68 @@ export class PublishCommandDispatcher {
     const value = rawValue;
     if (!this.cdp) {
       return isContent
-        ? this.runAtom(payload, buildContentInputRequest(value), new PublishStepValidator({ step: 'input_content', payload: { title: '', content: value, tags: [] } }))
-        : this.runAtom(payload, buildTitleInputRequest(value), new PublishStepValidator({ step: 'input_title', payload: { title: value, content: '', tags: [] } }));
+        ? this.runAtom(payload, buildContentInputRequest(value), new PublishStepValidator({ step: 'input_content', payload: { title: '', content: value, tags: [] } }), takeover)
+        : this.runAtom(payload, buildTitleInputRequest(value), new PublishStepValidator({ step: 'input_title', payload: { title: value, content: '', tags: [] } }), takeover);
     }
     const startedAt = this.clock();
     const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
     const details = { actionId: isContent ? 'note.publish_content' : 'note.publish_title', durationMs: 0 };
+    const finish = (): { actionId: string; durationMs: number } => ({ ...details, durationMs: this.clock() - startedAt });
     // 校准选择器：标题=placeholder「填写标题会有更多赞哦」的 input；正文=tiptap.ProseMirror。
     const findExpr = isContent
       ? `document.querySelector('.tiptap.ProseMirror') || document.querySelector('[contenteditable="true"]')`
       : `document.querySelector('input[placeholder="填写标题会有更多赞哦"]') || document.querySelector('div.edit-container input.d-text') || document.querySelector('input.d-text')`;
     const FOCUS = String.raw`(() => { const el = ${findExpr}; if (!el) return false; try { el.scrollIntoView({ block: 'center' }); } catch (e) {} el.focus(); try { el.click && el.click(); } catch (e) {} return true; })()`;
-    const probe = JSON.stringify(value.slice(0, 8));
-    const CHECK = isContent
-      ? String.raw`(() => { const el = ${findExpr}; return !!el && (el.innerText || '').includes(${probe}); })()`
-      : String.raw`(() => { const el = ${findExpr}; return !!el && (el.value || '').includes(${probe}); })()`;
+    const expected = normalizeFieldText(value);
     try {
       await this.ensureInputEnabled();
       const f = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: FOCUS, returnByValue: true });
       if (f?.result?.value !== true) {
-        return { ...base, ok: false, error: 'no_target', details: { ...details, durationMs: this.clock() - startedAt } };
+        return { ...base, ok: false, error: 'no_target', details: finish() };
+      }
+      // 清场前置：输入是追加，不先清空就会把残文和这一篇拼在一起发出去。
+      const before = await this.clearField(findExpr, isContent);
+      if (!before.fieldFound) return { ...base, ok: false, error: 'no_target', details: finish() };
+      if (!before.cleared) {
+        const residual = (before.residual ?? '').slice(0, 40);
+        return { ...base, ok: false, error: `editor_not_clean: ${JSON.stringify(residual)}`, details: finish() };
       }
       // 拟人：聚焦后短停顿（手移到输入框）→ 逐字打字（替代一次性灌入，标题/正文都逐字）→ 填完微停顿。
       await this.pause(PACING_MS.fieldFocus);
-      await this.typeHumanized(value);
+      await this.typeHumanized(value, takeover?.checkpoint);
       await this.pause(PACING_MS.fieldDone);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { ...base, ok: false, error: `engine_error: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
-    }
-    const deadline = this.clock() + 5_000;
-    for (;;) {
-      try {
-        const c = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: CHECK, returnByValue: true });
-        if (c?.result?.value === true) return { ...base, ok: true, details: { ...details, durationMs: this.clock() - startedAt } };
-      } catch {
-        // 忽略瞬时失败，继续轮询
+      if (err instanceof TaskTakeoverError) {
+        // 让位前 MUST 清场：半截正文留在活着的编辑器里，下一篇稿的清场闸会把它判成 editor_not_clean、
+        // 白白毙掉一篇有效稿（清不掉时更会真发出一篇拼接的帖子）。清场是让位前必须跑完的写。
+        await this.clearField(findExpr, isContent).catch(() => undefined);
+        throw err;
       }
-      if (this.clock() >= deadline) return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
-      await new Promise((r) => setTimeout(r, 300));
+      const message = err instanceof Error ? err.message : String(err);
+      // 打字途中抛出的任何异常同样把半截正文留在活着的编辑器里 → MUST 走清场 + 诚实回报。
+      return this.abandonFill(base, finish(), findExpr, isContent, `engine_error: ${message}`);
     }
+    // 🔴 正文已写入：以下全文回读 MUST NOT 取消——中止 = 把一次可能已生效的填写当成没发生，
+    //    而残文还留在编辑器里毒害下一篇。
+    const text = await pollBounded<string>({
+      probe: async () => {
+        const t = await this.readFieldText(findExpr, isContent);
+        return t !== null && t.includes(expected) ? t : undefined;
+      },
+      timeoutMs: 5_000,
+      intervalMs: 300,
+      clock: this.clock,
+      sleep: this.sleep,
+    });
+    if (text === undefined) {
+      return this.abandonFill(base, finish(), findExpr, isContent, 'post_validate_failed');
+    }
+    const extra = text.length - expected.length;
+    // 多出来的字符 = 残文没清干净 / 被输入法或话题联想塞了东西 → 这样的正文 MUST NOT 发出去。
+    if (extra > FILL_EXTRA_CHAR_TOLERANCE) {
+      return this.abandonFill(base, finish(), findExpr, isContent, `field_polluted: extra=${extra}`);
+    }
+    return { ...base, ok: true, details: finish() };
   }
 
   /**
@@ -697,19 +895,27 @@ export class PublishCommandDispatcher {
    * 点「发布」提交：发布栏是自定义元素 <xhs-publish-btn>（闭合 shadow，文本搜不到）；
    * 「发布」为其右侧红色按钮、「暂存离开」在左。用坐标点击宿主右侧区域（安全避开左侧暂存），再后置校验发布成功。
    */
-  private async runSubmit(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+  private async runSubmit(
+    payload: PublishCommandPayload,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload> {
     if (!this.cdp) {
-      return this.runAtom(payload, buildSubmitPublishRequest(), new PublishStepValidator({ step: 'submit_publish', payload: synthPayload(payload) }));
+      return this.runAtom(payload, buildSubmitPublishRequest(), new PublishStepValidator({ step: 'submit_publish', payload: synthPayload(payload) }), takeover);
     }
     const startedAt = this.clock();
     const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
     const details = { actionId: 'note.publish_submit', durationMs: 0 };
+    // 已派发提交动作（6.2）：点击真正发出那一刻置真；center 查找 / no_target 等**点击之前**的失败保持 false。
+    let submitDispatched = false;
+    // 提交窗口守卫（5.1）：点「发布」前 enter、确认段（≤15s poll）内绝不被强杀，disposer 关窗（时基兜底自动过期）。
+    let closeWindow: (() => void) | undefined;
     // 发布按钮在 <xhs-publish-btn> 闭合 shadow 内（BUTTON.ce-btn.bg-red，文本「发布」）；CDP DOM 穿透闭合 shadow 取精确盒模型中心点。
     let center: { x: number; y: number } | null = null;
     try {
       await this.ensureInputEnabled();
       center = await this.findShadowButtonCenter('发布');
     } catch (err) {
+      rethrowIfTakeover(err);
       const message = err instanceof Error ? err.message : String(err);
       return { ...base, ok: false, error: `engine_error: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
     }
@@ -722,35 +928,69 @@ export class PublishCommandDispatcher {
         // 拟人：点「发布」前"通读全文确认"停留，再走贝塞尔轨迹点击。
         // 关键：发布按钮小而精确，**关掉 overshoot/落点抖动**（精确落点）确保点中——保留移动轨迹(反检测)，但不冒"点偏发不出"的险。
         await this.pause(PACING_MS.submitReview);
-        await dispatchClick(this.cdp, x, y, { random: this.random, sleep: this.sleep, overshoot: false, jitter: 0 });
+        // 🔴 整条发布流的**最后一个安全取消点**：帖子一个字节都还没提交出去。
+        takeover?.checkpoint();
+        // 🔴 提交窗口开启（5.1）：越过此点即不可逆，协调器此间不强杀（回 window_busy + 剩余预算）。
+        closeWindow = this.publishGuard?.enter(15_000, 'xhs_publish_submit');
+        await dispatchClick(this.cdp, x, y, {
+          random: this.random,
+          sleep: this.sleep,
+          overshoot: false,
+          jitter: 0,
+          // 贝塞尔轨迹途中也能让路——但只在按下之前（cdp-util 的按下-松开是原子区）。
+          checkpoint: takeover?.checkpoint,
+          // 🔴 6.2：press 派发那一刻置真——即便 press 响应超时/release 抛出（点击可能已生效），也不谎报「压根没点」→ 双发。
+          onPressDispatched: () => {
+            submitDispatched = true;
+          },
+        });
       } else {
+        takeover?.checkpoint();
+        // 🔴 提交窗口开启（5.1）：同 pacing 路径，越过此点即不可逆。
+        closeWindow = this.publishGuard?.enter(15_000, 'xhs_publish_submit');
         await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
         await this.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+        // 🔴 6.2：mousePressed 已发出即置真（此后 mouseReleased 抛出，点击也可能已生效）；mousePressed 抛出则跳 catch、保持假（正确）。
+        submitDispatched = true;
         await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
       }
     } catch (err) {
+      closeWindow?.(); // 点击段抛错（含被接管前的 CDP 故障）：关窗，别让一个已作废的提交窗口挡住后续抢占。
+      rethrowIfTakeover(err);
       const message = err instanceof Error ? err.message : String(err);
-      return { ...base, ok: false, error: `engine_error: ${message}`, details: { ...details, durationMs: this.clock() - startedAt } };
+      // 🔴 MUST 带 submitDispatched：若 press 已派发（onPressDispatched 已置真）但 CDP 响应抛错，回执必须如实告知「已点」，
+      //    否则云端按提交前失败重投 → 双发（复核 wf_1657e89b MEDIUM）。press 未发时它仍为 false（正确）。
+      return { ...base, ok: false, error: `engine_error: ${message}`, submitDispatched, details: { ...details, durationMs: this.clock() - startedAt } };
     }
+    // 点击已派发（submitDispatched 由上面两分支在 press 派发那一刻各自置真，覆盖 press 已发/release 抛出的窗口）。
     // 诊断（只观测）：点击后立即快照页面状态（在 deadline 计算之前，不占用 15s 校验窗口）。
     await this.logSubmitDiag(x, y, 'after-click');
-    // 后置校验：发布成功信号（出现成功提示 / 离开发布编辑页）。
-    const CHECK = String.raw`(() => { const b = (document.body && document.body.innerText) || ''; return /发布成功|发布中|笔记已?发布|成功发布|稍后可在/.test(b) || !location.href.includes('/publish/publish'); })()`;
-    const deadline = this.clock() + 15_000;
-    for (;;) {
-      try {
-        const c = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: CHECK, returnByValue: true });
-        if (c?.result?.value === true) return { ...base, ok: true, details: { ...details, durationMs: this.clock() - startedAt } };
-      } catch {
-        // 忽略瞬时失败
-      }
-      if (this.clock() >= deadline) {
-        // 诊断（只观测）：超时时快照终态——区分 仍在编辑页有弹层/toast vs 已跳但晚于窗口。
-        await this.logSubmitDiag(x, y, 'timeout');
-        return { ...base, ok: false, error: 'post_validate_failed', details: { ...details, durationMs: this.clock() - startedAt } };
-      }
-      await new Promise((r) => setTimeout(r, 500));
-    }
+    // 🔴 提交点已跨过：以下 MUST NOT 取消（全仓代价最高的禁区）。中止 = 一篇**可能已经发出去的帖子**
+    //    被当成没发生 → 云端重投 → 发两遍。pollBounded 签名里没有取消入参，编译器焊死。
+    // 后置校验：**只认正证据**——页面成功文案（5.9 收紧）。原「离开发布编辑页(!href.includes('/publish/publish'))」
+    // 判据是已上膛的假成功：抢占方 / 恢复导航会在这 15s 窗口内把发布页导走 → 一篇可能根本没发出去的稿被记成已发布。
+    // 该假成功由 5.2/5.3（publishInFlight 闸封住恢复导航）从根上堵住，这里再去掉 URL 判据做纵深防御（URL 缺失单独不得判成功）。
+    // 真机项 F/D 待核：若确有成功后跳转的落地帖 URL 正证据，可再补为「成功文案 OR 落地帖 URL」白名单。
+    const CHECK = String.raw`(() => { const b = (document.body && document.body.innerText) || ''; return /发布成功|发布中|笔记已?发布|成功发布|稍后可在/.test(b); })()`;
+    const ok = await pollBounded<true>({
+      probe: async () => {
+        try {
+          const c = await this.cdp!.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: CHECK, returnByValue: true });
+          return c?.result?.value === true ? true : undefined;
+        } catch {
+          return undefined; // 忽略瞬时失败
+        }
+      },
+      timeoutMs: 15_000,
+      intervalMs: 500,
+      clock: this.clock,
+      sleep: this.sleep,
+    });
+    closeWindow?.(); // 确认段结束：关窗（成功/超时都在此后回执，窗口不再需要保护）。
+    if (ok) return { ...base, ok: true, submitDispatched, details: { ...details, durationMs: this.clock() - startedAt } };
+    // 诊断（只观测）：超时时快照终态——区分 仍在编辑页有弹层/toast vs 已跳但晚于窗口。
+    await this.logSubmitDiag(x, y, 'timeout');
+    return { ...base, ok: false, error: 'post_validate_failed', submitDispatched, details: { ...details, durationMs: this.clock() - startedAt } };
   }
 
   /**
@@ -759,7 +999,11 @@ export class PublishCommandDispatcher {
    * → 后置校验正文出现真话题 token `a.tiptap-topic`（非纯文本）。fail-closed，绝不静默假成功。
    * 仅在开关开 + cdp 注入时被 dispatch 调用（见 add_with_candidate 分支）。
    */
-  private async runAddTopic(payload: PublishCommandPayload, keyword: string): Promise<PublishCommandResultPayload> {
+  private async runAddTopic(
+    payload: PublishCommandPayload,
+    keyword: string,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload> {
     const startedAt = this.clock();
     const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
     const details = { actionId: 'note.publish_topic', durationMs: 0 };
@@ -773,7 +1017,12 @@ export class PublishCommandDispatcher {
       const f = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: FOCUS, returnByValue: true });
       if (f?.result?.value !== true) return done({ ok: false, error: 'no_target' });
       await this.pause(PACING_MS.fieldFocus);
+      // 本步**唯一**的安全取消点：话题词尚未进正文。
+      takeover?.checkpoint();
       // 2. 打 " #关键词"（逐字触发建议下拉；前导空格避免与前一 token 粘连）。
+      // 🔴 **不传 checkpoint**：中途取消会在正文里留一串裸 ' #关键'，而本文件唯一的清场原语 clearField
+      //    是**整字段清空**——此刻正文里躺着整篇稿子，清它等于毁稿。「取消 + 清场」这条路在加话题上
+      //    根本不存在 ⇒ 打完就没有安全取消点，把剩下的下拉等待与后置校验跑完再让位（合计 ≤10s）。
       await this.typeHumanized(' #' + kw);
       // 3. 轮询等下拉里的目标项（优先文本精确匹配 #kw；否则「新建话题」首项贴字面词），取其视口中心坐标。
       const CENTER = String.raw`(() => {
@@ -789,38 +1038,46 @@ export class PublishCommandDispatcher {
         const r = target.getBoundingClientRect(); if(!(r.width>0 && r.height>0)) return '';
         return JSON.stringify({ x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) });
       })()`;
-      let center: { x: number; y: number } | null = null;
-      const ddDeadline = this.clock() + 4000;
-      for (;;) {
-        try {
-          const c = await this.cdp.send<{ result?: { value?: string } }>('Runtime.evaluate', { expression: CENTER, returnByValue: true });
-          const v = c?.result?.value;
-          if (v) { center = JSON.parse(v) as { x: number; y: number }; break; }
-        } catch {
-          // 瞬时 evaluate 失败，继续轮询
-        }
-        if (this.clock() >= ddDeadline) break;
-        await new Promise((r) => setTimeout(r, 250));
-      }
+      // 🔴 话题词已进正文：以下两个轮询 MUST NOT 取消（清场会毁稿，见上）。
+      const center = await pollBounded<{ x: number; y: number }>({
+        probe: async () => {
+          try {
+            const c = await this.cdp!.send<{ result?: { value?: string } }>('Runtime.evaluate', { expression: CENTER, returnByValue: true });
+            const v = c?.result?.value;
+            return v ? (JSON.parse(v) as { x: number; y: number }) : undefined;
+          } catch {
+            return undefined; // 瞬时 evaluate 失败，继续轮询
+          }
+        },
+        timeoutMs: 4000,
+        intervalMs: 250,
+        clock: this.clock,
+        sleep: this.sleep,
+      });
       if (!center) return done({ ok: false, error: 'no_target' });
       await this.pause(PACING_MS.fieldFocus);
       // 4. 真实鼠标事件点建议（.click() 实测不提交待定 span）。精确落点、保留移动轨迹（反检测）。
       await dispatchClick(this.cdp, center.x, center.y, { random: this.random, sleep: this.sleep, overshoot: false, jitter: 0 });
       // 5. 后置校验：正文出现真话题 token（a.tiptap-topic），非纯文本。读 DOM 快照 + committedTopicPill，fail-closed。
-      const deadline = this.clock() + 4000;
-      for (;;) {
-        let root: Element | Document | undefined;
-        try {
-          root = await this.deps.dom.getRoot();
-        } catch {
-          root = undefined;
-        }
-        if (root && committedTopicPill(root, kw)) return done({ ok: true });
-        if (this.clock() >= deadline) break;
-        await new Promise((r) => setTimeout(r, 300));
-      }
+      const committed = await pollBounded<true>({
+        probe: async () => {
+          let root: Element | Document | undefined;
+          try {
+            root = await this.deps.dom.getRoot();
+          } catch {
+            root = undefined;
+          }
+          return root && committedTopicPill(root, kw) ? true : undefined;
+        },
+        timeoutMs: 4000,
+        intervalMs: 300,
+        clock: this.clock,
+        sleep: this.sleep,
+      });
+      if (committed) return done({ ok: true });
       return done({ ok: false, error: 'post_validate_failed' });
     } catch (err) {
+      rethrowIfTakeover(err);
       const message = err instanceof Error ? err.message : String(err);
       return done({ ok: false, error: `engine_error: ${message}` });
     }
@@ -831,14 +1088,16 @@ export class PublishCommandDispatcher {
     payload: PublishCommandPayload,
     req: ActionRequest,
     validator: PostValidator,
+    takeover?: TakeoverCtx,
   ): Promise<PublishCommandResultPayload> {
     const startedAt = this.clock();
     const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
     let result: ActionResult;
     try {
       const engine = new LocatingEngine({ ...this.deps, validator }, this.options);
-      result = await engine.resolveAndAct(req);
+      result = await engine.resolveAndAct(req, takeover);
     } catch (err) {
+      rethrowIfTakeover(err);
       const message = err instanceof Error ? err.message : String(err);
       return {
         ...base,
@@ -903,7 +1162,10 @@ export class PublishCommandDispatcher {
   }
 
   /** 配图上传：URL→下载→CDP 文件输入桥→后置校验成功态。未注入 uploader 则诚实 kind_not_implemented。 */
-  private async runUploadImage(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+  private async runUploadImage(
+    payload: PublishCommandPayload,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload> {
     const startedAt = this.clock();
     const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
     const imageUrl = payload.params.imageUrl;
@@ -911,7 +1173,8 @@ export class PublishCommandDispatcher {
     if (!imageUrl) {
       return { ...base, ok: false, error: 'no_target', details: { actionId: 'note.publish_upload_image', durationMs: this.clock() - startedAt } };
     }
-    const r = await this.uploader.upload(imageUrl);
+    // 上传器自己管取消边界：下载段可取消、塞文件之后不可取消（TaskTakeoverError 由 dispatch 顶层分类）。
+    const r = await this.uploader.upload(imageUrl, takeover);
     const details = { actionId: 'note.publish_upload_image', durationMs: this.clock() - startedAt };
     // 红线：上传器的 ok 即真实结果（下载/桥接/后置校验任一失败 → ok:false），此处绝不翻成 ok:true。
     if (!r.ok) return { ...base, ok: false, error: r.error ?? 'upload_failed', details };

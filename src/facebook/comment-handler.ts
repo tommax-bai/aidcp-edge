@@ -16,6 +16,7 @@ import type { Envelope, GroupJoinPayload, InteractionCommentPayload, NoteOpenPay
 import type { ActionCompletedPayload, NoteDetailPayload, PageCardsPayload } from '../comm/protocol.js';
 import type { FacebookCommentExecutor } from './comment-executor.js';
 import type { FacebookJoinExecutor } from './join-executor.js';
+import { TaskTakeoverError } from '../execution/takeover.js';
 
 /** 处理器回执所需的最小客户端能力（EdgeClient 已实现这三个方法）。 */
 export interface FacebookCommentReplyClient {
@@ -46,8 +47,15 @@ export class FacebookCommentHandler {
     this.log = deps.logger ?? (() => {});
   }
 
-  /** 云端主动命令入口（由 client.onBrowseCommand 转发）。绝不抛：任何异常都翻成诚实非成功回执。 */
-  async handle(env: Envelope): Promise<void> {
+  /**
+   * 云端主动命令入口（由 client.onBrowseCommand 转发）。绝不抛：任何异常都翻成诚实非成功回执。
+   *
+   * `checkpoint`（change lease-strict-preemption 4.1）：安全取消点。**这条链的终点在本函数**——
+   * FB 评论 / 加群由会话直接委托执行，不经浏览命令主循环，所以接管**必须在这里就地转成回执并 return，
+   * MUST NOT 重抛**：抛出去只会落到会话的链级 catch（只打日志、不发回执）⇒ 云端干等到超时、
+   * 空闲看门狗把整会话杀掉。
+   */
+  async handle(env: Envelope, checkpoint?: () => void): Promise<void> {
     try {
       switch (env.type) {
         case 'search.execute':
@@ -57,10 +65,10 @@ export class FacebookCommentHandler {
           await this.onOpen(env.payload as NoteOpenPayload);
           return;
         case 'interaction.comment':
-          await this.onComment(env.payload as InteractionCommentPayload);
+          await this.onComment(env.payload as InteractionCommentPayload, checkpoint);
           return;
         case 'group.join':
-          await this.onJoin(env.payload as GroupJoinPayload);
+          await this.onJoin(env.payload as GroupJoinPayload, checkpoint);
           return;
         default:
           // 白名单命中但本平台不支持：显式诚实回执，绝不静默丢弃。
@@ -69,10 +77,16 @@ export class FacebookCommentHandler {
           return;
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.log(`[fb-comment] 处理命令 ${env.type} 异常：${message}`);
       // 归一到该命令的回执面，让云端 sendAndAwait 不至于干等超时。
       const action = env.type === 'search.execute' ? 'search' : env.type === 'note.open' ? 'open_note' : env.type === 'interaction.comment' ? 'comment' : env.type;
+      if (err instanceof TaskTakeoverError) {
+        // 被接管 = **未开始 / 已作废**，不是一次业务失败。绝不降级成 handler_error。
+        this.log(`[fb-comment] 命令 ${env.type} 在安全取消点被独占任务接管 → 零页面副作用作废`);
+        this.client.reportActionCompleted({ action, ok: false, reason: 'preempted_by_task' });
+        return;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      this.log(`[fb-comment] 处理命令 ${env.type} 异常：${message}`);
       this.client.reportActionCompleted({ action, ok: false, reason: `handler_error:${message}` });
     }
   }
@@ -130,7 +144,10 @@ export class FacebookCommentHandler {
     });
   }
 
-  private async onComment(payload: InteractionCommentPayload): Promise<void> {
+  private async onComment(
+    payload: InteractionCommentPayload,
+    checkpoint?: () => void,
+  ): Promise<void> {
     if (this.busy) {
       this.client.reportActionCompleted({ action: 'comment', ok: false, reason: 'busy' });
       return;
@@ -139,14 +156,14 @@ export class FacebookCommentHandler {
     try {
       // noteId 即候选帖 permalink（云端下发）；submitComment 在「已由 note.open 打开的该帖」上操作，
       // 并用它做 own-identity 服务器确认的目标帖收窄。
-      const r = await this.executor.submitComment(payload.noteId, payload.text ?? '', payload.groupChatCode);
+      const r = await this.executor.submitComment(payload.noteId, payload.text ?? '', payload.groupChatCode, checkpoint);
       this.client.reportActionCompleted({ action: 'comment', ok: r.ok, ...(r.reason ? { reason: r.reason } : {}) });
     } finally {
       this.busy = false;
     }
   }
 
-  private async onJoin(payload: GroupJoinPayload): Promise<void> {
+  private async onJoin(payload: GroupJoinPayload, checkpoint?: () => void): Promise<void> {
     if (!this.joinExecutor) {
       this.client.reportActionCompleted({ action: 'join_group', ok: false, reason: 'capability_unsupported' });
       return;
@@ -157,7 +174,8 @@ export class FacebookCommentHandler {
     }
     this.busy = true;
     try {
-      const r = await this.joinExecutor.joinGroup(payload.groupUrl, { click: payload.click, thinkMs: payload.thinkMs });
+      // checkpoint（5.10b）：加群点击后短确认窗口过后的观察尾段可被接管中断，被接管即抛 → handle catch 转 preempted_by_task。
+      const r = await this.joinExecutor.joinGroup(payload.groupUrl, { click: payload.click, thinkMs: payload.thinkMs }, checkpoint);
       this.client.reportActionCompleted({
         action: 'join_group',
         ok: r.ok,

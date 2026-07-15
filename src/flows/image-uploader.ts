@@ -14,6 +14,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DomProvider } from '../locating/engine.js';
 import type { FileInputSetter } from '../cdp/file-input-setter.js';
+import { rethrowIfTakeover, type TakeoverCtx } from '../execution/takeover.js';
+import { pollBounded } from './bounded-poll.js';
 
 export interface ImageUploadResult {
   ok: boolean;
@@ -151,8 +153,16 @@ export class ImageUploader {
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
-  /** 上传一张配图。绝不抛——所有失败转诚实 ok:false + 分类 error。 */
-  async upload(imageUrl: string): Promise<ImageUploadResult> {
+  /**
+   * 上传一张配图。绝不抛**业务异常**——所有失败转诚实 ok:false + 分类 error。
+   *
+   * 唯一例外：被独占任务接管时抛 TaskTakeoverError（由上层统一分类成「未开始」而非发布失败）。
+   *
+   * 可取消边界（change lease-strict-preemption 4.4）：**下载段可取消**（纯本机 I/O、平台侧零副作用，
+   * 能省下最长 15s）；**文件一旦塞进上传控件就不可取消**——页面脚本随即自行异步读 FileList 并把图传给
+   * 平台，边缘再无窗口。取消那之后的后置校验 = 把一张**可能已经贴上去的图**当成没贴 ⇒ 上游重传 ⇒ 双写。
+   */
+  async upload(imageUrl: string, takeover?: TakeoverCtx): Promise<ImageUploadResult> {
     // 1) URL 安全校验：仅 https（受控可放 http），拒 file:/data:/blob: 等。
     let url: URL;
     try {
@@ -165,21 +175,26 @@ export class ImageUploader {
 
     let dir: string | undefined;
     try {
+      takeover?.checkpoint(); // 安全点 ①：下载之前（零副作用）
       // 2) 下载到临时文件（含安全封套）。
-      const dl = await this.downloadToTemp(imageUrl);
+      const dl = await this.downloadToTemp(imageUrl, takeover?.signal);
       if (!dl.ok) return { ok: false, error: dl.error };
       dir = dl.dir;
 
+      // 安全点 ②：**最后一个**。setFiles 一返回就不可逆。
+      takeover?.checkpoint();
       // 3) CDP 文件输入桥。
       const set = await this.fileInputSetter.setFiles([dl.path]);
       if (!set.ok) return { ok: false, error: set.error ?? 'no_target' };
 
+      // 🔴 MUST NOT 取消：图已交给页面脚本，verifyAttached 是它唯一的后置校验。
       // 4) 后置校验：等成功态（缩略图）出现。绝不以 files.length 为足够条件（红线）。
       const attached = await this.verifyAttached();
       if (!attached) return { ok: false, error: 'image_not_attached' };
 
       return { ok: true };
     } catch (err) {
+      rethrowIfTakeover(err); // 被接管 ≠ 上传失败（finally 的临时目录清理照跑）
       return { ok: false, error: `engine_error: ${err instanceof Error ? err.message : String(err)}` };
     } finally {
       if (dir) await this.cleanupTempDir(dir);
@@ -197,17 +212,31 @@ export class ImageUploader {
 
   private async downloadToTemp(
     imageUrl: string,
+    external?: AbortSignal,
   ): Promise<{ ok: true; dir: string; path: string } | { ok: false; error: string }> {
     const controller = new AbortController();
     // 一个 deadline 覆盖「连接+头 + body 流读」全程：body 慢/半开时也按时中止，
     // 使过期/慢 URL（本 change 的首要失败模式）边缘先回干净 image_fetch_failed，不拖到云端单指令超时。
     const timer = setTimeout(() => controller.abort(), this.downloadTimeoutMs);
+    // 外部取消（被独占任务接管）并进同一个 controller。**被接管 ≠「图取不到」**——必须能把两者分开，
+    // 否则一次让路会被报成 image_fetch_failed（一条会让上游换图重试的假失败）。
+    // 不用 AbortSignal.any（Node 20.3+ 才有，本仓最低 Node 20）。
+    let takenOver = false;
+    const onExternalAbort = (): void => {
+      takenOver = true;
+      controller.abort(external!.reason);
+    };
+    if (external) {
+      if (external.aborted) onExternalAbort();
+      else external.addEventListener('abort', onExternalAbort, { once: true });
+    }
     try {
       let res: Response;
       try {
         // redirect:'error'——拒绝任何 3xx，防原始 URL 校验被首跳重定向绕过到内网/本地。
         res = await this.fetchImpl(imageUrl, { redirect: 'error', signal: controller.signal });
       } catch {
+        if (takenOver) throw external!.reason;
         return { ok: false, error: 'image_fetch_failed' };
       }
       if (!res.ok) return { ok: false, error: 'image_fetch_failed' };
@@ -224,6 +253,7 @@ export class ImageUploader {
       try {
         bytes = await this.readCapped(reader, controller.signal);
       } catch {
+        if (takenOver) throw external!.reason;
         // body 读期间超时/中止 → 诚实回 image_fetch_failed（非 engine_error）。
         return { ok: false, error: 'image_fetch_failed' };
       }
@@ -238,6 +268,7 @@ export class ImageUploader {
       return { ok: true, dir, path };
     } finally {
       clearTimeout(timer);
+      external?.removeEventListener('abort', onExternalAbort);
     }
   }
 
@@ -275,18 +306,23 @@ export class ImageUploader {
     return out;
   }
 
+  /** 图已交给页面：这是它唯一的后置校验。**不接取消入参**（pollBounded 签名里也没有）——见 upload 的红线注释。 */
   private async verifyAttached(): Promise<boolean> {
-    const deadline = this.clock() + this.verifyTimeoutMs;
-    for (;;) {
-      let root: Element | Document | undefined;
-      try {
-        root = await this.dom.getRoot();
-      } catch {
-        root = undefined;
-      }
-      if (root && this.hasThumbnail(root)) return true;
-      if (this.clock() >= deadline) return false;
-      await this.sleep(this.verifyPollMs);
-    }
+    const hit = await pollBounded<true>({
+      probe: async () => {
+        let root: Element | Document | undefined;
+        try {
+          root = await this.dom.getRoot();
+        } catch {
+          root = undefined;
+        }
+        return root && this.hasThumbnail(root) ? true : undefined;
+      },
+      timeoutMs: this.verifyTimeoutMs,
+      intervalMs: this.verifyPollMs,
+      clock: this.clock,
+      sleep: this.sleep,
+    });
+    return hit === true;
   }
 }

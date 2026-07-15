@@ -56,6 +56,8 @@ import type { extractNoteContent as ExtractFn, NoteContent } from './note-extrac
 import { NOTE_BODY_SELECTORS, parseCount } from './note-extractor.js';
 import { executeSearch, applySearchFilters, SEARCH_RESULT_URL_RE, searchResultMatchesKeyword } from './search-handler.js';
 import { evalRaw, InputDispatchDeadlineError, type RandomFn, type BrowseCdp } from './cdp-util.js';
+import { TaskTakeoverError } from '../execution/takeover.js';
+import type { CommitWindowGuard } from '../execution/commit-window.js';
 import { CdpDisconnectedError } from '../cdp/client.js';
 import { buildNotificationHomeJs, buildNotificationItemsJs, buildNotificationCategoryItemsJs } from './notification-monitor.js';
 import type { DomProvider } from '../locating/engine.js';
@@ -109,6 +111,11 @@ export interface BrowseSessionDeps {
    * 同时注入 overlayMonitor 与 loginGate 时，优先用 overlayMonitor。
    */
   overlayMonitor?: OverlayMonitor;
+  /**
+   * 提交窗口守卫（change lease-strict-preemption 5.1）：不可逆提交动作（评论提交 / 通知分类栏目点击）前
+   * `enter()`、确认后 `dispose()`。未注入 = 抢占能力休眠、行为逐字不变（保守缺省，同 EdgeTaskPageWriterProbe）。
+   */
+  commitWindow?: CommitWindowGuard;
 }
 
 export interface BrowseSessionOptions {
@@ -308,11 +315,47 @@ class NoteOpenDeadlineError extends Error {
 }
 
 /**
+ * 命令在**安全取消点**上被更高优先级的独占任务接管（change lease-strict-preemption）。
+ *
+ * 安全取消点 = 命令入口到它**第一次真正改写页面**之前的整段：阻断浮层等待、动作前统一闸
+ * （最小间隔 + 犹豫）、离页/翻页前的停留。这一整段只消耗时间、平台侧零副作用，**不占页面写原子区**。
+ * 抛出本错误 = 该命令零页面副作用地作废，由主循环回一条诚实失败回执，**绝不重放**。
+ *
+ * 类定义已迁到零依赖叶子模块 `execution/takeover.ts`（第 4 节：flows / client / locating 都要引它做
+ * instanceof 分类，反向引用本模块会成环）。此处原地 re-export ⇒ ESM 同一份绑定、同一个类对象 ⇒
+ * 既有 import 与 instanceof 全部不变。
+ */
+export { TaskTakeoverError };
+
+/**
+ * 交接（quiesce）在预算内未能等到真写段收敛（change lease-strict-preemption）。
+ * 协调器据此 MUST NOT 授予租约、MUST NOT 谎称已收敛、MUST NOT 停在让位态。
+ */
+export class BrowseQuiesceTimeoutError extends Error {
+  constructor(public readonly timeoutMs: number) {
+    super(`浏览交接未在 ${timeoutMs}ms 内收敛`);
+    this.name = 'BrowseQuiesceTimeoutError';
+  }
+}
+
+/**
+ * 交接上界：只覆盖「真正在改写页面」的动作（纯等待已由安全取消点当场让路）。
+ * 云端的受理预算 MUST 大于本值 + 一个消息往返余量，否则边缘按时交接了、云端已判死走人。
+ */
+export const DEFAULT_TASK_QUIESCE_MS = Number(process.env.AIDCP_TASK_QUIESCE_MS ?? 30_000);
+
+/**
  * 关注按钮选择器（笔记 modal 作者区 + 作者主页两种上下文）。
  * executeFollow（点关注）与 note.open 时的关注态探测 probeAuthorFollowed 共用同一份，
  * 保证「已关注」判定口径完全一致、不漂移（change skip-profile-visit-if-followed）。
  */
 const FOLLOW_BUTTON_SELECTORS = ['.author-wrapper .follow-button', '.user-info .follow-button', '.user-page .follow-button', '.follow-button', '.author-follow-btn', '[data-type="follow"]', '.follow-btn'];
+
+/**
+ * 尽力清空评论编辑器（放弃这一条时用）。两个调用点共用：提交前复检到验证码、以及被独占任务接管。
+ * 清场是**让位前必须跑完的写**——半截评论留在编辑器里，下一条会接着往后追加。
+ */
+const CLEAR_COMMENT_EDITOR_JS = `(function(){var el=document.querySelector('#content-textarea')||document.querySelector('.engage-bar.active [contenteditable="true"]');if(el){el.textContent='';el.dispatchEvent(new Event('input',{bubbles:true}));}return 'ok';})()`;
 
 /** 浏览会话（命令驱动模式） */
 export class BrowseSession {
@@ -373,6 +416,15 @@ export class BrowseSession {
   /** 任务租约冻结普通浏览命令；带当前 taskId 的评论/维护命令仍由同一 loop 执行。 */
   private taskBlocked = false;
   private taskBlockEpoch = 0;
+  /**
+   * 当前正在执行的命令在入口拍下的接管世代号；null = 不在命令执行中（冷启动 / 恢复路径的等待不认接管打断）。
+   *
+   * **判据必须是世代号，不能是 `taskBlocked` 标志**（change lease-strict-preemption）：交接一开始就置
+   * `taskBlocked=true`、只在恢复时才清，于是**独占任务自己的命令就跑在冻结期内**。若用标志作取消令牌，
+   * 评论 / 巡视的每条命令要么在自己的等待里当场自尽，要么直接跳过浮层闸对着验证码墙点击。
+   * 世代号在一个租约期内恒定（授予期间不会再触发交接），是唯一正确的取消令牌。
+   */
+  private activeCommandEpoch: number | null = null;
   /** 当前正在执行的启动/命令原子区；quiesce 只等到该边界，不排空旧命令。 */
   private activeOperationCount = 0;
   private readonly operationIdleWaiters = new Set<() => void>();
@@ -477,7 +529,10 @@ export class BrowseSession {
     const remain = target - elapsed;
     if (remain > 0) {
       this.logger(`[browse] 返回前兜底停留 +${Math.round(remain)}ms（目标≈${Math.round(target)}ms，已停${Math.round(elapsed)}ms）`);
-      await this.sleep(remain);
+      // 安全取消点：停留只消耗时间、不碰页面。被接管即当场让路，绝不让一个 90s 的停留预算
+      // 把系统恢复任务的受理预算撑爆（change lease-strict-preemption）。
+      await this.sleepInterruptible(remain);
+      this.throwIfTakeover();
     }
     this.noteOpenedAt = null;
   }
@@ -497,7 +552,9 @@ export class BrowseSession {
     const remain = target - elapsed;
     if (remain > 0) {
       this.logger(`[browse] 翻页前看新卡停留 +${Math.round(remain)}ms（目标≈${Math.round(target)}ms，已停${Math.round(elapsed)}ms）`);
-      await this.sleep(remain);
+      // 安全取消点：同 ensureDetailDwell（change lease-strict-preemption）。
+      await this.sleepInterruptible(remain);
+      this.throwIfTakeover();
     }
   }
 
@@ -552,6 +609,10 @@ export class BrowseSession {
     const remaining = this.ensureMinInterval(op);
     const wait = Math.max(remaining, think); // ← max，绝不相加
     if (wait > 0) await this.sleepInterruptible(wait);
+    // 安全取消点：最小间隔 + 动作前犹豫都只消耗时间、不碰页面。被接管即抛出让路
+    // （change lease-strict-preemption）。抛出而非返回 false，是为了让主循环发出诚实回执——
+    // 返回 false 是既有的「停机/终止」静默中止路径，与「被接管」语义不同。
+    this.throwIfTakeover();
     return !this.stopRequested && !this.closing && !this.terminatePending();
   }
 
@@ -581,7 +642,20 @@ export class BrowseSession {
     });
   }
 
-  /** 唤醒所有正在等待的可打断 sleep（stopForReason / 终止命令入队时调用）。 */
+  /**
+   * 当前命令是否已被更高优先级的独占任务接管（change lease-strict-preemption）。
+   * 仅在命令执行中（activeCommandEpoch 非 null）且交接已推进世代号时为真。
+   */
+  private takeoverRequested(): boolean {
+    return this.activeCommandEpoch !== null && this.taskBlockEpoch !== this.activeCommandEpoch;
+  }
+
+  /** 在安全取消点检查接管：已被接管即抛出，令本命令零页面副作用地作废。 */
+  private throwIfTakeover(): void {
+    if (this.takeoverRequested()) throw new TaskTakeoverError();
+  }
+
+  /** 唤醒所有正在等待的可打断 sleep（stopForReason / 终止命令入队 / 任务接管时调用）。 */
   private wakeInterruptibleSleeps(): void {
     if (this.sleepWakers.size === 0) return;
     const wakers = [...this.sleepWakers];
@@ -877,18 +951,36 @@ export class BrowseSession {
   }
 
   /**
-   * 独占任务接管：先封住普通浏览准入、丢弃尚未开始的旧命令，再等待当前原子操作收敛。
+   * 独占任务接管：先封住普通浏览准入、丢弃尚未开始的旧命令，唤醒所有安全取消点上的纯等待，
+   * 再**有界**等待真正在改写页面的动作收敛。
    * 返回被取消的旧命令数，供 edge.task.acquired 可观测上报。
+   *
+   * change lease-strict-preemption —— 这里过去是硬死锁的锁体，两处错：
+   * ① 无界等待「命令处理函数还没返回」，而不是「页面正在被改写」：一条停在验证码浮层闸里的命令
+   *    （一个字节都没写过页面）会让本函数永远不返回，而那个验证码只有这次要授予的协助任务才能点掉。
+   * ② 协调器的「正在让位」标志只在本函数返回后才复位 ⇒ 本函数永不返回 ⇒ 标志永为真 ⇒ 此后拒绝授予
+   *    任何租约、拒绝进入冷待机，整台机器停摆，只有云端断连能解。
+   * 现在：推进世代号 → 唤醒全部可打断等待（安全取消点当场让路）→ 有界排空真写段；未收敛即抛出，
+   * 由协调器诚实地不授权（MUST NOT 在一个可能仍在写页面的动作头上再放一个人进来）。
    */
-  async quiesceForTask(): Promise<number> {
+  async quiesceForTask(timeoutMs = DEFAULT_TASK_QUIESCE_MS): Promise<number> {
     this.taskBlocked = true;
-    this.taskBlockEpoch++;
+    const epoch = ++this.taskBlockEpoch;
     this.wakeAfterStop = false;
     const cancelled = this.commandQueue.length;
     this.commandQueue = [];
     if (cancelled > 0) this.logger(`[browse] 任务接管取消 ${cancelled} 条未开始的旧浏览命令`);
+    // 让路：唤醒停在安全取消点（浮层闸 / 停留 / 动作前闸）上的纯等待，它们醒来即抛 TaskTakeoverError。
+    this.wakeInterruptibleSleeps();
     if (this.activeOperationCount === 0) return cancelled;
-    await new Promise<void>((resolve) => this.operationIdleWaiters.add(resolve));
+    const drained = await this.waitDrained(timeoutMs);
+    if (!drained) {
+      // 未收敛：真写段里有一个超出预算的动作。回滚自己置的冻结标志——不回滚就是把停摆从「让位态」
+      // 搬到「浏览冻结态」：协调器看着完全健康，而云端浏览命令逐条被静默丢弃，且没有任何事件会再来清它。
+      // 按世代号守卫：期间若来了新 acquire，世代号已推进，绝不能误清新任务的冻结。
+      if (this.taskBlockEpoch === epoch) this.taskBlocked = false;
+      throw new BrowseQuiesceTimeoutError(timeoutMs);
+    }
     return cancelled;
   }
 
@@ -1241,6 +1333,9 @@ export class BrowseSession {
     while (!this.stopRequested) {
       const cmd = await this.waitForCommand();
       if (this.stopRequested) return;
+      // 接管取消令牌：本命令入口拍下当前世代号。交接推进世代号 ⇒ 本命令的所有安全取消点抛出让路。
+      // 一个租约期内世代号恒定 ⇒ 持权任务自己的命令不会自尽（change lease-strict-preemption）。
+      this.activeCommandEpoch = this.taskBlockEpoch;
       try {
         await this.trackOperation(() => this.executeCommand(cmd));
         // 记账：命令的原子动作 + 功能性 settle + uplink 已完成，把「上次操作完成时刻」推进到现在，
@@ -1248,6 +1343,15 @@ export class BrowseSession {
         // session.end 非操作、stopRequested 时本命令已被 gate 中止 → 不记账。
         if (!this.stopRequested && cmd.type !== 'session.end') this.markActionEnd();
       } catch (err) {
+        // 安全取消点上被独占任务接管：该命令一个字节都没写过页面。回诚实失败回执、不记账、不重放。
+        // 红线：MUST NOT 静默丢弃（云端还要据此释放在途互动坑位）。
+        // 动作名直接回协议消息名——云端入口有归一函数；边缘侧**绝不新建映射表**（CLAUDE.md §2 第 5 处
+        // 漂移点，typecheck 抓不到，回错名的后果是角色永远等不到回执）。
+        if (err instanceof TaskTakeoverError) {
+          this.logger(`[browse] 命令 ${cmd.type} 在安全取消点被独占任务接管 → 零副作用作废`);
+          this.deps.client.reportActionCompleted?.({ action: cmd.type, ok: false, reason: 'preempted_by_task' });
+          continue;
+        }
         // CDP 断线：不当业务失败，等有界重连；成功→续跑重报，耗尽→已请求停止退出。
         if (err instanceof CdpDisconnectedError) {
           // 断连中止的若是通知巡视命令：重连后必须给云端一个诚实的 ok:false 终止回执，触发 excursion_resumer
@@ -1275,6 +1379,9 @@ export class BrowseSession {
         // 输入超时会先同步宣告 control unavailable 并请求终止；此处不得再把已请求停止的会话翻成未处理异常。
         if (this.stopRequested) return;
         throw err; // 其他业务异常保持现状（冒泡 → 会话结束）
+      } finally {
+        // 命令已离开执行域：冷启动 / 恢复路径的等待不认接管打断（它们不在 quiesce 等的原子区里）。
+        this.activeCommandEpoch = null;
       }
     }
   }
@@ -1427,6 +1534,9 @@ export class BrowseSession {
         const payload = env.payload as { keyword?: string; maxResults?: number; sort?: string; timeWindow?: string };
         const kw = payload.keyword ?? '';
         this.logger(`[browse] 命令: search.execute「${kw}」${payload.sort ? ` sort=${payload.sort}` : ''}${payload.timeWindow ? ` time=${payload.timeWindow}` : ''}`);
+        // 安全取消点（change lease-strict-preemption 4.1）：search.execute 是唯一不走动作前统一闸的
+        // 浏览命令，今天完全没有取消点。safeCloseModal 已经是页面写 ⇒ 必须查在它之前。
+        this.throwIfTakeover();
         await this.safeCloseModal();
         // 诚实闸（change comment-search-nav-confirm）：采卡前必须确认真到达搜索结果页。
         // 判据是「采卡时刻的实时 URL」——不与 executeSearch 的布尔取 AND（布尔可能滞后，
@@ -1437,8 +1547,11 @@ export class BrowseSession {
             await executeSearch(kw, {
               cdp: this.deps.cdp,
               random: this.random,
+              // sleep 保持 this.sleep（**不换可打断版**）：waitForSearchNavigation 按「已等时长 += 间隔」
+              // 记账，被唤醒后会空转到迭代耗尽、再谎报一句「没导航到搜索页」。让路由 checkpoint 负责。
               sleep: this.sleep,
               logger: this.logger,
+              checkpoint: () => this.throwIfTakeover(),
             });
             // 权威判据（采卡时刻实时 URL）：既是搜索结果页，且结果页关键词与本次搜索词一致（change
             // comment-keep-open-through-approval，关 Bug C）——提交失败时浏览器赖在旧关键词结果页上，
@@ -1463,6 +1576,9 @@ export class BrowseSession {
               }
             }
           } catch (err) {
+            // 被接管 MUST 原样抛出：吞成一次普通「搜索失败」会让命令**继续往下跑**（读 URL、采卡、上报），
+            // 既撒了谎，又在抢占方的页面上继续动作。冒到主循环 → 诚实回执 preempted_by_task。
+            if (err instanceof TaskTakeoverError) throw err;
             // 抛错（搜索框未找到等）→ 视为未到结果页，走诚实失败分支，绝不 fall through 去报当前页。
             this.logger(`[browse] 搜索执行失败：${(err as Error).message}`);
             onSearch = false;
@@ -1756,7 +1872,9 @@ export class BrowseSession {
       return;
     }
     await phase('remember_source', () => this.rememberCurrentSourceList());
-    await phase('click_primary', () => this.deps.scroller.openCard(card, { deadlineAt, clock: this.now }));
+    await phase('click_primary', () =>
+      this.deps.scroller.openCard(card, { deadlineAt, clock: this.now, checkpoint: () => this.throwIfTakeover() }),
+    );
     let opened = await phase(
       'modal_wait_primary',
       () => this.deps.modalCtrl.waitForModal(Math.min(this.modalTimeoutMs, this.remainingNoteOpenMs(deadlineAt, 'modal_wait_primary'))),
@@ -1764,7 +1882,9 @@ export class BrowseSession {
     if (!opened) {
       // 重试一次：点击可能未命中或渲染较慢
       this.logger('[browse] note.open: modal 未打开，重试一次');
-      await phase('click_retry', () => this.deps.scroller.openCard(card!, { deadlineAt, clock: this.now }));
+      await phase('click_retry', () =>
+        this.deps.scroller.openCard(card!, { deadlineAt, clock: this.now, checkpoint: () => this.throwIfTakeover() }),
+      );
       opened = await phase(
         'modal_wait_retry',
         () => this.deps.modalCtrl.waitForModal(Math.min(this.modalTimeoutMs, this.remainingNoteOpenMs(deadlineAt, 'modal_wait_retry'))),
@@ -2291,6 +2411,8 @@ export class BrowseSession {
       this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'empty_text' });
       return;
     }
+    // 提交窗口守卫（5.1）：评论提交点击前 enter、确认段（≤2s poll）内绝不被强杀，finally dispose（时基兜底自动过期）。
+    let disposeCommit: (() => void) | undefined;
     try {
       const { dispatchClick, dispatchKeystrokes, insertText } = await import('./cdp-util.js');
 
@@ -2328,8 +2450,42 @@ export class BrowseSession {
       await dispatchClick(this.deps.cdp, editor.x, editor.y, { random: this.random });
       await this.sleep(250);
 
+      // 2b) 清场前置（change lease-strict-preemption task 3.2）：输入是**在光标处追加**——
+      //     上一次被抢占 / 失败留在编辑器里的半截评论不清掉，就会和这一条拼在一起发出去。
+      //     清干净了才往下走；清不掉 = 真脏页，诚实终止（绝不带着残文提交）。
+      const clearJs = `(function(){
+        var el = document.querySelector('#content-textarea') || document.querySelector('.engage-bar.active [contenteditable="true"]') || document.querySelector('.engage-bar [contenteditable="true"]');
+        if (!el) return JSON.stringify({found:false, residual:''});
+        try {
+          el.focus();
+          var range = document.createRange(); range.selectNodeContents(el);
+          var sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+          document.execCommand('delete');
+        } catch (e) {}
+        if ((el.textContent || '').trim()) { el.textContent = ''; }
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        return JSON.stringify({found:true, residual: (el.textContent || '').trim()});
+      })()`;
+      const clearRaw = await evalRaw<string>(this.deps.cdp, clearJs);
+      const clear = typeof clearRaw === 'string' ? JSON.parse(clearRaw) : clearRaw;
+      if (!clear?.found) {
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'no_target' });
+        return;
+      }
+      if (clear.residual) {
+        this.logger(`[browse] comment 编辑器清不干净（残留 ${String(clear.residual).slice(0, 20)}…）→ 诚实终止，绝不拼接发出`);
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'editor_not_clean' });
+        return;
+      }
+
       // 3) 拟人逐字输入正文（文字部分手动输入）
-      await dispatchKeystrokes(this.deps.cdp, body, { random: this.random });
+      //    可打断 sleep + 安全取消点（change lease-strict-preemption 4.1）：被独占任务接管时，在**下一个
+      //    字符发出之前**停手。已输入的半截评论由下面的 catch 清场——不清就会和下一条评论拼在一起发出去。
+      await dispatchKeystrokes(this.deps.cdp, body, {
+        random: this.random,
+        sleep: (ms) => this.sleepInterruptible(ms),
+        checkpoint: () => this.throwIfTakeover(),
+      });
       // 3b) 联系方式（change account-group-chat-injection）：串码部分**单次整段插入**（Input.insertText），
       //     绕过逐字输入会触发的 @/# 提及/主题补全劫持；verbatim，不 trim/不逐字敲。追加「换行 + 联系方式」，
       //     与云端人审卡展示的合并终稿一致（AC-PUB 审=发）。缺省则不插、行为与今天一致。
@@ -2345,10 +2501,14 @@ export class BrowseSession {
       // 4) 提交前 fresh 复检验证码（最高风险写互动，务必复检）
       if (await this.captchaPresentFresh()) {
         this.logger('[browse] comment 提交前复检到验证码/未知阻断弹窗，放弃发送');
-        await evalRaw(this.deps.cdp, `(function(){var el=document.querySelector('#content-textarea')||document.querySelector('.engage-bar.active [contenteditable="true"]');if(el){el.textContent='';el.dispatchEvent(new Event('input',{bubbles:true}));}return 'ok';})()`);
+        await evalRaw(this.deps.cdp, CLEAR_COMMENT_EDITOR_JS);
         this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'blocked_by_captcha' });
         return;
       }
+
+      // 4b) 整条评论流的**最后一个安全取消点**：点下去就进入「已提交、结果未知」窗口，
+      //     此后取消 = 把一条**可能已经发出去**的评论当成没发生 ⇒ 上游重试 ⇒ 重复评论。
+      this.throwIfTakeover();
 
       // 5) 定位提交键并点击（有效内容后 .gray 消失）
       const submitJs = `(function(){
@@ -2363,7 +2523,10 @@ export class BrowseSession {
         this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'no_target' });
         return;
       }
+      // 🔴 提交窗口开启（5.1）：点下即进入禁区，协调器此间不强杀（回 window_busy + 剩余预算）。
+      disposeCommit = this.deps.commitWindow?.enter(4000, 'xhs_comment_submit');
       await dispatchClick(this.deps.cdp, submit.x, submit.y, { random: this.random });
+      // 🔴 提交键已点下：以下后置校验 MUST NOT 取消（禁区）。
 
       // 6) 后置校验：轮询「编辑器清空 且 自己的评论作为顶部新行出现」，命中即返回、上限 2000ms
       //    （取代固定 sleep(2000)；发评论生效多在 1s 内，快路径省 ~1s）。
@@ -2390,12 +2553,25 @@ export class BrowseSession {
         this.logger(`[browse] ✓ 评论发布成功（编辑器清空 + 自己的评论行出现，耗时 ${elapsed()}）`);
         this.deps.client.reportActionCompleted?.({ action, ok: true });
       } else {
-        this.logger(`[browse] ⚠ 评论提交后未确认生效 (cleared=${v?.cleared}, ownRow=${v?.ownRow}，耗时 ${elapsed()})`);
-        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'state_unchanged' });
+        // 提交三态（change lease-strict-preemption task 3.2）：**提交动作已经派发出去了**。
+        // 这一条评论可能真已发出（网络在途 / 页面渲染慢），也可能没发出——我们分不清。
+        // 谎报「未提交」会让上游重试 ⇒ 重复评论。故 MUST 用可区分的「已提交、结果未知」，
+        // 上游据此 MUST NOT 自动重试（去重账本 + 人工确认），见 cloud task 7.6。
+        this.logger(`[browse] ⚠ 评论已提交但未确认生效 (cleared=${v?.cleared}, ownRow=${v?.ownRow}，耗时 ${elapsed()}) → 已提交、结果未知，绝不重试`);
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'submitted_unconfirmed' });
       }
     } catch (err) {
+      if (err instanceof TaskTakeoverError) {
+        // 让位前 MUST 清场：半截评论留在编辑器里，下一条评论的清场闸会把它判成 editor_not_clean、
+        // 白白毙掉一条有效评论（清不掉时更会真发出一条拼接的评论）。清场是让位前必须跑完的写，
+        // 仍跑在页面写记账内 ⇒ 交接会有界等它收敛。
+        await evalRaw(this.deps.cdp, CLEAR_COMMENT_EDITOR_JS).catch(() => undefined);
+        throw err; // 冒到命令主循环 → 诚实回执 preempted_by_task、不记账、不重放
+      }
       this.logger(`[browse] comment 执行失败（耗时 ${elapsed()}）：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action, ok: false, reason: (err as Error).message });
+    } finally {
+      disposeCommit?.(); // 关窗（enter 只在提交点击后被赋值 ⇒ 取消/失败早退时为 no-op，绝不覆盖 takeover 清场）。
     }
   }
 
@@ -2854,8 +3030,11 @@ export class BrowseSession {
    * scrollMax 由云端下发，此处当作硬上限的下限参考（实际上限取 max(scrollMax, HARD_CAP_FLOOR)）。
    */
   private async browseNotificationComments(scrollMax: number): Promise<void> {
+    // 提交窗口守卫（5.1）：分类栏目点击**消费未读、无回滚** ⇒ 窗口 MUST 覆盖点击那一刻；确认/滚动尾段只读，超预算自动过期也安全。
+    let disposeCommit: (() => void) | undefined;
     try {
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
+      disposeCommit = this.deps.commitWindow?.enter(20000, 'xhs_notification_comments');
       await evalRawFn<boolean>(
         this.deps.cdp,
         // 真机校准（2026-06-24）：真实分类 tab = [class*="tab-item"]（叶子），点它而非全页文本匹配（避免点到包裹容器）。
@@ -2890,6 +3069,8 @@ export class BrowseSession {
       if (err instanceof CdpDisconnectedError) throw err; // 断连不当业务失败：冒泡到主循环重连，绝不假报「空 items」
       this.logger(`[browse] notification.browse_comments 失败（上报空 items 以便云端收尾）：${(err as Error).message}`);
       this.deps.client.send?.('notification.items', { items: [] });
+    } finally {
+      disposeCommit?.();
     }
   }
 
@@ -2900,11 +3081,14 @@ export class BrowseSession {
    */
   private async viewNotificationCategory(kind: 'likes' | 'follows'): Promise<void> {
     const action = kind === 'likes' ? 'browse_notification_likes' : 'browse_notification_follows';
+    // 提交窗口守卫（5.1）：分类栏目点击消费未读、无回滚 ⇒ 窗口 MUST 覆盖点击；早退(no_target)/尾段都由 finally 关窗。
+    let disposeCommit: (() => void) | undefined;
     try {
       const { evalRaw: evalRawFn } = await import('./cdp-util.js');
       const labelRe = kind === 'likes' ? '赞|收藏' : '关注|粉丝';
       // 捕获点击命中布尔：未命中分类 tab（选择器漂移/页面未渲染/单合并 tab）→ 诚实 no_target，
       // **绝不**像旧码那样丢弃返回值、无条件报 viewed（那是静默假成功，且掩盖了 6.5.4 本要暴露的选择器漂移）。
+      disposeCommit = this.deps.commitWindow?.enter(20000, kind === 'likes' ? 'xhs_notification_likes' : 'xhs_notification_follows');
       const clicked = await evalRawFn<boolean>(
         this.deps.cdp,
         // 真机校准（2026-06-24）：分类 tab = [class*="tab-item"]（叶子，文本如「赞和收藏1」含角标数字故放宽到 <=8）。
@@ -2951,6 +3135,8 @@ export class BrowseSession {
       if (err instanceof CdpDisconnectedError) throw err; // 断连不当业务失败：冒泡到主循环重连，绝不假报「已看」
       this.logger(`[browse] ${action} 失败：${(err as Error).message}`);
       this.deps.client.reportActionCompleted?.({ action, ok: false, reason: (err as Error).message });
+    } finally {
+      disposeCommit?.();
     }
   }
 
@@ -3155,7 +3341,15 @@ export class BrowseSession {
     if (!monitor && !gate) return;
     // 退出条件除 stopRequested 外，还包含"队列已有 session.end"——否则弹窗常驻时
     // 云端 session.end 进队列却无人消费，闸门永远轮询 → 死锁（见 terminatePending 注释）。
+    //
+    // 第三个出口 = 任务接管（change lease-strict-preemption，治硬死锁）：
+    // 本闸门是 executeCommand 的第一句、排在任何页面写之前——停在这里的命令**一个字节都没写过页面**。
+    // 但交接（quiesceForTask）等的是「命令处理函数还没返回」，于是它无界地等一条正在等验证码的命令，
+    // 而那个验证码只有这次交接要授予的 system_recovery 协助任务才能点掉 → 闭环死锁，整台机器停摆。
+    // 故：接管信号到达即抛出，命令零副作用作废、当场让路。**绝不能只 return**——那会让命令继续往下
+    // 对着验证码墙点击。
     while (!this.stopRequested && !this.terminatePending()) {
+      this.throwIfTakeover();
       let blocked = false;
       let kind: OverlayKind = 'none';
       if (monitor) {
@@ -3183,8 +3377,11 @@ export class BrowseSession {
         const label = kind === 'captcha' ? '验证码' : kind === 'unknown' ? '未知阻断' : '登录';
         this.logger(`[browse] 检测到${label}弹窗，暂停操作，等待处理…`);
       }
-      await this.sleep(this.loginGatePollMs);
+      // 可打断 sleep：交接推进世代号后会立刻唤醒，无需干等满一个轮询周期（2s）。
+      await this.sleepInterruptible(this.loginGatePollMs);
     }
+    // 循环因 stopRequested / 终止命令退出时也要认接管——避免刚被接管的命令继续往下写页面。
+    this.throwIfTakeover();
   }
 
   /**

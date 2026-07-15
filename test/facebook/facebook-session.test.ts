@@ -9,7 +9,8 @@ import {
   type FacebookBrowseSessionDeps,
   type FacebookBrowseMode,
 } from '../../src/facebook/facebook-session.js';
-import type { FacebookCommentHandler } from '../../src/facebook/comment-handler.js';
+import { FacebookCommentHandler } from '../../src/facebook/comment-handler.js';
+import { FacebookCommentExecutor } from '../../src/facebook/comment-executor.js';
 import type {
   FacebookFeedReader,
   FacebookFeedCard,
@@ -53,7 +54,10 @@ function makeSession(opts: {
   clickHome?: FacebookHomeRefreshResult;
   sleep?: (ms: number) => Promise<void>;
   hangOpen?: boolean;
+  /** 卡住的读帖执行体等这个 promise 才结束——用来造「孤儿写者在下一条命令跑到一半时才 settle」。 */
+  hangOpenUntil?: Promise<void>;
   cdpSend?: BrowseCdp['send'];
+  commentHandler?: FacebookCommentHandler;
 } = {}): Harness {
   const cards: PageCardsPayload[] = [];
   const details: NoteDetailPayload[] = [];
@@ -87,11 +91,13 @@ function makeSession(opts: {
       actions.push(p);
     },
   };
-  const commentHandler = {
-    handle: async (env: Envelope) => {
-      delegated.push(env);
-    },
-  } as unknown as FacebookCommentHandler;
+  const commentHandler =
+    opts.commentHandler ??
+    ({
+      handle: async (env: Envelope) => {
+        delegated.push(env);
+      },
+    } as unknown as FacebookCommentHandler);
   const feedReader = {
     ensureFeed: async (url: string) => {
       state.ensureCalls++;
@@ -120,6 +126,8 @@ function makeSession(opts: {
   } as unknown as FacebookFeedReader;
   const postReader = {
     openAndRead: async (permalink: string): Promise<FacebookPostDetail> => {
+      // 等门（可选）：命令已超时放行串行链、执行体仍在飞 = 孤儿写者；门一开它才 settle。
+      if (opts.hangOpenUntil) await opts.hangOpenUntil;
       if (opts.hangOpen) return new Promise<FacebookPostDetail>(() => {}); // 永不 resolve → 触发超时兜底
       return {
         ok: true,
@@ -693,4 +701,220 @@ test('session_closing：close 后命令诚实回执，绝不静默', async () =>
   h.session.close();
   await h.session.onCloudCommand(makeEnv('page.scroll', {}));
   assert.equal(h.actions.at(-1)?.reason, 'session_closing');
+});
+
+// ─────────── 让位探针不许撒谎（change lease-strict-preemption task 2）───────────
+
+test('让位探针不许撒谎：命令超时放行串行链后执行体仍在写页面 → 交接 MUST 抛出，绝不回「已静默」', async () => {
+  // hangOpen：读帖执行体永不返回（真实对应 CDP 卡死）。commandTimeoutMs=50 → 命令超时回诚实 timeout
+  // 并**放行串行链**，但执行体仍挂在页面上 = 孤儿写者。
+  const h = makeSession({ mode: 'on', hangOpen: true, commandTimeoutMs: 50 });
+  await h.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  assert.equal(h.actions.at(-1)?.reason, 'timeout', '命令已超时并放行链');
+  assert.ok(
+    h.logs.some((l) => l.includes('孤儿写者')),
+    '超时放行链时 MUST 登记孤儿写者',
+  );
+
+  // 修复前：quiesceForTask 只 await 串行链 → 链已被超时放行 → 回 0（「页面已静默」）＝**谎话**，
+  // 抢占者会在一个仍在写页面的执行体之上拿到执行权（双写）。修复后必须诚实抛出。
+  await assert.rejects(
+    () => h.session.quiesceForTask(200),
+    (err: Error) => err.name === 'BrowseQuiesceTimeoutError',
+    '孤儿写者在飞时 MUST NOT 谎称已静默',
+  );
+});
+
+test('让位：命令停在动作前犹豫（安全取消点）被接管 → 秒收敛、零页面写、回诚实 preempted_by_task', async () => {
+  const h = makeSession({ mode: 'on' });
+  // 60s 犹豫：纯等待、平台侧零副作用。被接管应当场作废，绝不等它睡完。
+  const running = h.session.onCloudCommand(
+    makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE', thinkMs: 60_000 }),
+  );
+  await sleep(20); // 让命令跑进 thinkBefore
+
+  const t0 = Date.now();
+  assert.equal(await h.session.quiesceForTask(2_000), 0, '安全取消点上的纯等待 MUST 当场让路');
+  assert.ok(Date.now() - t0 < 1_000, `交接必须秒收敛，实测 ${Date.now() - t0}ms`);
+  await running;
+
+  assert.equal(h.details.length, 0, '零页面写：帖子根本没被打开');
+  assert.equal(h.actions.at(-1)?.ok, false);
+  assert.equal(h.actions.at(-1)?.reason, 'preempted_by_task', '诚实回执，绝不假成功、绝不静默丢弃');
+});
+
+// ─────── 取消点补齐：FB 评论直路（change lease-strict-preemption task 4）───────
+
+test('让位：FB 评论逐字输入中途被接管 → 清空半截评论 + 回诚实 preempted_by_task（绝不 handler_error、绝不零回执）', async () => {
+  const body = '这是一条会被独占任务打断的评论';
+  const replies: ActionCompletedPayload[] = [];
+  const typed: string[] = [];
+  let editorSelects = 0; // clearEditorBestEffort 的「全选编辑器内容」
+  let backspaces = 0; // clearEditorBestEffort 的删除键（逐字输入本身不产生退格）
+  let enters = 0; // FB 评论回车即发 = 提交点
+  let quiesced: Promise<number> | undefined;
+  let sessionRef: FacebookBrowseSession | undefined;
+
+  const cdp = {
+    send: async <T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> => {
+      const val = (v: unknown): T => ({ result: { value: v } }) as unknown as T;
+      if (method === 'Input.insertText') {
+        typed.push(String(params?.text ?? ''));
+        // 打到第 3 个字符时独占任务发起交接：半截评论此刻**已在编辑器里**。
+        if (typed.length === 3) quiesced = sessionRef?.quiesceForTask(2_000);
+        return {} as T;
+      }
+      if (method === 'Input.dispatchKeyEvent' && params?.type === 'keyDown') {
+        if (params?.key === 'Backspace') backspaces++;
+        if (params?.key === 'Enter') enters++;
+        return {} as T;
+      }
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params?.expression ?? '');
+        if (expr.includes('focused:focused')) return val(JSON.stringify({ found: true, focused: true, permissionGated: false }));
+        if (expr.includes('selectNodeContents')) {
+          editorSelects++;
+          return val('selected');
+        }
+        return val('{}');
+      }
+      return {} as T;
+    },
+  } as unknown as BrowseCdp;
+
+  const commentHandler = new FacebookCommentHandler({
+    executor: new FacebookCommentExecutor(
+      {
+        cdp,
+        getAccountId: () => '100000123456789',
+        acceptConsent: async () => ({ handled: false, cleared: false, attempts: 0 }),
+        sleep: async () => {},
+        logger: () => {},
+      },
+      { settleMs: 0, waitAfterSubmitMs: 0, waitAfterReloadMs: 0 },
+    ),
+    client: {
+      reportPageCards: () => {},
+      reportNoteDetail: () => {},
+      reportActionCompleted: (p: ActionCompletedPayload) => replies.push(p),
+    },
+    logger: () => {},
+  });
+
+  const h = makeSession({ mode: 'on', commentHandler });
+  sessionRef = h.session;
+
+  await h.session.onCloudCommand(
+    makeEnv('interaction.comment', { noteId: 'https://www.facebook.com/groups/123456/posts/999', text: body }),
+  );
+  assert.equal(await quiesced, 0, '取消点上的命令 MUST 当场收敛，抢占者才拿得到「页面已静默」');
+
+  // ① 半截评论 MUST 被清场：FB 侧打字前只聚焦、不清空 —— 留下的半截会直接接在下一条评论前面发出去。
+  assert.ok(typed.length >= 3 && typed.length < Array.from(body).length, `输入应在中途停下，实测打了 ${typed.length} 字`);
+  assert.equal(editorSelects, 1, '接管后 MUST 全选编辑器内容');
+  assert.equal(backspaces, 1, '接管后 MUST 删除已打入的半截评论');
+  // ② 禁区未跨：回车即发，绝不能在提交后才取消（那会把一条已发出的评论当成没发生 → 上游重发）。
+  assert.equal(enters, 0, '打字段被接管 → 绝不提交');
+
+  // ③ FB 评论走会话直路、不经浏览命令主循环 ⇒ 回执必须由 commentHandler 就地发出；
+  //    抛出去只会落进会话链级 catch（只打日志、零回执）→ 云端干等超时、看门狗杀整会话。
+  assert.equal(replies.length, 1, '恰好一条回执：绝不静默丢弃');
+  assert.equal(replies[0].action, 'comment');
+  assert.equal(replies[0].ok, false, '被接管绝不假成功');
+  assert.equal(replies[0].reason, 'preempted_by_task', '被接管 = 未开始/已作废，MUST NOT 降级成 handler_error');
+});
+
+test('让位：孤儿写者在评论打字中途结束 → **绝不能**解除这条评论的取消点武装（写者重叠：判据必须按写者隔离）', async () => {
+  // 本会话允许写者重叠：命令超时会放行串行链、执行体变成孤儿仍在写页面，而下一条命令已经开跑。
+  // 若「我这条命令启动时的世代号」是一个共享标量，孤儿收尾时会把**正在跑的那条命令**的判据一起清掉
+  // ⇒ 它的取消点全部静默失效：评论一路打完并按下回车，让位退化成「等满整条命令」。
+  const body = '这是一条会被独占任务打断的评论';
+  const replies: ActionCompletedPayload[] = [];
+  const typed: string[] = [];
+  let backspaces = 0;
+  let enters = 0;
+  let quiesced: Promise<number> | undefined;
+  let sessionRef: FacebookBrowseSession | undefined;
+  let openOrphanGate!: () => void;
+  const orphanGate = new Promise<void>((r) => {
+    openOrphanGate = r;
+  });
+
+  const cdp = {
+    send: async <T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> => {
+      const val = (v: unknown): T => ({ result: { value: v } }) as unknown as T;
+      if (method === 'Input.insertText') {
+        typed.push(String(params?.text ?? ''));
+        if (typed.length === 3) {
+          // 半截评论已在编辑器里。此刻让**孤儿**结束——旧实现会在它的收尾里把本命令的判据清成 null。
+          openOrphanGate();
+          await new Promise((r) => setTimeout(r, 50)); // 让孤儿的收尾真正跑完
+          quiesced = sessionRef?.quiesceForTask(2_000); // 再发起交接
+        }
+        return {} as T;
+      }
+      if (method === 'Input.dispatchKeyEvent' && params?.type === 'keyDown') {
+        if (params?.key === 'Backspace') backspaces++;
+        if (params?.key === 'Enter') enters++;
+        return {} as T;
+      }
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params?.expression ?? '');
+        if (expr.includes('focused:focused')) return val(JSON.stringify({ found: true, focused: true, permissionGated: false }));
+        if (expr.includes('selectNodeContents')) return val('selected');
+        return val('{}');
+      }
+      return {} as T;
+    },
+  } as unknown as BrowseCdp;
+
+  const commentHandler = new FacebookCommentHandler({
+    executor: new FacebookCommentExecutor(
+      {
+        cdp,
+        getAccountId: () => '100000123456789',
+        acceptConsent: async () => ({ handled: false, cleared: false, attempts: 0 }),
+        sleep: async () => {},
+        logger: () => {},
+      },
+      { settleMs: 0, waitAfterSubmitMs: 0, waitAfterReloadMs: 0 },
+    ),
+    client: {
+      reportPageCards: () => {},
+      reportNoteDetail: () => {},
+      reportActionCompleted: (p: ActionCompletedPayload) => replies.push(p),
+    },
+    logger: () => {},
+  });
+
+  // ① 造孤儿：读帖执行体卡在门后，命令 50ms 超时 → 回诚实 timeout 并放行串行链，执行体仍在飞。
+  const h = makeSession({ mode: 'on', commentHandler, commandTimeoutMs: 50, hangOpenUntil: orphanGate });
+  sessionRef = h.session;
+  await h.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  assert.equal(h.actions.at(-1)?.reason, 'timeout', '前置：读帖命令已超时并放行链');
+  assert.ok(h.logs.some((l) => l.includes('孤儿写者')), '前置：孤儿写者已登记');
+
+  // ② 孤儿在飞期间下发评论 → 打到第 3 个字符时孤儿结束，随后交接。
+  await h.session.onCloudCommand(
+    makeEnv('interaction.comment', { noteId: 'https://www.facebook.com/groups/123456/posts/999', text: body }),
+  );
+  await quiesced;
+
+  // 旧实现（共享标量）在这里全线崩：孤儿的收尾清掉判据 ⇒ 取消点一个都不抛 ⇒ 评论打满并回车发出。
+  assert.ok(
+    typed.length >= 3 && typed.length < Array.from(body).length,
+    `孤儿结束绝不能解除本命令的取消点武装：输入应停在中途，实测打了 ${typed.length}/${Array.from(body).length} 字`,
+  );
+  assert.equal(enters, 0, '禁区未跨：绝不提交一条被接管的评论');
+  assert.equal(backspaces, 1, '半截评论 MUST 被清场');
+  assert.equal(replies.length, 1, '恰好一条回执');
+  assert.equal(replies[0].reason, 'preempted_by_task', '被接管 = 未开始/已作废');
+});
+
+test('让位：无在飞命令 / 命令已正常跑完 → 交接照常收敛回 0（不引入回归）', async () => {
+  const h = makeSession({ mode: 'on' });
+  assert.equal(await h.session.quiesceForTask(500), 0);
+  await h.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  assert.equal(h.details.length, 1, '正常命令照常执行');
+  assert.equal(await h.session.quiesceForTask(500), 0);
 });

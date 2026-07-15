@@ -6,6 +6,8 @@ import type { MessageType } from '../../src/comm/protocol.js';
 
 class FakeCdp implements BrowseCdp {
   readonly calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  /** 当前视口 URL（回放前复检据此判断页面是否被导航走；测试可在 click 前改它）。 */
+  viewportUrl = 'https://xhs.test/explore';
   private shotIdx = 0;
   constructor(
     private readonly opts: {
@@ -20,7 +22,7 @@ class FakeCdp implements BrowseCdp {
     if (method === 'Runtime.evaluate') {
       const expression = String(params?.expression ?? '');
       if (expression.includes('deviceScaleFactor')) {
-        return { result: { value: { width: 1000, height: 800, deviceScaleFactor: 2, url: 'https://xhs.test/explore' } } } as T;
+        return { result: { value: { width: 1000, height: 800, deviceScaleFactor: 2, url: this.viewportUrl } } } as T;
       }
       return {
         result: {
@@ -152,7 +154,7 @@ test('captcha assist click: normalized points map to viewport coordinates and cl
     client,
     edgeId: 'edge-1',
     getAccountId: () => 'acc-1',
-    overlayMonitor: new FakeMonitor(['captcha', 'none']),
+    overlayMonitor: new FakeMonitor(['captcha', 'captcha', 'none']),
     now: () => 3000,
     idGen: () => 'snap-click',
     sleep: async () => {},
@@ -345,7 +347,7 @@ test('拟人注入：多点连续光标（下点从上点真实落点起步）+ 
     cdp,
     client,
     edgeId: 'edge-1',
-    overlayMonitor: new FakeMonitor(['captcha', 'none']),
+    overlayMonitor: new FakeMonitor(['captcha', 'captcha', 'none']),
     now: () => 5000,
     idGen: () => 'snap-mp',
     sleep: async () => {},
@@ -381,7 +383,7 @@ test('拟人注入：真实随机源下落点仍落在 target±jitter 容差内�
     cdp,
     client,
     edgeId: 'edge-xyz',
-    overlayMonitor: new FakeMonitor(['captcha', 'none']),
+    overlayMonitor: new FakeMonitor(['captcha', 'captcha', 'none']),
     now: () => 6000,
     idGen: () => 'snap-tol',
     sleep: async () => {},
@@ -410,7 +412,7 @@ test('轨迹回放：带有效轨迹 → click_result replayMode=trajectory，�
     cdp,
     client,
     edgeId: 'edge-1',
-    overlayMonitor: new FakeMonitor(['captcha', 'none']),
+    overlayMonitor: new FakeMonitor(['captcha', 'captcha', 'none']),
     now: () => 7000,
     idGen: () => 'snap-traj',
     sleep: async () => {},
@@ -445,7 +447,7 @@ test('轨迹回放：畸形轨迹（clicks 长度不符）→ 诚实回落合成
     cdp,
     client,
     edgeId: 'edge-1',
-    overlayMonitor: new FakeMonitor(['captcha', 'none']),
+    overlayMonitor: new FakeMonitor(['captcha', 'captcha', 'none']),
     now: () => 8000,
     idGen: () => 'snap-bad',
     sleep: async () => {},
@@ -467,4 +469,75 @@ test('轨迹回放：畸形轨迹（clicks 长度不符）→ 诚实回落合成
   const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as { replayMode?: string };
   assert.equal(result.replayMode, 'synthetic', '畸形轨迹应回落合成');
   assert.ok(logs.some((l) => l.includes('轨迹无效')), '丢弃轨迹应可观测（有日志）');
+});
+
+// ── 回放前强制复检（change lease-strict-preemption 5.7）─────────────────────────
+
+test('回放前复检：阻断已自行消失 → not_blocked + risk.captcha_cleared，绝不派发盲点', async () => {
+  const cdp = new FakeCdp({ overlayRect: { x: 100, y: 100, width: 200, height: 100 } });
+  const client = new FakeClient();
+  const handler = new CaptchaAssistHandler({
+    cdp,
+    client,
+    edgeId: 'edge-1',
+    // capture='captcha'（抓帧存快照）；运营看图期间阻断消失，click 回放前复检探到 'none'。
+    overlayMonitor: new FakeMonitor(['captcha', 'none']),
+    now: () => 9000,
+    idGen: () => 'snap-stale',
+    sleep: async () => {},
+    logger: () => {},
+    random: () => 0.5,
+  });
+  await handler.handle('captcha.assist.capture', { incidentId: 'stale-1', quality: 80 });
+  client.sent.length = 0;
+  cdp.calls.length = 0;
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'stale-1',
+    snapshotId: 'snap-stale',
+    points: [{ x: 0.5, y: 0.5 }],
+    settleMs: 1,
+  });
+
+  assert.deepEqual(client.sent.map((s) => s.type), ['captcha.assist.click_result', 'risk.captcha_cleared']);
+  assert.equal((client.sent[0].payload as { status: string }).status, 'not_blocked');
+  // 回放前就拦下：阻断已不在，绝不在（可能已是别的页面的）坐标上派发任何点击。
+  const pressed = cdp.calls.find((c) => c.method === 'Input.dispatchMouseEvent' && c.params?.type === 'mousePressed');
+  assert.equal(pressed, undefined, '阻断已消失时绝不派发点击');
+});
+
+test('回放前复检：页面已被导航走（URL 变）→ stale_snapshot + 重抓帧，绝不派发盲点', async () => {
+  const cdp = new FakeCdp({ overlayRect: { x: 100, y: 100, width: 200, height: 100 } });
+  const client = new FakeClient();
+  const handler = new CaptchaAssistHandler({
+    cdp,
+    client,
+    edgeId: 'edge-1',
+    // 阻断类型全程仍是 'captcha'（没变）——只有 URL 这一路能抓出"页面被导航走"。
+    overlayMonitor: new FakeMonitor([]),
+    now: () => 10000,
+    idGen: seqIdGen('snap'), // snap-1 (capture), snap-2 (回放前复检重抓)
+    sleep: async () => {},
+    logger: () => {},
+    random: () => 0.5,
+  });
+  await handler.handle('captcha.assist.capture', { incidentId: 'moved-1', quality: 80 });
+  client.sent.length = 0;
+  cdp.calls.length = 0;
+  // 运营看图期间页面被导航到发布编辑页。
+  cdp.viewportUrl = 'https://xhs.test/publish/publish';
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'moved-1',
+    snapshotId: 'snap-1',
+    points: [{ x: 0.5, y: 0.5 }],
+    settleMs: 1,
+  });
+
+  const types = client.sent.map((s) => s.type);
+  assert.ok(types.includes('captcha.assist.snapshot'), '页面变了应重抓帧让运营在新帧上重标');
+  const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as { status: string };
+  assert.equal(result.status, 'stale_snapshot');
+  const pressed = cdp.calls.find((c) => c.method === 'Input.dispatchMouseEvent' && c.params?.type === 'mousePressed');
+  assert.equal(pressed, undefined, 'URL 变了时绝不派发点击');
 });

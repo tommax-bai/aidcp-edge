@@ -69,16 +69,16 @@ import {
 import { deriveEdgeId } from './client/edge-id.js';
 import { CloudElementSelector } from './client/cloud-selector.js';
 import { LikeStepRunner } from './client/like-runner.js';
-import { publishPost } from './flows/publish-post.js';
 import { PublishCommandDispatcher } from './flows/publish-command-handlers.js';
 import { EdgeTaskCoordinator } from './execution/edge-task-coordinator.js';
+import { CommitWindowGuard, combineCommitWindows } from './execution/commit-window.js';
+import { abortForTakeover, TaskTakeoverError, type TakeoverCtx } from './execution/takeover.js';
 import { PublishUiEventTracker, uiSnapshotToLines, writeNoteStageLine } from './flows/ui-event-lines.js';
 import { ImageUploader, imageTempPrefixFor, sweepImageTempDirs } from './flows/image-uploader.js';
 import { CdpFileInputSetter } from './cdp/file-input-setter.js';
 import { AnchorCache } from './locating/cache.js';
-import { buildPublishApprovalRequestId } from './publish/approval-gate.js';
+import type { EngineOptions } from './locating/engine.js';
 import type {
-  PublishResultPayload,
   PublishCommandResultPayload,
   EdgeTaskAcquirePayload,
   EdgeTaskReleasePayload,
@@ -102,6 +102,22 @@ import {
   type EdgeBrowseSession,
 } from './browse/index.js';
 import type { IdentityDecision, SelfIdentityResult } from './cdp/self-identity.js';
+
+/**
+ * 发布路径的定位引擎参数（change lease-strict-preemption 4.3）。
+ *
+ * **值 = 今天的默认值，行为逐字节不变**。意义在于把这条路径的等待上界从「两处默认值意外相乘」
+ * （引擎默认最多 3 轮 × 云端选元素默认 200s 上限）变成**发布路径自己写下的一个数**，给后续的
+ * 边-云预算对齐留一个单点。
+ *
+ * selectTimeoutMs MUST > 云端单次模型调用天花板 180s：压小了会把一次尚在进行的合法 thinking 选择
+ * 误判成 llm_error，而引擎见 llm_error 立刻升级上报、不再重试 ⇒ 一条本可成功的发布指令被判失败，
+ * 而发布失败在云端是不可逆终态。
+ *
+ * 注：真实等待上界并非 3×200s——云端挂起时选择器转 llm_error、引擎立刻停手不进第 2 轮，所以
+ * 「云端不回话」这一档的上界是 1×200s；三轮相乘只在「每轮都在 200s 内成功回一个没匹配上」时才凑得齐。
+ */
+const PUBLISH_ENGINE_OPTIONS: EngineOptions = { maxAttempts: 3, selectTimeoutMs: 200_000 };
 
 function verifiedAccountNickname(idRes: SelfIdentityResult, decision: IdentityDecision): string | undefined {
   if (!idRes.ok || decision.kind !== 'use') return undefined;
@@ -354,6 +370,17 @@ async function main(): Promise<void> {
   // §7 在途发布追踪：回收若撞上在途发布，先把它诚实判失败（让审批/通知侧看到失败而非半成品），
   // 绝不静默丢弃让其跨重起被重复触发 → 真账号重复发帖。值为「按各自结果形状诚实判失败」的闭包。
   const inFlightPublishes = new Map<string, (reason: string) => void>();
+  // 抢占取消登记（change lease-strict-preemption 5.3）：每条在途发布 dispatch 的**真取消**句柄——
+  //   abort() 触发本命令的接管（abortForTakeover），settled 在 dispatch 真收敛时 resolve。
+  //   协调器 writers.cancelPublish 遍历触发 abort + 有界等 settled；未收敛即抛（判控制面故障 yield_timeout）。
+  //   与 inFlightPublishes（断连/回收路径的诚实失败回执）分工不同：前者取消、后者只发回执。
+  const inFlightPublishCancels = new Map<string, { abort: () => void; settled: Promise<void> }>();
+  // 提交窗口守卫（change lease-strict-preemption 5.1）：页面写者进入不可逆提交动作前 enter()、确认后 dispose()。
+  //   publishGuard 归发布写者（XHS runSubmit + FB publish-executor）；browseGuard 归浏览写者（XHS 评论/通知分类、FB 评论/加群）。
+  //   在此集中创建、下注入各写者（enter/exit），并（批 B-2b 激活时）经 combineCommitWindows 聚合喂给协调器 writers 探针。
+  //   系统同一时刻至多一个独占写者在跑 ⇒ 至多一个窗口开着。
+  const publishGuard = new CommitWindowGuard();
+  const browseGuard = new CommitWindowGuard();
   // 退出码契约（看护进程 launch-multinode 据此决定是否重起）：
   //   0            = 关机（SIGINT/SIGTERM），不重起；
   //   EXIT_RECYCLE = 可恢复终态回收，请重起（sysexits EX_TEMPFAIL=75：临时失败、邀请重试）。
@@ -504,6 +531,32 @@ async function main(): Promise<void> {
       quiesceForTask: () => browse?.quiesceForTask() ?? Promise.resolve(0),
       resumeAfterTask: () => browse?.resumeAfterTask() ?? Promise.resolve(),
     },
+    // 页面写者注册表探针（change lease-strict-preemption 5.2/5.3/5.9）：**接线即激活抢占引擎**。
+    //   - inCommitWindow/commitWindowRemainingMs：六站提交窗口聚合（enter/exit 在各写者内）；窗口内绝不强杀，回 window_busy + 剩余预算。
+    //   - publishInFlight：在途发布写（独立于租约）→ 封住普通浏览导航，绝不让恢复导航把发布页导走（治 5.9 假成功）。
+    //   - cancelPublish：抢占/让位时真取消在途发布并有界等收敛；未收敛即抛（协调器判控制面故障 yield_timeout）。
+    writers: {
+      ...combineCommitWindows([publishGuard, browseGuard]),
+      publishInFlight: () => inFlightPublishes.size > 0,
+      cancelPublish: async (timeoutMs?: number): Promise<number> => {
+        const entries = [...inFlightPublishCancels.values()];
+        if (entries.length === 0) return 0;
+        for (const entry of entries) entry.abort(); // 触发接管（abortForTakeover）：下一个安全取消点抛出、dispatch 就地作废
+        const budget = timeoutMs && timeoutMs > 0 ? timeoutMs : Number(process.env.AIDCP_TASK_QUIESCE_MS) || 30_000;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`publish_cancel_timeout_${budget}ms`)), budget);
+          timer.unref?.();
+        });
+        try {
+          // allSettled 在全部 dispatch 真收敛时 resolve；超预算未收敛 → timeout 抛出 → 协调器判控制面故障。
+          await Promise.race([Promise.allSettled(entries.map((entry) => entry.settled)), timeout]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+        return entries.length;
+      },
+    },
     canAcquire: () => session.cdp.isControlReady(),
     // 「浏览器被我们自己收起来了」≠「浏览器坏了」。前者叫得醒，后者才是 cdp_unhealthy。
     browserAbsent: () => coldStandbyActive,
@@ -576,73 +629,9 @@ async function main(): Promise<void> {
     }
   });
 
-  client.onPublishCommand((env) => {
-    void (async () => {
-      console.log(writeNoteStageLine());
-      // 浏览器闸（change browser-slot-scheduling）：发布是第二个「没有唤醒守卫」的入口——冷待机中
-      // 它此前会直接摸一个已被关掉的浏览器。先唤醒、有界等；唤不醒就**诚实回失败**，绝不静默无动作。
-      if (!(await ensureBrowserAwake(`publish:${env.id}`))) {
-        console.warn('[aidcp-edge] 发布命令到达时浏览器处于冷待机且唤醒失败 → 诚实回执失败（未发布）');
-        try {
-          client.send('publish.result', { ok: false, error: '[browser_wake_failed] 浏览器处于待机且未能唤醒，本次未发布' }, env.id);
-        } catch {
-          /* best-effort */
-        }
-        return;
-      }
-      // §7 在途登记：回收若撞上这条在途发布，按 publish.result 形状诚实判失败（同 env.id 回执）。
-      inFlightPublishes.set(env.id, (reason) => {
-        try {
-          client.send('publish.result', { ok: false, error: `[recycled] ${reason}` }, env.id);
-        } catch {
-          /* 连接可能已在关闭中；best-effort */
-        }
-      });
-      let result: PublishResultPayload;
-      try {
-        const requestId = buildPublishApprovalRequestId();
-        client.send('publish.approval_request', {
-          requestId,
-          title: env.payload.title,
-          content: env.payload.content,
-          tags: env.payload.tags,
-          edgeId,
-        });
-        result = await publishPost(
-          {
-            dom: session.dom,
-            executor: session.executor,
-            selector,
-            cache: publishCache,
-          },
-          {},
-          env.payload,
-          // A 阶段4：人审默认必过（AC-PUB）——缺省/任何非 'false' 值都挂闸；仅显式 AIDCP_REAL_PUBLISH=false 才跳过（本地开发）。
-          process.env.AIDCP_REAL_PUBLISH !== 'false'
-            ? {
-                requestId,
-                pollIntervalMs: Number(process.env.AIDCP_PUBLISH_APPROVAL_POLL_MS ?? 2_000),
-                timeoutMs: Number(process.env.AIDCP_PUBLISH_APPROVAL_TIMEOUT_MS ?? 300_000),
-                consumeSignal: process.env.AIDCP_PUBLISH_APPROVAL_CONSUME !== 'false',
-              }
-            : undefined,
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        result = { ok: false, error: `[unknown] ${message}` };
-      } finally {
-        inFlightPublishes.delete(env.id);
-      }
-      try {
-        client.send('publish.result', result, env.id);
-      } catch (sendErr) {
-        console.error('[aidcp-edge] publish.result 回传失败:', sendErr);
-      }
-    })();
-  });
-
-  // A 阶段1 指令驱动发布：云端逐条下发 publish.command，边缘逐条执行 + 后置校验 + 如实回报。
-  // 与上面 publish.request 旧整页路径并行（地基阶段不删旧路）。
+  // 指令驱动发布：云端逐条下发 publish.command，边缘逐条执行 + 后置校验 + 如实回报（onPublishAtomCommand，见下）。
+  // 遗留整页发布处理器 client.onPublishCommand（publish.request）已删除（change lease-strict-preemption 5.8）：
+  //   全程不过租约闸、云端已无发送方（只发 publish.command），保留只会绕过抢占/租约在途发布假成功修复链。
   // 配图收口：CDP 文件输入桥 + 上传器（复用 session.cdp 单例，绝不重建）。
   // task-0 实机校准（小红书创作平台发布页，图文模式）注入真实选择器：
   // - 文件输入：图文模式下页面唯一 input[type=file] 是 input.upload-input（accept jpg/png/webp）。
@@ -697,6 +686,7 @@ async function main(): Promise<void> {
   const facebookPublishExecutor = new FacebookPublishExecutor({
     cdp: session.cdp,
     uploader: facebookImageUploader,
+    commitWindow: publishGuard, // 5.1：FB 发布提交窗口与 XHS 共用同一 publishGuard
   });
   const publishDispatcher = new PublishCommandDispatcher(
     {
@@ -705,13 +695,14 @@ async function main(): Promise<void> {
       selector,
       cache: publishCache,
     },
-    {},
+    PUBLISH_ENGINE_OPTIONS,
     Date.now,
     imageUploader,
     // 注入原始 CDP：navigate_entry 直达发布页 + select_mode 直驱点「上传图文」（发布页特殊 UI，通用选择器不可靠）。
     session.cdp,
     undefined,
     facebookPublishExecutor,
+    publishGuard, // 5.1：XHS runSubmit 提交窗口
   );
   // 陪伴界面事件（edge-companion-ui 6.4）：发布终态的本地事实经 [ui-event] 行直达桌面壳。
   const publishUiEvents = new PublishUiEventTracker();
@@ -734,7 +725,15 @@ async function main(): Promise<void> {
       return;
     }
     taskCoordinator.touch(env.payload.taskId);
-    void (async () => {
+    // 抢占取消上下文（5.3）：per-command AbortController = 本命令的接管世代令牌（局部，绝不存进单例字段 → 见 takeover.ts 契约）。
+    const abort = new AbortController();
+    const takeoverCtx: TakeoverCtx = {
+      checkpoint: () => {
+        if (abort.signal.aborted) throw new TaskTakeoverError();
+      },
+      signal: abort.signal,
+    };
+    const settled = (async () => {
       console.log(writeNoteStageLine());
       publishUiEvents.observe(env.payload);
       // §7 在途登记：按 publish.command.result 形状诚实判失败（带 recordId/seq/kind，同 env.id 回执）。
@@ -759,7 +758,7 @@ async function main(): Promise<void> {
       });
       let result: PublishCommandResultPayload;
       try {
-        result = await publishDispatcher.dispatch(env.payload);
+        result = await publishDispatcher.dispatch(env.payload, takeoverCtx);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         result = {
@@ -771,6 +770,9 @@ async function main(): Promise<void> {
         };
       } finally {
         inFlightPublishes.delete(env.id);
+        inFlightPublishCancels.delete(env.id);
+        // 在途发布收敛 → 若协调器空闲则恢复浏览（否则 publishInFlight 闸会让浏览在 dispatch 结束后永久冻结，复核 finding C）。
+        taskCoordinator.notifyPublishSettled();
       }
       const uiLine = publishUiEvents.onResult(env.payload, result);
       if (uiLine) console.log(uiLine);
@@ -780,6 +782,8 @@ async function main(): Promise<void> {
         console.error('[aidcp-edge] publish.command.result 回传失败:', sendErr);
       }
     })();
+    settled.catch(() => {}); // IIFE 自包含（内部已 try/catch）不应抛；防御性避免意外 unhandledRejection
+    inFlightPublishCancels.set(env.id, { abort: () => abortForTakeover(abort), settled });
   });
 
   // 陪伴界面数据快照（edge-companion-ui 8.1）：云端 ui.snapshot（昵称/最近发布/审批状态）
@@ -838,12 +842,14 @@ async function main(): Promise<void> {
       getAccountId: () => accountId,
       overlayMonitor,
       logger: (m) => console.log(m),
+      commitWindow: browseGuard, // 5.1：FB 评论回车提交窗口
     });
     const fbJoinExecutor = platformDriver.capabilities.includes('join')
       ? new FacebookJoinExecutor({
           cdp: session.cdp,
           overlayMonitor,
           logger: (m) => console.log(m),
+          commitWindow: browseGuard, // 5.1/5.10b：FB 加群短确认窗口
         })
       : undefined;
     const fbCommentHandler = new FacebookCommentHandler({
@@ -1021,11 +1027,13 @@ async function main(): Promise<void> {
       getAccountId: () => accountId,
       overlayMonitor,
       logger: (m) => console.log(m),
+      commitWindow: browseGuard, // 5.1：FB 评论回车提交窗口
     });
     const fbJoinExecutor = new FacebookJoinExecutor({
       cdp: session.cdp,
       overlayMonitor,
       logger: (m) => console.log(m),
+      commitWindow: browseGuard, // 5.1/5.10b：FB 加群短确认窗口
     });
     const fbCommentHandler = new FacebookCommentHandler({
       executor: fbCommentExecutor,
@@ -1066,7 +1074,13 @@ async function main(): Promise<void> {
         console.error(`[aidcp-edge] 执行 Facebook 命令 ${env.type} 失败:`, err);
       });
     });
-    if (taskCoordinator.blocksBrowse) await browse.quiesceForTask();
+    // 交接现在有界且会诚实抛出（change lease-strict-preemption）。此处是**全新会话**（零在飞写者），
+    // 必然瞬时收敛；catch 只为不让一个诚实异常炸掉装配流程。
+    if (taskCoordinator.blocksBrowse) {
+      await browse.quiesceForTask().catch((err) => {
+        console.warn(`[aidcp-edge] 注册 Facebook 会话时交接未收敛：${(err as Error).message}`);
+      });
+    }
     // 不 await：会话长跑，与命令收发并行。start() 内部据 AIDCP_FB_BROWSE_AUTO 决定是否自动进 feed。
     browse.start().catch((err) => {
       console.error('[aidcp-edge] Facebook 浏览会话异常:', err);
@@ -1101,6 +1115,7 @@ async function main(): Promise<void> {
         modalCtrl: new CdpModalController(session.cdp),
         overlayMonitor,
         stepRunner: runner,
+        commitWindow: browseGuard, // 5.1：XHS 评论提交 + 通知分类栏目点击窗口
       },
       browseOpts,
     );
@@ -1130,7 +1145,12 @@ async function main(): Promise<void> {
         console.error(`[aidcp-edge] 执行云端命令 ${env.type} 失败:`, err);
       });
     });
-    if (taskCoordinator.blocksBrowse) await browse.quiesceForTask();
+    // 同上：全新会话必然瞬时收敛，catch 只为不让诚实异常炸掉装配流程。
+    if (taskCoordinator.blocksBrowse) {
+      await browse.quiesceForTask().catch((err) => {
+        console.warn(`[aidcp-edge] 注册浏览会话时交接未收敛：${(err as Error).message}`);
+      });
+    }
     // 不 await：浏览循环长跑，与命令收发并行
     browse.start().catch((err) => {
       console.error('[aidcp-edge] 浏览会话异常:', err);

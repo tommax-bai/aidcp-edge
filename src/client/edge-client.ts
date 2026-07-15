@@ -341,23 +341,47 @@ export class EdgeClient {
     this.ws.send(JSON.stringify(env));
   }
 
-  /** 发送并按 id 等待对应响应信封 */
+  /**
+   * 发送并按 id 等待对应响应信封。
+   *
+   * `signal`（change lease-strict-preemption 4.3）：**就地作废一条在飞请求**。必须真删 pending 条目
+   * 并 clearTimeout —— 只在调用方 Promise.race 而不删，这里的超时定时器（没有 unref）会把进程事件
+   * 循环最长再吊住 timeoutMs（选元素是 200s；冷待机 / 关浏览器 / 退出场景对这个时延敏感）。
+   * reject 用 `signal.reason`（MUST 是 TaskTakeoverError，见 execution/takeover.ts），让调用方能按
+   * 类型把「被接管」与「云端不可用」分开。
+   *
+   * 迟到的响应安全：pending 条目已删 ⇒ 按 id 查不到、落不进来；请求 id 单调递增、永不撞新请求。
+   * 绝不复用 failAllPending 做取消——那会把同时在飞的 hello / note.content / anchor.get 一起炸掉。
+   */
   request<T>(
     type: Parameters<typeof makeEnvelope>[0],
     payload: T,
     timeoutMs = 15_000,
+    signal?: AbortSignal,
   ): Promise<Envelope> {
     const id = this.opts.idGen();
     const env = makeEnvelope(type, id, this.opts.clock(), payload as never);
     return new Promise<Envelope>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(signal.reason);
+        return;
+      }
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        signal?.removeEventListener('abort', onAbort);
         reject(new Error(`边-云请求超时: ${type}`));
       }, timeoutMs);
+      const onAbort = (): void => {
+        if (!this.pending.delete(id)) return; // 已 resolve / 已超时：不重复 reject
+        clearTimeout(timer);
+        reject(signal!.reason);
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
       this.pending.set(id, { resolve, reject, timer });
       if (!this.ws || !this.connected) {
         clearTimeout(timer);
         this.pending.delete(id);
+        signal?.removeEventListener('abort', onAbort);
         reject(new Error('边-云 WS 未连接'));
         return;
       }

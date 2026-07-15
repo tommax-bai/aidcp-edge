@@ -30,6 +30,8 @@ import {
 } from './probes/page-structure.js';
 import { isUrlAllowedByTargetDescriptor } from '../platform/driver.js';
 import { canonicalPostId, FB_TARGET_HELPERS_JS } from './post-identity.js';
+import { TaskTakeoverError } from '../execution/takeover.js';
+import type { CommitWindowGuard } from '../execution/commit-window.js';
 import { scrollFacebookViewport } from './viewport-scroll.js';
 
 /**
@@ -129,6 +131,11 @@ export interface FacebookCommentExecutorDeps {
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
   logger?: (msg: string) => void;
+  /**
+   * 提交窗口守卫（change lease-strict-preemption 5.1）：评论回车提交前 `enter()`、确认后 `dispose()`。
+   * 未注入 = 抢占能力休眠、行为逐字不变。与浏览会话共用同一 browse 侧实例。
+   */
+  commitWindow?: CommitWindowGuard;
 }
 
 export interface FacebookCommentExecutorOptions {
@@ -211,6 +218,7 @@ export class FacebookCommentExecutor {
   private readonly random?: () => number;
   private readonly log: (msg: string) => void;
   private readonly opts: Required<FacebookCommentExecutorOptions>;
+  private readonly commitWindow?: CommitWindowGuard;
 
   constructor(deps: FacebookCommentExecutorDeps, options: FacebookCommentExecutorOptions = {}) {
     this.cdp = deps.cdp;
@@ -221,6 +229,7 @@ export class FacebookCommentExecutor {
     this.random = deps.random;
     this.log = deps.logger ?? (() => {});
     this.opts = { ...DEFAULTS, ...options };
+    this.commitWindow = deps.commitWindow;
   }
 
   /**
@@ -455,7 +464,18 @@ export class FacebookCommentExecutor {
    *       替代旧「死等一次」——治慢渲染下评论已在服务器却没在单次窗口重渲染的假阴性（P2②）。
    * 两条都确认不了 → verification_ambiguous（诚实非成功，去重标记照打、不重发）。
    */
-  async submitComment(targetUrl: string, text: string, contactInfo?: string): Promise<FacebookSubmitResult> {
+  async submitComment(
+    targetUrl: string,
+    text: string,
+    contactInfo?: string,
+    /**
+     * 安全取消点（change lease-strict-preemption 4.1）：被独占任务接管即抛出。
+     * 最后一个取消点在**回车之前**——FB 评论回车即发，此后取消 = 把一条可能已经发出去的评论当成
+     * 没发生 ⇒ 上游重试 ⇒ 重复评论。打字中途取消 MUST 清场（FB 侧没有「输入前先清空」的守卫，
+     * 半截评论留下会直接接在下一条前面发出去）。
+     */
+    checkpoint?: () => void,
+  ): Promise<FacebookSubmitResult> {
     const body = (text ?? '').trim();
     if (!body) return { ok: false, reason: 'marker_not_accepted', submitted: false, serverConfirmed: false };
     // 本人稳定 id 是「服务器确认」收窄的必要条件；缺则绝不提交（宁可不发，也不发了无法确认）。
@@ -475,63 +495,87 @@ export class FacebookCommentExecutor {
       return { ok: false, reason: 'editor_not_found', submitted: false, serverConfirmed: false };
     }
 
-    // 催拉 + 聚焦**目标帖作用域内**的评论框（F1 补丁①再保险：submit 独立入口也需自证评论框在位）。
-    const focus = await this.focusEditorWithScroll(targetPostId);
-    if (focus.reason) return { ok: false, reason: focus.reason, submitted: false, serverConfirmed: false };
-
-    // 受控输入（逐字符拟人）。
-    await dispatchKeystrokes(this.cdp, body, { sleep: this.sleep });
-    const accepted = await evalJson<{ accepted: boolean }>(this.cdp, buildMarkerAcceptedJs(body, targetPostId));
-    if (!accepted?.accepted) {
-      await this.clearEditorBestEffort(targetPostId);
-      return { ok: false, reason: 'marker_not_accepted', submitted: false, serverConfirmed: false };
-    }
     const code = contactInfo && contactInfo.length > 0 ? contactInfo : '';
     const requiredFragments = requiredTextFragments(body, code);
-    if (code) {
-      // 真机探针实证：正文逐字输入后，再用单次 Input.insertText 灌入 "\n+联系方式" 会被 FB/React
-      // 编辑器吞掉整段；换行和联系方式逐字符输入可稳定进入编辑器。
-      await dispatchKeystrokes(this.cdp, `\n${code}`, { sleep: this.sleep });
-      const contactAccepted = await evalJson<{ accepted: boolean }>(
-        this.cdp,
-        buildEditorContainsFragmentsJs(requiredFragments, targetPostId),
-      );
-      if (!contactAccepted?.accepted) {
-        this.log(`[fb-comment] 联系方式追加后未被编辑器验收（${code.length} 字）——不提交，避免裸发`);
+    // 提交窗口守卫（5.1）：回车（536）前 enter，确认段（禁区）内绝不被强杀；enter 在最后取消点之后赋值，
+    // 取消/失败早退时仍为 undefined ⇒ dispose 为 no-op、绝不干扰既有清场。
+    let disposeCommit: (() => void) | undefined;
+    try {
+      checkpoint?.(); // 聚焦/滚动是页面写 → 查在它之前（此刻零副作用）
+
+      // 催拉 + 聚焦**目标帖作用域内**的评论框（F1 补丁①再保险：submit 独立入口也需自证评论框在位）。
+      const focus = await this.focusEditorWithScroll(targetPostId);
+      if (focus.reason) return { ok: false, reason: focus.reason, submitted: false, serverConfirmed: false };
+
+      // 受控输入（逐字符拟人）。
+      await dispatchKeystrokes(this.cdp, body, { sleep: this.sleep, checkpoint });
+      const accepted = await evalJson<{ accepted: boolean }>(this.cdp, buildMarkerAcceptedJs(body, targetPostId));
+      if (!accepted?.accepted) {
         await this.clearEditorBestEffort(targetPostId);
         return { ok: false, reason: 'marker_not_accepted', submitted: false, serverConfirmed: false };
       }
-      this.log(`[fb-comment] 联系方式逐字符追加并验收通过（${code.length} 字）`);
-    }
+      if (code) {
+        // 真机探针实证：正文逐字输入后，再用单次 Input.insertText 灌入 "\n+联系方式" 会被 FB/React
+        // 编辑器吞掉整段；换行和联系方式逐字符输入可稳定进入编辑器。
+        await dispatchKeystrokes(this.cdp, `\n${code}`, { sleep: this.sleep, checkpoint });
+        const contactAccepted = await evalJson<{ accepted: boolean }>(
+          this.cdp,
+          buildEditorContainsFragmentsJs(requiredFragments, targetPostId),
+        );
+        if (!contactAccepted?.accepted) {
+          this.log(`[fb-comment] 联系方式追加后未被编辑器验收（${code.length} 字）——不提交，避免裸发`);
+          await this.clearEditorBestEffort(targetPostId);
+          return { ok: false, reason: 'marker_not_accepted', submitted: false, serverConfirmed: false };
+        }
+        this.log(`[fb-comment] 联系方式逐字符追加并验收通过（${code.length} 字）`);
+      }
 
-    // 提交前二次 fresh 复检验证码：真验证码绝不硬提交（清空编辑器不留痕）。
-    const blockedMid = await this.blockingReason();
-    if (blockedMid) {
-      await this.clearEditorBestEffort(targetPostId);
-      return { ok: false, reason: blockedMid, submitted: false, serverConfirmed: false };
-    }
+      // 提交前二次 fresh 复检验证码：真验证码绝不硬提交（清空编辑器不留痕）。
+      const blockedMid = await this.blockingReason();
+      if (blockedMid) {
+        await this.clearEditorBestEffort(targetPostId);
+        return { ok: false, reason: blockedMid, submitted: false, serverConfirmed: false };
+      }
 
-    // 提交：FB 评论/回答框**回车即发**（语言无关，不依赖按钮文案；Shift+Enter 才换行）。
-    // 受控输入后可能失焦——先再聚焦一次，确保 Enter 落在编辑器上；随后按 Enter 提交。
-    // （旧版按按钮文案 `发布评论|Post|…` 定位提交控件在西语/问答帖上会 submit_control_not_found；回车更稳。）
-    await evalJson<FocusEditorResult>(this.cdp, buildFocusEditorJs(targetPostId));
-    await dispatchKey(this.cdp, 'Enter', 'Enter', 13);
+      // 🔴 整条评论流的**最后一个安全取消点**：回车即发。
+      checkpoint?.();
 
-    // (1) 就地 ack 门控快确认（不刷新，抓服务器点头即成功、比刷新又快又准）。
-    if (await this.inPlaceAckConfirm(requiredFragments, ownId, targetPostId)) {
-      return { ok: true, submitted: true, serverConfirmed: true };
-    }
-    // (2) 兜底：刷新一次 + 有界轮询三重收窄确认（治慢渲染假阴性；提交后误导性报错浮层不当作失败，确认信号权威）。
-    try {
-      await this.cdp.send('Page.reload', { ignoreCache: true });
+      // 提交：FB 评论/回答框**回车即发**（语言无关，不依赖按钮文案；Shift+Enter 才换行）。
+      // 受控输入后可能失焦——先再聚焦一次，确保 Enter 落在编辑器上；随后按 Enter 提交。
+      // （旧版按按钮文案 `发布评论|Post|…` 定位提交控件在西语/问答帖上会 submit_control_not_found；回车更稳。）
+      await evalJson<FocusEditorResult>(this.cdp, buildFocusEditorJs(targetPostId));
+      // 🔴 提交窗口开启（5.1）：回车即发，确认段整体受保护，协调器此间不强杀（回 window_busy + 剩余预算）。
+      disposeCommit = this.commitWindow?.enter(20000, 'fb_comment_enter');
+      await dispatchKey(this.cdp, 'Enter', 'Enter', 13);
     } catch (err) {
-      this.log(`[fb-comment] reload 失败：${(err as Error).message}`);
+      disposeCommit?.(); // 回车派发时的 CDP 故障：关窗（takeover 早退时 disposeCommit 仍 undefined、no-op）。
+      if (err instanceof TaskTakeoverError) {
+        // 让位前 MUST 清场：FB 侧打字前**只聚焦、不清空**，半截评论留在编辑器里会直接接在下一条
+        // 前面发出去（真·对外内容污染）。三条既有失败分支都是这么干的，照抄。
+        await this.clearEditorBestEffort(targetPostId).catch(() => undefined);
+      }
+      throw err;
+    }
+    // 🔴 回车已发出：以下确认段 MUST NOT 取消（禁区）。窗口在确认段结束（四条出口）由 finally 关闭。
+    try {
+      // (1) 就地 ack 门控快确认（不刷新，抓服务器点头即成功、比刷新又快又准）。
+      if (await this.inPlaceAckConfirm(requiredFragments, ownId, targetPostId)) {
+        return { ok: true, submitted: true, serverConfirmed: true };
+      }
+      // (2) 兜底：刷新一次 + 有界轮询三重收窄确认（治慢渲染假阴性；提交后误导性报错浮层不当作失败，确认信号权威）。
+      try {
+        await this.cdp.send('Page.reload', { ignoreCache: true });
+      } catch (err) {
+        this.log(`[fb-comment] reload 失败：${(err as Error).message}`);
+        return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
+      }
+      if (await this.reloadScopedConfirm(requiredFragments, ownId, targetPostId)) {
+        return { ok: true, submitted: true, serverConfirmed: true };
+      }
       return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
+    } finally {
+      disposeCommit?.();
     }
-    if (await this.reloadScopedConfirm(requiredFragments, ownId, targetPostId)) {
-      return { ok: true, submitted: true, serverConfirmed: true };
-    }
-    return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
   }
 
   /**

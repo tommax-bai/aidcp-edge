@@ -405,6 +405,13 @@ export interface ExecuteSearchDeps {
   searchSubmitSelector?: string;
   /** 日志输出（默认 console.log） */
   logger?: (msg: string) => void;
+  /**
+   * 安全取消点（change lease-strict-preemption 4.1）：被独占任务接管即抛出。
+   *
+   * 注：本命令**不是零副作用作废**——取消点落在「搜索框已被聚焦清空 / 已打了几个字」之后是可能的。
+   * 残留是可见的、非半截提交，下一次搜索会重新清空并重打，故不另加清场。
+   */
+  checkpoint?: () => void;
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -608,12 +615,13 @@ export async function executeSearch(
   }
 
   // 3. 聚焦并清空搜索框（真实点击后再 focus/clear：清掉残留值、确保插入点在框内）。
+  deps.checkpoint?.(); // 聚焦清空是页面写 → 查在它之前
   const focused = await evalRaw<boolean>(cdp, buildFocusClearJs(selector));
   if (focused !== true) {
     throw new Error(`搜索框未找到（selector: ${selector}）`);
   }
   // 逐字符拟人化输入（不再一次性 insertText 整段）。
-  await dispatchKeystrokes(cdp, keyword, { random, sleep });
+  await dispatchKeystrokes(cdp, keyword, { random, sleep, checkpoint: deps.checkpoint });
   // 输入完到回车的停顿：既有 action 抖动与一个停顿地板取 max——AI 搜索框需内部状态就绪，
   // 输入后立即回车会被忽略（真机实证）。
   await sleep(Math.max(SEARCH_SUBMIT_SETTLE_FLOOR_MS, sampleDelay(TIMING_PRESETS.action, random)));

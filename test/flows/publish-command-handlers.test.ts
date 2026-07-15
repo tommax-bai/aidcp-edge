@@ -11,6 +11,7 @@ import type {
 } from '../../src/locating/index.js';
 import type { ActionExecutor } from '../../src/locating/engine.js';
 import { PublishCommandDispatcher } from '../../src/flows/publish-command-handlers.js';
+import { TaskTakeoverError, type TakeoverCtx } from '../../src/execution/takeover.js';
 import type { PublishCommandPayload } from '../../src/comm/protocol.js';
 import {
   XHS_PUBLISH_CONTENT_ACTION_ID,
@@ -307,12 +308,50 @@ test('AC-CMD-S4 set_schedule → 定位定时控件 + 值写入', async () => {
 
 // ── change publish-fill-humanization（Phase A）：CDP 路径填写拟人化 ──────────────
 
-/** 记录 CDP 调用的最小 fake；Runtime.evaluate（FOCUS/CHECK）恒返回 true，使填写后置校验通过。 */
+/**
+ * 编辑器模型 fake（change lease-strict-preemption 升级）。
+ *
+ * 旧桩对任何 Runtime.evaluate 恒回 true —— 它验不出这条路径真正的语义：**输入是追加**。
+ * 现在照真页面建模：insertText 追加到 text；全选 + Backspace 才清空；回读返回 text。
+ * 这样「残文没清掉 → 拼接发出」才有可能在单测里被断言到。
+ */
 class FakeCdp {
   readonly calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  text: string;
+  private selected = false;
+  /** unclearable：模拟「全选做不到」的脏页（框架吃掉了选区）。 */
+  private accepted = 0;
+  constructor(private readonly opts: { initialText?: string; unclearable?: boolean; swallowAfter?: number } = {}) {
+    this.text = opts.initialText ?? '';
+  }
   async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ method, params });
-    if (method === 'Runtime.evaluate') return { result: { value: true } } as T;
+    if (method === 'Runtime.evaluate') {
+      const expr = String(params?.expression ?? '');
+      if (expr.includes('text: raw')) {
+        return { result: { value: JSON.stringify({ found: true, text: this.text.replace(/\s+/g, ' ').trim() }) } } as T;
+      }
+      if (expr.includes('selected: true')) {
+        if (this.opts.unclearable) return { result: { value: JSON.stringify({ found: true, selected: false }) } } as T;
+        this.selected = true;
+        return { result: { value: JSON.stringify({ found: true, selected: true }) } } as T;
+      }
+      return { result: { value: true } } as T; // FOCUS
+    }
+    if (method === 'Input.insertText') {
+      const chunk = String(params?.text ?? '');
+      // swallowAfter：编辑器只接收前 N 个字符，之后全吞（真机见过的「吞正文」）。
+      const chars = Array.from(chunk);
+      const room = this.opts.swallowAfter === undefined ? chars.length : Math.max(0, this.opts.swallowAfter - this.accepted);
+      const kept = chars.slice(0, room);
+      this.accepted += kept.length;
+      this.text += kept.join('');
+      this.selected = false;
+    }
+    if (method === 'Input.dispatchKeyEvent' && params?.key === 'Backspace' && this.selected) {
+      this.text = '';
+      this.selected = false;
+    }
     return {} as T;
   }
   inserts(): string[] {
@@ -352,6 +391,58 @@ test('拟人填写：pacing 关 → 回退一次性 insertText（旧快路径，
   const inserts = cdp.inserts();
   assert.equal(inserts.length, 1, 'pacing 关时一次性灌入');
   assert.equal(inserts[0], value);
+});
+
+// ── change lease-strict-preemption task 3.1：清场协议（抢占的硬前置）──────────────
+
+test('清场：编辑器里有上一篇的残文 → 先清空再填，正文 MUST NOT 拼接', async () => {
+  // 被抢占 / 失败留下的半截正文。旧代码无清空前置 + 只比对前 8 字 → 残文 + 新文照样放行，
+  // 真发出一篇拼接的帖子。这条断言就是那个 bug 的坟。
+  const cdp = new FakeCdp({ initialText: '上一篇被抢占时留下的半截正文' });
+  const dispatcher = dispatcherWithCdp(cdp);
+  const value = '这一篇的正文';
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, true);
+  assert.equal(cdp.text, value, '编辑器里 MUST 只剩这一篇的正文，绝不与残文拼接');
+});
+
+test('清场：残文清不掉（选区被框架吃掉）→ 诚实 editor_not_clean，绝不带着残文往下发', async () => {
+  const cdp = new FakeCdp({ initialText: '清不掉的残文', unclearable: true });
+  const dispatcher = dispatcherWithCdp(cdp);
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value: '新正文' }));
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^editor_not_clean/);
+  assert.equal(cdp.inserts().length, 0, '清不干净就 MUST NOT 往里打字');
+});
+
+test('全文回读：编辑器只吃进前 8 个字 → post_validate_failed（旧的前 8 字探针恰好会放行）', async () => {
+  // 刻意卡在旧探针的盲点上：前 8 字进去了，后面全被吞。旧的「includes(前8字)」判定为真
+  // → 真发出一篇被截断的帖子。全文回读必须抓到。
+  const value = '一二三四五六七八九十甲乙丙丁戊己庚辛壬癸';
+  const cdp = new FakeCdp({ swallowAfter: 8 });
+  const dispatcher = dispatcherWithCdp(cdp);
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^post_validate_failed/);
+  assert.equal(cdp.text, '', '放弃这一步 MUST 清场，绝不把半截正文留在活着的编辑器里');
+});
+
+test('全文回读：正文被塞入多余字符（超容差）→ field_polluted + 清场，绝不发出去', async () => {
+  const cdp = new FakeCdp();
+  const dispatcher = dispatcherWithCdp(cdp);
+  const value = '干净正文';
+  // 打完之后页面被联想/输入法塞了一长串（远超 4 字容差）。
+  const orig = cdp.send.bind(cdp);
+  let typed = 0;
+  (cdp as unknown as { send: typeof orig }).send = async (method, params) => {
+    const r = await orig(method, params);
+    if (method === 'Input.insertText' && ++typed === Array.from(value).length) cdp.text += '被话题联想塞进来的一长串脏东西';
+    return r as never;
+  };
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^field_polluted/);
+  assert.equal(cdp.text, '', '同样 MUST 清场');
 });
 
 // ── change split-topic-roles：真话题 token 校验 + runAddTopic CDP 直驱（实机校准选择器）──
@@ -621,4 +712,186 @@ test('select_mode 红线：模式判据保守（激活 tab 文本含「图文」
   assert.ok(modeJs, '应有 MODE_STATE 表达式被下发');
   assert.ok(modeJs!.includes('图文') && modeJs!.includes('视频'), '模式判据须同时约束「图文」与「视频」两侧');
   assert.ok(/aria-selected|active|selected|current/.test(modeJs!), '模式判据须限定激活态 tab');
+});
+
+// ── change lease-strict-preemption task 4：取消点补齐（安全取消点让位；提交点之后是禁区）──────
+//
+// 两侧各一条红线，缺一条都会出人命：
+//  ① 安全取消点（下一个页面写尚未发出）MUST 能让位，且让位前 MUST 清场 —— 半截正文留在活着的
+//     编辑器里，会和下一篇拼在一起发出去；且回执是 preempted_by_task（「未开始 / 已作废」），
+//     不是 engine_error（「发布失败」），云端据此绝不写不可逆 failed 终态。
+//  ② 提交点之后（发布按钮已点下去）MUST NOT 取消 —— 中止 = 把一篇**可能已经发出去的帖子**当成
+//     没发生 → 云端重投 → 发两遍。后置校验必须照跑到底、按页面真实状态回报。
+
+/**
+ * submit_publish 专用 fake cdp：闭合 shadow 里的「发布」按钮（DOM.getDocument 穿透 + getBoxModel 取中心点）
+ * + 提交后的成功态回读（CHECK）。
+ *
+ * 🔴 5.9 收紧后成功证据**只认页面成功文案**（body 出现「发布成功」）。原「URL 已离开 /publish/publish」判据是
+ * 一颗已上膛的假成功（抢占方 / 恢复导航会在 15s 窗口内把发布页导走 → 一篇可能没发出的稿被记成已发布），已由
+ * 5.2/5.3 的 publishInFlight 闸封住恢复导航、再由本 CHECK 去除 URL 判据做纵深防御。故本桩镜像收紧后的 CHECK：
+ * **只按成功文案返回**——「已离开发布页」单独存在（无成功文案）绝不判成功。回归 checkExpr() 另断言 CHECK 串已无 URL 判据。
+ */
+class SubmitFakeCdp {
+  readonly calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  private bodyText = '正在编辑';
+  private checkProbes = 0;
+  /**
+   * successAtProbe：第几次 CHECK 轮询时页面才出现「发布成功」（缺省第 2 次：toast 晚一拍，逼后置校验真的轮询；
+   *   传 Infinity = 成功文案永不出现，逼出 post_validate_failed）。
+   * noButton：DOM 里没有「发布」按钮 → findShadowButtonCenter 返回 null → no_target（点击之前失败）。
+   */
+  constructor(private readonly opts: { successAtProbe?: number; noButton?: boolean; throwOnMousePressed?: boolean } = {}) {}
+  /** 捕获后置校验 CHECK 表达式串（回归断言 5.9：不得含 location.href / URL 判据）。 */
+  checkExpr(): string {
+    const call = this.calls.find((c) => c.method === 'Runtime.evaluate' && String((c.params as { expression?: string })?.expression ?? '').includes('发布成功'));
+    return String((call?.params as { expression?: string })?.expression ?? '');
+  }
+  async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+    this.calls.push({ method, params });
+    if (method === 'DOM.getDocument') {
+      if (this.opts.noButton) return { root: { nodeType: 9, children: [] } } as T; // 无「发布」按钮 → no_target
+      // 文本恰为「发布」的元素节点（nodeId=7）；walk() 按 children 里的文本节点命中。
+      return { root: { nodeType: 9, children: [{ nodeType: 1, nodeId: 7, children: [{ nodeType: 3, nodeValue: '发布' }] }] } } as T;
+    }
+    if (method === 'DOM.getBoxModel') return { model: { content: [100, 200, 140, 200, 140, 220, 100, 220] } } as T; // center=(120,210)
+    if (method === 'DOM.getAttributes') return { attributes: [] } as T;
+    // 故障注入：mousePressed 已注入浏览器（mousedown 已触发）但其 CDP 响应超时/reject——点击可能已生效。
+    if (method === 'Input.dispatchMouseEvent' && (params as { type?: string })?.type === 'mousePressed' && this.opts.throwOnMousePressed) {
+      throw new Error('CDP 命令超时: Input.dispatchMouseEvent mousePressed');
+    }
+    if (method === 'Runtime.evaluate') {
+      const expr = String(params?.expression ?? '');
+      if (expr.includes('发布成功')) {
+        // CHECK（5.9 收紧）：**只认成功文案**。leftPublishPage（已离开发布页但无成功文案）MUST NOT 判成功。
+        if (++this.checkProbes >= (this.opts.successAtProbe ?? 2)) this.bodyText = '发布成功，稍后可在笔记里查看';
+        const byText = /发布成功|发布中|笔记已?发布|成功发布|稍后可在/.test(this.bodyText);
+        return { result: { value: byText } } as T;
+      }
+      return { result: { value: '{}' } } as T; // 诊断快照（只观测，不改行为）
+    }
+    return {} as T;
+  }
+  countOf(method: string, type?: string): number {
+    return this.calls.filter((c) => c.method === method && (!type || (c.params as { type?: string })?.type === type)).length;
+  }
+  pressed(): number {
+    return this.countOf('Input.dispatchMouseEvent', 'mousePressed');
+  }
+  checkProbeCount(): number {
+    return this.checkProbes;
+  }
+}
+
+function mkSubmit(cdp: SubmitFakeCdp): PublishCommandDispatcher {
+  const doc = buildDom(publishPageHtml());
+  return new PublishCommandDispatcher(
+    depsFor(doc, new FakeExecutor(doc)),
+    {},
+    selectStepClock(50), // 小步时钟：15s 后置校验窗口在桩里瞬间跑完，绝不真等
+    undefined,
+    cdp as unknown as ConstructorParameters<typeof PublishCommandDispatcher>[4],
+    { sleep: instantSleep, random: () => 0.5 },
+  );
+}
+
+test('取消点：fill_field 打字中途被接管 → 插入停在半途 + 让位前清场 + preempted_by_task（非 engine_error）', async () => {
+  const cdp = new FakeCdp();
+  const value = '这一篇被抢占的正文内容';
+  // 抢占发生在「已打进去 3 个字、第 4 块的 CDP 写尚未发出」的那道缝（typeHumanized 里唯一正确的取消缝）。
+  const takeover: TakeoverCtx = {
+    checkpoint: () => {
+      if (cdp.inserts().length >= 3) throw new TaskTakeoverError();
+    },
+  };
+  const res = await dispatcherWithCdp(cdp).dispatch(cmd('fill_field', { fieldType: 'content', value }), takeover);
+
+  const typed = cdp.inserts().join('');
+  assert.ok(typed.length > 0 && typed.length < Array.from(value).length, '插入 MUST 停在半途（既不是零字，也不是整篇打完）');
+  assert.equal(cdp.text, '', '让位前 MUST 清场：半截正文留在活着的编辑器里会和下一篇拼在一起发出去');
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'preempted_by_task', '被接管 = 未开始/已作废，MUST NOT 降级成 engine_error（云端会据此写不可逆 failed）');
+});
+
+test('取消点：submit_publish 在「通读停留」期间被接管 → 零 mousePressed（一个字节都没提交出去）+ preempted_by_task', async () => {
+  const cdp = new SubmitFakeCdp();
+  // 抢占发生在「发布按钮已定位、点击尚未发出」的那道缝 —— 整条发布流的最后一个安全取消点。
+  const takeover: TakeoverCtx = {
+    checkpoint: () => {
+      if (cdp.countOf('DOM.getBoxModel') > 0) throw new TaskTakeoverError();
+    },
+  };
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 7), takeover);
+
+  assert.equal(cdp.pressed(), 0, '提交点之前让位 MUST 零 mousePressed：帖子一个字节都没提交出去');
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'preempted_by_task');
+  assert.ok(!res.submitDispatched, '点击之前被接管 = 压根没点：submitDispatched MUST 为假（否则云端记成「已提交待确认」丢稿）');
+});
+
+test('🔴 禁区：submit_publish 点击已发出后被接管 → 15s 后置校验照跑到底，按页面真实成功态回 ok:true（绝不改写成 preempted）', async () => {
+  // 抢占方在**点击落地之后**才翻世代：此后任何 checkpoint 调用都会抛。实现若在这 15s 窗口里取消，
+  // 就是把一篇**可能已经发出去的帖子**当成没发生 → 云端重投 → 发两遍。
+  // 成功证据只认页面成功文案（桩把 URL 钉死在发布页上，见 SubmitFakeCdp 注释：URL 判据是尚未修复的假成功）。
+  const cdp = new SubmitFakeCdp({ successAtProbe: 2 });
+  const takeover: TakeoverCtx = {
+    checkpoint: () => {
+      if (cdp.pressed() > 0) throw new TaskTakeoverError();
+    },
+  };
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 8), takeover);
+
+  assert.equal(cdp.pressed(), 1, '确实点了发布（提交点已跨过）');
+  assert.equal(res.ok, true, '提交点之后 MUST NOT 取消：后置校验照跑到底、按页面真实成功态回报');
+  assert.equal(res.error, undefined, '绝不改写成 preempted_by_task —— 那会让云端重投、发两遍');
+  assert.equal(res.submitDispatched, true, '点击已发出 → submitDispatched=true（6.2）');
+  assert.ok(cdp.checkProbeCount() >= 2, '后置校验确实轮询到成功文案出现（而非一探就返回）');
+  // 反「空测」自证：接管确实是「已发生」态——实现只是（正确地）在禁区里从不调用它。
+  assert.throws(() => takeover.checkpoint(), TaskTakeoverError);
+});
+
+test('🔴 6.2 已派发提交位：点击已发出但后置校验超时未确认 → ok:false/post_validate_failed 且 submitDispatched=true（云端 MUST NOT 当「提交前失败」重投）', async () => {
+  // 成功文案永不出现（successAtProbe=Infinity）+ URL 钉在发布页 → CHECK 全程为假 → post_validate_failed。
+  // 关键：点击已经发出去了，帖子可能已发出。此回执必须携 submitDispatched=true，区别于「压根没点」的
+  // no_target/engine_error（那些保持假）——否则云端把一篇可能已发出的稿判成提交前失败、重投 = 双发。
+  const cdp = new SubmitFakeCdp({ successAtProbe: Number.POSITIVE_INFINITY });
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 9));
+
+  assert.equal(cdp.pressed(), 1, '确实点了发布');
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^post_validate_failed/, '成功证据未命中 → 诚实 post_validate_failed（绝不假成功）');
+  assert.equal(res.submitDispatched, true, '已点未确认 MUST submitDispatched=true —— 与「压根没点」回执面区分开');
+});
+
+test('🔴 5.9 收紧假成功 CHECK：后置校验只认成功文案，绝不含「离开发布页」URL 判据（那颗已上膛的假成功）', async () => {
+  // 成功文案在第 2 次探到 → ok:true。关键回归：下发的 CHECK 表达式**不得**含 location.href / URL 判据——
+  // 否则抢占方/恢复导航在 15s 窗口内把发布页导走 → 一篇可能没发出的稿被判已发布（5.9 根治点）。
+  const cdp = new SubmitFakeCdp({ successAtProbe: 2 });
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 11));
+  assert.equal(res.ok, true, '成功文案命中 → ok:true');
+  const expr = cdp.checkExpr();
+  assert.ok(expr.length > 0 && expr.includes('发布成功'), '确实下发了 CHECK 表达式');
+  assert.ok(!/location\.href|\/publish\/publish/.test(expr), 'CHECK MUST NOT 含 URL 判据——「已离开发布页」绝不单独判成功（5.9）');
+});
+
+test('🔴 6.2 已派发提交位：发布按钮找不到（no_target，压根没点）→ submitDispatched 保持假', async () => {
+  // center 查找类失败在点击之前返回，MUST NOT 携 submitDispatched（否则一篇从未提交的稿被记成已提交待确认、永久丢失）。
+  const cdp = new SubmitFakeCdp({ noButton: true });
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 10));
+
+  assert.equal(cdp.pressed(), 0, '没找到发布按钮 → 一次点击都没发出');
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'no_target');
+  assert.ok(!res.submitDispatched, 'no_target = 压根没点：submitDispatched MUST 为假');
+});
+
+test('🔴 复核 wf_1657e89b MEDIUM：mousePressed 已发出但其响应抛错（点击可能已生效）→ engine_error 且 submitDispatched=true（press 时机）', async () => {
+  // 修前：submitDispatched 在 dispatchClick 整体返回后才置真 → press 已注入但 send 抛错 → 回执 submitDispatched=false
+  //       → 云端按提交前失败重投 → 双发。修后：onPressDispatched 在 commitLeftClick 之前触发，press 一派发即置真。
+  const cdp = new SubmitFakeCdp({ throwOnMousePressed: true });
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 12));
+  assert.equal(cdp.pressed(), 1, 'mousePressed 确实发往浏览器（mousedown 已触发）');
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^engine_error/, 'press 响应抛错 → 诚实 engine_error');
+  assert.equal(res.submitDispatched, true, '🔴 press 已派发即置真：即便 click 调用抛错也 MUST NOT 报「压根没点」→ 防双发');
 });
