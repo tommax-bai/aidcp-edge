@@ -581,11 +581,9 @@
     };
   }
 
-  // 发布卡收展（dock）：进行中审批永远展开；已发布历史默认收起成薄条；
-  // 空态仅运行中收起，未运行时保持展开（空态旅程有引导价值）。manualOpen 为用户点薄条的临时展开。
-  function publishDock(view, status, manualOpen) {
-    const s = status || {};
-    const running = s.edge === 'running' && s.session === 'running';
+  // 发布卡收展（dock）：进行中审批永远展开；已发布历史与空态默认收起成薄条；
+  // manualOpen 为用户点薄条的临时展开，空态不因引擎 / 会话运行状态改变默认收展。
+  function publishDock(view, _status, manualOpen) {
     if (view.mode === 'flow') return { collapsed: false, label: '', summary: '' };
     if (view.mode === 'last') {
       return {
@@ -595,7 +593,7 @@
       };
     }
     return {
-      collapsed: running && !manualOpen,
+      collapsed: !manualOpen,
       label: '发布过的 AI 写好的笔记',
       summary: '还没有发布过内容',
     };

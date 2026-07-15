@@ -603,7 +603,7 @@ test('发布卡常驻：无进行中有历史 → last；两者皆无 → empty 
   assert.ok(!(empty.foot ?? '').includes('**通过后才会发布**'), '其余不加粗');
 });
 
-test('发布卡收起态：已发布历史默认收起为「已发布：标题」', () => {
+test('发布卡收起态：已发布历史与空态均默认收起，手动打开时展开', () => {
   const now = Date.now();
   const last = uiLogic.publishView(null, { title: '秋日漫步', at: new Date(now - 3_600_000).toISOString() }, now);
   const dock = uiLogic.publishDock(last, { edge: 'stopped', session: 'idle' }, false);
@@ -611,8 +611,18 @@ test('发布卡收起态：已发布历史默认收起为「已发布：标题�
   assert.equal(dock.label, '已发布：秋日漫步');
   assert.match(dock.summary, /小时前/);
   const empty = uiLogic.publishView(null, null, now);
-  const emptyDock = uiLogic.publishDock(empty, { edge: 'stopped', session: 'idle' }, false);
-  assert.equal(emptyDock.collapsed, false, '空态未运行时仍展开');
+  for (const status of [
+    { edge: 'running', session: 'running' },
+    { edge: 'stopped', session: 'idle' },
+    { edge: 'running', session: 'paused' },
+  ]) {
+    const emptyDock = uiLogic.publishDock(empty, status, false);
+    assert.equal(emptyDock.collapsed, true, '空态默认收起不依赖运行状态');
+    assert.equal(emptyDock.label, '发布过的 AI 写好的笔记');
+    assert.equal(emptyDock.summary, '还没有发布过内容');
+  }
+  const openedEmptyDock = uiLogic.publishDock(empty, { edge: 'stopped', session: 'idle' }, true);
+  assert.equal(openedEmptyDock.collapsed, false, '用户手动打开后临时展开');
 });
 
 test('相对时间走字', () => {

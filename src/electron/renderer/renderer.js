@@ -898,7 +898,7 @@ function renderPublish(status, nowMs) {
   fields.pubCard.classList.toggle('empty', view.mode === 'empty');
   fields.pubCard.dataset.pubMode = view.mode;
   fields.pubCard.dataset.pubState = status.publish && status.publish.state ? status.publish.state : view.mode;
-  // 收展：flow 永远展开；已发布历史默认收起，空态运行中收起（点击薄条可临时展开）。
+  // 收展：flow 永远展开；已发布历史与空态默认收起（点击薄条可临时展开）。
   const dock = uiLogic.publishDock(view, status, pubManualOpen);
   if (view.mode === 'flow') pubManualOpen = false; // 新审批到来自动展开并复位手动态
   fields.pubCard.classList.toggle('collapsed', dock.collapsed);

@@ -966,9 +966,27 @@ test('已发布历史即使未运行也默认收起为薄条', async () => {
   assert.equal($(w, '#pub-bar-label').textContent, '已发布：上周的咖啡馆合集');
 });
 
-test('未运行时发布卡保持展开（空态旅程有引导价值）', async () => {
-  const { w } = await boot({ edge: 'stopped', session: 'idle' });
-  assert.ok(!$(w, '#pub-card').classList.contains('collapsed'));
+test('未运行空态默认收起；点击可展开；真实发布流程到来仍自动展开', async () => {
+  const { w, pushStatus } = await boot({ edge: 'stopped', session: 'idle' });
+  const card = $(w, '#pub-card');
+  assert.ok(card.classList.contains('collapsed'), '未运行空态也应默认收起');
+  assert.equal(hidden($(w, '#pub-bar')), false, '空态薄条可见');
+  assert.equal($(w, '#pub-bar-label').textContent, '发布过的 AI 写好的笔记');
+  assert.match($(w, '#pub-bar-sum').textContent ?? '', /还没有发布过内容/);
+
+  $(w, '#pub-bar').dispatchEvent(new w.Event('click'));
+  assert.ok(!card.classList.contains('collapsed'), '点击薄条后展开空态旅程');
+  assert.match($(w, '#pub-meta').textContent ?? '', /等待第一条笔记/);
+
+  $(w, '#pub-head-row').dispatchEvent(new w.Event('click'));
+  assert.ok(card.classList.contains('collapsed'), '点击卡头可再次收起');
+
+  pushStatus(makeStatus({
+    edge: 'stopped',
+    session: 'idle',
+    publish: { state: 'pending', title: '秋日漫步', at: new Date().toISOString() },
+  }));
+  assert.ok(!card.classList.contains('collapsed'), '真实发布流程到来必须自动展开');
   assert.equal(hidden($(w, '#pub-bar')), true);
 });
 
