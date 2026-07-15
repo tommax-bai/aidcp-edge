@@ -205,8 +205,39 @@ const DEFAULT_SETTINGS = {
   // clientAuthUrl 给完整 http(s):// 地址即启用；或 clientAuthEnabled=true 由云端主机派生客户鉴权地址。
   clientAuthUrl: '',
   clientAuthEnabled: false,
+  // 仅保存 Cloud 已受理的解绑清理游标。不得含正文、凭证或最终模板文本；
+  // Cloud tombstone 前绝不物理删除本地环境，Edge 离线时靠这份列表在重启后续清理。
+  pendingInteractionOffboards: [],
 };
 let settings = { ...DEFAULT_SETTINGS };
+
+const INTERACTION_OFFBOARD_STATES = new Set(['pending_edge', 'dispatched', 'tombstoned', 'purged']);
+const INTERACTION_OFFBOARD_REASONS = new Set(['environment_unbind', 'customer_terminated', 'admin_revoked']);
+function normalizePendingInteractionOffboards(list) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(list) ? list : []) {
+    const offboardId = String((raw && raw.offboardId) || '').trim();
+    const envKey = String((raw && raw.envKey) || '').trim();
+    const accountId = String((raw && raw.accountId) || '').trim();
+    const state = String((raw && raw.state) || '').trim();
+    const reason = String((raw && raw.reason) || '').trim();
+    if (!offboardId || !envKey || !accountId || seen.has(offboardId)
+      || !INTERACTION_OFFBOARD_STATES.has(state) || !INTERACTION_OFFBOARD_REASONS.has(reason)) continue;
+    seen.add(offboardId);
+    out.push({
+      offboardId,
+      envKey,
+      accountId,
+      state,
+      reason,
+      requestedAt: Math.max(0, Number(raw.requestedAt) || 0),
+      purgeDueAt: Math.max(0, Number(raw.purgeDueAt) || 0),
+      platform: normalizePlatform(raw.platform),
+    });
+  }
+  return out;
+}
 
 function settingsFile() {
   return path.join(app.getPath('userData'), 'settings.json');
@@ -226,6 +257,7 @@ function loadSettings() {
   normalizeSlotSettingsIntoSettings();
   // 花名册迁移（向后兼容）：旧单值 adsProfileId → 单元素花名册；镜像回写旧字段（回滚兼容）。
   settings.environments = fleet.migrateEnvironments(parsed && typeof parsed === 'object' ? { ...parsed, environments: settings.environments } : settings);
+  settings.pendingInteractionOffboards = normalizePendingInteractionOffboards(settings.pendingInteractionOffboards);
   applyLegacyMirror();
   normalizeCloudSettings();
   return settings;
@@ -280,6 +312,7 @@ const CLIENT_AUTH_DEFAULT_PORT = 8091;
 let loginWindow = null;
 let clientSession = null; // { token, name, expiresAt(ms) } | null
 let allowedProfileIds = null; // Set<profileId> | null（null = 未 gated，不过滤）
+let allowedEnvironmentPlatforms = new Map(); // envKey -> Cloud 权威 platform；绝不采信 renderer 自报
 let sessionTimer = null;
 let proceededOnce = false;
 
@@ -548,52 +581,39 @@ async function handleInteractionIpc(handler) {
 }
 // 拉该客户可见环境 → 设 allowedProfileIds。返回 false 表示会话已失效（401），由调用方决定登出。
 async function refreshAllowedEnvironments() {
-  if (!clientAuthEnabled() || !hasValidSession()) { allowedProfileIds = null; return true; }
+  if (!clientAuthEnabled() || !hasValidSession()) {
+    allowedProfileIds = null;
+    allowedEnvironmentPlatforms = new Map();
+    return true;
+  }
   const r = await clientAuthFetch('/my-environments', { token: clientSession.token });
   if (r.status === 401) return false;
   if (r.ok && r.data && Array.isArray(r.data.environments)) {
     allowedProfileIds = new Set(r.data.environments.map((e) => String((e && e.envKey) || '')).filter(Boolean));
+    allowedEnvironmentPlatforms = new Map(r.data.environments
+      .map((e) => [String((e && e.envKey) || '').trim(), normalizePlatform(e && e.platform)])
+      .filter(([envKey]) => Boolean(envKey)));
   } else if (allowedProfileIds == null) {
     allowedProfileIds = new Set(); // 首次拉取失败 → fail-closed 空集（不误显他人环境）；已建立则保留上次已知
+    allowedEnvironmentPlatforms = new Map();
   }
   return true;
 }
 
-async function attachClientEnvironmentToCurrentUser({ userId, name, platform } = {}) {
-  const envKey = String(userId || '').trim();
-  if (!envKey || !clientAuthEnabled() || !hasValidSession()) return { ok: true, attached: false };
-  const r = await clientAuthFetch('/environments', {
-    method: 'POST',
-    token: clientSession.token,
-    body: { envKey, label: String(name || '').trim(), platform: normalizePlatform(platform) },
-  });
-  if (r.status === 401) {
-    onSessionInvalid();
-    return { ok: false, attached: false, error: '客户端登录已失效，新环境已创建但未能分配给当前用户，请重新登录后在后台分配。' };
-  }
-  if (!r.ok) {
-    const detail = r.error ? `（${r.error}）` : '';
-    return { ok: false, attached: false, error: `新环境已创建，但分配给当前用户失败${detail}。` };
-  }
-  if (!(allowedProfileIds instanceof Set)) allowedProfileIds = new Set();
-  allowedProfileIds.add(envKey);
-  return { ok: true, attached: true };
-}
-
-function withClientAttachment(result, attach) {
-  if (!result || !result.ok || !attach || attach.ok) {
-    return attach && attach.attached ? { ...result, assignedToCurrentClient: true } : result;
-  }
+function withAuthoritativeAssignmentNotice(result) {
+  if (!result || !result.ok || !clientAuthEnabled() || !hasValidSession()) return result;
   return {
     ...result,
     assignedToCurrentClient: false,
-    visibilityWarning: attach.error || '新环境已创建，但分配给当前用户失败，刷新后可能暂不可见。',
+    requiresAdminAssignment: true,
+    visibilityWarning: '环境已创建，但客户不能自行声明归属。请由管理员从权威环境注册表分配后再启动。',
   };
 }
 // 会话失效（登出 / 被停用 / 令牌过期）：清会话 + 拆掉所有环境 handle（停在跑子进程）+ 关主窗 + 回登录门。
 function onSessionInvalid() {
   clearClientSession();
   allowedProfileIds = new Set();
+  allowedEnvironmentPlatforms = new Map();
   try { syncEnvHandles(); } catch { /* ignore */ } // wanted 为空 → 移除并 SIGTERM 全部环境
   if (mainWindow) { try { mainWindow.close(); } catch { /* ignore */ } mainWindow = null; }
   createLoginWindow();
@@ -625,6 +645,7 @@ async function proceedAfterAuth() {
     allowedProfileIds = null; // 未 gated：不过滤
   }
   syncEnvHandles();
+  void retryPendingInteractionOffboards();
   loadUiState();
   // 一次性轻量预检：缺配置亮「待配置」，齐备则「就绪」。
   for (const handle of envs.values()) {
@@ -664,6 +685,7 @@ function startSessionMaintenance() {
     const ok = await refreshAllowedEnvironments();
     if (!ok) { onSessionInvalid(); return; }
     syncEnvHandles();
+    void retryPendingInteractionOffboards();
   }, 4 * 60_000);
 }
 
@@ -698,6 +720,7 @@ function saveSettings(patch) {
   normalizeColdStandbySettingsIntoSettings();
   normalizeSlotSettingsIntoSettings();
   settings.environments = fleet.normalizeEnvironments(settings.environments);
+  settings.pendingInteractionOffboards = normalizePendingInteractionOffboards(settings.pendingInteractionOffboards);
   applyLegacyMirror();
   normalizeCloudSettings();
   try {
@@ -983,6 +1006,16 @@ function selectedHandle() {
   return envs.get(selectedEnvId) || envs.values().next().value;
 }
 
+function pendingOffboardForEnv(envKey) {
+  return (settings.pendingInteractionOffboards || []).find((item) => item.envKey === envKey) || null;
+}
+
+function pendingOffboardEnvKeys() {
+  return new Set((settings.pendingInteractionOffboards || [])
+    .filter((item) => item.state !== 'purged')
+    .map((item) => item.envKey));
+}
+
 /** 依当前 settings 同步注册表：新增环境建 handle、被移出花名册的环境有序停止并摘除、序号重排。 */
 function syncEnvHandles() {
   const wanted = new Map(); // envId -> spec
@@ -992,11 +1025,26 @@ function syncEnvHandles() {
     // 按登录客户可见范围过滤（change edge-client-customer-auth）：allowedProfileIds 为 null 时不过滤（未 gated）；
     // 为 Set 时只保留归属当前客户的环境——非本客户环境不建 handle、不显示、不启动。cascadeIndex 用连续序号（错峰）。
     let idx = 0;
+    const cleanupEnvKeys = pendingOffboardEnvKeys();
     settings.environments.forEach((env) => {
-      if (allowedProfileIds && !allowedProfileIds.has(env.profileId)) return;
+      if (allowedProfileIds && !allowedProfileIds.has(env.profileId) && !cleanupEnvKeys.has(env.profileId)) return;
       const envId = fleet.envIdForProfile(env.profileId);
-      wanted.set(envId, { envId, kind: 'adspower', profileId: env.profileId, name: env.name, platform: env.platform, cascadeIndex: idx++ });
+      wanted.set(envId, {
+        envId, kind: 'adspower', profileId: env.profileId, name: env.name, platform: env.platform,
+        cascadeIndex: idx++, offboardCleanup: cleanupEnvKeys.has(env.profileId),
+      });
     });
+    // 不在运行花名册的环境也可能留有密文。Cloud 已受理解绑后，建立仅用于重连收取 offboard command 的 handle；
+    // welcome.offboardPending 会让新版核心 fail-closed，不启动平台 connector、更不会盲写。
+    for (const pending of settings.pendingInteractionOffboards || []) {
+      if (pending.state === 'purged') continue;
+      const envId = fleet.envIdForProfile(pending.envKey);
+      if (wanted.has(envId)) continue;
+      wanted.set(envId, {
+        envId, kind: 'adspower', profileId: pending.envKey, name: '待清理环境', platform: pending.platform,
+        cascadeIndex: idx++, offboardCleanup: true,
+      });
+    }
   }
   // 摘除不再需要的环境：在跑的先有意停止（removed + stopRequested 使退出回调 / 排队启动都按「有意」
   // 处理——不告警、不重起、queued start 到点也不再拉起，杜绝孤儿）。
@@ -1017,8 +1065,10 @@ function syncEnvHandles() {
       existing.name = spec.name;
       existing.platform = spec.platform;
       existing.cascadeIndex = spec.cascadeIndex;
+      existing.offboardCleanup = Boolean(spec.offboardCleanup);
     } else {
       const handle = makeEnvHandle(spec);
+      handle.offboardCleanup = Boolean(spec.offboardCleanup);
       // 环境名现成可得：未启动前就点亮账号标签（登录后被真实身份覆盖）。
       if (spec.kind === 'adspower' && spec.profileId) {
         handle.status.account = { id: spec.profileId, name: spec.name || '', source: 'env' };
@@ -1034,6 +1084,11 @@ function syncEnvHandles() {
   // 否则会留一个「幽灵需处理项」（脉冲 + 计入待处理 + 混进引导队列）直到别的环境再发身份事件。
   refreshSameAccountWarnings();
   broadcastFleet();
+  // 离线解绑恢复：只要本地仍有 Cloud 受理游标，就主动拉起对应核心重连收 offboard command。
+  // 新版核心在 welcome barrier 下不会启动平台读写；这里不是发送/重试平台写。
+  for (const handle of envs.values()) {
+    if (handle.offboardCleanup && !handle.child && !handle.respawnTimer) queueStartEnv(handle);
+  }
 }
 
 /** fleet 快照（花名册 + 各环境状态 + 选中项），供渲染层建栏/全量对齐。 */
@@ -3895,24 +3950,24 @@ ipcMain.handle('interaction:reads:cancel', (_event, raw) => handleInteractionIpc
 }));
 
 ipcMain.handle('settings:save', async (_event, patch) => {
-  const beforeIds = new Set((settings.environments || []).map((e) => e.profileId).filter(Boolean));
-  const res = saveSettings(patch);
-  // 自动归属（change edge-client-customer-auth）：登录态下新增的环境归当前客户,并乐观即时可见。
-  // 只对「本次新出现的 profileId」登记；已有环境不重复。这里必须 await：否则创建成功后紧接着刷新可见集时，
-  // 云端归属可能尚未写入，登录态列表会按旧 scope 过滤掉刚创建的环境。
-  const attachErrors = [];
-  if (clientAuthEnabled() && hasValidSession() && allowedProfileIds) {
-    for (const env of settings.environments) {
-      if (env.profileId && !beforeIds.has(env.profileId)) {
-        const attach = await attachClientEnvironmentToCurrentUser({
-          userId: env.profileId,
-          name: env.name,
-          platform: env.platform,
-        });
-        if (!attach.ok) attachErrors.push(attach.error || '分配给当前用户失败');
-      }
+  const safePatch = { ...(patch || {}) };
+  // pending offboard 是主进程在 Cloud 202 回执后写入的恢复游标，renderer 不得伪造/覆盖。
+  delete safePatch.pendingInteractionOffboards;
+  let scopeError;
+  if (clientAuthEnabled() && hasValidSession() && allowedProfileIds instanceof Set) {
+    if (Array.isArray(safePatch.environments)) {
+      const requested = safePatch.environments;
+      safePatch.environments = requested.filter((env) => env && allowedProfileIds.has(String(env.profileId || '').trim()));
+      if (safePatch.environments.length !== requested.length) scopeError = '未获管理员分配的环境不能加入运行花名册。';
+    }
+    if (Object.prototype.hasOwnProperty.call(safePatch, 'adsProfileId')
+      && safePatch.adsProfileId && !allowedProfileIds.has(String(safePatch.adsProfileId).trim())) {
+      delete safePatch.adsProfileId;
+      delete safePatch.adsProfileName;
+      scopeError = '未获管理员分配的环境不能设为当前运行环境。';
     }
   }
+  const res = saveSettings(safePatch);
   syncEnvHandles(); // 花名册变更即同步注册表（新环境建行、移出的有序停止）
   // 保存只持久化、**不打断**在跑的核心（应用改动经显式 edge:restart「按新设置重启」/「全部重启换云」）。
   const handle = selectedHandle();
@@ -3933,8 +3988,8 @@ ipcMain.handle('settings:save', async (_event, patch) => {
       occupied: occupiedSlots(),
       configured: [...envs.values()].filter((h) => !h.removed).length,
     },
-    saveOk: res.ok && attachErrors.length === 0,
-    saveError: res.error || attachErrors[0],
+    saveOk: res.ok && !scopeError,
+    saveError: res.error || scopeError,
   };
 });
 // 「全部重启并连接新云端」（change edge-cloud-env-selector）：切换云端后显式把全部在跑 / 退避中的环境
@@ -4106,8 +4161,14 @@ ipcMain.handle('ads:listProfiles', async (_event, opts) => {
     // foreign id 不在 roster/allowed、本就不与花名册成员相撞、不影响剔孤儿；降范围但本机仍在的环境仍在 roster 里、故不被误剔（保 MAJOR-2 修复）。
     const knownIds = new Set(allowedProfileIds);
     for (const e of settings.environments || []) { if (e && e.profileId) knownIds.add(e.profileId); }
+    for (const pending of settings.pendingInteractionOffboards || []) knownIds.add(pending.envKey);
     result.physicalUserIds = (result.profiles || []).map((p) => p && p.userId).filter((id) => id && knownIds.has(id));
-    result.profiles = (result.profiles || []).filter((p) => p && allowedProfileIds.has(p.userId));
+    result.profiles = (result.profiles || [])
+      .filter((p) => p && (allowedProfileIds.has(p.userId) || Boolean(pendingOffboardForEnv(p.userId))))
+      .map((p) => {
+        const pending = pendingOffboardForEnv(p.userId);
+        return pending ? { ...p, offboardPending: { state: pending.state, offboardId: pending.offboardId } } : p;
+      });
   }
   return result;
 });
@@ -4172,18 +4233,12 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         groupResolver: envGroupResolver,
       });
       if (result && result.ok) {
-        const attach = await attachClientEnvironmentToCurrentUser({
-          userId: result.userId,
-          name: result.name,
-          platform: result.platform || platform,
-        });
-        return withClientAttachment(result, attach);
+        return withAuthoritativeAssignmentNotice(result);
       }
       return result;
     }
 
     const created = [];
-    const attachErrors = [];
     for (let i = 0; i < entries.length; i += 1) {
       const entry = entries[i];
       const result = await createEnvironmentWithGroupRecovery({
@@ -4213,14 +4268,8 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         template: result.template,
         platform: result.platform,
       });
-      const attach = await attachClientEnvironmentToCurrentUser({
-        userId: result.userId,
-        name: result.name,
-        platform: result.platform || platform,
-      });
-      if (!attach.ok) attachErrors.push(`第 ${i + 1} 行：${attach.error || '分配给当前用户失败'}`);
     }
-    return {
+    return withAuthoritativeAssignmentNotice({
       ok: true,
       userId: created.length === 1 ? created[0].userId : undefined,
       // 单账号导入自动选中时带回真名，供渲染层入册用真名（change edge-env-name-live-sync）。
@@ -4229,11 +4278,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       platform,
       created,
       createdCount: created.length,
-      assignedToCurrentClient: attachErrors.length === 0 && created.length > 0 && clientAuthEnabled() && hasValidSession(),
-      visibilityWarning: attachErrors.length
-        ? `已创建 ${created.length} 个环境，但有 ${attachErrors.length} 个未能分配给当前用户，刷新后可能暂不可见。`
-        : undefined,
-    };
+    });
   } catch (e) {
     return { ok: false, error: `创建失败：${(e && e.message) || String(e)}` };
   } finally {
@@ -4264,21 +4309,125 @@ ipcMain.handle('ads:updateEnvProxy', async (_event, opts) => {
   }
 });
 
-// 删除环境（C3 放宽为 UI 确认删）：仅由渲染层逐个显式二次确认触发；本处不自动、不批量。
+function storePendingInteractionOffboard(offboard, platform) {
+  const normalized = normalizePendingInteractionOffboards([{ ...offboard, platform }])[0];
+  if (!normalized) return { ok: false, error: 'Cloud 返回的解绑状态不合法，已停止本地删除。' };
+  const next = (settings.pendingInteractionOffboards || [])
+    .filter((item) => item.offboardId !== normalized.offboardId && item.envKey !== normalized.envKey);
+  next.push(normalized);
+  const saved = saveSettings({ pendingInteractionOffboards: next });
+  return saved.ok ? { ok: true, offboard: normalized } : { ok: false, error: '解绑已由 Cloud 受理，但本地恢复游标写入失败；为避免误删，已停止物理删除。' };
+}
+
+function updatePendingInteractionOffboard(offboard) {
+  const current = pendingOffboardForEnv(offboard && offboard.envKey);
+  return storePendingInteractionOffboard(offboard, current && current.platform);
+}
+
+function finishLocalInteractionOffboard(envKey) {
+  const nextPending = (settings.pendingInteractionOffboards || []).filter((item) => item.envKey !== envKey);
+  const nextEnvironments = (settings.environments || []).filter((item) => item.profileId !== envKey);
+  const saved = saveSettings({ pendingInteractionOffboards: nextPending, environments: nextEnvironments });
+  syncEnvHandles();
+  return saved;
+}
+
+function waitForOffboardPoll(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function deletePhysicalEnvironmentAfterTombstone(envKey, opts) {
+  const svc = await ensureAdsServiceOnce(null);
+  if (!svc.ok) return { ok: false, cleanupPending: true, error: `设备清理待重试：指纹浏览器运行时未就绪（${svc.error || '未知错误'}）。` };
+  const ads = resolveAdsOpts(opts);
+  const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
+  const result = await writeApi.deleteProfile(envKey, ads);
+  const alreadyMissing = result && result.ok === false && /not found|not exist|does not exist|不存在/i.test(String(result.error || ''));
+  if (result && result.ok === false && !alreadyMissing) {
+    if (/being used|being opened|cannot be deleted|is open|正在使用|已打开/i.test(String(result.error || ''))) {
+      return { ok: false, cleanupPending: true, error: 'Edge 已清除登录密文，但环境仍在使用中；请关闭窗口后继续清理。' };
+    }
+    return { ok: false, cleanupPending: true, error: `Edge 已清除登录密文，本地环境删除待重试：${result.error || '未知错误'}` };
+  }
+  const saved = finishLocalInteractionOffboard(envKey);
+  if (!saved.ok) return { ok: false, cleanupPending: true, error: '物理环境已删除，但本地花名册清理未能持久化，请重试。' };
+  return { ok: true, cleanupPending: false, deleted: true };
+}
+
+async function reconcilePendingInteractionOffboard(entry, opts, pollAttempts = 1) {
+  let current = entry;
+  for (let attempt = 0; attempt < Math.max(1, pollAttempts); attempt += 1) {
+    const response = await clientAuthFetch(`/offboarding/${encodeURIComponent(current.offboardId)}`, {
+      token: clientSession && clientSession.token,
+    });
+    if (response.status === 401) {
+      onSessionInvalid();
+      return { ok: false, cleanupPending: true, error: '客户端登录已失效；Cloud 解绑仍会继续，重新登录后可查看清理状态。' };
+    }
+    const data = response.ok && response.data && response.data.data;
+    if (!data || data.offboardId !== current.offboardId || data.envKey !== current.envKey || data.accountId !== current.accountId) {
+      if (attempt + 1 < pollAttempts) { await waitForOffboardPoll(400); continue; }
+      return { ok: true, cleanupPending: true, offboard: current, message: '已撤销访问，等待 Edge 确认清理。' };
+    }
+    const stored = updatePendingInteractionOffboard(data);
+    if (!stored.ok) return { ok: false, cleanupPending: true, error: stored.error };
+    current = stored.offboard;
+    if (current.state === 'tombstoned' || current.state === 'purged') {
+      return deletePhysicalEnvironmentAfterTombstone(current.envKey, opts);
+    }
+    if (attempt + 1 < pollAttempts) await waitForOffboardPoll(400);
+  }
+  return { ok: true, cleanupPending: true, offboard: current, message: '已撤销访问，等待 Edge 确认清理。' };
+}
+
+let pendingOffboardRetryPromise = null;
+function retryPendingInteractionOffboards() {
+  if (pendingOffboardRetryPromise || !clientAuthEnabled() || !hasValidSession()) return pendingOffboardRetryPromise || Promise.resolve();
+  pendingOffboardRetryPromise = (async () => {
+    for (const entry of [...(settings.pendingInteractionOffboards || [])]) {
+      await reconcilePendingInteractionOffboard(entry, {}, 1);
+    }
+  })().finally(() => { pendingOffboardRetryPromise = null; });
+  return pendingOffboardRetryPromise;
+}
+
+// 删除环境：视频号客户环境必须先走 Cloud 权威解绑与 Edge 密文清除，Cloud tombstone 前禁止物理删除。
+// 非视频号保持既有显式双确认删除，但客户登录态同样先校验 envKey 在权威 scope 中，不能操作他人环境。
 ipcMain.handle('ads:deleteEnv', async (_event, opts) => {
-  const userId = opts && opts.userId;
+  const userId = String((opts && opts.userId) || '').trim();
   if (!userId) return { ok: false, error: '缺 userId' };
   try {
-    const svc = await ensureAdsServiceOnce(null);
-    if (!svc.ok) return { ok: false, error: `指纹浏览器运行时未就绪：${svc.error || '未知错误'}`, retryable: true };
-    const ads = resolveAdsOpts(opts);
-    const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
-    const r = await writeApi.deleteProfile(String(userId), ads);
-    // 环境正打开/被占用时服务端拒删，原始报错含空 user 列表([])且暴露方案名——转中性友好文案。
-    if (r && r.ok === false && /being used|being opened|cannot be deleted|is open|正在使用|已打开/i.test(String(r.error || ''))) {
-      return { ok: false, error: '该环境正在使用中（可能已在其它设备或窗口打开），无法删除；请先关闭该环境后重试。' };
+    const pending = pendingOffboardForEnv(userId);
+    if (clientAuthEnabled()) {
+      if (!hasValidSession()) { onSessionInvalid(); return { ok: false, error: '登录已失效，请重新登录客户端。' }; }
+      if (!pending && (!(allowedProfileIds instanceof Set) || !allowedProfileIds.has(userId))) {
+        return { ok: false, status: 403, error: '该环境不属于当前客户，已拒绝操作。' };
+      }
+      const platform = pending ? pending.platform : allowedEnvironmentPlatforms.get(userId);
+      if (pending || platform === 'wechat_channels') {
+        let accepted = pending;
+        if (!accepted) {
+          const response = await clientAuthFetch(`/environments/${encodeURIComponent(userId)}`, {
+            method: 'DELETE',
+            token: clientSession.token,
+          });
+          if (response.status === 401) { onSessionInvalid(); return { ok: false, error: '登录已失效，请重新登录客户端。' }; }
+          const data = response.ok && response.data && response.data.data;
+          if (!data || data.envKey !== userId) {
+            return { ok: false, error: `Cloud 未受理解绑，已停止本地删除（${(response.data && response.data.error) || response.error || response.status}）。` };
+          }
+          const stored = storePendingInteractionOffboard(data, platform);
+          if (!stored.ok) return stored;
+          accepted = stored.offboard;
+          // Cloud 已在同一事务撤销访问；保留 cleanup-only handle 接收清密文命令，但从普通可见/可运行 scope 移除。
+          allowedProfileIds.delete(userId);
+          allowedEnvironmentPlatforms.delete(userId);
+          syncEnvHandles();
+        }
+        return reconcilePendingInteractionOffboard(accepted, opts, 8);
+      }
     }
-    return r;
+    return deletePhysicalEnvironmentAfterTombstone(userId, opts);
   } catch (e) {
     return { ok: false, error: `删除失败：${(e && e.message) || String(e)}` };
   }

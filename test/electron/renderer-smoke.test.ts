@@ -54,8 +54,8 @@ interface Stub {
   adsListProfiles: (opts?: unknown) => Promise<unknown>;
   adsOpenCreate: () => { launched: boolean } | Promise<{ launched: boolean }>;
   adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
-  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string }>;
-  adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
+  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string; requiresAdminAssignment?: boolean }>;
+  adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string; cleanupPending?: boolean; message?: string }>;
 }
 
 function makeStub(overrides: Partial<Stub> = {}): Stub {
@@ -454,6 +454,35 @@ test('删除环境：点两次确认（第一次仅 armed、第二次才删）',
   del.dispatchEvent(new w.Event('click')); // 第二次：真删
   for (let i = 0; i < 3; i++) await tick();
   assert.equal(deletedId, 'u1', '第二次点击才删除该环境');
+});
+
+test('视频号解绑清理中：不冒充已删除、不移出花名册，可继续轮询', async () => {
+  const saves: Array<Record<string, unknown>> = [];
+  let calls = 0;
+  const w = await boot(makeStub({
+    getSettings: async () => ({
+      provider: 'adspower', adsProfileId: 'u1', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x',
+      environments: [{ profileId: 'u1', name: '视频号甲', platform: 'wechat_channels' }],
+    }),
+    adsListProfiles: async () => ({
+      ok: true,
+      physicalUserIds: ['u1'],
+      profiles: [{ userId: 'u1', name: '视频号甲', platform: 'wechat_channels',
+        offboardPending: { state: 'pending_edge', offboardId: 'off-1' } }],
+    }),
+    adsDeleteEnv: async () => { calls += 1; return { ok: true, cleanupPending: true, message: '已撤销访问，等待设备确认清理。' }; },
+    saveSettings: async (patch) => { saves.push(patch as Record<string, unknown>); return { provider: 'adspower', saveOk: true }; },
+  }));
+  assert.match($(w, '.env-member-badge').textContent ?? '', /已撤权|清理/);
+  const del = $(w, '.ads-env-del') as unknown as HTMLButtonElement;
+  assert.match(del.textContent ?? '', /继续清理/);
+  del.dispatchEvent(new w.Event('click'));
+  await tick();
+  del.dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(calls, 1);
+  assert.equal(saves.filter((p) => Array.isArray(p.environments)).length, 0,
+    'Cloud 未 tombstone 时 renderer 不得移除花名册冒充清理完成');
 });
 
 test('删除环境：删云端成功后自动移出本地花名册（不留孤儿）', async () => {

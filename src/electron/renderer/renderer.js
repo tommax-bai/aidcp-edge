@@ -2957,12 +2957,13 @@ function makeDeleteBtn(prof) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'ads-env-del';
-  btn.textContent = '删';
+  const cleanupPending = Boolean(prof.offboardPending);
+  btn.textContent = cleanupPending ? '继续清理' : '删';
   let armed = false;
   let timer = null;
   const disarm = () => {
     armed = false;
-    btn.textContent = '删';
+    btn.textContent = cleanupPending ? '继续清理' : '删';
     btn.classList.remove('armed');
     if (timer) { clearTimeout(timer); timer = null; }
   };
@@ -2970,9 +2971,11 @@ function makeDeleteBtn(prof) {
     e.stopPropagation(); // 不触发行选中
     if (!armed) {
       armed = true;
-      btn.textContent = '确认删除?';
+      btn.textContent = cleanupPending ? '确认继续清理?' : '确认删除?';
       btn.classList.add('armed');
-      btn.title = `永久删除「${prof.name || prof.userId}」，不可恢复；若已登录账号其登录态一并丢失`;
+      btn.title = cleanupPending
+        ? `继续核对「${prof.name || prof.userId}」的 Edge 清密文结果；Cloud 确认前不会物理删除`
+        : `永久删除「${prof.name || prof.userId}」，不可恢复；视频号环境会先撤权并清除 Edge 登录密文`;
       timer = setTimeout(disarm, 4000);
       return;
     }
@@ -2982,7 +2985,11 @@ function makeDeleteBtn(prof) {
     setEnvMsg(`正在删除「${prof.name || prof.userId}」…`, false);
     try {
       const r = await window.aidcpEdge.adsDeleteEnv({ ...formAdsOpts(), userId: prof.userId });
-      if (r && r.ok) {
+      if (r && r.ok && r.cleanupPending) {
+        setEnvMsg(r.message || `已撤销「${prof.name || prof.userId}」的访问，等待设备确认清理。`, false);
+        btn.disabled = false;
+        await refreshEnvs({ suppressAutoJoin: true });
+      } else if (r && r.ok) {
         setEnvMsg(`已删除环境「${prof.name || prof.userId}」。`, false);
         // 删除云端 profile 成功后一并把它从本地运行花名册移出——否则本地残留成「谁都删不掉」的孤儿：
         // 移出按钮只在云端实时列表里的环境行上出现，profile 一删该行随即消失、再无移除入口（刷新剔孤儿是补救）。
@@ -3052,7 +3059,12 @@ function populateEnvs(profiles, allowAutoJoin = false) {
     text.appendChild(name);
     text.appendChild(meta);
     item.appendChild(text);
-    if (prof.userId && rosterHas(prof.userId)) {
+    if (prof.offboardPending) {
+      const badge = document.createElement('span');
+      badge.className = 'env-member-badge';
+      badge.textContent = prof.offboardPending.state === 'tombstoned' ? '待物理清理' : '已撤权·清理中';
+      item.appendChild(badge);
+    } else if (prof.userId && rosterHas(prof.userId)) {
       const badge = document.createElement('span');
       badge.className = 'env-member-badge';
       badge.textContent = '已加入';
@@ -3068,10 +3080,12 @@ function populateEnvs(profiles, allowAutoJoin = false) {
       });
       item.appendChild(removeBtn);
     }
-    item.appendChild(makePlatformBtn(prof, displayPlat));
-    item.appendChild(makeProxyBtn(prof));
+    if (!prof.offboardPending) item.appendChild(makePlatformBtn(prof, displayPlat));
+    if (!prof.offboardPending) item.appendChild(makeProxyBtn(prof));
     item.appendChild(makeDeleteBtn(prof));
-    item.addEventListener('click', () => { void selectProfile(prof.userId, item, prof.name, member ? member.platform : prof.platform); });
+    if (!prof.offboardPending) {
+      item.addEventListener('click', () => { void selectProfile(prof.userId, item, prof.name, member ? member.platform : prof.platform); });
+    }
     if (prof.userId && prof.userId === current) {
       item.classList.add('selected');
       currentSelected = prof.name || prof.userId;
@@ -3081,7 +3095,8 @@ function populateEnvs(profiles, allowAutoJoin = false) {
   }
   // 唯一环境自动加入（首次列出的便利）：仅当调用方 allowAutoJoin 放行。删除/剔孤儿后触发的刷新绝不放行，
   // 否则会把一个无关的剩余环境静默拉进运行队列（评审 Finding 1 回归）。
-  if (allowAutoJoin && profiles.length === 1 && !current && roster.length === 0 && profiles[0].userId && !coreRunning()) {
+  if (allowAutoJoin && profiles.length === 1 && !profiles[0].offboardPending
+    && !current && roster.length === 0 && profiles[0].userId && !coreRunning()) {
     void selectProfile(profiles[0].userId, firstItem, profiles[0].name, profiles[0].platform);
     return { autoSelected: profiles[0].name || profiles[0].userId };
   }
@@ -3261,8 +3276,12 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       // 新建即选中时，带上刚起好的环境名（回执 name）与平台（回执 platform 优先，回落表单选择）。
       // 带回真名根治「新建即空名」——否则左栏回落「环境 …末4位」、与添加面板显示的真名不一致
       // （change edge-env-name-live-sync）。
-      if (r.userId && !coreRunning()) await selectProfile(r.userId, null, r.name || '', r.platform || platform);
-      const selectedHint = r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
+      if (r.userId && !r.requiresAdminAssignment && !coreRunning()) {
+        await selectProfile(r.userId, null, r.name || '', r.platform || platform);
+      }
+      const selectedHint = r.requiresAdminAssignment
+        ? '管理员分配前不会加入运行花名册。'
+        : r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
       const createdCount = Number(r.createdCount || (Array.isArray(r.created) ? r.created.length : 0));
       const countHint = createdCount > 1 ? `已创建 ${createdCount} 个环境。` : `已创建环境（${r.template || tpl}）。`;
       if (createdCount > 0 && settingsUi.adsFbImport) settingsUi.adsFbImport.value = '';

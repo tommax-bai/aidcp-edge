@@ -32,8 +32,8 @@ test('ads:listProfiles gated 时收窄显示列表（按 userId），未 gated /
   assert.match(block, /if\s*\(result\s*&&\s*result\.ok\s*&&\s*clientAuthEnabled\(\)\)/, '仅成功列表 + gated 才收窄');
   assert.match(
     block,
-    /result\.profiles\s*=\s*\(result\.profiles\s*\|\|\s*\[\]\)\.filter\(\(p\) => p && allowedProfileIds\.has\(p\.userId\)\)/,
-    '按 p.userId（分身 ID = 归属键）收窄显示；误用 profileId 会全落空（R1）',
+    /allowedProfileIds\.has\(p\.userId\)\s*\|\|\s*Boolean\(pendingOffboardForEnv\(p\.userId\)\)/,
+    '按 p.userId 收窄到权威归属；另只保留 Cloud 已受理的本机清理游标',
   );
   assert.match(block, /return result;\s*\}\);/, 'handler 末尾原样返回 result（未 gated / 错误结果透传）');
 });
@@ -64,6 +64,8 @@ test('ads:listProfiles 只收窄显示、physicalUserIds 收窄到 roster∪allo
     /for \(const e of settings\.environments \|\| \[\]\) \{ if \(e && e\.profileId\) knownIds\.add\(e\.profileId\); \}/,
     '并含花名册成员 id(roster)——降范围但在册的环境不被误剔(保 MAJOR-2)',
   );
+  assert.match(block, /for \(const pending of settings\.pendingInteractionOffboards \|\| \[\]\) knownIds\.add\(pending\.envKey\)/,
+    'Cloud 已受理解绑的环境可继续出现在清理列表，但不会恢复普通 scope');
   assert.match(
     block,
     /result\.physicalUserIds\s*=\s*\(result\.profiles\s*\|\|\s*\[\]\)\.map\(\(p\) => p && p\.userId\)\.filter\(\(id\) => id && knownIds\.has\(id\)\)/,
@@ -84,41 +86,45 @@ test('clientAuthFetch 有界超时（refresh 随每次刷新调用，绝不无�
   assert.match(main, /signal:\s*AbortSignal\.timeout\(\d+\)/, 'clientAuthFetch 必须带超时 signal');
 });
 
-test('登录态程序化建号：ads:createEnv 成功后等待归属当前客户，再让刷新可见', () => {
+test('登录态程序化建号：客户不能自声明 envKey，创建后必须等待管理员权威分配', () => {
   const block = handlerBlock(main, 'ads:createEnv');
   assert.ok(block, 'ads:createEnv handler 必须存在');
-  assert.match(main, /async function attachClientEnvironmentToCurrentUser/, '主进程必须有可等待的客户归属写入函数');
-  assert.match(
-    main,
-    /clientAuthFetch\('\/environments',\s*\{\s*method:\s*'POST',\s*token:\s*clientSession\.token/,
-    '客户归属写入必须走受客户令牌保护的 /environments',
-  );
-  assert.match(
-    block,
-    /const attach = await attachClientEnvironmentToCurrentUser\(\{\s*userId: result\.userId,\s*name: result\.name,\s*platform: result\.platform \|\| platform,\s*\}\);/,
-    '单环境创建成功后必须 await 归属，避免随后刷新按旧 scope 过滤掉新环境',
-  );
-  assert.match(
-    block,
-    /visibilityWarning/,
-    '归属失败时必须回传可见性告警，不能把“创建成功但不可见”伪装成完全成功',
-  );
+  assert.doesNotMatch(main, /attachClientEnvironmentToCurrentUser/, '客户端不得保留自绑定 helper');
+  assert.doesNotMatch(main, /clientAuthFetch\('\/environments',\s*\{\s*method:\s*'POST'/,
+    '客户端不得向旧 POST /environments 自声明 envKey');
+  assert.match(block, /withAuthoritativeAssignmentNotice\(result\)/,
+    '创建成功只回管理员分配提示，不乐观加入当前客户');
+  assert.match(main, /requiresAdminAssignment:\s*true/, '响应显式标记需管理员分配');
 });
 
-test('保存花名册新增环境：客户归属不再 fire-and-forget', () => {
+test('保存花名册：按权威 allowedProfileIds 过滤，且 renderer 不得伪造 offboard 恢复游标', () => {
   const block = handlerBlock(main, 'settings:save');
-  assert.match(block, /ipcMain\.handle\('settings:save',\s*async/, 'settings:save 需要 async 等待归属写入');
-  assert.match(block, /const attach = await attachClientEnvironmentToCurrentUser/, '新增环境入册时必须等待客户归属写入');
-  assert.doesNotMatch(block, /void clientAuthFetch\('\/environments'/, '不得再后台 best-effort 写归属后立即返回');
+  assert.match(block, /safePatch\.environments\s*=\s*requested\.filter\(\(env\) => env && allowedProfileIds\.has/,
+    '花名册写入只接受 Cloud 权威 scope');
+  assert.match(block, /delete safePatch\.pendingInteractionOffboards/,
+    'renderer 不能覆盖主进程收到的 Cloud offboard 游标');
 });
 
-test('创建成功后刷新 UI：先等左栏入册，再等添加窗口列表刷新', () => {
+test('创建成功后刷新 UI：仅已权威分配的环境可自动入册', () => {
   assert.match(
     renderer,
-    /if \(r\.userId && !coreRunning\(\)\) await selectProfile\(r\.userId, null, r\.name \|\| '', r\.platform \|\| platform\);/,
-    '创建成功后自动选中必须等待 persistRoster 完成，左栏才稳定出现',
+    /if \(r\.userId && !r\.requiresAdminAssignment && !coreRunning\(\)\)/,
+    '需管理员分配时不得自动选中/加入运行花名册',
   );
   assert.match(renderer, /await refreshEnvs\(\);/, '创建成功后必须等待添加窗口环境列表刷新完成');
+});
+
+test('视频号解绑：Cloud 202→持久化恢复游标→轮询 tombstone→才物理删除；断线可重启续跑', () => {
+  const block = handlerBlock(main, 'ads:deleteEnv');
+  assert.match(block, /allowedEnvironmentPlatforms\.get\(userId\)/, '平台来自 Cloud /my-environments 权威响应，不信 renderer');
+  assert.match(block, /clientAuthFetch\(`\/environments\/\$\{encodeURIComponent\(userId\)\}`/, '先请求 Cloud 权威解绑');
+  assert.match(block, /storePendingInteractionOffboard\(data, platform\)/, '202 回执先持久化 durable offboard 游标');
+  assert.match(main, /clientAuthFetch\(`\/offboarding\/\$\{encodeURIComponent\(current\.offboardId\)\}`/,
+    '重试通过状态 API 对账');
+  assert.match(main, /current\.state === 'tombstoned' \|\| current\.state === 'purged'/,
+    '仅 Cloud tombstone/purged 后允许进入物理删除');
+  assert.match(main, /if \(handle\.offboardCleanup && !handle\.child/, '离线解绑在重启后主动拉起 cleanup-only Edge');
+  assert.match(renderer, /r && r\.ok && r\.cleanupPending/, 'UI 对 pending 如实显示，不移除花名册冒充已删除');
 });
 
 test('设置抽屉移除 per-环境「重新登录」按钮；auth:relogin IPC 保留（通知巡视引导流「重检」仍用）', () => {
