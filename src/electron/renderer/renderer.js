@@ -703,6 +703,7 @@ const RUNTIME_GUIDANCE_ICONS = {
   browse: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 9 5 5l1.8 11.7L10 13.6l2.4 5.4 3-1.3-2.4-5.4h4.4L9 9Z"/><path d="M7.2 2.2 8 5.1"/><path d="m5.1 8-2.9-.8"/><path d="M14 4.1 12 6"/><path d="m6 12-1.9 2"/></svg>',
   pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5s2.5 2 5 2 2.5-2 5-2c1.3 0 1.9.5 2.5 1"/><path d="M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2c1.3 0 1.9.5 2.5 1"/><path d="M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2c1.3 0 1.9.5 2.5 1"/></svg>',
   match: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3H5a2 2 0 0 0-2 2v2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="11" cy="11" r="4"/><path d="m15 15 4 4"/></svg>',
+  create: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>',
   search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>',
   circleCheck: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.3 2.4 2.4 4.8-5.1"/></svg>',
   bookmarkCheck: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16Z"/><path d="m9 10 2 2 4-4"/></svg>',
@@ -810,6 +811,7 @@ function renderRuntimeGuidance(status, nowMs) {
     const nextState = steps[index + 1] && (steps[index + 1].state || 'next');
     const el = document.createElement('div');
     el.className = `rg-flow-step ${state}`;
+    el.dataset.stepIndex = String(index);
     if (nextState) {
       const activeFlow = (state === 'current' && (nextState === 'current' || nextState === 'done' || nextState === 'next'))
         || (state === 'done' && nextState === 'current');
@@ -3283,6 +3285,23 @@ function showPersonaGrowth(envId) {
   playPersonaGrowthAnimation();
 }
 
+function projectFirstPostStart(envId) {
+  const key = envId || currentEnvId() || '__local__';
+  const env = fleetView.envs.get(key);
+  if (!env || !env.status) return;
+  const dailyUsage = env.status.dailyUsage && typeof env.status.dailyUsage === 'object'
+    ? env.status.dailyUsage
+    : { asOf: Date.now(), totals: {} };
+  env.status = {
+    ...env.status,
+    dailyUsage: {
+      ...dailyUsage,
+      firstPost: { state: 'searching', viewed: 0, target: 20, startedAt: Date.now() },
+    },
+  };
+  if (fleetView.selected === key) render(env.status);
+}
+
 function clearPersonaGrowth() {
   personaGrowthEnvId = null;
   personaUi.growth?.classList.add('hidden');
@@ -3663,12 +3682,13 @@ personaUi.confirm?.addEventListener('click', async () => {
       personaDraftYaml = '';
       personaUi.draft?.classList.add('hidden');
       personaUi.wizardBody?.classList.add('hidden');
-      if (wasUpdate) {
+      if (wasUpdate || r.firstPostOnboarding !== true) {
         // 更新既有人设：这个号本来就在跑，不该再出「开始运营」的成长引导——收回已设置绿卡即可。
         personaUi.boundNote?.classList.remove('hidden');
         syncPersonaFoot('hidden');
-        setPersonaMsg('人设已更新，后续浏览 / 发布会使用新人设。', false);
+        setPersonaMsg(wasUpdate ? '人设已更新，后续浏览 / 发布会使用新人设。' : '人设已保存，后续浏览 / 发布会使用这份人设。', false);
       } else {
+        projectFirstPostStart(growthEnvId);
         showPersonaGrowth(growthEnvId);
       }
     } else {

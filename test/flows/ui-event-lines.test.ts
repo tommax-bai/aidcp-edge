@@ -160,6 +160,7 @@ test('ui-event-lines: uiSnapshotToLines forwards account daily usage for Electro
       quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
       saturated: ['publish'],
       inspirationSummary: { count: 3, sourceLikeCount: 12_345.8 },
+      firstPost: { state: 'searching', viewed: 7.9, target: 20, startedAt: 1730000000000 },
       windows: {
         minute: {
           startedAt: 1729999941000,
@@ -193,6 +194,7 @@ test('ui-event-lines: uiSnapshotToLines forwards account daily usage for Electro
     quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
     saturated: ['publish'],
     inspirationSummary: { count: 3, sourceLikeCount: 12_345 },
+    firstPost: { state: 'searching', viewed: 7, target: 20, startedAt: 1730000000000 },
     windows: {
       minute: {
         startedAt: 1729999941000,

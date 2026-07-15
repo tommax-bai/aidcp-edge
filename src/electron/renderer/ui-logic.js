@@ -246,6 +246,48 @@
     ];
   }
 
+  function firstPostGuidance(status) {
+    const daily = objectOrEmpty(objectOrEmpty(status).dailyUsage);
+    const firstPost = objectOrEmpty(daily.firstPost);
+    if (firstPost.state !== 'searching' && firstPost.state !== 'generating') return null;
+    const viewed = count(firstPost.viewed);
+    const target = 20;
+    const generating = firstPost.state === 'generating';
+    const shown = Math.min(viewed, target);
+    return {
+      mode: 'first-post',
+      mascot: generating ? 'celebration' : 'task-execution',
+      animate: generating,
+      kicker: generating ? '已找到创作灵感' : '正在为第一篇作品找灵感',
+      title: generating ? '正在生成你的第一篇作品。' : '正在观察平台推荐的上升话题。',
+      value: generating
+        ? '这条灵感来自平台正在推荐、且符合你人设的方向。'
+        : '自动浏览不是漫无目的，而是在寻找目标人群感兴趣、又符合人设的方向。',
+      detail: '',
+      steps: [
+        { icon: 'browse', state: generating ? 'done' : 'current', label: '看趋势', detail: generating ? `已观察 ${viewed} 条推荐内容` : '观察平台上升话题' },
+        { icon: 'match', state: generating ? 'done' : 'next', label: '找匹配', detail: generating ? '已筛出 1 条创作灵感' : '筛选人设匹配方向' },
+        { icon: 'create', state: generating ? 'current' : 'next', label: '开始创作', detail: generating ? '正在生成第一篇作品' : '找到后自动生成' },
+      ],
+      progress: {
+        current: viewed,
+        target,
+        percent: Math.min(100, Math.round((shown / target) * 100)),
+        title: generating
+          ? `已从 ${viewed} 条推荐内容中找到灵感`
+          : viewed >= target
+            ? '已观察约 20 条，继续寻找合适方向'
+            : viewed > 0
+              ? `正在观察第 ${viewed} 条推荐内容`
+              : '首轮观察刚刚开始',
+        counter: viewed > target ? `${viewed} 条` : `${shown}/${target}`,
+        meta: generating ? '已找到 1 条灵感' : '通常筛出 1 条灵感',
+      },
+      resume: '',
+      note: generating ? '生成后仍会由你确认发布' : '找到后，将自动生成你的第一篇作品',
+    };
+  }
+
   function inspirationHarvest(status) {
     const daily = objectOrEmpty(objectOrEmpty(status).dailyUsage);
     const summary = objectOrEmpty(daily.inspirationSummary);
@@ -332,6 +374,8 @@
 
   function runtimeGuidanceView(status, nowMs) {
     const s = status || {};
+    const firstPost = firstPostGuidance(s);
+    if (firstPost) return firstPost;
     const p = s.presence || null;
     const at = p && p.at ? Date.parse(p.at) : NaN;
     const running = s.edge === 'running' && s.session === 'running';
@@ -415,7 +459,7 @@
 
   function quotaCompletionPresence(status, nowMs) {
     const guidance = runtimeGuidanceView(status, nowMs);
-    if (!guidance || guidance.mode === 'running') return null;
+    if (!guidance || guidance.mode === 'running' || guidance.mode === 'first-post') return null;
     const text = guidance.mode === 'day'
       ? '今日内容探索已经完成'
       : guidance.mode === 'session'

@@ -84,6 +84,19 @@ function sanitizeInspirationSummary(input: NonNullable<UiSnapshotPayload['dailyU
   return output;
 }
 
+function sanitizeFirstPost(input: NonNullable<UiSnapshotPayload['dailyUsage']>['firstPost']): Record<string, unknown> | null {
+  if (!input || (input.state !== 'searching' && input.state !== 'generating')) return null;
+  if (!Number.isFinite(input.viewed) || !Number.isFinite(input.startedAt)) return null;
+  const output: Record<string, unknown> = {
+    state: input.state,
+    viewed: Math.max(0, Math.floor(input.viewed)),
+    target: 20,
+    startedAt: input.startedAt,
+  };
+  if (typeof input.sourceId === 'string' && input.sourceId) output.sourceId = input.sourceId.slice(0, 256);
+  return output;
+}
+
 function sanitizeDailyUsage(input: UiSnapshotPayload['dailyUsage']): Record<string, unknown> | null {
   if (!input || !Number.isFinite(input.asOf)) return null;
   const totals = sanitizeCounts(input.totals as Record<string, unknown> | undefined);
@@ -94,6 +107,8 @@ function sanitizeDailyUsage(input: UiSnapshotPayload['dailyUsage']): Record<stri
   if (Object.keys(quotas).length > 0) dailyUsage.quotas = quotas;
   const inspirationSummary = sanitizeInspirationSummary(input.inspirationSummary);
   if (inspirationSummary) dailyUsage.inspirationSummary = inspirationSummary;
+  const firstPost = sanitizeFirstPost(input.firstPost);
+  if (firstPost) dailyUsage.firstPost = firstPost;
   if (Array.isArray(input.saturated)) {
     dailyUsage.saturated = input.saturated.filter((action) =>
       (DAILY_USAGE_ACTIONS as readonly string[]).includes(action),

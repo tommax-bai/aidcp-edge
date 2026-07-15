@@ -1336,6 +1336,18 @@ function normalizeDailyUsage(input) {
   const quotas = cleanOptionalCounts(input.quotas);
   const windows = normalizeUsageWindows(input.windows);
   const inspirationSummary = cleanInspirationSummary(input.inspirationSummary);
+  const firstPost = input.firstPost && typeof input.firstPost === 'object'
+    && ['searching', 'generating'].includes(input.firstPost.state)
+    && typeof input.firstPost.viewed === 'number' && Number.isFinite(input.firstPost.viewed)
+    && typeof input.firstPost.startedAt === 'number' && Number.isFinite(input.firstPost.startedAt)
+    ? {
+        state: input.firstPost.state,
+        viewed: cleanCount(input.firstPost.viewed),
+        target: 20,
+        startedAt: input.firstPost.startedAt,
+        ...(typeof input.firstPost.sourceId === 'string' && input.firstPost.sourceId ? { sourceId: input.firstPost.sourceId } : {}),
+      }
+    : null;
   const out = {
     asOf,
     totals,
@@ -1344,6 +1356,7 @@ function normalizeDailyUsage(input) {
   if (['conservative', 'normal', 'aggressive'].includes(input.quotaLevel)) out.quotaLevel = input.quotaLevel;
   if (quotas) out.quotas = quotas;
   if (inspirationSummary) out.inspirationSummary = inspirationSummary;
+  if (firstPost) out.firstPost = firstPost;
   if (windows) out.windows = windows;
   return out;
 }

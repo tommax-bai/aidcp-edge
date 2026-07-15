@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 interface Health { code: string; label: string; detail: string }
 interface PresenceV { text: string; animate: boolean; fresh: string }
 interface RuntimeGuidanceV {
-  mode: 'running' | 'session' | 'hour' | 'day';
+  mode: 'running' | 'session' | 'hour' | 'day' | 'first-post';
   mascot: string;
   animate: boolean;
   kicker: string;
@@ -271,29 +271,59 @@ test('运行价值说明：日常进度分母来自今日目标时，分子也�
   });
 });
 
-test('运行价值说明：没有今日目标时保留当前窗口进度，避免覆盖新手首轮 20 条', () => {
+test('第一篇作品引导：首轮单独显示 0/20，不从今日计划推断', () => {
   const now = Date.now();
   const v = uiLogic.runtimeGuidanceView(st({
     presence: { text: '正在继续浏览…', at: new Date(now - 10_000).toISOString() },
     dailyUsage: {
+      totals: { view: 95 },
+      quotas: { view: 120 },
+      firstPost: { state: 'searching', viewed: 0, target: 20, startedAt: now },
       windows: {
         session: {
           active: true,
-          totals: { view: 0, collect: 0 },
-          quotas: { view: 20 },
+          totals: { view: 7, collect: 0 },
+          quotas: { view: 12 },
         },
       },
     },
   }), now);
-  assert.equal(v?.mode, 'running');
+  assert.equal(v?.mode, 'first-post');
+  assert.equal(v?.animate, false);
+  assert.match(v?.value ?? '', /不是漫无目的/);
+  assert.deepEqual(v?.steps.map((step) => step.label), ['看趋势', '找匹配', '开始创作']);
   assert.deepEqual(v?.progress, {
     current: 0,
     target: 20,
     percent: 0,
-    title: '正在观察推荐内容',
+    title: '首轮观察刚刚开始',
     counter: '0/20',
-    meta: '进展实时记录',
+    meta: '通常筛出 1 条灵感',
   });
+});
+
+test('第一篇作品引导：命中灵感后进入一次性生成态，不承诺浏览 20 条必定成功', () => {
+  const now = Date.now();
+  const v = uiLogic.runtimeGuidanceView(st({
+    dailyUsage: {
+      totals: { view: 14 },
+      firstPost: { state: 'generating', viewed: 14, target: 20, startedAt: now - 60_000, sourceId: 'note-1' },
+    },
+  }), now);
+  assert.equal(v?.mode, 'first-post');
+  assert.equal(v?.mascot, 'celebration');
+  assert.equal(v?.animate, true);
+  assert.match(v?.title ?? '', /正在生成/);
+  assert.deepEqual(v?.steps.map((step) => step.state), ['done', 'done', 'current']);
+  assert.deepEqual(v?.progress, {
+    current: 14,
+    target: 20,
+    percent: 70,
+    title: '已从 14 条推荐内容中找到灵感',
+    counter: '14/20',
+    meta: '已找到 1 条灵感',
+  });
+  assert.match(v?.note ?? '', /确认发布/);
 });
 
 test('运行价值说明：本轮浏览完成才展示自然间隔与三步说明', () => {

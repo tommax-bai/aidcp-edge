@@ -452,7 +452,7 @@ test('红线：人设草稿绑定生成时的环境，中途切换环境后确�
   const calls: Record<string, unknown[]> = { gen: [], persist: [] };
   const { w } = await boot({
     personaGenerate: async (envId: string) => { calls.gen.push(envId); return { ok: true, soulYaml: 'soul: A', identitySummary: 'A 人设' }; },
-    personaPersist: async (envId: string) => { calls.persist.push(envId); return { ok: true }; },
+    personaPersist: async (envId: string) => { calls.persist.push(envId); return { ok: true, firstPostOnboarding: true }; },
     // personaBound:false = 云端权威说未绑（向导只对权威未绑的账号开放；未知态出空态面板，见三态用例）。
     getStatus: async () => makeStatus({ envId: 'ads-p1', envName: '环境一', auth: 'logged in', cloud: 'connected', personaBound: false }),
   });
@@ -650,7 +650,7 @@ test('人设浮层：未就绪环境出空态面板（向导收起）；生成�
   const calls: Record<string, unknown[]> = { persist: [] };
   const { w, pushStatus } = await boot({
     personaGenerate: async () => ({ ok: true, soulYaml: 'soul: X', identitySummary: 'X 人设' }),
-    personaPersist: async (envId: string) => { calls.persist.push(envId); return { ok: true }; },
+    personaPersist: async (envId: string) => { calls.persist.push(envId); return { ok: true, firstPostOnboarding: true }; },
   });
   const rowOf = (id: string) => [...w.document.querySelectorAll('.rail-row')].find((r) => (r as HTMLElement).dataset.envId === id) as HTMLElement;
   // 环境二未启动未登录：打开其人设浮层 → 空态面板 + 「待启动」徽标 + 向导收起
@@ -686,14 +686,18 @@ test('人设浮层：未就绪环境出空态面板（向导收起）；生成�
   assert.equal(w.document.querySelector('#persona-growth')!.classList.contains('hidden'), false, '确认成功后展示一次成长引导');
   assert.match(w.document.querySelector('#persona-growth')!.textContent || '', /容易被看见的内容灵感/);
   assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), true, '成长引导期间不同时显示已设置卡片');
-  assert.equal(w.document.querySelector('#persona-growth-start')!.classList.contains('hidden'), false, '底部 CTA 切到开始生成');
+  assert.match(w.document.querySelector('#persona-growth')!.textContent || '', /看趋势[\s\S]*找匹配[\s\S]*开始创作/);
+  assert.match(w.document.querySelector('#persona-growth')!.textContent || '', /通常筛出\s*1 条/);
+  assert.equal(w.document.querySelector('#persona-growth-start')!.classList.contains('hidden'), false, '底部 CTA 切到开始找灵感');
+  assert.equal(w.document.querySelector('#persona-growth-start')!.textContent, '开始找灵感');
+  assert.match(w.document.querySelector('#runtime-guidance-progress')!.textContent || '', /0\/20/, '弹窗背后的获得感卡立即显示首轮 0/20');
 });
 
-test('人设成长引导：点击开始生成复用现有启动按钮并关闭浮层', async () => {
+test('人设成长引导：点击开始找灵感复用现有启动按钮并关闭浮层', async () => {
   const { w, calls, pushStatus } = await boot({
     getStatus: async () => makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'stopped', session: 'idle', auth: 'logged in', cloud: 'connected', personaBound: false }),
     personaGenerate: async () => ({ ok: true, soulYaml: 'soul: Start', identitySummary: 'Start 人设' }),
-    personaPersist: async () => ({ ok: true }),
+    personaPersist: async () => ({ ok: true, firstPostOnboarding: true }),
   });
   pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'stopped', session: 'idle', auth: 'logged in', cloud: 'connected', personaBound: false }));
   await tick();
@@ -709,9 +713,35 @@ test('人设成长引导：点击开始生成复用现有启动按钮并关闭�
   start.click();
   await tick();
 
-  assert.deepEqual(calls.start, ['ads-p1'], '开始生成走现有 session-fab 启动链路');
+  assert.deepEqual(calls.start, ['ads-p1'], '开始找灵感走现有 session-fab 启动链路');
   assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), false, '点击后关闭人设浮层');
   assert.equal(w.document.querySelector('#persona-growth')!.classList.contains('hidden'), true, '成长引导只出现一次');
+});
+
+test('人设成长引导：沿用旧庆祝吉祥物，撒花与缩放均为一次性且支持 reduced motion', () => {
+  assert.match(html, /mascot-celebration-512\.png/);
+  assert.match(rendererCss, /\.persona-growth\.play \.pg-mascot\s*\{\s*animation:\s*pg-mascot-scale 800ms[^;]*both;/);
+  assert.match(rendererCss, /@keyframes pg-mascot-scale\s*\{[\s\S]*scale\(1\.09\)[\s\S]*\}/);
+  assert.doesNotMatch(rendererCss, /\.persona-growth\.play \.pg-mascot[^}]*infinite/);
+  assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.persona-growth\.play \.pg-mascot\s*\{[\s\S]*animation:\s*none;/);
+  assert.match(rendererCss, /\.pg-step-icon\s*\{[^}]*color:\s*#2d8fa4;[^}]*\}/);
+  assert.doesNotMatch(rendererCss, /\.pg-step-icon\s*\{[^}]*background:/);
+});
+
+test('人设成长引导：云端未创建首次引导时不重复展示', async () => {
+  const { w, pushStatus } = await boot({
+    personaGenerate: async () => ({ ok: true, soulYaml: 'soul: Existing', identitySummary: 'Existing 人设' }),
+    personaPersist: async () => ({ ok: true, firstPostOnboarding: false }),
+  });
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: false }));
+  await tick();
+  (w.document.querySelector('.persona-kw-group[data-dim="content"][data-category="招聘求职"] .kw-btn') as HTMLElement).click();
+  (w.document.querySelector('#persona-generate') as HTMLElement).click();
+  await tick();
+  (w.document.querySelector('#persona-confirm') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-growth')!.classList.contains('hidden'), true);
+  assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), false);
 });
 
 test('暂停态显式关闭只路由当前选中环境并切到已关闭', async () => {
