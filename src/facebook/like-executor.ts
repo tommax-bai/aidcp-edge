@@ -22,7 +22,7 @@
  *  - Shadow：只定位+校验目标、**不点击**，回诚实 `shadow`（executed=false）——云端据此不记账、不扣风控。
  */
 
-import { evalJson, type BrowseCdp } from '../browse/cdp-util.js';
+import { dispatchClick, evalJson, type BrowseCdp } from '../browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../browse/overlay-monitor.js';
 import { defaultRandom, type RandomFn } from '../humanize/index.js';
 import {
@@ -152,13 +152,15 @@ interface VerifyResult {
   text?: string;
 }
 
-interface PickerProbeResult {
-  overlay: boolean;
-}
-
-interface PickerCommitResult {
-  clicked: boolean;
-  label?: string;
+interface PickerLocateResult {
+  /** 打开的反应选择器浮层里找到「赞」反应项。 */
+  found: boolean;
+  /** 「赞」项中心视口坐标（供 CDP 坐标点击；in-page element.click 对浮层项无效——见 commitFeedPicker）。 */
+  cx: number;
+  cy: number;
+  /** 目标卡中性 react 控件中心坐标，作指针移动起点（让路径落在「控件→浮层」走廊，避免 mouseleave 收起）。 */
+  fromX: number | null;
+  fromY: number | null;
 }
 
 interface RawObservation {
@@ -309,7 +311,7 @@ export class FacebookLikeExecutor {
         }
         // 未翻转 + 弹了反应选择器浮层 ⇒ 补第二段（feed 两段点赞）。只补一次。
         if (!pickerCommitted) {
-          const committed = await this.commitFeedPicker();
+          const committed = await this.commitFeedPicker(runId);
           if (committed) {
             pickerCommitted = true;
             await this.sleep(this.opts.settleMs);
@@ -357,25 +359,32 @@ export class FacebookLikeExecutor {
   }
 
   /**
-   * feed 两段兜底：探到反应选择器浮层就点其中「赞」项提交（探针 P4）。浮层常渲染在 portal（article 外），
-   * 故在全局可见项里找唯一「赞」项（数字守卫不适用——picker 项文案是纯反应词、无计数）。无浮层 → false（不点）。
+   * feed 两段兜底：探到反应选择器浮层就点其中「赞」项提交（探针 P4）。
+   *
+   * 【红线：浮层反应项必须走 CDP 坐标点击，绝不 in-page element.click】真机 A/B 实证（本轮，簇82）：
+   * 对浮层「赞」项 in-page `el.click()` 返回 `clicked=true` 但**反应不生效**（FB 把纯 'click' 事件当 hover
+   * 态忽略、监听的是真实 mousedown/mouseup）；改用 CDP `Input.dispatchMouseEvent` press/release（dispatchClick）
+   * 才真提交。这是 FB **逐控件事件机制不一致**的又一例（cta / composer 亦有先例）——浮层态选项一律坐标点击。
+   * 且**只在打开的反应浮层 dialog 内**定位「赞」项坐标（scoped，见 buildPickerLocateJs），绝不全文档搜索
+   * （feed 每卡 Like 按钮 aria-label 亦「赞」，全文档搜会点错帖）。无浮层 / 找不到 → false（不点，诚实）。
    */
-  private async commitFeedPicker(): Promise<boolean> {
-    let probe: PickerProbeResult;
+  private async commitFeedPicker(runId: string): Promise<boolean> {
+    let loc: PickerLocateResult;
     try {
-      probe = await evalJson<PickerProbeResult>(this.cdp, buildPickerProbeJs());
+      loc = await evalJson<PickerLocateResult>(this.cdp, buildPickerLocateJs(runId));
     } catch {
       return false;
     }
-    if (probe?.overlay !== true) return false;
-    let commit: PickerCommitResult;
+    if (loc?.found !== true) return false;
     try {
-      commit = await evalJson<PickerCommitResult>(this.cdp, buildPickerCommitJs());
+      const from = typeof loc.fromX === 'number' && typeof loc.fromY === 'number' ? { x: loc.fromX, y: loc.fromY } : undefined;
+      // overshoot=false：路径紧贴「控件→浮层」走廊，避免 overshoot 甩出浮层 hover 区致其收起。
+      await dispatchClick(this.cdp, loc.cx, loc.cy, { from, overshoot: false, random: this.random, sleep: this.sleep });
     } catch {
       return false;
     }
-    if (commit?.clicked === true) this.log(`[fb-like] feed 两段提交：点反应选择器「${commit.label ?? '赞'}」项`);
-    return commit?.clicked === true;
+    this.log(`[fb-like] feed 两段提交：坐标点击反应浮层「赞」项 @(${loc.cx},${loc.cy})`);
+    return true;
   }
 
   /** 现读被作用卡的独立见证（N4）：page-derived postId + surface + author/textHead/reactionText/articleIndex。 */
@@ -493,12 +502,18 @@ function buildResolveJs(targetId: string | null, runId: string): string {
 })()`;
 }
 
-/** 读标记节点位置（/*aidcp:rect*\/）。 */
+/**
+ * 读滚动定位锚的位置（/*aidcp:rect*\/）。**优先用帖级 react 控件的 rect**（而非文章顶）：feed 两段点赞要对
+ * 浮层「赞」项走 CDP 坐标点击，浮层贴着 Like 按钮渲染——按钮必须落在可视视口内、浮层才在屏、坐标点击才命中。
+ * 长招工帖若只把文章顶滚进视口，按钮/浮层会落在折叠线以下（真机实证 cy≈1372 > innerHeight≈1002 → 坐标点空、
+ * state_unchanged）。控件找不到（如尚未渲染出 react 按钮）回落文章 rect。
+ */
 function buildRectJs(runId: string): string {
   return `(function(){/*aidcp:rect*/${REACT_HELPERS}
   var el=fbTaggedTarget(${JSON.stringify(runId)});
   if(!el) return JSON.stringify({found:false, top:0, bottom:0, viewportH:0});
-  var b=el.getBoundingClientRect();
+  var c=fbPostReactControl(el);
+  var b=(c&&c.el)?c.el.getBoundingClientRect():el.getBoundingClientRect();
   return JSON.stringify({found:true, top:Math.round(b.top), bottom:Math.round(b.bottom), viewportH:Math.round(window.innerHeight||0)});
 })()`;
 }
@@ -555,32 +570,44 @@ function buildClearTagJs(runId: string): string {
 }
 
 /**
- * 反应选择器浮层探测（/*aidcp:picker-probe*\/）：可见 dialog / 反应容器内 ≥2 个反应项即判浮层已弹。
- * 探针 P4：单击「留下心情」后弹此浮层、按钮不翻转，需二段点其中「赞」项才提交。
+ * 反应选择器浮层里定位「赞」项**坐标**（/*aidcp:picker-commit*\/）。探针 P4：单击「留下心情」后弹此浮层、
+ * 按钮不翻转，需二段点其中「赞」项才提交。
+ *
+ * 【红线一：只在打开的反应浮层 dialog 内找，绝不全文档搜索】feed 里**每张卡的中性 Like 按钮 aria-label 也恰是
+ * 「赞」**（真机实证：帖级动作栏首个 `[role=button][aria-label="赞"]`），反应【计数汇总】按钮 aria-label 亦是
+ * 「赞」。浮层常渲染在 portal，document 序里排在**所有 feed 卡之后**——若全文档搜 `/^赞$/` 会命中**上方另一
+ * 张卡**的 Like 按钮：① 目标浮层永不提交 → verify 恒 `state_unchanged`（「读了从不点赞」的真根因，簇82）；
+ * ② 直接点了**别的帖**的赞（点错卡红线）。目标恰为首卡时才碰巧撞对（document 序首个「赞」= 目标自己）。
+ * 故只在**可见的反应选择器浮层**（`[role=dialog]` 等、且含 ≥2 个反应项）内部找「赞」项。
+ *
+ * 【红线二：只返坐标、由调用方走 CDP 坐标点击】浮层反应项监听真实指针事件，in-page element.click 无效（当 hover
+ * 态忽略）——见 commitFeedPicker。故这里**不点**，只回「赞」项中心坐标 + 目标控件坐标（作指针移动起点）。
  */
-function buildPickerProbeJs(): string {
-  return `(function(){/*aidcp:picker-probe*/${FB_TARGET_HELPERS_JS}
+function buildPickerLocateJs(runId: string): string {
+  return `(function(){/*aidcp:picker-commit*/${REACT_HELPERS}
+  var LIKEITEM=/(?:^|[:：]\\s*)(赞|讚|Like|Me gusta)$/i;
+  var REACTIONISH=/(赞|讚|Like|大爱|Love|哈哈|Haha|哇|Wow|加油|Care|怒|Angry|悲伤|Sad|Me gusta)/i;
   var dls=document.querySelectorAll('[role="dialog"],[aria-label*="反应"],[aria-label*="Reaction"],[aria-label*="心情"]');
-  for(var j=0;j<dls.length;j++){ var d=dls[j]; if(!fbTgtVisible(d)) continue;
-    if(d.querySelectorAll('[aria-label*="赞"],[aria-label*="Like"],[aria-label*="大爱"],[aria-label*="Love"]').length>=2) return JSON.stringify({overlay:true});
+  var cx=0, cy=0, found=false;
+  for(var j=0;j<dls.length && !found;j++){ var d=dls[j]; if(!fbTgtVisible(d)) continue;
+    var items=d.querySelectorAll('[role="button"][aria-label]');
+    var reactionCount=0;
+    for(var k=0;k<items.length;k++){ if(REACTIONISH.test(String(items[k].getAttribute('aria-label')||''))) reactionCount++; }
+    if(reactionCount<2) continue;                                    // 不是反应选择器浮层（含 <2 反应项）→ 跳过（如反应人数查看 toolbar）
+    for(var i=0;i<items.length;i++){ var el=items[i]; if(!fbTgtVisible(el)) continue;
+      var l=String(el.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
+      if(LIKEITEM.test(l)){ var r=el.getBoundingClientRect(); cx=Math.round(r.left+r.width/2); cy=Math.round(r.top+r.height/2); found=true; break; }
+    }
   }
-  return JSON.stringify({overlay:false});
-})()`;
-}
-
-/**
- * 反应选择器浮层里点「赞」项提交（/*aidcp:picker-commit*\/）。picker 常渲染在 portal（article 外），
- * 故在全局可见 [role=button] 里找唯一「赞」反应项 el.click()。反应项文案是纯反应词、无计数——不需数字守卫。
- */
-function buildPickerCommitJs(): string {
-  return `(function(){/*aidcp:picker-commit*/${FB_TARGET_HELPERS_JS}
-  var LIKEITEM=/^(赞|讚|Like|Me gusta)$/i;
-  var btns=document.querySelectorAll('[role="button"][aria-label]');
-  for(var i=0;i<btns.length;i++){ var el=btns[i]; if(!fbTgtVisible(el)) continue;
-    var l=String(el.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
-    if(LIKEITEM.test(l)){ try{ el.click(); return JSON.stringify({clicked:true, label:l}); }catch(e){ return JSON.stringify({clicked:false}); } }
-  }
-  return JSON.stringify({clicked:false});
+  if(!found) return JSON.stringify({found:false, cx:0, cy:0, fromX:null, fromY:null});
+  // 视口内守卫：坐标点击只对**可视区内**的项有效，屏外坐标点空（无声失败）。屏外即回 found:false，
+  // 由调用方诚实走 state_unchanged（配合 buildRectJs 把 Like 按钮滚进视口，正常情况下浮层项必在屏）。
+  var vw=window.innerWidth||0, vh=window.innerHeight||0;
+  if(cx<0||cy<0||cx>vw||cy>vh) return JSON.stringify({found:false, cx:cx, cy:cy, fromX:null, fromY:null, offscreen:true});
+  var fromX=null, fromY=null;
+  var tgt=fbTaggedTarget(${JSON.stringify(runId)});
+  if(tgt){ var c=fbPostReactControl(tgt); if(c&&c.el){ var rr=c.el.getBoundingClientRect(); fromX=Math.round(rr.left+rr.width/2); fromY=Math.round(rr.top+rr.height/2); } }
+  return JSON.stringify({found:true, cx:cx, cy:cy, fromX:fromX, fromY:fromY});
 })()`;
 }
 

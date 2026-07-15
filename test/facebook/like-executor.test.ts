@@ -431,6 +431,61 @@ test('fb-like[jsdom]: 目标卡只有计数按钮、无 toggle → no_target（�
   assert.equal(r.executed, false);
 });
 
+test('fb-like[jsdom] 两段: 反应浮层「赞」项走 CDP 坐标点击、落点=浮层项坐标（非首卡回归：不点到别卡「赞」，簇82）', async () => {
+  // 真机双根因（本轮实证）：① feed 里**每张卡**的 Like/计数按钮 aria-label 都恰是「赞」，反应浮层是 portal、
+  // document 序排在所有卡之后——旧 picker-commit 全文档搜 `/^赞$/` 会命中上方另一张卡的「赞」（点错帖 + 目标浮层
+  // 永不提交）；② 浮层反应项监听真实指针事件，in-page element.click 被当 hover 忽略、不提交，必须 CDP 坐标点击。
+  // 修法：只在浮层 dialog 内定位「赞」项**坐标**，交由 dispatchClick 走 press/release。本测断言落点=浮层项坐标
+  // (620,820)，绝非 feed 卡按钮的默认 stub 坐标(35,115)。
+  const dom = feedDom(card('c1', 'Ann', A) + card('c2', 'Bob', B) + card('c3', 'Cid', C));
+  const doc = dom.window.document;
+  const c2toggle = toggleOf(dom, 'c2');
+  // 点目标卡「留下心情」→ 弹浮层（portal 在 body 末尾）；浮层「赞」项 rect 覆写为独特**屏内**坐标 (600,380,40x40)→中心(620,400)。
+  c2toggle.addEventListener('click', () => {
+    const dlg = doc.createElement('div');
+    dlg.setAttribute('role', 'dialog');
+    dlg.setAttribute('aria-label', '心情');
+    dlg.innerHTML =
+      '<div role="button" aria-label="赞">赞</div>' +
+      '<div role="button" aria-label="大爱">大爱</div>' +
+      '<div role="button" aria-label="哇">哇</div>';
+    doc.body.appendChild(dlg);
+    const like = dlg.querySelector('[aria-label="赞"]') as HTMLElement;
+    Object.defineProperty(like, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 600, top: 380, right: 640, bottom: 420, width: 40, height: 40, x: 600, y: 380, toJSON() {} }),
+    });
+  });
+  const pressed: { x: number; y: number }[] = [];
+  // 自定义 CDP：Runtime.evaluate 跑真 in-page JS；Input.dispatchMouseEvent 记录 press，命中浮层坐标即真提交（翻转目标卡）。
+  const cdp: BrowseCdp = {
+    async send(method: string, params?: Record<string, unknown>) {
+      if (method === 'Runtime.evaluate') {
+        const v = dom.window.eval(String(params?.expression ?? ''));
+        return { result: { value: typeof v === 'string' ? v : JSON.stringify(v) } } as never;
+      }
+      if (method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed') {
+        const x = Number(params.x);
+        const y = Number(params.y);
+        pressed.push({ x, y });
+        if (Math.abs(x - 620) <= 20 && Math.abs(y - 400) <= 20) {
+          c2toggle.textContent = '赞'; // 坐标命中浮层「赞」项 → 真提交，目标卡翻转
+          doc.querySelector('[role="dialog"][aria-label="心情"]')?.remove();
+        }
+      }
+      return {} as never;
+    },
+  };
+  const exec = new FacebookLikeExecutor({ cdp, ...noSleep }, fastOpts);
+  const r = await exec.like({ noteId: 'https://www.facebook.com/groups/111/posts/BBB/' });
+  assert.equal(r.ok, true, '坐标点击浮层「赞」项 → 目标卡翻转');
+  assert.equal(c2toggle.textContent, '赞');
+  const hitPicker = pressed.find((p) => Math.abs(p.x - 620) <= 20 && Math.abs(p.y - 400) <= 20);
+  assert.ok(hitPicker, '必须对浮层「赞」项坐标(620,400)派发 mousePressed（scoped 到浮层，非首卡也对）');
+  const hitCard = pressed.find((p) => Math.abs(p.x - 35) <= 8 && Math.abs(p.y - 115) <= 8);
+  assert.equal(hitCard, undefined, '绝不点到 feed 卡「赞」按钮坐标(35,115)（修复前全文档搜索会点错帖）');
+});
+
 test('fb-like[jsdom]: 命令不带 noteId（老云端）→ 回落 location.href 派生身份，仍不 DOM 序回落', async () => {
   const dom = new JSDOM(
     `<!doctype html><html><body><div role="feed">${card('c1', 'Ann', A)}${card('c2', 'Bob', B)}</div></body></html>`,
