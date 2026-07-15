@@ -19,7 +19,7 @@
  *  - FB 无收藏/关注/看图（v1）：这些命令诚实回 capability_unsupported，绝不臆造。
  */
 
-import { evalJson, type BrowseCdp } from '../browse/cdp-util.js';
+import { type BrowseCdp } from '../browse/cdp-util.js';
 import type { OverlayMonitor } from '../browse/overlay-monitor.js';
 import { jitterAround } from '../humanize/index.js';
 import type { EdgeBrowseSession } from '../browse/edge-browse-session.js';
@@ -41,6 +41,7 @@ import type {
 } from '../comm/protocol.js';
 import type { PlatformDriver } from '../platform/driver.js';
 import { FACEBOOK_DEFAULT_START_URL } from './driver.js';
+import { readFacebookIdentity } from './identity.js';
 import { FacebookFeedReader, type FacebookFeedCard, type FacebookFeedSettleResult } from './feed-reader.js';
 import { FacebookPostReader } from './post-reader.js';
 import { FacebookLikeExecutor, type FacebookLikeObservation } from './like-executor.js';
@@ -154,13 +155,6 @@ interface FacebookCompanionUiEvent {
   presence?: string;
   loopStage?: 'feed' | 'read' | 'interact';
   statsDelta?: { views?: number; likes?: number };
-}
-
-interface FacebookProfileSnapshot {
-  url?: string;
-  title?: string;
-  nickname?: string;
-  bodyTextLen?: number;
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -1099,20 +1093,23 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   }
 
   private async openDirectProfile(payload: ProfileOpenPayload): Promise<TerminalReport> {
-    const authorId = String(payload.authorId ?? '').trim();
-    if (!authorId) return { type: 'profile', payload: this.profileFallback(authorId) };
+    const requestedAuthorId = String(payload.authorId ?? '').trim();
     await this.thinkBefore(payload.thinkMs);
-    const url = /^\d+$/.test(authorId)
-      ? `https://www.facebook.com/profile.php?id=${encodeURIComponent(authorId)}`
-      : `https://www.facebook.com/${encodeURIComponent(authorId)}`;
-    this.log(`[fb-session] 命令: profile.open direct（authorId=${authorId}）`);
-    await this.cdp.send('Page.navigate', { url });
-    const snapshot = await this.waitAndReadProfile();
-    const nickname = (snapshot.nickname ?? '').trim();
-    const landedUrl = snapshot.url?.startsWith('https://www.facebook.com/') ? snapshot.url : url;
+    // change facebook-nickname-capture-timing：本人昵称采集**就地读**（id 锚定顶栏头像标签），
+    // 绝不为取昵称导航 profile.php / /me（与 facebook-identity「取昵称绝不导航」契约一致）。
+    // 就地读从不离开 feed → 采集完的 back 经幂等 ensureFeed 变空操作、不整页重载。
+    // 上报按【就地读到的】数字 id 自校验：读到不匹配的 id → authorId≠连接 accountId，云端按「非本人」安全忽略（绝不写错账号）。
+    this.log(`[fb-session] 命令: profile.open direct（就地读, authorId=${requestedAuthorId || '<self>'}）`);
+    const idRes = await readFacebookIdentity(this.cdp, { logger: (m) => this.log(m), sleep: this.sleep });
+    if (!idRes.ok) {
+      this.log(`[fb-session] profile.detail direct 就地读身份失败（${idRes.reason}）→ 空昵称回执（不导航、不猜）`);
+      return { type: 'profile', payload: this.profileFallback(requestedAuthorId) };
+    }
+    const authorId = idRes.identity.accountId;
+    const nickname = (idRes.identity.displayName ?? '').trim();
     this.log(
       `[fb-session] profile.detail direct authorId=${authorId}` +
-        `${nickname ? ` nickname="${nickname}"` : ' nickname=<empty>'} extracted=false`,
+        `${nickname ? ` nickname="${nickname}"` : ' nickname=<empty>'} extracted=false（就地读、无导航）`,
     );
     return {
       type: 'profile',
@@ -1123,42 +1120,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         likesCollects: 0,
         extracted: false,
         ...(nickname ? { nickname } : {}),
-        ...(landedUrl ? { url: landedUrl } : {}),
       },
     };
-  }
-
-  private async waitAndReadProfile(timeoutMs = 8000): Promise<FacebookProfileSnapshot> {
-    const deadline = Date.now() + timeoutMs;
-    let last: FacebookProfileSnapshot = {};
-    while (Date.now() < deadline) {
-      last = await this.readProfileSnapshot();
-      if (last.nickname || (last.bodyTextLen ?? 0) > 0) return last;
-      await this.sleep(300);
-    }
-    return last;
-  }
-
-  private async readProfileSnapshot(): Promise<FacebookProfileSnapshot> {
-    return evalJson<FacebookProfileSnapshot>(
-      this.cdp,
-      `(() => {
-        const clean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
-        const title = clean(document.title).replace(/\\s*\\|\\s*Facebook\\s*$/i, '');
-        const h1 = clean(document.querySelector('h1')?.textContent || '');
-        const mainH1 = clean(document.querySelector('[role="main"] h1')?.textContent || '');
-        const bodyText = clean(document.body?.innerText || '');
-        const nickname = [mainH1, h1, title].find((v) =>
-          v && !/^(Facebook|首页|Home|通知|Notifications)$/i.test(v)
-        ) || '';
-        return JSON.stringify({
-          url: location.href,
-          title: document.title,
-          nickname,
-          bodyTextLen: bodyText.length
-        });
-      })()`,
-    );
   }
 
   private profileFallback(authorId?: string): ProfileDetailPayload {
