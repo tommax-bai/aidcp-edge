@@ -246,6 +246,39 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.doesNotMatch(rendererCss, /rg-loop-toggle|\.loop-step|\.loop-sep/);
 });
 
+test('获得感周期刷新原位更新内容，不重建连接器打断圆点行程', async () => {
+  const { w, pushStatus } = await boot({
+    dailyUsage: {
+      totals: { view: 3, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
+      quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+    },
+  });
+  const flow = $(w, '#runtime-guidance-flow');
+  const stepsBefore = Array.from(flow.querySelectorAll('.rg-flow-step'));
+  const connectorsBefore = Array.from(flow.querySelectorAll('.rg-flow-connector'));
+
+  pushStatus(makeStatus({
+    stats: { views: 4, likes: 1, collects: 0, comments: 0, follows: 0, publishes: 0 },
+    dailyUsage: {
+      totals: { view: 4, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
+      quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+    },
+  }));
+
+  const stepsAfter = Array.from(flow.querySelectorAll('.rg-flow-step'));
+  const connectorsAfter = Array.from(flow.querySelectorAll('.rg-flow-connector'));
+  assert.equal(stepsAfter.length, 3);
+  assert.equal(connectorsAfter.length, 2);
+  assert.strictEqual(stepsAfter[0], stepsBefore[0], '阶段节点应原位更新');
+  assert.strictEqual(connectorsAfter[0], connectorsBefore[0], '第一条连接器不得因状态刷新重建');
+  assert.strictEqual(connectorsAfter[1], connectorsBefore[1], '第二条连接器不得因状态刷新重建');
+  assert.match(flow.textContent ?? '', /正在查看第 4 条/, '原节点仍需刷新实时文案');
+  assert.ok(connectorsAfter.every((connector) => connector.classList.contains('flow-active')));
+  assert.match(rendererSrc, /const canReuseFlowNodes = existingFlowNodes\.length === expectedFlowNodeCount/);
+  assert.match(rendererSrc, /if \(!canReuseFlowNodes\) \{\s*fields\.runtimeGuidanceFlow\.replaceChildren\(\);/);
+  assert.match(rendererSrc, /connector\.classList\.toggle\('flow-active', activeFlow \|\| activeDayFlow\);/);
+});
+
 test('运行中 + 今日已有浏览累计 → 获得感进度使用账号今日累计，不被当前窗口 0 覆盖', async () => {
   const { w } = await boot({
     dailyUsage: {

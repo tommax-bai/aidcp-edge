@@ -1032,41 +1032,69 @@ function renderRuntimeGuidance(status, nowMs) {
   fields.runtimeGuidanceMascot.src = RUNTIME_GUIDANCE_MASCOTS[view.mascot] || '';
   fields.runtimeGuidanceMascot.classList.toggle('animate', Boolean(view.animate));
 
-  fields.runtimeGuidanceFlow.replaceChildren();
-  fields.runtimeGuidanceFlow.classList.toggle('hidden', !Array.isArray(view.steps) || view.steps.length === 0);
   const steps = Array.isArray(view.steps) ? view.steps : [];
+  fields.runtimeGuidanceFlow.classList.toggle('hidden', steps.length === 0);
+  const expectedFlowNodeCount = steps.length > 0 ? (steps.length * 2) - 1 : 0;
+  const existingFlowNodes = Array.from(fields.runtimeGuidanceFlow.children);
+  const canReuseFlowNodes = existingFlowNodes.length === expectedFlowNodeCount
+    && existingFlowNodes.every((node, index) => (
+      index % 2 === 0
+        ? node.classList.contains('rg-flow-step')
+          && node.querySelector('.rg-flow-icon')
+          && node.querySelector('.rg-flow-copy strong')
+          && node.querySelector('.rg-flow-copy small')
+        : node.classList.contains('rg-flow-connector')
+    ));
+  if (!canReuseFlowNodes) {
+    fields.runtimeGuidanceFlow.replaceChildren();
+    for (let index = 0; index < steps.length; index += 1) {
+      const el = document.createElement('div');
+      el.className = 'rg-flow-step';
+      const icon = document.createElement('span');
+      icon.className = 'rg-flow-icon';
+      const copy = document.createElement('span');
+      copy.className = 'rg-flow-copy';
+      const label = document.createElement('strong');
+      const detail = document.createElement('small');
+      copy.append(label, detail);
+      el.append(icon, copy);
+      fields.runtimeGuidanceFlow.appendChild(el);
+      if (index < steps.length - 1) {
+        const connector = document.createElement('span');
+        connector.className = 'rg-flow-connector';
+        connector.setAttribute('aria-hidden', 'true');
+        fields.runtimeGuidanceFlow.appendChild(connector);
+      }
+    }
+  }
+  const flowNodes = fields.runtimeGuidanceFlow.children;
   for (let index = 0; index < steps.length; index += 1) {
     const step = steps[index];
     const state = step.state || 'next';
     const nextState = steps[index + 1] && (steps[index + 1].state || 'next');
-    const el = document.createElement('div');
+    const el = flowNodes[index * 2];
     el.className = `rg-flow-step ${state}`;
     el.dataset.stepIndex = String(index);
-    const icon = document.createElement('span');
-    icon.className = 'rg-flow-icon';
-    icon.innerHTML = RUNTIME_GUIDANCE_ICONS[step.icon] || '';
-    const copy = document.createElement('span');
-    copy.className = 'rg-flow-copy';
-    const label = document.createElement('strong');
-    label.textContent = step.label || '';
-    const detail = document.createElement('small');
-    detail.textContent = step.detail || '';
-    copy.append(label, detail);
-    el.append(icon, copy);
-    fields.runtimeGuidanceFlow.appendChild(el);
+    const icon = el.querySelector('.rg-flow-icon');
+    const iconKey = step.icon || '';
+    if (icon.dataset.icon !== iconKey) {
+      icon.dataset.icon = iconKey;
+      icon.innerHTML = RUNTIME_GUIDANCE_ICONS[iconKey] || '';
+    }
+    const label = el.querySelector('.rg-flow-copy strong');
+    const detail = el.querySelector('.rg-flow-copy small');
+    if (label.textContent !== (step.label || '')) label.textContent = step.label || '';
+    if (detail.textContent !== (step.detail || '')) detail.textContent = step.detail || '';
     if (nextState) {
       const activeFlow = (state === 'current' && (nextState === 'current' || nextState === 'done' || nextState === 'next'))
         || (state === 'done' && nextState === 'current');
       const activeDayFlow = view.mode === 'day' && state === 'done' && (nextState === 'done' || nextState === 'next');
       const completeFlow = state === 'done' && (nextState === 'done' || nextState === 'next');
-      const connector = document.createElement('span');
-      connector.className = 'rg-flow-connector';
-      connector.setAttribute('aria-hidden', 'true');
+      const connector = flowNodes[(index * 2) + 1];
       connector.dataset.fromState = state;
       connector.dataset.toState = nextState;
-      if (activeFlow || activeDayFlow) connector.classList.add('flow-active');
-      else if (completeFlow) connector.classList.add('flow-complete');
-      fields.runtimeGuidanceFlow.appendChild(connector);
+      connector.classList.toggle('flow-active', activeFlow || activeDayFlow);
+      connector.classList.toggle('flow-complete', !(activeFlow || activeDayFlow) && completeFlow);
     }
   }
   return view;
