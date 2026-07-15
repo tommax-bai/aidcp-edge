@@ -111,6 +111,19 @@ const fields = {
   publishPreviewActionHint: document.querySelector('#publish-preview-action-hint'),
   publishPreviewApprove: document.querySelector('#publish-preview-approve'),
   publishPreviewCancel: document.querySelector('#publish-preview-cancel'),
+  delegatedCard: document.querySelector('#delegated-card'),
+  delegatedCount: document.querySelector('#delegated-count'),
+  delegatedSchedule: document.querySelector('#delegated-schedule'),
+  delegatedPriority: document.querySelector('#delegated-priority'),
+  delegatedRefresh: document.querySelector('#delegated-refresh'),
+  delegatedMessage: document.querySelector('#delegated-message'),
+  delegatedList: document.querySelector('#delegated-list'),
+  delegatedActionButtons: Array.from(document.querySelectorAll('[data-delegated-action]')),
+  delegatedConfirm: document.querySelector('#delegated-confirm'),
+  delegatedConfirmTitle: document.querySelector('#delegated-confirm-title'),
+  delegatedConfirmFacts: document.querySelector('#delegated-confirm-facts'),
+  delegatedConfirmBoundary: document.querySelector('#delegated-confirm-boundary'),
+  delegatedConfirmSubmit: document.querySelector('#delegated-confirm-submit'),
   drawer: document.querySelector('#drawer'),
   drawerMask: document.querySelector('#drawer-mask'),
   drawerClose: document.querySelector('#drawer-close'),
@@ -622,10 +635,227 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// ─── 用户委托任务：当前选中环境快捷入口 + 结构化确认 + 真实进度 ───
+const DELEGATED_ACTION_LABELS = {
+  comment_batch: '完成有效评论',
+  comment_curated: '评论指定精选内容',
+  facebook_group_comment: 'Facebook 群组评论',
+  publish_post: '发布一篇稿件',
+  publish_from_inspiration: '参考今日灵感发布',
+  generate_candidates: '生成候选稿（不发布）',
+  approve_candidate: '批准候选稿',
+  reject_candidate: '驳回候选稿',
+  modify_candidate: '修改候选稿',
+};
+const DELEGATED_STATUS_LABELS = {
+  draft: '草稿', awaiting_confirmation: '待确认', queued: '已排队', planning: '规划中',
+  waiting_approval: '等待人审', executing: '执行中', partially_completed: '部分完成', completed: '已完成',
+  deferred: '已推迟', cancelled: '已取消', failed: '失败',
+};
+let pendingDelegatedTask = null;
+let pendingDelegatedEnvId = null;
+let delegatedLoading = false;
+
+function setDelegatedMessage(text, error = false) {
+  if (!fields.delegatedMessage) return;
+  fields.delegatedMessage.textContent = text || '';
+  fields.delegatedMessage.classList.toggle('error', Boolean(error));
+}
+
+function delegatedErrorText(result) {
+  const code = result && result.error;
+  if (code === 'client_session_required' || code === 'client_session_expired') return '请先登录客户账号后使用委托任务。';
+  if (code === 'selected_environment_required') return '请先选择一个指纹浏览器环境。';
+  if (code === 'environment_not_owned') return '当前环境不属于已登录客户，不能创建任务。';
+  return code ? `任务请求未完成：${code}` : '任务请求未完成，请稍后重试。';
+}
+
+function renderDelegatedTasks(tasks) {
+  if (!fields.delegatedList) return;
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    fields.delegatedList.innerHTML = '<span class="delegated-empty">当前环境暂无委托任务</span>';
+    return;
+  }
+  fields.delegatedList.replaceChildren();
+  tasks.slice(0, 8).forEach((task) => {
+    const row = document.createElement('div');
+    row.className = 'delegated-task';
+    const status = String(task.status || '');
+    const progress = task.progress || {};
+    const top = document.createElement('div');
+    top.className = 'delegated-task-top';
+    const title = document.createElement('strong');
+    title.textContent = DELEGATED_ACTION_LABELS[task.action] || task.action || '委托任务';
+    const badge = document.createElement('span');
+    badge.className = `delegated-task-status ${status}`;
+    badge.textContent = DELEGATED_STATUS_LABELS[status] || status;
+    top.append(title, badge);
+    row.appendChild(top);
+    appendPreviewText(
+      row,
+      `成功 ${progress.successCount || 0}/${task.targetSuccessCount || 0} · 尝试 ${progress.attemptCount || 0}/${task.maxAttempts || 0} · 跳过 ${progress.skippedCount || 0} · 失败 ${progress.failureCount || 0}`,
+      'delegated-task-progress',
+    );
+    if (task.terminalOutcome && task.terminalOutcome.message) {
+      appendPreviewText(row, task.terminalOutcome.message, 'delegated-task-reason');
+    }
+    const terminal = ['completed', 'partially_completed', 'cancelled', 'failed'].includes(status);
+    if (!terminal) {
+      const controls = document.createElement('div');
+      controls.className = 'delegated-task-controls';
+      const addControl = (action, label) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = label;
+        btn.addEventListener('click', () => { void controlDelegatedTask(task, action); });
+        controls.appendChild(btn);
+      };
+      if (status === 'deferred') addControl('resume', '继续');
+      else if (status !== 'awaiting_confirmation') addControl('pause', '完成当前安全动作后暂停');
+      addControl('cancel', '取消未执行部分');
+      row.appendChild(controls);
+    }
+    fields.delegatedList.appendChild(row);
+  });
+}
+
+async function refreshDelegatedTasks(silent = false, envId = currentEnvId()) {
+  if (!fields.delegatedList || !envId || delegatedLoading || typeof window.aidcpEdge.delegatedTaskList !== 'function') return;
+  delegatedLoading = true;
+  if (!silent) setDelegatedMessage('正在刷新任务…');
+  try {
+    const result = await window.aidcpEdge.delegatedTaskList(envId);
+    if (!result || !result.ok) {
+      if (!silent) setDelegatedMessage(delegatedErrorText(result), true);
+      return;
+    }
+    if (envId !== currentEnvId()) return;
+    renderDelegatedTasks(result.data && result.data.tasks);
+    if (!silent) setDelegatedMessage('已刷新当前环境的真实任务状态。');
+  } finally {
+    delegatedLoading = false;
+  }
+}
+
+function showDelegatedConfirmation(receipt, envId) {
+  if (!receipt || !receipt.task || !receipt.confirmation || !fields.delegatedConfirm) return;
+  if (fields.delegatedConfirm.open) fields.delegatedConfirm.close('replace');
+  pendingDelegatedTask = receipt.task;
+  pendingDelegatedEnvId = envId;
+  const c = receipt.confirmation;
+  fields.delegatedConfirmTitle.textContent = c.title || '请确认用户委托任务';
+  const facts = [
+    ['账号', c.accountName], ['平台', `${c.platformLabel}${c.capability === 'beta' ? '（Beta）' : ''}`],
+    ['动作', c.actionLabel], ['成功目标', c.target], ['尝试上限', c.attempts],
+    ['执行窗口', c.schedule], ['人审', c.approval], ['优先级', c.priority], ['任务编号', receipt.task.id],
+  ];
+  fields.delegatedConfirmFacts.replaceChildren();
+  facts.forEach(([label, value]) => {
+    const dt = document.createElement('dt'); dt.textContent = label;
+    const dd = document.createElement('dd'); dd.textContent = value || '—';
+    fields.delegatedConfirmFacts.append(dt, dd);
+  });
+  fields.delegatedConfirmBoundary.textContent = c.capabilityReason ? `Beta 边界：${c.capabilityReason}` : '';
+  fields.delegatedConfirmBoundary.classList.toggle('hidden', !c.capabilityReason);
+  fields.delegatedConfirm.showModal();
+}
+
+async function draftDelegatedTask(action, targetConstraints = {}, opts = {}) {
+  const envId = opts.envId || currentEnvId();
+  if (!envId || typeof window.aidcpEdge.delegatedTaskDraft !== 'function') {
+    setDelegatedMessage('请先选择一个环境。', true);
+    return false;
+  }
+  if (action === 'publish_from_inspiration' && selectedEnvPlatform() === 'facebook') {
+    setDelegatedMessage('Facebook Beta 尚未开放“参考今日灵感发稿”；需先完成平台化模板、语言和素材策略。', true);
+    return false;
+  }
+  const countInput = Number(fields.delegatedCount && fields.delegatedCount.value);
+  const target = opts.targetSuccessCount || (action === 'comment_batch' || action === 'generate_candidates'
+    ? Math.max(1, Math.min(20, Number.isInteger(countInput) ? countInput : 1))
+    : 1);
+  const scheduleMode = (fields.delegatedSchedule && fields.delegatedSchedule.value) || 'immediate';
+  const payload = {
+    action,
+    targetSuccessCount: target,
+    maxAttempts: opts.maxAttempts || (action === 'comment_batch' ? Math.max(target, target * 2) : action === 'generate_candidates' ? target : 2),
+    deadlineAt: Date.now() + 24 * 60 * 60 * 1000,
+    executionWindow: { mode: scheduleMode },
+    sourceConstraints: opts.sourceConstraints || {},
+    targetConstraints,
+    approvalMode: action === 'generate_candidates' ? 'draft_only' : 'review',
+    priority: fields.delegatedPriority && fields.delegatedPriority.checked ? 'high' : 'normal',
+    sourceRef: `edge:${envId}:${action}:${Math.floor(Date.now() / 60000)}`,
+  };
+  setDelegatedMessage('正在生成结构化确认…');
+  const result = await window.aidcpEdge.delegatedTaskDraft(envId, payload);
+  if (!result || !result.ok) {
+    setDelegatedMessage(delegatedErrorText(result), true);
+    return false;
+  }
+  showDelegatedConfirmation(result.data, envId);
+  setDelegatedMessage('任务尚未执行，请核对确认卡。');
+  return true;
+}
+
+async function controlDelegatedTask(task, action) {
+  const envId = currentEnvId();
+  if (!envId || typeof window.aidcpEdge.delegatedTaskAction !== 'function') return;
+  setDelegatedMessage('正在更新任务…');
+  const result = await window.aidcpEdge.delegatedTaskAction(envId, task.id, action, task.version);
+  if (!result || !result.ok) {
+    setDelegatedMessage(delegatedErrorText(result), true);
+    return;
+  }
+  setDelegatedMessage(action === 'pause' ? '已请求在当前安全动作结束后暂停。' : action === 'cancel' ? '已取消尚未执行的剩余部分。' : '任务已继续排队。');
+  await refreshDelegatedTasks(true, envId);
+}
+
+fields.delegatedActionButtons.forEach((button) => button.addEventListener('click', () => {
+  void draftDelegatedTask(button.dataset.delegatedAction);
+}));
+fields.delegatedRefresh?.addEventListener('click', () => { void refreshDelegatedTasks(false); });
+fields.delegatedConfirmSubmit?.addEventListener('click', async () => {
+  if (!pendingDelegatedTask || !pendingDelegatedEnvId || fields.delegatedConfirmSubmit.disabled) return;
+  fields.delegatedConfirmSubmit.disabled = true;
+  const result = await window.aidcpEdge.delegatedTaskAction(
+    pendingDelegatedEnvId,
+    pendingDelegatedTask.id,
+    'confirm',
+    pendingDelegatedTask.version,
+  );
+  fields.delegatedConfirmSubmit.disabled = false;
+  if (!result || !result.ok) {
+    setDelegatedMessage(delegatedErrorText(result), true);
+    return;
+  }
+  const envId = pendingDelegatedEnvId;
+  fields.delegatedConfirm.close();
+  pendingDelegatedTask = null;
+  pendingDelegatedEnvId = null;
+  setDelegatedMessage('任务已确认并排队；后续只按真实验证结果计数。');
+  await refreshDelegatedTasks(true, envId);
+});
+fields.delegatedConfirm?.addEventListener('close', () => {
+  if (fields.delegatedConfirm.returnValue === 'cancel') {
+    pendingDelegatedTask = null;
+    pendingDelegatedEnvId = null;
+  }
+});
+
 // 当前选中环境的平台（fleet 环境优先，回落 settings 平台）——顶栏/登录提示/人设浮层共用。
 function selectedEnvPlatform() {
   const env = fleetView.envs.get(fleetView.selected);
   return normPlatform((env && env.platform) || selectedPlatform);
+}
+
+function syncDelegatedActionAvailability() {
+  const facebook = selectedEnvPlatform() === 'facebook';
+  fields.delegatedActionButtons.forEach((button) => {
+    const blocked = facebook && button.dataset.delegatedAction === 'publish_from_inspiration';
+    button.disabled = blocked;
+    button.title = blocked ? 'Facebook Beta 尚未完成平台化创作模板、语言和素材策略' : '';
+  });
 }
 
 // ─── 阻塞动作主动步骤（需登录 / 待配置）───
@@ -1032,9 +1262,8 @@ function appendPublishPreviewImageDelete(item, url, index) {
 async function submitPublishPreviewImageRemove(url) {
   const preview = currentStatus && currentStatus.publishPreview;
   if (!preview || publishPreviewActionBusy) return;
-  const publishImageRemove = window.aidcpEdge && window.aidcpEdge.publishImageRemove;
-  if (typeof publishImageRemove !== 'function') {
-    publishPreviewImageRemoveHint = '当前客户端不支持删除配图。';
+  if (typeof window.aidcpEdge.delegatedTaskDraft !== 'function') {
+    publishPreviewImageRemoveHint = '当前客户端不支持委托修改稿件。';
     publishPreviewPendingDeleteUrl = null;
     repaintPublishPreview();
     return;
@@ -1044,36 +1273,29 @@ async function submitPublishPreviewImageRemove(url) {
   syncPublishPreviewActions(currentStatus);
   repaintPublishPreview();
 
-  let result;
+  let created = false;
   try {
-    result = await publishImageRemove(currentStatus.envId, {
-      requestId: `publish-${preview.recordId}`,
-      contentVersion: Number.isInteger(preview.contentVersion) ? preview.contentVersion : 0,
-      imageUrl: url,
-    });
+    created = await draftDelegatedTask(
+      'modify_candidate',
+      {
+        candidateId: String(preview.recordId),
+        candidateVersion: Number.isInteger(preview.contentVersion) ? preview.contentVersion : 0,
+        images: (Array.isArray(preview.images) ? preview.images : []).filter((item) => item !== url),
+      },
+      { envId: currentStatus.envId, targetSuccessCount: 1, maxAttempts: 1 },
+    );
   } catch {
-    result = { ok: false, reason: 'request_failed' };
+    created = false;
   }
   publishPreviewActionBusy = false;
   publishPreviewPendingDeleteUrl = null;
-
-  if (!result || result.ok !== true) {
-    // 诚实：该张仍在界面上，只补一行拒因。
-    publishPreviewImageRemoveHint = publishPreviewImageRemoveReason(result && result.reason);
+  if (!created) {
+    publishPreviewImageRemoveHint = '未能创建修改任务，配图未删除。';
     syncPublishPreviewActions(currentStatus);
     repaintPublishPreview();
     return;
   }
-  // 成功：主进程已按应答的写后真态更新 publishPreview 并广播；这里同步本地副本以免等下一帧广播。
-  if (Array.isArray(result.images) && Number.isInteger(result.contentVersion)) {
-    currentStatus = {
-      ...currentStatus,
-      publishPreview: { ...preview, images: result.images.slice(), contentVersion: result.contentVersion },
-    };
-  }
-  syncPublishPreviewActions(currentStatus);
-  repaintPublishPreview();
-  renderPublish(currentStatus, Date.now());
+  closePublishPreview();
 }
 
 function renderPublishPreviewContent(status) {
@@ -1214,41 +1436,31 @@ fields.publishPreviewMask.addEventListener('click', closePublishPreview);
 async function submitPublishPreviewAction(approved) {
   const preview = currentStatus && currentStatus.publishPreview;
   if (!preview || publishPreviewActionBusy) return;
-  const publishApproval = window.aidcpEdge && window.aidcpEdge.publishApproval;
-  if (typeof publishApproval !== 'function') {
-    fields.publishPreviewActionHint.textContent = '当前客户端不支持稿件操作。';
+  if (typeof window.aidcpEdge.delegatedTaskDraft !== 'function') {
+    fields.publishPreviewActionHint.textContent = '当前客户端不支持委托审批。';
     return;
   }
   publishPreviewActionBusy = true;
   syncPublishPreviewActions(currentStatus);
-  closePublishPreview();
-  let result;
+  let created = false;
   try {
-    result = await publishApproval(currentStatus.envId, {
-      requestId: `publish-${preview.recordId}`,
-      approved,
-      contentVersion: Number.isInteger(preview.contentVersion) ? preview.contentVersion : 0,
-    });
+    created = await draftDelegatedTask(
+      approved ? 'approve_candidate' : 'reject_candidate',
+      {
+        candidateId: String(preview.recordId),
+        candidateVersion: Number.isInteger(preview.contentVersion) ? preview.contentVersion : 0,
+      },
+      { envId: currentStatus.envId, targetSuccessCount: 1, maxAttempts: 1 },
+    );
   } catch {
-    result = { ok: false, reason: 'request_failed' };
+    created = false;
   }
   publishPreviewActionBusy = false;
-  if (!result || result.ok !== true) {
-    openPublishPreview();
-    fields.publishPreviewActionHint.textContent = publishPreviewActionReason(result && result.reason);
+  if (!created) {
+    fields.publishPreviewActionHint.textContent = '未能创建审批任务，稿件状态未改变。';
     return;
   }
-  const nextState = result.state || (approved ? 'approved' : 'rejected');
-  currentStatus = {
-    ...currentStatus,
-    publish: {
-      ...(currentStatus.publish || {}),
-      state: nextState,
-      title: currentStatus.publish?.title || preview.title,
-      at: new Date().toISOString(),
-    },
-  };
-  renderPublish(currentStatus, Date.now());
+  closePublishPreview();
 }
 fields.publishPreviewApprove.addEventListener('click', () => { void submitPublishPreviewAction(true); });
 fields.publishPreviewCancel.addEventListener('click', () => { void submitPublishPreviewAction(false); });
@@ -1389,6 +1601,12 @@ setInterval(() => {
   });
   renderRail(); // 失联（stale）判定依赖走钟，每秒重估状态环
 }, 1000);
+
+// 委托进度来自云端持久任务投影，不复用本地探索状态。低频轮询只读当前选中环境，
+// 让 waiting_approval / 部分完成 / 失败等真实结果无需用户手动刷新即可回到卡片。
+setInterval(() => {
+  void refreshDelegatedTasks(true);
+}, 15_000);
 
 function toggleQuotaDetails() {
   quotaDetailsOpen = !quotaDetailsOpen;
@@ -1589,6 +1807,7 @@ function renderKernelPrepGlobal() {
 
 function render(status) {
   currentStatus = status;
+  syncDelegatedActionAvailability();
   const now = Date.now();
   setBadge(fields.auth, 'auth', status.auth);
   setBadge(fields.cloud, 'cloud', status.cloud);
@@ -1710,6 +1929,7 @@ function applyFleetSnapshot(snap) {
     const env = fleetView.envs.get(fleetView.selected);
     if (env && env.status) render(env.status);
     rebuildActivityStream();
+    void refreshDelegatedTasks(true, fleetView.selected);
   } else if (selectedEnvPlatform() !== prevSelectedPlat) {
     // 选中未变但其平台变了（如「改平台」落盘回推）：立即刷标题带等平台标识，不等下一次状态心跳。
     const env = fleetView.envs.get(fleetView.selected);
@@ -1734,6 +1954,7 @@ function selectEnv(envId) {
   if (env && env.status) render(env.status);
   rebuildActivityStream();
   renderRail();
+  void refreshDelegatedTasks(true, envId);
 }
 
 function railEnvList() {

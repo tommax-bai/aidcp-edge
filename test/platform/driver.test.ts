@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assertPlatformCapability,
+  delegatedActionSupportForPlatform,
   normalizePlatformId,
   selectPlatformDriver,
   type PlatformDriver,
@@ -44,6 +45,34 @@ test('selectPlatformDriver: facebook declares browse/interact (co-landed with Fa
 
 test('normalizePlatformId: unknown platform values fail honestly', () => {
   assert.throws(() => normalizePlatformId('instagram'), /unsupported AIDCP_PLATFORM/);
+});
+
+test('delegated actions: xiaohongshu supports phase-1 scope and rejects Facebook-only group action', () => {
+  assert.deepEqual(delegatedActionSupportForPlatform('xiaohongshu', 'comment_batch'), { level: 'supported' });
+  assert.deepEqual(delegatedActionSupportForPlatform('xiaohongshu', 'publish_from_inspiration'), {
+    level: 'supported',
+  });
+  assert.deepEqual(delegatedActionSupportForPlatform('xiaohongshu', 'facebook_group_comment'), {
+    level: 'unsupported',
+    reason: 'facebook_only',
+  });
+});
+
+test('delegated actions: Facebook remains beta and does not advertise unsupported arbitrary creation/targeting', () => {
+  assert.deepEqual(delegatedActionSupportForPlatform('facebook', 'publish_post'), {
+    level: 'beta',
+    reason: 'real_machine_and_client_capability_gate',
+    runtimeGate: 'facebook_publish_capability',
+  });
+  assert.equal(delegatedActionSupportForPlatform('facebook', 'facebook_group_comment').level, 'beta');
+  assert.deepEqual(delegatedActionSupportForPlatform('facebook', 'publish_from_inspiration'), {
+    level: 'unsupported',
+    reason: 'facebook_creation_template_language_media_strategy_not_ready',
+  });
+  assert.deepEqual(delegatedActionSupportForPlatform('facebook', 'comment_curated'), {
+    level: 'unsupported',
+    reason: 'arbitrary_facebook_post_targeting_not_supported',
+  });
 });
 
 test('assertPlatformCapability: missing capability does not fall back to xhs path', () => {

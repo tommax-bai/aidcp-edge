@@ -50,6 +50,14 @@ async function boot(statusOver: Record<string, unknown> = {}, apiOver: Record<st
   const dom = new JSDOM(html, { runScripts: 'dangerously' });
   const { window } = dom;
   openWindows.push(window);
+  if (typeof window.HTMLDialogElement.prototype.showModal !== 'function') {
+    window.HTMLDialogElement.prototype.showModal = function showModal() { this.setAttribute('open', ''); };
+    window.HTMLDialogElement.prototype.close = function close(returnValue = '') {
+      this.returnValue = returnValue;
+      this.removeAttribute('open');
+      this.dispatchEvent(new window.Event('close'));
+    };
+  }
   let pushStatus: (s: unknown) => void = () => undefined;
   let pushActivity: (e: unknown) => void = () => undefined;
   const settings = { provider: 'adspower', adsProfileId: 'u1', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'https://x' };
@@ -79,6 +87,20 @@ async function boot(statusOver: Record<string, unknown> = {}, apiOver: Record<st
 
 const $ = (w: DOMWindow, sel: string) => w.document.querySelector(sel) as unknown as HTMLElement;
 const hidden = (el: HTMLElement) => el.classList.contains('hidden');
+
+const TASK_ID = '11111111-1111-4111-8111-111111111111';
+function delegatedDraftReceipt(action: string, version = 0) {
+  return {
+    ok: true,
+    data: {
+      task: { id: TASK_ID, version, action, status: 'awaiting_confirmation' },
+      confirmation: {
+        title: '请确认用户委托任务', accountName: '晚风手作', platformLabel: '小红书', capability: 'supported',
+        actionLabel: action, target: '1', attempts: '1', schedule: '立即执行', approval: '公开写操作保留人审', priority: '普通',
+      },
+    },
+  };
+}
 
 // ── 标题带：身份 + 健康合成 + 风控染色 ──
 test('标题带展示账号身份与健康结论', async () => {
@@ -430,8 +452,10 @@ test('发布卡候审：可见、第三节点琥珀，提示从稿件预览处�
 });
 
 test('洗稿稿件预览：发布卡显示查看入口，打开抽屉展示正文/话题/配图且无原稿字段', async () => {
-  const approvalCalls: unknown[] = [];
+  const draftCalls: unknown[] = [];
+  const actionCalls: unknown[] = [];
   const { w } = await boot({
+    envId: 'u1',
     publish: { state: 'pending', title: '洗稿标题', code: '#89', at: new Date().toISOString() },
     publishPreview: {
       recordId: 89,
@@ -445,10 +469,11 @@ test('洗稿稿件预览：发布卡显示查看入口，打开抽屉展示正�
       updatedAt: Date.now(),
     },
   }, {
-    publishApproval: async (_envId: unknown, payload: unknown) => {
-      approvalCalls.push(payload);
-      return { ok: true, state: 'approved' };
+    delegatedTaskDraft: async (_envId: unknown, payload: unknown) => {
+      draftCalls.push(payload);
+      return delegatedDraftReceipt('approve_candidate');
     },
+    delegatedTaskAction: async (...args: unknown[]) => { actionCalls.push(args); return { ok: true, data: { task: { id: TASK_ID } } }; },
   });
   assert.equal(hidden($(w, '#pub-preview-link')), false);
   assert.equal($(w, '#pub-preview-link').textContent, '查看稿件 ↗');
@@ -470,19 +495,29 @@ test('洗稿稿件预览：发布卡显示查看入口，打开抽屉展示正�
   assert.equal($(w, '#publish-preview-approve').textContent, '发布');
   assert.equal($(w, '#publish-preview-cancel').textContent, '取消');
   $(w, '#publish-preview-approve').dispatchEvent(new w.Event('click'));
-  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false, '点击发布后应立即关闭预览');
   await tick();
-  assert.equal(approvalCalls.length, 1);
-  assert.equal((approvalCalls[0] as { requestId: string }).requestId, 'publish-89');
-  assert.equal((approvalCalls[0] as { approved: boolean }).approved, true);
-  assert.equal((approvalCalls[0] as { contentVersion: number }).contentVersion, 0);
-  assert.equal(hidden($(w, '#publish-preview-actions')), true);
-  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false);
+  await tick();
+  assert.equal(draftCalls.length, 1);
+  const draft = draftCalls[0] as { action: string; targetConstraints: { candidateId: string; candidateVersion: number } };
+  assert.equal(draft.action, 'approve_candidate');
+  assert.equal(draft.targetConstraints.candidateId, '89');
+  assert.equal(draft.targetConstraints.candidateVersion, 0);
+  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false, '生成确认任务后关闭预览');
+  assert.equal(($(w, '#delegated-confirm') as unknown as HTMLDialogElement).open, true, '公开写操作必须先展示结构化确认');
+  assert.equal(actionCalls.length, 0, '确认前不得批准或下发发布');
+  $(w, '#delegated-confirm-submit').dispatchEvent(new w.Event('click'));
+  await tick();
+  assert.equal(actionCalls.length, 1);
+  const actionCall = actionCalls[0] as unknown[];
+  assert.equal(actionCall[0], 'u1');
+  assert.equal(actionCall[1], TASK_ID);
+  assert.equal(actionCall[2], 'confirm');
 });
 
-test('洗稿稿件预览：点击取消后立即关闭抽屉并提交驳回', async () => {
-  const approvalCalls: unknown[] = [];
+test('洗稿稿件预览：点击取消先生成驳回确认任务，确认前不直接写稿件', async () => {
+  const draftCalls: unknown[] = [];
   const { w } = await boot({
+    envId: 'u1',
     publish: { state: 'pending', title: '洗稿标题', code: '#90', at: new Date().toISOString() },
     publishPreview: {
       recordId: 90,
@@ -496,19 +531,19 @@ test('洗稿稿件预览：点击取消后立即关闭抽屉并提交驳回', as
       updatedAt: Date.now(),
     },
   }, {
-    publishApproval: async (_envId: unknown, payload: unknown) => {
-      approvalCalls.push(payload);
-      return { ok: true, state: 'rejected' };
-    },
+    delegatedTaskDraft: async (_envId: unknown, payload: unknown) => { draftCalls.push(payload); return delegatedDraftReceipt('reject_candidate'); },
   });
   $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
   assert.ok($(w, '#publish-preview-panel').classList.contains('open'));
   $(w, '#publish-preview-cancel').dispatchEvent(new w.Event('click'));
-  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false, '点击取消后应立即关闭预览');
   await tick();
-  assert.equal(approvalCalls.length, 1);
-  assert.equal((approvalCalls[0] as { approved: boolean }).approved, false);
-  assert.equal((approvalCalls[0] as { contentVersion: number }).contentVersion, 1);
+  await tick();
+  assert.equal(draftCalls.length, 1);
+  const draft = draftCalls[0] as { action: string; targetConstraints: { candidateVersion: number } };
+  assert.equal(draft.action, 'reject_candidate');
+  assert.equal(draft.targetConstraints.candidateVersion, 1);
+  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false);
+  assert.equal(($(w, '#delegated-confirm') as unknown as HTMLDialogElement).open, true);
 });
 
 test('发布卡已通过 → 第四节点平静色 + 无需操作', async () => {
@@ -999,6 +1034,63 @@ test('未运行空态默认收起；点击可展开；真实发布流程到来�
   assert.equal(hidden($(w, '#pub-bar')), true);
 });
 
+test('用户委托快捷入口绑定当前选中环境，先确认再排队并展示真实进度', async () => {
+  const drafts: unknown[][] = [];
+  const actions: unknown[][] = [];
+  const status = makeStatus({ envId: 'u1', account: { id: 'u1', name: '晚风手作' } });
+  const { w } = await boot({}, {
+    fleetGet: async () => ({
+      environments: [{ envId: 'u1', name: '晚风手作', platform: 'xiaohongshu', status }],
+      selectedEnvId: 'u1',
+    }),
+    delegatedTaskList: async (envId: unknown) => ({
+      ok: true,
+      data: { tasks: [{
+        id: TASK_ID, version: 3, action: 'comment_batch', status: 'partially_completed',
+        targetSuccessCount: 5, maxAttempts: 8,
+        progress: { successCount: 3, attemptCount: 8, skippedCount: 3, failureCount: 2 },
+        terminalOutcome: { message: '候选不足，平台验证成功 3/5。' },
+        envId,
+      }] },
+    }),
+    delegatedTaskDraft: async (...args: unknown[]) => { drafts.push(args); return delegatedDraftReceipt('comment_batch'); },
+    delegatedTaskAction: async (...args: unknown[]) => { actions.push(args); return { ok: true, data: { task: { id: TASK_ID } } }; },
+  });
+  assert.match($(w, '#delegated-list').textContent ?? '', /成功 3\/5/);
+  assert.match($(w, '#delegated-list').textContent ?? '', /尝试 8\/8/);
+  assert.match($(w, '#delegated-list').textContent ?? '', /候选不足/);
+
+  ($(w, '#delegated-count') as unknown as HTMLInputElement).value = '5';
+  ($(w, '[data-delegated-action="comment_batch"]') as unknown as HTMLButtonElement).click();
+  await tick();
+  assert.equal(drafts.length, 1);
+  assert.equal(drafts[0][0], 'u1');
+  const payload = drafts[0][1] as { action: string; targetSuccessCount: number; maxAttempts: number };
+  assert.equal(payload.action, 'comment_batch');
+  assert.equal(payload.targetSuccessCount, 5);
+  assert.equal(payload.maxAttempts, 10);
+  assert.equal(($(w, '#delegated-confirm') as unknown as HTMLDialogElement).open, true);
+  assert.equal(actions.length, 0, '确认前不排队');
+  ($(w, '#delegated-confirm-submit') as unknown as HTMLButtonElement).click();
+  await tick();
+  assert.equal(actions.length, 1);
+  assert.deepEqual(actions[0].slice(0, 3), ['u1', TASK_ID, 'confirm']);
+});
+
+test('Facebook 当前环境明确禁用今日灵感快捷入口，不暗示已开放', async () => {
+  const status = makeStatus({ envId: 'fb1', account: { id: 'fb1', name: 'FB Beta' } });
+  const { w } = await boot({}, {
+    fleetGet: async () => ({
+      environments: [{ envId: 'fb1', name: 'FB Beta', platform: 'facebook', status }],
+      selectedEnvId: 'fb1',
+    }),
+    delegatedTaskList: async () => ({ ok: true, data: { tasks: [] } }),
+  });
+  const inspiration = $(w, '[data-delegated-action="publish_from_inspiration"]') as unknown as HTMLButtonElement;
+  assert.equal(inspiration.disabled, true);
+  assert.match(inspiration.title, /尚未完成平台化创作模板/);
+});
+
 // ── 三段价值流程不再附带七段详细步骤 ──
 test('运行步骤入口与七段详细步骤从 DOM、脚本和样式中彻底移除', async () => {
   const { w } = await boot();
@@ -1037,12 +1129,12 @@ const imgSrcs = (w: DOMWindow) =>
     (el as unknown as HTMLImageElement).getAttribute('src'),
   );
 
-test('删配图：待审多图 → 每张有删除角标；二次确认后才提交，成功按写后真态重绘', async () => {
+test('删配图：待审多图 → 二次确认后生成版本锁定的修改任务，任务确认前不改稿', async () => {
   const calls: unknown[] = [];
-  const { w } = await boot(previewStatus(IMGS3), {
-    publishImageRemove: async (_envId: unknown, payload: unknown) => {
+  const { w } = await boot(previewStatus(IMGS3, { envId: 'u1' }), {
+    delegatedTaskDraft: async (_envId: unknown, payload: unknown) => {
       calls.push(payload);
-      return { ok: true, images: [IMGS3[0], IMGS3[2]], contentVersion: 1 };
+      return delegatedDraftReceipt('modify_candidate');
     },
   });
   $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
@@ -1060,14 +1152,14 @@ test('删配图：待审多图 → 每张有删除角标；二次确认后才提
   confirmOk.dispatchEvent(new w.Event('click'));
   await tick();
   await tick();
-  // 逐字段断言：jsdom 里造的对象跨 realm，deepStrictEqual 会因原型不同而误报。
   assert.equal(calls.length, 1);
-  const sent = calls[0] as { requestId: string; contentVersion: number; imageUrl: string };
-  assert.equal(sent.requestId, 'publish-89');
-  assert.equal(sent.contentVersion, 0);
-  assert.equal(sent.imageUrl, IMGS3[1]);
-  assert.deepEqual(imgSrcs(w), [IMGS3[0], IMGS3[2]], '按服务端回读真态重绘');
-  assert.match($(w, '#publish-preview-content').textContent ?? '', /配图（2 张）/);
+  const sent = calls[0] as { action: string; targetConstraints: { candidateId: string; candidateVersion: number; images: string[] } };
+  assert.equal(sent.action, 'modify_candidate');
+  assert.equal(sent.targetConstraints.candidateId, '89');
+  assert.equal(sent.targetConstraints.candidateVersion, 0);
+  assert.deepEqual(Array.from(sent.targetConstraints.images), [IMGS3[0], IMGS3[2]]);
+  assert.equal(($(w, '#delegated-confirm') as unknown as HTMLDialogElement).open, true);
+  assert.deepEqual(imgSrcs(w), IMGS3, '确认和 worker 执行前绝不乐观改稿');
 });
 
 test('删配图：只剩一张 → 无删除入口 + 明示至少保留一张', async () => {
@@ -1088,8 +1180,8 @@ test('删配图：非待审稿件（已通过）不显示删除入口', async ()
 
 test('删配图：删除在途时发布/取消一并禁用（防拿旧版本号去审批）', async () => {
   const gate: { release?: (v: unknown) => void } = {};
-  const { w } = await boot(previewStatus(IMGS3), {
-    publishImageRemove: () => new Promise((r) => { gate.release = r; }),
+  const { w } = await boot(previewStatus(IMGS3, { envId: 'u1' }), {
+    delegatedTaskDraft: () => new Promise((r) => { gate.release = r; }),
   });
   $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
   deleteBtns(w)[0].dispatchEvent(new w.Event('click'));
@@ -1099,15 +1191,16 @@ test('删配图：删除在途时发布/取消一并禁用（防拿旧版本号�
   await tick();
   assert.equal(($(w, '#publish-preview-approve') as unknown as HTMLButtonElement).disabled, true);
   assert.equal(($(w, '#publish-preview-cancel') as unknown as HTMLButtonElement).disabled, true);
-  gate.release?.({ ok: true, images: [IMGS3[1], IMGS3[2]], contentVersion: 1 });
+  gate.release?.(delegatedDraftReceipt('modify_candidate'));
   await tick();
   await tick();
-  assert.equal(($(w, '#publish-preview-approve') as unknown as HTMLButtonElement).disabled, false);
+  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false);
+  assert.equal(($(w, '#delegated-confirm') as unknown as HTMLDialogElement).open, true);
 });
 
 test('删配图：云端拒绝 → 该张仍在界面上 + 诚实拒因，绝无成功措辞', async () => {
-  const { w } = await boot(previewStatus(IMGS3), {
-    publishImageRemove: async () => ({ ok: false, reason: 'version_stale', currentVersion: 2 }),
+  const { w } = await boot(previewStatus(IMGS3, { envId: 'u1' }), {
+    delegatedTaskDraft: async () => ({ ok: false, error: 'version_stale' }),
   });
   $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
   deleteBtns(w)[1].dispatchEvent(new w.Event('click'));
@@ -1118,6 +1211,6 @@ test('删配图：云端拒绝 → 该张仍在界面上 + 诚实拒因，绝无
   await tick();
   assert.deepEqual(imgSrcs(w), IMGS3, '失败后该张仍在，绝不抹掉');
   const text = $(w, '#publish-preview-content').textContent ?? '';
-  assert.match(text, /稿件已更新/);
+  assert.match(text, /未能创建修改任务/);
   assert.doesNotMatch(text, /已删除|删除成功/);
 });

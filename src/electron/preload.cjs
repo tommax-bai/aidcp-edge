@@ -58,6 +58,11 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   publishApproval: (envId, payload) => ipcRenderer.invoke('publish:approval', envId, payload),
   // 稿件预览内删除某张配图（同一条链路；云端持权限 / 版本 / 只删不注入 / 最后一张不可删的权威）。
   publishImageRemove: (envId, payload) => ipcRenderer.invoke('publish:image-remove', envId, payload),
+  // 用户委托任务：主进程把 envId 收口成该环境的 profileId；渲染层拿不到客户令牌、也不能改 accountId。
+  delegatedTaskList: (envId) => ipcRenderer.invoke('delegated-task:list', envId),
+  delegatedTaskDraft: (envId, payload) => ipcRenderer.invoke('delegated-task:draft', envId, payload),
+  delegatedTaskAction: (envId, taskId, action, version) =>
+    ipcRenderer.invoke('delegated-task:action', envId, taskId, action, version),
   // 对外客户鉴权（change edge-client-customer-auth）：登录窗口用 clientLogin；主界面/托盘用 clientLogout。
   // 主进程做实际 HTTP，渲染层不直连网络（避免 CORS / 凭据落渲染层）。
   clientLogin: (creds) => ipcRenderer.invoke('client-auth:login', creds),

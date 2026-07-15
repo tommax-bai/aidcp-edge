@@ -189,6 +189,35 @@
         </div>
       </section>
 
+      <!-- 第一批用户委托：快捷入口绑定当前选中环境；所有公开写操作先生成结构化确认。 -->
+      <section id="delegated-card" class="delegated-card">
+        <div class="delegated-head">
+          <div>
+            <strong>交给 AIDCP</strong>
+            <p>说目标，不用记命令。确认后排队，成功数只认平台验证。</p>
+          </div>
+          <button id="delegated-refresh" class="delegated-link" type="button">刷新任务</button>
+        </div>
+        <div class="delegated-compose">
+          <label>目标数 <input id="delegated-count" type="number" min="1" max="20" value="3" /></label>
+          <label>执行
+            <select id="delegated-schedule">
+              <option value="immediate">立即排队</option>
+              <option value="next_safe_slot">下一安全空档</option>
+            </select>
+          </label>
+          <label class="delegated-priority"><input id="delegated-priority" type="checkbox" /> 优先执行</label>
+        </div>
+        <div class="delegated-actions">
+          <button type="button" data-delegated-action="comment_batch">完成评论</button>
+          <button type="button" data-delegated-action="publish_post">发布一篇</button>
+          <button type="button" data-delegated-action="publish_from_inspiration">参考今日灵感发布</button>
+          <button type="button" data-delegated-action="generate_candidates">只生成候选稿</button>
+        </div>
+        <p id="delegated-message" class="delegated-message"></p>
+        <div id="delegated-list" class="delegated-list"><span class="delegated-empty">暂无委托任务</span></div>
+      </section>
+
       <!-- 今日进展条（计数从门面降级至此） -->
       <section class="summary" id="daily-summary">
         <div class="summary-head">
@@ -255,6 +284,22 @@
       </details>
       </main>
     </div>
+
+    <dialog id="delegated-confirm" class="delegated-confirm">
+      <form method="dialog">
+        <div class="delegated-confirm-head">
+          <strong id="delegated-confirm-title">请确认用户委托任务</strong>
+          <button value="cancel" aria-label="关闭" type="submit">×</button>
+        </div>
+        <dl id="delegated-confirm-facts"></dl>
+        <p id="delegated-confirm-boundary" class="delegated-confirm-boundary hidden"></p>
+        <p class="delegated-confirm-note">确认后进入统一队列；只有平台验证成功才计入成功数，候选不足会如实部分完成。</p>
+        <div class="delegated-confirm-actions">
+          <button value="cancel" type="submit">返回</button>
+          <button id="delegated-confirm-submit" value="default" type="button">确认并排队</button>
+        </div>
+      </form>
+    </dialog>
 
     <!-- ═══ 添加/创建环境面板（edge-fleet-rail-env-management）：由左栏「＋」拉起的独立浮层，
          集中做「加入现有 AdsPower 环境（多选）」与「新建指纹环境（模板 + 平台）」；

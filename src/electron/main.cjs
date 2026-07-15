@@ -3712,6 +3712,48 @@ ipcMain.handle('publish:image-remove', async (_event, envId, payload) => {
   }
   return result;
 });
+
+async function delegatedTaskRequest(envId, pathname, options = {}) {
+  const handle = resolveHandle(envId);
+  if (!handle || !handle.profileId) return { ok: false, status: 400, error: 'selected_environment_required' };
+  if (!clientAuthEnabled() || !hasValidSession()) return { ok: false, status: 401, error: 'client_session_required' };
+  const suffix = pathname.includes('?') ? '&' : '?';
+  const scopedPath = options.includeEnvQuery
+    ? `${pathname}${suffix}envKey=${encodeURIComponent(handle.profileId)}`
+    : pathname;
+  const r = await clientAuthFetch(scopedPath, {
+    method: options.method || 'GET',
+    token: clientSession.token,
+    ...(options.body ? { body: { ...options.body, envKey: handle.profileId } } : {}),
+  });
+  if (r.status === 401) return { ok: false, status: 401, error: 'client_session_expired' };
+  if (!r.ok) {
+    return {
+      ok: false,
+      status: r.status,
+      error: (r.data && (r.data.message || r.data.error)) || r.error || 'request_failed',
+    };
+  }
+  return { ok: true, status: r.status, data: r.data };
+}
+
+ipcMain.handle('delegated-task:list', (_event, envId) =>
+  delegatedTaskRequest(envId, '/delegated-tasks', { includeEnvQuery: true }));
+
+ipcMain.handle('delegated-task:draft', (_event, envId, payload) =>
+  delegatedTaskRequest(envId, '/delegated-tasks/draft', { method: 'POST', body: payload || {} }));
+
+ipcMain.handle('delegated-task:action', (_event, envId, taskId, action, version) => {
+  const allowed = new Set(['confirm', 'pause', 'resume', 'cancel']);
+  const normalizedTaskId = String(taskId || '').trim();
+  if (!normalizedTaskId || !allowed.has(action)) return { ok: false, status: 400, error: 'invalid_task_action' };
+  return delegatedTaskRequest(
+    envId,
+    `/delegated-tasks/${encodeURIComponent(normalizedTaskId)}/${action}`,
+    { method: 'POST', body: Number.isInteger(version) ? { version } : {} },
+  );
+});
+
 ipcMain.handle('notify:show', (_event, payload) => {
   const title = payload && typeof payload.title === 'string' ? payload.title : 'AIDCP Edge';
   const body = payload && typeof payload.body === 'string' ? payload.body : '';
