@@ -251,6 +251,79 @@ test('confirmed Facebook session/read/like → structured companion UI events；
   assert.equal(shadow.logs.some((line) => line.includes('"type":"like"')), false, 'shadow 不得伪报点赞成功');
 });
 
+test('Facebook like UI event: 使用实际被作用帖子的作者与正文摘要，并规范化截断', async () => {
+  const h = makeSession({
+    mode: 'on',
+    like: () => ({
+      ok: true,
+      executed: true,
+      observation: {
+        surface: 'feed',
+        noteId: 'fb:pfbid0ONE',
+        author: ' Alice\nSmith ',
+        textPreviewHead: '  01234567890123456789012345\nnext ',
+      },
+    }),
+  });
+  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  const event = h.logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as Record<string, unknown>)
+    .find((line) => line.type === 'like');
+  assert.equal(event?.sentence, '赞了「012345678901234567890123…」 · Alice Smith');
+  assert.equal(event?.presence, '刚赞了 Alice Smith 的「012345678901234567890123…」');
+  assert.deepEqual(event?.statsDelta, { likes: 1 });
+  assert.ok(!String(event?.sentence).includes('pfbid0ONE'));
+});
+
+test('Facebook like UI event: 见证字段缺失时部分展示或诚实降级', async () => {
+  const cases: Array<{
+    observation?: FacebookLikeResult['observation'];
+    sentence: string;
+    presence: string;
+  }> = [
+    {
+      observation: { surface: 'detail', textPreviewHead: 'the post body' },
+      sentence: '赞了「the post body」',
+      presence: '刚赞了「the post body」',
+    },
+    {
+      observation: { surface: 'detail', author: 'Alice' },
+      sentence: '赞了 Alice 的一条内容',
+      presence: '刚赞了 Alice 的一条内容',
+    },
+    { sentence: '点了个赞', presence: '刚点了个赞' },
+  ];
+
+  for (const item of cases) {
+    const h = makeSession({
+      mode: 'on',
+      like: () => ({ ok: true, executed: true, ...(item.observation ? { observation: item.observation } : {}) }),
+    });
+    await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+    const event = h.logs
+      .filter((line) => line.startsWith('[ui-event] '))
+      .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as Record<string, unknown>)
+      .find((line) => line.type === 'like');
+    assert.equal(event?.sentence, item.sentence);
+    assert.equal(event?.presence, item.presence);
+  }
+});
+
+test('Facebook like UI event: 未确认成功时即使有目标见证也不生成成功记录', async () => {
+  const h = makeSession({
+    mode: 'on',
+    like: () => ({
+      ok: false,
+      reason: 'state_unchanged',
+      executed: true,
+      observation: { surface: 'feed', author: 'Alice', textPreviewHead: 'the post body' },
+    }),
+  });
+  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  assert.equal(h.logs.some((line) => line.includes('"type":"like"')), false);
+});
+
 test('Facebook read UI event: 作者或正文缺失时诚实降级，不泄露 permalink', async () => {
   const h = makeSession({ mode: 'on', detail: { body: '', author: undefined } });
   await h.session.onCloudCommand(makeEnv('note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));

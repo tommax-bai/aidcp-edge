@@ -41,7 +41,7 @@ import type { PlatformDriver } from '../platform/driver.js';
 import { FACEBOOK_DEFAULT_START_URL } from './driver.js';
 import { FacebookFeedReader, type FacebookFeedCard, type FacebookFeedSettleResult } from './feed-reader.js';
 import { FacebookPostReader } from './post-reader.js';
-import { FacebookLikeExecutor } from './like-executor.js';
+import { FacebookLikeExecutor, type FacebookLikeObservation } from './like-executor.js';
 import { FacebookInlineReader } from './inline-reader.js';
 import { FacebookCommentHandler } from './comment-handler.js';
 import { canonicalPostId } from './post-identity.js';
@@ -139,7 +139,7 @@ type TerminalReport =
   | { type: 'cards'; payload: PageCardsPayload }
   | { type: 'detail'; payload: NoteDetailPayload }
   | { type: 'profile'; payload: ProfileDetailPayload }
-  | { type: 'action'; payload: ActionCompletedPayload };
+  | { type: 'action'; payload: ActionCompletedPayload; companionLikeObservation?: FacebookLikeObservation };
 
 /**
  * 伴随桌面端的结构化事件。云端 `dailyUsage` 才是账号今日总量的权威；这里仅把已确认的
@@ -219,6 +219,26 @@ function facebookReadUiText(payload: NoteDetailPayload): Pick<FacebookCompanionU
   if (excerpt) return { sentence: `打开「${excerpt}」`, presence: `正在认真阅读「${excerpt}」…` };
   if (author) return { sentence: `打开了 ${author} 的一条内容`, presence: `正在认真阅读 ${author} 的一条内容…` };
   return { sentence: '打开了一条内容', presence: '正在认真阅读一条内容…' };
+}
+
+/**
+ * 点赞摘要只认执行器从实际被作用帖子现读的见证，绝不拿上一条阅读记录或命令 noteId 猜目标。
+ * Facebook 帖子通常没有独立标题，因此与“读”保持同一口径：正文开头即活动流里的稿件摘要。
+ */
+function facebookLikeUiText(
+  observation: FacebookLikeObservation | undefined,
+): Pick<FacebookCompanionUiEvent, 'sentence' | 'presence'> {
+  const excerpt = clipFacebookUiText(observation?.textPreviewHead, 24);
+  const author = clipFacebookUiText(observation?.author, 18);
+  if (excerpt && author) {
+    return {
+      sentence: `赞了「${excerpt}」 · ${author}`,
+      presence: `刚赞了 ${author} 的「${excerpt}」`,
+    };
+  }
+  if (excerpt) return { sentence: `赞了「${excerpt}」`, presence: `刚赞了「${excerpt}」` };
+  if (author) return { sentence: `赞了 ${author} 的一条内容`, presence: `刚赞了 ${author} 的一条内容` };
+  return { sentence: '点了个赞', presence: '刚点了个赞' };
 }
 
 export class FacebookBrowseSession implements EdgeBrowseSession {
@@ -573,11 +593,11 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     else {
       this.client.reportActionCompleted(r.payload);
       if (r.payload.action === 'like' && r.payload.ok) {
+        const likeText = facebookLikeUiText(r.companionLikeObservation);
         this.emitCompanionUiEvent({
           kind: 'activity',
           type: 'like',
-          sentence: '点了个赞',
-          presence: '刚点了个赞',
+          ...likeText,
           loopStage: 'interact',
           statsDelta: { likes: 1 },
         });
@@ -725,6 +745,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     const attachWitness = obs?.surface === 'feed';
     return {
       type: 'action',
+      ...(r.ok && obs ? { companionLikeObservation: obs } : {}),
       payload: {
         action: 'like',
         ok: r.ok,
