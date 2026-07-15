@@ -176,6 +176,16 @@ test('创建时选平台 → remark 带 plat、回执带 platform', async () => 
   assert.equal(meta.platform, 'facebook', 'remark 里 plat=facebook');
 });
 
+test('创建视频号环境 → remark 与回执保留规范平台值 wechat_channels', async () => {
+  const w = recordingWriteApi({ ok: true, userId: 'u-wechat' });
+  const flow = createCreateFlow({ writeApi: w, fingerprint: realFingerprint });
+  const r = (await flow.createEnvironment({ templateKey: 'win11-intel', groupId: 'g1', platform: 'wechat_channels' } as any)) as any;
+  assert.equal(r.ok, true);
+  assert.equal(r.platform, 'wechat_channels');
+  const meta = parseRemark((w.calls[0] as any).remark) as any;
+  assert.equal(meta.platform, 'wechat_channels', 'AdsPower remark 必须让后续 list/fleet 读回视频号平台');
+});
+
 test('Facebook 导入资料只透传给 createProfile，不写进 remark', async () => {
   const w = recordingWriteApi({ ok: true, userId: 'u-fb-import' });
   const flow = createCreateFlow({ writeApi: w, fingerprint: realFingerprint });
@@ -212,6 +222,9 @@ test('normalizePlatform: 别名归一 + 未知/空回落 xiaohongshu', () => {
   const { normalizePlatform } = flowMod as any;
   assert.equal(normalizePlatform('fb'), 'facebook');
   assert.equal(normalizePlatform('Facebook'), 'facebook');
+  assert.equal(normalizePlatform('wechat_channels'), 'wechat_channels');
+  assert.equal(normalizePlatform('wechat-channels'), 'wechat_channels');
+  assert.equal(normalizePlatform('wechat'), 'wechat_channels');
   assert.equal(normalizePlatform('xhs'), 'xiaohongshu');
   assert.equal(normalizePlatform(''), 'xiaohongshu');
   assert.equal(normalizePlatform(undefined), 'xiaohongshu');

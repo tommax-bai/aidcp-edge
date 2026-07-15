@@ -333,6 +333,39 @@ test('程序化建号：填充模板下拉、点「创建环境」→ 传选中�
   assert.match($(w, '#ads-create-msg').textContent ?? '', /已创建环境/);
 });
 
+test('新增环境可选择视频号，并以 wechat_channels 创建、入册和持久化', async () => {
+  let sent: Record<string, unknown> = {};
+  let savedEnvironments: Array<{ profileId: string; name: string; platform: string }> = [];
+  const w = await boot(makeStub({
+    adsCreateEnv: async (opts) => {
+      sent = opts as Record<string, unknown>;
+      return { ok: true, userId: 'u_wechat', name: '视频号环境', template: 'win11-intel', platform: 'wechat_channels' };
+    },
+    saveSettings: async (patch) => {
+      savedEnvironments = ((patch as { environments?: Array<{ profileId: string; name: string; platform: string }> }).environments || []);
+      return { provider: 'adspower', environments: savedEnvironments, saveOk: true };
+    },
+  }));
+  for (let i = 0; i < 3; i++) await tick();
+
+  const platform = $(w, '#ads-platform') as HTMLSelectElement;
+  assert.ok(Array.from(platform.options).some((option) => option.value === 'wechat_channels' && option.textContent === '视频号'));
+  platform.value = 'wechat_channels';
+  platform.dispatchEvent(new w.Event('change'));
+  assert.ok($(w, '#ads-fb-import-wrap').classList.contains('hidden'), '视频号不显示 Facebook 一次性凭据框');
+
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(sent.platform, 'wechat_channels');
+  assert.equal(sent.facebookAccountImport, '');
+  assert.equal(savedEnvironments.length, 1);
+  assert.equal(savedEnvironments[0]?.profileId, 'u_wechat');
+  assert.equal(savedEnvironments[0]?.name, '视频号环境');
+  assert.equal(savedEnvironments[0]?.platform, 'wechat_channels');
+  assert.equal(($(w, '#ads-profile') as HTMLInputElement).value, 'u_wechat');
+  assert.match($(w, '#ads-create-msg').textContent ?? '', /已自动选中/);
+});
+
 test('Facebook 导入框：仅 Facebook 平台显示，创建时透传但提示不泄露账号资料', async () => {
   let sent: Record<string, unknown> = {};
   const secretLine = 'a@example.com----pw-secret----KEYSECRET----c_user=100000000000001; xs=TOKEN';

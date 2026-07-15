@@ -15,15 +15,17 @@ const STATUS = Object.freeze({ UNVERIFIED: 'unverified', READY: 'ready', VERIFY_
 const REMARK_TAG = 'aidcp-env';
 
 // change edge-environment-platform-select：每环境的运行时平台（决定启动时打开哪个平台首页、握手上报哪个平台）。
-// 与核心 src/platform 的 PlatformId 对齐（xiaohongshu | facebook）；空/未知/旧环境一律回落 xiaohongshu（零回归）。
+// 与核心 src/platform 的 PlatformId 对齐（xiaohongshu | facebook | wechat_channels）；
+// 空/未知/旧环境一律回落 xiaohongshu（零回归）。
 const DEFAULT_PLATFORM = 'xiaohongshu';
-const SUPPORTED_PLATFORMS = Object.freeze(['xiaohongshu', 'facebook']);
+const SUPPORTED_PLATFORMS = Object.freeze(['xiaohongshu', 'facebook', 'wechat_channels']);
 
 /** 归一平台字符串到规范值；空/未知回落 xiaohongshu（shell 层不抛，honest fallback）。 */
 function normalizePlatform(raw) {
   const v = String(raw == null ? '' : raw).trim().toLowerCase();
   if (!v || v === 'xhs' || v === 'redbook' || v === 'xiaohongshu') return 'xiaohongshu';
   if (v === 'facebook' || v === 'fb') return 'facebook';
+  if (v === 'wechat_channels' || v === 'wechat-channels' || v === 'wechat' || v === 'channels') return 'wechat_channels';
   return DEFAULT_PLATFORM;
 }
 
