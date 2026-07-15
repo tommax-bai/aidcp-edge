@@ -19,6 +19,7 @@ const fields = {
   usageSource: document.querySelector('#usage-source'),
   usageLimit: document.querySelector('#usage-limit'),
   quotaToggle: document.querySelector('#quota-toggle'),
+  quotaToggleLabel: document.querySelector('#quota-toggle-label'),
   quotaWindows: document.querySelector('#quota-windows'),
   updatedAt: document.querySelector('#updated-at'),
   usageCaps: {
@@ -321,6 +322,7 @@ function updateFacebookImportVisibility() {
 }
 const LOG_RETENTION_MS = 2 * 60 * 1000; // 开发者详情原始日志保留 2 分钟
 let quotaDetailsOpen = false;
+let loopDetailsOpen = false;
 
 // 平台占位：mac 红绿灯内嵌预留左侧；Windows 叠加窗控预留右侧。其余平台两侧归零。
 (function initPlatformPads() {
@@ -556,12 +558,14 @@ function quotaWindowView(item, window, now) {
 function renderQuotaWindows(usage) {
   if (!fields.quotaWindows) return;
   const windows = quotaWindowViews(usage);
-  fields.dailySummary?.classList.toggle('expanded', quotaDetailsOpen && windows.length > 0);
+  const expanded = quotaDetailsOpen && windows.length > 0;
+  fields.dailySummary?.classList.toggle('expanded', expanded);
   if (fields.quotaToggle) {
-    fields.quotaToggle.classList.toggle('open', quotaDetailsOpen && windows.length > 0);
-    fields.quotaToggle.setAttribute('aria-expanded', quotaDetailsOpen && windows.length > 0 ? 'true' : 'false');
-    fields.quotaToggle.setAttribute('aria-label', quotaDetailsOpen && windows.length > 0 ? '收起今日节奏' : '查看今日节奏');
+    fields.quotaToggle.classList.toggle('open', expanded);
+    fields.quotaToggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    fields.quotaToggle.setAttribute('aria-label', expanded ? '收起今日节奏' : '展开今日节奏');
   }
+  if (fields.quotaToggleLabel) fields.quotaToggleLabel.textContent = expanded ? '收起' : '展开';
   if (windows.length === 0 || !quotaDetailsOpen) {
     fields.quotaWindows.className = 'quota-windows hidden';
     fields.quotaWindows.innerHTML = '';
@@ -732,7 +736,11 @@ function renderRuntimeGuidanceProgress(progress) {
   if (!fields.runtimeGuidanceProgress) return;
   fields.runtimeGuidanceProgress.replaceChildren();
   fields.runtimeGuidanceProgress.classList.toggle('hidden', !progress);
-  if (!progress) return;
+  if (!progress) {
+    loopDetailsOpen = false;
+    fields.loop?.classList.add('hidden');
+    return;
+  }
 
   const current = Math.max(0, Number(progress.current) || 0);
   const target = Math.max(0, Number(progress.target) || 0);
@@ -744,7 +752,26 @@ function renderRuntimeGuidanceProgress(progress) {
   title.textContent = progress.title || '';
   const meta = document.createElement('span');
   meta.className = 'rg-progress-meta';
-  meta.textContent = [progress.counter, progress.meta].filter(Boolean).join(' · ');
+  const metaCopy = document.createElement('span');
+  metaCopy.textContent = [progress.counter, progress.meta].filter(Boolean).join(' · ');
+  meta.append(metaCopy);
+  if (fields.loop) {
+    const separator = document.createElement('span');
+    separator.className = 'rg-progress-separator';
+    separator.textContent = '·';
+    const toggle = document.createElement('button');
+    toggle.className = 'rg-loop-toggle';
+    toggle.type = 'button';
+    toggle.textContent = loopDetailsOpen ? '收起运行步骤' : '查看运行步骤';
+    toggle.setAttribute('aria-controls', 'loop');
+    toggle.setAttribute('aria-expanded', loopDetailsOpen ? 'true' : 'false');
+    toggle.addEventListener('click', () => {
+      loopDetailsOpen = !loopDetailsOpen;
+      renderRuntimeGuidanceProgress(progress);
+      if (currentStatus) renderLoop(currentStatus);
+    });
+    meta.append(separator, toggle);
+  }
   head.append(title, meta);
 
   const track = document.createElement('div');
@@ -798,6 +825,8 @@ function renderRuntimeGuidance(status, nowMs) {
   if (!view) {
     fields.runtimeGuidance.className = 'runtime-guidance hidden';
     delete fields.runtimeGuidance.dataset.mode;
+    loopDetailsOpen = false;
+    fields.loop?.classList.add('hidden');
     renderRuntimeGuidanceProgress(null);
     renderRuntimeGuidanceHarvest(null);
     return null;
@@ -862,9 +891,10 @@ function renderPresence(status, nowMs) {
   fields.presenceFresh.textContent = view.fresh || '';
 }
 
-// ─── 浏览循环 chip ───
+// ─── 详细运行步骤：默认收起，展开时仍由真实浏览阶段点亮。───
 function renderLoop(status) {
-  fields.loop.classList.remove('hidden');
+  const guidanceVisible = fields.runtimeGuidance && !fields.runtimeGuidance.classList.contains('hidden');
+  fields.loop.classList.toggle('hidden', !loopDetailsOpen || !guidanceVisible);
   const running = status.edge === 'running' && status.session === 'running';
   const active = running ? uiLogic.loopIndex(status.loopStage) : -1;
   fields.loop.querySelectorAll('.loop-step').forEach((el) => {

@@ -187,6 +187,15 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /3\/150/);
   assert.equal($(w, '#runtime-guidance-progress .rg-progress-track').getAttribute('aria-valuenow'), '3');
   assert.equal(($(w, '#runtime-guidance-progress .rg-progress-fill') as HTMLElement).style.width, '2%');
+  assert.equal(hidden($(w, '#loop')), true, '详细运行步骤默认收起');
+  const loopToggle = $(w, '.rg-loop-toggle');
+  assert.equal(loopToggle.textContent, '查看运行步骤');
+  assert.equal(loopToggle.getAttribute('aria-expanded'), 'false');
+  loopToggle.click();
+  assert.equal(hidden($(w, '#loop')), false, '点击入口后在运行价值卡内展开步骤');
+  assert.equal($(w, '.rg-loop-toggle').textContent, '收起运行步骤');
+  assert.equal($(w, '.rg-loop-toggle').getAttribute('aria-expanded'), 'true');
+  assert.ok($(w, '#loop .loop-step[data-stage="read"]').classList.contains('on'), '展开后仍点亮真实当前阶段');
   assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-task-execution/);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-main/);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-mascot/);
@@ -277,8 +286,8 @@ test('运行中 + 事件过期 + 阶段计划完成 → 说明自然间隔的成
       },
     }));
     assert.equal(hidden($(w, '.presence')), false, '间隔说明出现时仍保留第一块在场感');
-    assert.equal(hidden($(w, '#loop')), false, '间隔说明出现时仍保留浏览循环步骤');
-    assert.ok($(w, '#loop .loop-step[data-stage="read"]').classList.contains('on'), '运行态间隔仍点亮当前阶段');
+    assert.equal(hidden($(w, '#loop')), true, '间隔说明出现时详细步骤仍默认收起');
+    assert.ok($(w, '#loop .loop-step[data-stage="read"]').classList.contains('on'), '收起态仍同步真实当前阶段');
     assert.equal(hidden($(w, '#runtime-guidance')), false);
     assert.equal($(w, '#runtime-guidance').dataset.mode, 'hour');
     assert.match($(w, '#runtime-guidance-title').textContent ?? '', /先让平台认识你一点/);
@@ -325,7 +334,7 @@ test('本轮等待缺少浏览配额字段时仍渲染自然间隔进度卡', as
     }));
     assert.equal(hidden($(w, '.presence')), false, '完整进度卡出现时仍保留第一块在场感');
     assert.equal($(w, '#presence-fresh').textContent, '约 8 分钟后自动继续');
-    assert.equal(hidden($(w, '#loop')), false, '休息态仍保留浏览循环步骤');
+    assert.equal(hidden($(w, '#loop')), true, '休息态详细浏览步骤默认收起');
     assert.equal(
       Array.from(w.document.querySelectorAll('#loop .loop-step')).some((el) => (el as HTMLElement).classList.contains('on')),
       false,
@@ -718,11 +727,19 @@ test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并�
   assert.match($(w, '#usage-limit').title ?? '', /发帖：阶段节奏、今日计划已完成/);
   assert.ok($(w, '#usage-limit').classList.contains('complete'));
   assert.ok(!$(w, '#usage-limit').classList.contains('hit'));
-  assert.equal($(w, '#quota-toggle').getAttribute('aria-label'), '查看今日节奏');
+  assert.equal($(w, '#quota-toggle').getAttribute('aria-label'), '展开今日节奏');
+  assert.equal($(w, '#quota-toggle').getAttribute('aria-expanded'), 'false');
+  assert.equal($(w, '#quota-toggle-label').textContent, '展开');
+  assert.equal($(w, '#quota-toggle').classList.contains('open'), false);
+  assert.ok($(w, '#quota-toggle .quota-toggle-icon'));
   assert.ok($(w, '#quota-windows').classList.contains('hidden'), 'collapsed card should only show daily totals');
   $(w, '#daily-summary').click();
   await tick();
   assert.equal($(w, '#quota-toggle').getAttribute('aria-label'), '收起今日节奏');
+  assert.equal($(w, '#quota-toggle').getAttribute('aria-expanded'), 'true');
+  assert.equal($(w, '#quota-toggle-label').textContent, '收起');
+  assert.equal($(w, '#quota-toggle').classList.contains('open'), true);
+  assert.match(rendererCss, /\.quota-toggle\.open \.quota-toggle-icon/);
   assert.ok(!$(w, '#quota-windows').classList.contains('hidden'));
   assert.equal(w.document.querySelectorAll('.quota-window-detail').length, 4);
   assert.equal(w.document.querySelectorAll('.qwd-row').length, 24);
@@ -894,23 +911,28 @@ test('未运行时发布卡保持展开（空态旅程有引导价值）', async
   assert.equal(hidden($(w, '#pub-bar')), true);
 });
 
-// ── 循环 chip ──
-test('循环 chip 位于在场感下方、运行价值说明上方', async () => {
+// ── 详细运行步骤 ──
+test('详细运行步骤收进运行价值卡且默认收起', async () => {
   const { w } = await boot();
-  const presence = $(w, '.presence');
   const loop = $(w, '#loop');
   const guidance = $(w, '#runtime-guidance');
-  assert.ok(presence.compareDocumentPosition(loop) & w.Node.DOCUMENT_POSITION_FOLLOWING);
-  assert.ok(loop.compareDocumentPosition(guidance) & w.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.equal(guidance.contains(loop), true);
+  assert.equal(hidden(loop), true);
+  assert.equal($(w, '.rg-loop-toggle').textContent, '查看运行步骤');
+  assert.doesNotMatch(html, /<div class="loop" id="loop">/);
+  assert.match(rendererCss, /\.rg-loop-toggle\s*\{/);
 });
 
-test('循环 chip 随阶段点亮，停止时全灭', async () => {
+test('按需展开的运行步骤随阶段点亮，停止时收起并全灭', async () => {
   const { w, pushStatus } = await boot({ loopStage: 'read' });
   const on = () => Array.from(w.document.querySelectorAll('.loop-step.on')).map((el) => (el as HTMLElement).dataset.stage);
+  $(w, '.rg-loop-toggle').click();
+  assert.equal(hidden($(w, '#loop')), false);
   assert.deepEqual(on(), ['read']);
   pushStatus(makeStatus({ loopStage: 'interact' }));
   assert.deepEqual(on(), ['interact']);
   pushStatus(makeStatus({ edge: 'stopped', session: 'idle' }));
+  assert.equal(hidden($(w, '#loop')), true, '运行价值卡消失时步骤一并收起');
   assert.deepEqual(on(), [], '停止时不点亮任何阶段');
 });
 

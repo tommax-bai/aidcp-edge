@@ -419,14 +419,36 @@ body { margin: 0; }
   overflow-wrap: anywhere;
 }
 .rg-progress-meta {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  flex-wrap: wrap;
   color: #74849c;
   font-size: 10px;
   font-weight: 700;
   line-height: 1.3;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  text-align: right;
 }
+.rg-progress-meta > span,
+.rg-loop-toggle { white-space: nowrap; }
+.rg-progress-separator { color: #a3afc1; }
+.rg-loop-toggle {
+  min-height: 24px;
+  margin: -5px -5px -5px 0;
+  padding: 0 5px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #3d6dca;
+  font: inherit;
+  cursor: pointer;
+  transition: color 0.18s ease, background-color 0.18s ease;
+}
+.rg-loop-toggle:hover { color: #2759b8; background: rgba(59, 111, 240, 0.08); }
+.rg-loop-toggle:focus-visible { outline: 2px solid rgba(59, 111, 240, 0.34); outline-offset: 1px; }
 .rg-progress-track {
   position: relative;
   height: 5px;
@@ -644,11 +666,15 @@ body { margin: 0; }
   overflow-wrap: anywhere;
 }
 
-/* 浏览循环 chip */
+/* 详细浏览步骤：收进运行价值卡，默认由进度元信息入口按需展开。 */
 .loop {
   display: flex; align-items: center; gap: 5px; flex-wrap: nowrap;
   overflow-x: auto; overscroll-behavior-inline: contain; scrollbar-width: none;
-  background: var(--surface-soft); border-radius: 12px; padding: 8px 11px;
+  margin-top: 9px;
+  padding: 7px 9px;
+  border: 1px solid rgba(156, 178, 205, 0.24);
+  border-radius: 9px;
+  background: rgba(239, 244, 252, 0.62);
 }
 .loop::-webkit-scrollbar { display: none; }
 .loop-step { flex: 0 0 auto; font-size: 11.5px; color: var(--faint); font-weight: 650; }
@@ -863,24 +889,37 @@ body { margin: 0; }
   color: var(--good-fg);
 }
 .quota-toggle {
-  width: 22px;
-  height: 22px;
-  display: inline-grid;
-  place-items: center;
-  border: 1px solid var(--hair-strong);
-  border-radius: 50%;
-  background: #fff;
-  color: #52627c;
-  font-size: 14px;
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #71829f;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
   line-height: 1;
   cursor: pointer;
-  transition: transform 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+  transition: background-color 0.18s ease, color 0.18s ease;
 }
+.quota-toggle:hover { background: rgba(59, 111, 240, 0.07); color: #526a91; }
+.quota-toggle:focus-visible { outline: 2px solid rgba(59, 111, 240, 0.32); outline-offset: 1px; }
 .quota-toggle.open {
-  transform: rotate(180deg);
-  border-color: rgba(59, 111, 240, 0.34);
-  color: #3159bd;
+  color: #526a91;
 }
+.quota-toggle-icon {
+  width: 6px;
+  height: 6px;
+  margin-top: -3px;
+  border: solid currentColor;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+  transition: transform 0.18s ease, margin-top 0.18s ease;
+}
+.quota-toggle.open .quota-toggle-icon { margin-top: 3px; transform: rotate(-135deg); }
 .usage-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(58px, 1fr));
@@ -1773,6 +1812,9 @@ body { margin: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; }
+  .rg-loop-toggle,
+  .quota-toggle,
+  .quota-toggle-icon { transition: none; }
   #presence-text.shimmer {
     color: var(--ink);
     background: none;
@@ -1783,6 +1825,8 @@ body { margin: 0; }
 
 @media (max-width: 620px) {
   .acct-p { display: none; }
+  .rg-progress-head { align-items: flex-start; flex-wrap: wrap; }
+  .rg-progress-meta { width: 100%; justify-content: flex-start; text-align: left; }
   .summary {
     gap: 10px;
   }

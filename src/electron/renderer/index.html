@@ -117,17 +117,6 @@
         </div>
       </section>
 
-      <!-- 浏览循环 chip：AI 的循环自打勾 -->
-      <div class="loop" id="loop">
-        <span class="loop-step" data-stage="feed">刷 feed</span><span class="loop-sep">›</span>
-        <span class="loop-step" data-stage="select">选笔记</span><span class="loop-sep">›</span>
-        <span class="loop-step" data-stage="read">阅读</span><span class="loop-sep">›</span>
-        <span class="loop-step" data-stage="write">写笔记</span><span class="loop-sep">›</span>
-        <span class="loop-step" data-stage="comment">评论创作</span><span class="loop-sep">›</span>
-        <span class="loop-step" data-stage="interact">互动</span><span class="loop-sep">›</span>
-        <span class="loop-step" data-stage="return">返回续刷</span>
-      </div>
-
       <!-- 运行价值说明：仅由真实在场事件和浏览阶段数据驱动；发布卡与今日进展保持原职责。 -->
       <section id="runtime-guidance" class="runtime-guidance hidden" aria-label="运行进展">
         <div class="rg-main">
@@ -141,6 +130,16 @@
         </div>
         <div id="runtime-guidance-flow" class="rg-flow hidden"></div>
         <div id="runtime-guidance-progress" class="rg-progress hidden"></div>
+        <!-- 详细浏览步骤默认收起，由进度元信息旁的轻量入口按需展开。 -->
+        <div class="loop rg-loop-details hidden" id="loop" aria-label="运行步骤">
+          <span class="loop-step" data-stage="feed">刷 feed</span><span class="loop-sep">›</span>
+          <span class="loop-step" data-stage="select">选笔记</span><span class="loop-sep">›</span>
+          <span class="loop-step" data-stage="read">阅读</span><span class="loop-sep">›</span>
+          <span class="loop-step" data-stage="write">写笔记</span><span class="loop-sep">›</span>
+          <span class="loop-step" data-stage="comment">评论创作</span><span class="loop-sep">›</span>
+          <span class="loop-step" data-stage="interact">互动</span><span class="loop-sep">›</span>
+          <span class="loop-step" data-stage="return">返回续刷</span>
+        </div>
         <div id="runtime-guidance-harvest" class="rg-harvest hidden"></div>
         <div id="runtime-guidance-resume" class="rg-resume hidden"></div>
         <div id="runtime-guidance-note" class="rg-note hidden"></div>
@@ -208,7 +207,10 @@
             <span id="usage-source" class="summary-source">本机实时</span>
           </div>
           <span id="usage-limit" class="summary-limit hidden"></span>
-          <button id="quota-toggle" class="quota-toggle" type="button" aria-label="查看今日节奏" aria-expanded="false">⌄</button>
+          <button id="quota-toggle" class="quota-toggle" type="button" aria-label="展开今日节奏" aria-expanded="false">
+            <span id="quota-toggle-label">展开</span>
+            <span class="quota-toggle-icon" aria-hidden="true"></span>
+          </button>
           <div class="summary-actions" aria-label="环境生命周期控制">
             <time id="updated-at" class="summary-time"></time>
             <button id="session-close" class="fab close hidden" type="button">关闭</button>
