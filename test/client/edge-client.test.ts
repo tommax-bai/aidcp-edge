@@ -73,6 +73,39 @@ async function connectClient(ws: FakeWebSocket): Promise<EdgeClient> {
   return client;
 }
 
+async function connectInteractionClient(
+  ws: FakeWebSocket,
+  negotiated: boolean,
+  logger: (message: string) => void = () => {},
+): Promise<EdgeClient> {
+  const client = new EdgeClient({
+    url: 'ws://test',
+    edgeId: 'edge-wc-1',
+    platform: 'wechat_channels',
+    app: 'wechat_channels',
+    capabilities: ['identity', 'auth.browser_sidecar', 'interaction_inbox_v1'],
+    accountId: 'finder-a',
+    runner: {
+      run: async () => ({ actionId: 'noop', ok: false, outcome: 'escalated', attempts: 0, reason: 'api_only' }),
+    },
+    wsFactory: () => ws,
+    idGen: () => 'hello-wc-1',
+    clock: () => 1,
+    logger,
+  });
+  const connecting = client.connect();
+  ws.emitOpen();
+  await Promise.resolve();
+  ws.emitMessage(makeEnvelope('welcome', 'hello-wc-1', 1, {
+    sessionId: 'session-wc-1',
+    serverVersion: 'v1',
+    ...(negotiated ? { capabilities: ['interaction_inbox_v1'] } : {}),
+  }));
+  await connecting;
+  ws.sent.length = 0;
+  return client;
+}
+
 test('edge-client: hello carries platform metadata without changing message type', async () => {
   const ws = new FakeWebSocket();
   const client = new EdgeClient({
@@ -153,6 +186,104 @@ test('edge-client: hello carries optional account nickname for display enrichmen
 
   ws.emitMessage(makeEnvelope('welcome', 'hello-1', 1, { sessionId: 's1', serverVersion: 'v1' }));
   await connecting;
+});
+
+test('edge-client: wechat_channels hello declares frozen capability and welcome must echo it', async () => {
+  const ws = new FakeWebSocket();
+  const client = new EdgeClient({
+    url: 'ws://test',
+    edgeId: 'edge-wc-1',
+    platform: 'wechat_channels',
+    app: 'wechat_channels',
+    capabilities: ['identity', 'interaction_inbox_v1'],
+    runner: { run: async () => ({ actionId: 'noop', ok: false, outcome: 'escalated', attempts: 0, reason: 'api_only' }) },
+    wsFactory: () => ws,
+    idGen: () => 'hello-wc-1',
+    clock: () => 1,
+    logger: () => {},
+  });
+  const connecting = client.connect();
+  ws.emitOpen();
+  await Promise.resolve();
+  const hello = JSON.parse(ws.sent[0]) as Envelope<{ capabilities: string[]; platform: string }>;
+  assert.equal(hello.payload.platform, 'wechat_channels');
+  assert.ok(hello.payload.capabilities.includes('interaction_inbox_v1'));
+  ws.emitMessage(makeEnvelope('welcome', 'hello-wc-1', 1, {
+    sessionId: 'session-wc-1',
+    serverVersion: 'v1',
+    capabilities: ['interaction_inbox_v1'],
+  }));
+  await connecting;
+  assert.equal(client.isInteractionInboxNegotiated(), true);
+});
+
+test('edge-client: old Cloud cannot activate interaction commands or cause a retry loop', async () => {
+  const ws = new FakeWebSocket();
+  const logs: string[] = [];
+  const client = await connectInteractionClient(ws, false, (message) => logs.push(message));
+  const calls: Envelope[] = [];
+  client.onInteractionCommand((env) => calls.push(env));
+  ws.emitMessage(makeEnvelope('interaction.sync.request', 'sync-old-cloud', 2, {
+    requestId: 'request-1',
+    envKey: 'env-a',
+    accountId: 'finder-a',
+    platform: 'wechat_channels',
+    channel: 'comment',
+    scopeExternalId: null,
+    reason: 'scheduled',
+    requestedAt: 1,
+  }));
+  assert.equal(client.isInteractionInboxNegotiated(), false);
+  assert.equal(calls.length, 0);
+  assert.equal(ws.sent.length, 0);
+  assert.ok(logs.some((line) => line.includes('未协商')));
+});
+
+test('edge-client: negotiated interaction sync/send/reopen and late ack reach the dedicated active route', async () => {
+  const ws = new FakeWebSocket();
+  const client = await connectInteractionClient(ws, true);
+  const calls: Envelope[] = [];
+  client.onInteractionCommand((env) => calls.push(env));
+  ws.emitMessage(makeEnvelope('interaction.sync.request', 'sync-1', 2, {
+    requestId: 'request-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
+    channel: 'comment', scopeExternalId: null, reason: 'scheduled', requestedAt: 1,
+  }));
+  ws.emitMessage(makeEnvelope('interaction.reply.send', 'send-1', 2, {
+    jobId: 'job-1', attemptId: 'attempt-1', idempotencyKey: 'a'.repeat(64),
+    envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels', channel: 'dm',
+    target: { threadExternalId: 'thread-1', inboundMessageExternalId: 'message-1', parentExternalId: null },
+    content: { type: 'text', text: 'hello' }, expiresAt: 100,
+  }));
+  ws.emitMessage(makeEnvelope('interaction.auth.reopen', 'reopen-1', 2, {
+    requestId: 'reopen-request-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
+    reason: 'user_requested', requestedAt: 1,
+  }));
+  ws.emitMessage(makeEnvelope('interaction.sync.ack', 'late-ack-1', 2, {
+    batchId: 'batch-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
+    channel: 'dm', scopeExternalId: 'thread-1', status: 'duplicate', cursorAfter: 'cursor-1',
+    persisted: { threads: 1, messages: 1 }, errorCode: null, receivedAt: 2,
+  }));
+  assert.deepEqual(calls.map((env) => env.type), [
+    'interaction.sync.request',
+    'interaction.reply.send',
+    'interaction.auth.reopen',
+    'interaction.sync.ack',
+  ]);
+});
+
+test('edge-client: malformed negotiated interaction payload is rejected before the handler', async () => {
+  const ws = new FakeWebSocket();
+  const logs: string[] = [];
+  const client = await connectInteractionClient(ws, true, (message) => logs.push(message));
+  const calls: Envelope[] = [];
+  client.onInteractionCommand((env) => calls.push(env));
+  ws.emitMessage(makeEnvelope('interaction.sync.request', 'sync-invalid', 2, {
+    requestId: 'request-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
+    channel: 'comment', scopeExternalId: null, reason: 'scheduled', requestedAt: 1,
+    cookie: 'must-not-be-accepted',
+  } as never));
+  assert.equal(calls.length, 0);
+  assert.ok(logs.some((line) => line.includes('拒绝非法 interaction')));
 });
 
 function publishPayload(): PublishRequestPayload {

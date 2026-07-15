@@ -22,6 +22,14 @@ test('normalizeEnvironments：去空 id、按 profileId 去重（同一分身绝
   assert.equal(envs[1].platform, 'facebook');
 });
 
+test('normalizeEnvironments：wechat_channels 原样保留且别名归一，不回落小红书', () => {
+  const envs = fleet.normalizeEnvironments([
+    { profileId: 'wc1', name: '视频号 A', platform: 'wechat_channels' },
+    { profileId: 'wc2', name: '视频号 B', platform: 'wechat-channels' },
+  ]);
+  assert.deepEqual(envs.map((e: { platform: string }) => e.platform), ['wechat_channels', 'wechat_channels']);
+});
+
 test('migrateEnvironments：旧单值 adsProfileId 向后兼容加载为单元素花名册', () => {
   const envs = fleet.migrateEnvironments({ adsProfileId: 'legacy1', adsProfileName: '老环境', platform: 'xiaohongshu' });
   assert.deepEqual(envs, [{ profileId: 'legacy1', name: '老环境', platform: 'xiaohongshu' }]);
@@ -77,6 +85,17 @@ test('buildEnvSpawnEnv：注入 AIDCP_ADS_USER_ID、剔除继承的身份/端口
   for (const key of ['AIDCP_ACCOUNT_ID', 'AIDCP_EDGE_ID', 'AIDCP_CDP_PORT', 'AIDCP_CHROME_PROFILE']) {
     assert.equal(key in built.env, false, `${key} 不应泄漏进子进程 env`);
   }
+});
+
+test('buildEnvSpawnEnv：视频号平台原子注入 AIDCP_PLATFORM', () => {
+  const built = fleet.buildEnvSpawnEnv({
+    environment: { profileId: 'wc-profile', name: '视频号', platform: 'wechat_channels' },
+    processEnv: {},
+    providerEnv: {},
+  });
+  assert.equal(built.ok, true);
+  assert.equal(built.env.AIDCP_PLATFORM, 'wechat_channels');
+  assert.equal(built.env.AIDCP_ADS_USER_ID, 'wc-profile');
 });
 
 test('buildEnvSpawnEnv：缺分身 id（将回落主机名共享身份）→ 诚实拒绝（红线）', () => {

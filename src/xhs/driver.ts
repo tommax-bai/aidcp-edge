@@ -11,6 +11,7 @@ const XHS_TARGET = {
 
 export const xhsPlatformDriver: PlatformDriver = {
   platform: 'xiaohongshu',
+  runtimeKind: 'browser',
   app: 'xhs',
   capabilities: ['identity', 'overlay', 'browse', 'comment', 'publish', 'interact', 'patrol'],
   edgeCapabilities: ['locating', 'cdp', 'like', 'browse'],

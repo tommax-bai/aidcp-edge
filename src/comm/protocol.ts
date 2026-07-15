@@ -102,6 +102,14 @@ export type MessageType =
   | 'persona.generate.result' // cloud → edge：返回 soul.yaml/身份摘要或失败原因
   | 'persona.persist'         // edge → cloud：请求持久化确认后的 soul.yaml
   | 'persona.persist.result'  // cloud → edge：持久化结果
+  // —— 入站互动管理（视频号 v1；双方确认 interaction_inbox_v1 后启用）——
+  | 'interaction.auth.status' // edge → cloud：auth/browser/capability/identity 真态
+  | 'interaction.sync.batch' // edge → cloud：可重放的增量同步批次
+  | 'interaction.sync.ack' // cloud → edge：整批 accepted/duplicate/rejected
+  | 'interaction.reply.result' // edge → cloud：confirmed/failed/ambiguous 发送真态
+  | 'interaction.sync.request' // cloud → edge：触发按 channel/scope 同步
+  | 'interaction.reply.send' // cloud → edge：带稳定幂等键的文本回复
+  | 'interaction.auth.reopen' // cloud → edge：请求原环境重开登录 sidecar
   // —— 通用 ——
   | 'error' // 任一方 → 对方：错误信息
   | 'ping'
@@ -192,6 +200,220 @@ export interface WelcomePayload {
    * 可选、向后兼容（旧端忽略）；边缘据此做操作间最小间隔 gating 与详情页停留兜底。
    */
   pacing?: PacingSnapshotPayload;
+  /** Optional negotiated capabilities; old Cloud peers omit this field. */
+  capabilities?: string[];
+}
+
+// ————————————————— 视频号入站互动 v1（Session 00 frozen contract）—————————————————
+
+export const INTERACTION_INBOX_CAPABILITY = 'interaction_inbox_v1' as const;
+export type InteractionPlatform = 'wechat_channels';
+export type InteractionChannel = 'comment' | 'dm';
+export type InteractionMessageType = 'text' | 'image' | 'unknown';
+export type InteractionMessageLifecycle = 'active' | 'deleted' | 'hidden';
+export type InteractionAuthStatus =
+  | 'login_required'
+  | 'authenticating'
+  | 'active'
+  | 'reauth_required'
+  | 'challenge_required'
+  | 'degraded'
+  | 'disabled';
+export type InteractionBrowserState = 'closed' | 'opening' | 'open' | 'closing' | 'unavailable';
+export type InteractionErrorCode =
+  | 'INTERACTION_AUTH_REQUIRED'
+  | 'INTERACTION_PERMISSION_DENIED'
+  | 'INTERACTION_NOT_FOUND'
+  | 'INTERACTION_SCOPE_MISMATCH'
+  | 'INTERACTION_VERSION_CONFLICT'
+  | 'INTERACTION_STATE_CONFLICT'
+  | 'INTERACTION_VALIDATION_FAILED'
+  | 'INTERACTION_CONFIG_MISSING'
+  | 'INTERACTION_APPROVAL_REQUIRED'
+  | 'INTERACTION_SEND_AMBIGUOUS'
+  | 'INTERACTION_UNSUPPORTED_MESSAGE_TYPE'
+  | 'INTERACTION_FEATURE_DISABLED'
+  | 'INTERACTION_RATE_LIMITED'
+  | 'INTERACTION_UPSTREAM_UNAVAILABLE'
+  | 'INTERACTION_INTERNAL_ERROR'
+  | 'WECHAT_AUTH_REQUIRED'
+  | 'WECHAT_CHALLENGE_REQUIRED'
+  | 'WECHAT_IDENTITY_MISMATCH'
+  | 'WECHAT_RATE_LIMITED'
+  | 'WECHAT_PERMISSION_DENIED'
+  | 'WECHAT_SCHEMA_CHANGED';
+export type InteractionAuthReasonCode =
+  | 'WECHAT_AUTH_REQUIRED'
+  | 'WECHAT_CHALLENGE_REQUIRED'
+  | 'WECHAT_IDENTITY_MISMATCH'
+  | 'WECHAT_RATE_LIMITED'
+  | 'WECHAT_PERMISSION_DENIED'
+  | 'WECHAT_SCHEMA_CHANGED'
+  | 'INTERACTION_FEATURE_DISABLED'
+  | 'INTERACTION_UPSTREAM_UNAVAILABLE';
+
+export interface InteractionEffectiveCapabilities {
+  commentsRead: boolean;
+  commentsReply: boolean;
+  dmRead: boolean;
+  dmSendText: boolean;
+  dmSendImage: false;
+}
+
+export interface InteractionIdentitySummary {
+  externalId: string;
+  displayName: string;
+  identityHash: string;
+}
+
+export interface InteractionAuthStatusPayload {
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  status: InteractionAuthStatus;
+  browserState: InteractionBrowserState;
+  capabilities: InteractionEffectiveCapabilities;
+  identity: InteractionIdentitySummary | null;
+  checkedAt: number;
+  reasonCode: InteractionAuthReasonCode | null;
+}
+
+export interface InteractionParticipantSnapshot {
+  externalId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+}
+
+export interface InteractionAttachmentMeta {
+  mimeType: string | null;
+  width: number | null;
+  height: number | null;
+  url: string | null;
+}
+
+export interface InteractionSyncThread {
+  externalThreadId: string;
+  sourceExternalId: string | null;
+  sourceTitle: string | null;
+  sourceCoverUrl: string | null;
+  participant: InteractionParticipantSnapshot | null;
+  updatedAt: number;
+}
+
+export interface InteractionSyncMessage {
+  externalThreadId: string;
+  externalMessageId: string;
+  direction: 'inbound' | 'outbound';
+  externalParentId: string | null;
+  externalRootId: string | null;
+  messageType: InteractionMessageType;
+  contentText: string | null;
+  attachmentMeta: InteractionAttachmentMeta | null;
+  lifecycle: InteractionMessageLifecycle;
+  platformCreatedAt: number;
+  rawMetaSanitized: Record<string, string | number | boolean | null>;
+}
+
+export interface InteractionSyncBatchPayload {
+  batchId: string;
+  requestId: string | null;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  channel: InteractionChannel;
+  scopeExternalId: string | null;
+  cursorBefore: string | null;
+  cursorAfter: string | null;
+  hasMore: boolean;
+  threads: InteractionSyncThread[];
+  messages: InteractionSyncMessage[];
+  observedAt: number;
+}
+
+export interface InteractionSyncAckPayload {
+  batchId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  channel: InteractionChannel;
+  scopeExternalId: string | null;
+  status: 'accepted' | 'duplicate' | 'rejected';
+  cursorAfter: string | null;
+  persisted: { threads: number; messages: number };
+  errorCode: InteractionErrorCode | null;
+  receivedAt: number;
+}
+
+export interface InteractionSyncRequestPayload {
+  requestId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  channel: InteractionChannel;
+  scopeExternalId: string | null;
+  reason: 'user_requested' | 'resume' | 'scheduled' | 'recovery';
+  requestedAt: number;
+}
+
+export interface InteractionReplyTarget {
+  threadExternalId: string;
+  inboundMessageExternalId: string;
+  parentExternalId: string | null;
+}
+
+export interface InteractionReplySendPayload {
+  jobId: string;
+  attemptId: string;
+  idempotencyKey: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  channel: InteractionChannel;
+  target: InteractionReplyTarget;
+  content: { type: 'text'; text: string };
+  expiresAt: number;
+}
+
+export type InteractionReplyErrorCategory =
+  | 'auth_expired'
+  | 'challenge_required'
+  | 'identity_mismatch'
+  | 'rate_limited'
+  | 'permission_denied'
+  | 'schema_changed'
+  | 'transient_network'
+  | 'unsupported_message_type'
+  | 'invalid_scope'
+  | 'invalid_command'
+  | 'expired_command'
+  | 'platform_rejected'
+  | 'verification_failed'
+  | 'internal_error';
+
+export interface InteractionReplyResultPayload {
+  jobId: string;
+  attemptId: string;
+  idempotencyKey: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  channel: InteractionChannel;
+  status: 'confirmed' | 'failed' | 'ambiguous';
+  externalMessageId: string | null;
+  errorCategory: InteractionReplyErrorCategory | null;
+  errorCode: InteractionErrorCode | null;
+  verification: 'platform_ack' | 'history_lookup' | 'comment_lookup' | 'not_verified';
+  retryAfterMs: number | null;
+  finishedAt: number;
+}
+
+export interface InteractionAuthReopenPayload {
+  requestId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  reason: 'user_requested' | 'auth_expired' | 'identity_mismatch' | 'challenge_required';
+  requestedAt: number;
 }
 
 /**
@@ -1422,6 +1644,13 @@ export interface PayloadMap {
   'persona.generate.result': PersonaGenerateResultPayload;
   'persona.persist': PersonaPersistPayload;
   'persona.persist.result': PersonaPersistResultPayload;
+  'interaction.auth.status': InteractionAuthStatusPayload;
+  'interaction.sync.batch': InteractionSyncBatchPayload;
+  'interaction.sync.ack': InteractionSyncAckPayload;
+  'interaction.reply.result': InteractionReplyResultPayload;
+  'interaction.sync.request': InteractionSyncRequestPayload;
+  'interaction.reply.send': InteractionReplySendPayload;
+  'interaction.auth.reopen': InteractionAuthReopenPayload;
   error: ErrorPayload;
   ping: Record<string, never>;
   pong: Record<string, never>;

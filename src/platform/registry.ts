@@ -1,4 +1,5 @@
 import { facebookPlatformDriver } from '../facebook/driver.js';
+import { wechatChannelsPlatformDriver } from '../wechat-channels/driver.js';
 import { xhsPlatformDriver } from '../xhs/driver.js';
 import { normalizePlatformId, type PlatformDriver, type PlatformId } from './driver.js';
 
@@ -64,6 +65,7 @@ export const DELEGATED_ACTIONS_BY_PLATFORM: Record<PlatformId, Record<DelegatedA
 
 export const PLATFORM_DRIVERS: Partial<Record<PlatformId, PlatformDriver>> = {
   facebook: facebookPlatformDriver,
+  wechat_channels: wechatChannelsPlatformDriver,
   xiaohongshu: xhsPlatformDriver,
 };
 

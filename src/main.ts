@@ -48,6 +48,7 @@ import {
   type ReadSelfIdentityOptions,
 } from './cdp/index.js';
 import { selectPlatformDriver } from './platform/index.js';
+import { runWechatChannelsRuntime } from './wechat-channels/runtime.js';
 import {
   FacebookBrowseSession,
   FacebookCommentExecutor,
@@ -162,6 +163,10 @@ async function main(): Promise<void> {
   console.log(
     `[aidcp-edge] 平台装配 platform=${platformDriver.platform} app=${platformDriver.app} capabilities=${platformDriver.capabilities.join(',')}`,
   );
+  if (platformDriver.runtimeKind === 'interaction') {
+    await runWechatChannelsRuntime(platformDriver);
+    return;
+  }
   // 节点身份（edgeId）：缺省按节点隔离边界派生【唯一且稳定】的值，绝不回落共享常量（旧 'edge-local' 致同机/跨机
   // 两个裸 npm start 互踢的根因，见 edge-id.ts）。唯一→根除互踢与下行串号；稳定→保住云端「同节点重连顶替」。
   const edgeIdDerivation = deriveEdgeId();

@@ -27,10 +27,15 @@ function normalizeEnvironment(raw) {
   const profileId = String(raw.profileId ?? raw.userId ?? '').trim();
   if (!profileId) return null;
   const platformRaw = String(raw.platform ?? '').trim().toLowerCase();
+  const platform = platformRaw === 'facebook' || platformRaw === 'fb'
+    ? 'facebook'
+    : platformRaw === 'wechat_channels' || platformRaw === 'wechat-channels' || platformRaw === 'wechat'
+      ? 'wechat_channels'
+      : 'xiaohongshu';
   return {
     profileId,
     name: typeof raw.name === 'string' ? raw.name : '',
-    platform: platformRaw === 'facebook' || platformRaw === 'fb' ? 'facebook' : 'xiaohongshu',
+    platform,
   };
 }
 

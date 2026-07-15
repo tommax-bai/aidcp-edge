@@ -24,6 +24,19 @@ test('normalizePlatformId: xhs aliases resolve to xiaohongshu', () => {
   assert.equal(normalizePlatformId('xiaohongshu'), 'xiaohongshu');
 });
 
+test('selectPlatformDriver: wechat_channels registers API-only interaction capabilities', () => {
+  assert.equal(normalizePlatformId('wechat-channels'), 'wechat_channels');
+  const driver = selectPlatformDriver({ env: { AIDCP_PLATFORM: 'wechat_channels' } as NodeJS.ProcessEnv });
+  assert.equal(driver.platform, 'wechat_channels');
+  assert.equal(driver.runtimeKind, 'interaction');
+  assert.equal(driver.capabilities.includes('interaction.comment.read'), true);
+  assert.equal(driver.capabilities.includes('interaction.dm.send_image'), false);
+  assert.equal(driver.capabilities.includes('browse'), false);
+  assert.equal(driver.edgeCapabilities.includes('interaction_inbox_v1'), true);
+  assert.equal(driver.isAllowedTargetUrl('https://channels.weixin.qq.com/platform/post/list'), true);
+  assert.equal(driver.isAllowedTargetUrl('https://www.xiaohongshu.com/explore'), false);
+});
+
 test('selectPlatformDriver: facebook declares browse/interact (co-landed with FacebookBrowseSession)', () => {
   const driver = selectPlatformDriver({ env: { AIDCP_PLATFORM: 'facebook' } as NodeJS.ProcessEnv });
   assert.equal(driver.platform, 'facebook');

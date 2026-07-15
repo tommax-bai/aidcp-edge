@@ -17,6 +17,7 @@ export const FACEBOOK_TARGET: PlatformTargetDescriptor = {
 
 export const facebookPlatformDriver: PlatformDriver = {
   platform: 'facebook',
+  runtimeKind: 'browser',
   app: 'facebook',
   // 'comment'：Facebook 定向评论执行能力（change facebook-scheduled-comment）。
   // 'join'：Facebook 加群原子执行能力（change facebook-group-join-and-commenting），独立于 browse。

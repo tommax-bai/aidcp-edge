@@ -40,7 +40,13 @@ import {
   type PacingSnapshotPayload,
   type EdgeTaskAcquirePayload,
   type EdgeTaskReleasePayload,
+  INTERACTION_INBOX_CAPABILITY,
+  type InteractionAuthReopenPayload,
+  type InteractionReplySendPayload,
+  type InteractionSyncAckPayload,
+  type InteractionSyncRequestPayload,
 } from '../comm/protocol.js';
+import { isInteractionMessageType, validateInteractionEnvelope } from '../wechat-channels/protocol-validation.js';
 
 /** 最小 WebSocket 抽象（与 cdp/client.ts 同形，便于测试注入） */
 export interface CloudWebSocket {
@@ -75,6 +81,11 @@ export type CaptchaAssistCommandHandler = (
 ) => void;
 /** 陪伴界面数据快照处理器（ui.snapshot，cloud 主动推送；核心转 [ui-event] 行给桌面壳）。 */
 export type UiSnapshotHandler = (env: Envelope<UiSnapshotPayload>) => void;
+export type InteractionCommandHandler = (
+  env: Envelope<
+    InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload
+  >,
+) => void;
 export type CloudConnectionEvent = 'cloud.disconnected' | 'cloud.reconnecting' | 'cloud.reconnected' | 'cloud.unrecoverable';
 export type CloudConnectionListener = (params: unknown) => void;
 
@@ -155,6 +166,7 @@ export class EdgeClient {
   private sessionId?: string;
   /** welcome 握手下发的节奏快照（每类操作 floor 区间 + tempo）；重连（新 connect）后被最新 welcome 覆盖。 */
   private pacing?: PacingSnapshotPayload;
+  private peerCapabilities = new Set<string>();
   private connected = false;
   private intentionalClose = false;
   private reconnecting = false;
@@ -167,6 +179,7 @@ export class EdgeClient {
   private edgeTaskHandler?: EdgeTaskCommandHandler;
   private captchaAssistHandler?: CaptchaAssistCommandHandler;
   private uiSnapshotHandler?: UiSnapshotHandler;
+  private interactionHandler?: InteractionCommandHandler;
 
   constructor(options: EdgeClientOptions) {
     this.opts = {
@@ -252,6 +265,7 @@ export class EdgeClient {
     });
     const p = welcome.payload as WelcomePayload;
     this.sessionId = p.sessionId;
+    this.peerCapabilities = new Set(Array.isArray(p.capabilities) ? p.capabilities : []);
     // 节奏快照（pacing-floor-config-min-interval 设计 §4.3）：welcome 是 hello 的请求/响应，按 pending-id
     // 命中返回、永不经过主动命令白名单，故此处直接取用零白名单遗漏风险。缺省（旧云端）→ undefined，边缘用内置默认。
     this.pacing = p.pacing;
@@ -272,6 +286,15 @@ export class EdgeClient {
   /** 取最近一次 welcome 下发的节奏快照（供 main.ts 组装 browseOpts / 重连后 applyPacingSnapshot）；缺省 undefined。 */
   getPacing(): PacingSnapshotPayload | undefined {
     return this.pacing;
+  }
+
+  /** Both hello and welcome must advertise the capability before interaction v1 is usable. */
+  supportsCapability(capability: string): boolean {
+    return Boolean(this.opts.capabilities?.includes(capability) && this.peerCapabilities.has(capability));
+  }
+
+  isInteractionInboxNegotiated(): boolean {
+    return this.supportsCapability(INTERACTION_INBOX_CAPABILITY);
   }
 
   /**
@@ -320,6 +343,14 @@ export class EdgeClient {
     this.uiSnapshotHandler = handler;
     return () => {
       if (this.uiSnapshotHandler === handler) this.uiSnapshotHandler = undefined;
+    };
+  }
+
+  /** Register the explicit active-command route for all Cloud → Edge interaction types. */
+  onInteractionCommand(handler: InteractionCommandHandler): () => void {
+    this.interactionHandler = handler;
+    return () => {
+      if (this.interactionHandler === handler) this.interactionHandler = undefined;
     };
   }
 
@@ -501,13 +532,42 @@ export class EdgeClient {
       return;
     }
 
-    // 2) 云端主动下发的命令（以 plan.response 承载有序步骤）
+    // 2) 视频号 interaction 主动命令/迟到 ack：协商 + strict payload + 显式 route 三道闸。
+    if (isInteractionMessageType(env.type)) {
+      if (!this.isInteractionInboxNegotiated()) {
+        this.opts.logger(`[edge-client] 忽略未协商的 interaction type=${env.type}`);
+        return;
+      }
+      try {
+        validateInteractionEnvelope(env);
+      } catch (error) {
+        this.opts.logger(
+          `[edge-client] 拒绝非法 interaction type=${env.type}: ${error instanceof Error ? error.message : 'invalid payload'}`,
+        );
+        return;
+      }
+      if (
+        env.type === 'interaction.sync.ack' ||
+        env.type === 'interaction.sync.request' ||
+        env.type === 'interaction.reply.send' ||
+        env.type === 'interaction.auth.reopen'
+      ) {
+        this.interactionHandler?.(
+          env as Envelope<
+            InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload
+          >,
+        );
+      }
+      return;
+    }
+
+    // 3) 云端主动下发的命令（以 plan.response 承载有序步骤）
     if (env.type === 'plan.response') {
       void this.onCommand(env);
       return;
     }
 
-    // 3) 云端主动下发的浏览控制信令
+    // 4) 云端主动下发的浏览控制信令
     if (
       env.type === 'session.end' ||
       env.type === 'browse.next' ||

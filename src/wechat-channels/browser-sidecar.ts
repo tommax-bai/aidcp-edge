@@ -1,0 +1,150 @@
+import type { ChromeInstance } from '../cdp/chrome-launcher.js';
+import { attachToPage, selectBrowserProvider, type BrowserProvider, type EdgeSession } from '../cdp/index.js';
+import type { WechatCookie, WechatSessionMaterial } from './types.js';
+import { WECHAT_CHANNELS_DEFAULT_START_URL, WECHAT_CHANNELS_TARGET } from './driver.js';
+
+export type BrowserSidecarState = 'closed' | 'opening' | 'open' | 'closing' | 'unavailable';
+
+export interface WechatChannelsBrowserSidecar {
+  readonly browserProfileId: string;
+  getState(): BrowserSidecarState;
+  open(): Promise<void>;
+  readSessionCandidate(): Promise<WechatSessionMaterial | null>;
+  close(): Promise<void>;
+}
+
+export interface BrowserSidecarOptions {
+  env?: NodeJS.ProcessEnv;
+  provider?: BrowserProvider;
+  logImpl?: (message: string) => void;
+  nowImpl?: () => number;
+}
+
+export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSidecar {
+  readonly browserProfileId: string;
+  private readonly env: NodeJS.ProcessEnv;
+  private readonly provider: BrowserProvider;
+  private readonly log: (message: string) => void;
+  private readonly now: () => number;
+  private session?: EdgeSession;
+  private browser?: ChromeInstance;
+  private state: BrowserSidecarState = 'closed';
+
+  constructor(options: BrowserSidecarOptions = {}) {
+    this.env = options.env ?? process.env;
+    this.browserProfileId =
+      this.env.AIDCP_ADS_USER_ID?.trim() || this.env.AIDCP_WECHAT_BROWSER_PROFILE_ID?.trim() || '';
+    if (!this.browserProfileId) {
+      throw new Error('wechat_channels requires AIDCP_ADS_USER_ID or AIDCP_WECHAT_BROWSER_PROFILE_ID');
+    }
+    this.log = options.logImpl ?? ((message) => console.log(message));
+    this.now = options.nowImpl ?? Date.now;
+    this.provider =
+      options.provider ??
+      selectBrowserProvider({
+        env: this.env,
+        startUrl: WECHAT_CHANNELS_DEFAULT_START_URL,
+        logImpl: this.log,
+      });
+  }
+
+  getState(): BrowserSidecarState {
+    return this.state;
+  }
+
+  async open(): Promise<void> {
+    if (this.state === 'open') return;
+    if (this.state === 'opening' || this.state === 'closing') throw new Error(`browser sidecar is ${this.state}`);
+    this.state = 'opening';
+    try {
+      const launched = await this.provider.launch({
+        host: this.env.AIDCP_CDP_HOST ?? '127.0.0.1',
+        port: Number(this.env.AIDCP_CDP_PORT ?? 9222),
+        chromePath: this.env.AIDCP_CHROME_PATH,
+        profileDir: this.env.AIDCP_CHROME_PROFILE,
+        headless: false,
+        readyTimeoutMs: positiveMs(this.env.AIDCP_WECHAT_BROWSER_READY_TIMEOUT_MS, 20_000),
+      });
+      this.browser = launched.instance;
+      this.session = await attachToPage({
+        host: launched.endpoint.host,
+        port: launched.endpoint.port,
+        stealth: this.provider.kind !== 'adspower',
+        targetPredicate: (target) => {
+          try {
+            const host = new URL(target.url).hostname.toLowerCase();
+            return WECHAT_CHANNELS_TARGET.allowedHostSuffixes.some(
+              (suffix) => host === suffix || host.endsWith(`.${suffix}`),
+            );
+          } catch {
+            return false;
+          }
+        },
+      });
+      this.state = 'open';
+      this.log('[wechat-channels] browser login sidecar is open');
+    } catch (error) {
+      this.state = 'unavailable';
+      throw error;
+    }
+  }
+
+  async readSessionCandidate(): Promise<WechatSessionMaterial | null> {
+    const cdp = this.session?.cdp;
+    if (!cdp || this.state !== 'open') return null;
+    const response = await cdp.send<{ cookies?: WechatCookie[] }>('Network.getAllCookies').catch(() => ({ cookies: [] }));
+    const cookies = (response.cookies ?? []).filter((cookie) => {
+      const domain = String(cookie.domain ?? '').replace(/^\./, '').toLowerCase();
+      return domain === 'weixin.qq.com' || domain.endsWith('.weixin.qq.com');
+    });
+    if (cookies.length === 0) return null;
+    const userAgentResponse = await cdp
+      .send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+        expression: 'navigator.userAgent',
+        returnByValue: true,
+      })
+      .catch(() => ({ result: { value: '' } }));
+    const userAgent = String(userAgentResponse.result?.value ?? '').trim();
+    if (!userAgent) return null;
+    return {
+      cookies: cookies.map((cookie) => ({
+        name: String(cookie.name),
+        value: String(cookie.value),
+        domain: String(cookie.domain),
+        path: cookie.path ? String(cookie.path) : '/',
+        expires: typeof cookie.expires === 'number' ? cookie.expires : undefined,
+        httpOnly: Boolean(cookie.httpOnly),
+        secure: Boolean(cookie.secure),
+        sameSite: cookie.sameSite ? String(cookie.sameSite) : undefined,
+      })),
+      userAgent,
+      acquiredAt: this.now(),
+    };
+  }
+
+  async close(): Promise<void> {
+    if (this.state === 'closed') return;
+    this.state = 'closing';
+    const session = this.session;
+    const browser = this.browser;
+    this.session = undefined;
+    this.browser = undefined;
+    try {
+      session?.close();
+      if (browser) {
+        const confirmed = await browser.killAndConfirmDead();
+        if (!confirmed) throw new Error('browser sidecar close was not confirmed');
+      }
+      this.state = 'closed';
+      this.log('[wechat-channels] browser login sidecar closed after encrypted session handoff');
+    } catch (error) {
+      this.state = 'unavailable';
+      throw error;
+    }
+  }
+}
+
+function positiveMs(raw: string | undefined, fallback: number): number {
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
