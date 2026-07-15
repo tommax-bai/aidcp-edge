@@ -723,8 +723,9 @@ test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并�
   }));
   assert.match($(w, '#usage-source').textContent ?? '', /账号今日/);
   assert.match($(w, '#usage-source').textContent ?? '', /均衡节奏/);
-  assert.match($(w, '#usage-limit').textContent ?? '', /今日点赞\/发帖计划已完成/);
-  assert.match($(w, '#usage-limit').title ?? '', /发帖：阶段节奏、今日计划已完成/);
+  assert.equal($(w, '#usage-limit').textContent, '今日点赞计划已完成');
+  assert.match($(w, '#usage-limit').title ?? '', /点赞：当前节奏、今日计划已完成/);
+  assert.doesNotMatch($(w, '#usage-limit').title ?? '', /发帖/);
   assert.ok($(w, '#usage-limit').classList.contains('complete'));
   assert.ok(!$(w, '#usage-limit').classList.contains('hit'));
   assert.equal($(w, '#quota-toggle').getAttribute('aria-label'), '展开今日节奏');
@@ -757,6 +758,66 @@ test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并�
   assert.ok($(w, '#likes').closest('.kpi')?.classList.contains('complete'));
   assert.ok($(w, '#publishes').closest('.kpi')?.classList.contains('complete'));
   w.Date.now = originalNow;
+});
+
+test('今日进展：多个完成项只按浏览、点赞、收藏、评论、关注、发帖的顺序展示一个', async () => {
+  const { w, pushStatus } = await boot();
+  const originalNow = w.Date.now;
+  const now = 1730000002000;
+  w.Date.now = () => now;
+  const actions = [
+    { action: 'view', label: '浏览', text: '今日任务已完成' },
+    { action: 'like', label: '点赞', text: '今日点赞计划已完成' },
+    { action: 'collect', label: '收藏', text: '今日收藏计划已完成' },
+    { action: 'comment', label: '评论', text: '今日评论计划已完成' },
+    { action: 'follow', label: '关注', text: '今日关注计划已完成' },
+    { action: 'publish', label: '发帖', text: '今日发帖计划已完成' },
+  ];
+  try {
+    for (let index = 0; index < actions.length; index += 1) {
+      const completed = actions.slice(index);
+      const totals = Object.fromEntries(actions.map((item) => [item.action, completed.some((entry) => entry.action === item.action) ? 1 : 0]));
+      const quotas = Object.fromEntries(actions.map((item) => [item.action, 1]));
+      const saturated = completed.map((item) => item.action);
+      pushStatus(makeStatus({
+        dailyUsage: {
+          asOf: now,
+          quotaLevel: 'normal',
+          totals,
+          quotas,
+          saturated,
+          windows: {
+            day: {
+              startedAt: now - 3600000,
+              windowMs: 86400000,
+              expiresAt: now + 3600000,
+              totals,
+              quotas,
+              saturated,
+            },
+          },
+        },
+      }));
+      assert.equal($(w, '#usage-limit').textContent, actions[index].text);
+      assert.match($(w, '#usage-limit').title ?? '', new RegExp(`^${actions[index].label}：`));
+    }
+  } finally {
+    w.Date.now = originalNow;
+  }
+});
+
+test('今日进展：旧版今日配额同时完成多项时也只展示最高优先级', async () => {
+  const { w, pushStatus } = await boot();
+  pushStatus(makeStatus({
+    dailyUsage: {
+      asOf: 1730000001000,
+      quotaLevel: 'normal',
+      totals: { view: 0, like: 3, collect: 1, comment: 0, follow: 0, publish: 1 },
+      quotas: { view: 150, like: 3, collect: 1, comment: 8, follow: 15, publish: 1 },
+      saturated: ['like', 'collect', 'publish'],
+    },
+  }));
+  assert.equal($(w, '#usage-limit').textContent, '今日点赞计划已完成');
 });
 
 test('今日进展：过期窗口不再作为当前计划完成展示', async () => {

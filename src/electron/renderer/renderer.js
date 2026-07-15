@@ -436,43 +436,22 @@ function renderUsageItem(item, usage) {
   }
 }
 
-function compactLabels(labels) {
-  const unique = [...new Set(labels.filter(Boolean))];
-  if (unique.length <= 2) return unique.join('/');
-  return `${unique.slice(0, 2).join('/')}等${unique.length}项`;
-}
-
-function compactProgressText(parts) {
-  if (parts.length <= 2) return parts.join(' · ');
-  return `${parts.slice(0, 2).join(' · ')} 等${parts.length}项`;
-}
-
 function quotaCompletionSummary(windowViews) {
   const byAction = new Map();
   for (const window of windowViews) {
     for (const entry of window.rows.filter((row) => row.complete)) {
-      const current = byAction.get(entry.action) || { label: entry.label, windows: [] };
+      const current = byAction.get(entry.action) || { action: entry.action, label: entry.label, windows: [] };
       if (!current.windows.some((item) => item.key === window.key)) current.windows.push({ key: window.key, label: window.label });
       byAction.set(entry.action, current);
     }
   }
-  const daily = [];
-  const rounds = [];
-  const title = [];
-  let dailyBrowseDone = false;
-  for (const entry of byAction.values()) {
-    if (entry.windows.some((window) => window.key === 'day')) {
-      if (entry.label === '浏览') dailyBrowseDone = true;
-      else daily.push(entry.label);
-    } else {
-      rounds.push(entry.label);
-    }
-    title.push(`${entry.label}：${entry.windows.map((window) => window.label).join('、')}已完成`);
-  }
-  const text = [];
-  if (dailyBrowseDone) text.push('今日任务已完成');
-  if (daily.length > 0) text.push(`今日${compactLabels(daily)}计划已完成`);
-  if (rounds.length > 0) text.push(`${compactLabels(rounds)}完成一轮`);
+  const selected = USAGE_ITEMS.map((item) => byAction.get(item.action)).find(Boolean);
+  if (!selected) return null;
+  const dailyComplete = selected.windows.some((window) => window.key === 'day');
+  const text = dailyComplete
+    ? (selected.action === 'view' ? '今日任务已完成' : `今日${selected.label}计划已完成`)
+    : `${selected.label}完成一轮`;
+  const title = `${selected.label}：${selected.windows.map((window) => window.label).join('、')}已完成`;
   return { text, title };
 }
 
@@ -480,7 +459,7 @@ function usageProgressLabel(usage) {
   const windowViews = quotaWindowViews(usage);
   if (windowViews.length > 0) {
     const complete = quotaCompletionSummary(windowViews);
-    if (complete.text.length > 0) return { tone: 'complete', text: compactProgressText(complete.text), title: complete.title.join(' · ') };
+    if (complete) return { tone: 'complete', text: complete.text, title: complete.title };
     return { tone: 'ok', text: '按计划进行中' };
   }
   if (!usage.quotas) return null;
@@ -491,8 +470,9 @@ function usageProgressLabel(usage) {
     const used = count(usage.totals[item.action]);
     if (usage.saturated.has(item.action) || used >= cap) limited.push(item.label);
   }
-  return limited.length > 0
-    ? { tone: 'complete', text: limited.includes('浏览') ? '今日任务已完成' : `今日${compactLabels(limited)}计划已完成` }
+  const selected = limited[0];
+  return selected
+    ? { tone: 'complete', text: selected === '浏览' ? '今日任务已完成' : `今日${selected}计划已完成` }
     : { tone: 'ok', text: '按计划进行中' };
 }
 
