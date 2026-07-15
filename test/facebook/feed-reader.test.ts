@@ -162,6 +162,19 @@ test('ensureFeed 幂等：已在首页且有 feed、无 dialog → 不导航', a
   assert.deepEqual(navs, [], '已在首页不重新导航（消掉滚动重置回归）');
 });
 
+test('ensureFeed 幂等：已在首页有 feed、但挂着瞬时/良性 dialog → 仍不导航（不因良性浮层整页重载）', async () => {
+  // 真机根因：FB 首页常挂瞬时 [role=dialog]（聊天弹窗/加载态/通知提示），旧判据「有 dialog 就判非目标→整页导航」
+  // 导致每条 scroll 命令都整页重载、feed 被钉回第一屏（timeOrigin 每 ~8s 重置）。既在正确列表面且 feed 在场即为在目标。
+  const navs: string[] = [];
+  const reader = new FacebookFeedReader({
+    cdp: surfaceCdp({ href: 'https://www.facebook.com/', hasFeed: true, hydratedArticles: 3, dialogOpen: true }, navs),
+    sleep: async () => {},
+  });
+  const r = await reader.ensureFeed('https://www.facebook.com/');
+  assert.equal(r.ok, true);
+  assert.deepEqual(navs, [], '良性 dialog 不触发整页重载（消掉「一直刷新」churn）');
+});
+
 test('ensureFeed 幂等：在详情页（page_post）→ 导航回目标 feed', async () => {
   const navs: string[] = [];
   const reader = new FacebookFeedReader({

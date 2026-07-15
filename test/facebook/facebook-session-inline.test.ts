@@ -64,6 +64,7 @@ function makeSession(opts: {
     ensureFeed: async () => ({ ok: true as const }),
     scanCards: async () => [],
     scrollNext: async () => {},
+    scrollMetrics: async () => ({ scrollY: 0, scrollHeight: 5000, innerHeight: 900 }),
     settleCards: async () => (opts.settle ? opts.settle(settleCall++) : { cards: [fbCard(A)], degraded: false }),
     clickHomeAndScrollTop: async () => ({ ok: true as const }),
   } as unknown as FacebookFeedReader;

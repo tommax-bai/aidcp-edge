@@ -211,6 +211,13 @@ const HOME_CLICK_JS = String.raw`(function(){
   return JSON.stringify({ ok:true });
 })()`;
 
+/** 视口滚动量测：当前滚动位置 / 内容总高 / 视口高。用于判「FB 懒加载是否还在长内容」与「是否已接近底部」。 */
+const SCROLL_METRICS_JS = String.raw`(function(){
+  var root=document.scrollingElement||document.documentElement;
+  var sh=Math.max(document.documentElement?document.documentElement.scrollHeight:0, document.body?document.body.scrollHeight:0);
+  return JSON.stringify({ scrollY: Number(window.scrollY||(root&&root.scrollTop)||0), scrollHeight: sh, innerHeight: Number(window.innerHeight||0) });
+})()`;
+
 export class FacebookFeedReader {
   private readonly cdp: BrowseCdp;
   private readonly overlayMonitor?: OverlayMonitor;
@@ -239,15 +246,26 @@ export class FacebookFeedReader {
    */
   async ensureFeed(feedUrl: string): Promise<FacebookFeedEnsureResult> {
     let onTarget = false;
+    let probe: FacebookFeedSurface | undefined;
     try {
-      const s = await this.probeSurface();
+      probe = await this.probeSurface();
       const want = classifyFacebookSurface(feedUrl);
-      onTarget = isFacebookListSurface(s.surface) && s.surface === want && s.hasFeed && !s.dialogOpen;
+      // dialogOpen 不再作为「非目标」判据（change facebook-feed-lazyload-exhaustion-fix）：FB 首页常挂**瞬时/良性**
+      // [role=dialog]（聊天弹窗、加载态、通知提示浮层，来了又走）。旧判据「只要存在任意 dialog 就判非目标」→ 每条
+      // scroll 命令开头都整页 Page.navigate（经 fbsbx/maw_proxy_page 重定向链回首页）→ 真机上看着就是「一直刷新」、
+      // feed 被反复钉回第一屏、永远下不去（真机 CDP 取证：timeOrigin 每 ~8s 重置一次）。FB 就地读不弹模态，dialogOpen
+      // 对 FB 恒为良性浮层。既已在正确列表面且 feed 容器在场，就是在目标——良性浮层绝不该触发整页重载；真正的
+      // 登录/验证码阻断由下方 blockingReason 单独 fail-closed 兜底（不受此变更影响）。
+      onTarget = isFacebookListSurface(probe.surface) && probe.surface === want && probe.hasFeed;
     } catch (err) {
       this.log(`[fb-feed] surface 探测失败，按需导航：${(err as Error).message}`);
       onTarget = false;
     }
     if (!onTarget) {
+      // 导航决策以前不可观测（整页重载没日志）——把判据打出来，便于定位「为什么又整页导航/看着像刷新」。
+      this.log(
+        `[fb-feed] ensureFeed 判非目标→整页导航 want=${classifyFacebookSurface(feedUrl)} surface=${probe?.surface ?? '探测失败'} hasFeed=${probe?.hasFeed} dialog=${probe?.dialogOpen} href=${(probe?.href ?? '').slice(0, 48)}`,
+      );
       try {
         await this.cdp.send('Page.navigate', { url: feedUrl });
       } catch (err) {
@@ -329,6 +347,23 @@ export class FacebookFeedReader {
       logger: this.log,
     });
     await this.sleep(this.opts.pollMs);
+  }
+
+  /**
+   * 量测视口滚动状态（scrollY / 内容总高 / 视口高）。用于滚动循环区分「FB 懒加载还在长内容 / 未到底」
+   * 与「真·刷到底」——只有内容不再增长且接近底部时才允许判 feed_exhausted。探测异常保守回全 0（调用方据此不判到底）。
+   */
+  async scrollMetrics(): Promise<{ scrollY: number; scrollHeight: number; innerHeight: number }> {
+    try {
+      const raw = await evalJson<{ scrollY: number; scrollHeight: number; innerHeight: number }>(this.cdp, SCROLL_METRICS_JS);
+      return {
+        scrollY: Number(raw.scrollY) || 0,
+        scrollHeight: Number(raw.scrollHeight) || 0,
+        innerHeight: Number(raw.innerHeight) || 0,
+      };
+    } catch {
+      return { scrollY: 0, scrollHeight: 0, innerHeight: 0 };
+    }
   }
 
   /** feed 区域内是否有 loading 信号（progressbar / aria-busy）。探测异常保守当无信号（交给 wall-clock 兜底）。 */

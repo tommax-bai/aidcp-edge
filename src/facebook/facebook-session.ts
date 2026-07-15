@@ -39,7 +39,7 @@ import type {
 } from '../comm/protocol.js';
 import type { PlatformDriver } from '../platform/driver.js';
 import { FACEBOOK_DEFAULT_START_URL } from './driver.js';
-import { FacebookFeedReader, type FacebookFeedCard } from './feed-reader.js';
+import { FacebookFeedReader, type FacebookFeedCard, type FacebookFeedSettleResult } from './feed-reader.js';
 import { FacebookPostReader } from './post-reader.js';
 import { FacebookLikeExecutor } from './like-executor.js';
 import { FacebookInlineReader } from './inline-reader.js';
@@ -167,8 +167,18 @@ const FEED_SETTLE_NAV_MS = 6_000;
 const FEED_SETTLE_INPLACE_MS = 3_500;
 /** refresh 的 Page.reload 兜底频率下限（毫秒）。 */
 const REFRESH_RELOAD_FLOOR_MS = 3 * 60_000;
-/** page.scroll 有界续滚找新卡的额外轮次上限：本次滚动 0 新卡时再滚几次，仍 0 才诚实 feed_exhausted。 */
-const FEED_SCROLL_EXTRA_ROUNDS = 2;
+/**
+ * page.scroll 单条命令内有界续滚上限：本次 0 新卡时最多再滚几次找下沉的新卡（FB 懒加载 + 虚拟化需要时间渲染下一批）。
+ * 从旧值 2 提到 8——给懒加载足够时间把下一批渲染出来，避免「滚两下没冒新卡就误判到底、立刻刷新回顶」的换批抖动。
+ * 单条命令兜底超时 90s、每轮 ~5s，8 轮 ≤ ~45s 安全在预算内。
+ */
+const FEED_SCROLL_MAX_ROUNDS = 8;
+/** 判「真到底」需连续满足「高度稳定 + 接近底部 + 0 新卡」的轮数（连续确认防抖，绝不单轮误判到底）。 */
+const FEED_EXHAUST_CONFIRM_ROUNDS = 2;
+/** scrollHeight 视为「FB 懒加载又长出内容」的最小增量（像素）——只要页面在长就继续下滚、绝不判到底。 */
+const FEED_LAZYLOAD_GROWTH_PX = 100;
+/** 距内容底部小于此值（像素）视为「接近底部」——FB 通常在触底前就懒加载，故留约一屏余量提前判定。 */
+const FEED_NEAR_BOTTOM_PX = 900;
 /** 就地读停留地板：base + 每字符增量，封顶（× tempo 由调用点乘）。 */
 const INLINE_READ_FLOOR_BASE_MS = 1_200;
 const INLINE_READ_FLOOR_PER_CHAR_MS = 20;
@@ -727,8 +737,13 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
 
   /**
    * feed 翻页 → 判稳扫卡 → 只上报**未见过的新卡**（游标去回收重现）。ensureFeed 幂等：已在 feed 就不重新导航。
-   * 本次滚动 0 新卡（回收的旧卡重现，不算新）⇒ 有界续滚；仍 0 ⇒ 诚实 `feed_exhausted`（云端映射为 refresh，
-   * 见 change platform-browse-protocol），绝不把回收重现当新内容重复上报。
+   *
+   * 懒加载感知的「到底」判据（change facebook-feed-lazyload-exhaustion-fix）：FB feed 是懒加载 + 虚拟化——
+   * 往下滚到接近底部时才异步拉 + 渲染下一批，需要时间。旧逻辑「滚 2 次 0 新卡就判 feed_exhausted」会在
+   * 下一批还没渲染出来时**误判到底、立刻刷新回顶**，回顶后又从顶部那几张重新开始 → 频繁刷新、永远下不去。
+   * 现在：本轮 0 新卡时，只有「页面高度不再增长（懒加载没在长）**且**已接近底部**且**连续确认」才诚实
+   * `feed_exhausted`（云端映射为 refresh）；只要页面还在长或还没到底就继续下滚找下沉的新卡。让 60 篇深度阈值
+   * （云端 FeedScroller）成为换批主路。绝不把回收重现当新内容重复上报，绝不在还有内容时假判到底。
    */
   private async scrollFeed(): Promise<TerminalReport> {
     // 只有确认已在目标列表面后才能滚动。ensureFeed 幂等——已在首页/搜索页且无 dialog 时直接放行、不导航，
@@ -737,24 +752,45 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (!ensure.ok) {
       return { type: 'action', payload: { action: 'scroll', ok: false, reason: ensure.reason ?? 'no_feed' } };
     }
-    for (let attempt = 0; attempt <= FEED_SCROLL_EXTRA_ROUNDS; attempt++) {
+    let bottomDryRounds = 0;
+    let sawAnyCard = false;
+    let lastEmptyReason: FacebookFeedSettleResult['reason'];
+    for (let round = 0; round < FEED_SCROLL_MAX_ROUNDS; round++) {
+      const before = await this.feedReader.scrollMetrics();
       await this.feedReader.scrollNext();
       const settle = await this.feedReader.settleCards({ wallClockMs: FEED_SETTLE_INPLACE_MS });
-      if (settle.cards.length === 0) {
-        // 完全扫不到卡（loading/no_feed）：照实回，不当 exhausted（区分「没内容」与「没新内容」）。
-        if (attempt >= FEED_SCROLL_EXTRA_ROUNDS) {
-          return { type: 'action', payload: { action: 'scroll', ok: false, reason: settle.reason ?? 'no_target' } };
+      const after = await this.feedReader.scrollMetrics();
+      if (settle.cards.length > 0) {
+        sawAnyCard = true;
+        const fresh = this.takeNewCards(settle.cards);
+        if (fresh.length > 0) {
+          if (settle.degraded) this.log(`[fb-session] scroll settle degraded：上报 ${fresh.length} 张新卡（未完全稳定，卡为真抽）`);
+          return { type: 'cards', payload: this.toPageCards(fresh) };
         }
+      } else {
+        lastEmptyReason = settle.reason;
+      }
+      // 本轮 0 新卡：判是「懒加载还在长 / 还没到底」→ 继续下滚，还是「真到底」→ 连续确认后换批。
+      const grew = after.scrollHeight > before.scrollHeight + FEED_LAZYLOAD_GROWTH_PX;
+      const remaining = after.scrollHeight - after.scrollY - after.innerHeight;
+      const nearBottom = after.innerHeight > 0 && after.scrollHeight > 0 && remaining <= FEED_NEAR_BOTTOM_PX;
+      if (grew || !nearBottom) {
+        // 页面在长（FB 懒加载中）或还没滚到底 → 继续下滚找下沉的新卡，绝不当到底。
+        bottomDryRounds = 0;
         continue;
       }
-      const fresh = this.takeNewCards(settle.cards);
-      if (fresh.length > 0) {
-        if (settle.degraded) this.log(`[fb-session] scroll settle degraded：上报 ${fresh.length} 张新卡（未完全稳定，卡为真抽）`);
-        return { type: 'cards', payload: this.toPageCards(fresh) };
+      // 高度稳定 + 接近底部 + 0 新卡 → 真到底候选，连续确认防抖后才诚实 feed_exhausted。
+      bottomDryRounds += 1;
+      if (bottomDryRounds >= FEED_EXHAUST_CONFIRM_ROUNDS) {
+        this.log('[fb-session] 已到 feed 底部且无新卡 → feed_exhausted（云端映射为 refresh）');
+        return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'feed_exhausted' } };
       }
-      // 0 新卡（本屏全是已上报/回收重现）——继续有界续滚找下沉的新卡。
     }
-    this.log('[fb-session] 连续滚动无新卡 → feed_exhausted（云端映射为 refresh）');
+    // 轮次耗尽：从没扫到任何卡=「没内容」（loading/no_feed，照实回、不当到底）；扫到过卡但一直没新的=「没新内容」→ 兜底换批。
+    if (!sawAnyCard) {
+      return { type: 'action', payload: { action: 'scroll', ok: false, reason: lastEmptyReason ?? 'no_target' } };
+    }
+    this.log('[fb-session] 连续滚动无新卡（未确认到底，轮次耗尽）→ feed_exhausted 兜底换批');
     return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'feed_exhausted' } };
   }
 

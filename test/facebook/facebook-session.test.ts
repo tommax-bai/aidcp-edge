@@ -48,6 +48,8 @@ function makeSession(opts: {
   like?: (shadow?: boolean) => FacebookLikeResult;
   cardBatches?: FacebookFeedCard[][];
   settleBatches?: FacebookFeedSettleResult[];
+  scrollMetrics?: { scrollY: number; scrollHeight: number; innerHeight: number };
+  scrollMetricsBatches?: Array<{ scrollY: number; scrollHeight: number; innerHeight: number }>;
   clickHome?: FacebookHomeRefreshResult;
   sleep?: (ms: number) => Promise<void>;
   hangOpen?: boolean;
@@ -60,7 +62,7 @@ function makeSession(opts: {
   const logs: string[] = [];
   const delegated: Envelope[] = [];
   const likeShadowFlags: Array<boolean | undefined> = [];
-  const state = { ensureCalls: 0, ensureUrls: [] as string[], scanCalls: 0 };
+  const state = { ensureCalls: 0, ensureUrls: [] as string[], scanCalls: 0, scrollCalls: 0 };
 
   const card: FacebookFeedCard = opts.card ?? {
     index: 0,
@@ -101,7 +103,15 @@ function makeSession(opts: {
       if (opts.cardBatches) return opts.cardBatches.shift() ?? [];
       return [card];
     },
-    scrollNext: async () => {},
+    scrollNext: async () => {
+      state.scrollCalls++;
+    },
+    // 默认「未接近底部、高度稳定」——无新卡时循环继续下滚（对齐懒加载感知的续滚意图）；
+    // 需要触发「真到底 → feed_exhausted」的用例可用 opts.scrollMetricsBatches 逐轮喂到底状态。
+    scrollMetrics: async () => {
+      if (opts.scrollMetricsBatches) return opts.scrollMetricsBatches.shift() ?? { scrollY: 5000, scrollHeight: 5900, innerHeight: 900 };
+      return opts.scrollMetrics ?? { scrollY: 0, scrollHeight: 5000, innerHeight: 900 };
+    },
     settleCards: async () => {
       if (opts.settleBatches) return opts.settleBatches.shift() ?? { cards: [], degraded: false, reason: 'no_feed' as const };
       return { cards: [card], degraded: false };
@@ -432,6 +442,48 @@ test('FB scroll 在详情页时先回到 feed，再扫描并滚动', async () =>
   assert.equal(h.ensureCalls, 1);
   assert.deepEqual(h.ensureUrls, ['https://www.facebook.com/']);
   assert.equal(h.cards.length, 1);
+});
+
+test('page.scroll 懒加载还在长内容/未到底时绝不提前判到底：续滚到出新卡才上报（不刷新回顶）', async () => {
+  const cardA: FacebookFeedCard = { index: 0, noteId: 'https://www.facebook.com/a/posts/pfbidONE', author: 'A', textPreview: 'one', reactionCount: 1, isVideo: false };
+  const cardB: FacebookFeedCard = { index: 0, noteId: 'https://www.facebook.com/b/posts/pfbidTWO', author: 'B', textPreview: 'two', reactionCount: 2, isVideo: false };
+  const h = makeSession({
+    mode: 'on',
+    // start 报首屏 A；随后两轮仍是已见的 A（0 新卡），第三轮才下沉出真新卡 B。默认 metrics=未接近底部 → 每轮判「继续下滚」。
+    settleBatches: [
+      { cards: [cardA], degraded: false },
+      { cards: [cardA], degraded: false },
+      { cards: [cardA], degraded: false },
+      { cards: [cardB], degraded: false },
+    ],
+  });
+  await h.session.start();
+  assert.equal(h.cards.length, 1, 'start 先报首屏 A');
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  assert.equal(h.cards.length, 2, '续滚到下沉出的新卡 B 才上报（未因懒加载慢而提前判到底）');
+  assert.equal(h.cards[1].cards[0].noteId, cardB.noteId, '报的是新卡 B');
+  assert.equal(h.actions.filter((a) => a.reason === 'feed_exhausted').length, 0, '绝不因懒加载慢误报 feed_exhausted');
+});
+
+test('page.scroll 高度稳定且接近底部、连续无新卡 → 诚实 feed_exhausted 换批（真到底才刷新）', async () => {
+  const cardA: FacebookFeedCard = { index: 0, noteId: 'https://www.facebook.com/a/posts/pfbidONE', author: 'A', textPreview: 'one', reactionCount: 1, isVideo: false };
+  // remaining = 5900-5000-900 = 0 ≤ 900 → 接近底部；高度前后不变 → 未在长（非懒加载中）。
+  const atBottom = { scrollY: 5000, scrollHeight: 5900, innerHeight: 900 };
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [
+      { cards: [cardA], degraded: false },
+      { cards: [cardA], degraded: false },
+      { cards: [cardA], degraded: false },
+    ],
+    scrollMetricsBatches: [atBottom, atBottom, atBottom, atBottom], // 两轮 ×（before+after）
+  });
+  await h.session.start();
+  assert.equal(h.cards.length, 1);
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  assert.equal(h.cards.length, 1, '真到底无新卡不再上报陈旧卡');
+  const exhausted = h.actions.filter((a) => a.action === 'scroll' && a.reason === 'feed_exhausted');
+  assert.equal(exhausted.length, 1, '连续确认到底 → 诚实回 feed_exhausted（云端据此换批）');
 });
 
 test('FB scroll 在搜索详情页时回到原搜索结果，不误跳首页', async () => {
