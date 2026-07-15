@@ -497,6 +497,13 @@ body { margin: 0; }
 .runtime-guidance[data-mode="first-post"] .rg-flow-step[data-step-index="0"] { --rg-step-color: #2d8fa4; }
 .runtime-guidance[data-mode="first-post"] .rg-flow-step[data-step-index="1"] { --rg-step-color: #22966a; }
 .runtime-guidance[data-mode="first-post"] .rg-flow-step[data-step-index="2"] { --rg-step-color: #d88b22; }
+.runtime-guidance[data-mode="first-post"] .rg-flow-connector:nth-child(4) {
+  --rg-step-line: rgba(216, 139, 34, 0.58);
+  --rg-step-line-active-start: rgba(216, 139, 34, 0.92);
+  --rg-step-line-active-end: rgba(232, 164, 55, 0.86);
+  --rg-step-spark-ring: rgba(216, 139, 34, 0.22);
+  --rg-step-spark-glow: rgba(216, 139, 34, 0.48);
+}
 .rg-flow-step {
   --rg-step-color: var(--rg-step-next);
   position: relative;

@@ -285,6 +285,35 @@ test('获得感周期刷新原位更新内容，不重建连接器打断圆点�
   assert.match(rendererSrc, /connector\.classList\.toggle\('flow-active', activeFlow \|\| activeDayFlow\);/);
 });
 
+test('第一篇作品引导：开始创作前连接线在搜索与生成态都使用橙色语义', async () => {
+  const now = Date.now();
+  const { w, pushStatus } = await boot({
+    dailyUsage: {
+      totals: { view: 0 },
+      firstPost: { state: 'searching', viewed: 0, target: 20, startedAt: now },
+    },
+  });
+  assert.equal($(w, '#runtime-guidance').dataset.mode, 'first-post');
+  assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /开始创作/);
+  const searchingConnectors = Array.from(w.document.querySelectorAll('#runtime-guidance-flow .rg-flow-connector')) as HTMLElement[];
+  assert.equal(searchingConnectors.length, 2);
+  assert.equal(searchingConnectors[1].classList.contains('flow-active'), false, '搜索阶段第二条连接器虽未运动，也不得回退为灰色');
+  assert.match(rendererCss, /\.runtime-guidance\[data-mode="first-post"\] \.rg-flow-connector:nth-child\(4\)\s*\{[\s\S]*--rg-step-line: rgba\(216, 139, 34, 0\.58\);[\s\S]*--rg-step-line-active-start: rgba\(216, 139, 34, 0\.92\);[\s\S]*--rg-step-line-active-end: rgba\(232, 164, 55, 0\.86\);[\s\S]*--rg-step-spark-ring: rgba\(216, 139, 34, 0\.22\);[\s\S]*--rg-step-spark-glow: rgba\(216, 139, 34, 0\.48\);/);
+
+  pushStatus(makeStatus({
+    dailyUsage: {
+      totals: { view: 14 },
+      firstPost: { state: 'generating', viewed: 14, target: 20, startedAt: now - 60_000, sourceId: 'note-1' },
+    },
+  }));
+  assert.equal($(w, '#runtime-guidance').dataset.mode, 'first-post');
+  const generatingConnectors = Array.from(w.document.querySelectorAll('#runtime-guidance-flow .rg-flow-connector')) as HTMLElement[];
+  assert.equal(generatingConnectors.length, 2);
+  assert.ok(generatingConnectors[1].classList.contains('flow-active'), '生成阶段第二条连接器使用同一组橙色动态变量');
+  assert.equal(generatingConnectors[1].dataset.toState, 'current');
+  assert.match(rendererCss, /@media \(max-width: 430px\) \{[\s\S]*\.rg-flow-connector \{ width: 20px; transform: translateX\(3px\); \}/, '窄屏沿用同一连接器节点与颜色变量');
+});
+
 test('运行中 + 今日已有浏览累计 → 获得感进度使用账号今日累计，不被当前窗口 0 覆盖', async () => {
   const { w } = await boot({
     dailyUsage: {
