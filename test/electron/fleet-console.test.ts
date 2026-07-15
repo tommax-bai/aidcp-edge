@@ -754,6 +754,7 @@ test('人设成长引导：长时放大撒花后用长时流光强调首轮预�
   assert.match(rendererCss, /\.persona-growth\.play \.pg-mascot\s*\{\s*animation:\s*pg-mascot-scale 2100ms[^;]*260ms both;/);
   assert.match(rendererCss, /@keyframes pg-mascot-scale\s*\{[\s\S]*scale\(1\.12\)[\s\S]*\}/);
   assert.match(rendererCss, /\.persona-growth\.play \.pg-confetti i\s*\{[^}]*animation-duration:\s*1250ms;[^}]*animation-delay:\s*calc\(300ms \+ var\(--pg-delay, 0ms\)\);/);
+  assert.match(rendererCss, /\.pg-expectation::after\s*\{[^}]*width:\s*72%;/, '文字流光带应覆盖足够长的范围');
   assert.match(rendererCss, /\.persona-growth\.play \.pg-expectation::after\s*\{\s*animation:\s*pg-expectation-shimmer 2800ms[^;]*2680ms both;/);
   const shimmerFrames = rendererCss.match(/@keyframes pg-expectation-shimmer\s*\{([\s\S]*?)\n\}/)?.[1] ?? '';
   assert.match(shimmerFrames, /translateX/);
