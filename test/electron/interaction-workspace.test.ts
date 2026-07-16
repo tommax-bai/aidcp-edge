@@ -267,6 +267,21 @@ test('XHS / Facebook 保留原 workspace；视频号只替换右侧且不占左�
   assert.match($(window, '#iw-detail').textContent || '', /配置版本 1/);
 });
 
+test('视频号互动使用 profileId 作为 Cloud envKey，不混用本机 ads- 环境行 ID', async () => {
+  const { pushFleet, calls } = await boot();
+  pushFleet({
+    provider: 'adspower', selectedEnvId: 'ads-k1eoujd8', railCollapsed: true,
+    environments: [{
+      envId: 'ads-k1eoujd8', profileId: 'k1eoujd8', kind: 'adspower', name: '视频号环境', platform: 'wechat_channels',
+      status: { ...status('ads-k1eoujd8', '视频号环境'), account: { id: 'k1eoujd8', name: '', source: 'env' } },
+    }],
+  });
+  await flush();
+
+  assert.equal(calls.list.at(-1).envKey, 'k1eoujd8');
+  assert.notEqual(calls.list.at(-1).envKey, 'ads-k1eoujd8');
+});
+
 test('active 视频号可打开浏览器或转入后台，accepted 不会冒充浏览器已显隐', async () => {
   let browserState = 'closed';
   const browserCalls: any[] = [];

@@ -208,7 +208,7 @@ function syncInteractionWorkspace() {
   if (!interactionWorkspace) return;
   const selected = fleetView.envs.get(fleetView.selected);
   interactionWorkspace.selectEnvironment(selected ? {
-    envKey: selected.envId,
+    envKey: selected.profileId || selected.envId,
     platform: normPlatform(selected.platform),
     label: selected.name || '',
     connectivity: selected.status && selected.status.cloud,
@@ -2031,9 +2031,12 @@ function applyFleetSnapshot(snap) {
     if (existing) {
       existing.name = e.name || existing.name;
       existing.platform = e.platform || existing.platform;
+      existing.profileId = e.profileId || existing.profileId;
       if (e.status) existing.status = e.status;
     } else {
-      fleetView.envs.set(e.envId, { envId: e.envId, name: e.name || '', platform: e.platform || '', status: e.status });
+      fleetView.envs.set(e.envId, {
+        envId: e.envId, profileId: e.profileId || '', name: e.name || '', platform: e.platform || '', status: e.status,
+      });
     }
   }
   for (const key of [...fleetView.envs.keys()]) {
