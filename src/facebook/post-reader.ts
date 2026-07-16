@@ -50,8 +50,10 @@ export interface FacebookPostReaderOptions {
 
 const DEFAULTS: Required<FacebookPostReaderOptions> = {
   settleMs: 2_500,
-  // Facebook 详情 article 的水合通常晚于 feed，真机探针观察到 7-12s；留出约 10s 探测窗口，避免误报 open_failed。
-  surfaceProbeRounds: 14,
+  // Facebook 详情 article 的水合通常晚于 feed，真机探针观察到 7-12s；14 轮（~10s 循环 + 2.5s settle ≈ 12s）在上界处偏紧，
+  // 慢水合的帖子会误报 open_failed → 丢已批准评论（change fb-comment-migration-hold）。放宽到 22 轮（~15.4s 循环 + 2.5s ≈ 18s），
+  // 给慢详情页足够时间；仍有界、远在命令超时 90s 内；诚实失败语义不变（超窗仍如实 open_failed）。
+  surfaceProbeRounds: 22,
   pollMs: 700,
   maxComments: 6,
 };
