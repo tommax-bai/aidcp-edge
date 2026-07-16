@@ -57,9 +57,37 @@ export function isFacebookCommentEditorLabel(label: string | null | undefined): 
   return FB_COMMENT_EDITOR_LABEL_RE.test(String(label ?? ''));
 }
 
+/**
+ * 「待管理员审批」指示（change facebook-comment-participation-gate）。
+ * 群参与审批下，账号首条评论只对作者可见、带此徽章、**未上墙**——命中即**否决**「已上墙」确认（红线：待审 ≠ 已发出）。
+ * `.source` 同时喂页内 IIFE 与可单测 TS 断言，绝不各写一份漂移。真机文案未逐字坐实前用高置信超集（见 change §5）。
+ */
+export const FB_PENDING_APPROVAL_RE =
+  /待审核|待审批|待批准|等待(?:管理员)?(?:审核|审批|批准)|(?:管理员)?(?:审核|批准)后(?:才)?可见|通过后(?:才)?可见|需(?:要|经)?管理员(?:审核|批准)|pending review|pending approval|awaiting (?:admin(?:istrator)? )?approval|needs? admin(?:istrator)? approval|visible (?:once|after) approved|will be visible (?:once|after)/i;
+
+/** 与页内同源的「待审批」文本断言，供单测直接校验中英文案覆盖（无需真实 DOM）。 */
+export function isFacebookPendingApprovalText(text: string | null | undefined): boolean {
+  return FB_PENDING_APPROVAL_RE.test(String(text ?? ''));
+}
+
+/**
+ * 群「参与审批 / 参与问题」入群闸文案（change facebook-comment-participation-gate）。
+ * **只**用于**对话框作用域**检测（见 buildParticipationGateJs），绝不整页 body 扫——避开两类已知假阳：
+ * 侧栏/推荐群的「加入/Join」chrome、问答型帖子合法回复框的「输入回答/Answer」。因此用的是参与审批**专属**短语，
+ * 不含单独的「回答问题/Answer questions」。真机文案未逐字坐实前用高置信超集（英文取自 FB 帮助 verbatim；见 change §5）。
+ */
+export const FB_PARTICIPATION_GATE_RE =
+  /申请参与|请求参与|参与此(?:小组|群)|贡献(?:内容)?给?(?:此|这个)?(?:小组|群)|参与问题|同意(?:此|该|小组|群).{0,4}规则|同意群规|request to participate|participation question|answer questions to participate|contribute to (?:this|the) group|agree to the group rules|待审核|pending review/i;
+
+/** 与页内同源的「参与审批闸」文本断言，供单测直接校验中英文案覆盖（无需真实 DOM）。 */
+export function isFacebookParticipationGateText(text: string | null | undefined): boolean {
+  return FB_PARTICIPATION_GATE_RE.test(String(text ?? ''));
+}
+
 /** 搜索/开帖/提交诚实非成功原因（与云端 outcome 映射对齐）。 */
 export type FacebookCommentStepReason =
   | 'permission_gated' // 容器非法 / 非成员 / 待批准 / 群问答门槛
+  | 'pending_group_approval' // 群参与审批入群闸：评论未上墙、待管理员批准（区别于搜索期 permission_gated；submitted=false）
   | 'login_required' // 登录失效 / checkpoint / 账号恢复
   | 'blocked_by_consent' // cookie 同意浮层清不掉（认出但接受失败）
   | 'blocked_by_captcha' // 人机验证 / 未知阻断浮层
@@ -507,6 +535,13 @@ export class FacebookCommentExecutor {
       const focus = await this.focusEditorWithScroll(targetPostId);
       if (focus.reason) return { ok: false, reason: focus.reason, submitted: false, serverConfirmed: false };
 
+      // 群参与审批入群闸（打字前）：若已弹出参与审批对话框，聚焦可能落在「输入回答」答题框上——**绝不**把营销评论
+      // 灌进答题框（那会把评论当参与答案提交、暴露自动化痕迹）。诚实 pending_group_approval（未打字、无需清场）。
+      if (await this.participationGateVisible()) {
+        this.log('[fb-comment] 打字前识别到群参与审批入群闸——不把评论灌进答题框，pending_group_approval');
+        return { ok: false, reason: 'pending_group_approval', submitted: false, serverConfirmed: false };
+      }
+
       // 受控输入（逐字符拟人）。
       await dispatchKeystrokes(this.cdp, body, { sleep: this.sleep, checkpoint });
       const accepted = await evalJson<{ accepted: boolean }>(this.cdp, buildMarkerAcceptedJs(body, targetPostId));
@@ -559,8 +594,15 @@ export class FacebookCommentExecutor {
     // 🔴 回车已发出：以下确认段 MUST NOT 取消（禁区）。窗口在确认段结束（四条出口）由 finally 关闭。
     try {
       // (1) 就地 ack 门控快确认（不刷新，抓服务器点头即成功、比刷新又快又准）。
-      if (await this.inPlaceAckConfirm(requiredFragments, ownId, targetPostId)) {
+      const ack = await this.inPlaceAckConfirm(requiredFragments, ownId, targetPostId);
+      if (ack.confirmed) {
         return { ok: true, submitted: true, serverConfirmed: true };
+      }
+      // 群参与审批入群闸：本人首条评论只对作者可见、带「待审核」徽章（ack.pendingApproval），或页面有参与审批对话框。
+      // 评论**未上墙**——诚实 pending_group_approval（submitted:false），**不刷新**（reload 会刷掉徽章/对话框掩盖证据）、不重试。
+      if (ack.pendingApproval || (await this.participationGateVisible())) {
+        this.log('[fb-comment] 识别到群参与审批入群闸——评论未上墙、待管理员批准，pending_group_approval（不刷新、不重试）');
+        return { ok: false, reason: 'pending_group_approval', submitted: false, serverConfirmed: false };
       }
       // (2) 兜底：刷新一次 + 有界轮询三重收窄确认（治慢渲染假阴性；提交后误导性报错浮层不当作失败，确认信号权威）。
       try {
@@ -569,8 +611,14 @@ export class FacebookCommentExecutor {
         this.log(`[fb-comment] reload 失败：${(err as Error).message}`);
         return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
       }
-      if (await this.reloadScopedConfirm(requiredFragments, ownId, targetPostId)) {
+      const reloaded = await this.reloadScopedConfirm(requiredFragments, ownId, targetPostId);
+      if (reloaded.confirmed) {
         return { ok: true, submitted: true, serverConfirmed: true };
+      }
+      // 刷新后仍见「本人+文本+待审核徽章」评论行 → 同样是参与审批未上墙。
+      if (reloaded.pendingApproval) {
+        this.log('[fb-comment] 刷新后见待审批评论行——评论未上墙、待管理员批准，pending_group_approval');
+        return { ok: false, reason: 'pending_group_approval', submitted: false, serverConfirmed: false };
       }
       return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
     } finally {
@@ -582,36 +630,62 @@ export class FacebookCommentExecutor {
    * 就地 ack 门控确认（不刷新）：有界轮询，命中「服务器正式评论 id 或 点赞/回复交互控件」即成功。
    * 有界轮次 + 注入式 sleep（不用 wall-clock 循环），测试可确定性驱动。
    */
-  private async inPlaceAckConfirm(requiredFragments: string[], ownId: string, targetPostId: string | null): Promise<boolean> {
+  private async inPlaceAckConfirm(
+    requiredFragments: string[],
+    ownId: string,
+    targetPostId: string | null,
+  ): Promise<{ confirmed: boolean; pendingApproval: boolean }> {
     await this.sleep(this.opts.waitAfterSubmitMs);
+    let pendingApproval = false;
     for (let i = 0; i < this.opts.inPlaceVerifyRounds; i++) {
       if (i > 0) await this.sleep(this.opts.inPlaceVerifyIntervalMs);
       try {
         const v = await evalJson<AckVerifyResult>(this.cdp, buildAckVerifyJs(requiredFragments, ownId, targetPostId));
-        if (v?.ackConfirmed) return true;
+        if (v?.pendingApproval) pendingApproval = true;
+        if (v?.ackConfirmed) return { confirmed: true, pendingApproval: false };
       } catch (err) {
         this.log(`[fb-comment] 就地 ack 确认探测失败：${(err as Error).message}`);
       }
     }
-    return false;
+    return { confirmed: false, pendingApproval };
   }
 
   /**
    * 刷新兜底后有界轮询三重收窄确认（own-identity + 目标帖评论区 + 文本片段）。
    * 替代旧「reload 后死等一次」：慢渲染下评论已在服务器却没在单次窗口重渲染 → 多查几眼即命中（治 P2② 假阴性）。
    */
-  private async reloadScopedConfirm(requiredFragments: string[], ownId: string, targetPostId: string | null): Promise<boolean> {
+  private async reloadScopedConfirm(
+    requiredFragments: string[],
+    ownId: string,
+    targetPostId: string | null,
+  ): Promise<{ confirmed: boolean; pendingApproval: boolean }> {
     await this.sleep(this.opts.waitAfterReloadMs);
+    let pendingApproval = false;
     for (let i = 0; i < this.opts.reloadVerifyRounds; i++) {
       if (i > 0) await this.sleep(this.opts.reloadVerifyIntervalMs);
       try {
         const v = await evalJson<ScopedVerifyResult>(this.cdp, buildScopedVerifyJs(requiredFragments, ownId, targetPostId));
-        if (v?.confirmed) return true;
+        if (v?.pendingApproval) pendingApproval = true;
+        if (v?.confirmed) return { confirmed: true, pendingApproval: false };
       } catch (err) {
         this.log(`[fb-comment] 刷新确认探测失败：${(err as Error).message}`);
       }
     }
-    return false;
+    return { confirmed: false, pendingApproval };
+  }
+
+  /**
+   * 群参与审批入群闸探针（change facebook-comment-participation-gate）：可见 role=dialog + 参与审批专属文案。
+   * 命中 = 评论未上墙、待管理员批准。探测失败一律返回 false（漏检回落 verification_ambiguous 仍诚实、不假绿）。
+   */
+  private async participationGateVisible(): Promise<boolean> {
+    try {
+      const r = await evalJson<ParticipationGateResult>(this.cdp, buildParticipationGateJs());
+      return !!r?.gate;
+    } catch (err) {
+      this.log(`[fb-comment] 参与审批闸探测失败：${(err as Error).message}`);
+      return false;
+    }
   }
 
   /**
@@ -663,6 +737,8 @@ interface ScopedVerifyResult {
   matchedText: boolean;
   matchedOwnIdentity: boolean;
   articleCount: number;
+  /** 「本人+文本」评论行带「待管理员审批」徽章 → 未上墙（群参与审批）。绝不判 confirmed。 */
+  pendingApproval?: boolean;
 }
 
 interface AckVerifyResult {
@@ -670,6 +746,14 @@ interface AckVerifyResult {
   ackConfirmed: boolean;
   serverId: boolean;
   reactions: number;
+  /** 「本人+文本」评论行带「待管理员审批」徽章 → 未上墙（群参与审批）。绝不判 ackConfirmed。 */
+  pendingApproval?: boolean;
+}
+
+interface ParticipationGateResult {
+  /** 页面存在「可见 role=dialog」且文案含参与审批专属短语 → 群参与审批入群闸。 */
+  gate: boolean;
+  scope?: string;
 }
 
 /** 共享页内工具：可见性、评论框判定、群问答/入群门禁判定。 */
@@ -679,6 +763,9 @@ const FB_EXEC_HELPERS_JS = `
   function fbIsCommentEditor(el){ if(!el) return false; var lab=((el.getAttribute&&(el.getAttribute('aria-label')||el.getAttribute('data-placeholder')||el.getAttribute('placeholder')))||''); var re=/${FB_COMMENT_EDITOR_LABEL_RE.source}/i; if(re.test(lab)) return true; return re.test(fbText(el)); }
   function fbIsGroupQuestionEditor(el){ var lab=((el&&el.getAttribute&&el.getAttribute('aria-label'))||''); return /输入回答|Answer/i.test(lab); }
   function fbJoinSignalVisible(){ try{ if(!/\\/groups\\//.test(location.pathname)) return false; return /(加入小组|Join group|\\bJoin\\b|待批准|Pending|回答问题|Answer questions)/i.test(document.body.innerText||''); }catch(e){ return false; } }
+  var FB_PENDING_APPROVAL_RE=/${FB_PENDING_APPROVAL_RE.source}/i;
+  // 评论行是否带「待管理员审批」徽章（只查该行自身 innerText——徽章内联在行内；false-veto 安全、漏 veto 才危险）。
+  function fbNodePendingApproval(node){ try{ return !!node && FB_PENDING_APPROVAL_RE.test(fbText(node)); }catch(e){ return false; } }
 `;
 
 /**
@@ -805,6 +892,24 @@ function buildFocusEditorJs(targetPostId: string | null): string {
 })()`;
 }
 
+/**
+ * 群「参与审批 / 参与问题」入群闸探针（change facebook-comment-participation-gate）。
+ * **只**认「可见 `role="dialog"`」且其文案含**参与审批专属短语**（FB_PARTICIPATION_GATE_RE）——
+ * 绝不整页 `document.body.innerText` 扫，正是为避开 buildFocusEditorJs 注释里记的两类假阳（侧栏 Join chrome、
+ * 问答帖合法回复框「输入回答/Answer」）。命中 = 评论未上墙、待管理员批准（诚实 pending_group_approval）。
+ * 首版只覆盖对话框形态；若真机实证为非 dialog 的全屏 interstitial，再按 §5 取证扩面。
+ */
+export function buildParticipationGateJs(): string {
+  return `(function(){${FB_EXEC_HELPERS_JS}
+    try{
+      var GATE_RE=/${FB_PARTICIPATION_GATE_RE.source}/i;
+      var dialogs=Array.prototype.slice.call(document.querySelectorAll('[role="dialog"]'));
+      for(var i=0;i<dialogs.length;i++){ var d=dialogs[i]; if(!fbVisible(d)) continue; if(GATE_RE.test(fbText(d))) return JSON.stringify({gate:true,scope:'dialog'}); }
+      return JSON.stringify({gate:false});
+    }catch(e){ return JSON.stringify({gate:false}); }
+  })()`;
+}
+
 /** 受控输入后校验 marker 已被编辑器接受（**目标帖作用域内**的编辑器文本含该片段）。 */
 function buildMarkerAcceptedJs(text: string, targetPostId: string | null): string {
   return `(function(){${buildScopedEditorHelpersJs(targetPostId)}
@@ -841,7 +946,7 @@ function buildSelectEditorContentsJs(targetPostId: string | null): string {
  * - 在其评论区找**评论行**：文本含片段（前 60 字）且节点内有指向本人数字 id 的作者链接。
  * - **绝不退化成整帖 article**（见 buildAckVerifyJs 的同款说明）：那会拿编辑器里还没发出去的正文冒充成功。
  */
-function buildScopedVerifyJs(requiredFragments: string[], ownId: string, targetPostId: string | null): string {
+export function buildScopedVerifyJs(requiredFragments: string[], ownId: string, targetPostId: string | null): string {
   return `(function(){${buildScopedEditorHelpersJs(targetPostId)}
     var fragments=${JSON.stringify(requiredFragments)}; var ownId=${jsString(ownId)};
     function hasAllFragments(txt){ return fragments.length>0 && fragments.every(function(f){ return f && txt.indexOf(f)>=0; }); }
@@ -857,14 +962,17 @@ function buildScopedVerifyJs(requiredFragments: string[], ownId: string, targetP
     var commentNodes=Array.prototype.slice.call(target.querySelectorAll('[role="article"], [aria-label*="评论"], [aria-label*="Comment"]'))
       .filter(function(n){ return n.getAttribute('contenteditable')!=='true'; });
     if(commentNodes.length===0) return JSON.stringify({confirmed:false,matchedText:false,matchedOwnIdentity:false,articleCount:articles.length});
-    var matchedText=false, matchedOwn=false;
+    var matchedText=false, matchedOwn=false, sawPending=false, confirmedNode=false;
     for(var k=0;k<commentNodes.length;k++){ var node=commentNodes[k];
       var txt=fbText(node); var hasText=hasAllFragments(txt); if(!hasText) continue; matchedText=true;
-      var authorLinks=node.querySelectorAll('a[href*="/profile.php?id="], a[href*="/people/"], a[href*="user/"]');
-      for(var a=0;a<authorLinks.length;a++){ if((authorLinks[a].getAttribute('href')||'').indexOf(ownId)>=0){ matchedOwn=true; break; } }
-      if(matchedText&&matchedOwn) break;
+      var authorLinks=node.querySelectorAll('a[href*="/profile.php?id="], a[href*="/people/"], a[href*="user/"]'); var ownOnNode=false;
+      for(var a=0;a<authorLinks.length;a++){ if((authorLinks[a].getAttribute('href')||'').indexOf(ownId)>=0){ ownOnNode=true; break; } }
+      if(!ownOnNode) continue; matchedOwn=true;
+      // 🔴 待审批否决（同 buildAckVerifyJs）：本人+文本评论行带「待审核」徽章 = 未上墙，绝不判 confirmed。
+      if(fbNodePendingApproval(node)){ sawPending=true; continue; }
+      confirmedNode=true; break;
     }
-    return JSON.stringify({confirmed:matchedText&&matchedOwn,matchedText:matchedText,matchedOwnIdentity:matchedOwn,articleCount:articles.length});
+    return JSON.stringify({confirmed:confirmedNode,matchedText:matchedText,matchedOwnIdentity:matchedOwn,articleCount:articles.length,pendingApproval:sawPending});
   })()`;
 }
 
@@ -892,16 +1000,20 @@ export function buildAckVerifyJs(requiredFragments: string[], ownId: string, tar
     // 三条全中 → 一个字都没发出去也会被判成「服务器已点头」（假成功，对抗性评审复现）。
     var nodes=Array.prototype.slice.call(target.querySelectorAll('[role="article"]'));
     if(nodes.length===0) return JSON.stringify({ackConfirmed:false,serverId:false,reactions:0});
+    var sawPending=false;
     for(var k=0;k<nodes.length;k++){ var node=nodes[k];
       var txt=fbText(node); if(!hasAllFragments(txt)) continue;
       var owns=node.querySelectorAll('a[href*="/profile.php?id="], a[href*="/people/"], a[href*="user/"]'); var ownHit=false;
       for(var a=0;a<owns.length;a++){ if((owns[a].getAttribute('href')||'').indexOf(ownId)>=0){ ownHit=true; break; } }
       if(!ownHit) continue;
+      // 🔴 待审批否决（change facebook-comment-participation-gate）：群参与审批下本人首条评论只对作者可见、带
+      // 「待审核」徽章、**未上墙**——即便带服务器 id 或 ≥2 交互控件也**绝不**判 ackConfirmed（否则假绿）。
+      if(fbNodePendingApproval(node)){ sawPending=true; continue; }
       var hasServer=false; var idl=node.querySelectorAll('a[href*="comment_id="]');
       for(var b=0;b<idl.length;b++){ if(serverId(idl[b].getAttribute('href'))){ hasServer=true; break; } }
       var reactions=node.querySelectorAll('[role="button"]').length;
       if(hasServer || reactions>=2){ return JSON.stringify({ackConfirmed:true,serverId:hasServer,reactions:reactions}); }
     }
-    return JSON.stringify({ackConfirmed:false,serverId:false,reactions:0});
+    return JSON.stringify({ackConfirmed:false,serverId:false,reactions:0,pendingApproval:sawPending});
   })()`;
 }

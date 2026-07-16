@@ -8,8 +8,12 @@ import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monit
 import {
   FacebookCommentExecutor,
   buildAckVerifyJs,
+  buildParticipationGateJs,
   buildScopedEditorHelpersJs,
+  buildScopedVerifyJs,
   isFacebookCommentEditorLabel,
+  isFacebookParticipationGateText,
+  isFacebookPendingApprovalText,
   isServerFacebookCommentId,
 } from '../../src/facebook/comment-executor.js';
 
@@ -678,4 +682,156 @@ test('fb-editor-scope: 旁边的帖 article 0 尺寸（折叠/动画中）但其
     },
   });
   assert.deepEqual(scopedEditorIds(dom, 'fb:BBB'), ['ed-T'], '0 尺寸旁帖的评论框绝不能被当成目标帖的');
+});
+
+// ─── change facebook-comment-participation-gate：群参与审批入群闸 = 待审 ≠ 已发出（止血 + 识别）───
+
+function ackVerifyFull(
+  dom: JSDOM,
+  fragments: string[],
+  ownId: string,
+  targetPostId: string | null,
+): { ackConfirmed: boolean; pendingApproval?: boolean } {
+  return JSON.parse(String(dom.window.eval(buildAckVerifyJs(fragments, ownId, targetPostId)))) as {
+    ackConfirmed: boolean;
+    pendingApproval?: boolean;
+  };
+}
+function scopedVerifyFull(
+  dom: JSDOM,
+  fragments: string[],
+  ownId: string,
+  targetPostId: string | null,
+): { confirmed: boolean; pendingApproval?: boolean } {
+  return JSON.parse(String(dom.window.eval(buildScopedVerifyJs(fragments, ownId, targetPostId)))) as {
+    confirmed: boolean;
+    pendingApproval?: boolean;
+  };
+}
+function gateProbe(dom: JSDOM): { gate: boolean } {
+  return JSON.parse(String(dom.window.eval(buildParticipationGateJs()))) as { gate: boolean };
+}
+const POST_BBB = 'https://www.facebook.com/groups/111/posts/BBB/';
+
+test('fb-ack: 本人+文本+服务器 id 但评论行带「待审核」徽章 → 绝不 ackConfirmed（待审 ≠ 已发出），pendingApproval=true', () => {
+  const serverId = 'Y29tbWVudDoxMjM0';
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      postBar +
+      `<div role="article" id="my-comment">${ownLink}<div>我发的评论正文</div><span>待审核</span>` +
+      `<a href="${POST_BBB}?comment_id=${serverId}">2秒</a></div>` +
+      '</div>',
+    POST_BBB,
+  );
+  const r = ackVerifyFull(dom, ['我发的评论正文'], OWN, 'fb:BBB');
+  assert.equal(r.ackConfirmed, false, '带待审徽章即便有服务器 id 也绝不判已发出');
+  assert.equal(r.pendingApproval, true);
+});
+
+test('fb-ack: 本人+文本+≥2 交互控件 但带「等待管理员批准」徽章 → 绝不 ackConfirmed', () => {
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div><span>等待管理员批准</span>` +
+      '<div role="button">赞</div><div role="button">回复</div></div>' +
+      '</div>',
+    POST_BBB,
+  );
+  const r = ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB');
+  assert.equal(r.ackConfirmed, false, '待审徽章否决 reactions>=2 兜底');
+  assert.equal(r.pendingApproval, true);
+});
+
+test('fb-ack: 本人+文本+≥2 交互控件、无待审徽章 → 仍 ackConfirmed（否决不误伤真评论）', () => {
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div>` +
+      '<div role="button">赞</div><div role="button">回复</div></div>' +
+      '</div>',
+    POST_BBB,
+  );
+  assert.equal(ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB').ackConfirmed, true);
+});
+
+test('fb-scoped: 本人+文本评论行带「待审核」徽章 → confirmed=false, pendingApproval=true', () => {
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>我发的评论正文</div><span>待审核</span></div>` +
+      '</div>',
+    POST_BBB,
+  );
+  const r = scopedVerifyFull(dom, ['我发的评论正文'], OWN, 'fb:BBB');
+  assert.equal(r.confirmed, false);
+  assert.equal(r.pendingApproval, true);
+});
+
+test('fb-scoped: 本人+文本评论行无待审徽章 → confirmed=true', () => {
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>我发的评论正文</div></div>` +
+      '</div>',
+    POST_BBB,
+  );
+  assert.equal(scopedVerifyFull(dom, ['我发的评论正文'], OWN, 'fb:BBB').confirmed, true);
+});
+
+test('fb-gate: 可见 role=dialog 含「申请参与/参与问题」→ gate=true', () => {
+  const dom = editorScopeDom(
+    '<div role="dialog"><h2>申请参与</h2><div>请回答以下参与问题后提交</div></div>',
+    'https://www.facebook.com/groups/111',
+  );
+  assert.equal(gateProbe(dom).gate, true);
+});
+
+test('fb-gate: 英文 role=dialog（request to participate）→ gate=true', () => {
+  const dom = editorScopeDom(
+    '<div role="dialog"><h2>Request to participate</h2><div>Answer questions to participate and agree to the group rules</div></div>',
+    'https://www.facebook.com/groups/111',
+  );
+  assert.equal(gateProbe(dom).gate, true);
+});
+
+test('fb-gate: 整页 body 含「回答问题」但无参与审批对话框 → gate=false（不整页扫、避开侧栏 Join/问答帖假阳）', () => {
+  const dom = editorScopeDom(
+    '<div role="complementary"><div>推荐小组：加入小组需回答问题 / Answer questions</div><div role="button">加入小组</div></div>' +
+      '<div role="article">' +
+      editor('reply', '输入回答…') +
+      '</div>',
+    POST_BBB,
+  );
+  assert.equal(gateProbe(dom).gate, false);
+});
+
+test('pending-approval 文本断言：覆盖中英文案、排除普通评论元数据', () => {
+  for (const s of [
+    '待审核',
+    '待审批',
+    '等待管理员批准',
+    '通过后可见',
+    '需要管理员审核',
+    'Pending review',
+    'awaiting approval',
+    'needs admin approval',
+    'visible once approved',
+  ]) {
+    assert.equal(isFacebookPendingApprovalText(s), true, s);
+  }
+  for (const s of ['已发布', '2 秒前', '赞 · 回复', '', null, undefined]) {
+    assert.equal(isFacebookPendingApprovalText(s), false, String(s));
+  }
+});
+
+test('participation-gate 文本断言：覆盖中英文案、排除通用「回答问题/Answer questions」与侧栏 Join', () => {
+  for (const s of [
+    '申请参与',
+    '参与问题',
+    '同意小组规则',
+    'request to participate',
+    'participation questions',
+    'agree to the group rules',
+  ]) {
+    assert.equal(isFacebookParticipationGateText(s), true, s);
+  }
+  for (const s of ['回答问题', 'Answer questions', '加入小组', 'Join group', '评论', '']) {
+    assert.equal(isFacebookParticipationGateText(s), false, String(s));
+  }
 });
