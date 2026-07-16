@@ -268,7 +268,15 @@ test('XHS / Facebook 保留原 workspace；视频号只替换右侧且不占左�
 });
 
 test('视频号互动使用 profileId 作为 Cloud envKey，不混用本机 ads- 环境行 ID', async () => {
-  const { pushFleet, calls } = await boot();
+  const lifecycleCalls: string[] = [];
+  const { window, pushFleet, calls } = await boot({
+    api: {
+      pause: async (runtimeEnvId: string) => {
+        lifecycleCalls.push(runtimeEnvId);
+        return { ...status(runtimeEnvId, '视频号环境'), session: 'paused' };
+      },
+    },
+  });
   pushFleet({
     provider: 'adspower', selectedEnvId: 'ads-k1eoujd8', railCollapsed: true,
     environments: [{
@@ -280,6 +288,10 @@ test('视频号互动使用 profileId 作为 Cloud envKey，不混用本机 ads-
 
   assert.equal(calls.list.at(-1).envKey, 'k1eoujd8');
   assert.notEqual(calls.list.at(-1).envKey, 'ads-k1eoujd8');
+
+  $(window, '#iw-lifecycle').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls, ['ads-k1eoujd8'], '本机生命周期动作仍必须路由 runtime envId');
 });
 
 test('active 视频号可打开浏览器或转入后台，accepted 不会冒充浏览器已显隐', async () => {

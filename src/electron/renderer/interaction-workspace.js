@@ -1093,11 +1093,12 @@
       if (action === 'close' && env.session !== 'paused') return;
       const capturedEpoch = epoch;
       const envKey = env.envKey;
+      const runtimeEnvId = env.runtimeEnvId || envKey;
       state.lifecycleBusy = action;
       state.actionNotice = null;
       renderOverview();
       try {
-        const next = await onLifecycleAction(action, envKey);
+        const next = await onLifecycleAction(action, runtimeEnvId);
         if (!isCurrent(capturedEpoch, envKey)) return;
         if (!next) return;
         if (next && next.envId && next.envId !== envKey) {

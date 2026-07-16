@@ -209,6 +209,7 @@ function syncInteractionWorkspace() {
   const selected = fleetView.envs.get(fleetView.selected);
   interactionWorkspace.selectEnvironment(selected ? {
     envKey: selected.profileId || selected.envId,
+    runtimeEnvId: selected.envId,
     platform: normPlatform(selected.platform),
     label: selected.name || '',
     connectivity: selected.status && selected.status.cloud,
