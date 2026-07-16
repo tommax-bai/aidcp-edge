@@ -130,6 +130,15 @@ test('创建成功后刷新 UI：仅已权威分配的环境可自动入册', ()
   );
   assert.match(renderer, /r\.rosterJoinedByMain/, 'UI 必须区分已权威入册和仅本地创建');
   assert.match(renderer, /已分配到当前账号并加入运行环境/, '自动分配成功给出如实提示，不声称已启动');
+  assert.match(renderer, /if \(r\.rosterJoinedByMain\) await syncRosterFromMainSettings\(\);/,
+    'main 自动入册后先同步 renderer 持有的旧花名册快照');
+  assert.match(renderer, /async function syncRosterFromMainSettings\(\)[\s\S]*getSettings\(\)[\s\S]*roster = normalizeRosterList\(latest\.environments\)[\s\S]*refreshRosterMarks\(\)/,
+    '添加环境页从主进程已落盘 settings 回读并立即重画“已加入”标记');
+  assert.ok(
+    renderer.indexOf('if (r.rosterJoinedByMain) await syncRosterFromMainSettings();')
+      < renderer.indexOf('await refreshEnvs();', renderer.indexOf('if (r.rosterJoinedByMain) await syncRosterFromMainSettings();')),
+    '必须在重新拉取并绘制添加环境列表前同步 roster',
+  );
   assert.match(renderer, /await refreshEnvs\(\);/, '创建成功后必须等待添加窗口环境列表刷新完成');
 });
 
@@ -141,7 +150,7 @@ test('视频号解绑：Cloud 202→持久化恢复游标→轮询 tombstone→�
   assert.match(main, /clientAuthFetch\(`\/offboarding\/\$\{encodeURIComponent\(current\.offboardId\)\}`/,
     '重试通过状态 API 对账');
   assert.match(main, /current\.state === 'tombstoned' \|\| current\.state === 'purged'/,
-    '仅 Cloud tombstone/purged 后允许进入物理删除');
+    '仅 Cloud tombstone/purged 后允许进入物理删除，覆盖未绑定新环境的终态 offboard');
   assert.match(main, /if \(handle\.offboardCleanup && !handle\.child/, '离线解绑在重启后主动拉起 cleanup-only Edge');
   assert.match(renderer, /r && r\.ok && r\.cleanupPending/, 'UI 对 pending 如实显示，不移除花名册冒充已删除');
 });

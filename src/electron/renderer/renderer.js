@@ -2906,6 +2906,21 @@ async function persistRoster() {
   } catch { /* 落盘失败静默；下次「启动」的 saveCurrentSettings 会再落一次 */ }
 }
 
+// 程序化建号的 gated 路径由 main 完成权威入册与落盘；renderer 的 roster 仍是调用前快照。
+// 创建成功后从 settings:get 回读 main 真态再重画“已加入”，不把 envKey 二次提交、也不重复落盘。
+async function syncRosterFromMainSettings() {
+  if (!window.aidcpEdge || typeof window.aidcpEdge.getSettings !== 'function') return false;
+  try {
+    const latest = await window.aidcpEdge.getSettings();
+    if (!latest || !Array.isArray(latest.environments)) return false;
+    roster = normalizeRosterList(latest.environments);
+    refreshRosterMarks();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // 刷新时剔除孤儿：花名册里 profileId 已不在**本机物理分身列表**中的成员（AdsPower profile 已删除、本地残留）自动移出。
 // 参数 liveIds = 本机物理存在的全部分身 id（gated 时由 main 的 physicalUserIds 提供、非按云端可见集收窄的显示列表——
 // 降范围≠物理删除，绝不把降范围环境当孤儿销毁）。**只应在「成功且完整」的拉取后调用**（调用点 refreshEnvs 已守
@@ -3293,6 +3308,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       if (r.userId && !r.requiresAdminAssignment && !r.assignmentHandledByMain && !coreRunning()) {
         await selectProfile(r.userId, null, r.name || '', r.platform || platform);
       }
+      if (r.rosterJoinedByMain) await syncRosterFromMainSettings();
       const selectedHint = r.rosterJoinedByMain
         ? '已分配到当前账号并加入运行环境；需要启动时请在环境栏操作。'
         : r.requiresAdminAssignment
