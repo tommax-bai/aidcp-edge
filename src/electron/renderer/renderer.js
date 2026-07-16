@@ -3286,12 +3286,16 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       // 新建即选中时，带上刚起好的环境名（回执 name）与平台（回执 platform 优先，回落表单选择）。
       // 带回真名根治「新建即空名」——否则左栏回落「环境 …末4位」、与添加面板显示的真名不一致
       // （change edge-env-name-live-sync）。
-      if (r.userId && !r.requiresAdminAssignment && !coreRunning()) {
+      if (r.userId && !r.requiresAdminAssignment && !r.assignmentHandledByMain && !coreRunning()) {
         await selectProfile(r.userId, null, r.name || '', r.platform || platform);
       }
-      const selectedHint = r.requiresAdminAssignment
+      const selectedHint = r.rosterJoinedByMain
+        ? '已分配到当前账号并加入运行环境；需要启动时请在环境栏操作。'
+        : r.requiresAdminAssignment
         ? '管理员分配前不会加入运行花名册。'
-        : r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
+        : r.assignmentHandledByMain
+          ? '已分配到当前账号，但本次未加入运行环境，请按提示处理。'
+          : r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
       const createdCount = Number(r.createdCount || (Array.isArray(r.created) ? r.created.length : 0));
       const countHint = createdCount > 1 ? `已创建 ${createdCount} 个环境。` : `已创建环境（${r.template || tpl}）。`;
       if (createdCount > 0 && settingsUi.adsFbImport) settingsUi.adsFbImport.value = '';

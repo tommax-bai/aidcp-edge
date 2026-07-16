@@ -86,15 +86,32 @@ test('clientAuthFetch 有界超时（refresh 随每次刷新调用，绝不无�
   assert.match(main, /signal:\s*AbortSignal\.timeout\(\d+\)/, 'clientAuthFetch 必须带超时 signal');
 });
 
-test('登录态程序化建号：客户不能自声明 envKey，创建后必须等待管理员权威分配', () => {
+test('登录态程序化建号：只允许预授权的新建环境自动归属，旧自声明接口仍被禁止', () => {
   const block = handlerBlock(main, 'ads:createEnv');
   assert.ok(block, 'ads:createEnv handler 必须存在');
   assert.doesNotMatch(main, /attachClientEnvironmentToCurrentUser/, '客户端不得保留自绑定 helper');
   assert.doesNotMatch(main, /clientAuthFetch\('\/environments',\s*\{\s*method:\s*'POST'/,
     '客户端不得向旧 POST /environments 自声明 envKey');
-  assert.match(block, /withAuthoritativeAssignmentNotice\(result\)/,
-    '创建成功只回管理员分配提示，不乐观加入当前客户');
-  assert.match(main, /requiresAdminAssignment:\s*true/, '响应显式标记需管理员分配');
+  assert.match(main, /clientAuthFetch\('\/environment-provisioning\/intents'/,
+    '先向 Cloud 申请一次性建号意图');
+  assert.match(main, /clientAuthFetch\('\/environment-provisioning\/complete'/,
+    '建号成功后仅通过完成端点提交实际 envKey');
+  assert.ok(
+    block.indexOf('createEnvironmentProvisioningIntent()') < block.indexOf('createEnvironmentWithGroupRecovery({'),
+    '建号意图必须先于 AdsPower user/create，避免任意现有 envKey 进入自动归属流程',
+  );
+  assert.match(main, /envKey:\s*String\(result\.userId \|\| ''\)\.trim\(\)/,
+    '完成归属的 envKey 只取 AdsPower 新建结果，不信 renderer 输入');
+  assert.match(main, /const refreshed = await refreshAllowedEnvironments\(\)/,
+    '完成归属后必须重新读取 Cloud 权威环境清单');
+  assert.match(main, /allowedProfileIds\.has\(String\(result\.userId \|\| ''\)\.trim\(\)\)/,
+    '仅权威清单确认新 envKey 后才允许入册');
+  assert.match(main, /addProvisionedEnvironmentToRoster\(result\)/,
+    '运行花名册由 Electron main 写入，不由 renderer 自声明');
+  assert.match(main, /settings\.environments = existing;[\s\S]*applyLegacyMirror\(\);[\s\S]*return saved;/,
+    '花名册落盘失败必须回滚内存，不能一边提示未加入一边实际生成运行 handle');
+  assert.doesNotMatch(preload, /proof/, '一次性 proof 不得暴露到 preload');
+  assert.doesNotMatch(renderer, /proof/, '一次性 proof 不得暴露到 renderer');
 });
 
 test('保存花名册：按权威 allowedProfileIds 过滤，且 renderer 不得伪造 offboard 恢复游标', () => {
@@ -108,9 +125,11 @@ test('保存花名册：按权威 allowedProfileIds 过滤，且 renderer 不得
 test('创建成功后刷新 UI：仅已权威分配的环境可自动入册', () => {
   assert.match(
     renderer,
-    /if \(r\.userId && !r\.requiresAdminAssignment && !coreRunning\(\)\)/,
-    '需管理员分配时不得自动选中/加入运行花名册',
+    /if \(r\.userId && !r\.requiresAdminAssignment && !r\.assignmentHandledByMain && !coreRunning\(\)\)/,
+    '客户鉴权模式由 main 完成权威入册，renderer 不得重复自选；未启用鉴权保持旧行为',
   );
+  assert.match(renderer, /r\.rosterJoinedByMain/, 'UI 必须区分已权威入册和仅本地创建');
+  assert.match(renderer, /已分配到当前账号并加入运行环境/, '自动分配成功给出如实提示，不声称已启动');
   assert.match(renderer, /await refreshEnvs\(\);/, '创建成功后必须等待添加窗口环境列表刷新完成');
 });
 

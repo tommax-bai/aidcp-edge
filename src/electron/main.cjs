@@ -600,13 +600,122 @@ async function refreshAllowedEnvironments() {
   return true;
 }
 
-function withAuthoritativeAssignmentNotice(result) {
-  if (!result || !result.ok || !clientAuthEnabled() || !hasValidSession()) return result;
+function withAuthoritativeAssignmentNotice(result, detail) {
+  if (!result || !result.ok || !clientAuthEnabled()) return result;
   return {
     ...result,
+    createdLocally: true,
     assignedToCurrentClient: false,
     requiresAdminAssignment: true,
-    visibilityWarning: '环境已创建，但客户不能自行声明归属。请由管理员从权威环境注册表分配后再启动。',
+    assignmentHandledByMain: true,
+    rosterJoinedByMain: false,
+    visibilityWarning: `环境已在本机创建，但自动分配未完成${detail ? `（${detail}）` : ''}，因此未加入运行环境。请重试或由管理员分配。`,
+  };
+}
+
+async function createEnvironmentProvisioningIntent() {
+  if (!clientAuthEnabled()) return { ok: true, required: false };
+  if (!hasValidSession()) {
+    onSessionInvalid();
+    return { ok: false, error: '客户端登录已失效' };
+  }
+  const response = await clientAuthFetch('/environment-provisioning/intents', {
+    method: 'POST',
+    token: clientSession.token,
+    body: {},
+  });
+  if (response.status === 401) {
+    onSessionInvalid();
+    return { ok: false, error: '客户端登录已失效' };
+  }
+  const data = response && response.data && response.data.data;
+  if (!response.ok || !data || typeof data.intentId !== 'string' || !data.intentId
+    || typeof data.proof !== 'string' || !data.proof) {
+    const reason = response && response.data && response.data.error;
+    return { ok: false, error: `云端归属准备失败${reason ? `：${reason}` : ''}` };
+  }
+  return { ok: true, required: true, intentId: data.intentId, proof: data.proof };
+}
+
+function addProvisionedEnvironmentToRoster(result) {
+  const environment = fleet.normalizeEnvironment({
+    profileId: result && result.userId,
+    name: (result && result.name) || '',
+    platform: (result && result.platform) || 'xiaohongshu',
+  });
+  if (!environment) return { ok: false, error: '新环境缺少有效分身 ID' };
+  const existing = fleet.normalizeEnvironments(settings.environments || []);
+  const next = existing.some((item) => item.profileId === environment.profileId)
+    ? existing.map((item) => item.profileId === environment.profileId ? { ...item, ...environment } : item)
+    : [...existing, environment];
+  const saved = saveSettings({ environments: next });
+  if (!saved.ok) {
+    // saveSettings 会先更新内存再尝试落盘；写盘失败必须把内存花名册也回滚，
+    // 否则 UI 说“未加入”但本轮其实已经生成 handle，构成假失败/重启漂移。
+    settings.environments = existing;
+    applyLegacyMirror();
+    return saved;
+  }
+  syncEnvHandles();
+  broadcastFleet();
+  return saved;
+}
+
+async function finalizeCreatedEnvironmentAssignment(result, intent) {
+  if (!result || !result.ok || !intent || !intent.required) return result;
+  let response = null;
+  // 完成端点幂等：仅网络/服务端瞬时失败原样重试一次；4xx 具名拒绝不盲重试。
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    response = await clientAuthFetch('/environment-provisioning/complete', {
+      method: 'POST',
+      token: clientSession && clientSession.token,
+      body: {
+        intentId: intent.intentId,
+        proof: intent.proof,
+        envKey: String(result.userId || '').trim(),
+        label: String(result.name || '').trim() || null,
+        platform: normalizePlatform(result.platform),
+      },
+    });
+    if (response.ok || (response.status > 0 && response.status < 500)) break;
+  }
+  if (response && response.status === 401) {
+    onSessionInvalid();
+    return withAuthoritativeAssignmentNotice(result, '客户端登录已失效');
+  }
+  if (!response || !response.ok) {
+    const reason = response && response.data && response.data.error;
+    return withAuthoritativeAssignmentNotice(result, reason || '云端未确认归属');
+  }
+
+  const refreshed = await refreshAllowedEnvironments();
+  if (!refreshed || !(allowedProfileIds instanceof Set) || !allowedProfileIds.has(String(result.userId || '').trim())) {
+    return {
+      ...withAuthoritativeAssignmentNotice(result, '权威环境清单尚未确认'),
+      assignedToCurrentClient: true,
+      requiresAdminAssignment: false,
+      visibilityWarning: '环境已分配到当前账号，但权威环境清单尚未刷新，因此本次未加入运行环境。请稍后刷新后加入。',
+    };
+  }
+  const saved = addProvisionedEnvironmentToRoster(result);
+  if (!saved.ok) {
+    return {
+      ...result,
+      createdLocally: true,
+      assignedToCurrentClient: true,
+      requiresAdminAssignment: false,
+      assignmentHandledByMain: true,
+      rosterJoinedByMain: false,
+      visibilityWarning: `环境已分配到当前账号，但本地运行花名册保存失败（${saved.error || '未知错误'}）。请刷新后重新加入。`,
+    };
+  }
+  return {
+    ...result,
+    createdLocally: true,
+    assignedToCurrentClient: true,
+    requiresAdminAssignment: false,
+    assignmentHandledByMain: true,
+    rosterJoinedByMain: true,
   };
 }
 // 会话失效（登出 / 被停用 / 令牌过期）：清会话 + 拆掉所有环境 handle（停在跑子进程）+ 关主窗 + 回登录门。
@@ -4220,6 +4329,8 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
     const entries = parsedImport.entries || [];
     if (entries.length === 0) {
+      const intent = await createEnvironmentProvisioningIntent();
+      if (!intent.ok) return { ok: false, error: `${intent.error}，本次尚未创建本地环境。` };
       const result = await createEnvironmentWithGroupRecovery({
         writeApi,
         adsApi,
@@ -4233,7 +4344,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         groupResolver: envGroupResolver,
       });
       if (result && result.ok) {
-        return withAuthoritativeAssignmentNotice(result);
+        return finalizeCreatedEnvironmentAssignment(result, intent);
       }
       return result;
     }
@@ -4241,6 +4352,14 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     const created = [];
     for (let i = 0; i < entries.length; i += 1) {
       const entry = entries[i];
+      const intent = await createEnvironmentProvisioningIntent();
+      if (!intent.ok) {
+        return {
+          ok: false,
+          error: `第 ${i + 1} 行${intent.error}，该行尚未创建本地环境。`,
+          created,
+        };
+      }
       const result = await createEnvironmentWithGroupRecovery({
         writeApi,
         adsApi,
@@ -4262,14 +4381,23 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
           created,
         };
       }
+      const finalized = await finalizeCreatedEnvironmentAssignment(result, intent);
       created.push({
-        userId: result.userId,
-        name: result.name,
-        template: result.template,
-        platform: result.platform,
+        userId: finalized.userId,
+        name: finalized.name,
+        template: finalized.template,
+        platform: finalized.platform,
+        assignedToCurrentClient: finalized.assignedToCurrentClient,
+        requiresAdminAssignment: finalized.requiresAdminAssignment,
+        rosterJoinedByMain: finalized.rosterJoinedByMain,
+        visibilityWarning: finalized.visibilityWarning,
       });
     }
-    return withAuthoritativeAssignmentNotice({
+    const assignmentHandledByMain = clientAuthEnabled();
+    const unassigned = assignmentHandledByMain
+      ? created.filter((item) => item.requiresAdminAssignment || !item.rosterJoinedByMain)
+      : [];
+    return {
       ok: true,
       userId: created.length === 1 ? created[0].userId : undefined,
       // 单账号导入自动选中时带回真名，供渲染层入册用真名（change edge-env-name-live-sync）。
@@ -4278,7 +4406,14 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       platform,
       created,
       createdCount: created.length,
-    });
+      assignedToCurrentClient: assignmentHandledByMain ? unassigned.length === 0 : undefined,
+      requiresAdminAssignment: created.some((item) => item.requiresAdminAssignment),
+      assignmentHandledByMain,
+      rosterJoinedByMain: assignmentHandledByMain ? unassigned.length === 0 : undefined,
+      ...(unassigned.length > 0 ? {
+        visibilityWarning: `${created.length - unassigned.length}/${created.length} 个环境已分配并加入运行环境；其余环境未完成权威确认，未加入运行环境。`,
+      } : {}),
+    };
   } catch (e) {
     return { ok: false, error: `创建失败：${(e && e.message) || String(e)}` };
   } finally {
