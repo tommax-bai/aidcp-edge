@@ -835,3 +835,94 @@ test('participation-gate 文本断言：覆盖中英文案、排除通用「回�
     assert.equal(isFacebookParticipationGateText(s), false, String(s));
   }
 });
+
+// ─────────── openPost 详情水合窗（change fb-comment-open-hydration-window）───────────
+//
+// 真机实测 FB 详情 article 水合 7-12s。评论链路此前只有 surfaceProbeRounds=4（≈4.9s 总预算）→ 慢帖误报 open_failed。
+// 现给 article 等待一个**独立**预算 postDetailProbeRounds=22；催拉类调用点仍用 surfaceProbeRounds（它们在循环内）。
+
+/** 按生产默认形状构造（surfaceProbeRounds=4），只在需要时覆写详情窗。 */
+function makeOpenExecutor(cdp: FakeCdp, over: { postDetailProbeRounds?: number } = {}) {
+  return new FacebookCommentExecutor(
+    {
+      cdp,
+      getAccountId: () => '100000123456789',
+      acceptConsent: NO_CONSENT,
+      sleep: async () => {},
+      logger: () => {},
+    },
+    {
+      settleMs: 0,
+      editorScrollRounds: 3,
+      surfaceProbeRounds: 4,
+      waitAfterSubmitMs: 0,
+      waitAfterReloadMs: 0,
+      ...(over.postDetailProbeRounds !== undefined ? { postDetailProbeRounds: over.postDetailProbeRounds } : {}),
+    },
+  );
+}
+
+test('fb-executor: 慢水合详情（article 第 10 轮才出现）→ 开帖成功，不再误报 open_failed', async () => {
+  let probes = 0;
+  const cdp = new FakeCdp({
+    structureFor: () => {
+      probes++;
+      // 前 9 轮页面还没水合出 article；第 10 轮起出现（>4 = 旧窗口必挂，<=22 = 新窗口应接住）。
+      const hydrated = probes >= 10;
+      return struct({
+        href: 'https://www.facebook.com/groups/1/posts/2/',
+        articleCount: hydrated ? 1 : 0,
+        commentEditorCount: hydrated ? 1 : 0,
+      });
+    },
+  });
+  const r = await makeOpenExecutor(cdp).openPost('https://www.facebook.com/groups/1/posts/2/');
+  assert.equal(r.ok, true, `慢水合帖应被接住，实际 reason=${r.reason}`);
+  assert.equal(r.editorReady, true);
+});
+
+test('fb-executor: 旧的 4 轮窗口接不住同一个慢水合帖（坐实这就是 open_failed 的成因）', async () => {
+  let probes = 0;
+  const cdp = new FakeCdp({
+    structureFor: () => {
+      probes++;
+      const hydrated = probes >= 10;
+      return struct({
+        href: 'https://www.facebook.com/groups/1/posts/2/',
+        articleCount: hydrated ? 1 : 0,
+        commentEditorCount: hydrated ? 1 : 0,
+      });
+    },
+  });
+  // 显式退回修复前的窗口 → 必须复现 open_failed（若此断言变绿说明修复被架空）。
+  const r = await makeOpenExecutor(cdp, { postDetailProbeRounds: 4 }).openPost('https://www.facebook.com/groups/1/posts/2/');
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'open_failed');
+});
+
+test('fb-executor: 详情始终不水合 → 仍如实 open_failed（诚实闸不变、窗口仍有界）', async () => {
+  const cdp = new FakeCdp({
+    structureFor: () =>
+      struct({ href: 'https://www.facebook.com/groups/1/posts/2/', articleCount: 0, commentEditorCount: 0 }),
+  });
+  const r = await makeOpenExecutor(cdp).openPost('https://www.facebook.com/groups/1/posts/2/');
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'open_failed');
+});
+
+test('fb-executor: 详情窗放宽**不得**外溢到评论框催拉循环（防 6×22 炸步超时）', async () => {
+  let probes = 0;
+  const cdp = new FakeCdp({
+    structureFor: () => {
+      probes++;
+      // article 立刻就位（详情窗第 1 轮即接受），但评论框永远催不出 → 只有催拉循环在烧探测。
+      return struct({ href: 'https://www.facebook.com/groups/1/posts/2/', articleCount: 1, commentEditorCount: 0 });
+    },
+  });
+  const r = await makeOpenExecutor(cdp).openPost('https://www.facebook.com/groups/1/posts/2/');
+  assert.equal(r.ok, true);
+  assert.equal(r.editorReady, false);
+  // 预算 = 1（详情窗立即接受）+ editorScrollRounds(3) × surfaceProbeRounds(4) = 13。
+  // 若催拉循环误用了 postDetailProbeRounds(22)，将变成 1 + 3×22 = 67 → 生产上 6×22×600ms≈79s 炸开帖步超时。
+  assert.ok(probes <= 20, `催拉循环不得用详情窗预算，实际探测 ${probes} 次（>20 说明外溢）`);
+});

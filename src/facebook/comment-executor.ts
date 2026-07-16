@@ -174,8 +174,10 @@ export interface FacebookCommentExecutorOptions {
   /** 催拉懒加载评论框的滚动轮数上限（每轮滚一屏、复探一次）。 */
   editorScrollRounds?: number;
   editorScrollDistancePx?: number;
-  /** 结构探测的复探轮数（导航后等 surface 稳定）。 */
+  /** 结构探测的复探轮数（导航后等 surface 稳定）。用于搜索候选探测与评论框催拉——两者都跑在 `editorScrollRounds` 循环内。 */
   surfaceProbeRounds?: number;
+  /** 开帖后等帖子详情 article 水合的复探轮数（**独立**于 `surfaceProbeRounds`，见 DEFAULTS 注释）。 */
+  postDetailProbeRounds?: number;
   /** 提交后就地确认前的初始沉淀（等乐观渲染出现）/ reload 后确认前的初始沉淀。 */
   waitAfterSubmitMs?: number;
   waitAfterReloadMs?: number;
@@ -195,6 +197,15 @@ const DEFAULTS: Required<FacebookCommentExecutorOptions> = {
   editorScrollRounds: 6,
   editorScrollDistancePx: 700,
   surfaceProbeRounds: 4,
+  // 等帖子详情 article 水合的预算。**必须独立于 surfaceProbeRounds**，两者不可合并：
+  // - surfaceProbeRounds 的两个调用点（搜索候选探测 / 评论框催拉）都跑在 editorScrollRounds=6 的循环**内**，
+  //   是「每轮」预算；放宽到 22 即 6×22×600ms≈79s，远超开帖步超时 → 只是把 open_failed 换成 timeout。
+  // - 本常量的调用点（openPost 等 article）不在循环内，是一次性预算，可安全放宽。
+  // 值 22（~12.6s 循环 + 2.5s settle ≈ 15s）对齐 post-reader.ts 的**同源实测依据**：FB 详情 article 水合晚于 feed，
+  // 真机观察 7-12s。此前评论链路只有 4 轮（≈4.9s 总预算）< 实测下界 → 慢帖必然误报 open_failed、丢掉已搜到的目标
+  // （change fb-comment-migration-hold 的 678bdc6 只放宽了 post-reader，而评论链路不走 post-reader —— 本 change 补齐那一半）。
+  // 仍有界；超窗仍如实 open_failed，诚实失败语义不变。改此值须同步云端开帖步上界（facebook-edge-steps.ts）。
+  postDetailProbeRounds: 22,
   waitAfterSubmitMs: 500,
   waitAfterReloadMs: 2_500,
   inPlaceVerifyRounds: 32,
@@ -311,12 +322,18 @@ export class FacebookCommentExecutor {
     }
   }
 
-  /** 有界复探页面结构，直到 surface 落到期望集合或轮数耗尽（返回最后一次探测）。 */
+  /**
+   * 有界复探页面结构，直到 surface 落到期望集合或轮数耗尽（返回最后一次探测）。
+   *
+   * `rounds` 缺省取 `surfaceProbeRounds`（催拉类调用点的**每轮**预算，本身跑在 `editorScrollRounds` 循环里）。
+   * 只有「等详情 article 水合」这一个非循环调用点显式传 `postDetailProbeRounds` —— 两者不可合并，见该常量注释。
+   */
   private async probeStructureUntil(
     accept: (s: FacebookPageStructureSummary) => boolean,
+    rounds: number = this.opts.surfaceProbeRounds,
   ): Promise<FacebookPageStructureSummary | null> {
     let last: FacebookPageStructureSummary | null = null;
-    for (let i = 0; i < this.opts.surfaceProbeRounds; i++) {
+    for (let i = 0; i < rounds; i++) {
       try {
         last = await collectFacebookPageStructure(this.cdp);
       } catch (err) {
@@ -324,7 +341,7 @@ export class FacebookCommentExecutor {
         last = null;
       }
       if (last && accept(last)) return last;
-      if (i < this.opts.surfaceProbeRounds - 1) await this.sleep(600);
+      if (i < rounds - 1) await this.sleep(600);
     }
     return last;
   }
@@ -439,7 +456,12 @@ export class FacebookCommentExecutor {
     const blocked = await this.blockingReason();
     if (blocked) return { ok: false, reason: blocked, editorReady: false };
 
-    let structure = await this.probeStructureUntil((s) => s.commentEditorCount > 0 || s.articleCount > 0);
+    // 等详情 article 水合：用**独立**的 postDetailProbeRounds（不是 surfaceProbeRounds——后者是下面催拉循环的每轮预算）。
+    // FB 详情水合真机实测 7-12s，此处预算须覆盖之，否则慢帖被误报 open_failed（搜索已返回该 permalink ⇒ 帖子存在）。
+    let structure = await this.probeStructureUntil(
+      (s) => s.commentEditorCount > 0 || s.articleCount > 0,
+      this.opts.postDetailProbeRounds,
+    );
     if (!structure) return { ok: false, reason: 'nav_error', editorReady: false };
     if (structure.surface === 'login') return { ok: false, reason: 'login_required', editorReady: false, surface: 'login' };
     if (structure.surface === 'checkpoint') return { ok: false, reason: 'blocked_by_captcha', editorReady: false, surface: 'checkpoint' };
