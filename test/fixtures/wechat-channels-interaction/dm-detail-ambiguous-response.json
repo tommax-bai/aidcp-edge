@@ -3,6 +3,12 @@
     "envKey": "env_wc_demo",
     "accountId": "acct_wc_demo",
     "platform": "wechat_channels",
+    "replyConfig": {
+      "status": "published",
+      "currentVersion": 4,
+      "draftVersion": null,
+      "publishedVersion": 4
+    },
     "auth": {
       "status": "active",
       "browserState": "closed",

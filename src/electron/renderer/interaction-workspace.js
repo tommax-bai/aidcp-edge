@@ -127,6 +127,18 @@
       sync: root.querySelector('#iw-sync'),
       syncStatus: root.querySelector('#iw-sync-status'),
       asOf: root.querySelector('#iw-as-of'),
+      unreadBadge: root.querySelector('#iw-unread-badge'),
+      readAll: root.querySelector('#iw-read-all'),
+      readComment: root.querySelector('#iw-read-comment'),
+      readDm: root.querySelector('#iw-read-dm'),
+      readApply: root.querySelector('#iw-read-apply'),
+      readCommentStatus: root.querySelector('#iw-read-comment-status'),
+      readDmStatus: root.querySelector('#iw-read-dm-status'),
+      readError: root.querySelector('#iw-read-error'),
+      configStatus: root.querySelector('#iw-config-status'),
+      configSummary: root.querySelector('#iw-config-summary'),
+      configHelp: root.querySelector('#iw-config-help'),
+      configGuidance: root.querySelector('#iw-config-guidance'),
       tabs: Array.from(root.querySelectorAll('[data-interaction-tab]')),
       search: root.querySelector('#iw-search'),
       listMeta: root.querySelector('#iw-list-meta'),
@@ -141,15 +153,21 @@
     let detailRequest = 0;
     let pollTimer = null;
     let browserPollTimer = null;
+    let listPollTimer = null;
     let active = false;
     let env = null;
     let state = freshState();
+    const seenMessagesByEnv = new Map();
+    const notifiedMessagesByEnv = new Map();
+    const unreadMessagesByEnv = new Map();
+    const baselineTabs = new Set();
 
     function freshState() {
       return {
         tab: 'pending', search: '', items: [], nextCursor: null, listLoading: false, listAppending: false,
         listError: null, selectedThreadId: null, detail: null, detailLoading: false, detailError: null,
         auth: null, asOf: null, stale: false, actionBusy: null, actionError: null, actionNotice: null,
+        replyConfig: null, readControlsBusy: false, readControlsError: null, configGuidanceOpen: false,
         pendingBrowserAction: null, browserPollCount: 0,
         draftText: '', draftDirty: false, syncBusy: false, lifecycleBusy: null, pollCount: 0,
       };
@@ -163,6 +181,22 @@
     function clearBrowserPoll() {
       if (browserPollTimer) global.clearTimeout(browserPollTimer);
       browserPollTimer = null;
+    }
+
+    function clearListPoll() {
+      if (listPollTimer) global.clearTimeout(listPollTimer);
+      listPollTimer = null;
+    }
+
+    function scheduleListPoll(capturedEpoch, envKey) {
+      clearListPoll();
+      const readState = currentReadState();
+      if (!active || !state.auth || state.auth.status !== 'active' || !readState.storedEnabled) return;
+      listPollTimer = global.setTimeout(() => {
+        if (isCurrent(capturedEpoch, envKey) && !state.listLoading && !state.listAppending) {
+          void loadList({ preserveSelection: true });
+        }
+      }, 15_000);
     }
 
     function setVisible(show) {
@@ -223,6 +257,91 @@
       return channel === 'dm' ? !caps.dmSendText : !caps.commentsReply;
     }
 
+    function replyConfigReady() {
+      return Boolean(state.replyConfig && state.replyConfig.status === 'published');
+    }
+
+    function channelReadState(channel) {
+      const auth = state.auth;
+      const controls = auth && auth.runtimeControls;
+      const stored = controls && controls.stored;
+      const storedEnabled = stored ? Boolean(channel === 'dm' ? stored.dmReadEnabled : stored.commentsReadEnabled) : false;
+      const applied = Boolean(controls && controls.applicationStatus === 'applied');
+      const capable = Boolean(auth && auth.capabilities && (channel === 'dm' ? auth.capabilities.dmRead : auth.capabilities.commentsRead));
+      if (!controls || !stored) return { storedEnabled: false, effective: false, label: '状态待确认', reason: '正在读取账号开关。' };
+      if (!storedEnabled) return { storedEnabled, effective: false, label: '已关闭', reason: channel === 'dm' ? '私信收取未开启。' : '评论收取未开启。' };
+      if (!applied) return { storedEnabled, effective: false, label: '已开启，等待本机应用', reason: '开关已保存，等待 Edge 应用同一版本。' };
+      if (!capable) return { storedEnabled, effective: false, label: '平台读取能力未就绪', reason: '本机尚未确认该渠道的读取能力。' };
+      return { storedEnabled, effective: true, label: '正在收取', reason: '开关已保存、本机已应用且平台读取能力正常。' };
+    }
+
+    function currentReadState() {
+      if (!state.auth || !state.auth.runtimeControls) {
+        return {
+          storedEnabled: false,
+          effective: false,
+          label: '收取状态待确认',
+          reason: state.listError ? '本次未能读取账号开关，不能据此判断是否没有互动。' : '正在读取账号开关。',
+        };
+      }
+      if (state.tab === 'comment' || state.tab === 'dm') return channelReadState(state.tab);
+      const comment = channelReadState('comment');
+      const dm = channelReadState('dm');
+      if (comment.effective || dm.effective) return { storedEnabled: true, effective: true, label: '至少一个渠道正在收取', reason: '' };
+      if (comment.storedEnabled || dm.storedEnabled) return { storedEnabled: true, effective: false, label: '收取尚未生效', reason: comment.storedEnabled ? comment.reason : dm.reason };
+      return { storedEnabled: false, effective: false, label: '互动收取未开启', reason: '请先开启评论或私信收取。' };
+    }
+
+    function renderReadSettings() {
+      const controls = state.auth && state.auth.runtimeControls;
+      const stored = controls && controls.stored;
+      const comment = channelReadState('comment');
+      const dm = channelReadState('dm');
+      const editable = Boolean(stored && state.auth && state.auth.status === 'active' && !state.stale
+        && env && env.connectivity === 'connected' && typeof api.interactionUpdateReadControls === 'function');
+      dom.readComment.checked = comment.storedEnabled;
+      dom.readDm.checked = dm.storedEnabled;
+      dom.readAll.checked = comment.storedEnabled && dm.storedEnabled;
+      dom.readAll.indeterminate = comment.storedEnabled !== dm.storedEnabled;
+      dom.readAll.disabled = state.readControlsBusy || !editable;
+      dom.readComment.disabled = state.readControlsBusy || !editable;
+      dom.readDm.disabled = state.readControlsBusy || !editable;
+      dom.readCommentStatus.textContent = comment.label;
+      dom.readDmStatus.textContent = dm.label;
+      dom.readApply.textContent = state.readControlsBusy ? '正在保存，只会修改读取开关'
+        : !controls ? '正在读取当前账号开关'
+          : controls.applicationStatus === 'applied'
+            ? `Cloud 已保存 v${controls.storedVersion}，本机已应用同一版本`
+            : `Cloud 已保存 v${controls.storedVersion}，等待本机应用${controls.edgeAppliedVersion == null ? '' : `（当前 v${controls.edgeAppliedVersion}）`}`;
+      dom.readError.textContent = state.readControlsError ? friendlyError(state.readControlsError) : '';
+      dom.readError.classList.toggle('hidden', !state.readControlsError);
+
+      const config = state.replyConfig;
+      const status = config && config.status;
+      dom.configStatus.textContent = status === 'published' ? `回复配置已发布${config.publishedVersion ? ` · v${config.publishedVersion}` : ''}`
+        : status === 'draft_only' ? `回复配置只有草稿${config.draftVersion ? ` · v${config.draftVersion}` : ''}`
+          : status === 'missing' ? '尚未创建回复配置' : '回复配置状态暂不可确认';
+      dom.configSummary.textContent = status === 'published' ? '可以按已发布规则生成、保存和批准回复。'
+        : status === 'draft_only' ? '互动仍会收取；需要管理员发布草稿后才能生成或批准回复。'
+          : status === 'missing' ? '互动仍会收取；需要管理员先在管理后台创建安全草稿。'
+            : '为避免误发，配置恢复确认前不会生成或发送。';
+      const needsGuidance = status !== 'published';
+      dom.configHelp.classList.toggle('hidden', !needsGuidance);
+      dom.configHelp.textContent = state.configGuidanceOpen ? '收起处理方法' : '查看处理方法';
+      dom.configHelp.setAttribute('aria-expanded', String(state.configGuidanceOpen));
+      dom.configGuidance.classList.toggle('hidden', !needsGuidance || !state.configGuidanceOpen);
+      dom.configGuidance.textContent = status === 'draft_only'
+        ? '请联系有配置权限的管理员，在管理后台检查草稿内容并点击“发布”。客户端不会代替管理员发布配置。'
+        : status === 'missing'
+          ? '请联系有配置权限的管理员，在管理后台点击“创建安全草稿”，检查后再手动发布。初始化不会自动开启回复或发送。'
+          : '请稍后局部刷新；若持续无法确认，请让管理员检查当前账号的回复配置。';
+
+      const unread = unreadMessagesByEnv.get(selectedEnvKey());
+      const unreadCount = unread ? unread.size : 0;
+      dom.unreadBadge.textContent = `${unreadCount} 条未读`;
+      dom.unreadBadge.classList.toggle('hidden', unreadCount === 0);
+    }
+
     function lifecycleControl() {
       if (!env) return { action: null, label: '状态确认中' };
       if (env.session === 'paused') return { action: 'resume', label: '恢复' };
@@ -244,15 +363,23 @@
       } else if (status === 'active') {
         const connectivityStale = connectivityWriteBlocked();
         const controlsPending = controlsWriteBlocked();
+        const commentRead = channelReadState('comment');
+        const dmRead = channelReadState('dm');
+        const allReadDisabled = !commentRead.storedEnabled && !dmRead.storedEnabled;
+        const enabledButUnavailable = !allReadDisabled && !commentRead.effective && !dmRead.effective;
         title = connectivityStale ? '同步暂时中断'
-          : controlsPending ? '账号开关等待本机应用'
+          : allReadDisabled ? '互动收取已关闭'
+            : enabledButUnavailable ? '互动收取尚未生效'
+              : controlsPending ? '账号开关等待本机应用'
             : auth.identity ? `已绑定：${safeText(auth.identity.displayName, '视频号账号')}` : '互动托管中';
         summary = connectivityStale ? '正在使用上次成功数据；Cloud 恢复后可局部刷新。'
-          : controlsPending ? 'Cloud 已保存账号配置，但 Edge 尚未回报同版本能力；当前写操作继续关闭。'
+          : allReadDisabled ? '评论和私信收取都已关闭。可在下方按渠道重新开启。'
+            : enabledButUnavailable ? (commentRead.storedEnabled ? commentRead.reason : dmRead.reason)
+              : controlsPending ? 'Cloud 已保存账号配置，但 Edge 尚未回报同版本能力；当前写操作继续关闭。'
             : auth.browserState === 'open'
               ? '浏览器当前保持打开；评论和私信仍按 Edge 实际能力同步。完成查看后可转入后台。'
               : '当前环境已绑定这个视频号并在后台运行。评论和私信按 Edge 实际能力同步，发送结果以平台确认状态为准。';
-        tone = connectivityStale || controlsPending ? 'attention' : 'success';
+        tone = connectivityStale || controlsPending || allReadDisabled || enabledButUnavailable ? 'attention' : 'success';
       } else if (status === 'login_required') {
         title = '等待首次登录';
         summary = `将在“${safeText(env && env.label, '当前环境')}”打开的视频号助手中绑定你本次扫码登录的账号；无需填写内部账号 ID。`;
@@ -323,8 +450,11 @@
       dom.reauth.classList.toggle('hidden', !canReopen);
       dom.reauth.textContent = status === 'challenge_required' ? '打开浏览器处理验证' : status === 'login_required' ? '打开登录窗口' : '重新登录';
       dom.reauth.disabled = state.actionBusy === 'reauth';
-      dom.sync.disabled = state.syncBusy || !active;
+      const readState = currentReadState();
+      dom.sync.disabled = state.syncBusy || !active || !readState.effective;
+      dom.sync.title = readState.effective ? '' : readState.reason;
       dom.sync.textContent = state.syncBusy ? '已请求，等待同步' : '局部刷新';
+      renderReadSettings();
     }
 
     function renderTabs() {
@@ -336,11 +466,16 @@
     }
 
     function listEmptyCopy() {
-      if (state.search.trim()) return '当前已加载内容中没有匹配项';
-      if (state.tab === 'comment') return '当前没有评论互动';
-      if (state.tab === 'dm') return '当前没有私信会话';
-      if (state.tab === 'replied') return '当前没有已确认回复记录';
-      return '当前没有待处理互动';
+      if (state.search.trim()) return { title: '当前已加载内容中没有匹配项', detail: '搜索只作用于当前环境已经加载的分页。' };
+      const read = currentReadState();
+      if (!read.effective) {
+        const channel = state.tab === 'comment' ? '评论' : state.tab === 'dm' ? '私信' : '互动';
+        return { title: read.label === '收取状态待确认' ? read.label : `${channel}收取未生效`, detail: read.reason };
+      }
+      if (state.tab === 'comment') return { title: '当前没有评论互动', detail: '评论收取正常；有新评论时会显示在这里。' };
+      if (state.tab === 'dm') return { title: '当前没有私信会话', detail: '私信收取正常；有新私信时会显示在这里。' };
+      if (state.tab === 'replied') return { title: '当前没有已确认回复记录', detail: '只有平台已确认的回复才会进入这里。' };
+      return { title: '当前没有待处理互动', detail: '收取正常；需要处理的新互动会出现在这里。' };
     }
 
     function renderList() {
@@ -356,7 +491,8 @@
       if (state.listLoading && state.items.length === 0) {
         dom.list.innerHTML = '<div class="iw-loading-state"><i></i><i></i><i></i><span>正在获取当前环境互动</span></div>';
       } else if (items.length === 0) {
-        dom.list.innerHTML = `<div class="iw-empty-state compact"><span class="iw-empty-icon" aria-hidden="true">···</span><strong>${escapeHtml(listEmptyCopy())}</strong><span>${state.search.trim() ? '搜索只作用于当前环境已经加载的分页。' : '需要处理的新互动会出现在这里。'}</span></div>`;
+        const empty = listEmptyCopy();
+        dom.list.innerHTML = `<div class="iw-empty-state compact"><span class="iw-empty-icon" aria-hidden="true">···</span><strong>${escapeHtml(empty.title)}</strong><span>${escapeHtml(empty.detail)}</span></div>`;
       } else {
         dom.list.innerHTML = items.map((item) => {
           const selected = item.threadId === state.selectedThreadId;
@@ -364,10 +500,10 @@
           const name = safeText(item.participantName, '未获取昵称');
           const preview = safeText(item.previewText, item.channel === 'dm' ? '暂不支持的私信类型' : '暂不支持的评论类型');
           const source = safeText(item.sourceTitle, item.channel === 'dm' ? '私信会话' : '未获取视频标题');
-          return `<button class="iw-list-item${selected ? ' selected' : ''}" type="button" role="option" aria-selected="${String(selected)}" data-thread-id="${escapeHtml(item.threadId)}">
+          return `<button class="iw-list-item${selected ? ' selected' : ''}${item.unread ? ' unread' : ''}" type="button" role="option" aria-selected="${String(selected)}" data-thread-id="${escapeHtml(item.threadId)}">
             <span class="iw-avatar" aria-hidden="true">${escapeHtml(name.slice(0, 1))}</span>
             <span class="iw-item-copy">
-              <span class="iw-item-head"><strong>${escapeHtml(name)}</strong><time>${escapeHtml(formatTime(item.lastMessageAt))}</time></span>
+              <span class="iw-item-head"><strong>${item.unread ? '<i class="iw-unread-dot" aria-label="未读"></i>' : ''}${escapeHtml(name)}</strong><time>${escapeHtml(formatTime(item.lastMessageAt))}</time></span>
               <span class="iw-item-preview">${escapeHtml(preview)}</span>
               <span class="iw-item-foot"><span>${item.channel === 'dm' ? '私信' : '评论'} · ${escapeHtml(source)}</span><em class="iw-badge ${job[1]}">${escapeHtml(job[0])}</em></span>
             </span>
@@ -465,7 +601,8 @@
         ? job.riskReasons.map((reason) => RISK_REASON_LABEL[reason] || reason).join('、')
         : '未发现额外风险标签';
       const textStateLocked = !job || LOCKED_TEXT_STATES.has(job.state);
-      const textLocked = textStateLocked || writeBlocked();
+      const configBlocked = !replyConfigReady();
+      const textLocked = textStateLocked || writeBlocked() || configBlocked;
       const capabilityBlocked = channelCapabilityBlocked(thread.channel);
       const primary = actionButtonModel(job);
       const busy = Boolean(state.actionBusy);
@@ -491,18 +628,18 @@
           </div>
           <label class="iw-editor"><span>可编辑的最终文字</span><textarea id="iw-final-text" rows="4" maxlength="4000" ${textLocked ? 'disabled' : ''}>${escapeHtml(state.draftText)}</textarea><small id="iw-draft-count">${state.draftText.length}/4000${state.draftDirty ? ' · 尚未保存' : ''}</small></label>
           <div class="iw-risk-card ${job.riskLevel === 'high' ? 'danger' : job.riskLevel === 'unknown' ? 'attention' : 'neutral'}"><strong>风险检查：${escapeHtml(risk)}</strong><span>${escapeHtml(riskReasons)}</span></div>
-          ${authWriteBlocked() ? '<div class="iw-write-block">登录或能力状态未就绪，历史保持可读，写操作已禁用。</div>' : connectivityWriteBlocked() ? '<div class="iw-write-block">Cloud 离线或当前数据已过期，历史保持可读；刷新成功前写操作已禁用。</div>' : controlsWriteBlocked() ? '<div class="iw-write-block">账号开关已保存，但 Edge 尚未回报应用同一版本；写操作继续关闭。</div>' : capabilityBlocked ? '<div class="iw-write-block">当前账号没有这个渠道的发送能力，写操作已禁用。</div>' : ''}
+          ${authWriteBlocked() ? '<div class="iw-write-block">登录或能力状态未就绪，历史保持可读，写操作已禁用。</div>' : connectivityWriteBlocked() ? '<div class="iw-write-block">Cloud 离线或当前数据已过期，历史保持可读；刷新成功前写操作已禁用。</div>' : controlsWriteBlocked() ? '<div class="iw-write-block">账号开关已保存，但 Edge 尚未回报应用同一版本；写操作继续关闭。</div>' : configBlocked ? '<div class="iw-write-block">回复配置尚未发布；忽略和转人工仍可用，生成、保存、批准和发送暂不可用。</div>' : capabilityBlocked ? '<div class="iw-write-block">当前账号没有这个渠道的发送能力；保存、忽略、转人工和批准仍可用，只有发送被禁用。</div>' : ''}
           ${state.actionError ? `<div class="iw-action-error" role="alert">${escapeHtml(friendlyError(state.actionError))}${state.actionError.code === 'INTERACTION_VERSION_CONFLICT' || state.actionError.code === 'INTERACTION_STATE_CONFLICT' ? '<button class="iw-button ghost" type="button" data-iw-action="refresh-detail">重新加载详情</button>' : ''}</div>` : ''}
           ${state.actionNotice ? `<div class="iw-action-notice" role="status">${escapeHtml(state.actionNotice)}</div>` : ''}
           <footer class="iw-reply-actions">
             <div>
               <button class="iw-button ghost" type="button" data-iw-action="ignore" ${busy || TERMINAL_STATES.has(job.state) || writeBlocked() ? 'disabled' : ''}>忽略</button>
               <button class="iw-button ghost" type="button" data-iw-action="escalate" ${busy || TERMINAL_STATES.has(job.state) || writeBlocked() ? 'disabled' : ''}>转人工</button>
-              <button class="iw-button secondary" type="button" data-iw-action="regenerate" ${busy || TERMINAL_STATES.has(job.state) || writeBlocked() ? 'disabled' : ''}>${state.actionBusy === 'regenerate' ? '重新生成中' : '重新生成'}</button>
+              <button class="iw-button secondary" type="button" data-iw-action="regenerate" ${busy || TERMINAL_STATES.has(job.state) || writeBlocked() || configBlocked ? 'disabled' : ''}>${state.actionBusy === 'regenerate' ? '重新生成中' : '重新生成'}</button>
             </div>
             <div>
-              ${!textStateLocked ? `<button class="iw-button secondary" type="button" data-iw-action="save" ${busy || !state.draftDirty || writeBlocked() ? 'disabled' : ''}>${state.actionBusy === 'save' ? '保存中' : '保存修改'}</button>` : ''}
-              ${primary ? `<button class="iw-button primary" type="button" data-iw-action="${primary.action}" ${busy || primary.disabled || writeBlocked() || capabilityBlocked ? 'disabled' : ''}>${state.actionBusy === primary.action ? '处理中' : primary.label}</button>` : ''}
+              ${!textStateLocked ? `<button class="iw-button secondary" type="button" data-iw-action="save" ${busy || !state.draftDirty || writeBlocked() || configBlocked ? 'disabled' : ''}>${state.actionBusy === 'save' ? '保存中' : '保存修改'}</button>` : ''}
+              ${primary ? `<button class="iw-button primary" type="button" data-iw-action="${primary.action}" ${busy || primary.disabled || writeBlocked() || configBlocked || (primary.action === 'send' && capabilityBlocked) ? 'disabled' : ''}>${state.actionBusy === primary.action ? '处理中' : primary.label}</button>` : ''}
             </div>
           </footer>
         </section>` : '<section class="iw-empty-inline">这条互动尚未生成回复任务，可保留查看并等待 Cloud 工作流。</section>'}
@@ -516,7 +653,7 @@
           const count = dom.detail.querySelector('#iw-draft-count');
           if (count) count.textContent = `${state.draftText.length}/4000${state.draftDirty ? ' · 尚未保存' : ''}`;
           const save = dom.detail.querySelector('[data-iw-action="save"]');
-          if (save) save.disabled = !state.draftDirty || Boolean(state.actionBusy) || writeBlocked();
+          if (save) save.disabled = !state.draftDirty || Boolean(state.actionBusy) || writeBlocked() || !replyConfigReady();
           const approve = dom.detail.querySelector('[data-iw-action="approve"]');
           if (approve) approve.textContent = state.draftDirty ? '保存并批准' : '批准回复';
         });
@@ -533,10 +670,44 @@
       renderDetail();
     }
 
+    function envMessageSet(map, envKey) {
+      let set = map.get(envKey);
+      if (!set) {
+        set = new Set();
+        map.set(envKey, set);
+      }
+      return set;
+    }
+
+    function trackIncomingUnread(items, envKey, tab, append) {
+      const seen = envMessageSet(seenMessagesByEnv, envKey);
+      const notified = envMessageSet(notifiedMessagesByEnv, envKey);
+      const unread = envMessageSet(unreadMessagesByEnv, envKey);
+      const baselineKey = `${envKey}:${tab}`;
+      const hasBaseline = baselineTabs.has(baselineKey);
+      const newlyUnread = [];
+      for (const item of items) {
+        const messageId = String(item && item.messageId || '');
+        if (!messageId) continue;
+        if (item.unread) unread.add(messageId);
+        else unread.delete(messageId);
+        if (!append && hasBaseline && item.unread && !seen.has(messageId) && !notified.has(messageId)) newlyUnread.push(item);
+        seen.add(messageId);
+      }
+      if (!hasBaseline) baselineTabs.add(baselineKey);
+      if (newlyUnread.length === 0 || typeof api.interactionNotify !== 'function') return;
+      for (const item of newlyUnread) notified.add(item.messageId);
+      const channels = new Set(newlyUnread.map((item) => item.channel));
+      const channel = channels.size === 1 ? newlyUnread[0].channel : 'mixed';
+      void api.interactionNotify({ envKey, channel, count: newlyUnread.length });
+    }
+
     async function loadList({ append = false, preserveSelection = false } = {}) {
       if (!active || !env) return;
+      clearListPoll();
       const capturedEpoch = epoch;
       const envKey = env.envKey;
+      const capturedTab = state.tab;
       const request = ++listRequest;
       if (append) state.listAppending = true;
       else {
@@ -559,6 +730,7 @@
         if (!isCurrent(capturedEpoch, envKey) || request !== listRequest) return;
         const envelope = assertEnvelope(response, envKey);
         const incoming = Array.isArray(envelope.data.items) ? envelope.data.items : [];
+        trackIncomingUnread(incoming, envKey, capturedTab, append);
         if (append) {
           const seen = new Set(state.items.map((item) => `${item.threadId}:${item.messageId}`));
           state.items = state.items.concat(incoming.filter((item) => !seen.has(`${item.threadId}:${item.messageId}`)));
@@ -567,6 +739,7 @@
         }
         state.nextCursor = envelope.data.nextCursor || null;
         state.auth = envelope.data.auth;
+        state.replyConfig = envelope.data.replyConfig || { status: 'unknown', draftVersion: null, publishedVersion: null };
         reconcileBrowserAction();
         state.asOf = envelope.meta && envelope.meta.asOf;
         state.listError = null;
@@ -589,6 +762,7 @@
           state.listLoading = false;
           state.listAppending = false;
           renderAll();
+          scheduleListPoll(capturedEpoch, envKey);
         }
       }
     }
@@ -653,6 +827,7 @@
         }
         state.detail = envelope.data;
         state.auth = envelope.data.auth;
+        state.replyConfig = envelope.data.replyConfig || state.replyConfig || { status: 'unknown', draftVersion: null, publishedVersion: null };
         state.asOf = envelope.meta && envelope.meta.asOf;
         if (env && env.connectivity === 'connected') state.stale = false;
         state.detailError = null;
@@ -734,7 +909,9 @@
         return;
       }
       const job = state.detail && state.detail.replyJob;
-      if (!job || state.actionBusy || writeBlocked() || channelCapabilityBlocked(state.detail.thread.channel)) return;
+      const configRequired = new Set(['save', 'approve', 'send', 'regenerate']).has(kind);
+      if (!job || state.actionBusy || writeBlocked() || (configRequired && !replyConfigReady())
+        || (kind === 'send' && channelCapabilityBlocked(state.detail.thread.channel))) return;
       if (kind === 'save' && !state.draftDirty) return;
       const capturedEpoch = epoch;
       const envKey = env.envKey;
@@ -777,8 +954,49 @@
       }
     }
 
+    async function updateReadControls(commentsReadEnabled, dmReadEnabled) {
+      const controls = state.auth && state.auth.runtimeControls;
+      if (!active || !env || state.readControlsBusy || !controls || typeof api.interactionUpdateReadControls !== 'function') return;
+      const capturedEpoch = epoch;
+      const envKey = env.envKey;
+      state.readControlsBusy = true;
+      state.readControlsError = null;
+      state.actionNotice = null;
+      renderAll();
+      try {
+        const response = await api.interactionUpdateReadControls({
+          envKey,
+          expectedVersion: controls.storedVersion,
+          commentsReadEnabled,
+          dmReadEnabled,
+        });
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        const envelope = assertEnvelope(response, envKey);
+        state.auth = envelope.data.auth;
+        state.replyConfig = envelope.data.replyConfig || state.replyConfig;
+        state.actionNotice = envelope.data.edgeDelivery && envelope.data.edgeDelivery.status === 'enqueued'
+          ? '收取开关已保存并下发本机。'
+          : '收取开关已保存，等待本机重新连接后应用。';
+      } catch (error) {
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        state.readControlsError = error;
+      } finally {
+        if (isCurrent(capturedEpoch, envKey)) {
+          state.readControlsBusy = false;
+          renderAll();
+          scheduleListPoll(capturedEpoch, envKey);
+        }
+      }
+    }
+
     async function syncCurrent() {
       if (!active || !env || state.syncBusy) return;
+      const readState = currentReadState();
+      if (!readState.effective) {
+        state.actionNotice = readState.reason;
+        renderAll();
+        return;
+      }
       const capturedEpoch = epoch;
       const envKey = env.envKey;
       state.syncBusy = true;
@@ -910,6 +1128,7 @@
         env = null;
         clearPoll();
         clearBrowserPoll();
+        clearListPoll();
         setVisible(false);
         return;
       }
@@ -917,7 +1136,12 @@
         const connectivityChanged = env.connectivity !== next.connectivity;
         const lifecycleChanged = env.edge !== next.edge || env.session !== next.session;
         env = { ...next };
-        if (next.connectivity !== 'connected') state.stale = Boolean(state.items.length || state.detail || state.stale);
+        if (next.connectivity !== 'connected') {
+          state.stale = Boolean(state.items.length || state.detail || state.stale);
+          clearListPoll();
+        } else if (connectivityChanged) {
+          scheduleListPoll(epoch, next.envKey);
+        }
         if (connectivityChanged || lifecycleChanged) renderAll();
         return;
       }
@@ -928,6 +1152,7 @@
       if (env.connectivity !== 'connected') state.stale = true;
       clearPoll();
       clearBrowserPoll();
+      clearListPoll();
       setVisible(true);
       renderAll();
       void loadList();
@@ -940,6 +1165,7 @@
       listRequest += 1;
       detailRequest += 1;
       clearPoll();
+      clearListPoll();
       state.tab = nextTab;
       state.items = [];
       state.nextCursor = null;
@@ -980,6 +1206,13 @@
     dom.browserControl.addEventListener('click', () => void controlBrowser());
     dom.sync.addEventListener('click', () => void syncCurrent());
     dom.reauth.addEventListener('click', () => void reopenAuth());
+    dom.readAll.addEventListener('change', () => void updateReadControls(dom.readAll.checked, dom.readAll.checked));
+    dom.readComment.addEventListener('change', () => void updateReadControls(dom.readComment.checked, channelReadState('dm').storedEnabled));
+    dom.readDm.addEventListener('change', () => void updateReadControls(channelReadState('comment').storedEnabled, dom.readDm.checked));
+    dom.configHelp.addEventListener('click', () => {
+      state.configGuidanceOpen = !state.configGuidanceOpen;
+      renderReadSettings();
+    });
 
     return { selectEnvironment, refresh: () => loadList({ preserveSelection: true }) };
   }

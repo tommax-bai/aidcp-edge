@@ -499,6 +499,11 @@ function interactionExpectedVersion(value) {
   return value;
 }
 
+function interactionBoolean(value, label) {
+  if (typeof value !== 'boolean') throw new Error(`${label} 必须是布尔值`);
+  return value;
+}
+
 function interactionLimit(value) {
   if (value == null) return 30;
   if (!Number.isInteger(value) || value < 1 || value > 100) throw new Error('limit 必须在 1 到 100 之间');
@@ -4071,6 +4076,35 @@ ipcMain.handle('interaction:browser:control', (_event, raw) => handleInteraction
     body: { action },
     idempotencyKey,
   });
+}));
+
+ipcMain.handle('interaction:read-controls:update', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'expectedVersion', 'commentsReadEnabled', 'dmReadEnabled']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const expectedVersion = interactionExpectedVersion(args.expectedVersion);
+  const commentsReadEnabled = interactionBoolean(args.commentsReadEnabled, 'commentsReadEnabled');
+  const dmReadEnabled = interactionBoolean(args.dmReadEnabled, 'dmReadEnabled');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/interactions/read-controls`,
+    method: 'PUT',
+    body: { expectedVersion, commentsReadEnabled, dmReadEnabled },
+  });
+}));
+
+ipcMain.handle('interaction:notify', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'channel', 'count']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const channel = String(args.channel || '');
+  if (!INTERACTION_CHANNELS.has(channel) && channel !== 'mixed') throw new Error('channel 不合法');
+  if (!Number.isInteger(args.count) || args.count < 1 || args.count > 100) throw new Error('count 不合法');
+  if (!hasValidSession() || !(allowedProfileIds instanceof Set) || !allowedProfileIds.has(envKey)
+    || allowedEnvironmentPlatforms.get(envKey) !== 'wechat_channels') {
+    return interactionLocalError('INTERACTION_SCOPE_MISMATCH', '当前环境不可用，未显示互动提醒。', 403);
+  }
+  const subject = channel === 'comment' ? '条新评论' : channel === 'dm' ? '条新私信' : '条新互动';
+  surfaceNotification('视频号有新互动', `${args.count} ${subject}等待查看`);
+  return { status: 200, ok: true, data: { envKey, notified: true } };
 }));
 
 ipcMain.handle('interaction:reads:cancel', (_event, raw) => handleInteractionIpc(async () => {

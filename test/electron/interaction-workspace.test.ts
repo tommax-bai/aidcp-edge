@@ -88,6 +88,7 @@ interface BootOptions {
   label?: string;
   platform?: string;
   api?: Record<string, any>;
+  listPollDelayMs?: number;
 }
 
 interface BootHandle {
@@ -102,7 +103,10 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
   const label = options.label || '轻享生活号';
   const platform = options.platform || 'wechat_channels';
   const currentStatus = status(envKey, label);
-  const calls: Record<string, any[]> = { list: [], detail: [], cancel: [], save: [], approve: [], send: [], sync: [], reopen: [], browser: [] };
+  const calls: Record<string, any[]> = {
+    list: [], detail: [], cancel: [], save: [], approve: [], send: [], regenerate: [], ignore: [], escalate: [],
+    sync: [], reopen: [], browser: [], readControls: [], notify: [],
+  };
   let pushFleet: (snapshot: any) => void = () => undefined;
   let pushStatus: (status: any) => void = () => undefined;
   const defaultApi: Record<string, any> = {
@@ -170,9 +174,18 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
       job.version = args.expectedVersion + 1;
       return jobResult(args.envKey, job);
     },
-    interactionRegenerate: async (args: any) => jobResult(args.envKey, scopeEnvelope(commentFixture, args.envKey).data.replyJob),
-    interactionIgnore: async (args: any) => jobResult(args.envKey, { ...scopeEnvelope(commentFixture, args.envKey).data.replyJob, state: 'ignored', version: args.expectedVersion + 1 }),
-    interactionEscalate: async (args: any) => jobResult(args.envKey, { ...scopeEnvelope(commentFixture, args.envKey).data.replyJob, state: 'escalated', version: args.expectedVersion + 1 }),
+    interactionRegenerate: async (args: any) => {
+      calls.regenerate.push(args);
+      return jobResult(args.envKey, scopeEnvelope(commentFixture, args.envKey).data.replyJob);
+    },
+    interactionIgnore: async (args: any) => {
+      calls.ignore.push(args);
+      return jobResult(args.envKey, { ...scopeEnvelope(commentFixture, args.envKey).data.replyJob, state: 'ignored', version: args.expectedVersion + 1 });
+    },
+    interactionEscalate: async (args: any) => {
+      calls.escalate.push(args);
+      return jobResult(args.envKey, { ...scopeEnvelope(commentFixture, args.envKey).data.replyJob, state: 'escalated', version: args.expectedVersion + 1 });
+    },
     interactionSync: async (args: any) => {
       calls.sync.push(args);
       return apiResult({ data: { envKey: args.envKey, accountId: `account-${args.envKey}`, acceptedAt: Date.now() }, meta: { requestId: 'sync', asOf: Date.now() } });
@@ -191,11 +204,36 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
         meta: { requestId: 'browser-control', asOf: Date.now() },
       });
     },
+    interactionUpdateReadControls: async (args: any) => {
+      calls.readControls.push(args);
+      const auth = clone(listFixture.data.auth);
+      auth.runtimeControls.storedVersion = args.expectedVersion + 1;
+      auth.runtimeControls.applicationStatus = 'pending';
+      auth.runtimeControls.stored.commentsReadEnabled = args.commentsReadEnabled;
+      auth.runtimeControls.stored.dmReadEnabled = args.dmReadEnabled;
+      return apiResult({
+        data: {
+          envKey: args.envKey,
+          accountId: `account-${args.envKey}`,
+          platform: 'wechat_channels',
+          auth,
+          replyConfig: clone(listFixture.data.replyConfig),
+          edgeDelivery: { status: 'enqueued', delivered: 1 },
+        },
+        meta: { requestId: 'read-controls', asOf: Date.now() },
+      });
+    },
+    interactionNotify: async (args: any) => { calls.notify.push(args); return { ok: true }; },
     interactionCancelReads: async (key: string) => { calls.cancel.push(key); return { ok: true, cancelled: 1 }; },
   };
   const api = { ...defaultApi, ...(options.api || {}) };
   const dom = new JSDOM(html, { runScripts: 'dangerously', url: 'http://fixture.local/' });
   const { window } = dom;
+  if (options.listPollDelayMs !== undefined) {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: any[]) =>
+      nativeSetTimeout(handler, delay === 15_000 ? options.listPollDelayMs : delay, ...args)) as typeof window.setTimeout;
+  }
   openWindows.push(window);
   (window as any).aidcpEdge = api;
   window.eval(uiLogicSrc);
@@ -431,7 +469,8 @@ test('首次授权、错号恢复和账号开关待应用都有明确且 fail-cl
       interactionDetail: async () => apiResult(pendingDetail),
     },
   });
-  assert.match($(pending.window, '#iw-title').textContent || '', /账号开关等待本机应用/);
+  assert.match($(pending.window, '#iw-title').textContent || '', /互动收取尚未生效/);
+  assert.match($(pending.window, '#iw-read-apply').textContent || '', /Cloud 已保存 v8，等待本机应用/);
   assert.match($(pending.window, '#iw-detail').textContent || '', /尚未回报应用同一版本/);
   assert.equal((pending.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
 });
@@ -459,7 +498,185 @@ test('tabs / 搜索 / 空态 / 错态 / ambiguous 都使用冻结 fixture 的诚
     api: { interactionList: async () => apiError('INTERACTION_UPSTREAM_UNAVAILABLE', 'offline', 503) },
   });
   assert.match($(errorBoot.window, '#iw-list-error').textContent || '', /Cloud 暂时不可达/);
-  assert.match($(errorBoot.window, '#iw-list').textContent || '', /当前没有待处理互动/);
+  assert.match($(errorBoot.window, '#iw-list').textContent || '', /收取状态待确认/);
+  assert.match($(errorBoot.window, '#iw-list').textContent || '', /不能据此判断是否没有互动/);
+});
+
+test('页面提供总开关、评论和私信收取开关，只提交读取字段并显示存储/应用/有效状态', async () => {
+  const { window, calls } = await boot();
+  const all = $(window, '#iw-read-all') as HTMLInputElement;
+  const comment = $(window, '#iw-read-comment') as HTMLInputElement;
+  const dm = $(window, '#iw-read-dm') as HTMLInputElement;
+  assert.equal(all.checked, true);
+  assert.equal(comment.checked, true);
+  assert.equal(dm.checked, true);
+  assert.match($(window, '#iw-read-comment-status').textContent || '', /正在收取/);
+  assert.match($(window, '#iw-read-dm-status').textContent || '', /正在收取/);
+  assert.match($(window, '#iw-read-apply').textContent || '', /Cloud 已保存 v7，本机已应用同一版本/);
+
+  comment.checked = false;
+  comment.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await flush();
+  assert.deepEqual(clone(calls.readControls), [{
+    envKey: 'env_wc_demo', expectedVersion: 7, commentsReadEnabled: false, dmReadEnabled: true,
+  }]);
+  assert.deepEqual(Object.keys(calls.readControls[0]).sort(), ['commentsReadEnabled', 'dmReadEnabled', 'envKey', 'expectedVersion']);
+  assert.equal((window.document.querySelector('#iw-read-comment') as HTMLInputElement).checked, false);
+  assert.match($(window, '#iw-read-comment-status').textContent || '', /已关闭/);
+  assert.match($(window, '#iw-read-dm-status').textContent || '', /等待本机应用/);
+
+  const conflict = await boot({
+    api: { interactionUpdateReadControls: async () => apiError('INTERACTION_VERSION_CONFLICT', 'version conflict') },
+  });
+  const conflictDm = $(conflict.window, '#iw-read-dm') as HTMLInputElement;
+  conflictDm.checked = false;
+  conflictDm.dispatchEvent(new conflict.window.Event('change', { bubbles: true }));
+  await flush();
+  assert.match($(conflict.window, '#iw-read-error').textContent || '', /已在别处更新/);
+  assert.equal((conflict.window.document.querySelector('#iw-read-dm') as HTMLInputElement).checked, true, '冲突后恢复服务端已知值');
+});
+
+test('读取开关待本机应用时继续轮询，应用成功后自动恢复有效状态', async () => {
+  let listCount = 0;
+  const current = await boot({
+    listPollDelayMs: 10,
+    api: {
+      interactionList: async () => {
+        listCount += 1;
+        const envelope = clone(listFixture);
+        if (listCount === 1) {
+          envelope.data.auth.runtimeControls.storedVersion = 8;
+          envelope.data.auth.runtimeControls.edgeAppliedVersion = 7;
+          envelope.data.auth.runtimeControls.applicationStatus = 'pending';
+        }
+        return apiResult(envelope);
+      },
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await flush();
+  assert.ok(listCount >= 2, '待应用状态必须继续获取 Cloud 投影，不能陷入停止轮询');
+  assert.match($(current.window, '#iw-read-apply').textContent || '', /本机已应用同一版本/);
+  assert.match($(current.window, '#iw-read-comment-status').textContent || '', /正在收取/);
+  current.window.close();
+});
+
+test('关闭、待应用和平台读取能力未就绪时，标题、空态和局部刷新都说明真实原因', async () => {
+  for (const scenario of ['off', 'pending', 'capability'] as const) {
+    const list = clone(listFixture);
+    list.data.items = [];
+    if (scenario === 'off') {
+      list.data.auth.runtimeControls.stored.commentsReadEnabled = false;
+      list.data.auth.runtimeControls.stored.dmReadEnabled = false;
+    } else if (scenario === 'pending') {
+      list.data.auth.runtimeControls.storedVersion = 8;
+      list.data.auth.runtimeControls.edgeAppliedVersion = 7;
+      list.data.auth.runtimeControls.applicationStatus = 'pending';
+    } else {
+      list.data.auth.capabilities.commentsRead = false;
+      list.data.auth.capabilities.dmRead = false;
+    }
+    const current = await boot({ api: { interactionList: async () => apiResult(list) } });
+    const expected = scenario === 'off' ? /互动收取已关闭/ : /互动收取尚未生效/;
+    assert.match($(current.window, '#iw-title').textContent || '', expected);
+    assert.equal(($(current.window, '#iw-sync') as HTMLButtonElement).disabled, true);
+    assert.match($(current.window, '#iw-list').textContent || '', scenario === 'off'
+      ? /请先开启评论或私信收取/
+      : scenario === 'pending' ? /等待 Edge 应用同一版本/ : /读取能力/);
+  }
+});
+
+test('发送能力只阻止发送；配置缺失只阻止依赖配置的动作，忽略和转人工仍可用', async () => {
+  const noSendList = clone(listFixture);
+  const noSendDetail = clone(commentFixture);
+  noSendList.data.auth.capabilities.commentsReply = false;
+  noSendDetail.data.auth.capabilities.commentsReply = false;
+  const noSend = await boot({
+    api: {
+      interactionList: async () => apiResult(noSendList),
+      interactionDetail: async () => apiResult(noSendDetail),
+    },
+  });
+  for (const action of ['approve', 'regenerate', 'ignore', 'escalate']) {
+    assert.equal((noSend.window.document.querySelector(`[data-iw-action="${action}"]`) as HTMLButtonElement).disabled, false, `${action} 不应被发送能力误伤`);
+  }
+  const textarea = $(noSend.window, '#iw-final-text') as HTMLTextAreaElement;
+  textarea.value = '仍可保存的修改';
+  textarea.dispatchEvent(new noSend.window.Event('input', { bubbles: true }));
+  assert.equal((noSend.window.document.querySelector('[data-iw-action="save"]') as HTMLButtonElement).disabled, false);
+  $(noSend.window, '[data-iw-action="approve"]').dispatchEvent(new noSend.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal((noSend.window.document.querySelector('[data-iw-action="send"]') as HTMLButtonElement).disabled, true);
+  assert.match($(noSend.window, '#iw-detail').textContent || '', /只有发送被禁用/);
+
+  const missingList = clone(listFixture);
+  const missingDetail = clone(commentFixture);
+  for (const fixture of [missingList, missingDetail]) {
+    fixture.data.replyConfig = { status: 'missing', draftVersion: null, publishedVersion: null };
+  }
+  const missing = await boot({
+    api: {
+      interactionList: async () => apiResult(missingList),
+      interactionDetail: async () => apiResult(missingDetail),
+    },
+  });
+  assert.match($(missing.window, '#iw-config-status').textContent || '', /尚未创建回复配置/);
+  assert.equal((missing.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
+  assert.equal((missing.window.document.querySelector('[data-iw-action="regenerate"]') as HTMLButtonElement).disabled, true);
+  assert.equal((missing.window.document.querySelector('[data-iw-action="ignore"]') as HTMLButtonElement).disabled, false);
+  assert.equal((missing.window.document.querySelector('[data-iw-action="escalate"]') as HTMLButtonElement).disabled, false);
+  $(missing.window, '#iw-config-help').dispatchEvent(new missing.window.Event('click', { bubbles: true }));
+  assert.match($(missing.window, '#iw-config-guidance').textContent || '', /管理后台点击“创建安全草稿”/);
+  assert.match($(missing.window, '#iw-config-guidance').textContent || '', /不会自动开启回复或发送/);
+});
+
+test('未读提醒按环境建立无通知基线，之后每个新 messageId 最多提醒一次', async () => {
+  const callsByEnv = new Map<string, number>();
+  let exposeNewMessage = false;
+  const { window, pushFleet, calls } = await boot({
+    envKey: 'env_A',
+    api: {
+      interactionList: async (args: any) => {
+        const count = (callsByEnv.get(args.envKey) || 0) + 1;
+        callsByEnv.set(args.envKey, count);
+        const envelope = scopeEnvelope(listFixture, args.envKey, args.envKey);
+        envelope.data.items = [envelope.data.items[0]];
+        if (args.envKey === 'env_A' && exposeNewMessage) {
+          envelope.data.items.push({
+            ...clone(envelope.data.items[0]),
+            threadId: 'thread_comment_101',
+            messageId: 'msg_comment_101',
+            participantName: 'A 新观众',
+            previewText: '这是刷新后新增的评论',
+            unread: true,
+          });
+        }
+        return apiResult(envelope);
+      },
+    },
+  });
+  assert.equal(calls.notify.length, 0, '首屏历史未读只建基线，不弹系统提醒');
+  assert.match($(window, '#iw-unread-badge').textContent || '', /1 条未读/);
+
+  exposeNewMessage = true;
+  $(window, '#iw-sync').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await new Promise((resolve) => setTimeout(resolve, 850));
+  await flush();
+  assert.deepEqual(clone(calls.notify), [{ envKey: 'env_A', channel: 'comment', count: 1 }]);
+  assert.match($(window, '#iw-unread-badge').textContent || '', /2 条未读/);
+
+  $(window, '#iw-sync').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await new Promise((resolve) => setTimeout(resolve, 850));
+  await flush();
+  assert.equal(calls.notify.length, 1, '相同 messageId 刷新不得重复提醒');
+
+  pushFleet({
+    provider: 'adspower', selectedEnvId: 'env_B', railCollapsed: true,
+    environments: [{ envId: 'env_B', name: '账号 B', platform: 'wechat_channels', status: status('env_B', '账号 B') }],
+  });
+  await flush();
+  assert.equal(calls.notify.length, 1, '切换到新环境的首屏也只建自己的基线');
+  assert.match($(window, '#iw-unread-badge').textContent || '', /1 条未读/);
 });
 
 test('列表方向键可达并移动焦点，窄屏样式折叠为单栏且保留 focus ring', async () => {

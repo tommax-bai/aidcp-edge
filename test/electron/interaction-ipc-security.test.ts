@@ -14,6 +14,7 @@ const namedChannels = [
   'interaction:list', 'interaction:detail', 'interaction:draft:update', 'interaction:approve',
   'interaction:regenerate', 'interaction:send', 'interaction:ignore', 'interaction:escalate',
   'interaction:sync', 'interaction:auth:reopen', 'interaction:browser:control', 'interaction:reads:cancel',
+  'interaction:read-controls:update', 'interaction:notify',
 ];
 
 test('preload 只暴露具名互动方法，不给 renderer 任意 URL / method / header / token 能力', () => {
@@ -40,6 +41,8 @@ test('main 锁定 customer-auth 路径和方法，并对白名单参数与 envKe
   assert.match(main, /interaction:auth:reopen[\s\S]*idempotencyKey/, '重新登录动作必须带幂等键');
   assert.match(main, /interaction:browser:control[\s\S]*body: \{ action \},[\s\S]*idempotencyKey/, '浏览器显隐只允许 open\/close 且必须带幂等键');
   assert.match(main, /\/interactions\/browser/, '浏览器控制路径由 main 固定组装');
+  assert.match(main, /interaction:read-controls:update[\s\S]*method: 'PUT',[\s\S]*body: \{ expectedVersion, commentsReadEnabled, dmReadEnabled \}/, '收取开关只能写入两个读取字段');
+  assert.match(main, /interaction:notify[\s\S]*allowedProfileIds\.has\(envKey\)[\s\S]*allowedEnvironmentPlatforms\.get\(envKey\) !== 'wechat_channels'/, '系统提醒必须再次校验当前客户的视频号环境范围');
   const clientAuthFetch = main.slice(main.indexOf('async function clientAuthFetch'), main.indexOf('// ── 视频号 InteractionWorkspace'));
   assert.match(clientAuthFetch, /readBoundedJsonResponse\(res\)/, 'customer-auth 响应必须走有界 reader');
   assert.doesNotMatch(clientAuthFetch, /res\.json\(/, '不得用 res.json() 无界聚合响应体');
