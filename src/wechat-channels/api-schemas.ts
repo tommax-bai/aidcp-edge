@@ -2,12 +2,10 @@ import { schemaChanged, WechatChannelsError } from './error-classifier.js';
 import type {
   WechatComment,
   WechatDmMessage,
-  WechatDmSession,
   WechatIdentity,
   WechatLoginCode,
   WechatLoginStatus,
   WechatPage,
-  WechatParticipant,
   WechatPost,
   WechatSendAck,
 } from './types.js';
@@ -51,25 +49,15 @@ function optionalCount(record: JsonRecord, keys: readonly string[]): number | nu
 }
 
 function pageMeta(data: JsonRecord, endpoint: string): { nextCursor: string | null; hasMore: boolean } {
-  const cursorValue = valueAt(data, ['nextCursor', 'next_cursor', 'lastBuffer', 'last_buffer', 'cursor']);
+  const cursorValue = valueAt(data, ['nextCursor', 'next_cursor', 'lastBuff', 'lastBuffer', 'last_buffer', 'cookie', 'cursor']);
   const nextCursor = cursorValue === undefined || cursorValue === null || cursorValue === '' ? null : String(cursorValue);
-  const moreValue = valueAt(data, ['hasMore', 'has_more', 'continueFlag', 'continue_flag']);
+  const moreValue = valueAt(data, ['hasMore', 'has_more', 'isContinue', 'continueFlag', 'continue_flag']);
   if (![true, false, 0, 1, '0', '1'].includes(moreValue as boolean | number | string)) {
     throw schemaChanged(endpoint, 'hasMore');
   }
   const hasMore = moreValue === true || moreValue === 1 || moreValue === '1';
   if (hasMore && nextCursor === null) throw schemaChanged(endpoint, 'nextCursor');
   return { nextCursor, hasMore };
-}
-
-function participant(value: unknown, endpoint: string): WechatParticipant | null {
-  if (value === undefined || value === null) return null;
-  const p = rec(value, endpoint, 'participant');
-  return {
-    externalId: requiredString(p, ['externalId', 'external_id', 'userId', 'user_id', 'finderUsername', 'finder_username'], endpoint, 'participant.externalId'),
-    displayName: optionalString(p, ['displayName', 'display_name', 'nickname', 'nickName']),
-    avatarUrl: optionalString(p, ['avatarUrl', 'avatar_url', 'avatar']),
-  };
 }
 
 function dataRecord(body: unknown, endpoint: string): JsonRecord {
@@ -80,7 +68,7 @@ function dataRecord(body: unknown, endpoint: string): JsonRecord {
 
 export function parseIdentity(body: unknown, endpoint: string): WechatIdentity {
   const data = dataRecord(body, endpoint);
-  const identityValue = valueAt(data, ['identity', 'finder', 'account']);
+  const identityValue = valueAt(data, ['identity', 'finder', 'finderUser', 'account']);
   const identity = identityValue && typeof identityValue === 'object' ? rec(identityValue, endpoint, 'identity') : data;
   return {
     externalId: requiredString(identity, ['externalId', 'external_id', 'finderUsername', 'finder_username', 'finderUserName', 'username'], endpoint, 'identity.externalId'),
@@ -113,7 +101,7 @@ export function parseLoginStatus(body: unknown, endpoint: string): WechatLoginSt
   return { status: mapped };
 }
 
-export function parsePosts(body: unknown, endpoint: string): WechatPage<WechatPost> {
+export function parsePosts(body: unknown, endpoint: string, currentPage: number): WechatPage<WechatPost> {
   const data = dataRecord(body, endpoint);
   const rawItems = valueAt(data, ['posts', 'postList', 'post_list', 'list']);
   if (!Array.isArray(rawItems)) throw schemaChanged(endpoint, 'posts');
@@ -122,61 +110,71 @@ export function parsePosts(body: unknown, endpoint: string): WechatPage<WechatPo
     const updated = valueAt(p, ['updatedAt', 'updated_at', 'updateTime', 'update_time', 'createTime', 'create_time']);
     return {
       externalId: requiredString(p, ['externalId', 'external_id', 'objectId', 'object_id', 'postId', 'post_id'], endpoint, `posts[${index}].externalId`),
-      title: optionalString(p, ['title', 'description', 'desc']),
-      coverUrl: optionalString(p, ['coverUrl', 'cover_url', 'cover']),
+      title: postDescription(p),
+      coverUrl: postCover(p),
       updatedAt: epochMs(updated, endpoint, `posts[${index}].updatedAt`),
     };
   });
-  return { items, ...pageMeta(data, endpoint) };
-}
-
-function parseCommentRecord(value: unknown, endpoint: string, postExternalId: string, indexPath: string): WechatComment {
-  const c = rec(value, endpoint, indexPath);
-  const created = valueAt(c, ['createdAt', 'created_at', 'createTime', 'create_time']);
-  const status = optionalString(c, ['lifecycle', 'status'])?.toLowerCase();
-  const lifecycle = status === 'deleted' || status === 'delete' ? 'deleted' : status === 'hidden' ? 'hidden' : 'active';
-  const rawReplies = valueAt(c, ['replies', 'replyList', 'reply_list', 'children']);
-  if (rawReplies !== undefined && !Array.isArray(rawReplies)) throw schemaChanged(endpoint, `${indexPath}.replies`);
-  const externalId = requiredString(c, ['externalId', 'external_id', 'commentId', 'comment_id'], endpoint, `${indexPath}.externalId`);
-  const contentText = optionalString(c, ['contentText', 'content_text', 'content', 'text']);
-  if (lifecycle === 'active' && contentText === null) throw schemaChanged(endpoint, `${indexPath}.contentText`);
+  const meta = pageMeta(data, endpoint);
   return {
-    externalId,
-    postExternalId,
-    rootExternalId: optionalString(c, ['rootExternalId', 'root_external_id', 'rootCommentId', 'root_comment_id']) ?? externalId,
-    parentExternalId: optionalString(c, ['parentExternalId', 'parent_external_id', 'parentCommentId', 'parent_comment_id']),
-    participant: participant(valueAt(c, ['participant', 'user', 'author']), endpoint),
-    contentText,
-    lifecycle,
-    createdAt: epochMs(created, endpoint, `${indexPath}.createdAt`),
-    likeCount: optionalCount(c, ['likeCount', 'like_count', 'likes']),
-    replies: (rawReplies ?? []).map((reply, index) => parseCommentRecord(reply, endpoint, postExternalId, `${indexPath}.replies[${index}]`)),
+    items,
+    nextCursor: meta.hasMore ? String(currentPage + 1) : null,
+    hasMore: meta.hasMore,
   };
 }
 
-export function parseComments(body: unknown, endpoint: string, postExternalId: string): WechatPage<WechatComment> {
-  const data = dataRecord(body, endpoint);
-  const rawItems = valueAt(data, ['comments', 'commentList', 'comment_list', 'list']);
-  if (!Array.isArray(rawItems)) throw schemaChanged(endpoint, 'comments');
-  return {
-    items: rawItems.map((item, index) => parseCommentRecord(item, endpoint, postExternalId, `comments[${index}]`)),
-    ...pageMeta(data, endpoint),
-  };
+function postDescription(post: JsonRecord): string | null {
+  const direct = optionalString(post, ['title', 'description']);
+  if (direct !== null) return direct;
+  const desc = post.desc;
+  return desc && typeof desc === 'object' && !Array.isArray(desc)
+    ? optionalString(desc as JsonRecord, ['description', 'title'])
+    : null;
 }
 
-export function parseDmSessions(body: unknown, endpoint: string): WechatPage<WechatDmSession> {
+function postCover(post: JsonRecord): string | null {
+  const direct = optionalString(post, ['coverUrl', 'cover_url', 'cover']);
+  if (direct !== null) return direct;
+  const desc = post.desc;
+  if (!desc || typeof desc !== 'object' || Array.isArray(desc)) return null;
+  const media = (desc as JsonRecord).media;
+  if (!Array.isArray(media) || !media[0] || typeof media[0] !== 'object' || Array.isArray(media[0])) return null;
+  return optionalString(media[0] as JsonRecord, ['coverUrl', 'cover_url', 'thumbUrl', 'thumb_url']);
+}
+
+export function parseComments(
+  body: unknown,
+  endpoint: string,
+  postExternalId: string,
+  currentPage: number,
+): WechatPage<WechatComment> {
   const data = dataRecord(body, endpoint);
-  const rawItems = valueAt(data, ['sessions', 'sessionList', 'session_list', 'list']);
-  if (!Array.isArray(rawItems)) throw schemaChanged(endpoint, 'sessions');
-  const items = rawItems.map((item, index): WechatDmSession => {
-    const s = rec(item, endpoint, `sessions[${index}]`);
-    return {
-      externalId: requiredString(s, ['externalId', 'external_id', 'sessionId', 'session_id'], endpoint, `sessions[${index}].externalId`),
-      participant: participant(valueAt(s, ['participant', 'user', 'peer']), endpoint),
-      updatedAt: epochMs(valueAt(s, ['updatedAt', 'updated_at', 'updateTime', 'update_time', 'lastMessageAt']), endpoint, `sessions[${index}].updatedAt`),
-    };
+  const posts = data.list;
+  if (!Array.isArray(posts)) throw schemaChanged(endpoint, 'comments.postList');
+  const post = posts.find((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+    return optionalString(item as JsonRecord, ['objectId', 'object_id', 'postId', 'post_id']) === postExternalId;
   });
-  return { items, ...pageMeta(data, endpoint) };
+  const meta = pageMeta(data, endpoint);
+  if (!post || typeof post !== 'object' || Array.isArray(post)) {
+    if (meta.hasMore) return { items: [], nextCursor: String(currentPage + 1), hasMore: true };
+    throw schemaChanged(endpoint, 'comments.targetPost');
+  }
+  const rawItems = valueAt(post as JsonRecord, ['commentList', 'comment_list']);
+  if (!Array.isArray(rawItems)) throw schemaChanged(endpoint, 'comments');
+  if (rawItems.length > 0) throw schemaChanged(endpoint, 'comments.nonEmptyCaptureRequired');
+  return {
+    items: [],
+    nextCursor: meta.hasMore ? String(currentPage + 1) : null,
+    hasMore: meta.hasMore,
+  };
+}
+
+export function parseEmptyDmHistory(body: unknown, endpoint: string): { nextCursor: string | null; hasMore: boolean } {
+  const data = dataRecord(body, endpoint);
+  if (!Array.isArray(data.msg)) throw schemaChanged(endpoint, 'messages');
+  if (data.msg.length > 0) throw schemaChanged(endpoint, 'messages.nonEmptyCaptureRequired');
+  return pageMeta(data, endpoint);
 }
 
 function dmType(raw: unknown): { messageType: WechatDmMessage['messageType']; platformType: string } {
@@ -189,8 +187,10 @@ function dmType(raw: unknown): { messageType: WechatDmMessage['messageType']; pl
 
 export function parseDmMessages(body: unknown, endpoint: string, threadExternalId: string): WechatPage<WechatDmMessage> {
   const data = dataRecord(body, endpoint);
-  const rawItems = valueAt(data, ['messages', 'messageList', 'message_list', 'list']);
+  const allItems = valueAt(data, ['messages', 'messageList', 'message_list', 'list', 'msg']);
+  const rawItems = allItems;
   if (!Array.isArray(rawItems)) throw schemaChanged(endpoint, 'messages');
+  if (rawItems.length > 0) throw schemaChanged(endpoint, 'messages.nonEmptyCaptureRequired');
   const items = rawItems.map((item, index): WechatDmMessage => {
     const m = rec(item, endpoint, `messages[${index}]`);
     const { messageType, platformType } = dmType(valueAt(m, ['messageType', 'message_type', 'type']));
@@ -233,6 +233,14 @@ export function parseDmMessages(body: unknown, endpoint: string, threadExternalI
     };
   });
   return { items, ...pageMeta(data, endpoint) };
+}
+
+export function parseEmptyDmSessionInfo(body: unknown, endpoint: string): true {
+  const data = dataRecord(body, endpoint);
+  if (!Array.isArray(data.sessionInfo) || data.sessionInfo.length > 0) {
+    throw schemaChanged(endpoint, 'sessionInfo.nonEmptyCaptureRequired');
+  }
+  return true;
 }
 
 export function parseSendAck(body: unknown, endpoint: string): WechatSendAck {

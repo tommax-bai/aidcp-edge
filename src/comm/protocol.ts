@@ -113,6 +113,7 @@ export type MessageType =
   | 'interaction.sync.request' // cloud → edge：触发按 channel/scope 同步
   | 'interaction.reply.send' // cloud → edge：带稳定幂等键的文本回复
   | 'interaction.auth.reopen' // cloud → edge：请求原环境重开登录 sidecar
+  | 'interaction.runtime.controls' // cloud → edge：按账号下发版本化有效能力
   | 'interaction.offboard.command' // cloud → edge：撤权后清理所属加密会话
   | 'interaction.offboard.result' // edge → cloud：可重放的凭证清理结果
   | 'interaction.offboard.ack' // cloud → edge：结果持久化确认；ack 后清 Edge outbox
@@ -210,6 +211,8 @@ export interface WelcomePayload {
   capabilities?: string[];
   /** Account-bound recovery barrier; missing is fail-closed when offboarding was negotiated. */
   interactionRecovery?: { offboardPending: boolean };
+  /** Negotiated account-scoped effective controls; missing remains fail-closed. */
+  interactionRuntime?: InteractionRuntimeControlsPayload;
 }
 
 // ————————————————— 视频号入站互动 v1（Session 00 frozen contract）—————————————————
@@ -217,10 +220,21 @@ export interface WelcomePayload {
 export const INTERACTION_INBOX_CAPABILITY = 'interaction_inbox_v1' as const;
 export const INTERACTION_REPLY_RECOVERY_CAPABILITY = 'interaction_reply_recovery_v1' as const;
 export const INTERACTION_OFFBOARDING_CAPABILITY = 'interaction_offboarding_v1' as const;
+export const INTERACTION_RUNTIME_CONTROLS_CAPABILITY = 'interaction_runtime_controls_v1' as const;
 export type InteractionPlatform = 'wechat_channels';
 export type InteractionChannel = 'comment' | 'dm';
 export type InteractionMessageType = 'text' | 'image' | 'unknown';
 export type InteractionMessageLifecycle = 'active' | 'deleted' | 'hidden';
+export interface InteractionRuntimeControlsPayload {
+  accountId: string;
+  envKey: string;
+  version: number;
+  commentsReadEnabled: boolean;
+  commentsReplyEnabled: boolean;
+  dmReadEnabled: boolean;
+  dmSendTextEnabled: boolean;
+  dmSendImageEnabled: false;
+}
 export type InteractionAuthStatus =
   | 'login_required'
   | 'authenticating'
@@ -283,6 +297,8 @@ export interface InteractionAuthStatusPayload {
   status: InteractionAuthStatus;
   browserState: InteractionBrowserState;
   capabilities: InteractionEffectiveCapabilities;
+  /** Latest account-control version accepted by this Edge, or null before negotiation/application. */
+  runtimeControlsVersion: number | null;
   identity: InteractionIdentitySummary | null;
   checkedAt: number;
   reasonCode: InteractionAuthReasonCode | null;
@@ -1735,6 +1751,7 @@ export interface PayloadMap {
   'interaction.sync.request': InteractionSyncRequestPayload;
   'interaction.reply.send': InteractionReplySendPayload;
   'interaction.auth.reopen': InteractionAuthReopenPayload;
+  'interaction.runtime.controls': InteractionRuntimeControlsPayload;
   'interaction.offboard.command': InteractionOffboardCommandPayload;
   'interaction.offboard.result': InteractionOffboardResultPayload;
   'interaction.offboard.ack': InteractionOffboardAckPayload;

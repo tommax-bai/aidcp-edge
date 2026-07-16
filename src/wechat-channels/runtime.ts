@@ -9,6 +9,7 @@ import type {
   InteractionReplyResultPayload,
   InteractionReplyResultAckPayload,
   InteractionReplySendPayload,
+  InteractionRuntimeControlsPayload,
   InteractionSyncAckPayload,
   InteractionSyncRequestPayload,
 } from '../comm/protocol.js';
@@ -49,7 +50,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   const envKey = env.AIDCP_ENV_KEY?.trim() || env.AIDCP_ADS_USER_ID?.trim();
   if (!envKey) throw new Error('[aidcp-edge] wechat_channels requires AIDCP_ENV_KEY or AIDCP_ADS_USER_ID');
   const accountId = env.AIDCP_WECHAT_ACCOUNT_ID?.trim() || env.AIDCP_ACCOUNT_ID?.trim();
-  if (!accountId) throw new Error('[aidcp-edge] wechat_channels requires AIDCP_WECHAT_ACCOUNT_ID or AIDCP_ACCOUNT_ID');
+  const logicalAccountId = accountId || envKey;
 
   const flags = wechatChannelsFeatureFlagsFromEnv(env);
   const breaker = new WechatEndpointCircuitBreaker();
@@ -74,7 +75,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   });
   const auth = new WechatAuthCoordinator({
     envKey,
-    expectedAccountId: accountId,
+    expectedAccountId: logicalAccountId,
     api,
     sidecar,
     probeEnabledReads: (session) => probeRunner.probeEnabledReads(session),
@@ -84,10 +85,10 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   });
 
   safeLog(
-    `[wechat-channels] feature defaults interaction=${flags.interactionEnabled} commentsRead=${flags.commentsReadEnabled} dmRead=${flags.dmReadEnabled} writes=${flags.writeEnabled && flags.accountWriteEnabled}`,
+    `[wechat-channels] local gates interaction=${flags.interactionEnabled} writes=${flags.writeEnabled}; account grants await Cloud snapshot`,
   );
   const state = new WechatRuntimeStateStore(
-    { envKey, accountId, browserProfileId: sidecar.browserProfileId },
+    { envKey, accountId: logicalAccountId, browserProfileId: sidecar.browserProfileId },
     resolveWechatStateRoot(env),
   );
 
@@ -110,7 +111,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
 
   connector = new WechatChannelsConnector({
     envKey,
-    accountId,
+    accountId: logicalAccountId,
     api,
     auth,
     state,
@@ -127,7 +128,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     platform: driver.platform,
     app: driver.app,
     capabilities: [...driver.edgeCapabilities],
-    accountId,
+    accountId: logicalAccountId,
     accountNickname: auth.getSnapshot().identity?.displayName,
     machineLabel: env.AIDCP_MACHINE_LABEL,
     remoteAddr: env.AIDCP_REMOTE_ADDR,
@@ -210,12 +211,35 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     return offboardFlush;
   };
 
+  const applyRuntimeControls = async (payload: InteractionRuntimeControlsPayload | undefined): Promise<boolean> => {
+    if (!payload || !capabilities.applyRemoteControls(payload, { accountId: logicalAccountId, envKey })) {
+      connector!.reportStatus();
+      return false;
+    }
+    const session = auth.getSession();
+    if (session) await probeRunner.probeEnabledReads(session).catch(() => false);
+    connector!.reportStatus();
+    safeLog(`[wechat-channels] applied Cloud runtime controls version=${payload.version}`);
+    return true;
+  };
+
   client.onInteractionCommand((envelope) => {
+    if (envelope.type === 'interaction.runtime.controls') {
+      void applyRuntimeControls(envelope.payload as InteractionRuntimeControlsPayload);
+      return;
+    }
     void handleInteractionCommand({ client, connector: connector!, state, auth, sidecar,
-      flushReplyResultOutbox, flushOffboardResultOutbox, offboardFlights }, envelope);
+      flushReplyResultOutbox, flushOffboardResultOutbox, offboardFlights }, envelope as Parameters<typeof handleInteractionCommand>[1]);
+  });
+  client.on('cloud.disconnected', () => {
+    capabilities.resetRemoteControls();
+    connector!.reportStatus();
+    void connector!.stop();
   });
   client.on('cloud.reconnected', () => {
     void (async () => {
+      capabilities.resetRemoteControls();
+      await applyRuntimeControls(client.getInteractionRuntimeControls());
       await flushReplyResultOutbox();
       await flushOffboardResultOutbox();
       if (client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
@@ -225,6 +249,8 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   });
 
   await client.connect();
+  capabilities.resetRemoteControls();
+  await applyRuntimeControls(client.getInteractionRuntimeControls());
   await flushReplyResultOutbox();
   await flushOffboardResultOutbox();
   if (client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&

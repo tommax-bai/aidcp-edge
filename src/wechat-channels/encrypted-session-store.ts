@@ -32,6 +32,7 @@ export interface LoadedWechatSession {
   identity: StoredSessionRecord['identity'];
   session: WechatSessionMaterial;
   savedAt: number;
+  legacyBindingMigrated: boolean;
 }
 
 export interface EncryptedSessionStoreOptions {
@@ -128,14 +129,20 @@ export class EncryptedWechatSessionStore {
       this.assertScope(record.binding);
       assertSessionMaterial(record.session);
       if (record.binding.finderIdentity !== record.identity.externalId) throw new Error('identity binding mismatch');
-      if (expectedAccountId && record.binding.accountId !== expectedAccountId) {
+      const legacyBindingMigrated = !!expectedAccountId && record.binding.accountId !== expectedAccountId &&
+        record.binding.accountId === record.binding.finderIdentity;
+      if (expectedAccountId && record.binding.accountId !== expectedAccountId && !legacyBindingMigrated) {
         throw new WechatChannelsError('identity_mismatch', 'session_store', 'Stored session belongs to another account', false);
       }
+      const binding = legacyBindingMigrated
+        ? { ...record.binding, accountId: expectedAccountId }
+        : record.binding;
       return {
-        binding: record.binding,
+        binding,
         identity: record.identity,
         session: record.session,
         savedAt: record.savedAt,
+        legacyBindingMigrated,
       };
     } catch (error) {
       if (error instanceof WechatChannelsError) throw error;
@@ -203,7 +210,10 @@ function parseMasterKey(value: string): Buffer | null {
 }
 
 function assertSessionMaterial(session: WechatSessionMaterial): void {
-  if (!session || !Array.isArray(session.cookies) || session.cookies.length === 0 || typeof session.userAgent !== 'string') {
+  if (!session || !Array.isArray(session.cookies) || session.cookies.length === 0 || typeof session.userAgent !== 'string' ||
+      session.requestContext?.version !== 1 || !session.requestContext.aid || !session.requestContext.pageUrl ||
+      !session.requestContext.commonBody.rawKeyBuff || !session.requestContext.headers.fingerprintDeviceId ||
+      !session.requestContext.headers.wechatUin) {
     throw new Error('invalid session material');
   }
   const allCookies = [...session.cookies, ...(session.dmCookies ?? [])];

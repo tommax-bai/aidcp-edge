@@ -43,12 +43,14 @@ import {
   INTERACTION_INBOX_CAPABILITY,
   INTERACTION_OFFBOARDING_CAPABILITY,
   INTERACTION_REPLY_RECOVERY_CAPABILITY,
+  INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
   type InteractionAuthReopenPayload,
   type InteractionOffboardAckPayload,
   type InteractionOffboardCommandPayload,
   type InteractionReplyReconcilePayload,
   type InteractionReplyResultAckPayload,
   type InteractionReplySendPayload,
+  type InteractionRuntimeControlsPayload,
   type InteractionSyncAckPayload,
   type InteractionSyncRequestPayload,
 } from '../comm/protocol.js';
@@ -91,7 +93,7 @@ export type InteractionCommandHandler = (
   env: Envelope<
     InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload |
     InteractionReplyResultAckPayload | InteractionReplyReconcilePayload | InteractionOffboardCommandPayload |
-    InteractionOffboardAckPayload
+    InteractionOffboardAckPayload | InteractionRuntimeControlsPayload
   >,
 ) => void;
 export type CloudConnectionEvent = 'cloud.disconnected' | 'cloud.reconnecting' | 'cloud.reconnected' | 'cloud.unrecoverable';
@@ -176,6 +178,7 @@ export class EdgeClient {
   private pacing?: PacingSnapshotPayload;
   private peerCapabilities = new Set<string>();
   private interactionRecovery?: WelcomePayload['interactionRecovery'];
+  private interactionRuntime?: WelcomePayload['interactionRuntime'];
   private connected = false;
   private intentionalClose = false;
   private reconnecting = false;
@@ -276,6 +279,7 @@ export class EdgeClient {
     this.sessionId = p.sessionId;
     this.peerCapabilities = new Set(Array.isArray(p.capabilities) ? p.capabilities : []);
     this.interactionRecovery = p.interactionRecovery;
+    this.interactionRuntime = p.interactionRuntime;
     // 节奏快照（pacing-floor-config-min-interval 设计 §4.3）：welcome 是 hello 的请求/响应，按 pending-id
     // 命中返回、永不经过主动命令白名单，故此处直接取用零白名单遗漏风险。缺省（旧云端）→ undefined，边缘用内置默认。
     this.pacing = p.pacing;
@@ -311,6 +315,12 @@ export class EdgeClient {
   hasPendingInteractionOffboard(): boolean {
     return this.supportsCapability(INTERACTION_OFFBOARDING_CAPABILITY) &&
       this.interactionRecovery?.offboardPending !== false;
+  }
+
+  getInteractionRuntimeControls(): InteractionRuntimeControlsPayload | undefined {
+    return this.supportsCapability(INTERACTION_RUNTIME_CONTROLS_CAPABILITY)
+      ? this.interactionRuntime
+      : undefined;
   }
 
   /**
@@ -572,6 +582,7 @@ export class EdgeClient {
         env.type === 'interaction.sync.request' ||
         env.type === 'interaction.reply.send' ||
         env.type === 'interaction.auth.reopen' ||
+        env.type === 'interaction.runtime.controls' ||
         env.type === 'interaction.reply.result.ack' ||
         env.type === 'interaction.reply.reconcile' ||
         env.type === 'interaction.offboard.command' ||
@@ -581,7 +592,7 @@ export class EdgeClient {
           env as Envelope<
             InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload |
             InteractionReplyResultAckPayload | InteractionReplyReconcilePayload | InteractionOffboardCommandPayload |
-            InteractionOffboardAckPayload
+            InteractionOffboardAckPayload | InteractionRuntimeControlsPayload
           >,
         );
       }
@@ -752,6 +763,7 @@ export class EdgeClient {
 }
 
 function interactionExtensionCapability(type: string): string | null {
+  if (type === 'interaction.runtime.controls') return INTERACTION_RUNTIME_CONTROLS_CAPABILITY;
   if (type.startsWith('interaction.reply.result.') || type.startsWith('interaction.reply.reconcile')) {
     return INTERACTION_REPLY_RECOVERY_CAPABILITY;
   }

@@ -210,10 +210,62 @@ test('XHS / Facebook 保留原 workspace；视频号只替换右侧且不占左�
   assert.equal($(window, '#interaction-workspace').contains($(window, '#env-rail')), false, '互动工作区不能吞掉左栏');
   assert.match($(window, '#acct-name').textContent || '', /轻享生活号/);
   assert.equal($(window, '#acct-plat').textContent, '视频号');
+  assert.match($(window, '#iw-title').textContent || '', /已绑定：示例视频号/);
   assert.match($(window, '#iw-browser').textContent || '', /浏览器已关闭（正常）/);
   assert.match($(window, '#iw-list').textContent || '', /示例观众/);
   assert.match($(window, '#iw-detail').textContent || '', /模板 template_comment_thanks · v1/);
   assert.match($(window, '#iw-detail').textContent || '', /配置版本 1/);
+});
+
+test('首次授权、错号恢复和账号开关待应用都有明确且 fail-closed 的引导', async () => {
+  const loginList = clone(listFixture);
+  loginList.data.items = [];
+  loginList.data.auth.status = 'login_required';
+  loginList.data.auth.identity = null;
+  loginList.data.auth.runtimeControls.edgeAppliedVersion = null;
+  loginList.data.auth.runtimeControls.applicationStatus = 'pending';
+  const first = await boot({
+    label: '春日手作号',
+    api: { interactionList: async () => apiResult(loginList) },
+  });
+  assert.match($(first.window, '#iw-title').textContent || '', /等待首次登录/);
+  assert.match($(first.window, '#iw-summary').textContent || '', /春日手作号/);
+  assert.match($(first.window, '#iw-summary').textContent || '', /无需填写内部账号 ID/);
+  assert.equal(hidden($(first.window, '#iw-reauth')), false);
+
+  const mismatchList = clone(listFixture);
+  const mismatchDetail = clone(commentFixture);
+  for (const fixture of [mismatchList, mismatchDetail]) {
+    fixture.data.auth.status = 'reauth_required';
+    fixture.data.auth.reasonCode = 'WECHAT_IDENTITY_MISMATCH';
+  }
+  const mismatch = await boot({
+    api: {
+      interactionList: async () => apiResult(mismatchList),
+      interactionDetail: async () => apiResult(mismatchDetail),
+    },
+  });
+  assert.match($(mismatch.window, '#iw-title').textContent || '', /另一个视频号/);
+  assert.match($(mismatch.window, '#iw-summary').textContent || '', /示例视频号/);
+  assert.match($(mismatch.window, '#iw-summary').textContent || '', /历史内容仍可查看/);
+  assert.equal((mismatch.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
+
+  const pendingList = clone(listFixture);
+  const pendingDetail = clone(commentFixture);
+  for (const fixture of [pendingList, pendingDetail]) {
+    fixture.data.auth.runtimeControls.storedVersion = 8;
+    fixture.data.auth.runtimeControls.edgeAppliedVersion = 7;
+    fixture.data.auth.runtimeControls.applicationStatus = 'pending';
+  }
+  const pending = await boot({
+    api: {
+      interactionList: async () => apiResult(pendingList),
+      interactionDetail: async () => apiResult(pendingDetail),
+    },
+  });
+  assert.match($(pending.window, '#iw-title').textContent || '', /账号开关等待本机应用/);
+  assert.match($(pending.window, '#iw-detail').textContent || '', /尚未回报应用同一版本/);
+  assert.equal((pending.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
 });
 
 test('tabs / 搜索 / 空态 / 错态 / ambiguous 都使用冻结 fixture 的诚实状态', async () => {
@@ -369,6 +421,8 @@ test('CAS 冲突保留输入并给出刷新入口；reauth 保留历史但禁写
   assert.equal(hidden($(reauth.window, '#iw-reauth')), false);
   $(reauth.window, '#iw-reauth').dispatchEvent(new reauth.window.Event('click', { bubbles: true }));
   await flush();
+  assert.match($(reauth.window, '#iw-sync-status').textContent || '', /仍需等待平台登录状态确认/);
+  assert.match($(reauth.window, '#iw-title').textContent || '', /需要重新登录/);
   assert.equal(reauth.window.document.querySelectorAll('[data-iw-action="approve"]:not([disabled])').length, 0);
   assert.equal(reauthList.data.items.length, 2, '登录失效不能清掉历史 fixture');
   assert.match(reopenArgs.idempotencyKey, /^interaction-reauth-/);

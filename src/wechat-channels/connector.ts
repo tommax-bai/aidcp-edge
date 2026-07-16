@@ -108,6 +108,7 @@ export class WechatChannelsConnector implements InteractionConnector {
       status: auth.status,
       browserState: auth.browserState,
       capabilities,
+      runtimeControlsVersion: this.options.capabilities.getRemoteControls?.()?.version ?? null,
       identity: auth.identity
         ? {
             externalId: auth.identity.externalId,

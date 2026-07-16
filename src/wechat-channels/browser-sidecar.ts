@@ -1,6 +1,6 @@
 import type { ChromeInstance } from '../cdp/chrome-launcher.js';
 import { attachToPage, selectBrowserProvider, type BrowserProvider, type EdgeSession } from '../cdp/index.js';
-import type { WechatCookie, WechatSessionMaterial } from './types.js';
+import type { WechatCookie, WechatRequestContext, WechatSessionMaterial } from './types.js';
 import { WECHAT_CHANNELS_DEFAULT_START_URL, WECHAT_CHANNELS_TARGET } from './driver.js';
 
 export type BrowserSidecarState = 'closed' | 'opening' | 'open' | 'closing' | 'unavailable';
@@ -29,6 +29,8 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
   private session?: EdgeSession;
   private browser?: ChromeInstance;
   private state: BrowserSidecarState = 'closed';
+  private requestContext?: WechatRequestContext;
+  private stopRequestCapture?: () => void;
 
   constructor(options: BrowserSidecarOptions = {}) {
     this.env = options.env ?? process.env;
@@ -81,6 +83,12 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
           }
         },
       });
+      await this.session.cdp.send('Network.enable');
+      this.stopRequestCapture = this.session.cdp.on('Network.requestWillBeSent', (params) => {
+        const captured = captureRequestContext(params);
+        if (captured) this.requestContext = captured;
+      });
+      await this.session.cdp.send('Page.reload', { ignoreCache: false }).catch(() => undefined);
       this.state = 'open';
       this.log('[wechat-channels] browser login sidecar is open');
     } catch (error) {
@@ -97,7 +105,7 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
       const domain = String(cookie.domain ?? '').replace(/^\./, '').toLowerCase();
       return domain === 'weixin.qq.com' || domain.endsWith('.weixin.qq.com');
     });
-    if (cookies.length === 0) return null;
+    if (cookies.length === 0 || !this.requestContext) return null;
     const userAgentResponse = await cdp
       .send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
         expression: 'navigator.userAgent',
@@ -119,6 +127,7 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
       })),
       userAgent,
       acquiredAt: this.now(),
+      requestContext: this.requestContext,
     };
   }
 
@@ -129,6 +138,8 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
     const browser = this.browser;
     this.session = undefined;
     this.browser = undefined;
+    this.stopRequestCapture?.();
+    this.stopRequestCapture = undefined;
     try {
       session?.close();
       if (browser) {
@@ -142,6 +153,57 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
       throw error;
     }
   }
+}
+
+function captureRequestContext(value: unknown): WechatRequestContext | null {
+  if (!value || typeof value !== 'object') return null;
+  const request = (value as { request?: unknown }).request;
+  if (!request || typeof request !== 'object') return null;
+  const raw = request as { url?: unknown; postData?: unknown; headers?: unknown };
+  if (typeof raw.url !== 'string' || typeof raw.postData !== 'string') return null;
+  let url: URL;
+  let body: Record<string, unknown>;
+  try {
+    url = new URL(raw.url);
+    body = JSON.parse(raw.postData) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (url.hostname !== 'channels.weixin.qq.com' || !url.pathname.endsWith('/auth/auth_data')) return null;
+  const headers = raw.headers && typeof raw.headers === 'object'
+    ? Object.fromEntries(Object.entries(raw.headers as Record<string, unknown>).map(([key, item]) => [key.toLowerCase(), item]))
+    : {};
+  const aid = url.searchParams.get('_aid');
+  const pageUrl = url.searchParams.get('_pageUrl');
+  const logFinderId = body._log_finder_id;
+  const logFinderUin = body._log_finder_uin;
+  const rawKeyBuff = body.rawKeyBuff;
+  const reqScene = body.reqScene;
+  const scene = body.scene;
+  const fingerprintDeviceId = headers['finger-print-device-id'];
+  const wechatUin = headers['x-wechat-uin'];
+  if (![aid, pageUrl, logFinderId, logFinderUin, rawKeyBuff, fingerprintDeviceId, wechatUin]
+      .every((item) => typeof item === 'string' && item.length > 0) ||
+      typeof reqScene !== 'number' || typeof scene !== 'number') return null;
+  const pluginSessionId = body.pluginSessionId;
+  if (pluginSessionId !== null && typeof pluginSessionId !== 'string') return null;
+  return {
+    version: 1,
+    aid: aid!,
+    pageUrl: pageUrl!,
+    commonBody: {
+      logFinderId: logFinderId as string,
+      logFinderUin: logFinderUin as string,
+      rawKeyBuff: rawKeyBuff as string,
+      pluginSessionId,
+      reqScene,
+      scene,
+    },
+    headers: {
+      fingerprintDeviceId: fingerprintDeviceId as string,
+      wechatUin: wechatUin as string,
+    },
+  };
 }
 
 function positiveMs(raw: string | undefined, fallback: number): number {

@@ -130,6 +130,9 @@ export class WechatAuthCoordinator {
           this.transition('degraded', 'WECHAT_SCHEMA_CHANGED');
           return;
         }
+        if (stored.legacyBindingMigrated) {
+          await this.store.save({ binding: stored.binding, identity: observed, session: stored.session });
+        }
         this.transition('api_only_running', null);
         return;
       } catch (error) {
@@ -200,7 +203,7 @@ export class WechatAuthCoordinator {
     if (!this.session || !this.identity) return false;
     try {
       const observed = await this.api.getIdentity(this.session);
-      if (observed.externalId !== this.identity.externalId || (this.accountId && observed.externalId !== this.accountId)) {
+      if (observed.externalId !== this.identity.externalId) {
         throw new WechatChannelsError('identity_mismatch', 'authData', 'Active session belongs to another account', false);
       }
       this.identity = observed;
@@ -253,18 +256,13 @@ export class WechatAuthCoordinator {
         await this.sleep(this.pollIntervalMs);
         continue;
       }
-      const expectedIdentity = this.identity?.externalId ?? this.expectedAccountId ?? null;
+      const expectedIdentity = this.identity?.externalId ?? null;
       if (expectedIdentity && observed.externalId !== expectedIdentity) {
         this.identityMatches = false;
         this.transition('reauth_required', 'WECHAT_IDENTITY_MISMATCH');
         throw new WechatChannelsError('identity_mismatch', 'authData', 'Local browser is logged into another account', false);
       }
-      const accountId = this.expectedAccountId ?? this.accountId ?? observed.externalId;
-      if (accountId !== observed.externalId) {
-        this.identityMatches = false;
-        this.transition('reauth_required', 'WECHAT_IDENTITY_MISMATCH');
-        throw new WechatChannelsError('identity_mismatch', 'authData', 'Cloud account and finder identity do not match', false);
-      }
+      const accountId = this.expectedAccountId ?? this.accountId ?? this.envKey;
       const binding: WechatSessionBinding = {
         envKey: this.envKey,
         accountId,
@@ -293,8 +291,7 @@ export class WechatAuthCoordinator {
   private assertIdentity(observed: WechatIdentity, binding: WechatSessionBinding): void {
     if (
       observed.externalId !== binding.finderIdentity ||
-      observed.externalId !== binding.accountId ||
-      (this.expectedAccountId && observed.externalId !== this.expectedAccountId)
+      (this.expectedAccountId && binding.accountId !== this.expectedAccountId)
     ) {
       throw new WechatChannelsError('identity_mismatch', 'authData', 'Stored session identity mismatch', false);
     }

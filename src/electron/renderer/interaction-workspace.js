@@ -196,8 +196,13 @@
       return state.stale || !env || env.connectivity !== 'connected';
     }
 
+    function controlsWriteBlocked() {
+      const controls = state.auth && state.auth.runtimeControls;
+      return !controls || controls.applicationStatus !== 'applied';
+    }
+
     function writeBlocked() {
-      return authWriteBlocked() || connectivityWriteBlocked();
+      return authWriteBlocked() || connectivityWriteBlocked() || controlsWriteBlocked();
     }
 
     function channelCapabilityBlocked(channel) {
@@ -212,14 +217,23 @@
       let title = '正在加载互动状态';
       let summary = '正在读取当前环境的评论和私信。';
       let tone = 'neutral';
-      if (status === 'active') {
+      if (auth && auth.reasonCode === 'WECHAT_IDENTITY_MISMATCH') {
+        title = '浏览器登录了另一个视频号';
+        summary = `请在“${safeText(env && env.label, '当前环境')}”的原浏览器切回已绑定账号${auth.identity ? `“${safeText(auth.identity.displayName, '原账号')}”` : ''}。历史内容仍可查看，写操作已暂停。`;
+        tone = 'danger';
+      } else if (status === 'active') {
         const connectivityStale = connectivityWriteBlocked();
-        title = connectivityStale ? '同步暂时中断' : '互动托管中';
-        summary = connectivityStale ? '正在使用上次成功数据；Cloud 恢复后可局部刷新。' : '评论和私信通过接口同步，发送结果以平台确认状态为准。';
-        tone = connectivityStale ? 'attention' : 'success';
+        const controlsPending = controlsWriteBlocked();
+        title = connectivityStale ? '同步暂时中断'
+          : controlsPending ? '账号开关等待本机应用'
+            : auth.identity ? `已绑定：${safeText(auth.identity.displayName, '视频号账号')}` : '互动托管中';
+        summary = connectivityStale ? '正在使用上次成功数据；Cloud 恢复后可局部刷新。'
+          : controlsPending ? 'Cloud 已保存账号配置，但 Edge 尚未回报同版本能力；当前写操作继续关闭。'
+            : '当前环境已绑定这个视频号。评论和私信按 Edge 实际能力同步，发送结果以平台确认状态为准。';
+        tone = connectivityStale || controlsPending ? 'attention' : 'success';
       } else if (status === 'login_required') {
         title = '等待首次登录';
-        summary = '已同步历史仍可阅读；完成视频号登录后才能生成或发送回复。';
+        summary = `将在“${safeText(env && env.label, '当前环境')}”打开的视频号助手中绑定你本次扫码登录的账号；无需填写内部账号 ID。`;
         tone = 'attention';
       } else if (status === 'reauth_required') {
         title = '需要重新登录';
@@ -259,6 +273,7 @@
       dom.syncStatus.textContent = state.listLoading
         ? '正在读取当前环境'
         : state.stale ? '使用上次成功数据'
+          : controlsWriteBlocked() && status === 'active' ? '账号开关已保存，等待 Edge 应用'
           : state.actionNotice || (state.asOf ? '评论/私信同步正常' : '同步状态待确认');
       dom.asOf.textContent = state.asOf ? `数据时间 ${formatTime(state.asOf)}` : '—';
       const canReopen = ['login_required', 'reauth_required', 'challenge_required'].includes(status);
@@ -433,7 +448,7 @@
           </div>
           <label class="iw-editor"><span>可编辑的最终文字</span><textarea id="iw-final-text" rows="4" maxlength="4000" ${textLocked ? 'disabled' : ''}>${escapeHtml(state.draftText)}</textarea><small id="iw-draft-count">${state.draftText.length}/4000${state.draftDirty ? ' · 尚未保存' : ''}</small></label>
           <div class="iw-risk-card ${job.riskLevel === 'high' ? 'danger' : job.riskLevel === 'unknown' ? 'attention' : 'neutral'}"><strong>风险检查：${escapeHtml(risk)}</strong><span>${escapeHtml(riskReasons)}</span></div>
-          ${authWriteBlocked() ? '<div class="iw-write-block">登录或能力状态未就绪，历史保持可读，写操作已禁用。</div>' : connectivityWriteBlocked() ? '<div class="iw-write-block">Cloud 离线或当前数据已过期，历史保持可读；刷新成功前写操作已禁用。</div>' : capabilityBlocked ? '<div class="iw-write-block">当前账号没有这个渠道的发送能力，写操作已禁用。</div>' : ''}
+          ${authWriteBlocked() ? '<div class="iw-write-block">登录或能力状态未就绪，历史保持可读，写操作已禁用。</div>' : connectivityWriteBlocked() ? '<div class="iw-write-block">Cloud 离线或当前数据已过期，历史保持可读；刷新成功前写操作已禁用。</div>' : controlsWriteBlocked() ? '<div class="iw-write-block">账号开关已保存，但 Edge 尚未回报应用同一版本；写操作继续关闭。</div>' : capabilityBlocked ? '<div class="iw-write-block">当前账号没有这个渠道的发送能力，写操作已禁用。</div>' : ''}
           ${state.actionError ? `<div class="iw-action-error" role="alert">${escapeHtml(friendlyError(state.actionError))}${state.actionError.code === 'INTERACTION_VERSION_CONFLICT' || state.actionError.code === 'INTERACTION_STATE_CONFLICT' ? '<button class="iw-button ghost" type="button" data-iw-action="refresh-detail">重新加载详情</button>' : ''}</div>` : ''}
           ${state.actionNotice ? `<div class="iw-action-notice" role="status">${escapeHtml(state.actionNotice)}</div>` : ''}
           <footer class="iw-reply-actions">
