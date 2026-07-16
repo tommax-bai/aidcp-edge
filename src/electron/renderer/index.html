@@ -15,6 +15,22 @@
         <div class="acct-h" id="acct-name">小红书账号</div>
         <span class="acct-p" id="acct-plat">小红书</span>
       </div>
+      <!-- 当前账号灵感储备：真实汇总读取后再落数；条宽只表达积累丰富度，不表示消耗或任务完成率。 -->
+      <button
+        id="content-library-entry"
+        class="content-library-entry nodrag"
+        type="button"
+        title="点击进入灵感库"
+        aria-label="灵感库，数据加载中，点击进入"
+      >
+        <span class="cle-star" aria-hidden="true">✦</span>
+        <span class="cle-label">灵感</span>
+        <strong id="content-library-entry-count" class="cle-value primary">—</strong>
+        <span class="cle-divider" aria-hidden="true">·</span>
+        <span class="cle-label">已成稿</span>
+        <strong id="content-library-entry-draft-count" class="cle-value">—</strong>
+        <span class="cle-track" aria-hidden="true"><span id="content-library-entry-bar" class="cle-bar"></span></span>
+      </button>
       <div class="tb-spacer"></div>
       <!-- 当前云端常驻显示（change edge-cloud-env-selector）：点击去设置切换。ol 醒目色；待重启生效时带 pending 态 -->
       <button id="cloud-env-chip" class="cloud-env-chip nodrag" type="button" title="当前云端环境（点击去设置切换）">
@@ -200,17 +216,6 @@
         <div id="runtime-guidance-resume" class="rg-resume hidden"></div>
         <div id="runtime-guidance-note" class="rg-note hidden"></div>
       </section>
-
-      <!-- 当前账号内容入口：进入同一主窗口内的灵感库，不创建系统级子窗口。 -->
-      <button id="content-library-entry" class="content-library-entry" type="button">
-        <span class="cle-icon" aria-hidden="true">✦</span>
-        <span class="cle-copy">
-          <strong>灵感库</strong>
-          <span id="content-library-entry-copy">查看当前账号进入精选池的内容</span>
-        </span>
-        <span id="content-library-entry-count" class="cle-count">—</span>
-        <span class="cle-arrow" aria-hidden="true">›</span>
-      </button>
 
       <!-- 内嵌运行时首启内核准备进度（仅缺内核时显示；下完自动隐藏） -->
       <section id="kernel-prep" class="kernel-prep hidden" aria-live="polite">

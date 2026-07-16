@@ -79,6 +79,42 @@ body { margin: 0; }
 .acct-p.plat-wechat { background: var(--plat-wechat); }
 .tb-spacer { flex: 1; }
 
+/* 标题栏灵感储备入口：低频能力保持安静；蓝绿只在储备达到视觉饱和阈值后出现。 */
+.content-library-entry {
+  --inspiration-fill: 0%;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid #d7e5ff;
+  border-radius: 8px;
+  color: #526a87;
+  background: #eef5ff;
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color .16s, background .16s, box-shadow .16s;
+}
+.content-library-entry:hover:not(:disabled) {
+  border-color: #c5d9fb;
+  background: #e6f0ff;
+  box-shadow: 0 3px 10px rgba(47, 111, 228, .10);
+}
+.content-library-entry:focus-visible { outline: 2px solid rgba(47, 111, 228, .38); outline-offset: 2px; }
+.content-library-entry:disabled { cursor: default; opacity: .55; }
+.cle-star { color: #4f83e8; font-size: 11px; }
+.cle-label { font-weight: 600; }
+.cle-value { color: #526a87; font-size: 11px; font-weight: 760; font-variant-numeric: tabular-nums; }
+.cle-value.primary { color: #2f6fe4; }
+.cle-divider { color: #8fa4bf; }
+.cle-track { width: 54px; height: 3px; overflow: hidden; border-radius: 999px; background: #dce8f7; }
+.cle-bar { display: block; width: var(--inspiration-fill); height: 100%; border-radius: inherit; background: #4f83e8; transition: width .24s ease; }
+.content-library-entry.is-rich .cle-bar { background: linear-gradient(90deg, #3f7ce0, #2aa57a); }
+
 .health-pill {
   display: inline-flex; align-items: center; gap: 7px;
   font-size: 12px; font-weight: 650; font-family: inherit;
@@ -2069,6 +2105,7 @@ body { margin: 0; }
 
 @media (max-width: 620px) {
   .acct-p { display: none; }
+  .cle-track { width: 34px; }
   .delegated-popover { right: 3px; width: min(430px, calc(100vw - 34px)); }
   .rg-progress-head { align-items: flex-start; flex-wrap: wrap; }
   .rg-progress-meta { width: 100%; justify-content: flex-start; text-align: left; }
@@ -2983,31 +3020,6 @@ body { margin: 0; }
 }
 
 /* ═══ 当前账号内容工作区：灵感库 / 灵感详情 / 参考创作 / 稿件审核 ═══ */
-.content-library-entry {
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto 18px;
-  align-items: center;
-  gap: 11px;
-  width: 100%;
-  padding: 12px 14px;
-  border: 1px solid #d8e4f3;
-  border-radius: 14px;
-  color: var(--ink);
-  background: linear-gradient(135deg, #fff 20%, #f4f8ff);
-  box-shadow: 0 7px 22px rgba(38, 70, 120, 0.06);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.content-library-entry:hover:not(:disabled) { border-color: #b9cef0; box-shadow: 0 9px 26px rgba(52, 120, 246, 0.11); }
-.content-library-entry:disabled { cursor: default; opacity: .58; }
-.cle-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 12px; color: #6b4bbc; background: #eee8ff; font-size: 18px; }
-.cle-copy { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
-.cle-copy strong { font-size: 13.5px; }
-.cle-copy span { overflow: hidden; color: var(--mute); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
-.cle-count { min-width: 30px; padding: 4px 9px; border-radius: 999px; color: #4f46a4; background: #ececff; font-size: 12px; font-weight: 750; text-align: center; }
-.cle-arrow { color: #8290a8; font-size: 24px; line-height: 1; }
-
 .shell.content-mode { width: min(1040px, calc(100vw - 28px)); min-height: calc(100vh - 46px); padding-bottom: 16px; }
 .content-workspace {
   display: flex;

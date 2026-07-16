@@ -4135,8 +4135,11 @@ ipcMain.handle('delegated-task:action', (_event, envId, taskId, action, version)
   );
 });
 
-// 当前账号灵感库：三个具名 IPC 锁死 customer-auth 路径和方法；envId 只用于主进程查 profileId，
+// 当前账号灵感库：四个具名 IPC 锁死 customer-auth 路径和方法；envId 只用于主进程查 profileId，
 // renderer 不得提交 accountId/envKey/URL/token。所有参数先做窄形状校验，再复用逐请求归属校验出口。
+ipcMain.handle('curated:summary', (_event, envId) =>
+  delegatedTaskRequest(envId, '/curated-contents?mode=all&limit=1&offset=0', { includeEnvQuery: true }));
+
 ipcMain.handle('curated:list', (_event, envId, options) => {
   const raw = options && typeof options === 'object' ? options : {};
   const mode = raw.mode === 'all' ? 'all' : raw.mode === 'creatable' || raw.mode === undefined ? 'creatable' : null;

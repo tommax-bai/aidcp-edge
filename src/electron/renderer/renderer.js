@@ -224,13 +224,9 @@ function syncContentWorkspace(status = currentStatus) {
   if (!contentWorkspace) return;
   const selected = fleetView.envs.get(fleetView.selected);
   const envId = currentEnvId() || (status && status.envId);
-  const count = status && status.inspirationSummary && Number.isFinite(status.inspirationSummary.count)
-    ? status.inspirationSummary.count
-    : null;
   contentWorkspace.setEnvironment(envId ? {
     envId,
     label: (status && status.account && status.account.name) || (selected && selected.name) || '当前账号',
-    inspirationCount: count,
   } : null);
 }
 

@@ -57,6 +57,48 @@ function boot(api: Record<string, unknown>) {
   return { window, controller };
 }
 
+test('标题栏灵感入口显示权威汇总，储备条只按精选总数并丢弃旧账号迟到回包', async () => {
+  let resolveA: ((value: unknown) => void) | undefined;
+  const pendingA = new Promise((resolve) => { resolveA = resolve; });
+  const summaryCalls: string[] = [];
+  const { window, controller } = boot({
+    curatedSummary: async (envId: string) => {
+      summaryCalls.push(envId);
+      if (envId === 'env-a') return pendingA;
+      return { ok: true, data: { total: 36, referenceDraftCount: 7 } };
+    },
+  });
+
+  controller.setEnvironment({ envId: 'env-a', label: '账号 A' });
+  assert.equal($(window, '#content-library-entry-count').textContent, '—');
+  assert.equal($(window, '#content-library-entry-draft-count').textContent, '—');
+  controller.setEnvironment({ envId: 'env-b', label: '账号 B' });
+  await flush();
+  assert.deepEqual(summaryCalls, ['env-a', 'env-b']);
+  assert.equal($(window, '#content-library-entry-count').textContent, '36');
+  assert.equal($(window, '#content-library-entry-draft-count').textContent, '7');
+  assert.equal($(window, '#content-library-entry').style.getPropertyValue('--inspiration-fill'), '100%');
+  assert.ok($(window, '#content-library-entry').classList.contains('is-rich'));
+  assert.match($(window, '#content-library-entry').getAttribute('aria-label') ?? '', /灵感 36.*已成稿 7/);
+
+  resolveA?.({ ok: true, data: { total: 24, referenceDraftCount: 99 } });
+  await flush();
+  assert.equal($(window, '#content-library-entry-count').textContent, '36');
+  assert.equal($(window, '#content-library-entry-draft-count').textContent, '7');
+  assert.equal($(window, '#content-library-entry').parentElement?.id, 'titlebar');
+});
+
+test('标题栏普通储备为蓝色区间，成稿数不驱动条宽', async () => {
+  const { window, controller } = boot({
+    curatedSummary: async () => ({ ok: true, data: { total: 24, referenceDraftCount: 700 } }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作' });
+  await flush();
+  assert.equal($(window, '#content-library-entry').style.getPropertyValue('--inspiration-fill'), '80%');
+  assert.equal($(window, '#content-library-entry').classList.contains('is-rich'), false);
+  assert.equal($(window, '#content-library-entry-draft-count').textContent, '700');
+});
+
 test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async () => {
   const listCalls: Array<{ envId: string; options: { mode: string; limit: number; offset: number } }> = [];
   const { window, controller } = boot({

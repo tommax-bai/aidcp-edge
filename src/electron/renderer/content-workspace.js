@@ -2,6 +2,7 @@
   'use strict';
 
   const PAGE_SIZE = 12;
+  const INSPIRATION_SATURATION_COUNT = 30;
 
   function createElement(document, tag, className, text) {
     const element = document.createElement(tag);
@@ -76,8 +77,8 @@
     const document = root.ownerDocument;
     const fields = {
       entry: document.querySelector('#content-library-entry'),
-      entryCopy: document.querySelector('#content-library-entry-copy'),
       entryCount: document.querySelector('#content-library-entry-count'),
+      entryDraftCount: document.querySelector('#content-library-entry-draft-count'),
       back: root.querySelector('#content-workspace-back'),
       close: root.querySelector('#content-workspace-close'),
       kicker: root.querySelector('#content-workspace-kicker'),
@@ -100,6 +101,7 @@
     const states = new Map();
     let environment = null;
     let requestEpoch = 0;
+    let summaryEpoch = 0;
     let currentPage = 'home';
     let backStack = [];
     let sourceWorkspace = 'legacy';
@@ -110,7 +112,18 @@
     function envState() {
       if (!environment) return null;
       if (!states.has(environment.envId)) {
-        states.set(environment.envId, { mode: 'creatable', page: 1, total: 0, items: [], scrollTop: 0, loaded: false });
+        states.set(environment.envId, {
+          mode: 'creatable',
+          page: 1,
+          total: 0,
+          items: [],
+          scrollTop: 0,
+          loaded: false,
+          inspirationCount: null,
+          referenceDraftCount: null,
+          summaryLoading: false,
+          summaryRequestId: 0,
+        });
       }
       return states.get(environment.envId);
     }
@@ -225,18 +238,51 @@
     }
 
     function updateEntry() {
-      const count = finiteCount(environment?.inspirationCount);
+      const state = envState();
+      const count = finiteCount(state?.inspirationCount);
+      const draftCount = finiteCount(state?.referenceDraftCount);
+      const fill = count === null ? 0 : Math.min(100, (count / INSPIRATION_SATURATION_COUNT) * 100);
       if (fields.entry) fields.entry.disabled = !environment;
       if (fields.entryCount) fields.entryCount.textContent = count === null ? '—' : String(count);
-      if (fields.entryCopy) {
-        fields.entryCopy.textContent = !environment
-          ? '先选择一个账号环境'
-          : count === null
-            ? '查看当前账号进入精选池的内容'
-            : count === 0
-              ? '当前账号还没有精选内容'
-              : `当前账号已有 ${count} 条精选内容`;
+      if (fields.entryDraftCount) fields.entryDraftCount.textContent = draftCount === null ? '—' : String(draftCount);
+      if (fields.entry) {
+        fields.entry.style.setProperty('--inspiration-fill', `${fill}%`);
+        fields.entry.classList.toggle('is-rich', count !== null && count >= INSPIRATION_SATURATION_COUNT);
+        fields.entry.setAttribute('aria-busy', state?.summaryLoading ? 'true' : 'false');
+        const countLabel = count === null ? '灵感数据加载中' : `灵感 ${count}`;
+        const draftLabel = draftCount === null ? '成稿数据加载中' : `已成稿 ${draftCount}`;
+        fields.entry.setAttribute(
+          'aria-label',
+          environment ? `灵感库，${countLabel}，${draftLabel}，点击进入` : '灵感库，请先选择账号',
+        );
+        fields.entry.title = environment ? '点击进入灵感库' : '请先选择一个账号环境';
       }
+    }
+
+    async function loadSummary(force = false) {
+      const state = envState();
+      if (!state || !environment || typeof api.curatedSummary !== 'function') return;
+      if (state.summaryLoading || (!force && state.inspirationCount !== null && state.referenceDraftCount !== null)) return;
+      const capturedEnvId = environment.envId;
+      const capturedEpoch = ++summaryEpoch;
+      state.summaryLoading = true;
+      state.summaryRequestId = capturedEpoch;
+      updateEntry();
+      let response;
+      try {
+        response = await api.curatedSummary(capturedEnvId);
+      } catch {
+        response = { ok: false, error: 'request_failed' };
+      }
+      const isLatestForState = state.summaryRequestId === capturedEpoch;
+      if (!isLatestForState || capturedEpoch !== summaryEpoch || environment?.envId !== capturedEnvId) {
+        if (isLatestForState) state.summaryLoading = false;
+        return;
+      }
+      state.summaryLoading = false;
+      state.inspirationCount = response?.ok ? finiteCount(response.data?.total) : null;
+      state.referenceDraftCount = response?.ok ? finiteCount(response.data?.referenceDraftCount) : null;
+      updateEntry();
     }
 
     function renderListMessage(title, detail, retry) {
@@ -347,7 +393,11 @@
       }
       state.items = response.data.items;
       state.total = finiteCount(response.data.total) ?? 0;
+      if (state.mode === 'all') state.inspirationCount = finiteCount(response.data.total);
+      const referenceDraftCount = finiteCount(response.data.referenceDraftCount);
+      if (referenceDraftCount !== null) state.referenceDraftCount = referenceDraftCount;
       state.loaded = true;
+      updateEntry();
       const lastPage = Math.max(1, Math.ceil(state.total / PAGE_SIZE));
       if (state.page > lastPage) {
         state.page = lastPage;
@@ -366,6 +416,7 @@
       backStack = ['home'];
       currentDetail = null;
       showPage('library', false);
+      void loadSummary(true);
       void loadList();
     }
 
@@ -546,9 +597,15 @@
       const normalized = next && next.envId ? {
         envId: String(next.envId),
         label: String(next.label || '当前账号'),
-        inspirationCount: finiteCount(next.inspirationCount),
       } : null;
       const changed = normalized?.envId !== environment?.envId;
+      if (changed && environment) {
+        const previousState = states.get(environment.envId);
+        if (previousState) {
+          previousState.summaryLoading = false;
+          previousState.summaryRequestId = 0;
+        }
+      }
       environment = normalized;
       updateEntry();
       if (!changed) {
@@ -556,8 +613,10 @@
         return;
       }
       requestEpoch += 1;
+      summaryEpoch += 1;
       currentDetail = null;
       createBusy = false;
+      if (environment) void loadSummary(true);
       if (!visible()) return;
       if (!environment || currentPage === 'draft') {
         close();

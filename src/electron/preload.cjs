@@ -64,6 +64,7 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   delegatedTaskAction: (envId, taskId, action, version) =>
     ipcRenderer.invoke('delegated-task:action', envId, taskId, action, version),
   // 当前账号灵感库：主进程固定 customer-auth 路径并注入所选环境；renderer 不能传 URL/token/accountId。
+  curatedSummary: (envId) => ipcRenderer.invoke('curated:summary', envId),
   curatedList: (envId, options) => ipcRenderer.invoke('curated:list', envId, options),
   curatedGet: (envId, id) => ipcRenderer.invoke('curated:get', envId, id),
   curatedCreatePost: (envId, id, useReferenceImages) =>
