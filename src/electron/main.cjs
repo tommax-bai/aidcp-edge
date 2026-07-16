@@ -3542,10 +3542,16 @@ function handleEdgeLogLine(handle, message, isError = false) {
     }
     if (evt.loopStage !== undefined) next.loopStage = evt.loopStage;
     // 阻断浮层（登录/验证码/未知阻断）待人工处理：核心成对信号驱动（`popup` 置真 / `popup_cleared`
-    // 或会话结束或有成功互动 置假），使该环境在环境栏浮顶为「需人工」而非绿色在线（红线：多环境跨窗
-    // 盯验证码正是本控制台的核心目的）。
+    // 或会话结束 置假），使该环境在环境栏浮顶为「需人工」而非绿色在线（红线：多环境跨窗盯验证码正是
+    // 本控制台的核心目的）。
+    //
+    // change facebook-write-action-visibility：**移除了「任何成功互动（statsDelta）顺带置假」这条兜底**。
+    // 它原是「显式清除信号还没有时」的权宜，但清除是**判断**、不是副作用：一次点赞只能证明那次点赞成功，
+    // 证明不了验证码已经解决。留着它 = 被拦住的环境被一次无关动作抹回绿色，运营就此看不见该救哪台机器。
+    // 两个平台此刻都已有显式成对信号（XHS 走中文兜底表的两条恢复信号；FB 走结构化 popup/popup_cleared），
+    // 兜底已无存在理由。清除只认显式解除。
     if (evt.type === 'popup') next.overlayBlocked = true;
-    else if (evt.type === 'popup_cleared' || evt.type === 'session_end' || evt.statsDelta) next.overlayBlocked = false;
+    else if (evt.type === 'popup_cleared' || evt.type === 'session_end') next.overlayBlocked = false;
   }
   updateStatus(handle, next);
   if (standbyHint) applyBrowserStandbyHint(handle, standbyHint);

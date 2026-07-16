@@ -8,6 +8,15 @@
 //      发布链路的插入点归 publish-edge-command-runtime 收口后串行处理，本模块只负责解析）。
 //   2) 兜底映射：既有中文日志行 → 人话句子 / 在场感 / 节奏阶段 / 计数增量。现网核心零改动即可出活动流。
 //
+// 平台归属（change facebook-write-action-visibility 坐实，别再误会）：
+//   - 下面那张兜底表 **是小红书浏览会话专属的**：22 条规则的措辞只由 `src/browse/browse-session.ts`
+//     或仅 XHS 生效的 `if (autoBrowse)` 块打印（`autoBrowse` 按构造排除 Facebook）。
+//   - **Facebook 一律走结构化层**（`src/facebook/companion-ui.ts` 是其唯一叙述器）。FB 的日志措辞
+//     MUST NOT 依赖本表，也 MUST NOT 误命中本表里描述 XHS 专属行为的规则——曾发生：FB 的**就地读**
+//     被 `/命令: profile\.open/` 叙述成「顺路去作者主页看看」（已在核心侧改措辞躲开）。
+//   - 本表是**无保障的手工耦合**：解析器测试只测本文件、从不执行发射器 ⇒ 改一句核心日志措辞，
+//     测试照样全绿而活动条目**静默消失**。新增覆盖请压在发射器侧。
+//
 // 红线（不静默假成功）：只翻译真实发生的事件；失败行绝不计数。
 // 与改版前 main.cjs 内联 substring 计数的**有意偏离**（旧法把失败行也计进数）：
 //   - 旧：包含 'like'/'collect' 即 +1 → 「comment_like 点击后状态未变化」这类失败行也被计赞。
@@ -16,10 +25,16 @@
 
 const UI_EVENT_PREFIX = '[ui-event]';
 
-// 事件形状（字段全部可选，按需携带）：
+// 事件形状（字段全部可选，按需携带）。注意本解析器**对 kind / type 不作枚举校验**：只要求 kind 是
+// string，其余原样透传 —— 故核心新增类型无需改本文件。下列 kind 清单是发射器现状的记录，非白名单：
 // {
-//   kind: 'activity' | 'presence' | 'publish' | 'publishPreview' | 'identity' | 'lastPublish',
+//   kind: 'activity' | 'presence' | 'publish' | 'publishPreview' | 'identity' | 'lastPublish'
+//         | 'dailyUsage' | 'browserStandby' | 'personaBound',
 //   type: string,                     // 机器可读标签（'like' / 'note_open' / 'connect' / ...）
+//                                     // FB 写动作（facebook-write-action-visibility）：
+//                                     //   comment | comment_pending | comment_failed
+//                                     //   join_group | join_pending | join_failed
+//                                     //   search | search_failed | popup | popup_cleared
 //   sentence: string,                 // 活动流一句话（人话）
 //   presence: string,                 // 在场感行文案（当前正在做什么）
 //   loopStage: 'feed'|'select'|'read'|'write'|'comment'|'interact'|'return'|null,

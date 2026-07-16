@@ -50,6 +50,7 @@ import {
 import { selectPlatformDriver } from './platform/index.js';
 import { runWechatChannelsRuntime } from './wechat-channels/runtime.js';
 import {
+  emitCompanionUiEvent,
   FacebookBrowseSession,
   FacebookCommentExecutor,
   FacebookCommentHandler,
@@ -995,7 +996,18 @@ async function main(): Promise<void> {
           } catch (err) {
             console.error('[aidcp-edge] risk.captcha_detected 上报失败:', err);
           }
-          console.warn(`[aidcp-edge] ⚠ Facebook 检测到${kind === 'captcha' ? '验证码' : '未知阻断/限流'}，已上报云端`);
+          const what = kind === 'captcha' ? '验证码' : '未知阻断/限流';
+          console.warn(`[aidcp-edge] ⚠ Facebook 检测到${what}，已上报云端`);
+          // change facebook-write-action-visibility：结构化点亮客户端「需要处理」态。
+          // 既有 edge-fleet-console 规格要求被验证码拦住的环境必须浮到最上，但这条中文日志不含壳侧
+          // 兜底正则要的「弹窗」「暂停操作」（那张表是小红书专属的）⇒ FB 环境的阻断态**从不置真**，
+          // 卡在验证码上的机器在客户端里一直是绿的、运营不知道该救哪台。绝不靠措辞匹配，走结构化行。
+          emitCompanionUiEvent((m) => console.log(m), {
+            kind: 'activity',
+            type: 'popup',
+            sentence: `遇到${what}，先停一停等处理`,
+            presence: `遇到${what}，暂停操作中…`,
+          });
         })();
       };
       const overlayReportGate = createOverlayReportGate({
@@ -1007,6 +1019,14 @@ async function main(): Promise<void> {
             console.error('[aidcp-edge] risk.captcha_cleared 上报失败:', err);
           }
           resetOverlaySnapshot();
+          // 清除侧同样必须显式：此前 FB 这条路径**什么都不打**（小红书侧会打），两侧都没有 ⇒
+          // 阻断态只能靠「任何一次成功动作顺带清掉」这种假清除退出（已在壳侧收紧为只认本事件）。
+          emitCompanionUiEvent((m) => console.log(m), {
+            kind: 'activity',
+            type: 'popup_cleared',
+            sentence: '阻断已解除，继续浏览',
+            presence: '继续浏览…',
+          });
         },
         isStillUnknown: () => overlayMonitor?.state === 'unknown',
         schedule: (fn, ms) => {

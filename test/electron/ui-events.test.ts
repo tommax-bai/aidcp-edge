@@ -203,3 +203,17 @@ test('结构化 lastPublish 行（云端快照回填）→ 透传并截断标题
   assert.equal(evt.sentence, undefined, 'lastPublish 不产活动流句子（不是刚发生的事件）');
   assert.equal(evt.statsDelta, undefined, 'lastPublish 不计数');
 });
+
+test('结构化 FB 写动作行原样透传（解析器对新 type 不作枚举校验）', () => {
+  const s = createUiEventStream();
+  // change facebook-write-action-visibility：FB 走结构化层，解析器只要求 kind 是 string、其余透传。
+  // 本例证明新增 type 无需改解析器；红线断言（待批准不计数）压在发射器侧的 comment-handler 测试里。
+  const evt = s.push(
+    '[ui-event] {"kind":"activity","type":"comment_pending","sentence":"评论待管理员批准，还没显示出来：「请问还招人吗」","loopStage":"interact"}',
+  );
+  assert.ok(evt);
+  assert.equal(evt.kind, 'activity');
+  assert.equal(evt.type, 'comment_pending');
+  assert.equal(evt.sentence, '评论待管理员批准，还没显示出来：「请问还招人吗」');
+  assert.equal(evt.statsDelta, undefined, '待批准绝不计数——发射器不带，解析器也不得凭空补');
+});

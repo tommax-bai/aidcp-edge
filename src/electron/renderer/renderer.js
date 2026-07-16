@@ -1628,10 +1628,14 @@ fields.pubHeadRow.addEventListener('keydown', (e) => {
 // ─── 叙述式活动流（环形 ≤200 条，最新在上）───
 const STREAM_MAX = 200;
 // 事件类型 → 图标字 + 色调（给纯文字流加视觉锚点；这是类型记号，不是 App 图标）。
+// 未命中回落 ['·','ic-sys']——这里**不是**过滤器，新类型少了记号只是掉成灰点、条目照常上屏。
+// `_pending` / `_failed` 变体**有意与本族共用记号**：句子已经承载真相，逐档换记号只是噪声。
 const EV_ICONS = [
   [/^(like|comment_like|follow)$/, ['赞', 'ic-like']],
   [/^collect$/, ['藏', 'ic-collect']],
-  [/^comment$/, ['评', 'ic-comment']],
+  [/^(comment|comment_pending|comment_failed)$/, ['评', 'ic-comment']],
+  [/^(join_group|join_pending|join_failed)$/, ['群', 'ic-join']],
+  [/^(search|search_failed)$/, ['搜', 'ic-search']],
   [/^(note_open|images|profile_read)$/, ['读', 'ic-read']],
   [/^popup/, ['注', 'ic-warn']],
   [/^publish/, ['发', 'ic-pub']],

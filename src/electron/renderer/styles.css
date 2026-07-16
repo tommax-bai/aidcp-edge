@@ -999,6 +999,8 @@ body { margin: 0; }
 .ev-ic.ic-like { background: #ffeef1; color: #d02f4d; }
 .ev-ic.ic-collect { background: #fdf1dc; color: #9a6413; }
 .ev-ic.ic-comment { background: #e8f0ff; color: #2c5dd4; }
+.ev-ic.ic-join { background: #e9f6ee; color: #1f7a44; }
+.ev-ic.ic-search { background: #f0edfa; color: #5a45a8; }
 .ev-ic.ic-read { background: #ecf0fb; color: #4c5c9c; }
 .ev-ic.ic-warn { background: #fdf1dc; color: #9a6413; }
 .ev-ic.ic-pub { background: var(--good-bg); color: var(--good-fg); }
