@@ -646,6 +646,35 @@ test('平台标识：FB 环境行染平台类、顶栏徽标随选中环境切�
   assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('plat-facebook'), false, '小红书人设头像不得残留 FB 类');
 });
 
+test('平台标识：添加环境列表中的视频号标签复用状态栏绿色，不回落到小红书红色', async () => {
+  const { w } = await boot({
+    adsStatus: async () => ({ ok: true }),
+    adsListProfiles: async () => ({
+      ok: true,
+      profiles: [{
+        userId: 'wx1',
+        name: '视频号环境',
+        serialNumber: '75',
+        groupName: 'aidcp-创建',
+        proxy: '',
+        platform: 'wechat_channels',
+      }],
+    }),
+  }, { environments: [], adsProfileId: '', adsProfileName: '' });
+  await tick();
+  await tick();
+
+  const chip = w.document.querySelector('.ads-env-item .env-plat') as HTMLElement;
+  assert.ok(chip, '添加环境列表应渲染平台标签');
+  assert.equal(chip.textContent, '视频号');
+  assert.equal(chip.classList.contains('plat-wechat_channels'), true, 'renderer 平台类必须保留规范 wechat_channels id');
+  assert.match(
+    rendererCss,
+    /\.env-plat\.plat-wechat_channels\s*\{[^}]*color:\s*var\(--plat-wechat\);[^}]*background:\s*#[0-9a-f]{6};[^}]*\}/i,
+    '视频号标签必须用状态栏同源 --plat-wechat 文字色和专用浅绿背景',
+  );
+});
+
 test('人设浮层：未就绪环境出空态面板（向导收起）；生成后进预览页、「改关键词」回第一步草稿保留', async () => {
   const calls: Record<string, unknown[]> = { persist: [] };
   const { w, pushStatus } = await boot({

@@ -2487,6 +2487,7 @@ body { margin: 0; }
   color: #b02942; background: #ffeef1;
 }
 .env-plat.plat-facebook { color: var(--plat-fb); background: #e7f0fe; }
+.env-plat.plat-wechat_channels { color: var(--plat-wechat); background: #e7f8ef; }
 .env-plat.inferred { opacity: 0.8; }
 .ads-env-plat-switch, .ads-env-proxy {
   flex-shrink: 0; border: 1px solid #dbe3ef; background: #fff; color: #64748b;
