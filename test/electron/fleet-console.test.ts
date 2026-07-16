@@ -655,7 +655,7 @@ test('平台标识：添加环境列表中的视频号标签复用状态栏绿�
         userId: 'wx1',
         name: '视频号环境',
         serialNumber: '75',
-        groupName: 'aidcp-创建',
+        groupName: 'aidcp',
         proxy: '',
         platform: 'wechat_channels',
       }],

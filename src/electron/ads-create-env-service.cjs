@@ -1,6 +1,6 @@
 const { createCreateFlow } = require('./ads-create-flow.cjs');
 
-const ENV_GROUP_NAME = 'aidcp-创建';
+const ENV_GROUP_NAME = 'aidcp';
 
 function isDeletedOrArchivedGroupError(error) {
   const s = String(error || '').toLowerCase();
@@ -29,20 +29,23 @@ function createEnvGroupResolver({ adsApi, groupName = ENV_GROUP_NAME } = {}) {
     return picked ? String(picked.groupId) : '';
   }
 
-  async function ensureEnvGroup(writeApi, adsOpts, opts = {}) {
+  async function ensureEnvGroup(adsOpts, opts = {}) {
     const skipGroupIds = (opts.skipGroupIds || []).filter(Boolean).map(String);
     if (cachedEnvGroupId && !skipGroupIds.includes(String(cachedEnvGroupId))) {
       return { ok: true, groupId: cachedEnvGroupId };
     }
     if (cachedEnvGroupId && skipGroupIds.includes(String(cachedEnvGroupId))) clearEnvGroupCache();
 
-    let gid = pickGroupId(await adsApi.listGroups(adsOpts), skipGroupIds);
+    const listed = await adsApi.listGroups({ ...(adsOpts || {}), groupName });
+    if (!listed || !listed.ok) {
+      return { ok: false, error: (listed && listed.error) || `无法读取预置 AdsPower 分组“${groupName}”` };
+    }
+    const gid = pickGroupId(listed, skipGroupIds);
     if (!gid) {
-      const cr = await writeApi.createGroup(groupName, adsOpts);
-      gid = cr.ok && cr.groupId && !skipGroupIds.includes(String(cr.groupId))
-        ? String(cr.groupId)
-        : pickGroupId(await adsApi.listGroups(adsOpts), skipGroupIds);
-      if (!gid) return { ok: false, error: cr.error || '无法定位/创建专用分组' };
+      return {
+        ok: false,
+        error: `未找到预置 AdsPower 分组“${groupName}”，请确认当前指纹浏览器服务、API Key 与分组权限`,
+      };
     }
     cachedEnvGroupId = gid;
     return { ok: true, groupId: gid };
@@ -69,7 +72,7 @@ async function createEnvironmentWithGroupRecovery({
   const resolver = groupResolver || createEnvGroupResolver({ adsApi });
 
   async function attempt(skipGroupIds = []) {
-    const grp = await resolver.ensureEnvGroup(writeApi, adsOpts, { skipGroupIds });
+    const grp = await resolver.ensureEnvGroup(adsOpts, { skipGroupIds });
     if (!grp.ok) return { result: { ok: false, error: grp.error }, groupId: '' };
 
     const flow = createFlowFactory({ writeApi, fingerprint });

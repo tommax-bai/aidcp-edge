@@ -4370,7 +4370,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
   }
   adsCreateInFlight = true;
   try {
-    // 先确保指纹浏览器服务就绪（仅服务、不下内核）——冷机不再裸抛 group/create 的 fetch failed。
+    // 先确保指纹浏览器服务就绪（仅服务、不下内核）——冷机不再裸抛 LocalAPI fetch failed。
     const svc = await ensureAdsServiceOnce(null);
     if (!svc.ok) {
       return { ok: false, error: `指纹浏览器运行时未就绪：${svc.error || '未知错误'}`, retryable: true };
