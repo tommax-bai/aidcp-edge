@@ -217,6 +217,61 @@ test('XHS / Facebook 保留原 workspace；视频号只替换右侧且不占左�
   assert.match($(window, '#iw-detail').textContent || '', /配置版本 1/);
 });
 
+test('视频号工作区保留当前环境生命周期按钮，并只按 envKey 启动、暂停、恢复', async () => {
+  const lifecycleCalls: Array<[string, string]> = [];
+  let startAllCalls = 0;
+  let settingsSaveCalls = 0;
+  const lifecycleStatus = (envKey: string, edge: string, session: string) => ({
+    ...status(envKey, '轻享生活号'), edge, session,
+  });
+  const { window, pushFleet } = await boot({
+    api: {
+      fleetStartAll: async () => { startAllCalls += 1; return { ok: true }; },
+      saveSettings: async (patch: any) => { settingsSaveCalls += 1; return { ...patch, saveOk: true }; },
+      start: async (envKey: string) => {
+        lifecycleCalls.push(['start', envKey]);
+        return lifecycleStatus(envKey, 'starting', 'running');
+      },
+      pause: async (envKey: string) => {
+        lifecycleCalls.push(['pause', envKey]);
+        return lifecycleStatus(envKey, 'running', 'paused');
+      },
+      resume: async (envKey: string) => {
+        lifecycleCalls.push(['resume', envKey]);
+        return lifecycleStatus(envKey, 'running', 'running');
+      },
+    },
+  });
+  const lifecycle = $(window, '#iw-lifecycle') as HTMLButtonElement;
+  const stopped = lifecycleStatus('env_wc_demo', 'stopped', 'paused');
+  pushFleet({
+    provider: 'adspower', selectedEnvId: 'env_wc_demo', railCollapsed: true,
+    environments: [{ envId: 'env_wc_demo', name: '轻享生活号', platform: 'wechat_channels', status: stopped }],
+  });
+  await flush();
+
+  assert.equal(hidden(lifecycle), false, '视频号右侧工作区必须直接露出生命周期入口');
+  assert.equal(lifecycle.textContent, '启动', '核心已停止时启动优先于残留的 paused 会话标记');
+  lifecycle.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls, [['start', 'env_wc_demo']]);
+  assert.equal(lifecycle.textContent, '暂停', 'starting 状态继续允许用户暂停');
+
+  lifecycle.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls, [['start', 'env_wc_demo'], ['pause', 'env_wc_demo']]);
+  assert.equal(lifecycle.textContent, '恢复');
+
+  lifecycle.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls, [
+    ['start', 'env_wc_demo'], ['pause', 'env_wc_demo'], ['resume', 'env_wc_demo'],
+  ]);
+  assert.equal(lifecycle.textContent, '暂停');
+  assert.equal(startAllCalls, 0, '单环境入口不得退化成全部启动');
+  assert.equal(settingsSaveCalls, 1, '视频号启动必须复用先保存设置再启动的单环境链路');
+});
+
 test('首次授权、错号恢复和账号开关待应用都有明确且 fail-closed 的引导', async () => {
   const loginList = clone(listFixture);
   loginList.data.items = [];

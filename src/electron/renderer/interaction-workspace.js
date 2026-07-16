@@ -112,12 +112,15 @@
     const legacyRoot = options && options.legacyRoot;
     const shell = options && options.shell;
     const api = options && options.api;
+    const onLifecycleAction = options && options.onLifecycleAction;
+    const onLifecycleStatus = options && options.onLifecycleStatus;
     if (!root || !legacyRoot || !shell || !api) return null;
 
     const dom = {
       title: root.querySelector('#iw-title'),
       summary: root.querySelector('#iw-summary'),
       browser: root.querySelector('#iw-browser'),
+      lifecycle: root.querySelector('#iw-lifecycle'),
       reauth: root.querySelector('#iw-reauth'),
       sync: root.querySelector('#iw-sync'),
       syncStatus: root.querySelector('#iw-sync-status'),
@@ -144,7 +147,7 @@
         tab: 'pending', search: '', items: [], nextCursor: null, listLoading: false, listAppending: false,
         listError: null, selectedThreadId: null, detail: null, detailLoading: false, detailError: null,
         auth: null, asOf: null, stale: false, actionBusy: null, actionError: null, actionNotice: null,
-        draftText: '', draftDirty: false, syncBusy: false, pollCount: 0,
+        draftText: '', draftDirty: false, syncBusy: false, lifecycleBusy: null, pollCount: 0,
       };
     }
 
@@ -211,6 +214,14 @@
       return channel === 'dm' ? !caps.dmSendText : !caps.commentsReply;
     }
 
+    function lifecycleControl() {
+      if (!env) return { action: null, label: '状态确认中' };
+      if (env.edge === 'stopped' || env.edge === 'warning') return { action: 'start', label: '启动' };
+      if (env.session === 'paused') return { action: 'resume', label: '恢复' };
+      if (env.edge === 'starting' || env.edge === 'running') return { action: 'pause', label: '暂停' };
+      return { action: null, label: '状态确认中' };
+    }
+
     function renderOverview() {
       const auth = state.auth;
       const status = auth && auth.status;
@@ -270,6 +281,13 @@
                 : '浏览器状态待确认';
       dom.browser.textContent = browserText;
       dom.browser.className = `iw-status-chip ${browserState === 'unavailable' ? 'danger' : browserState === 'closed' && status === 'active' ? 'success' : 'neutral'}`;
+      const lifecycle = lifecycleControl();
+      const lifecycleBusyLabel = { start: '正在启动…', resume: '正在恢复…', pause: '正在暂停…' }[state.lifecycleBusy];
+      const lifecycleVisualAction = state.lifecycleBusy || lifecycle.action;
+      dom.lifecycle.dataset.action = lifecycle.action || '';
+      dom.lifecycle.textContent = lifecycleBusyLabel || lifecycle.label;
+      dom.lifecycle.className = `iw-button ${lifecycleVisualAction === 'pause' ? 'secondary' : 'primary'}`;
+      dom.lifecycle.disabled = Boolean(state.lifecycleBusy) || !active || !lifecycle.action || typeof onLifecycleAction !== 'function';
       dom.syncStatus.textContent = state.listLoading
         ? '正在读取当前环境'
         : state.stale ? '使用上次成功数据'
@@ -751,6 +769,39 @@
       }
     }
 
+    async function changeLifecycle() {
+      if (!active || !env || state.lifecycleBusy) return;
+      const lifecycle = lifecycleControl();
+      if (!lifecycle.action || typeof onLifecycleAction !== 'function') return;
+      const capturedEpoch = epoch;
+      const envKey = env.envKey;
+      state.lifecycleBusy = lifecycle.action;
+      state.actionNotice = null;
+      renderOverview();
+      try {
+        const next = await onLifecycleAction(lifecycle.action, envKey);
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        if (!next) return;
+        if (next && next.envId && next.envId !== envKey) {
+          const error = new Error('生命周期回包环境与当前环境不一致，已丢弃。');
+          error.code = 'INTERACTION_SCOPE_MISMATCH';
+          throw error;
+        }
+        if (next && typeof onLifecycleStatus === 'function') onLifecycleStatus(next);
+        state.actionNotice = lifecycle.action === 'start'
+          ? '已请求启动当前环境。'
+          : lifecycle.action === 'resume' ? '已请求恢复当前环境。' : '已请求暂停当前环境。';
+      } catch (error) {
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        state.actionNotice = `${lifecycle.label}失败：${friendlyError(error)}`;
+      } finally {
+        if (isCurrent(capturedEpoch, envKey)) {
+          state.lifecycleBusy = null;
+          renderAll();
+        }
+      }
+    }
+
     function selectEnvironment(next) {
       const isWechat = next && next.platform === 'wechat_channels';
       if (!isWechat) {
@@ -763,9 +814,10 @@
       }
       if (env && env.envKey === next.envKey && active) {
         const connectivityChanged = env.connectivity !== next.connectivity;
+        const lifecycleChanged = env.edge !== next.edge || env.session !== next.session;
         env = { ...next };
         if (next.connectivity !== 'connected') state.stale = Boolean(state.items.length || state.detail || state.stale);
-        if (connectivityChanged) renderAll();
+        if (connectivityChanged || lifecycleChanged) renderAll();
         return;
       }
       if (env && api.interactionCancelReads) void api.interactionCancelReads(env.envKey);
@@ -821,6 +873,7 @@
       if (button) button.focus();
     });
     dom.loadMore.addEventListener('click', () => void loadList({ append: true, preserveSelection: true }));
+    dom.lifecycle.addEventListener('click', () => void changeLifecycle());
     dom.sync.addEventListener('click', () => void syncCurrent());
     dom.reauth.addEventListener('click', () => void reopenAuth());
 

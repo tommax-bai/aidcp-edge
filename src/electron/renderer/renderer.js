@@ -200,6 +200,8 @@ const interactionWorkspace = window.InteractionWorkspace?.create({
   legacyRoot: document.querySelector('#legacy-workspace'),
   shell: document.querySelector('.shell'),
   api: window.aidcpEdge,
+  onLifecycleAction: runSessionLifecycle,
+  onLifecycleStatus: routeStatus,
 }) || null;
 
 function syncInteractionWorkspace() {
@@ -210,6 +212,8 @@ function syncInteractionWorkspace() {
     platform: normPlatform(selected.platform),
     label: selected.name || '',
     connectivity: selected.status && selected.status.cloud,
+    edge: selected.status && selected.status.edge,
+    session: selected.status && selected.status.session,
   } : null);
 }
 
@@ -3400,30 +3404,34 @@ settingsUi.applyRestart.addEventListener('click', async () => {
   }
 });
 
+// 单环境生命周期的唯一 renderer 出口：旧工作区与视频号 InteractionWorkspace 共用，确保“启动”始终先保存设置。
+async function runSessionLifecycle(action, envId = currentEnvId()) {
+  if (action === 'resume') {
+    // 恢复 = 重启核心。若暂停期间改过浏览器设置（如切换了环境），先落盘再重启，否则会按旧设置重起。
+    if (!(await persistDirtyBeforeRestart('设置已保存，正在按新设置恢复…'))) return null;
+    return window.aidcpEdge.resume(envId);
+  }
+  if (action === 'start') {
+    // 启动 = 先保存当前设置再启动（保存并入启动，无独立保存按钮）。
+    if (selectedProvider() === 'adspower' && !settingsUi.adsProfile.value.trim() && roster.length === 0) {
+      promptMissingAdsProfile();
+      return null;
+    }
+    const saved = await saveCurrentSettings();
+    settingsUi.msg.textContent = saved && saved.saveOk === false
+      ? `设置本次生效但写盘失败：${saved.saveError || ''}（重启应用后可能丢失）`
+      : '设置已保存，正在启动…';
+    return window.aidcpEdge.start(envId);
+  }
+  return window.aidcpEdge.pause(envId);
+}
+
 // 今日进展会话按钮：三态触发 恢复 / 启动（=先保存再启动） / 暂停。无独立「保存」按钮。
 fields.sessionFab.addEventListener('click', async () => {
   const action = fields.sessionFab.dataset.action;
   fields.sessionFab.disabled = true;
   try {
-    let next;
-    if (action === 'resume') {
-      // 恢复 = 重启核心。若暂停期间改过浏览器设置（如切换了环境），先落盘再重启，否则会按旧设置重起。
-      if (!(await persistDirtyBeforeRestart('设置已保存，正在按新设置恢复…'))) return;
-      next = await window.aidcpEdge.resume(currentEnvId());
-    } else if (action === 'start') {
-      // 启动 = 先保存当前设置再启动（保存并入启动，无独立保存按钮）。
-      if (selectedProvider() === 'adspower' && !settingsUi.adsProfile.value.trim() && roster.length === 0) {
-        promptMissingAdsProfile();
-        return;
-      }
-      const saved = await saveCurrentSettings();
-      settingsUi.msg.textContent = saved && saved.saveOk === false
-        ? `设置本次生效但写盘失败：${saved.saveError || ''}（重启应用后可能丢失）`
-        : '设置已保存，正在启动…';
-      next = await window.aidcpEdge.start(currentEnvId());
-    } else {
-      next = await window.aidcpEdge.pause(currentEnvId());
-    }
+    const next = await runSessionLifecycle(action, currentEnvId());
     if (next) routeStatus(next);
   } finally {
     fields.sessionFab.disabled = false;
