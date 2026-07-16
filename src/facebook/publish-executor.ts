@@ -11,10 +11,13 @@ import type { ImageUploader } from '../flows/image-uploader.js';
 import type { PublishCommandPayload, PublishCommandResultPayload } from '../comm/protocol.js';
 import { rethrowIfTakeover, TaskTakeoverError, type TakeoverCtx } from '../execution/takeover.js';
 import type { CommitWindowGuard } from '../execution/commit-window.js';
+import { classifyFacebookSurface, type FacebookSurfaceType } from './probes/page-structure.js';
 
 export interface FacebookPublishExecutorOptions {
-  settleMs?: number;
   pollMs?: number;
+  /** 导航到 Facebook 首页后的落地确认窗口；MUST 小于 cloud 默认单指令 30s。 */
+  navigationTimeoutMs?: number;
+  /** cloud 未下发 select_mode 预算时的兼容兜底；MUST 小于 cloud 默认单指令 30s。 */
   composerTimeoutMs?: number;
   submitVerifyTimeoutMs?: number;
   capturePostTimeoutMs?: number;
@@ -45,10 +48,11 @@ export interface FacebookPublishExecutorDeps {
 }
 
 const FACEBOOK_HOME_URL = 'https://www.facebook.com/';
+const COMPOSER_TRIGGER_MAX_MS = 20_000;
 
 const DEFAULTS: Required<FacebookPublishExecutorOptions> = {
-  settleMs: 2_000,
   pollMs: 400,
+  navigationTimeoutMs: 20_000,
   composerTimeoutMs: 20_000,
   submitVerifyTimeoutMs: 20_000,
   capturePostTimeoutMs: 20_000,
@@ -97,14 +101,16 @@ function fbPublishComposerTrigger(){
   return scored.length ? scored[0].el : null;
 }
 function fbPublishEditor(){
-  var root = fbPublishDialog() || document;
+  var dialog = fbPublishDialog();
+  var root = dialog || document;
   var editors = Array.from(root.querySelectorAll('[contenteditable="true"][role="textbox"],[contenteditable="true"]')).filter(fbPublishVisible);
   var re = /(what('|’)s on your mind|create a public post|write something|写点什么|在想什么|bạn đang nghĩ gì|qué estás pensando|publicación)/i;
   var exact = editors.find(function(el){
     var hay = fbPublishLabel(el) + ' ' + fbPublishText(el);
     return re.test(hay) && !/comment|评论|reply|回复/i.test(hay);
   });
-  return exact || editors[0] || null;
+  // 首页 feed 也可能渲染评论 contenteditable；没有 composer dialog 时绝不拿任意 textbox 兜底。
+  return exact || (dialog ? editors[0] : null) || null;
 }
 function fbPublishFileInput(){
   var root = fbPublishDialog() || document;
@@ -166,6 +172,23 @@ function fbPublishEditorText(){
   var el = fbPublishEditor();
   return { found: !!el, text: el ? fbPublishText(el) : '' };
 }
+function fbPublishPageState(){
+  var publishEditor = fbPublishEditor();
+  var dialogs = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).filter(fbPublishVisible);
+  var blockingDialog = dialogs.some(function(dialog){
+    return !publishEditor || !dialog.contains(publishEditor);
+  });
+  var credentialInput = Array.from(document.querySelectorAll('input[type="password"],input[type="email"]')).some(fbPublishVisible);
+  var mainVisible = Array.from(document.querySelectorAll('[role="main"]')).some(fbPublishVisible);
+  return {
+    href: String(location.href || ''),
+    readyState: String(document.readyState || ''),
+    mainVisible: mainVisible,
+    editorReady: !!publishEditor,
+    blockingDialog: blockingDialog,
+    credentialInput: credentialInput
+  };
+}
 function fbPublishCloseComposer(){
   var dlg = fbPublishDialog();
   if (!dlg) return { dialogFound:false, clicked:false };
@@ -217,6 +240,82 @@ interface ClearResult {
   residual: string | null;
   /** 编辑器是否还在页面上。false = 已被导航走 / 弹层已关，没有残文可留（≠ 脏页）。 */
   editorFound: boolean;
+}
+
+interface FacebookPublishPageState {
+  href: string;
+  readyState: string;
+  mainVisible: boolean;
+  editorReady: boolean;
+  blockingDialog: boolean;
+  credentialInput: boolean;
+}
+
+interface FacebookComposerTargetProbe extends FacebookPublishPageState {
+  found: boolean;
+  x: number | null;
+  y: number | null;
+}
+
+type FacebookHomeFailure =
+  | 'not_facebook'
+  | 'login_required'
+  | 'checkpoint_detected'
+  | 'blocked_dialog'
+  | 'home_not_reached';
+
+interface FacebookHomeAssessment {
+  ready: boolean;
+  error: FacebookHomeFailure;
+  surface: FacebookSurfaceType;
+  pathname: string;
+}
+
+type FacebookComposerProbeOutcome = {
+  kind: 'home_failure' | 'already_open' | 'target';
+  probe: FacebookComposerTargetProbe;
+};
+
+function facebookPathname(href: string): string {
+  try {
+    return new URL(href).pathname || '/';
+  } catch {
+    return 'invalid';
+  }
+}
+
+function isFacebookHostname(href: string): boolean {
+  try {
+    const hostname = new URL(href).hostname.toLowerCase();
+    return (
+      hostname === 'facebook.com' ||
+      hostname.endsWith('.facebook.com') ||
+      hostname === 'facebookcorewwwi.onion' ||
+      hostname.endsWith('.facebookcorewwwi.onion')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 首页语境判定只消费脱敏结构信号。URL 路由复用全仓统一分类器；main/dialog/editor
+ * 只决定是否真的渲染就绪，绝不凭相似文案猜「大概是首页」。
+ */
+function assessFacebookHome(state: FacebookPublishPageState): FacebookHomeAssessment {
+  const surface = classifyFacebookSurface(state.href);
+  const pathname = facebookPathname(state.href);
+  if (!isFacebookHostname(state.href)) return { ready: false, error: 'not_facebook', surface, pathname };
+  if (surface === 'checkpoint') return { ready: false, error: 'checkpoint_detected', surface, pathname };
+  if (surface === 'login' || state.credentialInput) {
+    return { ready: false, error: 'login_required', surface, pathname };
+  }
+  if (state.blockingDialog && !state.editorReady) {
+    return { ready: false, error: 'blocked_dialog', surface, pathname };
+  }
+  const documentReady = state.readyState === 'interactive' || state.readyState === 'complete';
+  const ready = surface === 'home' && documentReady && (state.mainVisible || state.editorReady);
+  return { ready, error: 'home_not_reached', surface, pathname };
 }
 
 export class FacebookPublishExecutor {
@@ -271,8 +370,9 @@ export class FacebookPublishExecutor {
     for (let i = 0; i < cap; i++) {
       const value = await fn();
       if (value) return value;
-      if (this.opts.now() >= deadline) return null;
-      await this.opts.sleep(this.opts.pollMs);
+      const remainingMs = deadline - this.opts.now();
+      if (remainingMs <= 0) return null;
+      await this.opts.sleep(Math.min(this.opts.pollMs, remainingMs));
     }
     return null;
   }
@@ -280,38 +380,148 @@ export class FacebookPublishExecutor {
   private async navigate(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
     try {
       await this.cdp.send('Page.navigate', { url: FACEBOOK_HOME_URL });
-      await this.opts.sleep(this.opts.settleMs);
-      const ok = await evalRaw<boolean>(
-        this.cdp,
-        `(() => /(^|\\.)facebook\\.com$|(^|\\.)facebookcorewwwi\\.onion$/.test(location.hostname))()`,
+      let attempts = 0;
+      let lastAssessment: FacebookHomeAssessment = {
+        ready: false,
+        error: 'home_not_reached',
+        surface: 'unknown',
+        pathname: 'unknown',
+      };
+      let successfulStateReads = 0;
+      let lastProbeError: unknown = null;
+      const startedAt = this.opts.now();
+      const ready = await this.waitUntil(this.opts.navigationTimeoutMs, async () => {
+        attempts += 1;
+        try {
+          const state = await this.readPageState();
+          successfulStateReads += 1;
+          lastProbeError = null;
+          lastAssessment = assessFacebookHome(state);
+          return lastAssessment.ready;
+        } catch (err) {
+          lastProbeError = err;
+          return false;
+        }
+      });
+      const elapsedMs = Math.max(0, this.opts.now() - startedAt);
+      const withinDeadline = ready && elapsedMs <= this.opts.navigationTimeoutMs;
+      this.log(
+        `[fb-publish] stage=navigate surface=${lastAssessment.surface} path=${lastAssessment.pathname} attempts=${attempts} elapsedMs=${elapsedMs}`,
       );
-      return ok ? { ...base(payload), ok: true } : { ...base(payload), ok: false, error: 'not_facebook' };
+      if (!withinDeadline && successfulStateReads === 0 && lastProbeError) {
+        const detail = lastProbeError instanceof Error ? lastProbeError.message : String(lastProbeError);
+        return { ...base(payload), ok: false, error: `nav_error: ${detail}` };
+      }
+      return withinDeadline
+        ? { ...base(payload), ok: true }
+        : { ...base(payload), ok: false, error: lastAssessment.error };
     } catch (err) {
       return { ...base(payload), ok: false, error: `nav_error: ${err instanceof Error ? err.message : String(err)}` };
     }
   }
 
   private async openComposer(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
-    if (payload.params.value && payload.params.value !== 'facebook_personal_timeline') {
+    if (
+      (payload.params.optionKind !== undefined && payload.params.optionKind !== 'target') ||
+      payload.params.optionValue !== 'facebook_personal_timeline'
+    ) {
       return { ...base(payload), ok: false, error: 'unsupported_target' };
     }
     try {
-      const readyBefore = await this.editorReady();
-      if (!readyBefore) {
-        const target = await evalJson<{ found: boolean; x: number | null; y: number | null }>(
-          this.cdp,
-          `(function(){${FB_PUBLISH_HELPERS_JS} var el = fbPublishComposerTrigger(); if (!el) return JSON.stringify({ found:false, x:null, y:null }); try { el.scrollIntoView({ block:'center' }); } catch(e) {} var r = el.getBoundingClientRect(); return JSON.stringify({ found:true, x:Math.round(r.left + r.width / 2), y:Math.round(r.top + r.height / 2) }); })()`,
+      const startedAt = this.opts.now();
+      const requestedBudgetMs = payload.timeoutMs ?? this.opts.composerTimeoutMs;
+      const totalBudgetMs = Number.isFinite(requestedBudgetMs) && requestedBudgetMs > 0
+        ? requestedBudgetMs
+        : this.opts.composerTimeoutMs;
+      const deadline = startedAt + totalBudgetMs;
+      const initial = await this.probeComposerTarget();
+      let lastAssessment = assessFacebookHome(initial);
+      let attempts = 1;
+      if (!lastAssessment.ready) {
+        this.log(
+          `[fb-publish] stage=select_mode result=${lastAssessment.error} surface=${lastAssessment.surface} path=${lastAssessment.pathname} attempts=${attempts} elapsedMs=${Math.max(0, this.opts.now() - startedAt)}`,
         );
-        if (!target.found || typeof target.x !== 'number' || typeof target.y !== 'number') {
-          return { ...base(payload), ok: false, error: 'no_target' };
-        }
-        await dispatchClick(this.cdp, target.x, target.y, { overshoot: false, jitter: 0 });
+        return { ...base(payload), ok: false, error: lastAssessment.error };
       }
-      const ready = await this.waitUntil(this.opts.composerTimeoutMs, () => this.editorReady());
-      return ready ? { ...base(payload), ok: true } : { ...base(payload), ok: false, error: 'post_validate_failed' };
+      if (initial.editorReady) {
+        this.log(
+          `[fb-publish] stage=select_mode result=already_open surface=${lastAssessment.surface} path=${lastAssessment.pathname} attempts=${attempts} elapsedMs=${Math.max(0, this.opts.now() - startedAt)}`,
+        );
+        return { ...base(payload), ok: true };
+      }
+
+      let target: FacebookComposerProbeOutcome | null =
+        initial.found && typeof initial.x === 'number' && typeof initial.y === 'number'
+          ? { kind: 'target', probe: initial }
+          : null;
+      const triggerDeadline = Math.min(deadline, startedAt + COMPOSER_TRIGGER_MAX_MS);
+      const triggerBudgetMs = triggerDeadline - this.opts.now();
+      if (!target && triggerBudgetMs > 0) {
+        target = await this.waitUntil(triggerBudgetMs, async () => {
+          const probe = await this.probeComposerTarget();
+          attempts += 1;
+          lastAssessment = assessFacebookHome(probe);
+          if (!lastAssessment.ready) return { kind: 'home_failure' as const, probe };
+          if (probe.editorReady) return { kind: 'already_open' as const, probe };
+          if (probe.found && typeof probe.x === 'number' && typeof probe.y === 'number') {
+            return { kind: 'target' as const, probe };
+          }
+          return null;
+        });
+      }
+
+      if (target?.kind === 'home_failure') {
+        this.log(
+          `[fb-publish] stage=select_mode result=${lastAssessment.error} surface=${lastAssessment.surface} path=${lastAssessment.pathname} attempts=${attempts} elapsedMs=${Math.max(0, this.opts.now() - startedAt)}`,
+        );
+        return { ...base(payload), ok: false, error: lastAssessment.error };
+      }
+      if (target?.kind === 'already_open') {
+        this.log(
+          `[fb-publish] stage=select_mode result=already_open surface=${lastAssessment.surface} path=${lastAssessment.pathname} attempts=${attempts} elapsedMs=${Math.max(0, this.opts.now() - startedAt)}`,
+        );
+        return { ...base(payload), ok: true };
+      }
+      if (!target || target.kind !== 'target' || this.opts.now() >= deadline) {
+        this.log(
+          `[fb-publish] stage=select_mode result=composer_trigger_timeout surface=${lastAssessment.surface} path=${lastAssessment.pathname} attempts=${attempts} elapsedMs=${Math.max(0, this.opts.now() - startedAt)}`,
+        );
+        return { ...base(payload), ok: false, error: 'no_target' };
+      }
+
+      await dispatchClick(this.cdp, target.probe.x as number, target.probe.y as number, {
+        overshoot: false,
+        jitter: 0,
+      });
+      const remainingMs = deadline - this.opts.now();
+      const ready = remainingMs > 0
+        ? await this.waitUntil(remainingMs, () => this.editorReady())
+        : false;
+      const confirmedWithinDeadline = ready && this.opts.now() <= deadline;
+      this.log(
+        `[fb-publish] stage=select_mode result=${confirmedWithinDeadline ? 'composer_open' : 'composer_open_timeout'} surface=${lastAssessment.surface} path=${lastAssessment.pathname} attempts=${attempts} elapsedMs=${Math.max(0, this.opts.now() - startedAt)}`,
+      );
+      return confirmedWithinDeadline
+        ? { ...base(payload), ok: true }
+        : { ...base(payload), ok: false, error: 'post_validate_failed' };
     } catch (err) {
       return { ...base(payload), ok: false, error: `engine_error: ${err instanceof Error ? err.message : String(err)}` };
     }
+  }
+
+  private async readPageState(): Promise<FacebookPublishPageState> {
+    return evalJson<FacebookPublishPageState>(
+      this.cdp,
+      `(function(){${FB_PUBLISH_HELPERS_JS} return JSON.stringify(fbPublishPageState()); })()`,
+    );
+  }
+
+  /** 页面语境与入口坐标在同一 Runtime.evaluate 快照读取，避免校验后导航再消费旧坐标。 */
+  private async probeComposerTarget(): Promise<FacebookComposerTargetProbe> {
+    return evalJson<FacebookComposerTargetProbe>(
+      this.cdp,
+      `(function(){${FB_PUBLISH_HELPERS_JS} var state = fbPublishPageState(); var el = fbPublishComposerTrigger(); if (!el) return JSON.stringify(Object.assign(state, { found:false, x:null, y:null })); try { el.scrollIntoView({ block:'center' }); } catch(e) {} var r = el.getBoundingClientRect(); return JSON.stringify(Object.assign(state, { found:true, x:Math.round(r.left + r.width / 2), y:Math.round(r.top + r.height / 2) })); })()`,
+    );
   }
 
   private async editorReady(): Promise<boolean> {
