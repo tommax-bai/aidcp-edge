@@ -84,6 +84,7 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
         },
       });
       await this.session.cdp.send('Network.enable');
+      await this.session.cdp.send('Page.bringToFront').catch(() => undefined);
       this.stopRequestCapture = this.session.cdp.on('Network.requestWillBeSent', (params) => {
         const captured = captureRequestContext(params);
         if (captured) this.requestContext = captured;
@@ -147,7 +148,7 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
         if (!confirmed) throw new Error('browser sidecar close was not confirmed');
       }
       this.state = 'closed';
-      this.log('[wechat-channels] browser login sidecar closed after encrypted session handoff');
+      this.log('[wechat-channels] browser sidecar closed');
     } catch (error) {
       this.state = 'unavailable';
       throw error;

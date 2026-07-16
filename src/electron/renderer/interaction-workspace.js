@@ -122,6 +122,7 @@
       browser: root.querySelector('#iw-browser'),
       lifecycle: root.querySelector('#iw-lifecycle'),
       close: root.querySelector('#iw-close'),
+      browserControl: root.querySelector('#iw-browser-control'),
       reauth: root.querySelector('#iw-reauth'),
       sync: root.querySelector('#iw-sync'),
       syncStatus: root.querySelector('#iw-sync-status'),
@@ -139,6 +140,7 @@
     let listRequest = 0;
     let detailRequest = 0;
     let pollTimer = null;
+    let browserPollTimer = null;
     let active = false;
     let env = null;
     let state = freshState();
@@ -148,6 +150,7 @@
         tab: 'pending', search: '', items: [], nextCursor: null, listLoading: false, listAppending: false,
         listError: null, selectedThreadId: null, detail: null, detailLoading: false, detailError: null,
         auth: null, asOf: null, stale: false, actionBusy: null, actionError: null, actionNotice: null,
+        pendingBrowserAction: null, browserPollCount: 0,
         draftText: '', draftDirty: false, syncBusy: false, lifecycleBusy: null, pollCount: 0,
       };
     }
@@ -155,6 +158,11 @@
     function clearPoll() {
       if (pollTimer) global.clearTimeout(pollTimer);
       pollTimer = null;
+    }
+
+    function clearBrowserPoll() {
+      if (browserPollTimer) global.clearTimeout(browserPollTimer);
+      browserPollTimer = null;
     }
 
     function setVisible(show) {
@@ -241,7 +249,9 @@
             : auth.identity ? `已绑定：${safeText(auth.identity.displayName, '视频号账号')}` : '互动托管中';
         summary = connectivityStale ? '正在使用上次成功数据；Cloud 恢复后可局部刷新。'
           : controlsPending ? 'Cloud 已保存账号配置，但 Edge 尚未回报同版本能力；当前写操作继续关闭。'
-            : '当前环境已绑定这个视频号。评论和私信按 Edge 实际能力同步，发送结果以平台确认状态为准。';
+            : auth.browserState === 'open'
+              ? '浏览器当前保持打开；评论和私信仍按 Edge 实际能力同步。完成查看后可转入后台。'
+              : '当前环境已绑定这个视频号并在后台运行。评论和私信按 Edge 实际能力同步，发送结果以平台确认状态为准。';
         tone = connectivityStale || controlsPending ? 'attention' : 'success';
       } else if (status === 'login_required') {
         title = '等待首次登录';
@@ -274,7 +284,7 @@
 
       const browserState = auth && auth.browserState;
       const browserText = browserState === 'closed' && status === 'active'
-        ? '浏览器已关闭（正常）'
+        ? '后台运行中（浏览器已关闭）'
         : browserState === 'open' ? '浏览器已打开'
           : browserState === 'opening' ? '浏览器正在打开'
             : browserState === 'closing' ? '浏览器正在关闭'
@@ -293,6 +303,16 @@
       dom.close.classList.toggle('hidden', !canClose);
       dom.close.textContent = state.lifecycleBusy === 'close' ? '正在关闭…' : '关闭';
       dom.close.disabled = Boolean(state.lifecycleBusy) || !active || !canClose || typeof onLifecycleAction !== 'function';
+      const canControlBrowser = status === 'active' && ['closed', 'open', 'opening', 'closing'].includes(browserState);
+      const browserAction = browserState === 'open' ? 'close' : browserState === 'closed' ? 'open' : null;
+      dom.browserControl.classList.toggle('hidden', !canControlBrowser);
+      dom.browserControl.dataset.action = browserAction || '';
+      dom.browserControl.textContent = browserState === 'opening' ? '正在打开…'
+        : browserState === 'closing' ? '正在转入后台…'
+          : state.pendingBrowserAction === 'open' ? '等待浏览器打开…'
+            : state.pendingBrowserAction === 'close' ? '等待转入后台…'
+              : browserAction === 'close' ? '转入后台' : '打开浏览器';
+      dom.browserControl.disabled = !browserAction || Boolean(state.actionBusy) || Boolean(state.pendingBrowserAction);
       dom.syncStatus.textContent = state.listLoading
         ? '正在读取当前环境'
         : state.stale ? '使用上次成功数据'
@@ -547,6 +567,7 @@
         }
         state.nextCursor = envelope.data.nextCursor || null;
         state.auth = envelope.data.auth;
+        reconcileBrowserAction();
         state.asOf = envelope.meta && envelope.meta.asOf;
         state.listError = null;
         state.stale = false;
@@ -570,6 +591,42 @@
           renderAll();
         }
       }
+    }
+
+    function scheduleBrowserPoll(capturedEpoch, envKey) {
+      clearBrowserPoll();
+      if (!state.pendingBrowserAction || state.browserPollCount >= 12) {
+        if (state.pendingBrowserAction) {
+          state.actionNotice = '请求已受理，但尚未收到 Edge 浏览器状态确认。';
+          state.pendingBrowserAction = null;
+        }
+        return;
+      }
+      state.browserPollCount += 1;
+      browserPollTimer = global.setTimeout(() => {
+        if (isCurrent(capturedEpoch, envKey)) void loadList({ preserveSelection: true });
+      }, 1000);
+    }
+
+    function reconcileBrowserAction() {
+      const action = state.pendingBrowserAction;
+      if (!action || !state.auth) return;
+      const target = action === 'open' ? 'open' : 'closed';
+      if (state.auth.browserState === target) {
+        state.actionNotice = action === 'open' ? '浏览器已打开，后台同步继续运行。' : '浏览器已关闭，已转入后台运行。';
+        state.pendingBrowserAction = null;
+        state.browserPollCount = 0;
+        clearBrowserPoll();
+        return;
+      }
+      if (state.auth.browserState === 'unavailable') {
+        state.actionNotice = 'Edge 未能完成浏览器控制，请稍后重试。';
+        state.pendingBrowserAction = null;
+        state.browserPollCount = 0;
+        clearBrowserPoll();
+        return;
+      }
+      scheduleBrowserPoll(epoch, env.envKey);
     }
 
     async function loadDetail(threadId, { cursor = null, append = false, silent = false } = {}) {
@@ -774,6 +831,40 @@
       }
     }
 
+    async function controlBrowser() {
+      if (!active || !env || state.actionBusy || state.pendingBrowserAction || !state.auth) return;
+      const action = state.auth.browserState === 'closed' ? 'open' : state.auth.browserState === 'open' ? 'close' : null;
+      if (!action) return;
+      const capturedEpoch = epoch;
+      const envKey = env.envKey;
+      state.actionBusy = 'browser-control';
+      state.actionError = null;
+      state.actionNotice = null;
+      renderAll();
+      try {
+        const response = await api.interactionBrowserControl({
+          envKey, action, idempotencyKey: makeRequestKey(`interaction-browser-${action}`),
+        });
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        assertEnvelope(response, envKey);
+        state.pendingBrowserAction = action;
+        state.browserPollCount = 0;
+        state.actionNotice = action === 'open'
+          ? 'Cloud 已受理打开请求，正在等待 Edge 浏览器状态。'
+          : 'Cloud 已受理转入后台请求，正在等待 Edge 浏览器状态。';
+        scheduleBrowserPoll(capturedEpoch, envKey);
+      } catch (error) {
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        state.actionError = error;
+        state.actionNotice = friendlyError(error);
+      } finally {
+        if (isCurrent(capturedEpoch, envKey)) {
+          state.actionBusy = null;
+          renderAll();
+        }
+      }
+    }
+
     async function changeLifecycle(requestedAction) {
       if (!active || !env || state.lifecycleBusy) return;
       const lifecycle = lifecycleControl();
@@ -818,6 +909,7 @@
         epoch += 1;
         env = null;
         clearPoll();
+        clearBrowserPoll();
         setVisible(false);
         return;
       }
@@ -835,6 +927,7 @@
       state = freshState();
       if (env.connectivity !== 'connected') state.stale = true;
       clearPoll();
+      clearBrowserPoll();
       setVisible(true);
       renderAll();
       void loadList();
@@ -884,6 +977,7 @@
     dom.loadMore.addEventListener('click', () => void loadList({ append: true, preserveSelection: true }));
     dom.close.addEventListener('click', () => void changeLifecycle('close'));
     dom.lifecycle.addEventListener('click', () => void changeLifecycle());
+    dom.browserControl.addEventListener('click', () => void controlBrowser());
     dom.sync.addEventListener('click', () => void syncCurrent());
     dom.reauth.addEventListener('click', () => void reopenAuth());
 

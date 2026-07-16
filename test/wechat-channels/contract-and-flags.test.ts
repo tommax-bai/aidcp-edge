@@ -14,6 +14,7 @@ import {
 import {
   InteractionProtocolValidationError,
   validateInteractionAuthStatus,
+  validateInteractionBrowserControl,
   validateInteractionOffboardAck,
   validateInteractionOffboardCommand,
   validateInteractionOffboardResult,
@@ -232,6 +233,26 @@ test('wechat contract validator: recovery/offboard payloads are exact and body-f
   }).status, 'duplicate');
   assert.throws(() => validateInteractionOffboardCommand({ ...command, credential: 'secret' }),
     InteractionProtocolValidationError);
+});
+
+test('wechat contract validator: browser control accepts only exact scope and open/close actions', () => {
+  const command = {
+    requestId: 'browser-control-1',
+    envKey: 'env-a',
+    accountId: 'finder-a',
+    platform: 'wechat_channels' as const,
+    action: 'open' as const,
+    requestedAt: 7,
+  };
+  assert.deepEqual(validateInteractionBrowserControl(command), command);
+  assert.throws(
+    () => validateInteractionBrowserControl({ ...command, action: 'focus' }),
+    InteractionProtocolValidationError,
+  );
+  assert.throws(
+    () => validateInteractionBrowserControl({ ...command, cookie: 'secret' }),
+    InteractionProtocolValidationError,
+  );
 });
 
 test('wechat write probes: exact disposable target approval is mandatory and no implicit target is accepted', () => {

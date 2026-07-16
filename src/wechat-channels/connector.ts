@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type {
   InteractionAuthReopenPayload,
   InteractionAuthStatusPayload,
+  InteractionBrowserControlPayload,
   InteractionReplyResultPayload,
   InteractionReplySendPayload,
   InteractionSyncAckPayload,
@@ -180,6 +181,12 @@ export class WechatChannelsConnector implements InteractionConnector {
   async reopenAuth(request: InteractionAuthReopenPayload): Promise<void> {
     this.assertScope(request);
     await this.options.auth.reopen(request.reason);
+    this.publishAuthStatus();
+  }
+
+  async controlBrowser(request: InteractionBrowserControlPayload): Promise<void> {
+    this.assertScope(request);
+    await this.options.auth.controlBrowser(request.action);
     this.publishAuthStatus();
   }
 

@@ -2,6 +2,7 @@ import type {
   Envelope,
   InteractionAuthReopenPayload,
   InteractionAuthStatusPayload,
+  InteractionBrowserControlPayload,
   InteractionErrorCode,
   InteractionOffboardAckPayload,
   InteractionOffboardCommandPayload,
@@ -31,6 +32,7 @@ const INTERACTION_TYPES = new Set<MessageType>([
   'interaction.sync.request',
   'interaction.reply.send',
   'interaction.auth.reopen',
+  'interaction.browser.control',
   'interaction.runtime.controls',
   'interaction.offboard.command',
   'interaction.offboard.result',
@@ -526,6 +528,20 @@ export function validateInteractionAuthReopen(value: unknown): InteractionAuthRe
   };
 }
 
+export function validateInteractionBrowserControl(value: unknown): InteractionBrowserControlPayload {
+  const path = 'payload';
+  const v = record(value, path);
+  exact(v, ['requestId', 'envKey', 'accountId', 'platform', 'action', 'requestedAt'], path);
+  return {
+    requestId: str(v.requestId, `${path}.requestId`),
+    envKey: str(v.envKey, `${path}.envKey`),
+    accountId: str(v.accountId, `${path}.accountId`),
+    platform: platform(v.platform, `${path}.platform`),
+    action: oneOf(v.action, ['open', 'close'] as const, `${path}.action`),
+    requestedAt: timestamp(v.requestedAt, `${path}.requestedAt`),
+  };
+}
+
 export function validateInteractionRuntimeControls(value: unknown): InteractionRuntimeControlsPayload {
   const path = 'payload';
   const v = record(value, path);
@@ -560,6 +576,7 @@ export function validateInteractionPayload(type: MessageType, payload: unknown):
     case 'interaction.sync.request': return validateInteractionSyncRequest(payload);
     case 'interaction.reply.send': return validateInteractionReplySend(payload);
     case 'interaction.auth.reopen': return validateInteractionAuthReopen(payload);
+    case 'interaction.browser.control': return validateInteractionBrowserControl(payload);
     case 'interaction.runtime.controls': return validateInteractionRuntimeControls(payload);
     case 'interaction.offboard.command': return validateInteractionOffboardCommand(payload);
     case 'interaction.offboard.result': return validateInteractionOffboardResult(payload);

@@ -223,6 +223,66 @@ test('wechat auth: stored encrypted session resumes API-only without opening bro
   });
 });
 
+test('wechat auth: active API-only session can open a visible browser and return to background idempotently', async () => {
+  await withTempDir(async (root) => {
+    const store = new EncryptedWechatSessionStore(SCOPE, {
+      rootDir: root,
+      env: { AIDCP_WECHAT_MASTER_KEY: '35'.repeat(32) },
+    });
+    await store.save({
+      binding: { ...SCOPE, accountId: SCOPE.envKey, finderIdentity: IDENTITY.externalId },
+      identity: IDENTITY,
+      session: SESSION,
+    });
+    const sidecar = new FakeSidecar(null);
+    const transitions: string[] = [];
+    const auth = new WechatAuthCoordinator({
+      envKey: SCOPE.envKey,
+      expectedAccountId: SCOPE.envKey,
+      api: apiReturning(IDENTITY),
+      sidecar,
+      store,
+      probeEnabledReads: async () => true,
+      logImpl: () => {},
+    });
+    auth.onChange((snapshot) => transitions.push(`${snapshot.state}:${snapshot.browserState}`));
+    await auth.initialize();
+
+    await auth.controlBrowser('open');
+    await auth.controlBrowser('open');
+    assert.equal(auth.getSnapshot().status, 'active');
+    assert.equal(auth.getSnapshot().browserState, 'open');
+    assert.equal(sidecar.opens, 1);
+
+    await auth.controlBrowser('close');
+    await auth.controlBrowser('close');
+    assert.equal(auth.getSnapshot().state, 'api_only_running');
+    assert.equal(auth.getSnapshot().browserState, 'closed');
+    assert.equal(sidecar.closes, 1);
+    assert.ok(transitions.includes('browser_foreground_opening:open'));
+    assert.ok(transitions.includes('browser_open:open'));
+    assert.ok(transitions.includes('browser_foreground_closing:closed'));
+  });
+});
+
+test('wechat auth: browser foreground control fails closed before identity-bound auth is active', async () => {
+  const sidecar = new FakeSidecar(SESSION);
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api: apiReturning(IDENTITY),
+    sidecar,
+    probeEnabledReads: async () => true,
+    logImpl: () => {},
+  });
+
+  await assert.rejects(
+    () => auth.controlBrowser('open'),
+    (error: unknown) => error instanceof WechatChannelsError && error.category === 'invalid_command',
+  );
+  assert.equal(sidecar.opens, 0);
+});
+
 test('wechat auth: legacy finder-as-account binding migrates to logical env scope after verification', async () => {
   await withTempDir(async (root) => {
     const store = new EncryptedWechatSessionStore(SCOPE, {

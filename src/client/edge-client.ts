@@ -41,10 +41,12 @@ import {
   type EdgeTaskAcquirePayload,
   type EdgeTaskReleasePayload,
   INTERACTION_INBOX_CAPABILITY,
+  INTERACTION_BROWSER_CONTROL_CAPABILITY,
   INTERACTION_OFFBOARDING_CAPABILITY,
   INTERACTION_REPLY_RECOVERY_CAPABILITY,
   INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
   type InteractionAuthReopenPayload,
+  type InteractionBrowserControlPayload,
   type InteractionOffboardAckPayload,
   type InteractionOffboardCommandPayload,
   type InteractionReplyReconcilePayload,
@@ -92,6 +94,7 @@ export type UiSnapshotHandler = (env: Envelope<UiSnapshotPayload>) => void;
 export type InteractionCommandHandler = (
   env: Envelope<
     InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload |
+    InteractionBrowserControlPayload |
     InteractionReplyResultAckPayload | InteractionReplyReconcilePayload | InteractionOffboardCommandPayload |
     InteractionOffboardAckPayload | InteractionRuntimeControlsPayload
   >,
@@ -582,6 +585,7 @@ export class EdgeClient {
         env.type === 'interaction.sync.request' ||
         env.type === 'interaction.reply.send' ||
         env.type === 'interaction.auth.reopen' ||
+        env.type === 'interaction.browser.control' ||
         env.type === 'interaction.runtime.controls' ||
         env.type === 'interaction.reply.result.ack' ||
         env.type === 'interaction.reply.reconcile' ||
@@ -591,6 +595,7 @@ export class EdgeClient {
         this.interactionHandler?.(
           env as Envelope<
             InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload |
+            InteractionBrowserControlPayload |
             InteractionReplyResultAckPayload | InteractionReplyReconcilePayload | InteractionOffboardCommandPayload |
             InteractionOffboardAckPayload | InteractionRuntimeControlsPayload
           >,
@@ -763,6 +768,7 @@ export class EdgeClient {
 }
 
 function interactionExtensionCapability(type: string): string | null {
+  if (type === 'interaction.browser.control') return INTERACTION_BROWSER_CONTROL_CAPABILITY;
   if (type === 'interaction.runtime.controls') return INTERACTION_RUNTIME_CONTROLS_CAPABILITY;
   if (type.startsWith('interaction.reply.result.') || type.startsWith('interaction.reply.reconcile')) {
     return INTERACTION_REPLY_RECOVERY_CAPABILITY;

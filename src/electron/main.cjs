@@ -4052,6 +4052,21 @@ ipcMain.handle('interaction:auth:reopen', (_event, raw) => handleInteractionIpc(
   });
 }));
 
+ipcMain.handle('interaction:browser:control', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'action', 'idempotencyKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const action = String(args.action || '');
+  if (action !== 'open' && action !== 'close') throw new Error('action 不合法');
+  const idempotencyKey = interactionIdempotencyKey(args.idempotencyKey);
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/interactions/browser`,
+    method: 'POST',
+    body: { action },
+    idempotencyKey,
+  });
+}));
+
 ipcMain.handle('interaction:reads:cancel', (_event, raw) => handleInteractionIpc(async () => {
   const args = interactionArgs(raw, new Set(['envKey']));
   const envKey = interactionId(args.envKey, 'envKey');

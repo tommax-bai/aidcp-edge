@@ -1,6 +1,7 @@
 import type {
   Envelope,
   InteractionAuthReopenPayload,
+  InteractionBrowserControlPayload,
   InteractionOffboardAckPayload,
   InteractionOffboardCommandPayload,
   InteractionOffboardResultPayload,
@@ -311,6 +312,7 @@ export async function handleInteractionCommand(
   },
   envelope: Envelope<
     InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload |
+    InteractionBrowserControlPayload |
     InteractionReplyResultAckPayload | InteractionReplyReconcilePayload | InteractionOffboardCommandPayload |
     InteractionOffboardAckPayload
   >,
@@ -390,6 +392,15 @@ export async function handleInteractionCommand(
       await connector.reopenAuth(envelope.payload as InteractionAuthReopenPayload);
     } catch (error) {
       safeLog(`[wechat-channels] auth reopen did not complete: ${safeCode(error)}`);
+      connector.reportStatus();
+    }
+    return;
+  }
+  if (envelope.type === 'interaction.browser.control') {
+    try {
+      await connector.controlBrowser(envelope.payload as InteractionBrowserControlPayload);
+    } catch (error) {
+      safeLog(`[wechat-channels] browser control did not complete: ${safeCode(error)}`);
       connector.reportStatus();
     }
     return;

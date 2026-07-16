@@ -102,7 +102,7 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
   const label = options.label || '轻享生活号';
   const platform = options.platform || 'wechat_channels';
   const currentStatus = status(envKey, label);
-  const calls: Record<string, any[]> = { list: [], detail: [], cancel: [], save: [], approve: [], send: [], sync: [], reopen: [] };
+  const calls: Record<string, any[]> = { list: [], detail: [], cancel: [], save: [], approve: [], send: [], sync: [], reopen: [], browser: [] };
   let pushFleet: (snapshot: any) => void = () => undefined;
   let pushStatus: (status: any) => void = () => undefined;
   const defaultApi: Record<string, any> = {
@@ -181,6 +181,16 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
       calls.reopen.push(args);
       return apiResult({ data: { envKey: args.envKey, accountId: `account-${args.envKey}`, acceptedAt: Date.now() }, meta: { requestId: 'reopen', asOf: Date.now() } });
     },
+    interactionBrowserControl: async (args: any) => {
+      calls.browser.push(args);
+      return apiResult({
+        data: {
+          envKey: args.envKey, accountId: `account-${args.envKey}`, action: 'browser_control',
+          browserAction: args.action, actionRequestId: 'browser-control', status: 'accepted',
+        },
+        meta: { requestId: 'browser-control', asOf: Date.now() },
+      });
+    },
     interactionCancelReads: async (key: string) => { calls.cancel.push(key); return { ok: true, cancelled: 1 }; },
   };
   const api = { ...defaultApi, ...(options.api || {}) };
@@ -213,10 +223,64 @@ test('XHS / Facebook 保留原 workspace；视频号只替换右侧且不占左�
   assert.match($(window, '#acct-name').textContent || '', /轻享生活号/);
   assert.equal($(window, '#acct-plat').textContent, '视频号');
   assert.match($(window, '#iw-title').textContent || '', /已绑定：示例视频号/);
-  assert.match($(window, '#iw-browser').textContent || '', /浏览器已关闭（正常）/);
+  assert.match($(window, '#iw-browser').textContent || '', /后台运行中（浏览器已关闭）/);
   assert.match($(window, '#iw-list').textContent || '', /示例观众/);
   assert.match($(window, '#iw-detail').textContent || '', /模板 template_comment_thanks · v1/);
   assert.match($(window, '#iw-detail').textContent || '', /配置版本 1/);
+});
+
+test('active 视频号可打开浏览器或转入后台，accepted 不会冒充浏览器已显隐', async () => {
+  let browserState = 'closed';
+  const browserCalls: any[] = [];
+  const browserList = clone(listFixture);
+  const { window } = await boot({
+    api: {
+      interactionList: async (args: any) => {
+        const envelope = scopeEnvelope(browserList, args.envKey);
+        envelope.data.auth.browserState = browserState;
+        return apiResult(envelope);
+      },
+      interactionBrowserControl: async (args: any) => {
+        browserCalls.push(args);
+        return apiResult({
+          data: {
+            envKey: args.envKey, accountId: `account-${args.envKey}`, action: 'browser_control',
+            browserAction: args.action, actionRequestId: `browser-${args.action}`, status: 'accepted',
+          },
+          meta: { requestId: `browser-${args.action}`, asOf: Date.now() },
+        });
+      },
+    },
+  });
+  const control = $(window, '#iw-browser-control') as HTMLButtonElement;
+  assert.equal(control.textContent, '打开浏览器');
+
+  control.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(browserCalls[0].action, 'open');
+  assert.match(browserCalls[0].idempotencyKey, /^interaction-browser-open-/);
+  assert.match($(window, '#iw-sync-status').textContent || '', /已受理打开请求/);
+  assert.match($(window, '#iw-browser').textContent || '', /浏览器已关闭/,
+    'accepted 后尚未读回 open，不得提前显示已打开');
+
+  browserState = 'open';
+  await new Promise((resolve) => setTimeout(resolve, 1_050));
+  await flush();
+  assert.equal($(window, '#iw-browser').textContent, '浏览器已打开');
+  assert.equal(control.textContent, '转入后台');
+  assert.match($(window, '#iw-sync-status').textContent || '', /浏览器已打开/);
+
+  control.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(browserCalls[1].action, 'close');
+  assert.match($(window, '#iw-browser').textContent || '', /浏览器已打开/,
+    'accepted 后尚未读回 closed，不得提前显示已转入后台');
+
+  browserState = 'closed';
+  await new Promise((resolve) => setTimeout(resolve, 1_050));
+  await flush();
+  assert.match($(window, '#iw-browser').textContent || '', /后台运行中/);
+  assert.equal(control.textContent, '打开浏览器');
 });
 
 test('视频号工作区按 XHS 状态矩阵显示恢复与暂停态关闭，并只路由当前 envKey', async () => {

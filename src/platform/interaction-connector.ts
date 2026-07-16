@@ -1,6 +1,7 @@
 import type {
   InteractionAuthReopenPayload,
   InteractionAuthStatusPayload,
+  InteractionBrowserControlPayload,
   InteractionReplyResultPayload,
   InteractionReplySendPayload,
   InteractionSyncAckPayload,
@@ -27,6 +28,7 @@ export interface InteractionConnector {
   sync(request: InteractionSyncRequestPayload): Promise<void>;
   send(command: InteractionReplySendPayload): Promise<InteractionReplyResultPayload>;
   reopenAuth(request: InteractionAuthReopenPayload): Promise<void>;
+  controlBrowser(request: InteractionBrowserControlPayload): Promise<void>;
   /** Late/replayed ack path; normal request-correlated acks are returned by the transport. */
   acceptSyncAck(ack: InteractionSyncAckPayload): void;
 }
