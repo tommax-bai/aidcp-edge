@@ -190,13 +190,15 @@
 
     function scheduleListPoll(capturedEpoch, envKey) {
       clearListPoll();
+      const bootstrap = !state.auth;
       const readState = currentReadState();
-      if (!active || !state.auth || state.auth.status !== 'active' || !readState.storedEnabled) return;
+      if (!active || !env || env.connectivity !== 'connected') return;
+      if (!bootstrap && (state.auth.status !== 'active' || !readState.storedEnabled)) return;
       listPollTimer = global.setTimeout(() => {
         if (isCurrent(capturedEpoch, envKey) && !state.listLoading && !state.listAppending) {
           void loadList({ preserveSelection: true });
         }
-      }, 15_000);
+      }, bootstrap ? 3_000 : 15_000);
     }
 
     function setVisible(show) {
@@ -1139,8 +1141,8 @@
         if (next.connectivity !== 'connected') {
           state.stale = Boolean(state.items.length || state.detail || state.stale);
           clearListPoll();
-        } else if (connectivityChanged) {
-          scheduleListPoll(epoch, next.envKey);
+        } else if ((connectivityChanged || lifecycleChanged) && !state.listLoading && !state.listAppending) {
+          void loadList({ preserveSelection: true });
         }
         if (connectivityChanged || lifecycleChanged) renderAll();
         return;

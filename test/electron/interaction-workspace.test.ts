@@ -232,7 +232,7 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
   if (options.listPollDelayMs !== undefined) {
     const nativeSetTimeout = window.setTimeout.bind(window);
     window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: any[]) =>
-      nativeSetTimeout(handler, delay === 15_000 ? options.listPollDelayMs : delay, ...args)) as typeof window.setTimeout;
+      nativeSetTimeout(handler, delay === 3_000 || delay === 15_000 ? options.listPollDelayMs : delay, ...args)) as typeof window.setTimeout;
   }
   openWindows.push(window);
   (window as any).aidcpEdge = api;
@@ -558,6 +558,31 @@ test('读取开关待本机应用时继续轮询，应用成功后自动恢复�
   assert.ok(listCount >= 2, '待应用状态必须继续获取 Cloud 投影，不能陷入停止轮询');
   assert.match($(current.window, '#iw-read-apply').textContent || '', /本机已应用同一版本/);
   assert.match($(current.window, '#iw-read-comment-status').textContent || '', /正在收取/);
+  current.window.close();
+});
+
+test('首次互动状态查询失败后自动重试并恢复浏览器控制', async () => {
+  let listCount = 0;
+  const current = await boot({
+    listPollDelayMs: 10,
+    api: {
+      interactionList: async (args: any) => {
+        listCount += 1;
+        if (listCount === 1) return apiError('INTERACTION_VALIDATION_FAILED', 'state 不合法。', 422);
+        const envelope = scopeEnvelope(listFixture, args.envKey);
+        envelope.data.auth.browserState = 'closed';
+        return apiResult(envelope);
+      },
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await flush();
+
+  assert.ok(listCount >= 2, '首次查询失败时必须继续获取 Cloud 投影，不能永久停在待确认');
+  assert.match($(current.window, '#iw-browser').textContent || '', /后台运行中/);
+  assert.equal(($(current.window, '#iw-browser-control') as HTMLButtonElement).textContent, '打开浏览器');
+  assert.equal(hidden($(current.window, '#iw-browser-control')), false);
   current.window.close();
 });
 
