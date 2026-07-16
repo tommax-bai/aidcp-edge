@@ -2632,6 +2632,8 @@ body { margin: 0; }
 .iw-button:hover:not(:disabled) { border-color: #b8c9e8; background: #f5f8fc; }
 .iw-button.primary { border-color: var(--accent); color: #fff; background: var(--accent); }
 .iw-button.primary:hover:not(:disabled) { border-color: #2769dc; background: #2769dc; }
+.iw-button.danger { border-color: #efc4c4; color: var(--bad-fg); background: var(--bad-bg); }
+.iw-button.danger:hover:not(:disabled) { border-color: #e3aaaa; background: #fde8e8; }
 .iw-button.ghost { border-color: transparent; color: var(--accent); background: transparent; }
 .iw-button:disabled { cursor: default; opacity: .52; }
 .iw-button:focus-visible,

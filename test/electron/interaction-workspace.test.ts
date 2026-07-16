@@ -93,6 +93,7 @@ interface BootOptions {
 interface BootHandle {
   window: DOMWindow;
   pushFleet: (snapshot: any) => void;
+  pushStatus: (status: any) => void;
   calls: Record<string, any[]>;
 }
 
@@ -103,8 +104,9 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
   const currentStatus = status(envKey, label);
   const calls: Record<string, any[]> = { list: [], detail: [], cancel: [], save: [], approve: [], send: [], sync: [], reopen: [] };
   let pushFleet: (snapshot: any) => void = () => undefined;
+  let pushStatus: (status: any) => void = () => undefined;
   const defaultApi: Record<string, any> = {
-    onStatusUpdate: () => undefined,
+    onStatusUpdate: (callback: (next: any) => void) => { pushStatus = callback; },
     onActivity: () => undefined,
     onFleetUpdate: (callback: (snapshot: any) => void) => { pushFleet = callback; },
     getStatus: async () => currentStatus,
@@ -190,7 +192,7 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
   window.eval(interactionSrc);
   window.eval(rendererSrc);
   await flush();
-  return { window, pushFleet, calls };
+  return { window, pushFleet, pushStatus, calls };
 }
 
 const $ = (window: DOMWindow, selector: string) => window.document.querySelector(selector) as HTMLElement;
@@ -217,9 +219,10 @@ test('XHS / Facebook 保留原 workspace；视频号只替换右侧且不占左�
   assert.match($(window, '#iw-detail').textContent || '', /配置版本 1/);
 });
 
-test('视频号工作区保留当前环境生命周期按钮，并只按 envKey 启动、暂停、恢复', async () => {
+test('视频号工作区按 XHS 状态矩阵显示恢复与暂停态关闭，并只路由当前 envKey', async () => {
   const lifecycleCalls: Array<[string, string]> = [];
   let startAllCalls = 0;
+  let stopAllCalls = 0;
   let settingsSaveCalls = 0;
   const lifecycleStatus = (envKey: string, edge: string, session: string) => ({
     ...status(envKey, '轻享生活号'), edge, session,
@@ -227,6 +230,7 @@ test('视频号工作区保留当前环境生命周期按钮，并只按 envKey 
   const { window, pushFleet } = await boot({
     api: {
       fleetStartAll: async () => { startAllCalls += 1; return { ok: true }; },
+      fleetStopAll: async () => { stopAllCalls += 1; return { ok: true }; },
       saveSettings: async (patch: any) => { settingsSaveCalls += 1; return { ...patch, saveOk: true }; },
       start: async (envKey: string) => {
         lifecycleCalls.push(['start', envKey]);
@@ -240,10 +244,15 @@ test('视频号工作区保留当前环境生命周期按钮，并只按 envKey 
         lifecycleCalls.push(['resume', envKey]);
         return lifecycleStatus(envKey, 'running', 'running');
       },
+      close: async (envKey: string) => {
+        lifecycleCalls.push(['close', envKey]);
+        return lifecycleStatus(envKey, 'stopped', 'closed');
+      },
     },
   });
   const lifecycle = $(window, '#iw-lifecycle') as HTMLButtonElement;
-  const stopped = lifecycleStatus('env_wc_demo', 'stopped', 'paused');
+  const close = $(window, '#iw-close') as HTMLButtonElement;
+  const stopped = lifecycleStatus('env_wc_demo', 'stopped', 'closed');
   pushFleet({
     provider: 'adspower', selectedEnvId: 'env_wc_demo', railCollapsed: true,
     environments: [{ envId: 'env_wc_demo', name: '轻享生活号', platform: 'wechat_channels', status: stopped }],
@@ -251,7 +260,11 @@ test('视频号工作区保留当前环境生命周期按钮，并只按 envKey 
   await flush();
 
   assert.equal(hidden(lifecycle), false, '视频号右侧工作区必须直接露出生命周期入口');
-  assert.equal(lifecycle.textContent, '启动', '核心已停止时启动优先于残留的 paused 会话标记');
+  assert.equal(lifecycle.textContent, '启动');
+  assert.equal(hidden(close), true, '未暂停时不显示关闭');
+  close.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls, [], '非暂停态即使被程序化触发也不得关闭');
   lifecycle.dispatchEvent(new window.Event('click', { bubbles: true }));
   await flush();
   assert.deepEqual(lifecycleCalls, [['start', 'env_wc_demo']]);
@@ -261,15 +274,51 @@ test('视频号工作区保留当前环境生命周期按钮，并只按 envKey 
   await flush();
   assert.deepEqual(lifecycleCalls, [['start', 'env_wc_demo'], ['pause', 'env_wc_demo']]);
   assert.equal(lifecycle.textContent, '恢复');
+  assert.equal(hidden(close), false, '暂停后同时显示恢复与关闭');
 
-  lifecycle.dispatchEvent(new window.Event('click', { bubbles: true }));
+  close.dispatchEvent(new window.Event('click', { bubbles: true }));
   await flush();
   assert.deepEqual(lifecycleCalls, [
-    ['start', 'env_wc_demo'], ['pause', 'env_wc_demo'], ['resume', 'env_wc_demo'],
+    ['start', 'env_wc_demo'], ['pause', 'env_wc_demo'], ['close', 'env_wc_demo'],
   ]);
+  assert.equal(lifecycle.textContent, '启动', '关闭回传真态后回到启动');
+  assert.equal(hidden(close), true);
+
+  pushFleet({
+    provider: 'adspower', selectedEnvId: 'env_wc_demo', railCollapsed: true,
+    environments: [{ envId: 'env_wc_demo', name: '轻享生活号', platform: 'wechat_channels', status: lifecycleStatus('env_wc_demo', 'stopped', 'paused') }],
+  });
+  await flush();
+  assert.equal(lifecycle.textContent, '恢复', 'paused 优先级与 XHS 一致，即使 edge 已停止仍可恢复或关闭');
+  assert.equal(hidden(close), false);
+  lifecycle.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls.at(-1), ['resume', 'env_wc_demo']);
   assert.equal(lifecycle.textContent, '暂停');
   assert.equal(startAllCalls, 0, '单环境入口不得退化成全部启动');
+  assert.equal(stopAllCalls, 0, '单环境关闭不得退化成全部停止');
   assert.equal(settingsSaveCalls, 1, '视频号启动必须复用先保存设置再启动的单环境链路');
+});
+
+test('开发者详情开关在视频号工作区仍展示当前环境日志', async () => {
+  const saved: any[] = [];
+  const { window, pushStatus } = await boot({
+    api: { saveSettings: async (patch: any) => { saved.push(patch); return { ...patch, saveOk: true }; } },
+  });
+  const dev = $(window, '#dev-section');
+  const toggle = $(window, '#dev-toggle') as HTMLInputElement;
+  assert.equal(hidden(dev), true, '默认隐藏语义不变');
+  assert.equal($(window, '#legacy-workspace').contains(dev), false, '开发者详情不能被 legacy workspace 的显隐吞掉');
+
+  toggle.checked = true;
+  toggle.dispatchEvent(new window.Event('change', { bubbles: true }));
+  pushStatus({ ...status('env_wc_demo', '轻享生活号'), lastMessage: '视频号当前环境日志' });
+  await flush();
+
+  assert.equal(hidden($(window, '#interaction-workspace')), false);
+  assert.equal(hidden(dev), false, '视频号工作区与开发者详情应同时可见');
+  assert.match($(window, '#last-message').textContent || '', /视频号当前环境日志/);
+  assert.ok(saved.some((patch) => patch.devDetails === true), '开发者详情开关继续持久化');
 });
 
 test('首次授权、错号恢复和账号开关待应用都有明确且 fail-closed 的引导', async () => {

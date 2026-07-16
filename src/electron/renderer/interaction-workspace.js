@@ -121,6 +121,7 @@
       summary: root.querySelector('#iw-summary'),
       browser: root.querySelector('#iw-browser'),
       lifecycle: root.querySelector('#iw-lifecycle'),
+      close: root.querySelector('#iw-close'),
       reauth: root.querySelector('#iw-reauth'),
       sync: root.querySelector('#iw-sync'),
       syncStatus: root.querySelector('#iw-sync-status'),
@@ -216,8 +217,8 @@
 
     function lifecycleControl() {
       if (!env) return { action: null, label: '状态确认中' };
-      if (env.edge === 'stopped' || env.edge === 'warning') return { action: 'start', label: '启动' };
       if (env.session === 'paused') return { action: 'resume', label: '恢复' };
+      if (env.edge === 'stopped' || env.edge === 'warning') return { action: 'start', label: '启动' };
       if (env.edge === 'starting' || env.edge === 'running') return { action: 'pause', label: '暂停' };
       return { action: null, label: '状态确认中' };
     }
@@ -288,6 +289,10 @@
       dom.lifecycle.textContent = lifecycleBusyLabel || lifecycle.label;
       dom.lifecycle.className = `iw-button ${lifecycleVisualAction === 'pause' ? 'secondary' : 'primary'}`;
       dom.lifecycle.disabled = Boolean(state.lifecycleBusy) || !active || !lifecycle.action || typeof onLifecycleAction !== 'function';
+      const canClose = Boolean(env && env.session === 'paused');
+      dom.close.classList.toggle('hidden', !canClose);
+      dom.close.textContent = state.lifecycleBusy === 'close' ? '正在关闭…' : '关闭';
+      dom.close.disabled = Boolean(state.lifecycleBusy) || !active || !canClose || typeof onLifecycleAction !== 'function';
       dom.syncStatus.textContent = state.listLoading
         ? '正在读取当前环境'
         : state.stale ? '使用上次成功数据'
@@ -769,17 +774,19 @@
       }
     }
 
-    async function changeLifecycle() {
+    async function changeLifecycle(requestedAction) {
       if (!active || !env || state.lifecycleBusy) return;
       const lifecycle = lifecycleControl();
-      if (!lifecycle.action || typeof onLifecycleAction !== 'function') return;
+      const action = requestedAction || lifecycle.action;
+      if (!['start', 'resume', 'pause', 'close'].includes(action) || typeof onLifecycleAction !== 'function') return;
+      if (action === 'close' && env.session !== 'paused') return;
       const capturedEpoch = epoch;
       const envKey = env.envKey;
-      state.lifecycleBusy = lifecycle.action;
+      state.lifecycleBusy = action;
       state.actionNotice = null;
       renderOverview();
       try {
-        const next = await onLifecycleAction(lifecycle.action, envKey);
+        const next = await onLifecycleAction(action, envKey);
         if (!isCurrent(capturedEpoch, envKey)) return;
         if (!next) return;
         if (next && next.envId && next.envId !== envKey) {
@@ -788,12 +795,14 @@
           throw error;
         }
         if (next && typeof onLifecycleStatus === 'function') onLifecycleStatus(next);
-        state.actionNotice = lifecycle.action === 'start'
+        state.actionNotice = action === 'start'
           ? '已请求启动当前环境。'
-          : lifecycle.action === 'resume' ? '已请求恢复当前环境。' : '已请求暂停当前环境。';
+          : action === 'resume' ? '已请求恢复当前环境。'
+            : action === 'close' ? '已关闭当前环境。' : '已请求暂停当前环境。';
       } catch (error) {
         if (!isCurrent(capturedEpoch, envKey)) return;
-        state.actionNotice = `${lifecycle.label}失败：${friendlyError(error)}`;
+        const label = action === 'close' ? '关闭' : lifecycle.label;
+        state.actionNotice = `${label}失败：${friendlyError(error)}`;
       } finally {
         if (isCurrent(capturedEpoch, envKey)) {
           state.lifecycleBusy = null;
@@ -873,6 +882,7 @@
       if (button) button.focus();
     });
     dom.loadMore.addEventListener('click', () => void loadList({ append: true, preserveSelection: true }));
+    dom.close.addEventListener('click', () => void changeLifecycle('close'));
     dom.lifecycle.addEventListener('click', () => void changeLifecycle());
     dom.sync.addEventListener('click', () => void syncCurrent());
     dom.reauth.addEventListener('click', () => void reopenAuth());

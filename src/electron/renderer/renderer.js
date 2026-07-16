@@ -3439,7 +3439,9 @@ async function runSessionLifecycle(action, envId = currentEnvId()) {
       : '设置已保存，正在启动…';
     return window.aidcpEdge.start(envId);
   }
-  return window.aidcpEdge.pause(envId);
+  if (action === 'pause') return window.aidcpEdge.pause(envId);
+  if (action === 'close') return window.aidcpEdge.close(envId);
+  return null;
 }
 
 // 今日进展会话按钮：三态触发 恢复 / 启动（=先保存再启动） / 暂停。无独立「保存」按钮。
