@@ -210,9 +210,13 @@ function parseMasterKey(value: string): Buffer | null {
 }
 
 function assertSessionMaterial(session: WechatSessionMaterial): void {
+  const commonBody = session?.requestContext?.commonBody;
   if (!session || !Array.isArray(session.cookies) || session.cookies.length === 0 || typeof session.userAgent !== 'string' ||
       session.requestContext?.version !== 1 || !session.requestContext.aid || !session.requestContext.pageUrl ||
-      !session.requestContext.commonBody.rawKeyBuff || !session.requestContext.headers.fingerprintDeviceId ||
+      !commonBody?.logFinderId || typeof commonBody.logFinderUin !== 'string' || typeof commonBody.rawKeyBuff !== 'string' ||
+      (commonBody.pluginSessionId !== null && typeof commonBody.pluginSessionId !== 'string') ||
+      typeof commonBody.reqScene !== 'number' || typeof commonBody.scene !== 'number' ||
+      !session.requestContext.headers.fingerprintDeviceId ||
       !session.requestContext.headers.wechatUin) {
     throw new Error('invalid session material');
   }

@@ -155,7 +155,7 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
   }
 }
 
-function captureRequestContext(value: unknown): WechatRequestContext | null {
+export function captureRequestContext(value: unknown): WechatRequestContext | null {
   if (!value || typeof value !== 'object') return null;
   const request = (value as { request?: unknown }).request;
   if (!request || typeof request !== 'object') return null;
@@ -182,8 +182,9 @@ function captureRequestContext(value: unknown): WechatRequestContext | null {
   const scene = body.scene;
   const fingerprintDeviceId = headers['finger-print-device-id'];
   const wechatUin = headers['x-wechat-uin'];
-  if (![aid, pageUrl, logFinderId, logFinderUin, rawKeyBuff, fingerprintDeviceId, wechatUin]
+  if (![aid, pageUrl, logFinderId, fingerprintDeviceId, wechatUin]
       .every((item) => typeof item === 'string' && item.length > 0) ||
+      typeof logFinderUin !== 'string' || typeof rawKeyBuff !== 'string' ||
       typeof reqScene !== 'number' || typeof scene !== 'number') return null;
   const pluginSessionId = body.pluginSessionId;
   if (pluginSessionId !== null && typeof pluginSessionId !== 'string') return null;
