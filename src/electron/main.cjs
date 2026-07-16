@@ -4100,10 +4100,19 @@ async function delegatedTaskRequest(envId, pathname, options = {}) {
   });
   if (r.status === 401) return { ok: false, status: 401, error: 'client_session_expired' };
   if (!r.ok) {
+    const responseError = r.data && r.data.error;
     return {
       ok: false,
       status: r.status,
-      error: (r.data && (r.data.message || r.data.error)) || r.error || 'request_failed',
+      error: (r.data && r.data.message)
+        || (typeof responseError === 'string' ? responseError : responseError && responseError.message)
+        || r.error
+        || 'request_failed',
+      ...((r.data && typeof r.data.reason === 'string')
+        ? { reason: r.data.reason }
+        : typeof responseError === 'string'
+          ? { reason: responseError }
+          : (responseError && typeof responseError.code === 'string') ? { reason: responseError.code } : {}),
     };
   }
   return { ok: true, status: r.status, data: r.data };
@@ -4123,6 +4132,37 @@ ipcMain.handle('delegated-task:action', (_event, envId, taskId, action, version)
     envId,
     `/delegated-tasks/${encodeURIComponent(normalizedTaskId)}/${action}`,
     { method: 'POST', body: Number.isInteger(version) ? { version } : {} },
+  );
+});
+
+// 当前账号灵感库：三个具名 IPC 锁死 customer-auth 路径和方法；envId 只用于主进程查 profileId，
+// renderer 不得提交 accountId/envKey/URL/token。所有参数先做窄形状校验，再复用逐请求归属校验出口。
+ipcMain.handle('curated:list', (_event, envId, options) => {
+  const raw = options && typeof options === 'object' ? options : {};
+  const mode = raw.mode === 'all' ? 'all' : raw.mode === 'creatable' || raw.mode === undefined ? 'creatable' : null;
+  const limit = raw.limit === undefined ? 20 : raw.limit;
+  const offset = raw.offset === undefined ? 0 : raw.offset;
+  if (!mode || !Number.isInteger(limit) || limit < 1 || limit > 50
+    || !Number.isInteger(offset) || offset < 0 || offset > 1_000_000) {
+    return { ok: false, status: 400, error: 'invalid_curated_pagination' };
+  }
+  const pathname = `/curated-contents?mode=${mode}&limit=${limit}&offset=${offset}`;
+  return delegatedTaskRequest(envId, pathname, { includeEnvQuery: true });
+});
+
+ipcMain.handle('curated:get', (_event, envId, id) => {
+  if (!Number.isInteger(id) || id <= 0) return { ok: false, status: 400, error: 'invalid_curated_id' };
+  return delegatedTaskRequest(envId, `/curated-contents/${id}`, { includeEnvQuery: true });
+});
+
+ipcMain.handle('curated:create-post', (_event, envId, id, useReferenceImages) => {
+  if (!Number.isInteger(id) || id <= 0 || typeof useReferenceImages !== 'boolean') {
+    return { ok: false, status: 400, error: 'invalid_curated_create_request' };
+  }
+  return delegatedTaskRequest(
+    envId,
+    `/curated-contents/${id}/create-post`,
+    { method: 'POST', body: { useReferenceImages } },
   );
 });
 

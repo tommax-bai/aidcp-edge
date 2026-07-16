@@ -101,9 +101,7 @@ const fields = {
   pubBarLabel: document.querySelector('#pub-bar-label'),
   pubBarSum: document.querySelector('#pub-bar-sum'),
   pubPreviewLink: document.querySelector('#pub-preview-link'),
-  publishPreviewMask: document.querySelector('#publish-preview-mask'),
   publishPreviewPanel: document.querySelector('#publish-preview-panel'),
-  publishPreviewClose: document.querySelector('#publish-preview-close'),
   publishPreviewKind: document.querySelector('#publish-preview-kind'),
   publishPreviewTitle: null,
   publishPreviewContent: document.querySelector('#publish-preview-content'),
@@ -202,6 +200,15 @@ const interactionWorkspace = window.InteractionWorkspace?.create({
   api: window.aidcpEdge,
 }) || null;
 
+// 灵感库与稿件审核共用同一主窗口内容页栈；全局标题栏、环境栏和健康状态仍由现有应用壳持有。
+const contentWorkspace = window.ContentWorkspace?.create({
+  root: document.querySelector('#content-workspace'),
+  legacyRoot: document.querySelector('#legacy-workspace'),
+  interactionRoot: document.querySelector('#interaction-workspace'),
+  shell: document.querySelector('.shell'),
+  api: window.aidcpEdge,
+}) || null;
+
 function syncInteractionWorkspace() {
   if (!interactionWorkspace) return;
   const selected = fleetView.envs.get(fleetView.selected);
@@ -210,6 +217,20 @@ function syncInteractionWorkspace() {
     platform: normPlatform(selected.platform),
     label: selected.name || '',
     connectivity: selected.status && selected.status.cloud,
+  } : null);
+}
+
+function syncContentWorkspace(status = currentStatus) {
+  if (!contentWorkspace) return;
+  const selected = fleetView.envs.get(fleetView.selected);
+  const envId = currentEnvId() || (status && status.envId);
+  const count = status && status.inspirationSummary && Number.isFinite(status.inspirationSummary.count)
+    ? status.inspirationSummary.count
+    : null;
+  contentWorkspace.setEnvironment(envId ? {
+    envId,
+    label: (status && status.account && status.account.name) || (selected && selected.name) || '当前账号',
+    inspirationCount: count,
   } : null);
 }
 
@@ -1294,6 +1315,12 @@ function publishPreviewImageRemoveReason(reason) {
 // 只存 DOM 的确认态会被下一次心跳抹掉。
 let publishPreviewPendingDeleteUrl = null;
 
+document.querySelector('#content-workspace')?.addEventListener('content-workspace:leave', (event) => {
+  if (event.detail?.page !== 'draft') return;
+  publishPreviewPendingDeleteUrl = null;
+  publishPreviewImageRemoveHint = '';
+});
+
 function publishPreviewIsPending(status) {
   const state = status && status.publish && status.publish.state;
   return Boolean(status && status.publishPreview && (state === 'pending' || state === 'reminded'));
@@ -1325,7 +1352,7 @@ function appendPreviewText(parent, text, className) {
 let publishPreviewImageRemoveHint = '';
 
 function repaintPublishPreview() {
-  if (fields.publishPreviewPanel && fields.publishPreviewPanel.classList.contains('open')) {
+  if (fields.publishPreviewPanel && (contentWorkspace?.isDraftOpen() || fields.publishPreviewPanel.classList.contains('open'))) {
     renderPublishPreviewContent(currentStatus);
   }
 }
@@ -1528,16 +1555,27 @@ function renderPublishPreviewContent(status) {
 
 function openPublishPreview() {
   if (!currentStatus || !currentStatus.publishPreview) return;
+  syncContentWorkspace(currentStatus);
   renderPublishPreviewContent(currentStatus);
-  fields.publishPreviewMask.classList.remove('hidden');
+  if (contentWorkspace) {
+    contentWorkspace.openDraft();
+    return;
+  }
+  // 旧测试桩/旧包未加载 content-workspace.js 时的安全降级。
+  document.querySelector('#content-workspace')?.classList.remove('hidden');
+  document.querySelector('#legacy-workspace')?.classList.add('hidden');
+  fields.publishPreviewPanel.classList.remove('hidden');
   fields.publishPreviewPanel.classList.add('open');
   fields.publishPreviewPanel.setAttribute('aria-hidden', 'false');
 }
 
 function closePublishPreview() {
+  if (contentWorkspace?.isDraftOpen()) {
+    contentWorkspace.close();
+  }
   fields.publishPreviewPanel.classList.remove('open');
+  fields.publishPreviewPanel.classList.add('hidden');
   fields.publishPreviewPanel.setAttribute('aria-hidden', 'true');
-  fields.publishPreviewMask.classList.add('hidden');
   // 关抽屉即丢弃未提交的删除确认态与上一次拒因（下次打开是干净的）。
   publishPreviewPendingDeleteUrl = null;
   publishPreviewImageRemoveHint = '';
@@ -1550,8 +1588,6 @@ fields.pubPreviewLink.addEventListener('keydown', (e) => {
     openPublishPreview();
   }
 });
-fields.publishPreviewClose.addEventListener('click', closePublishPreview);
-fields.publishPreviewMask.addEventListener('click', closePublishPreview);
 async function submitPublishPreviewAction(approved) {
   const preview = currentStatus && currentStatus.publishPreview;
   if (!preview || publishPreviewActionBusy) return;
@@ -1943,7 +1979,7 @@ function render(status) {
   // 内核首启进度条改由 renderKernelPrepGlobal 全局驱动（内核机器级共享、下载环境未必是当前选中环境）；
   // 此处不再按选中环境渲染，避免选中的非下载环境把进度条误藏。
   renderPublish(status, now);
-  if (fields.publishPreviewPanel.classList.contains('open')) renderPublishPreviewContent(status);
+  if (contentWorkspace?.isDraftOpen() || fields.publishPreviewPanel.classList.contains('open')) renderPublishPreviewContent(status);
   renderFab(status);
   renderNotice(status);
   renderSameAccount(status); // 同账号铺多环境告警（多环境 fleet；无告警字段时隐藏，零回归）
@@ -1954,6 +1990,7 @@ function render(status) {
   if (status.provider && !editingProvider) applyProviderSelection(status.provider);
   updatePersonaGate(status); // 建号人设：仅登录+云端已连接才可生成（不触碰已选关键词/草稿，避免状态推送重置向导）
   syncInteractionWorkspace();
+  syncContentWorkspace(status);
 }
 
 // ─── 多环境 fleet：状态路由 / 环境栏 / 引导处理 / 全部启动（edge-multi-environment-fleet）───
@@ -2061,6 +2098,7 @@ function applyFleetSnapshot(snap) {
   }
   // 即使新环境尚无 status，也必须原子切成它自己的 loading workspace，不能短暂复用上一账号内容。
   syncInteractionWorkspace();
+  syncContentWorkspace(fleetView.envs.get(fleetView.selected)?.status);
   // 云端环境（change edge-cloud-env-selector）：目标云端随快照更新；刷新 chip / 当前连接 / 待重启。
   if (snap.cloudEnv) targetCloud = snap.cloudEnv;
   updateCloudPending();
@@ -2078,6 +2116,7 @@ function selectEnv(envId) {
   closePublishPreview();
   resetPersonaDraft(); // 人设向导每环境独立：切换即清草稿，绝不把 A 的草稿误确认到 B
   syncInteractionWorkspace();
+  syncContentWorkspace(fleetView.envs.get(envId)?.status);
   window.aidcpEdge.fleetSelect?.(envId);
   const env = fleetView.envs.get(envId);
   if (env && env.status) render(env.status);

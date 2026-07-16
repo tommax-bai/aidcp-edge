@@ -201,6 +201,17 @@
         <div id="runtime-guidance-note" class="rg-note hidden"></div>
       </section>
 
+      <!-- 当前账号内容入口：进入同一主窗口内的灵感库，不创建系统级子窗口。 -->
+      <button id="content-library-entry" class="content-library-entry" type="button">
+        <span class="cle-icon" aria-hidden="true">✦</span>
+        <span class="cle-copy">
+          <strong>灵感库</strong>
+          <span id="content-library-entry-copy">查看当前账号进入精选池的内容</span>
+        </span>
+        <span id="content-library-entry-count" class="cle-count">—</span>
+        <span class="cle-arrow" aria-hidden="true">›</span>
+      </button>
+
       <!-- 内嵌运行时首启内核准备进度（仅缺内核时显示；下完自动隐藏） -->
       <section id="kernel-prep" class="kernel-prep hidden" aria-live="polite">
         <div class="kp-head">
@@ -372,6 +383,58 @@
             </div>
           </section>
         </div>
+      </section>
+
+      <!-- 内容工作区：同一 BrowserWindow 内替换主内容区；标题栏、环境栏、健康状态始终保留。 -->
+      <section id="content-workspace" class="content-workspace hidden" aria-label="内容工作区">
+        <header class="cw-header">
+          <button id="content-workspace-back" class="cw-icon-button hidden" type="button" aria-label="返回上一页">‹</button>
+          <div class="cw-heading">
+            <span id="content-workspace-kicker" class="cw-kicker">内容工作区</span>
+            <h1 id="content-workspace-title">灵感库</h1>
+            <p id="content-workspace-meta">当前账号</p>
+          </div>
+          <button id="content-workspace-close" class="cw-icon-button" type="button" aria-label="关闭内容工作区">×</button>
+        </header>
+
+        <section id="curated-library-view" class="cw-view" aria-label="灵感库">
+          <div class="cw-toolbar">
+            <div id="curated-mode-tabs" class="cw-tabs" role="group" aria-label="灵感筛选">
+              <button class="active" type="button" data-curated-mode="creatable" aria-pressed="true">可创作</button>
+              <button type="button" data-curated-mode="all" aria-pressed="false">全部</button>
+            </div>
+            <span id="curated-list-total" class="cw-total">正在读取…</span>
+          </div>
+          <div id="curated-list" class="curated-list" aria-live="polite" aria-busy="true"></div>
+          <div class="cw-pagination">
+            <button id="curated-prev" type="button">上一页</button>
+            <span id="curated-page">第 1 页</span>
+            <button id="curated-next" type="button">下一页</button>
+          </div>
+        </section>
+
+        <section id="curated-detail-view" class="cw-view hidden" aria-label="灵感详情">
+          <div id="curated-detail" class="curated-detail" aria-live="polite"></div>
+        </section>
+
+        <section id="curated-create-view" class="cw-view hidden" aria-label="参考创作确认">
+          <div id="curated-create" class="curated-create" aria-live="polite"></div>
+        </section>
+
+        <!-- 稿件审核：复用既有审批与删图 DOM id，只把窄抽屉迁移为主内容区全页。 -->
+        <section id="publish-preview-panel" class="publish-preview-panel cw-view hidden" aria-hidden="true" aria-label="稿件审核">
+          <div class="publish-preview-head">
+            <span id="publish-preview-kind" class="publish-preview-eyebrow">洗稿稿件</span>
+          </div>
+          <div id="publish-preview-content" class="publish-preview-content"></div>
+          <div id="publish-preview-actions" class="publish-preview-actions hidden">
+            <span id="publish-preview-action-hint" class="publish-preview-action-hint"></span>
+            <div class="publish-preview-action-buttons">
+              <button id="publish-preview-cancel" class="publish-preview-button secondary nodrag" type="button">取消</button>
+              <button id="publish-preview-approve" class="publish-preview-button primary nodrag" type="button">发布</button>
+            </div>
+          </div>
+        </section>
       </section>
       </main>
     </div>
@@ -780,25 +843,9 @@
       </div>
     </aside>
 
-    <!-- 稿件预览：内容来自云端 publish_log；发布/取消动作经 core 转发到云端审批链路。 -->
-    <div id="publish-preview-mask" class="publish-preview-mask hidden"></div>
-    <aside id="publish-preview-panel" class="publish-preview-panel" aria-hidden="true" aria-label="稿件预览">
-      <div class="publish-preview-head">
-        <span id="publish-preview-kind" class="publish-preview-eyebrow">洗稿稿件</span>
-        <button id="publish-preview-close" class="drawer-x nodrag" type="button" aria-label="关闭稿件预览">×</button>
-      </div>
-      <div id="publish-preview-content" class="publish-preview-content"></div>
-      <div id="publish-preview-actions" class="publish-preview-actions hidden">
-        <span id="publish-preview-action-hint" class="publish-preview-action-hint"></span>
-        <div class="publish-preview-action-buttons">
-          <button id="publish-preview-cancel" class="publish-preview-button secondary nodrag" type="button">取消</button>
-          <button id="publish-preview-approve" class="publish-preview-button primary nodrag" type="button">发布</button>
-        </div>
-      </div>
-    </aside>
-
     <script src="./ui-logic.js"></script>
     <script src="./interaction-workspace.js"></script>
+    <script src="./content-workspace.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

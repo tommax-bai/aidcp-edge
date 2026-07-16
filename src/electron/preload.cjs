@@ -63,6 +63,11 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   delegatedTaskDraft: (envId, payload) => ipcRenderer.invoke('delegated-task:draft', envId, payload),
   delegatedTaskAction: (envId, taskId, action, version) =>
     ipcRenderer.invoke('delegated-task:action', envId, taskId, action, version),
+  // 当前账号灵感库：主进程固定 customer-auth 路径并注入所选环境；renderer 不能传 URL/token/accountId。
+  curatedList: (envId, options) => ipcRenderer.invoke('curated:list', envId, options),
+  curatedGet: (envId, id) => ipcRenderer.invoke('curated:get', envId, id),
+  curatedCreatePost: (envId, id, useReferenceImages) =>
+    ipcRenderer.invoke('curated:create-post', envId, id, useReferenceImages),
   // 对外客户鉴权（change edge-client-customer-auth）：登录窗口用 clientLogin；主界面/托盘用 clientLogout。
   // 主进程做实际 HTTP，渲染层不直连网络（避免 CORS / 凭据落渲染层）。
   clientLogin: (creds) => ipcRenderer.invoke('client-auth:login', creds),

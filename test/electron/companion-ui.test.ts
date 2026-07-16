@@ -11,6 +11,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
+const contentWorkspaceSrc = readFileSync(join(electronDir, 'renderer/content-workspace.js'), 'utf8');
 const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
 const rendererCss = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 
@@ -80,6 +81,7 @@ async function boot(statusOver: Record<string, unknown> = {}, apiOver: Record<st
     ...apiOver,
   };
   window.eval(uiLogicSrc);
+  window.eval(contentWorkspaceSrc);
   window.eval(rendererSrc);
   for (let i = 0; i < 5; i++) await tick();
   return { w: window, pushStatus, pushActivity };
@@ -612,6 +614,31 @@ test('洗稿稿件预览：点击取消先生成驳回确认任务，确认前�
   assert.equal(draft.targetConstraints.candidateVersion, 1);
   assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false);
   assert.equal(($(w, '#delegated-confirm') as unknown as HTMLDialogElement).open, true);
+});
+
+test('稿件审核页关闭后清空未提交的删图确认态', async () => {
+  const { w } = await boot({
+    envId: 'u1',
+    publish: { state: 'pending', title: '多图稿件', code: '#91', at: new Date().toISOString() },
+    publishPreview: {
+      recordId: 91,
+      code: '#91',
+      kind: 'rewrite',
+      title: '多图稿件',
+      content: '正文',
+      topics: [],
+      images: ['https://cdn.example.com/1.jpg', 'https://cdn.example.com/2.jpg'],
+      contentVersion: 0,
+      updatedAt: Date.now(),
+    },
+  });
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  (w.document.querySelector('.publish-preview-image-delete') as unknown as HTMLButtonElement)
+    .dispatchEvent(new w.Event('click'));
+  assert.ok(w.document.querySelector('.publish-preview-image-confirm'));
+  $(w, '#content-workspace-close').dispatchEvent(new w.Event('click'));
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  assert.equal(w.document.querySelector('.publish-preview-image-confirm'), null);
 });
 
 test('发布卡已通过 → 第四节点平静色 + 无需操作', async () => {
