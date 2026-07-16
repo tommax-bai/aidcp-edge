@@ -4,7 +4,7 @@ import { JSDOM } from 'jsdom';
 
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monitor.js';
-import { FacebookJoinExecutor, classifyCtaLabel, hasMemberSignal, structuralJoinConfirmed } from '../../src/facebook/join-executor.js';
+import { FacebookJoinExecutor, classifyCtaLabel, hasMemberSignal, isOnCanonicalGroupPage, structuralJoinConfirmed } from '../../src/facebook/join-executor.js';
 import { TaskTakeoverError } from '../../src/execution/takeover.js';
 
 interface RawJoinObservation {
@@ -59,12 +59,24 @@ class FakeCdp implements BrowseCdp {
   jsClickSucceeds = true;
   escapes = 0;
   private evalCount = 0;
+  /**
+   * 浏览器此刻停在哪（change fb-group-join-click-leg-reuse 的在位探测读它）。
+   * 缺省 about:blank = 「不在任何群页」⇒ 一律导航 = 本 change 前的行为，既有用例零影响。
+   * 置 undefined 模拟「地址读不出来」。
+   */
+  currentUrl: string | undefined = 'about:blank';
+  /** 在位探测被调用的次数——用来断言 observe 腿根本不探测（它无条件导航）。 */
+  urlProbes = 0;
+  /** 置 true 让在位探测抛错，验证「探测炸了也只是回落导航、绝不弄失败加群」。 */
+  urlProbeThrows: Error | undefined;
 
   constructor(private readonly observations: RawJoinObservation[] = [obs()]) {}
 
   async send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     if (method === 'Page.navigate') {
       this.navigations.push(String(params.url));
+      // 导航后浏览器就停在那个地址了——让桩忠实于真实语义，否则「导航过还说不在位」会掩盖 bug。
+      this.currentUrl = String(params.url);
       return {} as T;
     }
     if (method === 'Runtime.evaluate') {
@@ -72,6 +84,12 @@ class FakeCdp implements BrowseCdp {
       if (String(params.expression ?? '').includes('__FB_JOIN_CLICK__')) {
         if (this.jsClickSucceeds) this.clicks.push({ x: -1, y: -1 });
         return { result: { value: JSON.stringify({ clicked: this.jsClickSucceeds }) } } as T;
+      }
+      // 在位探测 eval（带唯一标记）：观察脚本自身也含 location.href，故必须靠标记区分、绝不消费观察序列。
+      if (String(params.expression ?? '').includes('__FB_JOIN_URL__')) {
+        this.urlProbes++;
+        if (this.urlProbeThrows) throw this.urlProbeThrows;
+        return { result: { value: JSON.stringify({ href: this.currentUrl }) } } as T;
       }
       const current = this.observations[Math.min(this.evalCount, this.observations.length - 1)] ?? obs();
       this.evalCount++;
@@ -958,4 +976,87 @@ test('🔴 复核 wf_1657e89b BLOCKER：join 点击前（observe 阶段）被接
   assert.ok(checkpointCalls > 0, 'observe 阶段确实检查了接管（点击前可取消）');
   assert.equal(cdp.clicks.length, 0, '点击前被接管 MUST 零加群点击：未加群');
   // 反「空测」自证：换回旧的「observeUntilReady 无 checkpoint」实现，observe 会跑完并点击 → clicks.length===1、且不抛（两断言都变红）。
+});
+
+// ── change fb-group-join-click-leg-reuse：click 腿复用 observe 腿已确立的目标页，消灭同址整页重载 ──
+
+test('reuse 判据: 在位 / 不在位逐例（不在位一律 false ⇒ 回落导航）', () => {
+  const want = 'https://www.facebook.com/groups/123';
+  const onTarget = [
+    'https://www.facebook.com/groups/123',
+    'https://www.facebook.com/groups/123/', // 尾斜杠
+    'https://www.facebook.com/groups/123?ref=share', // FB 常追加的追踪参数——同一份 DOM
+    'https://www.facebook.com/groups/123#anchor',
+  ];
+  for (const u of onTarget) assert.equal(isOnCanonicalGroupPage(u, want), true, `应判在位: ${u}`);
+
+  const offTarget: Array<string | undefined> = [
+    'https://m.facebook.com/groups/123', // 同群但**移动版 DOM**：观察脚本按桌面 DOM 写，复用=在错 DOM 上观察
+    'https://www.facebook.com/groups/123/about', // 子面：加入按钮未必在 → 可能落 no_button（云端判永久 failed）
+    'https://www.facebook.com/groups/123/posts/456',
+    'https://www.facebook.com/groups/1234', // 异群（前缀相似，防松判据把它放过）
+    'https://www.facebook.com/', // 首页
+    'https://evil.example.com/groups/123',
+    'not-a-url',
+    '',
+    undefined,
+  ];
+  for (const u of offTarget) assert.equal(isOnCanonicalGroupPage(u, want), false, `应判不在位: ${String(u)}`);
+});
+
+test('click 腿在位 → 零导航（不重载 observe 腿已确立的页），仍走就绪轮询并点击', async () => {
+  const cdp = new FakeCdp([
+    obs(),
+    obs({ mainCtaText: 'Joined', membershipSignals: ['You are now a member'], joinButton: { found: false } }),
+  ]);
+  cdp.currentUrl = 'https://www.facebook.com/groups/123?ref=share'; // observe 腿刚把页面留在这
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.equal(cdp.navigations.length, 0, 'click 腿在位 MUST 零导航——这正是本 change 要消灭的整页重载');
+  assert.equal(r.ok, true, '跳过导航不得影响加群结果');
+  assert.equal(cdp.clicks.length, 1);
+});
+
+test('observe 腿即便在位也 MUST 导航（承重反死锁闸，勿"优化"）', async () => {
+  const cdp = new FakeCdp([obs()]);
+  cdp.currentUrl = 'https://www.facebook.com/groups/123'; // 已经停在目标页上
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123');
+  assert.equal(r.reason, 'observation_only');
+  assert.deepEqual(cdp.navigations, ['https://www.facebook.com/groups/123'],
+    'observe 腿是本流程唯一的页面确立 + 故障恢复手段：若它也复用，页面卡在目标 URL 的坏状态时 not_ready 重试将永远跳过导航、永远观察同一个坏页 → 死锁到 attempts 撞上限被永久标 failed');
+  assert.equal(cdp.urlProbes, 0, 'observe 腿无条件导航，连探测都不该做');
+});
+
+test('click 腿不在位（浏览器被别的任务开走）→ 照旧导航', async () => {
+  const cdp = new FakeCdp([
+    obs(),
+    obs({ mainCtaText: 'Joined', membershipSignals: ['You are now a member'], joinButton: { found: false } }),
+  ]);
+  cdp.currentUrl = 'https://www.facebook.com/'; // 租约间隙里被浏览闭环滚回了首页
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.deepEqual(cdp.navigations, ['https://www.facebook.com/groups/123']);
+  assert.equal(r.ok, true);
+});
+
+test('在位探测抛错 → 吞掉并回落导航（探测绝不弄失败加群）', async () => {
+  const cdp = new FakeCdp([
+    obs(),
+    obs({ mainCtaText: 'Joined', membershipSignals: ['You are now a member'], joinButton: { found: false } }),
+  ]);
+  cdp.currentUrl = 'https://www.facebook.com/groups/123';
+  cdp.urlProbeThrows = new Error('CDP boom');
+  const r = await makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true });
+  assert.deepEqual(cdp.navigations, ['https://www.facebook.com/groups/123'], '探测炸了 = 存疑 ⇒ 导航（退回今日行为）');
+  assert.equal(r.ok, true, '探测失败绝不能把加群本身弄失败');
+});
+
+test('在位探测遇接管 → MUST 冒泡，绝不降级成「探测失败照旧导航」', async () => {
+  const cdp = new FakeCdp([obs()]);
+  cdp.currentUrl = 'https://www.facebook.com/groups/123';
+  cdp.urlProbeThrows = new TaskTakeoverError();
+  await assert.rejects(
+    () => makeExecutor(cdp).joinGroup('https://www.facebook.com/groups/123', { click: true }),
+    TaskTakeoverError,
+    '接管被吞 = 一次已下达的让位变成一次多余整页加载 + 云端把主动让位误判成业务失败',
+  );
+  assert.equal(cdp.navigations.length, 0, '被接管 MUST 零导航');
 });
