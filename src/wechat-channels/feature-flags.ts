@@ -62,7 +62,7 @@ const ENDPOINT_CAPABILITIES: Record<WechatChannelsEndpoint, readonly WechatCapab
   authLoginStatus: [],
   authData: ['commentsRead', 'commentsReply', 'dmRead', 'dmSendText'],
   postList: ['commentsRead', 'commentsReply'],
-  commentPagePostList: ['commentsRead', 'commentsReply'],
+  commentList: ['commentsRead', 'commentsReply'],
   commentCreate: ['commentsReply'],
   dmLoginCookie: ['dmRead', 'dmSendText'],
   dmNewMessages: ['dmRead', 'dmSendText'],

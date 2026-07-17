@@ -84,6 +84,75 @@ export function isFacebookParticipationGateText(text: string | null | undefined)
   return FB_PARTICIPATION_GATE_RE.test(String(text ?? ''));
 }
 
+/**
+ * 从评论行文本里**剥掉本人提交的正文**，只留元数据槽位（时间 / 发布中 / 已拒绝 / 赞 / 回复 / 查看反馈…）。
+ *
+ * 🔴 为什么必须剥：评论行的 innerText = 作者名 + **我们自己提交的正文** + 元数据。若直接整行匹配
+ * 「已拒绝」/「发布中」,一条正文里含这些词的**正常评论**（例：评论内容在谈审核）会被误判——
+ * 误判成已拒绝 = 成功的评论报成失败 → 云端不打去重 → 下轮同帖**再发一条真评论**（平台可见重复），
+ * 正是本 change 要堵的洞，绝不能自己造一个。剥掉正文后，正文内容再也影响不了状态判别。
+ * 剥的是**完整正文 + 联系方式**（非 60 字片段），故长正文同样安全。
+ */
+export function stripSubmittedText(rowText: string, submitted: readonly string[]): string {
+  let out = String(rowText ?? '');
+  for (const s of submitted) {
+    const t = String(s ?? '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!t) continue;
+    out = out.split(t).join(' ');
+  }
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * 平台**已拒绝**指示（change facebook-comment-lifecycle-verify）。
+ * 真机实测（2026-07-17）：被拒行 = `… 16小时 已拒绝 查看反馈`，渲染在**正常行放「时间·赞·回复」的同一元数据槽位**，
+ * 无服务器正式 id，控件是「编辑或删除此项」+「查看反馈」（**恰好 2 个** → 旧的 `按钮数>=2` 判据把它判成成功，即本 change 要堵的假绿）。
+ * 命中 = 评论**确定未上墙、终局被拒**（区别于 `pending_group_approval` 的「待批准、可等」）。
+ * 与 `FB_PENDING_APPROVAL_RE` **互不串味**（见单测回归）。真机仅坐实简体中文，英文/越南语为高置信超集——
+ * **漏检安全**：回落既有诚实非成功路径，绝不假绿（红线：文案只做 veto/分诊，绝不做唯一成功判据）。
+ */
+export const FB_COMMENT_REJECTED_RE =
+  /已拒绝|被拒绝|遭拒绝|已(?:被)?驳回|查看反馈|查看意见反馈|đã từ chối|bị từ chối|xem phản hồi|\brejected\b|\bdeclined\b|was not approved|see feedback|view feedback/i;
+
+/** 与页内同源的「已拒绝」文本断言，供单测直接校验中英文案覆盖（无需真实 DOM）。 */
+export function isFacebookCommentRejectedText(text: string | null | undefined): boolean {
+  return FB_COMMENT_REJECTED_RE.test(String(text ?? ''));
+}
+
+/**
+ * **发布中**（在飞）指示（change facebook-comment-lifecycle-verify）。
+ * 真机实测（2026-07-17，两跑一致）：回车后 ~31ms 该行即乐观渲染为 `… 发布中...`（**0 个控件**、带 client 占位 id）；
+ * 服务器点头 ~2.8s，此后 ~99ms 内「发布中」消失、换成「时间 · 赞 · 回复」。
+ * **它是纯文字**——无 `aria-busy`、`opacity` 恒为 1（探针的 busy/opacity 探测**结构上看不见它**，这正是上轮漏测的原因）。
+ * 命中 = **仍在飞**：MUST NOT 落任何终态，继续等；窗口耗尽仍在飞 → 诚实非成功 + 带「观察到在飞」证据
+ * （用于把「压根没提交」与「提交了但没等到结果」分开——今天缺的分诊维度）。
+ */
+export const FB_COMMENT_IN_FLIGHT_RE = /发布中|發佈中|发送中|發送中|đang đăng|đang gửi|\bposting\b|\bsending\b/i;
+
+/** 与页内同源的「发布中」文本断言，供单测直接校验中英文案覆盖（无需真实 DOM）。 */
+export function isFacebookCommentInFlightText(text: string | null | undefined): boolean {
+  return FB_COMMENT_IN_FLIGHT_RE.test(String(text ?? ''));
+}
+
+/**
+ * 具名**赞 / 回复**控件标签（change facebook-comment-lifecycle-verify）。
+ * 取代旧的 `role=button` **计数**判据（`reactions>=2`）——真机证伪：被拒行也有 2 个控件（编辑或删除 / 查看反馈），
+ * 计数分不出「服务器点头了」和「平台拒了」。改为**具名**识别：赞 **且** 回复同时在位，才算 ack-gated 交互控件出现。
+ * 正常行真机原文（2026-07-17）：控件 = 编辑或删除此项 / 赞 / 留下心情 / 回复。
+ */
+export const FB_LIKE_CONTROL_RE = /^(?:赞|讚|点赞|按赞|thích|like)$/i;
+export const FB_REPLY_CONTROL_RE = /^(?:回复|回覆|trả lời|phản hồi|reply)$/i;
+
+/** 与页内同源的赞/回复具名控件断言，供单测直接校验（无需真实 DOM）。 */
+export function isFacebookLikeControlLabel(label: string | null | undefined): boolean {
+  return FB_LIKE_CONTROL_RE.test(String(label ?? '').trim());
+}
+export function isFacebookReplyControlLabel(label: string | null | undefined): boolean {
+  return FB_REPLY_CONTROL_RE.test(String(label ?? '').trim());
+}
+
 /** 搜索/开帖/提交诚实非成功原因（与云端 outcome 映射对齐）。 */
 export type FacebookCommentStepReason =
   | 'permission_gated' // 容器非法 / 非成员 / 待批准 / 群问答门槛
@@ -100,6 +169,7 @@ export type FacebookCommentStepReason =
   | 'submit_control_disabled' // 发布按钮禁用（空/受限）
   | 'marker_not_accepted' // 受控输入未被编辑器接受
   | 'verification_ambiguous' // 提交后无法在目标帖评论区确认本人评论
+  | 'comment_rejected' // 平台已拒绝该评论：确定未上墙、终局（区别于 pending_group_approval 的可等；绝不打去重）
   | 'nav_error'; // 导航/CDP 异常
 
 /** 容器内搜索到的候选帖（permalink 作为云端 noteId）。 */
@@ -178,15 +248,11 @@ export interface FacebookCommentExecutorOptions {
   surfaceProbeRounds?: number;
   /** 开帖后等帖子详情 article 水合的复探轮数（**独立**于 `surfaceProbeRounds`，见 DEFAULTS 注释）。 */
   postDetailProbeRounds?: number;
-  /** 提交后就地确认前的初始沉淀（等乐观渲染出现）/ reload 后确认前的初始沉淀。 */
+  /** 提交后就地确认前的初始沉淀（等乐观渲染出现）。 */
   waitAfterSubmitMs?: number;
-  waitAfterReloadMs?: number;
-  /** 就地 ack 门控确认（不刷新）的有界轮询轮数与间隔（治「秒退」误判、抓服务器点头即成功）。 */
+  /** 就地 ack 门控确认（**唯一确认路径，绝不刷新**）的有界轮询轮数与间隔。 */
   inPlaceVerifyRounds?: number;
   inPlaceVerifyIntervalMs?: number;
-  /** 刷新兜底后的有界轮询轮数与间隔（替代「死等一次」，治慢渲染假阴性 P2②）。 */
-  reloadVerifyRounds?: number;
-  reloadVerifyIntervalMs?: number;
   /** 读了再写：开帖后最多抽取的他人评论条数（供撰写器上下文）。 */
   maxComments?: number;
 }
@@ -207,11 +273,18 @@ const DEFAULTS: Required<FacebookCommentExecutorOptions> = {
   // 仍有界；超窗仍如实 open_failed，诚实失败语义不变。改此值须同步云端开帖步上界（facebook-edge-steps.ts）。
   postDetailProbeRounds: 22,
   waitAfterSubmitMs: 500,
-  waitAfterReloadMs: 2_500,
-  inPlaceVerifyRounds: 32,
+  // 提交后就地确认窗（change facebook-comment-lifecycle-verify）。刷新腿删除后，其预算并入此处：
+  //   旧：就地 0.5s + 32×300ms ≈ 10.1s ＋ 刷新腿 2.5s + 8×800ms ≈ 8.9s（含导航）→ 合计 ≈ 19s
+  //   新：就地 0.5s + 63×300ms ≈ 19.4s，**提交后总预算不变**（无刷新导航开销，实际略省）。
+  // 🔴 预算复算（红线，改此值必须重算）：云端提交步超时 = max(28s, 18s + 220ms×字数)，上限 90s
+  //   （aidcp-cloud/src/comment-agent/facebook-edge-steps.ts）。这**一个**预算要覆盖「逐字输入 + 本确认窗」全程。
+  //   最坏核对：短评论（≤45 字）云端预算取地板 28s，边缘 = 逐字输入 45×~110ms ≈ 5s + 确认 19.4s ≈ 24.4s < 28s ✅
+  //            长评论（如 120 字）云端 = 18 + 0.22×120 ≈ 44.4s，边缘 ≈ 13.2s + 19.4s ≈ 32.6s < 44.4s ✅
+  //   （云端预算随字数以 220ms/字增长、边缘逐字输入约 110ms/字，云端增速是边缘 2 倍 → 越长越宽裕，短评论是最紧的那端。）
+  //   若超出：云端记 timeout → reallySubmitted 为假 → **不打去重** → 下轮同帖再发一条真评论（平台可见重复），
+  //   正是 facebook-comment-idempotency 要堵的洞。真机实测服务器点头 2.8s，19.4s 已是 ~7 倍余量,无需再放宽。
+  inPlaceVerifyRounds: 63,
   inPlaceVerifyIntervalMs: 300,
-  reloadVerifyRounds: 8,
-  reloadVerifyIntervalMs: 800,
   maxComments: 6,
 };
 
@@ -547,6 +620,9 @@ export class FacebookCommentExecutor {
 
     const code = contactInfo && contactInfo.length > 0 ? contactInfo : '';
     const requiredFragments = requiredTextFragments(body, code);
+    // 状态判别前要剥掉的**完整**正文（非 60 字片段）——评论行 innerText 含我们自己的正文，不剥就会把
+    // 「正文里含『已拒绝』的正常评论」误判成被拒 → 成功报失败 → 不打去重 → 下轮真重复评论（见 stripSubmittedText）。
+    const submittedTexts = [body, code].filter((s) => s.length > 0);
     // 提交窗口守卫（5.1）：回车（536）前 enter，确认段（禁区）内绝不被强杀；enter 在最后取消点之后赋值，
     // 取消/失败早退时仍为 undefined ⇒ dispose 为 no-op、绝不干扰既有清场。
     let disposeCommit: (() => void) | undefined;
@@ -615,32 +691,33 @@ export class FacebookCommentExecutor {
     }
     // 🔴 回车已发出：以下确认段 MUST NOT 取消（禁区）。窗口在确认段结束（四条出口）由 finally 关闭。
     try {
-      // (1) 就地 ack 门控快确认（不刷新，抓服务器点头即成功、比刷新又快又准）。
-      const ack = await this.inPlaceAckConfirm(requiredFragments, ownId, targetPostId);
+      // 🔴 change facebook-comment-lifecycle-verify：确认段**纯就地观察，绝不刷新**。真机（2026-07-17）三条独立理由:
+      //   ① reload 校验当场制造**假阴性**——报评论不在，而两条探针评论实际都在（CDP 复核 + 肉眼双证）；
+      //      这正是运营侧「提交后无法确认评论已上墙」黄卡的产地。
+      //   ② reload 腿的判据只要「本人+文本」、连 ack 信号都不看 → 对**已拒绝**评论必定假绿。
+      //   ③ reload **毁证据**——刷掉待审徽章与参与审批对话框，把分类器直接弄瞎。
+      // 其原有预算（约 9s）已并入就地窗，**提交后总预算不变**（必须留在云端提交步超时内，否则云端记
+      // timeout → 不打去重 → 下轮同帖真重发，见 facebook-comment-idempotency）。
+      const ack = await this.inPlaceAckConfirm(requiredFragments, ownId, targetPostId, submittedTexts);
       if (ack.confirmed) {
         return { ok: true, submitted: true, serverConfirmed: true };
       }
+      // 平台已拒绝：确定未上墙、**终局**。自成一档 —— 绝不塌进 verification_ambiguous（那读作「可能已发出」**且会打去重**，
+      // 等于把确定失败当成可能成功、还顺手把目标帖永久烧掉），也绝不塌进 pending_group_approval（那是可等、批准后可重试）。
+      if (ack.rejected) {
+        this.log('[fb-comment] 识别到平台已拒绝该评论——确定未上墙、终局，comment_rejected（不去重、不重试）');
+        return { ok: false, reason: 'comment_rejected', submitted: true, serverConfirmed: false };
+      }
       // 群参与审批入群闸：本人首条评论只对作者可见、带「待审核」徽章（ack.pendingApproval），或页面有参与审批对话框。
-      // 评论**未上墙**——诚实 pending_group_approval（submitted:false），**不刷新**（reload 会刷掉徽章/对话框掩盖证据）、不重试。
+      // 评论**未上墙**——诚实 pending_group_approval（submitted:false）、不重试。
       if (ack.pendingApproval || (await this.participationGateVisible())) {
-        this.log('[fb-comment] 识别到群参与审批入群闸——评论未上墙、待管理员批准，pending_group_approval（不刷新、不重试）');
+        this.log('[fb-comment] 识别到群参与审批入群闸——评论未上墙、待管理员批准，pending_group_approval（不重试）');
         return { ok: false, reason: 'pending_group_approval', submitted: false, serverConfirmed: false };
       }
-      // (2) 兜底：刷新一次 + 有界轮询三重收窄确认（治慢渲染假阴性；提交后误导性报错浮层不当作失败，确认信号权威）。
-      try {
-        await this.cdp.send('Page.reload', { ignoreCache: true });
-      } catch (err) {
-        this.log(`[fb-comment] reload 失败：${(err as Error).message}`);
-        return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
-      }
-      const reloaded = await this.reloadScopedConfirm(requiredFragments, ownId, targetPostId);
-      if (reloaded.confirmed) {
-        return { ok: true, submitted: true, serverConfirmed: true };
-      }
-      // 刷新后仍见「本人+文本+待审核徽章」评论行 → 同样是参与审批未上墙。
-      if (reloaded.pendingApproval) {
-        this.log('[fb-comment] 刷新后见待审批评论行——评论未上墙、待管理员批准，pending_group_approval');
-        return { ok: false, reason: 'pending_group_approval', submitted: false, serverConfirmed: false };
+      // 窗口耗尽仍在飞：诚实非成功，但**带上「观察到在飞」证据**——这是「压根没提交」与「提交了但没等到结果」
+      // 的分诊维度（今天缺的那一维）。回执仍归 verification_ambiguous（其语义正是「提交了、没确认」+ 打去重防重发）。
+      if (ack.inFlight) {
+        this.log('[fb-comment] 窗口耗尽时评论仍处「发布中」——已提交但未等到落定，verification_ambiguous（观察到在飞）');
       }
       return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
     } finally {
@@ -656,45 +733,30 @@ export class FacebookCommentExecutor {
     requiredFragments: string[],
     ownId: string,
     targetPostId: string | null,
-  ): Promise<{ confirmed: boolean; pendingApproval: boolean }> {
+    submittedTexts: readonly string[],
+  ): Promise<{ confirmed: boolean; pendingApproval: boolean; rejected: boolean; inFlight: boolean }> {
     await this.sleep(this.opts.waitAfterSubmitMs);
     let pendingApproval = false;
+    let inFlight = false;
     for (let i = 0; i < this.opts.inPlaceVerifyRounds; i++) {
       if (i > 0) await this.sleep(this.opts.inPlaceVerifyIntervalMs);
       try {
-        const v = await evalJson<AckVerifyResult>(this.cdp, buildAckVerifyJs(requiredFragments, ownId, targetPostId));
+        const v = await evalJson<AckVerifyResult>(
+          this.cdp,
+          buildAckVerifyJs(requiredFragments, ownId, targetPostId, submittedTexts),
+        );
         if (v?.pendingApproval) pendingApproval = true;
-        if (v?.ackConfirmed) return { confirmed: true, pendingApproval: false };
+        if (v?.inFlight) inFlight = true;
+        if (v?.ackConfirmed) return { confirmed: true, pendingApproval: false, rejected: false, inFlight: false };
+        // 平台已拒绝 = **终局**：再等也不会变成功，立即停止轮询（省掉整个窗口的空转）。
+        if (v?.rejected) return { confirmed: false, pendingApproval: false, rejected: true, inFlight: false };
       } catch (err) {
         this.log(`[fb-comment] 就地 ack 确认探测失败：${(err as Error).message}`);
       }
     }
-    return { confirmed: false, pendingApproval };
+    return { confirmed: false, pendingApproval, rejected: false, inFlight };
   }
 
-  /**
-   * 刷新兜底后有界轮询三重收窄确认（own-identity + 目标帖评论区 + 文本片段）。
-   * 替代旧「reload 后死等一次」：慢渲染下评论已在服务器却没在单次窗口重渲染 → 多查几眼即命中（治 P2② 假阴性）。
-   */
-  private async reloadScopedConfirm(
-    requiredFragments: string[],
-    ownId: string,
-    targetPostId: string | null,
-  ): Promise<{ confirmed: boolean; pendingApproval: boolean }> {
-    await this.sleep(this.opts.waitAfterReloadMs);
-    let pendingApproval = false;
-    for (let i = 0; i < this.opts.reloadVerifyRounds; i++) {
-      if (i > 0) await this.sleep(this.opts.reloadVerifyIntervalMs);
-      try {
-        const v = await evalJson<ScopedVerifyResult>(this.cdp, buildScopedVerifyJs(requiredFragments, ownId, targetPostId));
-        if (v?.pendingApproval) pendingApproval = true;
-        if (v?.confirmed) return { confirmed: true, pendingApproval: false };
-      } catch (err) {
-        this.log(`[fb-comment] 刷新确认探测失败：${(err as Error).message}`);
-      }
-    }
-    return { confirmed: false, pendingApproval };
-  }
 
   /**
    * 群参与审批入群闸探针（change facebook-comment-participation-gate）：可见 role=dialog + 参与审批专属文案。
@@ -754,22 +816,18 @@ interface FocusEditorResult {
 }
 
 
-interface ScopedVerifyResult {
-  confirmed: boolean;
-  matchedText: boolean;
-  matchedOwnIdentity: boolean;
-  articleCount: number;
-  /** 「本人+文本」评论行带「待管理员审批」徽章 → 未上墙（群参与审批）。绝不判 confirmed。 */
-  pendingApproval?: boolean;
-}
-
 interface AckVerifyResult {
-  /** 「本人+文本」评论行上出现服务器正式 id 或 点赞/回复交互控件 → 服务器已点头。 */
+  /** 「本人+文本」评论行上出现服务器正式 id 或**具名**赞+回复控件 → 服务器已点头。 */
   ackConfirmed: boolean;
   serverId: boolean;
-  reactions: number;
+  /** 具名赞控件 **且** 具名回复控件同时在位（取代旧的 role=button 计数，见 buildAckVerifyJs 红线注释）。 */
+  likeAndReply: boolean;
   /** 「本人+文本」评论行带「待管理员审批」徽章 → 未上墙（群参与审批）。绝不判 ackConfirmed。 */
   pendingApproval?: boolean;
+  /** 「本人+文本」评论行带「已拒绝/查看反馈」→ 平台拒绝、确定未上墙、终局。绝不判 ackConfirmed、绝不打去重。 */
+  rejected?: boolean;
+  /** 「本人+文本」评论行带「发布中」→ 仍在飞。MUST NOT 落任何终态。 */
+  inFlight?: boolean;
 }
 
 interface ParticipationGateResult {
@@ -788,6 +846,50 @@ const FB_EXEC_HELPERS_JS = `
   var FB_PENDING_APPROVAL_RE=/${FB_PENDING_APPROVAL_RE.source}/i;
   // 评论行是否带「待管理员审批」徽章（只查该行自身 innerText——徽章内联在行内；false-veto 安全、漏 veto 才危险）。
   function fbNodePendingApproval(node){ try{ return !!node && FB_PENDING_APPROVAL_RE.test(fbText(node)); }catch(e){ return false; } }
+  // ── 三态生命周期（change facebook-comment-lifecycle-verify；真机 2026-07-17 坐实）──
+  var FB_COMMENT_REJECTED_RE=/${FB_COMMENT_REJECTED_RE.source}/i;
+  var FB_COMMENT_IN_FLIGHT_RE=/${FB_COMMENT_IN_FLIGHT_RE.source}/i;
+  var FB_LIKE_CONTROL_RE=/${FB_LIKE_CONTROL_RE.source}/i;
+  var FB_REPLY_CONTROL_RE=/${FB_REPLY_CONTROL_RE.source}/i;
+  // 🔴 剥掉本人提交的正文再判状态（与 TS 侧 stripSubmittedText 同源）：评论行 innerText 含我们自己的正文,
+  // 整行匹配会把「正文里含『已拒绝』的正常评论」误判成被拒 → 成功报失败 → 不打去重 → 下轮真重复评论。
+  function fbStripSubmitted(rowText, submitted){
+    var out=String(rowText||'');
+    for(var i=0;i<submitted.length;i++){
+      var t=String(submitted[i]||'').replace(/\\s+/g,' ').trim();
+      if(!t) continue;
+      out=out.split(t).join(' ');
+    }
+    return out.replace(/\\s+/g,' ').trim();
+  }
+  // 元数据槽位文本 = 行文本剥掉正文（时间 / 发布中 / 已拒绝 / 赞 / 回复 / 查看反馈… 都落在这里）。
+  function fbMetaText(node, submitted){ try{ return fbStripSubmitted(fbText(node), submitted||[]); }catch(e){ return ''; } }
+  // 控件具名判别:取 aria-label,回落到可见文本。
+  function fbCtlLabel(el){ try{ return String((el.getAttribute&&el.getAttribute('aria-label'))||fbText(el)||'').trim(); }catch(e){ return ''; } }
+  // 🔴 ack-gated 交互控件 = 具名「赞」**且**具名「回复」同时在位。绝不用 role=button **计数**——
+  // 真机证伪:被拒行也有 2 个控件(编辑或删除此项 / 查看反馈),计数分不出「点头」与「被拒」(本 change 要堵的假绿)。
+  function fbHasLikeAndReply(node){
+    try{
+      var btns=node.querySelectorAll('[role="button"]'); var like=false, reply=false;
+      for(var i=0;i<btns.length;i++){ var l=fbCtlLabel(btns[i]);
+        if(!like && FB_LIKE_CONTROL_RE.test(l)) like=true;
+        if(!reply && FB_REPLY_CONTROL_RE.test(l)) reply=true;
+        if(like&&reply) return true; }
+      return false;
+    }catch(e){ return false; }
+  }
+  // 被拒:元数据槽位命中「已拒绝」类文案,或存在具名「查看反馈」控件(控件不含正文,天然免正文污染)。
+  function fbNodeRejected(node, submitted){
+    try{
+      if(!node) return false;
+      if(FB_COMMENT_REJECTED_RE.test(fbMetaText(node, submitted))) return true;
+      var btns=node.querySelectorAll('[role="button"]');
+      for(var i=0;i<btns.length;i++){ if(FB_COMMENT_REJECTED_RE.test(fbCtlLabel(btns[i]))) return true; }
+      return false;
+    }catch(e){ return false; }
+  }
+  // 在飞:元数据槽位命中「发布中」类文案(纯文字——无 aria-busy、opacity 恒 1,属性/样式探测看不见它)。
+  function fbNodeInFlight(node, submitted){ try{ return !!node && FB_COMMENT_IN_FLIGHT_RE.test(fbMetaText(node, submitted)); }catch(e){ return false; } }
 `;
 
 /**
@@ -960,82 +1062,65 @@ function buildSelectEditorContentsJs(targetPostId: string | null): string {
 }
 
 /**
- * F1 补丁②：own-identity + 目标帖评论区 + 文本片段 三重收窄确认。
- * - 目标帖：先按**规范帖身份**三段式解析（唯一命中才算）；解析不出再退到「全文档里唯一一张**携带目标身份锚**的
- *   article」。两者都落空 → confirmed=false（诚实）。**不再退到首个 article、也不再按 URL pathname 子串挑**——
- *   `multi_permalinks` 形态的 targetUrl 其 pathname 只是 `/groups/<id>`，子串命中群页里几乎任何链接 → 又变成
- *   「取 DOM 序第一张卡」（对抗性评审复现）。
- * - 在其评论区找**评论行**：文本含片段（前 60 字）且节点内有指向本人数字 id 的作者链接。
- * - **绝不退化成整帖 article**（见 buildAckVerifyJs 的同款说明）：那会拿编辑器里还没发出去的正文冒充成功。
+ * 就地 ack 门控确认（**绝不刷新**）：在「本人身份 + 文本片段」收窄到的评论行上判三态。
+ *
+ * 成功（ackConfirmed）= ① 服务器正式评论 id（非 client 乐观占位，与 isServerFacebookCommentId 同源，语言无关）
+ *   **或** ② **具名**赞控件 **且** 具名回复控件同时在位。
+ *
+ * 🔴 change facebook-comment-lifecycle-verify 撤销了旧的 `reactions>=2`（role=button **计数**）判据:
+ *   真机（2026-07-17）实测被拒行 `… 16小时 已拒绝 查看反馈` **恰好带 2 个控件**（编辑或删除此项 / 查看反馈）
+ *   → 计数判据把**平台拒绝的评论判成发布成功**（云端据此打去重烧掉目标帖 + 运营收到「服务器已确认」绿卡）。
+ *   计数从来只是「赞和回复出现了」的代理,该代理被真机证伪 → 改具名识别。
+ *
+ * 另两态（均在「本人+文本」收窄之后判，与待审徽章同层级）：
+ *   - rejected：元数据槽位「已拒绝/查看反馈」→ 确定未上墙、终局被拒（绝不判 ackConfirmed）。
+ *   - inFlight：元数据槽位「发布中」→ 仍在飞，继续等（MUST NOT 落终态）。
+ * 红线：绝不据乐观渲染/占位 id 冒充成功；文案只做 veto/分诊，成功仍以语言无关信号为准。
  */
-export function buildScopedVerifyJs(requiredFragments: string[], ownId: string, targetPostId: string | null): string {
+export function buildAckVerifyJs(
+  requiredFragments: string[],
+  ownId: string,
+  targetPostId: string | null,
+  submittedTexts: readonly string[] = [],
+): string {
   return `(function(){${buildScopedEditorHelpersJs(targetPostId)}
     var fragments=${JSON.stringify(requiredFragments)}; var ownId=${jsString(ownId)};
-    function hasAllFragments(txt){ return fragments.length>0 && fragments.every(function(f){ return f && txt.indexOf(f)>=0; }); }
-    var articles=Array.prototype.slice.call(document.querySelectorAll('[role="article"], article'));
-    if(articles.length===0) return JSON.stringify({confirmed:false,matchedText:false,matchedOwnIdentity:false,articleCount:0});
-    var target=fbTgtResolve(FB_TARGET_POST_ID).el;
-    if(!target){ var carriers=[];
-      for(var i=0;i<articles.length;i++){ if(fbTgtArticleCarriesId(articles[i], FB_TARGET_POST_ID)) carriers.push(articles[i]); }
-      if(carriers.length===1) target=carriers[0];
-    }
-    if(!target) return JSON.stringify({confirmed:false,matchedText:false,matchedOwnIdentity:false,articleCount:articles.length});
-    // 评论行：目标帖内的评论条目（嵌套 role=article / [aria-label*=Comment/评论]），排除编辑框本身。
-    var commentNodes=Array.prototype.slice.call(target.querySelectorAll('[role="article"], [aria-label*="评论"], [aria-label*="Comment"]'))
-      .filter(function(n){ return n.getAttribute('contenteditable')!=='true'; });
-    if(commentNodes.length===0) return JSON.stringify({confirmed:false,matchedText:false,matchedOwnIdentity:false,articleCount:articles.length});
-    var matchedText=false, matchedOwn=false, sawPending=false, confirmedNode=false;
-    for(var k=0;k<commentNodes.length;k++){ var node=commentNodes[k];
-      var txt=fbText(node); var hasText=hasAllFragments(txt); if(!hasText) continue; matchedText=true;
-      var authorLinks=node.querySelectorAll('a[href*="/profile.php?id="], a[href*="/people/"], a[href*="user/"]'); var ownOnNode=false;
-      for(var a=0;a<authorLinks.length;a++){ if((authorLinks[a].getAttribute('href')||'').indexOf(ownId)>=0){ ownOnNode=true; break; } }
-      if(!ownOnNode) continue; matchedOwn=true;
-      // 🔴 待审批否决（同 buildAckVerifyJs）：本人+文本评论行带「待审核」徽章 = 未上墙，绝不判 confirmed。
-      if(fbNodePendingApproval(node)){ sawPending=true; continue; }
-      confirmedNode=true; break;
-    }
-    return JSON.stringify({confirmed:confirmedNode,matchedText:matchedText,matchedOwnIdentity:matchedOwn,articleCount:articles.length,pendingApproval:sawPending});
-  })()`;
-}
-
-/**
- * 就地 ack 门控确认（不刷新）：在「本人身份 + 文本片段」收窄到的评论行上，判服务器点头信号——
- * ① 服务器正式评论 id（非 client 乐观占位，与 isServerFacebookCommentId 同源）；② 点赞/回复交互控件（乐观阶段为 0）。
- * 任一命中即 ackConfirmed。语言无关（不吃任何 locale 文案）。红线：绝不据乐观渲染/占位 id 冒充成功。
- */
-export function buildAckVerifyJs(requiredFragments: string[], ownId: string, targetPostId: string | null): string {
-  return `(function(){${buildScopedEditorHelpersJs(targetPostId)}
-    var fragments=${JSON.stringify(requiredFragments)}; var ownId=${jsString(ownId)};
+    var submitted=${JSON.stringify(submittedTexts)};
     function hasAllFragments(txt){ return fragments.length>0 && fragments.every(function(f){ return f && txt.indexOf(f)>=0; }); }
     var CLIENT_RE=/${FB_CLIENT_COMMENT_ID_RE.source}/i; var SERVER_RE=/${FB_SERVER_COMMENT_ID_RE.source}/;
     function serverId(href){ var m=/[?&](?:reply_comment_id|comment_id)=([^&]+)/i.exec(href||''); if(!m) return false; var v=''; try{ v=decodeURIComponent(m[1]); }catch(e){ v=m[1]; } if(!v||CLIENT_RE.test(v)) return false; return SERVER_RE.test(v); }
+    var EMPTY={ackConfirmed:false,serverId:false,likeAndReply:false};
     var articles=Array.prototype.slice.call(document.querySelectorAll('[role="article"], article'));
-    if(articles.length===0) return JSON.stringify({ackConfirmed:false,serverId:false,reactions:0});
+    if(articles.length===0) return JSON.stringify(EMPTY);
     var target=fbTgtResolve(FB_TARGET_POST_ID).el;
     if(!target){ var carriers=[];
       for(var i=0;i<articles.length;i++){ if(fbTgtArticleCarriesId(articles[i], FB_TARGET_POST_ID)) carriers.push(articles[i]); }
       if(carriers.length===1) target=carriers[0];
     }
-    if(!target) return JSON.stringify({ackConfirmed:false,serverId:false,reactions:0});
+    if(!target) return JSON.stringify(EMPTY);
     // 评论行 = 目标帖内的**嵌套 article**。**绝不退化成整帖 article**：帖子还没有任何评论时，整帖节点里
-    // 既有编辑器里那段还没发出去的正文、又有本人头像链接、还有帖级动作栏的 3 个 role=button（≥2）——
-    // 三条全中 → 一个字都没发出去也会被判成「服务器已点头」（假成功，对抗性评审复现）。
+    // 既有编辑器里那段还没发出去的正文、又有本人头像链接、还有帖级动作栏的按钮——
+    // 全中 → 一个字都没发出去也会被判成「服务器已点头」（假成功，对抗性评审复现）。
     var nodes=Array.prototype.slice.call(target.querySelectorAll('[role="article"]'));
-    if(nodes.length===0) return JSON.stringify({ackConfirmed:false,serverId:false,reactions:0});
-    var sawPending=false;
+    if(nodes.length===0) return JSON.stringify(EMPTY);
+    var sawPending=false, sawRejected=false, sawInFlight=false;
     for(var k=0;k<nodes.length;k++){ var node=nodes[k];
       var txt=fbText(node); if(!hasAllFragments(txt)) continue;
       var owns=node.querySelectorAll('a[href*="/profile.php?id="], a[href*="/people/"], a[href*="user/"]'); var ownHit=false;
       for(var a=0;a<owns.length;a++){ if((owns[a].getAttribute('href')||'').indexOf(ownId)>=0){ ownHit=true; break; } }
       if(!ownHit) continue;
       // 🔴 待审批否决（change facebook-comment-participation-gate）：群参与审批下本人首条评论只对作者可见、带
-      // 「待审核」徽章、**未上墙**——即便带服务器 id 或 ≥2 交互控件也**绝不**判 ackConfirmed（否则假绿）。
+      // 「待审核」徽章、**未上墙**——即便带服务器 id 或赞/回复控件也**绝不**判 ackConfirmed（否则假绿）。
       if(fbNodePendingApproval(node)){ sawPending=true; continue; }
+      // 🔴 已拒绝否决（本 change）：平台拒了 = 确定未上墙,绝不判 ackConfirmed（旧计数判据正是在这里假绿）。
+      if(fbNodeRejected(node, submitted)){ sawRejected=true; continue; }
+      // 在飞：还没落定,别判成功也别判失败,继续等。
+      if(fbNodeInFlight(node, submitted)){ sawInFlight=true; continue; }
       var hasServer=false; var idl=node.querySelectorAll('a[href*="comment_id="]');
       for(var b=0;b<idl.length;b++){ if(serverId(idl[b].getAttribute('href'))){ hasServer=true; break; } }
-      var reactions=node.querySelectorAll('[role="button"]').length;
-      if(hasServer || reactions>=2){ return JSON.stringify({ackConfirmed:true,serverId:hasServer,reactions:reactions}); }
+      var likeAndReply=fbHasLikeAndReply(node);
+      if(hasServer || likeAndReply){ return JSON.stringify({ackConfirmed:true,serverId:hasServer,likeAndReply:likeAndReply}); }
     }
-    return JSON.stringify({ackConfirmed:false,serverId:false,reactions:0,pendingApproval:sawPending});
+    return JSON.stringify({ackConfirmed:false,serverId:false,likeAndReply:false,pendingApproval:sawPending,rejected:sawRejected,inFlight:sawInFlight});
   })()`;
 }

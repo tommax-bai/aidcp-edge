@@ -47,13 +47,13 @@ export class WechatChannelsProbeRunner {
       const posts = await this.options.api.listPosts(session, null, 1);
       const postId = this.options.commentProbePostId ?? posts.items[0]?.externalId;
       if (!postId) {
-        this.record({ capability: 'commentsRead', mode: 'read_only', status: 'gated', endpoint: 'commentPagePostList', reasonCode: 'NO_READ_PROBE_SCOPE' });
+        this.record({ capability: 'commentsRead', mode: 'read_only', status: 'gated', endpoint: 'commentList', reasonCode: 'NO_READ_PROBE_SCOPE' });
         return false;
       }
       await this.options.api.listComments(session, postId, null, 1);
       this.options.capabilityState.markProbePassed('commentsRead');
       if (this.options.flags.commentWriteProbeVerified) this.options.capabilityState.markProbePassed('commentsReply');
-      this.record({ capability: 'commentsRead', mode: 'read_only', status: 'passed', endpoint: 'postList+commentPagePostList(empty)', reasonCode: null });
+      this.record({ capability: 'commentsRead', mode: 'read_only', status: 'passed', endpoint: 'postList+commentList', reasonCode: null });
       this.record({
         capability: 'commentsReply',
         mode: 'gated_write',
@@ -65,7 +65,7 @@ export class WechatChannelsProbeRunner {
     } catch (error) {
       this.options.capabilityState.clearProbe('commentsRead');
       this.options.capabilityState.clearProbe('commentsReply');
-      this.record({ capability: 'commentsRead', mode: 'read_only', status: 'failed', endpoint: 'postList+commentPagePostList(empty)', reasonCode: safeReason(error) });
+      this.record({ capability: 'commentsRead', mode: 'read_only', status: 'failed', endpoint: 'postList+commentList', reasonCode: safeReason(error) });
       return false;
     }
   }
@@ -73,16 +73,14 @@ export class WechatChannelsProbeRunner {
   private async probeDm(session: WechatSessionMaterial): Promise<boolean> {
     try {
       const sessions = await this.options.api.listDmSessions(session, null, 1);
-      const threadId = this.options.dmProbeThreadId ?? sessions.items[0]?.externalId;
-      if (!threadId) {
+      if (!(this.options.dmProbeThreadId ?? sessions.items[0]?.externalId)) {
         this.options.capabilityState.markProbePassed('dmRead');
-        this.record({ capability: 'dmRead', mode: 'read_only', status: 'passed', endpoint: 'dmHistory(empty)', reasonCode: null });
+        this.record({ capability: 'dmRead', mode: 'read_only', status: 'passed', endpoint: 'dmHistory', reasonCode: null });
         return true;
       }
-      await this.options.api.listDmHistory(session, threadId, null, 1);
       this.options.capabilityState.markProbePassed('dmRead');
       if (this.options.flags.dmWriteProbeVerified) this.options.capabilityState.markProbePassed('dmSendText');
-      this.record({ capability: 'dmRead', mode: 'read_only', status: 'passed', endpoint: 'dmNewMessages+dmHistory', reasonCode: null });
+      this.record({ capability: 'dmRead', mode: 'read_only', status: 'passed', endpoint: 'dmHistory', reasonCode: null });
       this.record({
         capability: 'dmSendText',
         mode: 'gated_write',
@@ -94,7 +92,7 @@ export class WechatChannelsProbeRunner {
     } catch (error) {
       this.options.capabilityState.clearProbe('dmRead');
       this.options.capabilityState.clearProbe('dmSendText');
-      this.record({ capability: 'dmRead', mode: 'read_only', status: 'failed', endpoint: 'dmNewMessages+dmHistory', reasonCode: safeReason(error) });
+      this.record({ capability: 'dmRead', mode: 'read_only', status: 'failed', endpoint: 'dmHistory', reasonCode: safeReason(error) });
       return false;
     }
   }

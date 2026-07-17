@@ -3957,8 +3957,8 @@ ipcMain.handle('interaction:detail', (_event, raw) => handleInteractionIpc(async
   const envKey = interactionId(args.envKey, 'envKey');
   const threadId = interactionId(args.threadId, 'threadId');
   const cursor = interactionOptionalString(args.cursor, 'cursor', 4096);
-  const limit = interactionLimit(args.limit);
-  const query = interactionQuery({ cursor, limit }, new Set(['cursor', 'limit']));
+  interactionLimit(args.limit);
+  const query = interactionQuery({ cursor }, new Set(['cursor']));
   return interactionCustomerRequest({
     envKey,
     pathname: `/environments/${encodeURIComponent(envKey)}/interactions/${encodeURIComponent(threadId)}${query}`,

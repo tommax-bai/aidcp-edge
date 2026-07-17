@@ -102,66 +102,68 @@ test('wechat api: page-number requests do not reuse response lastBuff as the nex
   assert.equal('lastBuff' in bodies[1], false);
 });
 
-test('wechat api: comment/DM adapters accept only the captured empty-result boundary', async () => {
+test('wechat api: comment and DM adapters use the observed read-only request shapes', async () => {
   const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
   const api = new WechatChannelsApiClient({
     maxRetries: 0,
     fetchImpl: (async (url, init) => {
       const path = new URL(String(url)).pathname;
       calls.push({ path, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
-      if (path.endsWith('/post/post_list')) {
-        return json({ errCode: 0, data: { list: [{ objectId: 'post-1', commentCount: 0, commentList: [] }],
-          continueFlag: false, lastBuff: '' } }, { status: 201 });
+      if (path.endsWith('/comment/comment_list')) {
+        return json({ errCode: 0, data: { comment: [], downContinueFlag: 0, lastBuff: '' } }, { status: 201 });
       }
       if (path.endsWith('/get-history-msg')) {
         return json({ errCode: 0, data: { msg: [], isContinue: false, cookie: '', baseResp: { errcode: 0 } } }, { status: 201 });
       }
-      return json({ errCode: 0, data: { sessionInfo: [], baseResp: { errcode: 0 } } }, { status: 201 });
+      throw new Error(`unexpected path ${path}`);
     }) as typeof fetch,
   });
   assert.deepEqual(await api.listComments(SESSION, 'post-1', null, 20), { items: [], nextCursor: null, hasMore: false });
   assert.deepEqual(await api.listDmSessions(SESSION, null, 20), { items: [], nextCursor: null, hasMore: false });
   assert.deepEqual(Object.keys(calls[0].body).filter((key) => !key.startsWith('_') &&
     !['rawKeyBuff', 'timestamp', 'scene', 'reqScene', 'pluginSessionId'].includes(key)).sort(),
-  ['currentPage', 'pageSize', 'stickyOrder', 'userpageType']);
-  assert.deepEqual(calls.slice(1).map((call) => call.path), [
+  ['commentSelection', 'exportId', 'forMcn', 'lastBuff']);
+  assert.equal(calls[0].body.exportId, 'post-1');
+  assert.deepEqual(calls.map((call) => call.path), [
+    '/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/comment_list',
     '/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-history-msg',
-    '/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-session-info',
   ]);
-  assert.deepEqual(calls[2].body.sessionId, []);
+  assert.equal(calls[1].body.cookie, '');
 });
 
-test('wechat api: non-empty embedded comments remain unverified and trip only their endpoint circuit', async () => {
-  const changed: WechatChannelsEndpoint[] = [];
-  const api = new WechatChannelsApiClient({
-    maxRetries: 0, onSchemaChanged: (endpoint) => changed.push(endpoint),
-    fetchImpl: (async () => json({ errCode: 0, data: {
-      list: [{ objectId: 'post-1', commentCount: 1, commentList: [{ commentId: 'unverified' }] }],
-      continueFlag: false, lastBuff: '',
-    } })) as typeof fetch,
-  });
-  await assert.rejects(() => api.listComments(SESSION, 'post-1', null),
-    (error: unknown) => error instanceof WechatChannelsError && error.category === 'schema_changed');
-  assert.deepEqual(changed, ['commentPagePostList']);
-});
-
-test('wechat api: comment-page pagination searches for the matching post without treating posts as comments', async () => {
-  const pages: number[] = [];
+test('wechat api: non-empty comments preserve reply hierarchy and opaque pagination', async () => {
+  const requestCursors: unknown[] = [];
   const api = new WechatChannelsApiClient({
     maxRetries: 0,
     fetchImpl: (async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      pages.push(body.currentPage as number);
-      return json({ errCode: 0, data: body.currentPage === 1
-        ? { list: [{ objectId: 'another-post', commentList: [] }], continueFlag: true, lastBuff: 'unused' }
-        : { list: [{ objectId: 'post-2', commentList: [] }], continueFlag: false, lastBuff: '' } });
+      requestCursors.push(body.lastBuff);
+      return json({ errCode: 0, data: {
+        comment: [{
+          commentId: 'comment-root', username: 'peer-a', commentNickname: 'Peer A', commentHeadurl: 'https://example.invalid/a',
+          commentContent: 'root text', commentCreatetime: '1700000000', commentLikeCount: 2,
+          levelTwoComment: [{
+            commentId: 'comment-reply', username: 'finder-self', commentNickname: 'Self', commentHeadurl: '',
+            commentContent: 'reply text', commentCreatetime: '1700000001', commentLikeCount: 0, levelTwoComment: [],
+          }],
+        }],
+        downContinueFlag: body.lastBuff === '' ? 1 : 0,
+        lastBuff: body.lastBuff === '' ? 'comment-cursor-2' : 'terminal-cookie',
+      } });
     }) as typeof fetch,
   });
-  const first = await api.listComments(SESSION, 'post-2', null, 20);
-  assert.deepEqual(first, { items: [], nextCursor: '2', hasMore: true });
-  const second = await api.listComments(SESSION, 'post-2', first.nextCursor, 20);
-  assert.deepEqual(second, { items: [], nextCursor: null, hasMore: false });
-  assert.deepEqual(pages, [1, 2]);
+  const first = await api.listComments(SESSION, 'post-1', null, 20);
+  assert.equal(first.nextCursor, 'comment-cursor-2');
+  assert.equal(first.hasMore, true);
+  assert.equal(first.items[0].postExternalId, 'post-1');
+  assert.equal(first.items[0].rootExternalId, 'comment-root');
+  assert.equal(first.items[0].replies[0].rootExternalId, 'comment-root');
+  assert.equal(first.items[0].replies[0].parentExternalId, 'comment-root');
+  assert.equal(first.items[0].replies[0].contentText, 'reply text');
+  const second = await api.listComments(SESSION, 'post-1', first.nextCursor, 20);
+  assert.equal(second.nextCursor, null);
+  assert.equal(second.hasMore, false);
+  assert.deepEqual(requestCursors, ['', 'comment-cursor-2']);
 });
 
 test('wechat api: retries only bounded read calls and never retries writes', async () => {
@@ -253,7 +255,7 @@ test('wechat api: response size and schema failures are stable and open only the
   assert.deepEqual(changed, ['postList', 'postList']);
 });
 
-test('wechat api: auth, rate limit, and non-empty DM shapes outside the capture boundary are classified honestly', async () => {
+test('wechat api: auth/rate errors remain classified and non-empty DMs retain safe message truth', async () => {
   const authApi = new WechatChannelsApiClient({
     maxRetries: 0,
     fetchImpl: (async () => json({ errCode: 40101, errMsg: 'login expired' })) as typeof fetch,
@@ -281,17 +283,28 @@ test('wechat api: auth, rate limit, and non-empty DM shapes outside the capture 
       errCode: 0,
       data: {
         msg: [
-          { msgId: 'm-1', sessionId: 'thread-1', type: 'voice_card_v9', direction: 'inbound', content: 'opaque', createTime: 1_700_000_000 },
+          { svrMsgId: 'm-1', sessionId: 'thread-1', msgType: 1, fromUsername: 'peer-1', toUsername: 'finder-self', textMsg: { content: 'hello' }, ts: 1_700_000_000 },
+          { svrMsgId: 'm-2', sessionId: 'thread-1', msgType: 3, fromUsername: 'finder-self', toUsername: 'peer-1', imgMsg: { url: 'https://example.invalid/image', aeskey: 'must-not-survive', width: 640, height: 480 }, ts: 1_700_000_001 },
+          { svrMsgId: 'm-3', sessionId: 'thread-2', msgType: 99, fromUsername: 'peer-2', toUsername: 'finder-self', rawContent: 'must-not-survive', ts: 1_700_000_002 },
         ],
         isContinue: false,
-        cookie: '',
+        cookie: 'incremental-cookie',
       },
     })) as typeof fetch,
   });
-  await assert.rejects(
-    () => dmApi.listDmHistory(SESSION, 'thread-1', null),
-    (error: unknown) => error instanceof WechatChannelsError && error.category === 'schema_changed',
-  );
+  const updates = await dmApi.listDmUpdates(SESSION, null, 'finder-self');
+  assert.equal(updates.sessions.length, 2);
+  assert.equal(updates.messages[0].direction, 'inbound');
+  assert.equal(updates.messages[0].contentText, 'hello');
+  assert.equal(updates.messages[1].direction, 'outbound');
+  assert.deepEqual(updates.messages[1].attachmentMeta, {
+    mimeType: null, width: 640, height: 480, url: 'https://example.invalid/image',
+  });
+  assert.equal(updates.messages[2].messageType, 'unknown');
+  assert.equal(updates.messages[2].contentText, null);
+  assert.equal(updates.nextCursor, 'incremental-cookie');
+  assert.equal(updates.hasMore, false);
+  assert.doesNotMatch(JSON.stringify(updates), /aeskey|must-not-survive|rawContent/);
 });
 
 test('wechat api: missing pagination/direction fields trip schema circuit and explicit negative writes are not schema drift', async () => {
@@ -311,7 +324,7 @@ test('wechat api: missing pagination/direction fields trip schema circuit and ex
     onSchemaChanged: (endpoint) => changed.push(endpoint),
     fetchImpl: (async () => json({
       errCode: 0,
-      data: { msg: [{ msgId: 'm-1', type: 'text', content: 'hello', createTime: 1 }], isContinue: false, cookie: '' },
+      data: { msg: [{ svrMsgId: 'm-1', sessionId: 'thread-1', msgType: 1, textMsg: { content: 'hello' }, ts: 1 }], isContinue: false, cookie: '' },
     })) as typeof fetch,
   });
   await assert.rejects(

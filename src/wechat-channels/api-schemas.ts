@@ -2,6 +2,8 @@ import { schemaChanged, WechatChannelsError } from './error-classifier.js';
 import type {
   WechatComment,
   WechatDmMessage,
+  WechatDmSession,
+  WechatDmUpdatePage,
   WechatIdentity,
   WechatLoginCode,
   WechatLoginStatus,
@@ -51,7 +53,7 @@ function optionalCount(record: JsonRecord, keys: readonly string[]): number | nu
 function pageMeta(data: JsonRecord, endpoint: string): { nextCursor: string | null; hasMore: boolean } {
   const cursorValue = valueAt(data, ['nextCursor', 'next_cursor', 'lastBuff', 'lastBuffer', 'last_buffer', 'cookie', 'cursor']);
   const nextCursor = cursorValue === undefined || cursorValue === null || cursorValue === '' ? null : String(cursorValue);
-  const moreValue = valueAt(data, ['hasMore', 'has_more', 'isContinue', 'continueFlag', 'continue_flag']);
+  const moreValue = valueAt(data, ['hasMore', 'has_more', 'isContinue', 'downContinueFlag', 'continueFlag', 'continue_flag']);
   if (![true, false, 0, 1, '0', '1'].includes(moreValue as boolean | number | string)) {
     throw schemaChanged(endpoint, 'hasMore');
   }
@@ -146,93 +148,162 @@ export function parseComments(
   body: unknown,
   endpoint: string,
   postExternalId: string,
-  currentPage: number,
 ): WechatPage<WechatComment> {
   const data = dataRecord(body, endpoint);
-  const posts = data.list;
-  if (!Array.isArray(posts)) throw schemaChanged(endpoint, 'comments.postList');
-  const post = posts.find((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
-    return optionalString(item as JsonRecord, ['objectId', 'object_id', 'postId', 'post_id']) === postExternalId;
-  });
-  const meta = pageMeta(data, endpoint);
-  if (!post || typeof post !== 'object' || Array.isArray(post)) {
-    if (meta.hasMore) return { items: [], nextCursor: String(currentPage + 1), hasMore: true };
-    throw schemaChanged(endpoint, 'comments.targetPost');
-  }
-  const rawItems = valueAt(post as JsonRecord, ['commentList', 'comment_list']);
+  const rawItems = valueAt(data, ['comment', 'comments', 'commentList', 'comment_list']);
   if (!Array.isArray(rawItems)) throw schemaChanged(endpoint, 'comments');
-  if (rawItems.length > 0) throw schemaChanged(endpoint, 'comments.nonEmptyCaptureRequired');
+  const meta = pageMeta(data, endpoint);
   return {
-    items: [],
-    nextCursor: meta.hasMore ? String(currentPage + 1) : null,
+    items: rawItems.map((item, index) => parseComment(item, endpoint, postExternalId, index, null, null)),
+    nextCursor: meta.hasMore ? meta.nextCursor : null,
     hasMore: meta.hasMore,
   };
 }
 
-export function parseEmptyDmHistory(body: unknown, endpoint: string): { nextCursor: string | null; hasMore: boolean } {
-  const data = dataRecord(body, endpoint);
-  if (!Array.isArray(data.msg)) throw schemaChanged(endpoint, 'messages');
-  if (data.msg.length > 0) throw schemaChanged(endpoint, 'messages.nonEmptyCaptureRequired');
-  return pageMeta(data, endpoint);
+function parseComment(
+  value: unknown,
+  endpoint: string,
+  postExternalId: string,
+  index: number,
+  rootExternalId: string | null,
+  parentExternalId: string | null,
+): WechatComment {
+  const field = rootExternalId === null ? `comments[${index}]` : `comments[${index}].replies`;
+  const comment = rec(value, endpoint, field);
+  const externalId = requiredString(comment, ['commentId', 'comment_id', 'externalId', 'external_id'], endpoint, `${field}.externalId`);
+  const participantId = optionalString(comment, ['username', 'finderUsername', 'finder_username']);
+  const rawReplies = valueAt(comment, ['levelTwoComment', 'level_two_comment', 'replies']);
+  if (rawReplies !== undefined && !Array.isArray(rawReplies)) throw schemaChanged(endpoint, `${field}.replies`);
+  const explicitLifecycle = optionalString(comment, ['lifecycle', 'status'])?.toLowerCase();
+  const deleted = valueAt(comment, ['deleted', 'isDeleted', 'is_deleted']) === true;
+  const hidden = valueAt(comment, ['hidden', 'isHidden', 'is_hidden']) === true;
+  const lifecycle = deleted || explicitLifecycle === 'deleted' || explicitLifecycle === 'delete'
+    ? 'deleted'
+    : hidden || explicitLifecycle === 'hidden'
+      ? 'hidden'
+      : 'active';
+  const normalizedRoot = rootExternalId ?? externalId;
+  return {
+    externalId,
+    postExternalId,
+    rootExternalId: normalizedRoot,
+    parentExternalId,
+    participant: participantId === null ? null : {
+      externalId: participantId,
+      displayName: optionalString(comment, ['commentNickname', 'nickname', 'displayName', 'display_name']),
+      avatarUrl: optionalString(comment, ['commentHeadurl', 'headUrl', 'avatarUrl', 'avatar_url']),
+    },
+    contentText: optionalString(comment, ['commentContent', 'content', 'contentText', 'content_text']),
+    lifecycle,
+    createdAt: epochMs(valueAt(comment, ['commentCreatetime', 'createTime', 'create_time', 'createdAt', 'created_at']), endpoint, `${field}.createdAt`),
+    likeCount: optionalCount(comment, ['commentLikeCount', 'likeCount', 'like_count']),
+    replies: (rawReplies ?? []).map((reply, replyIndex) =>
+      parseComment(reply, endpoint, postExternalId, replyIndex, normalizedRoot, externalId)),
+  };
 }
 
 function dmType(raw: unknown): { messageType: WechatDmMessage['messageType']; platformType: string } {
   const platformType = raw === undefined || raw === null ? 'missing' : String(raw);
   const normalized = platformType.toLowerCase();
-  if (normalized === 'text' || normalized === 'plain_text') return { messageType: 'text', platformType };
-  if (normalized === 'image' || normalized === 'picture') return { messageType: 'image', platformType };
+  if (normalized === '1' || normalized === 'text' || normalized === 'plain_text') return { messageType: 'text', platformType };
+  if (normalized === '3' || normalized === 'image' || normalized === 'picture') return { messageType: 'image', platformType };
   return { messageType: 'unknown', platformType };
 }
 
-export function parseDmMessages(body: unknown, endpoint: string, threadExternalId: string): WechatPage<WechatDmMessage> {
+export function parseDmSessions(body: unknown, endpoint: string): WechatPage<WechatDmSession> {
   const data = dataRecord(body, endpoint);
-  const allItems = valueAt(data, ['messages', 'messageList', 'message_list', 'list', 'msg']);
-  const rawItems = allItems;
+  const rawItems = valueAt(data, ['messages', 'messageList', 'message_list', 'list', 'msg']);
   if (!Array.isArray(rawItems)) throw schemaChanged(endpoint, 'messages');
-  if (rawItems.length > 0) throw schemaChanged(endpoint, 'messages.nonEmptyCaptureRequired');
+  const sessions = new Map<string, WechatDmSession>();
+  rawItems.forEach((item, index) => {
+    const message = rec(item, endpoint, `messages[${index}]`);
+    const externalId = requiredString(message, ['sessionId', 'session_id', 'threadId', 'thread_id'], endpoint, `messages[${index}].sessionId`);
+    const updatedAt = epochMs(valueAt(message, ['ts', 'createdAt', 'created_at', 'createTime', 'create_time', 'timestamp']), endpoint, `messages[${index}].createdAt`);
+    const current = sessions.get(externalId);
+    if (!current || updatedAt > current.updatedAt) sessions.set(externalId, { externalId, participant: null, updatedAt });
+  });
+  return { items: [...sessions.values()], ...pageMeta(data, endpoint) };
+}
+
+export function parseDmUpdates(
+  body: unknown,
+  endpoint: string,
+  ownIdentityExternalId: string | null,
+): WechatDmUpdatePage {
+  const data = dataRecord(body, endpoint);
+  const rawItems = valueAt(data, ['messages', 'messageList', 'message_list', 'list', 'msg']);
+  if (!Array.isArray(rawItems)) throw schemaChanged(endpoint, 'messages');
+  const sessions = new Map<string, WechatDmSession>();
   const items = rawItems.map((item, index): WechatDmMessage => {
     const m = rec(item, endpoint, `messages[${index}]`);
-    const { messageType, platformType } = dmType(valueAt(m, ['messageType', 'message_type', 'type']));
+    const threadExternalId = requiredString(m, ['sessionId', 'session_id', 'threadId', 'thread_id'], endpoint, `messages[${index}].sessionId`);
+    const fromUsername = optionalString(m, ['fromUsername', 'from_username', 'senderId', 'sender_id']);
+    const toUsername = optionalString(m, ['toUsername', 'to_username', 'recipientId', 'recipient_id']);
+    const { messageType, platformType } = dmType(valueAt(m, ['msgType', 'messageType', 'message_type', 'type']));
     const directionRaw = optionalString(m, ['direction', 'messageDirection', 'message_direction', 'senderType'])?.toLowerCase();
-    const direction = directionRaw === 'outbound' || directionRaw === 'sent' || directionRaw === 'self'
+    const direction = ownIdentityExternalId !== null && fromUsername === ownIdentityExternalId && toUsername !== ownIdentityExternalId
       ? 'outbound'
-      : directionRaw === 'inbound' || directionRaw === 'received' || directionRaw === 'peer' || directionRaw === 'other'
+      : ownIdentityExternalId !== null && toUsername === ownIdentityExternalId && fromUsername !== ownIdentityExternalId
         ? 'inbound'
-        : null;
+        : directionRaw === 'outbound' || directionRaw === 'sent' || directionRaw === 'self'
+          ? 'outbound'
+          : directionRaw === 'inbound' || directionRaw === 'received' || directionRaw === 'peer' || directionRaw === 'other'
+            ? 'inbound'
+            : null;
     if (direction === null) throw schemaChanged(endpoint, `messages[${index}].direction`);
     const status = optionalString(m, ['lifecycle', 'status'])?.toLowerCase();
     const lifecycle = status === 'deleted' || status === 'delete' ? 'deleted' : status === 'hidden' ? 'hidden' : 'active';
-    const attachmentValue = valueAt(m, ['attachment', 'media', 'image']);
+    const attachmentValue = valueAt(m, ['imgMsg', 'imageMsg', 'attachment', 'media', 'image']);
     const attachment = attachmentValue && typeof attachmentValue === 'object' ? rec(attachmentValue, endpoint, `messages[${index}].attachment`) : null;
     const dimension = (value: unknown): number | null => {
       const n = typeof value === 'string' ? Number(value) : value;
       return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
     };
-    const contentText = messageType === 'text' ? optionalString(m, ['contentText', 'content_text', 'content', 'text']) : null;
+    const textValue = valueAt(m, ['textMsg', 'text_message']);
+    const textRecord = textValue && typeof textValue === 'object' && !Array.isArray(textValue)
+      ? textValue as JsonRecord
+      : null;
+    const contentText = messageType === 'text'
+      ? textRecord
+        ? optionalString(textRecord, ['content', 'text'])
+        : optionalString(m, ['contentText', 'content_text', 'content', 'text'])
+      : null;
     if (messageType === 'text' && lifecycle === 'active' && contentText === null) {
       throw schemaChanged(endpoint, `messages[${index}].contentText`);
     }
+    const createdAt = epochMs(valueAt(m, ['ts', 'createdAt', 'created_at', 'createTime', 'create_time', 'timestamp']), endpoint, `messages[${index}].createdAt`);
+    const peerExternalId = direction === 'outbound' ? toUsername : fromUsername;
+    const currentSession = sessions.get(threadExternalId);
+    const participant = peerExternalId === null ? currentSession?.participant ?? null : {
+      externalId: peerExternalId,
+      displayName: null,
+      avatarUrl: null,
+    };
+    if (!currentSession || createdAt > currentSession.updatedAt) {
+      sessions.set(threadExternalId, { externalId: threadExternalId, participant, updatedAt: createdAt });
+    } else if (currentSession.participant === null && participant !== null) {
+      currentSession.participant = participant;
+    }
     return {
-      externalId: requiredString(m, ['externalId', 'external_id', 'messageId', 'message_id', 'msgId', 'msg_id'], endpoint, `messages[${index}].externalId`),
+      externalId: requiredString(m, ['svrMsgId', 'svr_msg_id', 'externalId', 'external_id', 'messageId', 'message_id', 'msgId', 'msg_id'], endpoint, `messages[${index}].externalId`),
       threadExternalId,
       direction,
       messageType,
       contentText,
       attachmentMeta: messageType === 'image'
         ? {
-            mimeType: attachment ? optionalString(attachment, ['mimeType', 'mime_type']) : null,
+            mimeType: attachment ? optionalString(attachment, ['mimeType', 'mime_type', 'contentType', 'content_type']) : null,
             width: attachment ? dimension(valueAt(attachment, ['width'])) : null,
             height: attachment ? dimension(valueAt(attachment, ['height'])) : null,
             url: attachment ? optionalString(attachment, ['url', 'mediaUrl', 'media_url']) : null,
           }
         : null,
       lifecycle,
-      createdAt: epochMs(valueAt(m, ['createdAt', 'created_at', 'createTime', 'create_time', 'timestamp']), endpoint, `messages[${index}].createdAt`),
+      createdAt,
       platformType,
     };
   });
-  return { items, ...pageMeta(data, endpoint) };
+  return { sessions: [...sessions.values()], messages: items, ...pageMeta(data, endpoint) };
 }
 
 export function parseEmptyDmSessionInfo(body: unknown, endpoint: string): true {

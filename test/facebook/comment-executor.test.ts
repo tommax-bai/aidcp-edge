@@ -8,9 +8,11 @@ import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monit
 import {
   FacebookCommentExecutor,
   buildAckVerifyJs,
+  isFacebookCommentRejectedText,
+  isFacebookCommentInFlightText,
+  stripSubmittedText,
   buildParticipationGateJs,
   buildScopedEditorHelpersJs,
-  buildScopedVerifyJs,
   isFacebookCommentEditorLabel,
   isFacebookParticipationGateText,
   isFacebookPendingApprovalText,
@@ -76,11 +78,20 @@ interface FakeConfig {
   accepted?: boolean;
   contactAccepted?: boolean;
   submitCtl?: { found: boolean; disabled: boolean; label: string | null; x: number; y: number };
-  verify?: { confirmed: boolean; matchedText: boolean; matchedOwnIdentity: boolean; articleCount: number };
-  /** 就地 ack 门控确认结果（默认不确认 → 流程落到刷新兜底，保留旧路径覆盖）。 */
-  ack?: { ackConfirmed: boolean; serverId?: boolean; reactions?: number };
-  /** 刷新兜底三重确认只在第 N 次及以后命中（模拟慢渲染，验证有界轮询治 P2② 假阴性）。 */
-  verifyConfirmAfter?: number;
+  /**
+   * 就地 ack 门控确认结果（change facebook-comment-lifecycle-verify 后是**唯一**确认路径，刷新腿已删）。
+   * 默认不确认 → 走到窗口耗尽 → verification_ambiguous。
+   */
+  ack?: {
+    ackConfirmed: boolean;
+    serverId?: boolean;
+    likeAndReply?: boolean;
+    pendingApproval?: boolean;
+    rejected?: boolean;
+    inFlight?: boolean;
+  };
+  /** 就地 ack 只在第 N 次及以后命中（模拟慢渲染，验证有界轮询治假阴性——旧版靠刷新腿治，现由就地窗吸收）。 */
+  ackConfirmAfter?: number;
   containerName?: string | null;
   postContent?: { postText: string | null; comments: string[] };
 }
@@ -157,17 +168,15 @@ class FakeCdp implements BrowseCdp {
       }
       if (expr.includes('selectNodeContents')) return val('selected');
       if (expr.includes('ackConfirmed')) {
-        return val(JSON.stringify(this.cfg.ack ?? { ackConfirmed: false, serverId: false, reactions: 0 }));
-      }
-      if (expr.includes('matchedOwnIdentity')) {
         this.verifyCalls++;
-        if (this.cfg.verifyConfirmAfter !== undefined) {
-          const confirmed = this.verifyCalls >= this.cfg.verifyConfirmAfter;
-          return val(JSON.stringify({ confirmed, matchedText: true, matchedOwnIdentity: confirmed, articleCount: 1 }));
+        if (this.cfg.ackConfirmAfter !== undefined) {
+          const confirmed = this.verifyCalls >= this.cfg.ackConfirmAfter;
+          // 未命中期间模拟「发布中」在飞态（真机形态：先在飞、点头后才落定）。
+          return val(
+            JSON.stringify({ ackConfirmed: confirmed, serverId: confirmed, likeAndReply: false, inFlight: !confirmed }),
+          );
         }
-        return val(
-          JSON.stringify(this.cfg.verify ?? { confirmed: true, matchedText: true, matchedOwnIdentity: true, articleCount: 1 }),
-        );
+        return val(JSON.stringify(this.cfg.ack ?? { ackConfirmed: false, serverId: false, likeAndReply: false }));
       }
       return val('{}');
     }
@@ -205,7 +214,7 @@ function makeExecutor(
       sleep: async () => {},
       logger: () => {},
     },
-    { settleMs: 0, editorScrollRounds: 3, surfaceProbeRounds: 2, waitAfterSubmitMs: 0, waitAfterReloadMs: 0 },
+    { settleMs: 0, editorScrollRounds: 3, surfaceProbeRounds: 2, waitAfterSubmitMs: 0 },
   );
 }
 
@@ -350,7 +359,7 @@ test('fb-executor: 本人 id 未知 → identity_unknown，绝不提交（不点
   const cdp = new FakeCdp();
   const ex = new FacebookCommentExecutor(
     { cdp, getAccountId: () => undefined, acceptConsent: NO_CONSENT, sleep: async () => {}, logger: () => {} },
-    { settleMs: 0, waitAfterSubmitMs: 0, waitAfterReloadMs: 0 },
+    { settleMs: 0, waitAfterSubmitMs: 0 },
   );
   const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');
   assert.equal(r.ok, false);
@@ -359,10 +368,8 @@ test('fb-executor: 本人 id 未知 → identity_unknown，绝不提交（不点
   assert.equal(cdp.clicks.length, 0);
 });
 
-test('fb-executor: 服务器确认命中 → ok:true（回车提交 + reload 都发生）', async () => {
-  const cdp = new FakeCdp({
-    verify: { confirmed: true, matchedText: true, matchedOwnIdentity: true, articleCount: 1 },
-  });
+test('fb-executor: 服务器确认命中 → ok:true（回车提交；确认段绝不刷新）', async () => {
+  const cdp = new FakeCdp({ ack: { ackConfirmed: true, serverId: true } });
   const ex = makeExecutor(cdp);
   const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');
   assert.equal(r.ok, true);
@@ -370,14 +377,12 @@ test('fb-executor: 服务器确认命中 → ok:true（回车提交 + reload 都
   assert.equal(r.serverConfirmed, true);
   // 提交经回车（语言无关），不依赖按钮文案。
   assert.ok(cdp.enters >= 1, '应按回车提交');
-  assert.equal(cdp.reloads, 1);
+  assert.equal(cdp.reloads, 0, '确认段纯就地观察，绝不刷新（刷新会假阴性 + 对已拒绝假绿 + 毁押审证据）');
   assert.match(cdp.typed, /很喜欢这条分享/);
 });
 
 test('fb-executor: 联系方式逐字符追加并验收，避免换行+联系方式整段 bulk 被 FB 吞掉', async () => {
-  const cdp = new FakeCdp({
-    verify: { confirmed: true, matchedText: true, matchedOwnIdentity: true, articleCount: 1 },
-  });
+  const cdp = new FakeCdp({ ack: { ackConfirmed: true, serverId: true } });
   const ex = makeExecutor(cdp);
   const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '正文评论', 'LINE ID: abc123');
   assert.equal(r.ok, true);
@@ -399,20 +404,19 @@ test('fb-executor: 联系方式追加后未被编辑器验收 → 不提交，�
   assert.ok(cdp.backspaces >= 1, '失败时应清空草稿');
 });
 
-test('fb-executor: reload 后仅乐观渲染、own-identity 未命中 → verification_ambiguous（F1 补丁②：不冒充成功）', async () => {
-  const cdp = new FakeCdp({
-    verify: { confirmed: false, matchedText: true, matchedOwnIdentity: false, articleCount: 1 },
-  });
+test('fb-executor: 就地窗耗尽仍未确认 → verification_ambiguous（不冒充成功，且不刷新）', async () => {
+  const cdp = new FakeCdp({ ack: { ackConfirmed: false } });
   const ex = makeExecutor(cdp);
   const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'verification_ambiguous');
   assert.equal(r.submitted, true);
   assert.equal(r.serverConfirmed, false);
+  assert.equal(cdp.reloads, 0, '确认不了也绝不刷新');
 });
 
-test('fb-executor: 就地 ack 命中（服务器 id / 点赞回复出现）→ ok:true 且不刷新（快确认）', async () => {
-  const cdp = new FakeCdp({ ack: { ackConfirmed: true, serverId: true, reactions: 4 } });
+test('fb-executor: 就地 ack 命中（服务器 id）→ ok:true 且不刷新（快确认）', async () => {
+  const cdp = new FakeCdp({ ack: { ackConfirmed: true, serverId: true, likeAndReply: true } });
   const ex = makeExecutor(cdp);
   const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');
   assert.equal(r.ok, true);
@@ -421,15 +425,43 @@ test('fb-executor: 就地 ack 命中（服务器 id / 点赞回复出现）→ o
   assert.ok(cdp.enters >= 1, '仍经回车提交');
 });
 
-test('fb-executor: 就地未确认但刷新后有界轮询稍后一轮命中 → ok:true（治慢渲染假阴性 P2②）', async () => {
-  // 就地 ack 默认不确认 → 刷新兜底；前两次三重确认落空，第 3 次才命中（模拟慢渲染）。
-  const cdp = new FakeCdp({ verifyConfirmAfter: 3 });
+test('fb-executor: 就地有界轮询稍后一轮才命中 → ok:true（治慢渲染假阴性；预算由删掉的刷新腿让出）', async () => {
+  // 前两轮仍「发布中」在飞，第 3 轮才点头（模拟慢渲染）。旧版靠 reload 兜底治，现由就地窗吸收其预算。
+  const cdp = new FakeCdp({ ackConfirmAfter: 3 });
   const ex = makeExecutor(cdp);
   const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');
   assert.equal(r.ok, true);
   assert.equal(r.serverConfirmed, true);
-  assert.equal(cdp.reloads, 1, '只刷新一次');
-  assert.ok(cdp.verifyCalls >= 3, '刷新后应有界轮询多次直到命中，而非只查一次');
+  assert.equal(cdp.reloads, 0, '慢渲染也靠就地轮询解决，绝不刷新');
+  assert.ok(cdp.verifyCalls >= 3, '就地应有界轮询多次直到命中，而非只查一次');
+});
+
+test('fb-executor: 🔴 平台已拒绝 → comment_rejected 独立一档（绝不判成功、绝不塌进 ambiguous）', async () => {
+  // 真机形态（2026-07-17）：`… 16小时 已拒绝 查看反馈`，恰好 2 个控件 → 旧的「按钮数>=2」判据把它判成发布成功。
+  const cdp = new FakeCdp({ ack: { ackConfirmed: false, rejected: true } });
+  const ex = makeExecutor(cdp);
+  const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');
+  assert.equal(r.ok, false, '平台拒了 = 确定未上墙，绝不判成功（本 change 的核心红线）');
+  assert.equal(r.reason, 'comment_rejected');
+  assert.equal(r.serverConfirmed, false);
+  assert.equal(cdp.reloads, 0);
+});
+
+test('fb-executor: 已拒绝为终局 → 立即停止轮询，不空转整个窗口', async () => {
+  const cdp = new FakeCdp({ ack: { ackConfirmed: false, rejected: true } });
+  const ex = makeExecutor(cdp);
+  await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');
+  assert.equal(cdp.verifyCalls, 1, '被拒是终态，再等也不会变成功 → 首轮命中即停');
+});
+
+test('fb-executor: 窗口耗尽仍「发布中」→ verification_ambiguous（已提交、未落定；区别于压根没提交）', async () => {
+  const cdp = new FakeCdp({ ack: { ackConfirmed: false, inFlight: true } });
+  const ex = makeExecutor(cdp);
+  const r = await ex.submitComment('https://www.facebook.com/groups/1/posts/2/', '很喜欢这条分享');
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'verification_ambiguous');
+  assert.equal(r.submitted, true, '在飞 = 确实提交出去了');
+  assert.ok(cdp.verifyCalls > 1, '在飞时不落终态，应继续等到窗口耗尽');
 });
 
 test('isServerFacebookCommentId: 服务器正式 id 认、客户端乐观占位/空不认', () => {
@@ -691,21 +723,14 @@ function ackVerifyFull(
   fragments: string[],
   ownId: string,
   targetPostId: string | null,
-): { ackConfirmed: boolean; pendingApproval?: boolean } {
-  return JSON.parse(String(dom.window.eval(buildAckVerifyJs(fragments, ownId, targetPostId)))) as {
+  submittedTexts: readonly string[] = [],
+): { ackConfirmed: boolean; pendingApproval?: boolean; rejected?: boolean; inFlight?: boolean; likeAndReply?: boolean } {
+  return JSON.parse(String(dom.window.eval(buildAckVerifyJs(fragments, ownId, targetPostId, submittedTexts)))) as {
     ackConfirmed: boolean;
     pendingApproval?: boolean;
-  };
-}
-function scopedVerifyFull(
-  dom: JSDOM,
-  fragments: string[],
-  ownId: string,
-  targetPostId: string | null,
-): { confirmed: boolean; pendingApproval?: boolean } {
-  return JSON.parse(String(dom.window.eval(buildScopedVerifyJs(fragments, ownId, targetPostId)))) as {
-    confirmed: boolean;
-    pendingApproval?: boolean;
+    rejected?: boolean;
+    inFlight?: boolean;
+    likeAndReply?: boolean;
   };
 }
 function gateProbe(dom: JSDOM): { gate: boolean } {
@@ -728,7 +753,7 @@ test('fb-ack: 本人+文本+服务器 id 但评论行带「待审核」徽章 �
   assert.equal(r.pendingApproval, true);
 });
 
-test('fb-ack: 本人+文本+≥2 交互控件 但带「等待管理员批准」徽章 → 绝不 ackConfirmed', () => {
+test('fb-ack: 本人+文本+赞/回复控件 但带「等待管理员批准」徽章 → 绝不 ackConfirmed', () => {
   const dom = editorScopeDom(
     `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
       `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div><span>等待管理员批准</span>` +
@@ -736,12 +761,12 @@ test('fb-ack: 本人+文本+≥2 交互控件 但带「等待管理员批准」�
       '</div>',
     POST_BBB,
   );
-  const r = ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB');
-  assert.equal(r.ackConfirmed, false, '待审徽章否决 reactions>=2 兜底');
+  const r = ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB', ['正文XYZ']);
+  assert.equal(r.ackConfirmed, false, '待审徽章否决赞/回复兜底');
   assert.equal(r.pendingApproval, true);
 });
 
-test('fb-ack: 本人+文本+≥2 交互控件、无待审徽章 → 仍 ackConfirmed（否决不误伤真评论）', () => {
+test('fb-ack: 本人+文本+具名赞/回复、无徽章 → 仍 ackConfirmed（否决不误伤真评论）', () => {
   const dom = editorScopeDom(
     `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
       `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div>` +
@@ -749,29 +774,124 @@ test('fb-ack: 本人+文本+≥2 交互控件、无待审徽章 → 仍 ackConfi
       '</div>',
     POST_BBB,
   );
-  assert.equal(ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB').ackConfirmed, true);
+  assert.equal(ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB', ['正文XYZ']).ackConfirmed, true);
 });
 
-test('fb-scoped: 本人+文本评论行带「待审核」徽章 → confirmed=false, pendingApproval=true', () => {
+// ─── change facebook-comment-lifecycle-verify：三态生命周期（真机 2026-07-17 坐实）───
+
+test('fb-ack: 🔴 真机被拒行（已拒绝 + 查看反馈，恰好 2 控件）→ 绝不 ackConfirmed，rejected=true', () => {
+  // 真机原文：`Tianxing Bai | Lương bao nhiêu ạ? Làm ca mấy thế? | 16小时 | 已拒绝 | 查看反馈`
+  // 控件恰好 2 个（编辑或删除此项 / 查看反馈）→ 旧的 `reactions>=2` 判据在此判「发布成功」= 活的假绿。
   const dom = editorScopeDom(
     `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
-      `<div role="article" id="my-comment">${ownLink}<div>我发的评论正文</div><span>待审核</span></div>` +
+      `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div>` +
+      `<a href="${POST_BBB}?comment_id=4134110716722371">16小时</a><span>已拒绝</span>` +
+      '<div role="button" aria-label="编辑或删除此项">编辑或删除此项</div>' +
+      '<div role="button" aria-label="查看反馈">查看反馈</div></div>' +
       '</div>',
     POST_BBB,
   );
-  const r = scopedVerifyFull(dom, ['我发的评论正文'], OWN, 'fb:BBB');
-  assert.equal(r.confirmed, false);
-  assert.equal(r.pendingApproval, true);
+  const r = ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB', ['正文XYZ']);
+  assert.equal(r.ackConfirmed, false, '平台拒了 = 确定未上墙，绝不判成功（本 change 的核心红线）');
+  assert.equal(r.rejected, true);
 });
 
-test('fb-scoped: 本人+文本评论行无待审徽章 → confirmed=true', () => {
+test('fb-ack: 数字 comment_id（非服务器 base64）绝不算服务器确认', () => {
   const dom = editorScopeDom(
     `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
-      `<div role="article" id="my-comment">${ownLink}<div>我发的评论正文</div></div>` +
+      `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div>` +
+      `<a href="${POST_BBB}?comment_id=4134110716722371">16小时</a></div>` +
       '</div>',
     POST_BBB,
   );
-  assert.equal(scopedVerifyFull(dom, ['我发的评论正文'], OWN, 'fb:BBB').confirmed, true);
+  assert.equal(ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB', ['正文XYZ']).ackConfirmed, false);
+});
+
+test('fb-ack: 2 个控件但非具名赞/回复 → 绝不 ackConfirmed（撤销按钮计数代理判据）', () => {
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div>` +
+      '<div role="button" aria-label="编辑或删除此项">编辑或删除此项</div>' +
+      '<div role="button" aria-label="查看翻译">查看翻译</div></div>' +
+      '</div>',
+    POST_BBB,
+  );
+  assert.equal(ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB', ['正文XYZ']).ackConfirmed, false, '计数不是判据，具名才是');
+});
+
+test('fb-ack: 只有赞、没有回复 → 不算 ack（两个具名控件须同时在位）', () => {
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div>` +
+      '<div role="button">赞</div><div role="button">留下心情</div></div>' +
+      '</div>',
+    POST_BBB,
+  );
+  assert.equal(ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB', ['正文XYZ']).ackConfirmed, false);
+});
+
+test('fb-ack: 真机在飞行（发布中…，0 控件）→ 不确认、inFlight=true、不落终态', () => {
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div><span>发布中...</span></div>` +
+      '</div>',
+    POST_BBB,
+  );
+  const r = ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB', ['正文XYZ']);
+  assert.equal(r.ackConfirmed, false);
+  assert.equal(r.inFlight, true);
+  assert.equal(r.rejected ?? false, false, '在飞 ≠ 被拒');
+});
+
+test('fb-ack: 🔴 正文里含「已拒绝」的**正常**评论 → 绝不误判被拒（否则成功报失败→不去重→真重复评论）', () => {
+  // 评论行 innerText 含我们自己的正文；不剥正文就会整行命中「已拒绝」→ 一条成功的评论被报成被拒。
+  const body = '这个群的帖子已拒绝率很高吗';
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>${body}</div>` +
+      '<a href="' + POST_BBB + '?comment_id=Y29tbWVudDoxMjM0">1 分钟</a>' +
+      '<div role="button">赞</div><div role="button">回复</div></div>' +
+      '</div>',
+    POST_BBB,
+  );
+  const r = ackVerifyFull(dom, [body], OWN, 'fb:BBB', [body]);
+  assert.equal(r.rejected ?? false, false, '正文里的「已拒绝」必须被剥掉，绝不当状态信号');
+  assert.equal(r.ackConfirmed, true, '这是一条真的发出去的评论，应正常确认成功');
+});
+
+test('fb-ack: 🔴 正文里含「发布中」的正常评论 → 绝不误判在飞（同上，剥正文）', () => {
+  const body = '发布中的活动还有名额吗';
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>${body}</div>` +
+      '<div role="button">赞</div><div role="button">回复</div></div>' +
+      '</div>',
+    POST_BBB,
+  );
+  const r = ackVerifyFull(dom, [body], OWN, 'fb:BBB', [body]);
+  assert.equal(r.inFlight ?? false, false, '正文里的「发布中」必须被剥掉');
+  assert.equal(r.ackConfirmed, true);
+});
+
+test('fb-lifecycle: 三个词表互不串味（已拒绝 / 待审 / 发布中）', () => {
+  assert.equal(isFacebookCommentRejectedText('16小时 已拒绝 查看反馈'), true);
+  assert.equal(isFacebookPendingApprovalText('16小时 已拒绝 查看反馈'), false, '被拒 ≠ 待审（两者终局完全不同）');
+  assert.equal(isFacebookCommentInFlightText('16小时 已拒绝 查看反馈'), false);
+  // 正常已上墙行不得命中任何一态。
+  assert.equal(isFacebookCommentRejectedText('1 分钟 赞 回复'), false);
+  assert.equal(isFacebookCommentInFlightText('1 分钟 赞 回复'), false);
+  assert.equal(isFacebookPendingApprovalText('1 分钟 赞 回复'), false);
+  // 在飞行。
+  assert.equal(isFacebookCommentInFlightText('发布中...'), true);
+  assert.equal(isFacebookCommentRejectedText('发布中...'), false);
+  // 正常行的「查看翻译」绝不能被当成「查看反馈」。
+  assert.equal(isFacebookCommentRejectedText('1 分钟 赞 回复 查看翻译 分享'), false);
+});
+
+test('fb-lifecycle: stripSubmittedText 剥掉完整正文（长正文同样安全，非只剥 60 字片段）', () => {
+  const body = 'x'.repeat(80) + '已拒绝';
+  assert.equal(stripSubmittedText(`Tianxing Bai ${body} 1 分钟 赞 回复`, [body]), 'Tianxing Bai 1 分钟 赞 回复');
+  assert.equal(isFacebookCommentRejectedText(stripSubmittedText(`Tianxing Bai ${body} 1 分钟 赞 回复`, [body])), false);
 });
 
 test('fb-gate: 可见 role=dialog 含「申请参与/参与问题」→ gate=true', () => {
@@ -856,7 +976,6 @@ function makeOpenExecutor(cdp: FakeCdp, over: { postDetailProbeRounds?: number }
       editorScrollRounds: 3,
       surfaceProbeRounds: 4,
       waitAfterSubmitMs: 0,
-      waitAfterReloadMs: 0,
       ...(over.postDetailProbeRounds !== undefined ? { postDetailProbeRounds: over.postDetailProbeRounds } : {}),
     },
   );

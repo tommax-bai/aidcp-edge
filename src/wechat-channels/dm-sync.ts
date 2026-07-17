@@ -14,6 +14,7 @@ export interface DmSynchronizerOptions {
   api: WechatChannelsApiClient;
   state: WechatRuntimeStateStore;
   getSession: () => WechatSessionMaterial;
+  getOwnIdentityExternalId: () => string | null;
   publishBatch: (batch: InteractionSyncBatchPayload) => Promise<import('../comm/protocol.js').InteractionSyncAckPayload>;
   nowImpl?: () => number;
   maxPages?: number;
@@ -40,10 +41,20 @@ export class WechatDmSynchronizer {
     let cursor = sessionCheckpoint.cursor;
     const seen = new Set<string>(cursor ? [cursor] : []);
     for (let pageNo = 0; pageNo < this.maxPages; pageNo++) {
-      const page = await this.options.api.listDmSessions(this.options.getSession(), cursor);
-      assertCursorProgress({ endpoint: 'dmNewMessages', cursorBefore: cursor, cursorAfter: page.nextCursor, hasMore: page.hasMore, seen });
-      const sessions = dedupeBy(page.items, (session) => session.externalId);
-      for (const session of sessions) await this.syncThread(session, request.requestId);
+      const page = await this.options.api.listDmUpdates(
+        this.options.getSession(),
+        cursor,
+        this.options.getOwnIdentityExternalId(),
+      );
+      assertCursorProgress({ endpoint: 'dmHistory', cursorBefore: cursor, cursorAfter: page.nextCursor, hasMore: page.hasMore, seen });
+      const sessions = dedupeBy(page.sessions, (session) => session.externalId);
+      for (const session of sessions) {
+        const messages = dedupeBy(
+          page.messages.filter((message) => message.threadExternalId === session.externalId),
+          (message) => message.externalId,
+        );
+        await this.publishThreadPage(session, messages, request.requestId, cursor, page.nextCursor, page.hasMore);
+      }
       const checkpointPartial = {
         requestId: request.requestId,
         envKey: this.options.envKey,
@@ -72,7 +83,7 @@ export class WechatDmSynchronizer {
       cursor = page.nextCursor;
       if (!page.hasMore) return;
     }
-    throw new Error('dm session pagination exceeded the bounded page limit');
+    throw new Error('dm history pagination exceeded the bounded page limit');
   }
 
   private async syncThread(session: WechatDmSession, requestId: string | null): Promise<void> {
@@ -80,47 +91,70 @@ export class WechatDmSynchronizer {
     let cursor = checkpoint.cursor;
     const seen = new Set<string>(cursor ? [cursor] : []);
     for (let pageNo = 0; pageNo < this.maxPages; pageNo++) {
-      const page = await this.options.api.listDmHistory(this.options.getSession(), session.externalId, cursor);
+      const page = await this.options.api.listDmHistory(
+        this.options.getSession(),
+        session.externalId,
+        cursor,
+        100,
+        this.options.getOwnIdentityExternalId(),
+      );
       assertCursorProgress({ endpoint: 'dmHistory', cursorBefore: cursor, cursorAfter: page.nextCursor, hasMore: page.hasMore, seen });
-      const messages = dedupeBy(page.items, (message) => message.externalId).map(dmToMessage);
-      const partial = {
+      await this.publishThreadPage(
+        session,
+        dedupeBy(page.items, (message) => message.externalId),
         requestId,
-        envKey: this.options.envKey,
-        accountId: this.options.accountId,
-        platform: 'wechat_channels' as const,
-        channel: 'dm' as const,
-        scopeExternalId: session.externalId,
-        cursorBefore: cursor,
-        cursorAfter: page.nextCursor,
-        hasMore: page.hasMore,
-        threads: [
-          {
-            externalThreadId: session.externalId,
-            sourceExternalId: null,
-            sourceTitle: null,
-            sourceCoverUrl: null,
-            participant: session.participant,
-            updatedAt: session.updatedAt,
-          },
-        ],
-        messages,
-      };
-      const batch: InteractionSyncBatchPayload = {
-        batchId: stableBatchId(partial),
-        ...partial,
-        observedAt: this.now(),
-      };
-      const ack = await this.options.publishBatch(batch);
-      assertMatchingAck(batch, ack);
-      await this.options.state.commitCheckpoint('dm', session.externalId, {
-        cursor: page.nextCursor,
-        batchId: batch.batchId,
-        updatedAt: this.now(),
-      });
+        cursor,
+        page.nextCursor,
+        page.hasMore,
+      );
       cursor = page.nextCursor;
       if (!page.hasMore) return;
     }
     throw new Error('dm history pagination exceeded the bounded page limit');
+  }
+
+  private async publishThreadPage(
+    session: WechatDmSession,
+    messages: WechatDmMessage[],
+    requestId: string | null,
+    cursorBefore: string | null,
+    cursorAfter: string | null,
+    hasMore: boolean,
+  ): Promise<void> {
+    const partial = {
+      requestId,
+      envKey: this.options.envKey,
+      accountId: this.options.accountId,
+      platform: 'wechat_channels' as const,
+      channel: 'dm' as const,
+      scopeExternalId: session.externalId,
+      cursorBefore,
+      cursorAfter,
+      hasMore,
+      threads: [
+        {
+          externalThreadId: session.externalId,
+          sourceExternalId: null,
+          sourceTitle: null,
+          sourceCoverUrl: null,
+          participant: session.participant,
+          updatedAt: session.updatedAt,
+        },
+      ],
+      messages: messages.map(dmToMessage),
+    };
+    const batch: InteractionSyncBatchPayload = {
+      batchId: stableBatchId(partial),
+      ...partial,
+      observedAt: this.now(),
+    };
+    const ack = await this.options.publishBatch(batch);
+    assertMatchingAck(batch, ack);
+    await this.options.state.commitCheckpoint('dm', session.externalId, {
+      cursor: cursorAfter,
+      batchId: batch.batchId,
+      updatedAt: this.now(),
+    });
   }
 }
 

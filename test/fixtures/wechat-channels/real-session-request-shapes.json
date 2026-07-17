@@ -1,6 +1,6 @@
 {
   "manifestVersion": 1,
-  "capturedAt": "2026-07-16T07:46:01.873Z",
+  "capturedAt": "2026-07-17T03:30:15.000Z",
   "source": "authorized_adspower_session",
   "evidenceBoundary": "observed_read_only",
   "writesDispatched": false,
@@ -26,21 +26,21 @@
       "status": 201,
       "responseKeys": ["data.bindInfo", "data.continueFlag", "data.lastBuff", "data.list", "data.totalCount"]
     },
-    "commentPagePostList": {
-      "path": "/micro/interaction/cgi-bin/mmfinderassistant-bin/post/post_list",
-      "businessBody": {"currentPage": "number", "pageSize": "number", "stickyOrder": "boolean", "userpageType": "number"},
+    "commentList": {
+      "path": "/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/comment_list",
+      "businessBody": {"commentSelection": "boolean", "exportId": "string", "forMcn": "boolean", "lastBuff": "string"},
       "status": 201,
-      "responseKeys": ["data.continueFlag", "data.lastBuff", "data.list[].commentCount", "data.list[].commentList"],
-      "observedResult": "one_post_zero_comments",
-      "coverage": "empty_only_nonempty_comment_shape_unverified"
+      "responseKeys": ["data.comment", "data.comment[].commentId", "data.comment[].levelTwoComment", "data.downContinueFlag", "data.lastBuff"],
+      "observedResult": "non_empty_comments",
+      "coverage": "nonempty_read_shape_verified"
     },
     "dmHistory": {
       "path": "/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-history-msg",
       "businessBody": {"cookie": "string"},
       "status": 201,
       "responseKeys": ["data.baseResp.errcode", "data.cookie", "data.isContinue", "data.msg"],
-      "observedResult": "zero_messages",
-      "coverage": "empty_only_nonempty_message_and_session_semantics_unverified"
+      "observedResult": "non_empty_messages",
+      "coverage": "nonempty_read_shape_verified"
     },
     "dmSessionInfo": {
       "path": "/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-session-info",
