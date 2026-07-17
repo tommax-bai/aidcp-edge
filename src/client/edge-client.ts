@@ -45,6 +45,7 @@ import {
   INTERACTION_OFFBOARDING_CAPABILITY,
   INTERACTION_REPLY_RECOVERY_CAPABILITY,
   INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
+  INTERACTION_TEST_DATA_RESET_CAPABILITY,
   type InteractionAuthReopenPayload,
   type InteractionBrowserControlPayload,
   type InteractionOffboardAckPayload,
@@ -324,6 +325,10 @@ export class EdgeClient {
     return this.supportsCapability(INTERACTION_RUNTIME_CONTROLS_CAPABILITY)
       ? this.interactionRuntime
       : undefined;
+  }
+
+  isInteractionTestDataResetNegotiated(): boolean {
+    return this.supportsCapability(INTERACTION_TEST_DATA_RESET_CAPABILITY);
   }
 
   /**

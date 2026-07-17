@@ -39,6 +39,7 @@
         }
       }
     },
+    "testTools": { "dataResetEnabled": false },
     "items": [
       {
         "threadId": "thread_comment_100",

@@ -4099,6 +4099,21 @@ ipcMain.handle('interaction:sync', (_event, raw) => handleInteractionIpc(async (
   });
 }));
 
+ipcMain.handle('interaction:test-reset', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'channel', 'idempotencyKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const channel = String(args.channel || '');
+  if (!INTERACTION_CHANNELS.has(channel)) throw new Error('channel 不合法');
+  const idempotencyKey = interactionIdempotencyKey(args.idempotencyKey);
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/interactions/test-reset`,
+    method: 'POST',
+    body: { channel },
+    idempotencyKey,
+  });
+}));
+
 ipcMain.handle('interaction:auth:reopen', (_event, raw) => handleInteractionIpc(async () => {
   const args = interactionArgs(raw, new Set(['envKey', 'idempotencyKey']));
   const envKey = interactionId(args.envKey, 'envKey');

@@ -39,6 +39,7 @@ export const wechatChannelsPlatformDriver: InteractionPlatformDriver = {
     'interaction_offboarding_v1',
     'interaction_runtime_controls_v1',
     'interaction_browser_control_v1',
+    'interaction_test_data_reset_v1',
     'interaction.comment.read',
     'interaction.comment.reply',
     'interaction.dm.read',

@@ -338,7 +338,7 @@ export function validateInteractionSyncRequest(value: unknown): InteractionSyncR
     platform: platform(v.platform, `${path}.platform`),
     channel: channel(v.channel, `${path}.channel`),
     scopeExternalId: nullableStr(v.scopeExternalId, `${path}.scopeExternalId`, 256),
-    reason: oneOf(v.reason, ['user_requested', 'resume', 'scheduled', 'recovery'] as const, `${path}.reason`),
+    reason: oneOf(v.reason, ['user_requested', 'resume', 'scheduled', 'recovery', 'test_reset'] as const, `${path}.reason`),
     requestedAt: timestamp(v.requestedAt, `${path}.requestedAt`),
   };
 }

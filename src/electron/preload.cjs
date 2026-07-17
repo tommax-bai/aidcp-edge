@@ -86,6 +86,7 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   interactionIgnore: (args) => ipcRenderer.invoke('interaction:ignore', args),
   interactionEscalate: (args) => ipcRenderer.invoke('interaction:escalate', args),
   interactionSync: (args) => ipcRenderer.invoke('interaction:sync', args),
+  interactionTestReset: (args) => ipcRenderer.invoke('interaction:test-reset', args),
   interactionReopenAuth: (args) => ipcRenderer.invoke('interaction:auth:reopen', args),
   interactionBrowserControl: (args) => ipcRenderer.invoke('interaction:browser:control', args),
   interactionUpdateReadControls: (args) => ipcRenderer.invoke('interaction:read-controls:update', args),

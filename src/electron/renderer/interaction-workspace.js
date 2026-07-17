@@ -112,6 +112,7 @@
     const legacyRoot = options && options.legacyRoot;
     const shell = options && options.shell;
     const api = options && options.api;
+    const testResetRoot = options && options.testResetRoot;
     const onLifecycleAction = options && options.onLifecycleAction;
     const onLifecycleStatus = options && options.onLifecycleStatus;
     if (!root || !legacyRoot || !shell || !api) return null;
@@ -146,6 +147,8 @@
       listError: root.querySelector('#iw-list-error'),
       loadMore: root.querySelector('#iw-load-more'),
       detail: root.querySelector('#iw-detail'),
+      testResetStatus: testResetRoot && testResetRoot.querySelector('#interaction-test-reset-status'),
+      testResetButtons: testResetRoot ? Array.from(testResetRoot.querySelectorAll('[data-test-reset-channel]')) : [],
     };
 
     let epoch = 0;
@@ -168,6 +171,7 @@
         listError: null, selectedThreadId: null, detail: null, detailLoading: false, detailError: null,
         auth: null, asOf: null, stale: false, actionBusy: null, actionError: null, actionNotice: null,
         replyConfig: null, readControlsBusy: false, readControlsError: null, configGuidanceOpen: false,
+        testDataResetEnabled: false, testResetBusy: null, testResetStatus: null,
         pendingBrowserAction: null, browserPollCount: 0,
         draftText: '', draftDirty: false, syncBusy: false, lifecycleBusy: null, pollCount: 0,
       };
@@ -211,6 +215,7 @@
       if (show || wasActive) legacyRoot.classList.toggle('hidden', show);
       shell.classList.toggle('interaction-mode', show);
       root.setAttribute('aria-hidden', String(!show));
+      if (!show && testResetRoot) testResetRoot.classList.add('hidden');
     }
 
     function selectedEnvKey() {
@@ -348,6 +353,22 @@
       dom.unreadBadge.classList.toggle('hidden', unreadCount === 0);
     }
 
+    function renderTestReset() {
+      if (!testResetRoot) return;
+      const enabled = active && state.testDataResetEnabled && typeof api.interactionTestReset === 'function';
+      testResetRoot.classList.toggle('hidden', !enabled);
+      for (const button of dom.testResetButtons) {
+        button.disabled = Boolean(state.testResetBusy) || !env || env.connectivity !== 'connected' || state.stale;
+        const channel = button.dataset.testResetChannel;
+        button.textContent = state.testResetBusy === channel
+          ? (channel === 'comment' ? '正在重置评论…' : '正在重置私信…')
+          : (channel === 'comment' ? '重置评论' : '重置私信');
+      }
+      if (dom.testResetStatus) {
+        dom.testResetStatus.textContent = state.testResetStatus || '每次只重置一个渠道；操作前需要输入确认词。';
+      }
+    }
+
     function lifecycleControl() {
       if (!env) return { action: null, label: '状态确认中' };
       if (env.session === 'paused') return { action: 'resume', label: '恢复' };
@@ -461,6 +482,7 @@
       dom.sync.title = readState.effective ? '' : readState.reason;
       dom.sync.textContent = state.syncBusy ? '已请求，等待同步' : '局部刷新';
       renderReadSettings();
+      renderTestReset();
     }
 
     function renderTabs() {
@@ -746,6 +768,7 @@
         state.nextCursor = envelope.data.nextCursor || null;
         state.auth = envelope.data.auth;
         state.replyConfig = envelope.data.replyConfig || { status: 'unknown', draftVersion: null, publishedVersion: null };
+        state.testDataResetEnabled = Boolean(envelope.data.testTools && envelope.data.testTools.dataResetEnabled);
         reconcileBrowserAction();
         state.asOf = envelope.meta && envelope.meta.asOf;
         state.listError = null;
@@ -1031,6 +1054,55 @@
       }
     }
 
+    async function resetTestData(channel) {
+      if (!active || !env || state.testResetBusy || !state.testDataResetEnabled ||
+          typeof api.interactionTestReset !== 'function') return;
+      const label = channel === 'comment' ? '评论' : '私信';
+      const confirmation = `重置${label}`;
+      const typed = typeof global.prompt === 'function'
+        ? global.prompt(`这会清空当前账号的 Cloud ${label}副本和读取游标，再从微信平台重新拉取。\n\n不会删除微信平台数据，也不会发送回复。\n\n请输入“${confirmation}”继续：`, '')
+        : null;
+      if (typed !== confirmation) {
+        state.testResetStatus = typed === null ? '已取消，未清空任何数据。' : `确认词不匹配，未执行${label}重置。`;
+        renderTestReset();
+        return;
+      }
+      const capturedEpoch = epoch;
+      const envKey = env.envKey;
+      state.testResetBusy = channel;
+      state.testResetStatus = `正在清空 Cloud ${label}副本并请求重新拉取…`;
+      renderTestReset();
+      try {
+        const response = await api.interactionTestReset({
+          envKey, channel, idempotencyKey: makeRequestKey(`interaction-test-reset-${channel}`),
+        });
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        assertEnvelope(response, envKey);
+        const removedThreadIds = new Set(state.items.filter((item) => item.channel === channel).map((item) => item.threadId));
+        state.items = state.items.filter((item) => item.channel !== channel);
+        if (state.selectedThreadId && removedThreadIds.has(state.selectedThreadId)) {
+          state.selectedThreadId = null;
+          state.detail = null;
+          state.detailError = null;
+        }
+        state.testResetStatus = `Cloud ${label}测试数据已清空，正在从微信平台重新拉取。`;
+        renderAll();
+        global.setTimeout(() => {
+          if (isCurrent(capturedEpoch, envKey)) void loadList({ preserveSelection: true });
+        }, 750);
+      } catch (error) {
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        state.testResetStatus = error && error.code === 'INTERACTION_TEST_RESET_PARTIAL'
+          ? `Cloud ${label}副本已清空，但自动重新拉取没有启动；确认客户端在线后可再次重置。`
+          : safeText(error && error.message, friendlyError(error));
+      } finally {
+        if (isCurrent(capturedEpoch, envKey)) {
+          state.testResetBusy = null;
+          renderAll();
+        }
+      }
+    }
+
     async function reopenAuth() {
       if (!active || !env || state.actionBusy) return;
       const capturedEpoch = epoch;
@@ -1220,6 +1292,9 @@
       state.configGuidanceOpen = !state.configGuidanceOpen;
       renderReadSettings();
     });
+    for (const button of dom.testResetButtons) {
+      button.addEventListener('click', () => void resetTestData(button.dataset.testResetChannel));
+    }
 
     return { selectEnvironment, refresh: () => loadList({ preserveSelection: true }) };
   }

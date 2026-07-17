@@ -223,6 +223,7 @@ export const INTERACTION_REPLY_RECOVERY_CAPABILITY = 'interaction_reply_recovery
 export const INTERACTION_OFFBOARDING_CAPABILITY = 'interaction_offboarding_v1' as const;
 export const INTERACTION_RUNTIME_CONTROLS_CAPABILITY = 'interaction_runtime_controls_v1' as const;
 export const INTERACTION_BROWSER_CONTROL_CAPABILITY = 'interaction_browser_control_v1' as const;
+export const INTERACTION_TEST_DATA_RESET_CAPABILITY = 'interaction_test_data_reset_v1' as const;
 export type InteractionPlatform = 'wechat_channels';
 export type InteractionChannel = 'comment' | 'dm';
 export type InteractionMessageType = 'text' | 'image' | 'unknown';
@@ -379,7 +380,7 @@ export interface InteractionSyncRequestPayload {
   platform: InteractionPlatform;
   channel: InteractionChannel;
   scopeExternalId: string | null;
-  reason: 'user_requested' | 'resume' | 'scheduled' | 'recovery';
+  reason: 'user_requested' | 'resume' | 'scheduled' | 'recovery' | 'test_reset';
   requestedAt: number;
 }
 

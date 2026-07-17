@@ -203,6 +203,7 @@ const interactionWorkspace = window.InteractionWorkspace?.create({
   legacyRoot: document.querySelector('#legacy-workspace'),
   shell: document.querySelector('.shell'),
   api: window.aidcpEdge,
+  testResetRoot: document.querySelector('#interaction-test-reset'),
   onLifecycleAction: runSessionLifecycle,
   onLifecycleStatus: routeStatus,
 }) || null;

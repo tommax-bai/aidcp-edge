@@ -105,7 +105,7 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
   const currentStatus = status(envKey, label);
   const calls: Record<string, any[]> = {
     list: [], detail: [], cancel: [], save: [], approve: [], send: [], regenerate: [], ignore: [], escalate: [],
-    sync: [], reopen: [], browser: [], readControls: [], notify: [],
+    sync: [], reset: [], reopen: [], browser: [], readControls: [], notify: [],
   };
   let pushFleet: (snapshot: any) => void = () => undefined;
   let pushStatus: (status: any) => void = () => undefined;
@@ -189,6 +189,15 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
     interactionSync: async (args: any) => {
       calls.sync.push(args);
       return apiResult({ data: { envKey: args.envKey, accountId: `account-${args.envKey}`, acceptedAt: Date.now() }, meta: { requestId: 'sync', asOf: Date.now() } });
+    },
+    interactionTestReset: async (args: any) => {
+      calls.reset.push(args);
+      return apiResult({
+        data: { envKey: args.envKey, accountId: `account-${args.envKey}`, channel: args.channel,
+          action: 'test_reset', actionRequestId: `reset-${args.channel}`, status: 'accepted',
+          deleted: { threads: 1, syncBatches: 1, syncCursors: 1 } },
+        meta: { requestId: 'test-reset', asOf: Date.now() },
+      });
     },
     interactionReopenAuth: async (args: any) => {
       calls.reopen.push(args);
@@ -863,6 +872,68 @@ test('CAS 冲突保留输入并给出刷新入口；reauth 保留历史但禁写
   assert.equal(reauth.window.document.querySelectorAll('[data-iw-action="approve"]:not([disabled])').length, 0);
   assert.equal(reauthList.data.items.length, 2, '登录失效不能清掉历史 fixture');
   assert.match(reopenArgs.idempotencyKey, /^interaction-reauth-/);
+});
+
+test('测试数据入口默认隐藏，确认词不匹配时不调用重置 IPC', async () => {
+  const disabled = await boot();
+  assert.equal(hidden($(disabled.window, '#interaction-test-reset')), true);
+
+  const enabledList = clone(listFixture);
+  enabledList.data.testTools = { dataResetEnabled: true };
+  const enabled = await boot({
+    api: { interactionList: async (args: any) => apiResult(scopeEnvelope(enabledList, args.envKey)) },
+  });
+  const toggle = $(enabled.window, '#dev-toggle') as HTMLInputElement;
+  toggle.checked = true;
+  toggle.dispatchEvent(new enabled.window.Event('change', { bubbles: true }));
+  assert.equal(hidden($(enabled.window, '#dev-section')), false);
+  assert.equal(hidden($(enabled.window, '#interaction-test-reset')), false);
+  (enabled.window as any).prompt = () => '不匹配';
+  $(enabled.window, '[data-test-reset-channel="comment"]').dispatchEvent(new enabled.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(enabled.calls.reset.length, 0);
+  assert.match($(enabled.window, '#interaction-test-reset-status').textContent || '', /确认词不匹配/);
+});
+
+test('确认开发环境评论重置后只清本地评论视图并等待真实重拉', async () => {
+  const enabledList = clone(listFixture);
+  enabledList.data.testTools = { dataResetEnabled: true };
+  const handle = await boot({
+    api: { interactionList: async (args: any) => apiResult(scopeEnvelope(enabledList, args.envKey)) },
+  });
+  (handle.window as any).prompt = () => '重置评论';
+  $(handle.window, '[data-test-reset-channel="comment"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(handle.calls.reset.length, 1);
+  assert.equal(handle.calls.reset[0].channel, 'comment');
+  assert.match(handle.calls.reset[0].idempotencyKey, /^interaction-test-reset-comment-/);
+  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /已清空，正在从微信平台重新拉取/);
+});
+
+test('测试重置区分安全拒绝与 Cloud 已清空但 Edge 未收到', async () => {
+  const enabledList = clone(listFixture);
+  enabledList.data.testTools = { dataResetEnabled: true };
+  const safety = await boot({
+    api: {
+      interactionList: async (args: any) => apiResult(scopeEnvelope(enabledList, args.envKey)),
+      interactionTestReset: async () => apiError('INTERACTION_STATE_CONFLICT', '该渠道已有回复发送记录，不能重置。'),
+    },
+  });
+  (safety.window as any).prompt = () => '重置评论';
+  $(safety.window, '[data-test-reset-channel="comment"]').dispatchEvent(new safety.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(safety.window, '#interaction-test-reset-status').textContent || '', /已有回复发送记录/);
+
+  const partial = await boot({
+    api: {
+      interactionList: async (args: any) => apiResult(scopeEnvelope(enabledList, args.envKey)),
+      interactionTestReset: async () => apiError('INTERACTION_TEST_RESET_PARTIAL', 'partial', 503),
+    },
+  });
+  (partial.window as any).prompt = () => '重置私信';
+  $(partial.window, '[data-test-reset-channel="dm"]').dispatchEvent(new partial.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(partial.window, '#interaction-test-reset-status').textContent || '', /Cloud 私信副本已清空，但自动重新拉取没有启动/);
 });
 
 test('Cloud 离线局部刷新保留已读历史并标记上次成功数据', async () => {

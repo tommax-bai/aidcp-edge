@@ -204,7 +204,7 @@ test('edge-client: wechat_channels hello declares controls capability and keeps 
     edgeId: 'edge-wc-1',
     platform: 'wechat_channels',
     app: 'wechat_channels',
-    capabilities: ['identity', 'interaction_inbox_v1', 'interaction_reply_recovery_v1', 'interaction_offboarding_v1', 'interaction_runtime_controls_v1', 'interaction_browser_control_v1'],
+    capabilities: ['identity', 'interaction_inbox_v1', 'interaction_reply_recovery_v1', 'interaction_offboarding_v1', 'interaction_runtime_controls_v1', 'interaction_browser_control_v1', 'interaction_test_data_reset_v1'],
     runner: { run: async () => ({ actionId: 'noop', ok: false, outcome: 'escalated', attempts: 0, reason: 'api_only' }) },
     wsFactory: () => ws,
     idGen: () => 'hello-wc-1',
@@ -221,10 +221,11 @@ test('edge-client: wechat_channels hello declares controls capability and keeps 
   assert.ok(hello.payload.capabilities.includes('interaction_offboarding_v1'));
   assert.ok(hello.payload.capabilities.includes('interaction_runtime_controls_v1'));
   assert.ok(hello.payload.capabilities.includes('interaction_browser_control_v1'));
+  assert.ok(hello.payload.capabilities.includes('interaction_test_data_reset_v1'));
   ws.emitMessage(makeEnvelope('welcome', 'hello-wc-1', 1, {
     sessionId: 'session-wc-1',
     serverVersion: 'v1',
-    capabilities: ['interaction_inbox_v1', 'interaction_reply_recovery_v1', 'interaction_offboarding_v1', 'interaction_runtime_controls_v1', 'interaction_browser_control_v1'],
+    capabilities: ['interaction_inbox_v1', 'interaction_reply_recovery_v1', 'interaction_offboarding_v1', 'interaction_runtime_controls_v1', 'interaction_browser_control_v1', 'interaction_test_data_reset_v1'],
     interactionRecovery: { offboardPending: false },
     interactionRuntime: {
       accountId: 'env-a', envKey: 'env-a', version: 2,
