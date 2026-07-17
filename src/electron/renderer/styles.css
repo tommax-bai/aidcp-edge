@@ -2784,7 +2784,34 @@ body { margin: 0; }
 .iw-button.danger:hover:not(:disabled) { border-color: #e3aaaa; background: #fde8e8; }
 .iw-button.ghost { border-color: transparent; color: var(--accent); background: transparent; }
 .iw-button:disabled { cursor: default; opacity: .52; }
+/* 图标按钮：详情级的刷新 / 关闭 / 返回（wechat-inbox-im-drilldown）。
+   必须带 aria-label —— 只靠图形不传达用途。 */
+.iw-iconbtn {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 0;
+  color: var(--mute);
+  background: transparent;
+  cursor: pointer;
+}
+.iw-iconbtn:hover:not(:disabled) { border-color: var(--hair-strong); color: var(--accent); background: #f5f8fc; }
+.iw-iconbtn:disabled { cursor: default; opacity: .52; }
+.iw-iconbtn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.iw-detail-actions { display: flex; gap: 2px; }
 .iw-button:focus-visible,
+.iw-iconbtn:focus-visible,
 .iw-tab:focus-visible,
 .iw-list-item:focus-visible,
 .iw-search input:focus-visible,
@@ -2801,6 +2828,8 @@ body { margin: 0; }
   border-radius: 10px;
   background: var(--card);
   overflow-x: auto;
+  /* 两级切换时锚到视口顶部；留一点呼吸位 */
+  scroll-margin-top: 12px;
 }
 .iw-tab {
   min-width: 70px;
@@ -2856,11 +2885,14 @@ body { margin: 0; }
   line-height: 18px;
 }
 .iw-list-meta { color: var(--faint); font-size: 10.5px; white-space: nowrap; }
+/* 单栏两级：列表常驻，详情作为覆盖层铺满收件箱区并遮挡列表（wechat-inbox-im-drilldown）。
+   列表不卸载 → 关闭详情后滚动位置天然保留。 */
 .iw-inbox {
+  position: relative;
   display: grid;
   flex: 1;
   min-height: 0;
-  grid-template-columns: minmax(248px, .78fr) minmax(330px, 1.42fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 .iw-list-pane,
@@ -2873,6 +2905,19 @@ body { margin: 0; }
   overflow: hidden;
 }
 .iw-list-pane { display: flex; flex-direction: column; }
+/* 详情覆盖层：铺满收件箱区，盖住列表 */
+.iw-detail {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  box-shadow: 0 6px 24px rgb(23 34 56 / 10%);
+}
+/* 红线（wechat-inbox-im-drilldown design 决策 3）：这条必须显式压过上面的 display 声明。
+   .iw-list-pane 带 display:flex，优先级高于 UA 给 [hidden] 的 display:none —— 少了这条，
+   隐藏会静默失效（不报错、不白屏），覆盖层永久糊在列表上、客户无法选择任何互动。
+   逻辑侧另有一道：列表级下 renderDetail() 不渲染详情内容，两道缺一不可。 */
+.iw-detail[hidden],
+.iw-list-pane[hidden] { display: none !important; }
 .iw-list {
   display: flex;
   flex: 1;
@@ -2923,14 +2968,6 @@ body { margin: 0; }
 }
 .iw-item-head strong { overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .iw-item-head time { color: var(--faint); font-size: 9.5px; white-space: nowrap; }
-.iw-item-preview {
-  overflow: hidden;
-  color: #32405a;
-  font-size: 11.5px;
-  line-height: 17px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .iw-item-foot > span {
   min-width: 0;
   overflow: hidden;
@@ -2957,7 +2994,7 @@ body { margin: 0; }
 .iw-detail-scroll { display: flex; min-height: 100%; flex-direction: column; gap: 10px; padding: 12px; }
 .iw-detail-head {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto;
+  grid-template-columns: auto 38px minmax(0, 1fr) auto;
   gap: 9px;
   align-items: center;
 }

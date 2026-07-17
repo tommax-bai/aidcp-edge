@@ -164,6 +164,7 @@
       configHelp: root.querySelector('#iw-config-help'),
       configGuidance: root.querySelector('#iw-config-guidance'),
       tabs: Array.from(root.querySelectorAll('[data-interaction-tab]')),
+      tabsNav: root.querySelector('#iw-tabs'),
       search: root.querySelector('#iw-search'),
       listMeta: root.querySelector('#iw-list-meta'),
       list: root.querySelector('#iw-list'),
@@ -640,13 +641,12 @@
           const selected = item.threadId === state.selectedThreadId;
           const job = JOB_LABEL[item.jobState] || [safeText(item.jobState, '状态待确认'), 'neutral'];
           const name = safeText(item.participantName, '未获取昵称');
-          const preview = safeText(item.previewText, item.channel === 'dm' ? '暂不支持的私信类型' : '暂不支持的评论类型');
+          // 两级导航：列表只呈现摘要，消息正文只在详情级出现（不再渲染预览行）。
           const source = safeText(item.sourceTitle, item.channel === 'dm' ? '私信会话' : '未获取视频标题');
           return `<button class="iw-list-item${selected ? ' selected' : ''}${item.unread ? ' unread' : ''}" type="button" role="option" aria-selected="${String(selected)}" data-thread-id="${escapeHtml(item.threadId)}">
             <span class="iw-avatar" aria-hidden="true">${escapeHtml(name.slice(0, 1))}</span>
             <span class="iw-item-copy">
               <span class="iw-item-head"><strong>${item.unread ? '<i class="iw-unread-dot" aria-label="未读"></i>' : ''}${escapeHtml(name)}</strong><time>${escapeHtml(formatTime(item.lastMessageAt))}</time></span>
-              <span class="iw-item-preview">${escapeHtml(preview)}</span>
               <span class="iw-item-foot"><span>${item.channel === 'dm' ? '私信' : '评论'} · ${escapeHtml(source)}</span><em class="iw-badge ${job[1]}">${escapeHtml(job[0])}</em></span>
             </span>
           </button>`;
@@ -667,6 +667,24 @@
         const nextFocused = dom.list.querySelector(`[data-thread-id="${selectorId}"]`);
         if (nextFocused) nextFocused.focus({ preventScroll: true });
       }
+    }
+
+    // 详情级的图标控件（wechat-inbox-im-drilldown）。图标只是外形：每个都必须带
+    // aria-label 与 title，键盘可聚焦、焦点态可见 —— MUST NOT 只靠图形传达用途。
+    const ICON_BACK = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12 4.5 6.5 10l5.5 5.5"></path></svg>';
+    const ICON_CLOSE = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"></path></svg>';
+    const ICON_REFRESH = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 8a6.5 6.5 0 1 0 .3 3.4"></path><path d="M16.8 4v4h-4"></path></svg>';
+
+    function backButtonHtml() {
+      return `<button class="iw-iconbtn" type="button" data-iw-action="close-detail" aria-label="返回互动列表" title="返回列表">${ICON_BACK}</button>`;
+    }
+
+    function closeButtonHtml() {
+      return `<button class="iw-iconbtn" type="button" data-iw-action="close-detail" aria-label="关闭详情并返回互动列表" title="关闭">${ICON_CLOSE}</button>`;
+    }
+
+    function refreshButtonHtml() {
+      return `<button class="iw-iconbtn" type="button" data-iw-action="refresh-detail" aria-label="刷新状态" title="刷新状态">${ICON_REFRESH}</button>`;
     }
 
     function renderMessages(detail) {
@@ -717,13 +735,23 @@
 
     function renderDetail() {
       dom.detail.setAttribute('aria-busy', String(state.detailLoading));
+      // 列表级：详情覆盖层既隐藏、又不渲染内容。这是红线的第二道保险——
+      // 第一道是 styles.css 里显式压过 display 的 [hidden] 规则。任一道单独都不够：
+      // 只靠样式，层叠一旦被后来的规则改写就复发；只靠不渲染，空容器仍会绝对定位挡住点击。
+      if (!state.selectedThreadId) {
+        dom.detail.hidden = true;
+        dom.detail.innerHTML = '';
+        return;
+      }
+      dom.detail.hidden = false;
       if (state.detailLoading && !state.detail) {
         dom.detail.innerHTML = '<div class="iw-loading-state detail"><i></i><i></i><i></i><span>正在加载消息上下文</span></div>';
         return;
       }
-      if (!state.selectedThreadId || !state.detail) {
-        const message = state.detailError ? friendlyError(state.detailError) : '选择一条互动查看详情';
-        dom.detail.innerHTML = `<div class="iw-empty-state"><span class="iw-empty-icon" aria-hidden="true">···</span><strong>${escapeHtml(message)}</strong><span>${state.detailError ? '列表不会因此被清空，可选择其他互动或稍后重试。' : '消息上下文、回复依据和发送状态会显示在这里。'}</span></div>`;
+      if (!state.detail) {
+        const message = state.detailError ? friendlyError(state.detailError) : '正在准备消息上下文';
+        dom.detail.innerHTML = `<div class="iw-detail-scroll"><header class="iw-detail-head" data-iw-head="bare">${backButtonHtml()}<span></span><div class="headcopy"></div><div class="iw-detail-actions">${closeButtonHtml()}</div></header><div class="iw-empty-state"><span class="iw-empty-icon" aria-hidden="true">···</span><strong>${escapeHtml(message)}</strong><span>${state.detailError ? '列表不会因此被清空，可返回后选择其他互动或稍后重试。' : ''}</span></div></div>`;
+        bindDetailActions();
         return;
       }
 
@@ -756,9 +784,10 @@
 
       dom.detail.innerHTML = `<div class="iw-detail-scroll">
         <header class="iw-detail-head">
+          ${backButtonHtml()}
           <span class="iw-avatar large" aria-hidden="true">${escapeHtml(participant.slice(0, 1))}</span>
           <div><h2>${escapeHtml(participant)}</h2><p>${thread.channel === 'dm' ? '私信会话' : '公开视频评论'} · ${escapeHtml(formatTime(thread.lastMessageAt))}</p></div>
-          <button class="iw-button ghost" type="button" data-iw-action="refresh-detail">刷新状态</button>
+          <div class="iw-detail-actions">${refreshButtonHtml()}${closeButtonHtml()}</div>
         </header>
         <section class="iw-source-card">
           <span class="iw-source-icon" aria-hidden="true">${thread.channel === 'dm' ? '信' : '视'}</span>
@@ -805,6 +834,10 @@
           if (approve) approve.textContent = state.draftDirty ? '保存并批准' : '批准回复';
         });
       }
+      bindDetailActions();
+    }
+
+    function bindDetailActions() {
       for (const button of dom.detail.querySelectorAll('[data-iw-action]')) {
         button.addEventListener('click', () => handleDetailAction(button.dataset.iwAction));
       }
@@ -892,14 +925,12 @@
         reconcileBrowserAction();
         state.listError = null;
         state.stale = false;
-        const visible = filteredItems();
-        if (!state.selectedThreadId && visible[0]) {
-          state.selectedThreadId = visible[0].threadId;
-          void loadDetail(visible[0].threadId);
-        } else if (state.selectedThreadId && !state.items.some((item) => item.threadId === state.selectedThreadId)) {
-          state.selectedThreadId = visible[0] ? visible[0].threadId : null;
+        // 两级导航：MUST NOT 默认选中任何一条，也不为其预取详情——只有客户显式点击才进详情级。
+        if (state.selectedThreadId && !state.items.some((item) => item.threadId === state.selectedThreadId)) {
+          // 正在看的那条已不在列表里 → 回列表级，而不是顺手改选第一条
+          state.selectedThreadId = null;
           state.detail = null;
-          if (state.selectedThreadId) void loadDetail(state.selectedThreadId);
+          state.detailError = null;
         }
       } catch (error) {
         if (!isCurrent(capturedEpoch, envKey) || request !== listRequest) return;
@@ -1009,6 +1040,16 @@
       }, 1500);
     }
 
+    // 两级切换时把标签排锚到视口顶部，让收件箱区一次露全。
+    // 挂在 #iw-tabs 这个静态节点上：它跨重绘存活，且正是客户点名的锚点。
+    // 不自算 scrollTop —— 面板高度依赖视口、上方卡片高度可变，硬算偏移会随内容漂移。
+    function anchorTabs() {
+      if (!dom.tabsNav || typeof dom.tabsNav.scrollIntoView !== 'function') return;
+      const reduced = typeof global.matchMedia === 'function'
+        && global.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      dom.tabsNav.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' });
+    }
+
     function selectThread(threadId, focusDetail) {
       if (!threadId || state.selectedThreadId === threadId) return;
       clearPoll();
@@ -1019,8 +1060,25 @@
       state.actionNotice = null;
       state.pollCount = 0;
       renderList();
+      renderDetail();
       void loadDetail(threadId);
       if (focusDetail) dom.detail.setAttribute('tabindex', '-1');
+      anchorTabs();
+    }
+
+    // 关闭详情覆盖层，回到列表级。关闭图标 / 返回箭头 / Esc 三个入口收敛到这里。
+    function closeThread() {
+      if (!state.selectedThreadId) return;
+      clearPoll();
+      state.selectedThreadId = null;
+      state.detail = null;
+      state.detailError = null;
+      state.actionError = null;
+      state.actionNotice = null;
+      state.pollCount = 0;
+      renderList();
+      renderDetail();
+      anchorTabs();
     }
 
     function updateListJob(job) {
@@ -1046,6 +1104,10 @@
 
     async function handleDetailAction(kind) {
       if (!active || !env) return;
+      if (kind === 'close-detail') {
+        closeThread();
+        return;
+      }
       if (kind === 'refresh-detail') {
         state.actionError = null;
         state.actionNotice = null;
@@ -1390,21 +1452,35 @@
     dom.search.addEventListener('input', () => {
       state.search = dom.search.value;
       const visible = filteredItems();
+      // 正在看的那条被搜索条件筛掉 → 回列表级，MUST NOT 改选第一条
       if (state.selectedThreadId && !visible.some((item) => item.threadId === state.selectedThreadId)) {
-        state.selectedThreadId = visible[0] ? visible[0].threadId : null;
+        clearPoll();
+        state.selectedThreadId = null;
         state.detail = null;
-        if (state.selectedThreadId) void loadDetail(state.selectedThreadId);
+        state.detailError = null;
       }
       renderList();
       renderDetail();
+    });
+    // Esc = 关闭详情覆盖层，与关闭图标、返回箭头同一个动作。
+    // 挂在 root 上并由 active 兜底，与本模块其余监听同一惯例（随 root 一同消亡，不残留）。
+    root.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || !active || !state.selectedThreadId) return;
+      event.preventDefault();
+      closeThread();
     });
     dom.list.addEventListener('keydown', (event) => {
       if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
       const items = filteredItems();
       if (items.length === 0) return;
       event.preventDefault();
-      const index = Math.max(0, items.findIndex((item) => item.threadId === state.selectedThreadId));
-      const nextIndex = event.key === 'ArrowDown' ? Math.min(items.length - 1, index + 1) : Math.max(0, index - 1);
+      // 没有选中时 findIndex 返回 -1：ArrowDown 必须落到第 0 条。
+      // 旧代码把 -1 夹成 0，在「默认选中第一条」的前提下无害；现在不再默认选中，
+      // 夹完会让 ArrowDown 跳过第一条 —— 所以这里保留 -1 让下面的 +1 自然落到 0。
+      const index = items.findIndex((item) => item.threadId === state.selectedThreadId);
+      const nextIndex = event.key === 'ArrowDown'
+        ? Math.min(items.length - 1, index + 1)
+        : Math.max(0, index < 0 ? 0 : index - 1);
       selectThread(items[nextIndex].threadId, false);
       const button = dom.list.querySelector(`[data-thread-id="${global.CSS && global.CSS.escape ? global.CSS.escape(items[nextIndex].threadId) : items[nextIndex].threadId.replace(/["\\]/g, '\\$&')}"]`);
       if (button) button.focus();

@@ -256,6 +256,16 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
 const $ = (window: DOMWindow, selector: string) => window.document.querySelector(selector) as HTMLElement;
 const hidden = (element: HTMLElement) => element.classList.contains('hidden');
 
+// 两级导航（wechat-inbox-im-drilldown）：收件箱不再默认选中任何一条，详情要点开才存在。
+// 凡是断言详情内容的用例都得先经这里点一下 —— 这正是客户实际的操作路径。
+async function openThread(window: DOMWindow, threadId?: string): Promise<HTMLElement> {
+  const item = $(window, threadId ? `[data-thread-id="${threadId}"]` : '.iw-list-item');
+  assert.ok(item, `列表里应有可点开的互动：${threadId ?? '第一条'}`);
+  item.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  return item;
+}
+
 test('XHS / Facebook 保留原 workspace；视频号只替换右侧且不占左侧环境栏', async () => {
   for (const platform of ['xiaohongshu', 'facebook']) {
     const { window } = await boot({ platform, envKey: `env-${platform}` });
@@ -273,6 +283,7 @@ test('XHS / Facebook 保留原 workspace；视频号只替换右侧且不占左�
   assert.match($(window, '#iw-title').textContent || '', /已绑定：示例视频号/);
   assert.match($(window, '#iw-browser').textContent || '', /后台运行中（浏览器已关闭）/);
   assert.match($(window, '#iw-list').textContent || '', /示例观众/);
+  await openThread(window);
   assert.match($(window, '#iw-detail').textContent || '', /模板 template_comment_thanks · v1/);
   assert.match($(window, '#iw-detail').textContent || '', /配置版本 1/);
 });
@@ -504,6 +515,7 @@ test('首次授权、错号恢复和账号开关待应用都有明确且 fail-cl
   assert.match($(mismatch.window, '#iw-title').textContent || '', /另一个视频号/);
   assert.match($(mismatch.window, '#iw-summary').textContent || '', /示例视频号/);
   assert.match($(mismatch.window, '#iw-summary').textContent || '', /历史内容仍可查看/);
+  await openThread(mismatch.window);
   assert.equal((mismatch.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
 
   const pendingList = clone(listFixture);
@@ -521,6 +533,7 @@ test('首次授权、错号恢复和账号开关待应用都有明确且 fail-cl
   });
   assert.match($(pending.window, '#iw-title').textContent || '', /互动收取尚未生效/);
   assert.match($(pending.window, '#iw-read-apply').textContent || '', /Cloud 已保存 v8，等待本机应用/);
+  await openThread(pending.window);
   assert.match($(pending.window, '#iw-detail').textContent || '', /尚未回报应用同一版本/);
   assert.equal((pending.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
 });
@@ -540,6 +553,7 @@ test('tabs / 搜索 / 空态 / 错态 / ambiguous 都使用冻结 fixture 的诚
 
   $(window, '[data-interaction-tab="dm"]').dispatchEvent(new window.Event('click', { bubbles: true }));
   await flush();
+  await openThread(window);
   assert.match($(window, '#iw-detail').textContent || '', /平台结果待核验/);
   assert.match($(window, '#iw-detail').textContent || '', /不会自动重复发送/);
   assert.doesNotMatch($(window, '#iw-detail').textContent || '', /平台已确认发送/);
@@ -570,6 +584,7 @@ test('meta.asOf 只表示 API 快照；缺失或非法 syncFreshness 均按未�
   assert.match($(legacy.window, '#iw-as-of').textContent || '', /同步时间待确认/);
   assert.doesNotMatch($(legacy.window, '#iw-as-of').textContent || '', /数据时间/);
   assert.doesNotMatch($(legacy.window, '#iw-sync-status').textContent || '', /同步正常/);
+  await openThread(legacy.window);
   assert.match($(legacy.window, '#iw-detail').textContent || '', /最近同步 同步时间待确认/);
 
   const invalidList = clone(listFixture);
@@ -823,6 +838,7 @@ test('发送能力只阻止发送；配置缺失只阻止依赖配置的动作�
       interactionDetail: async () => apiResult(noSendDetail),
     },
   });
+  await openThread(noSend.window);
   for (const action of ['approve', 'regenerate', 'ignore', 'escalate']) {
     assert.equal((noSend.window.document.querySelector(`[data-iw-action="${action}"]`) as HTMLButtonElement).disabled, false, `${action} 不应被发送能力误伤`);
   }
@@ -847,6 +863,7 @@ test('发送能力只阻止发送；配置缺失只阻止依赖配置的动作�
     },
   });
   assert.match($(missing.window, '#iw-config-status').textContent || '', /尚未创建回复配置/);
+  await openThread(missing.window);
   assert.equal((missing.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
   assert.equal((missing.window.document.querySelector('[data-iw-action="regenerate"]') as HTMLButtonElement).disabled, true);
   assert.equal((missing.window.document.querySelector('[data-iw-action="ignore"]') as HTMLButtonElement).disabled, false);
@@ -908,6 +925,13 @@ test('未读提醒按环境建立无通知基线，之后每个新 messageId 最
 test('列表方向键可达并移动焦点，窄屏样式折叠为单栏且保留 focus ring', async () => {
   const { window } = await boot();
   const list = $(window, '#iw-list');
+  // 列表级下没有选中项：第一次 ArrowDown MUST 落到第一条，不能跳过它
+  list.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  await flush();
+  const first = $(window, '[data-thread-id="thread_comment_100"]');
+  assert.equal(first.getAttribute('aria-selected'), 'true');
+  assert.equal(window.document.activeElement, first);
+
   list.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
   await flush();
   const selected = $(window, '[data-thread-id="thread_dm_200"]');
@@ -971,6 +995,7 @@ test('批准/发送防双击，带 expectedVersion；queued 绝不冒充平台�
       interactionSend: async () => { sendCount += 1; return sendPending; },
     },
   });
+  await openThread(window);
 
   const approve = $(window, '[data-iw-action="approve"]');
   approve.dispatchEvent(new window.Event('click', { bubbles: true }));
@@ -1000,6 +1025,7 @@ test('CAS 冲突保留输入并给出刷新入口；reauth 保留历史但禁写
   const conflict = await boot({
     api: { interactionApprove: async () => apiError('INTERACTION_VERSION_CONFLICT', 'version conflict') },
   });
+  await openThread(conflict.window);
   const textarea = $(conflict.window, '#iw-final-text') as HTMLTextAreaElement;
   textarea.value = '我尚未保存的修改';
   textarea.dispatchEvent(new conflict.window.Event('input', { bubbles: true }));
@@ -1027,6 +1053,7 @@ test('CAS 冲突保留输入并给出刷新入口；reauth 保留历史但禁写
     },
   });
   assert.match($(reauth.window, '#iw-title').textContent || '', /需要重新登录/);
+  await openThread(reauth.window);
   assert.match($(reauth.window, '#iw-detail').textContent || '', /这个视频很有帮助/);
   assert.equal(($(reauth.window, '#iw-final-text') as HTMLTextAreaElement).disabled, true);
   assert.equal(hidden($(reauth.window, '#iw-reauth')), false);
@@ -1128,6 +1155,7 @@ test('Cloud offline/stale 禁止 save/approve/send，成功刷新后才恢复写
       interactionSync: async () => ({ status: 0, ok: false, data: null, error: 'offline' }),
     },
   });
+  await openThread(window);
 
   const textarea = $(window, '#iw-final-text') as HTMLTextAreaElement;
   textarea.value = '离线期间不得提交的修改';
@@ -1172,4 +1200,59 @@ test('Cloud offline/stale 禁止 save/approve/send，成功刷新后才恢复写
   send.dispatchEvent(new window.Event('click', { bubbles: true }));
   await flush();
   assert.equal(calls.send.length, 0, 'disabled 之外 handler guard 也必须拦 send');
+});
+
+test('两级导航：列表级不默认选中、详情不渲染，且每一条都点得开', async () => {
+  const { window, calls } = await boot();
+
+  // 不默认选中：进来就是列表级，也 MUST NOT 为任何一条预取详情
+  const detail = $(window, '#iw-detail');
+  assert.equal(detail.hasAttribute('hidden'), true, '列表级下详情覆盖层必须隐藏');
+  assert.equal(detail.innerHTML, '', '列表级下详情 MUST NOT 渲染内容（红线第二道保险）');
+  assert.equal(calls.detail.length, 0, '没点开就不该请求详情');
+  assert.equal(window.document.querySelectorAll('[aria-selected="true"]').length, 0);
+
+  // 红线：覆盖层若隐藏失效，会永久盖住列表且不报错 —— 这里逐条点开来证伪
+  const ids = Array.from(window.document.querySelectorAll('[data-thread-id]'))
+    .map((node) => (node as HTMLElement).dataset.threadId as string);
+  assert.ok(ids.length >= 2, 'fixture 应有多条互动');
+  for (const id of ids) {
+    await openThread(window, id);
+    assert.equal($(window, '#iw-detail').hasAttribute('hidden'), false, `${id} 应能点开详情`);
+    $(window, '[data-iw-action="close-detail"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+    await flush();
+    assert.equal($(window, '#iw-detail').hasAttribute('hidden'), true, `${id} 关闭后应回到列表级`);
+  }
+});
+
+test('关闭图标与 Esc 都回到列表级并清空选中；列表只呈现摘要不带正文', async () => {
+  const { window } = await boot();
+
+  await openThread(window, 'thread_comment_100');
+  assert.equal($(window, '#iw-detail').hasAttribute('hidden'), false);
+  assert.ok($(window, '[data-iw-action="refresh-detail"]').classList.contains('iw-iconbtn'), '刷新已图标化');
+  // 图标只是外形：无障碍名称必须还在，MUST NOT 只靠图形传达用途
+  assert.equal($(window, '[data-iw-action="refresh-detail"]').getAttribute('aria-label'), '刷新状态');
+  assert.ok($(window, '[data-iw-action="close-detail"]').getAttribute('aria-label'));
+
+  $(window, '#interaction-workspace').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await flush();
+  assert.equal($(window, '#iw-detail').hasAttribute('hidden'), true, 'Esc 应回到列表级');
+  assert.equal($(window, '#iw-detail').innerHTML, '');
+  assert.equal(window.document.querySelectorAll('[aria-selected="true"]').length, 0, 'Esc 后不应残留选中');
+
+  // 列表只呈现摘要：昵称/时间/来源在，消息正文只在详情级
+  const list = $(window, '#iw-list');
+  assert.equal(window.document.querySelectorAll('.iw-item-preview').length, 0, '列表 MUST NOT 渲染正文预览行');
+  assert.match(list.textContent || '', /示例观众/, '昵称仍在');
+  assert.doesNotMatch(list.textContent || '', /这个视频很有帮助/, '正文只属于详情级');
+});
+
+test('详情覆盖层的隐藏样式必须显式压过面板 display（红线）', () => {
+  const css = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
+  // .iw-list-pane 带 display:flex，优先级高于 UA 给 [hidden] 的 display:none。
+  // 少了这条，hidden 静默失效：不报错、不白屏，覆盖层永久糊在列表上、客户无法选择任何互动。
+  assert.match(css, /\.iw-detail\[hidden\][\s\S]{0,80}\{ display: none !important; \}/);
+  assert.match(css, /\.iw-inbox \{[\s\S]{0,120}position: relative;/, '覆盖层依赖收件箱容器做定位上下文');
+  assert.match(css, /\.iw-detail \{[\s\S]{0,120}position: absolute;[\s\S]{0,60}inset: 0;/);
 });

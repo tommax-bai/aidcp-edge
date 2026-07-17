@@ -462,13 +462,8 @@
               <button id="iw-load-more" class="iw-button ghost hidden" type="button">加载更多</button>
             </div>
           </section>
-          <section id="iw-detail" class="iw-detail" aria-label="互动详情" aria-live="polite" aria-busy="false">
-            <div class="iw-empty-state">
-              <span class="iw-empty-icon" aria-hidden="true">···</span>
-              <strong>选择一条互动查看详情</strong>
-              <span>消息上下文、回复依据和发送状态会显示在这里。</span>
-            </div>
-          </section>
+          <!-- 详情是覆盖层：列表级下 hidden 且不渲染内容（wechat-inbox-im-drilldown） -->
+          <section id="iw-detail" class="iw-detail" aria-label="互动详情" aria-live="polite" aria-busy="false" hidden></section>
         </div>
       </section>
 
