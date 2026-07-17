@@ -158,7 +158,7 @@ function assertInputDeadline(options: InputSafetyOptions): void {
  * 安全取消点：**接管优先于死线**——「我被抢走了」比「我超预算了」更接近事实，而下游要靠异常类型
  * 区分「未开始（可重派）」与「超预算失败」。顺序写反 = 一次接管被报成 fill_deadline_exceeded。
  */
-function assertInputSafety(options: InputSafetyOptions): void {
+export function assertInputSafety(options: InputSafetyOptions): void {
   options.checkpoint?.();
   assertInputDeadline(options);
 }
