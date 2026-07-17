@@ -3257,12 +3257,15 @@ body { margin: 0; }
    块级独占一行，不与标题区争空间 → Windows @640 窄窗不破版。 */
 .slow-start-row {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
+  margin-top: 0; padding-top: 0; border-top: 1px solid var(--line);
 }
 .slow-start-row .parking-hint { flex-basis: 100%; }
+.slow-start-row .switch-track { width: 30px; height: 16.5px; }
+.slow-start-row .switch-thumb { top: 1.5px; left: 1.5px; width: 13.5px; height: 13.5px; }
+.slow-start-row .switch input:checked + .switch-track .switch-thumb { transform: translateX(13.5px); }
 .slow-start-help { position: relative; display: inline-flex; flex-shrink: 0; }
 .slow-start-help-trigger {
-  width: 14px; height: 14px; padding: 0; border: 1px solid #a8b8cf; border-radius: 50%;
+  position: relative; top: 3px; width: 14px; height: 14px; padding: 0; border: 1px solid #a8b8cf; border-radius: 50%;
   background: rgba(255, 255, 255, 0.78); color: var(--mute); font-size: 10px; font-weight: 750;
   line-height: 12px; cursor: help;
 }

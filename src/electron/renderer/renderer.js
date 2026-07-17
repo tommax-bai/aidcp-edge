@@ -402,6 +402,16 @@ function selectedSlowStartContext() {
   const selectedKey = fleetView.selected;
   const env = selectedKey && fleetView.envs.get(selectedKey);
   const envKey = slowStartEnvKey(env);
+  if (env && envKey && selectedKey !== '__local__') return { selectedKey, env, envKey };
+
+  const selectedProfileId = settingsUi.adsProfile && settingsUi.adsProfile.value.trim();
+  if (selectedProfileId) {
+    return {
+      selectedKey: selectedProfileId,
+      env: { envId: selectedProfileId, profileId: selectedProfileId, platform: selectedPlatform, status: currentStatus },
+      envKey: selectedProfileId,
+    };
+  }
   return env && envKey ? { selectedKey, env, envKey } : null;
 }
 
@@ -410,6 +420,31 @@ function hideSlowStartRow() {
   fields.slowStartRow.classList.add('hidden');
   fields.slowStartRow.classList.remove('is-stale', 'is-pending');
   fields.slowStartRow.removeAttribute('aria-busy');
+  if (fields.slowStartToggle) fields.slowStartToggle.indeterminate = false;
+}
+
+function shouldShowSlowStartPendingSync(status) {
+  if (!status) return true;
+  if (status.edge === 'stopped' || status.session === 'idle' || status.session === 'closed') return true;
+  return status.cloud !== 'connected';
+}
+
+function renderSlowStartPendingSync() {
+  fields.slowStartRow.classList.remove('hidden', 'is-stale', 'is-pending');
+  fields.slowStartRow.removeAttribute('aria-busy');
+  if (fields.slowStartToggle) {
+    fields.slowStartToggle.checked = false;
+    fields.slowStartToggle.indeterminate = true;
+    fields.slowStartToggle.disabled = true;
+  }
+  if (fields.slowStartBadge) {
+    fields.slowStartBadge.textContent = '';
+    fields.slowStartBadge.className = 'acct-age hidden';
+  }
+  if (fields.slowStartReason) {
+    fields.slowStartReason.textContent = '启动环境并连接云端后同步慢启动状态';
+    fields.slowStartReason.className = 'parking-hint';
+  }
 }
 
 // 平台占位：mac 红绿灯内嵌预留左侧；Windows 叠加窗控预留右侧。其余平台两侧归零。
@@ -697,6 +732,10 @@ function renderSlowStart(status) {
   const connState = status && status.cloud === 'connected' ? 'online' : 'offline';
   const view = window.uiLogic.slowStartLine(status && status.dailyUsage, connState);
   if (!view.visible) {
+    if (shouldShowSlowStartPendingSync(status)) {
+      renderSlowStartPendingSync();
+      return;
+    }
     hideSlowStartRow();
     return;
   }
@@ -712,6 +751,7 @@ function renderSlowStart(status) {
   if (pending) {
     if (fields.slowStartToggle) {
       fields.slowStartToggle.checked = Boolean(pending.enabled);
+      fields.slowStartToggle.indeterminate = false;
       fields.slowStartToggle.disabled = true;
     }
     if (fields.slowStartBadge) {
@@ -727,6 +767,7 @@ function renderSlowStart(status) {
 
   if (fields.slowStartToggle) {
     fields.slowStartToggle.checked = Boolean(view.checked);
+    fields.slowStartToggle.indeterminate = false;
     fields.slowStartToggle.disabled = Boolean(view.disabled);
   }
   if (fields.slowStartBadge) {

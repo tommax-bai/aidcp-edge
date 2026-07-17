@@ -791,7 +791,10 @@ test('慢启动帮助：问号可聚焦，hover/focus 展示 7×6 Facebook 曲�
   assert.equal(trigger?.getAttribute('type'), 'button');
   assert.match(trigger?.getAttribute('aria-label') || '', /Facebook 慢启动 7 天限额/);
   assert.match(panel?.querySelector('strong')?.textContent || '', /Facebook 慢启动曲线限额/);
-  assert.match(styles, /\.slow-start-help-trigger\s*\{[^}]*width:\s*14px; height:\s*14px;[^}]*font-size:\s*10px;/s);
+  assert.match(styles, /\.slow-start-row\s*\{[^}]*margin-top:\s*0; padding-top:\s*0;/s);
+  assert.match(styles, /\.slow-start-row\s+\.switch-track\s*\{[^}]*width:\s*30px; height:\s*16\.5px;/s);
+  assert.match(styles, /\.slow-start-row\s+\.switch-thumb\s*\{[^}]*width:\s*13\.5px; height:\s*13\.5px;/s);
+  assert.match(styles, /\.slow-start-help-trigger\s*\{[^}]*top:\s*3px;[^}]*width:\s*14px; height:\s*14px;[^}]*font-size:\s*10px;/s);
   assert.match(styles, /\.slow-start-help-panel\s*\{[^}]*left:\s*-120px;/s);
   assert.match(styles, /\.slow-start-help:hover\s+\.slow-start-help-panel/);
   assert.match(styles, /\.slow-start-help:focus-within\s+\.slow-start-help-panel/);
@@ -811,8 +814,30 @@ test('慢启动帮助：问号可聚焦，hover/focus 展示 7×6 Facebook 曲�
 });
 
 test('慢启动行：字段缺省 → 整行 hidden（绝不默认成「关」）', async () => {
-  const w = await boot(slowStartStub({ getStatus: async () => makeStatus({ cloud: 'connected' }) }));
+  const w = await boot(slowStartStub({ getStatus: async () => makeStatus({ edge: 'running', session: 'running', cloud: 'connected' }) }));
   assert.ok(hidden($(w, '#slow-start-row')), '云端还没说 → 整行不渲染');
+});
+
+test('慢启动行：Facebook 环境未启动时仍展示入口，但不默认成「关」', async () => {
+  const w = await boot(slowStartStub({
+    getSettings: async () => ({
+      provider: 'adspower',
+      adsProfileId: 'fb_env',
+      adsProfileName: 'FB 环境',
+      adsApiKey: '',
+      adsApiBase: '',
+      browserParkingMode: 'edge-strip',
+      adsDownloadUrl: 'https://x',
+      platform: 'facebook',
+      environments: [{ profileId: 'fb_env', name: 'FB 环境', platform: 'facebook' }],
+    }),
+    getStatus: async () => makeStatus({ edge: 'stopped', session: 'idle', cloud: 'disconnected' }),
+  }));
+  assert.ok(!hidden($(w, '#slow-start-row')));
+  const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  assert.equal(toggle.disabled, true);
+  assert.equal(toggle.indeterminate, true, '未知态必须用 indeterminate，不能显示成已关闭');
+  assert.match($(w, '#slow-start-reason').textContent || '', /启动环境并连接云端后同步慢启动状态/);
 });
 
 test('慢启动行：active 态渲染徽章与勾选', async () => {
