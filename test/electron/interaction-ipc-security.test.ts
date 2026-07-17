@@ -43,6 +43,10 @@ test('main 锁定 customer-auth 路径和方法，并对白名单参数与 envKe
   assert.match(main, /\/interactions\/browser/, '浏览器控制路径由 main 固定组装');
   assert.match(main, /interaction:read-controls:update[\s\S]*method: 'PUT',[\s\S]*body: \{ expectedVersion, commentsReadEnabled, dmReadEnabled \}/, '收取开关只能写入两个读取字段');
   assert.match(main, /interaction:notify[\s\S]*allowedProfileIds\.has\(envKey\)[\s\S]*allowedEnvironmentPlatforms\.get\(envKey\) !== 'wechat_channels'/, '系统提醒必须再次校验当前客户的视频号环境范围');
+  const detailHandler = main.slice(main.indexOf("ipcMain.handle('interaction:detail'"), main.indexOf("ipcMain.handle('interaction:draft:update'"));
+  assert.match(detailHandler, /interactionLimit\(args\.limit\)/, '详情页仍在本地限制 renderer 传入的 limit');
+  assert.match(detailHandler, /interactionQuery\(\{ cursor \}, new Set\(\['cursor'\]\)\)/, 'Cloud 详情契约只允许 cursor，不能透传本地 limit');
+  assert.doesNotMatch(detailHandler, /interactionQuery\(\{ cursor, limit \}/, '详情请求不得发送 Cloud 不接受的 limit 参数');
   const clientAuthFetch = main.slice(main.indexOf('async function clientAuthFetch'), main.indexOf('// ── 视频号 InteractionWorkspace'));
   assert.match(clientAuthFetch, /readBoundedJsonResponse\(res\)/, 'customer-auth 响应必须走有界 reader');
   assert.doesNotMatch(clientAuthFetch, /res\.json\(/, '不得用 res.json() 无界聚合响应体');
