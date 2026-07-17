@@ -326,6 +326,36 @@ test('视频号互动使用 profileId 作为 Cloud envKey，不混用本机 ads-
   $(window, '#iw-lifecycle').dispatchEvent(new window.Event('click', { bubbles: true }));
   await flush();
   assert.deepEqual(lifecycleCalls, ['ads-k1eoujd8'], '本机生命周期动作仍必须路由 runtime envId');
+  // 只断言发送侧参数不足以钉住这条链路：作用域守卫拿本机口径的回包去比云端 envKey 时会抛，
+  // 异常被 catch 吞成失败提示，发送侧断言照样绿。必须一并断言用户看到的结论。
+  assert.equal($(window, '#iw-sync-status')?.textContent, '已请求暂停当前环境。',
+    '动作已真执行，MUST NOT 谎报失败');
+});
+
+test('缺少本机运行时标识时拒绝生命周期动作，绝不回落成 envKey 打到别的环境', async () => {
+  const lifecycleCalls: string[] = [];
+  const { window, pushFleet } = await boot({
+    api: {
+      pause: async (runtimeEnvId: string) => {
+        lifecycleCalls.push(runtimeEnvId);
+        return { ...status(runtimeEnvId, '视频号环境'), session: 'paused' };
+      },
+    },
+  });
+  // envId 缺失 → workspace 拿不到本机运行时标识。回落成 envKey 会让主进程查表落空、
+  // 静默改对当前选中的另一个环境执行动作，故必须诚实拒绝。
+  pushFleet({
+    provider: 'adspower', selectedEnvId: '', railCollapsed: true,
+    environments: [{
+      envId: '', profileId: 'k1eoujd8', kind: 'adspower', name: '视频号环境', platform: 'wechat_channels',
+      status: { ...status('', '视频号环境'), account: { id: 'k1eoujd8', name: '', source: 'env' } },
+    }],
+  });
+  await flush();
+
+  $(window, '#iw-lifecycle').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls, [], '标识缺失 MUST NOT 向本机通道发出请求');
 });
 
 test('active 视频号可打开浏览器或转入后台，accepted 不会冒充浏览器已显隐', async () => {

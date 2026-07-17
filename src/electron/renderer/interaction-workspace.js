@@ -250,6 +250,7 @@
     function assertEnvelope(result, expectedEnvKey) {
       if (!result || !result.ok) throw asApiError(result);
       const envelope = result.data;
+      // 云端口径：比云端回包的 envKey（裸 profileId）。与 changeLifecycle 的本机回包守卫基准相反，勿互借。
       if (!envelope || !envelope.data || envelope.data.envKey !== expectedEnvKey) {
         const error = new Error('响应环境与当前环境不一致，已丢弃。');
         error.code = 'INTERACTION_SCOPE_MISMATCH';
@@ -1360,7 +1361,15 @@
       if (action === 'close' && env.session !== 'paused') return;
       const capturedEpoch = epoch;
       const envKey = env.envKey;
-      const runtimeEnvId = env.runtimeEnvId || envKey;
+      // 本机口径：主进程按 runtime envId（ads-<profileId>）索引环境，云端口径的 envKey 在那边查不到。
+      // 缺失时诚实拒绝：回落成 envKey 会让主进程查表落空、静默回落到当前选中环境，
+      // 即对另一个环境执行生命周期动作而不报错——宁可拒绝，也绝不猜目标。
+      const runtimeEnvId = env.runtimeEnvId;
+      if (!runtimeEnvId) {
+        state.actionNotice = `${action === 'close' ? '关闭' : lifecycle.label}失败：当前环境缺少本机运行时标识，未执行。`;
+        renderOverview();
+        return;
+      }
       state.lifecycleBusy = action;
       state.actionNotice = null;
       renderOverview();
@@ -1368,7 +1377,9 @@
         const next = await onLifecycleAction(action, runtimeEnvId);
         if (!isCurrent(capturedEpoch, envKey)) return;
         if (!next) return;
-        if (next && next.envId && next.envId !== envKey) {
+        // 本机回包按本机口径校验，必须与发送侧同口径（onLifecycleAction 发的就是 runtimeEnvId）。
+        // 注意与 assertEnvelope 相反：那道守卫比的是云端回包的 envKey，基准是云端口径。两者绝不可互借。
+        if (next && next.envId && next.envId !== runtimeEnvId) {
           const error = new Error('生命周期回包环境与当前环境不一致，已丢弃。');
           error.code = 'INTERACTION_SCOPE_MISMATCH';
           throw error;
