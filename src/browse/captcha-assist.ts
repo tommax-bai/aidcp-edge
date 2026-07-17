@@ -106,8 +106,10 @@ export class CaptchaAssistHandler {
   private readonly snapshotRings = new Map<string, CaptchaAssistSnapshotPayload[]>();
   // 活跃实时循环：存在 = 在跑；token 用于 re-arm 时抢占旧循环、stopLive 时令旧循环自然退出。
   private readonly live = new Map<string, LiveState>();
-  // 点击派发中的 incident：实时 tick MUST 跳过，避免抓到点击派发到一半的半程画面。
-  private readonly clicking = new Set<string>();
+  // 注入派发中的 incident：实时 tick 与手动抓帧 MUST 跳过，避免抓到派发到一半的半程画面。
+  // 名字是「writing」而非「clicking」：这个集合守的是**任何向页面写入的动作**（点击、将来的键入），
+  // 不只是点击。叫 clicking 会诱导后来者为键入新开一个 typing 集合，把同一个洞再开一次。
+  private readonly writing = new Set<string>();
   // 抓帧进行中的 incident：手动刷新与实时 tick 互斥，避免并发 captureScreenshot 叠加。
   private readonly capturing = new Set<string>();
   private liveCounter = 0;
@@ -163,16 +165,24 @@ export class CaptchaAssistHandler {
   }
 
   private async handleCapture(payload: CaptchaAssistCapturePayload): Promise<void> {
+    // 注入期不抓帧（与 liveTick 同形的互斥）：此刻的画面是点击/键入派发到一半的半程状态，
+    // 回传给运营毫无价值，而它的 probe 还会污染下面的清除判定。
+    if (this.writing.has(payload.incidentId)) return;
     const kind = await this.probeBlockingKind();
     if (!kind) {
       this.stopLive(payload.incidentId);
+      // 只回 not_blocked 回执，**绝不发 risk.captcha_cleared**。
+      // 手动刷新与实时循环共用同一个「旧挑战已消失、新挑战未绘出」的瞬时无遮罩窗口——
+      // 单次 probe 在这里与在 liveTick 里同样不可信。liveTick 为此立了 K=3 连续确认，
+      // 而这条路径曾绕过它直接上报清除 = 提前解 restricted（自残）。清除的发出权只归两处：
+      // liveTick 的 K=3，与旁路监测体的翻转闸。cloud 的 onClickResult 已把 not_blocked
+      // 映射为 cleared，面板照常更新——此处无需、也无权代发。
       this.sendClickResult({
         incidentId: payload.incidentId,
         status: 'not_blocked',
         reason: 'blocking_overlay_absent',
         checkedAt: this.now(),
       });
-      this.sendRiskCleared();
       return;
     }
     try {
@@ -238,7 +248,7 @@ export class CaptchaAssistHandler {
       this.logger(`[captcha-assist] 轨迹无效，回落合成 incident=${payload.incidentId}`);
     }
     // 点击全程暂停实时 tick（互斥），避免抓到点击派发中途 / settle / 复检期间的画面。
-    this.clicking.add(payload.incidentId);
+    this.writing.add(payload.incidentId);
     try {
       // 落点回放前强制复检（change lease-strict-preemption 5.7）：快照是运营几十秒前看到的那一帧，
       // 落点按那一帧标定。回放前若页面已不是那一刻——阻断自行消失 / 换了阻断类型 / 页面被导航走——
@@ -277,14 +287,17 @@ export class CaptchaAssistHandler {
       const kind = await this.probeBlockingKind();
       if (!kind) {
         this.stopLive(payload.incidentId);
-        this.sendClickResult({
+        // 顺序不可换：cleared 承重（解除该 edge 的下发暂停、放生产账号继续跑），click_result 只驱动面板。
+        // 二者各自 try/catch —— client.send 在断连时会抛，把承重的那条排在装饰性的那条之后，
+        // 就是让「验证码已经解开了」这个事实永远到不了云端、账号无限期暗停。
+        this.sendRiskClearedSafely();
+        this.sendClickResultSafely({
           incidentId: payload.incidentId,
           snapshotId: payload.snapshotId,
           status: 'cleared',
           checkedAt: this.now(),
           replayMode,
         });
-        this.sendRiskCleared();
         return;
       }
       const next = await this.captureSnapshot(payload.incidentId, kind, {});
@@ -299,16 +312,32 @@ export class CaptchaAssistHandler {
         replayMode,
       });
     } catch (err) {
+      // 注入失败时框里可能留着半截答案/半程状态。不回带新帧，运营看不见现场就无法带 clear 重来。
+      // best-effort：重抓帧再失败 MUST NOT 盖掉原始 reason —— 那才是运营要看的那句话。
+      const reason = `click_failed:${(err as Error).message}`;
+      let snapshot: CaptchaAssistSnapshotPayload | undefined;
+      try {
+        const kind = await this.probeBlockingKind();
+        if (kind) {
+          snapshot = await this.captureSnapshot(payload.incidentId, kind, {});
+          this.pushSnapshot(payload.incidentId, snapshot);
+        }
+      } catch (recaptureErr) {
+        this.logger(
+          `[captcha-assist] 失败路径重抓帧失败 incident=${payload.incidentId}: ${(recaptureErr as Error).message}`,
+        );
+      }
       this.sendClickResult({
         incidentId: payload.incidentId,
         snapshotId: payload.snapshotId,
         status: 'failed',
-        reason: `click_failed:${(err as Error).message}`,
+        reason,
         checkedAt: this.now(),
+        ...(snapshot ? { snapshot } : {}),
         replayMode,
       });
     } finally {
-      this.clicking.delete(payload.incidentId);
+      this.writing.delete(payload.incidentId);
     }
   }
 
@@ -358,7 +387,7 @@ export class CaptchaAssistHandler {
   }
 
   private async liveTick(incidentId: string, token: number): Promise<void> {
-    if (this.clicking.has(incidentId) || this.capturing.has(incidentId)) return;
+    if (this.writing.has(incidentId) || this.capturing.has(incidentId)) return;
     const kind = await this.probeBlockingKind();
     const state = this.live.get(incidentId);
     if (!state || state.token !== token) return;
@@ -471,6 +500,29 @@ export class CaptchaAssistHandler {
     });
   }
 
+  /**
+   * 发 cleared，吞掉传输异常。
+   * 只用于「cleared 与 click_result 成对发出」的成功路径：两者 MUST 互不牵连——
+   * 前者抛不该让后者不发，后者抛更不该让前者白发。调用方 MUST 先发 cleared 再发 click_result。
+   */
+  private sendRiskClearedSafely(): void {
+    try {
+      this.sendRiskCleared();
+    } catch (err) {
+      // 吞异常但绝不静默：这条丢了 = 云端不知道验证码已解、该 edge 一直暗停，必须留痕。
+      this.logger(`[captcha-assist] risk.captcha_cleared 发送失败（该 edge 可能仍被暂停）：${(err as Error).message}`);
+    }
+  }
+
+  /** 发 click_result，吞掉传输异常（面板展示用，丢了不影响恢复）。 */
+  private sendClickResultSafely(payload: Omit<CaptchaAssistClickResultPayload, 'edgeId' | 'accountId'>): void {
+    try {
+      this.sendClickResult(payload);
+    } catch (err) {
+      this.logger(`[captcha-assist] click_result 发送失败：${(err as Error).message}`);
+    }
+  }
+
   private sendRiskCleared(): void {
     this.deps.client.send('risk.captcha_cleared', {
       edgeId: this.deps.edgeId,
@@ -504,6 +556,9 @@ export class CaptchaAssistHandler {
       return true;
     }
     // (a) 阻断已自行消失：页面上已无验证码 → 绝不在其上盲点（那可能已经导航到别的页面）。
+    // 只回 not_blocked，**绝不由这一次单次 probe 发 risk.captcha_cleared**：此处既没 settle
+    // 也没连续确认，与手动刷新同属「未经注入的单次 probe」，同样会撞上多步验证码的瞬时无遮罩窗口。
+    // 清除交由旁路监测体的翻转闸（它独立轮询，遮罩真消失时会发配对 cleared）——不发不会滞留暂停态。
     if (!kind) {
       this.stopLive(payload.incidentId);
       this.sendClickResult({
@@ -513,7 +568,6 @@ export class CaptchaAssistHandler {
         reason: 'cleared_before_replay',
         checkedAt: this.now(),
       });
-      this.sendRiskCleared();
       return true;
     }
     // (b) 页面已换（阻断类型变了，或 URL 变了）：快照过期 → 重抓帧让运营在新帧上重标，绝不按旧坐标盲点。

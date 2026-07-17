@@ -127,7 +127,10 @@ test('captcha assist capture: fresh blocking overlay → cropped screenshot snap
   assert.deepEqual((screenshotCall?.params?.clip as Record<string, unknown>), { x: 76, y: 76, width: 248, height: 148, scale: 1 });
 });
 
-test('captcha assist capture: fresh probe says not blocked → not_blocked + risk.captcha_cleared', async () => {
+// 手动刷新的单次 probe 未见遮罩 → 只回 not_blocked，**绝不发 risk.captcha_cleared**。
+// 它与实时循环共用「旧挑战已消失、新挑战未绘出」的瞬时无遮罩窗口，却既无 settle 也无连续确认；
+// 据此上报即提前解 restricted（自残）。恢复交由 liveTick 的 K=3 或旁路监测体的翻转闸。
+test('captcha assist capture: fresh probe says not blocked → 只回 not_blocked，绝不发 risk.captcha_cleared', async () => {
   const client = new FakeClient();
   const handler = new CaptchaAssistHandler({
     cdp: new FakeCdp(),
@@ -142,8 +145,57 @@ test('captcha assist capture: fresh probe says not blocked → not_blocked + ris
 
   await handler.handle('captcha.assist.capture', { incidentId: 'cap-2' });
 
-  assert.deepEqual(client.sent.map((item) => item.type), ['captcha.assist.click_result', 'risk.captcha_cleared']);
+  assert.deepEqual(client.sent.map((item) => item.type), ['captcha.assist.click_result']);
   assert.equal((client.sent[0].payload as { status: string }).status, 'not_blocked');
+});
+
+// 注入期不抓帧：此刻画面是派发到一半的半程状态（点了一半 / 打了一半的框），回传给运营毫无价值。
+// 这是互斥闸**独有**的职责——「不由半程 probe 误发 cleared」已由 handleCapture 根本不发 cleared 保证
+// （见上一个用例），不需要也不该靠互斥闸来兜。
+test('captcha assist capture: 注入进行中 → 跳过抓帧，绝不回传半程画面', async () => {
+  const cdp = new FakeCdp({ overlayRect: { x: 100, y: 100, width: 200, height: 100 } });
+  const client = new FakeClient();
+  // 全程 captcha：让点击以 still_blocked 收尾，从而把「有没有多出一帧 snapshot」这个判据留干净——
+  // 互斥闸若失效，并发 capture 会多推一条 captcha.assist.snapshot。
+  const monitor = new FakeMonitor(['captcha', 'captcha', 'captcha', 'captcha']);
+  let concurrentCapture: Promise<void> | undefined;
+  const handler = new CaptchaAssistHandler({
+    cdp,
+    client,
+    edgeId: 'edge-1',
+    getAccountId: () => 'acc-1',
+    overlayMonitor: monitor,
+    now: () => 3000,
+    idGen: () => 'snap-mutex',
+    // 在注入的停顿点插入一次并发 capture —— 模拟运营在点击/键入途中手点「刷新」。
+    sleep: async () => {
+      if (!concurrentCapture) {
+        concurrentCapture = handler.handle('captcha.assist.capture', { incidentId: 'cap-mutex' });
+      }
+    },
+    logger: () => {},
+    random: () => 0.5,
+  });
+  await handler.handle('captcha.assist.capture', { incidentId: 'cap-mutex' });
+  client.sent.length = 0;
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'cap-mutex',
+    snapshotId: 'snap-mutex',
+    points: [{ x: 0.5, y: 0.5 }],
+    settleMs: 1,
+  });
+  await concurrentCapture;
+
+  // 并发 capture 被互斥闸挡下 ⇒ 注入期零 snapshot 推送。
+  // （still_blocked 的新帧是随 click_result 载荷回带的，不是独立的 snapshot 消息。）
+  assert.equal(
+    client.sent.filter((item) => item.type === 'captcha.assist.snapshot').length,
+    0,
+    '注入期 MUST NOT 推送半程画面',
+  );
+  assert.deepEqual(client.sent.map((item) => item.type), ['captcha.assist.click_result']);
+  assert.equal((client.sent[0].payload as { status: string }).status, 'still_blocked');
 });
 
 test('captcha assist click: normalized points map to viewport coordinates and cleared emits risk.captcha_cleared', async () => {
@@ -177,8 +229,47 @@ test('captcha assist click: normalized points map to viewport coordinates and cl
   );
   assert.equal(pressed?.params?.x, 200);
   assert.equal(pressed?.params?.y, 150);
-  assert.deepEqual(client.sent.map((item) => item.type), ['captcha.assist.click_result', 'risk.captcha_cleared']);
-  assert.equal((client.sent[0].payload as { status: string }).status, 'cleared');
+  // 顺序不可换：cleared 承重（解除该 edge 暂停），click_result 只驱动面板。断连时 client.send 会抛，
+  // 把承重的排在装饰性的之后 = 「验证码已解开」永远到不了云端、账号无限期暗停。
+  assert.deepEqual(client.sent.map((item) => item.type), ['risk.captcha_cleared', 'captcha.assist.click_result']);
+  assert.equal((client.sent[1].payload as { status: string }).status, 'cleared');
+});
+
+// cleared 与 click_result MUST 互不牵连：后者抛错不该让前者白发，前者抛错也不该让后者不发。
+test('captcha assist click: click_result 发送抛错不影响已送达的 risk.captcha_cleared', async () => {
+  const cdp = new FakeCdp({ overlayRect: { x: 100, y: 100, width: 200, height: 100 } });
+  const client = new FakeClient();
+  const handler = new CaptchaAssistHandler({
+    cdp,
+    client,
+    edgeId: 'edge-1',
+    getAccountId: () => 'acc-1',
+    overlayMonitor: new FakeMonitor(['captcha', 'captcha', 'none']),
+    now: () => 3000,
+    idGen: () => 'snap-throw',
+    sleep: async () => {},
+    logger: () => {},
+    random: () => 0.5,
+  });
+  await handler.handle('captcha.assist.capture', { incidentId: 'cap-throw' });
+  client.sent.length = 0;
+  // cleared 正常送达后，让 click_result 的发送抛错（模拟 socket 在两帧之间断掉）。
+  const origSend = client.send.bind(client);
+  client.send = ((type: string, payload: unknown, id?: string) => {
+    if (type === 'captcha.assist.click_result') throw new Error('socket closed');
+    return origSend(type as never, payload as never, id);
+  }) as typeof client.send;
+
+  // 整个 handle MUST NOT 因此抛出（否则 finally 之外的调用方会把成功当异常）。
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'cap-throw',
+    snapshotId: 'snap-throw',
+    points: [{ x: 0.5, y: 0.5 }],
+    settleMs: 1,
+  });
+
+  // cleared 已经出去了 —— 这才是解除暂停的那一条。
+  assert.deepEqual(client.sent.map((item) => item.type), ['risk.captcha_cleared']);
 });
 
 // ── 实时抓帧循环（change captcha-assist-live-snapshot）─────────────────────────
@@ -473,7 +564,7 @@ test('轨迹回放：畸形轨迹（clicks 长度不符）→ 诚实回落合成
 
 // ── 回放前强制复检（change lease-strict-preemption 5.7）─────────────────────────
 
-test('回放前复检：阻断已自行消失 → not_blocked + risk.captcha_cleared，绝不派发盲点', async () => {
+test('回放前复检：阻断已自行消失 → 只回 not_blocked（不发 cleared），绝不派发盲点', async () => {
   const cdp = new FakeCdp({ overlayRect: { x: 100, y: 100, width: 200, height: 100 } });
   const client = new FakeClient();
   const handler = new CaptchaAssistHandler({
@@ -499,7 +590,9 @@ test('回放前复检：阻断已自行消失 → not_blocked + risk.captcha_cle
     settleMs: 1,
   });
 
-  assert.deepEqual(client.sent.map((s) => s.type), ['captcha.assist.click_result', 'risk.captcha_cleared']);
+  // 这是「未经注入的单次 probe」：无 settle、无连续确认，与手动刷新同类 ⇒ 绝不由它发 cleared。
+  // 恢复交由旁路监测体的翻转闸（独立轮询，遮罩真消失时发配对 cleared），故不发不会滞留暂停态。
+  assert.deepEqual(client.sent.map((s) => s.type), ['captcha.assist.click_result']);
   assert.equal((client.sent[0].payload as { status: string }).status, 'not_blocked');
   // 回放前就拦下：阻断已不在，绝不在（可能已是别的页面的）坐标上派发任何点击。
   const pressed = cdp.calls.find((c) => c.method === 'Input.dispatchMouseEvent' && c.params?.type === 'mousePressed');
