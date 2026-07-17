@@ -134,7 +134,6 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     accountId: logicalAccountId,
     accountNickname: auth.getSnapshot().identity?.displayName,
     machineLabel: env.AIDCP_MACHINE_LABEL,
-    remoteAddr: env.AIDCP_REMOTE_ADDR,
     runner: {
       run: async (step) => ({
         actionId: step.actionId,

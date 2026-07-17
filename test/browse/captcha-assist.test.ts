@@ -634,3 +634,262 @@ test('回放前复检：页面已被导航走（URL 变）→ stale_snapshot + �
   const pressed = cdp.calls.find((c) => c.method === 'Input.dispatchMouseEvent' && c.params?.type === 'mousePressed');
   assert.equal(pressed, undefined, 'URL 变了时绝不派发点击');
 });
+
+// ── §5 键入答案链路（change captcha-assist-text-answer）──────────────────────────
+
+/**
+ * 键入链路专用 CDP：在 FakeCdp（截图 / 遮罩 DOM / 视口）基础上加焦点探针、字段回读、键事件计数。
+ * 字段内容用有状态模型（clear 置空、每字符追加、Backspace 全删）——回读随之演进，解耦于调用次数。
+ */
+class TypeCdp extends FakeCdp {
+  readonly keyEvents: Array<{ type?: string; key?: string; code?: string; text?: string }> = [];
+  mousePressed = 0;
+  clearCount = 0;
+  /** probeFocus 每次调用的返回；用尽后回落 lastFocus（默认可编辑）。 */
+  focusQueue: Array<{ tier: string; tag: string }> = [];
+  private lastFocus = { tier: 'editable', tag: 'INPUT' };
+  private fieldValue = '';
+  private selected = false;
+
+  constructor() {
+    super({ overlayRect: { x: 100, y: 100, width: 200, height: 100 } });
+  }
+
+  override async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+    if (method === 'Input.dispatchKeyEvent') {
+      const ev = {
+        type: params?.type as string,
+        key: params?.key as string,
+        code: params?.code as string,
+        text: params?.text as string | undefined,
+      };
+      this.keyEvents.push(ev);
+      if (ev.type === 'keyDown' && ev.code === 'Backspace' && this.selected) {
+        this.fieldValue = '';
+        this.selected = false;
+      } else if (ev.type === 'keyDown' && ev.text !== undefined && ev.code !== 'Enter' && ev.code !== 'Backspace' && ev.key && ev.key.length === 1) {
+        this.fieldValue += ev.key;
+      }
+      return {} as T;
+    }
+    if (method === 'Input.dispatchMouseEvent') {
+      if (params?.type === 'mousePressed') this.mousePressed += 1;
+      return {} as T;
+    }
+    if (method === 'Runtime.evaluate') {
+      const expr = String(params?.expression ?? '');
+      if (expr.includes("editable ? 'editable'")) {
+        const f = this.focusQueue.length ? this.focusQueue.shift()! : this.lastFocus;
+        this.lastFocus = f;
+        return { result: { value: f } } as T;
+      }
+      if (expr.includes("typeof el.value === 'string'")) {
+        return { result: { value: { text: this.fieldValue } } } as T;
+      }
+      if (expr.includes("typeof el.select === 'function'")) {
+        this.selected = true;
+        this.clearCount += 1;
+        return { result: { value: true } } as T;
+      }
+    }
+    return super.send<T>(method, params);
+  }
+
+  /** 实际派发的可见字符数（keyDown 带 text、非 Enter/Backspace）。 */
+  typedChars(): number {
+    return this.keyEvents.filter((e) => e.type === 'keyDown' && e.text !== undefined && e.code !== 'Enter' && e.code !== 'Backspace').length;
+  }
+  enterPressed(): boolean {
+    return this.keyEvents.some((e) => e.type === 'keyDown' && e.code === 'Enter');
+  }
+}
+
+/** 按调用次数投放 probe 结果，用尽后按配置抛错（模拟 Enter 提交导航期 probe 打不到页面）。 */
+class ScriptedMonitor implements OverlayMonitor {
+  readonly state: OverlayKind = 'captcha';
+  private n = 0;
+  constructor(private readonly script: OverlayKind[], private readonly throwAfter = Infinity) {}
+  async probeNow(): Promise<OverlayKind> {
+    const i = this.n++;
+    if (i >= this.throwAfter) throw new Error('probe_navigation_in_flight');
+    return this.script[i] ?? 'captcha';
+  }
+  start(): void {}
+  stop(): void {}
+}
+
+/** 先 capture 播一帧进环，返回 snapshotId 供 click 引用。 */
+async function seedSnapshot(handler: CaptchaAssistHandler, client: FakeClient, incidentId: string, snapshotId: string): Promise<void> {
+  await handler.handle('captcha.assist.capture', { incidentId, quality: 80 });
+  client.sent.length = 0;
+  void snapshotId;
+}
+
+function makeTypeHandler(cdp: TypeCdp, client: FakeClient, monitor: OverlayMonitor, extra: Record<string, unknown> = {}): CaptchaAssistHandler {
+  return new CaptchaAssistHandler({
+    cdp,
+    client,
+    edgeId: 'edge-type',
+    getAccountId: () => 'acc-1',
+    overlayMonitor: monitor,
+    now: () => 5000,
+    idGen: seqIdGen('snap'),
+    sleep: async () => {},
+    logger: () => {},
+    random: () => 0.5,
+    ...extra,
+  });
+}
+
+test('键入：可编辑焦点 → 打字 + 回车 → 遮罩清除 ⇒ cleared + risk.captcha_cleared + typeReport 齐全', async () => {
+  const cdp = new TypeCdp();
+  const client = new FakeClient();
+  // capture / stale / recheck#1 / recheck#2 = captcha；提交后复检 = none。
+  const handler = makeTypeHandler(cdp, client, new ScriptedMonitor(['captcha', 'captcha', 'captcha', 'captcha', 'none']));
+  await seedSnapshot(handler, client, 'inc-ok', 'snap-1');
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'inc-ok',
+    snapshotId: 'snap-1',
+    points: [{ x: 0.5, y: 0.5 }],
+    text: 'AB3x',
+    submit: 'enter',
+    settleMs: 1,
+  });
+
+  assert.equal(cdp.typedChars(), 4, '恰好派发 4 个可见字符');
+  assert.ok(cdp.enterPressed(), '带 submit=enter 应按回车');
+  const types = client.sent.map((s) => s.type);
+  assert.ok(types.includes('risk.captcha_cleared'), '解开后必须发 risk.captcha_cleared');
+  const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as {
+    status: string; inputMode: string; typeReport: { focus: string; typed: number; verified: string; submitted: boolean };
+  };
+  assert.equal(result.status, 'cleared');
+  assert.equal(result.inputMode, 'click_type');
+  assert.equal(result.typeReport.focus, 'editable');
+  assert.equal(result.typeReport.typed, 4);
+  assert.equal(result.typeReport.verified, 'match');
+  assert.equal(result.typeReport.submitted, true);
+});
+
+test('键入：焦点没落定（none）⇒ no_target，零字符派发、绝不提交', async () => {
+  const cdp = new TypeCdp();
+  cdp.focusQueue = [{ tier: 'none', tag: 'BODY' }];
+  const client = new FakeClient();
+  const handler = makeTypeHandler(cdp, client, new ScriptedMonitor(['captcha', 'captcha', 'captcha']));
+  await seedSnapshot(handler, client, 'inc-nt', 'snap-1');
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'inc-nt', snapshotId: 'snap-1', points: [{ x: 0.5, y: 0.5 }], text: 'ab3', submit: 'enter', settleMs: 1,
+  });
+
+  assert.equal(cdp.typedChars(), 0);
+  assert.equal(cdp.enterPressed(), false);
+  const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as {
+    status: string; reason: string; typeReport: { focus: string; typed: number; submitted: boolean };
+  };
+  assert.equal(result.status, 'no_target');
+  assert.equal(result.reason, 'focus_not_landed');
+  assert.equal(result.typeReport.typed, 0);
+  assert.equal(result.typeReport.submitted, false);
+});
+
+test('键入：中途复检 #1 遮罩已不在 ⇒ cleared_mid_sequence，零字符派发', async () => {
+  const cdp = new TypeCdp();
+  const client = new FakeClient();
+  // capture=captcha, stale=captcha, recheck#1=none（聚焦点击把遮罩解了）。
+  const handler = makeTypeHandler(cdp, client, new ScriptedMonitor(['captcha', 'captcha', 'none']));
+  await seedSnapshot(handler, client, 'inc-mid', 'snap-1');
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'inc-mid', snapshotId: 'snap-1', points: [{ x: 0.5, y: 0.5 }], text: 'ab3', submit: 'enter', settleMs: 1,
+  });
+
+  assert.equal(cdp.typedChars(), 0, '复检 #1 触发即零字符');
+  const types = client.sent.map((s) => s.type);
+  assert.ok(types.includes('risk.captcha_cleared'));
+  const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as { status: string; reason: string };
+  assert.equal(result.status, 'cleared');
+  assert.equal(result.reason, 'cleared_mid_sequence');
+});
+
+test('键入：被抢占 ⇒ typed<len + 清场 + 未提交（reason takeover_during_type）', async () => {
+  const cdp = new TypeCdp();
+  const client = new FakeClient();
+  const handler = makeTypeHandler(cdp, client, new ScriptedMonitor(['captcha', 'captcha', 'captcha']), {
+    // 前 2 次 checkpoint 持有租约，第 3 个字符前被接管。
+    checkTaskLease: (() => { let n = 0; return () => n++ < 2; })(),
+    touchTaskLease: () => {},
+  });
+  await seedSnapshot(handler, client, 'inc-pre', 'snap-1');
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'inc-pre', snapshotId: 'snap-1', taskId: 'task-1', points: [{ x: 0.5, y: 0.5 }], text: 'abcde', submit: 'enter', settleMs: 1,
+  });
+
+  assert.equal(cdp.typedChars(), 2, '恰好派发 2 个字符后被接管');
+  assert.equal(cdp.enterPressed(), false, '被抢占后绝不提交');
+  assert.ok(cdp.clearCount >= 2, '键入前清空 + 被抢占后清场 ⇒ 至少两次清空');
+  const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as {
+    status: string; reason: string; typeReport: { typed: number; submitted: boolean };
+  };
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reason, 'takeover_during_type');
+  assert.equal(result.typeReport.typed, 2, '如实回报已派发数，绝不回退到意图长度');
+  assert.equal(result.typeReport.submitted, false);
+});
+
+test('键入：Enter 提交后复检连抛 ⇒ verdict_unavailable_after_submit（不是 click_failed）', async () => {
+  const cdp = new TypeCdp();
+  const client = new FakeClient();
+  // 前 4 次 probe（capture/stale/recheck1/recheck2）返回 captcha，之后全抛（模拟导航期打不到页面）。
+  const handler = makeTypeHandler(cdp, client, new ScriptedMonitor(['captcha', 'captcha', 'captcha', 'captcha'], 4));
+  await seedSnapshot(handler, client, 'inc-vu', 'snap-1');
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'inc-vu', snapshotId: 'snap-1', points: [{ x: 0.5, y: 0.5 }], text: 'ab3', submit: 'enter', settleMs: 1,
+  });
+
+  assert.ok(cdp.enterPressed(), '复检前已按下回车');
+  const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as {
+    status: string; reason: string; typeReport: { submitted: boolean };
+  };
+  assert.equal(result.status, 'failed');
+  assert.ok(result.reason.startsWith('verdict_unavailable_after_submit'), `reason 应为 verdict_unavailable_after_submit，实际 ${result.reason}`);
+  assert.ok(!result.reason.includes('click_failed'), '绝不误报 click_failed');
+  assert.equal(result.typeReport.submitted, true);
+});
+
+test('键入：带 text 但落点不是恰好 1 个 ⇒ 注入前拒绝（invalid_target），零点击零键入', async () => {
+  const cdp = new TypeCdp();
+  const client = new FakeClient();
+  const handler = makeTypeHandler(cdp, client, new ScriptedMonitor(['captcha']));
+  await seedSnapshot(handler, client, 'inc-shape', 'snap-1');
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'inc-shape', snapshotId: 'snap-1', points: [{ x: 0.3, y: 0.3 }, { x: 0.6, y: 0.6 }], text: 'ab', submit: 'enter', settleMs: 1,
+  });
+
+  assert.equal(cdp.mousePressed, 0, '拒绝时绝不派发点击');
+  assert.equal(cdp.typedChars(), 0);
+  const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as { status: string; reason: string };
+  assert.equal(result.status, 'invalid_target');
+  assert.equal(result.reason, 'text_requires_single_focus_point');
+});
+
+test('键入：表外字符 ⇒ 注入前整单拒绝（text_unsupported_char），绝不"只帮你点一下"', async () => {
+  const cdp = new TypeCdp();
+  const client = new FakeClient();
+  const handler = makeTypeHandler(cdp, client, new ScriptedMonitor(['captcha']));
+  await seedSnapshot(handler, client, 'inc-cs', 'snap-1');
+
+  await handler.handle('captcha.assist.click', {
+    incidentId: 'inc-cs', snapshotId: 'snap-1', points: [{ x: 0.5, y: 0.5 }], text: '验证', submit: 'enter', settleMs: 1,
+  });
+
+  assert.equal(cdp.mousePressed, 0);
+  assert.equal(cdp.typedChars(), 0);
+  const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as { status: string; reason: string };
+  assert.equal(result.status, 'invalid_target');
+  assert.equal(result.reason, 'text_unsupported_char');
+});

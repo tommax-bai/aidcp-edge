@@ -58,6 +58,7 @@ import {
   type InteractionSyncRequestPayload,
 } from '../comm/protocol.js';
 import { isInteractionMessageType, validateInteractionEnvelope } from '../wechat-channels/protocol-validation.js';
+import { EDGE_BUILD_CAPABILITIES } from './build-capabilities.js';
 
 /** 最小 WebSocket 抽象（与 cdp/client.ts 同形，便于测试注入） */
 export interface CloudWebSocket {
@@ -135,8 +136,6 @@ export interface EdgeClientOptions {
   accountNickname?: string;
   /** 人类可读机器标签（hello 上报，验证码卡片据此告诉运维去哪台机器） */
   machineLabel?: string;
-  /** 远程桌面/可达地址（hello 上报，用于人工远程处置） */
-  remoteAddr?: string;
   /** 步骤执行器（把命令落到页面） */
   runner: StepRunner;
   /** WebSocket 工厂（默认全局 WebSocket） */
@@ -149,6 +148,15 @@ export interface EdgeClientOptions {
   logger?: (msg: string) => void;
   /** 云端 WS 意外断线有界重连；默认开启，传 false 可关闭（测试/特殊启动路径用） */
   reconnect?: CloudReconnectOptions | false;
+}
+
+/** 把构建能力位并进调用方传入的能力声明（去重、保序，构建位追加在后）。 */
+function mergeBuildCapabilities(caps: string[] | undefined): string[] {
+  const merged = [...(caps ?? [])];
+  for (const c of EDGE_BUILD_CAPABILITIES) {
+    if (!merged.includes(c)) merged.push(c);
+  }
+  return merged;
 }
 
 function defaultWsFactory(url: string): CloudWebSocket {
@@ -171,10 +179,10 @@ export class EdgeClient {
   private readonly opts: Required<
     Omit<
       EdgeClientOptions,
-      'platform' | 'app' | 'capabilities' | 'accountId' | 'accountNickname' | 'machineLabel' | 'remoteAddr' | 'reconnect'
+      'platform' | 'app' | 'capabilities' | 'accountId' | 'accountNickname' | 'machineLabel' | 'reconnect'
     >
   > &
-    Pick<EdgeClientOptions, 'platform' | 'app' | 'capabilities' | 'accountId' | 'accountNickname' | 'machineLabel' | 'remoteAddr'>;
+    Pick<EdgeClientOptions, 'platform' | 'app' | 'capabilities' | 'accountId' | 'accountNickname' | 'machineLabel'>;
   private seq = 0;
   private readonly pending = new Map<string, Pending>();
   private sessionId?: string;
@@ -203,11 +211,14 @@ export class EdgeClient {
       edgeId: options.edgeId,
       platform: options.platform,
       app: options.app,
-      capabilities: options.capabilities,
+      // 构建能力位在此**统一并入**（design D8），绝不放进任何 driver 的 edgeCapabilities 常量：
+      // 那是平台能力、有三个 driver、两条装配路径（main.ts / wechat-channels/runtime.ts），漏一个
+      // driver 该平台就永久 409 且与「客户端太老」不可区分。收进构造函数 ⇒ 两条装配路径都拿不掉、
+      // 新增平台不可能漏。去重后回传，避免与 driver 常量或调用方传入重复。
+      capabilities: mergeBuildCapabilities(options.capabilities),
       accountId: options.accountId,
       accountNickname: options.accountNickname,
       machineLabel: options.machineLabel,
-      remoteAddr: options.remoteAddr,
       runner: options.runner,
       wsFactory: options.wsFactory ?? defaultWsFactory,
       clock: options.clock ?? Date.now,
@@ -277,7 +288,6 @@ export class EdgeClient {
       accountId: this.opts.accountId,
       accountNickname: this.opts.accountNickname,
       machineLabel: this.opts.machineLabel,
-      remoteAddr: this.opts.remoteAddr,
     });
     const p = welcome.payload as WelcomePayload;
     this.sessionId = p.sessionId;

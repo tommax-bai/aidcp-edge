@@ -28,6 +28,9 @@ import {
   type UiSnapshotPayload,
   type EdgeTaskReleasedPayload,
   type PublishCommandResultPayload,
+  type CaptchaAssistClickPayload,
+  type CaptchaAssistClickResultPayload,
+  type CaptchaAssistTypeReportPayload,
 } from '../../src/comm/protocol.js';
 
 /**
@@ -317,5 +320,77 @@ describe('AC-PROTO 协议契约一致性（edge）', () => {
     const absent: UiSnapshotPayload = { dailyUsage: { asOf: 1700000000000, totals: {} } };
     const back4 = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 'ss-5', 1700000000000, absent)));
     assert.equal((back4!.payload as UiSnapshotPayload).dailyUsage?.slowStart, undefined);
+  });
+
+  it('AC-PROTO-18 captcha assist 键入扩载荷逐字段往返存活（change captcha-assist-text-answer）', () => {
+    // ── 可复用模板（继 AC-PROTO-06 的 WelcomePayload.pacing 之后第二例）──────────────────
+    // 走「扩既有 click 载荷、不新增 MessageType」路线（design D1）：Record<MessageType,true> 穷举守卫
+    // 只护消息类型、**不护字段**，AC-PROTO-02 的计数也抓不到字段增删。任何「往既有 payload 加可选字段」
+    // 的改动都必须补一条这样的逐字段往返断言，否则两端字段漂移会静默通过 typecheck + 计数断言。
+    // 做法：① 样例填满全部新字段 ② JSON 往返 ③ 逐字段 deepEqual/equal 回读，缺一字段即红。
+
+    // CaptchaAssistClickPayload：新增 text? / submit?（+ 既有 taskId/points/trajectory）。
+    const click: CaptchaAssistClickPayload = {
+      taskId: 'task-cap-1',
+      incidentId: 'inc-1',
+      snapshotId: 'snap-1',
+      points: [{ x: 0.4, y: 0.6, label: 'field' }],
+      requestedAt: 1700000000000,
+      settleMs: 1500,
+      text: 'AB3x',
+      submit: 'enter',
+    };
+    const clickBack = parseEnvelope(JSON.stringify(makeEnvelope('captcha.assist.click', 'c-1', 1700000000000, click)));
+    assert.deepEqual(clickBack!.payload, click);
+    const cp = clickBack!.payload as CaptchaAssistClickPayload;
+    assert.equal(cp.text, 'AB3x');
+    assert.equal(cp.submit, 'enter');
+    assert.deepEqual(cp.points, [{ x: 0.4, y: 0.6, label: 'field' }]);
+
+    // 纯点击（无 text/submit）零回归：往返后这两字段仍缺省。
+    const clickOnly: CaptchaAssistClickPayload = { incidentId: 'inc-2', snapshotId: 'snap-2', points: [{ x: 0.1, y: 0.2 }] };
+    const clickOnlyBack = parseEnvelope(JSON.stringify(makeEnvelope('captcha.assist.click', 'c-2', 1700000000000, clickOnly)));
+    assert.equal((clickOnlyBack!.payload as CaptchaAssistClickPayload).text, undefined);
+    assert.equal((clickOnlyBack!.payload as CaptchaAssistClickPayload).submit, undefined);
+
+    // CaptchaAssistClickResultPayload：新增 no_target status / inputMode? / typeReport?。
+    const typeReport: CaptchaAssistTypeReportPayload = {
+      focus: 'editable',
+      focusTag: 'INPUT',
+      cleared: 'verified',
+      typed: 4,
+      verified: 'match',
+      submitted: true,
+    };
+    const result: CaptchaAssistClickResultPayload = {
+      incidentId: 'inc-1',
+      snapshotId: 'snap-1',
+      edgeId: 'edge-1',
+      accountId: 'acc-1',
+      status: 'cleared',
+      reason: 'ok',
+      checkedAt: 1700000000000,
+      replayMode: 'synthetic',
+      inputMode: 'click_type',
+      typeReport,
+    };
+    const resultBack = parseEnvelope(JSON.stringify(makeEnvelope('captcha.assist.click_result', 'r-1', 1700000000000, result)));
+    assert.deepEqual(resultBack!.payload, result);
+    const rp = resultBack!.payload as CaptchaAssistClickResultPayload;
+    assert.equal(rp.inputMode, 'click_type');
+    assert.deepEqual(rp.typeReport, typeReport);
+
+    // 新 status 值 no_target 往返存活（红线词汇，区分「点空了」与坐标越界）。
+    const noTarget: CaptchaAssistClickResultPayload = {
+      incidentId: 'inc-3',
+      status: 'no_target',
+      reason: 'focus_not_landed',
+      checkedAt: 1700000000000,
+      inputMode: 'click_type',
+      typeReport: { focus: 'none', typed: 0, submitted: false },
+    };
+    const noTargetBack = parseEnvelope(JSON.stringify(makeEnvelope('captcha.assist.click_result', 'r-2', 1700000000000, noTarget)));
+    assert.equal((noTargetBack!.payload as CaptchaAssistClickResultPayload).status, 'no_target');
+    assert.deepEqual((noTargetBack!.payload as CaptchaAssistClickResultPayload).typeReport, { focus: 'none', typed: 0, submitted: false });
   });
 });

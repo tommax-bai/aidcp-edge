@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EdgeClient, type CloudWebSocket } from '../../src/client/edge-client.js';
+import { EDGE_BUILD_CAPABILITIES } from '../../src/client/build-capabilities.js';
 import { makeEnvelope, type Envelope, type PublishRequestPayload, type PublishResultPayload } from '../../src/comm/protocol.js';
 
 class FakeWebSocket implements CloudWebSocket {
@@ -143,11 +144,12 @@ test('edge-client: hello carries platform metadata without changing message type
 
   const sent = JSON.parse(ws.sent[0]) as Envelope;
   assert.equal(sent.type, 'hello');
+  // 构建能力位 captcha_assist_text_v1 由 EdgeClient 构造函数统一并入（design D8）——main.ts 装配路径。
   assert.deepEqual(sent.payload, {
     edgeId: 'edge-1',
     platform: 'xiaohongshu',
     app: 'xhs',
-    capabilities: ['locating', 'cdp', 'like', 'browse'],
+    capabilities: ['locating', 'cdp', 'like', 'browse', 'captcha_assist_text_v1'],
   });
 
   ws.emitMessage(makeEnvelope('welcome', 'hello-1', 1, { sessionId: 's1', serverVersion: 'v1' }));
@@ -188,13 +190,40 @@ test('edge-client: hello carries optional account nickname for display enrichmen
     edgeId: 'edge-1',
     platform: 'facebook',
     app: 'fb',
-    capabilities: ['identity', 'overlay', 'comment'],
+    capabilities: ['identity', 'overlay', 'comment', 'captcha_assist_text_v1'],
     accountId: '1234567890',
     accountNickname: 'Test User',
   });
 
   ws.emitMessage(makeEnvelope('welcome', 'hello-1', 1, { sessionId: 's1', serverVersion: 'v1' }));
   await connecting;
+});
+
+test('edge-client: hello always advertises the captcha_assist_text_v1 build capability (merged in constructor, dedup, caps absent)', async () => {
+  // design D8：构建能力位在 EdgeClient 构造函数内统一并入 hello.capabilities，与传入哪个 driver 能力无关。
+  // 覆盖三种入参：能力缺省（undefined）、已含该位（不重复）、寻常 driver 列表——三条都必带且只带一次。
+  for (const caps of [undefined, ['captcha_assist_text_v1'], ['locating', 'browse']] as Array<string[] | undefined>) {
+    const ws = new FakeWebSocket();
+    const client = new EdgeClient({
+      url: 'ws://test',
+      edgeId: 'edge-cap',
+      ...(caps ? { capabilities: caps } : {}),
+      runner: { run: async () => ({ actionId: 'noop', ok: true, outcome: 'success', attempts: 1, reason: 'ok' }) },
+      wsFactory: () => ws,
+      idGen: () => 'hello-cap',
+      clock: () => 1,
+      logger: () => {},
+    });
+    const connecting = client.connect();
+    ws.emitOpen();
+    await Promise.resolve();
+    const hello = JSON.parse(ws.sent[0]) as Envelope<{ capabilities: string[] }>;
+    const built = hello.payload.capabilities.filter((c) => c === 'captcha_assist_text_v1');
+    assert.deepEqual(built, ['captcha_assist_text_v1'], `caps=${JSON.stringify(caps)} 应恰含一次构建能力位`);
+    for (const c of EDGE_BUILD_CAPABILITIES) assert.ok(hello.payload.capabilities.includes(c));
+    ws.emitMessage(makeEnvelope('welcome', 'hello-cap', 1, { sessionId: 's1', serverVersion: 'v1' }));
+    await connecting;
+  }
 });
 
 test('edge-client: wechat_channels hello declares controls capability and keeps its welcome snapshot', async () => {
@@ -222,6 +251,8 @@ test('edge-client: wechat_channels hello declares controls capability and keeps 
   assert.ok(hello.payload.capabilities.includes('interaction_runtime_controls_v1'));
   assert.ok(hello.payload.capabilities.includes('interaction_browser_control_v1'));
   assert.ok(hello.payload.capabilities.includes('interaction_test_data_reset_v1'));
+  // 构建能力位由 EdgeClient 构造函数统一并入（design D8）——wechat-channels/runtime.ts 装配路径。
+  assert.ok(hello.payload.capabilities.includes('captcha_assist_text_v1'));
   ws.emitMessage(makeEnvelope('welcome', 'hello-wc-1', 1, {
     sessionId: 'session-wc-1',
     serverVersion: 'v1',

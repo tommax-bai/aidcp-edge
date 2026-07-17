@@ -185,7 +185,6 @@ async function main(): Promise<void> {
   let accountId: string | undefined;
   let accountNickname: string | undefined;
   const machineLabel = process.env.AIDCP_MACHINE_LABEL;
-  const remoteAddr = process.env.AIDCP_REMOTE_ADDR;
   const cdpHost = process.env.AIDCP_CDP_HOST ?? '127.0.0.1';
   const cdpPort = Number(process.env.AIDCP_CDP_PORT ?? 9222);
   const pageUrl = process.env.AIDCP_PAGE_URL;
@@ -352,7 +351,6 @@ async function main(): Promise<void> {
     ...(accountId ? { accountId } : {}),
     ...(accountNickname ? { accountNickname } : {}),
     ...(machineLabel ? { machineLabel } : {}),
-    ...(remoteAddr ? { remoteAddr } : {}),
     runner: {
       run: (step) => {
         if (!runner) throw new Error('runner 尚未就绪');
@@ -807,6 +805,11 @@ async function main(): Promise<void> {
     getAccountId: () => accountId,
     getOverlayMonitor: () => overlayMonitor,
     logger: (m) => console.log(m),
+    // 键入序列中途的租约取消点 + 续租（change captcha-assist-text-answer，design D12）：checkpoint 逐字符
+    // 查 canExecute（被更高优先级任务接管即 false → 抛 TaskTakeoverError、清场、如实回报 typed）；
+    // touch 在聚焦后/清空后/键入后续租，避免 ~8s 键入窗口内租约到期。
+    checkTaskLease: (taskId) => taskCoordinator.canExecute(taskId),
+    touchTaskLease: (taskId) => taskCoordinator.touch(taskId),
   });
   client.onCaptchaAssistCommand((env) => {
     if (env.type !== 'captcha.assist.capture' && env.type !== 'captcha.assist.click') return;

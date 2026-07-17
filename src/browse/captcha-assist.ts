@@ -5,7 +5,7 @@ import type {
   CaptchaAssistSnapshotPayload,
   MessageType,
 } from '../comm/protocol.js';
-import { dispatchClick, evalRaw, type BrowseCdp } from './cdp-util.js';
+import { dispatchClick, evalRaw, pressEnter, InputDispatchDeadlineError, type BrowseCdp } from './cdp-util.js';
 import {
   captureBlockingOverlaySnapshot,
   type BlockingOverlayKind,
@@ -14,6 +14,18 @@ import {
 } from './overlay-monitor.js';
 import { sampleDelay, defaultRandom as humanDefaultRandom, type TimingConfig } from '../humanize/index.js';
 import { sanitizeTrajectory, replayTrajectory } from '../humanize/trajectory-replay.js';
+import {
+  dispatchHumanTyping,
+  probeFocus,
+  clearFocusedField,
+  readFocusedText,
+  validateCaptchaText,
+  type FocusTier,
+  type FocusProbeResult,
+  type ClearOutcome,
+} from './captcha-type.js';
+import { TaskTakeoverError } from '../execution/takeover.js';
+import type { CaptchaAssistTypeReportPayload } from '../comm/protocol.js';
 
 type CaptchaAssistCommandPayload = CaptchaAssistCapturePayload | CaptchaAssistClickPayload;
 
@@ -34,7 +46,22 @@ export interface CaptchaAssistHandlerDeps {
   logger?: (msg: string) => void;
   /** 注入随机源（change captcha-assist-humanize-click）：拟人参数与停顿共用，测试注入确定性。 */
   random?: () => number;
+  /**
+   * 键入序列中途的租约取消点（change captcha-assist-text-answer，design D12）。返回 false = 该 taskId
+   * 已不再持有租约（被更高优先级任务接管）；缺省视为「一直持有」（点击链路旧行为）。逐字符检查——
+   * 已派发的部分留在页面上，调用方清场并如实回报 typed。
+   */
+  checkTaskLease?: (taskId: string) => boolean;
+  /** 键入序列中途续租（聚焦后 / 清空后 / 键入后），避免长键入窗口内租约到期（design D12）。 */
+  touchTaskLease?: (taskId: string) => void;
 }
+
+/** 键入序列硬顶：24 字 × (110 flight + 75 dwell + ~60 RTT) + 长停顿 ≈ 8s，20s 远在 45s acquire 之内（design D12）。 */
+const TYPE_DEADLINE_MS = 20_000;
+/** 逐字键入的对数正态中位(ms)，按 edgeId 派生每机偏置后传入 dispatchHumanTyping（design D2）。 */
+const TYPE_MEDIAN_MS = 110;
+/** 提交后有界重试的 fresh 复检（迭代限界，绝不用 now() 当唯一终止条件）。 */
+const POST_SUBMIT_RECHECK = { attempts: 4, intervalMs: 500 };
 
 /**
  * 协助注入点击的拟人节奏基线（change captcha-assist-humanize-click）。
@@ -240,6 +267,36 @@ export class CaptchaAssistHandler {
         return;
       }
     }
+    // 键入答案纵深校验（change captcha-assist-text-answer，5.1）：与坐标越界同一位置纪律。
+    // 云端 submitClick 已在租约获取前 sanitize，此处是边缘侧纵深防御——畸形/表外字符/单点约束不满足
+    // 一律注入前整单拒绝，绝不「悄悄丢掉打字、只帮你点一下」（那正是静默假成功的形态）。
+    const text = typeof payload.text === 'string' ? payload.text : undefined;
+    if (text !== undefined) {
+      const validation = validateCaptchaText(text);
+      if (!validation.ok) {
+        const reason =
+          validation.reason === 'empty' ? 'text_empty' : validation.reason === 'too_long' ? 'text_too_long' : 'text_unsupported_char';
+        this.sendClickResult({
+          incidentId: payload.incidentId,
+          snapshotId: payload.snapshotId,
+          status: 'invalid_target',
+          reason,
+          checkedAt: this.now(),
+        });
+        return;
+      }
+      // v1 形状：带 text ⇒ 恰好 1 个落点（聚焦那个输入框）。多点会让「提交按钮」落点在聚焦滚动后失效（design D4）。
+      if (payload.points.length !== 1) {
+        this.sendClickResult({
+          incidentId: payload.incidentId,
+          snapshotId: payload.snapshotId,
+          status: 'invalid_target',
+          reason: 'text_requires_single_focus_point',
+          checkedAt: this.now(),
+        });
+        return;
+      }
+    }
     // 轨迹有效 → 回放运营真实轨迹；无/无效 → 回落合成拟人路径（change captcha-assist-humanize-click）。
     const traj = sanitizeTrajectory(payload.trajectory, payload.points.length);
     const replayMode: 'trajectory' | 'synthetic' = traj ? 'trajectory' : 'synthetic';
@@ -282,6 +339,14 @@ export class CaptchaAssistHandler {
           });
           if (i < pts.length - 1) await this.sleep(sampleDelay(pacing.interPoint, this.random));
         }
+      }
+      // 键入分支（change captcha-assist-text-answer）：聚焦腿已完成（上面那一次点击落在输入框上）。
+      // 续租一次（design D12：聚焦后 touch），再走 focus 探针 → 清空 → 键入 → 回读 → 提交 → 复检。
+      // runTypeSequence 自带全部诚实回执且**绝不外抛**，故此处 return，不落到点击链路的 settle+probe。
+      if (text !== undefined) {
+        this.touchLease(payload.taskId);
+        await this.runTypeSequence(payload, snapshot, replayMode, text);
+        return;
       }
       await this.sleep(payload.settleMs ?? 1500);
       const kind = await this.probeBlockingKind();
@@ -339,6 +404,258 @@ export class CaptchaAssistHandler {
     } finally {
       this.writing.delete(payload.incidentId);
     }
+  }
+
+  // ── 键入答案序列（change captcha-assist-text-answer）─────────────────────────
+  // 聚焦腿（handleClick 里那次点击）已完成。本方法走：中途复检 #1 → focus 探针 → 强制清空 →
+  // 拟人键入（checkpoint+deadline）→ 回读 → 中途复检 #2 → Enter → settle + 有界复检。
+  // 全部诚实回执在此发出，**绝不外抛**（异常都转成 typeReport + failed/no_target 回执）。
+
+  /** 键入序列中途续租（design D12）：聚焦后 / 清空后 / 键入后各一次，避免长窗口内租约到期。 */
+  private touchLease(taskId?: string): void {
+    if (taskId) this.deps.touchTaskLease?.(taskId);
+  }
+
+  /** 租约是否仍由本 taskId 持有（缺省视为一直持有，点击链路旧行为）。 */
+  private leaseHeld(taskId: string): boolean {
+    return this.deps.checkTaskLease ? this.deps.checkTaskLease(taskId) : true;
+  }
+
+  /** 尽力清空（被抢占/超预算后清场用）：框里留半截答案，运营看不见就无法带 clear 重来；清失败不外抛。 */
+  private async clearFocusedFieldSafe(tier: FocusTier): Promise<void> {
+    try {
+      await clearFocusedField(this.deps.cdp, tier);
+    } catch (err) {
+      this.logger(`[captcha-assist] 清场失败（框内可能残留半截答案）：${(err as Error).message}`);
+    }
+  }
+
+  /** 重抓一帧并入环、返回它（不 send，由调用方决定 send 还是 attach）；失败回 undefined、不外抛。 */
+  private async recaptureFrame(incidentId: string, kind: BlockingOverlayKind): Promise<CaptchaAssistSnapshotPayload | undefined> {
+    try {
+      const next = await this.captureSnapshot(incidentId, kind, {});
+      this.pushSnapshot(incidentId, next);
+      return next;
+    } catch (err) {
+      this.logger(`[captcha-assist] 键入路径重抓帧失败 incident=${incidentId}: ${(err as Error).message}`);
+      return undefined;
+    }
+  }
+
+  private async runTypeSequence(
+    payload: CaptchaAssistClickPayload,
+    snapshot: CaptchaAssistSnapshotPayload,
+    replayMode: 'trajectory' | 'synthetic',
+    text: string,
+  ): Promise<void> {
+    const incidentId = payload.incidentId;
+    const snapshotId = payload.snapshotId;
+    const zeroReport = (focus: FocusTier, focusTag?: string): CaptchaAssistTypeReportPayload => ({
+      focus,
+      ...(focusTag !== undefined ? { focusTag } : {}),
+      typed: 0,
+      submitted: false,
+    });
+
+    // ── 5.3 中途复检 #1（键入前）：聚焦点击可能已 dismiss 遮罩 / 导航。──
+    let kind1: BlockingOverlayKind | null;
+    let url1: string | undefined;
+    try {
+      kind1 = await this.probeBlockingKind();
+      url1 = (await readViewport(this.deps.cdp)).url;
+    } catch (err) {
+      this.sendClickResult({
+        incidentId, snapshotId, status: 'failed', reason: `recheck_failed_before_type:${(err as Error).message}`,
+        checkedAt: this.now(), replayMode, inputMode: 'click_type', typeReport: zeroReport('none'),
+      });
+      return;
+    }
+    if (!kind1) {
+      // 遮罩不在 ⇒ 聚焦点击把它解了（零字符派发）。与点击成功路径同序：先 cleared 再 click_result。
+      this.stopLive(incidentId);
+      this.sendRiskClearedSafely();
+      this.sendClickResultSafely({
+        incidentId, snapshotId, status: 'cleared', reason: 'cleared_mid_sequence',
+        checkedAt: this.now(), replayMode, inputMode: 'click_type', typeReport: zeroReport('none'),
+      });
+      return;
+    }
+    const kindChanged1 = kind1 !== snapshot.kind;
+    const urlChanged1 = !!snapshot.url && !!url1 && !sameLocation(snapshot.url, url1);
+    if (kindChanged1 || urlChanged1) {
+      const next = await this.recaptureFrame(incidentId, kind1);
+      if (next) this.deps.client.send('captcha.assist.snapshot', next);
+      this.sendClickResult({
+        incidentId, snapshotId, status: 'stale_snapshot',
+        reason: kindChanged1 ? 'kind_changed_mid_sequence' : 'page_moved_mid_sequence',
+        checkedAt: this.now(), replayMode, inputMode: 'click_type', typeReport: zeroReport('none'),
+      });
+      return;
+    }
+
+    // ── 5.4 focus 探针 ── none = 唯一结构确定的失败 ⇒ no_target，零派发，绝不提交。
+    let focus: FocusProbeResult;
+    try {
+      focus = await probeFocus(this.deps.cdp);
+    } catch (err) {
+      // 探针抛错 fail-closed：无法确认焦点落定，绝不盲打。
+      this.sendClickResult({
+        incidentId, snapshotId, status: 'failed', reason: `focus_probe_failed:${(err as Error).message}`,
+        checkedAt: this.now(), replayMode, inputMode: 'click_type', typeReport: zeroReport('none'),
+      });
+      return;
+    }
+    if (focus.tier === 'none') {
+      this.sendClickResult({
+        incidentId, snapshotId, status: 'no_target', reason: 'focus_not_landed',
+        checkedAt: this.now(), replayMode, inputMode: 'click_type', typeReport: zeroReport('none', focus.tag),
+      });
+      return;
+    }
+
+    // ── 5.5 强制清空 + 拟人键入 ──
+    let cleared: ClearOutcome;
+    try {
+      cleared = await clearFocusedField(this.deps.cdp, focus.tier);
+    } catch (err) {
+      this.sendClickResult({
+        incidentId, snapshotId, status: 'failed', reason: `clear_failed:${(err as Error).message}`,
+        checkedAt: this.now(), replayMode, inputMode: 'click_type',
+        typeReport: { focus: focus.tier, focusTag: focus.tag, typed: 0, submitted: false },
+      });
+      return;
+    }
+    this.touchLease(payload.taskId); // 清空后 touch（design D12）
+
+    const taskId = payload.taskId;
+    const deadlineAt = this.now() + TYPE_DEADLINE_MS;
+    const medianMs = Math.max(40, Math.round(TYPE_MEDIAN_MS * (1 + edgeIdBias(this.deps.edgeId))));
+    // typed 在闭包里由 onProgress 逐字更新：抛出（被抢占 / 超预算）时 dispatchHumanTyping 不返回、
+    // 其内部计数丢失，只有闭包捕获的这个值才是真实派发数，用于「如实回报 typed」。
+    let typed = 0;
+    try {
+      typed = await dispatchHumanTyping(this.deps.cdp, text, {
+        random: this.random,
+        sleep: this.sleep,
+        clock: this.now,
+        medianMs,
+        deadlineAt,
+        onProgress: (n) => { typed = n; },
+        // checkpoint 抛 TaskTakeoverError（本模块不认识类型、只调用——依赖闭包仍只 execution/takeover 叶子）。
+        ...(taskId ? { checkpoint: () => { if (!this.leaseHeld(taskId)) throw new TaskTakeoverError(); } } : {}),
+      });
+    } catch (err) {
+      // 已派发的部分留在页面上 ⇒ 清场 + 如实回报 typed，MUST NOT 提交。
+      await this.clearFocusedFieldSafe(focus.tier);
+      const reason =
+        err instanceof TaskTakeoverError ? 'takeover_during_type'
+          : err instanceof InputDispatchDeadlineError ? 'type_deadline_exceeded'
+            : `type_failed:${(err as Error).message}`;
+      this.sendClickResult({
+        incidentId, snapshotId, status: 'failed', reason,
+        checkedAt: this.now(), replayMode, inputMode: 'click_type',
+        typeReport: { focus: focus.tier, focusTag: focus.tag, cleared, typed, submitted: false },
+      });
+      return;
+    }
+    this.touchLease(payload.taskId); // 键入后 touch（design D12）
+
+    // ── 5.6 回读（editable 才有意义；顺序 MUST：type → read → submit，反了必假阴性）──
+    let verified: 'match' | 'mismatch' | 'unverifiable';
+    if (focus.tier === 'editable') {
+      const readback = await readFocusedText(this.deps.cdp).catch(() => null);
+      verified = readback !== null && readback === text ? 'match' : 'mismatch';
+    } else {
+      verified = 'unverifiable';
+    }
+    const report: CaptchaAssistTypeReportPayload = {
+      focus: focus.tier, focusTag: focus.tag, cleared, typed, verified, submitted: false,
+    };
+
+    // ── 5.7 中途复检 #2（Enter 前）+ 5.8 提交 ──
+    if (payload.submit === 'enter') {
+      let kind2: BlockingOverlayKind | null;
+      let focus2: FocusProbeResult;
+      try {
+        kind2 = await this.probeBlockingKind();
+        focus2 = await probeFocus(this.deps.cdp);
+      } catch (err) {
+        this.sendClickResult({
+          incidentId, snapshotId, status: 'failed', reason: `recheck_failed_before_submit:${(err as Error).message}`,
+          checkedAt: this.now(), replayMode, inputMode: 'click_type', typeReport: report,
+        });
+        return;
+      }
+      if (!kind2) {
+        // 遮罩在 Enter 前消失：键入本身可能已触发自动校验并清除（typed=N，未按 Enter）。
+        this.stopLive(incidentId);
+        this.sendRiskClearedSafely();
+        this.sendClickResultSafely({
+          incidentId, snapshotId, status: 'cleared', reason: 'cleared_before_submit',
+          checkedAt: this.now(), replayMode, inputMode: 'click_type', typeReport: report,
+        });
+        return;
+      }
+      if (focus2.tier !== focus.tier) {
+        // 焦点丢失/转移：Enter 会从错误上下文提交。停手不提交，诚实回执 + 重抓帧。
+        const next = await this.recaptureFrame(incidentId, kind2);
+        this.sendClickResult({
+          incidentId, snapshotId, status: 'still_blocked', reason: 'focus_lost_before_submit',
+          checkedAt: this.now(), replayMode, inputMode: 'click_type', typeReport: report,
+          ...(next ? { snapshot: next } : {}),
+        });
+        return;
+      }
+      await pressEnter(this.deps.cdp);
+      report.submitted = true;
+    }
+
+    // ── 5.9 settle + 有界重试的 fresh 复检（4 次 / 500ms，迭代限界）──
+    await this.sleep(payload.settleMs ?? 1500);
+    let lastErr: Error | undefined;
+    for (let attempt = 0; attempt < POST_SUBMIT_RECHECK.attempts; attempt++) {
+      if (attempt > 0) await this.sleep(POST_SUBMIT_RECHECK.intervalMs);
+      let kind3: BlockingOverlayKind | null;
+      try {
+        kind3 = await this.probeBlockingKind();
+      } catch (err) {
+        // Enter 提交常触发导航，probe 打不到页面属正常；下一拍再试，绝不据此报 failed。
+        lastErr = err as Error;
+        continue;
+      }
+      if (!kind3) {
+        this.stopLive(incidentId);
+        this.sendRiskClearedSafely();
+        this.sendClickResultSafely({
+          incidentId, snapshotId, status: 'cleared',
+          checkedAt: this.now(), replayMode, inputMode: 'click_type', typeReport: report,
+        });
+        return;
+      }
+      // 遮罩仍在：重抓帧 + still_blocked（运营看到「打了但没解开」，可带 clear 重来）。
+      const next = await this.recaptureFrame(incidentId, kind3);
+      this.sendClickResult({
+        incidentId, snapshotId, status: 'still_blocked', reason: 'blocking_overlay_still_visible',
+        checkedAt: this.now(), replayMode, inputMode: 'click_type', typeReport: report,
+        ...(next ? { snapshot: next } : {}),
+      });
+      return;
+    }
+    // 4 次复检全抛：绝不误报 click_failed（那是 task 0 修的洞）。诚实 verdict_unavailable_after_submit +
+    // submitted 位（在 report 里）+ 尽力回带新帧。
+    let recap: CaptchaAssistSnapshotPayload | undefined;
+    try {
+      const kindR = await this.probeBlockingKind();
+      if (kindR) recap = await this.recaptureFrame(incidentId, kindR);
+    } catch {
+      /* 尽力 */
+    }
+    this.sendClickResult({
+      incidentId, snapshotId, status: 'failed',
+      reason: `verdict_unavailable_after_submit${lastErr ? `:${lastErr.message}` : ''}`,
+      checkedAt: this.now(), replayMode, inputMode: 'click_type', typeReport: report,
+      ...(recap ? { snapshot: recap } : {}),
+    });
   }
 
   // ── 实时抓帧循环（change captcha-assist-live-snapshot）─────────────────────────

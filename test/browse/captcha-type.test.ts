@@ -149,6 +149,28 @@ test('键入：被抢占 → 抛出且已派发数如实（MUST NOT 回退到意
   assert.equal(cdp.keyEvents().filter((e) => e.type === 'keyDown' && e.key !== 'Shift').length, 2);
 });
 
+test('键入：onProgress 逐字回调，抛出时闭包里留下真实已派发数（调用方据此如实回报 typed）', async () => {
+  const cdp = new FakeCdp();
+  let n = 0;
+  let lastProgress = -1;
+  const seen: number[] = [];
+  class Takeover extends Error {}
+  await assert.rejects(
+    () =>
+      dispatchHumanTyping(cdp, 'abcdef', {
+        random: () => 0.5,
+        sleep: noSleep,
+        clock: () => 0,
+        onProgress: (typed) => { lastProgress = typed; seen.push(typed); },
+        checkpoint: () => { if (n++ >= 3) throw new Takeover('taken over'); },
+      }),
+    Takeover,
+  );
+  // 第 4 个字符前被接管 ⇒ onProgress 报到 3；抛出后 dispatchHumanTyping 不返回，唯有闭包捕获的值是真相。
+  assert.deepEqual(seen, [1, 2, 3]);
+  assert.equal(lastProgress, 3);
+});
+
 test('键入：超预算 → InputDispatchDeadlineError，且接管优先于死线', async () => {
   const cdp = new FakeCdp();
   await assert.rejects(

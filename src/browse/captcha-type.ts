@@ -168,6 +168,13 @@ export interface HumanTypingOptions extends InputSafetyOptions {
   medianMs?: number;
   /** 单键按下时长的中位(ms)，默认 75。 */
   dwellMedianMs?: number;
+  /**
+   * 每成功派发一个字符后回调实际累计数（change captcha-assist-text-answer，§5 接线所需）。
+   * **抛出时（被抢占 / 超预算）函数不返回、局部 typed 计数丢失**，调用方拿不到已派发数就没法「如实回报
+   * typed」——那正是 spec 要求区分「答案打错了」与「字根本没打进去」的凭据。调用方在闭包里存下最后一次
+   * 回调值，catch 时即为真实派发数。MUST NOT 在此抛出（非取消点）。
+   */
+  onProgress?: (typed: number) => void;
 }
 
 const DWELL = { median: 75, sigma: 0.3, min: 30, max: 180 };
@@ -217,6 +224,7 @@ export async function dispatchHumanTyping(cdp: BrowseCdp, text: string, options:
     const dwell = sampleDwell(random, dwellMedian);
     await commitKeyStroke(cdp, spec, dwell, sleep);
     typed++;
+    options.onProgress?.(typed);
     // 实测往返里扣掉我们自己 sleep 的 dwell —— 剩下的才是传输层的账。
     lastRttMs = Math.max(0, clock() - startedAt - dwell);
   }
