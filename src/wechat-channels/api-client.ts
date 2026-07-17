@@ -203,20 +203,41 @@ export class WechatChannelsApiClient {
     session: WechatSessionMaterial | undefined,
     parse: (body: unknown, endpoint: string) => T,
   ): Promise<T> {
+    let platform: PlatformEnvelope;
     try {
-      const platform = await this.requestJson(endpoint, payload, session);
+      platform = await this.requestJson(endpoint, payload, session);
+    } catch (error) {
+      this.throwEndpointError(endpoint, error, false);
+    }
+    try {
       return parse(platform.body, endpoint);
     } catch (error) {
-      const safe = asWechatChannelsError(error, endpoint, true);
-      if (safe.category === 'schema_changed') {
-        try {
-          this.onSchemaChanged?.(endpoint, safe);
-        } catch {
-          // Circuit-breaker observers cannot replace the stable endpoint error.
-        }
-      }
-      throw safe;
+      // Parsing happens only after a platform response exists, so parser-local schema errors
+      // must not retain their default pre-dispatch evidence.
+      this.throwEndpointError(endpoint, error, true);
     }
+  }
+
+  private throwEndpointError(endpoint: WechatChannelsEndpoint, error: unknown, promoteDispatched: boolean): never {
+    const classified = asWechatChannelsError(error, endpoint, true);
+    const safe = promoteDispatched && !classified.requestDispatched
+      ? new WechatChannelsError(
+          classified.category,
+          classified.endpoint,
+          classified.message,
+          classified.retryable,
+          classified.retryAfterMs,
+          true,
+        )
+      : classified;
+    if (safe.category === 'schema_changed') {
+      try {
+        this.onSchemaChanged?.(endpoint, safe);
+      } catch {
+        // Circuit-breaker observers cannot replace the stable endpoint error.
+      }
+    }
+    throw safe;
   }
 
   private async requestJson(
@@ -246,12 +267,12 @@ export class WechatChannelsApiClient {
     payload: Record<string, unknown>,
     session: WechatSessionMaterial | undefined,
   ): Promise<PlatformEnvelope> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     if (!session) {
       throw new WechatChannelsError('auth_expired', endpoint, 'Authorized session is required', false, null, false);
     }
     const serialized = serializeWechatRequest(endpoint, payload, session, { now: this.now });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       let response: Response;
       try {

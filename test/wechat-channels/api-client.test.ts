@@ -283,6 +283,7 @@ test('wechat api: response size and schema failures are stable and open only the
     (error: unknown) =>
       error instanceof WechatChannelsError &&
       error.category === 'schema_changed' &&
+      error.requestDispatched &&
       !error.message.includes('cookie-secret'),
   );
   assert.deepEqual(changed, ['postList', 'postList']);
