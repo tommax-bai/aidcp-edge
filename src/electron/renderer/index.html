@@ -316,6 +316,43 @@
           </div>
         </div>
         <div id="quota-windows" class="quota-windows hidden"></div>
+        <!-- 慢启动脚注行（change account-level-slow-start）：**静态节点**，JS 只切 hidden / checked /
+             disabled / textContent，绝不动态建元素（本 section 不在任何 innerHTML 重建范围内）。
+             落这里而非标题区：标题区跟随选中环境、而慢启动是账号级（作用域错），且 Windows 窄窗下
+             算术上会挤爆昵称。平台和云端状态均满足时本 section 常驻可见；非 Facebook 整行隐藏。 -->
+        <div id="slow-start-row" class="slow-start-row hidden">
+          <label class="switch inline-switch" id="slow-start-toggle-wrap">
+            <input id="slow-start-toggle" type="checkbox" />
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+            <span class="switch-label">慢启动</span>
+          </label>
+          <div class="slow-start-help">
+            <button id="slow-start-help-trigger" class="slow-start-help-trigger" type="button"
+              aria-label="查看 Facebook 慢启动 7 天限额" aria-describedby="slow-start-help-panel">?</button>
+            <div id="slow-start-help-panel" class="slow-start-help-panel" role="tooltip">
+              <strong>Facebook 慢启动曲线限额</strong>
+              <div class="slow-start-table-scroll">
+                <!-- 与 aidcp-cloud/src/risk/cold-start-planner.ts 的 FB_COLD_START_PLANS 上界逐格同步。 -->
+                <table aria-label="Facebook 慢启动 7 天每日曲线限额">
+                  <thead><tr><th scope="col">天数</th><th scope="col">浏览</th><th scope="col">点赞</th><th scope="col">评论</th><th scope="col">关注</th><th scope="col">发布</th><th scope="col">加组</th></tr></thead>
+                  <tbody>
+                    <tr><th scope="row">第 1 天</th><td>20</td><td>2</td><td>0</td><td>1</td><td>0</td><td>0</td></tr>
+                    <tr><th scope="row">第 2 天</th><td>25</td><td>3</td><td>0</td><td>1</td><td>0</td><td>0</td></tr>
+                    <tr><th scope="row">第 3 天</th><td>35</td><td>6</td><td>1</td><td>2</td><td>0</td><td>1</td></tr>
+                    <tr><th scope="row">第 4 天</th><td>40</td><td>8</td><td>2</td><td>2</td><td>0</td><td>1</td></tr>
+                    <tr><th scope="row">第 5 天</th><td>50</td><td>12</td><td>3</td><td>3</td><td>1</td><td>2</td></tr>
+                    <tr><th scope="row">第 6 天</th><td>60</td><td>15</td><td>4</td><td>4</td><td>1</td><td>2</td></tr>
+                    <tr><th scope="row">第 7 天</th><td>70</td><td>18</td><td>5</td><td>5</td><td>1</td><td>3</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <small>表中为慢启动曲线限额；实际运行仍不会超过账号档位。</small>
+            </div>
+          </div>
+          <span id="slow-start-badge" class="acct-age hidden"></span>
+          <span id="slow-start-reason" class="parking-hint hidden"></span>
+          <span class="parking-hint slow-start-copy">开启后头 7 天按曲线逐日放开量，7天后按账号档位运行。</span>
+        </div>
       </section>
 
       <!-- 叙述式活动流：一句人话一条、最新在上 -->
@@ -482,6 +519,17 @@
       <!-- 共享原始日志：位于 legacy / 视频号 / 内容工作区切换之外，设置开关打开后始终跟随当前环境。 -->
       <details class="dev hidden" id="dev-section">
         <summary>开发者详情</summary>
+        <section id="interaction-test-reset" class="iw-test-reset hidden" aria-label="视频号测试数据重置">
+          <div class="iw-test-reset-copy">
+            <strong>视频号测试数据</strong>
+            <span>清空当前渠道在 Cloud 的副本和读取游标，再从微信平台重新拉取。不会删除平台评论/私信，也不会发送回复。</span>
+          </div>
+          <div class="iw-test-reset-actions">
+            <button type="button" data-test-reset-channel="comment">重置评论</button>
+            <button type="button" data-test-reset-channel="dm">重置私信</button>
+          </div>
+          <p id="interaction-test-reset-status" aria-live="polite">每次只重置一个渠道；操作前需要输入确认词。</p>
+        </section>
         <pre id="last-message">等待状态…</pre>
       </details>
       </main>

@@ -12,6 +12,7 @@ const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
 const interactionSrc = readFileSync(join(electronDir, 'renderer/interaction-workspace.js'), 'utf8');
 const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
+const stylesSrc = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 const listFixture = JSON.parse(readFileSync(join(fixtureDir, 'interaction-list-response.json'), 'utf8'));
 const commentFixture = JSON.parse(readFileSync(join(fixtureDir, 'comment-detail-response.json'), 'utf8'));
 const dmFixture = JSON.parse(readFileSync(join(fixtureDir, 'dm-detail-ambiguous-response.json'), 'utf8'));
@@ -105,7 +106,7 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
   const currentStatus = status(envKey, label);
   const calls: Record<string, any[]> = {
     list: [], detail: [], cancel: [], save: [], approve: [], send: [], regenerate: [], ignore: [], escalate: [],
-    sync: [], reopen: [], browser: [], readControls: [], notify: [],
+    sync: [], reset: [], reopen: [], browser: [], readControls: [], notify: [],
   };
   let pushFleet: (snapshot: any) => void = () => undefined;
   let pushStatus: (status: any) => void = () => undefined;
@@ -190,6 +191,15 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
       calls.sync.push(args);
       return apiResult({ data: { envKey: args.envKey, accountId: `account-${args.envKey}`, acceptedAt: Date.now() }, meta: { requestId: 'sync', asOf: Date.now() } });
     },
+    interactionTestReset: async (args: any) => {
+      calls.reset.push(args);
+      return apiResult({
+        data: { envKey: args.envKey, accountId: `account-${args.envKey}`, channel: args.channel,
+          action: 'test_reset', actionRequestId: `reset-${args.channel}`, status: 'accepted',
+          deleted: { threads: 1, syncBatches: 1, syncCursors: 1 } },
+        meta: { requestId: 'test-reset', asOf: Date.now() },
+      });
+    },
     interactionReopenAuth: async (args: any) => {
       calls.reopen.push(args);
       return apiResult({ data: { envKey: args.envKey, accountId: `account-${args.envKey}`, acceptedAt: Date.now() }, meta: { requestId: 'reopen', asOf: Date.now() } });
@@ -265,6 +275,19 @@ test('XHS / Facebook 保留原 workspace；视频号只替换右侧且不占左�
   assert.match($(window, '#iw-list').textContent || '', /示例观众/);
   assert.match($(window, '#iw-detail').textContent || '', /模板 template_comment_thanks · v1/);
   assert.match($(window, '#iw-detail').textContent || '', /配置版本 1/);
+});
+
+test('820x720 单列互动布局使用主列整体滚动，不再把详情裁在固定高度之外', () => {
+  assert.match(stylesSrc, /\.shell\.interaction-mode[\s\S]*min-height:\s*calc\(100vh - 46px\);[\s\S]*overflow:\s*visible;/);
+  assert.match(stylesSrc, /\.interaction-workspace[\s\S]*min-height:\s*calc\(100vh - 70px\);/);
+  assert.match(stylesSrc, /@container \(max-width: 640px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column; overflow: visible; \}/);
+  assert.doesNotMatch(stylesSrc, /\.shell\.interaction-mode[\s\S]{0,260}\n\s*height:\s*calc\(100vh - 46px\);/);
+});
+
+test('窄 viewport 不覆盖 workspace 容器断点，仍放得下双栏时列表不被拉成通栏', () => {
+  assert.match(stylesSrc, /@container \(max-width: 640px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column; overflow: visible; \}/);
+  assert.match(stylesSrc, /@supports not \(container-type: inline-size\) \{\s*@media \(max-width: 700px\) \{[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column; overflow: visible; \}/);
+  assert.doesNotMatch(stylesSrc, /\n@media \(max-width: 700px\) \{\s*\.iw-inbox/);
 });
 
 test('视频号互动使用 profileId 作为 Cloud envKey，不混用本机 ads- 环境行 ID', async () => {
@@ -529,6 +552,157 @@ test('tabs / 搜索 / 空态 / 错态 / ambiguous 都使用冻结 fixture 的诚
   assert.match($(errorBoot.window, '#iw-list').textContent || '', /不能据此判断是否没有互动/);
 });
 
+test('meta.asOf 只表示 API 快照；缺失或非法 syncFreshness 均按未知失败关闭', async () => {
+  const legacyList = clone(listFixture);
+  const legacyDetail = clone(commentFixture);
+  delete legacyList.data.syncFreshness;
+  delete legacyDetail.data.syncFreshness;
+  legacyList.meta.asOf = Date.now();
+  legacyDetail.meta.asOf = Date.now();
+  const legacy = await boot({
+    api: {
+      interactionList: async () => apiResult(legacyList),
+      interactionDetail: async () => apiResult(legacyDetail),
+    },
+  });
+  assert.match($(legacy.window, '#iw-title').textContent || '', /等待首次成功同步/);
+  assert.match($(legacy.window, '#iw-sync-status').textContent || '', /同步状态待确认/);
+  assert.match($(legacy.window, '#iw-as-of').textContent || '', /同步时间待确认/);
+  assert.doesNotMatch($(legacy.window, '#iw-as-of').textContent || '', /数据时间/);
+  assert.doesNotMatch($(legacy.window, '#iw-sync-status').textContent || '', /同步正常/);
+  assert.match($(legacy.window, '#iw-detail').textContent || '', /最近同步 同步时间待确认/);
+
+  const invalidList = clone(listFixture);
+  const invalidDetail = clone(commentFixture);
+  invalidList.data.syncFreshness.comment = { observedAt: Date.now() };
+  invalidDetail.data.syncFreshness.comment = { observedAt: Date.now() };
+  const invalid = await boot({
+    api: {
+      interactionList: async () => apiResult(invalidList),
+      interactionDetail: async () => apiResult(invalidDetail),
+    },
+  });
+  assert.match($(invalid.window, '#iw-sync-status').textContent || '', /同步状态待确认/);
+  assert.match($(invalid.window, '#iw-as-of').textContent || '', /同步时间待确认/);
+});
+
+test('分渠道证据决定真实空态，一个渠道成功不能替另一个渠道背书', async () => {
+  const oneChannelList = clone(listFixture);
+  const oneChannelComment = clone(commentFixture);
+  const oneChannelDm = clone(dmFixture);
+  for (const fixture of [oneChannelList, oneChannelComment, oneChannelDm]) {
+    fixture.data.syncFreshness.dm = null;
+  }
+  const { window } = await boot({
+    api: {
+      interactionList: async (args: any) => {
+        const envelope = scopeEnvelope(oneChannelList, args.envKey);
+        envelope.data.items = args.channel ? [] : envelope.data.items;
+        return apiResult(envelope);
+      },
+      interactionDetail: async (args: any) => apiResult(scopeEnvelope(
+        args.threadId.includes('_dm_') ? oneChannelDm : oneChannelComment,
+        args.envKey,
+      )),
+    },
+  });
+  assert.match($(window, '#iw-sync-status').textContent || '', /私信尚未成功同步/);
+
+  $(window, '[data-interaction-tab="dm"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(window, '#iw-list').textContent || '', /私信尚未成功同步/);
+  assert.doesNotMatch($(window, '#iw-list').textContent || '', /当前没有私信会话/);
+
+  $(window, '[data-interaction-tab="comment"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(window, '#iw-list').textContent || '', /当前没有评论互动/);
+});
+
+test('页面刷新不洗新历史同步时间，明显未来的设备时间显示校准警告', async () => {
+  const observedAt = Date.now() - 2 * 60_000;
+  const historicalList = clone(listFixture);
+  const historicalDetail = clone(commentFixture);
+  for (const fixture of [historicalList, historicalDetail]) {
+    fixture.meta.asOf = Date.now();
+    fixture.data.syncFreshness.comment = { observedAt, receivedAt: observedAt + 100 };
+    fixture.data.syncFreshness.dm = { observedAt, receivedAt: observedAt + 100 };
+  }
+  const historical = await boot({
+    api: {
+      interactionList: async () => apiResult(historicalList),
+      interactionDetail: async () => apiResult(historicalDetail),
+    },
+  });
+  assert.match($(historical.window, '#iw-as-of').textContent || '', /2 分钟前/);
+  assert.doesNotMatch($(historical.window, '#iw-as-of').textContent || '', /数据时间/);
+
+  const receivedAt = Date.now();
+  const skewedList = clone(listFixture);
+  const skewedDetail = clone(commentFixture);
+  for (const fixture of [skewedList, skewedDetail]) {
+    fixture.data.syncFreshness.comment = { observedAt: receivedAt + 6 * 60_000, receivedAt };
+    fixture.data.syncFreshness.dm = { observedAt: receivedAt + 6 * 60_000, receivedAt };
+  }
+  const skewed = await boot({
+    api: {
+      interactionList: async () => apiResult(skewedList),
+      interactionDetail: async () => apiResult(skewedDetail),
+    },
+  });
+  assert.match($(skewed.window, '#iw-sync-status').textContent || '', /设备时间待校准/);
+  assert.match($(skewed.window, '#iw-as-of').textContent || '', /Cloud .*收到/);
+});
+
+test('同环境迟到的旧详情响应不会让已读回的同步证据倒退', async () => {
+  const current = Date.now() - 2 * 60_000;
+  const older = current - 8 * 60_000;
+  const newestList = clone(listFixture);
+  const staleDetail = clone(commentFixture);
+  for (const channel of ['comment', 'dm']) {
+    newestList.data.syncFreshness[channel] = { observedAt: current, receivedAt: current + 100 };
+    staleDetail.data.syncFreshness[channel] = { observedAt: older, receivedAt: older + 100 };
+  }
+  const { window } = await boot({
+    api: {
+      interactionList: async () => apiResult(newestList),
+      interactionDetail: async () => apiResult(staleDetail),
+    },
+  });
+  assert.match($(window, '#iw-as-of').textContent || '', /2 分钟前/);
+});
+
+test('局部刷新 accepted 不冒充完成，只有目标渠道 receivedAt 推进才确认成功', async () => {
+  let observedAt = Date.now() - 60_000;
+  let receivedAt = observedAt + 100;
+  const response = (base: any, envKey: string, channel?: string) => {
+    const envelope = scopeEnvelope(base, envKey);
+    envelope.data.syncFreshness.comment = { observedAt, receivedAt };
+    envelope.data.syncFreshness.dm = { observedAt, receivedAt };
+    if (channel) envelope.data.items = [];
+    return envelope;
+  };
+  const { window } = await boot({
+    api: {
+      interactionList: async (args: any) => apiResult(response(listFixture, args.envKey, args.channel)),
+      interactionDetail: async (args: any) => apiResult(response(commentFixture, args.envKey)),
+    },
+  });
+  $(window, '[data-interaction-tab="comment"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  $(window, '#iw-sync').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await new Promise((resolve) => setTimeout(resolve, 850));
+  await flush();
+  assert.match($(window, '#iw-sync-status').textContent || '', /已受理，尚未确认同步完成/);
+
+  observedAt += 5_000;
+  receivedAt += 5_000;
+  $(window, '#iw-sync').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await new Promise((resolve) => setTimeout(resolve, 850));
+  await flush();
+  assert.match($(window, '#iw-sync-status').textContent || '', /本次同步已有成功结果/);
+  assert.match($(window, '#iw-list').textContent || '', /当前没有评论互动/);
+});
+
 test('页面提供总开关、评论和私信收取开关，只提交读取字段并显示存储/应用/有效状态', async () => {
   const { window, calls } = await boot();
   const all = $(window, '#iw-read-all') as HTMLInputElement;
@@ -743,8 +917,8 @@ test('列表方向键可达并移动焦点，窄屏样式折叠为单栏且保�
 
   const css = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
   assert.match(css, /\.iw-list-item:focus-visible[\s\S]*outline: 2px solid var\(--accent\)/);
-  assert.match(css, /@container \(max-width: 640px\)[\s\S]*\.iw-inbox \{ grid-template-columns: 1fr/);
-  assert.match(css, /@media \(max-width: 700px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column/);
+  assert.match(css, /@container \(max-width: 640px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column; overflow: visible; \}/);
+  assert.match(css, /@supports not \(container-type: inline-size\)[\s\S]*@media \(max-width: 700px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column/);
 });
 
 test('环境 A→B 原子切换：取消 A 读取且迟到响应不能覆盖 B', async () => {
@@ -865,6 +1039,68 @@ test('CAS 冲突保留输入并给出刷新入口；reauth 保留历史但禁写
   assert.match(reopenArgs.idempotencyKey, /^interaction-reauth-/);
 });
 
+test('测试数据入口默认隐藏，确认词不匹配时不调用重置 IPC', async () => {
+  const disabled = await boot();
+  assert.equal(hidden($(disabled.window, '#interaction-test-reset')), true);
+
+  const enabledList = clone(listFixture);
+  enabledList.data.testTools = { dataResetEnabled: true };
+  const enabled = await boot({
+    api: { interactionList: async (args: any) => apiResult(scopeEnvelope(enabledList, args.envKey)) },
+  });
+  const toggle = $(enabled.window, '#dev-toggle') as HTMLInputElement;
+  toggle.checked = true;
+  toggle.dispatchEvent(new enabled.window.Event('change', { bubbles: true }));
+  assert.equal(hidden($(enabled.window, '#dev-section')), false);
+  assert.equal(hidden($(enabled.window, '#interaction-test-reset')), false);
+  (enabled.window as any).prompt = () => '不匹配';
+  $(enabled.window, '[data-test-reset-channel="comment"]').dispatchEvent(new enabled.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(enabled.calls.reset.length, 0);
+  assert.match($(enabled.window, '#interaction-test-reset-status').textContent || '', /确认词不匹配/);
+});
+
+test('确认开发环境评论重置后只清本地评论视图并等待真实重拉', async () => {
+  const enabledList = clone(listFixture);
+  enabledList.data.testTools = { dataResetEnabled: true };
+  const handle = await boot({
+    api: { interactionList: async (args: any) => apiResult(scopeEnvelope(enabledList, args.envKey)) },
+  });
+  (handle.window as any).prompt = () => '重置评论';
+  $(handle.window, '[data-test-reset-channel="comment"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(handle.calls.reset.length, 1);
+  assert.equal(handle.calls.reset[0].channel, 'comment');
+  assert.match(handle.calls.reset[0].idempotencyKey, /^interaction-test-reset-comment-/);
+  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /已清空，正在从微信平台重新拉取/);
+});
+
+test('测试重置区分安全拒绝与 Cloud 已清空但 Edge 未收到', async () => {
+  const enabledList = clone(listFixture);
+  enabledList.data.testTools = { dataResetEnabled: true };
+  const safety = await boot({
+    api: {
+      interactionList: async (args: any) => apiResult(scopeEnvelope(enabledList, args.envKey)),
+      interactionTestReset: async () => apiError('INTERACTION_STATE_CONFLICT', '该渠道已有回复发送记录，不能重置。'),
+    },
+  });
+  (safety.window as any).prompt = () => '重置评论';
+  $(safety.window, '[data-test-reset-channel="comment"]').dispatchEvent(new safety.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(safety.window, '#interaction-test-reset-status').textContent || '', /已有回复发送记录/);
+
+  const partial = await boot({
+    api: {
+      interactionList: async (args: any) => apiResult(scopeEnvelope(enabledList, args.envKey)),
+      interactionTestReset: async () => apiError('INTERACTION_TEST_RESET_PARTIAL', 'partial', 503),
+    },
+  });
+  (partial.window as any).prompt = () => '重置私信';
+  $(partial.window, '[data-test-reset-channel="dm"]').dispatchEvent(new partial.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(partial.window, '#interaction-test-reset-status').textContent || '', /Cloud 私信副本已清空，但自动重新拉取没有启动/);
+});
+
 test('Cloud 离线局部刷新保留已读历史并标记上次成功数据', async () => {
   let syncOffline = false;
   const { window } = await boot({
@@ -876,11 +1112,14 @@ test('Cloud 离线局部刷新保留已读历史并标记上次成功数据', as
     },
   });
   assert.match($(window, '#iw-list').textContent || '', /示例观众/);
+  const successfulTime = ($(window, '#iw-as-of').textContent || '').replace(/^最近成功 · /, '');
   $(window, '#iw-sync').dispatchEvent(new window.Event('click', { bubbles: true }));
   await flush();
   assert.equal(syncOffline, true);
   assert.match($(window, '#iw-list').textContent || '', /示例观众/);
   assert.match($(window, '#iw-summary').textContent || '', /上次成功数据/);
+  assert.match($(window, '#iw-as-of').textContent || '', /^上次成功/);
+  assert.match($(window, '#iw-as-of').textContent || '', new RegExp(successfulTime.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
 test('Cloud offline/stale 禁止 save/approve/send，成功刷新后才恢复写动作', async () => {

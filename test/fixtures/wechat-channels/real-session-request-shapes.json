@@ -46,9 +46,9 @@
       "path": "/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-session-info",
       "businessBody": {"sessionId": "array"},
       "status": 201,
-      "responseKeys": ["data.baseResp.errcode", "data.sessionInfo"],
-      "observedResult": "zero_sessions",
-      "coverage": "empty_only_nonempty_session_shape_unverified"
+      "responseKeys": ["data.baseResp.errcode", "data.sessionInfo", "data.sessionInfo[].headImgUrl", "data.sessionInfo[].nickname", "data.sessionInfo[].sessionId", "data.sessionInfo[].username"],
+      "observedResult": "non_empty_session_info",
+      "coverage": "nonempty_read_shape_verified"
     },
     "commentCreate": {"evidence": "not_observed", "descriptorEnabled": false},
     "dmSendText": {"evidence": "not_observed", "descriptorEnabled": false},

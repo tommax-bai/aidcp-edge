@@ -86,6 +86,11 @@ export interface WechatDmSession {
   updatedAt: number;
 }
 
+export interface WechatDmParticipantInfo {
+  sessionExternalId: string;
+  participant: WechatParticipant;
+}
+
 export interface WechatDmMessage {
   externalId: string;
   threadExternalId: string;

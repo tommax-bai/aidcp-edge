@@ -39,6 +39,17 @@
         }
       }
     },
+    "testTools": { "dataResetEnabled": false },
+    "syncFreshness": {
+      "comment": {
+        "observedAt": 1784044802000,
+        "receivedAt": 1784044802100
+      },
+      "dm": {
+        "observedAt": 1784044803000,
+        "receivedAt": 1784044803100
+      }
+    },
     "items": [
       {
         "threadId": "thread_comment_100",

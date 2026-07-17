@@ -1702,7 +1702,36 @@ function normalizeDailyUsage(input) {
   if (quotas) out.quotas = quotas;
   if (inspirationSummary) out.inspirationSummary = inspirationSummary;
   if (firstPost) out.firstPost = firstPost;
+  const slowStart = cleanSlowStart(input.slowStart);
+  if (slowStart) out.slowStart = slowStart;
   if (windows) out.windows = windows;
+  return out;
+}
+
+/**
+ * 慢启动字段的第二道白名单（change account-level-slow-start）：与 ui-event-lines.ts 的
+ * sanitizeSlowStart 同款校验。这两道都是手写对象组装、**typecheck 一道都抓不到**——
+ * 字段不进名单即静默丢弃，症状是「云端发了、界面不显示、没有任何报错」。
+ * 校验风格照同函数内的 quotaLevel / firstPost。任一项不合法 → 整块丢弃（不渲染 > 渲染半真）。
+ */
+function cleanSlowStart(input) {
+  if (!input || typeof input !== 'object') return null;
+  if (!['off', 'active', 'graduated'].includes(input.state)) return null;
+  if (typeof input.eligible !== 'boolean') return null;
+  if (!Number.isInteger(input.totalDays) || input.totalDays <= 0) return null;
+  const out = { state: input.state, totalDays: input.totalDays, eligible: input.eligible };
+  if (input.state === 'active') {
+    if (!Number.isInteger(input.day) || input.day < 1 || input.day > input.totalDays) return null;
+    // binding 缺省即无从判断「勾了到底压没压」→ 整块丢弃，绝不默认成 true（那等于宣称在压低配额）。
+    if (typeof input.binding !== 'boolean') return null;
+    out.day = input.day;
+    out.binding = input.binding;
+  }
+  if (typeof input.since === 'number' && Number.isFinite(input.since)) out.since = input.since;
+  if (input.ineligibleReason !== undefined) {
+    if (!['platform_unsupported', 'platform_unknown', 'globally_disabled'].includes(input.ineligibleReason)) return null;
+    out.ineligibleReason = input.ineligibleReason;
+  }
   return out;
 }
 
@@ -3980,6 +4009,22 @@ ipcMain.handle('interaction:draft:update', (_event, raw) => handleInteractionIpc
   });
 }));
 
+// 账号级慢启动开关（change account-level-slow-start）：**只提交 envKey + enabled**。
+// accountId 由云端经活会话映射解析、客户端永不提交（红线：accountId is never accepted as an
+// unverified cross-customer selector）。边缘未连接时云端如实回 409 —— 那不是缺陷：慢启动状态
+// 本身就搭在 ui.snapshot.dailyUsage 上，边缘离线时这张卡本来就不更新、开关本来就该禁用。
+ipcMain.handle('slow-start:set', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'enabled']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  if (typeof args.enabled !== 'boolean') throw new Error('enabled 不合法');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/slow-start`,
+    method: 'PUT',
+    body: { enabled: args.enabled },
+  });
+}));
+
 for (const action of ['approve', 'regenerate']) {
   ipcMain.handle(`interaction:${action}`, (_event, raw) => handleInteractionIpc(async () => {
     const args = interactionArgs(raw, new Set(['envKey', 'jobId', 'expectedVersion']));
@@ -4050,6 +4095,21 @@ ipcMain.handle('interaction:sync', (_event, raw) => handleInteractionIpc(async (
     pathname: `/environments/${encodeURIComponent(envKey)}/interactions/sync`,
     method: 'POST',
     body: { channel, scopeExternalId },
+    idempotencyKey,
+  });
+}));
+
+ipcMain.handle('interaction:test-reset', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'channel', 'idempotencyKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const channel = String(args.channel || '');
+  if (!INTERACTION_CHANNELS.has(channel)) throw new Error('channel 不合法');
+  const idempotencyKey = interactionIdempotencyKey(args.idempotencyKey);
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/interactions/test-reset`,
+    method: 'POST',
+    body: { channel },
     idempotencyKey,
   });
 }));

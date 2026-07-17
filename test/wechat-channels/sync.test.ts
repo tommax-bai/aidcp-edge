@@ -285,6 +285,48 @@ test('wechat dm sync: global history pagination groups sessions and preserves un
   });
 });
 
+test('wechat dm sync: session-info enriches a history-only participant before the batch is published', async () => {
+  await withState(async (state) => {
+    const api = {
+      listDmUpdates: async () => ({
+        sessions: [{
+          externalId: 'thread-1',
+          participant: { externalId: 'peer-1', displayName: null, avatarUrl: null },
+          updatedAt: 1_700_000_000_000,
+        }],
+        messages: [dmMessage('m-1')],
+        nextCursor: null,
+        hasMore: false,
+      }),
+      getDmParticipantInfo: async (_session: unknown, sessionIds: string[]) => {
+        assert.deepEqual(sessionIds, ['thread-1']);
+        return [{
+          sessionExternalId: 'thread-1',
+          participant: { externalId: 'peer-1', displayName: '客户昵称', avatarUrl: 'https://example.invalid/avatar' },
+        }];
+      },
+    } as unknown as WechatChannelsApiClient;
+    const batches: InteractionSyncBatchPayload[] = [];
+    const sync = new WechatDmSynchronizer({
+      envKey: SCOPE.envKey,
+      accountId: SCOPE.accountId,
+      api,
+      state,
+      getSession: () => SESSION,
+      getOwnIdentityExternalId: () => SCOPE.accountId,
+      publishBatch: async (batch) => {
+        batches.push(batch);
+        return accepted(batch);
+      },
+    });
+
+    await sync.sync(request('dm', null));
+
+    assert.equal(batches[0].threads[0].participant?.displayName, '客户昵称');
+    assert.equal(batches[0].threads[0].participant?.avatarUrl, 'https://example.invalid/avatar');
+  });
+});
+
 test('wechat dm sync: an observed empty session page publishes a Cloud-visible zero-item checkpoint batch', async () => {
   await withState(async (state) => {
     const api = {

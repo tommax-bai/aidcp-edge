@@ -284,6 +284,8 @@ test('wechat read probes: capabilities open independently while unverified write
     dmSendTextEnabled: true,
   };
   const breaker = new WechatEndpointCircuitBreaker();
+  breaker.open('postList');
+  breaker.open('commentList');
   const state = new WechatCapabilityState(flags, breaker);
   state.applyRemoteControls({
     accountId: 'env-a', envKey: 'env-a', version: 1,
@@ -307,7 +309,9 @@ test('wechat read probes: capabilities open independently while unverified write
     requestContext: { version: 1, aid: 'aid-test', pageUrl: 'https://channels.weixin.qq.com/platform/post/list', commonBody: { logFinderId: 'finder-test', logFinderUin: 'uin-test', rawKeyBuff: 'raw-key-test', pluginSessionId: null, reqScene: 7, scene: 7 }, headers: { fingerprintDeviceId: 'device-test', wechatUin: 'uin-test' } },
   };
 
-  assert.equal(await runner.probeEnabledReads(session), true);
+  assert.deepEqual(await runner.probeEnabledReads(session), { ok: true });
+  assert.equal(breaker.isOpen('postList'), false);
+  assert.equal(breaker.isOpen('commentList'), false);
   assert.deepEqual(state.effective({ authActive: true, identityMatches: true }), {
     commentsRead: true,
     commentsReply: false,
@@ -320,6 +324,24 @@ test('wechat read probes: capabilities open independently while unverified write
     ['commentsReply', 'gated'],
     ['dmRead', 'failed'],
   ]);
+});
+
+test('wechat endpoint breaker expires by TTL and omits expired endpoints from snapshots', () => {
+  let now = 100;
+  const breaker = new WechatEndpointCircuitBreaker({ ttlMs: 10, nowImpl: () => now });
+  breaker.open('postList');
+  assert.equal(breaker.isOpen('postList'), true);
+  assert.equal(breaker.capabilityAvailable('commentsRead'), false);
+  assert.deepEqual(breaker.snapshot(), ['postList']);
+
+  now = 110;
+  assert.equal(breaker.isOpen('postList'), false);
+  assert.equal(breaker.capabilityAvailable('commentsRead'), true);
+  assert.deepEqual(breaker.snapshot(), []);
+
+  breaker.open('commentList');
+  breaker.reset();
+  assert.deepEqual(breaker.snapshot(), []);
 });
 
 test('wechat runtime state: checkpoints and reply keys are isolated by account as well as environment/profile', async () => {

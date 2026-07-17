@@ -31,10 +31,10 @@ export class WechatDmSynchronizer {
 
   async sync(request: InteractionSyncRequestPayload): Promise<void> {
     if (request.scopeExternalId) {
-      await this.syncThread(
+      const [session] = await this.enrichParticipants([
         { externalId: request.scopeExternalId, participant: null, updatedAt: request.requestedAt },
-        request.requestId,
-      );
+      ]);
+      await this.syncThread(session, request.requestId);
       return;
     }
     const sessionCheckpoint = await this.options.state.getCheckpoint('dm', null);
@@ -47,7 +47,7 @@ export class WechatDmSynchronizer {
         this.options.getOwnIdentityExternalId(),
       );
       assertCursorProgress({ endpoint: 'dmHistory', cursorBefore: cursor, cursorAfter: page.nextCursor, hasMore: page.hasMore, seen });
-      const sessions = dedupeBy(page.sessions, (session) => session.externalId);
+      const sessions = await this.enrichParticipants(dedupeBy(page.sessions, (session) => session.externalId));
       for (const session of sessions) {
         const messages = dedupeBy(
           page.messages.filter((message) => message.threadExternalId === session.externalId),
@@ -84,6 +84,21 @@ export class WechatDmSynchronizer {
       if (!page.hasMore) return;
     }
     throw new Error('dm history pagination exceeded the bounded page limit');
+  }
+
+  private async enrichParticipants(sessions: WechatDmSession[]): Promise<WechatDmSession[]> {
+    const missingIds = sessions
+      .filter((session) => !session.participant?.displayName)
+      .map((session) => session.externalId);
+    if (missingIds.length === 0) return sessions;
+    const infoBySession = new Map(
+      (await this.options.api.getDmParticipantInfo(this.options.getSession(), missingIds))
+        .map((info) => [info.sessionExternalId, info.participant] as const),
+    );
+    return sessions.map((session) => {
+      const participant = infoBySession.get(session.externalId);
+      return participant ? { ...session, participant } : session;
+    });
   }
 
   private async syncThread(session: WechatDmSession, requestId: string | null): Promise<void> {

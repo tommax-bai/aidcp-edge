@@ -13,7 +13,7 @@ const renderer = readFileSync(join(electronDir, 'renderer/interaction-workspace.
 const namedChannels = [
   'interaction:list', 'interaction:detail', 'interaction:draft:update', 'interaction:approve',
   'interaction:regenerate', 'interaction:send', 'interaction:ignore', 'interaction:escalate',
-  'interaction:sync', 'interaction:auth:reopen', 'interaction:browser:control', 'interaction:reads:cancel',
+  'interaction:sync', 'interaction:test-reset', 'interaction:auth:reopen', 'interaction:browser:control', 'interaction:reads:cancel',
   'interaction:read-controls:update', 'interaction:notify',
 ];
 
@@ -38,6 +38,7 @@ test('main 锁定 customer-auth 路径和方法，并对白名单参数与 envKe
   assert.match(main, /method: 'PUT',[\s\S]*body: \{ expectedVersion, finalText: args\.finalText \}/, '草稿写入锁定 PUT 与 CAS body');
   assert.match(main, /interaction:send[\s\S]*body: \{ expectedVersion \},[\s\S]*idempotencyKey/, '发送必须同时带 CAS 与幂等键');
   assert.match(main, /interaction:sync[\s\S]*idempotencyKey/, '同步必须带幂等键');
+  assert.match(main, /interaction:test-reset[\s\S]*body: \{ channel \},[\s\S]*idempotencyKey/, '测试重置只允许单渠道并必须带幂等键');
   assert.match(main, /interaction:auth:reopen[\s\S]*idempotencyKey/, '重新登录动作必须带幂等键');
   assert.match(main, /interaction:browser:control[\s\S]*body: \{ action \},[\s\S]*idempotencyKey/, '浏览器显隐只允许 open\/close 且必须带幂等键');
   assert.match(main, /\/interactions\/browser/, '浏览器控制路径由 main 固定组装');

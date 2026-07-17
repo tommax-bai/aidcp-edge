@@ -11,6 +11,7 @@ import {
 } from './request-descriptors.js';
 import {
   parseComments,
+  parseDmParticipantInfo,
   parseDmSessions,
   parseDmUpdates,
   parseIdentity,
@@ -20,6 +21,7 @@ import {
 import type {
   WechatComment,
   WechatDmMessage,
+  WechatDmParticipantInfo,
   WechatDmSession,
   WechatDmUpdatePage,
   WechatIdentity,
@@ -125,6 +127,23 @@ export class WechatChannelsApiClient {
     return this.call('dmHistory', { cookie: cursor ?? '' }, session, parseDmSessions);
   }
 
+  async getDmParticipantInfo(
+    session: WechatSessionMaterial,
+    sessionExternalIds: readonly string[],
+  ): Promise<WechatDmParticipantInfo[]> {
+    const uniqueIds = [...new Set(sessionExternalIds.map((id) => id.trim()).filter(Boolean))];
+    const participants: WechatDmParticipantInfo[] = [];
+    for (let offset = 0; offset < uniqueIds.length; offset += 50) {
+      participants.push(...await this.call(
+        'dmSessionInfo',
+        { sessionId: uniqueIds.slice(offset, offset + 50) },
+        session,
+        parseDmParticipantInfo,
+      ));
+    }
+    return participants;
+  }
+
   listDmUpdates(
     session: WechatSessionMaterial,
     cursor: string | null,
@@ -184,20 +203,41 @@ export class WechatChannelsApiClient {
     session: WechatSessionMaterial | undefined,
     parse: (body: unknown, endpoint: string) => T,
   ): Promise<T> {
+    let platform: PlatformEnvelope;
     try {
-      const platform = await this.requestJson(endpoint, payload, session);
+      platform = await this.requestJson(endpoint, payload, session);
+    } catch (error) {
+      this.throwEndpointError(endpoint, error, false);
+    }
+    try {
       return parse(platform.body, endpoint);
     } catch (error) {
-      const safe = asWechatChannelsError(error, endpoint, true);
-      if (safe.category === 'schema_changed') {
-        try {
-          this.onSchemaChanged?.(endpoint, safe);
-        } catch {
-          // Circuit-breaker observers cannot replace the stable endpoint error.
-        }
-      }
-      throw safe;
+      // Parsing happens only after a platform response exists, so parser-local schema errors
+      // must not retain their default pre-dispatch evidence.
+      this.throwEndpointError(endpoint, error, true);
     }
+  }
+
+  private throwEndpointError(endpoint: WechatChannelsEndpoint, error: unknown, promoteDispatched: boolean): never {
+    const classified = asWechatChannelsError(error, endpoint, true);
+    const safe = promoteDispatched && !classified.requestDispatched
+      ? new WechatChannelsError(
+          classified.category,
+          classified.endpoint,
+          classified.message,
+          classified.retryable,
+          classified.retryAfterMs,
+          true,
+        )
+      : classified;
+    if (safe.category === 'schema_changed') {
+      try {
+        this.onSchemaChanged?.(endpoint, safe);
+      } catch {
+        // Circuit-breaker observers cannot replace the stable endpoint error.
+      }
+    }
+    throw safe;
   }
 
   private async requestJson(
@@ -227,12 +267,12 @@ export class WechatChannelsApiClient {
     payload: Record<string, unknown>,
     session: WechatSessionMaterial | undefined,
   ): Promise<PlatformEnvelope> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     if (!session) {
       throw new WechatChannelsError('auth_expired', endpoint, 'Authorized session is required', false, null, false);
     }
     const serialized = serializeWechatRequest(endpoint, payload, session, { now: this.now });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       let response: Response;
       try {
@@ -259,7 +299,7 @@ export class WechatChannelsApiClient {
         body = JSON.parse(text);
       } catch {
         if (!response.ok) throw classifyHttpFailure({ endpoint, status: response.status, retryAfterMs, requestDispatched: true });
-        throw new WechatChannelsError('schema_changed', endpoint, 'WeChat Channels returned non-JSON data', false, null, true);
+        throw new WechatChannelsError('transient_network', endpoint, 'WeChat Channels returned a temporary non-JSON response', true, null, true);
       }
       const { code, message } = platformStatus(body);
       if (!response.ok || (code !== null && String(code) !== '0')) {
@@ -286,7 +326,7 @@ function positiveInt(value: number | undefined, fallback: number): number {
 async function readLimitedText(response: Response, maxBytes: number, endpoint: string): Promise<string> {
   const length = Number(response.headers.get('content-length'));
   if (Number.isFinite(length) && length > maxBytes) {
-    throw new WechatChannelsError('schema_changed', endpoint, 'WeChat Channels response exceeded the size limit', false, null, true);
+    throw new WechatChannelsError('transient_network', endpoint, 'WeChat Channels response exceeded the size limit', true, null, true);
   }
   if (!response.body) return '';
   const reader = response.body.getReader();
@@ -298,7 +338,7 @@ async function readLimitedText(response: Response, maxBytes: number, endpoint: s
     total += value.byteLength;
     if (total > maxBytes) {
       await reader.cancel().catch(() => undefined);
-      throw new WechatChannelsError('schema_changed', endpoint, 'WeChat Channels response exceeded the size limit', false, null, true);
+      throw new WechatChannelsError('transient_network', endpoint, 'WeChat Channels response exceeded the size limit', true, null, true);
     }
     chunks.push(value);
   }

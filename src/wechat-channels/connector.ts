@@ -135,6 +135,9 @@ export class WechatChannelsConnector implements InteractionConnector {
       .catch(() => undefined)
       .then(async () => {
         try {
+          if (request.reason === 'test_reset') {
+            await this.options.state.resetReadState(request.channel);
+          }
           if (request.channel === 'comment') await this.comments.sync(request);
           else await this.dms.sync(request);
         } catch (error) {

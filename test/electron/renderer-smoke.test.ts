@@ -10,6 +10,7 @@ import { JSDOM, type DOMWindow } from 'jsdom';
 const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
+const styles = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
 const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
 
@@ -20,6 +21,13 @@ after(() => {
 });
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
 
 function makeStatus(over: Record<string, unknown> = {}) {
   return {
@@ -56,6 +64,7 @@ interface Stub {
   adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
   adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string; requiresAdminAssignment?: boolean; assignmentHandledByMain?: boolean; rosterJoinedByMain?: boolean }>;
   adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string; cleanupPending?: boolean; message?: string }>;
+  setSlowStart: (opts: { envKey: string; enabled: boolean }) => Promise<unknown>;
 }
 
 function makeStub(overrides: Partial<Stub> = {}): Stub {
@@ -80,6 +89,7 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     adsTemplates: async () => [{ key: 'win11-intel', label: 'Windows · 8核 8G' }],
     adsCreateEnv: async () => ({ ok: true, template: 'win11-intel' }),
     adsDeleteEnv: async () => ({ ok: true }),
+    setSlowStart: async () => ({ ok: false, data: { message: '测试桩未配置慢启动写入' } }),
     ...overrides,
   };
 }
@@ -742,4 +752,266 @@ test('拉列表回填：截断结果绝不回填（不因缺数据误改在用�
   for (let i = 0; i < 6; i++) await tick();
   const reconciled = savedEnvsOf(saved, 'p1').some((e) => e.name === '真名甲');
   assert.equal(reconciled, false, '截断拉取不得回填名字（缺数据不自残）');
+});
+
+// ── change account-level-slow-start：慢启动脚注行接线 ──
+
+function slowStartStub(overrides: Partial<Stub> = {}, platform = 'facebook'): Stub {
+  return makeStub({
+    getSettings: async () => ({
+      provider: 'adspower', adsProfileId: '', adsApiKey: '', adsApiBase: '',
+      browserParkingMode: 'edge-strip', adsDownloadUrl: 'https://x', platform,
+    }),
+    ...overrides,
+  });
+}
+
+test('慢启动行：静态节点在 #daily-summary 内、#quota-windows 之后', () => {
+  const dom = new JSDOM(html);
+  const summary = dom.window.document.querySelector('#daily-summary');
+  const row = summary?.querySelector('#slow-start-row');
+  assert.ok(row, '#slow-start-row 应在 #daily-summary 内');
+  assert.ok(row?.querySelector('#slow-start-toggle'), '勾选框应是静态节点（JS 只切 hidden/checked，不建元素）');
+  // 对比 #quota-windows：windows 为空时整块 hidden + 清空，而慢启动正是「启动新号之前」要设的。
+  const windows = summary?.querySelector('#quota-windows');
+  assert.ok(windows && row && windows.compareDocumentPosition(row) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+    '慢启动行应排在 #quota-windows 之后');
+});
+
+test('慢启动行：常驻说明使用新的 7 天/账号档位短文案', () => {
+  const copy = new JSDOM(html).window.document.querySelector('.slow-start-copy')?.textContent?.trim();
+  assert.equal(copy, '开启后头 7 天按曲线逐日放开量，7天后按账号档位运行。');
+});
+
+test('慢启动帮助：问号可聚焦，hover/focus 展示 7×6 Facebook 曲线限额表', () => {
+  const dom = new JSDOM(html);
+  const trigger = dom.window.document.querySelector('#slow-start-help-trigger');
+  const panel = dom.window.document.querySelector('#slow-start-help-panel');
+  assert.equal(trigger?.tagName, 'BUTTON');
+  assert.equal(trigger?.getAttribute('type'), 'button');
+  assert.match(trigger?.getAttribute('aria-label') || '', /Facebook 慢启动 7 天限额/);
+  assert.match(panel?.querySelector('strong')?.textContent || '', /Facebook 慢启动曲线限额/);
+  assert.match(styles, /\.slow-start-help-trigger\s*\{[^}]*width:\s*14px; height:\s*14px;[^}]*font-size:\s*10px;/s);
+  assert.match(styles, /\.slow-start-help-panel\s*\{[^}]*left:\s*-120px;/s);
+  assert.match(styles, /\.slow-start-help:hover\s+\.slow-start-help-panel/);
+  assert.match(styles, /\.slow-start-help:focus-within\s+\.slow-start-help-panel/);
+
+  const rows = Array.from(panel?.querySelectorAll('tbody tr') || []).map((row) =>
+    Array.from(row.children).map((cell) => cell.textContent?.trim()),
+  );
+  assert.deepEqual(rows, [
+    ['第 1 天', '20', '2', '0', '1', '0', '0'],
+    ['第 2 天', '25', '3', '0', '1', '0', '0'],
+    ['第 3 天', '35', '6', '1', '2', '0', '1'],
+    ['第 4 天', '40', '8', '2', '2', '0', '1'],
+    ['第 5 天', '50', '12', '3', '3', '1', '2'],
+    ['第 6 天', '60', '15', '4', '4', '1', '2'],
+    ['第 7 天', '70', '18', '5', '5', '1', '3'],
+  ]);
+});
+
+test('慢启动行：字段缺省 → 整行 hidden（绝不默认成「关」）', async () => {
+  const w = await boot(slowStartStub({ getStatus: async () => makeStatus({ cloud: 'connected' }) }));
+  assert.ok(hidden($(w, '#slow-start-row')), '云端还没说 → 整行不渲染');
+});
+
+test('慢启动行：active 态渲染徽章与勾选', async () => {
+  const w = await boot(slowStartStub({
+    getStatus: async () => makeStatus({
+      cloud: 'connected',
+      dailyUsage: { asOf: new Date().toISOString(), totals: {}, slowStart: { state: 'active', day: 3, totalDays: 7, binding: true, eligible: true } },
+    }),
+  }));
+  assert.ok(!hidden($(w, '#slow-start-row')));
+  assert.equal(($(w, '#slow-start-toggle') as unknown as HTMLInputElement).checked, true);
+  assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 3\/7 天/);
+});
+
+test('慢启动行：小红书即使收到 active 快照也整行隐藏', async () => {
+  const w = await boot(slowStartStub({
+    getStatus: async () => makeStatus({
+      cloud: 'connected',
+      dailyUsage: { asOf: new Date().toISOString(), totals: {}, slowStart: { state: 'active', day: 3, totalDays: 7, binding: true, eligible: true } },
+    }),
+  }, 'xiaohongshu'));
+  assert.ok(hidden($(w, '#slow-start-row')));
+  assert.equal($(w, '#slow-start-row').getAttribute('aria-busy'), null);
+});
+
+test('慢启动行：binding=false 如实标注「不额外限制」，不宣称在压低配额', async () => {
+  const w = await boot(slowStartStub({
+    getStatus: async () => makeStatus({
+      cloud: 'connected',
+      dailyUsage: { asOf: new Date().toISOString(), totals: {}, slowStart: { state: 'active', day: 5, totalDays: 7, binding: false, eligible: true } },
+    }),
+  }));
+  assert.match($(w, '#slow-start-badge').textContent || '', /当前档位已更严，不额外限制/);
+});
+
+test('慢启动行：eligible=false → 勾选禁用 + 如实说明', async () => {
+  const w = await boot(slowStartStub({
+    getStatus: async () => makeStatus({
+      cloud: 'connected',
+      dailyUsage: { asOf: new Date().toISOString(), totals: {}, slowStart: { state: 'off', totalDays: 7, eligible: false, ineligibleReason: 'platform_unsupported' } },
+    }),
+  }));
+  assert.equal(($(w, '#slow-start-toggle') as unknown as HTMLInputElement).disabled, true);
+  assert.match($(w, '#slow-start-reason').textContent || '', /该平台暂不支持/);
+});
+
+test('慢启动行：开启后立即显示等待态，旧快照不回拨，成功回执当场对齐真态与今日计划', async () => {
+  const write = deferred<unknown>();
+  let pushStatus: ((status: unknown) => void) | undefined;
+  const initial = makeStatus({
+    cloud: 'connected',
+    dailyUsage: {
+      asOf: new Date().toISOString(),
+      totals: { view: 3 },
+      quotas: { view: 80 },
+      windows: { day: { totals: { view: 3 }, quotas: { view: 80 }, saturated: [] } },
+      slowStart: { state: 'off', totalDays: 7, eligible: true },
+    },
+  });
+  const w = await boot(slowStartStub({
+    onStatusUpdate: (cb) => { pushStatus = cb; },
+    getStatus: async () => initial,
+    setSlowStart: async () => write.promise,
+  }));
+  const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  const row = $(w, '#slow-start-row');
+
+  toggle.checked = true;
+  toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.equal(toggle.checked, true);
+  assert.equal(toggle.disabled, true);
+  assert.equal(row.getAttribute('aria-busy'), 'true');
+  assert.ok(row.classList.contains('is-pending'));
+  assert.match($(w, '#slow-start-badge').textContent || '', /正在开启/);
+  assert.doesNotMatch($(w, '#slow-start-badge').textContent || '', /第 1\/7 天/, 'pending 不得本地冒充 D1');
+  assert.match($(w, '#slow-start-reason').textContent || '', /等待云端确认/);
+
+  pushStatus?.(initial); // PUT 仍在途时到达写前旧快照
+  await tick();
+  assert.equal(toggle.checked, true, '旧快照不得把目标开关拨回 off');
+  assert.ok(row.classList.contains('is-pending'), '旧快照不得清掉等待态');
+
+  write.resolve({
+    ok: true,
+    data: {
+      data: {
+        envKey: '__local__',
+        slowStart: { state: 'active', day: 1, totalDays: 7, since: Date.now(), binding: true, eligible: true },
+        dayQuotas: { view: 20 },
+      },
+    },
+  });
+  await tick();
+  assert.equal(row.hasAttribute('aria-busy'), false);
+  assert.equal(row.classList.contains('is-pending'), false);
+  assert.equal(toggle.checked, true);
+  assert.equal(toggle.disabled, false);
+  assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 1\/7 天/);
+  assert.equal($(w, '#views-cap').textContent, '/20', '成功回执的 dayQuotas 应当场更新，不等下一次快照');
+});
+
+test('慢启动行：关闭失败后回到权威开启态，并保留云端失败原因', async () => {
+  const w = await boot(slowStartStub({
+    getStatus: async () => makeStatus({
+      cloud: 'connected',
+      dailyUsage: {
+        asOf: new Date().toISOString(),
+        totals: { view: 3 },
+        quotas: { view: 20 },
+        slowStart: { state: 'active', day: 3, totalDays: 7, binding: true, eligible: true },
+      },
+    }),
+    setSlowStart: async () => ({ ok: false, data: { error: { code: 'EDGE_OFFLINE', message: '该环境当前未连接，暂时无法更改。' } } }),
+  }));
+  const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  toggle.checked = false;
+  toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.match($(w, '#slow-start-badge').textContent || '', /正在关闭/);
+
+  await tick();
+  assert.equal(toggle.checked, true, '失败后必须回到未被篡改的权威 active 状态');
+  assert.equal(toggle.disabled, false);
+  assert.equal($(w, '#slow-start-row').classList.contains('is-pending'), false);
+  assert.match($(w, '#slow-start-badge').textContent || '', /第 3\/7 天/);
+  assert.match($(w, '#slow-start-reason').textContent || '', /当前未连接/);
+  assert.ok($(w, '#slow-start-reason').classList.contains('is-error'));
+});
+
+test('慢启动行：A 环境写入反馈不串到 B，A 回执也不改写当前 B', async () => {
+  const writeA = deferred<unknown>();
+  let pushStatus: ((status: unknown) => void) | undefined;
+  const statusFor = (envId: string, state: 'off' | 'active') => makeStatus({
+    envId,
+    envName: `环境 ${envId}`,
+    cloud: 'connected',
+    edge: 'running',
+    session: 'running',
+    updatedAt: new Date().toISOString(),
+    dailyUsage: {
+      asOf: new Date().toISOString(),
+      totals: { view: 1 },
+      quotas: { view: state === 'active' ? 20 : 80 },
+      slowStart: state === 'active'
+        ? { state: 'active', day: 1, totalDays: 7, binding: true, eligible: true }
+        : { state: 'off', totalDays: 7, eligible: true },
+    },
+  });
+  const w = await boot(slowStartStub({
+    onStatusUpdate: (cb) => { pushStatus = cb; },
+    getStatus: async () => statusFor('A', 'off'),
+    setSlowStart: async ({ envKey }) => envKey === 'A' ? writeA.promise : ({ ok: false }),
+  }));
+  const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  toggle.checked = true;
+  toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.match($(w, '#slow-start-badge').textContent || '', /正在开启/);
+
+  pushStatus?.(statusFor('B', 'off'));
+  await tick();
+  const rowB = w.document.querySelector('.rail-row[data-env-id="B"]') as unknown as HTMLElement;
+  assert.ok(rowB, 'B 环境应进入左栏');
+  rowB.dispatchEvent(new w.Event('click', { bubbles: true }));
+  assert.equal($(w, '#slow-start-row').classList.contains('is-pending'), false);
+  assert.equal(toggle.checked, false);
+  assert.doesNotMatch($(w, '#slow-start-reason').textContent || '', /等待云端确认/);
+
+  writeA.resolve({
+    ok: true,
+    data: { data: { envKey: 'A', slowStart: { state: 'active', day: 1, totalDays: 7, binding: true, eligible: true }, dayQuotas: { view: 20 } } },
+  });
+  await tick();
+  assert.equal(toggle.checked, false, 'A 回执到达时当前 B 仍应保持 off');
+
+  const rowA = w.document.querySelector('.rail-row[data-env-id="A"]') as unknown as HTMLElement;
+  rowA.dispatchEvent(new w.Event('click', { bubbles: true }));
+  assert.equal(toggle.checked, true, '切回 A 后应看到 A 的成功写后真态');
+  assert.match($(w, '#slow-start-badge').textContent || '', /第 1\/7 天/);
+});
+
+// 这条守的是 design D8 点名的那个坑：整卡点击委托只认 closest('button')，checkbox / label 都不是
+// button → 不 stopPropagation 就会点勾选框连带展开/收起「今日节奏」。更难看的是 <label> 包 <input>
+// 时点文字合成两次冒泡 → 切换两次 → 净效果为零，而直接点滑块只冒泡一次 → 切换一次。
+// **同一控件点在不同位置行为不同，人工点测会当「偶发」放过**。
+test('慢启动行：点勾选框 MUST NOT 连带展开/收起「今日节奏」', async () => {
+  const w = await boot(slowStartStub({
+    getStatus: async () => makeStatus({
+      cloud: 'connected',
+      dailyUsage: {
+        asOf: new Date().toISOString(),
+        totals: { view: 3 },
+        windows: { day: { totals: { view: 3 }, quotas: { view: 20 }, saturated: [] } },
+        slowStart: { state: 'off', totalDays: 7, eligible: true },
+      },
+    }),
+  }));
+  const summary = $(w, '#daily-summary');
+  const before = summary.classList.contains('expanded');
+  // 点包住 input 的 <label>（最容易出双次冒泡的那个位置）
+  $(w, '#slow-start-toggle-wrap').dispatchEvent(new w.Event('click', { bubbles: true }));
+  await tick();
+  assert.equal(summary.classList.contains('expanded'), before, '点慢启动开关不得改变今日节奏的展开态');
 });

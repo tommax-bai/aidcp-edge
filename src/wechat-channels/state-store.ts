@@ -169,6 +169,24 @@ export class WechatRuntimeStateStore {
     return this.state.threadSources[`${channel}:${externalThreadId}`];
   }
 
+  async resetReadState(channel: InteractionChannel): Promise<{ checkpoints: number; threadSources: number }> {
+    return this.mutate((state) => {
+      let checkpoints = 0;
+      let threadSources = 0;
+      for (const key of Object.keys(state.checkpoints)) {
+        if (!key.startsWith(`${channel}:`)) continue;
+        delete state.checkpoints[key];
+        checkpoints++;
+      }
+      for (const key of Object.keys(state.threadSources)) {
+        if (!key.startsWith(`${channel}:`)) continue;
+        delete state.threadSources[key];
+        threadSources++;
+      }
+      return { checkpoints, threadSources };
+    });
+  }
+
   async claimReplyExecution(idempotencyKey: string, attemptId: string, now: number): Promise<ReplyExecutionClaim> {
     return this.mutate((state) => {
       if (replyBindingConflicts(state, idempotencyKey, attemptId)) return { status: 'conflict' };

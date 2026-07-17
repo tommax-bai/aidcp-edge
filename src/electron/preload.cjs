@@ -86,9 +86,12 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   interactionIgnore: (args) => ipcRenderer.invoke('interaction:ignore', args),
   interactionEscalate: (args) => ipcRenderer.invoke('interaction:escalate', args),
   interactionSync: (args) => ipcRenderer.invoke('interaction:sync', args),
+  interactionTestReset: (args) => ipcRenderer.invoke('interaction:test-reset', args),
   interactionReopenAuth: (args) => ipcRenderer.invoke('interaction:auth:reopen', args),
   interactionBrowserControl: (args) => ipcRenderer.invoke('interaction:browser:control', args),
   interactionUpdateReadControls: (args) => ipcRenderer.invoke('interaction:read-controls:update', args),
   interactionNotify: (args) => ipcRenderer.invoke('interaction:notify', args),
   interactionCancelReads: (envKey) => ipcRenderer.invoke('interaction:reads:cancel', { envKey }),
+  // 账号级慢启动（change account-level-slow-start）：只传 envKey + enabled，accountId 由云端解析。
+  setSlowStart: (args) => ipcRenderer.invoke('slow-start:set', args),
 });

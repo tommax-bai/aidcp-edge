@@ -1390,6 +1390,33 @@ body { margin: 0; }
   color: #4b5670;
   font: 12px/1.6 Consolas, "SFMono-Regular", monospace;
 }
+.iw-test-reset {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 14px;
+  margin: 10px 0 8px;
+  padding: 10px;
+  border: 1px solid #efc4c4;
+  border-radius: 9px;
+  background: #fff8f8;
+}
+.iw-test-reset.hidden { display: none; }
+.iw-test-reset-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.iw-test-reset-copy strong { color: #7f1d1d; font-size: 12px; }
+.iw-test-reset-copy span,
+.iw-test-reset p { color: #6b5660; font-size: 10.5px; line-height: 16px; }
+.iw-test-reset-actions { display: flex; align-items: center; gap: 6px; }
+.iw-test-reset-actions button {
+  border: 1px solid #e3aaaa;
+  border-radius: 7px;
+  padding: 5px 9px;
+  color: #9f2525;
+  background: #fff;
+  font: 600 10.5px/15px inherit;
+  cursor: pointer;
+}
+.iw-test-reset-actions button:disabled { cursor: default; opacity: .48; }
+.iw-test-reset p { grid-column: 1 / -1; margin: 0; }
 .log-entry { padding: 3px 0; border-bottom: 1px solid #f1f4fa; }
 .log-entry:last-child { border-bottom: none; }
 .log-time { color: var(--faint); margin-right: 8px; font-size: 11px; }
@@ -2131,6 +2158,7 @@ body { margin: 0; }
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .summary-time { padding-top: 1px; }
+  .slow-start-help-panel { left: -120px; }
 }
 
 /* ═══ 多环境 fleet（edge-fleet-rail-env-management：环境管理收口于左栏）═══ */
@@ -2568,18 +2596,18 @@ body { margin: 0; }
 .shell.interaction-mode {
   width: auto;
   max-width: none;
-  height: calc(100vh - 46px);
+  min-height: calc(100vh - 46px);
   margin: 0;
   padding-top: 12px;
   padding-bottom: 12px;
-  overflow: hidden;
+  overflow: visible;
 }
 .interaction-workspace {
   container-type: inline-size;
   display: flex;
   flex: 1;
   min-width: 0;
-  min-height: 0;
+  min-height: calc(100vh - 70px);
   flex-direction: column;
   gap: 9px;
 }
@@ -3074,21 +3102,21 @@ body { margin: 0; }
 @keyframes iw-loading { 0%, 100% { opacity: .35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-2px); } }
 
 @container (max-width: 640px) {
-  .iw-inbox { grid-template-columns: 1fr; overflow-y: auto; }
+  .iw-inbox { display: flex; flex: none; flex-direction: column; overflow: visible; }
   .iw-list-pane { min-height: 210px; max-height: 250px; }
   .iw-detail { min-height: 350px; overflow: visible; }
   .iw-overview { grid-template-columns: 1fr; }
   .iw-overview-actions { justify-content: flex-start; }
   .iw-settings-grid { grid-template-columns: 1fr; }
 }
-@media (max-width: 700px) {
-  .shell.interaction-mode { height: auto; min-height: calc(100vh - 46px); overflow-y: visible; }
-  .interaction-workspace { min-height: calc(100vh - 70px); }
-  .iw-inbox { display: flex; flex: none; flex-direction: column; overflow: visible; }
-  .iw-list-pane { min-height: 210px; max-height: 250px; }
-  .iw-detail { min-height: 360px; overflow: visible; }
-  .iw-overview { grid-template-columns: 1fr; }
-  .iw-overview-actions { justify-content: flex-start; }
+@supports not (container-type: inline-size) {
+  @media (max-width: 700px) {
+    .iw-inbox { display: flex; flex: none; flex-direction: column; overflow: visible; }
+    .iw-list-pane { min-height: 210px; max-height: 250px; }
+    .iw-detail { min-height: 360px; overflow: visible; }
+    .iw-overview { grid-template-columns: 1fr; }
+    .iw-overview-actions { justify-content: flex-start; }
+  }
 }
 @media (max-width: 520px) {
   .iw-overview { padding: 10px 11px; }
@@ -3224,3 +3252,65 @@ body { margin: 0; }
   .curated-create-modes { grid-template-columns: 1fr; }
   .content-workspace .publish-preview-images { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* 慢启动脚注行（change account-level-slow-start）：常驻「今日节奏」卡内、#quota-windows 之后。
+   块级独占一行，不与标题区争空间 → Windows @640 窄窗不破版。 */
+.slow-start-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
+}
+.slow-start-row .parking-hint { flex-basis: 100%; }
+.slow-start-help { position: relative; display: inline-flex; flex-shrink: 0; }
+.slow-start-help-trigger {
+  width: 14px; height: 14px; padding: 0; border: 1px solid #a8b8cf; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.78); color: var(--mute); font-size: 10px; font-weight: 750;
+  line-height: 12px; cursor: help;
+}
+.slow-start-help-trigger:hover,
+.slow-start-help-trigger:focus-visible {
+  border-color: var(--accent); color: var(--accent); outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.slow-start-help-panel {
+  position: absolute; z-index: 40; top: calc(100% + 8px); left: -120px;
+  display: none; width: min(520px, calc(100vw - 56px)); padding: 12px;
+  border: 1px solid #c7d5e8; border-radius: 12px; background: #fff;
+  color: var(--ink); box-shadow: 0 14px 34px rgba(25, 45, 76, 0.18);
+}
+.slow-start-help:hover .slow-start-help-panel,
+.slow-start-help:focus-within .slow-start-help-panel { display: block; }
+.slow-start-help-panel > strong { display: block; margin-bottom: 8px; font-size: 12px; }
+.slow-start-table-scroll { display: block; max-width: 100%; overflow-x: auto; }
+.slow-start-help-panel table { width: 100%; min-width: 430px; border-collapse: collapse; font-size: 11px; text-align: center; }
+.slow-start-help-panel th,
+.slow-start-help-panel td { padding: 5px 7px; border: 1px solid #d9e2ef; white-space: nowrap; }
+.slow-start-help-panel thead th { background: var(--surface-blue); font-weight: 800; }
+.slow-start-help-panel tbody th { background: #f8faff; text-align: left; }
+.slow-start-help-panel small { display: block; margin-top: 8px; color: var(--mute); font-size: 10px; }
+/* 徽章尺寸口径照 .acct-p（10px / 2px 6px），**刻意不复用 .badge**——那个是 12px/4px 11px、
+   为浮层行设计，放进这里会撑高整行。配色避开 .acct-p 已占的平台色：两个同尺寸色块并排会被
+   读成一个控件。 */
+.acct-age {
+  font-size: 10px; color: #fff; background: var(--amber); border-radius: 5px;
+  padding: 2px 6px; font-weight: 700; flex-shrink: 0;
+}
+/* 毕业态：爬坡已结束、上限已放开 —— 用静默色，与「正在被限制」的琥珀区分开。 */
+.acct-age.is-graduated { background: var(--mute); }
+/* 写入中只表达「等待云端确认」，不沿用琥珀色的已生效语义。spinner 放在徽章内，窄窗不增高。 */
+.slow-start-row.is-pending .switch { cursor: wait; }
+.slow-start-row.is-pending .switch-track { box-shadow: 0 0 0 3px var(--accent-soft); }
+.acct-age.is-pending {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--accent);
+}
+.acct-age.is-pending::before {
+  content: ""; width: 8px; height: 8px; border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.45); border-top-color: #fff;
+  animation: slow-start-spin 0.75s linear infinite;
+}
+.slow-start-feedback { color: var(--accent); }
+.slow-start-row .parking-hint.is-error { color: var(--bad-fg); }
+@keyframes slow-start-spin { to { transform: rotate(360deg); } }
+/* 断连 / 不适用：整行灰化，但**字段不会因断连变缺省**（主进程 if (evt.dailyUsage) 不清空），
+   所以这里表达的是「可能已过期」，不是「已关闭」。 */
+.slow-start-row.is-stale { opacity: 0.55; }
