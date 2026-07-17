@@ -50,11 +50,13 @@ import {
 import { selectPlatformDriver } from './platform/index.js';
 import { runWechatChannelsRuntime } from './wechat-channels/runtime.js';
 import {
+  backfillOverlayEvidenceText,
   emitCompanionUiEvent,
   FacebookBrowseSession,
   FacebookCommentExecutor,
   FacebookCommentHandler,
   FacebookJoinExecutor,
+  FacebookOverlayMonitor,
   FacebookPublishExecutor,
   parseFacebookBrowseMode,
   readFacebookIdentityPageContext,
@@ -973,6 +975,10 @@ async function main(): Promise<void> {
         if (overlaySnapshotPromise) return;
         overlaySnapshotPromise = captureBlockingOverlaySnapshot(session.cdp, kind).catch(() => undefined);
       };
+      // change fb-throttle-popup-zh-frequency-copy：回填同源证据用的监测体句柄。此块只在 useFacebookBrowse
+      // 下装配，driver 必返 FacebookOverlayMonitor；instanceof 只是诚实收窄——万一不是，回填静默不发生、
+      // 退化为改动前行为（不假造证据、不假成功）。
+      const fbOverlayMonitor = overlayMonitor instanceof FacebookOverlayMonitor ? overlayMonitor : undefined;
       const sendOverlayDetected = (kind: 'captcha' | 'unknown'): void => {
         void (async () => {
           primeOverlaySnapshot(kind);
@@ -985,12 +991,16 @@ async function main(): Promise<void> {
               /* best-effort */
             }
           }
+          // 快照候选筛选对 FB 标准限流弹窗必然落空（无 iframe / 未达尺寸阈 / 有关闭控件）⇒ overlay.text
+          // 为空 ⇒ 云端「无文案不臆断限流」返否定 ⇒ 真限流只到 warned 降速而非 restricted 刹车。用判定
+          // 同源文本回填证据；判定本身不变。
+          const reportedOverlay = backfillOverlayEvidenceText(overlay, kind, url, fbOverlayMonitor?.lastScanText);
           try {
             client.send('risk.captcha_detected', {
               edgeId,
               kind,
               url,
-              ...(overlay ? { overlay } : {}),
+              ...(reportedOverlay ? { overlay: reportedOverlay } : {}),
               ...(accountId ? { accountId } : {}),
             });
           } catch (err) {
