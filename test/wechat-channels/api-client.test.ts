@@ -256,7 +256,7 @@ test('wechat api: one deadline covers response body reads and returns a redacted
   );
 });
 
-test('wechat api: response size and schema failures are stable and open only the observed endpoint', async () => {
+test('wechat api: response limits are transient while real schema failures open only the observed endpoint', async () => {
   const changed: WechatChannelsEndpoint[] = [];
   const oversized = new WechatChannelsApiClient({
     maxRetries: 0,
@@ -269,9 +269,10 @@ test('wechat api: response size and schema failures are stable and open only the
   });
   await assert.rejects(
     () => oversized.listPosts(SESSION, null),
-    (error: unknown) => error instanceof WechatChannelsError && error.code === 'WECHAT_SCHEMA_CHANGED',
+    (error: unknown) => error instanceof WechatChannelsError &&
+      error.category === 'transient_network' && error.retryable,
   );
-  assert.deepEqual(changed, ['postList']);
+  assert.equal(changed.length, 0);
 
   const missingField = new WechatChannelsApiClient({
     maxRetries: 0,
@@ -286,7 +287,23 @@ test('wechat api: response size and schema failures are stable and open only the
       error.requestDispatched &&
       !error.message.includes('cookie-secret'),
   );
-  assert.deepEqual(changed, ['postList', 'postList']);
+  assert.deepEqual(changed, ['postList']);
+});
+
+test('wechat api: an HTTP 200 HTML response is transient and does not open the schema circuit', async () => {
+  const changed: WechatChannelsEndpoint[] = [];
+  const api = new WechatChannelsApiClient({
+    maxRetries: 0,
+    onSchemaChanged: (endpoint) => changed.push(endpoint),
+    fetchImpl: (async () => new Response('<html>temporary WAF page</html>', { status: 200 })) as typeof fetch,
+  });
+
+  await assert.rejects(
+    () => api.listPosts(SESSION, null),
+    (error: unknown) => error instanceof WechatChannelsError &&
+      error.category === 'transient_network' && error.retryable && error.requestDispatched,
+  );
+  assert.deepEqual(changed, []);
 });
 
 test('wechat api: auth/rate errors remain classified and non-empty DMs retain safe message truth', async () => {

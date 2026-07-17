@@ -8,7 +8,13 @@ import { WechatAuthCoordinator } from '../../src/wechat-channels/auth-session.js
 import { captureRequestContext, type WechatChannelsBrowserSidecar } from '../../src/wechat-channels/browser-sidecar.js';
 import { EncryptedWechatSessionStore } from '../../src/wechat-channels/encrypted-session-store.js';
 import { WechatChannelsError } from '../../src/wechat-channels/error-classifier.js';
+import {
+  DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS,
+  WechatCapabilityState,
+  WechatEndpointCircuitBreaker,
+} from '../../src/wechat-channels/feature-flags.js';
 import { sessionPath } from '../../src/wechat-channels/local-paths.js';
+import { WechatChannelsProbeRunner } from '../../src/wechat-channels/probes/black-box-probe.js';
 import type { WechatIdentity, WechatSessionMaterial } from '../../src/wechat-channels/types.js';
 
 const SCOPE = { envKey: 'env-a', browserProfileId: 'profile-a' };
@@ -58,6 +64,54 @@ class FakeSidecar implements WechatChannelsBrowserSidecar {
 
 function apiReturning(identity: WechatIdentity): WechatChannelsApiClient {
   return { getIdentity: async () => identity } as unknown as WechatChannelsApiClient;
+}
+
+function memoryStore(): EncryptedWechatSessionStore {
+  let stored = {
+    binding: { ...SCOPE, accountId: SCOPE.envKey, finderIdentity: IDENTITY.externalId },
+    identity: IDENTITY,
+    session: SESSION,
+    legacyBindingMigrated: false,
+  };
+  return {
+    load: async () => stored,
+    save: async (next: typeof stored) => { stored = { ...next, legacyBindingMigrated: false }; },
+    clear: async () => { stored = null as unknown as typeof stored; },
+  } as unknown as EncryptedWechatSessionStore;
+}
+
+class FakeTimers {
+  private readonly tasks: Array<{
+    callback: () => void;
+    delayMs: number;
+    cancelled: boolean;
+  }> = [];
+
+  readonly setTimeout = (callback: () => void, delayMs: number): ReturnType<typeof setTimeout> => {
+    const task = { callback, delayMs, cancelled: false };
+    this.tasks.push(task);
+    return task as unknown as ReturnType<typeof setTimeout>;
+  };
+
+  readonly clearTimeout = (timer: ReturnType<typeof setTimeout>): void => {
+    (timer as unknown as { cancelled: boolean }).cancelled = true;
+  };
+
+  pendingDelays(): number[] {
+    return this.tasks.filter((task) => !task.cancelled).map((task) => task.delayMs);
+  }
+
+  async runNext(): Promise<void> {
+    const task = this.tasks.find((candidate) => !candidate.cancelled);
+    assert.ok(task, 'expected a scheduled recovery timer');
+    task.cancelled = true;
+    task.callback();
+    await flushAsync();
+  }
+}
+
+async function flushAsync(): Promise<void> {
+  for (let i = 0; i < 4; i++) await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 test('wechat session store: AES-GCM round-trip keeps cookies out of plaintext and binds account/scope', async () => {
@@ -164,7 +218,7 @@ test('wechat auth: browser login closes only after identity, encrypted save, and
         rootDir: root,
         env: { AIDCP_WECHAT_MASTER_KEY: '22'.repeat(32) },
       }),
-      probeEnabledReads: async () => true,
+      probeEnabledReads: async () => ({ ok: true }),
       nowImpl: (() => {
         let now = 1;
         return () => now++;
@@ -209,7 +263,7 @@ test('wechat auth: stored encrypted session resumes API-only without opening bro
       store,
       probeEnabledReads: async () => {
         probes++;
-        return true;
+        return { ok: true };
       },
       logImpl: () => {},
     });
@@ -242,7 +296,7 @@ test('wechat auth: active API-only session can open a visible browser and return
       api: apiReturning(IDENTITY),
       sidecar,
       store,
-      probeEnabledReads: async () => true,
+      probeEnabledReads: async () => ({ ok: true }),
       logImpl: () => {},
     });
     auth.onChange((snapshot) => transitions.push(`${snapshot.state}:${snapshot.browserState}`));
@@ -272,7 +326,7 @@ test('wechat auth: browser foreground control fails closed before identity-bound
     expectedAccountId: SCOPE.envKey,
     api: apiReturning(IDENTITY),
     sidecar,
-    probeEnabledReads: async () => true,
+    probeEnabledReads: async () => ({ ok: true }),
     logImpl: () => {},
   });
 
@@ -301,7 +355,7 @@ test('wechat auth: legacy finder-as-account binding migrates to logical env scop
       api: apiReturning(IDENTITY),
       sidecar,
       store,
-      probeEnabledReads: async () => true,
+      probeEnabledReads: async () => ({ ok: true }),
       logImpl: () => {},
     });
     await auth.initialize();
@@ -332,18 +386,16 @@ test('wechat auth: a finder identity change fails closed and never replaces the 
       api: apiReturning({ externalId: 'finder-wrong', displayName: 'Wrong Finder' }),
       sidecar,
       store,
-      probeEnabledReads: async () => true,
+      probeEnabledReads: async () => ({ ok: true }),
       sleepImpl: async () => {},
       logImpl: () => {},
     });
 
-    await assert.rejects(
-      () => auth.initialize(),
-      (error: unknown) => error instanceof WechatChannelsError && error.code === 'WECHAT_IDENTITY_MISMATCH',
-    );
+    await auth.initialize();
     assert.equal(auth.getSnapshot().status, 'reauth_required');
     assert.equal(auth.getSnapshot().reasonCode, 'WECHAT_IDENTITY_MISMATCH');
     assert.equal(auth.getSnapshot().identityMatches, false);
+    assert.equal(sidecar.opens, 0, 'identity mismatch must wait for an explicit customer re-login');
     assert.equal(sidecar.closes, 0);
     assert.equal((await store.load(SCOPE.envKey))?.binding.finderIdentity, IDENTITY.externalId);
   });
@@ -361,7 +413,7 @@ test('wechat auth: a failed read probe keeps the browser open and exposes schema
         rootDir: root,
         env: { AIDCP_WECHAT_MASTER_KEY: '55'.repeat(32) },
       }),
-      probeEnabledReads: async () => false,
+      probeEnabledReads: async () => ({ ok: false, reasonCode: 'WECHAT_SCHEMA_CHANGED' }),
       sleepImpl: async () => {},
       logImpl: () => {},
     });
@@ -383,7 +435,7 @@ test('wechat auth: disabled feature stays fail-closed without opening a browser'
     expectedAccountId: SCOPE.envKey,
     api: apiReturning(IDENTITY),
     sidecar,
-    probeEnabledReads: async () => true,
+    probeEnabledReads: async () => ({ ok: true }),
     logImpl: () => {},
   });
   auth.disable();
@@ -400,7 +452,7 @@ test('wechat auth: ordinary network degradation does not reopen the browser', ()
     expectedAccountId: SCOPE.envKey,
     api: apiReturning(IDENTITY),
     sidecar,
-    probeEnabledReads: async () => true,
+    probeEnabledReads: async () => ({ ok: true }),
     logImpl: () => {},
   });
   auth.markApiFailure(new WechatChannelsError(
@@ -412,4 +464,143 @@ test('wechat auth: ordinary network degradation does not reopen the browser', ()
   assert.equal(auth.getSnapshot().status, 'degraded');
   assert.equal(auth.getSnapshot().reasonCode, 'INTERACTION_UPSTREAM_UNAVAILABLE');
   assert.equal(sidecar.opens, 0);
+});
+
+test('wechat auth: rate limiting follows retry-after and recovers without opening the browser', async () => {
+  const timers = new FakeTimers();
+  const sidecar = new FakeSidecar(null);
+  let identityCalls = 0;
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api: {
+      getIdentity: async () => { identityCalls++; return IDENTITY; },
+    } as unknown as WechatChannelsApiClient,
+    sidecar,
+    store: memoryStore(),
+    probeEnabledReads: async () => ({ ok: true }),
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    logImpl: () => {},
+  });
+  await auth.initialize();
+
+  auth.markApiFailure(new WechatChannelsError('rate_limited', 'postList', 'limited', true, 37));
+  assert.equal(auth.getSnapshot().status, 'degraded');
+  assert.equal(auth.getSnapshot().reasonCode, 'WECHAT_RATE_LIMITED');
+  assert.deepEqual(timers.pendingDelays(), [37]);
+
+  await timers.runNext();
+  assert.equal(auth.getSnapshot().state, 'api_only_running');
+  assert.equal(auth.getSnapshot().identityMatches, true);
+  assert.equal(identityCalls, 2);
+  assert.equal(sidecar.opens, 0);
+  assert.deepEqual(timers.pendingDelays(), []);
+});
+
+test('wechat auth: transient recovery backs off to its cap, keeps retrying, and disable cancels it', async () => {
+  const timers = new FakeTimers();
+  const sidecar = new FakeSidecar(null);
+  let identityCalls = 0;
+  const api = {
+    getIdentity: async () => {
+      identityCalls++;
+      if (identityCalls >= 2 && identityCalls <= 4) {
+        throw new WechatChannelsError('transient_network', 'authData', 'temporary outage', true);
+      }
+      return IDENTITY;
+    },
+  } as unknown as WechatChannelsApiClient;
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api,
+    sidecar,
+    store: memoryStore(),
+    probeEnabledReads: async () => ({ ok: true }),
+    recoveryBackoff: { transient_network: { initialMs: 5, maxMs: 20 } },
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    logImpl: () => {},
+  });
+  await auth.initialize();
+
+  auth.markApiFailure(new WechatChannelsError('transient_network', 'postList', 'temporary outage', true));
+  assert.deepEqual(timers.pendingDelays(), [5]);
+  await timers.runNext();
+  assert.deepEqual(timers.pendingDelays(), [10]);
+  await timers.runNext();
+  assert.deepEqual(timers.pendingDelays(), [20]);
+  await timers.runNext();
+  assert.deepEqual(timers.pendingDelays(), [20], 'recovery must keep retrying at the cap');
+  await timers.runNext();
+  assert.equal(auth.getSnapshot().state, 'api_only_running');
+  assert.deepEqual(timers.pendingDelays(), []);
+
+  auth.markApiFailure(new WechatChannelsError('transient_network', 'postList', 'temporary outage', true));
+  assert.deepEqual(timers.pendingDelays(), [5], 'successful recovery resets backoff');
+  const callsBeforeDisable = identityCalls;
+  auth.disable();
+  assert.deepEqual(timers.pendingDelays(), []);
+  await flushAsync();
+  assert.equal(identityCalls, callsBeforeDisable);
+  assert.equal(sidecar.opens, 0);
+});
+
+test('wechat auth: probe failure keeps its rate-limit reason instead of reporting schema drift', async () => {
+  const timers = new FakeTimers();
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api: apiReturning(IDENTITY),
+    sidecar: new FakeSidecar(null),
+    store: memoryStore(),
+    probeEnabledReads: async () => ({ ok: false, reasonCode: 'WECHAT_RATE_LIMITED' }),
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    logImpl: () => {},
+  });
+
+  await auth.initialize();
+  assert.equal(auth.getSnapshot().status, 'degraded');
+  assert.equal(auth.getSnapshot().reasonCode, 'WECHAT_RATE_LIMITED');
+  assert.deepEqual(timers.pendingDelays(), [30_000]);
+});
+
+test('wechat auth: an account with no posts stays active while comments remain fail-closed', async () => {
+  const flags = { ...DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS, commentsReadEnabled: true };
+  const capabilityState = new WechatCapabilityState(flags, new WechatEndpointCircuitBreaker());
+  capabilityState.applyRemoteControls({
+    accountId: SCOPE.envKey,
+    envKey: SCOPE.envKey,
+    version: 1,
+    commentsReadEnabled: true,
+    commentsReplyEnabled: false,
+    dmReadEnabled: false,
+    dmSendTextEnabled: false,
+    dmSendImageEnabled: false,
+  }, { accountId: SCOPE.envKey, envKey: SCOPE.envKey });
+  const api = {
+    getIdentity: async () => IDENTITY,
+    listPosts: async () => ({ items: [], nextCursor: null, hasMore: false }),
+  } as unknown as WechatChannelsApiClient;
+  const runner = new WechatChannelsProbeRunner({ api, flags, capabilityState });
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api,
+    sidecar: new FakeSidecar(null),
+    store: memoryStore(),
+    probeEnabledReads: (session) => runner.probeEnabledReads(session),
+    logImpl: () => {},
+  });
+
+  await auth.initialize();
+  assert.equal(auth.getSnapshot().state, 'api_only_running');
+  assert.equal(auth.getSnapshot().reasonCode, null);
+  assert.equal(capabilityState.effective({ authActive: true, identityMatches: true }).commentsRead, false);
+  assert.deepEqual(runner.snapshot().map((result) => [result.status, result.reasonCode]), [
+    ['gated', 'NO_READ_PROBE_SCOPE'],
+    ['disabled', null],
+  ]);
 });

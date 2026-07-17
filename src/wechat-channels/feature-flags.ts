@@ -74,25 +74,44 @@ const ENDPOINT_CAPABILITIES: Record<WechatChannelsEndpoint, readonly WechatCapab
 
 /** A schema break opens only the affected endpoint/capability circuit. */
 export class WechatEndpointCircuitBreaker {
-  private readonly openEndpoints = new Set<WechatChannelsEndpoint>();
+  private readonly openedAt = new Map<WechatChannelsEndpoint, number>();
+  private readonly ttlMs: number;
+  private readonly now: () => number;
+
+  constructor(options: { ttlMs?: number; nowImpl?: () => number } = {}) {
+    this.ttlMs = positiveMs(options.ttlMs, 10 * 60_000);
+    this.now = options.nowImpl ?? Date.now;
+  }
 
   open(endpoint: WechatChannelsEndpoint): void {
-    this.openEndpoints.add(endpoint);
+    this.openedAt.set(endpoint, this.now());
+  }
+
+  close(endpoint: WechatChannelsEndpoint): void {
+    this.openedAt.delete(endpoint);
+  }
+
+  reset(): void {
+    this.openedAt.clear();
   }
 
   isOpen(endpoint: WechatChannelsEndpoint): boolean {
-    return this.openEndpoints.has(endpoint);
+    const openedAt = this.openedAt.get(endpoint);
+    if (openedAt === undefined) return false;
+    if (this.now() - openedAt < this.ttlMs) return true;
+    this.openedAt.delete(endpoint);
+    return false;
   }
 
   capabilityAvailable(capability: WechatCapability): boolean {
-    for (const endpoint of this.openEndpoints) {
-      if (ENDPOINT_CAPABILITIES[endpoint].includes(capability)) return false;
+    for (const endpoint of this.openedAt.keys()) {
+      if (this.isOpen(endpoint) && ENDPOINT_CAPABILITIES[endpoint].includes(capability)) return false;
     }
     return true;
   }
 
   snapshot(): WechatChannelsEndpoint[] {
-    return [...this.openEndpoints].sort();
+    return [...this.openedAt.keys()].filter((endpoint) => this.isOpen(endpoint)).sort();
   }
 }
 
@@ -185,4 +204,8 @@ export class WechatCapabilityState {
       dmSendImage: false,
     };
   }
+}
+
+function positiveMs(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }

@@ -6,8 +6,20 @@ import type {
 import type { WechatChannelsApiClient } from './api-client.js';
 import type { WechatChannelsBrowserSidecar } from './browser-sidecar.js';
 import { EncryptedWechatSessionStore, type WechatSessionBinding } from './encrypted-session-store.js';
-import { WechatChannelsError } from './error-classifier.js';
+import { WechatChannelsError, type WechatEndpointErrorCategory } from './error-classifier.js';
+import type { WechatProbeOutcome } from './probes/black-box-probe.js';
 import type { WechatIdentity, WechatSessionMaterial } from './types.js';
+
+type RecoverableErrorCategory = Extract<
+  WechatEndpointErrorCategory,
+  'rate_limited' | 'transient_network' | 'permission_denied' | 'schema_changed'
+>;
+type RecoveryTimer = ReturnType<typeof setTimeout>;
+
+export interface WechatAuthRecoveryBackoff {
+  initialMs: number;
+  maxMs: number;
+}
 
 export type LocalAuthState =
   | 'uninitialized'
@@ -43,9 +55,12 @@ export interface WechatAuthCoordinatorOptions {
   api: WechatChannelsApiClient;
   sidecar: WechatChannelsBrowserSidecar;
   store?: EncryptedWechatSessionStore;
-  probeEnabledReads: (session: WechatSessionMaterial) => Promise<boolean>;
+  probeEnabledReads: (session: WechatSessionMaterial) => Promise<WechatProbeOutcome>;
   loginTimeoutMs?: number;
   pollIntervalMs?: number;
+  recoveryBackoff?: Partial<Record<RecoverableErrorCategory, Partial<WechatAuthRecoveryBackoff>>>;
+  setTimeoutImpl?: (callback: () => void, ms: number) => RecoveryTimer;
+  clearTimeoutImpl?: (timer: RecoveryTimer) => void;
   sleepImpl?: (ms: number) => Promise<void>;
   nowImpl?: () => number;
   logImpl?: (message: string) => void;
@@ -57,9 +72,12 @@ export class WechatAuthCoordinator {
   private readonly api: WechatChannelsApiClient;
   private readonly sidecar: WechatChannelsBrowserSidecar;
   private readonly store: EncryptedWechatSessionStore;
-  private readonly probeEnabledReads: (session: WechatSessionMaterial) => Promise<boolean>;
+  private readonly probeEnabledReads: (session: WechatSessionMaterial) => Promise<WechatProbeOutcome>;
   private readonly loginTimeoutMs: number;
   private readonly pollIntervalMs: number;
+  private readonly recoveryBackoff: Record<RecoverableErrorCategory, WechatAuthRecoveryBackoff>;
+  private readonly setTimeoutImpl: (callback: () => void, ms: number) => RecoveryTimer;
+  private readonly clearTimeoutImpl: (timer: RecoveryTimer) => void;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
   private readonly log: (message: string) => void;
@@ -74,6 +92,11 @@ export class WechatAuthCoordinator {
   private authInFlight?: Promise<void>;
   private browserControlChain: Promise<void> = Promise.resolve();
   private manualBrowserVisible = false;
+  private recoveryTimer?: RecoveryTimer;
+  private recoveryInFlight?: Promise<void>;
+  private recoveryCategory?: RecoverableErrorCategory;
+  private recoveryDelayMs = 0;
+  private recoveryGeneration = 0;
 
   constructor(options: WechatAuthCoordinatorOptions) {
     this.envKey = options.envKey;
@@ -84,6 +107,9 @@ export class WechatAuthCoordinator {
     this.probeEnabledReads = options.probeEnabledReads;
     this.loginTimeoutMs = positiveMs(options.loginTimeoutMs, 5 * 60_000);
     this.pollIntervalMs = positiveMs(options.pollIntervalMs, 2_000);
+    this.recoveryBackoff = recoveryBackoffOptions(options.recoveryBackoff);
+    this.setTimeoutImpl = options.setTimeoutImpl ?? ((callback, ms) => setTimeout(callback, ms));
+    this.clearTimeoutImpl = options.clearTimeoutImpl ?? ((timer) => clearTimeout(timer));
     this.sleep = options.sleepImpl ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.now = options.nowImpl ?? Date.now;
     this.log = options.logImpl ?? ((message) => console.log(message));
@@ -130,21 +156,29 @@ export class WechatAuthCoordinator {
         this.assertIdentity(observed, stored.binding);
         this.identity = observed;
         this.identityMatches = true;
-        const probeOk = await this.probeEnabledReads(stored.session);
-        if (!probeOk) {
-          this.transition('degraded', 'WECHAT_SCHEMA_CHANGED');
+        const probeOutcome = await this.probeEnabledReads(stored.session);
+        if (!probeOutcome.ok) {
+          this.applyProbeFailure(probeOutcome.reasonCode);
           return;
         }
         if (stored.legacyBindingMigrated) {
           await this.store.save({ binding: stored.binding, identity: observed, session: stored.session });
         }
+        this.cancelRecovery();
         this.transition('api_only_running', null);
         return;
       } catch (error) {
-        const safe = error instanceof WechatChannelsError ? error : null;
-        if (safe?.category === 'identity_mismatch') {
+        const safe = error instanceof WechatChannelsError
+          ? error
+          : new WechatChannelsError('transient_network', 'authData', 'Stored session verification failed temporarily', true);
+        if (isRecoverableCategory(safe.category)) {
+          this.markApiFailure(safe);
+          return;
+        }
+        if (safe.category === 'identity_mismatch') {
           this.transition('reauth_required', 'WECHAT_IDENTITY_MISMATCH');
-        } else if (safe?.category === 'challenge_required') {
+          return;
+        } else if (safe.category === 'challenge_required') {
           this.transition('challenge_required', 'WECHAT_CHALLENGE_REQUIRED');
         } else {
           this.transition('reauth_required', 'WECHAT_AUTH_REQUIRED');
@@ -153,6 +187,7 @@ export class WechatAuthCoordinator {
     } else {
       if (loadFailureReason === 'WECHAT_IDENTITY_MISMATCH') {
         this.transition('reauth_required', loadFailureReason);
+        return;
       } else {
         this.transition('browser_login_required', 'WECHAT_AUTH_REQUIRED');
       }
@@ -161,6 +196,7 @@ export class WechatAuthCoordinator {
   }
 
   async reopen(reason: 'user_requested' | 'auth_expired' | 'identity_mismatch' | 'challenge_required'): Promise<void> {
+    this.cancelRecovery();
     if (reason === 'user_requested') this.manualBrowserVisible = false;
     if (reason === 'identity_mismatch') this.transition('reauth_required', 'WECHAT_IDENTITY_MISMATCH');
     else if (reason === 'challenge_required') this.transition('challenge_required', 'WECHAT_CHALLENGE_REQUIRED');
@@ -169,6 +205,7 @@ export class WechatAuthCoordinator {
   }
 
   async clear(): Promise<void> {
+    this.cancelRecovery();
     this.manualBrowserVisible = false;
     this.session = null;
     this.identityMatches = false;
@@ -177,6 +214,7 @@ export class WechatAuthCoordinator {
   }
 
   disable(): void {
+    this.cancelRecovery();
     this.manualBrowserVisible = false;
     this.session = null;
     this.identityMatches = false;
@@ -185,26 +223,153 @@ export class WechatAuthCoordinator {
 
   markApiFailure(error: WechatChannelsError): void {
     if (error.category === 'auth_expired') {
+      this.cancelRecovery();
       this.identityMatches = false;
       this.transition('reauth_required', 'WECHAT_AUTH_REQUIRED');
       void this.authenticateThroughBrowser().catch(() => undefined);
     } else if (error.category === 'challenge_required') {
+      this.cancelRecovery();
       this.identityMatches = false;
       this.transition('challenge_required', 'WECHAT_CHALLENGE_REQUIRED');
       void this.authenticateThroughBrowser().catch(() => undefined);
     } else if (error.category === 'identity_mismatch') {
+      this.cancelRecovery();
       this.identityMatches = false;
+      // A session for another finder can never heal by retrying it. Customer re-login is the
+      // only recovery path without an automatic retry timer (apart from explicit disablement).
       this.transition('reauth_required', 'WECHAT_IDENTITY_MISMATCH');
-      void this.authenticateThroughBrowser().catch(() => undefined);
     } else if (error.category === 'rate_limited') {
       this.transition('degraded', 'WECHAT_RATE_LIMITED');
+      this.scheduleRecovery(error);
     } else if (error.category === 'schema_changed') {
       this.transition('degraded', 'WECHAT_SCHEMA_CHANGED');
+      this.scheduleRecovery(error);
     } else if (error.category === 'permission_denied') {
       this.transition('degraded', 'WECHAT_PERMISSION_DENIED');
+      this.scheduleRecovery(error);
     } else if (error.category === 'transient_network') {
       this.transition('degraded', 'INTERACTION_UPSTREAM_UNAVAILABLE');
+      this.scheduleRecovery(error);
     }
+  }
+
+  private applyProbeFailure(reasonCode: InteractionAuthReasonCode): WechatChannelsError {
+    const error = probeFailureError(reasonCode);
+    if (reasonCode === 'INTERACTION_FEATURE_DISABLED') {
+      this.disable();
+    } else {
+      this.markApiFailure(error);
+    }
+    return error;
+  }
+
+  private scheduleRecovery(error: WechatChannelsError, advance = false): void {
+    if (!isRecoverableCategory(error.category) || this.state === 'disabled' || !this.session || !this.identity) return;
+    const category = error.category;
+    const sameCategory = this.recoveryCategory === category;
+    if (this.recoveryTimer && sameCategory && !advance) return;
+    if (this.recoveryTimer) {
+      this.clearTimeoutImpl(this.recoveryTimer);
+      this.recoveryTimer = undefined;
+    }
+
+    const limits = this.recoveryBackoff[category];
+    const retryAfterMs = category === 'rate_limited' && error.retryAfterMs !== null &&
+      Number.isFinite(error.retryAfterMs) && error.retryAfterMs >= 0
+      ? Math.max(1, Math.floor(error.retryAfterMs))
+      : null;
+    const initial = Math.min(limits.maxMs, retryAfterMs ?? limits.initialMs);
+    const delayMs = sameCategory && advance && this.recoveryDelayMs > 0
+      ? Math.min(limits.maxMs, Math.max(limits.initialMs, this.recoveryDelayMs * 2))
+      : initial;
+    this.recoveryCategory = category;
+    this.recoveryDelayMs = delayMs;
+    this.armRecoveryTimer(delayMs);
+    this.log(`[wechat-channels] scheduled ${category} auth recovery in ${delayMs}ms`);
+  }
+
+  private armRecoveryTimer(delayMs: number): void {
+    const generation = this.recoveryGeneration;
+    let timer: RecoveryTimer;
+    timer = this.setTimeoutImpl(() => {
+      if (this.recoveryTimer === timer) this.recoveryTimer = undefined;
+      if (!this.isRecoveryCurrent(generation)) return;
+      if (this.recoveryInFlight) {
+        this.armRecoveryTimer(Math.max(1, this.recoveryDelayMs));
+        return;
+      }
+      const attempt = this.runRecoveryAttempt(generation);
+      this.recoveryInFlight = attempt;
+      void attempt.finally(() => {
+        if (this.recoveryInFlight === attempt) this.recoveryInFlight = undefined;
+      });
+    }, delayMs);
+    this.recoveryTimer = timer;
+    const unref = (timer as unknown as { unref?: () => void }).unref;
+    if (typeof unref === 'function') unref.call(timer);
+  }
+
+  private async runRecoveryAttempt(generation: number): Promise<void> {
+    const session = this.session;
+    const expectedIdentity = this.identity?.externalId;
+    if (!session || !expectedIdentity || !this.isRecoveryCurrent(generation)) return;
+    try {
+      const observed = await this.api.getIdentity(session);
+      if (!this.isRecoveryCurrent(generation)) return;
+      if (observed.externalId !== expectedIdentity) {
+        throw new WechatChannelsError('identity_mismatch', 'authData', 'Active session belongs to another account', false);
+      }
+      const outcome = await this.probeEnabledReads(session);
+      if (!this.isRecoveryCurrent(generation)) return;
+      if (!outcome.ok) throw probeFailureError(outcome.reasonCode);
+
+      const accountId = this.accountId ?? this.expectedAccountId ?? this.envKey;
+      await this.store.save({
+        binding: {
+          envKey: this.envKey,
+          accountId,
+          finderIdentity: observed.externalId,
+          browserProfileId: this.sidecar.browserProfileId,
+        },
+        identity: observed,
+        session,
+      });
+      if (!this.isRecoveryCurrent(generation)) return;
+      this.accountId = accountId;
+      this.identity = observed;
+      this.identityMatches = true;
+      if (!this.manualBrowserVisible && this.sidecar.getState() !== 'closed') {
+        this.transition('browser_closing', null);
+        await this.sidecar.close();
+        if (!this.isRecoveryCurrent(generation)) return;
+      }
+      this.cancelRecovery();
+      this.transition(this.manualBrowserVisible ? 'browser_open' : 'api_only_running', null);
+      this.log('[wechat-channels] degraded auth session recovered without opening the browser');
+    } catch (error) {
+      if (!this.isRecoveryCurrent(generation)) return;
+      const safe = error instanceof WechatChannelsError
+        ? error
+        : new WechatChannelsError('transient_network', 'auth_recovery', 'Auth recovery failed before a trustworthy result was available', true);
+      if (isRecoverableCategory(safe.category)) {
+        this.transition('degraded', authReasonForRecoverable(safe.category));
+        this.scheduleRecovery(safe, true);
+      } else {
+        this.markApiFailure(safe);
+      }
+    }
+  }
+
+  private cancelRecovery(): void {
+    this.recoveryGeneration += 1;
+    if (this.recoveryTimer) this.clearTimeoutImpl(this.recoveryTimer);
+    this.recoveryTimer = undefined;
+    this.recoveryCategory = undefined;
+    this.recoveryDelayMs = 0;
+  }
+
+  private isRecoveryCurrent(generation: number): boolean {
+    return generation === this.recoveryGeneration && this.state !== 'disabled';
   }
 
   async verifyIdentity(): Promise<boolean> {
@@ -330,16 +495,16 @@ export class WechatAuthCoordinator {
         finderIdentity: observed.externalId,
         browserProfileId: this.sidecar.browserProfileId,
       };
-      const probeOk = await this.probeEnabledReads(candidate);
-      if (!probeOk) {
-        this.transition('degraded', 'WECHAT_SCHEMA_CHANGED');
-        throw new WechatChannelsError('schema_changed', 'read_probe', 'Enabled read probes did not establish a safe API session', false);
-      }
-      await this.store.save({ binding, identity: observed, session: candidate });
       this.accountId = accountId;
       this.identity = observed;
       this.session = candidate;
       this.identityMatches = true;
+      const probeOutcome = await this.probeEnabledReads(candidate);
+      if (!probeOutcome.ok) {
+        throw this.applyProbeFailure(probeOutcome.reasonCode);
+      }
+      await this.store.save({ binding, identity: observed, session: candidate });
+      this.cancelRecovery();
       this.transition('session_active', null);
       if (this.manualBrowserVisible) {
         this.transition('browser_open', null);
@@ -390,6 +555,58 @@ function statusFor(state: LocalAuthState): InteractionAuthStatus {
     case 'degraded': return 'degraded';
     case 'disabled': return 'disabled';
   }
+}
+
+function probeFailureError(reasonCode: InteractionAuthReasonCode): WechatChannelsError {
+  switch (reasonCode) {
+    case 'WECHAT_AUTH_REQUIRED':
+      return new WechatChannelsError('auth_expired', 'read_probe', 'Enabled read probe requires authentication', false);
+    case 'WECHAT_CHALLENGE_REQUIRED':
+      return new WechatChannelsError('challenge_required', 'read_probe', 'Enabled read probe requires browser verification', false);
+    case 'WECHAT_IDENTITY_MISMATCH':
+      return new WechatChannelsError('identity_mismatch', 'read_probe', 'Enabled read probe observed another finder identity', false);
+    case 'WECHAT_RATE_LIMITED':
+      return new WechatChannelsError('rate_limited', 'read_probe', 'Enabled read probe was rate limited', true);
+    case 'WECHAT_PERMISSION_DENIED':
+      return new WechatChannelsError('permission_denied', 'read_probe', 'Enabled read probe was denied', false);
+    case 'WECHAT_SCHEMA_CHANGED':
+      return new WechatChannelsError('schema_changed', 'read_probe', 'Enabled read probe observed schema drift', false);
+    case 'INTERACTION_FEATURE_DISABLED':
+      return new WechatChannelsError('permission_denied', 'read_probe', 'Interaction feature is disabled', false);
+    case 'INTERACTION_UPSTREAM_UNAVAILABLE':
+      return new WechatChannelsError('transient_network', 'read_probe', 'Enabled read probe upstream is unavailable', true);
+  }
+}
+
+function isRecoverableCategory(category: WechatEndpointErrorCategory): category is RecoverableErrorCategory {
+  return category === 'rate_limited' || category === 'transient_network' ||
+    category === 'permission_denied' || category === 'schema_changed';
+}
+
+function authReasonForRecoverable(category: RecoverableErrorCategory): InteractionAuthReasonCode {
+  switch (category) {
+    case 'rate_limited': return 'WECHAT_RATE_LIMITED';
+    case 'transient_network': return 'INTERACTION_UPSTREAM_UNAVAILABLE';
+    case 'permission_denied': return 'WECHAT_PERMISSION_DENIED';
+    case 'schema_changed': return 'WECHAT_SCHEMA_CHANGED';
+  }
+}
+
+function recoveryBackoffOptions(
+  overrides: WechatAuthCoordinatorOptions['recoveryBackoff'],
+): Record<RecoverableErrorCategory, WechatAuthRecoveryBackoff> {
+  const defaults: Record<RecoverableErrorCategory, WechatAuthRecoveryBackoff> = {
+    rate_limited: { initialMs: 30_000, maxMs: 5 * 60_000 },
+    transient_network: { initialMs: 5_000, maxMs: 2 * 60_000 },
+    permission_denied: { initialMs: 5 * 60_000, maxMs: 30 * 60_000 },
+    schema_changed: { initialMs: 10 * 60_000, maxMs: 60 * 60_000 },
+  };
+  for (const category of Object.keys(defaults) as RecoverableErrorCategory[]) {
+    const initialMs = positiveMs(overrides?.[category]?.initialMs, defaults[category].initialMs);
+    const maxMs = positiveMs(overrides?.[category]?.maxMs, defaults[category].maxMs);
+    defaults[category] = { initialMs: Math.min(initialMs, maxMs), maxMs };
+  }
+  return defaults;
 }
 
 function positiveMs(value: number | undefined, fallback: number): number {

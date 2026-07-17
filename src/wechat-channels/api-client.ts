@@ -299,7 +299,7 @@ export class WechatChannelsApiClient {
         body = JSON.parse(text);
       } catch {
         if (!response.ok) throw classifyHttpFailure({ endpoint, status: response.status, retryAfterMs, requestDispatched: true });
-        throw new WechatChannelsError('schema_changed', endpoint, 'WeChat Channels returned non-JSON data', false, null, true);
+        throw new WechatChannelsError('transient_network', endpoint, 'WeChat Channels returned a temporary non-JSON response', true, null, true);
       }
       const { code, message } = platformStatus(body);
       if (!response.ok || (code !== null && String(code) !== '0')) {
@@ -326,7 +326,7 @@ function positiveInt(value: number | undefined, fallback: number): number {
 async function readLimitedText(response: Response, maxBytes: number, endpoint: string): Promise<string> {
   const length = Number(response.headers.get('content-length'));
   if (Number.isFinite(length) && length > maxBytes) {
-    throw new WechatChannelsError('schema_changed', endpoint, 'WeChat Channels response exceeded the size limit', false, null, true);
+    throw new WechatChannelsError('transient_network', endpoint, 'WeChat Channels response exceeded the size limit', true, null, true);
   }
   if (!response.body) return '';
   const reader = response.body.getReader();
@@ -338,7 +338,7 @@ async function readLimitedText(response: Response, maxBytes: number, endpoint: s
     total += value.byteLength;
     if (total > maxBytes) {
       await reader.cancel().catch(() => undefined);
-      throw new WechatChannelsError('schema_changed', endpoint, 'WeChat Channels response exceeded the size limit', false, null, true);
+      throw new WechatChannelsError('transient_network', endpoint, 'WeChat Channels response exceeded the size limit', true, null, true);
     }
     chunks.push(value);
   }
