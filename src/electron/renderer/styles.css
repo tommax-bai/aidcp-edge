@@ -3108,12 +3108,14 @@ body { margin: 0; }
   .iw-overview-actions { justify-content: flex-start; }
   .iw-settings-grid { grid-template-columns: 1fr; }
 }
-@media (max-width: 700px) {
-  .iw-inbox { display: flex; flex: none; flex-direction: column; overflow: visible; }
-  .iw-list-pane { min-height: 210px; max-height: 250px; }
-  .iw-detail { min-height: 360px; overflow: visible; }
-  .iw-overview { grid-template-columns: 1fr; }
-  .iw-overview-actions { justify-content: flex-start; }
+@supports not (container-type: inline-size) {
+  @media (max-width: 700px) {
+    .iw-inbox { display: flex; flex: none; flex-direction: column; overflow: visible; }
+    .iw-list-pane { min-height: 210px; max-height: 250px; }
+    .iw-detail { min-height: 360px; overflow: visible; }
+    .iw-overview { grid-template-columns: 1fr; }
+    .iw-overview-actions { justify-content: flex-start; }
+  }
 }
 @media (max-width: 520px) {
   .iw-overview { padding: 10px 11px; }

@@ -284,6 +284,12 @@ test('820x720 单列互动布局使用主列整体滚动，不再把详情裁在
   assert.doesNotMatch(stylesSrc, /\.shell\.interaction-mode[\s\S]{0,260}\n\s*height:\s*calc\(100vh - 46px\);/);
 });
 
+test('窄 viewport 不覆盖 workspace 容器断点，仍放得下双栏时列表不被拉成通栏', () => {
+  assert.match(stylesSrc, /@container \(max-width: 640px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column; overflow: visible; \}/);
+  assert.match(stylesSrc, /@supports not \(container-type: inline-size\) \{\s*@media \(max-width: 700px\) \{[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column; overflow: visible; \}/);
+  assert.doesNotMatch(stylesSrc, /\n@media \(max-width: 700px\) \{\s*\.iw-inbox/);
+});
+
 test('视频号互动使用 profileId 作为 Cloud envKey，不混用本机 ads- 环境行 ID', async () => {
   const lifecycleCalls: string[] = [];
   const { window, pushFleet, calls } = await boot({
@@ -912,7 +918,7 @@ test('列表方向键可达并移动焦点，窄屏样式折叠为单栏且保�
   const css = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
   assert.match(css, /\.iw-list-item:focus-visible[\s\S]*outline: 2px solid var\(--accent\)/);
   assert.match(css, /@container \(max-width: 640px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column; overflow: visible; \}/);
-  assert.match(css, /@media \(max-width: 700px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column/);
+  assert.match(css, /@supports not \(container-type: inline-size\)[\s\S]*@media \(max-width: 700px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column/);
 });
 
 test('环境 A→B 原子切换：取消 A 读取且迟到响应不能覆盖 B', async () => {
