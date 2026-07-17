@@ -147,6 +147,10 @@ function buildExistingSampleJs(): string {
       var btns = node.querySelectorAll('[role="button"]');
       var btnLabels = []; for (var i=0;i<btns.length && btnLabels.length<8;i++){ var l=(fbLabel(btns[i])||fbText(btns[i])).slice(0,24); if(l) btnLabels.push(l); }
       var abbr = node.querySelector('abbr, time, [data-tooltip-content]');
+    // 真机（2026-07-17）：FB 把评论时间渲染成**普通 <a>**（href=帖 permalink、文本「1 分钟」），
+    // 不是 abbr/time → 上一版选择器恒 null（结论里被误读成「平台没有时间戳」）。故回落到短文本 <a>。
+    if(!abbr){ var _ls=node.querySelectorAll('a[href*="story_fbid="], a[href*="/posts/"], a[href*="comment_id="]');
+      for(var _q=0;_q<_ls.length;_q++){ var _lt=fbText(_ls[_q]); if(_lt && _lt.length<=12 && !/^https?:/.test(_lt)){ abbr=_ls[_q]; break; } } }
       return {
         textHead: fbText(node).slice(0, 60),
         commentIdHref: cid ? cid.href : null,
@@ -251,7 +255,10 @@ function buildNodeSignalJs(frag: string, ownId: string): string {
       hasOwnId: hasOwn,
       ariaBusy: busy,
       opacity: opacity,
-      nodeTextLen: fbText(node).length
+      nodeTextLen: fbText(node).length,
+      // 🔴 每帧存该行**原文**：只存长度的话,「发布中」这类纯文字状态结构上就测不到
+      // （上一轮正是因此漏掉它,方案里提出后在结论中蒸发,时隔 5 天靠肉眼重新发现）。
+      nodeText: fbText(node).slice(0, 220)
     });
   })()`;
 }
@@ -523,7 +530,16 @@ async function main(): Promise<void> {
     const firstTimeElMs = firstMs(frames, (f) => !!f.hasTimeEl);
     const firstTwoButtonsMs = firstMs(frames, (f) => (f.roleButtonCount ?? 0) >= 2);
     const firstOwnIdMs = ownId ? firstMs(frames, (f) => !!f.hasOwnId) : null;
+    // ⚠️ pendingObserved 只探 aria-busy / opacity —— 真机（2026-07-17）实测「发布中」是**纯文字**、
+    // 无 aria-busy 且 opacity 恒为 1,故此位对在飞态**结构上恒为 false**,别再据它下「没有在飞态」的结论。
     const pendingObserved = frames.some((f) => f.ariaBusy || (typeof f.opacity === 'number' && f.opacity < 0.9));
+    // 三态直读（change facebook-comment-lifecycle-verify）:从每帧原文认,别再靠属性/样式。
+    const IN_FLIGHT_RE = /发布中|發佈中|发送中|đang đăng|posting|sending/i;
+    const REJECTED_RE = /已拒绝|被拒绝|查看反馈|đã từ chối|xem phản hồi|rejected|declined|see feedback/i;
+    const inFlightObserved = frames.some((f) => IN_FLIGHT_RE.test(String(f.nodeText ?? '')));
+    const rejectedObserved = frames.some((f) => REJECTED_RE.test(String(f.nodeText ?? '')));
+    const firstInFlightMs = firstMs(frames, (f) => IN_FLIGHT_RE.test(String(f.nodeText ?? '')));
+    const lastInFlightMs = frames.filter((f) => IN_FLIGHT_RE.test(String(f.nodeText ?? ''))).map((f) => f.tMs).pop() ?? null;
 
     const candidateAckMs = Array.from(graphql.values())
       .filter((h) => h.isCommentCandidate && h.tRespMs !== null)
@@ -547,13 +563,17 @@ async function main(): Promise<void> {
     const verdict = {
       firstNodeMs, firstCommentIdMs, firstTimeElMs, firstTwoButtonsMs, firstOwnIdMs,
       pendingObserved,
+      inFlightObserved, firstInFlightMs, lastInFlightMs, rejectedObserved,
       candidateAckMs, anyGraphqlAckMs,
       reloadPersisted,
       commentIdVerdict,
       note:
         'commentIdVerdict=appears_at_or_after_ack → 就地看到 comment_id 锚点即可当成功（比现状更快更硬）；' +
         '=appears_before_ack → 乐观渲染，comment_id 不能单独当成功，仍需服务器确认；' +
-        'reloadPersisted=false 而就地曾报成功 → 就地信号会 over-confirm，务必保留刷新兜底。',
+        'inFlightObserved=true → 「发布中」在飞态存在，lastInFlightMs≈其消失时刻，对齐 candidateAckMs 看点头与落定的间隔；' +
+        'rejectedObserved=true → 该评论被平台拒绝（终局，绝不可判成功）；' +
+        'pendingObserved 恒 false 属预期（在飞是纯文字，非 aria-busy/opacity）；' +
+        'reloadPersisted=false 未必是真相 —— 真机实测刷新后评论区常未及渲染完就被查，会给出假阴性（务必人工复核）。',
     };
     log('verdict', verdict);
 

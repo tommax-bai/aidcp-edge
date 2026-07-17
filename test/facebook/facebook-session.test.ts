@@ -791,7 +791,7 @@ test('让位：FB 评论逐字输入中途被接管 → 清空半截评论 + 回
         sleep: async () => {},
         logger: () => {},
       },
-      { settleMs: 0, waitAfterSubmitMs: 0, waitAfterReloadMs: 0 },
+      { settleMs: 0, waitAfterSubmitMs: 0 },
     ),
     client: {
       reportPageCards: () => {},
@@ -877,7 +877,7 @@ test('让位：孤儿写者在评论打字中途结束 → **绝不能**解除�
         sleep: async () => {},
         logger: () => {},
       },
-      { settleMs: 0, waitAfterSubmitMs: 0, waitAfterReloadMs: 0 },
+      { settleMs: 0, waitAfterSubmitMs: 0 },
     ),
     client: {
       reportPageCards: () => {},
