@@ -11,6 +11,7 @@
  *    经 uiSnapshotToLines 转发——单条指令 ok:false 不在边缘判 failed（云端序列可能对
  *    best-effort 步骤容错继续，边缘抢判会虚报失败）。
  */
+import { UI_DAILY_USAGE_ACTIONS } from '../comm/protocol.js';
 import type {
   PublishCommandPayload,
   PublishCommandResultPayload,
@@ -19,7 +20,18 @@ import type {
 } from '../comm/protocol.js';
 
 export const UI_EVENT_PREFIX = '[ui-event]';
-const DAILY_USAGE_ACTIONS = ['view', 'like', 'collect', 'comment', 'follow', 'publish'] as const;
+/**
+ * 键清单**从协议单一来源派生**（change platform-honest-usage-metrics）。
+ *
+ * 这里曾是一张手写的六键表，而 sanitizeCounts 拿它**过滤** totals ⇒ 云端新发的键在到达界面之前就被
+ * 这道白名单静默吃掉。**这不是假设，是本 change 首跑真机的实际故障**：云端已按平台正确投影（收藏 /
+ * 关注真的摘掉了、加群真的发了），屏幕上却只有 4 格、加群怎么也不出现，而全链路零报错、typecheck 全绿、
+ * 两侧 protocol.ts 逐字一致、main.cjs 与 renderer 的清单都已加好 —— 唯独这张表没人想起来。
+ *
+ * 症状就是 CLAUDE.md §2 反复警告的那句「云端发了、界面不显示、没有任何报错」。
+ * 改成 import 之后这张表不复存在，也就不会再漂。**别再把它写回本地常量。**
+ */
+const DAILY_USAGE_ACTIONS = UI_DAILY_USAGE_ACTIONS;
 const DAILY_USAGE_WINDOWS = ['session', 'minute', 'hour', 'day'] as const;
 
 function line(obj: Record<string, unknown>): string {

@@ -84,7 +84,10 @@
   // 「正在做」与「已做完、在等云端下一步」的分界。超过这条线，动作文案仍然保留（运营要知道最后
   // 推进到哪一步），但动效与「刚刚更新」必须撤掉——那两样是在向用户承诺「此刻正在做这件事」。
   const PRESENCE_LIVE_MS = 60_000;
-  const QUOTA_ACTION_PRIORITY = ['view', 'like', 'collect', 'comment', 'follow', 'publish'];
+  // 有上限的动作按此序参与「配额休息 / 计划完成」判定。**漏一个键的后果不是报错**，是该动作的上限对
+  // 这套逻辑完全不可见（加群满了也不会被算作在等配额）。与 protocol.ts 的 UI_DAILY_USAGE_ACTIONS 同集，
+  // 只是这里额外承载优先级顺序（本文件是纯 JS、import 不了那张表，改动时须手工对齐）。
+  const QUOTA_ACTION_PRIORITY = ['view', 'like', 'collect', 'comment', 'follow', 'publish', 'join_group'];
 
   function finiteNumber(value) {
     return typeof value === 'number' && Number.isFinite(value) ? value : null;

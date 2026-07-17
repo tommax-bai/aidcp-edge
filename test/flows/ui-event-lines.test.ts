@@ -292,3 +292,41 @@ test('ui-event-lines: personaBound 三态 → true/false 都出行，缺省不�
 
   assert.deepEqual(uiSnapshotToLines({}), [], '未知（字段缺省）不发行：外壳保持未知，未知永不弹窗');
 });
+
+test('ui-event-lines: FB 投影后的载荷穿透——收藏/关注保持缺席、加群 MUST NOT 被这道白名单吃掉', () => {
+  // 本条钉的是 change platform-honest-usage-metrics 首跑真机的实际故障：云端已按平台正确投影，
+  // 但本文件那张手写六键表把 join_group 过滤掉了 ⇒ 屏幕上只有 4 格、加群怎么也不出现、全链路零报错。
+  // 键清单现已从 protocol 的单一来源派生；这条断言防它被写回本地常量。
+  const lines = uiSnapshotToLines({
+    dailyUsage: {
+      asOf: 1730000001000,
+      quotaLevel: 'normal',
+      // 云端为 FB 投影后的真实形状：无 collect / follow，有 join_group。
+      totals: { view: 40, like: 6, comment: 1, publish: 1, join_group: 2 },
+      quotas: { view: 20, like: 2, comment: 0, publish: 0, join_group: 3 },
+      saturated: ['view', 'like', 'join_group'],
+      windows: {
+        day: {
+          startedAt: 1729999941000,
+          totals: { view: 40, like: 6, comment: 1, publish: 1, join_group: 2 },
+          quotas: { view: 20, like: 2, comment: 0, publish: 0, join_group: 3 },
+          saturated: ['view'],
+        },
+      },
+    },
+  });
+  const evt = parseLine(lines[0]);
+  const daily = evt.dailyUsage as {
+    totals: Record<string, number>;
+    quotas: Record<string, number>;
+    saturated: string[];
+    windows: { day: { totals: Record<string, number>; quotas: Record<string, number> } };
+  };
+  assert.equal(daily.totals.join_group, 2, '加群计数必须活着走到界面');
+  assert.equal(daily.quotas.join_group, 3, '加群上限同理');
+  assert.equal(daily.windows.day.totals.join_group, 2, '窗口面也不得吃掉它');
+  assert.equal(daily.windows.day.quotas.join_group, 3);
+  assert.ok(daily.saturated.includes('join_group'), 'saturated 白名单同样按单一来源过滤');
+  assert.ok(!('collect' in daily.totals), '云端摘掉的键必须保持缺席，绝不物化成 0');
+  assert.ok(!('follow' in daily.totals), '同上');
+});
