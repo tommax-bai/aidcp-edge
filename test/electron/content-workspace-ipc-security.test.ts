@@ -47,9 +47,16 @@ test('main 固定 customer-auth 路径、方法和参数白名单，并从所选
 });
 
 test('标题栏只保留紧凑灵感入口，并锁定低干扰蓝色与高储备蓝绿色', () => {
+  const accountIndex = html.indexOf('id="acct-plat"');
+  const spacerIndex = html.indexOf('class="tb-spacer"');
   const entryIndex = html.indexOf('id="content-library-entry"');
-  assert.ok(entryIndex > html.indexOf('id="acct-plat"'));
-  assert.ok(entryIndex < html.indexOf('id="health-pill"'));
+  const environmentIndex = html.indexOf('id="cloud-env-chip"');
+  const healthIndex = html.indexOf('id="health-pill"');
+  assert.ok(accountIndex < spacerIndex, '账号身份应留在标题栏左侧');
+  assert.ok(spacerIndex < entryIndex, '弹性留白应把灵感入口推到标题栏右侧');
+  assert.ok(entryIndex < environmentIndex, '灵感入口应紧邻环境名左侧');
+  assert.ok(environmentIndex < healthIndex, '环境名后仍保持健康状态顺序');
+  assert.match(styles, /\.tb-spacer\s*\{[^}]*flex:\s*1/s);
   assert.equal((html.match(/id="content-library-entry"/g) ?? []).length, 1, '运行首页不得再保留大卡入口');
   for (const color of ['#eef5ff', '#d7e5ff', '#526a87', '#2f6fe4', '#dce8f7', '#4f83e8', '#3f7ce0', '#2aa57a']) {
     assert.match(styles.toLowerCase(), new RegExp(color));
