@@ -405,6 +405,13 @@ function selectedSlowStartContext() {
   return env && envKey ? { selectedKey, env, envKey } : null;
 }
 
+function hideSlowStartRow() {
+  if (!fields.slowStartRow) return;
+  fields.slowStartRow.classList.add('hidden');
+  fields.slowStartRow.classList.remove('is-stale', 'is-pending');
+  fields.slowStartRow.removeAttribute('aria-busy');
+}
+
 // 平台占位：mac 红绿灯内嵌预留左侧；Windows 叠加窗控预留右侧。其余平台两侧归零。
 (function initPlatformPads() {
   const platform = (navigator.platform || '').toLowerCase();
@@ -680,14 +687,20 @@ function renderUsageSummary(status) {
  */
 function renderSlowStart(status) {
   if (!fields.slowStartRow) return;
+  const context = selectedSlowStartContext();
+  // change slow-start-facebook-curve-tooltip：产品入口只属于明确的 Facebook 环境。
+  // 不借 eligible / reason 猜平台；小红书即使收到历史 slowStart 投影也必须整行隐藏。
+  if (!context || selectedEnvPlatform() !== 'facebook') {
+    hideSlowStartRow();
+    return;
+  }
   const connState = status && status.cloud === 'connected' ? 'online' : 'offline';
   const view = window.uiLogic.slowStartLine(status && status.dailyUsage, connState);
   if (!view.visible) {
-    fields.slowStartRow.classList.add('hidden');
+    hideSlowStartRow();
     return;
   }
-  const context = selectedSlowStartContext();
-  const feedback = context && slowStartFeedbackByEnv.get(context.envKey);
+  const feedback = slowStartFeedbackByEnv.get(context.envKey);
   const pending = feedback && feedback.kind === 'pending' ? feedback : null;
   fields.slowStartRow.classList.remove('hidden');
   fields.slowStartRow.classList.toggle('is-stale', Boolean(view.stale) && !pending);

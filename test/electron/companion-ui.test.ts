@@ -888,7 +888,11 @@ test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并�
   assert.match($(w, '#quota-windows').textContent ?? '', /2\/-/);
   assert.match($(w, '#quota-windows').textContent ?? '', /10\/60/);
   assert.match($(w, '#quota-windows').textContent ?? '', /继续/);
-  assert.doesNotMatch($(w, '#daily-summary').textContent ?? '', /已达|上限|额度|释放|已满/);
+  // 慢启动问号中的数据表是用户明确请求的「曲线限额」说明；陪伴式用语红线仍约束卡片常驻文案，
+  // 不把按需展开的数值帮助表算进来。
+  const summaryCopy = $(w, '#daily-summary').cloneNode(true) as HTMLElement;
+  summaryCopy.querySelector('#slow-start-help-panel')?.remove();
+  assert.doesNotMatch(summaryCopy.textContent ?? '', /已达|上限|额度|释放|已满/);
   assert.equal($(w, '#views').textContent, '10');
   assert.equal($(w, '#likes').textContent, '3');
   assert.equal($(w, '#follows').textContent, '2');

@@ -2158,6 +2158,7 @@ body { margin: 0; }
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .summary-time { padding-top: 1px; }
+  .slow-start-help-panel { left: -92px; }
 }
 
 /* ═══ 多环境 fleet（edge-fleet-rail-env-management：环境管理收口于左栏）═══ */
@@ -3259,6 +3260,33 @@ body { margin: 0; }
   margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
 }
 .slow-start-row .parking-hint { flex-basis: 100%; }
+.slow-start-help { position: relative; display: inline-flex; flex-shrink: 0; }
+.slow-start-help-trigger {
+  width: 18px; height: 18px; padding: 0; border: 1px solid #a8b8cf; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.78); color: var(--mute); font-size: 12px; font-weight: 800;
+  line-height: 16px; cursor: help;
+}
+.slow-start-help-trigger:hover,
+.slow-start-help-trigger:focus-visible {
+  border-color: var(--accent); color: var(--accent); outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.slow-start-help-panel {
+  position: absolute; z-index: 40; top: calc(100% + 8px); left: 0;
+  display: none; width: min(520px, calc(100vw - 56px)); padding: 12px;
+  border: 1px solid #c7d5e8; border-radius: 12px; background: #fff;
+  color: var(--ink); box-shadow: 0 14px 34px rgba(25, 45, 76, 0.18);
+}
+.slow-start-help:hover .slow-start-help-panel,
+.slow-start-help:focus-within .slow-start-help-panel { display: block; }
+.slow-start-help-panel > strong { display: block; margin-bottom: 8px; font-size: 12px; }
+.slow-start-table-scroll { display: block; max-width: 100%; overflow-x: auto; }
+.slow-start-help-panel table { width: 100%; min-width: 430px; border-collapse: collapse; font-size: 11px; text-align: center; }
+.slow-start-help-panel th,
+.slow-start-help-panel td { padding: 5px 7px; border: 1px solid #d9e2ef; white-space: nowrap; }
+.slow-start-help-panel thead th { background: var(--surface-blue); font-weight: 800; }
+.slow-start-help-panel tbody th { background: #f8faff; text-align: left; }
+.slow-start-help-panel small { display: block; margin-top: 8px; color: var(--mute); font-size: 10px; }
 /* 徽章尺寸口径照 .acct-p（10px / 2px 6px），**刻意不复用 .badge**——那个是 12px/4px 11px、
    为浮层行设计，放进这里会撑高整行。配色避开 .acct-p 已占的平台色：两个同尺寸色块并排会被
    读成一个控件。 */

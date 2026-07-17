@@ -10,6 +10,7 @@ import { JSDOM, type DOMWindow } from 'jsdom';
 const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
+const styles = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
 const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
 
@@ -755,7 +756,17 @@ test('拉列表回填：截断结果绝不回填（不因缺数据误改在用�
 
 // ── change account-level-slow-start：慢启动脚注行接线 ──
 
-test('慢启动行：静态节点在 #daily-summary 内、#quota-windows 之后（该 section 永不 hidden → 「启动新号之前」也在）', () => {
+function slowStartStub(overrides: Partial<Stub> = {}, platform = 'facebook'): Stub {
+  return makeStub({
+    getSettings: async () => ({
+      provider: 'adspower', adsProfileId: '', adsApiKey: '', adsApiBase: '',
+      browserParkingMode: 'edge-strip', adsDownloadUrl: 'https://x', platform,
+    }),
+    ...overrides,
+  });
+}
+
+test('慢启动行：静态节点在 #daily-summary 内、#quota-windows 之后', () => {
   const dom = new JSDOM(html);
   const summary = dom.window.document.querySelector('#daily-summary');
   const row = summary?.querySelector('#slow-start-row');
@@ -767,27 +778,43 @@ test('慢启动行：静态节点在 #daily-summary 内、#quota-windows 之后�
     '慢启动行应排在 #quota-windows 之后');
 });
 
-test('慢启动行：规则第二句必须有（说清曲线与档位取更严的一个）', () => {
-  // #usage-source 已在同屏显示「账号今日 · 稳妥节奏」；两个都表示「慢」的东西不说清关系，
-  // 「我改了档位为什么没变」的工单会翻倍。
-  assert.ok(html.includes('更严的一个'), '规则小字必须说明取更严的一个');
-  // 文案红线：不出现「新账号」（系统只知道它连上我们多少天，不知道它多老——cookie 导入的
-  // 三年老号同样会被勾上），也不得用本卡禁用的配额术语（见 companion-ui 的整卡断言）。
-  // 判据必须是**渲染出来的文本**而非 HTML 源码：源码里还有解释这条规则的注释（注释本身会提到
-  // 那几个被禁的词），拿源码做判据会因为注释而红——那不是文案违规，是判据选错了。
-  const rowText = new JSDOM(html).window.document.querySelector('#slow-start-row')?.textContent ?? '';
-  assert.ok(rowText.length > 0);
-  assert.doesNotMatch(rowText, /新账号/);
-  assert.doesNotMatch(rowText, /已达|上限|额度|释放|已满/);
+test('慢启动行：常驻说明使用新的 7 天/账号档位短文案', () => {
+  const copy = new JSDOM(html).window.document.querySelector('.slow-start-copy')?.textContent?.trim();
+  assert.equal(copy, '开启后头 7 天按曲线逐日放开量，7天后按账号档位运行。');
+});
+
+test('慢启动帮助：问号可聚焦，hover/focus 展示 7×6 Facebook 曲线限额表', () => {
+  const dom = new JSDOM(html);
+  const trigger = dom.window.document.querySelector('#slow-start-help-trigger');
+  const panel = dom.window.document.querySelector('#slow-start-help-panel');
+  assert.equal(trigger?.tagName, 'BUTTON');
+  assert.equal(trigger?.getAttribute('type'), 'button');
+  assert.match(trigger?.getAttribute('aria-label') || '', /Facebook 慢启动 7 天限额/);
+  assert.match(panel?.querySelector('strong')?.textContent || '', /Facebook 慢启动曲线限额/);
+  assert.match(styles, /\.slow-start-help:hover\s+\.slow-start-help-panel/);
+  assert.match(styles, /\.slow-start-help:focus-within\s+\.slow-start-help-panel/);
+
+  const rows = Array.from(panel?.querySelectorAll('tbody tr') || []).map((row) =>
+    Array.from(row.children).map((cell) => cell.textContent?.trim()),
+  );
+  assert.deepEqual(rows, [
+    ['第 1 天', '20', '2', '0', '1', '0', '0'],
+    ['第 2 天', '25', '3', '0', '1', '0', '0'],
+    ['第 3 天', '35', '6', '1', '2', '0', '1'],
+    ['第 4 天', '40', '8', '2', '2', '0', '1'],
+    ['第 5 天', '50', '12', '3', '3', '1', '2'],
+    ['第 6 天', '60', '15', '4', '4', '1', '2'],
+    ['第 7 天', '70', '18', '5', '5', '1', '3'],
+  ]);
 });
 
 test('慢启动行：字段缺省 → 整行 hidden（绝不默认成「关」）', async () => {
-  const w = await boot(makeStub({ getStatus: async () => makeStatus({ cloud: 'connected' }) }));
+  const w = await boot(slowStartStub({ getStatus: async () => makeStatus({ cloud: 'connected' }) }));
   assert.ok(hidden($(w, '#slow-start-row')), '云端还没说 → 整行不渲染');
 });
 
 test('慢启动行：active 态渲染徽章与勾选', async () => {
-  const w = await boot(makeStub({
+  const w = await boot(slowStartStub({
     getStatus: async () => makeStatus({
       cloud: 'connected',
       dailyUsage: { asOf: new Date().toISOString(), totals: {}, slowStart: { state: 'active', day: 3, totalDays: 7, binding: true, eligible: true } },
@@ -798,8 +825,19 @@ test('慢启动行：active 态渲染徽章与勾选', async () => {
   assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 3\/7 天/);
 });
 
+test('慢启动行：小红书即使收到 active 快照也整行隐藏', async () => {
+  const w = await boot(slowStartStub({
+    getStatus: async () => makeStatus({
+      cloud: 'connected',
+      dailyUsage: { asOf: new Date().toISOString(), totals: {}, slowStart: { state: 'active', day: 3, totalDays: 7, binding: true, eligible: true } },
+    }),
+  }, 'xiaohongshu'));
+  assert.ok(hidden($(w, '#slow-start-row')));
+  assert.equal($(w, '#slow-start-row').getAttribute('aria-busy'), null);
+});
+
 test('慢启动行：binding=false 如实标注「不额外限制」，不宣称在压低配额', async () => {
-  const w = await boot(makeStub({
+  const w = await boot(slowStartStub({
     getStatus: async () => makeStatus({
       cloud: 'connected',
       dailyUsage: { asOf: new Date().toISOString(), totals: {}, slowStart: { state: 'active', day: 5, totalDays: 7, binding: false, eligible: true } },
@@ -809,7 +847,7 @@ test('慢启动行：binding=false 如实标注「不额外限制」，不宣称
 });
 
 test('慢启动行：eligible=false → 勾选禁用 + 如实说明', async () => {
-  const w = await boot(makeStub({
+  const w = await boot(slowStartStub({
     getStatus: async () => makeStatus({
       cloud: 'connected',
       dailyUsage: { asOf: new Date().toISOString(), totals: {}, slowStart: { state: 'off', totalDays: 7, eligible: false, ineligibleReason: 'platform_unsupported' } },
@@ -832,7 +870,7 @@ test('慢启动行：开启后立即显示等待态，旧快照不回拨，成�
       slowStart: { state: 'off', totalDays: 7, eligible: true },
     },
   });
-  const w = await boot(makeStub({
+  const w = await boot(slowStartStub({
     onStatusUpdate: (cb) => { pushStatus = cb; },
     getStatus: async () => initial,
     setSlowStart: async () => write.promise,
@@ -875,7 +913,7 @@ test('慢启动行：开启后立即显示等待态，旧快照不回拨，成�
 });
 
 test('慢启动行：关闭失败后回到权威开启态，并保留云端失败原因', async () => {
-  const w = await boot(makeStub({
+  const w = await boot(slowStartStub({
     getStatus: async () => makeStatus({
       cloud: 'connected',
       dailyUsage: {
@@ -920,7 +958,7 @@ test('慢启动行：A 环境写入反馈不串到 B，A 回执也不改写当�
         : { state: 'off', totalDays: 7, eligible: true },
     },
   });
-  const w = await boot(makeStub({
+  const w = await boot(slowStartStub({
     onStatusUpdate: (cb) => { pushStatus = cb; },
     getStatus: async () => statusFor('A', 'off'),
     setSlowStart: async ({ envKey }) => envKey === 'A' ? writeA.promise : ({ ok: false }),
@@ -957,7 +995,7 @@ test('慢启动行：A 环境写入反馈不串到 B，A 回执也不改写当�
 // 时点文字合成两次冒泡 → 切换两次 → 净效果为零，而直接点滑块只冒泡一次 → 切换一次。
 // **同一控件点在不同位置行为不同，人工点测会当「偶发」放过**。
 test('慢启动行：点勾选框 MUST NOT 连带展开/收起「今日节奏」', async () => {
-  const w = await boot(makeStub({
+  const w = await boot(slowStartStub({
     getStatus: async () => makeStatus({
       cloud: 'connected',
       dailyUsage: {
