@@ -3268,6 +3268,21 @@ body { margin: 0; }
 }
 /* 毕业态：爬坡已结束、上限已放开 —— 用静默色，与「正在被限制」的琥珀区分开。 */
 .acct-age.is-graduated { background: var(--mute); }
+/* 写入中只表达「等待云端确认」，不沿用琥珀色的已生效语义。spinner 放在徽章内，窄窗不增高。 */
+.slow-start-row.is-pending .switch { cursor: wait; }
+.slow-start-row.is-pending .switch-track { box-shadow: 0 0 0 3px var(--accent-soft); }
+.acct-age.is-pending {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--accent);
+}
+.acct-age.is-pending::before {
+  content: ""; width: 8px; height: 8px; border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.45); border-top-color: #fff;
+  animation: slow-start-spin 0.75s linear infinite;
+}
+.slow-start-feedback { color: var(--accent); }
+.slow-start-row .parking-hint.is-error { color: var(--bad-fg); }
+@keyframes slow-start-spin { to { transform: rotate(360deg); } }
 /* 断连 / 不适用：整行灰化，但**字段不会因断连变缺省**（主进程 if (evt.dailyUsage) 不清空），
    所以这里表达的是「可能已过期」，不是「已关闭」。 */
 .slow-start-row.is-stale { opacity: 0.55; }

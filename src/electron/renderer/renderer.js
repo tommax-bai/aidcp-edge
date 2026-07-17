@@ -387,8 +387,23 @@ function updateFacebookImportVisibility() {
 }
 const LOG_RETENTION_MS = 2 * 60 * 1000; // 开发者详情原始日志保留 2 分钟
 let quotaDetailsOpen = false;
-/** 慢启动 PUT 在途（change account-level-slow-start）：期间不让推送快照把用户刚拨的开关拨回去。 */
-let slowStartPending = false;
+/**
+ * 慢启动写反馈（change slow-start-optimistic-feedback）：按 envKey 隔离，允许 A 环境等待云端时
+ * 切到 B 环境继续操作，绝不把 A 的目标态 / 错误串过去。权威状态仍只在 env.status.dailyUsage；
+ * 这里的 pending 只表达「请求在途」，error 只表达最近一次写失败。
+ */
+const slowStartFeedbackByEnv = new Map();
+
+function slowStartEnvKey(env) {
+  return String((env && (env.profileId || env.envId)) || '').trim();
+}
+
+function selectedSlowStartContext() {
+  const selectedKey = fleetView.selected;
+  const env = selectedKey && fleetView.envs.get(selectedKey);
+  const envKey = slowStartEnvKey(env);
+  return env && envKey ? { selectedKey, env, envKey } : null;
+}
 
 // 平台占位：mac 红绿灯内嵌预留左侧；Windows 叠加窗控预留右侧。其余平台两侧归零。
 (function initPlatformPads() {
@@ -671,12 +686,35 @@ function renderSlowStart(status) {
     fields.slowStartRow.classList.add('hidden');
     return;
   }
+  const context = selectedSlowStartContext();
+  const feedback = context && slowStartFeedbackByEnv.get(context.envKey);
+  const pending = feedback && feedback.kind === 'pending' ? feedback : null;
   fields.slowStartRow.classList.remove('hidden');
-  fields.slowStartRow.classList.toggle('is-stale', Boolean(view.stale));
+  fields.slowStartRow.classList.toggle('is-stale', Boolean(view.stale) && !pending);
+  fields.slowStartRow.classList.toggle('is-pending', Boolean(pending));
+  if (pending) fields.slowStartRow.setAttribute('aria-busy', 'true');
+  else fields.slowStartRow.removeAttribute('aria-busy');
+
+  // pending 是明确的本地临时态：展示用户的目标动作，但不冒充云端已经生效，也不推算 day / quota。
+  if (pending) {
+    if (fields.slowStartToggle) {
+      fields.slowStartToggle.checked = Boolean(pending.enabled);
+      fields.slowStartToggle.disabled = true;
+    }
+    if (fields.slowStartBadge) {
+      fields.slowStartBadge.textContent = pending.enabled ? '慢启动 · 正在开启…' : '慢启动 · 正在关闭…';
+      fields.slowStartBadge.className = 'acct-age is-pending';
+    }
+    if (fields.slowStartReason) {
+      fields.slowStartReason.textContent = '正在等待云端确认，请稍候';
+      fields.slowStartReason.className = 'parking-hint slow-start-feedback';
+    }
+    return;
+  }
+
   if (fields.slowStartToggle) {
-    // 写入在途时不要用推送回来的旧快照把用户刚拨的开关拨回去（PUT 回执带写后真态）。
-    if (!slowStartPending) fields.slowStartToggle.checked = Boolean(view.checked);
-    fields.slowStartToggle.disabled = Boolean(view.disabled) || slowStartPending;
+    fields.slowStartToggle.checked = Boolean(view.checked);
+    fields.slowStartToggle.disabled = Boolean(view.disabled);
   }
   if (fields.slowStartBadge) {
     fields.slowStartBadge.textContent = view.badge || '';
@@ -685,8 +723,12 @@ function renderSlowStart(status) {
       : 'acct-age hidden';
   }
   if (fields.slowStartReason) {
-    fields.slowStartReason.textContent = view.reason || '';
-    fields.slowStartReason.className = view.reason ? 'parking-hint' : 'parking-hint hidden';
+    const error = feedback && feedback.kind === 'error' ? feedback.message : '';
+    const reason = error || view.reason || '';
+    fields.slowStartReason.textContent = reason;
+    fields.slowStartReason.className = reason
+      ? `parking-hint${error ? ' is-error' : ''}`
+      : 'parking-hint hidden';
   }
 }
 
@@ -1839,34 +1881,64 @@ fields.slowStartToggle?.addEventListener('change', (event) => {
  * 而这个谎的代价是运营以为号在被养、实际在按满额度跑。
  */
 async function submitSlowStart(enabled) {
-  const selected = fleetView.envs.get(fleetView.selected);
-  const envKey = selected && (selected.profileId || selected.envId);
-  if (!envKey) return;
-  slowStartPending = true;
-  if (fields.slowStartToggle) fields.slowStartToggle.disabled = true;
+  const context = selectedSlowStartContext();
+  if (!context) return;
+  const { selectedKey, env, envKey } = context;
+  const existing = slowStartFeedbackByEnv.get(envKey);
+  if (existing && existing.kind === 'pending') return;
+
+  slowStartFeedbackByEnv.set(envKey, { kind: 'pending', enabled });
+  // change 发生后、第一次 await 之前立即上屏，慢网络下也不会出现「点了没反应」。
+  renderSlowStart(env.status || currentStatus);
+
+  const settleError = (message) => {
+    slowStartFeedbackByEnv.set(envKey, { kind: 'error', message: String(message || '设置失败') });
+    if (fleetView.selected === selectedKey) renderSlowStart(env.status || currentStatus);
+  };
+
   try {
     const res = await window.aidcpEdge.setSlowStart({ envKey, enabled });
     if (!res || !res.ok) {
-      // 回滚 UI 到真实态，并把云端的原因如实转述（409=环境未连接 / 403=环境不归你 / 503=构建未启用）。
-      if (fields.slowStartToggle) fields.slowStartToggle.checked = !enabled;
-      if (fields.slowStartReason) {
-        const err = (res && res.data && (res.data.message || res.data.error)) || '设置失败';
-        fields.slowStartReason.textContent = String(err);
-        fields.slowStartReason.className = 'parking-hint';
-      }
+      // 回滚由未被篡改的权威 env.status 重绘；错误独立保留，不能再被 finally 吞掉。
+      const rawError = res && res.data && res.data.error;
+      const err = (res && res.data && res.data.message)
+        || (rawError && typeof rawError === 'object' && (rawError.message || rawError.code))
+        || (typeof rawError === 'string' && rawError)
+        || (res && res.error)
+        || '设置失败';
+      settleError(err);
       return;
     }
-    // 成功：云端回执带写后真态。下一次 ui.snapshot（≤60s）会把徽章刷成权威值，
-    // 这里不自行推算天数——推算一次就是第二个事实源。
-  } catch (err) {
-    if (fields.slowStartToggle) fields.slowStartToggle.checked = !enabled;
-    if (fields.slowStartReason) {
-      fields.slowStartReason.textContent = `设置失败：${(err && err.message) || err}`;
-      fields.slowStartReason.className = 'parking-hint';
+
+    // 成功回执本身就是云端写后真态：立即收敛，不再傻等下一次 ui.snapshot（最长 60s）。
+    // 只转交 slowStart / dayQuotas，绝不本地推算 day、binding 或计划量。
+    const receipt = res.data && res.data.data;
+    if (!receipt || !receipt.slowStart || typeof receipt.slowStart !== 'object') {
+      settleError('云端已返回，但未带回最新慢启动状态，请稍后重试');
+      return;
     }
-  } finally {
-    slowStartPending = false;
-    if (currentStatus) renderSlowStart(currentStatus);
+
+    slowStartFeedbackByEnv.delete(envKey);
+    if (fleetView.envs.get(selectedKey) !== env || !env.status || !env.status.dailyUsage) return;
+    const dayQuotas = receipt.dayQuotas && typeof receipt.dayQuotas === 'object' ? receipt.dayQuotas : null;
+    const dailyUsage = {
+      ...env.status.dailyUsage,
+      slowStart: receipt.slowStart,
+      ...(dayQuotas ? { quotas: { ...dayQuotas } } : {}),
+    };
+    if (dayQuotas && dailyUsage.windows && typeof dailyUsage.windows === 'object') {
+      dailyUsage.windows = {
+        ...dailyUsage.windows,
+        day: {
+          ...(dailyUsage.windows.day && typeof dailyUsage.windows.day === 'object' ? dailyUsage.windows.day : {}),
+          quotas: { ...dayQuotas },
+        },
+      };
+    }
+    env.status = { ...env.status, dailyUsage };
+    if (fleetView.selected === selectedKey) render(env.status);
+  } catch (err) {
+    settleError(`设置失败：${(err && err.message) || err}`);
   }
 }
 fields.quotaToggle?.addEventListener('click', (event) => {
@@ -2167,6 +2239,7 @@ function applyFleetSnapshot(snap) {
   }
   for (const key of [...fleetView.envs.keys()]) {
     if (known.has(key)) continue;
+    slowStartFeedbackByEnv.delete(slowStartEnvKey(fleetView.envs.get(key)));
     fleetView.envs.delete(key); // 快照为准（含 '__local__' 占位）
     // 连同该环境的所有渲染层缓冲一并清（否则同一分身移出再加回会重放上一会话的陈旧活动 + 吞掉新发布折流，
     // 还有全会话内存泄漏）。

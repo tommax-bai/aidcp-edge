@@ -21,6 +21,13 @@ after(() => {
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 function makeStatus(over: Record<string, unknown> = {}) {
   return {
     auth: 'checking',
@@ -56,6 +63,7 @@ interface Stub {
   adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
   adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string; requiresAdminAssignment?: boolean; assignmentHandledByMain?: boolean; rosterJoinedByMain?: boolean }>;
   adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string; cleanupPending?: boolean; message?: string }>;
+  setSlowStart: (opts: { envKey: string; enabled: boolean }) => Promise<unknown>;
 }
 
 function makeStub(overrides: Partial<Stub> = {}): Stub {
@@ -80,6 +88,7 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     adsTemplates: async () => [{ key: 'win11-intel', label: 'Windows · 8核 8G' }],
     adsCreateEnv: async () => ({ ok: true, template: 'win11-intel' }),
     adsDeleteEnv: async () => ({ ok: true }),
+    setSlowStart: async () => ({ ok: false, data: { message: '测试桩未配置慢启动写入' } }),
     ...overrides,
   };
 }
@@ -808,6 +817,139 @@ test('慢启动行：eligible=false → 勾选禁用 + 如实说明', async () =
   }));
   assert.equal(($(w, '#slow-start-toggle') as unknown as HTMLInputElement).disabled, true);
   assert.match($(w, '#slow-start-reason').textContent || '', /该平台暂不支持/);
+});
+
+test('慢启动行：开启后立即显示等待态，旧快照不回拨，成功回执当场对齐真态与今日计划', async () => {
+  const write = deferred<unknown>();
+  let pushStatus: ((status: unknown) => void) | undefined;
+  const initial = makeStatus({
+    cloud: 'connected',
+    dailyUsage: {
+      asOf: new Date().toISOString(),
+      totals: { view: 3 },
+      quotas: { view: 80 },
+      windows: { day: { totals: { view: 3 }, quotas: { view: 80 }, saturated: [] } },
+      slowStart: { state: 'off', totalDays: 7, eligible: true },
+    },
+  });
+  const w = await boot(makeStub({
+    onStatusUpdate: (cb) => { pushStatus = cb; },
+    getStatus: async () => initial,
+    setSlowStart: async () => write.promise,
+  }));
+  const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  const row = $(w, '#slow-start-row');
+
+  toggle.checked = true;
+  toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.equal(toggle.checked, true);
+  assert.equal(toggle.disabled, true);
+  assert.equal(row.getAttribute('aria-busy'), 'true');
+  assert.ok(row.classList.contains('is-pending'));
+  assert.match($(w, '#slow-start-badge').textContent || '', /正在开启/);
+  assert.doesNotMatch($(w, '#slow-start-badge').textContent || '', /第 1\/7 天/, 'pending 不得本地冒充 D1');
+  assert.match($(w, '#slow-start-reason').textContent || '', /等待云端确认/);
+
+  pushStatus?.(initial); // PUT 仍在途时到达写前旧快照
+  await tick();
+  assert.equal(toggle.checked, true, '旧快照不得把目标开关拨回 off');
+  assert.ok(row.classList.contains('is-pending'), '旧快照不得清掉等待态');
+
+  write.resolve({
+    ok: true,
+    data: {
+      data: {
+        envKey: '__local__',
+        slowStart: { state: 'active', day: 1, totalDays: 7, since: Date.now(), binding: true, eligible: true },
+        dayQuotas: { view: 20 },
+      },
+    },
+  });
+  await tick();
+  assert.equal(row.hasAttribute('aria-busy'), false);
+  assert.equal(row.classList.contains('is-pending'), false);
+  assert.equal(toggle.checked, true);
+  assert.equal(toggle.disabled, false);
+  assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 1\/7 天/);
+  assert.equal($(w, '#views-cap').textContent, '/20', '成功回执的 dayQuotas 应当场更新，不等下一次快照');
+});
+
+test('慢启动行：关闭失败后回到权威开启态，并保留云端失败原因', async () => {
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      cloud: 'connected',
+      dailyUsage: {
+        asOf: new Date().toISOString(),
+        totals: { view: 3 },
+        quotas: { view: 20 },
+        slowStart: { state: 'active', day: 3, totalDays: 7, binding: true, eligible: true },
+      },
+    }),
+    setSlowStart: async () => ({ ok: false, data: { error: { code: 'EDGE_OFFLINE', message: '该环境当前未连接，暂时无法更改。' } } }),
+  }));
+  const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  toggle.checked = false;
+  toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.match($(w, '#slow-start-badge').textContent || '', /正在关闭/);
+
+  await tick();
+  assert.equal(toggle.checked, true, '失败后必须回到未被篡改的权威 active 状态');
+  assert.equal(toggle.disabled, false);
+  assert.equal($(w, '#slow-start-row').classList.contains('is-pending'), false);
+  assert.match($(w, '#slow-start-badge').textContent || '', /第 3\/7 天/);
+  assert.match($(w, '#slow-start-reason').textContent || '', /当前未连接/);
+  assert.ok($(w, '#slow-start-reason').classList.contains('is-error'));
+});
+
+test('慢启动行：A 环境写入反馈不串到 B，A 回执也不改写当前 B', async () => {
+  const writeA = deferred<unknown>();
+  let pushStatus: ((status: unknown) => void) | undefined;
+  const statusFor = (envId: string, state: 'off' | 'active') => makeStatus({
+    envId,
+    envName: `环境 ${envId}`,
+    cloud: 'connected',
+    edge: 'running',
+    session: 'running',
+    updatedAt: new Date().toISOString(),
+    dailyUsage: {
+      asOf: new Date().toISOString(),
+      totals: { view: 1 },
+      quotas: { view: state === 'active' ? 20 : 80 },
+      slowStart: state === 'active'
+        ? { state: 'active', day: 1, totalDays: 7, binding: true, eligible: true }
+        : { state: 'off', totalDays: 7, eligible: true },
+    },
+  });
+  const w = await boot(makeStub({
+    onStatusUpdate: (cb) => { pushStatus = cb; },
+    getStatus: async () => statusFor('A', 'off'),
+    setSlowStart: async ({ envKey }) => envKey === 'A' ? writeA.promise : ({ ok: false }),
+  }));
+  const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  toggle.checked = true;
+  toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.match($(w, '#slow-start-badge').textContent || '', /正在开启/);
+
+  pushStatus?.(statusFor('B', 'off'));
+  await tick();
+  const rowB = w.document.querySelector('.rail-row[data-env-id="B"]') as unknown as HTMLElement;
+  assert.ok(rowB, 'B 环境应进入左栏');
+  rowB.dispatchEvent(new w.Event('click', { bubbles: true }));
+  assert.equal($(w, '#slow-start-row').classList.contains('is-pending'), false);
+  assert.equal(toggle.checked, false);
+  assert.doesNotMatch($(w, '#slow-start-reason').textContent || '', /等待云端确认/);
+
+  writeA.resolve({
+    ok: true,
+    data: { data: { envKey: 'A', slowStart: { state: 'active', day: 1, totalDays: 7, binding: true, eligible: true }, dayQuotas: { view: 20 } } },
+  });
+  await tick();
+  assert.equal(toggle.checked, false, 'A 回执到达时当前 B 仍应保持 off');
+
+  const rowA = w.document.querySelector('.rail-row[data-env-id="A"]') as unknown as HTMLElement;
+  rowA.dispatchEvent(new w.Event('click', { bubbles: true }));
+  assert.equal(toggle.checked, true, '切回 A 后应看到 A 的成功写后真态');
+  assert.match($(w, '#slow-start-badge').textContent || '', /第 1\/7 天/);
 });
 
 // 这条守的是 design D8 点名的那个坑：整卡点击委托只认 closest('button')，checkbox / label 都不是
