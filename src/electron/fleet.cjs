@@ -83,6 +83,14 @@ function legacyMirrorOf(environments) {
   };
 }
 
+/** Real nickname source marker used by the desktop shell; `env` remains reserved for roster fallback names. */
+function nicknameSourceForPlatform(platform) {
+  const normalized = String(platform ?? '').trim().toLowerCase();
+  if (normalized === 'facebook' || normalized === 'fb') return 'facebook';
+  if (normalized === 'wechat_channels' || normalized === 'wechat-channels' || normalized === 'wechat') return 'wechat_channels';
+  return 'xhs';
+}
+
 /**
  * Facebook 自动浏览策略：只允许已解析为 dev 的 Facebook 子进程真浏览/点赞。
  * 此处刻意不读取 process.env，调用方会把结果写入最终 spawn env，以阻断外壳残留值泄漏到 ol/custom。
@@ -589,6 +597,7 @@ module.exports = {
   normalizeEnvironments,
   migrateEnvironments,
   legacyMirrorOf,
+  nicknameSourceForPlatform,
   facebookBrowseModeFor,
   buildEnvSpawnEnv,
   createStaggerQueue,

@@ -3465,15 +3465,19 @@ function handleEdgeLogLine(handle, message, isError = false) {
   let standbyHint = null;
   if (evt) {
     if (evt.account) {
-      // 账号标签兜底链：平台昵称（navigate 身份路径才有）> AdsPower 环境名 > 渲染层再兜尾4位。
+      // 账号标签兜底链：已验证的平台昵称 > AdsPower 环境名 > 渲染层再兜尾4位。
       const name = evt.account.name || handle.name || '';
-      handle.status.account = { id: evt.account.id, name, source: evt.account.name ? 'xhs' : 'env' };
+      handle.status.account = {
+        id: evt.account.id,
+        name,
+        source: evt.account.name ? fleet.nicknameSourceForPlatform(handle.platform) : 'env',
+      };
       // 身份确立 = 登录态权威信号（核心读不出登录身份会诚实退出、不会走到这行），据此翻登录态。
       // adspower 路径此前无人写 'logged in'（cookie 门是 self 专属），人设闸因此永不开——修于本 change。
       next.auth = 'logged in';
       refreshSameAccountWarnings();
-      // 环境名跟随真实昵称（change edge-adspower-name-follows-nickname）：读到平台真实昵称（evt.account.name
-      // 非空 = source 'xhs'）且与 AdsPower 环境名不一致时，经写客户端改名封装把该环境名改成昵称。
+      // 环境名跟随真实昵称（changes edge-adspower-name-follows-nickname / wechat-channels-env-name-follows-nickname）：
+      // 读到非空平台真实昵称且与 AdsPower 环境名不一致时，经写客户端改名封装把该环境名改成昵称。
       // 幂等去抖（名已一致不发）+ 诚实降级（写失败保持原名、不重试风暴、不阻塞浏览闭环）；fire-and-forget，
       // 不 await（受写客户端 ≥1.1s 串行节流，不阻塞消息处理）。
       if (evt.account.name) maybeRenameEnvToNickname(handle, evt.account.name);

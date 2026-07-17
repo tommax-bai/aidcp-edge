@@ -25,6 +25,7 @@ import type { InteractionTransport } from '../platform/interaction-connector.js'
 import { WechatChannelsApiClient } from './api-client.js';
 import { WechatAuthCoordinator } from './auth-session.js';
 import { CdpWechatChannelsBrowserSidecar } from './browser-sidecar.js';
+import { wireWechatIdentityUiEvents } from './companion-ui.js';
 import { WechatChannelsConnector } from './connector.js';
 import {
   WechatCapabilityState,
@@ -84,6 +85,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     pollIntervalMs: envMs(env.AIDCP_WECHAT_LOGIN_POLL_MS, 2_000),
     logImpl: safeLog,
   });
+  wireWechatIdentityUiEvents(auth, safeLog);
 
   safeLog(
     `[wechat-channels] local gates interaction=${flags.interactionEnabled} writes=${flags.writeEnabled}; account grants await Cloud snapshot`,
