@@ -114,6 +114,11 @@ body { margin: 0; }
 .cle-track { width: 54px; height: 3px; overflow: hidden; border-radius: 999px; background: #dce8f7; }
 .cle-bar { display: block; width: var(--inspiration-fill); height: 100%; border-radius: inherit; background: #4f83e8; transition: width .24s ease; }
 .content-library-entry.is-rich .cle-bar { background: linear-gradient(90deg, #3f7ce0, #2aa57a); }
+/* 数值未知（尚未读到 / 读失败）：0% 宽度与「真的 0 条」像素级等同，会把「没读到」画成「没有」。
+   未知一律画成待定虚底纹，与真实零值的空槽区分开。 */
+.content-library-entry.is-unknown .cle-track {
+  background: repeating-linear-gradient(90deg, #dce8f7 0 3px, transparent 3px 6px);
+}
 
 .health-pill {
   display: inline-flex; align-items: center; gap: 7px;

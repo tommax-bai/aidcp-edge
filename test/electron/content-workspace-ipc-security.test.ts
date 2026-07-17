@@ -18,6 +18,12 @@ test('灵感库 preload 只暴露四个具名 IPC，不暴露 URL、令牌或账
   }
   const block = preload.slice(preload.indexOf('// 当前账号灵感库'), preload.indexOf('// 对外客户鉴权'));
   const executable = block.split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+  // 切片一旦因锚注释改名而落空，下面的 doesNotMatch 会对空串永真、断言全部空过。
+  // 先钉住切片真的取到了那四个方法，再断言它们不碰认证材料。
+  assert.ok(executable.length > 0, 'preload 切片落空 → 下面的断言会空过');
+  for (const method of ['curatedSummary', 'curatedList', 'curatedGet', 'curatedCreatePost']) {
+    assert.match(executable, new RegExp(`${method}:`), `切片必须真的覆盖 ${method}`);
+  }
   assert.doesNotMatch(executable, /authorization|cookie|jwt|token|headers|\burl\b|accountId/i);
   assert.doesNotMatch(renderer, /\bfetch\s*\(|authorization|cookie|jwt|token/i, '内容 renderer 不直接联网或接触认证材料');
 });
@@ -27,7 +33,10 @@ test('main 固定 customer-auth 路径、方法和参数白名单，并从所选
     assert.match(main, new RegExp(`ipcMain\\.handle\\('${channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
   }
   assert.match(main, /raw\.mode === 'all'[\s\S]*raw\.mode === 'creatable'/);
-  assert.match(main, /Number\.isInteger\(limit\)[\s\S]*limit > 50/);
+  // 边界值必须右锚（\b）：不加的话 `limit > 50` 也匹配放宽后的 `limit > 5000`，护栏形同虚设。
+  assert.match(main, /limit < 1 \|\| limit > 50\b/, 'limit 上界必须仍是 50');
+  assert.match(main, /Number\.isInteger\(offset\)/, 'offset 必须整数校验（原先根本没断言）');
+  assert.match(main, /offset < 0 \|\| offset > 1_000_000\b/, 'offset 边界必须仍收口');
   assert.match(main, /Number\.isInteger\(id\)[\s\S]*id <= 0/);
   assert.match(main, /typeof useReferenceImages !== 'boolean'/);
   assert.match(main, /`\/curated-contents\?mode=\$\{mode\}&limit=\$\{limit\}&offset=\$\{offset\}`/);
@@ -49,9 +58,14 @@ test('标题栏只保留紧凑灵感入口，并锁定低干扰蓝色与高储�
   assert.match(styles, /\.cle-track\s*\{[^}]*height:\s*3px/s);
 });
 
-test('页面控制器用环境和请求代次丢弃迟到响应，创建在途禁止重复提交', () => {
-  assert.match(renderer, /capturedEpoch !== requestEpoch \|\| environment\?\.envId !== capturedEnvId/);
-  assert.match(renderer, /if \(createBusy \|\| !environment/);
-  assert.match(renderer, /task\.status !== 'queued'/);
-  assert.match(renderer, /不代表已经生成或发布/);
+// 注：陈旧响应丢弃、账号切换失效、排队回执诚实性等**行为**一律由 content-workspace.test.ts
+// 在 jsdom 里真的执行控制器来验证。这里只留「源码文本」层面挡不住也测不出的静态约束
+// （IPC 通道白名单、路径/方法固定、envKey/token 只由 main 注入）。
+// 绝不再用源码正则去替代行为断言：那种断言只证明某段字符串还在，改个等价写法就红、真坏了却可能绿。
+test('页面控制器不自行拼接 customer-auth 路径，只经具名 IPC 取数', () => {
+  for (const method of ['curatedSummary', 'curatedList', 'curatedGet', 'curatedCreatePost']) {
+    assert.match(renderer, new RegExp(`api\\.${method}`), `renderer 只能经 ${method} 取数`);
+  }
+  assert.doesNotMatch(renderer, /\/curated-contents/, 'renderer 不得自行拼接 customer-auth 路径');
+  assert.doesNotMatch(renderer, /envKey/, 'renderer 不得触碰 envKey');
 });

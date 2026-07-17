@@ -62,6 +62,41 @@
     }
   }
 
+  /**
+   * 任务已被受理时的诚实回执；未受理（终态）返回 null 交给 terminalTaskMessage。
+   * 同一分钟内重复提交会被服务端按去重键收敛到上一条同样的任务，那条可能已经跑起来甚至跑完了——
+   * 它同样是「被受理」，绝不能报成失败：报失败会把操作员推去再点一次，反而制造重复稿件。
+   */
+  function acceptedTaskMessage(status, shortId) {
+    switch (status) {
+      case 'queued':
+      case 'draft':
+      case 'awaiting_confirmation':
+        return `已排队创作 · 任务 ${shortId}。后续会生成稿件并进入审核；这里不代表已经生成或发布。`;
+      case 'planning':
+      case 'executing':
+        return `这条灵感的创作任务已在执行 · 任务 ${shortId}。稿件生成后会进入审核。`;
+      case 'waiting_approval':
+        return `这条灵感的稿件已生成、正在等待审核 · 任务 ${shortId}。`;
+      case 'deferred':
+        return `这条灵感的创作任务已受理、正在等待可执行的时机 · 任务 ${shortId}。`;
+      case 'completed':
+      case 'partially_completed':
+        return `刚刚这条灵感的创作任务已经完成 · 任务 ${shortId}。请到稿件审核查看结果。`;
+      default:
+        return null;
+    }
+  }
+
+  /** 未受理的终态：如实说明上一条同样的任务是什么下场，不含糊成「没排上队」。 */
+  function terminalTaskMessage(status) {
+    switch (status) {
+      case 'cancelled': return '刚刚这条灵感上一次的创作任务已被取消，稍后可再试';
+      case 'failed': return '刚刚这条灵感上一次的创作任务失败了，稍后可再试';
+      default: return `服务端返回了未知的任务状态「${status}」，未按成功处理`;
+    }
+  }
+
   function responseFailureMessage(response) {
     return rejectionMessage(response?.reason || response?.error, response?.error);
   }
@@ -122,6 +157,7 @@
           inspirationCount: null,
           referenceDraftCount: null,
           summaryLoading: false,
+          summaryFailed: false,
           summaryRequestId: 0,
         });
       }
@@ -241,6 +277,8 @@
       const state = envState();
       const count = finiteCount(state?.inspirationCount);
       const draftCount = finiteCount(state?.referenceDraftCount);
+      const loading = Boolean(state?.summaryLoading);
+      const failed = Boolean(state?.summaryFailed);
       const fill = count === null ? 0 : Math.min(100, (count / INSPIRATION_SATURATION_COUNT) * 100);
       if (fields.entry) fields.entry.disabled = !environment;
       if (fields.entryCount) fields.entryCount.textContent = count === null ? '—' : String(count);
@@ -248,14 +286,23 @@
       if (fields.entry) {
         fields.entry.style.setProperty('--inspiration-fill', `${fill}%`);
         fields.entry.classList.toggle('is-rich', count !== null && count >= INSPIRATION_SATURATION_COUNT);
-        fields.entry.setAttribute('aria-busy', state?.summaryLoading ? 'true' : 'false');
-        const countLabel = count === null ? '灵感数据加载中' : `灵感 ${count}`;
-        const draftLabel = draftCount === null ? '成稿数据加载中' : `已成稿 ${draftCount}`;
+        // 数值未知时储备条必须与「真的 0 条」不同：0% 宽度和真实零值像素级等同，会把「没读到」画成「没有」。
+        fields.entry.classList.toggle('is-unknown', Boolean(environment) && count === null);
+        fields.entry.setAttribute('aria-busy', loading ? 'true' : 'false');
+        // 「加载中」只在真的在加载时说；读失败必须说失败，不能永远停在加载中。
+        const unknownLabel = loading ? '数据加载中' : failed ? '数据读取失败' : '数据暂缺';
+        const countLabel = count === null ? `灵感${unknownLabel}` : `灵感 ${count}`;
+        const draftLabel = draftCount === null ? `成稿${unknownLabel}` : `已成稿 ${draftCount}`;
+        const action = failed && !loading ? '点击重试' : '点击进入';
         fields.entry.setAttribute(
           'aria-label',
-          environment ? `灵感库，${countLabel}，${draftLabel}，点击进入` : '灵感库，请先选择账号',
+          environment ? `灵感库，${countLabel}，${draftLabel}，${action}` : '灵感库，请先选择账号',
         );
-        fields.entry.title = environment ? '点击进入灵感库' : '请先选择一个账号环境';
+        fields.entry.title = !environment
+          ? '请先选择一个账号环境'
+          : failed && !loading
+            ? '灵感数据没读到，点击进入并重试'
+            : '点击进入灵感库';
       }
     }
 
@@ -280,6 +327,8 @@
         return;
       }
       state.summaryLoading = false;
+      // 读失败与「读到但计数缺失」都落 null，但两者不是一回事：前者要说失败、后者是服务端诚实缺数。
+      state.summaryFailed = !response?.ok;
       state.inspirationCount = response?.ok ? finiteCount(response.data?.total) : null;
       state.referenceDraftCount = response?.ok ? finiteCount(response.data?.referenceDraftCount) : null;
       updateEntry();
@@ -550,8 +599,10 @@
         } catch {
           response = { ok: false, error: 'request_failed' };
         }
-        if (capturedEpoch !== requestEpoch || environment?.envId !== capturedEnvId || currentPage !== 'create') return;
+        // 忙碌锁必须先解，再判陈旧：解锁写在 return 之后的话，请求在途时离开创作页
+        // （返回详情 / 打开稿件审核）就会把锁永久留死，回到创作页只剩一个禁用的「正在排队…」。
         createBusy = false;
+        if (capturedEpoch !== requestEpoch || environment?.envId !== capturedEnvId || currentPage !== 'create') return;
         renderCreate();
         const liveMessage = fields.create.querySelector('.curated-create-message');
         const liveSubmit = fields.create.querySelector('.cw-button.primary');
@@ -566,16 +617,23 @@
           return;
         }
         const task = response.data?.task;
-        if (!task || task.status !== 'queued') {
-          liveMessage.textContent = '服务端没有返回已排队任务，未按成功处理。';
+        if (!task || typeof task.status !== 'string') {
+          liveMessage.textContent = '服务端没有返回任务，未按成功处理。';
           liveMessage.classList.add('error');
           return;
         }
         const shortId = typeof task.id === 'string' ? `${task.id.slice(0, 8)}…` : '未知';
-        liveMessage.textContent = `已排队创作 · 任务 ${shortId}。后续会生成稿件并进入审核；这里不代表已经生成或发布。`;
+        const accepted = acceptedTaskMessage(task.status, shortId);
+        if (!accepted) {
+          // 只有真正没被受理的终态才算失败（同一分钟内重复提交会被去重到上一条同样的任务）。
+          liveMessage.textContent = `${terminalTaskMessage(task.status)}（任务 ${shortId}）`;
+          liveMessage.classList.add('error');
+          return;
+        }
+        liveMessage.textContent = accepted;
         liveMessage.classList.add('queued');
         liveSubmit.disabled = true;
-        liveSubmit.textContent = '已排队';
+        liveSubmit.textContent = '已受理';
       });
       fields.create.appendChild(message);
       fields.create.appendChild(submit);
@@ -609,7 +667,12 @@
       environment = normalized;
       updateEntry();
       if (!changed) {
-        if (visible()) configureHeader(currentPage);
+        // 账号没变也必须重新主张自己的可见性：首页显隐是与互动工作区共享的状态，
+        // 对方每次状态心跳都会归还首页；只有本工作区开着时再压一次，才不会被掀开。
+        if (visible()) {
+          setWorkspaceVisible(true);
+          configureHeader(currentPage);
+        }
         return;
       }
       requestEpoch += 1;

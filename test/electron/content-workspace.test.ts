@@ -210,3 +210,163 @@ test('稿件审核占满主内容区，返回/关闭不影响主窗口壳', () =
   assert.equal(hidden($(window, '#content-workspace')), true);
   assert.equal(hidden($(window, '#legacy-workspace')), false);
 });
+
+// ── review 修复回归（每条都先在未修版本上验证过会红）──
+
+test('排队请求在途时离开创作页，不把忙碌锁留死（回来仍可再次提交）', async () => {
+  const deferred: { resolve?: (value: unknown) => void } = {};
+  let calls = 0;
+  const { window, controller } = boot({
+    curatedSummary: async () => ({ ok: true, data: { total: 1, referenceDraftCount: 0 } }),
+    curatedList: async () => ({ ok: true, data: { items: [listItem()], total: 1, limit: 12, offset: 0 } }),
+    curatedGet: async () => ({ ok: true, data: { item: detail() } }),
+    curatedCreatePost: async () => {
+      calls += 1;
+      return new Promise((resolve) => { deferred.resolve = resolve; });
+    },
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作' });
+  controller.openLibrary();
+  await flush();
+  $(window, '.curated-card').dispatchEvent(new window.Event('click'));
+  await flush();
+  $(window, '.curated-detail-actions .cw-button.primary').dispatchEvent(new window.Event('click'));
+  await flush();
+
+  $(window, '.curated-create .cw-button.primary').dispatchEvent(new window.Event('click'));
+  await flush();
+  assert.equal(calls, 1, '第一次提交应已发出');
+
+  // 请求还在途中就返回详情页——旧实现在此把 createBusy 永久留成 true。
+  $(window, '#content-workspace-back').dispatchEvent(new window.Event('click'));
+  await flush();
+  deferred.resolve?.({ ok: true, data: { triggered: true, created: true, task: { id: 'task-abcdefgh', status: 'queued', version: 1 } } });
+  await flush();
+
+  // 再次进入创作页：按钮必须可用，而不是卡在禁用的「正在排队…」。
+  $(window, '.curated-detail-actions .cw-button.primary').dispatchEvent(new window.Event('click'));
+  await flush();
+  const submit = $(window, '.curated-create .cw-button.primary') as HTMLButtonElement;
+  assert.equal(submit.disabled, false, '离开创作页后忙碌锁必须已解除');
+  assert.doesNotMatch(submit.textContent ?? '', /正在排队/);
+  submit.dispatchEvent(new window.Event('click'));
+  await flush();
+  assert.equal(calls, 2, '解锁后必须能真的再次提交');
+});
+
+test('已受理但已越过 queued 的任务如实报「已受理」，绝不谎报失败把人推去重复提交', async () => {
+  const { window, controller } = boot({
+    curatedSummary: async () => ({ ok: true, data: { total: 1, referenceDraftCount: 0 } }),
+    curatedList: async () => ({ ok: true, data: { items: [listItem()], total: 1, limit: 12, offset: 0 } }),
+    curatedGet: async () => ({ ok: true, data: { item: detail() } }),
+    // 同一分钟内重复提交 → 服务端按去重键收敛到上一条、此刻已在执行的任务。
+    curatedCreatePost: async () => ({
+      ok: true,
+      data: { triggered: true, created: false, task: { id: 'task-abcdefgh', status: 'executing', version: 3 } },
+    }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作' });
+  controller.openLibrary();
+  await flush();
+  $(window, '.curated-card').dispatchEvent(new window.Event('click'));
+  await flush();
+  $(window, '.curated-detail-actions .cw-button.primary').dispatchEvent(new window.Event('click'));
+  await flush();
+  $(window, '.curated-create .cw-button.primary').dispatchEvent(new window.Event('click'));
+  await flush();
+
+  const message = $(window, '.curated-create-message');
+  assert.doesNotMatch(message.textContent ?? '', /没有返回已排队任务|未按成功处理/, '已受理的任务绝不能报成失败');
+  assert.equal(message.classList.contains('error'), false);
+  assert.match(message.textContent ?? '', /已在执行/);
+});
+
+test('切账号时详情页与创作页的迟到回包一律丢弃（不只列表页）', async () => {
+  const detailDeferred: { resolve?: (value: unknown) => void } = {};
+  const { window, controller } = boot({
+    curatedSummary: async () => ({ ok: true, data: { total: 1, referenceDraftCount: 0 } }),
+    curatedList: async () => ({ ok: true, data: { items: [listItem()], total: 1, limit: 12, offset: 0 } }),
+    curatedGet: async () => new Promise((resolve) => { detailDeferred.resolve = resolve; }),
+    curatedCreatePost: async () => ({ ok: true, data: { triggered: true, created: true, task: { id: 'task-x', status: 'queued', version: 1 } } }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '账号 A' });
+  controller.openLibrary();
+  await flush();
+  $(window, '.curated-card').dispatchEvent(new window.Event('click'));
+  await flush();
+
+  // 详情还在途 → 切到账号 B → A 的详情回包必须不得渲染到 B 名下。
+  controller.setEnvironment({ envId: 'env-b', label: '账号 B' });
+  await flush();
+  detailDeferred.resolve?.({ ok: true, data: { item: detail({ title: 'A 账号的私有灵感' }) } });
+  await flush();
+  assert.doesNotMatch(window.document.body.textContent ?? '', /A 账号的私有灵感/, '旧账号详情绝不能渲染到新账号下');
+  assert.match($(window, '#content-workspace-meta').textContent ?? '', /账号 B/);
+});
+
+test('汇总读失败时标题栏说失败而不是永远「加载中」，储备条与真实 0 条可区分', async () => {
+  const { window, controller } = boot({
+    curatedSummary: async () => ({ ok: false, status: 503, error: 'curated_content_unavailable', reason: 'curated_content_unavailable' }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作' });
+  await flush();
+  const entry = $(window, '#content-library-entry');
+  const label = entry.getAttribute('aria-label') ?? '';
+  assert.doesNotMatch(label, /加载中/, '读失败后不得永远宣称加载中');
+  assert.match(label, /读取失败/);
+  assert.equal(entry.getAttribute('aria-busy'), 'false');
+  assert.equal(entry.classList.contains('is-unknown'), true, '未知必须与真实 0 条可区分');
+  assert.equal($(window, '#content-library-entry-count').textContent, '—');
+});
+
+test('真实 0 条精选不得被画成「未知」', async () => {
+  const { window, controller } = boot({
+    curatedSummary: async () => ({ ok: true, data: { total: 0, referenceDraftCount: 0 } }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作' });
+  await flush();
+  const entry = $(window, '#content-library-entry');
+  assert.equal(entry.classList.contains('is-unknown'), false, '真实 0 是已知值，不是未知');
+  assert.match(entry.getAttribute('aria-label') ?? '', /灵感 0/);
+  assert.equal($(window, '#content-library-entry-count').textContent, '0');
+});
+
+test('状态心跳不得把首页从开着的灵感库底下掀出来（两个工作区共享首页显隐）', async () => {
+  // 真机复现：非视频号账号每次心跳都会让互动工作区走 setVisible(false)，
+  // 旧实现在那里无条件归还首页 → 灵感库开着时首页被一次次掀开。
+  const interactionSrc = readFileSync(join(electronDir, 'renderer/interaction-workspace.js'), 'utf8');
+  const dom = new JSDOM(html, { runScripts: 'dangerously' });
+  const { window } = dom;
+  openWindows.push(window);
+  window.eval(interactionSrc);
+  window.eval(workspaceSrc);
+
+  const interaction = (window as unknown as { InteractionWorkspace: { create(o: unknown): any } }).InteractionWorkspace.create({
+    root: $(window, '#interaction-workspace'),
+    legacyRoot: $(window, '#legacy-workspace'),
+    shell: $(window, '.shell'),
+    api: {},
+  });
+  const content = (window as unknown as { ContentWorkspace: { create(o: unknown): any } }).ContentWorkspace.create({
+    root: $(window, '#content-workspace'),
+    legacyRoot: $(window, '#legacy-workspace'),
+    interactionRoot: $(window, '#interaction-workspace'),
+    shell: $(window, '.shell'),
+    api: { curatedSummary: async () => ({ ok: true, data: { total: 3, referenceDraftCount: 1 } }) },
+  });
+  assert.ok(interaction && content);
+
+  const env = { envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' };
+  content.setEnvironment(env);
+  content.openDraft();
+  assert.equal(hidden($(window, '#legacy-workspace')), true, '前置条件：灵感库/稿件审核开着时首页应藏起');
+
+  // 模拟一次状态心跳：render() 的真实顺序是先同步互动工作区、再同步内容工作区。
+  for (let i = 0; i < 3; i += 1) {
+    interaction.selectEnvironment({ envKey: 'env-a', platform: 'xiaohongshu', connectivity: 'connected' });
+    content.setEnvironment(env);
+    await flush(1);
+    assert.equal(hidden($(window, '#legacy-workspace')), true, `第 ${i + 1} 次心跳后首页仍必须藏着`);
+    assert.equal(hidden($(window, '#content-workspace')), false, '内容工作区必须仍开着');
+  }
+});

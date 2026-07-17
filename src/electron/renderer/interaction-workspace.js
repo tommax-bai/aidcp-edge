@@ -154,9 +154,13 @@
     }
 
     function setVisible(show) {
+      const wasActive = active;
       active = show;
       root.classList.toggle('hidden', !show);
-      legacyRoot.classList.toggle('hidden', show);
+      // 首页显隐是共享状态：内容工作区（灵感库 / 稿件审核）也会把它藏起来。
+      // 非视频号账号每次状态心跳都会走到 setVisible(false)；若无条件归还首页，就会把正开着的
+      // 内容工作区底下的首页一次次掀出来。只有自己真的从显示态退出时才归还首页。
+      if (show || wasActive) legacyRoot.classList.toggle('hidden', show);
       shell.classList.toggle('interaction-mode', show);
       root.setAttribute('aria-hidden', String(!show));
     }
