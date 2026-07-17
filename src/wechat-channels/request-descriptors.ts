@@ -54,7 +54,7 @@ export const WECHAT_CHANNELS_REQUEST_DESCRIPTORS: Readonly<Record<WechatChannels
   dmLoginCookie: unobserved(),
   dmNewMessages: unobserved(),
   dmHistory: observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-history-msg'),
-  dmSessionInfo: { ...observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-session-info'), coverage: 'empty_only' },
+  dmSessionInfo: observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-session-info'),
   dmSendText: unobserved(),
   dmUploadMedia: unobserved(),
 };

@@ -11,6 +11,7 @@ import {
 } from './request-descriptors.js';
 import {
   parseComments,
+  parseDmParticipantInfo,
   parseDmSessions,
   parseDmUpdates,
   parseIdentity,
@@ -20,6 +21,7 @@ import {
 import type {
   WechatComment,
   WechatDmMessage,
+  WechatDmParticipantInfo,
   WechatDmSession,
   WechatDmUpdatePage,
   WechatIdentity,
@@ -123,6 +125,23 @@ export class WechatChannelsApiClient {
   async listDmSessions(session: WechatSessionMaterial, cursor: string | null, limit = 50): Promise<WechatPage<WechatDmSession>> {
     void limit;
     return this.call('dmHistory', { cookie: cursor ?? '' }, session, parseDmSessions);
+  }
+
+  async getDmParticipantInfo(
+    session: WechatSessionMaterial,
+    sessionExternalIds: readonly string[],
+  ): Promise<WechatDmParticipantInfo[]> {
+    const uniqueIds = [...new Set(sessionExternalIds.map((id) => id.trim()).filter(Boolean))];
+    const participants: WechatDmParticipantInfo[] = [];
+    for (let offset = 0; offset < uniqueIds.length; offset += 50) {
+      participants.push(...await this.call(
+        'dmSessionInfo',
+        { sessionId: uniqueIds.slice(offset, offset + 50) },
+        session,
+        parseDmParticipantInfo,
+      ));
+    }
+    return participants;
   }
 
   listDmUpdates(

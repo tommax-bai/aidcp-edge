@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto';
 import { schemaChanged, WechatChannelsError } from './error-classifier.js';
 import type {
   WechatComment,
   WechatDmMessage,
+  WechatDmParticipantInfo,
   WechatDmSession,
   WechatDmUpdatePage,
   WechatIdentity,
@@ -171,7 +173,9 @@ function parseComment(
   const field = rootExternalId === null ? `comments[${index}]` : `comments[${index}].replies`;
   const comment = rec(value, endpoint, field);
   const externalId = requiredString(comment, ['commentId', 'comment_id', 'externalId', 'external_id'], endpoint, `${field}.externalId`);
-  const participantId = optionalString(comment, ['username', 'finderUsername', 'finder_username']);
+  const participantId = optionalString(comment, ['username', 'finderUsername', 'finder_username'])?.trim() || null;
+  const participantName = optionalString(comment, ['commentNickname', 'nickname', 'displayName', 'display_name'])?.trim() || null;
+  const participantAvatarUrl = optionalString(comment, ['commentHeadurl', 'headUrl', 'avatarUrl', 'avatar_url'])?.trim() || null;
   const rawReplies = valueAt(comment, ['levelTwoComment', 'level_two_comment', 'replies']);
   if (rawReplies !== undefined && !Array.isArray(rawReplies)) throw schemaChanged(endpoint, `${field}.replies`);
   const explicitLifecycle = optionalString(comment, ['lifecycle', 'status'])?.toLowerCase();
@@ -188,10 +192,10 @@ function parseComment(
     postExternalId,
     rootExternalId: normalizedRoot,
     parentExternalId,
-    participant: participantId === null ? null : {
-      externalId: participantId,
-      displayName: optionalString(comment, ['commentNickname', 'nickname', 'displayName', 'display_name']),
-      avatarUrl: optionalString(comment, ['commentHeadurl', 'headUrl', 'avatarUrl', 'avatar_url']),
+    participant: participantId === null && participantName === null && participantAvatarUrl === null ? null : {
+      externalId: participantId ?? opaqueCommentParticipantId(externalId),
+      displayName: participantName,
+      avatarUrl: participantAvatarUrl,
     },
     contentText: optionalString(comment, ['commentContent', 'content', 'contentText', 'content_text']),
     lifecycle,
@@ -200,6 +204,13 @@ function parseComment(
     replies: (rawReplies ?? []).map((reply, replyIndex) =>
       parseComment(reply, endpoint, postExternalId, replyIndex, normalizedRoot, externalId)),
   };
+}
+
+function opaqueCommentParticipantId(commentExternalId: string): string {
+  // Some observed comments expose a nickname/avatar while withholding username. Keep the visible
+  // snapshot without inventing a person-level platform ID. The stable comment ID scopes the opaque
+  // surrogate to this thread and does not drift when a signed avatar URL or display name changes.
+  return `comment_opaque_${createHash('sha256').update(`comment|${commentExternalId}`, 'utf8').digest('hex')}`;
 }
 
 function dmType(raw: unknown): { messageType: WechatDmMessage['messageType']; platformType: string } {
@@ -306,12 +317,30 @@ export function parseDmUpdates(
   return { sessions: [...sessions.values()], messages: items, ...pageMeta(data, endpoint) };
 }
 
-export function parseEmptyDmSessionInfo(body: unknown, endpoint: string): true {
+export function parseDmParticipantInfo(body: unknown, endpoint: string): WechatDmParticipantInfo[] {
   const data = dataRecord(body, endpoint);
-  if (!Array.isArray(data.sessionInfo) || data.sessionInfo.length > 0) {
-    throw schemaChanged(endpoint, 'sessionInfo.nonEmptyCaptureRequired');
-  }
-  return true;
+  if (!Array.isArray(data.sessionInfo)) throw schemaChanged(endpoint, 'sessionInfo');
+  return data.sessionInfo.map((value, index) => {
+    const info = rec(value, endpoint, `sessionInfo[${index}]`);
+    return {
+      sessionExternalId: requiredString(
+        info,
+        ['sessionId', 'session_id'],
+        endpoint,
+        `sessionInfo[${index}].sessionId`,
+      ),
+      participant: {
+        externalId: requiredString(
+          info,
+          ['username', 'finderUsername', 'finder_username'],
+          endpoint,
+          `sessionInfo[${index}].username`,
+        ),
+        displayName: optionalString(info, ['nickname', 'displayName', 'display_name'])?.trim() || null,
+        avatarUrl: optionalString(info, ['headImgUrl', 'head_img_url', 'avatarUrl', 'avatar_url'])?.trim() || null,
+      },
+    };
+  });
 }
 
 export function parseSendAck(body: unknown, endpoint: string): WechatSendAck {

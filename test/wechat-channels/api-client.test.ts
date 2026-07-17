@@ -115,11 +115,21 @@ test('wechat api: comment and DM adapters use the observed read-only request sha
       if (path.endsWith('/get-history-msg')) {
         return json({ errCode: 0, data: { msg: [], isContinue: false, cookie: '', baseResp: { errcode: 0 } } }, { status: 201 });
       }
+      if (path.endsWith('/get-session-info')) {
+        return json({ errCode: 0, data: { sessionInfo: [{
+          sessionId: 'dm-session-1', username: 'peer-1', nickname: '客户昵称', headImgUrl: 'https://example.invalid/avatar',
+          sessionType: 1, rejectMsg: 0, extInfo: {}, fromUserType: 1,
+        }], baseResp: { errcode: 0 } } }, { status: 201 });
+      }
       throw new Error(`unexpected path ${path}`);
     }) as typeof fetch,
   });
   assert.deepEqual(await api.listComments(SESSION, 'post-1', null, 20), { items: [], nextCursor: null, hasMore: false });
   assert.deepEqual(await api.listDmSessions(SESSION, null, 20), { items: [], nextCursor: null, hasMore: false });
+  assert.deepEqual(await api.getDmParticipantInfo(SESSION, ['dm-session-1']), [{
+    sessionExternalId: 'dm-session-1',
+    participant: { externalId: 'peer-1', displayName: '客户昵称', avatarUrl: 'https://example.invalid/avatar' },
+  }]);
   assert.deepEqual(Object.keys(calls[0].body).filter((key) => !key.startsWith('_') &&
     !['rawKeyBuff', 'timestamp', 'scene', 'reqScene', 'pluginSessionId'].includes(key)).sort(),
   ['commentSelection', 'exportId', 'forMcn', 'lastBuff']);
@@ -127,8 +137,10 @@ test('wechat api: comment and DM adapters use the observed read-only request sha
   assert.deepEqual(calls.map((call) => call.path), [
     '/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/comment_list',
     '/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-history-msg',
+    '/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-session-info',
   ]);
   assert.equal(calls[1].body.cookie, '');
+  assert.deepEqual(calls[2].body.sessionId, ['dm-session-1']);
 });
 
 test('wechat api: non-empty comments preserve reply hierarchy and opaque pagination', async () => {
@@ -164,6 +176,27 @@ test('wechat api: non-empty comments preserve reply hierarchy and opaque paginat
   assert.equal(second.nextCursor, null);
   assert.equal(second.hasMore, false);
   assert.deepEqual(requestCursors, ['', 'comment-cursor-2']);
+});
+
+test('wechat api: a visible comment nickname survives a blank platform username via an opaque surrogate', async () => {
+  const api = new WechatChannelsApiClient({
+    maxRetries: 0,
+    fetchImpl: (async () => json({ errCode: 0, data: {
+      comment: [{
+        commentId: 'comment-anonymous', username: '', commentNickname: '可见昵称',
+        commentHeadurl: 'https://example.invalid/anonymous-avatar', commentContent: 'hello',
+        commentCreatetime: '1700000000', commentLikeCount: 0, levelTwoComment: [],
+      }],
+      downContinueFlag: 0,
+      lastBuff: '',
+    } })) as typeof fetch,
+  });
+
+  const page = await api.listComments(SESSION, 'post-1', null, 20);
+  assert.equal(page.items[0].participant?.displayName, '可见昵称');
+  assert.equal(page.items[0].participant?.avatarUrl, 'https://example.invalid/anonymous-avatar');
+  assert.match(page.items[0].participant?.externalId ?? '', /^comment_opaque_[a-f0-9]{64}$/);
+  assert.doesNotMatch(page.items[0].participant?.externalId ?? '', /可见昵称|anonymous-avatar|comment-anonymous/);
 });
 
 test('wechat api: retries only bounded read calls and never retries writes', async () => {

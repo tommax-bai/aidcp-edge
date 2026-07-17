@@ -12,6 +12,7 @@ const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
 const interactionSrc = readFileSync(join(electronDir, 'renderer/interaction-workspace.js'), 'utf8');
 const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
+const stylesSrc = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 const listFixture = JSON.parse(readFileSync(join(fixtureDir, 'interaction-list-response.json'), 'utf8'));
 const commentFixture = JSON.parse(readFileSync(join(fixtureDir, 'comment-detail-response.json'), 'utf8'));
 const dmFixture = JSON.parse(readFileSync(join(fixtureDir, 'dm-detail-ambiguous-response.json'), 'utf8'));
@@ -274,6 +275,13 @@ test('XHS / Facebook 保留原 workspace；视频号只替换右侧且不占左�
   assert.match($(window, '#iw-list').textContent || '', /示例观众/);
   assert.match($(window, '#iw-detail').textContent || '', /模板 template_comment_thanks · v1/);
   assert.match($(window, '#iw-detail').textContent || '', /配置版本 1/);
+});
+
+test('820x720 单列互动布局使用主列整体滚动，不再把详情裁在固定高度之外', () => {
+  assert.match(stylesSrc, /\.shell\.interaction-mode[\s\S]*min-height:\s*calc\(100vh - 46px\);[\s\S]*overflow:\s*visible;/);
+  assert.match(stylesSrc, /\.interaction-workspace[\s\S]*min-height:\s*calc\(100vh - 70px\);/);
+  assert.match(stylesSrc, /@container \(max-width: 640px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column; overflow: visible; \}/);
+  assert.doesNotMatch(stylesSrc, /\.shell\.interaction-mode[\s\S]{0,260}\n\s*height:\s*calc\(100vh - 46px\);/);
 });
 
 test('视频号互动使用 profileId 作为 Cloud envKey，不混用本机 ads- 环境行 ID', async () => {
@@ -752,7 +760,7 @@ test('列表方向键可达并移动焦点，窄屏样式折叠为单栏且保�
 
   const css = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
   assert.match(css, /\.iw-list-item:focus-visible[\s\S]*outline: 2px solid var\(--accent\)/);
-  assert.match(css, /@container \(max-width: 640px\)[\s\S]*\.iw-inbox \{ grid-template-columns: 1fr/);
+  assert.match(css, /@container \(max-width: 640px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column; overflow: visible; \}/);
   assert.match(css, /@media \(max-width: 700px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column/);
 });
 
