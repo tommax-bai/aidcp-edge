@@ -11,9 +11,8 @@ import {
 } from './request-descriptors.js';
 import {
   parseComments,
-  parseDmMessages,
-  parseEmptyDmHistory,
-  parseEmptyDmSessionInfo,
+  parseDmSessions,
+  parseDmUpdates,
   parseIdentity,
   parsePosts,
   parseSendAck,
@@ -22,6 +21,7 @@ import type {
   WechatComment,
   WechatDmMessage,
   WechatDmSession,
+  WechatDmUpdatePage,
   WechatIdentity,
   WechatLoginCode,
   WechatLoginStatus,
@@ -111,23 +111,33 @@ export class WechatChannelsApiClient {
     cursor: string | null,
     limit = 100,
   ): Promise<WechatPage<WechatComment>> {
-    const page = cursor === null ? 1 : Number(cursor);
-    if (!Number.isInteger(page) || page < 1) {
-      return Promise.reject(new WechatChannelsError('invalid_command', 'commentPagePostList', 'Invalid page cursor', false));
-    }
+    void limit;
     return this.call(
-      'commentPagePostList',
-      { currentPage: page, pageSize: limit, userpageType: 0, stickyOrder: false },
+      'commentList',
+      { lastBuff: cursor ?? '', exportId: postExternalId, commentSelection: false, forMcn: false },
       session,
-      (body, endpoint) => parseComments(body, endpoint, postExternalId, page),
+      (body, endpoint) => parseComments(body, endpoint, postExternalId),
     );
   }
 
   async listDmSessions(session: WechatSessionMaterial, cursor: string | null, limit = 50): Promise<WechatPage<WechatDmSession>> {
     void limit;
-    const page = await this.call('dmHistory', { cookie: cursor ?? '' }, session, parseEmptyDmHistory);
-    await this.call('dmSessionInfo', { sessionId: [] }, session, parseEmptyDmSessionInfo);
-    return { items: [], nextCursor: page.nextCursor, hasMore: page.hasMore };
+    return this.call('dmHistory', { cookie: cursor ?? '' }, session, parseDmSessions);
+  }
+
+  listDmUpdates(
+    session: WechatSessionMaterial,
+    cursor: string | null,
+    ownIdentityExternalId: string | null,
+    limit = 100,
+  ): Promise<WechatDmUpdatePage> {
+    void limit;
+    return this.call(
+      'dmHistory',
+      { cookie: cursor ?? '' },
+      session,
+      (body, endpoint) => parseDmUpdates(body, endpoint, ownIdentityExternalId),
+    );
   }
 
   listDmHistory(
@@ -135,14 +145,13 @@ export class WechatChannelsApiClient {
     threadExternalId: string,
     cursor: string | null,
     limit = 100,
+    ownIdentityExternalId: string | null = null,
   ): Promise<WechatPage<WechatDmMessage>> {
-    void limit;
-    return this.call(
-      'dmHistory',
-      { cookie: cursor ?? '' },
-      session,
-      (body, endpoint) => parseDmMessages(body, endpoint, threadExternalId),
-    );
+    return this.listDmUpdates(session, cursor, ownIdentityExternalId, limit).then((page) => ({
+      items: page.messages.filter((message) => message.threadExternalId === threadExternalId),
+      nextCursor: page.nextCursor,
+      hasMore: page.hasMore,
+    }));
   }
 
   sendComment(

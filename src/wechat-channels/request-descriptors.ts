@@ -7,7 +7,7 @@ export type WechatChannelsEndpoint =
   | 'authLoginStatus'
   | 'authData'
   | 'postList'
-  | 'commentPagePostList'
+  | 'commentList'
   | 'commentCreate'
   | 'dmLoginCookie'
   | 'dmNewMessages'
@@ -49,11 +49,11 @@ export const WECHAT_CHANNELS_REQUEST_DESCRIPTORS: Readonly<Record<WechatChannels
   authLoginStatus: unobserved(),
   authData: observed('/cgi-bin/mmfinderassistant-bin/auth/auth_data'),
   postList: observed('/micro/content/cgi-bin/mmfinderassistant-bin/post/post_list'),
-  commentPagePostList: { ...observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/post/post_list'), coverage: 'empty_only' },
+  commentList: observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/comment_list'),
   commentCreate: unobserved(),
   dmLoginCookie: unobserved(),
   dmNewMessages: unobserved(),
-  dmHistory: { ...observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-history-msg'), coverage: 'empty_only' },
+  dmHistory: observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-history-msg'),
   dmSessionInfo: { ...observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-session-info'), coverage: 'empty_only' },
   dmSendText: unobserved(),
   dmUploadMedia: unobserved(),

@@ -234,7 +234,7 @@ function dmMessage(id: string, input: Partial<WechatDmMessage> = {}): WechatDmMe
   };
 }
 
-test('wechat dm sync: session/history pagination, duplicate items, and unknown messages preserve truth', async () => {
+test('wechat dm sync: global history pagination groups sessions and preserves unknown messages', async () => {
   await withState(async (state) => {
     const sessions: WechatDmSession[] = [{
       externalId: 'thread-1',
@@ -242,16 +242,17 @@ test('wechat dm sync: session/history pagination, duplicate items, and unknown m
       updatedAt: 1_700_000_000_000,
     }];
     const api = {
-      listDmSessions: async () => ({ items: sessions, nextCursor: null, hasMore: false }),
-      listDmHistory: async (_session: unknown, _threadId: string, cursor: string | null) => cursor === null
+      listDmUpdates: async (_session: unknown, cursor: string | null) => cursor === null
         ? {
-            items: [dmMessage('m-1'), dmMessage('m-1')],
+            sessions,
+            messages: [dmMessage('m-1'), dmMessage('m-1')],
             nextCursor: 'history-2',
             hasMore: true,
           }
         : {
-            items: [dmMessage('m-2', { messageType: 'unknown', contentText: null, platformType: 'voice_card_v9' })],
-            nextCursor: null,
+            sessions,
+            messages: [dmMessage('m-2', { messageType: 'unknown', contentText: null, platformType: 'voice_card_v9' })],
+            nextCursor: 'incremental-3',
             hasMore: false,
           },
     } as unknown as WechatChannelsApiClient;
@@ -262,6 +263,7 @@ test('wechat dm sync: session/history pagination, duplicate items, and unknown m
       api,
       state,
       getSession: () => SESSION,
+      getOwnIdentityExternalId: () => SCOPE.accountId,
       publishBatch: async (batch) => {
         batches.push(batch);
         return accepted(batch);
@@ -270,22 +272,23 @@ test('wechat dm sync: session/history pagination, duplicate items, and unknown m
 
     await sync.sync(request('dm', null));
 
-    assert.equal(batches.length, 3);
+    assert.equal(batches.length, 4);
     assert.deepEqual(batches.flatMap((batch) => batch.messages.map((message) => message.externalMessageId)), ['m-1', 'm-2']);
-    assert.equal(batches[1].messages[0].messageType, 'unknown');
-    assert.equal(batches[1].messages[0].rawMetaSanitized.platformType, 'voice_card_v9');
-    assert.equal(batches[2].scopeExternalId, null);
-    assert.deepEqual(batches[2].threads, []);
-    assert.deepEqual(batches[2].messages, []);
-    assert.equal((await state.getCheckpoint('dm', 'thread-1')).cursor, null);
-    assert.equal((await state.getCheckpoint('dm', null)).batchId, batches[2].batchId);
+    assert.equal(batches[2].messages[0].messageType, 'unknown');
+    assert.equal(batches[2].messages[0].rawMetaSanitized.platformType, 'voice_card_v9');
+    assert.equal(batches[3].scopeExternalId, null);
+    assert.deepEqual(batches[3].threads, []);
+    assert.deepEqual(batches[3].messages, []);
+    assert.equal((await state.getCheckpoint('dm', 'thread-1')).cursor, 'incremental-3');
+    assert.equal((await state.getCheckpoint('dm', null)).cursor, 'incremental-3');
+    assert.equal((await state.getCheckpoint('dm', null)).batchId, batches[3].batchId);
   });
 });
 
 test('wechat dm sync: an observed empty session page publishes a Cloud-visible zero-item checkpoint batch', async () => {
   await withState(async (state) => {
     const api = {
-      listDmSessions: async () => ({ items: [], nextCursor: null, hasMore: false }),
+      listDmUpdates: async () => ({ sessions: [], messages: [], nextCursor: 'incremental-1', hasMore: false }),
     } as unknown as WechatChannelsApiClient;
     const batches: InteractionSyncBatchPayload[] = [];
     const sync = new WechatDmSynchronizer({
@@ -294,6 +297,7 @@ test('wechat dm sync: an observed empty session page publishes a Cloud-visible z
       api,
       state,
       getSession: () => SESSION,
+      getOwnIdentityExternalId: () => SCOPE.accountId,
       publishBatch: async (batch) => {
         batches.push(batch);
         return accepted(batch);
@@ -306,6 +310,7 @@ test('wechat dm sync: an observed empty session page publishes a Cloud-visible z
     assert.equal(batches[0].scopeExternalId, null);
     assert.deepEqual(batches[0].threads, []);
     assert.deepEqual(batches[0].messages, []);
+    assert.equal((await state.getCheckpoint('dm', null)).cursor, 'incremental-1');
     assert.equal((await state.getCheckpoint('dm', null)).batchId, batches[0].batchId);
   });
 });

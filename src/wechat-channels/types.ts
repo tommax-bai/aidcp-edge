@@ -98,6 +98,13 @@ export interface WechatDmMessage {
   platformType: string;
 }
 
+export interface WechatDmUpdatePage {
+  sessions: WechatDmSession[];
+  messages: WechatDmMessage[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
 export interface WechatSendAck {
   accepted: boolean;
   externalMessageId: string | null;

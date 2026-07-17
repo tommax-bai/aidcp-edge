@@ -363,7 +363,13 @@ export class WechatReplySender {
     let cursor: string | null = null;
     const matches: WechatDmMessage[] = [];
     for (let pageNo = 0; pageNo < this.verificationPages; pageNo++) {
-      const page = await this.options.api.listDmHistory(session, command.target.threadExternalId, cursor);
+      const page = await this.options.api.listDmHistory(
+        session,
+        command.target.threadExternalId,
+        cursor,
+        100,
+        this.options.auth.getSnapshot().identity?.externalId ?? null,
+      );
       matches.push(
         ...page.items.filter(
           (message) =>
