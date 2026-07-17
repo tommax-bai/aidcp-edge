@@ -55,6 +55,10 @@
       case 'platform_mismatch': return '账号平台信息已变化，请刷新环境后重试。';
       case 'curated_content_unavailable':
       case 'curated_actions_unavailable': return '灵感库服务暂时不可用，请稍后重试。';
+      // 环境→账号绑定（change curated-envkey-account-binding）：区分「还不知道是谁」「跨客户争用」「离线未佐证」。
+      case 'binding_unknown': return '系统还不知道这个环境上登录的是哪个账号。把这个环境连上云端一次就会自动识别。';
+      case 'binding_conflict': return '这个账号同时出现在多个客户的环境上，出于安全暂不能读取，请联系管理员核对环境归属。';
+      case 'binding_unverified': return '暂时无法确认这个环境当前登录的账号，请让它连上云端后重试。';
       default:
         return typeof detail === 'string' && detail.trim() && detail !== reason
           ? detail.trim()
@@ -436,6 +440,16 @@
       }
       if (capturedEpoch !== requestEpoch || environment?.envId !== capturedEnvId || currentPage !== 'library') return;
       if (!response?.ok || !response.data || !Array.isArray(response.data.items)) {
+        // 「还不知道这个环境上是谁」是一等可见状态，MUST NOT 复用「精选池还是空的」空态（那是谎）：
+        // 上线当日多数环境都是这个态，画成通用失败会让运营把正常的自愈期误报为故障（change
+        // curated-envkey-account-binding）。连一次云端即自愈，故给重新加载按钮。
+        const failReason = response?.reason || response?.error;
+        if (failReason === 'binding_unknown') {
+          fields.total.textContent = '尚未识别账号';
+          renderListMessage('还不知道这个环境上是谁',
+            '系统还没识别到这个环境当前登录的账号。把这个环境连上云端一次就会自动识别，随后灵感库会自动出现。', true);
+          return;
+        }
         fields.total.textContent = '读取失败';
         renderListMessage('暂时没能读取灵感库', responseFailureMessage(response), true);
         return;
