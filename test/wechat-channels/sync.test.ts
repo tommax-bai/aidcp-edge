@@ -105,6 +105,7 @@ test('wechat comment sync: nested hierarchy is flattened and checkpoint advances
   await withState(async (state) => {
     const batches: InteractionSyncBatchPayload[] = [];
     const root = comment('root-1', {
+      createdAt: 1_699_999_900_000,
       replies: [comment('reply-1', {
         rootExternalId: 'root-1',
         parentExternalId: 'root-1',
@@ -136,6 +137,8 @@ test('wechat comment sync: nested hierarchy is flattened and checkpoint advances
     assert.equal(batches[0].messages[1].externalParentId, 'root-1');
     assert.equal(batches[0].messages[1].externalRootId, 'root-1');
     assert.deepEqual(batches[0].messages.map((message) => message.direction), ['inbound', 'outbound']);
+    assert.equal(batches[0].threads[0].updatedAt, root.createdAt);
+    assert.notEqual(batches[0].threads[0].updatedAt, request('comment', 'post-1').requestedAt);
     assert.equal((await state.getCheckpoint('comment', 'post-1')).cursor, 'cursor-1');
     assert.equal(await state.getThreadSource('comment', 'root-1'), 'post-1');
   });
@@ -233,6 +236,47 @@ function dmMessage(id: string, input: Partial<WechatDmMessage> = {}): WechatDmMe
     ...input,
   };
 }
+
+test('wechat dm sync: scoped pages use message time and omit an empty unknown-time thread while advancing checkpoint', async () => {
+  await withState(async (state) => {
+    const batches: InteractionSyncBatchPayload[] = [];
+    const api = {
+      getDmParticipantInfo: async () => [],
+      listDmHistory: async (_session: unknown, _threadId: string, cursor: string | null) => cursor === null
+        ? {
+            items: [
+              dmMessage('scoped-1', { createdAt: 1_699_999_900_100 }),
+              dmMessage('scoped-2', { createdAt: 1_699_999_900_200 }),
+            ],
+            nextCursor: 'scoped-page-2',
+            hasMore: true,
+          }
+        : { items: [], nextCursor: 'scoped-finished', hasMore: false },
+    } as unknown as WechatChannelsApiClient;
+    const sync = new WechatDmSynchronizer({
+      envKey: SCOPE.envKey,
+      accountId: SCOPE.accountId,
+      api,
+      state,
+      getSession: () => SESSION,
+      getOwnIdentityExternalId: () => SCOPE.accountId,
+      publishBatch: async (batch) => {
+        batches.push(batch);
+        return accepted(batch);
+      },
+      nowImpl: () => 1_700_000_000_002,
+    });
+
+    await sync.sync(request('dm', 'thread-1'));
+
+    assert.equal(batches[0].threads[0].updatedAt, 1_699_999_900_200);
+    assert.notEqual(batches[0].threads[0].updatedAt, request('dm', 'thread-1').requestedAt);
+    assert.deepEqual(batches[1].threads, []);
+    assert.deepEqual(batches[1].messages, []);
+    assert.equal((await state.getCheckpoint('dm', 'thread-1')).cursor, 'scoped-finished');
+    assert.equal((await state.getCheckpoint('dm', 'thread-1')).batchId, batches[1].batchId);
+  });
+});
 
 test('wechat dm sync: global history pagination groups sessions and preserves unknown messages', async () => {
   await withState(async (state) => {

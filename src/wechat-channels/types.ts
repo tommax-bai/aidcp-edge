@@ -58,7 +58,7 @@ export interface WechatPost {
   externalId: string;
   title: string | null;
   coverUrl: string | null;
-  updatedAt: number;
+  updatedAt: number | null;
 }
 
 export interface WechatParticipant {
@@ -83,7 +83,7 @@ export interface WechatComment {
 export interface WechatDmSession {
   externalId: string;
   participant: WechatParticipant | null;
-  updatedAt: number;
+  updatedAt: number | null;
 }
 
 export interface WechatDmParticipantInfo {

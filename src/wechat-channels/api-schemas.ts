@@ -231,7 +231,9 @@ export function parseDmSessions(body: unknown, endpoint: string): WechatPage<Wec
     const externalId = requiredString(message, ['sessionId', 'session_id', 'threadId', 'thread_id'], endpoint, `messages[${index}].sessionId`);
     const updatedAt = epochMs(valueAt(message, ['ts', 'createdAt', 'created_at', 'createTime', 'create_time', 'timestamp']), endpoint, `messages[${index}].createdAt`);
     const current = sessions.get(externalId);
-    if (!current || updatedAt > current.updatedAt) sessions.set(externalId, { externalId, participant: null, updatedAt });
+    if (!current || current.updatedAt === null || updatedAt > current.updatedAt) {
+      sessions.set(externalId, { externalId, participant: null, updatedAt });
+    }
   });
   return { items: [...sessions.values()], ...pageMeta(data, endpoint) };
 }
@@ -290,7 +292,7 @@ export function parseDmUpdates(
       displayName: null,
       avatarUrl: null,
     };
-    if (!currentSession || createdAt > currentSession.updatedAt) {
+    if (!currentSession || currentSession.updatedAt === null || createdAt > currentSession.updatedAt) {
       sessions.set(threadExternalId, { externalId: threadExternalId, participant, updatedAt: createdAt });
     } else if (currentSession.participant === null && participant !== null) {
       currentSession.participant = participant;

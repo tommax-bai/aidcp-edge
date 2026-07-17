@@ -32,7 +32,7 @@ export class WechatDmSynchronizer {
   async sync(request: InteractionSyncRequestPayload): Promise<void> {
     if (request.scopeExternalId) {
       const [session] = await this.enrichParticipants([
-        { externalId: request.scopeExternalId, participant: null, updatedAt: request.requestedAt },
+        { externalId: request.scopeExternalId, participant: null, updatedAt: null },
       ]);
       await this.syncThread(session, request.requestId);
       return;
@@ -136,6 +136,11 @@ export class WechatDmSynchronizer {
     cursorAfter: string | null,
     hasMore: boolean,
   ): Promise<void> {
+    const latestMessageTime = messages.reduce<number | null>(
+      (latest, message) => latest === null ? message.createdAt : Math.max(latest, message.createdAt),
+      null,
+    );
+    const threadUpdatedAt = session.updatedAt ?? latestMessageTime;
     const partial = {
       requestId,
       envKey: this.options.envKey,
@@ -146,16 +151,14 @@ export class WechatDmSynchronizer {
       cursorBefore,
       cursorAfter,
       hasMore,
-      threads: [
-        {
+      threads: threadUpdatedAt === null ? [] : [{
           externalThreadId: session.externalId,
           sourceExternalId: null,
           sourceTitle: null,
           sourceCoverUrl: null,
           participant: session.participant,
-          updatedAt: session.updatedAt,
-        },
-      ],
+          updatedAt: threadUpdatedAt,
+        }],
       messages: messages.map(dmToMessage),
     };
     const batch: InteractionSyncBatchPayload = {

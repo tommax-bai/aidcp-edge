@@ -33,7 +33,7 @@ export class WechatCommentSynchronizer {
   async sync(request: InteractionSyncRequestPayload): Promise<void> {
     if (request.scopeExternalId) {
       await this.syncPost(
-        { externalId: request.scopeExternalId, title: null, coverUrl: null, updatedAt: request.requestedAt },
+        { externalId: request.scopeExternalId, title: null, coverUrl: null, updatedAt: null },
         request.requestId,
       );
       return;
@@ -133,7 +133,7 @@ function buildThreads(post: WechatPost, comments: readonly WechatComment[]): Int
     sourceTitle: post.title,
     sourceCoverUrl: post.coverUrl,
     participant: root.participant,
-    updatedAt: Math.max(post.updatedAt, root.createdAt),
+    updatedAt: post.updatedAt === null ? root.createdAt : Math.max(post.updatedAt, root.createdAt),
   }));
 }
 
