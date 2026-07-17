@@ -314,6 +314,14 @@
             <div class="kpi-main"><b id="publishes">0</b><span id="publishes-cap" class="kpi-cap"></span></div>
             <span class="kpi-label">发帖</span><i class="usage-bar"><em id="publishes-bar"></em></i>
           </div>
+          <!-- 加群（change platform-honest-usage-metrics）：**静态节点**，与其余 kpi 同款——本 section 不在
+               任何 innerHTML 重建范围内，JS 只切 hidden。可见性由云端投影决定（只有声明支持加群的平台
+               才会收到 join_group 键），**不在这里按平台判**：客户端拿不到权威平台值。
+               口径 = 用量面（今天发出去几次加群申请，含待审批），与后台用量表同一个计数器。 -->
+          <div class="kpi" data-action="join_group">
+            <div class="kpi-main"><b id="joins">0</b><span id="joins-cap" class="kpi-cap"></span></div>
+            <span class="kpi-label">加群</span><i class="usage-bar"><em id="joins-bar"></em></i>
+          </div>
         </div>
         <div id="quota-windows" class="quota-windows hidden"></div>
         <!-- 慢启动脚注行（change account-level-slow-start）：**静态节点**，JS 只切 hidden / checked /

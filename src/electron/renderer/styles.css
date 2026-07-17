@@ -1136,30 +1136,35 @@ body { margin: 0; }
   transition: transform 0.18s ease, margin-top 0.18s ease;
 }
 .quota-toggle.open .quota-toggle-icon { margin-top: 3px; transform: rotate(-135deg); }
+/* 格数不固定（change platform-honest-usage-metrics）：云端按平台投影，FB 5 格 / 小红书 6 格 / 视频号 1 格。
+   故这里 MUST NOT 写死列数，也 MUST NOT 用 :first-child / :nth-child 画分隔线——**:nth-child 数的是 DOM
+   位置、不管 display:none**，隐藏两格后边框必然错位到错误的格子上。
+   改法：flex 换 grid（末行不足时自动拉伸填满，永不留空格位），分隔线改由 1px 间隙**透出容器底色**产生
+   （与格数、顺序、隐藏与否全部无关）。容器原来的白底因此下移到 .kpi 上。 */
 .usage-grid {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(58px, 1fr));
-  gap: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--hair-strong);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.74);
+  background: var(--hair);
 }
 .kpi {
   display: grid;
   grid-template-rows: 18px 15px 4px;
   align-items: center;
-  min-width: 0;
+  flex: 1 1 58px;
+  min-width: 58px;
   min-height: 58px;
   padding: 9px 11px 8px;
   border: 0;
-  border-left: 1px solid var(--hair);
   border-radius: 0;
-  background: transparent;
+  background: rgba(255, 255, 255, 0.74);
   line-height: 1;
 }
-.kpi:first-child { border-left: 0; }
+.kpi.hidden { display: none; }
 .kpi-main { display: flex; align-items: baseline; justify-content: center; min-width: 0; }
 .kpi b { font-size: 16px; font-weight: 780; font-variant-numeric: tabular-nums; color: #1f2a44; }
 .kpi b.zero { color: var(--faint); font-weight: 650; }
@@ -2149,11 +2154,9 @@ body { margin: 0; }
   .summary-head { min-width: 0; }
   .summary-actions { width: 100%; margin-left: 0; justify-content: flex-end; }
   .summary-actions .summary-time { margin-right: auto; }
-  .usage-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-  .kpi:nth-child(4) { border-left: 0; }
-  .kpi:nth-child(n+4) { border-top: 1px solid var(--hair); }
+  /* 窄窗每行最多 3 格：靠 flex-basis 而非固定列数 —— 末行不足 3 格时自动拉伸填满，
+     且与「隐藏了几格」无关（原来的 :nth-child(4) 边框规则在隐藏格子后会错位，已删）。 */
+  .kpi { flex-basis: 30%; }
   .quota-windows {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

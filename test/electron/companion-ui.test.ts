@@ -1416,3 +1416,64 @@ test('删配图：云端拒绝 → 该张仍在界面上 + 诚实拒因，绝无
   assert.match(text, /未能创建修改任务/);
   assert.doesNotMatch(text, /已删除|删除成功/);
 });
+
+// ── 指标格按平台投影（change platform-honest-usage-metrics）────────────────────
+// 客户端只渲染云端真给了的键。这几条钉的是「屏幕上多一格 / 少一格」，全都不报错。
+const kpi = (w: DOMWindow, action: string) => $(w, `.kpi[data-action="${action}"]`);
+const kpiVisible = (w: DOMWindow, action: string) => !kpi(w, action).classList.contains('hidden');
+
+test('FB 形状：收藏 / 关注整格不渲染（不是渲染一个诚实的 0），加群格出现', async () => {
+  const { w } = await boot({
+    dailyUsage: {
+      // 云端按平台投影后的真实形状：无 collect / follow，有 join_group。
+      totals: { view: 12, like: 3, comment: 1, publish: 0, join_group: 2 },
+      quotas: { view: 150, like: 50, comment: 8, publish: 1, join_group: 3 },
+    },
+  });
+  assert.equal(kpiVisible(w, 'collect'), false, 'FB 没有收藏这个概念 ⇒ 整格不画');
+  assert.equal(kpiVisible(w, 'follow'), false, 'FB 没有关注执行器 ⇒ 整格不画');
+  assert.equal(kpiVisible(w, 'join_group'), true, '加群是 FB 真做、真烧配额的动作');
+  assert.equal($(w, '#joins').textContent, '2');
+  assert.equal($(w, '#joins-cap').textContent, '/3');
+  for (const action of ['view', 'like', 'comment', 'publish']) {
+    assert.equal(kpiVisible(w, action), true, `${action} 照常显示`);
+  }
+});
+
+test('小红书形状：六格逐位如常，且 MUST NOT 长出加群格（首要回归判据）', async () => {
+  const { w } = await boot({
+    dailyUsage: {
+      totals: { view: 12, like: 3, collect: 2, comment: 1, follow: 1, publish: 0 },
+      quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+    },
+  });
+  for (const action of ['view', 'like', 'collect', 'comment', 'follow', 'publish']) {
+    assert.equal(kpiVisible(w, action), true, `${action} 必须照常显示`);
+  }
+  assert.equal(kpiVisible(w, 'join_group'), false, '小红书没有群 ⇒ 绝不出现加群格');
+  assert.equal($(w, '#collects').textContent, '2');
+  assert.equal($(w, '#collects-cap').textContent, '/25');
+});
+
+test('供给的 0 照显，缺席才隐藏（两者是两件事）', async () => {
+  const { w } = await boot({
+    dailyUsage: { totals: { view: 0, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 } },
+  });
+  assert.equal(kpiVisible(w, 'collect'), true, '0 = 今天还没收藏，必须照显');
+  assert.equal($(w, '#collects').textContent, '0');
+});
+
+test('还没收到云端用量 ⇒ 回落本机六格（保持现状），加群无本机来源故不出现', async () => {
+  const { w } = await boot({ dailyUsage: undefined });
+  for (const action of ['view', 'like', 'collect', 'comment', 'follow', 'publish']) {
+    assert.equal(kpiVisible(w, action), true, `${action} 回落本机计数`);
+  }
+  assert.equal(kpiVisible(w, 'join_group'), false);
+});
+
+test('布局不得依赖固定格数：分隔线来自间隙透底，不来自 :first-child / :nth-child', async () => {
+  // :nth-child 数的是 DOM 位置、不管 display:none ⇒ 隐藏格子后边框会错位到错误的格子上。
+  assert.doesNotMatch(rendererCss, /\.kpi:first-child\s*\{[^}]*border-left/);
+  assert.doesNotMatch(rendererCss, /\.kpi:nth-child/);
+  assert.doesNotMatch(rendererCss, /grid-template-columns:\s*repeat\(6,/);
+});

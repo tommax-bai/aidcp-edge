@@ -21,6 +21,7 @@ const fields = {
   comments: document.querySelector('#comments'),
   follows: document.querySelector('#follows'),
   publishes: document.querySelector('#publishes'),
+  joins: document.querySelector('#joins'),
   usageSource: document.querySelector('#usage-source'),
   usageLimit: document.querySelector('#usage-limit'),
   quotaToggle: document.querySelector('#quota-toggle'),
@@ -34,6 +35,7 @@ const fields = {
     comment: document.querySelector('#comments-cap'),
     follow: document.querySelector('#follows-cap'),
     publish: document.querySelector('#publishes-cap'),
+    join_group: document.querySelector('#joins-cap'),
   },
   usageBars: {
     view: document.querySelector('#views-bar'),
@@ -42,6 +44,7 @@ const fields = {
     comment: document.querySelector('#comments-bar'),
     follow: document.querySelector('#follows-bar'),
     publish: document.querySelector('#publishes-bar'),
+    join_group: document.querySelector('#joins-bar'),
   },
   lastMessage: document.querySelector('#last-message'),
   sessionFab: document.querySelector('#session-fab'),
@@ -461,6 +464,16 @@ function setBadge(element, field, value) {
   element.className = `badge ${value}`;
 }
 
+/**
+ * 客户端指标表（change platform-honest-usage-metrics）。
+ *
+ * 这里列的是「**可能**出现的格子」，不是「一定出现的格子」——**哪些真出现由云端投影决定**：云端按平台
+ * 声明摘掉该平台结构上做不到的动作（FB 没有收藏、没有关注执行器），客户端只渲染云端真给了的键。
+ * 客户端 MUST NOT 自己按平台判：它拿不到权威平台值（本地环境标签会错标，见 backlog 90.8）。
+ *
+ * `stat` = 无云端用量载荷时的本机回落来源。`join_group` 是 null：加群没有本机计数来源，故在「云端还没
+ * 发过用量」的那段时间里它不出现——那正是本 change 之前的现状（fail-safe 方向 = 保持现状）。
+ */
 const USAGE_ITEMS = [
   { action: 'view', stat: 'views', value: fields.views, label: '浏览' },
   { action: 'like', stat: 'likes', value: fields.likes, label: '点赞' },
@@ -468,6 +481,7 @@ const USAGE_ITEMS = [
   { action: 'comment', stat: 'comments', value: fields.comments, label: '评论' },
   { action: 'follow', stat: 'follows', value: fields.follows, label: '关注' },
   { action: 'publish', stat: 'publishes', value: fields.publishes, label: '发帖' },
+  { action: 'join_group', stat: null, value: fields.joins, label: '加群' },
 ];
 
 const QUOTA_WINDOWS = [
@@ -522,12 +536,25 @@ function usageView(status) {
   const hasDaily = Boolean(daily && daily.totals && typeof daily.totals === 'object');
   const stats = status.stats || {};
   const totals = {};
+  // 「这个账号该有哪些格子」（change platform-honest-usage-metrics）：
+  //   - 有云端用量 ⇒ 云端**真给了**的键就是全部答案。判据是键在不在，**不是值大不大**——
+  //     供给的 0 是真实的「今天还没做」、必须照显；缺席才是「这个平台没有这个动作」。
+  //   - 还没收到云端用量 ⇒ 回落本机六格（= 本 change 之前的现状；加群无本机来源故不出现）。
+  const supplied = new Set();
   for (const item of USAGE_ITEMS) {
-    totals[item.action] = hasDaily ? count(daily.totals[item.action]) : count(stats[item.stat]);
+    if (hasDaily) {
+      if (!Object.prototype.hasOwnProperty.call(daily.totals, item.action)) continue;
+      supplied.add(item.action);
+      totals[item.action] = count(daily.totals[item.action]);
+    } else if (item.stat) {
+      supplied.add(item.action);
+      totals[item.action] = count(stats[item.stat]);
+    }
   }
   const quotas = daily && daily.quotas && typeof daily.quotas === 'object' ? daily.quotas : null;
   return {
     hasDaily,
+    supplied,
     quotaLevel: daily?.quotaLevel,
     asOf: hasDaily ? parseUsageTime(daily.asOf, status.updatedAt) : parseUsageTime(status.updatedAt, status.updatedAt),
     totals,
@@ -538,9 +565,21 @@ function usageView(status) {
 }
 
 function renderUsageItem(item, usage) {
+  const card = item.value.closest('.kpi');
+  // 云端没给这个指标 = 这个平台结构上没有这个动作 ⇒ **整格不画**（change platform-honest-usage-metrics）。
+  // 不是画一个诚实的 0：FB 的「收藏 0」不是观测、是云端对一个不存在的动作物化出来的常量，
+  // 它读作「今天还没收藏」、暗示明天会有数字，而真相是「这个平台没有收藏」。
+  if (!usage.supplied.has(item.action)) {
+    if (card) {
+      card.classList.add('hidden');
+      card.classList.remove('has-limit', 'near', 'complete');
+      card.removeAttribute('title');
+    }
+    return;
+  }
+  if (card) card.classList.remove('hidden');
   const used = count(usage.totals[item.action]);
   const cap = usage.quotas && typeof usage.quotas[item.action] === 'number' ? count(usage.quotas[item.action]) : null;
-  const card = item.value.closest('.kpi');
   const capEl = fields.usageCaps[item.action];
   const barEl = fields.usageBars[item.action];
   const hasCap = cap !== null;
