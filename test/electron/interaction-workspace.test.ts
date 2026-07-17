@@ -807,6 +807,154 @@ test('读取开关待本机应用时继续轮询，应用成功后自动恢复�
   current.window.close();
 });
 
+// wechat-read-controls-offline-toggle：环境未启动（核心子进程离线）时读取开关必须仍可编辑。
+// 这条写入经主进程直发 Cloud HTTP，不经过该环境核心子进程；Cloud 无 Edge 在线时按 CAS 落库并回
+// edgeDelivery.status='deferred'，下次 hello 由欢迎信封快照收敛。渲染层曾用 connectivity 把它拦下 = 假阻断。
+//
+// ⚠️ 复现只能用「已停止 / 从未启动」的环境（connectivity !== 'connected'）。冷待机（浏览器关、核心仍在线）
+// 的 cloud 仍是 'connected'，开关本就可编辑——用应用内「关闭浏览器」按钮去试会看到一切正常、误判成复现不了。
+
+// deferred / enqueued 两种投递回包：auth 一律回 applicationStatus='pending'（离线保存结构上不可能报 applied）。
+function readDeliveryApi(deliveryStatus: 'enqueued' | 'deferred') {
+  return {
+    interactionUpdateReadControls: async (args: any) => {
+      const auth = clone(listFixture.data.auth);
+      auth.runtimeControls.storedVersion = args.expectedVersion + 1;
+      auth.runtimeControls.applicationStatus = 'pending';
+      auth.runtimeControls.stored.commentsReadEnabled = args.commentsReadEnabled;
+      auth.runtimeControls.stored.dmReadEnabled = args.dmReadEnabled;
+      return apiResult({
+        data: {
+          envKey: args.envKey, accountId: `account-${args.envKey}`, platform: 'wechat_channels',
+          auth, replyConfig: clone(listFixture.data.replyConfig),
+          edgeDelivery: { status: deliveryStatus, delivered: deliveryStatus === 'enqueued' ? 1 : 0 },
+        },
+        meta: { requestId: 'read-controls', asOf: Date.now() },
+      });
+    },
+  };
+}
+
+// 从一个连着的环境 boot（走通首屏），再切到一个已停止的环境：切到不同 envKey 会走
+// freshState + loadList 路径（stale 先真、被一次成功 loadList 无条件清掉），正是客户从环境栏点选停止号的真实时序。
+async function bootThenSelectStoppedEnv(apiOverride: Record<string, any> = {}): Promise<BootHandle> {
+  const handle = await boot({ envKey: 'env_connected', label: '在线号', api: apiOverride });
+  const stopped = status('env_stopped', '停止号');
+  stopped.cloud = 'disconnected';
+  stopped.edge = 'stopped';
+  stopped.session = 'stopped';
+  handle.pushFleet({
+    provider: 'adspower', selectedEnvId: 'env_stopped', railCollapsed: true,
+    environments: [
+      { envId: 'env_connected', kind: 'adspower', profileId: 'env_connected', name: '在线号', platform: 'wechat_channels', status: status('env_connected', '在线号') },
+      { envId: 'env_stopped', kind: 'adspower', profileId: 'env_stopped', name: '停止号', platform: 'wechat_channels', status: stopped },
+    ],
+  });
+  await flush();
+  return handle;
+}
+
+test('环境已停止（connectivity 非 connected）读取开关仍可编辑并真的携 expectedVersion 写入 Cloud', async () => {
+  const { window, calls } = await bootThenSelectStoppedEnv();
+  const all = $(window, '#iw-read-all') as HTMLInputElement;
+  const comment = $(window, '#iw-read-comment') as HTMLInputElement;
+  const dm = $(window, '#iw-read-dm') as HTMLInputElement;
+  // ⑥ 钉死决策 3 的暗路：停止态环境在一次成功 loadList 之后 stale===false、开关可编辑。
+  // 若哪天 loadList 成功不再无条件清 stale，这三条断言会当场红，而不是让开关悄悄变回灰的。
+  assert.equal(all.disabled, false, '停止态环境总开关必须可编辑（stale 已被成功 loadList 清掉）');
+  assert.equal(comment.disabled, false, '停止态环境评论开关必须可编辑');
+  assert.equal(dm.disabled, false, '停止态环境私信开关必须可编辑');
+
+  comment.checked = false;
+  comment.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await flush();
+  assert.equal(calls.readControls.length, 1, '① 切换必须真的发出 read-controls 请求，MUST NOT 被本地拦下');
+  assert.equal(calls.readControls[0].envKey, 'env_stopped');
+  assert.equal(calls.readControls[0].expectedVersion, 7, '必须携 stored 的 expectedVersion 走 CAS');
+  assert.equal(calls.readControls[0].commentsReadEnabled, false);
+});
+
+test('离线保存回 deferred → 持久显示待生效，不冒充已生效，且与 enqueued 措辞可区分', async () => {
+  const deferred = await bootThenSelectStoppedEnv(readDeliveryApi('deferred'));
+  const comment = $(deferred.window, '#iw-read-comment') as HTMLInputElement;
+  comment.checked = false;
+  comment.dispatchEvent(new deferred.window.Event('change', { bubbles: true }));
+  await flush();
+  const deferredText = $(deferred.window, '#iw-read-apply').textContent || '';
+  // ② 持久落点：#iw-read-apply 属读取设置区、非一次性 actionNotice 位（后者被 10+ 无关动作清空）。
+  assert.match(deferredText, /待该环境下次连接后生效（需要启动该环境）/, 'deferred 必须持久显示待生效并指明需启动该环境');
+  assert.doesNotMatch(deferredText, /已应用|已生效/, 'MUST NOT 把离线保存冒充为已应用/已生效');
+
+  // ③ 呈现落在持久位：一次仍处停止态的状态心跳（edge stopped→starting）触发重渲染后仍在。
+  const beat = status('env_stopped', '停止号');
+  beat.cloud = 'disconnected';
+  beat.edge = 'starting';
+  beat.session = 'stopped';
+  deferred.pushFleet({
+    provider: 'adspower', selectedEnvId: 'env_stopped', railCollapsed: true,
+    environments: [{ envId: 'env_stopped', kind: 'adspower', profileId: 'env_stopped', name: '停止号', platform: 'wechat_channels', status: beat }],
+  });
+  await flush();
+  assert.match($(deferred.window, '#iw-read-apply').textContent || '', /待该环境下次连接后生效/, 'deferred 呈现 MUST NOT 因随后其他操作而消失');
+
+  // enqueued 与 deferred 措辞必须可区分：enqueued 走默认「等待本机应用」分支。
+  const enqueued = await bootThenSelectStoppedEnv(readDeliveryApi('enqueued'));
+  const enqComment = $(enqueued.window, '#iw-read-comment') as HTMLInputElement;
+  enqComment.checked = false;
+  enqComment.dispatchEvent(new enqueued.window.Event('change', { bubbles: true }));
+  await flush();
+  const enqueuedText = $(enqueued.window, '#iw-read-apply').textContent || '';
+  assert.match(enqueuedText, /等待本机应用/, 'enqueued 读作已保存、等待本机应用');
+  assert.notEqual(deferredText, enqueuedText, 'deferred 与 enqueued 措辞必须可区分');
+});
+
+test('冷待机（connectivity=connected + browserState=closed + status=active）保持可编辑——防 1.2 顺手摘掉 status', async () => {
+  // 默认 boot 即冷待机形态：fixture auth.status=active、browserState=closed，fleet status.cloud=connected。
+  const { window, calls } = await boot();
+  assert.match($(window, '#iw-browser').textContent || '', /浏览器已关闭/, '前提：这是浏览器已关闭的后台运行态');
+  const comment = $(window, '#iw-read-comment') as HTMLInputElement;
+  assert.equal(comment.disabled, false, 'browserState=closed 且 status=active 必须仍可编辑');
+  comment.checked = false;
+  comment.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await flush();
+  assert.equal(calls.readControls.length, 1, '冷待机保存必须真的发出请求');
+  // 冷待机保存回 enqueued（默认 harness）：持久位 readApply 走默认待应用分支，不冒充已生效。
+  const applyText = $(window, '#iw-read-apply').textContent || '';
+  assert.match(applyText, /等待本机应用/);
+  assert.doesNotMatch(applyText, /待该环境下次连接后生效/, 'enqueued 不应显示 deferred 专属措辞');
+});
+
+test('授权态非 active 或数据 stale 时读取开关仍禁用', async () => {
+  // status 非 active：授权态才是那道闸，本 change 明确保留它。
+  const reauth = await boot({
+    api: {
+      interactionList: async (args: any) => {
+        const envelope = scopeEnvelope(listFixture, args.envKey, '示例');
+        envelope.data.auth.status = 'reauth_required';
+        return apiResult(envelope);
+      },
+    },
+  });
+  assert.equal(($(reauth.window, '#iw-read-comment') as HTMLInputElement).disabled, true, 'status 非 active 必须禁用');
+  assert.equal(($(reauth.window, '#iw-read-dm') as HTMLInputElement).disabled, true);
+  reauth.window.close();
+
+  // stale：正拿上次成功数据顶着（storedVersion 可能已落后），携它发 CAS 有版本冲突风险，故仍拦。
+  // 拦法是把三个开关 disabled——用户无从触发；这也是 `!state.stale` 必须留在 editable 里的理由。
+  const { window, pushFleet } = await boot();
+  assert.equal(($(window, '#iw-read-comment') as HTMLInputElement).disabled, false, '前提：连着时可编辑');
+  const off = status('env_wc_demo', '轻享生活号');
+  off.cloud = 'disconnected';
+  pushFleet({
+    provider: 'adspower', selectedEnvId: 'env_wc_demo', railCollapsed: true,
+    environments: [{ envId: 'env_wc_demo', kind: 'adspower', profileId: 'env_wc_demo', name: '轻享生活号', platform: 'wechat_channels', status: off }],
+  });
+  await flush();
+  assert.equal(($(window, '#iw-read-all') as HTMLInputElement).disabled, true, '同环境掉线致 stale 时总开关必须禁用');
+  assert.equal(($(window, '#iw-read-comment') as HTMLInputElement).disabled, true, '同环境掉线致 stale 时评论开关必须禁用');
+  assert.equal(($(window, '#iw-read-dm') as HTMLInputElement).disabled, true, '同环境掉线致 stale 时私信开关必须禁用');
+});
+
 test('首次互动状态查询失败后自动重试并恢复浏览器控制', async () => {
   let listCount = 0;
   const current = await boot({

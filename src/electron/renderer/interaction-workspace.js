@@ -195,7 +195,7 @@
         listError: null, selectedThreadId: null, detail: null, detailLoading: false, detailError: null,
         auth: null, syncFreshness: null, pendingSync: null, stale: false,
         actionBusy: null, actionError: null, actionNotice: null,
-        replyConfig: null, readControlsBusy: false, readControlsError: null, configGuidanceOpen: false,
+        replyConfig: null, readControlsBusy: false, readControlsError: null, readDelivery: null, configGuidanceOpen: false,
         testDataResetEnabled: false, testResetBusy: null, testResetStatus: null,
         pendingBrowserAction: null, browserPollCount: 0,
         draftText: '', draftDirty: false, syncBusy: false, lifecycleBusy: null, pollCount: 0,
@@ -409,8 +409,15 @@
       const stored = controls && controls.stored;
       const comment = channelReadState('comment');
       const dm = channelReadState('dm');
+      // connectivity 已移除：这次写入经主进程直发 Cloud HTTP，不经过该环境的核心子进程。
+      // Cloud 无 Edge 在线时按 CAS 正常落库并回 edgeDelivery.status='deferred'，
+      // Edge 下次 hello 由欢迎信封的 interactionRuntime 快照收敛（cloud handler.ts:663-669）。
+      // 保留的四项各有必要：stored（无它则无 expectedVersion 可携、CAS 无法构造）、
+      // status==='active'（授权态，与浏览器现场 browserState 正交，MUST NOT 合并）、
+      // !state.stale（正拿上次成功数据顶着时 storedVersion 可能已落后，携它发 CAS 有版本冲突风险）、
+      // api 通道存在（preload 没暴露就真的调不到）。
       const editable = Boolean(stored && state.auth && state.auth.status === 'active' && !state.stale
-        && env && env.connectivity === 'connected' && typeof api.interactionUpdateReadControls === 'function');
+        && typeof api.interactionUpdateReadControls === 'function');
       dom.readComment.checked = comment.storedEnabled;
       dom.readDm.checked = dm.storedEnabled;
       dom.readAll.checked = comment.storedEnabled && dm.storedEnabled;
@@ -424,7 +431,11 @@
         : !controls ? '正在读取当前账号开关'
           : controls.applicationStatus === 'applied'
             ? `Cloud 已保存 v${controls.storedVersion}，本机已应用同一版本`
-            : `Cloud 已保存 v${controls.storedVersion}，等待本机应用${controls.edgeAppliedVersion == null ? '' : `（当前 v${controls.edgeAppliedVersion}）`}`;
+            : state.readDelivery === 'deferred'
+              // 本次写入被 Cloud 受理但无 Edge 在线（deferred）：持久告知需启动该环境才生效，
+              // 不冒充「等待本机应用」（那句默认既覆盖 enqueued 的几秒延迟、也在 Edge 离线时读作真话但没用）。
+              ? `Cloud 已保存 v${controls.storedVersion}，待该环境下次连接后生效（需要启动该环境）`
+              : `Cloud 已保存 v${controls.storedVersion}，等待本机应用${controls.edgeAppliedVersion == null ? '' : `（当前 v${controls.edgeAppliedVersion}）`}`;
       dom.readError.textContent = state.readControlsError ? friendlyError(state.readControlsError) : '';
       dom.readError.classList.toggle('hidden', !state.readControlsError);
 
@@ -1173,6 +1184,7 @@
       state.readControlsBusy = true;
       state.readControlsError = null;
       state.actionNotice = null;
+      state.readDelivery = null;
       renderAll();
       try {
         const response = await api.interactionUpdateReadControls({
@@ -1185,6 +1197,9 @@
         const envelope = assertEnvelope(response, envKey);
         state.auth = envelope.data.auth;
         state.replyConfig = envelope.data.replyConfig || state.replyConfig;
+        // 持久落点：驱动 renderReadSettings() 的 readApply 分档（deferred → 待启动该环境才生效）。
+        // 与下面一次性的 actionNotice 互补——后者是「刚点了一下」的即时反馈，会被后续任意动作清空。
+        state.readDelivery = (envelope.data.edgeDelivery && envelope.data.edgeDelivery.status) || null;
         state.actionNotice = envelope.data.edgeDelivery && envelope.data.edgeDelivery.status === 'enqueued'
           ? '收取开关已保存并下发本机。'
           : '收取开关已保存，等待本机重新连接后应用。';
