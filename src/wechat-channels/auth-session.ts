@@ -18,6 +18,9 @@ export type LocalAuthState =
   | 'session_active'
   | 'browser_closing'
   | 'api_only_running'
+  | 'browser_foreground_opening'
+  | 'browser_open'
+  | 'browser_foreground_closing'
   | 'reauth_required'
   | 'challenge_required'
   | 'degraded'
@@ -69,6 +72,8 @@ export class WechatAuthCoordinator {
   private session: WechatSessionMaterial | null = null;
   private checkedAt = 0;
   private authInFlight?: Promise<void>;
+  private browserControlChain: Promise<void> = Promise.resolve();
+  private manualBrowserVisible = false;
 
   constructor(options: WechatAuthCoordinatorOptions) {
     this.envKey = options.envKey;
@@ -130,6 +135,9 @@ export class WechatAuthCoordinator {
           this.transition('degraded', 'WECHAT_SCHEMA_CHANGED');
           return;
         }
+        if (stored.legacyBindingMigrated) {
+          await this.store.save({ binding: stored.binding, identity: observed, session: stored.session });
+        }
         this.transition('api_only_running', null);
         return;
       } catch (error) {
@@ -153,6 +161,7 @@ export class WechatAuthCoordinator {
   }
 
   async reopen(reason: 'user_requested' | 'auth_expired' | 'identity_mismatch' | 'challenge_required'): Promise<void> {
+    if (reason === 'user_requested') this.manualBrowserVisible = false;
     if (reason === 'identity_mismatch') this.transition('reauth_required', 'WECHAT_IDENTITY_MISMATCH');
     else if (reason === 'challenge_required') this.transition('challenge_required', 'WECHAT_CHALLENGE_REQUIRED');
     else this.transition('reauth_required', 'WECHAT_AUTH_REQUIRED');
@@ -160,6 +169,7 @@ export class WechatAuthCoordinator {
   }
 
   async clear(): Promise<void> {
+    this.manualBrowserVisible = false;
     this.session = null;
     this.identityMatches = false;
     await this.store.clear();
@@ -167,6 +177,7 @@ export class WechatAuthCoordinator {
   }
 
   disable(): void {
+    this.manualBrowserVisible = false;
     this.session = null;
     this.identityMatches = false;
     this.transition('disabled', 'INTERACTION_FEATURE_DISABLED');
@@ -200,7 +211,7 @@ export class WechatAuthCoordinator {
     if (!this.session || !this.identity) return false;
     try {
       const observed = await this.api.getIdentity(this.session);
-      if (observed.externalId !== this.identity.externalId || (this.accountId && observed.externalId !== this.accountId)) {
+      if (observed.externalId !== this.identity.externalId) {
         throw new WechatChannelsError('identity_mismatch', 'authData', 'Active session belongs to another account', false);
       }
       this.identity = observed;
@@ -213,6 +224,59 @@ export class WechatAuthCoordinator {
         : new WechatChannelsError('transient_network', 'authData', 'Identity verification failed', true);
       this.markApiFailure(safe);
       return false;
+    }
+  }
+
+  controlBrowser(action: 'open' | 'close'): Promise<void> {
+    const execution = this.browserControlChain.then(() => this.runBrowserControl(action));
+    this.browserControlChain = execution.catch(() => undefined);
+    return execution;
+  }
+
+  private async runBrowserControl(action: 'open' | 'close'): Promise<void> {
+    if (statusFor(this.state) !== 'active' || !this.session || !this.identity || !this.identityMatches) {
+      throw new WechatChannelsError(
+        'invalid_command',
+        'browser_control',
+        'Browser foreground control requires an active identity-bound API session',
+        false,
+      );
+    }
+
+    if (action === 'open') {
+      this.manualBrowserVisible = true;
+      if (this.sidecar.getState() === 'open') {
+        this.transition('browser_open', null);
+        return;
+      }
+      try {
+        const opening = this.sidecar.open();
+        this.transition('browser_foreground_opening', null);
+        await opening;
+        this.transition('browser_open', null);
+        this.log('[wechat-channels] browser foreground opened by customer request; API session remains active');
+      } catch (error) {
+        this.manualBrowserVisible = false;
+        this.transition('api_only_running', null);
+        throw error;
+      }
+      return;
+    }
+
+    this.manualBrowserVisible = false;
+    if (this.sidecar.getState() === 'closed') {
+      this.transition('api_only_running', null);
+      return;
+    }
+    try {
+      const closing = this.sidecar.close();
+      this.transition('browser_foreground_closing', null);
+      await closing;
+      this.transition('api_only_running', null);
+      this.log('[wechat-channels] browser returned to API-only background operation by customer request');
+    } catch (error) {
+      this.transition('api_only_running', null);
+      throw error;
     }
   }
 
@@ -253,18 +317,13 @@ export class WechatAuthCoordinator {
         await this.sleep(this.pollIntervalMs);
         continue;
       }
-      const expectedIdentity = this.identity?.externalId ?? this.expectedAccountId ?? null;
+      const expectedIdentity = this.identity?.externalId ?? null;
       if (expectedIdentity && observed.externalId !== expectedIdentity) {
         this.identityMatches = false;
         this.transition('reauth_required', 'WECHAT_IDENTITY_MISMATCH');
         throw new WechatChannelsError('identity_mismatch', 'authData', 'Local browser is logged into another account', false);
       }
-      const accountId = this.expectedAccountId ?? this.accountId ?? observed.externalId;
-      if (accountId !== observed.externalId) {
-        this.identityMatches = false;
-        this.transition('reauth_required', 'WECHAT_IDENTITY_MISMATCH');
-        throw new WechatChannelsError('identity_mismatch', 'authData', 'Cloud account and finder identity do not match', false);
-      }
+      const accountId = this.expectedAccountId ?? this.accountId ?? this.envKey;
       const binding: WechatSessionBinding = {
         envKey: this.envKey,
         accountId,
@@ -282,6 +341,11 @@ export class WechatAuthCoordinator {
       this.session = candidate;
       this.identityMatches = true;
       this.transition('session_active', null);
+      if (this.manualBrowserVisible) {
+        this.transition('browser_open', null);
+        this.log('[wechat-channels] encrypted API session active; browser remains open by customer request');
+        return;
+      }
       this.transition('browser_closing', null);
       await this.sidecar.close();
       this.transition('api_only_running', null);
@@ -293,8 +357,7 @@ export class WechatAuthCoordinator {
   private assertIdentity(observed: WechatIdentity, binding: WechatSessionBinding): void {
     if (
       observed.externalId !== binding.finderIdentity ||
-      observed.externalId !== binding.accountId ||
-      (this.expectedAccountId && observed.externalId !== this.expectedAccountId)
+      (this.expectedAccountId && binding.accountId !== this.expectedAccountId)
     ) {
       throw new WechatChannelsError('identity_mismatch', 'authData', 'Stored session identity mismatch', false);
     }
@@ -318,7 +381,10 @@ function statusFor(state: LocalAuthState): InteractionAuthStatus {
     case 'identity_verifying': return 'authenticating';
     case 'session_active':
     case 'browser_closing':
-    case 'api_only_running': return 'active';
+    case 'api_only_running':
+    case 'browser_foreground_opening':
+    case 'browser_open':
+    case 'browser_foreground_closing': return 'active';
     case 'reauth_required': return 'reauth_required';
     case 'challenge_required': return 'challenge_required';
     case 'degraded': return 'degraded';

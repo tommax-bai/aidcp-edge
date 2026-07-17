@@ -288,17 +288,18 @@ test('normalizeProfile: 结构化 proxyConfig 透传非密字段、绝不透传�
   assert.equal(noProxy.proxyConfig.proxyType, '');
 });
 
-test('listGroups: 打 group/list、归一化 groupId/groupName', async () => {
+test('listGroups: 精确查询预置分组并归一化 groupId/groupName', async () => {
   const calls: Array<{ url: string }> = [];
   const api = createAdsLocalApi({
     ...noThrottle,
-    fetchImpl: stubFetch([['/group/list', () => res(true, 200, { code: 0, data: { list: [{ group_id: 42, group_name: 'aidcp-创建' }] } })]], calls),
+    fetchImpl: stubFetch([['/group/list', () => res(true, 200, { code: 0, data: { list: [{ group_id: 42, group_name: 'aidcp' }] } })]], calls),
   }) as unknown as { listGroups: (o?: unknown) => Promise<{ ok: boolean; groups?: Array<{ groupId: string; groupName: string }>; error?: string }> };
-  const r = await api.listGroups();
+  const r = await api.listGroups({ groupName: 'aidcp' });
   assert.equal(r.ok, true);
   assert.equal(r.groups?.[0].groupId, '42');
-  assert.equal(r.groups?.[0].groupName, 'aidcp-创建');
+  assert.equal(r.groups?.[0].groupName, 'aidcp');
   assert.ok(calls[0].url.includes('/api/v1/group/list'));
+  assert.ok(calls[0].url.includes('group_name=aidcp'));
 });
 
 // ── browser/local-active 对账（edge-multi-environment-fleet：外壳重启防双拉/防互踢）──

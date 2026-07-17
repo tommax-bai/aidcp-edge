@@ -44,9 +44,29 @@ export class WechatDmSynchronizer {
       assertCursorProgress({ endpoint: 'dmNewMessages', cursorBefore: cursor, cursorAfter: page.nextCursor, hasMore: page.hasMore, seen });
       const sessions = dedupeBy(page.items, (session) => session.externalId);
       for (const session of sessions) await this.syncThread(session, request.requestId);
+      const checkpointPartial = {
+        requestId: request.requestId,
+        envKey: this.options.envKey,
+        accountId: this.options.accountId,
+        platform: 'wechat_channels' as const,
+        channel: 'dm' as const,
+        scopeExternalId: null,
+        cursorBefore: cursor,
+        cursorAfter: page.nextCursor,
+        hasMore: page.hasMore,
+        threads: [],
+        messages: [],
+      };
+      const checkpointBatch: InteractionSyncBatchPayload = {
+        batchId: stableBatchId(checkpointPartial),
+        ...checkpointPartial,
+        observedAt: this.now(),
+      };
+      const checkpointAck = await this.options.publishBatch(checkpointBatch);
+      assertMatchingAck(checkpointBatch, checkpointAck);
       await this.options.state.commitCheckpoint('dm', null, {
         cursor: page.nextCursor,
-        batchId: sessionCheckpoint.batchId,
+        batchId: checkpointBatch.batchId,
         updatedAt: this.now(),
       });
       cursor = page.nextCursor;

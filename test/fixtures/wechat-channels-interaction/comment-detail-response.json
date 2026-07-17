@@ -3,6 +3,12 @@
     "envKey": "env_wc_demo",
     "accountId": "acct_wc_demo",
     "platform": "wechat_channels",
+    "replyConfig": {
+      "status": "published",
+      "currentVersion": 4,
+      "draftVersion": null,
+      "publishedVersion": 4
+    },
     "auth": {
       "status": "active",
       "browserState": "closed",
@@ -14,6 +20,23 @@
         "dmRead": true,
         "dmSendText": true,
         "dmSendImage": false
+      },
+      "identity": {
+        "displayName": "示例视频号",
+        "identityHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "runtimeControls": {
+        "storedVersion": 7,
+        "edgeAppliedVersion": 7,
+        "applicationStatus": "applied",
+        "stored": {
+          "commentsReadEnabled": true,
+          "commentsReplyEnabled": true,
+          "dmReadEnabled": true,
+          "dmSendTextEnabled": true,
+          "dmSendImageEnabled": false,
+          "writePaused": false
+        }
       }
     },
     "thread": {

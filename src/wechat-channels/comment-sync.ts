@@ -63,7 +63,7 @@ export class WechatCommentSynchronizer {
     const seen = new Set<string>(cursor ? [cursor] : []);
     for (let pageNo = 0; pageNo < this.maxPages; pageNo++) {
       const page = await this.options.api.listComments(this.options.getSession(), post.externalId, cursor);
-      assertCursorProgress({ endpoint: 'commentList', cursorBefore: cursor, cursorAfter: page.nextCursor, hasMore: page.hasMore, seen });
+      assertCursorProgress({ endpoint: 'commentPagePostList', cursorBefore: cursor, cursorAfter: page.nextCursor, hasMore: page.hasMore, seen });
       const flattened = flattenComments(page.items);
       const comments = dedupeBy(flattened, (comment) => comment.externalId);
       const threads = buildThreads(post, comments);

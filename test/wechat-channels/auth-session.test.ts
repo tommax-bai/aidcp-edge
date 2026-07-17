@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { WechatChannelsApiClient } from '../../src/wechat-channels/api-client.js';
 import { WechatAuthCoordinator } from '../../src/wechat-channels/auth-session.js';
-import type { WechatChannelsBrowserSidecar } from '../../src/wechat-channels/browser-sidecar.js';
+import { captureRequestContext, type WechatChannelsBrowserSidecar } from '../../src/wechat-channels/browser-sidecar.js';
 import { EncryptedWechatSessionStore } from '../../src/wechat-channels/encrypted-session-store.js';
 import { WechatChannelsError } from '../../src/wechat-channels/error-classifier.js';
 import { sessionPath } from '../../src/wechat-channels/local-paths.js';
@@ -17,6 +17,7 @@ const SESSION: WechatSessionMaterial = {
   cookies: [{ name: 'session_key', value: 'cookie-top-secret', domain: '.channels.weixin.qq.com', path: '/' }],
   userAgent: 'Wechat-Test-UA',
   acquiredAt: 100,
+  requestContext: { version: 1, aid: 'aid-test', pageUrl: 'https://channels.weixin.qq.com/platform/post/list', commonBody: { logFinderId: 'finder-test', logFinderUin: 'uin-test', rawKeyBuff: 'raw-key-test', pluginSessionId: null, reqScene: 7, scene: 7 }, headers: { fingerprintDeviceId: 'device-test', wechatUin: 'uin-test' } },
 };
 
 async function withTempDir(run: (root: string) => Promise<void>): Promise<void> {
@@ -68,7 +69,7 @@ test('wechat session store: AES-GCM round-trip keeps cookies out of plaintext an
       randomBytesImpl: (size) => Buffer.alloc(size, 7),
     });
     await store.save({
-      binding: { ...SCOPE, accountId: IDENTITY.externalId, finderIdentity: IDENTITY.externalId },
+      binding: { ...SCOPE, accountId: SCOPE.envKey, finderIdentity: IDENTITY.externalId },
       identity: IDENTITY,
       session: SESSION,
     });
@@ -77,7 +78,7 @@ test('wechat session store: AES-GCM round-trip keeps cookies out of plaintext an
     assert.equal(encrypted.includes('cookie-top-secret'), false);
     assert.equal(encrypted.includes('session_key'), false);
     assert.equal(encrypted.includes('Finder A'), false);
-    const loaded = await store.load(IDENTITY.externalId);
+    const loaded = await store.load(SCOPE.envKey);
     assert.deepEqual(loaded?.session, SESSION);
     assert.equal(loaded?.savedAt, 123);
     await assert.rejects(
@@ -93,13 +94,70 @@ test('wechat session store: AES-GCM round-trip keeps cookies out of plaintext an
   });
 });
 
+test('wechat auth capture: accepts observed empty finder uin and raw key strings', () => {
+  const captured = captureRequestContext({
+    request: {
+      url: 'https://channels.weixin.qq.com/cgi-bin/mmfinderassistant-bin/auth/auth_data?_aid=aid-test&_pageUrl=https%3A%2F%2Fchannels.weixin.qq.com%2Fplatform%2Fpost%2Flist&_rid=rid-test',
+      postData: JSON.stringify({
+        _log_finder_id: 'finder-test',
+        _log_finder_uin: '',
+        rawKeyBuff: '',
+        timestamp: '123',
+        scene: 7,
+        reqScene: 7,
+        pluginSessionId: null,
+      }),
+      headers: {
+        'finger-print-device-id': 'device-test',
+        'X-WECHAT-UIN': 'uin-test',
+      },
+    },
+  });
+
+  assert.deepEqual(captured?.commonBody, {
+    logFinderId: 'finder-test',
+    logFinderUin: '',
+    rawKeyBuff: '',
+    pluginSessionId: null,
+    reqScene: 7,
+    scene: 7,
+  });
+});
+
+test('wechat session store: accepts captured empty finder uin and raw key strings', async () => {
+  await withTempDir(async (root) => {
+    const store = new EncryptedWechatSessionStore(SCOPE, {
+      rootDir: root,
+      env: { AIDCP_WECHAT_MASTER_KEY: '12'.repeat(32) },
+    });
+    const observedSession: WechatSessionMaterial = {
+      ...SESSION,
+      requestContext: {
+        ...SESSION.requestContext,
+        commonBody: {
+          ...SESSION.requestContext.commonBody,
+          logFinderUin: '',
+          rawKeyBuff: '',
+        },
+      },
+    };
+    await store.save({
+      binding: { ...SCOPE, accountId: SCOPE.envKey, finderIdentity: IDENTITY.externalId },
+      identity: IDENTITY,
+      session: observedSession,
+    });
+
+    assert.deepEqual((await store.load(SCOPE.envKey))?.session, observedSession);
+  });
+});
+
 test('wechat auth: browser login closes only after identity, encrypted save, and enabled read probe succeed', async () => {
   await withTempDir(async (root) => {
     const sidecar = new FakeSidecar(SESSION);
     const transitions: string[] = [];
     const auth = new WechatAuthCoordinator({
       envKey: SCOPE.envKey,
-      expectedAccountId: IDENTITY.externalId,
+      expectedAccountId: SCOPE.envKey,
       api: apiReturning(IDENTITY),
       sidecar,
       store: new EncryptedWechatSessionStore(SCOPE, {
@@ -137,7 +195,7 @@ test('wechat auth: stored encrypted session resumes API-only without opening bro
       env: { AIDCP_WECHAT_MASTER_KEY: '33'.repeat(32) },
     });
     await store.save({
-      binding: { ...SCOPE, accountId: IDENTITY.externalId, finderIdentity: IDENTITY.externalId },
+      binding: { ...SCOPE, accountId: SCOPE.envKey, finderIdentity: IDENTITY.externalId },
       identity: IDENTITY,
       session: SESSION,
     });
@@ -145,7 +203,7 @@ test('wechat auth: stored encrypted session resumes API-only without opening bro
     let probes = 0;
     const auth = new WechatAuthCoordinator({
       envKey: SCOPE.envKey,
-      expectedAccountId: IDENTITY.externalId,
+      expectedAccountId: SCOPE.envKey,
       api: apiReturning(IDENTITY),
       sidecar,
       store,
@@ -165,16 +223,112 @@ test('wechat auth: stored encrypted session resumes API-only without opening bro
   });
 });
 
-test('wechat auth: wrong account fails closed and never closes or persists the candidate session', async () => {
+test('wechat auth: active API-only session can open a visible browser and return to background idempotently', async () => {
+  await withTempDir(async (root) => {
+    const store = new EncryptedWechatSessionStore(SCOPE, {
+      rootDir: root,
+      env: { AIDCP_WECHAT_MASTER_KEY: '35'.repeat(32) },
+    });
+    await store.save({
+      binding: { ...SCOPE, accountId: SCOPE.envKey, finderIdentity: IDENTITY.externalId },
+      identity: IDENTITY,
+      session: SESSION,
+    });
+    const sidecar = new FakeSidecar(null);
+    const transitions: string[] = [];
+    const auth = new WechatAuthCoordinator({
+      envKey: SCOPE.envKey,
+      expectedAccountId: SCOPE.envKey,
+      api: apiReturning(IDENTITY),
+      sidecar,
+      store,
+      probeEnabledReads: async () => true,
+      logImpl: () => {},
+    });
+    auth.onChange((snapshot) => transitions.push(`${snapshot.state}:${snapshot.browserState}`));
+    await auth.initialize();
+
+    await auth.controlBrowser('open');
+    await auth.controlBrowser('open');
+    assert.equal(auth.getSnapshot().status, 'active');
+    assert.equal(auth.getSnapshot().browserState, 'open');
+    assert.equal(sidecar.opens, 1);
+
+    await auth.controlBrowser('close');
+    await auth.controlBrowser('close');
+    assert.equal(auth.getSnapshot().state, 'api_only_running');
+    assert.equal(auth.getSnapshot().browserState, 'closed');
+    assert.equal(sidecar.closes, 1);
+    assert.ok(transitions.includes('browser_foreground_opening:open'));
+    assert.ok(transitions.includes('browser_open:open'));
+    assert.ok(transitions.includes('browser_foreground_closing:closed'));
+  });
+});
+
+test('wechat auth: browser foreground control fails closed before identity-bound auth is active', async () => {
+  const sidecar = new FakeSidecar(SESSION);
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api: apiReturning(IDENTITY),
+    sidecar,
+    probeEnabledReads: async () => true,
+    logImpl: () => {},
+  });
+
+  await assert.rejects(
+    () => auth.controlBrowser('open'),
+    (error: unknown) => error instanceof WechatChannelsError && error.category === 'invalid_command',
+  );
+  assert.equal(sidecar.opens, 0);
+});
+
+test('wechat auth: legacy finder-as-account binding migrates to logical env scope after verification', async () => {
+  await withTempDir(async (root) => {
+    const store = new EncryptedWechatSessionStore(SCOPE, {
+      rootDir: root,
+      env: { AIDCP_WECHAT_MASTER_KEY: '34'.repeat(32) },
+    });
+    await store.save({
+      binding: { ...SCOPE, accountId: IDENTITY.externalId, finderIdentity: IDENTITY.externalId },
+      identity: IDENTITY,
+      session: SESSION,
+    });
+    const sidecar = new FakeSidecar(null);
+    const auth = new WechatAuthCoordinator({
+      envKey: SCOPE.envKey,
+      expectedAccountId: SCOPE.envKey,
+      api: apiReturning(IDENTITY),
+      sidecar,
+      store,
+      probeEnabledReads: async () => true,
+      logImpl: () => {},
+    });
+    await auth.initialize();
+    assert.equal(auth.getSnapshot().status, 'active');
+    assert.equal(sidecar.opens, 0);
+    const migrated = await store.load(SCOPE.envKey);
+    assert.equal(migrated?.binding.accountId, SCOPE.envKey);
+    assert.equal(migrated?.binding.finderIdentity, IDENTITY.externalId);
+    assert.equal(migrated?.legacyBindingMigrated, false);
+  });
+});
+
+test('wechat auth: a finder identity change fails closed and never replaces the durable binding', async () => {
   await withTempDir(async (root) => {
     const sidecar = new FakeSidecar(SESSION);
     const store = new EncryptedWechatSessionStore(SCOPE, {
       rootDir: root,
       env: { AIDCP_WECHAT_MASTER_KEY: '44'.repeat(32) },
     });
+    await store.save({
+      binding: { ...SCOPE, accountId: SCOPE.envKey, finderIdentity: IDENTITY.externalId },
+      identity: IDENTITY,
+      session: SESSION,
+    });
     const auth = new WechatAuthCoordinator({
       envKey: SCOPE.envKey,
-      expectedAccountId: 'finder-expected',
+      expectedAccountId: SCOPE.envKey,
       api: apiReturning({ externalId: 'finder-wrong', displayName: 'Wrong Finder' }),
       sidecar,
       store,
@@ -191,7 +345,7 @@ test('wechat auth: wrong account fails closed and never closes or persists the c
     assert.equal(auth.getSnapshot().reasonCode, 'WECHAT_IDENTITY_MISMATCH');
     assert.equal(auth.getSnapshot().identityMatches, false);
     assert.equal(sidecar.closes, 0);
-    assert.equal(await store.load(), null);
+    assert.equal((await store.load(SCOPE.envKey))?.binding.finderIdentity, IDENTITY.externalId);
   });
 });
 
@@ -200,7 +354,7 @@ test('wechat auth: a failed read probe keeps the browser open and exposes schema
     const sidecar = new FakeSidecar(SESSION);
     const auth = new WechatAuthCoordinator({
       envKey: SCOPE.envKey,
-      expectedAccountId: IDENTITY.externalId,
+      expectedAccountId: SCOPE.envKey,
       api: apiReturning(IDENTITY),
       sidecar,
       store: new EncryptedWechatSessionStore(SCOPE, {
@@ -226,7 +380,7 @@ test('wechat auth: disabled feature stays fail-closed without opening a browser'
   const sidecar = new FakeSidecar(SESSION);
   const auth = new WechatAuthCoordinator({
     envKey: SCOPE.envKey,
-    expectedAccountId: IDENTITY.externalId,
+    expectedAccountId: SCOPE.envKey,
     api: apiReturning(IDENTITY),
     sidecar,
     probeEnabledReads: async () => true,
@@ -243,7 +397,7 @@ test('wechat auth: ordinary network degradation does not reopen the browser', ()
   const sidecar = new FakeSidecar(SESSION);
   const auth = new WechatAuthCoordinator({
     envKey: SCOPE.envKey,
-    expectedAccountId: IDENTITY.externalId,
+    expectedAccountId: SCOPE.envKey,
     api: apiReturning(IDENTITY),
     sidecar,
     probeEnabledReads: async () => true,

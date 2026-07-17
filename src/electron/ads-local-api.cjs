@@ -151,12 +151,14 @@ function createAdsLocalApi(deps = {}) {
   }
 
   /**
-   * 拉取分组：GET {base}/api/v1/group/list（只读，供「创建环境」定位/复用专用分组）。
+   * 拉取分组：GET {base}/api/v1/group/list（只读，供「创建环境」精确定位预置分组）。
    * 不 throw：成功 { ok:true, groups:[{groupId, groupName}] }，失败 { ok:false, error }。
    */
   async function listGroups(opts = {}) {
     const base = baseOf(opts);
-    const url = `${base}/api/v1/group/list?page=1&page_size=1000`;
+    const qs = new URLSearchParams({ page: '1', page_size: '1000' });
+    if (opts.groupName) qs.set('group_name', String(opts.groupName));
+    const url = `${base}/api/v1/group/list?${qs.toString()}`;
     let res;
     try {
       res = await throttledFetch(url, authHeaders(opts));

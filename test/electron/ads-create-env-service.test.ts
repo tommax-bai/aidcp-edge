@@ -6,11 +6,16 @@ const require = createRequire(import.meta.url);
 const service = require('../../src/electron/ads-create-env-service.cjs') as {
   ENV_GROUP_NAME: string;
   createEnvGroupResolver: (deps: {
-    adsApi: { listGroups: () => Promise<{ ok: boolean; groups?: Array<{ groupId: string; groupName: string }> }> };
+    adsApi: {
+      listGroups: (opts?: unknown) => Promise<{
+        ok: boolean;
+        groups?: Array<{ groupId: string; groupName: string }>;
+        error?: string;
+      }>;
+    };
     groupName?: string;
   }) => {
     ensureEnvGroup: (
-      writeApi: { createGroup: (name: string) => Promise<{ ok: boolean; groupId?: string; error?: string }> },
       adsOpts?: unknown,
       opts?: { skipGroupIds?: string[] },
     ) => Promise<{ ok: boolean; groupId?: string; error?: string }>;
@@ -32,6 +37,10 @@ function flowFactory(results: Array<{ ok: boolean; userId?: string; error?: stri
   });
 }
 
+test('ENV_GROUP_NAME is the operator-provisioned aidcp group', () => {
+  assert.equal(ENV_GROUP_NAME, 'aidcp');
+});
+
 test('isDeletedOrArchivedGroupError only matches group deleted/archived failures', () => {
   assert.equal(isDeletedOrArchivedGroupError('group is deleted or archived'), true);
   assert.equal(isDeletedOrArchivedGroupError('Group has been Archived'), true);
@@ -39,7 +48,86 @@ test('isDeletedOrArchivedGroupError only matches group deleted/archived failures
   assert.equal(isDeletedOrArchivedGroupError('profile is archived'), false);
 });
 
-test('createEnvironmentWithGroupRecovery clears stale group cache and retries once with a newly resolved group', async () => {
+test('createEnvironmentWithGroupRecovery assigns every supported platform to the pre-provisioned aidcp group', async () => {
+  let listCalls = 0;
+  const adsApi = {
+    listGroups: async () => {
+      listCalls += 1;
+      return { ok: true, groups: [{ groupId: 'g-aidcp', groupName: ENV_GROUP_NAME }] };
+    },
+  };
+  const resolver = createEnvGroupResolver({ adsApi });
+  const captured: Array<Record<string, unknown>> = [];
+
+  for (const platform of ['xiaohongshu', 'facebook', 'wechat_channels']) {
+    const result = await createEnvironmentWithGroupRecovery({
+      writeApi: {},
+      adsApi,
+      fingerprint: {},
+      templateKey: 'win11-intel',
+      machineLabel: 'mac-01',
+      platform,
+      groupResolver: resolver,
+      createFlowFactory: () => ({
+        createEnvironment: async (arg: Record<string, unknown>) => {
+          captured.push(arg);
+          return { ok: true, userId: `u-${platform}` };
+        },
+      }),
+    });
+    assert.equal(result.ok, true);
+  }
+
+  assert.equal(listCalls, 1, 'resolved group id is cached across platform-neutral creates');
+  assert.deepEqual(captured.map((arg) => arg.groupId), ['g-aidcp', 'g-aidcp', 'g-aidcp']);
+  assert.deepEqual(captured.map((arg) => arg.platform), ['xiaohongshu', 'facebook', 'wechat_channels']);
+});
+
+test('createEnvGroupResolver preserves a group/list failure and does not invent a group', async () => {
+  let listedOpts: Record<string, unknown> | undefined;
+  const resolver = createEnvGroupResolver({
+    adsApi: {
+      listGroups: async (opts) => {
+        listedOpts = opts as Record<string, unknown>;
+        return { ok: false, error: '拉取分组失败：无权限' };
+      },
+    },
+  });
+
+  const result = await resolver.ensureEnvGroup({ apiBase: 'http://local.adspower.net:50325' });
+
+  assert.deepEqual(result, { ok: false, error: '拉取分组失败：无权限' });
+  assert.equal(listedOpts?.groupName, 'aidcp');
+  assert.equal(listedOpts?.apiBase, 'http://local.adspower.net:50325');
+  assert.equal(resolver.getCachedEnvGroupId(), null);
+});
+
+test('createEnvironmentWithGroupRecovery stops before user/create when the pre-provisioned group is missing', async () => {
+  let flowCalls = 0;
+  const adsApi = {
+    listGroups: async () => ({ ok: true, groups: [{ groupId: 'other', groupName: '其他分组' }] }),
+  };
+
+  const result = await createEnvironmentWithGroupRecovery({
+    writeApi: {},
+    adsApi,
+    fingerprint: {},
+    groupResolver: createEnvGroupResolver({ adsApi }),
+    createFlowFactory: () => ({
+      createEnvironment: async () => {
+        flowCalls += 1;
+        return { ok: true, userId: 'unexpected' };
+      },
+    }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(String(result.error), /预置 AdsPower 分组“aidcp”/);
+  assert.match(String(result.error), /API Key 与分组权限/);
+  assert.equal(flowCalls, 0);
+});
+
+test('createEnvironmentWithGroupRecovery clears a stale cache and retries once with a newly resolved aidcp group', async () => {
   let listCalls = 0;
   const adsApi = {
     listGroups: async () => {
@@ -54,14 +142,11 @@ test('createEnvironmentWithGroupRecovery clears stale group cache and retries on
       };
     },
   };
-  const writeApi = {
-    createGroup: async () => ({ ok: true, groupId: 'created' }),
-  };
   const resolver = createEnvGroupResolver({ adsApi });
   const groupIds: string[] = [];
 
   const result = await createEnvironmentWithGroupRecovery({
-    writeApi,
+    writeApi: {},
     adsApi,
     fingerprint: {},
     templateKey: 'win11-intel',
@@ -82,44 +167,30 @@ test('createEnvironmentWithGroupRecovery clears stale group cache and retries on
   assert.equal(resolver.getCachedEnvGroupId(), 'new');
 });
 
-test('createEnvironmentWithGroupRecovery creates a dedicated group when no usable group exists after recovery', async () => {
+test('createEnvironmentWithGroupRecovery does not create or retry when no replacement aidcp group is visible', async () => {
   let listCalls = 0;
   const adsApi = {
     listGroups: async () => {
       listCalls += 1;
-      if (listCalls === 1) return { ok: true, groups: [{ groupId: 'old', groupName: ENV_GROUP_NAME }] };
       return { ok: true, groups: [{ groupId: 'old', groupName: ENV_GROUP_NAME }] };
-    },
-  };
-  const createdNames: string[] = [];
-  const writeApi = {
-    createGroup: async (name: string) => {
-      createdNames.push(name);
-      return { ok: true, groupId: 'created' };
     },
   };
   const groupIds: string[] = [];
 
   const result = await createEnvironmentWithGroupRecovery({
-    writeApi,
+    writeApi: {},
     adsApi,
     fingerprint: {},
     templateKey: 'win11-intel',
     machineLabel: 'mac-01',
     groupResolver: createEnvGroupResolver({ adsApi }),
-    createFlowFactory: flowFactory(
-      [
-        { ok: false, error: 'group is deleted or archived' },
-        { ok: true, userId: 'u-created' },
-      ],
-      groupIds,
-    ),
+    createFlowFactory: flowFactory([{ ok: false, error: 'group is deleted or archived' }], groupIds),
   });
 
-  assert.deepEqual(groupIds, ['old', 'created']);
-  assert.deepEqual(createdNames, [ENV_GROUP_NAME]);
-  assert.equal(result.ok, true);
-  assert.equal(result.userId, 'u-created');
+  assert.deepEqual(groupIds, ['old']);
+  assert.equal(listCalls, 2);
+  assert.equal(result.ok, false);
+  assert.match(String(result.error), /预置 AdsPower 分组“aidcp”/);
 });
 
 test('createEnvironmentWithGroupRecovery does not retry unrelated create failures', async () => {
@@ -133,7 +204,7 @@ test('createEnvironmentWithGroupRecovery does not retry unrelated create failure
   const groupIds: string[] = [];
 
   const result = await createEnvironmentWithGroupRecovery({
-    writeApi: { createGroup: async () => ({ ok: true, groupId: 'created' }) },
+    writeApi: {},
     adsApi,
     fingerprint: {},
     templateKey: 'win11-intel',
@@ -155,7 +226,7 @@ test('createEnvironmentWithGroupRecovery passes import payload into create flow'
   };
   const accountImport = { username: 'a@example.com', cookie: 'cookie-json' };
   const result = await createEnvironmentWithGroupRecovery({
-    writeApi: { createGroup: async () => ({ ok: true, groupId: 'created' }) },
+    writeApi: {},
     adsApi,
     fingerprint: {},
     templateKey: 'win11-intel',

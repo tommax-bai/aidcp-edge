@@ -3,6 +3,7 @@ export * from './identity.js';
 export * from './overlay.js';
 export * from './consent.js';
 export * from './cta-labels.js';
+export * from './companion-ui.js';
 export * from './feed-reader.js';
 export * from './post-reader.js';
 export * from './like-executor.js';

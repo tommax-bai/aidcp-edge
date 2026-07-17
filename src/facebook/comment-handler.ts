@@ -17,6 +17,15 @@ import type { ActionCompletedPayload, NoteDetailPayload, PageCardsPayload } from
 import type { FacebookCommentExecutor } from './comment-executor.js';
 import type { FacebookJoinExecutor } from './join-executor.js';
 import { TaskTakeoverError } from '../execution/takeover.js';
+import {
+  clipFacebookUiText,
+  emitCompanionUiEvent,
+  facebookGroupName,
+  facebookReadUiText,
+  isAttempted,
+  reasonText,
+  type FacebookCompanionUiEvent,
+} from './companion-ui.js';
 
 /** 处理器回执所需的最小客户端能力（EdgeClient 已实现这三个方法）。 */
 export interface FacebookCommentReplyClient {
@@ -45,6 +54,19 @@ export class FacebookCommentHandler {
     this.joinExecutor = deps.joinExecutor;
     this.client = deps.client;
     this.log = deps.logger ?? (() => {});
+  }
+
+  /**
+   * 陪伴客户端活动条目（change facebook-write-action-visibility）。
+   *
+   * 这条路径原本对客户端**完全静默**：评论 / 加群 / 定向搜索由会话直接委托到本处理器，
+   * 本处理器自己回执给云端后返回，走不到会话里唯一的叙述出口 ⇒ 运营分不清「没做」和「做了但没显示」。
+   *
+   * 红线：这里**不做任何成功判定**——只叙述执行器已经作出、且已回报云端的判断（判据与上面的
+   * reportActionCompleted 完全同源）。
+   */
+  private emitUi(event: FacebookCompanionUiEvent): void {
+    emitCompanionUiEvent(this.log, event);
   }
 
   /**
@@ -96,14 +118,37 @@ export class FacebookCommentHandler {
     const container = payload.container ?? '';
     if (!container) {
       // 无容器 = 绝不全站搜（红线）：诚实非成功。
+      // 不产活动条目：这是配置问题（没给容器），不是一次真发生过的搜索动作。
       this.client.reportActionCompleted({ action: 'search', ok: false, reason: 'permission_gated' });
       return;
     }
     const r = await this.executor.searchInContainer(keyword, container);
     if (!r.ok) {
-      this.client.reportActionCompleted({ action: 'search', ok: false, reason: r.reason ?? 'no_candidates' });
+      const reason = r.reason ?? 'no_candidates';
+      if (isAttempted(reason)) {
+        this.emitUi({
+          kind: 'activity',
+          type: 'search_failed',
+          sentence: `搜「${clipFacebookUiText(keyword, 20)}」失败：${reasonText(reason)}`,
+          loopStage: 'feed',
+        });
+      }
+      this.client.reportActionCompleted({ action: 'search', ok: false, reason });
       return;
     }
+    // 群名用执行器现读回传的真名（读不出为 undefined → 回落「群」），绝不把容器 id / URL 当群名展示。
+    const where = clipFacebookUiText(r.containerName, 18) || '群';
+    const kw = clipFacebookUiText(keyword, 20);
+    // 零候选是「搜索成功执行、但没有匹配」——与「搜索失败」是两回事，MUST NOT 混为一谈。
+    // 无 statsDelta：搜索在云端既不进 interaction.occurred 也不进 dailyUsage。
+    this.emitUi({
+      kind: 'activity',
+      type: 'search',
+      sentence: r.candidates.length > 0
+        ? `在「${where}」搜「${kw}」，找到 ${r.candidates.length} 条`
+        : `在「${where}」搜「${kw}」，没有匹配的帖子`,
+      loopStage: 'feed',
+    });
     // 命中（含空候选）→ page.cards：permalink 放 noteId，云端据此下发 note.open{url}。
     // containerName：容器真实群名回传，云端据此把配置容器名自动回填（人只看群名、不看 id）。
     const cards: PageCardsPayload['cards'] = r.candidates.map((c, i) => ({
@@ -129,18 +174,30 @@ export class FacebookCommentHandler {
     }
     if (!r.editorReady) {
       // 帖子开了但评论框始终催不出来 → 诚实非成功，让云端换下一个候选（不做无望的提交）。
+      // 刻意**不产活动条目**：帖子确实打开并读到了，回非成功只是为了换候选。发一条失败条目会被
+      // 误读成「读失败」——把一次成功的阅读叙述成失败，同样是不诚实。沉默才是这里的诚实投影。
       this.client.reportActionCompleted({ action: 'open_note', ok: false, reason: 'editor_not_found' });
       return;
     }
     // permalink 作为 noteId 回 note.detail；content=帖子正文（图片帖常空）、comments=顶部他人评论——
     // 供云端撰写器「读了再写」（顺着讨论、用内容语言）。计数诚实置零（本流程不做点赞/收藏计数）。
-    this.client.reportNoteDetail({
+    const detail: NoteDetailPayload = {
       noteId: url,
       title: '',
       content: r.postText ?? '',
       likeCount: 0,
       collectCount: 0,
       ...(r.comments && r.comments.length > 0 ? { comments: r.comments } : {}),
+    };
+    this.client.reportNoteDetail(detail);
+    // 与浏览路径共用同一构造器：同一条 note.open 不能一路记「读」、一路隐形（两路措辞必须一致）。
+    // 云端本来就在两路都从 note.detail 记一次浏览；这里补齐本地兜底增量使两者对齐。
+    this.emitUi({
+      kind: 'activity',
+      type: 'note_open',
+      ...facebookReadUiText(detail),
+      loopStage: 'read',
+      statsDelta: { views: 1 },
     });
   }
 
@@ -157,10 +214,53 @@ export class FacebookCommentHandler {
       // noteId 即候选帖 permalink（云端下发）；submitComment 在「已由 note.open 打开的该帖」上操作，
       // 并用它做 own-identity 服务器确认的目标帖收窄。
       const r = await this.executor.submitComment(payload.noteId, payload.text ?? '', payload.groupChatCode, checkpoint);
+      this.emitCommentOutcome(payload.text ?? '', r.ok, r.reason);
       this.client.reportActionCompleted({ action: 'comment', ok: r.ok, ...(r.reason ? { reason: r.reason } : {}) });
     } finally {
       this.busy = false;
     }
+  }
+
+  /**
+   * 评论结果 → 活动条目，四档互斥（change facebook-write-action-visibility）。
+   *
+   * 主语用**我们打进去的评论文本**（一手），绝不用 permalink / noteId。
+   * `ok:true` 的语义完全沿用执行器现状（own-identity 服务器确认落地才为真），这里不新增任何成功判定。
+   */
+  private emitCommentOutcome(text: string, ok: boolean, reason?: string): void {
+    const excerpt = clipFacebookUiText(text, 24);
+    const subject = excerpt ? `：「${excerpt}」` : '';
+    if (ok) {
+      // 唯一计数点：真成功才贡献一次本地 comments 兜底增量（云端 dailyUsage 快照仍是权威、会覆盖本地）。
+      this.emitUi({
+        kind: 'activity',
+        type: 'comment',
+        sentence: `评论了${subject}`,
+        presence: '刚发布了一条评论',
+        loopStage: 'interact',
+        statsDelta: { comments: 1 },
+      });
+      return;
+    }
+    if (reason === 'pending_group_approval') {
+      // 诚实枢轴：执行器一手看到待审徽章 / 参与审批弹层，并**有意不刷新**以保住该证据。
+      // 这是真实发生的事实，值得告诉运营——但它**没上墙**：绝不说成已发布，绝不计数。
+      this.emitUi({
+        kind: 'activity',
+        type: 'comment_pending',
+        sentence: `评论待管理员批准，还没显示出来${subject}`,
+        presence: '评论等着群管理员批准…',
+        loopStage: 'interact',
+      });
+      return;
+    }
+    if (!isAttempted(reason)) return; // 被占 / 被抢占 / 会话关闭中：未开始，不是失败——不产条目
+    this.emitUi({
+      kind: 'activity',
+      type: 'comment_failed',
+      sentence: `评论没发出去：${reasonText(reason)}`,
+      loopStage: 'interact',
+    });
   }
 
   private async onJoin(payload: GroupJoinPayload, checkpoint?: () => void): Promise<void> {
@@ -176,6 +276,7 @@ export class FacebookCommentHandler {
     try {
       // checkpoint（5.10b）：加群点击后短确认窗口过后的观察尾段可被接管中断，被接管即抛 → handle catch 转 preempted_by_task。
       const r = await this.joinExecutor.joinGroup(payload.groupUrl, { click: payload.click, thinkMs: payload.thinkMs }, checkpoint);
+      this.emitJoinOutcome(r.ok, r.clicked, r.reason, r.postObservation ?? r.observation);
       this.client.reportActionCompleted({
         action: 'join_group',
         ok: r.ok,
@@ -188,5 +289,63 @@ export class FacebookCommentHandler {
     } finally {
       this.busy = false;
     }
+  }
+
+  /**
+   * 加群结果 → 活动条目（change facebook-write-action-visibility）。
+   *
+   * 成功判据**镜像云端自己的证据闸**（cloud handler.ts 的 interaction.occurred：`ok && clicked===true`），
+   * 使客户端与云端永不就「到底有没有加进去」给出互相矛盾的结论。
+   *
+   * 无 statsDelta：本地 stats / 云端 dailyUsage 的形状里**根本没有加群字段**（云端投影只覆盖 6 个动作），
+   * 凭空造一个会让本地兜底与云端权威计数漂移——零收益。
+   */
+  private emitJoinOutcome(
+    ok: boolean,
+    clicked: boolean,
+    reason?: string,
+    observation?: { title?: string },
+  ): void {
+    const name = facebookGroupName(observation);
+    if (ok && clicked) {
+      this.emitUi({
+        kind: 'activity',
+        type: 'join_group',
+        sentence: `加入了小组「${name}」`,
+        presence: `刚加入了「${name}」`,
+        loopStage: 'interact',
+      });
+      return;
+    }
+    // 点了 ≠ 加进去了：FB 群普遍要管理员审批 / 答题。二者都是一手观察到的真实中间态，
+    // 如实单列，绝不表述为已加入。
+    if (reason === 'pending') {
+      this.emitUi({
+        kind: 'activity',
+        type: 'join_pending',
+        sentence: `申请加入「${name}」，等待管理员通过`,
+        loopStage: 'interact',
+      });
+      return;
+    }
+    if (reason === 'questionnaire_required') {
+      this.emitUi({
+        kind: 'activity',
+        type: 'join_pending',
+        sentence: `「${name}」需要回答入群问题，没有自动作答`,
+        loopStage: 'interact',
+      });
+      return;
+    }
+    // already_member = 本来就是成员，没发生一次加群动作；observation_only = 按设计只探不点。
+    // 二者都在 isAttempted 的拒绝集里（observation_only），already_member 在此显式拦掉。
+    if (reason === 'already_member') return;
+    if (!isAttempted(reason)) return;
+    this.emitUi({
+      kind: 'activity',
+      type: 'join_failed',
+      sentence: `没能加入「${name}」：${reasonText(reason)}`,
+      loopStage: 'interact',
+    });
   }
 }

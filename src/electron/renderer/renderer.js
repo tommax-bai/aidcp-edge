@@ -198,6 +198,8 @@ const interactionWorkspace = window.InteractionWorkspace?.create({
   legacyRoot: document.querySelector('#legacy-workspace'),
   shell: document.querySelector('.shell'),
   api: window.aidcpEdge,
+  onLifecycleAction: runSessionLifecycle,
+  onLifecycleStatus: routeStatus,
 }) || null;
 
 // 灵感库与稿件审核共用同一主窗口内容页栈；全局标题栏、环境栏和健康状态仍由现有应用壳持有。
@@ -213,10 +215,13 @@ function syncInteractionWorkspace() {
   if (!interactionWorkspace) return;
   const selected = fleetView.envs.get(fleetView.selected);
   interactionWorkspace.selectEnvironment(selected ? {
-    envKey: selected.envId,
+    envKey: selected.profileId || selected.envId,
+    runtimeEnvId: selected.envId,
     platform: normPlatform(selected.platform),
     label: selected.name || '',
     connectivity: selected.status && selected.status.cloud,
+    edge: selected.status && selected.status.edge,
+    session: selected.status && selected.status.session,
   } : null);
 }
 
@@ -1656,10 +1661,14 @@ fields.pubHeadRow.addEventListener('keydown', (e) => {
 // ─── 叙述式活动流（环形 ≤200 条，最新在上）───
 const STREAM_MAX = 200;
 // 事件类型 → 图标字 + 色调（给纯文字流加视觉锚点；这是类型记号，不是 App 图标）。
+// 未命中回落 ['·','ic-sys']——这里**不是**过滤器，新类型少了记号只是掉成灰点、条目照常上屏。
+// `_pending` / `_failed` 变体**有意与本族共用记号**：句子已经承载真相，逐档换记号只是噪声。
 const EV_ICONS = [
   [/^(like|comment_like|follow)$/, ['赞', 'ic-like']],
   [/^collect$/, ['藏', 'ic-collect']],
-  [/^comment$/, ['评', 'ic-comment']],
+  [/^(comment|comment_pending|comment_failed)$/, ['评', 'ic-comment']],
+  [/^(join_group|join_pending|join_failed)$/, ['群', 'ic-join']],
+  [/^(search|search_failed)$/, ['搜', 'ic-search']],
   [/^(note_open|images|profile_read)$/, ['读', 'ic-read']],
   [/^popup/, ['注', 'ic-warn']],
   [/^publish/, ['发', 'ic-pub']],
@@ -2056,9 +2065,12 @@ function applyFleetSnapshot(snap) {
     if (existing) {
       existing.name = e.name || existing.name;
       existing.platform = e.platform || existing.platform;
+      existing.profileId = e.profileId || existing.profileId;
       if (e.status) existing.status = e.status;
     } else {
-      fleetView.envs.set(e.envId, { envId: e.envId, name: e.name || '', platform: e.platform || '', status: e.status });
+      fleetView.envs.set(e.envId, {
+        envId: e.envId, profileId: e.profileId || '', name: e.name || '', platform: e.platform || '', status: e.status,
+      });
     }
   }
   for (const key of [...fleetView.envs.keys()]) {
@@ -2937,6 +2949,21 @@ async function persistRoster() {
   } catch { /* 落盘失败静默；下次「启动」的 saveCurrentSettings 会再落一次 */ }
 }
 
+// 程序化建号的 gated 路径由 main 完成权威入册与落盘；renderer 的 roster 仍是调用前快照。
+// 创建成功后从 settings:get 回读 main 真态再重画“已加入”，不把 envKey 二次提交、也不重复落盘。
+async function syncRosterFromMainSettings() {
+  if (!window.aidcpEdge || typeof window.aidcpEdge.getSettings !== 'function') return false;
+  try {
+    const latest = await window.aidcpEdge.getSettings();
+    if (!latest || !Array.isArray(latest.environments)) return false;
+    roster = normalizeRosterList(latest.environments);
+    refreshRosterMarks();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // 刷新时剔除孤儿：花名册里 profileId 已不在**本机物理分身列表**中的成员（AdsPower profile 已删除、本地残留）自动移出。
 // 参数 liveIds = 本机物理存在的全部分身 id（gated 时由 main 的 physicalUserIds 提供、非按云端可见集收窄的显示列表——
 // 降范围≠物理删除，绝不把降范围环境当孤儿销毁）。**只应在「成功且完整」的拉取后调用**（调用点 refreshEnvs 已守
@@ -3321,12 +3348,17 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       // 新建即选中时，带上刚起好的环境名（回执 name）与平台（回执 platform 优先，回落表单选择）。
       // 带回真名根治「新建即空名」——否则左栏回落「环境 …末4位」、与添加面板显示的真名不一致
       // （change edge-env-name-live-sync）。
-      if (r.userId && !r.requiresAdminAssignment && !coreRunning()) {
+      if (r.userId && !r.requiresAdminAssignment && !r.assignmentHandledByMain && !coreRunning()) {
         await selectProfile(r.userId, null, r.name || '', r.platform || platform);
       }
-      const selectedHint = r.requiresAdminAssignment
+      if (r.rosterJoinedByMain) await syncRosterFromMainSettings();
+      const selectedHint = r.rosterJoinedByMain
+        ? '已分配到当前账号并加入运行环境；需要启动时请在环境栏操作。'
+        : r.requiresAdminAssignment
         ? '管理员分配前不会加入运行花名册。'
-        : r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
+        : r.assignmentHandledByMain
+          ? '已分配到当前账号，但本次未加入运行环境，请按提示处理。'
+          : r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
       const createdCount = Number(r.createdCount || (Array.isArray(r.created) ? r.created.length : 0));
       const countHint = createdCount > 1 ? `已创建 ${createdCount} 个环境。` : `已创建环境（${r.template || tpl}）。`;
       if (createdCount > 0 && settingsUi.adsFbImport) settingsUi.adsFbImport.value = '';
@@ -3431,30 +3463,36 @@ settingsUi.applyRestart.addEventListener('click', async () => {
   }
 });
 
+// 单环境生命周期的唯一 renderer 出口：旧工作区与视频号 InteractionWorkspace 共用，确保“启动”始终先保存设置。
+async function runSessionLifecycle(action, envId = currentEnvId()) {
+  if (action === 'resume') {
+    // 恢复 = 重启核心。若暂停期间改过浏览器设置（如切换了环境），先落盘再重启，否则会按旧设置重起。
+    if (!(await persistDirtyBeforeRestart('设置已保存，正在按新设置恢复…'))) return null;
+    return window.aidcpEdge.resume(envId);
+  }
+  if (action === 'start') {
+    // 启动 = 先保存当前设置再启动（保存并入启动，无独立保存按钮）。
+    if (selectedProvider() === 'adspower' && !settingsUi.adsProfile.value.trim() && roster.length === 0) {
+      promptMissingAdsProfile();
+      return null;
+    }
+    const saved = await saveCurrentSettings();
+    settingsUi.msg.textContent = saved && saved.saveOk === false
+      ? `设置本次生效但写盘失败：${saved.saveError || ''}（重启应用后可能丢失）`
+      : '设置已保存，正在启动…';
+    return window.aidcpEdge.start(envId);
+  }
+  if (action === 'pause') return window.aidcpEdge.pause(envId);
+  if (action === 'close') return window.aidcpEdge.close(envId);
+  return null;
+}
+
 // 今日进展会话按钮：三态触发 恢复 / 启动（=先保存再启动） / 暂停。无独立「保存」按钮。
 fields.sessionFab.addEventListener('click', async () => {
   const action = fields.sessionFab.dataset.action;
   fields.sessionFab.disabled = true;
   try {
-    let next;
-    if (action === 'resume') {
-      // 恢复 = 重启核心。若暂停期间改过浏览器设置（如切换了环境），先落盘再重启，否则会按旧设置重起。
-      if (!(await persistDirtyBeforeRestart('设置已保存，正在按新设置恢复…'))) return;
-      next = await window.aidcpEdge.resume(currentEnvId());
-    } else if (action === 'start') {
-      // 启动 = 先保存当前设置再启动（保存并入启动，无独立保存按钮）。
-      if (selectedProvider() === 'adspower' && !settingsUi.adsProfile.value.trim() && roster.length === 0) {
-        promptMissingAdsProfile();
-        return;
-      }
-      const saved = await saveCurrentSettings();
-      settingsUi.msg.textContent = saved && saved.saveOk === false
-        ? `设置本次生效但写盘失败：${saved.saveError || ''}（重启应用后可能丢失）`
-        : '设置已保存，正在启动…';
-      next = await window.aidcpEdge.start(currentEnvId());
-    } else {
-      next = await window.aidcpEdge.pause(currentEnvId());
-    }
+    const next = await runSessionLifecycle(action, currentEnvId());
     if (next) routeStatus(next);
   } finally {
     fields.sessionFab.disabled = false;

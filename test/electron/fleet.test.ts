@@ -52,6 +52,13 @@ test('legacyMirrorOf：首成员镜像回旧字段（回滚兼容）；空花名
   assert.equal(fleet.legacyMirrorOf([]).adsProfileId, '');
 });
 
+test('nicknameSourceForPlatform：视频号真实昵称保留平台来源，环境名回落仍由调用方标 env', () => {
+  assert.equal(fleet.nicknameSourceForPlatform('wechat_channels'), 'wechat_channels');
+  assert.equal(fleet.nicknameSourceForPlatform('wechat-channels'), 'wechat_channels');
+  assert.equal(fleet.nicknameSourceForPlatform('facebook'), 'facebook');
+  assert.equal(fleet.nicknameSourceForPlatform('xiaohongshu'), 'xhs');
+});
+
 test('facebookBrowseModeFor：仅 dev 的 Facebook 分身真浏览，其他环境显式关闭', () => {
   assert.equal(fleet.facebookBrowseModeFor({ platform: 'facebook', cloudEnvKey: 'dev' }), 'on');
   assert.equal(fleet.facebookBrowseModeFor({ platform: 'fb', cloudEnvKey: 'DEV' }), 'on');

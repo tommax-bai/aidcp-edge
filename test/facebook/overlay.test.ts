@@ -1,11 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  FB_THROTTLE_ZH_FREQUENCY_PHRASES,
   FacebookOverlayMonitor,
+  OVERLAY_EVIDENCE_MAX_CHARS,
+  backfillOverlayEvidenceText,
   classifyFacebookOverlay,
   classifyFacebookOverlayFromSignals,
 } from '../../src/facebook/index.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
+import type { BlockingOverlaySnapshot } from '../../src/browse/overlay-monitor.js';
 
 function fakeCdp(ref: { value: unknown; throwIt?: boolean }): BrowseCdp {
   return {
@@ -84,6 +88,158 @@ test('classifyFacebookOverlayFromSignals: clean facebook page is none', () => {
 
 test('classifyFacebookOverlay: invalid JSON fails closed as unknown', async () => {
   assert.equal(await classifyFacebookOverlay(fakeCdp({ value: '{bad-json' })), 'unknown');
+});
+
+// ——— change fb-throttle-popup-zh-frequency-copy ———
+
+test('中文「频率」框架限流弹窗被判为阻断态（本 change 的主因缺口）', () => {
+  // 用户真实遭遇的整句（含前后文），既有「封锁/不可用」框架词库对它零命中。
+  assert.equal(
+    classifyFacebookOverlayFromSignals({
+      href: 'https://www.facebook.com/groups/123/',
+      text: '为让社群免受垃圾信息打扰，我们限制了你发帖、评论或执行其他操作的频率。你可以稍后再试。',
+    }),
+    'unknown',
+  );
+  // 「您」变体
+  assert.equal(
+    classifyFacebookOverlayFromSignals({
+      href: 'https://www.facebook.com/',
+      text: '为让社区免受垃圾信息打扰，我们限制了您发帖、评论或执行其他操作的频率。',
+    }),
+    'unknown',
+  );
+});
+
+test('词条不含标点与「社群/社区」⇒ 转录差异不影响命中', () => {
+  // 用户文案来自截图转录：标点全/半角、社群 vs 社区 均未真机坐实。词条刻意避开这两处方言面。
+  for (const phrase of FB_THROTTLE_ZH_FREQUENCY_PHRASES) {
+    assert.ok(!/[，。、,.]/.test(phrase), `词条不得含标点: ${phrase}`);
+    assert.ok(!phrase.includes('社群') && !phrase.includes('社区'), `词条不得含地区差异词: ${phrase}`);
+  }
+  // 半角标点 + 「社区」的转录变体照样命中
+  assert.equal(
+    classifyFacebookOverlayFromSignals({
+      href: 'https://www.facebook.com/',
+      text: '为让社区免受垃圾信息打扰,我们限制了你发帖、评论或执行其他操作的频率.你可以稍后再试.',
+    }),
+    'unknown',
+  );
+});
+
+test('词条纪律：绝不含裸词「限制」/「频率」（FB 群规则页遍地都是）', () => {
+  for (const phrase of FB_THROTTLE_ZH_FREQUENCY_PHRASES) {
+    assert.notEqual(phrase, '限制');
+    assert.notEqual(phrase, '频率');
+    assert.ok(phrase.length >= 6, `词条须为长专属句片段，过短易误报: ${phrase}`);
+  }
+  // 正常页面含这些字但无句片段 ⇒ 绝不命中（误报=账号停摆至恢复窗结束且需人工恢复）
+  const benign = [
+    '本群规则：请勿刷屏。管理员有权限制发帖频率，违者移出群组。',
+    '你可以在设置中调整通知的频率。',
+    '我们限制了广告的展示频率以改善你的体验。',
+  ];
+  for (const text of benign) {
+    assert.equal(
+      classifyFacebookOverlayFromSignals({ href: 'https://www.facebook.com/groups/x/', text }),
+      'none',
+      `正常页面不得判为限流: ${text}`,
+    );
+  }
+});
+
+test('词条集合锁：与云端 FB_THROTTLE_PHRASES 逐条对齐（任一侧漂移即失败）', () => {
+  // 两仓各自维护、无共享模块 ⇒ 本断言是唯一防漂移手段。改动须两侧同步（云端同名测试镜像本表）。
+  assert.deepEqual([...FB_THROTTLE_ZH_FREQUENCY_PHRASES], [
+    '我们限制了你发帖',
+    '我们限制了您发帖',
+    '执行其他操作的频率',
+  ]);
+});
+
+test('此前只在云端的 we restrict certain content and actions 现已可达（消除死代码）', () => {
+  // 该条此前只在云端词库、边缘不认 ⇒ 边缘不分类就永不上报 ⇒ 云端永远收不到能命中它的文本。
+  assert.equal(
+    classifyFacebookOverlayFromSignals({
+      href: 'https://www.facebook.com/',
+      text: 'We restrict certain content and actions to protect our community.',
+    }),
+    'unknown',
+  );
+});
+
+test('backfillOverlayEvidenceText: 候选为空时用判定同源文本回填（本 change 的钉）', () => {
+  // FB 标准限流弹窗：role=dialog / 无 iframe / 约占视口 35% / 右上角有关闭 × ⇒ 快照候选筛选三分支全不满足
+  // ⇒ candidates 空 ⇒ text=undefined ⇒ 云端「无文案不臆断限流」返否定 ⇒ 只到 warned 降速而非 restricted。
+  const emptySnapshot: BlockingOverlaySnapshot = {
+    kind: 'unknown',
+    firstDetectedUrl: 'https://www.facebook.com/groups/123/',
+    capturedAt: 1,
+    candidates: [],
+  };
+  const scanText = '为让社群免受垃圾信息打扰，我们限制了你发帖、评论或执行其他操作的频率。你可以稍后再试。';
+  const out = backfillOverlayEvidenceText(emptySnapshot, 'unknown', 'https://www.facebook.com/', scanText);
+  assert.ok(out?.text, '判为阻断态的上报必须携带非空证据文案');
+  assert.ok(out.text.includes('执行其他操作的频率'), '证据须为判定同源文本');
+  assert.equal(out.kind, 'unknown');
+  assert.equal(out.firstDetectedUrl, 'https://www.facebook.com/groups/123/', '回填不得改写其它字段');
+});
+
+test('backfillOverlayEvidenceText: 候选非空时沿用原证据，绝不覆盖', () => {
+  const snapshot: BlockingOverlaySnapshot = {
+    kind: 'unknown',
+    capturedAt: 1,
+    text: '弹窗元素原文',
+    candidates: [],
+  };
+  const out = backfillOverlayEvidenceText(snapshot, 'unknown', 'https://www.facebook.com/', '整页扫描文本');
+  assert.equal(out?.text, '弹窗元素原文');
+});
+
+test('backfillOverlayEvidenceText: 无同源文本时诚实保持现状，绝不臆造证据', () => {
+  const snapshot: BlockingOverlaySnapshot = { kind: 'unknown', capturedAt: 1, candidates: [] };
+  assert.equal(backfillOverlayEvidenceText(snapshot, 'unknown', 'u', undefined)?.text, undefined);
+  assert.equal(backfillOverlayEvidenceText(snapshot, 'unknown', 'u', '   ')?.text, undefined);
+  assert.equal(backfillOverlayEvidenceText(undefined, 'unknown', 'u', undefined), undefined);
+});
+
+test('backfillOverlayEvidenceText: 快照采集整个失败时仍送达同源证据', () => {
+  const out = backfillOverlayEvidenceText(undefined, 'unknown', 'https://www.facebook.com/x', '我们限制了你发帖');
+  assert.equal(out?.kind, 'unknown');
+  assert.equal(out?.text, '我们限制了你发帖');
+  assert.equal(out?.firstDetectedUrl, 'https://www.facebook.com/x');
+  assert.deepEqual(out?.candidates, []);
+});
+
+test('backfillOverlayEvidenceText: 证据按上限截断且折叠空白', () => {
+  const out = backfillOverlayEvidenceText(undefined, 'unknown', 'u', 'a\n\n  b' + 'x'.repeat(5000));
+  assert.equal(out?.text?.length, OVERLAY_EVIDENCE_MAX_CHARS);
+  assert.ok(out?.text?.startsWith('a b'), '空白须折叠');
+});
+
+test('回填不改变判定：不命中词库的页面绝不因回填变成阻断态', () => {
+  // 回填只在「已判为阻断」之后发生；判定仍完全由词库在整页文本上完成。
+  assert.equal(
+    classifyFacebookOverlayFromSignals({
+      href: 'https://www.facebook.com/',
+      text: '一段完全正常的正文，随便提到限制与频率两个词。',
+    }),
+    'none',
+  );
+});
+
+test('FacebookOverlayMonitor.lastScanText: 暴露判定同源文本，探测失败不覆盖', async () => {
+  const text = '为让社群免受垃圾信息打扰，我们限制了你发帖、评论或执行其他操作的频率。';
+  const ref = { value: JSON.stringify({ href: 'https://www.facebook.com/', text }) as unknown };
+  const monitor = new FacebookOverlayMonitor(fakeCdp(ref), { pollMs: 1 });
+
+  await monitor.tick();
+  assert.equal(monitor.state, 'unknown');
+  assert.equal(monitor.lastScanText, text, 'lastScanText 须是判定所依据的那份文本');
+
+  (ref as { throwIt?: boolean }).throwIt = true;
+  await monitor.tick();
+  assert.equal(monitor.lastScanText, text, '探测失败不得抹掉已有证据（与 state 的 sticky 语义一致）');
 });
 
 test('FacebookOverlayMonitor: sticky on probe errors', async () => {

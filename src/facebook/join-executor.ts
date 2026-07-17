@@ -139,6 +139,33 @@ function canonicalGroupUrl(input: string): string | null {
   return `https://www.facebook.com/groups/${parts[groupIdx + 1]}`;
 }
 
+/**
+ * 「浏览器此刻恰好停在目标群主页」判据（change fb-group-join-click-leg-reuse）——供 click 腿跳过整页重载。
+ *
+ * **故意不复用 `canonicalGroupUrl(current)` 归一**：那个函数把 `m.facebook.com/groups/<id>`、`/groups/<id>/about`
+ * 统统折叠成同一个 canonical 串，而这些恰恰是**复用不安全**的面——`m.` 是另一套移动 DOM（观察脚本按桌面 DOM 写）、
+ * `/about` 未必有加入按钮（落 `no_button` 会被云端判**永久 failed、不进重试池**）。判据只认「导航本会把我们放到的
+ * 那个位置」：同 origin + pathname 逐字为 `/groups/<id>`（容尾斜杠）。
+ *
+ * query / hash 不计：群主页带 `?ref=share` 仍是群主页，同一份 DOM。
+ *
+ * **失败方向 = 导航**：解析不出 / 存疑一律 false ⇒ 回落今日的无条件导航行为。优化只在确定安全时生效。
+ */
+export function isOnCanonicalGroupPage(currentUrl: string | undefined | null, canonicalUrl: string): boolean {
+  if (!currentUrl) return false;
+  let cur: URL;
+  let want: URL;
+  try {
+    cur = new URL(currentUrl);
+    want = new URL(canonicalUrl);
+  } catch {
+    return false;
+  }
+  if (cur.origin !== want.origin) return false;
+  const stripTrailing = (p: string): string => (p.length > 1 && p.endsWith('/') ? p.slice(0, -1) : p);
+  return stripTrailing(cur.pathname) === stripTrailing(want.pathname);
+}
+
 function publicObservation(raw: RawJoinObservation, groupUrl: string): FacebookGroupJoinObservation {
   return {
     groupUrl,
@@ -637,8 +664,19 @@ export class FacebookJoinExecutor {
     // 提交窗口守卫（5.1）：加群点击前赋值，观察尾段用时基自动过期（18.5s）划出「短确认 vs 可中断尾巴」；finally 关窗。
     let disposeCommit: (() => void) | undefined;
     try {
-      await this.cdp.send('Page.navigate', { url: groupUrl });
-      if (this.opts.settleMs > 0) await this.sleep(this.opts.settleMs);
+      // change fb-group-join-click-leg-reuse：加群是**两腿**边缘调用（observe → 云端 LLM 预判 → click），云端在两腿之间
+      // **故意释放租约**（绝不在等 LLM 时霸占浏览器）。但本例程开头的 navigate 原为无条件 ⇒ click 腿把 observe 腿刚加载好、
+      // 已水合完毕的同一个页面**整页重载一遍**：白等一整轮就绪轮询（FB 群页加入按钮实测数秒才渲染），且对同一 URL 连开
+      // 两次是机器行为特征。故 click 腿在位即复用。
+      //
+      // **observe 腿永远 navigate，绝不复用**（承重不变量，勿"优化"掉）：observe 腿是本流程**唯一**的页面确立 + 故障恢复
+      // 手段。若两腿都复用，页面一旦卡在目标 URL 上的坏状态，`not_ready` 重试将永远跳过导航、永远观察同一个坏页 ⇒ 死锁到
+      // attempts 撞上限被永久标 failed。保留 observe 腿无条件导航 ⇒ 每次逻辑加群必有一次干净加载兜底，重试必定重开。
+      const reusable = options.click === true && (await this.isOnGroupPage(groupUrl));
+      if (!reusable) {
+        await this.cdp.send('Page.navigate', { url: groupUrl });
+        if (this.opts.settleMs > 0) await this.sleep(this.opts.settleMs);
+      }
       // 就绪轮询（change fb-group-join-wait-render）：反复观察，直到出现决定性信号（加入按钮已渲染 / 已是成员 /
       // 需登录 / 验证码 / 问卷 / 待审 / 同意浮层清不掉）或触上限——按「页面真加载出来」判定，而非死等固定时长
       // （FB 群页头部+按钮实测常需数秒、且网络不稳）。同意/阻断浮层在轮询内每轮幂等处理。触上限仍无信号 → 用最后一次观察诚实交云端判定。
@@ -747,6 +785,28 @@ export class FacebookJoinExecutor {
    * 头部与按钮（实测常需数秒、网络不稳）时就过早观察到空页面而误判 ambiguous。触上限仍无信号 → 返回最后一次
    * 观察（诚实交云端判定，绝不假成功）。同意/阻断浮层每轮幂等处理，任意时刻出现都能捕获。
    */
+  /**
+   * 读当前页地址、判断是否已停在目标群主页（change fb-group-join-click-leg-reuse，仅 click 腿调用）。
+   *
+   * **异常一律吞掉回 false ⇒ 照旧导航**：这只是一次「能不能省一次加载」的探测，绝不允许它把加群整条弄失败。
+   * **例外 = 接管**：与本文件既有约定一致（见 joinGroup 的 catch），`TaskTakeoverError` MUST 冒泡，绝不能被这里
+   * 降级成「探测失败 → 照旧导航」——那会让一次已下达的让位变成一次多余的整页加载，正是本 change 要消灭的东西。
+   */
+  private async isOnGroupPage(groupUrl: string): Promise<boolean> {
+    try {
+      // 表达式带唯一标记 __FB_JOIN_URL__（同 GROUP_JOIN_CLICK_JS 的既有约定）：观察脚本自身也含 `location.href`，
+      // 测试桩若靠字面 `location.href` 区分会误撞观察 eval、打乱观察序列。
+      const res = await evalJson<{ href?: string }>(
+        this.cdp,
+        'JSON.stringify({ /*__FB_JOIN_URL__*/ href: location.href })',
+      );
+      return isOnCanonicalGroupPage(res?.href, groupUrl);
+    } catch (err) {
+      rethrowIfTakeover(err);
+      return false;
+    }
+  }
+
   private async observeUntilReady(
     groupUrl: string,
     /**

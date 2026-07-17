@@ -112,16 +112,33 @@
     const legacyRoot = options && options.legacyRoot;
     const shell = options && options.shell;
     const api = options && options.api;
+    const onLifecycleAction = options && options.onLifecycleAction;
+    const onLifecycleStatus = options && options.onLifecycleStatus;
     if (!root || !legacyRoot || !shell || !api) return null;
 
     const dom = {
       title: root.querySelector('#iw-title'),
       summary: root.querySelector('#iw-summary'),
       browser: root.querySelector('#iw-browser'),
+      lifecycle: root.querySelector('#iw-lifecycle'),
+      close: root.querySelector('#iw-close'),
+      browserControl: root.querySelector('#iw-browser-control'),
       reauth: root.querySelector('#iw-reauth'),
       sync: root.querySelector('#iw-sync'),
       syncStatus: root.querySelector('#iw-sync-status'),
       asOf: root.querySelector('#iw-as-of'),
+      unreadBadge: root.querySelector('#iw-unread-badge'),
+      readAll: root.querySelector('#iw-read-all'),
+      readComment: root.querySelector('#iw-read-comment'),
+      readDm: root.querySelector('#iw-read-dm'),
+      readApply: root.querySelector('#iw-read-apply'),
+      readCommentStatus: root.querySelector('#iw-read-comment-status'),
+      readDmStatus: root.querySelector('#iw-read-dm-status'),
+      readError: root.querySelector('#iw-read-error'),
+      configStatus: root.querySelector('#iw-config-status'),
+      configSummary: root.querySelector('#iw-config-summary'),
+      configHelp: root.querySelector('#iw-config-help'),
+      configGuidance: root.querySelector('#iw-config-guidance'),
       tabs: Array.from(root.querySelectorAll('[data-interaction-tab]')),
       search: root.querySelector('#iw-search'),
       listMeta: root.querySelector('#iw-list-meta'),
@@ -135,22 +152,53 @@
     let listRequest = 0;
     let detailRequest = 0;
     let pollTimer = null;
+    let browserPollTimer = null;
+    let listPollTimer = null;
     let active = false;
     let env = null;
     let state = freshState();
+    const seenMessagesByEnv = new Map();
+    const notifiedMessagesByEnv = new Map();
+    const unreadMessagesByEnv = new Map();
+    const baselineTabs = new Set();
 
     function freshState() {
       return {
         tab: 'pending', search: '', items: [], nextCursor: null, listLoading: false, listAppending: false,
         listError: null, selectedThreadId: null, detail: null, detailLoading: false, detailError: null,
         auth: null, asOf: null, stale: false, actionBusy: null, actionError: null, actionNotice: null,
-        draftText: '', draftDirty: false, syncBusy: false, pollCount: 0,
+        replyConfig: null, readControlsBusy: false, readControlsError: null, configGuidanceOpen: false,
+        pendingBrowserAction: null, browserPollCount: 0,
+        draftText: '', draftDirty: false, syncBusy: false, lifecycleBusy: null, pollCount: 0,
       };
     }
 
     function clearPoll() {
       if (pollTimer) global.clearTimeout(pollTimer);
       pollTimer = null;
+    }
+
+    function clearBrowserPoll() {
+      if (browserPollTimer) global.clearTimeout(browserPollTimer);
+      browserPollTimer = null;
+    }
+
+    function clearListPoll() {
+      if (listPollTimer) global.clearTimeout(listPollTimer);
+      listPollTimer = null;
+    }
+
+    function scheduleListPoll(capturedEpoch, envKey) {
+      clearListPoll();
+      const bootstrap = !state.auth;
+      const readState = currentReadState();
+      if (!active || !env || env.connectivity !== 'connected') return;
+      if (!bootstrap && (state.auth.status !== 'active' || !readState.storedEnabled)) return;
+      listPollTimer = global.setTimeout(() => {
+        if (isCurrent(capturedEpoch, envKey) && !state.listLoading && !state.listAppending) {
+          void loadList({ preserveSelection: true });
+        }
+      }, bootstrap ? 3_000 : 15_000);
     }
 
     function setVisible(show) {
@@ -200,8 +248,13 @@
       return state.stale || !env || env.connectivity !== 'connected';
     }
 
+    function controlsWriteBlocked() {
+      const controls = state.auth && state.auth.runtimeControls;
+      return !controls || controls.applicationStatus !== 'applied';
+    }
+
     function writeBlocked() {
-      return authWriteBlocked() || connectivityWriteBlocked();
+      return authWriteBlocked() || connectivityWriteBlocked() || controlsWriteBlocked();
     }
 
     function channelCapabilityBlocked(channel) {
@@ -210,20 +263,132 @@
       return channel === 'dm' ? !caps.dmSendText : !caps.commentsReply;
     }
 
+    function replyConfigReady() {
+      return Boolean(state.replyConfig && state.replyConfig.status === 'published');
+    }
+
+    function channelReadState(channel) {
+      const auth = state.auth;
+      const controls = auth && auth.runtimeControls;
+      const stored = controls && controls.stored;
+      const storedEnabled = stored ? Boolean(channel === 'dm' ? stored.dmReadEnabled : stored.commentsReadEnabled) : false;
+      const applied = Boolean(controls && controls.applicationStatus === 'applied');
+      const capable = Boolean(auth && auth.capabilities && (channel === 'dm' ? auth.capabilities.dmRead : auth.capabilities.commentsRead));
+      if (!controls || !stored) return { storedEnabled: false, effective: false, label: '状态待确认', reason: '正在读取账号开关。' };
+      if (!storedEnabled) return { storedEnabled, effective: false, label: '已关闭', reason: channel === 'dm' ? '私信收取未开启。' : '评论收取未开启。' };
+      if (!applied) return { storedEnabled, effective: false, label: '已开启，等待本机应用', reason: '开关已保存，等待 Edge 应用同一版本。' };
+      if (!capable) return { storedEnabled, effective: false, label: '平台读取能力未就绪', reason: '本机尚未确认该渠道的读取能力。' };
+      return { storedEnabled, effective: true, label: '正在收取', reason: '开关已保存、本机已应用且平台读取能力正常。' };
+    }
+
+    function currentReadState() {
+      if (!state.auth || !state.auth.runtimeControls) {
+        return {
+          storedEnabled: false,
+          effective: false,
+          label: '收取状态待确认',
+          reason: state.listError ? '本次未能读取账号开关，不能据此判断是否没有互动。' : '正在读取账号开关。',
+        };
+      }
+      if (state.tab === 'comment' || state.tab === 'dm') return channelReadState(state.tab);
+      const comment = channelReadState('comment');
+      const dm = channelReadState('dm');
+      if (comment.effective || dm.effective) return { storedEnabled: true, effective: true, label: '至少一个渠道正在收取', reason: '' };
+      if (comment.storedEnabled || dm.storedEnabled) return { storedEnabled: true, effective: false, label: '收取尚未生效', reason: comment.storedEnabled ? comment.reason : dm.reason };
+      return { storedEnabled: false, effective: false, label: '互动收取未开启', reason: '请先开启评论或私信收取。' };
+    }
+
+    function renderReadSettings() {
+      const controls = state.auth && state.auth.runtimeControls;
+      const stored = controls && controls.stored;
+      const comment = channelReadState('comment');
+      const dm = channelReadState('dm');
+      const editable = Boolean(stored && state.auth && state.auth.status === 'active' && !state.stale
+        && env && env.connectivity === 'connected' && typeof api.interactionUpdateReadControls === 'function');
+      dom.readComment.checked = comment.storedEnabled;
+      dom.readDm.checked = dm.storedEnabled;
+      dom.readAll.checked = comment.storedEnabled && dm.storedEnabled;
+      dom.readAll.indeterminate = comment.storedEnabled !== dm.storedEnabled;
+      dom.readAll.disabled = state.readControlsBusy || !editable;
+      dom.readComment.disabled = state.readControlsBusy || !editable;
+      dom.readDm.disabled = state.readControlsBusy || !editable;
+      dom.readCommentStatus.textContent = comment.label;
+      dom.readDmStatus.textContent = dm.label;
+      dom.readApply.textContent = state.readControlsBusy ? '正在保存，只会修改读取开关'
+        : !controls ? '正在读取当前账号开关'
+          : controls.applicationStatus === 'applied'
+            ? `Cloud 已保存 v${controls.storedVersion}，本机已应用同一版本`
+            : `Cloud 已保存 v${controls.storedVersion}，等待本机应用${controls.edgeAppliedVersion == null ? '' : `（当前 v${controls.edgeAppliedVersion}）`}`;
+      dom.readError.textContent = state.readControlsError ? friendlyError(state.readControlsError) : '';
+      dom.readError.classList.toggle('hidden', !state.readControlsError);
+
+      const config = state.replyConfig;
+      const status = config && config.status;
+      dom.configStatus.textContent = status === 'published' ? `回复配置已发布${config.publishedVersion ? ` · v${config.publishedVersion}` : ''}`
+        : status === 'draft_only' ? `回复配置只有草稿${config.draftVersion ? ` · v${config.draftVersion}` : ''}`
+          : status === 'missing' ? '尚未创建回复配置' : '回复配置状态暂不可确认';
+      dom.configSummary.textContent = status === 'published' ? '可以按已发布规则生成、保存和批准回复。'
+        : status === 'draft_only' ? '互动仍会收取；需要管理员发布草稿后才能生成或批准回复。'
+          : status === 'missing' ? '互动仍会收取；需要管理员先在管理后台创建安全草稿。'
+            : '为避免误发，配置恢复确认前不会生成或发送。';
+      const needsGuidance = status !== 'published';
+      dom.configHelp.classList.toggle('hidden', !needsGuidance);
+      dom.configHelp.textContent = state.configGuidanceOpen ? '收起处理方法' : '查看处理方法';
+      dom.configHelp.setAttribute('aria-expanded', String(state.configGuidanceOpen));
+      dom.configGuidance.classList.toggle('hidden', !needsGuidance || !state.configGuidanceOpen);
+      dom.configGuidance.textContent = status === 'draft_only'
+        ? '请联系有配置权限的管理员，在管理后台检查草稿内容并点击“发布”。客户端不会代替管理员发布配置。'
+        : status === 'missing'
+          ? '请联系有配置权限的管理员，在管理后台点击“创建安全草稿”，检查后再手动发布。初始化不会自动开启回复或发送。'
+          : '请稍后局部刷新；若持续无法确认，请让管理员检查当前账号的回复配置。';
+
+      const unread = unreadMessagesByEnv.get(selectedEnvKey());
+      const unreadCount = unread ? unread.size : 0;
+      dom.unreadBadge.textContent = `${unreadCount} 条未读`;
+      dom.unreadBadge.classList.toggle('hidden', unreadCount === 0);
+    }
+
+    function lifecycleControl() {
+      if (!env) return { action: null, label: '状态确认中' };
+      if (env.session === 'paused') return { action: 'resume', label: '恢复' };
+      if (env.edge === 'stopped' || env.edge === 'warning') return { action: 'start', label: '启动' };
+      if (env.edge === 'starting' || env.edge === 'running') return { action: 'pause', label: '暂停' };
+      return { action: null, label: '状态确认中' };
+    }
+
     function renderOverview() {
       const auth = state.auth;
       const status = auth && auth.status;
       let title = '正在加载互动状态';
       let summary = '正在读取当前环境的评论和私信。';
       let tone = 'neutral';
-      if (status === 'active') {
+      if (auth && auth.reasonCode === 'WECHAT_IDENTITY_MISMATCH') {
+        title = '浏览器登录了另一个视频号';
+        summary = `请在“${safeText(env && env.label, '当前环境')}”的原浏览器切回已绑定账号${auth.identity ? `“${safeText(auth.identity.displayName, '原账号')}”` : ''}。历史内容仍可查看，写操作已暂停。`;
+        tone = 'danger';
+      } else if (status === 'active') {
         const connectivityStale = connectivityWriteBlocked();
-        title = connectivityStale ? '同步暂时中断' : '互动托管中';
-        summary = connectivityStale ? '正在使用上次成功数据；Cloud 恢复后可局部刷新。' : '评论和私信通过接口同步，发送结果以平台确认状态为准。';
-        tone = connectivityStale ? 'attention' : 'success';
+        const controlsPending = controlsWriteBlocked();
+        const commentRead = channelReadState('comment');
+        const dmRead = channelReadState('dm');
+        const allReadDisabled = !commentRead.storedEnabled && !dmRead.storedEnabled;
+        const enabledButUnavailable = !allReadDisabled && !commentRead.effective && !dmRead.effective;
+        title = connectivityStale ? '同步暂时中断'
+          : allReadDisabled ? '互动收取已关闭'
+            : enabledButUnavailable ? '互动收取尚未生效'
+              : controlsPending ? '账号开关等待本机应用'
+            : auth.identity ? `已绑定：${safeText(auth.identity.displayName, '视频号账号')}` : '互动托管中';
+        summary = connectivityStale ? '正在使用上次成功数据；Cloud 恢复后可局部刷新。'
+          : allReadDisabled ? '评论和私信收取都已关闭。可在下方按渠道重新开启。'
+            : enabledButUnavailable ? (commentRead.storedEnabled ? commentRead.reason : dmRead.reason)
+              : controlsPending ? 'Cloud 已保存账号配置，但 Edge 尚未回报同版本能力；当前写操作继续关闭。'
+            : auth.browserState === 'open'
+              ? '浏览器当前保持打开；评论和私信仍按 Edge 实际能力同步。完成查看后可转入后台。'
+              : '当前环境已绑定这个视频号并在后台运行。评论和私信按 Edge 实际能力同步，发送结果以平台确认状态为准。';
+        tone = connectivityStale || controlsPending || allReadDisabled || enabledButUnavailable ? 'attention' : 'success';
       } else if (status === 'login_required') {
         title = '等待首次登录';
-        summary = '已同步历史仍可阅读；完成视频号登录后才能生成或发送回复。';
+        summary = `将在“${safeText(env && env.label, '当前环境')}”打开的视频号助手中绑定你本次扫码登录的账号；无需填写内部账号 ID。`;
         tone = 'attention';
       } else if (status === 'reauth_required') {
         title = '需要重新登录';
@@ -252,7 +417,7 @@
 
       const browserState = auth && auth.browserState;
       const browserText = browserState === 'closed' && status === 'active'
-        ? '浏览器已关闭（正常）'
+        ? '后台运行中（浏览器已关闭）'
         : browserState === 'open' ? '浏览器已打开'
           : browserState === 'opening' ? '浏览器正在打开'
             : browserState === 'closing' ? '浏览器正在关闭'
@@ -260,17 +425,42 @@
                 : '浏览器状态待确认';
       dom.browser.textContent = browserText;
       dom.browser.className = `iw-status-chip ${browserState === 'unavailable' ? 'danger' : browserState === 'closed' && status === 'active' ? 'success' : 'neutral'}`;
+      const lifecycle = lifecycleControl();
+      const lifecycleBusyLabel = { start: '正在启动…', resume: '正在恢复…', pause: '正在暂停…' }[state.lifecycleBusy];
+      const lifecycleVisualAction = state.lifecycleBusy || lifecycle.action;
+      dom.lifecycle.dataset.action = lifecycle.action || '';
+      dom.lifecycle.textContent = lifecycleBusyLabel || lifecycle.label;
+      dom.lifecycle.className = `iw-button ${lifecycleVisualAction === 'pause' ? 'secondary' : 'primary'}`;
+      dom.lifecycle.disabled = Boolean(state.lifecycleBusy) || !active || !lifecycle.action || typeof onLifecycleAction !== 'function';
+      const canClose = Boolean(env && env.session === 'paused');
+      dom.close.classList.toggle('hidden', !canClose);
+      dom.close.textContent = state.lifecycleBusy === 'close' ? '正在关闭…' : '关闭';
+      dom.close.disabled = Boolean(state.lifecycleBusy) || !active || !canClose || typeof onLifecycleAction !== 'function';
+      const canControlBrowser = status === 'active' && ['closed', 'open', 'opening', 'closing'].includes(browserState);
+      const browserAction = browserState === 'open' ? 'close' : browserState === 'closed' ? 'open' : null;
+      dom.browserControl.classList.toggle('hidden', !canControlBrowser);
+      dom.browserControl.dataset.action = browserAction || '';
+      dom.browserControl.textContent = browserState === 'opening' ? '正在打开…'
+        : browserState === 'closing' ? '正在转入后台…'
+          : state.pendingBrowserAction === 'open' ? '等待浏览器打开…'
+            : state.pendingBrowserAction === 'close' ? '等待转入后台…'
+              : browserAction === 'close' ? '转入后台' : '打开浏览器';
+      dom.browserControl.disabled = !browserAction || Boolean(state.actionBusy) || Boolean(state.pendingBrowserAction);
       dom.syncStatus.textContent = state.listLoading
         ? '正在读取当前环境'
         : state.stale ? '使用上次成功数据'
+          : controlsWriteBlocked() && status === 'active' ? '账号开关已保存，等待 Edge 应用'
           : state.actionNotice || (state.asOf ? '评论/私信同步正常' : '同步状态待确认');
       dom.asOf.textContent = state.asOf ? `数据时间 ${formatTime(state.asOf)}` : '—';
       const canReopen = ['login_required', 'reauth_required', 'challenge_required'].includes(status);
       dom.reauth.classList.toggle('hidden', !canReopen);
       dom.reauth.textContent = status === 'challenge_required' ? '打开浏览器处理验证' : status === 'login_required' ? '打开登录窗口' : '重新登录';
       dom.reauth.disabled = state.actionBusy === 'reauth';
-      dom.sync.disabled = state.syncBusy || !active;
+      const readState = currentReadState();
+      dom.sync.disabled = state.syncBusy || !active || !readState.effective;
+      dom.sync.title = readState.effective ? '' : readState.reason;
       dom.sync.textContent = state.syncBusy ? '已请求，等待同步' : '局部刷新';
+      renderReadSettings();
     }
 
     function renderTabs() {
@@ -282,11 +472,16 @@
     }
 
     function listEmptyCopy() {
-      if (state.search.trim()) return '当前已加载内容中没有匹配项';
-      if (state.tab === 'comment') return '当前没有评论互动';
-      if (state.tab === 'dm') return '当前没有私信会话';
-      if (state.tab === 'replied') return '当前没有已确认回复记录';
-      return '当前没有待处理互动';
+      if (state.search.trim()) return { title: '当前已加载内容中没有匹配项', detail: '搜索只作用于当前环境已经加载的分页。' };
+      const read = currentReadState();
+      if (!read.effective) {
+        const channel = state.tab === 'comment' ? '评论' : state.tab === 'dm' ? '私信' : '互动';
+        return { title: read.label === '收取状态待确认' ? read.label : `${channel}收取未生效`, detail: read.reason };
+      }
+      if (state.tab === 'comment') return { title: '当前没有评论互动', detail: '评论收取正常；有新评论时会显示在这里。' };
+      if (state.tab === 'dm') return { title: '当前没有私信会话', detail: '私信收取正常；有新私信时会显示在这里。' };
+      if (state.tab === 'replied') return { title: '当前没有已确认回复记录', detail: '只有平台已确认的回复才会进入这里。' };
+      return { title: '当前没有待处理互动', detail: '收取正常；需要处理的新互动会出现在这里。' };
     }
 
     function renderList() {
@@ -302,7 +497,8 @@
       if (state.listLoading && state.items.length === 0) {
         dom.list.innerHTML = '<div class="iw-loading-state"><i></i><i></i><i></i><span>正在获取当前环境互动</span></div>';
       } else if (items.length === 0) {
-        dom.list.innerHTML = `<div class="iw-empty-state compact"><span class="iw-empty-icon" aria-hidden="true">···</span><strong>${escapeHtml(listEmptyCopy())}</strong><span>${state.search.trim() ? '搜索只作用于当前环境已经加载的分页。' : '需要处理的新互动会出现在这里。'}</span></div>`;
+        const empty = listEmptyCopy();
+        dom.list.innerHTML = `<div class="iw-empty-state compact"><span class="iw-empty-icon" aria-hidden="true">···</span><strong>${escapeHtml(empty.title)}</strong><span>${escapeHtml(empty.detail)}</span></div>`;
       } else {
         dom.list.innerHTML = items.map((item) => {
           const selected = item.threadId === state.selectedThreadId;
@@ -310,10 +506,10 @@
           const name = safeText(item.participantName, '未获取昵称');
           const preview = safeText(item.previewText, item.channel === 'dm' ? '暂不支持的私信类型' : '暂不支持的评论类型');
           const source = safeText(item.sourceTitle, item.channel === 'dm' ? '私信会话' : '未获取视频标题');
-          return `<button class="iw-list-item${selected ? ' selected' : ''}" type="button" role="option" aria-selected="${String(selected)}" data-thread-id="${escapeHtml(item.threadId)}">
+          return `<button class="iw-list-item${selected ? ' selected' : ''}${item.unread ? ' unread' : ''}" type="button" role="option" aria-selected="${String(selected)}" data-thread-id="${escapeHtml(item.threadId)}">
             <span class="iw-avatar" aria-hidden="true">${escapeHtml(name.slice(0, 1))}</span>
             <span class="iw-item-copy">
-              <span class="iw-item-head"><strong>${escapeHtml(name)}</strong><time>${escapeHtml(formatTime(item.lastMessageAt))}</time></span>
+              <span class="iw-item-head"><strong>${item.unread ? '<i class="iw-unread-dot" aria-label="未读"></i>' : ''}${escapeHtml(name)}</strong><time>${escapeHtml(formatTime(item.lastMessageAt))}</time></span>
               <span class="iw-item-preview">${escapeHtml(preview)}</span>
               <span class="iw-item-foot"><span>${item.channel === 'dm' ? '私信' : '评论'} · ${escapeHtml(source)}</span><em class="iw-badge ${job[1]}">${escapeHtml(job[0])}</em></span>
             </span>
@@ -411,7 +607,8 @@
         ? job.riskReasons.map((reason) => RISK_REASON_LABEL[reason] || reason).join('、')
         : '未发现额外风险标签';
       const textStateLocked = !job || LOCKED_TEXT_STATES.has(job.state);
-      const textLocked = textStateLocked || writeBlocked();
+      const configBlocked = !replyConfigReady();
+      const textLocked = textStateLocked || writeBlocked() || configBlocked;
       const capabilityBlocked = channelCapabilityBlocked(thread.channel);
       const primary = actionButtonModel(job);
       const busy = Boolean(state.actionBusy);
@@ -437,18 +634,18 @@
           </div>
           <label class="iw-editor"><span>可编辑的最终文字</span><textarea id="iw-final-text" rows="4" maxlength="4000" ${textLocked ? 'disabled' : ''}>${escapeHtml(state.draftText)}</textarea><small id="iw-draft-count">${state.draftText.length}/4000${state.draftDirty ? ' · 尚未保存' : ''}</small></label>
           <div class="iw-risk-card ${job.riskLevel === 'high' ? 'danger' : job.riskLevel === 'unknown' ? 'attention' : 'neutral'}"><strong>风险检查：${escapeHtml(risk)}</strong><span>${escapeHtml(riskReasons)}</span></div>
-          ${authWriteBlocked() ? '<div class="iw-write-block">登录或能力状态未就绪，历史保持可读，写操作已禁用。</div>' : connectivityWriteBlocked() ? '<div class="iw-write-block">Cloud 离线或当前数据已过期，历史保持可读；刷新成功前写操作已禁用。</div>' : capabilityBlocked ? '<div class="iw-write-block">当前账号没有这个渠道的发送能力，写操作已禁用。</div>' : ''}
+          ${authWriteBlocked() ? '<div class="iw-write-block">登录或能力状态未就绪，历史保持可读，写操作已禁用。</div>' : connectivityWriteBlocked() ? '<div class="iw-write-block">Cloud 离线或当前数据已过期，历史保持可读；刷新成功前写操作已禁用。</div>' : controlsWriteBlocked() ? '<div class="iw-write-block">账号开关已保存，但 Edge 尚未回报应用同一版本；写操作继续关闭。</div>' : configBlocked ? '<div class="iw-write-block">回复配置尚未发布；忽略和转人工仍可用，生成、保存、批准和发送暂不可用。</div>' : capabilityBlocked ? '<div class="iw-write-block">当前账号没有这个渠道的发送能力；保存、忽略、转人工和批准仍可用，只有发送被禁用。</div>' : ''}
           ${state.actionError ? `<div class="iw-action-error" role="alert">${escapeHtml(friendlyError(state.actionError))}${state.actionError.code === 'INTERACTION_VERSION_CONFLICT' || state.actionError.code === 'INTERACTION_STATE_CONFLICT' ? '<button class="iw-button ghost" type="button" data-iw-action="refresh-detail">重新加载详情</button>' : ''}</div>` : ''}
           ${state.actionNotice ? `<div class="iw-action-notice" role="status">${escapeHtml(state.actionNotice)}</div>` : ''}
           <footer class="iw-reply-actions">
             <div>
               <button class="iw-button ghost" type="button" data-iw-action="ignore" ${busy || TERMINAL_STATES.has(job.state) || writeBlocked() ? 'disabled' : ''}>忽略</button>
               <button class="iw-button ghost" type="button" data-iw-action="escalate" ${busy || TERMINAL_STATES.has(job.state) || writeBlocked() ? 'disabled' : ''}>转人工</button>
-              <button class="iw-button secondary" type="button" data-iw-action="regenerate" ${busy || TERMINAL_STATES.has(job.state) || writeBlocked() ? 'disabled' : ''}>${state.actionBusy === 'regenerate' ? '重新生成中' : '重新生成'}</button>
+              <button class="iw-button secondary" type="button" data-iw-action="regenerate" ${busy || TERMINAL_STATES.has(job.state) || writeBlocked() || configBlocked ? 'disabled' : ''}>${state.actionBusy === 'regenerate' ? '重新生成中' : '重新生成'}</button>
             </div>
             <div>
-              ${!textStateLocked ? `<button class="iw-button secondary" type="button" data-iw-action="save" ${busy || !state.draftDirty || writeBlocked() ? 'disabled' : ''}>${state.actionBusy === 'save' ? '保存中' : '保存修改'}</button>` : ''}
-              ${primary ? `<button class="iw-button primary" type="button" data-iw-action="${primary.action}" ${busy || primary.disabled || writeBlocked() || capabilityBlocked ? 'disabled' : ''}>${state.actionBusy === primary.action ? '处理中' : primary.label}</button>` : ''}
+              ${!textStateLocked ? `<button class="iw-button secondary" type="button" data-iw-action="save" ${busy || !state.draftDirty || writeBlocked() || configBlocked ? 'disabled' : ''}>${state.actionBusy === 'save' ? '保存中' : '保存修改'}</button>` : ''}
+              ${primary ? `<button class="iw-button primary" type="button" data-iw-action="${primary.action}" ${busy || primary.disabled || writeBlocked() || configBlocked || (primary.action === 'send' && capabilityBlocked) ? 'disabled' : ''}>${state.actionBusy === primary.action ? '处理中' : primary.label}</button>` : ''}
             </div>
           </footer>
         </section>` : '<section class="iw-empty-inline">这条互动尚未生成回复任务，可保留查看并等待 Cloud 工作流。</section>'}
@@ -462,7 +659,7 @@
           const count = dom.detail.querySelector('#iw-draft-count');
           if (count) count.textContent = `${state.draftText.length}/4000${state.draftDirty ? ' · 尚未保存' : ''}`;
           const save = dom.detail.querySelector('[data-iw-action="save"]');
-          if (save) save.disabled = !state.draftDirty || Boolean(state.actionBusy) || writeBlocked();
+          if (save) save.disabled = !state.draftDirty || Boolean(state.actionBusy) || writeBlocked() || !replyConfigReady();
           const approve = dom.detail.querySelector('[data-iw-action="approve"]');
           if (approve) approve.textContent = state.draftDirty ? '保存并批准' : '批准回复';
         });
@@ -479,10 +676,44 @@
       renderDetail();
     }
 
+    function envMessageSet(map, envKey) {
+      let set = map.get(envKey);
+      if (!set) {
+        set = new Set();
+        map.set(envKey, set);
+      }
+      return set;
+    }
+
+    function trackIncomingUnread(items, envKey, tab, append) {
+      const seen = envMessageSet(seenMessagesByEnv, envKey);
+      const notified = envMessageSet(notifiedMessagesByEnv, envKey);
+      const unread = envMessageSet(unreadMessagesByEnv, envKey);
+      const baselineKey = `${envKey}:${tab}`;
+      const hasBaseline = baselineTabs.has(baselineKey);
+      const newlyUnread = [];
+      for (const item of items) {
+        const messageId = String(item && item.messageId || '');
+        if (!messageId) continue;
+        if (item.unread) unread.add(messageId);
+        else unread.delete(messageId);
+        if (!append && hasBaseline && item.unread && !seen.has(messageId) && !notified.has(messageId)) newlyUnread.push(item);
+        seen.add(messageId);
+      }
+      if (!hasBaseline) baselineTabs.add(baselineKey);
+      if (newlyUnread.length === 0 || typeof api.interactionNotify !== 'function') return;
+      for (const item of newlyUnread) notified.add(item.messageId);
+      const channels = new Set(newlyUnread.map((item) => item.channel));
+      const channel = channels.size === 1 ? newlyUnread[0].channel : 'mixed';
+      void api.interactionNotify({ envKey, channel, count: newlyUnread.length });
+    }
+
     async function loadList({ append = false, preserveSelection = false } = {}) {
       if (!active || !env) return;
+      clearListPoll();
       const capturedEpoch = epoch;
       const envKey = env.envKey;
+      const capturedTab = state.tab;
       const request = ++listRequest;
       if (append) state.listAppending = true;
       else {
@@ -505,6 +736,7 @@
         if (!isCurrent(capturedEpoch, envKey) || request !== listRequest) return;
         const envelope = assertEnvelope(response, envKey);
         const incoming = Array.isArray(envelope.data.items) ? envelope.data.items : [];
+        trackIncomingUnread(incoming, envKey, capturedTab, append);
         if (append) {
           const seen = new Set(state.items.map((item) => `${item.threadId}:${item.messageId}`));
           state.items = state.items.concat(incoming.filter((item) => !seen.has(`${item.threadId}:${item.messageId}`)));
@@ -513,6 +745,8 @@
         }
         state.nextCursor = envelope.data.nextCursor || null;
         state.auth = envelope.data.auth;
+        state.replyConfig = envelope.data.replyConfig || { status: 'unknown', draftVersion: null, publishedVersion: null };
+        reconcileBrowserAction();
         state.asOf = envelope.meta && envelope.meta.asOf;
         state.listError = null;
         state.stale = false;
@@ -534,8 +768,45 @@
           state.listLoading = false;
           state.listAppending = false;
           renderAll();
+          scheduleListPoll(capturedEpoch, envKey);
         }
       }
+    }
+
+    function scheduleBrowserPoll(capturedEpoch, envKey) {
+      clearBrowserPoll();
+      if (!state.pendingBrowserAction || state.browserPollCount >= 12) {
+        if (state.pendingBrowserAction) {
+          state.actionNotice = '请求已受理，但尚未收到 Edge 浏览器状态确认。';
+          state.pendingBrowserAction = null;
+        }
+        return;
+      }
+      state.browserPollCount += 1;
+      browserPollTimer = global.setTimeout(() => {
+        if (isCurrent(capturedEpoch, envKey)) void loadList({ preserveSelection: true });
+      }, 1000);
+    }
+
+    function reconcileBrowserAction() {
+      const action = state.pendingBrowserAction;
+      if (!action || !state.auth) return;
+      const target = action === 'open' ? 'open' : 'closed';
+      if (state.auth.browserState === target) {
+        state.actionNotice = action === 'open' ? '浏览器已打开，后台同步继续运行。' : '浏览器已关闭，已转入后台运行。';
+        state.pendingBrowserAction = null;
+        state.browserPollCount = 0;
+        clearBrowserPoll();
+        return;
+      }
+      if (state.auth.browserState === 'unavailable') {
+        state.actionNotice = 'Edge 未能完成浏览器控制，请稍后重试。';
+        state.pendingBrowserAction = null;
+        state.browserPollCount = 0;
+        clearBrowserPoll();
+        return;
+      }
+      scheduleBrowserPoll(epoch, env.envKey);
     }
 
     async function loadDetail(threadId, { cursor = null, append = false, silent = false } = {}) {
@@ -562,6 +833,7 @@
         }
         state.detail = envelope.data;
         state.auth = envelope.data.auth;
+        state.replyConfig = envelope.data.replyConfig || state.replyConfig || { status: 'unknown', draftVersion: null, publishedVersion: null };
         state.asOf = envelope.meta && envelope.meta.asOf;
         if (env && env.connectivity === 'connected') state.stale = false;
         state.detailError = null;
@@ -643,7 +915,9 @@
         return;
       }
       const job = state.detail && state.detail.replyJob;
-      if (!job || state.actionBusy || writeBlocked() || channelCapabilityBlocked(state.detail.thread.channel)) return;
+      const configRequired = new Set(['save', 'approve', 'send', 'regenerate']).has(kind);
+      if (!job || state.actionBusy || writeBlocked() || (configRequired && !replyConfigReady())
+        || (kind === 'send' && channelCapabilityBlocked(state.detail.thread.channel))) return;
       if (kind === 'save' && !state.draftDirty) return;
       const capturedEpoch = epoch;
       const envKey = env.envKey;
@@ -686,8 +960,49 @@
       }
     }
 
+    async function updateReadControls(commentsReadEnabled, dmReadEnabled) {
+      const controls = state.auth && state.auth.runtimeControls;
+      if (!active || !env || state.readControlsBusy || !controls || typeof api.interactionUpdateReadControls !== 'function') return;
+      const capturedEpoch = epoch;
+      const envKey = env.envKey;
+      state.readControlsBusy = true;
+      state.readControlsError = null;
+      state.actionNotice = null;
+      renderAll();
+      try {
+        const response = await api.interactionUpdateReadControls({
+          envKey,
+          expectedVersion: controls.storedVersion,
+          commentsReadEnabled,
+          dmReadEnabled,
+        });
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        const envelope = assertEnvelope(response, envKey);
+        state.auth = envelope.data.auth;
+        state.replyConfig = envelope.data.replyConfig || state.replyConfig;
+        state.actionNotice = envelope.data.edgeDelivery && envelope.data.edgeDelivery.status === 'enqueued'
+          ? '收取开关已保存并下发本机。'
+          : '收取开关已保存，等待本机重新连接后应用。';
+      } catch (error) {
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        state.readControlsError = error;
+      } finally {
+        if (isCurrent(capturedEpoch, envKey)) {
+          state.readControlsBusy = false;
+          renderAll();
+          scheduleListPoll(capturedEpoch, envKey);
+        }
+      }
+    }
+
     async function syncCurrent() {
       if (!active || !env || state.syncBusy) return;
+      const readState = currentReadState();
+      if (!readState.effective) {
+        state.actionNotice = readState.reason;
+        renderAll();
+        return;
+      }
       const capturedEpoch = epoch;
       const envKey = env.envKey;
       state.syncBusy = true;
@@ -740,6 +1055,78 @@
       }
     }
 
+    async function controlBrowser() {
+      if (!active || !env || state.actionBusy || state.pendingBrowserAction || !state.auth) return;
+      const action = state.auth.browserState === 'closed' ? 'open' : state.auth.browserState === 'open' ? 'close' : null;
+      if (!action) return;
+      const capturedEpoch = epoch;
+      const envKey = env.envKey;
+      state.actionBusy = 'browser-control';
+      state.actionError = null;
+      state.actionNotice = null;
+      renderAll();
+      try {
+        const response = await api.interactionBrowserControl({
+          envKey, action, idempotencyKey: makeRequestKey(`interaction-browser-${action}`),
+        });
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        assertEnvelope(response, envKey);
+        state.pendingBrowserAction = action;
+        state.browserPollCount = 0;
+        state.actionNotice = action === 'open'
+          ? 'Cloud 已受理打开请求，正在等待 Edge 浏览器状态。'
+          : 'Cloud 已受理转入后台请求，正在等待 Edge 浏览器状态。';
+        scheduleBrowserPoll(capturedEpoch, envKey);
+      } catch (error) {
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        state.actionError = error;
+        state.actionNotice = friendlyError(error);
+      } finally {
+        if (isCurrent(capturedEpoch, envKey)) {
+          state.actionBusy = null;
+          renderAll();
+        }
+      }
+    }
+
+    async function changeLifecycle(requestedAction) {
+      if (!active || !env || state.lifecycleBusy) return;
+      const lifecycle = lifecycleControl();
+      const action = requestedAction || lifecycle.action;
+      if (!['start', 'resume', 'pause', 'close'].includes(action) || typeof onLifecycleAction !== 'function') return;
+      if (action === 'close' && env.session !== 'paused') return;
+      const capturedEpoch = epoch;
+      const envKey = env.envKey;
+      const runtimeEnvId = env.runtimeEnvId || envKey;
+      state.lifecycleBusy = action;
+      state.actionNotice = null;
+      renderOverview();
+      try {
+        const next = await onLifecycleAction(action, runtimeEnvId);
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        if (!next) return;
+        if (next && next.envId && next.envId !== envKey) {
+          const error = new Error('生命周期回包环境与当前环境不一致，已丢弃。');
+          error.code = 'INTERACTION_SCOPE_MISMATCH';
+          throw error;
+        }
+        if (next && typeof onLifecycleStatus === 'function') onLifecycleStatus(next);
+        state.actionNotice = action === 'start'
+          ? '已请求启动当前环境。'
+          : action === 'resume' ? '已请求恢复当前环境。'
+            : action === 'close' ? '已关闭当前环境。' : '已请求暂停当前环境。';
+      } catch (error) {
+        if (!isCurrent(capturedEpoch, envKey)) return;
+        const label = action === 'close' ? '关闭' : lifecycle.label;
+        state.actionNotice = `${label}失败：${friendlyError(error)}`;
+      } finally {
+        if (isCurrent(capturedEpoch, envKey)) {
+          state.lifecycleBusy = null;
+          renderAll();
+        }
+      }
+    }
+
     function selectEnvironment(next) {
       const isWechat = next && next.platform === 'wechat_channels';
       if (!isWechat) {
@@ -747,14 +1134,22 @@
         epoch += 1;
         env = null;
         clearPoll();
+        clearBrowserPoll();
+        clearListPoll();
         setVisible(false);
         return;
       }
       if (env && env.envKey === next.envKey && active) {
         const connectivityChanged = env.connectivity !== next.connectivity;
+        const lifecycleChanged = env.edge !== next.edge || env.session !== next.session;
         env = { ...next };
-        if (next.connectivity !== 'connected') state.stale = Boolean(state.items.length || state.detail || state.stale);
-        if (connectivityChanged) renderAll();
+        if (next.connectivity !== 'connected') {
+          state.stale = Boolean(state.items.length || state.detail || state.stale);
+          clearListPoll();
+        } else if ((connectivityChanged || lifecycleChanged) && !state.listLoading && !state.listAppending) {
+          void loadList({ preserveSelection: true });
+        }
+        if (connectivityChanged || lifecycleChanged) renderAll();
         return;
       }
       if (env && api.interactionCancelReads) void api.interactionCancelReads(env.envKey);
@@ -763,6 +1158,8 @@
       state = freshState();
       if (env.connectivity !== 'connected') state.stale = true;
       clearPoll();
+      clearBrowserPoll();
+      clearListPoll();
       setVisible(true);
       renderAll();
       void loadList();
@@ -775,6 +1172,7 @@
       listRequest += 1;
       detailRequest += 1;
       clearPoll();
+      clearListPoll();
       state.tab = nextTab;
       state.items = [];
       state.nextCursor = null;
@@ -810,8 +1208,18 @@
       if (button) button.focus();
     });
     dom.loadMore.addEventListener('click', () => void loadList({ append: true, preserveSelection: true }));
+    dom.close.addEventListener('click', () => void changeLifecycle('close'));
+    dom.lifecycle.addEventListener('click', () => void changeLifecycle());
+    dom.browserControl.addEventListener('click', () => void controlBrowser());
     dom.sync.addEventListener('click', () => void syncCurrent());
     dom.reauth.addEventListener('click', () => void reopenAuth());
+    dom.readAll.addEventListener('change', () => void updateReadControls(dom.readAll.checked, dom.readAll.checked));
+    dom.readComment.addEventListener('change', () => void updateReadControls(dom.readComment.checked, channelReadState('dm').storedEnabled));
+    dom.readDm.addEventListener('change', () => void updateReadControls(channelReadState('comment').storedEnabled, dom.readDm.checked));
+    dom.configHelp.addEventListener('click', () => {
+      state.configGuidanceOpen = !state.configGuidanceOpen;
+      renderReadSettings();
+    });
 
     return { selectEnvironment, refresh: () => loadList({ preserveSelection: true }) };
   }

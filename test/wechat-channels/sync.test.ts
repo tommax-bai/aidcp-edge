@@ -27,6 +27,7 @@ const SESSION: WechatSessionMaterial = {
   cookies: [{ name: 'session', value: 'secret', domain: '.channels.weixin.qq.com' }],
   userAgent: 'ua',
   acquiredAt: 1,
+  requestContext: { version: 1, aid: 'aid-test', pageUrl: 'https://channels.weixin.qq.com/platform/post/list', commonBody: { logFinderId: 'finder-test', logFinderUin: 'uin-test', rawKeyBuff: 'raw-key-test', pluginSessionId: null, reqScene: 7, scene: 7 }, headers: { fingerprintDeviceId: 'device-test', wechatUin: 'uin-test' } },
 };
 
 function request(channel: 'comment' | 'dm', scopeExternalId: string | null): InteractionSyncRequestPayload {
@@ -269,10 +270,42 @@ test('wechat dm sync: session/history pagination, duplicate items, and unknown m
 
     await sync.sync(request('dm', null));
 
-    assert.equal(batches.length, 2);
+    assert.equal(batches.length, 3);
     assert.deepEqual(batches.flatMap((batch) => batch.messages.map((message) => message.externalMessageId)), ['m-1', 'm-2']);
     assert.equal(batches[1].messages[0].messageType, 'unknown');
     assert.equal(batches[1].messages[0].rawMetaSanitized.platformType, 'voice_card_v9');
+    assert.equal(batches[2].scopeExternalId, null);
+    assert.deepEqual(batches[2].threads, []);
+    assert.deepEqual(batches[2].messages, []);
     assert.equal((await state.getCheckpoint('dm', 'thread-1')).cursor, null);
+    assert.equal((await state.getCheckpoint('dm', null)).batchId, batches[2].batchId);
+  });
+});
+
+test('wechat dm sync: an observed empty session page publishes a Cloud-visible zero-item checkpoint batch', async () => {
+  await withState(async (state) => {
+    const api = {
+      listDmSessions: async () => ({ items: [], nextCursor: null, hasMore: false }),
+    } as unknown as WechatChannelsApiClient;
+    const batches: InteractionSyncBatchPayload[] = [];
+    const sync = new WechatDmSynchronizer({
+      envKey: SCOPE.envKey,
+      accountId: SCOPE.accountId,
+      api,
+      state,
+      getSession: () => SESSION,
+      publishBatch: async (batch) => {
+        batches.push(batch);
+        return accepted(batch);
+      },
+    });
+
+    await sync.sync(request('dm', null));
+
+    assert.equal(batches.length, 1);
+    assert.equal(batches[0].scopeExternalId, null);
+    assert.deepEqual(batches[0].threads, []);
+    assert.deepEqual(batches[0].messages, []);
+    assert.equal((await state.getCheckpoint('dm', null)).batchId, batches[0].batchId);
   });
 });

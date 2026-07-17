@@ -21,6 +21,7 @@ const SESSION: WechatSessionMaterial = {
   cookies: [{ name: 'session', value: 'secret', domain: '.channels.weixin.qq.com' }],
   userAgent: 'ua',
   acquiredAt: 1,
+  requestContext: { version: 1, aid: 'aid-test', pageUrl: 'https://channels.weixin.qq.com/platform/post/list', commonBody: { logFinderId: 'finder-test', logFinderUin: 'uin-test', rawKeyBuff: 'raw-key-test', pluginSessionId: null, reqScene: 7, scene: 7 }, headers: { fingerprintDeviceId: 'device-test', wechatUin: 'uin-test' } },
 };
 const NOW = 1_700_000_000_000;
 

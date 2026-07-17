@@ -15,12 +15,32 @@ export interface WechatCookie {
   sameSite?: string;
 }
 
+/** Sensitive request bootstrap captured from the authorized first-party page and stored encrypted. */
+export interface WechatRequestContext {
+  version: 1;
+  aid: string;
+  pageUrl: string;
+  commonBody: {
+    logFinderId: string;
+    logFinderUin: string;
+    rawKeyBuff: string;
+    pluginSessionId: string | null;
+    reqScene: number;
+    scene: number;
+  };
+  headers: {
+    fingerprintDeviceId: string;
+    wechatUin: string;
+  };
+}
+
 /** Sensitive. Instances must never be logged or sent over WS. */
 export interface WechatSessionMaterial {
   cookies: WechatCookie[];
   dmCookies?: WechatCookie[];
   userAgent: string;
   acquiredAt: number;
+  requestContext: WechatRequestContext;
 }
 
 export interface WechatIdentity {

@@ -2,6 +2,7 @@ import type {
   Envelope,
   InteractionAuthReopenPayload,
   InteractionAuthStatusPayload,
+  InteractionBrowserControlPayload,
   InteractionErrorCode,
   InteractionOffboardAckPayload,
   InteractionOffboardCommandPayload,
@@ -11,6 +12,7 @@ import type {
   InteractionReplyResultPayload,
   InteractionReplyResultAckPayload,
   InteractionReplySendPayload,
+  InteractionRuntimeControlsPayload,
   InteractionSyncAckPayload,
   InteractionSyncBatchPayload,
   InteractionSyncMessage,
@@ -30,6 +32,8 @@ const INTERACTION_TYPES = new Set<MessageType>([
   'interaction.sync.request',
   'interaction.reply.send',
   'interaction.auth.reopen',
+  'interaction.browser.control',
+  'interaction.runtime.controls',
   'interaction.offboard.command',
   'interaction.offboard.result',
   'interaction.offboard.ack',
@@ -216,7 +220,7 @@ function validateMessage(value: unknown, path: string): InteractionSyncMessage {
 export function validateInteractionAuthStatus(value: unknown): InteractionAuthStatusPayload {
   const path = 'payload';
   const v = record(value, path);
-  exact(v, ['envKey', 'accountId', 'platform', 'status', 'browserState', 'capabilities', 'identity', 'checkedAt', 'reasonCode'], path);
+  exact(v, ['envKey', 'accountId', 'platform', 'status', 'browserState', 'capabilities', 'runtimeControlsVersion', 'identity', 'checkedAt', 'reasonCode'], path);
   const c = record(v.capabilities, `${path}.capabilities`);
   exact(c, ['commentsRead', 'commentsReply', 'dmRead', 'dmSendText', 'dmSendImage'], `${path}.capabilities`);
   if (c.dmSendImage !== false) fail(`${path}.capabilities.dmSendImage`, 'v1 requires false');
@@ -261,6 +265,9 @@ export function validateInteractionAuthStatus(value: unknown): InteractionAuthSt
       dmSendText: bool(c.dmSendText, `${path}.capabilities.dmSendText`),
       dmSendImage: false,
     },
+    runtimeControlsVersion: v.runtimeControlsVersion === null
+      ? null
+      : timestamp(v.runtimeControlsVersion, `${path}.runtimeControlsVersion`),
     identity,
     checkedAt: timestamp(v.checkedAt, `${path}.checkedAt`),
     reasonCode,
@@ -521,6 +528,38 @@ export function validateInteractionAuthReopen(value: unknown): InteractionAuthRe
   };
 }
 
+export function validateInteractionBrowserControl(value: unknown): InteractionBrowserControlPayload {
+  const path = 'payload';
+  const v = record(value, path);
+  exact(v, ['requestId', 'envKey', 'accountId', 'platform', 'action', 'requestedAt'], path);
+  return {
+    requestId: str(v.requestId, `${path}.requestId`),
+    envKey: str(v.envKey, `${path}.envKey`),
+    accountId: str(v.accountId, `${path}.accountId`),
+    platform: platform(v.platform, `${path}.platform`),
+    action: oneOf(v.action, ['open', 'close'] as const, `${path}.action`),
+    requestedAt: timestamp(v.requestedAt, `${path}.requestedAt`),
+  };
+}
+
+export function validateInteractionRuntimeControls(value: unknown): InteractionRuntimeControlsPayload {
+  const path = 'payload';
+  const v = record(value, path);
+  exact(v, ['accountId', 'envKey', 'version', 'commentsReadEnabled', 'commentsReplyEnabled', 'dmReadEnabled', 'dmSendTextEnabled', 'dmSendImageEnabled'], path);
+  if (!Number.isInteger(v.version) || (v.version as number) < 0) fail(`${path}.version`, 'expected non-negative integer');
+  if (v.dmSendImageEnabled !== false) fail(`${path}.dmSendImageEnabled`, 'v1 requires false');
+  return {
+    accountId: str(v.accountId, `${path}.accountId`),
+    envKey: str(v.envKey, `${path}.envKey`),
+    version: v.version as number,
+    commentsReadEnabled: bool(v.commentsReadEnabled, `${path}.commentsReadEnabled`),
+    commentsReplyEnabled: bool(v.commentsReplyEnabled, `${path}.commentsReplyEnabled`),
+    dmReadEnabled: bool(v.dmReadEnabled, `${path}.dmReadEnabled`),
+    dmSendTextEnabled: bool(v.dmSendTextEnabled, `${path}.dmSendTextEnabled`),
+    dmSendImageEnabled: false,
+  };
+}
+
 export function isInteractionMessageType(type: string): type is MessageType {
   return INTERACTION_TYPES.has(type as MessageType);
 }
@@ -537,6 +576,8 @@ export function validateInteractionPayload(type: MessageType, payload: unknown):
     case 'interaction.sync.request': return validateInteractionSyncRequest(payload);
     case 'interaction.reply.send': return validateInteractionReplySend(payload);
     case 'interaction.auth.reopen': return validateInteractionAuthReopen(payload);
+    case 'interaction.browser.control': return validateInteractionBrowserControl(payload);
+    case 'interaction.runtime.controls': return validateInteractionRuntimeControls(payload);
     case 'interaction.offboard.command': return validateInteractionOffboardCommand(payload);
     case 'interaction.offboard.result': return validateInteractionOffboardResult(payload);
     case 'interaction.offboard.ack': return validateInteractionOffboardAck(payload);

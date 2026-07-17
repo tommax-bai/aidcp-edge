@@ -13,6 +13,10 @@ interface Call {
 class FakeFacebookPublishCdp implements BrowseCdp {
   calls: Call[] = [];
   composerOpen = false;
+  openComposerOnClick = true;
+  editorReadyAfterChecks = 0;
+  editorReadyChecks = 0;
+  composerClickDispatched = false;
   editorText = '';
   submitted = false;
   /** 故障注入：点击照发（submitted 可为 true）但 fbPublishSubmittedSignal 恒回 false → 复现「已点未确认」post_validate_failed。 */
@@ -33,7 +37,45 @@ class FakeFacebookPublishCdp implements BrowseCdp {
   closeComposerAfterTyping = false;
   /** 故障注入：第 N 个字符之后 Input.insertText 抛错（CDP 命令超时 / 协议错误 / 断连）。 */
   throwOnInsertAfter: number | null = null;
+  href = 'https://www.facebook.com/';
+  readyState = 'complete';
+  mainVisible = true;
+  blockingDialog = false;
+  credentialInput = false;
+  pageStates: Array<Partial<{
+    href: string;
+    readyState: string;
+    mainVisible: boolean;
+    blockingDialog: boolean;
+    credentialInput: boolean;
+  }>> = [];
+  pageStateProbeFailures = 0;
+  pageStateReads = 0;
+  composerProbeCalls = 0;
+  triggerAvailableAfterProbe = 1;
   private typedCount = 0;
+
+  private nextPageState(): {
+    href: string;
+    readyState: string;
+    mainVisible: boolean;
+    editorReady: boolean;
+    blockingDialog: boolean;
+    credentialInput: boolean;
+  } {
+    const scripted = this.pageStates.length > 0
+      ? this.pageStates[Math.min(this.pageStateReads, this.pageStates.length - 1)]
+      : {};
+    this.pageStateReads += 1;
+    return {
+      href: scripted.href ?? this.href,
+      readyState: scripted.readyState ?? this.readyState,
+      mainVisible: scripted.mainVisible ?? this.mainVisible,
+      editorReady: this.composerOpen,
+      blockingDialog: scripted.blockingDialog ?? this.blockingDialog,
+      credentialInput: scripted.credentialInput ?? this.credentialInput,
+    };
+  }
 
   async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ method, params });
@@ -60,7 +102,8 @@ class FakeFacebookPublishCdp implements BrowseCdp {
     }
     if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
       if (!this.composerOpen) {
-        this.composerOpen = true;
+        this.composerClickDispatched = true;
+        if (this.openComposerOnClick && this.editorReadyAfterChecks === 0) this.composerOpen = true;
       } else {
         this.submitted = true;
         this.composerOpen = false;
@@ -70,8 +113,27 @@ class FakeFacebookPublishCdp implements BrowseCdp {
     if (method !== 'Runtime.evaluate') return {} as T;
 
     const expression = String(params?.expression ?? '');
-    if (expression.includes('location.hostname')) {
-      return { result: { value: true } } as T;
+    if (expression.includes('var state = fbPublishPageState(); var el = fbPublishComposerTrigger();')) {
+      this.composerProbeCalls += 1;
+      const state = this.nextPageState();
+      const found = this.composerProbeCalls >= this.triggerAvailableAfterProbe;
+      return {
+        result: {
+          value: JSON.stringify({
+            ...state,
+            found,
+            x: found ? 100 : null,
+            y: found ? 120 : null,
+          }),
+        },
+      } as T;
+    }
+    if (expression.includes('return JSON.stringify(fbPublishPageState())')) {
+      if (this.pageStateProbeFailures > 0) {
+        this.pageStateProbeFailures -= 1;
+        throw new Error('Execution context was destroyed');
+      }
+      return { result: { value: JSON.stringify(this.nextPageState()) } } as T;
     }
     if (expression.includes('return JSON.stringify(fbPublishSubmitControl())')) {
       return {
@@ -132,14 +194,11 @@ class FakeFacebookPublishCdp implements BrowseCdp {
       } as T;
     }
     if (expression.includes('return !!fbPublishEditor()')) {
+      if (this.composerClickDispatched && this.openComposerOnClick && !this.composerOpen) {
+        this.editorReadyChecks += 1;
+        if (this.editorReadyChecks >= this.editorReadyAfterChecks) this.composerOpen = true;
+      }
       return { result: { value: this.composerOpen } } as T;
-    }
-    if (expression.includes('var el = fbPublishComposerTrigger')) {
-      return {
-        result: {
-          value: JSON.stringify({ found: true, x: 100, y: 120 }),
-        },
-      } as T;
     }
     return { result: { value: false } } as T;
   }
@@ -158,6 +217,12 @@ function command(kind: PublishCommandPayload['kind'], params: PublishCommandPayl
   };
 }
 
+function releasedClickCount(cdp: FakeFacebookPublishCdp): number {
+  return cdp.calls.filter(
+    (call) => call.method === 'Input.dispatchMouseEvent' && call.params?.type === 'mouseReleased',
+  ).length;
+}
+
 test('FacebookPublishExecutor: opens composer, fills content, uploads image, submits, and captures post id', async () => {
   const cdp = new FakeFacebookPublishCdp();
   const uploaded: string[] = [];
@@ -171,13 +236,13 @@ test('FacebookPublishExecutor: opens composer, fills content, uploads image, sub
         },
       } as never,
     },
-    { sleep: instantSleep, pollMs: 1, settleMs: 0, composerTimeoutMs: 50, submitVerifyTimeoutMs: 50 },
+    { sleep: instantSleep, pollMs: 1, navigationTimeoutMs: 50, composerTimeoutMs: 1_000, submitVerifyTimeoutMs: 50 },
   );
 
   assert.equal((await executor.dispatch(command('navigate_entry', {}, 0))).ok, true);
   assert.equal(cdp.navigatedUrl, 'https://www.facebook.com/');
 
-  assert.equal((await executor.dispatch(command('select_mode', { value: 'facebook_personal_timeline' }, 1))).ok, true);
+  assert.equal((await executor.dispatch(command('select_mode', { optionKind: 'target', optionValue: 'facebook_personal_timeline' }, 1))).ok, true);
   assert.equal(cdp.composerOpen, true);
   assert.equal(
     cdp.calls.some((call) => call.method === 'Input.dispatchMouseEvent' && call.params?.type === 'mouseReleased'),
@@ -207,6 +272,273 @@ test('FacebookPublishExecutor: opens composer, fills content, uploads image, sub
   assert.equal(capture.ok, true);
   assert.equal(capture.value, 'pfbid123');
   assert.equal(capture.postUrl, 'https://www.facebook.com/me/posts/pfbid123');
+});
+
+test('FacebookPublishExecutor: navigate waits for same-origin group page to become a ready home page', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  cdp.pageStates = [
+    { href: 'https://www.facebook.com/groups/123', readyState: 'complete', mainVisible: true },
+    { href: 'https://www.facebook.com/', readyState: 'loading', mainVisible: false },
+    { href: 'https://www.facebook.com/', readyState: 'complete', mainVisible: true },
+  ];
+  const clock = fakeClock();
+  const logs: string[] = [];
+  const executor = new FacebookPublishExecutor(
+    { cdp, logger: (message) => logs.push(message) },
+    { sleep: clock.sleep, now: clock.now, pollMs: 100, navigationTimeoutMs: 1_000 },
+  );
+
+  const result = await executor.dispatch(command('navigate_entry'));
+
+  assert.equal(result.ok, true);
+  assert.equal(cdp.pageStateReads, 3);
+  assert.equal(releasedClickCount(cdp), 0);
+  assert.match(logs.at(-1) ?? '', /stage=navigate surface=home path=\/ attempts=3 elapsedMs=200/);
+});
+
+test('FacebookPublishExecutor: navigate does not accept a same-origin group page as home', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  cdp.pageStates = [
+    { href: 'https://www.facebook.com/groups/123?secret=must-not-log', readyState: 'complete', mainVisible: true },
+  ];
+  const clock = fakeClock();
+  const logs: string[] = [];
+  const executor = new FacebookPublishExecutor(
+    { cdp, logger: (message) => logs.push(message) },
+    { sleep: clock.sleep, now: clock.now, pollMs: 100, navigationTimeoutMs: 500 },
+  );
+
+  const result = await executor.dispatch(command('navigate_entry'));
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'home_not_reached');
+  assert.equal(releasedClickCount(cdp), 0);
+  assert.equal(logs.some((message) => message.includes('must-not-log')), false);
+  assert.match(logs.at(-1) ?? '', /surface=group path=\/groups\/123/);
+});
+
+test('FacebookPublishExecutor: navigate tolerates transient page-probe context loss', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  cdp.pageStateProbeFailures = 2;
+  const clock = fakeClock();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: clock.sleep, now: clock.now, pollMs: 100, navigationTimeoutMs: 1_000 },
+  );
+
+  const result = await executor.dispatch(command('navigate_entry'));
+
+  assert.equal(result.ok, true);
+  assert.equal(clock.now(), 200);
+});
+
+test('FacebookPublishExecutor: navigate reports nav_error when every page probe fails', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  cdp.pageStateProbeFailures = Number.POSITIVE_INFINITY;
+  const clock = fakeClock();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: clock.sleep, now: clock.now, pollMs: 100, navigationTimeoutMs: 300 },
+  );
+
+  const result = await executor.dispatch(command('navigate_entry'));
+
+  assert.equal(result.ok, false);
+  assert.match(String(result.error), /^nav_error: Execution context was destroyed$/);
+});
+
+for (const scenario of [
+  {
+    name: 'login page',
+    state: { href: 'https://www.facebook.com/login/', credentialInput: true },
+    error: 'login_required',
+  },
+  {
+    name: 'checkpoint page',
+    state: { href: 'https://www.facebook.com/checkpoint/123' },
+    error: 'checkpoint_detected',
+  },
+  {
+    name: 'blocking dialog',
+    state: { href: 'https://www.facebook.com/', blockingDialog: true },
+    error: 'blocked_dialog',
+  },
+] as const) {
+  test(`FacebookPublishExecutor: navigate classifies ${scenario.name}`, async () => {
+    const cdp = new FakeFacebookPublishCdp();
+    cdp.pageStates = [{ readyState: 'complete', mainVisible: true, ...scenario.state }];
+    const clock = fakeClock();
+    const executor = new FacebookPublishExecutor(
+      { cdp },
+      { sleep: clock.sleep, now: clock.now, pollMs: 100, navigationTimeoutMs: 200 },
+    );
+
+    const result = await executor.dispatch(command('navigate_entry'));
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, scenario.error);
+    assert.equal(releasedClickCount(cdp), 0);
+  });
+}
+
+test('FacebookPublishExecutor: select_mode waits for a late home composer trigger and clicks exactly once', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  cdp.triggerAvailableAfterProbe = 4;
+  const clock = fakeClock();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: clock.sleep, now: clock.now, pollMs: 100 },
+  );
+
+  const result = await executor.dispatch(command(
+    'select_mode',
+    { optionKind: 'target', optionValue: 'facebook_personal_timeline' },
+    1,
+  ));
+
+  assert.equal(result.ok, true);
+  assert.equal(cdp.composerProbeCalls, 4);
+  assert.equal(releasedClickCount(cdp), 1);
+});
+
+test('FacebookPublishExecutor: select_mode uses the remaining total budget for a late editor', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  cdp.editorReadyAfterChecks = 3;
+  const clock = fakeClock();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: clock.sleep, now: clock.now, pollMs: 100 },
+  );
+  const payload = command(
+    'select_mode',
+    { optionKind: 'target', optionValue: 'facebook_personal_timeline' },
+    1,
+  );
+  payload.timeoutMs = 1_000;
+
+  const result = await executor.dispatch(payload);
+
+  assert.equal(result.ok, true);
+  assert.equal(cdp.editorReadyChecks, 3);
+  assert.equal(releasedClickCount(cdp), 1);
+  assert.equal(clock.now(), 200);
+});
+
+test('FacebookPublishExecutor: navigation from a group page must reach home before select_mode clicks', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  cdp.pageStates = [
+    { href: 'https://www.facebook.com/groups/123', readyState: 'complete', mainVisible: true },
+    { href: 'https://www.facebook.com/', readyState: 'complete', mainVisible: true },
+  ];
+  const clock = fakeClock();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: clock.sleep, now: clock.now, pollMs: 100, navigationTimeoutMs: 1_000 },
+  );
+
+  const navigated = await executor.dispatch(command('navigate_entry'));
+  assert.equal(navigated.ok, true);
+  assert.equal(releasedClickCount(cdp), 0);
+
+  const selected = await executor.dispatch(command(
+    'select_mode',
+    { optionKind: 'target', optionValue: 'facebook_personal_timeline' },
+    1,
+  ));
+  assert.equal(selected.ok, true);
+  assert.equal(releasedClickCount(cdp), 1);
+});
+
+test('FacebookPublishExecutor: select_mode caps trigger waiting at 20s within the 40s total budget', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  cdp.triggerAvailableAfterProbe = Number.POSITIVE_INFINITY;
+  const clock = fakeClock();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: clock.sleep, now: clock.now, pollMs: 100 },
+  );
+  const payload = command(
+    'select_mode',
+    { optionKind: 'target', optionValue: 'facebook_personal_timeline' },
+    1,
+  );
+  payload.timeoutMs = 40_000;
+
+  const result = await executor.dispatch(payload);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'no_target');
+  assert.equal(releasedClickCount(cdp), 0);
+  assert.equal(clock.now(), 20_000);
+});
+
+test('FacebookPublishExecutor: select_mode clicks once then reports post_validate_failed when editor never opens', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  cdp.openComposerOnClick = false;
+  const clock = fakeClock();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: clock.sleep, now: clock.now, pollMs: 100 },
+  );
+  const payload = command(
+    'select_mode',
+    { optionKind: 'target', optionValue: 'facebook_personal_timeline' },
+    1,
+  );
+  payload.timeoutMs = 1_000;
+
+  const result = await executor.dispatch(payload);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'post_validate_failed');
+  assert.equal(releasedClickCount(cdp), 1);
+  assert.equal(clock.now(), 1_000);
+});
+
+test('FacebookPublishExecutor: select_mode stops when the page leaves home while waiting for the trigger', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  cdp.triggerAvailableAfterProbe = Number.POSITIVE_INFINITY;
+  cdp.pageStates = [
+    { href: 'https://www.facebook.com/' },
+    { href: 'https://www.facebook.com/groups/123' },
+  ];
+  const clock = fakeClock();
+  const executor = new FacebookPublishExecutor(
+    { cdp },
+    { sleep: clock.sleep, now: clock.now, pollMs: 100 },
+  );
+
+  const result = await executor.dispatch(command(
+    'select_mode',
+    { optionKind: 'target', optionValue: 'facebook_personal_timeline' },
+    1,
+  ));
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'home_not_reached');
+  assert.equal(releasedClickCount(cdp), 0);
+});
+
+test('FacebookPublishExecutor: select_mode target guard trusts canonical option fields', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  const executor = new FacebookPublishExecutor({ cdp }, { sleep: instantSleep });
+
+  const result = await executor.dispatch(command('select_mode', {
+    optionKind: 'target',
+    optionValue: 'facebook_group',
+    value: 'facebook_personal_timeline',
+  }));
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'unsupported_target');
+  assert.equal(cdp.calls.length, 0);
+
+  const legacyOnly = await executor.dispatch(command('select_mode', {
+    value: 'facebook_personal_timeline',
+  }));
+  assert.equal(legacyOnly.ok, false);
+  assert.equal(legacyOnly.error, 'unsupported_target');
+  assert.equal(cdp.calls.length, 0);
 });
 
 test('FacebookPublishExecutor: waits for current-page permalink hydration after submit', async () => {
@@ -246,7 +578,7 @@ function fakeClock(): { now: () => number; sleep: (ms: number) => Promise<void> 
 }
 
 async function openComposer(cdp: FakeFacebookPublishCdp, executor: FacebookPublishExecutor): Promise<void> {
-  await executor.dispatch(command('select_mode', { value: 'facebook_personal_timeline' }, 1));
+  await executor.dispatch(command('select_mode', { optionKind: 'target', optionValue: 'facebook_personal_timeline' }, 1));
   assert.equal(cdp.composerOpen, true);
 }
 
@@ -254,7 +586,7 @@ test('FacebookPublishExecutor: 编辑器吞掉正文尾部 → 诚实失败 + �
   const cdp = new FakeFacebookPublishCdp();
   const executor = new FacebookPublishExecutor(
     { cdp },
-    { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 50, fillVerifyTimeoutMs: 20 },
+    { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 1_000, fillVerifyTimeoutMs: 20 },
   );
   await openComposer(cdp, executor);
 
@@ -313,7 +645,7 @@ test('FacebookPublishExecutor: 复用到脏 composer 时先清空再打字，绝
   const cdp = new FakeFacebookPublishCdp();
   const executor = new FacebookPublishExecutor(
     { cdp },
-    { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 50, fillVerifyTimeoutMs: 20 },
+    { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 1_000, fillVerifyTimeoutMs: 20 },
   );
   await openComposer(cdp, executor);
   cdp.editorText = '上一篇失败留下的残稿';
@@ -329,7 +661,7 @@ test('FacebookPublishExecutor: composer 清不干净 → 诚实失败，绝不�
   const cdp = new FakeFacebookPublishCdp();
   const executor = new FacebookPublishExecutor(
     { cdp },
-    { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 50, fillVerifyTimeoutMs: 20 },
+    { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 1_000, fillVerifyTimeoutMs: 20 },
   );
   await openComposer(cdp, executor);
   cdp.editorText = '清不掉的残稿';
@@ -347,7 +679,7 @@ test('FacebookPublishExecutor: 打字途中抛 CDP 异常 → 同样清场并诚
   const cdp = new FakeFacebookPublishCdp();
   const executor = new FacebookPublishExecutor(
     { cdp },
-    { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 50, fillVerifyTimeoutMs: 20 },
+    { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 1_000, fillVerifyTimeoutMs: 20 },
   );
   await openComposer(cdp, executor);
 
@@ -365,7 +697,7 @@ test('FacebookPublishExecutor: 打字途中抛 CDP 异常 → 同样清场并诚
 
 test('FacebookPublishExecutor: 清不干净时标 dirty；编辑器已消失时标 composer_gone（两者不得混为一谈）', async () => {
   const dirty = new FakeFacebookPublishCdp();
-  const e1 = new FacebookPublishExecutor({ cdp: dirty }, { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 50, fillVerifyTimeoutMs: 20 });
+  const e1 = new FacebookPublishExecutor({ cdp: dirty }, { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 1_000, fillVerifyTimeoutMs: 20 });
   await openComposer(dirty, e1);
   dirty.swallowAfterChars = 3;
   dirty.refuseClearAfterTyping = true;
@@ -374,7 +706,7 @@ test('FacebookPublishExecutor: 清不干净时标 dirty；编辑器已消失时�
   assert.match(String(r1.error), /_dirty_composer$/);
 
   const gone = new FakeFacebookPublishCdp();
-  const e2 = new FacebookPublishExecutor({ cdp: gone }, { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 50, fillVerifyTimeoutMs: 20 });
+  const e2 = new FacebookPublishExecutor({ cdp: gone }, { sleep: instantSleep, pollMs: 1, composerTimeoutMs: 1_000, fillVerifyTimeoutMs: 20 });
   await openComposer(gone, e2);
   gone.swallowAfterChars = 3;
   gone.closeComposerAfterTyping = true; // 页面被导航走 / 弹层关闭 → 没有残文可留

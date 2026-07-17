@@ -330,23 +330,21 @@
         </div>
       </section>
 
-      <!-- 原始日志：默认不展示，设置抽屉「显示开发者详情」开关打开后出现（仍为折叠区） -->
-      <details class="dev hidden" id="dev-section">
-        <summary>开发者详情</summary>
-        <pre id="last-message">等待状态…</pre>
-      </details>
       </div>
 
       <!-- 视频号互动工作区：只替换右侧当前环境内容，标题栏与环境栏继续复用现有应用壳。 -->
       <section id="interaction-workspace" class="interaction-workspace hidden" aria-label="视频号互动工作区">
         <header class="iw-overview">
           <div class="iw-overview-copy">
-            <span class="iw-kicker">视频号互动</span>
+            <span class="iw-kicker">视频号互动 <em id="iw-unread-badge" class="iw-unread-badge hidden">0 条未读</em></span>
             <h1 id="iw-title">正在加载互动状态</h1>
             <p id="iw-summary">正在读取当前环境的评论和私信。</p>
           </div>
           <div class="iw-overview-actions">
             <span id="iw-browser" class="iw-status-chip neutral">浏览器状态待确认</span>
+            <button id="iw-lifecycle" class="iw-button primary" type="button" disabled>状态确认中</button>
+            <button id="iw-close" class="iw-button danger hidden" type="button">关闭</button>
+            <button id="iw-browser-control" class="iw-button secondary hidden" type="button">打开浏览器</button>
             <button id="iw-reauth" class="iw-button secondary hidden" type="button">重新登录</button>
             <button id="iw-sync" class="iw-button secondary" type="button">局部刷新</button>
           </div>
@@ -355,6 +353,45 @@
             <span id="iw-as-of">—</span>
           </div>
         </header>
+
+        <section class="iw-settings-card" aria-labelledby="iw-settings-title">
+          <div class="iw-settings-head">
+            <div>
+              <span class="iw-kicker">互动设置</span>
+              <strong id="iw-settings-title">收取评论和私信</strong>
+              <small id="iw-read-apply">正在读取当前账号开关</small>
+            </div>
+            <label class="iw-settings-switch total">
+              <input id="iw-read-all" type="checkbox" />
+              <span aria-hidden="true"></span>
+              <em>全部收取</em>
+            </label>
+          </div>
+          <div class="iw-settings-grid">
+            <label class="iw-channel-setting">
+              <span class="iw-channel-copy"><strong>评论</strong><small id="iw-read-comment-status">状态待确认</small></span>
+              <span class="iw-settings-switch">
+                <input id="iw-read-comment" type="checkbox" />
+                <span aria-hidden="true"></span>
+                <em>收取评论</em>
+              </span>
+            </label>
+            <label class="iw-channel-setting">
+              <span class="iw-channel-copy"><strong>私信</strong><small id="iw-read-dm-status">状态待确认</small></span>
+              <span class="iw-settings-switch">
+                <input id="iw-read-dm" type="checkbox" />
+                <span aria-hidden="true"></span>
+                <em>收取私信</em>
+              </span>
+            </label>
+          </div>
+          <div id="iw-read-error" class="iw-inline-error hidden" role="alert"></div>
+          <div class="iw-config-row">
+            <div><strong id="iw-config-status">回复配置状态待确认</strong><small id="iw-config-summary">加载后会显示是否可以生成回复。</small></div>
+            <button id="iw-config-help" class="iw-button ghost" type="button" aria-expanded="false">查看处理方法</button>
+          </div>
+          <div id="iw-config-guidance" class="iw-config-guidance hidden"></div>
+        </section>
 
         <nav id="iw-tabs" class="iw-tabs" aria-label="互动分类">
           <button class="iw-tab active" type="button" data-interaction-tab="pending" aria-pressed="true">待处理</button>
@@ -441,6 +478,12 @@
           </div>
         </section>
       </section>
+
+      <!-- 共享原始日志：位于 legacy / 视频号 / 内容工作区切换之外，设置开关打开后始终跟随当前环境。 -->
+      <details class="dev hidden" id="dev-section">
+        <summary>开发者详情</summary>
+        <pre id="last-message">等待状态…</pre>
+      </details>
       </main>
     </div>
 

@@ -1,7 +1,8 @@
-// AdsPower 本地 API 的**主进程侧写客户端**（仅程序化建号/建组：`user/create` + `group/create`）。
+// AdsPower 本地 API 的**主进程侧写客户端**（程序化建号、删号与受限更新）。
 //
 // change adspower-auto-create-env（task 2）。与只读 `ads-local-api.cjs` **刻意分离**：
-//  - 红线（M7，结构性守）：本客户端用**硬编码 allowlist** 只放行 `user/create` / `group/create` / `user/delete` / `user/update`。
+//  - 红线（M7，结构性守）：本客户端用**硬编码 allowlist** 只放行 `user/create` / `user/delete` / `user/update`。
+//    预置分组只经只读 `group/list` 解析；`group/create` 与浏览器生命周期端点一样结构性禁止。
 //    任何 `browser/start|stop|active`（浏览器生命周期，核心子进程单写）路径在 `post()` 内**直接抛错**、
 //    绝不发出——把「主进程绝不碰浏览器生命周期」从注释自觉升为**代码上不可能**（回归断言覆盖）。
 //    注（C3 放宽）：`user/delete` 由原「禁一切程序化删」放宽为**允许、但仅由运维在界面上逐个显式确认触发**
@@ -22,7 +23,7 @@ const DEFAULT_ADS_BASE = 'http://local.adspower.net:50325';
 // 硬编码写 allowlist。新增写端点须显式加入并补回归断言。
 // user/delete 允许，但调用方 MUST 仅由运维界面逐个显式确认触发（见头注 C3 放宽）。
 // user/update 允许，但仅经 updateProfileProxy（改代理）/ renameProfile（改名）的各自两键 body（见头注放宽）。
-const WRITE_ALLOWLIST = Object.freeze(['user/create', 'group/create', 'user/delete', 'user/update']);
+const WRITE_ALLOWLIST = Object.freeze(['user/create', 'user/delete', 'user/update']);
 
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -92,7 +93,7 @@ function createAdsWriteApi(deps = {}) {
   /**
    * 发一个 allowlisted 写请求（POST + JSON body）。
    * @returns {Promise<{ ok: boolean, data?: any, code?: number, error?: string }>}
-   * @throws 若 path 不在 allowlist（生命周期 / 删除 / 未知写端点）——**结构性拒绝、绝不发出**。
+   * @throws 若 path 不在 allowlist（分组创建 / 生命周期 / 未知写端点）——**结构性拒绝、绝不发出**。
    */
   async function post(path, body, opts = {}) {
     const clean = normalizePath(path);
@@ -100,7 +101,7 @@ function createAdsWriteApi(deps = {}) {
       // 红线：不是「诚实失败返回」，而是**抛错**——调用这类端点是编程错误，须在测试/CI 暴露。
       throw new Error(
         `[ads-write] 禁止的写端点「${clean}」：allowlist 只放行 ${WRITE_ALLOWLIST.join(' / ')}。` +
-          '浏览器生命周期（browser/start|stop|active）仍由核心子进程单写、绝不经此客户端。',
+          '分组创建由运营预置；浏览器生命周期（browser/start|stop|active）仍由核心子进程单写、绝不经此客户端。',
       );
     }
     const url = `${baseOf(opts)}/api/v1/${clean}`;
@@ -123,14 +124,6 @@ function createAdsWriteApi(deps = {}) {
       return { ok: false, code: json ? json.code : undefined, error: (json && json.msg) || `code=${json && json.code}`, data: json && json.data };
     }
     return { ok: true, data: json.data };
-  }
-
-  /** 建组：返回 { ok, groupId? }。 */
-  async function createGroup(groupName, opts) {
-    const r = await post('group/create', { group_name: String(groupName) }, opts);
-    if (!r.ok) return r;
-    const gid = r.data && (r.data.group_id != null ? String(r.data.group_id) : undefined);
-    return { ok: true, groupId: gid, data: r.data };
   }
 
   /**
@@ -195,7 +188,7 @@ function createAdsWriteApi(deps = {}) {
     return post('user/update', { user_id: String(userId), name: nm }, opts);
   }
 
-  return { post, createGroup, createProfile, deleteProfile, updateProfileProxy, renameProfile, redactSensitive, WRITE_ALLOWLIST: [...WRITE_ALLOWLIST], ADS_MIN_INTERVAL_MS };
+  return { post, createProfile, deleteProfile, updateProfileProxy, renameProfile, redactSensitive, WRITE_ALLOWLIST: [...WRITE_ALLOWLIST], ADS_MIN_INTERVAL_MS };
 }
 
 module.exports = { createAdsWriteApi, redactSensitive, normalizePath, WRITE_ALLOWLIST: [...WRITE_ALLOWLIST], ADS_MIN_INTERVAL_MS, DEFAULT_ADS_BASE };

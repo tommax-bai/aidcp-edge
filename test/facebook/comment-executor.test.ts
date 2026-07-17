@@ -8,8 +8,12 @@ import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monit
 import {
   FacebookCommentExecutor,
   buildAckVerifyJs,
+  buildParticipationGateJs,
   buildScopedEditorHelpersJs,
+  buildScopedVerifyJs,
   isFacebookCommentEditorLabel,
+  isFacebookParticipationGateText,
+  isFacebookPendingApprovalText,
   isServerFacebookCommentId,
 } from '../../src/facebook/comment-executor.js';
 
@@ -678,4 +682,247 @@ test('fb-editor-scope: 旁边的帖 article 0 尺寸（折叠/动画中）但其
     },
   });
   assert.deepEqual(scopedEditorIds(dom, 'fb:BBB'), ['ed-T'], '0 尺寸旁帖的评论框绝不能被当成目标帖的');
+});
+
+// ─── change facebook-comment-participation-gate：群参与审批入群闸 = 待审 ≠ 已发出（止血 + 识别）───
+
+function ackVerifyFull(
+  dom: JSDOM,
+  fragments: string[],
+  ownId: string,
+  targetPostId: string | null,
+): { ackConfirmed: boolean; pendingApproval?: boolean } {
+  return JSON.parse(String(dom.window.eval(buildAckVerifyJs(fragments, ownId, targetPostId)))) as {
+    ackConfirmed: boolean;
+    pendingApproval?: boolean;
+  };
+}
+function scopedVerifyFull(
+  dom: JSDOM,
+  fragments: string[],
+  ownId: string,
+  targetPostId: string | null,
+): { confirmed: boolean; pendingApproval?: boolean } {
+  return JSON.parse(String(dom.window.eval(buildScopedVerifyJs(fragments, ownId, targetPostId)))) as {
+    confirmed: boolean;
+    pendingApproval?: boolean;
+  };
+}
+function gateProbe(dom: JSDOM): { gate: boolean } {
+  return JSON.parse(String(dom.window.eval(buildParticipationGateJs()))) as { gate: boolean };
+}
+const POST_BBB = 'https://www.facebook.com/groups/111/posts/BBB/';
+
+test('fb-ack: 本人+文本+服务器 id 但评论行带「待审核」徽章 → 绝不 ackConfirmed（待审 ≠ 已发出），pendingApproval=true', () => {
+  const serverId = 'Y29tbWVudDoxMjM0';
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      postBar +
+      `<div role="article" id="my-comment">${ownLink}<div>我发的评论正文</div><span>待审核</span>` +
+      `<a href="${POST_BBB}?comment_id=${serverId}">2秒</a></div>` +
+      '</div>',
+    POST_BBB,
+  );
+  const r = ackVerifyFull(dom, ['我发的评论正文'], OWN, 'fb:BBB');
+  assert.equal(r.ackConfirmed, false, '带待审徽章即便有服务器 id 也绝不判已发出');
+  assert.equal(r.pendingApproval, true);
+});
+
+test('fb-ack: 本人+文本+≥2 交互控件 但带「等待管理员批准」徽章 → 绝不 ackConfirmed', () => {
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div><span>等待管理员批准</span>` +
+      '<div role="button">赞</div><div role="button">回复</div></div>' +
+      '</div>',
+    POST_BBB,
+  );
+  const r = ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB');
+  assert.equal(r.ackConfirmed, false, '待审徽章否决 reactions>=2 兜底');
+  assert.equal(r.pendingApproval, true);
+});
+
+test('fb-ack: 本人+文本+≥2 交互控件、无待审徽章 → 仍 ackConfirmed（否决不误伤真评论）', () => {
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div>` +
+      '<div role="button">赞</div><div role="button">回复</div></div>' +
+      '</div>',
+    POST_BBB,
+  );
+  assert.equal(ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB').ackConfirmed, true);
+});
+
+test('fb-scoped: 本人+文本评论行带「待审核」徽章 → confirmed=false, pendingApproval=true', () => {
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>我发的评论正文</div><span>待审核</span></div>` +
+      '</div>',
+    POST_BBB,
+  );
+  const r = scopedVerifyFull(dom, ['我发的评论正文'], OWN, 'fb:BBB');
+  assert.equal(r.confirmed, false);
+  assert.equal(r.pendingApproval, true);
+});
+
+test('fb-scoped: 本人+文本评论行无待审徽章 → confirmed=true', () => {
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>我发的评论正文</div></div>` +
+      '</div>',
+    POST_BBB,
+  );
+  assert.equal(scopedVerifyFull(dom, ['我发的评论正文'], OWN, 'fb:BBB').confirmed, true);
+});
+
+test('fb-gate: 可见 role=dialog 含「申请参与/参与问题」→ gate=true', () => {
+  const dom = editorScopeDom(
+    '<div role="dialog"><h2>申请参与</h2><div>请回答以下参与问题后提交</div></div>',
+    'https://www.facebook.com/groups/111',
+  );
+  assert.equal(gateProbe(dom).gate, true);
+});
+
+test('fb-gate: 英文 role=dialog（request to participate）→ gate=true', () => {
+  const dom = editorScopeDom(
+    '<div role="dialog"><h2>Request to participate</h2><div>Answer questions to participate and agree to the group rules</div></div>',
+    'https://www.facebook.com/groups/111',
+  );
+  assert.equal(gateProbe(dom).gate, true);
+});
+
+test('fb-gate: 整页 body 含「回答问题」但无参与审批对话框 → gate=false（不整页扫、避开侧栏 Join/问答帖假阳）', () => {
+  const dom = editorScopeDom(
+    '<div role="complementary"><div>推荐小组：加入小组需回答问题 / Answer questions</div><div role="button">加入小组</div></div>' +
+      '<div role="article">' +
+      editor('reply', '输入回答…') +
+      '</div>',
+    POST_BBB,
+  );
+  assert.equal(gateProbe(dom).gate, false);
+});
+
+test('pending-approval 文本断言：覆盖中英文案、排除普通评论元数据', () => {
+  for (const s of [
+    '待审核',
+    '待审批',
+    '等待管理员批准',
+    '通过后可见',
+    '需要管理员审核',
+    'Pending review',
+    'awaiting approval',
+    'needs admin approval',
+    'visible once approved',
+  ]) {
+    assert.equal(isFacebookPendingApprovalText(s), true, s);
+  }
+  for (const s of ['已发布', '2 秒前', '赞 · 回复', '', null, undefined]) {
+    assert.equal(isFacebookPendingApprovalText(s), false, String(s));
+  }
+});
+
+test('participation-gate 文本断言：覆盖中英文案、排除通用「回答问题/Answer questions」与侧栏 Join', () => {
+  for (const s of [
+    '申请参与',
+    '参与问题',
+    '同意小组规则',
+    'request to participate',
+    'participation questions',
+    'agree to the group rules',
+  ]) {
+    assert.equal(isFacebookParticipationGateText(s), true, s);
+  }
+  for (const s of ['回答问题', 'Answer questions', '加入小组', 'Join group', '评论', '']) {
+    assert.equal(isFacebookParticipationGateText(s), false, String(s));
+  }
+});
+
+// ─────────── openPost 详情水合窗（change fb-comment-open-hydration-window）───────────
+//
+// 真机实测 FB 详情 article 水合 7-12s。评论链路此前只有 surfaceProbeRounds=4（≈4.9s 总预算）→ 慢帖误报 open_failed。
+// 现给 article 等待一个**独立**预算 postDetailProbeRounds=22；催拉类调用点仍用 surfaceProbeRounds（它们在循环内）。
+
+/** 按生产默认形状构造（surfaceProbeRounds=4），只在需要时覆写详情窗。 */
+function makeOpenExecutor(cdp: FakeCdp, over: { postDetailProbeRounds?: number } = {}) {
+  return new FacebookCommentExecutor(
+    {
+      cdp,
+      getAccountId: () => '100000123456789',
+      acceptConsent: NO_CONSENT,
+      sleep: async () => {},
+      logger: () => {},
+    },
+    {
+      settleMs: 0,
+      editorScrollRounds: 3,
+      surfaceProbeRounds: 4,
+      waitAfterSubmitMs: 0,
+      waitAfterReloadMs: 0,
+      ...(over.postDetailProbeRounds !== undefined ? { postDetailProbeRounds: over.postDetailProbeRounds } : {}),
+    },
+  );
+}
+
+test('fb-executor: 慢水合详情（article 第 10 轮才出现）→ 开帖成功，不再误报 open_failed', async () => {
+  let probes = 0;
+  const cdp = new FakeCdp({
+    structureFor: () => {
+      probes++;
+      // 前 9 轮页面还没水合出 article；第 10 轮起出现（>4 = 旧窗口必挂，<=22 = 新窗口应接住）。
+      const hydrated = probes >= 10;
+      return struct({
+        href: 'https://www.facebook.com/groups/1/posts/2/',
+        articleCount: hydrated ? 1 : 0,
+        commentEditorCount: hydrated ? 1 : 0,
+      });
+    },
+  });
+  const r = await makeOpenExecutor(cdp).openPost('https://www.facebook.com/groups/1/posts/2/');
+  assert.equal(r.ok, true, `慢水合帖应被接住，实际 reason=${r.reason}`);
+  assert.equal(r.editorReady, true);
+});
+
+test('fb-executor: 旧的 4 轮窗口接不住同一个慢水合帖（坐实这就是 open_failed 的成因）', async () => {
+  let probes = 0;
+  const cdp = new FakeCdp({
+    structureFor: () => {
+      probes++;
+      const hydrated = probes >= 10;
+      return struct({
+        href: 'https://www.facebook.com/groups/1/posts/2/',
+        articleCount: hydrated ? 1 : 0,
+        commentEditorCount: hydrated ? 1 : 0,
+      });
+    },
+  });
+  // 显式退回修复前的窗口 → 必须复现 open_failed（若此断言变绿说明修复被架空）。
+  const r = await makeOpenExecutor(cdp, { postDetailProbeRounds: 4 }).openPost('https://www.facebook.com/groups/1/posts/2/');
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'open_failed');
+});
+
+test('fb-executor: 详情始终不水合 → 仍如实 open_failed（诚实闸不变、窗口仍有界）', async () => {
+  const cdp = new FakeCdp({
+    structureFor: () =>
+      struct({ href: 'https://www.facebook.com/groups/1/posts/2/', articleCount: 0, commentEditorCount: 0 }),
+  });
+  const r = await makeOpenExecutor(cdp).openPost('https://www.facebook.com/groups/1/posts/2/');
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'open_failed');
+});
+
+test('fb-executor: 详情窗放宽**不得**外溢到评论框催拉循环（防 6×22 炸步超时）', async () => {
+  let probes = 0;
+  const cdp = new FakeCdp({
+    structureFor: () => {
+      probes++;
+      // article 立刻就位（详情窗第 1 轮即接受），但评论框永远催不出 → 只有催拉循环在烧探测。
+      return struct({ href: 'https://www.facebook.com/groups/1/posts/2/', articleCount: 1, commentEditorCount: 0 });
+    },
+  });
+  const r = await makeOpenExecutor(cdp).openPost('https://www.facebook.com/groups/1/posts/2/');
+  assert.equal(r.ok, true);
+  assert.equal(r.editorReady, false);
+  // 预算 = 1（详情窗立即接受）+ editorScrollRounds(3) × surfaceProbeRounds(4) = 13。
+  // 若催拉循环误用了 postDetailProbeRounds(22)，将变成 1 + 3×22 = 67 → 生产上 6×22×600ms≈79s 炸开帖步超时。
+  assert.ok(probes <= 20, `催拉循环不得用详情窗预算，实际探测 ${probes} 次（>20 说明外溢）`);
 });

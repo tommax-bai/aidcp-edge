@@ -7,7 +7,6 @@ const require = createRequire(import.meta.url);
 const mod = require('../../src/electron/ads-write-api.cjs') as {
   createAdsWriteApi: (deps?: Record<string, unknown>) => {
     post: (path: string, body: unknown, opts?: Record<string, unknown>) => Promise<{ ok: boolean; data?: unknown; code?: number; error?: string }>;
-    createGroup: (name: string, opts?: Record<string, unknown>) => Promise<{ ok: boolean; groupId?: string; error?: string }>;
     createProfile: (
       p: { groupId: string; name?: string; fingerprintConfig: unknown; proxyConfig?: unknown; accountImport?: Record<string, unknown> },
       opts?: Record<string, unknown>,
@@ -39,8 +38,8 @@ function stubFetch(
 }
 const noThrottle = { nowImpl: () => 0, sleepImpl: async () => undefined };
 
-// ── 红线回归：allowlist 结构性拦截生命周期端点（task 2.3，M7；user/update 已受限放行、仅改代理） ──
-for (const forbidden of ['browser/start', 'browser/stop', 'browser/active', '/api/v1/browser/start']) {
+// ── 红线回归：allowlist 结构性拦截分组创建与生命周期端点（M7；user/update 仅受限放行） ──
+for (const forbidden of ['group/create', '/api/v1/group/create', 'browser/start', 'browser/stop', 'browser/active', '/api/v1/browser/start']) {
   test(`allowlist: 禁止端点「${forbidden}」抛错且绝不发出请求`, async () => {
     const calls: Array<{ url: string }> = [];
     const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0 }), calls) });
@@ -144,16 +143,14 @@ test('deleteProfile: user/delete 放行、body 带 user_ids（C3 放宽为 UI �
   assert.match(String(calls[0].init?.body), /u1/);
 });
 
-test('allowlist: user/create 与 group/create 放行、打 /api/v1/ 前缀', async () => {
+test('allowlist: user/create 放行并打 /api/v1/ 前缀', async () => {
   const calls: Array<{ url: string }> = [];
   const api = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0, data: { id: 'u1' } }), calls) });
   const r1 = await api.post('user/create', { group_id: '1', fingerprint_config: { canvas: '1' } });
-  const r2 = await api.post('group/create', { group_name: 'g' });
   assert.equal(r1.ok, true);
-  assert.equal(r2.ok, true);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 1);
   assert.ok(calls[0].url.includes('/api/v1/user/create'), calls[0].url);
-  assert.ok(calls[1].url.includes('/api/v1/group/create'), calls[1].url);
+  assert.deepEqual(api.WRITE_ALLOWLIST, ['user/create', 'user/delete', 'user/update']);
 });
 
 // ── 诚实失败：code≠0 / 不可达一律 { ok:false }，MUST NOT 假成功 ──
@@ -231,13 +228,8 @@ test('createProfile: Facebook account import fields enter user/create body', asy
   assert.equal(body.ignore_cookie_error, '0');
 });
 
-// ── 便捷封装：createGroup / createProfile 抽出 id ──
-test('createGroup 抽出 groupId、createProfile 抽出 userId', async () => {
-  const gapi = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0, data: { group_id: 42 } })) });
-  const g = await gapi.createGroup('probe');
-  assert.equal(g.ok, true);
-  assert.equal(g.groupId, '42');
-
+// ── 便捷封装：createProfile 抽出 id ──
+test('createProfile 抽出 userId', async () => {
   const papi = createAdsWriteApi({ ...noThrottle, fetchImpl: stubFetch(() => res(200, { code: 0, data: { id: 'k1e0' } })) });
   const p = await papi.createProfile({ groupId: '42', fingerprintConfig: { canvas: '1' } });
   assert.equal(p.ok, true);

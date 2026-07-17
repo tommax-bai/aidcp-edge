@@ -5,12 +5,16 @@ import {
   WechatChannelsError,
 } from './error-classifier.js';
 import {
+  serializeWechatRequest,
+  WECHAT_CHANNELS_REQUEST_DESCRIPTORS,
+  type WechatChannelsEndpoint,
+} from './request-descriptors.js';
+import {
   parseComments,
   parseDmMessages,
-  parseDmSessions,
+  parseEmptyDmHistory,
+  parseEmptyDmSessionInfo,
   parseIdentity,
-  parseLoginCode,
-  parseLoginStatus,
   parsePosts,
   parseSendAck,
 } from './api-schemas.js';
@@ -26,35 +30,12 @@ import type {
   WechatSendAck,
   WechatSessionMaterial,
 } from './types.js';
+export type { WechatChannelsEndpoint } from './request-descriptors.js';
 
-export const WECHAT_CHANNELS_API_BASE_URL = 'https://channels.weixin.qq.com/cgi-bin/mmfinderassistant-bin' as const;
-
-export const WECHAT_CHANNELS_ENDPOINTS = {
-  authLoginCode: '/auth/auth_login_code',
-  authLoginStatus: '/auth/auth_login_status',
-  authData: '/auth/auth_data',
-  postList: '/post/post_list',
-  commentList: '/comment/comment_list',
-  commentCreate: '/comment/create_comment',
-  dmLoginCookie: '/private-msg/get-login-cookie',
-  dmNewMessages: '/private-msg/get-new-msg',
-  dmHistory: '/private-msg/get-history-msg',
-  dmSendText: '/private-msg/send-private-msg',
-  dmUploadMedia: '/private-msg/upload-media-info',
-} as const;
-
-export type WechatChannelsEndpoint = keyof typeof WECHAT_CHANNELS_ENDPOINTS;
-
-const READ_ENDPOINTS = new Set<WechatChannelsEndpoint>([
-  'authLoginCode',
-  'authLoginStatus',
-  'authData',
-  'postList',
-  'commentList',
-  'dmLoginCookie',
-  'dmNewMessages',
-  'dmHistory',
-]);
+export const WECHAT_CHANNELS_API_BASE_URL = 'https://channels.weixin.qq.com' as const;
+export const WECHAT_CHANNELS_ENDPOINTS = Object.fromEntries(
+  Object.entries(WECHAT_CHANNELS_REQUEST_DESCRIPTORS).map(([endpoint, descriptor]) => [endpoint, descriptor.path]),
+) as Readonly<Record<WechatChannelsEndpoint, string | null>>;
 
 export interface WechatChannelsApiClientOptions {
   fetchImpl?: typeof fetch;
@@ -95,11 +76,16 @@ export class WechatChannelsApiClient {
   }
 
   requestLoginCode(): Promise<WechatLoginCode> {
-    return this.call('authLoginCode', {}, undefined, (body, endpoint) => parseLoginCode(body, endpoint, this.now()));
+    return Promise.reject(new WechatChannelsError(
+      'schema_changed', 'authLoginCode', 'QR login is owned by the authorized browser sidecar', false, null, false,
+    ));
   }
 
   pollLoginStatus(token: string): Promise<WechatLoginStatus> {
-    return this.call('authLoginStatus', { token }, undefined, parseLoginStatus);
+    void token;
+    return Promise.reject(new WechatChannelsError(
+      'schema_changed', 'authLoginStatus', 'QR login status is owned by the authorized browser sidecar', false, null, false,
+    ));
   }
 
   getIdentity(session: WechatSessionMaterial): Promise<WechatIdentity> {
@@ -107,7 +93,16 @@ export class WechatChannelsApiClient {
   }
 
   listPosts(session: WechatSessionMaterial, cursor: string | null, limit = 50): Promise<WechatPage<WechatPost>> {
-    return this.call('postList', { cursor, limit }, session, parsePosts);
+    const page = cursor === null ? 1 : Number(cursor);
+    if (!Number.isInteger(page) || page < 1) {
+      return Promise.reject(new WechatChannelsError('invalid_command', 'postList', 'Invalid page cursor', false));
+    }
+    return this.call(
+      'postList',
+      { currentPage: page, pageSize: limit, userpageType: 0, stickyOrder: false },
+      session,
+      (body, endpoint) => parsePosts(body, endpoint, page),
+    );
   }
 
   listComments(
@@ -116,16 +111,23 @@ export class WechatChannelsApiClient {
     cursor: string | null,
     limit = 100,
   ): Promise<WechatPage<WechatComment>> {
+    const page = cursor === null ? 1 : Number(cursor);
+    if (!Number.isInteger(page) || page < 1) {
+      return Promise.reject(new WechatChannelsError('invalid_command', 'commentPagePostList', 'Invalid page cursor', false));
+    }
     return this.call(
-      'commentList',
-      { objectId: postExternalId, cursor, limit },
+      'commentPagePostList',
+      { currentPage: page, pageSize: limit, userpageType: 0, stickyOrder: false },
       session,
-      (body, endpoint) => parseComments(body, endpoint, postExternalId),
+      (body, endpoint) => parseComments(body, endpoint, postExternalId, page),
     );
   }
 
-  listDmSessions(session: WechatSessionMaterial, cursor: string | null, limit = 50): Promise<WechatPage<WechatDmSession>> {
-    return this.call('dmNewMessages', { cursor, limit }, session, parseDmSessions);
+  async listDmSessions(session: WechatSessionMaterial, cursor: string | null, limit = 50): Promise<WechatPage<WechatDmSession>> {
+    void limit;
+    const page = await this.call('dmHistory', { cookie: cursor ?? '' }, session, parseEmptyDmHistory);
+    await this.call('dmSessionInfo', { sessionId: [] }, session, parseEmptyDmSessionInfo);
+    return { items: [], nextCursor: page.nextCursor, hasMore: page.hasMore };
   }
 
   listDmHistory(
@@ -134,9 +136,10 @@ export class WechatChannelsApiClient {
     cursor: string | null,
     limit = 100,
   ): Promise<WechatPage<WechatDmMessage>> {
+    void limit;
     return this.call(
       'dmHistory',
-      { sessionId: threadExternalId, cursor, limit },
+      { cookie: cursor ?? '' },
       session,
       (body, endpoint) => parseDmMessages(body, endpoint, threadExternalId),
     );
@@ -193,7 +196,7 @@ export class WechatChannelsApiClient {
     payload: Record<string, unknown>,
     session: WechatSessionMaterial | undefined,
   ): Promise<PlatformEnvelope> {
-    const retrySafe = READ_ENDPOINTS.has(endpoint);
+    const retrySafe = WECHAT_CHANNELS_REQUEST_DESCRIPTORS[endpoint].retrySafe;
     const attempts = retrySafe ? this.maxRetries + 1 : 1;
     let lastError: WechatChannelsError | undefined;
     for (let attempt = 0; attempt < attempts; attempt++) {
@@ -217,20 +220,17 @@ export class WechatChannelsApiClient {
   ): Promise<PlatformEnvelope> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    const url = `${WECHAT_CHANNELS_API_BASE_URL}${WECHAT_CHANNELS_ENDPOINTS[endpoint]}`;
-    const headers: Record<string, string> = {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      'User-Agent': session?.userAgent || 'AIDCP-Edge/WechatChannels',
-    };
-    if (session) headers.Cookie = buildCookieHeader(session, endpoint.startsWith('dm'));
+    if (!session) {
+      throw new WechatChannelsError('auth_expired', endpoint, 'Authorized session is required', false, null, false);
+    }
+    const serialized = serializeWechatRequest(endpoint, payload, session, { now: this.now });
     try {
       let response: Response;
       try {
-        response = await this.fetchImpl(url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload),
+        response = await this.fetchImpl(serialized.url, {
+          method: serialized.method,
+          headers: serialized.headers,
+          body: serialized.body,
           signal: controller.signal,
           redirect: 'error',
         });
@@ -274,18 +274,6 @@ function positiveInt(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
-function buildCookieHeader(session: WechatSessionMaterial, dm: boolean): string {
-  const cookies = dm && session.dmCookies?.length ? session.dmCookies : session.cookies;
-  return cookies
-    .filter((cookie) => {
-      const domain = cookie.domain.replace(/^\./, '').toLowerCase();
-      return domain === 'weixin.qq.com' || domain.endsWith('.weixin.qq.com');
-    })
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((cookie) => `${cookie.name}=${cookie.value}`)
-    .join('; ');
-}
-
 async function readLimitedText(response: Response, maxBytes: number, endpoint: string): Promise<string> {
   const length = Number(response.headers.get('content-length'));
   if (Number.isFinite(length) && length > maxBytes) {
@@ -317,9 +305,12 @@ async function readLimitedText(response: Response, maxBytes: number, endpoint: s
 function platformStatus(body: unknown): { code: string | number | null; message: string | null } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { code: null, message: null };
   const root = body as Record<string, unknown>;
-  const nested = root.baseResp ?? root.base_resp;
+  const data = root.data && typeof root.data === 'object' && !Array.isArray(root.data)
+    ? root.data as Record<string, unknown>
+    : {};
+  const nested = root.baseResp ?? root.base_resp ?? data.baseResp ?? data.base_resp;
   const base = nested && typeof nested === 'object' && !Array.isArray(nested) ? nested as Record<string, unknown> : {};
-  const code = root.errCode ?? root.errcode ?? root.code ?? base.ret ?? null;
+  const code = root.errCode ?? root.errcode ?? root.code ?? base.errCode ?? base.errcode ?? base.ret ?? null;
   const messageValue = root.errMsg ?? root.errmsg ?? root.message ?? base.errMsg ?? base.err_msg;
   return {
     code: typeof code === 'string' || typeof code === 'number' ? code : null,

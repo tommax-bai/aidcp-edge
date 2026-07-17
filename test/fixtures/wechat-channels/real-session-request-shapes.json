@@ -1,0 +1,57 @@
+{
+  "manifestVersion": 1,
+  "capturedAt": "2026-07-16T07:46:01.873Z",
+  "source": "authorized_adspower_session",
+  "evidenceBoundary": "observed_read_only",
+  "writesDispatched": false,
+  "rawHarPersisted": false,
+  "secretValuesPersisted": false,
+  "common": {
+    "method": "POST",
+    "queryKeys": ["_aid", "_pageUrl", "_rid"],
+    "contentType": "application/json",
+    "bodyShape": {"_log_finder_id": "string", "_log_finder_uin": "string", "pluginSessionId": "null", "rawKeyBuff": "string", "reqScene": "number", "scene": "number", "timestamp": "string"},
+    "requiredHeaderNames": ["X-WECHAT-UIN", "finger-print-device-id"]
+  },
+  "requests": {
+    "authData": {
+      "path": "/cgi-bin/mmfinderassistant-bin/auth/auth_data",
+      "businessBody": {},
+      "status": 201,
+      "responseKeys": ["data.finderUser.finderUsername", "data.finderUser.nickname", "data.userAttr"]
+    },
+    "postList": {
+      "path": "/micro/content/cgi-bin/mmfinderassistant-bin/post/post_list",
+      "businessBody": {"currentPage": "number", "pageSize": "number", "stickyOrder": "boolean", "userpageType": "number"},
+      "status": 201,
+      "responseKeys": ["data.bindInfo", "data.continueFlag", "data.lastBuff", "data.list", "data.totalCount"]
+    },
+    "commentPagePostList": {
+      "path": "/micro/interaction/cgi-bin/mmfinderassistant-bin/post/post_list",
+      "businessBody": {"currentPage": "number", "pageSize": "number", "stickyOrder": "boolean", "userpageType": "number"},
+      "status": 201,
+      "responseKeys": ["data.continueFlag", "data.lastBuff", "data.list[].commentCount", "data.list[].commentList"],
+      "observedResult": "one_post_zero_comments",
+      "coverage": "empty_only_nonempty_comment_shape_unverified"
+    },
+    "dmHistory": {
+      "path": "/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-history-msg",
+      "businessBody": {"cookie": "string"},
+      "status": 201,
+      "responseKeys": ["data.baseResp.errcode", "data.cookie", "data.isContinue", "data.msg"],
+      "observedResult": "zero_messages",
+      "coverage": "empty_only_nonempty_message_and_session_semantics_unverified"
+    },
+    "dmSessionInfo": {
+      "path": "/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-session-info",
+      "businessBody": {"sessionId": "array"},
+      "status": 201,
+      "responseKeys": ["data.baseResp.errcode", "data.sessionInfo"],
+      "observedResult": "zero_sessions",
+      "coverage": "empty_only_nonempty_session_shape_unverified"
+    },
+    "commentCreate": {"evidence": "not_observed", "descriptorEnabled": false},
+    "dmSendText": {"evidence": "not_observed", "descriptorEnabled": false},
+    "dmNewMessages": {"evidence": "not_observed", "descriptorEnabled": false}
+  }
+}

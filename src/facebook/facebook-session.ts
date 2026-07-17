@@ -49,6 +49,14 @@ import { FacebookInlineReader } from './inline-reader.js';
 import { FacebookCommentHandler } from './comment-handler.js';
 import { canonicalPostId } from './post-identity.js';
 import { defaultFacebookConsentAccepter, type FacebookConsentAccepter } from './consent.js';
+import {
+  emitCompanionUiEvent as emitCompanionUiEventLine,
+  facebookLikeUiText,
+  facebookReadUiText,
+  isAttempted,
+  reasonText,
+  type FacebookCompanionUiEvent,
+} from './companion-ui.js';
 
 export type FacebookBrowseMode = 'off' | 'shadow' | 'on';
 
@@ -139,23 +147,11 @@ export interface FacebookBrowseSessionOptions {
 }
 
 type TerminalReport =
-  | { type: 'cards'; payload: PageCardsPayload }
+  // presence：列表面不都是推荐流——搜索结果页说「正在浏览推荐流」是假话。带上就用，不带回落推荐流。
+  | { type: 'cards'; payload: PageCardsPayload; presence?: string }
   | { type: 'detail'; payload: NoteDetailPayload }
   | { type: 'profile'; payload: ProfileDetailPayload }
   | { type: 'action'; payload: ActionCompletedPayload; companionLikeObservation?: FacebookLikeObservation };
-
-/**
- * 伴随桌面端的结构化事件。云端 `dailyUsage` 才是账号今日总量的权威；这里仅把已确认的
- * Facebook 动作即时投影到当前子进程的活动流、在场状态和本地兜底计数，不能据此猜测成功。
- */
-interface FacebookCompanionUiEvent {
-  kind: 'activity' | 'presence';
-  type: 'session_start' | 'feed' | 'note_open' | 'like';
-  sentence?: string;
-  presence?: string;
-  loopStage?: 'feed' | 'read' | 'interact';
-  statsDelta?: { views?: number; likes?: number };
-}
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 /** feed 判稳 wall-clock：导航类（首屏/返回/搜索）给足页面加载；原地类（滚动/刷新换批）更短。 */
@@ -193,50 +189,6 @@ export function computeInlineReadFloorMs(bodyLen: number, tempo: number): number
   const raw = INLINE_READ_FLOOR_BASE_MS + Math.max(0, bodyLen) * INLINE_READ_FLOOR_PER_CHAR_MS;
   const capped = Math.min(INLINE_READ_FLOOR_CAP_MS, raw);
   return Math.round(capped * (tempo > 0 ? tempo : 1));
-}
-
-/**
- * 把帖子详情压成活动流可读的一行：仅使用已成功读取的作者和正文，清掉换行并按字符截断。
- * 元数据缺失时宁可退回通用文案，绝不把 permalink / noteId 当作可读标题展示。
- */
-function clipFacebookUiText(value: string | undefined, max: number): string {
-  const normalized = String(value ?? '').replace(/\s+/g, ' ').trim();
-  const characters = Array.from(normalized);
-  return characters.length > max ? `${characters.slice(0, max).join('')}…` : normalized;
-}
-
-function facebookReadUiText(payload: NoteDetailPayload): Pick<FacebookCompanionUiEvent, 'sentence' | 'presence'> {
-  const excerpt = clipFacebookUiText(payload.content || payload.title, 24);
-  const author = clipFacebookUiText(payload.author, 18);
-  if (excerpt && author) {
-    return {
-      sentence: `打开「${excerpt}」 · ${author}`,
-      presence: `正在读 ${author} 的「${excerpt}」…`,
-    };
-  }
-  if (excerpt) return { sentence: `打开「${excerpt}」`, presence: `正在认真阅读「${excerpt}」…` };
-  if (author) return { sentence: `打开了 ${author} 的一条内容`, presence: `正在认真阅读 ${author} 的一条内容…` };
-  return { sentence: '打开了一条内容', presence: '正在认真阅读一条内容…' };
-}
-
-/**
- * 点赞摘要只认执行器从实际被作用帖子现读的见证，绝不拿上一条阅读记录或命令 noteId 猜目标。
- * Facebook 帖子通常没有独立标题，因此与“读”保持同一口径：正文开头即活动流里的稿件摘要。
- */
-function facebookLikeUiText(
-  observation: FacebookLikeObservation | undefined,
-): Pick<FacebookCompanionUiEvent, 'sentence' | 'presence'> {
-  const excerpt = clipFacebookUiText(observation?.textPreviewHead, 24);
-  const author = clipFacebookUiText(observation?.author, 18);
-  if (excerpt && author) {
-    return {
-      sentence: `赞了「${excerpt}」 · ${author}`,
-      presence: `刚赞了 ${author} 的「${excerpt}」`,
-    };
-  }
-  if (excerpt) return { sentence: `赞了「${excerpt}」`, presence: `刚赞了「${excerpt}」` };
-  if (author) return { sentence: `赞了 ${author} 的一条内容`, presence: `刚赞了 ${author} 的一条内容` };
-  return { sentence: '点了个赞', presence: '刚点了个赞' };
 }
 
 export class FacebookBrowseSession implements EdgeBrowseSession {
@@ -704,7 +656,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       this.emitCompanionUiEvent({
         kind: 'presence',
         type: 'feed',
-        presence: '正在浏览推荐流…',
+        presence: r.presence ?? '正在浏览推荐流…',
         loopStage: 'feed',
       });
     }
@@ -735,8 +687,9 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     }
   }
 
+  /** 薄包装：叙述与发射已下沉到 companion-ui.ts（供委托处理器共用），此处只绑定本会话的 logger。 */
   private emitCompanionUiEvent(event: FacebookCompanionUiEvent): void {
-    this.log(`[ui-event] ${JSON.stringify(event)}`);
+    emitCompanionUiEventLine(this.log, event);
   }
 
   /** 导航 feed → 扫卡 → 上报 page.cards（首屏 / 重连恢复）。无命令可回，best-effort 直发。 */
@@ -946,6 +899,20 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   }
 
   /** 普通浏览搜索：导航 FB 全站帖子搜索页，再复用同一 feed 扫描器读结果。 */
+  /**
+   * 浏览侧搜索失败的诚实叙述（change facebook-write-action-visibility）。
+   * 成功走 `cards` 分支——那条分支是 presence-only，故成功条目必须在这里就地发（见下方成功返回处）。
+   */
+  private emitSearchFailed(keyword: string, reason: string): void {
+    if (!isAttempted(reason)) return; // 未开始 / 已作废：不产条目、也不叙述成失败
+    this.emitCompanionUiEvent({
+      kind: 'activity',
+      type: 'search_failed',
+      sentence: `搜索「${keyword}」失败：${reasonText(reason)}`,
+      loopStage: 'feed',
+    });
+  }
+
   private async searchBrowse(payload: SearchExecutePayload): Promise<TerminalReport> {
     const keyword = String(payload.keyword ?? '').trim();
     if (!keyword) return { type: 'action', payload: { action: 'search', ok: false, reason: 'no_target' } };
@@ -956,22 +923,43 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       url.searchParams.set('q', keyword);
       searchUrl = url.toString();
     } catch {
+      this.emitSearchFailed(keyword, 'nav_error');
       return { type: 'action', payload: { action: 'search', ok: false, reason: 'nav_error' } };
     }
 
     const ensure = await this.feedReader.ensureFeed(searchUrl);
     if (!ensure.ok) {
-      return { type: 'action', payload: { action: 'search', ok: false, reason: ensure.reason ?? 'search_unavailable' } };
+      const reason = ensure.reason ?? 'search_unavailable';
+      this.emitSearchFailed(keyword, reason);
+      return { type: 'action', payload: { action: 'search', ok: false, reason } };
     }
     this.activeFeedUrl = searchUrl;
     const settle = await this.feedReader.settleCards({ wallClockMs: FEED_SETTLE_NAV_MS });
     const cards = settle.cards;
-    if (cards.length === 0) return { type: 'action', payload: { action: 'search', ok: false, reason: settle.reason ?? 'no_candidates' } };
+    if (cards.length === 0) {
+      const reason = settle.reason ?? 'no_candidates';
+      this.emitSearchFailed(keyword, reason);
+      return { type: 'action', payload: { action: 'search', ok: false, reason } };
+    }
     const maxResults = Number.isFinite(payload.maxResults) && (payload.maxResults ?? 0) > 0
       ? Math.floor(payload.maxResults as number)
       : cards.length;
     this.resetCursor(); // 搜索结果 = 全新一批，重置游标后按本批播种
-    return { type: 'cards', payload: this.toPageCards(this.seedCursor(cards.slice(0, maxResults))) };
+    const shown = cards.slice(0, maxResults);
+    // 成功条目就地发：`cards` 分支只发 presence（无 sentence）故不产条目。关键词与卡数此刻均为一手，
+    // 绝不猜。无 statsDelta：搜索在云端既不进 interaction.occurred 也不进 dailyUsage，本地不得凭空计数。
+    this.emitCompanionUiEvent({
+      kind: 'activity',
+      type: 'search',
+      sentence: `搜索「${keyword}」，找到 ${shown.length} 条`,
+      loopStage: 'feed',
+    });
+    // presence 随 cards 分支统一发，避免这里发一句立刻被覆盖（列表面是搜索结果、不是推荐流）。
+    return {
+      type: 'cards',
+      payload: this.toPageCards(this.seedCursor(shown)),
+      presence: `正在看「${keyword}」的搜索结果…`,
+    };
   }
 
   /**
@@ -1099,7 +1087,10 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     // 绝不为取昵称导航 profile.php / /me（与 facebook-identity「取昵称绝不导航」契约一致）。
     // 就地读从不离开 feed → 采集完的 back 经幂等 ensureFeed 变空操作、不整页重载。
     // 上报按【就地读到的】数字 id 自校验：读到不匹配的 id → authorId≠连接 accountId，云端按「非本人」安全忽略（绝不写错账号）。
-    this.log(`[fb-session] 命令: profile.open direct（就地读, authorId=${requestedAuthorId || '<self>'}）`);
+    // 措辞刻意不带「命令: profile.open」——那会命中壳侧中文兜底表里的小红书专属规则
+    // （ui-events.cjs 的 /命令: profile\.open/ → 在场感「顺路去作者主页看看…」），而 FB 是**就地读、从不跳转**，
+    // 那句在 FB 上是假话。兜底表是小红书会话专属的，FB 一律走结构化 [ui-event] 行。
+    this.log(`[fb-session] profile.open direct（就地读, authorId=${requestedAuthorId || '<self>'}）`);
     const idRes = await readFacebookIdentity(this.cdp, { logger: (m) => this.log(m), sleep: this.sleep });
     if (!idRes.ok) {
       this.log(`[fb-session] profile.detail direct 就地读身份失败（${idRes.reason}）→ 空昵称回执（不导航、不猜）`);

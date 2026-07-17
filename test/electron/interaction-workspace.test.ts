@@ -88,11 +88,13 @@ interface BootOptions {
   label?: string;
   platform?: string;
   api?: Record<string, any>;
+  listPollDelayMs?: number;
 }
 
 interface BootHandle {
   window: DOMWindow;
   pushFleet: (snapshot: any) => void;
+  pushStatus: (status: any) => void;
   calls: Record<string, any[]>;
 }
 
@@ -101,10 +103,14 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
   const label = options.label || '轻享生活号';
   const platform = options.platform || 'wechat_channels';
   const currentStatus = status(envKey, label);
-  const calls: Record<string, any[]> = { list: [], detail: [], cancel: [], save: [], approve: [], send: [], sync: [], reopen: [] };
+  const calls: Record<string, any[]> = {
+    list: [], detail: [], cancel: [], save: [], approve: [], send: [], regenerate: [], ignore: [], escalate: [],
+    sync: [], reopen: [], browser: [], readControls: [], notify: [],
+  };
   let pushFleet: (snapshot: any) => void = () => undefined;
+  let pushStatus: (status: any) => void = () => undefined;
   const defaultApi: Record<string, any> = {
-    onStatusUpdate: () => undefined,
+    onStatusUpdate: (callback: (next: any) => void) => { pushStatus = callback; },
     onActivity: () => undefined,
     onFleetUpdate: (callback: (snapshot: any) => void) => { pushFleet = callback; },
     getStatus: async () => currentStatus,
@@ -168,9 +174,18 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
       job.version = args.expectedVersion + 1;
       return jobResult(args.envKey, job);
     },
-    interactionRegenerate: async (args: any) => jobResult(args.envKey, scopeEnvelope(commentFixture, args.envKey).data.replyJob),
-    interactionIgnore: async (args: any) => jobResult(args.envKey, { ...scopeEnvelope(commentFixture, args.envKey).data.replyJob, state: 'ignored', version: args.expectedVersion + 1 }),
-    interactionEscalate: async (args: any) => jobResult(args.envKey, { ...scopeEnvelope(commentFixture, args.envKey).data.replyJob, state: 'escalated', version: args.expectedVersion + 1 }),
+    interactionRegenerate: async (args: any) => {
+      calls.regenerate.push(args);
+      return jobResult(args.envKey, scopeEnvelope(commentFixture, args.envKey).data.replyJob);
+    },
+    interactionIgnore: async (args: any) => {
+      calls.ignore.push(args);
+      return jobResult(args.envKey, { ...scopeEnvelope(commentFixture, args.envKey).data.replyJob, state: 'ignored', version: args.expectedVersion + 1 });
+    },
+    interactionEscalate: async (args: any) => {
+      calls.escalate.push(args);
+      return jobResult(args.envKey, { ...scopeEnvelope(commentFixture, args.envKey).data.replyJob, state: 'escalated', version: args.expectedVersion + 1 });
+    },
     interactionSync: async (args: any) => {
       calls.sync.push(args);
       return apiResult({ data: { envKey: args.envKey, accountId: `account-${args.envKey}`, acceptedAt: Date.now() }, meta: { requestId: 'sync', asOf: Date.now() } });
@@ -179,18 +194,53 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
       calls.reopen.push(args);
       return apiResult({ data: { envKey: args.envKey, accountId: `account-${args.envKey}`, acceptedAt: Date.now() }, meta: { requestId: 'reopen', asOf: Date.now() } });
     },
+    interactionBrowserControl: async (args: any) => {
+      calls.browser.push(args);
+      return apiResult({
+        data: {
+          envKey: args.envKey, accountId: `account-${args.envKey}`, action: 'browser_control',
+          browserAction: args.action, actionRequestId: 'browser-control', status: 'accepted',
+        },
+        meta: { requestId: 'browser-control', asOf: Date.now() },
+      });
+    },
+    interactionUpdateReadControls: async (args: any) => {
+      calls.readControls.push(args);
+      const auth = clone(listFixture.data.auth);
+      auth.runtimeControls.storedVersion = args.expectedVersion + 1;
+      auth.runtimeControls.applicationStatus = 'pending';
+      auth.runtimeControls.stored.commentsReadEnabled = args.commentsReadEnabled;
+      auth.runtimeControls.stored.dmReadEnabled = args.dmReadEnabled;
+      return apiResult({
+        data: {
+          envKey: args.envKey,
+          accountId: `account-${args.envKey}`,
+          platform: 'wechat_channels',
+          auth,
+          replyConfig: clone(listFixture.data.replyConfig),
+          edgeDelivery: { status: 'enqueued', delivered: 1 },
+        },
+        meta: { requestId: 'read-controls', asOf: Date.now() },
+      });
+    },
+    interactionNotify: async (args: any) => { calls.notify.push(args); return { ok: true }; },
     interactionCancelReads: async (key: string) => { calls.cancel.push(key); return { ok: true, cancelled: 1 }; },
   };
   const api = { ...defaultApi, ...(options.api || {}) };
   const dom = new JSDOM(html, { runScripts: 'dangerously', url: 'http://fixture.local/' });
   const { window } = dom;
+  if (options.listPollDelayMs !== undefined) {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: any[]) =>
+      nativeSetTimeout(handler, delay === 3_000 || delay === 15_000 ? options.listPollDelayMs : delay, ...args)) as typeof window.setTimeout;
+  }
   openWindows.push(window);
   (window as any).aidcpEdge = api;
   window.eval(uiLogicSrc);
   window.eval(interactionSrc);
   window.eval(rendererSrc);
   await flush();
-  return { window, pushFleet, calls };
+  return { window, pushFleet, pushStatus, calls };
 }
 
 const $ = (window: DOMWindow, selector: string) => window.document.querySelector(selector) as HTMLElement;
@@ -210,10 +260,246 @@ test('XHS / Facebook 保留原 workspace；视频号只替换右侧且不占左�
   assert.equal($(window, '#interaction-workspace').contains($(window, '#env-rail')), false, '互动工作区不能吞掉左栏');
   assert.match($(window, '#acct-name').textContent || '', /轻享生活号/);
   assert.equal($(window, '#acct-plat').textContent, '视频号');
-  assert.match($(window, '#iw-browser').textContent || '', /浏览器已关闭（正常）/);
+  assert.match($(window, '#iw-title').textContent || '', /已绑定：示例视频号/);
+  assert.match($(window, '#iw-browser').textContent || '', /后台运行中（浏览器已关闭）/);
   assert.match($(window, '#iw-list').textContent || '', /示例观众/);
   assert.match($(window, '#iw-detail').textContent || '', /模板 template_comment_thanks · v1/);
   assert.match($(window, '#iw-detail').textContent || '', /配置版本 1/);
+});
+
+test('视频号互动使用 profileId 作为 Cloud envKey，不混用本机 ads- 环境行 ID', async () => {
+  const lifecycleCalls: string[] = [];
+  const { window, pushFleet, calls } = await boot({
+    api: {
+      pause: async (runtimeEnvId: string) => {
+        lifecycleCalls.push(runtimeEnvId);
+        return { ...status(runtimeEnvId, '视频号环境'), session: 'paused' };
+      },
+    },
+  });
+  pushFleet({
+    provider: 'adspower', selectedEnvId: 'ads-k1eoujd8', railCollapsed: true,
+    environments: [{
+      envId: 'ads-k1eoujd8', profileId: 'k1eoujd8', kind: 'adspower', name: '视频号环境', platform: 'wechat_channels',
+      status: { ...status('ads-k1eoujd8', '视频号环境'), account: { id: 'k1eoujd8', name: '', source: 'env' } },
+    }],
+  });
+  await flush();
+
+  assert.equal(calls.list.at(-1).envKey, 'k1eoujd8');
+  assert.notEqual(calls.list.at(-1).envKey, 'ads-k1eoujd8');
+
+  $(window, '#iw-lifecycle').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls, ['ads-k1eoujd8'], '本机生命周期动作仍必须路由 runtime envId');
+});
+
+test('active 视频号可打开浏览器或转入后台，accepted 不会冒充浏览器已显隐', async () => {
+  let browserState = 'closed';
+  const browserCalls: any[] = [];
+  const browserList = clone(listFixture);
+  const { window } = await boot({
+    api: {
+      interactionList: async (args: any) => {
+        const envelope = scopeEnvelope(browserList, args.envKey);
+        envelope.data.auth.browserState = browserState;
+        return apiResult(envelope);
+      },
+      interactionBrowserControl: async (args: any) => {
+        browserCalls.push(args);
+        return apiResult({
+          data: {
+            envKey: args.envKey, accountId: `account-${args.envKey}`, action: 'browser_control',
+            browserAction: args.action, actionRequestId: `browser-${args.action}`, status: 'accepted',
+          },
+          meta: { requestId: `browser-${args.action}`, asOf: Date.now() },
+        });
+      },
+    },
+  });
+  const control = $(window, '#iw-browser-control') as HTMLButtonElement;
+  assert.equal(control.textContent, '打开浏览器');
+
+  control.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(browserCalls[0].action, 'open');
+  assert.match(browserCalls[0].idempotencyKey, /^interaction-browser-open-/);
+  assert.match($(window, '#iw-sync-status').textContent || '', /已受理打开请求/);
+  assert.match($(window, '#iw-browser').textContent || '', /浏览器已关闭/,
+    'accepted 后尚未读回 open，不得提前显示已打开');
+
+  browserState = 'open';
+  await new Promise((resolve) => setTimeout(resolve, 1_050));
+  await flush();
+  assert.equal($(window, '#iw-browser').textContent, '浏览器已打开');
+  assert.equal(control.textContent, '转入后台');
+  assert.match($(window, '#iw-sync-status').textContent || '', /浏览器已打开/);
+
+  control.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(browserCalls[1].action, 'close');
+  assert.match($(window, '#iw-browser').textContent || '', /浏览器已打开/,
+    'accepted 后尚未读回 closed，不得提前显示已转入后台');
+
+  browserState = 'closed';
+  await new Promise((resolve) => setTimeout(resolve, 1_050));
+  await flush();
+  assert.match($(window, '#iw-browser').textContent || '', /后台运行中/);
+  assert.equal(control.textContent, '打开浏览器');
+});
+
+test('视频号工作区按 XHS 状态矩阵显示恢复与暂停态关闭，并只路由当前 envKey', async () => {
+  const lifecycleCalls: Array<[string, string]> = [];
+  let startAllCalls = 0;
+  let stopAllCalls = 0;
+  let settingsSaveCalls = 0;
+  const lifecycleStatus = (envKey: string, edge: string, session: string) => ({
+    ...status(envKey, '轻享生活号'), edge, session,
+  });
+  const { window, pushFleet } = await boot({
+    api: {
+      fleetStartAll: async () => { startAllCalls += 1; return { ok: true }; },
+      fleetStopAll: async () => { stopAllCalls += 1; return { ok: true }; },
+      saveSettings: async (patch: any) => { settingsSaveCalls += 1; return { ...patch, saveOk: true }; },
+      start: async (envKey: string) => {
+        lifecycleCalls.push(['start', envKey]);
+        return lifecycleStatus(envKey, 'starting', 'running');
+      },
+      pause: async (envKey: string) => {
+        lifecycleCalls.push(['pause', envKey]);
+        return lifecycleStatus(envKey, 'running', 'paused');
+      },
+      resume: async (envKey: string) => {
+        lifecycleCalls.push(['resume', envKey]);
+        return lifecycleStatus(envKey, 'running', 'running');
+      },
+      close: async (envKey: string) => {
+        lifecycleCalls.push(['close', envKey]);
+        return lifecycleStatus(envKey, 'stopped', 'closed');
+      },
+    },
+  });
+  const lifecycle = $(window, '#iw-lifecycle') as HTMLButtonElement;
+  const close = $(window, '#iw-close') as HTMLButtonElement;
+  const stopped = lifecycleStatus('env_wc_demo', 'stopped', 'closed');
+  pushFleet({
+    provider: 'adspower', selectedEnvId: 'env_wc_demo', railCollapsed: true,
+    environments: [{ envId: 'env_wc_demo', name: '轻享生活号', platform: 'wechat_channels', status: stopped }],
+  });
+  await flush();
+
+  assert.equal(hidden(lifecycle), false, '视频号右侧工作区必须直接露出生命周期入口');
+  assert.equal(lifecycle.textContent, '启动');
+  assert.equal(hidden(close), true, '未暂停时不显示关闭');
+  close.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls, [], '非暂停态即使被程序化触发也不得关闭');
+  lifecycle.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls, [['start', 'env_wc_demo']]);
+  assert.equal(lifecycle.textContent, '暂停', 'starting 状态继续允许用户暂停');
+
+  lifecycle.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls, [['start', 'env_wc_demo'], ['pause', 'env_wc_demo']]);
+  assert.equal(lifecycle.textContent, '恢复');
+  assert.equal(hidden(close), false, '暂停后同时显示恢复与关闭');
+
+  close.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls, [
+    ['start', 'env_wc_demo'], ['pause', 'env_wc_demo'], ['close', 'env_wc_demo'],
+  ]);
+  assert.equal(lifecycle.textContent, '启动', '关闭回传真态后回到启动');
+  assert.equal(hidden(close), true);
+
+  pushFleet({
+    provider: 'adspower', selectedEnvId: 'env_wc_demo', railCollapsed: true,
+    environments: [{ envId: 'env_wc_demo', name: '轻享生活号', platform: 'wechat_channels', status: lifecycleStatus('env_wc_demo', 'stopped', 'paused') }],
+  });
+  await flush();
+  assert.equal(lifecycle.textContent, '恢复', 'paused 优先级与 XHS 一致，即使 edge 已停止仍可恢复或关闭');
+  assert.equal(hidden(close), false);
+  lifecycle.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.deepEqual(lifecycleCalls.at(-1), ['resume', 'env_wc_demo']);
+  assert.equal(lifecycle.textContent, '暂停');
+  assert.equal(startAllCalls, 0, '单环境入口不得退化成全部启动');
+  assert.equal(stopAllCalls, 0, '单环境关闭不得退化成全部停止');
+  assert.equal(settingsSaveCalls, 1, '视频号启动必须复用先保存设置再启动的单环境链路');
+});
+
+test('开发者详情开关在视频号工作区仍展示当前环境日志', async () => {
+  const saved: any[] = [];
+  const { window, pushStatus } = await boot({
+    api: { saveSettings: async (patch: any) => { saved.push(patch); return { ...patch, saveOk: true }; } },
+  });
+  const dev = $(window, '#dev-section');
+  const toggle = $(window, '#dev-toggle') as HTMLInputElement;
+  assert.equal(hidden(dev), true, '默认隐藏语义不变');
+  assert.equal($(window, '#legacy-workspace').contains(dev), false, '开发者详情不能被 legacy workspace 的显隐吞掉');
+
+  toggle.checked = true;
+  toggle.dispatchEvent(new window.Event('change', { bubbles: true }));
+  pushStatus({ ...status('env_wc_demo', '轻享生活号'), lastMessage: '视频号当前环境日志' });
+  await flush();
+
+  assert.equal(hidden($(window, '#interaction-workspace')), false);
+  assert.equal(hidden(dev), false, '视频号工作区与开发者详情应同时可见');
+  assert.match($(window, '#last-message').textContent || '', /视频号当前环境日志/);
+  assert.ok(saved.some((patch) => patch.devDetails === true), '开发者详情开关继续持久化');
+});
+
+test('首次授权、错号恢复和账号开关待应用都有明确且 fail-closed 的引导', async () => {
+  const loginList = clone(listFixture);
+  loginList.data.items = [];
+  loginList.data.auth.status = 'login_required';
+  loginList.data.auth.identity = null;
+  loginList.data.auth.runtimeControls.edgeAppliedVersion = null;
+  loginList.data.auth.runtimeControls.applicationStatus = 'pending';
+  const first = await boot({
+    label: '春日手作号',
+    api: { interactionList: async () => apiResult(loginList) },
+  });
+  assert.match($(first.window, '#iw-title').textContent || '', /等待首次登录/);
+  assert.match($(first.window, '#iw-summary').textContent || '', /春日手作号/);
+  assert.match($(first.window, '#iw-summary').textContent || '', /无需填写内部账号 ID/);
+  assert.equal(hidden($(first.window, '#iw-reauth')), false);
+
+  const mismatchList = clone(listFixture);
+  const mismatchDetail = clone(commentFixture);
+  for (const fixture of [mismatchList, mismatchDetail]) {
+    fixture.data.auth.status = 'reauth_required';
+    fixture.data.auth.reasonCode = 'WECHAT_IDENTITY_MISMATCH';
+  }
+  const mismatch = await boot({
+    api: {
+      interactionList: async () => apiResult(mismatchList),
+      interactionDetail: async () => apiResult(mismatchDetail),
+    },
+  });
+  assert.match($(mismatch.window, '#iw-title').textContent || '', /另一个视频号/);
+  assert.match($(mismatch.window, '#iw-summary').textContent || '', /示例视频号/);
+  assert.match($(mismatch.window, '#iw-summary').textContent || '', /历史内容仍可查看/);
+  assert.equal((mismatch.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
+
+  const pendingList = clone(listFixture);
+  const pendingDetail = clone(commentFixture);
+  for (const fixture of [pendingList, pendingDetail]) {
+    fixture.data.auth.runtimeControls.storedVersion = 8;
+    fixture.data.auth.runtimeControls.edgeAppliedVersion = 7;
+    fixture.data.auth.runtimeControls.applicationStatus = 'pending';
+  }
+  const pending = await boot({
+    api: {
+      interactionList: async () => apiResult(pendingList),
+      interactionDetail: async () => apiResult(pendingDetail),
+    },
+  });
+  assert.match($(pending.window, '#iw-title').textContent || '', /互动收取尚未生效/);
+  assert.match($(pending.window, '#iw-read-apply').textContent || '', /Cloud 已保存 v8，等待本机应用/);
+  assert.match($(pending.window, '#iw-detail').textContent || '', /尚未回报应用同一版本/);
+  assert.equal((pending.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
 });
 
 test('tabs / 搜索 / 空态 / 错态 / ambiguous 都使用冻结 fixture 的诚实状态', async () => {
@@ -239,7 +525,210 @@ test('tabs / 搜索 / 空态 / 错态 / ambiguous 都使用冻结 fixture 的诚
     api: { interactionList: async () => apiError('INTERACTION_UPSTREAM_UNAVAILABLE', 'offline', 503) },
   });
   assert.match($(errorBoot.window, '#iw-list-error').textContent || '', /Cloud 暂时不可达/);
-  assert.match($(errorBoot.window, '#iw-list').textContent || '', /当前没有待处理互动/);
+  assert.match($(errorBoot.window, '#iw-list').textContent || '', /收取状态待确认/);
+  assert.match($(errorBoot.window, '#iw-list').textContent || '', /不能据此判断是否没有互动/);
+});
+
+test('页面提供总开关、评论和私信收取开关，只提交读取字段并显示存储/应用/有效状态', async () => {
+  const { window, calls } = await boot();
+  const all = $(window, '#iw-read-all') as HTMLInputElement;
+  const comment = $(window, '#iw-read-comment') as HTMLInputElement;
+  const dm = $(window, '#iw-read-dm') as HTMLInputElement;
+  assert.equal(all.checked, true);
+  assert.equal(comment.checked, true);
+  assert.equal(dm.checked, true);
+  assert.match($(window, '#iw-read-comment-status').textContent || '', /正在收取/);
+  assert.match($(window, '#iw-read-dm-status').textContent || '', /正在收取/);
+  assert.match($(window, '#iw-read-apply').textContent || '', /Cloud 已保存 v7，本机已应用同一版本/);
+
+  comment.checked = false;
+  comment.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await flush();
+  assert.deepEqual(clone(calls.readControls), [{
+    envKey: 'env_wc_demo', expectedVersion: 7, commentsReadEnabled: false, dmReadEnabled: true,
+  }]);
+  assert.deepEqual(Object.keys(calls.readControls[0]).sort(), ['commentsReadEnabled', 'dmReadEnabled', 'envKey', 'expectedVersion']);
+  assert.equal((window.document.querySelector('#iw-read-comment') as HTMLInputElement).checked, false);
+  assert.match($(window, '#iw-read-comment-status').textContent || '', /已关闭/);
+  assert.match($(window, '#iw-read-dm-status').textContent || '', /等待本机应用/);
+
+  const conflict = await boot({
+    api: { interactionUpdateReadControls: async () => apiError('INTERACTION_VERSION_CONFLICT', 'version conflict') },
+  });
+  const conflictDm = $(conflict.window, '#iw-read-dm') as HTMLInputElement;
+  conflictDm.checked = false;
+  conflictDm.dispatchEvent(new conflict.window.Event('change', { bubbles: true }));
+  await flush();
+  assert.match($(conflict.window, '#iw-read-error').textContent || '', /已在别处更新/);
+  assert.equal((conflict.window.document.querySelector('#iw-read-dm') as HTMLInputElement).checked, true, '冲突后恢复服务端已知值');
+});
+
+test('读取开关待本机应用时继续轮询，应用成功后自动恢复有效状态', async () => {
+  let listCount = 0;
+  const current = await boot({
+    listPollDelayMs: 10,
+    api: {
+      interactionList: async () => {
+        listCount += 1;
+        const envelope = clone(listFixture);
+        if (listCount === 1) {
+          envelope.data.auth.runtimeControls.storedVersion = 8;
+          envelope.data.auth.runtimeControls.edgeAppliedVersion = 7;
+          envelope.data.auth.runtimeControls.applicationStatus = 'pending';
+        }
+        return apiResult(envelope);
+      },
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await flush();
+  assert.ok(listCount >= 2, '待应用状态必须继续获取 Cloud 投影，不能陷入停止轮询');
+  assert.match($(current.window, '#iw-read-apply').textContent || '', /本机已应用同一版本/);
+  assert.match($(current.window, '#iw-read-comment-status').textContent || '', /正在收取/);
+  current.window.close();
+});
+
+test('首次互动状态查询失败后自动重试并恢复浏览器控制', async () => {
+  let listCount = 0;
+  const current = await boot({
+    listPollDelayMs: 10,
+    api: {
+      interactionList: async (args: any) => {
+        listCount += 1;
+        if (listCount === 1) return apiError('INTERACTION_VALIDATION_FAILED', 'state 不合法。', 422);
+        const envelope = scopeEnvelope(listFixture, args.envKey);
+        envelope.data.auth.browserState = 'closed';
+        return apiResult(envelope);
+      },
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await flush();
+
+  assert.ok(listCount >= 2, '首次查询失败时必须继续获取 Cloud 投影，不能永久停在待确认');
+  assert.match($(current.window, '#iw-browser').textContent || '', /后台运行中/);
+  assert.equal(($(current.window, '#iw-browser-control') as HTMLButtonElement).textContent, '打开浏览器');
+  assert.equal(hidden($(current.window, '#iw-browser-control')), false);
+  current.window.close();
+});
+
+test('关闭、待应用和平台读取能力未就绪时，标题、空态和局部刷新都说明真实原因', async () => {
+  for (const scenario of ['off', 'pending', 'capability'] as const) {
+    const list = clone(listFixture);
+    list.data.items = [];
+    if (scenario === 'off') {
+      list.data.auth.runtimeControls.stored.commentsReadEnabled = false;
+      list.data.auth.runtimeControls.stored.dmReadEnabled = false;
+    } else if (scenario === 'pending') {
+      list.data.auth.runtimeControls.storedVersion = 8;
+      list.data.auth.runtimeControls.edgeAppliedVersion = 7;
+      list.data.auth.runtimeControls.applicationStatus = 'pending';
+    } else {
+      list.data.auth.capabilities.commentsRead = false;
+      list.data.auth.capabilities.dmRead = false;
+    }
+    const current = await boot({ api: { interactionList: async () => apiResult(list) } });
+    const expected = scenario === 'off' ? /互动收取已关闭/ : /互动收取尚未生效/;
+    assert.match($(current.window, '#iw-title').textContent || '', expected);
+    assert.equal(($(current.window, '#iw-sync') as HTMLButtonElement).disabled, true);
+    assert.match($(current.window, '#iw-list').textContent || '', scenario === 'off'
+      ? /请先开启评论或私信收取/
+      : scenario === 'pending' ? /等待 Edge 应用同一版本/ : /读取能力/);
+  }
+});
+
+test('发送能力只阻止发送；配置缺失只阻止依赖配置的动作，忽略和转人工仍可用', async () => {
+  const noSendList = clone(listFixture);
+  const noSendDetail = clone(commentFixture);
+  noSendList.data.auth.capabilities.commentsReply = false;
+  noSendDetail.data.auth.capabilities.commentsReply = false;
+  const noSend = await boot({
+    api: {
+      interactionList: async () => apiResult(noSendList),
+      interactionDetail: async () => apiResult(noSendDetail),
+    },
+  });
+  for (const action of ['approve', 'regenerate', 'ignore', 'escalate']) {
+    assert.equal((noSend.window.document.querySelector(`[data-iw-action="${action}"]`) as HTMLButtonElement).disabled, false, `${action} 不应被发送能力误伤`);
+  }
+  const textarea = $(noSend.window, '#iw-final-text') as HTMLTextAreaElement;
+  textarea.value = '仍可保存的修改';
+  textarea.dispatchEvent(new noSend.window.Event('input', { bubbles: true }));
+  assert.equal((noSend.window.document.querySelector('[data-iw-action="save"]') as HTMLButtonElement).disabled, false);
+  $(noSend.window, '[data-iw-action="approve"]').dispatchEvent(new noSend.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal((noSend.window.document.querySelector('[data-iw-action="send"]') as HTMLButtonElement).disabled, true);
+  assert.match($(noSend.window, '#iw-detail').textContent || '', /只有发送被禁用/);
+
+  const missingList = clone(listFixture);
+  const missingDetail = clone(commentFixture);
+  for (const fixture of [missingList, missingDetail]) {
+    fixture.data.replyConfig = { status: 'missing', draftVersion: null, publishedVersion: null };
+  }
+  const missing = await boot({
+    api: {
+      interactionList: async () => apiResult(missingList),
+      interactionDetail: async () => apiResult(missingDetail),
+    },
+  });
+  assert.match($(missing.window, '#iw-config-status').textContent || '', /尚未创建回复配置/);
+  assert.equal((missing.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
+  assert.equal((missing.window.document.querySelector('[data-iw-action="regenerate"]') as HTMLButtonElement).disabled, true);
+  assert.equal((missing.window.document.querySelector('[data-iw-action="ignore"]') as HTMLButtonElement).disabled, false);
+  assert.equal((missing.window.document.querySelector('[data-iw-action="escalate"]') as HTMLButtonElement).disabled, false);
+  $(missing.window, '#iw-config-help').dispatchEvent(new missing.window.Event('click', { bubbles: true }));
+  assert.match($(missing.window, '#iw-config-guidance').textContent || '', /管理后台点击“创建安全草稿”/);
+  assert.match($(missing.window, '#iw-config-guidance').textContent || '', /不会自动开启回复或发送/);
+});
+
+test('未读提醒按环境建立无通知基线，之后每个新 messageId 最多提醒一次', async () => {
+  const callsByEnv = new Map<string, number>();
+  let exposeNewMessage = false;
+  const { window, pushFleet, calls } = await boot({
+    envKey: 'env_A',
+    api: {
+      interactionList: async (args: any) => {
+        const count = (callsByEnv.get(args.envKey) || 0) + 1;
+        callsByEnv.set(args.envKey, count);
+        const envelope = scopeEnvelope(listFixture, args.envKey, args.envKey);
+        envelope.data.items = [envelope.data.items[0]];
+        if (args.envKey === 'env_A' && exposeNewMessage) {
+          envelope.data.items.push({
+            ...clone(envelope.data.items[0]),
+            threadId: 'thread_comment_101',
+            messageId: 'msg_comment_101',
+            participantName: 'A 新观众',
+            previewText: '这是刷新后新增的评论',
+            unread: true,
+          });
+        }
+        return apiResult(envelope);
+      },
+    },
+  });
+  assert.equal(calls.notify.length, 0, '首屏历史未读只建基线，不弹系统提醒');
+  assert.match($(window, '#iw-unread-badge').textContent || '', /1 条未读/);
+
+  exposeNewMessage = true;
+  $(window, '#iw-sync').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await new Promise((resolve) => setTimeout(resolve, 850));
+  await flush();
+  assert.deepEqual(clone(calls.notify), [{ envKey: 'env_A', channel: 'comment', count: 1 }]);
+  assert.match($(window, '#iw-unread-badge').textContent || '', /2 条未读/);
+
+  $(window, '#iw-sync').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await new Promise((resolve) => setTimeout(resolve, 850));
+  await flush();
+  assert.equal(calls.notify.length, 1, '相同 messageId 刷新不得重复提醒');
+
+  pushFleet({
+    provider: 'adspower', selectedEnvId: 'env_B', railCollapsed: true,
+    environments: [{ envId: 'env_B', name: '账号 B', platform: 'wechat_channels', status: status('env_B', '账号 B') }],
+  });
+  await flush();
+  assert.equal(calls.notify.length, 1, '切换到新环境的首屏也只建自己的基线');
+  assert.match($(window, '#iw-unread-badge').textContent || '', /1 条未读/);
 });
 
 test('列表方向键可达并移动焦点，窄屏样式折叠为单栏且保留 focus ring', async () => {
@@ -369,6 +858,8 @@ test('CAS 冲突保留输入并给出刷新入口；reauth 保留历史但禁写
   assert.equal(hidden($(reauth.window, '#iw-reauth')), false);
   $(reauth.window, '#iw-reauth').dispatchEvent(new reauth.window.Event('click', { bubbles: true }));
   await flush();
+  assert.match($(reauth.window, '#iw-sync-status').textContent || '', /仍需等待平台登录状态确认/);
+  assert.match($(reauth.window, '#iw-title').textContent || '', /需要重新登录/);
   assert.equal(reauth.window.document.querySelectorAll('[data-iw-action="approve"]:not([disabled])').length, 0);
   assert.equal(reauthList.data.items.length, 2, '登录失效不能清掉历史 fixture');
   assert.match(reopenArgs.idempotencyKey, /^interaction-reauth-/);

@@ -50,10 +50,13 @@ import {
 import { selectPlatformDriver } from './platform/index.js';
 import { runWechatChannelsRuntime } from './wechat-channels/runtime.js';
 import {
+  backfillOverlayEvidenceText,
+  emitCompanionUiEvent,
   FacebookBrowseSession,
   FacebookCommentExecutor,
   FacebookCommentHandler,
   FacebookJoinExecutor,
+  FacebookOverlayMonitor,
   FacebookPublishExecutor,
   parseFacebookBrowseMode,
   readFacebookIdentityPageContext,
@@ -972,6 +975,10 @@ async function main(): Promise<void> {
         if (overlaySnapshotPromise) return;
         overlaySnapshotPromise = captureBlockingOverlaySnapshot(session.cdp, kind).catch(() => undefined);
       };
+      // change fb-throttle-popup-zh-frequency-copy：回填同源证据用的监测体句柄。此块只在 useFacebookBrowse
+      // 下装配，driver 必返 FacebookOverlayMonitor；instanceof 只是诚实收窄——万一不是，回填静默不发生、
+      // 退化为改动前行为（不假造证据、不假成功）。
+      const fbOverlayMonitor = overlayMonitor instanceof FacebookOverlayMonitor ? overlayMonitor : undefined;
       const sendOverlayDetected = (kind: 'captcha' | 'unknown'): void => {
         void (async () => {
           primeOverlaySnapshot(kind);
@@ -984,18 +991,33 @@ async function main(): Promise<void> {
               /* best-effort */
             }
           }
+          // 快照候选筛选对 FB 标准限流弹窗必然落空（无 iframe / 未达尺寸阈 / 有关闭控件）⇒ overlay.text
+          // 为空 ⇒ 云端「无文案不臆断限流」返否定 ⇒ 真限流只到 warned 降速而非 restricted 刹车。用判定
+          // 同源文本回填证据；判定本身不变。
+          const reportedOverlay = backfillOverlayEvidenceText(overlay, kind, url, fbOverlayMonitor?.lastScanText);
           try {
             client.send('risk.captcha_detected', {
               edgeId,
               kind,
               url,
-              ...(overlay ? { overlay } : {}),
+              ...(reportedOverlay ? { overlay: reportedOverlay } : {}),
               ...(accountId ? { accountId } : {}),
             });
           } catch (err) {
             console.error('[aidcp-edge] risk.captcha_detected 上报失败:', err);
           }
-          console.warn(`[aidcp-edge] ⚠ Facebook 检测到${kind === 'captcha' ? '验证码' : '未知阻断/限流'}，已上报云端`);
+          const what = kind === 'captcha' ? '验证码' : '未知阻断/限流';
+          console.warn(`[aidcp-edge] ⚠ Facebook 检测到${what}，已上报云端`);
+          // change facebook-write-action-visibility：结构化点亮客户端「需要处理」态。
+          // 既有 edge-fleet-console 规格要求被验证码拦住的环境必须浮到最上，但这条中文日志不含壳侧
+          // 兜底正则要的「弹窗」「暂停操作」（那张表是小红书专属的）⇒ FB 环境的阻断态**从不置真**，
+          // 卡在验证码上的机器在客户端里一直是绿的、运营不知道该救哪台。绝不靠措辞匹配，走结构化行。
+          emitCompanionUiEvent((m) => console.log(m), {
+            kind: 'activity',
+            type: 'popup',
+            sentence: `遇到${what}，先停一停等处理`,
+            presence: `遇到${what}，暂停操作中…`,
+          });
         })();
       };
       const overlayReportGate = createOverlayReportGate({
@@ -1007,6 +1029,14 @@ async function main(): Promise<void> {
             console.error('[aidcp-edge] risk.captcha_cleared 上报失败:', err);
           }
           resetOverlaySnapshot();
+          // 清除侧同样必须显式：此前 FB 这条路径**什么都不打**（小红书侧会打），两侧都没有 ⇒
+          // 阻断态只能靠「任何一次成功动作顺带清掉」这种假清除退出（已在壳侧收紧为只认本事件）。
+          emitCompanionUiEvent((m) => console.log(m), {
+            kind: 'activity',
+            type: 'popup_cleared',
+            sentence: '阻断已解除，继续浏览',
+            presence: '继续浏览…',
+          });
         },
         isStillUnknown: () => overlayMonitor?.state === 'unknown',
         schedule: (fn, ms) => {
