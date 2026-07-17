@@ -48,6 +48,7 @@
   const TERMINAL_STATES = new Set(['sent', 'ignored', 'escalated']);
   const LOCKED_TEXT_STATES = new Set(['approved', 'queued', 'sending', 'sent', 'failed', 'ambiguous', 'ignored', 'escalated']);
   const WRITE_BLOCKING_AUTH = new Set(['login_required', 'reauth_required', 'challenge_required', 'disabled']);
+  const MAX_SYNC_CLOCK_SKEW_MS = 5 * 60_000;
 
   function escapeHtml(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, (char) => ({
@@ -67,6 +68,28 @@
     if (diff >= 0 && diff < 60_000) return '刚刚';
     if (diff >= 60_000 && diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
     return new Date(value).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  }
+
+  function exactKeys(value, expected) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const keys = Object.keys(value).sort();
+    return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
+  }
+
+  function parseSyncEvidence(value) {
+    if (!exactKeys(value, ['observedAt', 'receivedAt'])) return null;
+    const observedAt = Number(value.observedAt);
+    const receivedAt = Number(value.receivedAt);
+    if (!Number.isInteger(observedAt) || observedAt <= 0 || !Number.isInteger(receivedAt) || receivedAt <= 0) return null;
+    return { observedAt, receivedAt };
+  }
+
+  function parseSyncFreshness(value) {
+    if (!exactKeys(value, ['comment', 'dm'])) return null;
+    const comment = value.comment === null ? null : parseSyncEvidence(value.comment);
+    const dm = value.dm === null ? null : parseSyncEvidence(value.dm);
+    if ((value.comment !== null && !comment) || (value.dm !== null && !dm)) return null;
+    return { comment, dm };
   }
 
   function makeRequestKey(prefix) {
@@ -127,7 +150,7 @@
       reauth: root.querySelector('#iw-reauth'),
       sync: root.querySelector('#iw-sync'),
       syncStatus: root.querySelector('#iw-sync-status'),
-      asOf: root.querySelector('#iw-as-of'),
+      syncTime: root.querySelector('#iw-as-of'),
       unreadBadge: root.querySelector('#iw-unread-badge'),
       readAll: root.querySelector('#iw-read-all'),
       readComment: root.querySelector('#iw-read-comment'),
@@ -169,7 +192,8 @@
       return {
         tab: 'pending', search: '', items: [], nextCursor: null, listLoading: false, listAppending: false,
         listError: null, selectedThreadId: null, detail: null, detailLoading: false, detailError: null,
-        auth: null, asOf: null, stale: false, actionBusy: null, actionError: null, actionNotice: null,
+        auth: null, syncFreshness: null, pendingSync: null, stale: false,
+        actionBusy: null, actionError: null, actionNotice: null,
         replyConfig: null, readControlsBusy: false, readControlsError: null, configGuidanceOpen: false,
         testDataResetEnabled: false, testResetBusy: null, testResetStatus: null,
         pendingBrowserAction: null, browserPollCount: 0,
@@ -303,6 +327,81 @@
       return { storedEnabled: false, effective: false, label: '互动收取未开启', reason: '请先开启评论或私信收取。' };
     }
 
+    function relevantSyncChannels() {
+      return state.tab === 'comment' || state.tab === 'dm' ? [state.tab] : ['comment', 'dm'];
+    }
+
+    function syncEvidence(channel) {
+      return state.syncFreshness && state.syncFreshness[channel];
+    }
+
+    function syncClockSkewed(evidence) {
+      return Boolean(evidence && evidence.observedAt > evidence.receivedAt + MAX_SYNC_CLOCK_SKEW_MS);
+    }
+
+    function syncStatusText() {
+      if (!state.syncFreshness) return '同步状态待确认';
+      const channels = relevantSyncChannels();
+      const skewed = channels.filter((channel) => syncClockSkewed(syncEvidence(channel)));
+      if (skewed.length > 0) return `${skewed.map((channel) => channel === 'dm' ? '私信' : '评论').join('、')}设备时间待校准`;
+      const missing = channels.filter((channel) => !syncEvidence(channel));
+      if (missing.length === channels.length) {
+        return channels.length === 1
+          ? `${channels[0] === 'dm' ? '私信' : '评论'}尚未成功同步`
+          : '评论/私信尚未成功同步';
+      }
+      if (missing.length > 0) {
+        return `${missing.map((channel) => channel === 'dm' ? '私信' : '评论').join('、')}尚未成功同步`;
+      }
+      return channels.length === 1
+        ? `${channels[0] === 'dm' ? '私信' : '评论'}已有成功同步记录`
+        : '评论/私信均有成功同步记录';
+    }
+
+    function syncTimeText() {
+      if (!state.syncFreshness) return '同步时间待确认';
+      return relevantSyncChannels().map((channel) => {
+        const label = channel === 'dm' ? '私信' : '评论';
+        const evidence = syncEvidence(channel);
+        if (!evidence) return `${label} 尚无成功记录`;
+        if (syncClockSkewed(evidence)) return `${label} 设备时间待校准 · Cloud ${formatTime(evidence.receivedAt)}收到`;
+        return `${label} ${formatTime(evidence.observedAt)}`;
+      }).join(' · ');
+    }
+
+    function applySyncFreshness(value) {
+      const parsed = parseSyncFreshness(value);
+      const projection = parsed && state.syncFreshness
+        ? {
+            comment: newerSyncEvidence(state.syncFreshness.comment, parsed.comment),
+            dm: newerSyncEvidence(state.syncFreshness.dm, parsed.dm),
+          }
+        : parsed;
+      state.syncFreshness = projection;
+      const pending = state.pendingSync;
+      if (!pending || pending.envKey !== selectedEnvKey()) return;
+      const completed = Boolean(projection) && pending.channels.every((channel) => {
+        const evidence = projection[channel];
+        const baseline = pending.receivedAt[channel];
+        return Boolean(evidence && evidence.receivedAt > (baseline || 0));
+      });
+      if (completed) {
+        state.actionNotice = '本次同步已有成功结果。';
+        state.pendingSync = null;
+      } else {
+        state.actionNotice = '同步请求已受理，尚未确认同步完成。';
+      }
+    }
+
+    function newerSyncEvidence(current, incoming) {
+      if (!current) return incoming;
+      if (!incoming) return current;
+      if (incoming.observedAt !== current.observedAt) {
+        return incoming.observedAt > current.observedAt ? incoming : current;
+      }
+      return incoming.receivedAt >= current.receivedAt ? incoming : current;
+    }
+
     function renderReadSettings() {
       const controls = state.auth && state.auth.runtimeControls;
       const stored = controls && controls.stored;
@@ -394,19 +493,23 @@
         const dmRead = channelReadState('dm');
         const allReadDisabled = !commentRead.storedEnabled && !dmRead.storedEnabled;
         const enabledButUnavailable = !allReadDisabled && !commentRead.effective && !dmRead.effective;
+        const effectiveChannels = ['comment', 'dm'].filter((channel) => channelReadState(channel).effective);
+        const syncUnconfirmed = effectiveChannels.some((channel) => !syncEvidence(channel));
         title = connectivityStale ? '同步暂时中断'
           : allReadDisabled ? '互动收取已关闭'
             : enabledButUnavailable ? '互动收取尚未生效'
               : controlsPending ? '账号开关等待本机应用'
+                : syncUnconfirmed ? '等待首次成功同步'
             : auth.identity ? `已绑定：${safeText(auth.identity.displayName, '视频号账号')}` : '互动托管中';
         summary = connectivityStale ? '正在使用上次成功数据；Cloud 恢复后可局部刷新。'
           : allReadDisabled ? '评论和私信收取都已关闭。可在下方按渠道重新开启。'
             : enabledButUnavailable ? (commentRead.storedEnabled ? commentRead.reason : dmRead.reason)
               : controlsPending ? 'Cloud 已保存账号配置，但 Edge 尚未回报同版本能力；当前写操作继续关闭。'
+                : syncUnconfirmed ? '开关与平台读取能力已就绪，但尚未收到所有已启用渠道的成功同步证据。'
             : auth.browserState === 'open'
               ? '浏览器当前保持打开；评论和私信仍按 Edge 实际能力同步。完成查看后可转入后台。'
               : '当前环境已绑定这个视频号并在后台运行。评论和私信按 Edge 实际能力同步，发送结果以平台确认状态为准。';
-        tone = connectivityStale || controlsPending || allReadDisabled || enabledButUnavailable ? 'attention' : 'success';
+        tone = connectivityStale || controlsPending || allReadDisabled || enabledButUnavailable || syncUnconfirmed ? 'attention' : 'success';
       } else if (status === 'login_required') {
         title = '等待首次登录';
         summary = `将在“${safeText(env && env.label, '当前环境')}”打开的视频号助手中绑定你本次扫码登录的账号；无需填写内部账号 ID。`;
@@ -471,8 +574,8 @@
         ? '正在读取当前环境'
         : state.stale ? '使用上次成功数据'
           : controlsWriteBlocked() && status === 'active' ? '账号开关已保存，等待 Edge 应用'
-          : state.actionNotice || (state.asOf ? '评论/私信同步正常' : '同步状态待确认');
-      dom.asOf.textContent = state.asOf ? `数据时间 ${formatTime(state.asOf)}` : '—';
+          : state.actionNotice || syncStatusText();
+      dom.syncTime.textContent = `${state.stale ? '上次成功' : '最近成功'} · ${syncTimeText()}`;
       const canReopen = ['login_required', 'reauth_required', 'challenge_required'].includes(status);
       dom.reauth.classList.toggle('hidden', !canReopen);
       dom.reauth.textContent = status === 'challenge_required' ? '打开浏览器处理验证' : status === 'login_required' ? '打开登录窗口' : '重新登录';
@@ -499,6 +602,17 @@
       if (!read.effective) {
         const channel = state.tab === 'comment' ? '评论' : state.tab === 'dm' ? '私信' : '互动';
         return { title: read.label === '收取状态待确认' ? read.label : `${channel}收取未生效`, detail: read.reason };
+      }
+      const requiredChannels = (state.tab === 'comment' || state.tab === 'dm')
+        ? [state.tab]
+        : ['comment', 'dm'].filter((channel) => channelReadState(channel).effective);
+      if (!state.syncFreshness) {
+        return { title: '同步状态待确认', detail: '本次 API 读取成功不代表平台同步成功，当前列表为空不能证明没有互动。' };
+      }
+      const missingChannels = requiredChannels.filter((channel) => !syncEvidence(channel));
+      if (missingChannels.length > 0) {
+        const labels = missingChannels.map((channel) => channel === 'dm' ? '私信' : '评论').join('、');
+        return { title: `${labels}尚未成功同步`, detail: '收到目标渠道的成功同步时间后，才能确认当前确实没有新互动。' };
       }
       if (state.tab === 'comment') return { title: '当前没有评论互动', detail: '评论收取正常；有新评论时会显示在这里。' };
       if (state.tab === 'dm') return { title: '当前没有私信会话', detail: '私信收取正常；有新私信时会显示在这里。' };
@@ -619,6 +733,11 @@
       const attempt = detail.sendAttempt;
       const participant = safeText(thread.participant && thread.participant.displayName, '未获取昵称');
       const source = safeText(thread.sourceTitle, thread.channel === 'dm' ? '私信会话' : '未获取视频标题');
+      const channelSync = syncEvidence(thread.channel);
+      const threadSyncText = !state.syncFreshness ? '同步时间待确认'
+        : !channelSync ? '尚未成功同步'
+          : syncClockSkewed(channelSync) ? `设备时间待校准 · Cloud ${formatTime(channelSync.receivedAt)}收到`
+            : formatTime(channelSync.observedAt);
       const templateId = job && job.template && job.template.templateId;
       const templateVersion = job && job.template && job.template.templateVersion;
       const renderedText = safeText(job && job.renderedText, '未生成模板原文');
@@ -643,7 +762,7 @@
         </header>
         <section class="iw-source-card">
           <span class="iw-source-icon" aria-hidden="true">${thread.channel === 'dm' ? '信' : '视'}</span>
-          <div><span>${thread.channel === 'dm' ? '会话来源' : '关联视频'}</span><strong>${escapeHtml(source)}</strong><small>最近同步 ${escapeHtml(formatTime(thread.lastSyncedAt))}</small></div>
+          <div><span>${thread.channel === 'dm' ? '会话来源' : '关联视频'}</span><strong>${escapeHtml(source)}</strong><small>最近同步 ${escapeHtml(threadSyncText)}</small></div>
         </section>
         <section class="iw-thread" aria-label="消息上下文">${renderMessages(detail)}${detail.nextCursor ? '<button class="iw-button ghost" type="button" data-iw-action="load-messages">加载更早消息</button>' : ''}</section>
         ${renderSendState(job, attempt)}
@@ -769,8 +888,8 @@
         state.auth = envelope.data.auth;
         state.replyConfig = envelope.data.replyConfig || { status: 'unknown', draftVersion: null, publishedVersion: null };
         state.testDataResetEnabled = Boolean(envelope.data.testTools && envelope.data.testTools.dataResetEnabled);
+        applySyncFreshness(envelope.data.syncFreshness);
         reconcileBrowserAction();
-        state.asOf = envelope.meta && envelope.meta.asOf;
         state.listError = null;
         state.stale = false;
         const visible = filteredItems();
@@ -857,7 +976,7 @@
         state.detail = envelope.data;
         state.auth = envelope.data.auth;
         state.replyConfig = envelope.data.replyConfig || state.replyConfig || { status: 'unknown', draftVersion: null, publishedVersion: null };
-        state.asOf = envelope.meta && envelope.meta.asOf;
+        applySyncFreshness(envelope.data.syncFreshness);
         if (env && env.connectivity === 'connected') state.stale = false;
         state.detailError = null;
         state.draftText = safeText(envelope.data.replyJob && envelope.data.replyJob.finalText, '');
@@ -1028,22 +1147,32 @@
       }
       const capturedEpoch = epoch;
       const envKey = env.envKey;
+      const effectiveChannels = ['comment', 'dm'].filter((channel) => channelReadState(channel).effective);
+      const channel = state.tab === 'comment' || state.tab === 'dm'
+        ? state.tab
+        : effectiveChannels.length === 1 ? effectiveChannels[0] : null;
+      const pendingChannels = channel ? [channel] : effectiveChannels;
+      const receivedAt = {};
+      for (const pendingChannel of pendingChannels) {
+        receivedAt[pendingChannel] = syncEvidence(pendingChannel)?.receivedAt || null;
+      }
       state.syncBusy = true;
       state.actionNotice = null;
       renderOverview();
       try {
-        const channel = state.tab === 'comment' || state.tab === 'dm' ? state.tab : null;
         const response = await api.interactionSync({
           envKey, channel, scopeExternalId: null, idempotencyKey: makeRequestKey('interaction-sync'),
         });
         if (!isCurrent(capturedEpoch, envKey)) return;
         assertEnvelope(response, envKey);
-        state.actionNotice = 'Cloud 已受理同步请求，正在等待新数据。';
+        state.pendingSync = { envKey, channels: pendingChannels, receivedAt };
+        state.actionNotice = '同步请求已受理，尚未确认同步完成。';
         global.setTimeout(() => {
           if (isCurrent(capturedEpoch, envKey)) void loadList({ preserveSelection: true });
         }, 750);
       } catch (error) {
         if (!isCurrent(capturedEpoch, envKey)) return;
+        state.pendingSync = null;
         state.listError = error;
         state.stale = Boolean(state.items.length || state.detail);
       } finally {
@@ -1253,6 +1382,7 @@
       state.detailError = null;
       state.listError = null;
       state.actionNotice = null;
+      state.pendingSync = null;
       state.pollCount = 0;
       renderAll();
       void loadList();
