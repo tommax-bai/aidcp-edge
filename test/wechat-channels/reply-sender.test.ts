@@ -8,7 +8,7 @@ import type {
   InteractionReplyResultPayload,
   InteractionReplySendPayload,
 } from '../../src/comm/protocol.js';
-import type { WechatChannelsApiClient } from '../../src/wechat-channels/api-client.js';
+import { WechatChannelsApiClient } from '../../src/wechat-channels/api-client.js';
 import type { WechatAuthCoordinator } from '../../src/wechat-channels/auth-session.js';
 import { WechatChannelsError } from '../../src/wechat-channels/error-classifier.js';
 import { runtimeStatePath } from '../../src/wechat-channels/local-paths.js';
@@ -133,6 +133,52 @@ test('wechat reply: platform ack confirms once; duplicate command reuses durable
     assert.deepEqual(replay, first);
     assert.equal(wrongScopeReplay.errorCode, 'INTERACTION_SCOPE_MISMATCH');
     assert.equal(sends, 1);
+  });
+});
+
+test('wechat reply: a pre-dispatch schema failure is failed without any platform or verification request', async () => {
+  await withState(async (state) => {
+    let fetches = 0;
+    const api = new WechatChannelsApiClient({
+      fetchImpl: (async () => {
+        fetches++;
+        throw new Error('fetch must not run for an uncaptured write endpoint');
+      }) as typeof fetch,
+    });
+
+    const result = await sender(state, api).send(command('dm', '0'));
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.errorCategory, 'schema_changed');
+    assert.equal(result.errorCode, 'WECHAT_SCHEMA_CHANGED');
+    assert.equal(result.verification, 'not_verified');
+    assert.equal(fetches, 0);
+  });
+});
+
+test('wechat reply: the same schema failure after dispatch verifies and remains ambiguous when not found', async () => {
+  await withState(async (state) => {
+    let sends = 0;
+    let historyReads = 0;
+    const api = {
+      sendDmText: async () => {
+        sends++;
+        throw new WechatChannelsError('schema_changed', 'dmSendText', 'ack shape changed', false, null, true);
+      },
+      listDmHistory: async () => {
+        historyReads++;
+        return { items: [], nextCursor: null, hasMore: false };
+      },
+    } as unknown as WechatChannelsApiClient;
+
+    const result = await sender(state, api).send(command('dm', '4'));
+
+    assert.equal(result.status, 'ambiguous');
+    assert.equal(result.errorCategory, 'schema_changed');
+    assert.equal(result.errorCode, 'WECHAT_SCHEMA_CHANGED');
+    assert.equal(result.verification, 'not_verified');
+    assert.equal(sends, 1);
+    assert.equal(historyReads, 1);
   });
 });
 

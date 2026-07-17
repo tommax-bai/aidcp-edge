@@ -388,7 +388,7 @@ export class WechatReplySender {
 }
 
 function isDefinitiveFailure(error: WechatChannelsError): boolean {
-  return [
+  return !error.requestDispatched || [
     'auth_expired',
     'challenge_required',
     'identity_mismatch',
