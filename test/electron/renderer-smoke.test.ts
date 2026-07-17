@@ -791,6 +791,8 @@ test('慢启动帮助：问号可聚焦，hover/focus 展示 7×6 Facebook 曲�
   assert.equal(trigger?.getAttribute('type'), 'button');
   assert.match(trigger?.getAttribute('aria-label') || '', /Facebook 慢启动 7 天限额/);
   assert.match(panel?.querySelector('strong')?.textContent || '', /Facebook 慢启动曲线限额/);
+  assert.match(styles, /\.slow-start-help-trigger\s*\{[^}]*width:\s*14px; height:\s*14px;[^}]*font-size:\s*10px;/s);
+  assert.match(styles, /\.slow-start-help-panel\s*\{[^}]*left:\s*-120px;/s);
   assert.match(styles, /\.slow-start-help:hover\s+\.slow-start-help-panel/);
   assert.match(styles, /\.slow-start-help:focus-within\s+\.slow-start-help-panel/);
 

@@ -2158,7 +2158,7 @@ body { margin: 0; }
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .summary-time { padding-top: 1px; }
-  .slow-start-help-panel { left: -92px; }
+  .slow-start-help-panel { left: -120px; }
 }
 
 /* ═══ 多环境 fleet（edge-fleet-rail-env-management：环境管理收口于左栏）═══ */
@@ -3262,9 +3262,9 @@ body { margin: 0; }
 .slow-start-row .parking-hint { flex-basis: 100%; }
 .slow-start-help { position: relative; display: inline-flex; flex-shrink: 0; }
 .slow-start-help-trigger {
-  width: 18px; height: 18px; padding: 0; border: 1px solid #a8b8cf; border-radius: 50%;
-  background: rgba(255, 255, 255, 0.78); color: var(--mute); font-size: 12px; font-weight: 800;
-  line-height: 16px; cursor: help;
+  width: 14px; height: 14px; padding: 0; border: 1px solid #a8b8cf; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.78); color: var(--mute); font-size: 10px; font-weight: 750;
+  line-height: 12px; cursor: help;
 }
 .slow-start-help-trigger:hover,
 .slow-start-help-trigger:focus-visible {
@@ -3272,7 +3272,7 @@ body { margin: 0; }
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .slow-start-help-panel {
-  position: absolute; z-index: 40; top: calc(100% + 8px); left: 0;
+  position: absolute; z-index: 40; top: calc(100% + 8px); left: -120px;
   display: none; width: min(520px, calc(100vw - 56px)); padding: 12px;
   border: 1px solid #c7d5e8; border-radius: 12px; background: #fff;
   color: var(--ink); box-shadow: 0 14px 34px rgba(25, 45, 76, 0.18);
