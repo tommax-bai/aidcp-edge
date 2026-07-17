@@ -97,6 +97,40 @@ function sanitizeFirstPost(input: NonNullable<UiSnapshotPayload['dailyUsage']>['
   return output;
 }
 
+const SLOW_START_STATES = ['off', 'active', 'graduated'] as const;
+const SLOW_START_INELIGIBLE_REASONS = ['platform_unsupported', 'platform_unknown', 'globally_disabled'] as const;
+
+/**
+ * 慢启动字段白名单（change account-level-slow-start）：**不进名单即静默丢弃、typecheck 完全抓不到**
+ * ——症状是「云端发了、界面不显示、没有任何报错」。
+ *
+ * 逐字段校验：state 必须命中三枚举、day 必须是 1..totalDays 的整数。
+ * **任一项不合法 → 整个 slowStart 丢弃**（不渲染 > 渲染半真）：半真的徽章会让运营以为号在被养、
+ * 实际没有，而那正是这个功能唯一要回答的问题。
+ */
+function sanitizeSlowStart(input: NonNullable<UiSnapshotPayload['dailyUsage']>['slowStart']): Record<string, unknown> | null {
+  if (!input || typeof input !== 'object') return null;
+  if (!(SLOW_START_STATES as readonly string[]).includes(input.state)) return null;
+  if (typeof input.eligible !== 'boolean') return null;
+  const totalDays = input.totalDays;
+  if (!Number.isInteger(totalDays) || totalDays <= 0) return null;
+  const output: Record<string, unknown> = { state: input.state, totalDays, eligible: input.eligible };
+  if (input.state === 'active') {
+    // active 必须带一个合法天数——缺了它徽章就没法说「第几天」，宁可整块不渲染。
+    if (!Number.isInteger(input.day) || (input.day as number) < 1 || (input.day as number) > totalDays) return null;
+    output.day = input.day;
+    // binding 是「勾了但没压」的唯一信号，缺省即无从判断 → 整块丢弃，绝不默认成 true（那会宣称在压低配额）。
+    if (typeof input.binding !== 'boolean') return null;
+    output.binding = input.binding;
+  }
+  if (Number.isFinite(input.since)) output.since = input.since;
+  if (input.ineligibleReason !== undefined) {
+    if (!(SLOW_START_INELIGIBLE_REASONS as readonly string[]).includes(input.ineligibleReason)) return null;
+    output.ineligibleReason = input.ineligibleReason;
+  }
+  return output;
+}
+
 function sanitizeDailyUsage(input: UiSnapshotPayload['dailyUsage']): Record<string, unknown> | null {
   if (!input || !Number.isFinite(input.asOf)) return null;
   const totals = sanitizeCounts(input.totals as Record<string, unknown> | undefined);
@@ -109,6 +143,8 @@ function sanitizeDailyUsage(input: UiSnapshotPayload['dailyUsage']): Record<stri
   if (inspirationSummary) dailyUsage.inspirationSummary = inspirationSummary;
   const firstPost = sanitizeFirstPost(input.firstPost);
   if (firstPost) dailyUsage.firstPost = firstPost;
+  const slowStart = sanitizeSlowStart(input.slowStart);
+  if (slowStart) dailyUsage.slowStart = slowStart;
   if (Array.isArray(input.saturated)) {
     dailyUsage.saturated = input.saturated.filter((action) =>
       (DAILY_USAGE_ACTIONS as readonly string[]).includes(action),

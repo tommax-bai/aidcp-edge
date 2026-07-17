@@ -714,5 +714,67 @@
     return { rows, pendingCount: rows.filter((r) => r.needsAction).length };
   }
 
-  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, railDisplayName, FLEET_STALE_MS };
+  // ── 慢启动脚注行（change account-level-slow-start）──
+  //
+  // 渲染契约（每一条都对着一个具体的谎）：
+  // - **字段缺省 → 整行 hidden，绝不默认成「关」**：照 personaBound 三态判例（未知 ≠ 否）。
+  //   云端还没说的时候显示一个没勾的框，等于替云端回答了「这个号没在养」。
+  // - active + binding=true  → 「慢启动 · 第 3/7 天」
+  // - active + binding=false → 「慢启动 · 第 5/7 天 · 当前档位已更严，不额外限制」
+  //   慢启动语义是 min(曲线, 档位)，而档位数字面板可热编辑 → 勾了却一格没压是真实可达的状态。
+  //   MUST NOT 宣称「正在压低配额」；让「没变」成为一个被明说的态，而不是看起来像 bug 的沉默。
+  // - graduated → 「慢启动 · 已完成（X 月 X 日起上限已放开）」，显式告知而非静默消失
+  //   ——上限是哪天放开的，正是最该被告知的那一刻。
+  // - eligible=false → 禁用勾选 + 按 reason 如实说明。
+  // - 断连 → 字段不会变缺省（主进程 if (evt.dailyUsage) 不清空）→ 只灰化 + 说明「可能已过期」，
+  //   MUST NOT 渲染成「已关闭」。
+  //
+  // 两条文案红线：全域不出现「新账号」（系统只知道它连上我们多少天，不知道它多老）；
+  // 不暗示「动作更慢 / 更像真人」（clamp 只返回配额数字，完全不进 pacing）。
+  const SLOW_START_INELIGIBLE_TEXT = {
+    platform_unsupported: '该平台暂不支持慢启动',
+    platform_unknown: '账号平台待确认，暂不启用慢启动',
+    globally_disabled: '慢启动已被运维全局停用',
+  };
+
+  /** 「7 月 17 日」——毕业文案里只用到月/日。 */
+  function monthDayCN(ms) {
+    const d = new Date(ms);
+    return `${d.getMonth() + 1} 月 ${d.getDate()} 日`;
+  }
+
+  function slowStartLine(dailyUsage, connState) {
+    const ss = dailyUsage && dailyUsage.slowStart;
+    // 字段缺省 = 云端还没说 → 整行不渲染（绝不默认 off）。
+    if (!ss || typeof ss !== 'object') return { visible: false };
+    const stale = connState !== 'online';
+    const totalDays = Number.isFinite(ss.totalDays) ? ss.totalDays : 7;
+    const out = { visible: true, checked: ss.state === 'active' || ss.state === 'graduated', stale, badge: '', tone: ss.state };
+
+    if (ss.eligible === false) {
+      out.disabled = true;
+      out.checked = false;
+      out.reason = SLOW_START_INELIGIBLE_TEXT[ss.ineligibleReason] || '当前无法启用慢启动';
+      return out;
+    }
+    // 未连云端时开关禁用：状态本身就搭在云端推的 dailyUsage 上，边缘离线这张卡本来就不更新，
+    // 「离线改不了」与「离线不刷新」是同一件事，不额外损失。
+    out.disabled = stale;
+    if (stale) out.reason = '云端已断开，状态可能已过期';
+
+    if (ss.state === 'active') {
+      out.badge = `慢启动 · 第 ${ss.day}/${totalDays} 天`;
+      // binding=false 必须说出口，否则「勾了没变」看起来就是个 bug。
+      if (ss.binding === false) out.badge += ' · 当前档位已更严，不额外限制';
+    } else if (ss.state === 'graduated') {
+      // 文案受本卡既有口径约束（#daily-summary 全域不得出现「已达 / 上限 / 额度 / 释放 / 已满」，
+      // companion-ui 的陪伴式口径，有测试守着）→ 说「按正常档位执行」而非「上限已放开」。
+      out.badge = Number.isFinite(ss.since)
+        ? `慢启动 · 已完成（${monthDayCN(ss.since + totalDays * 86400000)}起按正常档位执行）`
+        : '慢启动 · 已完成（已按正常档位执行）';
+    }
+    return out;
+  }
+
+  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, railDisplayName, slowStartLine, FLEET_STALE_MS };
 });

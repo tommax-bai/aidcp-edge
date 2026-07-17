@@ -743,3 +743,93 @@ test('拉列表回填：截断结果绝不回填（不因缺数据误改在用�
   const reconciled = savedEnvsOf(saved, 'p1').some((e) => e.name === '真名甲');
   assert.equal(reconciled, false, '截断拉取不得回填名字（缺数据不自残）');
 });
+
+// ── change account-level-slow-start：慢启动脚注行接线 ──
+
+test('慢启动行：静态节点在 #daily-summary 内、#quota-windows 之后（该 section 永不 hidden → 「启动新号之前」也在）', () => {
+  const dom = new JSDOM(html);
+  const summary = dom.window.document.querySelector('#daily-summary');
+  const row = summary?.querySelector('#slow-start-row');
+  assert.ok(row, '#slow-start-row 应在 #daily-summary 内');
+  assert.ok(row?.querySelector('#slow-start-toggle'), '勾选框应是静态节点（JS 只切 hidden/checked，不建元素）');
+  // 对比 #quota-windows：windows 为空时整块 hidden + 清空，而慢启动正是「启动新号之前」要设的。
+  const windows = summary?.querySelector('#quota-windows');
+  assert.ok(windows && row && windows.compareDocumentPosition(row) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+    '慢启动行应排在 #quota-windows 之后');
+});
+
+test('慢启动行：规则第二句必须有（说清曲线与档位取更严的一个）', () => {
+  // #usage-source 已在同屏显示「账号今日 · 稳妥节奏」；两个都表示「慢」的东西不说清关系，
+  // 「我改了档位为什么没变」的工单会翻倍。
+  assert.ok(html.includes('更严的一个'), '规则小字必须说明取更严的一个');
+  // 文案红线：不出现「新账号」（系统只知道它连上我们多少天，不知道它多老——cookie 导入的
+  // 三年老号同样会被勾上），也不得用本卡禁用的配额术语（见 companion-ui 的整卡断言）。
+  // 判据必须是**渲染出来的文本**而非 HTML 源码：源码里还有解释这条规则的注释（注释本身会提到
+  // 那几个被禁的词），拿源码做判据会因为注释而红——那不是文案违规，是判据选错了。
+  const rowText = new JSDOM(html).window.document.querySelector('#slow-start-row')?.textContent ?? '';
+  assert.ok(rowText.length > 0);
+  assert.doesNotMatch(rowText, /新账号/);
+  assert.doesNotMatch(rowText, /已达|上限|额度|释放|已满/);
+});
+
+test('慢启动行：字段缺省 → 整行 hidden（绝不默认成「关」）', async () => {
+  const w = await boot(makeStub({ getStatus: async () => makeStatus({ cloud: 'connected' }) }));
+  assert.ok(hidden($(w, '#slow-start-row')), '云端还没说 → 整行不渲染');
+});
+
+test('慢启动行：active 态渲染徽章与勾选', async () => {
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      cloud: 'connected',
+      dailyUsage: { asOf: new Date().toISOString(), totals: {}, slowStart: { state: 'active', day: 3, totalDays: 7, binding: true, eligible: true } },
+    }),
+  }));
+  assert.ok(!hidden($(w, '#slow-start-row')));
+  assert.equal(($(w, '#slow-start-toggle') as unknown as HTMLInputElement).checked, true);
+  assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 3\/7 天/);
+});
+
+test('慢启动行：binding=false 如实标注「不额外限制」，不宣称在压低配额', async () => {
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      cloud: 'connected',
+      dailyUsage: { asOf: new Date().toISOString(), totals: {}, slowStart: { state: 'active', day: 5, totalDays: 7, binding: false, eligible: true } },
+    }),
+  }));
+  assert.match($(w, '#slow-start-badge').textContent || '', /当前档位已更严，不额外限制/);
+});
+
+test('慢启动行：eligible=false → 勾选禁用 + 如实说明', async () => {
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      cloud: 'connected',
+      dailyUsage: { asOf: new Date().toISOString(), totals: {}, slowStart: { state: 'off', totalDays: 7, eligible: false, ineligibleReason: 'platform_unsupported' } },
+    }),
+  }));
+  assert.equal(($(w, '#slow-start-toggle') as unknown as HTMLInputElement).disabled, true);
+  assert.match($(w, '#slow-start-reason').textContent || '', /该平台暂不支持/);
+});
+
+// 这条守的是 design D8 点名的那个坑：整卡点击委托只认 closest('button')，checkbox / label 都不是
+// button → 不 stopPropagation 就会点勾选框连带展开/收起「今日节奏」。更难看的是 <label> 包 <input>
+// 时点文字合成两次冒泡 → 切换两次 → 净效果为零，而直接点滑块只冒泡一次 → 切换一次。
+// **同一控件点在不同位置行为不同，人工点测会当「偶发」放过**。
+test('慢启动行：点勾选框 MUST NOT 连带展开/收起「今日节奏」', async () => {
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      cloud: 'connected',
+      dailyUsage: {
+        asOf: new Date().toISOString(),
+        totals: { view: 3 },
+        windows: { day: { totals: { view: 3 }, quotas: { view: 20 }, saturated: [] } },
+        slowStart: { state: 'off', totalDays: 7, eligible: true },
+      },
+    }),
+  }));
+  const summary = $(w, '#daily-summary');
+  const before = summary.classList.contains('expanded');
+  // 点包住 input 的 <label>（最容易出双次冒泡的那个位置）
+  $(w, '#slow-start-toggle-wrap').dispatchEvent(new w.Event('click', { bubbles: true }));
+  await tick();
+  assert.equal(summary.classList.contains('expanded'), before, '点慢启动开关不得改变今日节奏的展开态');
+});

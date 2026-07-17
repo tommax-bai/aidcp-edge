@@ -44,8 +44,19 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   publishView: (p: Record<string, unknown> | null, last: Record<string, unknown> | null, now: number) => PublishV;
   publishDock: (v: PublishV, s: Record<string, unknown>, manualOpen: boolean) => PublishDockV;
   railDisplayName: (row: Record<string, unknown>) => string;
+  slowStartLine: (dailyUsage: Record<string, unknown> | null | undefined, connState: string) => SlowStartV;
   PRESENCE_FRESH_MS: number;
 };
+
+interface SlowStartV {
+  visible: boolean;
+  checked?: boolean;
+  disabled?: boolean;
+  stale?: boolean;
+  badge?: string;
+  tone?: string;
+  reason?: string;
+}
 
 function st(over: Record<string, unknown> = {}) {
   return {
@@ -674,4 +685,100 @@ test('railDisplayName：未读到真实昵称（source=env）→ 回落花名册
 test('railDisplayName：既无真实昵称也无环境名 → 「环境 …末4位」兜底', () => {
   const row = { envId: 'ads-abcd1234', name: '', status: {} };
   assert.equal(uiLogic.railDisplayName(row), '环境 …1234');
+});
+
+// ── change account-level-slow-start：慢启动脚注行 ──
+// 每条用例都对着一个具体的谎（未知当成关 / 没压说成在压 / 毕业静默消失 / 断连当成已关闭）。
+
+const usage = (slowStart: Record<string, unknown> | undefined) => ({ asOf: '2026-07-17T00:00:00.000Z', totals: {}, ...(slowStart ? { slowStart } : {}) });
+
+test('slowStartLine：字段缺省 = 未知（云端还没说）→ 整行不渲染，绝不默认成「关」', () => {
+  // 照 personaBound 三态判例：显示一个没勾的框，等于替云端回答了「这个号没在养」。
+  assert.equal(uiLogic.slowStartLine(usage(undefined), 'online').visible, false);
+  assert.equal(uiLogic.slowStartLine(null, 'online').visible, false);
+  assert.equal(uiLogic.slowStartLine(undefined, 'online').visible, false);
+});
+
+test('slowStartLine：active + binding=true → 「慢启动 · 第 3/7 天」', () => {
+  const v = uiLogic.slowStartLine(usage({ state: 'active', day: 3, totalDays: 7, binding: true, eligible: true }), 'online');
+  assert.equal(v.visible, true);
+  assert.equal(v.checked, true);
+  assert.equal(v.disabled, false);
+  assert.equal(v.badge, '慢启动 · 第 3/7 天');
+});
+
+test('slowStartLine：active + binding=false → 明说「当前档位已更严，不额外限制」', () => {
+  // 慢启动语义是 min(曲线, 档位)，档位数字面板可热编辑 → 勾了却一格没压是真实可达的状态。
+  // 让「没变」成为一个被明说的态，而不是一个看起来像 bug 的沉默。
+  const v = uiLogic.slowStartLine(usage({ state: 'active', day: 5, totalDays: 7, binding: false, eligible: true }), 'online');
+  assert.equal(v.badge, '慢启动 · 第 5/7 天 · 当前档位已更严，不额外限制');
+  assert.doesNotMatch(v.badge!, /压低|正在限制/, 'MUST NOT 宣称正在压低配额');
+});
+
+test('slowStartLine：毕业态显式告知放开日期，绝不静默消失', () => {
+  // 第 8 天 clamp 自动失效而库里开关仍为真。若徽章静默消失，运营不知道限额是哪天放开的
+  // ——而那正是最该被告知的时刻。
+  const since = Date.UTC(2026, 6, 10, 0, 0);
+  const v = uiLogic.slowStartLine(usage({ state: 'graduated', totalDays: 7, since, eligible: true }), 'online');
+  assert.equal(v.visible, true);
+  assert.equal(v.tone, 'graduated');
+  assert.match(v.badge!, /慢启动 · 已完成（\d+ 月 \d+ 日起按正常档位执行）/);
+});
+
+test('slowStartLine：eligible=false → 禁用 + 按 reason 如实说明（三个原因各一条）', () => {
+  const cases: Array<[string, RegExp]> = [
+    ['platform_unsupported', /该平台暂不支持/],
+    ['platform_unknown', /平台待确认/],
+    ['globally_disabled', /全局停用/],
+  ];
+  for (const [reason, expect] of cases) {
+    const v = uiLogic.slowStartLine(usage({ state: 'off', totalDays: 7, eligible: false, ineligibleReason: reason }), 'online');
+    assert.equal(v.disabled, true, `${reason} 必须禁用勾选`);
+    assert.match(v.reason!, expect);
+  }
+});
+
+test('slowStartLine：断连 → 灰化 + 「可能已过期」，MUST NOT 渲染成「已关闭」', () => {
+  // 断连时字段不会变缺省（主进程 if (evt.dailyUsage) 不清空）→ 只是停止更新。
+  const v = uiLogic.slowStartLine(usage({ state: 'active', day: 2, totalDays: 7, binding: true, eligible: true }), 'offline');
+  assert.equal(v.visible, true);
+  assert.equal(v.checked, true, '断连不得把开关显示成未勾');
+  assert.equal(v.stale, true);
+  assert.equal(v.disabled, true, '断连时开关禁用（状态本就搭在云端推送上）');
+  assert.match(v.reason!, /云端已断开/);
+});
+
+test('slowStartLine：off 态不显徽章、开关未勾', () => {
+  const v = uiLogic.slowStartLine(usage({ state: 'off', totalDays: 7, eligible: true }), 'online');
+  assert.equal(v.visible, true);
+  assert.equal(v.checked, false);
+  assert.equal(v.badge, '');
+});
+
+test('slowStartLine：跨天 —— 天数一律用云端下发的 day，绝不本地推算', () => {
+  // 本地推算就是第二个事实源，必然与 clamp 漂移（「显示的 ≠ 生效的」）。
+  for (const day of [1, 4, 7]) {
+    const v = uiLogic.slowStartLine(usage({ state: 'active', day, totalDays: 7, binding: true, eligible: true }), 'online');
+    assert.equal(v.badge, `慢启动 · 第 ${day}/7 天`);
+  }
+});
+
+test('slowStartLine：文案红线 —— 全域不出现「新账号」、不暗示动作更慢', () => {
+  // 系统只知道它连上我们多少天，不知道它多老（cookie 导入的三年老号同样会被勾上）。
+  // clamp 只返回配额数字、完全不进 pacing → 不得暗示「更像真人 / 动作更慢」。
+  const all = [
+    uiLogic.slowStartLine(usage({ state: 'active', day: 1, totalDays: 7, binding: true, eligible: true }), 'online'),
+    uiLogic.slowStartLine(usage({ state: 'active', day: 5, totalDays: 7, binding: false, eligible: true }), 'online'),
+    uiLogic.slowStartLine(usage({ state: 'graduated', totalDays: 7, since: Date.UTC(2026, 6, 10), eligible: true }), 'online'),
+    uiLogic.slowStartLine(usage({ state: 'off', totalDays: 7, eligible: false, ineligibleReason: 'platform_unknown' }), 'offline'),
+  ];
+  for (const v of all) {
+    const text = `${v.badge ?? ''}${v.reason ?? ''}`;
+    assert.doesNotMatch(text, /新账号/);
+    assert.doesNotMatch(text, /更慢|更像真人|拟人/);
+    // 本行渲染进 #daily-summary，受该卡既有陪伴式口径约束（用「计划」不用配额术语）。
+    // companion-ui.test.ts 有一条断言守着整卡文本；这里把同一条口径钉在产出文案上，
+    // 让违规在写文案的地方就红，而不是在一条看起来无关的旧用例里红。
+    assert.doesNotMatch(text, /已达|上限|额度|释放|已满/);
+  }
 });

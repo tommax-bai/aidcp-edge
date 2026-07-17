@@ -91,4 +91,6 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   interactionUpdateReadControls: (args) => ipcRenderer.invoke('interaction:read-controls:update', args),
   interactionNotify: (args) => ipcRenderer.invoke('interaction:notify', args),
   interactionCancelReads: (envKey) => ipcRenderer.invoke('interaction:reads:cancel', { envKey }),
+  // 账号级慢启动（change account-level-slow-start）：只传 envKey + enabled，accountId 由云端解析。
+  setSlowStart: (args) => ipcRenderer.invoke('slow-start:set', args),
 });

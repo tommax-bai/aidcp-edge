@@ -5,6 +5,11 @@ const uiLogic = window.uiLogic;
 
 const fields = {
   dailySummary: document.querySelector('#daily-summary'),
+  slowStartRow: document.querySelector('#slow-start-row'),
+  slowStartToggleWrap: document.querySelector('#slow-start-toggle-wrap'),
+  slowStartToggle: document.querySelector('#slow-start-toggle'),
+  slowStartBadge: document.querySelector('#slow-start-badge'),
+  slowStartReason: document.querySelector('#slow-start-reason'),
   auth: document.querySelector('#auth-status'),
   cloud: document.querySelector('#cloud-status'),
   session: document.querySelector('#session-state'),
@@ -381,6 +386,8 @@ function updateFacebookImportVisibility() {
 }
 const LOG_RETENTION_MS = 2 * 60 * 1000; // 开发者详情原始日志保留 2 分钟
 let quotaDetailsOpen = false;
+/** 慢启动 PUT 在途（change account-level-slow-start）：期间不让推送快照把用户刚拨的开关拨回去。 */
+let slowStartPending = false;
 
 // 平台占位：mac 红绿灯内嵌预留左侧；Windows 叠加窗控预留右侧。其余平台两侧归零。
 (function initPlatformPads() {
@@ -646,7 +653,40 @@ function renderUsageSummary(status) {
   }
   for (const item of USAGE_ITEMS) renderUsageItem(item, usage);
   renderQuotaWindows(usage);
+  renderSlowStart(status);
   fields.updatedAt.textContent = new Date(usage.asOf).toLocaleTimeString();
+}
+
+/**
+ * 慢启动脚注行（change account-level-slow-start）：只切 hidden / checked / disabled / textContent，
+ * 绝不建元素（静态节点，本 section 不在任何 innerHTML 重建范围内）。
+ * 纯逻辑在 uiLogic.slowStartLine —— 字段缺省 → 整行不渲染（绝不默认 off，照 personaBound 三态判例）。
+ */
+function renderSlowStart(status) {
+  if (!fields.slowStartRow) return;
+  const connState = status && status.cloud === 'connected' ? 'online' : 'offline';
+  const view = window.uiLogic.slowStartLine(status && status.dailyUsage, connState);
+  if (!view.visible) {
+    fields.slowStartRow.classList.add('hidden');
+    return;
+  }
+  fields.slowStartRow.classList.remove('hidden');
+  fields.slowStartRow.classList.toggle('is-stale', Boolean(view.stale));
+  if (fields.slowStartToggle) {
+    // 写入在途时不要用推送回来的旧快照把用户刚拨的开关拨回去（PUT 回执带写后真态）。
+    if (!slowStartPending) fields.slowStartToggle.checked = Boolean(view.checked);
+    fields.slowStartToggle.disabled = Boolean(view.disabled) || slowStartPending;
+  }
+  if (fields.slowStartBadge) {
+    fields.slowStartBadge.textContent = view.badge || '';
+    fields.slowStartBadge.className = view.badge
+      ? `acct-age${view.tone === 'graduated' ? ' is-graduated' : ''}`
+      : 'acct-age hidden';
+  }
+  if (fields.slowStartReason) {
+    fields.slowStartReason.textContent = view.reason || '';
+    fields.slowStartReason.className = view.reason ? 'parking-hint' : 'parking-hint hidden';
+  }
 }
 
 // ─── 开发者详情：原始日志（滚动保留 + 连续去重；按 envId 分桶，绝不跨环境串号/相邻误吞）───
@@ -1777,6 +1817,57 @@ fields.dailySummary?.addEventListener('click', (event) => {
   if (event.target.closest('button')) return;
   toggleQuotaDetails();
 });
+
+// 慢启动脚注行（change account-level-slow-start）：**必须自己 stopPropagation**。
+// 上面这条整卡点击委托只认 closest('button')，而 checkbox / label 都不是 button →
+// 不拦的话点勾选框会连带展开/收起「今日节奏」。更难看的是 <label> 包 <input> 时点文字会合成
+// 两次冒泡 → 切换两次 → 净效果为零；直接点滑块只冒泡一次 → 切换一次。**同一控件点在不同位置
+// 行为不同，人工点测会当「偶发」放过**。照 quotaToggle 的做法在本控件上拦住，
+// **不要**去放宽上面那条委托的判据（那会波及卡内其它元素）。
+fields.slowStartToggleWrap?.addEventListener('click', (event) => {
+  event.stopPropagation();
+});
+fields.slowStartToggle?.addEventListener('change', (event) => {
+  event.stopPropagation();
+  void submitSlowStart(Boolean(event.target.checked));
+});
+
+/**
+ * 提交慢启动开关（change account-level-slow-start）：只传 envKey + enabled，accountId 由云端解析。
+ * 失败**必须把开关拨回去 + 如实说明**——留在「已勾」而库里没写，就是用界面撒谎；
+ * 而这个谎的代价是运营以为号在被养、实际在按满额度跑。
+ */
+async function submitSlowStart(enabled) {
+  const selected = fleetView.envs.get(fleetView.selected);
+  const envKey = selected && (selected.profileId || selected.envId);
+  if (!envKey) return;
+  slowStartPending = true;
+  if (fields.slowStartToggle) fields.slowStartToggle.disabled = true;
+  try {
+    const res = await window.aidcpEdge.setSlowStart({ envKey, enabled });
+    if (!res || !res.ok) {
+      // 回滚 UI 到真实态，并把云端的原因如实转述（409=环境未连接 / 403=环境不归你 / 503=构建未启用）。
+      if (fields.slowStartToggle) fields.slowStartToggle.checked = !enabled;
+      if (fields.slowStartReason) {
+        const err = (res && res.data && (res.data.message || res.data.error)) || '设置失败';
+        fields.slowStartReason.textContent = String(err);
+        fields.slowStartReason.className = 'parking-hint';
+      }
+      return;
+    }
+    // 成功：云端回执带写后真态。下一次 ui.snapshot（≤60s）会把徽章刷成权威值，
+    // 这里不自行推算天数——推算一次就是第二个事实源。
+  } catch (err) {
+    if (fields.slowStartToggle) fields.slowStartToggle.checked = !enabled;
+    if (fields.slowStartReason) {
+      fields.slowStartReason.textContent = `设置失败：${(err && err.message) || err}`;
+      fields.slowStartReason.className = 'parking-hint';
+    }
+  } finally {
+    slowStartPending = false;
+    if (currentStatus) renderSlowStart(currentStatus);
+  }
+}
 fields.quotaToggle?.addEventListener('click', (event) => {
   event.stopPropagation();
   toggleQuotaDetails();

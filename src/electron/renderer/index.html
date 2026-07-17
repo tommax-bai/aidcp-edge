@@ -316,6 +316,24 @@
           </div>
         </div>
         <div id="quota-windows" class="quota-windows hidden"></div>
+        <!-- 慢启动脚注行（change account-level-slow-start）：**静态节点**，JS 只切 hidden / checked /
+             disabled / textContent，绝不动态建元素（本 section 不在任何 innerHTML 重建范围内）。
+             落这里而非标题区：标题区跟随选中环境、而慢启动是账号级（作用域错），且 Windows 窄窗下
+             算术上会挤爆昵称。本 section 永不 hidden → 「启动新号之前」这个唯一需要它的时刻它也在。
+             规则第二句必须有：#usage-source 已在同屏显示「账号今日 · 稳妥节奏」，两个都表示「慢」的
+             东西不说清关系，「我改了档位为什么没变」的工单会翻倍。 -->
+        <div id="slow-start-row" class="slow-start-row hidden">
+          <label class="switch inline-switch" id="slow-start-toggle-wrap">
+            <input id="slow-start-toggle" type="checkbox" />
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+            <span class="switch-label">慢启动</span>
+          </label>
+          <span id="slow-start-badge" class="acct-age hidden"></span>
+          <span id="slow-start-reason" class="parking-hint hidden"></span>
+          <!-- 文案受本卡既有口径约束：#daily-summary 全域不得出现「已达 / 上限 / 额度 / 释放 / 已满」
+               （companion-ui 的陪伴式口径，用「计划」不用配额术语，有测试守着）→ 这里说「每日计划量」。 -->
+          <span class="parking-hint">开启后头 7 天按曲线逐日放开每日计划量，第 7 天自动恢复正常。每天实际执行的是慢启动曲线与账号档位中<b>更严的一个</b>。</span>
+        </div>
       </section>
 
       <!-- 叙述式活动流：一句人话一条、最新在上 -->

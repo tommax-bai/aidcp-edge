@@ -3224,3 +3224,23 @@ body { margin: 0; }
   .curated-create-modes { grid-template-columns: 1fr; }
   .content-workspace .publish-preview-images { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* 慢启动脚注行（change account-level-slow-start）：常驻「今日节奏」卡内、#quota-windows 之后。
+   块级独占一行，不与标题区争空间 → Windows @640 窄窗不破版。 */
+.slow-start-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
+}
+.slow-start-row .parking-hint { flex-basis: 100%; }
+/* 徽章尺寸口径照 .acct-p（10px / 2px 6px），**刻意不复用 .badge**——那个是 12px/4px 11px、
+   为浮层行设计，放进这里会撑高整行。配色避开 .acct-p 已占的平台色：两个同尺寸色块并排会被
+   读成一个控件。 */
+.acct-age {
+  font-size: 10px; color: #fff; background: var(--amber); border-radius: 5px;
+  padding: 2px 6px; font-weight: 700; flex-shrink: 0;
+}
+/* 毕业态：爬坡已结束、上限已放开 —— 用静默色，与「正在被限制」的琥珀区分开。 */
+.acct-age.is-graduated { background: var(--mute); }
+/* 断连 / 不适用：整行灰化，但**字段不会因断连变缺省**（主进程 if (evt.dailyUsage) 不清空），
+   所以这里表达的是「可能已过期」，不是「已关闭」。 */
+.slow-start-row.is-stale { opacity: 0.55; }
