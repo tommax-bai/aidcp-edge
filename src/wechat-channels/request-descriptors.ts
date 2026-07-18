@@ -25,8 +25,8 @@ export interface WechatRequestDescriptor {
   cookieJar: 'primary';
   retrySafe: boolean;
   captureBacked: boolean;
-  evidence: 'observed_read_only' | 'not_observed';
-  coverage: 'full_shape' | 'empty_only' | 'none';
+  evidence: 'observed_read_only' | 'official_bundle_candidate' | 'not_observed';
+  coverage: 'full_shape' | 'candidate_shape' | 'empty_only' | 'none';
 }
 
 const QUERY_KEYS = ['_aid', '_pageUrl', '_rid'] as const;
@@ -43,6 +43,12 @@ const unobserved = (): WechatRequestDescriptor => ({
   captureBacked: false, evidence: 'not_observed',
   coverage: 'none',
 });
+const candidateWrite = (path: string): WechatRequestDescriptor => ({
+  method: 'POST', path, queryKeys: QUERY_KEYS, bodyEncoding: 'json',
+  requiredHeaderNames: REQUIRED_HEADERS, cookieJar: 'primary', retrySafe: false,
+  captureBacked: false, evidence: 'official_bundle_candidate',
+  coverage: 'candidate_shape',
+});
 
 export const WECHAT_CHANNELS_REQUEST_DESCRIPTORS: Readonly<Record<WechatChannelsEndpoint, WechatRequestDescriptor>> = {
   authLoginCode: unobserved(),
@@ -50,12 +56,12 @@ export const WECHAT_CHANNELS_REQUEST_DESCRIPTORS: Readonly<Record<WechatChannels
   authData: observed('/cgi-bin/mmfinderassistant-bin/auth/auth_data'),
   postList: observed('/micro/content/cgi-bin/mmfinderassistant-bin/post/post_list'),
   commentList: observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/comment_list'),
-  commentCreate: unobserved(),
+  commentCreate: candidateWrite('/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/create_comment'),
   dmLoginCookie: unobserved(),
   dmNewMessages: unobserved(),
   dmHistory: observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-history-msg'),
   dmSessionInfo: observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-session-info'),
-  dmSendText: unobserved(),
+  dmSendText: candidateWrite('/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/send-private-msg'),
   dmUploadMedia: unobserved(),
 };
 
@@ -66,18 +72,29 @@ export interface SerializedWechatRequest {
   body: string;
 }
 
-export function serializeWechatRequest(
+export function assertWechatRequestDescriptorAvailable(
   endpoint: WechatChannelsEndpoint,
-  businessBody: Record<string, unknown>,
-  session: WechatSessionMaterial,
-  options: { now?: () => number; requestId?: () => string } = {},
-): SerializedWechatRequest {
+  allowUnverifiedWrite = false,
+): WechatRequestDescriptor {
   const descriptor = WECHAT_CHANNELS_REQUEST_DESCRIPTORS[endpoint];
-  if (!descriptor.captureBacked || !descriptor.path) {
+  const candidateAllowed = allowUnverifiedWrite &&
+    (endpoint === 'commentCreate' || endpoint === 'dmSendText') &&
+    descriptor.evidence === 'official_bundle_candidate';
+  if ((!descriptor.captureBacked && !candidateAllowed) || !descriptor.path) {
     throw new WechatChannelsError(
       'schema_changed', endpoint, `No capture-backed request descriptor for ${endpoint}`, false, null, false,
     );
   }
+  return descriptor;
+}
+
+export function serializeWechatRequest(
+  endpoint: WechatChannelsEndpoint,
+  businessBody: Record<string, unknown>,
+  session: WechatSessionMaterial,
+  options: { now?: () => number; requestId?: () => string; allowUnverifiedWrite?: boolean } = {},
+): SerializedWechatRequest {
+  const descriptor = assertWechatRequestDescriptorAvailable(endpoint, options.allowUnverifiedWrite);
   const context = session.requestContext;
   if (!context || context.version !== 1) {
     throw new WechatChannelsError('auth_expired', endpoint, 'Authorized request context is missing', false, null, false);

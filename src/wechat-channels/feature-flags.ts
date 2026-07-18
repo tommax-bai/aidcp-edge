@@ -15,7 +15,10 @@ export interface WechatChannelsFeatureFlags {
   dmSendTextEnabled: boolean;
   commentWriteProbeVerified: boolean;
   dmWriteProbeVerified: boolean;
+  unverifiedWriteTestMode: boolean;
 }
+
+export const WECHAT_DEV_UNVERIFIED_WRITE_TOKEN = 'dev-unverified-write-test-acknowledged';
 
 export const DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS: WechatChannelsFeatureFlags = {
   interactionEnabled: true,
@@ -29,6 +32,7 @@ export const DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS: WechatChannelsFeatureFlags =
   dmSendTextEnabled: false,
   commentWriteProbeVerified: false,
   dmWriteProbeVerified: false,
+  unverifiedWriteTestMode: false,
 };
 
 function enabled(value: string | undefined): boolean {
@@ -54,6 +58,8 @@ export function wechatChannelsFeatureFlagsFromEnv(env: NodeJS.ProcessEnv = proce
     dmSendTextEnabled: enabled(env.AIDCP_WECHAT_DM_SEND_TEXT_ENABLED),
     commentWriteProbeVerified: enabled(env.AIDCP_WECHAT_COMMENT_WRITE_PROBE_VERIFIED),
     dmWriteProbeVerified: enabled(env.AIDCP_WECHAT_DM_WRITE_PROBE_VERIFIED),
+    unverifiedWriteTestMode:
+      env.AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE === WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
   };
 }
 
@@ -184,22 +190,26 @@ export class WechatCapabilityState {
       this.passedProbes.has('dmRead') &&
       this.breaker.capabilityAvailable('dmRead');
     const writeBase = base && this.flags.writeEnabled && !this.flags.accountWriteKillSwitch;
+    const commentWriteEvidence = this.flags.unverifiedWriteTestMode || (
+      this.flags.commentWriteProbeVerified && this.passedProbes.has('commentsReply')
+    );
+    const dmWriteEvidence = this.flags.unverifiedWriteTestMode || (
+      this.flags.dmWriteProbeVerified && this.passedProbes.has('dmSendText')
+    );
     return {
       commentsRead,
       commentsReply:
         writeBase &&
         commentsRead &&
         !!remote?.commentsReplyEnabled &&
-        this.flags.commentWriteProbeVerified &&
-        this.passedProbes.has('commentsReply') &&
+        commentWriteEvidence &&
         this.breaker.capabilityAvailable('commentsReply'),
       dmRead,
       dmSendText:
         writeBase &&
         dmRead &&
         !!remote?.dmSendTextEnabled &&
-        this.flags.dmWriteProbeVerified &&
-        this.passedProbes.has('dmSendText') &&
+        dmWriteEvidence &&
         this.breaker.capabilityAvailable('dmSendText'),
       dmSendImage: false,
     };

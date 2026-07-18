@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import {
   asWechatChannelsError,
@@ -5,6 +6,7 @@ import {
   WechatChannelsError,
 } from './error-classifier.js';
 import {
+  assertWechatRequestDescriptorAvailable,
   serializeWechatRequest,
   WECHAT_CHANNELS_REQUEST_DESCRIPTORS,
   type WechatChannelsEndpoint,
@@ -47,6 +49,7 @@ export interface WechatChannelsApiClientOptions {
   sleepImpl?: (ms: number) => Promise<void>;
   nowImpl?: () => number;
   onSchemaChanged?: (endpoint: WechatChannelsEndpoint, error: WechatChannelsError) => void;
+  allowUnverifiedWrites?: boolean;
 }
 
 interface PlatformEnvelope {
@@ -63,6 +66,7 @@ export class WechatChannelsApiClient {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
   private readonly onSchemaChanged?: (endpoint: WechatChannelsEndpoint, error: WechatChannelsError) => void;
+  private readonly allowUnverifiedWrites: boolean;
 
   constructor(options: WechatChannelsApiClientOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
@@ -72,6 +76,7 @@ export class WechatChannelsApiClient {
     this.sleep = options.sleepImpl ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.now = options.nowImpl ?? Date.now;
     this.onSchemaChanged = options.onSchemaChanged;
+    this.allowUnverifiedWrites = options.allowUnverifiedWrites === true;
     if (new URL(WECHAT_CHANNELS_API_BASE_URL).protocol !== 'https:') {
       throw new Error('WeChat Channels API base URL must use TLS');
     }
@@ -175,23 +180,49 @@ export class WechatChannelsApiClient {
 
   sendComment(
     session: WechatSessionMaterial,
-    input: { postExternalId: string; parentExternalId: string; text: string },
+    input: { postExternalId: string; rootExternalId: string; parentExternalId: string; text: string },
   ): Promise<WechatSendAck> {
     return this.call(
       'commentCreate',
-      { objectId: input.postExternalId, commentId: input.parentExternalId, content: input.text },
+      {
+        exportId: input.postExternalId,
+        rootCommentId: input.rootExternalId,
+        replyCommentId: input.parentExternalId,
+        content: input.text,
+      },
       session,
       parseSendAck,
     );
   }
 
-  sendDmText(
+  async sendDmText(
     session: WechatSessionMaterial,
-    input: { threadExternalId: string; text: string },
+    input: { threadExternalId: string; fromUsername: string; text: string },
   ): Promise<WechatSendAck> {
+    try {
+      assertWechatRequestDescriptorAvailable('dmSendText', this.allowUnverifiedWrites);
+    } catch (error) {
+      this.throwEndpointError('dmSendText', error, false);
+    }
+    const participant = (await this.getDmParticipantInfo(session, [input.threadExternalId]))
+      .find((item) => item.sessionExternalId === input.threadExternalId)?.participant;
+    if (!participant) {
+      throw new WechatChannelsError(
+        'invalid_scope', 'dmSendText', 'DM participant could not be resolved for the selected session', false, null, false,
+      );
+    }
     return this.call(
       'dmSendText',
-      { sessionId: input.threadExternalId, messageType: 'text', content: input.text },
+      {
+        msgPack: {
+          sessionId: input.threadExternalId,
+          fromUsername: input.fromUsername,
+          toUsername: participant.externalId,
+          msgType: 1,
+          textMsg: { content: input.text },
+          cliMsgId: randomUUID(),
+        },
+      },
       session,
       parseSendAck,
     );
@@ -272,7 +303,10 @@ export class WechatChannelsApiClient {
     if (!session) {
       throw new WechatChannelsError('auth_expired', endpoint, 'Authorized session is required', false, null, false);
     }
-    const serialized = serializeWechatRequest(endpoint, payload, session, { now: this.now });
+    const serialized = serializeWechatRequest(endpoint, payload, session, {
+      now: this.now,
+      allowUnverifiedWrite: this.allowUnverifiedWrites,
+    });
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {

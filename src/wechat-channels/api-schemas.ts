@@ -347,6 +347,36 @@ export function parseDmParticipantInfo(body: unknown, endpoint: string): WechatD
 
 export function parseSendAck(body: unknown, endpoint: string): WechatSendAck {
   const data = dataRecord(body, endpoint);
+  if (endpoint === 'commentCreate') {
+    const comment = rec(data.comment, endpoint, 'sendAck.comment');
+    return {
+      accepted: true,
+      externalMessageId: requiredString(
+        comment,
+        ['commentId', 'comment_id'],
+        endpoint,
+        'sendAck.comment.commentId',
+      ),
+    };
+  }
+  if (endpoint === 'dmSendText') {
+    const baseResp = rec(data.baseResp, endpoint, 'sendAck.baseResp');
+    const baseCode = valueAt(baseResp, ['errcode', 'errCode']);
+    if (baseCode !== 0 && baseCode !== '0') {
+      throw new WechatChannelsError(
+        'platform_rejected', endpoint, 'WeChat Channels did not accept the write', false, null, true,
+      );
+    }
+    return {
+      accepted: true,
+      externalMessageId: requiredString(
+        data,
+        ['svrMsgId', 'svr_msg_id'],
+        endpoint,
+        'sendAck.svrMsgId',
+      ),
+    };
+  }
   const acceptedValue = valueAt(data, ['accepted', 'success', 'ok']);
   if (acceptedValue === undefined) throw schemaChanged(endpoint, 'sendAck.accepted');
   const accepted = acceptedValue === true || acceptedValue === 1 || acceptedValue === '1';

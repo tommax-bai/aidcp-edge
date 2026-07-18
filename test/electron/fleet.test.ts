@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { decideRespawn as decideRespawnTs } from '../../src/supervise/respawn-policy.js';
 import { imageTempPrefixFor } from '../../src/flows/image-uploader.js';
+import { WECHAT_DEV_UNVERIFIED_WRITE_TOKEN as featureFlagToken } from '../../src/wechat-channels/feature-flags.js';
 
 // fleet.cjs（多环境外壳纯决策层）单测：设置迁移 / 冻结 env 身份闸 / 错峰队列 / 内存预检 / 同账号检测。
 const require = createRequire(import.meta.url);
@@ -82,6 +83,21 @@ test('facebookBrowseModeFor：仅 dev 的 Facebook 分身真浏览，其他环�
   assert.equal(fleet.facebookBrowseModeFor({}), 'off');
 });
 
+test('wechatUnverifiedWriteTestModeFor: only unpackaged named-dev WeChat receives the exact token', () => {
+  assert.equal(fleet.WECHAT_DEV_UNVERIFIED_WRITE_TOKEN, featureFlagToken);
+  assert.equal(
+    fleet.wechatUnverifiedWriteTestModeFor({ platform: 'wechat_channels', cloudEnvKey: 'dev', isPackaged: false }),
+    fleet.WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
+  );
+  assert.equal(
+    fleet.wechatUnverifiedWriteTestModeFor({ platform: 'wechat-channels', cloudEnvKey: 'DEV', isPackaged: false }),
+    fleet.WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
+  );
+  assert.equal(fleet.wechatUnverifiedWriteTestModeFor({ platform: 'wechat_channels', cloudEnvKey: 'dev', isPackaged: true }), '');
+  assert.equal(fleet.wechatUnverifiedWriteTestModeFor({ platform: 'wechat_channels', cloudEnvKey: 'ol', isPackaged: false }), '');
+  assert.equal(fleet.wechatUnverifiedWriteTestModeFor({ platform: 'facebook', cloudEnvKey: 'dev', isPackaged: false }), '');
+});
+
 // ── 冻结 spawn env + 身份闸 ──
 
 test('buildEnvSpawnEnv：注入 AIDCP_ADS_USER_ID、剔除继承的身份/端口键（防串号）', () => {
@@ -94,6 +110,7 @@ test('buildEnvSpawnEnv：注入 AIDCP_ADS_USER_ID、剔除继承的身份/端口
       AIDCP_ADS_USER_ID: 'poisoned-profile',
       AIDCP_CDP_PORT: '9222',
       AIDCP_CHROME_PROFILE: '/tmp/x',
+      AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE: fleet.WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
     },
     providerEnv: { AIDCP_ADS_API_KEY: 'k' },
   });
@@ -103,7 +120,13 @@ test('buildEnvSpawnEnv：注入 AIDCP_ADS_USER_ID、剔除继承的身份/端口
   assert.equal(built.env.AIDCP_BROWSER_PROVIDER, 'adspower');
   assert.equal(built.env.AIDCP_CLOUD_URL, 'ws://example:8787'); // 其余继承保留（逃生阀）
   // 身份/端口键必须被剔除：任何一个泄漏都会钉死身份 → 云端互踢/串号
-  for (const key of ['AIDCP_ACCOUNT_ID', 'AIDCP_EDGE_ID', 'AIDCP_CDP_PORT', 'AIDCP_CHROME_PROFILE']) {
+  for (const key of [
+    'AIDCP_ACCOUNT_ID',
+    'AIDCP_EDGE_ID',
+    'AIDCP_CDP_PORT',
+    'AIDCP_CHROME_PROFILE',
+    'AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE',
+  ]) {
     assert.equal(key in built.env, false, `${key} 不应泄漏进子进程 env`);
   }
 });

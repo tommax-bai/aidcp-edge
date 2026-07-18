@@ -9,7 +9,7 @@ export type ProbeEvidenceMode = 'mock' | 'read_only' | 'gated_write';
 export interface ProbeResult {
   capability: 'commentsRead' | 'commentsReply' | 'dmRead' | 'dmSendText';
   mode: ProbeEvidenceMode;
-  status: 'passed' | 'failed' | 'gated' | 'disabled';
+  status: 'passed' | 'failed' | 'gated' | 'disabled' | 'bypassed';
   endpoint: string;
   reasonCode: string | null;
 }
@@ -74,9 +74,13 @@ export class WechatChannelsProbeRunner {
       this.record({
         capability: 'commentsReply',
         mode: 'gated_write',
-        status: this.options.flags.commentWriteProbeVerified ? 'passed' : 'gated',
+        status: this.options.flags.commentWriteProbeVerified
+          ? 'passed'
+          : this.options.flags.unverifiedWriteTestMode ? 'bypassed' : 'gated',
         endpoint: 'commentCreate',
-        reasonCode: this.options.flags.commentWriteProbeVerified ? null : 'WRITE_PROBE_NOT_APPROVED',
+        reasonCode: this.options.flags.commentWriteProbeVerified
+          ? null
+          : this.options.flags.unverifiedWriteTestMode ? 'DEV_UNVERIFIED_WRITE_TEST_MODE' : 'WRITE_PROBE_NOT_APPROVED',
       });
       return { ok: true };
     } catch (error) {
@@ -103,9 +107,13 @@ export class WechatChannelsProbeRunner {
       this.record({
         capability: 'dmSendText',
         mode: 'gated_write',
-        status: this.options.flags.dmWriteProbeVerified ? 'passed' : 'gated',
+        status: this.options.flags.dmWriteProbeVerified
+          ? 'passed'
+          : this.options.flags.unverifiedWriteTestMode ? 'bypassed' : 'gated',
         endpoint: 'dmSendText',
-        reasonCode: this.options.flags.dmWriteProbeVerified ? null : 'WRITE_PROBE_NOT_APPROVED',
+        reasonCode: this.options.flags.dmWriteProbeVerified
+          ? null
+          : this.options.flags.unverifiedWriteTestMode ? 'DEV_UNVERIFIED_WRITE_TEST_MODE' : 'WRITE_PROBE_NOT_APPROVED',
       });
       return { ok: true };
     } catch (error) {

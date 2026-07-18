@@ -2616,6 +2616,11 @@ function spawnEdgeChild(handle) {
     platform: handle.platform,
     cloudEnvKey: resolvedCloudKey,
   });
+  spawnEnv.AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE = fleet.wechatUnverifiedWriteTestModeFor({
+    platform: handle.platform,
+    cloudEnvKey: resolvedCloudKey,
+    isPackaged: app.isPackaged,
+  });
 
   handle.browserParkingReady = false;
   handle.browserPersonaNoticeState = null;

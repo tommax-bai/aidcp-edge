@@ -7,6 +7,7 @@ import type { InteractionReplySendPayload, InteractionSyncBatchPayload } from '.
 import type { WechatChannelsApiClient } from '../../src/wechat-channels/api-client.js';
 import {
   DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS,
+  WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
   WechatCapabilityState,
   WechatEndpointCircuitBreaker,
   wechatChannelsFeatureFlagsFromEnv,
@@ -42,6 +43,38 @@ test('wechat flags: missing Cloud controls keeps every effective capability off'
     dmSendText: false,
     dmSendImage: false,
   });
+});
+
+test('wechat flags: the exact dev test token bypasses only prior write-probe evidence', () => {
+  const parsed = wechatChannelsFeatureFlagsFromEnv({
+    AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE: WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
+  });
+  assert.equal(parsed.unverifiedWriteTestMode, true);
+  assert.equal(wechatChannelsFeatureFlagsFromEnv({
+    AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE: '1',
+  }).unverifiedWriteTestMode, false);
+
+  const breaker = new WechatEndpointCircuitBreaker();
+  const state = new WechatCapabilityState(parsed, breaker);
+  state.applyRemoteControls({
+    accountId: 'env-a', envKey: 'env-a', version: 1,
+    commentsReadEnabled: true, commentsReplyEnabled: true,
+    dmReadEnabled: true, dmSendTextEnabled: true, dmSendImageEnabled: false,
+  }, { accountId: 'env-a', envKey: 'env-a' });
+  state.markProbePassed('commentsRead');
+  state.markProbePassed('dmRead');
+
+  assert.deepEqual(state.effective({ authActive: true, identityMatches: true }), {
+    commentsRead: true,
+    commentsReply: true,
+    dmRead: true,
+    dmSendText: true,
+    dmSendImage: false,
+  });
+  assert.equal(state.effective({ authActive: false, identityMatches: true }).commentsReply, false);
+  assert.equal(state.effective({ authActive: true, identityMatches: false }).dmSendText, false);
+  breaker.open('commentCreate');
+  assert.equal(state.effective({ authActive: true, identityMatches: true }).commentsReply, false);
 });
 
 test('wechat flags: build, auth, identity, probes, kill switches, and endpoint breaker all gate effective capability', () => {

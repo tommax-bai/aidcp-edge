@@ -62,6 +62,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     timeoutMs: envMs(env.AIDCP_WECHAT_API_TIMEOUT_MS, 15_000),
     maxRetries: envInt(env.AIDCP_WECHAT_API_MAX_RETRIES, 2),
     maxResponseBytes: envInt(env.AIDCP_WECHAT_API_MAX_RESPONSE_BYTES, 2 * 1024 * 1024),
+    allowUnverifiedWrites: flags.unverifiedWriteTestMode,
     onSchemaChanged: (endpoint) => {
       breaker.open(endpoint);
       connector?.reportStatus();
@@ -88,7 +89,8 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   wireWechatIdentityUiEvents(auth, safeLog);
 
   safeLog(
-    `[wechat-channels] local gates interaction=${flags.interactionEnabled} writes=${flags.writeEnabled}; account grants await Cloud snapshot`,
+    `[wechat-channels] local gates interaction=${flags.interactionEnabled} writes=${flags.writeEnabled} ` +
+    `unverified_write_test=${flags.unverifiedWriteTestMode}; account grants await Cloud snapshot`,
   );
   const state = new WechatRuntimeStateStore(
     { envKey, accountId: logicalAccountId, browserProfileId: sidecar.browserProfileId },

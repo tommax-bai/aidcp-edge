@@ -27,6 +27,7 @@ All private capabilities and writes default off.
 | `AIDCP_WECHAT_DM_SEND_TEXT_ENABLED` | DM text endpoint gate |
 | `AIDCP_WECHAT_COMMENT_WRITE_PROBE_VERIFIED` | Operator-recorded controlled comment probe evidence |
 | `AIDCP_WECHAT_DM_WRITE_PROBE_VERIFIED` | Operator-recorded controlled DM probe evidence |
+| `AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE` | Exact-token escape hatch injected only by an unpackaged Electron client connected to named `dev` |
 
 Effective capability additionally requires active auth, exact identity match, a successful read/schema probe, and a closed endpoint circuit breaker. A schema mismatch opens only the affected endpoint/capability circuit.
 
@@ -39,6 +40,11 @@ approved-disposable-<comment|dm>-target:<external-target-id>
 ```
 
 No runtime path in this module automatically submits a probe write. Setting a `*_WRITE_PROBE_VERIFIED` flag records external controlled evidence; it does not perform or claim a real send.
+
+The unverified-write test mode is different from probe evidence. It permits the two separately labeled
+first-party-bundle candidate write descriptors only in the unpackaged named-dev runtime. It does not bypass
+auth, identity, Cloud controls, kill switches, circuits, approval, policy, risk, quota, idempotency, or
+channel-specific platform acknowledgement. Candidate writes remain non-retry-safe and are never sent at startup.
 
 ## Validation boundary
 

@@ -153,13 +153,15 @@ export class WechatReplySender {
 
     try {
       const ack = command.channel === 'comment'
-        ? await this.options.api.sendComment(session, {
+          ? await this.options.api.sendComment(session, {
             postExternalId: commentPostExternalId!,
+            rootExternalId: command.target.threadExternalId,
             parentExternalId: command.target.parentExternalId ?? command.target.inboundMessageExternalId,
             text: command.content.text,
           })
         : await this.options.api.sendDmText(session, {
             threadExternalId: command.target.threadExternalId,
+            fromUsername: this.options.auth.getSnapshot().identity!.externalId,
             text: command.content.text,
           });
       const confirmed = resultFor(command, {

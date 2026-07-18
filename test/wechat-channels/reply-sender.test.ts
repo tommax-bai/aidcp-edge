@@ -112,10 +112,13 @@ test('wechat reply: platform ack confirms once; duplicate command reuses durable
   await withState(async (state) => {
     let sends = 0;
     const api = {
-      sendComment: async (_session: unknown, input: { postExternalId: string; parentExternalId: string; text: string }) => {
+      sendComment: async (_session: unknown, input: {
+        postExternalId: string; rootExternalId: string; parentExternalId: string; text: string;
+      }) => {
         sends++;
         assert.deepEqual(input, {
           postExternalId: 'post-1',
+          rootExternalId: 'comment-root-1',
           parentExternalId: 'comment-root-1',
           text: '谢谢你的留言',
         });

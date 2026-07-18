@@ -118,6 +118,22 @@ function facebookBrowseModeFor({ platform, cloudEnvKey } = {}) {
     : 'off';
 }
 
+const WECHAT_DEV_UNVERIFIED_WRITE_TOKEN = 'dev-unverified-write-test-acknowledged';
+
+/**
+ * Unverified WeChat writes are deliberately limited to an unpackaged client connected to named dev.
+ * The final spawn env always receives either the exact token or an empty value so inherited values
+ * cannot leak across platform or Cloud-environment boundaries.
+ */
+function wechatUnverifiedWriteTestModeFor({ platform, cloudEnvKey, isPackaged } = {}) {
+  const normalizedPlatform = String(platform ?? '').trim().toLowerCase();
+  const normalizedCloudEnvKey = String(cloudEnvKey ?? '').trim().toLowerCase();
+  const isWechat = normalizedPlatform === 'wechat_channels' || normalizedPlatform === 'wechat-channels';
+  return !isPackaged && isWechat && normalizedCloudEnvKey === 'dev'
+    ? WECHAT_DEV_UNVERIFIED_WRITE_TOKEN
+    : '';
+}
+
 /** spawn 时必须从继承环境里剔除的键：任何一个泄漏进多环境子进程都会让身份/端口被钉死而串号。 */
 const ENV_KEYS_MUST_DROP = [
   'AIDCP_ACCOUNT_ID', // 身份由登录读出，绝不由启动方指派
@@ -127,6 +143,7 @@ const ENV_KEYS_MUST_DROP = [
   'AIDCP_CDP_PORT', // AdsPower 每分身动态返回调试端口
   'AIDCP_CHROME_PROFILE', // AdsPower 自管 user-data-dir
   'AIDCP_CDP_ALLOW_REUSE',
+  'AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE',
 ];
 
 /**
@@ -615,6 +632,8 @@ module.exports = {
   scopeFleetHandles,
   nicknameSourceForPlatform,
   facebookBrowseModeFor,
+  WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
+  wechatUnverifiedWriteTestModeFor,
   buildEnvSpawnEnv,
   createStaggerQueue,
   createSerialLaunchQueue,

@@ -10,7 +10,11 @@ import {
   safeWechatErrorDiagnostic,
   WechatChannelsError,
 } from '../../src/wechat-channels/error-classifier.js';
-import { serializeWechatRequest, structuralRequestShape } from '../../src/wechat-channels/request-descriptors.js';
+import {
+  serializeWechatRequest,
+  structuralRequestShape,
+  WECHAT_CHANNELS_REQUEST_DESCRIPTORS,
+} from '../../src/wechat-channels/request-descriptors.js';
 import type { WechatSessionMaterial } from '../../src/wechat-channels/types.js';
 
 const SESSION: WechatSessionMaterial = {
@@ -146,6 +150,136 @@ test('wechat api: comment and DM adapters use the observed read-only request sha
   assert.deepEqual(calls[2].body.sessionId, ['dm-session-1']);
 });
 
+test('wechat api: dev candidate writes stay explicit, non-retryable, and require channel-specific server ids', async () => {
+  assert.deepEqual(
+    {
+      comment: WECHAT_CHANNELS_REQUEST_DESCRIPTORS.commentCreate,
+      dm: WECHAT_CHANNELS_REQUEST_DESCRIPTORS.dmSendText,
+    },
+    {
+      comment: {
+        method: 'POST',
+        path: '/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/create_comment',
+        queryKeys: ['_aid', '_pageUrl', '_rid'],
+        bodyEncoding: 'json',
+        requiredHeaderNames: ['X-WECHAT-UIN', 'finger-print-device-id'],
+        cookieJar: 'primary',
+        retrySafe: false,
+        captureBacked: false,
+        evidence: 'official_bundle_candidate',
+        coverage: 'candidate_shape',
+      },
+      dm: {
+        method: 'POST',
+        path: '/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/send-private-msg',
+        queryKeys: ['_aid', '_pageUrl', '_rid'],
+        bodyEncoding: 'json',
+        requiredHeaderNames: ['X-WECHAT-UIN', 'finger-print-device-id'],
+        cookieJar: 'primary',
+        retrySafe: false,
+        captureBacked: false,
+        evidence: 'official_bundle_candidate',
+        coverage: 'candidate_shape',
+      },
+    },
+  );
+  assert.throws(
+    () => serializeWechatRequest('commentCreate', {}, SESSION),
+    (error: unknown) => error instanceof WechatChannelsError &&
+      error.category === 'schema_changed' && !error.requestDispatched,
+  );
+
+  const candidate = serializeWechatRequest('commentCreate', {
+    exportId: 'post-1',
+    rootCommentId: 'comment-root-1',
+    replyCommentId: 'comment-parent-1',
+    content: 'reply text',
+  }, SESSION, { now: () => 123, requestId: () => 'rid-test', allowUnverifiedWrite: true });
+  assert.equal(
+    new URL(candidate.url).pathname,
+    '/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/create_comment',
+  );
+  assert.deepEqual(JSON.parse(candidate.body), {
+    _log_finder_id: 'finder-test',
+    _log_finder_uin: 'uin-test',
+    rawKeyBuff: 'raw-key-test',
+    timestamp: '123',
+    scene: 7,
+    reqScene: 7,
+    pluginSessionId: null,
+    exportId: 'post-1',
+    rootCommentId: 'comment-root-1',
+    replyCommentId: 'comment-parent-1',
+    content: 'reply text',
+  });
+
+  const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const api = new WechatChannelsApiClient({
+    allowUnverifiedWrites: true,
+    maxRetries: 3,
+    nowImpl: () => 123,
+    fetchImpl: (async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      calls.push({ path, body });
+      if (path.endsWith('/comment/create_comment')) {
+        return json({ errCode: 0, data: { comment: { commentId: 'comment-server-1' } } });
+      }
+      if (path.endsWith('/private-msg/get-session-info')) {
+        return json({ errCode: 0, data: { sessionInfo: [{
+          sessionId: 'thread-1', username: 'peer-1', nickname: 'Peer', headImgUrl: '',
+        }] } });
+      }
+      if (path.endsWith('/private-msg/send-private-msg')) {
+        return json({ errCode: 0, data: { baseResp: { errcode: 0 }, svrMsgId: 'dm-server-1' } });
+      }
+      throw new Error(`unexpected path ${path}`);
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(await api.sendComment(SESSION, {
+    postExternalId: 'post-1',
+    rootExternalId: 'comment-root-1',
+    parentExternalId: 'comment-parent-1',
+    text: 'reply text',
+  }), { accepted: true, externalMessageId: 'comment-server-1' });
+  assert.deepEqual(await api.sendDmText(SESSION, {
+    threadExternalId: 'thread-1',
+    fromUsername: 'finder-self',
+    text: 'hello',
+  }), { accepted: true, externalMessageId: 'dm-server-1' });
+  assert.deepEqual(calls.map((call) => call.path), [
+    '/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/create_comment',
+    '/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-session-info',
+    '/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/send-private-msg',
+  ]);
+  assert.deepEqual(calls[0].body, JSON.parse(candidate.body));
+  const msgPack = calls[2].body.msgPack as Record<string, unknown>;
+  assert.equal(msgPack.sessionId, 'thread-1');
+  assert.equal(msgPack.fromUsername, 'finder-self');
+  assert.equal(msgPack.toUsername, 'peer-1');
+  assert.equal(msgPack.msgType, 1);
+  assert.deepEqual(msgPack.textMsg, { content: 'hello' });
+  assert.match(String(msgPack.cliMsgId), /^[0-9a-f-]{36}$/);
+
+  const changed: WechatChannelsEndpoint[] = [];
+  const missingServerId = new WechatChannelsApiClient({
+    allowUnverifiedWrites: true,
+    maxRetries: 3,
+    onSchemaChanged: (endpoint) => changed.push(endpoint),
+    fetchImpl: (async () => json({ errCode: 0, data: { comment: {} } })) as typeof fetch,
+  });
+  await assert.rejects(
+    () => missingServerId.sendComment(SESSION, {
+      postExternalId: 'post-1', rootExternalId: 'comment-root-1',
+      parentExternalId: 'comment-parent-1', text: 'reply text',
+    }),
+    (error: unknown) => error instanceof WechatChannelsError &&
+      error.category === 'schema_changed' && error.requestDispatched,
+  );
+  assert.deepEqual(changed, ['commentCreate']);
+});
+
 test('wechat api: non-empty comments preserve reply hierarchy and opaque pagination', async () => {
   const requestCursors: unknown[] = [];
   const api = new WechatChannelsApiClient({
@@ -226,7 +360,7 @@ test('wechat api: retries only bounded read calls and never retries writes', asy
     }) as typeof fetch,
   });
   await assert.rejects(
-    () => writeApi.sendDmText(SESSION, { threadExternalId: 'thread-1', text: 'hello' }),
+    () => writeApi.sendDmText(SESSION, { threadExternalId: 'thread-1', fromUsername: 'finder-self', text: 'hello' }),
     (error: unknown) => error instanceof WechatChannelsError && error.category === 'schema_changed' && !error.requestDispatched,
   );
   assert.equal(writeCalls, 0);
@@ -448,7 +582,7 @@ test('wechat api: missing pagination/direction fields trip schema circuit and ex
     fetchImpl: (async () => { writeFetches++; return json({ errCode: 0, data: { accepted: false } }); }) as typeof fetch,
   });
   await assert.rejects(
-    () => rejectedWrite.sendDmText(SESSION, { threadExternalId: 'thread-1', text: 'hello' }),
+    () => rejectedWrite.sendDmText(SESSION, { threadExternalId: 'thread-1', fromUsername: 'finder-self', text: 'hello' }),
     (error: unknown) => error instanceof WechatChannelsError && error.category === 'schema_changed' && !error.requestDispatched,
   );
   assert.equal(writeFetches, 0);

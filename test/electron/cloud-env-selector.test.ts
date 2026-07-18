@@ -65,6 +65,21 @@ test('Facebook 浏览模式由最终云端 key 统一注入，且只发生在启
   );
 });
 
+test('WeChat unverified-write test token is injected only after the final cloud selection and before spawn', () => {
+  const cloudResolveIdx = code.indexOf('const cloudSel = resolveCloudUrl();');
+  const writeInjectIdx = code.indexOf(
+    'spawnEnv.AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE = fleet.wechatUnverifiedWriteTestModeFor',
+  );
+  const spawnCallIdx = code.indexOf('spawn(process.execPath');
+  assert.ok(writeInjectIdx > cloudResolveIdx, 'the dev override must use the resolved cloud key');
+  assert.ok(writeInjectIdx < spawnCallIdx, 'the dev override must be injected before spawning the child');
+  assert.match(
+    code,
+    /spawnEnv\.AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE = fleet\.wechatUnverifiedWriteTestModeFor\([\s\S]*?cloudEnvKey: resolvedCloudKey[\s\S]*?isPackaged: app\.isPackaged/,
+    'the helper must receive the actual environment, platform, and packaging state',
+  );
+});
+
 test('custom 非法地址被降级为未选择、绝不注入垃圾（诚实回落）', () => {
   assert.match(
     code,
