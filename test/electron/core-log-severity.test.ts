@@ -25,6 +25,7 @@ const main = readFileSync(join(here, '../../src/electron/main.cjs'), 'utf8');
 // 否则一句解释性注释就能把断言弄假。剥掉行注释再断言。
 function stripLineComments(src: string): string {
   return src
+    .replace(/\r\n?/g, '\n')
     .split('\n')
     .map((l) => l.replace(/\/\/.*$/, ''))
     .join('\n');
