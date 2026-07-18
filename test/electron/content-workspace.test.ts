@@ -225,7 +225,10 @@ test('精选详情双栏保留彼此独立的滚动位置，窄屏交回单列�
   const workspace = $(window, '#content-workspace');
   const media = $(window, '.curated-detail-media');
   const copy = $(window, '.curated-detail-copy');
+  const close = $(window, '#content-workspace-close');
   assert.equal(workspace.classList.contains('curated-detail-mode'), true);
+  assert.equal(hidden(close), false);
+  assert.equal(close.getAttribute('aria-label'), '关闭内容工作区');
 
   const mediaTop = installClampedScroll(media, 80);
   const copyTop = installClampedScroll(copy, 240);

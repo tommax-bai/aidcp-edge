@@ -919,6 +919,8 @@ test('慢启动行：常驻说明明确设置跟随环境与当前账号档位',
 
 test('精选详情宽屏两列分别原生滚动并在窄屏恢复单列文档流', () => {
   assert.match(styles, /\.content-workspace\.curated-detail-mode\s*\{[^}]*height:\s*calc\(100vh - 78px\);[^}]*min-height:\s*0;/s);
+  assert.match(styles, /\.content-workspace\.curated-detail-mode\s+\.cw-header\s*\{[^}]*position:\s*sticky;[^}]*top:\s*46px;[^}]*grid-template-columns:\s*28px minmax\(0, 1fr\) 28px;[^}]*padding:\s*8px 10px;/s);
+  assert.match(styles, /\.content-workspace\.curated-detail-mode\s+\.cw-icon-button\s*\{[^}]*width:\s*28px;[^}]*height:\s*28px;/s);
   assert.match(styles, /\.curated-detail-media,\s*\.curated-detail-copy\s*\{[^}]*padding-bottom:\s*12px;[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain;/s);
   assert.match(styles, /@media \(max-width:\s*680px\)[\s\S]*?\.curated-detail-media,\s*\.curated-detail-copy\s*\{[^}]*padding-bottom:\s*0;[^}]*overflow:\s*visible;/s);
 });
