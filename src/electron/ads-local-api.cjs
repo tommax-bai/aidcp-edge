@@ -8,7 +8,9 @@
 //  - URL 前缀：核心 api<T>() 把 `/api/v1/` 前缀写死；而健康检查在**根级** `/status`（不在 /api/v1 下），
 //    若套用会打到不存在的 /api/v1/status → 404 → 谎报「不可达」。故本模块**逐端点显式拼 URL**。
 //
-// 红线：只读（仅 /status 与 user/list），MUST NOT 触碰 browser/start|stop|active；探测/拉取失败诚实回报、不假成功。
+// 红线：探测/拉取保持只读；唯一写例外是具名 openProfileForInspection（仅 browser/start、只接受
+// 视频号助手固定域名），供客户本机人工查看。MUST NOT 暴露 browser/stop 或通用生命周期写入口。
+// 所有调用共用本模块同一条串行节流；失败诚实回报、不假成功。
 // 敏感值：apiKey 只用于本次请求的 Authorization 头，不落日志、不写文件。
 
 const { parseRemark, DEFAULT_PLATFORM } = require('./ads-create-flow.cjs');
@@ -21,7 +23,8 @@ const DEFAULT_MAX_PAGES = 10; // 上限，避免超大环境量拉不停；超�
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * 创建一个主进程侧的 AdsPower 只读客户端（单例持有一条串行节流）。
+ * 创建一个主进程侧的 AdsPower LocalAPI 客户端（单例持有一条串行节流）。
+ * 除具名人工查看 openProfileForInspection 外，其余能力均为只读。
  * @param {{ apiBase?: string, apiKey?: string, fetchImpl?: typeof fetch, nowImpl?: () => number, sleepImpl?: (ms:number)=>Promise<void> }} deps
  */
 function createAdsLocalApi(deps = {}) {
@@ -225,6 +228,65 @@ function createAdsLocalApi(deps = {}) {
   }
 
   /**
+   * 打开/复用视频号助手分身供客户人工查看。这里只开放 browser/start：
+   * - userId / startUrl 必须由 Electron main 的权威环境映射给出，renderer 不得直传这些底层参数；
+   * - startUrl 再做一层 channels.weixin.qq.com HTTPS 限定，避免本地 IPC 退化成任意 URL 启动器；
+   * - 不关闭历史标签（open_tabs=0），避免人工查看动作破坏正在使用的浏览器上下文；
+   * - 返回有效 debug_port 才算成功，绝不把 code=0 但句柄缺失冒充已打开。
+   */
+  async function openProfileForInspection(opts = {}) {
+    const userId = String(opts.userId || '').trim();
+    if (!userId || userId.length > 256 || /[\u0000-\u001f\u007f]/.test(userId)) {
+      return { ok: false, error: '打开浏览器失败：环境标识不合法' };
+    }
+    let startUrl;
+    try {
+      startUrl = new URL(String(opts.startUrl || ''));
+    } catch {
+      return { ok: false, error: '打开浏览器失败：视频号助手地址不合法' };
+    }
+    if (startUrl.protocol !== 'https:' || startUrl.hostname !== 'channels.weixin.qq.com') {
+      return { ok: false, error: '打开浏览器失败：只允许打开视频号助手' };
+    }
+    const launchArgs = [
+      '--window-size=1440,980',
+      '--start-maximized',
+      '--deny-permission-prompts',
+      '--lang=zh-CN',
+      startUrl.toString(),
+    ];
+    const qs = new URLSearchParams({
+      user_id: userId,
+      open_tabs: '0',
+      ip_tab: '0',
+      headless: '0',
+      launch_args: JSON.stringify(launchArgs),
+    });
+    const url = `${baseOf(opts)}/api/v1/browser/start?${qs.toString()}`;
+    let res;
+    try {
+      res = await throttledFetch(url, authHeaders(opts));
+    } catch (e) {
+      return { ok: false, error: `打开浏览器失败：本地服务不可达（${(e && e.message) || String(e)}）` };
+    }
+    if (!res.ok) return { ok: false, error: `打开浏览器失败（HTTP ${res.status}）` };
+    let body;
+    try {
+      body = await res.json();
+    } catch {
+      return { ok: false, error: '打开浏览器失败：本地服务响应非 JSON' };
+    }
+    if (typeof body.code === 'number' && body.code !== 0) {
+      return { ok: false, error: `打开浏览器失败：code=${body.code} ${body.msg || ''}`.trim() };
+    }
+    const debugPort = Number(body && body.data && body.data.debug_port);
+    if (!Number.isInteger(debugPort) || debugPort <= 0) {
+      return { ok: false, error: '打开浏览器失败：本地服务未返回有效浏览器句柄' };
+    }
+    return { ok: true, debugPort };
+  }
+
+  /**
    * 取内核清单：GET {base}/api/v2/browser-profile/kernels?kernel_type=Chrome。
    * 直连 HTTP（绕开 CLI 的 `get-kernel-list`——Electron Node 20 下 `ads start` 未写 pid/store，
    * CLI 命令会误判「runtime not running」，但服务本身在监听、HTTP 正常）。
@@ -284,7 +346,16 @@ function createAdsLocalApi(deps = {}) {
     return { ok: true, status, progress };
   }
 
-  return { status, listProfiles, listGroups, listActiveProfiles, kernels, downloadKernel, ADS_MIN_INTERVAL_MS };
+  return {
+    status,
+    listProfiles,
+    listGroups,
+    listActiveProfiles,
+    openProfileForInspection,
+    kernels,
+    downloadKernel,
+    ADS_MIN_INTERVAL_MS,
+  };
 }
 
 // user/list 单项归一化。user_id=写入分身 ID 的唯一值；serial_number（UI 序号）/name/代理配置仅供展示。

@@ -389,18 +389,28 @@
             <span class="iw-kicker">视频号互动 <em id="iw-unread-badge" class="iw-unread-badge hidden">0 条未读</em></span>
             <h1 id="iw-title">正在加载互动状态</h1>
             <p id="iw-summary">正在读取当前环境的评论和私信。</p>
+            <div class="iw-core-status" aria-label="核心状态">
+              <span id="iw-engine-status" class="iw-status-chip neutral">引擎：待确认</span>
+              <span id="iw-auth-status" class="iw-status-chip neutral">视频号：待确认</span>
+            </div>
           </div>
           <div class="iw-overview-actions">
-            <span id="iw-browser" class="iw-status-chip neutral">浏览器状态待确认</span>
             <button id="iw-lifecycle" class="iw-button primary" type="button" disabled>状态确认中</button>
             <button id="iw-close" class="iw-button danger hidden" type="button">关闭</button>
-            <button id="iw-browser-control" class="iw-button secondary hidden" type="button">打开浏览器</button>
             <button id="iw-reauth" class="iw-button secondary hidden" type="button">重新登录</button>
             <button id="iw-sync" class="iw-button secondary" type="button">局部刷新</button>
           </div>
           <div class="iw-status-line" aria-live="polite">
             <span id="iw-sync-status">同步状态待确认</span>
             <span id="iw-as-of">—</span>
+          </div>
+          <div class="iw-browser-tools" aria-label="人工查看浏览器">
+            <div>
+              <span class="iw-browser-tools-label">辅助查看</span>
+              <span id="iw-browser" class="iw-status-chip neutral">自动化浏览器：未回报</span>
+              <small id="iw-browser-help" aria-live="polite">仅用于人工查看登录页和后台数据，不会启动引擎；视频号登录结果以上方鉴权状态为准。</small>
+            </div>
+            <button id="iw-browser-control" class="iw-button secondary" type="button">打开浏览器</button>
           </div>
         </header>
 

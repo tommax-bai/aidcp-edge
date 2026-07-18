@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
-// 主进程侧只读模块是 CJS（供 Electron main.cjs require），经 createRequire 引入以不破 ESM typecheck。
+// 主进程侧 LocalAPI 模块是 CJS（供 Electron main.cjs require），经 createRequire 引入以不破 ESM typecheck。
 const require = createRequire(import.meta.url);
 const { createAdsLocalApi, normalizeProfile } = require('../../src/electron/ads-local-api.cjs') as {
   createAdsLocalApi: (deps?: Record<string, unknown>) => {
@@ -12,6 +12,11 @@ const { createAdsLocalApi, normalizeProfile } = require('../../src/electron/ads-
       profiles?: Array<{ userId: string; serialNumber: string; name: string; groupName: string; proxy: string }>;
       truncated?: boolean;
       authLikely?: boolean;
+      error?: string;
+    }>;
+    openProfileForInspection: (opts?: Record<string, unknown>) => Promise<{
+      ok: boolean;
+      debugPort?: number;
       error?: string;
     }>;
     ADS_MIN_INTERVAL_MS: number;
@@ -208,7 +213,7 @@ test('并发串行化：两个调用同时进入也按 ≥1s 串行（防两独�
   assert.ok(sleeps.some((s) => s >= 1000), `并发调用应被串行节流，实测 sleeps=${JSON.stringify(sleeps)}`);
 });
 
-test('只读边界：normalizeProfile 只读字段映射，模块从不构造 browser/start|stop|active URL', async () => {
+test('只读边界：探测与列表仍不构造 browser/start|stop|active URL', async () => {
   const calls: Array<{ url: string }> = [];
   const api = createAdsLocalApi({
     ...noThrottle,
@@ -229,6 +234,78 @@ test('只读边界：normalizeProfile 只读字段映射，模块从不构造 br
   const n = normalizeProfile({ user_id: 'u1', serial_number: 's1' });
   assert.equal(n.userId, 'u1');
   assert.equal(n.serialNumber, 's1');
+});
+
+test('人工查看只打开权威视频号分身，固定 browser/start 参数且拿到有效句柄才成功', async () => {
+  const calls: Array<{ url: string; headers?: Record<string, string> }> = [];
+  const api = createAdsLocalApi({
+    ...noThrottle,
+    fetchImpl: stubFetch(
+      [['/api/v1/browser/start', () => res(true, 200, { code: 0, data: { debug_port: 61234 } })]],
+      calls,
+    ),
+  });
+  const result = await api.openProfileForInspection({
+    userId: 'k1eoujd8',
+    startUrl: 'https://channels.weixin.qq.com/platform/post/list',
+    apiBase: 'http://127.0.0.1:50325',
+    apiKey: 'secret-test-key',
+  });
+  assert.deepEqual(result, { ok: true, debugPort: 61234 });
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0].url);
+  assert.equal(url.pathname, '/api/v1/browser/start');
+  assert.equal(url.searchParams.get('user_id'), 'k1eoujd8');
+  assert.equal(url.searchParams.get('open_tabs'), '0', '人工查看不得清空已有标签页');
+  assert.equal(url.searchParams.get('headless'), '0');
+  const launchArgs = JSON.parse(url.searchParams.get('launch_args') || '[]');
+  assert.ok(launchArgs.includes('https://channels.weixin.qq.com/platform/post/list'));
+  assert.equal(calls[0].headers?.Authorization, 'Bearer secret-test-key');
+  assert.doesNotMatch(calls[0].url, /browser\/(stop|active)/);
+});
+
+test('人工查看拒绝任意站点，且 code=0 但无有效 debug_port 也不假报打开', async () => {
+  const calls: Array<{ url: string }> = [];
+  const api = createAdsLocalApi({
+    ...noThrottle,
+    fetchImpl: stubFetch(
+      [['/api/v1/browser/start', () => res(true, 200, { code: 0, data: {} })]],
+      calls,
+    ),
+  });
+  const arbitrary = await api.openProfileForInspection({ userId: 'p1', startUrl: 'https://example.com/' });
+  assert.equal(arbitrary.ok, false);
+  assert.match(arbitrary.error || '', /只允许打开视频号助手/);
+  assert.equal(calls.length, 0, '域名不合法时必须在 fetch 前拒绝');
+
+  const missingHandle = await api.openProfileForInspection({
+    userId: 'p1',
+    startUrl: 'https://channels.weixin.qq.com/platform/post/list',
+  });
+  assert.equal(missingHandle.ok, false);
+  assert.match(missingHandle.error || '', /未返回有效浏览器句柄/);
+});
+
+test('人工查看与列表共用同一条主进程 LocalAPI 串行节流', async () => {
+  let clock = 1_000_000;
+  const sleeps: number[] = [];
+  const calls: string[] = [];
+  const api = createAdsLocalApi({
+    nowImpl: () => clock,
+    sleepImpl: async (ms: number) => { sleeps.push(ms); clock += ms; },
+    fetchImpl: (async (url: string) => {
+      calls.push(String(url));
+      return String(url).includes('/browser/start')
+        ? res(true, 200, { code: 0, data: { debug_port: 61234 } })
+        : res(true, 200, { code: 0, data: { list: [] } });
+    }) as unknown as typeof fetch,
+  });
+  await Promise.all([
+    api.listProfiles(),
+    api.openProfileForInspection({ userId: 'p1', startUrl: 'https://channels.weixin.qq.com/platform/post/list' }),
+  ]);
+  assert.equal(calls.length, 2);
+  assert.ok(sleeps.some((ms) => ms >= 1000), `预期共用串行节流，实测 sleeps=${JSON.stringify(sleeps)}`);
 });
 
 test('normalizeProfile: 真机 no_proxy（带下划线）归一为「无代理配置」', () => {

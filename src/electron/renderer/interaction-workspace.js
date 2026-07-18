@@ -143,7 +143,10 @@
     const dom = {
       title: root.querySelector('#iw-title'),
       summary: root.querySelector('#iw-summary'),
+      engineStatus: root.querySelector('#iw-engine-status'),
+      authStatus: root.querySelector('#iw-auth-status'),
       browser: root.querySelector('#iw-browser'),
+      browserHelp: root.querySelector('#iw-browser-help'),
       lifecycle: root.querySelector('#iw-lifecycle'),
       close: root.querySelector('#iw-close'),
       browserControl: root.querySelector('#iw-browser-control'),
@@ -179,7 +182,6 @@
     let listRequest = 0;
     let detailRequest = 0;
     let pollTimer = null;
-    let browserPollTimer = null;
     let listPollTimer = null;
     let active = false;
     let env = null;
@@ -194,10 +196,9 @@
         tab: 'pending', search: '', items: [], nextCursor: null, listLoading: false, listAppending: false,
         listError: null, selectedThreadId: null, detail: null, detailLoading: false, detailError: null,
         auth: null, syncFreshness: null, pendingSync: null, stale: false,
-        actionBusy: null, actionError: null, actionNotice: null,
+        actionBusy: null, actionError: null, actionNotice: null, localBrowserNotice: null,
         replyConfig: null, readControlsBusy: false, readControlsError: null, readDelivery: null, configGuidanceOpen: false,
         testDataResetEnabled: false, testResetBusy: null, testResetStatus: null,
-        pendingBrowserAction: null, browserPollCount: 0,
         draftText: '', draftDirty: false, syncBusy: false, lifecycleBusy: null, pollCount: 0,
       };
     }
@@ -205,11 +206,6 @@
     function clearPoll() {
       if (pollTimer) global.clearTimeout(pollTimer);
       pollTimer = null;
-    }
-
-    function clearBrowserPoll() {
-      if (browserPollTimer) global.clearTimeout(browserPollTimer);
-      browserPollTimer = null;
     }
 
     function clearListPoll() {
@@ -489,6 +485,30 @@
       return { action: null, label: '状态确认中' };
     }
 
+    function engineStatusView() {
+      if (!env) return { label: '引擎：待确认', tone: 'neutral' };
+      if (env.edge === 'warning') return { label: '引擎：异常', tone: 'danger' };
+      if (env.edge === 'starting') return { label: '引擎：启动中', tone: 'progress' };
+      if (env.session === 'paused') return { label: '引擎：已暂停', tone: 'attention' };
+      if (env.edge === 'running' && env.connectivity === 'connected') return { label: '引擎：已连接', tone: 'success' };
+      if (env.edge === 'running') return { label: '引擎：连接中断', tone: 'danger' };
+      if (env.edge === 'stopped') return { label: '引擎：未启动', tone: 'neutral' };
+      return { label: '引擎：待确认', tone: 'neutral' };
+    }
+
+    function authStatusView(auth) {
+      if (auth && auth.reasonCode === 'WECHAT_IDENTITY_MISMATCH') return { label: '视频号：账号不匹配', tone: 'danger' };
+      const status = auth && auth.status;
+      if (status === 'active') return { label: '视频号：鉴权通过', tone: 'success' };
+      if (status === 'login_required') return { label: '视频号：等待登录', tone: 'attention' };
+      if (status === 'reauth_required') return { label: '视频号：需重新登录', tone: 'danger' };
+      if (status === 'challenge_required') return { label: '视频号：待人工验证', tone: 'attention' };
+      if (status === 'authenticating') return { label: '视频号：鉴权中', tone: 'progress' };
+      if (status === 'degraded') return { label: '视频号：同步异常', tone: 'attention' };
+      if (status === 'disabled') return { label: '视频号：能力暂停', tone: 'danger' };
+      return { label: '视频号：待确认', tone: 'neutral' };
+    }
+
     function renderOverview() {
       const auth = state.auth;
       const status = auth && auth.status;
@@ -519,13 +539,11 @@
             : enabledButUnavailable ? (commentRead.storedEnabled ? commentRead.reason : dmRead.reason)
               : controlsPending ? 'Cloud 已保存账号配置，但 Edge 尚未回报同版本能力；当前写操作继续关闭。'
                 : syncUnconfirmed ? '开关与平台读取能力已就绪，但尚未收到所有已启用渠道的成功同步证据。'
-            : auth.browserState === 'open'
-              ? '浏览器当前保持打开；评论和私信仍按 Edge 实际能力同步。完成查看后可转入后台。'
-              : '当前环境已绑定这个视频号并在后台运行。评论和私信按 Edge 实际能力同步，发送结果以平台确认状态为准。';
+            : '当前环境已绑定这个视频号。评论和私信按 Edge 实际能力同步，发送结果以平台确认状态为准。';
         tone = connectivityStale || controlsPending || allReadDisabled || enabledButUnavailable || syncUnconfirmed ? 'attention' : 'success';
       } else if (status === 'login_required') {
         title = '等待首次登录';
-        summary = `将在“${safeText(env && env.label, '当前环境')}”打开的视频号助手中绑定你本次扫码登录的账号；无需填写内部账号 ID。`;
+        summary = `可用下方“打开浏览器”在“${safeText(env && env.label, '当前环境')}”完成扫码；无需填写内部账号 ID，登录结果仍由引擎单独确认。`;
         tone = 'attention';
       } else if (status === 'reauth_required') {
         title = '需要重新登录';
@@ -552,14 +570,21 @@
       dom.title.dataset.tone = tone;
       dom.summary.textContent = summary;
 
+      const engineView = engineStatusView();
+      const authView = authStatusView(auth);
+      dom.engineStatus.textContent = engineView.label;
+      dom.engineStatus.className = `iw-status-chip ${engineView.tone}`;
+      dom.authStatus.textContent = authView.label;
+      dom.authStatus.className = `iw-status-chip ${authView.tone}`;
+
       const browserState = auth && auth.browserState;
       const browserText = browserState === 'closed' && status === 'active'
-        ? '后台运行中（浏览器已关闭）'
-        : browserState === 'open' ? '浏览器已打开'
-          : browserState === 'opening' ? '浏览器正在打开'
-            : browserState === 'closing' ? '浏览器正在关闭'
-              : browserState === 'unavailable' ? '浏览器暂不可用'
-                : '浏览器状态待确认';
+        ? '自动化浏览器：后台模式'
+        : browserState === 'open' ? '自动化浏览器：已打开'
+          : browserState === 'opening' ? '自动化浏览器：正在打开'
+            : browserState === 'closing' ? '自动化浏览器：正在关闭'
+              : browserState === 'unavailable' ? '自动化浏览器：暂不可用'
+                : '自动化浏览器：未回报';
       dom.browser.textContent = browserText;
       dom.browser.className = `iw-status-chip ${browserState === 'unavailable' ? 'danger' : browserState === 'closed' && status === 'active' ? 'success' : 'neutral'}`;
       const lifecycle = lifecycleControl();
@@ -573,16 +598,12 @@
       dom.close.classList.toggle('hidden', !canClose);
       dom.close.textContent = state.lifecycleBusy === 'close' ? '正在关闭…' : '关闭';
       dom.close.disabled = Boolean(state.lifecycleBusy) || !active || !canClose || typeof onLifecycleAction !== 'function';
-      const canControlBrowser = status === 'active' && ['closed', 'open', 'opening', 'closing'].includes(browserState);
-      const browserAction = browserState === 'open' ? 'close' : browserState === 'closed' ? 'open' : null;
-      dom.browserControl.classList.toggle('hidden', !canControlBrowser);
-      dom.browserControl.dataset.action = browserAction || '';
-      dom.browserControl.textContent = browserState === 'opening' ? '正在打开…'
-        : browserState === 'closing' ? '正在转入后台…'
-          : state.pendingBrowserAction === 'open' ? '等待浏览器打开…'
-            : state.pendingBrowserAction === 'close' ? '等待转入后台…'
-              : browserAction === 'close' ? '转入后台' : '打开浏览器';
-      dom.browserControl.disabled = !browserAction || Boolean(state.actionBusy) || Boolean(state.pendingBrowserAction);
+      const canOpenLocalBrowser = active && typeof api.interactionOpenLocalBrowser === 'function';
+      dom.browserControl.classList.toggle('hidden', !canOpenLocalBrowser);
+      dom.browserControl.textContent = state.actionBusy === 'browser-open-local' ? '正在打开…' : '打开浏览器';
+      dom.browserControl.disabled = !canOpenLocalBrowser || Boolean(state.actionBusy);
+      dom.browserHelp.textContent = state.localBrowserNotice
+        || '仅用于人工查看登录页和后台数据，不会启动引擎；视频号登录结果以上方鉴权状态为准。';
       dom.syncStatus.textContent = state.listLoading
         ? '正在读取当前环境'
         : state.stale ? '使用上次成功数据'
@@ -591,7 +612,7 @@
       dom.syncTime.textContent = `${state.stale ? '上次成功' : '最近成功'} · ${syncTimeText()}`;
       const canReopen = ['login_required', 'reauth_required', 'challenge_required'].includes(status);
       dom.reauth.classList.toggle('hidden', !canReopen);
-      dom.reauth.textContent = status === 'challenge_required' ? '打开浏览器处理验证' : status === 'login_required' ? '打开登录窗口' : '重新登录';
+      dom.reauth.textContent = status === 'challenge_required' ? '请求重新验证' : status === 'login_required' ? '请求检查登录' : '重新鉴权';
       dom.reauth.disabled = state.actionBusy === 'reauth';
       const readState = currentReadState();
       dom.sync.disabled = state.syncBusy || !active || !readState.effective;
@@ -934,7 +955,6 @@
         state.replyConfig = envelope.data.replyConfig || { status: 'unknown', draftVersion: null, publishedVersion: null };
         state.testDataResetEnabled = Boolean(envelope.data.testTools && envelope.data.testTools.dataResetEnabled);
         applySyncFreshness(envelope.data.syncFreshness);
-        reconcileBrowserAction();
         state.listError = null;
         state.stale = false;
         // 两级导航：MUST NOT 默认选中任何一条，也不为其预取详情——只有客户显式点击才进详情级。
@@ -956,42 +976,6 @@
           scheduleListPoll(capturedEpoch, envKey);
         }
       }
-    }
-
-    function scheduleBrowserPoll(capturedEpoch, envKey) {
-      clearBrowserPoll();
-      if (!state.pendingBrowserAction || state.browserPollCount >= 12) {
-        if (state.pendingBrowserAction) {
-          state.actionNotice = '请求已受理，但尚未收到 Edge 浏览器状态确认。';
-          state.pendingBrowserAction = null;
-        }
-        return;
-      }
-      state.browserPollCount += 1;
-      browserPollTimer = global.setTimeout(() => {
-        if (isCurrent(capturedEpoch, envKey)) void loadList({ preserveSelection: true });
-      }, 1000);
-    }
-
-    function reconcileBrowserAction() {
-      const action = state.pendingBrowserAction;
-      if (!action || !state.auth) return;
-      const target = action === 'open' ? 'open' : 'closed';
-      if (state.auth.browserState === target) {
-        state.actionNotice = action === 'open' ? '浏览器已打开，后台同步继续运行。' : '浏览器已关闭，已转入后台运行。';
-        state.pendingBrowserAction = null;
-        state.browserPollCount = 0;
-        clearBrowserPoll();
-        return;
-      }
-      if (state.auth.browserState === 'unavailable') {
-        state.actionNotice = 'Edge 未能完成浏览器控制，请稍后重试。';
-        state.pendingBrowserAction = null;
-        state.browserPollCount = 0;
-        clearBrowserPoll();
-        return;
-      }
-      scheduleBrowserPoll(epoch, env.envKey);
     }
 
     async function loadDetail(threadId, { cursor = null, append = false, silent = false } = {}) {
@@ -1321,7 +1305,7 @@
         const response = await api.interactionReopenAuth({ envKey, idempotencyKey: makeRequestKey('interaction-reauth') });
         if (!isCurrent(capturedEpoch, envKey)) return;
         assertEnvelope(response, envKey);
-        state.actionNotice = '已请求打开原浏览器，仍需等待平台登录状态确认。';
+        state.actionNotice = '已请求引擎重新检查登录，仍需等待平台登录状态确认。';
       } catch (error) {
         if (!isCurrent(capturedEpoch, envKey)) return;
         state.actionError = error;
@@ -1334,32 +1318,37 @@
       }
     }
 
-    async function controlBrowser() {
-      if (!active || !env || state.actionBusy || state.pendingBrowserAction || !state.auth) return;
-      const action = state.auth.browserState === 'closed' ? 'open' : state.auth.browserState === 'open' ? 'close' : null;
-      if (!action) return;
+    async function openLocalBrowser() {
+      if (!active || !env || state.actionBusy || typeof api.interactionOpenLocalBrowser !== 'function') return;
       const capturedEpoch = epoch;
       const envKey = env.envKey;
-      state.actionBusy = 'browser-control';
+      state.actionBusy = 'browser-open-local';
       state.actionError = null;
-      state.actionNotice = null;
+      state.actionNotice = '正在准备本地浏览器；这不会启动引擎。';
+      state.localBrowserNotice = '正在准备本地浏览器；这不会启动引擎。';
       renderAll();
       try {
-        const response = await api.interactionBrowserControl({
-          envKey, action, idempotencyKey: makeRequestKey(`interaction-browser-${action}`),
-        });
+        const response = await api.interactionOpenLocalBrowser({ envKey });
         if (!isCurrent(capturedEpoch, envKey)) return;
-        assertEnvelope(response, envKey);
-        state.pendingBrowserAction = action;
-        state.browserPollCount = 0;
-        state.actionNotice = action === 'open'
-          ? 'Cloud 已受理打开请求，正在等待 Edge 浏览器状态。'
-          : 'Cloud 已受理转入后台请求，正在等待 Edge 浏览器状态。';
-        scheduleBrowserPoll(capturedEpoch, envKey);
+        if (!response || !response.ok) {
+          const payload = response && response.data && response.data.error;
+          const error = new Error((payload && payload.message) || '本地浏览器未能打开。');
+          error.code = payload && payload.code;
+          error.status = response && response.status;
+          throw error;
+        }
+        if (!response.data || response.data.envKey !== envKey || response.data.opened !== true) {
+          const error = new Error('本地浏览器回包环境不一致，已丢弃。');
+          error.code = 'INTERACTION_SCOPE_MISMATCH';
+          throw error;
+        }
+        state.actionNotice = '本地浏览器已打开；未改变引擎状态，登录结果仍以上方“视频号”鉴权状态为准。';
+        state.localBrowserNotice = state.actionNotice;
       } catch (error) {
         if (!isCurrent(capturedEpoch, envKey)) return;
         state.actionError = error;
         state.actionNotice = friendlyError(error);
+        state.localBrowserNotice = state.actionNotice;
       } finally {
         if (isCurrent(capturedEpoch, envKey)) {
           state.actionBusy = null;
@@ -1423,7 +1412,6 @@
         epoch += 1;
         env = null;
         clearPoll();
-        clearBrowserPoll();
         clearListPoll();
         setVisible(false);
         return;
@@ -1447,7 +1435,6 @@
       state = freshState();
       if (env.connectivity !== 'connected') state.stale = true;
       clearPoll();
-      clearBrowserPoll();
       clearListPoll();
       setVisible(true);
       renderAll();
@@ -1514,7 +1501,7 @@
     dom.loadMore.addEventListener('click', () => void loadList({ append: true, preserveSelection: true }));
     dom.close.addEventListener('click', () => void changeLifecycle('close'));
     dom.lifecycle.addEventListener('click', () => void changeLifecycle());
-    dom.browserControl.addEventListener('click', () => void controlBrowser());
+    dom.browserControl.addEventListener('click', () => void openLocalBrowser());
     dom.sync.addEventListener('click', () => void syncCurrent());
     dom.reauth.addEventListener('click', () => void reopenAuth());
     dom.readAll.addEventListener('change', () => void updateReadControls(dom.readAll.checked, dom.readAll.checked));

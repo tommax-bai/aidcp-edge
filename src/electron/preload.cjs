@@ -89,6 +89,8 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   interactionTestReset: (args) => ipcRenderer.invoke('interaction:test-reset', args),
   interactionReopenAuth: (args) => ipcRenderer.invoke('interaction:auth:reopen', args),
   interactionBrowserControl: (args) => ipcRenderer.invoke('interaction:browser:control', args),
+  // 本机人工查看：只交 envKey；profile / URL / LocalAPI / 凭据全部由 main 权威派生。
+  interactionOpenLocalBrowser: (args) => ipcRenderer.invoke('interaction:browser:open-local', args),
   interactionUpdateReadControls: (args) => ipcRenderer.invoke('interaction:read-controls:update', args),
   interactionNotify: (args) => ipcRenderer.invoke('interaction:notify', args),
   interactionCancelReads: (envKey) => ipcRenderer.invoke('interaction:reads:cancel', { envKey }),

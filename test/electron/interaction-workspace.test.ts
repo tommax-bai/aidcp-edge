@@ -204,15 +204,9 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
       calls.reopen.push(args);
       return apiResult({ data: { envKey: args.envKey, accountId: `account-${args.envKey}`, acceptedAt: Date.now() }, meta: { requestId: 'reopen', asOf: Date.now() } });
     },
-    interactionBrowserControl: async (args: any) => {
+    interactionOpenLocalBrowser: async (args: any) => {
       calls.browser.push(args);
-      return apiResult({
-        data: {
-          envKey: args.envKey, accountId: `account-${args.envKey}`, action: 'browser_control',
-          browserAction: args.action, actionRequestId: 'browser-control', status: 'accepted',
-        },
-        meta: { requestId: 'browser-control', asOf: Date.now() },
-      });
+      return { status: 200, ok: true, data: { envKey: args.envKey, opened: true } };
     },
     interactionUpdateReadControls: async (args: any) => {
       calls.readControls.push(args);
@@ -281,7 +275,9 @@ test('XHS / Facebook 保留原 workspace；视频号只替换右侧且不占左�
   assert.match($(window, '#acct-name').textContent || '', /轻享生活号/);
   assert.equal($(window, '#acct-plat').textContent, '视频号');
   assert.match($(window, '#iw-title').textContent || '', /已绑定：示例视频号/);
-  assert.match($(window, '#iw-browser').textContent || '', /后台运行中（浏览器已关闭）/);
+  assert.equal($(window, '#iw-engine-status').textContent, '引擎：已连接');
+  assert.equal($(window, '#iw-auth-status').textContent, '视频号：鉴权通过');
+  assert.match($(window, '#iw-browser').textContent || '', /自动化浏览器：后台模式/);
   assert.match($(window, '#iw-list').textContent || '', /示例观众/);
   await openThread(window);
   assert.match($(window, '#iw-detail').textContent || '', /模板 template_comment_thanks · v1/);
@@ -358,58 +354,50 @@ test('缺少本机运行时标识时拒绝生命周期动作，绝不回落成 e
   assert.deepEqual(lifecycleCalls, [], '标识缺失 MUST NOT 向本机通道发出请求');
 });
 
-test('active 视频号可打开浏览器或转入后台，accepted 不会冒充浏览器已显隐', async () => {
-  let browserState = 'closed';
+test('本地打开浏览器不依赖引擎在线或视频号鉴权，也不冒充鉴权成功', async () => {
   const browserCalls: any[] = [];
   const browserList = clone(listFixture);
-  const { window } = await boot({
+  browserList.data.auth.status = 'login_required';
+  browserList.data.auth.browserState = 'unavailable';
+  const current = await boot({
     api: {
-      interactionList: async (args: any) => {
-        const envelope = scopeEnvelope(browserList, args.envKey);
-        envelope.data.auth.browserState = browserState;
-        return apiResult(envelope);
-      },
-      interactionBrowserControl: async (args: any) => {
+      interactionList: async (args: any) => apiResult(scopeEnvelope(browserList, args.envKey)),
+      interactionOpenLocalBrowser: async (args: any) => {
         browserCalls.push(args);
-        return apiResult({
-          data: {
-            envKey: args.envKey, accountId: `account-${args.envKey}`, action: 'browser_control',
-            browserAction: args.action, actionRequestId: `browser-${args.action}`, status: 'accepted',
-          },
-          meta: { requestId: `browser-${args.action}`, asOf: Date.now() },
-        });
+        return { status: 200, ok: true, data: { envKey: args.envKey, opened: true } };
       },
     },
   });
-  const control = $(window, '#iw-browser-control') as HTMLButtonElement;
-  assert.equal(control.textContent, '打开浏览器');
-
-  control.dispatchEvent(new window.Event('click', { bubbles: true }));
+  const stopped = status('env_wc_demo', '轻享生活号');
+  stopped.edge = 'stopped';
+  stopped.cloud = 'disconnected';
+  stopped.session = 'closed';
+  current.pushFleet({
+    provider: 'adspower', selectedEnvId: 'env_wc_demo', railCollapsed: true,
+    environments: [{
+      envId: 'env_wc_demo', kind: 'adspower', profileId: 'env_wc_demo', name: '轻享生活号',
+      platform: 'wechat_channels', status: stopped,
+    }],
+  });
   await flush();
-  assert.equal(browserCalls[0].action, 'open');
-  assert.match(browserCalls[0].idempotencyKey, /^interaction-browser-open-/);
-  assert.match($(window, '#iw-sync-status').textContent || '', /已受理打开请求/);
-  assert.match($(window, '#iw-browser').textContent || '', /浏览器已关闭/,
-    'accepted 后尚未读回 open，不得提前显示已打开');
 
-  browserState = 'open';
-  await new Promise((resolve) => setTimeout(resolve, 1_050));
-  await flush();
-  assert.equal($(window, '#iw-browser').textContent, '浏览器已打开');
-  assert.equal(control.textContent, '转入后台');
-  assert.match($(window, '#iw-sync-status').textContent || '', /浏览器已打开/);
+  const control = $(current.window, '#iw-browser-control') as HTMLButtonElement;
+  assert.equal(hidden(control), false);
+  assert.equal(control.disabled, false);
+  assert.equal($(current.window, '#iw-engine-status').textContent, '引擎：未启动');
+  assert.equal($(current.window, '#iw-auth-status').textContent, '视频号：等待登录');
+  assert.equal($(current.window, '#iw-browser').textContent, '自动化浏览器：暂不可用');
 
-  control.dispatchEvent(new window.Event('click', { bubbles: true }));
+  control.dispatchEvent(new current.window.Event('click', { bubbles: true }));
   await flush();
-  assert.equal(browserCalls[1].action, 'close');
-  assert.match($(window, '#iw-browser').textContent || '', /浏览器已打开/,
-    'accepted 后尚未读回 closed，不得提前显示已转入后台');
-
-  browserState = 'closed';
-  await new Promise((resolve) => setTimeout(resolve, 1_050));
-  await flush();
-  assert.match($(window, '#iw-browser').textContent || '', /后台运行中/);
-  assert.equal(control.textContent, '打开浏览器');
+  assert.equal(browserCalls.length, 1);
+  assert.equal(browserCalls[0].envKey, 'env_wc_demo');
+  assert.deepEqual(Object.keys(browserCalls[0]), ['envKey'], 'renderer 只能提交 envKey，不能传 URL/profile/token');
+  assert.match($(current.window, '#iw-browser-help').textContent || '', /本地浏览器已打开/);
+  assert.match($(current.window, '#iw-browser-help').textContent || '', /未改变引擎状态/);
+  assert.equal($(current.window, '#iw-engine-status').textContent, '引擎：未启动', '打开浏览器不得启动引擎');
+  assert.equal($(current.window, '#iw-auth-status').textContent, '视频号：等待登录', '打开浏览器不得冒充鉴权成功');
+  assert.equal(control.textContent, '打开浏览器', '人工查看只提供打开，不把按钮改成引擎侧关闭动作');
 });
 
 test('视频号工作区按 XHS 状态矩阵显示恢复与暂停态关闭，并只路由当前 envKey', async () => {
@@ -528,6 +516,7 @@ test('首次授权、错号恢复和账号开关待应用都有明确且 fail-cl
   assert.match($(first.window, '#iw-title').textContent || '', /等待首次登录/);
   assert.match($(first.window, '#iw-summary').textContent || '', /春日手作号/);
   assert.match($(first.window, '#iw-summary').textContent || '', /无需填写内部账号 ID/);
+  assert.equal($(first.window, '#iw-auth-status').textContent, '视频号：等待登录');
   assert.equal(hidden($(first.window, '#iw-reauth')), false);
 
   const mismatchList = clone(listFixture);
@@ -545,6 +534,7 @@ test('首次授权、错号恢复和账号开关待应用都有明确且 fail-cl
   assert.match($(mismatch.window, '#iw-title').textContent || '', /另一个视频号/);
   assert.match($(mismatch.window, '#iw-summary').textContent || '', /示例视频号/);
   assert.match($(mismatch.window, '#iw-summary').textContent || '', /历史内容仍可查看/);
+  assert.equal($(mismatch.window, '#iw-auth-status').textContent, '视频号：账号不匹配');
   await openThread(mismatch.window);
   assert.equal((mismatch.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
 
@@ -911,7 +901,7 @@ test('离线保存回 deferred → 持久显示待生效，不冒充已生效，
 test('冷待机（connectivity=connected + browserState=closed + status=active）保持可编辑——防 1.2 顺手摘掉 status', async () => {
   // 默认 boot 即冷待机形态：fixture auth.status=active、browserState=closed，fleet status.cloud=connected。
   const { window, calls } = await boot();
-  assert.match($(window, '#iw-browser').textContent || '', /浏览器已关闭/, '前提：这是浏览器已关闭的后台运行态');
+  assert.match($(window, '#iw-browser').textContent || '', /自动化浏览器：后台模式/, '前提：这是浏览器已关闭的后台运行态');
   const comment = $(window, '#iw-read-comment') as HTMLInputElement;
   assert.equal(comment.disabled, false, 'browserState=closed 且 status=active 必须仍可编辑');
   comment.checked = false;
@@ -955,7 +945,7 @@ test('授权态非 active 或数据 stale 时读取开关仍禁用', async () =>
   assert.equal(($(window, '#iw-read-dm') as HTMLInputElement).disabled, true, '同环境掉线致 stale 时私信开关必须禁用');
 });
 
-test('首次互动状态查询失败后自动重试并恢复浏览器控制', async () => {
+test('首次互动状态查询失败后自动重试，人工查看按钮不依赖 Cloud 浏览器状态', async () => {
   let listCount = 0;
   const current = await boot({
     listPollDelayMs: 10,
@@ -974,7 +964,7 @@ test('首次互动状态查询失败后自动重试并恢复浏览器控制', as
   await flush();
 
   assert.ok(listCount >= 2, '首次查询失败时必须继续获取 Cloud 投影，不能永久停在待确认');
-  assert.match($(current.window, '#iw-browser').textContent || '', /后台运行中/);
+  assert.match($(current.window, '#iw-browser').textContent || '', /自动化浏览器：后台模式/);
   assert.equal(($(current.window, '#iw-browser-control') as HTMLButtonElement).textContent, '打开浏览器');
   assert.equal(hidden($(current.window, '#iw-browser-control')), false);
   current.window.close();

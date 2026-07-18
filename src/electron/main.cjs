@@ -68,7 +68,8 @@ const { resolveTrayIconPath } = require('./tray-icon.cjs');
   }
 }
 
-// 主进程侧 AdsPower 只读客户端（探测 + 环境列表 + 在跑分身对账）。单例持有本进程内**唯一**串行节流（1req/s）。
+// 主进程侧 AdsPower 客户端（探测 + 环境列表 + 在跑分身对账 + 具名人工查看打开）。
+// 单例持有本进程内**唯一**串行节流（1req/s）；人工查看只开放 browser/start，不开放 stop / 通用写入口。
 // 与核心子进程内的 AdsPowerProvider 节流各自独立（跨进程无法共享内存队列，见 ads-local-api.cjs 头注）。
 const adsApi = createAdsLocalApi({});
 
@@ -485,6 +486,7 @@ async function clientAuthFetch(pathname, { method = 'GET', token, body, idempote
 // 这里不暴露通用 URL/fetch，也不把客户 token 或 Cloud 原始请求能力交给 renderer。
 const INTERACTION_CHANNELS = new Set(['comment', 'dm']);
 const INTERACTION_LIST_STATES = new Set(['pending', 'sent']);
+const WECHAT_CHANNELS_INSPECTION_URL = 'https://channels.weixin.qq.com/platform/post/list';
 const interactionReadControllers = new Map(); // envKey -> Set<AbortController>（仅取消 list/detail 读请求）
 
 function interactionLocalError(code, message, status = 400, details) {
@@ -4037,6 +4039,53 @@ ipcMain.handle('interaction:browser:control', (_event, raw) => handleInteraction
     body: { action },
     idempotencyKey,
   });
+}));
+
+// 客户本机人工查看：只按 envKey 定位当前客户可见的视频号 AdsPower 分身，直接走本机 LocalAPI。
+// 与上方 Cloud→Edge 的 auth sidecar 控制是两条不同能力：这里不要求 auth active / Edge 在线，
+// 也绝不启动、恢复或附着核心。打开浏览器成功 ≠ 视频号鉴权成功，鉴权仍以 Interaction 投影为准。
+ipcMain.handle('interaction:browser:open-local', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  if (!hasValidSession() || !(allowedProfileIds instanceof Set) || !allowedProfileIds.has(envKey)
+    || allowedEnvironmentPlatforms.get(envKey) !== 'wechat_channels') {
+    return interactionLocalError('INTERACTION_SCOPE_MISMATCH', '当前环境不属于本次登录客户，无法打开浏览器。', 403);
+  }
+  // 精确按 profileId 查本机句柄；MUST NOT 用 selectedHandle() 回落，否则环境切换竞态会误开另一个账号。
+  const handle = [...envs.values()].find((candidate) => candidate
+    && !candidate.removed
+    && candidate.kind === 'adspower'
+    && candidate.profileId === envKey
+    && normalizePlatform(candidate.platform) === 'wechat_channels');
+  if (!handle) {
+    return interactionLocalError('INTERACTION_SCOPE_MISMATCH', '当前视频号环境不在本机，无法打开浏览器。', 403);
+  }
+
+  // 只准备本地运行时 / 内核，handle 故意传 null：不得把人工打开呈现成「引擎正在启动」或改写鉴权状态。
+  const service = await ensureAdsServiceOnce(null);
+  if (!service.ok) {
+    return interactionLocalError('INTERACTION_UPSTREAM_UNAVAILABLE', `本地浏览器运行时未就绪：${service.error || '未知错误'}`, 503);
+  }
+  const kernelVersion = handle.neededKernel || adsFingerprint.DEFAULT_KERNEL;
+  const kernel = await ensureKernelOnce(kernelVersion, service.cliEntry, null);
+  if (!kernel.ok) {
+    return interactionLocalError('INTERACTION_UPSTREAM_UNAVAILABLE', `浏览器内核 ${kernelVersion} 未就绪：${kernel.error || '未知错误'}`, 503);
+  }
+  const opened = await adsApi.openProfileForInspection({
+    ...resolveAdsOpts(),
+    userId: handle.profileId,
+    startUrl: WECHAT_CHANNELS_INSPECTION_URL,
+  });
+  if (!opened.ok) {
+    return interactionLocalError('INTERACTION_UPSTREAM_UNAVAILABLE', opened.error || '本地浏览器未能打开。', 503);
+  }
+  // 只记录浏览器已在跑，供用户之后显式点「启动」时走既有接管路径；此处本身不启动核心。
+  handle.browserAlreadyRunning = true;
+  return {
+    status: 200,
+    ok: true,
+    data: { envKey, opened: true },
+  };
 }));
 
 ipcMain.handle('interaction:read-controls:update', (_event, raw) => handleInteractionIpc(async () => {

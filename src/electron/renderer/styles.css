@@ -2693,6 +2693,13 @@ body { margin: 0; }
   font-size: 11.5px;
   line-height: 17px;
 }
+.iw-core-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  flex-wrap: wrap;
+}
 .iw-overview-actions {
   display: flex;
   align-items: flex-start;
@@ -2711,6 +2718,32 @@ body { margin: 0; }
   color: var(--faint);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
+}
+.iw-browser-tools {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--hair);
+}
+.iw-browser-tools > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.iw-browser-tools-label {
+  color: var(--faint);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.iw-browser-tools small {
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 15px;
 }
 .iw-status-chip,
 .iw-badge {
@@ -3206,6 +3239,7 @@ body { margin: 0; }
 @media (max-width: 520px) {
   .iw-overview { padding: 10px 11px; }
   .iw-status-line { align-items: flex-start; flex-direction: column; }
+  .iw-browser-tools { align-items: flex-start; flex-direction: column; }
   .iw-toolbar { align-items: stretch; flex-direction: column; }
   .iw-search { flex-basis: auto; }
   .iw-list-meta { align-self: flex-end; }

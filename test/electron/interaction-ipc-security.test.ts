@@ -14,7 +14,7 @@ const namedChannels = [
   'interaction:list', 'interaction:detail', 'interaction:draft:update', 'interaction:approve',
   'interaction:regenerate', 'interaction:send', 'interaction:ignore', 'interaction:escalate',
   'interaction:sync', 'interaction:test-reset', 'interaction:auth:reopen', 'interaction:browser:control', 'interaction:reads:cancel',
-  'interaction:read-controls:update', 'interaction:notify',
+  'interaction:browser:open-local', 'interaction:read-controls:update', 'interaction:notify',
 ];
 
 test('preload 只暴露具名互动方法，不给 renderer 任意 URL / method / header / token 能力', () => {
@@ -42,6 +42,22 @@ test('main 锁定 customer-auth 路径和方法，并对白名单参数与 envKe
   assert.match(main, /interaction:auth:reopen[\s\S]*idempotencyKey/, '重新登录动作必须带幂等键');
   assert.match(main, /interaction:browser:control[\s\S]*body: \{ action \},[\s\S]*idempotencyKey/, '浏览器显隐只允许 open\/close 且必须带幂等键');
   assert.match(main, /\/interactions\/browser/, '浏览器控制路径由 main 固定组装');
+  const localOpenHandler = main.slice(
+    main.indexOf("ipcMain.handle('interaction:browser:open-local'"),
+    main.indexOf("ipcMain.handle('interaction:read-controls:update'"),
+  );
+  assert.match(localOpenHandler, /interactionArgs\(raw, new Set\(\['envKey'\]\)\)/, '本机打开只允许 renderer 提交 envKey');
+  assert.match(localOpenHandler, /allowedProfileIds\.has\(envKey\)[\s\S]*allowedEnvironmentPlatforms\.get\(envKey\) !== 'wechat_channels'/,
+    '本机打开必须重新校验当前客户可见的视频号范围');
+  assert.match(localOpenHandler, /candidate\.profileId === envKey[\s\S]*normalizePlatform\(candidate\.platform\) === 'wechat_channels'/,
+    '本机打开必须精确命中本地视频号 profile，不能回落当前选中环境');
+  assert.match(localOpenHandler, /ensureAdsServiceOnce\(null\)[\s\S]*ensureKernelOnce\(kernelVersion, service\.cliEntry, null\)[\s\S]*adsApi\.openProfileForInspection/,
+    '本机打开只准备本地运行时和 profile，不把 handle 状态冒充引擎启动');
+  const executableLocalOpenHandler = localOpenHandler.split('\n')
+    .filter((line) => !line.trim().startsWith('//'))
+    .join('\n');
+  assert.doesNotMatch(executableLocalOpenHandler, /interactionCustomerRequest|clientSession\.token|startEdge|queueStartEnv|resumeEdge|selectedHandle/,
+    '本机打开不得经过 Cloud、启动/恢复引擎或回落其他环境');
   assert.match(main, /interaction:read-controls:update[\s\S]*method: 'PUT',[\s\S]*body: \{ expectedVersion, commentsReadEnabled, dmReadEnabled \}/, '收取开关只能写入两个读取字段');
   assert.match(main, /interaction:notify[\s\S]*allowedProfileIds\.has\(envKey\)[\s\S]*allowedEnvironmentPlatforms\.get\(envKey\) !== 'wechat_channels'/, '系统提醒必须再次校验当前客户的视频号环境范围');
   const detailHandler = main.slice(main.indexOf("ipcMain.handle('interaction:detail'"), main.indexOf("ipcMain.handle('interaction:draft:update'"));
