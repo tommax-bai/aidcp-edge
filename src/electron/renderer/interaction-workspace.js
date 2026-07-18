@@ -121,7 +121,8 @@
     if (code === 'INTERACTION_PERMISSION_DENIED') return '平台尚未确认当前操作所需的渠道能力，请检查上方能力状态。';
     if (code === 'INTERACTION_NOT_FOUND' || code === 'INTERACTION_SCOPE_MISMATCH') return '这条互动已不可用，或不属于当前环境。';
     if (code === 'INTERACTION_CONFIG_MISSING') return '当前账号尚未发布回复配置。互动仍会保留，但暂时不能生成或发送。';
-    if (code === 'INTERACTION_RATE_LIMITED' || code === 'WECHAT_RATE_LIMITED') return '平台正在限流，请稍后再试。';
+    if (code === 'INTERACTION_RATE_LIMITED') return 'Cloud 本地发送限制尚未放行，请稍后再试。';
+    if (code === 'WECHAT_RATE_LIMITED') return '平台正在限流，请稍后再试。';
     if (code === 'INTERACTION_AUTH_REQUIRED' || code === 'WECHAT_AUTH_REQUIRED') return '视频号登录已失效。历史仍可查看，重新登录后才能继续写操作。';
     if (code === 'WECHAT_CHALLENGE_REQUIRED') return '平台需要人工验证。请在原浏览器完成验证后再继续。';
     if (code === 'WECHAT_SCHEMA_CHANGED' || code === 'INTERACTION_FEATURE_DISABLED') return '接口能力已暂停，避免在字段变化时误操作。';

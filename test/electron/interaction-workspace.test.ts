@@ -1205,6 +1205,27 @@ test('批准/发送防双击，带 expectedVersion；queued 绝不冒充平台�
   assert.doesNotMatch($(window, '#iw-detail').textContent || '', /平台已确认发送/);
 });
 
+test('发送错误区分 Cloud 本地限制与真实平台限流', async () => {
+  for (const [code, expected, excluded] of [
+    ['INTERACTION_RATE_LIMITED', /Cloud 本地发送限制/, /平台正在限流/],
+    ['WECHAT_RATE_LIMITED', /平台正在限流/, /Cloud 本地发送限制/],
+  ] as const) {
+    const handle = await boot({
+      api: { interactionSend: async () => apiError(code, 'rate limited', 429) },
+    });
+    await openThread(handle.window);
+    const approve = handle.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement;
+    approve.dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+    await flush();
+    const send = handle.window.document.querySelector('[data-iw-action="send"]') as HTMLButtonElement;
+    send.dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+    await flush();
+    const text = $(handle.window, '#iw-detail').textContent || '';
+    assert.match(text, expected);
+    assert.doesNotMatch(text, excluded);
+  }
+});
+
 test('CAS 冲突保留输入并给出刷新入口；reauth 保留历史但禁写', async () => {
   const conflict = await boot({
     api: { interactionApprove: async () => apiError('INTERACTION_VERSION_CONFLICT', 'version conflict') },
