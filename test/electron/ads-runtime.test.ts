@@ -42,6 +42,12 @@ const adsRuntime = require('../../src/electron/ads-runtime.cjs') as {
     readyTries?: number;
     readyIntervalMs?: number;
   }) => Promise<{ ok: boolean; base?: string; port?: number; alreadyRunning?: boolean; error?: string }>;
+  stopRuntime: (o: {
+    cliEntry: string | null;
+    run?: RunFn;
+    stopTries?: number;
+    stopIntervalMs?: number;
+  }) => Promise<{ ok: boolean; stopped?: boolean; alreadyStopped?: boolean; error?: string }>;
   kernelDownloaded: (o: { cliEntry: string; version: string; run?: RunFn }) => Promise<{ ok: boolean; present?: boolean; listed?: boolean; throttled?: boolean; error?: string }>;
   ensureKernel: (o: {
     cliEntry: string;
@@ -256,6 +262,41 @@ test('ensureRuntime: not running + key → start then becomes ready', async () =
 test('ensureRuntime: no cliEntry → honest failure', async () => {
   const r = await adsRuntime.ensureRuntime({ cliEntry: null });
   assert.equal(r.ok, false);
+});
+
+test('stopRuntime: running daemon receives stop and is confirmed down', async () => {
+  const calls: string[][] = [];
+  let running = true;
+  const run: RunFn = async (_entry, args) => {
+    calls.push(args);
+    if (args[0] === 'stop') {
+      running = false;
+      return { ok: true, code: 0, out: '' };
+    }
+    return { ok: true, code: 0, out: running ? 'Server running at http://local.adspower.net:50325' : 'Server is not running' };
+  };
+  const result = await adsRuntime.stopRuntime({ cliEntry: 'x', run, stopIntervalMs: 1 });
+  assert.deepEqual(result, { ok: true, stopped: true });
+  assert.deepEqual(calls.map((args) => args[0]), ['status', 'stop', 'status']);
+});
+
+test('stopRuntime: stopped daemon is a no-op and stop failures stay honest', async () => {
+  const stoppedRun: RunFn = async () => ({ ok: true, code: 0, out: 'Server is not running' });
+  assert.deepEqual(await adsRuntime.stopRuntime({ cliEntry: 'x', run: stoppedRun }), { ok: true, alreadyStopped: true });
+
+  const failingRun: RunFn = async (_entry, args) => (
+    args[0] === 'status'
+      ? { ok: true, code: 0, out: 'Server running at http://local.adspower.net:50325' }
+      : { ok: false, code: 1, out: '', err: 'permission denied' }
+  );
+  const failed = await adsRuntime.stopRuntime({ cliEntry: 'x', run: failingRun });
+  assert.equal(failed.ok, false);
+  assert.match(failed.error || '', /permission denied/);
+
+  const unknownStatus: RunFn = async () => ({ ok: false, code: 1, out: '', err: 'status transport failed' });
+  const unknown = await adsRuntime.stopRuntime({ cliEntry: 'x', run: unknownStatus });
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error || '', /status transport failed/);
 });
 
 // ── kernelDownloaded ──────────────────────────────────────

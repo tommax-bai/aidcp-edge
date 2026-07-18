@@ -84,6 +84,10 @@ test('cold standby child close stays in standby rather than respawning as a cras
 test('application quit still uses final SIGTERM for every retained core', () => {
   const quit = functionSource('gracefulStopAllAndQuit', 'quitApp');
   assert.match(quit, /kill\('SIGTERM'\)/);
+  assert.match(quit, /await stopManagedAdsRuntime\(\)/);
+  assert.ok(quit.indexOf("kill('SIGTERM')") < quit.indexOf('await stopManagedAdsRuntime()'), 'core shutdown must precede Ads CLI stop');
+  assert.match(main, /const hasManagedAdsRuntime = Boolean\(managedAdsRuntime\)/);
+  assert.match(main, /if \(!anyRunning && !hasManagedAdsRuntime\)/, 'daemon-only quit must still enter cleanup');
 });
 
 // Regression guard for a recurring packaged-only failure: in an asar:true build

@@ -16,6 +16,7 @@ const { createAdsLocalApi } = require('./ads-local-api.cjs');
 const { readWithRuntimeRecovery } = require('./ads-read-runtime.cjs');
 const { createAdsWriteApi } = require('./ads-write-api.cjs');
 const adsRuntime = require('./ads-runtime.cjs');
+const adsRuntimeStage = require('./ads-runtime-stage.cjs');
 const adsFingerprint = require('./ads-fingerprint.cjs');
 const { normalizePlatform } = require('./ads-create-flow.cjs');
 const { normalizeProxyInput } = require('./ads-proxy-config.cjs');
@@ -93,6 +94,8 @@ let quitStopAllInFlight = false;
 // 这是主进程读写 + 全部核心子进程的**单一 base 权威**（P0-A：resolveAdsOpts 亦优先采用它，
 // 杜绝「解析出非 50325 端口、主进程却仍发 50325」的串台）。未确保前保持 null，回落 settings.adsApiBase 或核心默认 50325。
 let adsServiceBase = null;
+// 本次 Electron 进程已启动或接管的 Ads CLI daemon；真正退出时必须有界 stop。
+let managedAdsRuntime = null;
 
 // AdsPower 官方下载页（客户端「下载 AdsPower」按钮外链）。
 const ADS_DOWNLOAD_URL = 'https://www.adspower.net/download';
@@ -3018,31 +3021,21 @@ function readAdsWithRuntime(opts, read) {
   });
 }
 
-// 首启把随包只读模板暂存到用户可写目录（打包态 Resources 只读、App Translocation 下尤甚，
-// 而 CLI 要往自身 cwd/ 写）。版本戳（app 版本 + CLI 版本）不符即清旧重拷，避免升级后旧副本遮挡新运行时。
-// 开发态无 resourcesPath / 无模板则跳过（resolveCliEntry 的 node_modules 候选直解）。
-function stageAdsRuntimeIfNeeded() {
-  try {
-    if (!process.resourcesPath) return { ok: true, skipped: 'dev' };
-    const src = path.join(process.resourcesPath, 'adspower-browser');
-    if (!fs.existsSync(src)) return { ok: true, skipped: 'no-template' };
-    const destRoot = path.join(app.getPath('userData'), 'ads-runtime');
-    const dest = path.join(destRoot, 'adspower-browser');
-    const stampPath = path.join(destRoot, 'stage.json');
-    let pkgVersion = '';
-    try { pkgVersion = JSON.parse(fs.readFileSync(path.join(src, 'package.json'), 'utf8')).version || ''; } catch { /* best-effort */ }
-    const wantStamp = JSON.stringify({ appVersion: app.getVersion(), pkgVersion });
-    let haveStamp = '';
-    try { haveStamp = fs.readFileSync(stampPath, 'utf8'); } catch { /* 无戳即视为需暂存 */ }
-    if (fs.existsSync(dest) && haveStamp === wantStamp) return { ok: true, staged: false };
-    fs.rmSync(dest, { recursive: true, force: true });
-    fs.mkdirSync(destRoot, { recursive: true });
-    fs.cpSync(src, dest, { recursive: true });
-    fs.writeFileSync(stampPath, wantStamp);
-    return { ok: true, staged: true };
-  } catch (e) {
-    return { ok: false, error: `指纹浏览器运行时暂存失败：${(e && e.message) || String(e)}` };
-  }
+// 打包态从 Resources、开发态从当前 build/ads-runtime 取模板，按完整内容身份暂存到用户可写目录。
+// 内容变化时先复制候选、再有界停旧 daemon、最后目录交换；失败回滚且不得继续接管旧 hook。
+async function stageAdsRuntimeIfNeeded() {
+  const source = adsRuntimeStage.resolveRuntimeTemplateSource({
+    resourcesPath: process.resourcesPath,
+    appRoot: app.getAppPath(),
+    isPackaged: app.isPackaged,
+  });
+  const execPath = adsRuntime.resolveRuntimeExecPath({ isPackaged: app.isPackaged });
+  return adsRuntimeStage.stageRuntimeTemplate({
+    source,
+    destRoot: path.join(app.getPath('userData'), 'ads-runtime'),
+    appVersion: app.getVersion(),
+    stopExisting: ({ cliEntry }) => adsRuntime.stopRuntime({ cliEntry, execPath }),
+  });
 }
 
 async function ensureAdsService(handle) {
@@ -3053,7 +3046,7 @@ async function ensureAdsService(handle) {
   // 注：判活读 CLI 自身 pid/store（我方 daemon / 本包上次所起），不探测独立运行的 AdsPower 桌面端——
   //   硬切换自包含形态本不依赖桌面端；若外部桌面端占端口，属超范围的共存冲突，由运营侧收敛。
   // 1. 首启暂存随包模板到可写目录（打包态 Resources 只读）。
-  const staged = stageAdsRuntimeIfNeeded();
+  const staged = await stageAdsRuntimeIfNeeded();
   if (!staged.ok) {
     if (handle) {
       updateStatus(handle, {
@@ -3093,9 +3086,10 @@ async function ensureAdsService(handle) {
   const apiKey = resolveAdsApiKey('');
   // 就绪判定走 CLI `ads status`（staging 已把其判活从 `ps|grep "node"` 换成 process.kill(pid,0)，故在
   // Electron 宿主下也可靠——服务进程名是 Electron 二进制而非 "node"，旧的 grep 会漏判、新的存在性探测不受影响）。
+  const execPath = adsRuntime.resolveRuntimeExecPath({ isPackaged: app.isPackaged });
   const rt = await adsRuntime.ensureRuntime({
     cliEntry,
-    execPath: adsRuntime.resolveRuntimeExecPath({ isPackaged: app.isPackaged }),
+    execPath,
     apiKey,
   });
   if (!rt.ok) {
@@ -3114,6 +3108,7 @@ async function ensureAdsService(handle) {
     return { ok: false, error: rt.error };
   }
   adsServiceBase = rt.base; // P0-A：运行时解析出的实际端口即单一 base 权威
+  managedAdsRuntime = { cliEntry, execPath };
   return { ok: true, mode: rt.alreadyRunning ? 'adopted' : 'embedded', base: rt.base, cliEntry };
 }
 
@@ -3736,7 +3731,20 @@ function stopAllEnvs() {
   return { ok: true, stopped: running.length + backoff.length };
 }
 
-/** 应用退出：对全部在跑环境经串行队列有序 SIGTERM + 有界等待确认退出，不留孤儿。 */
+async function stopManagedAdsRuntime() {
+  const runtime = managedAdsRuntime;
+  if (!runtime) return { ok: true, skipped: true };
+  const stopped = await adsRuntime.stopRuntime(runtime).catch((error) => ({
+    ok: false,
+    error: (error && error.message) || String(error),
+  }));
+  if (!stopped.ok) appendEdgeLog('supervisor', `Ads CLI daemon 停止失败：${stopped.error}`, true);
+  managedAdsRuntime = null;
+  adsServiceBase = null;
+  return stopped;
+}
+
+/** 应用退出：先停全部环境核心并等浏览器清理，再停止本次已管理的 Ads CLI daemon。 */
 async function gracefulStopAllAndQuit() {
   if (quitStopAllInFlight) return;
   quitStopAllInFlight = true;
@@ -3759,6 +3767,7 @@ async function gracefulStopAllAndQuit() {
     if (![...envs.values()].some((h) => h.child)) break;
     await new Promise((r) => setTimeout(r, 100));
   }
+  await stopManagedAdsRuntime();
   quitFinal = true;
   app.quit();
 }
@@ -4836,11 +4845,12 @@ app.on('before-quit', (event) => {
   if (quitFinal) return; // 优雅全停已完成，放行退出
   isQuitting = true;
   const anyRunning = [...envs.values()].some((h) => h.child);
-  if (!anyRunning) {
+  const hasManagedAdsRuntime = Boolean(managedAdsRuntime);
+  if (!anyRunning && !hasManagedAdsRuntime) {
     quitFinal = true;
     return;
   }
-  // 有在跑环境：拦下本次退出，先优雅全停（错峰 SIGTERM + 有界等待），完成后再真正退出。
+  // 有在跑环境或已管理 Ads CLI：拦下本次退出，完成有界清理后再真正退出。
   event.preventDefault();
   void gracefulStopAllAndQuit();
 });

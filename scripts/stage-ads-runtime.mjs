@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const { patchAdsRuntimeBrowserVisibility } = require('./patch-ads-runtime.cjs');
+const { writeTemplateManifest } = require('../src/electron/ads-runtime-stage.cjs');
 
 const ADS_VERSION = '2.1.0';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -220,4 +221,6 @@ if (!existsSync(nativeMac) && !existsSync(nativeArm)) {
   console.error('[stage-ads-runtime] FAILED: native node_sqlite3.node missing in staged tree');
   process.exit(1);
 }
+const templateManifest = writeTemplateManifest(out);
+console.log(`[stage-ads-runtime] template identity ${templateManifest.contentIdentity}`);
 console.log(`[stage-ads-runtime] staged -> ${out}`);

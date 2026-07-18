@@ -284,6 +284,36 @@ async function ensureRuntime({ cliEntry, execPath, apiKey, run = runCli, isReady
   return { ok: false, error: started.error || started.err || '内嵌运行时启动后未在预期时间内就绪', out: started.out };
 }
 
+// 有界停止 Ads CLI daemon。真正退出与运行时模板刷新共用这一条编排：
+// stop 命令成功不等于 daemon 已退出，故继续以 Local API/CLI status 有界确认。
+async function stopRuntime({ cliEntry, execPath, run = runCli, isReady, stopTries = 30, stopIntervalMs = 100 } = {}) {
+  if (!cliEntry) return { ok: false, error: '未找到随包 AdsPower 运行时（cli entry）' };
+  const probe = async () => {
+    const result = await runResilient(run, cliEntry, ['status'], { execPath, timeoutMs: 15000 });
+    const text = `${stripAnsi(result.out || '')}\n${stripAnsi(result.err || '')}`;
+    if (runtimeRunning(text)) return { ok: true, running: true };
+    if (result.ok || /not running/i.test(text)) return { ok: true, running: false };
+    return { ok: false, error: result.error || result.err || 'Ads CLI daemon 状态确认失败' };
+  };
+  const initial = await probe();
+  if (!initial.ok) return initial;
+  if (!initial.running) return { ok: true, alreadyStopped: true };
+
+  const stopped = await run(cliEntry, ['stop'], { execPath, timeoutMs: 30000 });
+  if (!stopped.ok) {
+    return { ok: false, error: stopped.error || stopped.err || 'Ads CLI daemon 停止命令失败' };
+  }
+  for (let i = 0; i < stopTries; i += 1) {
+    const current = isReady && !(await isReady().catch(() => false))
+      ? { ok: true, running: false }
+      : await probe();
+    if (current.ok && !current.running) return { ok: true, stopped: true };
+    if (!current.ok && i + 1 === stopTries) return current;
+    if (i + 1 < stopTries) await delay(stopIntervalMs);
+  }
+  return { ok: false, error: 'Ads CLI daemon 停止超时' };
+}
+
 function extractKernelList(out) {
   const data = parseCliJson(out);
   if (!data) return null;
@@ -363,6 +393,7 @@ module.exports = {
   runtimeRunning,
   getRuntime,
   ensureRuntime,
+  stopRuntime,
   kernelDownloaded,
   ensureKernel,
   DEFAULT_KERNEL_TYPE,
