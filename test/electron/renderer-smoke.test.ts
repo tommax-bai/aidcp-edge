@@ -65,6 +65,8 @@ interface Stub {
   adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string; requiresAdminAssignment?: boolean; assignmentHandledByMain?: boolean; rosterJoinedByMain?: boolean }>;
   adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string; cleanupPending?: boolean; message?: string }>;
   setSlowStart: (opts: { envKey: string; enabled: boolean }) => Promise<unknown>;
+  // 不依赖边缘的慢启动读（change slow-start-offline-toggle）：可选——不提供即模拟老客户端退化路径。
+  getSlowStart?: (opts: { envKey: string }) => Promise<unknown>;
 }
 
 function makeStub(overrides: Partial<Stub> = {}): Stub {
@@ -818,7 +820,8 @@ test('慢启动行：字段缺省 → 整行 hidden（绝不默认成「关」�
   assert.ok(hidden($(w, '#slow-start-row')), '云端还没说 → 整行不渲染');
 });
 
-test('慢启动行：Facebook 环境未启动时仍展示入口，但不默认成「关」', async () => {
+// 退化路径（老客户端未提供不依赖边缘的读）：仍展示入口、不默认成「关」，退回旧占位、绝不卡在「正在读取」。
+test('慢启动行：Facebook 环境未启动 + 无 env-scoped 读能力（老客户端）→ 退回旧占位，不默认成「关」', async () => {
   const w = await boot(slowStartStub({
     getSettings: async () => ({
       provider: 'adspower',
@@ -832,12 +835,93 @@ test('慢启动行：Facebook 环境未启动时仍展示入口，但不默认�
       environments: [{ profileId: 'fb_env', name: 'FB 环境', platform: 'facebook' }],
     }),
     getStatus: async () => makeStatus({ edge: 'stopped', session: 'idle', cloud: 'disconnected' }),
+    // 刻意不提供 getSlowStart（模拟老客户端）。
   }));
   assert.ok(!hidden($(w, '#slow-start-row')));
   const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
   assert.equal(toggle.disabled, true);
   assert.equal(toggle.indeterminate, true, '未知态必须用 indeterminate，不能显示成已关闭');
   assert.match($(w, '#slow-start-reason').textContent || '', /启动环境并连接云端后同步慢启动状态/);
+});
+
+// 停止的环境（内核未运行、无云链路，dailyUsage=null）+ 有绑定 → 经不依赖边缘的 env-scoped 读渲染真态，
+// **开关可点**（离线可改）。**验收必须用已停止的环境**——冷待机（cloud=connected）本来就能点，用它测会假绿（task 7.1）。
+function stoppedFbEnv(getSlowStart: Stub['getSlowStart']): Stub {
+  return slowStartStub({
+    getSettings: async () => ({
+      provider: 'adspower', adsProfileId: 'fb_env', adsProfileName: 'FB 环境', adsApiKey: '', adsApiBase: '',
+      browserParkingMode: 'edge-strip', adsDownloadUrl: 'https://x', platform: 'facebook',
+      environments: [{ profileId: 'fb_env', name: 'FB 环境', platform: 'facebook' }],
+    }),
+    getStatus: async () => makeStatus({ envId: 'fb_env', edge: 'stopped', session: 'idle', cloud: 'disconnected', dailyUsage: null }),
+    getSlowStart,
+  });
+}
+
+test('慢启动行：停止的环境经 env-scoped 读渲染真态、开关可点（change slow-start-offline-toggle）', async () => {
+  const w = await boot(stoppedFbEnv(async () => ({
+    ok: true,
+    data: { data: { envKey: 'fb_env', slowStart: { state: 'active', day: 3, totalDays: 7, binding: true, eligible: true }, dayQuotas: { view: 35 } } },
+  })));
+  for (let i = 0; i < 4; i++) await tick(); // flush 异步 HTTP 读 + 重绘
+  assert.ok(!hidden($(w, '#slow-start-row')));
+  const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  assert.equal(toggle.disabled, false, '离线（已停止）也可改——这次写根本不经过环境内核');
+  assert.equal(toggle.indeterminate, false);
+  assert.equal(toggle.checked, true);
+  assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 3\/7 天/);
+});
+
+test('慢启动行：binding_unknown → 整行可见、开关禁用、专属可行动文案（非泛化兜底、非整行隐藏）', async () => {
+  const w = await boot(stoppedFbEnv(async () => ({
+    ok: true,
+    data: { data: { envKey: 'fb_env', slowStart: { eligible: false, ineligibleReason: 'binding_unknown' } } },
+  })));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.ok(!hidden($(w, '#slow-start-row')), 'MUST NOT 整行隐藏（与修复前一模一样）');
+  const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  assert.equal(toggle.disabled, true);
+  const reason = $(w, '#slow-start-reason').textContent || '';
+  assert.match(reason, /尚未识别到该环境的账号/);
+  assert.match(reason, /启动一次该环境/, '给出可行动的下一步');
+  assert.notEqual(reason, '当前无法启用慢启动', '绝不落到泛化兜底');
+});
+
+test('慢启动行：env-scoped 读够不到云端 → 就地如实展示失败，绝不静默吞', async () => {
+  const w = await boot(stoppedFbEnv(async () => ({ ok: false, data: { error: 'edge_unreachable', message: '暂时够不到云端' } })));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.ok(!hidden($(w, '#slow-start-row')));
+  assert.match($(w, '#slow-start-reason').textContent || '', /够不到云端/);
+  assert.ok($(w, '#slow-start-reason').classList.contains('is-error'));
+});
+
+test('慢启动行：停止的环境离线写入成功 → 呈现为已生效，不显示「已保存/待应用」', async () => {
+  const base = stoppedFbEnv(async () => ({
+    ok: true,
+    data: { data: { envKey: 'fb_env', slowStart: { state: 'off', totalDays: 7, eligible: true }, dayQuotas: { view: 70 } } },
+  }));
+  const w = await boot({
+    ...base,
+    // 离线写入成功：回执带回 active 真态。
+    setSlowStart: async () => ({
+      ok: true,
+      data: { data: { envKey: 'fb_env', slowStart: { state: 'active', day: 1, totalDays: 7, since: Date.now(), binding: true, eligible: true }, dayQuotas: { view: 20 } } },
+    }),
+  });
+  for (let i = 0; i < 4; i++) await tick();
+  const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  assert.equal(toggle.checked, false, '读到 off 真态');
+  assert.equal(toggle.disabled, false, '停止的环境开关照常可点');
+  // 离线写入成功 → 当场呈现为已生效（勾上、有徽章），绝无「已保存/待应用」二态。
+  toggle.checked = true;
+  toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(toggle.checked, true, '离线写入成功后呈现为已生效');
+  assert.equal(toggle.disabled, false);
+  assert.equal($(w, '#slow-start-row').classList.contains('is-pending'), false);
+  assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 1\/7 天/);
+  const flat = `${$(w, '#slow-start-badge').textContent || ''}${$(w, '#slow-start-reason').textContent || ''}`;
+  assert.doesNotMatch(flat, /已保存|待应用|待下发/);
 });
 
 test('慢启动行：active 态渲染徽章与勾选', async () => {

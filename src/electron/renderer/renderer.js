@@ -397,8 +397,52 @@ let quotaDetailsOpen = false;
  */
 const slowStartFeedbackByEnv = new Map();
 
+/**
+ * 不依赖边缘的慢启动读缓存（change slow-start-offline-toggle），按 envKey 隔离。存放**纯云端真态**，
+ * 供**没有活快照**（从未启动 / 已停止，dailyUsage 为 null）的环境渲染慢启动这一行——binding_unknown 可见性的前置。
+ * 三种态：{ kind:'loading' }（读在途）/ { kind:'ok', slowStart, dayQuotas }（读到真态，或写入回执覆盖）/
+ * { kind:'error', message }（够不到云端，就地如实展示，绝不静默吞）。
+ * **来源优先级（D3，规则非巧合）**：有活快照 → 快照治理；无活快照 → 本缓存（HTTP 读）；PUT 回执 → 对发起环境权威
+ * （写成功即写入本缓存）。三者同源于云端 slowStartView，**MUST NOT 逐字段合并**——整体采用其一。
+ */
+const slowStartHttpByEnv = new Map();
+
 function slowStartEnvKey(env) {
   return String((env && (env.profileId || env.envId)) || '').trim();
+}
+
+/**
+ * 触发一次不依赖边缘的 env-scoped 慢启动读，落 slowStartHttpByEnv 后就地重绘。幂等：读在途 / 已读到即不重复发。
+ * 够不到云端由 getSlowStart 的成败表达，**绝不新增任何浏览器 / 环境在线闸**（那正是 DEFECT 3 的病灶形状）。
+ */
+async function ensureSlowStartHttpFetch(envKey) {
+  if (!envKey) return;
+  if (!window.aidcpEdge || typeof window.aidcpEdge.getSlowStart !== 'function') return;
+  const existing = slowStartHttpByEnv.get(envKey);
+  if (existing && (existing.kind === 'loading' || existing.kind === 'ok')) return;
+  slowStartHttpByEnv.set(envKey, { kind: 'loading' });
+  let next;
+  try {
+    const res = await window.aidcpEdge.getSlowStart({ envKey });
+    if (res && res.ok) {
+      const payload = res.data && res.data.data;
+      next = payload && payload.slowStart && typeof payload.slowStart === 'object'
+        ? { kind: 'ok', slowStart: payload.slowStart, dayQuotas: payload.dayQuotas && typeof payload.dayQuotas === 'object' ? payload.dayQuotas : null }
+        : { kind: 'error', message: '云端已返回，但未带回慢启动状态' };
+    } else {
+      const rawError = res && res.data && res.data.error;
+      next = { kind: 'error', message: String((res && res.data && res.data.message)
+        || (rawError && typeof rawError === 'object' && (rawError.message || rawError.code))
+        || (typeof rawError === 'string' && rawError)
+        || (res && res.error)
+        || '暂时无法读取慢启动状态') };
+    }
+  } catch (err) {
+    next = { kind: 'error', message: `读取失败：${(err && err.message) || err}` };
+  }
+  slowStartHttpByEnv.set(envKey, next);
+  const context = selectedSlowStartContext();
+  if (context && context.envKey === envKey) renderSlowStart((context.env && context.env.status) || currentStatus);
 }
 
 function selectedSlowStartContext() {
@@ -426,13 +470,10 @@ function hideSlowStartRow() {
   if (fields.slowStartToggle) fields.slowStartToggle.indeterminate = false;
 }
 
-function shouldShowSlowStartPendingSync(status) {
-  if (!status) return true;
-  if (status.edge === 'stopped' || status.session === 'idle' || status.session === 'closed') return true;
-  return status.cloud !== 'connected';
-}
-
-function renderSlowStartPendingSync() {
+// 慢启动占位（change slow-start-offline-toggle）：既不是禁用理由、也不冒充某个真态。两处用它：env-scoped 读在途
+// （'正在读取慢启动状态…'）；该构建未提供不依赖边缘的读时的退化态（'启动环境…'，绝不卡死在读中）。读毕由
+// ensureSlowStartHttpFetch 重绘为真态 / binding_unknown / 读失败。
+function renderSlowStartPlaceholder(text) {
   fields.slowStartRow.classList.remove('hidden', 'is-stale', 'is-pending');
   fields.slowStartRow.removeAttribute('aria-busy');
   if (fields.slowStartToggle) {
@@ -445,8 +486,28 @@ function renderSlowStartPendingSync() {
     fields.slowStartBadge.className = 'acct-age hidden';
   }
   if (fields.slowStartReason) {
-    fields.slowStartReason.textContent = '启动环境并连接云端后同步慢启动状态';
+    fields.slowStartReason.textContent = text;
     fields.slowStartReason.className = 'parking-hint';
+  }
+}
+
+// 慢启动 env-scoped 读失败（够不到云端）：整行可见、就地如实说明，绝不静默吞。读不到真态即无从渲染可信开关，
+// 故禁用是 ESSENTIAL（不知道现在是开是关，不能给一个会撒谎的勾选框）——这与被摘掉的「内核在线闸」形状不同。
+function renderSlowStartHttpError(message) {
+  fields.slowStartRow.classList.remove('hidden', 'is-stale', 'is-pending');
+  fields.slowStartRow.removeAttribute('aria-busy');
+  if (fields.slowStartToggle) {
+    fields.slowStartToggle.checked = false;
+    fields.slowStartToggle.indeterminate = true;
+    fields.slowStartToggle.disabled = true;
+  }
+  if (fields.slowStartBadge) {
+    fields.slowStartBadge.textContent = '';
+    fields.slowStartBadge.className = 'acct-age hidden';
+  }
+  if (fields.slowStartReason) {
+    fields.slowStartReason.textContent = message || '暂时无法读取慢启动状态，请稍后重试';
+    fields.slowStartReason.className = 'parking-hint is-error';
   }
 }
 
@@ -769,15 +830,42 @@ function renderSlowStart(status) {
     return;
   }
   const connState = status && status.cloud === 'connected' ? 'online' : 'offline';
-  const view = window.uiLogic.slowStartLine(status && status.dailyUsage, connState);
-  if (!view.visible) {
-    if (shouldShowSlowStartPendingSync(status)) {
-      renderSlowStartPendingSync();
-      return;
-    }
+  // 来源优先级（change slow-start-offline-toggle，D3）：① 有活快照 → 快照治理（同时带用量计数）。
+  const snapshotView = window.uiLogic.slowStartLine(status && status.dailyUsage, connState, 'snapshot');
+  if (snapshotView.visible) {
+    applySlowStartView(snapshotView, context);
+    return;
+  }
+  // 云端已连接但快照尚未带来 slowStart（瞬态）→ 快照马上就到，先隐藏，绝不冗余 HTTP 读（否则连着的号也去打一次读）。
+  if (connState !== 'offline') {
     hideSlowStartRow();
     return;
   }
+  // ② 边缘离线（从未启动 / 已停止，dailyUsage 为 null）→ 用不依赖边缘的 env-scoped 读填这一行。
+  //    这是 binding_unknown 可见性的**前置**——真正让它「什么都不显示」的是「没有 payload ⇒ 整行不渲染」，不是文案表缺键。
+  if (!window.aidcpEdge || typeof window.aidcpEdge.getSlowStart !== 'function') {
+    // 该构建未提供不依赖边缘的读（老客户端）→ 退回旧占位，绝不卡在「正在读取」。
+    renderSlowStartPlaceholder('启动环境并连接云端后同步慢启动状态');
+    return;
+  }
+  const http = slowStartHttpByEnv.get(context.envKey);
+  if (http && http.kind === 'ok') {
+    applySlowStartView(window.uiLogic.slowStartLine({ slowStart: http.slowStart }, connState, 'http'), context);
+    return;
+  }
+  if (http && http.kind === 'error') {
+    renderSlowStartHttpError(http.message);
+    return;
+  }
+  void ensureSlowStartHttpFetch(context.envKey);
+  renderSlowStartPlaceholder('正在读取慢启动状态…');
+}
+
+/**
+ * 把一个已解析的慢启动视图（来自快照或 HTTP 读，二选一整体采用、绝不逐字段拼）落到静态节点上。
+ * pending（本地在途写）覆盖一切；否则渲染真态徽章 + 开关 + reason（用量陈旧 / 不可用原因 / 写失败）。
+ */
+function applySlowStartView(view, context) {
   const feedback = slowStartFeedbackByEnv.get(context.envKey);
   const pending = feedback && feedback.kind === 'pending' ? feedback : null;
   fields.slowStartRow.classList.remove('hidden');
@@ -2012,24 +2100,32 @@ async function submitSlowStart(enabled) {
     }
 
     slowStartFeedbackByEnv.delete(envKey);
-    if (fleetView.envs.get(selectedKey) !== env || !env.status || !env.status.dailyUsage) return;
     const dayQuotas = receipt.dayQuotas && typeof receipt.dayQuotas === 'object' ? receipt.dayQuotas : null;
-    const dailyUsage = {
-      ...env.status.dailyUsage,
-      slowStart: receipt.slowStart,
-      ...(dayQuotas ? { quotas: { ...dayQuotas } } : {}),
-    };
-    if (dayQuotas && dailyUsage.windows && typeof dailyUsage.windows === 'object') {
-      dailyUsage.windows = {
-        ...dailyUsage.windows,
-        day: {
-          ...(dailyUsage.windows.day && typeof dailyUsage.windows.day === 'object' ? dailyUsage.windows.day : {}),
-          quotas: { ...dayQuotas },
-        },
+    // 回执对**发起环境**在写入瞬间权威（change slow-start-offline-toggle，D3 优先级③）：写进 HTTP/receipt 缓存，
+    // 使**没有活快照**的环境（离线写入）也当场呈现为**已生效**，绝不显示「已保存 / 待本机应用」二态。
+    slowStartHttpByEnv.set(envKey, { kind: 'ok', slowStart: receipt.slowStart, dayQuotas });
+    // 有活快照的同一 env 对象 → 把回执并进快照（快照来源优先，且带用量计数轴 + 当日上限当场更新）。
+    // **不逐字段跨源拼**：慢启动真态整块换成回执的，用量计数仍来自快照——两条独立的轴，不是同一 datum 的合并。
+    if (fleetView.envs.get(selectedKey) === env && env.status && env.status.dailyUsage) {
+      const dailyUsage = {
+        ...env.status.dailyUsage,
+        slowStart: receipt.slowStart,
+        ...(dayQuotas ? { quotas: { ...dayQuotas } } : {}),
       };
+      if (dayQuotas && dailyUsage.windows && typeof dailyUsage.windows === 'object') {
+        dailyUsage.windows = {
+          ...dailyUsage.windows,
+          day: {
+            ...(dailyUsage.windows.day && typeof dailyUsage.windows.day === 'object' ? dailyUsage.windows.day : {}),
+            quotas: { ...dayQuotas },
+          },
+        };
+      }
+      env.status = { ...env.status, dailyUsage };
     }
-    env.status = { ...env.status, dailyUsage };
-    if (fleetView.selected === selectedKey) render(env.status);
+    // 仍在看同一 env（按 envKey，非对象身份）即重绘：无活快照时靠上面的 HTTP/回执缓存以 HTTP 来源渲染真态。
+    const ctxNow = selectedSlowStartContext();
+    if (ctxNow && ctxNow.envKey === envKey) render((ctxNow.env && ctxNow.env.status) || currentStatus);
   } catch (err) {
     settleError(`设置失败：${(err && err.message) || err}`);
   }
@@ -2332,7 +2428,9 @@ function applyFleetSnapshot(snap) {
   }
   for (const key of [...fleetView.envs.keys()]) {
     if (known.has(key)) continue;
-    slowStartFeedbackByEnv.delete(slowStartEnvKey(fleetView.envs.get(key)));
+    const goneEnvKey = slowStartEnvKey(fleetView.envs.get(key));
+    slowStartFeedbackByEnv.delete(goneEnvKey);
+    slowStartHttpByEnv.delete(goneEnvKey); // change slow-start-offline-toggle：连同慢启动 HTTP/回执缓存一并清
     fleetView.envs.delete(key); // 快照为准（含 '__local__' 占位）
     // 连同该环境的所有渲染层缓冲一并清（否则同一分身移出再加回会重放上一会话的陈旧活动 + 吞掉新发布折流，
     // 还有全会话内存泄漏）。

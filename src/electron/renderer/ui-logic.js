@@ -729,8 +729,13 @@
   // - graduated → 「慢启动 · 已完成（X 月 X 日起上限已放开）」，显式告知而非静默消失
   //   ——上限是哪天放开的，正是最该被告知的那一刻。
   // - eligible=false → 禁用勾选 + 按 reason 如实说明。
-  // - 断连 → 字段不会变缺省（主进程 if (evt.dailyUsage) 不清空）→ 只灰化 + 说明「可能已过期」，
-  //   MUST NOT 渲染成「已关闭」。
+  // - binding_unknown（change slow-start-offline-toggle）→ 该环境尚未把浏览器启动登录过，云端还没认出它在跑
+  //   哪个账号 → 整行可见、开关禁用、给**可行动**的下一步（启动一次该环境完成登录即绑定），MUST NOT 整行隐藏
+  //   （「什么都不显示」与修复前一模一样，用户无从分辨没支持 / 坏了 / 在等他做什么）。
+  // - **离线（内核 / 云链路断开）不再禁用开关**（change slow-start-offline-toggle）：慢启动真态是纯云端算的、
+  //   写入执行体也在云端配额计算内、经运行时现读生效——这次写根本不经过环境内核。那道内核在线闸是 INCIDENTAL，
+  //   摘掉。离线只影响**用量计数**（边缘上报的今日已做多少），对它单独打「可能已过期」标签，绝不据此禁用开关。
+  // - 断连 → 字段不会变缺省（主进程 if (evt.dailyUsage) 不清空）→ 真态照常呈现，仅给用量计数打陈旧标签。
   //
   // 两条文案红线：全域不出现「新账号」（系统只知道它连上我们多少天，不知道它多老）；
   // 不暗示「动作更慢 / 更像真人」（clamp 只返回配额数字，完全不进 pacing）。
@@ -738,6 +743,8 @@
     platform_unsupported: '该平台暂不支持慢启动',
     platform_unknown: '账号平台待确认，暂不启用慢启动',
     globally_disabled: '慢启动已被运维全局停用',
+    // 云端还没认出这个环境在跑哪个账号（还没启动登录过）。给一条**可行动**的下一步。
+    binding_unknown: '尚未识别到该环境的账号，启动一次该环境并完成登录后即可开启慢启动',
   };
 
   /** 「7 月 17 日」——毕业文案里只用到月/日。 */
@@ -746,13 +753,17 @@
     return `${d.getMonth() + 1} 月 ${d.getDate()} 日`;
   }
 
-  function slowStartLine(dailyUsage, connState) {
+  // source（change slow-start-offline-toggle）：'snapshot' = 来自边缘活快照的 dailyUsage（带用量计数，离线时陈旧）；
+  // 'http' = 来自不依赖边缘的 env-scoped 读（纯云端真态，根本不带用量计数 ⇒ 无「陈旧」可言）。默认 'snapshot'（向后兼容）。
+  function slowStartLine(dailyUsage, connState, source) {
     const ss = dailyUsage && dailyUsage.slowStart;
     // 字段缺省 = 云端还没说 → 整行不渲染（绝不默认 off）。
     if (!ss || typeof ss !== 'object') return { visible: false };
-    const stale = connState !== 'online';
+    const src = source === 'http' ? 'http' : 'snapshot';
+    // **用量计数陈旧**只在「来自活快照 + 此刻离线」时成立；HTTP 读不带用量、无从陈旧。**慢启动真态永远新鲜**。
+    const usageStale = src === 'snapshot' && connState !== 'online';
     const totalDays = Number.isFinite(ss.totalDays) ? ss.totalDays : 7;
-    const out = { visible: true, checked: ss.state === 'active' || ss.state === 'graduated', stale, badge: '', tone: ss.state };
+    const out = { visible: true, checked: ss.state === 'active' || ss.state === 'graduated', stale: usageStale, badge: '', tone: ss.state, source: src };
 
     if (ss.eligible === false) {
       out.disabled = true;
@@ -760,10 +771,11 @@
       out.reason = SLOW_START_INELIGIBLE_TEXT[ss.ineligibleReason] || '当前无法启用慢启动';
       return out;
     }
-    // 未连云端时开关禁用：状态本身就搭在云端推的 dailyUsage 上，边缘离线这张卡本来就不更新，
-    // 「离线改不了」与「离线不刷新」是同一件事，不额外损失。
-    out.disabled = stale;
-    if (stale) out.reason = '云端已断开，状态可能已过期';
+    // 慢启动真态是纯云端算的、写入执行体也在云端配额计算内、经运行时现读生效 → **离线也可改**：不再因内核 /
+    // 云链路离线禁用开关（change slow-start-offline-toggle：那道内核在线闸 INCIDENTAL，这次写根本不经过环境内核）。
+    out.disabled = false;
+    // 离线时**只有用量计数**陈旧（真态与开关照常）：给用量那一条单独打标签，绝不说成「状态过期 / 开关不可用」。
+    if (usageStale) out.reason = '云端已断开，下方今日用量为最后一次同步、可能已过期';
 
     if (ss.state === 'active') {
       out.badge = `慢启动 · 第 ${ss.day}/${totalDays} 天`;

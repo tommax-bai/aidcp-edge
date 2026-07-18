@@ -44,7 +44,7 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   publishView: (p: Record<string, unknown> | null, last: Record<string, unknown> | null, now: number) => PublishV;
   publishDock: (v: PublishV, s: Record<string, unknown>, manualOpen: boolean) => PublishDockV;
   railDisplayName: (row: Record<string, unknown>) => string;
-  slowStartLine: (dailyUsage: Record<string, unknown> | null | undefined, connState: string) => SlowStartV;
+  slowStartLine: (dailyUsage: Record<string, unknown> | null | undefined, connState: string, source?: string) => SlowStartV;
   PRESENCE_FRESH_MS: number;
 };
 
@@ -56,6 +56,7 @@ interface SlowStartV {
   badge?: string;
   tone?: string;
   reason?: string;
+  source?: string;
 }
 
 function st(over: Record<string, unknown> = {}) {
@@ -738,14 +739,40 @@ test('slowStartLine：eligible=false → 禁用 + 按 reason 如实说明（三�
   }
 });
 
-test('slowStartLine：断连 → 灰化 + 「可能已过期」，MUST NOT 渲染成「已关闭」', () => {
-  // 断连时字段不会变缺省（主进程 if (evt.dailyUsage) 不清空）→ 只是停止更新。
+test('slowStartLine：断连（活快照）→ 真态照常 + 开关可点，仅用量计数打陈旧标签（change slow-start-offline-toggle）', () => {
+  // 断连时字段不会变缺省（主进程 if (evt.dailyUsage) 不清空）→ 真态照常呈现。
+  // 慢启动真态纯云端算 + 写入执行体在云端 → 离线也可改：**开关不再禁用**，只有用量计数陈旧。
   const v = uiLogic.slowStartLine(usage({ state: 'active', day: 2, totalDays: 7, binding: true, eligible: true }), 'offline');
   assert.equal(v.visible, true);
   assert.equal(v.checked, true, '断连不得把开关显示成未勾');
-  assert.equal(v.stale, true);
-  assert.equal(v.disabled, true, '断连时开关禁用（状态本就搭在云端推送上）');
-  assert.match(v.reason!, /云端已断开/);
+  assert.equal(v.stale, true, '用量计数（本机）离线时陈旧');
+  assert.equal(v.disabled, false, '离线不再禁用开关——这次写根本不经过环境内核');
+  assert.match(v.reason!, /用量/, 'reason 描述的是用量陈旧，不是状态过期/开关不可用');
+  assert.doesNotMatch(v.reason!, /不可用|已关闭|状态可能已过期/);
+});
+
+test('slowStartLine：binding_unknown → 整行可见 + 开关禁用 + 专属可行动文案，绝不落泛化兜底或整行隐藏', () => {
+  // 云端还没认出这个环境在跑哪个账号（从未启动登录过）→ 必须可见地说明为何不可用 + 下一步怎么做。
+  const v = uiLogic.slowStartLine(usage({ eligible: false, ineligibleReason: 'binding_unknown' }), 'offline', 'http');
+  assert.equal(v.visible, true, 'MUST NOT 整行隐藏（那与修复前一模一样）');
+  assert.equal(v.disabled, true);
+  assert.equal(v.checked, false);
+  assert.match(v.reason!, /尚未识别到该环境的账号/);
+  assert.match(v.reason!, /启动一次该环境/, '给出可行动的下一步');
+  assert.notEqual(v.reason, '当前无法启用慢启动', '绝不落到泛化兜底文案');
+});
+
+test('slowStartLine：HTTP 读来源（从未连接的环境）→ 真态可见可点，且不谈用量陈旧（change slow-start-offline-toggle）', () => {
+  // 从未启动的环境没有活快照、dailyUsage 为 null → 经 env-scoped HTTP 读取得纯云端真态。
+  // 该来源根本不带用量计数 ⇒ 不打陈旧标签；开关照常可点（离线可改）。
+  const v = uiLogic.slowStartLine(usage({ state: 'active', day: 3, totalDays: 7, binding: true, eligible: true }), 'offline', 'http');
+  assert.equal(v.visible, true);
+  assert.equal(v.checked, true);
+  assert.equal(v.disabled, false, 'HTTP 读来源开关照常可点');
+  assert.equal(v.stale, false, 'HTTP 读不带用量 → 无「陈旧」可言');
+  assert.equal(v.source, 'http');
+  assert.equal(v.reason, undefined, '不谈用量陈旧');
+  assert.equal(v.badge, '慢启动 · 第 3/7 天');
 });
 
 test('slowStartLine：off 态不显徽章、开关未勾', () => {
@@ -771,6 +798,9 @@ test('slowStartLine：文案红线 —— 全域不出现「新账号」、不�
     uiLogic.slowStartLine(usage({ state: 'active', day: 5, totalDays: 7, binding: false, eligible: true }), 'online'),
     uiLogic.slowStartLine(usage({ state: 'graduated', totalDays: 7, since: Date.UTC(2026, 6, 10), eligible: true }), 'online'),
     uiLogic.slowStartLine(usage({ state: 'off', totalDays: 7, eligible: false, ineligibleReason: 'platform_unknown' }), 'offline'),
+    // change slow-start-offline-toggle 新增两态：binding_unknown 专属文案 + 离线用量陈旧提示，同受文案红线约束。
+    uiLogic.slowStartLine(usage({ eligible: false, ineligibleReason: 'binding_unknown' }), 'offline', 'http'),
+    uiLogic.slowStartLine(usage({ state: 'active', day: 2, totalDays: 7, binding: true, eligible: true }), 'offline'),
   ];
   for (const v of all) {
     const text = `${v.badge ?? ''}${v.reason ?? ''}`;

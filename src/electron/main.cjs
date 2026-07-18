@@ -3824,10 +3824,14 @@ ipcMain.handle('interaction:draft:update', (_event, raw) => handleInteractionIpc
   });
 }));
 
-// 账号级慢启动开关（change account-level-slow-start）：**只提交 envKey + enabled**。
-// accountId 由云端经活会话映射解析、客户端永不提交（红线：accountId is never accepted as an
-// unverified cross-customer selector）。边缘未连接时云端如实回 409 —— 那不是缺陷：慢启动状态
-// 本身就搭在 ui.snapshot.dailyUsage 上，边缘离线时这张卡本来就不更新、开关本来就该禁用。
+// 账号级慢启动开关（change account-level-slow-start；**离线可读写** change slow-start-offline-toggle）：
+// **只提交 envKey + enabled**。accountId 由云端经**持久绑定**解析、客户端永不提交（红线：accountId is never
+// accepted as an unverified cross-customer selector）。
+//
+// **原作者「边缘不在线就改不了不是缺陷」的论断已被用户裁定推翻**：慢启动真态是纯云端算的、写入执行体也在云端
+// 配额计算内，边缘对这次写入没有任何参与——那道内核在线闸是 INCIDENTAL（这次写全程不经过环境内核子进程）。
+// 故此处**MUST NOT**为「一致」在 IPC / interactionCustomerRequest 上新增任何浏览器 / 环境在线闸（那正是 DEFECT 3
+// 的病灶形状）：够不够得着云端由 interactionCustomerRequest 自身的成败表达，失败复用既有按环境隔离的失败反馈。
 ipcMain.handle('slow-start:set', (_event, raw) => handleInteractionIpc(async () => {
   const args = interactionArgs(raw, new Set(['envKey', 'enabled']));
   const envKey = interactionId(args.envKey, 'envKey');
@@ -3837,6 +3841,18 @@ ipcMain.handle('slow-start:set', (_event, raw) => handleInteractionIpc(async () 
     pathname: `/environments/${encodeURIComponent(envKey)}/slow-start`,
     method: 'PUT',
     body: { enabled: args.enabled },
+  });
+}));
+
+// 不依赖边缘的慢启动读（change slow-start-offline-toggle）：让没有活快照（从未启动 / 已停止，dailyUsage 为 null）
+// 的环境也能把慢启动这一行渲染出来——binding_unknown 可见性的前置。同样**不加**任何环境在线闸。
+ipcMain.handle('slow-start:get', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/slow-start`,
+    method: 'GET',
   });
 }));
 
