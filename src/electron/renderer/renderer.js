@@ -266,8 +266,11 @@ const settingsUi = {
   adsCreate: document.querySelector('#ads-create'),
   adsTemplate: document.querySelector('#ads-template'),
   adsPlatform: document.querySelector('#ads-platform'),
+  adsFbCreateMode: document.querySelector('#ads-fb-create-mode'),
   adsFbImportWrap: document.querySelector('#ads-fb-import-wrap'),
   adsFbImport: document.querySelector('#ads-fb-import'),
+  adsFbImportRequirement: document.querySelector('#ads-fb-import-requirement'),
+  adsFbBatchAccountHelp: document.querySelector('#ads-fb-batch-account-help'),
   adsCreateMsg: document.querySelector('#ads-create-msg'),
   // 新建环境的可选代理区块（edge-client-proxy-platform-persona-ux）
   adsProxyType: document.querySelector('#ads-proxy-type'),
@@ -276,6 +279,10 @@ const settingsUi = {
   adsProxyPort: document.querySelector('#ads-proxy-port'),
   adsProxyUser: document.querySelector('#ads-proxy-user'),
   adsProxyPass: document.querySelector('#ads-proxy-pass'),
+  adsProxyBatchWrap: document.querySelector('#ads-proxy-batch-wrap'),
+  adsProxyBatch: document.querySelector('#ads-proxy-batch'),
+  adsSingleProxyHelp: document.querySelector('#ads-single-proxy-help'),
+  adsBatchProxyHelp: document.querySelector('#ads-batch-proxy-help'),
   parkingButtons: Array.from(document.querySelectorAll('.parking-btn')),
   browserShow: document.querySelector('#browser-show'),
   browserResetParking: document.querySelector('#browser-reset-parking'),
@@ -388,9 +395,25 @@ function platformLabel(p) {
   return platform === 'facebook' ? 'Facebook' : '小红书';
 }
 function updateFacebookImportVisibility() {
-  if (!settingsUi.adsFbImportWrap) return;
   const facebook = normPlatform(settingsUi.adsPlatform && settingsUi.adsPlatform.value) === 'facebook';
-  settingsUi.adsFbImportWrap.classList.toggle('hidden', !facebook);
+  if (!facebook && settingsUi.adsFbCreateMode) settingsUi.adsFbCreateMode.value = 'single';
+  const batch = facebook && settingsUi.adsFbCreateMode && settingsUi.adsFbCreateMode.value === 'batch';
+  settingsUi.adsFbCreateMode?.classList.toggle('hidden', !facebook);
+  settingsUi.adsFbImportWrap?.classList.toggle('hidden', !facebook);
+  settingsUi.adsTemplate?.classList.toggle('hidden', Boolean(batch));
+  settingsUi.adsFbBatchAccountHelp?.classList.toggle('hidden', !batch);
+  settingsUi.adsSingleProxyHelp?.classList.toggle('hidden', Boolean(batch));
+  settingsUi.adsBatchProxyHelp?.classList.toggle('hidden', !batch);
+  if (settingsUi.adsFbImportRequirement) {
+    settingsUi.adsFbImportRequirement.textContent = batch ? '必填' : '可选';
+    settingsUi.adsFbImportRequirement.classList.toggle('req', Boolean(batch));
+    settingsUi.adsFbImportRequirement.classList.toggle('opt', !batch);
+  }
+  if (settingsUi.adsFbImport) settingsUi.adsFbImport.rows = batch ? 7 : 4;
+  if (settingsUi.adsCreate) settingsUi.adsCreate.textContent = batch ? '批量创建' : '创建环境';
+  const noProxy = !settingsUi.adsProxyType || settingsUi.adsProxyType.value === 'no_proxy';
+  settingsUi.adsProxyDetail?.classList.toggle('hidden', Boolean(batch) || noProxy);
+  settingsUi.adsProxyBatchWrap?.classList.toggle('hidden', !batch || noProxy);
 }
 const LOG_RETENTION_MS = 2 * 60 * 1000; // 开发者详情原始日志保留 2 分钟
 let quotaDetailsOpen = false;
@@ -3711,6 +3734,7 @@ async function populateTemplates() {
 populateTemplates();
 updateFacebookImportVisibility();
 if (settingsUi.adsPlatform) settingsUi.adsPlatform.addEventListener('change', updateFacebookImportVisibility);
+if (settingsUi.adsFbCreateMode) settingsUi.adsFbCreateMode.addEventListener('change', updateFacebookImportVisibility);
 
 // ── 代理表单（edge-client-proxy-platform-persona-ux）：新建可选区块 + 已有环境编辑浮层共用读值/校验 ──
 // 主校验在主进程归一层（ads-proxy-config），前端只做「选了类型必须填 host/port」的即时反馈。
@@ -3740,30 +3764,62 @@ const createProxyUi = {
 function resetCreateProxyForm() {
   if (createProxyUi.type) createProxyUi.type.value = 'no_proxy';
   for (const k of ['host', 'port', 'user', 'pass']) if (createProxyUi[k]) createProxyUi[k].value = '';
-  settingsUi.adsProxyDetail?.classList.add('hidden');
+  if (settingsUi.adsProxyBatch) settingsUi.adsProxyBatch.value = '';
+  updateFacebookImportVisibility();
 }
 settingsUi.adsProxyType?.addEventListener('change', () => {
-  settingsUi.adsProxyDetail?.classList.toggle('hidden', settingsUi.adsProxyType.value === 'no_proxy');
+  updateFacebookImportVisibility();
 });
 
-// 「创建环境」程序化建号：挑模板 →（可选填代理）→ 建一个指纹环境。非法代理主进程诚实拒建。
+// 「创建环境」程序化建号：单建挑模板；Facebook 批量由主进程逐账号随机整套模板、代理按行轮询。
 settingsUi.adsCreate.addEventListener('click', async () => {
-  const tpl = settingsUi.adsTemplate && settingsUi.adsTemplate.value;
-  if (!tpl) return setCreateMsg('请先选择一个整机模板', true);
   const platform = normPlatform(settingsUi.adsPlatform && settingsUi.adsPlatform.value);
+  const batch = platform === 'facebook'
+    && settingsUi.adsFbCreateMode
+    && settingsUi.adsFbCreateMode.value === 'batch';
+  const tpl = settingsUi.adsTemplate && settingsUi.adsTemplate.value;
+  if (!batch && !tpl) return setCreateMsg('请先选择一个整机模板', true);
   if (!window.aidcpEdge || typeof window.aidcpEdge.adsCreateEnv !== 'function') return;
-  const proxy = readProxyForm(createProxyUi);
-  const proxyErr = quickProxyCheck(proxy);
+  const facebookAccountImport = platform === 'facebook' && settingsUi.adsFbImport
+    ? settingsUi.adsFbImport.value
+    : '';
+  if (batch && !facebookAccountImport.trim()) {
+    return setCreateMsg('批量新建请至少粘贴一条 Facebook 账号资料。', true);
+  }
+  const proxyType = settingsUi.adsProxyType ? settingsUi.adsProxyType.value : 'no_proxy';
+  const proxy = batch ? null : readProxyForm(createProxyUi);
+  const proxyErr = batch ? '' : quickProxyCheck(proxy);
   if (proxyErr) return setCreateMsg(`代理输入不完整：${proxyErr}。`, true);
-  const withProxy = proxy.proxyType !== 'no_proxy';
+  const facebookProxyBatch = batch && proxyType !== 'no_proxy' && settingsUi.adsProxyBatch
+    ? settingsUi.adsProxyBatch.value
+    : '';
+  if (batch && proxyType !== 'no_proxy' && !facebookProxyBatch.trim()) {
+    return setCreateMsg('已选择代理类型，请至少粘贴一条代理资料。', true);
+  }
+  const withProxy = proxyType !== 'no_proxy';
   settingsUi.adsCreate.disabled = true;
-  setCreateMsg('正在创建环境…', false);
+  const batchCount = facebookAccountImport.split(/\r?\n/).filter((line) => line.trim()).length;
+  setCreateMsg(batch ? `正在批量创建 ${batchCount} 个环境，请勿关闭客户端…` : '正在创建环境…', false);
   try {
-    const facebookAccountImport =
-      platform === 'facebook' && settingsUi.adsFbImport
-        ? settingsUi.adsFbImport.value
-        : '';
-    const r = await window.aidcpEdge.adsCreateEnv({ ...formAdsOpts(), templateKey: tpl, platform, proxy, facebookAccountImport });
+    const payload = batch
+      ? {
+          ...formAdsOpts(),
+          creationMode: 'batch',
+          templateKey: '',
+          platform,
+          batchProxyType: proxyType,
+          facebookAccountImport,
+          facebookProxyBatch,
+        }
+      : {
+          ...formAdsOpts(),
+          creationMode: 'single',
+          templateKey: tpl,
+          platform,
+          proxy,
+          facebookAccountImport,
+        };
+    const r = await window.aidcpEdge.adsCreateEnv(payload);
     if (r && r.ok) {
       // 新建即选中时，带上刚起好的环境名（回执 name）与平台（回执 platform 优先，回落表单选择）。
       // 带回真名根治「新建即空名」——否则左栏回落「环境 …末4位」、与添加面板显示的真名不一致
@@ -3780,16 +3836,24 @@ settingsUi.adsCreate.addEventListener('click', async () => {
           ? '已分配到当前账号，但本次未加入运行环境，请按提示处理。'
           : r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
       const createdCount = Number(r.createdCount || (Array.isArray(r.created) ? r.created.length : 0));
-      const countHint = createdCount > 1 ? `已创建 ${createdCount} 个环境。` : `已创建环境（${r.template || tpl}）。`;
+      const countHint = batch
+        ? `已创建 ${createdCount} 个环境。`
+        : createdCount > 1 ? `已创建 ${createdCount} 个环境。` : `已创建环境（${r.template || tpl}）。`;
       if (createdCount > 0 && settingsUi.adsFbImport) settingsUi.adsFbImport.value = '';
-      const proxyHint = withProxy ? '代理已随建号写入。' : '未配代理，可稍后在环境行「代理」里补配。';
+      if (batch && createdCount > 0 && settingsUi.adsProxyBatch) settingsUi.adsProxyBatch.value = '';
+      const proxyHint = batch && withProxy
+        ? '代理已按粘贴顺序轮询分配并随建号写入。'
+        : withProxy ? '代理已随建号写入。' : '未配代理，可稍后在环境行「代理」里补配。';
       const visibilityHint = r.visibilityWarning ? r.visibilityWarning : '';
       setCreateMsg(`${countHint}${selectedHint}${proxyHint}${visibilityHint}`, Boolean(r.visibilityWarning));
       resetCreateProxyForm();
       await refreshEnvs();
     } else {
       const extra = r && r.violations && r.violations.length ? '（' + r.violations.join('；') + '）' : '';
-      setCreateMsg(`创建失败：${(r && r.error) || '未知错误'}${extra}。`, true);
+      const createdCount = Number(r && (r.createdCount || (Array.isArray(r.created) ? r.created.length : 0)) || 0);
+      const prefix = createdCount > 0 ? '批量创建未完成' : '创建失败';
+      setCreateMsg(`${prefix}：${(r && r.error) || '未知错误'}${extra}。`, true);
+      if (createdCount > 0) await refreshEnvs();
     }
   } finally {
     settingsUi.adsCreate.disabled = false;

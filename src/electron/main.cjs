@@ -27,6 +27,11 @@ const {
   parseFacebookAccountImport,
   profileNameForFacebookImport,
 } = require('./facebook-account-import.cjs');
+const {
+  createFacebookBatchPlan,
+  validateCreationCapacity,
+  failedFacebookBatchReceipt,
+} = require('./facebook-batch-create.cjs');
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
 const {
@@ -4293,38 +4298,74 @@ ipcMain.handle('ads:templates', () =>
   adsFingerprint.DEVICE_TEMPLATES.map((t) => ({ key: t.key, label: templateLabel(t) })),
 );
 
-// 程序化建一个指纹环境。opts: { templateKey, apiKey?, apiBase?, proxy?, facebookAccountImport? }。
-// 代理可选（缺省 no_proxy）；FB 支持批量账号导入（每行一个环境，共用同一份代理输入）。
+function safeCreatedEnvironment(finalized) {
+  return {
+    userId: finalized.userId,
+    name: finalized.name,
+    template: finalized.template,
+    platform: finalized.platform,
+    assignedToCurrentClient: finalized.assignedToCurrentClient,
+    requiresAdminAssignment: finalized.requiresAdminAssignment,
+    assignmentHandledByMain: finalized.assignmentHandledByMain,
+    rosterJoinedByMain: finalized.rosterJoinedByMain,
+    visibilityWarning: finalized.visibilityWarning,
+  };
+}
+
+// 程序化建指纹环境。单建 opts: { templateKey, platform, proxy?, facebookAccountImport? }；
+// Facebook 批量另带 { creationMode:'batch', batchProxyType, facebookProxyBatch }。
 ipcMain.handle('ads:createEnv', async (_event, opts) => {
   if (adsCreateInFlight) return { ok: false, error: '创建进行中，请等当前创建完成' };
-  // 账号上限是**唯一**该硬性拒绝的地方（change browser-slot-scheduling）：
-  // 槽位不够只是「现在轮不到你」——该排队；账号挂满了才是「这台机器不该再多带一个」——该拒绝。
-  // 上限可在设置里改，所以这不是死路，运维知道该去哪调。
-  const accountCap = maxAccounts();
-  const configured = [...envs.values()].filter((h) => !h.removed).length;
-  if (configured >= accountCap) {
-    return {
-      ok: false,
-      error: `已挂载 ${configured} 个账号，达到上限 ${accountCap}（${slotCapacity()} 个浏览器槽位 × 2）。`
-        + '如确要再挂，请到设置「浏览器并发」里调高「最多挂载账号数」——但超出后部分账号可能长期排不到槽位。',
-    };
-  }
   adsCreateInFlight = true;
   try {
+    const platform = normalizePlatform(opts && opts.platform);
+    const creationMode = opts && opts.creationMode === 'batch' ? 'batch' : 'single';
+    if (creationMode === 'batch' && platform !== 'facebook') {
+      return { ok: false, error: '批量新建当前仅支持 Facebook 环境' };
+    }
+    const importText = platform === 'facebook' ? (opts && opts.facebookAccountImport) : '';
+    const parsedImport = parseFacebookAccountImport(importText);
+    if (!parsedImport.ok) return { ok: false, error: parsedImport.error };
+    const entries = parsedImport.entries || [];
+    if (creationMode === 'single' && entries.length > 1) {
+      return { ok: false, error: '单个新建只允许一条 Facebook 账号资料；多条请切换到「批量新建」' };
+    }
+
+    let batchPlan = null;
+    if (creationMode === 'batch') {
+      batchPlan = createFacebookBatchPlan({
+        accountEntries: entries,
+        proxyType: opts && opts.batchProxyType,
+        proxyText: opts && opts.facebookProxyBatch,
+        templateKeys: adsFingerprint.DEVICE_TEMPLATES.map((template) => template.key),
+      });
+      if (!batchPlan.ok) return { ok: false, error: batchPlan.error };
+    }
+
+    // 账号上限是**唯一**硬性容量拒绝（change browser-slot-scheduling）。批量必须在第一条写入前检查整批，
+    // 不能只看“当前是否已满”而允许本批中途越过上限。
+    const accountCap = maxAccounts();
+    const configured = [...envs.values()].filter((h) => !h.removed).length;
+    const requested = creationMode === 'batch' ? batchPlan.plan.length : 1;
+    const capacity = validateCreationCapacity({ configured, accountCap, requested });
+    if (!capacity.ok) {
+      const requestLabel = creationMode === 'batch' ? '本批' : '本次';
+      return {
+        ok: false,
+        error: `${requestLabel}需要创建 ${requested} 个环境，但当前仅剩 ${capacity.remaining} 个挂载名额（已挂载 ${configured}/${accountCap}）。`
+          + `${creationMode === 'batch' ? '请减少本批账号，或' : '请'}到设置「浏览器并发」调高「最多挂载账号数」。`,
+      };
+    }
+
     // 先确保指纹浏览器服务就绪（仅服务、不下内核）——冷机不再裸抛 LocalAPI fetch failed。
     const svc = await ensureAdsServiceOnce(null);
     if (!svc.ok) {
       return { ok: false, error: `指纹浏览器运行时未就绪：${svc.error || '未知错误'}`, retryable: true };
     }
     const ads = resolveAdsOpts(opts);
-    const platform = normalizePlatform(opts && opts.platform);
-    const importText = platform === 'facebook' ? (opts && opts.facebookAccountImport) : '';
-    const parsedImport = parseFacebookAccountImport(importText);
-    if (!parsedImport.ok) return { ok: false, error: parsedImport.error };
     // 凭据只内存（deps），绝不落 settings；写客户端错误层已脱敏。
     const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
-    const entries = parsedImport.entries || [];
-    if (entries.length === 0) {
+    if (creationMode === 'single' && entries.length === 0) {
       const intent = await createEnvironmentProvisioningIntent();
       if (!intent.ok) return { ok: false, error: `${intent.error}，本次尚未创建本地环境。` };
       const result = await createEnvironmentWithGroupRecovery({
@@ -4345,49 +4386,40 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       return result;
     }
 
+    const plan = creationMode === 'batch'
+      ? batchPlan.plan
+      : [{
+          accountImport: entries[0],
+          accountLine: 1,
+          templateKey: (opts && opts.templateKey) || '',
+          proxy: opts && opts.proxy,
+        }];
     const created = [];
-    for (let i = 0; i < entries.length; i += 1) {
-      const entry = entries[i];
+    for (let i = 0; i < plan.length; i += 1) {
+      const item = plan[i];
       const intent = await createEnvironmentProvisioningIntent();
       if (!intent.ok) {
-        return {
-          ok: false,
-          error: `第 ${i + 1} 行${intent.error}，该行尚未创建本地环境。`,
-          created,
-        };
+        return failedFacebookBatchReceipt(created, i + 1, `${intent.error}，该账号尚未创建本地环境`);
       }
       const result = await createEnvironmentWithGroupRecovery({
         writeApi,
         adsApi,
         fingerprint: adsFingerprint,
         adsOpts: ads,
-        templateKey: (opts && opts.templateKey) || '',
+        templateKey: item.templateKey,
         intendedAccountLabel: '',
         machineLabel: os.hostname(),
         platform,
-        name: profileNameForFacebookImport(entry, i),
-        accountImport: entry,
-        proxy: opts && opts.proxy, // 批量导入的每个环境共用同一份代理输入
+        name: profileNameForFacebookImport(item.accountImport, i),
+        accountImport: item.accountImport,
+        proxy: item.proxy,
         groupResolver: envGroupResolver,
       });
       if (!result.ok) {
-        return {
-          ok: false,
-          error: `第 ${i + 1} 行创建失败：${result.error || '未知错误'}`,
-          created,
-        };
+        return failedFacebookBatchReceipt(created, i + 1, result.error || '未知错误');
       }
       const finalized = await finalizeCreatedEnvironmentAssignment(result, intent);
-      created.push({
-        userId: finalized.userId,
-        name: finalized.name,
-        template: finalized.template,
-        platform: finalized.platform,
-        assignedToCurrentClient: finalized.assignedToCurrentClient,
-        requiresAdminAssignment: finalized.requiresAdminAssignment,
-        rosterJoinedByMain: finalized.rosterJoinedByMain,
-        visibilityWarning: finalized.visibilityWarning,
-      });
+      created.push(safeCreatedEnvironment(finalized));
     }
     const assignmentHandledByMain = clientAuthEnabled();
     const unassigned = assignmentHandledByMain
@@ -4395,11 +4427,12 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       : [];
     return {
       ok: true,
-      userId: created.length === 1 ? created[0].userId : undefined,
+      userId: creationMode === 'single' && created.length === 1 ? created[0].userId : undefined,
       // 单账号导入自动选中时带回真名，供渲染层入册用真名（change edge-env-name-live-sync）。
-      name: created.length === 1 ? created[0].name : undefined,
-      template: (opts && opts.templateKey) || '',
+      name: creationMode === 'single' && created.length === 1 ? created[0].name : undefined,
+      template: creationMode === 'single' ? ((opts && opts.templateKey) || '') : undefined,
       platform,
+      creationMode,
       created,
       createdCount: created.length,
       assignedToCurrentClient: assignmentHandledByMain ? unassigned.length === 0 : undefined,

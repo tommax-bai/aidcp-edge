@@ -1686,6 +1686,7 @@ body { margin: 0; }
 .ads-create-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 /* 平台下拉按内容收窄（选项短），系统模板下拉占满余量（选项长，避免截断） */
 .ads-create-row #ads-platform { flex: 0 0 auto; width: auto; }
+.ads-create-row #ads-fb-create-mode { flex: 0 0 auto; width: auto; }
 .ads-create-row #ads-template { flex: 1 1 150px; }
 .ads-create-btn {
   flex: 0 0 auto;
@@ -1726,9 +1727,16 @@ body { margin: 0; }
   .ads-create-row #ads-platform { flex: 1 1 88px; }
   .ads-create-btn { width: 100%; }
 }
-.ads-fb-import textarea {
+.ads-fb-import textarea,
+.ads-proxy-batch textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
+}
+.ads-fb-import .subtle,
+.ads-proxy-batch .subtle {
+  display: block;
+  margin-top: 5px;
+  line-height: 1.55;
 }
 /* 创建提示行空着时不占位（否则 grid gap+min-height 会把下拉与「下载 AdsPower」撑开一大截）。 */
 #ads-create-msg:empty { display: none; }

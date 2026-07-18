@@ -365,6 +365,7 @@ test('新增环境可选择视频号，并以 wechat_channels 创建、入册和
   platform.value = 'wechat_channels';
   platform.dispatchEvent(new w.Event('change'));
   assert.ok($(w, '#ads-fb-import-wrap').classList.contains('hidden'), '视频号不显示 Facebook 一次性凭据框');
+  assert.ok($(w, '#ads-fb-create-mode').classList.contains('hidden'), '视频号不显示 Facebook 批量入口');
 
   $(w, '#ads-create').dispatchEvent(new w.Event('click'));
   for (let i = 0; i < 5; i++) await tick();
@@ -378,32 +379,101 @@ test('新增环境可选择视频号，并以 wechat_channels 创建、入册和
   assert.match($(w, '#ads-create-msg').textContent ?? '', /已自动选中/);
 });
 
-test('Facebook 导入框：仅 Facebook 平台显示，创建时透传但提示不泄露账号资料', async () => {
+test('Facebook 批量新建：显式模式、隐藏模板、多行账号代理透传且成功回执不泄密', async () => {
   let sent: Record<string, unknown> = {};
   const secretLine = 'a@example.com----pw-secret----KEYSECRET----c_user=100000000000001; xs=TOKEN';
+  const proxySecret = 'proxy.example:8080:proxy-user:proxy-pass';
   const w = await boot(makeStub({
     adsCreateEnv: async (opts) => {
       sent = opts as Record<string, unknown>;
-      return { ok: true, createdCount: 2, created: [{ userId: 'u1' }, { userId: 'u2' }], platform: 'facebook' };
+      return {
+        ok: true,
+        createdCount: 2,
+        created: [{ userId: 'u1', template: 'win11-intel' }, { userId: 'u2', template: 'macos-m2' }],
+        platform: 'facebook',
+        creationMode: 'batch',
+      };
     },
   }));
   for (let i = 0; i < 3; i++) await tick();
   assert.ok($(w, '#ads-fb-import-wrap').classList.contains('hidden'), '默认小红书不显示导入框');
+  assert.ok($(w, '#ads-fb-create-mode').classList.contains('hidden'), '默认小红书不显示批量入口');
 
   const platform = $(w, '#ads-platform') as HTMLSelectElement;
   platform.value = 'facebook';
   platform.dispatchEvent(new w.Event('change'));
   assert.ok(!$(w, '#ads-fb-import-wrap').classList.contains('hidden'), 'Facebook 平台显示导入框');
+  assert.ok(!$(w, '#ads-fb-create-mode').classList.contains('hidden'), 'Facebook 平台显示创建方式');
+  assert.ok(!$(w, '#ads-template').classList.contains('hidden'), 'Facebook 单个新建仍显示模板');
+
+  const mode = $(w, '#ads-fb-create-mode') as HTMLSelectElement;
+  mode.value = 'batch';
+  mode.dispatchEvent(new w.Event('change'));
+  assert.ok($(w, '#ads-template').classList.contains('hidden'), '批量新建不可选择模板');
+  assert.equal($(w, '#ads-create').textContent, '批量创建');
+  assert.match($(w, '#ads-fb-import-requirement').textContent ?? '', /必填/);
   ($(w, '#ads-fb-import') as HTMLTextAreaElement).value = `${secretLine}\n${secretLine}`;
+  const proxyType = $(w, '#ads-proxy-type') as HTMLSelectElement;
+  proxyType.value = 'socks5';
+  proxyType.dispatchEvent(new w.Event('change'));
+  assert.ok(!$(w, '#ads-proxy-batch-wrap').classList.contains('hidden'), '批量代理输入在选定类型后显示');
+  ($(w, '#ads-proxy-batch') as HTMLTextAreaElement).value = `${proxySecret}\nproxy-b.example:8081`;
 
   $(w, '#ads-create').dispatchEvent(new w.Event('click'));
   for (let i = 0; i < 4; i++) await tick();
   assert.equal(sent.platform, 'facebook');
+  assert.equal(sent.creationMode, 'batch');
+  assert.equal(sent.templateKey, '', '批量模式不把渲染层模板值交给主进程');
   assert.equal(sent.facebookAccountImport, `${secretLine}\n${secretLine}`);
+  assert.equal(sent.batchProxyType, 'socks5');
+  assert.equal(sent.facebookProxyBatch, `${proxySecret}\nproxy-b.example:8081`);
   const msg = $(w, '#ads-create-msg').textContent ?? '';
   assert.match(msg, /已创建 2 个环境/);
-  assert.doesNotMatch(msg, /a@example.com|pw-secret|KEYSECRET|TOKEN/);
+  assert.match(msg, /轮询分配/);
+  assert.doesNotMatch(msg, /a@example.com|pw-secret|KEYSECRET|TOKEN|proxy-user|proxy-pass/);
   assert.equal(($(w, '#ads-fb-import') as HTMLTextAreaElement).value, '', '成功后清空一次性输入');
+  assert.equal(($(w, '#ads-proxy-batch') as HTMLTextAreaElement).value, '', '成功后清空一次性代理输入');
+});
+
+test('Facebook 批量部分失败：刷新已建环境并保留一次性输入供核对', async () => {
+  let listCalls = 0;
+  const accountSecret = 'a@example.com----pw-secret----KEYSECRET----c_user=100000000000001; xs=TOKEN';
+  const proxySecret = 'proxy.example:8080:proxy-user:proxy-pass';
+  const w = await boot(makeStub({
+    adsListProfiles: async () => {
+      listCalls += 1;
+      return { ok: true, profiles: [] };
+    },
+    adsCreateEnv: async () => ({
+      ok: false,
+      error: '第 2 个账号创建失败：AdsPower 暂不可用；已创建 1 个环境，后续账号尚未创建',
+      createdCount: 1,
+      created: [{ userId: 'u1', template: 'win11-intel' }],
+      failedIndex: 2,
+      partial: true,
+    }),
+  }));
+  const initialListCalls = listCalls;
+  const platform = $(w, '#ads-platform') as HTMLSelectElement;
+  platform.value = 'facebook';
+  platform.dispatchEvent(new w.Event('change'));
+  const mode = $(w, '#ads-fb-create-mode') as HTMLSelectElement;
+  mode.value = 'batch';
+  mode.dispatchEvent(new w.Event('change'));
+  ($(w, '#ads-fb-import') as HTMLTextAreaElement).value = `${accountSecret}\n${accountSecret}`;
+  const proxyType = $(w, '#ads-proxy-type') as HTMLSelectElement;
+  proxyType.value = 'http';
+  proxyType.dispatchEvent(new w.Event('change'));
+  ($(w, '#ads-proxy-batch') as HTMLTextAreaElement).value = proxySecret;
+
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 5; i++) await tick();
+  const msg = $(w, '#ads-create-msg').textContent ?? '';
+  assert.match(msg, /批量创建未完成.*已创建 1 个环境/);
+  assert.doesNotMatch(msg, /a@example.com|pw-secret|KEYSECRET|TOKEN|proxy-user|proxy-pass/);
+  assert.equal(($(w, '#ads-fb-import') as HTMLTextAreaElement).value, `${accountSecret}\n${accountSecret}`);
+  assert.equal(($(w, '#ads-proxy-batch') as HTMLTextAreaElement).value, proxySecret);
+  assert.ok(listCalls > initialListCalls, '部分成功后刷新环境列表');
 });
 
 test('程序化建号成功返回 userId → 自动选中新环境，启动可直接保存并开跑', async () => {
