@@ -58,13 +58,14 @@ test('customer JWT：safeStorage 可用时整包加密，磁盘记录不含 toke
   assert.deepEqual(security.unsealClientSession(record, safeStorage), session);
 });
 
-test('customer JWT：原子替换并显式保持 0600，不遗留临时文件', (t) => {
+test('customer JWT：原子替换且 POSIX 显式保持 0600，不遗留临时文件', (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'aidcp-customer-auth-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const file = join(directory, 'client-session.json');
   security.writePrivateJsonAtomic(file, { version: 1, token: 'first' });
   security.writePrivateJsonAtomic(file, { version: 2, token: 'second' });
-  assert.equal(statSync(file).mode & 0o777, 0o600);
+  // Windows 的 stat mode 是由 NTFS 属性合成的 0666，不能证明或否定 ACL；0600 只在 POSIX 上有可验证语义。
+  if (process.platform !== 'win32') assert.equal(statSync(file).mode & 0o777, 0o600);
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { version: 2, token: 'second' });
   assert.deepEqual(readdirSync(directory), ['client-session.json']);
 });
