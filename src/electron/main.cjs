@@ -13,6 +13,7 @@ const {
 } = require('./customer-auth-security.cjs');
 const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
 const { createAdsLocalApi } = require('./ads-local-api.cjs');
+const { readWithRuntimeRecovery } = require('./ads-read-runtime.cjs');
 const { createAdsWriteApi } = require('./ads-write-api.cjs');
 const adsRuntime = require('./ads-runtime.cjs');
 const adsFingerprint = require('./ads-fingerprint.cjs');
@@ -823,7 +824,15 @@ async function proceedAfterAuth() {
   if (!proceededOnce) {
     proceededOnce = true;
     createTray();
-    void reconcileRunningProfiles();
+    // 冷启动非阻塞预热 Ads CLI：面板首次 /status 不再先撞 fetch failed。
+    // 只在 adspower 模式执行；内核仍保持首次启动浏览器时才按需下载。
+    if (settings.provider === 'adspower') {
+      void ensureAdsServiceOnce(null)
+        .then((service) => (service && service.ok ? reconcileRunningProfiles() : undefined))
+        .catch(() => undefined);
+    } else {
+      void reconcileRunningProfiles();
+    }
     startSessionMaintenance();
   }
 }
@@ -2998,6 +3007,17 @@ function ensureAdsServiceOnce(handle) {
   return adsServiceInFlight;
 }
 
+// 设置面板只读路径：已有 base 时直接读；冷机或真实传输失败时才 ensure CLI 并重读一次。
+// 这避免每次面板刷新都执行 `ads status` 子进程，同时让 daemon 中途退出后能够自愈。
+function readAdsWithRuntime(opts, read) {
+  return readWithRuntimeRecovery({
+    hasBase: () => Boolean(adsServiceBase),
+    clearBase: () => { adsServiceBase = null; },
+    ensure: () => ensureAdsServiceOnce(null),
+    read: () => read(resolveAdsOpts(opts)),
+  });
+}
+
 // 首启把随包只读模板暂存到用户可写目录（打包态 Resources 只读、App Translocation 下尤甚，
 // 而 CLI 要往自身 cwd/ 写）。版本戳（app 版本 + CLI 版本）不符即清旧重拷，避免升级后旧副本遮挡新运行时。
 // 开发态无 resourcesPath / 无模板则跳过（resolveCliEntry 的 node_modules 候选直解）。
@@ -4363,13 +4383,10 @@ ipcMain.handle('notify:show', (_event, payload) => {
   return { ok: true };
 });
 // AdsPower 只读探测 / 拉取（主进程侧，渲染层不直连本地 API）。opts 可带渲染层当前表单 apiKey/apiBase/groupId。
-ipcMain.handle('ads:status', (_event, opts) => adsApi.status(resolveAdsOpts(opts)));
-// 「选择已有环境」拉分身列表：先确保服务就绪（冷机会启动随包运行时），再拉列表——
-// 否则裸抛「本地 API 不可达(fetch failed)」。确保失败则诚实回错（面板据此提示手动填分身 ID）。
+ipcMain.handle('ads:status', (_event, opts) => readAdsWithRuntime(opts, (resolved) => adsApi.status(resolved)));
+// 「选择已有环境」与 status 共享 cached-base fast path；仅冷机/传输失败时启动或重启随包运行时。
 ipcMain.handle('ads:listProfiles', async (_event, opts) => {
-  const svc = await ensureAdsServiceOnce(null);
-  if (!svc.ok) return { ok: false, error: `指纹浏览器运行时未就绪：${svc.error || '未知错误'}` };
-  const result = await adsApi.listProfiles(resolveAdsOpts(opts));
+  const result = await readAdsWithRuntime(opts, (resolved) => adsApi.listProfiles(resolved));
   // 按登录客户可见范围收窄「加入现有环境」**显示列表**（change edge-client-env-scope-and-logout，补 edge-client-customer-auth
   // 的漏）：此前该列表列出本机全部指纹环境、不分归属，把他人环境的名字/分组/代理/分身 ID 暴露给已登录客户，也让用户误加入
   // 永不启动的非归属环境。
