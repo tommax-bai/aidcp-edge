@@ -100,7 +100,7 @@ for (const line of HALT_LINES) {
 test('isFailureShapedLine：真失败行仍可作为归因', () => {
   assert.equal(fleet.isFailureShapedLine('[aidcp-edge] 启动失败: Error: 连接云端失败 ECONNREFUSED'), true);
   assert.equal(
-    fleet.isFailureShapedLine('AdsPower browser/start 失败：is being used by [tom] and is not allowed to open'),
+    fleet.isFailureShapedLine('AdsPower browser-profile/start 失败：is being used by [tom] and is not allowed to open'),
     true,
   );
   assert.equal(fleet.isFailureShapedLine('[aidcp-edge] 核心退出 code=-1'), true);

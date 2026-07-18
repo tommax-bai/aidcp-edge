@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   SelfChromeProvider,
   AdsPowerProvider,
@@ -14,17 +17,32 @@ const fakeInstance: ChromeInstance = {
   killAndConfirmDead: async () => true,
 };
 
-const noopDeps = { sleepImpl: async () => undefined, logImpl: () => undefined, nowImpl: () => 0 };
+const noopDeps = {
+  sleepImpl: async () => undefined,
+  logImpl: () => undefined,
+  nowImpl: () => 0,
+  adsCacheRoot: join(tmpdir(), '__aidcp_nonexistent_ads_cache__'),
+};
 
-/** 路由式 fetch 桩：按 url 子串返回 {ok,json}；记录每次调用的 url 与 headers。 */
+interface FetchCall {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+/** 路由式 fetch 桩：按 url 子串返回 {ok,json}；记录每次调用；未显式路由的 V2 active 缺省 Inactive。 */
 function routedFetch(
   routes: Array<[string, () => unknown]>,
-  calls: Array<{ url: string; headers?: Record<string, string> }> = [],
+  calls: FetchCall[] = [],
 ): typeof fetch {
-  return (async (url: string, init?: { headers?: Record<string, string> }) => {
-    calls.push({ url: String(url), headers: init?.headers });
+  return (async (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => {
+    calls.push({ url: String(url), method: init?.method, headers: init?.headers, body: init?.body });
     for (const [pat, body] of routes) {
       if (String(url).includes(pat)) return { ok: true, json: async () => body() } as unknown;
+    }
+    if (String(url).includes('/api/v2/browser-profile/active')) {
+      return { ok: true, json: async () => ({ code: 0, data: { status: 'Inactive' } }) } as unknown;
     }
     throw new Error(`unrouted ${String(url)}`);
   }) as unknown as typeof fetch;
@@ -49,10 +67,10 @@ test('SelfChromeProvider 透传 launchChrome 入参与返回，端点=传入端�
 // ---- AdsPowerProvider.launch ----
 
 test('AdsPowerProvider.launch 成功 → 端点带 debug_port、实例非 reused，含视口+起始页+Bearer', async () => {
-  const calls: Array<{ url: string; headers?: Record<string, string> }> = [];
+  const calls: FetchCall[] = [];
   const fetchImpl = routedFetch(
     [
-      ['/api/v1/browser/start', () => ({ code: 0, data: { debug_port: 61332 } })],
+      ['/api/v2/browser-profile/start', () => ({ code: 0, data: { debug_port: 61332 } })],
       ['/json/version', () => ({})],
     ],
     calls,
@@ -66,23 +84,32 @@ test('AdsPowerProvider.launch 成功 → 端点带 debug_port、实例非 reused
   assert.equal(out.endpoint.host, '127.0.0.1');
   assert.equal(out.instance.reused, false);
   assert.equal(out.instance.pid, null);
-  const startCall = calls.find((c) => c.url.includes('browser/start'));
+  const startCall = calls.find((c) => c.url.includes('browser-profile/start'));
   assert.ok(startCall);
-  const decoded = decodeURIComponent(startCall.url);
-  assert.match(decoded, /--window-size=1440,980/);
-  assert.match(decoded, /--deny-permission-prompts/);
-  assert.match(decoded, /--lang=en-US/); // C1: 界面语言钉英文（兜登出 chrome，见 facebook-locale-pin-en-us）
-  assert.match(decoded, /--start-maximized/); // 覆盖 AdsPower profile 记忆的窄窗 → 强制 PC 布局（FB 无 role=feed/article 兜底）
-  assert.match(decoded, /--window-position=1902,0/);
-  assert.match(decoded, /xiaohongshu\.com/);
+  assert.equal(startCall.method, 'POST');
+  const payload = JSON.parse(startCall.body || '{}') as { profile_id?: string; last_opened_tabs?: string; launch_args?: string[] };
+  assert.equal(payload.profile_id, 'k1');
+  assert.equal(payload.last_opened_tabs, '0');
+  assert.ok(payload.launch_args?.includes('--window-size=1440,980'));
+  assert.ok(payload.launch_args?.includes('--deny-permission-prompts'));
+  assert.ok(payload.launch_args?.includes('--lang=en-US')); // C1: 界面语言钉英文（兜登出 chrome，见 facebook-locale-pin-en-us）
+  assert.ok(payload.launch_args?.includes('--start-maximized')); // 覆盖 AdsPower profile 记忆的窄窗 → 强制 PC 布局（FB 无 role=feed/article 兜底）
+  assert.ok(payload.launch_args?.includes('--window-position=1902,0'));
+  assert.ok(payload.launch_args?.some((arg) => /xiaohongshu\.com/.test(arg)));
   assert.equal(startCall.headers?.Authorization, 'Bearer secret');
+  assert.equal(startCall.headers?.['Content-Type'], 'application/json');
+  const activeCall = calls.find((c) => c.url.includes('browser-profile/active'));
+  assert.ok(activeCall);
+  assert.equal(activeCall.method, 'GET');
+  assert.equal(new URL(activeCall.url).searchParams.get('profile_id'), 'k1');
+  assert.ok(calls.every((call) => !call.url.includes('/api/v1/browser/')));
 });
 
 test('AdsPowerProvider.launch 支持平台 driver 注入起始页', async () => {
-  const calls: Array<{ url: string; headers?: Record<string, string> }> = [];
+  const calls: FetchCall[] = [];
   const fetchImpl = routedFetch(
     [
-      ['/api/v1/browser/start', () => ({ code: 0, data: { debug_port: 61332 } })],
+      ['/api/v2/browser-profile/start', () => ({ code: 0, data: { debug_port: 61332 } })],
       ['/json/version', () => ({})],
     ],
     calls,
@@ -92,21 +119,80 @@ test('AdsPowerProvider.launch 支持平台 driver 注入起始页', async () => 
     { fetchImpl, ...noopDeps },
   );
   await provider.launch({ host: '127.0.0.1', port: 9222 });
-  const startCall = calls.find((c) => c.url.includes('browser/start'));
+  const startCall = calls.find((c) => c.url.includes('browser-profile/start'));
   assert.ok(startCall);
-  assert.match(decodeURIComponent(startCall.url), /https:\/\/example\.test\/home/);
+  const payload = JSON.parse(startCall.body || '{}') as { launch_args?: string[] };
+  assert.ok(payload.launch_args?.includes('https://example.test/home'));
+});
+
+test('AdsPowerProvider.launch：V2 Active 返回有效端点时直接接管，不重复 start', async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl = routedFetch([
+    ['/api/v2/browser-profile/active', () => ({ code: 0, data: { status: 'Active', debug_port: '59167' } })],
+    ['/json/version', () => ({})],
+  ], calls);
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    { fetchImpl, ...noopDeps },
+  );
+  const out = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(out.endpoint.port, 59167);
+  assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
+});
+
+test('AdsPowerProvider.launch：V2 Inactive 但 profile marker 与 /json/version 完全匹配时接管失联浏览器', async (t) => {
+  const cacheRoot = await mkdtemp(join(tmpdir(), 'aidcp-ads-orphan-'));
+  t.after(async () => rm(cacheRoot, { recursive: true, force: true }));
+  const profileDir = join(cacheRoot, 'k1_suffix');
+  await mkdir(profileDir);
+  await writeFile(join(profileDir, 'DevToolsActivePort'), '59167\n/devtools/browser/abc-123\n', 'utf8');
+  const calls: FetchCall[] = [];
+  const logs: string[] = [];
+  const fetchImpl = routedFetch([
+    ['/api/v2/browser-profile/active', () => ({ code: 0, data: { status: 'Inactive' } })],
+    ['/json/version', () => ({ webSocketDebuggerUrl: 'ws://127.0.0.1:59167/devtools/browser/abc-123' })],
+  ], calls);
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    { fetchImpl, ...noopDeps, adsCacheRoot: cacheRoot, logImpl: (message) => logs.push(message) },
+  );
+  const out = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(out.endpoint.port, 59167);
+  assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
+  assert.match(logs.join('\n'), /接管失联浏览器/);
+});
+
+test('AdsPowerProvider.launch：marker browser path 不匹配时拒绝接管并回落 V2 start', async (t) => {
+  const cacheRoot = await mkdtemp(join(tmpdir(), 'aidcp-ads-stale-'));
+  t.after(async () => rm(cacheRoot, { recursive: true, force: true }));
+  const profileDir = join(cacheRoot, 'k1_suffix');
+  await mkdir(profileDir);
+  await writeFile(join(profileDir, 'DevToolsActivePort'), '59167\n/devtools/browser/expected\n', 'utf8');
+  const calls: FetchCall[] = [];
+  const fetchImpl = routedFetch([
+    ['/api/v2/browser-profile/active', () => ({ code: 0, data: { status: 'Inactive' } })],
+    ['/api/v2/browser-profile/start', () => ({ code: 0, data: { debug_port: 61234 } })],
+    ['/json/version', () => ({ webSocketDebuggerUrl: 'ws://127.0.0.1:59167/devtools/browser/different' })],
+  ], calls);
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1' },
+    { fetchImpl, ...noopDeps, adsCacheRoot: cacheRoot },
+  );
+  const out = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(out.endpoint.port, 61234);
+  assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 1);
 });
 
 test('AdsPowerProvider.launch code≠0 → 诚实报错（不回落 self）', async () => {
   const fetchImpl = routedFetch([
-    ['/api/v1/browser/start', () => ({ code: -1, msg: 'Profile does not exist' })],
+    ['/api/v2/browser-profile/start', () => ({ code: -1, msg: 'Profile does not exist' })],
   ]);
   const provider = new AdsPowerProvider({ apiBase: 'http://x:50325', userId: 'k1' }, { fetchImpl, ...noopDeps });
   await assert.rejects(provider.launch({ host: '127.0.0.1', port: 9222 }), /code=-1|不回落 self/);
 });
 
 test('AdsPowerProvider.launch 无 debug_port → 诚实报错', async () => {
-  const fetchImpl = routedFetch([['/api/v1/browser/start', () => ({ code: 0, data: {} })]]);
+  const fetchImpl = routedFetch([['/api/v2/browser-profile/start', () => ({ code: 0, data: {} })]]);
   const provider = new AdsPowerProvider({ apiBase: 'http://x:50325', userId: 'k1' }, { fetchImpl, ...noopDeps });
   await assert.rejects(provider.launch({ host: '127.0.0.1', port: 9222 }), /debug_port/);
 });
@@ -121,7 +207,10 @@ test('AdsPowerProvider.launch API 不可达 → 诚实报错（不回落 self）
 
 test('AdsPowerProvider.launch API 半开无响应 → 有界超时并诚实报错', async () => {
   const fetchImpl = ((url: string, init?: { signal?: AbortSignal }) => {
-    assert.match(String(url), /browser\/start/);
+    if (String(url).includes('/browser-profile/active')) {
+      return Promise.resolve({ ok: true, json: async () => ({ code: 0, data: { status: 'Inactive' } }) });
+    }
+    assert.match(String(url), /browser-profile\/start/);
     return new Promise((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
     });
@@ -129,10 +218,10 @@ test('AdsPowerProvider.launch API 半开无响应 → 有界超时并诚实报�
   const logs: string[] = [];
   const provider = new AdsPowerProvider(
     { apiBase: 'http://x:50325', userId: 'k1' },
-    { fetchImpl, sleepImpl: async () => undefined, logImpl: (m) => logs.push(m), nowImpl: () => 0, apiTimeoutMs: 5 },
+    { fetchImpl, sleepImpl: async () => undefined, logImpl: (m) => logs.push(m), nowImpl: () => 0, apiTimeoutMs: 5, adsCacheRoot: noopDeps.adsCacheRoot },
   );
-  await assert.rejects(provider.launch({ host: '127.0.0.1', port: 9222 }), /browser\/start 超时|不回落 self/);
-  assert.match(logs.join('\n'), /请求 AdsPower browser\/start profile=k1/);
+  await assert.rejects(provider.launch({ host: '127.0.0.1', port: 9222 }), /browser-profile\/start 超时|不回落 self/);
+  assert.match(logs.join('\n'), /请求 AdsPower V2 browser-profile\/start profile=k1/);
 });
 
 test('AdsPowerProvider.launch API 响应体卡住 → 有界超时并诚实报错', async () => {
@@ -151,23 +240,28 @@ test('AdsPowerProvider.launch API 响应体卡住 → 有界超时并诚实报�
 // 关闭确认以「该 profile 调试端点是否变暗」为权威判据（独立于 AdsPower 自报），软停止未生效则升级
 // （重发 + OS 级强杀）；无法确认端点变暗时诚实 false，绝不假成功（红线）。
 
-// launch 所需的最小路由（browser/start + waitCdpReady 用 /json/version）+ browser/stop。
-const adsCloseFetch = (extra: Array<[string, () => unknown]> = []): typeof fetch =>
+// launch 所需的最小路由（V2 start + waitCdpReady 用 /json/version）+ V2 stop。
+const adsCloseFetch = (extra: Array<[string, () => unknown]> = [], calls: FetchCall[] = []): typeof fetch =>
   routedFetch([
-    ['/api/v1/browser/start', () => ({ code: 0, data: { debug_port: 5000 } })],
+    ['/api/v2/browser-profile/start', () => ({ code: 0, data: { debug_port: 5000 } })],
     ['/json/version', () => ({})],
-    ['/api/v1/browser/stop', () => ({ code: 0 })],
+    ['/api/v2/browser-profile/stop', () => ({ code: 0 })],
     ...extra,
-  ]);
+  ], calls);
 const closeBounds = { closeConfirmTries: 3, closeConfirmIntervalMs: 0 };
 
 test('killAndConfirmDead：软停止后调试端点变暗 → 确认已关 true', async () => {
+  const calls: FetchCall[] = [];
   const provider = new AdsPowerProvider(
     { apiBase: 'http://x:50325', userId: 'k1' },
-    { fetchImpl: adsCloseFetch(), ...noopDeps, ...closeBounds, probeCdpImpl: async () => false, osKillEnabled: false },
+    { fetchImpl: adsCloseFetch([], calls), ...noopDeps, ...closeBounds, probeCdpImpl: async () => false, osKillEnabled: false },
   );
   const { instance } = await provider.launch({ host: '127.0.0.1', port: 9222 });
   assert.equal(await instance.killAndConfirmDead(), true);
+  const stopCall = calls.find((call) => call.url.includes('/api/v2/browser-profile/stop'));
+  assert.ok(stopCall);
+  assert.equal(stopCall.method, 'POST');
+  assert.deepEqual(JSON.parse(stopCall.body || '{}'), { profile_id: 'k1' });
 });
 
 test('killAndConfirmDead：软停止未使端点变暗 + OS 级强杀成功 → 升级后 true', async () => {
@@ -216,12 +310,12 @@ test('killAndConfirmDead：端点一直应答 + OS 杀也没杀掉 → 诚实 fa
   assert.equal(await instance.killAndConfirmDead(), false);
 });
 
-test('killAndConfirmDead：browser/stop 失败但端点变暗 → 端点权威判 true，且如实记 stop 失败', async () => {
+test('killAndConfirmDead：V2 stop 失败但端点变暗 → 端点权威判 true，且如实记 stop 失败', async () => {
   const logs: string[] = [];
   const fetchImpl = routedFetch([
-    ['/api/v1/browser/start', () => ({ code: 0, data: { debug_port: 5000 } })],
+    ['/api/v2/browser-profile/start', () => ({ code: 0, data: { debug_port: 5000 } })],
     ['/json/version', () => ({})],
-    ['/api/v1/browser/stop', () => ({ code: -1, msg: 'stop failed' })], // api() 抛错 → stop 记失败
+    ['/api/v2/browser-profile/stop', () => ({ code: -1, msg: 'stop failed' })], // apiV2() 抛错 → stop 记失败
   ]);
   const provider = new AdsPowerProvider(
     { apiBase: 'http://x:50325', userId: 'k1' },
@@ -237,15 +331,15 @@ test('killAndConfirmDead：browser/stop 失败但端点变暗 → 端点权威�
   );
   const { instance } = await provider.launch({ host: '127.0.0.1', port: 9222 });
   assert.equal(await instance.killAndConfirmDead(), true);
-  assert.match(logs.join('\n'), /browser\/stop 失败/);
+  assert.match(logs.join('\n'), /browser-profile\/stop 失败/);
 });
 
 test('killAndConfirmDead：stop API 不可达 + 端点仍应答 → 不再「查不动当已关」，诚实 false', async () => {
   // 老 bug 反例：停止 API 抛错曾被静默吞 + confirmClosed 查不动返回 true。新逻辑以端点为权威，端口仍应答=未死。
   const fetchImpl = routedFetch([
-    ['/api/v1/browser/start', () => ({ code: 0, data: { debug_port: 5000 } })],
+    ['/api/v2/browser-profile/start', () => ({ code: 0, data: { debug_port: 5000 } })],
     ['/json/version', () => ({})],
-    // 不路由 browser/stop → api() 抛 unrouted → stop 如实记失败、不当已关
+    // 不路由 V2 stop → apiV2() 抛 unrouted → stop 如实记失败、不当已关
   ]);
   const provider = new AdsPowerProvider(
     { apiBase: 'http://x:50325', userId: 'k1' },
@@ -277,10 +371,13 @@ test('默认关闭探测：stop 后 /json/version 连接被拒 → 判真死 tru
   let stopped = false;
   const fetchImpl = (async (url: string) => {
     const u = String(url);
-    if (u.includes('/api/v1/browser/start')) {
+    if (u.includes('/api/v2/browser-profile/active')) {
+      return { ok: true, json: async () => ({ code: 0, data: { status: 'Inactive' } }) } as unknown;
+    }
+    if (u.includes('/api/v2/browser-profile/start')) {
       return { ok: true, json: async () => ({ code: 0, data: { debug_port: 5000 } }) } as unknown;
     }
-    if (u.includes('/api/v1/browser/stop')) {
+    if (u.includes('/api/v2/browser-profile/stop')) {
       stopped = true;
       return { ok: true, json: async () => ({ code: 0 }) } as unknown;
     }

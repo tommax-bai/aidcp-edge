@@ -70,7 +70,7 @@ const { resolveTrayIconPath } = require('./tray-icon.cjs');
 }
 
 // 主进程侧 AdsPower 客户端（探测 + 环境列表 + 在跑分身对账 + 具名人工查看打开）。
-// 单例持有本进程内**唯一**串行节流（1req/s）；人工查看只开放 browser/start，不开放 stop / 通用写入口。
+// 单例持有本进程内**唯一**串行节流（1req/s）；人工查看只开放 V2 browser-profile/start，不开放 stop / 通用写入口。
 // 与核心子进程内的 AdsPowerProvider 节流各自独立（跨进程无法共享内存队列，见 ads-local-api.cjs 头注）。
 const adsApi = createAdsLocalApi({});
 
@@ -3143,13 +3143,13 @@ function ensureKernelOnce(version, cliEntry, handle) {
 }
 
 // 启动浏览器前的完整确保 = 服务确保 + 内核预检（无论服务是刚起的还是已在跑的都要预检——
-// 我们自己先前起的服务也没下内核，adopted 直接放行会撞 browser/start「SunBrowser 148 is not ready」）。
+// 我们自己先前起的服务也没下内核，adopted 直接放行会撞 V2 browser-profile/start「SunBrowser 148 is not ready」）。
 // 内核走随包 **CLI**（get-kernel-list / download-kernel）——staging 修好 isRunning 判活后，CLI 命令在
 // Electron 宿主下可靠；download-kernel 非 TTY 下逐轮吐 `Kernel progress: N% [state]`，经 onProgress 上进度条。
 async function ensureAdsRuntimeAndKernel(handle) {
   const svc = await ensureAdsServiceOnce(handle);
   if (!svc.ok) return svc;
-  // 该环境所需内核版本：优先上次 browser/start 诚实报出的版本（handle.neededKernel）——AdsPower profile
+  // 该环境所需内核版本：优先上次 browser-profile/start 诚实报出的版本（handle.neededKernel）——AdsPower profile
   // 可绑 ≠ DEFAULT_KERNEL 的内核（旧版/手工建/云端同步来的），且 LocalAPI user/list 不暴露该版本，故按
   // 启动报错「SunBrowser <N> is not ready」反应式确保（同 AdsPower CLI open-browser 的自愈做法）；否则默认。
   const version = (handle && handle.neededKernel) || adsFingerprint.DEFAULT_KERNEL;
@@ -3170,7 +3170,7 @@ async function ensureAdsRuntimeAndKernel(handle) {
     return { ok: false, error: kres.error };
   }
   if (handle) {
-    // 记下已成功确保就绪的内核版本（已在盘 or 刚下完）。若之后 browser/start 仍报该版本 not ready，
+    // 记下已成功确保就绪的内核版本（已在盘 or 刚下完）。若之后 browser-profile/start 仍报该版本 not ready，
     // 属真异常（非「尚未下载」），不再当可恢复的内核准备处理——见 handleEdgeLogLine / 核心退出处的 kernelMissExit 守卫。
     if (!handle.kernelEnsuredVersions) handle.kernelEnsuredVersions = new Set();
     handle.kernelEnsuredVersions.add(String(version));
@@ -3277,7 +3277,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
     return;
   }
   appendEdgeLog(handle.envId, message, isError); // 落文件（排障回溯，独立于下方状态判断）
-  // AdsPower profile 可绑 ≠ DEFAULT_KERNEL 的内核；browser/start 会诚实报「SunBrowser <N> is not ready」。
+  // AdsPower profile 可绑 ≠ DEFAULT_KERNEL 的内核；browser-profile/start 会诚实报「SunBrowser <N> is not ready」。
   // 该版本 LocalAPI（v2 browser-profile/list 亦然）不暴露，只能据启动报错反应式获知——同 AdsPower CLI 自愈。
   // UX 修（本次）：首次发现「内核尚未下载」不当启动失败，直接转「准备内核」进度态；不落失败候选、不翻
   // warning、不弹通知。核心随后退出，退出处据此走可恢复分支：respawn 的预检据 neededKernel 下载正确内核
@@ -3582,7 +3582,7 @@ function resumeEdge(handle) {
 
 /**
  * 无核心子进程时的诚实关闭核实（红线：绝不零回收假报已关）。该 profile 的浏览器由外部 AdsPower 运行时
- * 托管、会在核心死亡（如暂停驻留期崩溃）后存活。经**只读** browser/local-active 查其是否真的不在跑：
+ * 托管、会在核心死亡（如暂停驻留期崩溃）后存活。经**只读** V2 browser-profile/active 查其是否真的不在跑：
  * 确认不在跑才判「已关闭」；仍在跑则如实报「浏览器仍在运行、恢复接管后再关」；查不动则如实报「无法确认」。
  * 外壳只读 ads-local-api 边界不破：这里只读、不发停止；真关闭仍由（恢复后的）核心权威执行。
  */
@@ -3591,7 +3591,7 @@ async function confirmOwnedProfileClosedFromShell(handle) {
     lastMessage: '正在确认浏览器是否已关闭…',
     ...presencePatch('正在确认浏览器状态…'),
   });
-  const res = await adsApi.listActiveProfiles(resolveAdsOpts()).catch(() => null);
+  const res = await adsApi.listActiveProfiles({ ...resolveAdsOpts(), profileIds: [handle.profileId] }).catch(() => null);
   // 期间被启动 / 恢复 / 移出（start/resume 会把 stopRequested 复位为 false）：交给新流程，勿覆盖更新后的状态。
   if (handle.child || handle.removed || !handle.stopRequested) return;
   // 仅在拿到**结构良好**的在跑分身列表时才据其判定；code:0 但 data.list 缺失/非数组不算「确认为空」，
@@ -3643,7 +3643,7 @@ function closeEdge(handle) {
   if (!handle.child) {
     handle.coreParked = false;
     // 无核心子进程：adspower 分身浏览器由外部运行时托管、会在核心死亡后存活。MUST NOT 零回收假报已关——
-    // 经**只读** browser/local-active 诚实核实后再判定；确认不在跑才判已关，仍在跑/查不动都如实回报。
+    // 经**只读** V2 browser-profile/active 诚实核实后再判定；确认不在跑才判已关，仍在跑/查不动都如实回报。
     if (handle.kind === 'adspower' && handle.profileId) {
       void confirmOwnedProfileClosedFromShell(handle);
       return;
@@ -3767,10 +3767,13 @@ function quitApp() {
   app.quit(); // 经 before-quit 统一走优雅全停
 }
 
-/** 外壳重启对账：经 browser/active 探已在运行的分身——启动时接管、不重复拉起（防孤儿/防互踢）。 */
+/** 外壳重启对账：逐 profile 经 V2 active + 已验证失联 CDP 探在跑分身——启动时接管、不重复拉起。 */
 async function reconcileRunningProfiles() {
   if (settings.provider !== 'adspower' || envs.size === 0) return;
-  const res = await adsApi.listActiveProfiles(resolveAdsOpts()).catch(() => null);
+  const profileIds = [...envs.values()]
+    .filter((handle) => handle.kind === 'adspower' && handle.profileId)
+    .map((handle) => handle.profileId);
+  const res = await adsApi.listActiveProfiles({ ...resolveAdsOpts(), profileIds }).catch(() => null);
   if (!res || !res.ok) return; // 无法对账（服务未起等）：不猜测、维持默认「未运行」呈现
   const active = new Set(res.activeUserIds);
   for (const handle of envs.values()) {

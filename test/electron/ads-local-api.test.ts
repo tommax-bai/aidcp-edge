@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // 主进程侧 LocalAPI 模块是 CJS（供 Electron main.cjs require），经 createRequire 引入以不破 ESM typecheck。
 const require = createRequire(import.meta.url);
@@ -36,10 +39,10 @@ function res(ok: boolean, statusCode: number, body: unknown): StubRes {
 /** fetch 桩：按 url 子串命中返回响应或抛错；记录所有请求 url + headers。 */
 function stubFetch(
   routes: Array<[string, () => StubRes | never]>,
-  calls: Array<{ url: string; headers?: Record<string, string> }> = [],
+  calls: Array<{ url: string; method?: string; headers?: Record<string, string>; body?: string }> = [],
 ): typeof fetch {
-  return (async (url: string, init?: { headers?: Record<string, string> }) => {
-    calls.push({ url: String(url), headers: init?.headers });
+  return (async (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => {
+    calls.push({ url: String(url), method: init?.method, headers: init?.headers, body: init?.body });
     for (const [needle, make] of routes) {
       if (String(url).includes(needle)) return make();
     }
@@ -236,14 +239,18 @@ test('只读边界：探测与列表仍不构造 browser/start|stop|active URL',
   assert.equal(n.serialNumber, 's1');
 });
 
-test('人工查看只打开权威视频号分身，固定 browser/start 参数且拿到有效句柄才成功', async () => {
-  const calls: Array<{ url: string; headers?: Record<string, string> }> = [];
+test('人工查看只打开权威视频号分身，固定 V2 start 参数且拿到有效句柄才成功', async () => {
+  const calls: Array<{ url: string; method?: string; headers?: Record<string, string>; body?: string }> = [];
   const api = createAdsLocalApi({
     ...noThrottle,
     fetchImpl: stubFetch(
-      [['/api/v1/browser/start', () => res(true, 200, { code: 0, data: { debug_port: 61234 } })]],
+      [
+        ['/api/v2/browser-profile/active', () => res(true, 200, { code: 0, data: { status: 'Inactive' } })],
+        ['/api/v2/browser-profile/start', () => res(true, 200, { code: 0, data: { debug_port: 61234 } })],
+      ],
       calls,
     ),
+    adsCacheRoot: join(tmpdir(), '__aidcp_nonexistent_ads_cache__'),
   });
   const result = await api.openProfileForInspection({
     userId: 'k1eoujd8',
@@ -252,16 +259,64 @@ test('人工查看只打开权威视频号分身，固定 browser/start 参数�
     apiKey: 'secret-test-key',
   });
   assert.deepEqual(result, { ok: true, debugPort: 61234 });
+  assert.equal(calls.length, 2);
+  const activeCall = calls[0];
+  assert.equal(new URL(activeCall.url).pathname, '/api/v2/browser-profile/active');
+  assert.equal(new URL(activeCall.url).searchParams.get('profile_id'), 'k1eoujd8');
+  const startCall = calls[1];
+  assert.equal(new URL(startCall.url).pathname, '/api/v2/browser-profile/start');
+  assert.equal(startCall.method, 'POST');
+  const payload = JSON.parse(startCall.body || '{}');
+  assert.equal(payload.profile_id, 'k1eoujd8');
+  assert.equal(payload.last_opened_tabs, '1', '人工查看新启动时应恢复历史标签页');
+  assert.equal(payload.headless, '0');
+  assert.ok(payload.launch_args.includes('https://channels.weixin.qq.com/platform/post/list'));
+  assert.equal(startCall.headers?.Authorization, 'Bearer secret-test-key');
+  assert.equal(startCall.headers?.['Content-Type'], 'application/json');
+  assert.ok(calls.every((call) => !call.url.includes('/api/v1/browser/')));
+});
+
+test('人工查看：V2 Active 时复用 debug_port，不重复 start', async () => {
+  const calls: Array<{ url: string }> = [];
+  const api = createAdsLocalApi({
+    ...noThrottle,
+    fetchImpl: stubFetch([
+      ['/api/v2/browser-profile/active', () => res(true, 200, { code: 0, data: { status: 'Active', debug_port: '59167' } })],
+    ], calls),
+  });
+  const result = await api.openProfileForInspection({
+    userId: 'k1eoujd8',
+    startUrl: 'https://channels.weixin.qq.com/platform/post/list',
+  });
+  assert.deepEqual(result, { ok: true, debugPort: 59167 });
   assert.equal(calls.length, 1);
-  const url = new URL(calls[0].url);
-  assert.equal(url.pathname, '/api/v1/browser/start');
-  assert.equal(url.searchParams.get('user_id'), 'k1eoujd8');
-  assert.equal(url.searchParams.get('open_tabs'), '0', '人工查看不得清空已有标签页');
-  assert.equal(url.searchParams.get('headless'), '0');
-  const launchArgs = JSON.parse(url.searchParams.get('launch_args') || '[]');
-  assert.ok(launchArgs.includes('https://channels.weixin.qq.com/platform/post/list'));
-  assert.equal(calls[0].headers?.Authorization, 'Bearer secret-test-key');
-  assert.doesNotMatch(calls[0].url, /browser\/(stop|active)/);
+  assert.equal(new URL(calls[0].url).pathname, '/api/v2/browser-profile/active');
+});
+
+test('人工查看：V2 Inactive 但 marker 与 /json/version 匹配时接管失联浏览器', async (t) => {
+  const cacheRoot = await mkdtemp(join(tmpdir(), 'aidcp-electron-orphan-'));
+  t.after(async () => rm(cacheRoot, { recursive: true, force: true }));
+  const profileDir = join(cacheRoot, 'k1eoujd8_suffix');
+  await mkdir(profileDir);
+  await writeFile(join(profileDir, 'DevToolsActivePort'), '59167\n/devtools/browser/abc-123\n', 'utf8');
+  const calls: Array<{ url: string }> = [];
+  const logs: string[] = [];
+  const api = createAdsLocalApi({
+    ...noThrottle,
+    adsCacheRoot: cacheRoot,
+    logImpl: (message: string) => logs.push(message),
+    fetchImpl: stubFetch([
+      ['/api/v2/browser-profile/active', () => res(true, 200, { code: 0, data: { status: 'Inactive' } })],
+      ['/json/version', () => res(true, 200, { webSocketDebuggerUrl: 'ws://127.0.0.1:59167/devtools/browser/abc-123' })],
+    ], calls),
+  });
+  const result = await api.openProfileForInspection({
+    userId: 'k1eoujd8',
+    startUrl: 'https://channels.weixin.qq.com/platform/post/list',
+  });
+  assert.deepEqual(result, { ok: true, debugPort: 59167 });
+  assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
+  assert.match(logs.join('\n'), /接管失联浏览器/);
 });
 
 test('人工查看拒绝任意站点，且 code=0 但无有效 debug_port 也不假报打开', async () => {
@@ -269,9 +324,13 @@ test('人工查看拒绝任意站点，且 code=0 但无有效 debug_port 也不
   const api = createAdsLocalApi({
     ...noThrottle,
     fetchImpl: stubFetch(
-      [['/api/v1/browser/start', () => res(true, 200, { code: 0, data: {} })]],
+      [
+        ['/api/v2/browser-profile/active', () => res(true, 200, { code: 0, data: { status: 'Inactive' } })],
+        ['/api/v2/browser-profile/start', () => res(true, 200, { code: 0, data: {} })],
+      ],
       calls,
     ),
+    adsCacheRoot: join(tmpdir(), '__aidcp_nonexistent_ads_cache__'),
   });
   const arbitrary = await api.openProfileForInspection({ userId: 'p1', startUrl: 'https://example.com/' });
   assert.equal(arbitrary.ok, false);
@@ -295,7 +354,10 @@ test('人工查看与列表共用同一条主进程 LocalAPI 串行节流', asyn
     sleepImpl: async (ms: number) => { sleeps.push(ms); clock += ms; },
     fetchImpl: (async (url: string) => {
       calls.push(String(url));
-      return String(url).includes('/browser/start')
+      if (String(url).includes('/browser-profile/active')) {
+        return res(true, 200, { code: 0, data: { status: 'Inactive' } });
+      }
+      return String(url).includes('/browser-profile/start')
         ? res(true, 200, { code: 0, data: { debug_port: 61234 } })
         : res(true, 200, { code: 0, data: { list: [] } });
     }) as unknown as typeof fetch,
@@ -304,7 +366,7 @@ test('人工查看与列表共用同一条主进程 LocalAPI 串行节流', asyn
     api.listProfiles(),
     api.openProfileForInspection({ userId: 'p1', startUrl: 'https://channels.weixin.qq.com/platform/post/list' }),
   ]);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.ok(sleeps.some((ms) => ms >= 1000), `预期共用串行节流，实测 sleeps=${JSON.stringify(sleeps)}`);
 });
 
@@ -379,24 +441,64 @@ test('listGroups: 精确查询预置分组并归一化 groupId/groupName', async
   assert.ok(calls[0].url.includes('group_name=aidcp'));
 });
 
-// ── browser/local-active 对账（edge-multi-environment-fleet：外壳重启防双拉/防互踢）──
+// ── V2 browser-profile/active 对账（edge-multi-environment-fleet：外壳重启防双拉/防互踢）──
 
-test('listActiveProfiles：返回本机已打开分身的 user_id 列表', async () => {
+test('listActiveProfiles：按已知 roster 逐 profile 查询 V2 active，不依赖全局 V1 列表', async () => {
+  const calls: Array<{ url: string }> = [];
   const api = createAdsLocalApi({
+    ...noThrottle,
+    adsCacheRoot: join(tmpdir(), '__aidcp_nonexistent_ads_cache__'),
     fetchImpl: stubFetch([
-      ['/api/v1/browser/local-active', () => res(true, 200, { code: 0, data: { list: [{ user_id: 'p1', ws: {} }, { user_id: 'p3' }] } })],
-    ]),
+      ['profile_id=p1', () => res(true, 200, { code: 0, data: { status: 'Active', debug_port: 59167 } })],
+      ['profile_id=p2', () => res(true, 200, { code: 0, data: { status: 'Inactive' } })],
+      ['profile_id=p3', () => res(true, 200, { code: 0, data: { status: 'Active', debug_port: 59169 } })],
+    ], calls),
   }) as unknown as { listActiveProfiles: (o?: Record<string, unknown>) => Promise<{ ok: boolean; activeUserIds?: string[]; error?: string }> };
-  const r = await api.listActiveProfiles();
+  const r = await api.listActiveProfiles({ profileIds: ['p1', 'p2', 'p3'] });
   assert.equal(r.ok, true);
   assert.deepEqual(r.activeUserIds, ['p1', 'p3']);
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every((call) => new URL(call.url).pathname === '/api/v2/browser-profile/active'));
+  assert.ok(calls.every((call) => !call.url.includes('/api/v1/browser/local-active')));
 });
 
 test('listActiveProfiles：本地 API 不可达 → 诚实 ok:false（调用方按「无法对账」处理，不猜测）', async () => {
   const api = createAdsLocalApi({
-    fetchImpl: stubFetch([['/api/v1/browser/local-active', () => { throw new Error('ECONNREFUSED'); }]]),
+    ...noThrottle,
+    fetchImpl: stubFetch([['/api/v2/browser-profile/active', () => { throw new Error('ECONNREFUSED'); }]]),
   }) as unknown as { listActiveProfiles: (o?: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }> };
-  const r = await api.listActiveProfiles();
+  const r = await api.listActiveProfiles({ profileIds: ['p1'] });
   assert.equal(r.ok, false);
   assert.match(String(r.error), /不可达/);
+});
+
+test('listActiveProfiles：缺 roster 时诚实失败，避免把未查询误判成全部已关', async () => {
+  const api = createAdsLocalApi({ ...noThrottle });
+  const r = await (api as unknown as { listActiveProfiles: (o?: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }> })
+    .listActiveProfiles();
+  assert.equal(r.ok, false);
+  assert.match(String(r.error), /roster/);
+});
+
+test('listActiveProfiles：V2 Inactive 的匹配 orphan 计为 active，path 不匹配的 stale marker 被拒绝', async (t) => {
+  const cacheRoot = await mkdtemp(join(tmpdir(), 'aidcp-electron-reconcile-'));
+  t.after(async () => rm(cacheRoot, { recursive: true, force: true }));
+  for (const [profileId, browserPath] of [['p1', 'expected-one'], ['p2', 'expected-two']] as const) {
+    const profileDir = join(cacheRoot, `${profileId}_suffix`);
+    await mkdir(profileDir);
+    await writeFile(join(profileDir, 'DevToolsActivePort'), `${profileId === 'p1' ? 59167 : 59168}\n/devtools/browser/${browserPath}\n`, 'utf8');
+  }
+  const calls: Array<{ url: string }> = [];
+  const api = createAdsLocalApi({
+    ...noThrottle,
+    adsCacheRoot: cacheRoot,
+    fetchImpl: stubFetch([
+      ['/api/v2/browser-profile/active', () => res(true, 200, { code: 0, data: { status: 'Inactive' } })],
+      [':59167/json/version', () => res(true, 200, { webSocketDebuggerUrl: 'ws://127.0.0.1:59167/devtools/browser/expected-one' })],
+      [':59168/json/version', () => res(true, 200, { webSocketDebuggerUrl: 'ws://127.0.0.1:59168/devtools/browser/different' })],
+    ], calls),
+  }) as unknown as { listActiveProfiles: (o?: Record<string, unknown>) => Promise<{ ok: boolean; activeUserIds?: string[] }> };
+  const r = await api.listActiveProfiles({ profileIds: ['p1', 'p2'] });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.activeUserIds, ['p1']);
 });

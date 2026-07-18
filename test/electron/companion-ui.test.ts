@@ -126,7 +126,7 @@ test('风控警戒与登录协助用琥珀；真正异常使用独立错误态',
 });
 
 test('异常退出详情在客户端内持久展示，且不把堆栈塞进主界面', async () => {
-  const summary = '启动失败：AdsPower browser/start 失败：code=-1 msg=[k1e0ero8] is being used by [tommax.bai@gmail.com] and is not allowed to open';
+  const summary = '启动失败：AdsPower browser-profile/start 失败：code=-1 msg=[k1e0ero8] is being used by [tommax.bai@gmail.com] and is not allowed to open';
   const { w } = await boot({
     edge: 'warning',
     cloud: 'disconnected',
@@ -135,7 +135,7 @@ test('异常退出详情在客户端内持久展示，且不把堆栈塞进主�
     edgeFailure: { summary, at: new Date().toISOString(), exitCode: 1 },
   });
   assert.equal(hidden($(w, '#edge-failure')), false, '异常详情应在主界面可见');
-  assert.match($(w, '#edge-failure-text').textContent ?? '', /browser\/start 失败/);
+  assert.match($(w, '#edge-failure-text').textContent ?? '', /browser-profile\/start 失败/);
   assert.match($(w, '#edge-failure-text').textContent ?? '', /tommax\.bai@gmail\.com/);
   assert.doesNotMatch($(w, '#edge-failure').textContent ?? '', /at async/, '主界面不展示堆栈行');
 

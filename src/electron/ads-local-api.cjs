@@ -5,32 +5,45 @@
 //    （实例私有字段 lastApiAt）跑在 main.cjs 用 spawn 拉起的**独立子进程**里——两进程堆内存不通，无法共享节流；
 //    且 main.cjs 是 CommonJS、核心产物是 ESM，require 也复用不了（比照 chrome-launcher.cjs 与 cdp/chrome-launcher.ts 并存）。
 //    更何况探测常发生在核心尚未 spawn 之时（分身 ID 为空则根本不起核心）。故本模块**自持一套独立节流**，这是唯一可行形态。
-//  - URL 前缀：核心 api<T>() 把 `/api/v1/` 前缀写死；而健康检查在**根级** `/status`（不在 /api/v1 下），
-//    若套用会打到不存在的 /api/v1/status → 404 → 谎报「不可达」。故本模块**逐端点显式拼 URL**。
+//  - URL 契约：健康检查在根级 `/status`，元数据仍有 V1，而浏览器生命周期是 V2；若套用统一前缀会
+//    打到错误端点并谎报「不可达」。故本模块**逐端点显式拼 URL**。
 //
-// 红线：探测/拉取保持只读；唯一写例外是具名 openProfileForInspection（仅 browser/start、只接受
+// 红线：探测/拉取保持只读；唯一写例外是具名 openProfileForInspection（仅 V2 browser-profile/start、只接受
 // 视频号助手固定域名），供客户本机人工查看。MUST NOT 暴露 browser/stop 或通用生命周期写入口。
 // 所有调用共用本模块同一条串行节流；失败诚实回报、不假成功。
 // 敏感值：apiKey 只用于本次请求的 Authorization 头，不落日志、不写文件。
 
 const { parseRemark, DEFAULT_PLATFORM } = require('./ads-create-flow.cjs');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const ADS_MIN_INTERVAL_MS = 1100; // 本地 API 限速 1req/s，留余量串行节流（与核心同规格、但独立实例）
 const DEFAULT_ADS_BASE = 'http://local.adspower.net:50325';
 const DEFAULT_PAGE_SIZE = 100;
 const DEFAULT_MAX_PAGES = 10; // 上限，避免超大环境量拉不停；超限如实标 truncated
+const DEFAULT_ADS_CACHE_ROOT = path.join(os.homedir(), '.adspowerCli', 'source', 'cache');
+const MAX_ORPHAN_CACHE_CANDIDATES = 8;
+const ORPHAN_PROBE_TIMEOUT_MS = 2_000;
+const PROFILE_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
+const DEVTOOLS_BROWSER_PATH_RE = /^\/devtools\/browser\/[A-Za-z0-9._-]+$/;
 
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * 创建一个主进程侧的 AdsPower LocalAPI 客户端（单例持有一条串行节流）。
  * 除具名人工查看 openProfileForInspection 外，其余能力均为只读。
- * @param {{ apiBase?: string, apiKey?: string, fetchImpl?: typeof fetch, nowImpl?: () => number, sleepImpl?: (ms:number)=>Promise<void> }} deps
+ * @param {{ apiBase?: string, apiKey?: string, fetchImpl?: typeof fetch, nowImpl?: () => number, sleepImpl?: (ms:number)=>Promise<void>, adsCacheRoot?: string, orphanProbeTimeoutMs?: number, logImpl?: (msg:string)=>void }} deps
  */
 function createAdsLocalApi(deps = {}) {
   const fetchImpl = deps.fetchImpl || globalThis.fetch;
   const now = deps.nowImpl || (() => Date.now());
   const sleep = deps.sleepImpl || defaultSleep;
+  const log = deps.logImpl || ((message) => console.log(message));
+  const adsCacheRoot = path.resolve(deps.adsCacheRoot || DEFAULT_ADS_CACHE_ROOT);
+  const orphanProbeTimeoutMs = Number(deps.orphanProbeTimeoutMs) > 0
+    ? Math.floor(Number(deps.orphanProbeTimeoutMs))
+    : ORPHAN_PROBE_TIMEOUT_MS;
   // 主进程内**唯一**串行节流闸门：所有只读请求经 throttledFetch 排进同一条链，
   // 把「等间隔 → fetch → 记时」作为**不可重入单元**串行执行。
   // 为什么要队列而非仅一个时间戳：面板「检测」「刷新」是两个独立按钮、各自的 in-flight 禁用管不到对方，
@@ -74,6 +87,118 @@ function createAdsLocalApi(deps = {}) {
     return key ? { Authorization: `Bearer ${key}` } : {};
   }
 
+  async function withTimeout(promise, timeoutMs, label) {
+    let timer;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label}超时（${timeoutMs}ms）`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function fetchWithTimeout(url, init, timeoutMs) {
+    const controller = new AbortController();
+    let timer;
+    try {
+      return await Promise.race([
+        fetchImpl(url, { ...(init || {}), signal: controller.signal }),
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error(`CDP 探测超时（${timeoutMs}ms）`));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function profileActive(opts, profileId) {
+    const qs = new URLSearchParams({ profile_id: profileId });
+    const url = `${baseOf(opts)}/api/v2/browser-profile/active?${qs.toString()}`;
+    let res;
+    try {
+      res = await throttledFetch(url, authHeaders(opts));
+    } catch (e) {
+      return { ok: false, error: `查询分身 ${profileId} 状态失败：本地 API 不可达（${(e && e.message) || String(e)}）` };
+    }
+    if (!res.ok) return { ok: false, error: `查询分身 ${profileId} 状态失败（HTTP ${res.status}）` };
+    let body;
+    try {
+      body = await res.json();
+    } catch {
+      return { ok: false, error: `查询分身 ${profileId} 状态失败：本地 API 响应非 JSON` };
+    }
+    if (body && typeof body.code === 'number' && body.code !== 0) {
+      return { ok: false, error: `查询分身 ${profileId} 状态失败：code=${body.code} ${body.msg || ''}`.trim() };
+    }
+    const data = body && body.data || {};
+    const statusValue = String(data.status || '').trim().toLowerCase();
+    if (statusValue !== 'active' && statusValue !== 'inactive') {
+      return { ok: false, error: `查询分身 ${profileId} 状态失败：V2 active 返回未知状态 ${JSON.stringify(data.status)}` };
+    }
+    const debugPort = Number(data.debug_port);
+    if (statusValue === 'active' && (!Number.isInteger(debugPort) || debugPort <= 0 || debugPort > 65535)) {
+      return { ok: false, error: `查询分身 ${profileId} 状态失败：已报告 Active 但缺少有效 debug_port` };
+    }
+    return { ok: true, active: statusValue === 'active', debugPort: statusValue === 'active' ? debugPort : undefined };
+  }
+
+  /**
+   * daemon 重启后 V2 registry 可能丢失，但 SunBrowser 仍在监听。只检查目标 profile 的有限 cache 候选，
+   * 并要求 marker 的端口 + browser path 与 loopback /json/version 完全一致；绝不只凭端口接管。
+   */
+  async function findValidatedOrphanCdp(profileId) {
+    if (!PROFILE_ID_RE.test(profileId)) return null;
+    let entries;
+    try {
+      entries = fs.readdirSync(adsCacheRoot, { withFileTypes: true, encoding: 'utf8' });
+    } catch {
+      return null;
+    }
+    const prefix = `${profileId}_`;
+    const candidates = entries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
+      .sort((a, b) => b.name.localeCompare(a.name))
+      .slice(0, MAX_ORPHAN_CACHE_CANDIDATES);
+    const rootPrefix = `${adsCacheRoot}${path.sep}`;
+    for (const entry of candidates) {
+      const markerPath = path.resolve(adsCacheRoot, entry.name, 'DevToolsActivePort');
+      if (!markerPath.startsWith(rootPrefix)) continue;
+      let raw;
+      try {
+        const markerStat = fs.lstatSync(markerPath);
+        if (!markerStat.isFile() || markerStat.isSymbolicLink()) continue;
+        raw = fs.readFileSync(markerPath, 'utf8');
+      } catch {
+        continue;
+      }
+      const [portLine, browserPathLine] = raw.split(/\r?\n/);
+      const port = Number(String(portLine || '').trim());
+      const browserPath = String(browserPathLine || '').trim();
+      if (!Number.isInteger(port) || port <= 0 || port > 65535 || !DEVTOOLS_BROWSER_PATH_RE.test(browserPath)) continue;
+      try {
+        const response = await fetchWithTimeout(`http://127.0.0.1:${port}/json/version`, {}, orphanProbeTimeoutMs);
+        if (!response.ok) continue;
+        const version = await withTimeout(response.json(), orphanProbeTimeoutMs, 'CDP 响应');
+        const ws = new URL(String(version && version.webSocketDebuggerUrl || ''));
+        const hostname = ws.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+        const loopback = hostname === 'localhost' || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+        if (ws.protocol !== 'ws:' || !loopback || Number(ws.port) !== port || ws.pathname !== browserPath) continue;
+        return { host: '127.0.0.1', port };
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+
   /**
    * 健康检查：GET {base}/status（**根级**，不带 /api/v1 前缀，通常免鉴权）。
    * 不 throw：可达返回 { ok:true }，不可达/异常返回 { ok:false, error }（供面板分档提示）。
@@ -105,7 +230,7 @@ function createAdsLocalApi(deps = {}) {
   /**
    * 拉取浏览器环境：GET {base}/api/v1/user/list（分页，可选 group_id；开 API 校验时带 Bearer）。
    * 不 throw：成功返回 { ok:true, profiles:[...], truncated }，失败返回 { ok:false, error, authLikely }。
-   * 归一化：user_id 是写入分身 ID 字段的唯一值（下游 browser/start 只认它）；serial_number/name 仅供展示。
+   * 归一化：user_id 是写入分身 ID 字段的唯一值（下游 V2 browser-profile/start 只认它）；serial_number/name 仅供展示。
    */
   async function listProfiles(opts = {}) {
     const base = baseOf(opts);
@@ -191,52 +316,46 @@ function createAdsLocalApi(deps = {}) {
   }
 
   /**
-   * 对账当前**本机已打开**的浏览器分身：GET {base}/api/v1/browser/local-active（只读）。
+   * 对账当前**本机已打开**的浏览器分身：逐个 GET {base}/api/v2/browser-profile/active（只读）。
    * 用途（edge-multi-environment-fleet）：外壳重启时 spawn 前对账已在运行的分身——已在运行则接管、
    * 不重复拉起（防孤儿 + 防同 edgeId 第二连接被云端互踢）。
    * 不 throw：成功 { ok:true, activeUserIds:[...] }，失败 { ok:false, error }（调用方按「无法对账」诚实处理）。
    */
   async function listActiveProfiles(opts = {}) {
-    const url = `${baseOf(opts)}/api/v1/browser/local-active`;
-    let res;
-    try {
-      res = await throttledFetch(url, authHeaders(opts));
-    } catch (e) {
-      return { ok: false, error: `对账在跑分身失败：本地 API 不可达（${(e && e.message) || String(e)}）` };
+    if (!Array.isArray(opts.profileIds)) {
+      return { ok: false, error: '对账在跑分身失败：缺少已知环境 profile roster' };
     }
-    if (!res.ok) {
-      return { ok: false, error: `对账在跑分身失败（HTTP ${res.status}）` };
+    const profileIds = [...new Set(opts.profileIds.map((id) => String(id || '').trim()).filter(Boolean))];
+    if (profileIds.some((id) => !PROFILE_ID_RE.test(id))) {
+      return { ok: false, error: '对账在跑分身失败：环境 profile id 不合法' };
     }
-    let body;
-    try {
-      body = await res.json();
-    } catch {
-      return { ok: false, error: '对账在跑分身失败：本地 API 响应非 JSON' };
+    const activeUserIds = [];
+    for (const profileId of profileIds) {
+      const state = await profileActive(opts, profileId);
+      if (!state.ok) return { ok: false, error: `对账在跑分身失败：${state.error}` };
+      if (state.active) {
+        activeUserIds.push(profileId);
+        continue;
+      }
+      const orphan = await findValidatedOrphanCdp(profileId);
+      if (orphan) {
+        activeUserIds.push(profileId);
+        log(`[aidcp-edge] AdsPower V2 registry 未登记但已验证 profile=${profileId} 的 CDP ${orphan.port}，外壳接管失联浏览器`);
+      }
     }
-    if (typeof body.code === 'number' && body.code !== 0) {
-      return { ok: false, error: `对账在跑分身失败：code=${body.code} ${body.msg || ''}`.trim() };
-    }
-    const data = body.data || {};
-    // listWellFormed 区分「确认为空」(data.list 是数组、恰好没有在跑分身) 与「响应不完整」(code:0 但
-    // data.list 缺失/非数组)：调用方据此避免把不完整列表当「已关」（防孤儿浏览器被假报已关）。
-    const listWellFormed = Array.isArray(data.list);
-    const list = listWellFormed ? data.list : [];
-    const activeUserIds = list
-      .map((it) => (it && it.user_id != null ? String(it.user_id) : ''))
-      .filter(Boolean);
-    return { ok: true, activeUserIds, listWellFormed };
+    return { ok: true, activeUserIds, listWellFormed: true };
   }
 
   /**
-   * 打开/复用视频号助手分身供客户人工查看。这里只开放 browser/start：
+   * 打开/复用视频号助手分身供客户人工查看。这里只开放 V2 browser-profile/start：
    * - userId / startUrl 必须由 Electron main 的权威环境映射给出，renderer 不得直传这些底层参数；
    * - startUrl 再做一层 channels.weixin.qq.com HTTPS 限定，避免本地 IPC 退化成任意 URL 启动器；
-   * - 不关闭历史标签（open_tabs=0），避免人工查看动作破坏正在使用的浏览器上下文；
+   * - 已在跑（V2 Active 或已验证失联 CDP）直接复用；新启动恢复历史标签，避免人工查看破坏上下文；
    * - 返回有效 debug_port 才算成功，绝不把 code=0 但句柄缺失冒充已打开。
    */
   async function openProfileForInspection(opts = {}) {
     const userId = String(opts.userId || '').trim();
-    if (!userId || userId.length > 256 || /[\u0000-\u001f\u007f]/.test(userId)) {
+    if (!PROFILE_ID_RE.test(userId)) {
       return { ok: false, error: '打开浏览器失败：环境标识不合法' };
     }
     let startUrl;
@@ -255,17 +374,29 @@ function createAdsLocalApi(deps = {}) {
       '--lang=zh-CN',
       startUrl.toString(),
     ];
-    const qs = new URLSearchParams({
-      user_id: userId,
-      open_tabs: '0',
+    const state = await profileActive(opts, userId);
+    if (!state.ok) return { ok: false, error: `打开浏览器失败：${state.error}` };
+    if (state.active) return { ok: true, debugPort: state.debugPort };
+    const orphan = await findValidatedOrphanCdp(userId);
+    if (orphan) {
+      log(`[aidcp-edge] AdsPower V2 registry 未登记但已验证 profile=${userId} 的 CDP ${orphan.port}，人工查看接管失联浏览器`);
+      return { ok: true, debugPort: orphan.port };
+    }
+    const url = `${baseOf(opts)}/api/v2/browser-profile/start`;
+    const payload = JSON.stringify({
+      profile_id: userId,
+      last_opened_tabs: '1',
       ip_tab: '0',
       headless: '0',
-      launch_args: JSON.stringify(launchArgs),
+      launch_args: launchArgs,
     });
-    const url = `${baseOf(opts)}/api/v1/browser/start?${qs.toString()}`;
     let res;
     try {
-      res = await throttledFetch(url, authHeaders(opts));
+      res = await throttledRequest(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(opts) },
+        body: payload,
+      });
     } catch (e) {
       return { ok: false, error: `打开浏览器失败：本地服务不可达（${(e && e.message) || String(e)}）` };
     }

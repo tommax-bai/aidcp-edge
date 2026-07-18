@@ -220,7 +220,7 @@ test('imageTempNamespace parity：外壳侧与核心侧同公式（清扫边界�
 
 test('classifyAdsInUse：真实同账号并发占用拒启 → 判终局并解析占用账号', () => {
   const line =
-    '[aidcp-edge] 启动失败: Error: [aidcp-edge] AdsPower browser/start 失败：code=-1 ' +
+    '[aidcp-edge] 启动失败: Error: [aidcp-edge] AdsPower browser-profile/start 失败：code=-1 ' +
     'msg=[k1eioggp] is being used by [tommax.bai@gmail.com] and is not allowed to open（诚实失败，不回落 self）';
   const r = fleet.classifyAdsInUse(line);
   assert.equal(r.inUse, true);
@@ -228,17 +228,17 @@ test('classifyAdsInUse：真实同账号并发占用拒启 → 判终局并解�
 });
 
 test('classifyAdsInUse：中文本地化占用文案（无账号）也判终局', () => {
-  const r = fleet.classifyAdsInUse('AdsPower browser/start 失败：该环境正在使用中，已在其它设备打开');
+  const r = fleet.classifyAdsInUse('AdsPower browser-profile/start 失败：该环境正在使用中，已在其它设备打开');
   assert.equal(r.inUse, true);
   assert.equal(r.account, undefined);
 });
 
 test('classifyAdsInUse：普通崩溃 / 缺内核 / 无关失败 / 空 → 一律不判终局（防误判）', () => {
   // 缺内核（可恢复态，走另一条特判，绝不能被误当终局）
-  assert.equal(fleet.classifyAdsInUse('AdsPower browser/start 失败：SunBrowser 148 is not ready').inUse, false);
+  assert.equal(fleet.classifyAdsInUse('AdsPower browser-profile/start 失败：SunBrowser 148 is not ready').inUse, false);
   // 连云失败（有「启动失败」上下文但无占用签名）
   assert.equal(fleet.classifyAdsInUse('[aidcp-edge] 启动失败: Error: 连接云端失败 ECONNREFUSED').inUse, false);
-  // 有占用签名但无 browser/start 上下文（不满足双闸）
+  // 有占用签名但无 browser-profile/start 上下文（不满足双闸）
   assert.equal(fleet.classifyAdsInUse('some proxy is being used by another process').inUse, false);
   // 空输入
   assert.equal(fleet.classifyAdsInUse('').inUse, false);

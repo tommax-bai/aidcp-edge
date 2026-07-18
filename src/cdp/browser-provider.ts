@@ -11,6 +11,10 @@
  * MUST NOT 静默回落 self、MUST NOT 假成功——否则本应用独立指纹 / IP 的账号会偷偷以本机真实指纹起跑。
  */
 import { execFile } from 'node:child_process';
+import type { Dirent } from 'node:fs';
+import { lstat, readdir, readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
 import { launchChrome, type ChromeInstance } from './chrome-launcher.js';
 
 export type BrowserProviderKind = 'self' | 'adspower';
@@ -31,7 +35,7 @@ export interface BrowserLaunchOptions {
 /** provider.launch 产物：浏览器实例句柄 + CDP 接入端点（adspower 端口是动态的）。 */
 export interface LaunchedBrowser {
   instance: ChromeInstance;
-  /** CDP 附着端点：self=传入端口；adspower=browser/start 返回的 debug_port。 */
+  /** CDP 附着端点：self=传入端口；adspower=V2 active/start 返回或已验证失联 marker 的 debug_port。 */
   endpoint: { host: string; port: number };
 }
 
@@ -89,6 +93,8 @@ export interface AdsPowerDeps {
   closeConfirmIntervalMs?: number;
   /** 单次关闭探测超时 ms（小于轮询间隔量级，保最坏总时长落在退出预算内）。 */
   closeProbeTimeoutMs?: number;
+  /** Ads CLI profile cache 根目录；生产缺省 ~/.adspowerCli/source/cache，测试可注入隔离目录。 */
+  adsCacheRoot?: string;
 }
 
 interface AdsStartData {
@@ -97,12 +103,20 @@ interface AdsStartData {
   webdriver?: string;
 }
 
+interface AdsActiveData extends AdsStartData {
+  status?: string;
+}
+
 const DEFAULT_ADS_BASE = 'http://local.adspower.net:50325';
 const DEFAULT_ADS_START_URL = 'https://www.xiaohongshu.com/explore';
 /** 本地 API 限速 1req/s，留余量串行节流。 */
 const ADS_MIN_INTERVAL_MS = 1100;
 const DEFAULT_ADS_API_TIMEOUT_MS = 30_000;
 const DEFAULT_ADS_CDP_PROBE_TIMEOUT_MS = 2_000;
+const DEFAULT_ADS_CACHE_ROOT = join(homedir(), '.adspowerCli', 'source', 'cache');
+const MAX_ORPHAN_CACHE_CANDIDATES = 8;
+const PROFILE_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
+const DEVTOOLS_BROWSER_PATH_RE = /^\/devtools\/browser\/[A-Za-z0-9._-]+$/;
 /**
  * 关闭确认：每个阶段（停止 / 重发停止 / OS 杀后）轮询该 profile 调试端点是否变暗的次数与间隔。
  * 每次探测都设**小超时**（closeProbeTimeoutMs），超时/异常一律视为「仍应答」（浏览器可能只是慢/挂，
@@ -185,9 +199,9 @@ async function defaultOsKill(host: string, port: number, log: (m: string) => voi
 }
 
 /**
- * adspower：经 AdsPower 本地 API（browser/start|stop|active）托管指纹浏览器。
+ * adspower：经 AdsPower V2 本地 API（browser-profile/start|stop|active）托管指纹浏览器。
  * 反检测整层交 AdsPower（main.ts 在本模式默认关 edge 自研 stealth）：自动化痕迹由 cdp_mask
- * （browser/start 字段，默认开，掩盖 navigator.webdriver 等 CDP 特征）掩盖、指纹由该 profile 的
+ * （browser-profile/start 字段，默认开，掩盖 navigator.webdriver 等 CDP 特征）掩盖、指纹由该 profile 的
  * fingerprint_config（Canvas/WebGL/UA/时区…按分身稳定生成）负责——两者是 AdsPower 的两套独立机制。
  */
 export class AdsPowerProvider implements BrowserProvider {
@@ -204,6 +218,7 @@ export class AdsPowerProvider implements BrowserProvider {
   private readonly closeConfirmTries: number;
   private readonly closeConfirmIntervalMs: number;
   private readonly closeProbeTimeoutMs: number;
+  private readonly adsCacheRoot: string;
   private lastApiAt = 0;
 
   constructor(
@@ -221,6 +236,7 @@ export class AdsPowerProvider implements BrowserProvider {
     this.closeConfirmTries = positiveInt(deps.closeConfirmTries, DEFAULT_CLOSE_CONFIRM_TRIES);
     this.closeConfirmIntervalMs = positiveMs(deps.closeConfirmIntervalMs, DEFAULT_CLOSE_CONFIRM_INTERVAL_MS);
     this.closeProbeTimeoutMs = positiveMs(deps.closeProbeTimeoutMs, DEFAULT_CLOSE_PROBE_TIMEOUT_MS);
+    this.adsCacheRoot = resolve(deps.adsCacheRoot ?? DEFAULT_ADS_CACHE_ROOT);
     // 默认探测走有界超时的「仍活」判据（超时=仍活、连接被拒=已死）；测试可注入即时桩。
     this.probeCdpImpl = deps.probeCdpImpl ?? ((h, p, f) => defaultProbeAlive(h, p, f, this.closeProbeTimeoutMs));
   }
@@ -238,27 +254,57 @@ export class AdsPowerProvider implements BrowserProvider {
       launchArgs.push(`--window-position=${Math.floor(opts.windowPosition.left)},${Math.floor(opts.windowPosition.top)}`);
     }
     launchArgs.push(startUrl);
-    this.log(`[aidcp-edge] 请求 AdsPower browser/start profile=${this.cfg.userId} ...`);
-    const data = await this.api<AdsStartData>('browser/start', {
-      user_id: this.cfg.userId,
-      open_tabs: '1', // 关掉平台/历史页，留干净标签
-      ip_tab: '0', // 不弹 IP 检测页
-      headless: opts.headless ? '1' : '0',
-      launch_args: JSON.stringify(launchArgs),
+    this.log(`[aidcp-edge] 检查 AdsPower V2 profile active=${this.cfg.userId} ...`);
+    const active = await this.apiV2<AdsActiveData>('GET', 'browser-profile/active', {
+      query: { profile_id: this.cfg.userId },
     });
-    const port = Number(data?.debug_port);
+    const activeStatus = String(active?.status ?? '').trim().toLowerCase();
+    let port = 0;
+    if (activeStatus === 'active') {
+      port = Number(active?.debug_port);
+      if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
+        throw new Error(
+          `[aidcp-edge] AdsPower browser-profile/active 已报告 Active 但未返回有效 debug_port（profile=${this.cfg.userId}）——诚实失败，不启动重复浏览器`,
+        );
+      }
+      this.log(`[aidcp-edge] AdsPower V2 已有活跃 profile=${this.cfg.userId} → debug_port=${port}`);
+    } else if (activeStatus === 'inactive') {
+      const orphan = await this.findValidatedOrphanCdp();
+      if (orphan) {
+        port = orphan.port;
+        this.log(
+          `[aidcp-edge] AdsPower V2 registry 未登记但检测到该 profile 的有效 CDP，接管失联浏览器 profile=${this.cfg.userId} → debug_port=${port}`,
+        );
+      } else {
+        this.log(`[aidcp-edge] 请求 AdsPower V2 browser-profile/start profile=${this.cfg.userId} ...`);
+        const data = await this.apiV2<AdsStartData>('POST', 'browser-profile/start', {
+          body: {
+            profile_id: this.cfg.userId,
+            last_opened_tabs: '0', // 不恢复历史标签，交付干净的自动化起始页
+            ip_tab: '0', // 不弹 IP 检测页
+            headless: opts.headless ? '1' : '0',
+            launch_args: launchArgs,
+          },
+        });
+        port = Number(data?.debug_port);
+        this.log(`[aidcp-edge] AdsPower V2 启动 profile=${this.cfg.userId} → debug_port=${port}`);
+      }
+    } else {
+      throw new Error(
+        `[aidcp-edge] AdsPower browser-profile/active 返回未知状态 ${JSON.stringify(active?.status)}（profile=${this.cfg.userId}）——诚实失败，不启动重复浏览器`,
+      );
+    }
     if (!Number.isInteger(port) || port <= 0) {
       throw new Error(
-        `[aidcp-edge] AdsPower browser/start 未返回有效 debug_port（profile=${this.cfg.userId}）——诚实失败，不回落 self`,
+        `[aidcp-edge] AdsPower browser-profile/start 未返回有效 debug_port（profile=${this.cfg.userId}）——诚实失败，不回落 self`,
       );
     }
     const host = '127.0.0.1';
-    this.log(`[aidcp-edge] AdsPower 启动 profile=${this.cfg.userId} → debug_port=${port}`);
     await this.waitCdpReady(host, port, opts.readyTimeoutMs ?? 15_000);
 
     const instance: ChromeInstance = {
       pid: null,
-      reused: false, // 由本节点经 API 启动 → 退出时经 browser/stop 回收（非外部复用）
+      reused: false, // 由本节点启动或接管 → 退出时均经 V2 stop 回收（ChromeInstance.reused 仅指 self 外部 Chrome）
       kill: () => {
         void this.stop();
       },
@@ -269,19 +315,30 @@ export class AdsPowerProvider implements BrowserProvider {
     return { instance, endpoint: { host, port } };
   }
 
-  /** 调本地 API（带 Bearer + 1req/s 串行节流 + code≠0 诚实报错）。 */
-  private async api<T>(path: string, params: Record<string, string>): Promise<T> {
+  /** 调 V2 本地 API（带 Bearer + 1req/s 串行节流 + code≠0 诚实报错）。 */
+  private async apiV2<T>(
+    method: 'GET' | 'POST',
+    path: string,
+    request: { query?: Record<string, string>; body?: Record<string, unknown> },
+  ): Promise<T> {
     if (this.lastApiAt !== 0) {
       const wait = ADS_MIN_INTERVAL_MS - (this.now() - this.lastApiAt);
       if (wait > 0) await this.sleep(wait);
     }
-    const qs = new URLSearchParams(params).toString();
-    const url = `${this.cfg.apiBase}/api/v1/${path}?${qs}`;
+    const qs = new URLSearchParams(request.query ?? {}).toString();
+    const apiBase = this.cfg.apiBase.replace(/\/+$/, '');
+    const url = `${apiBase}/api/v2/${path}${qs ? `?${qs}` : ''}`;
     const headers: Record<string, string> = {};
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`;
+    if (method === 'POST') headers['Content-Type'] = 'application/json';
     let res: Response;
     try {
-      res = await this.fetchWithTimeout(url, { headers }, this.apiTimeoutMs, path);
+      res = await this.fetchWithTimeout(
+        url,
+        { method, headers, ...(method === 'POST' ? { body: JSON.stringify(request.body ?? {}) } : {}) },
+        this.apiTimeoutMs,
+        path,
+      );
     } catch (e) {
       const message = (e as Error).message || String(e);
       throw new Error(
@@ -290,6 +347,9 @@ export class AdsPowerProvider implements BrowserProvider {
       );
     } finally {
       this.lastApiAt = this.now();
+    }
+    if (!res.ok) {
+      throw new Error(`[aidcp-edge] AdsPower ${path} 响应异常：HTTP ${res.status}（诚实失败，不回落 self）`);
     }
     let body: { code: number; msg?: string; data?: T };
     try {
@@ -308,6 +368,67 @@ export class AdsPowerProvider implements BrowserProvider {
       );
     }
     return body.data as T;
+  }
+
+  /**
+   * CLI daemon 重启会丢失 active registry，但已起的 SunBrowser 可能继续监听 CDP。只在目标 profile 的
+   * cache 目录内做有界查找，并同时核对 DevToolsActivePort 的端口、browser path 与 /json/version；
+   * 任一不一致都拒绝，绝不只凭「某端口可连」接管。
+   */
+  private async findValidatedOrphanCdp(): Promise<{ host: '127.0.0.1'; port: number } | null> {
+    if (!PROFILE_ID_RE.test(this.cfg.userId)) return null;
+    let entries: Dirent<string>[];
+    try {
+      entries = await readdir(this.adsCacheRoot, { withFileTypes: true, encoding: 'utf8' });
+    } catch {
+      return null;
+    }
+    const prefix = `${this.cfg.userId}_`;
+    const candidates = entries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
+      .sort((a, b) => b.name.localeCompare(a.name))
+      .slice(0, MAX_ORPHAN_CACHE_CANDIDATES);
+    const rootPrefix = `${this.adsCacheRoot}${sep}`;
+    for (const entry of candidates) {
+      const markerPath = resolve(this.adsCacheRoot, entry.name, 'DevToolsActivePort');
+      if (!markerPath.startsWith(rootPrefix)) continue;
+      let raw: string;
+      try {
+        const markerStat = await lstat(markerPath);
+        if (!markerStat.isFile() || markerStat.isSymbolicLink()) continue;
+        raw = await readFile(markerPath, 'utf8');
+      } catch {
+        continue;
+      }
+      const [portLine, browserPathLine] = raw.split(/\r?\n/);
+      const port = Number(portLine?.trim());
+      const browserPath = browserPathLine?.trim() ?? '';
+      if (!Number.isInteger(port) || port <= 0 || port > 65_535 || !DEVTOOLS_BROWSER_PATH_RE.test(browserPath)) {
+        continue;
+      }
+      try {
+        const response = await this.fetchWithTimeout(
+          `http://127.0.0.1:${port}/json/version`,
+          {},
+          this.cdpProbeTimeoutMs,
+          'orphan-cdp/json/version',
+        );
+        if (!response.ok) continue;
+        const version = await this.withTimeout(
+          response.json() as Promise<{ webSocketDebuggerUrl?: unknown }>,
+          this.cdpProbeTimeoutMs,
+          'orphan-cdp/json/version 响应',
+        );
+        const ws = new URL(String(version?.webSocketDebuggerUrl ?? ''));
+        const hostname = ws.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+        const loopback = hostname === 'localhost' || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+        if (ws.protocol !== 'ws:' || !loopback || Number(ws.port) !== port || ws.pathname !== browserPath) continue;
+        return { host: '127.0.0.1', port };
+      } catch {
+        continue;
+      }
+    }
+    return null;
   }
 
   private async waitCdpReady(host: string, port: number, timeoutMs: number): Promise<void> {
@@ -374,15 +495,15 @@ export class AdsPowerProvider implements BrowserProvider {
     }
   }
 
-  /** 调 browser/stop 请求关闭；失败**如实返回并记日志**（不再静默吞成假成功）。 */
+  /** 调 V2 browser-profile/stop 请求关闭；失败**如实返回并记日志**（不再静默吞成假成功）。 */
   private async stop(): Promise<{ ok: boolean; error?: string }> {
     try {
-      await this.api<unknown>('browser/stop', { user_id: this.cfg.userId });
-      this.log(`[aidcp-edge] AdsPower browser/stop profile=${this.cfg.userId}`);
+      await this.apiV2<unknown>('POST', 'browser-profile/stop', { body: { profile_id: this.cfg.userId } });
+      this.log(`[aidcp-edge] AdsPower V2 browser-profile/stop profile=${this.cfg.userId}`);
       return { ok: true };
     } catch (e) {
       const error = (e as Error).message || String(e);
-      this.log(`[aidcp-edge] ⚠ AdsPower browser/stop 失败（profile=${this.cfg.userId}）：${error}`);
+      this.log(`[aidcp-edge] ⚠ AdsPower browser-profile/stop 失败（profile=${this.cfg.userId}）：${error}`);
       return { ok: false, error };
     }
   }
@@ -416,7 +537,7 @@ export class AdsPowerProvider implements BrowserProvider {
     await this.stop();
     if (await this.waitPortDark(host, port)) return true;
 
-    this.log(`[aidcp-edge] AdsPower 首次停止后调试端口仍应答，重发 browser/stop profile=${this.cfg.userId}`);
+    this.log(`[aidcp-edge] AdsPower 首次停止后调试端口仍应答，重发 V2 browser-profile/stop profile=${this.cfg.userId}`);
     await this.stop();
     if (await this.waitPortDark(host, port)) return true;
 

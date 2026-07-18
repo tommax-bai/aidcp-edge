@@ -510,10 +510,10 @@ function decideRespawn(input, opts) {
 
 /**
  * 识别 AdsPower「同账号并发占用拒启」——该分身已被同一账号在别处（另一台机 / 另一实例 /
- * 桌面端窗口）打开、不允许并发打开（`browser/start` 返回 code≠0，msg 含
+ * 桌面端窗口）打开、不允许并发打开（V2 `browser-profile/start` 返回 code≠0，msg 含
  * `is being used by [<account>] and is not allowed to open`）。这是**不可重起终局**：
  * 重起不会自愈，看护据此即刻诚实停止、不重试、不消耗失败预算。
- * 双命中闸（拒启签名 + `browser/start` 失败上下文）避免把无关「失败」串误判为终局。
+ * 双命中闸（拒启签名 + browser-profile/start 失败上下文）避免把无关「失败」串误判为终局。
  * 返回 `{ inUse, account }`；account 从 `is being used by [<account>]` 解析（解析不到则 undefined）。
  * 纯函数、可单测。
  */
@@ -521,8 +521,8 @@ function classifyAdsInUse(line) {
   const raw = String(line || '');
   // 拒启签名：AdsPower 英文原文（not allowed to open / is being used by）或中文本地化（正在使用 / 已打开）。
   const rejectSig = /not allowed to open|is being used by|being used|正在使用|已打开/i.test(raw);
-  // 上下文闸：须是 browser/start 启动失败行，避免与无关「失败」串误命中（如连云失败）。
-  const startCtx = /browser\/start|browser\.start|启动失败/i.test(raw);
+  // 上下文闸：须是 V2 browser-profile/start（兼容历史 V1 browser/start 日志）启动失败行，避免误命中连云失败。
+  const startCtx = /browser(?:-profile)?\/start|browser(?:-profile)?\.start|启动失败/i.test(raw);
   if (!rejectSig || !startCtx) return { inUse: false };
   const m = /is being used by\s*\[([^\]]+)\]/i.exec(raw);
   const account = m ? m[1].trim() : undefined;
