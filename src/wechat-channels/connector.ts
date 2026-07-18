@@ -20,6 +20,19 @@ import { WechatReplySender } from './reply-sender.js';
 import type { WechatRuntimeStateStore } from './state-store.js';
 import { assertMatchingAck } from './sync-common.js';
 
+// Idle liveness beat for the desktop shell's fleet rail. The rail flips an environment to 失联 once
+// its status projection has gone untouched past a staleness threshold (renderer side, 5 minutes).
+// This connector is API-only: it keeps no browser attached and stays silent on stdout while it polls,
+// so a healthy, Cloud-connected account with no new comments/DMs drifts to 失联 even though the engine
+// is alive and interacting with Cloud on its timers. We emit a throttled beat on each PROVEN Cloud
+// round-trip (a matched batch ack), so the projection stays fresh from real engine-interaction
+// liveness rather than from browser/stdout chatter — while a genuinely dead loop (no acks) still goes
+// stale honestly. The throttle sits well under the 5-minute threshold so one beat per window suffices;
+// the wording is deliberately benign (matches neither the core-halt whitelist nor any failure-shaped
+// token) so it never flips the environment badge nor poisons failure attribution.
+const API_SYNC_HEARTBEAT_MIN_INTERVAL_MS = 60_000;
+const API_SYNC_HEARTBEAT_LINE = '[wechat-channels] api-sync heartbeat';
+
 export interface WechatChannelsConnectorOptions {
   envKey: string;
   accountId: string;
@@ -47,6 +60,7 @@ export class WechatChannelsConnector implements InteractionConnector {
   private readonly pendingBatches = new Map<string, InteractionSyncBatchPayload>();
   private unsubscribeAuth?: () => void;
   private started = false;
+  private lastHeartbeatAt = 0;
 
   constructor(private readonly options: WechatChannelsConnectorOptions) {
     this.now = options.nowImpl ?? Date.now;
@@ -77,6 +91,9 @@ export class WechatChannelsConnector implements InteractionConnector {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+    // Reset on every (re)start so the first proven round-trip after a Cloud reconnect beats promptly
+    // instead of being throttled against a beat from the previous session.
+    this.lastHeartbeatAt = 0;
     await this.options.state.load();
     this.unsubscribeAuth = this.options.auth.onChange(() => this.publishAuthStatus());
     this.publishAuthStatus();
@@ -209,12 +226,30 @@ export class WechatChannelsConnector implements InteractionConnector {
     this.publishAuthStatus();
   }
 
+  /**
+   * Liveness beat for the desktop shell's fleet rail, emitted only after a proven Cloud round-trip
+   * (a matched batch ack). It rides the shell's existing stdout→status-refresh path so an idle but
+   * alive account keeps reading as running instead of drifting to 失联; a loop that has genuinely
+   * stopped emits no more acks, so staleness still surfaces honestly. Throttled so bursts of real
+   * batches do not spam the log. The zero sentinel guarantees the first beat after start() fires.
+   */
+  private emitHeartbeat(): void {
+    const now = this.now();
+    if (this.lastHeartbeatAt !== 0 && now - this.lastHeartbeatAt < API_SYNC_HEARTBEAT_MIN_INTERVAL_MS) return;
+    this.lastHeartbeatAt = now;
+    this.log(API_SYNC_HEARTBEAT_LINE);
+  }
+
   private async publishBatch(batch: InteractionSyncBatchPayload): Promise<InteractionSyncAckPayload> {
     this.pendingBatches.set(batch.batchId, batch);
     try {
       const ack = await this.options.transport.publishSyncBatch(batch);
       assertMatchingAck(batch, ack);
       this.pendingBatches.delete(batch.batchId);
+      // A matched ack is a proven Cloud round-trip: process alive + platform session usable (the batch
+      // came from a successful platform read) + Cloud WS round-tripping both ways. That is the honest
+      // liveness signal the fleet rail should reflect for this browserless platform.
+      this.emitHeartbeat();
       return ack;
     } catch (error) {
       // Keep the batch for a late active-route ack. The synchronizer will not move its checkpoint yet.

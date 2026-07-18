@@ -57,6 +57,8 @@ const BENIGN_STDERR_LINES = [
   '[aidcp-edge] edge.task.acquired 回传失败: Error: socket hang up',
   // 单次浏览会话异常 —— 浏览循环自己会重来，核心不退出
   '[aidcp-edge] 浏览会话异常: Error: CdpDisconnectedError',
+  // 视频号 API-only 存活心跳 —— 每次云端往返成功后发一拍，喂给外壳心跳，绝不能被判终态或污染归因
+  '[wechat-channels] api-sync heartbeat',
 ];
 
 for (const line of BENIGN_STDERR_LINES) {
@@ -76,6 +78,8 @@ test('isFailureShapedLine：良性行不得污染失败归因（真出事时归�
     false,
   );
   assert.equal(fleet.isFailureShapedLine('[aidcp-edge] 任务租约抑制命令 type=page.scroll taskId=t-1 current=t-2'), false);
+  // 视频号存活心跳：措辞里绝不能含失败归因词（失败/不可达/code=-N…），否则核心真崩时归因会被这拍污染。
+  assert.equal(fleet.isFailureShapedLine('[wechat-channels] api-sync heartbeat'), false);
 });
 
 // ── ② 核心自己声明的终态：仍须判死（红线：不吞真失败） ─────────────────────────────
