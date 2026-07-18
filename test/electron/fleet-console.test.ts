@@ -538,6 +538,96 @@ test('全部启动：内存预检超限 → 诚实拦阻出确认；确认后 fo
   assert.match(w.document.querySelector('#rail-msg')!.textContent!, /启动中 \d\/4|已错峰排队启动 4/);
 });
 
+test('平台筛选：默认全部；切换后列表、计数、选中环境与全部启动范围同步', async () => {
+  const environments = [
+    { envId: 'ads-xhs', profileId: 'xhs', name: '小红书一', platform: 'xiaohongshu', status: makeStatus({ envId: 'ads-xhs', envName: '小红书一' }) },
+    { envId: 'ads-fb', profileId: 'fb', name: 'Facebook 一', platform: 'fb', status: makeStatus({ envId: 'ads-fb', envName: 'Facebook 一' }) },
+    { envId: 'ads-wc', profileId: 'wc', name: '视频号一', platform: 'wechat-channels', status: makeStatus({ envId: 'ads-wc', envName: '视频号一' }) },
+  ];
+  const { w, calls } = await boot({
+    fleetGet: async () => ({ provider: 'adspower', selectedEnvId: 'ads-xhs', railCollapsed: false, environments }),
+  });
+
+  const buttons = (platform: string) => w.document.querySelector(`[data-rail-platform="${platform}"]`) as HTMLButtonElement;
+  assert.equal(buttons('all').getAttribute('aria-pressed'), 'true');
+  assert.equal(w.document.querySelectorAll('.rail-row').length, 3);
+  assert.equal(w.document.querySelector('#rail-count')!.textContent, '3');
+
+  (w.document.querySelector('#rail-start-all') as HTMLButtonElement).click();
+  await tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.startAll[0])), { envIds: ['ads-xhs', 'ads-fb', 'ads-wc'] }, '默认全部必须传完整花名册范围');
+
+  buttons('facebook').click();
+  await tick();
+  assert.equal(w.document.querySelectorAll('.rail-row').length, 1);
+  assert.equal((w.document.querySelector('.rail-row') as HTMLElement).dataset.envId, 'ads-fb');
+  assert.equal(w.document.querySelector('#rail-count')!.textContent, '1');
+  assert.deepEqual(calls.select.at(-1), 'ads-fb', '当前选中环境被过滤掉时切到首个可见环境');
+  (w.document.querySelector('#rail-start-all') as HTMLButtonElement).click();
+  await tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.startAll[1])), { envIds: ['ads-fb'] }, 'Facebook 筛选不得启动其他平台');
+
+  buttons('wechat_channels').click();
+  await tick();
+  assert.equal((w.document.querySelector('.rail-row') as HTMLElement).dataset.envId, 'ads-wc');
+  assert.deepEqual(calls.select.at(-1), 'ads-wc');
+  buttons('xiaohongshu').click();
+  await tick();
+  assert.equal((w.document.querySelector('.rail-row') as HTMLElement).dataset.envId, 'ads-xhs');
+});
+
+test('平台筛选：空分类显示空态并禁用全部启动，不发无目标请求', async () => {
+  const { w, calls } = await boot({
+    fleetGet: async () => ({
+      provider: 'adspower',
+      selectedEnvId: 'ads-p1',
+      railCollapsed: false,
+      environments: [
+        { envId: 'ads-p1', profileId: 'p1', name: '环境一', platform: 'xiaohongshu', status: makeStatus({ envId: 'ads-p1' }) },
+      ],
+    }),
+  });
+  (w.document.querySelector('[data-rail-platform="wechat_channels"]') as HTMLButtonElement).click();
+  await tick();
+  assert.equal(w.document.querySelectorAll('.rail-row').length, 0);
+  assert.match(w.document.querySelector('.rail-filter-empty')!.textContent!, /暂无视频号环境/);
+  const startAll = w.document.querySelector('#rail-start-all') as HTMLButtonElement;
+  assert.equal(startAll.disabled, true);
+  startAll.click();
+  await tick();
+  assert.equal(calls.startAll.length, 0);
+});
+
+test('平台筛选：资源确认后的 force 请求复用首次分类范围', async () => {
+  const requests: Array<{ envIds?: string[]; force?: boolean }> = [];
+  const { w } = await boot({
+    fleetGet: async () => ({
+      provider: 'adspower',
+      selectedEnvId: 'ads-xhs',
+      railCollapsed: false,
+      environments: [
+        { envId: 'ads-xhs', profileId: 'xhs', name: '小红书', platform: 'xiaohongshu', status: makeStatus({ envId: 'ads-xhs' }) },
+        { envId: 'ads-fb', profileId: 'fb', name: 'Facebook', platform: 'facebook', status: makeStatus({ envId: 'ads-fb' }) },
+      ],
+    }),
+    fleetStartAll: async (opts: { envIds?: string[]; force?: boolean }) => {
+      requests.push(opts);
+      if (!opts.force) return { ok: false, reason: 'ram', requiredMB: 1024, freeMB: 512, plannedCount: 1 };
+      return { ok: true, queued: 1, envIds: ['ads-fb'] };
+    },
+  });
+  (w.document.querySelector('[data-rail-platform="facebook"]') as HTMLButtonElement).click();
+  await tick();
+  (w.document.querySelector('#rail-start-all') as HTMLButtonElement).click();
+  await tick();
+  (w.document.querySelector('#rail-ram-force') as HTMLButtonElement).click();
+  await tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)), [
+    { envIds: ['ads-fb'] },
+    { envIds: ['ads-fb'], force: true },
+  ]);
+});
+
 test('同账号告警：选中环境带 sameAccountWarning → 主区域出告警条', async () => {
   const { w, pushStatus } = await boot();
   pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', sameAccountWarning: { message: '该环境与另一环境登录了同一账号。' } }));

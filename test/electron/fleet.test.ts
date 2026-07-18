@@ -52,6 +52,20 @@ test('legacyMirrorOf：首成员镜像回旧字段（回滚兼容）；空花名
   assert.equal(fleet.legacyMirrorOf([]).adsProfileId, '');
 });
 
+test('scopeFleetHandles：批量启动范围与实时未移除句柄求交集，空数组 fail closed', () => {
+  const handles = [
+    { envId: 'ads-xhs', removed: false },
+    { envId: 'ads-fb', removed: false },
+    { envId: 'ads-wechat', removed: true },
+  ];
+  assert.deepEqual(
+    fleet.scopeFleetHandles(handles, ['ads-fb', 'ads-missing', 'ads-fb', {}, '']),
+    [handles[1]],
+  );
+  assert.deepEqual(fleet.scopeFleetHandles(handles, []), []);
+  assert.deepEqual(fleet.scopeFleetHandles(handles, undefined), [handles[0], handles[1]]);
+});
+
 test('nicknameSourceForPlatform：视频号真实昵称保留平台来源，环境名回落仍由调用方标 env', () => {
   assert.equal(fleet.nicknameSourceForPlatform('wechat_channels'), 'wechat_channels');
   assert.equal(fleet.nicknameSourceForPlatform('wechat-channels'), 'wechat_channels');

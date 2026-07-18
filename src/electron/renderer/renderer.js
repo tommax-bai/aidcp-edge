@@ -145,6 +145,7 @@ const fields = {
   railBadge: document.querySelector('#rail-badge'),
   railList: document.querySelector('#rail-list'),
   railCount: document.querySelector('#rail-count'),
+  railPlatformFilters: Array.from(document.querySelectorAll('[data-rail-platform]')),
   railAdd: document.querySelector('#rail-add'),
   railFootAdd: document.querySelector('#rail-foot-add'),
   railSum: document.querySelector('#rail-sum'),
@@ -332,6 +333,8 @@ const fleetView = {
   selected: null, // 当前选中 envId
   shownEnv: null, // 头像三态：已把浏览器抬到主屏前台的那个 envId（null=无）。切换选中即清，见 selectEnv
   collapsed: true, // 环境栏默认收起为窄图标条
+  platformFilter: 'all', // 平台分类筛选为会话内视图态；每次启动默认全部，不落设置
+  startAllScope: null, // 资源确认期间冻结首次批量启动 envId 范围，force 不得扩大范围
   buffers: new Map(), // envId -> [{ entry, cls }]（每环境活动流缓冲，≤200 条，绝不串号）
   logs: new Map(), // envId -> { entries:[{time,message}], last }（每环境开发者原始日志，绝不串号）
   guided: null, // 引导处理态 { done:Set, current }
@@ -2497,6 +2500,12 @@ function railEnvList() {
     .filter(Boolean);
 }
 
+function filteredRailEnvList() {
+  const list = railEnvList();
+  if (fleetView.platformFilter === 'all') return list;
+  return list.filter((env) => normPlatform(env && env.platform) === fleetView.platformFilter);
+}
+
 // 需处理浮顶，其后普通状态明确分为运行中 / 暂停 / 离线。级别归组一处收口。
 const isPausedRailRow = (r) => !r.needsAction && r.status && r.status.session === 'paused';
 const isRunningRailRow = (r) => !r.needsAction && !isPausedRailRow(r) && (r.level === 'running' || r.level === 'launching');
@@ -2520,22 +2529,25 @@ function railDisplayName(row) {
 
 function renderRail() {
   if (!fields.envRail || !window.uiLogic || typeof uiLogic.fleetRailModel !== 'function') return;
-  const list = railEnvList();
+  const allList = railEnvList();
+  const list = filteredRailEnvList();
   // 环境栏常驻显示（用户要求「左边栏默认展示」）：名册为空也保留栏、露出「＋ 添加环境」入口，
   // 不再按有无环境显隐（此前空名册整栏 hidden，新实例进来完全看不到添加入口）。
   const show = true;
+  const rosterEmpty = allList.length === 0;
   const empty = list.length === 0;
   // 名册空时本次渲染强制展开（把空态提示与添加入口露出来），但不落库、不覆盖用户已保存的收起偏好；
   // 一旦有环境即回落 fleetView.collapsed（默认收起为窄图标条）。
-  const collapsed = empty ? false : fleetView.collapsed;
+  const collapsed = rosterEmpty ? false : fleetView.collapsed;
   fields.envRail.classList.toggle('hidden', !show);
   fields.fleetRow?.classList.toggle('with-rail', show);
   const model = uiLogic.fleetRailModel(list, Date.now());
+  const fullModel = fleetView.platformFilter === 'all' ? model : uiLogic.fleetRailModel(allList, Date.now());
   // 头像三态清理：仅在浏览器确已不在（环境移出 / 核心非运行）时撤销「已显示」相位。
   // 绝不按 level 清——attention（验证码浮层、云端瞬断、风控受限等，核心仍在跑、浏览器仍可控）
   // 必须保留 shown，否则盯验证码的环境永远回不到「归位」态（第三态不可达）。以 status.edge 为准。
   if (fleetView.shownEnv) {
-    const shownRow = model.rows.find((r) => r.envId === fleetView.shownEnv);
+    const shownRow = fullModel.rows.find((r) => r.envId === fleetView.shownEnv);
     const edgeAlive = shownRow && shownRow.status && (shownRow.status.edge === 'running' || shownRow.status.edge === 'starting');
     if (!edgeAlive) fleetView.shownEnv = null;
   }
@@ -2553,6 +2565,8 @@ function renderRail() {
     selected: fleetView.selected,
     shown: fleetView.shownEnv,
     guided: Boolean(fleetView.guided),
+    platformFilter: fleetView.platformFilter,
+    globalPendingCount: fullModel.pendingCount,
     counts,
     // platform 必须进签名：改平台后行才会重建上色（漏掉则签名未变、UI 停留旧平台）。
     rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, railDisplayName(r), r.label, Boolean(r.status && r.status.personaBound), normPlatform(r.platform)]),
@@ -2568,17 +2582,26 @@ function renderRail() {
     fields.railToggle.setAttribute('aria-label', fields.railToggle.title);
   }
   if (fields.railCount) fields.railCount.textContent = String(list.length);
+  for (const button of fields.railPlatformFilters || []) {
+    const active = button.dataset.railPlatform === fleetView.platformFilter;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
   if (fields.railSum) fields.railSum.classList.toggle('hidden', collapsed);
   if (fields.railSumRun) fields.railSumRun.textContent = `▶ ${counts.run}`;
   if (fields.railSumAttn) fields.railSumAttn.textContent = `⚠ ${counts.attn}`;
   if (fields.railSumIdle) fields.railSumIdle.textContent = `⏸ ${counts.idle}`;
   if (fields.railBadge) {
-    fields.railBadge.textContent = String(model.pendingCount);
-    fields.railBadge.classList.toggle('hidden', model.pendingCount === 0);
+    fields.railBadge.textContent = String(fullModel.pendingCount);
+    fields.railBadge.classList.toggle('hidden', fullModel.pendingCount === 0);
   }
   if (fields.railGuide) {
-    fields.railGuide.classList.toggle('hidden', model.pendingCount === 0 && !fleetView.guided);
-    fields.railGuide.textContent = model.pendingCount > 0 ? `引导处理（${model.pendingCount}）` : '引导处理';
+    fields.railGuide.classList.toggle('hidden', fullModel.pendingCount === 0 && !fleetView.guided);
+    fields.railGuide.textContent = fullModel.pendingCount > 0 ? `引导处理（${fullModel.pendingCount}）` : '引导处理';
+  }
+  if (fields.railStartAll) {
+    fields.railStartAll.disabled = empty;
+    fields.railStartAll.title = empty ? '当前分类暂无可启动环境' : `启动当前分类的 ${list.length} 个环境`;
   }
   if (!fields.railList) return;
   // 列表现在是栏内定高滚动区：签名一变就整块重建，重建会把滚动位清零。不接管的话，用户往下滚去看后面的
@@ -2590,7 +2613,7 @@ function renderRail() {
   fleetView.lastRailCollapsed = collapsed;
   fleetView.lastRailSel = fleetView.selected;
   fields.railList.innerHTML = '';
-  if (empty) {
+  if (rosterEmpty) {
     // 空名册空态：直接给一个「添加第一个环境」按钮（点开加入 / 新建面板），别让用户找那个小「＋」。
     const cta = document.createElement('button');
     cta.type = 'button';
@@ -2599,6 +2622,13 @@ function renderRail() {
     cta.addEventListener('click', () => openEnvAddPanel('join'));
     fields.railList.appendChild(cta);
     return; // 空态无可滚内容，滚动位天然为 0
+  }
+  if (empty) {
+    const emptyState = document.createElement('div');
+    emptyState.className = 'rail-filter-empty';
+    emptyState.textContent = `暂无${platformLabel(fleetView.platformFilter)}环境`;
+    fields.railList.appendChild(emptyState);
+    return;
   }
   for (const g of RAIL_GROUPS) {
     const groupRows = model.rows.filter(g.has);
@@ -2724,12 +2754,37 @@ fields.railToggle?.addEventListener('click', () => {
   renderRail();
 });
 
+for (const button of fields.railPlatformFilters || []) {
+  button.addEventListener('click', () => {
+    const next = button.dataset.railPlatform || 'all';
+    if (next === fleetView.platformFilter) return;
+    fleetView.platformFilter = next;
+    fleetView.startAllScope = null;
+    fields.railRamConfirm?.classList.add('hidden');
+    fleetView.lastRailSig = '';
+    const visible = filteredRailEnvList();
+    if (visible.length > 0 && !visible.some((env) => env.envId === fleetView.selected)) {
+      selectEnv(visible[0].envId);
+    } else {
+      renderRail();
+    }
+  });
+}
+
 // ── 「全部启动」：内存上限预检，超限诚实拦阻、让运维确认后 force 放行 ──
 async function doStartAll(force) {
   const api = window.aidcpEdge.fleetStartAll;
   if (typeof api !== 'function') return;
+  const envIds = force && Array.isArray(fleetView.startAllScope)
+    ? [...fleetView.startAllScope]
+    : filteredRailEnvList().map((env) => env.envId);
+  if (envIds.length === 0) {
+    setRailMsg('当前分类没有可启动的环境。');
+    return;
+  }
+  if (!force) fleetView.startAllScope = [...envIds];
   fields.railRamConfirm?.classList.add('hidden');
-  const res = await api(force ? { force: true } : undefined);
+  const res = await api({ envIds, ...(force ? { force: true } : {}) });
   if (res && res.ok === false && res.reason === 'ram') {
     if (fields.railRamText) {
       fields.railRamText.textContent = `预计需 ~${res.requiredMB}MB 内存（${res.plannedCount} 个环境 × ~1GB），本机当前可用 ~${res.freeMB}MB，可能不足并拖垮已在跑的环境。仍要全部启动吗？`;
@@ -2737,6 +2792,7 @@ async function doStartAll(force) {
     fields.railRamConfirm?.classList.remove('hidden');
     return;
   }
+  fleetView.startAllScope = null;
   if (res && res.ok) {
     if (res.queued > 0 && Array.isArray(res.envIds)) {
       fleetView.startAll = { ids: res.envIds, total: res.queued };
@@ -2767,7 +2823,10 @@ function updateStartAllProgress() {
 }
 fields.railStartAll?.addEventListener('click', () => { void doStartAll(false); });
 fields.railRamForce?.addEventListener('click', () => { void doStartAll(true); });
-fields.railRamCancel?.addEventListener('click', () => fields.railRamConfirm?.classList.add('hidden'));
+fields.railRamCancel?.addEventListener('click', () => {
+  fleetView.startAllScope = null;
+  fields.railRamConfirm?.classList.add('hidden');
+});
 
 // ── 引导式登录 / 验证码流：待处理环境排队、一次引导一个；新到项实时并入（队列每步重算）──
 function guideQueue() {

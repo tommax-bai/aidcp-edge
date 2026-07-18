@@ -3612,9 +3612,12 @@ function relogin(handle) {
  * 而不是「一个都不给起」。哪些起得来由逐个过的准入闸说了算，起不来的不丢弃、进等槽位队列。
  * （force 仍保留：运维明确要求越过内存闸时逐个 force 放行。）
  */
-function startAllEnvs({ force = false } = {}) {
-  const paused = [...envs.values()].filter((h) => h.child && h.status.session === 'paused' && !h.removed);
-  const targets = [...envs.values()].filter((h) => !h.child && !h.removed);
+function startAllEnvs({ force = false, envIds } = {}) {
+  // renderer 的筛选只决定“请求哪些”；主进程仍以实时句柄表求交集，已移出/伪造 ID 不能扩大启动范围。
+  // envIds 未提供时兼容旧版 renderer 的全量调用；显式空数组则是零目标。
+  const scoped = fleet.scopeFleetHandles([...envs.values()], envIds);
+  const paused = scoped.filter((h) => h.child && h.status.session === 'paused');
+  const targets = scoped.filter((h) => !h.child);
   if (targets.length === 0 && paused.length === 0) return { ok: true, queued: 0 };
   const cap = slotCapacity();
   // 账号上限（缺省 = 2 × 槽位，可在设置里改）：超过即存在「永远排不上」的风险，必须诚实告警而非静默接受。

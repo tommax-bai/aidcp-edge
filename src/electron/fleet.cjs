@@ -83,6 +83,21 @@ function legacyMirrorOf(environments) {
   };
 }
 
+/**
+ * 将 renderer 提交的批量启动 envId 白名单与主进程当前句柄求交集。
+ * - envIds 未提供：兼容旧调用方，返回全部未移除句柄；
+ * - envIds 为数组（含空数组）：只返回命中的未移除句柄；非法/重复 ID 不扩大范围。
+ */
+function scopeFleetHandles(handles, envIds) {
+  const live = Array.isArray(handles) ? handles.filter((handle) => handle && !handle.removed) : [];
+  if (!Array.isArray(envIds)) return live;
+  const requested = new Set(envIds
+    .filter((envId) => typeof envId === 'string' || typeof envId === 'number')
+    .map((envId) => String(envId).trim())
+    .filter(Boolean));
+  return live.filter((handle) => requested.has(String(handle.envId || '')));
+}
+
 /** Real nickname source marker used by the desktop shell; `env` remains reserved for roster fallback names. */
 function nicknameSourceForPlatform(platform) {
   const normalized = String(platform ?? '').trim().toLowerCase();
@@ -597,6 +612,7 @@ module.exports = {
   normalizeEnvironments,
   migrateEnvironments,
   legacyMirrorOf,
+  scopeFleetHandles,
   nicknameSourceForPlatform,
   facebookBrowseModeFor,
   buildEnvSpawnEnv,

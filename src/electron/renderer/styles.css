@@ -2234,6 +2234,31 @@ body { margin: 0; }
 .env-rail.expanded .rail-badge:not(.hidden) { display: inline-flex; }
 .rail-badge.hidden { display: none !important; }
 
+/* 平台筛选只在展开态显示；它同时定义列表与“全部启动”的作用域。 */
+.rail-platform-filter {
+  display: none;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 3px;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+.env-rail.expanded .rail-platform-filter { display: grid; }
+.rail-filter-btn {
+  min-width: 0;
+  border: 1px solid #dbe3ef;
+  border-radius: 6px;
+  background: #fff;
+  color: #64748b;
+  padding: 4px 1px;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rail-filter-btn:hover { border-color: #b9caf0; color: #2563eb; }
+.rail-filter-btn.active { border-color: #9db8f2; background: var(--accent-soft); color: #2563eb; font-weight: 700; }
+.rail-filter-btn:focus-visible { outline: 2px solid #9db8f2; outline-offset: 1px; }
+
 /* 汇总 chip（展开态） */
 .rail-sum { display: flex; gap: 6px; padding: 0 4px 4px; flex-shrink: 0; }
 .rail-sum.hidden { display: none; }
@@ -2241,6 +2266,17 @@ body { margin: 0; }
 .sum-chip.run { color: var(--good-fg); background: var(--good-bg); }
 .sum-chip.attn { color: #991b1b; background: #fff0f1; }
 .sum-chip.idle { color: #4b5870; background: var(--surface-soft); }
+
+.rail-filter-empty {
+  margin: 16px 8px;
+  padding: 12px 6px;
+  border: 1px dashed #d6deeb;
+  border-radius: 9px;
+  color: #7b879c;
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: center;
+}
 
 /* 栏内唯一滚动区：环境超出一屏就在这里滚，栏头 / 汇总 / 栏尾都不动（微信选联系人手感）。
    min-height 必须保持 0：宁可列表被压到很矮，也绝不允许它把栏尾顶出视口——栏是 sticky 定高的，
@@ -2400,6 +2436,7 @@ body { margin: 0; }
   padding: 6px 8px; font-size: 12px; color: #33415c; cursor: pointer;
 }
 .rail-btn.warn { border-color: #f2c063; background: #fff7e8; color: #92600a; }
+.rail-btn:disabled { cursor: not-allowed; opacity: .5; }
 .rail-btn.hidden { display: none; }
 .rail-ram { border: 1px solid #f2c063; border-radius: 8px; background: #fff8ec; padding: 8px; }
 .rail-ram.hidden { display: none; }
