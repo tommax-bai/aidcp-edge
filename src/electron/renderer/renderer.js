@@ -1581,7 +1581,11 @@ function publishPreviewActionReason(reason) {
     case 'already_decided': return '这份稿件已被处理。';
     case 'not_pending': return '这份稿件已不在待确认状态。';
     case 'account_mismatch': return '当前环境与稿件账号不一致。';
+    case 'account_unavailable': return '登录状态异常，请重新登录。';
     case 'edge_not_running': return '引擎未运行，暂时无法提交。';
+    case 'edge_request_timeout':
+    case 'edge_request_failed':
+    case 'request_failed': return '暂时没能连上云端，请稍后重试。';
     default: return '操作未完成，请稍后重试。';
   }
 }
@@ -1883,31 +1887,52 @@ fields.pubPreviewLink.addEventListener('keydown', (e) => {
 async function submitPublishPreviewAction(approved) {
   const preview = currentStatus && currentStatus.publishPreview;
   if (!preview || publishPreviewActionBusy) return;
-  if (typeof window.aidcpEdge.delegatedTaskDraft !== 'function') {
-    fields.publishPreviewActionHint.textContent = '当前客户端不支持委托审批。';
+  const actionEnvId = currentStatus.envId;
+  const actionRecordId = preview.recordId;
+  const publishApproval = window.aidcpEdge && window.aidcpEdge.publishApproval;
+  if (typeof publishApproval !== 'function') {
+    fields.publishPreviewActionHint.textContent = '当前客户端不支持应用内审批。';
     return;
   }
   publishPreviewActionBusy = true;
   syncPublishPreviewActions(currentStatus);
-  let created = false;
+  let result;
   try {
-    created = await draftDelegatedTask(
-      approved ? 'approve_candidate' : 'reject_candidate',
-      {
-        candidateId: String(preview.recordId),
-        candidateVersion: Number.isInteger(preview.contentVersion) ? preview.contentVersion : 0,
-      },
-      { envId: currentStatus.envId, targetSuccessCount: 1, maxAttempts: 1 },
-    );
+    result = await publishApproval(currentStatus.envId, {
+      requestId: `publish-${preview.recordId}`,
+      approved,
+      contentVersion: Number.isInteger(preview.contentVersion) ? preview.contentVersion : 0,
+    });
   } catch {
-    created = false;
+    result = { ok: false, reason: 'request_failed' };
   }
   publishPreviewActionBusy = false;
-  if (!created) {
-    fields.publishPreviewActionHint.textContent = '未能创建审批任务，稿件状态未改变。';
+  const actionStillCurrent = currentStatus
+    && currentStatus.envId === actionEnvId
+    && currentStatus.publishPreview
+    && Number(currentStatus.publishPreview.recordId) === Number(actionRecordId);
+  if (!actionStillCurrent) {
+    // 账号/稿件已切换：云端决定仍以 RPC 真结果为准，但旧应答不得改写或关闭新账号的审核页。
+    syncPublishPreviewActions(currentStatus);
     return;
   }
+  if (!result || result.ok !== true) {
+    syncPublishPreviewActions(currentStatus);
+    fields.publishPreviewActionHint.textContent = publishPreviewActionReason(result && result.reason);
+    return;
+  }
+  const nextState = result.state || (approved ? 'approved' : 'rejected');
+  currentStatus = {
+    ...currentStatus,
+    publish: {
+      ...(currentStatus.publish || {}),
+      state: nextState,
+      title: currentStatus.publish?.title || preview.title,
+      at: new Date().toISOString(),
+    },
+  };
   closePublishPreview();
+  renderPublish(currentStatus, Date.now());
 }
 fields.publishPreviewApprove.addEventListener('click', () => { void submitPublishPreviewAction(true); });
 fields.publishPreviewCancel.addEventListener('click', () => { void submitPublishPreviewAction(false); });
