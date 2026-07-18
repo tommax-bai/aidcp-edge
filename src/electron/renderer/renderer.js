@@ -2497,11 +2497,15 @@ function railEnvList() {
     .filter(Boolean);
 }
 
-// 三大分组（按紧迫度）：需处理浮顶 → 运行中 → 暂停·离线。级别归组一处收口。
+// 需处理浮顶，其后普通状态明确分为运行中 / 暂停 / 离线。级别归组一处收口。
+const isPausedRailRow = (r) => !r.needsAction && r.status && r.status.session === 'paused';
+const isRunningRailRow = (r) => !r.needsAction && !isPausedRailRow(r) && (r.level === 'running' || r.level === 'launching');
+const isOfflineRailRow = (r) => !r.needsAction && !isPausedRailRow(r) && (r.level === 'offline' || r.level === 'stale');
 const RAIL_GROUPS = [
   { key: 'attn', title: '需要处理', crit: true, has: (r) => r.needsAction },
-  { key: 'run', title: '运行中', crit: false, has: (r) => !r.needsAction && (r.level === 'running' || r.level === 'launching') },
-  { key: 'idle', title: '暂停 · 离线', crit: false, has: (r) => !r.needsAction && (r.level === 'offline' || r.level === 'stale') },
+  { key: 'run', title: '运行中', crit: false, has: isRunningRailRow },
+  { key: 'paused', title: '暂停', crit: false, has: isPausedRailRow },
+  { key: 'offline', title: '离线', crit: false, has: isOfflineRailRow },
 ];
 
 // 显示优先级（真实昵称 → 花名册/环境名 → 末4位）的**唯一实现**在 ui-logic.js（可单测），此处委托；
@@ -2536,9 +2540,9 @@ function renderRail() {
     if (!edgeAlive) fleetView.shownEnv = null;
   }
   const counts = {
-    run: model.rows.filter((r) => !r.needsAction && (r.level === 'running' || r.level === 'launching')).length,
+    run: model.rows.filter(isRunningRailRow).length,
     attn: model.pendingCount,
-    idle: model.rows.filter((r) => !r.needsAction && (r.level === 'offline' || r.level === 'stale')).length,
+    idle: model.rows.filter((r) => isPausedRailRow(r) || isOfflineRailRow(r)).length,
   };
   // 变更签名：每秒 stale 重估会反复调本函数，但只有模型真变时才重建 DOM——否则 innerHTML='' 会每秒
   // 打断 1.6s 脉冲动画（视觉抖动）、把行焦点甩回 <body>、并吞掉跨 tick 的点击手势。

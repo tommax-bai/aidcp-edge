@@ -164,7 +164,7 @@ test('fleetLevel：放弃重启和冻结为 error；账号重复运行为 attent
   assert.equal(warn.label, '账号重复运行');
 });
 
-test('fleetLevel：暂停与关闭同属离线组但标签明确区分', () => {
+test('fleetLevel：暂停与关闭共享 offline 级别但标签明确区分，供渲染层拆组', () => {
   const now = Date.now();
   const paused = uiLogic.fleetLevel({ edge: 'stopped', session: 'paused' }, now);
   const closed = uiLogic.fleetLevel({ edge: 'stopped', session: 'closed' }, now);
@@ -217,6 +217,46 @@ test('环境栏：fleet 快照建行、默认收起、点选切换主区域并�
     (w.document.querySelector('.rail-row[data-env-id="ads-p2"]') as HTMLElement).classList.contains('selected'),
     true,
   );
+});
+
+test('环境栏：普通状态拆成运行中、暂停、离线三组，需处理仍浮顶且每行只出现一次', async () => {
+  const environments = [
+    { envId: 'env-attn', name: '需处理环境', status: makeStatus({ envId: 'env-attn', overlayBlocked: true }) },
+    { envId: 'env-running', name: '运行环境', status: makeStatus({ envId: 'env-running' }) },
+    { envId: 'env-paused', name: '暂停环境', status: makeStatus({ envId: 'env-paused', session: 'paused' }) },
+    { envId: 'env-offline', name: '离线环境', status: makeStatus({ envId: 'env-offline', edge: 'stopped', session: 'closed' }) },
+  ];
+  const { w } = await boot({
+    fleetGet: async () => ({
+      provider: 'adspower',
+      selectedEnvId: 'env-running',
+      railCollapsed: false,
+      environments,
+    }),
+  }, {
+    railCollapsed: false,
+    environments: environments.map((env) => ({ profileId: env.envId, name: env.name, platform: 'xiaohongshu' })),
+  });
+
+  const list = w.document.querySelector('#rail-list')!;
+  const groupTitles = [...list.querySelectorAll('.rail-group')].map((group) => group.firstChild?.textContent?.trim());
+  assert.deepEqual(groupTitles, ['需要处理', '运行中', '暂停', '离线']);
+  assert.doesNotMatch(list.textContent || '', /暂停\s*·\s*离线/);
+
+  const sequence = [...list.children].map((node) =>
+    node.classList.contains('rail-group')
+      ? `group:${node.firstChild?.textContent?.trim()}`
+      : `row:${(node as HTMLElement).dataset.envId}`,
+  );
+  assert.deepEqual(sequence, [
+    'group:需要处理', 'row:env-attn',
+    'group:运行中', 'row:env-running',
+    'group:暂停', 'row:env-paused',
+    'group:离线', 'row:env-offline',
+  ]);
+  for (const env of environments) {
+    assert.equal(list.querySelectorAll(`.rail-row[data-env-id="${env.envId}"]`).length, 1, `${env.name} 只属于一个分组`);
+  }
 });
 
 test('环境头像三态：①未选中→选中 ②再点→抬前显示（shown 态）③再点→归位（撤 shown）', async () => {
