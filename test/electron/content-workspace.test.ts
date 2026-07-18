@@ -69,10 +69,10 @@ test('标题栏灵感入口显示权威汇总，储备条只按精选总数并�
     },
   });
 
-  controller.setEnvironment({ envId: 'env-a', label: '账号 A' });
+  controller.setEnvironment({ envId: 'env-a', label: '账号 A', platform: 'xiaohongshu' });
   assert.equal($(window, '#content-library-entry-count').textContent, '—');
   assert.equal($(window, '#content-library-entry-draft-count').textContent, '—');
-  controller.setEnvironment({ envId: 'env-b', label: '账号 B' });
+  controller.setEnvironment({ envId: 'env-b', label: '账号 B', platform: 'xiaohongshu' });
   await flush();
   assert.deepEqual(summaryCalls, ['env-a', 'env-b']);
   assert.equal($(window, '#content-library-entry-count').textContent, '36');
@@ -92,11 +92,56 @@ test('标题栏普通储备为蓝色区间，成稿数不驱动条宽', async ()
   const { window, controller } = boot({
     curatedSummary: async () => ({ ok: true, data: { total: 24, referenceDraftCount: 700 } }),
   });
-  controller.setEnvironment({ envId: 'env-a', label: '晚风手作' });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
   await flush();
   assert.equal($(window, '#content-library-entry').style.getPropertyValue('--inspiration-fill'), '80%');
   assert.equal($(window, '#content-library-entry').classList.contains('is-rich'), false);
   assert.equal($(window, '#content-library-entry-draft-count').textContent, '700');
+});
+
+test('灵感入口只在小红书环境展示，非 XHS 不取数、不打开且切换时关闭旧页面', async () => {
+  const summaryCalls: string[] = [];
+  const { window, controller } = boot({
+    curatedSummary: async (envId: string) => {
+      summaryCalls.push(envId);
+      return { ok: true, data: { total: 8, referenceDraftCount: 2 } };
+    },
+    curatedList: async () => ({ ok: true, data: { items: [], total: 0, referenceDraftCount: 2 } }),
+  });
+  const entry = $(window, '#content-library-entry');
+
+  controller.setEnvironment({ envId: 'env-fb', label: 'Facebook 账号', platform: 'facebook' });
+  await flush();
+  assert.equal(hidden(entry), true);
+  assert.deepEqual(summaryCalls, []);
+  entry.dispatchEvent(new window.Event('click'));
+  assert.equal(controller.currentPage(), 'home');
+
+  controller.setEnvironment({ envId: 'env-wechat', label: '视频号账号', platform: 'wechat_channels' });
+  await flush();
+  assert.equal(hidden(entry), true);
+  assert.deepEqual(summaryCalls, []);
+
+  controller.setEnvironment({ envId: 'env-xhs', label: '小红书账号', platform: 'xiaohongshu' });
+  await flush();
+  assert.equal(hidden(entry), false);
+  assert.deepEqual(summaryCalls, ['env-xhs']);
+  entry.dispatchEvent(new window.Event('click'));
+  await flush();
+  assert.equal(controller.currentPage(), 'library');
+  assert.equal(hidden($(window, '#content-workspace')), false);
+  assert.ok(summaryCalls.length >= 1);
+  assert.equal(summaryCalls.every((envId) => envId === 'env-xhs'), true);
+  const xhsSummaryCallCount = summaryCalls.length;
+
+  controller.setEnvironment({ envId: 'env-fb', label: 'Facebook 账号', platform: 'facebook' });
+  await flush();
+  assert.equal(hidden(entry), true);
+  assert.equal(controller.currentPage(), 'home');
+  assert.equal(hidden($(window, '#content-workspace')), true);
+  assert.equal(hidden($(window, '#legacy-workspace')), false);
+  assert.equal(summaryCalls.length, xhsSummaryCallCount);
+  assert.equal(summaryCalls.every((envId) => envId === 'env-xhs'), true);
 });
 
 test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async () => {
@@ -108,7 +153,7 @@ test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async
     },
     curatedGet: async (_envId: string, id: number) => ({ ok: true, data: { item: detail({ id, title: `详情 ${id}` }) } }),
   });
-  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', inspirationCount: 25 });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu', inspirationCount: 25 });
   $(window, '#content-library-entry').dispatchEvent(new window.Event('click'));
   await flush();
 
@@ -150,7 +195,7 @@ test('无参考图时禁用图文模式，文字参照只呈现诚实排队回�
       return { ok: true, data: { task: { id: '12345678-1234-4234-8234-123456789012', status: 'queued' } } };
     },
   });
-  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', inspirationCount: 1 });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu', inspirationCount: 1 });
   controller.openLibrary();
   await flush();
   ($(window, '.curated-card')).dispatchEvent(new window.Event('click'));
@@ -177,10 +222,10 @@ test('切账号丢弃旧请求，稿件审核在账号切换时关闭且不残�
       ? pendingA
       : { ok: true, data: { items: [listItem({ title: 'B 的灵感' })], total: 1 } },
   });
-  controller.setEnvironment({ envId: 'env-a', label: '账号 A', inspirationCount: 1 });
+  controller.setEnvironment({ envId: 'env-a', label: '账号 A', platform: 'xiaohongshu', inspirationCount: 1 });
   controller.openLibrary();
   await flush(2);
-  controller.setEnvironment({ envId: 'env-b', label: '账号 B', inspirationCount: 1 });
+  controller.setEnvironment({ envId: 'env-b', label: '账号 B', platform: 'xiaohongshu', inspirationCount: 1 });
   await flush(4);
   resolveA?.({ ok: true, data: { items: [listItem({ title: 'A 的迟到灵感' })], total: 1 } });
   await flush(4);
@@ -191,7 +236,7 @@ test('切账号丢弃旧请求，稿件审核在账号切换时关闭且不残�
   controller.openDraft();
   assert.equal(controller.isDraftOpen(), true);
   assert.ok($(window, '#publish-preview-panel').classList.contains('open'));
-  controller.setEnvironment({ envId: 'env-c', label: '账号 C', inspirationCount: 0 });
+  controller.setEnvironment({ envId: 'env-c', label: '账号 C', platform: 'xiaohongshu', inspirationCount: 0 });
   assert.equal(controller.isDraftOpen(), false);
   assert.equal(hidden($(window, '#content-workspace')), true);
   assert.equal(hidden($(window, '#legacy-workspace')), false);
@@ -199,7 +244,7 @@ test('切账号丢弃旧请求，稿件审核在账号切换时关闭且不残�
 
 test('稿件审核占满主内容区，返回/关闭不影响主窗口壳', () => {
   const { window, controller } = boot({});
-  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', inspirationCount: 2 });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu', inspirationCount: 2 });
   controller.openDraft();
   assert.equal(hidden($(window, '#content-workspace')), false);
   assert.equal(hidden($(window, '#legacy-workspace')), true);
@@ -225,7 +270,7 @@ test('排队请求在途时离开创作页，不把忙碌锁留死（回来仍�
       return new Promise((resolve) => { deferred.resolve = resolve; });
     },
   });
-  controller.setEnvironment({ envId: 'env-a', label: '晚风手作' });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
   controller.openLibrary();
   await flush();
   $(window, '.curated-card').dispatchEvent(new window.Event('click'));
@@ -265,7 +310,7 @@ test('已受理但已越过 queued 的任务如实报「已受理」，绝不谎
       data: { triggered: true, created: false, task: { id: 'task-abcdefgh', status: 'executing', version: 3 } },
     }),
   });
-  controller.setEnvironment({ envId: 'env-a', label: '晚风手作' });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
   controller.openLibrary();
   await flush();
   $(window, '.curated-card').dispatchEvent(new window.Event('click'));
@@ -289,14 +334,14 @@ test('切账号时详情页与创作页的迟到回包一律丢弃（不只列�
     curatedGet: async () => new Promise((resolve) => { detailDeferred.resolve = resolve; }),
     curatedCreatePost: async () => ({ ok: true, data: { triggered: true, created: true, task: { id: 'task-x', status: 'queued', version: 1 } } }),
   });
-  controller.setEnvironment({ envId: 'env-a', label: '账号 A' });
+  controller.setEnvironment({ envId: 'env-a', label: '账号 A', platform: 'xiaohongshu' });
   controller.openLibrary();
   await flush();
   $(window, '.curated-card').dispatchEvent(new window.Event('click'));
   await flush();
 
   // 详情还在途 → 切到账号 B → A 的详情回包必须不得渲染到 B 名下。
-  controller.setEnvironment({ envId: 'env-b', label: '账号 B' });
+  controller.setEnvironment({ envId: 'env-b', label: '账号 B', platform: 'xiaohongshu' });
   await flush();
   detailDeferred.resolve?.({ ok: true, data: { item: detail({ title: 'A 账号的私有灵感' }) } });
   await flush();
@@ -308,7 +353,7 @@ test('汇总读失败时标题栏说失败而不是永远「加载中」，储�
   const { window, controller } = boot({
     curatedSummary: async () => ({ ok: false, status: 503, error: 'curated_content_unavailable', reason: 'curated_content_unavailable' }),
   });
-  controller.setEnvironment({ envId: 'env-a', label: '晚风手作' });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
   await flush();
   const entry = $(window, '#content-library-entry');
   const label = entry.getAttribute('aria-label') ?? '';
@@ -323,7 +368,7 @@ test('真实 0 条精选不得被画成「未知」', async () => {
   const { window, controller } = boot({
     curatedSummary: async () => ({ ok: true, data: { total: 0, referenceDraftCount: 0 } }),
   });
-  controller.setEnvironment({ envId: 'env-a', label: '晚风手作' });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
   await flush();
   const entry = $(window, '#content-library-entry');
   assert.equal(entry.classList.contains('is-unknown'), false, '真实 0 是已知值，不是未知');

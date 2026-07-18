@@ -9,6 +9,7 @@ const electronDir = join(here, '../../src/electron');
 const main = readFileSync(join(electronDir, 'main.cjs'), 'utf8');
 const preload = readFileSync(join(electronDir, 'preload.cjs'), 'utf8');
 const renderer = readFileSync(join(electronDir, 'renderer/content-workspace.js'), 'utf8');
+const appRenderer = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
 const styles = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 
@@ -63,6 +64,13 @@ test('标题栏只保留紧凑灵感入口，并锁定低干扰蓝色与高储�
   }
   assert.match(styles, /height:\s*28px/);
   assert.match(styles, /\.cle-track\s*\{[^}]*height:\s*3px/s);
+});
+
+test('应用壳把当前平台交给内容工作区，由内容控制器执行 XHS 门禁', () => {
+  assert.match(
+    appRenderer,
+    /contentWorkspace\.setEnvironment\(envId \? \{[\s\S]*?platform: selectedEnvPlatform\(\),[\s\S]*?\} : null\)/,
+  );
 });
 
 // 注：陈旧响应丢弃、账号切换失效、排队回执诚实性等**行为**一律由 content-workspace.test.ts

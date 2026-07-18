@@ -172,6 +172,10 @@
       return !root.classList.contains('hidden');
     }
 
+    function inspirationAvailable() {
+      return environment?.platform === 'xiaohongshu';
+    }
+
     function captureSourceWorkspace() {
       sourceWorkspace = interactionRoot && !interactionRoot.classList.contains('hidden') ? 'interaction' : 'legacy';
     }
@@ -279,19 +283,23 @@
 
     function updateEntry() {
       const state = envState();
+      const available = inspirationAvailable();
       const count = finiteCount(state?.inspirationCount);
       const draftCount = finiteCount(state?.referenceDraftCount);
       const loading = Boolean(state?.summaryLoading);
       const failed = Boolean(state?.summaryFailed);
       const fill = count === null ? 0 : Math.min(100, (count / INSPIRATION_SATURATION_COUNT) * 100);
-      if (fields.entry) fields.entry.disabled = !environment;
+      if (fields.entry) {
+        fields.entry.classList.toggle('hidden', !available);
+        fields.entry.disabled = !available;
+      }
       if (fields.entryCount) fields.entryCount.textContent = count === null ? '—' : String(count);
       if (fields.entryDraftCount) fields.entryDraftCount.textContent = draftCount === null ? '—' : String(draftCount);
       if (fields.entry) {
         fields.entry.style.setProperty('--inspiration-fill', `${fill}%`);
         fields.entry.classList.toggle('is-rich', count !== null && count >= INSPIRATION_SATURATION_COUNT);
         // 数值未知时储备条必须与「真的 0 条」不同：0% 宽度和真实零值像素级等同，会把「没读到」画成「没有」。
-        fields.entry.classList.toggle('is-unknown', Boolean(environment) && count === null);
+        fields.entry.classList.toggle('is-unknown', available && count === null);
         fields.entry.setAttribute('aria-busy', loading ? 'true' : 'false');
         // 「加载中」只在真的在加载时说；读失败必须说失败，不能永远停在加载中。
         const unknownLabel = loading ? '数据加载中' : failed ? '数据读取失败' : '数据暂缺';
@@ -312,7 +320,7 @@
 
     async function loadSummary(force = false) {
       const state = envState();
-      if (!state || !environment || typeof api.curatedSummary !== 'function') return;
+      if (!state || !inspirationAvailable() || typeof api.curatedSummary !== 'function') return;
       if (state.summaryLoading || (!force && state.inspirationCount !== null && state.referenceDraftCount !== null)) return;
       const capturedEnvId = environment.envId;
       const capturedEpoch = ++summaryEpoch;
@@ -471,7 +479,7 @@
     }
 
     function openLibrary() {
-      if (!environment) return;
+      if (!inspirationAvailable()) return;
       if (!visible()) {
         captureSourceWorkspace();
         setWorkspaceVisible(true);
@@ -669,8 +677,9 @@
       const normalized = next && next.envId ? {
         envId: String(next.envId),
         label: String(next.label || '当前账号'),
+        platform: String(next.platform || '').trim().toLowerCase(),
       } : null;
-      const changed = normalized?.envId !== environment?.envId;
+      const changed = normalized?.envId !== environment?.envId || normalized?.platform !== environment?.platform;
       if (changed && environment) {
         const previousState = states.get(environment.envId);
         if (previousState) {
@@ -693,9 +702,9 @@
       summaryEpoch += 1;
       currentDetail = null;
       createBusy = false;
-      if (environment) void loadSummary(true);
+      if (inspirationAvailable()) void loadSummary(true);
       if (!visible()) return;
-      if (!environment || currentPage === 'draft') {
+      if (!environment || currentPage === 'draft' || !inspirationAvailable()) {
         close();
         return;
       }

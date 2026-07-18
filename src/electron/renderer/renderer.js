@@ -241,6 +241,7 @@ function syncContentWorkspace(status = currentStatus) {
   contentWorkspace.setEnvironment(envId ? {
     envId,
     label: (status && status.account && status.account.name) || (selected && selected.name) || '当前账号',
+    platform: selectedEnvPlatform(),
   } : null);
 }
 
