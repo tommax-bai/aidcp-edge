@@ -917,6 +917,12 @@ test('慢启动行：常驻说明明确设置跟随环境与当前账号档位',
   assert.equal(copy, '设置跟随当前环境。开启后头 7 天按曲线逐日放开量，7天后按当前账号档位运行。');
 });
 
+test('精选详情宽屏列独立滚动并在窄屏恢复单列文档流', () => {
+  assert.match(styles, /\.content-workspace\.curated-detail-mode\s*\{[^}]*height:\s*calc\(100vh - 78px\);[^}]*min-height:\s*0;/s);
+  assert.match(styles, /\.curated-detail-media,\s*\.curated-detail-copy\s*\{[^}]*padding-bottom:\s*12px;[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain;/s);
+  assert.match(styles, /@media \(max-width:\s*680px\)[\s\S]*?\.curated-detail-media,\s*\.curated-detail-copy\s*\{[^}]*padding-bottom:\s*0;[^}]*overflow:\s*visible;/s);
+});
+
 test('慢启动帮助：问号可聚焦，hover/focus 展示 7×6 Facebook 曲线限额表', () => {
   const dom = new JSDOM(html);
   const trigger = dom.window.document.querySelector('#slow-start-help-trigger');
