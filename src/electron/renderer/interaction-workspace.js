@@ -118,7 +118,7 @@
   function friendlyError(error) {
     const code = error && error.code;
     if (code === 'INTERACTION_VERSION_CONFLICT' || code === 'INTERACTION_STATE_CONFLICT') return '这条互动已在别处更新。当前输入已保留，请重新加载详情后再操作。';
-    if (code === 'INTERACTION_PERMISSION_DENIED') return '当前登录没有查看或操作这条互动的权限。';
+    if (code === 'INTERACTION_PERMISSION_DENIED') return '平台尚未确认当前操作所需的渠道能力，请检查上方能力状态。';
     if (code === 'INTERACTION_NOT_FOUND' || code === 'INTERACTION_SCOPE_MISMATCH') return '这条互动已不可用，或不属于当前环境。';
     if (code === 'INTERACTION_CONFIG_MISSING') return '当前账号尚未发布回复配置。互动仍会保留，但暂时不能生成或发送。';
     if (code === 'INTERACTION_RATE_LIMITED' || code === 'WECHAT_RATE_LIMITED') return '平台正在限流，请稍后再试。';

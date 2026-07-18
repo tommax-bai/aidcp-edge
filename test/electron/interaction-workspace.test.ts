@@ -1043,6 +1043,20 @@ test('发送能力只阻止发送；配置缺失只阻止依赖配置的动作�
   assert.match($(missing.window, '#iw-config-guidance').textContent || '', /不会自动开启回复或发送/);
 });
 
+test('平台能力拒绝不会被误报为客户登录没有互动权限', async () => {
+  const current = await boot({
+    api: {
+      interactionRegenerate: async () => apiError('INTERACTION_PERMISSION_DENIED', '平台当前未确认回复能力。', 403),
+    },
+  });
+  await openThread(current.window);
+  $(current.window, '[data-iw-action="regenerate"]').dispatchEvent(new current.window.Event('click', { bubbles: true }));
+  await flush();
+  const copy = $(current.window, '.iw-action-error').textContent || '';
+  assert.match(copy, /平台尚未确认当前操作所需的渠道能力/);
+  assert.doesNotMatch(copy, /当前登录没有查看或操作/);
+});
+
 test('未读提醒按环境建立无通知基线，之后每个新 messageId 最多提醒一次', async () => {
   const callsByEnv = new Map<string, number>();
   let exposeNewMessage = false;

@@ -35,6 +35,8 @@ test('main 锁定 customer-auth 路径和方法，并对白名单参数与 envKe
   assert.match(main, /responseEnvKey !== envKey/, 'Cloud 成功响应必须由 main 再校验 envKey');
   assert.match(main, /pathname: `\/environments\/\$\{encodeURIComponent\(envKey\)\}/, '路径由 main 从 envKey 组装');
   assert.match(main, /token: clientSession\.token/, 'customer-auth token 只在 main 注入');
+  assert.match(main, /pathname: `\/environments\/\$\{encodeURIComponent\(envKey\)\}\/replies\/\$\{encodeURIComponent\(jobId\)\}\/draft`/,
+    '草稿写入必须使用公开的 /replies/:jobId/draft 路由');
   assert.match(main, /method: 'PUT',[\s\S]*body: \{ expectedVersion, finalText: args\.finalText \}/, '草稿写入锁定 PUT 与 CAS body');
   assert.match(main, /interaction:send[\s\S]*body: \{ expectedVersion \},[\s\S]*idempotencyKey/, '发送必须同时带 CAS 与幂等键');
   assert.match(main, /interaction:sync[\s\S]*idempotencyKey/, '同步必须带幂等键');
