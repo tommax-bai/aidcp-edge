@@ -3297,7 +3297,17 @@ body { margin: 0; }
 .curated-card-top strong { overflow: hidden; font-size: 13px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .curated-card-top em, .curated-detail-badge { flex: 0 0 auto; padding: 3px 7px; border-radius: 999px; color: #6d7789; background: #eef1f5; font-size: 9.5px; font-style: normal; font-weight: 700; }
 .curated-card-top em.ready, .curated-detail-badge.ready { color: #0e8058; background: var(--good-bg); }
-.curated-card-body { display: -webkit-box; overflow: hidden; color: #536176; font-size: 11.5px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.curated-card-body {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #536176;
+  font-family: system-ui, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", sans-serif, BlinkMacSystemFont, "Helvetica Neue", Arial, "PingFang SC", "PingFang TC", "PingFang HK", "Microsoft Yahei", "Microsoft JhengHei";
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
 .curated-card-meta { color: var(--faint); font-size: 10.5px; }
 .curated-stats { display: flex; flex-wrap: wrap; gap: 10px; color: #728096; font-size: 10.5px; }
 .cw-pagination { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 13px; color: var(--mute); font-size: 11.5px; }
@@ -3351,7 +3361,16 @@ body { margin: 0; }
 .curated-detail-no-image { display: grid; min-height: 220px; place-items: center; border: 1px dashed var(--hair-strong); border-radius: 13px; color: var(--faint); background: #f8fafc; font-size: 11.5px; }
 .curated-detail-copy h2 { margin: 10px 0 5px; font-size: 21px; line-height: 1.4; overflow-wrap: anywhere; }
 .curated-detail-author { margin: 0 0 9px; color: var(--faint); font-size: 11.5px; }
-.curated-detail-body { margin-top: 17px; color: #344157; font-size: 13.5px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.curated-detail-body {
+  margin-top: 17px;
+  color: #344157;
+  font-family: system-ui, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", sans-serif, BlinkMacSystemFont, "Helvetica Neue", Arial, "PingFang SC", "PingFang TC", "PingFang HK", "Microsoft Yahei", "Microsoft JhengHei";
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .curated-detail-topics { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
 .curated-detail-topics span { padding: 4px 8px; border-radius: 999px; color: #4259a3; background: #eef2ff; font-size: 11px; }
 .curated-detail-actions { display: flex; align-items: center; justify-content: flex-end; margin-top: 20px; }
