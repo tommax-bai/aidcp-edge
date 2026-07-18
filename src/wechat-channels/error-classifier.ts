@@ -29,6 +29,8 @@ export class WechatChannelsError extends Error {
     readonly retryable: boolean,
     readonly retryAfterMs: number | null = null,
     readonly requestDispatched = false,
+    readonly httpStatus: number | null = null,
+    readonly platformCode: string | number | null = null,
   ) {
     super(message);
     this.name = 'WechatChannelsError';
@@ -55,20 +57,41 @@ export function classifyHttpFailure(params: {
 }): WechatChannelsError {
   const { endpoint, status } = params;
   const hint = `${params.platformCode ?? ''} ${params.platformMessage ?? ''}`.toLowerCase();
+  if (String(params.platformCode ?? '') === '300334') {
+    return new WechatChannelsError(
+      'auth_expired', endpoint, 'WeChat Channels authorization context must be refreshed', false,
+      null, params.requestDispatched ?? true, status, params.platformCode ?? null,
+    );
+  }
   if (status === 401 || /(?:not.?login|login.?expired|auth.?expired|未登录|登录失效|登录过期)/i.test(hint)) {
-    return new WechatChannelsError('auth_expired', endpoint, 'WeChat Channels authentication is required', false, null, true);
+    return new WechatChannelsError(
+      'auth_expired', endpoint, 'WeChat Channels authentication is required', false,
+      null, true, status, params.platformCode ?? null,
+    );
   }
   if (/(?:captcha|challenge|verify|risk.?control|验证码|风控|验证)/i.test(hint)) {
-    return new WechatChannelsError('challenge_required', endpoint, 'WeChat Channels requires local browser verification', false, null, true);
+    return new WechatChannelsError(
+      'challenge_required', endpoint, 'WeChat Channels requires local browser verification', false,
+      null, true, status, params.platformCode ?? null,
+    );
   }
   if (status === 429 || /(?:too.?many|rate.?limit|频繁|限流)/i.test(hint)) {
-    return new WechatChannelsError('rate_limited', endpoint, 'WeChat Channels rate limited the request', true, params.retryAfterMs ?? null, true);
+    return new WechatChannelsError(
+      'rate_limited', endpoint, 'WeChat Channels rate limited the request', true,
+      params.retryAfterMs ?? null, true, status, params.platformCode ?? null,
+    );
   }
   if (status === 403 || /(?:permission|forbidden|无权限|拒绝访问)/i.test(hint)) {
-    return new WechatChannelsError('permission_denied', endpoint, 'WeChat Channels denied the requested capability', false, null, true);
+    return new WechatChannelsError(
+      'permission_denied', endpoint, 'WeChat Channels denied the requested capability', false,
+      null, true, status, params.platformCode ?? null,
+    );
   }
   if (status >= 500 || status === 408 || status === 425) {
-    return new WechatChannelsError('transient_network', endpoint, 'WeChat Channels upstream is temporarily unavailable', true, params.retryAfterMs ?? null, true);
+    return new WechatChannelsError(
+      'transient_network', endpoint, 'WeChat Channels upstream is temporarily unavailable', true,
+      params.retryAfterMs ?? null, true, status, params.platformCode ?? null,
+    );
   }
   return new WechatChannelsError(
     'platform_rejected',
@@ -77,7 +100,26 @@ export function classifyHttpFailure(params: {
     false,
     null,
     params.requestDispatched ?? true,
+    status,
+    params.platformCode ?? null,
   );
+}
+
+export function safeWechatErrorDiagnostic(error: WechatChannelsError): string {
+  const parts = [
+    `code=${error.code}`,
+    `endpoint=${safeDiagnosticToken(error.endpoint)}`,
+  ];
+  if (error.httpStatus !== null) parts.push(`http_status=${error.httpStatus}`);
+  const platformCode = safeDiagnosticToken(error.platformCode);
+  if (platformCode !== null) parts.push(`platform_code=${platformCode}`);
+  return parts.join(' ');
+}
+
+function safeDiagnosticToken(value: unknown): string | null {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const token = String(value).trim();
+  return /^[A-Za-z0-9_.:-]{1,64}$/.test(token) ? token : 'redacted';
 }
 
 export function asWechatChannelsError(error: unknown, endpoint: string, dispatched = false): WechatChannelsError {

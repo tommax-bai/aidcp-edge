@@ -6,7 +6,10 @@ import {
   WechatChannelsApiClient,
   type WechatChannelsEndpoint,
 } from '../../src/wechat-channels/api-client.js';
-import { WechatChannelsError } from '../../src/wechat-channels/error-classifier.js';
+import {
+  safeWechatErrorDiagnostic,
+  WechatChannelsError,
+} from '../../src/wechat-channels/error-classifier.js';
 import { serializeWechatRequest, structuralRequestShape } from '../../src/wechat-channels/request-descriptors.js';
 import type { WechatSessionMaterial } from '../../src/wechat-channels/types.js';
 
@@ -356,6 +359,61 @@ test('wechat api: auth/rate errors remain classified and non-empty DMs retain sa
   assert.equal(updates.nextCursor, 'incremental-cookie');
   assert.equal(updates.hasMore, false);
   assert.doesNotMatch(JSON.stringify(updates), /aeskey|must-not-survive|rawContent/);
+});
+
+test('wechat api: platform code 300334 requires session refresh while adjacent rejects remain upstream failures', async () => {
+  const expiredApi = new WechatChannelsApiClient({
+    maxRetries: 0,
+    fetchImpl: (async () => json({ errCode: 300334, errMsg: 'request failed with cookie-top-secret' })) as typeof fetch,
+  });
+  await assert.rejects(
+    () => expiredApi.listPosts(SESSION, null),
+    (error: unknown) => {
+      assert.ok(error instanceof WechatChannelsError);
+      assert.equal(error.category, 'auth_expired');
+      assert.equal(error.code, 'WECHAT_AUTH_REQUIRED');
+      assert.equal(error.endpoint, 'postList');
+      assert.equal(error.httpStatus, 200);
+      assert.equal(error.platformCode, 300334);
+      assert.equal(error.requestDispatched, true);
+      assert.equal(
+        safeWechatErrorDiagnostic(error),
+        'code=WECHAT_AUTH_REQUIRED endpoint=postList http_status=200 platform_code=300334',
+      );
+      assert.doesNotMatch(error.message, /cookie-top-secret|request failed/);
+      return true;
+    },
+  );
+
+  const rejectedApi = new WechatChannelsApiClient({
+    maxRetries: 0,
+    fetchImpl: (async () => json({ errCode: 300335, errMsg: 'request failed' })) as typeof fetch,
+  });
+  await assert.rejects(
+    () => rejectedApi.listPosts(SESSION, null),
+    (error: unknown) =>
+      error instanceof WechatChannelsError &&
+      error.category === 'platform_rejected' &&
+      error.code === 'INTERACTION_UPSTREAM_UNAVAILABLE' &&
+      error.httpStatus === 200 &&
+      error.platformCode === 300335,
+  );
+
+  const unsafeMetadata = new WechatChannelsError(
+    'platform_rejected',
+    'postList',
+    'response-body-secret',
+    false,
+    null,
+    true,
+    200,
+    'unsafe platform code',
+  );
+  assert.equal(
+    safeWechatErrorDiagnostic(unsafeMetadata),
+    'code=INTERACTION_UPSTREAM_UNAVAILABLE endpoint=postList http_status=200 platform_code=redacted',
+  );
+  assert.doesNotMatch(safeWechatErrorDiagnostic(unsafeMetadata), /response-body-secret|unsafe platform code/);
 });
 
 test('wechat api: missing pagination/direction fields trip schema circuit and explicit negative writes are not schema drift', async () => {

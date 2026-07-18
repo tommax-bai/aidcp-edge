@@ -228,6 +228,8 @@ export class WechatChannelsApiClient {
           classified.retryable,
           classified.retryAfterMs,
           true,
+          classified.httpStatus,
+          classified.platformCode,
         )
       : classified;
     if (safe.category === 'schema_changed') {
@@ -299,7 +301,10 @@ export class WechatChannelsApiClient {
         body = JSON.parse(text);
       } catch {
         if (!response.ok) throw classifyHttpFailure({ endpoint, status: response.status, retryAfterMs, requestDispatched: true });
-        throw new WechatChannelsError('transient_network', endpoint, 'WeChat Channels returned a temporary non-JSON response', true, null, true);
+        throw new WechatChannelsError(
+          'transient_network', endpoint, 'WeChat Channels returned a temporary non-JSON response', true,
+          null, true, response.status, null,
+        );
       }
       const { code, message } = platformStatus(body);
       if (!response.ok || (code !== null && String(code) !== '0')) {

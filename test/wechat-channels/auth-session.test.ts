@@ -558,6 +558,73 @@ test('wechat auth: rate limiting follows retry-after and recovers without openin
   assert.deepEqual(timers.pendingDelays(), []);
 });
 
+test('wechat auth: an expired runtime API session is recaptured through the existing browser sidecar', async () => {
+  const logs: string[] = [];
+  const sidecar = new FakeSidecar(SESSION);
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api: apiReturning(IDENTITY),
+    sidecar,
+    store: memoryStore(),
+    probeEnabledReads: async () => ({ ok: true }),
+    logImpl: (message) => logs.push(message),
+  });
+  await auth.initialize();
+  assert.equal(auth.getSnapshot().status, 'active');
+  assert.equal(sidecar.opens, 0);
+
+  auth.markApiFailure(new WechatChannelsError(
+    'auth_expired',
+    'postList',
+    'request failed with cookie-top-secret',
+    false,
+    null,
+    true,
+    200,
+    300334,
+  ));
+  await flushAsync();
+
+  assert.equal(sidecar.opens, 1);
+  assert.equal(sidecar.closes, 1);
+  assert.equal(auth.getSnapshot().state, 'api_only_running');
+  assert.equal(auth.getSnapshot().status, 'active');
+  assert.equal(auth.getSnapshot().reasonCode, null);
+  assert.ok(logs.some((line) => line.includes('trigger=runtime_auth_expired')));
+  assert.doesNotMatch(logs.join('\n'), /request failed|cookie-top-secret/);
+});
+
+test('wechat auth: an unrelated platform rejection does not open the browser', async () => {
+  const sidecar = new FakeSidecar(null);
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api: apiReturning(IDENTITY),
+    sidecar,
+    store: memoryStore(),
+    probeEnabledReads: async () => ({ ok: true }),
+    logImpl: () => {},
+  });
+  await auth.initialize();
+
+  auth.markApiFailure(new WechatChannelsError(
+    'platform_rejected',
+    'postList',
+    'unrelated rejection',
+    false,
+    null,
+    true,
+    200,
+    300335,
+  ));
+  await flushAsync();
+
+  assert.equal(sidecar.opens, 0);
+  assert.equal(auth.getSnapshot().state, 'api_only_running');
+  assert.equal(auth.getSnapshot().status, 'active');
+});
+
 test('wechat auth: transient recovery backs off to its cap, keeps retrying, and disable cancels it', async () => {
   const timers = new FakeTimers();
   const sidecar = new FakeSidecar(null);

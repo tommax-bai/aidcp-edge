@@ -14,7 +14,7 @@ import type { WechatChannelsApiClient } from './api-client.js';
 import type { WechatAuthCoordinator } from './auth-session.js';
 import { WechatCommentSynchronizer } from './comment-sync.js';
 import { WechatDmSynchronizer } from './dm-sync.js';
-import { WechatChannelsError } from './error-classifier.js';
+import { safeWechatErrorDiagnostic, WechatChannelsError } from './error-classifier.js';
 import type { WechatCapabilityState } from './feature-flags.js';
 import { WechatReplySender } from './reply-sender.js';
 import type { WechatRuntimeStateStore } from './state-store.js';
@@ -268,10 +268,11 @@ export class WechatChannelsConnector implements InteractionConnector {
         requestedAt: this.now(),
       });
     } catch (error) {
+      const diagnostic = error instanceof WechatChannelsError
+        ? safeWechatErrorDiagnostic(error)
+        : 'code=INTERACTION_INTERNAL_ERROR';
       this.log(
-        `[wechat-channels] scheduled ${channel} sync stopped safely: ${
-          error instanceof WechatChannelsError ? error.code : 'INTERACTION_INTERNAL_ERROR'
-        }`,
+        `[wechat-channels] scheduled ${channel} sync stopped safely: ${diagnostic}`,
       );
     }
   }

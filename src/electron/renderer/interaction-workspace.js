@@ -216,9 +216,7 @@
     function scheduleListPoll(capturedEpoch, envKey) {
       clearListPoll();
       const bootstrap = !state.auth;
-      const readState = currentReadState();
       if (!active || !env || env.connectivity !== 'connected') return;
-      if (!bootstrap && (state.auth.status !== 'active' || !readState.storedEnabled)) return;
       listPollTimer = global.setTimeout(() => {
         if (isCurrent(capturedEpoch, envKey) && !state.listLoading && !state.listAppending) {
           void loadList({ preserveSelection: true });
@@ -580,6 +578,7 @@
       const browserState = auth && auth.browserState;
       const browserText = browserState === 'closed' && status === 'active'
         ? '自动化浏览器：后台模式'
+        : browserState === 'closed' ? '自动化浏览器：已关闭'
         : browserState === 'open' ? '自动化浏览器：已打开'
           : browserState === 'opening' ? '自动化浏览器：正在打开'
             : browserState === 'closing' ? '自动化浏览器：正在关闭'

@@ -1427,3 +1427,66 @@ test('宽屏收件箱是双列且详情不再覆盖列表，窄工作区仍回�
   assert.doesNotMatch(css, /\.iw-detail \{[\s\S]{0,120}position: absolute;/, '详情不得再绝对定位覆盖左列');
   assert.match(css, /@container \(max-width: 640px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column; overflow: visible; \}/);
 });
+
+test('interaction workspace keeps polling while auth recovery is required and renders closed browser truthfully', async () => {
+  const closed = await boot({
+    api: {
+      interactionList: async (args: any) => {
+        const envelope = scopeEnvelope(listFixture, args.envKey);
+        envelope.data.auth.status = 'login_required';
+        envelope.data.auth.reasonCode = 'WECHAT_AUTH_REQUIRED';
+        envelope.data.auth.browserState = 'closed';
+        return apiResult(envelope);
+      },
+    },
+  });
+  assert.equal($(closed.window, '#iw-browser').textContent, '自动化浏览器：已关闭');
+  closed.window.close();
+
+  let listCount = 0;
+  const current = await boot({
+    listPollDelayMs: 10,
+    api: {
+      interactionList: async (args: any) => {
+        listCount += 1;
+        const envelope = scopeEnvelope(listFixture, args.envKey);
+        envelope.data.auth.browserState = 'closed';
+        if (listCount === 1) {
+          envelope.data.auth.status = 'login_required';
+          envelope.data.auth.reasonCode = 'WECHAT_AUTH_REQUIRED';
+        }
+        return apiResult(envelope);
+      },
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await flush();
+
+  assert.ok(listCount >= 2, 'login_required must continue polling the Cloud projection');
+  assert.equal($(current.window, '#iw-browser').textContent, '自动化浏览器：后台模式');
+  assert.match($(current.window, '#iw-auth-status').textContent || '', /鉴权通过/);
+  current.window.close();
+});
+
+test('interaction workspace keeps polling when all read controls are disabled', async () => {
+  let listCount = 0;
+  const current = await boot({
+    listPollDelayMs: 10,
+    api: {
+      interactionList: async (args: any) => {
+        listCount += 1;
+        const envelope = scopeEnvelope(listFixture, args.envKey);
+        envelope.data.auth.runtimeControls.stored.commentsReadEnabled = false;
+        envelope.data.auth.runtimeControls.stored.dmReadEnabled = false;
+        return apiResult(envelope);
+      },
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await flush();
+
+  assert.ok(listCount >= 2, 'disabled reads must not freeze browser and auth status polling');
+  current.window.close();
+});
