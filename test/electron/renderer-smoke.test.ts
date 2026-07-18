@@ -780,9 +780,9 @@ test('慢启动行：静态节点在 #daily-summary 内、#quota-windows 之后'
     '慢启动行应排在 #quota-windows 之后');
 });
 
-test('慢启动行：常驻说明使用新的 7 天/账号档位短文案', () => {
+test('慢启动行：常驻说明明确设置跟随环境与当前账号档位', () => {
   const copy = new JSDOM(html).window.document.querySelector('.slow-start-copy')?.textContent?.trim();
-  assert.equal(copy, '开启后头 7 天按曲线逐日放开量，7天后按账号档位运行。');
+  assert.equal(copy, '设置跟随当前环境。开启后头 7 天按曲线逐日放开量，7天后按当前账号档位运行。');
 });
 
 test('慢启动帮助：问号可聚焦，hover/focus 展示 7×6 Facebook 曲线限额表', () => {
@@ -872,19 +872,41 @@ test('慢启动行：停止的环境经 env-scoped 读渲染真态、开关可�
   assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 3\/7 天/);
 });
 
-test('慢启动行：binding_unknown → 整行可见、开关禁用、专属可行动文案（非泛化兜底、非整行隐藏）', async () => {
+test('慢启动行：binding_unknown + active → 环境配置保持勾选可操作，不冒充账号已生效', async () => {
   const w = await boot(stoppedFbEnv(async () => ({
     ok: true,
-    data: { data: { envKey: 'fb_env', slowStart: { eligible: false, ineligibleReason: 'binding_unknown' } } },
+    data: { data: { envKey: 'fb_env', slowStart: {
+      state: 'active', day: 2, totalDays: 7, since: Date.now(), eligible: false, ineligibleReason: 'binding_unknown',
+    } } },
   })));
   for (let i = 0; i < 4; i++) await tick();
-  assert.ok(!hidden($(w, '#slow-start-row')), 'MUST NOT 整行隐藏（与修复前一模一样）');
+  assert.ok(!hidden($(w, '#slow-start-row')));
   const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
-  assert.equal(toggle.disabled, true);
+  assert.equal(toggle.disabled, false);
+  assert.equal(toggle.checked, true);
   const reason = $(w, '#slow-start-reason').textContent || '';
-  assert.match(reason, /尚未识别到该环境的账号/);
-  assert.match(reason, /启动一次该环境/, '给出可行动的下一步');
-  assert.notEqual(reason, '当前无法启用慢启动', '绝不落到泛化兜底');
+  assert.match(reason, /设置跟随当前环境/);
+  assert.match(reason, /登录账号后/);
+  assert.doesNotMatch($(w, '#slow-start-badge').textContent || '', /档位已更严|不额外限制/);
+});
+
+test('慢启动行：binding_unknown + off → 未绑定环境可在登录前预先开启', async () => {
+  const calls: unknown[] = [];
+  const stub = stoppedFbEnv(async () => ({
+    ok: true,
+    data: { data: { envKey: 'fb_env', slowStart: {
+      state: 'off', totalDays: 7, eligible: false, ineligibleReason: 'binding_unknown',
+    } } },
+  })) as Stub & { setSlowStart?: (args: unknown) => Promise<unknown> };
+  stub.setSlowStart = async (args: unknown) => { calls.push(args); return { ok: false, error: 'test_stop' }; };
+  const w = await boot(stub);
+  for (let i = 0; i < 4; i++) await tick();
+  const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  assert.equal(toggle.disabled, false);
+  assert.equal(toggle.checked, false);
+  toggle.click();
+  await tick();
+  assert.equal(JSON.stringify(calls), JSON.stringify([{ envKey: 'fb_env', enabled: true }]));
 });
 
 test('慢启动行：env-scoped 读够不到云端 → 就地如实展示失败，绝不静默吞', async () => {

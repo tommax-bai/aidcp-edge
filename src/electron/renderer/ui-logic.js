@@ -717,7 +717,7 @@
     return { rows, pendingCount: rows.filter((r) => r.needsAction).length };
   }
 
-  // ── 慢启动脚注行（change account-level-slow-start）──
+  // ── 环境级慢启动脚注行（change environment-level-slow-start）──
   //
   // 渲染契约（每一条都对着一个具体的谎）：
   // - **字段缺省 → 整行 hidden，绝不默认成「关」**：照 personaBound 三态判例（未知 ≠ 否）。
@@ -728,10 +728,8 @@
   //   MUST NOT 宣称「正在压低配额」；让「没变」成为一个被明说的态，而不是看起来像 bug 的沉默。
   // - graduated → 「慢启动 · 已完成（X 月 X 日起上限已放开）」，显式告知而非静默消失
   //   ——上限是哪天放开的，正是最该被告知的那一刻。
-  // - eligible=false → 禁用勾选 + 按 reason 如实说明。
-  // - binding_unknown（change slow-start-offline-toggle）→ 该环境尚未把浏览器启动登录过，云端还没认出它在跑
-  //   哪个账号 → 整行可见、开关禁用、给**可行动**的下一步（启动一次该环境完成登录即绑定），MUST NOT 整行隐藏
-  //   （「什么都不显示」与修复前一模一样，用户无从分辨没支持 / 坏了 / 在等他做什么）。
+  // - eligible=false 通常禁用；binding_unknown / binding_conflict 例外：配置属于环境，未绑定也可预设。
+  //   此时 state/checked 是环境真态，reason 只说明当前没有唯一执行账号；绝不显示 binding/dayQuotas 已生效。
   // - **离线（内核 / 云链路断开）不再禁用开关**（change slow-start-offline-toggle）：慢启动真态是纯云端算的、
   //   写入执行体也在云端配额计算内、经运行时现读生效——这次写根本不经过环境内核。那道内核在线闸是 INCIDENTAL，
   //   摘掉。离线只影响**用量计数**（边缘上报的今日已做多少），对它单独打「可能已过期」标签，绝不据此禁用开关。
@@ -743,8 +741,8 @@
     platform_unsupported: '该平台暂不支持慢启动',
     platform_unknown: '账号平台待确认，暂不启用慢启动',
     globally_disabled: '慢启动已被运维全局停用',
-    // 云端还没认出这个环境在跑哪个账号（还没启动登录过）。给一条**可行动**的下一步。
-    binding_unknown: '尚未识别到该环境的账号，启动一次该环境并完成登录后即可开启慢启动',
+    binding_unknown: '设置跟随当前环境；登录账号后会按该环境的慢启动曲线生效',
+    binding_conflict: '该账号同时出现在多个环境，当前配置不会被当作已生效；请先处理环境绑定冲突',
   };
 
   /** 「7 月 17 日」——毕业文案里只用到月/日。 */
@@ -765,7 +763,10 @@
     const totalDays = Number.isFinite(ss.totalDays) ? ss.totalDays : 7;
     const out = { visible: true, checked: ss.state === 'active' || ss.state === 'graduated', stale: usageStale, badge: '', tone: ss.state, source: src };
 
-    if (ss.eligible === false) {
+    const environmentConfiguredOnly = ss.eligible === false
+      && (ss.ineligibleReason === 'binding_unknown' || ss.ineligibleReason === 'binding_conflict')
+      && (ss.state === 'off' || ss.state === 'active' || ss.state === 'graduated');
+    if (ss.eligible === false && !environmentConfiguredOnly) {
       out.disabled = true;
       out.checked = false;
       out.reason = SLOW_START_INELIGIBLE_TEXT[ss.ineligibleReason] || '当前无法启用慢启动';
@@ -774,13 +775,17 @@
     // 慢启动真态是纯云端算的、写入执行体也在云端配额计算内、经运行时现读生效 → **离线也可改**：不再因内核 /
     // 云链路离线禁用开关（change slow-start-offline-toggle：那道内核在线闸 INCIDENTAL，这次写根本不经过环境内核）。
     out.disabled = false;
+    if (environmentConfiguredOnly) {
+      out.reason = SLOW_START_INELIGIBLE_TEXT[ss.ineligibleReason];
+      out.configurationOnly = true;
+    }
     // 离线时**只有用量计数**陈旧（真态与开关照常）：给用量那一条单独打标签，绝不说成「状态过期 / 开关不可用」。
-    if (usageStale) out.reason = '云端已断开，下方今日用量为最后一次同步、可能已过期';
+    if (usageStale && !environmentConfiguredOnly) out.reason = '云端已断开，下方今日用量为最后一次同步、可能已过期';
 
     if (ss.state === 'active') {
       out.badge = `慢启动 · 第 ${ss.day}/${totalDays} 天`;
       // binding=false 必须说出口，否则「勾了没变」看起来就是个 bug。
-      if (ss.binding === false) out.badge += ' · 当前档位已更严，不额外限制';
+      if (!environmentConfiguredOnly && ss.binding === false) out.badge += ' · 当前档位已更严，不额外限制';
     } else if (ss.state === 'graduated') {
       // 文案受本卡既有口径约束（#daily-summary 全域不得出现「已达 / 上限 / 额度 / 释放 / 已满」，
       // companion-ui 的陪伴式口径，有测试守着）→ 说「按正常档位执行」而非「上限已放开」。

@@ -3330,7 +3330,7 @@ body { margin: 0; }
   .content-workspace .publish-preview-images { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-/* 慢启动脚注行（change account-level-slow-start）：常驻「今日节奏」卡内、#quota-windows 之后。
+/* 环境级慢启动脚注行：常驻「今日节奏」卡内、#quota-windows 之后。
    块级独占一行，不与标题区争空间 → Windows @640 窄窗不破版。 */
 .slow-start-row {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;

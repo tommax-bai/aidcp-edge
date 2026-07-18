@@ -820,7 +820,7 @@ function renderUsageSummary(status) {
 }
 
 /**
- * 慢启动脚注行（change account-level-slow-start）：只切 hidden / checked / disabled / textContent，
+ * 环境级慢启动脚注行：只切 hidden / checked / disabled / textContent，
  * 绝不建元素（静态节点，本 section 不在任何 innerHTML 重建范围内）。
  * 纯逻辑在 uiLogic.slowStartLine —— 字段缺省 → 整行不渲染（绝不默认 off，照 personaBound 三态判例）。
  */
@@ -2046,7 +2046,7 @@ fields.dailySummary?.addEventListener('click', (event) => {
   toggleQuotaDetails();
 });
 
-// 慢启动脚注行（change account-level-slow-start）：**必须自己 stopPropagation**。
+// 环境级慢启动脚注行：**必须自己 stopPropagation**。
 // 上面这条整卡点击委托只认 closest('button')，而 checkbox / label 都不是 button →
 // 不拦的话点勾选框会连带展开/收起「今日节奏」。更难看的是 <label> 包 <input> 时点文字会合成
 // 两次冒泡 → 切换两次 → 净效果为零；直接点滑块只冒泡一次 → 切换一次。**同一控件点在不同位置
@@ -2061,7 +2061,7 @@ fields.slowStartToggle?.addEventListener('change', (event) => {
 });
 
 /**
- * 提交慢启动开关（change account-level-slow-start）：只传 envKey + enabled，accountId 由云端解析。
+ * 提交环境级慢启动开关：只传 envKey + enabled，客户端不提交 accountId。
  * 失败**必须把开关拨回去 + 如实说明**——留在「已勾」而库里没写，就是用界面撒谎；
  * 而这个谎的代价是运营以为号在被养、实际在按满额度跑。
  */

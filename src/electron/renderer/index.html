@@ -330,10 +330,9 @@
           </div>
         </div>
         <div id="quota-windows" class="quota-windows hidden"></div>
-        <!-- 慢启动脚注行（change account-level-slow-start）：**静态节点**，JS 只切 hidden / checked /
+        <!-- 环境级慢启动脚注行（change environment-level-slow-start）：**静态节点**，JS 只切 hidden / checked /
              disabled / textContent，绝不动态建元素（本 section 不在任何 innerHTML 重建范围内）。
-             落这里而非标题区：标题区跟随选中环境、而慢启动是账号级（作用域错），且 Windows 窄窗下
-             算术上会挤爆昵称。平台和云端状态均满足时本 section 常驻可见；非 Facebook 整行隐藏。 -->
+             落这里而非标题区，避免 Windows 窄窗挤爆昵称。配置跟随当前环境；非 Facebook 整行隐藏。 -->
         <div id="slow-start-row" class="slow-start-row hidden">
           <label class="switch inline-switch" id="slow-start-toggle-wrap">
             <input id="slow-start-toggle" type="checkbox" />
@@ -365,7 +364,7 @@
           </div>
           <span id="slow-start-badge" class="acct-age hidden"></span>
           <span id="slow-start-reason" class="parking-hint hidden"></span>
-          <span class="parking-hint slow-start-copy">开启后头 7 天按曲线逐日放开量，7天后按账号档位运行。</span>
+          <span class="parking-hint slow-start-copy">设置跟随当前环境。开启后头 7 天按曲线逐日放开量，7天后按当前账号档位运行。</span>
         </div>
       </section>
 
