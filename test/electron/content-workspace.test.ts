@@ -188,6 +188,11 @@ test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async
   assert.equal(controller.currentPage(), 'detail');
   assert.match($(window, '#curated-detail').textContent ?? '', /详情 19/);
 
+  $(window, '.curated-detail-actions .cw-button.primary').dispatchEvent(new window.Event('click'));
+  assert.equal(controller.currentPage(), 'create');
+  assert.equal(hidden($(window, '#content-workspace-back')), false);
+  assert.equal($(window, '#content-workspace-close').getAttribute('aria-label'), '返回灵感库');
+
   $(window, '#content-workspace-close').dispatchEvent(new window.Event('click'));
   assert.equal(controller.currentPage(), 'library');
   assert.equal(hidden($(window, '#content-workspace')), false);
@@ -359,6 +364,7 @@ test('排队请求在途时离开创作页，不把忙碌锁留死（回来仍�
   // 请求还在途中就返回详情页——旧实现在此把 createBusy 永久留成 true。
   $(window, '#content-workspace-back').dispatchEvent(new window.Event('click'));
   await flush();
+  assert.equal(controller.currentPage(), 'detail', '左侧返回仍应只退一层到详情');
   deferred.resolve?.({ ok: true, data: { triggered: true, created: true, task: { id: 'task-abcdefgh', status: 'queued', version: 1 } } });
   await flush();
 

@@ -209,8 +209,9 @@
     function configureHeader(page) {
       const account = environment?.label || '当前账号';
       const isDetail = page === 'detail';
+      const returnsToLibrary = isDetail || page === 'create';
       fields.back?.classList.toggle('hidden', backStack.length === 0 || isDetail);
-      fields.close?.setAttribute('aria-label', isDetail ? '返回灵感库' : '关闭内容工作区');
+      fields.close?.setAttribute('aria-label', returnsToLibrary ? '返回灵感库' : '关闭内容工作区');
       if (page === 'library') {
         fields.kicker.textContent = '精选内容';
         fields.title.textContent = '灵感库';
@@ -285,9 +286,19 @@
       }
     }
 
+    function returnToLibrary() {
+      const libraryIndex = backStack.lastIndexOf('library');
+      if (libraryIndex < 0) {
+        close();
+        return;
+      }
+      backStack.splice(libraryIndex + 1);
+      goBack();
+    }
+
     function handleCloseControl() {
-      if (currentPage === 'detail') {
-        goBack();
+      if (currentPage === 'detail' || currentPage === 'create') {
+        returnToLibrary();
         return;
       }
       close();
