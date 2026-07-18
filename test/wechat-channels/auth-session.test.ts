@@ -41,13 +41,17 @@ class FakeSidecar implements WechatChannelsBrowserSidecar {
   opens = 0;
   closes = 0;
 
-  constructor(private readonly candidate: WechatSessionMaterial | null) {}
+  constructor(
+    private readonly candidate: WechatSessionMaterial | null,
+    private readonly onOpen?: () => void,
+  ) {}
 
   getState(): 'closed' | 'open' {
     return this.state;
   }
 
   async open(): Promise<void> {
+    this.onOpen?.();
     this.opens++;
     this.state = 'open';
   }
@@ -207,7 +211,11 @@ test('wechat session store: accepts captured empty finder uin and raw key string
 
 test('wechat auth: browser login closes only after identity, encrypted save, and enabled read probe succeed', async () => {
   await withTempDir(async (root) => {
-    const sidecar = new FakeSidecar(SESSION);
+    const logs: string[] = [];
+    const sidecar = new FakeSidecar(SESSION, () => {
+      assert.ok(logs.some((line) => line.includes('browser=required trigger=startup_stored_session_missing')),
+        'browser reason must be logged before the provider is opened');
+    });
     const transitions: string[] = [];
     const auth = new WechatAuthCoordinator({
       envKey: SCOPE.envKey,
@@ -224,7 +232,7 @@ test('wechat auth: browser login closes only after identity, encrypted save, and
         return () => now++;
       })(),
       sleepImpl: async () => {},
-      logImpl: () => {},
+      logImpl: (message) => logs.push(message),
     });
     auth.onChange((snapshot) => transitions.push(snapshot.state));
 
@@ -235,6 +243,8 @@ test('wechat auth: browser login closes only after identity, encrypted save, and
     assert.equal(auth.getSnapshot().identityMatches, true);
     assert.equal(sidecar.opens, 1);
     assert.equal(sidecar.closes, 1);
+    assert.ok(logs.some((line) => line.includes('stored_session=missing')));
+    assert.doesNotMatch(logs.join('\n'), /cookie-top-secret|raw-key-test|finder-a/);
     assert.deepEqual(
       transitions,
       ['browser_login_required', 'browser_opening', 'qr_waiting', 'identity_verifying', 'session_active', 'browser_closing', 'api_only_running'],
@@ -244,6 +254,7 @@ test('wechat auth: browser login closes only after identity, encrypted save, and
 
 test('wechat auth: stored encrypted session resumes API-only without opening browser', async () => {
   await withTempDir(async (root) => {
+    const logs: string[] = [];
     const store = new EncryptedWechatSessionStore(SCOPE, {
       rootDir: root,
       env: { AIDCP_WECHAT_MASTER_KEY: '33'.repeat(32) },
@@ -265,7 +276,7 @@ test('wechat auth: stored encrypted session resumes API-only without opening bro
         probes++;
         return { ok: true };
       },
-      logImpl: () => {},
+      logImpl: (message) => logs.push(message),
     });
 
     await auth.initialize();
@@ -274,7 +285,45 @@ test('wechat auth: stored encrypted session resumes API-only without opening bro
     assert.equal(sidecar.opens, 0);
     assert.equal(sidecar.closes, 0);
     assert.equal(probes, 1);
+    assert.ok(logs.some((line) => line.includes('stored_session=found')));
+    assert.ok(logs.some((line) => line.includes('stored_session=valid browser=skipped mode=api_only')));
+    assert.equal(logs.some((line) => line.includes('browser=required')), false);
+    assert.doesNotMatch(logs.join('\n'), /cookie-top-secret|raw-key-test|finder-a/);
   });
+});
+
+test('wechat auth: expired stored session logs its reason before browser reauthentication', async () => {
+  const logs: string[] = [];
+  let identityCalls = 0;
+  const sidecar = new FakeSidecar(SESSION, () => {
+    assert.ok(logs.some((line) => line.includes('browser=required trigger=startup_stored_session_expired')),
+      'expired-session reason must be logged before the provider is opened');
+  });
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api: {
+      getIdentity: async () => {
+        identityCalls++;
+        if (identityCalls === 1) {
+          throw new WechatChannelsError('auth_expired', 'authData', 'synthetic expired session', false);
+        }
+        return IDENTITY;
+      },
+    } as unknown as WechatChannelsApiClient,
+    sidecar,
+    store: memoryStore(),
+    probeEnabledReads: async () => ({ ok: true }),
+    sleepImpl: async () => {},
+    logImpl: (message) => logs.push(message),
+  });
+
+  await auth.initialize();
+
+  assert.equal(sidecar.opens, 1);
+  assert.equal(sidecar.closes, 1);
+  assert.equal(auth.getSnapshot().state, 'api_only_running');
+  assert.doesNotMatch(logs.join('\n'), /cookie-top-secret|raw-key-test|finder-a|synthetic expired session/);
 });
 
 test('wechat auth: active API-only session can open a visible browser and return to background idempotently', async () => {
@@ -445,25 +494,36 @@ test('wechat auth: disabled feature stays fail-closed without opening a browser'
   assert.equal(sidecar.opens, 0);
 });
 
-test('wechat auth: ordinary network degradation does not reopen the browser', () => {
-  const sidecar = new FakeSidecar(SESSION);
+test('wechat auth: stored-session network degradation logs API recovery and keeps the browser closed', async () => {
+  const logs: string[] = [];
+  const timers = new FakeTimers();
+  const sidecar = new FakeSidecar(null);
   const auth = new WechatAuthCoordinator({
     envKey: SCOPE.envKey,
     expectedAccountId: SCOPE.envKey,
-    api: apiReturning(IDENTITY),
+    api: {
+      getIdentity: async () => {
+        throw new WechatChannelsError('transient_network', 'authData', 'upstream temporarily unavailable', true);
+      },
+    } as unknown as WechatChannelsApiClient,
     sidecar,
+    store: memoryStore(),
     probeEnabledReads: async () => ({ ok: true }),
-    logImpl: () => {},
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    logImpl: (message) => logs.push(message),
   });
-  auth.markApiFailure(new WechatChannelsError(
-    'transient_network',
-    'postList',
-    'upstream temporarily unavailable',
-    true,
-  ));
+
+  await auth.initialize();
+
   assert.equal(auth.getSnapshot().status, 'degraded');
   assert.equal(auth.getSnapshot().reasonCode, 'INTERACTION_UPSTREAM_UNAVAILABLE');
   assert.equal(sidecar.opens, 0);
+  assert.deepEqual(timers.pendingDelays(), [5_000]);
+  assert.ok(logs.some((line) => line.includes(
+    'browser=skipped reason=INTERACTION_UPSTREAM_UNAVAILABLE recovery=api_retry',
+  )));
+  assert.doesNotMatch(logs.join('\n'), /upstream temporarily unavailable|cookie-top-secret/);
 });
 
 test('wechat auth: rate limiting follows retry-after and recovers without opening the browser', async () => {

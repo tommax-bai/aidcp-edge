@@ -16,6 +16,19 @@ type RecoverableErrorCategory = Extract<
 >;
 type RecoveryTimer = ReturnType<typeof setTimeout>;
 
+type BrowserAuthenticationTrigger =
+  | 'startup_stored_session_missing'
+  | 'startup_stored_session_unavailable'
+  | 'startup_stored_session_expired'
+  | 'startup_challenge_required'
+  | 'startup_probe_failure'
+  | 'reopen_user_requested'
+  | 'reopen_auth_expired'
+  | 'reopen_identity_mismatch'
+  | 'reopen_challenge_required'
+  | 'runtime_auth_expired'
+  | 'runtime_challenge_required';
+
 export interface WechatAuthRecoveryBackoff {
   initialMs: number;
   maxMs: number;
@@ -140,13 +153,18 @@ export class WechatAuthCoordinator {
   async initialize(): Promise<void> {
     let stored: Awaited<ReturnType<EncryptedWechatSessionStore['load']>> = null;
     let loadFailureReason: InteractionAuthReasonCode | null = null;
+    let browserTrigger: BrowserAuthenticationTrigger = 'startup_stored_session_missing';
+    this.log('[wechat-channels] auth startup: checking for a reusable encrypted session');
     try {
       stored = await this.store.load(this.expectedAccountId);
     } catch (error) {
       const safe = error instanceof WechatChannelsError ? error : null;
       loadFailureReason = safe?.category === 'identity_mismatch' ? 'WECHAT_IDENTITY_MISMATCH' : 'WECHAT_AUTH_REQUIRED';
+      browserTrigger = 'startup_stored_session_unavailable';
+      this.log(`[wechat-channels] auth startup: stored_session=unavailable reason=${loadFailureReason}`);
     }
     if (stored) {
+      this.log('[wechat-channels] auth startup: stored_session=found; validating identity and enabled reads with browser closed');
       this.accountId = stored.binding.accountId;
       this.identity = stored.identity;
       this.session = stored.session;
@@ -158,7 +176,8 @@ export class WechatAuthCoordinator {
         this.identityMatches = true;
         const probeOutcome = await this.probeEnabledReads(stored.session);
         if (!probeOutcome.ok) {
-          this.applyProbeFailure(probeOutcome.reasonCode);
+          this.log(`[wechat-channels] auth startup: stored_session=probe_failed reason=${probeOutcome.reasonCode}`);
+          this.applyProbeFailure(probeOutcome.reasonCode, 'startup_probe_failure');
           return;
         }
         if (stored.legacyBindingMigrated) {
@@ -166,6 +185,7 @@ export class WechatAuthCoordinator {
         }
         this.cancelRecovery();
         this.transition('api_only_running', null);
+        this.log('[wechat-channels] auth startup: stored_session=valid browser=skipped mode=api_only');
         return;
       } catch (error) {
         const safe = error instanceof WechatChannelsError
@@ -177,22 +197,31 @@ export class WechatAuthCoordinator {
         }
         if (safe.category === 'identity_mismatch') {
           this.transition('reauth_required', 'WECHAT_IDENTITY_MISMATCH');
+          this.log('[wechat-channels] auth startup: stored_session=rejected reason=WECHAT_IDENTITY_MISMATCH browser=skipped action=customer_relogin_required');
           return;
         } else if (safe.category === 'challenge_required') {
+          browserTrigger = 'startup_challenge_required';
           this.transition('challenge_required', 'WECHAT_CHALLENGE_REQUIRED');
         } else {
+          browserTrigger = safe.category === 'auth_expired'
+            ? 'startup_stored_session_expired'
+            : 'startup_stored_session_unavailable';
           this.transition('reauth_required', 'WECHAT_AUTH_REQUIRED');
         }
       }
     } else {
       if (loadFailureReason === 'WECHAT_IDENTITY_MISMATCH') {
         this.transition('reauth_required', loadFailureReason);
+        this.log('[wechat-channels] auth startup: stored_session=rejected reason=WECHAT_IDENTITY_MISMATCH browser=skipped action=customer_relogin_required');
         return;
       } else {
+        if (!loadFailureReason) {
+          this.log('[wechat-channels] auth startup: stored_session=missing');
+        }
         this.transition('browser_login_required', 'WECHAT_AUTH_REQUIRED');
       }
     }
-    await this.authenticateThroughBrowser();
+    await this.authenticateThroughBrowser(browserTrigger);
   }
 
   async reopen(reason: 'user_requested' | 'auth_expired' | 'identity_mismatch' | 'challenge_required'): Promise<void> {
@@ -201,7 +230,7 @@ export class WechatAuthCoordinator {
     if (reason === 'identity_mismatch') this.transition('reauth_required', 'WECHAT_IDENTITY_MISMATCH');
     else if (reason === 'challenge_required') this.transition('challenge_required', 'WECHAT_CHALLENGE_REQUIRED');
     else this.transition('reauth_required', 'WECHAT_AUTH_REQUIRED');
-    await this.authenticateThroughBrowser();
+    await this.authenticateThroughBrowser(reopenTrigger(reason));
   }
 
   async clear(): Promise<void> {
@@ -221,17 +250,17 @@ export class WechatAuthCoordinator {
     this.transition('disabled', 'INTERACTION_FEATURE_DISABLED');
   }
 
-  markApiFailure(error: WechatChannelsError): void {
+  markApiFailure(error: WechatChannelsError, browserTrigger?: BrowserAuthenticationTrigger): void {
     if (error.category === 'auth_expired') {
       this.cancelRecovery();
       this.identityMatches = false;
       this.transition('reauth_required', 'WECHAT_AUTH_REQUIRED');
-      void this.authenticateThroughBrowser().catch(() => undefined);
+      void this.authenticateThroughBrowser(browserTrigger ?? 'runtime_auth_expired').catch(() => undefined);
     } else if (error.category === 'challenge_required') {
       this.cancelRecovery();
       this.identityMatches = false;
       this.transition('challenge_required', 'WECHAT_CHALLENGE_REQUIRED');
-      void this.authenticateThroughBrowser().catch(() => undefined);
+      void this.authenticateThroughBrowser(browserTrigger ?? 'runtime_challenge_required').catch(() => undefined);
     } else if (error.category === 'identity_mismatch') {
       this.cancelRecovery();
       this.identityMatches = false;
@@ -240,25 +269,32 @@ export class WechatAuthCoordinator {
       this.transition('reauth_required', 'WECHAT_IDENTITY_MISMATCH');
     } else if (error.category === 'rate_limited') {
       this.transition('degraded', 'WECHAT_RATE_LIMITED');
+      this.log('[wechat-channels] auth decision: browser=skipped reason=WECHAT_RATE_LIMITED recovery=api_retry');
       this.scheduleRecovery(error);
     } else if (error.category === 'schema_changed') {
       this.transition('degraded', 'WECHAT_SCHEMA_CHANGED');
+      this.log('[wechat-channels] auth decision: browser=skipped reason=WECHAT_SCHEMA_CHANGED recovery=api_retry');
       this.scheduleRecovery(error);
     } else if (error.category === 'permission_denied') {
       this.transition('degraded', 'WECHAT_PERMISSION_DENIED');
+      this.log('[wechat-channels] auth decision: browser=skipped reason=WECHAT_PERMISSION_DENIED recovery=api_retry');
       this.scheduleRecovery(error);
     } else if (error.category === 'transient_network') {
       this.transition('degraded', 'INTERACTION_UPSTREAM_UNAVAILABLE');
+      this.log('[wechat-channels] auth decision: browser=skipped reason=INTERACTION_UPSTREAM_UNAVAILABLE recovery=api_retry');
       this.scheduleRecovery(error);
     }
   }
 
-  private applyProbeFailure(reasonCode: InteractionAuthReasonCode): WechatChannelsError {
+  private applyProbeFailure(
+    reasonCode: InteractionAuthReasonCode,
+    browserTrigger?: BrowserAuthenticationTrigger,
+  ): WechatChannelsError {
     const error = probeFailureError(reasonCode);
     if (reasonCode === 'INTERACTION_FEATURE_DISABLED') {
       this.disable();
     } else {
-      this.markApiFailure(error);
+      this.markApiFailure(error, browserTrigger);
     }
     return error;
   }
@@ -445,8 +481,12 @@ export class WechatAuthCoordinator {
     }
   }
 
-  private authenticateThroughBrowser(): Promise<void> {
-    if (this.authInFlight) return this.authInFlight;
+  private authenticateThroughBrowser(trigger: BrowserAuthenticationTrigger): Promise<void> {
+    if (this.authInFlight) {
+      this.log(`[wechat-channels] auth decision: browser=already_opening trigger=${trigger} reason=${this.reasonCode ?? 'WECHAT_AUTH_REQUIRED'}`);
+      return this.authInFlight;
+    }
+    this.log(`[wechat-channels] auth decision: browser=required trigger=${trigger} reason=${this.reasonCode ?? 'WECHAT_AUTH_REQUIRED'}; opening for login or reauthorization`);
     this.authInFlight = this.runBrowserAuthentication().finally(() => {
       this.authInFlight = undefined;
     });
@@ -534,6 +574,15 @@ export class WechatAuthCoordinator {
     this.checkedAt = this.now();
     const snapshot = this.getSnapshot();
     for (const listener of [...this.listeners]) listener(snapshot);
+  }
+}
+
+function reopenTrigger(reason: 'user_requested' | 'auth_expired' | 'identity_mismatch' | 'challenge_required'): BrowserAuthenticationTrigger {
+  switch (reason) {
+    case 'user_requested': return 'reopen_user_requested';
+    case 'auth_expired': return 'reopen_auth_expired';
+    case 'identity_mismatch': return 'reopen_identity_mismatch';
+    case 'challenge_required': return 'reopen_challenge_required';
   }
 }
 
