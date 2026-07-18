@@ -223,7 +223,11 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     const session = auth.getSession();
     if (session) await probeRunner.probeEnabledReads(session).catch(() => false);
     connector!.reportStatus();
-    safeLog(`[wechat-channels] applied Cloud runtime controls version=${payload.version}`);
+    safeLog(
+      `[wechat-channels] applied Cloud runtime controls version=${payload.version} ` +
+      `comment_write=${payload.commentsReplyEnabled} dm_write=${payload.dmSendTextEnabled} ` +
+      `dev_write_controls_bypassed=${flags.unverifiedWriteTestMode}`,
+    );
     return true;
   };
 

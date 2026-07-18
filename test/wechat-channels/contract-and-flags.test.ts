@@ -45,7 +45,7 @@ test('wechat flags: missing Cloud controls keeps every effective capability off'
   });
 });
 
-test('wechat flags: the exact dev test token bypasses only prior write-probe evidence', () => {
+test('wechat flags: the exact dev test token bypasses per-channel write controls and prior probe evidence', () => {
   const parsed = wechatChannelsFeatureFlagsFromEnv({
     AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE: WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
   });
@@ -58,8 +58,8 @@ test('wechat flags: the exact dev test token bypasses only prior write-probe evi
   const state = new WechatCapabilityState(parsed, breaker);
   state.applyRemoteControls({
     accountId: 'env-a', envKey: 'env-a', version: 1,
-    commentsReadEnabled: true, commentsReplyEnabled: true,
-    dmReadEnabled: true, dmSendTextEnabled: true, dmSendImageEnabled: false,
+    commentsReadEnabled: true, commentsReplyEnabled: false,
+    dmReadEnabled: true, dmSendTextEnabled: false, dmSendImageEnabled: false,
   }, { accountId: 'env-a', envKey: 'env-a' });
   state.markProbePassed('commentsRead');
   state.markProbePassed('dmRead');
@@ -73,6 +73,19 @@ test('wechat flags: the exact dev test token bypasses only prior write-probe evi
   });
   assert.equal(state.effective({ authActive: false, identityMatches: true }).commentsReply, false);
   assert.equal(state.effective({ authActive: true, identityMatches: false }).dmSendText, false);
+  state.applyRemoteControls({
+    accountId: 'env-a', envKey: 'env-a', version: 2,
+    commentsReadEnabled: false, commentsReplyEnabled: false,
+    dmReadEnabled: false, dmSendTextEnabled: false, dmSendImageEnabled: false,
+  }, { accountId: 'env-a', envKey: 'env-a' });
+  assert.equal(state.effective({ authActive: true, identityMatches: true }).commentsReply, false);
+  assert.equal(state.effective({ authActive: true, identityMatches: true }).dmSendText, false);
+
+  state.applyRemoteControls({
+    accountId: 'env-a', envKey: 'env-a', version: 3,
+    commentsReadEnabled: true, commentsReplyEnabled: false,
+    dmReadEnabled: true, dmSendTextEnabled: false, dmSendImageEnabled: false,
+  }, { accountId: 'env-a', envKey: 'env-a' });
   breaker.open('commentCreate');
   assert.equal(state.effective({ authActive: true, identityMatches: true }).commentsReply, false);
 });

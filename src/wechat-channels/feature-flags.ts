@@ -196,19 +196,25 @@ export class WechatCapabilityState {
     const dmWriteEvidence = this.flags.unverifiedWriteTestMode || (
       this.flags.dmWriteProbeVerified && this.passedProbes.has('dmSendText')
     );
+    // The exact token is injected only by the unpackaged Electron client for the named dev Cloud
+    // environment. In that bounded runtime it is also the explicit operator grant for exercising
+    // both real text-write paths while Cloud's ordinary per-channel write booleans remain false.
+    // A valid scoped/versioned control snapshot and a healthy enabled read are still mandatory.
+    const commentsReplyControlEnabled = this.flags.unverifiedWriteTestMode || !!remote?.commentsReplyEnabled;
+    const dmSendTextControlEnabled = this.flags.unverifiedWriteTestMode || !!remote?.dmSendTextEnabled;
     return {
       commentsRead,
       commentsReply:
         writeBase &&
         commentsRead &&
-        !!remote?.commentsReplyEnabled &&
+        commentsReplyControlEnabled &&
         commentWriteEvidence &&
         this.breaker.capabilityAvailable('commentsReply'),
       dmRead,
       dmSendText:
         writeBase &&
         dmRead &&
-        !!remote?.dmSendTextEnabled &&
+        dmSendTextControlEnabled &&
         dmWriteEvidence &&
         this.breaker.capabilityAvailable('dmSendText'),
       dmSendImage: false,
