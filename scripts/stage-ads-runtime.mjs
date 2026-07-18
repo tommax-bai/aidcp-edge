@@ -41,9 +41,15 @@ rmSync(prefix, { recursive: true, force: true });
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(prefix, { recursive: true });
 
+const npmInstallArgs = ['install', '--global', '--prefix', prefix, `adspower-browser@${ADS_VERSION}`];
+const npmExecPath = process.env.npm_execpath;
+if (process.platform === 'win32' && (!npmExecPath || !existsSync(npmExecPath))) {
+  throw new Error('npm_execpath is unavailable; run staging through npm run build:ads-runtime');
+}
+
 execFileSync(
-  process.platform === 'win32' ? 'npm.cmd' : 'npm',
-  ['install', '--global', '--prefix', prefix, `adspower-browser@${ADS_VERSION}`],
+  process.platform === 'win32' ? process.execPath : 'npm',
+  process.platform === 'win32' ? [npmExecPath, ...npmInstallArgs] : npmInstallArgs,
   {
     stdio: 'inherit',
     env: {

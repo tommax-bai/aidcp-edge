@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // 内嵌 AdsPower 运行时编排是 CJS（供 Electron main.cjs require），经 createRequire 引入以不破 ESM typecheck。
 const require = createRequire(import.meta.url);
@@ -13,6 +16,7 @@ type RunFn = (
 ) => Promise<RunResult>;
 
 const adsRuntime = require('../../src/electron/ads-runtime.cjs') as {
+  resolveCliEntry: (o: { resourcesPath?: string; appRoot?: string; userDataPath?: string }) => string | null;
   stripAnsi: (s: unknown) => string;
   isThrottled: (r: { out?: string; err?: string }) => boolean;
   parseCliJson: (out: string) => unknown;
@@ -34,6 +38,21 @@ const adsRuntime = require('../../src/electron/ads-runtime.cjs') as {
     run?: RunFn;
   }) => Promise<{ ok: boolean; alreadyPresent?: boolean; downloaded?: boolean; error?: string }>;
 };
+
+test('resolveCliEntry prefers the patched staged runtime in development', () => {
+  const appRoot = mkdtempSync(join(tmpdir(), 'aidcp-ads-runtime-'));
+  const stagedCli = join(appRoot, 'build', 'ads-runtime', 'adspower-browser', 'cli', 'index.js');
+  const rawCli = join(appRoot, 'node_modules', 'adspower-browser', 'cli', 'index.js');
+  try {
+    mkdirSync(join(stagedCli, '..'), { recursive: true });
+    mkdirSync(join(rawCli, '..'), { recursive: true });
+    writeFileSync(stagedCli, '// staged');
+    writeFileSync(rawCli, '// raw');
+    assert.equal(adsRuntime.resolveCliEntry({ appRoot }), stagedCli);
+  } finally {
+    rmSync(appRoot, { recursive: true, force: true });
+  }
+});
 
 const A = '\x1b[32m';
 const Z = '\x1b[39m';

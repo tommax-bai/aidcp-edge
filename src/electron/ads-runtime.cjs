@@ -40,6 +40,8 @@ function resolveCliEntry({ resourcesPath, appRoot, userDataPath } = {}) {
     candidates.push(path.join(resourcesPath, 'app.asar.unpacked', 'node_modules', 'adspower-browser', 'cli', 'index.js'));
   }
   if (appRoot) {
+    // Development builds prefer the patched staging output over the raw package.
+    candidates.push(path.join(appRoot, 'build', 'ads-runtime', 'adspower-browser', 'cli', 'index.js'));
     candidates.push(path.join(appRoot, 'node_modules', 'adspower-browser', 'cli', 'index.js'));
   }
   for (const c of candidates) {
