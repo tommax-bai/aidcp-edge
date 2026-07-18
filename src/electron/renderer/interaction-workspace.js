@@ -603,7 +603,7 @@
       dom.browserControl.textContent = state.actionBusy === 'browser-open-local' ? '正在打开…' : '打开浏览器';
       dom.browserControl.disabled = !canOpenLocalBrowser || Boolean(state.actionBusy);
       dom.browserHelp.textContent = state.localBrowserNotice
-        || '仅用于人工查看登录页和后台数据，不会启动引擎；视频号登录结果以上方鉴权状态为准。';
+        || '仅用于人工查看，引擎以上方鉴权状态为准。';
       dom.syncStatus.textContent = state.listLoading
         ? '正在读取当前环境'
         : state.stale ? '使用上次成功数据'
