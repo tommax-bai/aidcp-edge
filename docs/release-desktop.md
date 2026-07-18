@@ -131,3 +131,15 @@ ssh -i ~/codes/isales-4.pem root@121.89.85.150 '
 - 部署铁律 / 生产机 / isales 红线：`../aidcp/CLAUDE.md` §5/§6。
 - 后台下载清单来源：cloud `src/panel/downloads-manifest.ts`（现扫该机 downloads 目录）+ console `src/config/downloads.ts` 顶部注释。
 - Nginx 下载 location：`aidcp-console/deploy/aidcp-console.conf`（`location /downloads/`）。
+
+## Client auth defaults
+
+Desktop clients require customer login by default for official cloud
+environments. The default customer-auth URLs are:
+
+- `dev`: `http://121.89.85.150:8088/capi`
+- `ol`: `https://aidcp.tommax.cc/capi`
+
+`AIDCP_CLIENT_AUTH_URL` or the workflow `client_auth_url` input still overrides
+these defaults. Leaving the workflow input empty bakes the default URL for the
+selected `cloud_default_env`.

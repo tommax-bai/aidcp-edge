@@ -132,6 +132,12 @@ if [ -n "${AIDCP_CLOUD_DEFAULT_ENV:-}" ]; then
   esac
 fi
 client_auth_url="${AIDCP_CLIENT_AUTH_URL:-}"
+if [ -z "$client_auth_url" ]; then
+  case "${AIDCP_CLOUD_DEFAULT_ENV:-}" in
+    dev) client_auth_url="http://121.89.85.150:8088/capi" ;;
+    ol) client_auth_url="https://aidcp.tommax.cc/capi" ;;
+  esac
+fi
 while [ -n "$client_auth_url" ] && [ "${client_auth_url%/}" != "$client_auth_url" ]; do
   client_auth_url="${client_auth_url%/}"
 done

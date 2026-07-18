@@ -20,6 +20,7 @@
     "electron:build:win": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --win",
     "electron:build:mac": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac",
     "electron:build:mac:dev": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=dev -c.extraMetadata.aidcpClientAuthUrl=http://121.89.85.150:8088/capi",
+    "electron:build:mac:ol": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=ol -c.extraMetadata.aidcpClientAuthUrl=https://aidcp.tommax.cc/capi",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "test:acceptance": "tsx --test test/acceptance/*.test.ts",

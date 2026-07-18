@@ -137,6 +137,7 @@ function appendEdgeLog(envId, line, isError) {
 // AIDCP_CLOUD_URL）；界面留空则回落启动环境变量、再回落缺省 dev（对现有以环境变量启动的流程零回归）。
 // 两个正式地址一处真源；custom 允许任意 ws(s):// 地址。dev=测试、ol=线上生产。
 const CLOUD_ENV_URLS = { dev: 'ws://121.89.85.150:8787', ol: 'ws://123.56.253.183:8787' };
+const CLIENT_AUTH_ENV_URLS = { dev: 'http://121.89.85.150:8088/capi', ol: 'https://aidcp.tommax.cc/capi' };
 // 构建期烘焙的缺省云端环境：分发包用 electron-builder `-c.extraMetadata.aidcpCloudDefaultEnv=ol`
 // 注入 'dev' | 'ol'，让「无界面选择、无启动环境变量」时连指定云（如线上分发包默认 ol）。
 // 普通开发 / CI 包不带此字段 → '' → 沿用历史缺省 dev（零回归）。只读打包进 app 的 package.json；
@@ -151,15 +152,19 @@ function readBakedDefaultCloudEnv() {
   }
 }
 const BAKED_DEFAULT_CLOUD_ENV = readBakedDefaultCloudEnv();
+function normalizeClientAuthUrl(value) {
+  const v = String(value || '').trim();
+  return /^https?:\/\//i.test(v) ? v.replace(/\/+$/, '') : '';
+}
 // 构建期烘焙的对外客户鉴权地址（change edge-client-customer-auth）：分发包用
 // electron-builder `-c.extraMetadata.aidcpClientAuthUrl=https://…/capi` 注入，让分发的客户端「一装即带登录门」，
-// 无需运营 / 客户手填环境变量。只读打包进 app 的 package.json；非法 / 缺失 → ''（登录门保持 opt-in 关闭，零回归）。
+// 无需运营 / 客户手填环境变量。只读打包进 app 的 package.json；非法 / 缺失 → ''，随后按 dev/ol 环境默认地址启用登录门。
 // dev(electron .) 下 getAppPath 是仓库根、package.json 无此字段 → 不受影响。
 function readBakedClientAuthUrl() {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8'));
     const v = String((pkg && pkg.aidcpClientAuthUrl) || '').trim();
-    return /^https?:\/\//i.test(v) ? v.replace(/\/+$/, '') : '';
+    return normalizeClientAuthUrl(v);
   } catch {
     return '';
   }
@@ -206,8 +211,8 @@ const DEFAULT_SETTINGS = {
   // 环境栏（fleet rail）收起态与上次选中环境（跨重启保留）。
   railCollapsed: true,
   selectedEnvId: '',
-  // 对外客户鉴权登录门（change edge-client-customer-auth）：opt-in、默认不启用（零回归）。
-  // clientAuthUrl 给完整 http(s):// 地址即启用；或 clientAuthEnabled=true 由云端主机派生客户鉴权地址。
+  // 对外客户鉴权登录门：dev/ol 默认启用；clientAuthUrl 给完整 http(s):// 地址时覆盖默认地址。
+  // clientAuthEnabled=true 仅用于 custom 云端由主机派生客户鉴权地址。
   clientAuthUrl: '',
   clientAuthEnabled: false,
   // 仅保存 Cloud 已受理的解绑清理游标。不得含正文、凭证或最终模板文本；
@@ -305,10 +310,11 @@ function cloudSelectionView() {
 }
 
 // ── 对外客户鉴权登录门（change edge-client-customer-auth）─────────────────────
-// 给客户端加一层「客户 name+key 登录」。**opt-in、零回归**：仅当配置了客户鉴权地址时启用登录门；
-// 未配置（现有运营装机 / dev）行为与从前完全一致（无登录、无过滤）。地址解析：
+// 给客户端加一层「客户 name+key 登录」。dev/ol 默认启用登录门；custom 云端仍需显式 URL 或显式派生开关。地址解析：
 //   ① 显式完整 URL：env AIDCP_CLIENT_AUTH_URL 或 settings.clientAuthUrl（http(s)://…）；
-//   ② 显式启用（env AIDCP_CLIENT_AUTH_ENABLE=1 或 settings.clientAuthEnabled）→ 由云端 WS 主机派生
+//   ② 打包 URL：electron-builder extraMetadata.aidcpClientAuthUrl；
+//   ③ 官方 dev/ol 默认地址；
+//   ④ 显式启用（env AIDCP_CLIENT_AUTH_ENABLE=1 或 settings.clientAuthEnabled）→ 由云端 WS 主机派生
 //      ws(s)://host:8787 → http(s)://host:8091（部署经 Nginx 反代时用 ① 给完整 URL）。
 // 登录后：客户令牌存 userData/client-session.json（随 AIDCP_USER_DATA_DIR 多实例隔离）；
 // 环境栏只显示云端按该客户下发的可见环境（与本地花名册求交，见 syncEnvHandles 的 allowedProfileIds 过滤）。
@@ -321,18 +327,24 @@ let allowedEnvironmentPlatforms = new Map(); // envKey -> Cloud 权威 platform�
 let sessionTimer = null;
 let proceededOnce = false;
 
-function resolveClientAuthBase() {
-  // 优先级：显式环境变量 / 设置里的完整地址 > 构建期烘焙地址（分发包）> 显式启用+云端主机派生。
-  const explicit = String((process.env.AIDCP_CLIENT_AUTH_URL || '') || (settings && settings.clientAuthUrl) || '').trim();
-  if (/^https?:\/\//i.test(explicit)) return explicit.replace(/\/+$/, '');
-  if (BAKED_CLIENT_AUTH_URL) return BAKED_CLIENT_AUTH_URL;
-  const enabled = process.env.AIDCP_CLIENT_AUTH_ENABLE === '1' || Boolean(settings && settings.clientAuthEnabled);
-  if (!enabled) return '';
-  const cloud = resolveCloudUrl().url;
+function deriveClientAuthBaseFromCloudUrl(cloud) {
   const m = /^wss?:\/\/([^/:]+)(?::(\d+))?/i.exec(String(cloud || '').trim());
   if (!m) return '';
   const scheme = /^wss:/i.test(cloud) ? 'https' : 'http';
   return `${scheme}://${m[1]}:${CLIENT_AUTH_DEFAULT_PORT}`;
+}
+
+function resolveClientAuthBase() {
+  // 优先级：显式完整 URL > 构建期烘焙地址 > dev/ol 默认地址 > 显式启用+云端主机派生。
+  const explicit = normalizeClientAuthUrl((process.env.AIDCP_CLIENT_AUTH_URL || '') || (settings && settings.clientAuthUrl) || '');
+  if (explicit) return explicit;
+  if (BAKED_CLIENT_AUTH_URL) return BAKED_CLIENT_AUTH_URL;
+  const cloud = resolveCloudUrl();
+  const envDefault = CLIENT_AUTH_ENV_URLS[cloud.key];
+  if (envDefault) return envDefault;
+  const enabled = process.env.AIDCP_CLIENT_AUTH_ENABLE === '1' || Boolean(settings && settings.clientAuthEnabled);
+  if (!enabled) return '';
+  return deriveClientAuthBaseFromCloudUrl(cloud.url);
 }
 function clientAuthEnabled() {
   return Boolean(resolveClientAuthBase());

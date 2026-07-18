@@ -21,8 +21,8 @@ name: Build Desktop Installers
 # Inputs:
 #   cloud_default_env  dev|ol — baked default cloud the app connects to out of the box.
 #                      ol = production. Absent field => app falls back to its own dev default.
-#   client_auth_url    optional http(s) /capi URL baked into the app. For ol builds,
-#                      empty means https://aidcp.tommax.cc/capi.
+#   client_auth_url    optional http(s) /capi URL baked into the app. Empty means
+#                      the default URL for cloud_default_env.
 #   include_windows    also build the Windows installer (not self-contained yet; off by default).
 
 on:
@@ -40,7 +40,7 @@ on:
         type: boolean
         default: false
       client_auth_url:
-        description: 'Optional client auth base URL to bake into mac app. Empty + ol => https://aidcp.tommax.cc/capi.'
+        description: 'Optional client auth base URL to bake into the app. Empty uses the default for dev/ol.'
         type: string
         default: ''
 
@@ -116,8 +116,11 @@ jobs:
         run: |
           set -euo pipefail
           auth_url="${{ inputs.client_auth_url }}"
-          if [ -z "$auth_url" ] && [ "${{ inputs.cloud_default_env }}" = "ol" ]; then
-            auth_url="https://aidcp.tommax.cc/capi"
+          if [ -z "$auth_url" ]; then
+            case "${{ inputs.cloud_default_env }}" in
+              dev) auth_url="http://121.89.85.150:8088/capi" ;;
+              ol) auth_url="https://aidcp.tommax.cc/capi" ;;
+            esac
           fi
           while [ -n "$auth_url" ] && [ "${auth_url%/}" != "$auth_url" ]; do
             auth_url="${auth_url%/}"
@@ -130,7 +133,7 @@ jobs:
             echo "AIDCP_CLIENT_AUTH_URL=$auth_url" >> "$GITHUB_ENV"
             echo "Client auth URL will be baked into the mac app."
           else
-            echo "No client auth URL baked; login gate remains disabled by default."
+            echo "No client auth URL baked."
           fi
       - name: Build signed and notarized macOS installers
         shell: bash
@@ -199,9 +202,22 @@ jobs:
         run: npm ci
       - name: Build Windows installer
         # --publish never: avoid electron-builder's CI auto-publish (needs GH_TOKEN).
+        shell: pwsh
         run: |
+          $authUrl = '${{ inputs.client_auth_url }}'.Trim()
+          if (-not $authUrl) {
+            if ('${{ inputs.cloud_default_env }}' -eq 'ol') {
+              $authUrl = 'https://aidcp.tommax.cc/capi'
+            } else {
+              $authUrl = 'http://121.89.85.150:8088/capi'
+            }
+          }
+          while ($authUrl.EndsWith('/')) { $authUrl = $authUrl.Substring(0, $authUrl.Length - 1) }
+          if ($authUrl -notmatch '^https?://') {
+            throw 'client_auth_url must be http(s)://...'
+          }
           npm run build:dist
-          npx electron-builder --win --publish never
+          npx electron-builder --win --publish never "-c.extraMetadata.aidcpCloudDefaultEnv=${{ inputs.cloud_default_env }}" "-c.extraMetadata.aidcpClientAuthUrl=$authUrl"
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
