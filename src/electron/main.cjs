@@ -53,6 +53,7 @@ const {
   browserPersonaNoticeForStatus,
   browserPersonaNoticeKey,
 } = require('./persona-notice.cjs');
+const { resolveTrayIconPath } = require('./tray-icon.cjs');
 
 // ── 实例级 userData 隔离（change edge-multi-instance-userdata-isolation）──────
 // 同机并行多个监督者（如一个连 dev、一个连 ol）时，各实例需独立的单实例锁 /
@@ -1813,36 +1814,58 @@ function createWindow() {
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault();
+      if (!tray) {
+        mainWindow.show();
+        mainWindow.focus();
+        surfaceFailure('AIDCP Edge 托盘不可用', '托盘入口未能创建，窗口将保持显示，避免监督者在后台不可发现。');
+        return;
+      }
       mainWindow.hide();
     }
   });
 }
 
 function createTray() {
-  const icon = nativeImage.createFromDataURL(
-    'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" rx="7" fill="%232563eb"/><g stroke="%23ffffff" stroke-opacity="0.5" stroke-width="1.4" stroke-linecap="round"><line x1="16" y1="16" x2="16" y2="7"/><line x1="16" y1="16" x2="8.2" y2="20.5"/><line x1="16" y1="16" x2="23.8" y2="20.5"/></g><circle cx="8.2" cy="20.5" r="2.4" fill="%23ffffff"/><circle cx="23.8" cy="20.5" r="2.4" fill="%23ffffff"/><circle cx="16" cy="7" r="2.6" fill="%23ff6b6b"/><circle cx="16" cy="16" r="4" fill="%23ffffff"/></svg>',
-  );
-  tray = new Tray(icon);
-  tray.setToolTip('AIDCP Edge');
-  const trayTemplate = [
-    { label: '显示窗口', click: () => mainWindow?.show() },
-    { label: '隐藏窗口', click: () => mainWindow?.hide() },
-    { type: 'separator' },
-    { label: '显示浏览器窗口', click: () => { void sendBrowserParkingCommand(selectedHandle(), 'browser.show'); } },
-    { label: '重置浏览器位置', click: () => { void sendBrowserParkingCommand(selectedHandle(), 'browser.park'); } },
-    { type: 'separator' },
-  ];
-  // 对外客户登录态下提供「退出登录」（change edge-client-customer-auth）：停所有环境、回登录门,不改主界面。
-  if (clientAuthEnabled()) {
-    trayTemplate.push({ label: '退出登录', click: () => { if (clientSession && clientSession.token) void clientAuthFetch('/logout', { method: 'POST', token: clientSession.token }); onSessionInvalid(); } });
+  try {
+    const iconPath = resolveTrayIconPath({
+      isPackaged: app.isPackaged,
+      appPath: app.getAppPath(),
+      resourcesPath: process.resourcesPath,
+    });
+    if (!fs.existsSync(iconPath)) throw new Error(`tray icon file not found: ${iconPath}`);
+    const icon = nativeImage.createFromPath(iconPath);
+    if (icon.isEmpty()) throw new Error(`tray icon decoded empty: ${iconPath}`);
+
+    tray = new Tray(icon);
+    tray.setToolTip('AIDCP Edge');
+    const trayTemplate = [
+      { label: '显示窗口', click: () => mainWindow?.show() },
+      { label: '隐藏窗口', click: () => mainWindow?.hide() },
+      { type: 'separator' },
+      { label: '显示浏览器窗口', click: () => { void sendBrowserParkingCommand(selectedHandle(), 'browser.show'); } },
+      { label: '重置浏览器位置', click: () => { void sendBrowserParkingCommand(selectedHandle(), 'browser.park'); } },
+      { type: 'separator' },
+    ];
+    // 对外客户登录态下提供「退出登录」（change edge-client-customer-auth）：停所有环境、回登录门,不改主界面。
+    if (clientAuthEnabled()) {
+      trayTemplate.push({ label: '退出登录', click: () => { if (clientSession && clientSession.token) void clientAuthFetch('/logout', { method: 'POST', token: clientSession.token }); onSessionInvalid(); } });
+    }
+    trayTemplate.push({ label: '退出', click: quitApp });
+    tray.setContextMenu(Menu.buildFromTemplate(trayTemplate));
+    tray.on('click', () => {
+      if (!mainWindow) return;
+      if (mainWindow.isVisible()) mainWindow.hide();
+      else mainWindow.show();
+    });
+    return true;
+  } catch (error) {
+    try { tray?.destroy(); } catch { /* best-effort */ }
+    tray = undefined;
+    const message = (error && error.message) || String(error);
+    appendEdgeLog('supervisor', `tray unavailable: ${message}`, true);
+    surfaceFailure('AIDCP Edge 托盘不可用', `托盘图标加载失败，窗口将保持显示：${message}`);
+    return false;
   }
-  trayTemplate.push({ label: '退出', click: quitApp });
-  tray.setContextMenu(Menu.buildFromTemplate(trayTemplate));
-  tray.on('click', () => {
-    if (!mainWindow) return;
-    if (mainWindow.isVisible()) mainWindow.hide();
-    else mainWindow.show();
-  });
 }
 
 function writeBrowserControlCommand(handle, type, payload) {

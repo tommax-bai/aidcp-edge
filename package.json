@@ -49,6 +49,10 @@
       {
         "from": "resources/ads-runtime.json",
         "to": "ads-runtime.json"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "tray-icon.png"
       }
     ],
     "extraMetadata": {
