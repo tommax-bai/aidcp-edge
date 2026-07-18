@@ -2740,6 +2740,10 @@ function makeRailRow(row) {
   const nameEl = document.createElement('span');
   nameEl.className = 'rail-name';
   nameEl.textContent = displayName;
+  nameEl.addEventListener('dblclick', (e) => {
+    e.stopPropagation();
+    void showRailBrowser(row.envId);
+  });
   nameLine.appendChild(nameEl);
   const bound = Boolean(row.status && row.status.personaBound);
   const pIcon = document.createElement('button');
@@ -2760,7 +2764,13 @@ function makeRailRow(row) {
   stateEl.appendChild(document.createTextNode(row.label));
   meta.appendChild(stateEl);
   btn.appendChild(meta);
-  btn.addEventListener('click', () => onRailRowActivate(row.envId));
+  btn.addEventListener('click', (e) => {
+    // A physical double-click emits click(detail=1), click(detail=2), then dblclick.
+    // Only the first click may advance the ordinary three-state control; otherwise an
+    // already-selected row would show and immediately re-park the browser.
+    if (e.detail > 1) return;
+    void onRailRowActivate(row.envId);
+  });
   btn.addEventListener('keydown', (e) => {
     // 只在整行本身聚焦时响应键盘：焦点在行内的人设 ✦ 按钮上时 e.target≠btn，放行让按钮原生激活（开人设浮层），
     // 否则本处 preventDefault 会吞掉按钮激活、还把三态切换误触发在人设图标上。
@@ -2792,6 +2802,26 @@ async function onRailRowActivate(envId) {
     }
   } catch (e) {
     setRailMsg(`${label}失败：${(e && e.message) || e}`);
+  }
+}
+
+async function showRailBrowser(envId) {
+  if (!envId || !fleetView.envs.has(envId)) return;
+  if (envId !== fleetView.selected) selectEnv(envId);
+  if (fleetView.shownEnv === envId) return;
+  const api = window.aidcpEdge.showDrivenBrowser;
+  if (typeof api !== 'function') return;
+  try {
+    const r = await api(envId);
+    if (r && r.ok) {
+      fleetView.shownEnv = envId;
+      setRailMsg(r.hint || '显示浏览器指令已发送。');
+      renderRail();
+    } else {
+      setRailMsg(`显示浏览器失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`);
+    }
+  } catch (e) {
+    setRailMsg(`显示浏览器失败：${(e && e.message) || e}`);
   }
 }
 

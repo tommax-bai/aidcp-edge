@@ -287,6 +287,32 @@ test('环境头像三态：①未选中→选中 ②再点→抬前显示（show
   assert.equal(rowOf('ads-p2').classList.contains('shown'), false);
 });
 
+test('环境昵称双击只显示浏览器，不把第二次 click 解释成归位', async () => {
+  const { w, calls, pushStatus } = await boot();
+  const rowOf = (id: string) => w.document.querySelector(`.rail-row[data-env-id="${id}"]`) as HTMLElement;
+  const nicknameOf = (id: string) => rowOf(id).querySelector('.rail-name') as HTMLElement;
+
+  // 已选中环境：第一次 click 显示，第二次 click(detail=2) 不得归位，dblclick 保持 show-only。
+  nicknameOf('ads-p1').dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 1 }));
+  await tick();
+  nicknameOf('ads-p1').dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 2 }));
+  nicknameOf('ads-p1').dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+  await tick();
+  assert.deepEqual(calls.showDriven, ['ads-p1']);
+  assert.deepEqual(calls.resetParking, [], '同一双击手势绝不能紧接着归位');
+
+  // 未选中环境：首击选中，dblclick 明确显示；同样不发送归位。
+  pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二' }));
+  await tick();
+  nicknameOf('ads-p2').dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 1 }));
+  nicknameOf('ads-p2').dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 2 }));
+  nicknameOf('ads-p2').dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+  await tick();
+  assert.ok(calls.select.includes('ads-p2'));
+  assert.deepEqual(calls.showDriven, ['ads-p1', 'ads-p2']);
+  assert.deepEqual(calls.resetParking, []);
+});
+
 test('环境头像三态：验证码浮层态（core 仍在跑）保留 shown，第三态仍可归位', async () => {
   const { w, calls, pushStatus } = await boot();
   const rowOf = (id: string) => w.document.querySelector(`.rail-row[data-env-id="${id}"]`) as HTMLElement;

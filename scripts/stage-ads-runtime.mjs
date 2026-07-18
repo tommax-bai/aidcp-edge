@@ -22,7 +22,11 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+
+const require = createRequire(import.meta.url);
+const { patchAdsRuntimeBrowserVisibility } = require('./patch-ads-runtime.cjs');
 
 const ADS_VERSION = '2.1.0';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -68,6 +72,13 @@ if (!existsSync(installedPkg)) {
 
 mkdirSync(outDir, { recursive: true });
 cpSync(installedPkg, out, { recursive: true });
+
+// Ads CLI preloads a Windows child-process hook into its daemon. The pinned 2.1.0 hook
+// defaults every descendant spawn to windowsHide=true, which also hides the driven
+// SunBrowser native window. Patch only that GUI executable back to windowsHide=false;
+// keep the existing policy for other Ads CLI helper subprocesses.
+patchAdsRuntimeBrowserVisibility(out);
+console.log('[stage-ads-runtime] preserved native visibility for Ads CLI-launched SunBrowser');
 
 // --- CJS-compat shim for @bomb.sh/tab (Electron Node 20 can't require() ESM) ---
 // cli/index.js does `require("@bomb.sh/tab/commander")` — a pure-ESM package with no

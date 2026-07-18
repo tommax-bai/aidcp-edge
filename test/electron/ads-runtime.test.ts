@@ -1,12 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // 内嵌 AdsPower 运行时编排是 CJS（供 Electron main.cjs require），经 createRequire 引入以不破 ESM typecheck。
 const require = createRequire(import.meta.url);
+const runtimePatch = require('../../scripts/patch-ads-runtime.cjs') as {
+  ORIGINAL_SPAWN_BLOCK: string;
+  PATCHED_SPAWN_BLOCK: string;
+  patchAdsRuntimeBrowserVisibility: (root: string) => { changed: boolean; hookPath: string };
+};
 
 type RunResult = { ok: boolean; code?: number; out: string; err?: string; error?: string };
 type RunFn = (
@@ -102,6 +107,43 @@ test('resolveCliEntry prefers the patched staged runtime in development', () => 
     assert.equal(adsRuntime.resolveCliEntry({ appRoot }), stagedCli);
   } finally {
     rmSync(appRoot, { recursive: true, force: true });
+  }
+});
+
+test('staging patch keeps Ads CLI-launched SunBrowser visible and is idempotent', () => {
+  const root = mkdtempSync(join(tmpdir(), 'aidcp-ads-runtime-patch-'));
+  const hookDir = join(root, 'cli', 'core');
+  const hookPath = join(hookDir, 'winHideChildProcess.js');
+  try {
+    mkdirSync(hookDir, { recursive: true });
+    writeFileSync(hookPath, `"use strict";\n${runtimePatch.ORIGINAL_SPAWN_BLOCK}\n`);
+    const first = runtimePatch.patchAdsRuntimeBrowserVisibility(root);
+    assert.equal(first.changed, true);
+    const patched = readFileSync(hookPath, 'utf8');
+    assert.match(patched, /SunBrowser/);
+    assert.match(patched, /windowsHide: false/);
+    assert.ok(patched.includes(runtimePatch.PATCHED_SPAWN_BLOCK));
+
+    const second = runtimePatch.patchAdsRuntimeBrowserVisibility(root);
+    assert.equal(second.changed, false);
+    assert.equal(readFileSync(hookPath, 'utf8'), patched, 'second patch must be byte-stable');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('staging patch fails closed when the pinned Ads CLI hook shape changes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'aidcp-ads-runtime-patch-shape-'));
+  const hookDir = join(root, 'cli', 'core');
+  try {
+    mkdirSync(hookDir, { recursive: true });
+    writeFileSync(join(hookDir, 'winHideChildProcess.js'), '// incompatible vendor hook\n');
+    assert.throws(
+      () => runtimePatch.patchAdsRuntimeBrowserVisibility(root),
+      /refusing to stage an unverified SunBrowser visibility policy/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
