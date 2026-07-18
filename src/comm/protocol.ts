@@ -260,6 +260,7 @@ export type InteractionErrorCode =
   | 'INTERACTION_FEATURE_DISABLED'
   | 'INTERACTION_RATE_LIMITED'
   | 'INTERACTION_UPSTREAM_UNAVAILABLE'
+  | 'INTERACTION_TEST_RESET_PARTIAL'
   | 'INTERACTION_INTERNAL_ERROR'
   | 'WECHAT_AUTH_REQUIRED'
   | 'WECHAT_CHALLENGE_REQUIRED'
@@ -971,7 +972,7 @@ export interface SessionBudgetPayload {
 }
 
 export interface RiskCanDoPayload {
-  action: 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish' | 'comment_like';
+  action: 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish' | 'comment_like' | 'join_group';
   accountId?: string;
 }
 
@@ -1291,7 +1292,7 @@ export interface PublishResultPayload {
   error?: string;
 }
 
-/** 发布原子指令的种类（A 设计 E1-E10）。 */
+/** 发布原子指令的种类（E1-E12；仍由一对通用 publish.command/result 消息承载）。 */
 export type PublishCommandKind =
   | 'navigate_entry'
   | 'select_mode'
@@ -1302,7 +1303,11 @@ export type PublishCommandKind =
   | 'set_option'
   | 'set_schedule'
   | 'submit_publish'
-  | 'capture_postId';
+  | 'capture_postId'
+  /** 小红书定时提交后：捕获定时列表内部句柄，绝不当公开 postId。 */
+  | 'capture_scheduled'
+  /** 小红书目标时刻后：只读核验真实公开 postId/postUrl。 */
+  | 'reconcile_scheduled';
 
 /**
  * 各 kind 的参数（按 kind 区分；元数据维度本阶段先占位预留）。
@@ -1325,6 +1330,10 @@ export interface PublishCommandParams {
   optionValue?: string;
   /** set_schedule：定时发布时刻（毫秒时间戳；缺省则云端不下发此指令） */
   publishTime?: number;
+  /** capture_scheduled / reconcile_scheduled：用于唯一匹配的冻结标题。 */
+  scheduledTitle?: string;
+  /** reconcile_scheduled：平台定时列表内部句柄；它不是公开 postId。 */
+  scheduledPlatformId?: string;
 }
 
 /**
@@ -1370,10 +1379,13 @@ export interface PublishCommandResultPayload {
    * 反之 `ok===false && !submitDispatched` 才是「提交前失败」，可安全保持待审重投（change lease-strict-preemption）。
    */
   submitDispatched?: boolean;
-  /** 成功时的产出值（如 capture_postId 的真实 postId） */
+  /**
+   * 成功产出：capture_postId/reconcile_scheduled 为真实公开 postId；
+   * capture_scheduled 为平台定时列表内部句柄（不得写 platform_post_id）。
+   */
   value?: string;
   /**
-   * capture_postId 附带：带 xsec_token 的完整小红书详情页分享 URL（可点开真实笔记）。
+   * capture_postId / reconcile_scheduled 附带：平台给出的完整小红书详情页分享 URL（可点开真实笔记）。
    * 抓不到则不带（undefined）——诚实置空，绝不用裸 id 拼打不开的假链接（change publish-history-account-and-detail）。
    */
   postUrl?: string;

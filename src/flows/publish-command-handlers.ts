@@ -90,6 +90,33 @@ const PACING_MS = {
 } as const;
 
 const CAPTURE_POST_ID_ACTION = 'note.capture_post_id';
+const CAPTURE_SCHEDULED_ACTION = 'note.capture_scheduled';
+const RECONCILE_SCHEDULED_ACTION = 'note.reconcile_scheduled';
+
+/** 小红书创作平台当前原生定时窗口（实机 + 官方前端约束）：未来 1h 至 14d。 */
+export const XHS_SCHEDULE_MIN_AHEAD_MS = 60 * 60 * 1000;
+export const XHS_SCHEDULE_MAX_AHEAD_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** epoch → 北京时间分钟字符串；cloud 永远存 epoch，只有 edge 在平台边界格式化。 */
+export function formatXhsScheduleTime(publishTime: number): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(publishTime));
+  const read = (type: Intl.DateTimeFormatPartTypes): string => parts.find((part) => part.type === type)?.value ?? '';
+  return `${read('year')}-${read('month')}-${read('day')} ${read('hour')}:${read('minute')}`;
+}
+
+export function isValidXhsScheduleTime(publishTime: number, now: number): boolean {
+  return Number.isFinite(publishTime)
+    && publishTime - now >= XHS_SCHEDULE_MIN_AHEAD_MS
+    && publishTime - now <= XHS_SCHEDULE_MAX_AHEAD_MS;
+}
 
 /** 与页面侧读回同口径归一（折叠空白、去首尾），供全文比对（change lease-strict-preemption）。 */
 function normalizeFieldText(value: string): string {
@@ -192,17 +219,6 @@ function buildSetOptionRequest(optionKind: string | undefined, optionValue: stri
   };
 }
 
-/** set_schedule：定位定时发布控件并设定时刻（best-effort）。 */
-function buildSetScheduleRequest(publishTime: number): ActionRequest {
-  return {
-    actionId: 'note.publish_set_schedule',
-    op: 'input',
-    value: String(publishTime),
-    goal: '在发布页设置定时发布：打开「定时发布」并填入目标时刻',
-    anchorHint: { text: '定时', textMatch: 'contains' },
-  };
-}
-
 /** set_cover：定位封面入口并将所选图设为封面（best-effort；真实 DOM 待实机校准）。 */
 function buildSetCoverRequest(): ActionRequest {
   return {
@@ -231,11 +247,28 @@ function coverActiveValidator(): PostValidator {
 
 /** 创作平台图文发布页（navigate_entry 直达；跨子域点击入口会开新标签、edge 看不到，故用 Page.navigate）。 */
 const XHS_CREATOR_PUBLISH_URL = 'https://creator.xiaohongshu.com/publish/publish?source=official';
+/** 创作平台笔记管理；capture/reconcile 只读导航到这里核验平台事实。 */
+const XHS_CREATOR_MANAGE_URL = 'https://creator.xiaohongshu.com/new/note-manager?source=official';
+
+interface ScheduleDomState {
+  checked: boolean;
+  inputFound: boolean;
+  value: string;
+  toggle?: { x: number; y: number };
+}
+
+interface ManagedNoteMatch {
+  state: 'found' | 'missing' | 'ambiguous';
+  noteId?: string;
+  postUrl?: string;
+}
 
 export class PublishCommandDispatcher {
   private readonly clock: () => number;
   private inputEnabled = false;
   private domEnabled = false;
+  /** 只在专用 set_schedule 三项正证据全部通过后置真；新发布页导航必清。 */
+  private scheduleModeConfirmed = false;
   /** 拟人节奏（change publish-fill-humanization，Phase A）：开关 + 可注入 sleep/random。 */
   private readonly pacingEnabled: boolean;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -290,7 +323,8 @@ export class PublishCommandDispatcher {
    * submit 有自己的"通读停留"且其后置校验最长 15s，再叠通用 think 易撞云端 30s 单步上限。
    */
   private async thinkBeforeStep(kind: PublishCommandPayload['kind']): Promise<void> {
-    if (kind === 'capture_postId' || kind === 'upload_image' || kind === 'submit_publish') return;
+    if (kind === 'capture_postId' || kind === 'capture_scheduled' || kind === 'reconcile_scheduled'
+      || kind === 'upload_image' || kind === 'submit_publish') return;
     await this.pause(PACING_MS.stepThink);
   }
 
@@ -362,6 +396,10 @@ export class PublishCommandDispatcher {
         return this.runSubmit(payload, takeover);
       case 'capture_postId':
         return this.runCapturePostId(payload);
+      case 'capture_scheduled':
+        return this.runCaptureScheduled(payload);
+      case 'reconcile_scheduled':
+        return this.runReconcileScheduled(payload);
       case 'set_option': {
         const optionValue = payload.params.optionValue ?? payload.params.value ?? '';
         return this.runAtom(
@@ -373,7 +411,7 @@ export class PublishCommandDispatcher {
       }
       case 'set_schedule': {
         const publishTime = payload.params.publishTime ?? 0;
-        return this.runAtom(payload, buildSetScheduleRequest(publishTime), valueValidator('定时'), takeover);
+        return this.runSetSchedule(payload, publishTime, takeover);
       }
       case 'upload_image':
         return this.runUploadImage(payload, takeover);
@@ -393,6 +431,8 @@ export class PublishCommandDispatcher {
     payload: PublishCommandPayload,
     takeover?: TakeoverCtx,
   ): Promise<PublishCommandResultPayload> {
+    // 新的一篇必须重新通过专用定时正证据；绝不沿用上一页内存态决定提交按钮。
+    this.scheduleModeConfirmed = false;
     if (!this.cdp) {
       // 回退：无 CDP 直驱能力时，沿用点击入口 + 后置校验。
       return this.runAtom(
@@ -861,6 +901,163 @@ export class PublishCommandDispatcher {
     return best ? { x: best.x, y: best.y } : null;
   }
 
+  /** 读取定时开关与时间输入真态；只读，找不到任一关键控件即返回保守 false。 */
+  private async readScheduleDomState(): Promise<ScheduleDomState> {
+    if (!this.cdp) return { checked: false, inputFound: false, value: '' };
+    const expression = String.raw`(() => { /*SCHEDULE_STATE*/
+      const visible = (el) => { try { const r=el.getBoundingClientRect(); const s=getComputedStyle(el); const vw=window.innerWidth||0,vh=window.innerHeight||0; return r.width>0&&r.height>0&&r.right>0&&r.bottom>0&&r.left<vw&&r.top<vh&&s.display!=='none'&&s.visibility!=='hidden'; } catch(e) { return false; } };
+      const norm = (s) => String(s||'').replace(/\s+/g,'').trim();
+      const all = Array.from(document.querySelectorAll('label,span,div,p'));
+      const label = all.find((el) => visible(el) && /^定时发布(?:$|[:：])/.test(norm(el.textContent)));
+      const scope = label && (label.closest('[class*="post-time-wrapper" i]') || label.closest('[class*="custom-switch-wrapper" i],[class*="form" i],[class*="item" i],[class*="row" i]') || label.parentElement?.parentElement || label.parentElement);
+      const root = scope || document;
+      const checks = Array.from(root.querySelectorAll('input[type="checkbox"],[role="checkbox"],[class*="switch-simulator" i],[class*="checkbox" i]')).filter(visible);
+      const check = checks.find((el) => el instanceof HTMLInputElement || el.hasAttribute('aria-checked') || /(^|[\s_-])(un)?checked([\s_-]|$)/i.test(String(el.className||''))) || checks[0] || null;
+      const checkClass = String(check&&check.className||'');
+      const checked = !!check && ((check instanceof HTMLInputElement && check.checked) || check.getAttribute('aria-checked')==='true' || (!/(^|[\s_-])unchecked([\s_-]|$)/i.test(checkClass) && /(^|[\s_-])(checked|active|selected)([\s_-]|$)/i.test(checkClass)));
+      const inputs = Array.from(root.querySelectorAll('input')).filter((el) => visible(el) && el.type!=='checkbox');
+      const input = inputs.find((el) => /时间|日期|date|time/i.test((el.placeholder||'')+' '+(el.getAttribute('aria-label')||'')+' '+(el.type||''))) || inputs[0] || null;
+      const toggleEl = check && (check.closest('label,[role="checkbox"],[class~="d-switch"],[class*="custom-switch-switch" i],[class*="checkbox" i]') || check) || label;
+      let toggle;
+      if (toggleEl) { const r=toggleEl.getBoundingClientRect(); if(r.width>0&&r.height>0) toggle={x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)}; }
+      return JSON.stringify({checked,inputFound:!!input,value:input ? String(input.value||input.getAttribute('value')||'') : '',toggle});
+    })()`;
+    try {
+      const response = await this.cdp.send<{ result?: { value?: string } }>('Runtime.evaluate', { expression, returnByValue: true });
+      const parsed = JSON.parse(response?.result?.value ?? '{}') as Partial<ScheduleDomState>;
+      return {
+        checked: parsed.checked === true,
+        inputFound: parsed.inputFound === true,
+        value: typeof parsed.value === 'string' ? parsed.value : '',
+        ...(parsed.toggle && Number.isFinite(parsed.toggle.x) && Number.isFinite(parsed.toggle.y) ? { toggle: parsed.toggle } : {}),
+      };
+    } catch {
+      return { checked: false, inputFound: false, value: '' };
+    }
+  }
+
+  /** 用原生 value setter + input/change/blur 写平台受控时间输入；回 false 表示控件不存在/拒绝写入。 */
+  private async writeScheduleTime(displayTime: string): Promise<boolean> {
+    if (!this.cdp) return false;
+    const localValue = displayTime.replace(' ', 'T');
+    const expression = String.raw`(() => { /*SCHEDULE_SET_TIME*/
+      const visible = (el) => { try { const r=el.getBoundingClientRect(); return r.width>0&&r.height>0&&getComputedStyle(el).display!=='none'; } catch(e) { return false; } };
+      const norm = (s) => String(s||'').replace(/\s+/g,'').trim();
+      const label = Array.from(document.querySelectorAll('label,span,div,p')).find((el) => visible(el) && /^定时发布(?:$|[:：])/.test(norm(el.textContent)));
+      const scope = label && (label.closest('[class*="post-time-wrapper" i]') || label.closest('[class*="custom-switch-wrapper" i],[class*="form" i],[class*="item" i],[class*="row" i]') || label.parentElement?.parentElement || label.parentElement);
+      const root = scope || document;
+      const inputs = Array.from(root.querySelectorAll('input')).filter((el) => visible(el) && el.type!=='checkbox');
+      const el = inputs.find((node) => /时间|日期|date|time/i.test((node.placeholder||'')+' '+(node.getAttribute('aria-label')||'')+' '+(node.type||''))) || inputs[0];
+      if(!el) return false;
+      const value = el.type==='datetime-local' ? ${JSON.stringify(localValue)} : ${JSON.stringify(displayTime)};
+      try {
+        const proto = Object.getPrototypeOf(el);
+        const desc = Object.getOwnPropertyDescriptor(proto,'value') || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');
+        if(desc&&desc.set) desc.set.call(el,value); else el.value=value;
+        el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:value}));
+        el.dispatchEvent(new Event('change',{bubbles:true}));
+        el.blur();
+        return true;
+      } catch(e) { return false; }
+    })()`;
+    try {
+      const response = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression, returnByValue: true });
+      return response?.result?.value === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** 将定时设置行滚入可点击视口；页面设置区位于独立长滚动容器内，不能直接点击屏外坐标。 */
+  private async revealScheduleRow(): Promise<boolean> {
+    if (!this.cdp) return false;
+    const expression = String.raw`(() => { /*SCHEDULE_REVEAL*/
+      const norm=(s)=>String(s||'').replace(/\s+/g,'').trim();
+      const label=Array.from(document.querySelectorAll('label,span,div,p')).find((el)=>/^定时发布(?:$|[:：])/.test(norm(el.textContent)));
+      if(!label)return false;
+      const row=label.closest('[class*="post-time-wrapper" i]')||label.closest('[class*="custom-switch-wrapper" i],[class*="form" i],[class*="item" i],[class*="row" i]')||label;
+      row.scrollIntoView({block:'center',inline:'nearest'});
+      return true;
+    })()`;
+    try {
+      const response = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression, returnByValue: true });
+      if (response?.result?.value !== true) return false;
+      await this.sleep(150);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 小红书原生定时设置：窗口校验 → 开开关 → 写北京时间 → 三项正证据（checked/value/定时发布按钮）。
+   * 任何失败都 fail-closed；绝不回退通用「页面有定时文案即成功」假校验。
+   */
+  private async runSetSchedule(
+    payload: PublishCommandPayload,
+    publishTime: number,
+    takeover?: TakeoverCtx,
+  ): Promise<PublishCommandResultPayload> {
+    const startedAt = this.clock();
+    const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
+    const details = () => ({ actionId: 'note.publish_set_schedule', durationMs: this.clock() - startedAt });
+    this.scheduleModeConfirmed = false;
+    if (!this.cdp) return { ...base, ok: false, error: 'kind_not_implemented', details: details() };
+    if (!isValidXhsScheduleTime(publishTime, this.clock())) {
+      return { ...base, ok: false, error: 'schedule_time_out_of_range', details: details() };
+    }
+    const displayTime = formatXhsScheduleTime(publishTime);
+    try {
+      await this.ensureInputEnabled();
+      takeover?.checkpoint();
+      if (!(await this.revealScheduleRow())) return { ...base, ok: false, error: 'no_target', details: details() };
+      let state = await this.readScheduleDomState();
+      if (!state.checked) {
+        if (!state.toggle) return { ...base, ok: false, error: 'no_target', details: details() };
+        await dispatchClick(this.cdp, state.toggle.x, state.toggle.y, {
+          random: this.random,
+          sleep: this.sleep,
+          overshoot: false,
+          jitter: 0,
+        });
+        state = await pollBounded<ScheduleDomState>({
+          probe: async () => {
+            const next = await this.readScheduleDomState();
+            return next.checked ? next : undefined;
+          },
+          timeoutMs: 5_000,
+          intervalMs: 250,
+          clock: this.clock,
+          sleep: this.sleep,
+        }) ?? { checked: false, inputFound: false, value: '' };
+      }
+      if (!state.checked) return { ...base, ok: false, error: 'post_validation_failed', details: details() };
+      if (!state.inputFound) return { ...base, ok: false, error: 'no_target', details: details() };
+      if (!(await this.writeScheduleTime(displayTime))) {
+        return { ...base, ok: false, error: 'post_validation_failed', details: details() };
+      }
+      const verified = await pollBounded<ScheduleDomState>({
+        probe: async () => {
+          const next = await this.readScheduleDomState();
+          const normalized = next.value.replace('T', ' ').slice(0, 16);
+          return next.checked && next.inputFound && normalized === displayTime ? next : undefined;
+        },
+        timeoutMs: 5_000,
+        intervalMs: 250,
+        clock: this.clock,
+        sleep: this.sleep,
+      });
+      if (!verified || !(await this.findShadowButtonCenter('定时发布'))) {
+        return { ...base, ok: false, error: 'post_validation_failed', details: details() };
+      }
+      this.scheduleModeConfirmed = true;
+      return { ...base, ok: true, value: displayTime, details: details() };
+    } catch (err) {
+      rethrowIfTakeover(err);
+      return { ...base, ok: false, error: `engine_error: ${err instanceof Error ? err.message : String(err)}`, details: details() };
+    }
+  }
+
   /**
    * 诊断（change diagnose-publish-submit-failure，只观测不改行为）：只读捕获点击坐标处的页面状态——
    * 顶层命中元素 / 是否在弹层内 / role=dialog / toast 文案 / 正文头 / URL，用于区分
@@ -913,7 +1110,7 @@ export class PublishCommandDispatcher {
     let center: { x: number; y: number } | null = null;
     try {
       await this.ensureInputEnabled();
-      center = await this.findShadowButtonCenter('发布');
+      center = await this.findShadowButtonCenter(this.scheduleModeConfirmed ? '定时发布' : '发布');
     } catch (err) {
       rethrowIfTakeover(err);
       const message = err instanceof Error ? err.message : String(err);
@@ -1159,6 +1356,199 @@ export class PublishCommandDispatcher {
       ...(postUrl ? { postUrl } : {}),
       details: { actionId: CAPTURE_POST_ID_ACTION, durationMs: this.clock() - startedAt },
     };
+  }
+
+  /** 导航到创作平台笔记管理并等待列表壳出现；只读核验，不携 takeover 取消点。 */
+  private async navigateToManage(): Promise<boolean> {
+    if (!this.cdp) return false;
+    try {
+      await this.cdp.send('Page.navigate', { url: XHS_CREATOR_MANAGE_URL });
+    } catch {
+      return false;
+    }
+    return !!(await pollBounded<true>({
+      probe: async () => {
+        try {
+          const response = await this.cdp!.send<{ result?: { value?: boolean } }>('Runtime.evaluate', {
+            expression: String.raw`(() => { /*MANAGE_READY*/ const text=(document.body&&document.body.innerText)||''; return /笔记管理|内容管理/.test(text); })()`,
+            returnByValue: true,
+          });
+          return response?.result?.value === true ? true : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+      timeoutMs: 20_000,
+      intervalMs: 500,
+      clock: this.clock,
+      sleep: this.sleep,
+    }));
+  }
+
+  /** 点击笔记管理的精确语义 tab；只点可见项，找不到诚实 false。 */
+  private async clickManageTab(label: '全部' | '定时发布' | '已发布'): Promise<boolean> {
+    if (!this.cdp) return false;
+    const expression = String.raw`(() => { /*MANAGE_TAB*/
+      const wanted=${JSON.stringify(label)};
+      const visible=(el)=>{try{const r=el.getBoundingClientRect();const s=getComputedStyle(el);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';}catch(e){return false;}};
+      const norm=(s)=>String(s||'').replace(/\s+/g,'').trim();
+      const candidates=Array.from(document.querySelectorAll('[role="tab"],button,a,li,div,span')).filter((el)=>visible(el));
+      const target=candidates.find((el)=>{const text=norm(el.textContent);return text===wanted||text.startsWith(wanted+'(')||text.startsWith(wanted+'（')||(wanted==='全部'&&text.startsWith('全部'));});
+      if(!target)return false;
+      target.click();
+      return true;
+    })()`;
+    try {
+      const response = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression, returnByValue: true });
+      return response?.result?.value === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 在当前管理 tab 中做保守唯一匹配。内部 id 优先；否则必须同时命中冻结标题与目标日期/分钟。
+   * 只接受平台给出的 explore 链接，绝不从裸 id 拼 URL。
+   */
+  private async findManagedNote(
+    title: string,
+    publishTime: number,
+    scheduledPlatformId?: string,
+    expectedStatus?: 'scheduled' | 'published',
+  ): Promise<ManagedNoteMatch> {
+    if (!this.cdp) return { state: 'missing' };
+    const displayTime = formatXhsScheduleTime(publishTime);
+    const expression = String.raw`(() => { /*MANAGED_NOTE_MATCH*/
+      const title=${JSON.stringify(title)};
+      const display=${JSON.stringify(displayTime)};
+      const wantedId=${JSON.stringify(scheduledPlatformId ?? '')};
+      const expectedStatus=${JSON.stringify(expectedStatus ?? '')};
+      const norm=(s)=>String(s||'').replace(/\s+/g,'').trim();
+      const titleNorm=norm(title);
+      const d=new Date(${JSON.stringify(publishTime)});
+      const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(d);
+      const get=(t)=>parts.find((p)=>p.type===t)?.value||'';
+      const y=get('year'),m=get('month'),day=get('day'),hm=get('hour')+':'+get('minute');
+      const dateSignals=[norm(display),norm(y+'/'+m+'/'+day+' '+hm),norm(y+'年'+m+'月'+day+'日 '+hm),norm(Number(m)+'月'+Number(day)+'日 '+hm)];
+      const seen=new Set(); const rows=[];
+      const seeds=Array.from(document.querySelectorAll('[data-impression],a[href*="/explore/"],a[href*="/discovery/item/"]'));
+      for(const seed of seeds){
+        const row=seed.closest('tr,li,[class*="note" i],[class*="card" i],[class*="item" i]')||seed.parentElement||seed;
+        if(seen.has(row))continue;seen.add(row);
+        const text=norm(row.innerText||row.textContent||'');
+        const signalEls=[row,...Array.from(row.querySelectorAll('[data-impression]'))];
+        const raw=signalEls.map((el)=>el.getAttribute&&el.getAttribute('data-impression')||'').join(' ');
+        const idMatch=raw.match(/["'](?:note_id|noteId)["']\s*:\s*["']([0-9a-f]{16,32})["']/i);
+        const link=Array.from(row.querySelectorAll('a[href]')).find((a)=>/xiaohongshu\.com\/(?:explore|discovery\/item)\//i.test(a.href||''));
+        const href=link&&link.href||'';
+        const urlId=(href.match(/\/(?:explore|discovery\/item)\/([0-9a-f]{16,32})/i)||[])[1]||'';
+        const noteId=idMatch&&idMatch[1]||urlId;
+        const idOk=!!wantedId&&(noteId===wantedId||raw.includes(wantedId));
+        const titleOk=!!titleNorm&&text.includes(titleNorm);
+        const timeOk=dateSignals.some((s)=>s&&text.includes(s));
+        const statusOk=expectedStatus!=='scheduled'||text.includes(norm('定时发布'));
+        if(statusOk&&(idOk||(titleOk&&timeOk)))rows.push({noteId,postUrl:href,text});
+      }
+      const unique=[];const keys=new Set();
+      for(const row of rows){const key=row.noteId||row.postUrl||row.text;if(keys.has(key))continue;keys.add(key);unique.push(row);}
+      if(unique.length===0)return JSON.stringify({state:'missing'});
+      if(unique.length!==1)return JSON.stringify({state:'ambiguous'});
+      return JSON.stringify({state:'found',noteId:unique[0].noteId||undefined,postUrl:unique[0].postUrl||undefined});
+    })()`;
+    try {
+      const response = await this.cdp.send<{ result?: { value?: string } }>('Runtime.evaluate', { expression, returnByValue: true });
+      const parsed = JSON.parse(response?.result?.value ?? '{}') as Partial<ManagedNoteMatch>;
+      if (parsed.state !== 'found' && parsed.state !== 'ambiguous') return { state: 'missing' };
+      return {
+        state: parsed.state,
+        ...(typeof parsed.noteId === 'string' && parsed.noteId ? { noteId: parsed.noteId } : {}),
+        ...(typeof parsed.postUrl === 'string' && parsed.postUrl ? { postUrl: parsed.postUrl } : {}),
+      };
+    } catch {
+      return { state: 'missing' };
+    }
+  }
+
+  /** 定时提交后抓平台内部句柄；失败不代表提交失败，由 cloud 保持 scheduled 并后续按标题/时间对账。 */
+  private async runCaptureScheduled(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+    const startedAt = this.clock();
+    const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
+    const details = () => ({ actionId: CAPTURE_SCHEDULED_ACTION, durationMs: this.clock() - startedAt });
+    const title = payload.params.scheduledTitle?.trim() ?? '';
+    const publishTime = payload.params.publishTime ?? 0;
+    if (!this.cdp) return { ...base, ok: false, error: 'kind_not_implemented', details: details() };
+    if (!title || !Number.isFinite(publishTime)) return { ...base, ok: false, error: 'invalid_schedule_identity', details: details() };
+    if (!(await this.navigateToManage())) return { ...base, ok: false, error: 'manage_navigation_failed', details: details() };
+    if (!(await this.clickManageTab('定时发布'))) return { ...base, ok: false, error: 'no_target', details: details() };
+    let match = await pollBounded<ManagedNoteMatch>({
+      probe: async () => {
+        const next = await this.findManagedNote(title, publishTime, undefined, 'scheduled');
+        return next.state === 'missing' ? undefined : next;
+      },
+      timeoutMs: 3_000,
+      intervalMs: 500,
+      clock: this.clock,
+      sleep: this.sleep,
+    });
+    // 平台刚提交后「定时发布」筛选偶尔短暂返回空集，但「全部」已出现带定时状态的卡片；
+    // 只在卡片同时命中冻结标题、目标分钟和“定时发布”状态时兜底，仍保持 fail-closed。
+    if (!match && await this.clickManageTab('全部')) {
+      match = await pollBounded<ManagedNoteMatch>({
+        probe: async () => {
+          const next = await this.findManagedNote(title, publishTime, undefined, 'scheduled');
+          return next.state === 'missing' ? undefined : next;
+        },
+        timeoutMs: 8_000,
+        intervalMs: 500,
+        clock: this.clock,
+        sleep: this.sleep,
+      });
+    }
+    if (!match) return { ...base, ok: false, error: 'scheduled_record_not_found', details: details() };
+    if (match.state === 'ambiguous') return { ...base, ok: false, error: 'ambiguous_match', details: details() };
+    if (!match.noteId) return { ...base, ok: false, error: 'scheduled_id_unavailable', details: details() };
+    return { ...base, ok: true, value: match.noteId, details: details() };
+  }
+
+  /** 到期后只读对账：仍在定时列表即 pending；已发布列表必须同时给真实 id 与平台 URL 才确认。 */
+  private async runReconcileScheduled(payload: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+    const startedAt = this.clock();
+    const base = { recordId: payload.recordId, seq: payload.seq, kind: payload.kind };
+    const details = () => ({ actionId: RECONCILE_SCHEDULED_ACTION, durationMs: this.clock() - startedAt });
+    const title = payload.params.scheduledTitle?.trim() ?? '';
+    const publishTime = payload.params.publishTime ?? 0;
+    const scheduledId = payload.params.scheduledPlatformId?.trim() || undefined;
+    if (!this.cdp) return { ...base, ok: false, error: 'kind_not_implemented', details: details() };
+    if (!title || !Number.isFinite(publishTime)) return { ...base, ok: false, error: 'invalid_schedule_identity', details: details() };
+    if (!(await this.navigateToManage())) return { ...base, ok: false, error: 'manage_navigation_failed', details: details() };
+
+    if (await this.clickManageTab('定时发布')) {
+      const stillScheduled = await this.findManagedNote(title, publishTime, scheduledId, 'scheduled');
+      if (stillScheduled.state === 'ambiguous') return { ...base, ok: false, error: 'ambiguous_match', details: details() };
+      if (stillScheduled.state === 'found') return { ...base, ok: false, error: 'scheduled_pending', details: details() };
+    }
+    // 同 capture：筛选页可能短暂为空；在“全部”中只认明确带“定时发布”状态的唯一卡片。
+    if (await this.clickManageTab('全部')) {
+      const stillScheduled = await this.findManagedNote(title, publishTime, scheduledId, 'scheduled');
+      if (stillScheduled.state === 'ambiguous') return { ...base, ok: false, error: 'ambiguous_match', details: details() };
+      if (stillScheduled.state === 'found') return { ...base, ok: false, error: 'scheduled_pending', details: details() };
+    }
+    if (!(await this.clickManageTab('已发布'))) return { ...base, ok: false, error: 'no_target', details: details() };
+    const published = await pollBounded<ManagedNoteMatch>({
+      probe: async () => {
+        const next = await this.findManagedNote(title, publishTime, scheduledId);
+        return next.state === 'missing' ? undefined : next;
+      },
+      timeoutMs: 10_000,
+      intervalMs: 500,
+      clock: this.clock,
+      sleep: this.sleep,
+    });
+    if (!published) return { ...base, ok: false, error: 'published_record_not_found', details: details() };
+    if (published.state === 'ambiguous') return { ...base, ok: false, error: 'ambiguous_match', details: details() };
+    if (!published.noteId) return { ...base, ok: false, error: 'public_post_id_unavailable', details: details() };
+    if (!published.postUrl) return { ...base, ok: false, error: 'public_link_unavailable', details: details() };
+    return { ...base, ok: true, value: published.noteId, postUrl: published.postUrl, details: details() };
   }
 
   /** 配图上传：URL→下载→CDP 文件输入桥→后置校验成功态。未注入 uploader 则诚实 kind_not_implemented。 */

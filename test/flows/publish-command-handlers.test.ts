@@ -10,7 +10,10 @@ import type {
   SelectionResult,
 } from '../../src/locating/index.js';
 import type { ActionExecutor } from '../../src/locating/engine.js';
-import { PublishCommandDispatcher } from '../../src/flows/publish-command-handlers.js';
+import {
+  formatXhsScheduleTime,
+  PublishCommandDispatcher,
+} from '../../src/flows/publish-command-handlers.js';
 import { TaskTakeoverError, type TakeoverCtx } from '../../src/execution/takeover.js';
 import type { PublishCommandPayload } from '../../src/comm/protocol.js';
 import {
@@ -297,13 +300,176 @@ test('AC-CMD-S4 set_option(visibility) → 定位选项控件 + 值校验通过'
   assert.equal(res.kind, 'set_option');
 });
 
-test('AC-CMD-S4 set_schedule → 定位定时控件 + 值写入', async () => {
-  const extra = `<label>定时发布</label><input data-action-id="note.publish_set_schedule" placeholder="选择时间" />`;
-  const doc = buildDom(publishPageHtml(extra));
-  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
-  const res = await dispatcher.dispatch(cmd('set_schedule', { publishTime: 1800000000000 }));
+class FakeScheduleCdp {
+  readonly calls: Array<{ method: string; expression: string }> = [];
+  value = '';
+
+  constructor(private readonly hasScheduledButton = true) {}
+
+  async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+    const expression = String(params?.expression ?? '');
+    this.calls.push({ method, expression });
+    if (method === 'Runtime.evaluate') {
+      if (expression.includes('SCHEDULE_STATE')) {
+        return { result: { value: JSON.stringify({ checked: true, inputFound: true, value: this.value }) } } as T;
+      }
+      if (expression.includes('SCHEDULE_SET_TIME')) {
+        const values = [...expression.matchAll(/"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2})"/g)].map((match) => match[1]);
+        this.value = values.find((candidate) => candidate.includes(' ')) ?? values[0]?.replace('T', ' ') ?? '';
+        return { result: { value: true } } as T;
+      }
+      return { result: { value: true } } as T;
+    }
+    if (method === 'DOM.getDocument') {
+      return {
+        root: {
+          nodeType: 9,
+          children: this.hasScheduledButton
+            ? [{ nodeType: 1, nodeId: 77, children: [{ nodeType: 3, nodeValue: '定时发布' }] }]
+            : [],
+        },
+      } as T;
+    }
+    if (method === 'DOM.getBoxModel') {
+      return { model: { content: [100, 200, 200, 200, 200, 240, 100, 240] } } as T;
+    }
+    if (method === 'DOM.getAttributes') return { attributes: [] } as T;
+    return {} as T;
+  }
+}
+
+test('XHS-SCHEDULE set_schedule 写入 1h–14d 内时间并以三项正证据确认', async () => {
+  const doc = buildDom(publishPageHtml());
+  const now = 1_800_000_000_000;
+  const publishTime = now + 2 * 60 * 60 * 1000;
+  const cdp = new FakeScheduleCdp();
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), {}, () => now, undefined, cdp as any);
+  const res = await dispatcher.dispatch(cmd('set_schedule', { publishTime }));
   assert.equal(res.ok, true);
   assert.equal(res.kind, 'set_schedule');
+  assert.equal(res.value, formatXhsScheduleTime(publishTime));
+  assert.equal(cdp.value, formatXhsScheduleTime(publishTime));
+});
+
+test('XHS-SCHEDULE 缺“定时发布”提交按钮正证据时 fail closed', async () => {
+  const doc = buildDom(publishPageHtml());
+  const now = 1_800_000_000_000;
+  const cdp = new FakeScheduleCdp(false);
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), {}, () => now, undefined, cdp as any);
+  const res = await dispatcher.dispatch(cmd('set_schedule', { publishTime: now + 2 * 60 * 60 * 1000 }));
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'post_validation_failed');
+});
+
+test('XHS-SCHEDULE 边缘再挡 1h–14d 时间窗，越界不触碰页面', async () => {
+  const doc = buildDom(publishPageHtml());
+  const now = 1_800_000_000_000;
+  const cdp = new FakeScheduleCdp();
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), {}, () => now, undefined, cdp as any);
+  const res = await dispatcher.dispatch(cmd('set_schedule', { publishTime: now + 60 * 60 * 1000 - 1 }));
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'schedule_time_out_of_range');
+  assert.equal(cdp.calls.length, 0);
+});
+
+class FakeManageCdp {
+  readonly tabs: string[] = [];
+  readonly navigations: string[] = [];
+  private matchIndex = 0;
+
+  constructor(private readonly matches: Array<Record<string, unknown>>) {}
+
+  async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+    const expression = String(params?.expression ?? '');
+    if (method === 'Page.navigate') {
+      this.navigations.push(String(params?.url ?? ''));
+      return {} as T;
+    }
+    if (method === 'Runtime.evaluate' && expression.includes('MANAGE_READY')) {
+      return { result: { value: true } } as T;
+    }
+    if (method === 'Runtime.evaluate' && expression.includes('MANAGE_TAB')) {
+      const wantedLiteral = expression.match(/const wanted=("(?:[^"\\]|\\.)*")/)?.[1];
+      const wanted = wantedLiteral ? JSON.parse(wantedLiteral) as string : '';
+      this.tabs.push(wanted === '已发布' ? 'published' : wanted === '全部' ? 'all' : 'scheduled');
+      return { result: { value: true } } as T;
+    }
+    if (method === 'Runtime.evaluate' && expression.includes('MANAGED_NOTE_MATCH')) {
+      const value = this.matches[Math.min(this.matchIndex, this.matches.length - 1)] ?? { state: 'missing' };
+      this.matchIndex++;
+      return { result: { value: JSON.stringify(value) } } as T;
+    }
+    return { result: { value: true } } as T;
+  }
+}
+
+test('XHS-SCHEDULE capture_scheduled 只回平台内部句柄，不伪装公开链接', async () => {
+  const doc = buildDom(publishPageHtml());
+  const cdp = new FakeManageCdp([{ state: 'found', noteId: '6a5b3b98000000000301f011' }]);
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, undefined, cdp as any);
+  const res = await dispatcher.dispatch(cmd('capture_scheduled', {
+    scheduledTitle: '冻结标题',
+    publishTime: Date.now() + 2 * 60 * 60 * 1000,
+  }));
+  assert.equal(res.ok, true);
+  assert.equal(res.value, '6a5b3b98000000000301f011');
+  assert.equal(res.postUrl, undefined);
+  assert.deepEqual(cdp.tabs, ['scheduled']);
+  assert.deepEqual(cdp.navigations, ['https://creator.xiaohongshu.com/new/note-manager?source=official']);
+});
+
+test('XHS-SCHEDULE 定时筛选短暂空集时仅凭“全部”中的定时状态卡片兜底', async () => {
+  const doc = buildDom(publishPageHtml());
+  const cdp = new FakeManageCdp([
+    ...Array.from({ length: 8 }, () => ({ state: 'missing' })),
+    { state: 'found', noteId: '6a5b50d30000000005038f98' },
+  ]);
+  let now = 1_800_000_000_000;
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), {}, () => (now += 500), undefined, cdp as any);
+  const res = await dispatcher.dispatch(cmd('capture_scheduled', {
+    scheduledTitle: '定时筛选延迟',
+    publishTime: now + 2 * 60 * 60 * 1000,
+  }));
+  assert.equal(res.ok, true);
+  assert.equal(res.value, '6a5b50d30000000005038f98');
+  assert.deepEqual(cdp.tabs, ['scheduled', 'all']);
+});
+
+test('XHS-SCHEDULE reconcile_scheduled 只有公开 id 与平台 URL 同时存在才确认 published', async () => {
+  const doc = buildDom(publishPageHtml());
+  const cdp = new FakeManageCdp([
+    { state: 'missing' },
+    { state: 'missing' },
+    {
+      state: 'found',
+      noteId: 'public1234567890abcd',
+      postUrl: 'https://www.xiaohongshu.com/explore/public1234567890abcd?xsec_token=token',
+    },
+  ]);
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, undefined, cdp as any);
+  const res = await dispatcher.dispatch(cmd('reconcile_scheduled', {
+    scheduledTitle: '冻结标题',
+    publishTime: Date.now() - 10 * 60 * 1000,
+    scheduledPlatformId: '6a5b3b98000000000301f011',
+  }));
+  assert.equal(res.ok, true);
+  assert.equal(res.value, 'public1234567890abcd');
+  assert.ok(res.postUrl?.includes('xsec_token=token'));
+  assert.deepEqual(cdp.tabs, ['scheduled', 'all', 'published']);
+});
+
+test('XHS-SCHEDULE reconcile_scheduled 仍在定时列表时诚实 pending', async () => {
+  const doc = buildDom(publishPageHtml());
+  const cdp = new FakeManageCdp([{ state: 'found', noteId: '6a5b3b98000000000301f011' }]);
+  const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, undefined, cdp as any);
+  const res = await dispatcher.dispatch(cmd('reconcile_scheduled', {
+    scheduledTitle: '冻结标题',
+    publishTime: Date.now() - 10 * 60 * 1000,
+    scheduledPlatformId: '6a5b3b98000000000301f011',
+  }));
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'scheduled_pending');
+  assert.deepEqual(cdp.tabs, ['scheduled']);
 });
 
 // ── change publish-fill-humanization（Phase A）：CDP 路径填写拟人化 ──────────────
