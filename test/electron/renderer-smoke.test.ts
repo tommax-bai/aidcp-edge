@@ -12,6 +12,7 @@ const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
 const styles = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
+const publishReviewLogicSrc = readFileSync(join(electronDir, 'renderer/publish-review-logic.js'), 'utf8');
 const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
 
 // renderer 装了 1s 走字 interval：测试结束统一 close 掉所有 jsdom window，防止句柄挂住测试进程。
@@ -102,6 +103,7 @@ async function boot(stub: Stub): Promise<DOMWindow> {
   openWindows.push(window);
   (window as unknown as { aidcpEdge: Stub }).aidcpEdge = stub;
   window.eval(uiLogicSrc); // 纯视图逻辑先注入（真实加载顺序同 index.html 的 <script> 顺序）
+  window.eval(publishReviewLogicSrc);
   window.eval(rendererSrc);
   for (let i = 0; i < 5; i++) await tick(); // flush getSettings→probe→auto refreshEnvs 链
   return window;

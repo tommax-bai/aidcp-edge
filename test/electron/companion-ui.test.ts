@@ -12,6 +12,7 @@ const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
 const contentWorkspaceSrc = readFileSync(join(electronDir, 'renderer/content-workspace.js'), 'utf8');
+const publishReviewLogicSrc = readFileSync(join(electronDir, 'renderer/publish-review-logic.js'), 'utf8');
 const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
 const rendererCss = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 
@@ -82,6 +83,7 @@ async function boot(statusOver: Record<string, unknown> = {}, apiOver: Record<st
   };
   window.eval(uiLogicSrc);
   window.eval(contentWorkspaceSrc);
+  window.eval(publishReviewLogicSrc);
   window.eval(rendererSrc);
   for (let i = 0; i < 5; i++) await tick();
   return { w: window, pushStatus, pushActivity };
@@ -565,17 +567,25 @@ test('洗稿稿件审核：展示成品并通过既有审批 RPC 直接发布，
   assert.equal($(w, '#publish-preview-content img').getAttribute('src'), 'https://cdn.example.com/1.jpg');
   assert.doesNotMatch($(w, '#publish-preview-content').textContent ?? '', /原稿|作者|链接/);
   assert.equal(hidden($(w, '#publish-preview-actions')), false);
-  assert.equal($(w, '#publish-preview-approve').textContent, '发布');
+  assert.equal($(w, '#publish-preview-approve').textContent, '批准并发布');
   assert.equal($(w, '#publish-preview-cancel').textContent, '取消');
   $(w, '#publish-preview-approve').dispatchEvent(new w.Event('click'));
   await tick();
   await tick();
   assert.equal(approvalCalls.length, 1);
   assert.equal(approvalCalls[0][0], 'u1');
-  const approvalPayload = approvalCalls[0][1] as { requestId: string; approved: boolean; contentVersion: number };
+  const approvalPayload = approvalCalls[0][1] as {
+    requestId: string;
+    approved: boolean;
+    contentVersion: number;
+    publishMode: string;
+    publishTime: number | null;
+  };
   assert.equal(approvalPayload.requestId, 'publish-89');
   assert.equal(approvalPayload.approved, true);
   assert.equal(approvalPayload.contentVersion, 0);
+  assert.equal(approvalPayload.publishMode, 'immediate');
+  assert.equal(approvalPayload.publishTime, null);
   assert.equal(delegatedCalls.length, 0, '审核页即时审批不得降级为异步委托任务');
   assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false, '云端受理后关闭审核页');
   assert.equal($(w, '#pub-card').dataset.pubState, 'approved');
@@ -617,9 +627,150 @@ test('洗稿稿件审核：点击取消直接提交驳回决定并携带当前�
   assert.equal(approvalPayload.requestId, 'publish-90');
   assert.equal(approvalPayload.approved, false);
   assert.equal(approvalPayload.contentVersion, 1);
+  assert.equal('publishMode' in approvalPayload, false, '取消不得夹带发布计划');
+  assert.equal('publishTime' in approvalPayload, false, '取消不得夹带发布时间');
   assert.equal(delegatedCalls.length, 0);
   assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false);
   assert.equal($(w, '#pub-card').dataset.pubState, 'rejected');
+});
+
+test('多条待审批稿按灵感池卡片展示，批准时可定时发布并继续处理剩余稿件', async () => {
+  const now = Date.now();
+  const scheduledInput = new Date(now + 2 * 60 * 60 * 1000 + 8 * 60 * 60 * 1000).toISOString().slice(0, 16);
+  const scheduledAt = Date.parse(`${scheduledInput}:00+08:00`);
+  const listItems = [
+    {
+      id: 101, platform: 'xiaohongshu', kind: 'rewrite', title: '第一条待审', contentPreview: '第一条摘要',
+      topics: ['一'], images: ['https://img/1.jpg'], contentVersion: 2, updatedAt: now,
+      publishMode: 'immediate', publishTime: null,
+    },
+    {
+      id: 102, platform: 'xiaohongshu', kind: 'generated', title: '第二条待审', contentPreview: '第二条摘要',
+      topics: ['二'], images: ['https://img/2.jpg'], contentVersion: 4, updatedAt: now,
+      publishMode: 'immediate', publishTime: null,
+    },
+  ];
+  const approvalCalls: unknown[][] = [];
+  let listCalls = 0;
+  const { w } = await boot({
+    envId: 'u1',
+    publish: { state: 'pending', title: '第二条待审', code: '#102', at: new Date().toISOString() },
+    publishPreview: { recordId: 102, ...listItems[1], content: '第二条完整正文' },
+  }, {
+    publishDraftList: async () => {
+      listCalls += 1;
+      return { ok: true, data: { items: listItems, total: 2, limit: 12, offset: 0 } };
+    },
+    publishDraftGet: async (_envId: string, id: number) => ({
+      ok: true,
+      data: { item: { ...listItems.find((item) => item.id === id), content: `${id} 的完整正文` } },
+    }),
+    publishApproval: async (...args: unknown[]) => {
+      approvalCalls.push(args);
+      return { ok: true, state: 'approved', currentVersion: 5 };
+    },
+  });
+
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.equal(w.document.querySelectorAll('.publish-draft-card').length, 2);
+  assert.match($(w, '#publish-preview-content').textContent ?? '', /第一条待审/);
+  assert.match($(w, '#publish-preview-content').textContent ?? '', /第二条待审/);
+  assert.equal(hidden($(w, '#publish-preview-actions')), true, '列表态不允许误批未选中的稿件');
+
+  (w.document.querySelector('[data-publish-draft-id="102"]') as HTMLElement).dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.equal($(w, '#publish-preview-title').textContent, '第二条待审');
+  assert.match($(w, '#publish-preview-content').textContent ?? '', /102 的完整正文/);
+  const scheduled = w.document.querySelector('input[name="publish-plan-mode"][value="scheduled"]') as HTMLInputElement;
+  scheduled.checked = true;
+  scheduled.dispatchEvent(new w.Event('change'));
+  const time = w.document.querySelector('.publish-plan-time input') as HTMLInputElement;
+  time.value = '';
+  time.dispatchEvent(new w.Event('input'));
+  assert.equal((w.document.querySelector('#publish-preview-approve') as HTMLButtonElement).disabled, true);
+  assert.match($(w, '#publish-preview-action-hint').textContent ?? '', /请选择定时发布时间/);
+  time.value = scheduledInput;
+  time.dispatchEvent(new w.Event('input'));
+  assert.equal($(w, '#publish-preview-approve').textContent, '批准并定时发布');
+  assert.equal((w.document.querySelector('#publish-preview-approve') as HTMLButtonElement).disabled, false);
+
+  $(w, '#publish-preview-approve').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  await tick();
+  assert.equal(approvalCalls.length, 1);
+  assert.equal(approvalCalls[0][0], 'u1');
+  const sent = approvalCalls[0][1] as Record<string, unknown>;
+  assert.equal(sent.requestId, 'publish-102');
+  assert.equal(sent.approved, true);
+  assert.equal(sent.contentVersion, 4);
+  assert.equal(sent.publishMode, 'scheduled');
+  assert.equal(sent.publishTime, scheduledAt);
+  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), true, '还有稿件时审核页保持打开');
+  assert.equal($(w, '#publish-preview-title').textContent, '第一条待审', '数据库状态延迟时 handled 集也会滤掉刚处理的稿件');
+  assert.ok(listCalls >= 2, '审批成功后重新读取权威待审列表');
+});
+
+test('旧 Cloud 不提供待审批列表端点时回落单稿快照', async () => {
+  const { w } = await boot({
+    envId: 'u1',
+    publish: { state: 'pending', title: '兼容稿件', code: '#77', at: new Date().toISOString() },
+    publishPreview: {
+      recordId: 77,
+      kind: 'rewrite',
+      title: '兼容稿件',
+      content: '旧 Cloud 快照正文',
+      topics: [],
+      images: [],
+      contentVersion: 2,
+      updatedAt: Date.now(),
+    },
+  }, {
+    publishDraftList: async () => ({ ok: false, status: 404, error: 'request_failed' }),
+    publishDraftGet: async () => ({ ok: false, status: 404, error: 'request_failed' }),
+  });
+
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.equal($(w, '#publish-preview-title').textContent, '兼容稿件');
+  assert.match($(w, '#publish-preview-content').textContent ?? '', /旧 Cloud 快照正文/);
+  assert.equal(hidden($(w, '#publish-preview-actions')), false);
+});
+
+test('账号切换会使旧账号在途待审列表应答失效', async () => {
+  let releaseList: ((value: unknown) => void) | undefined;
+  const { w, pushStatus } = await boot({
+    envId: 'u1',
+    publish: { state: 'pending', title: '账号 A 最新稿', code: '#1', at: new Date().toISOString() },
+    publishPreview: { recordId: 1, kind: 'rewrite', title: '账号 A 最新稿', content: 'A', topics: [], images: [], contentVersion: 0 },
+  }, {
+    publishDraftList: () => new Promise((resolve) => { releaseList = resolve; }),
+    publishDraftGet: async () => ({ ok: false, status: 404 }),
+  });
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  await tick();
+  pushStatus(makeStatus({
+    envId: 'u2',
+    account: { id: 'acct-2', name: '账号 B' },
+    publish: { state: 'pending', title: '账号 B 稿件', code: '#2', at: new Date().toISOString() },
+    publishPreview: { recordId: 2, kind: 'rewrite', title: '账号 B 稿件', content: 'B', topics: [], images: [], contentVersion: 0 },
+  }));
+  await tick();
+  (w.document.querySelector('.rail-row[data-env-id="u2"]') as HTMLElement).dispatchEvent(new w.Event('click'));
+  await tick();
+  releaseList?.({
+    ok: true,
+    data: { items: [{ id: 9, kind: 'rewrite', title: '账号 A 陈旧应答', contentPreview: 'stale', images: [], topics: [] }], total: 1 },
+  });
+  await tick();
+  await tick();
+  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false);
+  assert.doesNotMatch($(w, '#publish-preview-content').textContent ?? '', /账号 A 陈旧应答/);
+  assert.equal($(w, '#pub-title').textContent, '账号 B 稿件');
 });
 
 test('洗稿稿件审核：云端拒绝时保持页面与待审真态并显示具名原因', async () => {

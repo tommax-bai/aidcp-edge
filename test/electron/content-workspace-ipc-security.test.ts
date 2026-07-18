@@ -47,6 +47,38 @@ test('main 固定 customer-auth 路径、方法和参数白名单，并从所选
   assert.match(main, /token: clientSession\.token/, '客户 token 只在 main 注入');
 });
 
+test('待审批稿只经具名 IPC 读取，路径和环境范围由 main 固定', () => {
+  for (const channel of ['publish-draft:list', 'publish-draft:get']) {
+    const escaped = channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(preload, new RegExp(`ipcRenderer\\.invoke\\('${escaped}'`));
+    assert.match(main, new RegExp(`ipcMain\\.handle\\('${escaped}'`));
+  }
+  assert.match(main, /`\/publish-drafts\?limit=\$\{limit\}&offset=\$\{offset\}`[\s\S]*includeEnvQuery: true/);
+  assert.match(main, /`\/publish-drafts\/\$\{id\}`[\s\S]*includeEnvQuery: true/);
+  assert.match(main, /limit < 1 \|\| limit > 50\b/);
+  assert.match(main, /Number\.isInteger\(id\)[\s\S]*id <= 0/);
+  assert.doesNotMatch(appRenderer, /\/publish-drafts/, 'renderer 不得自行拼客户接口路径');
+
+  const block = preload.slice(preload.indexOf('// 待审批稿列表/详情'), preload.indexOf('// 稿件预览内删除某张配图'));
+  assert.match(block, /publishDraftList:/);
+  assert.match(block, /publishDraftGet:/);
+  const executable = block.split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+  assert.doesNotMatch(executable, /authorization|cookie|jwt|token|headers|accountId|\burl\b/i);
+});
+
+test('审批 IPC 允许旧客户端省略计划，新计划须成对且取消不得夹带', () => {
+  const start = main.indexOf("ipcMain.handle('publish:approval'");
+  const end = main.indexOf("ipcMain.handle('publish:image-remove'", start);
+  const block = main.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(block, /hasPublishMode !== hasPublishTime/);
+  assert.match(block, /!approved && \(hasPublishMode \|\| hasPublishTime\)/);
+  assert.match(block, /publishMode !== 'immediate' && publishMode !== 'scheduled'/);
+  assert.match(block, /publishMode === 'immediate' && publishTime !== null/);
+  assert.match(block, /publishMode === 'scheduled'[\s\S]*Number\.isFinite\(publishTime\)/);
+  assert.match(block, /\.\.\.\(hasPublishMode \? \{ publishMode: payload\.publishMode, publishTime: payload\.publishTime \} : \{\}\)/);
+});
+
 test('标题栏只保留紧凑灵感入口，并锁定低干扰蓝色与高储备蓝绿色', () => {
   const accountIndex = html.indexOf('id="acct-plat"');
   const spacerIndex = html.indexOf('class="tb-spacer"');

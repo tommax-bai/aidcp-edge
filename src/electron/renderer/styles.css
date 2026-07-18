@@ -1557,6 +1557,33 @@ body { margin: 0; }
 .publish-preview-button.secondary:hover:not(:disabled) { background: #f3f5f8; color: #475569; }
 .publish-preview-button.primary { border-color: #cbd5ee; background: #eef2ff; color: #4259a3; }
 .publish-preview-button.primary:hover:not(:disabled) { background: #e4eafe; border-color: #b9c6e8; }
+.publish-draft-back {
+  margin: 0 0 13px; padding: 6px 0; border: 0; color: #3f6ebd; background: transparent;
+  font: 700 12px/1.2 inherit; cursor: pointer;
+}
+.publish-draft-back:hover { color: #245fcb; }
+.publish-draft-list-intro { margin-bottom: 13px; padding: 13px 15px; border-radius: 12px; background: #f4f7fb; }
+.publish-draft-list-title { color: #34445d; font-size: 14px; font-weight: 750; }
+.publish-draft-list-copy { margin-top: 4px; color: var(--faint); font-size: 11.5px; line-height: 1.55; }
+.publish-draft-list.curated-list { min-height: 0; max-height: none; overflow: visible; }
+.publish-draft-card .curated-card-image { background: #eef2f7; }
+.publish-draft-state-title { color: #45536a; font-size: 14px; font-weight: 750; }
+.publish-draft-state-detail { max-width: 420px; color: var(--faint); font-size: 11.5px; line-height: 1.6; }
+.publish-plan-section { padding: 14px; border: 1px solid #dbe5f4; border-radius: 12px; background: #f8faff; }
+.publish-plan-choices { display: flex; flex-wrap: wrap; gap: 9px; }
+.publish-plan-choice {
+  display: inline-flex; min-height: 34px; align-items: center; gap: 7px; padding: 7px 11px;
+  border: 1px solid #d7e1f0; border-radius: 9px; color: #44536a; background: #fff;
+  font-size: 12px; font-weight: 650; cursor: pointer;
+}
+.publish-plan-choice:has(input:checked) { color: #315fae; border-color: #aebfe2; background: #eef3ff; }
+.publish-plan-choice.disabled { cursor: default; opacity: .48; }
+.publish-plan-choice input { margin: 0; accent-color: #4f6fc6; }
+.publish-plan-time { display: grid; gap: 6px; margin-top: 11px; color: #536176; font-size: 11.5px; font-weight: 650; }
+.publish-plan-time input {
+  width: min(320px, 100%); min-height: 36px; padding: 7px 9px; border: 1px solid #ccd8ea;
+  border-radius: 9px; color: #334155; background: #fff; font: 500 12px/1.2 inherit;
+}
 @media (prefers-reduced-motion: reduce) { .publish-preview-panel { transition: none; } }
 .drawer-head {
   display: flex; align-items: center; justify-content: space-between;

@@ -2,6 +2,7 @@
 // 纯视图逻辑（健康合成 / 在场感动效门 / 发布卡状态机）在 ui-logic.js（window.uiLogic，可单测）；
 // 本文件只做 DOM 粘合。设置表单 / 悬浮三态 FAB 的既有逻辑原样保留（仅 DOM 迁入设置抽屉）。
 const uiLogic = window.uiLogic;
+const publishReviewLogic = window.publishReviewLogic;
 
 const fields = {
   dailySummary: document.querySelector('#daily-summary'),
@@ -328,6 +329,23 @@ const SUBTITLE = {
 
 let currentStatus;
 let publishPreviewActionBusy = false;
+const PUBLISH_DRAFT_PAGE_SIZE = 12;
+const publishDraftReview = {
+  envId: null,
+  page: 1,
+  scrollTop: 0,
+  total: 0,
+  items: [],
+  loaded: false,
+  loading: false,
+  error: '',
+  selected: null,
+  requestEpoch: 0,
+  planRecordId: null,
+  publishMode: 'immediate',
+  publishTimeInput: '',
+  handledByEnv: new Map(),
+};
 // 云端环境（change edge-cloud-env-selector）：本地已选 key + 主进程解析出的目标云端视图（含友好名）。
 let cloudSelKey = '';
 let targetCloud = { key: '', label: '默认', url: '' };
@@ -1585,6 +1603,11 @@ function publishPreviewActionReason(reason) {
     case 'not_pending': return '这份稿件已不在待确认状态。';
     case 'account_mismatch': return '当前环境与稿件账号不一致。';
     case 'account_unavailable': return '登录状态异常，请重新登录。';
+    case 'invalid_publish_plan': return '发布方式不完整，请重新选择。';
+    case 'schedule_platform_unsupported': return '当前平台暂不支持定时发布。';
+    case 'schedule_time_required': return '请选择定时发布时间。';
+    case 'schedule_time_out_of_range': return '定时时间需在未来 1 小时至 14 天内。';
+    case 'schedule_update_rejected': return '发布计划未能保存，请刷新稿件后重试。';
     case 'edge_not_running': return '引擎未运行，暂时无法提交。';
     case 'edge_request_timeout':
     case 'edge_request_failed':
@@ -1618,9 +1641,58 @@ document.querySelector('#content-workspace')?.addEventListener('content-workspac
   if (event.detail?.page !== 'draft') return;
   publishPreviewPendingDeleteUrl = null;
   publishPreviewImageRemoveHint = '';
+  publishDraftReview.selected = null;
+  publishDraftReview.planRecordId = null;
+  publishDraftReview.requestEpoch += 1;
 });
 
+function normalizePublishDraft(raw) {
+  return publishReviewLogic.normalizeDraft(raw);
+}
+
+function publishDraftHandledSet(envId) {
+  if (!publishDraftReview.handledByEnv.has(envId)) publishDraftReview.handledByEnv.set(envId, new Set());
+  return publishDraftReview.handledByEnv.get(envId);
+}
+
+function resetPublishDraftReview(envId) {
+  if (publishDraftReview.envId === envId) return;
+  publishDraftReview.requestEpoch += 1;
+  publishDraftReview.envId = envId || null;
+  publishDraftReview.page = 1;
+  publishDraftReview.scrollTop = 0;
+  publishDraftReview.total = 0;
+  publishDraftReview.items = [];
+  publishDraftReview.loaded = false;
+  publishDraftReview.loading = false;
+  publishDraftReview.error = '';
+  publishDraftReview.selected = null;
+  publishDraftReview.planRecordId = null;
+  publishDraftReview.publishMode = 'immediate';
+  publishDraftReview.publishTimeInput = '';
+}
+
+function activePublishPreview(status = currentStatus) {
+  if (publishDraftReview.selected && publishDraftReview.envId === status?.envId) {
+    return publishDraftReview.selected;
+  }
+  return status?.publishPreview ? normalizePublishDraft(status.publishPreview) : null;
+}
+
+function initializePublishPlan(preview) {
+  if (!preview || publishDraftReview.planRecordId === preview.recordId) return;
+  publishDraftReview.planRecordId = preview.recordId;
+  const scheduled = preview.platform === 'xiaohongshu' && preview.publishMode === 'scheduled';
+  publishDraftReview.publishMode = scheduled ? 'scheduled' : 'immediate';
+  publishDraftReview.publishTimeInput = scheduled && Number.isFinite(preview.publishTime)
+    ? publishReviewLogic.toShanghaiInput(preview.publishTime)
+    : publishReviewLogic.defaultScheduledInput(Date.now());
+}
+
 function publishPreviewIsPending(status) {
+  if (publishDraftReview.selected && publishDraftReview.envId === status?.envId) {
+    return !publishDraftHandledSet(publishDraftReview.envId).has(publishDraftReview.selected.recordId);
+  }
   const state = status && status.publish && status.publish.state;
   return Boolean(status && status.publishPreview && (state === 'pending' || state === 'reminded'));
 }
@@ -1628,14 +1700,27 @@ function publishPreviewIsPending(status) {
 function syncPublishPreviewActions(status) {
   if (!fields.publishPreviewActions) return;
   const pending = publishPreviewIsPending(status);
+  const preview = activePublishPreview(status);
+  if (pending) initializePublishPlan(preview);
+  const plan = pending && preview
+    ? publishReviewLogic.validatePlan(
+        preview.platform,
+        publishDraftReview.publishMode,
+        publishDraftReview.publishTimeInput,
+        Date.now(),
+      )
+    : null;
   fields.publishPreviewActions.classList.toggle('hidden', !pending && !publishPreviewActionBusy);
   const disabled = publishPreviewActionBusy || !pending;
-  fields.publishPreviewApprove.disabled = disabled;
+  fields.publishPreviewApprove.disabled = disabled || Boolean(plan && !plan.ok);
   fields.publishPreviewCancel.disabled = disabled;
+  fields.publishPreviewApprove.textContent = publishDraftReview.publishMode === 'scheduled' ? '批准并定时发布' : '批准并发布';
   if (publishPreviewActionBusy) {
     fields.publishPreviewActionHint.textContent = '正在提交，请稍候…';
+  } else if (plan && !plan.ok) {
+    fields.publishPreviewActionHint.textContent = publishPreviewActionReason(plan.reason);
   } else if (pending) {
-    fields.publishPreviewActionHint.textContent = '确认稿件内容后直接操作';
+    fields.publishPreviewActionHint.textContent = '批准会按上方发布方式执行；取消不会发布';
   }
 }
 
@@ -1705,7 +1790,7 @@ function appendPublishPreviewImageDelete(item, url, index) {
  * 否则用户能在删除在途时点发布，云端会拿旧版本号去审批而撞版本闸，看到一个莫名其妙的失败。
  */
 async function submitPublishPreviewImageRemove(url) {
-  const preview = currentStatus && currentStatus.publishPreview;
+  const preview = activePublishPreview(currentStatus);
   if (!preview || publishPreviewActionBusy) return;
   if (typeof window.aidcpEdge.delegatedTaskDraft !== 'function') {
     publishPreviewImageRemoveHint = '当前客户端不支持委托修改稿件。';
@@ -1743,11 +1828,315 @@ async function submitPublishPreviewImageRemove(url) {
   closePublishPreview();
 }
 
+function renderPublishDraftMessage(title, detail, retry) {
+  fields.publishPreviewKind.textContent = '待审批稿件';
+  fields.publishPreviewContent.replaceChildren();
+  const state = document.createElement('div');
+  state.className = 'cw-state';
+  appendPreviewText(state, title, 'publish-draft-state-title');
+  appendPreviewText(state, detail, 'publish-draft-state-detail');
+  if (retry) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'cw-button secondary';
+    button.textContent = '重新读取';
+    button.addEventListener('click', () => { void loadPublishDraftList(); });
+    state.appendChild(button);
+  }
+  fields.publishPreviewContent.appendChild(state);
+  fields.publishPreviewActions.classList.add('hidden');
+}
+
+function renderPublishDraftList() {
+  fields.publishPreviewKind.textContent = `待审批稿件 · ${publishDraftReview.total} 条`;
+  fields.publishPreviewContent.replaceChildren();
+  fields.publishPreviewActions.classList.add('hidden');
+
+  const intro = document.createElement('div');
+  intro.className = 'publish-draft-list-intro';
+  appendPreviewText(intro, '逐条查看后批准或取消', 'publish-draft-list-title');
+  appendPreviewText(intro, '卡片只展示当前账号的待审批内容，打开后可选择立即发布或定时发布。', 'publish-draft-list-copy');
+  fields.publishPreviewContent.appendChild(intro);
+
+  const list = document.createElement('div');
+  list.className = 'publish-draft-list curated-list';
+  for (const item of publishDraftReview.items) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'curated-card publish-draft-card';
+    card.dataset.publishDraftId = String(item.recordId);
+    const imageUrl = item.images.map((value) => String(value || '').trim()).find(Boolean);
+    if (imageUrl) {
+      const image = document.createElement('img');
+      image.className = 'curated-card-image';
+      image.src = imageUrl;
+      image.alt = '';
+      image.referrerPolicy = 'no-referrer';
+      card.appendChild(image);
+    } else {
+      appendPreviewText(card, '文字', 'curated-card-image placeholder');
+    }
+    const copy = document.createElement('span');
+    copy.className = 'curated-card-copy';
+    const top = document.createElement('span');
+    top.className = 'curated-card-top';
+    const title = document.createElement('strong');
+    title.textContent = item.title || '未命名稿件';
+    const badge = document.createElement('em');
+    badge.className = 'ready';
+    badge.textContent = item.publishMode === 'scheduled' ? '已设定时' : '待审批';
+    top.append(title, badge);
+    copy.appendChild(top);
+    appendPreviewText(copy, item.contentPreview || '打开查看完整正文', 'curated-card-body');
+    const updatedAt = Number.isFinite(item.updatedAt) && item.updatedAt > 0
+      ? new Date(item.updatedAt).toLocaleString()
+      : '更新时间未知';
+    appendPreviewText(
+      copy,
+      `${item.kind === 'rewrite' ? '参考创作' : 'AI 创作'} · ${item.images.length} 张图 · v${item.contentVersion} · ${updatedAt}`,
+      'curated-card-meta',
+    );
+    card.appendChild(copy);
+    card.addEventListener('click', () => {
+      publishDraftReview.scrollTop = fields.publishPreviewPanel.scrollTop;
+      void selectPublishDraft(item.recordId);
+    });
+    list.appendChild(card);
+  }
+  fields.publishPreviewContent.appendChild(list);
+
+  const pages = Math.max(1, Math.ceil(publishDraftReview.total / PUBLISH_DRAFT_PAGE_SIZE));
+  if (pages > 1) {
+    const pagination = document.createElement('div');
+    pagination.className = 'cw-pagination';
+    const previous = document.createElement('button');
+    previous.type = 'button';
+    previous.textContent = '上一页';
+    previous.disabled = publishDraftReview.page <= 1;
+    previous.addEventListener('click', () => {
+      publishDraftReview.page -= 1;
+      publishDraftReview.scrollTop = 0;
+      void loadPublishDraftList();
+    });
+    appendPreviewText(pagination, `第 ${publishDraftReview.page} / ${pages} 页`);
+    const next = document.createElement('button');
+    next.type = 'button';
+    next.textContent = '下一页';
+    next.disabled = publishDraftReview.page >= pages;
+    next.addEventListener('click', () => {
+      publishDraftReview.page += 1;
+      publishDraftReview.scrollTop = 0;
+      void loadPublishDraftList();
+    });
+    pagination.prepend(previous);
+    pagination.appendChild(next);
+    fields.publishPreviewContent.appendChild(pagination);
+  }
+  fields.publishPreviewPanel.scrollTop = publishDraftReview.scrollTop;
+}
+
+async function selectPublishDraft(recordId) {
+  const envId = publishDraftReview.envId;
+  if (!envId || !Number.isInteger(recordId) || recordId <= 0) return;
+  const epoch = ++publishDraftReview.requestEpoch;
+  publishDraftReview.loading = true;
+  publishDraftReview.error = '';
+  renderPublishPreviewContent(currentStatus);
+  let response;
+  try {
+    response = await window.aidcpEdge.publishDraftGet(envId, recordId);
+  } catch {
+    response = { ok: false, error: 'request_failed' };
+  }
+  if (epoch !== publishDraftReview.requestEpoch || envId !== publishDraftReview.envId) return;
+  publishDraftReview.loading = false;
+  if (!response || response.ok !== true || !response.data?.item) {
+    publishDraftReview.error = response?.error || response?.reason || 'request_failed';
+    renderPublishPreviewContent(currentStatus);
+    return;
+  }
+  publishDraftReview.selected = normalizePublishDraft(response.data.item);
+  publishDraftReview.planRecordId = null;
+  initializePublishPlan(publishDraftReview.selected);
+  renderPublishPreviewContent(currentStatus);
+}
+
+function useSinglePreviewFallback() {
+  const fallback = currentStatus?.publishPreview ? normalizePublishDraft(currentStatus.publishPreview) : null;
+  publishDraftReview.loading = false;
+  publishDraftReview.loaded = true;
+  publishDraftReview.error = '';
+  publishDraftReview.items = fallback ? [fallback] : [];
+  publishDraftReview.total = fallback ? 1 : 0;
+  publishDraftReview.selected = fallback;
+  publishDraftReview.planRecordId = null;
+  initializePublishPlan(fallback);
+  renderPublishPreviewContent(currentStatus);
+}
+
+async function loadPublishDraftList() {
+  const envId = currentStatus?.envId || currentEnvId();
+  if (!envId) {
+    useSinglePreviewFallback();
+    return;
+  }
+  resetPublishDraftReview(envId);
+  const epoch = ++publishDraftReview.requestEpoch;
+  publishDraftReview.loading = true;
+  publishDraftReview.error = '';
+  publishDraftReview.selected = null;
+  publishDraftReview.planRecordId = null;
+  renderPublishPreviewContent(currentStatus);
+
+  if (typeof window.aidcpEdge?.publishDraftList !== 'function'
+    || typeof window.aidcpEdge?.publishDraftGet !== 'function') {
+    useSinglePreviewFallback();
+    return;
+  }
+
+  let response;
+  try {
+    response = await window.aidcpEdge.publishDraftList(envId, {
+      limit: PUBLISH_DRAFT_PAGE_SIZE,
+      offset: (publishDraftReview.page - 1) * PUBLISH_DRAFT_PAGE_SIZE,
+    });
+  } catch {
+    response = { ok: false, error: 'request_failed' };
+  }
+  if (epoch !== publishDraftReview.requestEpoch || envId !== publishDraftReview.envId) return;
+  publishDraftReview.loading = false;
+  publishDraftReview.loaded = true;
+  if (!response || response.ok !== true || !Array.isArray(response.data?.items)) {
+    if ((response?.status === 404 || response?.status === 501 || response?.error === 'pending_drafts_unavailable')
+      && currentStatus?.publishPreview) {
+      useSinglePreviewFallback();
+      return;
+    }
+    publishDraftReview.error = response?.error || response?.reason || 'request_failed';
+    renderPublishPreviewContent(currentStatus);
+    return;
+  }
+
+  const handled = publishDraftHandledSet(envId);
+  const rawItems = response.data.items.map(normalizePublishDraft).filter((item) => item.recordId > 0);
+  const handledHere = rawItems.filter((item) => handled.has(item.recordId));
+  publishDraftReview.items = rawItems.filter((item) => !handled.has(item.recordId));
+  publishDraftReview.total = Math.max(0, Number(response.data.total || 0) - handledHere.length);
+
+  if (publishDraftReview.items.length === 0 && publishDraftReview.total > 0 && publishDraftReview.page > 1) {
+    publishDraftReview.page -= 1;
+    await loadPublishDraftList();
+    return;
+  }
+  if (publishDraftReview.total === 1 && publishDraftReview.items.length === 1) {
+    await selectPublishDraft(publishDraftReview.items[0].recordId);
+    return;
+  }
+  renderPublishPreviewContent(currentStatus);
+}
+
+function appendPublishPlanControls(parent, preview) {
+  const section = document.createElement('section');
+  section.className = 'publish-preview-section publish-plan-section';
+  appendPreviewText(section, '批准后的发布方式', 'publish-preview-label');
+  const choices = document.createElement('div');
+  choices.className = 'publish-plan-choices';
+
+  const addChoice = (mode, label, disabled = false) => {
+    const choice = document.createElement('label');
+    choice.className = 'publish-plan-choice';
+    choice.classList.toggle('disabled', disabled);
+    const input = document.createElement('input');
+    input.type = 'radio';
+    input.name = 'publish-plan-mode';
+    input.value = mode;
+    input.checked = publishDraftReview.publishMode === mode;
+    input.disabled = disabled || publishPreviewActionBusy;
+    input.addEventListener('change', () => {
+      if (!input.checked) return;
+      publishDraftReview.publishMode = mode;
+      if (mode === 'scheduled' && !publishDraftReview.publishTimeInput) {
+        publishDraftReview.publishTimeInput = publishReviewLogic.defaultScheduledInput(Date.now());
+      }
+      renderPublishPreviewContent(currentStatus);
+    });
+    choice.append(input, document.createTextNode(label));
+    choices.appendChild(choice);
+  };
+  addChoice('immediate', '批准后立即发布');
+  addChoice('scheduled', '定时发布', preview.platform !== 'xiaohongshu');
+  section.appendChild(choices);
+
+  if (preview.platform !== 'xiaohongshu') {
+    appendPreviewText(section, '当前平台暂不支持原生定时发布。', 'publish-preview-hint');
+  } else if (publishDraftReview.publishMode === 'scheduled') {
+    const timeRow = document.createElement('label');
+    timeRow.className = 'publish-plan-time';
+    const caption = document.createElement('span');
+    caption.textContent = '发布时间（北京时间）';
+    const input = document.createElement('input');
+    input.type = 'datetime-local';
+    input.value = publishDraftReview.publishTimeInput;
+    input.min = publishReviewLogic.defaultScheduledInput(Date.now());
+    input.max = publishReviewLogic.toShanghaiInput(Date.now() + 14 * 24 * 60 * 60 * 1000);
+    input.disabled = publishPreviewActionBusy;
+    const hint = document.createElement('span');
+    hint.className = 'publish-preview-hint';
+    const update = () => {
+      publishDraftReview.publishTimeInput = input.value;
+      const plan = publishReviewLogic.validatePlan(preview.platform, 'scheduled', input.value, Date.now());
+      hint.textContent = plan.ok ? '需在未来 1 小时至 14 天内。' : publishPreviewActionReason(plan.reason);
+      hint.classList.toggle('publish-preview-hint-warn', !plan.ok);
+      syncPublishPreviewActions(currentStatus);
+    };
+    input.addEventListener('input', update);
+    timeRow.append(caption, input, hint);
+    section.appendChild(timeRow);
+    update();
+  }
+  parent.appendChild(section);
+}
+
 function renderPublishPreviewContent(status) {
-  const preview = status && status.publishPreview;
-  if (!preview || !fields.publishPreviewContent) return;
+  if (!fields.publishPreviewContent) return;
+  const reviewActive = publishDraftReview.envId === status?.envId;
+  if (reviewActive && publishDraftReview.loading) {
+    renderPublishDraftMessage('正在读取待审批稿件', '只会显示当前账号仍待处理的内容。', false);
+    return;
+  }
+  if (reviewActive && publishDraftReview.error) {
+    renderPublishDraftMessage('暂时无法读取稿件', '请检查连接后重试，当前没有执行任何审批。', true);
+    return;
+  }
+  if (reviewActive && publishDraftReview.loaded && !publishDraftReview.selected) {
+    if (publishDraftReview.total === 0 || publishDraftReview.items.length === 0) {
+      renderPublishDraftMessage('没有待审批稿件', '新稿件生成后会出现在这里。', false);
+      return;
+    }
+    renderPublishDraftList();
+    return;
+  }
+  const preview = activePublishPreview(status);
+  if (!preview) {
+    renderPublishDraftMessage('没有待审批稿件', '新稿件生成后会出现在这里。', false);
+    return;
+  }
+  initializePublishPlan(preview);
   fields.publishPreviewKind.textContent = preview.kind === 'rewrite' ? '洗稿稿件' : 'AI 稿件';
   fields.publishPreviewContent.replaceChildren();
+
+  if (publishDraftReview.selected && publishDraftReview.total > 1) {
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'publish-draft-back';
+    back.textContent = '‹ 返回待审批列表';
+    back.addEventListener('click', () => {
+      publishDraftReview.selected = null;
+      publishDraftReview.planRecordId = null;
+      renderPublishPreviewContent(currentStatus);
+    });
+    fields.publishPreviewContent.appendChild(back);
+  }
 
   // 按小红书稿件阅读顺序：先看配图，再看标题、状态、正文和话题。
   const images = Array.isArray(preview.images) ? preview.images : [];
@@ -1793,7 +2182,9 @@ function renderPublishPreviewContent(status) {
   fields.publishPreviewTitle = noteTitle;
   fields.publishPreviewContent.appendChild(noteTitle);
 
-  const state = status.publish && status.publish.state ? status.publish.state : 'pending';
+  const state = publishDraftReview.selected
+    ? 'pending'
+    : status.publish && status.publish.state ? status.publish.state : 'pending';
   const statusRow = document.createElement('div');
   statusRow.className = 'publish-preview-status';
   const stateText = document.createElement('span');
@@ -1803,7 +2194,7 @@ function renderPublishPreviewContent(status) {
   const metaText = document.createElement('span');
   const version = Number.isInteger(preview.contentVersion) ? preview.contentVersion : 0;
   const updatedAt = Number.isFinite(preview.updatedAt) ? new Date(preview.updatedAt).toLocaleString() : '';
-  metaText.textContent = `${preview.code || '—'} · v${version}${updatedAt ? ` · 更新于 ${updatedAt}` : ''}`;
+  metaText.textContent = `${preview.code || `P-${preview.recordId}`} · v${version}${updatedAt ? ` · 更新于 ${updatedAt}` : ''}`;
   statusRow.appendChild(metaText);
   fields.publishPreviewContent.appendChild(statusRow);
 
@@ -1849,23 +2240,25 @@ function renderPublishPreviewContent(status) {
     appendPreviewText(auditSection, `配图说明：参考图 ${audit.requestedCount} 张；${statusLabel}。`, 'publish-preview-empty');
     fields.publishPreviewContent.appendChild(auditSection);
   }
+  if (publishPreviewIsPending(status)) appendPublishPlanControls(fields.publishPreviewContent, preview);
   syncPublishPreviewActions(status);
 }
 
 function openPublishPreview() {
   if (!currentStatus || !currentStatus.publishPreview) return;
   syncContentWorkspace(currentStatus);
-  renderPublishPreviewContent(currentStatus);
+  resetPublishDraftReview(currentStatus.envId || currentEnvId());
   if (contentWorkspace) {
     contentWorkspace.openDraft();
-    return;
+  } else {
+    // 旧测试桩/旧包未加载 content-workspace.js 时的安全降级。
+    document.querySelector('#content-workspace')?.classList.remove('hidden');
+    document.querySelector('#legacy-workspace')?.classList.add('hidden');
+    fields.publishPreviewPanel.classList.remove('hidden');
+    fields.publishPreviewPanel.classList.add('open');
+    fields.publishPreviewPanel.setAttribute('aria-hidden', 'false');
   }
-  // 旧测试桩/旧包未加载 content-workspace.js 时的安全降级。
-  document.querySelector('#content-workspace')?.classList.remove('hidden');
-  document.querySelector('#legacy-workspace')?.classList.add('hidden');
-  fields.publishPreviewPanel.classList.remove('hidden');
-  fields.publishPreviewPanel.classList.add('open');
-  fields.publishPreviewPanel.setAttribute('aria-hidden', 'false');
+  void loadPublishDraftList();
 }
 
 function closePublishPreview() {
@@ -1878,6 +2271,8 @@ function closePublishPreview() {
   // 关抽屉即丢弃未提交的删除确认态与上一次拒因（下次打开是干净的）。
   publishPreviewPendingDeleteUrl = null;
   publishPreviewImageRemoveHint = '';
+  publishDraftReview.selected = null;
+  publishDraftReview.planRecordId = null;
 }
 
 fields.pubPreviewLink.addEventListener('click', openPublishPreview);
@@ -1888,7 +2283,7 @@ fields.pubPreviewLink.addEventListener('keydown', (e) => {
   }
 });
 async function submitPublishPreviewAction(approved) {
-  const preview = currentStatus && currentStatus.publishPreview;
+  const preview = activePublishPreview(currentStatus);
   if (!preview || publishPreviewActionBusy) return;
   const actionEnvId = currentStatus.envId;
   const actionRecordId = preview.recordId;
@@ -1897,14 +2292,28 @@ async function submitPublishPreviewAction(approved) {
     fields.publishPreviewActionHint.textContent = '当前客户端不支持应用内审批。';
     return;
   }
+  const plan = approved
+    ? publishReviewLogic.validatePlan(
+        preview.platform,
+        publishDraftReview.publishMode,
+        publishDraftReview.publishTimeInput,
+        Date.now(),
+      )
+    : null;
+  if (plan && !plan.ok) {
+    fields.publishPreviewActionHint.textContent = publishPreviewActionReason(plan.reason);
+    syncPublishPreviewActions(currentStatus);
+    return;
+  }
   publishPreviewActionBusy = true;
   syncPublishPreviewActions(currentStatus);
   let result;
   try {
-    result = await publishApproval(currentStatus.envId, {
+    result = await publishApproval(actionEnvId, {
       requestId: `publish-${preview.recordId}`,
       approved,
       contentVersion: Number.isInteger(preview.contentVersion) ? preview.contentVersion : 0,
+      ...(approved ? { publishMode: plan.publishMode, publishTime: plan.publishTime } : {}),
     });
   } catch {
     result = { ok: false, reason: 'request_failed' };
@@ -1912,8 +2321,7 @@ async function submitPublishPreviewAction(approved) {
   publishPreviewActionBusy = false;
   const actionStillCurrent = currentStatus
     && currentStatus.envId === actionEnvId
-    && currentStatus.publishPreview
-    && Number(currentStatus.publishPreview.recordId) === Number(actionRecordId);
+    && Number(activePublishPreview(currentStatus)?.recordId) === Number(actionRecordId);
   if (!actionStillCurrent) {
     // 账号/稿件已切换：云端决定仍以 RPC 真结果为准，但旧应答不得改写或关闭新账号的审核页。
     syncPublishPreviewActions(currentStatus);
@@ -1925,17 +2333,26 @@ async function submitPublishPreviewAction(approved) {
     return;
   }
   const nextState = result.state || (approved ? 'approved' : 'rejected');
-  currentStatus = {
-    ...currentStatus,
-    publish: {
-      ...(currentStatus.publish || {}),
-      state: nextState,
-      title: currentStatus.publish?.title || preview.title,
-      at: new Date().toISOString(),
-    },
-  };
-  closePublishPreview();
+  publishDraftHandledSet(actionEnvId).add(Number(actionRecordId));
+  if (Number(currentStatus.publishPreview?.recordId) === Number(actionRecordId)) {
+    currentStatus = {
+      ...currentStatus,
+      publish: {
+        ...(currentStatus.publish || {}),
+        state: nextState,
+        title: currentStatus.publish?.title || preview.title,
+        at: new Date().toISOString(),
+      },
+    };
+  }
   renderPublish(currentStatus, Date.now());
+  if (typeof window.aidcpEdge?.publishDraftList === 'function') {
+    publishDraftReview.selected = null;
+    publishDraftReview.planRecordId = null;
+    await loadPublishDraftList();
+  } else {
+    closePublishPreview();
+  }
 }
 fields.publishPreviewApprove.addEventListener('click', () => { void submitPublishPreviewAction(true); });
 fields.publishPreviewCancel.addEventListener('click', () => { void submitPublishPreviewAction(false); });

@@ -4265,10 +4265,24 @@ ipcMain.handle('publish:approval', (_event, envId, payload) => {
   if (contentVersion !== undefined && (!Number.isInteger(contentVersion) || contentVersion < 0)) {
     return { ok: false, reason: 'invalid_version' };
   }
+  const hasPublishMode = Boolean(payload && Object.prototype.hasOwnProperty.call(payload, 'publishMode'));
+  const hasPublishTime = Boolean(payload && Object.prototype.hasOwnProperty.call(payload, 'publishTime'));
+  if (!approved && (hasPublishMode || hasPublishTime)) return { ok: false, reason: 'invalid_request' };
+  if (hasPublishMode !== hasPublishTime) return { ok: false, reason: 'invalid_publish_plan' };
+  if (hasPublishMode) {
+    const publishMode = payload.publishMode;
+    const publishTime = payload.publishTime;
+    if ((publishMode !== 'immediate' && publishMode !== 'scheduled')
+      || (publishMode === 'immediate' && publishTime !== null)
+      || (publishMode === 'scheduled' && (typeof publishTime !== 'number' || !Number.isFinite(publishTime)))) {
+      return { ok: false, reason: 'invalid_publish_plan' };
+    }
+  }
   return sendPublishApprovalCommand(envId, {
     requestId,
     approved,
     contentVersion: contentVersion === undefined ? 0 : contentVersion,
+    ...(hasPublishMode ? { publishMode: payload.publishMode, publishTime: payload.publishTime } : {}),
   });
 });
 // 预览内删除某张配图（change client-preview-image-delete）。云端才是权限 / 版本 / 只删不注入 /
@@ -4343,6 +4357,27 @@ ipcMain.handle('delegated-task:action', (_event, envId, taskId, action, version)
     `/delegated-tasks/${encodeURIComponent(normalizedTaskId)}/${action}`,
     { method: 'POST', body: Number.isInteger(version) ? { version } : {} },
   );
+});
+
+// 待审批稿只开放具名只读 IPC；envKey 仍由 main 从所选环境注入。
+ipcMain.handle('publish-draft:list', (_event, envId, options) => {
+  const raw = options && typeof options === 'object' ? options : {};
+  const limit = raw.limit === undefined ? 12 : raw.limit;
+  const offset = raw.offset === undefined ? 0 : raw.offset;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50
+    || !Number.isInteger(offset) || offset < 0 || offset > 1_000_000) {
+    return { ok: false, status: 400, error: 'invalid_publish_draft_pagination' };
+  }
+  return delegatedTaskRequest(
+    envId,
+    `/publish-drafts?limit=${limit}&offset=${offset}`,
+    { includeEnvQuery: true },
+  );
+});
+
+ipcMain.handle('publish-draft:get', (_event, envId, id) => {
+  if (!Number.isInteger(id) || id <= 0) return { ok: false, status: 400, error: 'invalid_publish_draft_id' };
+  return delegatedTaskRequest(envId, `/publish-drafts/${id}`, { includeEnvQuery: true });
 });
 
 // 当前账号灵感库：四个具名 IPC 锁死 customer-auth 路径和方法；envId 只用于主进程查 profileId，

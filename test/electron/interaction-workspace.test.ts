@@ -11,6 +11,7 @@ const fixtureDir = join(here, '../fixtures/wechat-channels-interaction');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
 const interactionSrc = readFileSync(join(electronDir, 'renderer/interaction-workspace.js'), 'utf8');
+const publishReviewLogicSrc = readFileSync(join(electronDir, 'renderer/publish-review-logic.js'), 'utf8');
 const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
 const stylesSrc = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 const listFixture = JSON.parse(readFileSync(join(fixtureDir, 'interaction-list-response.json'), 'utf8'));
@@ -242,6 +243,7 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
   (window as any).aidcpEdge = api;
   window.eval(uiLogicSrc);
   window.eval(interactionSrc);
+  window.eval(publishReviewLogicSrc);
   window.eval(rendererSrc);
   await flush();
   return { window, pushFleet, pushStatus, calls };

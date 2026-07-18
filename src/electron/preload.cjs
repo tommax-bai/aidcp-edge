@@ -56,6 +56,9 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   },
   // 稿件预览内的发布/取消审批动作（经目标环境 core → cloud，渲染层不直连网络）。
   publishApproval: (envId, payload) => ipcRenderer.invoke('publish:approval', envId, payload),
+  // 待审批稿列表/详情：main 固定客户接口路径并注入当前环境，renderer 不能提交 URL/token/accountId。
+  publishDraftList: (envId, options) => ipcRenderer.invoke('publish-draft:list', envId, options),
+  publishDraftGet: (envId, id) => ipcRenderer.invoke('publish-draft:get', envId, id),
   // 稿件预览内删除某张配图（同一条链路；云端持权限 / 版本 / 只删不注入 / 最后一张不可删的权威）。
   publishImageRemove: (envId, payload) => ipcRenderer.invoke('publish:image-remove', envId, payload),
   // 用户委托任务：主进程把 envId 收口成该环境的 profileId；渲染层拿不到客户令牌、也不能改 accountId。

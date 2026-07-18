@@ -111,8 +111,10 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
     ...apiOver,
   };
   const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
+  const publishReviewLogicSrc = readFileSync(join(electronDir, 'renderer/publish-review-logic.js'), 'utf8');
   const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
   window.eval(uiLogicSrc);
+  window.eval(publishReviewLogicSrc);
   window.eval(rendererSrc);
   await tick();
   await tick();
