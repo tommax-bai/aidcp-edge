@@ -3095,7 +3095,7 @@ async function ensureAdsService(handle) {
   // Electron 宿主下也可靠——服务进程名是 Electron 二进制而非 "node"，旧的 grep 会漏判、新的存在性探测不受影响）。
   const rt = await adsRuntime.ensureRuntime({
     cliEntry,
-    execPath: process.execPath,
+    execPath: adsRuntime.resolveRuntimeExecPath({ isPackaged: app.isPackaged }),
     apiKey,
   });
   if (!rt.ok) {
@@ -3126,7 +3126,7 @@ function ensureKernelOnce(version, cliEntry, handle) {
   if (existing) return existing;
   const p = adsRuntime.ensureKernel({
     cliEntry,
-    execPath: process.execPath,
+    execPath: adsRuntime.resolveRuntimeExecPath({ isPackaged: app.isPackaged }),
     version,
     kernelType: 'Chrome',
     onProgress: ({ percent, state }) => {

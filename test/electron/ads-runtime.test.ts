@@ -16,6 +16,13 @@ type RunFn = (
 ) => Promise<RunResult>;
 
 const adsRuntime = require('../../src/electron/ads-runtime.cjs') as {
+  resolveRuntimeExecPath: (o: {
+    isPackaged?: boolean;
+    execPath?: string;
+    env?: Record<string, string | undefined>;
+    platform?: string;
+    exists?: (path: string) => boolean;
+  }) => string;
   resolveCliEntry: (o: { resourcesPath?: string; appRoot?: string; userDataPath?: string }) => string | null;
   stripAnsi: (s: unknown) => string;
   isThrottled: (r: { out?: string; err?: string }) => boolean;
@@ -38,6 +45,50 @@ const adsRuntime = require('../../src/electron/ads-runtime.cjs') as {
     run?: RunFn;
   }) => Promise<{ ok: boolean; alreadyPresent?: boolean; downloaded?: boolean; error?: string }>;
 };
+
+test('resolveRuntimeExecPath keeps packaged clients self-contained', () => {
+  const ownExecutable = 'C:\\Program Files\\AIDCP\\AIDCP.exe';
+  const resolved = adsRuntime.resolveRuntimeExecPath({
+    isPackaged: true,
+    execPath: ownExecutable,
+    env: { npm_node_execpath: 'C:\\Program Files\\nodejs\\node.exe' },
+    platform: 'win32',
+    exists: () => true,
+  });
+  assert.equal(resolved, ownExecutable);
+});
+
+test('resolveRuntimeExecPath uses npm Node in Windows development to avoid locking node_modules/electron', () => {
+  const node = 'C:\\Program Files\\nodejs\\node.exe';
+  const resolved = adsRuntime.resolveRuntimeExecPath({
+    isPackaged: false,
+    execPath: 'C:\\repo\\node_modules\\electron\\dist\\electron.exe',
+    env: { npm_node_execpath: node },
+    platform: 'win32',
+    exists: (candidate) => candidate === node,
+  });
+  assert.equal(resolved, node);
+});
+
+test('resolveRuntimeExecPath finds Node on PATH and falls back honestly when absent', () => {
+  const fromPath = adsRuntime.resolveRuntimeExecPath({
+    isPackaged: false,
+    execPath: '/repo/node_modules/electron/dist/electron',
+    env: { PATH: '/opt/tools:/usr/local/bin' },
+    platform: 'linux',
+    exists: (candidate) => candidate === '/usr/local/bin/node',
+  });
+  assert.equal(fromPath, '/usr/local/bin/node');
+
+  const fallback = adsRuntime.resolveRuntimeExecPath({
+    isPackaged: false,
+    execPath: '/repo/node_modules/electron/dist/electron',
+    env: { PATH: '/missing' },
+    platform: 'linux',
+    exists: () => false,
+  });
+  assert.equal(fallback, '/repo/node_modules/electron/dist/electron');
+});
 
 test('resolveCliEntry prefers the patched staged runtime in development', () => {
   const appRoot = mkdtempSync(join(tmpdir(), 'aidcp-ads-runtime-'));

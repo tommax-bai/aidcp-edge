@@ -26,6 +26,40 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Packaged clients must be self-contained and therefore run the CLI with their own
+// Electron executable. In development, leaving the daemon attached to
+// node_modules/electron locks that dependency tree after the UI exits; a later
+// `npm ci` can then stop halfway with EBUSY and leave node_modules incomplete.
+// Prefer a real Node executable only in development (the CLI's sqlite binding is
+// N-API); fall back to the current Electron executable when no trusted Node path
+// is available.
+function resolveRuntimeExecPath({
+  isPackaged = false,
+  execPath = process.execPath,
+  env = process.env,
+  platform = process.platform,
+  exists = fs.existsSync,
+} = {}) {
+  if (isPackaged) return execPath;
+  const nodeName = platform === 'win32' ? 'node.exe' : 'node';
+  const pathDelimiter = platform === 'win32' ? ';' : ':';
+  const pathImpl = platform === 'win32' ? path.win32 : path.posix;
+  const candidates = [env.AIDCP_ADS_RUNTIME_NODE, env.npm_node_execpath];
+  const pathValue = env.PATH || env.Path || '';
+  for (const dir of String(pathValue).split(pathDelimiter)) {
+    if (dir) candidates.push(pathImpl.join(dir, nodeName));
+  }
+  for (const candidate of candidates) {
+    if (!candidate || pathImpl.basename(String(candidate)).toLowerCase() !== nodeName) continue;
+    try {
+      if (exists(String(candidate))) return String(candidate);
+    } catch {
+      /* best-effort candidate probing */
+    }
+  }
+  return execPath;
+}
+
 // 解析随包 CLI 入口：优先 extraResources（打包态 process.resourcesPath），回落 node_modules（开发态）。
 // 找不到返回 null——调用方据此优雅跳过内嵌运行时（迁移期：外部已装 AdsPower 客户端时行为不变）。
 function resolveCliEntry({ resourcesPath, appRoot, userDataPath } = {}) {
@@ -321,6 +355,7 @@ async function ensureKernel({ cliEntry, execPath, version, kernelType = DEFAULT_
 module.exports = {
   stripAnsi,
   isThrottled,
+  resolveRuntimeExecPath,
   resolveCliEntry,
   runCli,
   parseCliJson,
