@@ -175,7 +175,7 @@ test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async
   assert.equal(hidden($(window, '#legacy-workspace')), true);
   assert.match($(window, '#content-workspace-meta').textContent ?? '', /晚风手作/);
   assert.match($(window, '#curated-list').textContent ?? '', /第 1 页灵感/);
-  assert.deepEqual(listCalls[0], { envId: 'env-a', options: { mode: 'creatable', limit: 12, offset: 0 } });
+  assert.deepEqual(listCalls[0], { envId: 'env-a', options: { mode: 'uncreated', limit: 12, offset: 0 } });
 
   $(window, '#curated-next').dispatchEvent(new window.Event('click'));
   await flush();
@@ -199,6 +199,10 @@ test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async
   assert.equal($(window, '#content-workspace-close').getAttribute('aria-label'), '关闭内容工作区');
   assert.match($(window, '#curated-page').textContent ?? '', /第 2 \/ 3 页/);
   assert.equal($(window, '#curated-list').scrollTop, 73);
+
+  ($(window, '[data-curated-mode="created"]')).dispatchEvent(new window.Event('click'));
+  await flush();
+  assert.deepEqual(listCalls.at(-1)?.options, { mode: 'created', limit: 12, offset: 0 });
 
   ($(window, '[data-curated-mode="all"]')).dispatchEvent(new window.Event('click'));
   await flush();
@@ -290,6 +294,39 @@ test('无参考图时禁用图文模式，文字参照只呈现诚实排队回�
   assert.match(receipt, /已排队创作/);
   assert.match(receipt, /不代表已经生成或发布/);
   assert.doesNotMatch(receipt, /发布成功|稿件已生成/);
+});
+
+test('洗稿任务一经受理，返回未创作列表时立即向服务端重载归类', async () => {
+  let listReads = 0;
+  const item = listItem({ referenceImages: [] });
+  const { window, controller } = boot({
+    curatedList: async (_envId: string, options: { mode: string }) => {
+      listReads += 1;
+      assert.equal(options.mode, 'uncreated');
+      return listReads === 1
+        ? { ok: true, data: { items: [item], total: 1 } }
+        : { ok: true, data: { items: [], total: 0 } };
+    },
+    curatedGet: async () => ({ ok: true, data: { item: detail({ referenceImages: [] }) } }),
+    curatedCreatePost: async () => ({
+      ok: true,
+      data: { triggered: true, created: true, task: { id: 'task-triggered', status: 'queued', version: 1 } },
+    }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  controller.openLibrary();
+  await flush();
+  $(window, '.curated-card').dispatchEvent(new window.Event('click'));
+  await flush();
+  $(window, '.curated-detail-actions .cw-button.primary').dispatchEvent(new window.Event('click'));
+  $(window, '#curated-create .cw-button.primary').dispatchEvent(new window.Event('click'));
+  await flush();
+
+  $(window, '#content-workspace-close').dispatchEvent(new window.Event('click'));
+  await flush();
+  assert.equal(controller.currentPage(), 'library');
+  assert.equal(listReads, 2, '已持久化触发后必须重读服务端归类，不能保留本地未创作旧页');
+  assert.match($(window, '#curated-list').textContent ?? '', /还没有未创作灵感/);
 });
 
 test('切账号丢弃旧请求，稿件审核在账号切换时关闭且不残留', async () => {

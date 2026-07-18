@@ -152,12 +152,13 @@
       if (!environment) return null;
       if (!states.has(environment.envId)) {
         states.set(environment.envId, {
-          mode: 'creatable',
+          mode: 'uncreated',
           page: 1,
           total: 0,
           items: [],
           scrollTop: 0,
           loaded: false,
+          needsReload: false,
           inspirationCount: null,
           referenceDraftCount: null,
           summaryLoading: false,
@@ -278,9 +279,14 @@
         root.dispatchEvent(new global.CustomEvent('content-workspace:leave', { detail: { page: leavingPage } }));
       }
       if (previous === 'library') {
-        renderList();
         const state = envState();
-        if (state && fields.list) fields.list.scrollTop = state.scrollTop;
+        if (state?.needsReload) {
+          state.needsReload = false;
+          void loadList();
+        } else {
+          renderList();
+          if (state && fields.list) fields.list.scrollTop = state.scrollTop;
+        }
       } else if (previous === 'detail') {
         renderDetail(currentDetail);
       }
@@ -407,9 +413,14 @@
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
       });
       if (state.items.length === 0) {
+        const empty = state.mode === 'uncreated'
+          ? ['还没有未创作灵感', '可以切到“已创作”或“全部”查看其它内容。']
+          : state.mode === 'created'
+            ? ['还没有已创作灵感', '成功发起一次洗稿后，对应灵感会出现在这里。']
+            : ['精选池还是空的', '系统发现适合当前账号的内容后，会出现在这里。'];
         renderListMessage(
-          state.mode === 'creatable' ? '还没有可创作灵感' : '精选池还是空的',
-          state.mode === 'creatable' ? '可以切到“全部”看看已经收集的内容。' : '系统发现适合当前账号的内容后，会出现在这里。',
+          empty[0],
+          empty[1],
           false,
         );
         return;
@@ -499,6 +510,7 @@
         return;
       }
       renderList();
+      if (fields.list) fields.list.scrollTop = state.scrollTop;
     }
 
     function openLibrary() {
@@ -679,6 +691,8 @@
         liveMessage.classList.add('queued');
         liveSubmit.disabled = true;
         liveSubmit.textContent = '已受理';
+        const state = envState();
+        if (state) state.needsReload = true;
       });
       fields.create.appendChild(message);
       fields.create.appendChild(submit);
@@ -742,7 +756,7 @@
     fields.modeButtons.forEach((button) => button.addEventListener('click', () => {
       const state = envState();
       const mode = button.dataset.curatedMode;
-      if (!state || (mode !== 'creatable' && mode !== 'all') || state.mode === mode) return;
+      if (!state || (mode !== 'uncreated' && mode !== 'created' && mode !== 'all') || state.mode === mode) return;
       state.mode = mode;
       state.page = 1;
       state.scrollTop = 0;

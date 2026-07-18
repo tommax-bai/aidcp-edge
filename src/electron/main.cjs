@@ -4387,7 +4387,13 @@ ipcMain.handle('curated:summary', (_event, envId) =>
 
 ipcMain.handle('curated:list', (_event, envId, options) => {
   const raw = options && typeof options === 'object' ? options : {};
-  const mode = raw.mode === 'all' ? 'all' : raw.mode === 'creatable' || raw.mode === undefined ? 'creatable' : null;
+  const mode = raw.mode === 'all'
+    ? 'all'
+    : raw.mode === 'created'
+      ? 'created'
+      : raw.mode === 'uncreated' || raw.mode === undefined
+        ? 'uncreated'
+        : null;
   const limit = raw.limit === undefined ? 20 : raw.limit;
   const offset = raw.offset === undefined ? 0 : raw.offset;
   if (!mode || !Number.isInteger(limit) || limit < 1 || limit > 50

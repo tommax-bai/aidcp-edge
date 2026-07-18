@@ -3316,7 +3316,11 @@ body { margin: 0; }
 }
 .cw-tabs button.active { color: #245fcb; background: #fff; box-shadow: 0 2px 8px rgba(35, 60, 100, .1); }
 .cw-total { color: var(--faint); font-size: 11.5px; }
-.curated-list { display: grid; gap: 9px; min-height: 300px; max-height: calc(100vh - 235px); overflow-y: auto; padding-right: 3px; }
+.curated-list {
+  display: grid; gap: 9px; min-height: 300px; max-height: calc(100vh - 235px); overflow-y: auto; padding-right: 3px;
+  scrollbar-width: none;
+}
+.curated-list::-webkit-scrollbar { display: none; }
 .curated-card {
   display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 12px; width: 100%; min-height: 100px;
   padding: 9px; border: 1px solid var(--hair); border-radius: 13px; color: inherit; background: #fff;

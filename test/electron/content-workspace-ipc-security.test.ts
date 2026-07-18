@@ -33,7 +33,8 @@ test('main 固定 customer-auth 路径、方法和参数白名单，并从所选
   for (const channel of ['curated:summary', 'curated:list', 'curated:get', 'curated:create-post']) {
     assert.match(main, new RegExp(`ipcMain\\.handle\\('${channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
   }
-  assert.match(main, /raw\.mode === 'all'[\s\S]*raw\.mode === 'creatable'/);
+  assert.match(main, /raw\.mode === 'all'[\s\S]*raw\.mode === 'created'[\s\S]*raw\.mode === 'uncreated'/);
+  assert.doesNotMatch(main.slice(main.indexOf("ipcMain.handle('curated:list'"), main.indexOf("ipcMain.handle('curated:get'")), /raw\.mode === 'creatable'/);
   // 边界值必须右锚（\b）：不加的话 `limit > 50` 也匹配放宽后的 `limit > 5000`，护栏形同虚设。
   assert.match(main, /limit < 1 \|\| limit > 50\b/, 'limit 上界必须仍是 50');
   assert.match(main, /Number\.isInteger\(offset\)/, 'offset 必须整数校验（原先根本没断言）');
@@ -45,6 +46,11 @@ test('main 固定 customer-auth 路径、方法和参数白名单，并从所选
   assert.match(main, /`\/curated-contents\/\$\{id\}\/create-post`[\s\S]*method: 'POST'[\s\S]*body: \{ useReferenceImages \}/);
   assert.match(main, /body: \{ \.\.\.options\.body, envKey: handle\.profileId \}/, 'envKey 只能由 main 从所选环境注入');
   assert.match(main, /token: clientSession\.token/, '客户 token 只在 main 注入');
+});
+
+test('灵感库列表隐藏视觉滚动条但保留原生纵向滚动', () => {
+  assert.match(styles, /\.curated-list\s*\{[\s\S]*overflow-y:\s*auto;[\s\S]*scrollbar-width:\s*none;/);
+  assert.match(styles, /\.curated-list::\-webkit-scrollbar\s*\{\s*display:\s*none;/);
 });
 
 test('待审批稿只经具名 IPC 读取，路径和环境范围由 main 固定', () => {
