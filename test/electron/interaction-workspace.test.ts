@@ -1250,7 +1250,7 @@ test('CAS 冲突保留输入并给出刷新入口；reauth 保留历史但禁写
   assert.match(reopenArgs.idempotencyKey, /^interaction-reauth-/);
 });
 
-test('测试数据入口默认隐藏，确认词不匹配时不调用重置 IPC', async () => {
+test('测试数据入口默认隐藏，开启后点击即直接调用重置 IPC（无二次确认弹窗）', async () => {
   const disabled = await boot();
   assert.equal(hidden($(disabled.window, '#interaction-test-reset')), true);
 
@@ -1264,11 +1264,12 @@ test('测试数据入口默认隐藏，确认词不匹配时不调用重置 IPC'
   toggle.dispatchEvent(new enabled.window.Event('change', { bubbles: true }));
   assert.equal(hidden($(enabled.window, '#dev-section')), false);
   assert.equal(hidden($(enabled.window, '#interaction-test-reset')), false);
-  (enabled.window as any).prompt = () => '不匹配';
+  // Electron 不支持 window.prompt（调用即抛错），改为点击直接生效，不再有输入确认词的二次弹窗。
   $(enabled.window, '[data-test-reset-channel="comment"]').dispatchEvent(new enabled.window.Event('click', { bubbles: true }));
   await flush();
-  assert.equal(enabled.calls.reset.length, 0);
-  assert.match($(enabled.window, '#interaction-test-reset-status').textContent || '', /确认词不匹配/);
+  assert.equal(enabled.calls.reset.length, 1);
+  assert.equal(enabled.calls.reset[0].channel, 'comment');
+  assert.match($(enabled.window, '#interaction-test-reset-status').textContent || '', /已清空，正在从微信平台重新拉取/);
 });
 
 test('确认开发环境评论重置后只清本地评论视图并等待真实重拉', async () => {
@@ -1277,7 +1278,6 @@ test('确认开发环境评论重置后只清本地评论视图并等待真实�
   const handle = await boot({
     api: { interactionList: async (args: any) => apiResult(scopeEnvelope(enabledList, args.envKey)) },
   });
-  (handle.window as any).prompt = () => '重置评论';
   $(handle.window, '[data-test-reset-channel="comment"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
   await flush();
   assert.equal(handle.calls.reset.length, 1);
@@ -1295,7 +1295,6 @@ test('测试重置区分安全拒绝与 Cloud 已清空但 Edge 未收到', asyn
       interactionTestReset: async () => apiError('INTERACTION_STATE_CONFLICT', '该渠道已有回复发送记录，不能重置。'),
     },
   });
-  (safety.window as any).prompt = () => '重置评论';
   $(safety.window, '[data-test-reset-channel="comment"]').dispatchEvent(new safety.window.Event('click', { bubbles: true }));
   await flush();
   assert.match($(safety.window, '#interaction-test-reset-status').textContent || '', /已有回复发送记录/);
@@ -1306,7 +1305,6 @@ test('测试重置区分安全拒绝与 Cloud 已清空但 Edge 未收到', asyn
       interactionTestReset: async () => apiError('INTERACTION_TEST_RESET_PARTIAL', 'partial', 503),
     },
   });
-  (partial.window as any).prompt = () => '重置私信';
   $(partial.window, '[data-test-reset-channel="dm"]').dispatchEvent(new partial.window.Event('click', { bubbles: true }));
   await flush();
   assert.match($(partial.window, '#interaction-test-reset-status').textContent || '', /Cloud 私信副本已清空，但自动重新拉取没有启动/);

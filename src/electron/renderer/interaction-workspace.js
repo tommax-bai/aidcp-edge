@@ -471,7 +471,7 @@
           : (channel === 'comment' ? '重置评论' : '重置私信');
       }
       if (dom.testResetStatus) {
-        dom.testResetStatus.textContent = state.testResetStatus || '每次只重置一个渠道；操作前需要输入确认词。';
+        dom.testResetStatus.textContent = state.testResetStatus || '每次只重置一个渠道；点击后立即清空 Cloud 副本并重新拉取。';
       }
     }
 
@@ -1248,15 +1248,6 @@
       if (!active || !env || state.testResetBusy || !state.testDataResetEnabled ||
           typeof api.interactionTestReset !== 'function') return;
       const label = channel === 'comment' ? '评论' : '私信';
-      const confirmation = `重置${label}`;
-      const typed = typeof global.prompt === 'function'
-        ? global.prompt(`这会清空当前账号的 Cloud ${label}副本和读取游标，再从微信平台重新拉取。\n\n不会删除微信平台数据，也不会发送回复。\n\n请输入“${confirmation}”继续：`, '')
-        : null;
-      if (typed !== confirmation) {
-        state.testResetStatus = typed === null ? '已取消，未清空任何数据。' : `确认词不匹配，未执行${label}重置。`;
-        renderTestReset();
-        return;
-      }
       const capturedEpoch = epoch;
       const envKey = env.envKey;
       state.testResetBusy = channel;
