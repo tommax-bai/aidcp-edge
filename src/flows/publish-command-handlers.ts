@@ -124,6 +124,17 @@ function normalizeFieldText(value: string): string {
 }
 
 /**
+ * 只保留汉字（Unicode Han script，含各扩展区）。填写后置校验只比对汉字部分——
+ * URL、emoji（及其变体选择符 U+FE0F / keycap U+20E3）、反引号代码块等**会被富文本编辑器自动改写**的
+ * 非汉字内容不参与比对。治「假失败」：小红书正文编辑器会把外链转成「网页链接」卡片/吞掉、把 emoji 变体选择符
+ * 规整掉、把反引号触发成内联代码，回读文本因此与原始正文不再逐字一致；旧的「回读须原样包含全文」精确子串校验
+ * 会把这类合法正文判成 post_validate_failed、连带整篇定时稿被 fail-closed 毙掉（实机 record 133）。
+ */
+function hanziOnly(value: string): string {
+  return value.replace(/[^\p{Script=Han}]/gu, '');
+}
+
+/**
  * 允许「多出来的字符数」。编辑器可能带入零宽字符/不间断空格之类的无害残留；
  * 超出这个容差就是真被塞了东西（残文没清干净 / 话题联想劫持插入），这样的正文 MUST NOT 发出去。
  */
@@ -765,9 +776,14 @@ export class PublishCommandDispatcher {
    * 填标题/正文：标题是 React 受控 input、正文是 tiptap contenteditable——JS 直接赋 value/textContent 都不被框架接收。
    * 用 CDP 真实输入：聚焦目标（校准选择器）→ **清空并回读确认为空** → Input.insertText 逐块输入 → **全文回读校验**。
    *
-   * 红线（不假成功）：校验 MUST 回读**全文**。老的「前 8 字」探针有两个致命面——
+   * 红线（不假成功）：校验回读**全文的汉字部分**。老的「前 8 字」探针有两个致命面——
    * ① 被抢占 / 失败留下的残文 + 新正文追加，探针只看新正文的前 8 字，照样放行 ⇒ 真发出一篇拼接的帖子；
-   * ② 正文被吞掉 90% 也判成功 ⇒ 真发出截断的帖子。
+   * ② 正文被吞掉 90% 也判成功 ⇒ 真发出截断的帖子。全文回读堵住这两条。
+   *
+   * 只比对汉字（hanziOnly）：正文含汉字时只要求回读的**汉字子串**原样包含期望的汉字子串——URL / emoji /
+   * 反引号等被编辑器自动改写的非汉字不参与比对，避免合法正文因编辑器改写被判「假失败」（治 record 133）。
+   * 汉字部分仍是全文回读（不是前 8 字），残文 / 截断照样抓得到；正文无汉字时回退原精确子串校验，
+   * 避免「空汉字子串恒被包含」退化成静默假成功（红线）。
    */
   private async runFillField(
     payload: PublishCommandPayload,
@@ -793,6 +809,10 @@ export class PublishCommandDispatcher {
       : `document.querySelector('input[placeholder="填写标题会有更多赞哦"]') || document.querySelector('div.edit-container input.d-text') || document.querySelector('input.d-text')`;
     const FOCUS = String.raw`(() => { const el = ${findExpr}; if (!el) return false; try { el.scrollIntoView({ block: 'center' }); } catch (e) {} el.focus(); try { el.click && el.click(); } catch (e) {} return true; })()`;
     const expected = normalizeFieldText(value);
+    // 只保证汉字一致：含汉字时按汉字子串比对（非汉字改写不参与）；无汉字时回退原精确子串校验（避免空汉字恒真的假成功）。
+    const expectedHanzi = hanziOnly(expected);
+    const fillMatches = (readback: string): boolean =>
+      expectedHanzi ? hanziOnly(readback).includes(expectedHanzi) : readback.includes(expected);
     try {
       await this.ensureInputEnabled();
       const f = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: FOCUS, returnByValue: true });
@@ -826,7 +846,7 @@ export class PublishCommandDispatcher {
     const text = await pollBounded<string>({
       probe: async () => {
         const t = await this.readFieldText(findExpr, isContent);
-        return t !== null && t.includes(expected) ? t : undefined;
+        return t !== null && fillMatches(t) ? t : undefined;
       },
       timeoutMs: 5_000,
       intervalMs: 300,
@@ -836,8 +856,9 @@ export class PublishCommandDispatcher {
     if (text === undefined) {
       return this.abandonFill(base, finish(), findExpr, isContent, 'post_validate_failed');
     }
-    const extra = text.length - expected.length;
-    // 多出来的字符 = 残文没清干净 / 被输入法或话题联想塞了东西 → 这样的正文 MUST NOT 发出去。
+    // 污染以汉字口径量：多出来的汉字 = 残文没清干净 / 被输入法或话题联想塞了东西 → 这样的正文 MUST NOT 发出去。
+    // 非汉字（编辑器把外链转卡片新增的「网页链接」等）不计入，与「只比对汉字」的验收口径一致。
+    const extra = expectedHanzi ? hanziOnly(text).length - expectedHanzi.length : text.length - expected.length;
     if (extra > FILL_EXTRA_CHAR_TOLERANCE) {
       return this.abandonFill(base, finish(), findExpr, isContent, `field_polluted: extra=${extra}`);
     }

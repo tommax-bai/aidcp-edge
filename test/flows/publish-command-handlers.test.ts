@@ -611,6 +611,37 @@ test('全文回读：正文被塞入多余字符（超容差）→ field_pollute
   assert.equal(cdp.text, '', '同样 MUST 清场');
 });
 
+test('只比对汉字：正文外链/emoji 被编辑器改写（回读缺非汉字、汉字齐全）→ ok:true（record 133 回归）', async () => {
+  // 实机 record 133：正文含外链 https://... + 组合 emoji 🛠️，小红书富文本编辑器把外链吞掉/emoji 规整掉，
+  // 回读文本与原始正文不再逐字一致。旧的精确子串校验会误判 post_validate_failed、连带整篇定时稿被 fail-closed 毙掉。
+  const cdp = new FakeCdp();
+  const dispatcher = dispatcherWithCdp(cdp);
+  const value = '给Agent做长期记忆🛠️看仓库https://github.com/foo/bar就够了';
+  // 编辑器改写：打完后把非汉字（emoji/URL）从回读里抹掉，只留汉字 + 部分 ASCII。
+  const orig = cdp.send.bind(cdp);
+  let typed = 0;
+  (cdp as unknown as { send: typeof orig }).send = async (method, params) => {
+    const r = await orig(method, params);
+    if (method === 'Input.insertText' && ++typed === Array.from(value).length) {
+      cdp.text = '给Agent做长期记忆看仓库就够了';
+    }
+    return r as never;
+  };
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, true, '汉字部分一致即算填写成功，非汉字改写不参与比对');
+  assert.notEqual(cdp.text, '', '成功路径不清场');
+});
+
+test('只比对汉字·兜底：正文无汉字 → 回退精确子串校验，编辑器吞内容仍 post_validate_failed（不因空汉字恒真而假成功）', async () => {
+  // 无汉字时若仍走「汉字子串包含」，空子串恒被包含 = 静默假成功（红线）。故必须回退原精确子串校验。
+  const value = 'Agent memory tool';
+  const cdp = new FakeCdp({ swallowAfter: 5 }); // 只吃进前 5 字符 'Agent'，其余被吞
+  const dispatcher = dispatcherWithCdp(cdp);
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^post_validate_failed/, '无汉字时回退全文精确校验，绝不假成功');
+});
+
 // ── change split-topic-roles：真话题 token 校验 + runAddTopic CDP 直驱（实机校准选择器）──
 
 /** 话题专用 fake cdp：FOCUS(含 ProseMirror)→focus 布尔；CENTER(含 tippy-box)→建议中心 JSON 或 ''；其余(点击等)→{}。 */
