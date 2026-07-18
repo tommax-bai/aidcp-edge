@@ -198,7 +198,7 @@ test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async
   assert.deepEqual(listCalls.at(-1)?.options, { mode: 'all', limit: 12, offset: 0 });
 });
 
-test('精选详情双栏共享滚轮但分别夹紧边界，窄屏交回普通滚动', async () => {
+test('精选详情双栏保留彼此独立的滚动位置，窄屏交回单列文档流', async () => {
   const { window, controller } = boot({
     curatedList: async () => ({ ok: true, data: { items: [listItem()], total: 1 } }),
     curatedGet: async () => ({
@@ -229,38 +229,20 @@ test('精选详情双栏共享滚轮但分别夹紧边界，窄屏交回普通�
 
   const mediaTop = installClampedScroll(media, 80);
   const copyTop = installClampedScroll(copy, 240);
-  const down = () => {
-    const event = new window.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 100 });
-    media.dispatchEvent(event);
-    return event;
-  };
+  media.scrollTop = 80;
+  assert.deepEqual([mediaTop(), copyTop()], [80, 0]);
+  copy.scrollTop = 160;
+  assert.deepEqual([mediaTop(), copyTop()], [80, 160]);
 
-  assert.equal(down().defaultPrevented, true);
-  assert.deepEqual([mediaTop(), copyTop()], [80, 100]);
-  assert.equal(down().defaultPrevented, true, '指针留在已到底的图片栏时，文字栏仍应继续');
-  assert.deepEqual([mediaTop(), copyTop()], [80, 200]);
-  assert.equal(down().defaultPrevented, true);
-  assert.deepEqual([mediaTop(), copyTop()], [80, 240]);
-  assert.equal(down().defaultPrevented, false, '两栏都到底后不应吞掉外层滚动链');
+  const mediaWheel = new window.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 100 });
+  media.dispatchEvent(mediaWheel);
+  assert.equal(mediaWheel.defaultPrevented, false, '渲染层不得接管滚轮并联动另一栏');
+  assert.deepEqual([mediaTop(), copyTop()], [80, 160]);
 
-  const up = new window.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -100 });
-  copy.dispatchEvent(up);
-  assert.equal(up.defaultPrevented, true);
-  assert.deepEqual([mediaTop(), copyTop()], [0, 140], '图片栏先回顶部后，文字栏保留剩余反向滚动距离');
-
-  const mediaLongTop = installClampedScroll(media, 240);
-  const copyShortTop = installClampedScroll(copy, 80);
-  down();
-  down();
-  assert.deepEqual([mediaLongTop(), copyShortTop()], [200, 80], '文字栏先到底后，图片栏继续推进');
-
-  installClampedScroll(media, 240);
-  installClampedScroll(copy, 240);
-  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 640 });
-  const narrowWheel = new window.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 100 });
-  media.dispatchEvent(narrowWheel);
-  assert.equal(narrowWheel.defaultPrevented, false);
-  assert.deepEqual([media.scrollTop, copy.scrollTop], [0, 0]);
+  const copyWheel = new window.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -100 });
+  copy.dispatchEvent(copyWheel);
+  assert.equal(copyWheel.defaultPrevented, false);
+  assert.deepEqual([mediaTop(), copyTop()], [80, 160]);
 
   $(window, '#content-workspace-back').dispatchEvent(new window.Event('click'));
   assert.equal(workspace.classList.contains('curated-detail-mode'), false);
