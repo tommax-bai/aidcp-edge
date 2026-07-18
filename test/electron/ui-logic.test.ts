@@ -57,6 +57,7 @@ interface SlowStartV {
   tone?: string;
   reason?: string;
   source?: string;
+  configurationOnly?: boolean;
 }
 
 function st(over: Record<string, unknown> = {}) {
@@ -751,15 +752,24 @@ test('slowStartLine：断连（活快照）→ 真态照常 + 开关可点，仅
   assert.doesNotMatch(v.reason!, /不可用|已关闭|状态可能已过期/);
 });
 
-test('slowStartLine：binding_unknown → 整行可见 + 开关禁用 + 专属可行动文案，绝不落泛化兜底或整行隐藏', () => {
-  // 云端还没认出这个环境在跑哪个账号（从未启动登录过）→ 必须可见地说明为何不可用 + 下一步怎么做。
-  const v = uiLogic.slowStartLine(usage({ eligible: false, ineligibleReason: 'binding_unknown' }), 'offline', 'http');
-  assert.equal(v.visible, true, 'MUST NOT 整行隐藏（那与修复前一模一样）');
-  assert.equal(v.disabled, true);
-  assert.equal(v.checked, false);
-  assert.match(v.reason!, /尚未识别到该环境的账号/);
-  assert.match(v.reason!, /启动一次该环境/, '给出可行动的下一步');
-  assert.notEqual(v.reason, '当前无法启用慢启动', '绝不落到泛化兜底文案');
+test('slowStartLine：binding_unknown 保留环境 active/off 真态且可预设，不编造 binding 生效', () => {
+  const active = uiLogic.slowStartLine(usage({
+    state: 'active', day: 2, totalDays: 7, since: Date.now(), eligible: false, ineligibleReason: 'binding_unknown',
+  }), 'offline', 'http');
+  assert.equal(active.visible, true);
+  assert.equal(active.disabled, false, '未绑定不是环境配置写入前置');
+  assert.equal(active.checked, true, '环境已经开启，不得因无账号回拨成关闭');
+  assert.equal(active.configurationOnly, true);
+  assert.match(active.reason!, /设置跟随当前环境/);
+  assert.match(active.reason!, /登录账号后/);
+  assert.doesNotMatch(active.badge!, /档位已更严|不额外限制/, '无账号不得编造 binding 结论');
+
+  const off = uiLogic.slowStartLine(usage({
+    state: 'off', totalDays: 7, eligible: false, ineligibleReason: 'binding_unknown',
+  }), 'offline', 'http');
+  assert.equal(off.disabled, false);
+  assert.equal(off.checked, false);
+  assert.equal(off.configurationOnly, true);
 });
 
 test('slowStartLine：HTTP 读来源（从未连接的环境）→ 真态可见可点，且不谈用量陈旧（change slow-start-offline-toggle）', () => {
@@ -799,7 +809,7 @@ test('slowStartLine：文案红线 —— 全域不出现「新账号」、不�
     uiLogic.slowStartLine(usage({ state: 'graduated', totalDays: 7, since: Date.UTC(2026, 6, 10), eligible: true }), 'online'),
     uiLogic.slowStartLine(usage({ state: 'off', totalDays: 7, eligible: false, ineligibleReason: 'platform_unknown' }), 'offline'),
     // change slow-start-offline-toggle 新增两态：binding_unknown 专属文案 + 离线用量陈旧提示，同受文案红线约束。
-    uiLogic.slowStartLine(usage({ eligible: false, ineligibleReason: 'binding_unknown' }), 'offline', 'http'),
+    uiLogic.slowStartLine(usage({ state: 'off', totalDays: 7, eligible: false, ineligibleReason: 'binding_unknown' }), 'offline', 'http'),
     uiLogic.slowStartLine(usage({ state: 'active', day: 2, totalDays: 7, binding: true, eligible: true }), 'offline'),
   ];
   for (const v of all) {

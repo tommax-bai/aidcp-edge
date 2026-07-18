@@ -3832,9 +3832,8 @@ ipcMain.handle('interaction:draft:update', (_event, raw) => handleInteractionIpc
   });
 }));
 
-// 账号级慢启动开关（change account-level-slow-start；**离线可读写** change slow-start-offline-toggle）：
-// **只提交 envKey + enabled**。accountId 由云端经**持久绑定**解析、客户端永不提交（红线：accountId is never
-// accepted as an unverified cross-customer selector）。
+// 环境级慢启动开关（change environment-level-slow-start）：**只提交 envKey + enabled**。
+// 配置直接属于 envKey，未绑定账号也可预设；客户端永不提交 accountId。
 //
 // **原作者「边缘不在线就改不了不是缺陷」的论断已被用户裁定推翻**：慢启动真态是纯云端算的、写入执行体也在云端
 // 配额计算内，边缘对这次写入没有任何参与——那道内核在线闸是 INCIDENTAL（这次写全程不经过环境内核子进程）。

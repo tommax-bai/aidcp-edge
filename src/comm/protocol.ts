@@ -596,21 +596,21 @@ export interface UiDailyUsagePayload {
     sourceId?: string;
   };
   /**
-   * 账号级慢启动投影（change account-level-slow-start）。**字段缺省 = 未知（云端还没说）→ 整行不渲染**，
+   * 环境级慢启动投影（change environment-level-slow-start）。**字段缺省 = 未知（云端还没说）→ 整行不渲染**，
    * 照 personaBound 的三态判例：MUST NOT 把「未知」当「关」。
    *
    * `binding` 只在 active 时有意义：慢启动语义是 min(曲线, 档位)，而曲线写死、档位数字面板可热编辑，
    * 两者之间没有任何不变量保证曲线更紧 → 勾了却一格都没压是**真实可达**的状态。
    * binding=false MUST 如实标注「当前档位已更严，不额外限制」，MUST NOT 宣称「正在压低配额」。
    *
-   * `eligible=false` 时 UI 禁用开关并按 ineligibleReason 如实说明；平台未知 MUST NOT 静默按
-   * 小红书曲线跑（那会让 FB 号的 D1 上限从 20 变成 50）。
+   * `eligible=false` 通常禁用；binding_unknown/binding_conflict 时环境配置仍可操作，
+   * state 表达配置真态，客户端不得声称配额已经作用到账号。
    */
   slowStart?: UiSlowStartPayload;
   windows?: Partial<Record<UiDailyUsageWindow, UiDailyUsageWindowStatus>>;
 }
 
-/** 账号级慢启动状态（change account-level-slow-start）：与云端 clamp 同源同格（同一 controller、同一次 clock）。 */
+/** 环境级慢启动状态：有唯一当前账号时与 clamp 同源，未绑定时只表达环境配置。 */
 export interface UiSlowStartPayload {
   /** off = 未开启；active = 爬坡中；graduated = 已完成（上限已放开，但库里开关仍为真）。 */
   state: 'off' | 'active' | 'graduated';
@@ -622,9 +622,14 @@ export interface UiSlowStartPayload {
   since?: number;
   /** active 时：clamp 是否至少收紧一项。false = 勾了但当前档位已更严、不额外限制。 */
   binding?: boolean;
-  /** 该账号此刻能否被慢启动约束；false 时 UI MUST 禁用开关并说明原因。 */
+  /** 当前环境设置是否正作用到唯一账号；绑定缺失/冲突时设置仍可操作。 */
   eligible: boolean;
-  ineligibleReason?: 'platform_unsupported' | 'platform_unknown' | 'globally_disabled';
+  ineligibleReason?:
+    | 'platform_unsupported'
+    | 'platform_unknown'
+    | 'globally_disabled'
+    | 'binding_unknown'
+    | 'binding_conflict';
 }
 
 export interface UiBrowserStandbyPayload {

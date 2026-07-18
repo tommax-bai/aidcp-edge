@@ -92,7 +92,7 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   interactionUpdateReadControls: (args) => ipcRenderer.invoke('interaction:read-controls:update', args),
   interactionNotify: (args) => ipcRenderer.invoke('interaction:notify', args),
   interactionCancelReads: (envKey) => ipcRenderer.invoke('interaction:reads:cancel', { envKey }),
-  // 账号级慢启动（change account-level-slow-start）：只传 envKey + enabled，accountId 由云端解析。
+  // 环境级慢启动：只传 envKey + enabled，客户端永不提交 accountId。
   setSlowStart: (args) => ipcRenderer.invoke('slow-start:set', args),
   // 不依赖边缘的慢启动读（change slow-start-offline-toggle）：没有活快照时用它把这一行渲染出来。
   getSlowStart: (args) => ipcRenderer.invoke('slow-start:get', args),
