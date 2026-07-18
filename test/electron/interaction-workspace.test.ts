@@ -250,7 +250,7 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
 const $ = (window: DOMWindow, selector: string) => window.document.querySelector(selector) as HTMLElement;
 const hidden = (element: HTMLElement) => element.classList.contains('hidden');
 
-// 两级导航（wechat-inbox-im-drilldown）：收件箱不再默认选中任何一条，详情要点开才存在。
+// 收件箱不再默认选中任何一条；详情数据要经客户显式点击后才加载。
 // 凡是断言详情内容的用例都得先经这里点一下 —— 这正是客户实际的操作路径。
 async function openThread(window: DOMWindow, threadId?: string): Promise<HTMLElement> {
   const item = $(window, threadId ? `[data-thread-id="${threadId}"]` : '.iw-list-item');
@@ -1370,26 +1370,29 @@ test('Cloud offline/stale 禁止 save/approve/send，成功刷新后才恢复写
   assert.equal(calls.send.length, 0, 'disabled 之外 handler guard 也必须拦 send');
 });
 
-test('两级导航：列表级不默认选中、详情不渲染，且每一条都点得开', async () => {
+test('双列主从布局：不默认选中或预取，右列显示选择提示且每一条都点得开', async () => {
   const { window, calls } = await boot();
 
-  // 不默认选中：进来就是列表级，也 MUST NOT 为任何一条预取详情
+  // 不默认选中：左列没有选中项，右列显示选择提示，也 MUST NOT 预取详情。
   const detail = $(window, '#iw-detail');
-  assert.equal(detail.hasAttribute('hidden'), true, '列表级下详情覆盖层必须隐藏');
-  assert.equal(detail.innerHTML, '', '列表级下详情 MUST NOT 渲染内容（红线第二道保险）');
+  assert.equal(detail.hasAttribute('hidden'), false, '双列布局右侧详情列必须常驻');
+  assert.match(detail.textContent || '', /选择一条互动查看详情/);
   assert.equal(calls.detail.length, 0, '没点开就不该请求详情');
   assert.equal(window.document.querySelectorAll('[aria-selected="true"]').length, 0);
 
-  // 红线：覆盖层若隐藏失效，会永久盖住列表且不报错 —— 这里逐条点开来证伪
+  const list = $(window, '#iw-list');
+  list.scrollTop = 42;
   const ids = Array.from(window.document.querySelectorAll('[data-thread-id]'))
     .map((node) => (node as HTMLElement).dataset.threadId as string);
   assert.ok(ids.length >= 2, 'fixture 应有多条互动');
   for (const id of ids) {
     await openThread(window, id);
-    assert.equal($(window, '#iw-detail').hasAttribute('hidden'), false, `${id} 应能点开详情`);
+    assert.equal($(window, '#iw-detail').hasAttribute('hidden'), false, `${id} 的详情应在右列显示`);
+    assert.ok($(window, '#iw-list').isConnected, '详情打开时左列列表 DOM 必须保留');
     $(window, '[data-iw-action="close-detail"]').dispatchEvent(new window.Event('click', { bubbles: true }));
     await flush();
-    assert.equal($(window, '#iw-detail').hasAttribute('hidden'), true, `${id} 关闭后应回到列表级`);
+    assert.match($(window, '#iw-detail').textContent || '', /选择一条互动查看详情/, `${id} 关闭后右列应恢复选择提示`);
+    assert.equal(list.scrollTop, 42, `${id} 关闭后左列滚动位置必须保留`);
   }
 });
 
@@ -1405,8 +1408,8 @@ test('关闭图标与 Esc 都回到列表级并清空选中；列表只呈现摘
 
   $(window, '#interaction-workspace').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await flush();
-  assert.equal($(window, '#iw-detail').hasAttribute('hidden'), true, 'Esc 应回到列表级');
-  assert.equal($(window, '#iw-detail').innerHTML, '');
+  assert.equal($(window, '#iw-detail').hasAttribute('hidden'), false, 'Esc 后右侧详情列仍应保留');
+  assert.match($(window, '#iw-detail').textContent || '', /选择一条互动查看详情/);
   assert.equal(window.document.querySelectorAll('[aria-selected="true"]').length, 0, 'Esc 后不应残留选中');
 
   // 列表只呈现摘要：昵称/时间/来源在，消息正文只在详情级
@@ -1416,11 +1419,9 @@ test('关闭图标与 Esc 都回到列表级并清空选中；列表只呈现摘
   assert.doesNotMatch(list.textContent || '', /这个视频很有帮助/, '正文只属于详情级');
 });
 
-test('详情覆盖层的隐藏样式必须显式压过面板 display（红线）', () => {
+test('宽屏收件箱是双列且详情不再覆盖列表，窄工作区仍回退单列', () => {
   const css = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
-  // .iw-list-pane 带 display:flex，优先级高于 UA 给 [hidden] 的 display:none。
-  // 少了这条，hidden 静默失效：不报错、不白屏，覆盖层永久糊在列表上、客户无法选择任何互动。
-  assert.match(css, /\.iw-detail\[hidden\][\s\S]{0,80}\{ display: none !important; \}/);
-  assert.match(css, /\.iw-inbox \{[\s\S]{0,120}position: relative;/, '覆盖层依赖收件箱容器做定位上下文');
-  assert.match(css, /\.iw-detail \{[\s\S]{0,120}position: absolute;[\s\S]{0,60}inset: 0;/);
+  assert.match(css, /\.iw-inbox \{[\s\S]{0,160}grid-template-columns: minmax\(248px, \.78fr\) minmax\(330px, 1\.42fr\);/);
+  assert.doesNotMatch(css, /\.iw-detail \{[\s\S]{0,120}position: absolute;/, '详情不得再绝对定位覆盖左列');
+  assert.match(css, /@container \(max-width: 640px\)[\s\S]*\.iw-inbox \{ display: flex; flex: none; flex-direction: column; overflow: visible; \}/);
 });

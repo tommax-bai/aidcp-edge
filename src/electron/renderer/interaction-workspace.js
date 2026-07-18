@@ -768,12 +768,12 @@
 
     function renderDetail() {
       dom.detail.setAttribute('aria-busy', String(state.detailLoading));
-      // 列表级：详情覆盖层既隐藏、又不渲染内容。这是红线的第二道保险——
-      // 第一道是 styles.css 里显式压过 display 的 [hidden] 规则。任一道单独都不够：
-      // 只靠样式，层叠一旦被后来的规则改写就复发；只靠不渲染，空容器仍会绝对定位挡住点击。
+      // 双列主从布局：未选中时右列保留明确空态，但绝不自动选中或预取详情。
+      // 左侧列表节点始终存活，打开/关闭详情不会重置其滚动位置。
       if (!state.selectedThreadId) {
-        dom.detail.hidden = true;
-        dom.detail.innerHTML = '';
+        dom.detail.hidden = false;
+        dom.detail.removeAttribute('tabindex');
+        dom.detail.innerHTML = '<div class="iw-empty-state"><span class="iw-empty-icon" aria-hidden="true">···</span><strong>选择一条互动查看详情</strong><span>消息上下文、回复依据和发送状态会显示在这里。</span></div>';
         return;
       }
       dom.detail.hidden = false;
@@ -1062,7 +1062,7 @@
       anchorTabs();
     }
 
-    // 关闭详情覆盖层，回到列表级。关闭图标 / 返回箭头 / Esc 三个入口收敛到这里。
+    // 清除右列详情并恢复选择提示。关闭图标 / 返回箭头 / Esc 三个入口收敛到这里。
     function closeThread() {
       if (!state.selectedThreadId) return;
       clearPoll();

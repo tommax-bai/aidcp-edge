@@ -2963,14 +2963,13 @@ body { margin: 0; }
   line-height: 18px;
 }
 .iw-list-meta { color: var(--faint); font-size: 10.5px; white-space: nowrap; }
-/* 单栏两级：列表常驻，详情作为覆盖层铺满收件箱区并遮挡列表（wechat-inbox-im-drilldown）。
-   列表不卸载 → 关闭详情后滚动位置天然保留。 */
+/* 宽屏双列主从布局：列表与详情同屏且各自滚动；窄工作区在下方 container query
+   回退为单列文档流。列表不卸载，切换详情后滚动位置天然保留。 */
 .iw-inbox {
-  position: relative;
   display: grid;
   flex: 1;
   min-height: 0;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(248px, .78fr) minmax(330px, 1.42fr);
   gap: 10px;
 }
 .iw-list-pane,
@@ -2983,17 +2982,7 @@ body { margin: 0; }
   overflow: hidden;
 }
 .iw-list-pane { display: flex; flex-direction: column; }
-/* 详情覆盖层：铺满收件箱区，盖住列表 */
-.iw-detail {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  box-shadow: 0 6px 24px rgb(23 34 56 / 10%);
-}
-/* 红线（wechat-inbox-im-drilldown design 决策 3）：这条必须显式压过上面的 display 声明。
-   .iw-list-pane 带 display:flex，优先级高于 UA 给 [hidden] 的 display:none —— 少了这条，
-   隐藏会静默失效（不报错、不白屏），覆盖层永久糊在列表上、客户无法选择任何互动。
-   逻辑侧另有一道：列表级下 renderDetail() 不渲染详情内容，两道缺一不可。 */
+/* 初始化期间仍尊重静态 hidden；首次 renderDetail 后右列始终显示详情或选择提示。 */
 .iw-detail[hidden],
 .iw-list-pane[hidden] { display: none !important; }
 .iw-list {
