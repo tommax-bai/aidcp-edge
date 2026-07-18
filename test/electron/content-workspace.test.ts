@@ -17,6 +17,20 @@ async function flush(times = 5) { for (let i = 0; i < times; i += 1) await tick(
 const $ = (window: DOMWindow, selector: string) => window.document.querySelector(selector) as unknown as HTMLElement;
 const hidden = (element: HTMLElement) => element.classList.contains('hidden');
 
+function installClampedScroll(element: HTMLElement, max: number, initial = 0) {
+  let scrollTop = Math.min(max, Math.max(0, initial));
+  Object.defineProperties(element, {
+    clientHeight: { configurable: true, value: 100 },
+    scrollHeight: { configurable: true, value: max + 100 },
+    scrollTop: {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = Math.min(max, Math.max(0, Number(value))); },
+    },
+  });
+  return () => scrollTop;
+}
+
 function listItem(overrides: Record<string, unknown> = {}) {
   return {
     id: 7,
@@ -182,6 +196,74 @@ test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async
   ($(window, '[data-curated-mode="all"]')).dispatchEvent(new window.Event('click'));
   await flush();
   assert.deepEqual(listCalls.at(-1)?.options, { mode: 'all', limit: 12, offset: 0 });
+});
+
+test('精选详情双栏共享滚轮但分别夹紧边界，窄屏交回普通滚动', async () => {
+  const { window, controller } = boot({
+    curatedList: async () => ({ ok: true, data: { items: [listItem()], total: 1 } }),
+    curatedGet: async () => ({
+      ok: true,
+      data: {
+        item: detail({
+          body: '很长的正文\n'.repeat(80),
+          referenceImages: Array.from({ length: 6 }, (_, index) => ({
+            index,
+            sourceUrl: `https://img.test/${index}.jpg`,
+            captureStatus: 'url_only',
+            capturedAt: 1,
+          })),
+        }),
+      },
+    }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  controller.openLibrary();
+  await flush();
+  $(window, '.curated-card').dispatchEvent(new window.Event('click'));
+  await flush();
+
+  const workspace = $(window, '#content-workspace');
+  const media = $(window, '.curated-detail-media');
+  const copy = $(window, '.curated-detail-copy');
+  assert.equal(workspace.classList.contains('curated-detail-mode'), true);
+
+  const mediaTop = installClampedScroll(media, 80);
+  const copyTop = installClampedScroll(copy, 240);
+  const down = () => {
+    const event = new window.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 100 });
+    media.dispatchEvent(event);
+    return event;
+  };
+
+  assert.equal(down().defaultPrevented, true);
+  assert.deepEqual([mediaTop(), copyTop()], [80, 100]);
+  assert.equal(down().defaultPrevented, true, '指针留在已到底的图片栏时，文字栏仍应继续');
+  assert.deepEqual([mediaTop(), copyTop()], [80, 200]);
+  assert.equal(down().defaultPrevented, true);
+  assert.deepEqual([mediaTop(), copyTop()], [80, 240]);
+  assert.equal(down().defaultPrevented, false, '两栏都到底后不应吞掉外层滚动链');
+
+  const up = new window.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -100 });
+  copy.dispatchEvent(up);
+  assert.equal(up.defaultPrevented, true);
+  assert.deepEqual([mediaTop(), copyTop()], [0, 140], '图片栏先回顶部后，文字栏保留剩余反向滚动距离');
+
+  const mediaLongTop = installClampedScroll(media, 240);
+  const copyShortTop = installClampedScroll(copy, 80);
+  down();
+  down();
+  assert.deepEqual([mediaLongTop(), copyShortTop()], [200, 80], '文字栏先到底后，图片栏继续推进');
+
+  installClampedScroll(media, 240);
+  installClampedScroll(copy, 240);
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 640 });
+  const narrowWheel = new window.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 100 });
+  media.dispatchEvent(narrowWheel);
+  assert.equal(narrowWheel.defaultPrevented, false);
+  assert.deepEqual([media.scrollTop, copy.scrollTop], [0, 0]);
+
+  $(window, '#content-workspace-back').dispatchEvent(new window.Event('click'));
+  assert.equal(workspace.classList.contains('curated-detail-mode'), false);
 });
 
 test('无参考图时禁用图文模式，文字参照只呈现诚实排队回执', async () => {

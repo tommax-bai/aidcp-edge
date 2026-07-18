@@ -40,6 +40,34 @@
     return Array.isArray(item && item.referenceImages) && item.referenceImages.some((image) => referenceImageUrl(image));
   }
 
+  function usesCuratedDetailColumns(global) {
+    if (typeof global.matchMedia === 'function') return global.matchMedia('(min-width: 681px)').matches;
+    return !Number.isFinite(global.innerWidth) || global.innerWidth > 680;
+  }
+
+  function wheelDeltaPixels(event, viewportHeight) {
+    if (event.deltaMode === 1) return event.deltaY * 16;
+    if (event.deltaMode === 2) return event.deltaY * Math.max(1, viewportHeight);
+    return event.deltaY;
+  }
+
+  /**
+   * 宽屏精选详情的两栏共享同一次滚轮输入，但各自保留独立边界。
+   * 浏览器会把每个 scrollTop 夹在合法范围内：先到底的一栏停住，另一栏继续。
+   */
+  function coordinateDetailWheel(event, columns) {
+    if (!usesCuratedDetailColumns(global) || event.ctrlKey || event.deltaY === 0) return;
+    const viewportHeight = Math.max(...columns.map((column) => column.clientHeight || 0));
+    const delta = wheelDeltaPixels(event, viewportHeight);
+    let moved = false;
+    for (const column of columns) {
+      const before = column.scrollTop;
+      column.scrollTop += delta;
+      moved = moved || column.scrollTop !== before;
+    }
+    if (moved) event.preventDefault();
+  }
+
   function rejectionMessage(reason, detail) {
     switch (reason) {
       case 'image_text_only': return '这条内容不是可参照创作的图文内容。';
@@ -231,6 +259,7 @@
     function showPage(page, pushCurrent) {
       if (pushCurrent && currentPage !== 'home') backStack.push(currentPage);
       currentPage = page;
+      root.classList.toggle('curated-detail-mode', page === 'detail');
       hideViews();
       const view = page === 'library'
         ? fields.library
@@ -254,6 +283,7 @@
       backStack = [];
       currentDetail = null;
       createBusy = false;
+      root.classList.remove('curated-detail-mode');
       hideViews();
       setWorkspaceVisible(false);
       if (leavingPage !== 'home') {
@@ -548,6 +578,7 @@
       content.appendChild(footer);
       layout.appendChild(media);
       layout.appendChild(content);
+      layout.addEventListener('wheel', (event) => coordinateDetailWheel(event, [media, content]), { passive: false });
       fields.detail.appendChild(layout);
     }
 
