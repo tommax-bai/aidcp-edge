@@ -689,6 +689,68 @@ test('首次列出唯一环境仍自动加入花名册（allowAutoJoin 合法路
   assert.ok(envSaves.some((p) => (p.environments as Array<{ profileId: string }>).some((e) => e.profileId === 'only1')), '唯一环境应被自动加入花名册');
 });
 
+test('客户归属环境默认全部移入且不启动；手动移出持久保留、再次点选恢复', async () => {
+  const saves: Array<Record<string, unknown>> = [];
+  let starts = 0;
+  let state: Record<string, unknown> = {
+    provider: 'adspower', adsProfileId: '', adsProfileName: '', adsApiKey: '', adsApiBase: '', adsDownloadUrl: 'x',
+    environments: [], clientRosterExcludedEnvIds: [],
+  };
+  const profiles = [
+    { userId: 'owned-1', serialNumber: '1', name: '归属甲', groupName: 'g', proxy: 'p', platform: 'xiaohongshu' },
+    { userId: 'owned-2', serialNumber: '2', name: '归属乙', groupName: 'g', proxy: 'p', platform: 'facebook' },
+  ];
+  const w = await boot(makeStub({
+    getSettings: async () => state,
+    getStatus: async () => makeStatus({ edge: 'running', session: 'running' }),
+    start: async () => { starts += 1; return makeStatus({ edge: 'starting' }); },
+    adsListProfiles: async () => ({ ok: true, assignmentScoped: true, truncated: false, profiles }),
+    saveSettings: async (patch) => {
+      const p = patch as Record<string, unknown>;
+      saves.push(p);
+      state = { ...state, ...p, saveOk: true };
+      return state;
+    },
+  }));
+  for (let i = 0; i < 4; i++) await tick();
+  const latestEnvs = state.environments as Array<{ profileId: string }>;
+  assert.deepEqual(Array.from(latestEnvs, (e) => e.profileId), ['owned-1', 'owned-2'], '完整权威归属列表默认全部移入');
+  assert.equal(starts, 0, '默认移入只建离线行，绝不自动启动');
+  assert.match($(w, '#ads-env-msg').textContent ?? '', /已默认移入 2 个归属环境.*未自动启动/);
+
+  const secondRemove = $$(w, '.ads-env-item')[1].querySelector('.ads-env-remove') as HTMLElement;
+  secondRemove.click();
+  for (let i = 0; i < 3; i++) await tick();
+  assert.deepEqual(Array.from(state.environments as Array<{ profileId: string }>, (e) => e.profileId), ['owned-1']);
+  assert.deepEqual(Array.from(state.clientRosterExcludedEnvIds as string[]), ['owned-2'], '手动移出写入持久排除集合');
+
+  ($(w, '#ads-refresh') as HTMLButtonElement).click();
+  for (let i = 0; i < 4; i++) await tick();
+  assert.deepEqual(Array.from(state.environments as Array<{ profileId: string }>, (e) => e.profileId), ['owned-1'], '普通刷新不得把手动移出项加回');
+
+  $$(w, '.ads-env-item')[1].click();
+  for (let i = 0; i < 3; i++) await tick();
+  assert.deepEqual(Array.from(state.environments as Array<{ profileId: string }>, (e) => e.profileId), ['owned-1', 'owned-2']);
+  assert.deepEqual(Array.from(state.clientRosterExcludedEnvIds as string[]), [], '显式再次移入撤销排除');
+  assert.ok(saves.length >= 3, '默认移入、手动移出和再次移入都应即时落盘');
+});
+
+test('客户归属列表截断或空响应不默认移入；非客户多环境仍不代选', async () => {
+  for (const result of [
+    { ok: true, assignmentScoped: true, truncated: true, profiles: [{ userId: 'p1', name: '甲' }] },
+    { ok: true, assignmentScoped: true, truncated: false, profiles: [] },
+    { ok: true, truncated: false, profiles: [{ userId: 'p1', name: '甲' }, { userId: 'p2', name: '乙' }] },
+  ]) {
+    const saves: Array<Record<string, unknown>> = [];
+    await boot(makeStub({
+      getSettings: async () => ({ provider: 'adspower', adsProfileId: '', adsApiKey: '', adsApiBase: '', environments: [] }),
+      adsListProfiles: async () => result,
+      saveSettings: async (patch) => { saves.push(patch as Record<string, unknown>); return { saveOk: true, environments: [] }; },
+    }));
+    assert.ok(!saves.some((p) => Array.isArray(p.environments)), '不完整客户列表 / 非客户多环境不得默认改写花名册');
+  }
+});
+
 test('空响应安全闸（红线）：整份花名册都不在本次云端列表时，绝不把在用环境渲染成可移除的残留行', async () => {
   // 撤销残留行渲染后的回归守卫：success-but-empty 的偶发响应下，不得把活着的环境误标成已删除+给一键移出。
   const w = await boot(makeStub({

@@ -187,6 +187,9 @@ function cloudKeyForUrl(url) {
 const DEFAULT_SETTINGS = {
   provider: 'adspower',
   environments: [],
+  // 客户归属环境默认入册后的显式 opt-out。owner 由主进程绑定当前登录客户，renderer 只能提交 envKey 集合。
+  clientRosterExclusionOwner: '',
+  clientRosterExcludedEnvIds: [],
   adsProfileId: '',
   adsApiKey: '',
   adsApiBase: '',
@@ -250,6 +253,18 @@ function normalizePendingInteractionOffboards(list) {
   return out;
 }
 
+function normalizeClientRosterExcludedEnvIds(list) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(list) ? list : []) {
+    const envKey = String(raw || '').trim();
+    if (!envKey || seen.has(envKey)) continue;
+    seen.add(envKey);
+    out.push(envKey);
+  }
+  return out;
+}
+
 function settingsFile() {
   return path.join(app.getPath('userData'), 'settings.json');
 }
@@ -269,6 +284,8 @@ function loadSettings() {
   // 花名册迁移（向后兼容）：旧单值 adsProfileId → 单元素花名册；镜像回写旧字段（回滚兼容）。
   settings.environments = fleet.migrateEnvironments(parsed && typeof parsed === 'object' ? { ...parsed, environments: settings.environments } : settings);
   settings.pendingInteractionOffboards = normalizePendingInteractionOffboards(settings.pendingInteractionOffboards);
+  settings.clientRosterExclusionOwner = String(settings.clientRosterExclusionOwner || '').trim();
+  settings.clientRosterExcludedEnvIds = normalizeClientRosterExcludedEnvIds(settings.clientRosterExcludedEnvIds);
   applyLegacyMirror();
   normalizeCloudSettings();
   return settings;
@@ -773,6 +790,11 @@ async function proceedAfterAuth() {
   if (clientAuthEnabled() && hasValidSession()) {
     const ok = await refreshAllowedEnvironments();
     if (!ok) { clearClientSession(); allowedProfileIds = new Set(); createLoginWindow(); return; }
+    const owner = String((clientSession && clientSession.name) || '').trim();
+    if (settings.clientRosterExclusionOwner !== owner) {
+      // 同机切换客户时绝不继承上一客户的手动移出选择；首次升级也在此把排除集合绑定到当前客户。
+      saveSettings({ clientRosterExclusionOwner: owner, clientRosterExcludedEnvIds: [] });
+    }
   } else {
     allowedProfileIds = null; // 未 gated：不过滤
   }
@@ -853,6 +875,8 @@ function saveSettings(patch) {
   normalizeSlotSettingsIntoSettings();
   settings.environments = fleet.normalizeEnvironments(settings.environments);
   settings.pendingInteractionOffboards = normalizePendingInteractionOffboards(settings.pendingInteractionOffboards);
+  settings.clientRosterExclusionOwner = String(settings.clientRosterExclusionOwner || '').trim();
+  settings.clientRosterExcludedEnvIds = normalizeClientRosterExcludedEnvIds(settings.clientRosterExcludedEnvIds);
   applyLegacyMirror();
   normalizeCloudSettings();
   try {
@@ -4054,6 +4078,8 @@ ipcMain.handle('settings:save', async (_event, patch) => {
   const safePatch = { ...(patch || {}) };
   // pending offboard 是主进程在 Cloud 202 回执后写入的恢复游标，renderer 不得伪造/覆盖。
   delete safePatch.pendingInteractionOffboards;
+  // 排除集合 owner 只由当前有效客户会话派生，renderer 不得伪造身份或把选择带给另一客户。
+  delete safePatch.clientRosterExclusionOwner;
   let scopeError;
   if (clientAuthEnabled() && hasValidSession() && allowedProfileIds instanceof Set) {
     if (Array.isArray(safePatch.environments)) {
@@ -4067,6 +4093,17 @@ ipcMain.handle('settings:save', async (_event, patch) => {
       delete safePatch.adsProfileName;
       scopeError = '未获管理员分配的环境不能设为当前运行环境。';
     }
+    if (Array.isArray(safePatch.clientRosterExcludedEnvIds)) {
+      const requested = normalizeClientRosterExcludedEnvIds(safePatch.clientRosterExcludedEnvIds);
+      safePatch.clientRosterExcludedEnvIds = requested.filter((envKey) => allowedProfileIds.has(envKey));
+      safePatch.clientRosterExclusionOwner = String((clientSession && clientSession.name) || '').trim();
+      if (safePatch.clientRosterExcludedEnvIds.length !== requested.length) {
+        scopeError = scopeError || '未获管理员分配的环境不能保存为手动移出。';
+      }
+    }
+  } else {
+    // 无可信客户范围时不接受 renderer 写排除集合；非客户模式也不启用这套默认入册语义。
+    delete safePatch.clientRosterExcludedEnvIds;
   }
   const res = saveSettings(safePatch);
   syncEnvHandles(); // 花名册变更即同步注册表（新环境建行、移出的有序停止）
@@ -4313,6 +4350,8 @@ ipcMain.handle('ads:listProfiles', async (_event, opts) => {
         const pending = pendingOffboardForEnv(p.userId);
         return pending ? { ...p, offboardPending: { state: pending.state, offboardId: pending.offboardId } } : p;
       });
+    // 只在有效会话 + 权威归属刷新 + 本机列表收窄完成后给 renderer 这个可信信号。
+    result.assignmentScoped = true;
   }
   return result;
 });

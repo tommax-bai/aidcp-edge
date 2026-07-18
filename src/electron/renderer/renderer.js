@@ -365,6 +365,9 @@ let selectedProfileName = '';
 // 运行花名册（edge-multi-environment-fleet）：多选加入的环境成员 [{profileId, name, platform}]，
 // 按 profileId 去重（同一分身 MUST NOT 重复加入，防 edgeId 撞车）；持久化为 settings.environments。
 let roster = [];
+// 客户归属环境默认入册的持久 opt-out；只在 main 明确标记 assignmentScoped 的列表上读写。
+let clientRosterExcludedEnvIds = new Set();
+let lastAssignmentScoped = false;
 // 最近一次拉取的环境列表（roster 变更后就地重刷成员标记，无需重新拉取）。
 let lastProfiles = [];
 function normalizeRosterList(list) {
@@ -3149,6 +3152,11 @@ function applySettings(s) {
   roster = Array.isArray(s.environments) && s.environments.length > 0
     ? normalizeRosterList(s.environments)
     : normalizeRosterList(s.adsProfileId ? [{ profileId: s.adsProfileId, name: s.adsProfileName, platform: s.platform }] : []);
+  clientRosterExcludedEnvIds = new Set(
+    (Array.isArray(s.clientRosterExcludedEnvIds) ? s.clientRosterExcludedEnvIds : [])
+      .map((envKey) => String(envKey || '').trim())
+      .filter(Boolean),
+  );
   if (typeof s.railCollapsed === 'boolean') fleetView.collapsed = s.railCollapsed;
   applyDevVisible(Boolean(s.devDetails));
   settingsUi.adsProfile.value = s.adsProfileId || '';
@@ -3375,6 +3383,7 @@ function selectProfile(userId, itemEl, profileName, platform) {
   let added = false;
   if (userId && !rosterHas(userId)) {
     roster.push({ profileId: userId, name: profileName || '', platform: normPlatform(platform) });
+    if (lastAssignmentScoped) clientRosterExcludedEnvIds.delete(userId);
     added = true;
   } else if (userId) {
     setEnvMsg(`「${profileName || userId}」已在运行花名册中。`, false);
@@ -3387,15 +3396,23 @@ function selectProfile(userId, itemEl, profileName, platform) {
   if (added) {
     setEnvMsg(`已加入「${profileName || userId}」，在左栏可见并可启动。`, false);
     const persisted = persistRoster();
-    void persisted;
+    void persisted.then((saved) => {
+      if (saved && saved.saveOk === false) {
+        setEnvMsg(`已移入「${profileName || userId}」（本次生效），但写盘失败：${saved.saveError || '未知错误'}。重启后可能丢失。`, true);
+      }
+    });
     return persisted;
   }
   return Promise.resolve();
 }
 
 // 从花名册移出一个成员；若其恰为当前分身 ID，则回落到剩余首个成员（或清空）。
-function removeFromRoster(profileId) {
+function removeFromRoster(profileId, { remember = true } = {}) {
   roster = roster.filter((m) => m.profileId !== profileId);
+  if (remember && lastAssignmentScoped
+    && lastProfiles.some((p) => p && p.userId === profileId && !p.offboardPending)) {
+    clientRosterExcludedEnvIds.add(profileId);
+  }
   if (settingsUi.adsProfile.value.trim() === profileId) {
     const next = roster[0];
     settingsUi.adsProfile.value = next ? next.profileId : '';
@@ -3404,7 +3421,16 @@ function removeFromRoster(profileId) {
     updateProfileDisplay();
   }
   refreshRosterMarks();
-  void persistRoster(); // 移出即落盘：main 有序停止并摘除该环境、左栏随即撤下
+  if (remember) setEnvMsg('已移出运行环境；归属不变，可随时再次点选移入。', false);
+  const persisted = persistRoster(); // 移出即落盘：main 有序停止并摘除该环境、左栏随即撤下
+  if (remember) {
+    void persisted.then((saved) => {
+      if (saved && saved.saveOk === false) {
+        setEnvMsg(`已移出（本次生效），但写盘失败：${saved.saveError || '未知错误'}。重启后可能恢复。`, true);
+      }
+    });
+  }
+  return persisted;
 }
 
 // 把当前花名册直接落盘（加入/移出即时生效，不必等「启动」）。main 的 syncEnvHandles 会据此建行/摘行。
@@ -3412,9 +3438,19 @@ async function persistRoster() {
   if (!window.aidcpEdge || typeof window.aidcpEdge.saveSettings !== 'function') return;
   const environments = roster.map((m) => ({ profileId: m.profileId, name: m.name, platform: m.platform }));
   try {
-    const saved = await window.aidcpEdge.saveSettings({ environments });
-    if (saved && Array.isArray(saved.environments)) { roster = normalizeRosterList(saved.environments); refreshRosterMarks(); }
-  } catch { /* 落盘失败静默；下次「启动」的 saveCurrentSettings 会再落一次 */ }
+    const saved = await window.aidcpEdge.saveSettings({
+      environments,
+      clientRosterExcludedEnvIds: [...clientRosterExcludedEnvIds],
+    });
+    if (saved && Array.isArray(saved.environments)) roster = normalizeRosterList(saved.environments);
+    if (saved && Array.isArray(saved.clientRosterExcludedEnvIds)) {
+      clientRosterExcludedEnvIds = new Set(saved.clientRosterExcludedEnvIds.map((envKey) => String(envKey || '').trim()).filter(Boolean));
+    }
+    refreshRosterMarks();
+    return saved;
+  } catch {
+    return null; // 下次「启动」的 saveCurrentSettings 会再落一次；调用方不得据此声称已持久化。
+  }
 }
 
 // 程序化建号的 gated 路径由 main 完成权威入册与落盘；renderer 的 roster 仍是调用前快照。
@@ -3425,6 +3461,11 @@ async function syncRosterFromMainSettings() {
     const latest = await window.aidcpEdge.getSettings();
     if (!latest || !Array.isArray(latest.environments)) return false;
     roster = normalizeRosterList(latest.environments);
+    clientRosterExcludedEnvIds = new Set(
+      (Array.isArray(latest.clientRosterExcludedEnvIds) ? latest.clientRosterExcludedEnvIds : [])
+        .map((envKey) => String(envKey || '').trim())
+        .filter(Boolean),
+    );
     refreshRosterMarks();
     return true;
   } catch {
@@ -3453,7 +3494,6 @@ function pruneOrphanRoster(liveIds) {
     selectedPlatform = next ? normPlatform(next.platform) : 'xiaohongshu';
     updateProfileDisplay();
   }
-  void persistRoster(); // 落盘：main 的 syncEnvHandles 有序停止并摘除这些孤儿环境、左栏随即撤下
   return orphanIds.length;
 }
 
@@ -3479,6 +3519,33 @@ function reconcileRosterNames(profiles) {
     if (selLive) selectedProfileName = selLive;
   }
   return changed;
+}
+
+// 客户模式：完整非空列表已经由 main 按权威归属收窄，可安全把未排除的本机归属环境默认移入花名册。
+// 只改花名册/排除草稿，不自行落盘；refreshEnvs 将名字、孤儿、默认移入合并为一次 save。
+function reconcileAssignedRoster(profiles) {
+  if (!lastAssignmentScoped || !Array.isArray(profiles) || profiles.length === 0) {
+    return { added: [], exclusionsChanged: false };
+  }
+  const visibleIds = new Set(profiles.map((p) => String((p && p.userId) || '').trim()).filter(Boolean));
+  const beforeExclusions = clientRosterExcludedEnvIds.size;
+  clientRosterExcludedEnvIds = new Set([...clientRosterExcludedEnvIds].filter((envKey) => visibleIds.has(envKey)));
+  const exclusionsChanged = clientRosterExcludedEnvIds.size !== beforeExclusions;
+  const added = [];
+  for (const prof of profiles) {
+    const envKey = String((prof && prof.userId) || '').trim();
+    if (!envKey || prof.offboardPending || rosterHas(envKey) || clientRosterExcludedEnvIds.has(envKey)) continue;
+    roster.push({ profileId: envKey, name: prof.name || '', platform: normPlatform(prof.platform) });
+    added.push(prof.name || envKey);
+  }
+  if (added.length > 0 && !settingsUi.adsProfile.value.trim()) {
+    const first = roster[0];
+    settingsUi.adsProfile.value = first ? first.profileId : '';
+    selectedProfileName = first ? first.name : '';
+    selectedPlatform = first ? normPlatform(first.platform) : 'xiaohongshu';
+    updateProfileDisplay();
+  }
+  return { added, exclusionsChanged };
 }
 
 // roster 变更后就地重刷环境列表的成员标记（不重新拉取）。
@@ -3533,7 +3600,7 @@ function makeDeleteBtn(prof) {
         setEnvMsg(`已删除环境「${prof.name || prof.userId}」。`, false);
         // 删除云端 profile 成功后一并把它从本地运行花名册移出——否则本地残留成「谁都删不掉」的孤儿：
         // 移出按钮只在云端实时列表里的环境行上出现，profile 一删该行随即消失、再无移除入口（刷新剔孤儿是补救）。
-        if (rosterHas(prof.userId)) removeFromRoster(prof.userId);
+        if (rosterHas(prof.userId)) removeFromRoster(prof.userId, { remember: false });
         refreshEnvs({ suppressAutoJoin: true }); // 删除后不触发「唯一环境自动加入」（否则会静默拉进无关的剩余环境，评审 Finding 1）
       } else {
         setEnvMsg(`删除失败：${(r && r.error) || '未知错误'}`, true);
@@ -3635,7 +3702,7 @@ function populateEnvs(profiles, allowAutoJoin = false) {
   }
   // 唯一环境自动加入（首次列出的便利）：仅当调用方 allowAutoJoin 放行。删除/剔孤儿后触发的刷新绝不放行，
   // 否则会把一个无关的剩余环境静默拉进运行队列（评审 Finding 1 回归）。
-  if (allowAutoJoin && profiles.length === 1 && !profiles[0].offboardPending
+  if (!lastAssignmentScoped && allowAutoJoin && profiles.length === 1 && !profiles[0].offboardPending
     && !current && roster.length === 0 && profiles[0].userId && !coreRunning()) {
     void selectProfile(profiles[0].userId, firstItem, profiles[0].name, profiles[0].platform);
     return { autoSelected: profiles[0].name || profiles[0].userId };
@@ -3696,8 +3763,9 @@ async function refreshEnvs(opts) {
       return;
     }
     const profiles = r.profiles || [];
+    lastAssignmentScoped = Boolean(r.assignmentScoped);
     // 拉列表时以实时名回填花名册成员名（change edge-env-name-live-sync），治左栏展示名与添加面板漂移。
-    // **先回填、再剔孤儿**：这样 pruneOrphanRoster 内部若因剔孤儿而落盘，快照里已含回填后的名字，无需重复落盘。
+    // **先回填、再剔孤儿、最后归属默认入册**，三类草稿合并为一次落盘。
     // 同守 !r.truncated：截断/不全的拉取绝不回填（不因缺数据误改在用环境名）。
     const renamedCount = r.truncated ? 0 : reconcileRosterNames(profiles);
     // 刷新即清理孤儿：花名册里在本机指纹浏览器已不存在的环境（AdsPower profile 已删、本地残留）自动移出。
@@ -3708,20 +3776,28 @@ async function refreshEnvs(opts) {
     // physicalUserIds（本机全部物理分身 id）；未 gated 时该字段缺省、回落用 profiles 自身 id（与旧行为逐字一致）。
     const physicalIds = Array.isArray(r.physicalUserIds) ? r.physicalUserIds : profiles.map((p) => p.userId).filter(Boolean);
     const prunedCount = r.truncated ? 0 : pruneOrphanRoster(physicalIds);
-    // 回填了名字但本轮没剔孤儿（prune 未落盘）时补一次落盘，令 main 的 syncEnvHandles 刷新 handle.name → 左栏随即显真名；
-    // 剔了孤儿则 prune 已带回填名落盘一次，这里不重复（全程仅一次落盘、无竞态）。
-    if (renamedCount > 0 && prunedCount === 0) void persistRoster();
+    // 客户模式默认移入只接受成功、完整且非空的权威收窄结果；截断/空响应保持花名册和排除集合原样。
+    const assigned = r.truncated ? { added: [], exclusionsChanged: false } : reconcileAssignedRoster(profiles);
+    const saved = renamedCount > 0 || prunedCount > 0 || assigned.added.length > 0 || assigned.exclusionsChanged
+      ? await persistRoster()
+      : null;
     // 删除后刷新（suppressAutoJoin）或本轮剔了孤儿（prunedCount>0，花名册刚被动清空）时绝不自动加入——
     // 否则「唯一环境自动加入」会把一个无关的剩余环境静默拉进运行队列（评审 Finding 1）。
-    const allowAutoJoin = !suppressAutoJoin && prunedCount === 0;
+    const allowAutoJoin = !lastAssignmentScoped && !suppressAutoJoin && prunedCount === 0;
     const { autoSelected, currentSelected } = populateEnvs(profiles, allowAutoJoin);
     const extra = r.truncated ? '（环境较多，仅显示前若干条，可用分组精简）' : '';
     const cleaned = prunedCount > 0 ? `已清理 ${prunedCount} 个云端已删除的残留环境。` : '';
-    const autoHint = autoSelected
-      ? `已自动加入唯一环境「${autoSelected}」。`
+    const autoHint = assigned.added.length > 0
+      ? saved && saved.saveOk === false
+        ? `已默认移入 ${assigned.added.length} 个归属环境（本次展示、未自动启动），但写盘失败：${saved.saveError || '未知错误'}。`
+        : `已默认移入 ${assigned.added.length} 个归属环境（仅展示，未自动启动）。`
+      : autoSelected
+        ? `已自动加入唯一环境「${autoSelected}」。`
       : currentSelected
         ? `已选中「${currentSelected}」。`
-        : '点选环境即加入运行花名册（可多选并行运行）。';
+        : lastAssignmentScoped
+          ? '已手动移出的归属环境可再次点选移入。'
+          : '点选环境即加入运行花名册（可多选并行运行）。';
     setEnvMsg(`已加载 ${profiles.length} 个环境${extra}。${cleaned}${autoHint}`, false);
   } catch (e) {
     setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可在「高级设置」打开「手动填写」填分身 ID。`, true);

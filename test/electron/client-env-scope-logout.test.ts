@@ -122,6 +122,29 @@ test('保存花名册：按权威 allowedProfileIds 过滤，且 renderer 不得
     'renderer 不能覆盖主进程收到的 Cloud offboard 游标');
 });
 
+test('客户归属默认入册：可信范围信号、排除集合 owner 与 envKey 都由 main 收口', () => {
+  const listBlock = handlerBlock(main, 'ads:listProfiles');
+  const saveBlock = handlerBlock(main, 'settings:save');
+  assert.match(listBlock, /result\.assignmentScoped\s*=\s*true/,
+    'assignmentScoped 只在 gated handler 完成会话复核、归属刷新和列表收窄后置 true');
+  assert.ok(
+    listBlock.indexOf('result.profiles = (result.profiles || [])') < listBlock.indexOf('result.assignmentScoped = true'),
+    '可信范围信号必须晚于 profiles 权威收窄',
+  );
+  assert.match(main, /clientRosterExclusionOwner:\s*''/);
+  assert.match(main, /clientRosterExcludedEnvIds:\s*\[\]/);
+  assert.match(main, /normalizeClientRosterExcludedEnvIds\(settings\.clientRosterExcludedEnvIds\)/,
+    '设置加载/保存必须去空、去重归一排除 envKey');
+  assert.match(main, /if \(settings\.clientRosterExclusionOwner !== owner\)[\s\S]*clientRosterExcludedEnvIds:\s*\[\]/,
+    '切换客户时清空上一客户排除集合');
+  assert.match(saveBlock, /delete safePatch\.clientRosterExclusionOwner/,
+    'renderer 不得伪造排除集合 owner');
+  assert.match(saveBlock, /requested\.filter\(\(envKey\) => allowedProfileIds\.has\(envKey\)\)/,
+    '排除集合只接受当前客户权威归属 envKey');
+  assert.match(saveBlock, /clientRosterExclusionOwner\s*=\s*String\(\(clientSession && clientSession\.name\)/,
+    '排除集合 owner 由有效主进程会话派生');
+});
+
 test('创建成功后刷新 UI：仅已权威分配的环境可自动入册', () => {
   assert.match(
     renderer,
