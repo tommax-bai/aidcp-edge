@@ -919,7 +919,7 @@ test('慢启动行：常驻说明明确设置跟随环境与当前账号档位',
 
 test('精选详情宽屏两列分别原生滚动并在窄屏恢复单列文档流', () => {
   assert.match(styles, /\.content-workspace\.curated-detail-mode\s*\{[^}]*height:\s*calc\(100vh - 78px\);[^}]*min-height:\s*0;/s);
-  assert.match(styles, /\.content-workspace\.curated-detail-mode\s+\.cw-header\s*\{[^}]*position:\s*sticky;[^}]*top:\s*46px;[^}]*flex:\s*0 0 auto;[^}]*grid-template-columns:\s*26px minmax\(0, 1fr\) 26px;[^}]*padding:\s*6px 9px;/s);
+  assert.match(styles, /\.content-workspace\.curated-detail-mode\s+\.cw-header\s*\{[^}]*position:\s*sticky;[^}]*top:\s*46px;[^}]*flex:\s*0 0 auto;[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 26px;[^}]*padding:\s*6px 9px;/s);
   assert.match(styles, /\.content-workspace\.curated-detail-mode\s+\.cw-kicker,\s*\.content-workspace\.curated-detail-mode\s+\.cw-heading p\s*\{[^}]*display:\s*none;/s);
   assert.match(styles, /\.content-workspace\.curated-detail-mode\s+\.cw-icon-button\s*\{[^}]*width:\s*26px;[^}]*height:\s*26px;/s);
   assert.match(styles, /\.curated-detail-media,\s*\.curated-detail-copy\s*\{[^}]*padding-bottom:\s*12px;[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain;/s);

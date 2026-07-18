@@ -208,7 +208,9 @@
 
     function configureHeader(page) {
       const account = environment?.label || '当前账号';
-      fields.back?.classList.toggle('hidden', backStack.length === 0);
+      const isDetail = page === 'detail';
+      fields.back?.classList.toggle('hidden', backStack.length === 0 || isDetail);
+      fields.close?.setAttribute('aria-label', isDetail ? '返回灵感库' : '关闭内容工作区');
       if (page === 'library') {
         fields.kicker.textContent = '精选内容';
         fields.title.textContent = '灵感库';
@@ -281,6 +283,14 @@
       } else if (previous === 'detail') {
         renderDetail(currentDetail);
       }
+    }
+
+    function handleCloseControl() {
+      if (currentPage === 'detail') {
+        goBack();
+        return;
+      }
+      close();
     }
 
     function updateEntry() {
@@ -716,7 +726,7 @@
     }
 
     fields.entry?.addEventListener('click', openLibrary);
-    fields.close?.addEventListener('click', close);
+    fields.close?.addEventListener('click', handleCloseControl);
     fields.back?.addEventListener('click', goBack);
     fields.modeButtons.forEach((button) => button.addEventListener('click', () => {
       const state = envState();

@@ -188,8 +188,10 @@ test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async
   assert.equal(controller.currentPage(), 'detail');
   assert.match($(window, '#curated-detail').textContent ?? '', /详情 19/);
 
-  $(window, '#content-workspace-back').dispatchEvent(new window.Event('click'));
+  $(window, '#content-workspace-close').dispatchEvent(new window.Event('click'));
   assert.equal(controller.currentPage(), 'library');
+  assert.equal(hidden($(window, '#content-workspace')), false);
+  assert.equal($(window, '#content-workspace-close').getAttribute('aria-label'), '关闭内容工作区');
   assert.match($(window, '#curated-page').textContent ?? '', /第 2 \/ 3 页/);
   assert.equal($(window, '#curated-list').scrollTop, 73);
 
@@ -226,9 +228,11 @@ test('精选详情双栏保留彼此独立的滚动位置，窄屏交回单列�
   const media = $(window, '.curated-detail-media');
   const copy = $(window, '.curated-detail-copy');
   const close = $(window, '#content-workspace-close');
+  const back = $(window, '#content-workspace-back');
   assert.equal(workspace.classList.contains('curated-detail-mode'), true);
   assert.equal(hidden(close), false);
-  assert.equal(close.getAttribute('aria-label'), '关闭内容工作区');
+  assert.equal(hidden(back), true);
+  assert.equal(close.getAttribute('aria-label'), '返回灵感库');
 
   const mediaTop = installClampedScroll(media, 80);
   const copyTop = installClampedScroll(copy, 240);
@@ -247,8 +251,10 @@ test('精选详情双栏保留彼此独立的滚动位置，窄屏交回单列�
   assert.equal(copyWheel.defaultPrevented, false);
   assert.deepEqual([mediaTop(), copyTop()], [80, 160]);
 
-  $(window, '#content-workspace-back').dispatchEvent(new window.Event('click'));
+  close.dispatchEvent(new window.Event('click'));
   assert.equal(workspace.classList.contains('curated-detail-mode'), false);
+  assert.equal(controller.currentPage(), 'library');
+  assert.equal(hidden(workspace), false);
 });
 
 test('无参考图时禁用图文模式，文字参照只呈现诚实排队回执', async () => {
@@ -318,6 +324,7 @@ test('稿件审核占满主内容区，返回/关闭不影响主窗口壳', () =
   assert.ok($(window, '.shell').classList.contains('content-mode'));
   assert.match($(window, '#content-workspace-title').textContent ?? '', /稿件审核/);
   assert.equal($(window, '#publish-preview-panel').getAttribute('aria-hidden'), 'false');
+  assert.equal($(window, '#content-workspace-close').getAttribute('aria-label'), '关闭内容工作区');
   $(window, '#content-workspace-close').dispatchEvent(new window.Event('click'));
   assert.equal(hidden($(window, '#content-workspace')), true);
   assert.equal(hidden($(window, '#legacy-workspace')), false);

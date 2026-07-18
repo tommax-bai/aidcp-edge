@@ -3330,7 +3330,7 @@ body { margin: 0; }
   top: 46px;
   z-index: 6;
   flex: 0 0 auto;
-  grid-template-columns: 26px minmax(0, 1fr) 26px;
+  grid-template-columns: minmax(0, 1fr) 26px;
   gap: 7px;
   padding: 6px 9px;
   background: rgba(250, 252, 255, .98);
