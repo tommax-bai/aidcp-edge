@@ -640,14 +640,14 @@
             </div>
           </div>
           <label id="ads-proxy-batch-wrap" class="field ads-proxy-batch hidden">
-            <span class="field-label">代理资料 <em class="req">必填</em></span>
-            <textarea id="ads-proxy-batch" rows="5" spellcheck="false" autocomplete="off" placeholder="host:port&#10;host:port:username:password"></textarea>
-            <span class="subtle">每行一个代理；全部使用上方选定的同一代理类型。按粘贴顺序轮询分配，全部代理用完一轮后再从第一条开始。</span>
+            <span class="field-label">批量代理资料 <em class="req">必填</em></span>
+            <textarea id="ads-proxy-batch" rows="5" spellcheck="false" autocomplete="off" placeholder="一行一个代理，直接整批粘贴：&#10;1.2.3.4:8000&#10;proxy.example:8080:user:password&#10;proxy.example----8080----user----password"></textarea>
+            <span class="subtle">支持一次粘贴多行代理；每行分给一个账号，代理数量少于账号数时按粘贴顺序循环使用。全部使用上方选定的同一代理类型。</span>
           </label>
         </div>
         <span id="ads-create-msg" class="ads-env-msg"></span>
         <p id="ads-single-proxy-help" class="subtle">不填代理则默认为空；之后可在「加入现有环境」列表中该环境行的「代理」按钮补配或修改。</p>
-        <p id="ads-batch-proxy-help" class="subtle hidden">选择“无代理”会为本批全部账号创建无代理环境；选择代理类型后必须粘贴至少一条代理。</p>
+        <p id="ads-batch-proxy-help" class="subtle hidden">选择“无代理”会为本批全部账号创建无代理环境；选择 HTTP / HTTPS / SOCKS5 后，在「批量代理资料」里多行粘贴即可批量添加代理。</p>
       </div>
     </aside>
 
