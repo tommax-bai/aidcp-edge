@@ -3598,3 +3598,43 @@ body::-webkit-scrollbar:vertical,
 /* 断连 / 不适用：整行灰化，但**字段不会因断连变缺省**（主进程 if (evt.dailyUsage) 不清空），
    所以这里表达的是「可能已过期」，不是「已关闭」。 */
 .slow-start-row.is-stale { opacity: 0.55; }
+
+/* 当前环境解除受限：与慢启动同属「今日进展」脚注区，只占一行，不升级成独立卡片。 */
+.risk-recovery-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  min-height: 30px; padding-top: 8px; border-top: 1px solid var(--line);
+}
+.risk-recovery-button {
+  min-height: 26px; padding: 4px 10px; border: 1px solid rgba(196, 62, 62, .38); border-radius: 8px;
+  background: rgba(255, 247, 247, .9); color: var(--bad-fg); font-size: 11px; font-weight: 750; cursor: pointer;
+}
+.risk-recovery-button:hover:not(:disabled),
+.risk-recovery-button:focus-visible {
+  border-color: var(--bad-fg); outline: none; box-shadow: 0 0 0 3px rgba(196, 62, 62, .12);
+}
+.risk-recovery-button:disabled { cursor: wait; opacity: .58; }
+.risk-recovery-help { position: relative; display: inline-flex; flex-shrink: 0; }
+.risk-recovery-help-trigger {
+  width: 15px; height: 15px; padding: 0; border: 1px solid #a8b8cf; border-radius: 50%;
+  background: rgba(255, 255, 255, .82); color: var(--mute); font-size: 10px; font-weight: 750;
+  line-height: 13px; cursor: help;
+}
+.risk-recovery-help-trigger:hover,
+.risk-recovery-help-trigger:focus-visible {
+  border-color: var(--accent); color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.risk-recovery-help-panel {
+  position: absolute; z-index: 40; top: calc(100% + 8px); left: -150px;
+  display: none; width: min(330px, calc(100vw - 56px)); padding: 12px;
+  border: 1px solid #c7d5e8; border-radius: 12px; background: #fff;
+  color: var(--ink); box-shadow: 0 14px 34px rgba(25, 45, 76, .18);
+}
+.risk-recovery-help:hover .risk-recovery-help-panel,
+.risk-recovery-help:focus-within .risk-recovery-help-panel { display: block; }
+.risk-recovery-help-panel strong { display: block; margin-bottom: 7px; font-size: 12px; }
+.risk-recovery-help-panel p { margin: 5px 0 0; color: var(--mute); font-size: 11px; line-height: 1.55; }
+.risk-recovery-feedback { flex-basis: 100%; color: var(--bad-fg); font-size: 11px; }
+
+@media (max-width: 640px) {
+  .risk-recovery-help-panel { left: auto; right: -8px; width: min(300px, calc(100vw - 36px)); }
+}

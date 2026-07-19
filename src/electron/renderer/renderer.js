@@ -11,6 +11,9 @@ const fields = {
   slowStartToggle: document.querySelector('#slow-start-toggle'),
   slowStartBadge: document.querySelector('#slow-start-badge'),
   slowStartReason: document.querySelector('#slow-start-reason'),
+  riskRecoveryRow: document.querySelector('#risk-recovery-row'),
+  riskRecoveryButton: document.querySelector('#risk-recovery-button'),
+  riskRecoveryFeedback: document.querySelector('#risk-recovery-feedback'),
   auth: document.querySelector('#auth-status'),
   cloud: document.querySelector('#cloud-status'),
   session: document.querySelector('#session-state'),
@@ -321,7 +324,7 @@ const STATUS_LABELS = {
   },
   cloud: { disconnected: '未连接', connected: '已连接' },
   session: { idle: '待命', running: '进行中', resting: '等待下一轮', paused: '已暂停', closed: '已关闭' },
-  risk: { normal: '正常', warned: '谨慎放慢', restricted: '受限', frozen: '已冻结' },
+  risk: { normal: '正常', warned: '谨慎放慢', restricted: '账号受限', frozen: '已冻结' },
   edge: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '异常' },
 };
 
@@ -461,6 +464,15 @@ const slowStartFeedbackByEnv = new Map();
  */
 const slowStartHttpByEnv = new Map();
 
+// Cloud 环境风险真态：只给停止/断连环境补足本地 status.risk='normal' 的不可信缺口。
+// live connected 时始终让 ui.snapshot 胜出；HTTP 失败保留上次已证实真态，不把失败画成 normal。
+const environmentRiskHttpByEnv = new Map();
+const environmentRiskFetchInFlight = new Set();
+const environmentRiskFeedbackByEnv = new Map();
+const ENVIRONMENT_RISK_TTL_MS = 15_000;
+const ENVIRONMENT_RISK_RETRY_MS = 5_000;
+const ENVIRONMENT_RISK_STATUSES = new Set(['normal', 'warned', 'restricted', 'frozen']);
+
 function slowStartEnvKey(env) {
   return String((env && (env.profileId || env.envId)) || '').trim();
 }
@@ -514,6 +526,83 @@ function selectedSlowStartContext() {
     };
   }
   return env && envKey ? { selectedKey, env, envKey } : null;
+}
+
+function selectedEnvironmentRiskContext() {
+  const selectedKey = fleetView.selected;
+  const env = selectedKey && fleetView.envs.get(selectedKey);
+  const envKey = slowStartEnvKey(env);
+  // 旧单环境状态形状没有 env.platform；选中环境可安全回落当前设置的平台，非选中环境绝不猜。
+  const rawPlatform = String((env && env.platform) || '').trim();
+  const platform = rawPlatform ? normPlatform(rawPlatform) : selectedEnvPlatform();
+  if (!env || !envKey || selectedKey === '__local__' || platform !== 'facebook') return null;
+  return { selectedKey, env, envKey };
+}
+
+function effectiveEnvironmentStatus(env, status) {
+  const base = status || {};
+  const rawPlatform = String((env && env.platform) || '').trim();
+  const platform = rawPlatform
+    ? normPlatform(rawPlatform)
+    : (env && env.envId === fleetView.selected ? selectedEnvPlatform() : '');
+  if (!env || platform !== 'facebook') return base;
+  // 活 Cloud snapshot 与 controller 同源且持续刷新；HTTP 只补没有活快照的环境。
+  if (base.cloud === 'connected' && ENVIRONMENT_RISK_STATUSES.has(base.risk)) return base;
+  const envKey = slowStartEnvKey(env);
+  const cached = envKey && environmentRiskHttpByEnv.get(envKey);
+  if (!cached || cached.kind !== 'ok' || !ENVIRONMENT_RISK_STATUSES.has(cached.status)) return base;
+  return { ...base, risk: cached.status };
+}
+
+function selectedEffectiveEnvironmentStatus(status) {
+  const env = fleetView.selected && fleetView.envs.get(fleetView.selected);
+  return effectiveEnvironmentStatus(env, status);
+}
+
+async function ensureEnvironmentRiskHttpFetch(envKey) {
+  if (!envKey || environmentRiskFetchInFlight.has(envKey)) return;
+  if (!window.aidcpEdge || typeof window.aidcpEdge.getEnvironmentRisk !== 'function') return;
+  const existing = environmentRiskHttpByEnv.get(envKey);
+  const now = Date.now();
+  if (existing && Number(existing.retryAfter) > now) return;
+  if (existing && existing.kind === 'ok' && now - Number(existing.fetchedAt || 0) < ENVIRONMENT_RISK_TTL_MS) return;
+  environmentRiskFetchInFlight.add(envKey);
+  try {
+    const res = await window.aidcpEdge.getEnvironmentRisk({ envKey });
+    const payload = res && res.ok && res.data && res.data.data;
+    if (!payload || payload.envKey !== envKey || !ENVIRONMENT_RISK_STATUSES.has(payload.status)) {
+      const message = String((res && res.error) || '云端未返回可用的风险状态');
+      if (existing && existing.kind === 'ok') {
+        environmentRiskHttpByEnv.set(envKey, { ...existing, retryAfter: Date.now() + ENVIRONMENT_RISK_RETRY_MS });
+      } else {
+        environmentRiskHttpByEnv.set(envKey, { kind: 'error', message, retryAfter: Date.now() + ENVIRONMENT_RISK_RETRY_MS });
+      }
+    } else {
+      environmentRiskHttpByEnv.set(envKey, {
+        kind: 'ok',
+        status: payload.status,
+        statusSince: payload.statusSince,
+        updatedAt: payload.updatedAt,
+        fetchedAt: Date.now(),
+      });
+    }
+  } catch (err) {
+    if (existing && existing.kind === 'ok') {
+      environmentRiskHttpByEnv.set(envKey, { ...existing, retryAfter: Date.now() + ENVIRONMENT_RISK_RETRY_MS });
+    } else {
+      environmentRiskHttpByEnv.set(envKey, {
+        kind: 'error', message: String((err && err.message) || err || '读取失败'), retryAfter: Date.now() + ENVIRONMENT_RISK_RETRY_MS,
+      });
+    }
+  } finally {
+    environmentRiskFetchInFlight.delete(envKey);
+  }
+  const context = selectedEnvironmentRiskContext();
+  if (context && context.envKey === envKey) {
+    render(context.env.status || currentStatus || {});
+    // env-scoped HTTP 是停止环境的风险真态来源；主区域与环境栏必须在同一回执上同步收敛。
+    renderRail();
+  }
 }
 
 function hideSlowStartRow() {
@@ -866,7 +955,50 @@ function renderUsageSummary(status) {
   for (const item of USAGE_ITEMS) renderUsageItem(item, usage);
   renderQuotaWindows(usage);
   renderSlowStart(status);
+  renderEnvironmentRiskRecovery(status);
   fields.updatedAt.textContent = new Date(usage.asOf).toLocaleTimeString();
+}
+
+function hideEnvironmentRiskRecovery() {
+  fields.riskRecoveryRow?.classList.add('hidden');
+  if (fields.riskRecoveryButton) {
+    fields.riskRecoveryButton.disabled = false;
+    fields.riskRecoveryButton.textContent = '解除受限';
+  }
+  if (fields.riskRecoveryFeedback) {
+    fields.riskRecoveryFeedback.textContent = '';
+    fields.riskRecoveryFeedback.classList.add('hidden');
+  }
+}
+
+/** 当前选中 Facebook 环境的一行式恢复入口；状态必须来自 live snapshot 或 env-scoped Cloud 读。 */
+function renderEnvironmentRiskRecovery(status) {
+  if (!fields.riskRecoveryRow) return;
+  const context = selectedEnvironmentRiskContext();
+  if (!context) {
+    hideEnvironmentRiskRecovery();
+    return;
+  }
+  if (status && status.cloud !== 'connected') void ensureEnvironmentRiskHttpFetch(context.envKey);
+  const visible = status && status.risk === 'restricted';
+  if (!visible) {
+    const previous = environmentRiskFeedbackByEnv.get(context.envKey);
+    if (!previous || previous.kind !== 'pending') environmentRiskFeedbackByEnv.delete(context.envKey);
+    hideEnvironmentRiskRecovery();
+    return;
+  }
+  fields.riskRecoveryRow.classList.remove('hidden');
+  const feedback = environmentRiskFeedbackByEnv.get(context.envKey);
+  const pending = feedback && feedback.kind === 'pending';
+  if (fields.riskRecoveryButton) {
+    fields.riskRecoveryButton.disabled = Boolean(pending);
+    fields.riskRecoveryButton.textContent = pending ? '解除中…' : '解除受限';
+  }
+  if (fields.riskRecoveryFeedback) {
+    const message = feedback && feedback.kind === 'error' ? String(feedback.message || '解除失败') : '';
+    fields.riskRecoveryFeedback.textContent = message;
+    fields.riskRecoveryFeedback.classList.toggle('hidden', !message);
+  }
 }
 
 /**
@@ -2594,6 +2726,69 @@ fields.slowStartToggle?.addEventListener('change', (event) => {
   void submitSlowStart(Boolean(event.target.checked));
 });
 
+fields.riskRecoveryButton?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  void submitEnvironmentRiskRecovery();
+});
+
+async function submitEnvironmentRiskRecovery() {
+  const context = selectedEnvironmentRiskContext();
+  if (!context || !window.aidcpEdge || typeof window.aidcpEdge.recoverEnvironmentRisk !== 'function') return;
+  const status = effectiveEnvironmentStatus(context.env, context.env.status || currentStatus);
+  if (!status || status.risk !== 'restricted') return;
+  const confirmed = window.confirm(
+    '确认解除当前 Facebook 环境的受限状态？\n\n请先确认账号已经可以正常使用。若 Facebook 的安全检查、验证码或限流仍在，系统仍会停手并可能再次进入受限。',
+  );
+  if (!confirmed) return;
+
+  const { selectedKey, env, envKey } = context;
+  if (environmentRiskFeedbackByEnv.get(envKey)?.kind === 'pending') return;
+  environmentRiskFeedbackByEnv.set(envKey, { kind: 'pending' });
+  if (fleetView.selected === selectedKey) render(env.status || currentStatus);
+
+  const settleError = (message) => {
+    environmentRiskFeedbackByEnv.set(envKey, { kind: 'error', message: String(message || '解除失败') });
+  };
+
+  try {
+    const res = await window.aidcpEdge.recoverEnvironmentRisk({ envKey });
+    const receipt = res && res.ok && res.data && res.data.data;
+    if (!receipt || receipt.envKey !== envKey || receipt.status !== 'normal') {
+      // 409 可能携带并发变化后的同环境真态；只在 envKey 严格相等时采用，绝不让失败回包串环境。
+      const refusalTruth = res && res.data && res.data.data;
+      if (refusalTruth && refusalTruth.envKey === envKey && ENVIRONMENT_RISK_STATUSES.has(refusalTruth.status)) {
+        environmentRiskHttpByEnv.set(envKey, {
+          kind: 'ok', status: refusalTruth.status, fetchedAt: Date.now(), updatedAt: Date.now(), statusSince: Date.now(),
+        });
+        env.status = { ...(env.status || {}), risk: refusalTruth.status };
+      }
+      const rawError = res && res.data && res.data.error;
+      settleError((res && res.data && res.data.message)
+        || (rawError && typeof rawError === 'object' && (rawError.message || rawError.code))
+        || (typeof rawError === 'string' && rawError)
+        || (res && res.error)
+        || '解除失败，请确认网络和账号状态后重试');
+      return;
+    }
+
+    // Cloud 写后回执是当前操作的权威终态：立即收敛当前环境，不乐观先改、也不傻等下一次 snapshot。
+    environmentRiskHttpByEnv.set(envKey, {
+      kind: 'ok',
+      status: receipt.status,
+      statusSince: receipt.statusSince,
+      updatedAt: receipt.updatedAt,
+      fetchedAt: Date.now(),
+    });
+    env.status = { ...(env.status || {}), risk: receipt.status };
+    environmentRiskFeedbackByEnv.delete(envKey);
+  } catch (err) {
+    settleError(`解除失败：${(err && err.message) || err}`);
+  } finally {
+    if (fleetView.selected === selectedKey) render(env.status || currentStatus);
+    renderRail();
+  }
+}
+
 /**
  * 提交环境级慢启动开关：只传 envKey + enabled，客户端不提交 accountId。
  * 失败**必须把开关拨回去 + 如实说明**——留在「已勾」而库里没写，就是用界面撒谎；
@@ -2857,6 +3052,7 @@ function renderKernelPrepGlobal() {
 }
 
 function render(status) {
+  status = selectedEffectiveEnvironmentStatus(status);
   currentStatus = status;
   syncDelegatedActionAvailability();
   const now = Date.now();
@@ -2969,6 +3165,9 @@ function applyFleetSnapshot(snap) {
     const goneEnvKey = slowStartEnvKey(fleetView.envs.get(key));
     slowStartFeedbackByEnv.delete(goneEnvKey);
     slowStartHttpByEnv.delete(goneEnvKey); // change slow-start-offline-toggle：连同慢启动 HTTP/回执缓存一并清
+    environmentRiskHttpByEnv.delete(goneEnvKey);
+    environmentRiskFeedbackByEnv.delete(goneEnvKey);
+    environmentRiskFetchInFlight.delete(goneEnvKey);
     fleetView.envs.delete(key); // 快照为准（含 '__local__' 占位）
     // 连同该环境的所有渲染层缓冲一并清（否则同一分身移出再加回会重放上一会话的陈旧活动 + 吞掉新发布折流，
     // 还有全会话内存泄漏）。
@@ -3031,7 +3230,8 @@ function railEnvList() {
   return fleetView.order
     .filter((id) => id !== '__local__')
     .map((id) => fleetView.envs.get(id))
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((env) => ({ ...env, status: effectiveEnvironmentStatus(env, env.status) }));
 }
 
 function filteredRailEnvList() {

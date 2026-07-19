@@ -4283,6 +4283,29 @@ ipcMain.handle('slow-start:get', (_event, raw) => handleInteractionIpc(async () 
   });
 }));
 
+// Facebook 环境风险真态读 / 解除受限：renderer 只交 envKey；accountId、平台、目标状态、审计理由均由 Cloud 解析。
+// 与慢启动读写同样不依赖环境内核在线，停止的环境也必须能看到并解除持久 restricted。
+ipcMain.handle('environment-risk:get', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/risk-state`,
+    method: 'GET',
+  });
+}));
+
+ipcMain.handle('environment-risk:recover', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/risk-state/recover`,
+    method: 'POST',
+    body: {},
+  });
+}));
+
 for (const action of ['approve', 'regenerate']) {
   ipcMain.handle(`interaction:${action}`, (_event, raw) => handleInteractionIpc(async () => {
     const args = interactionArgs(raw, new Set(['envKey', 'jobId', 'expectedVersion']));

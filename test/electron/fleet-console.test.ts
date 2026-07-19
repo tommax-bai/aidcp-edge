@@ -12,6 +12,8 @@ const require = createRequire(import.meta.url);
 const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   fleetLevel: (s: unknown, now: number) => { level: string; needsAction: boolean; label: string };
   fleetRailModel: (l: unknown[], now: number) => { rows: Array<{ envId: string; level: string; needsAction: boolean }>; pendingCount: number };
+  synthesizeHealth: (s: unknown) => { label: string; detail: string };
+  detailRows: (s: unknown) => Array<{ key: string; value: string }>;
   FLEET_STALE_MS: number;
 };
 
@@ -168,6 +170,14 @@ test('fleetLevel：放弃重启和冻结为 error；账号重复运行为 attent
   assert.equal(warn.level, 'attention');
   assert.equal(warn.needsAction, true);
   assert.equal(warn.label, '账号重复运行');
+});
+
+test('restricted 在健康、风险明细和环境栏统一明确显示「账号受限」', () => {
+  const now = Date.now();
+  const status = { risk: 'restricted', edge: 'stopped', session: 'idle', cloud: 'disconnected' };
+  assert.equal(uiLogic.synthesizeHealth(status).label, '账号受限');
+  assert.equal(uiLogic.detailRows(status).find((row) => row.key === 'risk')?.value, '账号受限');
+  assert.equal(uiLogic.fleetLevel(status, now).label, '账号受限');
 });
 
 test('fleetLevel：暂停与关闭共享 offline 级别但标签明确区分，供渲染层拆组', () => {

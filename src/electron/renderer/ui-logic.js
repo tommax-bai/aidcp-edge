@@ -34,7 +34,7 @@
     if (s.edge === 'warning') return { code: 'error', label: '运行异常', detail: edgeFailure || '引擎未能继续运行，请查看详情后重新启动' };
     if (s.risk === 'frozen') return { code: 'error', label: '账号已暂停', detail: '账号当前无法继续操作，请查看详情' };
     if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需要协助', detail: AUTH_ATTENTION[s.auth] };
-    if (s.risk === 'restricted') return { code: 'attention', label: '节奏已调整', detail: '账号互动暂时受限，已自动放慢节奏' };
+    if (s.risk === 'restricted') return { code: 'attention', label: '账号受限', detail: '自动运营已暂停；确认 Facebook 可正常使用后可解除受限' };
     if (s.edge === 'running' && s.session === 'running' && s.cloud !== 'connected') {
       // 「**重**新连接」断言的是「曾经连上过、现在断了」。本轮核心从没连上过 = 还在冷启动：核心一打印日志
       // edge 就翻成 running，但它 main() 里连云端排在「起浏览器 → CDP attach → 登录闸」之后，中间整个窗口
@@ -65,7 +65,7 @@
     auth: { label: '小红书登录', values: { checking: '检测中', 'login required': '需要登录', 'logged in': '已登录', 'chrome missing': '缺少 Chrome', 'config required': '待完成设置' } },
     cloud: { label: '云端连接', values: { disconnected: '未连接', connected: '已连接' } },
     session: { label: '自动运营', values: { idle: '待命', running: '进行中', resting: '等待下一轮', paused: '已暂停', closed: '已关闭' } },
-    risk: { label: '账号保护', values: { normal: '正常', warned: '谨慎放慢', restricted: '已调整节奏', frozen: '已暂停' } },
+    risk: { label: '账号保护', values: { normal: '正常', warned: '谨慎放慢', restricted: '账号受限', frozen: '已暂停' } },
     edge: { label: '本机引擎', values: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '需要处理' } },
   };
 
@@ -660,7 +660,7 @@
     if (s.auth === 'config required') return { level: 'attention', needsAction: true, label: '待配置' };
     if (s.auth === 'chrome missing') return { level: 'attention', needsAction: true, label: '缺少 Chrome' };
     if (s.risk === 'frozen') return { level: 'error', needsAction: true, label: '账号已暂停' };
-    if (s.risk === 'restricted') return { level: 'attention', needsAction: true, label: '节奏已调整' };
+    if (s.risk === 'restricted') return { level: 'attention', needsAction: true, label: '账号受限' };
     if (s.sameAccountWarning) return { level: 'attention', needsAction: true, label: '账号重复运行' };
     if (s.edge === 'starting') return { level: 'launching', needsAction: false, label: '启动中' };
     if (s.edge === 'running') {

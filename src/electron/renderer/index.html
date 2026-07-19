@@ -368,6 +368,20 @@
           <span id="slow-start-reason" class="parking-hint hidden"></span>
           <span class="parking-hint slow-start-copy">设置跟随当前环境。开启后头 7 天按曲线逐日放开量，7天后按当前账号档位运行。</span>
         </div>
+        <!-- 当前 Facebook 环境受限恢复：保持一行、一个主动作，不扩成大卡片。真态来自 Cloud env-scoped 读。 -->
+        <div id="risk-recovery-row" class="risk-recovery-row hidden">
+          <button id="risk-recovery-button" class="risk-recovery-button" type="button">解除受限</button>
+          <div class="risk-recovery-help">
+            <button id="risk-recovery-help-trigger" class="risk-recovery-help-trigger" type="button"
+              aria-label="查看账号受限说明" aria-describedby="risk-recovery-help-panel">?</button>
+            <div id="risk-recovery-help-panel" class="risk-recovery-help-panel" role="tooltip">
+              <strong>为什么会进入账号受限？</strong>
+              <p>系统检测到 Facebook 安全检查、明确的验证码证据或平台限流信号后，会暂停当前环境的自动运营。</p>
+              <p>解除前请先确认账号已可正常使用。此操作只针对当前环境；如果平台阻断仍在，系统仍会停手并可能再次标记受限。</p>
+            </div>
+          </div>
+          <span id="risk-recovery-feedback" class="risk-recovery-feedback hidden" aria-live="polite"></span>
+        </div>
       </section>
 
       <!-- 叙述式活动流：一句人话一条、最新在上 -->

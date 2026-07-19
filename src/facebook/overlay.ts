@@ -43,12 +43,14 @@ export function classifyFacebookOverlayFromSignals(signals: FacebookBlockingSign
   const textLower = text.toLowerCase();
   const frames = (signals.frameUrls || []).join('\n').toLowerCase();
 
+  // `checkpoint` 只是 Facebook 的通用安全检查路由，不等于页面上真的出现了验证码。
+  // 旧逻辑仅凭 URL 就即时上报 captcha → confirmed → restricted；这会把身份确认、设备确认等
+  // 没有验证码控件的 checkpoint 冒充成「验证码弹出」。captcha 必须有正向证据：厂商 iframe
+  // 或明确的人机验证语义。真实 captcha 仍然排在所有 route fallback 之前、即时 fail-closed。
   if (
-    href.includes('/checkpoint') ||
-    href.includes('/two_step_verification') ||
     frames.includes('fbsbx.com/captcha') ||
     frames.includes('google.com/recaptcha') ||
-    /进行人机身份验证|人机身份验证|security check|captcha|recaptcha/i.test(text)
+    /进行人机身份验证|人机身份验证|captcha|recaptcha|prove you(?:'|’)re human|confirm you(?:'|’)re human|verify you(?:'|’)re human/i.test(text)
   ) {
     return 'captcha';
   }
@@ -56,9 +58,19 @@ export function classifyFacebookOverlayFromSignals(signals: FacebookBlockingSign
   if (
     href.includes('/login') ||
     href.includes('/recover') ||
+    href.includes('/two_step_verification') ||
     /登录 facebook|登录或注册|log in to facebook|forgot password|account recovery|账号恢复|找回账号/i.test(text)
   ) {
     return 'login';
+  }
+
+  // 通用 checkpoint / security check 仍是阻断态：本地立即停手，云端上报走 unknown 的一轮
+  // 持续性确认，既不放行自动化，也不凭 URL 臆称已经看见验证码。
+  if (
+    href.includes('/checkpoint') ||
+    /security check|security checkpoint|安全检查|安全验证/i.test(text)
+  ) {
+    return 'unknown';
   }
 
   // FB 软阻断 / 限流信号（change account-nurture-discipline-spine §5.2）：FB 主力限流是 inline

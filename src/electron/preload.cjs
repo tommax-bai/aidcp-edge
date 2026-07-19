@@ -103,4 +103,6 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   setSlowStart: (args) => ipcRenderer.invoke('slow-start:set', args),
   // 不依赖边缘的慢启动读（change slow-start-offline-toggle）：没有活快照时用它把这一行渲染出来。
   getSlowStart: (args) => ipcRenderer.invoke('slow-start:get', args),
+  getEnvironmentRisk: (args) => ipcRenderer.invoke('environment-risk:get', args),
+  recoverEnvironmentRisk: (args) => ipcRenderer.invoke('environment-risk:recover', args),
 });

@@ -79,6 +79,10 @@ interface Stub {
   setSlowStart: (opts: { envKey: string; enabled: boolean }) => Promise<unknown>;
   // 不依赖边缘的慢启动读（change slow-start-offline-toggle）：可选——不提供即模拟老客户端退化路径。
   getSlowStart?: (opts: { envKey: string }) => Promise<unknown>;
+  getEnvironmentRisk?: (opts: { envKey: string }) => Promise<unknown>;
+  recoverEnvironmentRisk?: (opts: { envKey: string }) => Promise<unknown>;
+  fleetGet?: () => Promise<unknown>;
+  fleetSelect?: (envId: string) => Promise<unknown>;
 }
 
 function makeStub(overrides: Partial<Stub> = {}): Stub {
@@ -935,6 +939,28 @@ test('慢启动行：常驻说明明确设置跟随环境与当前账号档位',
   assert.equal(copy, '设置跟随当前环境。开启后头 7 天按曲线逐日放开量，7天后按当前账号档位运行。');
 });
 
+test('解除受限行：位于今日进展底部且只有一个恢复主动作与一个问号说明', () => {
+  const dom = new JSDOM(html);
+  const summary = dom.window.document.querySelector('#daily-summary');
+  const slowStart = summary?.querySelector('#slow-start-row');
+  const row = summary?.querySelector('#risk-recovery-row');
+  assert.ok(row, '#risk-recovery-row 应为 #daily-summary 内的静态轻量行');
+  assert.ok(slowStart && row && slowStart.compareDocumentPosition(row) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+    '解除受限行应排在慢启动之后，不占标题区');
+  assert.equal(row?.querySelector('.risk-recovery-state'), null, '状态已在健康/明细/环境栏展示，轻量行不得重复占位');
+  assert.equal(row?.querySelector('#risk-recovery-button')?.textContent?.trim(), '解除受限');
+  assert.equal(row?.querySelectorAll('.risk-recovery-button').length, 1, '只有一个恢复主动作');
+  const help = row?.querySelector('#risk-recovery-help-trigger');
+  assert.equal(help?.tagName, 'BUTTON');
+  assert.match(help?.getAttribute('aria-label') || '', /账号受限说明/);
+  const helpText = row?.querySelector('#risk-recovery-help-panel')?.textContent || '';
+  assert.match(helpText, /Facebook 安全检查/);
+  assert.match(helpText, /只针对当前环境/);
+  assert.match(helpText, /再次标记受限/);
+  assert.match(styles, /.risk-recovery-row\s*\{[^}]*display:\s*flex;[^}]*border-top:/s);
+  assert.match(styles, /@media \(max-width:\s*640px\)[\s\S]*?\.risk-recovery-help-panel\s*\{[^}]*right:\s*-8px;/s);
+});
+
 test('精选详情宽屏两列分别原生滚动并在窄屏恢复单列文档流', () => {
   assert.match(styles, /\.content-workspace\.curated-detail-mode\s*\{[^}]*height:\s*calc\(100vh - 78px\);[^}]*min-height:\s*0;/s);
   assert.match(styles, /\.content-workspace\.curated-detail-mode\s+\.cw-header\s*\{[^}]*position:\s*sticky;[^}]*top:\s*46px;[^}]*flex:\s*0 0 auto;[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 26px;[^}]*padding:\s*6px 9px;/s);
@@ -1023,6 +1049,125 @@ function stoppedFbEnv(getSlowStart: Stub['getSlowStart']): Stub {
     getSlowStart,
   });
 }
+
+function stoppedRestrictedFbEnv(overrides: Partial<Stub> = {}): Stub {
+  const status = makeStatus({ envId: 'fb_env', edge: 'stopped', session: 'idle', cloud: 'disconnected', dailyUsage: null });
+  return makeStub({
+    getSettings: async () => ({
+      provider: 'adspower', adsProfileId: 'fb_env', adsProfileName: 'FB 环境', adsApiKey: '', adsApiBase: '',
+      browserParkingMode: 'edge-strip', adsDownloadUrl: 'https://x', platform: 'facebook',
+      environments: [{ profileId: 'fb_env', name: 'FB 环境', platform: 'facebook' }],
+    }),
+    getStatus: async () => status,
+    fleetGet: async () => ({
+      selectedEnvId: 'fb_env', railCollapsed: false,
+      environments: [{ envId: 'fb_env', profileId: 'fb_env', name: 'FB 环境', platform: 'facebook', status }],
+    }),
+    fleetSelect: async () => ({}),
+    getEnvironmentRisk: async ({ envKey }) => ({
+      ok: true,
+      data: { data: { envKey, status: 'restricted', statusSince: 1000, updatedAt: 2000 } },
+    }),
+    ...overrides,
+  });
+}
+
+test('解除受限：停止的 Facebook 环境经 env-scoped Cloud 读仍显示账号受限', async () => {
+  const riskReads: unknown[] = [];
+  const w = await boot(stoppedRestrictedFbEnv({
+    getEnvironmentRisk: async (args) => {
+      riskReads.push(args);
+      return { ok: true, data: { data: { envKey: args.envKey, status: 'restricted', statusSince: 1000, updatedAt: 2000 } } };
+    },
+  }));
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(riskReads.length, 1);
+  assert.equal((riskReads[0] as { envKey?: string }).envKey, 'fb_env');
+  assert.ok(!hidden($(w, '#risk-recovery-row')));
+  assert.equal($(w, '#health-label').textContent, '账号受限');
+  assert.match($(w, '#risk-status').textContent || '', /账号受限/);
+  assert.match($(w, '.rail-row.selected').textContent || '', /账号受限/);
+});
+
+test('解除受限：取消不请求；确认后同一按钮 pending，Cloud normal 回执才隐藏', async () => {
+  const recovery = deferred<unknown>();
+  const calls: unknown[] = [];
+  const w = await boot(stoppedRestrictedFbEnv({
+    recoverEnvironmentRisk: async (args) => { calls.push(args); return recovery.promise; },
+  }));
+  for (let i = 0; i < 5; i++) await tick();
+  const button = $(w, '#risk-recovery-button') as unknown as HTMLButtonElement;
+
+  (w as unknown as { confirm: () => boolean }).confirm = () => false;
+  button.click();
+  await tick();
+  assert.deepEqual(calls, [], '取消确认不得请求 Cloud');
+  assert.ok(!hidden($(w, '#risk-recovery-row')));
+
+  (w as unknown as { confirm: () => boolean }).confirm = () => true;
+  button.click();
+  await tick();
+  assert.equal(calls.length, 1);
+  assert.equal((calls[0] as { envKey?: string }).envKey, 'fb_env');
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, '解除中…');
+  assert.ok(!hidden($(w, '#risk-recovery-row')), 'Cloud 回执前不得乐观清掉 restricted');
+
+  recovery.resolve({
+    ok: true,
+    data: { data: { envKey: 'fb_env', status: 'normal', statusSince: 3000, updatedAt: 3000, changed: true, resumedEdges: 1 } },
+  });
+  for (let i = 0; i < 4; i++) await tick();
+  assert.ok(hidden($(w, '#risk-recovery-row')), 'Cloud 写后 normal 到达后才隐藏');
+});
+
+test('解除受限：Cloud 失败保留受限行并展示原位错误', async () => {
+  const w = await boot(stoppedRestrictedFbEnv({
+    recoverEnvironmentRisk: async () => ({ ok: false, data: { error: 'environment_risk_unavailable', message: '暂时够不到云端' } }),
+  }));
+  for (let i = 0; i < 5; i++) await tick();
+  (w as unknown as { confirm: () => boolean }).confirm = () => true;
+  ($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).click();
+  for (let i = 0; i < 3; i++) await tick();
+  assert.ok(!hidden($(w, '#risk-recovery-row')));
+  assert.equal(($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).disabled, false);
+  assert.match($(w, '#risk-recovery-feedback').textContent || '', /够不到云端/);
+});
+
+test('解除受限：风险读缓存和按钮随环境切换隔离，不从 A 串到 B', async () => {
+  const reads: string[] = [];
+  const statusFor = (envId: string) => makeStatus({ envId, envName: envId, edge: 'stopped', cloud: 'disconnected' });
+  const w = await boot(makeStub({
+    getStatus: async () => statusFor('a'),
+    getSettings: async () => ({
+      provider: 'adspower', adsProfileId: 'a', adsApiKey: '', adsApiBase: '', browserParkingMode: 'edge-strip',
+      environments: [{ profileId: 'a', name: '环境 A', platform: 'facebook' }, { profileId: 'b', name: '环境 B', platform: 'facebook' }],
+    }),
+    fleetGet: async () => ({
+      selectedEnvId: 'a', railCollapsed: false,
+      environments: [
+        { envId: 'a', profileId: 'a', name: '环境 A', platform: 'facebook', status: statusFor('a') },
+        { envId: 'b', profileId: 'b', name: '环境 B', platform: 'facebook', status: statusFor('b') },
+      ],
+    }),
+    fleetSelect: async () => ({}),
+    getEnvironmentRisk: async ({ envKey }) => {
+      reads.push(envKey);
+      return { ok: true, data: { data: {
+        envKey, status: envKey === 'a' ? 'restricted' : 'normal', statusSince: 1000, updatedAt: 2000,
+      } } };
+    },
+  }));
+  for (let i = 0; i < 6; i++) await tick();
+  assert.ok(!hidden($(w, '#risk-recovery-row')), 'A restricted → 显示');
+  $(w, '.rail-row[data-env-id="b"]').click();
+  for (let i = 0; i < 5; i++) await tick();
+  assert.ok(hidden($(w, '#risk-recovery-row')), 'B normal → 隐藏');
+  $(w, '.rail-row[data-env-id="a"]').click();
+  await tick();
+  assert.ok(!hidden($(w, '#risk-recovery-row')), '切回 A 仍使用 A 自己的 restricted 真态');
+  assert.deepEqual([...new Set(reads)].sort(), ['a', 'b']);
+});
 
 test('慢启动行：停止的环境经 env-scoped 读渲染真态、开关可点（change slow-start-offline-toggle）', async () => {
   const w = await boot(stoppedFbEnv(async () => ({

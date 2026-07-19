@@ -20,10 +20,17 @@ function fakeCdp(ref: { value: unknown; throwIt?: boolean }): BrowseCdp {
   };
 }
 
-test('classifyFacebookOverlayFromSignals: checkpoint and human verification are captcha-blocking', () => {
-  assert.equal(classifyFacebookOverlayFromSignals({ href: 'https://www.facebook.com/checkpoint/123' }), 'captcha');
+test('classifyFacebookOverlayFromSignals: generic checkpoint is unknown without positive captcha evidence', () => {
+  assert.equal(classifyFacebookOverlayFromSignals({ href: 'https://www.facebook.com/checkpoint/123' }), 'unknown');
   assert.equal(classifyFacebookOverlayFromSignals({
-    href: 'https://www.facebook.com/two_step_verification/authentication/',
+    href: 'https://www.facebook.com/checkpoint/123',
+    text: 'Security check',
+  }), 'unknown');
+});
+
+test('classifyFacebookOverlayFromSignals: positive human verification evidence is captcha-blocking', () => {
+  assert.equal(classifyFacebookOverlayFromSignals({
+    href: 'https://www.facebook.com/checkpoint/123',
     text: '进行人机身份验证',
     frameUrls: ['https://www.google.com/recaptcha/enterprise/anchor'],
   }), 'captcha');
@@ -36,7 +43,15 @@ test('classifyFacebookOverlayFromSignals: checkpoint and human verification are 
 test('classifyFacebookOverlayFromSignals: login and recovery pages are login-blocking', () => {
   assert.equal(classifyFacebookOverlayFromSignals({ href: 'https://www.facebook.com/login/?next=x' }), 'login');
   assert.equal(classifyFacebookOverlayFromSignals({ href: 'https://www.facebook.com/recover/initiate/' }), 'login');
+  assert.equal(classifyFacebookOverlayFromSignals({ href: 'https://www.facebook.com/two_step_verification/authentication/' }), 'login');
   assert.equal(classifyFacebookOverlayFromSignals({ href: 'https://www.facebook.com/', text: '登录 Facebook' }), 'login');
+});
+
+test('classifyFacebookOverlayFromSignals: AIDCP persona reminder copy is not captcha evidence', () => {
+  assert.equal(classifyFacebookOverlayFromSignals({
+    href: 'https://www.facebook.com/',
+    text: '请先完善账号人设，完成后系统会继续自动运营。',
+  }), 'none');
 });
 
 test('classifyFacebookOverlayFromSignals: temporarily blocked text is unknown-blocking', () => {
