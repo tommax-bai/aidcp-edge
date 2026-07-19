@@ -35,6 +35,12 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; }
+/* Keep native scrolling while removing only the persistent vertical chrome.
+   The axis qualifier is intentional: developer logs may still need a horizontal scrollbar. */
+html::-webkit-scrollbar:vertical,
+body::-webkit-scrollbar:vertical,
+.stream-wrap::-webkit-scrollbar:vertical,
+.dev pre::-webkit-scrollbar:vertical { width: 0; }
 .hidden { display: none !important; }
 
 /* ═══ 自定义标题带（46px；隐藏系统标题栏后由此承载拖拽 + 身份 + 健康）═══ */

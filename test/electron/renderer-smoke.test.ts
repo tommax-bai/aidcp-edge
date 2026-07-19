@@ -11,6 +11,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
 const styles = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
+
+test('客户端主体、活动流和开发者日志仅隐藏纵向滚动条', () => {
+  const rule = styles.match(
+    /html::-webkit-scrollbar:vertical,\s*body::-webkit-scrollbar:vertical,\s*\.stream-wrap::-webkit-scrollbar:vertical,\s*\.dev pre::-webkit-scrollbar:vertical\s*\{([^}]*)\}/s,
+  );
+  assert.ok(rule, '三个目标区域及文档滚动根必须共用纵向限定规则');
+  assert.match(rule[1], /width:\s*0;/, '纵向轨道宽度必须归零');
+  assert.doesNotMatch(rule[1], /height|display|scrollbar-width/, '不得连带隐藏或改变横向滚动条');
+  assert.match(styles, /\.stream-wrap\s*\{[^}]*overflow-y:\s*auto;/s, '活动流必须继续原生纵向滚动');
+  assert.match(styles, /\.dev pre\s*\{[^}]*overflow-y:\s*auto;/s, '开发者日志必须继续原生纵向滚动');
+});
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
 const publishReviewLogicSrc = readFileSync(join(electronDir, 'renderer/publish-review-logic.js'), 'utf8');
 const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
