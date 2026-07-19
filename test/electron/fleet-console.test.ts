@@ -62,7 +62,7 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
   let pushStatus: (s: unknown) => void = () => undefined;
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], personaFill: [], select: [], close: [], notify: [], start: [], resume: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], personaPreview: [], personaFill: [], select: [], close: [], notify: [], start: [], resume: [] };
   const settings = {
     provider: 'adspower',
     adsProfileId: 'p1',
@@ -97,8 +97,12 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
     fleetSetRailCollapsed: async () => ({ ok: true }),
     fleetStartAll: async (opts: unknown) => { calls.startAll.push(opts); return { ok: true, queued: 2 }; },
     fleetStopAll: async () => ({ ok: true }),
-    facebookPersonaAutoFill: async (writingLanguage: string) => {
-      calls.personaFill.push(writingLanguage);
+    facebookPersonaTemplatePreview: async (selection: unknown) => {
+      calls.personaPreview.push(selection);
+      return { ok: true, soulYaml: 'selected-soul-yaml', identitySummary: '批量人设预览' };
+    },
+    facebookPersonaFillSelected: async (soulYaml: string) => {
+      calls.personaFill.push(soulYaml);
       return { ok: true, accepted: true };
     },
     relogin: async (envId: string) => { calls.relogin.push(envId); return makeStatus({ envId }); },
@@ -693,72 +697,85 @@ test('平台筛选：默认全部；切换后列表、计数、选中环境与�
   assert.equal((w.document.querySelector('.rail-row') as HTMLElement).dataset.envId, 'ads-xhs');
 });
 
-test('Facebook 筛选显示手动补齐入口，请求中防双击并原地反馈', async () => {
-  let resolveRequest: ((value: { ok: boolean; accepted: boolean }) => void) | undefined;
-  const requests: string[] = [];
-  const pending = new Promise<{ ok: boolean; accepted: boolean }>((resolve) => { resolveRequest = resolve; });
+test('Facebook 筛选入口打开批量人设页面；人工选择预览后才提交同一模板', async () => {
+  const previews: unknown[] = [];
+  const fills: string[] = [];
+  let singleGenerateCalls = 0;
   const { w } = await boot({
-    facebookPersonaAutoFill: async (writingLanguage: string) => {
-      requests.push(writingLanguage);
-      return pending;
-    },
     fleetGet: async () => ({
-      provider: 'adspower',
-      selectedEnvId: 'ads-fb',
-      railCollapsed: false,
+      provider: 'adspower', selectedEnvId: 'ads-fb', railCollapsed: false,
       environments: [
-        { envId: 'ads-fb', profileId: 'fb', name: 'Facebook', platform: 'facebook', status: makeStatus({ envId: 'ads-fb' }) },
+        { envId: 'ads-fb', profileId: 'fb', name: 'Facebook', platform: 'facebook', status: makeStatus({ envId: 'ads-fb', personaBound: true }) },
       ],
     }),
+    personaGenerate: async () => { singleGenerateCalls += 1; return { ok: false }; },
+    facebookPersonaTemplatePreview: async (selection: unknown) => {
+      previews.push(selection);
+      return { ok: true, soulYaml: 'same-selected-soul', identitySummary: '同一份批量人设' };
+    },
+    facebookPersonaFillSelected: async (soulYaml: string) => {
+      fills.push(soulYaml);
+      return { ok: true, accepted: true };
+    },
   });
   const wrap = w.document.querySelector('#rail-facebook-persona-fill') as HTMLElement;
-  assert.equal(wrap.classList.contains('hidden'), true, '默认全部分类不展示手动能力');
+  assert.equal(wrap.classList.contains('hidden'), true);
   (w.document.querySelector('[data-rail-platform="facebook"]') as HTMLButtonElement).click();
   await tick();
   assert.equal(wrap.classList.contains('hidden'), false);
-  const language = w.document.querySelector('#rail-facebook-persona-language') as HTMLSelectElement;
-  language.value = 'en';
-  const submit = w.document.querySelector('#rail-facebook-persona-submit') as HTMLButtonElement;
-  submit.click();
-  submit.click();
-  assert.equal(submit.disabled, true);
-  assert.deepEqual(requests, ['en'], '请求在途不得因连点重复建立运行');
-  assert.match(w.document.querySelector('#rail-facebook-persona-status')!.textContent!, /正在交由云端处理/);
-  resolveRequest?.({ ok: true, accepted: true });
+  assert.equal(w.document.querySelector('#rail-facebook-persona-language'), null, '环境栏不再重复选择语言');
+
+  (w.document.querySelector('#rail-facebook-persona-submit') as HTMLButtonElement).click();
   await tick();
-  assert.equal(submit.disabled, false);
-  assert.match(w.document.querySelector('#rail-facebook-persona-status')!.textContent!, /已交由云端处理/);
+  const pop = w.document.querySelector('#persona-pop') as HTMLElement;
+  assert.equal(pop.classList.contains('hidden'), false);
+  assert.match(w.document.querySelector('#persona-head-title')!.textContent!, /批量设置人设/);
+  assert.match(w.document.querySelector('#persona-hint')!.textContent!, /同一份完全相同的人设|这一份完全相同的人设/);
+  assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), true, '即使当前环境已有人设，批量模式仍展示选择页');
+
+  (w.document.querySelector('.persona-kw-group[data-dim="tone"] .kw-btn') as HTMLButtonElement).click();
+  (w.document.querySelector('#persona-language-group [data-writing-language="en"]') as HTMLButtonElement).click();
+  (w.document.querySelector('.persona-kw-group[data-dim="content"] .kw-btn') as HTMLButtonElement).click();
+  (w.document.querySelector('#persona-generate') as HTMLButtonElement).click();
+  await tick();
+  assert.equal(singleGenerateCalls, 0, '批量模式不得调用单账号/Cloud PersonaGenerator');
+  assert.equal(previews.length, 1);
+  const selected = previews[0] as { writingLanguage?: string; contentPreferences?: string[] };
+  assert.equal(selected.writingLanguage, 'en');
+  assert.ok((selected.contentPreferences || []).length > 0);
+  assert.match(w.document.querySelector('#persona-draft-body')!.textContent!, /same-selected-soul/);
+
+  (w.document.querySelector('#persona-confirm') as HTMLButtonElement).click();
+  await tick();
+  assert.deepEqual(fills, ['same-selected-soul']);
+  assert.equal(pop.classList.contains('hidden'), true);
+  assert.match(w.document.querySelector('#rail-facebook-persona-status')!.textContent!, /所选人设已交由云端/);
   (w.document.querySelector('[data-rail-platform="all"]') as HTMLButtonElement).click();
   await tick();
   assert.equal(wrap.classList.contains('hidden'), true);
 });
 
-test('Facebook 本地分类为空仍可提交，由 Cloud 决定权威目标；失败只在原位置说明', async () => {
-  const requests: string[] = [];
+test('批量人设确认失败留在人设页面诚实说明，不伪报已设置', async () => {
   const { w } = await boot({
-    fleetGet: async () => ({
-      provider: 'adspower', selectedEnvId: 'ads-xhs', railCollapsed: false,
-      environments: [
-        { envId: 'ads-xhs', profileId: 'xhs', name: '小红书', platform: 'xiaohongshu', status: makeStatus({ envId: 'ads-xhs' }) },
-      ],
-    }),
-    facebookPersonaAutoFill: async (writingLanguage: string) => {
-      requests.push(writingLanguage);
-      return { ok: false, accepted: false, message: '云端暂时未受理，请稍后重试。' };
-    },
+    fleetGet: async () => ({ provider: 'adspower', selectedEnvId: 'ads-fb', railCollapsed: false, environments: [
+      { envId: 'ads-fb', profileId: 'fb', name: 'Facebook', platform: 'facebook', status: makeStatus({ envId: 'ads-fb' }) },
+    ] }),
+    facebookPersonaTemplatePreview: async () => ({ ok: true, soulYaml: 'same-selected-soul', identitySummary: '预览' }),
+    facebookPersonaFillSelected: async () => ({ ok: false, accepted: false, message: '云端暂时未受理，请稍后重试。' }),
   });
   (w.document.querySelector('[data-rail-platform="facebook"]') as HTMLButtonElement).click();
   await tick();
-  assert.match(w.document.querySelector('.rail-filter-empty')!.textContent!, /暂无Facebook环境/);
-  const wrap = w.document.querySelector('#rail-facebook-persona-fill') as HTMLElement;
-  assert.equal(wrap.classList.contains('hidden'), false);
-  const submit = w.document.querySelector('#rail-facebook-persona-submit') as HTMLButtonElement;
-  assert.equal(submit.disabled, false);
-  submit.click();
+  (w.document.querySelector('#rail-facebook-persona-submit') as HTMLButtonElement).click();
+  (w.document.querySelector('.persona-kw-group[data-dim="tone"] .kw-btn') as HTMLButtonElement).click();
+  (w.document.querySelector('#persona-language-group [data-writing-language="zh-CN"]') as HTMLButtonElement).click();
+  (w.document.querySelector('.persona-kw-group[data-dim="content"] .kw-btn') as HTMLButtonElement).click();
+  (w.document.querySelector('#persona-generate') as HTMLButtonElement).click();
   await tick();
-  assert.deepEqual(requests, ['zh-CN']);
-  assert.match(w.document.querySelector('#rail-facebook-persona-status')!.textContent!, /云端暂时未受理/);
-  assert.equal(w.document.querySelector('[role="dialog"]:not(.hidden)'), null, '不得弹窗展示目标或结果');
+  (w.document.querySelector('#persona-confirm') as HTMLButtonElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('hidden'), false);
+  assert.match(w.document.querySelector('#persona-msg')!.textContent!, /云端暂时未受理/);
+  assert.doesNotMatch(w.document.querySelector('#persona-state-badge')!.textContent!, /已设置/);
 });
 
 test('平台筛选：空分类显示空态并禁用全部启动，不发无目标请求', async () => {
