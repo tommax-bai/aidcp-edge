@@ -7,15 +7,18 @@ const require = createRequire(import.meta.url);
 const {
   normalizeFacebookPersonaAutoFillOptions,
   requestFacebookPersonaAutoFill,
+  requestFacebookPersonaAutoFillRun,
 } = require('../../src/electron/facebook-persona-auto-fill.cjs') as {
   normalizeFacebookPersonaAutoFillOptions(opts: unknown):
     { ok: true; enabled: boolean; writingLanguage?: string } | { ok: false; error: string };
   requestFacebookPersonaAutoFill(opts: Record<string, unknown>): Promise<Record<string, unknown>>;
+  requestFacebookPersonaAutoFillRun(opts: Record<string, unknown>): Promise<Record<string, unknown>>;
 };
 
 const main = readFileSync(new URL('../../src/electron/main.cjs', import.meta.url), 'utf8');
 const html = readFileSync(new URL('../../src/electron/renderer/index.html', import.meta.url), 'utf8');
 const renderer = readFileSync(new URL('../../src/electron/renderer/renderer.js', import.meta.url), 'utf8');
+const preload = readFileSync(new URL('../../src/electron/preload.cjs', import.meta.url), 'utf8');
 
 test('批量人设能力默认开启并要求受控语言；显式关闭后不提交', () => {
   assert.deepEqual(normalizeFacebookPersonaAutoFillOptions({}), { ok: true, enabled: true, writingLanguage: 'zh-CN' });
@@ -53,6 +56,34 @@ test('请求只提交 platform/strategy/writingLanguage，幂等重试不泄漏�
   for (const forbidden of ['accountId', 'envKey', 'env-secret-id', 'customer-secret-token', 'cookie', 'password']) {
     assert.equal(bodyWire.includes(forbidden), false, `请求体不得包含 ${forbidden}`);
   }
+});
+
+test('手动入口不依赖批量创建结果，仍只提交固定客户范围意图', async () => {
+  const calls: Array<{ pathname: string; options: Record<string, unknown> }> = [];
+  const result = await requestFacebookPersonaAutoFillRun({
+    request: async (pathname: string, options: Record<string, unknown>) => {
+      calls.push({ pathname, options });
+      return { ok: true, status: 201 };
+    },
+    token: 'customer-secret-token',
+    idempotencyKey: 'fb-manual-persona-safe-key',
+    writingLanguage: 'vi',
+  });
+  assert.equal(result.accepted, true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], {
+    pathname: '/persona-auto-fill/runs',
+    options: {
+      method: 'POST',
+      token: 'customer-secret-token',
+      idempotencyKey: 'fb-manual-persona-safe-key',
+      body: { platform: 'facebook', strategy: 'facebook_auto_v1', writingLanguage: 'vi' },
+    },
+  });
+  const invalid = await requestFacebookPersonaAutoFillRun({
+    request: async () => ({ ok: true, status: 201 }), token: 'token', idempotencyKey: 'key', writingLanguage: 'fr',
+  });
+  assert.equal(invalid.attempted, false);
 });
 
 test('没有权威归属环境时不调用 Cloud；创建回执与人设受理状态保持分离', async () => {
@@ -103,4 +134,21 @@ test('UI 只在 Facebook 批量模式显示：默认勾选、单一语言选择�
   assert.match(renderer, /facebookPersonaAutoFill:\s*settingsUi\.adsFbPersonaAutoFill\?\.checked !== false/);
   assert.match(renderer, /facebookPersonaWritingLanguage:\s*settingsUi\.adsFbPersonaLanguage\?\.value \|\| 'zh-CN'/);
   assert.doesNotMatch(renderer, /personaAutoFill[^\n]*(open|modal|popup|navigate)/i);
+});
+
+test('环境栏手动入口使用具名最小 IPC，主进程决定范围和幂等键', () => {
+  assert.match(html, /id="rail-facebook-persona-fill" class="rail-facebook-persona-fill hidden"/);
+  assert.match(html, /id="rail-facebook-persona-submit"[^>]*>补齐未设置人设</);
+  assert.match(preload, /facebookPersonaAutoFill:\s*\(writingLanguage\)\s*=>\s*ipcRenderer\.invoke\('persona:auto-fill-facebook', writingLanguage\)/);
+  const start = main.indexOf("ipcMain.handle('persona:auto-fill-facebook'");
+  const end = main.indexOf("ipcMain.handle('browser:openAdsDownload'", start);
+  assert.ok(start >= 0 && end > start);
+  const handler = main.slice(start, end);
+  assert.match(handler, /WRITING_LANGUAGES\.has\(writingLanguage\)/);
+  assert.match(handler, /clientAuthEnabled\(\)[\s\S]*hasValidSession\(\)/);
+  assert.match(handler, /idempotencyKey:\s*`fb-manual-persona-\$\{crypto\.randomUUID\(\)\}`/);
+  assert.match(handler, /requestFacebookPersonaAutoFillRun/);
+  for (const forbidden of ['accountId', 'accountIds', 'envKey', 'envKeys', 'password', 'cookie', 'token: writingLanguage']) {
+    assert.equal(handler.includes(forbidden), false, `手动 IPC 不得接受或构造 ${forbidden}`);
+  }
 });

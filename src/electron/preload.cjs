@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   fleetSelect: (envId) => ipcRenderer.invoke('fleet:select', envId),
   fleetStartAll: (opts) => ipcRenderer.invoke('fleet:startAll', opts),
   fleetStopAll: () => ipcRenderer.invoke('fleet:stopAll'),
+  // Facebook 分类手动补齐：renderer 只能提交语言，目标范围与幂等键均由可信主进程/Cloud 决定。
+  facebookPersonaAutoFill: (writingLanguage) => ipcRenderer.invoke('persona:auto-fill-facebook', writingLanguage),
   // 云端环境（change edge-cloud-env-selector）：切换云端后「全部重启并连接新云端」。
   cloudRestartAll: () => ipcRenderer.invoke('cloud:restartAll'),
   fleetSetRailCollapsed: (collapsed) => ipcRenderer.invoke('fleet:setRailCollapsed', collapsed),

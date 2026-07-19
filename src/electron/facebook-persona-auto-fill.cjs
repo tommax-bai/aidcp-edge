@@ -32,6 +32,38 @@ async function requestFacebookPersonaAutoFill({
       warning: '人设自动补齐尚未提交：本批没有完成 Cloud 权威归属的环境。',
     };
   }
+  const outcome = await requestFacebookPersonaAutoFillRun({
+    request,
+    token,
+    idempotencyKey,
+    writingLanguage,
+  });
+  if (!outcome.accepted && outcome.attempted) {
+    return {
+      ...outcome,
+      warning: `环境已创建，但云端未受理人设自动补齐${outcome.reason ? `（${outcome.reason}）` : ''}。`,
+    };
+  }
+  return outcome;
+}
+
+/**
+ * 向 customer-auth 提交一次客户范围的 Facebook 补齐意图。
+ * 这是批量创建与环境栏手动入口共用的最小网络出口，body 永远不接收目标选择器。
+ */
+async function requestFacebookPersonaAutoFillRun({
+  request,
+  token,
+  idempotencyKey,
+  writingLanguage,
+}) {
+  if (!WRITING_LANGUAGES.has(writingLanguage)) {
+    return {
+      accepted: false,
+      attempted: false,
+      warning: 'Facebook 人设发言语言不合法。',
+    };
+  }
   if (typeof request !== 'function' || !token) {
     return {
       accepted: false,
@@ -60,7 +92,8 @@ async function requestFacebookPersonaAutoFill({
     accepted: false,
     attempted: true,
     sessionExpired: Boolean(response && response.status === 401),
-    warning: `环境已创建，但云端未受理人设自动补齐${reason ? `（${reason}）` : ''}。`,
+    reason,
+    warning: `云端未受理人设自动补齐${reason ? `（${reason}）` : ''}。`,
   };
 }
 
@@ -68,4 +101,5 @@ module.exports = {
   WRITING_LANGUAGES,
   normalizeFacebookPersonaAutoFillOptions,
   requestFacebookPersonaAutoFill,
+  requestFacebookPersonaAutoFillRun,
 };

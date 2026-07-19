@@ -60,7 +60,7 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
   let pushStatus: (s: unknown) => void = () => undefined;
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], select: [], close: [], notify: [], start: [], resume: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], personaFill: [], select: [], close: [], notify: [], start: [], resume: [] };
   const settings = {
     provider: 'adspower',
     adsProfileId: 'p1',
@@ -95,6 +95,10 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
     fleetSetRailCollapsed: async () => ({ ok: true }),
     fleetStartAll: async (opts: unknown) => { calls.startAll.push(opts); return { ok: true, queued: 2 }; },
     fleetStopAll: async () => ({ ok: true }),
+    facebookPersonaAutoFill: async (writingLanguage: string) => {
+      calls.personaFill.push(writingLanguage);
+      return { ok: true, accepted: true };
+    },
     relogin: async (envId: string) => { calls.relogin.push(envId); return makeStatus({ envId }); },
     notify: async (payload: unknown) => { calls.notify.push(payload); return { ok: true }; },
     showDrivenBrowser: async (envId: string) => { calls.showDriven.push(envId); return { ok: true, hint: '已请求前置；窗口平时停放在屏幕边缘。' }; },
@@ -677,6 +681,74 @@ test('平台筛选：默认全部；切换后列表、计数、选中环境与�
   buttons('xiaohongshu').click();
   await tick();
   assert.equal((w.document.querySelector('.rail-row') as HTMLElement).dataset.envId, 'ads-xhs');
+});
+
+test('Facebook 筛选显示手动补齐入口，请求中防双击并原地反馈', async () => {
+  let resolveRequest: ((value: { ok: boolean; accepted: boolean }) => void) | undefined;
+  const requests: string[] = [];
+  const pending = new Promise<{ ok: boolean; accepted: boolean }>((resolve) => { resolveRequest = resolve; });
+  const { w } = await boot({
+    facebookPersonaAutoFill: async (writingLanguage: string) => {
+      requests.push(writingLanguage);
+      return pending;
+    },
+    fleetGet: async () => ({
+      provider: 'adspower',
+      selectedEnvId: 'ads-fb',
+      railCollapsed: false,
+      environments: [
+        { envId: 'ads-fb', profileId: 'fb', name: 'Facebook', platform: 'facebook', status: makeStatus({ envId: 'ads-fb' }) },
+      ],
+    }),
+  });
+  const wrap = w.document.querySelector('#rail-facebook-persona-fill') as HTMLElement;
+  assert.equal(wrap.classList.contains('hidden'), true, '默认全部分类不展示手动能力');
+  (w.document.querySelector('[data-rail-platform="facebook"]') as HTMLButtonElement).click();
+  await tick();
+  assert.equal(wrap.classList.contains('hidden'), false);
+  const language = w.document.querySelector('#rail-facebook-persona-language') as HTMLSelectElement;
+  language.value = 'en';
+  const submit = w.document.querySelector('#rail-facebook-persona-submit') as HTMLButtonElement;
+  submit.click();
+  submit.click();
+  assert.equal(submit.disabled, true);
+  assert.deepEqual(requests, ['en'], '请求在途不得因连点重复建立运行');
+  assert.match(w.document.querySelector('#rail-facebook-persona-status')!.textContent!, /正在交由云端处理/);
+  resolveRequest?.({ ok: true, accepted: true });
+  await tick();
+  assert.equal(submit.disabled, false);
+  assert.match(w.document.querySelector('#rail-facebook-persona-status')!.textContent!, /已交由云端处理/);
+  (w.document.querySelector('[data-rail-platform="all"]') as HTMLButtonElement).click();
+  await tick();
+  assert.equal(wrap.classList.contains('hidden'), true);
+});
+
+test('Facebook 本地分类为空仍可提交，由 Cloud 决定权威目标；失败只在原位置说明', async () => {
+  const requests: string[] = [];
+  const { w } = await boot({
+    fleetGet: async () => ({
+      provider: 'adspower', selectedEnvId: 'ads-xhs', railCollapsed: false,
+      environments: [
+        { envId: 'ads-xhs', profileId: 'xhs', name: '小红书', platform: 'xiaohongshu', status: makeStatus({ envId: 'ads-xhs' }) },
+      ],
+    }),
+    facebookPersonaAutoFill: async (writingLanguage: string) => {
+      requests.push(writingLanguage);
+      return { ok: false, accepted: false, message: '云端暂时未受理，请稍后重试。' };
+    },
+  });
+  (w.document.querySelector('[data-rail-platform="facebook"]') as HTMLButtonElement).click();
+  await tick();
+  assert.match(w.document.querySelector('.rail-filter-empty')!.textContent!, /暂无Facebook环境/);
+  const wrap = w.document.querySelector('#rail-facebook-persona-fill') as HTMLElement;
+  assert.equal(wrap.classList.contains('hidden'), false);
+  const submit = w.document.querySelector('#rail-facebook-persona-submit') as HTMLButtonElement;
+  assert.equal(submit.disabled, false);
+  submit.click();
+  await tick();
+  assert.deepEqual(requests, ['zh-CN']);
+  assert.match(w.document.querySelector('#rail-facebook-persona-status')!.textContent!, /云端暂时未受理/);
+  assert.equal(w.document.querySelector('[role="dialog"]:not(.hidden)'), null, '不得弹窗展示目标或结果');
 });
 
 test('平台筛选：空分类显示空态并禁用全部启动，不发无目标请求', async () => {

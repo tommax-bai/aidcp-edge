@@ -35,8 +35,10 @@ const {
   failedFacebookBatchReceipt,
 } = require('./facebook-batch-create.cjs');
 const {
+  WRITING_LANGUAGES,
   normalizeFacebookPersonaAutoFillOptions,
   requestFacebookPersonaAutoFill,
+  requestFacebookPersonaAutoFillRun,
 } = require('./facebook-persona-auto-fill.cjs');
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
@@ -4576,6 +4578,28 @@ ipcMain.handle('fleet:stopAll', () => stopAllEnvs());
 ipcMain.handle('fleet:setRailCollapsed', (_event, collapsed) => {
   saveSettings({ railCollapsed: Boolean(collapsed) });
   return { ok: true };
+});
+ipcMain.handle('persona:auto-fill-facebook', async (_event, writingLanguage) => {
+  if (!WRITING_LANGUAGES.has(writingLanguage)) {
+    return { ok: false, error: 'invalid_writing_language', message: '请选择中文、English 或越南语。' };
+  }
+  if (!clientAuthEnabled() || !hasValidSession()) {
+    if (clientAuthEnabled()) onSessionInvalid();
+    return { ok: false, error: 'client_session_required', message: '登录状态已失效，请重新登录后再试。' };
+  }
+  const outcome = await requestFacebookPersonaAutoFillRun({
+    request: clientAuthFetch,
+    token: clientSession.token,
+    idempotencyKey: `fb-manual-persona-${crypto.randomUUID()}`,
+    writingLanguage,
+  });
+  if (outcome.sessionExpired) onSessionInvalid();
+  if (outcome.accepted) return { ok: true, accepted: true };
+  return {
+    ok: false,
+    error: outcome.sessionExpired ? 'client_session_required' : 'persona_auto_fill_not_accepted',
+    message: outcome.warning || '云端未受理，请稍后重试。',
+  };
 });
 ipcMain.handle('browser:openAdsDownload', () => {
   void shell.openExternal(ADS_DOWNLOAD_URL);
