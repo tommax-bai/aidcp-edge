@@ -4262,7 +4262,7 @@ function setCreateMsg(text, isError) {
   settingsUi.adsCreateMsg.classList.toggle('error', !!isError);
 }
 
-// 整机模板下拉：一次性从主进程拉清单填充（防御：桩 / 旧壳无此 API 时静默跳过）。
+// 操作系统下拉：复用旧 adsTemplates IPC 名称，内容已是 OS family。
 async function populateTemplates() {
   if (!settingsUi.adsTemplate || !window.aidcpEdge || typeof window.aidcpEdge.adsTemplates !== 'function') return;
   try {
@@ -4276,7 +4276,7 @@ async function populateTemplates() {
       settingsUi.adsTemplate.appendChild(opt);
     }
   } catch {
-    /* 静默：模板拉取失败不影响其它 */
+    /* 静默：操作系统选项拉取失败不影响其它 */
   }
 }
 populateTemplates();
@@ -4319,14 +4319,14 @@ settingsUi.adsProxyType?.addEventListener('change', () => {
   updateFacebookImportVisibility();
 });
 
-// 「创建环境」程序化建号：单建挑模板；Facebook 批量由主进程逐账号随机整套模板、代理按行轮询。
+// 「创建环境」程序化建号：单建挑 OS family；Facebook 批量由主进程逐账号随机 OS family、代理按行轮询。
 settingsUi.adsCreate.addEventListener('click', async () => {
   const platform = normPlatform(settingsUi.adsPlatform && settingsUi.adsPlatform.value);
   const batch = platform === 'facebook'
     && settingsUi.adsFbCreateMode
     && settingsUi.adsFbCreateMode.value === 'batch';
-  const tpl = settingsUi.adsTemplate && settingsUi.adsTemplate.value;
-  if (!batch && !tpl) return setCreateMsg('请先选择一个整机模板', true);
+  const osFamilyKey = settingsUi.adsTemplate && settingsUi.adsTemplate.value;
+  if (!batch && !osFamilyKey) return setCreateMsg('请先选择操作系统', true);
   if (!window.aidcpEdge || typeof window.aidcpEdge.adsCreateEnv !== 'function') return;
   const facebookAccountImport = platform === 'facebook' && settingsUi.adsFbImport
     ? settingsUi.adsFbImport.value
@@ -4353,7 +4353,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       ? {
           ...formAdsOpts(),
           creationMode: 'batch',
-          templateKey: '',
+          osFamilyKey: '',
           platform,
           batchProxyType: proxyType,
           facebookAccountImport,
@@ -4362,7 +4362,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       : {
           ...formAdsOpts(),
           creationMode: 'single',
-          templateKey: tpl,
+          osFamilyKey,
           platform,
           proxy,
           facebookAccountImport,
@@ -4386,7 +4386,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       const createdCount = Number(r.createdCount || (Array.isArray(r.created) ? r.created.length : 0));
       const countHint = batch
         ? `已创建 ${createdCount} 个环境。`
-        : createdCount > 1 ? `已创建 ${createdCount} 个环境。` : `已创建环境（${r.template || tpl}）。`;
+        : createdCount > 1 ? `已创建 ${createdCount} 个环境。` : `已创建环境（${r.osFamily || r.template || osFamilyKey}）。`;
       if (createdCount > 0 && settingsUi.adsFbImport) settingsUi.adsFbImport.value = '';
       if (batch && createdCount > 0 && settingsUi.adsProxyBatch) settingsUi.adsProxyBatch.value = '';
       const proxyHint = batch && withProxy

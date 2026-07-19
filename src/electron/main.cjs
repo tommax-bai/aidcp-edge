@@ -4514,14 +4514,13 @@ ipcMain.handle('ads:openCreate', () => openAdsClient());
 const envGroupResolver = createEnvGroupResolver({ adsApi, groupName: ENV_GROUP_NAME });
 let adsCreateInFlight = false; // 进程级单飞互斥（防连点双建）
 
-function templateLabel(t) {
-  const osName = t.os === 'windows' ? 'Windows' : t.os === 'macos' ? 'Mac' : t.os;
-  return `${osName} · ${t.hardwareConcurrency}核 ${t.deviceMemory}G`;
+function osFamilyLabel(t) {
+  return t.label || (t.os === 'windows' ? 'Windows' : t.os === 'macos' ? 'macOS' : t.os);
 }
 
-// 整机模板清单（供渲染层下拉，一处真源）。
+// Back-compatible IPC name: the renderer consumes OS families through the old templates hook.
 ipcMain.handle('ads:templates', () =>
-  adsFingerprint.DEVICE_TEMPLATES.map((t) => ({ key: t.key, label: templateLabel(t) })),
+  adsFingerprint.OS_FAMILIES.map((t) => ({ key: t.key, label: osFamilyLabel(t) })),
 );
 
 function safeCreatedEnvironment(finalized) {
@@ -4529,6 +4528,7 @@ function safeCreatedEnvironment(finalized) {
     userId: finalized.userId,
     name: finalized.name,
     template: finalized.template,
+    osFamily: finalized.osFamily,
     platform: finalized.platform,
     assignedToCurrentClient: finalized.assignedToCurrentClient,
     requiresAdminAssignment: finalized.requiresAdminAssignment,
@@ -4538,7 +4538,7 @@ function safeCreatedEnvironment(finalized) {
   };
 }
 
-// 程序化建指纹环境。单建 opts: { templateKey, platform, proxy?, facebookAccountImport? }；
+// 程序化建指纹环境。单建 opts: { osFamilyKey, platform, proxy?, facebookAccountImport? }；
 // Facebook 批量另带 { creationMode:'batch', batchProxyType, facebookProxyBatch }。
 ipcMain.handle('ads:createEnv', async (_event, opts) => {
   if (adsCreateInFlight) return { ok: false, error: '创建进行中，请等当前创建完成' };
@@ -4563,7 +4563,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         accountEntries: entries,
         proxyType: opts && opts.batchProxyType,
         proxyText: opts && opts.facebookProxyBatch,
-        templateKeys: adsFingerprint.DEVICE_TEMPLATES.map((template) => template.key),
+        osFamilyKeys: adsFingerprint.OS_FAMILIES.map((family) => family.key),
       });
       if (!batchPlan.ok) return { ok: false, error: batchPlan.error };
     }
@@ -4599,7 +4599,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         adsApi,
         fingerprint: adsFingerprint,
         adsOpts: ads,
-        templateKey: (opts && opts.templateKey) || '',
+        osFamilyKey: (opts && (opts.osFamilyKey || opts.templateKey)) || '',
         intendedAccountLabel: opts && opts.intendedAccountLabel,
         machineLabel: os.hostname(),
         platform,
@@ -4617,7 +4617,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       : [{
           accountImport: entries[0],
           accountLine: 1,
-          templateKey: (opts && opts.templateKey) || '',
+          osFamilyKey: (opts && (opts.osFamilyKey || opts.templateKey)) || '',
           proxy: opts && opts.proxy,
         }];
     const created = [];
@@ -4632,7 +4632,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         adsApi,
         fingerprint: adsFingerprint,
         adsOpts: ads,
-        templateKey: item.templateKey,
+        osFamilyKey: item.osFamilyKey,
         intendedAccountLabel: '',
         machineLabel: os.hostname(),
         platform,
@@ -4656,7 +4656,8 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       userId: creationMode === 'single' && created.length === 1 ? created[0].userId : undefined,
       // 单账号导入自动选中时带回真名，供渲染层入册用真名（change edge-env-name-live-sync）。
       name: creationMode === 'single' && created.length === 1 ? created[0].name : undefined,
-      template: creationMode === 'single' ? ((opts && opts.templateKey) || '') : undefined,
+      template: creationMode === 'single' && created.length === 1 ? (created[0].template || created[0].osFamily) : undefined,
+      osFamily: creationMode === 'single' && created.length === 1 ? (created[0].osFamily || created[0].template) : undefined,
       platform,
       creationMode,
       created,

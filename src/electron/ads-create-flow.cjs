@@ -2,7 +2,7 @@
 // 「按一下建一个环境」的动作，并守住几条不变量：
 //  - 诚实分离创建态/就绪态（C1/D2）：建成只标 UNVERIFIED（仅配置层/未验证/不可投产），
 //    绝不把 user/create 回 id 当就绪；「真实/就绪」由 environment-readiness-verification 运行时置位。
-//  - 绑定意图（C2/D7）：把 intendedAccountLabel + 模板 + 建号机写进分身 remark（随 user/list 读回），
+//  - 绑定意图（C2/D7）：把 intendedAccountLabel + OS family + 建号机写进分身 remark（随 user/list 读回），
 //    供登录握手回写比对真实 accountId。
 //  - 防连点双建（H5）：单飞互斥，创建在途时重入诚实返回「进行中」。
 //  - 代理可选（edge-client-proxy-platform-persona-ux）：表单填了合法代理即随建号下发，
@@ -29,12 +29,12 @@ function normalizePlatform(raw) {
   return DEFAULT_PLATFORM;
 }
 
-/** 把意图/模板/机器/平台编码进分身 remark（随 user/create 写入、user/list 读回）。 */
-function encodeRemark({ intendedAccountLabel, template, machine, createdAt, platform } = {}) {
+/** 把意图/OS family/机器/平台编码进分身 remark（随 user/create 写入、user/list 读回）。 */
+function encodeRemark({ intendedAccountLabel, template, osFamily, machine, createdAt, platform } = {}) {
   return JSON.stringify({
     t: REMARK_TAG,
     acct: intendedAccountLabel || '',
-    tpl: template || '',
+    tpl: osFamily || template || '',
     mach: machine || '',
     ts: createdAt || 0,
     plat: normalizePlatform(platform), // 每环境平台（缺省 xiaohongshu）
@@ -62,7 +62,7 @@ function parseRemark(remark) {
 }
 
 /**
- * @param {{ writeApi: { createProfile: Function }, fingerprint: { getTemplate: Function, buildFingerprintConfig: Function }, nowImpl?: () => number }} deps
+ * @param {{ writeApi: { createProfile: Function }, fingerprint: { getOsFamily?: Function, getTemplate?: Function, buildFingerprintConfig: Function }, nowImpl?: () => number }} deps
  */
 function createCreateFlow(deps) {
   const writeApi = deps.writeApi;
@@ -73,17 +73,21 @@ function createCreateFlow(deps) {
   /**
    * 建一个环境。proxy 可选（渲染层原始输入）：填了经归一层校验后随建号下发，
    * 非法诚实拒建；缺省 no_proxy（与历史行为逐位等价）。
-   * @returns {Promise<{ ok: boolean, userId?: string, status?: string, template?: string, intendedAccountLabel?: string, violations?: string[], error?: string, code?: number }>}
+   * @returns {Promise<{ ok: boolean, userId?: string, status?: string, template?: string, osFamily?: string, intendedAccountLabel?: string, violations?: string[], error?: string, code?: number }>}
    */
-  async function createEnvironment({ templateKey, intendedAccountLabel, machineLabel, groupId, name, platform, accountImport, proxy } = {}) {
+  async function createEnvironment({ osFamilyKey, templateKey, intendedAccountLabel, machineLabel, groupId, name, platform, accountImport, proxy } = {}) {
     if (inFlight) {
       return { ok: false, error: '创建进行中，请等当前创建完成（防连点双建）' };
     }
     inFlight = true;
     try {
       if (!groupId) return { ok: false, status: 'rejected', error: '缺 groupId（应先建/取专用分组）' };
-      const tpl = fingerprint.getTemplate(templateKey);
-      if (!tpl) return { ok: false, status: 'rejected', error: `未知整机模板：${templateKey}` };
+      const requestedOsFamilyKey = osFamilyKey || templateKey;
+      const osFamily = typeof fingerprint.getOsFamily === 'function'
+        ? fingerprint.getOsFamily(requestedOsFamilyKey)
+        : fingerprint.getTemplate(requestedOsFamilyKey);
+      if (!osFamily) return { ok: false, status: 'rejected', error: `未知操作系统：${requestedOsFamilyKey}` };
+      const resolvedOsFamilyKey = osFamily.key || requestedOsFamilyKey;
 
       const proxyNorm = normalizeProxyInput(proxy || {});
       if (!proxyNorm.ok) {
@@ -91,13 +95,13 @@ function createCreateFlow(deps) {
         return { ok: false, status: 'rejected', error: `代理输入不合法：${proxyNorm.error}` };
       }
 
-      const built = fingerprint.buildFingerprintConfig(tpl);
+      const built = fingerprint.buildFingerprintConfig(osFamily);
       if (!built.ok) {
         // 护栏 / 四者一致断言未过 → 诚实拒建，不提交矛盾环境。
         return { ok: false, status: 'rejected', violations: built.violations, error: '指纹护栏/一致性断言未过：' + built.violations.join('；') };
       }
 
-      const remark = encodeRemark({ intendedAccountLabel, template: templateKey, machine: machineLabel, createdAt: now(), platform });
+      const remark = encodeRemark({ intendedAccountLabel, osFamily: resolvedOsFamilyKey, machine: machineLabel, createdAt: now(), platform });
       const r = await writeApi.createProfile({
         groupId,
         // 建号不写死设备模板名（change edge-adspower-name-follows-nickname）：标准建号路径 name 缺省 →
@@ -120,7 +124,8 @@ function createCreateFlow(deps) {
         // change edge-adspower-name-follows-nickname）。
         name: name || '',
         status: STATUS.UNVERIFIED,
-        template: templateKey,
+        template: resolvedOsFamilyKey,
+        osFamily: resolvedOsFamilyKey,
         intendedAccountLabel: intendedAccountLabel || '',
         platform: normalizePlatform(platform),
       };

@@ -1,14 +1,8 @@
-// 指纹环境「整机模板 + 薄护栏 + OS 四者一致断言」（change adspower-auto-create-env task 3）。
+// AdsPower-first fingerprint creation.
 //
-// 设计（据 2026-07-03 真机探针 scripts/adspower-fingerprint-probe.ts 定案）：
-//  - **最大化委托 AdsPower 生成**：默认 webgl='3'（random matching，AdsPower 按 OS 给自洽随机 renderer），
-//    ua_auto 不用（探针实测会随机分 OS、甚至分到 iPhone），改**显式 pin OS**（random_ua.ua_system_version）
-//    + 显式内核版本；aidcp 只挑「这是台什么机器」（整机模板）+ 极薄护栏 + 提交前一致断言。
-//  - **护栏（实测支撑）**：device_memory 只允 2 的幂（探针：6→运行时读到 4，不忠实下发）；webgl 模式互斥
-//    （'3' 无视 webgl_config、'2' 逐字 honor）→ '3' 时禁带 config、'2' 时必带 OS 匹配 renderer；webrtc 禁
-//    local/real（泄真机 IP）；canvas/webgl_image/audio/client_rects 噪声必开；不启用「每次启动重随机指纹」。
-//  - **四者一致断言**：声明 OS == UA 的 OS(ua_system_version) == 字体的 OS(若显式设) == renderer 家族 OS(若 '2')，
-//    任一不符拒建（探针现场：AdsPower 会照单全收 Mac 画像 + Windows renderer 的矛盾，故必须自己断言）。
+// The shell now chooses only an OS family and a few safety constraints. AdsPower
+// generates the remaining per-profile fingerprint details during user/create.
+// Keep this file from drifting back into a small list of complete machine shapes.
 
 const POWERS_OF_2 = Object.freeze(['2', '4', '8', '16']); // deviceMemory 合法集（≤16；navigator.deviceMemory 上限 8，16 视内核而定）
 const REALISTIC_CORES = Object.freeze(['2', '4', '6', '8', '12', '16']);
@@ -29,15 +23,18 @@ const FINGERPRINT_UI_LANGUAGE = Object.freeze(['en-US']);
 const WIN_FONTS = /segoe ui|calibri|consolas|cambria|tahoma/i;
 const MAC_FONTS = /helvetica neue|san francisco|sf pro|\.sf ns|monaco|menlo/i;
 
-/** 一套内部自洽的桌面整机模板。webgl 默认 '3'（委托，最稳）；'2' 需自带 OS 匹配 renderer。 */
-const DEVICE_TEMPLATES = Object.freeze([
-  { key: 'win11-intel', os: 'windows', uaSystemVersion: 'Windows 10', kernel: DEFAULT_KERNEL, deviceMemory: '8', hardwareConcurrency: '8', screenResolution: '1920_1080', webglMode: '3' },
-  { key: 'win11-nvidia', os: 'windows', uaSystemVersion: 'Windows 10', kernel: DEFAULT_KERNEL, deviceMemory: '16', hardwareConcurrency: '16', screenResolution: '2560_1440', webglMode: '3' },
-  { key: 'win11-nvidia-custom', os: 'windows', uaSystemVersion: 'Windows 10', kernel: DEFAULT_KERNEL, deviceMemory: '16', hardwareConcurrency: '12', screenResolution: '1920_1080', webglMode: '2',
-    webglVendor: 'Google Inc. (NVIDIA)', webglRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)' },
-  { key: 'macos-m2', os: 'macos', uaSystemVersion: 'Mac OS X 13', kernel: DEFAULT_KERNEL, deviceMemory: '8', hardwareConcurrency: '8', screenResolution: '1728_1117', webglMode: '3' },
-  { key: 'macos-m3', os: 'macos', uaSystemVersion: 'Mac OS X 13', kernel: DEFAULT_KERNEL, deviceMemory: '16', hardwareConcurrency: '12', screenResolution: '1512_982', webglMode: '3' },
+const OS_FAMILIES = Object.freeze([
+  { key: 'windows', label: 'Windows', os: 'windows', uaSystemVersions: Object.freeze(['Windows 10', 'Windows 11']), kernel: DEFAULT_KERNEL },
+  { key: 'macos', label: 'macOS', os: 'macos', uaSystemVersions: Object.freeze(['Mac OS X 12', 'Mac OS X 13']), kernel: DEFAULT_KERNEL },
 ]);
+
+const LEGACY_OS_FAMILY_ALIASES = Object.freeze({
+  'win11-intel': 'windows',
+  'win11-nvidia': 'windows',
+  'win11-nvidia-custom': 'windows',
+  'macos-m2': 'macos',
+  'macos-m3': 'macos',
+});
 
 /** 从各带 OS 信息的字段推断 OS 家族；返回 'windows'|'macos'|'linux'|'mobile'|'unknown'。 */
 function osFromUaSystemVersion(s) {
@@ -111,17 +108,28 @@ function validateGuardrails(fp) {
  * @param {object} fp
  * @returns {{ ok: boolean, violations: string[], declaredOs: string }}
  */
-function assertOsCoherent(template, fp) {
-  const declared = template && template.os;
+function uaSystemVersionsOf(fp) {
+  const raw = fp && fp.random_ua ? fp.random_ua.ua_system_version : null;
+  if (Array.isArray(raw)) return raw.map(String).filter(Boolean);
+  return raw ? [String(raw)] : [];
+}
+
+function assertOsCoherent(osFamily, fp) {
+  const declared = osFamily && osFamily.os;
   const v = [];
   if (declared !== 'windows' && declared !== 'macos') {
-    v.push(`模板 OS=${declared} 非桌面（仅支持 windows/macos；探针实测不 pin OS 会随机分到 iPhone/Linux）`);
+    v.push(`OS family=${declared} 非桌面（仅支持 windows/macos；探针实测不 pin OS 会随机分到 iPhone/Linux）`);
   }
-  const uaOs = fp.random_ua && Array.isArray(fp.random_ua.ua_system_version)
-    ? osFromUaSystemVersion(fp.random_ua.ua_system_version[0])
-    : (fp.random_ua ? osFromUaSystemVersion(fp.random_ua.ua_system_version) : 'unknown');
-  if (uaOs !== 'unknown' && uaOs !== declared) v.push(`UA 的 OS(${uaOs}) != 声明 OS(${declared})`);
-  if (uaOs === 'unknown') v.push('未显式 pin OS（random_ua.ua_system_version 缺失）——MUST 钉死，勿放任 ua_auto 随机分 OS');
+  const uaVersions = uaSystemVersionsOf(fp);
+  if (uaVersions.length === 0) {
+    v.push('未显式 pin OS（random_ua.ua_system_version 缺失）——MUST 钉死，勿放任 ua_auto 随机分 OS');
+  } else {
+    for (const version of uaVersions) {
+      const uaOs = osFromUaSystemVersion(version);
+      if (uaOs === 'unknown') v.push(`UA 系统版本(${version}) 未知，无法证明 OS 一致`);
+      else if (uaOs !== declared) v.push(`UA 的 OS(${uaOs}) != 声明 OS(${declared})`);
+    }
+  }
 
   if (String(fp.webgl) === '2' && fp.webgl_config && fp.webgl_config.unmasked_renderer) {
     const rOs = osFromRenderer(fp.webgl_config.unmasked_renderer);
@@ -137,15 +145,23 @@ function assertOsCoherent(template, fp) {
 }
 
 /**
- * 由整机模板构造 fingerprint_config（委托生成为主 + 护栏 + 一致断言）。
- * @returns {{ ok: boolean, fingerprintConfig?: object, violations: string[], template: object }}
+ * 由 OS family 构造最小 fingerprint_config（AdsPower 生成为主 + 护栏 + 一致断言）。
+ * @returns {{ ok: boolean, fingerprintConfig?: object, violations: string[], osFamily: object, template: object }}
  */
-function buildFingerprintConfig(template) {
-  const t = template || {};
+function buildFingerprintConfig(osFamily) {
+  const t = osFamily || {};
   const kernel = t.kernel || DEFAULT_KERNEL;
-  const templateViolations = [];
-  if (!ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS.includes(String(t.uaSystemVersion || ''))) {
-    templateViolations.push(`ua_system_version=${t.uaSystemVersion || '(empty)'} 不在 AdsPower 支持枚举内（合法：${ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS.join('/')}）`);
+  const uaSystemVersions = Array.isArray(t.uaSystemVersions)
+    ? t.uaSystemVersions.map(String).filter(Boolean)
+    : (t.uaSystemVersion ? [String(t.uaSystemVersion)] : []);
+  const familyViolations = [];
+  if (uaSystemVersions.length === 0) {
+    familyViolations.push('ua_system_version 为空，无法约束 AdsPower 生成的桌面 OS');
+  }
+  for (const version of uaSystemVersions) {
+    if (!ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS.includes(version)) {
+      familyViolations.push(`ua_system_version=${version} 不在 AdsPower 支持枚举内（合法：${ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS.join('/')}）`);
+    }
   }
   const fp = {
     automatic_timezone: '1', // 时区随代理 IP
@@ -159,34 +175,42 @@ function buildFingerprintConfig(template) {
     audio: '1',
     client_rects: '1',
     media_devices: '1',
-    webgl: String(t.webglMode || '3'),
-    device_memory: String(t.deviceMemory || '8'),
-    hardware_concurrency: String(t.hardwareConcurrency || '8'),
-    screen_resolution: t.screenResolution || 'none',
+    webgl: '3',
     browser_kernel_config: { version: kernel, type: 'chrome' },
-    random_ua: { ua_browser: ['chrome'], ua_version: [kernel], ua_system_version: [t.uaSystemVersion] },
+    random_ua: { ua_browser: ['chrome'], ua_version: [kernel], ua_system_version: uaSystemVersions },
     do_not_track: 'default',
     flash: 'block',
     scan_port_type: '1',
   };
-  // webgl='2' 才带 config（'3' 带会被忽略、护栏拦）。
-  if (String(t.webglMode) === '2' && t.webglRenderer) {
-    fp.webgl_config = { unmasked_vendor: t.webglVendor || '', unmasked_renderer: t.webglRenderer };
-  }
 
   const g = validateGuardrails(fp);
   const a = assertOsCoherent(t, fp);
-  const violations = [...templateViolations, ...g.violations, ...a.violations];
-  if (violations.length > 0) return { ok: false, violations, template: t };
-  return { ok: true, fingerprintConfig: fp, violations: [], template: t };
+  const violations = [...familyViolations, ...g.violations, ...a.violations];
+  if (violations.length > 0) return { ok: false, violations, osFamily: t, template: t };
+  return { ok: true, fingerprintConfig: fp, violations: [], osFamily: t, template: t };
 }
 
+function normalizeOsFamilyKey(key) {
+  const raw = String(key || '').trim().toLowerCase();
+  return LEGACY_OS_FAMILY_ALIASES[raw] || raw;
+}
+
+function getOsFamily(key) {
+  const normalized = normalizeOsFamilyKey(key);
+  return OS_FAMILIES.find((t) => t.key === normalized);
+}
+
+// Compatibility for old callers/tests. This resolves to an OS family, not a
+// complete machine template.
 function getTemplate(key) {
-  return DEVICE_TEMPLATES.find((t) => t.key === key);
+  return getOsFamily(key);
 }
 
 module.exports = {
-  DEVICE_TEMPLATES,
+  OS_FAMILIES,
+  // Compatibility export for legacy template callers. Do not add fixed machine
+  // shapes here; the canonical list is OS_FAMILIES.
+  DEVICE_TEMPLATES: OS_FAMILIES,
   POWERS_OF_2,
   REALISTIC_CORES,
   ALLOWED_WEBRTC,
@@ -199,5 +223,7 @@ module.exports = {
   validateGuardrails,
   assertOsCoherent,
   buildFingerprintConfig,
+  normalizeOsFamilyKey,
+  getOsFamily,
   getTemplate,
 };

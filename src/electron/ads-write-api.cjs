@@ -138,7 +138,7 @@ function createAdsWriteApi(deps = {}) {
       fingerprint_config: fingerprintConfig,
     };
     if (name) body.name = String(name);
-    if (remark != null) body.remark = String(remark); // 承载意图账号/模板/机器（随 user/list 读回）
+    if (remark != null) body.remark = String(remark); // 承载意图账号/OS family/机器（随 user/list 读回）
     if (accountImport) {
       const account = accountImport;
       if (account.domainName) body.domain_name = String(account.domainName);

@@ -31,7 +31,7 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   adsStatus: (opts) => ipcRenderer.invoke('ads:status', opts),
   adsListProfiles: (opts) => ipcRenderer.invoke('ads:listProfiles', opts),
   adsOpenCreate: () => ipcRenderer.invoke('ads:openCreate'),
-  // 「创建环境」程序化建号：整机模板清单 + 建一个环境（可选 proxy 表单输入，缺省 no_proxy）。
+  // 「创建环境」程序化建号：OS family 清单 + 建一个环境（可选 proxy 表单输入，缺省 no_proxy）。
   adsTemplates: () => ipcRenderer.invoke('ads:templates'),
   adsCreateEnv: (opts) => ipcRenderer.invoke('ads:createEnv', opts),
   // 删除环境（仅由界面逐个二次确认触发）：opts { userId, apiKey?, apiBase? }。

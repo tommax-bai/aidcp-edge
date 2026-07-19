@@ -1711,7 +1711,7 @@ body { margin: 0; }
 .ads-env-msg { color: var(--mute); font-size: 12px; min-height: 14px; }
 .ads-env-msg.error { color: #b91c1c; }
 .ads-create-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-/* 平台下拉按内容收窄（选项短），系统模板下拉占满余量（选项长，避免截断） */
+/* 平台下拉按内容收窄，操作系统下拉占满余量。 */
 .ads-create-row #ads-platform { flex: 0 0 auto; width: auto; }
 .ads-create-row #ads-fb-create-mode { flex: 0 0 auto; width: auto; }
 .ads-create-row #ads-template { flex: 1 1 150px; }

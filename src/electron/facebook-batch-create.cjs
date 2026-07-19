@@ -80,27 +80,27 @@ function createFacebookBatchPlan({
   accountEntries,
   proxyType,
   proxyText,
-  templateKeys,
+  osFamilyKeys,
   randomIndex = defaultRandomIndex,
 } = {}) {
   const accounts = Array.isArray(accountEntries) ? accountEntries : [];
   if (accounts.length === 0) {
     return { ok: false, error: '批量新建请至少粘贴一条 Facebook 账号资料' };
   }
-  const templates = Array.isArray(templateKeys)
-    ? templateKeys.map((key) => String(key || '').trim()).filter(Boolean)
+  const osFamilies = Array.isArray(osFamilyKeys)
+    ? osFamilyKeys.map((key) => String(key || '').trim()).filter(Boolean)
     : [];
-  if (templates.length === 0) {
-    return { ok: false, error: '当前没有可用的整机模板' };
+  if (osFamilies.length === 0) {
+    return { ok: false, error: '当前没有可用的操作系统选项' };
   }
   const parsedProxies = parseFacebookBatchProxies({ proxyType, proxyText });
   if (!parsedProxies.ok) return parsedProxies;
 
   const plan = [];
   for (let i = 0; i < accounts.length; i += 1) {
-    const templateIndex = Number(randomIndex(templates.length));
-    if (!Number.isInteger(templateIndex) || templateIndex < 0 || templateIndex >= templates.length) {
-      return { ok: false, error: '随机模板选择器返回了无效索引' };
+    const osFamilyIndex = Number(randomIndex(osFamilies.length));
+    if (!Number.isInteger(osFamilyIndex) || osFamilyIndex < 0 || osFamilyIndex >= osFamilies.length) {
+      return { ok: false, error: '随机操作系统选择器返回了无效索引' };
     }
     const proxy = parsedProxies.noProxy
       ? { ...NO_PROXY_INPUT }
@@ -108,7 +108,7 @@ function createFacebookBatchPlan({
     plan.push({
       accountImport: accounts[i],
       accountLine: i + 1,
-      templateKey: templates[templateIndex],
+      osFamilyKey: osFamilies[osFamilyIndex],
       proxy,
     });
   }

@@ -4,13 +4,13 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const fp = require('../../src/electron/ads-fingerprint.cjs') as {
-  DEVICE_TEMPLATES: Array<{ key: string; os: string; uaSystemVersion: string; webglMode: string; deviceMemory: string }>;
+  OS_FAMILIES: Array<{ key: string; label: string; os: string; uaSystemVersions: string[] }>;
   ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS: string[];
   FINGERPRINT_UI_LANGUAGE: string[];
   validateGuardrails: (f: Record<string, unknown>) => { ok: boolean; violations: string[] };
   assertOsCoherent: (t: { os: string }, f: Record<string, unknown>) => { ok: boolean; violations: string[] };
   buildFingerprintConfig: (t: unknown) => { ok: boolean; fingerprintConfig?: Record<string, any>; violations: string[] };
-  getTemplate: (k: string) => { os: string } | undefined;
+  getOsFamily: (k: string) => { key: string; os: string } | undefined;
   osFromRenderer: (r: string) => string;
   osFromUaSystemVersion: (s: string) => string;
   osFromFonts: (f: string[]) => string;
@@ -56,7 +56,7 @@ test('护栏: fonts 跨 OS 混装被拒', () => {
 });
 
 // ── 四者一致断言：H6 现场（Mac 画像 + Windows renderer） ──
-test('断言: Mac 模板 + Windows/Direct3D11 renderer → 违规', () => {
+test('断言: macOS family + Windows/Direct3D11 renderer → 违规', () => {
   const macTpl = { os: 'macos' };
   const badFp = {
     random_ua: { ua_system_version: ['Mac OS X 13'] },
@@ -88,50 +88,49 @@ test('osFromRenderer/osFromUaSystemVersion 家族判定', () => {
   assert.equal(fp.osFromUaSystemVersion('Windows 10'), 'windows');
 });
 
-// ── 所有内置模板都能构造出自洽合法环境、且都显式 pin 桌面 OS ──
-test('所有 DEVICE_TEMPLATES 构造出 ok 且自洽，均 pin 桌面 OS', () => {
-  assert.ok(fp.DEVICE_TEMPLATES.length >= 4);
-  for (const t of fp.DEVICE_TEMPLATES) {
+// ── OS family 只约束操作系统；其余指纹由 AdsPower 在 user/create 内生成 ──
+test('所有 OS_FAMILIES 构造出 ok 且只 pin 桌面 OS family', () => {
+  assert.deepEqual(fp.OS_FAMILIES.map((item) => item.key), ['windows', 'macos']);
+  for (const t of fp.OS_FAMILIES) {
     const r = fp.buildFingerprintConfig(t);
     assert.equal(r.ok, true, `${t.key} 应构造成功，违规：${r.violations.join('; ')}`);
     assert.ok(['windows', 'macos'].includes(t.os), `${t.key} 必须桌面 OS`);
     const built = r.fingerprintConfig!;
     // 显式 pin OS
-    assert.ok(built.random_ua && built.random_ua.ua_system_version[0] === t.uaSystemVersion, `${t.key} 应 pin ua_system_version`);
-    assert.ok(fp.ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS.includes(t.uaSystemVersion), `${t.key} ua_system_version 必须是 AdsPower 可匹配枚举`);
-    // 噪声开、webrtc 非 local/real、device_memory 2 的幂
+    assert.deepEqual(built.random_ua.ua_system_version, [...t.uaSystemVersions], `${t.key} 应 pin OS family 枚举`);
+    for (const version of t.uaSystemVersions) {
+      assert.ok(fp.ADSPOWER_DESKTOP_UA_SYSTEM_VERSIONS.includes(version), `${t.key} ua_system_version 必须是 AdsPower 可匹配枚举`);
+    }
+    // 噪声开、webrtc 非 local/real、地理位置策略保留
     assert.equal(built.canvas, '1');
     assert.notEqual(built.webrtc, 'local');
     assert.equal(built.location, 'block', `${t.key} 应默认拒绝页面地理位置授权`);
     assert.equal(built.location_switch, '1', `${t.key} 指纹地理位置仍应随代理 IP`);
-    assert.ok(['2', '4', '8', '16'].includes(built.device_memory));
-    // webgl='3' 不带 config；'2' 带 OS 匹配 renderer
-    if (built.webgl === '3') assert.equal(built.webgl_config, undefined, `${t.key} webgl='3' 不应带 config`);
-    if (built.webgl === '2') assert.ok(built.webgl_config && built.webgl_config.unmasked_renderer, `${t.key} webgl='2' 应带 renderer`);
+    assert.equal(built.webgl, '3', `${t.key} 应委托 AdsPower 随机匹配 WebGL`);
+    assert.equal(built.webgl_config, undefined, `${t.key} 不应固定 renderer`);
+    assert.equal(built.device_memory, undefined, `${t.key} 不应固定内存`);
+    assert.equal(built.hardware_concurrency, undefined, `${t.key} 不应固定 CPU 核数`);
+    assert.equal(built.screen_resolution, undefined, `${t.key} 不应固定分辨率`);
   }
 });
 
 test('AdsPower 不支持的 ua_system_version 在提交前被拒', () => {
-  const template = {
+  const osFamily = {
     key: 'bad-macos',
     os: 'macos',
-    uaSystemVersion: 'Mac OS X 14_4',
+    uaSystemVersions: ['Mac OS X 14_4'],
     kernel: '148',
-    deviceMemory: '16',
-    hardwareConcurrency: '12',
-    screenResolution: '1512_982',
-    webglMode: '3',
   };
-  const r = fp.buildFingerprintConfig(template);
+  const r = fp.buildFingerprintConfig(osFamily);
   assert.equal(r.ok, false);
   assert.match(r.violations.join('; '), /ua_system_version=Mac OS X 14_4/);
   assert.match(r.violations.join('; '), /AdsPower 支持枚举/);
 });
 
 // ── C1（facebook-locale-pin-en-us）：界面语言钉死 en-US、时区仍随 IP、pin 不触发一致性拒建 ──
-test('语言 pin: 每个模板产物 language=[en-US]、language_switch 关闭、时区仍 based-on-IP', () => {
+test('语言 pin: 每个 OS family 产物 language=[en-US]、language_switch 关闭、时区仍 based-on-IP', () => {
   assert.deepEqual(fp.FINGERPRINT_UI_LANGUAGE, ['en-US'], '语言常量单点应为 en-US');
-  for (const t of fp.DEVICE_TEMPLATES) {
+  for (const t of fp.OS_FAMILIES) {
     const r = fp.buildFingerprintConfig(t);
     assert.equal(r.ok, true, `${t.key}: ${r.violations.join('; ')}`);
     const built = r.fingerprintConfig!;
@@ -142,7 +141,7 @@ test('语言 pin: 每个模板产物 language=[en-US]、language_switch 关闭�
 });
 
 test('语言 pin: language 不进四者一致断言，pin en-US 不触发 coherence 拒建', () => {
-  const macTpl = fp.DEVICE_TEMPLATES.find((t) => t.os === 'macos')!;
+  const macTpl = fp.OS_FAMILIES.find((t) => t.os === 'macos')!;
   const r = fp.buildFingerprintConfig(macTpl);
   assert.equal(r.ok, true, r.violations.join('; '));
   const a = fp.assertOsCoherent(macTpl, r.fingerprintConfig!);
@@ -150,11 +149,12 @@ test('语言 pin: language 不进四者一致断言，pin en-US 不触发 cohere
   assert.doesNotMatch(a.violations.join(), /language|语言/, 'language 不是 OS 一致性字段');
 });
 
-test("webgl='2' 内置模板的 renderer 与其声明 OS 家族一致", () => {
-  for (const t of fp.DEVICE_TEMPLATES.filter((x) => x.webglMode === '2')) {
-    const r = fp.buildFingerprintConfig(t);
-    assert.equal(r.ok, true, `${t.key}: ${r.violations.join('; ')}`);
-    const rOs = fp.osFromRenderer(r.fingerprintConfig!.webgl_config.unmasked_renderer);
-    assert.equal(rOs, t.os, `${t.key} renderer OS 应 == ${t.os}`);
-  }
+test('legacy machine template keys map to OS families without restoring fixed shapes', () => {
+  assert.equal(fp.getOsFamily('win11-intel')?.key, 'windows');
+  assert.equal(fp.getOsFamily('win11-nvidia-custom')?.key, 'windows');
+  assert.equal(fp.getOsFamily('macos-m2')?.key, 'macos');
+  const r = fp.buildFingerprintConfig(fp.getOsFamily('win11-nvidia-custom'));
+  assert.equal(r.ok, true, r.violations.join('; '));
+  assert.equal(r.fingerprintConfig!.webgl_config, undefined, 'legacy key must not restore fixed NVIDIA renderer');
+  assert.equal(r.fingerprintConfig!.device_memory, undefined, 'legacy key must not restore fixed memory');
 });

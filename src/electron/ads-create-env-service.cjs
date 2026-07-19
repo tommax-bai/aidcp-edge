@@ -59,6 +59,7 @@ async function createEnvironmentWithGroupRecovery({
   adsApi,
   fingerprint,
   adsOpts,
+  osFamilyKey,
   templateKey,
   intendedAccountLabel,
   machineLabel,
@@ -77,6 +78,7 @@ async function createEnvironmentWithGroupRecovery({
 
     const flow = createFlowFactory({ writeApi, fingerprint });
     const result = await flow.createEnvironment({
+      osFamilyKey,
       templateKey,
       intendedAccountLabel,
       machineLabel,

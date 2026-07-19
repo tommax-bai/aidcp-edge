@@ -571,7 +571,7 @@
     </dialog>
 
     <!-- ═══ 添加/创建环境面板（edge-fleet-rail-env-management）：由左栏「＋」拉起的独立浮层，
-         集中做「加入现有 AdsPower 环境（多选）」与「新建指纹环境（模板 + 平台）」；
+         集中做「加入现有 AdsPower 环境（多选）」与「新建指纹环境（操作系统 + 平台）」；
          加入即落盘并作为离线行出现在左栏（根治「加入后左栏不显示」）。 ═══ -->
     <div id="env-add-mask" class="pop-mask hidden"></div>
     <aside id="env-add-panel" class="env-add-panel hidden" aria-hidden="true" aria-label="添加环境">
@@ -624,13 +624,13 @@
             <option value="single">单个新建</option>
             <option value="batch">批量新建</option>
           </select>
-          <select id="ads-template" class="ads-template" aria-label="整机模板"></select>
+          <select id="ads-template" class="ads-template" aria-label="操作系统"></select>
           <button id="ads-create" class="ads-create-btn" type="button">创建环境</button>
         </div>
         <label id="ads-fb-import-wrap" class="field ads-fb-import hidden">
           <span class="field-label">Facebook 账号资料 <em id="ads-fb-import-requirement" class="opt">可选</em></span>
           <textarea id="ads-fb-import" rows="4" spellcheck="false" autocomplete="off" placeholder="email----password----2FA----cookie"></textarea>
-          <span id="ads-fb-batch-account-help" class="subtle hidden">每行一个账号；每个账号将独立随机分配一套完整环境模板。</span>
+          <span id="ads-fb-batch-account-help" class="subtle hidden">每行一个账号；每个账号将独立随机分配操作系统，其余指纹由 AdsPower 生成。</span>
         </label>
         <div class="proxy-form">
           <div class="proxy-row">

@@ -17,7 +17,7 @@ const {
   };
   createFacebookBatchPlan: (input: Record<string, unknown>) => {
     ok: boolean;
-    plan?: Array<{ accountImport: unknown; accountLine: number; templateKey: string; proxy: Record<string, string> }>;
+    plan?: Array<{ accountImport: unknown; accountLine: number; osFamilyKey: string; proxy: Record<string, string> }>;
     proxyCount?: number;
     error?: string;
   };
@@ -91,14 +91,14 @@ test('parseFacebookBatchProxies: 非法后置行只报告安全行号，不回�
   assert.doesNotMatch(String(result.error), /bad\.example|secret-user|secret-pass/);
 });
 
-test('createFacebookBatchPlan: 五个账号按 A/B/A/B/A 轮询代理，并独立选择完整模板', () => {
+test('createFacebookBatchPlan: 五个账号按 A/B/A/B/A 轮询代理，并独立选择 OS family', () => {
   const accounts = Array.from({ length: 5 }, (_, index) => ({ username: `account-${index + 1}` }));
-  const picks = [2, 0, 1, 2, 0];
+  const picks = [1, 0, 1, 1, 0];
   const result = createFacebookBatchPlan({
     accountEntries: accounts,
     proxyType: 'http',
     proxyText: 'proxy-a:8001\nproxy-b:8002',
-    templateKeys: ['tpl-a', 'tpl-b', 'tpl-c'],
+    osFamilyKeys: ['windows', 'macos'],
     randomIndex: () => picks.shift(),
   });
   assert.equal(result.ok, true);
@@ -106,8 +106,8 @@ test('createFacebookBatchPlan: 五个账号按 A/B/A/B/A 轮询代理，并独�
   assert.deepEqual(result.plan?.map((item) => item.proxy.proxyHost), [
     'proxy-a', 'proxy-b', 'proxy-a', 'proxy-b', 'proxy-a',
   ]);
-  assert.deepEqual(result.plan?.map((item) => item.templateKey), [
-    'tpl-c', 'tpl-a', 'tpl-b', 'tpl-c', 'tpl-a',
+  assert.deepEqual(result.plan?.map((item) => item.osFamilyKey), [
+    'macos', 'windows', 'macos', 'macos', 'windows',
   ]);
   assert.deepEqual(result.plan?.map((item) => item.accountLine), [1, 2, 3, 4, 5]);
   assert.equal(result.plan?.[3].accountImport, accounts[3]);
@@ -118,7 +118,7 @@ test('createFacebookBatchPlan: 无代理时每个账号显式获得独立 no_pro
     accountEntries: [{ username: 'a' }, { username: 'b' }],
     proxyType: 'no_proxy',
     proxyText: '',
-    templateKeys: ['tpl-a'],
+    osFamilyKeys: ['windows'],
     randomIndex: () => 0,
   });
   assert.equal(result.ok, true);
@@ -129,23 +129,23 @@ test('createFacebookBatchPlan: 无代理时每个账号显式获得独立 no_pro
   assert.notEqual(result.plan?.[0].proxy, result.plan?.[1].proxy);
 });
 
-test('createFacebookBatchPlan: 缺账号、缺模板或随机索引越界均诚实拒绝', () => {
-  const missingAccounts = createFacebookBatchPlan({ accountEntries: [], templateKeys: ['tpl'] });
+test('createFacebookBatchPlan: 缺账号、缺 OS family 或随机索引越界均诚实拒绝', () => {
+  const missingAccounts = createFacebookBatchPlan({ accountEntries: [], osFamilyKeys: ['windows'] });
   assert.equal(missingAccounts.ok, false);
   assert.match(String(missingAccounts.error), /至少.*账号/);
 
-  const missingTemplates = createFacebookBatchPlan({ accountEntries: [{}], templateKeys: [] });
-  assert.equal(missingTemplates.ok, false);
-  assert.match(String(missingTemplates.error), /模板/);
+  const missingOsFamilies = createFacebookBatchPlan({ accountEntries: [{}], osFamilyKeys: [] });
+  assert.equal(missingOsFamilies.ok, false);
+  assert.match(String(missingOsFamilies.error), /操作系统/);
 
   const badRandom = createFacebookBatchPlan({
     accountEntries: [{}],
     proxyType: 'no_proxy',
-    templateKeys: ['tpl'],
+    osFamilyKeys: ['windows'],
     randomIndex: () => 1,
   });
   assert.equal(badRandom.ok, false);
-  assert.match(String(badRandom.error), /随机模板/);
+  assert.match(String(badRandom.error), /随机操作系统/);
 });
 
 test('validateCreationCapacity: 整批超过剩余容量时在写入前拒绝', () => {

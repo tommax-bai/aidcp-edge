@@ -63,7 +63,7 @@ interface Stub {
   adsListProfiles: (opts?: unknown) => Promise<unknown>;
   adsOpenCreate: () => { launched: boolean } | Promise<{ launched: boolean }>;
   adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
-  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string; requiresAdminAssignment?: boolean; assignmentHandledByMain?: boolean; rosterJoinedByMain?: boolean }>;
+  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; osFamily?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string; requiresAdminAssignment?: boolean; assignmentHandledByMain?: boolean; rosterJoinedByMain?: boolean }>;
   adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string; cleanupPending?: boolean; message?: string }>;
   setSlowStart: (opts: { envKey: string; enabled: boolean }) => Promise<unknown>;
   // 不依赖边缘的慢启动读（change slow-start-offline-toggle）：可选——不提供即模拟老客户端退化路径。
@@ -89,8 +89,8 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     adsStatus: async () => ({ ok: true }),
     adsListProfiles: async () => ({ ok: true, profiles: [] }),
     adsOpenCreate: () => ({ launched: true }),
-    adsTemplates: async () => [{ key: 'win11-intel', label: 'Windows · 8核 8G' }],
-    adsCreateEnv: async () => ({ ok: true, template: 'win11-intel' }),
+    adsTemplates: async () => [{ key: 'windows', label: 'Windows' }, { key: 'macos', label: 'macOS' }],
+    adsCreateEnv: async () => ({ ok: true, osFamily: 'windows' }),
     adsDeleteEnv: async () => ({ ok: true }),
     setSlowStart: async () => ({ ok: false, data: { message: '测试桩未配置慢启动写入' } }),
     ...overrides,
@@ -328,22 +328,22 @@ test('暂停态点击关闭：调用显式 close 并切到已关闭/启动', asy
   assert.ok($(w, '#session-close').classList.contains('hidden'));
 });
 
-test('程序化建号：填充模板下拉、点「创建环境」→ 传选中模板、成功提示 + 刷新', async () => {
-  let sentTemplate = '';
+test('程序化建号：填充操作系统下拉、点「创建环境」→ 传选中 OS family、成功提示 + 刷新', async () => {
+  let sentOsFamily = '';
   const w = await boot(makeStub({
     adsCreateEnv: async (opts) => {
-      sentTemplate = (opts as { templateKey?: string }).templateKey ?? '';
-      return { ok: true, template: sentTemplate };
+      sentOsFamily = (opts as { osFamilyKey?: string }).osFamilyKey ?? '';
+      return { ok: true, osFamily: sentOsFamily };
     },
   }));
   for (let i = 0; i < 3; i++) await tick(); // flush populateTemplates()
   const sel = $(w, '#ads-template') as unknown as HTMLSelectElement;
-  assert.ok(sel.options.length >= 1, '模板下拉应被填充');
-  assert.equal(sel.value, 'win11-intel');
+  assert.ok(sel.options.length >= 1, '操作系统下拉应被填充');
+  assert.equal(sel.value, 'windows');
 
   $(w, '#ads-create').dispatchEvent(new w.Event('click'));
   for (let i = 0; i < 3; i++) await tick();
-  assert.equal(sentTemplate, 'win11-intel', '应把选中模板传给 adsCreateEnv');
+  assert.equal(sentOsFamily, 'windows', '应把选中 OS family 传给 adsCreateEnv');
   assert.match($(w, '#ads-create-msg').textContent ?? '', /已创建环境/);
 });
 
@@ -353,7 +353,7 @@ test('新增环境可选择视频号，并以 wechat_channels 创建、入册和
   const w = await boot(makeStub({
     adsCreateEnv: async (opts) => {
       sent = opts as Record<string, unknown>;
-      return { ok: true, userId: 'u_wechat', name: '视频号环境', template: 'win11-intel', platform: 'wechat_channels' };
+      return { ok: true, userId: 'u_wechat', name: '视频号环境', osFamily: 'windows', platform: 'wechat_channels' };
     },
     saveSettings: async (patch) => {
       savedEnvironments = ((patch as { environments?: Array<{ profileId: string; name: string; platform: string }> }).environments || []);
@@ -381,7 +381,7 @@ test('新增环境可选择视频号，并以 wechat_channels 创建、入册和
   assert.match($(w, '#ads-create-msg').textContent ?? '', /已自动选中/);
 });
 
-test('Facebook 批量新建：显式模式、隐藏模板、多行账号代理透传且成功回执不泄密', async () => {
+test('Facebook 批量新建：显式模式、隐藏操作系统下拉、多行账号代理透传且成功回执不泄密', async () => {
   let sent: Record<string, unknown> = {};
   const secretLine = 'a@example.com----pw-secret----KEYSECRET----c_user=100000000000001; xs=TOKEN';
   const proxySecret = 'proxy.example:8080:proxy-user:proxy-pass';
@@ -391,7 +391,7 @@ test('Facebook 批量新建：显式模式、隐藏模板、多行账号代理�
       return {
         ok: true,
         createdCount: 2,
-        created: [{ userId: 'u1', template: 'win11-intel' }, { userId: 'u2', template: 'macos-m2' }],
+        created: [{ userId: 'u1', osFamily: 'windows' }, { userId: 'u2', osFamily: 'macos' }],
         platform: 'facebook',
         creationMode: 'batch',
       };
@@ -406,12 +406,12 @@ test('Facebook 批量新建：显式模式、隐藏模板、多行账号代理�
   platform.dispatchEvent(new w.Event('change'));
   assert.ok(!$(w, '#ads-fb-import-wrap').classList.contains('hidden'), 'Facebook 平台显示导入框');
   assert.ok(!$(w, '#ads-fb-create-mode').classList.contains('hidden'), 'Facebook 平台显示创建方式');
-  assert.ok(!$(w, '#ads-template').classList.contains('hidden'), 'Facebook 单个新建仍显示模板');
+  assert.ok(!$(w, '#ads-template').classList.contains('hidden'), 'Facebook 单个新建仍显示操作系统');
 
   const mode = $(w, '#ads-fb-create-mode') as HTMLSelectElement;
   mode.value = 'batch';
   mode.dispatchEvent(new w.Event('change'));
-  assert.ok($(w, '#ads-template').classList.contains('hidden'), '批量新建不可选择模板');
+  assert.ok($(w, '#ads-template').classList.contains('hidden'), '批量新建不可选择操作系统');
   assert.equal($(w, '#ads-create').textContent, '批量创建');
   assert.match($(w, '#ads-fb-import-requirement').textContent ?? '', /必填/);
   ($(w, '#ads-fb-import') as HTMLTextAreaElement).value = `${secretLine}\n${secretLine}`;
@@ -425,7 +425,7 @@ test('Facebook 批量新建：显式模式、隐藏模板、多行账号代理�
   for (let i = 0; i < 4; i++) await tick();
   assert.equal(sent.platform, 'facebook');
   assert.equal(sent.creationMode, 'batch');
-  assert.equal(sent.templateKey, '', '批量模式不把渲染层模板值交给主进程');
+  assert.equal(sent.osFamilyKey, '', '批量模式不把渲染层 OS family 值交给主进程');
   assert.equal(sent.facebookAccountImport, `${secretLine}\n${secretLine}`);
   assert.equal(sent.batchProxyType, 'socks5');
   assert.equal(sent.facebookProxyBatch, `${proxySecret}\nproxy-b.example:8081`);
@@ -450,7 +450,7 @@ test('Facebook 批量部分失败：刷新已建环境并保留一次性输入�
       ok: false,
       error: '第 2 个账号创建失败：AdsPower 暂不可用；已创建 1 个环境，后续账号尚未创建',
       createdCount: 1,
-      created: [{ userId: 'u1', template: 'win11-intel' }],
+      created: [{ userId: 'u1', osFamily: 'windows' }],
       failedIndex: 2,
       partial: true,
     }),
@@ -489,7 +489,7 @@ test('程序化建号成功返回 userId → 自动选中新环境，启动可�
         { userId: 'u_new', serialNumber: '2', name: '新环境', groupName: 'g', proxy: 'p' },
       ],
     }),
-    adsCreateEnv: async () => ({ ok: true, userId: 'u_new', template: 'win11-intel' }),
+    adsCreateEnv: async () => ({ ok: true, userId: 'u_new', osFamily: 'windows' }),
     saveSettings: async (patch) => {
       calls.push(`save:${(patch as { adsProfileId?: string }).adsProfileId || ''}`);
       return { provider: 'adspower', adsProfileId: 'u_new', saveOk: true };
@@ -848,11 +848,11 @@ test('创建环境：回执带回真名 → 花名册落盘真名（不再空名
     adsStatus: async () => ({ ok: true }),
     // 新建后紧接着的自动刷新里 user/list 尚未带出新环境（传播延迟）——正是需要「回执带名」兜住的场景
     adsListProfiles: async () => ({ ok: true, profiles: [] }),
-    adsTemplates: async () => [{ key: 'win11-intel', label: 'Windows · 8核 8G' }],
-    adsCreateEnv: async () => ({ ok: true, userId: 'newu', name: '我的新环境', platform: 'xiaohongshu', template: 'win11-intel' }),
+    adsTemplates: async () => [{ key: 'windows', label: 'Windows' }],
+    adsCreateEnv: async () => ({ ok: true, userId: 'newu', name: '我的新环境', platform: 'xiaohongshu', osFamily: 'windows' }),
     saveSettings: async (patch: unknown) => { saved.push((patch as Record<string, unknown>) || {}); return { provider: 'adspower', ...(patch as object), saveOk: true }; },
   }));
-  (($(w, '#ads-template')) as unknown as { value: string }).value = 'win11-intel';
+  (($(w, '#ads-template')) as unknown as { value: string }).value = 'windows';
   $(w, '#ads-create').dispatchEvent(new w.Event('click'));
   for (let i = 0; i < 6; i++) await tick();
   const persisted = savedEnvsOf(saved, 'newu');
