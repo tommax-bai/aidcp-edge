@@ -5,7 +5,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { WechatChannelsApiClient } from '../../src/wechat-channels/api-client.js';
 import { WechatAuthCoordinator } from '../../src/wechat-channels/auth-session.js';
-import { captureRequestContext, type WechatChannelsBrowserSidecar } from '../../src/wechat-channels/browser-sidecar.js';
+import {
+  captureRequestContext,
+  safeBrowserSidecarDiagnostic,
+  type WechatChannelsBrowserSidecar,
+} from '../../src/wechat-channels/browser-sidecar.js';
 import { EncryptedWechatSessionStore } from '../../src/wechat-channels/encrypted-session-store.js';
 import { WechatChannelsError } from '../../src/wechat-channels/error-classifier.js';
 import {
@@ -37,22 +41,27 @@ async function withTempDir(run: (root: string) => Promise<void>): Promise<void> 
 
 class FakeSidecar implements WechatChannelsBrowserSidecar {
   readonly browserProfileId = SCOPE.browserProfileId;
-  state: 'closed' | 'open' = 'closed';
+  state: 'closed' | 'open' | 'unavailable' = 'closed';
   opens = 0;
   closes = 0;
 
   constructor(
     private readonly candidate: WechatSessionMaterial | null,
     private readonly onOpen?: () => void,
+    private readonly openError?: Error,
   ) {}
 
-  getState(): 'closed' | 'open' {
+  getState(): 'closed' | 'open' | 'unavailable' {
     return this.state;
   }
 
   async open(): Promise<void> {
     this.onOpen?.();
     this.opens++;
+    if (this.openError) {
+      this.state = 'unavailable';
+      throw this.openError;
+    }
     this.state = 'open';
   }
 
@@ -81,6 +90,14 @@ function memoryStore(): EncryptedWechatSessionStore {
     load: async () => stored,
     save: async (next: typeof stored) => { stored = { ...next, legacyBindingMigrated: false }; },
     clear: async () => { stored = null as unknown as typeof stored; },
+  } as unknown as EncryptedWechatSessionStore;
+}
+
+function emptyMemoryStore(): EncryptedWechatSessionStore {
+  return {
+    load: async () => null,
+    save: async () => {},
+    clear: async () => {},
   } as unknown as EncryptedWechatSessionStore;
 }
 
@@ -324,6 +341,85 @@ test('wechat auth: expired stored session logs its reason before browser reauthe
   assert.equal(sidecar.closes, 1);
   assert.equal(auth.getSnapshot().state, 'api_only_running');
   assert.doesNotMatch(logs.join('\n'), /cookie-top-secret|raw-key-test|finder-a|synthetic expired session/);
+});
+
+test('wechat auth: expired session browser launch failure returns to reauth_required with a safe code', async () => {
+  const logs: string[] = [];
+  const sidecar = new FakeSidecar(
+    null,
+    undefined,
+    new Error('AdsPower rejected Authorization=Bearer top-secret cookie=cookie-top-secret'),
+  );
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api: {
+      getIdentity: async () => {
+        throw new WechatChannelsError('auth_expired', 'authData', 'stored session expired', false);
+      },
+    } as unknown as WechatChannelsApiClient,
+    sidecar,
+    store: memoryStore(),
+    probeEnabledReads: async () => ({ ok: true }),
+    logImpl: (message) => logs.push(message),
+  });
+
+  await assert.rejects(auth.initialize(), (error: unknown) => {
+    assert.ok(error instanceof WechatChannelsError);
+    assert.equal(error.code, 'WECHAT_AUTH_REQUIRED');
+    assert.equal(error.endpoint, 'browser_login');
+    return true;
+  });
+  assert.equal(auth.getSnapshot().state, 'reauth_required');
+  assert.equal(auth.getSnapshot().status, 'reauth_required');
+  assert.equal(auth.getSnapshot().reasonCode, 'WECHAT_AUTH_REQUIRED');
+  assert.equal(auth.getSnapshot().browserState, 'unavailable');
+  assert.ok(logs.some((line) => line.includes('state=reauth_required action=customer_retry')));
+  assert.doesNotMatch(logs.join('\n'), /top-secret|cookie-top-secret|Authorization|stored session expired/);
+});
+
+test('wechat auth: first-login browser launch failure returns to login_required and remains retryable', async () => {
+  const sidecar = new FakeSidecar(null, undefined, new Error('local browser unavailable'));
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api: apiReturning(IDENTITY),
+    sidecar,
+    store: emptyMemoryStore(),
+    probeEnabledReads: async () => ({ ok: true }),
+    logImpl: () => {},
+  });
+
+  await assert.rejects(auth.initialize(), (error: unknown) => {
+    assert.ok(error instanceof WechatChannelsError);
+    assert.equal(error.code, 'WECHAT_AUTH_REQUIRED');
+    return true;
+  });
+  assert.equal(auth.getSnapshot().state, 'browser_login_required');
+  assert.equal(auth.getSnapshot().status, 'login_required');
+  assert.equal(auth.getSnapshot().reasonCode, 'WECHAT_AUTH_REQUIRED');
+  assert.equal(auth.getSnapshot().browserState, 'unavailable');
+});
+
+test('wechat browser diagnostic exposes only whitelist fields', () => {
+  const diagnostic = safeBrowserSidecarDiagnostic(new Error(
+    '[aidcp-edge] AdsPower browser-profile/start 失败：code=-321 msg=Authorization Bearer api-key-secret '
+      + 'cookie=cookie-top-secret https://local.adspower.net/start?token=query-secret',
+  ));
+  assert.equal(
+    diagnostic,
+    'provider=adspower operation=browser-profile/start kind=provider_rejected provider_code=-321',
+  );
+  assert.doesNotMatch(diagnostic, /Authorization|Bearer|api-key-secret|cookie|top-secret|https|query-secret/);
+
+  assert.equal(
+    safeBrowserSidecarDiagnostic(new Error('[aidcp-edge] AdsPower browser-profile/start 响应异常：HTTP 503')),
+    'provider=adspower operation=browser-profile/start kind=http_error http_status=503',
+  );
+  assert.equal(
+    safeBrowserSidecarDiagnostic(new Error('opaque secret payload')),
+    'provider=browser operation=sidecar.open kind=unexpected',
+  );
 });
 
 test('wechat auth: active API-only session can open a visible browser and return to background idempotently', async () => {

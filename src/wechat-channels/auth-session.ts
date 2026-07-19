@@ -495,7 +495,23 @@ export class WechatAuthCoordinator {
 
   private async runBrowserAuthentication(): Promise<void> {
     this.transition('browser_opening', this.reasonCode);
-    await this.sidecar.open();
+    try {
+      await this.sidecar.open();
+    } catch {
+      // Browser launch is not an in-progress state once open() has rejected. Keep the existing auth
+      // distinction and recovery action: an expired bound session needs re-authentication, while a
+      // brand-new environment still needs first login. browserState remains independently
+      // `unavailable` on the sidecar snapshot; neither path claims auth success.
+      const fallbackState: LocalAuthState = this.session ? 'reauth_required' : 'browser_login_required';
+      this.transition(fallbackState, 'WECHAT_AUTH_REQUIRED');
+      this.log(`[wechat-channels] browser authentication unavailable state=${fallbackState} action=customer_retry`);
+      throw new WechatChannelsError(
+        'auth_expired',
+        'browser_login',
+        'Local browser is unavailable for WeChat Channels authentication',
+        false,
+      );
+    }
     this.transition('qr_waiting', this.reasonCode);
     const deadline = this.now() + this.loginTimeoutMs;
     for (;;) {

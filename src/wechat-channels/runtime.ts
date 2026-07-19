@@ -45,6 +45,10 @@ import {
 } from './protocol-validation.js';
 import { WechatChannelsProbeRunner } from './probes/black-box-probe.js';
 import { WechatRuntimeStateStore } from './state-store.js';
+import {
+  DEFAULT_WECHAT_CONTROL_PLANE_HEARTBEAT_TIMEOUT_MS,
+  WechatControlPlaneHeartbeat,
+} from './control-plane-heartbeat.js';
 
 export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver): Promise<void> {
   if (driver.platform !== 'wechat_channels') throw new Error('interaction runtime only supports wechat_channels');
@@ -151,6 +155,15 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
       }),
     },
     logger: safeLog,
+  });
+  const controlPlaneHeartbeat = new WechatControlPlaneHeartbeat({
+    intervalMs: envMs(env.AIDCP_WECHAT_CONTROL_HEARTBEAT_INTERVAL_MS, 60_000),
+    probe: () => client.request(
+      'ping',
+      {},
+      envMs(env.AIDCP_WECHAT_CONTROL_HEARTBEAT_TIMEOUT_MS, DEFAULT_WECHAT_CONTROL_PLANE_HEARTBEAT_TIMEOUT_MS),
+    ),
+    logImpl: safeLog,
   });
 
   let browserAbsent = startBrowserAbsent;
@@ -289,6 +302,10 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   });
 
   await client.connect();
+  // Start before browser authentication: Cloud presence must remain provable while login is pending
+  // or the local sidecar is unavailable. A successful pong refreshes only shell liveness; it never
+  // promotes auth/capabilities.
+  controlPlaneHeartbeat.start();
   capabilities.resetRemoteControls();
   await applyRuntimeControls(client.getInteractionRuntimeControls());
   await flushReplyResultOutbox();
@@ -305,6 +322,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   const shutdown = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    controlPlaneHeartbeat.stop();
     await connector!.stop();
     await client.closeAndWait();
     await sidecar.close().catch(() => undefined);

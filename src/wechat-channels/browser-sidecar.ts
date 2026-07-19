@@ -94,6 +94,7 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
       this.log('[wechat-channels] browser login sidecar is open');
     } catch (error) {
       this.state = 'unavailable';
+      this.log(`[wechat-channels] browser login sidecar unavailable: ${safeBrowserSidecarDiagnostic(error)}`);
       throw error;
     }
   }
@@ -154,6 +155,41 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
       throw error;
     }
   }
+}
+
+/**
+ * Whitelist-only diagnostic for provider failures. Never forward the raw error: provider messages
+ * may contain response bodies, URLs, credentials, or platform session material.
+ */
+export function safeBrowserSidecarDiagnostic(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const provider = /adspower/i.test(message) ? 'adspower' : 'browser';
+  const operationMatch = message.match(/\b(browser-profile\/(?:start|active|stop))\b/i)
+    ?? message.match(/不可达（([A-Za-z0-9/_-]{1,64})）/);
+  const operation = safeToken(operationMatch?.[1]) ?? 'sidecar.open';
+  const httpStatus = message.match(/\bHTTP\s+(\d{3})\b/i)?.[1];
+  const providerCode = safeToken(message.match(/\bcode=([A-Za-z0-9_.:-]{1,64})\b/i)?.[1]);
+  const kind = /不可达|ECONN(?:REFUSED|RESET)|fetch failed|network/i.test(message)
+    ? 'api_unreachable'
+    : /未返回有效\s*debug_port|invalid\s+debug_port/i.test(message)
+      ? 'invalid_handle'
+      : /CDP.*(?:超时|timeout)|(?:超时|timeout).*CDP/i.test(message)
+        ? 'cdp_timeout'
+        : httpStatus
+          ? 'http_error'
+          : providerCode || /失败|rejected/i.test(message)
+            ? 'provider_rejected'
+            : 'unexpected';
+  const fields = [`provider=${provider}`, `operation=${operation}`, `kind=${kind}`];
+  if (httpStatus) fields.push(`http_status=${httpStatus}`);
+  if (providerCode) fields.push(`provider_code=${providerCode}`);
+  return fields.join(' ');
+}
+
+function safeToken(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const token = value.trim();
+  return /^[A-Za-z0-9_.:/-]{1,64}$/.test(token) ? token : null;
 }
 
 export function captureRequestContext(value: unknown): WechatRequestContext | null {
