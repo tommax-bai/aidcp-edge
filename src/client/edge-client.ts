@@ -284,6 +284,13 @@ export class EdgeClient {
 
   private async openAndHello(): Promise<void> {
     await this.openSocket();
+    // 新 socket 尚未完成 hello/welcome；旧连接的协商结果绝不能跨代存活。
+    this.hasCompletedHello = false;
+    this.sessionId = undefined;
+    this.peerCapabilities.clear();
+    this.interactionRecovery = undefined;
+    this.interactionRuntime = undefined;
+    this.pacing = undefined;
     let welcome: Envelope;
     try {
       welcome = await this.request('hello', {
@@ -341,6 +348,7 @@ export class EdgeClient {
 
   private failHandshake(error: unknown): void {
     this.connected = false;
+    this.hasCompletedHello = false;
     this.sessionId = undefined;
     this.peerCapabilities.clear();
     this.interactionRecovery = undefined;

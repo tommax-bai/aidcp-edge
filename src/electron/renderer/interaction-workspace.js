@@ -196,7 +196,7 @@
       return {
         tab: 'pending', search: '', items: [], nextCursor: null, listLoading: false, listAppending: false,
         listError: null, selectedThreadId: null, detail: null, detailLoading: false, detailError: null,
-        auth: null, syncFreshness: null, pendingSync: null, stale: false,
+        auth: null, syncFreshness: null, pendingSync: null, pendingTestResets: null, stale: false,
         actionBusy: null, actionError: null, actionNotice: null, localBrowserNotice: null,
         replyConfig: null, readControlsBusy: false, readControlsError: null, readDelivery: null, configGuidanceOpen: false,
         testDataResetEnabled: false, testResetBusy: null, testResetStatus: null,
@@ -376,17 +376,37 @@
         : parsed;
       state.syncFreshness = projection;
       const pending = state.pendingSync;
-      if (!pending || pending.envKey !== selectedEnvKey()) return;
-      const completed = Boolean(projection) && pending.channels.every((channel) => {
-        const evidence = projection[channel];
-        const baseline = pending.receivedAt[channel];
-        return Boolean(evidence && evidence.receivedAt > (baseline || 0));
-      });
-      if (completed) {
-        state.actionNotice = '本次同步已有成功结果。';
-        state.pendingSync = null;
-      } else {
-        state.actionNotice = '同步请求已受理，尚未确认同步完成。';
+      if (pending && pending.envKey === selectedEnvKey()) {
+        const completed = Boolean(projection) && pending.channels.every((channel) => {
+          const evidence = projection[channel];
+          const baseline = pending.receivedAt[channel];
+          return Boolean(evidence && evidence.receivedAt > (baseline || 0));
+        });
+        if (completed) {
+          state.actionNotice = '本次同步已有成功结果。';
+          state.pendingSync = null;
+        } else {
+          state.actionNotice = '同步请求已受理，尚未确认同步完成。';
+        }
+      }
+      const pendingResets = state.pendingTestResets;
+      if (pendingResets && pendingResets.envKey === selectedEnvKey()) {
+        const completedChannels = [];
+        for (const channel of Object.keys(pendingResets.receivedAt)) {
+          const evidence = projection && projection[channel];
+          if (evidence && evidence.receivedAt > (pendingResets.receivedAt[channel] || 0)) {
+            completedChannels.push(channel);
+            delete pendingResets.receivedAt[channel];
+          }
+        }
+        if (completedChannels.length > 0) {
+          const completedLabels = completedChannels.map((channel) => channel === 'dm' ? '私信' : '评论').join('、');
+          const remainingChannels = Object.keys(pendingResets.receivedAt);
+          state.testResetStatus = remainingChannels.length > 0
+            ? `${completedLabels}已从微信平台重新拉取完成；${remainingChannels.map((channel) => channel === 'dm' ? '私信' : '评论').join('、')}仍在等待同步结果。`
+            : `${completedLabels}已从微信平台重新拉取完成。`;
+          if (remainingChannels.length === 0) state.pendingTestResets = null;
+        }
       }
     }
 
@@ -475,7 +495,7 @@
           : (channel === 'comment' ? '重置评论' : '重置私信');
       }
       if (dom.testResetStatus) {
-        dom.testResetStatus.textContent = state.testResetStatus || '每次只重置一个渠道；离线也可点，清空立即生效，联网后自动重拉。';
+        dom.testResetStatus.textContent = state.testResetStatus || '每次只重置一个渠道；离线时只清空 Cloud，连接恢复后需再次重置。';
       }
     }
 
@@ -1254,6 +1274,7 @@
       const label = channel === 'comment' ? '评论' : '私信';
       const capturedEpoch = epoch;
       const envKey = env.envKey;
+      const baselineReceivedAt = syncEvidence(channel)?.receivedAt || null;
       state.testResetBusy = channel;
       state.testResetStatus = `正在清空 Cloud ${label}副本并请求重新拉取…`;
       renderTestReset();
@@ -1271,9 +1292,19 @@
           state.detailError = null;
         }
         const resyncSkipped = Boolean(response.data && response.data.data && response.data.data.resync === 'skipped');
-        state.testResetStatus = resyncSkipped
-          ? `Cloud ${label}测试数据已清空；客户端当前离线，未自动重新拉取，联网后会自动补拉。`
-          : `Cloud ${label}测试数据已清空，正在从微信平台重新拉取。`;
+        if (resyncSkipped) {
+          state.testResetStatus = `Cloud ${label}测试数据已清空，但重拉命令未送达；连接恢复后请再次重置。`;
+        } else {
+          const pending = state.pendingTestResets && state.pendingTestResets.envKey === envKey
+            ? state.pendingTestResets
+            : { envKey, receivedAt: {} };
+          pending.receivedAt[channel] = baselineReceivedAt;
+          state.pendingTestResets = pending;
+          const labels = Object.keys(pending.receivedAt)
+            .map((pendingChannel) => pendingChannel === 'dm' ? '私信' : '评论')
+            .join('、');
+          state.testResetStatus = `Cloud ${labels}测试数据已清空；重拉请求已发送，等待同步结果。`;
+        }
         renderAll();
         global.setTimeout(() => {
           if (isCurrent(capturedEpoch, envKey)) void loadList({ preserveSelection: true });
@@ -1281,7 +1312,7 @@
       } catch (error) {
         if (!isCurrent(capturedEpoch, envKey)) return;
         state.testResetStatus = error && error.code === 'INTERACTION_TEST_RESET_PARTIAL'
-          ? `Cloud ${label}副本已清空，但自动重新拉取没有启动；确认客户端在线后可再次重置。`
+          ? `Cloud ${label}副本已清空，但重拉命令未送达；连接恢复后请再次重置。`
           : safeText(error && error.message, friendlyError(error));
       } finally {
         if (isCurrent(capturedEpoch, envKey)) {

@@ -1290,7 +1290,7 @@ test('测试数据入口默认隐藏，开启后点击即直接调用重置 IPC�
   await flush();
   assert.equal(enabled.calls.reset.length, 1);
   assert.equal(enabled.calls.reset[0].channel, 'comment');
-  assert.match($(enabled.window, '#interaction-test-reset-status').textContent || '', /已清空，正在从微信平台重新拉取/);
+  assert.match($(enabled.window, '#interaction-test-reset-status').textContent || '', /重拉请求已发送，等待同步结果/);
 });
 
 test('确认开发环境评论重置后只清本地评论视图并等待真实重拉', async () => {
@@ -1304,7 +1304,7 @@ test('确认开发环境评论重置后只清本地评论视图并等待真实�
   assert.equal(handle.calls.reset.length, 1);
   assert.equal(handle.calls.reset[0].channel, 'comment');
   assert.match(handle.calls.reset[0].idempotencyKey, /^interaction-test-reset-comment-/);
-  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /已清空，正在从微信平台重新拉取/);
+  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /重拉请求已发送，等待同步结果/);
 });
 
 test('测试重置区分安全拒绝与 Cloud 已清空但 Edge 未收到', async () => {
@@ -1328,7 +1328,7 @@ test('测试重置区分安全拒绝与 Cloud 已清空但 Edge 未收到', asyn
   });
   $(partial.window, '[data-test-reset-channel="dm"]').dispatchEvent(new partial.window.Event('click', { bubbles: true }));
   await flush();
-  assert.match($(partial.window, '#interaction-test-reset-status').textContent || '', /Cloud 私信副本已清空，但自动重新拉取没有启动/);
+  assert.match($(partial.window, '#interaction-test-reset-status').textContent || '', /Cloud 私信副本已清空，但重拉命令未送达/);
 });
 
 // 引擎/浏览器未启动（环境已停止，connectivity 非 connected）也必须能重置：清空走主进程直连云端 HTTP，
@@ -1348,7 +1348,7 @@ test('环境已停止（connectivity 非 connected）重置按钮仍可用并直
   assert.equal(handle.calls.reset[0].channel, 'comment');
 });
 
-test('重置回包 resync=skipped 时状态明说离线未自动重拉，不冒充正在拉取', async () => {
+test('重置回包 resync=skipped 时状态明说命令未送达且要求重试，不承诺自动补拉', async () => {
   const enabledList = clone(listFixture);
   enabledList.data.testTools = { dataResetEnabled: true };
   const handle = await boot({
@@ -1364,7 +1364,79 @@ test('重置回包 resync=skipped 时状态明说离线未自动重拉，不冒�
   });
   $(handle.window, '[data-test-reset-channel="dm"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
   await flush();
-  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /客户端当前离线，未自动重新拉取/);
+  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /重拉命令未送达；连接恢复后请再次重置/);
+});
+
+test('重置 accepted 只表示已派发，目标渠道 receivedAt 推进后才显示完成', async () => {
+  const enabledList = clone(listFixture);
+  enabledList.data.testTools = { dataResetEnabled: true };
+  const baseline = enabledList.data.syncFreshness.comment.receivedAt;
+  let listReads = 0;
+  const handle = await boot({
+    api: {
+      interactionList: async (args: any) => {
+        listReads += 1;
+        const envelope = scopeEnvelope(enabledList, args.envKey);
+        if (listReads > 1) envelope.data.syncFreshness.comment = { observedAt: baseline + 900, receivedAt: baseline + 1000 };
+        return apiResult(envelope);
+      },
+    },
+  });
+  $(handle.window, '[data-test-reset-channel="comment"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /等待同步结果/);
+  $(handle.window, '[data-interaction-tab="comment"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /评论已从微信平台重新拉取完成/);
+});
+
+test('重置 accepted 后证据未推进时保持等待，不用 HTTP 成功或空列表伪造完成', async () => {
+  const enabledList = clone(listFixture);
+  enabledList.data.testTools = { dataResetEnabled: true };
+  enabledList.data.items = [];
+  const handle = await boot({
+    api: { interactionList: async (args: any) => apiResult(scopeEnvelope(enabledList, args.envKey)) },
+  });
+  $(handle.window, '[data-test-reset-channel="comment"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+  await flush();
+  $(handle.window, '[data-interaction-tab="comment"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /等待同步结果/);
+  assert.doesNotMatch($(handle.window, '#interaction-test-reset-status').textContent || '', /重新拉取完成/);
+});
+
+test('评论和私信连续重置时按渠道分别等待并分别由新 receivedAt 完成', async () => {
+  const enabledList = clone(listFixture);
+  enabledList.data.testTools = { dataResetEnabled: true };
+  const commentBase = enabledList.data.syncFreshness.comment.receivedAt;
+  const dmBase = enabledList.data.syncFreshness.dm.receivedAt;
+  let phase = 0;
+  const handle = await boot({
+    api: {
+      interactionList: async (args: any) => {
+        const envelope = scopeEnvelope(enabledList, args.envKey);
+        if (phase >= 1) envelope.data.syncFreshness.comment = { observedAt: commentBase + 900, receivedAt: commentBase + 1000 };
+        if (phase >= 2) envelope.data.syncFreshness.dm = { observedAt: dmBase + 900, receivedAt: dmBase + 1000 };
+        return apiResult(envelope);
+      },
+    },
+  });
+  $(handle.window, '[data-test-reset-channel="comment"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+  await flush();
+  $(handle.window, '[data-test-reset-channel="dm"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /评论、私信.*等待同步结果/);
+
+  phase = 1;
+  $(handle.window, '[data-interaction-tab="comment"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /评论已从微信平台重新拉取完成；私信仍在等待同步结果/);
+
+  phase = 2;
+  $(handle.window, '[data-interaction-tab="dm"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /私信已从微信平台重新拉取完成/);
+  assert.doesNotMatch($(handle.window, '#interaction-test-reset-status').textContent || '', /仍在等待/);
 });
 
 test('Cloud 离线局部刷新保留已读历史并标记上次成功数据', async () => {
