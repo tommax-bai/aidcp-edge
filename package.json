@@ -98,6 +98,7 @@
     }
   },
   "devDependencies": {
+    "@electron/asar": "^3.4.1",
     "@types/jsdom": "^21.1.7",
     "@types/node": "^22.10.0",
     "@types/ws": "^8.18.1",
