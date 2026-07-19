@@ -3,6 +3,8 @@ const FACEBOOK_COOKIE_DOMAIN = '.facebook.com';
 const FACEBOOK_START_URL = 'https://www.facebook.com/';
 const FIELD_DELIMITER = '----';
 const PIPE_FIELD_DELIMITER = '|';
+const EMAIL_SHAPE_RE = /^[^\s@|]+@[^\s@|]+$/;
+const BASE32_2FA_RE = /^[A-Z2-7]{16,64}$/i;
 // 界面 chrome 语言钉英文的 belt（change facebook-locale-pin-en-us / C1）：归一化 header 形态（name=value;…）
 // 导入 cookie 时，缺 `locale` 则注入 en_US，统一导入号首屏/登录前界面语言；已有 locale 保留用户值不覆盖。
 // 结构化形态（JSON 数组 / TSV 导出）走 looksStructuredCookie 原样透传、**不注入**（用户自带的 cookie 逐字保留）。
@@ -125,43 +127,90 @@ function buildImportEntry({ username, password, fakey, rawCookie, lineNo, expect
 }
 
 function parseLegacyImportLine(line, lineNo) {
+  if (!String(line).includes(FIELD_DELIMITER)) return { status: 'no_match' };
   const parts = String(line).split(FIELD_DELIMITER);
   if (parts.length < 4) {
-    return { ok: false, error: `第 ${lineNo} 行格式错误` };
+    return { status: 'error', error: `第 ${lineNo} 行格式错误` };
   }
   const username = parts[0].trim();
   const password = parts[1].trim();
   const fakey = parts[2].trim();
   const rawCookie = parts.slice(3).join(FIELD_DELIMITER).trim();
-  return buildImportEntry({ username, password, fakey, rawCookie, lineNo });
+  const parsed = buildImportEntry({ username, password, fakey, rawCookie, lineNo });
+  return parsed.ok ? { status: 'match', entry: parsed.entry } : { status: 'error', error: parsed.error };
 }
 
-function parsePipeImportLine(line, lineNo) {
+function looksLikeEmail(value) {
+  return EMAIL_SHAPE_RE.test(String(value || '').trim());
+}
+
+function looksLikeBase32TwoFactorKey(value) {
+  return BASE32_2FA_RE.test(String(value || '').trim());
+}
+
+function parsedCandidate(result) {
+  return result.ok
+    ? { status: 'match', entry: result.entry }
+    : { status: 'error', error: result.error };
+}
+
+function parseExistingPipeImportLine(line, lineNo) {
+  if (!String(line).includes(PIPE_FIELD_DELIMITER)) return { status: 'no_match' };
   const parts = String(line).split(PIPE_FIELD_DELIMITER);
-  if (parts.length < 6) {
-    return { ok: false, error: `第 ${lineNo} 行格式错误` };
-  }
+  if (parts.length < 6 || !looksLikeEmail(parts.at(-2))) return { status: 'no_match' };
   const uid = parts[0].trim();
   const password = parts[1].trim();
   const rawCookie = parts.slice(2, -3).join(PIPE_FIELD_DELIMITER).trim();
   // access_token 与 timestamp 只用于确定右侧字段边界；客户端建环境不需要它们，解析后立即丢弃。
   const username = parts.at(-2).trim();
-  if (!uid) return { ok: false, error: `第 ${lineNo} 行缺少 uid` };
-  if (!/^\d+$/.test(uid)) return { ok: false, error: `第 ${lineNo} 行 uid 格式错误` };
-  if (!password) return { ok: false, error: `第 ${lineNo} 行缺少 password` };
-  if (!username) return { ok: false, error: `第 ${lineNo} 行缺少 email` };
-  return buildImportEntry({ username, password, rawCookie, lineNo, expectedUserId: uid });
+  if (!uid) return { status: 'error', error: `第 ${lineNo} 行缺少 uid` };
+  if (!/^\d+$/.test(uid)) return { status: 'error', error: `第 ${lineNo} 行 uid 格式错误` };
+  if (!password) return { status: 'error', error: `第 ${lineNo} 行缺少 password` };
+  return parsedCandidate(buildImportEntry({ username, password, rawCookie, lineNo, expectedUserId: uid }));
 }
+
+function parseTwoFactorPipeImportLine(line, lineNo) {
+  if (!String(line).includes(PIPE_FIELD_DELIMITER)) return { status: 'no_match' };
+  const parts = String(line).split(PIPE_FIELD_DELIMITER);
+  if (parts.length < 6 || !looksLikeEmail(parts[3])) return { status: 'no_match' };
+
+  const uid = parts[0].trim();
+  const password = parts[1].trim();
+  const fakey = parts[2].trim();
+  const username = parts[3].trim();
+  const rawCookie = parts.slice(4, -1).join(PIPE_FIELD_DELIMITER).trim();
+  const accessToken = parts.at(-1).trim();
+  if (!uid) return { status: 'error', error: `第 ${lineNo} 行缺少 uid` };
+  if (!/^\d+$/.test(uid)) return { status: 'error', error: `第 ${lineNo} 行 uid 格式错误` };
+  if (!password) return { status: 'error', error: `第 ${lineNo} 行缺少 password` };
+  if (!fakey) return { status: 'error', error: `第 ${lineNo} 行缺少 2FA` };
+  if (!looksLikeBase32TwoFactorKey(fakey)) {
+    return { status: 'error', error: `第 ${lineNo} 行 2FA 格式错误` };
+  }
+  if (!accessToken) return { status: 'error', error: `第 ${lineNo} 行缺少 access_token` };
+  // accessToken 仅用于确认最右侧边界，绝不进入候选对象或后续创建计划。
+  return parsedCandidate(buildImportEntry({ username, password, fakey, rawCookie, lineNo, expectedUserId: uid }));
+}
+
+const FACEBOOK_IMPORT_RULES = Object.freeze([
+  { id: 'email-password-2fa-cookie', parse: parseLegacyImportLine },
+  { id: 'uid-password-cookie-token-email-time', parse: parseExistingPipeImportLine },
+  { id: 'uid-password-2fa-email-cookie-token', parse: parseTwoFactorPipeImportLine },
+]);
 
 function parseImportLine(line, index) {
   const text = String(line);
   const lineNo = index + 1;
-  const legacyAt = text.indexOf(FIELD_DELIMITER);
-  const pipeAt = text.indexOf(PIPE_FIELD_DELIMITER);
-  if (pipeAt >= 0 && (legacyAt < 0 || pipeAt < legacyAt)) {
-    return parsePipeImportLine(text, lineNo);
+  const attempts = FACEBOOK_IMPORT_RULES.map((rule) => rule.parse(text, lineNo));
+  const matches = attempts.filter((attempt) => attempt.status === 'match');
+  if (matches.length === 1) return { ok: true, entry: matches[0].entry };
+  if (matches.length > 1) {
+    return { ok: false, error: `第 ${lineNo} 行格式识别存在歧义` };
   }
-  return parseLegacyImportLine(text, lineNo);
+
+  const errors = attempts.filter((attempt) => attempt.status === 'error');
+  if (errors.length === 1) return { ok: false, error: errors[0].error };
+  return { ok: false, error: `第 ${lineNo} 行无法识别受支持格式` };
 }
 
 function parseFacebookAccountImport(raw) {

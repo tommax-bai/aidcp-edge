@@ -421,7 +421,11 @@ test('Facebook 批量新建：显式模式、隐藏操作系统下拉、多行�
   platform.value = 'facebook';
   platform.dispatchEvent(new w.Event('change'));
   assert.ok(!$(w, '#ads-fb-import-wrap').classList.contains('hidden'), 'Facebook 平台显示导入框');
-  assert.match(($(w, '#ads-fb-import') as HTMLTextAreaElement).placeholder, /uid\|password\|cookie\|access_token\|email\|timestamp/);
+  const facebookImportPlaceholder = ($(w, '#ads-fb-import') as HTMLTextAreaElement).placeholder;
+  assert.match(facebookImportPlaceholder, /每行自动识别一种受支持格式/);
+  assert.match(facebookImportPlaceholder, /uid\|password\|cookie\|access_token\|email\|timestamp/);
+  assert.match(facebookImportPlaceholder, /uid\|password\|2FA\|email\|cookie\|access_token/);
+  assert.match($(w, '#ads-fb-account-format-help').textContent ?? '', /未知或有歧义的格式会拒绝/);
   assert.match($(w, '#ads-fb-account-format-help').textContent ?? '', /Access Token.*不会导入或保存/);
   assert.match($(w, '#ads-fb-account-format-help').textContent ?? '', /单个、批量新建环境均默认开启慢启动/);
   assert.ok(!$(w, '#ads-fb-create-mode').classList.contains('hidden'), 'Facebook 平台显示创建方式');

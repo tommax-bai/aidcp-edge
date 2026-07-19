@@ -78,6 +78,87 @@ test('parseFacebookAccountImport: six-field pipe record maps email/password/cook
   assert.doesNotMatch(JSON.stringify(parsed.entries[0]), /EAA_TEST_ACCESS_TOKEN_SECRET|7\\\\\/16/);
 });
 
+test('parseFacebookAccountImport: recognizes uid/password/2FA/email/cookie/token with embedded cookie pipes', () => {
+  const uid = '100000000000005';
+  const twoFactorKey = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+  const accessToken = 'EAA_NEW_LAYOUT_TOKEN_SECRET';
+  const pipeCookie = rawCookie.replace('100000000000001', uid);
+  const parsed = mod.parseFacebookAccountImport(
+    `${uid}|new-layout-password|${twoFactorKey}|new-layout@example.com|${pipeCookie}|${accessToken}`,
+  );
+
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.entries.length, 1);
+  assert.equal(parsed.entries[0].username, 'new-layout@example.com');
+  assert.equal(parsed.entries[0].password, 'new-layout-password');
+  assert.equal(parsed.entries[0].fakey, twoFactorKey);
+  assert.equal(Object.hasOwn(parsed.entries[0], 'uid'), false);
+  assert.equal(Object.hasOwn(parsed.entries[0], 'accessToken'), false);
+  const cookies = JSON.parse(String(parsed.entries[0].cookie)) as Array<{ name: string; value: string }>;
+  assert.equal(cookies.find((cookie) => cookie.name === 'c_user')?.value, uid);
+  assert.equal(cookies.find((cookie) => cookie.name === 'oo')?.value, 'v1|3:1');
+  assert.doesNotMatch(JSON.stringify(parsed.entries[0]), new RegExp(accessToken));
+});
+
+test('parseFacebookAccountImport: batches may mix all supported layouts', () => {
+  const existingPipeCookie = rawCookie.replace('100000000000001', '100000000000006');
+  const newPipeCookie = rawCookie.replace('100000000000001', '100000000000007');
+  const parsed = mod.parseFacebookAccountImport([
+    `legacy@example.com----legacy-password----LEGACY-2FA----${rawCookie}`,
+    `100000000000006|existing-password|${existingPipeCookie}|EAA_EXISTING|existing@example.com|2026-07-19`,
+    `100000000000007|new-password|JBSWY3DPEHPK3PXP|new@example.com|${newPipeCookie}|EAA_NEW`,
+  ].join('\n'));
+
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.entries.length, 3);
+  assert.deepEqual(parsed.entries.map((entry) => entry.username), [
+    'legacy@example.com',
+    'existing@example.com',
+    'new@example.com',
+  ]);
+  assert.equal(parsed.entries[2].fakey, 'JBSWY3DPEHPK3PXP');
+});
+
+test('parseFacebookAccountImport: new pipe layout rejects UID mismatch without credential values', () => {
+  const password = 'new-mismatch-password';
+  const twoFactorKey = 'JBSWY3DPEHPK3PXP';
+  const email = 'new-mismatch@example.com';
+  const accessToken = 'EAA_NEW_MISMATCH_SECRET';
+  const bad = mod.parseFacebookAccountImport(
+    `100000000000099|${password}|${twoFactorKey}|${email}|${rawCookie}|${accessToken}`,
+  );
+
+  assert.equal(bad.ok, false);
+  assert.match(bad.error || '', /第 1 行.*c_user.*uid.*不一致/i);
+  assert.doesNotMatch(
+    bad.error || '',
+    new RegExp(`100000000000099|100000000000001|${password}|${twoFactorKey}|${accessToken}|new-mismatch`),
+  );
+});
+
+test('parseFacebookAccountImport: unknown and ambiguous layouts fail closed without credential values', () => {
+  const unknownSecret = 'unknown-password-secret';
+  const unknown = mod.parseFacebookAccountImport(
+    `unknown@example.com|${unknownSecret}|not-a-cookie|unclassified-field`,
+  );
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error || '', /第 1 行.*(?:无法识别|格式)/);
+  assert.doesNotMatch(unknown.error || '', /unknown@example\.com|unknown-password-secret|not-a-cookie/);
+
+  const uid = '100000000000008';
+  const ambiguousSecret = 'ambiguous-password-secret';
+  const ambiguousCookie = `datr=A----B----C----D; c_user=${uid}; xs=ambiguous-xs;`;
+  const ambiguous = mod.parseFacebookAccountImport(
+    `${uid}|${ambiguousSecret}|JBSWY3DPEHPK3PXP|ambiguous@example.com|${ambiguousCookie}|EAA_AMBIGUOUS_SECRET`,
+  );
+  assert.equal(ambiguous.ok, false);
+  assert.match(ambiguous.error || '', /第 1 行.*歧义/);
+  assert.doesNotMatch(
+    ambiguous.error || '',
+    new RegExp(`${uid}|${ambiguousSecret}|JBSWY3DPEHPK3PXP|ambiguous@example|EAA_AMBIGUOUS_SECRET`),
+  );
+});
+
 test('parseFacebookAccountImport: pipe cookie may contain pipes and batches may mix formats', () => {
   const pipeCookie = rawCookie.replace('100000000000001', '100000000000004');
   const parsed = mod.parseFacebookAccountImport([

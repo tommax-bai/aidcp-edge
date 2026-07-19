@@ -645,8 +645,8 @@
         </div>
         <label id="ads-fb-import-wrap" class="field ads-fb-import hidden">
           <span class="field-label">Facebook 账号资料 <em id="ads-fb-import-requirement" class="opt">可选</em></span>
-          <textarea id="ads-fb-import" rows="4" spellcheck="false" autocomplete="off" placeholder="每行使用一种格式：&#10;email----password----2FA----cookie&#10;uid|password|cookie|access_token|email|timestamp"></textarea>
-          <span id="ads-fb-account-format-help" class="subtle">兼容以上两种格式；六字段中的 Access Token 与时间仅识别格式，不会导入或保存。Facebook 单个、批量新建环境均默认开启慢启动；它只收紧每日操作额度，不改变操作速度。</span>
+          <textarea id="ads-fb-import" rows="5" spellcheck="false" autocomplete="off" placeholder="每行自动识别一种受支持格式：&#10;email----password----2FA----cookie&#10;uid|password|cookie|access_token|email|timestamp&#10;uid|password|2FA|email|cookie|access_token"></textarea>
+          <span id="ads-fb-account-format-help" class="subtle">自动识别以上三种常见格式；未知或有歧义的格式会拒绝，不会猜测字段。Access Token 与时间仅用于识别边界，不会导入或保存。Facebook 单个、批量新建环境均默认开启慢启动；它只收紧每日操作额度，不改变操作速度。</span>
           <span id="ads-fb-batch-account-help" class="subtle hidden">每行一个账号；每个账号将独立随机分配操作系统，其余指纹由 AdsPower 生成。</span>
         </label>
         <div id="ads-fb-persona-auto-fill-wrap" class="field ads-fb-persona-auto-fill hidden">
