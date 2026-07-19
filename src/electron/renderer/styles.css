@@ -1766,28 +1766,11 @@ body::-webkit-scrollbar:vertical,
   font-size: 12px;
 }
 .ads-fb-import .subtle,
-.ads-fb-persona-auto-fill .subtle,
 .ads-proxy-batch .subtle {
   display: block;
   margin-top: 5px;
   line-height: 1.55;
 }
-
-.ads-fb-persona-auto-fill {
-  padding: 10px 12px;
-  border: 1px solid var(--hair);
-  border-radius: 10px;
-  background: var(--surface-soft);
-}
-.ads-fb-persona-auto-fill-toggle,
-.ads-fb-persona-language {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.ads-fb-persona-auto-fill-toggle { font-size: 13px; color: var(--ink); }
-.ads-fb-persona-language { justify-content: space-between; }
-.ads-fb-persona-language .ads-template { width: auto; min-width: 108px; }
 /* 创建提示行空着时不占位（否则 grid gap+min-height 会把下拉与「下载 AdsPower」撑开一大截）。 */
 #ads-create-msg:empty { display: none; }
 .ads-template {
@@ -2324,13 +2307,12 @@ body::-webkit-scrollbar:vertical,
 
 .rail-facebook-persona-fill {
   display: none;
-  grid-template-columns: 72px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 5px;
   padding: 2px 4px 5px;
   flex-shrink: 0;
 }
 .env-rail.expanded .rail-facebook-persona-fill:not(.hidden) { display: grid; }
-.rail-facebook-persona-fill select,
 .rail-facebook-persona-fill button {
   min-width: 0;
   height: 28px;
@@ -2340,7 +2322,6 @@ body::-webkit-scrollbar:vertical,
   color: #475569;
   font-size: 11px;
 }
-.rail-facebook-persona-fill select { padding: 0 5px; }
 .rail-facebook-persona-fill button {
   border-color: #9db8f2;
   background: var(--accent-soft);
@@ -2350,7 +2331,6 @@ body::-webkit-scrollbar:vertical,
 }
 .rail-facebook-persona-fill button:disabled { cursor: wait; opacity: 0.6; }
 .rail-facebook-persona-status {
-  grid-column: 1 / -1;
   min-height: 0;
   margin: 0;
   color: #64748b;

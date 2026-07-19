@@ -151,7 +151,6 @@ const fields = {
   railCount: document.querySelector('#rail-count'),
   railPlatformFilters: Array.from(document.querySelectorAll('[data-rail-platform]')),
   railFacebookPersonaFill: document.querySelector('#rail-facebook-persona-fill'),
-  railFacebookPersonaLanguage: document.querySelector('#rail-facebook-persona-language'),
   railFacebookPersonaSubmit: document.querySelector('#rail-facebook-persona-submit'),
   railFacebookPersonaStatus: document.querySelector('#rail-facebook-persona-status'),
   railAdd: document.querySelector('#rail-add'),
@@ -186,6 +185,7 @@ const fields = {
   personaPop: document.querySelector('#persona-pop'),
   personaMask: document.querySelector('#persona-mask'),
   personaClose: document.querySelector('#persona-close'),
+  personaHeadTitle: document.querySelector('#persona-head-title'),
   personaPopEnv: document.querySelector('#persona-pop-env'),
   personaAva: document.querySelector('#persona-ava'),
   personaPlat: document.querySelector('#persona-plat'),
@@ -275,9 +275,6 @@ const settingsUi = {
   adsFbImport: document.querySelector('#ads-fb-import'),
   adsFbImportRequirement: document.querySelector('#ads-fb-import-requirement'),
   adsFbBatchAccountHelp: document.querySelector('#ads-fb-batch-account-help'),
-  adsFbPersonaAutoFillWrap: document.querySelector('#ads-fb-persona-auto-fill-wrap'),
-  adsFbPersonaAutoFill: document.querySelector('#ads-fb-persona-auto-fill'),
-  adsFbPersonaLanguage: document.querySelector('#ads-fb-persona-language'),
   adsCreateMsg: document.querySelector('#ads-create-msg'),
   // 新建环境的可选代理区块（edge-client-proxy-platform-persona-ux）
   adsProxyType: document.querySelector('#ads-proxy-type'),
@@ -428,10 +425,6 @@ function updateFacebookImportVisibility() {
   settingsUi.adsFbImportWrap?.classList.toggle('hidden', !facebook);
   settingsUi.adsTemplate?.classList.toggle('hidden', Boolean(batch));
   settingsUi.adsFbBatchAccountHelp?.classList.toggle('hidden', !batch);
-  settingsUi.adsFbPersonaAutoFillWrap?.classList.toggle('hidden', !batch);
-  if (settingsUi.adsFbPersonaLanguage) {
-    settingsUi.adsFbPersonaLanguage.disabled = !settingsUi.adsFbPersonaAutoFill?.checked;
-  }
   settingsUi.adsSingleProxyHelp?.classList.toggle('hidden', Boolean(batch));
   settingsUi.adsBatchProxyHelp?.classList.toggle('hidden', !batch);
   if (settingsUi.adsFbImportRequirement) {
@@ -2938,8 +2931,10 @@ function openPersonaPop(envId, reason = 'manual') {
   if (envId && envId !== fleetView.selected && fleetView.envs.has(envId)) selectEnv(envId);
   const env = fleetView.envs.get(fleetView.selected);
   const label = env && (env.name || (env.status && env.status.account && env.status.account.name)) || '';
-  if (fields.personaPopEnv) fields.personaPopEnv.textContent = label ? `· ${label}` : '';
-  const plat = selectedEnvPlatform();
+  const bulk = reason === 'bulk';
+  if (fields.personaHeadTitle) fields.personaHeadTitle.textContent = bulk ? '批量设置人设' : '账号人设';
+  if (fields.personaPopEnv) fields.personaPopEnv.textContent = bulk ? '· 未设置的 Facebook 账号' : label ? `· ${label}` : '';
+  const plat = bulk ? 'facebook' : selectedEnvPlatform();
   const fb = plat === 'facebook';
   if (fields.personaAva) fields.personaAva.textContent = label ? label.slice(0, 1) : '✦';
   if (fields.personaPlat) {
@@ -2952,10 +2947,22 @@ function openPersonaPop(envId, reason = 'manual') {
   fields.personaPop.setAttribute('aria-hidden', 'false');
   fields.personaMask?.classList.remove('hidden');
   // 记下「谁弹的」：只有系统自动弹的窗才允许在权威「已绑」到达时被自动收起（见 updatePersonaGate）。
-  personaPopOpenReason = reason === 'auto' ? 'auto' : 'manual';
-  personaPopOpenEnvId = currentEnvId() || envId || null;
+  personaPopOpenReason = bulk ? 'bulk' : reason === 'auto' ? 'auto' : 'manual';
+  personaPopOpenEnvId = bulk ? '__facebook_bulk__' : currentEnvId() || envId || null;
   // 用目标环境**自身**的状态评闸：此前用 currentStatus，目标环境尚无状态推送时会拿上一环境的状态误开闸。
   updatePersonaGate((env && env.status) || null);
+}
+function openFacebookBulkPersona() {
+  const target = filteredRailEnvList()[0] || railEnvList().find((env) => normPlatform(env && env.platform) === 'facebook');
+  if (target && target.envId !== fleetView.selected) selectEnv(target.envId);
+  personaBulkFillMode = true;
+  personaUpdateMode = false;
+  personaLocallyBound = false;
+  clearPersonaDraft();
+  personaWritingLanguageSelections.delete('__facebook_bulk__');
+  personaWritingLanguageDirty.delete('__facebook_bulk__');
+  if (fields.railFacebookPersonaStatus) fields.railFacebookPersonaStatus.textContent = '';
+  openPersonaPop(target && target.envId, 'bulk');
 }
 function closePersonaPop(force) {
   if (!fields.personaPop) return;
@@ -2970,6 +2977,8 @@ function closePersonaPop(force) {
   fields.personaMask?.classList.add('hidden');
   personaPopOpenReason = null;
   personaPopOpenEnvId = null;
+  personaBulkFillMode = false;
+  if (fields.personaHeadTitle) fields.personaHeadTitle.textContent = '账号人设';
   if (isPersonaGrowthActive()) {
     clearPersonaGrowth();
     personaUi.boundNote?.classList.remove('hidden');
@@ -3534,33 +3543,7 @@ for (const button of fields.railPlatformFilters || []) {
   });
 }
 
-let facebookPersonaAutoFillInFlight = false;
-fields.railFacebookPersonaSubmit?.addEventListener('click', async () => {
-  if (facebookPersonaAutoFillInFlight) return;
-  const api = window.aidcpEdge.facebookPersonaAutoFill;
-  if (typeof api !== 'function') {
-    if (fields.railFacebookPersonaStatus) fields.railFacebookPersonaStatus.textContent = '当前客户端版本暂不支持此操作。';
-    return;
-  }
-  facebookPersonaAutoFillInFlight = true;
-  fields.railFacebookPersonaSubmit.disabled = true;
-  if (fields.railFacebookPersonaStatus) fields.railFacebookPersonaStatus.textContent = '正在交由云端处理…';
-  try {
-    const result = await api(fields.railFacebookPersonaLanguage?.value || 'zh-CN');
-    if (fields.railFacebookPersonaStatus) {
-      fields.railFacebookPersonaStatus.textContent = result && result.ok && result.accepted
-        ? '已交由云端处理，将补齐尚未设置的人设。'
-        : (result && result.message) || '提交失败，请稍后重试。';
-    }
-  } catch (error) {
-    if (fields.railFacebookPersonaStatus) {
-      fields.railFacebookPersonaStatus.textContent = `提交失败：${(error && error.message) || error || '请稍后重试'}`;
-    }
-  } finally {
-    facebookPersonaAutoFillInFlight = false;
-    fields.railFacebookPersonaSubmit.disabled = false;
-  }
-});
+fields.railFacebookPersonaSubmit?.addEventListener('click', () => openFacebookBulkPersona());
 
 // ── 「全部启动」：主进程按有界启动排队接收；环境数量本身不受限制 ──
 async function doStartAll() {
@@ -4570,7 +4553,6 @@ populateTemplates();
 updateFacebookImportVisibility();
 if (settingsUi.adsPlatform) settingsUi.adsPlatform.addEventListener('change', updateFacebookImportVisibility);
 if (settingsUi.adsFbCreateMode) settingsUi.adsFbCreateMode.addEventListener('change', updateFacebookImportVisibility);
-if (settingsUi.adsFbPersonaAutoFill) settingsUi.adsFbPersonaAutoFill.addEventListener('change', updateFacebookImportVisibility);
 
 // ── 代理表单（edge-client-proxy-platform-persona-ux）：新建可选区块 + 已有环境编辑浮层共用读值/校验 ──
 // 主校验在主进程归一层（ads-proxy-config），前端只做「选了类型必须填 host/port」的即时反馈。
@@ -4646,8 +4628,6 @@ settingsUi.adsCreate.addEventListener('click', async () => {
           batchProxyType: proxyType,
           facebookAccountImport,
           facebookProxyBatch,
-          facebookPersonaAutoFill: settingsUi.adsFbPersonaAutoFill?.checked !== false,
-          facebookPersonaWritingLanguage: settingsUi.adsFbPersonaLanguage?.value || 'zh-CN',
         }
       : {
           ...formAdsOpts(),
@@ -4686,12 +4666,9 @@ settingsUi.adsCreate.addEventListener('click', async () => {
         ? 'Facebook 环境已默认开启慢启动（只收紧每日操作额度，不改变操作速度）。'
         : '';
       const visibilityHint = r.visibilityWarning ? r.visibilityWarning : '';
-      const personaHint = r.personaAutoFillAccepted === true
-        ? '云端已受理，将自动补齐未设置人设的 Facebook 账号。'
-        : r.personaAutoFillWarning || '';
       setCreateMsg(
-        `${countHint}${selectedHint}${proxyHint}${slowStartHint}${visibilityHint}${personaHint}`,
-        Boolean(r.visibilityWarning || r.personaAutoFillWarning),
+        `${countHint}${selectedHint}${proxyHint}${slowStartHint}${visibilityHint}`,
+        Boolean(r.visibilityWarning),
       );
       resetCreateProxyForm();
       await refreshEnvs();
@@ -4699,10 +4676,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       const extra = r && r.violations && r.violations.length ? '（' + r.violations.join('；') + '）' : '';
       const createdCount = Number(r && (r.createdCount || (Array.isArray(r.created) ? r.created.length : 0)) || 0);
       const prefix = createdCount > 0 ? '批量创建未完成' : '创建失败';
-      const personaHint = r && r.personaAutoFillAccepted === true
-        ? ' 已创建部分对应的人设补齐已由云端受理。'
-        : r && r.personaAutoFillWarning ? ` ${r.personaAutoFillWarning}` : '';
-      setCreateMsg(`${prefix}：${(r && r.error) || '未知错误'}${extra}。${personaHint}`, true);
+      setCreateMsg(`${prefix}：${(r && r.error) || '未知错误'}${extra}。`, true);
       if (createdCount > 0) await refreshEnvs();
     }
   } finally {
@@ -5021,6 +4995,7 @@ let personaInFlight = false; // 生成请求在途（骨架 + 按钮禁用 + 遮
 let personaGrowthEnvId = null; // 本次刚确认成功的人设所属环境；只让该环境出现一次成长引导
 let personaPersistPendingEnvId = null; // persist IPC 收敛中的环境；main 可能先推 personaBound=true，期间不得把自动弹窗收走
 let personaUpdateMode = false; // 已绑账号手动进入更新流程：生成新草稿，确认后覆盖当前人设
+let personaBulkFillMode = false; // FB 分类批量模板：客户端构建一份人设，Cloud 只筛缺失账号并原样写入
 const personaPrompted = new Set();
 const personaWritingLanguageSelections = new Map(); // envId -> zh-CN | en | vi；切环境不串号
 const personaWritingLanguageDirty = new Set(); // 用户正在编辑的环境；状态心跳不得覆盖未确认选择
@@ -5035,7 +5010,7 @@ const personaWritingLanguageDirty = new Set(); // 用户正在编辑的环境；
 // 现在三态：true=已绑 / false=云端确认未绑 / null|undefined=未知。触发条件是 `=== false` —— 一个只有云端
 // 能写入的值。「没收到信号」在类型上是未知，而未知永不满足触发条件。于是无论将来新增多少条重置路径，
 // 它们最坏只能把状态打回「未知」，而不会打成「未绑」。宽限期机制随之整体删除：它是那个错误推断的载体。
-let personaPopOpenReason = null; // manual | auto：只自动收起「系统误弹」的窗，不动用户手动打开的
+let personaPopOpenReason = null; // manual | auto | bulk：只自动收起「系统误弹」的窗
 let personaPopOpenEnvId = null;
 
 // 底部操作栏按阶段/形态切换主 CTA：向导态 pick=「生成人设」、preview=「重新生成 + 确认使用」；
@@ -5045,8 +5020,8 @@ function syncPersonaFoot(mode) {
   const growth = mode === 'growth';
   const inPick = personaStage === 'pick';
   // 更新流程复用同一套向导按钮，只改文案：让「这次是覆盖已有人设」在按钮上就看得见。
-  if (personaUi.generate) personaUi.generate.textContent = personaUpdateMode ? '生成新草稿' : '生成人设';
-  if (personaUi.confirm) personaUi.confirm.textContent = personaUpdateMode ? '确认更新' : '确认使用';
+  if (personaUi.generate) personaUi.generate.textContent = personaBulkFillMode ? '生成人设' : personaUpdateMode ? '生成新草稿' : '生成人设';
+  if (personaUi.confirm) personaUi.confirm.textContent = personaBulkFillMode ? '确认批量设置' : personaUpdateMode ? '确认更新' : '确认使用';
   personaUi.generate?.classList.toggle('hidden', !wizard || !inPick);
   personaUi.regenerate?.classList.toggle('hidden', !wizard || inPick);
   personaUi.confirm?.classList.toggle('hidden', !wizard || inPick);
@@ -5167,6 +5142,9 @@ const PERSONA_GEN_FAIL = {
   writing_language_required: '请先选择发言语言。',
   writing_language_invalid: '发言语言无效，请重新选择。',
   writing_language_not_supported: '当前平台不支持发言语言设置。',
+  tone_required: '请先选择语气调性。',
+  content_preferences_required: '请至少选择一项内容偏好。',
+  like_affinity_invalid: '点赞倾向无效，请重新选择。',
 };
 const PERSONA_PERSIST_FAIL = {
   unknown_account: '账号身份未就绪（云端未建号），请稍后重试。',
@@ -5235,10 +5213,30 @@ function collectPersonaKeywords() {
   return [...new Set(out)];
 }
 
+function collectFacebookPersonaTemplateSelection() {
+  const tone = personaUi.kwGroups
+    .find((group) => group.dataset.dim === 'tone')
+    ?.querySelector('.kw-btn.active')?.dataset.kw || '';
+  const contentGroups = personaUi.kwGroups.filter((group) => group.dataset.dim === 'content');
+  const contentPreferences = [...new Set(contentGroups.flatMap((group) =>
+    Array.from(group.querySelectorAll('.kw-btn.active')).map((button) => button.dataset.kw).filter(Boolean)))];
+  const contentCategories = [...new Set(contentGroups
+    .filter((group) => group.querySelector('.kw-btn.active'))
+    .map((group) => group.dataset.category)
+    .filter(Boolean))];
+  return {
+    tone,
+    writingLanguage: collectPersonaWritingLanguage(),
+    likeAffinity: collectPersonaLikeAffinity().key,
+    contentPreferences,
+    contentCategories,
+  };
+}
+
 const PERSONA_LIKE_AFFINITIES = {
-  normal: { label: '正常', token: 'like_affinity:normal' },
-  like_more: { label: '喜欢', token: 'like_affinity:like_more' },
-  like_most: { label: '更喜欢', token: 'like_affinity:like_most' },
+  normal: { key: 'normal', label: '正常', token: 'like_affinity:normal' },
+  like_more: { key: 'like_more', label: '喜欢', token: 'like_affinity:like_more' },
+  like_most: { key: 'like_most', label: '更喜欢', token: 'like_affinity:like_most' },
 };
 
 const PERSONA_WRITING_LANGUAGES = {
@@ -5248,13 +5246,13 @@ const PERSONA_WRITING_LANGUAGES = {
 };
 
 function syncPersonaWritingLanguage(status) {
-  const facebook = selectedEnvPlatform() === 'facebook';
+  const facebook = personaBulkFillMode || selectedEnvPlatform() === 'facebook';
   personaUi.languageCard?.classList.toggle('hidden', !facebook);
   if (!facebook || !personaUi.languageGroup) return;
 
-  const envId = currentEnvId() || '__local__';
+  const envId = personaWritingLanguageKey();
   const authoritative = status && status.personaWritingLanguage;
-  if (!personaWritingLanguageDirty.has(envId)) {
+  if (!personaBulkFillMode && !personaWritingLanguageDirty.has(envId)) {
     if (PERSONA_WRITING_LANGUAGES[authoritative]) personaWritingLanguageSelections.set(envId, authoritative);
     else personaWritingLanguageSelections.delete(envId);
   }
@@ -5265,14 +5263,20 @@ function syncPersonaWritingLanguage(status) {
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
   if (personaUi.languageHelp) {
-    personaUi.languageHelp.textContent = status?.personaBound === true && status.personaWritingLanguage === null && !selected
+    personaUi.languageHelp.textContent = personaBulkFillMode
+      ? '这项语言会写入同一份人设，并用于所有本次补齐的 Facebook 账号。'
+      : status?.personaBound === true && status.personaWritingLanguage === null && !selected
       ? '当前人设尚未设置发言语言；更新人设时请选择，之后的 Facebook 帖子和评论将使用该语言。'
       : '用于这个 Facebook 账号后续生成的帖子和评论，不改变 Facebook 界面语言。';
   }
 }
 
+function personaWritingLanguageKey() {
+  return personaBulkFillMode ? '__facebook_bulk__' : currentEnvId() || '__local__';
+}
+
 function collectPersonaWritingLanguage() {
-  return personaWritingLanguageSelections.get(currentEnvId() || '__local__') || null;
+  return personaWritingLanguageSelections.get(personaWritingLanguageKey()) || null;
 }
 
 function collectPersonaLikeAffinity() {
@@ -5302,6 +5306,20 @@ personaUi.update?.addEventListener('click', beginPersonaUpdate);
 // 只改 disabled/显隐/面板文案，绝不触碰已选关键词与草稿（状态推送不重置向导进度）。
 function updatePersonaGate(status) {
   syncPersonaWritingLanguage(status);
+  if (personaBulkFillMode) {
+    personaReady = true;
+    personaUi.growth?.classList.add('hidden');
+    personaUi.boundNote?.classList.add('hidden');
+    personaUi.empty?.classList.add('hidden');
+    personaUi.wizardBody?.classList.remove('hidden');
+    setPersonaBadge(personaDraftYaml ? '待确认' : '选择人设', personaDraftYaml ? 'warning' : 'checking');
+    if (personaUi.hint) {
+      personaUi.hint.textContent = '选择发言语言、语气、点赞倾向和内容偏好；确认后，云端只把这一份完全相同的人设添加给尚未设置的 Facebook 账号。';
+    }
+    if (personaUi.generate) personaUi.generate.disabled = personaInFlight;
+    syncPersonaFoot('wizard');
+    return;
+  }
   const loggedIn = Boolean(status && status.auth === 'logged in');
   const connected = Boolean(status && status.cloud === 'connected');
   personaReady = loggedIn && connected;
@@ -5417,7 +5435,7 @@ personaUi.languageGroup?.addEventListener('click', (event) => {
   if (!button || !personaUi.languageGroup.contains(button)) return;
   const writingLanguage = button.dataset.writingLanguage;
   if (!PERSONA_WRITING_LANGUAGES[writingLanguage]) return;
-  const envId = currentEnvId() || '__local__';
+  const envId = personaWritingLanguageKey();
   personaWritingLanguageSelections.set(envId, writingLanguage);
   personaWritingLanguageDirty.add(envId);
   syncPersonaWritingLanguage((fleetView.envs.get(currentEnvId()) || {}).status || currentStatus || null);
@@ -5477,14 +5495,17 @@ document.querySelectorAll('.persona-pref-group').forEach((section) => {
 
 async function runPersonaGenerate() {
   if (!personaReady) return setPersonaMsg('请先启动该环境并在浏览器里登录', true);
+  const bulk = personaBulkFillMode;
   const keywordSelections = collectPersonaKeywords();
   if (!keywordSelections.length) return setPersonaMsg('请先选择关键词', true);
-  const facebook = selectedEnvPlatform() === 'facebook';
+  const facebook = bulk || selectedEnvPlatform() === 'facebook';
   const writingLanguage = facebook ? collectPersonaWritingLanguage() : null;
   if (facebook && !writingLanguage) return setPersonaMsg('请先选择发言语言', true);
   const likeAffinity = collectPersonaLikeAffinity();
   const requestSelections = [...keywordSelections, likeAffinity.token];
-  if (!window.aidcpEdge || typeof window.aidcpEdge.personaGenerate !== 'function') return;
+  if (!window.aidcpEdge || (bulk
+    ? typeof window.aidcpEdge.facebookPersonaTemplatePreview !== 'function'
+    : typeof window.aidcpEdge.personaGenerate !== 'function')) return;
   personaInFlight = true;
   // 预先切到预览页：让「结果会出现在哪」提前可见，生成中该处呈现骨架。
   updateKwSummary([
@@ -5498,12 +5519,17 @@ async function runPersonaGenerate() {
   personaUi.generate.disabled = true;
   if (personaUi.regenerate) { personaUi.regenerate.disabled = true; personaUi.regenerate.textContent = '正在生成…'; }
   if (personaUi.confirm) personaUi.confirm.disabled = true;
-  setPersonaMsg(personaUpdateMode ? '正在生成新人设…（可能需要十几秒）' : '正在生成人设…（可能需要十几秒）', false);
-  const genEnvId = currentEnvId(); // 生成时锁定目标环境；persist 打回它，绝不随后续切换漂移
+  setPersonaMsg(bulk ? '正在根据你的选择生成人设预览…' : personaUpdateMode ? '正在生成新人设…（可能需要十几秒）' : '正在生成人设…（可能需要十几秒）', false);
+  const genEnvId = bulk ? '__facebook_bulk__' : currentEnvId(); // 单账号草稿仍锁定目标环境；批量模板不绑定账号
   try {
-    const request = { keywordSelections: requestSelections, idempotencyKey: newIdempotencyKey() };
-    if (facebook) request.writingLanguage = writingLanguage;
-    const r = await window.aidcpEdge.personaGenerate(genEnvId, request);
+    let r;
+    if (bulk) {
+      r = await window.aidcpEdge.facebookPersonaTemplatePreview(collectFacebookPersonaTemplateSelection());
+    } else {
+      const request = { keywordSelections: requestSelections, idempotencyKey: newIdempotencyKey() };
+      if (facebook) request.writingLanguage = writingLanguage;
+      r = await window.aidcpEdge.personaGenerate(genEnvId, request);
+    }
     if (r && r.ok && r.soulYaml) {
       personaDraftYaml = r.soulYaml;
       personaDraftWritingLanguage = writingLanguage;
@@ -5514,7 +5540,9 @@ async function runPersonaGenerate() {
       personaUi.draft?.classList.remove('hidden');
       setPersonaBadge('待确认', 'warning');
       setPersonaMsg(
-        personaUpdateMode
+        bulk
+          ? '已生成一份批量人设；确认后，尚未设置的 Facebook 账号都会使用这份完全相同的人设。'
+          : personaUpdateMode
           ? '已生成新草稿，确认后会覆盖当前人设；不满意可「重新生成」。'
           : '已生成草稿，确认后即绑定；不满意可「重新生成」。',
         false,
@@ -5540,6 +5568,31 @@ personaUi.regenerate?.addEventListener('click', runPersonaGenerate);
 
 personaUi.confirm?.addEventListener('click', async () => {
   if (!personaDraftYaml) return;
+  if (personaBulkFillMode) {
+    if (!window.aidcpEdge || typeof window.aidcpEdge.facebookPersonaFillSelected !== 'function') return;
+    personaUi.confirm.disabled = true;
+    setPersonaMsg('正在提交所选人设…', false);
+    try {
+      const result = await window.aidcpEdge.facebookPersonaFillSelected(personaDraftYaml);
+      if (result && result.ok && result.accepted) {
+        setPersonaBadge('已安排', 'normal');
+        personaUi.wizardBody?.classList.add('hidden');
+        syncPersonaFoot('hidden');
+        setPersonaMsg('云端已受理：只筛选尚未设置的人设账号，并使用你刚确认的同一份人设。', false);
+        if (fields.railFacebookPersonaStatus) fields.railFacebookPersonaStatus.textContent = '所选人设已交由云端补齐未设置账号。';
+        personaDraftYaml = '';
+        personaDraftWritingLanguage = null;
+        closePersonaPop(true);
+      } else {
+        setPersonaMsg((result && result.message) || '提交失败，请稍后重试。', true);
+      }
+    } catch (error) {
+      setPersonaMsg(`提交失败：${(error && error.message) || error || '请稍后重试'}`, true);
+    } finally {
+      personaUi.confirm.disabled = false;
+    }
+    return;
+  }
   if (!window.aidcpEdge || typeof window.aidcpEdge.personaPersist !== 'function') return;
   const wasUpdate = personaUpdateMode;
   const persistEnvId = personaDraftEnvId || currentEnvId() || '__local__';

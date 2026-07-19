@@ -35,10 +35,8 @@ const {
   failedFacebookBatchReceipt,
 } = require('./facebook-batch-create.cjs');
 const {
-  WRITING_LANGUAGES,
-  normalizeFacebookPersonaAutoFillOptions,
-  requestFacebookPersonaAutoFill,
-  requestFacebookPersonaAutoFillRun,
+  buildFacebookSelectedPersona,
+  requestFacebookSelectedPersonaFill,
 } = require('./facebook-persona-auto-fill.cjs');
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
@@ -4602,25 +4600,24 @@ ipcMain.handle('fleet:setRailCollapsed', (_event, collapsed) => {
   saveSettings({ railCollapsed: Boolean(collapsed) });
   return { ok: true };
 });
-ipcMain.handle('persona:auto-fill-facebook', async (_event, writingLanguage) => {
-  if (!WRITING_LANGUAGES.has(writingLanguage)) {
-    return { ok: false, error: 'invalid_writing_language', message: '请选择中文、English 或越南语。' };
-  }
+ipcMain.handle('persona:preview-facebook-template', (_event, selection) =>
+  buildFacebookSelectedPersona(selection));
+ipcMain.handle('persona:fill-facebook-selected', async (_event, soulYaml) => {
   if (!clientAuthEnabled() || !hasValidSession()) {
     if (clientAuthEnabled()) onSessionInvalid();
     return { ok: false, error: 'client_session_required', message: '登录状态已失效，请重新登录后再试。' };
   }
-  const outcome = await requestFacebookPersonaAutoFillRun({
+  const outcome = await requestFacebookSelectedPersonaFill({
     request: clientAuthFetch,
     token: clientSession.token,
-    idempotencyKey: `fb-manual-persona-${crypto.randomUUID()}`,
-    writingLanguage,
+    idempotencyKey: `fb-selected-persona-${crypto.randomUUID()}`,
+    soulYaml,
   });
   if (outcome.sessionExpired) onSessionInvalid();
   if (outcome.accepted) return { ok: true, accepted: true };
   return {
     ok: false,
-    error: outcome.sessionExpired ? 'client_session_required' : 'persona_auto_fill_not_accepted',
+    error: outcome.sessionExpired ? 'client_session_required' : 'selected_persona_fill_not_accepted',
     message: outcome.warning || '云端未受理，请稍后重试。',
   };
 });
@@ -4891,25 +4888,6 @@ function safeCreatedEnvironment(finalized) {
   };
 }
 
-async function withFacebookPersonaAutoFillReceipt(receipt, config, idempotencyKey) {
-  if (!config || !config.enabled || !receipt || !Array.isArray(receipt.created) || receipt.created.length === 0) {
-    return receipt;
-  }
-  const outcome = await requestFacebookPersonaAutoFill({
-    request: clientAuthFetch,
-    token: clientSession && clientSession.token,
-    idempotencyKey,
-    writingLanguage: config.writingLanguage,
-    createdItems: receipt.created,
-  });
-  if (outcome.sessionExpired) onSessionInvalid();
-  return {
-    ...receipt,
-    personaAutoFillAccepted: outcome.accepted === true,
-    ...(outcome.warning ? { personaAutoFillWarning: outcome.warning } : {}),
-  };
-}
-
 // 程序化建指纹环境。单建 opts: { osFamilyKey, platform, proxy?, facebookAccountImport? }；
 // Facebook 批量另带 { creationMode:'batch', batchProxyType, facebookProxyBatch }。
 ipcMain.handle('ads:createEnv', async (_event, opts) => {
@@ -4923,13 +4901,6 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     if (creationMode === 'batch' && platform !== 'facebook') {
       return { ok: false, error: '批量新建当前仅支持 Facebook 环境' };
     }
-    const personaAutoFill = creationMode === 'batch'
-      ? normalizeFacebookPersonaAutoFillOptions(opts)
-      : { ok: true, enabled: false };
-    if (!personaAutoFill.ok) return { ok: false, error: personaAutoFill.error };
-    const personaAutoFillIdempotencyKey = personaAutoFill.enabled
-      ? `fb-batch-persona-${crypto.randomUUID()}`
-      : null;
     const importText = platform === 'facebook' ? (opts && opts.facebookAccountImport) : '';
     const parsedImport = parseFacebookAccountImport(importText);
     if (!parsedImport.ok) return { ok: false, error: parsedImport.error };
@@ -4994,11 +4965,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       const item = plan[i];
       const intent = await createEnvironmentProvisioningIntent();
       if (!intent.ok) {
-        return withFacebookPersonaAutoFillReceipt(
-          failedFacebookBatchReceipt(created, i + 1, `${intent.error}，该账号尚未创建本地环境`),
-          personaAutoFill,
-          personaAutoFillIdempotencyKey,
-        );
+        return failedFacebookBatchReceipt(created, i + 1, `${intent.error}，该账号尚未创建本地环境`);
       }
       const result = await createEnvironmentWithGroupRecovery({
         writeApi,
@@ -5015,11 +4982,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         groupResolver: envGroupResolver,
       });
       if (!result.ok) {
-        return withFacebookPersonaAutoFillReceipt(
-          failedFacebookBatchReceipt(created, i + 1, result.error || '未知错误'),
-          personaAutoFill,
-          personaAutoFillIdempotencyKey,
-        );
+        return failedFacebookBatchReceipt(created, i + 1, result.error || '未知错误');
       }
       const finalized = await finalizeCreatedEnvironmentAssignment(result, intent, { slowStartEnabled });
       created.push(safeCreatedEnvironment(finalized));
@@ -5053,7 +5016,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         visibilityWarning: '环境已在本机创建，但 Facebook 慢启动未全部完成 Cloud 权威确认。',
       } : {}),
     };
-    return withFacebookPersonaAutoFillReceipt(receipt, personaAutoFill, personaAutoFillIdempotencyKey);
+    return receipt;
   } catch (e) {
     return { ok: false, error: `创建失败：${(e && e.message) || String(e)}` };
   } finally {
