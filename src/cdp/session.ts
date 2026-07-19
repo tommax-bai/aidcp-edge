@@ -183,6 +183,24 @@ export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSes
 }
 
 /**
+ * 无浏览器控制面启动（change browser-slot-cloud-presence）：先构造一套对象身份稳定的 session，
+ * 但立刻置为 detached。DomProvider / ActionExecutor / 所有事件订阅者从第一刻就攥住同一个 CdpClient；
+ * 后续取得槽位后由 reattachSession() 原地复活，绝不需要重建整套运行时。
+ */
+export function createDetachedSession(options: Pick<AttachOptions, 'client'> = {}): EdgeSession {
+  const cdp = new CdpClient('ws://127.0.0.1:0/browser-absent', options.client);
+  takeOverJavaScriptDialogs(cdp, (m) => console.log(m));
+  cdp.detach();
+  return {
+    cdp,
+    dom: new CdpDomProvider(cdp),
+    executor: new CdpActionExecutor(cdp),
+    close: () => cdp.close(),
+    detach: () => cdp.detach(),
+  };
+}
+
+/**
  * 唤醒重建（change browser-slot-scheduling）：把**已有的** EdgeSession 重新附着到新一代浏览器。
  *
  * 不新建 CdpClient / DomProvider / ActionExecutor —— 十几个长期存活的组件在构造时就攥住了这三个对象，

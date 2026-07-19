@@ -76,7 +76,9 @@ test('cold standby child close stays in standby rather than respawning as a cras
 
   assert.match(startEdge, /message\.type === 'lifecycle\.standby_cloud_degraded'/);
   assert.match(startEdge, /message\.type === 'lifecycle\.standby_cloud_reconnected'/);
-  assert.match(startEdge, /const wasColdStandby = handle\.coldStandbyPending \|\| handle\.coldStandbyActive/);
+  assert.match(startEdge, /const wasColdStandby = !controlPlaneNeverEstablished && \(handle\.coldStandbyPending \|\| handle\.coldStandbyActive\)/);
+  assert.match(startEdge, /controlPlaneNeverEstablished = handle\.controlPlaneOnly && !handle\.controlPlaneBootstrapped/,
+    'browser-absent hello failure must not be laundered into an intentional standby exit');
   assert.match(startEdge, /const intentional = [^;]*wasColdStandby[^;]*;/);
   assert.match(startEdge, /core_exited_during_standby/);
 });

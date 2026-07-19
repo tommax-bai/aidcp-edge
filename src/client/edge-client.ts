@@ -191,6 +191,8 @@ export class EdgeClient {
   private peerCapabilities = new Set<string>();
   private interactionRecovery?: WelcomePayload['interactionRecovery'];
   private interactionRuntime?: WelcomePayload['interactionRuntime'];
+  /** TCP/WS transport 已打开；只有合法 welcome 后 connected 才为 true。 */
+  private socketOpen = false;
   private connected = false;
   private intentionalClose = false;
   private reconnecting = false;
@@ -250,7 +252,8 @@ export class EdgeClient {
       let settled = false;
       ws.addEventListener('open', () => {
         if (this.ws !== ws) return;
-        this.connected = true;
+        this.socketOpen = true;
+        this.connected = false;
         settled = true;
         resolve();
       });
@@ -263,6 +266,7 @@ export class EdgeClient {
       });
       ws.addEventListener('close', () => {
         if (this.ws !== ws) return;
+        this.socketOpen = false;
         this.connected = false;
         this.failAllPending(new Error('边-云 WS 已关闭'));
         if (!this.intentionalClose && this.hasCompletedHello) {
@@ -280,16 +284,47 @@ export class EdgeClient {
 
   private async openAndHello(): Promise<void> {
     await this.openSocket();
-    const welcome = await this.request('hello', {
-      edgeId: this.opts.edgeId,
-      platform: this.opts.platform,
-      app: this.opts.app,
-      capabilities: this.opts.capabilities,
-      accountId: this.opts.accountId,
-      accountNickname: this.opts.accountNickname,
-      machineLabel: this.opts.machineLabel,
-    });
+    let welcome: Envelope;
+    try {
+      welcome = await this.request('hello', {
+        edgeId: this.opts.edgeId,
+        platform: this.opts.platform,
+        app: this.opts.app,
+        capabilities: this.opts.capabilities,
+        accountId: this.opts.accountId,
+        accountNickname: this.opts.accountNickname,
+        machineLabel: this.opts.machineLabel,
+      });
+    } catch (error) {
+      this.failHandshake(error);
+      throw error;
+    }
+
+    if (welcome.type === 'error') {
+      const payload = welcome.payload as { code?: unknown; message?: unknown } | null;
+      const code = typeof payload?.code === 'string' && payload.code.trim() ? payload.code.trim() : 'cloud_rejected';
+      const message = typeof payload?.message === 'string' && payload.message.trim()
+        ? payload.message.trim()
+        : 'Cloud 拒绝 hello';
+      const error = new Error(`Cloud 握手失败 [${code}]: ${message}`);
+      this.failHandshake(error);
+      throw error;
+    }
+    if (welcome.type !== 'welcome' || !welcome.payload || typeof welcome.payload !== 'object') {
+      const error = new Error(`Cloud 握手协议错误: 期望 welcome，实际 ${welcome.type}`);
+      this.failHandshake(error);
+      throw error;
+    }
+
     const p = welcome.payload as WelcomePayload;
+    if (
+      typeof p.sessionId !== 'string' || !p.sessionId.trim() ||
+      typeof p.serverVersion !== 'string' || !p.serverVersion.trim()
+    ) {
+      const error = new Error('Cloud 握手协议错误: welcome 缺少有效 sessionId/serverVersion');
+      this.failHandshake(error);
+      throw error;
+    }
     this.sessionId = p.sessionId;
     this.peerCapabilities = new Set(Array.isArray(p.capabilities) ? p.capabilities : []);
     this.interactionRecovery = p.interactionRecovery;
@@ -298,9 +333,28 @@ export class EdgeClient {
     // 命中返回、永不经过主动命令白名单，故此处直接取用零白名单遗漏风险。缺省（旧云端）→ undefined，边缘用内置默认。
     this.pacing = p.pacing;
     this.hasCompletedHello = true;
+    this.connected = true;
     this.opts.logger(
       `[edge-client] 已握手，sessionId=${this.sessionId ?? '?'}${this.pacing ? `，pacing tempo=${this.pacing.tempo}` : '（无 pacing，用内置默认）'}`,
     );
+  }
+
+  private failHandshake(error: unknown): void {
+    this.connected = false;
+    this.sessionId = undefined;
+    this.peerCapabilities.clear();
+    this.interactionRecovery = undefined;
+    this.interactionRuntime = undefined;
+    this.pacing = undefined;
+    this.opts.logger(`[edge-client] Cloud 握手未成立: ${error instanceof Error ? error.message : String(error)}`);
+    const ws = this.ws;
+    this.ws = undefined;
+    this.socketOpen = false;
+    try {
+      ws?.close();
+    } catch {
+      /* ignore */
+    }
   }
 
   isConnected(): boolean {
@@ -453,7 +507,9 @@ export class EdgeClient {
       };
       signal?.addEventListener('abort', onAbort, { once: true });
       this.pending.set(id, { resolve, reject, timer });
-      if (!this.ws || !this.connected) {
+      // hello 发生在 welcome 之前，只要求 transport 已打开；其它请求必须已有合法 Cloud session。
+      const available = type === 'hello' ? this.socketOpen : this.connected;
+      if (!this.ws || !available) {
         clearTimeout(timer);
         this.pending.delete(id);
         signal?.removeEventListener('abort', onAbort);

@@ -84,6 +84,22 @@ test('standby closes browser but does not exit or deactivate cloud connection', 
   assert.deepEqual(exits, []);
 });
 
+test('initial standby wakes without re-entering standby or closing a nonexistent browser', async () => {
+  const calls: string[] = [];
+  const controller = new CoreLifecycleController({
+    deactivate: async () => { calls.push('deactivate'); },
+    closeOwnedBrowser: async () => { calls.push('close'); return true; },
+    enterStandby: async () => { calls.push('enter'); return true; },
+    wakeFromStandby: async () => { calls.push('wake'); return true; },
+    exit: () => { calls.push('exit'); },
+  }, 'standby');
+
+  assert.equal(controller.state, 'standby');
+  await controller.request('wake');
+  assert.equal(controller.state, 'active');
+  assert.deepEqual(calls, ['wake']);
+});
+
 test('resume after standby exits without trying to close the already closed browser', async () => {
   let deactivations = 0;
   let browserCloses = 0;

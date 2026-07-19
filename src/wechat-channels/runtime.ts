@@ -51,8 +51,13 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   const env = process.env;
   const envKey = env.AIDCP_ENV_KEY?.trim() || env.AIDCP_ADS_USER_ID?.trim();
   if (!envKey) throw new Error('[aidcp-edge] wechat_channels requires AIDCP_ENV_KEY or AIDCP_ADS_USER_ID');
+  const startBrowserAbsent = env.AIDCP_START_BROWSER_ABSENT === '1';
+  const controlAccountId = env.AIDCP_CONTROL_ACCOUNT_ID?.trim();
+  if (startBrowserAbsent && !controlAccountId) {
+    throw new Error('[aidcp-edge] wechat_channels browser-absent startup requires AIDCP_CONTROL_ACCOUNT_ID');
+  }
   const accountId = env.AIDCP_WECHAT_ACCOUNT_ID?.trim() || env.AIDCP_ACCOUNT_ID?.trim();
-  const logicalAccountId = accountId || envKey;
+  const logicalAccountId = startBrowserAbsent ? controlAccountId! : (accountId || envKey);
 
   const flags = wechatChannelsFeatureFlagsFromEnv(env);
   const breaker = new WechatEndpointCircuitBreaker();
@@ -132,7 +137,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     edgeId,
     platform: driver.platform,
     app: driver.app,
-    capabilities: [...driver.edgeCapabilities],
+    capabilities: [...driver.edgeCapabilities, ...(startBrowserAbsent ? ['browser_absent_v1'] : [])],
     accountId: logicalAccountId,
     accountNickname: auth.getSnapshot().identity?.displayName,
     machineLabel: env.AIDCP_MACHINE_LABEL,
@@ -147,6 +152,33 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     },
     logger: safeLog,
   });
+
+  let browserAbsent = startBrowserAbsent;
+  let wakeWaiters: Array<(ok: boolean) => void> = [];
+  const settleWake = (ok: boolean): void => {
+    const waiters = wakeWaiters;
+    wakeWaiters = [];
+    for (const waiter of waiters) waiter(ok);
+  };
+  const ensureBrowserAwake = (): Promise<boolean> => {
+    if (!browserAbsent) return Promise.resolve(true);
+    const deadlineAt = Date.now() + envMs(env.AIDCP_WAKE_DEADLINE_MS, 180_000);
+    if (typeof process.send === 'function' && process.connected) {
+      process.send({ type: 'lifecycle.wake_requested', reason: 'wechat_browser_command', deadlineAt });
+    }
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const finish = (ok: boolean): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), Math.max(0, deadlineAt - Date.now()));
+      timer.unref?.();
+      wakeWaiters.push(finish);
+    });
+  };
 
   let replyFlush: Promise<void> | undefined;
   const flushReplyResultOutbox = (): Promise<void> => {
@@ -236,7 +268,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
       void applyRuntimeControls(envelope.payload as InteractionRuntimeControlsPayload);
       return;
     }
-    void handleInteractionCommand({ client, connector: connector!, state, auth, sidecar,
+    void handleInteractionCommand({ client, connector: connector!, state, auth, sidecar, ensureBrowserAwake,
       flushReplyResultOutbox, flushOffboardResultOutbox, offboardFlights }, envelope as Parameters<typeof handleInteractionCommand>[1]);
   });
   client.on('cloud.disconnected', () => {
@@ -250,7 +282,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
       await applyRuntimeControls(client.getInteractionRuntimeControls());
       await flushReplyResultOutbox();
       await flushOffboardResultOutbox();
-      if (client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
+      if (!browserAbsent && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
           !(await state.isOffboarded())) await connector!.start();
       else await connector!.stop();
     })();
@@ -261,7 +293,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   await applyRuntimeControls(client.getInteractionRuntimeControls());
   await flushReplyResultOutbox();
   await flushOffboardResultOutbox();
-  if (client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
+  if (!browserAbsent && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
       !(await state.isOffboarded())) {
     await connector.start();
     safeLog('[wechat-channels] interaction_inbox_v1 negotiated; API-only connector is online');
@@ -288,12 +320,42 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   process.on('message', (message: unknown) => {
     if (!message || typeof message !== 'object') return;
     const type = (message as { type?: unknown }).type;
+    if (type === 'lifecycle.wake_denied') {
+      settleWake(false);
+      return;
+    }
+    if (type === 'lifecycle.wake') {
+      void (async () => {
+        if (!browserAbsent) {
+          if (typeof process.send === 'function' && process.connected) process.send({ type: 'lifecycle.woken' });
+          return;
+        }
+        try {
+          await auth.initialize();
+          browserAbsent = false;
+          settleWake(true);
+          if (client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
+              !(await state.isOffboarded())) await connector!.start();
+          if (typeof process.send === 'function' && process.connected) process.send({ type: 'lifecycle.woken' });
+        } catch (error) {
+          const reason = safeCode(error);
+          settleWake(false);
+          if (typeof process.send === 'function' && process.connected) {
+            process.send({ type: 'lifecycle.wake_failed', reason });
+          }
+        }
+      })();
+      return;
+    }
     if (type === 'lifecycle.close' || type === 'lifecycle.pause') terminate(String(type));
   });
 
   // Keep WS/status routing online while QR login is pending. Authentication failures are fail-closed states,
   // not process-fatal events; Cloud may later request an explicit reopen on the same environment/profile.
-  if (!flags.interactionEnabled || flags.accountKillSwitch) {
+  if (startBrowserAbsent) {
+    safeLog('[wechat-channels] Cloud control plane online; browser sidecar remains absent until a slot-backed wake');
+    if (typeof process.send === 'function' && process.connected) process.send({ type: 'lifecycle.standby' });
+  } else if (!flags.interactionEnabled || flags.accountKillSwitch) {
     auth.disable();
     connector.reportStatus();
   } else {
@@ -313,6 +375,7 @@ export async function handleInteractionCommand(
     state: WechatRuntimeStateStore;
     auth: WechatAuthCoordinator;
     sidecar: CdpWechatChannelsBrowserSidecar;
+    ensureBrowserAwake?: () => Promise<boolean>;
     flushReplyResultOutbox: () => Promise<void>;
     flushOffboardResultOutbox: () => Promise<void>;
     offboardFlights: Map<string, Promise<void>>;
@@ -395,6 +458,11 @@ export async function handleInteractionCommand(
     return;
   }
   if (envelope.type === 'interaction.auth.reopen') {
+    if (deps.ensureBrowserAwake && !(await deps.ensureBrowserAwake())) {
+      safeLog('[wechat-channels] auth reopen deferred: browser slot unavailable');
+      connector.reportStatus();
+      return;
+    }
     try {
       await connector.reopenAuth(envelope.payload as InteractionAuthReopenPayload);
     } catch (error) {
@@ -404,6 +472,11 @@ export async function handleInteractionCommand(
     return;
   }
   if (envelope.type === 'interaction.browser.control') {
+    if (deps.ensureBrowserAwake && !(await deps.ensureBrowserAwake())) {
+      safeLog('[wechat-channels] browser control deferred: browser slot unavailable');
+      connector.reportStatus();
+      return;
+    }
     try {
       await connector.controlBrowser(envelope.payload as InteractionBrowserControlPayload);
     } catch (error) {

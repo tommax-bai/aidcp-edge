@@ -3337,12 +3337,15 @@ async function doStartAll() {
       fleetView.startAll = {
         ids: res.envIds,
         total: res.queued,
+        controlOnly: Number(res.controlOnly) || 0,
         rejected: Number(res.rejected) || 0,
         queueLimit: Number(res.queueLimit) || 0,
       };
       updateStartAllProgress();
     } else if (res.queued > 0) {
       setRailMsg(`已错峰排队启动 ${res.queued} 个环境（相邻间隔约 1.1s）。`); // 旧主进程无 envIds 时兜底
+    } else if (Number(res.controlOnly) > 0) {
+      setRailMsg(`${res.controlOnly} 个环境正在先连接云端控制面；浏览器启动队列有空位后再进入。`);
     } else if (Number(res.rejected) > 0) {
       setRailMsg(`启动排队已满，本次有 ${res.rejected} 个环境未加入（排队上限 ${res.queueLimit}）。`);
     } else {
@@ -3361,13 +3364,16 @@ function updateStartAllProgress() {
     return e && e.status && e.status.edge === 'running';
   }).length;
   if (launched >= sa.total) {
-    setRailMsg(sa.rejected > 0
-      ? `已启动 ${sa.total} 个；另 ${sa.rejected} 个因启动排队已满未加入，可稍后重试。`
-      : `已全部启动（${sa.total}/${sa.total}）。`);
+    const suffix = sa.controlOnly > 0
+      ? `；另 ${sa.controlOnly} 个已请求连接云端控制面，浏览器暂未入队`
+      : sa.rejected > 0
+        ? `；另 ${sa.rejected} 个未加入启动请求`
+        : '';
+    setRailMsg(`已启动 ${sa.total} 个${suffix}。`);
     fleetView.startAll = null;
     return;
   }
-  setRailMsg(`启动中 ${launched}/${sa.total} · 其余 ${sa.total - launched} 个错峰排队${sa.rejected > 0 ? ` · ${sa.rejected} 个未加入` : ''}…`);
+  setRailMsg(`启动中 ${launched}/${sa.total} · 其余 ${sa.total - launched} 个错峰排队${sa.controlOnly > 0 ? ` · ${sa.controlOnly} 个先连云端控制面` : ''}${sa.rejected > 0 ? ` · ${sa.rejected} 个未加入` : ''}…`);
 }
 fields.railStartAll?.addEventListener('click', () => { void doStartAll(); });
 

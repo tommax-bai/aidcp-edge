@@ -508,6 +508,53 @@ async function clientAuthFetch(pathname, { method = 'GET', token, body, idempote
   }
 }
 
+const CONTROL_BOOTSTRAP_REASON_ZH = {
+  environment_not_owned: '当前客户无权访问该环境',
+  binding_unknown: '该环境尚未成功上报过登录账号',
+  binding_conflict: '该环境的账号绑定存在跨客户冲突',
+  binding_unavailable: '云端账号绑定暂时不可用',
+};
+
+/**
+ * 浏览器缺席启动的唯一账号来源：customer-auth 的 ownership + persistent binding 联接。
+ * renderer、本地环境名/profileId/旧日志一律不参与；任何结构异常都 fail-closed。
+ */
+async function resolveControlBootstrap(handle) {
+  if (!handle || handle.kind !== 'adspower') {
+    return { ok: false, reason: 'unsupported_environment', message: '该环境类型暂不支持无浏览器控制面启动' };
+  }
+  if (!clientAuthEnabled()) {
+    return { ok: false, reason: 'client_auth_disabled', message: '客户鉴权未配置，无法可信确认环境账号' };
+  }
+  if (!hasValidSession()) {
+    return { ok: false, reason: 'client_session_missing', message: '客户登录已失效，无法可信确认环境账号' };
+  }
+  const envKey = String(handle.profileId || '').trim();
+  if (!envKey) return { ok: false, reason: 'invalid_environment', message: '环境缺少分身 ID' };
+  const response = await clientAuthFetch(`/environments/${encodeURIComponent(envKey)}/control-bootstrap`, {
+    token: clientSession.token,
+  });
+  if (response.status === 401) onSessionInvalid();
+  if (!response.ok) {
+    const reason = response.data && typeof response.data.error === 'string'
+      ? response.data.error
+      : response.status === 0 ? 'cloud_unreachable' : 'bootstrap_rejected';
+    return {
+      ok: false,
+      reason,
+      message: CONTROL_BOOTSTRAP_REASON_ZH[reason]
+        || (reason === 'cloud_unreachable' ? '暂时无法连接账号绑定服务' : '云端拒绝控制面账号引导'),
+    };
+  }
+  const data = response.data && response.data.data;
+  const returnedEnvKey = data && typeof data.envKey === 'string' ? data.envKey.trim() : '';
+  const accountId = data && typeof data.accountId === 'string' ? data.accountId.trim() : '';
+  if (returnedEnvKey !== envKey || !accountId || accountId.length > 256 || /[\u0000-\u001f\u007f]/.test(accountId)) {
+    return { ok: false, reason: 'bootstrap_schema_invalid', message: '云端控制面引导响应不合法，已拒绝使用' };
+  }
+  return { ok: true, envKey, accountId };
+}
+
 // ── 视频号 InteractionWorkspace customer-auth bridge ────────────────────────
 // renderer 只能调用下方具名 IPC；路径、方法、query、body 与幂等 header 全部由主进程组装。
 // 这里不暴露通用 URL/fetch，也不把客户 token 或 Cloud 原始请求能力交给 renderer。
@@ -1209,6 +1256,11 @@ function makeEnvHandle({ envId, kind, profileId, name, platform, cascadeIndex })
     coldStandbyWakeAt: 0,
     coldStandbyActive: false,
     coldStandbyPending: false,
+    // 控制面与浏览器槽位解耦：核心/Cloud 已上线但浏览器从未启动。只有 lifecycle.standby ack 后
+    // controlPlaneBootstrapped 才为真，握手前退出不得被误洗成“正常待机退出”。
+    controlPlaneOnly: false,
+    controlPlaneBootstrapped: false,
+    controlPlaneStarting: false,
     // 最短持有时长（change standby-covers-idle-waits）：上次唤醒完成的时刻 + 一个「持有满足后重新判定」
     // 的定时器。被 min_hold 拦下时**绝不能把提示丢掉**——否则一次拦截就把该环境永久留在开启态、
     // 再也不会让出槽位（外层 !decision.ok 分支对「不在待机中」的普通 skip 是直接 return、什么都不做的）。
@@ -1394,7 +1446,8 @@ function maxQueuedStarts() {
 function occupiedSlots() {
   let n = 0;
   for (const h of envs.values()) {
-    if (h.child && !h.coldStandbyActive && !h.removed) n += 1;
+    // 初始 browser-absent 核心从未打开浏览器；coldStandbyPending 期间也不能虚占一个执行槽。
+    if (h.child && !h.coldStandbyActive && !h.controlPlaneOnly && !h.removed) n += 1;
   }
   return n;
 }
@@ -2363,8 +2416,10 @@ function enterColdStandby(handle, decision) {
 
 function onColdStandbyAck(handle) {
   if (!handle || !handle.coldStandbyPending) return;
+  const bornBrowserAbsent = Boolean(handle.controlPlaneOnly);
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = true;
+  if (handle.controlPlaneOnly) handle.controlPlaneBootstrapped = true;
   // 浏览器关掉了 = 一个槽位空出来了：立刻叫等槽位队列的队头，别让它白等到下一次重扫。
   setTimeout(() => drainSlotWaiters(), 0);
   const hint = handle.status.browserStandby && handle.status.browserStandby.hint;
@@ -2385,8 +2440,12 @@ function onColdStandbyAck(handle) {
       wakeDelayMs: decision.wakeDelayMs,
       warmupMs: decision.warmupMs,
     } : { reason: decision.reason }),
-    lastMessage: '浏览器已关闭进入冷待机，云端连接保持中。',
-    ...presencePatch('长时间等待中，浏览器已关闭，云端连接保持中'),
+    lastMessage: bornBrowserAbsent
+      ? '云端控制面已连接；浏览器尚未启动，正在等待执行槽位。'
+      : '浏览器已关闭进入冷待机，云端连接保持中。',
+    ...presencePatch(bornBrowserAbsent
+      ? '已连接云端，浏览器等待槽位'
+      : '长时间等待中，浏览器已关闭，云端连接保持中'),
     ...clearEdgeFailurePatch(handle),
   });
 }
@@ -2559,6 +2618,8 @@ function onColdStandbyWoken(handle) {
   if (typeof handle.wakeSettle === 'function') handle.wakeSettle(true); // 放行启动队列的下一个
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = false;
+  handle.controlPlaneOnly = false;
+  handle.controlPlaneBootstrapped = false;
   handle.wakeRetryStreak = 0;
   handle.wakeDeadlineAt = 0;
   clearWakeDeadline(handle);
@@ -2593,6 +2654,9 @@ function onColdStandbyWakeFailed(handle, reason) {
   // 待机定时器在 wakeColdStandby 里被清掉了，这里**必须还回去**——不还，这个环境此后再无任何
   // 自唤醒路径，会一直待机到天荒地老（一次唤醒失败 = 永久停摆）。
   rearmWakeAfterFailure(handle);
+  // 这次浏览器没有起来，执行槽仍是空的：立即放行 FIFO 下一项。只靠 15s 重扫虽最终会恢复，
+  // 但会把“第 5 个分身被占用”表现成后续环境长时间没有回复，正是启动调度需要消掉的空窗。
+  setTimeout(() => drainSlotWaiters(), 0);
   updateStatus(handle, {
     browserStandby: coldStandbyStatus('sleeping', handle.status.browserStandby && handle.status.browserStandby.hint, {
       reason: `wake_failed:${reason}`,
@@ -2600,6 +2664,70 @@ function onColdStandbyWakeFailed(handle, reason) {
     lastMessage: `唤醒失败：${reason}。仍保持待机，可再次唤醒。`,
     ...presencePatch('待机中（唤醒失败）'),
   });
+}
+
+/**
+ * 不占浏览器槽位地启动核心控制面。引导失败时保留原浏览器排队语义，绝不猜账号、绝不显示已连接。
+ * retainStartQueueReservation=true 表示这个环境已经是有界浏览器等待队列的一员；核心上线不能偷释放名额。
+ */
+async function startBrowserAbsentCore(handle, {
+  retainStartQueueReservation = false,
+  slotAdmission = null,
+  queueAdmission = null,
+} = {}) {
+  if (!handle || handle.child || handle.controlPlaneStarting || handle.removed || handle.stopRequested || isQuitting) return false;
+  handle.controlPlaneStarting = true;
+  try {
+    const bootstrap = await resolveControlBootstrap(handle);
+    if (!bootstrap.ok) {
+      if (!retainStartQueueReservation) releaseStartQueue(handle);
+      const browserState = queueAdmission && queueAdmission.message
+        ? queueAdmission.message
+        : slotAdmission && slotAdmission.message
+          ? slotAdmission.message
+          : '浏览器仍在等待可用槽位';
+      updateStatus(handle, {
+        edge: 'idle',
+        cloud: 'disconnected',
+        session: 'idle',
+        lastMessage: `${browserState}；控制面未连接：${bootstrap.message}。`,
+        ...edgeFailurePatch(`控制面未连接：${bootstrap.message}`),
+        ...presencePatch('浏览器等待中，云端身份尚未确认'),
+      });
+      return false;
+    }
+
+    handle.coldStandbyPending = true;
+    handle.coldStandbyActive = false;
+    handle.controlPlaneOnly = true;
+    handle.controlPlaneBootstrapped = false;
+    if (slotAdmission) {
+      parkForSlot(handle, slotAdmission);
+    } else {
+      updateStatus(handle, {
+        edge: 'starting',
+        session: 'resting',
+        browserStandby: coldStandbyStatus('scheduled', null, { reason: 'start_queue_full' }),
+        lastMessage: `${queueAdmission?.message || '浏览器启动暂未入队'}；正在先连接云端控制面。`,
+        ...presencePatch('正在连接云端，浏览器暂未入队'),
+        ...clearEdgeFailurePatch(handle),
+      });
+    }
+    const started = spawnEdgeChild(handle, {
+      controlBootstrap: bootstrap,
+      retainStartQueueReservation,
+    });
+    if (!started) {
+      handle.coldStandbyPending = false;
+      handle.controlPlaneOnly = false;
+      handle.controlPlaneBootstrapped = false;
+      if (!retainStartQueueReservation) releaseStartQueue(handle);
+      return false;
+    }
+    return await started;
+  } finally {
+    handle.controlPlaneStarting = false;
+  }
 }
 
 /**
@@ -2647,8 +2775,10 @@ function startEdge(handle, { kind = 'resume' } = {}) {
         // 挂 12 个账号、只有 6 个槽位，本来就该有 6 个在等——等别人进冷待机让出槽位再顶上，
         // 这正是 1:2 能成立的前提。旧版在这里直接丢弃请求、环境永久趴在 warning 态，
         // 后来槽位空出来也没人去取，等于把 1:2 废掉了（多挂的账号一天都跑不了）。
-        parkForSlot(handle, admitted);
-        return false;
+        return await startBrowserAbsentCore(handle, {
+          retainStartQueueReservation: true,
+          slotAdmission: admitted,
+        });
       }
       clearSlotWaiting(handle);
       clearWakeDeadline(handle);
@@ -2663,9 +2793,13 @@ function startEdge(handle, { kind = 'resume' } = {}) {
  * 返回一个在环境**真正就绪**（云端已连上）或诚实失败时才 settle 的 promise——串行启动队列靠它
  * 实现「起完一个再起下一个」；不等就绪就放行下一个，10 个环境仍会几乎同时冷启、把内存打爆。
  */
-function spawnEdgeChild(handle) {
+function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReservation = false } = {}) {
   if (!handle || handle.child || handle.removed || handle.stopRequested || isQuitting) return false;
   if (handle.status.session === 'paused') return false;
+  if (!controlBootstrap) {
+    handle.controlPlaneOnly = false;
+    handle.controlPlaneBootstrapped = false;
+  }
   // 打包后用 Electron 自带的 Node 运行预编译产物（ELECTRON_RUN_AS_NODE），
   // 不依赖目标机装 Node/npx/tsx。entry 为 build:dist 编译出的 dist/main.js。
   const appRoot = app.getAppPath();
@@ -2729,6 +2863,11 @@ function spawnEdgeChild(handle) {
     cloudEnvKey: resolvedCloudKey,
     isPackaged: app.isPackaged,
   });
+  if (controlBootstrap) {
+    // 与 AIDCP_ACCOUNT_ID 严格分离：后者会覆盖页面真实身份，绝不能承载可能陈旧的启动引导。
+    spawnEnv.AIDCP_START_BROWSER_ABSENT = '1';
+    spawnEnv.AIDCP_CONTROL_ACCOUNT_ID = controlBootstrap.accountId;
+  }
 
   handle.browserParkingReady = false;
   handle.browserPersonaNoticeState = null;
@@ -2756,24 +2895,28 @@ function spawnEdgeChild(handle) {
   });
   handle.child = child;
   // 核心已进入执行态：从启动排队移出；后续由浏览器并发槽位计数，不再占等待容量。
-  releaseStartQueue(handle);
+  if (!retainStartQueueReservation) releaseStartQueue(handle);
 
   // 发布卡在途状态随核心（重）启动清零（edge-companion-ui 8.1 评审修正）：离线窗口内的审批变化
   // （拒绝/失败）推送会如实丢失，旧 pending/approved 卡若不清会永久滞留成陈卡；真在候审/已批的
   // 草稿由重连后的云端 hello 快照重新推回。lastPublish 历史态不清（持久数据）。
   updateStatus(handle, {
     edge: 'starting',
-    session: 'running',
+    session: controlBootstrap ? 'resting' : 'running',
     // 新核心 = 还没连上过云端，哪怕上一个核心连上过（change honest-first-connect-label）。不复位这一位，
     // 崩溃重起 / 显式重启的整个冷启动窗口会顶着上一轮的「连过」资格，被讲成「正在重新连接」。
     cloudEverConnected: false,
-    browserStandby: null,
+    browserStandby: controlBootstrap
+      ? coldStandbyStatus('scheduled', null, { reason: 'browser_absent_at_start' })
+      : null,
     publish: null,
     publishPreview: null,
     respawnGaveUp: false,
     connectedCloudKey: handle.connectedCloudKey || '',
-    lastMessage: '正在启动 aidcp-edge…',
-    ...presencePatch('正在启动引擎…'),
+    lastMessage: controlBootstrap
+      ? '正在启动云端控制面；浏览器保持关闭，等待执行槽位。'
+      : '正在启动 aidcp-edge…',
+    ...presencePatch(controlBootstrap ? '正在连接云端，浏览器等待槽位' : '正在启动引擎…'),
     ...clearEdgeFailurePatch(handle),
   });
 
@@ -2854,6 +2997,9 @@ function spawnEdgeChild(handle) {
     if (handle.child !== child) return;
     settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
     handle.child = undefined;
+    handle.coldStandbyPending = false;
+    handle.controlPlaneOnly = false;
+    handle.controlPlaneBootstrapped = false;
     handle.browserParkingReady = false;
     handle.browserPersonaNoticeState = null;
     resetPersonaNoticeGrace(handle);
@@ -2903,8 +3049,17 @@ function spawnEdgeChild(handle) {
     const wasParked = handle.coreParked;
     const wasPausing = handle.pausePending;
     const wasRestarting = handle.restartPending;
-    const wasColdStandby = handle.coldStandbyPending || handle.coldStandbyActive;
+    // 初始 browser-absent 核心只有在发出 lifecycle.standby ack 后才算真正待机成功。若 Cloud hello
+    // 失败即退出，pending 不能把它洗成“有意待机退出”——那会吞掉真实握手故障且永不重试。
+    const controlPlaneNeverEstablished = handle.controlPlaneOnly && !handle.controlPlaneBootstrapped;
+    const wasColdStandby = !controlPlaneNeverEstablished && (handle.coldStandbyPending || handle.coldStandbyActive);
     handle.child = undefined;
+    if (controlPlaneNeverEstablished) {
+      handle.coldStandbyPending = false;
+      handle.coldStandbyActive = false;
+      handle.controlPlaneOnly = false;
+      handle.controlPlaneBootstrapped = false;
+    }
     // 核心退出 = 它的浏览器也没了 = 槽位空出来了：立刻叫队头（停止 / 暂停 / 崩溃都算）。
     setTimeout(() => drainSlotWaiters(), 0);
     handle.browserParkingReady = false;
@@ -3339,7 +3494,10 @@ function enqueueStartFlow(handle) {
   const admission = reserveStartQueue(handle);
   if (!admission.ok) {
     showStartQueueFull(handle, admission);
-    return false;
+    // 浏览器启动队列容量只限制浏览器等待者，不限制 Cloud 控制面数。未进浏览器队列的环境仍尝试
+    // 用客户 ownership + persistent binding 启动 browser-absent 核心；失败也只保持诚实离线，绝不猜账号。
+    void startBrowserAbsentCore(handle, { queueAdmission: admission });
+    return 'control-only';
   }
   handle.startFlowQueued = true;
   void queueLifecycle(async () => {
@@ -3367,6 +3525,7 @@ function queueStartEnv(handle, queuePosition) {
   clearColdStandbyTimer(handle);
   const queued = enqueueStartFlow(handle);
   if (!queued) return false;
+  if (queued === 'control-only') return queued;
   updateStatus(handle, {
     edge: 'starting',
     respawnGaveUp: false,
@@ -3687,6 +3846,10 @@ function resumeEdge(handle) {
   handle.stopRequested = false;
   clearRespawnTimer(handle);
   clearColdStandbyTimer(handle);
+  if (handle.child && (handle.coldStandbyActive || handle.coldStandbyPending || handle.controlPlaneOnly)) {
+    wakeColdStandby(handle, 'user_resume');
+    return;
+  }
   if (handle.child && (handle.coreParked || handle.pausePending || handle.status.session === 'paused')) {
     const child = handle.child;
     handle.restartPending = true;
@@ -3836,22 +3999,30 @@ function startAllEnvs({ envIds } = {}) {
   // envIds 未提供时兼容旧版 renderer 的全量调用；显式空数组则是零目标。
   const scoped = fleet.scopeFleetHandles([...envs.values()], envIds);
   const paused = scoped.filter((h) => h.child && h.status.session === 'paused');
+  const standby = scoped.filter((h) => h.child && h.status.session !== 'paused'
+    && (h.coldStandbyActive || h.coldStandbyPending || h.controlPlaneOnly));
   const targets = scoped.filter((h) => !h.child);
-  if (targets.length === 0 && paused.length === 0) return { ok: true, queued: 0 };
+  if (targets.length === 0 && paused.length === 0 && standby.length === 0) return { ok: true, queued: 0 };
   paused.forEach((h) => resumeEdge(h));
+  standby.forEach((h) => wakeColdStandby(h, 'user_start_all'));
   const accepted = [];
+  const controlOnly = [];
   const rejected = [];
   targets.forEach((handle) => {
-    if (queueStartEnv(handle, accepted.length + 1)) accepted.push(handle);
+    const result = queueStartEnv(handle, accepted.length + 1);
+    if (result === 'control-only') controlOnly.push(handle);
+    else if (result) accepted.push(handle);
     else rejected.push(handle);
   });
-  const all = [...paused, ...accepted];
+  const all = [...paused, ...standby, ...accepted];
   return {
     ok: true,
     queued: all.length,
+    controlOnly: controlOnly.length,
     rejected: rejected.length,
     queueLimit: maxQueuedStarts(),
     envIds: all.map((h) => h.envId),
+    controlOnlyEnvIds: controlOnly.map((h) => h.envId),
     rejectedEnvIds: rejected.map((h) => h.envId),
   };
 }
@@ -4358,7 +4529,11 @@ ipcMain.handle('cloud:restartAll', () => {
 // 悬浮「启动」：目标环境未跑则错峰启动；已在跑则不重复启动。
 ipcMain.handle('edge:start', (_event, envId) => {
   const handle = resolveHandle(envId);
-  if (handle && !handle.child) queueStartEnv(handle);
+  if (handle && handle.child && (handle.coldStandbyActive || handle.coldStandbyPending || handle.controlPlaneOnly)) {
+    wakeColdStandby(handle, 'user_start');
+  } else if (handle && !handle.child) {
+    queueStartEnv(handle);
+  }
   return statusOf(handle);
 });
 // 「按新设置重启」：显式应用已保存的设置到在跑核心（有序重启，不由保存隐式打断）。

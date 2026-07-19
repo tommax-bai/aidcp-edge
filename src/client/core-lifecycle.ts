@@ -48,10 +48,15 @@ export function parseCoreLifecycleCommand(message: unknown): CoreLifecycleComman
 export class CoreLifecycleController {
   private transition: Promise<void> = Promise.resolve();
   private deactivatePromise: Promise<void> | undefined;
-  private currentState: CoreLifecycleState = 'active';
+  private currentState: CoreLifecycleState;
   private finalizing = false;
 
-  constructor(private readonly deps: CoreLifecycleDependencies) {}
+  constructor(
+    private readonly deps: CoreLifecycleDependencies,
+    initialState: 'active' | 'standby' = 'active',
+  ) {
+    this.currentState = initialState;
+  }
 
   get state(): CoreLifecycleState {
     return this.currentState;

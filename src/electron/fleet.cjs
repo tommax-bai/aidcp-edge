@@ -143,6 +143,8 @@ const ENV_KEYS_MUST_DROP = [
   'AIDCP_CDP_PORT', // AdsPower 每分身动态返回调试端口
   'AIDCP_CHROME_PROFILE', // AdsPower 自管 user-data-dir
   'AIDCP_CDP_ALLOW_REUSE',
+  'AIDCP_START_BROWSER_ABSENT', // 仅主进程在可信 control bootstrap 成功后逐环境注入
+  'AIDCP_CONTROL_ACCOUNT_ID', // 不得从外壳继承，避免跨环境串用陈旧绑定
   'AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE',
 ];
 

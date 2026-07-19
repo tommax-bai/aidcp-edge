@@ -156,6 +156,63 @@ test('edge-client: hello carries platform metadata without changing message type
   await connecting;
 });
 
+test('edge-client: hello error envelope fail-closed and never becomes connected', async () => {
+  const ws = new FakeWebSocket();
+  const logs: string[] = [];
+  const client = new EdgeClient({
+    url: 'ws://test',
+    edgeId: 'edge-rejected',
+    runner: { run: async () => ({ actionId: 'noop', ok: false, outcome: 'escalated', attempts: 0, reason: 'unused' }) },
+    wsFactory: () => ws,
+    idGen: () => 'hello-rejected',
+    clock: () => 1,
+    logger: (line) => logs.push(line),
+    reconnect: false,
+  });
+
+  const connecting = client.connect();
+  ws.emitOpen();
+  await Promise.resolve();
+  assert.equal(client.isConnected(), false, 'transport open is not a Cloud session');
+  ws.emitMessage(makeEnvelope('error', 'hello-rejected', 1, {
+    code: 'account_mismatch',
+    message: '账号与环境绑定不一致',
+  }));
+
+  await assert.rejects(connecting, /Cloud 握手失败 \[account_mismatch\]: 账号与环境绑定不一致/);
+  assert.equal(client.isConnected(), false);
+  assert.equal(client.getSessionId(), undefined);
+  assert.ok(logs.some((line) => line.includes('Cloud 握手未成立')));
+  assert.ok(logs.every((line) => !line.includes('已握手')));
+});
+
+test('edge-client: malformed welcome without session identity fails closed', async () => {
+  for (const payload of [
+    { serverVersion: 'v1' },
+    { sessionId: 's1' },
+    { sessionId: '   ', serverVersion: 'v1' },
+  ]) {
+    const ws = new FakeWebSocket();
+    const client = new EdgeClient({
+      url: 'ws://test',
+      edgeId: 'edge-malformed',
+      runner: { run: async () => ({ actionId: 'noop', ok: false, outcome: 'escalated', attempts: 0, reason: 'unused' }) },
+      wsFactory: () => ws,
+      idGen: () => 'hello-malformed',
+      clock: () => 1,
+      logger: () => {},
+      reconnect: false,
+    });
+    const connecting = client.connect();
+    ws.emitOpen();
+    await Promise.resolve();
+    ws.emitMessage(makeEnvelope('welcome', 'hello-malformed', 1, payload as never));
+    await assert.rejects(connecting, /welcome 缺少有效 sessionId\/serverVersion/);
+    assert.equal(client.isConnected(), false);
+    assert.equal(client.getSessionId(), undefined);
+  }
+});
+
 test('edge-client: hello carries optional account nickname for display enrichment', async () => {
   const ws = new FakeWebSocket();
   const client = new EdgeClient({

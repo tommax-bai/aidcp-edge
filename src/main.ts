@@ -38,6 +38,7 @@ import './websocket-polyfill.js';
 import {
   applyBrowserParking,
   attachToPage,
+  createDetachedSession,
   reattachSession,
   browserParkingConfigFromEnv,
   installBrowserParkingStdinControl,
@@ -45,6 +46,7 @@ import {
   waitForLoginIdentity,
   resolveStartupIdentity,
   type BrowserLaunchOptions,
+  type ChromeInstance,
   type ReadSelfIdentityOptions,
 } from './cdp/index.js';
 import { selectPlatformDriver } from './platform/index.js';
@@ -58,6 +60,7 @@ import {
   FacebookJoinExecutor,
   FacebookOverlayMonitor,
   FacebookPublishExecutor,
+  facebookActionNameForCommand,
   parseFacebookBrowseMode,
   readFacebookIdentityPageContext,
   usesFacebookBrowseSession,
@@ -86,6 +89,7 @@ import type {
   PublishCommandResultPayload,
   EdgeTaskAcquirePayload,
   EdgeTaskReleasePayload,
+  Envelope,
 } from './comm/protocol.js';
 import {
   BrowseSession,
@@ -182,6 +186,11 @@ async function main(): Promise<void> {
   // hello 身份（account-identity-from-login）：默认从「登录后读出的真实稳定 id」确立（见 attachToPage 之后）；
   // 环境变量 AIDCP_ACCOUNT_ID 降级为【可选覆盖】（预置/特殊场景的逃生阀）。
   const overrideAccountId = process.env.AIDCP_ACCOUNT_ID;
+  const startBrowserAbsent = process.env.AIDCP_START_BROWSER_ABSENT === '1';
+  const controlAccountId = process.env.AIDCP_CONTROL_ACCOUNT_ID?.trim() || undefined;
+  if (startBrowserAbsent && !controlAccountId) {
+    throw new Error('AIDCP_START_BROWSER_ABSENT=1 需要可信 AIDCP_CONTROL_ACCOUNT_ID；拒绝猜测账号');
+  }
   let accountId: string | undefined;
   let accountNickname: string | undefined;
   const machineLabel = process.env.AIDCP_MACHINE_LABEL;
@@ -225,7 +234,15 @@ async function main(): Promise<void> {
   }
   // let（非 const）：冷待机唤醒会**重开浏览器**，新一代的 ChromeInstance 与调试端口必须整体换掉——
   // AdsPower 每次启动的 debug_port 都不同，留着旧的会让后续所有生命周期闭包对着一个死端口操作。
-  let { instance: chrome, endpoint } = await provider.launch(launchOpts);
+  let chrome: ChromeInstance | undefined;
+  let endpoint = { host: cdpHost, port: cdpPort };
+  if (!startBrowserAbsent) {
+    const launched = await provider.launch(launchOpts);
+    chrome = launched.instance;
+    endpoint = launched.endpoint;
+  } else {
+    console.log(`[aidcp-edge] 浏览器槽位缺席：以控制面待机态启动（accountId=${controlAccountId}），暂不调用 provider.launch`);
+  }
 
   // 反检测恰一层生效：self 默认开 edge 自研 stealth；adspower 默认关、反检测整层交 AdsPower——
   // 自动化痕迹由 cdp_mask（V2 browser-profile/start 字段，藏 navigator.webdriver 等 CDP 特征）掩盖、
@@ -234,23 +251,28 @@ async function main(): Promise<void> {
   const stealthEnv = process.env.AIDCP_STEALTH?.toLowerCase();
   const stealth = stealthEnv ? !['off', 'false', '0', 'no'].includes(stealthEnv) : provider.kind !== 'adspower';
 
-  console.log(`[aidcp-edge] 连接浏览器 CDP ${endpoint.host}:${endpoint.port}（stealth=${stealth ? 'on' : 'off'}）...`);
+  if (!startBrowserAbsent) {
+    console.log(`[aidcp-edge] 连接浏览器 CDP ${endpoint.host}:${endpoint.port}（stealth=${stealth ? 'on' : 'off'}）...`);
+  }
   const attachOpts: Parameters<typeof attachToPage>[0] = { host: endpoint.host, port: endpoint.port, stealth };
   if (pageUrl) attachOpts.urlIncludes = pageUrl;
   else if (provider.kind === 'adspower') {
     attachOpts.urlIncludes = platformDriver.attachUrlIncludes;
     attachOpts.targetPredicate = (target) => platformDriver.isAllowedTargetUrl(target.url);
   }
-  const session = await attachToPage(attachOpts);
-  console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
+  const session = startBrowserAbsent ? createDetachedSession() : await attachToPage(attachOpts);
+  let parkingControlInstalled = !startBrowserAbsent;
+  if (!startBrowserAbsent) console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
   // 停放校验失败会抛（bounds 与兜底位都过不了可见性探针）；绝不能因此跳过下面的 stdin 控制通道安装，
   // 否则 control-ready 永不发出、「显示浏览器 / 重置位置」被永久禁用（静默假死）。故此处吞异常、只记日志。
-  try {
-    await applyBrowserParking(session.cdp, parkingConfig, (m) => console.log(m));
-  } catch (e) {
-    console.log(`[browser-parking] apply failed at startup: ${(e as Error).message}`);
+  if (!startBrowserAbsent) {
+    try {
+      await applyBrowserParking(session.cdp, parkingConfig, (m) => console.log(m));
+    } catch (e) {
+      console.log(`[browser-parking] apply failed at startup: ${(e as Error).message}`);
+    }
+    installBrowserParkingStdinControl(session.cdp, parkingConfig, (m) => console.log(m));
   }
-  installBrowserParkingStdinControl(session.cdp, parkingConfig, (m) => console.log(m));
   // Runtime/Page/Input 域启用 + 反检测注入均在 attachToPage 内（reEnableAndInject，与断线重连共用）。
 
   // 收口真退出端点（change adspower-first-login-wait-gate）：本进程带 IPC 通道 + stdin 控制读取器两个常驻句柄，
@@ -269,7 +291,10 @@ async function main(): Promise<void> {
   // self 模式登录态由壳侧登录门保证；adspower 模式无壳侧门——新建环境=全新未登录分身，首读必 halt。故 adspower 首读 halt 时
   // 不即刻停手，进【有界等待登录门】等操作者扫码；读出真 id 无缝续握手，超时/中断诚实【干净停止】。红线不变：只在读出真实
   // 稳定 id 时握手，超时绝不猜、绝不回落 default；所有 halt 都经 terminateNow 真退出（绝不 bare-return 挂僵尸）。
-  {
+  if (startBrowserAbsent) {
+    accountId = controlAccountId;
+    console.log(`[aidcp-edge] 控制面账号身份已确立: ${accountId} [source=cloud-bound-bootstrap; browser=absent]`);
+  } else {
     // adspower 首读 allowNavigate=false：登录页无「我」锚点，navigate 兜底既接不住新登录又只带误导航风险（task 1.5）。self 维持默认。
     const firstReadOpts: ReadSelfIdentityOptions = { logger: (m) => console.log(m) };
     if (provider.kind === 'adspower') firstReadOpts.allowNavigate = false;
@@ -347,7 +372,10 @@ async function main(): Promise<void> {
     edgeId,
     platform: platformDriver.platform,
     app: platformDriver.app,
-    capabilities: [...platformDriver.edgeCapabilities],
+    capabilities: [
+      ...platformDriver.edgeCapabilities,
+      ...(startBrowserAbsent ? ['browser_absent_v1'] : []),
+    ],
     ...(accountId ? { accountId } : {}),
     ...(accountNickname ? { accountNickname } : {}),
     ...(machineLabel ? { machineLabel } : {}),
@@ -408,7 +436,7 @@ async function main(): Promise<void> {
   let watcherSupervisor: WatcherSupervisor | undefined;
   let identityWatcher: IdentityWatcher | undefined;
   let requestShutdown: ((reason: string) => void) | undefined;
-  let coldStandbyActive = false;
+  let coldStandbyActive = startBrowserAbsent;
   let coldStandbyWakeRequested = false;
   /** 当前唤醒请求所携带的最早死线（调用方等不下去的时刻）。见 requestColdStandbyWake 的闩升级语义。 */
   let coldStandbyWakeDeadlineAt: number | undefined;
@@ -478,6 +506,29 @@ async function main(): Promise<void> {
         + (coldStandbyWakeDeadlineAt !== undefined ? `（死线还剩 ${Math.max(0, coldStandbyWakeDeadlineAt - Date.now())}ms）` : ''),
     );
     sendLifecycleIpc({ type: 'lifecycle.wake_requested', reason, deadlineAt: coldStandbyWakeDeadlineAt });
+  };
+  /**
+   * 浏览器缺席时，云端直达页面命令不能被静默吞掉。
+   *
+   * 正常独占任务会先 acquire，待浏览器真实唤醒后再下发页面命令；这里兜住乱序、旧云端或自动浏览
+   * 直达命令。请求外壳唤醒的同时回明确失败，让调用方在 woken 后决定是否重试。pacing.update 不触碰
+   * 页面，直接应用到待机会话，不占浏览器槽位。
+   */
+  const handleBrowserAbsentCommand = (env: Envelope): boolean => {
+    if (!coldStandbyActive) return false;
+    if (env.type === 'pacing.update') {
+      const payload = (env.payload ?? {}) as {
+        opFloorsMs?: Parameters<EdgeBrowseSession['applyPacingSnapshot']>[0];
+        tempo?: number;
+      };
+      browse?.applyPacingSnapshot(payload.opFloorsMs, payload.tempo);
+      return true;
+    }
+    requestColdStandbyWake(`cloud_command:${env.type}`);
+    const action = facebookActionNameForCommand(env.type);
+    console.warn(`[aidcp-edge] 浏览器尚未启动，命令 ${env.type} 回执 ${action}:browser_absent_wake_requested`);
+    client.reportActionCompleted({ action, ok: false, reason: 'browser_absent_wake_requested' });
+    return true;
   };
   /** 唤醒有了结论（成功 / 失败 / 外壳说这次没轮到）→ 复位闩，否则这个账号此后再也不会请求唤醒 = 永久停摆。 */
   const clearColdStandbyWakeLatch = (): void => {
@@ -847,7 +898,7 @@ async function main(): Promise<void> {
   if (facebookCommandDriver) {
     // 该平台的旁路弹窗监测体后台常开：执行器每步操作前 fresh 复检登录/验证码（fail-closed）。
     overlayMonitor = platformDriver.createOverlayMonitor(session.cdp);
-    overlayMonitor.start();
+    if (!coldStandbyActive) overlayMonitor.start();
     const fbCommentExecutor = new FacebookCommentExecutor({
       cdp: session.cdp,
       getAccountId: () => accountId,
@@ -870,10 +921,7 @@ async function main(): Promise<void> {
       logger: (m) => console.log(m),
     });
     client.onBrowseCommand((env) => {
-      if (coldStandbyActive) {
-        requestColdStandbyWake(`cloud_command:${env.type}`);
-        return;
-      }
+      if (handleBrowserAbsentCommand(env)) return;
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
       const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
       if (!taskCoordinator.canExecute(ownedTaskId)) {
@@ -1058,7 +1106,7 @@ async function main(): Promise<void> {
       });
       session.cdp.on?.('cdp.unrecoverable', () => fbSupervisor.stopAll());
       session.cdp.on?.('cdp.reconnected', () => fbSupervisor.startAll());
-      fbSupervisor.startAll();
+      if (!coldStandbyActive) fbSupervisor.startAll();
     }
     const fbCommentExecutor = new FacebookCommentExecutor({
       cdp: session.cdp,
@@ -1095,10 +1143,7 @@ async function main(): Promise<void> {
     );
     const fbSession = browse;
     client.onBrowseCommand((env) => {
-      if (coldStandbyActive) {
-        requestColdStandbyWake(`cloud_command:${env.type}`);
-        return;
-      }
+      if (handleBrowserAbsentCommand(env)) return;
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
       const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
       if (!taskCoordinator.canExecute(ownedTaskId)) {
@@ -1120,9 +1165,11 @@ async function main(): Promise<void> {
       });
     }
     // 不 await：会话长跑，与命令收发并行。start() 内部据 AIDCP_FB_BROWSE_AUTO 决定是否自动进 feed。
-    browse.start().catch((err) => {
-      console.error('[aidcp-edge] Facebook 浏览会话异常:', err);
-    });
+    if (!coldStandbyActive) {
+      browse.start().catch((err) => {
+        console.error('[aidcp-edge] Facebook 浏览会话异常:', err);
+      });
+    }
     console.log(`[aidcp-edge] Facebook 浏览会话已注册（mode=${parseFacebookBrowseMode()}，含评论/加群委托）`);
   }
   if (autoBrowse) {
@@ -1159,10 +1206,7 @@ async function main(): Promise<void> {
     );
     // 云端异步推送的浏览控制命令统一转发到 BrowseSession 执行
     client.onBrowseCommand((env) => {
-      if (coldStandbyActive) {
-        requestColdStandbyWake(`cloud_command:${env.type}`);
-        return;
-      }
+      if (handleBrowserAbsentCommand(env)) return;
       if (!browse) {
         console.log(`[aidcp-edge] 收到云端命令 ${env.type} 但浏览会话未创建，忽略`);
         return;
@@ -1190,9 +1234,11 @@ async function main(): Promise<void> {
       });
     }
     // 不 await：浏览循环长跑，与命令收发并行
-    browse.start().catch((err) => {
-      console.error('[aidcp-edge] 浏览会话异常:', err);
-    });
+    if (!coldStandbyActive) {
+      browse.start().catch((err) => {
+        console.error('[aidcp-edge] 浏览会话异常:', err);
+      });
+    }
 
     // 启动旁路监测：类别翻转进 captcha/unknown 时上报云端（人工升级）；离开时上报已清除。
     // 仅 captcha/unknown 上报（login 只本地暂停、沿用现状不打扰云端）。判定逻辑抽在 overlay-report-gate：
@@ -1320,8 +1366,12 @@ async function main(): Promise<void> {
       console.log('[aidcp-edge] CDP 已重连，重启后台监测体');
       supervisor.startAll();
     });
-    supervisor.startAll();
-    console.log('[aidcp-edge] 自动浏览已启动（含弹窗 + 通知未读旁路监测）');
+    if (!coldStandbyActive) {
+      supervisor.startAll();
+      console.log('[aidcp-edge] 自动浏览已启动（含弹窗 + 通知未读旁路监测）');
+    } else {
+      console.log('[aidcp-edge] 控制面待机：自动浏览与后台监测体已装配但暂不启动');
+    }
   }
 
   // —— 退出 / 回收统一路径（节点终态诚实下线 + 看护可重起；真关机干净退出）——
@@ -1348,6 +1398,7 @@ async function main(): Promise<void> {
     },
     closeOwnedBrowser: async () => {
       // 仅最终关闭才到这里；pause/resume-preserve 明确绕过。复用模式绝不回收外部浏览器。
+      if (!chrome) return true;
       if (chrome.reused) {
         console.log('[aidcp-edge] 复用模式：只诚实退出，不回收本进程不拥有的外部 Chrome');
         return true;
@@ -1374,6 +1425,7 @@ async function main(): Promise<void> {
         console.log('[aidcp-edge] 有任务租约在跑，拒绝进入冷待机（绝不把浏览器从正在执行的任务底下抽走）');
         return false;
       }
+      if (!chrome) return true;
       if (chrome.reused) {
         console.log('[aidcp-edge] 复用模式：不回收本进程不拥有的外部 Chrome，拒绝进入冷待机');
         return false;
@@ -1433,6 +1485,10 @@ async function main(): Promise<void> {
         } catch (e) {
           console.log(`[browser-parking] apply failed after wake: ${(e as Error).message}`);
         }
+        if (!parkingControlInstalled) {
+          installBrowserParkingStdinControl(session.cdp, parkingConfig, (m) => console.log(m));
+          parkingControlInstalled = true;
+        }
 
         // 4) 重新确认登录态与身份（红线：新一代浏览器，绝不假设还登着）。
         const idRes = await platformDriver.readIdentity(session.cdp, { logger: (m) => console.log(m) });
@@ -1443,16 +1499,20 @@ async function main(): Promise<void> {
               '如实判唤醒失败、留在待机态（可再次唤醒），绝不以默认账号开跑。',
           );
           session.detach();
-          await chrome.killAndConfirmDead().catch(() => undefined);
+          await chrome?.killAndConfirmDead().catch(() => undefined);
           return false;
         }
         if (decision.accountId !== accountId) {
-          // 换号：走既有的身份重建路径（它会按新 id 重连云端、rebaseline 监测体、重启浏览循环）。
-          console.warn(`[aidcp-edge] 唤醒后发现账号已变（${accountId} → ${decision.accountId}），走身份重新确立路径`);
-          coldStandbyActive = false;
-          clearColdStandbyWakeLatch();
-          await reestablishIdentity();
-          return true;
+          // 控制面引导是“上一次握手”的持久事实，允许陈旧；但绝不允许它覆盖新浏览器里的真实账号。
+          // 在任何页面动作恢复前，先以刚读出的真实身份换 Cloud 会话并拿到严格 welcome。
+          console.warn(`[aidcp-edge] 唤醒后发现账号已变（${accountId} → ${decision.accountId}），先重建 Cloud 会话再恢复浏览器动作`);
+          failInFlightPublishesHonestly('browser_wake_identity_changed');
+          await client.closeAndWait(1500).catch(() => undefined);
+          accountId = decision.accountId;
+          accountNickname = verifiedAccountNickname(idRes, decision);
+          client.setAccountIdentity(accountId, accountNickname);
+          await client.connect();
+          console.log(`[aidcp-edge] 唤醒身份已按真实账号 ${accountId} 重建 Cloud 会话`);
         }
 
         // 5) 恢复自动化：监测体重挂、浏览循环重开（注意顺序——先出待机态，否则循环起手就被待机守卫挡回）。
@@ -1471,7 +1531,7 @@ async function main(): Promise<void> {
         // 半开的浏览器绝不留着占内存槽位——它既不能干活、又挡着别的账号。
         try {
           session.detach();
-          await chrome.killAndConfirmDead().catch(() => undefined);
+          await chrome?.killAndConfirmDead().catch(() => undefined);
         } catch {
           /* best-effort */
         }
@@ -1507,7 +1567,7 @@ async function main(): Promise<void> {
       sendLifecycleIpc({ type: 'lifecycle.wake_failed', reason });
     },
     logger: (message) => console.log(message),
-  });
+  }, startBrowserAbsent ? 'standby' : 'active');
 
   dispatchLifecycleCommand = (command) => {
     void lifecycle.request(command).catch((error) => {
@@ -1515,6 +1575,10 @@ async function main(): Promise<void> {
     });
   };
   for (const command of pendingLifecycleCommands.splice(0)) dispatchLifecycleCommand(command);
+  if (startBrowserAbsent) {
+    // 浏览器从未打开，不需要再跑 enterStandby；这里只向外壳确认“核心+Cloud 已在线、浏览器缺席”。
+    sendLifecycleIpc({ type: 'lifecycle.standby' });
+  }
 
   const shutdown = (opts: { exitCode: number; recycle: boolean; reason: string }): Promise<void> => {
     // 已请求回收则即便随后信号撞入也以回收码退出（真终态不被掩成 clean exit，MAJOR⑤）。
@@ -1534,6 +1598,10 @@ async function main(): Promise<void> {
     // （与下方 cdp.unrecoverable 的守卫同口径；缺了它，待机期一条在途 Input 就能把核心杀掉）。
     if (coldStandbyActive) {
       console.log('[aidcp-edge] CDP 控制不可用发生在冷待机期间（浏览器已被有意关闭）；保留云端连接，等待外壳唤醒');
+      return;
+    }
+    if (!chrome) {
+      console.log('[aidcp-edge] 浏览器缺席态没有可回收实例；保留控制面等待唤醒');
       return;
     }
     if (chrome.reused) {
