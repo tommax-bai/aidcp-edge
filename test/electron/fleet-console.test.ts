@@ -355,6 +355,88 @@ test('人设弹窗：账号已绑人设时绝不自动弹', async () => {
   assert.equal(calls.notify.length, 0, '已绑账号不得发通知');
 });
 
+test('Facebook 人设：发言语言只对 FB 展示、必选并按账号随生成请求提交', async () => {
+  const requests: Array<{ envId: string; payload: { keywordSelections: string[]; writingLanguage?: string } }> = [];
+  const status = makeStatus({ envId: 'ads-fb', envName: 'FB 账号', personaBound: false });
+  const { w } = await boot({
+    getStatus: async () => status,
+    fleetGet: async () => ({
+      provider: 'adspower',
+      selectedEnvId: 'ads-fb',
+      railCollapsed: false,
+      environments: [{ envId: 'ads-fb', kind: 'adspower', profileId: 'fb', name: 'FB 账号', platform: 'facebook', status }],
+    }),
+    personaGenerate: async (envId: string, payload: { keywordSelections: string[]; writingLanguage?: string }) => {
+      requests.push({ envId, payload });
+      return { ok: true, soulYaml: 'writing_language: "en"', identitySummary: 'English persona' };
+    },
+  }, {
+    adsProfileId: 'fb',
+    adsProfileName: 'FB 账号',
+    environments: [{ profileId: 'fb', name: 'FB 账号', platform: 'facebook' }],
+  });
+
+  (w.document.querySelector('.rail-row[data-env-id="ads-fb"] .rail-persona') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-language-card')!.classList.contains('hidden'), false);
+  assert.match(w.document.querySelector('#persona-language-help')!.textContent || '', /不改变 Facebook 界面语言/);
+
+  (w.document.querySelector('.persona-kw-group[data-dim="content"] .kw-btn') as HTMLElement).click();
+  (w.document.querySelector('#persona-generate') as HTMLButtonElement).click();
+  await tick();
+  assert.equal(requests.length, 0, '未选择发言语言不得请求云端生成');
+  assert.match(w.document.querySelector('#persona-msg')!.textContent || '', /选择发言语言/);
+
+  (w.document.querySelector('[data-writing-language="en"]') as HTMLElement).click();
+  (w.document.querySelector('#persona-generate') as HTMLButtonElement).click();
+  await tick();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].envId, 'ads-fb');
+  assert.equal(requests[0].payload.writingLanguage, 'en');
+  assert.equal(requests[0].payload.keywordSelections.includes('en'), false, '结构化语言不得混进关键词数组');
+  assert.match(w.document.querySelector('#persona-kw-summary-text')!.textContent || '', /发言语言：英文/);
+
+  const { w: xhs } = await boot();
+  (xhs.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-persona') as HTMLElement).click();
+  await tick();
+  assert.equal(xhs.document.querySelector('#persona-language-card')!.classList.contains('hidden'), true, '小红书账号不得展示 FB 发言语言设置');
+});
+
+test('Facebook 人设：两个环境的未确认发言语言选择互不串号', async () => {
+  const first = makeStatus({ envId: 'ads-fb1', envName: 'FB 一', personaBound: false });
+  const second = makeStatus({ envId: 'ads-fb2', envName: 'FB 二', personaBound: false });
+  const { w } = await boot({
+    getStatus: async () => first,
+    fleetGet: async () => ({
+      provider: 'adspower', selectedEnvId: 'ads-fb1', railCollapsed: false,
+      environments: [
+        { envId: 'ads-fb1', kind: 'adspower', profileId: 'fb1', name: 'FB 一', platform: 'facebook', status: first },
+        { envId: 'ads-fb2', kind: 'adspower', profileId: 'fb2', name: 'FB 二', platform: 'facebook', status: second },
+      ],
+    }),
+  }, {
+    adsProfileId: 'fb1',
+    environments: [
+      { profileId: 'fb1', name: 'FB 一', platform: 'facebook' },
+      { profileId: 'fb2', name: 'FB 二', platform: 'facebook' },
+    ],
+  });
+
+  (w.document.querySelector('.rail-row[data-env-id="ads-fb1"] .rail-persona') as HTMLElement).click();
+  (w.document.querySelector('[data-writing-language="en"]') as HTMLElement).click();
+  assert.equal(w.document.querySelector('[data-writing-language="en"]')!.classList.contains('active'), true);
+
+  (w.document.querySelector('.rail-row[data-env-id="ads-fb2"] .rail-persona') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelectorAll('#persona-language-group .kw-btn.active').length, 0, 'FB 二不得继承 FB 一未确认的英文选择');
+  (w.document.querySelector('[data-writing-language="vi"]') as HTMLElement).click();
+
+  (w.document.querySelector('.rail-row[data-env-id="ads-fb1"] .rail-persona') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('[data-writing-language="en"]')!.classList.contains('active'), true, '切回 FB 一须恢复自己的英文选择');
+  assert.equal(w.document.querySelector('[data-writing-language="vi"]')!.classList.contains('active'), false, 'FB 二的越南语不得串到 FB 一');
+});
+
 test('人设浮层：已绑账号可手动进入更新流程，确认后覆盖当前人设', async () => {
   const calls: Record<string, unknown[]> = { gen: [], persist: [] };
   const { w, pushStatus } = await boot({
@@ -1031,12 +1113,14 @@ test('人设浮层：云端权威说未绑 → 自动弹出并通知；偏好面
 
   const cards = [...w.document.querySelectorAll('#persona-stage-pick .persona-card')];
   assert.match(cards[0].textContent || '', /语气调性/, '语气调性必须是第一个面板');
-  assert.match(cards[1].textContent || '', /点赞倾向/, '点赞倾向必须紧跟在语气调性下方');
-  assert.match(cards[2].textContent || '', /内容偏好/, '内容偏好必须在点赞倾向之后');
+  assert.match(cards[1].textContent || '', /发言语言/, 'Facebook 发言语言的固定位置必须在语气调性下方');
+  assert.equal(cards[1].classList.contains('hidden'), true, '当前为小红书账号，发言语言面板必须隐藏');
+  assert.match(cards[2].textContent || '', /点赞倾向/, '点赞倾向必须在平台语言面板之后');
+  assert.match(cards[3].textContent || '', /内容偏好/, '内容偏好必须在点赞倾向之后');
   const affinityButtons = [...w.document.querySelectorAll('.persona-kw-group[data-dim="like-affinity"] .kw-btn')] as HTMLButtonElement[];
   assert.deepEqual(affinityButtons.map((button) => button.textContent), ['正常', '喜欢', '更喜欢']);
   assert.equal(affinityButtons[0].classList.contains('active'), true, '正常档必须默认选中');
-  assert.match(cards[1].textContent || '', /不会强制点赞/, '面板必须解释倾向不是强制点赞');
+  assert.match(cards[2].textContent || '', /不会强制点赞/, '面板必须解释倾向不是强制点赞');
   assert.match(rendererCss, /\.persona-pop \{[\s\S]*--persona-accent: #1496a5;/, '人设浮层必须使用吉祥物青绿局部令牌');
   assert.match(rendererCss, /\.persona-kw-group \.kw-btn \{[\s\S]*font-weight: 500;/, '选择项字重应低于区块标题');
   assert.doesNotMatch(rendererCss, /\.persona-pref-group \.kw-btn:not\(\.active\)::before\s*\{[^}]*content:\s*["']\+["']/, '内容项加号不得依赖字体字形');

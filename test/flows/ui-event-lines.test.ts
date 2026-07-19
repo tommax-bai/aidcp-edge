@@ -293,6 +293,19 @@ test('ui-event-lines: personaBound 三态 → true/false 都出行，缺省不�
   assert.deepEqual(uiSnapshotToLines({}), [], '未知（字段缺省）不发行：外壳保持未知，未知永不弹窗');
 });
 
+test('ui-event-lines: personaWritingLanguage 显式值/null 出行，缺省不覆盖旧状态', () => {
+  const configured = uiSnapshotToLines({ personaWritingLanguage: 'vi' });
+  assert.equal(configured.length, 1);
+  assert.match(configured[0], /"kind":"personaWritingLanguage"/);
+  assert.match(configured[0], /"personaWritingLanguage":"vi"/);
+
+  const legacy = uiSnapshotToLines({ personaWritingLanguage: null });
+  assert.equal(legacy.length, 1);
+  assert.match(legacy[0], /"personaWritingLanguage":null/);
+
+  assert.equal(uiSnapshotToLines({}).some((line) => line.includes('personaWritingLanguage')), false);
+});
+
 test('ui-event-lines: FB 投影后的载荷穿透——收藏/关注保持缺席、加群 MUST NOT 被这道白名单吃掉', () => {
   // 本条钉的是 change platform-honest-usage-metrics 首跑真机的实际故障：云端已按平台正确投影，
   // 但本文件那张手写六键表把 join_group 过滤掉了 ⇒ 屏幕上只有 4 格、加群怎么也不出现、全链路零报错。

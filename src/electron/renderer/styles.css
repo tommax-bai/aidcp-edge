@@ -1873,6 +1873,8 @@ body::-webkit-scrollbar:vertical,
 /* 语气调性：等宽网格铺满每一行（原 flex 按字数长短参差、右侧不齐）。5 项 → 3 列 [3,2]。 */
 .persona-kw-group[data-dim="tone"] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .persona-kw-group[data-dim="tone"] .kw-btn { width: 100%; }
+.persona-kw-group[data-dim="language"] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.persona-kw-group[data-dim="language"] .kw-btn { width: 100%; }
 .persona-kw-group[data-dim="like-affinity"] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .persona-kw-group[data-dim="like-affinity"] .kw-btn { width: 100%; }
 .persona-field-help { display: block; margin-top: 9px; color: var(--persona-faint); font-size: 11.5px; line-height: 1.55; }

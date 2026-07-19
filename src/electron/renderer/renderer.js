@@ -4732,7 +4732,10 @@ const personaUi = {
   boundNote: document.querySelector('#persona-bound-note'),
   update: document.querySelector('#persona-update'),
   wizardBody: document.querySelector('#persona-wizard-body'),
-  kwGroups: Array.from(document.querySelectorAll('.persona-kw-group')),
+  kwGroups: Array.from(document.querySelectorAll('.persona-kw-group:not([data-dim="language"])')),
+  languageCard: document.querySelector('#persona-language-card'),
+  languageGroup: document.querySelector('#persona-language-group'),
+  languageHelp: document.querySelector('#persona-language-help'),
   likeAffinityGroup: document.querySelector('.persona-kw-group[data-dim="like-affinity"]'),
   generate: document.querySelector('#persona-generate'),
   msg: document.querySelector('#persona-msg'),
@@ -4758,6 +4761,7 @@ const personaUi = {
 };
 let personaReady = false; // 已登录 + 云端已连接才可生成
 let personaDraftYaml = ''; // 当前草稿 soulYaml（确认时提交）
+let personaDraftWritingLanguage = null; // 草稿对应的 FB 发言语言（persist 成功前不覆盖权威状态）
 let personaLocallyBound = false; // 本会话确认成功后即视为已绑（personaBound 信号要等下次 hello 才到）
 let personaDraftEnvId; // 草稿所属环境（多环境：persist MUST 打回生成时那个账号，不随后续切换环境漂移）
 let personaStage = 'pick'; // 两步向导阶段：pick（选关键词）| preview（预览确认）
@@ -4766,6 +4770,8 @@ let personaGrowthEnvId = null; // 本次刚确认成功的人设所属环境；�
 let personaPersistPendingEnvId = null; // persist IPC 收敛中的环境；main 可能先推 personaBound=true，期间不得把自动弹窗收走
 let personaUpdateMode = false; // 已绑账号手动进入更新流程：生成新草稿，确认后覆盖当前人设
 const personaPrompted = new Set();
+const personaWritingLanguageSelections = new Map(); // envId -> zh-CN | en | vi；切环境不串号
+const personaWritingLanguageDirty = new Set(); // 用户正在编辑的环境；状态心跳不得覆盖未确认选择
 // 人设弹窗触发判据（change persona-bound-tristate）：**只由云端权威的「未绑」触发**。
 //
 // 旧实现按「!bound」触发，而 bound=false 同时承载了两个互斥的含义——「云端说没有」和「云端还没说」。
@@ -4879,6 +4885,7 @@ personaUi.growthStart?.addEventListener('click', () => {
 // 只清草稿本身（更新流程复用：进更新模式时要清掉上一次的草稿，但绝不能连「已绑」态一起清掉）。
 function clearPersonaDraft() {
   personaDraftYaml = '';
+  personaDraftWritingLanguage = null;
   personaDraftEnvId = undefined;
   personaUi.draft?.classList.add('hidden');
   personaUi.skeleton?.classList.add('hidden');
@@ -4905,6 +4912,9 @@ const PERSONA_GEN_FAIL = {
   edge_request_failed: '与云端通信失败，请检查连接后重试。',
   unavailable: '云端暂不支持人设生成，请稍后再试。',
   unknown_account: '账号身份未就绪，请确认已扫码登录。',
+  writing_language_required: '请先选择发言语言。',
+  writing_language_invalid: '发言语言无效，请重新选择。',
+  writing_language_not_supported: '当前平台不支持发言语言设置。',
 };
 const PERSONA_PERSIST_FAIL = {
   unknown_account: '账号身份未就绪（云端未建号），请稍后重试。',
@@ -4979,6 +4989,40 @@ const PERSONA_LIKE_AFFINITIES = {
   like_most: { label: '更喜欢', token: 'like_affinity:like_most' },
 };
 
+const PERSONA_WRITING_LANGUAGES = {
+  'zh-CN': { label: '中文' },
+  en: { label: '英文' },
+  vi: { label: '越南语' },
+};
+
+function syncPersonaWritingLanguage(status) {
+  const facebook = selectedEnvPlatform() === 'facebook';
+  personaUi.languageCard?.classList.toggle('hidden', !facebook);
+  if (!facebook || !personaUi.languageGroup) return;
+
+  const envId = currentEnvId() || '__local__';
+  const authoritative = status && status.personaWritingLanguage;
+  if (!personaWritingLanguageDirty.has(envId)) {
+    if (PERSONA_WRITING_LANGUAGES[authoritative]) personaWritingLanguageSelections.set(envId, authoritative);
+    else personaWritingLanguageSelections.delete(envId);
+  }
+  const selected = personaWritingLanguageSelections.get(envId) || null;
+  personaUi.languageGroup.querySelectorAll('.kw-btn').forEach((button) => {
+    const active = button.dataset.writingLanguage === selected;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  if (personaUi.languageHelp) {
+    personaUi.languageHelp.textContent = status?.personaBound === true && status.personaWritingLanguage === null && !selected
+      ? '当前人设尚未设置发言语言；更新人设时请选择，之后的 Facebook 帖子和评论将使用该语言。'
+      : '用于这个 Facebook 账号后续生成的帖子和评论，不改变 Facebook 界面语言。';
+  }
+}
+
+function collectPersonaWritingLanguage() {
+  return personaWritingLanguageSelections.get(currentEnvId() || '__local__') || null;
+}
+
 function collectPersonaLikeAffinity() {
   const selected = personaUi.likeAffinityGroup?.querySelector('.kw-btn.active');
   const key = selected?.dataset.likeAffinity;
@@ -4994,6 +5038,8 @@ function beginPersonaUpdate() {
   personaUpdateMode = true;
   personaLocallyBound = true; // 更新期间本地锚住已绑：状态推送不得把向导藏回去，也不得触发未设置提醒
   clearPersonaDraft();
+  personaWritingLanguageSelections.delete(currentEnvId() || '__local__');
+  personaWritingLanguageDirty.delete(currentEnvId() || '__local__');
   const env = fleetView.envs.get(currentEnvId());
   updatePersonaGate((env && env.status) || currentStatus || null);
   setPersonaMsg('重新选择偏好并生成新草稿；确认后会覆盖当前人设。', false);
@@ -5003,6 +5049,7 @@ personaUi.update?.addEventListener('click', beginPersonaUpdate);
 // onboarding 三态（change persona-wizard-onboarding-fixes）：已绑→已设置跳过 / 未绑未连→空态面板 / 未绑已连→启用向导。
 // 只改 disabled/显隐/面板文案，绝不触碰已选关键词与草稿（状态推送不重置向导进度）。
 function updatePersonaGate(status) {
+  syncPersonaWritingLanguage(status);
   const loggedIn = Boolean(status && status.auth === 'logged in');
   const connected = Boolean(status && status.cloud === 'connected');
   personaReady = loggedIn && connected;
@@ -5076,9 +5123,12 @@ function updatePersonaGate(status) {
   // ③ 云端权威确认未绑（或已绑但手动进入更新）：向导可用；确认时复用同一条 persist 路径覆盖。
   if (personaUi.generate) personaUi.generate.disabled = personaInFlight || !personaReady;
   if (personaUi.hint) {
+    const preferences = selectedEnvPlatform() === 'facebook'
+      ? '发言语言、语气、点赞倾向和内容偏好'
+      : '语气、点赞倾向和内容偏好';
     personaUi.hint.textContent = updatingBound
-      ? '重新选择偏好并生成新草稿，确认后会覆盖当前账号的人设；生成失败不会影响现有人设。'
-      : '设置语气、点赞倾向和内容偏好，自动生成这个账号的人设；确认后账号才会开始自动运营。';
+      ? `重新选择${preferences}并生成新草稿，确认后会覆盖当前账号的人设；生成失败不会影响现有人设。`
+      : `设置${preferences}，自动生成这个账号的人设；确认后账号才会开始自动运营。`;
   }
   syncPersonaFoot('wizard');
   // 自动弹窗只对「云端权威说未绑」的账号；已绑账号手动进入更新时绝不再弹、也绝不发未设置通知。
@@ -5108,6 +5158,17 @@ personaUi.kwGroups.forEach((group) => {
     syncKwGroupState(group);
   });
   syncKwGroupState(group);
+});
+
+personaUi.languageGroup?.addEventListener('click', (event) => {
+  const button = event.target.closest('.kw-btn');
+  if (!button || !personaUi.languageGroup.contains(button)) return;
+  const writingLanguage = button.dataset.writingLanguage;
+  if (!PERSONA_WRITING_LANGUAGES[writingLanguage]) return;
+  const envId = currentEnvId() || '__local__';
+  personaWritingLanguageSelections.set(envId, writingLanguage);
+  personaWritingLanguageDirty.add(envId);
+  syncPersonaWritingLanguage((fleetView.envs.get(currentEnvId()) || {}).status || currentStatus || null);
 });
 
 function addCustomPreference(group, value) {
@@ -5166,12 +5227,19 @@ async function runPersonaGenerate() {
   if (!personaReady) return setPersonaMsg('请先启动该环境并在浏览器里登录', true);
   const keywordSelections = collectPersonaKeywords();
   if (!keywordSelections.length) return setPersonaMsg('请先选择关键词', true);
+  const facebook = selectedEnvPlatform() === 'facebook';
+  const writingLanguage = facebook ? collectPersonaWritingLanguage() : null;
+  if (facebook && !writingLanguage) return setPersonaMsg('请先选择发言语言', true);
   const likeAffinity = collectPersonaLikeAffinity();
   const requestSelections = [...keywordSelections, likeAffinity.token];
   if (!window.aidcpEdge || typeof window.aidcpEdge.personaGenerate !== 'function') return;
   personaInFlight = true;
   // 预先切到预览页：让「结果会出现在哪」提前可见，生成中该处呈现骨架。
-  updateKwSummary([...keywordSelections, `点赞倾向：${likeAffinity.label}`]);
+  updateKwSummary([
+    ...keywordSelections,
+    ...(facebook ? [`发言语言：${PERSONA_WRITING_LANGUAGES[writingLanguage].label}`] : []),
+    `点赞倾向：${likeAffinity.label}`,
+  ]);
   setPersonaStage('preview');
   personaUi.skeleton?.classList.remove('hidden');
   personaUi.draft?.classList.add('hidden');
@@ -5181,9 +5249,12 @@ async function runPersonaGenerate() {
   setPersonaMsg(personaUpdateMode ? '正在生成新人设…（可能需要十几秒）' : '正在生成人设…（可能需要十几秒）', false);
   const genEnvId = currentEnvId(); // 生成时锁定目标环境；persist 打回它，绝不随后续切换漂移
   try {
-    const r = await window.aidcpEdge.personaGenerate(genEnvId, { keywordSelections: requestSelections, idempotencyKey: newIdempotencyKey() });
+    const request = { keywordSelections: requestSelections, idempotencyKey: newIdempotencyKey() };
+    if (facebook) request.writingLanguage = writingLanguage;
+    const r = await window.aidcpEdge.personaGenerate(genEnvId, request);
     if (r && r.ok && r.soulYaml) {
       personaDraftYaml = r.soulYaml;
+      personaDraftWritingLanguage = writingLanguage;
       personaDraftEnvId = genEnvId;
       // 信息层级：identitySummary（给人看的人设）升为标题；原始 YAML 收进折叠。
       if (personaUi.draftSummary) personaUi.draftSummary.textContent = r.identitySummary || '已生成人设';
@@ -5198,6 +5269,7 @@ async function runPersonaGenerate() {
       );
     } else {
       personaDraftYaml = '';
+      personaDraftWritingLanguage = null;
       personaUi.draft?.classList.add('hidden');
       setPersonaStage('pick'); // 失败诚实回到选关键词，错误在底栏警示条如实展示
       setPersonaMsg(PERSONA_GEN_FAIL[(r && r.reason) || ''] || `生成失败：${(r && r.reason) || '未知'}`, true);
@@ -5231,7 +5303,14 @@ personaUi.confirm?.addEventListener('click', async () => {
       personaUpdateMode = false;
       setPersonaBadge('已设置', 'normal');
       const growthEnvId = personaDraftEnvId || currentEnvId() || '__local__';
+      if (personaDraftWritingLanguage) {
+        personaWritingLanguageSelections.set(growthEnvId, personaDraftWritingLanguage);
+        personaWritingLanguageDirty.delete(growthEnvId);
+        const targetEnv = fleetView.envs.get(growthEnvId);
+        if (targetEnv?.status) targetEnv.status.personaWritingLanguage = personaDraftWritingLanguage;
+      }
       personaDraftYaml = '';
+      personaDraftWritingLanguage = null;
       personaUi.draft?.classList.add('hidden');
       personaUi.wizardBody?.classList.add('hidden');
       if (wasUpdate || r.firstPostOnboarding !== true) {

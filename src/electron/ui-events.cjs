@@ -29,7 +29,7 @@ const UI_EVENT_PREFIX = '[ui-event]';
 // string，其余原样透传 —— 故核心新增类型无需改本文件。下列 kind 清单是发射器现状的记录，非白名单：
 // {
 //   kind: 'activity' | 'presence' | 'publish' | 'publishPreview' | 'identity' | 'lastPublish'
-//         | 'dailyUsage' | 'browserStandby' | 'personaBound',
+//         | 'dailyUsage' | 'browserStandby' | 'personaBound' | 'personaWritingLanguage',
 //   type: string,                     // 机器可读标签（'like' / 'note_open' / 'connect' / ...）
 //                                     // FB 写动作（facebook-write-action-visibility）：
 //                                     //   comment | comment_pending | comment_failed

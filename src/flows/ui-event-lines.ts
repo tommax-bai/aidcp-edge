@@ -337,5 +337,8 @@ export function uiSnapshotToLines(p: UiSnapshotPayload): string[] {
   // 只转 true 的话，权威的「未绑」在这里就被吞掉，外壳只能靠「等了 6 秒还没收到」去猜——猜错就误弹向导。
   // 字段缺省（未知）不发行：外壳保持「未知」，而未知永不触发弹窗。
   if (typeof p.personaBound === 'boolean') lines.push(line({ kind: 'personaBound', personaBound: p.personaBound }));
+  if (Object.prototype.hasOwnProperty.call(p, 'personaWritingLanguage')) {
+    lines.push(line({ kind: 'personaWritingLanguage', personaWritingLanguage: p.personaWritingLanguage ?? null }));
+  }
   return lines;
 }

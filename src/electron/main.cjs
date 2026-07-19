@@ -1206,6 +1206,8 @@ function makeStatus(provider) {
     // 任何一次重启把它归零，渲染层就会在快照到达前把已设置人设的账号判成未设置并弹向导。
     // 按环境隔离（账号级信号）。
     personaBound: null,
+    // Facebook 人设公开写作语言：undefined=Cloud 尚未投影；null=存量人设缺字段；字符串=权威值。
+    personaWritingLanguage: undefined,
     // 本环境核心本次实际被派生去连的云端 key（change edge-cloud-env-selector）：''=未启动/未知。
     // 界面据此与「目标云端」比对，运行中且不一致即显示「待重启生效」（红线：显示=实际连接）。
     connectedCloudKey: '',
@@ -2886,6 +2888,7 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
   // 误显示「已设置」，但也绝不能归零成 false——那等于替云端宣布「未绑」，正是「已设置账号被反复误弹向导」
   // 的根因（每次冷待机唤醒都会重启核心、走到这一行）。重置成 null=未知，等新会话的权威信号重建。
   handle.status.personaBound = null;
+  handle.status.personaWritingLanguage = undefined;
   const child = spawn(process.execPath, [edgeEntry], {
     cwd: edgeCwd,
     env: spawnEnv,
@@ -3710,6 +3713,9 @@ function handleEdgeLogLine(handle, message, isError = false) {
     // 人设绑定态（change persona-bound-tristate）：云端 true / false 都下发，双向采纳——云端是单写方，
     // 解绑必须能传下来（否则客户端会一直显示「已设置」，而云端早已按未绑停了这个号）。
     if (typeof evt.personaBound === 'boolean') next.personaBound = evt.personaBound;
+    if (Object.prototype.hasOwnProperty.call(evt, 'personaWritingLanguage')) {
+      next.personaWritingLanguage = evt.personaWritingLanguage;
+    }
     if (evt.presence) next.presence = { text: evt.presence, at: new Date().toISOString() };
     if (evt.publish && evt.publish.state) {
       next.publish = { ...evt.publish, at: new Date().toISOString() };
