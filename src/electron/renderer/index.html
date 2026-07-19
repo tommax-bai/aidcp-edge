@@ -782,9 +782,9 @@
             <div class="j-step cur" data-stage="pick"><span class="j-dot"></span><span class="j-lab">设置偏好</span></div>
             <div class="j-step" data-stage="preview"><span class="j-dot"></span><span class="j-lab">预览确认</span></div>
           </div>
-          <p class="subtle persona-hint" id="persona-hint">设置语气和内容偏好，自动生成这个账号的人设；确认后账号才会开始自动运营。</p>
+          <p class="subtle persona-hint" id="persona-hint">设置语气、点赞倾向和内容偏好，自动生成这个账号的人设；确认后账号才会开始自动运营。</p>
 
-          <!-- Stage 1：设置偏好（两个面板：语气调性 / 内容偏好） -->
+          <!-- Stage 1：设置偏好（三个面板：语气调性 / 点赞倾向 / 内容偏好） -->
           <div class="persona-stage" id="persona-stage-pick">
             <div class="persona-card field">
               <span class="field-label">语气调性 <em class="opt">单选</em></span>
@@ -795,6 +795,16 @@
                 <button class="kw-btn" type="button" data-kw="温柔治愈">温柔治愈</button>
                 <button class="kw-btn" type="button" data-kw="犀利真实">犀利真实</button>
               </div>
+            </div>
+
+            <div class="persona-card field persona-like-affinity-card">
+              <span class="field-label">点赞倾向 <em class="opt">单选</em></span>
+              <div class="persona-kw-group" data-dim="like-affinity" data-select="single" aria-label="点赞倾向">
+                <button class="kw-btn active" type="button" data-like-affinity="normal" aria-pressed="true">正常</button>
+                <button class="kw-btn" type="button" data-like-affinity="like_more" aria-pressed="false">喜欢</button>
+                <button class="kw-btn" type="button" data-like-affinity="like_most" aria-pressed="false">更喜欢</button>
+              </div>
+              <span class="persona-field-help">档位越高越倾向点赞，但仍按内容判断，不会强制点赞。</span>
             </div>
 
             <div class="persona-card field">

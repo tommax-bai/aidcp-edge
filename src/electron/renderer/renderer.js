@@ -4727,6 +4727,7 @@ const personaUi = {
   update: document.querySelector('#persona-update'),
   wizardBody: document.querySelector('#persona-wizard-body'),
   kwGroups: Array.from(document.querySelectorAll('.persona-kw-group')),
+  likeAffinityGroup: document.querySelector('.persona-kw-group[data-dim="like-affinity"]'),
   generate: document.querySelector('#persona-generate'),
   msg: document.querySelector('#persona-msg'),
   draft: document.querySelector('#persona-draft'),
@@ -4966,6 +4967,18 @@ function collectPersonaKeywords() {
   return [...new Set(out)];
 }
 
+const PERSONA_LIKE_AFFINITIES = {
+  normal: { label: '正常', token: 'like_affinity:normal' },
+  like_more: { label: '喜欢', token: 'like_affinity:like_more' },
+  like_most: { label: '更喜欢', token: 'like_affinity:like_most' },
+};
+
+function collectPersonaLikeAffinity() {
+  const selected = personaUi.likeAffinityGroup?.querySelector('.kw-btn.active');
+  const key = selected?.dataset.likeAffinity;
+  return PERSONA_LIKE_AFFINITIES[key] || PERSONA_LIKE_AFFINITIES.normal;
+}
+
 function newIdempotencyKey() {
   return `persona-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
@@ -5059,7 +5072,7 @@ function updatePersonaGate(status) {
   if (personaUi.hint) {
     personaUi.hint.textContent = updatingBound
       ? '重新选择偏好并生成新草稿，确认后会覆盖当前账号的人设；生成失败不会影响现有人设。'
-      : '设置语气和内容偏好，自动生成这个账号的人设；确认后账号才会开始自动运营。';
+      : '设置语气、点赞倾向和内容偏好，自动生成这个账号的人设；确认后账号才会开始自动运营。';
   }
   syncPersonaFoot('wizard');
   // 自动弹窗只对「云端权威说未绑」的账号；已绑账号手动进入更新时绝不再弹、也绝不发未设置通知。
@@ -5147,10 +5160,12 @@ async function runPersonaGenerate() {
   if (!personaReady) return setPersonaMsg('请先启动该环境并在浏览器里登录', true);
   const keywordSelections = collectPersonaKeywords();
   if (!keywordSelections.length) return setPersonaMsg('请先选择关键词', true);
+  const likeAffinity = collectPersonaLikeAffinity();
+  const requestSelections = [...keywordSelections, likeAffinity.token];
   if (!window.aidcpEdge || typeof window.aidcpEdge.personaGenerate !== 'function') return;
   personaInFlight = true;
   // 预先切到预览页：让「结果会出现在哪」提前可见，生成中该处呈现骨架。
-  updateKwSummary(keywordSelections);
+  updateKwSummary([...keywordSelections, `点赞倾向：${likeAffinity.label}`]);
   setPersonaStage('preview');
   personaUi.skeleton?.classList.remove('hidden');
   personaUi.draft?.classList.add('hidden');
@@ -5160,7 +5175,7 @@ async function runPersonaGenerate() {
   setPersonaMsg(personaUpdateMode ? '正在生成新人设…（可能需要十几秒）' : '正在生成人设…（可能需要十几秒）', false);
   const genEnvId = currentEnvId(); // 生成时锁定目标环境；persist 打回它，绝不随后续切换漂移
   try {
-    const r = await window.aidcpEdge.personaGenerate(genEnvId, { keywordSelections, idempotencyKey: newIdempotencyKey() });
+    const r = await window.aidcpEdge.personaGenerate(genEnvId, { keywordSelections: requestSelections, idempotencyKey: newIdempotencyKey() });
     if (r && r.ok && r.soulYaml) {
       personaDraftYaml = r.soulYaml;
       personaDraftEnvId = genEnvId;

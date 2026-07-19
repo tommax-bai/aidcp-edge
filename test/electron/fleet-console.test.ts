@@ -1011,7 +1011,7 @@ test('人设浮层：系统误弹的窗在权威「已绑」到达时自动收�
   assert.equal(pop.classList.contains('open'), false, '自动弹出的窗应在权威「已绑」到达时自动收起');
 });
 
-test('人设浮层：云端权威说未绑 → 自动弹出并通知；偏好面板为语气调性 + 内容偏好，招聘求职置顶且支持自定义', async () => {
+test('人设浮层：云端权威说未绑 → 自动弹出并通知；偏好面板含三档点赞倾向且内容支持自定义', async () => {
   const generateCalls: Array<{ envId: string; payload: { keywordSelections: string[] } }> = [];
   const { w, calls, pushStatus } = await boot({
     personaGenerate: async (envId: string, payload: { keywordSelections: string[] }) => {
@@ -1031,7 +1031,12 @@ test('人设浮层：云端权威说未绑 → 自动弹出并通知；偏好面
 
   const cards = [...w.document.querySelectorAll('#persona-stage-pick .persona-card')];
   assert.match(cards[0].textContent || '', /语气调性/, '语气调性必须是第一个面板');
-  assert.match(cards[1].textContent || '', /内容偏好/, '内容偏好必须是第二个面板');
+  assert.match(cards[1].textContent || '', /点赞倾向/, '点赞倾向必须紧跟在语气调性下方');
+  assert.match(cards[2].textContent || '', /内容偏好/, '内容偏好必须在点赞倾向之后');
+  const affinityButtons = [...w.document.querySelectorAll('.persona-kw-group[data-dim="like-affinity"] .kw-btn')] as HTMLButtonElement[];
+  assert.deepEqual(affinityButtons.map((button) => button.textContent), ['正常', '喜欢', '更喜欢']);
+  assert.equal(affinityButtons[0].classList.contains('active'), true, '正常档必须默认选中');
+  assert.match(cards[1].textContent || '', /不会强制点赞/, '面板必须解释倾向不是强制点赞');
   assert.match(rendererCss, /\.persona-pop \{[\s\S]*--persona-accent: #1496a5;/, '人设浮层必须使用吉祥物青绿局部令牌');
   assert.match(rendererCss, /\.persona-kw-group \.kw-btn \{[\s\S]*font-weight: 500;/, '选择项字重应低于区块标题');
   assert.doesNotMatch(rendererCss, /\.persona-pref-group \.kw-btn:not\(\.active\)::before\s*\{[^}]*content:\s*["']\+["']/, '内容项加号不得依赖字体字形');
@@ -1051,11 +1056,16 @@ test('人设浮层：云端权威说未绑 → 自动弹出并通知；偏好面
   assert.match(firstGroup.textContent || '', /直播招聘/, '自定义偏好应出现在当前分组');
 
   (w.document.querySelector('.persona-kw-group[data-dim="tone"] .kw-btn') as HTMLElement).click();
+  affinityButtons[2].click();
+  assert.equal(affinityButtons[0].classList.contains('active'), false, '三档必须单选互斥');
+  assert.equal(affinityButtons[2].classList.contains('active'), true);
   (w.document.querySelector('#persona-generate') as HTMLElement).click();
   await tick();
   assert.equal(generateCalls.length, 1);
   assert.deepEqual(generateCalls[0].payload.keywordSelections.includes('招聘求职'), true, '选择内容偏好时应带上行业标题');
   assert.deepEqual(generateCalls[0].payload.keywordSelections.includes('直播招聘'), true, '自定义兴趣应进入生成关键词');
+  assert.deepEqual(generateCalls[0].payload.keywordSelections.includes('like_affinity:like_most'), true, '更喜欢档应以受控标记进入生成请求');
+  assert.match(w.document.querySelector('#persona-kw-summary')!.textContent || '', /点赞倾向：更喜欢/, '预览摘要应显示中文档位');
 });
 
 // ═══ 环境栏定高 + 栏内滚动（edge-rail-fixed-height-scroll）═══
