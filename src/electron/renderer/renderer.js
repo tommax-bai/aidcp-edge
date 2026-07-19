@@ -2035,12 +2035,32 @@ async function loadPublishDraftList() {
   renderPublishPreviewContent(currentStatus);
 }
 
+function restorePublishPreviewScrollTop(scrollTop) {
+  const panel = fields.publishPreviewPanel;
+  if (!panel || !Number.isFinite(scrollTop)) return;
+  const restore = () => {
+    if (fields.publishPreviewPanel === panel && !panel.classList.contains('hidden')) {
+      panel.scrollTop = scrollTop;
+    }
+  };
+  restore();
+  if (typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(restore);
+  } else {
+    window.setTimeout(restore, 0);
+  }
+}
+
 function appendPublishPlanControls(parent, preview) {
   const section = document.createElement('section');
   section.className = 'publish-preview-section publish-plan-section';
   appendPreviewText(section, '批准后的发布方式', 'publish-preview-label');
   const choices = document.createElement('div');
   choices.className = 'publish-plan-choices';
+  let syncControls = () => {};
+  let timeRow = null;
+  let timeInput = null;
+  let updateTime = () => {};
 
   const addChoice = (mode, label, disabled = false) => {
     const choice = document.createElement('label');
@@ -2052,13 +2072,22 @@ function appendPublishPlanControls(parent, preview) {
     input.value = mode;
     input.checked = publishDraftReview.publishMode === mode;
     input.disabled = disabled || publishPreviewActionBusy;
+    let interactionScrollTop = null;
+    const captureScroll = () => {
+      interactionScrollTop = fields.publishPreviewPanel?.scrollTop ?? 0;
+    };
+    choice.addEventListener('pointerdown', captureScroll);
+    choice.addEventListener('mousedown', captureScroll);
     input.addEventListener('change', () => {
       if (!input.checked) return;
+      const scrollTop = interactionScrollTop ?? fields.publishPreviewPanel?.scrollTop ?? 0;
       publishDraftReview.publishMode = mode;
       if (mode === 'scheduled' && !publishDraftReview.publishTimeInput) {
         publishDraftReview.publishTimeInput = publishReviewLogic.defaultScheduledInput(Date.now());
       }
-      renderPublishPreviewContent(currentStatus);
+      syncControls();
+      restorePublishPreviewScrollTop(scrollTop);
+      interactionScrollTop = null;
     });
     choice.append(input, document.createTextNode(label));
     choices.appendChild(choice);
@@ -2069,31 +2098,62 @@ function appendPublishPlanControls(parent, preview) {
 
   if (preview.platform !== 'xiaohongshu') {
     appendPreviewText(section, '当前平台暂不支持原生定时发布。', 'publish-preview-hint');
-  } else if (publishDraftReview.publishMode === 'scheduled') {
-    const timeRow = document.createElement('label');
+  } else {
+    timeRow = document.createElement('label');
     timeRow.className = 'publish-plan-time';
     const caption = document.createElement('span');
     caption.textContent = '发布时间（北京时间）';
     const input = document.createElement('input');
+    timeInput = input;
     input.type = 'datetime-local';
     input.value = publishDraftReview.publishTimeInput;
     input.min = publishReviewLogic.defaultScheduledInput(Date.now());
     input.max = publishReviewLogic.toShanghaiInput(Date.now() + 14 * 24 * 60 * 60 * 1000);
     input.disabled = publishPreviewActionBusy;
+    let interactionScrollTop = null;
+    const captureScroll = () => {
+      interactionScrollTop = fields.publishPreviewPanel?.scrollTop ?? 0;
+    };
+    const restoreScroll = () => {
+      restorePublishPreviewScrollTop(interactionScrollTop ?? fields.publishPreviewPanel?.scrollTop ?? 0);
+    };
+    input.addEventListener('pointerdown', captureScroll);
+    input.addEventListener('mousedown', captureScroll);
+    input.addEventListener('keydown', captureScroll);
+    input.addEventListener('focus', restoreScroll);
+    input.addEventListener('click', restoreScroll);
     const hint = document.createElement('span');
     hint.className = 'publish-preview-hint';
-    const update = () => {
+    updateTime = (preserveScroll = false) => {
       publishDraftReview.publishTimeInput = input.value;
       const plan = publishReviewLogic.validatePlan(preview.platform, 'scheduled', input.value, Date.now());
       hint.textContent = plan.ok ? '需在未来 1 小时至 14 天内。' : publishPreviewActionReason(plan.reason);
       hint.classList.toggle('publish-preview-hint-warn', !plan.ok);
       syncPublishPreviewActions(currentStatus);
+      if (preserveScroll) restoreScroll();
     };
-    input.addEventListener('input', update);
+    input.addEventListener('input', () => updateTime(true));
+    input.addEventListener('change', () => {
+      updateTime(true);
+      interactionScrollTop = null;
+    });
+    input.addEventListener('blur', () => { interactionScrollTop = null; });
     timeRow.append(caption, input, hint);
     section.appendChild(timeRow);
-    update();
   }
+  syncControls = () => {
+    const scheduled = publishDraftReview.publishMode === 'scheduled';
+    if (timeRow) timeRow.classList.toggle('hidden', !scheduled);
+    if (timeInput && scheduled) {
+      if (timeInput.value !== publishDraftReview.publishTimeInput) {
+        timeInput.value = publishDraftReview.publishTimeInput;
+      }
+      updateTime(false);
+    } else {
+      syncPublishPreviewActions(currentStatus);
+    }
+  };
+  syncControls();
   parent.appendChild(section);
 }
 

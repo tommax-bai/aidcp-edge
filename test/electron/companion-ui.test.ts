@@ -714,6 +714,70 @@ test('多条待审批稿按灵感池卡片展示，批准时可定时发布并�
   assert.ok(listCalls >= 2, '审批成功后重新读取权威待审列表');
 });
 
+test('定时发布与日期时间控件交互保持稿件阅读位置', async () => {
+  const now = Date.now();
+  const item = {
+    id: 201,
+    platform: 'xiaohongshu',
+    kind: 'generated',
+    title: '长稿待审',
+    contentPreview: '需要滚动阅读的摘要',
+    content: '需要滚动阅读的完整正文',
+    topics: ['滚动位置'],
+    images: ['https://img/201.jpg'],
+    contentVersion: 3,
+    updatedAt: now,
+    publishMode: 'immediate',
+    publishTime: null,
+  };
+  const { w } = await boot({
+    envId: 'u1',
+    publish: { state: 'pending', title: item.title, code: '#201', at: new Date().toISOString() },
+    publishPreview: { recordId: 201, ...item },
+  }, {
+    publishDraftList: async () => ({ ok: true, data: { items: [item], total: 1, limit: 12, offset: 0 } }),
+    publishDraftGet: async () => ({ ok: true, data: { item } }),
+  });
+
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  await tick();
+
+  const panel = $(w, '#publish-preview-panel');
+  const titleBefore = $(w, '#publish-preview-title');
+  const scheduled = w.document.querySelector('input[name="publish-plan-mode"][value="scheduled"]') as HTMLInputElement;
+  panel.scrollTop = 360;
+  scheduled.dispatchEvent(new w.Event('pointerdown', { bubbles: true }));
+  panel.scrollTop = 0;
+  scheduled.checked = true;
+  scheduled.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await tick();
+
+  assert.equal(panel.scrollTop, 360, '切换定时发布后保持审核容器位置');
+  assert.equal($(w, '#publish-preview-title'), titleBefore, '切换发布模式不得重建整份稿件详情');
+  const timeRow = w.document.querySelector('.publish-plan-time') as HTMLElement;
+  assert.equal(timeRow.classList.contains('hidden'), false);
+
+  const time = timeRow.querySelector('input') as HTMLInputElement;
+  panel.scrollTop = 420;
+  time.dispatchEvent(new w.Event('pointerdown', { bubbles: true }));
+  panel.scrollTop = 0;
+  time.dispatchEvent(new w.Event('click', { bubbles: true }));
+  await tick();
+  assert.equal(panel.scrollTop, 420, '打开日期时间选择器后保持审核容器位置');
+
+  const scheduledInput = new Date(now + 2 * 60 * 60 * 1000 + 8 * 60 * 60 * 1000).toISOString().slice(0, 16);
+  panel.scrollTop = 480;
+  time.dispatchEvent(new w.Event('pointerdown', { bubbles: true }));
+  panel.scrollTop = 0;
+  time.value = scheduledInput;
+  time.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await tick();
+  assert.equal(panel.scrollTop, 480, '修改定时时间后保持审核容器位置');
+  assert.equal((w.document.querySelector('#publish-preview-approve') as HTMLButtonElement).disabled, false);
+});
+
 test('旧 Cloud 不提供待审批列表端点时回落单稿快照', async () => {
   const { w } = await boot({
     envId: 'u1',
