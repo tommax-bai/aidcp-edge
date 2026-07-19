@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, Notification, shel
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const {
   CustomerAuthResponseError,
   readBoundedJsonResponse,
@@ -33,6 +34,10 @@ const {
   createFacebookBatchPlan,
   failedFacebookBatchReceipt,
 } = require('./facebook-batch-create.cjs');
+const {
+  normalizeFacebookPersonaAutoFillOptions,
+  requestFacebookPersonaAutoFill,
+} = require('./facebook-persona-auto-fill.cjs');
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
 const {
@@ -4839,6 +4844,25 @@ function safeCreatedEnvironment(finalized) {
   };
 }
 
+async function withFacebookPersonaAutoFillReceipt(receipt, config, idempotencyKey) {
+  if (!config || !config.enabled || !receipt || !Array.isArray(receipt.created) || receipt.created.length === 0) {
+    return receipt;
+  }
+  const outcome = await requestFacebookPersonaAutoFill({
+    request: clientAuthFetch,
+    token: clientSession && clientSession.token,
+    idempotencyKey,
+    writingLanguage: config.writingLanguage,
+    createdItems: receipt.created,
+  });
+  if (outcome.sessionExpired) onSessionInvalid();
+  return {
+    ...receipt,
+    personaAutoFillAccepted: outcome.accepted === true,
+    ...(outcome.warning ? { personaAutoFillWarning: outcome.warning } : {}),
+  };
+}
+
 // 程序化建指纹环境。单建 opts: { osFamilyKey, platform, proxy?, facebookAccountImport? }；
 // Facebook 批量另带 { creationMode:'batch', batchProxyType, facebookProxyBatch }。
 ipcMain.handle('ads:createEnv', async (_event, opts) => {
@@ -4852,6 +4876,13 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     if (creationMode === 'batch' && platform !== 'facebook') {
       return { ok: false, error: '批量新建当前仅支持 Facebook 环境' };
     }
+    const personaAutoFill = creationMode === 'batch'
+      ? normalizeFacebookPersonaAutoFillOptions(opts)
+      : { ok: true, enabled: false };
+    if (!personaAutoFill.ok) return { ok: false, error: personaAutoFill.error };
+    const personaAutoFillIdempotencyKey = personaAutoFill.enabled
+      ? `fb-batch-persona-${crypto.randomUUID()}`
+      : null;
     const importText = platform === 'facebook' ? (opts && opts.facebookAccountImport) : '';
     const parsedImport = parseFacebookAccountImport(importText);
     if (!parsedImport.ok) return { ok: false, error: parsedImport.error };
@@ -4916,7 +4947,11 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       const item = plan[i];
       const intent = await createEnvironmentProvisioningIntent();
       if (!intent.ok) {
-        return failedFacebookBatchReceipt(created, i + 1, `${intent.error}，该账号尚未创建本地环境`);
+        return withFacebookPersonaAutoFillReceipt(
+          failedFacebookBatchReceipt(created, i + 1, `${intent.error}，该账号尚未创建本地环境`),
+          personaAutoFill,
+          personaAutoFillIdempotencyKey,
+        );
       }
       const result = await createEnvironmentWithGroupRecovery({
         writeApi,
@@ -4933,7 +4968,11 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         groupResolver: envGroupResolver,
       });
       if (!result.ok) {
-        return failedFacebookBatchReceipt(created, i + 1, result.error || '未知错误');
+        return withFacebookPersonaAutoFillReceipt(
+          failedFacebookBatchReceipt(created, i + 1, result.error || '未知错误'),
+          personaAutoFill,
+          personaAutoFillIdempotencyKey,
+        );
       }
       const finalized = await finalizeCreatedEnvironmentAssignment(result, intent, { slowStartEnabled });
       created.push(safeCreatedEnvironment(finalized));
@@ -4945,7 +4984,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     const slowStartConfigured = platform === 'facebook'
       ? created.length > 0 && created.every((item) => item.slowStartConfigured === true)
       : undefined;
-    return {
+    const receipt = {
       ok: true,
       userId: creationMode === 'single' && created.length === 1 ? created[0].userId : undefined,
       // 单账号导入自动选中时带回真名，供渲染层入册用真名（change edge-env-name-live-sync）。
@@ -4967,6 +5006,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         visibilityWarning: '环境已在本机创建，但 Facebook 慢启动未全部完成 Cloud 权威确认。',
       } : {}),
     };
+    return withFacebookPersonaAutoFillReceipt(receipt, personaAutoFill, personaAutoFillIdempotencyKey);
   } catch (e) {
     return { ok: false, error: `创建失败：${(e && e.message) || String(e)}` };
   } finally {

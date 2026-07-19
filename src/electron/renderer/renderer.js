@@ -268,6 +268,9 @@ const settingsUi = {
   adsFbImport: document.querySelector('#ads-fb-import'),
   adsFbImportRequirement: document.querySelector('#ads-fb-import-requirement'),
   adsFbBatchAccountHelp: document.querySelector('#ads-fb-batch-account-help'),
+  adsFbPersonaAutoFillWrap: document.querySelector('#ads-fb-persona-auto-fill-wrap'),
+  adsFbPersonaAutoFill: document.querySelector('#ads-fb-persona-auto-fill'),
+  adsFbPersonaLanguage: document.querySelector('#ads-fb-persona-language'),
   adsCreateMsg: document.querySelector('#ads-create-msg'),
   // 新建环境的可选代理区块（edge-client-proxy-platform-persona-ux）
   adsProxyType: document.querySelector('#ads-proxy-type'),
@@ -418,6 +421,10 @@ function updateFacebookImportVisibility() {
   settingsUi.adsFbImportWrap?.classList.toggle('hidden', !facebook);
   settingsUi.adsTemplate?.classList.toggle('hidden', Boolean(batch));
   settingsUi.adsFbBatchAccountHelp?.classList.toggle('hidden', !batch);
+  settingsUi.adsFbPersonaAutoFillWrap?.classList.toggle('hidden', !batch);
+  if (settingsUi.adsFbPersonaLanguage) {
+    settingsUi.adsFbPersonaLanguage.disabled = !settingsUi.adsFbPersonaAutoFill?.checked;
+  }
   settingsUi.adsSingleProxyHelp?.classList.toggle('hidden', Boolean(batch));
   settingsUi.adsBatchProxyHelp?.classList.toggle('hidden', !batch);
   if (settingsUi.adsFbImportRequirement) {
@@ -4330,6 +4337,7 @@ populateTemplates();
 updateFacebookImportVisibility();
 if (settingsUi.adsPlatform) settingsUi.adsPlatform.addEventListener('change', updateFacebookImportVisibility);
 if (settingsUi.adsFbCreateMode) settingsUi.adsFbCreateMode.addEventListener('change', updateFacebookImportVisibility);
+if (settingsUi.adsFbPersonaAutoFill) settingsUi.adsFbPersonaAutoFill.addEventListener('change', updateFacebookImportVisibility);
 
 // ── 代理表单（edge-client-proxy-platform-persona-ux）：新建可选区块 + 已有环境编辑浮层共用读值/校验 ──
 // 主校验在主进程归一层（ads-proxy-config），前端只做「选了类型必须填 host/port」的即时反馈。
@@ -4405,6 +4413,8 @@ settingsUi.adsCreate.addEventListener('click', async () => {
           batchProxyType: proxyType,
           facebookAccountImport,
           facebookProxyBatch,
+          facebookPersonaAutoFill: settingsUi.adsFbPersonaAutoFill?.checked !== false,
+          facebookPersonaWritingLanguage: settingsUi.adsFbPersonaLanguage?.value || 'zh-CN',
         }
       : {
           ...formAdsOpts(),
@@ -4443,14 +4453,23 @@ settingsUi.adsCreate.addEventListener('click', async () => {
         ? 'Facebook 环境已默认开启慢启动（只收紧每日操作额度，不改变操作速度）。'
         : '';
       const visibilityHint = r.visibilityWarning ? r.visibilityWarning : '';
-      setCreateMsg(`${countHint}${selectedHint}${proxyHint}${slowStartHint}${visibilityHint}`, Boolean(r.visibilityWarning));
+      const personaHint = r.personaAutoFillAccepted === true
+        ? '云端已受理，将自动补齐未设置人设的 Facebook 账号。'
+        : r.personaAutoFillWarning || '';
+      setCreateMsg(
+        `${countHint}${selectedHint}${proxyHint}${slowStartHint}${visibilityHint}${personaHint}`,
+        Boolean(r.visibilityWarning || r.personaAutoFillWarning),
+      );
       resetCreateProxyForm();
       await refreshEnvs();
     } else {
       const extra = r && r.violations && r.violations.length ? '（' + r.violations.join('；') + '）' : '';
       const createdCount = Number(r && (r.createdCount || (Array.isArray(r.created) ? r.created.length : 0)) || 0);
       const prefix = createdCount > 0 ? '批量创建未完成' : '创建失败';
-      setCreateMsg(`${prefix}：${(r && r.error) || '未知错误'}${extra}。`, true);
+      const personaHint = r && r.personaAutoFillAccepted === true
+        ? ' 已创建部分对应的人设补齐已由云端受理。'
+        : r && r.personaAutoFillWarning ? ` ${r.personaAutoFillWarning}` : '';
+      setCreateMsg(`${prefix}：${(r && r.error) || '未知错误'}${extra}。${personaHint}`, true);
       if (createdCount > 0) await refreshEnvs();
     }
   } finally {

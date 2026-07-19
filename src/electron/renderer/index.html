@@ -626,6 +626,21 @@
           <span id="ads-fb-account-format-help" class="subtle">兼容以上两种格式；六字段中的 Access Token 与时间仅识别格式，不会导入或保存。Facebook 单个、批量新建环境均默认开启慢启动；它只收紧每日操作额度，不改变操作速度。</span>
           <span id="ads-fb-batch-account-help" class="subtle hidden">每行一个账号；每个账号将独立随机分配操作系统，其余指纹由 AdsPower 生成。</span>
         </label>
+        <div id="ads-fb-persona-auto-fill-wrap" class="field ads-fb-persona-auto-fill hidden">
+          <label class="ads-fb-persona-auto-fill-toggle">
+            <input id="ads-fb-persona-auto-fill" type="checkbox" checked />
+            <span>创建后由云端自动补齐未设置人设</span>
+          </label>
+          <label class="ads-fb-persona-language">
+            <span class="field-label">本批发言语言</span>
+            <select id="ads-fb-persona-language" class="ads-template" aria-label="本批 Facebook 人设发言语言">
+              <option value="zh-CN">中文</option>
+              <option value="en">英文</option>
+              <option value="vi">越南语</option>
+            </select>
+          </label>
+          <span class="subtle">云端会检查当前账号，只补齐未设置的人设，不覆盖已有设置。</span>
+        </div>
         <div class="proxy-form">
           <div class="proxy-row">
             <span class="field-label">代理 <em class="opt">可选</em></span>
