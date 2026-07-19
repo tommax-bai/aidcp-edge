@@ -486,6 +486,11 @@
     if (s.session === 'closed') return { text: '已关闭浏览器', animate: false, fresh: staticFresh };
     if (s.auth === 'login required') return { text: '等你登录小红书后继续', animate: false, fresh: '' };
     if (s.auth === 'config required') return { text: '等待完成初始设置', animate: false, fresh: '' };
+    // restricted 会主动暂停自动运营并可能关闭浏览器进入冷待机；它不是「本轮配额已完成」，
+    // 也不能展示 resting 的自动继续倒计时（平台阻断未解除时并不会按那个时刻正常续跑）。
+    if (s.risk === 'restricted') {
+      return { text: '账号受限，自动运营已暂停', animate: false, fresh: '确认 Facebook 已可正常使用后，可解除受限' };
+    }
     if (s.edge === 'warning') return { text: '引擎已停止，请查看详情或重新启动', animate: false, fresh: staticFresh };
     if (s.edge === 'starting') return { text: '正在启动引擎…', animate: true, fresh: '' };
     const quotaCompletion = quotaCompletionPresence(s, nowMs);

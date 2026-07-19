@@ -569,6 +569,19 @@ test('在场感：暂停 / 停止 / 需登录 → 静态诚实文案', () => {
   assert.match(login.text, /登录/);
 });
 
+test('在场感：账号受限压过 resting 兜底，0 浏览也不冒充本轮完成或承诺自动继续', () => {
+  const now = Date.now();
+  const restricted = uiLogic.presenceView(st({
+    risk: 'restricted',
+    session: 'resting',
+    edge: 'running',
+    dailyUsage: { totals: { view: 0 }, quotas: { view: 20 } },
+  }), now);
+  assert.equal(restricted.text, '账号受限，自动运营已暂停');
+  assert.match(restricted.fresh, /Facebook.*解除受限/);
+  assert.doesNotMatch(`${restricted.text} ${restricted.fresh}`, /本轮.*完成|自动继续|分钟后/);
+});
+
 // ── 发布卡状态机（只读投影）──
 test('发布卡：候审 → 第三节点琥珀、脚注指向稿件预览、绝无「已再提醒」', () => {
   const now = Date.now();
