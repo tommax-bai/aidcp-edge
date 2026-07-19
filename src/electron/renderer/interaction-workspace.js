@@ -465,14 +465,17 @@
       const enabled = active && state.testDataResetEnabled && typeof api.interactionTestReset === 'function';
       testResetRoot.classList.toggle('hidden', !enabled);
       for (const button of dom.testResetButtons) {
-        button.disabled = Boolean(state.testResetBusy) || !env || env.connectivity !== 'connected' || state.stale;
+        // 重置是无条件的渠道级清空、不走 expectedVersion CAS：选中环境即可点。清空由主进程直连云端 HTTP
+        // 完成，与引擎/浏览器是否在线无关；离线时够不够得着云端由请求成败表达。MUST NOT 用 connectivity /
+        // stale 假阻断——同读取开关那条「渲染层用 connectivity 假阻断」的教训。
+        button.disabled = Boolean(state.testResetBusy) || !env;
         const channel = button.dataset.testResetChannel;
         button.textContent = state.testResetBusy === channel
           ? (channel === 'comment' ? '正在重置评论…' : '正在重置私信…')
           : (channel === 'comment' ? '重置评论' : '重置私信');
       }
       if (dom.testResetStatus) {
-        dom.testResetStatus.textContent = state.testResetStatus || '每次只重置一个渠道；点击后立即清空 Cloud 副本并重新拉取。';
+        dom.testResetStatus.textContent = state.testResetStatus || '每次只重置一个渠道；离线也可点，清空立即生效，联网后自动重拉。';
       }
     }
 
@@ -1267,7 +1270,10 @@
           state.detail = null;
           state.detailError = null;
         }
-        state.testResetStatus = `Cloud ${label}测试数据已清空，正在从微信平台重新拉取。`;
+        const resyncSkipped = Boolean(response.data && response.data.data && response.data.data.resync === 'skipped');
+        state.testResetStatus = resyncSkipped
+          ? `Cloud ${label}测试数据已清空；客户端当前离线，未自动重新拉取，联网后会自动补拉。`
+          : `Cloud ${label}测试数据已清空，正在从微信平台重新拉取。`;
         renderAll();
         global.setTimeout(() => {
           if (isCurrent(capturedEpoch, envKey)) void loadList({ preserveSelection: true });

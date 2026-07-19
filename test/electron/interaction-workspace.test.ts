@@ -1331,6 +1331,42 @@ test('测试重置区分安全拒绝与 Cloud 已清空但 Edge 未收到', asyn
   assert.match($(partial.window, '#interaction-test-reset-status').textContent || '', /Cloud 私信副本已清空，但自动重新拉取没有启动/);
 });
 
+// 引擎/浏览器未启动（环境已停止，connectivity 非 connected）也必须能重置：清空走主进程直连云端 HTTP，
+// 与在线无关。渲染层曾用 connectivity 把读取开关「假阻断」，重置按钮同一病灶——这条钉死它不得复发。
+test('环境已停止（connectivity 非 connected）重置按钮仍可用并直接调用重置 IPC', async () => {
+  const enabledList = clone(listFixture);
+  enabledList.data.testTools = { dataResetEnabled: true };
+  const handle = await bootThenSelectStoppedEnv({
+    interactionList: async (args: any) => apiResult(scopeEnvelope(enabledList, args.envKey)),
+  });
+  const button = $(handle.window, '[data-test-reset-channel="comment"]') as HTMLButtonElement;
+  assert.equal(button.disabled, false, '停止态环境重置按钮必须可用——MUST NOT 用 connectivity / stale 假阻断');
+  button.dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(handle.calls.reset.length, 1, '离线点击必须真的调用重置 IPC');
+  assert.equal(handle.calls.reset[0].envKey, 'env_stopped');
+  assert.equal(handle.calls.reset[0].channel, 'comment');
+});
+
+test('重置回包 resync=skipped 时状态明说离线未自动重拉，不冒充正在拉取', async () => {
+  const enabledList = clone(listFixture);
+  enabledList.data.testTools = { dataResetEnabled: true };
+  const handle = await boot({
+    api: {
+      interactionList: async (args: any) => apiResult(scopeEnvelope(enabledList, args.envKey)),
+      interactionTestReset: async (args: any) => apiResult({
+        data: { envKey: args.envKey, accountId: `account-${args.envKey}`, channel: args.channel,
+          action: 'test_reset', actionRequestId: null, resync: 'skipped', status: 'accepted',
+          deleted: { threads: 1, syncBatches: 1, syncCursors: 1 } },
+        meta: { requestId: 'test-reset', asOf: Date.now() },
+      }),
+    },
+  });
+  $(handle.window, '[data-test-reset-channel="dm"]').dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+  await flush();
+  assert.match($(handle.window, '#interaction-test-reset-status').textContent || '', /客户端当前离线，未自动重新拉取/);
+});
+
 test('Cloud 离线局部刷新保留已读历史并标记上次成功数据', async () => {
   let syncOffline = false;
   const { window } = await boot({
