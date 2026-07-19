@@ -14,13 +14,14 @@
     "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build:dist": "npm run clean:dist && tsc -p tsconfig.build.json",
     "build:ads-runtime": "node scripts/stage-ads-runtime.mjs",
+    "verify:desktop-build-input": "node scripts/verify-desktop-build-input.mjs",
     "electron:dev": "electron .",
     "electron:ol": "AIDCP_USER_DATA_DIR=\"$HOME/.aidcp-edge/ol\" AIDCP_CLOUD_URL=ws://123.56.253.183:8787 electron .",
-    "electron:build": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js",
-    "electron:build:win": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --win",
-    "electron:build:mac": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac",
-    "electron:build:mac:dev": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=dev -c.extraMetadata.aidcpClientAuthUrl=http://121.89.85.150:8088/capi",
-    "electron:build:mac:ol": "npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=ol -c.extraMetadata.aidcpClientAuthUrl=https://aidcp.tommax.cc/capi",
+    "electron:build": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js",
+    "electron:build:win": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --win",
+    "electron:build:mac": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac",
+    "electron:build:mac:dev": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=dev -c.extraMetadata.aidcpClientAuthUrl=http://121.89.85.150:8088/capi",
+    "electron:build:mac:ol": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=ol -c.extraMetadata.aidcpClientAuthUrl=https://aidcp.tommax.cc/capi",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "test:acceptance": "tsx --test test/acceptance/*.test.ts",
@@ -32,6 +33,7 @@
   "build": {
     "appId": "com.aidcp.edge",
     "productName": "AIDCP",
+    "afterPack": "scripts/after-pack.cjs",
     "directories": {
       "output": "dist-electron"
     },
