@@ -730,8 +730,19 @@ function addProvisionedEnvironmentToRoster(result) {
   return saved;
 }
 
-async function finalizeCreatedEnvironmentAssignment(result, intent) {
-  if (!result || !result.ok || !intent || !intent.required) return result;
+async function finalizeCreatedEnvironmentAssignment(result, intent, { slowStartEnabled = false } = {}) {
+  if (!result || !result.ok) return result;
+  const pendingResult = slowStartEnabled
+    ? { ...result, slowStartConfigured: false }
+    : result;
+  if (!intent || !intent.required) {
+    return slowStartEnabled
+      ? {
+          ...pendingResult,
+          visibilityWarning: '环境已在本机创建，但当前构建未启用 Cloud 客户归属，Facebook 慢启动未配置。',
+        }
+      : result;
+  }
   let response = null;
   // 完成端点幂等：仅网络/服务端瞬时失败原样重试一次；4xx 具名拒绝不盲重试。
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -744,23 +755,33 @@ async function finalizeCreatedEnvironmentAssignment(result, intent) {
         envKey: String(result.userId || '').trim(),
         label: String(result.name || '').trim() || null,
         platform: normalizePlatform(result.platform),
+        ...(slowStartEnabled ? { slowStartEnabled: true } : {}),
       },
     });
     if (response.ok || (response.status > 0 && response.status < 500)) break;
   }
   if (response && response.status === 401) {
     onSessionInvalid();
-    return withAuthoritativeAssignmentNotice(result, '客户端登录已失效');
+    return withAuthoritativeAssignmentNotice(
+      pendingResult,
+      `客户端登录已失效${slowStartEnabled ? '；Facebook 慢启动未确认' : ''}`,
+    );
   }
   if (!response || !response.ok) {
     const reason = response && response.data && response.data.error;
-    return withAuthoritativeAssignmentNotice(result, reason || '云端未确认归属');
+    return withAuthoritativeAssignmentNotice(
+      pendingResult,
+      `${reason || '云端未确认归属'}${slowStartEnabled ? '；Facebook 慢启动未确认' : ''}`,
+    );
   }
+  const confirmedResult = slowStartEnabled
+    ? { ...result, slowStartConfigured: true }
+    : result;
 
   const refreshed = await refreshAllowedEnvironments();
   if (!refreshed || !(allowedProfileIds instanceof Set) || !allowedProfileIds.has(String(result.userId || '').trim())) {
     return {
-      ...withAuthoritativeAssignmentNotice(result, '权威环境清单尚未确认'),
+      ...withAuthoritativeAssignmentNotice(confirmedResult, '权威环境清单尚未确认'),
       assignedToCurrentClient: true,
       requiresAdminAssignment: false,
       visibilityWarning: '环境已分配到当前账号，但权威环境清单尚未刷新，因此本次未加入运行环境。请稍后刷新后加入。',
@@ -769,7 +790,7 @@ async function finalizeCreatedEnvironmentAssignment(result, intent) {
   const saved = addProvisionedEnvironmentToRoster(result);
   if (!saved.ok) {
     return {
-      ...result,
+      ...confirmedResult,
       createdLocally: true,
       assignedToCurrentClient: true,
       requiresAdminAssignment: false,
@@ -779,7 +800,7 @@ async function finalizeCreatedEnvironmentAssignment(result, intent) {
     };
   }
   return {
-    ...result,
+    ...confirmedResult,
     createdLocally: true,
     assignedToCurrentClient: true,
     requiresAdminAssignment: false,
@@ -4534,6 +4555,9 @@ function safeCreatedEnvironment(finalized) {
     requiresAdminAssignment: finalized.requiresAdminAssignment,
     assignmentHandledByMain: finalized.assignmentHandledByMain,
     rosterJoinedByMain: finalized.rosterJoinedByMain,
+    ...(typeof finalized.slowStartConfigured === 'boolean'
+      ? { slowStartConfigured: finalized.slowStartConfigured }
+      : {}),
     visibilityWarning: finalized.visibilityWarning,
   };
 }
@@ -4546,6 +4570,8 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
   try {
     const platform = normalizePlatform(opts && opts.platform);
     const creationMode = opts && opts.creationMode === 'batch' ? 'batch' : 'single';
+    // 慢启动是 Facebook 专属的环境级每日额度约束；XHS / 视频号不提交这个概念。
+    const slowStartEnabled = platform === 'facebook';
     if (creationMode === 'batch' && platform !== 'facebook') {
       return { ok: false, error: '批量新建当前仅支持 Facebook 环境' };
     }
@@ -4607,7 +4633,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         groupResolver: envGroupResolver,
       });
       if (result && result.ok) {
-        return finalizeCreatedEnvironmentAssignment(result, intent);
+        return finalizeCreatedEnvironmentAssignment(result, intent, { slowStartEnabled });
       }
       return result;
     }
@@ -4644,13 +4670,16 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       if (!result.ok) {
         return failedFacebookBatchReceipt(created, i + 1, result.error || '未知错误');
       }
-      const finalized = await finalizeCreatedEnvironmentAssignment(result, intent);
+      const finalized = await finalizeCreatedEnvironmentAssignment(result, intent, { slowStartEnabled });
       created.push(safeCreatedEnvironment(finalized));
     }
     const assignmentHandledByMain = clientAuthEnabled();
     const unassigned = assignmentHandledByMain
       ? created.filter((item) => item.requiresAdminAssignment || !item.rosterJoinedByMain)
       : [];
+    const slowStartConfigured = platform === 'facebook'
+      ? created.length > 0 && created.every((item) => item.slowStartConfigured === true)
+      : undefined;
     return {
       ok: true,
       userId: creationMode === 'single' && created.length === 1 ? created[0].userId : undefined,
@@ -4666,8 +4695,11 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       requiresAdminAssignment: created.some((item) => item.requiresAdminAssignment),
       assignmentHandledByMain,
       rosterJoinedByMain: assignmentHandledByMain ? unassigned.length === 0 : undefined,
+      ...(platform === 'facebook' ? { slowStartConfigured } : {}),
       ...(unassigned.length > 0 ? {
-        visibilityWarning: `${created.length - unassigned.length}/${created.length} 个环境已分配并加入运行环境；其余环境未完成权威确认，未加入运行环境。`,
+        visibilityWarning: `${created.length - unassigned.length}/${created.length} 个环境已分配并加入运行环境；其余环境未完成权威确认，未加入运行环境且慢启动未确认。`,
+      } : platform === 'facebook' && !slowStartConfigured ? {
+        visibilityWarning: '环境已在本机创建，但 Facebook 慢启动未全部完成 Cloud 权威确认。',
       } : {}),
     };
   } catch (e) {

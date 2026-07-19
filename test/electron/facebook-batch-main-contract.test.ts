@@ -20,6 +20,16 @@ test('ads:createEnv: Facebook 批量平台门禁、整批解析与容量检查�
   assert.ok(ensureRuntime < writeClient, '运行时就绪后才建立写客户端');
 });
 
+test('ads:createEnv: Facebook 单建与批量都请求慢启动，XHS/视频号不提交该概念', () => {
+  assert.match(createBlock, /const slowStartEnabled = platform === 'facebook'/);
+  assert.equal((createBlock.match(
+    /finalizeCreatedEnvironmentAssignment\(result, intent, \{ slowStartEnabled \}\)/g,
+  ) ?? []).length, 2, '无账号资料单建分支与账号导入/批量分支必须共用 Facebook 默认值');
+  assert.match(mainSource, /\.\.\.\(slowStartEnabled \? \{ slowStartEnabled: true \} : \{\}\)/);
+  assert.match(mainSource, /slowStartConfigured: finalized\.slowStartConfigured/);
+  assert.match(createBlock, /created\.every\(\(item\) => item\.slowStartConfigured === true\)/);
+});
+
 test('ads:createEnv: 批量逐项使用计划中的随机 OS family 与轮询代理，并保留部分失败回执', () => {
   assert.match(createBlock, /osFamilyKey:\s*item\.osFamilyKey/);
   assert.match(createBlock, /accountImport:\s*item\.accountImport/);

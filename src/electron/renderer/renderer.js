@@ -4392,8 +4392,11 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       const proxyHint = batch && withProxy
         ? '代理已按粘贴顺序轮询分配并随建号写入。'
         : withProxy ? '代理已随建号写入。' : '未配代理，可稍后在环境行「代理」里补配。';
+      const slowStartHint = r.slowStartConfigured === true
+        ? 'Facebook 环境已默认开启慢启动（只收紧每日操作额度，不改变操作速度）。'
+        : '';
       const visibilityHint = r.visibilityWarning ? r.visibilityWarning : '';
-      setCreateMsg(`${countHint}${selectedHint}${proxyHint}${visibilityHint}`, Boolean(r.visibilityWarning));
+      setCreateMsg(`${countHint}${selectedHint}${proxyHint}${slowStartHint}${visibilityHint}`, Boolean(r.visibilityWarning));
       resetCreateProxyForm();
       await refreshEnvs();
     } else {

@@ -394,6 +394,7 @@ test('Facebook 批量新建：显式模式、隐藏操作系统下拉、多行�
         created: [{ userId: 'u1', osFamily: 'windows' }, { userId: 'u2', osFamily: 'macos' }],
         platform: 'facebook',
         creationMode: 'batch',
+        slowStartConfigured: true,
       };
     },
   }));
@@ -407,6 +408,7 @@ test('Facebook 批量新建：显式模式、隐藏操作系统下拉、多行�
   assert.ok(!$(w, '#ads-fb-import-wrap').classList.contains('hidden'), 'Facebook 平台显示导入框');
   assert.match(($(w, '#ads-fb-import') as HTMLTextAreaElement).placeholder, /uid\|password\|cookie\|access_token\|email\|timestamp/);
   assert.match($(w, '#ads-fb-account-format-help').textContent ?? '', /Access Token.*不会导入或保存/);
+  assert.match($(w, '#ads-fb-account-format-help').textContent ?? '', /单个、批量新建环境均默认开启慢启动/);
   assert.ok(!$(w, '#ads-fb-create-mode').classList.contains('hidden'), 'Facebook 平台显示创建方式');
   assert.ok(!$(w, '#ads-template').classList.contains('hidden'), 'Facebook 单个新建仍显示操作系统');
 
@@ -434,6 +436,7 @@ test('Facebook 批量新建：显式模式、隐藏操作系统下拉、多行�
   const msg = $(w, '#ads-create-msg').textContent ?? '';
   assert.match(msg, /已创建 2 个环境/);
   assert.match(msg, /轮询分配/);
+  assert.match(msg, /默认开启慢启动.*只收紧每日操作额度.*不改变操作速度/);
   assert.doesNotMatch(msg, /a@example.com|pw-secret|KEYSECRET|TOKEN|proxy-user|proxy-pass/);
   assert.equal(($(w, '#ads-fb-import') as HTMLTextAreaElement).value, '', '成功后清空一次性输入');
   assert.equal(($(w, '#ads-proxy-batch') as HTMLTextAreaElement).value, '', '成功后清空一次性代理输入');
