@@ -349,6 +349,7 @@ let allowedProfileIds = null; // Set<profileId> | null（null = 未 gated，不�
 let allowedEnvironmentPlatforms = new Map(); // envKey -> Cloud 权威 platform；绝不采信 renderer 自报
 let sessionTimer = null;
 let proceededOnce = false;
+const CLIENT_SESSION_REFRESH_WINDOW_MS = 5 * 60_000;
 
 function deriveClientAuthBaseFromCloudUrl(cloud) {
   const m = /^wss?:\/\/([^/:]+)(?::(\d+))?/i.exec(String(cloud || '').trim());
@@ -434,6 +435,28 @@ function clearClientSession() {
 }
 function hasValidSession() {
   return Boolean(clientSession && clientSession.token && (!clientSession.expiresAt || Date.now() < clientSession.expiresAt));
+}
+// 启动恢复与定时维护共用同一续签闸：缓存令牌可能在启动时仍有效，却早于首次 4 分钟维护到期。
+// 非 401 的瞬时失败不销毁仍有效的会话；若请求返回时本地已过期，则立即走统一失效流程。
+async function refreshClientSessionIfNeeded() {
+  if (!clientAuthEnabled()) return true;
+  if (!hasValidSession()) { onSessionInvalid(); return false; }
+  if (!clientSession.expiresAt
+    || clientSession.expiresAt - Date.now() >= CLIENT_SESSION_REFRESH_WINDOW_MS) return true;
+  const rr = await clientAuthFetch('/auth/refresh', { method: 'POST', token: clientSession.token });
+  if (rr.status === 200 && rr.data && rr.data.token) {
+    saveClientSession({
+      token: rr.data.token,
+      name: clientSession.name,
+      expiresAt: Date.now() + (Number(rr.data.expiresIn) || 900) * 1000,
+    });
+    return true;
+  }
+  if (rr.status === 401 || !hasValidSession()) {
+    onSessionInvalid();
+    return false;
+  }
+  return true;
 }
 async function clientAuthFetch(pathname, { method = 'GET', token, body, idempotencyKey, signal } = {}) {
   const base = resolveClientAuthBase();
@@ -793,7 +816,10 @@ function createLoginWindow() {
 }
 // 登录成功 / 已有会话后的正常启动流程（原 whenReady 主体收拢于此，便于登录门前置门控 + 登录后续跑）。
 async function proceedAfterAuth() {
-  if (clientAuthEnabled() && hasValidSession()) {
+  if (clientAuthEnabled()) {
+    if (!hasValidSession()) { onSessionInvalid(); return; }
+    const sessionReady = await refreshClientSessionIfNeeded();
+    if (!sessionReady) return;
     const ok = await refreshAllowedEnvironments();
     if (!ok) { clearClientSession(); allowedProfileIds = new Set(); createLoginWindow(); return; }
     const owner = String((clientSession && clientSession.name) || '').trim();
@@ -843,13 +869,9 @@ async function proceedAfterAuth() {
 function startSessionMaintenance() {
   if (sessionTimer) return;
   sessionTimer = setInterval(async () => {
-    if (!clientAuthEnabled() || !hasValidSession()) return;
-    if (clientSession.expiresAt && clientSession.expiresAt - Date.now() < 5 * 60_000) {
-      const rr = await clientAuthFetch('/auth/refresh', { method: 'POST', token: clientSession.token });
-      if (rr.status === 200 && rr.data && rr.data.token) {
-        saveClientSession({ token: rr.data.token, name: clientSession.name, expiresAt: Date.now() + (Number(rr.data.expiresIn) || 900) * 1000 });
-      } else if (rr.status === 401) { onSessionInvalid(); return; }
-    }
+    if (!clientAuthEnabled()) return;
+    const sessionReady = await refreshClientSessionIfNeeded();
+    if (!sessionReady) return;
     const ok = await refreshAllowedEnvironments();
     if (!ok) { onSessionInvalid(); return; }
     syncEnvHandles();
@@ -4326,7 +4348,11 @@ ipcMain.handle('publish:image-remove', async (_event, envId, payload) => {
 async function delegatedTaskRequest(envId, pathname, options = {}) {
   const handle = resolveHandle(envId);
   if (!handle || !handle.profileId) return { ok: false, status: 400, error: 'selected_environment_required' };
-  if (!clientAuthEnabled() || !hasValidSession()) return { ok: false, status: 401, error: 'client_session_required' };
+  if (!clientAuthEnabled()) return { ok: false, status: 401, error: 'client_session_required' };
+  if (!hasValidSession()) {
+    onSessionInvalid();
+    return { ok: false, status: 401, error: 'client_session_expired' };
+  }
   const suffix = pathname.includes('?') ? '&' : '?';
   const scopedPath = options.includeEnvQuery
     ? `${pathname}${suffix}envKey=${encodeURIComponent(handle.profileId)}`
@@ -4336,7 +4362,10 @@ async function delegatedTaskRequest(envId, pathname, options = {}) {
     token: clientSession.token,
     ...(options.body ? { body: { ...options.body, envKey: handle.profileId } } : {}),
   });
-  if (r.status === 401) return { ok: false, status: 401, error: 'client_session_expired' };
+  if (r.status === 401) {
+    onSessionInvalid();
+    return { ok: false, status: 401, error: 'client_session_expired' };
+  }
   if (!r.ok) {
     const responseError = r.data && r.data.error;
     return {
