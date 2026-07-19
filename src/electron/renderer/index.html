@@ -629,7 +629,8 @@
         </div>
         <label id="ads-fb-import-wrap" class="field ads-fb-import hidden">
           <span class="field-label">Facebook 账号资料 <em id="ads-fb-import-requirement" class="opt">可选</em></span>
-          <textarea id="ads-fb-import" rows="4" spellcheck="false" autocomplete="off" placeholder="email----password----2FA----cookie"></textarea>
+          <textarea id="ads-fb-import" rows="4" spellcheck="false" autocomplete="off" placeholder="每行使用一种格式：&#10;email----password----2FA----cookie&#10;uid|password|cookie|access_token|email|timestamp"></textarea>
+          <span id="ads-fb-account-format-help" class="subtle">兼容以上两种格式；六字段中的 Access Token 与时间仅识别格式，不会导入或保存。</span>
           <span id="ads-fb-batch-account-help" class="subtle hidden">每行一个账号；每个账号将独立随机分配操作系统，其余指纹由 AdsPower 生成。</span>
         </label>
         <div class="proxy-form">

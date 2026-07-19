@@ -405,6 +405,8 @@ test('Facebook 批量新建：显式模式、隐藏操作系统下拉、多行�
   platform.value = 'facebook';
   platform.dispatchEvent(new w.Event('change'));
   assert.ok(!$(w, '#ads-fb-import-wrap').classList.contains('hidden'), 'Facebook 平台显示导入框');
+  assert.match(($(w, '#ads-fb-import') as HTMLTextAreaElement).placeholder, /uid\|password\|cookie\|access_token\|email\|timestamp/);
+  assert.match($(w, '#ads-fb-account-format-help').textContent ?? '', /Access Token.*不会导入或保存/);
   assert.ok(!$(w, '#ads-fb-create-mode').classList.contains('hidden'), 'Facebook 平台显示创建方式');
   assert.ok(!$(w, '#ads-template').classList.contains('hidden'), 'Facebook 单个新建仍显示操作系统');
 

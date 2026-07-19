@@ -2,6 +2,7 @@ const FACEBOOK_DOMAIN = 'facebook.com';
 const FACEBOOK_COOKIE_DOMAIN = '.facebook.com';
 const FACEBOOK_START_URL = 'https://www.facebook.com/';
 const FIELD_DELIMITER = '----';
+const PIPE_FIELD_DELIMITER = '|';
 // 界面 chrome 语言钉英文的 belt（change facebook-locale-pin-en-us / C1）：归一化 header 形态（name=value;…）
 // 导入 cookie 时，缺 `locale` 则注入 en_US，统一导入号首屏/登录前界面语言；已有 locale 保留用户值不覆盖。
 // 结构化形态（JSON 数组 / TSV 导出）走 looksStructuredCookie 原样透传、**不注入**（用户自带的 cookie 逐字保留）。
@@ -81,9 +82,50 @@ function normalizeFacebookCookie(rawCookie) {
   return { ok: true, cookie: JSON.stringify(cookies) };
 }
 
-function parseImportLine(line, index) {
+function readableFacebookCookieUserId(rawCookie) {
+  const text = String(rawCookie || '').trim();
+  if (!text) return '';
+  if (text.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) {
+        const cUser = parsed.find((item) => item && String(item.name || '') === 'c_user');
+        return cUser && cUser.value != null ? String(cUser.value).trim() : '';
+      }
+    } catch {
+      return '';
+    }
+  }
+  const cUser = parseCookiePairs(text).find((pair) => pair.name === 'c_user');
+  return cUser ? String(cUser.value || '').trim() : '';
+}
+
+function buildImportEntry({ username, password, fakey, rawCookie, lineNo, expectedUserId = '' }) {
+  if (!username) return { ok: false, error: `第 ${lineNo} 行缺少 username` };
+  if (!rawCookie) return { ok: false, error: `第 ${lineNo} 行缺少 cookie` };
+
+  const cookie = normalizeFacebookCookie(rawCookie);
+  if (!cookie.ok) return { ok: false, error: `第 ${lineNo} 行${cookie.error}` };
+  const cookieUserId = expectedUserId ? readableFacebookCookieUserId(rawCookie) : '';
+  if (cookieUserId && cookieUserId !== expectedUserId) {
+    return { ok: false, error: `第 ${lineNo} 行 cookie c_user 与 uid 不一致` };
+  }
+
+  const entry = {
+    username,
+    password,
+    cookie: cookie.cookie,
+    domainName: FACEBOOK_DOMAIN,
+    openUrls: [FACEBOOK_START_URL],
+    repeatConfig: [4],
+    ignoreCookieError: '0',
+  };
+  if (fakey !== undefined) entry.fakey = fakey;
+  return { ok: true, entry };
+}
+
+function parseLegacyImportLine(line, lineNo) {
   const parts = String(line).split(FIELD_DELIMITER);
-  const lineNo = index + 1;
   if (parts.length < 4) {
     return { ok: false, error: `第 ${lineNo} 行格式错误` };
   }
@@ -91,25 +133,35 @@ function parseImportLine(line, index) {
   const password = parts[1].trim();
   const fakey = parts[2].trim();
   const rawCookie = parts.slice(3).join(FIELD_DELIMITER).trim();
-  if (!username) return { ok: false, error: `第 ${lineNo} 行缺少 username` };
-  if (!rawCookie) return { ok: false, error: `第 ${lineNo} 行缺少 cookie` };
+  return buildImportEntry({ username, password, fakey, rawCookie, lineNo });
+}
 
-  const cookie = normalizeFacebookCookie(rawCookie);
-  if (!cookie.ok) return { ok: false, error: `第 ${lineNo} 行${cookie.error}` };
+function parsePipeImportLine(line, lineNo) {
+  const parts = String(line).split(PIPE_FIELD_DELIMITER);
+  if (parts.length < 6) {
+    return { ok: false, error: `第 ${lineNo} 行格式错误` };
+  }
+  const uid = parts[0].trim();
+  const password = parts[1].trim();
+  const rawCookie = parts.slice(2, -3).join(PIPE_FIELD_DELIMITER).trim();
+  // access_token 与 timestamp 只用于确定右侧字段边界；客户端建环境不需要它们，解析后立即丢弃。
+  const username = parts.at(-2).trim();
+  if (!uid) return { ok: false, error: `第 ${lineNo} 行缺少 uid` };
+  if (!/^\d+$/.test(uid)) return { ok: false, error: `第 ${lineNo} 行 uid 格式错误` };
+  if (!password) return { ok: false, error: `第 ${lineNo} 行缺少 password` };
+  if (!username) return { ok: false, error: `第 ${lineNo} 行缺少 email` };
+  return buildImportEntry({ username, password, rawCookie, lineNo, expectedUserId: uid });
+}
 
-  return {
-    ok: true,
-    entry: {
-      username,
-      password,
-      fakey,
-      cookie: cookie.cookie,
-      domainName: FACEBOOK_DOMAIN,
-      openUrls: [FACEBOOK_START_URL],
-      repeatConfig: [4],
-      ignoreCookieError: '0',
-    },
-  };
+function parseImportLine(line, index) {
+  const text = String(line);
+  const lineNo = index + 1;
+  const legacyAt = text.indexOf(FIELD_DELIMITER);
+  const pipeAt = text.indexOf(PIPE_FIELD_DELIMITER);
+  if (pipeAt >= 0 && (legacyAt < 0 || pipeAt < legacyAt)) {
+    return parsePipeImportLine(text, lineNo);
+  }
+  return parseLegacyImportLine(text, lineNo);
 }
 
 function parseFacebookAccountImport(raw) {

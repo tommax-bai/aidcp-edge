@@ -60,6 +60,50 @@ test('parseFacebookAccountImport: parses one or more lines without leaking value
   assert.doesNotMatch(bad.error || '', /secret@example.com|pw|KEY|datr/);
 });
 
+test('parseFacebookAccountImport: six-field pipe record maps email/password/cookie and drops token metadata', () => {
+  const pipeCookie = rawCookie.replace('100000000000001', '100000000000003');
+  const accessToken = 'EAA_TEST_ACCESS_TOKEN_SECRET';
+  const timestamp = '7\\/16\\/2026 10:14:57 AM';
+  const parsed = mod.parseFacebookAccountImport(
+    `100000000000003|pipe-password|${pipeCookie}|${accessToken}|pipe@example.com|${timestamp}`,
+  );
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.entries.length, 1);
+  assert.equal(parsed.entries[0].username, 'pipe@example.com');
+  assert.equal(parsed.entries[0].password, 'pipe-password');
+  assert.equal(Object.hasOwn(parsed.entries[0], 'fakey'), false, 'access token must not be treated as 2FA');
+  assert.equal(Object.hasOwn(parsed.entries[0], 'uid'), false);
+  assert.equal(Object.hasOwn(parsed.entries[0], 'accessToken'), false);
+  assert.equal(Object.hasOwn(parsed.entries[0], 'timestamp'), false);
+  assert.doesNotMatch(JSON.stringify(parsed.entries[0]), /EAA_TEST_ACCESS_TOKEN_SECRET|7\\\\\/16/);
+});
+
+test('parseFacebookAccountImport: pipe cookie may contain pipes and batches may mix formats', () => {
+  const pipeCookie = rawCookie.replace('100000000000001', '100000000000004');
+  const parsed = mod.parseFacebookAccountImport([
+    `legacy@example.com----legacy-pw----LEGACY-2FA----${rawCookie}`,
+    `100000000000004|pipe-pw|${pipeCookie}|EAA_TEST|pipe@example.com|2026-07-16 10:14:57`,
+  ].join('\n'));
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.entries.length, 2);
+  assert.equal(parsed.entries[0].fakey, 'LEGACY-2FA');
+  assert.equal(parsed.entries[1].username, 'pipe@example.com');
+  const cookies = JSON.parse(String(parsed.entries[1].cookie)) as Array<{ name: string; value: string }>;
+  assert.equal(cookies.find((cookie) => cookie.name === 'oo')?.value, 'v1|3:1');
+});
+
+test('parseFacebookAccountImport: pipe UID mismatch rejects safely without credential values', () => {
+  const bad = mod.parseFacebookAccountImport(
+    `100000000000099|mismatch-password|${rawCookie}|EAA_MISMATCH_SECRET|mismatch@example.com|2026-07-16`,
+  );
+  assert.equal(bad.ok, false);
+  assert.match(bad.error || '', /第 1 行.*c_user.*uid.*不一致/i);
+  assert.doesNotMatch(
+    bad.error || '',
+    /100000000000099|100000000000001|mismatch-password|EAA_MISMATCH_SECRET|mismatch@example\.com/,
+  );
+});
+
 test('profileNameForFacebookImport: does not persist imported username in profile name', () => {
   assert.equal(mod.profileNameForFacebookImport({ username: 'a@example.com' }, 0), 'Facebook import 1');
   assert.equal(mod.profileNameForFacebookImport({}, 2), 'Facebook import 3');
