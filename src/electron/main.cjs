@@ -2960,6 +2960,13 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
       updateColdStandbyCloudRecovery(handle, 'reconnected');
       return;
     }
+    if (message.type === 'lifecycle.task_idle') {
+      // 核心只证明任务/发布写者已在安全边界收敛；外壳重新走完整待机判定，绝不直接 close。
+      // 无最新提示即 no-op；提示过时、最短持有未满、验证码/认证/新任务等均由既有双层安全闸拦截。
+      const standbyHint = handle.status.browserStandby && handle.status.browserStandby.hint;
+      if (standbyHint) applyBrowserStandbyHint(handle, standbyHint);
+      return;
+    }
     if (message.type === 'lifecycle.paused') {
       clearColdStandbyTimer(handle);
       handle.pausePending = false;

@@ -46,6 +46,11 @@ test('browser cold standby uses lifecycle.standby and manual controls cancel tim
   assert.match(main, /sendCoreLifecycle\(handle, 'standby'/);
   assert.match(main, /message\.type === 'lifecycle\.standby'/);
   assert.match(main, /message\.type === 'lifecycle\.wake_requested'/);
+  assert.match(edgeMain, /onIdle:\s*\(\)\s*=>\s*sendLifecycleIpc\(\{ type: 'lifecycle\.task_idle' \}\)/,
+    'core should report only a safe-idle hint after task coordination settles');
+  assert.match(main, /message\.type === 'lifecycle\.task_idle'/);
+  assert.match(main, /if \(standbyHint\) applyBrowserStandbyHint\(handle, standbyHint\)/,
+    'Electron must reapply the latest hint through existing safety gates, not close directly');
 
   const pause = functionSource('pauseEdge', 'resumeEdge');
   assert.match(pause, /clearColdStandbyTimer\(handle\)/, 'manual pause must cancel cold standby timers');

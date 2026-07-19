@@ -18,6 +18,7 @@ describe('EdgeTaskCoordinator', () => {
     const released: EdgeTaskReleasedPayload[] = [];
     let quiesces = 0;
     let resumes = 0;
+    let idles = 0;
     const coordinator = new EdgeTaskCoordinator({
       browse: {
         quiesceForTask: async () => { quiesces++; return gate.promise; },
@@ -25,6 +26,7 @@ describe('EdgeTaskCoordinator', () => {
       },
       onAcquired: (payload) => acquired.push(payload),
       onReleased: (payload) => released.push(payload),
+      onIdle: () => { idles++; },
     });
 
     coordinator.acquire({ taskId: 'auto-1', kind: 'comment_prepare', priority: 'automatic', leaseMs: 60_000 });
@@ -50,6 +52,7 @@ describe('EdgeTaskCoordinator', () => {
     coordinator.release({ taskId: 'auto-1', outcome: 'completed' });
     await tick();
     assert.equal(resumes, 1, '所有独占任务收敛后恰恢复一次');
+    assert.equal(idles, 1, '只有最后一条任务收敛并恢复浏览后才报告一次安全空闲');
     assert.equal(coordinator.canExecute(), true);
     assert.deepEqual(released.map((item) => item.reason), ['released', 'released', 'released']);
   });
@@ -86,6 +89,25 @@ describe('EdgeTaskCoordinator', () => {
     assert.equal(released.some((item) => item.taskId === 'stuck' && item.reason === 'expired'), true);
     assert.equal(resumed, 1);
     assert.equal(coordinator.canExecute(), true);
+  });
+
+  it('安全空闲回调在 resumeAfterTask 完成后触发，回调异常不破坏所有权收敛', async () => {
+    const events: string[] = [];
+    const coordinator = new EdgeTaskCoordinator({
+      browse: {
+        quiesceForTask: async () => 0,
+        resumeAfterTask: async () => { events.push('resume'); },
+      },
+      onAcquired: () => {},
+      onReleased: () => {},
+      onIdle: () => { events.push('idle'); throw new Error('observer failed'); },
+    });
+    coordinator.acquire({ taskId: 'publish-idle', kind: 'publish', priority: 'automatic', leaseMs: 60_000 });
+    await tick();
+    coordinator.release({ taskId: 'publish-idle', outcome: 'completed' });
+    await tick();
+    assert.deepEqual(events, ['resume', 'idle'], '先恢复到安全边界，再通知外壳重判待机');
+    assert.equal(coordinator.canExecute(), true, '观察回调异常不重新冻结浏览或残留租约');
   });
 
   it('quiesce 未在 acquire 等待期内收敛时废弃排队任务，不授予无主租约', async () => {

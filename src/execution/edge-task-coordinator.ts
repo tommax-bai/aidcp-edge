@@ -66,6 +66,11 @@ export interface EdgeTaskCoordinatorOptions {
   requestWake?: (deadlineAt?: number) => Promise<boolean>;
   onAcquired: (payload: EdgeTaskAcquiredPayload) => void;
   onReleased: (payload: EdgeTaskReleasedPayload) => void;
+  /**
+   * 全部任务与发布写者收敛、普通浏览恢复到安全边界后的提示。
+   * 只表达“此刻可重新判定待机”，不得由协调器直接关闭浏览器。
+   */
+  onIdle?: () => void;
   logger?: (message: string) => void;
   now?: () => number;
   maxAbsoluteLeaseMs?: number;
@@ -117,6 +122,7 @@ export class EdgeTaskCoordinator {
   private readonly waking = new Set<string>();
   private readonly onAcquired: (payload: EdgeTaskAcquiredPayload) => void;
   private readonly onReleased: (payload: EdgeTaskReleasedPayload) => void;
+  private readonly onIdle: () => void;
   private readonly logger: (message: string) => void;
   private readonly now: () => number;
   private readonly maxAbsoluteLeaseMs: number;
@@ -142,6 +148,7 @@ export class EdgeTaskCoordinator {
     this.requestWake = options.requestWake ?? (() => Promise.resolve(false));
     this.onAcquired = options.onAcquired;
     this.onReleased = options.onReleased;
+    this.onIdle = options.onIdle ?? (() => {});
     this.logger = options.logger ?? (() => {});
     this.now = options.now ?? Date.now;
     this.maxAbsoluteLeaseMs = options.maxAbsoluteLeaseMs ?? DEFAULT_MAX_ABSOLUTE_LEASE_MS;
@@ -518,7 +525,14 @@ export class EdgeTaskCoordinator {
       this.logger(`[task] browse resume failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     // 恢复导航/重报期间继续封住迟到的旧普通命令；只有恢复收敛且没有新接管申请才真正放行。
-    if (!this.active && !this.quiescing && this.queue.length === 0) this.browseBlocked = false;
+    if (!this.active && !this.quiescing && this.queue.length === 0) {
+      this.browseBlocked = false;
+      try {
+        this.onIdle();
+      } catch (err) {
+        this.logger(`[task] idle callback failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   /** 在途发布写收敛后调用（5.3/5.9 配套）：若协调器空闲则恢复浏览，避免发布 dispatch 结束后浏览永久冻结。 */

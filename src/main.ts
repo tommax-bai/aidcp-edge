@@ -632,6 +632,9 @@ async function main(): Promise<void> {
         console.error('[aidcp-edge] edge.task.released 回传失败:', err);
       }
     },
+    // 任务与发布写者都已收敛、浏览恢复到安全边界后，只通知 Electron 重新应用最新待机提示。
+    // 是否真关浏览器仍由外壳 + 核心既有安全闸共同决定，绝不在此直接关闭。
+    onIdle: () => sendLifecycleIpc({ type: 'lifecycle.task_idle' }),
     logger: (message) => console.log(message),
   });
   session.cdp.on('cdp.control_recovered', () => taskCoordinator.resumeAfterControlRecovery());
