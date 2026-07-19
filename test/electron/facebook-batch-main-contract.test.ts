@@ -7,16 +7,16 @@ const start = mainSource.indexOf("ipcMain.handle('ads:createEnv'");
 const end = mainSource.indexOf("ipcMain.handle('ads:updateEnvProxy'", start);
 const createBlock = mainSource.slice(start, end);
 
-test('ads:createEnv: Facebook 批量平台门禁、整批解析与容量检查均早于运行时/写客户端', () => {
+test('ads:createEnv: Facebook 批量平台门禁与整批解析早于运行时/写客户端，环境创建不受运行容量限制', () => {
   assert.ok(start >= 0 && end > start, '应找到 ads:createEnv IPC 块');
   const platformGate = createBlock.indexOf("creationMode === 'batch' && platform !== 'facebook'");
   const plan = createBlock.indexOf('createFacebookBatchPlan({');
-  const capacity = createBlock.indexOf('validateCreationCapacity({ configured, accountCap, requested })');
   const ensureRuntime = createBlock.indexOf('ensureAdsServiceOnce(null)');
   const writeClient = createBlock.indexOf('createAdsWriteApi(');
   assert.ok(platformGate >= 0 && platformGate < ensureRuntime, '非 Facebook 批量须在运行时探测前拒绝');
   assert.ok(plan >= 0 && plan < ensureRuntime, '整批账号/代理/操作系统计划须先形成');
-  assert.ok(capacity >= 0 && capacity < ensureRuntime, '整批容量须在第一条写入前校验');
+  assert.equal(createBlock.includes('validateCreationCapacity('), false, '不得拿浏览器并发/启动排队限制环境创建');
+  assert.equal(createBlock.includes('最大挂载账号数'), false, '创建路径不得保留旧的挂载硬上限');
   assert.ok(ensureRuntime < writeClient, '运行时就绪后才建立写客户端');
 });
 

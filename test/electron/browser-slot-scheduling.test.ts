@@ -21,9 +21,21 @@ test('槽位上限 = 可用内存 ÷ 单环境估值；override 优先；至少 
   assert.equal(fleet.resolveSlotCapacity({ freeBytes: 7000 * MB, perEnvBytes: 700 * MB, override: 4 }), 4);
 });
 
-test('可设置账号数上限 = 2 × 槽位（1:2，用户定案）', () => {
-  assert.equal(fleet.maxAccountsForSlots(10), 20);
-  assert.equal(fleet.maxAccountsForSlots(8), 16);
+test('自动启动排队上限 = 2 × 浏览器并发；这不是账号/环境上限', () => {
+  assert.equal(fleet.maxQueuedStartsForSlots(10), 20);
+  assert.equal(fleet.maxQueuedStartsForSlots(8), 16);
+});
+
+test('启动排队准入：未满可加入、满时拒绝、同一环境重复请求幂等', () => {
+  assert.deepEqual(fleet.startQueueAdmission({ queuedCount: 3, limit: 4 }), {
+    ok: true, queued: 4, limit: 4, added: true,
+  });
+  assert.deepEqual(fleet.startQueueAdmission({ queuedCount: 4, limit: 4 }), {
+    ok: false, queued: 4, limit: 4, added: false, reason: 'start_queue_full',
+  });
+  assert.deepEqual(fleet.startQueueAdmission({ queuedCount: 4, limit: 4, alreadyQueued: true }), {
+    ok: true, queued: 4, limit: 4, added: false,
+  });
 });
 
 test('单环境内存估值默认取实测口径 700MB（旧的 1GB 是没量过的设计缺省）', () => {
@@ -139,7 +151,7 @@ test('排队等待计入唤醒死线：轮到它时已超死线 → 立刻诚实
 });
 
 // ---------------------------------------------------------------------------
-// 界面可设的两个上限（并发数 / 最大账号数）。
+// 界面可设的两个上限（浏览器并发 / 启动排队）。
 //
 // 权威口径只有一处（主进程），渲染层只显示不重算。优先级 界面设置 > 启动环境变量 > 按内存自动推——
 // 与云端环境选择同一套。0 / 空 = 未设 = 自动，绝不能被读成「上限 0」（那等于整机停摆）。
@@ -151,13 +163,13 @@ test('两个上限：界面设置 > 启动环境变量 > 按内存自动推', ()
   const auto = fleet.resolveSlotSettings({ freeBytes: 7000 * MB, perEnvBytes: 700 * MB });
   assert.equal(auto.capacity, 10);
   assert.equal(auto.capacitySource, 'auto');
-  assert.equal(auto.maxAccounts, 20, '未设时账号上限 = 2 × 槽位');
-  assert.equal(auto.maxAccountsSource, 'auto');
+  assert.equal(auto.maxQueuedStarts, 20, '未设时启动排队上限 = 2 × 浏览器并发');
+  assert.equal(auto.maxQueuedStartsSource, 'auto');
 
   const byEnv = fleet.resolveSlotSettings({ freeBytes: 7000 * MB, perEnvBytes: 700 * MB, slotEnv: 6 });
   assert.equal(byEnv.capacity, 6);
   assert.equal(byEnv.capacitySource, 'env');
-  assert.equal(byEnv.maxAccounts, 12, '账号上限跟着实际生效的槽位走，而不是自动推算值');
+  assert.equal(byEnv.maxQueuedStarts, 12, '自动排队上限跟着实际生效的浏览器并发走');
 
   const bySetting = fleet.resolveSlotSettings({ freeBytes: 7000 * MB, perEnvBytes: 700 * MB, slotEnv: 6, slotSetting: 3 });
   assert.equal(bySetting.capacity, 3, '界面设置压过启动参数');
@@ -165,25 +177,22 @@ test('两个上限：界面设置 > 启动环境变量 > 按内存自动推', ()
   assert.equal(bySetting.autoCapacity, 10, '自动推算值仍如实带出，供界面说明「自动会是多少」');
 });
 
-test('账号上限可单独设定；设到 1:2 之上必须诚实告警而非静默接受', () => {
-  const v = fleet.resolveSlotSettings({ freeBytes: 3500 * MB, perEnvBytes: 700 * MB, maxAccountsSetting: 20 });
+test('启动排队上限可单独设定，且不派生任何账号/环境创建限制', () => {
+  const v = fleet.resolveSlotSettings({ freeBytes: 3500 * MB, perEnvBytes: 700 * MB, maxQueuedStartsSetting: 20 });
   assert.equal(v.capacity, 5);
-  assert.equal(v.maxAccounts, 20);
-  assert.equal(v.maxAccountsSource, 'setting');
-  assert.equal(v.autoMaxAccounts, 10);
-  assert.equal(v.maxAccountsExceedsRatio, true, '20 个账号抢 5 个槽位：部分账号可能永远排不上，必须说出来');
-
-  const within = fleet.resolveSlotSettings({ freeBytes: 3500 * MB, perEnvBytes: 700 * MB, maxAccountsSetting: 8 });
-  assert.equal(within.maxAccountsExceedsRatio, false);
+  assert.equal(v.maxQueuedStarts, 20);
+  assert.equal(v.maxQueuedStartsSource, 'setting');
+  assert.equal(v.autoMaxQueuedStarts, 10);
+  assert.equal('maxAccounts' in v, false, '运行设置不得再产出环境创建上限');
 });
 
 test('0 / 空 / 负数 = 未设 = 自动，绝不解读成「上限 0」', () => {
   for (const v of [0, '', null, undefined, -3, 'abc']) {
     assert.equal(fleet.normalizeSlotLimit(v), 0, `${JSON.stringify(v)} 应归一为 0（自动）`);
   }
-  const zeroed = fleet.resolveSlotSettings({ freeBytes: 7000 * MB, perEnvBytes: 700 * MB, slotSetting: 0, maxAccountsSetting: 0 });
+  const zeroed = fleet.resolveSlotSettings({ freeBytes: 7000 * MB, perEnvBytes: 700 * MB, slotSetting: 0, maxQueuedStartsSetting: 0 });
   assert.equal(zeroed.capacity, 10, '0 是「自动」不是「不许开浏览器」');
-  assert.equal(zeroed.maxAccounts, 20);
+  assert.equal(zeroed.maxQueuedStarts, 20);
   assert.equal(fleet.normalizeSlotLimit(999), 64, '上界 64：防手滑多打一个零把机器拖垮');
 });
 
@@ -263,7 +272,7 @@ test('探测失败 / 未知平台 → 回落 os.freemem()（只许偏保守，�
   assert.equal(Math.round(garbage / MB), 900, '解析不出来也要回落，不能当成 0 把机器锁死');
 });
 
-test('读数带 TTL 缓存：准入闸每次开浏览器都问，不该每次都 spawn 一个 vm_stat', () => {
+test('底层读数工具带 TTL 缓存；Edge 主进程只会在启动时调用它一次', () => {
   let calls = 0;
   const cache = { at: -Infinity, bytes: 0 };
   let clock = 1_000;
@@ -279,15 +288,17 @@ test('读数带 TTL 缓存：准入闸每次开浏览器都问，不该每次都
   assert.equal(calls, 1, 'TTL 内复用缓存');
   clock += 5_000;
   read();
-  assert.equal(calls, 2, '过了 TTL 重新读——内存是会变的，不能一辈子只读一次');
+  assert.equal(calls, 2, '工具本身仍可刷新；主进程契约负责只在启动时取一次快照');
 });
 
-test('真机上这台 16GB Mac 必须能开浏览器（端到端：读数 → 准入闸）', () => {
+test('真机上这台 16GB Mac 的启动快照可推算 4 个浏览器并发', () => {
   const usable = fleet.parseVmStatAvailableBytes(VM_STAT_REAL) - fleet.MEM_RESERVE_BYTES_DEFAULT;
-  const admission = fleet.ramAdmission({ plannedCount: 1, freeBytes: usable, perEnvBytes: 700 * MB });
-  assert.equal(admission.ok, true, '3.9GB 可用、留 512MB 余量后仍装得下一个 700MB 的浏览器');
   const cap = fleet.resolveSlotCapacity({ freeBytes: usable, perEnvBytes: 700 * MB });
   assert.equal(cap, 4, '≈3409MB ÷ 700MB = 4 个槽位');
+});
+
+test('3202MB 启动快照 ÷ 700MB 固定推算为 4', () => {
+  assert.equal(fleet.resolveSlotCapacity({ freeBytes: 3202 * MB, perEnvBytes: 700 * MB }), 4);
 });
 
 // ---------------------------------------------------------------------------

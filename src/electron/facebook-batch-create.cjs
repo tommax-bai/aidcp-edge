@@ -115,16 +115,6 @@ function createFacebookBatchPlan({
   return { ok: true, plan, proxyCount: parsedProxies.proxies.length };
 }
 
-function validateCreationCapacity({ configured, accountCap, requested } = {}) {
-  const used = Math.max(0, Number(configured) || 0);
-  const cap = Math.max(0, Number(accountCap) || 0);
-  const count = Math.max(0, Number(requested) || 0);
-  const remaining = Math.max(0, cap - used);
-  return count <= remaining
-    ? { ok: true, configured: used, accountCap: cap, requested: count, remaining }
-    : { ok: false, configured: used, accountCap: cap, requested: count, remaining };
-}
-
 function failedFacebookBatchReceipt(createdItems, failedIndex, reason) {
   const created = Array.isArray(createdItems) ? createdItems : [];
   const count = created.length;
@@ -145,6 +135,5 @@ module.exports = {
   nonBlankLines,
   parseFacebookBatchProxies,
   createFacebookBatchPlan,
-  validateCreationCapacity,
   failedFacebookBatchReceipt,
 };

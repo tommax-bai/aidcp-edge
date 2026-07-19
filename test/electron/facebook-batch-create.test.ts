@@ -6,7 +6,6 @@ const require = createRequire(import.meta.url);
 const {
   parseFacebookBatchProxies,
   createFacebookBatchPlan,
-  validateCreationCapacity,
   failedFacebookBatchReceipt,
 } = require('../../src/electron/facebook-batch-create.cjs') as {
   parseFacebookBatchProxies: (input: Record<string, unknown>) => {
@@ -20,13 +19,6 @@ const {
     plan?: Array<{ accountImport: unknown; accountLine: number; osFamilyKey: string; proxy: Record<string, string> }>;
     proxyCount?: number;
     error?: string;
-  };
-  validateCreationCapacity: (input: Record<string, unknown>) => {
-    ok: boolean;
-    configured: number;
-    accountCap: number;
-    requested: number;
-    remaining: number;
   };
   failedFacebookBatchReceipt: (created: unknown[], failedIndex: number, reason: string) => {
     ok: boolean;
@@ -146,23 +138,6 @@ test('createFacebookBatchPlan: 缺账号、缺 OS family 或随机索引越界�
   });
   assert.equal(badRandom.ok, false);
   assert.match(String(badRandom.error), /随机操作系统/);
-});
-
-test('validateCreationCapacity: 整批超过剩余容量时在写入前拒绝', () => {
-  assert.deepEqual(validateCreationCapacity({ configured: 3, accountCap: 5, requested: 2 }), {
-    ok: true,
-    configured: 3,
-    accountCap: 5,
-    requested: 2,
-    remaining: 2,
-  });
-  assert.deepEqual(validateCreationCapacity({ configured: 3, accountCap: 5, requested: 3 }), {
-    ok: false,
-    configured: 3,
-    accountCap: 5,
-    requested: 3,
-    remaining: 2,
-  });
 });
 
 test('failedFacebookBatchReceipt: 部分失败保留真实计数、序号与安全摘要', () => {

@@ -6,7 +6,7 @@
  *  - 每环境冻结 spawn env 构建 + 身份闸：无法派生唯一稳定 edgeId（ads-<分身id>）则拒绝，
  *    绝不让子进程回落 host-<主机名> 共享身份（云端会互踢串号）；
  *  - AdsPower 生命周期错峰串行队列（相邻 ≥1.1s，避开本机 ~1req/s 限频；单任务失败不阻塞队列）；
- *  - 「全部启动」内存上限预检（headful 每环境 ~1GB，超限诚实拦阻而非拖垮）；
+ *  - Edge 启动时内存快照与浏览器并发自动推算（任务热路径不重复采样）；
  *  - 同账号铺多环境检测（云端会合并风控/配额预算，两行并非独立——必须告警）；
  *  - decideRespawn：与 src/supervise/respawn-policy.ts **语义逐位一致的 CJS 副本**
  *    （Electron 主进程是 CJS、无法 require 编译后的 ESM；由 test/electron/fleet.test.ts
@@ -221,16 +221,14 @@ const PER_ENV_BYTES_DEFAULT = 700 * 1024 * 1024;
 // 红线：**不要用 os.freemem() 当「可用内存」**。它只统计完全空闲的物理页；macOS / Linux 都会把
 // 绝大部分空闲内存拿去做文件缓存（inactive / page cache），这些页随时可回收、却不计入 freemem。
 // 后果不是少开几个浏览器，而是**整台机器一个浏览器都开不了**：一台 16GB、系统自报可用 48% 的 Mac，
-// os.freemem() 只报 ~220MB < 单环境 700MB → 每一条开浏览器路径都被内存闸拦死。
-// （browser-slot-scheduling 把内存闸从「只在全部启动、可 force 越过」收成「全路径必经、无绕过口」
-//  之后，这个一直存在的错误读数才第一次真的把机器锁死。）
+// os.freemem() 只报 ~220MB < 单环境 700MB → 启动时会把浏览器并发误算成最低值。
 //
 // 正确读法按平台取「可回收后真正能用的量」：
 //   linux  → /proc/meminfo 的 MemAvailable（内核自己算好的，最权威）
 //   darwin → vm_stat 的 free + inactive + speculative（inactive 是干净可回收的文件缓存）
 //   其它   → 回落 os.freemem()（宁可保守拦阻，也不假装内存充裕）
 
-/** 读数缓存 TTL：准入闸每次开浏览器都会问一次，别每次都 spawn 一个 vm_stat。 */
+/** 底层读数工具的短 TTL；Edge 外壳只在启动时调用一次，测试/诊断调用仍避免重复 spawn。 */
 const MEM_READ_TTL_MS = 3_000;
 
 /**
@@ -303,8 +301,8 @@ function usableMemoryBytes(deps = {}) {
   return Math.max(0, availableMemoryBytes(deps) - reserve);
 }
 
-/** 并行槽位 : 可设置账号数 = 1:2（用户定案）。 */
-const ACCOUNTS_PER_SLOT = 2;
+/** 浏览器并发 : 自动启动排队容量 = 1:2。这里只是队列缺省比例，不是账号/环境数量上限。 */
+const QUEUED_STARTS_PER_SLOT = 2;
 
 /**
  * 槽位/内存不够时该怎么办：**一律排队等，谁都不判失败。**
@@ -319,9 +317,8 @@ const ACCOUNTS_PER_SLOT = 2;
  * 而那台浏览器**照常继续起、环境照常留在队列里**——它正是下一次重试要命中的东西。
  * 撤销唤醒是双输：这次没做成，下次还得从冷启重来。
  *
- * 因此这里没有 policy 函数可写。判据只剩两条，都不在这个热路径上：
- *  · 结构性拒绝 = 挂载账号数超上限（配置期的闸，见外壳 ads:createEnv）；
- *  · 诚实失败 = 调用方自己的死线到了 / 唤醒真的失败（浏览器起不来）。
+ * 因此这里没有按调用方身份分流的 policy。结构性准入只有两条：浏览器并发限制执行数，启动排队上限
+ * 限制等待数；二者都不限制环境创建数量。
  */
 
 /**
@@ -349,9 +346,18 @@ function resolveSlotCapacity({ freeBytes, perEnvBytes = PER_ENV_BYTES_DEFAULT, o
   return Math.max(1, Math.floor(free / per));
 }
 
-/** 可设置账号数上限 = 2 × 槽位（超过即存在「永远排不上」的风险，必须诚实告警）。 */
-function maxAccountsForSlots(slots) {
-  return Math.max(0, Math.floor(Number(slots) || 0)) * ACCOUNTS_PER_SLOT;
+/** 自动启动排队上限 = 2 × 浏览器并发。它限制等待启动的请求，不限制账号或环境数量。 */
+function maxQueuedStartsForSlots(slots) {
+  return Math.max(0, Math.floor(Number(slots) || 0)) * QUEUED_STARTS_PER_SLOT;
+}
+
+/** 启动排队的纯准入判定。同一环境已在队列中时幂等，不重复占容量。 */
+function startQueueAdmission({ queuedCount, limit, alreadyQueued = false } = {}) {
+  const queued = Math.max(0, Math.floor(Number(queuedCount) || 0));
+  const max = Math.max(1, Math.floor(Number(limit) || 1));
+  if (alreadyQueued) return { ok: true, queued, limit: max, added: false };
+  if (queued >= max) return { ok: false, queued, limit: max, added: false, reason: 'start_queue_full' };
+  return { ok: true, queued: queued + 1, limit: max, added: true };
 }
 
 /**
@@ -360,33 +366,31 @@ function maxAccountsForSlots(slots) {
  * 优先级 **界面设置 > 启动环境变量 > 按内存自动推**——与云端环境选择同一套口径（界面是权威，env 只是
  * 没界面时的兜底）。0 / 空 = 未设 = 自动，绝不解读成「上限 0」（那等于整机停摆）。
  *
- * 两个数是不同的事实，各自独立可设：**槽位**是物理上限（同时开几个浏览器，由内存顶死），**账号上限**
- * 是排班上限（挂几个账号，靠冷待机轮流用槽位）。1:2 是缺省比例、不是物理常数——可以设高，但设高了就
- * 存在「部分账号长期排不到槽位」的风险，必须诚实告警（`maxAccountsExceedsRatio`），MUST NOT 静默接受。
+ * 两个数是不同的事实，各自独立可设：**浏览器并发**限制同时执行数，**启动排队上限**限制尚未执行的
+ * 启动/唤醒请求数。环境可以继续创建，不参与这两个容量数。1:2 只是自动排队容量的缺省比例。
  */
 function resolveSlotSettings({
   freeBytes,
   perEnvBytes = PER_ENV_BYTES_DEFAULT,
   slotSetting,
   slotEnv,
-  maxAccountsSetting,
+  maxQueuedStartsSetting,
 } = {}) {
   const per = Math.max(1, Math.floor(Number(perEnvBytes) || PER_ENV_BYTES_DEFAULT));
   const autoCapacity = resolveSlotCapacity({ freeBytes, perEnvBytes: per });
   const fromSetting = normalizeSlotLimit(slotSetting);
   const fromEnv = Math.floor(Number(slotEnv) || 0);
   const capacity = fromSetting > 0 ? fromSetting : fromEnv > 0 ? fromEnv : autoCapacity;
-  const autoMaxAccounts = maxAccountsForSlots(capacity);
-  const maxSetting = normalizeSlotLimit(maxAccountsSetting);
-  const maxAccounts = maxSetting > 0 ? maxSetting : autoMaxAccounts;
+  const autoMaxQueuedStarts = maxQueuedStartsForSlots(capacity);
+  const maxSetting = normalizeSlotLimit(maxQueuedStartsSetting);
+  const maxQueuedStarts = maxSetting > 0 ? maxSetting : autoMaxQueuedStarts;
   return {
     capacity,
     capacitySource: fromSetting > 0 ? 'setting' : fromEnv > 0 ? 'env' : 'auto',
     autoCapacity,
-    maxAccounts,
-    maxAccountsSource: maxSetting > 0 ? 'setting' : 'auto',
-    autoMaxAccounts,
-    maxAccountsExceedsRatio: maxAccounts > autoMaxAccounts,
+    maxQueuedStarts,
+    maxQueuedStartsSource: maxSetting > 0 ? 'setting' : 'auto',
+    autoMaxQueuedStarts,
     perEnvMB: Math.round(per / (1024 * 1024)),
   };
 }
@@ -474,23 +478,6 @@ function createSerialLaunchQueue(opts = {}) {
     enqueue,
     pendingCount: () => queue.length,
     isRunning: () => running,
-  };
-}
-
-/**
- * 「全部启动」内存上限预检：预计新增在跑数 × 单环境估值 是否超过本机可用内存。
- * 超限 → { ok:false }（调用方诚实拦阻/让运维确认），绝不静默超额拉起。
- */
-function ramAdmission({ plannedCount, freeBytes, perEnvBytes = PER_ENV_BYTES_DEFAULT }) {
-  const planned = Math.max(0, Math.floor(Number(plannedCount) || 0));
-  const required = planned * perEnvBytes;
-  const free = Math.max(0, Number(freeBytes) || 0);
-  return {
-    ok: required <= free,
-    requiredBytes: required,
-    freeBytes: free,
-    requiredMB: Math.round(required / (1024 * 1024)),
-    freeMB: Math.round(free / (1024 * 1024)),
   };
 }
 
@@ -638,13 +625,13 @@ module.exports = {
   createStaggerQueue,
   createSerialLaunchQueue,
   resolveSlotCapacity,
-  maxAccountsForSlots,
+  maxQueuedStartsForSlots,
+  startQueueAdmission,
   resolveSlotSettings,
   normalizeSlotLimit,
-  ACCOUNTS_PER_SLOT,
+  QUEUED_STARTS_PER_SLOT,
   LAUNCH_PRIORITY,
   orderSlotWaiters,
-  ramAdmission,
   availableMemoryBytes,
   usableMemoryBytes,
   parseVmStatAvailableBytes,

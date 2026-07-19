@@ -86,13 +86,6 @@
         <div class="rail-foot">
           <button id="rail-guide" class="rail-btn hidden" type="button">引导处理</button>
           <button id="rail-start-all" class="rail-btn" type="button">全部启动</button>
-          <div id="rail-ram-confirm" class="rail-ram hidden">
-            <p id="rail-ram-text"></p>
-            <div class="rail-ram-actions">
-              <button id="rail-ram-force" class="rail-btn warn" type="button">仍要启动</button>
-              <button id="rail-ram-cancel" class="rail-btn" type="button">取消</button>
-            </div>
-          </div>
           <p id="rail-msg" class="rail-msg"></p>
         </div>
       </aside>
@@ -927,23 +920,22 @@
           </div>
         </div>
 
-        <!-- 浏览器并发（change browser-slot-scheduling）：两个上限都可显式设定，留空 = 自动推算。
-             并发数是物理上限（同时开几个浏览器，由内存顶死）；账号数是排班上限（挂几个账号，靠冷待机轮流用槽位）。 -->
+        <!-- 浏览器调度（change browser-slot-scheduling）：执行并发与启动排队分别设定；环境创建数量不受限制。 -->
         <div class="set-card">
           <div class="set-card-head">
             <div class="set-card-title">
-              <span>浏览器并发</span>
-              <span class="set-card-sub">同时能开几个浏览器、最多挂几个账号；留空按本机可用内存自动推算</span>
+              <span>浏览器调度</span>
+              <span class="set-card-sub">浏览器并发限制同时执行数，启动排队限制等待数；不限制创建环境数量</span>
             </div>
           </div>
           <div class="slots-field">
             <label class="field">
-              <span class="field-label">同时打开的浏览器数 <em class="opt">留空自动</em></span>
+              <span class="field-label">浏览器并发（同时执行数） <em class="opt">留空自动</em></span>
               <input id="slot-limit" type="number" min="1" max="64" step="1" placeholder="自动（按可用内存推算）" autocomplete="off" />
             </label>
             <label class="field">
-              <span class="field-label">最多挂载账号数 <em class="opt">留空自动</em></span>
-              <input id="max-account-limit" type="number" min="1" max="64" step="1" placeholder="自动（并发数 × 2）" autocomplete="off" />
+              <span class="field-label">启动排队上限 <em class="opt">留空自动</em></span>
+              <input id="max-queued-start-limit" type="number" min="1" max="64" step="1" placeholder="自动（并发数 × 2）" autocomplete="off" />
             </label>
             <span id="slots-hint" class="parking-hint">—</span>
             <span id="slots-warn" class="parking-hint slots-warn hidden"></span>

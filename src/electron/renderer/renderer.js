@@ -155,10 +155,6 @@ const fields = {
   railSumIdle: document.querySelector('#rail-sum-idle'),
   railGuide: document.querySelector('#rail-guide'),
   railStartAll: document.querySelector('#rail-start-all'),
-  railRamConfirm: document.querySelector('#rail-ram-confirm'),
-  railRamText: document.querySelector('#rail-ram-text'),
-  railRamForce: document.querySelector('#rail-ram-force'),
-  railRamCancel: document.querySelector('#rail-ram-cancel'),
   railMsg: document.querySelector('#rail-msg'),
   guidePanel: document.querySelector('#guide-panel'),
   guideTitle: document.querySelector('#guide-title'),
@@ -290,7 +286,7 @@ const settingsUi = {
   browserColdStandby: document.querySelector('#browser-cold-standby'),
   // 浏览器并发卡（change browser-slot-scheduling）
   slotLimit: document.querySelector('#slot-limit'),
-  maxAccountLimit: document.querySelector('#max-account-limit'),
+  maxQueuedStartLimit: document.querySelector('#max-queued-start-limit'),
   slotsHint: document.querySelector('#slots-hint'),
   slotsWarn: document.querySelector('#slots-warn'),
   applyRestart: document.querySelector('#apply-restart'),
@@ -359,7 +355,6 @@ const fleetView = {
   shownEnv: null, // 头像三态：已把浏览器抬到主屏前台的那个 envId（null=无）。切换选中即清，见 selectEnv
   collapsed: true, // 环境栏默认收起为窄图标条
   platformFilter: 'all', // 平台分类筛选为会话内视图态；每次启动默认全部，不落设置
-  startAllScope: null, // 资源确认期间冻结首次批量启动 envId 范围，force 不得扩大范围
   buffers: new Map(), // envId -> [{ entry, cls }]（每环境活动流缓冲，≤200 条，绝不串号）
   logs: new Map(), // envId -> { entries:[{time,message}], last }（每环境开发者原始日志，绝不串号）
   guided: null, // 引导处理态 { done:Set, current }
@@ -3317,8 +3312,6 @@ for (const button of fields.railPlatformFilters || []) {
     const next = button.dataset.railPlatform || 'all';
     if (next === fleetView.platformFilter) return;
     fleetView.platformFilter = next;
-    fleetView.startAllScope = null;
-    fields.railRamConfirm?.classList.add('hidden');
     fleetView.lastRailSig = '';
     const visible = filteredRailEnvList();
     if (visible.length > 0 && !visible.some((env) => env.envId === fleetView.selected)) {
@@ -3329,34 +3322,29 @@ for (const button of fields.railPlatformFilters || []) {
   });
 }
 
-// ── 「全部启动」：内存上限预检，超限诚实拦阻、让运维确认后 force 放行 ──
-async function doStartAll(force) {
+// ── 「全部启动」：主进程按有界启动排队接收；环境数量本身不受限制 ──
+async function doStartAll() {
   const api = window.aidcpEdge.fleetStartAll;
   if (typeof api !== 'function') return;
-  const envIds = force && Array.isArray(fleetView.startAllScope)
-    ? [...fleetView.startAllScope]
-    : filteredRailEnvList().map((env) => env.envId);
+  const envIds = filteredRailEnvList().map((env) => env.envId);
   if (envIds.length === 0) {
     setRailMsg('当前分类没有可启动的环境。');
     return;
   }
-  if (!force) fleetView.startAllScope = [...envIds];
-  fields.railRamConfirm?.classList.add('hidden');
-  const res = await api({ envIds, ...(force ? { force: true } : {}) });
-  if (res && res.ok === false && res.reason === 'ram') {
-    if (fields.railRamText) {
-      fields.railRamText.textContent = `预计需 ~${res.requiredMB}MB 内存（${res.plannedCount} 个环境 × ~1GB），本机当前可用 ~${res.freeMB}MB，可能不足并拖垮已在跑的环境。仍要全部启动吗？`;
-    }
-    fields.railRamConfirm?.classList.remove('hidden');
-    return;
-  }
-  fleetView.startAllScope = null;
+  const res = await api({ envIds });
   if (res && res.ok) {
     if (res.queued > 0 && Array.isArray(res.envIds)) {
-      fleetView.startAll = { ids: res.envIds, total: res.queued };
+      fleetView.startAll = {
+        ids: res.envIds,
+        total: res.queued,
+        rejected: Number(res.rejected) || 0,
+        queueLimit: Number(res.queueLimit) || 0,
+      };
       updateStartAllProgress();
     } else if (res.queued > 0) {
       setRailMsg(`已错峰排队启动 ${res.queued} 个环境（相邻间隔约 1.1s）。`); // 旧主进程无 envIds 时兜底
+    } else if (Number(res.rejected) > 0) {
+      setRailMsg(`启动排队已满，本次有 ${res.rejected} 个环境未加入（排队上限 ${res.queueLimit}）。`);
     } else {
       setRailMsg('没有待启动的环境。');
     }
@@ -3373,18 +3361,15 @@ function updateStartAllProgress() {
     return e && e.status && e.status.edge === 'running';
   }).length;
   if (launched >= sa.total) {
-    setRailMsg(`已全部启动（${sa.total}/${sa.total}）。`);
+    setRailMsg(sa.rejected > 0
+      ? `已启动 ${sa.total} 个；另 ${sa.rejected} 个因启动排队已满未加入，可稍后重试。`
+      : `已全部启动（${sa.total}/${sa.total}）。`);
     fleetView.startAll = null;
     return;
   }
-  setRailMsg(`启动中 ${launched}/${sa.total} · 其余 ${sa.total - launched} 个错峰排队（相邻约 1.1s）…`);
+  setRailMsg(`启动中 ${launched}/${sa.total} · 其余 ${sa.total - launched} 个错峰排队${sa.rejected > 0 ? ` · ${sa.rejected} 个未加入` : ''}…`);
 }
-fields.railStartAll?.addEventListener('click', () => { void doStartAll(false); });
-fields.railRamForce?.addEventListener('click', () => { void doStartAll(true); });
-fields.railRamCancel?.addEventListener('click', () => {
-  fleetView.startAllScope = null;
-  fields.railRamConfirm?.classList.add('hidden');
-});
+fields.railStartAll?.addEventListener('click', () => { void doStartAll(); });
 
 // ── 引导式登录 / 验证码流：待处理环境排队、一次引导一个；新到项实时并入（队列每步重算）──
 function guideQueue() {
@@ -3673,7 +3658,7 @@ function applySettings(s) {
   if (settingsUi.browserColdStandby) settingsUi.browserColdStandby.checked = s.browserColdStandbyEnabled !== false;
   // 浏览器并发（change browser-slot-scheduling）：0 = 自动 → 输入框留空，让占位文案说清自动是怎么算的。
   if (settingsUi.slotLimit) settingsUi.slotLimit.value = Number(s.browserSlotLimit) > 0 ? String(s.browserSlotLimit) : '';
-  if (settingsUi.maxAccountLimit) settingsUi.maxAccountLimit.value = Number(s.maxAccountLimit) > 0 ? String(s.maxAccountLimit) : '';
+  if (settingsUi.maxQueuedStartLimit) settingsUi.maxQueuedStartLimit.value = Number(s.maxQueuedStartLimit) > 0 ? String(s.maxQueuedStartLimit) : '';
   applySlotsView(s.slots);
   updateProfileDisplay();
   // 云端环境（change edge-cloud-env-selector）：回填已选 key、自定义地址、目标云端视图。
@@ -3698,17 +3683,13 @@ function applySlotsView(view) {
     : view.capacitySource === 'env'
       ? '启动参数'
       : `自动推算（可用内存约 ${view.usableMB}MB ÷ 单环境约 ${view.perEnvMB}MB）`;
-  const accSrc = view.maxAccountsSource === 'setting' ? '你设定' : '自动（并发 × 2）';
+  const queueSrc = view.maxQueuedStartsSource === 'setting' ? '你设定' : '自动（并发 × 2）';
   settingsUi.slotsHint.textContent =
-    `并发上限 ${view.capacity}（${capSrc}）· 账号上限 ${view.maxAccounts}（${accSrc}）· `
-    + `此刻 ${view.occupied} 个浏览器在跑、已挂 ${view.configured} 个账号。改完立即生效，不必重启环境。`;
-  // 两类风险都如实说出来，绝不静默接受：账号挂太多（排不上）、或已挂的已经超过上限。
+    `浏览器并发 ${view.capacity}（${capSrc}）· 启动排队上限 ${view.maxQueuedStarts}（${queueSrc}）· `
+    + `此刻 ${view.occupied} 个在执行、${view.queued} 个等待启动、已创建 ${view.configured} 个环境。环境数量不受限制。`;
   const warns = [];
-  if (view.maxAccountsExceedsRatio) {
-    warns.push(`⚠ 账号上限 ${view.maxAccounts} 超过并发数的 2 倍（${view.autoMaxAccounts}）：部分账号可能长期排不到浏览器。`);
-  }
-  if (Number(view.configured) > Number(view.maxAccounts)) {
-    warns.push(`⚠ 已挂 ${view.configured} 个账号，超过账号上限 ${view.maxAccounts}。`);
+  if (Number(view.queued) >= Number(view.maxQueuedStarts)) {
+    warns.push(`⚠ 启动排队已满（${view.queued}/${view.maxQueuedStarts}）；新的启动请求需稍后重试。`);
   }
   if (settingsUi.slotsWarn) {
     settingsUi.slotsWarn.textContent = warns.join('　');
@@ -3727,15 +3708,15 @@ function readSlotInput(el) {
 async function persistSlotLimits() {
   const saved = await window.aidcpEdge.saveSettings({
     browserSlotLimit: readSlotInput(settingsUi.slotLimit),
-    maxAccountLimit: readSlotInput(settingsUi.maxAccountLimit),
+    maxQueuedStartLimit: readSlotInput(settingsUi.maxQueuedStartLimit),
   });
   if (!saved) return;
   if (settingsUi.slotLimit) settingsUi.slotLimit.value = Number(saved.browserSlotLimit) > 0 ? String(saved.browserSlotLimit) : '';
-  if (settingsUi.maxAccountLimit) settingsUi.maxAccountLimit.value = Number(saved.maxAccountLimit) > 0 ? String(saved.maxAccountLimit) : '';
+  if (settingsUi.maxQueuedStartLimit) settingsUi.maxQueuedStartLimit.value = Number(saved.maxQueuedStartLimit) > 0 ? String(saved.maxQueuedStartLimit) : '';
   applySlotsView(saved.slots);
 }
 settingsUi.slotLimit?.addEventListener('change', () => { void persistSlotLimits(); });
-settingsUi.maxAccountLimit?.addEventListener('change', () => { void persistSlotLimits(); });
+settingsUi.maxQueuedStartLimit?.addEventListener('change', () => { void persistSlotLimits(); });
 
 // 云端环境卡交互（change edge-cloud-env-selector）
 for (const btn of settingsUi.cloudEnvButtons) {

@@ -543,27 +543,20 @@ test('红线：人设草稿绑定生成时的环境，中途切换环境后确�
   assert.equal(calls.persist.length, 0, '切换环境清空草稿后，确认不再向任何环境写入（绝不误绑环境二）');
 });
 
-test('全部启动：内存预检超限 → 诚实拦阻出确认；确认后 force 放行', async () => {
+test('全部启动：启动排队有界接收，超出部分如实提示且不再提供内存 force 绕过', async () => {
   let callCount = 0;
   const { w } = await boot({
-    fleetStartAll: async (opts: { force?: boolean } | undefined) => {
+    fleetStartAll: async () => {
       callCount += 1;
-      if (!opts || !opts.force) return { ok: false, reason: 'ram', requiredMB: 4096, freeMB: 2048, plannedCount: 4 };
-      return { ok: true, queued: 4, envIds: ['ads-p1', 'ads-p2', 'ads-a', 'ads-b'] };
+      return { ok: true, queued: 2, rejected: 2, queueLimit: 2, envIds: ['ads-p1', 'ads-p2'] };
     },
   });
   (w.document.querySelector('#rail-toggle') as HTMLElement).click();
   (w.document.querySelector('#rail-start-all') as HTMLElement).click();
   await tick();
-  const confirm = w.document.querySelector('#rail-ram-confirm')!;
-  assert.equal(confirm.classList.contains('hidden'), false, '超限必须先诚实拦阻');
-  assert.match(w.document.querySelector('#rail-ram-text')!.textContent!, /4096.*2048|可能不足/);
-  (w.document.querySelector('#rail-ram-force') as HTMLElement).click();
-  await tick();
-  assert.equal(callCount, 2, 'force 二次调用');
-  assert.equal(confirm.classList.contains('hidden'), true);
-  // 实时进度：如实呈现 k/N（k=已 running 的目标环境数）而非静态一句话。
-  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /启动中 \d\/4|已错峰排队启动 4/);
+  assert.equal(callCount, 1, '只发一次可审计的启动请求，不做 force 重试');
+  assert.equal(w.document.querySelector('#rail-ram-confirm'), null, '动态内存确认与 force 入口应移除');
+  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /2 个未加入|另 2 个/);
 });
 
 test('平台筛选：默认全部；切换后列表、计数、选中环境与全部启动范围同步', async () => {
@@ -626,8 +619,8 @@ test('平台筛选：空分类显示空态并禁用全部启动，不发无目�
   assert.equal(calls.startAll.length, 0);
 });
 
-test('平台筛选：资源确认后的 force 请求复用首次分类范围', async () => {
-  const requests: Array<{ envIds?: string[]; force?: boolean }> = [];
+test('平台筛选：启动排队拒绝只发送当前分类的一次请求', async () => {
+  const requests: Array<{ envIds?: string[] }> = [];
   const { w } = await boot({
     fleetGet: async () => ({
       provider: 'adspower',
@@ -638,22 +631,19 @@ test('平台筛选：资源确认后的 force 请求复用首次分类范围', a
         { envId: 'ads-fb', profileId: 'fb', name: 'Facebook', platform: 'facebook', status: makeStatus({ envId: 'ads-fb' }) },
       ],
     }),
-    fleetStartAll: async (opts: { envIds?: string[]; force?: boolean }) => {
+    fleetStartAll: async (opts: { envIds?: string[] }) => {
       requests.push(opts);
-      if (!opts.force) return { ok: false, reason: 'ram', requiredMB: 1024, freeMB: 512, plannedCount: 1 };
-      return { ok: true, queued: 1, envIds: ['ads-fb'] };
+      return { ok: true, queued: 0, rejected: 1, queueLimit: 4, envIds: [], rejectedEnvIds: ['ads-fb'] };
     },
   });
   (w.document.querySelector('[data-rail-platform="facebook"]') as HTMLButtonElement).click();
   await tick();
   (w.document.querySelector('#rail-start-all') as HTMLButtonElement).click();
   await tick();
-  (w.document.querySelector('#rail-ram-force') as HTMLButtonElement).click();
-  await tick();
   assert.deepEqual(JSON.parse(JSON.stringify(requests)), [
     { envIds: ['ads-fb'] },
-    { envIds: ['ads-fb'], force: true },
   ]);
+  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /1 个环境未加入|排队已满/);
 });
 
 test('同账号告警：选中环境带 sameAccountWarning → 主区域出告警条', async () => {
