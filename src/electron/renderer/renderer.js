@@ -147,6 +147,10 @@ const fields = {
   railList: document.querySelector('#rail-list'),
   railCount: document.querySelector('#rail-count'),
   railPlatformFilters: Array.from(document.querySelectorAll('[data-rail-platform]')),
+  railFacebookPersonaFill: document.querySelector('#rail-facebook-persona-fill'),
+  railFacebookPersonaLanguage: document.querySelector('#rail-facebook-persona-language'),
+  railFacebookPersonaSubmit: document.querySelector('#rail-facebook-persona-submit'),
+  railFacebookPersonaStatus: document.querySelector('#rail-facebook-persona-status'),
   railAdd: document.querySelector('#rail-add'),
   railFootAdd: document.querySelector('#rail-foot-add'),
   railSum: document.querySelector('#rail-sum'),
@@ -3117,6 +3121,7 @@ function renderRail() {
     button.classList.toggle('active', active);
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
+  fields.railFacebookPersonaFill?.classList.toggle('hidden', fleetView.platformFilter !== 'facebook');
   if (fields.railSum) fields.railSum.classList.toggle('hidden', collapsed);
   if (fields.railSumRun) fields.railSumRun.textContent = `▶ ${counts.run}`;
   if (fields.railSumAttn) fields.railSumAttn.textContent = `⚠ ${counts.attn}`;
@@ -3328,6 +3333,34 @@ for (const button of fields.railPlatformFilters || []) {
     }
   });
 }
+
+let facebookPersonaAutoFillInFlight = false;
+fields.railFacebookPersonaSubmit?.addEventListener('click', async () => {
+  if (facebookPersonaAutoFillInFlight) return;
+  const api = window.aidcpEdge.facebookPersonaAutoFill;
+  if (typeof api !== 'function') {
+    if (fields.railFacebookPersonaStatus) fields.railFacebookPersonaStatus.textContent = '当前客户端版本暂不支持此操作。';
+    return;
+  }
+  facebookPersonaAutoFillInFlight = true;
+  fields.railFacebookPersonaSubmit.disabled = true;
+  if (fields.railFacebookPersonaStatus) fields.railFacebookPersonaStatus.textContent = '正在交由云端处理…';
+  try {
+    const result = await api(fields.railFacebookPersonaLanguage?.value || 'zh-CN');
+    if (fields.railFacebookPersonaStatus) {
+      fields.railFacebookPersonaStatus.textContent = result && result.ok && result.accepted
+        ? '已交由云端处理，将补齐尚未设置的人设。'
+        : (result && result.message) || '提交失败，请稍后重试。';
+    }
+  } catch (error) {
+    if (fields.railFacebookPersonaStatus) {
+      fields.railFacebookPersonaStatus.textContent = `提交失败：${(error && error.message) || error || '请稍后重试'}`;
+    }
+  } finally {
+    facebookPersonaAutoFillInFlight = false;
+    fields.railFacebookPersonaSubmit.disabled = false;
+  }
+});
 
 // ── 「全部启动」：主进程按有界启动排队接收；环境数量本身不受限制 ──
 async function doStartAll() {

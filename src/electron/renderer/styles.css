@@ -2322,6 +2322,43 @@ body::-webkit-scrollbar:vertical,
 .rail-filter-btn.active { border-color: #9db8f2; background: var(--accent-soft); color: #2563eb; font-weight: 700; }
 .rail-filter-btn:focus-visible { outline: 2px solid #9db8f2; outline-offset: 1px; }
 
+.rail-facebook-persona-fill {
+  display: none;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 5px;
+  padding: 2px 4px 5px;
+  flex-shrink: 0;
+}
+.env-rail.expanded .rail-facebook-persona-fill:not(.hidden) { display: grid; }
+.rail-facebook-persona-fill select,
+.rail-facebook-persona-fill button {
+  min-width: 0;
+  height: 28px;
+  border: 1px solid #dbe3ef;
+  border-radius: 7px;
+  background: #fff;
+  color: #475569;
+  font-size: 11px;
+}
+.rail-facebook-persona-fill select { padding: 0 5px; }
+.rail-facebook-persona-fill button {
+  border-color: #9db8f2;
+  background: var(--accent-soft);
+  color: #2563eb;
+  font-weight: 700;
+  cursor: pointer;
+}
+.rail-facebook-persona-fill button:disabled { cursor: wait; opacity: 0.6; }
+.rail-facebook-persona-status {
+  grid-column: 1 / -1;
+  min-height: 0;
+  margin: 0;
+  color: #64748b;
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.rail-facebook-persona-status:empty { display: none; }
+
 /* 汇总 chip（展开态） */
 .rail-sum { display: flex; gap: 6px; padding: 0 4px 4px; flex-shrink: 0; }
 .rail-sum.hidden { display: none; }
