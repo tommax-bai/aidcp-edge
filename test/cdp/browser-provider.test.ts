@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   SelfChromeProvider,
   AdsPowerProvider,
+  BrowserProfileInUseError,
   selectBrowserProvider,
 } from '../../src/cdp/index.js';
 import type { ChromeInstance } from '../../src/cdp/index.js';
@@ -189,6 +190,50 @@ test('AdsPowerProvider.launch code≠0 → 诚实报错（不回落 self）', as
   ]);
   const provider = new AdsPowerProvider({ apiBase: 'http://x:50325', userId: 'k1' }, { fetchImpl, ...noopDeps });
   await assert.rejects(provider.launch({ host: '127.0.0.1', port: 9222 }), /code=-1|不回落 self/);
+});
+
+test('AdsPowerProvider.launch：安全锁占用被结构化且原始邮箱不离开 provider', async () => {
+  const calls: FetchCall[] = [];
+  const rawOwner = 'tommax.bai@gmail.com';
+  const fetchImpl = routedFetch([
+    ['/api/v2/browser-profile/start', () => ({
+      code: -1,
+      msg: `[k1] is being used by [${rawOwner}] and is not allowed to open`,
+    })],
+  ], calls);
+  const provider = new AdsPowerProvider({ apiBase: 'http://x:50325', userId: 'k1' }, { fetchImpl, ...noopDeps });
+
+  await assert.rejects(
+    provider.launch({ host: '127.0.0.1', port: 9222 }),
+    (error: unknown) => {
+      assert.ok(error instanceof BrowserProfileInUseError);
+      assert.equal(error.code, 'BROWSER_PROFILE_IN_USE');
+      assert.equal(error.profileId, 'k1');
+      assert.equal(error.ownerHint, 't***@gmail.com');
+      assert.doesNotMatch(error.message, /tommax\.bai@gmail\.com/);
+      assert.match(error.message, /is being used by \[t\*\*\*@gmail\.com\]/);
+      return true;
+    },
+  );
+  assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 1);
+  assert.equal(calls.some((call) => call.url.includes('browser-profile/stop')), false);
+  assert.equal(calls.some((call) => call.url.includes('/json/version')), false);
+});
+
+test('AdsPowerProvider.launch：非邮箱占用标识也只保留首字符提示', async () => {
+  const fetchImpl = routedFetch([
+    ['/api/v2/browser-profile/start', () => ({
+      code: -1,
+      msg: '[k1] is being used by [operator-name] and is not allowed to open',
+    })],
+  ]);
+  const provider = new AdsPowerProvider({ apiBase: 'http://x:50325', userId: 'k1' }, { fetchImpl, ...noopDeps });
+
+  await assert.rejects(
+    provider.launch({ host: '127.0.0.1', port: 9222 }),
+    (error: unknown) => error instanceof BrowserProfileInUseError &&
+      error.ownerHint === 'o***' && !error.message.includes('operator-name'),
+  );
 });
 
 test('AdsPowerProvider.launch 无 debug_port → 诚实报错', async () => {

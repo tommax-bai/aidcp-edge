@@ -175,6 +175,28 @@ test('wechat contract validator: strict frozen payloads reject extra fields, sco
     reasonCode: null,
   };
   assert.deepEqual(validateInteractionAuthStatus(auth), auth);
+  assert.deepEqual(
+    validateInteractionAuthStatus({
+      ...auth,
+      status: 'reauth_required',
+      browserState: 'unavailable',
+      reasonCode: 'INTERACTION_BROWSER_PROFILE_IN_USE',
+    }),
+    {
+      ...auth,
+      status: 'reauth_required',
+      browserState: 'unavailable',
+      reasonCode: 'INTERACTION_BROWSER_PROFILE_IN_USE',
+    },
+  );
+  assert.throws(
+    () => validateInteractionAuthStatus({ ...auth, reasonCode: 'invented' }),
+    InteractionProtocolValidationError,
+  );
+  assert.throws(
+    () => validateInteractionAuthStatus({ ...auth, ownerHint: 'raw-owner@example.com' }),
+    InteractionProtocolValidationError,
+  );
   assert.throws(
     () => validateInteractionAuthStatus({ ...auth, cookie: 'secret' }),
     InteractionProtocolValidationError,

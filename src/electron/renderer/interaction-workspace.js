@@ -123,6 +123,7 @@
     if (code === 'INTERACTION_CONFIG_MISSING') return '当前账号尚未发布回复配置。互动仍会保留，但暂时不能生成或发送。';
     if (code === 'INTERACTION_RATE_LIMITED') return 'Cloud 本地发送限制尚未放行，请稍后再试。';
     if (code === 'WECHAT_RATE_LIMITED') return '平台正在限流，请稍后再试。';
+    if (code === 'INTERACTION_BROWSER_PROFILE_IN_USE') return '浏览器环境正在其他设备或账号中使用。请解除占用后重试。';
     if (code === 'INTERACTION_AUTH_REQUIRED' || code === 'WECHAT_AUTH_REQUIRED') return '视频号登录已失效。历史仍可查看，重新登录后才能继续写操作。';
     if (code === 'WECHAT_CHALLENGE_REQUIRED') return '平台需要人工验证。请在原浏览器完成验证后再继续。';
     if (code === 'WECHAT_SCHEMA_CHANGED' || code === 'INTERACTION_FEATURE_DISABLED') return '接口能力已暂停，避免在字段变化时误操作。';
@@ -520,6 +521,7 @@
 
     function authStatusView(auth) {
       if (auth && auth.reasonCode === 'WECHAT_IDENTITY_MISMATCH') return { label: '视频号：账号不匹配', tone: 'danger' };
+      if (auth && auth.reasonCode === 'INTERACTION_BROWSER_PROFILE_IN_USE') return { label: '视频号：浏览器被占用', tone: 'danger' };
       const status = auth && auth.status;
       if (status === 'active') return { label: '视频号：鉴权通过', tone: 'success' };
       if (status === 'login_required') return { label: '视频号：等待登录', tone: 'attention' };
@@ -540,6 +542,10 @@
       if (auth && auth.reasonCode === 'WECHAT_IDENTITY_MISMATCH') {
         title = '浏览器登录了另一个视频号';
         summary = `请在“${safeText(env && env.label, '当前环境')}”的原浏览器切回已绑定账号${auth.identity ? `“${safeText(auth.identity.displayName, '原账号')}”` : ''}。历史内容仍可查看，写操作已暂停。`;
+        tone = 'danger';
+      } else if (auth && auth.reasonCode === 'INTERACTION_BROWSER_PROFILE_IN_USE') {
+        title = '浏览器环境被占用';
+        summary = '已保存的登录信息未通过校验，但浏览器环境正在其他设备或账号中使用。请解除占用后重试；历史内容仍可查看，所有写操作已暂停。';
         tone = 'danger';
       } else if (status === 'active') {
         const connectivityStale = connectivityWriteBlocked();
@@ -635,7 +641,9 @@
       dom.syncTime.textContent = `${state.stale ? '上次成功' : '最近成功'} · ${syncTimeText()}`;
       const canReopen = ['login_required', 'reauth_required', 'challenge_required'].includes(status);
       dom.reauth.classList.toggle('hidden', !canReopen);
-      dom.reauth.textContent = status === 'challenge_required' ? '请求重新验证' : status === 'login_required' ? '请求检查登录' : '重新鉴权';
+      dom.reauth.textContent = auth && auth.reasonCode === 'INTERACTION_BROWSER_PROFILE_IN_USE'
+        ? '重试打开浏览器'
+        : status === 'challenge_required' ? '请求重新验证' : status === 'login_required' ? '请求检查登录' : '重新鉴权';
       dom.reauth.disabled = state.actionBusy === 'reauth';
       const readState = currentReadState();
       dom.sync.disabled = state.syncBusy || !active || !readState.effective;

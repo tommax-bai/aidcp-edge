@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { BrowserProfileInUseError } from '../../src/cdp/browser-provider.js';
 import type { WechatChannelsApiClient } from '../../src/wechat-channels/api-client.js';
 import { WechatAuthCoordinator } from '../../src/wechat-channels/auth-session.js';
 import {
@@ -47,7 +48,7 @@ class FakeSidecar implements WechatChannelsBrowserSidecar {
 
   constructor(
     private readonly candidate: WechatSessionMaterial | null,
-    private readonly onOpen?: () => void,
+    private readonly onOpen?: () => void | Promise<void>,
     private readonly openError?: Error,
   ) {}
 
@@ -56,13 +57,19 @@ class FakeSidecar implements WechatChannelsBrowserSidecar {
   }
 
   async open(): Promise<void> {
-    this.onOpen?.();
     this.opens++;
     if (this.openError) {
       this.state = 'unavailable';
       throw this.openError;
     }
-    this.state = 'open';
+    try {
+      const opening = this.onOpen?.();
+      if (opening) await opening;
+      this.state = 'open';
+    } catch (error) {
+      this.state = 'unavailable';
+      throw error;
+    }
   }
 
   async readSessionCandidate(): Promise<WechatSessionMaterial | null> {
@@ -420,6 +427,59 @@ test('wechat browser diagnostic exposes only whitelist fields', () => {
     safeBrowserSidecarDiagnostic(new Error('opaque secret payload')),
     'provider=browser operation=sidecar.open kind=unexpected',
   );
+});
+
+test('wechat auth: occupied reauthorization exits authenticating and explicit retry can recover', async () => {
+  const logs: string[] = [];
+  let identityCalls = 0;
+  let occupied = true;
+  const sidecar = new FakeSidecar(SESSION, () => {
+    if (occupied) {
+      occupied = false;
+      throw new BrowserProfileInUseError(SCOPE.browserProfileId, 't***@gmail.com');
+    }
+  });
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api: {
+      getIdentity: async () => {
+        identityCalls++;
+        if (identityCalls === 1) {
+          throw new WechatChannelsError('auth_expired', 'authData', 'synthetic expired session', false);
+        }
+        return IDENTITY;
+      },
+    } as unknown as WechatChannelsApiClient,
+    sidecar,
+    store: memoryStore(),
+    probeEnabledReads: async () => ({ ok: true }),
+    sleepImpl: async () => {},
+    logImpl: (message) => logs.push(message),
+  });
+
+  await auth.initialize();
+
+  assert.equal(auth.getSnapshot().state, 'reauth_required');
+  assert.equal(auth.getSnapshot().status, 'reauth_required');
+  assert.equal(auth.getSnapshot().browserState, 'unavailable');
+  assert.equal(auth.getSnapshot().reasonCode, 'INTERACTION_BROWSER_PROFILE_IN_USE');
+  assert.equal(auth.getSnapshot().identityMatches, false);
+  assert.equal(sidecar.opens, 1);
+  assert.equal(sidecar.closes, 0);
+  assert.match(logs.join('\n'), /reason=INTERACTION_BROWSER_PROFILE_IN_USE/);
+  assert.match(logs.join('\n'), /owner_hint=t\*\*\*@gmail\.com/);
+  assert.doesNotMatch(logs.join('\n'), /tommax\.bai@gmail\.com/);
+
+  await auth.reopen('user_requested');
+
+  assert.equal(auth.getSnapshot().state, 'api_only_running');
+  assert.equal(auth.getSnapshot().status, 'active');
+  assert.equal(auth.getSnapshot().browserState, 'closed');
+  assert.equal(auth.getSnapshot().reasonCode, null);
+  assert.equal(auth.getSnapshot().identityMatches, true);
+  assert.equal(sidecar.opens, 2);
+  assert.equal(sidecar.closes, 1);
 });
 
 test('wechat auth: active API-only session can open a visible browser and return to background idempotently', async () => {

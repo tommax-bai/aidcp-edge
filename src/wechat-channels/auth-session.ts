@@ -3,11 +3,12 @@ import type {
   InteractionAuthStatus,
   InteractionBrowserState,
 } from '../comm/protocol.js';
+import { BrowserProfileInUseError } from '../cdp/browser-provider.js';
 import type { WechatChannelsApiClient } from './api-client.js';
 import type { WechatChannelsBrowserSidecar } from './browser-sidecar.js';
 import { EncryptedWechatSessionStore, type WechatSessionBinding } from './encrypted-session-store.js';
 import { WechatChannelsError, type WechatEndpointErrorCategory } from './error-classifier.js';
-import type { WechatProbeOutcome } from './probes/black-box-probe.js';
+import type { WechatProbeOutcome, WechatProbeReasonCode } from './probes/black-box-probe.js';
 import type { WechatIdentity, WechatSessionMaterial } from './types.js';
 
 type RecoverableErrorCategory = Extract<
@@ -287,7 +288,7 @@ export class WechatAuthCoordinator {
   }
 
   private applyProbeFailure(
-    reasonCode: InteractionAuthReasonCode,
+    reasonCode: WechatProbeReasonCode,
     browserTrigger?: BrowserAuthenticationTrigger,
   ): WechatChannelsError {
     const error = probeFailureError(reasonCode);
@@ -497,7 +498,16 @@ export class WechatAuthCoordinator {
     this.transition('browser_opening', this.reasonCode);
     try {
       await this.sidecar.open();
-    } catch {
+    } catch (error) {
+      if (error instanceof BrowserProfileInUseError) {
+        this.identityMatches = false;
+        this.transition('reauth_required', 'INTERACTION_BROWSER_PROFILE_IN_USE');
+        this.log(
+          `[wechat-channels] browser reauthorization blocked: reason=INTERACTION_BROWSER_PROFILE_IN_USE ` +
+            `profile=${error.profileId} owner_hint=${error.ownerHint ?? 'another_user'} action=release_occupancy_and_retry`,
+        );
+        return;
+      }
       // Browser launch is not an in-progress state once open() has rejected. Keep the existing auth
       // distinction and recovery action: an expired bound session needs re-authentication, while a
       // brand-new environment still needs first login. browserState remains independently
@@ -622,7 +632,7 @@ function statusFor(state: LocalAuthState): InteractionAuthStatus {
   }
 }
 
-function probeFailureError(reasonCode: InteractionAuthReasonCode): WechatChannelsError {
+function probeFailureError(reasonCode: WechatProbeReasonCode): WechatChannelsError {
   switch (reasonCode) {
     case 'WECHAT_AUTH_REQUIRED':
       return new WechatChannelsError('auth_expired', 'read_probe', 'Enabled read probe requires authentication', false);

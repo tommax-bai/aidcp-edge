@@ -5,6 +5,10 @@ import type { WechatChannelsFeatureFlags, WechatCapabilityState } from '../featu
 import type { WechatSessionMaterial } from '../types.js';
 
 export type ProbeEvidenceMode = 'mock' | 'read_only' | 'gated_write';
+export type WechatProbeReasonCode = Exclude<
+  InteractionAuthReasonCode,
+  'INTERACTION_BROWSER_PROFILE_IN_USE'
+>;
 
 export interface ProbeResult {
   capability: 'commentsRead' | 'commentsReply' | 'dmRead' | 'dmSendText';
@@ -24,7 +28,7 @@ export interface ProbeRunnerOptions {
 
 export type WechatProbeOutcome =
   | { ok: true }
-  | { ok: false; reasonCode: InteractionAuthReasonCode };
+  | { ok: false; reasonCode: WechatProbeReasonCode };
 
 export class WechatChannelsProbeRunner {
   private readonly results: ProbeResult[] = [];
@@ -41,7 +45,7 @@ export class WechatChannelsProbeRunner {
     const dmEnabled = this.options.flags.interactionEnabled && remote?.dmReadEnabled === true;
     if (!commentsEnabled && !dmEnabled) return { ok: true };
     let passed = false;
-    let failureReason: InteractionAuthReasonCode | null = null;
+    let failureReason: WechatProbeReasonCode | null = null;
     if (commentsEnabled) {
       const outcome = await this.probeComments(session);
       passed = outcome.ok || passed;
@@ -146,7 +150,7 @@ export function assertWriteProbeGate(input: WriteProbeGateInput): { targetExtern
   return { targetExternalId };
 }
 
-function safeReason(error: unknown): InteractionAuthReasonCode {
+function safeReason(error: unknown): WechatProbeReasonCode {
   if (!(error instanceof WechatChannelsError)) return 'INTERACTION_UPSTREAM_UNAVAILABLE';
   switch (error.category) {
     case 'rate_limited': return 'WECHAT_RATE_LIMITED';

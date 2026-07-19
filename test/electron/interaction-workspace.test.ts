@@ -1271,6 +1271,48 @@ test('CAS 冲突保留输入并给出刷新入口；reauth 保留历史但禁写
   assert.match(reopenArgs.idempotencyKey, /^interaction-reauth-/);
 });
 
+test('profile 被占用时显示终态提示、保留历史并只把重试当受理', async () => {
+  const occupiedList = clone(listFixture);
+  const occupiedDetail = clone(commentFixture);
+  for (const fixture of [occupiedList, occupiedDetail]) {
+    fixture.data.auth.status = 'reauth_required';
+    fixture.data.auth.browserState = 'unavailable';
+    fixture.data.auth.reasonCode = 'INTERACTION_BROWSER_PROFILE_IN_USE';
+  }
+  let reopenArgs: any = null;
+  const occupied = await boot({
+    api: {
+      interactionList: async () => apiResult(occupiedList),
+      interactionDetail: async () => apiResult(occupiedDetail),
+      interactionReopenAuth: async (args: any) => {
+        reopenArgs = args;
+        return apiResult({
+          data: { envKey: args.envKey, accountId: 'acct_wc_demo', acceptedAt: Date.now() },
+          meta: { requestId: 'occupied-retry', asOf: Date.now() },
+        });
+      },
+    },
+  });
+
+  assert.equal($(occupied.window, '#iw-title').textContent, '浏览器环境被占用');
+  assert.equal($(occupied.window, '#iw-auth-status').textContent, '视频号：浏览器被占用');
+  assert.equal($(occupied.window, '#iw-browser').textContent, '自动化浏览器：暂不可用');
+  assert.match($(occupied.window, '#iw-summary').textContent || '', /其他设备或账号中使用/);
+  assert.match($(occupied.window, '#iw-summary').textContent || '', /历史内容仍可查看/);
+  assert.equal($(occupied.window, '#iw-reauth').textContent, '重试打开浏览器');
+  assert.doesNotMatch(occupied.window.document.body.textContent || '', /tommax\.bai@gmail\.com/);
+
+  await openThread(occupied.window);
+  assert.match($(occupied.window, '#iw-detail').textContent || '', /这个视频很有帮助/);
+  assert.equal(($(occupied.window, '#iw-final-text') as HTMLTextAreaElement).disabled, true);
+  $(occupied.window, '#iw-reauth').dispatchEvent(new occupied.window.Event('click', { bubbles: true }));
+  await flush();
+
+  assert.match($(occupied.window, '#iw-sync-status').textContent || '', /仍需等待平台登录状态确认/);
+  assert.equal($(occupied.window, '#iw-title').textContent, '浏览器环境被占用');
+  assert.match(reopenArgs.idempotencyKey, /^interaction-reauth-/);
+});
+
 test('测试数据入口默认隐藏，开启后点击即直接调用重置 IPC（无二次确认弹窗）', async () => {
   const disabled = await boot();
   assert.equal(hidden($(disabled.window, '#interaction-test-reset')), true);

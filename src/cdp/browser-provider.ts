@@ -44,6 +44,25 @@ export interface BrowserProvider {
   launch(opts: BrowserLaunchOptions): Promise<LaunchedBrowser>;
 }
 
+/**
+ * AdsPower's browser security lock rejected this profile because another account/device owns the
+ * current open lease. The raw owner string is deliberately discarded at the provider boundary.
+ */
+export class BrowserProfileInUseError extends Error {
+  readonly code = 'BROWSER_PROFILE_IN_USE' as const;
+
+  constructor(
+    readonly profileId: string,
+    readonly ownerHint: string | null,
+  ) {
+    super(
+      `[aidcp-edge] AdsPower browser-profile/start failed: profile=${profileId} ` +
+        `is being used by [${ownerHint ?? 'another user'}] and is not allowed to open`,
+    );
+    this.name = 'BrowserProfileInUseError';
+  }
+}
+
 /** self：自起真实指纹 Chrome，委托现有 `launchChrome`（行为零变化）。 */
 export class SelfChromeProvider implements BrowserProvider {
   readonly kind = 'self' as const;
@@ -117,6 +136,7 @@ const DEFAULT_ADS_CACHE_ROOT = join(homedir(), '.adspowerCli', 'source', 'cache'
 const MAX_ORPHAN_CACHE_CANDIDATES = 8;
 const PROFILE_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 const DEVTOOLS_BROWSER_PATH_RE = /^\/devtools\/browser\/[A-Za-z0-9._-]+$/;
+const ADS_PROFILE_IN_USE_RE = /^\s*\[[^\]]+\]\s+is being used by\s+\[([^\]]+)\]\s+and is not allowed to open\s*$/i;
 /**
  * 关闭确认：每个阶段（停止 / 重发停止 / OS 杀后）轮询该 profile 调试端点是否变暗的次数与间隔。
  * 每次探测都设**小超时**（closeProbeTimeoutMs），超时/异常一律视为「仍应答」（浏览器可能只是慢/挂，
@@ -363,6 +383,12 @@ export class AdsPowerProvider implements BrowserProvider {
       throw new Error(`[aidcp-edge] AdsPower ${path} 响应异常：${message}（诚实失败，不回落 self）`);
     }
     if (body.code !== 0) {
+      if (path === 'browser-profile/start') {
+        const occupied = ADS_PROFILE_IN_USE_RE.exec(body.msg ?? '');
+        if (occupied) {
+          throw new BrowserProfileInUseError(this.cfg.userId, maskOwnerHint(occupied[1]));
+        }
+      }
       throw new Error(
         `[aidcp-edge] AdsPower ${path} 失败：code=${body.code} msg=${body.msg ?? ''}（诚实失败，不回落 self）`,
       );
@@ -552,6 +578,17 @@ export class AdsPowerProvider implements BrowserProvider {
     );
     return false;
   }
+}
+
+function maskOwnerHint(raw: string): string | null {
+  const value = raw.trim().replace(/[\s\u0000-\u001f\u007f]+/g, '').slice(0, 254);
+  if (!value) return null;
+  const at = value.indexOf('@');
+  if (at > 0 && at < value.length - 1) {
+    const domain = value.slice(at + 1).replace(/[^A-Za-z0-9.-]/g, '').slice(0, 190);
+    return domain ? `${value[0]}***@${domain}` : `${value[0]}***`;
+  }
+  return `${value[0]}***`;
 }
 
 /** 按 `AIDCP_BROWSER_PROVIDER` 选 provider（**默认 adspower**）。adspower 缺 user_id / 未知 kind 诚实报错。 */
