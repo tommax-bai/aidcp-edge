@@ -16,6 +16,7 @@ import { WechatRuntimeStateStore } from '../../src/wechat-channels/state-store.j
 import { stableBatchId } from '../../src/wechat-channels/sync-common.js';
 import type {
   WechatComment,
+  WechatCommentWriteContext,
   WechatDmMessage,
   WechatDmSession,
   WechatPost,
@@ -28,6 +29,14 @@ const SESSION: WechatSessionMaterial = {
   userAgent: 'ua',
   acquiredAt: 1,
   requestContext: { version: 1, aid: 'aid-test', pageUrl: 'https://channels.weixin.qq.com/platform/post/list', commonBody: { logFinderId: 'finder-test', logFinderUin: 'uin-test', rawKeyBuff: 'raw-key-test', pluginSessionId: null, reqScene: 7, scene: 7 }, headers: { fingerprintDeviceId: 'device-test', wechatUin: 'uin-test' } },
+};
+
+const ROOT_WRITE_CONTEXT: WechatCommentWriteContext = {
+  levelTwoComment: [], commentId: 'root-1', commentNickname: 'write-context-only-marker',
+  commentContent: 'text-root-1', commentHeadurl: 'https://example.invalid/write-context-only',
+  commentCreatetime: '1699999900', commentLikeCount: 0, lastBuff: '', downContinueFlag: 0,
+  visibleFlag: 1, readFlag: true, displayFlag: 1, username: 'user-root-1',
+  blacklistFlag: 0, likeFlag: 0,
 };
 
 function request(channel: 'comment' | 'dm', scopeExternalId: string | null): InteractionSyncRequestPayload {
@@ -79,6 +88,7 @@ function comment(id: string, input: Partial<WechatComment> = {}): WechatComment 
     lifecycle: 'active',
     createdAt: 1_700_000_000_000,
     likeCount: null,
+    writeContext: null,
     replies: [],
     ...input,
   };
@@ -106,6 +116,7 @@ test('wechat comment sync: nested hierarchy is flattened and checkpoint advances
     const batches: InteractionSyncBatchPayload[] = [];
     const root = comment('root-1', {
       createdAt: 1_699_999_900_000,
+      writeContext: ROOT_WRITE_CONTEXT,
       replies: [comment('reply-1', {
         rootExternalId: 'root-1',
         parentExternalId: 'root-1',
@@ -141,6 +152,8 @@ test('wechat comment sync: nested hierarchy is flattened and checkpoint advances
     assert.notEqual(batches[0].threads[0].updatedAt, request('comment', 'post-1').requestedAt);
     assert.equal((await state.getCheckpoint('comment', 'post-1')).cursor, 'cursor-1');
     assert.equal(await state.getThreadSource('comment', 'root-1'), 'post-1');
+    assert.deepEqual(await state.getCommentWriteContext('root-1'), ROOT_WRITE_CONTEXT);
+    assert.doesNotMatch(JSON.stringify(batches[0]), /write-context-only-marker|write-context-only/);
   });
 });
 

@@ -22,10 +22,11 @@ export interface WechatRequestDescriptor {
   queryKeys: readonly ['_aid', '_pageUrl', '_rid'];
   bodyEncoding: 'json';
   requiredHeaderNames: readonly string[];
+  refererPath: '/' | '/micro/interaction/comment';
   cookieJar: 'primary';
   retrySafe: boolean;
   captureBacked: boolean;
-  evidence: 'observed_read_only' | 'official_bundle_candidate' | 'not_observed';
+  evidence: 'observed_read_only' | 'observed_write' | 'official_bundle_candidate' | 'not_observed';
   coverage: 'full_shape' | 'candidate_shape' | 'empty_only' | 'none';
 }
 
@@ -33,21 +34,27 @@ const QUERY_KEYS = ['_aid', '_pageUrl', '_rid'] as const;
 const REQUIRED_HEADERS = ['X-WECHAT-UIN', 'finger-print-device-id'] as const;
 const observed = (path: string, retrySafe = true): WechatRequestDescriptor => ({
   method: 'POST', path, queryKeys: QUERY_KEYS, bodyEncoding: 'json',
-  requiredHeaderNames: REQUIRED_HEADERS, cookieJar: 'primary', retrySafe,
+  requiredHeaderNames: REQUIRED_HEADERS, refererPath: '/', cookieJar: 'primary', retrySafe,
   captureBacked: true, evidence: 'observed_read_only',
   coverage: 'full_shape',
 });
 const unobserved = (): WechatRequestDescriptor => ({
   method: 'POST', path: null, queryKeys: QUERY_KEYS, bodyEncoding: 'json',
-  requiredHeaderNames: REQUIRED_HEADERS, cookieJar: 'primary', retrySafe: false,
+  requiredHeaderNames: REQUIRED_HEADERS, refererPath: '/', cookieJar: 'primary', retrySafe: false,
   captureBacked: false, evidence: 'not_observed',
   coverage: 'none',
 });
 const candidateWrite = (path: string): WechatRequestDescriptor => ({
   method: 'POST', path, queryKeys: QUERY_KEYS, bodyEncoding: 'json',
-  requiredHeaderNames: REQUIRED_HEADERS, cookieJar: 'primary', retrySafe: false,
+  requiredHeaderNames: REQUIRED_HEADERS, refererPath: '/', cookieJar: 'primary', retrySafe: false,
   captureBacked: false, evidence: 'official_bundle_candidate',
   coverage: 'candidate_shape',
+});
+const capturedCommentWrite = (path: string): WechatRequestDescriptor => ({
+  method: 'POST', path, queryKeys: QUERY_KEYS, bodyEncoding: 'json',
+  requiredHeaderNames: REQUIRED_HEADERS, refererPath: '/micro/interaction/comment',
+  cookieJar: 'primary', retrySafe: false,
+  captureBacked: true, evidence: 'observed_write', coverage: 'full_shape',
 });
 
 export const WECHAT_CHANNELS_REQUEST_DESCRIPTORS: Readonly<Record<WechatChannelsEndpoint, WechatRequestDescriptor>> = {
@@ -56,7 +63,7 @@ export const WECHAT_CHANNELS_REQUEST_DESCRIPTORS: Readonly<Record<WechatChannels
   authData: observed('/cgi-bin/mmfinderassistant-bin/auth/auth_data'),
   postList: observed('/micro/content/cgi-bin/mmfinderassistant-bin/post/post_list'),
   commentList: observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/comment_list'),
-  commentCreate: candidateWrite('/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/create_comment'),
+  commentCreate: capturedCommentWrite('/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/create_comment'),
   dmLoginCookie: unobserved(),
   dmNewMessages: unobserved(),
   dmHistory: observed('/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/get-history-msg'),
@@ -78,7 +85,7 @@ export function assertWechatRequestDescriptorAvailable(
 ): WechatRequestDescriptor {
   const descriptor = WECHAT_CHANNELS_REQUEST_DESCRIPTORS[endpoint];
   const candidateAllowed = allowUnverifiedWrite &&
-    (endpoint === 'commentCreate' || endpoint === 'dmSendText') &&
+    endpoint === 'dmSendText' &&
     descriptor.evidence === 'official_bundle_candidate';
   if ((!descriptor.captureBacked && !candidateAllowed) || !descriptor.path) {
     throw new WechatChannelsError(
@@ -121,7 +128,7 @@ export function serializeWechatRequest(
       Accept: 'application/json',
       'Content-Type': 'application/json',
       'User-Agent': session.userAgent,
-      Referer: 'https://channels.weixin.qq.com/',
+      Referer: `https://channels.weixin.qq.com${descriptor.refererPath}`,
       'finger-print-device-id': context.headers.fingerprintDeviceId,
       'X-WECHAT-UIN': context.headers.wechatUin,
       Cookie: buildCookieHeader(session),

@@ -89,6 +89,9 @@ export class WechatCommentSynchronizer {
       };
       const ack = await this.options.publishBatch(batch);
       assertMatchingAck(batch, ack);
+      await this.options.state.putCommentWriteContexts(
+        comments.flatMap((comment) => comment.writeContext ? [comment.writeContext] : []),
+      );
       await this.options.state.commitCheckpoint('comment', post.externalId, {
         cursor: page.nextCursor,
         batchId: batch.batchId,

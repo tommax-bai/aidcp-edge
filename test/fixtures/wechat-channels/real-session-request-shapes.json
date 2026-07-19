@@ -1,9 +1,9 @@
 {
   "manifestVersion": 1,
-  "capturedAt": "2026-07-17T03:30:15.000Z",
-  "source": "authorized_adspower_session",
-  "evidenceBoundary": "observed_read_only",
-  "writesDispatched": false,
+  "capturedAt": "2026-07-19T05:11:30.000Z",
+  "source": "authorized_sunbrowser_session",
+  "evidenceBoundary": "sanitized_authorized_session",
+  "writesDispatched": true,
   "rawHarPersisted": false,
   "secretValuesPersisted": false,
   "common": {
@@ -50,7 +50,39 @@
       "observedResult": "non_empty_session_info",
       "coverage": "nonempty_read_shape_verified"
     },
-    "commentCreate": {"evidence": "not_observed", "descriptorEnabled": false},
+    "commentCreate": {
+      "path": "/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/create_comment",
+      "businessBody": {
+        "clientId": "string",
+        "comment": "object",
+        "content": "string",
+        "exportId": "string",
+        "replyCommentId": "string",
+        "rootCommentId": "string"
+      },
+      "commentBodyShape": {
+        "blacklistFlag": "number",
+        "commentContent": "string",
+        "commentCreatetime": "string",
+        "commentHeadurl": "string",
+        "commentId": "string",
+        "commentLikeCount": "number",
+        "commentNickname": "string",
+        "displayFlag": "number",
+        "downContinueFlag": "number",
+        "lastBuff": "string",
+        "levelTwoComment": "array",
+        "likeFlag": "number",
+        "readFlag": "boolean",
+        "username": "string",
+        "visibleFlag": "number"
+      },
+      "referer": "https://channels.weixin.qq.com/micro/interaction/comment",
+      "status": 201,
+      "responseKeys": ["data.comment.commentId", "data.clientId", "data.baseResp.errcode"],
+      "evidence": "platform_confirmed",
+      "descriptorEnabled": true
+    },
     "dmSendText": {"evidence": "not_observed", "descriptorEnabled": false},
     "dmNewMessages": {"evidence": "not_observed", "descriptorEnabled": false}
   }

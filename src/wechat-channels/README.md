@@ -41,11 +41,15 @@ approved-disposable-<comment|dm>-target:<external-target-id>
 
 No runtime path in this module automatically submits a probe write. Setting a `*_WRITE_PROBE_VERIFIED` flag records external controlled evidence; it does not perform or claim a real send.
 
-The unverified-write test mode is different from probe evidence. It permits the two separately labeled
-first-party-bundle candidate write descriptors only in the unpackaged named-dev runtime. It does not bypass
+The unverified-write test mode is different from probe evidence. It permits only the separately labeled
+first-party-bundle DM-text candidate descriptor in the unpackaged named-dev runtime. Comment create is backed
+by a sanitized, platform-confirmed authorized-session capture; its bounded target snapshot stays in local Edge
+runtime state and is never added to the Cloud interaction payload. Neither path bypasses
 auth, identity, Cloud controls, kill switches, circuits, approval, policy, risk, quota, idempotency, or
-channel-specific platform acknowledgement. Candidate writes remain non-retry-safe and are never sent at startup.
+channel-specific platform acknowledgement. Writes remain non-retry-safe and are never sent at startup.
 
 ## Validation boundary
 
-Unit and contract tests use synthetic data only. Real-account reads, browser cold-stop operation, endpoint field stability, and approved disposable-target writes remain integration gates until a test account owner supplies the required scope.
+Unit and contract tests use synthetic data only. The repository fixture retains only the structural shape of one
+operator-approved, platform-confirmed comment reply; it contains no captured identifiers, profiles, credentials,
+or message content. Further real-account writes still require a separately approved disposable target and scope.

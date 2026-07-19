@@ -10,6 +10,7 @@ import type {
   InteractionReplyResultPayload,
 } from '../comm/protocol.js';
 import { resolveWechatStateRoot, runtimeStatePath, type WechatRuntimeScope } from './local-paths.js';
+import type { WechatCommentWriteContext } from './types.js';
 
 export interface SyncCheckpoint {
   cursor: string | null;
@@ -32,7 +33,7 @@ interface StoredOffboardExecution {
 }
 
 interface RuntimeState {
-  version: 3;
+  version: 4;
   checkpoints: Record<string, SyncCheckpoint>;
   replies: Record<string, StoredReplyExecution>;
   attempts: Record<string, string>;
@@ -40,6 +41,7 @@ interface RuntimeState {
   offboards: Record<string, StoredOffboardExecution>;
   offboardOutbox: Record<string, InteractionOffboardResultPayload>;
   threadSources: Record<string, string | null>;
+  commentWriteContexts: Record<string, WechatCommentWriteContext>;
 }
 
 export type ReplyExecutionClaim =
@@ -98,13 +100,14 @@ export class WechatRuntimeStateStore {
         offboards?: Record<string, StoredOffboardExecution>;
         offboardOutbox?: Record<string, InteractionOffboardResultPayload>;
         threadSources?: Record<string, string | null>;
+        commentWriteContexts?: Record<string, unknown>;
       };
-      if ((parsed.version === 1 || parsed.version === 2 || parsed.version === 3) && parsed.checkpoints && parsed.replies && parsed.attempts) {
+      if ((parsed.version === 1 || parsed.version === 2 || parsed.version === 3 || parsed.version === 4) && parsed.checkpoints && parsed.replies && parsed.attempts) {
         const attempts = { ...parsed.attempts };
         const replies: Record<string, StoredReplyExecution> = {};
         for (const [idempotencyKey, stored] of Object.entries(parsed.replies)) {
           if (typeof stored.attemptId !== 'string') continue;
-          const state = (parsed.version === 2 || parsed.version === 3) && (
+          const state = (parsed.version === 2 || parsed.version === 3 || parsed.version === 4) && (
             stored.state === 'claimed' || stored.state === 'executing' || stored.state === 'completed'
           ) ? stored.state : 'completed';
           const result = stored.result ?? null;
@@ -118,19 +121,22 @@ export class WechatRuntimeStateStore {
           attempts[stored.attemptId] ??= idempotencyKey;
         }
         this.state = {
-          version: 3,
+          version: 4,
           checkpoints: parsed.checkpoints,
           replies,
           attempts,
-          resultOutbox: parsed.version === 3 && parsed.resultOutbox
+          resultOutbox: (parsed.version === 3 || parsed.version === 4) && parsed.resultOutbox
             ? { ...parsed.resultOutbox }
             : Object.fromEntries(Object.values(replies)
               .filter((entry): entry is StoredReplyExecution & { result: InteractionReplyResultPayload } =>
                 entry.state === 'completed' && entry.result !== null)
               .map((entry) => [entry.attemptId, entry.result])),
-          offboards: parsed.version === 3 && parsed.offboards ? { ...parsed.offboards } : {},
-          offboardOutbox: parsed.version === 3 && parsed.offboardOutbox ? { ...parsed.offboardOutbox } : {},
+          offboards: (parsed.version === 3 || parsed.version === 4) && parsed.offboards ? { ...parsed.offboards } : {},
+          offboardOutbox: (parsed.version === 3 || parsed.version === 4) && parsed.offboardOutbox ? { ...parsed.offboardOutbox } : {},
           threadSources: parsed.threadSources ?? {},
+          commentWriteContexts: parsed.version === 4
+            ? sanitizeCommentWriteContexts(parsed.commentWriteContexts)
+            : {},
         };
       }
     } catch (error) {
@@ -169,10 +175,32 @@ export class WechatRuntimeStateStore {
     return this.state.threadSources[`${channel}:${externalThreadId}`];
   }
 
-  async resetReadState(channel: InteractionChannel): Promise<{ checkpoints: number; threadSources: number }> {
+  async putCommentWriteContexts(
+    contexts: readonly WechatCommentWriteContext[],
+  ): Promise<void> {
+    if (contexts.length === 0) return;
+    await this.mutate((state) => {
+      for (const context of contexts) {
+        state.commentWriteContexts[context.commentId] = cloneCommentWriteContext(context);
+      }
+    });
+  }
+
+  async getCommentWriteContext(externalCommentId: string): Promise<WechatCommentWriteContext | undefined> {
+    await this.waitForMutations();
+    const context = this.state.commentWriteContexts[externalCommentId];
+    return context ? cloneCommentWriteContext(context) : undefined;
+  }
+
+  async resetReadState(channel: InteractionChannel): Promise<{
+    checkpoints: number;
+    threadSources: number;
+    commentWriteContexts: number;
+  }> {
     return this.mutate((state) => {
       let checkpoints = 0;
       let threadSources = 0;
+      let commentWriteContexts = 0;
       for (const key of Object.keys(state.checkpoints)) {
         if (!key.startsWith(`${channel}:`)) continue;
         delete state.checkpoints[key];
@@ -183,7 +211,11 @@ export class WechatRuntimeStateStore {
         delete state.threadSources[key];
         threadSources++;
       }
-      return { checkpoints, threadSources };
+      if (channel === 'comment') {
+        commentWriteContexts = Object.keys(state.commentWriteContexts).length;
+        state.commentWriteContexts = {};
+      }
+      return { checkpoints, threadSources, commentWriteContexts };
     });
   }
 
@@ -377,13 +409,13 @@ export class WechatRuntimeStateStore {
 }
 
 function emptyRuntimeState(): RuntimeState {
-  return { version: 3, checkpoints: {}, replies: {}, attempts: {}, resultOutbox: {},
-    offboards: {}, offboardOutbox: {}, threadSources: {} };
+  return { version: 4, checkpoints: {}, replies: {}, attempts: {}, resultOutbox: {},
+    offboards: {}, offboardOutbox: {}, threadSources: {}, commentWriteContexts: {} };
 }
 
 function cloneRuntimeState(state: RuntimeState): RuntimeState {
   return {
-    version: 3,
+    version: 4,
     checkpoints: { ...state.checkpoints },
     replies: Object.fromEntries(Object.entries(state.replies).map(([key, value]) => [
       key,
@@ -396,7 +428,34 @@ function cloneRuntimeState(state: RuntimeState): RuntimeState {
     }])),
     offboardOutbox: Object.fromEntries(Object.entries(state.offboardOutbox).map(([key, value]) => [key, { ...value }])),
     threadSources: { ...state.threadSources },
+    commentWriteContexts: Object.fromEntries(Object.entries(state.commentWriteContexts).map(([key, value]) => [
+      key, cloneCommentWriteContext(value),
+    ])),
   };
+}
+
+function sanitizeCommentWriteContexts(value: Record<string, unknown> | undefined): Record<string, WechatCommentWriteContext> {
+  const sanitized: Record<string, WechatCommentWriteContext> = {};
+  for (const [key, candidate] of Object.entries(value ?? {})) {
+    if (!isCommentWriteContext(candidate) || candidate.commentId !== key) continue;
+    sanitized[key] = cloneCommentWriteContext(candidate);
+  }
+  return sanitized;
+}
+
+function isCommentWriteContext(value: unknown): value is WechatCommentWriteContext {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const context = value as Record<string, unknown>;
+  return Array.isArray(context.levelTwoComment) && context.levelTwoComment.length === 0 &&
+    ['commentId', 'commentNickname', 'commentContent', 'commentHeadurl', 'commentCreatetime', 'lastBuff', 'username']
+      .every((key) => typeof context[key] === 'string') &&
+    ['commentLikeCount', 'downContinueFlag', 'visibleFlag', 'displayFlag', 'blacklistFlag', 'likeFlag']
+      .every((key) => typeof context[key] === 'number' && Number.isFinite(context[key])) &&
+    typeof context.readFlag === 'boolean';
+}
+
+function cloneCommentWriteContext(context: WechatCommentWriteContext): WechatCommentWriteContext {
+  return { ...context, levelTwoComment: [] };
 }
 
 function replyBindingConflicts(state: RuntimeState, idempotencyKey: string, attemptId: string): boolean {

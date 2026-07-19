@@ -22,6 +22,7 @@ import {
 } from './api-schemas.js';
 import type {
   WechatComment,
+  WechatCommentWriteContext,
   WechatDmMessage,
   WechatDmParticipantInfo,
   WechatDmSession,
@@ -48,6 +49,7 @@ export interface WechatChannelsApiClientOptions {
   maxResponseBytes?: number;
   sleepImpl?: (ms: number) => Promise<void>;
   nowImpl?: () => number;
+  clientIdImpl?: () => string;
   onSchemaChanged?: (endpoint: WechatChannelsEndpoint, error: WechatChannelsError) => void;
   allowUnverifiedWrites?: boolean;
 }
@@ -65,6 +67,7 @@ export class WechatChannelsApiClient {
   private readonly maxResponseBytes: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
+  private readonly clientId: () => string;
   private readonly onSchemaChanged?: (endpoint: WechatChannelsEndpoint, error: WechatChannelsError) => void;
   private readonly allowUnverifiedWrites: boolean;
 
@@ -75,6 +78,7 @@ export class WechatChannelsApiClient {
     this.maxResponseBytes = positiveInt(options.maxResponseBytes, 2 * 1024 * 1024);
     this.sleep = options.sleepImpl ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.now = options.nowImpl ?? Date.now;
+    this.clientId = options.clientIdImpl ?? randomUUID;
     this.onSchemaChanged = options.onSchemaChanged;
     this.allowUnverifiedWrites = options.allowUnverifiedWrites === true;
     if (new URL(WECHAT_CHANNELS_API_BASE_URL).protocol !== 'https:') {
@@ -180,7 +184,13 @@ export class WechatChannelsApiClient {
 
   sendComment(
     session: WechatSessionMaterial,
-    input: { postExternalId: string; rootExternalId: string; parentExternalId: string; text: string },
+    input: {
+      postExternalId: string;
+      rootExternalId: string;
+      parentExternalId: string;
+      text: string;
+      writeContext: WechatCommentWriteContext;
+    },
   ): Promise<WechatSendAck> {
     return this.call(
       'commentCreate',
@@ -189,6 +199,8 @@ export class WechatChannelsApiClient {
         rootCommentId: input.rootExternalId,
         replyCommentId: input.parentExternalId,
         content: input.text,
+        clientId: this.clientId(),
+        comment: input.writeContext,
       },
       session,
       parseSendAck,

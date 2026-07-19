@@ -67,6 +67,28 @@ export interface WechatParticipant {
   avatarUrl: string | null;
 }
 
+/**
+ * Bounded target snapshot required by the captured comment-create request.
+ * Sensitive user content: keep account-local and never project it over WS.
+ */
+export interface WechatCommentWriteContext {
+  levelTwoComment: [];
+  commentId: string;
+  commentNickname: string;
+  commentContent: string;
+  commentHeadurl: string;
+  commentCreatetime: string;
+  commentLikeCount: number;
+  lastBuff: string;
+  downContinueFlag: number;
+  visibleFlag: number;
+  readFlag: boolean;
+  displayFlag: number;
+  username: string;
+  blacklistFlag: number;
+  likeFlag: number;
+}
+
 export interface WechatComment {
   externalId: string;
   postExternalId: string;
@@ -77,6 +99,7 @@ export interface WechatComment {
   lifecycle: InteractionMessageLifecycle;
   createdAt: number;
   likeCount: number | null;
+  writeContext: WechatCommentWriteContext | null;
   replies: WechatComment[];
 }
 

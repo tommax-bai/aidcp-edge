@@ -9,7 +9,12 @@ import type { WechatChannelsApiClient } from './api-client.js';
 import type { WechatAuthCoordinator } from './auth-session.js';
 import { WechatChannelsError } from './error-classifier.js';
 import type { WechatRuntimeStateStore } from './state-store.js';
-import type { WechatComment, WechatDmMessage, WechatSessionMaterial } from './types.js';
+import type {
+  WechatComment,
+  WechatCommentWriteContext,
+  WechatDmMessage,
+  WechatSessionMaterial,
+} from './types.js';
 
 export interface ReplySenderOptions {
   envKey: string;
@@ -124,10 +129,27 @@ export class WechatReplySender {
     if (!session) return this.persistFailure(command, 'auth_expired', 'WECHAT_AUTH_REQUIRED');
 
     let commentPostExternalId: string | null = null;
+    let commentWriteContext: WechatCommentWriteContext | null = null;
     if (command.channel === 'comment') {
       commentPostExternalId =
         (await this.options.state.getThreadSource('comment', command.target.threadExternalId)) ?? null;
       if (!commentPostExternalId) {
+        return this.persistFailure(command, 'invalid_scope', 'INTERACTION_SCOPE_MISMATCH');
+      }
+      try {
+        commentWriteContext = await this.resolveCommentWriteContext(
+          session,
+          commentPostExternalId,
+          command.target.inboundMessageExternalId,
+        );
+      } catch (error) {
+        const safe = error instanceof WechatChannelsError
+          ? error
+          : new WechatChannelsError('transient_network', 'commentList', 'Comment context lookup failed', true);
+        this.options.auth.markApiFailure(safe);
+        return this.persistFailure(command, safe.category, safe.code);
+      }
+      if (!commentWriteContext) {
         return this.persistFailure(command, 'invalid_scope', 'INTERACTION_SCOPE_MISMATCH');
       }
     }
@@ -158,6 +180,7 @@ export class WechatReplySender {
             rootExternalId: command.target.threadExternalId,
             parentExternalId: command.target.parentExternalId ?? command.target.inboundMessageExternalId,
             text: command.content.text,
+            writeContext: commentWriteContext!,
           })
         : await this.options.api.sendDmText(session, {
             threadExternalId: command.target.threadExternalId,
@@ -333,6 +356,30 @@ export class WechatReplySender {
     }
   }
 
+  private async resolveCommentWriteContext(
+    session: WechatSessionMaterial,
+    postExternalId: string,
+    targetExternalId: string,
+  ): Promise<WechatCommentWriteContext | null> {
+    const stored = await this.options.state.getCommentWriteContext(targetExternalId);
+    if (stored) return stored;
+
+    let cursor: string | null = null;
+    const seen = new Set<string>();
+    for (let pageNo = 0; pageNo < this.verificationPages; pageNo++) {
+      const page = await this.options.api.listComments(session, postExternalId, cursor);
+      const target = findCommentByExternalId(page.items, targetExternalId);
+      if (target?.writeContext) {
+        await this.options.state.putCommentWriteContexts([target.writeContext]);
+        return target.writeContext;
+      }
+      if (!page.hasMore || !page.nextCursor || seen.has(page.nextCursor)) break;
+      seen.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
+    return null;
+  }
+
   private async verifyComment(
     command: InteractionReplySendPayload,
     session: WechatSessionMaterial,
@@ -451,4 +498,16 @@ function collectCommentMatches(
     }
     collectCommentMatches(comment.replies, out, input);
   }
+}
+
+function findCommentByExternalId(
+  comments: readonly WechatComment[],
+  targetExternalId: string,
+): WechatComment | null {
+  for (const comment of comments) {
+    if (comment.externalId === targetExternalId) return comment;
+    const nested = findCommentByExternalId(comment.replies, targetExternalId);
+    if (nested) return nested;
+  }
+  return null;
 }

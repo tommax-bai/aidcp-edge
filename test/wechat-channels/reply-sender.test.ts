@@ -14,7 +14,11 @@ import { WechatChannelsError } from '../../src/wechat-channels/error-classifier.
 import { runtimeStatePath } from '../../src/wechat-channels/local-paths.js';
 import { WechatReplySender } from '../../src/wechat-channels/reply-sender.js';
 import { WechatRuntimeStateStore } from '../../src/wechat-channels/state-store.js';
-import type { WechatSessionMaterial } from '../../src/wechat-channels/types.js';
+import type {
+  WechatComment,
+  WechatCommentWriteContext,
+  WechatSessionMaterial,
+} from '../../src/wechat-channels/types.js';
 
 const SCOPE = { envKey: 'env-a', accountId: 'finder-a', browserProfileId: 'profile-a' };
 const SESSION: WechatSessionMaterial = {
@@ -24,6 +28,13 @@ const SESSION: WechatSessionMaterial = {
   requestContext: { version: 1, aid: 'aid-test', pageUrl: 'https://channels.weixin.qq.com/platform/post/list', commonBody: { logFinderId: 'finder-test', logFinderUin: 'uin-test', rawKeyBuff: 'raw-key-test', pluginSessionId: null, reqScene: 7, scene: 7 }, headers: { fingerprintDeviceId: 'device-test', wechatUin: 'uin-test' } },
 };
 const NOW = 1_700_000_000_000;
+const COMMENT_WRITE_CONTEXT: WechatCommentWriteContext = {
+  levelTwoComment: [], commentId: 'inbound-1', commentNickname: 'Synthetic User',
+  commentContent: 'synthetic target text', commentHeadurl: 'https://example.invalid/avatar',
+  commentCreatetime: '1700000000', commentLikeCount: 0, lastBuff: '', downContinueFlag: 0,
+  visibleFlag: 1, readFlag: true, displayFlag: 1, username: 'synthetic-user',
+  blacklistFlag: 0, likeFlag: 0,
+};
 
 function command(channel: 'comment' | 'dm', keyChar = 'a'): InteractionReplySendPayload {
   return {
@@ -86,6 +97,7 @@ async function withState(run: (state: WechatRuntimeStateStore, root: string) => 
   try {
     const state = new WechatRuntimeStateStore(SCOPE, root);
     await state.putThreadSource('comment', 'comment-root-1', 'post-1');
+    await state.putCommentWriteContexts([COMMENT_WRITE_CONTEXT]);
     await run(state, root);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -114,12 +126,14 @@ test('wechat reply: platform ack confirms once; duplicate command reuses durable
     const api = {
       sendComment: async (_session: unknown, input: {
         postExternalId: string; rootExternalId: string; parentExternalId: string; text: string;
+        writeContext: WechatCommentWriteContext;
       }) => {
         sends++;
         assert.deepEqual(input, {
           postExternalId: 'post-1',
           rootExternalId: 'comment-root-1',
           parentExternalId: 'comment-root-1',
+          writeContext: COMMENT_WRITE_CONTEXT,
           text: '谢谢你的留言',
         });
         return { accepted: true, externalMessageId: 'reply-1' };
@@ -137,6 +151,60 @@ test('wechat reply: platform ack confirms once; duplicate command reuses durable
     assert.equal(wrongScopeReplay.errorCode, 'INTERACTION_SCOPE_MISMATCH');
     assert.equal(sends, 1);
   });
+});
+
+test('wechat reply: missing local context is refreshed by bounded reads before one comment write', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aidcp-wc-reply-context-'));
+  try {
+    const state = new WechatRuntimeStateStore(SCOPE, root);
+    await state.putThreadSource('comment', 'comment-root-1', 'post-1');
+    let reads = 0;
+    let sends = 0;
+    const target: WechatComment = {
+      externalId: 'inbound-1', postExternalId: 'post-1', rootExternalId: 'comment-root-1',
+      parentExternalId: 'comment-root-1', participant: null, contentText: 'synthetic target text',
+      lifecycle: 'active', createdAt: NOW - 1_000, likeCount: 0,
+      writeContext: COMMENT_WRITE_CONTEXT, replies: [],
+    };
+    const api = {
+      listComments: async () => {
+        reads++;
+        return { items: [target], nextCursor: null, hasMore: false };
+      },
+      sendComment: async (_session: unknown, input: { writeContext: WechatCommentWriteContext }) => {
+        sends++;
+        assert.deepEqual(input.writeContext, COMMENT_WRITE_CONTEXT);
+        return { accepted: true, externalMessageId: 'reply-context-1' };
+      },
+    } as unknown as WechatChannelsApiClient;
+
+    const result = await sender(state, api).send(command('comment', 'c'));
+    assert.equal(result.status, 'confirmed');
+    assert.equal(reads, 1);
+    assert.equal(sends, 1);
+    assert.deepEqual(await state.getCommentWriteContext('inbound-1'), COMMENT_WRITE_CONTEXT);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('wechat reply: unresolved comment context fails before comment-create dispatch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aidcp-wc-reply-no-context-'));
+  try {
+    const state = new WechatRuntimeStateStore(SCOPE, root);
+    await state.putThreadSource('comment', 'comment-root-1', 'post-1');
+    let sends = 0;
+    const api = {
+      listComments: async () => ({ items: [], nextCursor: null, hasMore: false }),
+      sendComment: async () => { sends++; return { accepted: true, externalMessageId: 'must-not-send' }; },
+    } as unknown as WechatChannelsApiClient;
+    const result = await sender(state, api).send(command('comment', 'd'));
+    assert.equal(result.status, 'failed');
+    assert.equal(result.errorCode, 'INTERACTION_SCOPE_MISMATCH');
+    assert.equal(sends, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('wechat reply: a pre-dispatch schema failure is failed without any platform or verification request', async () => {

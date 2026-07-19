@@ -11,8 +11,15 @@ import { WechatChannelsConnector } from '../../src/wechat-channels/connector.js'
 import type { WechatCapabilityState } from '../../src/wechat-channels/feature-flags.js';
 import { validateInteractionSyncRequest } from '../../src/wechat-channels/protocol-validation.js';
 import { WechatRuntimeStateStore } from '../../src/wechat-channels/state-store.js';
+import type { WechatCommentWriteContext } from '../../src/wechat-channels/types.js';
 
 const scope = { envKey: 'env-a', accountId: 'acct-a', browserProfileId: 'profile-a' };
+const writeContext: WechatCommentWriteContext = {
+  levelTwoComment: [], commentId: 'comment-target', commentNickname: 'Synthetic',
+  commentContent: 'synthetic', commentHeadurl: '', commentCreatetime: '1700000000',
+  commentLikeCount: 0, lastBuff: '', downContinueFlag: 0, visibleFlag: 1,
+  readFlag: true, displayFlag: 1, username: 'synthetic-user', blacklistFlag: 0, likeFlag: 0,
+};
 
 function resetRequest(channel: 'comment' | 'dm' = 'comment'): InteractionSyncRequestPayload {
   return {
@@ -36,12 +43,18 @@ test('runtime state reset clears only the selected read channel and persists the
     await state.commitCheckpoint('dm', null, { cursor: 'dm-global', batchId: 'dm-batch', updatedAt: 3 });
     await state.putThreadSource('comment', 'comment-thread', 'post-a');
     await state.putThreadSource('dm', 'dm-thread', null);
+    await state.putCommentWriteContexts([writeContext]);
 
-    assert.deepEqual(await state.resetReadState('comment'), { checkpoints: 2, threadSources: 1 });
+    const persisted = new WechatRuntimeStateStore(scope, root);
+    assert.deepEqual(await persisted.getCommentWriteContext('comment-target'), writeContext);
+    assert.deepEqual(await persisted.resetReadState('comment'), {
+      checkpoints: 2, threadSources: 1, commentWriteContexts: 1,
+    });
     const reloaded = new WechatRuntimeStateStore(scope, root);
     assert.equal((await reloaded.getCheckpoint('comment', null)).cursor, null);
     assert.equal((await reloaded.getCheckpoint('comment', 'post-a')).cursor, null);
     assert.equal(await reloaded.getThreadSource('comment', 'comment-thread'), undefined);
+    assert.equal(await reloaded.getCommentWriteContext('comment-target'), undefined);
     assert.equal((await reloaded.getCheckpoint('dm', null)).cursor, 'dm-global');
     assert.equal(await reloaded.getThreadSource('dm', 'dm-thread'), null);
   } finally {

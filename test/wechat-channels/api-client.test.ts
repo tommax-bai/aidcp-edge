@@ -15,7 +15,7 @@ import {
   structuralRequestShape,
   WECHAT_CHANNELS_REQUEST_DESCRIPTORS,
 } from '../../src/wechat-channels/request-descriptors.js';
-import type { WechatSessionMaterial } from '../../src/wechat-channels/types.js';
+import type { WechatCommentWriteContext, WechatSessionMaterial } from '../../src/wechat-channels/types.js';
 
 const SESSION: WechatSessionMaterial = {
   cookies: [
@@ -25,6 +25,24 @@ const SESSION: WechatSessionMaterial = {
   userAgent: 'Wechat-Test-UA',
   acquiredAt: 1,
   requestContext: { version: 1, aid: 'aid-test', pageUrl: 'https://channels.weixin.qq.com/platform/post/list', commonBody: { logFinderId: 'finder-test', logFinderUin: 'uin-test', rawKeyBuff: 'raw-key-test', pluginSessionId: null, reqScene: 7, scene: 7 }, headers: { fingerprintDeviceId: 'device-test', wechatUin: 'uin-test' } },
+};
+
+const COMMENT_WRITE_CONTEXT: WechatCommentWriteContext = {
+  levelTwoComment: [],
+  commentId: 'comment-parent-1',
+  commentNickname: 'Synthetic User',
+  commentContent: 'synthetic target text',
+  commentHeadurl: 'https://example.invalid/synthetic-avatar',
+  commentCreatetime: '1700000000',
+  commentLikeCount: 2,
+  lastBuff: '',
+  downContinueFlag: 0,
+  visibleFlag: 1,
+  readFlag: true,
+  displayFlag: 1,
+  username: 'synthetic-user',
+  blacklistFlag: 0,
+  likeFlag: 0,
 };
 
 function json(body: unknown, init: ResponseInit = {}): Response {
@@ -38,12 +56,27 @@ function json(body: unknown, init: ResponseInit = {}): Response {
 test('wechat api: golden serializers match the secret-free authorized-session manifest', async () => {
   const manifest = JSON.parse(await readFile(new URL('../fixtures/wechat-channels/real-session-request-shapes.json', import.meta.url), 'utf8')) as {
     common: { queryKeys: string[]; bodyShape: Record<string, string>; requiredHeaderNames: string[] };
-    requests: Record<string, { path?: string; businessBody?: Record<string, string>; descriptorEnabled?: boolean }>;
+    requests: Record<string, {
+      path?: string;
+      businessBody?: Record<string, string>;
+      commentBodyShape?: Record<string, string>;
+      referer?: string;
+      descriptorEnabled?: boolean;
+    }>;
   };
-  const valueFor = (type: string): unknown => type === 'number' ? 1 : type === 'boolean' ? false : type === 'array' ? [] : '';
+  const valueFor = (type: string): unknown => type === 'number' ? 1
+    : type === 'boolean' ? false
+      : type === 'array' ? []
+        : type === 'object' ? {}
+          : '';
   for (const [name, evidence] of Object.entries(manifest.requests)) {
     if (!evidence.path || evidence.descriptorEnabled === false) continue;
-    const businessBody = Object.fromEntries(Object.entries(evidence.businessBody ?? {}).map(([key, type]) => [key, valueFor(type)]));
+    const businessBody = Object.fromEntries(Object.entries(evidence.businessBody ?? {}).map(([key, type]) => [
+      key,
+      key === 'comment' && evidence.commentBodyShape
+        ? Object.fromEntries(Object.entries(evidence.commentBodyShape).map(([field, fieldType]) => [field, valueFor(fieldType)]))
+        : valueFor(type),
+    ]));
     const request = serializeWechatRequest(name as WechatChannelsEndpoint, businessBody, SESSION, {
       now: () => 123, requestId: () => 'rid-redacted',
     });
@@ -53,6 +86,16 @@ test('wechat api: golden serializers match the secret-free authorized-session ma
     assert.deepEqual(shape.bodyShape, { ...manifest.common.bodyShape, ...(evidence.businessBody ?? {}) }, name);
     for (const header of manifest.common.requiredHeaderNames) {
       assert.ok(shape.headerNames.includes(header.toLowerCase()), `${name}:${header}`);
+    }
+    if (evidence.referer) assert.equal(request.headers.Referer, evidence.referer, name);
+    if (evidence.commentBodyShape) {
+      const comment = (JSON.parse(request.body) as { comment: Record<string, unknown> }).comment;
+      assert.deepEqual(
+        Object.fromEntries(Object.entries(comment).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [
+          key, value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value,
+        ])),
+        evidence.commentBodyShape,
+      );
     }
   }
   const persisted = JSON.stringify(manifest);
@@ -150,7 +193,7 @@ test('wechat api: comment and DM adapters use the observed read-only request sha
   assert.deepEqual(calls[2].body.sessionId, ['dm-session-1']);
 });
 
-test('wechat api: dev candidate writes stay explicit, non-retryable, and require channel-specific server ids', async () => {
+test('wechat api: captured comment write and candidate DM stay explicit, non-retryable, and require server ids', async () => {
   assert.deepEqual(
     {
       comment: WECHAT_CHANNELS_REQUEST_DESCRIPTORS.commentCreate,
@@ -163,11 +206,12 @@ test('wechat api: dev candidate writes stay explicit, non-retryable, and require
         queryKeys: ['_aid', '_pageUrl', '_rid'],
         bodyEncoding: 'json',
         requiredHeaderNames: ['X-WECHAT-UIN', 'finger-print-device-id'],
+        refererPath: '/micro/interaction/comment',
         cookieJar: 'primary',
         retrySafe: false,
-        captureBacked: false,
-        evidence: 'official_bundle_candidate',
-        coverage: 'candidate_shape',
+        captureBacked: true,
+        evidence: 'observed_write',
+        coverage: 'full_shape',
       },
       dm: {
         method: 'POST',
@@ -175,6 +219,7 @@ test('wechat api: dev candidate writes stay explicit, non-retryable, and require
         queryKeys: ['_aid', '_pageUrl', '_rid'],
         bodyEncoding: 'json',
         requiredHeaderNames: ['X-WECHAT-UIN', 'finger-print-device-id'],
+        refererPath: '/',
         cookieJar: 'primary',
         retrySafe: false,
         captureBacked: false,
@@ -184,7 +229,7 @@ test('wechat api: dev candidate writes stay explicit, non-retryable, and require
     },
   );
   assert.throws(
-    () => serializeWechatRequest('commentCreate', {}, SESSION),
+    () => serializeWechatRequest('dmSendText', {}, SESSION),
     (error: unknown) => error instanceof WechatChannelsError &&
       error.category === 'schema_changed' && !error.requestDispatched,
   );
@@ -194,7 +239,9 @@ test('wechat api: dev candidate writes stay explicit, non-retryable, and require
     rootCommentId: 'comment-root-1',
     replyCommentId: 'comment-parent-1',
     content: 'reply text',
-  }, SESSION, { now: () => 123, requestId: () => 'rid-test', allowUnverifiedWrite: true });
+    clientId: 'client-test',
+    comment: COMMENT_WRITE_CONTEXT,
+  }, SESSION, { now: () => 123, requestId: () => 'rid-test' });
   assert.equal(
     new URL(candidate.url).pathname,
     '/micro/interaction/cgi-bin/mmfinderassistant-bin/comment/create_comment',
@@ -211,6 +258,8 @@ test('wechat api: dev candidate writes stay explicit, non-retryable, and require
     rootCommentId: 'comment-root-1',
     replyCommentId: 'comment-parent-1',
     content: 'reply text',
+    clientId: 'client-test',
+    comment: COMMENT_WRITE_CONTEXT,
   });
 
   const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
@@ -218,12 +267,15 @@ test('wechat api: dev candidate writes stay explicit, non-retryable, and require
     allowUnverifiedWrites: true,
     maxRetries: 3,
     nowImpl: () => 123,
+    clientIdImpl: () => 'client-test',
     fetchImpl: (async (url, init) => {
       const path = new URL(String(url)).pathname;
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       calls.push({ path, body });
       if (path.endsWith('/comment/create_comment')) {
-        return json({ errCode: 0, data: { comment: { commentId: 'comment-server-1' } } });
+        return json({ errCode: 0, data: {
+          baseResp: { errcode: 0 }, clientId: 'client-test', comment: { commentId: 'comment-server-1' },
+        } }, { status: 201 });
       }
       if (path.endsWith('/private-msg/get-session-info')) {
         return json({ errCode: 0, data: { sessionInfo: [{
@@ -242,6 +294,7 @@ test('wechat api: dev candidate writes stay explicit, non-retryable, and require
     rootExternalId: 'comment-root-1',
     parentExternalId: 'comment-parent-1',
     text: 'reply text',
+    writeContext: COMMENT_WRITE_CONTEXT,
   }), { accepted: true, externalMessageId: 'comment-server-1' });
   assert.deepEqual(await api.sendDmText(SESSION, {
     threadExternalId: 'thread-1',
@@ -272,7 +325,7 @@ test('wechat api: dev candidate writes stay explicit, non-retryable, and require
   await assert.rejects(
     () => missingServerId.sendComment(SESSION, {
       postExternalId: 'post-1', rootExternalId: 'comment-root-1',
-      parentExternalId: 'comment-parent-1', text: 'reply text',
+      parentExternalId: 'comment-parent-1', text: 'reply text', writeContext: COMMENT_WRITE_CONTEXT,
     }),
     (error: unknown) => error instanceof WechatChannelsError &&
       error.category === 'schema_changed' && error.requestDispatched,
@@ -291,6 +344,8 @@ test('wechat api: non-empty comments preserve reply hierarchy and opaque paginat
         comment: [{
           commentId: 'comment-root', username: 'peer-a', commentNickname: 'Peer A', commentHeadurl: 'https://example.invalid/a',
           commentContent: 'root text', commentCreatetime: '1700000000', commentLikeCount: 2,
+          lastBuff: '', downContinueFlag: 0, visibleFlag: 1, readFlag: true,
+          displayFlag: 1, blacklistFlag: 0, likeFlag: 0,
           levelTwoComment: [{
             commentId: 'comment-reply', username: 'finder-self', commentNickname: 'Self', commentHeadurl: '',
             commentContent: 'reply text', commentCreatetime: '1700000001', commentLikeCount: 0, levelTwoComment: [],
@@ -309,6 +364,13 @@ test('wechat api: non-empty comments preserve reply hierarchy and opaque paginat
   assert.equal(first.items[0].replies[0].rootExternalId, 'comment-root');
   assert.equal(first.items[0].replies[0].parentExternalId, 'comment-root');
   assert.equal(first.items[0].replies[0].contentText, 'reply text');
+  assert.deepEqual(first.items[0].writeContext, {
+    levelTwoComment: [], commentId: 'comment-root', commentNickname: 'Peer A',
+    commentContent: 'root text', commentHeadurl: 'https://example.invalid/a',
+    commentCreatetime: '1700000000', commentLikeCount: 2, lastBuff: '', downContinueFlag: 0,
+    visibleFlag: 1, readFlag: true, displayFlag: 1, username: 'peer-a', blacklistFlag: 0, likeFlag: 0,
+  });
+  assert.equal(first.items[0].replies[0].writeContext, null);
   const second = await api.listComments(SESSION, 'post-1', first.nextCursor, 20);
   assert.equal(second.nextCursor, null);
   assert.equal(second.hasMore, false);

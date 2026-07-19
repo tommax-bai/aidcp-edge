@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { schemaChanged, WechatChannelsError } from './error-classifier.js';
 import type {
   WechatComment,
+  WechatCommentWriteContext,
   WechatDmMessage,
   WechatDmParticipantInfo,
   WechatDmSession,
@@ -201,9 +202,50 @@ function parseComment(
     lifecycle,
     createdAt: epochMs(valueAt(comment, ['commentCreatetime', 'createTime', 'create_time', 'createdAt', 'created_at']), endpoint, `${field}.createdAt`),
     likeCount: optionalCount(comment, ['commentLikeCount', 'likeCount', 'like_count']),
+    writeContext: parseCommentWriteContext(comment, externalId),
     replies: (rawReplies ?? []).map((reply, replyIndex) =>
       parseComment(reply, endpoint, postExternalId, replyIndex, normalizedRoot, externalId)),
   };
+}
+
+function parseCommentWriteContext(
+  comment: JsonRecord,
+  externalId: string,
+): WechatCommentWriteContext | null {
+  const exact = {
+    commentId: comment.commentId,
+    commentNickname: comment.commentNickname,
+    commentContent: comment.commentContent,
+    commentHeadurl: comment.commentHeadurl,
+    commentCreatetime: comment.commentCreatetime,
+    commentLikeCount: comment.commentLikeCount,
+    lastBuff: comment.lastBuff,
+    downContinueFlag: comment.downContinueFlag,
+    visibleFlag: comment.visibleFlag,
+    readFlag: comment.readFlag,
+    displayFlag: comment.displayFlag,
+    username: comment.username,
+    blacklistFlag: comment.blacklistFlag,
+    likeFlag: comment.likeFlag,
+  };
+  if (
+    exact.commentId !== externalId ||
+    typeof exact.commentId !== 'string' ||
+    typeof exact.commentNickname !== 'string' ||
+    typeof exact.commentContent !== 'string' ||
+    typeof exact.commentHeadurl !== 'string' ||
+    typeof exact.commentCreatetime !== 'string' ||
+    typeof exact.commentLikeCount !== 'number' || !Number.isFinite(exact.commentLikeCount) ||
+    typeof exact.lastBuff !== 'string' ||
+    typeof exact.downContinueFlag !== 'number' || !Number.isFinite(exact.downContinueFlag) ||
+    typeof exact.visibleFlag !== 'number' || !Number.isFinite(exact.visibleFlag) ||
+    typeof exact.readFlag !== 'boolean' ||
+    typeof exact.displayFlag !== 'number' || !Number.isFinite(exact.displayFlag) ||
+    typeof exact.username !== 'string' ||
+    typeof exact.blacklistFlag !== 'number' || !Number.isFinite(exact.blacklistFlag) ||
+    typeof exact.likeFlag !== 'number' || !Number.isFinite(exact.likeFlag)
+  ) return null;
+  return { levelTwoComment: [], ...exact } as WechatCommentWriteContext;
 }
 
 function opaqueCommentParticipantId(commentExternalId: string): string {
