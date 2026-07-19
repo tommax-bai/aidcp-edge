@@ -31,6 +31,17 @@ test('normalizeEnvironments：wechat_channels 原样保留且别名归一，不�
   assert.deepEqual(envs.map((e: { platform: string }) => e.platform), ['wechat_channels', 'wechat_channels']);
 });
 
+test('normalizeEnvironments：仅保留受限的人工昵称来源标记，旧成员与未知来源不被误保护', () => {
+  const envs = fleet.normalizeEnvironments([
+    { profileId: 'manual', name: '人工名', nameSource: 'manual' },
+    { profileId: 'legacy', name: '旧环境' },
+    { profileId: 'forged', name: '伪来源', nameSource: 'platform' },
+  ]);
+  assert.equal(envs[0].nameSource, 'manual');
+  assert.equal('nameSource' in envs[1], false);
+  assert.equal('nameSource' in envs[2], false);
+});
+
 test('migrateEnvironments：旧单值 adsProfileId 向后兼容加载为单元素花名册', () => {
   const envs = fleet.migrateEnvironments({ adsProfileId: 'legacy1', adsProfileName: '老环境', platform: 'xiaohongshu' });
   assert.deepEqual(envs, [{ profileId: 'legacy1', name: '老环境', platform: 'xiaohongshu' }]);

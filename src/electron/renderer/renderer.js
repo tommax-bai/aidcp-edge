@@ -382,7 +382,7 @@ let editingProvider = null;
 let dirty = false;
 // 选中环境的 AdsPower 环境名（随设置持久化，作标题带账号标签兜底）。
 let selectedProfileName = '';
-// 运行花名册（edge-multi-environment-fleet）：多选加入的环境成员 [{profileId, name, platform}]，
+// 运行花名册（edge-multi-environment-fleet）：多选加入的环境成员 [{profileId, name, platform, nameSource?}]，
 // 按 profileId 去重（同一分身 MUST NOT 重复加入，防 edgeId 撞车）；持久化为 settings.environments。
 let roster = [];
 // 客户归属环境默认入册的持久 opt-out；只在 main 明确标记 assignmentScoped 的列表上读写。
@@ -397,7 +397,9 @@ function normalizeRosterList(list) {
     const id = String((raw && (raw.profileId !== undefined ? raw.profileId : raw.userId)) || '').trim();
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    out.push({ profileId: id, name: (raw && raw.name) || '', platform: normPlatform(raw && raw.platform) });
+    const member = { profileId: id, name: (raw && raw.name) || '', platform: normPlatform(raw && raw.platform) };
+    if (raw && raw.nameSource === 'manual') member.nameSource = 'manual';
+    out.push(member);
   }
   return out;
 }
@@ -3160,12 +3162,18 @@ function applyFleetSnapshot(snap) {
     const existing = fleetView.envs.get(e.envId);
     if (existing) {
       existing.name = e.name || existing.name;
+      existing.nameSource = e.nameSource === 'manual' ? 'manual' : undefined;
       existing.platform = e.platform || existing.platform;
       existing.profileId = e.profileId || existing.profileId;
       if (e.status) existing.status = e.status;
     } else {
       fleetView.envs.set(e.envId, {
-        envId: e.envId, profileId: e.profileId || '', name: e.name || '', platform: e.platform || '', status: e.status,
+        envId: e.envId,
+        profileId: e.profileId || '',
+        name: e.name || '',
+        nameSource: e.nameSource === 'manual' ? 'manual' : undefined,
+        platform: e.platform || '',
+        status: e.status,
       });
     }
   }
@@ -3260,14 +3268,15 @@ const RAIL_GROUPS = [
   { key: 'offline', title: '离线', crit: false, has: isOfflineRailRow },
 ];
 
-// 显示优先级（真实昵称 → 花名册/环境名 → 末4位）的**唯一实现**在 ui-logic.js（可单测），此处委托；
+// 显示优先级（人工昵称 → 真实昵称 → 花名册/环境名 → 末4位）的**唯一实现**在 ui-logic.js（可单测），此处委托；
 // uiLogic 未加载时用同逻辑内联兜底，行为逐位一致（change edge-adspower-name-follows-nickname）。
 function railDisplayName(row) {
   if (window.uiLogic && typeof uiLogic.railDisplayName === 'function') return uiLogic.railDisplayName(row);
   const acct = row && row.status && row.status.account;
+  const manualName = row && row.nameSource === 'manual' && row.name ? String(row.name) : '';
   const realNick = acct && acct.source !== 'env' && acct.name ? String(acct.name) : '';
   const envId = row && row.envId != null ? String(row.envId) : '';
-  return realNick || (row && row.name) || (acct && acct.name) || `环境 …${envId.slice(-4)}`;
+  return manualName || realNick || (row && row.name) || (acct && acct.name) || `环境 …${envId.slice(-4)}`;
 }
 
 function renderRail() {
@@ -3312,7 +3321,7 @@ function renderRail() {
     globalPendingCount: fullModel.pendingCount,
     counts,
     // platform 必须进签名：改平台后行才会重建上色（漏掉则签名未变、UI 停留旧平台）。
-    rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, railDisplayName(r), r.label, Boolean(r.status && r.status.personaBound), normPlatform(r.platform)]),
+    rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, railDisplayName(r), r.nameSource, r.label, Boolean(r.status && r.status.personaBound), normPlatform(r.platform)]),
   });
   if (sig === fleetView.lastRailSig) return;
   fleetView.lastRailSig = sig;
@@ -3431,11 +3440,31 @@ function makeRailRow(row) {
   const nameLine = document.createElement('span');
   nameLine.className = 'rail-nameline';
   const nameEl = document.createElement('span');
-  nameEl.className = 'rail-name';
+  const manualName = row.nameSource === 'manual';
+  nameEl.className = `rail-name${manualName ? ' manual' : ''}`;
   nameEl.textContent = displayName;
-  nameEl.addEventListener('dblclick', (e) => {
+  nameEl.title = manualName ? '人工昵称 · 双击修改' : '双击修改环境昵称';
+  let nameClickTimer = null;
+  nameEl.addEventListener('click', (e) => {
     e.stopPropagation();
-    void showRailBrowser(row.envId);
+    if (e.detail > 1) {
+      if (nameClickTimer) clearTimeout(nameClickTimer);
+      nameClickTimer = null;
+      return;
+    }
+    // 昵称单击仍沿用整行三态；短暂等待第二击，避免双击编辑同时把浏览器抬前或归位。
+    if (nameClickTimer) clearTimeout(nameClickTimer);
+    nameClickTimer = setTimeout(() => {
+      nameClickTimer = null;
+      void onRailRowActivate(row.envId);
+    }, 220);
+  });
+  nameEl.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (nameClickTimer) clearTimeout(nameClickTimer);
+    nameClickTimer = null;
+    beginRailNameEdit(row, nameEl);
   });
   nameLine.appendChild(nameEl);
   const bound = Boolean(row.status && row.status.personaBound);
@@ -3473,6 +3502,77 @@ function makeRailRow(row) {
   return btn;
 }
 
+/** 左栏昵称就地编辑：人工来源一旦提交即成为最高优先级，并经现有 settings 通道立即持久化。 */
+function beginRailNameEdit(row, nameEl) {
+  const profileId = String((row && row.profileId) || '').trim();
+  const member = roster.find((item) => item.profileId === profileId);
+  if (!member) {
+    setRailMsg('该环境尚未进入运行花名册，暂不能修改昵称。');
+    return;
+  }
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'rail-name-editor';
+  input.value = railDisplayName(row);
+  input.maxLength = 80;
+  input.setAttribute('aria-label', '修改环境昵称');
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const closeEditor = () => {
+    fleetView.lastRailSig = '';
+    renderRail();
+  };
+  const commit = async () => {
+    if (settled) return;
+    settled = true;
+    const nickname = input.value.trim();
+    if (!nickname) {
+      setRailMsg('环境昵称不能为空，未保存。');
+      closeEditor();
+      return;
+    }
+    if (member.name === nickname && member.nameSource === 'manual') {
+      closeEditor();
+      return;
+    }
+
+    member.name = nickname;
+    member.nameSource = 'manual';
+    if (settingsUi.adsProfile.value.trim() === member.profileId) selectedProfileName = nickname;
+    const env = fleetView.envs.get(row.envId);
+    if (env) {
+      env.name = nickname;
+      env.nameSource = 'manual';
+    }
+    closeEditor();
+
+    const saved = await persistRoster();
+    if (!saved || saved.saveOk === false) {
+      setRailMsg(`人工昵称「${nickname}」本次已生效，但未持久化${saved && saved.saveError ? `：${saved.saveError}` : ''}；重启后可能丢失。`);
+      return;
+    }
+    setRailMsg(`已保存人工昵称「${nickname}」，后续系统更新不会覆盖。`);
+  };
+
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('dblclick', (e) => e.stopPropagation());
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void commit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      settled = true;
+      closeEditor();
+    }
+  });
+  input.addEventListener('blur', () => { void commit(); });
+}
+
 // 环境头像三态（用户要求）：①未选中→选中（红高亮）②已选中且浏览器未抬前→把浏览器抬到主屏前台并聚焦
 // ③已抬前→让浏览器归位（回背景停放位）。②③复用既有 showDrivenBrowser / resetBrowserParking 通道。
 // 诚实边界：指令失败（引擎未起 / 浏览器未就绪）绝不推进相位，把回执文案如实显示在环境栏消息位。
@@ -3495,26 +3595,6 @@ async function onRailRowActivate(envId) {
     }
   } catch (e) {
     setRailMsg(`${label}失败：${(e && e.message) || e}`);
-  }
-}
-
-async function showRailBrowser(envId) {
-  if (!envId || !fleetView.envs.has(envId)) return;
-  if (envId !== fleetView.selected) selectEnv(envId);
-  if (fleetView.shownEnv === envId) return;
-  const api = window.aidcpEdge.showDrivenBrowser;
-  if (typeof api !== 'function') return;
-  try {
-    const r = await api(envId);
-    if (r && r.ok) {
-      fleetView.shownEnv = envId;
-      setRailMsg(r.hint || '显示浏览器指令已发送。');
-      renderRail();
-    } else {
-      setRailMsg(`显示浏览器失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`);
-    }
-  } catch (e) {
-    setRailMsg(`显示浏览器失败：${(e && e.message) || e}`);
   }
 }
 
@@ -4153,7 +4233,12 @@ function removeFromRoster(profileId, { remember = true } = {}) {
 // 把当前花名册直接落盘（加入/移出即时生效，不必等「启动」）。main 的 syncEnvHandles 会据此建行/摘行。
 async function persistRoster() {
   if (!window.aidcpEdge || typeof window.aidcpEdge.saveSettings !== 'function') return;
-  const environments = roster.map((m) => ({ profileId: m.profileId, name: m.name, platform: m.platform }));
+  const environments = roster.map((m) => ({
+    profileId: m.profileId,
+    name: m.name,
+    platform: m.platform,
+    ...(m.nameSource === 'manual' ? { nameSource: 'manual' } : {}),
+  }));
   try {
     const saved = await window.aidcpEdge.saveSettings({
       environments,
@@ -4217,7 +4302,7 @@ function pruneOrphanRoster(liveIds) {
 // 拉列表时以 AdsPower 实时名回填花名册成员名（change edge-env-name-live-sync）：治「加入那一刻拍下、
 // 此后永不更新」导致左栏展示名与添加面板显示的真名漂移（新建即空名 / 手填空名 / AdsPower 端改名三源）。
 // 只覆盖**本次列表在场、实时名非空、且与现存名不同**的成员；返回改动数、不自行落盘（由 refreshEnvs 统一落一次，
-// 杜绝与 pruneOrphanRoster 的双落盘竞态）。名字为纯展示字段，无「人工标注优先」问题（对比 platform）。
+// 杜绝与 pruneOrphanRoster 的双落盘竞态）。人工昵称是明确例外，列表实时名不得覆盖。
 // **缺数据不自残**：本函数只在 refreshEnvs 的 `!r.truncated` 守卫下调用，空实时名从不回填（不因缺数据误清 / 误改）。
 function reconcileRosterNames(profiles) {
   const liveName = new Map();
@@ -4227,12 +4312,15 @@ function reconcileRosterNames(profiles) {
   if (liveName.size === 0) return 0; // 二道防御：一个带名环境都没取到时绝不回填（同 pruneOrphanRoster 的空列表守卫）
   let changed = 0;
   for (const m of roster) {
+    if (m.nameSource === 'manual') continue;
     const live = liveName.get(String(m.profileId));
     if (live && live !== m.name) { m.name = live; changed += 1; }
   }
   if (changed > 0) {
     // 当前选中分身的名字同步更新，保持旧单值镜像 adsProfileName 与花名册一致（saveCurrentSettings 会写该镜像）。
-    const selLive = liveName.get(settingsUi.adsProfile.value.trim());
+    const selectedId = settingsUi.adsProfile.value.trim();
+    const selectedMember = roster.find((m) => m.profileId === selectedId);
+    const selLive = selectedMember && selectedMember.nameSource !== 'manual' ? liveName.get(selectedId) : '';
     if (selLive) selectedProfileName = selLive;
   }
   return changed;

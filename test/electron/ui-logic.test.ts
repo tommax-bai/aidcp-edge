@@ -688,6 +688,16 @@ test('相对时间走字', () => {
 });
 
 // ── 左栏显示名优先级（change edge-adspower-name-follows-nickname）：真实昵称 → 花名册/环境名 → 末4位 ──
+test('railDisplayName：人工昵称优先于真实平台昵称', () => {
+  const row = {
+    envId: 'ads-abcd1234',
+    name: '运营重点号',
+    nameSource: 'manual',
+    status: { account: { id: 'u1', name: '平台新昵称', source: 'xhs' } },
+  };
+  assert.equal(uiLogic.railDisplayName(row), '运营重点号');
+});
+
 test('railDisplayName：真实昵称优先于花名册名（实时名回填成模板名也不遮蔽已知昵称）', () => {
   // 回归场景：reconcileRosterNames 把花名册名刷成 AdsPower 模板名，但真实昵称已读到（source!=='env'）→ 显示昵称。
   const row = { envId: 'ads-abcd1234', name: 'win11-intel', status: { account: { id: 'u1', name: '大白', source: 'xhs' } } };

@@ -1129,6 +1129,8 @@ function resolveAdsOpts(formOpts) {
 //  - fire-and-forget：调用方不 await；写客户端 ≥1.1s 串行节流保证不与核心本地 API 同秒并发。
 async function maybeRenameEnvToNickname(handle, nickname) {
   if (!handle || handle.kind !== 'adspower') return;
+  // 人工昵称是运营明确指定的最高优先级：既不改本地花名册，也不在后台改 AdsPower 环境名。
+  if (handle.nameSource === 'manual') return;
   const userId = handle.profileId && String(handle.profileId).trim();
   if (!userId) return;
   const nick = nickname == null ? '' : String(nickname).trim();
@@ -1141,6 +1143,8 @@ async function maybeRenameEnvToNickname(handle, nickname) {
     const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
     const r = await writeApi.renameProfile({ userId, name: nick }, ads);
     if (r && r.ok) {
+      // 请求在人工编辑前已经发出也不能回头覆盖本地人工名；外部写已无法撤销，但左栏/花名册仍以人工名为准。
+      if (handle.nameSource === 'manual') return;
       // 本地花名册名同步（令下次 user/list 回填与 reconcileRosterNames 一致、单写、不双落盘竞态）。
       handle.name = nick;
       if (handle.status && handle.status.account) handle.status.account.name = nick;
@@ -1227,12 +1231,13 @@ function makeStatus(provider) {
 const envs = new Map();
 let selectedEnvId = '';
 
-function makeEnvHandle({ envId, kind, profileId, name, platform, cascadeIndex }) {
+function makeEnvHandle({ envId, kind, profileId, name, nameSource, platform, cascadeIndex }) {
   return {
     envId,
     kind, // 'adspower' | 'self'
     profileId: profileId || '',
     name: name || '',
+    nameSource: nameSource === 'manual' ? 'manual' : undefined,
     platform: platform || 'xiaohongshu',
     cascadeIndex: cascadeIndex || 0,
     child: undefined,
@@ -1311,7 +1316,7 @@ function syncEnvHandles() {
       if (allowedProfileIds && !allowedProfileIds.has(env.profileId) && !cleanupEnvKeys.has(env.profileId)) return;
       const envId = fleet.envIdForProfile(env.profileId);
       wanted.set(envId, {
-        envId, kind: 'adspower', profileId: env.profileId, name: env.name, platform: env.platform,
+        envId, kind: 'adspower', profileId: env.profileId, name: env.name, nameSource: env.nameSource, platform: env.platform,
         cascadeIndex: idx++, offboardCleanup: cleanupEnvKeys.has(env.profileId),
       });
     });
@@ -1345,6 +1350,7 @@ function syncEnvHandles() {
     const existing = envs.get(envId);
     if (existing) {
       existing.name = spec.name;
+      existing.nameSource = spec.nameSource === 'manual' ? 'manual' : undefined;
       existing.platform = spec.platform;
       existing.cascadeIndex = spec.cascadeIndex;
       existing.offboardCleanup = Boolean(spec.offboardCleanup);
@@ -1385,6 +1391,7 @@ function fleetSnapshot() {
       kind: h.kind,
       profileId: h.profileId,
       name: h.name,
+      nameSource: h.nameSource,
       platform: h.platform,
       status: { ...h.status, envId: h.envId, envName: h.name },
     })),

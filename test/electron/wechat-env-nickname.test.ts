@@ -15,4 +15,11 @@ test('Electron identity bridge keeps the real platform source and reuses the exi
 
   assert.match(branch, /source: evt\.account\.name \? fleet\.nicknameSourceForPlatform\(handle\.platform\) : 'env'/);
   assert.match(branch, /if \(evt\.account\.name\) maybeRenameEnvToNickname\(handle, evt\.account\.name\)/);
+
+  const helperStart = main.indexOf('async function maybeRenameEnvToNickname');
+  const helperEnd = main.indexOf('function makeStatus', helperStart);
+  const helper = main.slice(helperStart, helperEnd);
+  assert.match(helper, /if \(handle\.nameSource === 'manual'\) return;/, '人工昵称必须在任何 AdsPower 自动改名前 fail closed');
+  assert.match(main, /nameSource: env\.nameSource/, '花名册人工来源必须进入环境 handle');
+  assert.match(main, /nameSource: h\.nameSource/, '人工来源必须随 fleet snapshot 回到 renderer');
 });

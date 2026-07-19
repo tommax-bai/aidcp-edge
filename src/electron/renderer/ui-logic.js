@@ -690,17 +690,16 @@
   // 紧迫度排序：需处理（error→attention）浮顶，其后 launching/stale/running，再 offline；同级保持花名册序。
   const FLEET_LEVEL_RANK = { error: 0, attention: 1, launching: 2, stale: 3, running: 4, offline: 5 };
 
-  // 左栏环境显示名优先级（change edge-adspower-name-follows-nickname）：真实登录昵称（account.source!=='env'，
-  // 即登录读出的真实身份，见 main.cjs：source 'xhs'=读出昵称 / 'env'=环境名兜底）优先 → 花名册/环境名 →
-  // 「环境 …末4位」兜底。真实昵称压过花名册名，兜住「实时名回填把花名册名刷成 AdsPower 模板名」遮蔽昵称的
-  // 回归；即使 AdsPower 侧尚未改名 / 改名写失败，左栏也已显示昵称。纯函数、可单测。
+  // 左栏环境显示名优先级：人工昵称 → 真实登录昵称 → 花名册/环境名 → 「环境 …末4位」。
+  // 人工来源是运营明确意图；真实昵称仍压过普通花名册名，兜住列表回填模板名遮蔽昵称的回归。
   function railDisplayName(row) {
     const acct = row && row.status && row.status.account;
+    const manualName = row && row.nameSource === 'manual' && row.name ? String(row.name) : '';
     const realNick = acct && acct.source !== 'env' && acct.name ? String(acct.name) : '';
     const rosterName = (row && (row.name || (row.status && row.status.envName))) || '';
     const fallbackAcct = acct && acct.name ? String(acct.name) : '';
     const envId = row && row.envId != null ? String(row.envId) : '';
-    return realNick || rosterName || fallbackAcct || `环境 …${envId.slice(-4)}`;
+    return manualName || realNick || rosterName || fallbackAcct || `环境 …${envId.slice(-4)}`;
   }
 
   /** 输入 [{envId, name, status}]，输出 { rows:[{envId,name,level,needsAction,label,status}], pendingCount }。 */
@@ -709,7 +708,9 @@
       const lv = fleetLevel(e && e.status, nowMs);
       return {
         envId: e && e.envId,
+        profileId: (e && e.profileId) || '',
         name: (e && (e.name || (e.status && e.status.envName))) || '',
+        nameSource: e && e.nameSource === 'manual' ? 'manual' : undefined,
         platform: (e && e.platform) || '', // 平台视觉标识（rail 行按平台上色）
         level: lv.level,
         needsAction: lv.needsAction,

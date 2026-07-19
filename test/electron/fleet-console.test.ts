@@ -307,30 +307,101 @@ test('环境头像三态：①未选中→选中 ②再点→抬前显示（show
   assert.equal(rowOf('ads-p2').classList.contains('shown'), false);
 });
 
-test('环境昵称双击只显示浏览器，不把第二次 click 解释成归位', async () => {
-  const { w, calls, pushStatus } = await boot();
+test('环境昵称双击进入编辑并持久化人工来源，不同时触发浏览器三态', async () => {
+  const saved: Array<Record<string, unknown>> = [];
+  const { w, calls } = await boot({
+    saveSettings: async (patch: Record<string, unknown>) => {
+      saved.push(patch);
+      return { ...patch, saveOk: true };
+    },
+  });
   const rowOf = (id: string) => w.document.querySelector(`.rail-row[data-env-id="${id}"]`) as HTMLElement;
   const nicknameOf = (id: string) => rowOf(id).querySelector('.rail-name') as HTMLElement;
 
-  // 已选中环境：第一次 click 显示，第二次 click(detail=2) 不得归位，dblclick 保持 show-only。
+  // 物理双击序列：第一击不得在第二击到来前抬浏览器，最终只进入编辑。
   nicknameOf('ads-p1').dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 1 }));
-  await tick();
   nicknameOf('ads-p1').dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 2 }));
   nicknameOf('ads-p1').dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
   await tick();
-  assert.deepEqual(calls.showDriven, ['ads-p1']);
-  assert.deepEqual(calls.resetParking, [], '同一双击手势绝不能紧接着归位');
-
-  // 未选中环境：首击选中，dblclick 明确显示；同样不发送归位。
-  pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二' }));
-  await tick();
-  nicknameOf('ads-p2').dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 1 }));
-  nicknameOf('ads-p2').dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 2 }));
-  nicknameOf('ads-p2').dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
-  await tick();
-  assert.ok(calls.select.includes('ads-p2'));
-  assert.deepEqual(calls.showDriven, ['ads-p1', 'ads-p2']);
+  assert.deepEqual(calls.showDriven, []);
   assert.deepEqual(calls.resetParking, []);
+  const input = rowOf('ads-p1').querySelector('.rail-name-editor') as HTMLInputElement;
+  assert.ok(input, '双击后应原位出现昵称输入框');
+  assert.equal(input.value, '环境一');
+
+  input.value = '运营重点号';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+  await tick();
+  await tick();
+  const savedMember = saved
+    .flatMap((patch) => (patch.environments as Array<Record<string, unknown>>) || [])
+    .find((member) => member.profileId === 'p1');
+  assert.equal(savedMember?.profileId, 'p1');
+  assert.equal(savedMember?.name, '运营重点号');
+  assert.equal(savedMember?.platform, 'xiaohongshu');
+  assert.equal(savedMember?.nameSource, 'manual');
+  const rendered = nicknameOf('ads-p1');
+  assert.equal(rendered.textContent, '运营重点号');
+  assert.equal(rendered.classList.contains('manual'), true);
+  assert.match(rendered.title, /人工昵称/);
+  assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /后续系统更新不会覆盖/);
+});
+
+test('环境昵称编辑支持 Escape 取消、空值拒绝与失焦提交', async () => {
+  const saved: Array<Record<string, unknown>> = [];
+  const { w } = await boot({
+    saveSettings: async (patch: Record<string, unknown>) => {
+      saved.push(patch);
+      return { ...patch, saveOk: true };
+    },
+  });
+  const rowOf = (id: string) => w.document.querySelector(`.rail-row[data-env-id="${id}"]`) as HTMLElement;
+  const open = (id: string) => {
+    (rowOf(id).querySelector('.rail-name') as HTMLElement)
+      .dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+    return rowOf(id).querySelector('.rail-name-editor') as HTMLInputElement;
+  };
+
+  let input = open('ads-p1');
+  input.value = '不会保存';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+  await tick();
+  assert.equal(saved.length, 0);
+  assert.equal((rowOf('ads-p1').querySelector('.rail-name') as HTMLElement).textContent, '环境一');
+
+  input = open('ads-p1');
+  input.value = '   ';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+  await tick();
+  assert.equal(saved.length, 0);
+  assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /不能为空，未保存/);
+
+  input = open('ads-p2');
+  input.value = '失焦保存号';
+  input.dispatchEvent(new w.FocusEvent('blur'));
+  await tick();
+  await tick();
+  assert.equal(saved.length, 1);
+  const savedP2 = ((saved[0].environments as Array<Record<string, unknown>>) || [])
+    .find((member) => member.profileId === 'p2');
+  assert.equal(savedP2?.name, '失焦保存号');
+  assert.equal(savedP2?.nameSource, 'manual');
+});
+
+test('人工昵称写盘失败时保留本次显示并明确提示未持久化', async () => {
+  const { w } = await boot({
+    saveSettings: async (patch: Record<string, unknown>) => ({ ...patch, saveOk: false, saveError: '磁盘只读' }),
+  });
+  const row = w.document.querySelector('.rail-row[data-env-id="ads-p1"]') as HTMLElement;
+  (row.querySelector('.rail-name') as HTMLElement)
+    .dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+  const input = row.querySelector('.rail-name-editor') as HTMLInputElement;
+  input.value = '本次人工名';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+  await tick();
+  await tick();
+  assert.equal((w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-name') as HTMLElement).textContent, '本次人工名');
+  assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /未持久化.*重启后可能丢失/);
 });
 
 test('环境头像三态：验证码浮层态（core 仍在跑）保留 shown，第三态仍可归位', async () => {

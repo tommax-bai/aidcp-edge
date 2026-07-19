@@ -21,7 +21,7 @@ function envIdForProfile(profileId) {
   return `ads-${String(profileId).trim()}`;
 }
 
-/** 归一单个环境成员：{ profileId, name, platform }；profileId 空则返回 null。 */
+/** 归一单个环境成员：{ profileId, name, platform, nameSource? }；profileId 空则返回 null。 */
 function normalizeEnvironment(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const profileId = String(raw.profileId ?? raw.userId ?? '').trim();
@@ -32,11 +32,14 @@ function normalizeEnvironment(raw) {
     : platformRaw === 'wechat_channels' || platformRaw === 'wechat-channels' || platformRaw === 'wechat'
       ? 'wechat_channels'
       : 'xiaohongshu';
-  return {
+  const normalized = {
     profileId,
     name: typeof raw.name === 'string' ? raw.name : '',
     platform,
   };
+  // 人工昵称是唯一可持久化的特殊来源；未知值一律丢弃，避免任意 renderer 输入扩大覆盖保护面。
+  if (raw.nameSource === 'manual') normalized.nameSource = 'manual';
+  return normalized;
 }
 
 /** 归一花名册：去非法项 + 按 profileId 去重（同一分身 MUST NOT 出现两次，防 edgeId 撞车）。 */

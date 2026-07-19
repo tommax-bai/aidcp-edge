@@ -861,7 +861,7 @@ test('保存后解除 provider 编辑闩锁：状态推送可再跟随实际 pro
 
 const savedEnvsOf = (calls: Array<Record<string, unknown>>, profileId: string) =>
   calls
-    .map((p) => (p && (p.environments as Array<{ profileId?: string; name?: string }>)) || [])
+    .map((p) => (p && (p.environments as Array<{ profileId?: string; name?: string; nameSource?: string }>)) || [])
     .flat()
     .filter((e) => e && e.profileId === profileId);
 
@@ -898,6 +898,28 @@ test('拉列表回填：花名册空名成员用 user/list 实时名补齐并落
   const persisted = savedEnvsOf(saved, 'p1');
   assert.ok(persisted.length > 0, '回填应触发一次落盘');
   assert.ok(persisted.some((e) => e.name === '真名甲'), '空名成员应被回填为 user/list 实时名');
+});
+
+test('拉列表回填：人工昵称保持最高优先级，不被 user/list 实时名覆盖', async () => {
+  const saved: Array<Record<string, unknown>> = [];
+  await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped' }),
+    adsStatus: async () => ({ ok: true }),
+    getSettings: async () => ({
+      provider: 'adspower',
+      adsProfileId: 'p1',
+      adsProfileName: '运营重点号',
+      adsApiKey: '',
+      adsApiBase: '',
+      browserParkingMode: 'edge-strip',
+      environments: [{ profileId: 'p1', name: '运营重点号', platform: 'xiaohongshu', nameSource: 'manual' }],
+    }),
+    adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'p1', name: '平台实时名', serialNumber: '1', proxy: 'x' }] }),
+    saveSettings: async (patch: unknown) => { saved.push((patch as Record<string, unknown>) || {}); return { provider: 'adspower', ...(patch as object), saveOk: true }; },
+  }));
+  for (let i = 0; i < 6; i++) await tick();
+  const persisted = savedEnvsOf(saved, 'p1');
+  assert.equal(persisted.some((e) => e.name === '平台实时名'), false, '实时列表名不得覆盖人工昵称');
 });
 
 test('拉列表回填：截断结果绝不回填（不因缺数据误改在用环境名）', async () => {
