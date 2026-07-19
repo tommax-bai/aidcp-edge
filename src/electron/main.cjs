@@ -102,6 +102,9 @@ let quitStopAllInFlight = false;
 let adsServiceBase = null;
 // 本次 Electron 进程已启动或接管的 Ads CLI daemon；真正退出时必须有界 stop。
 let managedAdsRuntime = null;
+// 每个 Electron 会话第一次成功建立托管运行时前，先经 CLI 自身 status/stop 清理登记 daemon。
+// 只有 ensureRuntime 成功后才提交该标记；预热半途失败时，真实动作仍会重试而不是接管半成品。
+let adsRuntimeSessionResetComplete = false;
 
 // AdsPower 官方下载页（客户端「下载 AdsPower」按钮外链）。
 const ADS_DOWNLOAD_URL = 'https://www.adspower.net/download';
@@ -1101,12 +1104,13 @@ function buildAdsProviderEnv(handle) {
   return env;
 }
 
-// 解析只读调用的 base/key：优先用渲染层传入的**当前表单值**（支持「新填 key 未保存即刷新」而不陷回环），
-// 表单未带该字段才回落。base 优先级（P0-A）：表单 > 运行时解析出的 adsServiceBase > 持久化 settings > 核心默认。
+// 解析只读/写调用的 base/key：托管运行时已建立时，其 CLI 实际上报 base 是单一权威；只有尚未建立时
+// 才允许渲染层当前表单值（支持诊断「新填未保存即刷新」）或持久化设置回落。
+// base 优先级（P0-A）：运行时 adsServiceBase > 表单 > 持久化 settings > 核心默认。
 // apiKey 走单一解析器（含随包内置默认），只用于本次请求头、不落日志 / 不写文件。
 function resolveAdsOpts(formOpts) {
   const o = formOpts || {};
-  const apiBase = (o.apiBase && String(o.apiBase).trim()) || adsServiceBase || settings.adsApiBase || undefined;
+  const apiBase = adsServiceBase || (o.apiBase && String(o.apiBase).trim()) || settings.adsApiBase || undefined;
   const formKey = Object.prototype.hasOwnProperty.call(o, 'apiKey') ? String(o.apiKey).trim() : '';
   const apiKey = resolveAdsApiKey(formKey);
   const out = {};
@@ -3368,7 +3372,8 @@ async function ensureAdsService(handle) {
     return { ok: false, error };
   }
 
-  // 2. 起内嵌运行时（`ads status` 已在跑则复用、否则 `ads start -k <key>`）。
+  // 2. 每个 Electron 会话第一次成功建立前，先经 CLI status/stop 有界清理登记 daemon；随后
+  // `ads start -k <key>` 建立本会话新运行时。后续中途重探不重复 stop 健康 daemon。
   if (handle) updateStatus(handle, { auth: 'checking', lastMessage: '正在启动内置指纹浏览器运行时…', ...presencePatch('正在准备浏览器运行时…') });
   const apiKey = resolveAdsApiKey('');
   // 就绪判定走 CLI `ads status`（staging 已把其判活从 `ps|grep "node"` 换成 process.kill(pid,0)，故在
@@ -3378,6 +3383,7 @@ async function ensureAdsService(handle) {
     cliEntry,
     execPath,
     apiKey,
+    resetExisting: !adsRuntimeSessionResetComplete,
   });
   if (!rt.ok) {
     if (handle) {
@@ -3394,6 +3400,7 @@ async function ensureAdsService(handle) {
     }
     return { ok: false, error: rt.error };
   }
+  adsRuntimeSessionResetComplete = true;
   adsServiceBase = rt.base; // P0-A：运行时解析出的实际端口即单一 base 权威
   managedAdsRuntime = { cliEntry, execPath };
   return { ok: true, mode: rt.alreadyRunning ? 'adopted' : 'embedded', base: rt.base, cliEntry };

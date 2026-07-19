@@ -41,6 +41,9 @@ const adsRuntime = require('../../src/electron/ads-runtime.cjs') as {
     run?: RunFn;
     readyTries?: number;
     readyIntervalMs?: number;
+    resetExisting?: boolean;
+    stopTries?: number;
+    stopIntervalMs?: number;
   }) => Promise<{ ok: boolean; base?: string; port?: number; alreadyRunning?: boolean; error?: string }>;
   stopRuntime: (o: {
     cliEntry: string | null;
@@ -262,6 +265,106 @@ test('ensureRuntime: not running + key → start then becomes ready', async () =
 test('ensureRuntime: no cliEntry → honest failure', async () => {
   const r = await adsRuntime.ensureRuntime({ cliEntry: null });
   assert.equal(r.ok, false);
+});
+
+test('ensureRuntime: reset skips stop for an already-stopped daemon and starts fresh', async () => {
+  const calls: string[][] = [];
+  const run = makeRun(
+    {
+      status: [
+        { ok: true, out: statusOut(null) },
+        { ok: true, out: statusOut(null) },
+        { ok: true, out: statusOut(50326) },
+      ],
+      start: { ok: true, out: 'Server running at: http://local.adspower.net:50326' },
+    },
+    calls,
+  );
+
+  const result = await adsRuntime.ensureRuntime({
+    cliEntry: 'x',
+    apiKey: 'KEY',
+    run,
+    resetExisting: true,
+    readyTries: 2,
+    readyIntervalMs: 1,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.base, 'http://local.adspower.net:50326');
+  assert.deepEqual(calls.map((args) => args[0]), ['status', 'status', 'start', 'status']);
+});
+
+test('ensureRuntime: reset stops a registered daemon before starting fresh', async () => {
+  const calls: string[][] = [];
+  let phase = 'old';
+  const run: RunFn = async (_entry, args) => {
+    calls.push(args);
+    if (args[0] === 'stop') {
+      phase = 'stopped';
+      return { ok: true, code: 0, out: '' };
+    }
+    if (args[0] === 'start') {
+      phase = 'fresh';
+      return { ok: true, code: 0, out: 'Server running at: http://local.adspower.net:50326' };
+    }
+    if (phase === 'old') return { ok: true, code: 0, out: statusOut(50325) };
+    if (phase === 'stopped') return { ok: true, code: 0, out: statusOut(null) };
+    return { ok: true, code: 0, out: statusOut(50326) };
+  };
+
+  const result = await adsRuntime.ensureRuntime({
+    cliEntry: 'x',
+    apiKey: 'KEY',
+    run,
+    resetExisting: true,
+    readyTries: 2,
+    readyIntervalMs: 1,
+    stopIntervalMs: 1,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.base, 'http://local.adspower.net:50326');
+  assert.deepEqual(calls.map((args) => args[0]), ['status', 'stop', 'status', 'status', 'start', 'status']);
+});
+
+test('ensureRuntime: reset stop failure blocks start and preserves the cause', async () => {
+  const calls: string[][] = [];
+  const run: RunFn = async (_entry, args) => {
+    calls.push(args);
+    return args[0] === 'status'
+      ? { ok: true, code: 0, out: statusOut(50325) }
+      : { ok: false, code: 1, out: '', err: 'permission denied' };
+  };
+
+  const result = await adsRuntime.ensureRuntime({ cliEntry: 'x', apiKey: 'KEY', run, resetExisting: true });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error || '', /已有 Ads CLI daemon 无法停止：permission denied/);
+  assert.ok(!calls.some((args) => args[0] === 'start'));
+});
+
+test('ensureRuntime: reset timeout blocks start honestly', async () => {
+  const calls: string[][] = [];
+  const run: RunFn = async (_entry, args) => {
+    calls.push(args);
+    return args[0] === 'stop'
+      ? { ok: true, code: 0, out: '' }
+      : { ok: true, code: 0, out: statusOut(50325) };
+  };
+
+  const result = await adsRuntime.ensureRuntime({
+    cliEntry: 'x',
+    apiKey: 'KEY',
+    run,
+    resetExisting: true,
+    stopTries: 2,
+    stopIntervalMs: 1,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error || '', /已有 Ads CLI daemon 无法停止：Ads CLI daemon 停止超时/);
+  assert.ok(!calls.some((args) => args[0] === 'start'));
 });
 
 test('stopRuntime: running daemon receives stop and is confirmed down', async () => {

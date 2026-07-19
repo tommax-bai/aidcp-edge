@@ -97,6 +97,23 @@ test('application quit still uses final SIGTERM for every retained core', () => 
   assert.match(main, /if \(!anyRunning && !hasManagedAdsRuntime\)/, 'daemon-only quit must still enter cleanup');
 });
 
+test('managed Ads runtime resets once per successful app session and owns the resolved base', () => {
+  assert.match(main, /let adsRuntimeSessionResetComplete = false;/);
+  const ensure = functionSource('ensureAdsService', 'ensureKernelOnce');
+  assert.match(ensure, /resetExisting:\s*!adsRuntimeSessionResetComplete/);
+  const failureGate = ensure.indexOf('if (!rt.ok)');
+  const resetCommit = ensure.indexOf('adsRuntimeSessionResetComplete = true;');
+  const baseCommit = ensure.indexOf('adsServiceBase = rt.base;');
+  assert.ok(failureGate >= 0 && resetCommit > failureGate, 'session reset must be committed only after ensureRuntime succeeds');
+  assert.ok(baseCommit > resetCommit, 'the fresh runtime base is committed after the session reset succeeds');
+
+  assert.match(
+    main,
+    /const apiBase = adsServiceBase \|\| \(o\.apiBase && String\(o\.apiBase\)\.trim\(\)\) \|\| settings\.adsApiBase \|\| undefined;/,
+    'managed CLI base must outrank a stale renderer/settings API base such as 50325',
+  );
+});
+
 // Regression guard for a recurring packaged-only failure: in an asar:true build
 // app.getAppPath() is the app.asar FILE, so spawning the core with cwd = appRoot
 // throws 'spawn ENOTDIR' and the browser never launches (invisible to dev /

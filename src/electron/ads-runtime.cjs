@@ -246,13 +246,35 @@ async function getRuntime({ cliEntry, execPath, run = runCli } = {}) {
 }
 
 // 确保运行时在跑：已跑则返回其 base；未跑则用 apiKey `start`、轮询就绪。
+// 新 Electron 会话可传 resetExisting=true：只经 CLI 自身 status/stop 有界清理登记 daemon，
+// 再用本会话当前 key 启动；不扫描/终止独立 AdsPower 桌面或任意进程。
 // 就绪判定优先用注入的 `isReady`（HTTP LocalAPI /status，权威且可靠）：实测在 Electron 自带 Node 20 下
 // `ads start` 经 child_process.fork 起服务后，其 pid/store 写入握手可能未完成 → `ads status` 误报「未在跑」，
 // 但服务本身在监听、HTTP LocalAPI 正常。故不依赖 `ads status`（仅作端口解析与兜底），以 HTTP 探活为准。
 // 端口优先从 `ads start` 输出（"Server running at :<port>"）解析，回落 `ads status`，再回落默认 50325。
 // isReady: 可选 async () => boolean，命中即视为就绪。返回 { ok, base, port } 或 { ok:false, error }。
-async function ensureRuntime({ cliEntry, execPath, apiKey, run = runCli, isReady, readyTries = 40, readyIntervalMs = 500 } = {}) {
+async function ensureRuntime({
+  cliEntry,
+  execPath,
+  apiKey,
+  run = runCli,
+  isReady,
+  readyTries = 40,
+  readyIntervalMs = 500,
+  resetExisting = false,
+  stopTries,
+  stopIntervalMs,
+} = {}) {
   if (!cliEntry) return { ok: false, error: '未找到随包 AdsPower 运行时（cli entry）' };
+  if (resetExisting) {
+    if (!apiKey || !String(apiKey).trim()) {
+      return { ok: false, error: '缺少 AdsPower api-key，无法重置并启动本会话指纹浏览器运行时' };
+    }
+    const stopped = await stopRuntime({ cliEntry, execPath, run, isReady, stopTries, stopIntervalMs });
+    if (!stopped.ok) {
+      return { ok: false, error: `已有 Ads CLI daemon 无法停止：${stopped.error || '未知错误'}` };
+    }
+  }
   // 已在跑？优先 HTTP 探活（可靠），否则回落 CLI status。
   if (isReady) {
     if (await isReady().catch(() => false)) {

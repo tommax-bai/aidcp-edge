@@ -123,7 +123,8 @@ test('createEnvironmentWithGroupRecovery stops before user/create when the pre-p
 
   assert.equal(result.ok, false);
   assert.match(String(result.error), /预置 AdsPower 分组“aidcp”/);
-  assert.match(String(result.error), /API Key 与分组权限/);
+  assert.match(String(result.error), /当前 AIDCP 指纹运行时已就绪/);
+  assert.match(String(result.error), /当前运行时使用的 AdsPower 账号/);
   assert.equal(flowCalls, 0);
 });
 

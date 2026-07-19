@@ -44,7 +44,7 @@ function createEnvGroupResolver({ adsApi, groupName = ENV_GROUP_NAME } = {}) {
     if (!gid) {
       return {
         ok: false,
-        error: `未找到预置 AdsPower 分组“${groupName}”，请确认当前指纹浏览器服务、API Key 与分组权限`,
+        error: `当前 AIDCP 指纹运行时已就绪，但其账号或权限范围内未找到预置 AdsPower 分组“${groupName}”；请确认该分组建立在当前运行时使用的 AdsPower 账号中`,
       };
     }
     cachedEnvGroupId = gid;
