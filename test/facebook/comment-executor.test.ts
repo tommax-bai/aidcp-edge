@@ -203,6 +203,7 @@ function makeExecutor(
     accountId?: string;
     overlayMonitor?: OverlayMonitor;
     acceptConsent?: (cdp: BrowseCdp) => Promise<{ handled: boolean; cleared: boolean; attempts: number }>;
+    sleeps?: number[];
   } = {},
 ) {
   return new FacebookCommentExecutor(
@@ -211,7 +212,7 @@ function makeExecutor(
       getAccountId: () => (over.accountId === undefined ? '100000123456789' : over.accountId),
       ...(over.overlayMonitor ? { overlayMonitor: over.overlayMonitor } : {}),
       acceptConsent: over.acceptConsent ?? NO_CONSENT,
-      sleep: async () => {},
+      sleep: async (ms) => { over.sleeps?.push(ms); },
       logger: () => {},
     },
     { settleMs: 0, editorScrollRounds: 3, surfaceProbeRounds: 2, waitAfterSubmitMs: 0 },
@@ -413,6 +414,24 @@ test('fb-executor: 就地窗耗尽仍未确认 → verification_ambiguous（不�
   assert.equal(r.submitted, true);
   assert.equal(r.serverConfirmed, false);
   assert.equal(cdp.reloads, 0, '确认不了也绝不刷新');
+});
+
+test('fb-executor --feed: Enter 后等 500ms、跳过 ack 检测、直回首页并诚实 ambiguous', async () => {
+  const cdp = new FakeCdp({ ack: { ackConfirmed: true, serverId: true } });
+  const sleeps: number[] = [];
+  const ex = makeExecutor(cdp, { sleeps });
+  const r = await ex.submitComment(
+    'https://www.facebook.com/groups/1/posts/2/',
+    '很喜欢这条分享',
+    undefined,
+    undefined,
+    true,
+  );
+  assert.deepEqual(r, { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false });
+  assert.ok(sleeps.includes(500), '提交后必须等待 500ms');
+  assert.equal(cdp.verifyCalls, 0, 'fast return 不得读取平台 ack');
+  assert.ok(cdp.navigations.includes('https://www.facebook.com/'), '应直达 Facebook 首页');
+  assert.ok(cdp.enters >= 1, '仍须先真实派发 Enter');
 });
 
 test('fb-executor: 就地 ack 命中（服务器 id）→ ok:true 且不刷新（快确认）', async () => {

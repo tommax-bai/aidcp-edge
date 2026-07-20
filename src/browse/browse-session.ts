@@ -1520,7 +1520,7 @@ export class BrowseSession {
             break;
           }
         }
-        await this.executeComment(payload.text, payload.groupChatCode);
+        await this.executeComment(payload.text, payload.groupChatCode, payload.fastReturnToFeed === true);
         break;
       }
       case 'interaction.like_comment': {
@@ -2401,7 +2401,7 @@ export class BrowseSession {
    *  - 发布后校验：编辑器清空 且 自己的评论作为顶部新 `[id^="comment-"]` 行出现（评论数文本不可靠，不依赖）。
    * 红线：找不到框/按钮 no_target、未生效 state_unchanged、验证码 blocked_by_captcha——绝不静默假成功。
    */
-  private async executeComment(text: string, contactInfo?: string): Promise<void> {
+  private async executeComment(text: string, contactInfo?: string, fastReturnToFeed = false): Promise<void> {
     const action = 'comment';
     // 记评论处理耗时：成功/未生效/异常三条出口都带上「耗时」，让 electron「最近状态」能看到评论处理用时（honest，失败也如实报时）。
     const startedAt = Date.now();
@@ -2527,6 +2527,22 @@ export class BrowseSession {
       disposeCommit = this.deps.commitWindow?.enter(4000, 'xhs_comment_submit');
       await dispatchClick(this.deps.cdp, submit.x, submit.y, { random: this.random });
       // 🔴 提交键已点下：以下后置校验 MUST NOT 取消（禁区）。
+
+      // `/comment --feed`（change comment-feed-fast-return）：用户显式选择浏览器可用性优先。
+      // 只在提交点击已经成功派发后进入；所有目标/人审/验证码/编辑器读回/取消闸均原样保留。
+      // 不观察平台结果，所以绝不报成功：500ms 后直回首页，再以 submitted_unconfirmed 收口，
+      // 让云端写去重、绝不自动重试。回首页派发失败也不能把已点击的评论降格成「未提交」。
+      if (fastReturnToFeed) {
+        try {
+          await this.sleep(500);
+          await this.deps.cdp.send('Page.navigate', { url: this.exploreUrl });
+          this.logger(`[browse] comment --feed：提交已派发，500ms 后已导航首页；未检测平台结果（耗时 ${elapsed()}）`);
+        } catch (err) {
+          this.logger(`[browse] comment --feed：提交已派发，但回首页导航异常：${(err as Error).message}；结果仍为已提交未确认`);
+        }
+        this.deps.client.reportActionCompleted?.({ action, ok: false, reason: 'submitted_unconfirmed' });
+        return;
+      }
 
       // 6) 后置校验：轮询「编辑器清空 且 自己的评论作为顶部新行出现」，命中即返回、上限 2000ms
       //    （取代固定 sleep(2000)；发评论生效多在 1s 内，快路径省 ~1s）。

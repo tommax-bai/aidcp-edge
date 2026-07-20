@@ -17,7 +17,7 @@ import type { FacebookJoinResult } from '../../src/facebook/join-executor.js';
 class FakeExecutor {
   searchArg?: { keyword: string; container: string };
   openArg?: string;
-  submitArg?: { url: string; text: string; contactInfo?: string };
+  submitArg?: { url: string; text: string; contactInfo?: string; fastReturnToFeed?: boolean };
   constructor(
     private readonly cfg: {
       search?: FacebookSearchResult;
@@ -33,8 +33,8 @@ class FakeExecutor {
     this.openArg = url;
     return this.cfg.open ?? { ok: true, editorReady: true };
   }
-  async submitComment(url: string, text: string, contactInfo?: string): Promise<FacebookSubmitResult> {
-    this.submitArg = { url, text, ...(contactInfo ? { contactInfo } : {}) };
+  async submitComment(url: string, text: string, contactInfo?: string, _checkpoint?: () => void, fastReturnToFeed = false): Promise<FacebookSubmitResult> {
+    this.submitArg = { url, text, ...(contactInfo ? { contactInfo } : {}), ...(fastReturnToFeed ? { fastReturnToFeed: true } : {}) };
     return this.cfg.submit ?? { ok: true, submitted: true, serverConfirmed: true };
   }
 }
@@ -198,6 +198,22 @@ test('fb-handler: interaction.comment ambiguous → action.completed{comment,ok:
   assert.equal(cap.actions[0].action, 'comment');
   assert.equal(cap.actions[0].ok, false);
   assert.equal(cap.actions[0].reason, 'verification_ambiguous');
+});
+
+test('fb-handler: interaction.comment --feed 透传 executor，并用未确认而非失败措辞', async () => {
+  const exec = new FakeExecutor({ submit: { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false } });
+  const { handler, cap } = makeHandler(exec);
+  await handler.handle(
+    makeEnvelope('interaction.comment', 'c1', 1, {
+      noteId: 'https://www.facebook.com/groups/1/posts/2',
+      text: '很喜欢',
+      fastReturnToFeed: true,
+    } as never),
+  );
+  assert.equal(exec.submitArg?.fastReturnToFeed, true);
+  assert.equal(cap.actions[0].reason, 'verification_ambiguous');
+  assert.equal(cap.ui[0].type, 'comment_pending');
+  assert.match(cap.ui[0].sentence ?? '', /已提交.*未确认/);
 });
 
 test('fb-handler: 不支持的白名单命令（session.end）→ capability_unsupported（绝不静默丢弃）', async () => {

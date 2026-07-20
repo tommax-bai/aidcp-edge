@@ -35,6 +35,8 @@ interface Harness {
   openedCards: number[];
   closes: number;
   steps: PlanStep[];
+  navigations: string[];
+  verifyCalls: number;
 }
 
 function makeHarness(cards: NoteCard[] = [CARD]): Harness {
@@ -44,6 +46,7 @@ function makeHarness(cards: NoteCard[] = [CARD]): Harness {
   const reportedProfiles: ProfileDetailPayload[] = [];
   const openedCards: number[] = [];
   const steps: PlanStep[] = [];
+  const navigations: string[] = [];
   let closes = 0;
 
   const scroller: FeedScroller = {
@@ -64,6 +67,10 @@ function makeHarness(cards: NoteCard[] = [CARD]): Harness {
 
   const cdp: BrowseCdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Page.navigate') {
+        navigations.push(String(params.url ?? ''));
+        return {} as never;
+      }
       if (method === 'Runtime.evaluate') {
         const expr = String(params.expression ?? '');
         // engage-bar 探测
@@ -142,6 +149,8 @@ function makeHarness(cards: NoteCard[] = [CARD]): Harness {
       return closes;
     },
     steps,
+    navigations,
+    verifyCalls: 0,
   } as Harness;
 }
 
@@ -177,9 +186,14 @@ function commentHarness(opts: {
   const h = makeHarness();
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === 'Page.navigate') {
+        h.navigations.push(String(params.url ?? ''));
+        return {} as never;
+      }
       if (method !== 'Runtime.evaluate') return {} as never;
       const expr = String(params.expression ?? '');
       if (expr.includes('ownRow')) {
+        h.verifyCalls++;
         return { result: { value: JSON.stringify(opts.verify ?? { cleared: true, ownRow: true }) } } as never;
       }
       // 清场前置（必须排在 content-textarea 之前——两条 expr 都含该选择器）。
@@ -245,6 +259,24 @@ test('executeComment: 提交后未确认生效 → ok:false reason submitted_unc
   assert.equal(c!.ok, false);
   // 提交动作已经派发出去了：这条评论可能真已发出。谎报「未提交」会让上游重试 ⇒ 重复评论。
   assert.equal(c!.reason, 'submitted_unconfirmed');
+});
+
+test('executeComment --feed: 提交后等 500ms、跳过结果检测、直回首页并诚实 submitted_unconfirmed', async () => {
+  const h = commentHarness({ verify: { cleared: true, ownRow: true } });
+  const sleeps: number[] = [];
+  const sess = new BrowseSession(h.deps, {
+    ...noOpts(),
+    sleep: async (ms) => { sleeps.push(ms); },
+  });
+  await startAndPush(sess, [
+    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '赞', fastReturnToFeed: true }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const c = h.completedActions.find((a) => a.action === 'comment');
+  assert.deepEqual(c, { action: 'comment', ok: false, reason: 'submitted_unconfirmed' });
+  assert.equal(h.verifyCalls, 0, 'fast return 不得读取发布结果');
+  assert.ok(sleeps.includes(500), '提交后必须等待 500ms');
+  assert.ok(h.navigations.includes('https://www.xiaohongshu.com/explore'), '应直达小红书首页');
 });
 
 test('executeComment 清场：编辑器里有残文且清不掉 → 诚实 editor_not_clean，绝不拼接发出（task 3.2）', async () => {

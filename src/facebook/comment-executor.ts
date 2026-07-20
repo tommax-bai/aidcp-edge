@@ -20,7 +20,7 @@ import {
   type BrowseCdp,
 } from '../browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../browse/overlay-monitor.js';
-import { FACEBOOK_TARGET } from './driver.js';
+import { FACEBOOK_DEFAULT_START_URL, FACEBOOK_TARGET } from './driver.js';
 import { defaultFacebookConsentAccepter, type FacebookConsentAccepter } from './consent.js';
 import { FACEBOOK_NUMERIC_ID_RE } from './identity.js';
 import {
@@ -598,6 +598,7 @@ export class FacebookCommentExecutor {
      * 半截评论留下会直接接在下一条前面发出去）。
      */
     checkpoint?: () => void,
+    fastReturnToFeed = false,
   ): Promise<FacebookSubmitResult> {
     const body = (text ?? '').trim();
     if (!body) return { ok: false, reason: 'marker_not_accepted', submitted: false, serverConfirmed: false };
@@ -691,6 +692,19 @@ export class FacebookCommentExecutor {
     }
     // 🔴 回车已发出：以下确认段 MUST NOT 取消（禁区）。窗口在确认段结束（四条出口）由 finally 关闭。
     try {
+      // `/comment --feed`（change comment-feed-fast-return）：回车已成功派发才进入。保留全部提交前闸，
+      // 但用户显式选择 500ms 后释放浏览器，不读取 ack。故只能回 verification_ambiguous（已提交、未确认），
+      // 云端据此写去重且不重试；回首页导航失败也不能把已经派发的 Enter 降格成「未提交」。
+      if (fastReturnToFeed) {
+        try {
+          await this.sleep(500);
+          await this.cdp.send('Page.navigate', { url: FACEBOOK_DEFAULT_START_URL });
+          this.log('[fb-comment] --feed：提交已派发，500ms 后已导航首页；未检测平台结果');
+        } catch (err) {
+          this.log(`[fb-comment] --feed：提交已派发，但回首页导航异常：${(err as Error).message}；结果仍为已提交未确认`);
+        }
+        return { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false };
+      }
       // 🔴 change facebook-comment-lifecycle-verify：确认段**纯就地观察，绝不刷新**。真机（2026-07-17）三条独立理由:
       //   ① reload 校验当场制造**假阴性**——报评论不在，而两条探针评论实际都在（CDP 复核 + 肉眼双证）；
       //      这正是运营侧「提交后无法确认评论已上墙」黄卡的产地。

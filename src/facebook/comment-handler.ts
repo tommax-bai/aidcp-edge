@@ -213,8 +213,14 @@ export class FacebookCommentHandler {
     try {
       // noteId 即候选帖 permalink（云端下发）；submitComment 在「已由 note.open 打开的该帖」上操作，
       // 并用它做 own-identity 服务器确认的目标帖收窄。
-      const r = await this.executor.submitComment(payload.noteId, payload.text ?? '', payload.groupChatCode, checkpoint);
-      this.emitCommentOutcome(payload.text ?? '', r.ok, r.reason);
+      const r = await this.executor.submitComment(
+        payload.noteId,
+        payload.text ?? '',
+        payload.groupChatCode,
+        checkpoint,
+        payload.fastReturnToFeed === true,
+      );
+      this.emitCommentOutcome(payload.text ?? '', r.ok, r.reason, payload.fastReturnToFeed === true);
       this.client.reportActionCompleted({ action: 'comment', ok: r.ok, ...(r.reason ? { reason: r.reason } : {}) });
     } finally {
       this.busy = false;
@@ -227,7 +233,7 @@ export class FacebookCommentHandler {
    * 主语用**我们打进去的评论文本**（一手），绝不用 permalink / noteId。
    * `ok:true` 的语义完全沿用执行器现状（own-identity 服务器确认落地才为真），这里不新增任何成功判定。
    */
-  private emitCommentOutcome(text: string, ok: boolean, reason?: string): void {
+  private emitCommentOutcome(text: string, ok: boolean, reason?: string, fastReturnToFeed = false): void {
     const excerpt = clipFacebookUiText(text, 24);
     const subject = excerpt ? `：「${excerpt}」` : '';
     if (ok) {
@@ -250,6 +256,16 @@ export class FacebookCommentHandler {
         type: 'comment_pending',
         sentence: `评论待管理员批准，还没显示出来${subject}`,
         presence: '评论等着群管理员批准…',
+        loopStage: 'interact',
+      });
+      return;
+    }
+    if (fastReturnToFeed && reason === 'verification_ambiguous') {
+      this.emitUi({
+        kind: 'activity',
+        type: 'comment_pending',
+        sentence: `评论已提交，按 --feed 返回首页，未确认是否显示${subject}`,
+        presence: '评论已提交，平台结果未确认…',
         loopStage: 'interact',
       });
       return;
