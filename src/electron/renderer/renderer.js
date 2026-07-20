@@ -507,6 +507,108 @@ const ENVIRONMENT_RISK_TTL_MS = 15_000;
 const ENVIRONMENT_RISK_RETRY_MS = 5_000;
 const ENVIRONMENT_RISK_STATUSES = new Set(['normal', 'warned', 'restricted', 'frozen']);
 
+// 客户首页业务概览：单一来源为 customer-auth HTTP。自动化状态只用于触发失效重拉，绝不写入本缓存。
+const environmentOverviewByEnv = new Map();
+const environmentOverviewInFlight = new Set();
+const environmentOverviewRefreshTimers = new Map();
+const environmentOverviewAutomationSigByEnv = new Map();
+const ENVIRONMENT_OVERVIEW_TTL_MS = 30_000;
+const ENVIRONMENT_OVERVIEW_RETRY_MS = 5_000;
+const ENVIRONMENT_OVERVIEW_POLL_MS = 60_000;
+const ENVIRONMENT_OVERVIEW_MIN_REFRESH_MS = 5_000;
+
+function environmentOverviewSupported() {
+  return Boolean(window.aidcpEdge && typeof window.aidcpEdge.getEnvironmentOverview === 'function');
+}
+
+function environmentOverviewError(result, fallback = '暂时无法读取') {
+  const raw = result && result.data && result.data.error;
+  return String((result && result.data && result.data.message)
+    || (raw && typeof raw === 'object' && (raw.message || raw.code))
+    || (typeof raw === 'string' && raw)
+    || (result && result.error)
+    || fallback);
+}
+
+function normalizeEnvironmentOverview(result, expectedEnvKey) {
+  const data = result && result.ok && result.data && result.data.data;
+  const meta = result && result.data && result.data.meta;
+  if (!data || data.envKey !== expectedEnvKey || !data.dailyUsage
+      || !data.dailyUsage.totals || typeof data.dailyUsage.totals !== 'object') return null;
+  const current = data.currentPublishState;
+  if (current !== null && current !== undefined) {
+    if (!current || !['pending', 'approved', 'submitted'].includes(current.state)
+        || typeof current.code !== 'string' || !Number.isFinite(Number(current.at))) return null;
+  }
+  const last = data.lastPublished;
+  if (last !== null && last !== undefined) {
+    if (!last || typeof last.title !== 'string' || !last.title.trim() || !Number.isFinite(Number(last.at))) return null;
+  }
+  const asOf = Number(meta && meta.asOf);
+  if (!Number.isFinite(asOf)) return null;
+  return {
+    dailyUsage: data.dailyUsage,
+    publish: current ? {
+      state: current.state,
+      code: current.code,
+      ...(typeof current.title === 'string' && current.title.trim() ? { title: current.title.trim() } : {}),
+      at: new Date(Number(current.at)).toISOString(),
+    } : null,
+    lastPublish: last ? { title: last.title.trim(), at: new Date(Number(last.at)).toISOString() } : null,
+    asOf,
+  };
+}
+
+async function ensureEnvironmentOverview(envId, { force = false } = {}) {
+  if (!environmentOverviewSupported() || !envId || envId === '__local__' || environmentOverviewInFlight.has(envId)) return;
+  const env = fleetView.envs.get(envId);
+  if (!env) return;
+  const envKey = slowStartEnvKey(env);
+  if (!envKey) return;
+  const existing = environmentOverviewByEnv.get(envId);
+  const now = Date.now();
+  if (existing && Number(existing.retryAfter || 0) > now) return;
+  if (force && existing && now - Number(existing.requestedAt || existing.fetchedAt || 0) < ENVIRONMENT_OVERVIEW_MIN_REFRESH_MS) return;
+  if (!force && existing && existing.kind === 'ok' && now - Number(existing.fetchedAt || 0) < ENVIRONMENT_OVERVIEW_TTL_MS) return;
+  environmentOverviewInFlight.add(envId);
+  if (!existing || existing.kind !== 'ok') environmentOverviewByEnv.set(envId, { kind: 'loading', requestedAt: now });
+  else environmentOverviewByEnv.set(envId, { ...existing, refreshing: true, requestedAt: now });
+  if (fleetView.selected === envId && env.status) render(env.status);
+  try {
+    const result = await window.aidcpEdge.getEnvironmentOverview(envId);
+    const normalized = normalizeEnvironmentOverview(result, envKey);
+    if (!normalized) throw new Error(environmentOverviewError(result, 'Cloud 未返回可用的环境概览'));
+    environmentOverviewByEnv.set(envId, {
+      kind: 'ok', ...normalized, fetchedAt: Date.now(), requestedAt: now, stale: false, refreshing: false,
+    });
+  } catch (err) {
+    const message = String((err && err.message) || err || '暂时无法读取');
+    if (existing && existing.kind === 'ok') {
+      environmentOverviewByEnv.set(envId, {
+        ...existing, stale: true, refreshing: false, error: message, retryAfter: Date.now() + ENVIRONMENT_OVERVIEW_RETRY_MS,
+      });
+    } else {
+      environmentOverviewByEnv.set(envId, {
+        kind: 'error', error: message, requestedAt: now, retryAfter: Date.now() + ENVIRONMENT_OVERVIEW_RETRY_MS,
+      });
+    }
+  } finally {
+    environmentOverviewInFlight.delete(envId);
+    const latest = fleetView.envs.get(envId);
+    if (fleetView.selected === envId && latest && latest.status) render(latest.status);
+  }
+}
+
+function scheduleEnvironmentOverviewRefresh(envId) {
+  if (!environmentOverviewSupported() || !envId || envId === '__local__') return;
+  const old = environmentOverviewRefreshTimers.get(envId);
+  if (old) clearTimeout(old);
+  environmentOverviewRefreshTimers.set(envId, setTimeout(() => {
+    environmentOverviewRefreshTimers.delete(envId);
+    void ensureEnvironmentOverview(envId, { force: true });
+  }, 750));
+}
+
 function slowStartEnvKey(env) {
   return String((env && (env.profileId || env.envId)) || '').trim();
 }
@@ -574,7 +676,40 @@ function selectedEnvironmentRiskContext() {
 }
 
 function effectiveEnvironmentStatus(env, status) {
-  const base = status || {};
+  let base = status || {};
+  if (environmentOverviewSupported() && env && env.envId !== '__local__') {
+    const overview = environmentOverviewByEnv.get(env.envId);
+    if (overview && overview.kind === 'ok') {
+      base = {
+        ...base,
+        dailyUsage: overview.dailyUsage,
+        publish: overview.publish,
+        lastPublish: overview.lastPublish,
+        publishPreview: null,
+        environmentOverview: {
+          confirmed: true,
+          stale: Boolean(overview.stale),
+          refreshing: Boolean(overview.refreshing),
+          asOf: overview.asOf,
+          error: overview.error || null,
+        },
+      };
+    } else {
+      // 首次请求完成前/失败且无缓存：显式清掉本地引擎投影，防止假 0 与“从未发布”冒充云端事实。
+      base = {
+        ...base,
+        dailyUsage: null,
+        publish: null,
+        lastPublish: null,
+        publishPreview: null,
+        environmentOverview: {
+          confirmed: false,
+          loading: !overview || overview.kind === 'loading',
+          error: overview && overview.kind === 'error' ? overview.error : null,
+        },
+      };
+    }
+  }
   const rawPlatform = String((env && env.platform) || '').trim();
   const platform = rawPlatform
     ? normPlatform(rawPlatform)
@@ -770,6 +905,8 @@ function refreshMeta(refreshAt, now) {
 function usageView(status) {
   const daily = status.dailyUsage;
   const hasDaily = Boolean(daily && daily.totals && typeof daily.totals === 'object');
+  const overview = status.environmentOverview || null;
+  const managedByOverview = Boolean(overview);
   const stats = status.stats || {};
   const totals = {};
   // 「这个账号该有哪些格子」（change platform-honest-usage-metrics）：
@@ -782,14 +919,20 @@ function usageView(status) {
       if (!Object.prototype.hasOwnProperty.call(daily.totals, item.action)) continue;
       supplied.add(item.action);
       totals[item.action] = count(daily.totals[item.action]);
-    } else if (item.stat) {
+    } else if (!managedByOverview && item.stat) {
       supplied.add(item.action);
       totals[item.action] = count(stats[item.stat]);
+    } else if (managedByOverview && item.stat) {
+      // 首次 HTTP 结果到达前保留稳定格位，但值用破折号，绝不把“未知”画成 0。
+      supplied.add(item.action);
     }
   }
   const quotas = daily && daily.quotas && typeof daily.quotas === 'object' ? daily.quotas : null;
   return {
     hasDaily,
+    managedByOverview,
+    confirmed: hasDaily,
+    overview,
     supplied,
     quotaLevel: daily?.quotaLevel,
     asOf: hasDaily ? parseUsageTime(daily.asOf, status.updatedAt) : parseUsageTime(status.updatedAt, status.updatedAt),
@@ -814,6 +957,19 @@ function renderUsageItem(item, usage) {
     return;
   }
   if (card) card.classList.remove('hidden');
+  if (usage.managedByOverview && !usage.confirmed) {
+    item.value.textContent = '—';
+    item.value.classList.remove('zero');
+    const capEl = fields.usageCaps[item.action];
+    const barEl = fields.usageBars[item.action];
+    if (capEl) capEl.textContent = '';
+    if (barEl) barEl.style.width = '0%';
+    if (card) {
+      card.classList.remove('has-limit', 'near', 'complete');
+      card.title = usage.overview?.loading ? '正在读取账号今日数据' : '暂时无法读取账号今日数据';
+    }
+    return;
+  }
   const used = count(usage.totals[item.action]);
   const cap = usage.quotas && typeof usage.quotas[item.action] === 'number' ? count(usage.quotas[item.action]) : null;
   const capEl = fields.usageCaps[item.action];
@@ -822,8 +978,8 @@ function renderUsageItem(item, usage) {
   const saturated = hasCap && (usage.saturated.has(item.action) || used >= cap);
   const ratio = hasCap ? (cap > 0 ? Math.min(1, used / cap) : 1) : 0;
 
-  item.value.textContent = used;
-  item.value.classList.toggle('zero', used === 0);
+  item.value.textContent = usage.managedByOverview && !usage.confirmed ? '—' : used;
+  item.value.classList.toggle('zero', (!usage.managedByOverview || usage.confirmed) && used === 0);
   if (capEl) capEl.textContent = hasCap ? `/${cap}` : '';
   if (barEl) barEl.style.width = hasCap ? `${Math.round(ratio * 100)}%` : '0%';
   if (card) {
@@ -976,8 +1132,13 @@ function renderQuotaWindows(usage) {
 function renderUsageSummary(status) {
   const usage = usageView(status);
   fields.usageSource.textContent = usage.hasDaily
-    ? `账号今日${usage.quotaLevel ? ` · ${QUOTA_LEVEL_LABELS[usage.quotaLevel] || usage.quotaLevel}` : ''}`
-    : '本机实时';
+    ? `${usage.overview?.stale ? '账号今日 · 缓存' : '账号今日'}${usage.quotaLevel ? ` · ${QUOTA_LEVEL_LABELS[usage.quotaLevel] || usage.quotaLevel}` : ''}`
+    : usage.managedByOverview
+      ? (usage.overview?.loading ? '获取中' : '暂时无法获取')
+      : '本机实时';
+  fields.usageSource.title = usage.overview?.error
+    ? `最近刷新失败：${usage.overview.error}`
+    : usage.overview?.refreshing ? '正在刷新云端数据' : '';
   const limit = usageProgressLabel(usage);
   if (fields.usageLimit) {
     fields.usageLimit.textContent = limit ? limit.text : '';
@@ -988,7 +1149,9 @@ function renderUsageSummary(status) {
   renderQuotaWindows(usage);
   renderSlowStart(status);
   renderEnvironmentRiskRecovery(status);
-  fields.updatedAt.textContent = new Date(usage.asOf).toLocaleTimeString();
+  fields.updatedAt.textContent = usage.managedByOverview && !usage.confirmed
+    ? '—'
+    : new Date(usage.overview?.asOf || usage.asOf).toLocaleTimeString();
 }
 
 function hideEnvironmentRiskRecovery() {
@@ -1841,6 +2004,25 @@ const lastPublishSigByEnv = new Map();
 // 用户点薄条的临时展开（进行中审批到来 / 会话停止 / 切换环境时自动复位）。
 let pubManualOpen = false;
 function renderPublish(status, nowMs) {
+  const overview = status && status.environmentOverview;
+  if (overview && !overview.confirmed) {
+    const loading = Boolean(overview.loading);
+    fields.pubCard.classList.remove('hidden', 'empty', 'collapsed');
+    fields.pubCard.dataset.pubMode = 'loading';
+    fields.pubCard.dataset.pubState = loading ? 'loading' : 'error';
+    fields.pubBar.classList.add('hidden');
+    fields.pubMain.classList.remove('folded');
+    fields.pubHead.textContent = loading ? '正在读取发布记录' : '暂时无法读取发布记录';
+    fields.pubCorner.textContent = '';
+    fields.pubCorner.classList.remove('hot');
+    fields.pubTitle.textContent = '—';
+    fields.pubTitle.classList.add('muted');
+    fields.pubMeta.textContent = '尚未取得云端确认数据';
+    fields.pubFoot.textContent = loading ? '正在从云端获取' : '请稍后重试，当前不会把未知显示成未发布';
+    fields.pubPreviewLink.classList.add('hidden');
+    fields.pubSteps.querySelectorAll('.j-step').forEach((step) => { step.className = 'j-step todo'; });
+    return;
+  }
   const view = uiLogic.publishView(status.publish, status.lastPublish, nowMs);
   const preview = status && status.publishPreview && typeof status.publishPreview === 'object'
     ? status.publishPreview
@@ -3065,8 +3247,19 @@ setInterval(() => {
   void refreshDelegatedTasks(true);
 }, 15_000);
 
+// 客户首页概览是普通 Web 拉取：选中环境低频刷新；浏览器聚焦时补一跳。与自动化 WS 生命周期无关。
+setInterval(() => {
+  if (fleetView.selected) void ensureEnvironmentOverview(fleetView.selected, { force: true });
+}, ENVIRONMENT_OVERVIEW_POLL_MS);
+window.addEventListener('focus', () => {
+  if (fleetView.selected) void ensureEnvironmentOverview(fleetView.selected, { force: true });
+});
+
 function toggleQuotaDetails() {
   quotaDetailsOpen = !quotaDetailsOpen;
+  if (quotaDetailsOpen && fleetView.selected) {
+    void ensureEnvironmentOverview(fleetView.selected, { force: true });
+  }
   if (currentStatus) renderUsageSummary(currentStatus);
 }
 
@@ -3464,6 +3657,7 @@ function renderKernelPrepGlobal() {
 }
 
 function render(status) {
+  if (fleetView.selected) void ensureEnvironmentOverview(fleetView.selected);
   status = selectedEffectiveEnvironmentStatus(status);
   currentStatus = status;
   syncDelegatedActionAvailability();
@@ -3524,10 +3718,25 @@ function routeStatus(status) {
     if (status.envName && env.nameSource !== 'manual') env.name = status.envName;
   }
   if (!fleetView.selected) fleetView.selected = key;
+  if (environmentOverviewSupported() && key !== '__local__') {
+    const signature = JSON.stringify({
+      publish: status.publish && {
+        state: status.publish.state, code: status.publish.code, title: status.publish.title, at: status.publish.at,
+      },
+      stats: status.stats || null,
+    });
+    const previous = environmentOverviewAutomationSigByEnv.get(key);
+    environmentOverviewAutomationSigByEnv.set(key, signature);
+    if (previous !== undefined && previous !== signature) scheduleEnvironmentOverviewRefresh(key);
+  }
   // 原始日志与发布终态折流对**每个**环境记录（含未选中）：未选中环境的日志进其桶、发布终态折进其活动缓冲，
   // 切过去时历史完整、绝不丢，也绝不串到别的环境。
   recordLog(key, status.lastMessage);
-  absorbPublishTerminal(key, status);
+  const effective = effectiveEnvironmentStatus(env, status);
+  // 新客户端的发布历史只认 HTTP 概览；本地自动化终态只负责使概览失效，不直接写业务历史。
+  if (!environmentOverviewSupported() || key === '__local__' || effective.environmentOverview?.confirmed) {
+    absorbPublishTerminal(key, effective);
+  }
   if (fleetView.selected === key) render(status);
   renderKernelPrepGlobal(); // 内核首启进度条全局呈现，不受「仅选中环境上屏」限制
   renderRail();
@@ -3600,6 +3809,12 @@ function applyFleetSnapshot(snap) {
     environmentRiskFeedbackByEnv.delete(goneEnvKey);
     manualNicknamePendingEnvIds.delete(key);
     environmentRiskFetchInFlight.delete(goneEnvKey);
+    environmentOverviewByEnv.delete(key);
+    environmentOverviewInFlight.delete(key);
+    environmentOverviewAutomationSigByEnv.delete(key);
+    const overviewTimer = environmentOverviewRefreshTimers.get(key);
+    if (overviewTimer) clearTimeout(overviewTimer);
+    environmentOverviewRefreshTimers.delete(key);
     fleetView.envs.delete(key); // 快照为准（含 '__local__' 占位）
     // 连同该环境的所有渲染层缓冲一并清（否则同一分身移出再加回会重放上一会话的陈旧活动 + 吞掉新发布折流，
     // 还有全会话内存泄漏）。
@@ -3624,6 +3839,7 @@ function applyFleetSnapshot(snap) {
     if (env && env.status) render(env.status);
     rebuildActivityStream();
     void refreshDelegatedTasks(true, fleetView.selected);
+    void ensureEnvironmentOverview(fleetView.selected, { force: true });
   } else if (selectedEnvPlatform() !== prevSelectedPlat) {
     // 选中未变但其平台变了（如「改平台」落盘回推）：立即刷标题带等平台标识，不等下一次状态心跳。
     const env = fleetView.envs.get(fleetView.selected);
@@ -3656,6 +3872,7 @@ function selectEnv(envId) {
   rebuildActivityStream();
   renderRail();
   void refreshDelegatedTasks(true, envId);
+  void ensureEnvironmentOverview(envId, { force: true });
 }
 
 function railEnvList() {

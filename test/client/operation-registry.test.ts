@@ -153,5 +153,5 @@ test('new client strips cloud_data fields from legacy ui.snapshot and keeps only
     },
     dailyUsage,
     browserStandby,
-  }), { dailyUsage, browserStandby });
+  }), { browserStandby });
 });

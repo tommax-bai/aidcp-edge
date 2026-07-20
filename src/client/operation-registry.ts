@@ -125,7 +125,6 @@ export function operationDescriptorFor(type: MessageType): OperationDescriptor |
  * automation projection and refetch persona/publish/account data over customer-auth HTTP. */
 export function automationUiSnapshot(payload: UiSnapshotPayload): UiSnapshotPayload {
   const safe: UiSnapshotPayload = {};
-  if (payload.dailyUsage) safe.dailyUsage = payload.dailyUsage;
   if (payload.browserStandby) safe.browserStandby = payload.browserStandby;
   return safe;
 }
