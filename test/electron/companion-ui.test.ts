@@ -1044,6 +1044,28 @@ test('发布卡已通过 → 第四节点平静色 + 无需操作', async () => 
   assert.match($(w, '#pub-foot').textContent ?? '', /无需操作/);
 });
 
+test('发布卡已提交待确认 → 本次稿件压过旧历史、自动展开且不冒充已发布', async () => {
+  const now = Date.now();
+  const { w } = await boot({
+    publish: { state: 'submitted', title: '4090跑122B大模型实测对比', code: '#160', at: new Date(now - 90_000).toISOString() },
+    lastPublish: { title: 'Claude被封 企业AI稳才是核心', at: new Date(now - 7 * 86_400_000).toISOString() },
+  });
+  const card = $(w, '#pub-card');
+  assert.equal(card.dataset.pubState, 'submitted');
+  assert.equal(card.dataset.pubMode, 'submitted');
+  assert.equal(card.classList.contains('collapsed'), false, '未确认结果必须自动展开');
+  assert.equal($(w, '#pub-head').textContent, '已提交，平台确认中');
+  assert.match($(w, '#pub-title').textContent ?? '', /4090跑122B/);
+  assert.doesNotMatch($(w, '#pub-title').textContent ?? '', /Claude被封/);
+  assert.match($(w, '#pub-meta').textContent ?? '', /#160/);
+  const steps = Array.from(card.querySelectorAll('.j-step'));
+  assert.ok((steps[3] as HTMLElement).classList.contains('cur'));
+  assert.ok((steps[3] as HTMLElement).classList.contains('calm'));
+  assert.equal((steps[3].querySelector('.j-lab') as HTMLElement).textContent, '确认结果');
+  assert.doesNotMatch(`${$(w, '#pub-head').textContent} ${$(w, '#pub-foot').textContent}`, /已发布/);
+  assert.match($(w, '#activity-stream').textContent ?? '', /已提交，待链接确认/);
+});
+
 test('发布终态 → 折进活动流 + 卡片常驻转「上次发布」', async () => {
   const { w, pushStatus } = await boot({ publish: { state: 'pending', title: '秋日漫步', at: new Date().toISOString() } });
   pushStatus(makeStatus({ publish: { state: 'published', title: '秋日漫步', at: new Date().toISOString() } }));
