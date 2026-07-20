@@ -13,7 +13,10 @@ import type { ActionExecutor } from '../../src/locating/engine.js';
 import {
   buildXhsContentCaretStateExpression,
   formatXhsScheduleTime,
+  normalizeXhsContentSemanticText,
   PublishCommandDispatcher,
+  XHS_CONTENT_SEMANTIC_SIMILARITY_THRESHOLD,
+  xhsContentSemanticSimilarity,
 } from '../../src/flows/publish-command-handlers.js';
 import { TaskTakeoverError, type TakeoverCtx } from '../../src/execution/takeover.js';
 import type { PublishCommandPayload } from '../../src/comm/protocol.js';
@@ -569,15 +572,27 @@ class FakeCdp {
 
 function dispatcherWithCdp(cdp: FakeCdp, pacingEnabled = true): PublishCommandDispatcher {
   const doc = buildDom(publishPageHtml());
+  let now = 0;
   return new PublishCommandDispatcher(
     depsFor(doc, new FakeExecutor(doc)),
     {},
-    Date.now,
+    () => now,
     undefined,
     cdp as unknown as ConstructorParameters<typeof PublishCommandDispatcher>[4],
-    { sleep: instantSleep, enabled: pacingEnabled, random: () => 0.5 },
+    { sleep: async (ms) => { now += ms; }, enabled: pacingEnabled, random: () => 0.5 },
   );
 }
+
+test('正文语义投影：URL/emoji/换行/标点不参与，中文英文数字与 URL 后紧邻中文均保留', () => {
+  const value = '商汤（SenseTime）\n🔹 ７Ｂ：https://example.com/path?q=1后文 **OCR**';
+  assert.equal(normalizeXhsContentSemanticText(value), '商汤SenseTime7B后文OCR');
+});
+
+test('正文语义相似度边界：90% 放行，89% 拒绝', () => {
+  const expected = '甲'.repeat(100);
+  assert.equal(xhsContentSemanticSimilarity(expected, '甲'.repeat(90)), XHS_CONTENT_SEMANTIC_SIMILARITY_THRESHOLD);
+  assert.ok(xhsContentSemanticSimilarity(expected, '甲'.repeat(89)) < XHS_CONTENT_SEMANTIC_SIMILARITY_THRESHOLD);
+});
 
 test('拟人填写：CDP 路径标题/正文逐字打字（多次 insertText，拼接==原值）而非一次性灌入', async () => {
   const cdp = new FakeCdp();
@@ -715,11 +730,11 @@ test('全文回读：编辑器只吃进前 8 个字 → post_validate_failed（�
   assert.equal(cdp.text, '', '放弃这一步 MUST 清场，绝不把半截正文留在活着的编辑器里');
 });
 
-test('全文回读：正文被塞入多余字符（超容差）→ field_polluted + 清场，绝不发出去', async () => {
+test('全文回读：正文被塞入大量额外文字（相似度低于 90%）→ field_polluted + 清场', async () => {
   const cdp = new FakeCdp();
   const dispatcher = dispatcherWithCdp(cdp);
   const value = '干净正文';
-  // 打完之后页面被联想/输入法塞了一长串（远超 4 字容差）。
+  // 打完之后页面被联想/输入法塞了一长串，使对称相似度跌破 90%。
   const orig = cdp.send.bind(cdp);
   let typed = 0;
   (cdp as unknown as { send: typeof orig }).send = async (method, params) => {
@@ -733,13 +748,13 @@ test('全文回读：正文被塞入多余字符（超容差）→ field_pollute
   assert.equal(cdp.text, '', '同样 MUST 清场');
 });
 
-test('只比对汉字：正文外链/emoji 被编辑器改写（回读缺非汉字、汉字齐全）→ ok:true（record 133 回归）', async () => {
+test('语义文字：正文 URL/emoji 被编辑器改写但中文英文数字齐全 → ok:true（record 133 回归）', async () => {
   // 实机 record 133：正文含外链 https://... + 组合 emoji 🛠️，小红书富文本编辑器把外链吞掉/emoji 规整掉，
   // 回读文本与原始正文不再逐字一致。旧的精确子串校验会误判 post_validate_failed、连带整篇定时稿被 fail-closed 毙掉。
   const cdp = new FakeCdp();
   const dispatcher = dispatcherWithCdp(cdp);
   const value = '给Agent做长期记忆🛠️看仓库https://github.com/foo/bar就够了';
-  // 编辑器改写：打完后把非汉字（emoji/URL）从回读里抹掉，只留汉字 + 部分 ASCII。
+  // 编辑器改写：打完后把 emoji/URL 从回读里抹掉，中文与 Agent 等英文仍完整。
   const orig = cdp.send.bind(cdp);
   let typed = 0;
   (cdp as unknown as { send: typeof orig }).send = async (method, params) => {
@@ -750,18 +765,72 @@ test('只比对汉字：正文外链/emoji 被编辑器改写（回读缺非汉�
     return r as never;
   };
   const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
-  assert.equal(res.ok, true, '汉字部分一致即算填写成功，非汉字改写不参与比对');
-  assert.notEqual(cdp.text, '', '成功路径不清场');
+  assert.equal(res.ok, true, 'URL/emoji 改写不参与比较，中文英文数字语义文字完整即可成功');
+  assert.equal(cdp.text, '给Agent做长期记忆看仓库就够了', '测试必须真实执行 URL/emoji 改写，而不是原文原样通过');
 });
 
-test('只比对汉字·兜底：正文无汉字 → 回退精确子串校验，编辑器吞内容仍 post_validate_failed（不因空汉字恒真而假成功）', async () => {
-  // 无汉字时若仍走「汉字子串包含」，空子串恒被包含 = 静默假成功（红线）。故必须回退原精确子串校验。
+test('语义文字：纯英文正文吞字超过 10% → post_validate_failed', async () => {
   const value = 'Agent memory tool';
   const cdp = new FakeCdp({ swallowAfter: 5 }); // 只吃进前 5 字符 'Agent'，其余被吞
   const dispatcher = dispatcherWithCdp(cdp);
   const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
   assert.equal(res.ok, false);
-  assert.match(String(res.error), /^post_validate_failed/, '无汉字时回退全文精确校验，绝不假成功');
+  assert.match(String(res.error), /^post_validate_failed/, '英文是语义文字，超过容差的丢失绝不假成功');
+});
+
+test('语义文字：中文完整但英文模型名和数字大量丢失 → post_validate_failed', async () => {
+  const value = '商汤科技SenseTimeSenseNova7BMoTOCRGUI视觉模型';
+  const cdp = new FakeCdp();
+  const dispatcher = dispatcherWithCdp(cdp);
+  const originalSend = cdp.send.bind(cdp);
+  (cdp as unknown as { send: typeof originalSend }).send = async (method, params) => {
+    const result = await originalSend(method, params);
+    if (method === 'Input.insertText' && cdp.text === value) cdp.text = '商汤科技视觉模型';
+    return result as never;
+  };
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^post_validate_failed/, '不能因汉字仍完整就忽略英文和数字丢失');
+});
+
+test('语义文字：最终回读恰好保留 90% → 保底放行', async () => {
+  const value = '甲'.repeat(100);
+  const cdp = new FakeCdp();
+  const dispatcher = dispatcherWithCdp(cdp);
+  const originalSend = cdp.send.bind(cdp);
+  (cdp as unknown as { send: typeof originalSend }).send = async (method, params) => {
+    const result = await originalSend(method, params);
+    if (method === 'Input.insertText' && cdp.text === value) cdp.text = '甲'.repeat(90);
+    return result as never;
+  };
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, true, '相似度 >= 0.90 必须放行');
+  assert.equal(cdp.text.length, 90);
+});
+
+test('语义文字：最终回读仅保留 89% → 拒绝并清场', async () => {
+  const value = '甲'.repeat(100);
+  const cdp = new FakeCdp();
+  const dispatcher = dispatcherWithCdp(cdp);
+  const originalSend = cdp.send.bind(cdp);
+  (cdp as unknown as { send: typeof originalSend }).send = async (method, params) => {
+    const result = await originalSend(method, params);
+    if (method === 'Input.insertText' && cdp.text === value) cdp.text = '甲'.repeat(89);
+    return result as never;
+  };
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^post_validate_failed/);
+  assert.equal(cdp.text, '', '低于阈值必须清场');
+});
+
+test('语义文字为空：仅 URL/emoji 的正文仍走精确兜底，不能空投影假成功', async () => {
+  const value = 'https://example.com/only 🛠️';
+  const cdp = new FakeCdp({ swallowAfter: 0 });
+  const dispatcher = dispatcherWithCdp(cdp);
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^post_validate_failed/);
 });
 
 // ── change split-topic-roles：真话题 token 校验 + runAddTopic CDP 直驱（实机校准选择器）──

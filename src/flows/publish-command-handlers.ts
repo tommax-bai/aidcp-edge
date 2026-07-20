@@ -124,20 +124,74 @@ function normalizeFieldText(value: string): string {
 }
 
 /**
- * 只保留汉字（Unicode Han script，含各扩展区）。填写后置校验只比对汉字部分——
- * URL、emoji（及其变体选择符 U+FE0F / keycap U+20E3）、反引号代码块等**会被富文本编辑器自动改写**的
- * 非汉字内容不参与比对。治「假失败」：小红书正文编辑器会把外链转成「网页链接」卡片/吞掉、把 emoji 变体选择符
- * 规整掉、把反引号触发成内联代码，回读文本因此与原始正文不再逐字一致；旧的「回读须原样包含全文」精确子串校验
- * 会把这类合法正文判成 post_validate_failed、连带整篇定时稿被 fail-closed 毙掉（实机 record 133）。
+ * 只保留汉字（Unicode Han script，含各扩展区）。保留给 Enter 后过程前缀确认与既有标题验收；
+ * 正文最终回读改走包含英文和数字的 normalizeXhsContentSemanticText，避免丢失模型名仍被放行。
  */
 function hanziOnly(value: string): string {
   return value.replace(/[^\p{Script=Han}]/gu, '');
 }
 
+/** 小红书正文最终语义验收阈值：用户允许最多约一成字母/数字差异。 */
+export const XHS_CONTENT_SEMANTIC_SIMILARITY_THRESHOLD = 0.90;
+
 /**
- * 允许「多出来的字符数」。编辑器可能带入零宽字符/不间断空格之类的无害残留；
- * 超出这个容差就是真被塞了东西（残文没清干净 / 话题联想劫持插入），这样的正文 MUST NOT 发出去。
+ * URL 必须先整体移除；若先过滤符号，`https://example.com` 会残留为 `httpsexamplecom` 并被误计为正文。
+ * URL 字符集有意限于常见 ASCII URL，遇到紧邻中文的链接时不会把链接后的正文一起吞掉。
  */
+const XHS_CONTENT_URL_PATTERN = /(?:https?:\/\/|www\.)[a-z0-9._~:/?#@!$&()*+,;=%+-]+/giu;
+
+/**
+ * 小红书正文的可比较语义文字：NFKC 后只保留 Unicode 字母和数字。
+ * DOM 标签已由调用侧 innerText 排除；这里继续忽略 URL、空白/换行、标点、emoji 与 Markdown 定界符。
+ */
+export function normalizeXhsContentSemanticText(value: string): string {
+  return value
+    .normalize('NFKC')
+    .replace(XHS_CONTENT_URL_PATTERN, '')
+    .replace(/[^\p{L}\p{N}]/gu, '');
+}
+
+/** O(min(m,n)) 空间的 Unicode code point Levenshtein 距离。 */
+function unicodeLevenshteinDistance(left: string, right: string): number {
+  let leftPoints = Array.from(left);
+  let rightPoints = Array.from(right);
+  if (leftPoints.length < rightPoints.length) {
+    [leftPoints, rightPoints] = [rightPoints, leftPoints];
+  }
+  let previous = new Uint32Array(rightPoints.length + 1);
+  let current = new Uint32Array(rightPoints.length + 1);
+  for (let j = 0; j <= rightPoints.length; j++) previous[j] = j;
+  for (let i = 1; i <= leftPoints.length; i++) {
+    current[0] = i;
+    for (let j = 1; j <= rightPoints.length; j++) {
+      const substitutionCost = leftPoints[i - 1] === rightPoints[j - 1] ? 0 : 1;
+      current[j] = Math.min(
+        previous[j]! + 1,
+        current[j - 1]! + 1,
+        previous[j - 1]! + substitutionCost,
+      );
+    }
+    [previous, current] = [current, previous];
+  }
+  return previous[rightPoints.length]!;
+}
+
+/**
+ * 对输入值和 innerText 回读做相同语义投影后计算对称相似度。
+ * 两边都为空视为相同；仅一边为空视为完全不同。调用侧对“期望投影为空”另走非空精确兜底。
+ */
+export function xhsContentSemanticSimilarity(expected: string, actual: string): number {
+  const normalizedExpected = normalizeXhsContentSemanticText(expected);
+  const normalizedActual = normalizeXhsContentSemanticText(actual);
+  const expectedLength = Array.from(normalizedExpected).length;
+  const actualLength = Array.from(normalizedActual).length;
+  const longest = Math.max(expectedLength, actualLength);
+  if (longest === 0) return 1;
+  const distance = unicodeLevenshteinDistance(normalizedExpected, normalizedActual);
+  return 1 - distance / longest;
+}
+
+/** 既有标题/空语义正文精确兜底允许的额外字符数；普通正文改由 90% 对称相似度统一计分。 */
 const FILL_EXTRA_CHAR_TOLERANCE = 4;
 
 /** 清场三态：清干净 / 字段已不在（无残文可留）/ 字段还在但清不掉（真脏页）。 */
@@ -926,14 +980,12 @@ export class PublishCommandDispatcher {
    * 填标题/正文：标题是 React 受控 input、正文是 tiptap contenteditable——JS 直接赋 value/textContent 都不被框架接收。
    * 用 CDP 真实输入：聚焦目标（校准选择器）→ **清空并回读确认为空** → Input.insertText 逐块输入 → **全文回读校验**。
    *
-   * 红线（不假成功）：校验回读**全文的汉字部分**。老的「前 8 字」探针有两个致命面——
+   * 红线（不假成功）：校验回读全文的语义文字。老的「前 8 字」探针有两个致命面——
    * ① 被抢占 / 失败留下的残文 + 新正文追加，探针只看新正文的前 8 字，照样放行 ⇒ 真发出一篇拼接的帖子；
    * ② 正文被吞掉 90% 也判成功 ⇒ 真发出截断的帖子。全文回读堵住这两条。
    *
-   * 只比对汉字（hanziOnly）：正文含汉字时只要求回读的**汉字子串**原样包含期望的汉字子串——URL / emoji /
-   * 反引号等被编辑器自动改写的非汉字不参与比对，避免合法正文因编辑器改写被判「假失败」（治 record 133）。
-   * 汉字部分仍是全文回读（不是前 8 字），残文 / 截断照样抓得到；正文无汉字时回退原精确子串校验，
-   * 避免「空汉字子串恒被包含」退化成静默假成功（红线）。
+   * 正文最终回读先移除 URL，再保留 Unicode 字母和数字，语义相似度达到 90% 放行；空语义投影
+   * 回退既有精确子串校验，避免“空投影恒成功”。标题与 Enter 后过程确认保持既有严格口径。
    */
   private async runFillField(
     payload: PublishCommandPayload,
@@ -959,10 +1011,17 @@ export class PublishCommandDispatcher {
       : `document.querySelector('input[placeholder="填写标题会有更多赞哦"]') || document.querySelector('div.edit-container input.d-text') || document.querySelector('input.d-text')`;
     const FOCUS = String.raw`(() => { const el = ${findExpr}; if (!el) return false; try { el.scrollIntoView({ block: 'center' }); } catch (e) {} el.focus(); try { el.click && el.click(); } catch (e) {} return true; })()`;
     const expected = normalizeFieldText(value);
-    // 只保证汉字一致：含汉字时按汉字子串比对（非汉字改写不参与）；无汉字时回退原精确子串校验（避免空汉字恒真的假成功）。
+    // 标题沿用既有 Hanzi/精确口径；正文改用包含英文数字的语义文字，空投影时回退精确口径。
     const expectedHanzi = hanziOnly(expected);
-    const fillMatches = (readback: string): boolean =>
+    const expectedSemantic = isContent ? normalizeXhsContentSemanticText(value) : '';
+    const legacyFillMatches = (readback: string): boolean =>
       expectedHanzi ? hanziOnly(readback).includes(expectedHanzi) : readback.includes(expected);
+    const fillMatches = (readback: string): boolean => {
+      if (!isContent || expectedSemantic === '') return legacyFillMatches(readback);
+      const actualSemantic = normalizeXhsContentSemanticText(readback);
+      return actualSemantic.includes(expectedSemantic)
+        || xhsContentSemanticSimilarity(expectedSemantic, actualSemantic) >= XHS_CONTENT_SEMANTIC_SIMILARITY_THRESHOLD;
+    };
     try {
       await this.ensureInputEnabled();
       const f = await this.cdp.send<{ result?: { value?: boolean } }>('Runtime.evaluate', { expression: FOCUS, returnByValue: true });
@@ -1010,11 +1069,18 @@ export class PublishCommandDispatcher {
     if (text === undefined) {
       return this.abandonFill(base, finish(), findExpr, isContent, 'post_validate_failed');
     }
-    // 污染以汉字口径量：多出来的汉字 = 残文没清干净 / 被输入法或话题联想塞了东西 → 这样的正文 MUST NOT 发出去。
-    // 非汉字（编辑器把外链转卡片新增的「网页链接」等）不计入，与「只比对汉字」的验收口径一致。
-    const extra = expectedHanzi ? hanziOnly(text).length - expectedHanzi.length : text.length - expected.length;
-    if (extra > FILL_EXTRA_CHAR_TOLERANCE) {
-      return this.abandonFill(base, finish(), findExpr, isContent, `field_polluted: extra=${extra}`);
+    if (isContent && expectedSemantic !== '') {
+      const similarity = xhsContentSemanticSimilarity(expectedSemantic, text);
+      // probe 允许“完整期望文本 + 大量额外内容”先返回，以保留 field_polluted 的诚实分类；
+      // 真正成功仍必须达到统一的 90% 对称相似度。
+      if (similarity < XHS_CONTENT_SEMANTIC_SIMILARITY_THRESHOLD) {
+        return this.abandonFill(base, finish(), findExpr, isContent, `field_polluted: similarity=${similarity.toFixed(4)}`);
+      }
+    } else {
+      const extra = expectedHanzi ? hanziOnly(text).length - expectedHanzi.length : text.length - expected.length;
+      if (extra > FILL_EXTRA_CHAR_TOLERANCE) {
+        return this.abandonFill(base, finish(), findExpr, isContent, `field_polluted: extra=${extra}`);
+      }
     }
     return { ...base, ok: true, details: finish() };
   }
