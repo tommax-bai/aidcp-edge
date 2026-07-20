@@ -51,6 +51,28 @@ export interface FacebookFeedSurface {
   hasFeed: boolean;
   hydratedArticles: number;
   dialogOpen: boolean;
+  /** 首页壳已就绪；与 feed 容器/卡片是否存在分离。 */
+  homeReady: boolean;
+}
+
+export type FacebookHomeFeedState =
+  | 'cards_ready'
+  | 'empty_feed_confirmed'
+  | 'feed_still_loading'
+  | 'feed_unknown'
+  | 'login_required'
+  | 'blocked_by_captcha';
+
+export interface FacebookHomeFeedStateResult {
+  state: FacebookHomeFeedState;
+  generation?: string;
+}
+
+export interface FacebookHomeEmptyOptions {
+  minDocumentAgeMs?: number;
+  stableSamples?: number;
+  roundMs?: number;
+  wallClockMs?: number;
 }
 
 /** loading-aware 累积判稳结果。cards 为真抽卡（绝不含空壳）；degraded=到 wall-clock 仍未完全稳但有真卡。 */
@@ -110,6 +132,10 @@ const DEFAULTS: Required<FacebookFeedReaderOptions> = {
 /** settleCards 兜底默认（wall-clock 上限 / 每轮间隔）。 */
 const SETTLE_DEFAULT_WALL_CLOCK_MS = 3_500;
 const SETTLE_DEFAULT_ROUND_MS = 500;
+const HOME_EMPTY_MIN_DOCUMENT_AGE_MS = 8_000;
+const HOME_EMPTY_STABLE_SAMPLES = 3;
+const HOME_EMPTY_ROUND_MS = 600;
+const HOME_EMPTY_WALL_CLOCK_MS = 15_000;
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -188,7 +214,46 @@ const SURFACE_PROBE_JS = String.raw`(function(){${FB_FEED_LAYOUT_HELPERS_JS}
   var arts=feed?fbFeedSemanticCards(feed,false):(fallback||[]);
   var hydrated=0;
   for(var i=0;i<arts.length;i++){ if(arts[i].querySelector('h2 a, h3 a, h4 a')) hydrated++; }
-  return JSON.stringify({ href: location.href, hasFeed: !!feed||arts.length>0, hydratedArticles: hydrated, dialogOpen: !!document.querySelector('[role="dialog"]') });
+  var hostOk=/(^|\.)facebook\.com$/i.test(location.hostname||'');
+  var topLevel=false; try{ topLevel=window.top===window; }catch(e){}
+  var main=!!document.querySelector('[role="main"],main');
+  var shell=!!document.querySelector('[role="banner"],nav[aria-label]');
+  var login=!!document.querySelector('input[type="password"],form[action*="login"]');
+  var ready=document.readyState==='interactive'||document.readyState==='complete';
+  return JSON.stringify({ href: location.href, hasFeed: !!feed||arts.length>0, hydratedArticles: hydrated, dialogOpen: !!document.querySelector('[role="dialog"]'), homeReady: hostOk&&topLevel&&main&&shell&&!login&&ready });
+})()`;
+
+interface RawHomeState {
+  href: string;
+  generation: string;
+  ageMs: number;
+  homeReady: boolean;
+  hasCards: boolean;
+  loading: boolean;
+  explicitEmpty: boolean;
+  loginLike: boolean;
+  checkpointLike: boolean;
+}
+
+/** 首页空态完整样本：卡片、loading、generation 与同容器成对空态文字一次性同源读取。 */
+const HOME_STATE_JS = String.raw`(function(){/*__AIDCP_FB_HOME_STATE__*/${FB_FEED_LAYOUT_HELPERS_JS}
+  function norm(v){return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim().toLowerCase();}
+  var href=location.href, hostOk=/(^|\.)facebook\.com$/i.test(location.hostname||''), topLevel=false;try{topLevel=window.top===window;}catch(e){}
+  var main=document.querySelector('[role="main"],main'), shell=document.querySelector('[role="banner"],nav[aria-label]');
+  var loginLike=!!document.querySelector('input[type="password"],form[action*="login"]');
+  var checkpointLike=/\/checkpoint|\/recover/i.test(location.pathname)||!!document.querySelector('form[action*="checkpoint"]');
+  var ready=document.readyState==='interactive'||document.readyState==='complete';
+  var feed=document.querySelector('div[role="feed"]'), fallback=!feed&&fbFeedFallbackCards(document,false), arts=feed?fbFeedSemanticCards(feed,false):(fallback||[]), hasCards=false;
+  for(var i=0;i<arts.length;i++){if(arts[i].querySelector('h2 a,h3 a,h4 a')&&fbFeedVisible(arts[i])){hasCards=true;break;}}
+  var scope=main||document.body, loading=!!(scope&&scope.querySelector('[role="progressbar"],[aria-busy="true"]'));
+  var explicitEmpty=false, nodes=scope?scope.querySelectorAll('div,section'):[];
+  for(var n=0;n<nodes.length;n++){var raw=String(nodes[n].innerText||nodes[n].textContent||'').replace(/\s+/g,' ').trim();if(raw.length<15||raw.length>600)continue;var t=norm(raw);
+    var title=/(no more posts|there are no posts|khong con bai viet nao|khong co bai viet nao|没有更多帖子|没有帖子)/i.test(t);
+    var hint=/(add friends|them ban be|添加好友)/i.test(t)&&/(feed|bang feed|动态消息|信息流)/i.test(t);
+    if(title&&hint){explicitEmpty=true;break;}
+  }
+  var origin=Number(performance&&performance.timeOrigin)||0, age=origin?Math.max(0,Date.now()-origin):0;
+  return JSON.stringify({href:href,generation:String(origin),ageMs:age,homeReady:hostOk&&topLevel&&!!main&&!!shell&&!loginLike&&!checkpointLike&&ready,hasCards:hasCards,loading:loading,explicitEmpty:explicitEmpty,loginLike:loginLike,checkpointLike:checkpointLike});
 })()`;
 
 /** feed 区域内是否有 loading 信号——只按可访问性语义（progressbar / aria-busy），绝不认骨架屏 CSS 类名。 */
@@ -255,7 +320,7 @@ export class FacebookFeedReader {
       // feed 被反复钉回第一屏、永远下不去（真机 CDP 取证：timeOrigin 每 ~8s 重置一次）。FB 就地读不弹模态，dialogOpen
       // 对 FB 恒为良性浮层。既已在正确列表面且任一受支持 feed 结构在场，就是在目标——良性浮层绝不该触发整页重载；真正的
       // 登录/验证码阻断由下方 blockingReason 单独 fail-closed 兜底（不受此变更影响）。
-      onTarget = isFacebookListSurface(probe.surface) && probe.surface === want && probe.hasFeed;
+      onTarget = isFacebookListSurface(probe.surface) && probe.surface === want && (want === 'home' ? probe.homeReady : probe.hasFeed);
     } catch (err) {
       this.log(`[fb-feed] surface 探测失败，按需导航：${(err as Error).message}`);
       onTarget = false;
@@ -263,7 +328,7 @@ export class FacebookFeedReader {
     if (!onTarget) {
       // 导航决策以前不可观测（整页重载没日志）——把判据打出来，便于定位「为什么又整页导航/看着像刷新」。
       this.log(
-        `[fb-feed] ensureFeed 判非目标→整页导航 want=${classifyFacebookSurface(feedUrl)} surface=${probe?.surface ?? '探测失败'} hasFeed=${probe?.hasFeed} dialog=${probe?.dialogOpen} href=${(probe?.href ?? '').slice(0, 48)}`,
+        `[fb-feed] ensureFeed 判非目标→整页导航 want=${classifyFacebookSurface(feedUrl)} surface=${probe?.surface ?? '探测失败'} homeReady=${probe?.homeReady} hasFeed=${probe?.hasFeed} dialog=${probe?.dialogOpen} href=${(probe?.href ?? '').slice(0, 48)}`,
       );
       try {
         await this.cdp.send('Page.navigate', { url: feedUrl });
@@ -289,7 +354,7 @@ export class FacebookFeedReader {
 
   /** 探测当前页 surface（URL 归类 + feed/dialog/水合数）。 */
   async probeSurface(): Promise<FacebookFeedSurface> {
-    const raw = await evalJson<{ href: string; hasFeed: boolean; hydratedArticles: number; dialogOpen: boolean }>(
+    const raw = await evalJson<{ href: string; hasFeed: boolean; hydratedArticles: number; dialogOpen: boolean; homeReady?: boolean }>(
       this.cdp,
       SURFACE_PROBE_JS,
     );
@@ -299,7 +364,78 @@ export class FacebookFeedReader {
       hasFeed: raw.hasFeed === true,
       hydratedArticles: Number(raw.hydratedArticles) || 0,
       dialogOpen: raw.dialogOpen === true,
+      // 老测试/旧探针桩未提供该字段时保持原有幂等语义；真实脚本始终显式给 boolean。
+      homeReady: raw.homeReady !== false,
     };
+  }
+
+  /**
+   * 只确认 Facebook 首页显式空态。0 卡、超时或未知布局绝不推断为空；样本不能跨 URL/document generation 累积。
+   */
+  async confirmHomeEmpty(options: FacebookHomeEmptyOptions = {}): Promise<FacebookHomeFeedStateResult> {
+    const minAge = Math.max(0, options.minDocumentAgeMs ?? HOME_EMPTY_MIN_DOCUMENT_AGE_MS);
+    const stableNeeded = Math.max(1, options.stableSamples ?? HOME_EMPTY_STABLE_SAMPLES);
+    const roundMs = Math.max(1, options.roundMs ?? HOME_EMPTY_ROUND_MS);
+    const maxRounds = Math.max(stableNeeded, Math.ceil((options.wallClockMs ?? HOME_EMPTY_WALL_CLOCK_MS) / roundMs));
+    let generationKey = '';
+    let stable = 0;
+    let lastLoading = false;
+    for (let round = 0; round < maxRounds; round++) {
+      const blocked = await this.blockingReason();
+      if (blocked) return { state: blocked };
+      let sample: RawHomeState;
+      try {
+        sample = await evalJson<RawHomeState>(this.cdp, HOME_STATE_JS);
+      } catch {
+        return { state: 'feed_unknown' };
+      }
+      const surface = classifyFacebookSurface(sample.href);
+      if (surface === 'login' || sample.loginLike) return { state: 'login_required' };
+      if (surface === 'checkpoint' || sample.checkpointLike) return { state: 'blocked_by_captcha' };
+      if (surface !== 'home' || !sample.homeReady) return { state: 'feed_unknown' };
+      if (sample.hasCards) return { state: 'cards_ready', generation: sample.generation };
+      lastLoading = sample.loading;
+      const nextKey = `${sample.href}|${sample.generation}`;
+      if (nextKey !== generationKey) {
+        generationKey = nextKey;
+        stable = 0;
+      }
+      if (sample.loading || sample.ageMs < minAge || !sample.explicitEmpty) {
+        stable = 0;
+      } else {
+        stable += 1;
+      }
+      if (stable >= stableNeeded) {
+        // 动作前最终完整复检：不复用上一样本；任何卡/loading/generation/阻断变化都取消确认。
+        const finalBlocked = await this.blockingReason();
+        if (finalBlocked) return { state: finalBlocked };
+        let finalSample: RawHomeState;
+        try {
+          finalSample = await evalJson<RawHomeState>(this.cdp, HOME_STATE_JS);
+        } catch {
+          return { state: 'feed_unknown' };
+        }
+        if (finalSample.hasCards) return { state: 'cards_ready', generation: finalSample.generation };
+        const finalKey = `${finalSample.href}|${finalSample.generation}`;
+        if (
+          classifyFacebookSurface(finalSample.href) === 'home' &&
+          finalSample.homeReady &&
+          finalKey === generationKey &&
+          finalSample.ageMs >= minAge &&
+          !finalSample.loading &&
+          finalSample.explicitEmpty &&
+          !finalSample.loginLike &&
+          !finalSample.checkpointLike
+        ) {
+          return { state: 'empty_feed_confirmed', generation: finalSample.generation };
+        }
+        stable = 0;
+        generationKey = finalKey;
+        lastLoading = finalSample.loading;
+      }
+      if (round < maxRounds - 1) await this.sleep(roundMs);
+    }
+    return { state: lastLoading ? 'feed_still_loading' : 'feed_unknown', ...(generationKey ? { generation: generationKey } : {}) };
   }
 
   /** 扫描当前视口 feed 卡片 → 规范化 → 去重 → FacebookFeedCard[]（跳过未水合空壳）。 */

@@ -206,7 +206,7 @@ test('fb-feed: 默认滚动走 650px 多帧手势，wheel 生效后不再补 scr
 
 /** SURFACE_PROBE 返回预置 surface；记录 Page.navigate 调用；其它 evaluate 返回 false。 */
 function surfaceCdp(
-  surface: { href: string; hasFeed: boolean; hydratedArticles: number; dialogOpen: boolean },
+  surface: { href: string; hasFeed: boolean; hydratedArticles: number; dialogOpen: boolean; homeReady?: boolean },
   navs: string[],
 ): BrowseCdp {
   return {
@@ -232,6 +232,16 @@ test('ensureFeed 幂等：已在首页且有 feed、无 dialog → 不导航', a
   const r = await reader.ensureFeed('https://www.facebook.com/');
   assert.equal(r.ok, true);
   assert.deepEqual(navs, [], '已在首页不重新导航（消掉滚动重置回归）');
+});
+
+test('ensureFeed 幂等：首页壳已就绪但 0 卡/无 feed 容器 → 不重复导航', async () => {
+  const navs: string[] = [];
+  const reader = new FacebookFeedReader({
+    cdp: surfaceCdp({ href: 'https://www.facebook.com/', hasFeed: false, hydratedArticles: 0, dialogOpen: false, homeReady: true }, navs),
+    sleep: async () => {},
+  });
+  assert.deepEqual(await reader.ensureFeed('https://www.facebook.com/'), { ok: true });
+  assert.deepEqual(navs, [], '首页 readiness 与卡片存在性分离，真实空首页不刷新');
 });
 
 test('ensureFeed 幂等：已在首页有 feed、但挂着瞬时/良性 dialog → 仍不导航（不因良性浮层整页重载）', async () => {
@@ -359,6 +369,106 @@ test('settleCards：触达上限 0 真卡（只有空壳）+ 无 loading → no_
   const r = await reader.settleCards({ wallClockMs: 200, roundMs: 100 });
   assert.equal(r.cards.length, 0);
   assert.equal(r.reason, 'no_feed');
+});
+
+// ─────────────────────────── 首页显式空态连续确认 ────────────────────────────
+
+type HomeSample = {
+  href: string;
+  generation: string;
+  ageMs: number;
+  homeReady: boolean;
+  hasCards: boolean;
+  loading: boolean;
+  explicitEmpty: boolean;
+  loginLike: boolean;
+  checkpointLike: boolean;
+};
+
+const EMPTY_HOME: HomeSample = {
+  href: 'https://www.facebook.com/',
+  generation: '1000',
+  ageMs: 9_000,
+  homeReady: true,
+  hasCards: false,
+  loading: false,
+  explicitEmpty: true,
+  loginLike: false,
+  checkpointLike: false,
+};
+
+function homeStateCdp(samples: HomeSample[]): BrowseCdp {
+  let index = 0;
+  return {
+    send: async (method, params: Record<string, unknown> = {}) => {
+      if (method !== 'Runtime.evaluate') return {} as never;
+      const expression = String(params.expression ?? '');
+      if (expression.includes('__AIDCP_FB_HOME_STATE__')) {
+        const sample = samples[Math.min(index, samples.length - 1)];
+        index += 1;
+        return { result: { value: JSON.stringify(sample) } } as never;
+      }
+      return { result: { value: JSON.stringify(false) } } as never;
+    },
+  };
+}
+
+test('confirmHomeEmpty：同 generation 三次显式空态 + 最终复检才确认', async () => {
+  const reader = new FacebookFeedReader({ cdp: homeStateCdp([EMPTY_HOME, EMPTY_HOME, EMPTY_HOME, EMPTY_HOME]), sleep: async () => {} });
+  const result = await reader.confirmHomeEmpty({ minDocumentAgeMs: 8_000, stableSamples: 3, roundMs: 1, wallClockMs: 5 });
+  assert.deepEqual(result, { state: 'empty_feed_confirmed', generation: '1000' });
+});
+
+test('confirmHomeEmpty[jsdom]：越南语标题+说明必须在同一紧凑容器才构成显式空态', async () => {
+  const dom = layoutDom(
+    '<div role="banner"></div><main role="main"><section><div>' +
+      '<h2>Không còn bài viết nào</h2>' +
+      '<div>Thêm bạn bè để xem nhiều bài viết hơn trong Bảng feed.</div>' +
+      '</div></section></main>',
+  );
+  Object.defineProperty(dom.window.document, 'readyState', { configurable: true, value: 'complete' });
+  const reader = new FacebookFeedReader({ cdp: layoutCdp(dom), sleep: async () => {} });
+  const result = await reader.confirmHomeEmpty({ minDocumentAgeMs: 0, stableSamples: 3, roundMs: 1, wallClockMs: 5 });
+  assert.equal(result.state, 'empty_feed_confirmed');
+});
+
+test('confirmHomeEmpty：加载晚到真卡立即胜出，取消 fallback', async () => {
+  const reader = new FacebookFeedReader({
+    cdp: homeStateCdp([
+      { ...EMPTY_HOME, loading: true, explicitEmpty: false },
+      EMPTY_HOME,
+      EMPTY_HOME,
+      { ...EMPTY_HOME, hasCards: true, explicitEmpty: false },
+    ]),
+    sleep: async () => {},
+  });
+  const result = await reader.confirmHomeEmpty({ stableSamples: 3, roundMs: 1, wallClockMs: 6 });
+  assert.equal(result.state, 'cards_ready');
+});
+
+test('confirmHomeEmpty：URL/document generation 变化清零旧样本', async () => {
+  const next = { ...EMPTY_HOME, generation: '2000', ageMs: 9_000 };
+  const reader = new FacebookFeedReader({
+    cdp: homeStateCdp([EMPTY_HOME, EMPTY_HOME, next, next, next, next]),
+    sleep: async () => {},
+  });
+  const result = await reader.confirmHomeEmpty({ stableSamples: 3, roundMs: 1, wallClockMs: 8 });
+  assert.deepEqual(result, { state: 'empty_feed_confirmed', generation: '2000' });
+});
+
+test('confirmHomeEmpty：about:blank/login/checkpoint/未知 0 卡均不算首页空态', async () => {
+  const cases: Array<[HomeSample, string]> = [
+    [{ ...EMPTY_HOME, href: 'about:blank', homeReady: false }, 'feed_unknown'],
+    [{ ...EMPTY_HOME, href: 'https://www.facebook.com/login/', homeReady: false, loginLike: true }, 'login_required'],
+    [{ ...EMPTY_HOME, href: 'https://www.facebook.com/checkpoint/', homeReady: false, checkpointLike: true }, 'blocked_by_captcha'],
+    [{ ...EMPTY_HOME, explicitEmpty: false }, 'feed_unknown'],
+    [{ ...EMPTY_HOME, ageMs: 2_000 }, 'feed_unknown'],
+  ];
+  for (const [sample, expected] of cases) {
+    const reader = new FacebookFeedReader({ cdp: homeStateCdp([sample]), sleep: async () => {} });
+    const result = await reader.confirmHomeEmpty({ stableSamples: 3, roundMs: 1, wallClockMs: 3 });
+    assert.equal(result.state, expected);
+  }
 });
 
 // ─────────────────────────── 首页图标点击换批（Q3）───────────────────────────
