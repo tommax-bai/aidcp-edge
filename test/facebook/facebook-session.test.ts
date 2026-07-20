@@ -696,6 +696,50 @@ test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，�
   assert.equal(h.cards.at(-1)?.cards[0].noteId, second.noteId);
 });
 
+test('Reels 全部导航方式均未证明下一条时，session 诚实回 scroll/no_target', async () => {
+  const first: FacebookReelCard = {
+    noteId: 'https://www.facebook.com/reel/111',
+    summary: 'first reel summary',
+    videoKey: 'video-111',
+  };
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [{ cards: [], degraded: false, reason: 'no_feed' }],
+    homeState: { state: 'empty_feed_confirmed', generation: 'g1' },
+    reelCards: [first],
+  });
+  await h.session.start();
+  await h.session.onCloudCommand(makeEnv('page.scroll', { reason: 'empty_feed_reels_fallback' }));
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  assert.equal(h.actions.at(-1)?.action, 'scroll');
+  assert.equal(h.actions.at(-1)?.ok, false);
+  assert.equal(h.actions.at(-1)?.reason, 'no_target');
+});
+
+test('Reels 视频已切但路由尚未水合时，route+videoKey 新身份仍可进入下一轮', async () => {
+  const first: FacebookReelCard = {
+    noteId: 'https://www.facebook.com/reel/111',
+    summary: 'first reel summary',
+    videoKey: 'video-element-1',
+  };
+  const transitioned: FacebookReelCard = {
+    noteId: first.noteId,
+    summary: 'transitioned reel summary',
+    videoKey: 'video-element-2',
+  };
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [{ cards: [], degraded: false, reason: 'no_feed' }],
+    homeState: { state: 'empty_feed_confirmed', generation: 'g1' },
+    reelCards: [first, transitioned],
+  });
+  await h.session.start();
+  await h.session.onCloudCommand(makeEnv('page.scroll', { reason: 'empty_feed_reels_fallback' }));
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  assert.equal(h.cards.length, 3);
+  assert.equal(h.cards.at(-1)?.cards[0].title, transitioned.summary);
+});
+
 test('首页 0 卡但 feed_unknown 时不报告 empty，也不进入 Reels', async () => {
   const h = makeSession({
     mode: 'on',

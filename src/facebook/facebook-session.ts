@@ -234,6 +234,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
    * 首屏 / 刷新 / 返回是「新批」——重置后按当前批重新播种。
    */
   private seenPostIds = new Set<string>();
+  /** Reels 路由可能晚于视频切换；用 route+videoKey 去重，不能只按暂未更新的地址栏拒绝新视频。 */
+  private seenReelIdentities = new Set<string>();
   /** 最近一次就地读的时刻 + 读地板（毫秒）：inline read 停留兜底（task 4.2），下一条 scroll 前 max（不累加）。 */
   private inlineReadStartedAt = 0;
   private inlineReadFloorMs = 0;
@@ -1191,6 +1193,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   /** 「新批」重置游标（首屏 / 刷新 / 搜索结果 = 全新列表）。 */
   private resetCursor(): void {
     this.seenPostIds.clear();
+    this.seenReelIdentities.clear();
   }
 
   /** 播种：把整批卡标记为已上报并连续重排 index（不过滤）。首屏/刷新/返回用——保证云端总有候选。 */
@@ -1271,8 +1274,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private async scrollReels(): Promise<TerminalReport> {
     const card = await this.reelsReader.next();
     if (!card) return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'no_target' } };
-    const key = canonicalPostId(card.noteId);
-    if (key && this.seenPostIds.has(key)) {
+    const identity = this.reelIdentity(card);
+    if (this.seenReelIdentities.has(identity)) {
       return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'no_target' } };
     }
     this.seedReel(card);
@@ -1282,6 +1285,11 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private seedReel(card: FacebookReelCard): void {
     const key = canonicalPostId(card.noteId);
     if (key) this.seenPostIds.add(key);
+    this.seenReelIdentities.add(this.reelIdentity(card));
+  }
+
+  private reelIdentity(card: FacebookReelCard): string {
+    return `${canonicalPostId(card.noteId) || card.noteId}\n${card.videoKey}`;
   }
 
   private toReelPageCards(card: FacebookReelCard): PageCardsPayload {

@@ -4,7 +4,8 @@
  * Reels is not an article/feed DOM. The page keeps neighbouring videos mounted, so every read/write
  * starts by resolving the single video with the largest viewport intersection and binding it to the
  * canonical `/reel/<id>` route. All writes use trusted CDP mouse events and require a same-Reel
- * post-condition; rounded counters never prove success.
+ * post-condition; rounded counters never prove success. Forward navigation prefers trusted keyboard
+ * and wheel input before the DOM button fallback, and every method must prove route/video movement.
  */
 
 import { evalJson, type BrowseCdp } from '../browse/cdp-util.js';
@@ -22,6 +23,7 @@ export interface FacebookReelsReaderDeps {
   cdp: BrowseCdp;
   sleep?: (ms: number) => Promise<void>;
   logger?: (message: string) => void;
+  random?: () => number;
 }
 
 export interface FacebookReelsReaderOptions {
@@ -29,6 +31,8 @@ export interface FacebookReelsReaderOptions {
   settleMs?: number;
   verifyRounds?: number;
   verifyMs?: number;
+  navigationRounds?: number;
+  navigationMs?: number;
 }
 
 const DEFAULTS: Required<FacebookReelsReaderOptions> = {
@@ -36,6 +40,8 @@ const DEFAULTS: Required<FacebookReelsReaderOptions> = {
   settleMs: 500,
   verifyRounds: 10,
   verifyMs: 250,
+  navigationRounds: 6,
+  navigationMs: 250,
 };
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -88,19 +94,24 @@ function observation(card: FacebookReelCard): FacebookLikeObservation {
 }
 
 /** Marker names intentionally remain in expressions: focused tests can script CDP without coupling to minified DOM text. */
-const REEL_PROBE_JS = String.raw`(function(){/*__AIDCP_REEL_PROBE__*/
+export function buildReelProbeJs(): string {
+  return String.raw`(function(){/*__AIDCP_REEL_PROBE__*/
   function text(el){return String((el&&el.innerText)||(el&&el.textContent)||'').replace(/\s+/g,' ').trim();}
   function visible(el){if(!el||!el.getBoundingClientRect)return false;var r=el.getBoundingClientRect();var s=getComputedStyle(el);return r.width>1&&r.height>1&&r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden';}
   function canonical(){try{var u=new URL(location.href);if(!/(^|\.)facebook\.com$/i.test(u.hostname))return '';var m=u.pathname.match(/^\/reel\/([^/?#]+)/i);return m?'https://www.facebook.com/reel/'+m[1]:'';}catch(e){return '';}}
   function area(r){var l=Math.max(0,r.left),t=Math.max(0,r.top),rr=Math.min(innerWidth,r.right),b=Math.min(innerHeight,r.bottom);return Math.max(0,rr-l)*Math.max(0,b-t);}
   function active(){var vs=Array.from(document.querySelectorAll('video')).map(function(v,i){var r=v.getBoundingClientRect();return {v:v,i:i,r:r,a:area(r),d:Math.abs((r.top+r.bottom)/2-innerHeight/2)};}).filter(function(x){return x.a>0;}).sort(function(a,b){return b.a-a.a||a.d-b.d;});if(!vs.length)return null;if(vs.length>1&&Math.abs(vs[0].a-vs[1].a)<1&&Math.abs(vs[0].d-vs[1].d)<1)return {ambiguous:true};return vs[0];}
+  function videoKey(v){var w=window,state=w.__aidcpReelVideoKeyState;if(!state){state={seq:0,keys:new WeakMap()};w.__aidcpReelVideoKeyState=state;}var id=state.keys.get(v);if(!id){id=++state.seq;state.keys.set(v,id);}return (v.currentSrc||v.src||v.poster||v.getAttribute('src')||'')+'@element:'+id;}
   function lineNoise(s){return /^(follow|following|theo doi|đang theo dõi|关注|已关注|audio|original audio|am thanh goc|原声|like|thich|赞|comment|share)$/i.test(s);}
   var id=canonical();if(!id)return JSON.stringify({ok:false,reason:'not_reel'});var a=active();if(!a)return JSON.stringify({ok:false,reason:'no_active_video'});if(a.ambiguous)return JSON.stringify({ok:false,reason:'ambiguous_target'});
   var r=a.r, candidates=[];Array.from(document.querySelectorAll('[dir="auto"],span,div')).forEach(function(el){if(!visible(el)||el.children.length>6)return;var er=el.getBoundingClientRect(),s=text(el);if(s.length<2||s.length>1500||lineNoise(s))return;if(er.left>r.left+r.width*.68||er.top<r.top+r.height*.42||er.bottom>r.bottom+30)return;var nested=Array.from(el.children).some(function(c){return text(c)===s&&text(c).length>1;});if(nested)return;var score=s.length+(er.top-r.top)*.02-(Math.max(0,r.left-er.left))*0.01;candidates.push({s:s,score:score,el:el});});candidates.sort(function(x,y){return y.score-x.score;});
   var summary=candidates.length?candidates[0].s:'';var author='';if(candidates.length){var root=candidates[0].el.parentElement;for(var up=0;root&&up<5;up++,root=root.parentElement){var h=root.querySelector('h1 a,h2 a,h3 a,h4 a,a[role="link"]');var ht=text(h);if(ht&&ht!==summary&&ht.length<100){author=ht;break;}}}
-  var key=(a.v.currentSrc||a.v.src||a.v.getAttribute('src')||'')+'@'+a.i+'@'+Math.round(r.top)+':'+Math.round(r.left);
+  var key=videoKey(a.v);
   return JSON.stringify({ok:true,noteId:id,summary:summary,author:author,videoKey:key,videoRect:{left:r.left,top:r.top,right:r.right,bottom:r.bottom}});
 })()`;
+}
+
+const REEL_PROBE_JS = buildReelProbeJs();
 
 function buildLikeTargetJs(): string {
   return String.raw`(function(){/*__AIDCP_REEL_LIKE_TARGET__*/
@@ -123,12 +134,19 @@ const LIKE_VERIFY_JS = String.raw`(function(){/*__AIDCP_REEL_LIKE_VERIFY__*/
   return JSON.stringify({noteId:canon(),selected:candidates.length===1,label:candidates.length===1?(candidates[0].getAttribute('aria-label')||txt(candidates[0])):'',ambiguous:candidates.length>1});
 })()`;
 
-const NEXT_TARGET_JS = String.raw`(function(){/*__AIDCP_REEL_NEXT_TARGET__*/
-  function canon(){try{var u=new URL(location.href),m=u.pathname.match(/^\/reel\/([^/?#]+)/i);return m?'https://www.facebook.com/reel/'+m[1]:'';}catch(e){return '';}}function ar(r){return Math.max(0,Math.min(innerWidth,r.right)-Math.max(0,r.left))*Math.max(0,Math.min(innerHeight,r.bottom)-Math.max(0,r.top));}
+export function buildNextTargetJs(): string {
+  return String.raw`(function(){/*__AIDCP_REEL_NEXT_TARGET__*/
+  function text(e){return String((e&&e.getAttribute&&e.getAttribute('aria-label'))||(e&&e.innerText)||(e&&e.textContent)||'').replace(/\s+/g,' ').trim();}function canon(){try{var u=new URL(location.href),m=u.pathname.match(/^\/reel\/([^/?#]+)/i);return m?'https://www.facebook.com/reel/'+m[1]:'';}catch(e){return '';}}function ar(r){return Math.max(0,Math.min(innerWidth,r.right)-Math.max(0,r.left))*Math.max(0,Math.min(innerHeight,r.bottom)-Math.max(0,r.top));}
   var vs=Array.from(document.querySelectorAll('video')).map(function(v,i){var r=v.getBoundingClientRect();return {v:v,i:i,r:r,a:ar(r),d:Math.abs((r.top+r.bottom)/2-innerHeight/2)};}).filter(function(x){return x.a>0;}).sort(function(a,b){return b.a-a.a||a.d-b.d;});if(!canon()||!vs.length)return JSON.stringify({ok:false,found:false});if(vs.length>1&&Math.abs(vs[0].a-vs[1].a)<1&&Math.abs(vs[0].d-vs[1].d)<1)return JSON.stringify({ok:true,found:false,ambiguous:true});var r=vs[0].r;
-  var buttons=Array.from(document.querySelectorAll('[role="button"],button')).map(function(b){var q=b.getBoundingClientRect();return {b:b,q:q};}).filter(function(x){return x.q.width>=36&&x.q.width<=68&&x.q.height>=36&&x.q.height<=68&&x.q.left>Math.max(innerWidth*.8,r.right+120)&&x.q.right<=innerWidth+2&&x.q.top>0&&x.q.bottom<innerHeight&&x.b.getAttribute('aria-disabled')!=='true'&&!x.b.disabled;}).sort(function(a,b){return a.q.top-b.q.top;});
-  if(buttons.length<2)return JSON.stringify({ok:true,found:false,ambiguous:buttons.length>2});var lower=buttons[buttons.length-1];return JSON.stringify({ok:true,found:true,ambiguous:buttons.length>2,cx:lower.q.left+lower.q.width/2,cy:lower.q.top+lower.q.height/2,noteId:canon(),videoKey:(vs[0].v.currentSrc||vs[0].v.src||'')+'@'+vs[0].i});
+  var next=/(next|ti[eế]p theo|下一|下一个|下一張|下一张|往下)/i,previous=/(previous|trước|上一|上一个|上一張|上一张|往上)/i;
+  var buttons=Array.from(document.querySelectorAll('[role="button"],button')).map(function(b){var q=b.getBoundingClientRect();return {b:b,q:q,label:text(b)};}).filter(function(x){return x.q.width>=36&&x.q.width<=68&&x.q.height>=36&&x.q.height<=68&&x.q.left>Math.max(innerWidth*.8,r.right+120)&&x.q.right<=innerWidth+2&&x.q.top>=Math.max(64,r.top+r.height*.25)&&x.q.bottom<=Math.min(innerHeight,r.bottom-r.height*.12)&&x.b.getAttribute('aria-disabled')!=='true'&&!x.b.disabled;}).sort(function(a,b){return a.q.top-b.q.top;});
+  var labelled=buttons.filter(function(x){return next.test(x.label)&&!previous.test(x.label);});if(labelled.length>1)return JSON.stringify({ok:true,found:false,ambiguous:true});var target=labelled.length===1?labelled[0]:null;
+  if(!target){var unknown=buttons.filter(function(x){return !previous.test(x.label);});if(unknown.length===2)target=unknown[1];else return JSON.stringify({ok:true,found:false,ambiguous:unknown.length>1});}
+  return JSON.stringify({ok:true,found:true,ambiguous:false,cx:target.q.left+target.q.width/2,cy:target.q.top+target.q.height/2,label:target.label,noteId:canon(),videoKey:(vs[0].v.currentSrc||vs[0].v.src||'')+'@'+vs[0].i});
 })()`;
+}
+
+const NEXT_TARGET_JS = buildNextTargetJs();
 
 async function trustedClick(cdp: BrowseCdp, x: number, y: number): Promise<void> {
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
@@ -136,16 +154,38 @@ async function trustedClick(cdp: BrowseCdp, x: number, y: number): Promise<void>
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
 }
 
+async function trustedArrowDown(cdp: BrowseCdp): Promise<void> {
+  const key = { key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40 };
+  await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...key });
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...key });
+}
+
+async function trustedWheel(cdp: BrowseCdp, x: number, y: number, deltaY: number): Promise<void> {
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: 0, deltaY });
+}
+
+export function randomReelWheelDistance(random: () => number = Math.random): number {
+  const sample = Number(random());
+  const bounded = Number.isFinite(sample) ? Math.min(1, Math.max(0, sample)) : 0.5;
+  return Math.min(100, 70 + Math.floor(bounded * 31));
+}
+
+function movedFrom(card: FacebookReelCard, previous: { noteId: string; videoKey: string }): boolean {
+  return card.noteId !== previous.noteId || card.videoKey !== previous.videoKey;
+}
+
 export class FacebookReelsReader {
   private readonly cdp: BrowseCdp;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: (message: string) => void;
+  private readonly random: () => number;
   private readonly opts: Required<FacebookReelsReaderOptions>;
 
   constructor(deps: FacebookReelsReaderDeps, options: FacebookReelsReaderOptions = {}) {
     this.cdp = deps.cdp;
     this.sleep = deps.sleep ?? defaultSleep;
     this.log = deps.logger ?? (() => {});
+    this.random = deps.random ?? Math.random;
     this.opts = { ...DEFAULTS, ...options };
   }
 
@@ -175,6 +215,28 @@ export class FacebookReelsReader {
       if (round < this.opts.settleRounds - 1) await this.sleep(this.opts.settleMs);
     }
     return null;
+  }
+
+  private async waitForMovement(previous: { noteId: string; videoKey: string }): Promise<FacebookReelCard | null> {
+    let videoMoved: FacebookReelCard | null = null;
+    for (let round = 0; round < this.opts.navigationRounds; round++) {
+      const card = await this.readActive();
+      if (card && card.noteId !== previous.noteId) return card;
+      if (card && card.videoKey !== previous.videoKey) videoMoved = card;
+      if (round < this.opts.navigationRounds - 1) await this.sleep(this.opts.navigationMs);
+    }
+    return videoMoved;
+  }
+
+  /** Re-probe immediately before a fallback write; late movement wins and suppresses that write. */
+  private async beforeFallback(previous: { noteId: string; videoKey: string }): Promise<{
+    card: FacebookReelCard;
+    moved: boolean;
+    videoRect?: { left: number; top: number; right: number; bottom: number };
+  } | null> {
+    const probe = await this.readProbe();
+    const card = probe ? reelCard(probe) : null;
+    return card ? { card, moved: movedFrom(card, previous), ...(probe?.videoRect ? { videoRect: probe.videoRect } : {}) } : null;
   }
 
   async like(noteId: string, shadow: boolean): Promise<FacebookLikeResult> {
@@ -212,15 +274,82 @@ export class FacebookReelsReader {
 
   async next(): Promise<FacebookReelCard | null> {
     const before = await this.readActive();
-    if (!before) return null;
+    if (!before) {
+      this.log('[fb-reels] 下一条失败 method=probe reason=no_active_reel');
+      return null;
+    }
+
+    let fresh = await this.beforeFallback(before);
+    if (!fresh) return null;
+    if (fresh.moved) return fresh.card;
+    try {
+      await trustedArrowDown(this.cdp);
+      const moved = await this.waitForMovement(before);
+      if (moved) {
+        this.log(`[fb-reels] 下一条成功 method=keyboard from=${before.noteId} to=${moved.noteId}`);
+        return moved;
+      }
+      this.log('[fb-reels] 下一条未变化 method=keyboard reason=keyboard_unchanged');
+    } catch (error) {
+      this.log(`[fb-reels] 下一条输入失败 method=keyboard reason=${(error as Error).message}`);
+    }
+
+    fresh = await this.beforeFallback(before);
+    if (!fresh) return null;
+    if (fresh.moved) return fresh.card;
+    const rect = fresh.videoRect;
+    if (rect) {
+      const deltaY = randomReelWheelDistance(this.random);
+      try {
+        await trustedWheel(this.cdp, (rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2, deltaY);
+        const moved = await this.waitForMovement(before);
+        if (moved) {
+          this.log(`[fb-reels] 下一条成功 method=wheel deltaY=${deltaY} from=${before.noteId} to=${moved.noteId}`);
+          return moved;
+        }
+        this.log(`[fb-reels] 下一条未变化 method=wheel deltaY=${deltaY} reason=wheel_unchanged`);
+      } catch (error) {
+        this.log(`[fb-reels] 下一条输入失败 method=wheel deltaY=${deltaY} reason=${(error as Error).message}`);
+      }
+    } else {
+      this.log('[fb-reels] 下一条跳过 method=wheel reason=no_active_video_rect');
+    }
+
+    fresh = await this.beforeFallback(before);
+    if (!fresh) return null;
+    if (fresh.moved) return fresh.card;
     let target: ActionTarget;
     try {
       target = await evalJson<ActionTarget>(this.cdp, NEXT_TARGET_JS);
+    } catch (error) {
+      this.log(`[fb-reels] 下一条探测失败 method=button reason=${(error as Error).message}`);
+      return null;
+    }
+    if (target.ambiguous) {
+      this.log('[fb-reels] 下一条失败 method=button reason=button_ambiguous');
+      return null;
+    }
+    if (!target.ok || !target.found || target.noteId !== before.noteId || !Number.isFinite(target.cx) || !Number.isFinite(target.cy)) {
+      const late = await this.readActive();
+      if (late && movedFrom(late, before)) return late;
+      this.log('[fb-reels] 下一条失败 method=button reason=button_no_target');
+      return null;
+    }
+    await trustedClick(this.cdp, Number(target.cx), Number(target.cy));
+    const moved = await this.waitForMovement(before);
+    if (moved) {
+      this.log(`[fb-reels] 下一条成功 method=button from=${before.noteId} to=${moved.noteId}`);
+      return moved;
+    }
+    this.log('[fb-reels] 下一条失败 method=button reason=button_unchanged');
+    return null;
+  }
+
+  private async readProbe(): Promise<ReelProbe | null> {
+    try {
+      return await evalJson<ReelProbe>(this.cdp, REEL_PROBE_JS);
     } catch {
       return null;
     }
-    if (!target.ok || !target.found || target.ambiguous || !Number.isFinite(target.cx) || !Number.isFinite(target.cy)) return null;
-    await trustedClick(this.cdp, Number(target.cx), Number(target.cy));
-    return this.settleActive(before);
   }
 }
