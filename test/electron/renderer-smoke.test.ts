@@ -21,6 +21,8 @@ test('客户端主体、活动流和开发者日志仅隐藏纵向滚动条', ()
   assert.doesNotMatch(rule[1], /height|display|scrollbar-width/, '不得连带隐藏或改变横向滚动条');
   assert.match(styles, /\.stream-wrap\s*\{[^}]*overflow-y:\s*auto;/s, '活动流必须继续原生纵向滚动');
   assert.match(styles, /\.dev pre\s*\{[^}]*overflow-y:\s*auto;/s, '开发者日志必须继续原生纵向滚动');
+  assert.match(styles, /\.command-diagnostic-list::-webkit-scrollbar:vertical\s*\{[^}]*width:\s*0;/s, '命令列表只隐藏纵向滚动条');
+  assert.match(styles, /\.command-diagnostic-list\s*\{[^}]*overflow-y:\s*auto;/s, '命令列表必须继续原生纵向滚动');
 });
 const environmentDisplayNameSrc = readFileSync(join(electronDir, 'renderer/environment-display-name.cjs'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
@@ -153,6 +155,82 @@ test('中文化：新增控件文案齐全', () => {
   for (const s of ['浏览器引擎', '本机 Chrome', '添加环境', '加入现有环境', '新建环境', '刷新', '手动填写', '创建环境', '账号人设', '窗口停放', '主屏停放', '副屏停放', '边缘停放', '完全移出', '指纹浏览器高级设置']) {
     assert.ok(html.includes(s), `index.html 应含「${s}」`);
   }
+});
+
+test('开发者详情：旧状态为空态，结构化命令展示诚实阶段且不进入活动流', async () => {
+  const legacy = await boot(makeStub({ getStatus: async () => makeStatus() }));
+  assert.match($(legacy, '#command-diagnostic-list').textContent || '', /当前环境暂无引擎命令/);
+
+  const now = Date.now();
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      envId: 'env-command-a',
+      envName: '环境 A',
+      commandDiagnostics: [{
+        key: '1234abcd',
+        type: 'interaction.comment',
+        stage: 'dispatched',
+        summary: '评论正文 8 字',
+        receivedAt: now - 1_000,
+        updatedAt: now,
+      }],
+    }),
+  }));
+  const item = w.document.querySelector('[data-command-key="1234abcd"]') as unknown as HTMLElement;
+  assert.ok(item);
+  assert.match(item.textContent || '', /评论/);
+  assert.match(item.textContent || '', /已交给执行器/);
+  assert.match(item.textContent || '', /评论正文 8 字/);
+  assert.match($(w, '#dev-section').textContent || '', /不代表平台成功/);
+  assert.doesNotMatch($(w, '#activity-stream').textContent || '', /已交给执行器|interaction\.comment/);
+});
+
+test('开发者详情：命令按当前环境隔离，非法或过期状态不渲染', async () => {
+  let pushStatus: ((status: unknown) => void) | undefined;
+  const now = Date.now();
+  const statusFor = (envId: string, key: string, summary: string) => makeStatus({
+    envId,
+    envName: `环境 ${envId}`,
+    commandDiagnostics: [{
+      key,
+      type: envId === 'A' ? 'browse.next' : 'publish.command',
+      stage: envId === 'A' ? 'dispatched' : 'rejected',
+      summary,
+      receivedAt: now - 1_000,
+      updatedAt: now,
+    }, {
+      key: 'ffffffff',
+      type: 'search.execute',
+      stage: 'received',
+      summary: '过期命令',
+      receivedAt: now - 31 * 60 * 1_000,
+      updatedAt: now - 31 * 60 * 1_000,
+    }, {
+      key: 'bad-key',
+      type: 'search.execute',
+      stage: 'received',
+      summary: '非法命令',
+      receivedAt: now,
+      updatedAt: now,
+    }],
+  });
+  const w = await boot(makeStub({
+    onStatusUpdate: (cb) => { pushStatus = cb; },
+    getStatus: async () => statusFor('A', 'aaaaaaaa', 'A 环境命令'),
+  }));
+  assert.match($(w, '#command-diagnostic-list').textContent || '', /A 环境命令/);
+  assert.doesNotMatch($(w, '#command-diagnostic-list').textContent || '', /过期命令|非法命令/);
+
+  pushStatus?.(statusFor('B', 'bbbbbbbb', 'B 环境命令'));
+  await tick();
+  assert.match($(w, '#command-diagnostic-list').textContent || '', /A 环境命令/);
+  assert.doesNotMatch($(w, '#command-diagnostic-list').textContent || '', /B 环境命令/);
+
+  const rowB = w.document.querySelector('.rail-row[data-env-id="B"]') as unknown as HTMLElement;
+  assert.ok(rowB);
+  rowB.dispatchEvent(new w.Event('click', { bubbles: true }));
+  assert.match($(w, '#command-diagnostic-list').textContent || '', /B 环境命令/);
+  assert.doesNotMatch($(w, '#command-diagnostic-list').textContent || '', /A 环境命令/);
 });
 
 test('探测就绪 → 静默自动列出环境（无徽标、无需先点刷新）', async () => {

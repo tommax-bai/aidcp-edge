@@ -44,6 +44,7 @@ const {
 } = require('./facebook-persona-auto-fill.cjs');
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
+const commandDiagnostics = require('./command-diagnostics.cjs');
 const { normalizeProxyRuntime } = require('./proxy-runtime.cjs');
 const {
   DEFAULT_PARKING_MODE,
@@ -1396,6 +1397,7 @@ function makeStatus(provider) {
     risk: 'normal',
     edge: 'stopped',
     lastMessage: '客户端已就绪；自动化尚未启动。',
+    commandDiagnostics: [],
     edgeFailure: null,
     updatedAt: new Date().toISOString(),
     account: null,
@@ -4181,6 +4183,25 @@ function handleEdgeLogLine(handle, message, isError = false) {
     handlePublishApprovalReply(message.slice('[publish-approval-reply]'.length).trim());
     return;
   }
+  // 引擎命令诊断是核心本地生成的白名单结构化行：主进程再验一次形状，按环境合并进内存态。
+  // 无论解析成功与否，原始 JSON 都不得进入 edge.log / renderer 原始日志；只留下固定安全痕迹。
+  if (message.startsWith(commandDiagnostics.PREFIX)) {
+    const receivedAt = Date.now();
+    const event = commandDiagnostics.parseCommandDiagnosticLine(message, receivedAt);
+    const trace = commandDiagnostics.commandDiagnosticTraceLine(event);
+    appendEdgeLog(handle.envId, trace, isError);
+    if (!event) {
+      updateStatus(handle, { lastMessage: trace });
+      return;
+    }
+    const entries = commandDiagnostics.mergeCommandDiagnostic(
+      handle.status.commandDiagnostics,
+      event,
+      receivedAt,
+    );
+    updateStatus(handle, { commandDiagnostics: entries, lastMessage: trace });
+    return;
+  }
   // 代理运行事件带当前公网 IP，只属于内存态：落盘日志与开发者详情均只记“已更新”，不持久化 IP。
   const proxyRuntimeLine = message.includes('[ui-event]') && message.includes('"kind":"proxyRuntime"');
   const structuredMessage = message;
@@ -4844,6 +4865,10 @@ function statusOf(handle) {
       browserState: 'closed',
     };
   }
+  handle.status.commandDiagnostics = commandDiagnostics.pruneCommandDiagnostics(
+    handle.status.commandDiagnostics,
+    Date.now(),
+  );
   return {
     ...handle.status,
     ...lifecycleAxes(handle),

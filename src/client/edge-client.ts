@@ -59,6 +59,12 @@ import {
 } from '../comm/protocol.js';
 import { isInteractionMessageType, validateInteractionEnvelope } from '../wechat-channels/protocol-validation.js';
 import { EDGE_BUILD_CAPABILITIES } from './build-capabilities.js';
+import {
+  commandDiagnosticLine,
+  isActiveCommandType,
+  type CommandDiagnosticReason,
+  type CommandDiagnosticStage,
+} from './command-diagnostics.js';
 import { operationDescriptorFor } from './operation-registry.js';
 
 /** 最小 WebSocket 抽象（与 cdp/client.ts 同形，便于测试注入） */
@@ -654,24 +660,30 @@ export class EdgeClient {
     }
 
     if (!operationDescriptorFor(env.type)) {
+      this.emitCommandDiagnostic(env, 'rejected', 'operation_unclassified');
       this.opts.logger(`[edge-client] operation_unclassified type=${env.type}; rejected`);
       return;
     }
 
     // 2) 视频号 interaction 主动命令/迟到 ack：协商 + strict payload + 显式 route 三道闸。
     if (isInteractionMessageType(env.type)) {
+      const diagnostic = isActiveCommandType(env.type);
+      if (diagnostic) this.emitCommandDiagnostic(env, 'received');
       if (!this.isInteractionInboxNegotiated()) {
+        if (diagnostic) this.emitCommandDiagnostic(env, 'rejected', 'capability_not_negotiated');
         this.opts.logger(`[edge-client] 忽略未协商的 interaction type=${env.type}`);
         return;
       }
       const extension = interactionExtensionCapability(env.type);
       if (extension && !this.supportsCapability(extension)) {
+        if (diagnostic) this.emitCommandDiagnostic(env, 'rejected', 'extension_not_negotiated');
         this.opts.logger(`[edge-client] 忽略未协商扩展 capability=${extension} type=${env.type}`);
         return;
       }
       try {
         validateInteractionEnvelope(env);
       } catch (error) {
+        if (diagnostic) this.emitCommandDiagnostic(env, 'rejected', 'payload_invalid');
         this.opts.logger(
           `[edge-client] 拒绝非法 interaction type=${env.type}: ${error instanceof Error ? error.message : 'invalid payload'}`,
         );
@@ -689,7 +701,12 @@ export class EdgeClient {
         env.type === 'interaction.offboard.command' ||
         env.type === 'interaction.offboard.ack'
       ) {
-        this.interactionHandler?.(
+        if (!this.interactionHandler) {
+          this.emitCommandDiagnostic(env, 'rejected', 'handler_unavailable');
+          return;
+        }
+        this.emitCommandDiagnostic(env, 'dispatched');
+        this.interactionHandler(
           env as Envelope<
             InteractionSyncAckPayload | InteractionSyncRequestPayload | InteractionReplySendPayload | InteractionAuthReopenPayload |
             InteractionBrowserControlPayload |
@@ -703,6 +720,7 @@ export class EdgeClient {
 
     // 3) 云端主动下发的命令（以 plan.response 承载有序步骤）
     if (env.type === 'plan.response') {
+      this.emitCommandDiagnostic(env, 'received');
       void this.onCommand(env);
       return;
     }
@@ -749,27 +767,57 @@ export class EdgeClient {
       env.type === 'notification.browse_follows' ||
       env.type === 'notification.back_home'
     ) {
-      this.browseHandler?.(env);
+      this.emitCommandDiagnostic(env, 'received');
+      if (!this.browseHandler) {
+        this.emitCommandDiagnostic(env, 'rejected', 'handler_unavailable');
+        return;
+      }
+      this.emitCommandDiagnostic(env, 'dispatched');
+      this.browseHandler(env);
       return;
     }
 
     if (env.type === 'publish.request') {
-      this.publishHandler?.(env as Envelope<PublishRequestPayload>);
+      this.emitCommandDiagnostic(env, 'received');
+      if (!this.publishHandler) {
+        this.emitCommandDiagnostic(env, 'rejected', 'handler_unavailable');
+        return;
+      }
+      this.emitCommandDiagnostic(env, 'dispatched');
+      this.publishHandler(env as Envelope<PublishRequestPayload>);
       return;
     }
 
     if (env.type === 'publish.command') {
-      this.publishAtomHandler?.(env as Envelope<PublishCommandPayload>);
+      this.emitCommandDiagnostic(env, 'received');
+      if (!this.publishAtomHandler) {
+        this.emitCommandDiagnostic(env, 'rejected', 'handler_unavailable');
+        return;
+      }
+      this.emitCommandDiagnostic(env, 'dispatched');
+      this.publishAtomHandler(env as Envelope<PublishCommandPayload>);
       return;
     }
 
     if (env.type === 'edge.task.acquire' || env.type === 'edge.task.release') {
-      this.edgeTaskHandler?.(env as Envelope<EdgeTaskAcquirePayload | EdgeTaskReleasePayload>);
+      this.emitCommandDiagnostic(env, 'received');
+      if (!this.edgeTaskHandler) {
+        this.emitCommandDiagnostic(env, 'rejected', 'handler_unavailable');
+        return;
+      }
+      this.emitCommandDiagnostic(env, 'dispatched');
+      this.edgeTaskHandler(env as Envelope<EdgeTaskAcquirePayload | EdgeTaskReleasePayload>);
       return;
     }
 
     if (env.type === 'captcha.assist.capture' || env.type === 'captcha.assist.click') {
-      this.captchaAssistHandler?.(env as Envelope<CaptchaAssistCapturePayload | CaptchaAssistClickPayload>);
+      this.emitCommandDiagnostic(env, 'received');
+      if (!this.captchaAssistHandler) {
+        this.emitCommandDiagnostic(env, 'rejected', 'handler_unavailable');
+        return;
+      }
+      this.emitCommandDiagnostic(env, 'dispatched');
+      this.captchaAssistHandler(env as Envelope<CaptchaAssistCapturePayload | CaptchaAssistClickPayload>);
       return;
     }
 
@@ -786,7 +834,9 @@ export class EdgeClient {
   private async onCommand(env: Envelope): Promise<void> {
     const payload = env.payload as PlanResponsePayload;
     const steps = payload?.steps ?? [];
-    this.opts.logger(`[edge-client] 收到命令：${steps.length} 步（${payload?.reason ?? ''}）`);
+    this.emitCommandDiagnostic(env, 'dispatched');
+    this.opts.logger(`[edge-client] 收到命令：${steps.length} 步`);
+    let failed = false;
     for (const step of steps) {
       let result: ActionResultPayload;
       try {
@@ -800,8 +850,9 @@ export class EdgeClient {
           reason: `runner_error:${(err as Error).message}`,
         };
       }
+      if (!result.ok) failed = true;
       this.opts.logger(
-        `[edge-client] 步骤 ${step.actionId} → ${result.ok ? 'OK' : 'FAIL'}（${result.outcome}: ${result.reason}）`,
+        `[edge-client] 命令步骤 → ${result.ok ? 'OK' : 'FAIL'}（${result.outcome}）`,
       );
       try {
         this.send('action.result', result, env.id);
@@ -809,6 +860,15 @@ export class EdgeClient {
         // 连接可能已断；忽略回传失败
       }
     }
+    this.emitCommandDiagnostic(env, failed ? 'failed' : 'completed', failed ? 'step_failed' : undefined);
+  }
+
+  private emitCommandDiagnostic(
+    env: { id?: unknown; type?: unknown; payload?: unknown },
+    stage: CommandDiagnosticStage,
+    reason?: CommandDiagnosticReason,
+  ): void {
+    this.opts.logger(commandDiagnosticLine(env, stage, reason));
   }
 
   private failAllPending(err: Error): void {

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EdgeClient, type CloudWebSocket } from '../../src/client/edge-client.js';
 import { EDGE_BUILD_CAPABILITIES } from '../../src/client/build-capabilities.js';
+import { COMMAND_DIAGNOSTIC_PREFIX } from '../../src/client/command-diagnostics.js';
 import { makeEnvelope, type Envelope, type PublishRequestPayload, type PublishResultPayload } from '../../src/comm/protocol.js';
 
 class FakeWebSocket implements CloudWebSocket {
@@ -43,11 +44,17 @@ class FakeWebSocket implements CloudWebSocket {
   }
 }
 
-async function connectClient(ws: FakeWebSocket): Promise<EdgeClient> {
+async function connectClient(
+  ws: FakeWebSocket,
+  options: {
+    logger?: (message: string) => void;
+    runner?: ConstructorParameters<typeof EdgeClient>[0]['runner'];
+  } = {},
+): Promise<EdgeClient> {
   const client = new EdgeClient({
     url: 'ws://test',
     edgeId: 'edge-1',
-    runner: {
+    runner: options.runner ?? {
       run: async () => ({
         actionId: 'noop',
         ok: true,
@@ -63,7 +70,7 @@ async function connectClient(ws: FakeWebSocket): Promise<EdgeClient> {
       return () => ids[index++] ?? `id-${index}`;
     })(),
     clock: () => 1,
-    logger: () => {},
+    logger: options.logger ?? (() => {}),
   });
   const connecting = client.connect();
   ws.emitOpen();
@@ -72,6 +79,11 @@ async function connectClient(ws: FakeWebSocket): Promise<EdgeClient> {
   await connecting;
   ws.sent.length = 0;
   return client;
+}
+
+function diagnosticEvents(logs: string[]): Array<Record<string, unknown>> {
+  return logs.filter((line) => line.startsWith(`${COMMAND_DIAGNOSTIC_PREFIX} `))
+    .map((line) => JSON.parse(line.slice(COMMAND_DIAGNOSTIC_PREFIX.length + 1)) as Record<string, unknown>);
 }
 
 async function connectInteractionClient(
@@ -870,4 +882,104 @@ test('edge-client: Cloud rebind closes only the old transport and completes a fr
   assert.equal(client.getSessionId(), 'new-session');
   assert.equal(client.isConnected(), true);
   await client.closeAndWait();
+});
+
+test('edge-client: active browse command emits received then dispatched without exposing payload content', async () => {
+  const ws = new FakeWebSocket();
+  const logs: string[] = [];
+  const client = await connectClient(ws, { logger: (line) => logs.push(line) });
+  let routed = false;
+  client.onBrowseCommand(() => { routed = true; });
+
+  ws.emitMessage(makeEnvelope('search.execute', 'search-secret-id', 1, {
+    keyword: '绝密关键词',
+    source: 'manager',
+    maxResults: 12,
+    container: 'https://www.facebook.com/groups/private?token=secret',
+  }));
+
+  assert.equal(routed, true);
+  const events = diagnosticEvents(logs);
+  assert.deepEqual(events.map((event) => event.stage), ['received', 'dispatched']);
+  assert.equal(events[0].type, 'search.execute');
+  assert.match(String(events[0].summary), /搜索词 5 字/);
+  assert.match(String(events[0].summary), /已限定搜索容器/);
+  assert.doesNotMatch(logs.join('\n'), /绝密关键词|facebook\.com|token=secret|search-secret-id/);
+});
+
+test('edge-client: command without a handler is rejected and never presented as executed', async () => {
+  const ws = new FakeWebSocket();
+  const logs: string[] = [];
+  await connectClient(ws, { logger: (line) => logs.push(line) });
+
+  ws.emitMessage(makeEnvelope('note.open', 'note-open-1', 1, {
+    noteId: 'private-note-id',
+    url: 'https://example.test/secret?auth=token',
+    surface: 'detail',
+    purpose: 'read',
+  }));
+
+  const events = diagnosticEvents(logs);
+  assert.deepEqual(events.map((event) => event.stage), ['received', 'rejected']);
+  assert.equal(events[1].reason, 'handler_unavailable');
+  assert.doesNotMatch(logs.join('\n'), /private-note-id|example\.test|auth=token/);
+});
+
+test('edge-client: plan diagnostics expose local step result but not plan/action/result text', async () => {
+  const ws = new FakeWebSocket();
+  const logs: string[] = [];
+  await connectClient(ws, {
+    logger: (line) => logs.push(line),
+    runner: {
+      run: async () => ({
+        actionId: 'private-action-id',
+        ok: false,
+        outcome: 'escalated',
+        attempts: 1,
+        reason: 'private-result-detail',
+      }),
+    },
+  });
+
+  ws.emitMessage(makeEnvelope('plan.response', 'plan-private-id', 1, {
+    reason: 'private-model-reason',
+    steps: [{ actionId: 'private-action-id', op: 'input', goal: 'private-goal', value: 'private-value' }],
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const events = diagnosticEvents(logs);
+  assert.deepEqual(events.map((event) => event.stage), ['received', 'dispatched', 'failed']);
+  assert.equal(events[2].reason, 'step_failed');
+  assert.doesNotMatch(
+    logs.join('\n'),
+    /private-model-reason|private-action-id|private-result-detail|private-goal|private-value|plan-private-id/,
+  );
+});
+
+test('edge-client: unnegotiated interaction command is visibly rejected without reply disclosure', async () => {
+  const ws = new FakeWebSocket();
+  const logs: string[] = [];
+  await connectInteractionClient(ws, false, (line) => logs.push(line));
+
+  ws.emitMessage(makeEnvelope('interaction.reply.send', 'reply-private-id', 1, {
+    jobId: 'job-secret',
+    attemptId: 'attempt-secret',
+    idempotencyKey: 'idempotency-secret',
+    envKey: 'env-secret',
+    accountId: 'account-secret',
+    platform: 'wechat_channels',
+    channel: 'dm',
+    target: {
+      threadExternalId: 'thread-secret',
+      inboundMessageExternalId: 'message-secret',
+      parentExternalId: null,
+    },
+    content: { type: 'text', text: '绝密私信正文' },
+    expiresAt: Date.now() + 60_000,
+  }));
+
+  const events = diagnosticEvents(logs);
+  assert.deepEqual(events.map((event) => event.stage), ['received', 'rejected']);
+  assert.equal(events[1].reason, 'capability_not_negotiated');
+  assert.doesNotMatch(logs.join('\n'), /绝密私信正文|job-secret|thread-secret|account-secret|reply-private-id/);
 });

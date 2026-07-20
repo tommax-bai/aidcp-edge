@@ -566,6 +566,15 @@
       <details class="dev hidden" id="dev-section">
         <summary>开发者详情</summary>
         <div class="hp-row"><span class="hp-label">自动化引擎连接</span><strong id="engine-link-diagnostic" class="badge">未连接</strong></div>
+        <section class="command-diagnostics" aria-labelledby="command-diagnostics-title">
+          <div class="command-diagnostics-head">
+            <strong id="command-diagnostics-title">引擎命令</strong>
+            <span>仅表示 Edge 接收和交付状态，不代表平台成功</span>
+          </div>
+          <div id="command-diagnostic-list" class="command-diagnostic-list" role="list">
+            <p id="command-diagnostic-empty" class="command-diagnostic-empty">当前环境暂无引擎命令</p>
+          </div>
+        </section>
         <section id="interaction-test-reset" class="iw-test-reset hidden" aria-label="视频号测试数据重置">
           <div class="iw-test-reset-copy">
             <strong>视频号测试数据</strong>
@@ -577,6 +586,7 @@
           </div>
           <p id="interaction-test-reset-status" aria-live="polite">每次只重置一个渠道；离线也可点，清空立即生效，联网后自动重拉。</p>
         </section>
+        <div class="dev-subhead">原始日志</div>
         <pre id="last-message">等待状态…</pre>
       </details>
       </main>

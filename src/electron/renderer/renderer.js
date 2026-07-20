@@ -58,6 +58,8 @@ const fields = {
     join_group: document.querySelector('#joins-bar'),
   },
   lastMessage: document.querySelector('#last-message'),
+  commandDiagnosticList: document.querySelector('#command-diagnostic-list'),
+  commandDiagnosticEmpty: document.querySelector('#command-diagnostic-empty'),
   sessionFab: document.querySelector('#session-fab'),
   sessionClose: document.querySelector('#session-close'),
   clientSessionFoot: document.querySelector('#client-session-foot'),
@@ -1163,6 +1165,85 @@ function renderLog() {
     return `<div class="log-entry"><span class="log-time">${time}</span> ${escapeHtml(entry.message)}</div>`;
   }).join('');
   fields.lastMessage.scrollTop = fields.lastMessage.scrollHeight;
+}
+
+const COMMAND_DIAGNOSTIC_RETENTION_MS = 30 * 60 * 1000;
+const COMMAND_DIAGNOSTIC_STAGES = {
+  received: '已收到',
+  rejected: '已拒绝',
+  dispatched: '已交给执行器',
+  completed: '步骤已完成',
+  failed: '步骤失败',
+};
+const COMMAND_DIAGNOSTIC_REASONS = {
+  operation_unclassified: '未登记的命令',
+  capability_not_negotiated: '能力未协商',
+  extension_not_negotiated: '扩展能力未协商',
+  payload_invalid: '命令载荷不合法',
+  handler_unavailable: '本地处理器不可用',
+  step_failed: '至少一个步骤失败',
+};
+const COMMAND_DIAGNOSTIC_LABELS = {
+  'plan.response': '顺序步骤',
+  'session.end': '结束浏览',
+  'browse.next': '浏览下一条',
+  'browse.scroll': '页面滚动',
+  'note.open': '打开内容',
+  'note.close': '关闭内容',
+  'search.execute': '关键词搜索',
+  'page.scroll': '页面滚动',
+  'feed.refresh': '刷新信息流',
+  'pacing.update': '更新节奏',
+  'interaction.like': '点赞',
+  'interaction.collect': '收藏',
+  'interaction.follow': '关注',
+  'interaction.comment': '评论',
+  'interaction.like_comment': '评论点赞',
+  'group.join': '群组加入',
+  'publish.request': '发布请求',
+  'publish.command': '发布步骤',
+  'edge.task.acquire': '申请写租约',
+  'edge.task.release': '释放写租约',
+  'captcha.assist.capture': '验证码采集',
+  'captcha.assist.click': '验证码协助',
+  'interaction.reply.send': '发送互动回复',
+};
+
+function safeCommandDiagnostics(status, now) {
+  const entries = Array.isArray(status && status.commandDiagnostics) ? status.commandDiagnostics : [];
+  return entries.filter((entry) => entry && typeof entry === 'object'
+    && typeof entry.key === 'string' && /^[a-f0-9]{8}$/.test(entry.key)
+    && typeof entry.type === 'string' && /^[a-z][a-z0-9._-]{0,63}$/.test(entry.type)
+    && Object.prototype.hasOwnProperty.call(COMMAND_DIAGNOSTIC_STAGES, entry.stage)
+    && typeof entry.summary === 'string' && entry.summary.length > 0 && entry.summary.length <= 160
+    && !/[\r\n]/.test(entry.summary)
+    && Number.isFinite(entry.updatedAt)
+    && entry.updatedAt >= now - COMMAND_DIAGNOSTIC_RETENTION_MS
+    && entry.updatedAt <= now + 60_000)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 50);
+}
+
+function renderCommandDiagnostics(status, now = Date.now()) {
+  if (!fields.commandDiagnosticList) return;
+  const entries = safeCommandDiagnostics(status, now);
+  if (entries.length === 0) {
+    fields.commandDiagnosticList.innerHTML = '<p id="command-diagnostic-empty" class="command-diagnostic-empty">当前环境暂无引擎命令</p>';
+    fields.commandDiagnosticEmpty = fields.commandDiagnosticList.querySelector('#command-diagnostic-empty');
+    return;
+  }
+  fields.commandDiagnosticList.innerHTML = entries.map((entry) => {
+    const label = COMMAND_DIAGNOSTIC_LABELS[entry.type] || entry.type;
+    const stage = COMMAND_DIAGNOSTIC_STAGES[entry.stage];
+    const reason = typeof entry.reason === 'string' ? COMMAND_DIAGNOSTIC_REASONS[entry.reason] : '';
+    const detail = reason ? `${entry.summary} · ${reason}` : entry.summary;
+    const time = new Date(entry.updatedAt).toLocaleTimeString();
+    return `<article class="command-diagnostic-item" role="listitem" data-command-key="${escapeHtml(entry.key)}" data-command-stage="${escapeHtml(entry.stage)}">
+      <div class="command-diagnostic-row"><strong>${escapeHtml(label)}</strong><span class="command-diagnostic-stage ${escapeHtml(entry.stage)}">${escapeHtml(stage)}</span><time>${escapeHtml(time)}</time></div>
+      <p>${escapeHtml(detail)}</p>
+      <code>${escapeHtml(entry.type)} · #${escapeHtml(entry.key)}</code>
+    </article>`;
+  }).join('');
 }
 
 function escapeHtml(s) {
@@ -3277,6 +3358,7 @@ function render(status) {
   renderUsageSummary(status); // 各计数一律 ?? 0 兜底（旧形状 / 部分补丁都不出空数字）
   // 原始日志记录已移到 routeStatus（按 envId 分桶、覆盖未选中环境）；此处仅刷当前环境的日志 DOM。
   renderLog();
+  renderCommandDiagnostics(status, now);
   renderEdgeFailure(status);
   renderTitlebar(status);
   renderRuntimeGuidance(status, now);
