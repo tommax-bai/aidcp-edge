@@ -352,7 +352,7 @@ const STATUS_LABELS = {
   core: { stopped: '未连接', starting: '启动中', online: '在线', restarting: '重启中', error: '异常' },
   engineLink: { disconnected: '未连接', connecting: '连接中', connected: '已连接', reconnecting: '重连中', error: '异常' },
   cloudAxis: { connecting: '连接中', connected: '已连接', reconnecting: '重连中', offline: '离线' },
-  automation: { stopped: '未启动', starting: '启动中', ready: '已就绪', running: '运行中', waiting_resource: '等待资源', pausing: '暂停中', paused: '已暂停', stopping: '关闭中', error: '异常' },
+  automation: { stopped: '未启动', starting: '启动中', ready: '已就绪', running: '运行中', waiting_resource: '排队中', pausing: '暂停中', paused: '已暂停', stopping: '关闭中', error: '异常' },
   browser: { closed: '已关闭', queued: '排队中', starting: '启动中', ready: '已就绪', blocked: '等待人工处理', closing: '关闭中', releasing: '关闭中', error: '异常' },
 };
 

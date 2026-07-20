@@ -38,6 +38,7 @@ interface PublishDockV { collapsed: boolean; label: string; summary: string }
 const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   relTime: (from: number, now: number) => string;
   synthesizeHealth: (s: Record<string, unknown>) => Health;
+  fleetLevel: (s: Record<string, unknown>, now: number) => { level: string; needsAction: boolean; label: string };
   bandTone: (s: Record<string, unknown>) => string;
   detailRows: (s: Record<string, unknown>) => Array<{ key: string; label: string; value: string }>;
   presenceView: (s: Record<string, unknown>, now: number) => PresenceV;
@@ -115,6 +116,21 @@ test('健康合成：自动化首次连接 → 是启动中，绝不冒充「正
   assert.equal(booting.code, 'ready');
   assert.doesNotMatch(booting.label, /重新连接/); // 「重」断言了一次从未发生过的连接
   assert.equal(booting.label, '启动中');
+});
+
+test('健康合成：首次账号待确认且槽位已满 → 只显示排队中', () => {
+  const queued = st({
+    automationState: 'waiting_resource',
+    engineLinkState: 'disconnected',
+    browserState: 'queued',
+    coreState: 'stopped',
+    edge: 'idle',
+    edgeFailure: null,
+  });
+  assert.equal(uiLogic.synthesizeHealth(queued).label, '排队中');
+  assert.equal(uiLogic.fleetLevel(queued, Date.now()).label, '排队中');
+  assert.equal(uiLogic.detailRows(queued).find((row) => row.key === 'automationState')?.value, '排队中');
+  assert.equal(uiLogic.detailRows(queued).find((row) => row.key === 'engineLinkState')?.value, '未连接');
 });
 
 test('健康合成：自动化引擎连上过之后掉线 → 才是真的「重连中」', () => {

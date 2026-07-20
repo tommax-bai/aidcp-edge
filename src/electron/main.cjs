@@ -1908,6 +1908,7 @@ function parkForSlot(handle, admitted) {
   updateStatus(handle, {
     ...(parked ? {} : { edge: 'idle', session: 'idle' }),
     lastMessage: `排队等槽位（${place}）：${admitted.message}。有账号进入待机让出槽位后会自动${parked ? '唤醒' : '启动'}。`,
+    ...clearEdgeFailurePatch(handle),
     ...presencePatch(`排队等槽位（${place}）`),
   });
   startSlotWaitTimer();
@@ -3047,6 +3048,12 @@ async function startBrowserAbsentCore(handle, {
     const coreOnlyBootstrap = !slotAdmission && !queueAdmission;
     const bootstrap = await resolveControlBootstrap(handle);
     if (!bootstrap.ok) {
+      // 首次未绑定环境无法在浏览器缺席时可信确定平台账号，但这不改变已经取得的槽位排队资格。
+      // 等槽位后走真实浏览器启动与身份确认；此刻只呈现排队，绝不把正常前置条件写成引擎异常。
+      if (slotAdmission && bootstrap.reason === 'binding_unknown') {
+        parkForSlot(handle, slotAdmission);
+        return false;
+      }
       if (!retainStartQueueReservation) releaseStartQueue(handle);
       const browserState = coreOnlyBootstrap
         ? '浏览器保持关闭'
