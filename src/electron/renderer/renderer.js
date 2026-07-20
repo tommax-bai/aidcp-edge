@@ -3614,7 +3614,8 @@ function renderFab(status) {
     const browser = status.browserState || (status.browserStandby ? 'closed' : status.edge === 'running' ? 'ready' : 'closed');
     const closed = browser === 'closed' || browser === 'error';
     const browserPending = browser === 'queued' || browser === 'starting' || browser === 'closing' || browser === 'releasing';
-    const automationActive = automation !== 'stopped' && automation !== 'error';
+    // error 仍代表本机启动意图为 enabled，只是引擎已终态失败；保留「关闭」让操作者能明确结束本机意图。
+    const automationActive = automation !== 'stopped';
     fields.sessionClose.classList.remove('hidden');
     fields.sessionClose.textContent = automationActive ? '关闭' : '浏览器';
     const secondaryLabel = automationActive

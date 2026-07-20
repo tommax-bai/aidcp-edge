@@ -46,6 +46,15 @@ test('edge close stops automation engine while explicit browser close only relea
   const stopAutomation = functionSource('stopAutomation', 'closeBrowserExecutor');
   assert.match(stopAutomation, /sendCoreLifecycle\(handle, 'close'/);
   assert.match(stopAutomation, /handle\.automationIntent = 'stopped'/);
+  assert.match(stopAutomation, /const externallyOccupiedBeforeAcquire = !handle\.child && handle\.envInUseThisRun === true/);
+  assert.match(stopAutomation, /externallyOccupiedBeforeAcquire[\s\S]*handle\.browserStateUnconfirmed = false/,
+    'occupied start rejection never acquired a local browser, so local close must clear the synthetic unconfirmed flag');
+  const occupiedReturn = stopAutomation.indexOf('if (externallyOccupiedBeforeAcquire) return;');
+  const genericConfirm = stopAutomation.indexOf('confirmOwnedProfileClosedFromShell(handle)');
+  assert.ok(occupiedReturn >= 0 && genericConfirm > occupiedReturn,
+    'occupied-before-acquire close must settle locally before the generic retained-browser confirmation');
+  assert.match(stopAutomation, /closeScope: externallyOccupiedBeforeAcquire \? 'local_automation_only' : null/);
+  assert.match(stopAutomation, /占用端浏览器未被本机关闭或触碰/);
   assert.match(stopAutomation, /confirmOwnedProfileClosedFromShell\(handle\)/,
     'closing without a child must verify an externally retained AdsPower browser instead of claiming success');
   const browserClose = functionSource('closeBrowserExecutor', 'relogin');

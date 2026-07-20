@@ -538,6 +538,16 @@ test('今日进展生命周期控制：自动化和浏览器使用独立动作',
   assert.equal($(paused, '#session-close').textContent, '关闭');
   assert.equal($(paused, '#session-close').getAttribute('aria-label'), '关闭自动化');
   assert.ok(!$(paused, '#session-close').classList.contains('hidden'));
+  const terminalError = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      edge: 'warning', cloud: 'disconnected', automationState: 'error', browserState: 'error',
+    }),
+  }));
+  assert.equal($(terminalError, '#session-fab').textContent, '启动');
+  assert.equal($(terminalError, '#session-close').textContent, '关闭');
+  assert.equal($(terminalError, '#session-close').getAttribute('aria-label'), '关闭自动化');
+  assert.equal(($(terminalError, '#session-close') as HTMLElement).dataset.lifecycleAction, 'close');
+  assert.equal(($(terminalError, '#session-close') as HTMLElement).dataset.browserAction, '');
   const executorError = await boot(makeStub({
     getStatus: async () => makeStatus({
       edge: 'running', coreState: 'online', cloud: 'connected', cloudState: 'connected', browserState: 'error',
@@ -546,6 +556,33 @@ test('今日进展生命周期控制：自动化和浏览器使用独立动作',
   assert.equal($(executorError, '#session-close').textContent, '浏览器');
   assert.equal($(executorError, '#session-close').getAttribute('aria-label'), '重新打开浏览器');
   assert.equal(($(executorError, '#session-close') as HTMLElement).dataset.browserAction, 'open');
+});
+
+test('自动化终态错误点击关闭：结束本机自动化，不误走浏览器重开', async () => {
+  let lifecycleCloses = 0;
+  let browserOpens = 0;
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      edge: 'warning', cloud: 'disconnected', automationState: 'error', browserState: 'error',
+    }),
+    close: async () => {
+      lifecycleCloses++;
+      return makeStatus({
+        edge: 'stopped', cloud: 'disconnected', session: 'closed', automationState: 'stopped', browserState: 'closed',
+      });
+    },
+    browserOpen: async () => {
+      browserOpens++;
+      return makeStatus();
+    },
+  }));
+  $(w, '#session-close').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.equal(lifecycleCloses, 1);
+  assert.equal(browserOpens, 0);
+  assert.equal($(w, '#session-fab').textContent, '启动');
+  assert.equal($(w, '#session-close').textContent, '浏览器');
 });
 
 test('自动化暂停态点击关闭：调用自动化关闭，不走浏览器辅助动作', async () => {
