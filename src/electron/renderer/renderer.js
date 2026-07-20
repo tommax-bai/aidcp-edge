@@ -398,7 +398,7 @@ let editingProvider = null;
 let dirty = false;
 // 选中环境的 AdsPower 环境名（随设置持久化，作标题带账号标签兜底）。
 let selectedProfileName = '';
-// 运行花名册（edge-multi-environment-fleet）：多选加入的环境成员 [{profileId, name, platform, nameSource?}]，
+// 运行花名册：除可见名外保留系统名影子与 Cloud 同步态，空人工输入可可靠恢复系统名。
 // 按 profileId 去重（同一分身 MUST NOT 重复加入，防 edgeId 撞车）；持久化为 settings.environments。
 let roster = [];
 // 昵称写入等待态按 envId 隔离：页面先乐观显示，但在主进程确认落盘前不得冒充“已保存”。
@@ -416,7 +416,11 @@ function normalizeRosterList(list) {
     if (!id || seen.has(id)) continue;
     seen.add(id);
     const member = { profileId: id, name: (raw && raw.name) || '', platform: normPlatform(raw && raw.platform) };
-    if (raw && raw.nameSource === 'manual') member.nameSource = 'manual';
+    if (raw && typeof raw.systemName === 'string' && raw.systemName.trim()) member.systemName = raw.systemName.trim();
+    if (raw && raw.nameSource === 'manual') {
+      member.nameSource = 'manual';
+      if (raw.nameSyncState === 'synced' || raw.nameSyncState === 'unsynced') member.nameSyncState = raw.nameSyncState;
+    }
     out.push(member);
   }
   return out;
@@ -3272,7 +3276,10 @@ function applyFleetSnapshot(snap) {
       // 昵称持久化在途时，旧 fleet 快照不得把乐观名字弹回；成功/失败回执会各自收敛到权威结果。
       if (!manualNicknamePendingEnvIds.has(e.envId)) {
         existing.name = e.name || existing.name;
+        existing.systemName = e.systemName || existing.systemName;
         existing.nameSource = e.nameSource === 'manual' ? 'manual' : undefined;
+        existing.nameSyncState = existing.nameSource
+          && (e.nameSyncState === 'synced' || e.nameSyncState === 'unsynced') ? e.nameSyncState : undefined;
       }
       existing.platform = e.platform || existing.platform;
       existing.profileId = e.profileId || existing.profileId;
@@ -3282,7 +3289,10 @@ function applyFleetSnapshot(snap) {
         envId: e.envId,
         profileId: e.profileId || '',
         name: e.name || '',
+        systemName: e.systemName || '',
         nameSource: e.nameSource === 'manual' ? 'manual' : undefined,
+        nameSyncState: e.nameSource === 'manual'
+          && (e.nameSyncState === 'synced' || e.nameSyncState === 'unsynced') ? e.nameSyncState : undefined,
         platform: e.platform || '',
         status: e.status,
       });
@@ -3447,7 +3457,9 @@ function renderRail() {
     globalPendingCount: fullModel.pendingCount,
     counts,
     // platform 必须进签名：改平台后行才会重建上色（漏掉则签名未变、UI 停留旧平台）。
-    rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, railDisplayName(r), r.nameSource, manualNicknamePendingEnvIds.has(r.envId), r.label, Boolean(r.status && r.status.personaBound), normPlatform(r.platform)]),
+    rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, railDisplayName(r), r.nameSource,
+      r.nameSyncState, manualNicknamePendingEnvIds.has(r.envId), r.label,
+      Boolean(r.status && r.status.personaBound), normPlatform(r.platform)]),
   });
   if (sig === fleetView.lastRailSig) return;
   fleetView.lastRailSig = sig;
@@ -3568,9 +3580,12 @@ function makeRailRow(row) {
   const nameEl = document.createElement('span');
   const manualName = row.nameSource === 'manual';
   const pendingName = manualNicknamePendingEnvIds.has(row.envId);
-  nameEl.className = `rail-name${manualName ? ' manual' : ''}${pendingName ? ' pending' : ''}`;
+  const unsyncedName = manualName && row.nameSyncState === 'unsynced';
+  nameEl.className = `rail-name${manualName ? ' manual' : ''}${pendingName ? ' pending' : ''}${unsyncedName ? ' unsynced' : ''}`;
   nameEl.textContent = displayName;
-  nameEl.title = pendingName ? '人工昵称 · 正在保存' : manualName ? '人工昵称 · 双击修改' : '双击修改环境昵称';
+  nameEl.title = pendingName ? '人工昵称 · 正在保存'
+    : unsyncedName ? '人工昵称 · 尚未同步到云端，将在登录后重试'
+      : manualName ? '人工昵称 · 双击修改' : '双击修改环境昵称';
   if (pendingName) nameEl.setAttribute('aria-busy', 'true');
   let nameClickTimer = null;
   nameEl.addEventListener('click', (e) => {
@@ -3684,32 +3699,49 @@ function beginRailNameEdit(row, nameEl) {
     if (settled) return;
     settled = true;
     const nickname = input.value.trim();
-    if (!nickname) {
-      setRailMsg('环境昵称不能为空，未保存。');
-      closeEditor();
-      return;
-    }
     if (member.name === nickname && member.nameSource === 'manual') {
       closeEditor();
       return;
     }
+    if (!nickname && member.nameSource !== 'manual') {
+      closeEditor();
+      return;
+    }
 
-    const previousName = member.name;
-    const previousWasManual = member.nameSource === 'manual';
+    const previousMember = { ...member };
     const envBefore = fleetView.envs.get(row.envId);
-    const previousEnvName = envBefore && envBefore.name;
-    const previousEnvWasManual = Boolean(envBefore && envBefore.nameSource === 'manual');
+    const previousEnv = envBefore ? { ...envBefore } : null;
+    const liveAccount = envBefore && envBefore.status && envBefore.status.account;
+    const liveSystemName = liveAccount && liveAccount.source !== 'env' && liveAccount.name
+      ? String(liveAccount.name).trim() : '';
+    const systemName = String(member.systemName || (envBefore && envBefore.systemName) || liveSystemName
+      || (member.nameSource !== 'manual' ? member.name : '') || '').trim();
+    const optimisticName = nickname || systemName;
 
     manualNicknamePendingEnvIds.add(row.envId);
-    member.name = nickname;
-    member.nameSource = 'manual';
-    if (settingsUi.adsProfile.value.trim() === member.profileId) selectedProfileName = nickname;
+    member.name = optimisticName;
+    if (systemName) member.systemName = systemName;
+    if (nickname) {
+      member.nameSource = 'manual';
+      member.nameSyncState = 'unsynced';
+    } else {
+      delete member.nameSource;
+      delete member.nameSyncState;
+    }
+    if (settingsUi.adsProfile.value.trim() === member.profileId) selectedProfileName = optimisticName;
     if (envBefore) {
-      envBefore.name = nickname;
-      envBefore.nameSource = 'manual';
+      envBefore.name = optimisticName;
+      if (systemName) envBefore.systemName = systemName;
+      if (nickname) {
+        envBefore.nameSource = 'manual';
+        envBefore.nameSyncState = 'unsynced';
+      } else {
+        delete envBefore.nameSource;
+        delete envBefore.nameSyncState;
+      }
     }
     closeEditor();
-    setRailMsg(`正在保存人工昵称「${nickname}」…`);
+    setRailMsg(nickname ? `正在保存人工昵称「${nickname}」…` : '正在清除人工昵称并恢复系统昵称…');
 
     let saved;
     try {
@@ -3723,25 +3755,52 @@ function beginRailNameEdit(row, nameEl) {
     if (!saved || saved.ok !== true) {
       const currentMember = roster.find((item) => item.profileId === profileId);
       if (currentMember) {
-        currentMember.name = previousName;
-        if (previousWasManual) currentMember.nameSource = 'manual';
-        else delete currentMember.nameSource;
+        Object.assign(currentMember, previousMember);
+        if (!previousMember.systemName) delete currentMember.systemName;
+        if (!previousMember.nameSource) delete currentMember.nameSource;
+        if (!previousMember.nameSyncState) delete currentMember.nameSyncState;
       }
       const currentEnv = fleetView.envs.get(row.envId);
-      if (currentEnv) {
-        currentEnv.name = previousEnvName;
-        if (previousEnvWasManual) currentEnv.nameSource = 'manual';
-        else delete currentEnv.nameSource;
+      if (currentEnv && previousEnv) {
+        Object.assign(currentEnv, previousEnv);
+        if (!previousEnv.systemName) delete currentEnv.systemName;
+        if (!previousEnv.nameSource) delete currentEnv.nameSource;
+        if (!previousEnv.nameSyncState) delete currentEnv.nameSyncState;
       }
-      if (settingsUi.adsProfile.value.trim() === profileId) selectedProfileName = previousName;
+      if (settingsUi.adsProfile.value.trim() === profileId) selectedProfileName = previousMember.name;
       manualNicknamePendingEnvIds.delete(row.envId);
       refreshEnvironmentIdentityAnchors(row.envId);
-      setRailMsg(`人工昵称保存失败，已恢复「${previousName || railDisplayName(row)}」：${saved && saved.error ? saved.error : '未知错误'}`);
+      setRailMsg(`昵称保存失败，已恢复「${previousMember.name || railDisplayName(row)}」：${saved && saved.error ? saved.error : '未知错误'}`);
       return;
     }
+    const confirmed = saved.environment || {};
+    const confirmedManual = confirmed.nameSource === 'manual' || (Boolean(nickname) && !saved.environment);
+    const currentMember = roster.find((item) => item.profileId === profileId);
+    const currentEnv = fleetView.envs.get(row.envId);
+    if (currentMember) {
+      currentMember.name = confirmed.name || optimisticName;
+      if (confirmed.systemName) currentMember.systemName = confirmed.systemName;
+      if (confirmedManual) currentMember.nameSource = 'manual';
+      else delete currentMember.nameSource;
+      if (confirmed.nameSyncState) currentMember.nameSyncState = confirmed.nameSyncState;
+      else if (confirmedManual) currentMember.nameSyncState = 'synced';
+      else delete currentMember.nameSyncState;
+    }
+    if (currentEnv) {
+      currentEnv.name = confirmed.name || optimisticName;
+      if (confirmed.systemName) currentEnv.systemName = confirmed.systemName;
+      if (confirmedManual) currentEnv.nameSource = 'manual';
+      else delete currentEnv.nameSource;
+      if (confirmed.nameSyncState) currentEnv.nameSyncState = confirmed.nameSyncState;
+      else if (confirmedManual) currentEnv.nameSyncState = 'synced';
+      else delete currentEnv.nameSyncState;
+    }
+    if (settingsUi.adsProfile.value.trim() === profileId) selectedProfileName = confirmed.name || optimisticName;
     manualNicknamePendingEnvIds.delete(row.envId);
     refreshEnvironmentIdentityAnchors(row.envId);
-    setRailMsg(`已保存人工昵称「${nickname}」，后续系统更新不会覆盖。`);
+    setRailMsg(nickname
+      ? `已保存人工昵称「${confirmed.name || nickname}」，后续系统更新不会覆盖。`
+      : `已清除人工昵称，恢复系统昵称「${confirmed.name || optimisticName || '未获取昵称'}」。`);
   };
 
   input.addEventListener('click', (e) => e.stopPropagation());
@@ -4423,8 +4482,10 @@ async function persistRoster() {
   const environments = roster.map((m) => ({
     profileId: m.profileId,
     name: m.name,
+    ...(m.systemName ? { systemName: m.systemName } : {}),
     platform: m.platform,
     ...(m.nameSource === 'manual' ? { nameSource: 'manual' } : {}),
+    ...(m.nameSource === 'manual' && m.nameSyncState ? { nameSyncState: m.nameSyncState } : {}),
   }));
   try {
     const saved = await window.aidcpEdge.saveSettings({

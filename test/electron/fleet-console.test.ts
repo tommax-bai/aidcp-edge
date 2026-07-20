@@ -461,7 +461,7 @@ test('人工昵称统一覆盖环境身份锚点，旧系统名心跳不得回�
   assert.match(w.document.querySelector('#guide-title')?.textContent || '', /Tianxing Bai1/);
 });
 
-test('环境昵称编辑支持 Escape 取消、空值拒绝与失焦提交', async () => {
+test('环境昵称编辑支持 Escape 取消、空值清除人工名恢复系统名与失焦提交', async () => {
   const saved: Array<{ profileId: string; nickname: string }> = [];
   const { w } = await boot({
     saveEnvironmentNickname: async (args: { profileId: string; nickname: string }) => {
@@ -484,20 +484,31 @@ test('环境昵称编辑支持 Escape 取消、空值拒绝与失焦提交', asy
   assert.equal((rowOf('ads-p1').querySelector('.rail-name') as HTMLElement).textContent, '环境一');
 
   input = open('ads-p1');
+  input.value = '临时人工名';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+  await tick();
+  await tick();
+  assert.equal(saved.length, 1);
+  assert.equal((rowOf('ads-p1').querySelector('.rail-name') as HTMLElement).textContent, '临时人工名');
+
+  input = open('ads-p1');
   input.value = '   ';
   input.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
   await tick();
-  assert.equal(saved.length, 0);
-  assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /不能为空，未保存/);
+  await tick();
+  assert.equal(saved.length, 2);
+  assert.equal(saved[1]?.nickname, '');
+  assert.equal((rowOf('ads-p1').querySelector('.rail-name') as HTMLElement).textContent, '环境一');
+  assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /已清除人工昵称.*恢复系统昵称/);
 
   input = open('ads-p2');
   input.value = '失焦保存号';
   input.dispatchEvent(new w.FocusEvent('blur'));
   await tick();
   await tick();
-  assert.equal(saved.length, 1);
-  assert.equal(saved[0]?.profileId, 'p2');
-  assert.equal(saved[0]?.nickname, '失焦保存号');
+  assert.equal(saved.length, 3);
+  assert.equal(saved[2]?.profileId, 'p2');
+  assert.equal(saved[2]?.nickname, '失焦保存号');
 });
 
 test('人工昵称先乐观显示 pending，写盘失败后恢复原昵称与来源并提示原因', async () => {

@@ -881,6 +881,47 @@ function onSessionInvalid() {
   if (mainWindow) { try { mainWindow.close(); } catch { /* ignore */ } mainWindow = null; }
   createLoginWindow();
 }
+
+let legacyManualAliasSyncPromise = null;
+/** 升级前本地人工名的有界补同步：最多 20 个并行、单请求 5 秒；失败保留本地值并显式标为 unsynced。 */
+function syncUnsyncedManualAliases() {
+  if (legacyManualAliasSyncPromise || !clientAuthEnabled() || !hasValidSession()) {
+    return legacyManualAliasSyncPromise || Promise.resolve();
+  }
+  const candidates = fleet.normalizeEnvironments(settings.environments || [])
+    .filter((environment) => environment.nameSource === 'manual'
+      && environment.nameSyncState !== 'synced'
+      && (!allowedProfileIds || allowedProfileIds.has(environment.profileId)))
+    .slice(0, 20);
+  if (candidates.length === 0) return Promise.resolve();
+  legacyManualAliasSyncPromise = Promise.all(candidates.map(async (environment) => {
+    const response = await clientAuthFetch(`/environments/${encodeURIComponent(environment.profileId)}/operator-alias`, {
+      method: 'PUT', token: clientSession && clientSession.token,
+      body: { alias: environment.name }, timeoutMs: 5000,
+    });
+    return { environment, response };
+  })).then((results) => {
+    if (results.some(({ response }) => response.status === 401)) {
+      onSessionInvalid();
+      return;
+    }
+    let changed = false;
+    const byProfile = new Map(results.map((result) => [result.environment.profileId, result]));
+    const environments = fleet.normalizeEnvironments(settings.environments || []).map((current) => {
+      const result = byProfile.get(current.profileId);
+      if (!result || current.nameSource !== 'manual' || current.name !== result.environment.name) return current;
+      const nextState = result.response.ok ? 'synced' : 'unsynced';
+      if (current.nameSyncState === nextState) return current;
+      changed = true;
+      return { ...current, nameSyncState: nextState };
+    });
+    if (!changed) return;
+    const saved = saveSettings({ environments });
+    if (!saved.ok) console.warn(`[aidcp-edge] 人工昵称同步状态写入失败：${saved.error || '未知错误'}`);
+    syncEnvHandles();
+  }).finally(() => { legacyManualAliasSyncPromise = null; });
+  return legacyManualAliasSyncPromise;
+}
 function createLoginWindow() {
   if (loginWindow) { try { loginWindow.show(); loginWindow.focus(); } catch { /* ignore */ } return; }
   loginWindow = new BrowserWindow({
@@ -916,6 +957,7 @@ async function proceedAfterAuth() {
     allowedProfileIds = null; // 未 gated：不过滤
   }
   syncEnvHandles();
+  void syncUnsyncedManualAliases();
   void retryPendingInteractionOffboards();
   loadUiState();
   // 一次性轻量预检：缺配置亮「待配置」，齐备则「就绪」。
@@ -960,6 +1002,7 @@ function startSessionMaintenance() {
     const ok = await refreshAllowedEnvironments();
     if (!ok) { onSessionInvalid(); return; }
     syncEnvHandles();
+    void syncUnsyncedManualAliases();
     void retryPendingInteractionOffboards();
   }, 4 * 60_000);
 }
@@ -1138,12 +1181,25 @@ function resolveAdsOpts(formOpts) {
 //  - fire-and-forget：调用方不 await；写客户端 ≥1.1s 串行节流保证不与核心本地 API 同秒并发。
 async function maybeRenameEnvToNickname(handle, nickname) {
   if (!handle || handle.kind !== 'adspower') return;
-  // 人工昵称是运营明确指定的最高优先级：既不改本地花名册，也不在后台改 AdsPower 环境名。
-  if (handle.nameSource === 'manual') return;
   const userId = handle.profileId && String(handle.profileId).trim();
   if (!userId) return;
   const nick = nickname == null ? '' : String(nickname).trim();
   if (!nick) return;
+  // 人工昵称期间系统刷新只推进影子值，供用户清空人工输入时恢复；绝不覆盖可见人工名或改 AdsPower 名。
+  if (handle.nameSource === 'manual') {
+    if (nick !== String(handle.systemName || '')) {
+      const environments = fleet.normalizeEnvironments(settings.environments || []).map((environment) =>
+        environment.profileId === userId ? { ...environment, systemName: nick } : environment);
+      const saved = saveSettings({ environments });
+      if (saved.ok) {
+        handle.systemName = nick;
+        broadcastFleet();
+      } else {
+        console.warn(`[aidcp-edge] 系统昵称影子写入失败（人工名仍保留）：${userId} → ${saved.error || '未知错误'}`);
+      }
+    }
+    return;
+  }
   if (nick === String(handle.name || '')) return; // 幂等去抖：名已一致不发
   if (handle.renamingTo === nick) return; // 同名改名在途，不重复发
   handle.renamingTo = nick;
@@ -1240,13 +1296,16 @@ function makeStatus(provider) {
 const envs = new Map();
 let selectedEnvId = '';
 
-function makeEnvHandle({ envId, kind, profileId, name, nameSource, platform, cascadeIndex }) {
+function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, nameSyncState, platform, cascadeIndex }) {
   return {
     envId,
     kind, // 'adspower' | 'self'
     profileId: profileId || '',
     name: name || '',
+    systemName: systemName || '',
     nameSource: nameSource === 'manual' ? 'manual' : undefined,
+    nameSyncState: nameSource === 'manual' && (nameSyncState === 'synced' || nameSyncState === 'unsynced')
+      ? nameSyncState : undefined,
     platform: platform || 'xiaohongshu',
     cascadeIndex: cascadeIndex || 0,
     child: undefined,
@@ -1325,7 +1384,8 @@ function syncEnvHandles() {
       if (allowedProfileIds && !allowedProfileIds.has(env.profileId) && !cleanupEnvKeys.has(env.profileId)) return;
       const envId = fleet.envIdForProfile(env.profileId);
       wanted.set(envId, {
-        envId, kind: 'adspower', profileId: env.profileId, name: env.name, nameSource: env.nameSource, platform: env.platform,
+        envId, kind: 'adspower', profileId: env.profileId, name: env.name, systemName: env.systemName,
+        nameSource: env.nameSource, nameSyncState: env.nameSyncState, platform: env.platform,
         cascadeIndex: idx++, offboardCleanup: cleanupEnvKeys.has(env.profileId),
       });
     });
@@ -1359,7 +1419,10 @@ function syncEnvHandles() {
     const existing = envs.get(envId);
     if (existing) {
       existing.name = spec.name;
+      existing.systemName = spec.systemName || '';
       existing.nameSource = spec.nameSource === 'manual' ? 'manual' : undefined;
+      existing.nameSyncState = existing.nameSource
+        && (spec.nameSyncState === 'synced' || spec.nameSyncState === 'unsynced') ? spec.nameSyncState : undefined;
       existing.platform = spec.platform;
       existing.cascadeIndex = spec.cascadeIndex;
       existing.offboardCleanup = Boolean(spec.offboardCleanup);
@@ -1400,7 +1463,9 @@ function fleetSnapshot() {
       kind: h.kind,
       profileId: h.profileId,
       name: h.name,
+      systemName: h.systemName,
       nameSource: h.nameSource,
+      nameSyncState: h.nameSyncState,
       platform: h.platform,
       status: { ...h.status, envId: h.envId, envName: h.name },
     })),
@@ -4632,13 +4697,12 @@ ipcMain.handle('fleet:select', (_event, envId) => {
   }
   return fleetSnapshot();
 });
-// 人工昵称专用原子保存：昵称是本地 Edge 花名册数据，不伪装成 Cloud 更新。
-// write 失败时恢复旧 settings，且绝不先同步 handle；renderer 可安全乐观展示并按失败回滚。
-ipcMain.handle('fleet:setManualNickname', (_event, raw) => {
+// 运营别名一致写：先落本地并让 renderer 保持 pending，再以客户令牌写 Cloud；Cloud 或最终本地确认任一步失败，
+// 都恢复原花名册并返回真实原因。空白表示清除运营别名，回落系统昵称影子。
+ipcMain.handle('fleet:setManualNickname', async (_event, raw) => {
   const profileId = String((raw && raw.profileId) || '').trim();
   const nickname = String((raw && raw.nickname) || '').trim();
   if (!profileId) return { ok: false, error: '环境标识为空，未保存昵称。' };
-  if (!nickname) return { ok: false, error: '环境昵称不能为空。' };
   if (nickname.length > 80) return { ok: false, error: '环境昵称不能超过 80 个字符。' };
 
   const previousEnvironments = fleet.normalizeEnvironments(settings.environments || []);
@@ -4647,22 +4711,74 @@ ipcMain.handle('fleet:setManualNickname', (_event, raw) => {
   if (clientAuthEnabled() && allowedProfileIds instanceof Set && !allowedProfileIds.has(profileId)) {
     return { ok: false, error: '当前账号无权修改该环境昵称。' };
   }
+  if (!clientAuthEnabled() || !hasValidSession()) {
+    if (clientAuthEnabled()) onSessionInvalid();
+    return { ok: false, error: '登录已失效或客户服务未启用，昵称未保存。' };
+  }
 
-  const previousSettings = settings;
-  const nextEnvironment = { ...previousEnvironments[index], name: nickname, nameSource: 'manual' };
+  const previousEnvironment = previousEnvironments[index];
+  const handle = [...envs.values()].find((candidate) => candidate.profileId === profileId);
+  const liveSystemName = String(
+    (handle && handle.status && handle.status.account && handle.status.account.source !== 'env'
+      && handle.status.account.name) || (handle && handle.systemName) || '',
+  ).trim();
+  const nextEnvironment = fleet.environmentWithOperatorAlias(previousEnvironment, nickname, liveSystemName);
+  if (!nextEnvironment) return { ok: false, error: '环境记录无效，昵称未保存。' };
   const nextEnvironments = previousEnvironments.map((environment, envIndex) =>
     envIndex === index ? nextEnvironment : environment);
   const saved = saveSettings({ environments: nextEnvironments });
   if (!saved.ok) {
-    settings = previousSettings;
     broadcastFleet();
-    return { ok: false, error: saved.error || '本地设置写入失败。', environment: previousEnvironments[index] };
+    return { ok: false, error: saved.error || '本地设置写入失败。', environment: previousEnvironment };
   }
 
   syncEnvHandles();
-  const renamedHandle = [...envs.values()].find((handle) => handle.profileId === profileId);
+  const response = await clientAuthFetch(`/environments/${encodeURIComponent(profileId)}/operator-alias`, {
+    method: 'PUT', token: clientSession.token, body: { alias: nickname || null }, timeoutMs: 12000,
+  });
+  if (response.status === 401) onSessionInvalid();
+  if (!response.ok || !response.data || !response.data.data) {
+    const restored = saveSettings({ environments: previousEnvironments });
+    syncEnvHandles();
+    const reason = response.data && (response.data.error || response.data.reason);
+    return {
+      ok: false,
+      error: `${reason || response.error || '云端昵称更新失败'}${restored.ok ? '' : `；本地恢复也失败：${restored.error || '未知错误'}`}`,
+      environment: previousEnvironment,
+    };
+  }
+
+  const confirmed = response.data.data;
+  const confirmedName = confirmed.displayNameSource !== 'account_id' && String(confirmed.displayName || '').trim()
+    ? String(confirmed.displayName).trim()
+    : String(nextEnvironment.systemName || '').trim();
+  const confirmedEnvironment = nickname
+    ? { ...nextEnvironment, name: confirmedName || nickname, nameSource: 'manual', nameSyncState: 'synced' }
+    : { ...nextEnvironment, name: confirmedName || nextEnvironment.name || '' };
+  if (!nickname) {
+    delete confirmedEnvironment.nameSource;
+    delete confirmedEnvironment.nameSyncState;
+  }
+  const confirmedEnvironments = previousEnvironments.map((environment, envIndex) =>
+    envIndex === index ? confirmedEnvironment : environment);
+  const confirmedSave = saveSettings({ environments: confirmedEnvironments });
+  if (!confirmedSave.ok) {
+    const rollbackAlias = previousEnvironment.nameSource === 'manual' ? previousEnvironment.name : null;
+    const cloudRollback = await clientAuthFetch(`/environments/${encodeURIComponent(profileId)}/operator-alias`, {
+      method: 'PUT', token: clientSession && clientSession.token, body: { alias: rollbackAlias }, timeoutMs: 12000,
+    });
+    const localRollback = saveSettings({ environments: previousEnvironments });
+    syncEnvHandles();
+    return {
+      ok: false,
+      error: `本地昵称确认写入失败：${confirmedSave.error || '未知错误'}；云端回滚${cloudRollback.ok ? '成功' : '失败'}；本地恢复${localRollback.ok ? '成功' : '失败'}。`,
+      environment: previousEnvironment,
+    };
+  }
+  syncEnvHandles();
+  const renamedHandle = [...envs.values()].find((candidate) => candidate.profileId === profileId);
   if (renamedHandle) syncBrowserPersonaNotice(renamedHandle, true);
-  return { ok: true, environment: nextEnvironment };
+  return { ok: true, environment: confirmedEnvironment };
 });
 ipcMain.handle('fleet:startAll', (_event, opts) => startAllEnvs(opts || {}));
 ipcMain.handle('fleet:stopAll', () => stopAllEnvs());

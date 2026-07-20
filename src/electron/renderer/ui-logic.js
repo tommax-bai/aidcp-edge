@@ -709,7 +709,10 @@
         envId: e && e.envId,
         profileId: (e && e.profileId) || '',
         name: (e && (e.name || (e.status && e.status.envName))) || '',
+        systemName: (e && e.systemName) || '',
         nameSource: e && e.nameSource === 'manual' ? 'manual' : undefined,
+        nameSyncState: e && e.nameSource === 'manual'
+          && (e.nameSyncState === 'synced' || e.nameSyncState === 'unsynced') ? e.nameSyncState : undefined,
         platform: (e && e.platform) || '', // 平台视觉标识（rail 行按平台上色）
         level: lv.level,
         needsAction: lv.needsAction,

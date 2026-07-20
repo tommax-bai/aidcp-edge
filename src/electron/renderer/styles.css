@@ -2528,6 +2528,7 @@ body::-webkit-scrollbar:vertical,
 .rail-nameline { display: flex; align-items: center; gap: 5px; }
 .rail-name { font-size: 12.5px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
 .rail-name.manual { color: #5969a8; font-weight: 700; }
+.rail-name.manual.unsynced { color: #a16a22; text-decoration: underline dotted; text-underline-offset: 3px; }
 .rail-name.pending { color: #6f7da9; text-decoration: underline dotted #9ba8cb; text-underline-offset: 3px; animation: rail-name-saving 1s ease-in-out infinite alternate; }
 @keyframes rail-name-saving { from { opacity: .58; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .rail-name.pending { animation: none; } }

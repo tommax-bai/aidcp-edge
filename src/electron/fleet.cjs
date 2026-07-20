@@ -21,7 +21,7 @@ function envIdForProfile(profileId) {
   return `ads-${String(profileId).trim()}`;
 }
 
-/** 归一单个环境成员：{ profileId, name, platform, nameSource? }；profileId 空则返回 null。 */
+/** 归一单个环境成员：保留人工名、系统名影子及云端同步状态；profileId 空则返回 null。 */
 function normalizeEnvironment(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const profileId = String(raw.profileId ?? raw.userId ?? '').trim();
@@ -37,9 +37,39 @@ function normalizeEnvironment(raw) {
     name: typeof raw.name === 'string' ? raw.name : '',
     platform,
   };
+  if (typeof raw.systemName === 'string' && raw.systemName.trim()) normalized.systemName = raw.systemName.trim();
   // 人工昵称是唯一可持久化的特殊来源；未知值一律丢弃，避免任意 renderer 输入扩大覆盖保护面。
-  if (raw.nameSource === 'manual') normalized.nameSource = 'manual';
+  if (raw.nameSource === 'manual') {
+    normalized.nameSource = 'manual';
+    if (raw.nameSyncState === 'synced' || raw.nameSyncState === 'unsynced') {
+      normalized.nameSyncState = raw.nameSyncState;
+    }
+  }
   return normalized;
+}
+
+/** 人工名期间只更新系统名影子；清空人工输入时从影子回落，绝不把旧人工字符串继续当系统名。 */
+function environmentWithOperatorAlias(environment, alias, observedSystemName) {
+  const current = normalizeEnvironment(environment);
+  if (!current) return null;
+  const observed = String(observedSystemName || '').trim();
+  const systemName = observed || String(current.systemName || '').trim()
+    || (current.nameSource === 'manual' ? '' : String(current.name || '').trim());
+  const clean = String(alias || '').trim();
+  if (clean) {
+    return {
+      ...current,
+      name: clean,
+      ...(systemName ? { systemName } : {}),
+      nameSource: 'manual',
+      nameSyncState: 'unsynced',
+    };
+  }
+  const restored = { ...current, name: systemName };
+  delete restored.nameSource;
+  delete restored.nameSyncState;
+  if (systemName) restored.systemName = systemName;
+  return restored;
 }
 
 /** 归一花名册：去非法项 + 按 profileId 去重（同一分身 MUST NOT 出现两次，防 edgeId 撞车）。 */
@@ -618,6 +648,7 @@ module.exports = {
   ENV_KEYS_MUST_DROP,
   envIdForProfile,
   normalizeEnvironment,
+  environmentWithOperatorAlias,
   normalizeEnvironments,
   migrateEnvironments,
   legacyMirrorOf,

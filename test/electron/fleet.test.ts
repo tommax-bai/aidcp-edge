@@ -42,6 +42,38 @@ test('normalizeEnvironments：仅保留受限的人工昵称来源标记，旧�
   assert.equal('nameSource' in envs[2], false);
 });
 
+test('environmentWithOperatorAlias：人工期间保留系统影子，空内容恢复系统名并清除人工来源', () => {
+  const manual = fleet.environmentWithOperatorAlias(
+    { profileId: 'p1', name: 'Tianxing Bai', platform: 'facebook' },
+    ' Tianxing Bai1 ',
+    'Tianxing Bai',
+  );
+  assert.deepEqual(manual, {
+    profileId: 'p1', name: 'Tianxing Bai1', systemName: 'Tianxing Bai', platform: 'facebook',
+    nameSource: 'manual', nameSyncState: 'unsynced',
+  });
+  const refreshed = fleet.environmentWithOperatorAlias(manual, 'Tianxing Bai1', 'Tianxing Bai New');
+  assert.equal(refreshed.name, 'Tianxing Bai1');
+  assert.equal(refreshed.systemName, 'Tianxing Bai New');
+  const cleared = fleet.environmentWithOperatorAlias(refreshed, '   ', '');
+  assert.deepEqual(cleared, {
+    profileId: 'p1', name: 'Tianxing Bai New', systemName: 'Tianxing Bai New', platform: 'facebook',
+  });
+});
+
+test('normalizeEnvironment：系统影子和明确同步态可持久化，旧人工名不冒充已同步', () => {
+  assert.deepEqual(fleet.normalizeEnvironment({
+    profileId: 'p1', name: '人工名', systemName: '系统名', platform: 'facebook',
+    nameSource: 'manual', nameSyncState: 'synced',
+  }), {
+    profileId: 'p1', name: '人工名', systemName: '系统名', platform: 'facebook',
+    nameSource: 'manual', nameSyncState: 'synced',
+  });
+  const legacy = fleet.normalizeEnvironment({ profileId: 'p2', name: '旧人工名', nameSource: 'manual' });
+  assert.equal(legacy.nameSource, 'manual');
+  assert.equal('nameSyncState' in legacy, false, '旧记录由登录后的补同步流程识别');
+});
+
 test('migrateEnvironments：旧单值 adsProfileId 向后兼容加载为单元素花名册', () => {
   const envs = fleet.migrateEnvironments({ adsProfileId: 'legacy1', adsProfileName: '老环境', platform: 'xiaohongshu' });
   assert.deepEqual(envs, [{ profileId: 'legacy1', name: '老环境', platform: 'xiaohongshu' }]);
