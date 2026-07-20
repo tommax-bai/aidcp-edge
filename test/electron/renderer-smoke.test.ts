@@ -116,6 +116,47 @@ test('客户首页概览：自动化与浏览器均停止时仍通过 HTTP 展�
   assert.match($(w, '#pub-card').textContent || '', /云端确认的上一篇/);
 });
 
+test('客户首页概览：重启后 submitted 覆盖本地旧 lastPublish', async () => {
+  const requestedEnvIds: string[] = [];
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      envId: 'ads-k1e0awu5',
+      publish: null,
+      lastPublish: { title: 'Claude被封 企业AI稳才是核心', at: '2026-07-13T05:53:27.047Z' },
+    }),
+    getEnvironmentOverview: async (envId) => {
+      requestedEnvIds.push(envId);
+      return {
+        ok: true,
+        data: {
+          data: {
+            envKey: envId,
+            dailyUsage: { asOf: 1_752_989_057_000, totals: { view: 0, like: 0, collect: 0, comment: 0, follow: 0, publish: 1 } },
+            currentPublishState: {
+              state: 'submitted',
+              code: '#160',
+              title: '4090跑122B大模型实测对比',
+              at: 1_752_989_057_000,
+            },
+            lastPublished: { title: 'Claude被封 企业AI稳才是核心', at: 1_752_378_807_047 },
+          },
+          meta: { asOf: 1_752_989_057_000 },
+        },
+      };
+    },
+  }));
+  for (let i = 0; i < 4; i++) await tick();
+
+  const card = $(w, '#pub-card');
+  assert.deepEqual(requestedEnvIds, ['ads-k1e0awu5']);
+  assert.equal(card.dataset.pubState, 'submitted');
+  assert.equal(card.dataset.pubMode, 'submitted');
+  assert.match(card.textContent || '', /4090跑122B大模型实测对比/);
+  assert.match(card.textContent || '', /已提交，平台确认中/);
+  assert.doesNotMatch(card.textContent || '', /Claude被封 企业AI稳才是核心/);
+  assert.doesNotMatch(card.textContent || '', /已发布/);
+});
+
 test('客户首页概览：首次 HTTP 失败不显示假 0 或“还没有发布过”', async () => {
   const w = await boot(makeStub({
     getStatus: async () => makeStatus({ envId: 'p1', stats: { views: 0, likes: 0, collects: 0 } }),
