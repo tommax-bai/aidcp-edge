@@ -61,7 +61,7 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
     ipcRenderer.on('ui:activity', listener);
     return () => ipcRenderer.removeListener('ui:activity', listener);
   },
-  // 稿件预览内的发布/取消审批动作（经目标环境 core → cloud，渲染层不直连网络）。
+  // 稿件预览内的发布/取消审批动作（Electron main 经 customer-auth HTTP 发起；不依赖自动化引擎/浏览器）。
   publishApproval: (envId, payload) => ipcRenderer.invoke('publish:approval', envId, payload),
   // 待审批稿列表/详情：main 固定客户接口路径并注入当前环境，renderer 不能提交 URL/token/accountId。
   publishDraftList: (envId, options) => ipcRenderer.invoke('publish-draft:list', envId, options),

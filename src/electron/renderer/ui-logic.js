@@ -28,36 +28,61 @@
     return `${Math.floor(diff / 3_600_000)} 小时`;
   }
 
-  // ── 健康合成：五路技术状态 → 一句结论 + 色调。真正中断与可恢复协助分级。──
+  // ── 健康合成：客户会话 + 自动化 + 浏览器 → 一句结论。core/cloud 仅作旧版兼容，不参与主结论。──
   const AUTH_ATTENTION = { 'login required': '需要登录小红书', 'chrome missing': '本机缺少 Chrome', 'config required': '需要完成初始设置' };
 
+  function lifecycleView(status) {
+    const raw = status || {};
+    const automationState = raw.automationState
+      || (raw.session === 'paused' ? 'paused'
+        : raw.edge === 'warning' || raw.coreState === 'error' ? 'error'
+        : raw.edge === 'starting' || raw.coreState === 'starting' || raw.coreState === 'restarting' ? 'starting'
+        : (raw.session === 'running' || raw.session === 'resting') && (raw.edge === 'running' || raw.coreState === 'online') ? 'running'
+        : 'stopped');
+    const legacyEngineActive = ['starting', 'ready', 'running', 'waiting_resource'].includes(automationState);
+    const engineLinkState = raw.engineLinkState
+      || (raw.cloudState === 'offline' ? 'disconnected' : raw.cloudState)
+      || (raw.cloud === 'connected' ? 'connected'
+        : legacyEngineActive && (raw.edge === 'running' || raw.edge === 'starting')
+          ? (raw.cloudEverConnected ? 'reconnecting' : 'connecting')
+          : 'disconnected');
+    return {
+      ...raw,
+      clientSessionState: raw.clientSessionState || 'ready',
+      automationState,
+      engineLinkState,
+      browserState: raw.browserState || (raw.browserStandby ? 'closed' : raw.edge === 'running' ? 'ready' : 'closed'),
+    };
+  }
+
   function synthesizeHealth(status) {
-    const s = status || {};
+    const s = lifecycleView(status);
     const edgeFailure = s.edgeFailure && typeof s.edgeFailure.summary === 'string' ? s.edgeFailure.summary.trim() : '';
-    if (s.coreState === 'error' || s.edge === 'warning') return { code: 'error', label: '核心异常', detail: edgeFailure || '客户端核心未能继续运行，请查看详情' };
+    if (s.clientSessionState === 'signed_out' || s.clientSessionState === 'expired') {
+      return { code: 'attention', label: '需要登录客户端', detail: '登录后即可继续数据管理；不会自动启动浏览器' };
+    }
     if (s.risk === 'frozen') return { code: 'error', label: '账号已暂停', detail: '账号当前无法继续操作，请查看详情' };
-    if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需要协助', detail: AUTH_ATTENTION[s.auth] };
     if (s.risk === 'restricted') return { code: 'attention', label: '账号受限', detail: '自动运营已暂停；确认 Facebook 可正常使用后可解除受限' };
-    if (s.cloudState === 'reconnecting' || (s.edge === 'running' && s.session === 'running' && s.cloud !== 'connected')) {
-      // 「**重**新连接」断言的是「曾经连上过、现在断了」。本轮核心从没连上过 = 还在冷启动：核心一打印日志
-      // edge 就翻成 running，但它 main() 里连云端排在「起浏览器 → CDP attach → 登录闸」之后，中间整个窗口
-      // cloud 都还是 disconnected。这时讲「重新连接」＝断言一个从未发生过的连接，把「还没」读成「否」。
-      if (s.cloudState === 'connecting' || !s.cloudEverConnected) return { code: 'ready', label: '核心连接中…', detail: '正在连接 Cloud；浏览器无需启动' };
-      return { code: 'attention', label: '正在重新连接', detail: '连接恢复后会自动继续' };
+    if (s.automationState === 'error' || ((s.coreState === 'error' || s.edge === 'warning') && s.automationState !== 'stopped')) {
+      return { code: 'error', label: '自动化异常', detail: edgeFailure || '自动化引擎未能继续运行，请查看详情' };
+    }
+    if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需要协助', detail: AUTH_ATTENTION[s.auth] };
+    if (s.automationState === 'pausing') return { code: 'paused', label: '正在暂停自动化…', detail: '正在断开引擎并释放浏览器；数据管理仍可用' };
+    if (s.automationState === 'stopping') return { code: 'paused', label: '正在关闭自动化…', detail: '数据管理仍可用' };
+    if (s.automationState === 'waiting_resource') return { code: 'ready', label: '等待浏览器资源', detail: '轮到当前环境后会自动继续' };
+    if (s.automationState === 'starting') return { code: 'ready', label: '正在启动自动化…', detail: '正在连接引擎并准备浏览器' };
+    if (s.engineLinkState === 'reconnecting' && ['ready', 'running'].includes(s.automationState)) {
+      return { code: 'attention', label: '自动化正在重连', detail: '数据管理不受影响；连接恢复后会自动继续' };
     }
     if (s.browserState === 'error') {
-      return { code: 'attention', label: '浏览器执行器异常', detail: '客户端核心与 Cloud 仍在线；可重新打开浏览器恢复页面操作' };
+      return { code: 'attention', label: '浏览器异常', detail: '数据管理仍可用；可重新打开浏览器恢复页面操作' };
     }
-    if (s.automationState === 'paused' || s.session === 'paused') return { code: 'paused', label: '自动化已暂停', detail: `客户端核心在线；浏览器${s.browserState === 'ready' ? '已打开' : '已关闭'}` };
-    if (s.edge === 'running' && s.session === 'resting') return { code: 'paused', label: '等待下一轮', detail: '当前阶段完成后会自动继续' };
-    if (s.coreState === 'starting' || s.edge === 'starting') return { code: 'ready', label: '核心启动中…', detail: '浏览器保持独立' };
-    if (s.automationState === 'running' || (s.edge === 'running' && s.session === 'running')) {
+    if (s.automationState === 'paused') return { code: 'paused', label: '自动化已暂停', detail: '引擎已断开；数据管理仍可继续使用' };
+    if (s.automationState === 'running') {
       return { code: 'running', label: s.risk === 'warned' ? '运行中 · 放慢节奏' : '运行中 · 一切正常', detail: '' };
     }
-    if (s.coreState === 'online' && s.cloudState === 'connected') {
-      return { code: 'ready', label: '客户端核心在线', detail: s.browserState === 'closed' ? '浏览器已关闭；Cloud 操作仍可用' : '浏览器已就绪，自动化尚未开始' };
-    }
-    return { code: 'ready', label: '待连接', detail: '登录客户端后会自动连接客户端核心' };
+    if (s.automationState === 'ready') return { code: 'ready', label: '自动化已就绪', detail: '引擎已连接，等待下一项任务' };
+    return { code: 'ready', label: '客户端已就绪', detail: '数据管理可直接使用；开始自动化时才会连接引擎和打开浏览器' };
   }
 
   // 标题带色调：可恢复的节奏调整用琥珀，只有冻结使用红色。
@@ -68,13 +93,13 @@
     return 'normal';
   }
 
-  // 五路明细的人话标签（内部词 → 客户能懂的话）。
+  // 用户可见明细只展示产品概念；coreState/cloudState 保留在诊断快照，不进入这里。
   const DETAIL_LABELS = {
-    auth: { label: '小红书登录', values: { checking: '检测中', 'login required': '需要登录', 'logged in': '已登录', 'chrome missing': '缺少 Chrome', 'config required': '待完成设置' } },
-    cloud: { label: '云端连接', values: { disconnected: '未连接', connected: '已连接' } },
-    session: { label: '自动运营', values: { idle: '待命', running: '进行中', resting: '等待下一轮', paused: '已暂停', closed: '已关闭' } },
+    clientSessionState: { label: '客户会话', values: { ready: '已登录', signed_out: '未登录', expired: '已过期' } },
+    automationState: { label: '自动化', values: { stopped: '未启动', starting: '启动中', ready: '已就绪', running: '运行中', waiting_resource: '等待资源', pausing: '暂停中', paused: '已暂停', stopping: '关闭中', error: '异常' } },
+    engineLinkState: { label: '引擎连接', values: { disconnected: '未连接', connecting: '连接中', connected: '已连接', reconnecting: '重连中', error: '异常' } },
+    browserState: { label: '浏览器', values: { closed: '已关闭', queued: '等待槽位', starting: '启动中', ready: '已就绪', blocked: '等待人工处理', closing: '关闭中', error: '异常' } },
     risk: { label: '账号保护', values: { normal: '正常', warned: '谨慎放慢', restricted: '账号受限', frozen: '已暂停' } },
-    edge: { label: '本机引擎', values: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '需要处理' } },
   };
 
   function detailRows(status) {
@@ -663,41 +688,34 @@
   const FLEET_STALE_MS = 5 * 60_000; // 状态投影超 5 分钟无任何更新即判失联（诚实：不确定 ≠ 在线）
 
   function fleetLevel(status, nowMs) {
-    const s = status || {};
+    const s = lifecycleView(status);
     if (s.respawnGaveUp) return { level: 'error', needsAction: true, label: '错误 · 已放弃重启' };
-    if (s.coreState === 'error' || s.edge === 'warning') return { level: 'error', needsAction: true, label: '核心异常' };
-    if (s.cloudRebind && s.cloudRebind.state === 'failed') return { level: 'attention', needsAction: true, label: 'Cloud 重绑失败' };
+    if (s.automationState === 'error' || ((s.coreState === 'error' || s.edge === 'warning') && s.automationState !== 'stopped')) return { level: 'error', needsAction: true, label: '自动化异常' };
+    if (s.cloudRebind && s.cloudRebind.state === 'failed') return { level: 'attention', needsAction: true, label: '引擎重绑失败' };
     // 阻断浮层待人工（登录/验证码/未知阻断，核心已本地暂停）：即便 edge 仍 running 也 MUST 浮顶为需处理，
     // 绝不呈现为绿色在线（多环境跨窗盯验证码是本控制台核心目的）。置于 running 判定之前。
     if (s.overlayBlocked) return { level: 'attention', needsAction: true, label: '等待你处理' };
-    if (s.auth === 'login required') return { level: 'attention', needsAction: true, label: '需要登录' };
+    if (s.auth === 'login required') return { level: 'attention', needsAction: true, label: '需要登录平台' };
     if (s.auth === 'config required') return { level: 'attention', needsAction: true, label: '待配置' };
     if (s.auth === 'chrome missing') return { level: 'attention', needsAction: true, label: '缺少 Chrome' };
+    if (s.clientSessionState === 'signed_out' || s.clientSessionState === 'expired') return { level: 'attention', needsAction: true, label: '需要登录客户端' };
     if (s.risk === 'frozen') return { level: 'error', needsAction: true, label: '账号已暂停' };
     if (s.risk === 'restricted') return { level: 'attention', needsAction: true, label: '账号受限' };
     if (s.sameAccountWarning) return { level: 'attention', needsAction: true, label: '账号重复运行' };
-    if (s.coreState === 'starting' || s.coreState === 'restarting' || s.edge === 'starting') return { level: 'launching', needsAction: false, label: '核心连接中' };
-    if (s.coreState === 'online' || s.edge === 'running') {
+    if (s.automationState === 'starting' || s.automationState === 'waiting_resource' || s.automationState === 'pausing' || s.automationState === 'stopping') {
+      return { level: 'launching', needsAction: false, label: s.automationState === 'waiting_resource' ? '等待浏览器资源' : '自动化处理中' };
+    }
+    if (s.automationState === 'ready' || s.automationState === 'running') {
       const at = Date.parse(s.updatedAt || '');
       if (Number.isFinite(at) && Number.isFinite(nowMs) && nowMs - at > FLEET_STALE_MS) {
         return { level: 'stale', needsAction: false, label: '失联' };
       }
-      // 同 synthesizeHealth：没连上过 ≠ 断线。冷启动窗口必须留在 launching（蓝、不 needsAction、不浮顶），
-      // 否则每次正常启动都会被染成琥珀「需要你处理」并挤到列表顶部，与真正待人工的登录 / 验证码 / 风控
-      // 受限混作一谈——那正好毁掉环境栏存在的理由（一眼看出谁真的需要我）。
-      if (s.cloudState === 'connecting' || (s.session === 'running' && s.cloud !== 'connected' && !s.cloudEverConnected)) {
-        return { level: 'launching', needsAction: false, label: '核心连接中' };
-      }
-      if (s.cloudState === 'reconnecting' || (s.session === 'running' && s.cloud !== 'connected')) {
-        return { level: 'attention', needsAction: true, label: '正在重新连接' };
-      }
-      const automation = s.automationState || (s.session === 'running' ? 'running' : s.session === 'paused' ? 'paused' : 'stopped');
-      if (automation === 'running' || automation === 'queued') return { level: 'running', needsAction: false, label: automation === 'queued' ? '页面任务排队' : '自动化运行中' };
-      return { level: 'running', needsAction: false, label: s.browserState === 'closed' ? '核心在线 · 浏览器已关' : automation === 'paused' ? '核心在线 · 自动化暂停' : '客户端核心在线' };
+      if (s.engineLinkState === 'connecting') return { level: 'launching', needsAction: false, label: '自动化连接中' };
+      if (s.engineLinkState === 'reconnecting') return { level: 'attention', needsAction: true, label: '自动化正在重连' };
+      return { level: 'running', needsAction: false, label: s.automationState === 'running' ? '自动化运行中' : '自动化已就绪' };
     }
-    if (s.session === 'paused') return { level: 'offline', needsAction: false, label: '已暂停' };
-    if (s.session === 'closed') return { level: 'offline', needsAction: false, label: '已关闭' };
-    return { level: 'offline', needsAction: false, label: '已停止' };
+    if (s.automationState === 'paused') return { level: 'offline', needsAction: false, label: '自动化已暂停' };
+    return { level: 'offline', needsAction: false, label: '客户端已就绪' };
   }
 
   // 紧迫度排序：需处理（error→attention）浮顶，其后 launching/stale/running，再 offline；同级保持花名册序。

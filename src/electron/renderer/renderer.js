@@ -21,6 +21,7 @@ const fields = {
   riskRecoveryConfirmSubmit: document.querySelector('#risk-recovery-confirm-submit'),
   auth: document.querySelector('#auth-status'),
   cloud: document.querySelector('#cloud-status'),
+  engineLinkDiagnostic: document.querySelector('#engine-link-diagnostic'),
   session: document.querySelector('#session-state'),
   browser: document.querySelector('#browser-state'),
   risk: document.querySelector('#risk-status'),
@@ -323,6 +324,7 @@ const settingsUi = {
   cloudEnvButtons: Array.from(document.querySelectorAll('.cloud-env-btn')),
   cloudEnvCustomField: document.querySelector('#cloud-env-custom-field'),
   cloudUrlCustom: document.querySelector('#cloud-url-custom'),
+  clientAuthUrlCustom: document.querySelector('#client-auth-url-custom'),
   cloudEnvCurrent: document.querySelector('#cloud-env-current'),
   cloudEnvHint: document.querySelector('#cloud-env-hint'),
   cloudRestartAll: document.querySelector('#cloud-restart-all'),
@@ -333,6 +335,7 @@ const PARKING_MODES = new Set(['primary-screen', 'parking-display', 'edge-strip'
 
 // 状态码保持英文（供 CSS 上色 + main 侧判断），展示文案在此本地化。className 仍用原始码不动色。
 const STATUS_LABELS = {
+  clientSession: { ready: '已登录', signed_out: '未登录', expired: '已过期' },
   auth: {
     checking: '检测中',
     'login required': '需登录',
@@ -345,14 +348,15 @@ const STATUS_LABELS = {
   risk: { normal: '正常', warned: '谨慎放慢', restricted: '账号受限', frozen: '已冻结' },
   edge: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '异常' },
   core: { stopped: '未连接', starting: '启动中', online: '在线', restarting: '重启中', error: '异常' },
+  engineLink: { disconnected: '未连接', connecting: '连接中', connected: '已连接', reconnecting: '重连中', error: '异常' },
   cloudAxis: { connecting: '连接中', connected: '已连接', reconnecting: '重连中', offline: '离线' },
-  automation: { stopped: '未开始', queued: '排队中', running: '运行中', paused: '已暂停', error: '异常' },
-  browser: { closed: '已关闭', queued: '排队中', starting: '启动中', ready: '已就绪', releasing: '关闭中', error: '异常' },
+  automation: { stopped: '未启动', starting: '启动中', ready: '已就绪', running: '运行中', waiting_resource: '等待资源', pausing: '暂停中', paused: '已暂停', stopping: '关闭中', error: '异常' },
+  browser: { closed: '已关闭', queued: '排队中', starting: '启动中', ready: '已就绪', blocked: '等待人工处理', closing: '关闭中', releasing: '关闭中', error: '异常' },
 };
 
 const SUBTITLE = {
-  adspower: '客户端核心常驻；内置指纹浏览器只在登录或页面自动化时按需打开。',
-  self: '客户端核心常驻；本机 Chrome 只在登录或页面自动化时按需打开。',
+  adspower: '数据管理可直接使用；开始自动化时才连接引擎并按需打开指纹浏览器。',
+  self: '数据管理可直接使用；开始自动化时才连接引擎并按需打开本机 Chrome。',
 };
 
 let currentStatus;
@@ -481,17 +485,15 @@ let quotaDetailsOpen = false;
 const slowStartFeedbackByEnv = new Map();
 
 /**
- * 不依赖边缘的慢启动读缓存（change slow-start-offline-toggle），按 envKey 隔离。存放**纯云端真态**，
- * 供**没有活快照**（从未启动 / 已停止，dailyUsage 为 null）的环境渲染慢启动这一行——binding_unknown 可见性的前置。
+ * 慢启动管理统一使用 customer-auth HTTP，按 envKey 隔离。自动化 WebSocket 快照可展示运行用量，
+ * 但不再决定管理开关是否可读写。
  * 三种态：{ kind:'loading' }（读在途）/ { kind:'ok', slowStart, dayQuotas }（读到真态，或写入回执覆盖）/
  * { kind:'error', message }（够不到云端，就地如实展示，绝不静默吞）。
- * **来源优先级（D3，规则非巧合）**：有活快照 → 快照治理；无活快照 → 本缓存（HTTP 读）；PUT 回执 → 对发起环境权威
- * （写成功即写入本缓存）。三者同源于云端 slowStartView，**MUST NOT 逐字段合并**——整体采用其一。
+ * PUT 回执会覆盖本缓存；所有请求都有独立 loading / ok / error 状态。
  */
 const slowStartHttpByEnv = new Map();
 
-// Cloud 环境风险真态：只给停止/断连环境补足本地 status.risk='normal' 的不可信缺口。
-// live connected 时始终让 ui.snapshot 胜出；HTTP 失败保留上次已证实真态，不把失败画成 normal。
+// Cloud 环境风险管理真态统一由 customer-auth HTTP 提供；自动化引擎是否连接不参与读取/恢复闸。
 const environmentRiskHttpByEnv = new Map();
 const environmentRiskFetchInFlight = new Set();
 const environmentRiskFeedbackByEnv = new Map();
@@ -573,8 +575,6 @@ function effectiveEnvironmentStatus(env, status) {
     ? normPlatform(rawPlatform)
     : (env && env.envId === fleetView.selected ? selectedEnvPlatform() : '');
   if (!env || platform !== 'facebook') return base;
-  // 活 Cloud snapshot 与 controller 同源且持续刷新；HTTP 只补没有活快照的环境。
-  if (base.cloud === 'connected' && ENVIRONMENT_RISK_STATUSES.has(base.risk)) return base;
   const envKey = slowStartEnvKey(env);
   const cached = envKey && environmentRiskHttpByEnv.get(envKey);
   if (!cached || cached.kind !== 'ok' || !ENVIRONMENT_RISK_STATUSES.has(cached.status)) return base;
@@ -1028,8 +1028,9 @@ function renderEnvironmentRiskRecovery(status) {
   if (environmentRiskConfirmContext && environmentRiskConfirmContext.envKey !== context.envKey) {
     closeEnvironmentRiskRecoveryConfirm('environment_changed');
   }
-  if (status && status.cloud !== 'connected') void ensureEnvironmentRiskHttpFetch(context.envKey);
-  const visible = status && status.risk === 'restricted';
+  void ensureEnvironmentRiskHttpFetch(context.envKey);
+  const effective = effectiveEnvironmentStatus(context.env, status);
+  const visible = effective && effective.risk === 'restricted';
   if (!visible) {
     closeEnvironmentRiskRecoveryConfirm('state_changed');
     const previous = environmentRiskFeedbackByEnv.get(context.envKey);
@@ -1065,28 +1066,14 @@ function renderSlowStart(status) {
     hideSlowStartRow();
     return;
   }
-  const connState = status && status.cloud === 'connected' ? 'online' : 'offline';
-  // 来源优先级（change slow-start-offline-toggle，D3）：① 有活快照 → 快照治理（同时带用量计数）。
-  const snapshotView = window.uiLogic.slowStartLine(status && status.dailyUsage, connState, 'snapshot');
-  if (snapshotView.visible) {
-    applySlowStartView(snapshotView, context);
-    return;
-  }
-  // 云端已连接但快照尚未带来 slowStart（瞬态）→ 快照马上就到，先隐藏，绝不冗余 HTTP 读（否则连着的号也去打一次读）。
-  if (connState !== 'offline') {
-    hideSlowStartRow();
-    return;
-  }
-  // ② 边缘离线（从未启动 / 已停止，dailyUsage 为 null）→ 用不依赖边缘的 env-scoped 读填这一行。
-  //    这是 binding_unknown 可见性的**前置**——真正让它「什么都不显示」的是「没有 payload ⇒ 整行不渲染」，不是文案表缺键。
+  // 管理开关始终走 env-scoped HTTP；引擎已连接也不会切回 WebSocket 快照作为写入依据。
   if (!window.aidcpEdge || typeof window.aidcpEdge.getSlowStart !== 'function') {
-    // 该构建未提供不依赖边缘的读（老客户端）→ 退回旧占位，绝不卡在「正在读取」。
     renderSlowStartPlaceholder('请登录客户端后读取 Cloud 慢启动状态');
     return;
   }
   const http = slowStartHttpByEnv.get(context.envKey);
   if (http && http.kind === 'ok') {
-    applySlowStartView(window.uiLogic.slowStartLine({ slowStart: http.slowStart }, connState, 'http'), context);
+    applySlowStartView(window.uiLogic.slowStartLine({ slowStart: http.slowStart }, 'offline', 'http'), context);
     return;
   }
   if (http && http.kind === 'error') {
@@ -1532,7 +1519,7 @@ function renderTitlebar(status) {
     fields.acctPlat.classList.toggle('plat-facebook', fb);
     fields.acctPlat.classList.toggle('plat-wechat', wechat);
   }
-  if (fields.authLabel) fields.authLabel.textContent = fb ? 'Facebook 登录' : wechat ? '视频号登录' : '小红书登录';
+  if (fields.authLabel) fields.authLabel.textContent = '客户会话';
   renderProxyRuntime(status, fb);
   const health = uiLogic.synthesizeHealth(status);
   fields.healthLabel.textContent = health.label;
@@ -3210,30 +3197,36 @@ function applyDevVisible(v) {
 }
 devToggle.addEventListener('change', () => {
   applyDevVisible(devToggle.checked);
-  window.aidcpEdge.saveSettings({ devDetails: devToggle.checked }); // 独立持久化，不打断在跑核心
+  window.aidcpEdge.saveSettings({ devDetails: devToggle.checked }); // 独立持久化，不打断运行中的自动化引擎
 });
 
-// 自动化与浏览器是两条独立意图：核心/Cloud 在线不等于自动化运行，浏览器关闭也不等于离线。
+// 主控制只表达自动化生命周期；手动浏览器仅在自动化未启动时作为登录/检查入口。
 function renderFab(status) {
   const fab = fields.sessionFab;
   const automation = status.automationState
     || (status.session === 'paused' ? 'paused' : (status.session === 'running' || status.session === 'resting') ? 'running' : 'stopped');
-  const running = automation === 'running' || automation === 'queued';
+  const running = ['starting', 'ready', 'running', 'waiting_resource'].includes(automation);
   const paused = automation === 'paused';
+  const pending = automation === 'pausing' || automation === 'stopping';
   const text = running ? '暂停自动化' : paused ? '恢复自动化' : '开始自动化';
   const cls = running ? 'pause' : 'start';
   const action = running ? 'pause' : paused ? 'resume' : 'start';
   fab.textContent = text;
   fab.className = `fab ${cls}`;
   fab.dataset.action = action;
+  fab.disabled = pending;
   if (fields.sessionClose) {
     const browser = status.browserState || (status.browserStandby ? 'closed' : status.edge === 'running' ? 'ready' : 'closed');
     const closed = browser === 'closed' || browser === 'error';
-    const pending = browser === 'queued' || browser === 'starting' || browser === 'releasing';
+    const browserPending = browser === 'queued' || browser === 'starting' || browser === 'closing' || browser === 'releasing';
+    const automationActive = automation !== 'stopped' && automation !== 'error';
     fields.sessionClose.classList.remove('hidden');
-    fields.sessionClose.textContent = pending ? '浏览器处理中…' : browser === 'error' ? '重新打开浏览器' : closed ? '打开浏览器' : '关闭浏览器';
-    fields.sessionClose.dataset.browserAction = closed ? 'open' : 'close';
-    fields.sessionClose.disabled = pending;
+    fields.sessionClose.textContent = automationActive
+      ? (automation === 'stopping' ? '正在关闭自动化…' : '关闭自动化')
+      : browserPending ? '浏览器处理中…' : browser === 'error' ? '重新打开浏览器' : closed ? '打开浏览器（登录/检查）' : '关闭浏览器';
+    fields.sessionClose.dataset.lifecycleAction = automationActive ? 'close' : '';
+    fields.sessionClose.dataset.browserAction = automationActive ? '' : (closed ? 'open' : 'close');
+    fields.sessionClose.disabled = pending || (!automationActive && browserPending);
   }
 }
 
@@ -3270,8 +3263,9 @@ function render(status) {
   currentStatus = status;
   syncDelegatedActionAvailability();
   const now = Date.now();
-  setBadge(fields.auth, 'auth', status.auth);
-  setBadge(fields.cloud, 'cloudAxis', status.cloudState || (status.cloud === 'connected' ? 'connected' : 'offline'));
+  setBadge(fields.auth, 'clientSession', status.clientSessionState || 'ready');
+  setBadge(fields.cloud, 'engineLink', status.engineLinkState || (status.cloud === 'connected' ? 'connected' : 'disconnected'));
+  setBadge(fields.engineLinkDiagnostic, 'engineLink', status.engineLinkState || (status.cloud === 'connected' ? 'connected' : 'disconnected'));
   setBadge(fields.session, 'automation', status.automationState || (status.session === 'running' ? 'running' : status.session === 'paused' ? 'paused' : 'stopped'));
   setBadge(fields.browser, 'browser', status.browserState || 'closed');
   setBadge(fields.risk, 'risk', status.risk);
@@ -3290,12 +3284,12 @@ function render(status) {
   renderFab(status);
   renderNotice(status);
   renderSameAccount(status); // 同账号铺多环境告警（多环境 fleet；无告警字段时隐藏，零回归）
-  updateApplyRestart(); // 依「dirty && 核心在跑」决定是否显示「按新设置重启」
+  updateApplyRestart(); // 依「dirty && 自动化引擎在跑」决定是否显示「按新设置重启」
   updateCloudPending(); // 云端环境（change edge-cloud-env-selector）：随状态心跳刷「当前云端 / 待重启生效」
   if (status.provider && SUBTITLE[status.provider]) fields.subtitle.textContent = SUBTITLE[status.provider];
   // 表单未在编辑时，让 provider 分段跟随实际运行 provider。
   if (status.provider && !editingProvider) applyProviderSelection(status.provider);
-  updatePersonaGate(status); // 建号人设：仅登录+云端已连接才可生成（不触碰已选关键词/草稿，避免状态推送重置向导）
+  updatePersonaGate(status); // 建号人设只依赖客户会话与 HTTP 权威绑定，不依赖自动化引擎/浏览器
   syncInteractionWorkspace();
   syncContentWorkspace(status);
 }
@@ -3964,7 +3958,7 @@ for (const button of fields.railPlatformFilters || []) {
 
 fields.railFacebookPersonaSubmit?.addEventListener('click', () => openFacebookBulkPersona());
 
-// ── 「全部开始自动化」：只有浏览器执行器进入有界槽位/启动队列，客户端核心不受此上限限制 ──
+// ── 「全部开始自动化」：每个环境按需启动引擎，浏览器执行器进入有界槽位/启动队列 ──
 async function doStartAll() {
   const api = window.aidcpEdge.fleetStartAll;
   if (typeof api !== 'function') return;
@@ -3987,7 +3981,7 @@ async function doStartAll() {
     } else if (res.queued > 0) {
       setRailMsg(`已为 ${res.queued} 个环境排队开始自动化（浏览器执行器错峰取得）。`); // 旧主进程无 envIds 时兜底
     } else if (Number(res.controlOnly) > 0) {
-      setRailMsg(`${res.controlOnly} 个客户端核心已连接；自动化浏览器正在等待执行槽位。`);
+      setRailMsg(`${res.controlOnly} 个自动化引擎正在等待浏览器执行槽位。`);
     } else if (Number(res.rejected) > 0) {
       setRailMsg(`浏览器执行队列已满，本次有 ${res.rejected} 个环境未加入自动化（排队上限 ${res.queueLimit}）。`);
     } else {
@@ -4007,7 +4001,7 @@ function updateStartAllProgress() {
   }).length;
   if (launched >= sa.total) {
     const suffix = sa.controlOnly > 0
-      ? `；另 ${sa.controlOnly} 个客户端核心已在线，浏览器暂未入队`
+      ? `；另 ${sa.controlOnly} 个自动化引擎已连接，浏览器暂未入队`
       : sa.rejected > 0
         ? `；另 ${sa.rejected} 个未加入自动化请求`
         : '';
@@ -4015,7 +4009,7 @@ function updateStartAllProgress() {
     fleetView.startAll = null;
     return;
   }
-  setRailMsg(`自动化启动中 ${launched}/${sa.total} · 其余 ${sa.total - launched} 个浏览器错峰排队${sa.controlOnly > 0 ? ` · ${sa.controlOnly} 个客户端核心已在线` : ''}${sa.rejected > 0 ? ` · ${sa.rejected} 个未加入` : ''}…`);
+  setRailMsg(`自动化启动中 ${launched}/${sa.total} · 其余 ${sa.total - launched} 个浏览器错峰排队${sa.controlOnly > 0 ? ` · ${sa.controlOnly} 个自动化引擎已连接` : ''}${sa.rejected > 0 ? ` · ${sa.rejected} 个未加入` : ''}…`);
 }
 fields.railStartAll?.addEventListener('click', () => { void doStartAll(); });
 
@@ -4212,6 +4206,9 @@ function updateProfileDisplay() {
 function isWsUrl(u) {
   return /^wss?:\/\//i.test(String(u || '').trim());
 }
+function isHttpUrl(u) {
+  return /^https?:\/\//i.test(String(u || '').trim());
+}
 // 反映已选 key 到分段按钮 + 自定义输入框显隐（不触发保存）。
 function applyCloudSelectionUi() {
   for (const btn of settingsUi.cloudEnvButtons) {
@@ -4223,11 +4220,20 @@ function applyCloudSelectionUi() {
 async function persistCloudSelection() {
   const key = cloudSelKey;
   const custom = settingsUi.cloudUrlCustom.value.trim();
+  const dataApi = settingsUi.clientAuthUrlCustom.value.trim();
   if (key === 'custom' && !isWsUrl(custom)) {
-    settingsUi.cloudEnvHint.textContent = '自定义地址需以 ws:// 或 wss:// 开头。';
+    settingsUi.cloudEnvHint.textContent = '自动化 WebSocket 地址需以 ws:// 或 wss:// 开头。';
     return { ok: false };
   }
-  const saved = await window.aidcpEdge.saveSettings({ cloudEnvKey: key, cloudUrlCustom: custom });
+  if (key === 'custom' && !isHttpUrl(dataApi)) {
+    settingsUi.cloudEnvHint.textContent = '客户数据 API 地址需以 http:// 或 https:// 开头。';
+    return { ok: false };
+  }
+  const saved = await window.aidcpEdge.saveSettings({
+    cloudEnvKey: key,
+    cloudUrlCustom: custom,
+    clientAuthUrl: key === 'custom' ? dataApi : '',
+  });
   // 主进程归一化可能把非法 custom 降级为 ''（未选择）；以回执为准回填。
   cloudSelKey = (saved && typeof saved.cloudEnvKey === 'string') ? saved.cloudEnvKey : key;
   if (saved && saved.cloudEnv) targetCloud = saved.cloudEnv;
@@ -4235,22 +4241,22 @@ async function persistCloudSelection() {
   updateCloudPending();
   return saved;
 }
-// 选择某云端：ol 需二次确认；确认/落盘后由用户显式让各客户端核心重绑控制连接。
+// 选择云端目标：数据 API 按请求生效；只有正在运行的自动化引擎需要显式重绑 WebSocket。
 async function selectCloudEnv(key) {
   if (key === 'ol' && cloudSelKey !== 'ol') {
-    if (!window.confirm('将连接线上生产云端 ol，确认切换？\n（切换只重绑客户端核心，浏览器状态保持不变）')) return;
+    if (!window.confirm('将数据请求和自动化目标切换到线上生产环境 ol，确认切换？\n（不会启动已停止的自动化或浏览器）')) return;
   }
   cloudSelKey = key;
   applyCloudSelectionUi();
   if (key === 'custom') {
     // 等用户填地址再落盘：仅展开输入框、聚焦；不立即保存空地址。
     settingsUi.cloudUrlCustom.focus();
-    settingsUi.cloudEnvHint.textContent = '填写 ws:// 或 wss:// 地址后自动保存。';
-    if (!isWsUrl(settingsUi.cloudUrlCustom.value)) { updateCloudPending(); return; }
+    settingsUi.cloudEnvHint.textContent = '分别填写客户数据 API 与自动化 WebSocket 地址后保存。';
+    if (!isWsUrl(settingsUi.cloudUrlCustom.value) || !isHttpUrl(settingsUi.clientAuthUrlCustom.value)) { updateCloudPending(); return; }
   }
   const saved = await persistCloudSelection();
   if (saved && saved.ok !== false) {
-    settingsUi.cloudEnvHint.textContent = `目标 Cloud 已改为「${targetCloud.label}」，请执行核心重绑；浏览器状态不会改变。`;
+    settingsUi.cloudEnvHint.textContent = `数据请求已切到「${targetCloud.label}」；运行中的自动化引擎可执行重绑，停止中的下次启动生效。`;
   }
 }
 // 逐环境比较实际 Cloud、目标 Cloud 和重绑失败；部分成功绝不冒充全量成功。
@@ -4322,6 +4328,7 @@ function applySettings(s) {
   // 云端环境（change edge-cloud-env-selector）：回填已选 key、自定义地址、目标云端视图。
   cloudSelKey = typeof s.cloudEnvKey === 'string' ? s.cloudEnvKey : '';
   settingsUi.cloudUrlCustom.value = s.cloudUrlCustom || '';
+  settingsUi.clientAuthUrlCustom.value = s.clientAuthUrl || '';
   if (s.cloudEnv) targetCloud = s.cloudEnv;
   applyCloudSelectionUi();
   updateCloudPending();
@@ -4388,20 +4395,24 @@ settingsUi.cloudUrlCustom.addEventListener('change', () => {
   if (cloudSelKey !== 'custom') return;
   void persistCloudSelection().then((saved) => {
     if (saved && saved.ok !== false) {
-      settingsUi.cloudEnvHint.textContent = `目标 Cloud 已改为「${targetCloud.label}」，请执行核心重绑；浏览器状态不会改变。`;
+      settingsUi.cloudEnvHint.textContent = `数据请求已切到「${targetCloud.label}」；运行中的自动化引擎可执行重绑。`;
     }
   });
 });
-// 兼容旧 API 名，执行的是逐核心控制传输重绑；不重启 core/浏览器。
+settingsUi.clientAuthUrlCustom.addEventListener('change', () => {
+  if (cloudSelKey !== 'custom') return;
+  void persistCloudSelection();
+});
+// 兼容旧 API 名，仅重绑运行中的自动化 WebSocket；不启动引擎或浏览器。
 settingsUi.cloudRestartAll.addEventListener('click', async () => {
   settingsUi.cloudRestartAll.disabled = true;
   try {
     const r = await window.aidcpEdge.cloudRestartAll?.();
     settingsUi.cloudEnvHint.textContent = r && r.ok
-      ? `${r.rebound} 个客户端核心已重绑「${(r.cloudEnv && r.cloudEnv.label) || targetCloud.label}」，浏览器状态未改变。`
+      ? `${r.rebound} 个运行中的自动化引擎已重绑「${(r.cloudEnv && r.cloudEnv.label) || targetCloud.label}」；${r.skipped || 0} 个停止中的环境将在下次启动时生效。`
       : r
-        ? `核心重绑完成 ${r.rebound || 0}/${r.accepted || 0}；${r.failed || 0} 个失败，请查看各环境状态后重试。`
-        : '核心重绑请求失败，请重试。';
+        ? `引擎重绑完成 ${r.rebound || 0}/${r.accepted || 0}；${r.failed || 0} 个失败，请查看各环境状态后重试。`
+        : '自动化引擎重绑请求失败，请重试。';
   } finally {
     settingsUi.cloudRestartAll.disabled = false;
   }
@@ -5198,7 +5209,7 @@ fields.proxySave?.addEventListener('click', async () => {
   }
 });
 
-// 「按新设置重启」：先保存当前设置，再显式重启把改动应用到在跑核心（dirty && 在跑时才出现）。
+// 「按新设置重启」：先保存当前设置，再显式重启把改动应用到运行中的自动化引擎。
 settingsUi.applyRestart.addEventListener('click', async () => {
   settingsUi.applyRestart.disabled = true;
   try {
@@ -5216,7 +5227,7 @@ settingsUi.applyRestart.addEventListener('click', async () => {
 // 单环境生命周期的唯一 renderer 出口：旧工作区与视频号 InteractionWorkspace 共用，确保“启动”始终先保存设置。
 async function runSessionLifecycle(action, envId = currentEnvId()) {
   if (action === 'resume') {
-    // 恢复 = 重启核心。若暂停期间改过浏览器设置（如切换了环境），先落盘再重启，否则会按旧设置重起。
+    // 恢复 = 重建自动化引擎。若暂停期间改过浏览器设置，先落盘再恢复，否则会按旧设置启动。
     if (!(await persistDirtyBeforeRestart('设置已保存，正在按新设置恢复…'))) return null;
     return window.aidcpEdge.resume(envId);
   }
@@ -5245,7 +5256,8 @@ fields.sessionFab.addEventListener('click', async () => {
     const next = await runSessionLifecycle(action, currentEnvId());
     if (next) routeStatus(next);
   } finally {
-    fields.sessionFab.disabled = false;
+    if (currentStatus) renderFab(currentStatus);
+    else fields.sessionFab.disabled = false;
   }
 });
 
@@ -5253,14 +5265,22 @@ fields.sessionClose?.addEventListener('click', async () => {
   fields.sessionClose.disabled = true;
   fields.sessionFab.disabled = true;
   try {
+    if (fields.sessionClose.dataset.lifecycleAction === 'close') {
+      const next = await window.aidcpEdge.close(currentEnvId());
+      if (next) routeStatus(next);
+      return;
+    }
     const action = fields.sessionClose.dataset.browserAction;
     const next = action === 'open'
       ? await window.aidcpEdge.browserOpen?.(currentEnvId())
       : await window.aidcpEdge.browserClose?.(currentEnvId());
     if (next) routeStatus(next);
   } finally {
-    fields.sessionClose.disabled = false;
-    fields.sessionFab.disabled = false;
+    if (currentStatus) renderFab(currentStatus);
+    else {
+      fields.sessionClose.disabled = false;
+      fields.sessionFab.disabled = false;
+    }
   }
 });
 
@@ -5961,7 +5981,7 @@ function beginPersonaUpdate() {
 }
 personaUi.update?.addEventListener('click', beginPersonaUpdate);
 
-// onboarding 三态（change persona-wizard-onboarding-fixes）：已绑→已设置跳过 / 未绑未连→空态面板 / 未绑已连→启用向导。
+// onboarding 三态：客户会话 ready 后直接按 HTTP/花名册权威绑定态工作，不依赖自动化引擎或浏览器。
 // 只改 disabled/显隐/面板文案，绝不触碰已选关键词与草稿（状态推送不重置向导进度）。
 function updatePersonaGate(status) {
   syncPersonaWritingLanguage(status);
@@ -5993,14 +6013,14 @@ function updatePersonaGate(status) {
     renderCloudPersonaGate(status, openView);
     return;
   }
-  const loggedIn = Boolean(status && status.auth === 'logged in');
-  const connected = Boolean(status && status.cloud === 'connected');
+  const sessionReady = Boolean(status && status.clientSessionState === 'ready');
+  const loggedIn = sessionReady;
   const browserOpen = Boolean(status && (status.browserState === 'ready'
     || (!status.browserState && status.edge === 'running' && !status.browserStandby)));
-  personaReady = loggedIn && connected;
+  personaReady = sessionReady;
 
   // 绑定态三态（change persona-bound-tristate）：true=云端确认已绑 / false=云端确认未绑 / 未知=还没收到。
-  // known 必须同时要求「已连云」和「权威信号已到」——只要信号没到，一律按未知处理（宁缺毋假）。
+  // known 只要求客户会话可用且权威绑定信号已到；自动化引擎连接不参与数据管理闸。
   const authoritative = personaReady && typeof (status && status.personaBound) === 'boolean';
   const bound = (authoritative && status.personaBound === true) || (personaReady && personaLocallyBound);
   // 「云端确认未绑」是弹窗与「未设置」徽标的**唯一**依据；未知既不弹窗、也不谎称未设置。
@@ -6051,7 +6071,7 @@ function updatePersonaGate(status) {
     if (personaUi.emptyTitle) personaUi.emptyTitle.textContent = loggedIn ? '正在读取云端账号绑定…' : '需要完成一次浏览器登录';
     if (personaUi.emptySub) {
       personaUi.emptySub.textContent = loggedIn
-        ? 'Cloud 返回绑定后会显示该账号的人设状态；不要求浏览器持续打开。'
+        ? '账号绑定读取完成后会显示人设状态；不要求启动自动化或持续打开浏览器。'
         : browserOpen
           ? '请在已打开的浏览器窗口完成登录；绑定落云后可关闭浏览器继续管理人设。'
           : '请显式打开浏览器完成首次登录；绑定落云后无需保持浏览器运行。';

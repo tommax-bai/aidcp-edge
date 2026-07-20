@@ -47,15 +47,15 @@
       <div class="tb-winctl-pad"></div>
     </header>
 
-    <!-- 健康明细浮层：核心、Cloud、自动化、浏览器四轴独立呈现，另列平台登录与账号保护。 -->
+    <!-- 健康明细浮层：客户会话、自动化引擎连接、自动化和浏览器。旧 core/cloud 轴仅留诊断快照。 -->
     <div id="health-pop" class="health-pop hidden">
       <p id="health-detail" class="hp-hint"></p>
-      <div class="hp-row"><span class="hp-label" id="auth-label">小红书登录</span><strong id="auth-status" class="badge">检测中</strong></div>
-      <div class="hp-row"><span class="hp-label">云端连接</span><strong id="cloud-status" class="badge">未连接</strong></div>
-      <div class="hp-row"><span class="hp-label">自动运营</span><strong id="session-state" class="badge">待命</strong></div>
-      <div class="hp-row"><span class="hp-label">浏览器执行器</span><strong id="browser-state" class="badge">已关闭</strong></div>
+      <div class="hp-row"><span class="hp-label" id="auth-label">客户会话</span><strong id="auth-status" class="badge">已登录</strong></div>
+      <div class="hp-row hidden"><span class="hp-label">引擎连接</span><strong id="cloud-status" class="badge">未连接</strong></div>
+      <div class="hp-row"><span class="hp-label">自动化</span><strong id="session-state" class="badge">未启动</strong></div>
+      <div class="hp-row"><span class="hp-label">浏览器</span><strong id="browser-state" class="badge">已关闭</strong></div>
       <div class="hp-row"><span class="hp-label">账号保护</span><strong id="risk-status" class="badge">正常</strong></div>
-      <div class="hp-row"><span class="hp-label">客户端核心</span><strong id="edge-state" class="badge">未连接</strong></div>
+      <div class="hp-row hidden"><span class="hp-label">引擎进程（兼容诊断）</span><strong id="edge-state" class="badge">未连接</strong></div>
     </div>
 
     <!-- 当前 Facebook 指纹浏览器的代理运行证据；配置态与实际出口刻意分行，避免“配了=生效”。 -->
@@ -249,7 +249,7 @@
       <section id="edge-failure" class="edge-failure hidden" aria-live="polite">
         <span class="ef-mark">!</span>
         <div class="ef-main">
-          <strong>客户端核心异常</strong>
+          <strong>自动化异常</strong>
           <span id="edge-failure-text"></span>
         </div>
       </section>
@@ -304,7 +304,7 @@
           </button>
           <div class="summary-actions" aria-label="环境生命周期控制">
             <time id="updated-at" class="summary-time"></time>
-            <button id="session-close" class="fab close" type="button">打开浏览器</button>
+            <button id="session-close" class="fab close" type="button">打开浏览器（登录/检查）</button>
             <button id="session-fab" class="fab" type="button">开始自动化</button>
           </div>
         </div>
@@ -565,6 +565,7 @@
       <!-- 共享原始日志：位于 legacy / 视频号 / 内容工作区切换之外，设置开关打开后始终跟随当前环境。 -->
       <details class="dev hidden" id="dev-section">
         <summary>开发者详情</summary>
+        <div class="hp-row"><span class="hp-label">自动化引擎连接</span><strong id="engine-link-diagnostic" class="badge">未连接</strong></div>
         <section id="interaction-test-reset" class="iw-test-reset hidden" aria-label="视频号测试数据重置">
           <div class="iw-test-reset-copy">
             <strong>视频号测试数据</strong>
@@ -955,15 +956,15 @@
         <span>设置</span>
         <button id="drawer-close" class="drawer-x nodrag" type="button" aria-label="关闭设置">×</button>
       </div>
-      <p class="subtle" id="subtitle">客户端核心常驻连接云端；浏览器只在登录或页面自动化时按需打开。</p>
+      <p class="subtle" id="subtitle">数据管理可直接使用；开始自动化时才连接引擎并按需打开浏览器。</p>
 
       <section class="settings">
-        <!-- 云端环境：选择客户端核心所连 Cloud；切换时只重绑控制连接，不重启浏览器。 -->
+        <!-- 云端目标：客户数据 API 与自动化 WebSocket 明确分离。 -->
         <div class="set-card">
           <div class="set-card-head">
             <div class="set-card-title">
-              <span>云端环境</span>
-              <span class="set-card-sub">选择客户端核心连接的云端；切换只重绑控制连接，浏览器状态保持不变</span>
+              <span>云端目标</span>
+              <span class="set-card-sub">数据管理走按请求 HTTP；自动化引擎另走 WebSocket</span>
             </div>
           </div>
           <div class="cloud-env-field">
@@ -973,13 +974,15 @@
               <button id="cloud-env-custom" class="seg cloud-env-btn" type="button" data-cloud="custom">自定义</button>
             </div>
             <label id="cloud-env-custom-field" class="field hidden">
-              <span class="field-label">自定义地址</span>
-              <input id="cloud-url-custom" type="text" placeholder="ws:// 或 wss:// 开头的云端地址" autocomplete="off" />
+              <span class="field-label">自动化 WebSocket</span>
+              <input id="cloud-url-custom" type="text" placeholder="ws:// 或 wss:// 开头" autocomplete="off" />
+              <span class="field-label">客户数据 API</span>
+              <input id="client-auth-url-custom" type="text" placeholder="http:// 或 https:// 开头，通常以 /capi 结尾" autocomplete="off" />
             </label>
-            <div class="cloud-env-current">当前连接：<strong id="cloud-env-current" class="badge">—</strong></div>
-            <span id="cloud-env-hint" class="parking-hint">未选择时跟随启动参数 / 默认 dev。切到「ol（线上）」会连接生产云端，需二次确认。</span>
+            <div class="cloud-env-current">自动化目标：<strong id="cloud-env-current" class="badge">—</strong></div>
+            <span id="cloud-env-hint" class="parking-hint">dev / ol 会使用内置的 HTTP 与 WebSocket 端点；自定义环境需要分别填写。</span>
             <div class="cloud-env-actions">
-              <button id="cloud-restart-all" class="secondary small hidden" type="button">全部核心重绑新云端</button>
+              <button id="cloud-restart-all" class="secondary small hidden" type="button">重绑运行中的自动化引擎</button>
             </div>
           </div>
         </div>

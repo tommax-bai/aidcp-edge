@@ -17,11 +17,15 @@ function functionSource(name: string, nextName: string): string {
   return main.slice(start, end);
 }
 
-test('Electron core child has IPC and pause uses lifecycle.pause rather than SIGTERM', () => {
+test('Electron engine child has IPC and pause disconnects it through lifecycle.pause_and_exit', () => {
   assert.match(main, /stdio:\s*\['pipe', 'pipe', 'pipe', 'ipc'\]/);
   const pause = functionSource('pauseEdge', 'resumeEdge');
-  assert.match(pause, /sendCoreLifecycle\(handle, 'pause'/);
-  assert.doesNotMatch(pause, /kill\(['"]SIGTERM['"]\)/, 'pause must never fall back to final-close SIGTERM');
+  assert.match(pause, /sendCoreLifecycle\(handle, 'pause_and_exit'/);
+  assert.match(pause, /handle\.automationIntent = 'paused'/);
+  assert.match(pause, /handle\.stopRequested = true/);
+  assert.match(pause, /child\.kill\('SIGTERM'\)/, 'IPC failure must still enforce pause = engine disconnected');
+  assert.match(main, /if \(handle\.automationPaused\) \{\s*spawnEnv\.AIDCP_AUTOMATION_PAUSED_AT_START = '1'/,
+    'manual browser sessions must remain paused even when bootstrapped browser-absent');
 });
 
 // change presence-terminal-honesty：断连时只翻云端徽标、不翻在场感，那一行会挂着断连前的中途动作文案
@@ -34,15 +38,20 @@ test('cloud disconnect rewrites the presence line instead of leaving the last ac
   assert.match(handler, /云端已重连[\s\S]{0,400}?next\.presence = \{ text: '已连接云端，等待安排…'/);
 });
 
-test('legacy edge close and explicit browser close both release only the browser executor', () => {
+test('edge close stops automation engine while explicit browser close only releases the browser executor', () => {
   assert.match(preload, /close:\s*\(envId\)\s*=>\s*ipcRenderer\.invoke\('edge:close', envId\)/);
   assert.match(preload, /browserClose:\s*\(envId\)\s*=>\s*ipcRenderer\.invoke\('browser:close', envId\)/);
   assert.match(main, /ipcMain\.handle\('edge:close'/);
   assert.match(main, /ipcMain\.handle\('browser:close'/);
-  const close = functionSource('closeEdge', 'relogin');
-  assert.match(close, /sendCoreLifecycle\(handle, 'standby'/);
-  assert.doesNotMatch(close, /sendCoreLifecycle\(handle, 'close'|kill\(['"]SIGTERM['"]\)/,
-    'browser close keeps core and Cloud alive');
+  const stopAutomation = functionSource('stopAutomation', 'closeBrowserExecutor');
+  assert.match(stopAutomation, /sendCoreLifecycle\(handle, 'close'/);
+  assert.match(stopAutomation, /handle\.automationIntent = 'stopped'/);
+  assert.match(stopAutomation, /confirmOwnedProfileClosedFromShell\(handle\)/,
+    'closing without a child must verify an externally retained AdsPower browser instead of claiming success');
+  const browserClose = functionSource('closeBrowserExecutor', 'relogin');
+  assert.match(browserClose, /sendCoreLifecycle\(handle, 'standby'/);
+  assert.doesNotMatch(browserClose, /sendCoreLifecycle\(handle, 'close'|kill\(['"]SIGTERM['"]\)/,
+    'manual browser close keeps a running engine connected');
 });
 
 test('browser cold standby uses lifecycle.standby and manual controls cancel timers', () => {
@@ -58,7 +67,7 @@ test('browser cold standby uses lifecycle.standby and manual controls cancel tim
 
   const pause = functionSource('pauseEdge', 'resumeEdge');
   assert.match(pause, /clearColdStandbyTimer\(handle\)/, 'manual pause must cancel cold standby timers');
-  const close = functionSource('closeEdge', 'relogin');
+  const close = functionSource('closeBrowserExecutor', 'relogin');
   assert.match(close, /clearColdStandbyTimer\(handle\)/, 'manual close must cancel cold standby timers');
   const restart = functionSource('stopAndRestart', 'handleEdgeOutput');
   assert.match(restart, /clearColdStandbyTimer\(handle\)/, 'manual restart must cancel cold standby timers');

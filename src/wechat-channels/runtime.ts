@@ -427,10 +427,11 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
       })();
       return;
     }
-    if (type === 'lifecycle.pause') {
+    if (type === 'lifecycle.pause' || type === 'lifecycle.pause_and_exit') {
       void connector!.stop().then(() => {
         automationPaused = true;
         if (typeof process.send === 'function' && process.connected) process.send({ type: 'lifecycle.paused' });
+        if (type === 'lifecycle.pause_and_exit') terminate(String(type));
       });
       return;
     }

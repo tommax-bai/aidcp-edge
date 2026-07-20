@@ -1,4 +1,4 @@
-export type CoreLifecycleCommand = 'pause' | 'resume' | 'close' | 'standby' | 'wake';
+export type CoreLifecycleCommand = 'pause' | 'pause_and_exit' | 'resume' | 'close' | 'standby' | 'wake';
 export type CoreLifecycleState = 'active' | 'pausing' | 'paused' | 'standby' | 'waking' | 'finalizing' | 'finished';
 
 export interface CoreLifecycleDependencies {
@@ -38,6 +38,7 @@ export function parseCoreLifecycleCommand(message: unknown): CoreLifecycleComman
   if (!message || typeof message !== 'object') return null;
   const type = (message as { type?: unknown }).type;
   if (type === 'lifecycle.pause') return 'pause';
+  if (type === 'lifecycle.pause_and_exit') return 'pause_and_exit';
   if (type === 'lifecycle.resume') return 'resume';
   if (type === 'lifecycle.close') return 'close';
   if (type === 'lifecycle.standby') return 'standby';
@@ -59,9 +60,10 @@ export class CoreLifecycleController {
   constructor(
     private readonly deps: CoreLifecycleDependencies,
     initialState: 'active' | 'paused' | 'standby' = 'active',
+    initialAutomationPaused = initialState === 'paused',
   ) {
     this.currentState = initialState;
-    this.automationPaused = initialState === 'paused';
+    this.automationPaused = initialAutomationPaused;
   }
 
   get state(): CoreLifecycleState {
@@ -70,6 +72,16 @@ export class CoreLifecycleController {
 
   request(command: CoreLifecycleCommand): Promise<void> {
     return this.enqueue(async () => {
+      if (command === 'pause_and_exit') {
+        await this.pause();
+        await this.finalize({
+          exitCode: 0,
+          reason: 'user_pause_disconnect_engine',
+          preserveBrowser: false,
+          requireConfirmedClose: true,
+        });
+        return;
+      }
       if (command === 'pause') {
         await this.pause();
         return;

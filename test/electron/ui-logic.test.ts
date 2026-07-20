@@ -66,6 +66,10 @@ interface SlowStartV {
 
 function st(over: Record<string, unknown> = {}) {
   return {
+    clientSessionState: 'ready',
+    automationState: 'running',
+    engineLinkState: 'connected',
+    browserState: 'ready',
     auth: 'logged in',
     cloud: 'connected',
     // 一个正常在跑的环境，按定义就是**连上过**的。基线带上这一位，下面「云端掉线 → 需处理」那条断言
@@ -91,45 +95,42 @@ test('健康合成：可恢复状态需要协助，真正中断状态为错误',
   assert.equal(uiLogic.synthesizeHealth(st({ auth: 'config required' })).code, 'attention');
   assert.equal(uiLogic.synthesizeHealth(st({ edge: 'warning' })).code, 'error');
   assert.equal(uiLogic.synthesizeHealth(st({ risk: 'frozen' })).code, 'error');
-  assert.equal(uiLogic.synthesizeHealth(st({ cloud: 'disconnected' })).code, 'attention');
+  assert.equal(uiLogic.synthesizeHealth(st({ engineLinkState: 'reconnecting' })).code, 'attention');
   assert.equal(uiLogic.synthesizeHealth(st({ risk: 'restricted' })).code, 'attention');
   const executorError = uiLogic.synthesizeHealth(st({ browserState: 'error', coreState: 'online', cloudState: 'connected' }));
   assert.equal(executorError.code, 'attention');
-  assert.equal(executorError.label, '浏览器执行器异常');
-  assert.match(executorError.detail, /核心与 Cloud 仍在线/);
+  assert.equal(executorError.label, '浏览器异常');
+  assert.match(executorError.detail, /数据管理仍可用/);
 });
 
 // ── 首次连接 ≠ 断线重连（change honest-first-connect-label）──
 // 冷启动窗口的真实形状：核心一打印日志 edge 就被翻成 running，spawn 时 session 已乐观写成 running，
 // 而核心 main() 里连云端排在「起浏览器 → CDP attach → 登录闸」之后——于是 cloud 还是 disconnected。
 // 这三者凑齐正好命中断连分支。它必须被读成「还在启动」，而不是「连接掉了」。
-test('健康合成：本轮核心从没连上过云端 → 是启动中，绝不冒充「正在重新连接」', () => {
+test('健康合成：自动化首次连接 → 是启动中，绝不冒充「正在重新连接」', () => {
   const booting = uiLogic.synthesizeHealth(
-    st({ edge: 'running', session: 'running', cloud: 'disconnected', cloudEverConnected: false }),
+    st({ automationState: 'starting', engineLinkState: 'connecting', cloudEverConnected: false }),
   );
   assert.equal(booting.code, 'ready');
   assert.doesNotMatch(booting.label, /重新连接/); // 「重」断言了一次从未发生过的连接
-  assert.match(booting.label, /连接/);
+  assert.match(booting.label, /启动自动化/);
 });
 
-test('健康合成：连上过之后掉线 → 才是真的「正在重新连接」', () => {
+test('健康合成：自动化引擎连上过之后掉线 → 才是真的「自动化正在重连」', () => {
   const dropped = uiLogic.synthesizeHealth(
-    st({ edge: 'running', session: 'running', cloud: 'disconnected', cloudEverConnected: true }),
+    st({ automationState: 'running', engineLinkState: 'reconnecting', cloudEverConnected: true }),
   );
   assert.equal(dropped.code, 'attention');
-  assert.match(dropped.label, /正在重新连接/);
+  assert.match(dropped.label, /自动化正在重连/);
 });
 
 test('健康合成：暂停 / 启动中 / 停止', () => {
-  assert.equal(uiLogic.synthesizeHealth(st({ session: 'paused', edge: 'stopped' })).code, 'paused');
-  const closed = uiLogic.synthesizeHealth(st({ session: 'closed', edge: 'stopped', cloud: 'disconnected' }));
-  assert.equal(closed.label, '待连接');
-  assert.match(closed.detail, /登录客户端/);
-  const resting = uiLogic.synthesizeHealth(st({ session: 'resting', edge: 'running' }));
-  assert.equal(resting.code, 'paused');
-  assert.match(resting.label, /等待下一轮/);
-  assert.equal(uiLogic.synthesizeHealth(st({ edge: 'starting', session: 'running', cloud: 'disconnected' })).code, 'ready');
-  assert.equal(uiLogic.synthesizeHealth(st({ edge: 'stopped', session: 'idle', cloud: 'disconnected' })).code, 'ready');
+  assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'paused', engineLinkState: 'disconnected', browserState: 'closed' })).code, 'paused');
+  const closed = uiLogic.synthesizeHealth(st({ automationState: 'stopped', engineLinkState: 'disconnected', browserState: 'closed' }));
+  assert.equal(closed.label, '客户端已就绪');
+  assert.match(closed.detail, /数据管理可直接使用/);
+  assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'starting', engineLinkState: 'connecting' })).code, 'ready');
+  assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'stopped', engineLinkState: 'disconnected' })).code, 'ready');
 });
 
 test('标题带色调随风控状态', () => {
@@ -139,10 +140,12 @@ test('标题带色调随风控状态', () => {
   assert.equal(uiLogic.bandTone(st({ risk: 'frozen' })), 'danger');
 });
 
-test('五路明细用人话（内部词不外露）', () => {
-  const rows = uiLogic.detailRows(st({ edge: 'running' }));
-  const edgeRow = rows.find((r) => r.key === 'edge');
-  assert.equal(edgeRow?.label, '本机引擎');
+test('五路明细只展示客户会话、自动化、引擎连接、浏览器和账号保护', () => {
+  const rows = uiLogic.detailRows(st());
+  const automationRow = rows.find((r) => r.key === 'automationState');
+  assert.equal(automationRow?.label, '自动化');
+  assert.equal(rows.find((r) => r.key === 'engineLinkState')?.label, '引擎连接');
+  assert.equal(rows.some((r) => r.key === 'coreState' || r.key === 'cloudState'), false);
   const riskRow = rows.find((r) => r.key === 'risk');
   assert.equal(riskRow?.label, '账号保护');
 });

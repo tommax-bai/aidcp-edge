@@ -1,18 +1,25 @@
-import type { MessageType } from '../comm/protocol.js';
+import type { MessageType, UiSnapshotPayload } from '../comm/protocol.js';
 
-export type OperationClass = 'local' | 'cloud' | 'platform_api' | 'browser_lifecycle' | 'page_automation';
+export type OperationClass =
+  | 'local'
+  | 'cloud_data'
+  | 'automation_control'
+  | 'platform_api_automation'
+  | 'browser_lifecycle'
+  | 'page_automation';
 
 export interface OperationDescriptor {
   category: OperationClass;
-  transport: 'local' | 'electron_ipc' | 'customer_auth_http' | 'cloud_ws';
+  transport: 'local' | 'electron_ipc' | 'customer_auth_http' | 'automation_ws';
   identity: 'none' | 'local_environment' | 'customer_environment' | 'bound_account' | 'page_account';
   browser: 'forbidden' | 'on_demand' | 'required';
 }
 
-const cloud = (): OperationDescriptor => ({ category: 'cloud', transport: 'cloud_ws', identity: 'bound_account', browser: 'forbidden' });
-const platformApi = (): OperationDescriptor => ({ category: 'platform_api', transport: 'cloud_ws', identity: 'bound_account', browser: 'forbidden' });
-const browserLifecycle = (): OperationDescriptor => ({ category: 'browser_lifecycle', transport: 'cloud_ws', identity: 'bound_account', browser: 'on_demand' });
-const pageAutomation = (): OperationDescriptor => ({ category: 'page_automation', transport: 'cloud_ws', identity: 'page_account', browser: 'required' });
+const cloudData = (): OperationDescriptor => ({ category: 'cloud_data', transport: 'customer_auth_http', identity: 'customer_environment', browser: 'forbidden' });
+const automationControl = (identity: OperationDescriptor['identity'] = 'bound_account'): OperationDescriptor => ({ category: 'automation_control', transport: 'automation_ws', identity, browser: 'forbidden' });
+const platformApiAutomation = (): OperationDescriptor => ({ category: 'platform_api_automation', transport: 'automation_ws', identity: 'bound_account', browser: 'forbidden' });
+const browserLifecycle = (): OperationDescriptor => ({ category: 'browser_lifecycle', transport: 'automation_ws', identity: 'bound_account', browser: 'on_demand' });
+const pageAutomation = (): OperationDescriptor => ({ category: 'page_automation', transport: 'automation_ws', identity: 'page_account', browser: 'required' });
 
 /** Electron/renderer operations share the same classification vocabulary and never infer browser needs from child state. */
 export const CLIENT_OPERATION_REGISTRY = {
@@ -20,13 +27,26 @@ export const CLIENT_OPERATION_REGISTRY = {
   'settings.save': { category: 'local', transport: 'electron_ipc', identity: 'local_environment', browser: 'forbidden' },
   'environment.nickname.save': { category: 'local', transport: 'electron_ipc', identity: 'local_environment', browser: 'forbidden' },
   'notification.surface': { category: 'local', transport: 'local', identity: 'local_environment', browser: 'forbidden' },
-  'persona.read': { category: 'cloud', transport: 'customer_auth_http', identity: 'customer_environment', browser: 'forbidden' },
-  'persona.generate': { category: 'cloud', transport: 'customer_auth_http', identity: 'customer_environment', browser: 'forbidden' },
-  'persona.persist': { category: 'cloud', transport: 'customer_auth_http', identity: 'customer_environment', browser: 'forbidden' },
-  'publish.approval.decision': { category: 'cloud', transport: 'customer_auth_http', identity: 'customer_environment', browser: 'forbidden' },
-  'publish.draft.image.remove': { category: 'cloud', transport: 'customer_auth_http', identity: 'customer_environment', browser: 'forbidden' },
-  'interaction.workspace': { category: 'cloud', transport: 'customer_auth_http', identity: 'customer_environment', browser: 'forbidden' },
-  'cloud.transport.rebind': { category: 'cloud', transport: 'electron_ipc', identity: 'bound_account', browser: 'forbidden' },
+  'client.session': cloudData(),
+  'environment.roster': cloudData(),
+  'environment.provision': cloudData(),
+  'environment.operator_alias': cloudData(),
+  'environment.offboard': cloudData(),
+  'persona.read': cloudData(),
+  'persona.generate': cloudData(),
+  'persona.persist': cloudData(),
+  'publish.approval.decision': cloudData(),
+  'publish.draft.read': cloudData(),
+  'publish.draft.image.remove': cloudData(),
+  'delegated_task.workspace': cloudData(),
+  'curated_content.workspace': cloudData(),
+  'slow_start.read_write': cloudData(),
+  'environment.risk.read_recover': cloudData(),
+  'interaction.workspace': cloudData(),
+  'interaction.auth.request': cloudData(),
+  'automation.transport.rebind': { category: 'automation_control', transport: 'electron_ipc', identity: 'bound_account', browser: 'forbidden' },
+  // Wire-name compatibility for the shipped renderer; semantically this is the automation transport.
+  'cloud.transport.rebind': { category: 'automation_control', transport: 'electron_ipc', identity: 'bound_account', browser: 'forbidden' },
   'browser.open': { category: 'browser_lifecycle', transport: 'electron_ipc', identity: 'bound_account', browser: 'on_demand' },
   'browser.close': { category: 'browser_lifecycle', transport: 'electron_ipc', identity: 'local_environment', browser: 'on_demand' },
   'automation.start': { category: 'page_automation', transport: 'electron_ipc', identity: 'page_account', browser: 'required' },
@@ -38,19 +58,19 @@ export const CLIENT_OPERATION_REGISTRY = {
  * Correlated request responses are resolved before this table. Missing active operations fail closed.
  */
 export const CLOUD_OPERATION_REGISTRY = {
-  'ui.snapshot': cloud(),
-  'pacing.update': cloud(),
-  'interaction.sync.ack': cloud(),
-  'interaction.reply.result.ack': cloud(),
-  'interaction.offboard.ack': cloud(),
-  'interaction.runtime.controls': cloud(),
-  ping: { category: 'cloud', transport: 'cloud_ws', identity: 'none', browser: 'forbidden' },
-  pong: { category: 'cloud', transport: 'cloud_ws', identity: 'none', browser: 'forbidden' },
+  'ui.snapshot': automationControl(),
+  'pacing.update': automationControl(),
+  'interaction.sync.ack': automationControl(),
+  'interaction.reply.result.ack': automationControl(),
+  'interaction.offboard.ack': automationControl(),
+  'interaction.runtime.controls': automationControl(),
+  ping: automationControl('none'),
+  pong: automationControl('none'),
 
-  'interaction.sync.request': platformApi(),
-  'interaction.reply.send': platformApi(),
-  'interaction.reply.reconcile': platformApi(),
-  'interaction.offboard.command': platformApi(),
+  'interaction.sync.request': platformApiAutomation(),
+  'interaction.reply.send': platformApiAutomation(),
+  'interaction.reply.reconcile': platformApiAutomation(),
+  'interaction.offboard.command': platformApiAutomation(),
 
   'interaction.auth.reopen': browserLifecycle(),
   'interaction.browser.control': browserLifecycle(),
@@ -96,4 +116,13 @@ export function clientOperationDescriptorFor(type: string): OperationDescriptor 
 
 export function operationDescriptorFor(type: MessageType): OperationDescriptor | null {
   return (CLOUD_OPERATION_REGISTRY as Partial<Record<MessageType, OperationDescriptor>>)[type] ?? null;
+}
+
+/** Legacy Clouds may still mix client-owned data into ui.snapshot. New clients consume only the
+ * automation projection and refetch persona/publish/account data over customer-auth HTTP. */
+export function automationUiSnapshot(payload: UiSnapshotPayload): UiSnapshotPayload {
+  const safe: UiSnapshotPayload = {};
+  if (payload.dailyUsage) safe.dailyUsage = payload.dailyUsage;
+  if (payload.browserStandby) safe.browserStandby = payload.browserStandby;
+  return safe;
 }

@@ -25,13 +25,37 @@ function harness() {
   };
 }
 
-test('core lifecycle parser accepts only local pause/resume/close messages', () => {
+test('core lifecycle parser accepts only local lifecycle messages', () => {
   assert.equal(parseCoreLifecycleCommand({ type: 'lifecycle.pause' }), 'pause');
+  assert.equal(parseCoreLifecycleCommand({ type: 'lifecycle.pause_and_exit' }), 'pause_and_exit');
   assert.equal(parseCoreLifecycleCommand({ type: 'lifecycle.resume' }), 'resume');
   assert.equal(parseCoreLifecycleCommand({ type: 'lifecycle.close' }), 'close');
   assert.equal(parseCoreLifecycleCommand({ type: 'lifecycle.standby' }), 'standby');
   assert.equal(parseCoreLifecycleCommand({ type: 'persona.generate' }), null);
   assert.equal(parseCoreLifecycleCommand('lifecycle.pause'), null);
+});
+
+test('pause-and-exit stops automation, closes browser, and disconnects the engine', async () => {
+  const h = harness();
+  await h.controller.request('pause_and_exit');
+  assert.equal(h.deactivations, 1);
+  assert.equal(h.browserCloses, 1);
+  assert.equal(h.pausedAcks, 1);
+  assert.deepEqual(h.exits, [0]);
+  assert.equal(h.controller.state, 'finished');
+});
+
+test('browser-absent manual session wakes with automation still paused', async () => {
+  let resumeAutomation: boolean | undefined;
+  const controller = new CoreLifecycleController({
+    deactivate: async () => undefined,
+    closeOwnedBrowser: async () => true,
+    wakeFromStandby: async (resume) => { resumeAutomation = resume; return true; },
+    exit: () => undefined,
+  }, 'standby', true);
+  await controller.request('wake');
+  assert.equal(resumeAutomation, false);
+  assert.equal(controller.state, 'paused');
 });
 
 test('pause deactivates once, acknowledges pause, and never closes or exits', async () => {

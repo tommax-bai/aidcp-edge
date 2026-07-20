@@ -67,7 +67,7 @@ import {
   usesFacebookBrowseSession,
 } from './facebook/index.js';
 import { EdgeClient } from './client/edge-client.js';
-import { operationDescriptorFor } from './client/operation-registry.js';
+import { automationUiSnapshot, operationDescriptorFor } from './client/operation-registry.js';
 import { registerPersonaStdinCommands } from './client/persona-onboarding.js';
 import { registerPublishApprovalStdinCommands } from './client/publish-approval-onboarding.js';
 import {
@@ -929,10 +929,10 @@ async function main(): Promise<void> {
     inFlightPublishCancels.set(env.id, { abort: () => abortForTakeover(abort), settled });
   });
 
-  // 陪伴界面数据快照（edge-companion-ui 8.1）：云端 ui.snapshot（昵称/最近发布/审批状态）
-  // 转成 [ui-event] 行打到 stdout，由 Electron 壳解析驱动标题带与发布卡。
+  // ui.snapshot 在新能力下只承载自动化运行投影。旧 Cloud 可能仍夹带 persona/publish/account 数据，
+  // 必须在引擎边界丢弃；客户端的数据管理真态由 Electron main 通过 customer-auth HTTP 主动拉取。
   client.onUiSnapshot((env) => {
-    for (const uiLine of uiSnapshotToLines(env.payload)) console.log(uiLine);
+    for (const uiLine of uiSnapshotToLines(automationUiSnapshot(env.payload))) console.log(uiLine);
   });
 
   const captchaAssist = new CaptchaAssistHandler({
@@ -1684,7 +1684,7 @@ async function main(): Promise<void> {
       sendLifecycleIpc({ type: 'lifecycle.wake_failed', reason });
     },
     logger: (message) => console.log(message),
-  }, startBrowserAbsent ? 'standby' : startAutomationPaused ? 'paused' : 'active');
+  }, startBrowserAbsent ? 'standby' : startAutomationPaused ? 'paused' : 'active', startAutomationPaused);
 
   dispatchLifecycleCommand = (command) => {
     void lifecycle.request(command).catch((error) => {

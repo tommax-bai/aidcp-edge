@@ -44,6 +44,7 @@ function deferred<T>() {
 
 function makeStatus(over: Record<string, unknown> = {}) {
   return {
+    clientSessionState: 'ready',
     auth: 'checking',
     cloud: 'disconnected',
     session: 'idle',
@@ -337,14 +338,14 @@ test('今日进展生命周期控制：自动化和浏览器使用独立动作',
   assert.equal($(stopped, '#session-fab').textContent, '开始自动化');
   const closed = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'stopped', session: 'closed' }) }));
   assert.equal($(closed, '#session-fab').textContent, '开始自动化');
-  assert.equal($(closed, '#session-close').textContent, '打开浏览器');
+  assert.equal($(closed, '#session-close').textContent, '打开浏览器（登录/检查）');
   const running = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'running', session: 'running' }) }));
   assert.equal($(running, '#session-fab').textContent, '暂停自动化');
   const resting = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'running', session: 'resting' }) }));
   assert.equal($(resting, '#session-fab').textContent, '暂停自动化');
   const paused = await boot(makeStub({ getStatus: async () => makeStatus({ session: 'paused' }) }));
   assert.equal($(paused, '#session-fab').textContent, '恢复自动化');
-  assert.equal($(paused, '#session-close').textContent, '打开浏览器');
+  assert.equal($(paused, '#session-close').textContent, '关闭自动化');
   assert.ok(!$(paused, '#session-close').classList.contains('hidden'));
   const executorError = await boot(makeStub({
     getStatus: async () => makeStatus({
@@ -355,18 +356,21 @@ test('今日进展生命周期控制：自动化和浏览器使用独立动作',
   assert.equal(($(executorError, '#session-close') as HTMLElement).dataset.browserAction, 'open');
 });
 
-test('自动化暂停态点击关闭浏览器：只调用 browserClose，核心和暂停态保留', async () => {
-  let closes = 0;
+test('自动化暂停态点击关闭：调用自动化关闭，不走浏览器辅助动作', async () => {
+  let lifecycleCloses = 0;
+  let browserCloses = 0;
   const w = await boot(makeStub({
-    getStatus: async () => makeStatus({ session: 'paused', edge: 'running', cloud: 'connected', automationState: 'paused', browserState: 'ready' }),
-    browserClose: async () => { closes++; return makeStatus({ session: 'paused', edge: 'running', cloud: 'connected', automationState: 'paused', browserState: 'closed' }); },
+    getStatus: async () => makeStatus({ session: 'paused', edge: 'stopped', cloud: 'disconnected', automationState: 'paused', browserState: 'closed' }),
+    close: async () => { lifecycleCloses++; return makeStatus({ session: 'closed', edge: 'stopped', cloud: 'disconnected', automationState: 'stopped', browserState: 'closed' }); },
+    browserClose: async () => { browserCloses++; return makeStatus(); },
   }));
   $(w, '#session-close').dispatchEvent(new w.Event('click'));
   await tick();
   await tick();
-  assert.equal(closes, 1);
-  assert.equal($(w, '#session-fab').textContent, '恢复自动化');
-  assert.equal($(w, '#session-close').textContent, '打开浏览器');
+  assert.equal(lifecycleCloses, 1);
+  assert.equal(browserCloses, 0);
+  assert.equal($(w, '#session-fab').textContent, '开始自动化');
+  assert.equal($(w, '#session-close').textContent, '打开浏览器（登录/检查）');
 });
 
 test('程序化建号：填充操作系统下拉、点「创建环境」→ 传选中 OS family、成功提示 + 刷新', async () => {
@@ -965,11 +969,21 @@ test('拉列表回填：截断结果绝不回填（不因缺数据误改在用�
 // ── change account-level-slow-start：慢启动脚注行接线 ──
 
 function slowStartStub(overrides: Partial<Stub> = {}, platform = 'facebook'): Stub {
+  const getStatus = overrides.getStatus || (async () => makeStatus());
+  const getSlowStart = overrides.getSlowStart || (async ({ envKey }: { envKey: string }) => {
+    const status = await getStatus() as { dailyUsage?: { slowStart?: unknown; quotas?: unknown } | null };
+    const slowStart = status.dailyUsage?.slowStart;
+    return slowStart && typeof slowStart === 'object'
+      ? { ok: true, data: { data: { envKey, slowStart, dayQuotas: status.dailyUsage?.quotas || null } } }
+      : { ok: false, data: { message: '云端未返回慢启动状态' } };
+  });
   return makeStub({
     getSettings: async () => ({
       provider: 'adspower', adsProfileId: '', adsApiKey: '', adsApiBase: '',
       browserParkingMode: 'edge-strip', adsDownloadUrl: 'https://x', platform,
     }),
+    getStatus,
+    getSlowStart,
     ...overrides,
   });
 }
@@ -1074,14 +1088,18 @@ test('慢启动帮助：问号可聚焦，hover/focus 展示 7×6 Facebook 曲�
   ]);
 });
 
-test('慢启动行：字段缺省 → 整行 hidden（绝不默认成「关」）', async () => {
+test('慢启动 HTTP 未返回状态 → 显示读取失败且绝不默认成「关」', async () => {
   const w = await boot(slowStartStub({ getStatus: async () => makeStatus({ edge: 'running', session: 'running', cloud: 'connected' }) }));
-  assert.ok(hidden($(w, '#slow-start-row')), '云端还没说 → 整行不渲染');
+  assert.ok(!hidden($(w, '#slow-start-row')));
+  const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  assert.equal(toggle.disabled, true);
+  assert.equal(toggle.indeterminate, true, '读取失败不得显示成已关闭');
+  assert.match($(w, '#slow-start-reason').textContent || '', /未返回慢启动状态/);
 });
 
 // 退化路径（老客户端未提供不依赖边缘的读）：仍展示入口、不默认成「关」，退回旧占位、绝不卡在「正在读取」。
 test('慢启动行：Facebook 环境未启动 + 无 env-scoped 读能力（老客户端）→ 退回旧占位，不默认成「关」', async () => {
-  const w = await boot(slowStartStub({
+  const w = await boot(makeStub({
     getSettings: async () => ({
       provider: 'adspower',
       adsProfileId: 'fb_env',

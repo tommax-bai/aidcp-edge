@@ -147,10 +147,9 @@ function appendEdgeLog(envId, line, isError) {
 //  - provider='self'：自起本机真实指纹 Chrome（等价旧桌面行为，固定 9222 + cookie 轮询登录门；单环境遗留路径）。
 // 旧单值 adsProfileId/adsProfileName/platform 向后兼容加载为单元素花名册，并保持镜像回写（回滚兼容）。
 // 敏感值（apiKey）只落本机 userData、随用户机器，不进仓库 / 不外发。
-// ── 云端环境选择（change edge-cloud-env-selector）─────────────────────────────
-// 客户端连哪个云端由「设置里的选择」权威决定：界面选了就以界面为准（派生核心时显式覆盖继承来的
-// AIDCP_CLOUD_URL）；界面留空则回落启动环境变量、再回落缺省 dev（对现有以环境变量启动的流程零回归）。
-// 两个正式地址一处真源；custom 允许任意 ws(s):// 地址。dev=测试、ol=线上生产。
+// ── 云端目标选择 ───────────────────────────────────────────────────────────────
+// 正式环境把 request-scoped 客户数据 API 与自动化 WebSocket 作为两个独立端点映射；custom 也分别配置。
+// AIDCP_CLOUD_URL 只代表自动化通道，绝不被解释成“客户端全局云端连接”。
 const CLOUD_ENV_URLS = { dev: 'ws://121.89.85.150:8787', ol: 'ws://123.56.253.183:8787' };
 const CLIENT_AUTH_ENV_URLS = { dev: 'http://121.89.85.150:8088/capi', ol: 'https://aidcp.tommax.cc/capi' };
 // 构建期烘焙的缺省云端环境：分发包用 electron-builder `-c.extraMetadata.aidcpCloudDefaultEnv=ol`
@@ -315,10 +314,14 @@ function normalizeCloudSettings() {
   const key = settings.cloudEnvKey;
   if (key !== 'dev' && key !== 'ol' && key !== 'custom') settings.cloudEnvKey = '';
   settings.cloudUrlCustom = String(settings.cloudUrlCustom || '').trim();
-  if (settings.cloudEnvKey === 'custom' && !isWsUrl(settings.cloudUrlCustom)) settings.cloudEnvKey = '';
+  settings.clientAuthUrl = normalizeClientAuthUrl(settings.clientAuthUrl);
+  if (
+    settings.cloudEnvKey === 'custom'
+    && (!isWsUrl(settings.cloudUrlCustom) || !settings.clientAuthUrl)
+  ) settings.cloudEnvKey = '';
 }
 
-// 解析派生核心该连的云端：界面选择优先 > 启动环境变量 AIDCP_CLOUD_URL > 缺省 dev。
+// 解析自动化引擎应连接的 WebSocket：界面选择优先 > 启动环境变量 AIDCP_CLOUD_URL > 缺省 dev。
 // fromSelection=true 时派生处 MUST 在合并之后显式覆盖继承来的 AIDCP_CLOUD_URL（否则被 processEnv 同名值压过）；
 // false 时不注入、沿用继承 / 缺省（零回归）。
 function resolveCloudUrl() {
@@ -364,6 +367,8 @@ let allowedEnvironmentControlStates = new Map(); // envKey -> Cloud 权威 bindi
 let sessionTimer = null;
 let proceededOnce = false;
 const CLIENT_SESSION_REFRESH_WINDOW_MS = 5 * 60_000;
+// Ordinary Edge children are on-demand automation engines. This supervisor remains only for the
+// short-lived, capability-restricted offboard cleanup worker.
 const coreBootstrapSupervisor = createCoreBootstrapSupervisor({
   concurrency: Number(process.env.AIDCP_CORE_BOOTSTRAP_CONCURRENCY) || 3,
 });
@@ -389,6 +394,17 @@ function resolveClientAuthBase() {
 }
 function clientAuthEnabled() {
   return Boolean(resolveClientAuthBase());
+}
+
+function cloudTargetView() {
+  const automation = cloudSelectionView();
+  return {
+    key: automation.key,
+    label: automation.label,
+    automationUrl: automation.url,
+    dataApiUrl: resolveClientAuthBase(),
+    fromSelection: automation.fromSelection,
+  };
 }
 function clientSessionFile() {
   return path.join(app.getPath('userData'), 'client-session.json');
@@ -991,14 +1007,12 @@ async function proceedAfterAuth() {
       });
     } else {
       updateStatus(handle, {
-        lastMessage: clientAuthEnabled()
-          ? '正在连接客户端核心；浏览器保持关闭。'
-          : '就绪。点右下角「开始自动化」后按需打开浏览器。',
-        ...presencePatch(clientAuthEnabled() ? '正在连接客户端核心…' : '就绪，等待开始自动化'),
+        lastMessage: '客户端已就绪；数据管理可直接使用。点“开始自动化”后再连接引擎并准备浏览器。',
+        ...presencePatch('客户端已就绪，等待开始自动化'),
       });
     }
   }
-  bootstrapOwnedClientCores();
+  enforceOwnedAutomationEngines();
   if (settings.provider === 'adspower' && envs.size === 0) broadcastFleet();
   if (!mainWindow) createWindow();
   if (!proceededOnce) {
@@ -1023,7 +1037,7 @@ function startSessionMaintenance() {
     if (!ok) { onSessionInvalid(); return; }
     syncEnvHandles();
     void syncUnsyncedManualAliases();
-    bootstrapOwnedClientCores();
+    enforceOwnedAutomationEngines();
     void retryPendingInteractionOffboards();
   }, 4 * 60_000);
 }
@@ -1285,11 +1299,11 @@ function makeStatus(provider) {
     browserStandby: null,
     risk: 'normal',
     edge: 'stopped',
-    lastMessage: '边缘进程尚未运行。',
+    lastMessage: '客户端已就绪；自动化尚未启动。',
     edgeFailure: null,
     updatedAt: new Date().toISOString(),
     account: null,
-    presence: { text: '等待启动…', at: new Date().toISOString() },
+    presence: { text: '数据管理可用，等待开始自动化', at: new Date().toISOString() },
     publish: null,
     publishPreview: null,
     kernelPrep: null,
@@ -1346,6 +1360,9 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     restartPending: false,
     pausePending: false,
     automationPaused: false,
+    automationIntent: 'stopped', // 'stopped' | 'enabled' | 'paused'
+    engineStopReason: '',
+    resumeAfterStop: false,
     // Resume and browser wake are serialized: when automation is paused in browser standby,
     // first clear the core's pause latch, then open the browser through the normal slot queue.
     resumeWakePending: false,
@@ -1366,6 +1383,7 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     gaveUp: false,
     spawnedAtMs: 0,
     browserAlreadyRunning: false,
+    browserStateUnconfirmed: false,
     coldStandbyTimer: null,
     coldStandbyWakeAt: 0,
     coldStandbyActive: false,
@@ -1495,10 +1513,11 @@ function syncEnvHandles() {
 }
 
 /**
- * 客户登录后的正常生命周期：为每个“归属 + 账号绑定”均可信的环境启动浏览器无关 core。
- * 这条队列与 AdsPower、CDP、浏览器槽位/等待容量完全隔离；单环境失败只在独立监督器里退避/熔断。
+ * 客户会话只提供数据管理能力，不会在登录后自动启动自动化引擎。
+ * 这里仅执行归属/绑定收紧：已经失去可信绑定的环境必须停止现有引擎；可信环境保持原状，
+ * 等用户明确点击“开始自动化”后才进入引擎和浏览器启动队列。
  */
-function bootstrapOwnedClientCores() {
+function enforceOwnedAutomationEngines() {
   if (!clientAuthEnabled() || !hasValidSession() || !(allowedProfileIds instanceof Set)) return;
   for (const handle of envs.values()) {
     if (!handle || handle.removed || handle.kind !== 'adspower' || handle.offboardCleanup) continue;
@@ -1507,7 +1526,10 @@ function bootstrapOwnedClientCores() {
     const trustworthy = allowedProfileIds.has(envKey) && controlState && controlState.bindingState === 'bound';
     if (!trustworthy) {
       coreBootstrapSupervisor.remove(handle.envId);
-      // 归属仍在但绑定不可信：立刻限制客户业务 core；绝不猜账号，也不靠打开浏览器“修复”。
+      handle.automationIntent = 'stopped';
+      handle.engineStopReason = 'binding_untrusted';
+      handle.resumeAfterStop = false;
+      // 归属仍在但绑定不可信：立刻停止自动化引擎；绝不猜账号，也不靠打开浏览器“修复”。
       if (handle.child) {
         handle.stopRequested = true;
         clearRespawnTimer(handle);
@@ -1519,21 +1541,12 @@ function bootstrapOwnedClientCores() {
       updateStatus(handle, {
         edge: 'stopped',
         cloud: 'disconnected',
-        lastMessage: `客户端核心未启动：${reason}。浏览器保持关闭。`,
+        session: 'idle',
+        lastMessage: `自动化未启动：${reason}。数据管理仍可继续使用。`,
         ...edgeFailurePatch(reason),
-        ...presencePatch('账号绑定未确认，核心已限制'),
+        ...presencePatch('账号绑定未确认，自动化已限制'),
       });
-      continue;
     }
-    handle.stopRequested = false;
-    coreBootstrapSupervisor.enqueue({
-      key: handle.envId,
-      cancelled: () => handle.removed
-        || envs.get(handle.envId) !== handle
-        || !hasValidSession()
-        || allowedEnvironmentControlStates.get(envKey)?.bindingState !== 'bound',
-      start: () => handle.child ? true : startBrowserAbsentCore(handle),
-    });
   }
 }
 
@@ -1543,7 +1556,8 @@ function fleetSnapshot() {
     provider: settings.provider,
     selectedEnvId,
     railCollapsed: Boolean(settings.railCollapsed),
-    cloudEnv: cloudSelectionView(), // 目标云端（当前选择解析出的地址 + 友好名，change edge-cloud-env-selector）
+    cloudEnv: cloudSelectionView(), // compatibility: automation WebSocket target
+    cloudTarget: cloudTargetView(), // structured data API + automation WebSocket target
     environments: [...envs.values()].map((h) => ({
       envId: h.envId,
       kind: h.kind,
@@ -2429,18 +2443,18 @@ function refreshSameAccountWarnings() {
 
 /** 有界重起调度尾（exit / spawn-error 两处共用）：respawn → 退避后经错峰队列重起（再校验取消闸）。 */
 function scheduleRespawnIfNeeded(handle, decision) {
-  if (decision.action !== 'respawn' || isQuitting) return;
+  if (decision.action !== 'respawn' || isQuitting || handle.automationIntent !== 'enabled') return;
   handle.respawnTimer = setTimeout(() => {
     handle.respawnTimer = null;
-    if (isQuitting || handle.removed || handle.child || handle.stopRequested) return;
+    if (isQuitting || handle.removed || handle.child || handle.stopRequested || handle.automationIntent !== 'enabled') return;
     void enqueueStartFlow(handle);
   }, decision.delayMs || 0);
   if (handle.respawnTimer && typeof handle.respawnTimer.unref === 'function') handle.respawnTimer.unref();
 }
 
 /**
- * 把窄生命周期意图送到该环境自己的 core。pause 交付失败绝不回落 SIGTERM——SIGTERM 是最终关闭，
- * 若拿它伪装暂停会再次关掉浏览器。异步 send 失败也按目标 handle 原位回报，不串环境。
+ * 把窄生命周期意图送到该环境自己的自动化引擎。普通 lifecycle.pause 交付失败不冒充成功；
+ * pause_and_exit / close 的调用方可按自身安全策略回落 SIGTERM。异步失败始终按目标 handle 原位回报。
  */
 function sendCoreLifecycle(handle, command, onError) {
   const child = handle && handle.child;
@@ -2469,8 +2483,8 @@ function failPendingCoreRebind(handle, reason) {
   handle.cloudRebindPending = null;
   updateStatus(handle, {
     cloudRebind: { state: 'failed', targetKey: pending.targetKey, reason },
-    lastMessage: `Cloud 重绑失败：${reason}。浏览器状态未改变。`,
-    ...presencePatch('Cloud 重绑失败，浏览器状态未改变'),
+    lastMessage: `自动化引擎重绑失败：${reason}。浏览器状态未改变。`,
+    ...presencePatch('自动化引擎重绑失败'),
   });
   pending.resolve({ ok: false, reason });
 }
@@ -2489,8 +2503,8 @@ function requestCoreCloudRebind(handle, target) {
       handle.cloudRebindPending = null;
       updateStatus(handle, {
         cloudRebind: { state: 'failed', targetKey: target.key, reason: 'rebind_timeout' },
-        lastMessage: `客户端核心切换到 ${target.label || target.key} 超时；浏览器状态未改变。`,
-        ...presencePatch('Cloud 重绑超时，浏览器状态未改变'),
+        lastMessage: `自动化引擎切换到 ${target.label || target.key} 超时；浏览器状态未改变。`,
+        ...presencePatch('自动化引擎重绑超时'),
       });
       resolve({ ok: false, reason: 'rebind_timeout' });
     }, 45_000);
@@ -2499,7 +2513,7 @@ function requestCoreCloudRebind(handle, target) {
     updateStatus(handle, {
       targetCloudKey: target.key,
       cloudRebind: { state: 'pending', targetKey: target.key },
-      lastMessage: `正在把客户端核心重绑到 ${target.label || target.key}；浏览器状态与槽位保持不变。`,
+      lastMessage: `正在把自动化引擎重绑到 ${target.label || target.key}；浏览器状态与槽位保持不变。`,
       ...presencePatch('正在切换 Cloud 控制连接…'),
     });
     try {
@@ -2515,8 +2529,8 @@ function requestCoreCloudRebind(handle, target) {
         handle.cloudRebindPending = null;
         updateStatus(handle, {
           cloudRebind: { state: 'failed', targetKey: target.key, reason: error.message },
-          lastMessage: `Cloud 重绑指令未送达：${error.message}。浏览器状态未改变。`,
-          ...presencePatch('Cloud 重绑未送达'),
+          lastMessage: `自动化引擎重绑指令未送达：${error.message}。浏览器状态未改变。`,
+          ...presencePatch('自动化引擎重绑未送达'),
         });
         resolve({ ok: false, reason: 'ipc_send_failed' });
       });
@@ -2526,8 +2540,8 @@ function requestCoreCloudRebind(handle, target) {
       const reason = (error && error.message) || String(error);
       updateStatus(handle, {
         cloudRebind: { state: 'failed', targetKey: target.key, reason },
-        lastMessage: `Cloud 重绑指令未送达：${reason}。浏览器状态未改变。`,
-        ...presencePatch('Cloud 重绑未送达'),
+        lastMessage: `自动化引擎重绑指令未送达：${reason}。浏览器状态未改变。`,
+        ...presencePatch('自动化引擎重绑未送达'),
       });
       resolve({ ok: false, reason: 'ipc_send_failed' });
     }
@@ -2692,11 +2706,11 @@ function onColdStandbyAck(handle) {
       warmupMs: decision.warmupMs,
     } : { reason: decision.reason }),
     lastMessage: bornBrowserAbsent
-      ? '客户端核心与 Cloud 已连接；浏览器保持关闭，按需申请执行槽位。'
-      : '浏览器已关闭；客户端核心与 Cloud 连接保持在线。',
+      ? '自动化引擎已连接；浏览器保持关闭，按需申请执行槽位。'
+      : '浏览器已关闭；自动化引擎保持连接。',
     ...presencePatch(bornBrowserAbsent
-      ? '客户端核心在线，浏览器已关闭'
-      : '浏览器已关闭，客户端核心在线'),
+      ? '自动化引擎已连接，浏览器已关闭'
+      : '浏览器已关闭，自动化引擎已连接'),
     ...clearEdgeFailurePatch(handle),
   });
 }
@@ -2885,8 +2899,8 @@ function onColdStandbyWoken(handle) {
     session: handle.automationPaused ? 'paused' : 'running',
     browserStandby: coldStandbyStatus('awake', handle.status.browserStandby && handle.status.browserStandby.hint, {}),
     lastMessage: handle.automationPaused
-      ? '浏览器已打开；自动化仍暂停，客户端核心与 Cloud 连接全程未断。'
-      : '浏览器已打开并恢复自动化；客户端核心与 Cloud 连接全程未断。',
+      ? '浏览器已打开；自动化仍暂停。'
+      : '浏览器已打开并恢复自动化。',
     ...presencePatch(handle.automationPaused ? '浏览器已打开，自动化暂停' : '自动化运行中'),
     ...clearEdgeFailurePatch(handle),
   });
@@ -2947,9 +2961,9 @@ async function startBrowserAbsentCore(handle, {
         edge: 'idle',
         cloud: 'disconnected',
         session: 'idle',
-        lastMessage: `${browserState}；客户端核心未连接：${bootstrap.message}。`,
-        ...edgeFailurePatch(`客户端核心未连接：${bootstrap.message}`),
-        ...presencePatch('客户端核心未连接，浏览器保持关闭'),
+        lastMessage: `${browserState}；自动化引擎未连接：${bootstrap.message}。`,
+        ...edgeFailurePatch(`自动化引擎未连接：${bootstrap.message}`),
+        ...presencePatch('自动化引擎未连接，浏览器保持关闭'),
       });
       return false;
     }
@@ -2966,9 +2980,9 @@ async function startBrowserAbsentCore(handle, {
         session: 'resting',
         browserStandby: coldStandbyStatus('scheduled', null, { reason: 'start_queue_full' }),
         lastMessage: coreOnlyBootstrap
-          ? '正在启动客户端核心；浏览器保持关闭。'
-          : `${queueAdmission?.message || '浏览器启动暂未入队'}；正在先连接客户端核心。`,
-        ...presencePatch(coreOnlyBootstrap ? '正在连接客户端核心…' : '正在连接客户端核心，浏览器暂未入队'),
+          ? '正在连接自动化引擎；浏览器保持关闭。'
+          : `${queueAdmission?.message || '浏览器启动暂未入队'}；正在先连接自动化引擎。`,
+        ...presencePatch(coreOnlyBootstrap ? '正在连接自动化引擎…' : '正在连接自动化引擎，浏览器暂未入队'),
         ...clearEdgeFailurePatch(handle),
       });
     }
@@ -3210,12 +3224,13 @@ function spawnEdgeChild(handle, {
     spawnEnv.AIDCP_OFFBOARD_CLEANUP_ONLY = '1';
     spawnEnv.AIDCP_OFFBOARD_CLEANUP_ID = cleanupBootstrap.offboardId;
   }
-  if (handle.automationPaused && !controlBootstrap) {
+  if (handle.automationPaused) {
     spawnEnv.AIDCP_AUTOMATION_PAUSED_AT_START = '1';
   }
 
   handle.browserParkingReady = false;
   handle.executorFailure = null;
+  handle.browserStateUnconfirmed = false;
   handle.browserPersonaNoticeState = null;
   resetPersonaNoticeGrace(handle);
   handle.browserAlreadyRunning = false;
@@ -3266,7 +3281,7 @@ function spawnEdgeChild(handle, {
     lastMessage: cleanupBootstrap
       ? '正在启动受限离场清理核心；浏览器保持关闭。'
       : controlBootstrap
-      ? '正在启动云端控制面；浏览器保持关闭，等待执行槽位。'
+      ? '正在连接自动化引擎；浏览器保持关闭，等待执行槽位。'
       : '正在启动 aidcp-edge…',
     ...presencePatch(cleanupBootstrap
       ? '正在连接离场清理核心…'
@@ -3290,7 +3305,7 @@ function spawnEdgeChild(handle, {
           connectedCloudKey: pending.targetKey,
           targetCloudKey: pending.targetKey,
           cloudRebind: { state: 'connected', targetKey: pending.targetKey },
-          lastMessage: `客户端核心已连接 ${CLOUD_ENV_LABELS[pending.targetKey] || pending.targetKey}；浏览器状态未改变。`,
+          lastMessage: `自动化引擎已连接 ${CLOUD_ENV_LABELS[pending.targetKey] || pending.targetKey}；浏览器状态未改变。`,
           ...presencePatch('Cloud 控制连接已切换'),
           ...clearEdgeFailurePatch(handle),
         });
@@ -3301,8 +3316,8 @@ function spawnEdgeChild(handle, {
           cloud: 'disconnected',
           targetCloudKey: pending.targetKey,
           cloudRebind: { state: 'failed', targetKey: pending.targetKey, reason },
-          lastMessage: `客户端核心未能连接 ${CLOUD_ENV_LABELS[pending.targetKey] || pending.targetKey}：${reason}。浏览器状态未改变。`,
-          ...presencePatch('Cloud 重绑失败，浏览器状态未改变'),
+          lastMessage: `自动化引擎未能连接 ${CLOUD_ENV_LABELS[pending.targetKey] || pending.targetKey}：${reason}。浏览器状态未改变。`,
+          ...presencePatch('自动化引擎重绑失败'),
         });
         pending.resolve({ ok: false, reason });
       }
@@ -3321,8 +3336,8 @@ function spawnEdgeChild(handle, {
       updateStatus(handle, {
         edge: 'running',
         browserStandby: coldStandbyStatus('scheduled', null, { reason }),
-        lastMessage: `浏览器执行器异常：${reason}。正在释放浏览器资源；客户端核心与 Cloud 保持在线。`,
-        ...presencePatch('浏览器执行器异常，客户端核心在线'),
+        lastMessage: `浏览器执行器异常：${reason}。正在释放浏览器资源；自动化引擎保持连接。`,
+        ...presencePatch('浏览器执行器异常'),
       });
       return;
     }
@@ -3363,14 +3378,13 @@ function spawnEdgeChild(handle, {
       return;
     }
     if (message.type === 'lifecycle.paused') {
-      handle.pausePending = false;
       handle.automationPaused = true;
       updateStatus(handle, {
-        edge: 'running',
+        edge: 'stopping',
         session: 'paused',
         overlayBlocked: false,
-        lastMessage: '自动化已暂停；客户端核心与 Cloud 仍在线，浏览器状态未改变。',
-        ...presencePatch('自动化已暂停，客户端核心在线'),
+        lastMessage: '自动化已暂停，正在断开自动化引擎并释放浏览器…',
+        ...presencePatch('正在断开自动化引擎…'),
         ...clearEdgeFailurePatch(handle),
       });
       return;
@@ -3385,7 +3399,7 @@ function spawnEdgeChild(handle, {
         session: shouldWakeBrowser ? 'resting' : 'running',
         lastMessage: shouldWakeBrowser
           ? '自动化暂停已解除；正在按浏览器槽位恢复浏览器。'
-          : '自动化已原地恢复；客户端核心与浏览器未重启。',
+          : '自动化已原地恢复；浏览器未重启。',
         ...presencePatch(shouldWakeBrowser ? '正在恢复浏览器…' : '自动化运行中'),
         ...clearEdgeFailurePatch(handle),
       });
@@ -3421,9 +3435,9 @@ function spawnEdgeChild(handle, {
       updateStatus(handle, {
         edge: 'running',
         session: handle.automationPaused ? 'paused' : 'running',
-        lastMessage: '浏览器关闭状态未能确认；客户端核心与 Cloud 仍在线，可重试关闭。',
+        lastMessage: '浏览器关闭状态未能确认；自动化引擎仍连接，可重试关闭。',
         ...edgeFailurePatch('浏览器关闭状态未能确认'),
-        ...presencePatch('浏览器关闭未确认，客户端核心在线'),
+        ...presencePatch('浏览器关闭未确认'),
       });
       return;
     }
@@ -3491,6 +3505,8 @@ function spawnEdgeChild(handle, {
     const wasParked = handle.coreParked;
     const wasPausing = handle.pausePending;
     const wasRestarting = handle.restartPending;
+    const stopReason = handle.engineStopReason;
+    const shouldResumeAfterStop = handle.resumeAfterStop && handle.automationIntent === 'enabled';
     // 初始 browser-absent 核心只有在发出 lifecycle.standby ack 后才算真正待机成功。若 Cloud hello
     // 失败即退出，pending 不能把它洗成“有意待机退出”——那会吞掉真实握手故障且永不重试。
     const controlPlaneNeverEstablished = handle.controlPlaneOnly && !handle.controlPlaneBootstrapped;
@@ -3507,16 +3523,18 @@ function spawnEdgeChild(handle, {
     handle.browserParkingReady = false;
     handle.browserPersonaNoticeState = null;
     resetPersonaNoticeGrace(handle);
-    // 主动重启、暂停驻留、冷待机、显式关闭、移出花名册、退出应用都是「有意停止」，不算异常。
-    const intentional = isQuitting || wasRestarting || wasPausing || wasParked || wasColdStandby || wasClosing || handle.removed;
+    // 主动重启、自动化暂停/关闭、冷待机、浏览器关闭、移出花名册、退出应用都是「有意停止」，不算异常。
+    const intentional = isQuitting || wasRestarting || wasPausing || wasParked || wasColdStandby || wasClosing
+      || Boolean(stopReason) || handle.automationIntent !== 'enabled' || handle.removed;
     handle.pausePending = false;
     handle.coreParked = false;
     handle.closePending = false;
     const exitedAbnormally = !intentional && (signal != null || (code != null && code !== 0));
+    handle.browserStateUnconfirmed = exitedAbnormally;
     const message = exitMessage(code, signal);
     if (handle.removed) return; // 已摘除的环境不再投影状态
 
-    if (wasColdStandby && !isQuitting && !wasRestarting && !wasPausing && !wasParked && !wasClosing) {
+    if (wasColdStandby && !isQuitting && !wasRestarting && !wasPausing && !wasParked && !wasClosing && !stopReason) {
       handle.coldStandbyPending = false;
       handle.coldStandbyActive = true;
       if (handle.offboardCleanup) {
@@ -3596,7 +3614,11 @@ function spawnEdgeChild(handle, {
     updateStatus(handle, {
       edge: exitedAbnormally ? 'warning' : 'stopped',
       cloud: 'disconnected',
-      session: wasClosing
+      session: stopReason === 'user_pause'
+        ? 'paused'
+        : stopReason === 'user_close' || stopReason === 'binding_untrusted'
+          ? 'closed'
+        : wasClosing
         ? 'closed'
         : wasRestarting
           ? 'running'
@@ -3610,6 +3632,12 @@ function spawnEdgeChild(handle, {
       respawnGaveUp: gaveUp,
       lastMessage: envInUse
         ? inUseMsg
+        : stopReason === 'user_pause'
+        ? '自动化已暂停，引擎和浏览器已关闭；数据管理仍可继续使用。'
+        : stopReason === 'user_close'
+        ? '自动化已关闭，引擎和浏览器已关闭；数据管理仍可继续使用。'
+        : stopReason === 'binding_untrusted'
+        ? '账号绑定未确认，自动化引擎已停止；数据管理仍可继续使用。'
         : wasClosing
         ? '浏览器已关闭。'
         : gaveUp
@@ -3618,7 +3646,13 @@ function spawnEdgeChild(handle, {
           ? `${message} 将在 ${Math.round((decision.delayMs || 0) / 1000)}s 后自动重启（第 ${decision.streak}/${RESPAWN_OPTS.maxConsecutiveFailures} 次）。`
           : message,
       ...presencePatch(
-        wasClosing
+        stopReason === 'user_pause'
+          ? '自动化已暂停'
+          : stopReason === 'user_close'
+            ? '自动化已关闭'
+            : stopReason === 'binding_untrusted'
+              ? '账号绑定未确认，自动化已停止'
+        : wasClosing
           ? '已关闭浏览器'
           : wasRestarting
             ? '正在重启引擎…'
@@ -3652,6 +3686,20 @@ function spawnEdgeChild(handle, {
     }
 
     scheduleRespawnIfNeeded(handle, decision);
+
+    if (shouldResumeAfterStop && !isQuitting) {
+      handle.stopRequested = false;
+      handle.engineStopReason = '';
+      handle.resumeAfterStop = false;
+      updateStatus(handle, {
+        edge: 'starting',
+        session: 'idle',
+        lastMessage: '正在重新连接自动化引擎并准备浏览器…',
+        ...presencePatch('正在恢复自动化…'),
+      });
+      queueStartEnv(handle);
+      return;
+    }
 
     // 有意重启：旧进程退出后按当前设置起新流程（经错峰队列）。退出应用途中绝不再起。
     if (handle.restartPending) {
@@ -3977,6 +4025,10 @@ function enqueueStartFlow(handle) {
 function queueStartEnv(handle, queuePosition) {
   if (!handle || handle.child) return false;
   if (handle.startFlowQueued || handle.launchQueued || handle.slotWaitingSince) return true;
+  handle.automationIntent = 'enabled';
+  handle.engineStopReason = '';
+  handle.resumeAfterStop = false;
+  handle.automationPaused = false;
   handle.gaveUp = false;
   handle.respawnStreak = 0;
   handle.stopRequested = false; // 显式启动意图：解除任何在途取消闸
@@ -3999,6 +4051,9 @@ function queueStartEnv(handle, queuePosition) {
 function stopAndRestart(handle, message, patch = {}) {
   if (!handle) return;
   stopLoginPoller();
+  handle.automationIntent = 'enabled';
+  handle.engineStopReason = '';
+  handle.resumeAfterStop = false;
   handle.gaveUp = false;
   handle.respawnStreak = 0;
   handle.stopRequested = false; // 显式重启意图：解除任何在途取消闸
@@ -4264,105 +4319,98 @@ function handleEdgeLogLine(handle, message, isError = false) {
 
 function pauseEdge(handle) {
   if (!handle) return;
-  if (handle.automationPaused || handle.pausePending) return;
-  // 暂停只停止自动化；客户端核心、Cloud 连接和浏览器开关状态保持不变。
-  // 若浏览器本就在待机，只取消其定时自唤醒；这不是关闭浏览器动作。
+  if (handle.automationIntent === 'paused' || handle.pausePending) return;
+  // 暂停属于自动化通道生命周期：停止任务、断开引擎连接，并释放当前浏览器执行器。
+  // 客户会话和所有 request-scoped HTTP 数据管理能力保持可用。
+  handle.automationIntent = 'paused';
+  handle.engineStopReason = 'user_pause';
+  handle.resumeAfterStop = false;
+  handle.stopRequested = true;
   clearColdStandbyTimer(handle);
+  clearRespawnTimer(handle);
   handle.restartPending = false;
   handle.automationPaused = true;
   releaseStartQueue(handle);
+  clearSlotWaiting(handle);
   if (handle.child) {
     const child = handle.child;
-    const previousSession = handle.status.session;
     handle.pausePending = true;
     updateStatus(handle, {
+      edge: 'stopping',
       session: 'paused',
       overlayBlocked: false,
-      lastMessage: '正在暂停自动化；客户端核心、Cloud 连接和浏览器状态保持不变…',
-      ...presencePatch('正在暂停自动化…'),
+      lastMessage: '正在暂停自动化并断开引擎；数据管理不受影响…',
+      ...presencePatch('正在暂停并断开引擎…'),
       ...clearEdgeFailurePatch(handle),
     });
-    sendCoreLifecycle(handle, 'pause', (error) => {
+    sendCoreLifecycle(handle, 'pause_and_exit', (error) => {
       if (handle.child !== child) return;
-      handle.pausePending = false;
-      handle.automationPaused = false;
+      // IPC 已不可用时仍必须落实“暂停 = 引擎断开”；SIGTERM 走核心既有安全关闭路径。
+      try { child.kill('SIGTERM'); } catch { /* best-effort */ }
       updateStatus(handle, {
-        edge: 'warning',
-        session: previousSession === 'paused' ? 'running' : previousSession,
-        lastMessage: `暂停失败：${error.message}。自动化可能仍在运行；核心与浏览器未被关闭。`,
-        ...edgeFailurePatch(`暂停失败：${error.message}`),
-        ...presencePatch('暂停请求未送达，请重试'),
+        edge: 'stopping',
+        session: 'paused',
+        lastMessage: `暂停指令未送达（${error.message}），正在强制断开自动化引擎…`,
+        ...presencePatch('正在强制断开自动化引擎…'),
       });
     });
     return;
   }
-  // 无核心时仍保留自动化暂停意图；可信客户环境的 browserless core 可独立恢复，不受暂停影响。
+  handle.pausePending = false;
   updateStatus(handle, {
     edge: 'stopped',
+    cloud: 'disconnected',
     session: 'paused',
     overlayBlocked: false,
-    lastMessage: '自动化已暂停；客户端核心当前离线，将按独立核心策略恢复，浏览器保持关闭。',
+    lastMessage: '自动化已暂停，引擎未连接；数据管理仍可继续使用。',
     ...presencePatch('自动化已暂停'),
     ...clearEdgeFailurePatch(handle),
   });
-  bootstrapOwnedClientCores();
 }
 
 function resumeEdge(handle) {
   if (!handle) return;
+  handle.automationIntent = 'enabled';
+  handle.engineStopReason = '';
+  handle.automationPaused = false;
+  if (handle.child && handle.pausePending) {
+    // pause_and_exit 已进入安全退出，不尝试把同一进程“拉回来”；待 close 后按新意图重新启动。
+    handle.resumeAfterStop = true;
+    updateStatus(handle, {
+      edge: 'starting',
+      session: 'idle',
+      lastMessage: '暂停收尾中；引擎断开后将重新连接并自动准备浏览器…',
+      ...presencePatch('等待引擎断开后恢复…'),
+      ...clearEdgeFailurePatch(handle),
+    });
+    return;
+  }
   handle.stopRequested = false;
+  handle.resumeAfterStop = false;
   if (handle.child && (handle.coldStandbyActive || handle.coldStandbyPending || handle.controlPlaneOnly)) {
-    if (handle.automationPaused || handle.pausePending || handle.status.session === 'paused') {
-      const child = handle.child;
-      handle.pausePending = true;
-      handle.resumeWakePending = true;
-      updateStatus(handle, {
-        edge: 'running',
-        session: 'paused',
-        lastMessage: '正在解除自动化暂停；确认后将按浏览器槽位恢复浏览器…',
-        ...presencePatch('正在恢复自动化…'),
-        ...clearEdgeFailurePatch(handle),
-      });
-      sendCoreLifecycle(handle, 'resume', (error) => {
-        if (handle.child !== child) return;
-        handle.pausePending = false;
-        handle.resumeWakePending = false;
-        handle.automationPaused = true;
-        updateStatus(handle, {
-          edge: 'running',
-          session: 'paused',
-          lastMessage: `恢复自动化失败：${error.message}。浏览器仍保持关闭。`,
-          ...edgeFailurePatch(`恢复失败：${error.message}`),
-          ...presencePatch('恢复请求未送达，仍保持暂停'),
-        });
-      });
-      return;
-    }
-    handle.automationPaused = false;
     wakeColdStandby(handle, 'user_resume');
     return;
   }
-  handle.automationPaused = false;
-  if (handle.child && (handle.pausePending || handle.status.session === 'paused')) {
+  if (handle.child) {
     const child = handle.child;
     handle.pausePending = true;
     updateStatus(handle, {
       edge: 'running',
       session: 'running',
-      lastMessage: '正在原地恢复自动化；客户端核心、Cloud 连接和浏览器状态保持不变…',
+      lastMessage: '正在恢复自动化…',
       ...presencePatch('正在恢复自动化…'),
-      ...clearEdgeFailurePatch(handle),
     });
     sendCoreLifecycle(handle, 'resume', (error) => {
       if (handle.child !== child) return;
       handle.pausePending = false;
+      handle.automationIntent = 'paused';
       handle.automationPaused = true;
       updateStatus(handle, {
-        edge: 'running',
+        edge: 'warning',
         session: 'paused',
-        lastMessage: `恢复自动化失败：${error.message}。客户端核心与浏览器状态未改变。`,
+        lastMessage: `恢复自动化失败：${error.message}。`,
         ...edgeFailurePatch(`恢复失败：${error.message}`),
-        ...presencePatch('恢复请求未送达，仍保持暂停'),
+        ...presencePatch('恢复请求未送达'),
       });
     });
     return;
@@ -4391,6 +4439,7 @@ async function confirmOwnedProfileClosedFromShell(handle) {
     res && res.ok && res.listWellFormed && Array.isArray(res.activeUserIds) ? res.activeUserIds : null;
   if (active && active.includes(handle.profileId)) {
     // 分身确在跑但无核心可关：诚实报未关（保持暂停——浏览器开着、自动运营停着），引导恢复接管后再关。
+    handle.browserStateUnconfirmed = true;
     updateStatus(handle, {
       edge: 'warning',
       session: 'paused',
@@ -4402,6 +4451,7 @@ async function confirmOwnedProfileClosedFromShell(handle) {
   }
   if (active) {
     // 结构良好的列表里没有该分身 = 确认已关。
+    handle.browserStateUnconfirmed = false;
     updateStatus(handle, {
       edge: 'stopped',
       cloud: 'disconnected',
@@ -4415,6 +4465,7 @@ async function confirmOwnedProfileClosedFromShell(handle) {
     return;
   }
   // 拿不到结构良好的列表（不可达 / 响应不完整）：不确定，绝不假报已关。
+  handle.browserStateUnconfirmed = true;
   updateStatus(handle, {
     edge: 'warning',
     session: 'paused',
@@ -4424,13 +4475,61 @@ async function confirmOwnedProfileClosedFromShell(handle) {
   });
 }
 
-function closeEdge(handle) {
+function stopAutomation(handle) {
+  if (!handle || handle.removed) return;
+  handle.automationIntent = 'stopped';
+  handle.engineStopReason = 'user_close';
+  handle.resumeAfterStop = false;
+  handle.automationPaused = false;
+  handle.stopRequested = true;
+  handle.restartPending = false;
+  clearRespawnTimer(handle);
+  clearColdStandbyTimer(handle);
+  releaseStartQueue(handle);
+  clearSlotWaiting(handle);
+  if (!handle.child) {
+    handle.pausePending = false;
+    updateStatus(handle, {
+      edge: 'stopped',
+      cloud: 'disconnected',
+      session: 'closed',
+      overlayBlocked: false,
+      lastMessage: handle.kind === 'adspower'
+        ? '自动化引擎已关闭，正在确认浏览器状态；数据管理仍可继续使用。'
+        : '自动化已关闭；数据管理仍可继续使用。',
+      ...presencePatch(handle.kind === 'adspower' ? '自动化已关闭，正在确认浏览器' : '自动化已关闭'),
+      ...clearEdgeFailurePatch(handle),
+    });
+    if (handle.kind === 'adspower' && handle.profileId) void confirmOwnedProfileClosedFromShell(handle);
+    return;
+  }
+  const child = handle.child;
+  updateStatus(handle, {
+    edge: 'stopping',
+    session: 'closed',
+    overlayBlocked: false,
+    lastMessage: '正在关闭自动化引擎和浏览器；数据管理不受影响…',
+    ...presencePatch('正在关闭自动化…'),
+    ...clearEdgeFailurePatch(handle),
+  });
+  sendCoreLifecycle(handle, 'close', (error) => {
+    if (handle.child !== child) return;
+    try { child.kill('SIGTERM'); } catch { /* best-effort */ }
+    updateStatus(handle, {
+      edge: 'stopping',
+      lastMessage: `关闭指令未送达（${error.message}），正在终止自动化引擎…`,
+      ...presencePatch('正在终止自动化引擎…'),
+    });
+  });
+}
+
+function closeBrowserExecutor(handle) {
   if (!handle || handle.closePending || handle.coldStandbyPending || handle.coldStandbyActive || handle.controlPlaneOnly) return;
   clearColdStandbyTimer(handle);
   if (!handle.child) {
     updateStatus(handle, {
-      lastMessage: '客户端核心当前离线，无法确认外部浏览器状态；未执行隐式 provider 操作。',
-      ...presencePatch('核心离线，浏览器状态未确认'),
+      lastMessage: '自动化引擎当前未连接，无法确认外部浏览器状态；未执行隐式浏览器操作。',
+      ...presencePatch('引擎未连接，浏览器状态未确认'),
     });
     return;
   }
@@ -4440,8 +4539,8 @@ function closeEdge(handle) {
   handle.coldStandbyWakeAt = 0;
   updateStatus(handle, {
     browserStandby: coldStandbyStatus('scheduled', null, { reason: 'user_browser_close' }),
-    lastMessage: '正在关闭浏览器执行器；客户端核心与 Cloud 连接保持在线…',
-    ...presencePatch('正在关闭浏览器，客户端核心保持在线'),
+    lastMessage: '正在关闭浏览器执行器；自动化引擎保持连接…',
+    ...presencePatch('正在关闭浏览器'),
     ...clearEdgeFailurePatch(handle),
   });
   sendCoreLifecycle(handle, 'standby', (error) => {
@@ -4450,7 +4549,7 @@ function closeEdge(handle) {
     handle.coldStandbyPending = false;
     updateStatus(handle, {
       edge: 'warning',
-      lastMessage: `浏览器关闭失败：${error.message}。客户端核心与 Cloud 未关闭。`,
+      lastMessage: `浏览器关闭失败：${error.message}。自动化引擎未关闭。`,
       ...edgeFailurePatch(`浏览器关闭失败：${error.message}`),
       ...presencePatch('浏览器关闭请求未送达'),
     });
@@ -4503,11 +4602,9 @@ function startAllEnvs({ envIds } = {}) {
 /** 「全部停止」（不退出应用）：全部在跑环境按暂停语义错峰停止；处于重起退避窗口（无子进程）的环境
  * 也置暂停 + 清重起定时器，杜绝「全部停止后某个崩溃环境几秒后自行复活」的静默矛盾。 */
 function stopAllEnvs() {
-  const running = [...envs.values()].filter((h) => h.child && h.status.session !== 'paused' && !h.pausePending);
-  const backoff = [...envs.values()].filter((h) => !h.child && h.respawnTimer && !h.removed);
-  for (const h of running) pauseEdge(h);
-  for (const h of backoff) pauseEdge(h); // clearRespawnTimer + stopRequested 在 pauseEdge 内
-  return { ok: true, stopped: running.length + backoff.length };
+  const targets = [...envs.values()].filter((h) => !h.removed && h.automationIntent === 'enabled');
+  for (const h of targets) pauseEdge(h);
+  return { ok: true, stopped: targets.length };
 }
 
 async function stopManagedAdsRuntime() {
@@ -4583,22 +4680,47 @@ function resolveHandle(envId) {
 
 function lifecycleAxes(handle) {
   const status = handle.status || {};
+  const clientSessionState = clientAuthEnabled()
+    ? (hasValidSession() ? 'ready' : 'signed_out')
+    : 'ready';
   const coreState = handle.child
     ? (status.edge === 'starting' || handle.controlPlaneStarting ? 'starting' : 'online')
     : (handle.respawnTimer ? 'restarting' : (handle.gaveUp || status.respawnGaveUp ? 'error' : 'stopped'));
-  const cloudState = status.cloud === 'connected'
+  const engineLinkState = status.cloud === 'connected'
     ? 'connected'
     : handle.child
       ? (status.cloudEverConnected ? 'reconnecting' : 'connecting')
-      : 'offline';
-  const automationState = handle.automationPaused || status.session === 'paused'
-    ? 'paused'
-    : (handle.launchQueued || handle.startFlowQueued || handle.slotWaitingSince)
-      ? 'queued'
-      : (status.session === 'running' || status.session === 'resting')
-        ? 'running'
-        : (status.edgeFailure && handle.child && !handle.controlPlaneOnly ? 'error' : 'stopped');
-  const browserState = handle.coldStandbyWaking
+      : (handle.gaveUp || status.respawnGaveUp ? 'error' : 'disconnected');
+  // compatibility only: old renderers may still consume cloudState, but it is the automation-engine link,
+  // not a global client-to-cloud connection or a prerequisite for HTTP data management.
+  const cloudState = engineLinkState === 'disconnected' ? 'offline' : engineLinkState;
+  const waitingForResource = handle.launchQueued || handle.startFlowQueued || handle.slotWaitingSince;
+  const automationState = handle.pausePending && handle.automationIntent === 'enabled'
+    ? 'starting'
+    : handle.pausePending
+      ? 'pausing'
+      : handle.engineStopReason === 'user_close' && handle.child
+        ? 'stopping'
+        : handle.automationIntent === 'paused'
+          ? 'paused'
+          : handle.automationIntent === 'stopped'
+            ? 'stopped'
+            : waitingForResource
+              ? 'waiting_resource'
+              : (handle.gaveUp || status.respawnGaveUp || (status.edgeFailure && !handle.child))
+                ? 'error'
+                : handle.child && status.cloud === 'connected'
+                  ? (status.loopStage ? 'running' : 'ready')
+                  : handle.child
+                    ? 'starting'
+                    : 'stopped';
+  const browserState = status.overlayBlocked
+    ? 'blocked'
+    : handle.browserStateUnconfirmed
+      ? 'error'
+    : (handle.pausePending || (handle.engineStopReason === 'user_close' && handle.child))
+    ? 'closing'
+    : handle.coldStandbyWaking
     ? 'starting'
     : handle.executorFailure
       ? 'error'
@@ -4609,7 +4731,7 @@ function lifecycleAxes(handle) {
         : handle.child
           ? (handle.browserParkingReady ? 'ready' : 'starting')
           : 'closed';
-  return { coreState, cloudState, automationState, browserState };
+  return { clientSessionState, engineLinkState, automationState, browserState, coreState, cloudState };
 }
 
 function statusOf(handle) {
@@ -4618,6 +4740,8 @@ function statusOf(handle) {
       ...makeStatus(settings.provider),
       envId: '',
       envName: '',
+      clientSessionState: clientAuthEnabled() && !hasValidSession() ? 'signed_out' : 'ready',
+      engineLinkState: 'disconnected',
       coreState: 'stopped',
       cloudState: 'offline',
       automationState: 'stopped',
@@ -4646,12 +4770,12 @@ ipcMain.handle('edge:resume', (_event, envId) => {
 });
 ipcMain.handle('edge:close', (_event, envId) => {
   const handle = resolveHandle(envId);
-  closeEdge(handle);
+  stopAutomation(handle);
   return statusOf(handle);
 });
 ipcMain.handle('browser:close', (_event, envId) => {
   const handle = resolveHandle(envId);
-  closeEdge(handle);
+  closeBrowserExecutor(handle);
   return statusOf(handle);
 });
 ipcMain.handle('browser:open', async (_event, envId) => {
@@ -4663,6 +4787,12 @@ ipcMain.handle('browser:open', async (_event, envId) => {
     }
     return statusOf(handle);
   }
+  // 手动打开浏览器是高级登录/验证/检查动作：允许临时连接引擎，但保持自动化暂停。
+  handle.automationIntent = 'paused';
+  handle.engineStopReason = '';
+  handle.resumeAfterStop = false;
+  handle.automationPaused = true;
+  handle.stopRequested = false;
   const controlState = allowedEnvironmentControlStates.get(String(handle.profileId || '').trim());
   if (controlState && controlState.bindingState === 'bound') {
     handle.stopRequested = false;
@@ -4671,9 +4801,8 @@ ipcMain.handle('browser:open', async (_event, envId) => {
     return statusOf(handle);
   }
   // 首次建立绑定必须显式打开真实页面。保持自动化暂停，只做 browser_lifecycle 启动；不由 Cloud 操作触发。
-  handle.automationPaused = true;
   updateStatus(handle, { session: 'idle' });
-  queueStartEnv(handle);
+  enqueueStartFlow(handle);
   return statusOf(handle);
 });
 ipcMain.handle('auth:relogin', (_event, envId) => {
@@ -4696,6 +4825,7 @@ ipcMain.handle('settings:get', () => ({
   })),
   adsDownloadUrl: ADS_DOWNLOAD_URL,
   cloudEnv: cloudSelectionView(),
+  cloudTarget: cloudTargetView(),
   // 浏览器并发：把**算出来的**两个上限连同来源一起给界面，让它能如实说「自动推算 N」还是「你设的 N」，
   // 而不是让渲染层自己再算一遍（两处各算一遍必然漂移）。
   slots: {
@@ -5089,6 +5219,7 @@ ipcMain.handle('settings:save', async (_event, patch) => {
     ...settings,
     adsDownloadUrl: ADS_DOWNLOAD_URL,
     cloudEnv: cloudSelectionView(),
+    cloudTarget: cloudTargetView(),
     // 并发上限改了要立刻回给界面**重算后的**值（缓存已在归一时作废）——否则界面还显示旧的推算数。
     slots: {
       ...slotSettingsView(),
@@ -5100,41 +5231,27 @@ ipcMain.handle('settings:save', async (_event, patch) => {
     saveError: res.error || scopeError,
   };
 });
-// 兼容既有 preload 通道名，但语义已改为“全部核心重绑 Cloud”：不 SIGTERM、不走 queueStartEnv，
-// 不启动/关闭浏览器，也不改变槽位。每个环境独立回报实际 Cloud 与失败原因，部分成功不会冒充全量成功。
+// 兼容既有 preload 通道名，但仅重绑已经运行的自动化引擎：绝不因设置变更启动已停止的引擎或浏览器。
 ipcMain.handle('cloud:restartAll', async () => {
   const target = cloudSelectionView();
   const targets = [...envs.values()].filter((h) => !h.removed && h.kind === 'adspower');
   const results = await Promise.all(targets.map(async (handle) => {
     if (handle.child) return requestCoreCloudRebind(handle, target);
-    const controlState = allowedEnvironmentControlStates.get(String(handle.profileId || '').trim());
-    if (!controlState || controlState.bindingState !== 'bound') {
-      updateStatus(handle, {
-        targetCloudKey: target.key,
-        cloudRebind: { state: 'failed', targetKey: target.key, reason: 'binding_untrusted' },
-        lastMessage: 'Cloud 目标已保存，但账号绑定不可信，客户端核心未启动；浏览器保持关闭。',
-      });
-      return { ok: false, reason: 'binding_untrusted' };
-    }
-    handle.stopRequested = false;
     updateStatus(handle, {
       targetCloudKey: target.key,
-      cloudRebind: { state: 'pending', targetKey: target.key },
+      cloudRebind: { state: 'idle', targetKey: target.key },
+      lastMessage: '自动化目标已保存；当前引擎未运行，将在下次开始自动化时生效。',
     });
-    const ok = await startBrowserAbsentCore(handle);
-    if (!ok) {
-      updateStatus(handle, {
-        cloudRebind: { state: 'failed', targetKey: target.key, reason: 'core_bootstrap_failed' },
-      });
-    }
-    return { ok: Boolean(ok), ...(ok ? {} : { reason: 'core_bootstrap_failed' }) };
+    return { ok: true, skipped: true, reason: 'engine_not_running' };
   }));
-  const rebound = results.filter((result) => result.ok).length;
+  const activeResults = results.filter((result) => !result.skipped);
+  const rebound = activeResults.filter((result) => result.ok).length;
   return {
-    ok: rebound === results.length,
-    accepted: results.length,
+    ok: rebound === activeResults.length,
+    accepted: activeResults.length,
     rebound,
-    failed: results.length - rebound,
+    skipped: results.length - activeResults.length,
+    failed: activeResults.length - rebound,
     results: targets.map((handle, index) => ({ envId: handle.envId, ...results[index] })),
     cloudEnv: target,
   };
@@ -5142,7 +5259,13 @@ ipcMain.handle('cloud:restartAll', async () => {
 // 悬浮「启动」：目标环境未跑则错峰启动；已在跑则不重复启动。
 ipcMain.handle('edge:start', (_event, envId) => {
   const handle = resolveHandle(envId);
-  if (handle) handle.automationPaused = false;
+  if (handle) {
+    handle.automationIntent = 'enabled';
+    handle.engineStopReason = '';
+    handle.resumeAfterStop = false;
+    handle.automationPaused = false;
+    handle.stopRequested = false;
+  }
   if (handle && handle.child && (handle.coldStandbyActive || handle.coldStandbyPending || handle.controlPlaneOnly)) {
     wakeColdStandby(handle, 'user_start');
   } else if (handle && !handle.child) {

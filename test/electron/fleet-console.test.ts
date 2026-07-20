@@ -31,6 +31,7 @@ after(() => {
 
 function makeStatus(over: Record<string, unknown> = {}) {
   return {
+    clientSessionState: 'ready',
     auth: 'logged in',
     cloud: 'connected',
     session: 'running',
@@ -198,7 +199,7 @@ test('fleetLevel：冷启动窗口留在 launching，绝不冒充需要人工', 
   );
   assert.equal(booting.level, 'launching');
   assert.equal(booting.needsAction, false); // 正常启动不是待办事项
-  assert.equal(booting.label, '核心连接中');
+  assert.equal(booting.label, '自动化连接中');
 });
 
 test('fleetLevel：连上过之后掉线才升为需处理的「正在重新连接」', () => {
@@ -209,7 +210,7 @@ test('fleetLevel：连上过之后掉线才升为需处理的「正在重新连�
   );
   assert.equal(dropped.level, 'attention');
   assert.equal(dropped.needsAction, true);
-  assert.equal(dropped.label, '正在重新连接');
+  assert.equal(dropped.label, '自动化正在重连');
 });
 
 test('fleetLevel：放弃重启和冻结为 error；账号重复运行为 attention', () => {
@@ -235,9 +236,9 @@ test('fleetLevel：暂停与关闭共享 offline 级别但标签明确区分，�
   const paused = uiLogic.fleetLevel({ edge: 'stopped', session: 'paused' }, now);
   const closed = uiLogic.fleetLevel({ edge: 'stopped', session: 'closed' }, now);
   assert.equal(paused.level, 'offline');
-  assert.equal(paused.label, '已暂停');
+  assert.equal(paused.label, '自动化已暂停');
   assert.equal(closed.level, 'offline');
-  assert.equal(closed.label, '已关闭');
+  assert.equal(closed.label, '客户端已就绪');
 });
 
 test('红线：阻断浮层（验证码/登录墙）即便 edge 仍 running 也判需处理，绝不呈现为绿色在线', () => {
@@ -1272,7 +1273,7 @@ test('平台标识：FB 环境行染平台类、顶栏徽标随选中环境切�
   await tick();
   assert.equal(w.document.querySelector('#acct-plat')!.textContent, 'Facebook');
   assert.equal(w.document.querySelector('#acct-plat')!.classList.contains('plat-facebook'), true);
-  assert.equal(w.document.querySelector('#auth-label')!.textContent, 'Facebook 登录');
+  assert.equal(w.document.querySelector('#auth-label')!.textContent, '客户会话');
   (rowOf('ads-p1').querySelector('.rail-persona') as HTMLElement).click();
   await tick();
   assert.equal(w.document.querySelector('#persona-plat')!.textContent, 'Facebook', 'FB 环境的人设浮层必须显示 Facebook');
@@ -1457,20 +1458,20 @@ test('人设成长引导：云端未创建首次引导时不重复展示', async
   assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), false);
 });
 
-test('自动化暂停时显式关闭浏览器只释放当前环境执行器，核心保持在线', async () => {
+test('自动化暂停后关闭表达停止意图，不退化成独立浏览器操作', async () => {
   const { w, pushStatus, calls } = await boot();
-  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'running', cloud: 'connected', session: 'paused',
-    coreState: 'online', cloudState: 'connected', automationState: 'paused', browserState: 'ready' }));
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'stopped', cloud: 'disconnected', session: 'paused',
+    coreState: 'stopped', cloudState: 'offline', automationState: 'paused', browserState: 'closed' }));
   await tick();
   const close = w.document.querySelector('#session-close') as HTMLElement;
   assert.equal(close.classList.contains('hidden'), false);
   close.click();
   await tick();
   await tick();
-  assert.deepEqual(calls.browserClose, ['ads-p1']);
-  assert.deepEqual(calls.close, []);
-  assert.equal(w.document.querySelector('#session-fab')!.textContent, '恢复自动化');
-  assert.equal(close.textContent, '打开浏览器');
+  assert.deepEqual(calls.browserClose, []);
+  assert.deepEqual(calls.close, ['ads-p1']);
+  assert.equal(w.document.querySelector('#session-fab')!.textContent, '开始自动化');
+  assert.equal(close.textContent, '打开浏览器（登录/检查）');
 });
 
 // ── 人设弹窗三态（change persona-bound-tristate）────────────────────────────────────────────

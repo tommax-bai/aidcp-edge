@@ -80,11 +80,11 @@ test('WeChat unverified-write test token is injected only after the final cloud 
   );
 });
 
-test('custom 非法地址被降级为未选择、绝不注入垃圾（诚实回落）', () => {
+test('custom 必须同时提供 HTTP 数据地址与自动化 WebSocket，否则降级为未选择', () => {
   assert.match(
     code,
-    /cloudEnvKey === 'custom'\s*&&\s*!isWsUrl\(settings\.cloudUrlCustom\)\)\s*settings\.cloudEnvKey = ''/,
-    'normalizeCloudSettings 必须把非法 custom 降级为空、不注入坏地址',
+    /cloudEnvKey === 'custom'[\s\S]*?!isWsUrl\(settings\.cloudUrlCustom\)[\s\S]*?!settings\.clientAuthUrl[\s\S]*?settings\.cloudEnvKey = ''/,
+    'normalizeCloudSettings 必须同时校验 custom HTTP 与 WS 地址',
   );
   assert.match(main, /function isWsUrl\(/, '必须有 ws(s):// 地址校验器 isWsUrl');
 });
@@ -94,16 +94,24 @@ test('settings:get 与 fleetSnapshot 带出目标云端视图，供界面常驻�
   assert.match(main, /function cloudSelectionView\(/, '必须有 cloudSelectionView 生成目标云端视图');
 });
 
-test('换云 IPC 逐核心重绑并独立返回部分失败，不重启浏览器或重走槽位队列', () => {
+test('换云 IPC 只重绑运行中的自动化引擎，停止中的环境下次启动生效', () => {
   const start = main.indexOf("ipcMain.handle('cloud:restartAll'");
   const end = main.indexOf("ipcMain.handle('edge:start'", start);
   const handler = main.slice(start, end);
   assert.ok(start >= 0 && end > start, '必须暴露 cloud:restartAll 兼容通道');
   assert.match(handler, /Promise\.all\(targets\.map/, '所有环境必须独立并行重绑');
   assert.match(handler, /requestCoreCloudRebind\(handle, target\)/, '在线核心必须原地重绑 Cloud 传输');
-  assert.match(handler, /failed:\s*results\.length - rebound/, '必须返回部分失败数量');
+  assert.match(handler, /activeResults = results\.filter/, '停止中的环境必须从本轮重绑目标中剔除');
+  assert.match(handler, /skipped:\s*results\.length - activeResults\.length/, '必须返回停止中跳过数量');
+  assert.match(handler, /failed:\s*activeResults\.length - rebound/, '必须返回运行中引擎的部分失败数量');
   assert.match(handler, /results:\s*targets\.map/, '必须逐环境返回成功或失败原因');
   assert.doesNotMatch(handler, /stopAndRestart|queueStartEnv|provider\.|cdp|admitBrowserSlot|occupiedSlots/, '换云不得触碰浏览器执行器或槽位');
+});
+
+test('structured cloud target exposes separate customer HTTP and automation WebSocket endpoints', () => {
+  assert.match(main, /CLIENT_AUTH_ENV_URLS\s*=\s*\{[\s\S]*\/capi[\s\S]*\}/);
+  assert.match(main, /function cloudTargetView\(\)[\s\S]*automationUrl:[\s\S]*dataApiUrl:/);
+  assert.match(main, /cloudTarget:\s*cloudTargetView\(\)/);
 });
 
 test('单核心 Cloud 重绑消息只携带控制传输目标，明确不改浏览器状态', () => {
