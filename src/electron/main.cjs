@@ -5785,6 +5785,10 @@ ipcMain.handle('publish-draft:get', (_event, envId, id) => {
   return delegatedTaskRequest(envId, `/publish-drafts/${id}`, { includeEnvQuery: true });
 });
 
+// 当前账号已被平台接受的定时小时；路径、客户令牌、envKey 与账号绑定均由 main/Cloud 收口。
+ipcMain.handle('publish-schedule:occupied-hours', (_event, envId) =>
+  delegatedTaskRequest(envId, '/publish-schedule/occupied-hours', { includeEnvQuery: true }));
+
 // 当前账号灵感库：四个具名 IPC 锁死 customer-auth 路径和方法；envId 只用于主进程查 profileId，
 // renderer 不得提交 accountId/envKey/URL/token。所有参数先做窄形状校验，再复用逐请求归属校验出口。
 ipcMain.handle('curated:summary', (_event, envId) =>

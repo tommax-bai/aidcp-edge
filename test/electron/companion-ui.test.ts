@@ -600,6 +600,59 @@ test('洗稿稿件审核：展示成品并通过既有审批 RPC 直接发布，
   assert.equal(($(w, '#delegated-confirm') as unknown as HTMLDialogElement).open, false);
 });
 
+test('小红书单稿显示定时入口，快捷按钮只选时间并按小时跳过 08:15 占用', async () => {
+  const now = Date.parse('2026-07-20T20:00:00+08:00');
+  const approvalCalls: unknown[][] = [];
+  const { w } = await boot({
+    envId: 'u1',
+    publish: { state: 'pending', title: '单稿快捷排期', code: '#190', at: new Date(now).toISOString() },
+    publishPreview: {
+      recordId: 190,
+      platform: 'xiaohongshu',
+      kind: 'generated',
+      title: '单稿快捷排期',
+      content: '只选择时间，不自动批准。',
+      topics: [],
+      images: ['https://cdn.example.com/190.jpg'],
+      contentVersion: 1,
+      updatedAt: now,
+    },
+  }, {
+    publishScheduleOccupiedHours: async () => ({
+      ok: true,
+      data: { occupiedTimes: [Date.parse('2026-07-21T08:15:00+08:00')] },
+    }),
+    publishApproval: async (...args: unknown[]) => {
+      approvalCalls.push(args);
+      return { ok: true, state: 'approved' };
+    },
+  });
+  w.Date.now = () => now;
+
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  const scheduled = w.document.querySelector('input[name="publish-plan-mode"][value="scheduled"]') as HTMLInputElement;
+  assert.ok(scheduled, '单稿详情必须展示定时发布入口');
+  scheduled.checked = true;
+  scheduled.dispatchEvent(new w.Event('change'));
+  const time = w.document.querySelector('.publish-plan-time input') as HTMLInputElement;
+  time.value = '2026-07-20T21:00';
+  time.dispatchEvent(new w.Event('input'));
+
+  const free = w.document.querySelector('[data-publish-time-shortcut="free"]') as HTMLButtonElement;
+  const peak = w.document.querySelector('[data-publish-time-shortcut="peak"]') as HTMLButtonElement;
+  assert.equal(free.textContent, '下个空闲时段');
+  assert.equal(peak.textContent, '下个热门时段');
+  assert.equal(free.disabled, false);
+  free.dispatchEvent(new w.Event('click'));
+  assert.equal(time.value, '2026-07-21T12:00', '08:15 占用整个早上档，应跳到 12:00');
+  assert.equal(approvalCalls.length, 0, '快捷按钮不得提交审批');
+  peak.dispatchEvent(new w.Event('click'));
+  assert.equal(time.value, '2026-07-21T18:00', '再次点击应以当前选择为游标前进');
+  assert.equal(approvalCalls.length, 0);
+});
+
 test('稿件审核配图：双击查看大图，关闭层级与删图入口互不干扰', async () => {
   const firstUrl = 'https://cdn.example.com/lightbox-1.jpg';
   const secondUrl = 'https://cdn.example.com/lightbox-2.jpg';
@@ -727,8 +780,8 @@ test('洗稿稿件审核：点击取消直接提交驳回决定并携带当前�
 });
 
 test('多条待审批稿按灵感池卡片展示，批准时可定时发布并继续处理剩余稿件', async () => {
-  const now = Date.now();
-  const scheduledInput = new Date(now + 2 * 60 * 60 * 1000 + 8 * 60 * 60 * 1000).toISOString().slice(0, 16);
+  const now = Date.parse('2026-07-20T20:00:00+08:00');
+  const scheduledInput = '2026-07-21T08:00';
   const scheduledAt = Date.parse(`${scheduledInput}:00+08:00`);
   const listItems = [
     {
@@ -757,11 +810,13 @@ test('多条待审批稿按灵感池卡片展示，批准时可定时发布并�
       ok: true,
       data: { item: { ...listItems.find((item) => item.id === id), content: `${id} 的完整正文` } },
     }),
+    publishScheduleOccupiedHours: async () => ({ ok: true, data: { occupiedTimes: [] } }),
     publishApproval: async (...args: unknown[]) => {
       approvalCalls.push(args);
       return { ok: true, state: 'approved', currentVersion: 5 };
     },
   });
+  w.Date.now = () => now;
 
   $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
   await tick();
@@ -804,6 +859,15 @@ test('多条待审批稿按灵感池卡片展示，批准时可定时发布并�
   assert.equal($(w, '#publish-preview-panel').classList.contains('open'), true, '还有稿件时审核页保持打开');
   assert.equal($(w, '#publish-preview-title').textContent, '第一条待审', '数据库状态延迟时 handled 集也会滤掉刚处理的稿件');
   assert.ok(listCalls >= 2, '审批成功后重新读取权威待审列表');
+  const nextScheduled = w.document.querySelector('input[name="publish-plan-mode"][value="scheduled"]') as HTMLInputElement;
+  nextScheduled.checked = true;
+  nextScheduled.dispatchEvent(new w.Event('change'));
+  const nextTime = w.document.querySelector('.publish-plan-time input') as HTMLInputElement;
+  nextTime.value = '2026-07-20T21:00';
+  nextTime.dispatchEvent(new w.Event('input'));
+  (w.document.querySelector('[data-publish-time-shortcut="free"]') as HTMLButtonElement)
+    .dispatchEvent(new w.Event('click'));
+  assert.equal(nextTime.value, '2026-07-21T12:00', '刚受理的 08:00 排期在 Cloud 回写前也应由会话保留避让');
 });
 
 test('定时发布与日期时间控件交互保持稿件阅读位置', async () => {
@@ -895,6 +959,8 @@ test('旧 Cloud 不提供待审批列表端点时回落单稿快照', async () =
   assert.equal($(w, '#publish-preview-title').textContent, '兼容稿件');
   assert.match($(w, '#publish-preview-content').textContent ?? '', /旧 Cloud 快照正文/);
   assert.equal(hidden($(w, '#publish-preview-actions')), false);
+  assert.equal((w.document.querySelector('[data-publish-time-shortcut="free"]') as HTMLButtonElement).disabled, true);
+  assert.match($(w, '.publish-plan-shortcut-hint').textContent ?? '', /暂时无法判断空闲时段/);
 });
 
 test('账号切换会使旧账号在途待审列表应答失效', async () => {

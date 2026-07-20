@@ -69,7 +69,7 @@
     if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需要协助', detail: AUTH_ATTENTION[s.auth] };
     if (s.automationState === 'pausing') return { code: 'paused', label: '暂停中', detail: '正在断开引擎并释放浏览器；数据管理仍可用' };
     if (s.automationState === 'stopping') return { code: 'paused', label: '关闭中', detail: '数据管理仍可用' };
-    if (s.automationState === 'waiting_resource') return { code: 'ready', label: '等待浏览器资源', detail: '轮到当前环境后会自动继续' };
+    if (s.automationState === 'waiting_resource') return { code: 'ready', label: '排队中', detail: '轮到当前环境后会自动继续' };
     if (s.automationState === 'starting') return { code: 'ready', label: '启动中', detail: '正在连接引擎并准备浏览器' };
     if (s.engineLinkState === 'reconnecting' && ['ready', 'running'].includes(s.automationState)) {
       return { code: 'attention', label: '重连中', detail: '数据管理不受影响；连接恢复后会自动继续' };
@@ -722,7 +722,7 @@
     if (s.risk === 'restricted') return { level: 'attention', needsAction: true, label: '账号受限' };
     if (s.sameAccountWarning) return { level: 'attention', needsAction: true, label: '账号重复运行' };
     if (s.automationState === 'starting' || s.automationState === 'waiting_resource' || s.automationState === 'pausing' || s.automationState === 'stopping') {
-      return { level: 'launching', needsAction: false, label: s.automationState === 'waiting_resource' ? '等待浏览器资源' : '处理中' };
+      return { level: 'launching', needsAction: false, label: s.automationState === 'waiting_resource' ? '排队中' : '处理中' };
     }
     if (s.automationState === 'ready' || s.automationState === 'running') {
       const at = Date.parse(s.updatedAt || '');

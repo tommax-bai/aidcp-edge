@@ -54,20 +54,22 @@ test('灵感库列表隐藏视觉滚动条但保留原生纵向滚动', () => {
 });
 
 test('待审批稿只经具名 IPC 读取，路径和环境范围由 main 固定', () => {
-  for (const channel of ['publish-draft:list', 'publish-draft:get']) {
+  for (const channel of ['publish-draft:list', 'publish-draft:get', 'publish-schedule:occupied-hours']) {
     const escaped = channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     assert.match(preload, new RegExp(`ipcRenderer\\.invoke\\('${escaped}'`));
     assert.match(main, new RegExp(`ipcMain\\.handle\\('${escaped}'`));
   }
   assert.match(main, /`\/publish-drafts\?limit=\$\{limit\}&offset=\$\{offset\}`[\s\S]*includeEnvQuery: true/);
   assert.match(main, /`\/publish-drafts\/\$\{id\}`[\s\S]*includeEnvQuery: true/);
+  assert.match(main, /'\/publish-schedule\/occupied-hours'[\s\S]*includeEnvQuery: true/);
   assert.match(main, /limit < 1 \|\| limit > 50\b/);
   assert.match(main, /Number\.isInteger\(id\)[\s\S]*id <= 0/);
-  assert.doesNotMatch(appRenderer, /\/publish-drafts/, 'renderer 不得自行拼客户接口路径');
+  assert.doesNotMatch(appRenderer, /\/publish-(?:drafts|schedule)/, 'renderer 不得自行拼客户接口路径');
 
   const block = preload.slice(preload.indexOf('// 待审批稿列表/详情'), preload.indexOf('// 稿件预览内删除某张配图'));
   assert.match(block, /publishDraftList:/);
   assert.match(block, /publishDraftGet:/);
+  assert.match(block, /publishScheduleOccupiedHours:/);
   const executable = block.split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
   assert.doesNotMatch(executable, /authorization|cookie|jwt|token|headers|accountId|\burl\b/i);
 });

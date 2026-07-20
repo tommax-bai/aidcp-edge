@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 // 锁住云端环境选择的关键不变量：地址映射、按选择解析、**在 env 合并之后**覆盖、留空零注入、custom 非法降级。
 const here = dirname(fileURLToPath(import.meta.url));
 const main = readFileSync(join(here, '../../src/electron/main.cjs'), 'utf8');
+const renderer = readFileSync(join(here, '../../src/electron/renderer/renderer.js'), 'utf8');
 const buildScript = readFileSync(join(here, '../../scripts/build-desktop-macos.sh'), 'utf8');
 const buildWorkflow = readFileSync(join(here, '../../.github/workflows/build-desktop.yml'), 'utf8');
 // 顺序不变量按**代码**位置比较：剥掉整行注释，避免注释里合法引用这些符号名污染位置。
@@ -92,6 +93,23 @@ test('custom 必须同时提供 HTTP 数据地址与自动化 WebSocket，否则
 test('settings:get 与 fleetSnapshot 带出目标云端视图，供界面常驻显示', () => {
   assert.match(main, /cloudEnv:\s*cloudSelectionView\(\)/, 'settings:get / fleetSnapshot 必须带 cloudEnv 目标云端视图');
   assert.match(main, /function cloudSelectionView\(/, '必须有 cloudSelectionView 生成目标云端视图');
+});
+
+test('首次启动实际 Cloud 未知时不判待重绑，已知目标不一致与显式重绑仍保留', () => {
+  const start = renderer.indexOf('const pendingRows = running.filter');
+  const end = renderer.indexOf('const failedRows = running.filter', start);
+  const predicate = renderer.slice(start, end);
+  assert.ok(start >= 0 && end > start, '必须存在顶部 Cloud 待重绑判定');
+  assert.match(
+    predicate,
+    /e\.status\.connectedCloudKey\s*&&\s*e\.status\.connectedCloudKey\s*!==\s*target\.key/,
+    '只有实际 Cloud 已知且与目标不一致时才判待重绑，首次启动空值不得误报',
+  );
+  assert.match(
+    predicate,
+    /e\.status\.cloudRebind[\s\S]*state === 'pending'/,
+    '显式 Cloud 重绑进行中仍必须保留待重绑反馈',
+  );
 });
 
 test('换云 IPC 只重绑运行中的自动化引擎，停止中的环境下次启动生效', () => {
