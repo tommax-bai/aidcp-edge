@@ -147,6 +147,10 @@ interface FieldClearResult {
   fieldFound: boolean;
 }
 
+type ContentInputUnit =
+  | { kind: 'text'; value: string }
+  | { kind: 'newline' };
+
 /** 由指令参数合成最小 PublishRequestPayload，供复用 PublishStepValidator 的字段读取。 */
 function synthPayload(payload: PublishCommandPayload): PublishRequestPayload {
   const value = payload.params.value ?? '';
@@ -687,6 +691,130 @@ export class PublishCommandDispatcher {
     }
   }
 
+  /**
+   * 小红书正文换行不是普通字符，而是 ProseMirror 的段落结构事务。
+   * `Input.insertText({text:'上一段\n下一段'})` 会让段落重排与 selection 更新互相抢跑：旧 selection
+   * 可能落回块尾字之前，后续块遂插到尾字前，尾字逐块倒序堆到文末（dev record #153）。
+   *
+   * 因此正文 MUST 拆为两类原语：纯文本 insertText 与独立 Enter；任何 insertText 都不携 CR/LF。
+   * 普通字符仍共享 maxSends/PAUSE_BUDGET，避免按行重置预算使长正文往返数失控。
+   */
+  private buildContentInputUnits(text: string): ContentInputUnit[] {
+    const normalized = text.replace(/\r\n?/g, '\n');
+    const textChars = Array.from(normalized.replace(/\n/g, ''));
+    const maxSends = this.pacingEnabled ? 50 : 1;
+    const chunkSize = Math.max(1, Math.ceil(textChars.length / maxSends));
+    const lines = normalized.split('\n');
+    const units: ContentInputUnit[] = [];
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      const chars = Array.from(lines[lineIndex]!);
+      for (let i = 0; i < chars.length; i += chunkSize) {
+        units.push({ kind: 'text', value: chars.slice(i, i + chunkSize).join('') });
+      }
+      if (lineIndex < lines.length - 1) units.push({ kind: 'newline' });
+    }
+    return units;
+  }
+
+  /**
+   * Enter 已写入页面后不可取消：先有界确认「已写前缀仍在 + selection 连续两次位于末端」。
+   * 探针发现 selection 偏移时会就地 collapse(false) 归尾；下一轮再确认没有被 ProseMirror 的
+   * 延迟 selection 事务覆盖。命令 ACK 只代表 CDP 收到指令，不能替代此编辑器状态确认。
+   */
+  private async stabilizeContentAfterNewline(
+    findExpr: string,
+    expectedPrefix: string,
+    expectedNewlines: number,
+  ): Promise<void> {
+    if (!this.cdp) throw new Error('content_newline_unstable');
+    const expected = normalizeFieldText(expectedPrefix);
+    const expectedHanzi = hanziOnly(expected);
+    const STATE = String.raw`(() => { /* xhs-content-caret-state */
+      const el = ${findExpr};
+      if (!el) return JSON.stringify({ found: false, text: '', atEnd: false });
+      const raw = el.innerText || '';
+      const text = raw.replace(/\s+/g, ' ').trim();
+      const directBlocks = Array.from(el.children || []).filter((child) =>
+        /^(P|DIV|LI|H[1-6]|BLOCKQUOTE|PRE)$/.test(child.tagName || '')).length;
+      const brCount = el.querySelectorAll ? el.querySelectorAll('br').length : 0;
+      const newlines = Math.max(Math.max(0, directBlocks - 1), brCount);
+      const sel = getSelection();
+      const end = document.createRange();
+      end.selectNodeContents(el); end.collapse(false);
+      let atEnd = false;
+      try {
+        if (sel && sel.rangeCount > 0 && sel.isCollapsed && el.contains(sel.anchorNode)) {
+          const current = sel.getRangeAt(0).cloneRange();
+          atEnd = current.compareBoundaryPoints(0, end) === 0;
+        }
+      } catch (e) {}
+      if (!atEnd && sel) {
+        try { sel.removeAllRanges(); sel.addRange(end); } catch (e) {}
+      }
+      return JSON.stringify({ found: true, text, newlines, atEnd });
+    })()`;
+    let stableAtEnd = 0;
+    const stable = await pollBounded<boolean>({
+      probe: async () => {
+        const r = await this.cdp!.send<{ result?: { value?: string } }>('Runtime.evaluate', {
+          expression: STATE,
+          returnByValue: true,
+        });
+        const parsed = JSON.parse(r?.result?.value ?? '{"found":false,"text":"","newlines":0,"atEnd":false}') as {
+          found: boolean;
+          text: string;
+          newlines: number;
+          atEnd: boolean;
+        };
+        if (!parsed.found) {
+          stableAtEnd = 0;
+          return undefined;
+        }
+        const prefixMatches = expected === ''
+          || (expectedHanzi ? hanziOnly(parsed.text).includes(expectedHanzi) : parsed.text.includes(expected));
+        if (!prefixMatches || parsed.newlines < expectedNewlines || !parsed.atEnd) {
+          stableAtEnd = 0;
+          return undefined;
+        }
+        stableAtEnd++;
+        return stableAtEnd >= 2 ? true : undefined;
+      },
+      timeoutMs: 1_500,
+      intervalMs: 80,
+      clock: this.clock,
+      sleep: this.sleep,
+    });
+    if (stable !== true) throw new Error('content_newline_unstable');
+  }
+
+  private async typeHumanizedContent(
+    text: string,
+    findExpr: string,
+    checkpoint?: Checkpoint,
+  ): Promise<void> {
+    if (!this.cdp) return;
+    const units = this.buildContentInputUnits(text);
+    if (units.length === 0) return;
+    const PAUSE_BUDGET = 12_000;
+    const perPause = this.pacingEnabled ? Math.min(220, Math.floor(PAUSE_BUDGET / units.length)) : 0;
+    let expectedPrefix = '';
+    let expectedNewlines = 0;
+    for (const unit of units) {
+      if (perPause > 0) await this.sleep(jitterAround(perPause, 0.4, this.random));
+      checkpoint?.();
+      if (unit.kind === 'text') {
+        await this.cdp.send('Input.insertText', { text: unit.value });
+        expectedPrefix += unit.value;
+        continue;
+      }
+      // 裸 Enter 让 ProseMirror 自己执行 splitBlock；携 '\r' 的搜索框专用 keypress 形态不用于正文。
+      await dispatchKey(this.cdp as unknown as Parameters<typeof dispatchKey>[0], 'Enter', 'Enter', 13);
+      expectedPrefix += '\n';
+      expectedNewlines++;
+      await this.stabilizeContentAfterNewline(findExpr, expectedPrefix, expectedNewlines);
+    }
+  }
+
   private async ensureInputEnabled(): Promise<void> {
     if (!this.cdp || this.inputEnabled) return;
     try {
@@ -828,7 +956,11 @@ export class PublishCommandDispatcher {
       }
       // 拟人：聚焦后短停顿（手移到输入框）→ 逐字打字（替代一次性灌入，标题/正文都逐字）→ 填完微停顿。
       await this.pause(PACING_MS.fieldFocus);
-      await this.typeHumanized(value, takeover?.checkpoint);
+      if (isContent) {
+        await this.typeHumanizedContent(value, findExpr, takeover?.checkpoint);
+      } else {
+        await this.typeHumanized(value, takeover?.checkpoint);
+      }
       await this.pause(PACING_MS.fieldDone);
     } catch (err) {
       if (err instanceof TaskTakeoverError) {

@@ -485,15 +485,43 @@ class FakeCdp {
   readonly calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
   text: string;
   private selected = false;
+  private caret: number;
   /** unclearable：模拟「全选做不到」的脏页（框架吃掉了选区）。 */
   private accepted = 0;
-  constructor(private readonly opts: { initialText?: string; unclearable?: boolean; swallowAfter?: number } = {}) {
+  constructor(private readonly opts: {
+    initialText?: string;
+    unclearable?: boolean;
+    swallowAfter?: number;
+    /** Enter 后模拟 ProseMirror 用旧 selection 把 caret 恢复到末端之前；探针归尾后可恢复。 */
+    rewindCaretAfterEnter?: boolean;
+    /** 每次探针后仍把 caret 拉回去，模拟无法稳定的编辑器。 */
+    neverStabilizeCaret?: boolean;
+    /** 页面吞掉 Enter：光标仍在末端，但没有创建段落。 */
+    swallowEnter?: boolean;
+  } = {}) {
     this.text = opts.initialText ?? '';
+    this.caret = this.text.length;
   }
   async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ method, params });
     if (method === 'Runtime.evaluate') {
       const expr = String(params?.expression ?? '');
+      if (expr.includes('xhs-content-caret-state')) {
+        const atEnd = !this.opts.neverStabilizeCaret && this.caret === this.text.length;
+        if (!atEnd) {
+          this.caret = this.opts.neverStabilizeCaret ? Math.max(0, this.text.length - 1) : this.text.length;
+        }
+        return {
+          result: {
+            value: JSON.stringify({
+              found: true,
+              text: this.text.replace(/\s+/g, ' ').trim(),
+              newlines: (this.text.match(/\n/g) ?? []).length,
+              atEnd,
+            }),
+          },
+        } as T;
+      }
       if (expr.includes('text: raw')) {
         return { result: { value: JSON.stringify({ found: true, text: this.text.replace(/\s+/g, ' ').trim() }) } } as T;
       }
@@ -511,12 +539,25 @@ class FakeCdp {
       const room = this.opts.swallowAfter === undefined ? chars.length : Math.max(0, this.opts.swallowAfter - this.accepted);
       const kept = chars.slice(0, room);
       this.accepted += kept.length;
-      this.text += kept.join('');
+      const inserted = kept.join('');
+      this.text = this.text.slice(0, this.caret) + inserted + this.text.slice(this.caret);
+      this.caret += inserted.length;
       this.selected = false;
     }
-    if (method === 'Input.dispatchKeyEvent' && params?.key === 'Backspace' && this.selected) {
-      this.text = '';
-      this.selected = false;
+    if (method === 'Input.dispatchKeyEvent' && params?.type === 'keyDown') {
+      if (params?.key === 'Enter') {
+        if (!this.opts.swallowEnter) {
+          this.text = this.text.slice(0, this.caret) + '\n' + this.text.slice(this.caret);
+          this.caret++;
+          if (this.opts.rewindCaretAfterEnter) this.caret = Math.max(0, this.caret - 1);
+        }
+        this.selected = false;
+      }
+      if (params?.key === 'Backspace' && this.selected) {
+        this.text = '';
+        this.caret = 0;
+        this.selected = false;
+      }
     }
     return {} as T;
   }
@@ -557,6 +598,41 @@ test('拟人填写：pacing 关 → 回退一次性 insertText（旧快路径，
   const inserts = cdp.inserts();
   assert.equal(inserts.length, 1, 'pacing 关时一次性灌入');
   assert.equal(inserts[0], value);
+});
+
+test('多段正文：换行独立 Enter + selection 归尾，尾字不再被后续段落顶到文末', async () => {
+  const cdp = new FakeCdp({ rewindCaretAfterEnter: true });
+  const dispatcher = dispatcherWithCdp(cdp);
+  const value = '第一段尾字甲\r\n第二段尾字乙\n\n第三段尾字丙';
+  const normalized = value.replace(/\r\n?/g, '\n');
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  assert.equal(res.ok, true);
+  assert.equal(cdp.text, normalized, '即使 Enter 后 caret 回退，下一段也必须归尾后再写，正文顺序保持不变');
+  assert.ok(cdp.inserts().every((part) => !/[\r\n]/.test(part)), '任何 Input.insertText 都不得携带换行');
+  const enters = cdp.calls.filter((call) =>
+    call.method === 'Input.dispatchKeyEvent' && call.params?.type === 'keyDown' && call.params?.key === 'Enter');
+  assert.equal(enters.length, 3, 'CRLF 归一为一个 Enter，连续空行保留为两个连续 Enter');
+  const caretChecks = cdp.calls.filter((call) =>
+    call.method === 'Runtime.evaluate' && String(call.params?.expression ?? '').includes('xhs-content-caret-state'));
+  assert.ok(caretChecks.length >= 6, '每个 Enter 后至少连续两次确认 selection 稳定在末端');
+});
+
+test('换行确认持续不稳定：清空正文并诚实失败，不留下逐渐积累的文末尾字', async () => {
+  const cdp = new FakeCdp({ neverStabilizeCaret: true });
+  const dispatcher = dispatcherWithCdp(cdp);
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value: '第一段尾字甲\n第二段' }));
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^engine_error: content_newline_unstable/);
+  assert.equal(cdp.text, '', 'Enter 后 selection 无法稳定时 MUST 清场，绝不把半篇正文留给后续步骤');
+});
+
+test('Enter 被页面吞掉：即使 caret 在末端也不能放行，必须清场并诚实失败', async () => {
+  const cdp = new FakeCdp({ swallowEnter: true });
+  const dispatcher = dispatcherWithCdp(cdp);
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value: '第一段\n第二段' }));
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /^engine_error: content_newline_unstable/);
+  assert.equal(cdp.text, '', '未建出段落时 MUST 清场，绝不把丢失换行的正文当成功');
 });
 
 // ── change lease-strict-preemption task 3.1：清场协议（抢占的硬前置）──────────────
