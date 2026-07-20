@@ -67,6 +67,7 @@ async function boot(
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
   const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], personaPreview: [], personaFill: [], select: [], close: [], notify: [], start: [], resume: [], saveNickname: [] };
+  const personaStatusByEnv = new Map<string, Record<string, unknown>>();
   const settings = {
     provider: 'adspower',
     adsProfileId: 'p1',
@@ -83,7 +84,15 @@ async function boot(
   };
   Object.assign(window, globalsOver);
   (window as unknown as { aidcpEdge: unknown }).aidcpEdge = {
-    onStatusUpdate: (cb: (s: unknown) => void) => { pushStatus = cb; },
+    onStatusUpdate: (cb: (s: unknown) => void) => {
+      pushStatus = (status: unknown) => {
+        if (status && typeof status === 'object') {
+          const value = status as Record<string, unknown>;
+          if (typeof value.envId === 'string') personaStatusByEnv.set(value.envId, value);
+        }
+        cb(status);
+      };
+    },
     onActivity: (cb: (e: unknown) => void) => { pushActivity = cb; },
     onFleetUpdate: (cb: (snap: unknown) => void) => { pushFleet = cb; },
     getStatus: async () => makeStatus({ envId: 'ads-p1', envName: '环境一' }),
@@ -113,6 +122,24 @@ async function boot(
     facebookPersonaFillSelected: async (soulYaml: string) => {
       calls.personaFill.push(soulYaml);
       return { ok: true, accepted: true };
+    },
+    personaGet: async (envId: string) => {
+      const status = personaStatusByEnv.get(envId);
+      if (status?.personaBound === true) {
+        return {
+          ok: true,
+          state: 'configured',
+          persona: {
+            soulYaml: 'identity:\n  name: "当前人设"',
+            summary: {
+              name: '当前人设', role: '内容创作者', background: '', tone: '真诚自然', writingLanguage: null,
+              primaryInterests: ['内容创作'], secondaryInterests: [], seedKeywords: [], likeAffinity: 'normal',
+            },
+            updatedAt: null,
+          },
+        };
+      }
+      return { ok: true, state: 'missing', persona: null };
     },
     relogin: async (envId: string) => { calls.relogin.push(envId); return makeStatus({ envId }); },
     notify: async (payload: unknown) => { calls.notify.push(payload); return { ok: true }; },
@@ -663,7 +690,7 @@ test('人设浮层：已绑账号可手动进入更新流程，确认后覆盖�
   (w.document.querySelector('#persona-update') as HTMLElement).click();
   await tick();
   assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), false, '点击更新后显示向导');
-  assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), true, '更新中隐藏已设置卡片');
+  assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), false, '更新中仍展示当前摘要，保存失败也不会抹掉现状');
   assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '待更新');
   assert.match(w.document.querySelector('#persona-hint')!.textContent || '', /覆盖当前账号的人设/);
   assert.equal((w.document.querySelector('#persona-generate') as HTMLElement).textContent, '生成新草稿');
@@ -686,6 +713,92 @@ test('人设浮层：已绑账号可手动进入更新流程，确认后覆盖�
   assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), true, '确认更新后收起向导');
   assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), false, '确认更新后回到已设置卡片（不再出「开始运营」成长引导）');
   assert.match(w.document.querySelector('#persona-msg')!.textContent || '', /人设已更新/);
+});
+
+test('人设浮层：引擎停止时展示当前摘要，更新失败仍保留原人设', async () => {
+  const summary = {
+    name: '林晓', role: '理性的职场观察者', background: '记录一线工作与真实选择。', tone: '专业理性',
+    writingLanguage: null, primaryInterests: ['数据标注'], secondaryInterests: ['职场干货'],
+    seedKeywords: ['工作选择'], likeAffinity: 'like_most',
+  };
+  const { w, pushStatus } = await boot({
+    personaGet: async () => ({
+      ok: true, state: 'configured',
+      persona: { soulYaml: 'identity:\n  name: "林晓"', summary, updatedAt: '2026-07-20T00:00:00.000Z' },
+    }),
+    personaGenerate: async () => ({
+      ok: true, soulYaml: 'identity:\n  name: "林晓二号"', identitySummary: '林晓二号', summary: { ...summary, name: '林晓二号' },
+    }),
+    personaPersist: async () => ({ ok: false, reason: 'persist_failed' }),
+  });
+  pushStatus(makeStatus({
+    envId: 'ads-p1', envName: '环境一', edge: 'stopped', session: 'idle', cloud: 'disconnected', auth: 'checking',
+  }));
+  await tick();
+  (w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-persona') as HTMLElement).click();
+  await tick();
+
+  assert.equal(w.document.querySelector('#persona-current-name')!.textContent, '林晓');
+  assert.equal(w.document.querySelector('#persona-current-tone')!.textContent, '专业理性');
+  assert.equal(w.document.querySelector('#persona-current-like')!.textContent, '更喜欢');
+  assert.match(w.document.querySelector('#persona-current-tags')!.textContent || '', /数据标注/);
+  assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), true);
+
+  (w.document.querySelector('#persona-update') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), false, '更新时原摘要继续可见');
+  assert.equal(w.document.querySelector('.persona-kw-group[data-dim="tone"] [data-kw="专业理性"]')!.classList.contains('active'), true);
+  assert.equal(w.document.querySelector('[data-kw="数据标注"]')!.classList.contains('active'), true, '可匹配的现有偏好应尽力预填');
+  assert.equal(w.document.querySelector('[data-like-affinity="like_most"]')!.classList.contains('active'), true);
+
+  (w.document.querySelector('#persona-generate') as HTMLElement).click();
+  await tick();
+  (w.document.querySelector('#persona-confirm') as HTMLElement).click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-current-name')!.textContent, '林晓', '保存失败不得用新草稿覆盖当前摘要');
+  assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), false);
+  assert.match(w.document.querySelector('#persona-msg')!.textContent || '', /现有人设未改变/);
+});
+
+test('人设浮层：首次未绑定与普通读取失败使用不同空态', async () => {
+  let reason = 'binding_unknown';
+  const { w } = await boot({ personaGet: async () => ({ ok: false, reason }) });
+  const icon = w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-persona') as HTMLElement;
+  icon.click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-empty-title')!.textContent, '首次启动并登录一次');
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '待绑定');
+  assert.equal(w.document.querySelector('#persona-empty-action')!.textContent, '首次启动');
+
+  reason = 'cloud_unreachable';
+  (w.document.querySelector('#persona-close') as HTMLElement).click();
+  icon.click();
+  await tick();
+  assert.equal(w.document.querySelector('#persona-empty-title')!.textContent, '暂时连不上云端');
+  assert.equal(w.document.querySelector('#persona-empty-action')!.textContent, '重试');
+});
+
+test('人设浮层：切换环境后丢弃前一个环境的晚返回', async () => {
+  let resolveFirst!: (value: unknown) => void;
+  let resolveSecond!: (value: unknown) => void;
+  const first = new Promise((resolve) => { resolveFirst = resolve; });
+  const second = new Promise((resolve) => { resolveSecond = resolve; });
+  const { w } = await boot({ personaGet: async (envId: string) => envId === 'ads-p1' ? first : second });
+  (w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-persona') as HTMLElement).click();
+  (w.document.querySelector('.rail-row[data-env-id="ads-p2"] .rail-persona') as HTMLElement).click();
+  resolveSecond({
+    ok: true, state: 'configured',
+    persona: { soulYaml: 'name: B', summary: { name: '环境 B 人设' }, updatedAt: null },
+  });
+  await tick();
+  assert.equal(w.document.querySelector('#persona-current-name')!.textContent, '环境 B 人设');
+  resolveFirst({
+    ok: true, state: 'configured',
+    persona: { soulYaml: 'name: A', summary: { name: '环境 A 人设' }, updatedAt: null },
+  });
+  await tick();
+  assert.equal(w.document.querySelector('#persona-current-name')!.textContent, '环境 B 人设', 'A 的晚返回不得覆盖 B');
+  assert.match(w.document.querySelector('#persona-pop-env')!.textContent || '', /环境二/);
 });
 
 test('红线：并发环境的状态与活动按 envId 归属，切换环境不残留、不串号', async () => {
@@ -1191,22 +1304,21 @@ test('平台标识：添加环境列表中的视频号标签复用状态栏绿�
   );
 });
 
-test('人设浮层：未就绪环境出空态面板（向导收起）；生成后进预览页、「改关键词」回第一步草稿保留', async () => {
+test('人设浮层：引擎停止仍可读写；生成后进预览页、「改关键词」回第一步草稿保留', async () => {
   const calls: Record<string, unknown[]> = { persist: [] };
   const { w, pushStatus } = await boot({
     personaGenerate: async () => ({ ok: true, soulYaml: 'soul: X', identitySummary: 'X 人设' }),
     personaPersist: async (envId: string) => { calls.persist.push(envId); return { ok: true, firstPostOnboarding: true }; },
   });
   const rowOf = (id: string) => [...w.document.querySelectorAll('.rail-row')].find((r) => (r as HTMLElement).dataset.envId === id) as HTMLElement;
-  // 环境二未启动未登录：打开其人设浮层 → 空态面板 + 「待启动」徽标 + 向导收起
+  // 环境二未启动：Cloud 已有环境绑定且确认人设缺失，仍直接开放向导，不再要求启动 core。
   pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二', auth: 'checking', cloud: 'disconnected', edge: 'stopped', session: 'idle' }));
   await tick();
   (rowOf('ads-p2').querySelector('.rail-persona') as HTMLElement).click();
   await tick();
-  assert.equal(w.document.querySelector('#persona-empty')!.classList.contains('hidden'), false, '未就绪显示空态面板');
-  assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), true, '未就绪收起向导');
-  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '待启动');
-  assert.equal((w.document.querySelector('#persona-empty-action') as HTMLElement).textContent, '去启动');
+  assert.equal(w.document.querySelector('#persona-empty')!.classList.contains('hidden'), true, '引擎停止不再显示启动闸');
+  assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), false, '引擎停止仍开放人设向导');
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '未设置');
   // 切回已登录+连云、且云端权威说未绑的环境一 → 向导可用
   pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: false }));
   await tick();

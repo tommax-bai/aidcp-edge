@@ -83,7 +83,8 @@ test('ads:listProfiles 只收窄显示、physicalUserIds 收窄到 roster∪allo
 test('clientAuthFetch 有界超时（refresh 随每次刷新调用，绝不无限吊住按钮）', () => {
   const block = handlerBlock(main, 'ads:listProfiles'); // 触发方
   assert.ok(block, 'handler 存在');
-  assert.match(main, /signal:\s*AbortSignal\.timeout\(\d+\)/, 'clientAuthFetch 必须带超时 signal');
+  assert.match(main, /timeoutMs = 12000/, 'clientAuthFetch 默认请求必须保持 12 秒有界超时');
+  assert.match(main, /signal:\s*AbortSignal\.timeout\(boundedTimeoutMs\)/, 'clientAuthFetch 必须把有界超时接入 signal');
 });
 
 test('登录态程序化建号：只允许预授权的新建环境自动归属，旧自声明接口仍被禁止', () => {

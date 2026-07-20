@@ -467,7 +467,9 @@ async function refreshClientSessionIfNeeded() {
   }
   return true;
 }
-async function clientAuthFetch(pathname, { method = 'GET', token, body, idempotencyKey, signal } = {}) {
+async function clientAuthFetch(pathname, {
+  method = 'GET', token, body, idempotencyKey, signal, timeoutMs = 12000,
+} = {}) {
   const base = resolveClientAuthBase();
   if (!base) return { status: 0, ok: false, data: null };
   const headers = { 'content-type': 'application/json' };
@@ -477,7 +479,10 @@ async function clientAuthFetch(pathname, { method = 'GET', token, body, idempote
     // 有界超时：登录/刷新/拉可见环境都经此出口，refreshAllowedEnvironments 现随每次「刷新」列表调用——面板挂起时
     // 绝不能让裸 fetch 无限吊住按钮。超时按 status:0（非 401）处理：refreshAllowedEnvironments 据此保留上次已知集、
     // 不误登出、不清空（与网络抖动同路径）。
-    const timeoutOptions = { signal: AbortSignal.timeout(12000) };
+    const boundedTimeoutMs = Number.isInteger(timeoutMs) && timeoutMs >= 1000 && timeoutMs <= 200000
+      ? timeoutMs
+      : 12000;
+    const timeoutOptions = { signal: AbortSignal.timeout(boundedTimeoutMs) };
     const requestSignal = signal && typeof AbortSignal.any === 'function'
       ? AbortSignal.any([signal, timeoutOptions.signal])
       : signal || timeoutOptions.signal;
@@ -667,7 +672,9 @@ function cancelInteractionReads(envKey) {
   return count;
 }
 
-async function interactionCustomerRequest({ envKey, pathname, method = 'GET', body, idempotencyKey, cancellable = false }) {
+async function interactionCustomerRequest({
+  envKey, pathname, method = 'GET', body, idempotencyKey, cancellable = false, timeoutMs,
+}) {
   if (!clientAuthEnabled()) return interactionLocalError('INTERACTION_FEATURE_DISABLED', '当前构建未启用 customer-auth API。', 503);
   if (!hasValidSession()) return interactionLocalError('INTERACTION_AUTH_REQUIRED', '客户端登录已失效。', 401);
   const controller = cancellable ? new AbortController() : null;
@@ -679,6 +686,7 @@ async function interactionCustomerRequest({ envKey, pathname, method = 'GET', bo
       body,
       idempotencyKey,
       signal: controller && controller.signal,
+      timeoutMs,
     });
     if (result.status === 401) {
       // customer-auth token 失效沿用既有安全机制回登录门；平台 reauth 则由 API data.auth 表达，不走此分支。
@@ -4689,17 +4697,107 @@ ipcMain.handle('browser:openAdsDownload', () => {
 });
 ipcMain.handle('browser:showDriven', (_event, envId) => sendBrowserParkingCommand(resolveHandle(envId), 'browser.show'));
 ipcMain.handle('browser:resetParking', (_event, envId) => sendBrowserParkingCommand(resolveHandle(envId), 'browser.park'));
-// 建号自助人设（change edge-persona-keyword-generation）：渲染层选关键词 → 云端生成草稿 / 确认落库。
-// envId 路由（多环境）：草稿属哪个环境就 persist 到哪个环境，杜绝中途切换环境把人设写进别的账号。
-ipcMain.handle('persona:generate', (_event, envId, payload) => sendPersonaCommand(envId, 'persona.generate', payload));
-ipcMain.handle('persona:persist', async (_event, envId, payload) => {
-  const result = await sendPersonaCommand(envId, 'persona.persist', payload);
-  if (result && result.ok === true) {
-    const handle = envId ? envs.get(envId) : selectedHandle();
-    if (handle) updateStatus(handle, { personaBound: true });
+// 账号人设（change offline-account-persona-management）：这三条具名 IPC 只接收本地 envId，并在 main
+// 权威换成 profileId/envKey 后直连 customer-auth。浏览器与环境 core 不参与，因此停止状态也能读写；
+// 老 core 的 persona WS handler 继续保留，兼容尚未升级的客户端版本。
+function personaIpcEnv(envId) {
+  const requestedEnvId = envId == null || envId === '' ? null : interactionId(envId, 'envId');
+  const handle = requestedEnvId ? envs.get(requestedEnvId) : selectedHandle();
+  if (!handle || handle.removed || handle.kind !== 'adspower') throw new Error('当前环境不支持人设管理');
+  const envKey = interactionId(handle.profileId, 'envKey');
+  return { handle, envKey };
+}
+
+function personaIpcFailure(response) {
+  const data = response && response.data;
+  const nested = data && data.error && typeof data.error === 'object' ? data.error : null;
+  const reason = data && typeof data.reason === 'string'
+    ? data.reason
+    : data && typeof data.error === 'string'
+      ? data.error
+      : nested && typeof nested.code === 'string'
+        ? nested.code
+        : response && response.status === 0
+          ? 'cloud_unreachable'
+          : 'request_failed';
+  const message = nested && typeof nested.message === 'string' ? nested.message : undefined;
+  return { ok: false, reason, ...(message ? { message } : {}) };
+}
+
+async function handlePersonaIpc(handler) {
+  try {
+    return await handler();
+  } catch (error) {
+    return { ok: false, reason: 'invalid_request', message: String((error && error.message) || error || '参数不合法') };
   }
-  return result;
-});
+}
+
+ipcMain.handle('persona:get', (_event, envId) => handlePersonaIpc(async () => {
+  const { envKey } = personaIpcEnv(envId);
+  const response = await interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/persona`,
+  });
+  if (!response.ok) return personaIpcFailure(response);
+  const data = response.data && response.data.data;
+  if (!data || (data.state !== 'missing' && data.state !== 'configured')) {
+    return { ok: false, reason: 'response_invalid' };
+  }
+  return { ok: true, state: data.state, persona: data.persona || null };
+}));
+
+ipcMain.handle('persona:generate', (_event, envId, raw) => handlePersonaIpc(async () => {
+  const args = interactionArgs(raw, new Set(['keywordSelections', 'writingLanguage', 'idempotencyKey']));
+  if (!Array.isArray(args.keywordSelections)
+      || args.keywordSelections.length > 24
+      || args.keywordSelections.some((value) => typeof value !== 'string' || value.length > 40)) {
+    throw new Error('keywordSelections 不合法');
+  }
+  const idempotencyKey = interactionIdempotencyKey(args.idempotencyKey);
+  if (args.writingLanguage !== undefined && !['zh-CN', 'en', 'vi'].includes(args.writingLanguage)) {
+    throw new Error('writingLanguage 不合法');
+  }
+  const { envKey } = personaIpcEnv(envId);
+  const body = {
+    keywordSelections: args.keywordSelections,
+    ...(args.writingLanguage === undefined ? {} : { writingLanguage: args.writingLanguage }),
+  };
+  const response = await interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/persona/draft`,
+    method: 'POST',
+    body,
+    idempotencyKey,
+    timeoutMs: 200000,
+  });
+  if (!response.ok) return personaIpcFailure(response);
+  const draft = response.data && response.data.data && response.data.data.draft;
+  if (!draft || typeof draft.soulYaml !== 'string') return { ok: false, reason: 'response_invalid' };
+  return { ok: true, soulYaml: draft.soulYaml, identitySummary: draft.identitySummary, summary: draft.summary };
+}));
+
+ipcMain.handle('persona:persist', (_event, envId, raw) => handlePersonaIpc(async () => {
+  const args = interactionArgs(raw, new Set(['soulYaml']));
+  if (typeof args.soulYaml !== 'string' || !args.soulYaml.trim()
+      || Buffer.byteLength(args.soulYaml, 'utf8') > 32 * 1024) throw new Error('soulYaml 不合法');
+  const { handle, envKey } = personaIpcEnv(envId);
+  const response = await interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/persona`,
+    method: 'PUT',
+    body: { soulYaml: args.soulYaml },
+  });
+  if (!response.ok) return personaIpcFailure(response);
+  const data = response.data && response.data.data;
+  if (!data || data.state !== 'configured' || !data.persona) return { ok: false, reason: 'response_invalid' };
+  updateStatus(handle, { personaBound: true });
+  return {
+    ok: true,
+    state: data.state,
+    persona: data.persona,
+    firstPostOnboarding: data.firstPostOnboarding === true,
+  };
+}));
 ipcMain.handle('publish:approval', (_event, envId, payload) => {
   const requestId = String(payload && payload.requestId || '').trim();
   const approved = payload && payload.approved;

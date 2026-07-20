@@ -788,14 +788,27 @@
           <button id="persona-empty-action" class="secondary small" type="button">去启动</button>
         </div>
 
-        <!-- 已绑态卡片 -->
+        <!-- 当前人设：常用信息直接读，原始 YAML 按需展开。更新时卡片仍保留，失败不会抹掉现状。 -->
         <div id="persona-bound-note" class="persona-bound hidden">
-          <span class="pb-check">✓</span>
-          <span class="pb-txt">
-            <strong>该账号已设置人设，正在正常自动运营。</strong>
-            <em>如需调整，可重新生成并确认覆盖当前人设。</em>
-          </span>
-          <button id="persona-update" class="secondary small pb-update" type="button">更新人设</button>
+          <div class="pb-head">
+            <span class="pb-check">✓</span>
+            <span class="pb-txt">
+              <strong id="persona-current-name">已设置人设</strong>
+              <em id="persona-current-role">后续浏览与发布会使用这份人设</em>
+            </span>
+            <button id="persona-update" class="secondary small pb-update" type="button">更新人设</button>
+          </div>
+          <p id="persona-current-background" class="pb-background hidden"></p>
+          <div class="pb-facts" aria-label="当前人设摘要">
+            <span><em>语气</em><strong id="persona-current-tone">—</strong></span>
+            <span><em>语言</em><strong id="persona-current-language">—</strong></span>
+            <span><em>点赞</em><strong id="persona-current-like">正常</strong></span>
+          </div>
+          <div id="persona-current-tags" class="pb-tags"></div>
+          <details id="persona-current-details" class="pb-details">
+            <summary>查看完整配置</summary>
+            <pre id="persona-current-yaml"></pre>
+          </details>
         </div>
 
         <div id="persona-growth" class="persona-growth hidden" aria-live="polite">

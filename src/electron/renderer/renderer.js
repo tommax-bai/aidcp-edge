@@ -3057,8 +3057,9 @@ function openPersonaPop(envId, reason = 'manual') {
   // 记下「谁弹的」：只有系统自动弹的窗才允许在权威「已绑」到达时被自动收起（见 updatePersonaGate）。
   personaPopOpenReason = bulk ? 'bulk' : reason === 'auto' ? 'auto' : 'manual';
   personaPopOpenEnvId = bulk ? '__facebook_bulk__' : currentEnvId() || envId || null;
-  // 用目标环境**自身**的状态评闸：此前用 currentStatus，目标环境尚无状态推送时会拿上一环境的状态误开闸。
-  updatePersonaGate((env && env.status) || null);
+  // 批量模板仍是纯本地预览；单账号始终刷新云端真态。该请求不依赖环境 core，停止状态也会进入摘要/向导。
+  if (bulk) updatePersonaGate((env && env.status) || null);
+  else void loadPersonaView(personaPopOpenEnvId);
 }
 function openFacebookBulkPersona() {
   const target = filteredRailEnvList()[0] || railEnvList().find((env) => normPlatform(env && env.platform) === 'facebook');
@@ -5231,6 +5232,15 @@ const personaUi = {
   stateBadge: document.querySelector('#persona-state-badge'),
   hint: document.querySelector('#persona-hint'),
   boundNote: document.querySelector('#persona-bound-note'),
+  currentName: document.querySelector('#persona-current-name'),
+  currentRole: document.querySelector('#persona-current-role'),
+  currentBackground: document.querySelector('#persona-current-background'),
+  currentTone: document.querySelector('#persona-current-tone'),
+  currentLanguage: document.querySelector('#persona-current-language'),
+  currentLike: document.querySelector('#persona-current-like'),
+  currentTags: document.querySelector('#persona-current-tags'),
+  currentDetails: document.querySelector('#persona-current-details'),
+  currentYaml: document.querySelector('#persona-current-yaml'),
   update: document.querySelector('#persona-update'),
   wizardBody: document.querySelector('#persona-wizard-body'),
   kwGroups: Array.from(document.querySelectorAll('.persona-kw-group:not([data-dim="language"])')),
@@ -5260,8 +5270,9 @@ const personaUi = {
   kwSummaryText: document.querySelector('#persona-kw-summary-text'),
   contentCount: document.querySelector('#persona-content-count'),
 };
-let personaReady = false; // 已登录 + 云端已连接才可生成
+let personaReady = false; // 当前环境的 customer-auth 人设作用域已就绪（与浏览器/core 运行状态无关）
 let personaDraftYaml = ''; // 当前草稿 soulYaml（确认时提交）
+let personaDraftSummary = null; // 当前草稿可读摘要（保存后立即投影，不等状态心跳）
 let personaDraftWritingLanguage = null; // 草稿对应的 FB 发言语言（persist 成功前不覆盖权威状态）
 let personaLocallyBound = false; // 本会话确认成功后即视为已绑（personaBound 信号要等下次 hello 才到）
 let personaDraftEnvId; // 草稿所属环境（多环境：persist MUST 打回生成时那个账号，不随后续切换环境漂移）
@@ -5274,6 +5285,8 @@ let personaBulkFillMode = false; // FB 分类批量模板：客户端构建一�
 const personaPrompted = new Set();
 const personaWritingLanguageSelections = new Map(); // envId -> zh-CN | en | vi；切环境不串号
 const personaWritingLanguageDirty = new Set(); // 用户正在编辑的环境；状态心跳不得覆盖未确认选择
+const personaViewsByEnv = new Map(); // envId -> { requestId, phase, state?, persona?, reason? }；晚返回不得串环境
+let personaViewRequestId = 0;
 // 人设弹窗触发判据（change persona-bound-tristate）：**只由云端权威的「未绑」触发**。
 //
 // 旧实现按「!bound」触发，而 bound=false 同时承载了两个互斥的含义——「云端说没有」和「云端还没说」。
@@ -5369,8 +5382,12 @@ function updateKwSummary(keywords) {
 // 「改关键词」：回到第一步；草稿保留（回来还能确认）。
 personaUi.kwSummary?.addEventListener('click', () => setPersonaStage('pick'));
 
-// 空态「去启动 / 打开浏览器窗口」：复用既有 FAB 三态与浏览器前置流程，不新增 IPC。
+// 空态动作：普通读取错误在原地重试；只有 Cloud 明确说从未建立账号绑定时，才引导首次启动登录。
 personaUi.emptyAction?.addEventListener('click', () => {
+  if (personaUi.emptyAction.dataset.personaAction === 'retry') {
+    void loadPersonaView(personaPopOpenEnvId || currentEnvId());
+    return;
+  }
   closePersonaPop(true);
   const action = fields.sessionFab && fields.sessionFab.dataset.action;
   if (action === 'start' || action === 'resume') fields.sessionFab.click();
@@ -5387,6 +5404,7 @@ personaUi.growthStart?.addEventListener('click', () => {
 // 只清草稿本身（更新流程复用：进更新模式时要清掉上一次的草稿，但绝不能连「已绑」态一起清掉）。
 function clearPersonaDraft() {
   personaDraftYaml = '';
+  personaDraftSummary = null;
   personaDraftWritingLanguage = null;
   personaDraftEnvId = undefined;
   personaUi.draft?.classList.add('hidden');
@@ -5412,6 +5430,9 @@ const PERSONA_GEN_FAIL = {
   edge_not_running: '引擎未运行，请先启动。',
   edge_request_timeout: '生成超时，请重试。',
   edge_request_failed: '与云端通信失败，请检查连接后重试。',
+  cloud_unreachable: '暂时连不上云端，请检查网络后重试。',
+  request_failed: '云端未受理人设生成，请稍后重试。',
+  invalid_request: '人设参数不合法，请重新选择后再试。',
   unavailable: '云端暂不支持人设生成，请稍后再试。',
   unknown_account: '账号身份未就绪，请确认已扫码登录。',
   writing_language_required: '请先选择发言语言。',
@@ -5427,6 +5448,11 @@ const PERSONA_PERSIST_FAIL = {
   persona_invalid: '人设格式无效，请重新生成。',
   edge_request_failed: '与云端通信失败，请重试。',
   edge_request_timeout: '保存超时，请重试。',
+  cloud_unreachable: '暂时连不上云端，请检查网络后重试。',
+  request_failed: '云端未受理保存，请稍后重试。',
+  persist_failed: '云端保存失败，现有人设未改变，请重试。',
+  input_too_large: '人设内容过长，未保存。',
+  invalid_request: '人设内容不合法，未保存。',
   unavailable: '云端暂不支持，请稍后再试。',
 };
 
@@ -5440,6 +5466,197 @@ function setPersonaBadge(text, variant) {
   if (!personaUi.stateBadge) return;
   personaUi.stateBadge.textContent = text;
   personaUi.stateBadge.className = `badge${variant ? ' ' + variant : ''}`;
+}
+
+function personaFailureText(reason) {
+  const copy = {
+    binding_unknown: ['首次启动并登录一次', '这个环境还没有建立云端账号绑定。首次登录成功后，即使以后停止引擎，也能在这里查看和修改人设。'],
+    environment_not_owned: ['当前账号无权访问', '该环境不在当前登录客户的可见范围内。'],
+    binding_conflict: ['账号绑定存在冲突', '该环境的账号归属需要管理员处理，当前不会读取或覆盖人设。'],
+    binding_unavailable: ['账号绑定暂不可用', '云端暂时无法确认这个环境对应的账号，请稍后重试。'],
+    unknown_account: ['账号尚未就绪', '云端还没有这个账号的有效记录，请稍后重试。'],
+    persona_invalid: ['当前人设无法读取', '云端保存的人设格式异常，当前不会用模板或旧数据冒充。'],
+    INTERACTION_AUTH_REQUIRED: ['登录状态已失效', '请重新登录客户端后再查看人设。'],
+    cloud_unreachable: ['暂时连不上云端', '请检查网络后重试；这不要求启动环境引擎。'],
+    persona_unavailable: ['人设服务暂不可用', '云端暂未提供人设管理能力，请稍后重试。'],
+  };
+  return copy[reason] || ['人设加载失败', '暂时无法读取云端人设，请稍后重试。'];
+}
+
+function renderCurrentPersona(persona) {
+  const summary = persona && persona.summary && typeof persona.summary === 'object' ? persona.summary : {};
+  if (personaUi.currentName) personaUi.currentName.textContent = summary.name || '已设置人设';
+  if (personaUi.currentRole) personaUi.currentRole.textContent = summary.role || '后续浏览与发布会使用这份人设';
+  if (personaUi.currentBackground) {
+    personaUi.currentBackground.textContent = summary.background || '';
+    personaUi.currentBackground.classList.toggle('hidden', !summary.background);
+  }
+  if (personaUi.currentTone) personaUi.currentTone.textContent = summary.tone || '—';
+  if (personaUi.currentLanguage) {
+    personaUi.currentLanguage.textContent = PERSONA_WRITING_LANGUAGES[summary.writingLanguage]?.label || '跟随平台';
+  }
+  if (personaUi.currentLike) personaUi.currentLike.textContent = PERSONA_LIKE_AFFINITIES[summary.likeAffinity]?.label || '正常';
+  if (personaUi.currentTags) {
+    personaUi.currentTags.replaceChildren();
+    const tags = [...new Set([
+      ...(Array.isArray(summary.primaryInterests) ? summary.primaryInterests : []),
+      ...(Array.isArray(summary.secondaryInterests) ? summary.secondaryInterests : []),
+      ...(Array.isArray(summary.seedKeywords) ? summary.seedKeywords : []),
+    ])].slice(0, 10);
+    for (const tag of tags) {
+      const chip = document.createElement('span');
+      chip.textContent = tag;
+      personaUi.currentTags.appendChild(chip);
+    }
+  }
+  if (personaUi.currentYaml) personaUi.currentYaml.textContent = persona?.soulYaml || '';
+  if (personaUi.currentDetails) {
+    personaUi.currentDetails.classList.toggle('hidden', !persona?.soulYaml);
+    personaUi.currentDetails.open = false;
+  }
+}
+
+function prefillPersonaFromSummary(summary) {
+  if (!summary || typeof summary !== 'object') return;
+  const interests = new Set([
+    ...(Array.isArray(summary.primaryInterests) ? summary.primaryInterests : []),
+    ...(Array.isArray(summary.secondaryInterests) ? summary.secondaryInterests : []),
+    ...(Array.isArray(summary.seedKeywords) ? summary.seedKeywords : []),
+  ]);
+  for (const group of personaUi.kwGroups) {
+    const dim = group.dataset.dim;
+    for (const button of group.querySelectorAll('.kw-btn')) {
+      const active = dim === 'tone'
+        ? button.dataset.kw === summary.tone
+        : dim === 'like-affinity'
+          ? button.dataset.likeAffinity === (summary.likeAffinity || 'normal')
+          : dim === 'content' && interests.has(button.dataset.kw);
+      button.classList.toggle('active', active);
+    }
+    syncKwGroupState(group);
+  }
+  const envId = currentEnvId() || '__local__';
+  if (PERSONA_WRITING_LANGUAGES[summary.writingLanguage]) {
+    personaWritingLanguageSelections.set(envId, summary.writingLanguage);
+    personaWritingLanguageDirty.add(envId);
+  } else {
+    personaWritingLanguageSelections.delete(envId);
+    personaWritingLanguageDirty.delete(envId);
+  }
+  syncPersonaWritingLanguage((fleetView.envs.get(currentEnvId()) || {}).status || currentStatus || null);
+}
+
+async function loadPersonaView(envId) {
+  const targetEnvId = envId || currentEnvId();
+  if (!targetEnvId || !window.aidcpEdge || typeof window.aidcpEdge.personaGet !== 'function') {
+    if (targetEnvId) personaViewsByEnv.set(targetEnvId, { phase: 'error', reason: 'persona_unavailable' });
+    updatePersonaGate((fleetView.envs.get(targetEnvId) || {}).status || currentStatus || null);
+    return;
+  }
+  const requestId = ++personaViewRequestId;
+  personaViewsByEnv.set(targetEnvId, { requestId, phase: 'loading' });
+  if (personaPopOpenEnvId === targetEnvId) {
+    updatePersonaGate((fleetView.envs.get(targetEnvId) || {}).status || null);
+  }
+  let result;
+  try {
+    result = await window.aidcpEdge.personaGet(targetEnvId);
+  } catch (error) {
+    result = { ok: false, reason: 'cloud_unreachable', message: String((error && error.message) || error || '') };
+  }
+  const pending = personaViewsByEnv.get(targetEnvId);
+  if (!pending || pending.requestId !== requestId) return;
+  if (result && result.ok && (result.state === 'missing' || result.state === 'configured')) {
+    personaViewsByEnv.set(targetEnvId, {
+      requestId,
+      phase: 'loaded',
+      state: result.state,
+      persona: result.persona || null,
+    });
+  } else {
+    personaViewsByEnv.set(targetEnvId, {
+      requestId,
+      phase: 'error',
+      reason: (result && result.reason) || 'request_failed',
+      message: result && result.message,
+    });
+  }
+  // A 的晚返回只更新 A 的缓存；弹窗已切到 B 或已关闭时绝不投影到当前画面。
+  if (fields.personaPop?.classList.contains('open') && personaPopOpenEnvId === targetEnvId) {
+    updatePersonaGate((fleetView.envs.get(targetEnvId) || {}).status || null);
+  }
+}
+
+function renderCloudPersonaGate(status, view) {
+  const targetEnvId = personaPopOpenEnvId || currentEnvId() || '__local__';
+  personaUi.growth?.classList.add('hidden');
+  personaUi.emptyAction?.classList.add('hidden');
+  if (personaUi.emptyAction) personaUi.emptyAction.dataset.personaAction = '';
+
+  if (view.phase === 'loading') {
+    personaReady = false;
+    personaUi.boundNote?.classList.add('hidden');
+    personaUi.wizardBody?.classList.add('hidden');
+    personaUi.empty?.classList.remove('hidden');
+    if (personaUi.emptyTitle) personaUi.emptyTitle.textContent = '正在读取云端人设…';
+    if (personaUi.emptySub) personaUi.emptySub.textContent = '无需启动环境，请稍候。';
+    setPersonaBadge('读取中', 'checking');
+    syncPersonaFoot('hidden');
+    return;
+  }
+
+  if (view.phase === 'error') {
+    personaReady = false;
+    personaUi.boundNote?.classList.add('hidden');
+    personaUi.wizardBody?.classList.add('hidden');
+    personaUi.empty?.classList.remove('hidden');
+    const [title, detail] = personaFailureText(view.reason);
+    if (personaUi.emptyTitle) personaUi.emptyTitle.textContent = title;
+    if (personaUi.emptySub) personaUi.emptySub.textContent = view.message || detail;
+    if (personaUi.emptyAction) {
+      personaUi.emptyAction.classList.remove('hidden');
+      personaUi.emptyAction.dataset.personaAction = view.reason === 'binding_unknown' ? 'start' : 'retry';
+      personaUi.emptyAction.textContent = view.reason === 'binding_unknown' ? '首次启动' : '重试';
+    }
+    setPersonaBadge(view.reason === 'binding_unknown' ? '待绑定' : '暂不可用', 'checking');
+    syncPersonaFoot('hidden');
+    return;
+  }
+
+  personaReady = true;
+  personaUi.empty?.classList.add('hidden');
+  if (view.state === 'configured') {
+    const updating = personaUpdateMode;
+    const growthActive = !updating && isPersonaGrowthActive();
+    renderCurrentPersona(view.persona);
+    personaUi.boundNote?.classList.toggle('hidden', growthActive);
+    personaUi.growth?.classList.toggle('hidden', !growthActive);
+    personaUi.wizardBody?.classList.toggle('hidden', !updating);
+    setPersonaBadge(updating ? '待更新' : '已设置', updating ? 'warning' : 'normal');
+    clearPersonaPromptForCurrentEnv();
+    if (personaUi.hint && updating) {
+      personaUi.hint.textContent = '重新选择偏好并生成新草稿，确认后覆盖当前账号的人设；保存失败不会影响上方现有人设。';
+    }
+    syncPersonaFoot(growthActive ? 'growth' : updating ? 'wizard' : 'hidden');
+    if (personaUi.generate) personaUi.generate.disabled = personaInFlight;
+    const persistSettling = personaPersistPendingEnvId === targetEnvId;
+    if (personaPopOpenReason === 'auto' && !persistSettling && !growthActive) closePersonaPop(true);
+    return;
+  }
+
+  personaLocallyBound = false;
+  personaUi.boundNote?.classList.add('hidden');
+  personaUi.wizardBody?.classList.remove('hidden');
+  setPersonaBadge(personaDraftYaml ? '待确认' : '未设置', personaDraftYaml ? 'warning' : 'checking');
+  if (personaUi.generate) personaUi.generate.disabled = personaInFlight;
+  if (personaUi.hint) {
+    const preferences = selectedEnvPlatform() === 'facebook'
+      ? '发言语言、语气、点赞倾向和内容偏好'
+      : '语气、点赞倾向和内容偏好';
+    personaUi.hint.textContent = `设置${preferences}，自动生成这个账号的人设；确认后账号才会开始自动运营。`;
+  }
+  syncPersonaFoot('wizard');
+  if (status?.personaBound === false) maybePromptPersonaSetup(status);
 }
 
 function personaPromptKey(status) {
@@ -5569,8 +5786,8 @@ function beginPersonaUpdate() {
   personaUpdateMode = true;
   personaLocallyBound = true; // 更新期间本地锚住已绑：状态推送不得把向导藏回去，也不得触发未设置提醒
   clearPersonaDraft();
-  personaWritingLanguageSelections.delete(currentEnvId() || '__local__');
-  personaWritingLanguageDirty.delete(currentEnvId() || '__local__');
+  const currentView = personaViewsByEnv.get(currentEnvId() || '__local__');
+  prefillPersonaFromSummary(currentView?.state === 'configured' ? currentView.persona?.summary : null);
   const env = fleetView.envs.get(currentEnvId());
   updatePersonaGate((env && env.status) || currentStatus || null);
   setPersonaMsg('重新选择偏好并生成新草稿；确认后会覆盖当前人设。', false);
@@ -5593,6 +5810,20 @@ function updatePersonaGate(status) {
     }
     if (personaUi.generate) personaUi.generate.disabled = personaInFlight;
     syncPersonaFoot('wizard');
+    return;
+  }
+  const openView = fields.personaPop?.classList.contains('open') && personaPopOpenEnvId
+    ? personaViewsByEnv.get(personaPopOpenEnvId)
+    : null;
+  if (openView) {
+    // 兼容正在运行的旧 core 信号：自动向导若刚读到 missing、随后 WS 明确上报已设置，立即复读一次
+    // customer-auth 真态；最终仍以环境接口的结果决定是否收起，不直接拿状态心跳覆盖摘要。
+    if (personaPopOpenReason === 'auto' && openView.phase === 'loaded'
+        && openView.state === 'missing' && status?.personaBound === true) {
+      void loadPersonaView(personaPopOpenEnvId);
+      return;
+    }
+    renderCloudPersonaGate(status, openView);
     return;
   }
   const loggedIn = Boolean(status && status.auth === 'logged in');
@@ -5769,7 +6000,7 @@ document.querySelectorAll('.persona-pref-group').forEach((section) => {
 });
 
 async function runPersonaGenerate() {
-  if (!personaReady) return setPersonaMsg('请先启动该环境并在浏览器里登录', true);
+  if (!personaReady) return setPersonaMsg('云端人设暂未就绪，请重试读取。', true);
   const bulk = personaBulkFillMode;
   const keywordSelections = collectPersonaKeywords();
   if (!keywordSelections.length) return setPersonaMsg('请先选择关键词', true);
@@ -5807,6 +6038,7 @@ async function runPersonaGenerate() {
     }
     if (r && r.ok && r.soulYaml) {
       personaDraftYaml = r.soulYaml;
+      personaDraftSummary = r.summary || null;
       personaDraftWritingLanguage = writingLanguage;
       personaDraftEnvId = genEnvId;
       // 信息层级：identitySummary（给人看的人设）升为标题；原始 YAML 收进折叠。
@@ -5824,6 +6056,7 @@ async function runPersonaGenerate() {
       );
     } else {
       personaDraftYaml = '';
+      personaDraftSummary = null;
       personaDraftWritingLanguage = null;
       personaUi.draft?.classList.add('hidden');
       setPersonaStage('pick'); // 失败诚实回到选关键词，错误在底栏警示条如实展示
@@ -5871,6 +6104,8 @@ personaUi.confirm?.addEventListener('click', async () => {
   if (!window.aidcpEdge || typeof window.aidcpEdge.personaPersist !== 'function') return;
   const wasUpdate = personaUpdateMode;
   const persistEnvId = personaDraftEnvId || currentEnvId() || '__local__';
+  const persistedYaml = personaDraftYaml;
+  const persistedSummary = personaDraftSummary;
   personaPersistPendingEnvId = persistEnvId;
   personaUi.confirm.disabled = true;
   setPersonaMsg(wasUpdate ? '正在更新人设…' : '正在保存人设…', false);
@@ -5890,13 +6125,24 @@ personaUi.confirm?.addEventListener('click', async () => {
         if (targetEnv?.status) targetEnv.status.personaWritingLanguage = personaDraftWritingLanguage;
       }
       personaDraftYaml = '';
+      personaDraftSummary = null;
       personaDraftWritingLanguage = null;
       personaUi.draft?.classList.add('hidden');
       personaUi.wizardBody?.classList.add('hidden');
+      const savedPersona = r.persona || {
+        soulYaml: persistedYaml,
+        summary: persistedSummary || {},
+        updatedAt: null,
+      };
+      personaViewsByEnv.set(persistEnvId, {
+        requestId: ++personaViewRequestId,
+        phase: 'loaded',
+        state: 'configured',
+        persona: savedPersona,
+      });
       if (wasUpdate || r.firstPostOnboarding !== true) {
         // 更新既有人设：这个号本来就在跑，不该再出「开始运营」的成长引导——收回已设置绿卡即可。
-        personaUi.boundNote?.classList.remove('hidden');
-        syncPersonaFoot('hidden');
+        updatePersonaGate((fleetView.envs.get(persistEnvId) || {}).status || currentStatus || null);
         setPersonaMsg(wasUpdate ? '人设已更新，后续浏览 / 发布会使用新人设。' : '人设已保存，后续浏览 / 发布会使用这份人设。', false);
         if (
           personaPopOpenReason === 'auto'
