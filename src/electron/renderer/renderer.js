@@ -136,6 +136,10 @@ const fields = {
   publishPreviewActionHint: document.querySelector('#publish-preview-action-hint'),
   publishPreviewApprove: document.querySelector('#publish-preview-approve'),
   publishPreviewCancel: document.querySelector('#publish-preview-cancel'),
+  publishPreviewImageLightbox: document.querySelector('#publish-preview-image-lightbox'),
+  publishPreviewImageLightboxImage: document.querySelector('#publish-preview-image-lightbox-image'),
+  publishPreviewImageLightboxCaption: document.querySelector('#publish-preview-image-lightbox-caption'),
+  publishPreviewImageLightboxClose: document.querySelector('#publish-preview-image-lightbox-close'),
   delegatedTrigger: document.querySelector('#delegated-trigger'),
   delegatedIndicator: document.querySelector('#delegated-indicator'),
   delegatedCard: document.querySelector('#delegated-card'),
@@ -1960,6 +1964,60 @@ function appendPreviewText(parent, text, className) {
 // 上一次删配图失败的原因（诚实呈现；成功后清空）。同样存模块级——抽屉每帧重建。
 let publishPreviewImageRemoveHint = '';
 
+function resetPublishPreviewImageLightbox() {
+  if (!fields.publishPreviewImageLightbox) return;
+  fields.publishPreviewImageLightbox.removeAttribute('data-record-id');
+  fields.publishPreviewImageLightbox.removeAttribute('data-image-url');
+  fields.publishPreviewImageLightboxImage?.removeAttribute('src');
+  if (fields.publishPreviewImageLightboxImage) fields.publishPreviewImageLightboxImage.alt = '';
+  if (fields.publishPreviewImageLightboxCaption) fields.publishPreviewImageLightboxCaption.textContent = '';
+}
+
+function closePublishPreviewImageLightbox() {
+  if (!fields.publishPreviewImageLightbox) return;
+  if (fields.publishPreviewImageLightbox.open) {
+    fields.publishPreviewImageLightbox.close();
+    return;
+  }
+  resetPublishPreviewImageLightbox();
+}
+
+function publishPreviewImageLightboxContext(preview, status = currentStatus) {
+  // 旧 Cloud 没有列表/详情 RPC 时，selected 是打开页面当下的单稿快照；后续 status 才是继续推进的真态。
+  // 新 Cloud 有队列 RPC 时则以当前钻取的 selected 为准，避免后台最新稿心跳误关正在看的另一篇稿件。
+  const hasDraftQueueRpc = typeof window.aidcpEdge?.publishDraftList === 'function'
+    && typeof window.aidcpEdge?.publishDraftGet === 'function';
+  return hasDraftQueueRpc
+    ? preview
+    : (status?.publishPreview ? normalizePublishDraft(status.publishPreview) : null);
+}
+
+function openPublishPreviewImageLightbox(url, index, preview) {
+  if (!fields.publishPreviewImageLightbox || !fields.publishPreviewImageLightboxImage) return;
+  const currentPreview = publishPreviewImageLightboxContext(preview);
+  const isCurrentImage = String(currentPreview?.recordId ?? '') === String(preview?.recordId ?? '')
+    && Array.isArray(currentPreview?.images)
+    && currentPreview.images.some((candidate) => String(candidate) === url);
+  if (!isCurrentImage) return;
+  const label = `配图 ${index + 1} 大图`;
+  fields.publishPreviewImageLightbox.dataset.recordId = String(preview?.recordId ?? '');
+  fields.publishPreviewImageLightbox.dataset.imageUrl = url;
+  fields.publishPreviewImageLightboxImage.src = url;
+  fields.publishPreviewImageLightboxImage.alt = label;
+  if (fields.publishPreviewImageLightboxCaption) fields.publishPreviewImageLightboxCaption.textContent = label;
+  if (!fields.publishPreviewImageLightbox.open) fields.publishPreviewImageLightbox.showModal();
+}
+
+function syncPublishPreviewImageLightbox(preview, status) {
+  if (!fields.publishPreviewImageLightbox?.open) return;
+  const currentPreview = publishPreviewImageLightboxContext(preview, status);
+  const recordMatches = fields.publishPreviewImageLightbox.dataset.recordId === String(currentPreview?.recordId ?? '');
+  const imageUrl = fields.publishPreviewImageLightbox.dataset.imageUrl || '';
+  const imageStillPresent = Array.isArray(currentPreview?.images)
+    && currentPreview.images.some((url) => String(url) === imageUrl);
+  if (!recordMatches || !imageStillPresent) closePublishPreviewImageLightbox();
+}
+
 function repaintPublishPreview() {
   if (fields.publishPreviewPanel && (contentWorkspace?.isDraftOpen() || fields.publishPreviewPanel.classList.contains('open'))) {
     renderPublishPreviewContent(currentStatus);
@@ -2386,14 +2444,17 @@ function renderPublishPreviewContent(status) {
   if (!fields.publishPreviewContent) return;
   const reviewActive = publishDraftReview.envId === status?.envId;
   if (reviewActive && publishDraftReview.loading) {
+    closePublishPreviewImageLightbox();
     renderPublishDraftMessage('正在读取待审批稿件', '只会显示当前账号仍待处理的内容。', false);
     return;
   }
   if (reviewActive && publishDraftReview.error) {
+    closePublishPreviewImageLightbox();
     renderPublishDraftMessage('暂时无法读取稿件', '请检查连接后重试，当前没有执行任何审批。', true);
     return;
   }
   if (reviewActive && publishDraftReview.loaded && !publishDraftReview.selected) {
+    closePublishPreviewImageLightbox();
     if (publishDraftReview.total === 0 || publishDraftReview.items.length === 0) {
       renderPublishDraftMessage('没有待审批稿件', '新稿件生成后会出现在这里。', false);
       return;
@@ -2402,6 +2463,7 @@ function renderPublishPreviewContent(status) {
     return;
   }
   const preview = activePublishPreview(status);
+  syncPublishPreviewImageLightbox(preview, status);
   if (!preview) {
     renderPublishDraftMessage('没有待审批稿件', '新稿件生成后会出现在这里。', false);
     return;
@@ -2441,7 +2503,18 @@ function renderPublishPreviewContent(status) {
       item.className = 'publish-preview-image';
       const img = document.createElement('img');
       img.src = String(url);
-      img.alt = `配图 ${index + 1}`;
+      img.alt = `配图 ${index + 1}，双击查看大图`;
+      img.title = '双击查看大图';
+      img.tabIndex = 0;
+      img.setAttribute('role', 'button');
+      img.addEventListener('dblclick', () => {
+        openPublishPreviewImageLightbox(String(url), index, preview);
+      });
+      img.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        openPublishPreviewImageLightbox(String(url), index, preview);
+      });
       img.addEventListener('error', () => item.classList.add('failed'), { once: true });
       item.appendChild(img);
       appendPreviewText(item, '图片暂不可用', 'publish-preview-image-fallback');
@@ -2547,6 +2620,7 @@ function openPublishPreview() {
 }
 
 function closePublishPreview() {
+  closePublishPreviewImageLightbox();
   if (contentWorkspace?.isDraftOpen()) {
     contentWorkspace.close();
   }
@@ -2641,8 +2715,22 @@ async function submitPublishPreviewAction(approved) {
 }
 fields.publishPreviewApprove.addEventListener('click', () => { void submitPublishPreviewAction(true); });
 fields.publishPreviewCancel.addEventListener('click', () => { void submitPublishPreviewAction(false); });
+fields.publishPreviewImageLightboxClose?.addEventListener('click', closePublishPreviewImageLightbox);
+fields.publishPreviewImageLightbox?.addEventListener('click', (event) => {
+  const figure = fields.publishPreviewImageLightbox.querySelector('figure');
+  if (event.target === fields.publishPreviewImageLightbox || event.target === figure) {
+    closePublishPreviewImageLightbox();
+  }
+});
+fields.publishPreviewImageLightbox?.addEventListener('close', resetPublishPreviewImageLightbox);
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && fields.publishPreviewPanel.classList.contains('open')) closePublishPreview();
+  if (e.key !== 'Escape') return;
+  if (fields.publishPreviewImageLightbox?.open) {
+    e.preventDefault();
+    closePublishPreviewImageLightbox();
+    return;
+  }
+  if (fields.publishPreviewPanel.classList.contains('open')) closePublishPreview();
 });
 
 // foot 富文本：仅解析固定文案模板里的 **加粗** 标记（无任何插值，无注入面）。

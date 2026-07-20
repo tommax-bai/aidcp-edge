@@ -595,6 +595,90 @@ test('洗稿稿件审核：展示成品并通过既有审批 RPC 直接发布，
   assert.equal(($(w, '#delegated-confirm') as unknown as HTMLDialogElement).open, false);
 });
 
+test('稿件审核配图：双击查看大图，关闭层级与删图入口互不干扰', async () => {
+  const firstUrl = 'https://cdn.example.com/lightbox-1.jpg';
+  const secondUrl = 'https://cdn.example.com/lightbox-2.jpg';
+  const { w, pushStatus } = await boot({
+    envId: 'u1',
+    publish: { state: 'pending', title: '配图核对稿', code: '#189', at: new Date().toISOString() },
+    publishPreview: {
+      recordId: 189,
+      code: '#189',
+      kind: 'rewrite',
+      title: '配图核对稿',
+      content: '核对图片细节后再发布',
+      topics: [],
+      images: [firstUrl, secondUrl],
+      contentVersion: 2,
+      updatedAt: Date.now(),
+    },
+  });
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+
+  const dialog = $(w, '#publish-preview-image-lightbox') as unknown as HTMLDialogElement;
+  const firstImage = $(w, '#publish-preview-content img');
+  firstImage.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  assert.equal(dialog.open, false, '单击缩略图不得打开大图');
+
+  firstImage.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true }));
+  assert.equal(dialog.open, true);
+  assert.equal($(w, '#publish-preview-image-lightbox-image').getAttribute('src'), firstUrl);
+  assert.equal($(w, '#publish-preview-image-lightbox-image').getAttribute('alt'), '配图 1 大图');
+
+  w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  assert.equal(dialog.open, false, '第一次 Escape 只关闭大图');
+  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), true, '底层稿件审核保持打开');
+  assert.equal($(w, '#publish-preview-image-lightbox-image').getAttribute('src'), null, '关闭后清理旧图片引用');
+
+  firstImage.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true }));
+  $(w, '#publish-preview-image-lightbox-close').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  assert.equal(dialog.open, false, '关闭按钮可退出大图');
+
+  firstImage.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true }));
+  dialog.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  assert.equal(dialog.open, false, '点击图片外的 dialog 遮罩可退出大图');
+
+  firstImage.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true }));
+  $(w, '#publish-preview-image-lightbox figure').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  assert.equal(dialog.open, false, '点击大图留白区可退出大图');
+
+  const deleteButton = $(w, '#publish-preview-content .publish-preview-image-delete');
+  deleteButton.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  assert.equal(dialog.open, false, '删图入口不得误开大图');
+  assert.ok($(w, '#publish-preview-content .publish-preview-image-confirm'), '删图仍进入既有二次确认');
+  $(w, '#publish-preview-content .publish-preview-image-confirm-cancel')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+
+  const refreshedImage = $(w, '#publish-preview-content img');
+  refreshedImage.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true }));
+  assert.equal(dialog.open, true);
+  pushStatus(makeStatus({
+    envId: 'u1',
+    publish: { state: 'pending', title: '另一篇稿件', code: '#190', at: new Date().toISOString() },
+    publishPreview: {
+      recordId: 190,
+      code: '#190',
+      kind: 'rewrite',
+      title: '另一篇稿件',
+      content: '新稿件正文',
+      topics: [],
+      images: ['https://cdn.example.com/lightbox-new.jpg'],
+      contentVersion: 0,
+      updatedAt: Date.now(),
+    },
+  }));
+  assert.equal(dialog.open, false, '切换稿件真态时关闭旧图');
+  assert.equal($(w, '#publish-preview-image-lightbox-image').getAttribute('src'), null);
+  refreshedImage.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true }));
+  assert.equal(dialog.open, false, '旧 Cloud 单稿快照的过期缩略图不得重新打开');
+
+  w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), false, '大图已关闭后 Escape 仍按既有语义退出稿件审核');
+
+  assert.match(rendererCss, /\.publish-preview-image-lightbox img\s*\{[^}]*object-fit:\s*contain/s);
+  assert.match(rendererCss, /\.publish-preview-image img\s*\{[^}]*cursor:\s*zoom-in/s);
+});
+
 test('洗稿稿件审核：点击取消直接提交驳回决定并携带当前版本', async () => {
   const approvalCalls: unknown[][] = [];
   const delegatedCalls: unknown[] = [];
