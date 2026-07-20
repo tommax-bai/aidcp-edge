@@ -5,8 +5,9 @@
 //    预置分组只经只读 `group/list` 解析；`group/create` 与浏览器生命周期端点一样结构性禁止。
 //    任何 `browser/start|stop|active`（浏览器生命周期，核心子进程单写）路径在 `post()` 内**直接抛错**、
 //    绝不发出——把「主进程绝不碰浏览器生命周期」从注释自觉升为**代码上不可能**（回归断言覆盖）。
-//    注（C3 放宽）：`user/delete` 由原「禁一切程序化删」放宽为**允许、但仅由运维在界面上逐个显式确认触发**
-//    （非自动 / 非批量 / 非 ledger 驱动，删前明确警示不可恢复）——ads-create-flow 内无删除，删除只走 UI 确认路径。
+//    注（C3 放宽）：`user/delete` 只允许两种具名来源：本机运维逐个确认，或 Cloud 管理员逐环境确认后由
+//    本安装经 customer-auth HTTP 拉取、唯一持有者认领的 durable desired-state。它仍不是 WS 自动化命令，
+//    也不允许批量 envKey；ads-create-flow 内无删除。
 //    注（edge-client-proxy-platform-persona-ux / edge-adspower-name-follows-nickname 放宽）：`user/update`
 //    **仅限改代理或改环境名两种用途**——只提供两个封装：`updateProfileProxy` 的 body 只构造
 //    `{ user_id, user_proxy_config }` 两键、`renameProfile` 的 body 只构造 `{ user_id, name }` 两键；
@@ -21,7 +22,7 @@ const ADS_MIN_INTERVAL_MS = 1100; // 本地 API 限速 1req/s，留余量（与�
 const DEFAULT_ADS_BASE = 'http://local.adspower.net:50325';
 
 // 硬编码写 allowlist。新增写端点须显式加入并补回归断言。
-// user/delete 允许，但调用方 MUST 仅由运维界面逐个显式确认触发（见头注 C3 放宽）。
+// user/delete 允许，但调用方 MUST 来自本机逐个确认或 HTTP desired-state 唯一持有者认领（见头注 C3 放宽）。
 // user/update 允许，但仅经 updateProfileProxy（改代理）/ renameProfile（改名）的各自两键 body（见头注放宽）。
 const WRITE_ALLOWLIST = Object.freeze(['user/create', 'user/delete', 'user/update']);
 
@@ -156,7 +157,7 @@ function createAdsWriteApi(deps = {}) {
     return { ok: true, userId: uid, data: r.data };
   }
 
-  /** 删除分身（allowlist 放行；调用方 MUST 仅由运维界面逐个显式确认触发、绝不自动/批量）。 */
+  /** 删除单个分身；调用方必须先完成本机确认或 HTTP desired-state 唯一持有者认领。 */
   async function deleteProfile(userId, opts) {
     if (!userId) return { ok: false, error: '缺 user_id' };
     return post('user/delete', { user_ids: [String(userId)] }, opts);
