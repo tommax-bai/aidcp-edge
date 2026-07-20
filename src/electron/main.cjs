@@ -5789,6 +5789,17 @@ ipcMain.handle('publish-draft:get', (_event, envId, id) => {
 ipcMain.handle('publish-schedule:occupied-hours', (_event, envId) =>
   delegatedTaskRequest(envId, '/publish-schedule/occupied-hours', { includeEnvQuery: true }));
 
+// 客户首页概览只走 customer-auth HTTP：main 由本地 envId 解析 profileId，renderer 无法提交 URL/token/accountId。
+// 这条读不检查 core、自动化连接或浏览器状态；这些运行组件不属于常规客户数据面的前置条件。
+ipcMain.handle('environment-overview:get', (_event, envId) => {
+  const handle = resolveHandle(envId);
+  if (!handle || !handle.profileId) return { ok: false, status: 400, error: 'selected_environment_required' };
+  return delegatedTaskRequest(
+    envId,
+    `/environments/${encodeURIComponent(handle.profileId)}/overview`,
+  );
+});
+
 // 当前账号灵感库：四个具名 IPC 锁死 customer-auth 路径和方法；envId 只用于主进程查 profileId，
 // renderer 不得提交 accountId/envKey/URL/token。所有参数先做窄形状校验，再复用逐请求归属校验出口。
 ipcMain.handle('curated:summary', (_event, envId) =>

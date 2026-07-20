@@ -87,9 +87,78 @@ interface Stub {
   getSlowStart?: (opts: { envKey: string }) => Promise<unknown>;
   getEnvironmentRisk?: (opts: { envKey: string }) => Promise<unknown>;
   recoverEnvironmentRisk?: (opts: { envKey: string }) => Promise<unknown>;
+  getEnvironmentOverview?: (envId: string) => Promise<unknown>;
   fleetGet?: () => Promise<unknown>;
   fleetSelect?: (envId: string) => Promise<unknown>;
 }
+
+test('客户首页概览：自动化与浏览器均停止时仍通过 HTTP 展示今日进展和最近发布', async () => {
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      envId: 'p1', edge: 'stopped', session: 'idle', browserState: 'closed', stats: { views: 999 },
+    }),
+    getEnvironmentOverview: async (envId) => ({
+      ok: true,
+      data: {
+        data: {
+          envKey: envId,
+          dailyUsage: { asOf: 1_721_277_200_000, totals: { view: 17, like: 2, collect: 1, comment: 3, follow: 0, publish: 1 } },
+          currentPublishState: null,
+          lastPublished: { title: '云端确认的上一篇', at: 1_721_200_000_000 },
+        },
+        meta: { asOf: 1_721_277_200_000 },
+      },
+    }),
+  }));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal($(w, '#views').textContent, '17', '不得回落本机事件计数 999');
+  assert.match($(w, '#usage-source').textContent || '', /账号今日/);
+  assert.match($(w, '#pub-card').textContent || '', /云端确认的上一篇/);
+});
+
+test('客户首页概览：首次 HTTP 失败不显示假 0 或“还没有发布过”', async () => {
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ envId: 'p1', stats: { views: 0, likes: 0, collects: 0 } }),
+    getEnvironmentOverview: async () => ({ ok: false, status: 503, error: 'request_failed' }),
+  }));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal($(w, '#views').textContent, '—');
+  assert.match($(w, '#usage-source').textContent || '', /暂时无法获取/);
+  assert.match($(w, '#pub-card').textContent || '', /暂时无法读取发布记录/);
+  assert.doesNotMatch($(w, '#pub-card').textContent || '', /还没有发布过/);
+});
+
+test('客户首页概览：刷新失败保留上次确认数据并标记缓存', async () => {
+  let calls = 0;
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ envId: 'p1' }),
+    getEnvironmentOverview: async (envId) => {
+      calls += 1;
+      if (calls > 1) throw new Error('network_down');
+      return {
+        ok: true,
+        data: {
+          data: {
+            envKey: envId,
+            dailyUsage: { asOf: 1_721_277_200_000, totals: { view: 23, like: 0, collect: 0, comment: 0, follow: 0, publish: 1 } },
+            currentPublishState: null,
+            lastPublished: { title: '保留的已确认记录', at: 1_721_200_000_000 },
+          },
+          meta: { asOf: 1_721_277_200_000 },
+        },
+      };
+    },
+  }));
+  for (let i = 0; i < 4; i++) await tick();
+  const realNow = w.Date.now();
+  w.Date.now = () => realNow + 6_000;
+  w.dispatchEvent(new w.Event('focus'));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.ok(calls >= 2);
+  assert.equal($(w, '#views').textContent, '23');
+  assert.match($(w, '#usage-source').textContent || '', /缓存/);
+  assert.match($(w, '#pub-card').textContent || '', /保留的已确认记录/);
+});
 
 function makeStub(overrides: Partial<Stub> = {}): Stub {
   const settings = { provider: 'adspower', adsProfileId: '', adsApiKey: '', adsApiBase: '', browserParkingMode: 'edge-strip', adsDownloadUrl: 'https://x' };
