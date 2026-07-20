@@ -20,6 +20,7 @@ import { normalizeFacebookPermalinks, classifyFacebookSurface, type FacebookSurf
 import type { FacebookConsentAccepter } from './consent.js';
 import { scrollFacebookViewport } from './viewport-scroll.js';
 import type { RandomFn } from '../humanize/index.js';
+import { FB_FEED_LAYOUT_HELPERS_JS, POST_IDENTITY_JS } from './post-identity.js';
 
 /** 一张 Facebook feed 卡片（映射 page.cards 的一项）。 */
 export interface FacebookFeedCard {
@@ -145,29 +146,27 @@ interface RawFeedArticle {
 }
 
 /**
- * feed 卡片扫描 IIFE：遍历 `div[role=feed] [role=article]`，跳过未水合空壳（无作者链接），
+ * feed 卡片扫描 IIFE：遍历共享多布局 helper 给出的顶层卡片，跳过未水合空壳（无作者链接），
  * 抽作者/正文预览/反应数/permalink/视频标记。返回原始数组 JSON。
  */
-const FEED_SCAN_JS = String.raw`(function(){
-  function vis(el){ if(!el||!el.getBoundingClientRect) return false; var r=el.getBoundingClientRect(); if(r.width<=0||r.height<=0) return false; var s=window.getComputedStyle?getComputedStyle(el):null; return !s||(s.visibility!=='hidden'&&s.display!=='none'&&Number(s.opacity||'1')>0.01); }
+const FEED_SCAN_JS = String.raw`(function(){${POST_IDENTITY_JS}${FB_FEED_LAYOUT_HELPERS_JS}
   function txt(el){ return String((el&&el.innerText)||(el&&el.textContent)||'').replace(/\s+/g,' ').trim(); }
   function href(a){ try{ return new URL(a.getAttribute('href')||a.href||'', location.href).href; }catch(e){ return ''; } }
-  function isPermalink(h){ return /\/groups\/[^/]+\/posts\/[^/?#]+/i.test(h)||/\/posts\/[^/?#]+/i.test(h)||/\/permalink\.php/i.test(h)||/\/videos\/[^/?#]+/i.test(h)||/\/reel\/[^/?#]+/i.test(h)||/\/watch\/?\?[^#]*[?&]?v=/i.test(h)||/[?&](story_fbid|multi_permalinks)=/i.test(h); }
-  var feed = document.querySelector('div[role="feed"]');
-  var scope = feed || document;
-  var arts = Array.prototype.slice.call(scope.querySelectorAll('[role="article"]'));
+  var arts = fbFeedTopCards(document);
   var out = [];
   for(var i=0;i<arts.length;i++){
     var a = arts[i];
-    if(!vis(a)) continue;
+    if(!fbFeedVisible(a)) continue;
     // 水合判据：存在作者链接（h2/h3/h4 a）。虚拟化空壳无之 → 跳过（绝不臆造）。
     var authorLink = a.querySelector('h2 a, h3 a, h4 a');
     if(!authorLink){ out.push({ hydrated:false }); continue; }
     var author = txt(authorLink);
-    // permalink 候选：卡内所有命中 permalink 形态的 a[href]。
+    // permalink 候选：卡内 own-level 且通过唯一规范身份白名单的 a[href]。
     var links = a.querySelectorAll('a[href]');
     var perms = [];
-    for(var j=0;j<links.length && perms.length<8;j++){ var h=href(links[j]); if(h&&isPermalink(h)) perms.push(h); }
+    for(var j=0;j<links.length && perms.length<8;j++){
+      if(fbFeedClosestCard(links[j])!==a) continue;
+      var h=href(links[j]); if(h&&fbCanonicalPostId(h)) perms.push(h); }
     // 正文预览：story_message / message 优先，否则首个非空 div[dir=auto]。
     var msg = a.querySelector('[data-ad-comet-preview="message"], [data-ad-preview="message"], [data-ad-rendering-role="story_message"]');
     var preview = msg ? txt(msg) : '';
@@ -182,14 +181,14 @@ const FEED_SCAN_JS = String.raw`(function(){
   return JSON.stringify(out);
 })()`;
 
-/** 探测当前 surface：URL / 是否有 feed 容器 / 已水合文章数 / 是否有打开的 dialog。用于幂等 ensureFeed。 */
-const SURFACE_PROBE_JS = String.raw`(function(){
+/** 探测当前 surface：URL / 是否有任一受支持 feed 布局 / 已水合卡数 / dialog。用于幂等 ensureFeed。 */
+const SURFACE_PROBE_JS = String.raw`(function(){${FB_FEED_LAYOUT_HELPERS_JS}
   var feed=document.querySelector('div[role="feed"]');
-  var scope=feed||document;
-  var arts=Array.prototype.slice.call(scope.querySelectorAll('[role="article"]'));
+  var fallback=!feed&&fbFeedFallbackCards(document,false);
+  var arts=feed?fbFeedSemanticCards(feed,false):(fallback||[]);
   var hydrated=0;
   for(var i=0;i<arts.length;i++){ if(arts[i].querySelector('h2 a, h3 a, h4 a')) hydrated++; }
-  return JSON.stringify({ href: location.href, hasFeed: !!feed, hydratedArticles: hydrated, dialogOpen: !!document.querySelector('[role="dialog"]') });
+  return JSON.stringify({ href: location.href, hasFeed: !!feed||arts.length>0, hydratedArticles: hydrated, dialogOpen: !!document.querySelector('[role="dialog"]') });
 })()`;
 
 /** feed 区域内是否有 loading 信号——只按可访问性语义（progressbar / aria-busy），绝不认骨架屏 CSS 类名。 */
@@ -238,7 +237,7 @@ export class FacebookFeedReader {
   }
 
   /**
-   * 幂等确保在目标 feed surface：先探一次当前页；已在目标列表面（首页/搜索/群）且有 feed 容器、无 dialog
+   * 幂等确保在目标 feed surface：先探一次当前页；已在目标列表面（首页/搜索/群）且有受支持 feed 结构
    * 时直接过前置门返回（**不导航**，消掉「滚动前整页重载」回归）；否则导航到目标 URL。
    *
    * 红线（fail-closed）：无论是否导航，consent 预清理 + 登录/验证码复检都必须跑——它们现搭在导航步骤里，
@@ -254,7 +253,7 @@ export class FacebookFeedReader {
       // [role=dialog]（聊天弹窗、加载态、通知提示浮层，来了又走）。旧判据「只要存在任意 dialog 就判非目标」→ 每条
       // scroll 命令开头都整页 Page.navigate（经 fbsbx/maw_proxy_page 重定向链回首页）→ 真机上看着就是「一直刷新」、
       // feed 被反复钉回第一屏、永远下不去（真机 CDP 取证：timeOrigin 每 ~8s 重置一次）。FB 就地读不弹模态，dialogOpen
-      // 对 FB 恒为良性浮层。既已在正确列表面且 feed 容器在场，就是在目标——良性浮层绝不该触发整页重载；真正的
+      // 对 FB 恒为良性浮层。既已在正确列表面且任一受支持 feed 结构在场，就是在目标——良性浮层绝不该触发整页重载；真正的
       // 登录/验证码阻断由下方 blockingReason 单独 fail-closed 兜底（不受此变更影响）。
       onTarget = isFacebookListSurface(probe.surface) && probe.surface === want && probe.hasFeed;
     } catch (err) {

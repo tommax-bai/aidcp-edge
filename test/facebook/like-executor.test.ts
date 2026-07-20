@@ -286,6 +286,17 @@ function card(id: string, author: string, href: string, extra = ''): string {
   );
 }
 
+function lightCard(id: string, author: string, href: string): string {
+  return (
+    `<div id="${id}">` +
+    `<div data-ad-rendering-role="profile_name"><h4><a href="/${id}-author">${author}</a></h4></div>` +
+    `<a href="${href}">1天</a>` +
+    `<div data-ad-rendering-role="story_message">${id} body</div>` +
+    actionBar({ author }) +
+    '</div>'
+  );
+}
+
 function feedDom(cardsHtml: string, url = 'https://www.facebook.com/groups/111'): JSDOM {
   const dom = new JSDOM(`<!doctype html><html><body><div role="feed">${cardsHtml}</div></body></html>`, {
     runScripts: 'outside-only',
@@ -327,6 +338,26 @@ test('fb-like[jsdom]: 信息流里点第 N 张卡 → 只有第 N 张翻转，�
   assert.equal(toggleOf(dom, 'c2').textContent, '赞', '命令指定的第 2 张卡真翻转');
   assert.equal(c1Clicked, false, 'DOM 序第一张卡绝不能被点（修复前正是这里点错）');
   assert.equal(c3Clicked, false);
+});
+
+test('fb-like[jsdom]: 无 feed/article 的轻量布局仍按规范身份锁定目标卡，且见证 surface=feed', async () => {
+  const dom = new JSDOM(
+    '<!doctype html><html><body><main>' + lightCard('l1', 'Ann', A) + lightCard('l2', 'Bob', B) + '</main></body></html>',
+    { runScripts: 'outside-only', url: 'https://www.facebook.com/' },
+  );
+  stubRects(dom);
+  let firstClicked = false;
+  wireToggle(dom, 'l1', () => (firstClicked = true));
+  wireToggle(dom, 'l2');
+
+  const exec = new FacebookLikeExecutor({ cdp: jsdomCdp(dom), ...noSleep }, fastOpts);
+  const r = await exec.like({ noteId: B });
+
+  assert.equal(r.ok, true);
+  assert.equal(toggleOf(dom, 'l2').textContent, '赞');
+  assert.equal(firstClicked, false, '轻量布局也绝不 DOM 序回落到第一张');
+  assert.equal(r.observation?.surface, 'feed', '无 role=feed 时见证仍诚实标成 feed');
+  assert.equal(r.observation?.noteId, 'fb:BBB');
 });
 
 test('fb-like[jsdom]: 目标帖不在页面上 → no_target，DOM 序第一张卡一动不动', async () => {

@@ -618,14 +618,14 @@ function buildPickerLocateJs(runId: string): string {
 
 /**
  * 被作用卡独立见证现读（/*aidcp:observation*\/）：只读标记节点，重新派生 postId + 判 surface + 取
- * author/textPreviewHead/reactionText/articleIndex。surface 由标记卡的祖先判：dialog→detail、feed 容器→feed。
+ * author/textPreviewHead/reactionText/articleIndex。surface 由标记卡现判：dialog→detail、语义 feed / 轻量卡→feed。
  */
 function buildObservationJs(runId: string): string {
   return `(function(){/*aidcp:observation*/${FB_TARGET_HELPERS_JS}
   function obsText(el){ return String((el&&el.innerText)||(el&&el.textContent)||'').replace(/\\s+/g,' ').trim(); }
   var el=document.querySelector('[data-aidcp-target="'+${JSON.stringify(runId)}+'"]');
   if(!el) return JSON.stringify({found:false});
-  var surface=(el.closest && el.closest('[role="dialog"]')) ? 'detail' : ((el.closest && el.closest('div[role="feed"]')) ? 'feed' : 'detail');
+  var surface=(el.closest && el.closest('[role="dialog"]')) ? 'detail' : (((el.closest && el.closest('div[role="feed"]'))||fbFeedIsFallbackCard(el)) ? 'feed' : 'detail');
   var al=el.querySelector('h2 a, h3 a, h4 a');
   var msg=el.querySelector('[data-ad-comet-preview="message"],[data-ad-preview="message"],[data-ad-rendering-role="story_message"]');
   var head=msg?obsText(msg):'';

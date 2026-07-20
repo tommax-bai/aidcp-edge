@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
 import { FacebookFeedReader, parseFacebookCount } from '../../src/facebook/feed-reader.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import type { OverlayMonitor } from '../../src/browse/overlay-monitor.js';
@@ -14,6 +15,30 @@ function scanCdp(rawArticles: unknown[]): BrowseCdp {
         return { result: { value: JSON.stringify(rawArticles) } } as never;
       }
       return { result: { value: JSON.stringify(true) } } as never;
+    },
+  };
+}
+
+function layoutDom(html: string): JSDOM {
+  const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, {
+    runScripts: 'outside-only',
+    url: 'https://www.facebook.com/',
+  });
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value() {
+      return { left: 10, top: 100, right: 690, bottom: 500, width: 680, height: 400 };
+    },
+  });
+  return dom;
+}
+
+function layoutCdp(dom: JSDOM): BrowseCdp {
+  return {
+    send: async (method: string, params?: Record<string, unknown>) => {
+      if (method !== 'Runtime.evaluate') return {} as never;
+      const value = dom.window.eval(String(params?.expression ?? ''));
+      return { result: { value: typeof value === 'string' ? value : JSON.stringify(value) } } as never;
     },
   };
 }
@@ -92,6 +117,53 @@ test('fb-feed: 扫描异常/非数组 → 空数组（绝不臆造卡片）', as
   const reader = new FacebookFeedReader({ cdp, sleep: async () => {} });
   const cards = await reader.scanCards();
   assert.deepEqual(cards, []);
+});
+
+test('fb-feed[jsdom]: 语义化 feed/article 布局保持原路径，只抽顶层规范身份卡', async () => {
+  const dom = layoutDom(
+    '<div role="feed"><div role="article" id="semantic">' +
+      '<h4><a href="/alice">Alice</a></h4>' +
+      '<a href="/alice/posts/1001/?tracking=x">1h</a>' +
+      '<div data-ad-comet-preview="message">semantic body</div>' +
+      '</div></div>',
+  );
+  const reader = new FacebookFeedReader({ cdp: layoutCdp(dom), sleep: async () => {} });
+  const surface = await reader.probeSurface();
+  const cards = await reader.scanCards();
+
+  assert.equal(surface.hasFeed, true);
+  assert.equal(surface.hydratedArticles, 1);
+  assert.deepEqual(cards.map((card) => [card.noteId, card.author, card.textPreview]), [
+    ['https://www.facebook.com/alice/posts/1001', 'Alice', 'semantic body'],
+  ]);
+});
+
+test('fb-feed[jsdom]: 轻量 story-message 布局去重并抽规范卡；媒体-only 卡只证明 feed 在场、不造 noteId', async () => {
+  const dom = layoutDom(
+    '<main>' +
+      '<div id="light-safe">' +
+      '<div data-ad-rendering-role="profile_name"><h4><a href="/groups/77">Nhóm 77</a></h4></div>' +
+      '<a href="/groups/77/?multi_permalinks=2002&tracking=x">2h</a>' +
+      '<div><div data-ad-rendering-role="story_message">light body</div>' +
+      '<div><div data-ad-rendering-role="story_message">light body</div></div></div>' +
+      '</div>' +
+      '<div id="light-media-only">' +
+      '<div data-ad-rendering-role="profile_name"><h4><a href="/media-owner">Media owner</a></h4></div>' +
+      '<a href="/photo/?fbid=999&set=a.8">photo</a>' +
+      '<div data-ad-rendering-role="story_message">media body</div>' +
+      '</div>' +
+      '</main>',
+  );
+  const reader = new FacebookFeedReader({ cdp: layoutCdp(dom), sleep: async () => {} });
+  const surface = await reader.probeSurface();
+  const cards = await reader.scanCards();
+
+  assert.equal(dom.window.document.querySelector('div[role="feed"]'), null, 'fixture 确实没有语义 feed');
+  assert.equal(surface.hasFeed, true, '轻量结构足以阻止 ensureFeed 反复整页导航');
+  assert.equal(surface.hydratedArticles, 2, '两个轻量卡根被识别；重复 story-message 不重复计卡');
+  assert.deepEqual(cards.map((card) => [card.noteId, card.author, card.textPreview]), [
+    ['https://www.facebook.com/groups/77?multi_permalinks=2002', 'Nhóm 77', 'light body'],
+  ]);
 });
 
 test('fb-feed: 默认滚动走 650px 多帧手势，wheel 生效后不再补 scrollBy', async () => {

@@ -104,14 +104,80 @@ export function canonicalPostId(href: string | null | undefined): string | null 
 export const POST_IDENTITY_JS = `var fbCanonicalPostId = ${canonicalPostId.toString()};`;
 
 /**
+ * Facebook feed 的页内多布局抽象（扫描 / 就地深读 / 点赞 / 评论共用）。
+ *
+ * 语义化布局仍优先使用 `[role=feed] > [role=article]`；只有页面没有真 feed 容器时才从
+ * locale-neutral 的 story-message 锚向上寻找「首个带作者标题链接」的轻量卡片根。轻量布局里同一正文
+ * 常同时出现外层 + 内层两个 story-message 节点，故必须按 DOM 节点去重并丢掉嵌套候选。
+ *
+ * ⚠️ 本 helper **只定义卡片边界，不定义帖子身份**。调用方仍必须用 fbCanonicalPostId 做身份硬闸；
+ * photo/video 资源 id 绝不能因结构命中就被抬升成 post id。
+ */
+export const FB_FEED_LAYOUT_HELPERS_JS = `
+  var fbFeedStorySelector='[data-ad-comet-preview="message"],[data-ad-preview="message"],[data-ad-rendering-role="story_message"]';
+  var fbFeedAuthorSelector='h2 a[href],h3 a[href],h4 a[href]';
+  function fbFeedVisible(el){ if(!el||!el.getBoundingClientRect) return false; var r=el.getBoundingClientRect(); if(r.width<=0||r.height<=0) return false; var s=window.getComputedStyle?getComputedStyle(el):null; return !s||(s.visibility!=='hidden'&&s.display!=='none'&&Number(s.opacity||'1')>0.01); }
+  function fbFeedContains(root,el){ return root===document ? !!(document.documentElement&&document.documentElement.contains(el)) : !!(root&&root.contains&&root.contains(el)); }
+  function fbFeedSemanticCards(root,includeHidden){
+    var base=root||document; var arts=base.querySelectorAll('[role="article"],article'); var out=[];
+    for(var i=0;i<arts.length;i++){ var a=arts[i]; if(!includeHidden&&!fbFeedVisible(a)) continue;
+      var parent=a.parentElement&&a.parentElement.closest?a.parentElement.closest('[role="article"],article'):null;
+      if(parent&&fbFeedContains(base,parent)) continue;                                      // 嵌套评论 article
+      out.push(a); }
+    return out; }
+  function fbFeedFallbackCards(root,includeHidden){
+    var base=root||document; var seeds=base.querySelectorAll(fbFeedStorySelector); var found=[];
+    for(var i=0;i<seeds.length;i++){ var seed=seeds[i]; if(!includeHidden&&!fbFeedVisible(seed)) continue;
+      if(seed.closest&&seed.closest('div[role="feed"]')) continue;                         // 真 feed 走语义化路径
+      var cur=seed;
+      while(cur&&cur!==document.body&&cur!==document.documentElement&&cur!==base){
+        if(cur!==seed&&cur.querySelector&&cur.querySelector(fbFeedAuthorSelector)) break;
+        cur=cur.parentElement;
+      }
+      if(cur===base&&cur.querySelector&&!cur.querySelector(fbFeedAuthorSelector)) cur=null;
+      if(!cur||cur===document.body||cur===document.documentElement||!fbFeedContains(base,cur)) continue;
+      if(!includeHidden&&!fbFeedVisible(cur)) continue;
+      if(found.indexOf(cur)<0) found.push(cur); }
+    // 分享/重复 story-message 可能先得到嵌套候选；只保留最外层卡，避免一帖多卡与跨卡误归因。
+    var top=[];
+    for(var j=0;j<found.length;j++){ var nested=false;
+      for(var k=0;k<found.length;k++){ if(j!==k&&found[k].contains(found[j])){ nested=true; break; } }
+      if(!nested) top.push(found[j]); }
+    top.sort(function(a,b){ if(a===b) return 0; var p=a.compareDocumentPosition(b); return (p&Node.DOCUMENT_POSITION_FOLLOWING)?-1:1; });
+    return top; }
+  function fbFeedTopCards(root){
+    var base=root||document;
+    if(base===document){
+      var feeds=document.querySelectorAll('div[role="feed"]');
+      for(var i=0;i<feeds.length;i++){ if(!fbFeedVisible(feeds[i])) continue; return fbFeedSemanticCards(feeds[i],false); }
+      var fallback=fbFeedFallbackCards(document,false); if(fallback.length>0) return fallback;
+      return fbFeedSemanticCards(document,false);                                      // permalink 单帖页
+    }
+    var semantic=fbFeedSemanticCards(base,false); if(semantic.length>0) return semantic;
+    return fbFeedFallbackCards(base,false); }
+  function fbFeedClosestCard(el){
+    if(!el) return null;
+    var semantic=el.closest?el.closest('[role="article"],article'):null; if(semantic) return semantic;
+    var fallback=fbFeedFallbackCards(document,true); var hit=null;
+    for(var i=0;i<fallback.length;i++){ if(fallback[i]===el||fallback[i].contains(el)){ if(!hit||hit.contains(fallback[i])) hit=fallback[i]; } }
+    return hit; }
+  function fbFeedHasFallbackCard(root){ return fbFeedFallbackCards(root||document,false).length>0; }
+  function fbFeedIsFallbackCard(el){ return fbFeedFallbackCards(document,true).indexOf(el)>=0; }
+  function fbFeedAllPhysicalCards(root){
+    var base=root||document; var out=Array.prototype.slice.call(base.querySelectorAll('[role="article"],article'));
+    var fallback=fbFeedFallbackCards(base,true); for(var i=0;i<fallback.length;i++){ if(out.indexOf(fallback[i])<0) out.push(fallback[i]); }
+    return out; }
+`;
+
+/**
  * 页内三段式目标解析助手（like / comment 共用）。命名统一 `fbTgt*` 前缀，
  * 避免与各执行器自己的页内助手（fbVis / fbVisible / fbText…）重名。
  *
  * 三段式（design §3）：
  *  1. **作用域**：可见 `[role=dialog]`（取**最后打开的**，不是 querySelector 第一个）→ 否则 `div[role=feed]`
  *     → 否则 document（permalink 全页态）。document 只是作用域，**不是** DOM 序回落——身份匹配仍是硬条件。
- *  2. **顶层候选**：祖先链上没有别的 `[role=article]` 的 article（排除嵌套的评论 article）。
- *  3. **身份匹配**：候选卡的 canonical 链接派生的 postId 与命令 postId 相等。
+ *  2. **顶层候选**：共享 feed-layout helper 给出的顶层卡（语义 article 或轻量 story-message 卡）。
+ *  3. **身份匹配**：候选卡的 own-level canonical 链接派生的 postId 与命令 postId 相等。
  *
  * 卡的 canonical 链接 = **DOM 序里第一个可派生出 id 的 own-level 锚**（与 feed 扫卡产出 noteId 的规则同源：
  * 卡头时间戳 permalink 在正文/分享附件之前）——这样云端拿到的 noteId 与页内解析出的身份**必然同源**，
@@ -120,9 +186,9 @@ export const POST_IDENTITY_JS = `var fbCanonicalPostId = ${canonicalPostId.toStr
  * 兜底（URL 佐证的单帖态，**不是** DOM 序回落）：作用域内**恰好一张**顶层 article、它**派生不出任何身份**、
  * 且当前页 URL 的身份**等于**命令身份 → 认它为目标（我们就在这帖的 permalink 页上，页上只有这一帖）。
  */
-export const FB_TARGET_HELPERS_JS = `${POST_IDENTITY_JS}
-  function fbTgtVisible(el){ if(!el||!el.getBoundingClientRect) return false; var r=el.getBoundingClientRect(); if(r.width<=0||r.height<=0) return false; var s=window.getComputedStyle?getComputedStyle(el):null; return !s||(s.visibility!=='hidden'&&s.display!=='none'&&Number(s.opacity||'1')>0.01); }
-  function fbTgtClosestArticle(el){ return (el&&el.closest)?el.closest('[role="article"], article'):null; }
+export const FB_TARGET_HELPERS_JS = `${POST_IDENTITY_JS}${FB_FEED_LAYOUT_HELPERS_JS}
+  function fbTgtVisible(el){ return fbFeedVisible(el); }
+  function fbTgtClosestArticle(el){ return fbFeedClosestCard(el); }
   /** 卡身份：DOM 序首个 own-level（不在嵌套评论 article 内）且可派生 id 的锚。派生不出 → null。 */
   function fbTgtArticlePostId(a){ if(!a||!a.querySelectorAll) return null;
     var links=a.querySelectorAll('a[href]');
@@ -132,12 +198,7 @@ export const FB_TARGET_HELPERS_JS = `${POST_IDENTITY_JS}
       var id=fbCanonicalPostId(raw); if(id) return id;
     }
     return null; }
-  function fbTgtTopArticles(root){
-    var arts=(root||document).querySelectorAll('[role="article"], article'); var out=[];
-    for(var i=0;i<arts.length;i++){ var a=arts[i]; if(!fbTgtVisible(a)) continue;
-      if(a.parentElement && fbTgtClosestArticle(a.parentElement)) continue;             // 嵌套（评论）article
-      out.push(a); }
-    return out; }
+  function fbTgtTopArticles(root){ return fbFeedTopCards(root||document); }
   /**
    * 作用域根：最后打开的、**且真的含帖**的可见 dialog → 否则含帖的可见 feed → 否则 document。
    * 「含帖」这道闸不可省：FB 页面上常年挂着聊天 / cookie 同意 / 发帖 composer 之类的 [role=dialog]，
@@ -194,7 +255,7 @@ export const FB_TARGET_HELPERS_JS = `${POST_IDENTITY_JS}
     // 一张 0 尺寸 / 折叠 / 动画中的旁帖若因不可见被漏算，区域会一路爬到 body、把它的评论框纳入 → 评错帖
     // （round-2 对抗性评审在真实注入产物上复现）。这里排他性证明要的是「区域内**物理上**没有第二张帖」，
     // 与可见性无关。
-    var allArts=document.querySelectorAll('[role="article"], article');
+    var allArts=fbFeedAllPhysicalCards(document);
     var others=[]; for(var i=0;i<allArts.length;i++){ var a=allArts[i];
       if(a===article || article.contains(a) || a.contains(article)) continue;            // 目标自身 / 其嵌套评论 / 其祖先不算污染
       others.push(a); }
