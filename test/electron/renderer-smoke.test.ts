@@ -22,7 +22,7 @@ test('客户端主体、活动流和开发者日志仅隐藏纵向滚动条', ()
   assert.match(styles, /\.stream-wrap\s*\{[^}]*overflow-y:\s*auto;/s, '活动流必须继续原生纵向滚动');
   assert.match(styles, /\.dev pre\s*\{[^}]*overflow-y:\s*auto;/s, '开发者日志必须继续原生纵向滚动');
 });
-const environmentDisplayNameSrc = readFileSync(join(electronDir, 'renderer/environment-display-name.js'), 'utf8');
+const environmentDisplayNameSrc = readFileSync(join(electronDir, 'renderer/environment-display-name.cjs'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
 const publishReviewLogicSrc = readFileSync(join(electronDir, 'renderer/publish-review-logic.js'), 'utf8');
 const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');

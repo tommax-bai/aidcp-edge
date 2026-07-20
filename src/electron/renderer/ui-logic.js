@@ -4,7 +4,7 @@
 // 无 DOM、无 Electron 依赖——浏览器里挂 window.uiLogic，node:test 里经 createRequire 直接单测。
 (function (root, factory) {
   const displayNameApi = typeof module !== 'undefined' && module.exports
-    ? require('./environment-display-name.js')
+    ? require('./environment-display-name.cjs')
     : root && root.environmentDisplayName;
   const api = factory(displayNameApi);
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
@@ -693,7 +693,7 @@
   // 紧迫度排序：需处理（error→attention）浮顶，其后 launching/stale/running，再 offline；同级保持花名册序。
   const FLEET_LEVEL_RANK = { error: 0, attention: 1, launching: 2, stale: 3, running: 4, offline: 5 };
 
-  // 全客户端唯一规则位于 environment-display-name.js；uiLogic 只兼容既有消费入口。
+  // 全客户端唯一规则位于 environment-display-name.cjs；uiLogic 只兼容既有消费入口。
   const resolveEnvironmentDisplayName = displayNameApi.resolveEnvironmentDisplayName;
 
   // 兼容既有左栏调用与测试；所有新消费位置应使用上面的来源感知解析器。

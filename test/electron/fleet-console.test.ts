@@ -129,7 +129,7 @@ async function boot(
     openFeishu: async () => ({ ok: true }),
     ...apiOver,
   };
-  const environmentDisplayNameSrc = readFileSync(join(electronDir, 'renderer/environment-display-name.js'), 'utf8');
+  const environmentDisplayNameSrc = readFileSync(join(electronDir, 'renderer/environment-display-name.cjs'), 'utf8');
   const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
   const publishReviewLogicSrc = readFileSync(join(electronDir, 'renderer/publish-review-logic.js'), 'utf8');
   const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');

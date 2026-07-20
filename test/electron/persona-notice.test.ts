@@ -1,8 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
+const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const notice = require('../../src/electron/persona-notice.cjs') as {
   browserPersonaNoticeForStatus: (
     status: Record<string, unknown>,
@@ -10,6 +14,23 @@ const notice = require('../../src/electron/persona-notice.cjs') as {
   ) => { active: boolean; accountLabel?: string };
   browserPersonaNoticeKey: (value: { active: boolean; accountLabel?: string }) => string;
 };
+
+test('persona notice loads through Electron embedded Node without a tsx loader', () => {
+  const electronExecutable = require('electron') as string;
+  const output = execFileSync(electronExecutable, [
+    '-e',
+    "require('./src/electron/persona-notice.cjs'); process.stdout.write(JSON.stringify({ loaded: true, electron: process.versions.electron, node: process.versions.node }))",
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE_OPTIONS: '' },
+    timeout: 30_000,
+  });
+  const result = JSON.parse(output) as { loaded: boolean; electron: string; node: string };
+  assert.equal(result.loaded, true);
+  assert.match(result.electron, /^31\./);
+  assert.match(result.node, /^20\./);
+});
 
 test('browser persona notice activates only for logged-in + connected + unbound status', () => {
   const active = notice.browserPersonaNoticeForStatus({

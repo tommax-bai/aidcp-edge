@@ -1,6 +1,6 @@
 'use strict';
 
-const { resolveEnvironmentDisplayName } = require('./renderer/environment-display-name.js');
+const { resolveEnvironmentDisplayName } = require('./renderer/environment-display-name.cjs');
 
 function cleanLabel(value, fallback = '当前账号') {
   const label = String(value || '').trim().replace(/\s+/g, ' ');
