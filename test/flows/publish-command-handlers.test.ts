@@ -11,6 +11,7 @@ import type {
 } from '../../src/locating/index.js';
 import type { ActionExecutor } from '../../src/locating/engine.js';
 import {
+  buildXhsContentCaretStateExpression,
   formatXhsScheduleTime,
   PublishCommandDispatcher,
 } from '../../src/flows/publish-command-handlers.js';
@@ -615,6 +616,51 @@ test('多段正文：换行独立 Enter + selection 归尾，尾字不再被后�
   const caretChecks = cdp.calls.filter((call) =>
     call.method === 'Runtime.evaluate' && String(call.params?.expression ?? '').includes('xhs-content-caret-state'));
   assert.ok(caretChecks.length >= 6, '每个 Enter 后至少连续两次确认 selection 稳定在末端');
+});
+
+test('ProseMirror 真实段落边界：末段 p 内 caret 是语义末端，不要求等于外层 div 末端', () => {
+  const dom = new JSDOM(
+    '<!doctype html><html><body><div class="tiptap ProseMirror" contenteditable="true"><p>第一段</p><p><br></p></div></body></html>',
+    { runScripts: 'outside-only' },
+  );
+  const doc = dom.window.document;
+  const editor = doc.querySelector('.tiptap.ProseMirror')!;
+  const lastParagraph = editor.lastElementChild!;
+  const selection = dom.window.getSelection()!;
+  const caret = doc.createRange();
+  caret.setStart(lastParagraph, 0);
+  caret.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(caret);
+
+  const expression = buildXhsContentCaretStateExpression(`document.querySelector('.tiptap.ProseMirror')`);
+  const state = JSON.parse(String(dom.window.eval(expression))) as { newlines: number; atEnd: boolean };
+  assert.equal(state.newlines, 1, '两个顶层 p 表示一个已创建的换行');
+  assert.equal(state.atEnd, true, '末段 p 内的空 caret 与外层 div 末端边界不同，但语义上已经在正文末端');
+});
+
+test('ProseMirror 真实段落边界：前段 caret 先归到末段内部，下一轮确认末端', () => {
+  const dom = new JSDOM(
+    '<!doctype html><html><body><div class="tiptap ProseMirror" contenteditable="true"><p>第一段</p><p><br></p></div></body></html>',
+    { runScripts: 'outside-only' },
+  );
+  const doc = dom.window.document;
+  const editor = doc.querySelector('.tiptap.ProseMirror')!;
+  const firstParagraph = editor.firstElementChild!;
+  const lastParagraph = editor.lastElementChild!;
+  const selection = dom.window.getSelection()!;
+  const staleCaret = doc.createRange();
+  staleCaret.selectNodeContents(firstParagraph);
+  staleCaret.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(staleCaret);
+
+  const expression = buildXhsContentCaretStateExpression(`document.querySelector('.tiptap.ProseMirror')`);
+  const first = JSON.parse(String(dom.window.eval(expression))) as { atEnd: boolean };
+  assert.equal(first.atEnd, false, '停在上一段尾部不能被当作编辑器末端');
+  assert.ok(lastParagraph.contains(selection.anchorNode), '校准必须把 caret 放进最后段落，而不是外层 div 边界');
+  const second = JSON.parse(String(dom.window.eval(expression))) as { atEnd: boolean };
+  assert.equal(second.atEnd, true, '段内归尾后下一轮应确认稳定');
 });
 
 test('换行确认持续不稳定：清空正文并诚实失败，不留下逐渐积累的文末尾字', async () => {

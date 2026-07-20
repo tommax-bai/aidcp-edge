@@ -151,6 +151,51 @@ type ContentInputUnit =
   | { kind: 'text'; value: string }
   | { kind: 'newline' };
 
+/**
+ * 构造小红书正文换行后的页面侧状态探针。
+ *
+ * ProseMirror 的 selection 位于末段 `<p>` 内；它与外层 `.ProseMirror` 的末端 Range
+ * 视觉等价但 boundary container 不同，不能用 compareBoundaryPoints 严格相等判断（dev record #159）。
+ * 正确语义是：caret 位于最后一个顶层段落内，且从 caret 到该段末端没有实际文本。
+ */
+export function buildXhsContentCaretStateExpression(findExpr: string): string {
+  return String.raw`(() => { /* xhs-content-caret-state */
+    const el = ${findExpr};
+    if (!el) return JSON.stringify({ found: false, text: '', newlines: 0, atEnd: false });
+    const raw = el.innerText || el.textContent || '';
+    const text = raw.replace(/\s+/g, ' ').trim();
+    const directBlocks = Array.from(el.children || []).filter((child) =>
+      /^(P|DIV|LI|H[1-6]|BLOCKQUOTE|PRE)$/.test(child.tagName || '')).length;
+    const brCount = el.querySelectorAll ? el.querySelectorAll('br').length : 0;
+    const newlines = Math.max(Math.max(0, directBlocks - 1), brCount);
+    const sel = getSelection();
+    const lastBlock = el.lastElementChild || el;
+    let atEnd = false;
+    try {
+      if (sel && sel.rangeCount > 0 && sel.isCollapsed && el.contains(sel.anchorNode)) {
+        const anchor = sel.anchorNode;
+        const inLastBlock = lastBlock === el
+          ? el.contains(anchor)
+          : lastBlock === anchor || lastBlock.contains(anchor);
+        if (inLastBlock) {
+          const tail = document.createRange();
+          tail.setStart(anchor, sel.anchorOffset);
+          tail.setEnd(lastBlock, lastBlock.childNodes.length);
+          atEnd = tail.toString().replace(/[\u200B\uFEFF]/g, '') === '';
+        }
+      }
+    } catch (e) {}
+    if (!atEnd && sel) {
+      try {
+        const end = document.createRange();
+        end.selectNodeContents(lastBlock); end.collapse(false);
+        sel.removeAllRanges(); sel.addRange(end);
+      } catch (e) {}
+    }
+    return JSON.stringify({ found: true, text, newlines, atEnd });
+  })()`;
+}
+
 /** 由指令参数合成最小 PublishRequestPayload，供复用 PublishStepValidator 的字段读取。 */
 function synthPayload(payload: PublishCommandPayload): PublishRequestPayload {
   const value = payload.params.value ?? '';
@@ -729,30 +774,7 @@ export class PublishCommandDispatcher {
     if (!this.cdp) throw new Error('content_newline_unstable');
     const expected = normalizeFieldText(expectedPrefix);
     const expectedHanzi = hanziOnly(expected);
-    const STATE = String.raw`(() => { /* xhs-content-caret-state */
-      const el = ${findExpr};
-      if (!el) return JSON.stringify({ found: false, text: '', atEnd: false });
-      const raw = el.innerText || '';
-      const text = raw.replace(/\s+/g, ' ').trim();
-      const directBlocks = Array.from(el.children || []).filter((child) =>
-        /^(P|DIV|LI|H[1-6]|BLOCKQUOTE|PRE)$/.test(child.tagName || '')).length;
-      const brCount = el.querySelectorAll ? el.querySelectorAll('br').length : 0;
-      const newlines = Math.max(Math.max(0, directBlocks - 1), brCount);
-      const sel = getSelection();
-      const end = document.createRange();
-      end.selectNodeContents(el); end.collapse(false);
-      let atEnd = false;
-      try {
-        if (sel && sel.rangeCount > 0 && sel.isCollapsed && el.contains(sel.anchorNode)) {
-          const current = sel.getRangeAt(0).cloneRange();
-          atEnd = current.compareBoundaryPoints(0, end) === 0;
-        }
-      } catch (e) {}
-      if (!atEnd && sel) {
-        try { sel.removeAllRanges(); sel.addRange(end); } catch (e) {}
-      }
-      return JSON.stringify({ found: true, text, newlines, atEnd });
-    })()`;
+    const STATE = buildXhsContentCaretStateExpression(findExpr);
     let stableAtEnd = 0;
     const stable = await pollBounded<boolean>({
       probe: async () => {
