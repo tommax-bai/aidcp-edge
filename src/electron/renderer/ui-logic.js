@@ -3,10 +3,13 @@
 // 陪伴式界面的纯视图逻辑（edge-companion-ui）：健康合成 / 在场感动效门 / 发布卡状态机 / 相对时间。
 // 无 DOM、无 Electron 依赖——浏览器里挂 window.uiLogic，node:test 里经 createRequire 直接单测。
 (function (root, factory) {
-  const api = factory();
+  const displayNameApi = typeof module !== 'undefined' && module.exports
+    ? require('./environment-display-name.js')
+    : root && root.environmentDisplayName;
+  const api = factory(displayNameApi);
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (root) root.uiLogic = api;
-})(typeof window !== 'undefined' ? window : null, function () {
+})(typeof window !== 'undefined' ? window : null, function (displayNameApi) {
   // ── 相对时间：诚实走字（「刚刚 / N 秒前 / N 分钟前 / N 小时前」）──
   function relTime(fromMs, nowMs) {
     const diff = Math.max(0, nowMs - fromMs);
@@ -690,16 +693,12 @@
   // 紧迫度排序：需处理（error→attention）浮顶，其后 launching/stale/running，再 offline；同级保持花名册序。
   const FLEET_LEVEL_RANK = { error: 0, attention: 1, launching: 2, stale: 3, running: 4, offline: 5 };
 
-  // 左栏环境显示名优先级：人工昵称 → 真实登录昵称 → 花名册/环境名 → 「环境 …末4位」。
-  // 人工来源是运营明确意图；真实昵称仍压过普通花名册名，兜住列表回填模板名遮蔽昵称的回归。
+  // 全客户端唯一规则位于 environment-display-name.js；uiLogic 只兼容既有消费入口。
+  const resolveEnvironmentDisplayName = displayNameApi.resolveEnvironmentDisplayName;
+
+  // 兼容既有左栏调用与测试；所有新消费位置应使用上面的来源感知解析器。
   function railDisplayName(row) {
-    const acct = row && row.status && row.status.account;
-    const manualName = row && row.nameSource === 'manual' && row.name ? String(row.name) : '';
-    const realNick = acct && acct.source !== 'env' && acct.name ? String(acct.name) : '';
-    const rosterName = (row && (row.name || (row.status && row.status.envName))) || '';
-    const fallbackAcct = acct && acct.name ? String(acct.name) : '';
-    const envId = row && row.envId != null ? String(row.envId) : '';
-    return manualName || realNick || rosterName || fallbackAcct || `环境 …${envId.slice(-4)}`;
+    return resolveEnvironmentDisplayName(row).name;
   }
 
   /** 输入 [{envId, name, status}]，输出 { rows:[{envId,name,level,needsAction,label,status}], pendingCount }。 */
@@ -802,5 +801,5 @@
     return out;
   }
 
-  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, railDisplayName, slowStartLine, FLEET_STALE_MS };
+  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, resolveEnvironmentDisplayName, railDisplayName, slowStartLine, FLEET_STALE_MS };
 });

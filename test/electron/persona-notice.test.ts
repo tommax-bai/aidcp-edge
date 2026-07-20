@@ -4,7 +4,10 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const notice = require('../../src/electron/persona-notice.cjs') as {
-  browserPersonaNoticeForStatus: (status: Record<string, unknown>, envName?: string) => { active: boolean; accountLabel?: string };
+  browserPersonaNoticeForStatus: (
+    status: Record<string, unknown>,
+    environment?: string | Record<string, unknown>,
+  ) => { active: boolean; accountLabel?: string };
   browserPersonaNoticeKey: (value: { active: boolean; accountLabel?: string }) => string;
 };
 
@@ -35,4 +38,18 @@ test('browser persona notice uses the routed environment label and stable de-dup
   assert.deepEqual(first, { active: true, accountLabel: '环境 B' });
   assert.equal(notice.browserPersonaNoticeKey(first), notice.browserPersonaNoticeKey(second));
   assert.notEqual(notice.browserPersonaNoticeKey(first), notice.browserPersonaNoticeKey({ active: false }));
+});
+
+test('browser persona notice uses the same manual-first environment display-name rule', () => {
+  const status = {
+    auth: 'logged in',
+    cloud: 'connected',
+    personaBound: false,
+    account: { name: 'Tianxing Bai', source: 'facebook' },
+  };
+  const environment = { envId: 'ads-p1', name: 'Tianxing Bai1', nameSource: 'manual' };
+  assert.deepEqual(notice.browserPersonaNoticeForStatus(status, environment), {
+    active: true,
+    accountLabel: 'Tianxing Bai1',
+  });
 });

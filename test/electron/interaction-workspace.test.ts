@@ -9,6 +9,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const fixtureDir = join(here, '../fixtures/wechat-channels-interaction');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
+const environmentDisplayNameSrc = readFileSync(join(electronDir, 'renderer/environment-display-name.js'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
 const interactionSrc = readFileSync(join(electronDir, 'renderer/interaction-workspace.js'), 'utf8');
 const publishReviewLogicSrc = readFileSync(join(electronDir, 'renderer/publish-review-logic.js'), 'utf8');
@@ -241,6 +242,7 @@ async function boot(options: BootOptions = {}): Promise<BootHandle> {
   }
   openWindows.push(window);
   (window as any).aidcpEdge = api;
+  window.eval(environmentDisplayNameSrc);
   window.eval(uiLogicSrc);
   window.eval(interactionSrc);
   window.eval(publishReviewLogicSrc);

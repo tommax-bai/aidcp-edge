@@ -228,11 +228,12 @@ const contentWorkspace = window.ContentWorkspace?.create({
 function syncInteractionWorkspace() {
   if (!interactionWorkspace) return;
   const selected = fleetView.envs.get(fleetView.selected);
+  const display = resolveEnvironmentDisplayName(selected);
   interactionWorkspace.selectEnvironment(selected ? {
     envKey: selected.profileId || selected.envId,
     runtimeEnvId: selected.envId,
     platform: normPlatform(selected.platform),
-    label: selected.name || '',
+    label: display.name,
     connectivity: selected.status && selected.status.cloud,
     edge: selected.status && selected.status.edge,
     session: selected.status && selected.status.session,
@@ -243,9 +244,10 @@ function syncContentWorkspace(status = currentStatus) {
   if (!contentWorkspace) return;
   const selected = fleetView.envs.get(fleetView.selected);
   const envId = currentEnvId() || (status && status.envId);
+  const display = resolveEnvironmentDisplayName(selected, status);
   contentWorkspace.setEnvironment(envId ? {
     envId,
-    label: (status && status.account && status.account.name) || (selected && selected.name) || '当前账号',
+    label: display.name || '当前账号',
     platform: selectedEnvPlatform(),
   } : null);
 }
@@ -1454,13 +1456,17 @@ function renderTitlebar(status) {
   const plat = selectedEnvPlatform();
   const fb = plat === 'facebook';
   const wechat = plat === 'wechat_channels';
-  const acct = status.account;
-  if (acct && (acct.name || acct.id)) {
-    // 标签兜底链：平台昵称（@ 前缀）> AdsPower 环境名（平铺，不冒充平台昵称）> 账号 …尾4位。
-    const nick = (acct.name || '').replace(/^@/, '');
-    const isPlatNick = nick && acct.source !== 'env';
-    fields.acctName.textContent = nick ? (isPlatNick ? `@${nick}` : nick) : `账号 …${String(acct.id).slice(-4)}`;
-    fields.acctAva.textContent = nick ? nick.slice(0, 1) : (fb ? 'f' : wechat ? '视' : '书');
+  const acct = status && status.account;
+  const selected = fleetView.envs.get(fleetView.selected);
+  const display = resolveEnvironmentDisplayName(selected, status);
+  const nick = (display.name || '').replace(/^@/, '');
+  // 解析器的环境尾号只在连账号 ID 也未知时兜底；账号 ID 已知则保留标题栏既有「账号 …尾4位」语义。
+  const titleName = display.source === 'fallback' && acct && acct.id ? '' : nick;
+  if (titleName || (acct && acct.id)) {
+    // 只有真实平台昵称带 @；人工昵称与 AdsPower 环境名都只是客户端环境显示名，不冒充平台身份。
+    const isPlatNick = titleName && display.source === 'platform';
+    fields.acctName.textContent = titleName ? (isPlatNick ? `@${titleName}` : titleName) : `账号 …${String(acct.id).slice(-4)}`;
+    fields.acctAva.textContent = titleName ? titleName.slice(0, 1) : (fb ? 'f' : wechat ? '视' : '书');
   } else {
     // 无账号信息时按平台给默认身份占位（此前写死小红书，FB 环境也顶着「书」——问题 3）。
     fields.acctAva.textContent = fb ? 'f' : wechat ? '视' : '书';
@@ -2932,7 +2938,7 @@ function openPersonaPop(envId, reason = 'manual') {
   if (!fields.personaPop) return;
   if (envId && envId !== fleetView.selected && fleetView.envs.has(envId)) selectEnv(envId);
   const env = fleetView.envs.get(fleetView.selected);
-  const label = env && (env.name || (env.status && env.status.account && env.status.account.name)) || '';
+  const label = resolveEnvironmentDisplayName(env).name;
   const bulk = reason === 'bulk';
   if (fields.personaHeadTitle) fields.personaHeadTitle.textContent = bulk ? '批量设置人设' : '账号人设';
   if (fields.personaPopEnv) fields.personaPopEnv.textContent = bulk ? '· 未设置的 Facebook 账号' : label ? `· ${label}` : '';
@@ -3116,7 +3122,8 @@ function routeStatus(status) {
     if (!fleetView.order.includes(key)) fleetView.order.push(key);
   } else {
     env.status = status;
-    if (status.envName) env.name = status.envName;
+    // 人工昵称一旦落库，运行态心跳里的系统名称只能作为身份事实，不能回写覆盖人工展示名。
+    if (status.envName && env.nameSource !== 'manual') env.name = status.envName;
   }
   if (!fleetView.selected) fleetView.selected = key;
   // 原始日志与发布终态折流对**每个**环境记录（含未选中）：未选中环境的日志进其桶、发布终态折进其活动缓冲，
@@ -3268,15 +3275,29 @@ const RAIL_GROUPS = [
   { key: 'offline', title: '离线', crit: false, has: isOfflineRailRow },
 ];
 
-// 显示优先级（人工昵称 → 真实昵称 → 花名册/环境名 → 末4位）的**唯一实现**在 ui-logic.js（可单测），此处委托；
-// uiLogic 未加载时用同逻辑内联兜底，行为逐位一致（change edge-adspower-name-follows-nickname）。
-function railDisplayName(row) {
-  if (window.uiLogic && typeof uiLogic.railDisplayName === 'function') return uiLogic.railDisplayName(row);
-  const acct = row && row.status && row.status.account;
-  const manualName = row && row.nameSource === 'manual' && row.name ? String(row.name) : '';
+// 当前环境身份锚点统一从这里取「显示名 + 来源」。ui-logic.js 是可单测的唯一规则实现；
+// renderer 只保留旧包/测试桩未加载新版 uiLogic 时的等价兜底。
+function resolveEnvironmentDisplayName(row, status) {
+  const candidate = row
+    ? { ...row, status: status || row.status }
+    : { envId: status && status.envId, status };
+  if (window.uiLogic && typeof uiLogic.resolveEnvironmentDisplayName === 'function') {
+    return uiLogic.resolveEnvironmentDisplayName(candidate);
+  }
+  const acct = candidate && candidate.status && candidate.status.account;
+  const manualName = candidate && candidate.nameSource === 'manual' && candidate.name ? String(candidate.name) : '';
   const realNick = acct && acct.source !== 'env' && acct.name ? String(acct.name) : '';
-  const envId = row && row.envId != null ? String(row.envId) : '';
-  return manualName || realNick || (row && row.name) || (acct && acct.name) || `环境 …${envId.slice(-4)}`;
+  const environmentName = (candidate && (candidate.name || (candidate.status && candidate.status.envName)))
+    || (acct && acct.source === 'env' && acct.name ? String(acct.name) : '');
+  const envId = candidate && candidate.envId != null ? String(candidate.envId) : '';
+  if (manualName) return { name: manualName, source: 'manual' };
+  if (realNick) return { name: realNick, source: 'platform' };
+  if (environmentName) return { name: String(environmentName), source: 'environment' };
+  return { name: envId ? `环境 …${envId.slice(-4)}` : '', source: 'fallback' };
+}
+
+function railDisplayName(row) {
+  return resolveEnvironmentDisplayName(row).name;
 }
 
 function renderRail() {
@@ -3712,7 +3733,7 @@ function showGuideStep() {
   // 引导目标若本就是当前选中项，selectEnv 会早退（不重建、不滚动）——这里补一次「确保可见」，
   // 否则正在引导的那一行可能停在滚动区外、用户对着看不见的行找不到北。幂等：已完整可见就不动。
   scrollRailRowIntoView(fields.railList?.querySelector('.rail-row.selected'));
-  const displayName = target.name || `环境 …${String(target.envId).slice(-4)}`;
+  const displayName = resolveEnvironmentDisplayName(target).name;
   if (fields.guideTitle) fields.guideTitle.textContent = `引导处理（剩 ${q.length} 个）：${displayName}`;
   if (fields.guideBody) {
     fields.guideBody.textContent = `当前状态：${target.label}。点「打开窗口」找到它的浏览器窗口，在窗口里完成登录 / 验证码后点「完成 · 重检」。`;
@@ -3741,7 +3762,7 @@ function maybeAdvanceGuide() {
   const recovered = !lv.needsAction && env.status && env.status.edge === 'running';
   if (recovered) {
     fleetView.guided.done.add(fleetView.guided.current);
-    setGuideHint(`「${env.name || env.envId}」已恢复（${lv.label}），前进到下一个。`);
+    setGuideHint(`「${resolveEnvironmentDisplayName(env).name || env.envId}」已恢复（${lv.label}），前进到下一个。`);
     showGuideStep();
   }
 }
@@ -5275,7 +5296,7 @@ function maybePromptPersonaSetup(status) {
   personaPrompted.add(key);
   const envId = currentEnvId();
   const env = fleetView.envs.get(envId);
-  const label = (env && (env.name || (env.status && env.status.account && env.status.account.name))) || '当前账号';
+  const label = resolveEnvironmentDisplayName(env, status).name || '当前账号';
   try {
     const notifyResult = window.aidcpEdge.notify?.({
       title: '需要设置账号人设',

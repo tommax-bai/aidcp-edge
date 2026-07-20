@@ -43,6 +43,10 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   runtimeGuidanceView: (s: Record<string, unknown>, now: number) => RuntimeGuidanceV | null;
   publishView: (p: Record<string, unknown> | null, last: Record<string, unknown> | null, now: number) => PublishV;
   publishDock: (v: PublishV, s: Record<string, unknown>, manualOpen: boolean) => PublishDockV;
+  resolveEnvironmentDisplayName: (row: Record<string, unknown>) => {
+    name: string;
+    source: 'manual' | 'platform' | 'environment' | 'fallback';
+  };
   railDisplayName: (row: Record<string, unknown>) => string;
   slowStartLine: (dailyUsage: Record<string, unknown> | null | undefined, connState: string, source?: string) => SlowStartV;
   PRESENCE_FRESH_MS: number;
@@ -687,28 +691,32 @@ test('相对时间走字', () => {
   assert.equal(uiLogic.relTime(now - 5 * 60_000, now), '5 分钟前');
 });
 
-// ── 左栏显示名优先级（change edge-adspower-name-follows-nickname）：真实昵称 → 花名册/环境名 → 末4位 ──
-test('railDisplayName：人工昵称优先于真实平台昵称', () => {
+// ── 全客户端环境显示名优先级：人工昵称 → 真实昵称 → 花名册/环境名 → 末4位 ──
+test('resolveEnvironmentDisplayName：人工昵称优先于真实平台昵称，并保留来源', () => {
   const row = {
     envId: 'ads-abcd1234',
     name: '运营重点号',
     nameSource: 'manual',
     status: { account: { id: 'u1', name: '平台新昵称', source: 'xhs' } },
   };
+  assert.deepEqual(uiLogic.resolveEnvironmentDisplayName(row), { name: '运营重点号', source: 'manual' });
   assert.equal(uiLogic.railDisplayName(row), '运营重点号');
 });
 
 test('railDisplayName：真实昵称优先于花名册名（实时名回填成模板名也不遮蔽已知昵称）', () => {
   // 回归场景：reconcileRosterNames 把花名册名刷成 AdsPower 模板名，但真实昵称已读到（source!=='env'）→ 显示昵称。
   const row = { envId: 'ads-abcd1234', name: 'win11-intel', status: { account: { id: 'u1', name: '大白', source: 'xhs' } } };
+  assert.deepEqual(uiLogic.resolveEnvironmentDisplayName(row), { name: '大白', source: 'platform' });
   assert.equal(uiLogic.railDisplayName(row), '大白');
 });
 test('railDisplayName：未读到真实昵称（source=env）→ 回落花名册/环境名', () => {
   const row = { envId: 'ads-abcd1234', name: 'win11-intel', status: { account: { id: 'u1', name: 'win11-intel', source: 'env' } } };
+  assert.deepEqual(uiLogic.resolveEnvironmentDisplayName(row), { name: 'win11-intel', source: 'environment' });
   assert.equal(uiLogic.railDisplayName(row), 'win11-intel', 'source=env 不是登录读出的真实身份，不算昵称档');
 });
 test('railDisplayName：既无真实昵称也无环境名 → 「环境 …末4位」兜底', () => {
   const row = { envId: 'ads-abcd1234', name: '', status: {} };
+  assert.deepEqual(uiLogic.resolveEnvironmentDisplayName(row), { name: '环境 …1234', source: 'fallback' });
   assert.equal(uiLogic.railDisplayName(row), '环境 …1234');
 });
 

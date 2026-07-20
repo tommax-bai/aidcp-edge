@@ -10,6 +10,7 @@ import { JSDOM, type DOMWindow } from 'jsdom';
 const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
+const environmentDisplayNameSrc = readFileSync(join(electronDir, 'renderer/environment-display-name.js'), 'utf8');
 const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
 const contentWorkspaceSrc = readFileSync(join(electronDir, 'renderer/content-workspace.js'), 'utf8');
 const publishReviewLogicSrc = readFileSync(join(electronDir, 'renderer/publish-review-logic.js'), 'utf8');
@@ -81,6 +82,7 @@ async function boot(statusOver: Record<string, unknown> = {}, apiOver: Record<st
     adsOpenCreate: () => ({ launched: true }),
     ...apiOver,
   };
+  window.eval(environmentDisplayNameSrc);
   window.eval(uiLogicSrc);
   window.eval(contentWorkspaceSrc);
   window.eval(publishReviewLogicSrc);

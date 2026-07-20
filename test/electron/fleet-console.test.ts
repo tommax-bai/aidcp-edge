@@ -55,7 +55,11 @@ interface BootHandles {
   calls: Record<string, unknown[]>;
 }
 
-async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<string, unknown> = {}): Promise<BootHandles> {
+async function boot(
+  apiOver: Record<string, unknown> = {},
+  settingsOver: Record<string, unknown> = {},
+  globalsOver: Record<string, unknown> = {},
+): Promise<BootHandles> {
   const dom = new JSDOM(html, { runScripts: 'dangerously' });
   const { window } = dom;
   openWindows.push(window);
@@ -77,6 +81,7 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
     adsDownloadUrl: 'https://x',
     ...settingsOver,
   };
+  Object.assign(window, globalsOver);
   (window as unknown as { aidcpEdge: unknown }).aidcpEdge = {
     onStatusUpdate: (cb: (s: unknown) => void) => { pushStatus = cb; },
     onActivity: (cb: (e: unknown) => void) => { pushActivity = cb; },
@@ -120,9 +125,11 @@ async function boot(apiOver: Record<string, unknown> = {}, settingsOver: Record<
     openFeishu: async () => ({ ok: true }),
     ...apiOver,
   };
+  const environmentDisplayNameSrc = readFileSync(join(electronDir, 'renderer/environment-display-name.js'), 'utf8');
   const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
   const publishReviewLogicSrc = readFileSync(join(electronDir, 'renderer/publish-review-logic.js'), 'utf8');
   const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf8');
+  window.eval(environmentDisplayNameSrc);
   window.eval(uiLogicSrc);
   window.eval(publishReviewLogicSrc);
   window.eval(rendererSrc);
@@ -345,6 +352,85 @@ test('环境昵称双击进入编辑并持久化人工来源，不同时触发�
   assert.equal(rendered.classList.contains('manual'), true);
   assert.match(rendered.title, /人工昵称/);
   assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /后续系统更新不会覆盖/);
+});
+
+test('人工昵称统一覆盖环境身份锚点，旧系统名心跳不得回写覆盖', async () => {
+  const interactionSelections: unknown[] = [];
+  const contentSelections: unknown[] = [];
+  const platformStatus = makeStatus({
+    envId: 'ads-p1',
+    envName: 'Tianxing Bai',
+    account: { id: 'fb-1', name: 'Tianxing Bai', source: 'facebook' },
+    personaBound: true,
+  });
+  const manualEnvironment = {
+    envId: 'ads-p1',
+    kind: 'adspower',
+    profileId: 'p1',
+    name: 'Tianxing Bai1',
+    nameSource: 'manual',
+    platform: 'facebook',
+    status: platformStatus,
+  };
+  const { w, calls, pushStatus } = await boot({
+    getStatus: async () => platformStatus,
+    fleetGet: async () => ({
+      provider: 'adspower',
+      selectedEnvId: 'ads-p1',
+      railCollapsed: false,
+      environments: [manualEnvironment],
+    }),
+  }, {
+    adsProfileId: 'p1',
+    adsProfileName: 'Tianxing Bai1',
+    railCollapsed: false,
+    environments: [{ profileId: 'p1', name: 'Tianxing Bai1', nameSource: 'manual', platform: 'facebook' }],
+  }, {
+    InteractionWorkspace: {
+      create: () => ({ selectEnvironment: (value: unknown) => interactionSelections.push(value) }),
+    },
+    ContentWorkspace: {
+      create: () => ({
+        setEnvironment: (value: unknown) => contentSelections.push(value),
+        isDraftOpen: () => false,
+        openDraft: () => undefined,
+        close: () => undefined,
+      }),
+    },
+  });
+
+  const railName = () => w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-name')?.textContent || '';
+  assert.equal(railName(), 'Tianxing Bai1');
+  assert.equal(w.document.querySelector('#acct-name')?.textContent, 'Tianxing Bai1', '人工昵称不是平台 handle，不加 @');
+  assert.equal((interactionSelections.at(-1) as { label?: string })?.label, 'Tianxing Bai1');
+  assert.equal((contentSelections.at(-1) as { label?: string })?.label, 'Tianxing Bai1');
+
+  (w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-persona') as HTMLElement).click();
+  assert.match(w.document.querySelector('#persona-pop-env')?.textContent || '', /Tianxing Bai1/);
+
+  // 回归用户现场：运行态仍上报旧系统名 Tianxing Bai，也不能把人工昵称刷回去。
+  pushStatus(makeStatus({
+    ...platformStatus,
+    envName: 'Tianxing Bai',
+    personaBound: false,
+  }));
+  await tick();
+  await tick();
+  assert.equal(railName(), 'Tianxing Bai1');
+  assert.equal(w.document.querySelector('#acct-name')?.textContent, 'Tianxing Bai1');
+  assert.equal((interactionSelections.at(-1) as { label?: string })?.label, 'Tianxing Bai1');
+  assert.equal((contentSelections.at(-1) as { label?: string })?.label, 'Tianxing Bai1');
+  assert.match(String((calls.notify.at(-1) as { body?: string })?.body || ''), /Tianxing Bai1/);
+
+  pushStatus(makeStatus({
+    ...platformStatus,
+    envName: 'Tianxing Bai',
+    personaBound: false,
+    auth: 'login required',
+  }));
+  await tick();
+  (w.document.querySelector('#rail-guide') as HTMLElement).click();
+  assert.match(w.document.querySelector('#guide-title')?.textContent || '', /Tianxing Bai1/);
 });
 
 test('环境昵称编辑支持 Escape 取消、空值拒绝与失焦提交', async () => {

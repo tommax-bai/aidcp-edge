@@ -2093,7 +2093,7 @@ function syncBrowserPersonaNotice(handle, force = false) {
   if (!ready) handle.personaNoticeReadySince = 0;
   else if (!handle.personaNoticeReadySince) handle.personaNoticeReadySince = Date.now();
 
-  let notice = browserPersonaNoticeForStatus(handle.status, handle.name);
+  let notice = browserPersonaNoticeForStatus(handle.status, handle);
   if (notice.active && ready) {
     const elapsed = Date.now() - handle.personaNoticeReadySince;
     if (elapsed < PERSONA_NOTICE_GRACE_MS) {
