@@ -166,6 +166,34 @@ test('fb-feed[jsdom]: 轻量 story-message 布局去重并抽规范卡；媒体-
   ]);
 });
 
+test('fb-feed[jsdom]: 越南语媒体-only 视频首卡跳过；exact-card watch 视频卡诚实上报', async () => {
+  const dom = layoutDom(
+    '<main>' +
+      '<div id="video-media-only">' +
+      '<div data-ad-rendering-role="profile_name"><h4><a href="/media-owner">Media owner</a></h4></div>' +
+      '<a href="/">deSonpotsr1u5179945</a>' +
+      '<div data-ad-rendering-role="story_message">Mến chúc cả nhà buổi trưa đầu tuần vui vẻ và may mắn</div>' +
+      '<a href="/photo/?fbid=999"><video src="https://video.example/media-only.mp4"></video></a>' +
+      '</div>' +
+      '<div id="video-watch">' +
+      '<div data-ad-rendering-role="profile_name"><h4><a href="/dua-beo-vlog">Đưa Béo Vlog</a></h4></div>' +
+      '<a href="/watch/?v=1547652190157533&tracking=x">deSonpotsr1u5179945</a>' +
+      '<div data-ad-rendering-role="story_message">Mời các bác ăn sáng #Buffet… Xem thêm</div>' +
+      '<video src="https://video.example/watch.mp4"></video>' +
+      '</div>' +
+      '</main>',
+  );
+  const reader = new FacebookFeedReader({ cdp: layoutCdp(dom), sleep: async () => {} });
+  const surface = await reader.probeSurface();
+  const cards = await reader.scanCards();
+
+  assert.equal(surface.hasFeed, true);
+  assert.equal(surface.hydratedArticles, 2, '两张轻量视频结构卡都证明 feed 在场');
+  assert.deepEqual(cards.map((card) => [card.noteId, card.author, card.textPreview, card.isVideo]), [
+    ['https://www.facebook.com/watch?v=1547652190157533', 'Đưa Béo Vlog', 'Mời các bác ăn sáng #Buffet… Xem thêm', true],
+  ]);
+});
+
 test('fb-feed: 默认滚动走 650px 多帧手势，wheel 生效后不再补 scrollBy', async () => {
   let scrollY = 0;
   const wheels: Array<Record<string, unknown>> = [];

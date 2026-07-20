@@ -39,6 +39,7 @@ interface Harness {
   ensureCalls: number;
   ensureUrls: string[];
   scanCalls: number;
+  scrollCalls: number;
   likeShadowFlags: Array<boolean | undefined>;
 }
 
@@ -206,6 +207,9 @@ function makeSession(opts: {
     },
     get scanCalls() {
       return state.scanCalls;
+    },
+    get scrollCalls() {
+      return state.scrollCalls;
     },
   } as Harness;
 }
@@ -656,6 +660,59 @@ test('start(): settleCards 判稳后上报（晚水合的卡由 settle 承担，
   await h.session.start();
   assert.equal(h.cards.length, 1);
   assert.equal(h.cards[0].cards[0].noteId, 'https://www.facebook.com/a/posts/pfbid0LATE');
+});
+
+test('start(): 不可上报首卡立即有界续滚，只上报后续 canonical 卡且不伪造 action 回执', async () => {
+  const later: FacebookFeedCard = {
+    index: 0,
+    noteId: 'https://www.facebook.com/watch?v=1547652190157533',
+    author: 'Đưa Béo Vlog',
+    textPreview: 'Mời các bác ăn sáng #Buffet… Xem thêm',
+    reactionCount: 0,
+    isVideo: true,
+  };
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [
+      { cards: [], degraded: false, reason: 'no_feed' },
+      { cards: [], degraded: false, reason: 'no_feed' },
+      { cards: [later], degraded: false },
+    ],
+    scrollMetricsBatches: [
+      { scrollY: 4_100, scrollHeight: 5_000, innerHeight: 900 },
+      { scrollY: 4_750, scrollHeight: 6_200, innerHeight: 900 },
+      { scrollY: 4_750, scrollHeight: 6_200, innerHeight: 900 },
+      { scrollY: 5_300, scrollHeight: 6_200, innerHeight: 900 },
+    ],
+    homeState: { state: 'cards_ready' },
+  });
+
+  await h.session.start();
+
+  assert.equal(h.scrollCalls, 2, '首轮只增长页面高度、卡片尚未水合时继续等待并下滚，而非等 Cloud watchdog');
+  assert.equal(h.cards.length, 1);
+  assert.equal(h.cards[0].cards[0].noteId, later.noteId);
+  assert.equal(h.actions.length, 0, 'bootstrap 续滚没有对应 Cloud 命令，不得伪造 action.completed');
+  assert.ok(h.logs.some((line) => line.includes('不可上报卡片')));
+  assert.ok(h.logs.some((line) => line.includes('跳过不可上报首卡后已上报 1 张')));
+});
+
+test('start(): 连续不可上报卡片耗尽有界续滚后静默等待，不伪造 cards 或 action', async () => {
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [
+      { cards: [], degraded: false, reason: 'no_feed' },
+      ...Array.from({ length: 8 }, () => ({ cards: [], degraded: false, reason: 'no_feed' as const })),
+    ],
+    homeState: { state: 'cards_ready' },
+  });
+
+  await h.session.start();
+
+  assert.equal(h.scrollCalls, 8, 'bootstrap 续滚必须受既有最大轮次约束');
+  assert.equal(h.cards.length, 0, '没有可信 canonical 身份就不伪造 page.cards');
+  assert.equal(h.actions.length, 0, 'bootstrap 没有对应 Cloud 命令就不伪造 action.completed');
+  assert.ok(h.logs.some((line) => line.includes('有界续滚未找到可上报卡片')));
 });
 
 test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，摘要/点赞/下一条走独立列表路径', async () => {

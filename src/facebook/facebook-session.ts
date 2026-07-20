@@ -733,7 +733,27 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
           this.log(`[fb-session] 首页显式空态已确认 generation=${empty.generation ?? '-'} → 等 Cloud 授权 Reels fallback`);
           return;
         }
-        this.log(`[fb-session] 首页 0 卡但未确认空态（${empty.state}）：不上报空态、不切 Reels`);
+        if (empty.state === 'cards_ready') {
+          // 页面有真实结构卡，但当前卡没有可信 canonical permalink（常见于媒体-only / 轻量视频首卡）。
+          // 这不是空 feed，也不能停在原视口等 Cloud——Cloud 尚未收到 page.cards，正常闭环无法自行下发 scroll。
+          // 复用 page.scroll 的同一套有界、人类化、懒加载感知续滚；仅发找到的真实 cards，绝不凭空发 action 回执。
+          this.log('[fb-session] 首页当前视口存在不可上报卡片：忽略并有界向下滚动寻找下一张');
+          const continued = await this.scrollFeed();
+          if (continued.type === 'cards') {
+            this.emit(continued);
+            if (continued.payload.listState === 'empty') {
+              this.log('[fb-session] 跳过不可上报首卡后确认首页显式空态 → 等 Cloud 授权 Reels fallback');
+            } else {
+              this.log(`[fb-session] 跳过不可上报首卡后已上报 ${continued.payload.cards.length} 张 feed 卡片`);
+            }
+          } else {
+            this.log(
+              `[fb-session] 跳过不可上报首卡后有界续滚未找到可上报卡片（${continued.payload.reason ?? 'no_target'}）：不发无命令 action 回执`,
+            );
+          }
+          return;
+        }
+        this.log(`[fb-session] 首页无可上报卡片且未确认空态（${empty.state}）：不上报空态、不切 Reels`);
         return;
       }
       this.log(`[fb-session] feed 就绪但无可上报卡片（${settle.reason ?? 'no_target'}）`);
@@ -886,7 +906,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
    * `feed_exhausted`（云端映射为 refresh）；只要页面还在长或还没到底就继续下滚找下沉的新卡。让 60 篇深度阈值
    * （云端 FeedScroller）成为换批主路。绝不把回收重现当新内容重复上报，绝不在还有内容时假判到底。
    */
-  private async scrollFeed(): Promise<TerminalReport> {
+  private async scrollFeed(): Promise<Extract<TerminalReport, { type: 'cards' | 'action' }>> {
     // 只有确认已在目标列表面后才能滚动。ensureFeed 幂等——已在首页/搜索页且无 dialog 时直接放行、不导航，
     // 因此连续滚动能真正累积深度，而非每次被整页重载钉回第一屏。
     const ensure = await this.feedReader.ensureFeed(this.activeFeedUrl);
