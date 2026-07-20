@@ -565,6 +565,44 @@
       </main>
     </div>
 
+    <dialog id="risk-recovery-confirm" class="risk-recovery-confirm"
+      aria-labelledby="risk-recovery-confirm-title"
+      aria-describedby="risk-recovery-confirm-lead risk-recovery-confirm-boundary">
+      <form method="dialog">
+        <button id="risk-recovery-confirm-close" class="risk-recovery-confirm-close nodrag"
+          type="button" aria-label="关闭解除受限确认">×</button>
+        <header class="risk-recovery-confirm-head">
+          <span class="risk-recovery-confirm-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M12 3.2 19 6v5.2c0 4.3-2.7 7.7-7 9.6-4.3-1.9-7-5.3-7-9.6V6l7-2.8Z"></path>
+              <path d="m9 12 2 2 4-4"></path>
+            </svg>
+          </span>
+          <div>
+            <span class="risk-recovery-confirm-eyebrow">Facebook · 当前环境</span>
+            <h2 id="risk-recovery-confirm-title">确认解除受限？</h2>
+          </div>
+        </header>
+        <p id="risk-recovery-confirm-lead" class="risk-recovery-confirm-lead">
+          请先确认账号已经可以正常浏览 Facebook。
+        </p>
+        <p class="risk-recovery-confirm-env">
+          将恢复「<strong id="risk-recovery-confirm-env">当前环境</strong>」的自动运营。
+        </p>
+        <div id="risk-recovery-confirm-boundary" class="risk-recovery-confirm-boundary">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="10" cy="10" r="8"></circle>
+            <path d="M10 9v5M10 6.2v.2"></path>
+          </svg>
+          <span>此操作只解除 AIDCP 的暂停状态，不代表 Facebook 的安全检查、验证码或限流已经消失；阻断仍在时系统会再次停手。</span>
+        </div>
+        <div class="risk-recovery-confirm-actions">
+          <button id="risk-recovery-confirm-cancel" class="risk-recovery-confirm-cancel" type="button" autofocus>暂不解除</button>
+          <button id="risk-recovery-confirm-submit" class="risk-recovery-confirm-submit" type="button">确认解除</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="delegated-confirm" class="delegated-confirm">
       <form method="dialog">
         <div class="delegated-confirm-head">

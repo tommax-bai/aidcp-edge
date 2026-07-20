@@ -117,6 +117,19 @@ async function boot(stub: Stub): Promise<DOMWindow> {
   const dom = new JSDOM(html, { runScripts: 'dangerously' });
   const { window } = dom;
   openWindows.push(window);
+  // jsdom 还没有完整实现 <dialog>；补齐真实浏览器会提供的最小 open/close 语义，供渲染接线测试。
+  Object.defineProperty(window.HTMLDialogElement.prototype, 'showModal', {
+    configurable: true,
+    value: function showModal(this: HTMLDialogElement) { this.setAttribute('open', ''); },
+  });
+  Object.defineProperty(window.HTMLDialogElement.prototype, 'close', {
+    configurable: true,
+    value: function close(this: HTMLDialogElement, returnValue = '') {
+      this.returnValue = returnValue;
+      this.removeAttribute('open');
+      this.dispatchEvent(new window.Event('close'));
+    },
+  });
   (window as unknown as { aidcpEdge: Stub }).aidcpEdge = stub;
   window.eval(environmentDisplayNameSrc);
   window.eval(uiLogicSrc); // 纯视图逻辑先注入（真实加载顺序同 index.html 的 <script> 顺序）
@@ -989,6 +1002,21 @@ test('解除受限行：位于今日进展底部且只有一个恢复主动作�
   assert.match(styles, /@media \(max-width:\s*640px\)[\s\S]*?\.risk-recovery-help-panel\s*\{[^}]*right:\s*-8px;/s);
 });
 
+test('解除受限确认：使用紧凑应用 dialog，不再调用系统确认框', () => {
+  const dom = new JSDOM(html);
+  const dialog = dom.window.document.querySelector('#risk-recovery-confirm');
+  assert.equal(dialog?.tagName, 'DIALOG');
+  assert.equal(dialog?.querySelector('#risk-recovery-confirm-title')?.textContent?.trim(), '确认解除受限？');
+  assert.match(dialog?.querySelector('#risk-recovery-confirm-boundary')?.textContent || '', /只解除 AIDCP.*不代表 Facebook/s);
+  assert.equal(dialog?.querySelector('#risk-recovery-confirm-cancel')?.textContent?.trim(), '暂不解除');
+  assert.equal(dialog?.querySelector('#risk-recovery-confirm-submit')?.textContent?.trim(), '确认解除');
+  assert.ok(dialog?.querySelector('[aria-label="关闭解除受限确认"]'));
+  assert.match(styles, /\.risk-recovery-confirm\s*\{[^}]*width:\s*min\(410px,[^}]*border-radius:\s*18px;/s);
+  assert.match(styles, /\.risk-recovery-confirm::backdrop\s*\{[^}]*background:[^}]*backdrop-filter:\s*blur\(3px\);/s);
+  assert.match(styles, /@media \(max-width:\s*640px\)[\s\S]*?\.risk-recovery-confirm-actions button\s*\{[^}]*flex:\s*1;/s);
+  assert.doesNotMatch(rendererSrc, /window\.confirm\(\s*['"]确认解除/, '解除受限不得再回退系统确认框');
+});
+
 test('精选详情宽屏两列分别原生滚动并在窄屏恢复单列文档流', () => {
   assert.match(styles, /\.content-workspace\.curated-detail-mode\s*\{[^}]*height:\s*calc\(100vh - 78px\);[^}]*min-height:\s*0;/s);
   assert.match(styles, /\.content-workspace\.curated-detail-mode\s+\.cw-header\s*\{[^}]*position:\s*sticky;[^}]*top:\s*46px;[^}]*flex:\s*0 0 auto;[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 26px;[^}]*padding:\s*6px 9px;/s);
@@ -1117,7 +1145,7 @@ test('解除受限：停止的 Facebook 环境经 env-scoped Cloud 读仍显示�
   assert.match($(w, '.rail-row.selected').textContent || '', /账号受限/);
 });
 
-test('解除受限：取消不请求；确认后同一按钮 pending，Cloud normal 回执才隐藏', async () => {
+test('解除受限：应用弹层展示环境；取消/关闭/Escape 不请求；确认后等 Cloud normal 才隐藏', async () => {
   const recovery = deferred<unknown>();
   const calls: unknown[] = [];
   const w = await boot(stoppedRestrictedFbEnv({
@@ -1125,15 +1153,32 @@ test('解除受限：取消不请求；确认后同一按钮 pending，Cloud nor
   }));
   for (let i = 0; i < 5; i++) await tick();
   const button = $(w, '#risk-recovery-button') as unknown as HTMLButtonElement;
+  const dialog = $(w, '#risk-recovery-confirm') as unknown as HTMLDialogElement;
 
-  (w as unknown as { confirm: () => boolean }).confirm = () => false;
   button.click();
   await tick();
+  assert.equal(dialog.open, true);
+  assert.equal($(w, '#risk-recovery-confirm-env').textContent, 'FB 环境');
+  assert.deepEqual(calls, [], '打开弹层不得请求 Cloud');
+  $(w, '#risk-recovery-confirm-cancel').click();
+  assert.equal(dialog.open, false);
   assert.deepEqual(calls, [], '取消确认不得请求 Cloud');
   assert.ok(!hidden($(w, '#risk-recovery-row')));
 
-  (w as unknown as { confirm: () => boolean }).confirm = () => true;
   button.click();
+  $(w, '#risk-recovery-confirm-close').click();
+  assert.equal(dialog.open, false);
+  assert.deepEqual(calls, [], '关闭按钮不得请求 Cloud');
+
+  button.click();
+  dialog.dispatchEvent(new w.Event('cancel', { cancelable: true }));
+  dialog.close('cancel');
+  $(w, '#risk-recovery-confirm-submit').click();
+  await tick();
+  assert.deepEqual(calls, [], 'Escape/cancel 事件必须清空待确认上下文');
+
+  button.click();
+  $(w, '#risk-recovery-confirm-submit').click();
   await tick();
   assert.equal(calls.length, 1);
   assert.equal((calls[0] as { envKey?: string }).envKey, 'fb_env');
@@ -1154,8 +1199,8 @@ test('解除受限：Cloud 失败保留受限行并展示原位错误', async ()
     recoverEnvironmentRisk: async () => ({ ok: false, data: { error: 'environment_risk_unavailable', message: '暂时够不到云端' } }),
   }));
   for (let i = 0; i < 5; i++) await tick();
-  (w as unknown as { confirm: () => boolean }).confirm = () => true;
   ($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).click();
+  $(w, '#risk-recovery-confirm-submit').click();
   for (let i = 0; i < 3; i++) await tick();
   assert.ok(!hidden($(w, '#risk-recovery-row')));
   assert.equal(($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).disabled, false);
@@ -1164,6 +1209,7 @@ test('解除受限：Cloud 失败保留受限行并展示原位错误', async ()
 
 test('解除受限：风险读缓存和按钮随环境切换隔离，不从 A 串到 B', async () => {
   const reads: string[] = [];
+  const recoverCalls: string[] = [];
   const statusFor = (envId: string) => makeStatus({ envId, envName: envId, edge: 'stopped', cloud: 'disconnected' });
   const w = await boot(makeStub({
     getStatus: async () => statusFor('a'),
@@ -1185,11 +1231,22 @@ test('解除受限：风险读缓存和按钮随环境切换隔离，不从 A �
         envKey, status: envKey === 'a' ? 'restricted' : 'normal', statusSince: 1000, updatedAt: 2000,
       } } };
     },
+    recoverEnvironmentRisk: async ({ envKey }) => {
+      recoverCalls.push(envKey);
+      return { ok: true, data: { data: { envKey, status: 'normal', changed: true, resumedEdges: 1 } } };
+    },
   }));
   for (let i = 0; i < 6; i++) await tick();
   assert.ok(!hidden($(w, '#risk-recovery-row')), 'A restricted → 显示');
+  $(w, '#risk-recovery-button').click();
+  assert.equal(($(w, '#risk-recovery-confirm') as unknown as HTMLDialogElement).open, true);
+  assert.equal($(w, '#risk-recovery-confirm-env').textContent, '环境 A');
   $(w, '.rail-row[data-env-id="b"]').click();
   for (let i = 0; i < 5; i++) await tick();
+  assert.equal(($(w, '#risk-recovery-confirm') as unknown as HTMLDialogElement).open, false, '切环境必须关闭旧环境确认层');
+  $(w, '#risk-recovery-confirm-submit').click();
+  await tick();
+  assert.deepEqual(recoverCalls, [], '旧弹层即使被脚本触发确认也不得跨环境请求');
   assert.ok(hidden($(w, '#risk-recovery-row')), 'B normal → 隐藏');
   $(w, '.rail-row[data-env-id="a"]').click();
   await tick();

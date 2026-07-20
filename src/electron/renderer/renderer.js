@@ -14,6 +14,11 @@ const fields = {
   riskRecoveryRow: document.querySelector('#risk-recovery-row'),
   riskRecoveryButton: document.querySelector('#risk-recovery-button'),
   riskRecoveryFeedback: document.querySelector('#risk-recovery-feedback'),
+  riskRecoveryConfirm: document.querySelector('#risk-recovery-confirm'),
+  riskRecoveryConfirmClose: document.querySelector('#risk-recovery-confirm-close'),
+  riskRecoveryConfirmEnv: document.querySelector('#risk-recovery-confirm-env'),
+  riskRecoveryConfirmCancel: document.querySelector('#risk-recovery-confirm-cancel'),
+  riskRecoveryConfirmSubmit: document.querySelector('#risk-recovery-confirm-submit'),
   auth: document.querySelector('#auth-status'),
   cloud: document.querySelector('#cloud-status'),
   session: document.querySelector('#session-state'),
@@ -466,6 +471,7 @@ const slowStartHttpByEnv = new Map();
 const environmentRiskHttpByEnv = new Map();
 const environmentRiskFetchInFlight = new Set();
 const environmentRiskFeedbackByEnv = new Map();
+let environmentRiskConfirmContext = null;
 const ENVIRONMENT_RISK_TTL_MS = 15_000;
 const ENVIRONMENT_RISK_RETRY_MS = 5_000;
 const ENVIRONMENT_RISK_STATUSES = new Set(['normal', 'warned', 'restricted', 'frozen']);
@@ -968,17 +974,40 @@ function hideEnvironmentRiskRecovery() {
   }
 }
 
+function closeEnvironmentRiskRecoveryConfirm(returnValue = 'cancel') {
+  environmentRiskConfirmContext = null;
+  if (fields.riskRecoveryConfirm?.open) fields.riskRecoveryConfirm.close(returnValue);
+}
+
+function openEnvironmentRiskRecoveryConfirm() {
+  const context = selectedEnvironmentRiskContext();
+  if (!context || !fields.riskRecoveryConfirm || typeof fields.riskRecoveryConfirm.showModal !== 'function') return;
+  if (!window.aidcpEdge || typeof window.aidcpEdge.recoverEnvironmentRisk !== 'function') return;
+  const status = effectiveEnvironmentStatus(context.env, context.env.status || currentStatus);
+  if (!status || status.risk !== 'restricted') return;
+  if (environmentRiskFeedbackByEnv.get(context.envKey)?.kind === 'pending') return;
+  if (fields.riskRecoveryConfirm.open) fields.riskRecoveryConfirm.close('replace');
+  environmentRiskConfirmContext = { selectedKey: context.selectedKey, envKey: context.envKey };
+  if (fields.riskRecoveryConfirmEnv) fields.riskRecoveryConfirmEnv.textContent = railDisplayName(context.env);
+  fields.riskRecoveryConfirm.showModal();
+}
+
 /** 当前选中 Facebook 环境的一行式恢复入口；状态必须来自 live snapshot 或 env-scoped Cloud 读。 */
 function renderEnvironmentRiskRecovery(status) {
   if (!fields.riskRecoveryRow) return;
   const context = selectedEnvironmentRiskContext();
   if (!context) {
+    closeEnvironmentRiskRecoveryConfirm();
     hideEnvironmentRiskRecovery();
     return;
+  }
+  if (environmentRiskConfirmContext && environmentRiskConfirmContext.envKey !== context.envKey) {
+    closeEnvironmentRiskRecoveryConfirm('environment_changed');
   }
   if (status && status.cloud !== 'connected') void ensureEnvironmentRiskHttpFetch(context.envKey);
   const visible = status && status.risk === 'restricted';
   if (!visible) {
+    closeEnvironmentRiskRecoveryConfirm('state_changed');
     const previous = environmentRiskFeedbackByEnv.get(context.envKey);
     if (!previous || previous.kind !== 'pending') environmentRiskFeedbackByEnv.delete(context.envKey);
     hideEnvironmentRiskRecovery();
@@ -2729,18 +2758,28 @@ fields.slowStartToggle?.addEventListener('change', (event) => {
 
 fields.riskRecoveryButton?.addEventListener('click', (event) => {
   event.stopPropagation();
-  void submitEnvironmentRiskRecovery();
+  openEnvironmentRiskRecoveryConfirm();
 });
 
-async function submitEnvironmentRiskRecovery() {
+fields.riskRecoveryConfirmClose?.addEventListener('click', () => closeEnvironmentRiskRecoveryConfirm());
+fields.riskRecoveryConfirmCancel?.addEventListener('click', () => closeEnvironmentRiskRecoveryConfirm());
+fields.riskRecoveryConfirm?.addEventListener('cancel', () => { environmentRiskConfirmContext = null; });
+fields.riskRecoveryConfirm?.addEventListener('close', () => { environmentRiskConfirmContext = null; });
+fields.riskRecoveryConfirmSubmit?.addEventListener('click', () => {
+  const expected = environmentRiskConfirmContext;
+  closeEnvironmentRiskRecoveryConfirm('confirmed');
+  void submitEnvironmentRiskRecovery(expected);
+});
+
+async function submitEnvironmentRiskRecovery(expected) {
   const context = selectedEnvironmentRiskContext();
   if (!context || !window.aidcpEdge || typeof window.aidcpEdge.recoverEnvironmentRisk !== 'function') return;
+  if (!expected || expected.selectedKey !== context.selectedKey || expected.envKey !== context.envKey) {
+    render(context.env.status || currentStatus || {});
+    return;
+  }
   const status = effectiveEnvironmentStatus(context.env, context.env.status || currentStatus);
   if (!status || status.risk !== 'restricted') return;
-  const confirmed = window.confirm(
-    '确认解除当前 Facebook 环境的受限状态？\n\n请先确认账号已经可以正常使用。若 Facebook 的安全检查、验证码或限流仍在，系统仍会停手并可能再次进入受限。',
-  );
-  if (!confirmed) return;
 
   const { selectedKey, env, envKey } = context;
   if (environmentRiskFeedbackByEnv.get(envKey)?.kind === 'pending') return;
