@@ -3778,6 +3778,7 @@ function beginRailNameEdit(row, nameEl) {
   input.type = 'text';
   input.className = 'rail-name-editor';
   input.value = railDisplayName(row);
+  const originalNickname = input.value.trim();
   input.maxLength = 80;
   input.setAttribute('aria-label', '修改环境昵称');
   nameEl.replaceWith(input);
@@ -3790,7 +3791,7 @@ function beginRailNameEdit(row, nameEl) {
     if (settled) return;
     settled = true;
     const nickname = input.value.trim();
-    if (member.name === nickname && member.nameSource === 'manual') {
+    if (nickname === originalNickname) {
       closeEditor();
       return;
     }

@@ -391,6 +391,64 @@ test('环境昵称双击进入编辑并持久化人工来源，不同时触发�
   assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /后续系统更新不会覆盖/);
 });
 
+test('昵称原值提交是纯 no-op，不把系统昵称误记为人工也不重复保存人工昵称', async () => {
+  const saved: Array<{ profileId: string; nickname: string }> = [];
+  const { w } = await boot({
+    saveEnvironmentNickname: async (args: { profileId: string; nickname: string }) => {
+      saved.push(args);
+      return {
+        ok: true,
+        environment: {
+          profileId: args.profileId,
+          name: args.nickname,
+          nameSource: 'manual',
+          nameSyncState: 'synced',
+        },
+      };
+    },
+  });
+  const rowOf = (id: string) => w.document.querySelector(`.rail-row[data-env-id="${id}"]`) as HTMLElement;
+  const open = (id: string) => {
+    (rowOf(id).querySelector('.rail-name') as HTMLElement)
+      .dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+    return rowOf(id).querySelector('.rail-name-editor') as HTMLInputElement;
+  };
+
+  let input = open('ads-p1');
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+  await tick();
+  let rendered = rowOf('ads-p1').querySelector('.rail-name') as HTMLElement;
+  assert.equal(saved.length, 0, '系统昵称未变化时不得调用主进程/Cloud 保存');
+  assert.equal(rendered.textContent, '环境一');
+  assert.equal(rendered.classList.contains('manual'), false, '误触不得把系统昵称升级成人工来源');
+  assert.equal(rendered.classList.contains('pending'), false);
+
+  input = open('ads-p2');
+  input.dispatchEvent(new w.FocusEvent('blur'));
+  await tick();
+  rendered = rowOf('ads-p2').querySelector('.rail-name') as HTMLElement;
+  assert.equal(saved.length, 0, '系统昵称原值失焦也必须是 no-op');
+  assert.equal(rendered.classList.contains('manual'), false);
+
+  input = open('ads-p1');
+  input.value = '运营重点号';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+  await tick();
+  await tick();
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0]?.nickname, '运营重点号');
+
+  input = open('ads-p1');
+  input.value = '  运营重点号  ';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+  await tick();
+  rendered = rowOf('ads-p1').querySelector('.rail-name') as HTMLElement;
+  assert.equal(saved.length, 1, '人工昵称 trim 后未变化时不得重复保存');
+  assert.equal(rendered.textContent, '运营重点号');
+  assert.equal(rendered.classList.contains('manual'), true, '既有人工来源应原样保留');
+  assert.equal(rendered.classList.contains('pending'), false);
+});
+
 test('人工昵称统一覆盖环境身份锚点，旧系统名心跳不得回写覆盖', async () => {
   const interactionSelections: unknown[] = [];
   const contentSelections: unknown[] = [];
