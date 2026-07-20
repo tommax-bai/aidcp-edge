@@ -546,6 +546,78 @@ test('发布卡候审：可见、第三节点琥珀，提示从稿件预览处�
   assert.ok(!($(w, '#pub-foot').textContent ?? '').includes('再次提醒'), '未收到再提醒事件绝不谎称');
 });
 
+test('HTTP overview 候审摘要：无内联 preview 仍显示审批入口并拉取 #161 完整稿件', async () => {
+  const now = Date.parse('2026-07-20T17:25:54+08:00');
+  const listCalls: unknown[][] = [];
+  const detailCalls: unknown[][] = [];
+  const listItem = {
+    id: 161,
+    platform: 'xiaohongshu',
+    kind: 'generated',
+    title: '商汤开源全能视觉模型MoT架构解析',
+    contentPreview: '待审正文摘要',
+    topics: ['视觉模型'],
+    images: ['https://cdn.example.com/161.jpg'],
+    contentVersion: 0,
+    updatedAt: now,
+    publishMode: 'immediate',
+    publishTime: null,
+  };
+  const { w } = await boot({
+    envId: 'u1',
+    publish: null,
+    publishPreview: null,
+  }, {
+    getEnvironmentOverview: async (envId: string) => ({
+      ok: true,
+      data: {
+        data: {
+          envKey: envId,
+          dailyUsage: { asOf: now, totals: { view: 0, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 } },
+          currentPublishState: {
+            state: 'pending',
+            code: '#161',
+            title: '商汤开源全能视觉模型MoT架构解析',
+            at: now,
+          },
+          lastPublished: null,
+        },
+        meta: { asOf: now },
+      },
+    }),
+    publishDraftList: async (...args: unknown[]) => {
+      listCalls.push(args);
+      return { ok: true, data: { items: [listItem], total: 1, limit: 12, offset: 0 } };
+    },
+    publishDraftGet: async (...args: unknown[]) => {
+      detailCalls.push(args);
+      return { ok: true, data: { item: { ...listItem, content: '商汤开源模型的完整待审正文' } } };
+    },
+    publishScheduleOccupiedHours: async () => ({ ok: true, data: { occupiedTimes: [] } }),
+  });
+
+  const link = $(w, '#pub-preview-link');
+  assert.equal($(w, '#pub-card').dataset.pubState, 'pending');
+  assert.match($(w, '#pub-card').textContent ?? '', /商汤开源全能视觉模型MoT架构解析/);
+  assert.equal(hidden(link), false, '待审摘要不能只显示等你确认却藏掉审批入口');
+  assert.equal(link.textContent, '查看稿件 ↗');
+
+  link.dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 5; i++) await tick();
+
+  assert.equal($(w, '#publish-preview-panel').classList.contains('open'), true);
+  assert.equal(listCalls[0][0], 'u1');
+  assert.equal((listCalls[0][1] as { limit: number }).limit, 12);
+  assert.equal((listCalls[0][1] as { offset: number }).offset, 0);
+  assert.equal(detailCalls[0][0], 'u1');
+  assert.equal(detailCalls[0][1], 161);
+  assert.equal($(w, '#publish-preview-title').textContent, '商汤开源全能视觉模型MoT架构解析');
+  assert.match($(w, '#publish-preview-content').textContent ?? '', /完整待审正文/);
+  assert.equal(hidden($(w, '#publish-preview-actions')), false);
+  assert.equal($(w, '#publish-preview-approve').textContent, '批准并发布');
+  assert.equal($(w, '#publish-preview-cancel').textContent, '取消');
+});
+
 test('洗稿稿件审核：展示成品并通过既有审批 RPC 直接发布，不创建委托任务', async () => {
   const approvalCalls: unknown[][] = [];
   const delegatedCalls: unknown[] = [];
