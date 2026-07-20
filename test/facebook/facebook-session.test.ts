@@ -19,6 +19,7 @@ import type {
 } from '../../src/facebook/feed-reader.js';
 import type { FacebookPostReader, FacebookPostDetail } from '../../src/facebook/post-reader.js';
 import type { FacebookLikeExecutor, FacebookLikeResult } from '../../src/facebook/like-executor.js';
+import type { FacebookReelsReader, FacebookReelCard } from '../../src/facebook/reels-reader.js';
 import { selectPlatformDriver } from '../../src/platform/index.js';
 import type { Envelope, ActionCompletedPayload, NoteDetailPayload, PageCardsPayload, ProfileDetailPayload } from '../../src/comm/protocol.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
@@ -58,6 +59,8 @@ function makeSession(opts: {
   hangOpenUntil?: Promise<void>;
   cdpSend?: BrowseCdp['send'];
   commentHandler?: FacebookCommentHandler;
+  homeState?: { state: 'cards_ready' | 'empty_feed_confirmed' | 'feed_still_loading' | 'feed_unknown' | 'login_required' | 'blocked_by_captcha'; generation?: string };
+  reelCards?: FacebookReelCard[];
 } = {}): Harness {
   const cards: PageCardsPayload[] = [];
   const details: NoteDetailPayload[] = [];
@@ -123,6 +126,7 @@ function makeSession(opts: {
       return { cards: [card], degraded: false };
     },
     clickHomeAndScrollTop: async () => opts.clickHome ?? { ok: true as const },
+    confirmHomeEmpty: async () => opts.homeState ?? { state: 'feed_unknown' as const },
   } as unknown as FacebookFeedReader;
   const postReader = {
     openAndRead: async (permalink: string): Promise<FacebookPostDetail> => {
@@ -149,6 +153,25 @@ function makeSession(opts: {
       return o?.shadow ? { ok: false, reason: 'shadow', executed: false } : { ok: true, executed: true };
     },
   } as unknown as FacebookLikeExecutor;
+  const reelQueue = [...(opts.reelCards ?? [])];
+  let activeReel: FacebookReelCard | undefined;
+  const reelsReader = {
+    enter: async () => {
+      activeReel = reelQueue.shift();
+      return activeReel ?? null;
+    },
+    readActive: async () => activeReel ?? null,
+    next: async () => {
+      activeReel = reelQueue.shift();
+      return activeReel ?? null;
+    },
+    like: async (noteId: string, shadow: boolean): Promise<FacebookLikeResult> => {
+      if (!activeReel || activeReel.noteId !== noteId) return { ok: false, reason: 'no_target', executed: false };
+      return shadow
+        ? { ok: false, reason: 'shadow', executed: false, observation: { noteId, surface: 'feed', textPreviewHead: activeReel.summary } }
+        : { ok: true, executed: true, observation: { noteId, surface: 'feed', textPreviewHead: activeReel.summary } };
+    },
+  } as unknown as FacebookReelsReader;
 
   const deps: FacebookBrowseSessionDeps = {
     cdp: { send: opts.cdpSend ?? (async () => ({})) } as unknown as BrowseCdp,
@@ -157,6 +180,7 @@ function makeSession(opts: {
     feedReader,
     postReader,
     likeExecutor,
+    reelsReader,
     logger: (message) => logs.push(message),
     ...(opts.sleep ? { sleep: opts.sleep } : {}),
   };
@@ -632,6 +656,68 @@ test('start(): settleCards 判稳后上报（晚水合的卡由 settle 承担，
   await h.session.start();
   assert.equal(h.cards.length, 1);
   assert.equal(h.cards[0].cards[0].noteId, 'https://www.facebook.com/a/posts/pfbid0LATE');
+});
+
+test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，摘要/点赞/下一条走独立列表路径', async () => {
+  const first: FacebookReelCard = {
+    noteId: 'https://www.facebook.com/reel/111',
+    summary: 'first reel summary',
+    author: 'Bao',
+    videoKey: 'video-111',
+  };
+  const second: FacebookReelCard = {
+    noteId: 'https://www.facebook.com/reel/222',
+    summary: 'second reel summary',
+    author: 'Lan',
+    videoKey: 'video-222',
+  };
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [{ cards: [], degraded: false, reason: 'no_feed' }],
+    homeState: { state: 'empty_feed_confirmed', generation: 'g1' },
+    reelCards: [first, second],
+  });
+  await h.session.start();
+  assert.deepEqual(h.cards[0], { cards: [], listKind: 'feed', listState: 'empty' }, 'Edge 只报告空态，不自行导航');
+
+  await h.session.onCloudCommand(makeEnv('page.scroll', { reason: 'empty_feed_reels_fallback' }));
+  assert.equal(h.cards[1].listKind, 'reels');
+  assert.equal(h.cards[1].cards[0].noteId, first.noteId);
+
+  await h.session.onCloudCommand(makeEnv('note.open', { noteId: first.noteId, surface: 'feed' }));
+  assert.equal(h.details.at(-1)?.content, first.summary);
+  assert.equal(h.details.at(-1)?.mediaType, 'video');
+
+  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: first.noteId }));
+  assert.equal(h.actions.at(-1)?.ok, true);
+  assert.equal(h.actions.at(-1)?.noteId, first.noteId);
+
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  assert.equal(h.cards.at(-1)?.cards[0].noteId, second.noteId);
+});
+
+test('首页 0 卡但 feed_unknown 时不报告 empty，也不进入 Reels', async () => {
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [{ cards: [], degraded: false, reason: 'no_feed' }],
+    homeState: { state: 'feed_unknown' },
+    reelCards: [{ noteId: 'https://www.facebook.com/reel/111', summary: 'x', videoKey: 'v1' }],
+  });
+  await h.session.start();
+  assert.equal(h.cards.length, 0);
+  assert.ok(h.logs.some((line) => line.includes('未确认空态')));
+});
+
+test('首页从未出现真卡时 page.scroll 不得误报 feed_exhausted，并可严格复确认空态', async () => {
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: Array.from({ length: 8 }, () => ({ cards: [], degraded: false, reason: 'no_feed' as const })),
+    homeState: { state: 'empty_feed_confirmed', generation: 'g-scroll' },
+    scrollMetrics: { scrollY: 0, scrollHeight: 800, innerHeight: 800 },
+  });
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  assert.equal(h.actions.some((action) => action.reason === 'feed_exhausted'), false, '从未见卡不能声称刷到底');
+  assert.deepEqual(h.cards[0], { cards: [], listKind: 'feed', listState: 'empty' });
 });
 
 // ─────────────────────────── split-brain：返回落回当前列表面（task 1.4/1.5）───────────────────────────

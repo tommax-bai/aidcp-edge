@@ -9,7 +9,7 @@
  *
  * 平台无关的编排在云端 role-dispatcher（feed.entered→pick→open→deep-read→interact→back），本会话只是
  * 平台执行器：把云端命令翻成 FB DOM 操作、把结构化结果按【既有平台中立消息】上报（page.cards / note.detail /
- * action.completed），零改 protocol.ts。
+ * action.completed）。首页空态/Reels 只使用 page.cards 的向后兼容可选观察字段，不新增消息类型。
  *
  * 红线：
  *  - 每条命令恰好一个诚实回执（page.cards / note.detail / action.completed）；有界超时兜底 timeout 回执，
@@ -46,6 +46,7 @@ import { FacebookFeedReader, type FacebookFeedCard, type FacebookFeedSettleResul
 import { FacebookPostReader } from './post-reader.js';
 import { FacebookLikeExecutor, type FacebookLikeObservation } from './like-executor.js';
 import { FacebookInlineReader } from './inline-reader.js';
+import { FacebookReelsReader, type FacebookReelCard, FACEBOOK_REELS_ENTRY_URL } from './reels-reader.js';
 import { FacebookCommentHandler } from './comment-handler.js';
 import { canonicalPostId } from './post-identity.js';
 import { defaultFacebookConsentAccepter, type FacebookConsentAccepter } from './consent.js';
@@ -132,6 +133,7 @@ export interface FacebookBrowseSessionDeps {
   postReader?: FacebookPostReader;
   likeExecutor?: FacebookLikeExecutor;
   inlineReader?: FacebookInlineReader;
+  reelsReader?: FacebookReelsReader;
   sleep?: (ms: number) => Promise<void>;
   logger?: (msg: string) => void;
 }
@@ -191,6 +193,15 @@ export function computeInlineReadFloorMs(bodyLen: number, tempo: number): number
   return Math.round(capped * (tempo > 0 ? tempo : 1));
 }
 
+function canonicalHomeUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return /(^|\.)facebook\.com$/i.test(url.hostname) && (url.pathname === '/' || url.pathname === '/home.php');
+  } catch {
+    return false;
+  }
+}
+
 export class FacebookBrowseSession implements EdgeBrowseSession {
   private readonly cdp: BrowseCdp;
   private readonly client: FacebookSessionClient;
@@ -199,6 +210,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private readonly postReader: FacebookPostReader;
   private readonly likeExecutor: FacebookLikeExecutor;
   private readonly inlineReader: FacebookInlineReader;
+  private readonly reelsReader: FacebookReelsReader;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: (msg: string) => void;
   private readonly feedUrl: string;
@@ -210,6 +222,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private tempo: number;
   /** 当前可滚动列表的来源；详情页恢复时必须回原 feed 或原搜索页，不能一律跳首页。 */
   private activeFeedUrl: string;
+  /** 当前列表形态；只有 Cloud 的 empty_feed_reels_fallback 授权可以把 feed 切成 reels。 */
+  private listMode: 'feed' | 'reels' = 'feed';
   /** 最近一次 page.cards 到达时间；用于吸收云端评估耗时，避免 dwellMs 变成额外固定等待。 */
   private lastCardsAt = 0;
   /** 最近一次 refresh 的 Page.reload 兜底时刻；配 REFRESH_RELOAD_FLOOR_MS 做频率下限。 */
@@ -276,6 +290,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       deps.likeExecutor ?? new FacebookLikeExecutor({ cdp: this.cdp, overlayMonitor: deps.overlayMonitor, sleep: this.sleep, logger: this.log });
     this.inlineReader =
       deps.inlineReader ?? new FacebookInlineReader({ cdp: this.cdp, overlayMonitor: deps.overlayMonitor, sleep: this.sleep, logger: this.log });
+    this.reelsReader = deps.reelsReader ?? new FacebookReelsReader({ cdp: this.cdp, sleep: this.sleep, logger: this.log });
   }
 
   isRunning(): boolean {
@@ -492,12 +507,14 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         const payload = (env.payload ?? {}) as PageScrollPayload;
         await this.runBrowseCommand('scroll', async () => {
           await this.ensureFeedDwell(payload.dwellMs);
+          if (payload.reason === 'empty_feed_reels_fallback') return this.enterReels();
+          if (this.listMode === 'reels') return this.scrollReels();
           return this.scrollFeed();
         });
         return;
       }
       case 'feed.refresh':
-        await this.runBrowseCommand('refresh', () => this.refreshFeed());
+        await this.runBrowseCommand('refresh', () => (this.listMode === 'reels' ? this.scrollReels() : this.refreshFeed()));
         return;
       case 'interaction.like': {
         const payload = env.payload as InteractionLikePayload;
@@ -694,6 +711,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
 
   /** 导航 feed → 扫卡 → 上报 page.cards（首屏 / 重连恢复）。无命令可回，best-effort 直发。 */
   private async reportInitialFeed(): Promise<void> {
+    this.listMode = 'feed';
     const ensure = await this.feedReader.ensureFeed(this.feedUrl);
     if (!ensure.ok) {
       this.log(`[fb-session] feed 未就绪（${ensure.reason}）：不上报首屏（云端看门狗后续可 nudge）`);
@@ -702,6 +720,20 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     this.activeFeedUrl = this.feedUrl;
     const settle = await this.feedReader.settleCards({ wallClockMs: FEED_SETTLE_NAV_MS });
     if (settle.cards.length === 0) {
+      if (settle.reason === 'no_feed') {
+        const empty = await this.feedReader.confirmHomeEmpty();
+        if (empty.state === 'empty_feed_confirmed') {
+          this.emit({
+            type: 'cards',
+            payload: { cards: [], listKind: 'feed', listState: 'empty', ...(this.startupId ? { startupId: this.startupId } : {}) },
+            presence: '首页暂时没有可浏览的帖子…',
+          });
+          this.log(`[fb-session] 首页显式空态已确认 generation=${empty.generation ?? '-'} → 等 Cloud 授权 Reels fallback`);
+          return;
+        }
+        this.log(`[fb-session] 首页 0 卡但未确认空态（${empty.state}）：不上报空态、不切 Reels`);
+        return;
+      }
       this.log(`[fb-session] feed 就绪但无可上报卡片（${settle.reason ?? 'no_target'}）`);
       return;
     }
@@ -723,6 +755,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     const surface = payload.surface === 'feed' ? 'feed' : 'detail';
     const purpose = payload.purpose === 'navigate' ? 'navigate' : 'read';
     if (purpose === 'navigate') return this.navigateForMigration(noteId);
+    if (surface === 'feed' && this.listMode === 'reels') return this.openReelNote(noteId);
     if (surface === 'feed') return this.openInlineNote(noteId);
     return this.openBrowseNote(noteId);
   }
@@ -820,7 +853,9 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private async likeCurrent(payload: InteractionLikePayload): Promise<TerminalReport> {
     const shadow = this.mode === 'shadow';
     const noteId = String(payload?.noteId ?? '').trim();
-    const r = await this.likeExecutor.like({ shadow, ...(noteId ? { noteId } : {}) });
+    const r = this.listMode === 'reels'
+      ? await this.reelsReader.like(noteId, shadow)
+      : await this.likeExecutor.like({ shadow, ...(noteId ? { noteId } : {}) });
     // ok:true 才让云端经 RiskController.record 记账；shadow/失败一律 ok:false（云端不记、不扣风控）。
     // 独立见证（noteId + observation）**只在 feed 就地作用面上挂**——detail 面（今天）逐位回落会话当前笔记、
     // 逐位等于今天（零回归）；feed 面才激活云端归账仲裁（N4，shadow/真点均带）。
@@ -885,13 +920,26 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       }
       // 高度稳定 + 接近底部 + 0 新卡 → 真到底候选，连续确认防抖后才诚实 feed_exhausted。
       bottomDryRounds += 1;
-      if (bottomDryRounds >= FEED_EXHAUST_CONFIRM_ROUNDS) {
+      if (bottomDryRounds >= FEED_EXHAUST_CONFIRM_ROUNDS && sawAnyCard) {
         this.log('[fb-session] 已到 feed 底部且无新卡 → feed_exhausted（云端映射为 refresh）');
         return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'feed_exhausted' } };
       }
     }
     // 轮次耗尽：从没扫到任何卡=「没内容」（loading/no_feed，照实回、不当到底）；扫到过卡但一直没新的=「没新内容」→ 兜底换批。
     if (!sawAnyCard) {
+      // 首次 empty 观察若因连接时序未被 Cloud 消费，后续 watchdog/redrive 仍可重新做同一套严格确认并重报；
+      // 仅首页 + no_feed 可达，搜索/群组/unknown 绝不套用。
+      if (lastEmptyReason === 'no_feed' && canonicalHomeUrl(this.activeFeedUrl)) {
+        const empty = await this.feedReader.confirmHomeEmpty();
+        if (empty.state === 'empty_feed_confirmed') {
+          return {
+            type: 'cards',
+            payload: { cards: [], listKind: 'feed', listState: 'empty', ...(this.startupId ? { startupId: this.startupId } : {}) },
+            presence: '首页暂时没有可浏览的帖子…',
+          };
+        }
+        lastEmptyReason = empty.state === 'feed_still_loading' ? 'feed_still_loading' : 'no_feed';
+      }
       return { type: 'action', payload: { action: 'scroll', ok: false, reason: lastEmptyReason ?? 'no_target' } };
     }
     this.log('[fb-session] 连续滚动无新卡（未确认到底，轮次耗尽）→ feed_exhausted 兜底换批');
@@ -934,6 +982,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       return { type: 'action', payload: { action: 'search', ok: false, reason } };
     }
     this.activeFeedUrl = searchUrl;
+    this.listMode = 'feed';
     const settle = await this.feedReader.settleCards({ wallClockMs: FEED_SETTLE_NAV_MS });
     const cards = settle.cards;
     if (cards.length === 0) {
@@ -996,6 +1045,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       return { type: 'action', payload: { action: 'refresh', ok: false, reason: ensure.reason ?? 'wrong_context' } };
     }
     this.activeFeedUrl = this.feedUrl;
+    this.listMode = 'feed';
     // 基线首卡 permalink（点击前）。
     const before = await this.feedReader.scanCards();
     const beforeTop = before[0]?.noteId ?? '';
@@ -1178,6 +1228,76 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         ...(c.author ? { author: c.author } : {}),
       })),
       ...(this.startupId ? { startupId: this.startupId } : {}),
+      listKind: 'feed',
+      listState: 'ready',
+    };
+  }
+
+  /** Cloud 授权后的唯一 Reels 入口；普通 0 卡/滚动命令不可达。 */
+  private async enterReels(): Promise<TerminalReport> {
+    if (this.listMode === 'reels') return this.scrollReels();
+    const card = await this.reelsReader.enter();
+    if (!card) return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'no_target' } };
+    this.listMode = 'reels';
+    this.activeFeedUrl = FACEBOOK_REELS_ENTRY_URL;
+    this.resetCursor();
+    this.seedReel(card);
+    this.log(`[fb-session] Cloud 已授权首页空态 fallback → Reels ${card.noteId}`);
+    return { type: 'cards', payload: this.toReelPageCards(card), presence: '正在浏览 Reels 视频流…' };
+  }
+
+  private async openReelNote(noteId: string): Promise<TerminalReport> {
+    const card = await this.reelsReader.readActive();
+    const activeKey = canonicalPostId(card?.noteId);
+    const requestedKey = canonicalPostId(noteId);
+    if (!card || !activeKey || !requestedKey || activeKey !== requestedKey) {
+      return { type: 'action', payload: { action: 'open_note', ok: false, reason: 'no_target' } };
+    }
+    return {
+      type: 'detail',
+      payload: {
+        noteId: card.noteId,
+        title: card.summary.slice(0, 60),
+        content: card.summary,
+        mediaType: 'video',
+        likeCount: 0,
+        collectCount: 0,
+        url: card.noteId,
+        ...(card.author ? { author: card.author } : {}),
+      },
+    };
+  }
+
+  private async scrollReels(): Promise<TerminalReport> {
+    const card = await this.reelsReader.next();
+    if (!card) return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'no_target' } };
+    const key = canonicalPostId(card.noteId);
+    if (key && this.seenPostIds.has(key)) {
+      return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'no_target' } };
+    }
+    this.seedReel(card);
+    return { type: 'cards', payload: this.toReelPageCards(card), presence: '正在浏览 Reels 视频流…' };
+  }
+
+  private seedReel(card: FacebookReelCard): void {
+    const key = canonicalPostId(card.noteId);
+    if (key) this.seenPostIds.add(key);
+  }
+
+  private toReelPageCards(card: FacebookReelCard): PageCardsPayload {
+    return {
+      cards: [{
+        index: 0,
+        title: card.summary,
+        likeCount: 0,
+        collectCount: 0,
+        noteId: card.noteId,
+        isVideo: true,
+        ...(card.author ? { author: card.author } : {}),
+      }],
+      ...(this.startupId ? { startupId: this.startupId } : {}),
+      listKind: 'reels',
+      listState: 'ready',
     };
   }
 
