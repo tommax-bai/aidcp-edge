@@ -67,7 +67,7 @@ async function boot(
   let pushStatus: (s: unknown) => void = () => undefined;
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], personaPreview: [], personaFill: [], select: [], close: [], browserOpen: [], browserClose: [], notify: [], start: [], resume: [], saveNickname: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], closeAll: [], personaPreview: [], personaFill: [], select: [], close: [], browserOpen: [], browserClose: [], notify: [], start: [], resume: [], saveNickname: [] };
   const personaStatusByEnv = new Map<string, Record<string, unknown>>();
   const settings = {
     provider: 'adspower',
@@ -116,6 +116,7 @@ async function boot(
     fleetSetRailCollapsed: async () => ({ ok: true }),
     fleetStartAll: async (opts: unknown) => { calls.startAll.push(opts); return { ok: true, queued: 2 }; },
     fleetStopAll: async () => ({ ok: true }),
+    fleetCloseAll: async (opts: unknown) => { calls.closeAll.push(opts); return { ok: true, accepted: 2 }; },
     facebookPersonaTemplatePreview: async (selection: unknown) => {
       calls.personaPreview.push(selection);
       return { ok: true, soulYaml: 'selected-soul-yaml', identitySummary: '批量人设预览' };
@@ -144,7 +145,7 @@ async function boot(
     },
     relogin: async (envId: string) => { calls.relogin.push(envId); return makeStatus({ envId }); },
     notify: async (payload: unknown) => { calls.notify.push(payload); return { ok: true }; },
-    showDrivenBrowser: async (envId: string) => { calls.showDriven.push(envId); return { ok: true, hint: '已请求前置；窗口平时停放在屏幕边缘。' }; },
+    showDrivenBrowser: async (envId: string) => { calls.showDriven.push(envId); return { ok: true }; },
     resetBrowserParking: async (envId: string) => { calls.resetParking.push(envId); return { ok: true }; },
     pause: async () => makeStatus(),
     resume: async (envId: string) => { calls.resume.push(envId); return makeStatus({ envId }); },
@@ -352,6 +353,7 @@ test('环境头像三态：①未选中→选中 ②再点→抬前显示（show
   await tick();
   assert.deepEqual(calls.showDriven, ['ads-p2'], '第二次点击抬前该环境浏览器');
   assert.equal(rowOf('ads-p2').classList.contains('shown'), true, '抬前后行进入 shown 态');
+  assert.equal(w.document.querySelector('#rail-msg')!.textContent, '', '窗口前置成功不展示说明文案');
   // ③ 已显示 → 归位，撤 shown
   rowOf('ads-p2').click();
   await tick();
@@ -939,7 +941,7 @@ test('待处理徽标 + 需处理浮顶：需登录环境脉冲并计入徽标',
   assert.equal(firstRow.classList.contains('pulse'), true, '需处理项状态环脉冲');
 });
 
-test('引导处理流：排队一次一个、打开窗口带诚实提示、恢复后自动前进直至完成', async () => {
+test('引导处理流：排队一次一个、窗口前置成功静默、恢复后自动前进直至完成', async () => {
   const { w, pushStatus, calls } = await boot();
   // 两个环境都需要登录
   pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', auth: 'login required', edge: 'stopped', session: 'idle' }));
@@ -954,11 +956,12 @@ test('引导处理流：排队一次一个、打开窗口带诚实提示、恢�
   const panel = w.document.querySelector('#guide-panel')!;
   assert.equal(panel.classList.contains('hidden'), false);
   assert.match(w.document.querySelector('#guide-title')!.textContent!, /剩 2 个/);
-  // 打开窗口 → 诚实提示（不宣称已抬到最前）
+  // 打开窗口成功后保持安静；失败才展示原因。
   (w.document.querySelector('#guide-open') as HTMLElement).click();
   await tick();
   assert.equal(calls.showDriven.length, 1);
-  assert.match(w.document.querySelector('#guide-hint')!.textContent!, /屏幕边缘|前置/);
+  assert.equal(w.document.querySelector('#guide-hint')!.textContent, '');
+  assert.equal(w.document.querySelector('#guide-hint')!.classList.contains('hidden'), true);
   // 完成 · 重检 → 触发该环境 relogin
   (w.document.querySelector('#guide-done') as HTMLElement).click();
   await tick();
@@ -1181,7 +1184,9 @@ test('平台筛选：空分类显示空态并禁用全部启动，不发无目�
   assert.equal(w.document.querySelectorAll('.rail-row').length, 0);
   assert.match(w.document.querySelector('.rail-filter-empty')!.textContent!, /暂无视频号环境/);
   const startAll = w.document.querySelector('#rail-start-all') as HTMLButtonElement;
+  const closeAll = w.document.querySelector('#rail-close-all') as HTMLButtonElement;
   assert.equal(startAll.disabled, true);
+  assert.equal(closeAll.disabled, true);
   startAll.click();
   await tick();
   assert.equal(calls.startAll.length, 0);
@@ -1212,6 +1217,44 @@ test('平台筛选：启动排队拒绝只发送当前分类的一次请求', as
     { envIds: ['ads-fb'] },
   ]);
   assert.match(w.document.querySelector('#rail-msg')!.textContent!, /1 个环境未加入|排队已满/);
+});
+
+test('平台筛选：全部关闭只提交当前分类，处理中可见且回执不冒充终态完成', async () => {
+  const requests: Array<{ envIds?: string[] }> = [];
+  let settleClose: (value: { ok: boolean; accepted: number; envIds: string[] }) => void = () => {
+    assert.fail('close-all promise was not installed');
+  };
+  const { w } = await boot({
+    fleetGet: async () => ({
+      provider: 'adspower',
+      selectedEnvId: 'ads-xhs',
+      railCollapsed: false,
+      environments: [
+        { envId: 'ads-xhs', profileId: 'xhs', name: '小红书', platform: 'xiaohongshu', status: makeStatus({ envId: 'ads-xhs' }) },
+        { envId: 'ads-fb', profileId: 'fb', name: 'Facebook', platform: 'facebook', status: makeStatus({ envId: 'ads-fb' }) },
+      ],
+    }),
+    fleetCloseAll: async (opts: { envIds?: string[] }) => {
+      requests.push(opts);
+      return new Promise((resolve) => { settleClose = resolve; });
+    },
+  });
+  (w.document.querySelector('[data-rail-platform="facebook"]') as HTMLButtonElement).click();
+  await tick();
+  const closeAll = w.document.querySelector('#rail-close-all') as HTMLButtonElement;
+  closeAll.click();
+  await tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{ envIds: ['ads-fb'] }]);
+  assert.equal(closeAll.disabled, true);
+  assert.equal(closeAll.textContent, '关闭请求中…');
+  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /正在关闭 1 个环境/);
+  settleClose({ ok: true, accepted: 1, envIds: ['ads-fb'] });
+  await tick();
+  await tick();
+  assert.equal(closeAll.disabled, false);
+  assert.equal(closeAll.textContent, '全部关闭');
+  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /已受理 1 个环境的关闭请求/);
+  assert.doesNotMatch(w.document.querySelector('#rail-msg')!.textContent!, /全部.*已关闭|关闭完成/);
 });
 
 test('同账号告警：选中环境带 sameAccountWarning → 主区域出告警条', async () => {
@@ -1540,6 +1583,44 @@ test('自动化暂停后关闭表达停止意图，不退化成独立浏览器�
   assert.equal(w.document.querySelector('#session-fab')!.textContent, '启动');
   assert.equal(close.textContent, '浏览器');
   assert.equal(close.getAttribute('aria-label'), '打开浏览器');
+});
+
+test('任务已关闭时打开浏览器先显示处理中，不等待后台启动链返回', async () => {
+  let settleOpen: (status: ReturnType<typeof makeStatus>) => void = () => {
+    assert.fail('browser-open promise was not installed');
+  };
+  const { w, pushStatus, calls } = await boot({
+    browserOpen: async (envId: string) => {
+      calls.browserOpen.push(envId);
+      return new Promise((resolve) => { settleOpen = resolve; });
+    },
+  });
+  pushStatus(makeStatus({
+    envId: 'ads-p1', envName: '环境一', edge: 'stopped', cloud: 'disconnected', session: 'closed',
+    coreState: 'stopped', cloudState: 'offline', automationState: 'stopped', browserState: 'closed',
+  }));
+  await tick();
+  const browser = w.document.querySelector('#session-close') as HTMLButtonElement;
+  browser.click();
+  assert.deepEqual(calls.browserOpen, ['ads-p1']);
+  assert.equal(browser.disabled, true);
+  assert.equal(browser.textContent, '浏览器开启中');
+  assert.equal(browser.getAttribute('aria-label'), '正在打开浏览器');
+  settleOpen(makeStatus({
+    envId: 'ads-p1', envName: '环境一', edge: 'starting', cloud: 'disconnected', session: 'idle',
+    coreState: 'starting', cloudState: 'connecting', automationState: 'stopped', browserState: 'starting',
+  }));
+  await tick();
+  assert.equal(browser.disabled, true);
+  assert.equal(browser.textContent, '浏览器开启中');
+  pushStatus(makeStatus({
+    envId: 'ads-p1', envName: '环境一', edge: 'running', cloud: 'connected', session: 'idle',
+    coreState: 'online', cloudState: 'connected', automationState: 'stopped', browserState: 'ready',
+  }));
+  await tick();
+  assert.equal(browser.disabled, false);
+  assert.equal(browser.textContent, '浏览器');
+  assert.equal(browser.getAttribute('aria-label'), '关闭浏览器');
 });
 
 // ── 人设弹窗三态（change persona-bound-tristate）────────────────────────────────────────────

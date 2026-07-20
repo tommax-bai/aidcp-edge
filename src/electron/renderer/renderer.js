@@ -183,6 +183,7 @@ const fields = {
   railSumIdle: document.querySelector('#rail-sum-idle'),
   railGuide: document.querySelector('#rail-guide'),
   railStartAll: document.querySelector('#rail-start-all'),
+  railCloseAll: document.querySelector('#rail-close-all'),
   railMsg: document.querySelector('#rail-msg'),
   guidePanel: document.querySelector('#guide-panel'),
   guideTitle: document.querySelector('#guide-title'),
@@ -396,6 +397,7 @@ const fleetView = {
   shownEnv: null, // 头像三态：已把浏览器抬到主屏前台的那个 envId（null=无）。切换选中即清，见 selectEnv
   collapsed: true, // 环境栏默认收起为窄图标条
   platformFilter: 'all', // 平台分类筛选为会话内视图态；每次启动默认全部，不落设置
+  closeAllPending: false, // 只表达批量关闭 IPC 在途；逐环境终态仍由真实状态投影
   buffers: new Map(), // envId -> [{ entry, cls }]（每环境活动流缓冲，≤200 条，绝不串号）
   logs: new Map(), // envId -> { entries:[{time,message}], last }（每环境开发者原始日志，绝不串号）
   guided: null, // 引导处理态 { done:Set, current }
@@ -3626,7 +3628,11 @@ function renderFab(status) {
     // error 仍代表本机启动意图为 enabled，只是引擎已终态失败；保留「关闭」让操作者能明确结束本机意图。
     const automationActive = automation !== 'stopped';
     fields.sessionClose.classList.remove('hidden');
-    fields.sessionClose.textContent = automationActive ? '关闭' : '浏览器';
+    fields.sessionClose.textContent = automationActive
+      ? '关闭'
+      : browserPending
+        ? (browser === 'closing' || browser === 'releasing' ? '浏览器关闭中' : '浏览器开启中')
+        : '浏览器';
     const secondaryLabel = automationActive
       ? (automation === 'stopping' ? '正在关闭自动化' : '关闭自动化')
       : browserPending ? '浏览器处理中' : browser === 'error' ? '重新打开浏览器' : closed ? '打开浏览器' : '关闭浏览器';
@@ -3974,6 +3980,7 @@ function renderRail() {
     shown: fleetView.shownEnv,
     guided: Boolean(fleetView.guided),
     platformFilter: fleetView.platformFilter,
+    closeAllPending: fleetView.closeAllPending,
     globalPendingCount: fullModel.pendingCount,
     counts,
     // platform 必须进签名：改平台后行才会重建上色（漏掉则签名未变、UI 停留旧平台）。
@@ -4011,8 +4018,13 @@ function renderRail() {
     fields.railGuide.textContent = fullModel.pendingCount > 0 ? `引导处理（${fullModel.pendingCount}）` : '引导处理';
   }
   if (fields.railStartAll) {
-    fields.railStartAll.disabled = empty;
+    fields.railStartAll.disabled = empty || fleetView.closeAllPending;
     fields.railStartAll.title = empty ? '当前分类暂无可开始的自动化' : `为当前分类的 ${list.length} 个环境开始自动化`;
+  }
+  if (fields.railCloseAll) {
+    fields.railCloseAll.disabled = empty || fleetView.closeAllPending;
+    fields.railCloseAll.textContent = fleetView.closeAllPending ? '关闭请求中…' : '全部关闭';
+    fields.railCloseAll.title = empty ? '当前分类暂无可关闭的环境' : `关闭当前分类的 ${list.length} 个环境`;
   }
   if (!fields.railList) return;
   // 列表现在是栏内定高滚动区：签名一变就整块重建，重建会把滚动位清零。不接管的话，用户往下滚去看后面的
@@ -4355,7 +4367,7 @@ async function onRailRowActivate(envId) {
     const r = await api(envId);
     if (r && r.ok) {
       fleetView.shownEnv = showing ? envId : null; // 仅成功才推进相位
-      setRailMsg(r.hint || `${label}指令已发送。`);
+      setRailMsg('');
       renderRail();
     } else {
       setRailMsg(`${label}失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`);
@@ -4424,6 +4436,39 @@ async function doStartAll() {
   }
 }
 
+// 「全部关闭」与单环境关闭共享 stopAutomation 真语义；这里只提交当前平台筛选范围，
+// 主进程仍会用实时句柄二次收口。回执只表示已受理，逐环境终态继续看状态行。
+async function doCloseAll() {
+  const api = window.aidcpEdge.fleetCloseAll;
+  if (typeof api !== 'function' || fleetView.closeAllPending) return;
+  const envIds = filteredRailEnvList().map((env) => env.envId);
+  if (envIds.length === 0) {
+    setRailMsg('当前分类没有可关闭的环境。');
+    return;
+  }
+  fleetView.closeAllPending = true;
+  fleetView.lastRailSig = '';
+  setRailMsg(`正在关闭 ${envIds.length} 个环境…`);
+  renderRail();
+  try {
+    const res = await api({ envIds });
+    if (res && res.ok) {
+      const accepted = Number(res.accepted) || 0;
+      setRailMsg(accepted > 0
+        ? `已受理 ${accepted} 个环境的关闭请求，请查看各环境状态。`
+        : '没有仍可关闭的环境。');
+    } else {
+      setRailMsg(`全部关闭失败：${(res && res.error) || '请求未被主进程受理'}`);
+    }
+  } catch (e) {
+    setRailMsg(`全部关闭失败：${(e && e.message) || e}`);
+  } finally {
+    fleetView.closeAllPending = false;
+    fleetView.lastRailSig = '';
+    renderRail();
+  }
+}
+
 // 「全部开始自动化」实时进度（如实呈现 k/N）：随各环境状态推送重算已起数，全起后收尾。
 // 精确「下一个 Ns 后」倒计时依赖错峰队列时序（未透传渲染层），当前以每行「第 N 位」传达顺序。
 function updateStartAllProgress() {
@@ -4446,6 +4491,7 @@ function updateStartAllProgress() {
   setRailMsg(`自动化启动中 ${launched}/${sa.total} · 其余 ${sa.total - launched} 个浏览器错峰排队${sa.controlOnly > 0 ? ` · ${sa.controlOnly} 个自动化引擎已连接` : ''}${sa.rejected > 0 ? ` · ${sa.rejected} 个未加入` : ''}…`);
 }
 fields.railStartAll?.addEventListener('click', () => { void doStartAll(); });
+fields.railCloseAll?.addEventListener('click', () => { void doCloseAll(); });
 
 // ── 引导式登录 / 验证码流：待处理环境排队、一次引导一个；新到项实时并入（队列每步重算）──
 function guideQueue() {
@@ -4525,7 +4571,7 @@ fields.guideOpen?.addEventListener('click', async () => {
   if (!envId || typeof window.aidcpEdge.showDrivenBrowser !== 'function') return;
   const r = await window.aidcpEdge.showDrivenBrowser(envId);
   // 诚实红线：抬不动 / 无法保证抬前时告知窗口所在，绝不假装已抬前。
-  setGuideHint(r && r.ok ? (r.hint || '已请求把该环境的浏览器窗口前置。') : `打开窗口失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`);
+  setGuideHint(r && r.ok ? '' : `打开窗口失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`);
 });
 fields.guideDone?.addEventListener('click', async () => {
   const envId = fleetView.guided && fleetView.guided.current;
@@ -4920,8 +4966,8 @@ async function runBrowserRecovery(action) {
   const label = action === 'show' ? '显示浏览器' : '重置浏览器位置';
   try {
     const r = await api(currentEnvId());
-    // 诚实边界：外壳只能「尽力抬前」，成功回执带窗口所在提示（r.hint），绝不宣称已抬到最前。
-    settingsUi.msg.textContent = r && r.ok ? (r.hint || `${label}指令已发送。`) : `${label}失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`;
+    // 诚实边界：成功只表示指令被接受，保持安静；失败才展示原因，绝不宣称已抬到最前。
+    settingsUi.msg.textContent = r && r.ok ? '' : `${label}失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`;
   } catch (e) {
     settingsUi.msg.textContent = `${label}失败：${(e && e.message) || e}`;
   }
@@ -5705,6 +5751,11 @@ fields.sessionClose?.addEventListener('click', async () => {
       return;
     }
     const action = fields.sessionClose.dataset.browserAction;
+    if (action === 'open') {
+      fields.sessionClose.textContent = '浏览器开启中';
+      fields.sessionClose.setAttribute('aria-label', '正在打开浏览器');
+      fields.sessionClose.title = '正在打开浏览器';
+    }
     const next = action === 'open'
       ? await window.aidcpEdge.browserOpen?.(currentEnvId())
       : await window.aidcpEdge.browserClose?.(currentEnvId());

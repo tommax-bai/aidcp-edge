@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   saveEnvironmentNickname: (args) => ipcRenderer.invoke('fleet:setManualNickname', args),
   fleetStartAll: (opts) => ipcRenderer.invoke('fleet:startAll', opts),
   fleetStopAll: () => ipcRenderer.invoke('fleet:stopAll'),
+  fleetCloseAll: (opts) => ipcRenderer.invoke('fleet:closeAll', opts),
   // Facebook 批量人设：主进程本地构建模板；确认后 Cloud 只筛目标并原样补齐。
   facebookPersonaTemplatePreview: (selection) => ipcRenderer.invoke('persona:preview-facebook-template', selection),
   facebookPersonaFillSelected: (soulYaml) => ipcRenderer.invoke('persona:fill-facebook-selected', soulYaml),

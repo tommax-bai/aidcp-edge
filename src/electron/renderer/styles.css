@@ -2624,6 +2624,7 @@ body::-webkit-scrollbar:vertical,
   padding: 6px 8px; font-size: 12px; color: #33415c; cursor: pointer;
 }
 .rail-btn.warn { border-color: #f2c063; background: #fff7e8; color: #92600a; }
+.rail-btn.danger { border-color: #f0c7c7; background: #fff7f7; color: #a33b3b; }
 .rail-btn:disabled { cursor: not-allowed; opacity: .5; }
 .rail-btn.hidden { display: none; }
 .rail-ram { border: 1px solid #f2c063; border-radius: 8px; background: #fff8ec; padding: 8px; }

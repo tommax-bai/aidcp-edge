@@ -1482,6 +1482,7 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     spawnedAtMs: 0,
     browserAlreadyRunning: false,
     browserStateUnconfirmed: false,
+    browserOpenPending: false,
     coldStandbyTimer: null,
     coldStandbyWakeAt: 0,
     coldStandbyActive: false,
@@ -2389,21 +2390,9 @@ function syncBrowserPersonaNotice(handle, force = false) {
 function sendBrowserParkingCommand(handle, type) {
   const sent = writeBrowserControlCommand(handle, type);
   if (!sent.ok) return sent;
-  try {
-    // 「尽力抬前」诚实边界：外壳只能请求核心把窗口前置/归位，无法保证系统真把它抬到最前，
-    // 故回执带窗口所在的定位提示、绝不宣称「已抬到最前」。
-    const plan = currentParkingPlan();
-    const where = plan.effectiveMode === 'offscreen'
-      ? '窗口平时完全移出屏幕，请稍候其自动归位'
-      : plan.effectiveMode === 'edge-strip'
-        ? '窗口平时停放在屏幕边缘'
-        : plan.effectiveMode === 'parking-display'
-          ? '窗口平时停放在副屏'
-          : '窗口平时停放在主屏背景位';
-    return { ok: true, hint: `已向该环境发出窗口${type === 'browser.show' ? '前置' : '归位'}请求；若未见弹出，${where}，也可在系统窗口切换器里按名字找到它。` };
-  } catch (error) {
-    return { ok: false, error: error?.message || '发送浏览器控制指令失败' };
-  }
+  // 指令写入成功只证明目标核心已接受，不证明操作系统真的把窗口置顶。成功保持静默；
+  // writeBrowserControlCommand 的失败仍原样返回给目标环境，绝不把受理包装成已完成。
+  return { ok: true };
 }
 
 // 建号自助人设：把带 correlation id 的 persona 命令写进**目标环境**（envId 路由，缺省选中环境）的 core stdin，
@@ -2977,6 +2966,15 @@ function wakeColdStandby(handle, reason) {
 /** 核心已完成原地重建：解除待机态。 */
 function onColdStandbyWoken(handle) {
   if (!handle) return;
+  // 批量 / 单环境关闭可能与已送达的 wake 回执竞态；关闭意图优先，迟到的 woken 不得把状态翻回已打开。
+  if (handle.stopRequested || handle.removed || isQuitting) {
+    handle.browserOpenPending = false;
+    releaseStartQueue(handle);
+    handle.coldStandbyWaking = false;
+    if (typeof handle.wakeSettle === 'function') handle.wakeSettle(false);
+    return;
+  }
+  handle.browserOpenPending = false;
   releaseStartQueue(handle);
   handle.coldStandbyWaking = false;
   if (typeof handle.wakeSettle === 'function') handle.wakeSettle(true); // 放行启动队列的下一个
@@ -2993,14 +2991,19 @@ function onColdStandbyWoken(handle) {
   // 最短持有时长的起点：从「浏览器真的重建好了」这一刻起算，而非下发唤醒那一刻——否则冷启那 30–45s
   // 会被算进持有期，闸就形同虚设。必须在 clearColdStandbyTimer 之后写（它会清掉 hold timer，但不碰这个时刻）。
   handle.coldStandbyLastWokenAt = Date.now();
+  const manualBrowserOnly = handle.automationIntent === 'stopped';
   updateStatus(handle, {
     edge: 'running',
-    session: handle.automationPaused ? 'paused' : 'running',
+    session: manualBrowserOnly ? 'idle' : handle.automationPaused ? 'paused' : 'running',
     browserStandby: coldStandbyStatus('awake', handle.status.browserStandby && handle.status.browserStandby.hint, {}),
-    lastMessage: handle.automationPaused
+    lastMessage: manualBrowserOnly
+      ? '浏览器已打开；自动化保持关闭。'
+      : handle.automationPaused
       ? '浏览器已打开；自动化仍暂停。'
       : '浏览器已打开并恢复自动化。',
-    ...presencePatch(handle.automationPaused ? '浏览器已打开，自动化暂停' : '自动化运行中'),
+    ...presencePatch(manualBrowserOnly
+      ? '浏览器已打开，自动化关闭'
+      : handle.automationPaused ? '浏览器已打开，自动化暂停' : '自动化运行中'),
     ...clearEdgeFailurePatch(handle),
   });
 }
@@ -3011,6 +3014,7 @@ function onColdStandbyWoken(handle) {
  */
 function onColdStandbyWakeFailed(handle, reason) {
   if (!handle) return;
+  handle.browserOpenPending = false;
   releaseStartQueue(handle);
   handle.coldStandbyWaking = false;
   if (typeof handle.wakeSettle === 'function') handle.wakeSettle(false); // 放行启动队列的下一个
@@ -3558,6 +3562,7 @@ function spawnEdgeChild(handle, {
     failPendingCoreRebind(handle, `core_spawn_error:${(err && err.message) || String(err)}`);
     settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
     handle.child = undefined;
+    handle.browserOpenPending = false;
     handle.coldStandbyPending = false;
     handle.controlPlaneOnly = false;
     handle.controlPlaneBootstrapped = false;
@@ -3618,6 +3623,7 @@ function spawnEdgeChild(handle, {
     const controlPlaneNeverEstablished = handle.controlPlaneOnly && !handle.controlPlaneBootstrapped;
     const wasColdStandby = !controlPlaneNeverEstablished && (handle.coldStandbyPending || handle.coldStandbyActive);
     handle.child = undefined;
+    handle.browserOpenPending = false;
     if (controlPlaneNeverEstablished) {
       handle.coldStandbyPending = false;
       handle.coldStandbyActive = false;
@@ -4242,6 +4248,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
   }
   if (message.includes('[browser-parking] control-ready')) {
     handle.browserParkingReady = true;
+    handle.browserOpenPending = false;
     handle.browserPersonaNoticeState = null;
     syncBrowserPersonaNotice(handle, true);
   }
@@ -4611,6 +4618,7 @@ function stopAutomation(handle) {
   handle.resumeAfterStop = false;
   handle.automationPaused = false;
   handle.stopRequested = true;
+  handle.browserOpenPending = false;
   handle.restartPending = false;
   clearRespawnTimer(handle);
   clearColdStandbyTimer(handle);
@@ -4751,6 +4759,17 @@ function stopAllEnvs() {
   return { ok: true, stopped: targets.length };
 }
 
+/**
+ * 「全部关闭」按 renderer 声明的筛选范围取实时句柄交集，再逐环境复用 stopAutomation。
+ * accepted 只表示关闭请求已受理；浏览器是否真实关闭仍由各环境后续状态 / 本地只读确认给结论。
+ */
+function closeAllEnvs({ envIds } = {}) {
+  const targets = fleet.scopeFleetHandles([...envs.values()], envIds)
+    .filter((handle) => !handle.removed);
+  for (const handle of targets) stopAutomation(handle);
+  return { ok: true, accepted: targets.length, envIds: targets.map((handle) => handle.envId) };
+}
+
 async function stopManagedAdsRuntime() {
   const runtime = managedAdsRuntime;
   if (!runtime) return { ok: true, skipped: true };
@@ -4864,11 +4883,13 @@ function lifecycleAxes(handle) {
       ? 'error'
     : (handle.pausePending || (handle.engineStopReason === 'user_close' && handle.child))
     ? 'closing'
+    : handle.browserOpenPending
+    ? 'starting'
     : handle.coldStandbyWaking
     ? 'starting'
     : handle.executorFailure
       ? 'error'
-    : (handle.slotWaitingSince || (handle.launchQueued && !handle.controlPlaneOnly))
+    : (handle.slotWaitingSince || handle.startFlowQueued || (handle.launchQueued && !handle.controlPlaneOnly))
       ? 'queued'
       : (handle.coldStandbyActive || handle.coldStandbyPending || handle.controlPlaneOnly)
         ? 'closed'
@@ -4926,7 +4947,7 @@ ipcMain.handle('browser:close', (_event, envId) => {
   closeBrowserExecutor(handle);
   return statusOf(handle);
 });
-ipcMain.handle('browser:open', async (_event, envId) => {
+ipcMain.handle('browser:open', (_event, envId) => {
   const handle = resolveHandle(envId);
   if (!handle || handle.removed) return statusOf(handle);
   if (handle.child) {
@@ -4935,21 +4956,51 @@ ipcMain.handle('browser:open', async (_event, envId) => {
     }
     return statusOf(handle);
   }
-  // 手动打开浏览器是高级登录/验证/检查动作：允许临时连接引擎，但保持自动化暂停。
-  handle.automationIntent = 'paused';
+  // 手动打开浏览器是高级登录/验证/检查动作：允许临时连接引擎，但自动化意图仍保持关闭。
+  handle.automationIntent = 'stopped';
   handle.engineStopReason = '';
   handle.resumeAfterStop = false;
   handle.automationPaused = true;
   handle.stopRequested = false;
   const controlState = allowedEnvironmentControlStates.get(String(handle.profileId || '').trim());
   if (controlState && controlState.bindingState === 'bound') {
-    handle.stopRequested = false;
-    const started = await startBrowserAbsentCore(handle);
-    if (started) wakeColdStandby(handle, 'user_browser_open');
+    // 先回可见受理态，再做可能等待客户接口 / Cloud 握手的 bootstrap。IPC 不再把按钮挂到握手结束。
+    handle.browserOpenPending = true;
+    updateStatus(handle, {
+      edge: 'starting',
+      session: 'idle',
+      lastMessage: '正在连接自动化引擎并打开浏览器；自动化保持关闭…',
+      ...presencePatch('正在打开浏览器…'),
+      ...clearEdgeFailurePatch(handle),
+    });
+    void startBrowserAbsentCore(handle).then((started) => {
+      if (!handle.browserOpenPending) return;
+      if (!started || handle.removed || handle.stopRequested || handle.automationIntent !== 'stopped' || !handle.child) {
+        handle.browserOpenPending = false;
+        updateStatus(handle, {});
+        return;
+      }
+      wakeColdStandby(handle, 'user_browser_open');
+    }).catch((error) => {
+      if (!handle.browserOpenPending) return;
+      handle.browserOpenPending = false;
+      updateStatus(handle, {
+        edge: 'warning',
+        lastMessage: `打开浏览器失败：${error?.message || error}`,
+        ...edgeFailurePatch(`打开浏览器失败：${error?.message || error}`),
+        ...presencePatch('浏览器打开失败'),
+      });
+    });
     return statusOf(handle);
   }
-  // 首次建立绑定必须显式打开真实页面。保持自动化暂停，只做 browser_lifecycle 启动；不由 Cloud 操作触发。
-  updateStatus(handle, { session: 'idle' });
+  // 首次建立绑定必须显式打开真实页面。自动化保持关闭，只做 browser_lifecycle 启动；不由 Cloud 操作触发。
+  updateStatus(handle, {
+    edge: 'starting',
+    session: 'idle',
+    lastMessage: '正在打开浏览器完成首次登录；自动化保持关闭…',
+    ...presencePatch('正在打开浏览器…'),
+    ...clearEdgeFailurePatch(handle),
+  });
   enqueueStartFlow(handle);
   return statusOf(handle);
 });
@@ -5523,6 +5574,7 @@ ipcMain.handle('fleet:setManualNickname', async (_event, raw) => {
 });
 ipcMain.handle('fleet:startAll', (_event, opts) => startAllEnvs(opts || {}));
 ipcMain.handle('fleet:stopAll', () => stopAllEnvs());
+ipcMain.handle('fleet:closeAll', (_event, opts) => closeAllEnvs(opts || {}));
 ipcMain.handle('fleet:setRailCollapsed', (_event, collapsed) => {
   saveSettings({ railCollapsed: Boolean(collapsed) });
   return { ok: true };
