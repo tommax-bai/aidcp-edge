@@ -9,16 +9,17 @@ interface FacebookCookieLike {
   domain?: string;
 }
 
-/** 本人 profile 锚点（含 aria-label）——用于 id 锚定就地取昵称（顶栏头像锚点 aria 形如「<昵称>的头像」）。 */
+/** 本人 profile 锚点——aria 与可见文本都只能在 href 先绑定本人 id 后作为昵称候选。 */
 export interface FacebookProfileAnchor {
   href: string;
   ariaLabel: string | null;
+  textContent?: string | null;
 }
 
 export interface FacebookIdentitySignals {
   href: string;
   profileHrefs: string[];
-  /** 本人/他人 profile 锚点及其 aria-label（就地 id 锚定取昵称用；缺省空数组）。 */
+  /** 本人/他人 profile 锚点及其标签/可见文本（就地 id 锚定取昵称用；缺省空数组）。 */
   profileAnchors?: FacebookProfileAnchor[];
   cookieUserId: string | null;
   displayName: string | null;
@@ -64,6 +65,7 @@ const GENERIC_FACEBOOK_DISPLAY_NAMES = new Set([
   'sign up',
   'create new account',
   'account controls and settings',
+  'your timeline',
   'menu',
   'marketplace',
   '首页',
@@ -75,6 +77,9 @@ const GENERIC_FACEBOOK_DISPLAY_NAMES = new Set([
   '菜单',
   '登录',
   '注册',
+  'trang cá nhân',
+  'trang cá nhân của bạn',
+  'dòng thời gian của bạn',
 ]);
 
 export function cleanFacebookDisplayName(value: string | null | undefined): string | null {
@@ -123,7 +128,8 @@ function isSelfProfileHref(href: string, accountId: string): boolean {
 }
 
 /**
- * 从本人 profile 锚点集里按 id 锚定取昵称（纯函数）：取首个「是本人（id 匹配或 /me） & aria 含头像后缀」的名字。
+ * 从本人 profile 锚点集里按 id 锚定取昵称（纯函数）：
+ * 先取可安全解析的 aria 本人标签；本地化 aria 未覆盖时，再取同一个本人锚点的可见文本。
  * id 锚定 ⇒ 绝不把他人/他页锚点的名字当作本账号昵称。
  */
 export function avatarNameForId(
@@ -134,7 +140,7 @@ export function avatarNameForId(
   for (const a of anchors) {
     if (!a || typeof a.href !== 'string') continue;
     if (!isSelfProfileHref(a.href, accountId)) continue;
-    const name = extractNameFromAvatarAria(a.ariaLabel);
+    const name = extractNameFromAvatarAria(a.ariaLabel) ?? cleanFacebookDisplayName(a.textContent);
     if (name) return name;
   }
   return null;
@@ -221,7 +227,11 @@ const FACEBOOK_IDENTITY_SCAN_JS = `(function(){
   for (var i = 0; i < anchors.length && profileAnchors.length < 30; i++) {
     var h = attr(anchors[i], 'href');
     if (!h) continue;
-    profileAnchors.push({ href: h, ariaLabel: attr(anchors[i], 'aria-label') || null });
+    profileAnchors.push({
+      href: h,
+      ariaLabel: attr(anchors[i], 'aria-label') || null,
+      textContent: text(anchors[i]) || null
+    });
     // profileHrefs 只收 profile.php?id= / people（数字 id 派生输入，逐字保持既有行为，不含 /me）。
     var isProfileHref = h.indexOf('profile.php?id=') >= 0 || h.indexOf('/people/') >= 0;
     if (isProfileHref && hrefs.length < 20) hrefs.push(h);
@@ -255,7 +265,11 @@ function normalizeFacebookIdentitySignals(raw: FacebookIdentitySignals, cookieUs
   const profileAnchors = Array.isArray(raw.profileAnchors)
     ? raw.profileAnchors
         .filter((a): a is FacebookProfileAnchor => !!a && typeof a.href === 'string')
-        .map((a) => ({ href: a.href, ariaLabel: typeof a.ariaLabel === 'string' ? a.ariaLabel : null }))
+        .map((a) => ({
+          href: a.href,
+          ariaLabel: typeof a.ariaLabel === 'string' ? a.ariaLabel : null,
+          textContent: typeof a.textContent === 'string' ? a.textContent : null,
+        }))
     : [];
   return {
     href: typeof raw.href === 'string' ? raw.href : '',
@@ -281,7 +295,13 @@ async function readFacebookCookieUserId(cdp: BrowseCdp): Promise<{ ok: true; acc
 }
 
 async function scanFacebookIdentitySignals(cdp: BrowseCdp, cookieUserId: string | null): Promise<FacebookIdentitySignals | null> {
-  const raw = await evalRaw<string>(cdp, FACEBOOK_IDENTITY_SCAN_JS);
+  let raw = '';
+  try {
+    raw = await evalRaw<string>(cdp, FACEBOOK_IDENTITY_SCAN_JS);
+  } catch {
+    // Page.navigate / React 重载期间 Runtime execution context 可短暂销毁；交给有界重扫，而不是把首读炸断。
+    return null;
+  }
   try {
     return normalizeFacebookIdentitySignals(JSON.parse(raw) as FacebookIdentitySignals, cookieUserId);
   } catch {
@@ -317,8 +337,9 @@ export async function readFacebookIdentityPageContext(cdp: BrowseCdp): Promise<P
 /**
  * 读出 Facebook 登录账号身份（数字 id + 昵称）。
  * - 数字 id：cookie `c_user` / profile 锚点 / profile URL 锚定（逐字保持既有行为）。
- * - 昵称：**就地** id 锚定读取（本人头像锚点 aria-label「<昵称>的头像」），**绝不导航 /me**、非本人主页页不取页面标题。
- * - 昵称随顶栏异步渲染 → 按次数上界就地轮询等它出现；耗尽仍无 → 诚实以空昵称返回（不阻断身份、不猜、不导航）。
+ * - 昵称：在 Facebook 页内按本人 id 锚定读取 aria/可见文本，**绝不导航 /me/profile**、非本人主页不取页面标题。
+ * - 仅显式 allowNavigate=true 且当前 tab 明确非 Facebook 时，可启动引导一次首页；运行期调用必须传 false。
+ * - 昵称随顶栏异步渲染 → 按次数上界轮询；耗尽仍无 → 诚实以空昵称返回（不阻断身份、不猜）。
  */
 export async function readFacebookIdentity(
   cdp: BrowseCdp,
@@ -335,13 +356,31 @@ export async function readFacebookIdentity(
     return { ok: false, reason: cookie.reason };
   }
 
-  // 就地有界重试（不导航）：昵称随顶栏异步渲染，按【次数上界】轮询等它出现。
+  // 先拿当前页信号，显式允许启动导航且 tab 仍是 about:blank/非 Facebook 时，才一次性引导到消费端首页。
+  // 这是启动页面 bootstrap，不是去 /me/profile 取昵称；所有运行期调用必须传 allowNavigate=false。
+  let firstSignals = await scanFacebookIdentitySignals(cdp, cookie.accountId);
+  const initialHref = firstSignals?.href ||
+    (opts.allowNavigate === true ? await evalRaw<string>(cdp, 'location.href').catch(() => '') : '');
+  // Runtime 扫描失败不等于“已证明在非 Facebook 页”；只有拿到明确 href 且确属 unknown 才允许 bootstrap。
+  if (opts.allowNavigate === true && initialHref && classifyFacebookIdentityPageContext(initialHref) === 'unknown') {
+    try {
+      log(`[facebook-identity] 当前 tab 非 Facebook 页面（${initialHref}）→ 启动引导首页后再采集昵称`);
+      await cdp.send('Page.navigate', { url: 'https://www.facebook.com/' });
+      firstSignals = null; // 导航前 about:blank 信号绝不参与导航后的昵称成功判定。
+      if (hydrateTimeoutMs > 0) await sleep(hydrateIntervalMs);
+    } catch (err) {
+      log(`[facebook-identity] 启动引导 Facebook 首页失败：${(err as Error).message} → 保留就地有界读取`);
+    }
+  }
+
+  // 有界重试：在 Facebook 页面内始终就地读；昵称随顶栏异步渲染，按【次数上界】轮询等它出现。
   // 用迭代次数限界（不依赖 now() 前进——单测常注入恒定假时钟，靠 deadline 会死循环）。
   const attempts = Math.max(1, Math.ceil(hydrateTimeoutMs / Math.max(1, hydrateIntervalMs)) + 1);
   let lastReason = 'facebook identity scan returned invalid JSON';
   let bestIdentity: SelfIdentity | null = null;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    const signals = await scanFacebookIdentitySignals(cdp, cookie.accountId);
+    const signals = firstSignals ?? (await scanFacebookIdentitySignals(cdp, cookie.accountId));
+    firstSignals = null;
     if (signals) {
       const derived = deriveFacebookIdentity(signals);
       if (derived.ok) {

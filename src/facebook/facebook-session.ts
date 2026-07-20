@@ -1091,7 +1091,11 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     // （ui-events.cjs 的 /命令: profile\.open/ → 在场感「顺路去作者主页看看…」），而 FB 是**就地读、从不跳转**，
     // 那句在 FB 上是假话。兜底表是小红书会话专属的，FB 一律走结构化 [ui-event] 行。
     this.log(`[fb-session] profile.open direct（就地读, authorId=${requestedAuthorId || '<self>'}）`);
-    const idRes = await readFacebookIdentity(this.cdp, { logger: (m) => this.log(m), sleep: this.sleep });
+    const idRes = await readFacebookIdentity(this.cdp, {
+      allowNavigate: false,
+      logger: (m) => this.log(m),
+      sleep: this.sleep,
+    });
     if (!idRes.ok) {
       this.log(`[fb-session] profile.detail direct 就地读身份失败（${idRes.reason}）→ 空昵称回执（不导航、不猜）`);
       return { type: 'profile', payload: this.profileFallback(requestedAuthorId) };

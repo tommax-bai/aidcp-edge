@@ -351,6 +351,81 @@ test('readFacebookIdentity: id without a readable avatar nickname stays empty an
   assert.equal(calls.some((call) => call.method === 'Page.navigate'), false);
 });
 
+test('readFacebookIdentity: about:blank startup bootstrap waits for Facebook self anchor before returning nickname', async () => {
+  const { cdp, calls } = fakeCdpSequence(
+    [
+      JSON.stringify({
+        href: 'about:blank',
+        profileHrefs: [],
+        profileAnchors: [],
+        displayName: null,
+        title: null,
+      }),
+      JSON.stringify({
+        href: 'https://www.facebook.com/',
+        profileHrefs: [],
+        profileAnchors: [],
+        displayName: null,
+        title: 'Facebook',
+      }),
+      JSON.stringify({
+        href: 'https://www.facebook.com/',
+        profileHrefs: ['https://www.facebook.com/profile.php?id=61591968120367'],
+        profileAnchors: [
+          {
+            href: 'https://www.facebook.com/profile.php?id=61591968120367',
+            ariaLabel: 'Dòng thời gian của Ve Te',
+            textContent: 'Ve Te',
+          },
+        ],
+        displayName: null,
+        title: 'Facebook',
+      }),
+    ],
+    [{ name: 'c_user', value: '61591968120367', domain: '.facebook.com' }],
+  );
+
+  const res = await readFacebookIdentity(cdp, {
+    allowNavigate: true,
+    hydrateTimeoutMs: 20,
+    hydrateIntervalMs: 10,
+    sleep: async () => undefined,
+  });
+
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    assert.equal(res.identity.accountId, '61591968120367');
+    assert.equal(res.identity.displayName, 'Ve Te');
+  }
+  const navigations = calls.filter((call) => call.method === 'Page.navigate');
+  assert.deepEqual(navigations, [{ method: 'Page.navigate', params: { url: 'https://www.facebook.com/' } }]);
+  assert.equal(calls.filter((call) => call.method === 'Runtime.evaluate').length, 3, '空白页不算完成，等 Facebook 自链水合');
+});
+
+test('readFacebookIdentity: navigation-disabled about:blank read keeps stable id empty-name and never bootstraps', async () => {
+  const { cdp, calls } = fakeCdpSequence(
+    [
+      JSON.stringify({
+        href: 'about:blank',
+        profileHrefs: [],
+        profileAnchors: [],
+        displayName: null,
+        title: null,
+      }),
+    ],
+    [{ name: 'c_user', value: '61591968120367', domain: '.facebook.com' }],
+  );
+
+  const res = await readFacebookIdentity(cdp, { allowNavigate: false, hydrateTimeoutMs: 0 });
+
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    assert.equal(res.identity.accountId, '61591968120367');
+    assert.equal(res.identity.displayName, null);
+  }
+  assert.equal(calls.some((call) => call.method === 'Page.navigate'), false);
+});
+
 test('extractNameFromAvatarAria: strips avatar suffix, rejects non-avatar/generic aria', () => {
   assert.equal(extractNameFromAvatarAria('Tianxing Bai的头像'), 'Tianxing Bai');
   assert.equal(extractNameFromAvatarAria('Test User’s profile picture'), 'Test User');
@@ -379,6 +454,31 @@ test('avatarNameForId: id-anchored, ignores other ids and honors /me self-link',
     avatarNameForId([{ href: 'https://www.facebook.com/me', ariaLabel: 'Test User的头像' }], '1234567890'),
     'Test User',
   ); // /me 自链命中
+});
+
+test('avatarNameForId: localized aria falls back to visible text only on the self-id anchor', () => {
+  const anchors = [
+    {
+      href: 'https://www.facebook.com/profile.php?id=9876543210',
+      ariaLabel: 'Dòng thời gian của Wrong Person',
+      textContent: 'Wrong Person',
+    },
+    {
+      href: 'https://www.facebook.com/profile.php?id=1234567890',
+      ariaLabel: 'Dòng thời gian của Ve Te',
+      textContent: 'Ve Te',
+    },
+  ];
+  assert.equal(avatarNameForId(anchors, '1234567890'), 'Ve Te');
+  assert.equal(avatarNameForId(anchors, '5555555555'), null, '其他 id 的可见文本绝不成为本人昵称');
+  assert.equal(
+    avatarNameForId(
+      [{ href: 'https://www.facebook.com/profile.php?id=1234567890', ariaLabel: null, textContent: 'Trang cá nhân của bạn' }],
+      '1234567890',
+    ),
+    null,
+    '越南语通用个人主页外壳不写入昵称',
+  );
 });
 
 test('deriveFacebookIdentity: 中文界面本人主页链接「<名>的时间线」→ 读出昵称（真机 Nancy Terry 复现，change facebook-nickname-aria-timeline-suffix）', () => {

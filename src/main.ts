@@ -50,7 +50,7 @@ import {
   type ReadSelfIdentityOptions,
   ProxyRuntimeObserver,
 } from './cdp/index.js';
-import { selectPlatformDriver } from './platform/index.js';
+import { selectPlatformDriver, startupIdentityReadPolicy } from './platform/index.js';
 import { runWechatChannelsRuntime } from './wechat-channels/runtime.js';
 import {
   backfillOverlayEvidenceText,
@@ -306,9 +306,12 @@ async function main(): Promise<void> {
     accountId = controlAccountId;
     console.log(`[aidcp-edge] 控制面账号身份已确立: ${accountId} [source=cloud-bound-bootstrap; browser=absent]`);
   } else {
-    // adspower 首读 allowNavigate=false：登录页无「我」锚点，navigate 兜底既接不住新登录又只带误导航风险（task 1.5）。self 维持默认。
-    const firstReadOpts: ReadSelfIdentityOptions = { logger: (m) => console.log(m) };
-    if (provider.kind === 'adspower') firstReadOpts.allowNavigate = false;
+    // Facebook AdsPower 可能刚附着在 about:blank：首读显式允许一次消费端首页 bootstrap，再有界等本人锚点；
+    // XHS AdsPower 仍保持登录页纯就地读，绝不新增误导航。运行期复读另行显式 allowNavigate=false。
+    const firstReadOpts: ReadSelfIdentityOptions = {
+      ...startupIdentityReadPolicy(platformDriver.platform, provider.kind),
+      logger: (m) => console.log(m),
+    };
     const idRes = await platformDriver.readIdentity(session.cdp, firstReadOpts);
     const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
 
@@ -367,7 +370,7 @@ async function main(): Promise<void> {
         );
       }
       accountId = resolved.accountId;
-      // 昵称仅在首读成功（in-place 恒 null / navigate 才有）时取；等待路径 idRes 为首读失败结果，verifiedAccountNickname 自然返回 undefined。
+      // 昵称仅从本次首读且与最终数字 id 一致的已验证结果取；等待路径 idRes 仍是首读失败结果，自然不携昵称。
       accountNickname = verifiedAccountNickname(idRes, resolved);
       const display = accountNickname ? ` (${accountNickname})` : '';
       const source = 'source' in resolved ? resolved.source : 'env-override';
@@ -981,7 +984,10 @@ async function main(): Promise<void> {
       } catch {
         /* best-effort */
       }
-      const idRes = await platformDriver.readIdentity(session.cdp, { logger: (m) => console.log(m) });
+      const idRes = await platformDriver.readIdentity(session.cdp, {
+        allowNavigate: false,
+        logger: (m) => console.log(m),
+      });
       const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
       if (decision.kind === 'halt') {
         console.error(
@@ -1507,7 +1513,10 @@ async function main(): Promise<void> {
         }
 
         // 4) 重新确认登录态与身份（红线：新一代浏览器，绝不假设还登着）。
-        const idRes = await platformDriver.readIdentity(session.cdp, { logger: (m) => console.log(m) });
+        const idRes = await platformDriver.readIdentity(session.cdp, {
+          ...startupIdentityReadPolicy(platformDriver.platform, provider.kind),
+          logger: (m) => console.log(m),
+        });
         const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
         if (decision.kind === 'halt') {
           console.error(
