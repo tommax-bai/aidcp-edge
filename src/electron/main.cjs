@@ -4608,6 +4608,38 @@ ipcMain.handle('fleet:select', (_event, envId) => {
   }
   return fleetSnapshot();
 });
+// 人工昵称专用原子保存：昵称是本地 Edge 花名册数据，不伪装成 Cloud 更新。
+// write 失败时恢复旧 settings，且绝不先同步 handle；renderer 可安全乐观展示并按失败回滚。
+ipcMain.handle('fleet:setManualNickname', (_event, raw) => {
+  const profileId = String((raw && raw.profileId) || '').trim();
+  const nickname = String((raw && raw.nickname) || '').trim();
+  if (!profileId) return { ok: false, error: '环境标识为空，未保存昵称。' };
+  if (!nickname) return { ok: false, error: '环境昵称不能为空。' };
+  if (nickname.length > 80) return { ok: false, error: '环境昵称不能超过 80 个字符。' };
+
+  const previousEnvironments = fleet.normalizeEnvironments(settings.environments || []);
+  const index = previousEnvironments.findIndex((environment) => environment.profileId === profileId);
+  if (index < 0) return { ok: false, error: '该环境不在运行花名册中，未保存昵称。' };
+  if (clientAuthEnabled() && allowedProfileIds instanceof Set && !allowedProfileIds.has(profileId)) {
+    return { ok: false, error: '当前账号无权修改该环境昵称。' };
+  }
+
+  const previousSettings = settings;
+  const nextEnvironment = { ...previousEnvironments[index], name: nickname, nameSource: 'manual' };
+  const nextEnvironments = previousEnvironments.map((environment, envIndex) =>
+    envIndex === index ? nextEnvironment : environment);
+  const saved = saveSettings({ environments: nextEnvironments });
+  if (!saved.ok) {
+    settings = previousSettings;
+    broadcastFleet();
+    return { ok: false, error: saved.error || '本地设置写入失败。', environment: previousEnvironments[index] };
+  }
+
+  syncEnvHandles();
+  const renamedHandle = [...envs.values()].find((handle) => handle.profileId === profileId);
+  if (renamedHandle) syncBrowserPersonaNotice(renamedHandle, true);
+  return { ok: true, environment: nextEnvironment };
+});
 ipcMain.handle('fleet:startAll', (_event, opts) => startAllEnvs(opts || {}));
 ipcMain.handle('fleet:stopAll', () => stopAllEnvs());
 ipcMain.handle('fleet:setRailCollapsed', (_event, collapsed) => {

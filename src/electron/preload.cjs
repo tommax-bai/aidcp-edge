@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   // 多环境 fleet 控制面：花名册快照 / 选中环境 / 全部启动（内存预检，force 放行）/ 全部停止 / 环境栏收展持久化。
   fleetGet: () => ipcRenderer.invoke('fleet:get'),
   fleetSelect: (envId) => ipcRenderer.invoke('fleet:select', envId),
+  saveEnvironmentNickname: (args) => ipcRenderer.invoke('fleet:setManualNickname', args),
   fleetStartAll: (opts) => ipcRenderer.invoke('fleet:startAll', opts),
   fleetStopAll: () => ipcRenderer.invoke('fleet:stopAll'),
   // Facebook 批量人设：主进程本地构建模板；确认后 Cloud 只筛目标并原样补齐。

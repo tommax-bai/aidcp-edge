@@ -392,6 +392,8 @@ let selectedProfileName = '';
 // 运行花名册（edge-multi-environment-fleet）：多选加入的环境成员 [{profileId, name, platform, nameSource?}]，
 // 按 profileId 去重（同一分身 MUST NOT 重复加入，防 edgeId 撞车）；持久化为 settings.environments。
 let roster = [];
+// 昵称写入等待态按 envId 隔离：页面先乐观显示，但在主进程确认落盘前不得冒充“已保存”。
+const manualNicknamePendingEnvIds = new Set();
 // 客户归属环境默认入册的持久 opt-out；只在 main 明确标记 assignmentScoped 的列表上读写。
 let clientRosterExcludedEnvIds = new Set();
 let lastAssignmentScoped = false;
@@ -3207,8 +3209,11 @@ function applyFleetSnapshot(snap) {
     fleetView.order.push(e.envId);
     const existing = fleetView.envs.get(e.envId);
     if (existing) {
-      existing.name = e.name || existing.name;
-      existing.nameSource = e.nameSource === 'manual' ? 'manual' : undefined;
+      // 昵称持久化在途时，旧 fleet 快照不得把乐观名字弹回；成功/失败回执会各自收敛到权威结果。
+      if (!manualNicknamePendingEnvIds.has(e.envId)) {
+        existing.name = e.name || existing.name;
+        existing.nameSource = e.nameSource === 'manual' ? 'manual' : undefined;
+      }
       existing.platform = e.platform || existing.platform;
       existing.profileId = e.profileId || existing.profileId;
       if (e.status) existing.status = e.status;
@@ -3230,6 +3235,7 @@ function applyFleetSnapshot(snap) {
     slowStartHttpByEnv.delete(goneEnvKey); // change slow-start-offline-toggle：连同慢启动 HTTP/回执缓存一并清
     environmentRiskHttpByEnv.delete(goneEnvKey);
     environmentRiskFeedbackByEnv.delete(goneEnvKey);
+    manualNicknamePendingEnvIds.delete(key);
     environmentRiskFetchInFlight.delete(goneEnvKey);
     fleetView.envs.delete(key); // 快照为准（含 '__local__' 占位）
     // 连同该环境的所有渲染层缓冲一并清（否则同一分身移出再加回会重放上一会话的陈旧活动 + 吞掉新发布折流，
@@ -3381,7 +3387,7 @@ function renderRail() {
     globalPendingCount: fullModel.pendingCount,
     counts,
     // platform 必须进签名：改平台后行才会重建上色（漏掉则签名未变、UI 停留旧平台）。
-    rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, railDisplayName(r), r.nameSource, r.label, Boolean(r.status && r.status.personaBound), normPlatform(r.platform)]),
+    rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, railDisplayName(r), r.nameSource, manualNicknamePendingEnvIds.has(r.envId), r.label, Boolean(r.status && r.status.personaBound), normPlatform(r.platform)]),
   });
   if (sig === fleetView.lastRailSig) return;
   fleetView.lastRailSig = sig;
@@ -3501,9 +3507,11 @@ function makeRailRow(row) {
   nameLine.className = 'rail-nameline';
   const nameEl = document.createElement('span');
   const manualName = row.nameSource === 'manual';
-  nameEl.className = `rail-name${manualName ? ' manual' : ''}`;
+  const pendingName = manualNicknamePendingEnvIds.has(row.envId);
+  nameEl.className = `rail-name${manualName ? ' manual' : ''}${pendingName ? ' pending' : ''}`;
   nameEl.textContent = displayName;
-  nameEl.title = manualName ? '人工昵称 · 双击修改' : '双击修改环境昵称';
+  nameEl.title = pendingName ? '人工昵称 · 正在保存' : manualName ? '人工昵称 · 双击修改' : '双击修改环境昵称';
+  if (pendingName) nameEl.setAttribute('aria-busy', 'true');
   let nameClickTimer = null;
   nameEl.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -3562,8 +3570,38 @@ function makeRailRow(row) {
   return btn;
 }
 
-/** 左栏昵称就地编辑：人工来源一旦提交即成为最高优先级，并经现有 settings 通道立即持久化。 */
+/** 昵称乐观变化后，只重绘环境身份锚点；不重跑生命周期或业务状态副作用。 */
+function refreshEnvironmentIdentityAnchors(envId) {
+  fleetView.lastRailSig = '';
+  renderRail();
+  if (!envId || fleetView.selected !== envId) return;
+  const env = fleetView.envs.get(envId);
+  const status = env && effectiveEnvironmentStatus(env, env.status || currentStatus);
+  if (status) {
+    renderTitlebar(status);
+    syncInteractionWorkspace();
+    syncContentWorkspace(status);
+  }
+  if (env && fields.personaPop && fields.personaPop.classList.contains('open')
+    && fields.personaHeadTitle && fields.personaHeadTitle.textContent !== '批量设置人设') {
+    const label = resolveEnvironmentDisplayName(env, status).name;
+    if (fields.personaPopEnv) fields.personaPopEnv.textContent = label ? `· ${label}` : '';
+    if (fields.personaAva) fields.personaAva.textContent = label ? label.slice(0, 1) : '✦';
+  }
+  if (env && fleetView.guided && fleetView.guided.current === envId && fields.guideTitle
+    && fields.guidePanel && !fields.guidePanel.classList.contains('hidden')) {
+    const q = guideQueue();
+    const target = q.find((item) => item.envId === envId);
+    if (target) fields.guideTitle.textContent = `引导处理（剩 ${q.length} 个）：${resolveEnvironmentDisplayName(env, status).name}`;
+  }
+}
+
+/** 左栏昵称就地编辑：先乐观显示，再等待主进程原子持久化；失败恢复原昵称与来源。 */
 function beginRailNameEdit(row, nameEl) {
+  if (manualNicknamePendingEnvIds.has(row.envId)) {
+    setRailMsg('该环境昵称正在保存，请等待确认。');
+    return;
+  }
   const profileId = String((row && row.profileId) || '').trim();
   const member = roster.find((item) => item.profileId === profileId);
   if (!member) {
@@ -3581,10 +3619,7 @@ function beginRailNameEdit(row, nameEl) {
   input.select();
 
   let settled = false;
-  const closeEditor = () => {
-    fleetView.lastRailSig = '';
-    renderRail();
-  };
+  const closeEditor = () => refreshEnvironmentIdentityAnchors(row.envId);
   const commit = async () => {
     if (settled) return;
     settled = true;
@@ -3599,21 +3634,53 @@ function beginRailNameEdit(row, nameEl) {
       return;
     }
 
+    const previousName = member.name;
+    const previousWasManual = member.nameSource === 'manual';
+    const envBefore = fleetView.envs.get(row.envId);
+    const previousEnvName = envBefore && envBefore.name;
+    const previousEnvWasManual = Boolean(envBefore && envBefore.nameSource === 'manual');
+
+    manualNicknamePendingEnvIds.add(row.envId);
     member.name = nickname;
     member.nameSource = 'manual';
     if (settingsUi.adsProfile.value.trim() === member.profileId) selectedProfileName = nickname;
-    const env = fleetView.envs.get(row.envId);
-    if (env) {
-      env.name = nickname;
-      env.nameSource = 'manual';
+    if (envBefore) {
+      envBefore.name = nickname;
+      envBefore.nameSource = 'manual';
     }
     closeEditor();
+    setRailMsg(`正在保存人工昵称「${nickname}」…`);
 
-    const saved = await persistRoster();
-    if (!saved || saved.saveOk === false) {
-      setRailMsg(`人工昵称「${nickname}」本次已生效，但未持久化${saved && saved.saveError ? `：${saved.saveError}` : ''}；重启后可能丢失。`);
+    let saved;
+    try {
+      if (!window.aidcpEdge || typeof window.aidcpEdge.saveEnvironmentNickname !== 'function') {
+        throw new Error('当前客户端未加载昵称保存能力，请重启客户端后再试。');
+      }
+      saved = await window.aidcpEdge.saveEnvironmentNickname({ profileId, nickname });
+    } catch (error) {
+      saved = { ok: false, error: error && error.message ? error.message : '昵称保存请求失败。' };
+    }
+    if (!saved || saved.ok !== true) {
+      const currentMember = roster.find((item) => item.profileId === profileId);
+      if (currentMember) {
+        currentMember.name = previousName;
+        if (previousWasManual) currentMember.nameSource = 'manual';
+        else delete currentMember.nameSource;
+      }
+      const currentEnv = fleetView.envs.get(row.envId);
+      if (currentEnv) {
+        currentEnv.name = previousEnvName;
+        if (previousEnvWasManual) currentEnv.nameSource = 'manual';
+        else delete currentEnv.nameSource;
+      }
+      if (settingsUi.adsProfile.value.trim() === profileId) selectedProfileName = previousName;
+      manualNicknamePendingEnvIds.delete(row.envId);
+      refreshEnvironmentIdentityAnchors(row.envId);
+      setRailMsg(`人工昵称保存失败，已恢复「${previousName || railDisplayName(row)}」：${saved && saved.error ? saved.error : '未知错误'}`);
       return;
     }
+    manualNicknamePendingEnvIds.delete(row.envId);
+    refreshEnvironmentIdentityAnchors(row.envId);
     setRailMsg(`已保存人工昵称「${nickname}」，后续系统更新不会覆盖。`);
   };
 

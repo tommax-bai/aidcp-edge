@@ -66,7 +66,7 @@ async function boot(
   let pushStatus: (s: unknown) => void = () => undefined;
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], personaPreview: [], personaFill: [], select: [], close: [], notify: [], start: [], resume: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], personaPreview: [], personaFill: [], select: [], close: [], notify: [], start: [], resume: [], saveNickname: [] };
   const settings = {
     provider: 'adspower',
     adsProfileId: 'p1',
@@ -99,6 +99,10 @@ async function boot(
       ],
     }),
     fleetSelect: async (envId: string) => { calls.select.push(envId); return {}; },
+    saveEnvironmentNickname: async (args: { profileId: string; nickname: string }) => {
+      calls.saveNickname.push(args);
+      return { ok: true, environment: { profileId: args.profileId, name: args.nickname, nameSource: 'manual' } };
+    },
     fleetSetRailCollapsed: async () => ({ ok: true }),
     fleetStartAll: async (opts: unknown) => { calls.startAll.push(opts); return { ok: true, queued: 2 }; },
     fleetStopAll: async () => ({ ok: true }),
@@ -315,11 +319,11 @@ test('环境头像三态：①未选中→选中 ②再点→抬前显示（show
 });
 
 test('环境昵称双击进入编辑并持久化人工来源，不同时触发浏览器三态', async () => {
-  const saved: Array<Record<string, unknown>> = [];
+  const saved: Array<{ profileId: string; nickname: string }> = [];
   const { w, calls } = await boot({
-    saveSettings: async (patch: Record<string, unknown>) => {
-      saved.push(patch);
-      return { ...patch, saveOk: true };
+    saveEnvironmentNickname: async (args: { profileId: string; nickname: string }) => {
+      saved.push(args);
+      return { ok: true, environment: { profileId: args.profileId, name: args.nickname, nameSource: 'manual' } };
     },
   });
   const rowOf = (id: string) => w.document.querySelector(`.rail-row[data-env-id="${id}"]`) as HTMLElement;
@@ -340,16 +344,13 @@ test('环境昵称双击进入编辑并持久化人工来源，不同时触发�
   input.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
   await tick();
   await tick();
-  const savedMember = saved
-    .flatMap((patch) => (patch.environments as Array<Record<string, unknown>>) || [])
-    .find((member) => member.profileId === 'p1');
-  assert.equal(savedMember?.profileId, 'p1');
-  assert.equal(savedMember?.name, '运营重点号');
-  assert.equal(savedMember?.platform, 'xiaohongshu');
-  assert.equal(savedMember?.nameSource, 'manual');
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0]?.profileId, 'p1');
+  assert.equal(saved[0]?.nickname, '运营重点号');
   const rendered = nicknameOf('ads-p1');
   assert.equal(rendered.textContent, '运营重点号');
   assert.equal(rendered.classList.contains('manual'), true);
+  assert.equal(rendered.classList.contains('pending'), false);
   assert.match(rendered.title, /人工昵称/);
   assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /后续系统更新不会覆盖/);
 });
@@ -434,11 +435,11 @@ test('人工昵称统一覆盖环境身份锚点，旧系统名心跳不得回�
 });
 
 test('环境昵称编辑支持 Escape 取消、空值拒绝与失焦提交', async () => {
-  const saved: Array<Record<string, unknown>> = [];
+  const saved: Array<{ profileId: string; nickname: string }> = [];
   const { w } = await boot({
-    saveSettings: async (patch: Record<string, unknown>) => {
-      saved.push(patch);
-      return { ...patch, saveOk: true };
+    saveEnvironmentNickname: async (args: { profileId: string; nickname: string }) => {
+      saved.push(args);
+      return { ok: true };
     },
   });
   const rowOf = (id: string) => w.document.querySelector(`.rail-row[data-env-id="${id}"]`) as HTMLElement;
@@ -468,15 +469,15 @@ test('环境昵称编辑支持 Escape 取消、空值拒绝与失焦提交', asy
   await tick();
   await tick();
   assert.equal(saved.length, 1);
-  const savedP2 = ((saved[0].environments as Array<Record<string, unknown>>) || [])
-    .find((member) => member.profileId === 'p2');
-  assert.equal(savedP2?.name, '失焦保存号');
-  assert.equal(savedP2?.nameSource, 'manual');
+  assert.equal(saved[0]?.profileId, 'p2');
+  assert.equal(saved[0]?.nickname, '失焦保存号');
 });
 
-test('人工昵称写盘失败时保留本次显示并明确提示未持久化', async () => {
-  const { w } = await boot({
-    saveSettings: async (patch: Record<string, unknown>) => ({ ...patch, saveOk: false, saveError: '磁盘只读' }),
+test('人工昵称先乐观显示 pending，写盘失败后恢复原昵称与来源并提示原因', async () => {
+  let finishSave: (value: unknown) => void = () => undefined;
+  const saveResult = new Promise((resolve) => { finishSave = resolve; });
+  const { w, pushFleet } = await boot({
+    saveEnvironmentNickname: async () => saveResult,
   });
   const row = w.document.querySelector('.rail-row[data-env-id="ads-p1"]') as HTMLElement;
   (row.querySelector('.rail-name') as HTMLElement)
@@ -485,9 +486,38 @@ test('人工昵称写盘失败时保留本次显示并明确提示未持久化',
   input.value = '本次人工名';
   input.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
   await tick();
+  const pendingName = w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-name') as HTMLElement;
+  assert.equal(pendingName.textContent, '本次人工名', '第一次 await 前应先乐观显示新昵称');
+  assert.equal(w.document.querySelector('#acct-name')?.textContent, '本次人工名', '当前账号标题也应同步乐观更新');
+  assert.equal(pendingName.classList.contains('pending'), true, '等待写盘期间必须与已保存态区分');
+  assert.equal(pendingName.getAttribute('aria-busy'), 'true');
+  assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /正在保存/);
+
+  pushFleet({
+    provider: 'adspower',
+    selectedEnvId: 'ads-p1',
+    railCollapsed: false,
+    environments: [{
+      envId: 'ads-p1', profileId: 'p1', name: '环境一', platform: 'xiaohongshu',
+      status: makeStatus({ envId: 'ads-p1', envName: '环境一' }),
+    }],
+  });
   await tick();
-  assert.equal((w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-name') as HTMLElement).textContent, '本次人工名');
-  assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /未持久化.*重启后可能丢失/);
+  assert.equal(
+    w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-name')?.textContent,
+    '本次人工名',
+    'pending 期间旧 fleet 快照不得把乐观昵称弹回',
+  );
+
+  finishSave({ ok: false, error: '磁盘只读' });
+  await tick();
+  await tick();
+  const rolledBack = w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-name') as HTMLElement;
+  assert.equal(rolledBack.textContent, '环境一');
+  assert.equal(w.document.querySelector('#acct-name')?.textContent, '环境一', '失败后当前账号标题也恢复原名');
+  assert.equal(rolledBack.classList.contains('manual'), false, '原来源不是人工，失败后必须恢复来源');
+  assert.equal(rolledBack.classList.contains('pending'), false);
+  assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /保存失败.*已恢复.*磁盘只读/);
 });
 
 test('环境头像三态：验证码浮层态（core 仍在跑）保留 shown，第三态仍可归位', async () => {
