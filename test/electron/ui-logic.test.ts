@@ -113,23 +113,31 @@ test('健康合成：自动化首次连接 → 是启动中，绝不冒充「正
   );
   assert.equal(booting.code, 'ready');
   assert.doesNotMatch(booting.label, /重新连接/); // 「重」断言了一次从未发生过的连接
-  assert.match(booting.label, /启动自动化/);
+  assert.equal(booting.label, '启动中');
 });
 
-test('健康合成：自动化引擎连上过之后掉线 → 才是真的「自动化正在重连」', () => {
+test('健康合成：自动化引擎连上过之后掉线 → 才是真的「重连中」', () => {
   const dropped = uiLogic.synthesizeHealth(
     st({ automationState: 'running', engineLinkState: 'reconnecting', cloudEverConnected: true }),
   );
   assert.equal(dropped.code, 'attention');
-  assert.match(dropped.label, /自动化正在重连/);
+  assert.equal(dropped.label, '重连中');
 });
 
-test('健康合成：暂停 / 启动中 / 停止', () => {
-  assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'paused', engineLinkState: 'disconnected', browserState: 'closed' })).code, 'paused');
+test('健康合成：状态标签省略重复主体，详情仍说明真实阶段', () => {
+  const paused = uiLogic.synthesizeHealth(st({ automationState: 'paused', engineLinkState: 'disconnected', browserState: 'closed' }));
+  assert.equal(paused.code, 'paused');
+  assert.equal(paused.label, '已暂停');
   const closed = uiLogic.synthesizeHealth(st({ automationState: 'stopped', engineLinkState: 'disconnected', browserState: 'closed' }));
-  assert.equal(closed.label, '客户端已就绪');
+  assert.equal(closed.label, '已就绪');
   assert.match(closed.detail, /数据管理可直接使用/);
-  assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'starting', engineLinkState: 'connecting' })).code, 'ready');
+  const starting = uiLogic.synthesizeHealth(st({ automationState: 'starting', engineLinkState: 'connecting' }));
+  assert.equal(starting.code, 'ready');
+  assert.equal(starting.label, '启动中');
+  assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'pausing' })).label, '暂停中');
+  assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'stopping' })).label, '关闭中');
+  assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'ready', engineLinkState: 'connected' })).label, '已就绪');
+  assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'error' })).label, '异常');
   assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'stopped', engineLinkState: 'disconnected' })).code, 'ready');
 });
 

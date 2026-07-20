@@ -199,10 +199,19 @@ test('fleetLevel：冷启动窗口留在 launching，绝不冒充需要人工', 
   );
   assert.equal(booting.level, 'launching');
   assert.equal(booting.needsAction, false); // 正常启动不是待办事项
-  assert.equal(booting.label, '自动化连接中');
+  assert.equal(booting.label, '连接中');
 });
 
-test('fleetLevel：连上过之后掉线才升为需处理的「正在重新连接」', () => {
+test('fleetLevel：自动化状态统一使用无重复主体的短标签', () => {
+  const now = Date.now();
+  const updatedAt = new Date(now).toISOString();
+  assert.equal(uiLogic.fleetLevel({ automationState: 'starting', updatedAt }, now).label, '处理中');
+  assert.equal(uiLogic.fleetLevel({ automationState: 'ready', engineLinkState: 'connected', updatedAt }, now).label, '已就绪');
+  assert.equal(uiLogic.fleetLevel({ automationState: 'running', engineLinkState: 'connected', updatedAt }, now).label, '运行中');
+  assert.equal(uiLogic.fleetLevel({ automationState: 'error', updatedAt }, now).label, '异常');
+});
+
+test('fleetLevel：连上过之后掉线才升为需处理的「重连中」', () => {
   const now = Date.now();
   const dropped = uiLogic.fleetLevel(
     { edge: 'running', session: 'running', cloud: 'disconnected', cloudEverConnected: true, updatedAt: new Date(now).toISOString() },
@@ -210,7 +219,7 @@ test('fleetLevel：连上过之后掉线才升为需处理的「正在重新连�
   );
   assert.equal(dropped.level, 'attention');
   assert.equal(dropped.needsAction, true);
-  assert.equal(dropped.label, '自动化正在重连');
+  assert.equal(dropped.label, '重连中');
 });
 
 test('fleetLevel：放弃重启和冻结为 error；账号重复运行为 attention', () => {
@@ -236,9 +245,9 @@ test('fleetLevel：暂停与关闭共享 offline 级别但标签明确区分，�
   const paused = uiLogic.fleetLevel({ edge: 'stopped', session: 'paused' }, now);
   const closed = uiLogic.fleetLevel({ edge: 'stopped', session: 'closed' }, now);
   assert.equal(paused.level, 'offline');
-  assert.equal(paused.label, '自动化已暂停');
+  assert.equal(paused.label, '已暂停');
   assert.equal(closed.level, 'offline');
-  assert.equal(closed.label, '客户端已就绪');
+  assert.equal(closed.label, '已就绪');
 });
 
 test('红线：阻断浮层（验证码/登录墙）即便 edge 仍 running 也判需处理，绝不呈现为绿色在线', () => {
