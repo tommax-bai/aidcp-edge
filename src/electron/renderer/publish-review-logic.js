@@ -9,6 +9,7 @@
   const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
   const SCHEDULE_MIN_AHEAD_MS = 60 * 60 * 1000;
   const SCHEDULE_MAX_AHEAD_MS = 14 * 24 * 60 * 60 * 1000;
+  const PEAK_HOURS = Object.freeze([8, 12, 18]);
 
   function toShanghaiInput(timestamp) {
     if (!Number.isFinite(timestamp)) return '';
@@ -26,6 +27,38 @@
   function defaultScheduledInput(now) {
     const earliest = now + SCHEDULE_MIN_AHEAD_MS;
     return toShanghaiInput(Math.ceil(earliest / 60_000) * 60_000);
+  }
+
+  function shanghaiHourKey(timestamp) {
+    const input = toShanghaiInput(timestamp);
+    return input ? input.slice(0, 13) : '';
+  }
+
+  function nextPeakScheduledInput(currentInput, occupiedTimes, now) {
+    if (!Number.isFinite(now)) return null;
+    const current = fromShanghaiInput(currentInput);
+    const earliest = now + SCHEDULE_MIN_AHEAD_MS;
+    const latest = now + SCHEDULE_MAX_AHEAD_MS;
+    const cursor = current !== null && current > earliest ? current : earliest;
+    const occupied = new Set(
+      (Array.isArray(occupiedTimes) ? occupiedTimes : [])
+        .map(shanghaiHourKey)
+        .filter(Boolean),
+    );
+    const shanghaiDate = toShanghaiInput(cursor).slice(0, 10);
+    const startDay = Date.parse(`${shanghaiDate}T00:00:00Z`);
+    for (let dayOffset = 0; dayOffset <= 14; dayOffset += 1) {
+      const date = new Date(startDay + dayOffset * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      for (const hour of PEAK_HOURS) {
+        const input = `${date}T${String(hour).padStart(2, '0')}:00`;
+        const timestamp = fromShanghaiInput(input);
+        if (timestamp === null || timestamp < earliest || timestamp > latest) continue;
+        if (current !== null && timestamp <= current) continue;
+        if (occupied.has(shanghaiHourKey(timestamp))) continue;
+        return input;
+      }
+    }
+    return null;
   }
 
   function validatePlan(platform, mode, inputValue, now) {
@@ -64,9 +97,12 @@
     SHANGHAI_OFFSET_MS,
     SCHEDULE_MIN_AHEAD_MS,
     SCHEDULE_MAX_AHEAD_MS,
+    PEAK_HOURS,
     toShanghaiInput,
     fromShanghaiInput,
     defaultScheduledInput,
+    shanghaiHourKey,
+    nextPeakScheduledInput,
     validatePlan,
     normalizeDraft,
   };

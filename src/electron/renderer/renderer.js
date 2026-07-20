@@ -379,6 +379,9 @@ const publishDraftReview = {
   publishMode: 'immediate',
   publishTimeInput: '',
   handledByEnv: new Map(),
+  scheduleAvailabilityByEnv: new Map(),
+  scheduleAvailabilityEpochByEnv: new Map(),
+  scheduleReservationsByAccount: new Map(),
 };
 // 云端环境（change edge-cloud-env-selector）：本地已选 key + 主进程解析出的目标云端视图（含友好名）。
 let cloudSelKey = '';
@@ -1954,6 +1957,83 @@ function publishDraftHandledSet(envId) {
   return publishDraftReview.handledByEnv.get(envId);
 }
 
+function publishScheduleEnvKey(envId) {
+  return envId || '__local__';
+}
+
+function publishScheduleAccountKey(status = currentStatus, envId = status?.envId) {
+  const accountId = status?.envId === envId ? String(status?.account?.id || '').trim() : '';
+  return accountId ? `account:${accountId}` : `env:${publishScheduleEnvKey(envId)}`;
+}
+
+function publishScheduleReservationSet(accountKey) {
+  if (!publishDraftReview.scheduleReservationsByAccount.has(accountKey)) {
+    publishDraftReview.scheduleReservationsByAccount.set(accountKey, new Set());
+  }
+  return publishDraftReview.scheduleReservationsByAccount.get(accountKey);
+}
+
+function publishScheduleAvailability(envId = publishDraftReview.envId) {
+  return publishDraftReview.scheduleAvailabilityByEnv.get(publishScheduleEnvKey(envId))
+    || { status: 'unavailable', occupiedTimes: [] };
+}
+
+function publishScheduleOccupiedTimes(envId = publishDraftReview.envId) {
+  const availability = publishScheduleAvailability(envId);
+  const reservations = publishScheduleReservationSet(publishScheduleAccountKey(currentStatus, envId));
+  return [...new Set([...availability.occupiedTimes, ...reservations])];
+}
+
+function syncPublishScheduleShortcutAvailability() {
+  const peakButton = fields.publishPreviewContent?.querySelector('[data-publish-time-shortcut="peak"]');
+  const freeButton = fields.publishPreviewContent?.querySelector('[data-publish-time-shortcut="free"]');
+  const availabilityHint = fields.publishPreviewContent?.querySelector('.publish-plan-shortcut-hint');
+  if (!peakButton || !freeButton || !availabilityHint) return;
+  const availability = publishScheduleAvailability();
+  peakButton.disabled = publishPreviewActionBusy;
+  freeButton.disabled = publishPreviewActionBusy || availability.status !== 'ready';
+  freeButton.title = availability.status === 'loading'
+    ? '正在读取已安排时段'
+    : availability.status === 'ready'
+      ? '跳过当前账号同一小时已有的定时安排'
+      : '暂时无法判断空闲时段';
+  const base = '热门时段：每天 08:00、12:00、18:00。快捷按钮只选择时间，仍需点击批准。';
+  availabilityHint.textContent = availability.status === 'loading'
+    ? `${base} 正在读取已安排时段…`
+    : availability.status === 'ready'
+      ? base
+      : `${base} 暂时无法判断空闲时段。`;
+}
+
+async function loadPublishScheduleOccupiedHours(envId) {
+  const key = publishScheduleEnvKey(envId);
+  const epoch = (publishDraftReview.scheduleAvailabilityEpochByEnv.get(key) || 0) + 1;
+  publishDraftReview.scheduleAvailabilityEpochByEnv.set(key, epoch);
+  publishDraftReview.scheduleAvailabilityByEnv.set(key, { status: 'loading', occupiedTimes: [] });
+  syncPublishScheduleShortcutAvailability();
+  const api = window.aidcpEdge?.publishScheduleOccupiedHours;
+  if (typeof api !== 'function') {
+    publishDraftReview.scheduleAvailabilityByEnv.set(key, { status: 'unavailable', occupiedTimes: [] });
+    syncPublishScheduleShortcutAvailability();
+    return;
+  }
+  let response;
+  try {
+    response = await api(envId);
+  } catch {
+    response = { ok: false };
+  }
+  if (publishDraftReview.scheduleAvailabilityEpochByEnv.get(key) !== epoch) return;
+  const occupiedTimes = response?.data?.occupiedTimes;
+  const valid = response?.ok === true
+    && Array.isArray(occupiedTimes)
+    && occupiedTimes.every((timestamp) => Number.isFinite(timestamp));
+  publishDraftReview.scheduleAvailabilityByEnv.set(key, valid
+    ? { status: 'ready', occupiedTimes: occupiedTimes.slice() }
+    : { status: 'unavailable', occupiedTimes: [] });
+  if (publishScheduleEnvKey(publishDraftReview.envId) === key) syncPublishScheduleShortcutAvailability();
+}
+
 function resetPublishDraftReview(envId) {
   if (publishDraftReview.envId === envId) return;
   publishDraftReview.requestEpoch += 1;
@@ -2021,6 +2101,7 @@ function syncPublishPreviewActions(status) {
   } else if (pending) {
     fields.publishPreviewActionHint.textContent = '批准会按上方发布方式执行；取消不会发布';
   }
+  syncPublishScheduleShortcutAvailability();
 }
 
 function appendPreviewText(parent, text, className) {
@@ -2452,12 +2533,14 @@ function appendPublishPlanControls(parent, preview) {
   if (preview.platform !== 'xiaohongshu') {
     appendPreviewText(section, '当前平台暂不支持原生定时发布。', 'publish-preview-hint');
   } else {
-    timeRow = document.createElement('label');
+    timeRow = document.createElement('div');
     timeRow.className = 'publish-plan-time';
-    const caption = document.createElement('span');
+    const caption = document.createElement('label');
     caption.textContent = '发布时间（北京时间）';
     const input = document.createElement('input');
     timeInput = input;
+    input.id = `publish-plan-time-${preview.recordId}`;
+    caption.htmlFor = input.id;
     input.type = 'datetime-local';
     input.value = publishDraftReview.publishTimeInput;
     input.min = publishReviewLogic.defaultScheduledInput(Date.now());
@@ -2491,7 +2574,36 @@ function appendPublishPlanControls(parent, preview) {
       interactionScrollTop = null;
     });
     input.addEventListener('blur', () => { interactionScrollTop = null; });
-    timeRow.append(caption, input, hint);
+    const shortcuts = document.createElement('div');
+    shortcuts.className = 'publish-plan-shortcuts';
+    const addShortcut = (kind, label) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'publish-plan-shortcut';
+      button.dataset.publishTimeShortcut = kind;
+      button.textContent = label;
+      button.disabled = publishPreviewActionBusy || (kind === 'free' && publishScheduleAvailability().status !== 'ready');
+      button.addEventListener('click', () => {
+        const scrollTop = fields.publishPreviewPanel?.scrollTop ?? 0;
+        const occupiedTimes = kind === 'free' ? publishScheduleOccupiedTimes() : [];
+        const nextInput = publishReviewLogic.nextPeakScheduledInput(input.value, occupiedTimes, Date.now());
+        if (!nextInput) {
+          hint.textContent = kind === 'free' ? '未来 14 天内没有空闲热门时段。' : '未来 14 天内没有可选热门时段。';
+          hint.classList.add('publish-preview-hint-warn');
+          restorePublishPreviewScrollTop(scrollTop);
+          return;
+        }
+        input.value = nextInput;
+        updateTime(false);
+        restorePublishPreviewScrollTop(scrollTop);
+      });
+      shortcuts.appendChild(button);
+    };
+    addShortcut('peak', '下个热门时段');
+    addShortcut('free', '下个空闲时段');
+    const shortcutHint = document.createElement('span');
+    shortcutHint.className = 'publish-preview-hint publish-plan-shortcut-hint';
+    timeRow.append(caption, input, shortcuts, hint, shortcutHint);
     section.appendChild(timeRow);
   }
   syncControls = () => {
@@ -2508,6 +2620,7 @@ function appendPublishPlanControls(parent, preview) {
   };
   syncControls();
   parent.appendChild(section);
+  syncPublishScheduleShortcutAvailability();
 }
 
 function renderPublishPreviewContent(status) {
@@ -2687,6 +2800,7 @@ function openPublishPreview() {
     fields.publishPreviewPanel.setAttribute('aria-hidden', 'false');
   }
   void loadPublishDraftList();
+  void loadPublishScheduleOccupiedHours(currentStatus.envId || currentEnvId());
 }
 
 function closePublishPreview() {
@@ -2716,6 +2830,7 @@ async function submitPublishPreviewAction(approved) {
   if (!preview || publishPreviewActionBusy) return;
   const actionEnvId = currentStatus.envId;
   const actionRecordId = preview.recordId;
+  const actionScheduleAccountKey = publishScheduleAccountKey(currentStatus, actionEnvId);
   const publishApproval = window.aidcpEdge && window.aidcpEdge.publishApproval;
   if (typeof publishApproval !== 'function') {
     fields.publishPreviewActionHint.textContent = '当前客户端不支持应用内审批。';
@@ -2760,6 +2875,9 @@ async function submitPublishPreviewAction(approved) {
     syncPublishPreviewActions(currentStatus);
     fields.publishPreviewActionHint.textContent = publishPreviewActionReason(result && result.reason);
     return;
+  }
+  if (approved && plan?.publishMode === 'scheduled' && Number.isFinite(plan.publishTime)) {
+    publishScheduleReservationSet(actionScheduleAccountKey).add(plan.publishTime);
   }
   const nextState = result.state || (approved ? 'approved' : 'rejected');
   publishDraftHandledSet(actionEnvId).add(Number(actionRecordId));
