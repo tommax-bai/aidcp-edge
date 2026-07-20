@@ -14,6 +14,10 @@
         <div class="ava" id="acct-ava">书</div>
         <div class="acct-h" id="acct-name">小红书账号</div>
         <span class="acct-p" id="acct-plat">小红书</span>
+        <button id="proxy-runtime-chip" class="proxy-runtime-chip nodrag hidden" type="button" aria-expanded="false" aria-controls="proxy-runtime-pop">
+          <span class="proxy-runtime-dot" aria-hidden="true"></span>
+          <span id="proxy-runtime-label">待验证 · 本次 0 B</span>
+        </button>
       </div>
       <div class="tb-spacer"></div>
       <!-- 当前账号灵感储备：真实汇总读取后再落数；条宽只表达积累丰富度，不表示消耗或任务完成率。 -->
@@ -51,6 +55,17 @@
       <div class="hp-row"><span class="hp-label">自动运营</span><strong id="session-state" class="badge">待命</strong></div>
       <div class="hp-row"><span class="hp-label">账号保护</span><strong id="risk-status" class="badge">正常</strong></div>
       <div class="hp-row"><span class="hp-label">本机引擎</span><strong id="edge-state" class="badge">已停止</strong></div>
+    </div>
+
+    <!-- 当前 Facebook 指纹浏览器的代理运行证据；配置态与实际出口刻意分行，避免“配了=生效”。 -->
+    <div id="proxy-runtime-pop" class="proxy-runtime-pop hidden" role="dialog" aria-label="代理运行详情" aria-hidden="true">
+      <div class="pr-head"><strong>代理运行详情</strong><span id="proxy-runtime-state" class="pr-state">待验证</span></div>
+      <div class="pr-row"><span>代理配置</span><strong id="proxy-runtime-config">配置待读取</strong></div>
+      <div class="pr-row"><span>浏览器实际出口</span><strong id="proxy-runtime-browser-ip">未取得</strong></div>
+      <div class="pr-row"><span>本机直连出口</span><strong id="proxy-runtime-direct-ip">未取得</strong></div>
+      <div class="pr-row"><span>最后检测</span><strong id="proxy-runtime-checked-at">尚未检测</strong></div>
+      <div class="pr-row pr-traffic"><span>本次会话接收流量</span><strong id="proxy-runtime-bytes">0 B</strong></div>
+      <p class="pr-note">从客户端接管当前受管页面后累计；不含上传，也不是代理商计费流量。</p>
     </div>
 
     <div class="fleet-row" id="fleet-row">

@@ -83,6 +83,20 @@ body::-webkit-scrollbar:vertical,
 .acct-p.plat-facebook { background: var(--plat-fb); }
 .ava.plat-wechat { background: linear-gradient(135deg, #36c77b, var(--plat-wechat)); }
 .acct-p.plat-wechat { background: var(--plat-wechat); }
+.proxy-runtime-chip {
+  display: inline-flex; align-items: center; gap: 5px; height: 24px; max-width: 210px;
+  border: 1px solid #d5deeb; border-radius: 999px; padding: 0 8px;
+  color: #526174; background: #f6f8fb; font: inherit; font-size: 10.5px; font-weight: 650;
+  white-space: nowrap; cursor: pointer;
+}
+.proxy-runtime-chip:hover { border-color: #b8c8df; background: #f0f5fb; }
+.proxy-runtime-dot { width: 6px; height: 6px; border-radius: 50%; background: #94a3b8; flex: 0 0 auto; }
+.proxy-runtime-chip.verified { color: #18734b; border-color: #bde8d3; background: #edfbf4; }
+.proxy-runtime-chip.verified .proxy-runtime-dot { background: #16a34a; }
+.proxy-runtime-chip.danger { color: #b42332; border-color: #f2c4ca; background: #fff1f2; }
+.proxy-runtime-chip.danger .proxy-runtime-dot { background: #dc2626; }
+.proxy-runtime-chip.pending, .proxy-runtime-chip.unknown { color: #8a5b14; border-color: #f0dbac; background: #fff8e8; }
+.proxy-runtime-chip.pending .proxy-runtime-dot, .proxy-runtime-chip.unknown .proxy-runtime-dot { background: #d89b2b; }
 .tb-spacer { flex: 1; }
 
 /* 标题栏灵感储备入口：低频能力保持安静；蓝绿只在储备达到视觉饱和阈值后出现。 */
@@ -166,6 +180,22 @@ body::-webkit-scrollbar:vertical,
 .hp-hint:empty { display: none; }
 .hp-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .hp-label { font-size: 12.5px; color: var(--mute); }
+
+.proxy-runtime-pop {
+  position: fixed; top: 52px; left: 78px; z-index: 61;
+  width: 320px; background: var(--card); border: 1px solid var(--hair); border-radius: 13px;
+  box-shadow: 0 14px 40px rgba(15, 23, 42, .15); padding: 13px 14px;
+  display: flex; flex-direction: column; gap: 9px;
+}
+.pr-head, .pr-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pr-head { padding-bottom: 6px; border-bottom: 1px solid var(--hair); }
+.pr-head > strong { font-size: 13px; }
+.pr-state { font-size: 11px; color: var(--mute); }
+.pr-row > span { font-size: 12px; color: var(--mute); flex: 0 0 auto; }
+.pr-row > strong { min-width: 0; font-size: 12px; color: #28364a; text-align: right; overflow-wrap: anywhere; }
+.pr-traffic { margin-top: 2px; padding-top: 9px; border-top: 1px solid var(--hair); }
+.pr-traffic > strong { color: #245fbf; font-size: 13px; font-variant-numeric: tabular-nums; }
+.pr-note { margin: 0; color: var(--mute); font-size: 10.5px; line-height: 1.5; }
 
 /* ═══ 主列 ═══ */
 .shell {

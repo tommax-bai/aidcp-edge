@@ -48,6 +48,7 @@ import {
   type BrowserLaunchOptions,
   type ChromeInstance,
   type ReadSelfIdentityOptions,
+  ProxyRuntimeObserver,
 } from './cdp/index.js';
 import { selectPlatformDriver } from './platform/index.js';
 import { runWechatChannelsRuntime } from './wechat-channels/runtime.js';
@@ -255,12 +256,22 @@ async function main(): Promise<void> {
     console.log(`[aidcp-edge] 连接浏览器 CDP ${endpoint.host}:${endpoint.port}（stealth=${stealth ? 'on' : 'off'}）...`);
   }
   const attachOpts: Parameters<typeof attachToPage>[0] = { host: endpoint.host, port: endpoint.port, stealth };
+  const observesFacebookProxy = provider.kind === 'adspower' && platformDriver.platform === 'facebook';
+  if (observesFacebookProxy) attachOpts.network = true;
   if (pageUrl) attachOpts.urlIncludes = pageUrl;
   else if (provider.kind === 'adspower') {
     attachOpts.urlIncludes = platformDriver.attachUrlIncludes;
     attachOpts.targetPredicate = (target) => platformDriver.isAllowedTargetUrl(target.url);
   }
   const session = startBrowserAbsent ? createDetachedSession() : await attachToPage(attachOpts);
+  const proxyRuntime = observesFacebookProxy
+    ? new ProxyRuntimeObserver({
+        cdp: session.cdp,
+        probeUrl: process.env.AIDCP_EGRESS_PROBE_URL ?? '',
+        emit: (event) => console.log(`[ui-event] ${JSON.stringify(event)}`),
+      })
+    : undefined;
+  if (proxyRuntime && !startBrowserAbsent) void proxyRuntime.startGeneration();
   let parkingControlInstalled = !startBrowserAbsent;
   if (!startBrowserAbsent) console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
   // 停放校验失败会抛（bounds 与兜底位都过不了可见性探针）；绝不能因此跳过下面的 stdin 控制通道安装，
@@ -1445,6 +1456,7 @@ async function main(): Promise<void> {
       // 当成意外掉线、触发有界重连，最后把连接对象搞成一个 recovering/unavailable 的僵尸（今天的 bug）。
       // 释放后任何页面命令都会响亮失败，绝不静默假成功。
       session.detach();
+      proxyRuntime?.suspendGeneration('browser_standby');
       try {
         const freed = await chrome.killAndConfirmDead();
         if (!freed) {
@@ -1481,6 +1493,7 @@ async function main(): Promise<void> {
         //    重连配置在这里被重新构造，classify/rediscover 闭包里的端口随之更新——不换它，唤醒后第一次
         //    瞬断就会拿旧端口探活、探不到即误判「进程已死 = 终局」，把可续跑的连接直接判死。
         await reattachSession(session, attachOpts);
+        void proxyRuntime?.startGeneration();
 
         // 3) 停放（最小化 / 移出视野）要重新施加：新浏览器窗口不继承上一代的位置。
         try {
@@ -1502,6 +1515,7 @@ async function main(): Promise<void> {
               '如实判唤醒失败、留在待机态（可再次唤醒），绝不以默认账号开跑。',
           );
           session.detach();
+          proxyRuntime?.suspendGeneration('wake_identity_failed');
           await chrome?.killAndConfirmDead().catch(() => undefined);
           return false;
         }
@@ -1534,6 +1548,7 @@ async function main(): Promise<void> {
         // 半开的浏览器绝不留着占内存槽位——它既不能干活、又挡着别的账号。
         try {
           session.detach();
+          proxyRuntime?.suspendGeneration('wake_failed');
           await chrome?.killAndConfirmDead().catch(() => undefined);
         } catch {
           /* best-effort */

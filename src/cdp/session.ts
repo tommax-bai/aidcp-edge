@@ -44,6 +44,8 @@ export interface AttachOptions extends DiscoverOptions {
    * 重连内化进 CdpClient（保实例换内层 WS），对云端透明、绝不重发 hello。
    */
   reconnect?: Partial<CdpReconnectOptions> | false;
+  /** 是否启用 CDP Network domain（代理出口/接收流量观测使用）。 */
+  network?: boolean;
 }
 
 /**
@@ -92,11 +94,12 @@ function takeOverJavaScriptDialogs(cdp: CdpClient, log: (m: string) => void): vo
  */
 async function reEnableAndInject(
   cdp: CdpClient,
-  opts: { stealth?: boolean; injector: StealthInjector },
+  opts: { stealth?: boolean; injector: StealthInjector; network?: boolean },
 ): Promise<void> {
   await cdp.send('Runtime.enable').catch(() => undefined);
   await cdp.send('Page.enable').catch(() => undefined);
   await cdp.send('Input.enable').catch(() => undefined);
+  if (opts.network) await cdp.send('Network.enable').catch(() => undefined);
   // 权限弹窗兜底：与启动参数 --deny-permission-prompts 形成双保险，覆盖复用/重连拿不到该参数的浏览器。
   await denyPermissionPrompts(cdp);
   if (opts.stealth !== false) {
@@ -135,7 +138,7 @@ function buildReconnect(options: AttachOptions, injector: StealthInjector): CdpR
       return t.webSocketDebuggerUrl;
     },
     onReconnected: async (c) => {
-      await reEnableAndInject(c, { stealth: options.stealth, injector });
+      await reEnableAndInject(c, { stealth: options.stealth, injector, network: options.network });
     },
     // 终态快判（进入退避循环前）：① 浏览器进程级端点 /json/version 不可达 → 进程已死 = 终态；
     // ② 进程在但找不到可用 page target → 页面归零（窗口被关/标签崩，经验不可恢复）= 终态；
@@ -171,7 +174,7 @@ export async function attachToPage(options: AttachOptions = {}): Promise<EdgeSes
   // 放进 reEnableAndInject 会每次重连叠一个监听器。
   takeOverJavaScriptDialogs(cdp, (m) => console.log(m));
   // 启用所需域 + 注入反检测（与重连共用同一函数）。
-  await reEnableAndInject(cdp, { stealth: options.stealth, injector });
+  await reEnableAndInject(cdp, { stealth: options.stealth, injector, network: options.network });
 
   return {
     cdp,
@@ -214,5 +217,5 @@ export async function reattachSession(session: EdgeSession, options: AttachOptio
   const target = await firstPageTarget(options);
   const injector = options.stealthInjector ?? new CdpStealthInjector();
   await session.cdp.reattach(target.webSocketDebuggerUrl, buildReconnect(options, injector));
-  await reEnableAndInject(session.cdp, { stealth: options.stealth, injector });
+  await reEnableAndInject(session.cdp, { stealth: options.stealth, injector, network: options.network });
 }

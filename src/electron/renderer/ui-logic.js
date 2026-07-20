@@ -801,5 +801,51 @@
     return out;
   }
 
-  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, resolveEnvironmentDisplayName, railDisplayName, slowStartLine, FLEET_STALE_MS };
+  function formatReceivedBytes(value) {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    const amount = bytes / (1024 ** index);
+    const digits = index === 0 || amount >= 100 ? 0 : amount >= 10 ? 1 : 2;
+    return `${amount.toFixed(digits)} ${units[index]}`;
+  }
+
+  /** 代理配置是辅助语境；“已验证”只可能来自当前浏览器运行证据。 */
+  function proxyRuntimeView(runtime, configuration) {
+    const evidence = runtime && typeof runtime === 'object' ? runtime : {};
+    const config = configuration && typeof configuration === 'object' ? configuration : {};
+    const noProxy = config.known === true && config.noProxy === true;
+    const bytes = formatReceivedBytes(evidence.sessionReceivedBytes);
+    let label = '待验证';
+    let tone = 'pending';
+    if (noProxy) {
+      label = '未配置代理';
+      tone = 'danger';
+    } else if (evidence.state === 'verified') {
+      label = '代理已验证';
+      tone = 'verified';
+    } else if (evidence.state === 'same_as_host') {
+      label = '疑似直连';
+      tone = 'danger';
+    } else if (evidence.state === 'unavailable') {
+      label = '无法确认';
+      tone = 'unknown';
+    } else if (evidence.state === 'stale') {
+      label = evidence.generation > 0 ? '验证已失效' : '待验证';
+      tone = evidence.generation > 0 ? 'danger' : 'pending';
+    }
+    return {
+      label,
+      tone,
+      bytes,
+      compact: `${label} · 本次 ${bytes}`,
+      configuration: config.summary || (config.known ? '无代理配置' : '配置待读取'),
+      browserIp: evidence.browserIp || '未取得',
+      directIp: evidence.directIp || '未取得',
+      checkedAt: evidence.checkedAt || '',
+    };
+  }
+
+  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, resolveEnvironmentDisplayName, railDisplayName, slowStartLine, formatReceivedBytes, proxyRuntimeView, FLEET_STALE_MS };
 });

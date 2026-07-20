@@ -40,6 +40,7 @@ const {
 } = require('./facebook-persona-auto-fill.cjs');
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
+const { normalizeProxyRuntime } = require('./proxy-runtime.cjs');
 const {
   DEFAULT_PARKING_MODE,
   normalizeParkingMode,
@@ -2870,6 +2871,12 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
     ? cloudSel.key
     : cloudKeyForUrl(String(process.env.AIDCP_CLOUD_URL || '').trim() || DEFAULT_CLOUD_URL);
   handle.connectedCloudKey = resolvedCloudKey;
+  // 出口探测复用与当前 dev/ol/custom 云选择一致的 Client Auth 公网基址。显式 env 仍可覆盖；
+  // 不存在可用基址时不猜第三方服务，核心会诚实投影 unavailable。
+  const clientAuthBase = resolveClientAuthBase();
+  const explicitEgressProbe = normalizeClientAuthUrl(process.env.AIDCP_EGRESS_PROBE_URL || '');
+  if (explicitEgressProbe) spawnEnv.AIDCP_EGRESS_PROBE_URL = explicitEgressProbe;
+  else if (clientAuthBase) spawnEnv.AIDCP_EGRESS_PROBE_URL = `${clientAuthBase}/egress`;
   // Facebook 真浏览/点赞只对 dev 生效。必须放在两路 env 合并与云端解析之后，避免外壳遗留 on/shadow
   // 泄漏到 ol/custom；所有 Facebook 分身共享此策略，不再按分身单独放行。
   spawnEnv.AIDCP_FB_BROWSE_AUTO = fleet.facebookBrowseModeFor({
@@ -2930,6 +2937,7 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
       : null,
     publish: null,
     publishPreview: null,
+    proxyRuntime: null,
     respawnGaveUp: false,
     connectedCloudKey: handle.connectedCloudKey || '',
     lastMessage: controlBootstrap
@@ -3600,7 +3608,11 @@ function handleEdgeLogLine(handle, message, isError = false) {
     handlePublishApprovalReply(message.slice('[publish-approval-reply]'.length).trim());
     return;
   }
-  appendEdgeLog(handle.envId, message, isError); // 落文件（排障回溯，独立于下方状态判断）
+  // 代理运行事件带当前公网 IP，只属于内存态：落盘日志与开发者详情均只记“已更新”，不持久化 IP。
+  const proxyRuntimeLine = message.includes('[ui-event]') && message.includes('"kind":"proxyRuntime"');
+  const structuredMessage = message;
+  if (proxyRuntimeLine) message = '[ui-event] proxyRuntime updated (redacted)';
+  appendEdgeLog(handle.envId, message, isError);
   // AdsPower profile 可绑 ≠ DEFAULT_KERNEL 的内核；browser-profile/start 会诚实报「SunBrowser <N> is not ready」。
   // 该版本 LocalAPI（v2 browser-profile/list 亦然）不暴露，只能据启动报错反应式获知——同 AdsPower CLI 自愈。
   // UX 修（本次）：首次发现「内核尚未下载」不当启动失败，直接转「准备内核」进度态；不落失败候选、不翻
@@ -3664,7 +3676,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
   // 退出码才是权威；把预测调准，权威一分不动。白名单里保留「CDP 输入控制不可用」是因为那条是唯一
   // **不退出**的终态（核心活着但驱不动浏览器、要求人工重启），少了它「边缘在线但浏览器驱不动」就没人报。
   const halting = fleet.declaresCoreHalt(message);
-  const next = { edge: halting ? 'warning' : 'running', lastMessage: message };
+  const next = { edge: halting ? 'warning' : 'running', lastMessage: proxyRuntimeLine ? '代理运行证据已更新' : message };
   if (!halting && handle.status.edgeFailure) next.edgeFailure = null;
   if (message.includes('[browser-parking] awaiting-login')) {
     // adspower 首登有界等待门（change adspower-first-login-wait-gate）：核心在等操作者扫码登录、浏览器与 CDP 仍在。
@@ -3715,7 +3727,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
 
   // UI 事件（活动流 / 在场感 / 发布卡 / 账号身份 / 计数）统一走该环境自己的 ui-events 实例：
   // 结构化 [ui-event] 行优先，中文日志行映射兜底；计数只认 ✓ 成功行。
-  const evt = handle.uiEvents.push(message);
+  const evt = handle.uiEvents.push(structuredMessage);
   let standbyHint = null;
   if (evt) {
     if (evt.account) {
@@ -3741,6 +3753,10 @@ function handleEdgeLogLine(handle, message, isError = false) {
     if (typeof evt.personaBound === 'boolean') next.personaBound = evt.personaBound;
     if (Object.prototype.hasOwnProperty.call(evt, 'personaWritingLanguage')) {
       next.personaWritingLanguage = evt.personaWritingLanguage;
+    }
+    if (evt.proxyRuntime) {
+      const proxyRuntime = normalizeProxyRuntime(evt.proxyRuntime);
+      if (proxyRuntime) next.proxyRuntime = proxyRuntime;
     }
     if (evt.presence) next.presence = { text: evt.presence, at: new Date().toISOString() };
     if (evt.publish && evt.publish.state) {

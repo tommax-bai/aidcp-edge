@@ -11,3 +11,4 @@ export * from './browser-provider.js';
 export * from './browser-window.js';
 export * from './stealth-injector.js';
 export * from './self-identity.js';
+export * from './proxy-runtime-observer.js';

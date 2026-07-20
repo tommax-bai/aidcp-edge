@@ -73,6 +73,15 @@ const fields = {
   acctAva: document.querySelector('#acct-ava'),
   acctName: document.querySelector('#acct-name'),
   acctPlat: document.querySelector('#acct-plat'),
+  proxyRuntimeChip: document.querySelector('#proxy-runtime-chip'),
+  proxyRuntimeLabel: document.querySelector('#proxy-runtime-label'),
+  proxyRuntimePop: document.querySelector('#proxy-runtime-pop'),
+  proxyRuntimeState: document.querySelector('#proxy-runtime-state'),
+  proxyRuntimeConfig: document.querySelector('#proxy-runtime-config'),
+  proxyRuntimeBrowserIp: document.querySelector('#proxy-runtime-browser-ip'),
+  proxyRuntimeDirectIp: document.querySelector('#proxy-runtime-direct-ip'),
+  proxyRuntimeCheckedAt: document.querySelector('#proxy-runtime-checked-at'),
+  proxyRuntimeBytes: document.querySelector('#proxy-runtime-bytes'),
   authLabel: document.querySelector('#auth-label'),
   healthPill: document.querySelector('#health-pill'),
   healthLabel: document.querySelector('#health-label'),
@@ -1511,11 +1520,48 @@ function renderTitlebar(status) {
     fields.acctPlat.classList.toggle('plat-wechat', wechat);
   }
   if (fields.authLabel) fields.authLabel.textContent = fb ? 'Facebook 登录' : wechat ? '视频号登录' : '小红书登录';
+  renderProxyRuntime(status, fb);
   const health = uiLogic.synthesizeHealth(status);
   fields.healthLabel.textContent = health.label;
   fields.healthPill.className = `health-pill nodrag ${health.code}`;
   fields.healthDetail.textContent = failureSummary(status) || health.detail || '';
   fields.titlebar.className = `titlebar tone-${uiLogic.bandTone(status)}`;
+}
+
+function selectedProxyConfiguration() {
+  const selected = fleetView.envs.get(fleetView.selected);
+  const profileId = String((selected && (selected.profileId || selected.envId)) || '').trim();
+  const profile = lastProfiles.find((item) => item && String(item.userId) === profileId);
+  if (!profile) return { known: false, summary: '配置待读取' };
+  const config = profile.proxyConfig || {};
+  return {
+    known: true,
+    noProxy: config.noProxy === true,
+    summary: profile.proxy || (config.noProxy ? '无代理配置' : '代理配置已保存'),
+  };
+}
+
+function renderProxyRuntime(status, facebook) {
+  if (!fields.proxyRuntimeChip || !fields.proxyRuntimePop) return;
+  fields.proxyRuntimeChip.classList.toggle('hidden', !facebook);
+  if (!facebook) {
+    fields.proxyRuntimePop.classList.add('hidden');
+    fields.proxyRuntimePop.setAttribute('aria-hidden', 'true');
+    fields.proxyRuntimeChip.setAttribute('aria-expanded', 'false');
+    return;
+  }
+  const view = uiLogic.proxyRuntimeView(status && status.proxyRuntime, selectedProxyConfiguration());
+  fields.proxyRuntimeChip.className = `proxy-runtime-chip nodrag ${view.tone}`;
+  fields.proxyRuntimeLabel.textContent = view.compact;
+  fields.proxyRuntimeChip.title = `${view.label}；本次会话接收流量 ${view.bytes}`;
+  fields.proxyRuntimeState.textContent = view.label;
+  fields.proxyRuntimeConfig.textContent = view.configuration;
+  fields.proxyRuntimeBrowserIp.textContent = view.browserIp;
+  fields.proxyRuntimeDirectIp.textContent = view.directIp;
+  fields.proxyRuntimeCheckedAt.textContent = view.checkedAt
+    ? new Date(view.checkedAt).toLocaleString('zh-CN', { hour12: false })
+    : '尚未检测';
+  fields.proxyRuntimeBytes.textContent = view.bytes;
 }
 
 // ─── 运行价值说明：浏览目标 / 自然间隔 / 今日成果，全部来自真实在场与窗口数据。───
@@ -2915,9 +2961,22 @@ fields.healthPill.addEventListener('click', (event) => {
   event.stopPropagation();
   fields.healthPop.classList.toggle('hidden');
 });
+fields.proxyRuntimeChip?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  const opening = fields.proxyRuntimePop.classList.contains('hidden');
+  fields.proxyRuntimePop.classList.toggle('hidden', !opening);
+  fields.proxyRuntimePop.setAttribute('aria-hidden', opening ? 'false' : 'true');
+  fields.proxyRuntimeChip.setAttribute('aria-expanded', opening ? 'true' : 'false');
+});
 document.addEventListener('click', (event) => {
   if (!fields.healthPop.classList.contains('hidden') && !fields.healthPop.contains(event.target)) {
     fields.healthPop.classList.add('hidden');
+  }
+  if (fields.proxyRuntimePop && !fields.proxyRuntimePop.classList.contains('hidden')
+    && !fields.proxyRuntimePop.contains(event.target) && !fields.proxyRuntimeChip.contains(event.target)) {
+    fields.proxyRuntimePop.classList.add('hidden');
+    fields.proxyRuntimePop.setAttribute('aria-hidden', 'true');
+    fields.proxyRuntimeChip.setAttribute('aria-expanded', 'false');
   }
 });
 
@@ -4554,6 +4613,7 @@ function makeDeleteBtn(prof) {
 // 清理只由 refreshEnvs→pruneOrphanRoster 在「成功且完整且非空」时做；边角（空/截断）宁可留孤儿、不误删。
 function populateEnvs(profiles, allowAutoJoin = false) {
   lastProfiles = Array.isArray(profiles) ? profiles : [];
+  if (currentStatus) renderProxyRuntime(currentStatus, selectedEnvPlatform() === 'facebook');
   const list = settingsUi.adsEnvList;
   const current = settingsUi.adsProfile.value.trim();
   list.innerHTML = '';
