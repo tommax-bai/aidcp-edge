@@ -3208,10 +3208,11 @@ function renderFab(status) {
   const running = ['starting', 'ready', 'running', 'waiting_resource'].includes(automation);
   const paused = automation === 'paused';
   const pending = automation === 'pausing' || automation === 'stopping';
-  const text = running ? '暂停自动化' : paused ? '恢复自动化' : '开始自动化';
+  const text = running ? '暂停' : paused ? '恢复' : '启动';
   const cls = running ? 'pause' : 'start';
   const action = running ? 'pause' : paused ? 'resume' : 'start';
   fab.textContent = text;
+  fab.setAttribute('aria-label', `${text}自动化`);
   fab.className = `fab ${cls}`;
   fab.dataset.action = action;
   fab.disabled = pending;
@@ -3221,9 +3222,12 @@ function renderFab(status) {
     const browserPending = browser === 'queued' || browser === 'starting' || browser === 'closing' || browser === 'releasing';
     const automationActive = automation !== 'stopped' && automation !== 'error';
     fields.sessionClose.classList.remove('hidden');
-    fields.sessionClose.textContent = automationActive
-      ? (automation === 'stopping' ? '正在关闭自动化…' : '关闭自动化')
-      : browserPending ? '浏览器处理中…' : browser === 'error' ? '重新打开浏览器' : closed ? '打开浏览器（登录/检查）' : '关闭浏览器';
+    fields.sessionClose.textContent = automationActive ? '关闭' : '浏览器';
+    const secondaryLabel = automationActive
+      ? (automation === 'stopping' ? '正在关闭自动化' : '关闭自动化')
+      : browserPending ? '浏览器处理中' : browser === 'error' ? '重新打开浏览器' : closed ? '打开浏览器' : '关闭浏览器';
+    fields.sessionClose.setAttribute('aria-label', secondaryLabel);
+    fields.sessionClose.title = secondaryLabel;
     fields.sessionClose.dataset.lifecycleAction = automationActive ? 'close' : '';
     fields.sessionClose.dataset.browserAction = automationActive ? '' : (closed ? 'open' : 'close');
     fields.sessionClose.disabled = pending || (!automationActive && browserPending);

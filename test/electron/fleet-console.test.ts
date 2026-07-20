@@ -1470,8 +1470,9 @@ test('自动化暂停后关闭表达停止意图，不退化成独立浏览器�
   await tick();
   assert.deepEqual(calls.browserClose, []);
   assert.deepEqual(calls.close, ['ads-p1']);
-  assert.equal(w.document.querySelector('#session-fab')!.textContent, '开始自动化');
-  assert.equal(close.textContent, '打开浏览器（登录/检查）');
+  assert.equal(w.document.querySelector('#session-fab')!.textContent, '启动');
+  assert.equal(close.textContent, '浏览器');
+  assert.equal(close.getAttribute('aria-label'), '打开浏览器');
 });
 
 // ── 人设弹窗三态（change persona-bound-tristate）────────────────────────────────────────────

@@ -335,24 +335,28 @@ test('窗口停放：无可控浏览器时显示浏览器诚实失败', async ()
 
 test('今日进展生命周期控制：自动化和浏览器使用独立动作', async () => {
   const stopped = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'stopped' }) }));
-  assert.equal($(stopped, '#session-fab').textContent, '开始自动化');
+  assert.equal($(stopped, '#rail-start-all').textContent, '全部启动');
+  assert.equal($(stopped, '#session-fab').textContent, '启动');
   const closed = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'stopped', session: 'closed' }) }));
-  assert.equal($(closed, '#session-fab').textContent, '开始自动化');
-  assert.equal($(closed, '#session-close').textContent, '打开浏览器（登录/检查）');
+  assert.equal($(closed, '#session-fab').textContent, '启动');
+  assert.equal($(closed, '#session-close').textContent, '浏览器');
+  assert.equal($(closed, '#session-close').getAttribute('aria-label'), '打开浏览器');
   const running = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'running', session: 'running' }) }));
-  assert.equal($(running, '#session-fab').textContent, '暂停自动化');
+  assert.equal($(running, '#session-fab').textContent, '暂停');
   const resting = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'running', session: 'resting' }) }));
-  assert.equal($(resting, '#session-fab').textContent, '暂停自动化');
+  assert.equal($(resting, '#session-fab').textContent, '暂停');
   const paused = await boot(makeStub({ getStatus: async () => makeStatus({ session: 'paused' }) }));
-  assert.equal($(paused, '#session-fab').textContent, '恢复自动化');
-  assert.equal($(paused, '#session-close').textContent, '关闭自动化');
+  assert.equal($(paused, '#session-fab').textContent, '恢复');
+  assert.equal($(paused, '#session-close').textContent, '关闭');
+  assert.equal($(paused, '#session-close').getAttribute('aria-label'), '关闭自动化');
   assert.ok(!$(paused, '#session-close').classList.contains('hidden'));
   const executorError = await boot(makeStub({
     getStatus: async () => makeStatus({
       edge: 'running', coreState: 'online', cloud: 'connected', cloudState: 'connected', browserState: 'error',
     }),
   }));
-  assert.equal($(executorError, '#session-close').textContent, '重新打开浏览器');
+  assert.equal($(executorError, '#session-close').textContent, '浏览器');
+  assert.equal($(executorError, '#session-close').getAttribute('aria-label'), '重新打开浏览器');
   assert.equal(($(executorError, '#session-close') as HTMLElement).dataset.browserAction, 'open');
 });
 
@@ -369,8 +373,9 @@ test('自动化暂停态点击关闭：调用自动化关闭，不走浏览器�
   await tick();
   assert.equal(lifecycleCloses, 1);
   assert.equal(browserCloses, 0);
-  assert.equal($(w, '#session-fab').textContent, '开始自动化');
-  assert.equal($(w, '#session-close').textContent, '打开浏览器（登录/检查）');
+  assert.equal($(w, '#session-fab').textContent, '启动');
+  assert.equal($(w, '#session-close').textContent, '浏览器');
+  assert.equal($(w, '#session-close').getAttribute('aria-label'), '打开浏览器');
 });
 
 test('程序化建号：填充操作系统下拉、点「创建环境」→ 传选中 OS family、成功提示 + 刷新', async () => {
@@ -842,7 +847,7 @@ test('暂停中切换环境 → 恢复：先存再恢复（回归：新环境不
     saveSettings: async () => { calls.push('save'); return { provider: 'adspower', adsProfileId: 'u_new', saveOk: true }; },
     resume: async () => { calls.push('resume'); return makeStatus({ session: 'running', edge: 'running' }); },
   }));
-  assert.equal($(w, '#session-fab').textContent, '恢复自动化', '暂停态 fab 应为「恢复自动化」');
+  assert.equal($(w, '#session-fab').textContent, '恢复', '暂停态 fab 应为「恢复」');
   $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click')); // 暂停中切换环境 → dirty
   $(w, '#session-fab').dispatchEvent(new w.Event('click')); // 点「恢复」
   await tick();
