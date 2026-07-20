@@ -96,7 +96,7 @@
   // 用户可见明细只展示产品概念；coreState/cloudState 保留在诊断快照，不进入这里。
   const DETAIL_LABELS = {
     clientSessionState: { label: '客户会话', values: { ready: '已登录', signed_out: '未登录', expired: '已过期' } },
-    automationState: { label: '自动化', values: { stopped: '未启动', starting: '启动中', ready: '已就绪', running: '运行中', waiting_resource: '等待资源', pausing: '暂停中', paused: '已暂停', stopping: '关闭中', error: '异常' } },
+    automationState: { label: '自动化', values: { stopped: '未启动', starting: '启动中', ready: '已就绪', running: '运行中', waiting_resource: '排队中', pausing: '暂停中', paused: '已暂停', stopping: '关闭中', error: '异常' } },
     engineLinkState: { label: '引擎连接', values: { disconnected: '未连接', connecting: '连接中', connected: '已连接', reconnecting: '重连中', error: '异常' } },
     browserState: { label: '浏览器', values: { closed: '已关闭', queued: '等待槽位', starting: '启动中', ready: '已就绪', blocked: '等待人工处理', closing: '关闭中', error: '异常' } },
     risk: { label: '账号保护', values: { normal: '正常', warned: '谨慎放慢', restricted: '账号受限', frozen: '已暂停' } },
@@ -516,7 +516,12 @@
 
     // 非运行态：诚实静态文案，presence 历史文本不再当「正在做」展示。
     if (s.session === 'paused') return { text: '已暂停，浏览器保持打开', animate: false, fresh: staticFresh };
-    if (s.session === 'closed') return { text: '已关闭浏览器', animate: false, fresh: staticFresh };
+    // 只有主进程明确标出「仅关闭本机自动化」时，才采用这次原子写入的范围文案；普通关闭继续讲
+    // 「已关闭浏览器」，也绝不能让任意历史 presence 文本在关闭态复活。
+    if (s.session === 'closed') {
+      const text = s.closeScope === 'local_automation_only' && p && p.text ? p.text : '已关闭浏览器';
+      return { text, animate: false, fresh: staticFresh };
+    }
     if (s.auth === 'login required') return { text: '等你登录小红书后继续', animate: false, fresh: '' };
     if (s.auth === 'config required') return { text: '等待完成初始设置', animate: false, fresh: '' };
     // restricted 会主动暂停自动运营并可能关闭浏览器进入冷待机；它不是「本轮配额已完成」，

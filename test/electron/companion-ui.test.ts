@@ -362,6 +362,21 @@ test('红线：停止 / 事件过期时动效止息、如实待命', async () =>
   assert.match($(w, '#presence-text').textContent ?? '', /没有新动态/);
 });
 
+test('外部占用拒启后关闭：显示本机自动化已关，不冒充占用端浏览器已关', async () => {
+  const at = new Date().toISOString();
+  const { w } = await boot({
+    edge: 'stopped',
+    cloud: 'disconnected',
+    session: 'closed',
+    automationState: 'stopped',
+    browserState: 'closed',
+    closeScope: 'local_automation_only',
+    presence: { text: '本机自动化已关闭；占用端浏览器未受影响', at },
+  });
+  assert.equal($(w, '#presence-text').textContent, '本机自动化已关闭；占用端浏览器未受影响');
+  assert.doesNotMatch($(w, '#presence-text').textContent ?? '', /^已关闭浏览器$/);
+});
+
 test('运行中 + 事件过期 + 阶段计划完成 → 说明自然间隔的成果与继续时间', async () => {
   const now = 1730000000000;
   const stale = new Date(now - 6 * 60_000).toISOString();

@@ -23,6 +23,20 @@ test('browser slot and start-queue rejection both keep a path to browser-absent 
   assert.match(enqueue, /if \(!admission\.ok\)[\s\S]*startBrowserAbsentCore\(handle, \{ queueAdmission: admission \}\)/);
 });
 
+test('binding_unknown while browser slots are full remains queued instead of becoming an engine error', () => {
+  const start = blockBetween(electronMain, 'async function startBrowserAbsentCore(', 'async function startRestrictedOffboardCleanupCore(');
+  assert.match(
+    start,
+    /if \(slotAdmission && bootstrap\.reason === 'binding_unknown'\) \{[\s\S]{0,180}parkForSlot\(handle, slotAdmission\);[\s\S]{0,80}return false;/,
+  );
+  const queueUnknown = start.indexOf("if (slotAdmission && bootstrap.reason === 'binding_unknown')");
+  const failureProjection = start.indexOf('...edgeFailurePatch(`自动化引擎未连接：${bootstrap.message}`)');
+  assert.ok(queueUnknown >= 0 && failureProjection > queueUnknown, '可恢复的首次绑定排队分支必须先于异常投影返回');
+
+  const park = blockBetween(electronMain, 'function parkForSlot(', '/**\n * 到点告诉核心');
+  assert.match(park, /clearEdgeFailurePatch\(handle\)/, '进入槽位队列时必须清除旧失败投影');
+});
+
 test('control bootstrap is customer-auth scoped, validated, and uses dedicated non-inherited env vars', () => {
   const bootstrap = blockBetween(electronMain, 'async function resolveControlBootstrap(', '// ── 视频号 InteractionWorkspace');
   assert.match(bootstrap, /clientAuthFetch\(`\/environments\/\$\{encodeURIComponent\(envKey\)\}\/control-bootstrap`/);

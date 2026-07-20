@@ -1908,6 +1908,7 @@ function parkForSlot(handle, admitted) {
   updateStatus(handle, {
     ...(parked ? {} : { edge: 'idle', session: 'idle' }),
     lastMessage: `排队等槽位（${place}）：${admitted.message}。有账号进入待机让出槽位后会自动${parked ? '唤醒' : '启动'}。`,
+    ...clearEdgeFailurePatch(handle),
     ...presencePatch(`排队等槽位（${place}）`),
   });
   startSlotWaitTimer();
@@ -3047,6 +3048,12 @@ async function startBrowserAbsentCore(handle, {
     const coreOnlyBootstrap = !slotAdmission && !queueAdmission;
     const bootstrap = await resolveControlBootstrap(handle);
     if (!bootstrap.ok) {
+      // 首次未绑定环境无法在浏览器缺席时可信确定平台账号，但这不改变已经取得的槽位排队资格。
+      // 等槽位后走真实浏览器启动与身份确认；此刻只呈现排队，绝不把正常前置条件写成引擎异常。
+      if (slotAdmission && bootstrap.reason === 'binding_unknown') {
+        parkForSlot(handle, slotAdmission);
+        return false;
+      }
       if (!retainStartQueueReservation) releaseStartQueue(handle);
       const browserState = coreOnlyBootstrap
         ? '浏览器保持关闭'
@@ -3363,6 +3370,7 @@ function spawnEdgeChild(handle, {
   updateStatus(handle, {
     edge: 'starting',
     session: handle.automationPaused ? 'paused' : (controlBootstrap ? 'resting' : 'running'),
+    closeScope: null,
     // 新核心 = 还没连上过云端，哪怕上一个核心连上过（change honest-first-connect-label）。不复位这一位，
     // 崩溃重起 / 显式重启的整个冷启动窗口会顶着上一轮的「连过」资格，被讲成「正在重新连接」。
     cloudEverConnected: false,
@@ -4137,6 +4145,7 @@ function queueStartEnv(handle, queuePosition) {
   if (queued === 'control-only') return queued;
   updateStatus(handle, {
     edge: 'starting',
+    closeScope: null,
     respawnGaveUp: false,
     lastMessage: queuePosition ? `已排队错峰启动（第 ${queuePosition} 位，相邻间隔约 1.1s）…` : '已排队错峰启动…',
     ...presencePatch('排队启动中…'),
@@ -4594,6 +4603,9 @@ async function confirmOwnedProfileClosedFromShell(handle) {
 
 function stopAutomation(handle) {
   if (!handle || handle.removed) return;
+  // 外部占用拒启发生在 browser-profile/start 返回句柄之前：本机从未拥有该浏览器。
+  // 先冻结本轮事实，随后只收敛本机自动化意图；绝不能把远端 active 当成本机遗留浏览器去确认/接管/关闭。
+  const externallyOccupiedBeforeAcquire = !handle.child && handle.envInUseThisRun === true;
   handle.automationIntent = 'stopped';
   handle.engineStopReason = 'user_close';
   handle.resumeAfterStop = false;
@@ -4606,17 +4618,32 @@ function stopAutomation(handle) {
   clearSlotWaiting(handle);
   if (!handle.child) {
     handle.pausePending = false;
+    if (externallyOccupiedBeforeAcquire) {
+      handle.browserStateUnconfirmed = false;
+      handle.envInUseThisRun = false;
+      handle.envInUseHolder = null;
+    }
     updateStatus(handle, {
       edge: 'stopped',
       cloud: 'disconnected',
       session: 'closed',
+      closeScope: externallyOccupiedBeforeAcquire ? 'local_automation_only' : null,
       overlayBlocked: false,
-      lastMessage: handle.kind === 'adspower'
+      lastMessage: externallyOccupiedBeforeAcquire
+        ? '本机自动化已关闭；占用端浏览器未被本机关闭或触碰，数据管理仍可继续使用。'
+        : handle.kind === 'adspower'
         ? '自动化引擎已关闭，正在确认浏览器状态；数据管理仍可继续使用。'
         : '自动化已关闭；数据管理仍可继续使用。',
-      ...presencePatch(handle.kind === 'adspower' ? '自动化已关闭，正在确认浏览器' : '自动化已关闭'),
+      ...presencePatch(
+        externallyOccupiedBeforeAcquire
+          ? '本机自动化已关闭；占用端浏览器未受影响'
+          : handle.kind === 'adspower'
+            ? '自动化已关闭，正在确认浏览器'
+            : '自动化已关闭',
+      ),
       ...clearEdgeFailurePatch(handle),
     });
+    if (externallyOccupiedBeforeAcquire) return;
     if (handle.kind === 'adspower' && handle.profileId) void confirmOwnedProfileClosedFromShell(handle);
     return;
   }
