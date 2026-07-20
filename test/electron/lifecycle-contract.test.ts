@@ -34,11 +34,15 @@ test('cloud disconnect rewrites the presence line instead of leaving the last ac
   assert.match(handler, /云端已重连[\s\S]{0,400}?next\.presence = \{ text: '已连接云端，等待安排…'/);
 });
 
-test('explicit close is exposed through preload and routed by envId', () => {
+test('legacy edge close and explicit browser close both release only the browser executor', () => {
   assert.match(preload, /close:\s*\(envId\)\s*=>\s*ipcRenderer\.invoke\('edge:close', envId\)/);
+  assert.match(preload, /browserClose:\s*\(envId\)\s*=>\s*ipcRenderer\.invoke\('browser:close', envId\)/);
   assert.match(main, /ipcMain\.handle\('edge:close'/);
+  assert.match(main, /ipcMain\.handle\('browser:close'/);
   const close = functionSource('closeEdge', 'relogin');
-  assert.match(close, /sendCoreLifecycle\(handle, 'close'/);
+  assert.match(close, /sendCoreLifecycle\(handle, 'standby'/);
+  assert.doesNotMatch(close, /sendCoreLifecycle\(handle, 'close'|kill\(['"]SIGTERM['"]\)/,
+    'browser close keeps core and Cloud alive');
 });
 
 test('browser cold standby uses lifecycle.standby and manual controls cancel timers', () => {

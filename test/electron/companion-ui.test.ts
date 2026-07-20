@@ -125,7 +125,7 @@ test('风控警戒与登录协助用琥珀；真正异常使用独立错误态',
   assert.equal($(w, '#health-label').textContent, '需要协助');
   assert.ok($(w, '#health-pill').classList.contains('attention'));
   pushStatus(makeStatus({ edge: 'warning' }));
-  assert.equal($(w, '#health-label').textContent, '运行异常');
+  assert.equal($(w, '#health-label').textContent, '核心异常');
   assert.ok($(w, '#health-pill').classList.contains('error'));
 });
 
@@ -159,12 +159,13 @@ test('新启动状态会清除上一轮异常详情', async () => {
   assert.equal($(w, '#edge-failure-text').textContent, '');
 });
 
-test('健康明细浮层点开可见五路人话状态', async () => {
+test('健康明细浮层点开可见核心、Cloud、自动化、浏览器、登录与风控独立状态', async () => {
   const { w } = await boot();
   assert.equal(hidden($(w, '#health-pop')), true, '默认收起');
   $(w, '#health-pill').dispatchEvent(new w.Event('click'));
   assert.equal(hidden($(w, '#health-pop')), false);
-  assert.ok($(w, '#health-pop').textContent?.includes('本机引擎'));
+  assert.ok($(w, '#health-pop').textContent?.includes('客户端核心'));
+  assert.ok($(w, '#health-pop').textContent?.includes('浏览器执行器'));
 });
 
 // ── 设置抽屉：稳态首屏无表单 ──

@@ -42,7 +42,7 @@ test('core browser-absent startup skips provider launch and acknowledges initial
   assert.match(edgeMain, /const startBrowserAbsent = process\.env\.AIDCP_START_BROWSER_ABSENT === '1'/);
   assert.match(edgeMain, /if \(!startBrowserAbsent\) \{[\s\S]{0,180}provider\.launch\(launchOpts\)/);
   assert.match(edgeMain, /startBrowserAbsent \? createDetachedSession\(\) : await attachToPage/);
-  assert.match(edgeMain, /startBrowserAbsent \? 'standby' : 'active'/);
+  assert.match(edgeMain, /startBrowserAbsent \? 'standby' : startAutomationPaused \? 'paused' : 'active'/);
   assert.match(edgeMain, /if \(startBrowserAbsent\) \{[\s\S]{0,200}type: 'lifecycle\.standby'/);
   assert.match(edgeMain, /\.\.\.\(startBrowserAbsent \? \['browser_absent_v1'\] : \[\]\)/);
 });
@@ -51,7 +51,7 @@ test('browser-absent page commands request a wake and return an explicit failure
   const handler = blockBetween(edgeMain, 'const handleBrowserAbsentCommand =', '/** 唤醒有了结论');
   assert.match(handler, /requestColdStandbyWake\(`cloud_command:\$\{env\.type\}`\)/);
   assert.match(handler, /reportActionCompleted\(\{ action, ok: false, reason: 'browser_absent_wake_requested' \}\)/);
-  assert.match(handler, /env\.type === 'pacing\.update'[\s\S]*applyPacingSnapshot/);
+  assert.match(handler, /operation\.browser === 'forbidden'[\s\S]*env\.type !== 'pacing\.update'[\s\S]*applyPacingSnapshot/);
   assert.equal(edgeMain.match(/if \(handleBrowserAbsentCommand\(env\)\) return;/g)?.length, 3);
 });
 

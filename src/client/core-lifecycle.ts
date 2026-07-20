@@ -3,6 +3,9 @@ export type CoreLifecycleState = 'active' | 'pausing' | 'paused' | 'standby' | '
 
 export interface CoreLifecycleDependencies {
   deactivate(reason: string): Promise<void>;
+  /** Stop/resume automation at a page-safe boundary without closing Cloud, CDP, browser, or the core process. */
+  pauseAutomation?: () => Promise<void>;
+  resumeAutomation?: () => Promise<void>;
   closeOwnedBrowser(): Promise<boolean>;
   enterStandby?: () => Promise<boolean>;
   /**
@@ -12,9 +15,10 @@ export interface CoreLifecycleDependencies {
    * 待机唤醒会变成高频动作（每小时都可能发生），不能每次都掀一次桌子。返回 false = 唤醒失败，
    * 会话如实**留在待机态**（可再次唤醒），绝不假装已就绪。
    */
-  wakeFromStandby?: () => Promise<boolean>;
+  wakeFromStandby?: (resumeAutomation: boolean) => Promise<boolean>;
   exit(code: number): void;
   onPaused?(): void;
+  onResumed?(): void;
   onStandby?(): void;
   onWoken?(): void;
   onWakeFailed?(reason: string): void;
@@ -50,12 +54,14 @@ export class CoreLifecycleController {
   private deactivatePromise: Promise<void> | undefined;
   private currentState: CoreLifecycleState;
   private finalizing = false;
+  private automationPaused = false;
 
   constructor(
     private readonly deps: CoreLifecycleDependencies,
-    initialState: 'active' | 'standby' = 'active',
+    initialState: 'active' | 'paused' | 'standby' = 'active',
   ) {
     this.currentState = initialState;
+    this.automationPaused = initialState === 'paused';
   }
 
   get state(): CoreLifecycleState {
@@ -76,9 +82,13 @@ export class CoreLifecycleController {
         await this.wake();
         return;
       }
+      if (command === 'resume' && this.deps.resumeAutomation) {
+        await this.resume();
+        return;
+      }
       await this.finalize({
         exitCode: 0,
-        reason: command === 'resume' ? 'user_resume' : 'user_close',
+        reason: command === 'resume' ? 'legacy_user_resume' : 'user_close',
         preserveBrowser: command === 'resume',
         requireConfirmedClose: command === 'close',
       });
@@ -99,13 +109,31 @@ export class CoreLifecycleController {
 
   private async pause(): Promise<void> {
     if (this.finalizing || this.currentState === 'finished') return;
-    if (this.currentState !== 'paused') {
+    if (!this.automationPaused) {
+      const browserWasInStandby = this.currentState === 'standby';
       this.currentState = 'pausing';
-      await this.ensureDeactivated('user_pause');
-      this.currentState = 'paused';
-      this.log('[aidcp-edge] lifecycle paused: automation stopped, owned browser retained');
+      if (this.deps.pauseAutomation) await this.deps.pauseAutomation();
+      else await this.ensureDeactivated('user_pause');
+      this.automationPaused = true;
+      // Browser state and automation state are independent axes. Pausing while the browser is
+      // already absent must retain standby so a later explicit resume can still use the normal
+      // in-place wake path instead of being mistaken for an already-open browser.
+      this.currentState = browserWasInStandby ? 'standby' : 'paused';
+      this.log('[aidcp-edge] lifecycle paused: automation stopped, core/cloud/browser retained');
     }
     this.deps.onPaused?.();
+  }
+
+  private async resume(): Promise<void> {
+    if (this.finalizing || this.currentState === 'finished') return;
+    if (this.automationPaused) {
+      const browserIsInStandby = this.currentState === 'standby';
+      if (!browserIsInStandby) await this.deps.resumeAutomation?.();
+      this.automationPaused = false;
+      this.currentState = browserIsInStandby ? 'standby' : 'active';
+      this.log('[aidcp-edge] lifecycle resumed: automation restarted in place, core/cloud/browser retained');
+    }
+    this.deps.onResumed?.();
   }
 
   private async standby(): Promise<void> {
@@ -145,7 +173,7 @@ export class CoreLifecycleController {
     this.currentState = 'waking';
     let ok = false;
     try {
-      ok = await this.deps.wakeFromStandby();
+      ok = await this.deps.wakeFromStandby(!this.automationPaused);
     } catch (error) {
       this.currentState = 'standby';
       const reason = (error as Error)?.message || String(error);
@@ -159,7 +187,7 @@ export class CoreLifecycleController {
       this.deps.onWakeFailed?.('wake_failed');
       return;
     }
-    this.currentState = 'active';
+    this.currentState = this.automationPaused ? 'paused' : 'active';
     this.log('[aidcp-edge] lifecycle woken: browser rebuilt in place, core process and cloud link untouched');
     this.deps.onWoken?.();
   }

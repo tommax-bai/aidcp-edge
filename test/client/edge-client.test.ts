@@ -144,12 +144,12 @@ test('edge-client: hello carries platform metadata without changing message type
 
   const sent = JSON.parse(ws.sent[0]) as Envelope;
   assert.equal(sent.type, 'hello');
-  // 构建能力位 captcha_assist_text_v1 由 EdgeClient 构造函数统一并入（design D8）——main.ts 装配路径。
+  // 构建能力位由 EdgeClient 构造函数统一并入——main.ts 装配路径。
   assert.deepEqual(sent.payload, {
     edgeId: 'edge-1',
     platform: 'xiaohongshu',
     app: 'xhs',
-    capabilities: ['locating', 'cdp', 'like', 'browse', 'captcha_assist_text_v1'],
+    capabilities: ['locating', 'cdp', 'like', 'browse', 'captcha_assist_text_v1', 'client_core_browser_executor_v1'],
   });
 
   ws.emitMessage(makeEnvelope('welcome', 'hello-1', 1, { sessionId: 's1', serverVersion: 'v1' }));
@@ -247,7 +247,7 @@ test('edge-client: hello carries optional account nickname for display enrichmen
     edgeId: 'edge-1',
     platform: 'facebook',
     app: 'fb',
-    capabilities: ['identity', 'overlay', 'comment', 'captcha_assist_text_v1'],
+    capabilities: ['identity', 'overlay', 'comment', 'captcha_assist_text_v1', 'client_core_browser_executor_v1'],
     accountId: '1234567890',
     accountNickname: 'Test User',
   });
@@ -801,4 +801,73 @@ test('edge-client: pacing.update 路由到 browseHandler（不得静默丢弃）
   assert.equal(calls.length, 1, 'pacing.update 应被路由到 browseHandler 而非在入口丢弃');
   assert.equal(calls[0].type, 'pacing.update');
   assert.equal((calls[0].payload as { tempo: number }).tempo, 1.6);
+});
+
+test('edge-client: unclassified active message fails closed before any handler', async () => {
+  const ws = new FakeWebSocket();
+  const logs: string[] = [];
+  const client = new EdgeClient({
+    url: 'ws://test',
+    edgeId: 'edge-unclassified',
+    runner: {
+      run: async () => ({ actionId: 'noop', ok: true, outcome: 'success', attempts: 1, reason: 'unused' }),
+    },
+    wsFactory: () => ws,
+    idGen: () => 'hello-unclassified',
+    clock: () => 1,
+    logger: (line) => logs.push(line),
+  });
+  const calls: Envelope[] = [];
+  client.onBrowseCommand((env) => calls.push(env));
+  client.onInteractionCommand((env) => calls.push(env));
+
+  const connecting = client.connect();
+  ws.emitOpen();
+  await Promise.resolve();
+  ws.emitMessage(makeEnvelope('welcome', 'hello-unclassified', 1, { sessionId: 's1', serverVersion: 'v1' }));
+  await connecting;
+  ws.emitMessage({ v: 2, type: 'future.command', id: 'unknown-1', ts: 2, payload: {} } as unknown as Envelope);
+
+  assert.equal(calls.length, 0);
+  assert.ok(logs.some((line) => line.includes('operation_unclassified type=future.command')));
+});
+
+test('edge-client: Cloud rebind closes only the old transport and completes a fresh hello', async () => {
+  const oldWs = new FakeWebSocket();
+  const newWs = new FakeWebSocket();
+  const urls: string[] = [];
+  const client = new EdgeClient({
+    url: 'ws://old-cloud',
+    edgeId: 'edge-rebind',
+    runner: { run: async () => ({ actionId: 'noop', ok: true, outcome: 'success', attempts: 1, reason: 'unused' }) },
+    wsFactory: (url) => {
+      urls.push(url);
+      return urls.length === 1 ? oldWs : newWs;
+    },
+    idGen: (() => {
+      const ids = ['hello-old', 'hello-new'];
+      let index = 0;
+      return () => ids[index++] ?? `id-${index}`;
+    })(),
+    clock: () => 1,
+    logger: () => {},
+  });
+  const connecting = client.connect();
+  oldWs.emitOpen();
+  await Promise.resolve();
+  oldWs.emitMessage(makeEnvelope('welcome', 'hello-old', 1, { sessionId: 'old-session', serverVersion: 'v1' }));
+  await connecting;
+
+  const rebinding = client.rebind('wss://new-cloud');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(urls.length, 2, 'new socket must be installed before its open event is emitted');
+  newWs.emitOpen();
+  await Promise.resolve();
+  newWs.emitMessage(makeEnvelope('welcome', 'hello-new', 1, { sessionId: 'new-session', serverVersion: 'v2' }));
+  await rebinding;
+
+  assert.deepEqual(urls, ['ws://old-cloud', 'wss://new-cloud']);
+  assert.equal(client.getSessionId(), 'new-session');
+  assert.equal(client.isConnected(), true);
+  await client.closeAndWait();
 });

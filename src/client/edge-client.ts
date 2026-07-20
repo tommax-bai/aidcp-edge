@@ -59,6 +59,7 @@ import {
 } from '../comm/protocol.js';
 import { isInteractionMessageType, validateInteractionEnvelope } from '../wechat-channels/protocol-validation.js';
 import { EDGE_BUILD_CAPABILITIES } from './build-capabilities.js';
+import { operationDescriptorFor } from './operation-registry.js';
 
 /** 最小 WebSocket 抽象（与 cdp/client.ts 同形，便于测试注入） */
 export interface CloudWebSocket {
@@ -610,6 +611,18 @@ export class EdgeClient {
   }
 
   /**
+   * Rebind only the Cloud control transport. Browser/CDP ownership is outside EdgeClient and is untouched.
+   * The caller must first drain page work to a safe boundary; success means the new hello/welcome completed.
+   */
+  async rebind(url: string, timeoutMs = 1500): Promise<void> {
+    const target = String(url || '').trim();
+    if (!/^wss?:\/\//i.test(target)) throw new Error('Cloud rebind target must be ws:// or wss://');
+    await this.closeAndWait(timeoutMs);
+    this.opts.url = target;
+    await this.connect();
+  }
+
+  /**
    * 更新握手携带的账号身份（account-identity-from-login：身份翻转后按新 id 重连）。
    * 仅改下次 connect() 的 hello 身份；须在 close() 之后、connect() 之前调用。
    */
@@ -637,6 +650,11 @@ export class EdgeClient {
       this.pending.delete(env.id);
       clearTimeout(p.timer);
       p.resolve(env);
+      return;
+    }
+
+    if (!operationDescriptorFor(env.type)) {
+      this.opts.logger(`[edge-client] operation_unclassified type=${env.type}; rejected`);
       return;
     }
 
@@ -761,7 +779,7 @@ export class EdgeClient {
       return;
     }
 
-    // 其他主动消息（ping 等）暂忽略
+    // 已登记但无需业务 handler 的控制消息（ping/pong）到此结束。
   }
 
   /** 执行云端下发的有序步骤命令，并逐步回传 action.result */

@@ -85,6 +85,20 @@ test('审批 IPC 允许旧客户端省略计划，新计划须成对且取消不
   assert.match(block, /\.\.\.\(hasPublishMode \? \{ publishMode: payload\.publishMode, publishTime: payload\.publishTime \} : \{\}\)/);
 });
 
+test('审批与删图 IPC 直连 customer-auth，停止状态不经过环境 core 或浏览器调度', () => {
+  const start = main.indexOf("ipcMain.handle('publish:approval'");
+  const end = main.indexOf('async function delegatedTaskRequest', start);
+  const block = main.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(block, /personaIpcEnv\(envId\)/, 'main 必须把 renderer envId 权威换成 envKey');
+  assert.match(block, /\/publish\/approval`[\s\S]*method: 'POST'/);
+  assert.match(block, /\/publish\/draft-image-remove`[\s\S]*method: 'POST'/);
+  assert.match(block, /receipt !== 'accepted_pending_execution'[\s\S]*receipt !== 'rejected'/,
+    '审批受理与发布成功必须保持分离');
+  assert.doesNotMatch(block, /sendPublishClientCommand|sendPublishApprovalCommand|\.child\b|queueStartEnv|startEdge|resumeEdge|admitBrowserSlot/,
+    'Cloud 决策写不得依赖 core、浏览器或槽位');
+});
+
 test('标题栏只保留紧凑灵感入口，并锁定低干扰蓝色与高储备蓝绿色', () => {
   const accountIndex = html.indexOf('id="acct-plat"');
   const spacerIndex = html.indexOf('class="tb-spacer"');

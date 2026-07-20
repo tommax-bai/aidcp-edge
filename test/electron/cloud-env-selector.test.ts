@@ -94,8 +94,26 @@ test('settings:get 与 fleetSnapshot 带出目标云端视图，供界面常驻�
   assert.match(main, /function cloudSelectionView\(/, '必须有 cloudSelectionView 生成目标云端视图');
 });
 
-test('提供「全部重启换云」IPC（避免部分环境连旧云的裂脑）', () => {
-  assert.match(main, /ipcMain\.handle\(\s*['"]cloud:restartAll['"]/, '必须暴露 cloud:restartAll 全部重启换云');
+test('换云 IPC 逐核心重绑并独立返回部分失败，不重启浏览器或重走槽位队列', () => {
+  const start = main.indexOf("ipcMain.handle('cloud:restartAll'");
+  const end = main.indexOf("ipcMain.handle('edge:start'", start);
+  const handler = main.slice(start, end);
+  assert.ok(start >= 0 && end > start, '必须暴露 cloud:restartAll 兼容通道');
+  assert.match(handler, /Promise\.all\(targets\.map/, '所有环境必须独立并行重绑');
+  assert.match(handler, /requestCoreCloudRebind\(handle, target\)/, '在线核心必须原地重绑 Cloud 传输');
+  assert.match(handler, /failed:\s*results\.length - rebound/, '必须返回部分失败数量');
+  assert.match(handler, /results:\s*targets\.map/, '必须逐环境返回成功或失败原因');
+  assert.doesNotMatch(handler, /stopAndRestart|queueStartEnv|provider\.|cdp|admitBrowserSlot|occupiedSlots/, '换云不得触碰浏览器执行器或槽位');
+});
+
+test('单核心 Cloud 重绑消息只携带控制传输目标，明确不改浏览器状态', () => {
+  const start = main.indexOf('function requestCoreCloudRebind');
+  const end = main.indexOf('function clearColdStandbyTimer', start);
+  const rebind = main.slice(start, end);
+  assert.ok(start >= 0 && end > start, '必须存在 per-core rebind helper');
+  assert.match(rebind, /type:\s*'lifecycle\.cloud_rebind'/);
+  assert.match(rebind, /浏览器状态未改变/);
+  assert.doesNotMatch(rebind, /stopAndRestart|queueStartEnv|provider\.|cdp|admitBrowserSlot|occupiedSlots/);
 });
 
 // 构建期烘焙缺省云端环境（mac 签名分发包默认 ol）：分发包用 electron-builder

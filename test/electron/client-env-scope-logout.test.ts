@@ -166,16 +166,23 @@ test('创建成功后刷新 UI：仅已权威分配的环境可自动入册', ()
   assert.match(renderer, /await refreshEnvs\(\);/, '创建成功后必须等待添加窗口环境列表刷新完成');
 });
 
-test('视频号解绑：Cloud 202→持久化恢复游标→轮询 tombstone→才物理删除；断线可重启续跑', () => {
+test('视频号解绑：Cloud 202→受限无浏览器清理→轮询 tombstone→才物理删除', () => {
   const block = handlerBlock(main, 'ads:deleteEnv');
   assert.match(block, /allowedEnvironmentPlatforms\.get\(userId\)/, '平台来自 Cloud /my-environments 权威响应，不信 renderer');
   assert.match(block, /clientAuthFetch\(`\/environments\/\$\{encodeURIComponent\(userId\)\}`/, '先请求 Cloud 权威解绑');
+  assert.match(block, /body:\s*\{ edgeId: fleet\.envIdForProfile\(userId\) \}/, '签发清理凭证时绑定稳定 edgeId');
   assert.match(block, /storePendingInteractionOffboard\(data, platform\)/, '202 回执先持久化 durable offboard 游标');
   assert.match(main, /clientAuthFetch\(`\/offboarding\/\$\{encodeURIComponent\(current\.offboardId\)\}`/,
     '重试通过状态 API 对账');
   assert.match(main, /current\.state === 'tombstoned' \|\| current\.state === 'purged'/,
     '仅 Cloud tombstone/purged 后允许进入物理删除，覆盖未绑定新环境的终态 offboard');
-  assert.match(main, /if \(handle\.offboardCleanup && !handle\.child/, '离线解绑在重启后主动拉起 cleanup-only Edge');
+  assert.match(main, /startRestrictedOffboardCleanupCore\(handle\)/, '离线解绑只拉起受限 cleanup core');
+  const cleanupStart = main.slice(
+    main.indexOf('async function startRestrictedOffboardCleanupCore'),
+    main.indexOf('function startEdge(', main.indexOf('async function startRestrictedOffboardCleanupCore')),
+  );
+  assert.doesNotMatch(cleanupStart, /queueStartEnv|ensureAdsServiceOnce|ensureKernelOnce|admitBrowserSlot|launchQueue|CDP/,
+    '清理恢复不得进入浏览器/provider/slot 路径');
   assert.match(renderer, /r && r\.ok && r\.cleanupPending/, 'UI 对 pending 如实显示，不移除花名册冒充已删除');
 });
 

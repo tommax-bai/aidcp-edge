@@ -93,6 +93,10 @@ test('健康合成：可恢复状态需要协助，真正中断状态为错误',
   assert.equal(uiLogic.synthesizeHealth(st({ risk: 'frozen' })).code, 'error');
   assert.equal(uiLogic.synthesizeHealth(st({ cloud: 'disconnected' })).code, 'attention');
   assert.equal(uiLogic.synthesizeHealth(st({ risk: 'restricted' })).code, 'attention');
+  const executorError = uiLogic.synthesizeHealth(st({ browserState: 'error', coreState: 'online', cloudState: 'connected' }));
+  assert.equal(executorError.code, 'attention');
+  assert.equal(executorError.label, '浏览器执行器异常');
+  assert.match(executorError.detail, /核心与 Cloud 仍在线/);
 });
 
 // ── 首次连接 ≠ 断线重连（change honest-first-connect-label）──
@@ -105,7 +109,7 @@ test('健康合成：本轮核心从没连上过云端 → 是启动中，绝不
   );
   assert.equal(booting.code, 'ready');
   assert.doesNotMatch(booting.label, /重新连接/); // 「重」断言了一次从未发生过的连接
-  assert.match(booting.label, /启动/);
+  assert.match(booting.label, /连接/);
 });
 
 test('健康合成：连上过之后掉线 → 才是真的「正在重新连接」', () => {
@@ -119,8 +123,8 @@ test('健康合成：连上过之后掉线 → 才是真的「正在重新连接
 test('健康合成：暂停 / 启动中 / 停止', () => {
   assert.equal(uiLogic.synthesizeHealth(st({ session: 'paused', edge: 'stopped' })).code, 'paused');
   const closed = uiLogic.synthesizeHealth(st({ session: 'closed', edge: 'stopped', cloud: 'disconnected' }));
-  assert.equal(closed.label, '已关闭');
-  assert.match(closed.detail, /启动/);
+  assert.equal(closed.label, '待连接');
+  assert.match(closed.detail, /登录客户端/);
   const resting = uiLogic.synthesizeHealth(st({ session: 'resting', edge: 'running' }));
   assert.equal(resting.code, 'paused');
   assert.match(resting.label, /等待下一轮/);

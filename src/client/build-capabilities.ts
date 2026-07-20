@@ -13,4 +13,9 @@
  * (an old binary that would silently ignore the `text` field and only click) is rejected with 409
  * `edge_lacks_text_capability` before any command is dispatched.
  */
-export const EDGE_BUILD_CAPABILITIES = ['captcha_assist_text_v1'] as const;
+import { CLIENT_CORE_BROWSER_EXECUTOR_CAPABILITY } from '../comm/protocol.js';
+
+export const EDGE_BUILD_CAPABILITIES = [
+  'captcha_assist_text_v1',
+  CLIENT_CORE_BROWSER_EXECUTOR_CAPABILITY,
+] as const;

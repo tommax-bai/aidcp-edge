@@ -65,6 +65,8 @@ interface Stub {
   pause: () => Promise<unknown>;
   resume: () => Promise<unknown>;
   close: () => Promise<unknown>;
+  browserOpen: () => Promise<unknown>;
+  browserClose: () => Promise<unknown>;
   start: () => Promise<unknown>;
   restart: () => Promise<unknown>;
   relogin: () => Promise<unknown>;
@@ -96,6 +98,8 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     pause: async () => makeStatus({ session: 'paused' }),
     resume: async () => makeStatus({ session: 'running', edge: 'running' }),
     close: async () => makeStatus({ session: 'closed', edge: 'stopped', cloud: 'disconnected' }),
+    browserOpen: async () => makeStatus({ session: 'paused', edge: 'running', cloud: 'connected', automationState: 'paused', browserState: 'ready' }),
+    browserClose: async () => makeStatus({ session: 'paused', edge: 'running', cloud: 'connected', automationState: 'paused', browserState: 'closed' }),
     start: async () => makeStatus({ edge: 'starting', session: 'running' }),
     restart: async () => makeStatus({ edge: 'starting', session: 'running' }),
     relogin: async () => makeStatus(),
@@ -328,34 +332,41 @@ test('窗口停放：无可控浏览器时显示浏览器诚实失败', async ()
   assert.match($(w, '#settings-msg').textContent ?? '', /引擎未运行或浏览器尚未就绪，请先启动引擎再操作/);
 });
 
-test('今日进展生命周期控制：关闭/停止→启动，运行→暂停，暂停→关闭+恢复', async () => {
+test('今日进展生命周期控制：自动化和浏览器使用独立动作', async () => {
   const stopped = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'stopped' }) }));
-  assert.equal($(stopped, '#session-fab').textContent, '启动');
+  assert.equal($(stopped, '#session-fab').textContent, '开始自动化');
   const closed = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'stopped', session: 'closed' }) }));
-  assert.equal($(closed, '#session-fab').textContent, '启动');
-  assert.ok($(closed, '#session-close').classList.contains('hidden'));
+  assert.equal($(closed, '#session-fab').textContent, '开始自动化');
+  assert.equal($(closed, '#session-close').textContent, '打开浏览器');
   const running = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'running', session: 'running' }) }));
-  assert.equal($(running, '#session-fab').textContent, '暂停');
+  assert.equal($(running, '#session-fab').textContent, '暂停自动化');
   const resting = await boot(makeStub({ getStatus: async () => makeStatus({ edge: 'running', session: 'resting' }) }));
-  assert.equal($(resting, '#session-fab').textContent, '暂停');
+  assert.equal($(resting, '#session-fab').textContent, '暂停自动化');
   const paused = await boot(makeStub({ getStatus: async () => makeStatus({ session: 'paused' }) }));
-  assert.equal($(paused, '#session-fab').textContent, '恢复');
-  assert.equal($(paused, '#session-close').textContent, '关闭');
+  assert.equal($(paused, '#session-fab').textContent, '恢复自动化');
+  assert.equal($(paused, '#session-close').textContent, '打开浏览器');
   assert.ok(!$(paused, '#session-close').classList.contains('hidden'));
+  const executorError = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      edge: 'running', coreState: 'online', cloud: 'connected', cloudState: 'connected', browserState: 'error',
+    }),
+  }));
+  assert.equal($(executorError, '#session-close').textContent, '重新打开浏览器');
+  assert.equal(($(executorError, '#session-close') as HTMLElement).dataset.browserAction, 'open');
 });
 
-test('暂停态点击关闭：调用显式 close 并切到已关闭/启动', async () => {
+test('自动化暂停态点击关闭浏览器：只调用 browserClose，核心和暂停态保留', async () => {
   let closes = 0;
   const w = await boot(makeStub({
-    getStatus: async () => makeStatus({ session: 'paused', edge: 'stopped' }),
-    close: async () => { closes++; return makeStatus({ session: 'closed', edge: 'stopped', cloud: 'disconnected' }); },
+    getStatus: async () => makeStatus({ session: 'paused', edge: 'running', cloud: 'connected', automationState: 'paused', browserState: 'ready' }),
+    browserClose: async () => { closes++; return makeStatus({ session: 'paused', edge: 'running', cloud: 'connected', automationState: 'paused', browserState: 'closed' }); },
   }));
   $(w, '#session-close').dispatchEvent(new w.Event('click'));
   await tick();
   await tick();
   assert.equal(closes, 1);
-  assert.equal($(w, '#session-fab').textContent, '启动');
-  assert.ok($(w, '#session-close').classList.contains('hidden'));
+  assert.equal($(w, '#session-fab').textContent, '恢复自动化');
+  assert.equal($(w, '#session-close').textContent, '打开浏览器');
 });
 
 test('程序化建号：填充操作系统下拉、点「创建环境」→ 传选中 OS family、成功提示 + 刷新', async () => {
@@ -827,7 +838,7 @@ test('暂停中切换环境 → 恢复：先存再恢复（回归：新环境不
     saveSettings: async () => { calls.push('save'); return { provider: 'adspower', adsProfileId: 'u_new', saveOk: true }; },
     resume: async () => { calls.push('resume'); return makeStatus({ session: 'running', edge: 'running' }); },
   }));
-  assert.equal($(w, '#session-fab').textContent, '恢复', '暂停态 fab 应为「恢复」');
+  assert.equal($(w, '#session-fab').textContent, '恢复自动化', '暂停态 fab 应为「恢复自动化」');
   $$(w, '.ads-env-item')[0].dispatchEvent(new w.Event('click')); // 暂停中切换环境 → dirty
   $(w, '#session-fab').dispatchEvent(new w.Event('click')); // 点「恢复」
   await tick();
@@ -1089,7 +1100,7 @@ test('慢启动行：Facebook 环境未启动 + 无 env-scoped 读能力（老�
   const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
   assert.equal(toggle.disabled, true);
   assert.equal(toggle.indeterminate, true, '未知态必须用 indeterminate，不能显示成已关闭');
-  assert.match($(w, '#slow-start-reason').textContent || '', /启动环境并连接云端后同步慢启动状态/);
+  assert.match($(w, '#slow-start-reason').textContent || '', /登录客户端后读取 Cloud 慢启动状态/);
 });
 
 // 停止的环境（内核未运行、无云链路，dailyUsage=null）+ 有绑定 → 经不依赖边缘的 env-scoped 读渲染真态，

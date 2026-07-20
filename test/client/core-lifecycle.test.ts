@@ -64,6 +64,27 @@ test('resume after pause exits without closing the retained browser', async () =
   assert.deepEqual(h.exits, [0]);
 });
 
+test('separated lifecycle pauses and resumes automation in place without deactivating core or Cloud', async () => {
+  const calls: string[] = [];
+  const exits: number[] = [];
+  const controller = new CoreLifecycleController({
+    pauseAutomation: async () => { calls.push('pause-automation'); },
+    resumeAutomation: async () => { calls.push('resume-automation'); },
+    deactivate: async () => { calls.push('deactivate'); },
+    closeOwnedBrowser: async () => { calls.push('close-browser'); return true; },
+    exit: (code) => { exits.push(code); },
+    onPaused: () => { calls.push('paused-ack'); },
+    onResumed: () => { calls.push('resumed-ack'); },
+  });
+
+  await controller.request('pause');
+  assert.equal(controller.state, 'paused');
+  await controller.request('resume');
+  assert.equal(controller.state, 'active');
+  assert.deepEqual(calls, ['pause-automation', 'paused-ack', 'resume-automation', 'resumed-ack']);
+  assert.deepEqual(exits, []);
+});
+
 test('standby closes browser but does not exit or deactivate cloud connection', async () => {
   let standbyCalls = 0;
   let standbyAcks = 0;
@@ -116,6 +137,37 @@ test('resume after standby exits without trying to close the already closed brow
   assert.equal(deactivations, 1);
   assert.equal(browserCloses, 0);
   assert.deepEqual(exits, [0]);
+});
+
+test('automation pause remains independent from browser standby and resumes before wake', async () => {
+  const calls: string[] = [];
+  let paused = 0;
+  let resumed = 0;
+  const controller = new CoreLifecycleController({
+    deactivate: async () => undefined,
+    pauseAutomation: async () => { paused++; },
+    resumeAutomation: async () => { resumed++; },
+    closeOwnedBrowser: async () => true,
+    enterStandby: async () => true,
+    wakeFromStandby: async (resumeAutomation) => {
+      calls.push(`wake:${resumeAutomation}`);
+      return true;
+    },
+    exit: () => undefined,
+  });
+
+  await controller.request('standby');
+  await controller.request('pause');
+  assert.equal(controller.state, 'standby');
+  assert.equal(paused, 1);
+
+  await controller.request('resume');
+  assert.equal(controller.state, 'standby');
+  assert.equal(resumed, 0, 'browser-absent resume only clears the pause latch');
+
+  await controller.request('wake');
+  assert.equal(controller.state, 'active');
+  assert.deepEqual(calls, ['wake:true']);
 });
 
 test('terminal shutdown still closes the browser and preserves exit code', async () => {

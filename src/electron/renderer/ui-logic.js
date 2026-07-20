@@ -34,25 +34,30 @@
   function synthesizeHealth(status) {
     const s = status || {};
     const edgeFailure = s.edgeFailure && typeof s.edgeFailure.summary === 'string' ? s.edgeFailure.summary.trim() : '';
-    if (s.edge === 'warning') return { code: 'error', label: '运行异常', detail: edgeFailure || '引擎未能继续运行，请查看详情后重新启动' };
+    if (s.coreState === 'error' || s.edge === 'warning') return { code: 'error', label: '核心异常', detail: edgeFailure || '客户端核心未能继续运行，请查看详情' };
     if (s.risk === 'frozen') return { code: 'error', label: '账号已暂停', detail: '账号当前无法继续操作，请查看详情' };
     if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需要协助', detail: AUTH_ATTENTION[s.auth] };
     if (s.risk === 'restricted') return { code: 'attention', label: '账号受限', detail: '自动运营已暂停；确认 Facebook 可正常使用后可解除受限' };
-    if (s.edge === 'running' && s.session === 'running' && s.cloud !== 'connected') {
+    if (s.cloudState === 'reconnecting' || (s.edge === 'running' && s.session === 'running' && s.cloud !== 'connected')) {
       // 「**重**新连接」断言的是「曾经连上过、现在断了」。本轮核心从没连上过 = 还在冷启动：核心一打印日志
       // edge 就翻成 running，但它 main() 里连云端排在「起浏览器 → CDP attach → 登录闸」之后，中间整个窗口
       // cloud 都还是 disconnected。这时讲「重新连接」＝断言一个从未发生过的连接，把「还没」读成「否」。
-      if (!s.cloudEverConnected) return { code: 'ready', label: '正在启动…', detail: '正在准备浏览器并连接云端' };
+      if (s.cloudState === 'connecting' || !s.cloudEverConnected) return { code: 'ready', label: '核心连接中…', detail: '正在连接 Cloud；浏览器无需启动' };
       return { code: 'attention', label: '正在重新连接', detail: '连接恢复后会自动继续' };
     }
-    if (s.session === 'paused') return { code: 'paused', label: '已暂停', detail: '浏览器保持打开；可恢复或关闭' };
-    if (s.session === 'closed') return { code: 'ready', label: '已关闭', detail: '浏览器已关闭，点右下角「启动」重新打开' };
+    if (s.browserState === 'error') {
+      return { code: 'attention', label: '浏览器执行器异常', detail: '客户端核心与 Cloud 仍在线；可重新打开浏览器恢复页面操作' };
+    }
+    if (s.automationState === 'paused' || s.session === 'paused') return { code: 'paused', label: '自动化已暂停', detail: `客户端核心在线；浏览器${s.browserState === 'ready' ? '已打开' : '已关闭'}` };
     if (s.edge === 'running' && s.session === 'resting') return { code: 'paused', label: '等待下一轮', detail: '当前阶段完成后会自动继续' };
-    if (s.edge === 'starting') return { code: 'ready', label: '正在启动…', detail: '引擎启动中' };
-    if (s.edge === 'running' && s.session === 'running') {
+    if (s.coreState === 'starting' || s.edge === 'starting') return { code: 'ready', label: '核心启动中…', detail: '浏览器保持独立' };
+    if (s.automationState === 'running' || (s.edge === 'running' && s.session === 'running')) {
       return { code: 'running', label: s.risk === 'warned' ? '运行中 · 放慢节奏' : '运行中 · 一切正常', detail: '' };
     }
-    return { code: 'ready', label: '就绪', detail: '点右下角「启动」开始' };
+    if (s.coreState === 'online' && s.cloudState === 'connected') {
+      return { code: 'ready', label: '客户端核心在线', detail: s.browserState === 'closed' ? '浏览器已关闭；Cloud 操作仍可用' : '浏览器已就绪，自动化尚未开始' };
+    }
+    return { code: 'ready', label: '待连接', detail: '登录客户端后会自动连接客户端核心' };
   }
 
   // 标题带色调：可恢复的节奏调整用琥珀，只有冻结使用红色。
@@ -660,7 +665,8 @@
   function fleetLevel(status, nowMs) {
     const s = status || {};
     if (s.respawnGaveUp) return { level: 'error', needsAction: true, label: '错误 · 已放弃重启' };
-    if (s.edge === 'warning') return { level: 'error', needsAction: true, label: '异常' };
+    if (s.coreState === 'error' || s.edge === 'warning') return { level: 'error', needsAction: true, label: '核心异常' };
+    if (s.cloudRebind && s.cloudRebind.state === 'failed') return { level: 'attention', needsAction: true, label: 'Cloud 重绑失败' };
     // 阻断浮层待人工（登录/验证码/未知阻断，核心已本地暂停）：即便 edge 仍 running 也 MUST 浮顶为需处理，
     // 绝不呈现为绿色在线（多环境跨窗盯验证码是本控制台核心目的）。置于 running 判定之前。
     if (s.overlayBlocked) return { level: 'attention', needsAction: true, label: '等待你处理' };
@@ -670,8 +676,8 @@
     if (s.risk === 'frozen') return { level: 'error', needsAction: true, label: '账号已暂停' };
     if (s.risk === 'restricted') return { level: 'attention', needsAction: true, label: '账号受限' };
     if (s.sameAccountWarning) return { level: 'attention', needsAction: true, label: '账号重复运行' };
-    if (s.edge === 'starting') return { level: 'launching', needsAction: false, label: '启动中' };
-    if (s.edge === 'running') {
+    if (s.coreState === 'starting' || s.coreState === 'restarting' || s.edge === 'starting') return { level: 'launching', needsAction: false, label: '核心连接中' };
+    if (s.coreState === 'online' || s.edge === 'running') {
       const at = Date.parse(s.updatedAt || '');
       if (Number.isFinite(at) && Number.isFinite(nowMs) && nowMs - at > FLEET_STALE_MS) {
         return { level: 'stale', needsAction: false, label: '失联' };
@@ -679,11 +685,15 @@
       // 同 synthesizeHealth：没连上过 ≠ 断线。冷启动窗口必须留在 launching（蓝、不 needsAction、不浮顶），
       // 否则每次正常启动都会被染成琥珀「需要你处理」并挤到列表顶部，与真正待人工的登录 / 验证码 / 风控
       // 受限混作一谈——那正好毁掉环境栏存在的理由（一眼看出谁真的需要我）。
-      if (s.session === 'running' && s.cloud !== 'connected') {
-        if (!s.cloudEverConnected) return { level: 'launching', needsAction: false, label: '启动中' };
+      if (s.cloudState === 'connecting' || (s.session === 'running' && s.cloud !== 'connected' && !s.cloudEverConnected)) {
+        return { level: 'launching', needsAction: false, label: '核心连接中' };
+      }
+      if (s.cloudState === 'reconnecting' || (s.session === 'running' && s.cloud !== 'connected')) {
         return { level: 'attention', needsAction: true, label: '正在重新连接' };
       }
-      return { level: 'running', needsAction: false, label: s.session === 'paused' ? '已暂停' : s.session === 'resting' ? '等待下一轮' : '运行中' };
+      const automation = s.automationState || (s.session === 'running' ? 'running' : s.session === 'paused' ? 'paused' : 'stopped');
+      if (automation === 'running' || automation === 'queued') return { level: 'running', needsAction: false, label: automation === 'queued' ? '页面任务排队' : '自动化运行中' };
+      return { level: 'running', needsAction: false, label: s.browserState === 'closed' ? '核心在线 · 浏览器已关' : automation === 'paused' ? '核心在线 · 自动化暂停' : '客户端核心在线' };
     }
     if (s.session === 'paused') return { level: 'offline', needsAction: false, label: '已暂停' };
     if (s.session === 'closed') return { level: 'offline', needsAction: false, label: '已关闭' };

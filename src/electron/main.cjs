@@ -56,6 +56,7 @@ const {
   normalizeBrowserStandbyHint,
 } = require('./browser-cold-standby.cjs');
 const fleet = require('./fleet.cjs');
+const { createCoreBootstrapSupervisor } = require('./core-bootstrap.cjs');
 const {
   browserPersonaNoticeForStatus,
   browserPersonaNoticeKey,
@@ -233,8 +234,8 @@ const DEFAULT_SETTINGS = {
   // clientAuthEnabled=true 仅用于 custom 云端由主机派生客户鉴权地址。
   clientAuthUrl: '',
   clientAuthEnabled: false,
-  // 仅保存 Cloud 已受理的解绑清理游标。不得含正文、凭证或最终模板文本；
-  // Cloud tombstone 前绝不物理删除本地环境，Edge 离线时靠这份列表在重启后续清理。
+  // 仅保存 Cloud 已受理的解绑清理游标与短期清理凭证。该凭证只在 Electron main 中使用，
+  // settings:get 会剥离；Cloud tombstone 前绝不物理删除本地环境。
   pendingInteractionOffboards: [],
 };
 let settings = { ...DEFAULT_SETTINGS };
@@ -262,6 +263,9 @@ function normalizePendingInteractionOffboards(list) {
       requestedAt: Math.max(0, Number(raw.requestedAt) || 0),
       purgeDueAt: Math.max(0, Number(raw.purgeDueAt) || 0),
       platform: normalizePlatform(raw.platform),
+      cleanupGrant: typeof raw.cleanupGrant === 'string' ? raw.cleanupGrant.trim() : '',
+      cleanupGrantExpiresAt: Math.max(0, Number(raw.cleanupGrantExpiresAt) || 0),
+      cleanupEdgeId: typeof raw.cleanupEdgeId === 'string' ? raw.cleanupEdgeId.trim() : '',
     });
   }
   return out;
@@ -356,9 +360,13 @@ let loginWindow = null;
 let clientSession = null; // { token, name, expiresAt(ms) } | null
 let allowedProfileIds = null; // Set<profileId> | null（null = 未 gated，不过滤）
 let allowedEnvironmentPlatforms = new Map(); // envKey -> Cloud 权威 platform；绝不采信 renderer 自报
+let allowedEnvironmentControlStates = new Map(); // envKey -> Cloud 权威 binding/persona 投影；不含 accountId
 let sessionTimer = null;
 let proceededOnce = false;
 const CLIENT_SESSION_REFRESH_WINDOW_MS = 5 * 60_000;
+const coreBootstrapSupervisor = createCoreBootstrapSupervisor({
+  concurrency: Number(process.env.AIDCP_CORE_BOOTSTRAP_CONCURRENCY) || 3,
+});
 
 function deriveClientAuthBaseFromCloudUrl(cloud) {
   const m = /^wss?:\/\/([^/:]+)(?::(\d+))?/i.exec(String(cloud || '').trim());
@@ -717,6 +725,7 @@ async function refreshAllowedEnvironments() {
   if (!clientAuthEnabled() || !hasValidSession()) {
     allowedProfileIds = null;
     allowedEnvironmentPlatforms = new Map();
+    allowedEnvironmentControlStates = new Map();
     return true;
   }
   const r = await clientAuthFetch('/my-environments', { token: clientSession.token });
@@ -726,9 +735,20 @@ async function refreshAllowedEnvironments() {
     allowedEnvironmentPlatforms = new Map(r.data.environments
       .map((e) => [String((e && e.envKey) || '').trim(), normalizePlatform(e && e.platform)])
       .filter(([envKey]) => Boolean(envKey)));
+    allowedEnvironmentControlStates = new Map(r.data.environments
+      .map((e) => {
+        const envKey = String((e && e.envKey) || '').trim();
+        return [envKey, {
+          bindingState: String((e && e.bindingState) || 'binding_unavailable'),
+          personaState: String((e && e.personaState) || 'unavailable'),
+          personaBound: e && typeof e.personaBound === 'boolean' ? e.personaBound : null,
+        }];
+      })
+      .filter(([envKey]) => Boolean(envKey)));
   } else if (allowedProfileIds == null) {
     allowedProfileIds = new Set(); // 首次拉取失败 → fail-closed 空集（不误显他人环境）；已建立则保留上次已知
     allowedEnvironmentPlatforms = new Map();
+    allowedEnvironmentControlStates = new Map();
   }
   return true;
 }
@@ -877,6 +897,7 @@ function onSessionInvalid() {
   clearClientSession();
   allowedProfileIds = new Set();
   allowedEnvironmentPlatforms = new Map();
+  allowedEnvironmentControlStates = new Map();
   try { syncEnvHandles(); } catch { /* ignore */ } // wanted 为空 → 移除并 SIGTERM 全部环境
   if (mainWindow) { try { mainWindow.close(); } catch { /* ignore */ } mainWindow = null; }
   createLoginWindow();
@@ -970,23 +991,22 @@ async function proceedAfterAuth() {
       });
     } else {
       updateStatus(handle, {
-        lastMessage: '就绪。点右下角「启动」开始自动运营。',
-        ...presencePatch('就绪，等你点「启动」'),
+        lastMessage: clientAuthEnabled()
+          ? '正在连接客户端核心；浏览器保持关闭。'
+          : '就绪。点右下角「开始自动化」后按需打开浏览器。',
+        ...presencePatch(clientAuthEnabled() ? '正在连接客户端核心…' : '就绪，等待开始自动化'),
       });
     }
   }
+  bootstrapOwnedClientCores();
   if (settings.provider === 'adspower' && envs.size === 0) broadcastFleet();
   if (!mainWindow) createWindow();
   if (!proceededOnce) {
     proceededOnce = true;
     createTray();
-    // 冷启动非阻塞预热 Ads CLI：面板首次 /status 不再先撞 fetch failed。
-    // 只在 adspower 模式执行；内核仍保持首次启动浏览器时才按需下载。
-    if (settings.provider === 'adspower') {
-      void ensureAdsServiceOnce(null)
-        .then((service) => (service && service.ok ? reconcileRunningProfiles() : undefined))
-        .catch(() => undefined);
-    } else {
+    // 客户核心启动不得隐式启动 AdsPower 或下载内核。provider 探测延后到显式浏览器/自动化意图；
+    // self 遗留模式无 AdsPower 生命周期，仍保留只读 Chrome 对账。
+    if (settings.provider !== 'adspower') {
       void reconcileRunningProfiles();
     }
     startSessionMaintenance();
@@ -1003,6 +1023,7 @@ function startSessionMaintenance() {
     if (!ok) { onSessionInvalid(); return; }
     syncEnvHandles();
     void syncUnsyncedManualAliases();
+    bootstrapOwnedClientCores();
     void retryPendingInteractionOffboards();
   }, 4 * 60_000);
 }
@@ -1289,6 +1310,8 @@ function makeStatus(provider) {
     // 本环境核心本次实际被派生去连的云端 key（change edge-cloud-env-selector）：''=未启动/未知。
     // 界面据此与「目标云端」比对，运行中且不一致即显示「待重启生效」（红线：显示=实际连接）。
     connectedCloudKey: '',
+    targetCloudKey: '',
+    cloudRebind: null,
   };
 }
 
@@ -1309,6 +1332,8 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     platform: platform || 'xiaohongshu',
     cascadeIndex: cascadeIndex || 0,
     child: undefined,
+    spawnCloudKey: '',
+    cloudRebindPending: null,
     status: makeStatus(kind === 'self' ? 'self' : 'adspower'),
     // 每环境各一份日志→UI 事件解析器（交织 stdout 按 envId 归属，绝不串号）。
     uiEvents: createUiEventStream(),
@@ -1320,6 +1345,11 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     personaNoticeTimer: null,
     restartPending: false,
     pausePending: false,
+    automationPaused: false,
+    // Resume and browser wake are serialized: when automation is paused in browser standby,
+    // first clear the core's pause latch, then open the browser through the normal slot queue.
+    resumeWakePending: false,
+    cleanupManual: false,
     coreParked: false,
     closePending: false,
     removed: false,
@@ -1405,6 +1435,7 @@ function syncEnvHandles() {
   // 处理——不告警、不重起、queued start 到点也不再拉起，杜绝孤儿）。
   for (const [envId, handle] of envs) {
     if (wanted.has(envId)) continue;
+    coreBootstrapSupervisor.remove(envId);
     handle.removed = true;
     handle.stopRequested = true;
     releaseStartQueue(handle);
@@ -1426,12 +1457,20 @@ function syncEnvHandles() {
       existing.platform = spec.platform;
       existing.cascadeIndex = spec.cascadeIndex;
       existing.offboardCleanup = Boolean(spec.offboardCleanup);
+      const controlState = allowedEnvironmentControlStates.get(spec.profileId);
+      if (controlState && typeof controlState.personaBound === 'boolean') {
+        existing.status.personaBound = controlState.personaBound;
+      }
     } else {
       const handle = makeEnvHandle(spec);
       handle.offboardCleanup = Boolean(spec.offboardCleanup);
       // 环境名现成可得：未启动前就点亮账号标签（登录后被真实身份覆盖）。
       if (spec.kind === 'adspower' && spec.profileId) {
         handle.status.account = { id: spec.profileId, name: spec.name || '', source: 'env' };
+      }
+      const controlState = allowedEnvironmentControlStates.get(spec.profileId);
+      if (controlState && typeof controlState.personaBound === 'boolean') {
+        handle.status.personaBound = controlState.personaBound;
       }
       envs.set(envId, handle);
     }
@@ -1444,10 +1483,57 @@ function syncEnvHandles() {
   // 否则会留一个「幽灵需处理项」（脉冲 + 计入待处理 + 混进引导队列）直到别的环境再发身份事件。
   refreshSameAccountWarnings();
   broadcastFleet();
-  // 离线解绑恢复：只要本地仍有 Cloud 受理游标，就主动拉起对应核心重连收 offboard command。
-  // 新版核心在 welcome barrier 下不会启动平台读写；这里不是发送/重试平台写。
+  // 离线解绑恢复使用独立、受限、浏览器无关的 cleanup core；绝不进入普通浏览器启动队列。
   for (const handle of envs.values()) {
-    if (handle.offboardCleanup && !handle.child && !handle.respawnTimer) queueStartEnv(handle);
+    if (!handle.offboardCleanup || handle.child || handle.cleanupManual) continue;
+    coreBootstrapSupervisor.enqueue({
+      key: handle.envId,
+      cancelled: () => handle.removed || handle.cleanupManual || !pendingOffboardForEnv(handle.profileId),
+      start: () => startRestrictedOffboardCleanupCore(handle),
+    });
+  }
+}
+
+/**
+ * 客户登录后的正常生命周期：为每个“归属 + 账号绑定”均可信的环境启动浏览器无关 core。
+ * 这条队列与 AdsPower、CDP、浏览器槽位/等待容量完全隔离；单环境失败只在独立监督器里退避/熔断。
+ */
+function bootstrapOwnedClientCores() {
+  if (!clientAuthEnabled() || !hasValidSession() || !(allowedProfileIds instanceof Set)) return;
+  for (const handle of envs.values()) {
+    if (!handle || handle.removed || handle.kind !== 'adspower' || handle.offboardCleanup) continue;
+    const envKey = String(handle.profileId || '').trim();
+    const controlState = allowedEnvironmentControlStates.get(envKey);
+    const trustworthy = allowedProfileIds.has(envKey) && controlState && controlState.bindingState === 'bound';
+    if (!trustworthy) {
+      coreBootstrapSupervisor.remove(handle.envId);
+      // 归属仍在但绑定不可信：立刻限制客户业务 core；绝不猜账号，也不靠打开浏览器“修复”。
+      if (handle.child) {
+        handle.stopRequested = true;
+        clearRespawnTimer(handle);
+        try { handle.child.kill('SIGTERM'); } catch { /* best-effort */ }
+      }
+      const reason = controlState && controlState.bindingState
+        ? CONTROL_BOOTSTRAP_REASON_ZH[controlState.bindingState] || '云端账号绑定暂不可用'
+        : '云端账号绑定暂不可用';
+      updateStatus(handle, {
+        edge: 'stopped',
+        cloud: 'disconnected',
+        lastMessage: `客户端核心未启动：${reason}。浏览器保持关闭。`,
+        ...edgeFailurePatch(reason),
+        ...presencePatch('账号绑定未确认，核心已限制'),
+      });
+      continue;
+    }
+    handle.stopRequested = false;
+    coreBootstrapSupervisor.enqueue({
+      key: handle.envId,
+      cancelled: () => handle.removed
+        || envs.get(handle.envId) !== handle
+        || !hasValidSession()
+        || allowedEnvironmentControlStates.get(envKey)?.bindingState !== 'bound',
+      start: () => handle.child ? true : startBrowserAbsentCore(handle),
+    });
   }
 }
 
@@ -1467,7 +1553,7 @@ function fleetSnapshot() {
       nameSource: h.nameSource,
       nameSyncState: h.nameSyncState,
       platform: h.platform,
-      status: { ...h.status, envId: h.envId, envName: h.name },
+      status: statusOf(h),
     })),
   };
 }
@@ -2376,6 +2462,78 @@ function sendCoreLifecycle(handle, command, onError) {
   }
 }
 
+function failPendingCoreRebind(handle, reason) {
+  const pending = handle && handle.cloudRebindPending;
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  handle.cloudRebindPending = null;
+  updateStatus(handle, {
+    cloudRebind: { state: 'failed', targetKey: pending.targetKey, reason },
+    lastMessage: `Cloud 重绑失败：${reason}。浏览器状态未改变。`,
+    ...presencePatch('Cloud 重绑失败，浏览器状态未改变'),
+  });
+  pending.resolve({ ok: false, reason });
+}
+
+/** Rebind only a core's Cloud transport; browser/provider/CDP/slot state is intentionally absent. */
+function requestCoreCloudRebind(handle, target) {
+  return new Promise((resolve) => {
+    const child = handle && handle.child;
+    if (!child || typeof child.send !== 'function' || child.connected === false) {
+      resolve({ ok: false, reason: 'core_offline' });
+      return;
+    }
+    const requestId = `cloud-rebind-${crypto.randomUUID()}`;
+    const timer = setTimeout(() => {
+      if (!handle.cloudRebindPending || handle.cloudRebindPending.requestId !== requestId) return;
+      handle.cloudRebindPending = null;
+      updateStatus(handle, {
+        cloudRebind: { state: 'failed', targetKey: target.key, reason: 'rebind_timeout' },
+        lastMessage: `客户端核心切换到 ${target.label || target.key} 超时；浏览器状态未改变。`,
+        ...presencePatch('Cloud 重绑超时，浏览器状态未改变'),
+      });
+      resolve({ ok: false, reason: 'rebind_timeout' });
+    }, 45_000);
+    if (typeof timer.unref === 'function') timer.unref();
+    handle.cloudRebindPending = { requestId, targetKey: target.key, timer, resolve };
+    updateStatus(handle, {
+      targetCloudKey: target.key,
+      cloudRebind: { state: 'pending', targetKey: target.key },
+      lastMessage: `正在把客户端核心重绑到 ${target.label || target.key}；浏览器状态与槽位保持不变。`,
+      ...presencePatch('正在切换 Cloud 控制连接…'),
+    });
+    try {
+      child.send({
+        type: 'lifecycle.cloud_rebind',
+        requestId,
+        url: target.url,
+        targetKey: target.key,
+        facebookBrowseMode: fleet.facebookBrowseModeFor({ platform: handle.platform, cloudEnvKey: target.key }),
+      }, (error) => {
+        if (!error || handle.child !== child || handle.cloudRebindPending?.requestId !== requestId) return;
+        clearTimeout(timer);
+        handle.cloudRebindPending = null;
+        updateStatus(handle, {
+          cloudRebind: { state: 'failed', targetKey: target.key, reason: error.message },
+          lastMessage: `Cloud 重绑指令未送达：${error.message}。浏览器状态未改变。`,
+          ...presencePatch('Cloud 重绑未送达'),
+        });
+        resolve({ ok: false, reason: 'ipc_send_failed' });
+      });
+    } catch (error) {
+      clearTimeout(timer);
+      handle.cloudRebindPending = null;
+      const reason = (error && error.message) || String(error);
+      updateStatus(handle, {
+        cloudRebind: { state: 'failed', targetKey: target.key, reason },
+        lastMessage: `Cloud 重绑指令未送达：${reason}。浏览器状态未改变。`,
+        ...presencePatch('Cloud 重绑未送达'),
+      });
+      resolve({ ok: false, reason: 'ipc_send_failed' });
+    }
+  });
+}
+
 function clearColdStandbyTimer(handle) {
   if (!handle) return;
   if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
@@ -2511,12 +2669,13 @@ function onColdStandbyAck(handle) {
   const bornBrowserAbsent = Boolean(handle.controlPlaneOnly);
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = true;
+  handle.closePending = false;
   if (handle.controlPlaneOnly) handle.controlPlaneBootstrapped = true;
   // 浏览器关掉了 = 一个槽位空出来了：立刻叫等槽位队列的队头，别让它白等到下一次重扫。
   setTimeout(() => drainSlotWaiters(), 0);
   const hint = handle.status.browserStandby && handle.status.browserStandby.hint;
   const decision = shouldEnterColdStandby({
-    status: { ...handle.status, edge: 'running', cloud: 'connected', session: 'resting' },
+    status: { ...handle.status, edge: 'running', cloud: 'connected', session: handle.automationPaused ? 'paused' : 'resting' },
     flags: { ...coldStandbyFlags(handle), closePending: false, pausePending: false },
     hint,
     settings: normalizeColdStandbySettings(settings, process.env),
@@ -2526,18 +2685,18 @@ function onColdStandbyAck(handle) {
   updateStatus(handle, {
     edge: 'running',
     cloud: 'connected',
-    session: 'resting',
+    session: handle.automationPaused ? 'paused' : 'resting',
     overlayBlocked: false,
     browserStandby: coldStandbyStatus('sleeping', hint, decision.ok ? {
       wakeDelayMs: decision.wakeDelayMs,
       warmupMs: decision.warmupMs,
     } : { reason: decision.reason }),
     lastMessage: bornBrowserAbsent
-      ? '云端控制面已连接；浏览器尚未启动，正在等待执行槽位。'
-      : '浏览器已关闭进入冷待机，云端连接保持中。',
+      ? '客户端核心与 Cloud 已连接；浏览器保持关闭，按需申请执行槽位。'
+      : '浏览器已关闭；客户端核心与 Cloud 连接保持在线。',
     ...presencePatch(bornBrowserAbsent
-      ? '已连接云端，浏览器等待槽位'
-      : '长时间等待中，浏览器已关闭，云端连接保持中'),
+      ? '客户端核心在线，浏览器已关闭'
+      : '浏览器已关闭，客户端核心在线'),
     ...clearEdgeFailurePatch(handle),
   });
 }
@@ -2712,6 +2871,7 @@ function onColdStandbyWoken(handle) {
   handle.coldStandbyActive = false;
   handle.controlPlaneOnly = false;
   handle.controlPlaneBootstrapped = false;
+  handle.executorFailure = null;
   handle.wakeRetryStreak = 0;
   handle.wakeDeadlineAt = 0;
   clearWakeDeadline(handle);
@@ -2722,10 +2882,12 @@ function onColdStandbyWoken(handle) {
   handle.coldStandbyLastWokenAt = Date.now();
   updateStatus(handle, {
     edge: 'running',
-    session: 'running',
+    session: handle.automationPaused ? 'paused' : 'running',
     browserStandby: coldStandbyStatus('awake', handle.status.browserStandby && handle.status.browserStandby.hint, {}),
-    lastMessage: '已从待机唤醒：浏览器已重建，引擎与云端连接全程未断。',
-    ...presencePatch('运行中'),
+    lastMessage: handle.automationPaused
+      ? '浏览器已打开；自动化仍暂停，客户端核心与 Cloud 连接全程未断。'
+      : '浏览器已打开并恢复自动化；客户端核心与 Cloud 连接全程未断。',
+    ...presencePatch(handle.automationPaused ? '浏览器已打开，自动化暂停' : '自动化运行中'),
     ...clearEdgeFailurePatch(handle),
   });
 }
@@ -2770,10 +2932,13 @@ async function startBrowserAbsentCore(handle, {
   if (!handle || handle.child || handle.controlPlaneStarting || handle.removed || handle.stopRequested || isQuitting) return false;
   handle.controlPlaneStarting = true;
   try {
+    const coreOnlyBootstrap = !slotAdmission && !queueAdmission;
     const bootstrap = await resolveControlBootstrap(handle);
     if (!bootstrap.ok) {
       if (!retainStartQueueReservation) releaseStartQueue(handle);
-      const browserState = queueAdmission && queueAdmission.message
+      const browserState = coreOnlyBootstrap
+        ? '浏览器保持关闭'
+        : queueAdmission && queueAdmission.message
         ? queueAdmission.message
         : slotAdmission && slotAdmission.message
           ? slotAdmission.message
@@ -2782,9 +2947,9 @@ async function startBrowserAbsentCore(handle, {
         edge: 'idle',
         cloud: 'disconnected',
         session: 'idle',
-        lastMessage: `${browserState}；控制面未连接：${bootstrap.message}。`,
-        ...edgeFailurePatch(`控制面未连接：${bootstrap.message}`),
-        ...presencePatch('浏览器等待中，云端身份尚未确认'),
+        lastMessage: `${browserState}；客户端核心未连接：${bootstrap.message}。`,
+        ...edgeFailurePatch(`客户端核心未连接：${bootstrap.message}`),
+        ...presencePatch('客户端核心未连接，浏览器保持关闭'),
       });
       return false;
     }
@@ -2800,8 +2965,10 @@ async function startBrowserAbsentCore(handle, {
         edge: 'starting',
         session: 'resting',
         browserStandby: coldStandbyStatus('scheduled', null, { reason: 'start_queue_full' }),
-        lastMessage: `${queueAdmission?.message || '浏览器启动暂未入队'}；正在先连接云端控制面。`,
-        ...presencePatch('正在连接云端，浏览器暂未入队'),
+        lastMessage: coreOnlyBootstrap
+          ? '正在启动客户端核心；浏览器保持关闭。'
+          : `${queueAdmission?.message || '浏览器启动暂未入队'}；正在先连接客户端核心。`,
+        ...presencePatch(coreOnlyBootstrap ? '正在连接客户端核心…' : '正在连接客户端核心，浏览器暂未入队'),
         ...clearEdgeFailurePatch(handle),
       });
     }
@@ -2820,6 +2987,75 @@ async function startBrowserAbsentCore(handle, {
   } finally {
     handle.controlPlaneStarting = false;
   }
+}
+
+/**
+ * Consume a Cloud-issued, use-once cleanup bootstrap and start a minimal browserless session.
+ * Definitive grant failures enter manual handling; transient network failures stay inside the
+ * independent core bootstrap supervisor and never fall back to queueStartEnv/provider/CDP.
+ */
+async function startRestrictedOffboardCleanupCore(handle) {
+  if (!handle || handle.child || handle.removed || handle.cleanupManual || isQuitting) return false;
+  const pending = pendingOffboardForEnv(handle.profileId);
+  if (!pending || pending.state === 'tombstoned' || pending.state === 'purged') return true;
+  const expectedEdgeId = fleet.envIdForProfile(pending.envKey);
+  if (!pending.cleanupGrant || !pending.cleanupGrantExpiresAt || pending.cleanupEdgeId !== expectedEdgeId) {
+    handle.cleanupManual = true;
+    updateStatus(handle, {
+      edge: 'warning',
+      cloud: 'disconnected',
+      session: 'resting',
+      lastMessage: '离场清理缺少与本环境绑定的有效凭证；已停止自动恢复，请人工处理。浏览器保持关闭。',
+      ...edgeFailurePatch('离场清理凭证缺失或环境不匹配'),
+      ...presencePatch('离场清理需人工处理'),
+    });
+    return false;
+  }
+  if (pending.cleanupGrantExpiresAt <= Date.now()) {
+    handle.cleanupManual = true;
+    updateStatus(handle, {
+      edge: 'warning',
+      cloud: 'disconnected',
+      session: 'resting',
+      lastMessage: '离场清理凭证已过期；已停止自动恢复，请人工处理。浏览器保持关闭。',
+      ...edgeFailurePatch('离场清理凭证已过期'),
+      ...presencePatch('离场清理需人工处理'),
+    });
+    return false;
+  }
+  const response = await clientAuthFetch(`/offboarding/${encodeURIComponent(pending.offboardId)}/cleanup-bootstrap`, {
+    method: 'POST',
+    token: clientSession && clientSession.token,
+    body: { cleanupGrant: pending.cleanupGrant, edgeId: expectedEdgeId },
+  });
+  const data = response.ok && response.data && response.data.data;
+  if (!data || data.mode !== 'restricted_cleanup' || data.offboardId !== pending.offboardId
+    || data.envKey !== pending.envKey || data.accountId !== pending.accountId || data.edgeId !== expectedEdgeId) {
+    if (response.status === 401) onSessionInvalid();
+    const definitive = response.status === 401 || response.status === 403 || response.status === 404
+      || response.status === 409 || response.status === 410;
+    if (definitive) handle.cleanupManual = true;
+    updateStatus(handle, {
+      edge: definitive ? 'warning' : 'starting',
+      cloud: 'disconnected',
+      session: 'resting',
+      lastMessage: definitive
+        ? `离场清理凭证被 Cloud 拒绝（${response.data?.error || response.status}）；请人工处理。浏览器保持关闭。`
+        : '离场清理核心暂未连上 Cloud，将按独立核心退避重试；浏览器保持关闭。',
+      ...(definitive ? edgeFailurePatch('离场清理凭证不可用') : clearEdgeFailurePatch(handle)),
+      ...presencePatch(definitive ? '离场清理需人工处理' : '离场清理核心等待重连'),
+    });
+    return false;
+  }
+  handle.stopRequested = false;
+  handle.controlPlaneOnly = true;
+  handle.controlPlaneBootstrapped = false;
+  handle.coldStandbyPending = true;
+  handle.coldStandbyActive = false;
+  return await spawnEdgeChild(handle, {
+    controlBootstrap: { accountId: data.accountId },
+    cleanupBootstrap: { offboardId: data.offboardId },
+  });
 }
 
 /**
@@ -2885,9 +3121,13 @@ function startEdge(handle, { kind = 'resume' } = {}) {
  * 返回一个在环境**真正就绪**（云端已连上）或诚实失败时才 settle 的 promise——串行启动队列靠它
  * 实现「起完一个再起下一个」；不等就绪就放行下一个，10 个环境仍会几乎同时冷启、把内存打爆。
  */
-function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReservation = false } = {}) {
+function spawnEdgeChild(handle, {
+  controlBootstrap = null,
+  cleanupBootstrap = null,
+  retainStartQueueReservation = false,
+} = {}) {
   if (!handle || handle.child || handle.removed || handle.stopRequested || isQuitting) return false;
-  if (handle.status.session === 'paused') return false;
+  if (handle.status.session === 'paused' && !controlBootstrap) return false;
   if (!controlBootstrap) {
     handle.controlPlaneOnly = false;
     handle.controlPlaneBootstrapped = false;
@@ -2937,13 +3177,13 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
 
   // 云端环境注入（change edge-cloud-env-selector）：界面已显式选择时，在**合并之后**覆盖继承来的
   // AIDCP_CLOUD_URL（必须在此、而非塞进 providerEnv：合并 { ...providerEnv, ...processEnv } 会让继承值压过）；
-  // 未选择则不动、沿用继承 / 缺省（零回归）。stamp 本次实际连接的云端 key，供界面「当前云端」显示与实际一致。
+  // 未选择则不动、沿用继承 / 缺省（零回归）。这里只记录本次目标；实际 key 必须等 hello/welcome 成功后再确认。
   const cloudSel = resolveCloudUrl();
   if (cloudSel.fromSelection) spawnEnv.AIDCP_CLOUD_URL = cloudSel.url;
   const resolvedCloudKey = cloudSel.fromSelection
     ? cloudSel.key
     : cloudKeyForUrl(String(process.env.AIDCP_CLOUD_URL || '').trim() || DEFAULT_CLOUD_URL);
-  handle.connectedCloudKey = resolvedCloudKey;
+  handle.spawnCloudKey = resolvedCloudKey;
   // 出口探测复用与当前 dev/ol/custom 云选择一致的 Client Auth 公网基址。显式 env 仍可覆盖；
   // 不存在可用基址时不猜第三方服务，核心会诚实投影 unavailable。
   const clientAuthBase = resolveClientAuthBase();
@@ -2966,8 +3206,16 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
     spawnEnv.AIDCP_START_BROWSER_ABSENT = '1';
     spawnEnv.AIDCP_CONTROL_ACCOUNT_ID = controlBootstrap.accountId;
   }
+  if (cleanupBootstrap) {
+    spawnEnv.AIDCP_OFFBOARD_CLEANUP_ONLY = '1';
+    spawnEnv.AIDCP_OFFBOARD_CLEANUP_ID = cleanupBootstrap.offboardId;
+  }
+  if (handle.automationPaused && !controlBootstrap) {
+    spawnEnv.AIDCP_AUTOMATION_PAUSED_AT_START = '1';
+  }
 
   handle.browserParkingReady = false;
+  handle.executorFailure = null;
   handle.browserPersonaNoticeState = null;
   resetPersonaNoticeGrace(handle);
   handle.browserAlreadyRunning = false;
@@ -3001,7 +3249,7 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
   // 草稿由重连后的云端 hello 快照重新推回。lastPublish 历史态不清（持久数据）。
   updateStatus(handle, {
     edge: 'starting',
-    session: controlBootstrap ? 'resting' : 'running',
+    session: handle.automationPaused ? 'paused' : (controlBootstrap ? 'resting' : 'running'),
     // 新核心 = 还没连上过云端，哪怕上一个核心连上过（change honest-first-connect-label）。不复位这一位，
     // 崩溃重起 / 显式重启的整个冷启动窗口会顶着上一轮的「连过」资格，被讲成「正在重新连接」。
     cloudEverConnected: false,
@@ -3012,11 +3260,17 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
     publishPreview: null,
     proxyRuntime: null,
     respawnGaveUp: false,
-    connectedCloudKey: handle.connectedCloudKey || '',
-    lastMessage: controlBootstrap
+    connectedCloudKey: '',
+    targetCloudKey: resolvedCloudKey,
+    cloudRebind: null,
+    lastMessage: cleanupBootstrap
+      ? '正在启动受限离场清理核心；浏览器保持关闭。'
+      : controlBootstrap
       ? '正在启动云端控制面；浏览器保持关闭，等待执行槽位。'
       : '正在启动 aidcp-edge…',
-    ...presencePatch(controlBootstrap ? '正在连接云端，浏览器等待槽位' : '正在启动引擎…'),
+    ...presencePatch(cleanupBootstrap
+      ? '正在连接离场清理核心…'
+      : controlBootstrap ? '正在连接云端，浏览器等待槽位' : '正在启动引擎…'),
     ...clearEdgeFailurePatch(handle),
   });
 
@@ -3024,8 +3278,52 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
   child.stderr.on('data', (chunk) => handleEdgeOutput(handle, chunk.toString(), true));
   child.on('message', (message) => {
     if (handle.child !== child || !message || typeof message !== 'object') return;
+    if (message.type === 'lifecycle.cloud_rebound' || message.type === 'lifecycle.cloud_rebind_failed') {
+      const pending = handle.cloudRebindPending;
+      if (!pending || message.requestId !== pending.requestId || message.targetKey !== pending.targetKey) return;
+      clearTimeout(pending.timer);
+      handle.cloudRebindPending = null;
+      if (message.type === 'lifecycle.cloud_rebound' && message.ok === true) {
+        handle.spawnCloudKey = pending.targetKey;
+        updateStatus(handle, {
+          cloud: 'connected',
+          connectedCloudKey: pending.targetKey,
+          targetCloudKey: pending.targetKey,
+          cloudRebind: { state: 'connected', targetKey: pending.targetKey },
+          lastMessage: `客户端核心已连接 ${CLOUD_ENV_LABELS[pending.targetKey] || pending.targetKey}；浏览器状态未改变。`,
+          ...presencePatch('Cloud 控制连接已切换'),
+          ...clearEdgeFailurePatch(handle),
+        });
+        pending.resolve({ ok: true });
+      } else {
+        const reason = typeof message.reason === 'string' && message.reason ? message.reason : 'rebind_failed';
+        updateStatus(handle, {
+          cloud: 'disconnected',
+          targetCloudKey: pending.targetKey,
+          cloudRebind: { state: 'failed', targetKey: pending.targetKey, reason },
+          lastMessage: `客户端核心未能连接 ${CLOUD_ENV_LABELS[pending.targetKey] || pending.targetKey}：${reason}。浏览器状态未改变。`,
+          ...presencePatch('Cloud 重绑失败，浏览器状态未改变'),
+        });
+        pending.resolve({ ok: false, reason });
+      }
+      return;
+    }
     if (message.type === 'lifecycle.standby') {
       onColdStandbyAck(handle);
+      return;
+    }
+    if (message.type === 'lifecycle.executor_failed') {
+      const reason = typeof message.reason === 'string' && message.reason ? message.reason : 'executor_failed';
+      handle.executorFailure = reason;
+      // The core initiated a browser-only teardown. Mark it pending so the following standby ack
+      // releases the browser slot without treating the independently healthy core as stopped.
+      if (message.teardown !== false) handle.coldStandbyPending = true;
+      updateStatus(handle, {
+        edge: 'running',
+        browserStandby: coldStandbyStatus('scheduled', null, { reason }),
+        lastMessage: `浏览器执行器异常：${reason}。正在释放浏览器资源；客户端核心与 Cloud 保持在线。`,
+        ...presencePatch('浏览器执行器异常，客户端核心在线'),
+      });
       return;
     }
     if (message.type === 'lifecycle.wake_requested') {
@@ -3065,34 +3363,69 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
       return;
     }
     if (message.type === 'lifecycle.paused') {
-      clearColdStandbyTimer(handle);
       handle.pausePending = false;
-      handle.coreParked = true;
+      handle.automationPaused = true;
       updateStatus(handle, {
-        edge: 'stopped',
-        cloud: 'disconnected',
+        edge: 'running',
         session: 'paused',
         overlayBlocked: false,
-        lastMessage: '已暂停自动运营，浏览器保持打开。',
-        ...presencePatch('已暂停，浏览器保持打开'),
+        lastMessage: '自动化已暂停；客户端核心与 Cloud 仍在线，浏览器状态未改变。',
+        ...presencePatch('自动化已暂停，客户端核心在线'),
         ...clearEdgeFailurePatch(handle),
+      });
+      return;
+    }
+    if (message.type === 'lifecycle.resumed') {
+      handle.pausePending = false;
+      handle.automationPaused = false;
+      const shouldWakeBrowser = handle.resumeWakePending;
+      handle.resumeWakePending = false;
+      updateStatus(handle, {
+        edge: 'running',
+        session: shouldWakeBrowser ? 'resting' : 'running',
+        lastMessage: shouldWakeBrowser
+          ? '自动化暂停已解除；正在按浏览器槽位恢复浏览器。'
+          : '自动化已原地恢复；客户端核心与浏览器未重启。',
+        ...presencePatch(shouldWakeBrowser ? '正在恢复浏览器…' : '自动化运行中'),
+        ...clearEdgeFailurePatch(handle),
+      });
+      if (shouldWakeBrowser) wakeColdStandby(handle, 'user_resume');
+      return;
+    }
+    if (message.type === 'lifecycle.offboard_cleanup_complete') {
+      const pending = pendingOffboardForEnv(handle.profileId);
+      if (!handle.offboardCleanup || !pending || message.offboardId !== pending.offboardId) return;
+      // The use-once session has completed its only command. Never recycle it into a general core;
+      // polling Cloud tombstone is an Electron customer-auth operation and remains browserless.
+      handle.cleanupManual = true;
+      updateStatus(handle, {
+        edge: 'running',
+        cloud: 'connected',
+        session: 'resting',
+        lastMessage: '离场清理已回报 Cloud，正在等待权威墓碑后删除本地环境；浏览器全程未启动。',
+        ...presencePatch('离场清理已完成，等待 Cloud 确认'),
+        ...clearEdgeFailurePatch(handle),
+      });
+      void reconcilePendingInteractionOffboard(pending, {}, 8).finally(() => {
+        if (handle.child) {
+          try { handle.child.kill('SIGTERM'); } catch { /* best-effort */ }
+        }
       });
       return;
     }
     if (message.type === 'lifecycle.close_failed') {
       clearColdStandbyTimer(handle);
+      handle.coldStandbyPending = false;
       handle.closePending = false;
       handle.pausePending = false;
-      handle.coreParked = true;
-      handle.stopRequested = true;
       updateStatus(handle, {
-        edge: 'stopped',
-        cloud: 'disconnected',
-        session: 'paused',
-        lastMessage: '浏览器关闭状态未能确认，仍按暂停处理；可重试关闭。',
+        edge: 'running',
+        session: handle.automationPaused ? 'paused' : 'running',
+        lastMessage: '浏览器关闭状态未能确认；客户端核心与 Cloud 仍在线，可重试关闭。',
         ...edgeFailurePatch('浏览器关闭状态未能确认'),
-        ...presencePatch('关闭未确认，仍保持暂停'),
+        ...presencePatch('浏览器关闭未确认，客户端核心在线'),
       });
+      return;
     }
   });
   // spawn 失败（EAGAIN 多环境 fork 压力 / ENOENT 产物缺失）：'error' 事件无监听会被 EventEmitter
@@ -3102,6 +3435,7 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
   // 互斥，谁先触发谁处理、另一个 no-op。
   child.on('error', (err) => {
     if (handle.child !== child) return;
+    failPendingCoreRebind(handle, `core_spawn_error:${(err && err.message) || String(err)}`);
     settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
     handle.child = undefined;
     handle.coldStandbyPending = false;
@@ -3151,6 +3485,7 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
   // 读 handle.child、'close' 仅晚 'exit' 数毫秒，远在 ~10s 预算内。）
   child.on('close', (code, signal) => {
     if (handle.child !== child) return; // 已被 'error' 处理器接管
+    failPendingCoreRebind(handle, `core_exited:${code ?? signal ?? 'unknown'}`);
     settleLaunchReady(handle, false); // 进程没了：放行启动队列的下一个
     const wasClosing = handle.closePending;
     const wasParked = handle.coreParked;
@@ -3184,6 +3519,20 @@ function spawnEdgeChild(handle, { controlBootstrap = null, retainStartQueueReser
     if (wasColdStandby && !isQuitting && !wasRestarting && !wasPausing && !wasParked && !wasClosing) {
       handle.coldStandbyPending = false;
       handle.coldStandbyActive = true;
+      if (handle.offboardCleanup) {
+        handle.cleanupManual = true;
+        updateStatus(handle, {
+          edge: 'warning',
+          cloud: 'disconnected',
+          session: 'resting',
+          overlayBlocked: false,
+          browserStandby: coldStandbyStatus('sleeping', null, { reason: 'cleanup_core_exited' }),
+          lastMessage: '受限离场清理核心已退出；单次凭证不会复用，已转人工处理。浏览器保持关闭。',
+          ...edgeFailurePatch('离场清理核心退出，单次凭证已停止复用'),
+          ...presencePatch('离场清理需人工处理'),
+        });
+        return;
+      }
       updateStatus(handle, {
         edge: 'stopped',
         session: 'resting',
@@ -3759,6 +4108,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
   }
   if (message.includes('已连接云端') || message.includes('已握手') || message.includes('云端已重连')) {
     next.cloud = 'connected';
+    if (handle.spawnCloudKey) next.connectedCloudKey = handle.spawnCloudKey;
     // 本轮核心已确凿连上过云端：此后再断，才配讲「正在重新连接」（change honest-first-connect-label）。
     // 只在此置位、只在换核心时复位——冷待机唤醒不复位（云端连接全程未断，唤醒的是浏览器不是连接）。
     next.cloudEverConnected = true;
@@ -3914,15 +4264,13 @@ function handleEdgeLogLine(handle, message, isError = false) {
 
 function pauseEdge(handle) {
   if (!handle) return;
-  if (handle.coreParked || handle.pausePending) return;
-  // 暂停取消任何在途重启/重起，并置取消闸：排队等待中的启动（尚无子进程、SIGTERM 无处可发）到点
-  // 也不再拉起，杜绝「暂停被排队启动静默覆盖回运行」。
-  handle.restartPending = false;
-  handle.stopRequested = true;
-  releaseStartQueue(handle);
-  stopLoginPoller(); // self 路径的 5s 登录轮询若在跑，暂停期间应停（否则空转、每 tick 被取消闸挡下）
-  clearRespawnTimer(handle);
+  if (handle.automationPaused || handle.pausePending) return;
+  // 暂停只停止自动化；客户端核心、Cloud 连接和浏览器开关状态保持不变。
+  // 若浏览器本就在待机，只取消其定时自唤醒；这不是关闭浏览器动作。
   clearColdStandbyTimer(handle);
+  handle.restartPending = false;
+  handle.automationPaused = true;
+  releaseStartQueue(handle);
   if (handle.child) {
     const child = handle.child;
     const previousSession = handle.status.session;
@@ -3930,75 +4278,97 @@ function pauseEdge(handle) {
     updateStatus(handle, {
       session: 'paused',
       overlayBlocked: false,
-      lastMessage: '正在暂停自动运营，浏览器将保持打开…',
-      ...presencePatch('正在暂停，浏览器将保持打开'),
+      lastMessage: '正在暂停自动化；客户端核心、Cloud 连接和浏览器状态保持不变…',
+      ...presencePatch('正在暂停自动化…'),
       ...clearEdgeFailurePatch(handle),
     });
     sendCoreLifecycle(handle, 'pause', (error) => {
       if (handle.child !== child) return;
       handle.pausePending = false;
-      handle.stopRequested = false;
+      handle.automationPaused = false;
       updateStatus(handle, {
         edge: 'warning',
         session: previousSession === 'paused' ? 'running' : previousSession,
-        lastMessage: `暂停失败：${error.message}。自动运营可能仍在运行，浏览器未被关闭。`,
+        lastMessage: `暂停失败：${error.message}。自动化可能仍在运行；核心与浏览器未被关闭。`,
         ...edgeFailurePatch(`暂停失败：${error.message}`),
         ...presencePatch('暂停请求未送达，请重试'),
       });
     });
     return;
   }
-  // 无核心（如重起退避窗口）只暂停后续拉起；此时没有可被误关的 owned browser 句柄。
-  // kernelPrep 显式清零：若在内核缺失 respawn 退避窗口内暂停，会 clearRespawnTimer 掐掉唯一会清 kernelPrep 的
-  // 预检重启，残留 pending 会让机器级全局进度条永久显示「正在下载内核 N…0%」（实则无下载在进行）。
+  // 无核心时仍保留自动化暂停意图；可信客户环境的 browserless core 可独立恢复，不受暂停影响。
   updateStatus(handle, {
     edge: 'stopped',
     session: 'paused',
     overlayBlocked: false,
-    kernelPrep: null,
-    lastMessage: '已暂停自动启动；当前没有运行中的边缘进程。',
-    ...presencePatch('已暂停，随时可以恢复'),
+    lastMessage: '自动化已暂停；客户端核心当前离线，将按独立核心策略恢复，浏览器保持关闭。',
+    ...presencePatch('自动化已暂停'),
     ...clearEdgeFailurePatch(handle),
   });
+  bootstrapOwnedClientCores();
 }
 
 function resumeEdge(handle) {
   if (!handle) return;
   handle.stopRequested = false;
-  clearRespawnTimer(handle);
-  clearColdStandbyTimer(handle);
   if (handle.child && (handle.coldStandbyActive || handle.coldStandbyPending || handle.controlPlaneOnly)) {
+    if (handle.automationPaused || handle.pausePending || handle.status.session === 'paused') {
+      const child = handle.child;
+      handle.pausePending = true;
+      handle.resumeWakePending = true;
+      updateStatus(handle, {
+        edge: 'running',
+        session: 'paused',
+        lastMessage: '正在解除自动化暂停；确认后将按浏览器槽位恢复浏览器…',
+        ...presencePatch('正在恢复自动化…'),
+        ...clearEdgeFailurePatch(handle),
+      });
+      sendCoreLifecycle(handle, 'resume', (error) => {
+        if (handle.child !== child) return;
+        handle.pausePending = false;
+        handle.resumeWakePending = false;
+        handle.automationPaused = true;
+        updateStatus(handle, {
+          edge: 'running',
+          session: 'paused',
+          lastMessage: `恢复自动化失败：${error.message}。浏览器仍保持关闭。`,
+          ...edgeFailurePatch(`恢复失败：${error.message}`),
+          ...presencePatch('恢复请求未送达，仍保持暂停'),
+        });
+      });
+      return;
+    }
+    handle.automationPaused = false;
     wakeColdStandby(handle, 'user_resume');
     return;
   }
-  if (handle.child && (handle.coreParked || handle.pausePending || handle.status.session === 'paused')) {
+  handle.automationPaused = false;
+  if (handle.child && (handle.pausePending || handle.status.session === 'paused')) {
     const child = handle.child;
-    handle.restartPending = true;
+    handle.pausePending = true;
     updateStatus(handle, {
-      edge: 'starting',
-      cloud: 'disconnected',
+      edge: 'running',
       session: 'running',
-      lastMessage: '正在复用已打开的浏览器恢复自动运营…',
-      ...presencePatch('正在恢复引擎…'),
+      lastMessage: '正在原地恢复自动化；客户端核心、Cloud 连接和浏览器状态保持不变…',
+      ...presencePatch('正在恢复自动化…'),
       ...clearEdgeFailurePatch(handle),
     });
     sendCoreLifecycle(handle, 'resume', (error) => {
       if (handle.child !== child) return;
-      handle.restartPending = false;
       handle.pausePending = false;
-      handle.coreParked = true;
-      handle.stopRequested = true;
+      handle.automationPaused = true;
       updateStatus(handle, {
-        edge: 'stopped',
+        edge: 'running',
         session: 'paused',
-        lastMessage: `恢复失败：${error.message}。浏览器仍保持打开。`,
+        lastMessage: `恢复自动化失败：${error.message}。客户端核心与浏览器状态未改变。`,
         ...edgeFailurePatch(`恢复失败：${error.message}`),
         ...presencePatch('恢复请求未送达，仍保持暂停'),
       });
     });
     return;
   }
-  stopAndRestart(handle, '已请求恢复，正在按当前浏览器设置重启边缘进程。');
+  updateStatus(handle, { session: 'idle' });
+  queueStartEnv(handle);
 }
 
 /**
@@ -4055,52 +4425,34 @@ async function confirmOwnedProfileClosedFromShell(handle) {
 }
 
 function closeEdge(handle) {
-  if (!handle || handle.closePending || handle.status.session === 'closed') return;
-  handle.restartPending = false;
-  handle.stopRequested = true;
-  releaseStartQueue(handle);
-  stopLoginPoller();
-  clearRespawnTimer(handle);
+  if (!handle || handle.closePending || handle.coldStandbyPending || handle.coldStandbyActive || handle.controlPlaneOnly) return;
   clearColdStandbyTimer(handle);
   if (!handle.child) {
-    handle.coreParked = false;
-    // 无核心子进程：adspower 分身浏览器由外部运行时托管、会在核心死亡后存活。MUST NOT 零回收假报已关——
-    // 经**只读** V2 browser-profile/active 诚实核实后再判定；确认不在跑才判已关，仍在跑/查不动都如实回报。
-    if (handle.kind === 'adspower' && handle.profileId) {
-      void confirmOwnedProfileClosedFromShell(handle);
-      return;
-    }
     updateStatus(handle, {
-      edge: 'stopped',
-      cloud: 'disconnected',
-      session: 'closed',
-      overlayBlocked: false,
-      kernelPrep: null, // 同 pauseEdge：清掉退避窗口内被掐断的内核缺失 respawn 残留的 pending 进度条
-      lastMessage: '浏览器已关闭。',
-      ...presencePatch('已关闭浏览器'),
-      ...clearEdgeFailurePatch(handle),
+      lastMessage: '客户端核心当前离线，无法确认外部浏览器状态；未执行隐式 provider 操作。',
+      ...presencePatch('核心离线，浏览器状态未确认'),
     });
     return;
   }
-
   const child = handle.child;
-  const previousSession = handle.status.session;
   handle.closePending = true;
+  handle.coldStandbyPending = true;
+  handle.coldStandbyWakeAt = 0;
   updateStatus(handle, {
-    lastMessage: '正在关闭浏览器并确认回收…',
-    ...presencePatch('正在关闭浏览器…'),
+    browserStandby: coldStandbyStatus('scheduled', null, { reason: 'user_browser_close' }),
+    lastMessage: '正在关闭浏览器执行器；客户端核心与 Cloud 连接保持在线…',
+    ...presencePatch('正在关闭浏览器，客户端核心保持在线'),
     ...clearEdgeFailurePatch(handle),
   });
-  sendCoreLifecycle(handle, 'close', (error) => {
+  sendCoreLifecycle(handle, 'standby', (error) => {
     if (handle.child !== child) return;
     handle.closePending = false;
-    handle.stopRequested = previousSession === 'paused';
+    handle.coldStandbyPending = false;
     updateStatus(handle, {
-      edge: handle.coreParked ? 'stopped' : 'warning',
-      session: previousSession,
-      lastMessage: `关闭失败：${error.message}。浏览器关闭状态未确认。`,
-      ...edgeFailurePatch(`关闭失败：${error.message}`),
-      ...presencePatch(previousSession === 'paused' ? '关闭失败，仍保持暂停' : '关闭请求未送达'),
+      edge: 'warning',
+      lastMessage: `浏览器关闭失败：${error.message}。客户端核心与 Cloud 未关闭。`,
+      ...edgeFailurePatch(`浏览器关闭失败：${error.message}`),
+      ...presencePatch('浏览器关闭请求未送达'),
     });
   });
 }
@@ -4229,9 +4581,56 @@ function resolveHandle(envId) {
   return (envId && envs.get(envId)) || selectedHandle();
 }
 
+function lifecycleAxes(handle) {
+  const status = handle.status || {};
+  const coreState = handle.child
+    ? (status.edge === 'starting' || handle.controlPlaneStarting ? 'starting' : 'online')
+    : (handle.respawnTimer ? 'restarting' : (handle.gaveUp || status.respawnGaveUp ? 'error' : 'stopped'));
+  const cloudState = status.cloud === 'connected'
+    ? 'connected'
+    : handle.child
+      ? (status.cloudEverConnected ? 'reconnecting' : 'connecting')
+      : 'offline';
+  const automationState = handle.automationPaused || status.session === 'paused'
+    ? 'paused'
+    : (handle.launchQueued || handle.startFlowQueued || handle.slotWaitingSince)
+      ? 'queued'
+      : (status.session === 'running' || status.session === 'resting')
+        ? 'running'
+        : (status.edgeFailure && handle.child && !handle.controlPlaneOnly ? 'error' : 'stopped');
+  const browserState = handle.coldStandbyWaking
+    ? 'starting'
+    : handle.executorFailure
+      ? 'error'
+    : (handle.slotWaitingSince || (handle.launchQueued && !handle.controlPlaneOnly))
+      ? 'queued'
+      : (handle.coldStandbyActive || handle.coldStandbyPending || handle.controlPlaneOnly)
+        ? 'closed'
+        : handle.child
+          ? (handle.browserParkingReady ? 'ready' : 'starting')
+          : 'closed';
+  return { coreState, cloudState, automationState, browserState };
+}
+
 function statusOf(handle) {
-  if (!handle) return { ...makeStatus(settings.provider), envId: '', envName: '' };
-  return { ...handle.status, envId: handle.envId, envName: handle.name };
+  if (!handle) {
+    return {
+      ...makeStatus(settings.provider),
+      envId: '',
+      envName: '',
+      coreState: 'stopped',
+      cloudState: 'offline',
+      automationState: 'stopped',
+      browserState: 'closed',
+    };
+  }
+  return {
+    ...handle.status,
+    ...lifecycleAxes(handle),
+    targetCloudKey: handle.status.targetCloudKey || cloudSelectionView().key,
+    envId: handle.envId,
+    envName: handle.name,
+  };
 }
 
 ipcMain.handle('status:get', (_event, envId) => statusOf(resolveHandle(envId)));
@@ -4250,6 +4649,33 @@ ipcMain.handle('edge:close', (_event, envId) => {
   closeEdge(handle);
   return statusOf(handle);
 });
+ipcMain.handle('browser:close', (_event, envId) => {
+  const handle = resolveHandle(envId);
+  closeEdge(handle);
+  return statusOf(handle);
+});
+ipcMain.handle('browser:open', async (_event, envId) => {
+  const handle = resolveHandle(envId);
+  if (!handle || handle.removed) return statusOf(handle);
+  if (handle.child) {
+    if (handle.coldStandbyActive || handle.coldStandbyPending || handle.controlPlaneOnly) {
+      wakeColdStandby(handle, 'user_browser_open');
+    }
+    return statusOf(handle);
+  }
+  const controlState = allowedEnvironmentControlStates.get(String(handle.profileId || '').trim());
+  if (controlState && controlState.bindingState === 'bound') {
+    handle.stopRequested = false;
+    const started = await startBrowserAbsentCore(handle);
+    if (started) wakeColdStandby(handle, 'user_browser_open');
+    return statusOf(handle);
+  }
+  // 首次建立绑定必须显式打开真实页面。保持自动化暂停，只做 browser_lifecycle 启动；不由 Cloud 操作触发。
+  handle.automationPaused = true;
+  updateStatus(handle, { session: 'idle' });
+  queueStartEnv(handle);
+  return statusOf(handle);
+});
 ipcMain.handle('auth:relogin', (_event, envId) => {
   const handle = resolveHandle(envId);
   relogin(handle);
@@ -4257,6 +4683,17 @@ ipcMain.handle('auth:relogin', (_event, envId) => {
 });
 ipcMain.handle('settings:get', () => ({
   ...settings,
+  // Cleanup credentials and authoritative account bindings stay in Electron main. Renderer only
+  // receives the minimum status cursor already projected through ads:listProfiles/fleet state.
+  pendingInteractionOffboards: (settings.pendingInteractionOffboards || []).map((item) => ({
+    offboardId: item.offboardId,
+    envKey: item.envKey,
+    state: item.state,
+    reason: item.reason,
+    requestedAt: item.requestedAt,
+    purgeDueAt: item.purgeDueAt,
+    platform: item.platform,
+  })),
   adsDownloadUrl: ADS_DOWNLOAD_URL,
   cloudEnv: cloudSelectionView(),
   // 浏览器并发：把**算出来的**两个上限连同来源一起给界面，让它能如实说「自动推算 N」还是「你设的 N」，
@@ -4663,16 +5100,49 @@ ipcMain.handle('settings:save', async (_event, patch) => {
     saveError: res.error || scopeError,
   };
 });
-// 「全部重启并连接新云端」（change edge-cloud-env-selector）：切换云端后显式把全部在跑 / 退避中的环境
-// 有序重启，使其按新选择重新解析云端地址连接——避免部分环境连旧云、部分连新云的裂脑。
-ipcMain.handle('cloud:restartAll', () => {
-  const targets = [...envs.values()].filter((h) => (h.child || h.respawnTimer) && !h.removed);
-  for (const h of targets) stopAndRestart(h, '正在按新云端重启边缘进程…');
-  return { ok: true, restarted: targets.length, cloudEnv: cloudSelectionView() };
+// 兼容既有 preload 通道名，但语义已改为“全部核心重绑 Cloud”：不 SIGTERM、不走 queueStartEnv，
+// 不启动/关闭浏览器，也不改变槽位。每个环境独立回报实际 Cloud 与失败原因，部分成功不会冒充全量成功。
+ipcMain.handle('cloud:restartAll', async () => {
+  const target = cloudSelectionView();
+  const targets = [...envs.values()].filter((h) => !h.removed && h.kind === 'adspower');
+  const results = await Promise.all(targets.map(async (handle) => {
+    if (handle.child) return requestCoreCloudRebind(handle, target);
+    const controlState = allowedEnvironmentControlStates.get(String(handle.profileId || '').trim());
+    if (!controlState || controlState.bindingState !== 'bound') {
+      updateStatus(handle, {
+        targetCloudKey: target.key,
+        cloudRebind: { state: 'failed', targetKey: target.key, reason: 'binding_untrusted' },
+        lastMessage: 'Cloud 目标已保存，但账号绑定不可信，客户端核心未启动；浏览器保持关闭。',
+      });
+      return { ok: false, reason: 'binding_untrusted' };
+    }
+    handle.stopRequested = false;
+    updateStatus(handle, {
+      targetCloudKey: target.key,
+      cloudRebind: { state: 'pending', targetKey: target.key },
+    });
+    const ok = await startBrowserAbsentCore(handle);
+    if (!ok) {
+      updateStatus(handle, {
+        cloudRebind: { state: 'failed', targetKey: target.key, reason: 'core_bootstrap_failed' },
+      });
+    }
+    return { ok: Boolean(ok), ...(ok ? {} : { reason: 'core_bootstrap_failed' }) };
+  }));
+  const rebound = results.filter((result) => result.ok).length;
+  return {
+    ok: rebound === results.length,
+    accepted: results.length,
+    rebound,
+    failed: results.length - rebound,
+    results: targets.map((handle, index) => ({ envId: handle.envId, ...results[index] })),
+    cloudEnv: target,
+  };
 });
 // 悬浮「启动」：目标环境未跑则错峰启动；已在跑则不重复启动。
 ipcMain.handle('edge:start', (_event, envId) => {
   const handle = resolveHandle(envId);
+  if (handle) handle.automationPaused = false;
   if (handle && handle.child && (handle.coldStandbyActive || handle.coldStandbyPending || handle.controlPlaneOnly)) {
     wakeColdStandby(handle, 'user_start');
   } else if (handle && !handle.child) {
@@ -4914,7 +5384,10 @@ ipcMain.handle('persona:persist', (_event, envId, raw) => handlePersonaIpc(async
     firstPostOnboarding: data.firstPostOnboarding === true,
   };
 }));
-ipcMain.handle('publish:approval', (_event, envId, payload) => {
+// 客户端审批是 Cloud 决策写，不是页面发布动作。renderer 只提交 envId + 窄 DTO；main 用客户会话和
+// Cloud 权威 envKey→accountId 绑定直连 customer-auth。核心、浏览器、CDP 与槽位均不参与。
+// 老版本 core 的 publish.approval_action WS handler 保留给兼容客户端，但新版桌面不再以核心是否在跑为前置。
+ipcMain.handle('publish:approval', (_event, envId, payload) => handlePersonaIpc(async () => {
   const requestId = String(payload && payload.requestId || '').trim();
   const approved = payload && payload.approved;
   const contentVersion = payload && payload.contentVersion;
@@ -4937,16 +5410,30 @@ ipcMain.handle('publish:approval', (_event, envId, payload) => {
       return { ok: false, reason: 'invalid_publish_plan' };
     }
   }
-  return sendPublishApprovalCommand(envId, {
+  const { envKey } = personaIpcEnv(envId);
+  const body = {
     requestId,
     approved,
     contentVersion: contentVersion === undefined ? 0 : contentVersion,
     ...(hasPublishMode ? { publishMode: payload.publishMode, publishTime: payload.publishTime } : {}),
+  };
+  const response = await interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/publish/approval`,
+    method: 'POST',
+    body,
   });
-});
+  if (!response.ok) return personaIpcFailure(response);
+  const data = response.data && response.data.data;
+  if (!data || data.envKey !== envKey || data.requestId !== requestId || data.ok !== true
+      || (data.receipt !== 'accepted_pending_execution' && data.receipt !== 'rejected')) {
+    return { ok: false, reason: 'response_invalid' };
+  }
+  return data;
+}));
 // 预览内删除某张配图（change client-preview-image-delete）。云端才是权限 / 版本 / 只删不注入 /
 // 最后一张不可删的权威；这里只做入参形状校验 + 成功后就地刷新预览真态。
-ipcMain.handle('publish:image-remove', async (_event, envId, payload) => {
+ipcMain.handle('publish:image-remove', (_event, envId, payload) => handlePersonaIpc(async () => {
   const requestId = String((payload && payload.requestId) || '').trim();
   const imageUrl = typeof (payload && payload.imageUrl) === 'string' ? payload.imageUrl.trim() : '';
   const contentVersion = payload && payload.contentVersion;
@@ -4956,17 +5443,25 @@ ipcMain.handle('publish:image-remove', async (_event, envId, payload) => {
   if (!Number.isInteger(contentVersion) || contentVersion < 0) {
     return { ok: false, reason: 'invalid_version' };
   }
-  const result = await sendPublishClientCommand(envId, 'publish.draft_image_remove', {
-    requestId,
-    contentVersion,
-    imageUrl,
+  const { envKey } = personaIpcEnv(envId);
+  const response = await interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/publish/draft-image-remove`,
+    method: 'POST',
+    body: { requestId, contentVersion, imageUrl },
   });
+  if (!response.ok) return personaIpcFailure(response);
+  const result = response.data && response.data.data;
+  if (!result || result.envKey !== envKey || result.requestId !== requestId || result.ok !== true
+      || !Array.isArray(result.images) || !Number.isInteger(result.contentVersion)) {
+    return { ok: false, reason: 'response_invalid' };
+  }
   if (result && result.ok) {
     const recordId = Number(requestId.slice('publish-'.length));
     applyPublishPreviewImages(envId, recordId, result.images, result.contentVersion);
   }
   return result;
-});
+}));
 
 async function delegatedTaskRequest(envId, pathname, options = {}) {
   const handle = resolveHandle(envId);
@@ -5330,12 +5825,20 @@ function storePendingInteractionOffboard(offboard, platform) {
     .filter((item) => item.offboardId !== normalized.offboardId && item.envKey !== normalized.envKey);
   next.push(normalized);
   const saved = saveSettings({ pendingInteractionOffboards: next });
+  const handle = envs.get(fleet.envIdForProfile(normalized.envKey));
+  if (saved.ok && handle) handle.cleanupManual = false;
   return saved.ok ? { ok: true, offboard: normalized } : { ok: false, error: '解绑已由 Cloud 受理，但本地恢复游标写入失败；为避免误删，已停止物理删除。' };
 }
 
 function updatePendingInteractionOffboard(offboard) {
   const current = pendingOffboardForEnv(offboard && offboard.envKey);
-  return storePendingInteractionOffboard(offboard, current && current.platform);
+  return storePendingInteractionOffboard({
+    ...(current || {}),
+    ...(offboard || {}),
+    cleanupGrant: (offboard && offboard.cleanupGrant) || (current && current.cleanupGrant),
+    cleanupGrantExpiresAt: (offboard && offboard.cleanupGrantExpiresAt) || (current && current.cleanupGrantExpiresAt),
+    cleanupEdgeId: (offboard && offboard.cleanupEdgeId) || (current && current.cleanupEdgeId),
+  }, current && current.platform);
 }
 
 function finishLocalInteractionOffboard(envKey) {
@@ -5424,6 +5927,7 @@ ipcMain.handle('ads:deleteEnv', async (_event, opts) => {
           const response = await clientAuthFetch(`/environments/${encodeURIComponent(userId)}`, {
             method: 'DELETE',
             token: clientSession.token,
+            body: { edgeId: fleet.envIdForProfile(userId) },
           });
           if (response.status === 401) { onSessionInvalid(); return { ok: false, error: '登录已失效，请重新登录客户端。' }; }
           const data = response.ok && response.data && response.data.data;

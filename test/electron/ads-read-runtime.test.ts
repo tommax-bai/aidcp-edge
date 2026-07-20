@@ -102,14 +102,14 @@ test('main process wires both read IPC handlers through cached-base recovery', (
   );
 });
 
-test('adspower startup warms the service before reconciling profiles', () => {
+test('client-core startup does not warm AdsPower or reconcile browser profiles', () => {
   const proceedStart = mainSource.indexOf('async function proceedAfterAuth()');
   const proceedEnd = mainSource.indexOf('// 会话维护', proceedStart);
   const proceed = mainSource.slice(proceedStart, proceedEnd);
-  const ensureAt = proceed.indexOf('ensureAdsServiceOnce(null)');
-  const reconcileAt = proceed.indexOf('reconcileRunningProfiles()', ensureAt);
-
-  assert.ok(ensureAt >= 0, 'adspower startup must eagerly ensure the bundled CLI');
-  assert.ok(reconcileAt > ensureAt, 'profile reconciliation must run after service ensure succeeds');
-  assert.match(proceed, /settings\.provider === 'adspower'/);
+  assert.doesNotMatch(proceed, /ensureAdsServiceOnce\(null\)/, 'browserless client cores must not start the bundled CLI');
+  assert.match(
+    proceed,
+    /if \(settings\.provider !== 'adspower'\) \{[\s\S]*reconcileRunningProfiles\(\)/,
+    'AdsPower browser reconciliation must stay behind an explicit browser intent',
+  );
 });

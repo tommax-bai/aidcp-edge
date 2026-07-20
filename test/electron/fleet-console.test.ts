@@ -66,7 +66,7 @@ async function boot(
   let pushStatus: (s: unknown) => void = () => undefined;
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], personaPreview: [], personaFill: [], select: [], close: [], notify: [], start: [], resume: [], saveNickname: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], personaPreview: [], personaFill: [], select: [], close: [], browserOpen: [], browserClose: [], notify: [], start: [], resume: [], saveNickname: [] };
   const personaStatusByEnv = new Map<string, Record<string, unknown>>();
   const settings = {
     provider: 'adspower',
@@ -148,6 +148,14 @@ async function boot(
     pause: async () => makeStatus(),
     resume: async (envId: string) => { calls.resume.push(envId); return makeStatus({ envId }); },
     close: async (envId: string) => { calls.close.push(envId); return makeStatus({ envId, edge: 'stopped', cloud: 'disconnected', session: 'closed' }); },
+    browserOpen: async (envId: string) => {
+      calls.browserOpen.push(envId);
+      return makeStatus({ envId, edge: 'running', session: 'paused', coreState: 'online', cloudState: 'connected', automationState: 'paused', browserState: 'ready' });
+    },
+    browserClose: async (envId: string) => {
+      calls.browserClose.push(envId);
+      return makeStatus({ envId, edge: 'running', session: 'paused', coreState: 'online', cloudState: 'connected', automationState: 'paused', browserState: 'closed' });
+    },
     start: async (envId: string) => { calls.start.push(envId); return makeStatus({ envId }); },
     restart: async () => makeStatus(),
     adsStatus: async () => ({ ok: false, error: 'not running' }),
@@ -190,7 +198,7 @@ test('fleetLevel：冷启动窗口留在 launching，绝不冒充需要人工', 
   );
   assert.equal(booting.level, 'launching');
   assert.equal(booting.needsAction, false); // 正常启动不是待办事项
-  assert.equal(booting.label, '启动中');
+  assert.equal(booting.label, '核心连接中');
 });
 
 test('fleetLevel：连上过之后掉线才升为需处理的「正在重新连接」', () => {
@@ -779,7 +787,7 @@ test('人设浮层：首次未绑定与普通读取失败使用不同空态', as
   await tick();
   assert.equal(w.document.querySelector('#persona-empty-title')!.textContent, '首次启动并登录一次');
   assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '待绑定');
-  assert.equal(w.document.querySelector('#persona-empty-action')!.textContent, '首次启动');
+  assert.equal(w.document.querySelector('#persona-empty-action')!.textContent, '打开浏览器完成首次登录');
 
   reason = 'cloud_unreachable';
   (w.document.querySelector('#persona-close') as HTMLElement).click();
@@ -1449,18 +1457,20 @@ test('人设成长引导：云端未创建首次引导时不重复展示', async
   assert.equal(w.document.querySelector('#persona-bound-note')!.classList.contains('hidden'), false);
 });
 
-test('暂停态显式关闭只路由当前选中环境并切到已关闭', async () => {
+test('自动化暂停时显式关闭浏览器只释放当前环境执行器，核心保持在线', async () => {
   const { w, pushStatus, calls } = await boot();
-  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'stopped', cloud: 'disconnected', session: 'paused' }));
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', edge: 'running', cloud: 'connected', session: 'paused',
+    coreState: 'online', cloudState: 'connected', automationState: 'paused', browserState: 'ready' }));
   await tick();
   const close = w.document.querySelector('#session-close') as HTMLElement;
   assert.equal(close.classList.contains('hidden'), false);
   close.click();
   await tick();
   await tick();
-  assert.deepEqual(calls.close, ['ads-p1']);
-  assert.equal(w.document.querySelector('#session-fab')!.textContent, '启动');
-  assert.equal(close.classList.contains('hidden'), true);
+  assert.deepEqual(calls.browserClose, ['ads-p1']);
+  assert.deepEqual(calls.close, []);
+  assert.equal(w.document.querySelector('#session-fab')!.textContent, '恢复自动化');
+  assert.equal(close.textContent, '打开浏览器');
 });
 
 // ── 人设弹窗三态（change persona-bound-tristate）────────────────────────────────────────────
@@ -1473,7 +1483,7 @@ test('人设浮层：权威信号未到（未知态）时**永不**自动弹，�
   await new Promise((r) => setTimeout(r, 300)); // 等再久也不该弹：未知不是未绑，没有任何计时器会把它翻成未绑
   assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), false, '未知态不得自动弹出人设浮层');
   assert.equal(calls.notify.length, 0, '未知态不得发系统通知');
-  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '待启动', '未知态徽标须为「待启动」，绝不谎称「未设置」');
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '待绑定', '未知态徽标须为「待绑定」，绝不谎称「未设置」');
 });
 
 test('人设浮层：已绑账号在核心重启后（绑定态回落未知）绝不被误弹', async () => {

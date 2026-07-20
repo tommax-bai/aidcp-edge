@@ -67,6 +67,7 @@ import {
   usesFacebookBrowseSession,
 } from './facebook/index.js';
 import { EdgeClient } from './client/edge-client.js';
+import { operationDescriptorFor } from './client/operation-registry.js';
 import { registerPersonaStdinCommands } from './client/persona-onboarding.js';
 import { registerPublishApprovalStdinCommands } from './client/publish-approval-onboarding.js';
 import {
@@ -140,6 +141,25 @@ async function main(): Promise<void> {
   // 全部就绪后按原顺序交付。绝不把未知 IPC 当生命周期命令。
   const pendingLifecycleCommands: CoreLifecycleCommand[] = [];
   let dispatchLifecycleCommand: ((command: CoreLifecycleCommand) => void) | undefined;
+  type CloudRebindRequest = {
+    type: 'lifecycle.cloud_rebind';
+    requestId: string;
+    url: string;
+    targetKey: string;
+    facebookBrowseMode?: 'off' | 'shadow' | 'on';
+  };
+  const pendingCloudRebindRequests: CloudRebindRequest[] = [];
+  let dispatchCloudRebind: ((request: CloudRebindRequest) => void) | undefined;
+  const parseCloudRebind = (message: unknown): CloudRebindRequest | null => {
+    if (!message || typeof message !== 'object') return null;
+    const raw = message as Partial<CloudRebindRequest>;
+    if (raw.type !== 'lifecycle.cloud_rebind'
+        || typeof raw.requestId !== 'string' || !raw.requestId
+        || typeof raw.url !== 'string' || !/^wss?:\/\//i.test(raw.url)
+        || typeof raw.targetKey !== 'string' || !raw.targetKey) return null;
+    if (raw.facebookBrowseMode !== undefined && !['off', 'shadow', 'on'].includes(raw.facebookBrowseMode)) return null;
+    return raw as CloudRebindRequest;
+  };
   /**
    * 外壳说「这次没轮到你」（槽位/内存暂时不够，你排在队列里，但你的调用方等不到了）。
    *
@@ -155,6 +175,12 @@ async function main(): Promise<void> {
     return typeof m.detail === 'string' && m.detail ? m.detail : 'wake_denied';
   };
   process.on('message', (message: unknown) => {
+    const rebind = parseCloudRebind(message);
+    if (rebind) {
+      if (dispatchCloudRebind) dispatchCloudRebind(rebind);
+      else pendingCloudRebindRequests.push(rebind);
+      return;
+    }
     const denied = parseWakeDenied(message);
     if (denied !== undefined) {
       onWakeDenied?.(denied);
@@ -188,6 +214,7 @@ async function main(): Promise<void> {
   // 环境变量 AIDCP_ACCOUNT_ID 降级为【可选覆盖】（预置/特殊场景的逃生阀）。
   const overrideAccountId = process.env.AIDCP_ACCOUNT_ID;
   const startBrowserAbsent = process.env.AIDCP_START_BROWSER_ABSENT === '1';
+  const startAutomationPaused = process.env.AIDCP_AUTOMATION_PAUSED_AT_START === '1';
   const controlAccountId = process.env.AIDCP_CONTROL_ACCOUNT_ID?.trim() || undefined;
   if (startBrowserAbsent && !controlAccountId) {
     throw new Error('AIDCP_START_BROWSER_ABSENT=1 需要可信 AIDCP_CONTROL_ACCOUNT_ID；拒绝猜测账号');
@@ -530,7 +557,13 @@ async function main(): Promise<void> {
    */
   const handleBrowserAbsentCommand = (env: Envelope): boolean => {
     if (!coldStandbyActive) return false;
-    if (env.type === 'pacing.update') {
+    const operation = operationDescriptorFor(env.type);
+    if (!operation) {
+      console.warn(`[aidcp-edge] operation_unclassified type=${env.type}; rejected without browser wake`);
+      return true;
+    }
+    if (operation.browser === 'forbidden') {
+      if (env.type !== 'pacing.update') return false;
       const payload = (env.payload ?? {}) as {
         opFloorsMs?: Parameters<EdgeBrowseSession['applyPacingSnapshot']>[0];
         tempo?: number;
@@ -690,6 +723,42 @@ async function main(): Promise<void> {
       process.exitCode = EXIT_RECYCLE;
     }
   });
+
+  // Cloud 切换只重绑控制传输。先等页面租约/提交窗口归零并把浏览循环收敛到安全边界；
+  // 浏览器、CDP、provider 与槽位所有权全程不动。失败时浏览器保持原开/关态并停在安全边界。
+  let cloudRebindChain = Promise.resolve();
+  dispatchCloudRebind = (request) => {
+    cloudRebindChain = cloudRebindChain.then(async () => {
+      const sendResult = (payload: Record<string, unknown>): void => sendLifecycleIpc({
+        requestId: request.requestId,
+        targetKey: request.targetKey,
+        ...payload,
+      });
+      let quiesced = false;
+      try {
+        const deadline = Date.now() + 30_000;
+        while ((taskCoordinator.hasActiveLease() || inFlightPublishes.size > 0) && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        if (taskCoordinator.hasActiveLease() || inFlightPublishes.size > 0) {
+          throw new Error('page_work_drain_timeout');
+        }
+        browse?.discardQueuedCloudCommands('cloud_rebind');
+        if (browse && !coldStandbyActive) {
+          await browse.quiesceForTask();
+          quiesced = true;
+        }
+        await client.rebind(request.url);
+        if (request.facebookBrowseMode) process.env.AIDCP_FB_BROWSE_AUTO = request.facebookBrowseMode;
+        if (quiesced) await browse?.resumeAfterTask();
+        sendResult({ type: 'lifecycle.cloud_rebound', ok: true, browserAbsent: coldStandbyActive });
+      } catch (error) {
+        const reason = (error as Error)?.message || String(error);
+        sendResult({ type: 'lifecycle.cloud_rebind_failed', ok: false, reason, browserAbsent: coldStandbyActive });
+      }
+    });
+  };
+  for (const request of pendingCloudRebindRequests.splice(0)) dispatchCloudRebind(request);
 
   // 红线（edge-companion-ui 8.1 评审修正）：全部云端主动消息处理器 MUST 在 connect() 之前注册。
   // 云端在 welcome 回发后立刻推 hello 快照（ui.snapshot）——若 welcome 与快照同一批 socket 读到达，
@@ -915,7 +984,7 @@ async function main(): Promise<void> {
   if (facebookCommandDriver) {
     // 该平台的旁路弹窗监测体后台常开：执行器每步操作前 fresh 复检登录/验证码（fail-closed）。
     overlayMonitor = platformDriver.createOverlayMonitor(session.cdp);
-    if (!coldStandbyActive) overlayMonitor.start();
+    if (!coldStandbyActive && !startAutomationPaused) overlayMonitor.start();
     const fbCommentExecutor = new FacebookCommentExecutor({
       cdp: session.cdp,
       getAccountId: () => accountId,
@@ -1126,7 +1195,7 @@ async function main(): Promise<void> {
       });
       session.cdp.on?.('cdp.unrecoverable', () => fbSupervisor.stopAll());
       session.cdp.on?.('cdp.reconnected', () => fbSupervisor.startAll());
-      if (!coldStandbyActive) fbSupervisor.startAll();
+      if (!coldStandbyActive && !startAutomationPaused) fbSupervisor.startAll();
     }
     const fbCommentExecutor = new FacebookCommentExecutor({
       cdp: session.cdp,
@@ -1185,7 +1254,7 @@ async function main(): Promise<void> {
       });
     }
     // 不 await：会话长跑，与命令收发并行。start() 内部据 AIDCP_FB_BROWSE_AUTO 决定是否自动进 feed。
-    if (!coldStandbyActive) {
+    if (!coldStandbyActive && !startAutomationPaused) {
       browse.start().catch((err) => {
         console.error('[aidcp-edge] Facebook 浏览会话异常:', err);
       });
@@ -1254,7 +1323,7 @@ async function main(): Promise<void> {
       });
     }
     // 不 await：浏览循环长跑，与命令收发并行
-    if (!coldStandbyActive) {
+    if (!coldStandbyActive && !startAutomationPaused) {
       browse.start().catch((err) => {
         console.error('[aidcp-edge] 浏览会话异常:', err);
       });
@@ -1386,7 +1455,7 @@ async function main(): Promise<void> {
       console.log('[aidcp-edge] CDP 已重连，重启后台监测体');
       supervisor.startAll();
     });
-    if (!coldStandbyActive) {
+    if (!coldStandbyActive && !startAutomationPaused) {
       supervisor.startAll();
       console.log('[aidcp-edge] 自动浏览已启动（含弹窗 + 通知未读旁路监测）');
     } else {
@@ -1397,6 +1466,20 @@ async function main(): Promise<void> {
   // —— 退出 / 回收统一路径（节点终态诚实下线 + 看护可重起；真关机干净退出）——
   let recycleRequested = false;
   const lifecycle = new CoreLifecycleController({
+    pauseAutomation: async () => {
+      console.log('\n[aidcp-edge] 正在暂停自动化：客户端核心、Cloud 连接与浏览器资源保持不变...');
+      failInFlightPublishesHonestly('user_pause');
+      taskCoordinator.reset('user_pause');
+      watcherSupervisor?.stopAll();
+      reportBrowseDrainTimeout((await browse?.stopAndWait(BROWSE_DRAIN_MS)) ?? true, 'user_pause');
+    },
+    resumeAutomation: async () => {
+      if (coldStandbyActive) throw new Error('browser_absent_use_wake');
+      watcherSupervisor?.startAll();
+      browse?.start().catch((error) => {
+        console.error('[aidcp-edge] 恢复自动化失败:', error);
+      });
+    },
     deactivate: async (reason) => {
       coldStandbyActive = false;
       clearColdStandbyCloudRetry();
@@ -1485,7 +1568,7 @@ async function main(): Promise<void> {
      * 重建当作**新的一代浏览器**：绝不假设还登着——重新确认登录态与账号身份。身份读不出来（未登录 /
      * 需验证）即诚实判唤醒失败、留在待机态，绝不把一个没登录的浏览器当就绪、更不回落默认账号。
      */
-    wakeFromStandby: async () => {
+    wakeFromStandby: async (resumeAutomation) => {
       console.log('\n[aidcp-edge] 唤醒：重开浏览器 + 原地重建浏览器层（核心进程与云端连接不动）...');
       try {
         // 1) 重开浏览器。新一代 = 新的调试端口，整体换掉 chrome / endpoint / attachOpts。
@@ -1546,11 +1629,13 @@ async function main(): Promise<void> {
         clearColdStandbyWakeLatch();
         clearColdStandbyCloudRetry();
         identityWatcher?.rebaseline(accountId!);
-        watcherSupervisor?.startAll();
+        if (resumeAutomation) watcherSupervisor?.startAll();
         const wakePacing = client.getPacing();
         browse?.applyPacingSnapshot(wakePacing?.opFloorsMs, wakePacing?.tempo);
-        browse?.start().catch((err) => console.error('[aidcp-edge] 唤醒后浏览会话异常:', err));
-        console.log('[aidcp-edge] ✓ 唤醒完成：浏览器已重建、身份已确认、自动化已恢复');
+        if (resumeAutomation) {
+          browse?.start().catch((err) => console.error('[aidcp-edge] 唤醒后浏览会话异常:', err));
+        }
+        console.log(`[aidcp-edge] ✓ 唤醒完成：浏览器已重建、身份已确认、自动化${resumeAutomation ? '已恢复' : '保持暂停'}`);
         return true;
       } catch (error) {
         console.warn(`[aidcp-edge] ⚠ 唤醒失败：${(error as Error)?.message || String(error)}；留在待机态，可再次唤醒`);
@@ -1569,6 +1654,11 @@ async function main(): Promise<void> {
     onPaused: () => {
       if (typeof process.send === 'function' && process.connected) {
         process.send({ type: 'lifecycle.paused' });
+      }
+    },
+    onResumed: () => {
+      if (typeof process.send === 'function' && process.connected) {
+        process.send({ type: 'lifecycle.resumed' });
       }
     },
     onCloseFailed: () => {
@@ -1594,7 +1684,7 @@ async function main(): Promise<void> {
       sendLifecycleIpc({ type: 'lifecycle.wake_failed', reason });
     },
     logger: (message) => console.log(message),
-  }, startBrowserAbsent ? 'standby' : 'active');
+  }, startBrowserAbsent ? 'standby' : startAutomationPaused ? 'paused' : 'active');
 
   dispatchLifecycleCommand = (command) => {
     void lifecycle.request(command).catch((error) => {
@@ -1618,8 +1708,22 @@ async function main(): Promise<void> {
     void shutdown({ exitCode: EXIT_RECYCLE, recycle: true, reason });
   };
 
+  let executorFailureTransitioning = false;
+  const isolateExecutorFailure = (reason: string): void => {
+    if (coldStandbyActive || executorFailureTransitioning) return;
+    executorFailureTransitioning = true;
+    console.warn(`[aidcp-edge] 浏览器执行器故障（${reason}）：终止页面工作并释放执行器；客户端核心与 Cloud 保持在线`);
+    failInFlightPublishesHonestly(reason);
+    taskCoordinator.reset(reason);
+    browse?.discardQueuedCloudCommands(reason);
+    sendLifecycleIpc({ type: 'lifecycle.executor_failed', reason });
+    void lifecycle.request('standby').finally(() => {
+      executorFailureTransitioning = false;
+    });
+  };
+
   // Input 超时的结果不确定：已由 CdpClient 封住后续页面写。若浏览器由本节点启动并拥有，则回收并让看护
-  // 建一个新的 CDP 安全边界；复用的外部浏览器绝不强杀，只保留 unavailable 供操作者显式重启。
+  // 建一个新的 CDP 安全边界；执行器故障不得把客户端核心或 Cloud 投影为离线。
   const recycleOrHoldUnavailableBrowser = (): void => {
     // 冷待机：浏览器是我们自己关的，"控制不可用"是预期终局而非故障——绝不据此回收自杀
     // （与下方 cdp.unrecoverable 的守卫同口径；缺了它，待机期一条在途 Input 就能把核心杀掉）。
@@ -1633,23 +1737,26 @@ async function main(): Promise<void> {
     }
     if (chrome.reused) {
       console.warn('[aidcp-edge] CDP 输入控制不可用：复用的外部浏览器不会被自动关闭；请人工重启浏览器客户端后恢复');
+      sendLifecycleIpc({
+        type: 'lifecycle.executor_failed',
+        reason: 'cdp_control_unavailable_external_browser',
+        teardown: false,
+      });
       return;
     }
-    console.warn('[aidcp-edge] CDP 输入控制不可用：浏览器由本节点拥有，诚实下线并回收重启以建立新的控制边界');
-    requestShutdown?.('cdp_control_unavailable');
+    isolateExecutorFailure('cdp_control_unavailable');
   };
   session.cdp.on('cdp.control_unavailable', recycleOrHoldUnavailableBrowser);
   // attach 初始 enable 阶段若已经发生输入超时，订阅发生得较晚也必须按同一所有权边界处理。
   if (!session.cdp.isControlReady()) recycleOrHoldUnavailableBrowser();
 
-  // CDP 终态（重连不可恢复）→ 诚实下线 + 回收退出（请重起）。autoBrowse 与否都接，节点失去浏览器即回收。
+  // CDP 终态只终止并释放浏览器执行器；核心与 Cloud 连接继续提供 browser-independent 操作。
   session.cdp.on('cdp.unrecoverable', () => {
     if (coldStandbyActive) {
       console.log('[aidcp-edge] CDP 因冷待机关闭浏览器而不可用；保留云端连接，等待外壳唤醒');
       return;
     }
-    console.warn('[aidcp-edge] CDP 重连不可恢复（终态）→ 诚实下线 + 回收退出（请重起）');
-    requestShutdown?.('cdp_unrecoverable');
+    isolateExecutorFailure('cdp_unrecoverable');
   });
 
   process.on('SIGINT', () => void shutdown({ exitCode: 0, recycle: false, reason: 'SIGINT' }));

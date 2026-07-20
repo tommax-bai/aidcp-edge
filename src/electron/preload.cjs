@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   pause: (envId) => ipcRenderer.invoke('edge:pause', envId),
   resume: (envId) => ipcRenderer.invoke('edge:resume', envId),
   close: (envId) => ipcRenderer.invoke('edge:close', envId),
+  browserOpen: (envId) => ipcRenderer.invoke('browser:open', envId),
+  browserClose: (envId) => ipcRenderer.invoke('browser:close', envId),
   start: (envId) => ipcRenderer.invoke('edge:start', envId),
   restart: (envId) => ipcRenderer.invoke('edge:restart', envId),
   relogin: (envId) => ipcRenderer.invoke('auth:relogin', envId),
@@ -23,7 +25,7 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   // Facebook 批量人设：主进程本地构建模板；确认后 Cloud 只筛目标并原样补齐。
   facebookPersonaTemplatePreview: (selection) => ipcRenderer.invoke('persona:preview-facebook-template', selection),
   facebookPersonaFillSelected: (soulYaml) => ipcRenderer.invoke('persona:fill-facebook-selected', soulYaml),
-  // 云端环境（change edge-cloud-env-selector）：切换云端后「全部重启并连接新云端」。
+  // 云端环境：兼容旧方法名，主进程执行的是 core transport rebind，不重启 core/浏览器。
   cloudRestartAll: () => ipcRenderer.invoke('cloud:restartAll'),
   fleetSetRailCollapsed: (collapsed) => ipcRenderer.invoke('fleet:setRailCollapsed', collapsed),
   onFleetUpdate: (callback) => {

@@ -56,9 +56,15 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   const envKey = env.AIDCP_ENV_KEY?.trim() || env.AIDCP_ADS_USER_ID?.trim();
   if (!envKey) throw new Error('[aidcp-edge] wechat_channels requires AIDCP_ENV_KEY or AIDCP_ADS_USER_ID');
   const startBrowserAbsent = env.AIDCP_START_BROWSER_ABSENT === '1';
+  const startAutomationPaused = env.AIDCP_AUTOMATION_PAUSED_AT_START === '1';
+  const cleanupOnly = env.AIDCP_OFFBOARD_CLEANUP_ONLY === '1';
+  const cleanupOffboardId = env.AIDCP_OFFBOARD_CLEANUP_ID?.trim();
   const controlAccountId = env.AIDCP_CONTROL_ACCOUNT_ID?.trim();
   if (startBrowserAbsent && !controlAccountId) {
     throw new Error('[aidcp-edge] wechat_channels browser-absent startup requires AIDCP_CONTROL_ACCOUNT_ID');
+  }
+  if (cleanupOnly && (!startBrowserAbsent || !cleanupOffboardId)) {
+    throw new Error('[aidcp-edge] restricted cleanup requires browser-absent bootstrap and offboard id');
   }
   const accountId = env.AIDCP_WECHAT_ACCOUNT_ID?.trim() || env.AIDCP_ACCOUNT_ID?.trim();
   const logicalAccountId = startBrowserAbsent ? controlAccountId! : (accountId || envKey);
@@ -141,7 +147,9 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     edgeId,
     platform: driver.platform,
     app: driver.app,
-    capabilities: [...driver.edgeCapabilities, ...(startBrowserAbsent ? ['browser_absent_v1'] : [])],
+    capabilities: cleanupOnly
+      ? ['interaction_inbox_v1', 'interaction_offboarding_v1', 'browser_absent_v1']
+      : [...driver.edgeCapabilities, ...(startBrowserAbsent ? ['browser_absent_v1'] : [])],
     accountId: logicalAccountId,
     accountNickname: auth.getSnapshot().identity?.displayName,
     machineLabel: env.AIDCP_MACHINE_LABEL,
@@ -277,12 +285,30 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   };
 
   client.onInteractionCommand((envelope) => {
+    if (cleanupOnly && envelope.type !== 'interaction.offboard.command' && envelope.type !== 'interaction.offboard.ack') {
+      safeLog(`[wechat-channels] restricted cleanup rejected command type=${envelope.type}`);
+      return;
+    }
+    const cleanupPayload = envelope.payload && typeof envelope.payload === 'object'
+      ? envelope.payload as { offboardId?: unknown }
+      : null;
+    if (cleanupOnly && cleanupPayload && 'offboardId' in cleanupPayload
+      && cleanupPayload.offboardId !== cleanupOffboardId) {
+      safeLog('[wechat-channels] restricted cleanup rejected mismatched offboard command');
+      return;
+    }
     if (envelope.type === 'interaction.runtime.controls') {
       void applyRuntimeControls(envelope.payload as InteractionRuntimeControlsPayload);
       return;
     }
     void handleInteractionCommand({ client, connector: connector!, state, auth, sidecar, ensureBrowserAwake,
-      flushReplyResultOutbox, flushOffboardResultOutbox, offboardFlights }, envelope as Parameters<typeof handleInteractionCommand>[1]);
+      flushReplyResultOutbox, flushOffboardResultOutbox, offboardFlights }, envelope as Parameters<typeof handleInteractionCommand>[1])
+      .then(() => {
+        if (cleanupOnly && envelope.type === 'interaction.offboard.ack'
+          && typeof process.send === 'function' && process.connected) {
+          process.send({ type: 'lifecycle.offboard_cleanup_complete', offboardId: cleanupOffboardId });
+        }
+      });
   });
   client.on('cloud.disconnected', () => {
     capabilities.resetRemoteControls();
@@ -293,9 +319,9 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     void (async () => {
       capabilities.resetRemoteControls();
       await applyRuntimeControls(client.getInteractionRuntimeControls());
-      await flushReplyResultOutbox();
+      if (!cleanupOnly) await flushReplyResultOutbox();
       await flushOffboardResultOutbox();
-      if (!browserAbsent && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
+      if (!cleanupOnly && !browserAbsent && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
           !(await state.isOffboarded())) await connector!.start();
       else await connector!.stop();
     })();
@@ -308,17 +334,20 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   controlPlaneHeartbeat.start();
   capabilities.resetRemoteControls();
   await applyRuntimeControls(client.getInteractionRuntimeControls());
-  await flushReplyResultOutbox();
+  if (!cleanupOnly) await flushReplyResultOutbox();
   await flushOffboardResultOutbox();
-  if (!browserAbsent && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
+  if (!cleanupOnly && !browserAbsent && !startAutomationPaused && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
       !(await state.isOffboarded())) {
     await connector.start();
     safeLog('[wechat-channels] interaction_inbox_v1 negotiated; API-only connector is online');
   } else {
-    safeLog('[wechat-channels] Cloud did not negotiate interaction_inbox_v1; sync/send remain disabled without retries');
+    safeLog(cleanupOnly
+      ? '[wechat-channels] restricted offboard cleanup core online; all ordinary interaction operations disabled'
+      : '[wechat-channels] Cloud did not negotiate interaction_inbox_v1; sync/send remain disabled without retries');
   }
 
   let shuttingDown = false;
+  let automationPaused = startAutomationPaused;
   const shutdown = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -335,9 +364,42 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   };
   process.once('SIGINT', () => terminate('SIGINT'));
   process.once('SIGTERM', () => terminate('SIGTERM'));
+  let cloudRebindChain = Promise.resolve();
   process.on('message', (message: unknown) => {
     if (!message || typeof message !== 'object') return;
-    const type = (message as { type?: unknown }).type;
+    const raw = message as { type?: unknown; requestId?: unknown; url?: unknown; targetKey?: unknown };
+    const type = raw.type;
+    if (type === 'lifecycle.cloud_rebind') {
+      if (typeof raw.requestId !== 'string' || !raw.requestId
+          || typeof raw.url !== 'string' || !/^wss?:\/\//i.test(raw.url)
+          || typeof raw.targetKey !== 'string' || !raw.targetKey) return;
+      cloudRebindChain = cloudRebindChain.then(async () => {
+        const send = (payload: Record<string, unknown>): void => {
+          if (typeof process.send === 'function' && process.connected) {
+            process.send({ requestId: raw.requestId, targetKey: raw.targetKey, ...payload });
+          }
+        };
+        try {
+          // API-only connector owns no browser slot. Stop its old-Cloud work at a connector boundary, rebind WS,
+          // then restore negotiated controls; visible auth sidecar state is untouched.
+          await connector!.stop();
+          await client.rebind(raw.url as string);
+          capabilities.resetRemoteControls();
+          await applyRuntimeControls(client.getInteractionRuntimeControls());
+          if (!cleanupOnly && !automationPaused && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard()
+              && !(await state.isOffboarded())) await connector!.start();
+          send({ type: 'lifecycle.cloud_rebound', ok: true, browserAbsent });
+        } catch (error) {
+          send({
+            type: 'lifecycle.cloud_rebind_failed',
+            ok: false,
+            reason: (error as Error)?.message || String(error),
+            browserAbsent,
+          });
+        }
+      });
+      return;
+    }
     if (type === 'lifecycle.wake_denied') {
       settleWake(false);
       return;
@@ -352,7 +414,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
           await auth.initialize();
           browserAbsent = false;
           settleWake(true);
-          if (client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
+          if (!automationPaused && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
               !(await state.isOffboarded())) await connector!.start();
           if (typeof process.send === 'function' && process.connected) process.send({ type: 'lifecycle.woken' });
         } catch (error) {
@@ -365,7 +427,23 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
       })();
       return;
     }
-    if (type === 'lifecycle.close' || type === 'lifecycle.pause') terminate(String(type));
+    if (type === 'lifecycle.pause') {
+      void connector!.stop().then(() => {
+        automationPaused = true;
+        if (typeof process.send === 'function' && process.connected) process.send({ type: 'lifecycle.paused' });
+      });
+      return;
+    }
+    if (type === 'lifecycle.resume') {
+      void (async () => {
+        automationPaused = false;
+        if (!browserAbsent && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard()
+            && !(await state.isOffboarded())) await connector!.start();
+        if (typeof process.send === 'function' && process.connected) process.send({ type: 'lifecycle.resumed' });
+      })();
+      return;
+    }
+    if (type === 'lifecycle.close') terminate(String(type));
   });
 
   // Keep WS/status routing online while QR login is pending. Authentication failures are fail-closed states,
