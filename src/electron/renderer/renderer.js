@@ -4353,7 +4353,7 @@ function updateCloudPending() {
     (e) => e.status && (e.status.coreState === 'online' || e.status.coreState === 'starting'
       || e.status.edge === 'running' || e.status.edge === 'starting'),
   );
-  const pendingRows = running.filter((e) => e.status.connectedCloudKey !== target.key
+  const pendingRows = running.filter((e) => (e.status.connectedCloudKey && e.status.connectedCloudKey !== target.key)
     || (e.status.cloudRebind && e.status.cloudRebind.state === 'pending'));
   const failedRows = running.filter((e) => e.status.cloudRebind && e.status.cloudRebind.state === 'failed');
   const pending = pendingRows.length > 0;
