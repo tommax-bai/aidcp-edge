@@ -2057,7 +2057,7 @@ function renderPublish(status, nowMs) {
   codeChip.textContent = view.code || (preview && preview.code) || '—';
   fields.pubMeta.appendChild(codeChip);
   renderFootRich(fields.pubFoot, view.foot); // 固定模板内 **…** 加粗，破掉整片灰
-  fields.pubPreviewLink.classList.toggle('hidden', !(preview && view.mode === 'flow'));
+  fields.pubPreviewLink.classList.toggle('hidden', !(view.mode === 'flow' && publishDraftEntryAvailable(status)));
   syncPublishPreviewActions(status);
   const steps = fields.pubSteps.querySelectorAll('.j-step');
   view.stepStates.forEach((state, i) => {
@@ -2240,6 +2240,17 @@ function activePublishPreview(status = currentStatus) {
   return status?.publishPreview ? normalizePublishDraft(status.publishPreview) : null;
 }
 
+function publishDraftQueueSupported() {
+  return typeof window.aidcpEdge?.publishDraftList === 'function'
+    && typeof window.aidcpEdge?.publishDraftGet === 'function';
+}
+
+function publishDraftEntryAvailable(status) {
+  if (status?.publishPreview) return true;
+  const state = status?.publish?.state;
+  return publishDraftQueueSupported() && (state === 'pending' || state === 'reminded');
+}
+
 function initializePublishPlan(preview) {
   if (!preview || publishDraftReview.planRecordId === preview.recordId) return;
   publishDraftReview.planRecordId = preview.recordId;
@@ -2318,9 +2329,7 @@ function closePublishPreviewImageLightbox() {
 function publishPreviewImageLightboxContext(preview, status = currentStatus) {
   // 旧 Cloud 没有列表/详情 RPC 时，selected 是打开页面当下的单稿快照；后续 status 才是继续推进的真态。
   // 新 Cloud 有队列 RPC 时则以当前钻取的 selected 为准，避免后台最新稿心跳误关正在看的另一篇稿件。
-  const hasDraftQueueRpc = typeof window.aidcpEdge?.publishDraftList === 'function'
-    && typeof window.aidcpEdge?.publishDraftGet === 'function';
-  return hasDraftQueueRpc
+  return publishDraftQueueSupported()
     ? preview
     : (status?.publishPreview ? normalizePublishDraft(status.publishPreview) : null);
 }
@@ -2968,7 +2977,7 @@ function renderPublishPreviewContent(status) {
 }
 
 function openPublishPreview() {
-  if (!currentStatus || !currentStatus.publishPreview) return;
+  if (!currentStatus || !publishDraftEntryAvailable(currentStatus)) return;
   syncContentWorkspace(currentStatus);
   resetPublishDraftReview(currentStatus.envId || currentEnvId());
   if (contentWorkspace) {
