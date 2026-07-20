@@ -1721,6 +1721,58 @@ test('人设浮层：云端权威说未绑 → 自动弹出并通知；偏好面
   assert.match(w.document.querySelector('#persona-kw-summary')!.textContent || '', /点赞倾向：更喜欢/, '预览摘要应显示中文档位');
 });
 
+test('人设浮层：内容偏好选满 24 项后原位拒绝第 25 项，取消后可继续选择和添加自定义项', async () => {
+  const { w, pushStatus } = await boot();
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: false }));
+  await tick();
+
+  const contentButtons = [...w.document.querySelectorAll(
+    '.persona-kw-group[data-dim="content"] .kw-btn:not(.custom)',
+  )] as HTMLButtonElement[];
+  assert.ok(contentButtons.length > 25, '测试目录应至少提供 25 个内容偏好');
+  contentButtons.slice(0, 24).forEach((button) => button.click());
+
+  const count = w.document.querySelector('#persona-content-count')!;
+  const message = w.document.querySelector('#persona-content-limit-msg')!;
+  assert.equal(count.textContent, '已选 24/24');
+  assert.equal(count.classList.contains('at-limit'), true);
+
+  contentButtons[24].click();
+  assert.equal(w.document.querySelectorAll('.persona-kw-group[data-dim="content"] .kw-btn.active').length, 24);
+  assert.equal(contentButtons[24].classList.contains('active'), false, '第 25 项不得进入选择集');
+  assert.equal(contentButtons[24].classList.contains('limit-rejected'), true, '被拒绝的框应在原位标红');
+  assert.equal(contentButtons[24].getAttribute('aria-invalid'), 'true');
+  assert.equal(message.textContent, '最多选择 24 个内容偏好，请先取消一个再选择');
+  assert.equal(message.classList.contains('active'), true);
+
+  contentButtons[0].click();
+  assert.equal(count.textContent, '已选 23/24');
+  assert.equal(message.textContent, '', '取消任意已选项应清除限制提示');
+  contentButtons[24].click();
+  assert.equal(contentButtons[24].classList.contains('active'), true, '释放名额后可选择刚才被拒绝的项');
+  assert.equal(count.textContent, '已选 24/24');
+
+  const firstGroup = w.document.querySelector('.persona-pref-group')!;
+  (firstGroup.querySelector('.persona-add-custom') as HTMLButtonElement).click();
+  const input = firstGroup.querySelector('.persona-custom-input') as HTMLInputElement;
+  const customRow = firstGroup.querySelector('.persona-custom-row')!;
+  input.value = '直播招聘';
+  (firstGroup.querySelector('.persona-custom-add') as HTMLButtonElement).click();
+  assert.equal(input.value, '直播招聘', '达到上限时应保留用户输入');
+  assert.equal(w.document.activeElement, input, '达到上限时焦点应留在输入框');
+  assert.equal(customRow.classList.contains('hidden'), false, '达到上限时输入行不得收起');
+  assert.equal(customRow.classList.contains('limit-rejected'), true, '自定义输入行应原位标红');
+  assert.equal(firstGroup.querySelector('.kw-btn[data-kw="直播招聘"]'), null);
+
+  contentButtons[1].click();
+  (firstGroup.querySelector('.persona-custom-add') as HTMLButtonElement).click();
+  const customButton = firstGroup.querySelector('.kw-btn.custom[data-kw="直播招聘"]');
+  assert.ok(customButton?.classList.contains('active'), '释放名额后应成功添加自定义项');
+  assert.equal(input.value, '');
+  assert.equal(count.textContent, '已选 24/24');
+  assert.equal(message.textContent, '');
+});
+
 // ═══ 环境栏定高 + 栏内滚动（edge-rail-fixed-height-scroll）═══
 // index.html 外链 styles.css，jsdom 不会去取；把真实样式表注入成 <style> 后 jsdom 会解析级联，
 // 于是断言的是「这条规则真的命中了这个元素」，而不只是「文件里有这段文本」。

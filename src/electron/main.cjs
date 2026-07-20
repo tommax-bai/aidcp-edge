@@ -66,6 +66,7 @@ const {
   browserPersonaNoticeForStatus,
   browserPersonaNoticeKey,
 } = require('./persona-notice.cjs');
+const { validatePersonaKeywordSelections } = require('./persona-request-validation.cjs');
 const { resolveTrayIconPath } = require('./tray-icon.cjs');
 
 // ── 实例级 userData 隔离（change edge-multi-instance-userdata-isolation）──────
@@ -5657,11 +5658,8 @@ ipcMain.handle('persona:get', (_event, envId) => handlePersonaIpc(async () => {
 
 ipcMain.handle('persona:generate', (_event, envId, raw) => handlePersonaIpc(async () => {
   const args = interactionArgs(raw, new Set(['keywordSelections', 'writingLanguage', 'idempotencyKey']));
-  if (!Array.isArray(args.keywordSelections)
-      || args.keywordSelections.length > 24
-      || args.keywordSelections.some((value) => typeof value !== 'string' || value.length > 40)) {
-    throw new Error('keywordSelections 不合法');
-  }
+  const keywordValidation = validatePersonaKeywordSelections(args.keywordSelections);
+  if (!keywordValidation.ok) return keywordValidation;
   const idempotencyKey = interactionIdempotencyKey(args.idempotencyKey);
   if (args.writingLanguage !== undefined && !['zh-CN', 'en', 'vi'].includes(args.writingLanguage)) {
     throw new Error('writingLanguage 不合法');

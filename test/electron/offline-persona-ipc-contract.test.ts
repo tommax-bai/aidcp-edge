@@ -3,11 +3,22 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const main = readFileSync(join(electronDir, 'main.cjs'), 'utf8');
 const preload = readFileSync(join(electronDir, 'preload.cjs'), 'utf8');
+const require = createRequire(import.meta.url);
+const {
+  MAX_PERSONA_KEYWORD_SELECTIONS,
+  MAX_PERSONA_KEYWORD_LENGTH,
+  validatePersonaKeywordSelections,
+} = require('../../src/electron/persona-request-validation.cjs') as {
+  MAX_PERSONA_KEYWORD_SELECTIONS: number;
+  MAX_PERSONA_KEYWORD_LENGTH: number;
+  validatePersonaKeywordSelections: (value: unknown) => { ok: boolean; reason?: string };
+};
 
 test('人设 preload 只暴露三个具名环境方法，不暴露 URL、token 或 accountId', () => {
   assert.match(preload, /personaGet: \(envId\) => ipcRenderer\.invoke\('persona:get', envId\)/);
@@ -42,11 +53,21 @@ test('人设 IPC 本地白名单、幂等键和体积上限保持 fail-closed', 
   );
   assert.match(personaBlock, /new Set\(\['keywordSelections', 'writingLanguage', 'idempotencyKey'\]\)/);
   assert.match(personaBlock, /interactionIdempotencyKey\(args\.idempotencyKey\)/);
-  assert.match(personaBlock, /args\.keywordSelections\.length > 24/);
-  assert.match(personaBlock, /value\.length > 40/);
+  assert.match(personaBlock, /validatePersonaKeywordSelections\(args\.keywordSelections\)/);
+  assert.match(main, /require\('\.\/persona-request-validation\.cjs'\)/);
   assert.match(personaBlock, /new Set\(\['soulYaml'\]\)/);
   assert.match(personaBlock, /Buffer\.byteLength\(args\.soulYaml, 'utf8'\) > 32 \* 1024/);
   const fetchBlock = main.slice(main.indexOf('async function clientAuthFetch'), main.indexOf('const CONTROL_BOOTSTRAP_REASON_ZH'));
   assert.match(fetchBlock, /timeoutMs = 12000/);
   assert.match(fetchBlock, /timeoutMs <= 200000/);
+});
+
+test('人设 IPC 允许展开后的正常关键词载荷，并在发 HTTP 前拒绝超过 64 项或单项 40 字', () => {
+  assert.equal(MAX_PERSONA_KEYWORD_SELECTIONS, 64);
+  assert.equal(MAX_PERSONA_KEYWORD_LENGTH, 40);
+  assert.deepEqual(validatePersonaKeywordSelections(Array.from({ length: 50 }, (_, i) => `keyword-${i}`)), { ok: true });
+  assert.deepEqual(validatePersonaKeywordSelections(Array.from({ length: 64 }, (_, i) => `keyword-${i}`)), { ok: true });
+  assert.equal(validatePersonaKeywordSelections(Array.from({ length: 65 }, (_, i) => `keyword-${i}`)).reason, 'input_too_large');
+  assert.equal(validatePersonaKeywordSelections(['x'.repeat(41)]).reason, 'input_too_large');
+  assert.equal(validatePersonaKeywordSelections(['valid', 1]).reason, 'invalid_request');
 });

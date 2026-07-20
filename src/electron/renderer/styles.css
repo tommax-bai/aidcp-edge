@@ -1917,6 +1917,11 @@ body::-webkit-scrollbar:vertical,
 .persona-card .field-label { color: var(--persona-ink); font-size: 13px; font-weight: 600; }
 .persona-card .field-label .opt { color: #647b83; background: #edf3f3; font-weight: 550; }
 .kw-count { font-size: 11px; color: var(--persona-faint); font-weight: 500; margin-left: 6px; }
+.kw-count.at-limit { color: #a14438; font-weight: 650; }
+.persona-content-limit-msg {
+  min-height: 18px; margin: 5px 0 8px; color: transparent; font-size: 11.5px; line-height: 1.45;
+}
+.persona-content-limit-msg.active { color: #a72f24; }
 .persona-or { font-size: 11px; color: var(--persona-faint); }
 /* 关键词 chip：语气调性（单选）与内容偏好（多选）共用同一「边缘弧度方形」chip。
    非自定义（预设）实线描边；自定义（用户新增 + 加号框）同尺寸同位置、仅描边改虚线。
@@ -1979,6 +1984,26 @@ body::-webkit-scrollbar:vertical,
 }
 /* 自定义（用户新增）chip：与预设同尺寸同位置，仅描边改虚线（选中态仍保留同一功能色）。 */
 .persona-pref-group .kw-btn.custom { border-style: dashed; }
+@keyframes persona-limit-reject {
+  0%, 100% { transform: translateX(0); }
+  35% { transform: translateX(-2px); }
+  70% { transform: translateX(2px); }
+}
+.persona-pref-group .kw-btn.limit-rejected,
+.persona-custom-row.limit-rejected .persona-custom-input,
+.persona-custom-row.limit-rejected .persona-custom-add {
+  border-color: #d84a3d;
+  background: #fff3f1;
+  color: #a72f24;
+  box-shadow: 0 0 0 3px rgba(216, 74, 61, .12);
+  animation: persona-limit-reject .24s ease-out;
+}
+.persona-pref-group .kw-btn.limit-rejected::before {
+  border-color: #d84a3d;
+  background:
+    linear-gradient(#d84a3d, #d84a3d) center / 8px 1.5px no-repeat,
+    linear-gradient(#d84a3d, #d84a3d) center / 1.5px 8px no-repeat;
+}
 /* 自定义加号框：与预设选项同尺寸同位置，几何线条天然居中。 */
 .persona-add-custom {
   display: inline-flex; align-items: center; justify-content: center;

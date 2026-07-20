@@ -5836,6 +5836,8 @@ const PERSONA_CONTENT_GROUPS = [
   { title: '体育运动', items: ['篮球', '滑雪', '跑步', '垂钓', '徒步', '游泳', '骑行', '滑板', '足球', '飞盘', '露营', '水上活动', '极限运动'] },
   { title: '个人管理', items: ['星座', '职场干货'] },
 ];
+const PERSONA_CONTENT_PREFERENCE_LIMIT = 24;
+const PERSONA_CONTENT_LIMIT_MESSAGE = '最多选择 24 个内容偏好，请先取消一个再选择';
 
 function renderPersonaContentGroups() {
   const host = document.querySelector('#persona-content-groups');
@@ -5859,6 +5861,7 @@ function renderPersonaContentGroups() {
     chips.dataset.dim = 'content';
     chips.dataset.category = group.title;
     chips.dataset.select = 'multi';
+    chips.setAttribute('aria-describedby', 'persona-content-limit-msg');
     for (const item of group.items) {
       const btn = document.createElement('button');
       btn.className = 'kw-btn';
@@ -5942,7 +5945,9 @@ const personaUi = {
   skeleton: document.querySelector('#persona-skeleton'),
   kwSummary: document.querySelector('#persona-kw-summary'),
   kwSummaryText: document.querySelector('#persona-kw-summary-text'),
+  contentGroups: document.querySelector('#persona-content-groups'),
   contentCount: document.querySelector('#persona-content-count'),
+  contentLimitMsg: document.querySelector('#persona-content-limit-msg'),
 };
 let personaReady = false; // 当前环境的 customer-auth 人设作用域已就绪（与浏览器/core 运行状态无关）
 let personaDraftYaml = ''; // 当前草稿 soulYaml（确认时提交）
@@ -5961,6 +5966,7 @@ const personaWritingLanguageSelections = new Map(); // envId -> zh-CN | en | vi�
 const personaWritingLanguageDirty = new Set(); // 用户正在编辑的环境；状态心跳不得覆盖未确认选择
 const personaViewsByEnv = new Map(); // envId -> { requestId, phase, state?, persona?, reason? }；晚返回不得串环境
 let personaViewRequestId = 0;
+let personaContentLimitFeedbackTimer = null;
 // 人设弹窗触发判据（change persona-bound-tristate）：**只由云端权威的「未绑」触发**。
 //
 // 旧实现按「!bound」触发，而 bound=false 同时承载了两个互斥的含义——「云端说没有」和「云端还没说」。
@@ -6584,14 +6590,53 @@ function updatePersonaGate(status) {
   if (!bound) maybePromptPersonaSetup(status);
 }
 
-// 关键词 toggle：单选组互斥、多选组可叠加；同步 aria-pressed 与「已选 n」计数。
+function personaContentPreferenceCount() {
+  return personaUi.kwGroups
+    .filter((group) => group.dataset.dim === 'content')
+    .reduce((sum, group) => sum + group.querySelectorAll('.kw-btn.active').length, 0);
+}
+
+function clearPersonaContentLimitFeedback() {
+  if (personaContentLimitFeedbackTimer) {
+    clearTimeout(personaContentLimitFeedbackTimer);
+    personaContentLimitFeedbackTimer = null;
+  }
+  personaUi.contentGroups?.querySelectorAll('.limit-rejected').forEach((element) => element.classList.remove('limit-rejected'));
+  personaUi.contentGroups?.querySelectorAll('[aria-invalid="true"]').forEach((element) => element.removeAttribute('aria-invalid'));
+  if (personaUi.contentLimitMsg) {
+    personaUi.contentLimitMsg.textContent = '';
+    personaUi.contentLimitMsg.classList.remove('active');
+  }
+}
+
+function showPersonaContentLimitFeedback(control, row) {
+  if (personaContentLimitFeedbackTimer) clearTimeout(personaContentLimitFeedbackTimer);
+  personaUi.contentGroups?.querySelectorAll('.limit-rejected').forEach((element) => element.classList.remove('limit-rejected'));
+  personaUi.contentGroups?.querySelectorAll('[aria-invalid="true"]').forEach((element) => element.removeAttribute('aria-invalid'));
+  for (const element of [control, row].filter(Boolean)) {
+    element.classList.add('limit-rejected');
+    element.setAttribute('aria-invalid', 'true');
+  }
+  if (personaUi.contentLimitMsg) {
+    personaUi.contentLimitMsg.textContent = PERSONA_CONTENT_LIMIT_MESSAGE;
+    personaUi.contentLimitMsg.classList.add('active');
+  }
+  personaContentLimitFeedbackTimer = setTimeout(() => {
+    for (const element of [control, row].filter(Boolean)) {
+      element.classList.remove('limit-rejected');
+      element.removeAttribute('aria-invalid');
+    }
+    personaContentLimitFeedbackTimer = null;
+  }, 1200);
+}
+
+// 关键词 toggle：单选组互斥；内容偏好最多 24 个，第 25 次点击原位拒绝且不污染选择集。
 function syncKwGroupState(group) {
   group.querySelectorAll('.kw-btn').forEach((b) => b.setAttribute('aria-pressed', b.classList.contains('active') ? 'true' : 'false'));
   if (personaUi.contentCount) {
-    const n = personaUi.kwGroups
-      .filter((g) => g.dataset.dim === 'content')
-      .reduce((sum, g) => sum + g.querySelectorAll('.kw-btn.active').length, 0);
-    personaUi.contentCount.textContent = n ? `已选 ${n}` : '';
+    const n = personaContentPreferenceCount();
+    personaUi.contentCount.textContent = `已选 ${n}/${PERSONA_CONTENT_PREFERENCE_LIMIT}`;
+    personaUi.contentCount.classList.toggle('at-limit', n >= PERSONA_CONTENT_PREFERENCE_LIMIT);
   }
 }
 personaUi.kwGroups.forEach((group) => {
@@ -6601,8 +6646,16 @@ personaUi.kwGroups.forEach((group) => {
     if (!btn || !group.contains(btn)) return;
     if (single) {
       group.querySelectorAll('.kw-btn').forEach((b) => b.classList.toggle('active', b === btn));
+    } else if (btn.classList.contains('active')) {
+      btn.classList.remove('active');
+      clearPersonaContentLimitFeedback();
+    } else if (personaContentPreferenceCount() >= PERSONA_CONTENT_PREFERENCE_LIMIT) {
+      showPersonaContentLimitFeedback(btn);
+      syncKwGroupState(group);
+      return;
     } else {
-      btn.classList.toggle('active');
+      btn.classList.add('active');
+      clearPersonaContentLimitFeedback();
     }
     syncKwGroupState(group);
   });
@@ -6620,15 +6673,26 @@ personaUi.languageGroup?.addEventListener('click', (event) => {
   syncPersonaWritingLanguage((fleetView.envs.get(currentEnvId()) || {}).status || currentStatus || null);
 });
 
-function addCustomPreference(group, value) {
+function addCustomPreference(group, value, row, input) {
   const name = (value || '').trim();
-  if (!name) return;
+  if (!name) return { ok: false, reason: 'empty' };
   const normalized = name.slice(0, 40);
   const existing = Array.from(group.querySelectorAll('.kw-btn')).find((b) => b.dataset.kw === normalized);
   if (existing) {
+    if (!existing.classList.contains('active') && personaContentPreferenceCount() >= PERSONA_CONTENT_PREFERENCE_LIMIT) {
+      showPersonaContentLimitFeedback(existing, row);
+      input?.focus();
+      return { ok: false, reason: 'limit' };
+    }
     existing.classList.add('active');
+    clearPersonaContentLimitFeedback();
     syncKwGroupState(group);
-    return;
+    return { ok: true };
+  }
+  if (personaContentPreferenceCount() >= PERSONA_CONTENT_PREFERENCE_LIMIT) {
+    showPersonaContentLimitFeedback(input, row);
+    input?.focus();
+    return { ok: false, reason: 'limit' };
   }
   const btn = document.createElement('button');
   btn.className = 'kw-btn active custom';
@@ -6639,7 +6703,9 @@ function addCustomPreference(group, value) {
   const addBtn = group.querySelector('.persona-add-custom');
   if (addBtn) group.insertBefore(btn, addBtn);
   else group.appendChild(btn);
+  clearPersonaContentLimitFeedback();
   syncKwGroupState(group);
+  return { ok: true };
 }
 
 document.querySelectorAll('.persona-pref-group').forEach((section) => {
@@ -6656,7 +6722,8 @@ document.querySelectorAll('.persona-pref-group').forEach((section) => {
   });
   const submit = () => {
     if (!group || !input) return;
-    addCustomPreference(group, input.value);
+    const result = addCustomPreference(group, input.value, row, input);
+    if (!result.ok && result.reason === 'limit') return;
     input.value = '';
     row?.classList.add('hidden');
     // 收起输入框时把焦点交还加号（否则焦点落到 body、键盘用户丢失位置）。
