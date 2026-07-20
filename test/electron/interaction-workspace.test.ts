@@ -540,7 +540,7 @@ test('首次授权、错号恢复和账号开关待应用都有明确且 fail-cl
   assert.match($(mismatch.window, '#iw-summary').textContent || '', /历史内容仍可查看/);
   assert.equal($(mismatch.window, '#iw-auth-status').textContent, '视频号：账号不匹配');
   await openThread(mismatch.window);
-  assert.equal((mismatch.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
+  assert.equal((mismatch.window.document.querySelector('[data-iw-action="approve_send"]') as HTMLButtonElement).disabled, true);
 
   const pendingList = clone(listFixture);
   const pendingDetail = clone(commentFixture);
@@ -559,7 +559,7 @@ test('首次授权、错号恢复和账号开关待应用都有明确且 fail-cl
   assert.match($(pending.window, '#iw-read-apply').textContent || '', /Cloud 已保存 v8，等待本机应用/);
   await openThread(pending.window);
   assert.match($(pending.window, '#iw-detail').textContent || '', /尚未回报应用同一版本/);
-  assert.equal((pending.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
+  assert.equal((pending.window.document.querySelector('[data-iw-action="approve_send"]') as HTMLButtonElement).disabled, true);
 });
 
 test('tabs / 搜索 / 空态 / 错态 / ambiguous 都使用冻结 fixture 的诚实状态', async () => {
@@ -1036,7 +1036,7 @@ test('发送能力只阻止发送；配置缺失只阻止依赖配置的动作�
   });
   assert.match($(missing.window, '#iw-config-status').textContent || '', /尚未创建回复配置/);
   await openThread(missing.window);
-  assert.equal((missing.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement).disabled, true);
+  assert.equal((missing.window.document.querySelector('[data-iw-action="approve_send"]') as HTMLButtonElement).disabled, true);
   assert.equal((missing.window.document.querySelector('[data-iw-action="regenerate"]') as HTMLButtonElement).disabled, true);
   assert.equal((missing.window.document.querySelector('[data-iw-action="ignore"]') as HTMLButtonElement).disabled, false);
   assert.equal((missing.window.document.querySelector('[data-iw-action="escalate"]') as HTMLButtonElement).disabled, false);
@@ -1168,43 +1168,68 @@ test('环境 A→B 原子切换：取消 A 读取且迟到响应不能覆盖 B',
   assert.deepEqual(listCalls, ['env_A', 'env_B']);
 });
 
-test('批准/发送防双击，带 expectedVersion；queued 绝不冒充平台发送成功', async () => {
+test('一次审核发送按保存、批准、发送串行并防双击；queued 绝不冒充平台发送成功', async () => {
   let approveCount = 0;
   let sendCount = 0;
+  let approveArgs: any = null;
+  let sendArgs: any = null;
   let resolveApprove!: (value: any) => void;
   let resolveSend!: (value: any) => void;
   const approvePending = new Promise((resolve) => { resolveApprove = resolve; });
   const sendPending = new Promise((resolve) => { resolveSend = resolve; });
-  const { window } = await boot({
+  const { window, calls } = await boot({
     api: {
-      interactionApprove: async () => { approveCount += 1; return approvePending; },
-      interactionSend: async () => { sendCount += 1; return sendPending; },
+      interactionApprove: async (args: any) => { approveCount += 1; approveArgs = args; return approvePending; },
+      interactionSend: async (args: any) => { sendCount += 1; sendArgs = args; return sendPending; },
     },
   });
   await openThread(window);
 
-  const approve = $(window, '[data-iw-action="approve"]');
-  approve.dispatchEvent(new window.Event('click', { bubbles: true }));
-  approve.dispatchEvent(new window.Event('click', { bubbles: true }));
+  const initialVersion = commentFixture.data.replyJob.version;
+  const textarea = $(window, '#iw-final-text') as HTMLTextAreaElement;
+  textarea.value = '保存后再审核发送';
+  textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
+  const approveSend = $(window, '[data-iw-action="approve_send"]');
+  assert.equal(approveSend.textContent, '保存并审核发送');
+  approveSend.dispatchEvent(new window.Event('click', { bubbles: true }));
+  approveSend.dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  assert.equal(calls.save.length, 1);
   assert.equal(approveCount, 1);
+  assert.equal(sendCount, 0);
+  assert.equal(calls.save[0].expectedVersion, initialVersion);
+  assert.equal(approveArgs.expectedVersion, initialVersion + 1);
   const approvedJob = clone(commentFixture.data.replyJob);
+  approvedJob.finalText = '保存后再审核发送';
   approvedJob.state = 'approved';
-  approvedJob.version = 4;
+  approvedJob.version = initialVersion + 2;
   resolveApprove(jobResult('env_wc_demo', approvedJob));
   await flush();
-  assert.match($(window, '#iw-detail').textContent || '', /回复已批准，尚未发送/);
-
-  const send = $(window, '[data-iw-action="send"]');
-  send.dispatchEvent(new window.Event('click', { bubbles: true }));
-  send.dispatchEvent(new window.Event('click', { bubbles: true }));
   assert.equal(sendCount, 1);
+  assert.equal(sendArgs.expectedVersion, approvedJob.version);
+  assert.match(sendArgs.idempotencyKey, /^interaction-send-/);
   const queuedJob = clone(approvedJob);
   queuedJob.state = 'queued';
-  queuedJob.version = 5;
+  queuedJob.version = approvedJob.version + 1;
   resolveSend(jobResult('env_wc_demo', queuedJob));
   await flush();
   assert.match($(window, '#iw-detail').textContent || '', /Cloud 已受理并进入发送队列/);
   assert.doesNotMatch($(window, '#iw-detail').textContent || '', /平台已确认发送/);
+});
+
+test('审核成功但发送失败时保留 approved 真态和直接重试入口', async () => {
+  const { window } = await boot({
+    api: { interactionSend: async () => apiError('INTERACTION_RATE_LIMITED', 'rate limited', 429) },
+  });
+  await openThread(window);
+  $(window, '[data-iw-action="approve_send"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+  await flush();
+  const text = $(window, '#iw-detail').textContent || '';
+  assert.match(text, /已批准，待发送/);
+  assert.match(text, /回复已批准，尚未提交到平台/);
+  assert.match(text, /Cloud 本地发送限制/);
+  assert.ok($(window, '[data-iw-action="send"]'));
+  assert.doesNotMatch(text, /平台已确认发送/);
 });
 
 test('发送错误区分 Cloud 本地限制与真实平台限流', async () => {
@@ -1216,11 +1241,8 @@ test('发送错误区分 Cloud 本地限制与真实平台限流', async () => {
       api: { interactionSend: async () => apiError(code, 'rate limited', 429) },
     });
     await openThread(handle.window);
-    const approve = handle.window.document.querySelector('[data-iw-action="approve"]') as HTMLButtonElement;
-    approve.dispatchEvent(new handle.window.Event('click', { bubbles: true }));
-    await flush();
-    const send = handle.window.document.querySelector('[data-iw-action="send"]') as HTMLButtonElement;
-    send.dispatchEvent(new handle.window.Event('click', { bubbles: true }));
+    const approveSend = handle.window.document.querySelector('[data-iw-action="approve_send"]') as HTMLButtonElement;
+    approveSend.dispatchEvent(new handle.window.Event('click', { bubbles: true }));
     await flush();
     const text = $(handle.window, '#iw-detail').textContent || '';
     assert.match(text, expected);
@@ -1236,7 +1258,7 @@ test('CAS 冲突保留输入并给出刷新入口；reauth 保留历史但禁写
   const textarea = $(conflict.window, '#iw-final-text') as HTMLTextAreaElement;
   textarea.value = '我尚未保存的修改';
   textarea.dispatchEvent(new conflict.window.Event('input', { bubbles: true }));
-  $(conflict.window, '[data-iw-action="approve"]').dispatchEvent(new conflict.window.Event('click', { bubbles: true }));
+  $(conflict.window, '[data-iw-action="approve_send"]').dispatchEvent(new conflict.window.Event('click', { bubbles: true }));
   await flush();
   assert.match($(conflict.window, '#iw-detail').textContent || '', /已在别处更新/);
   assert.equal(($(conflict.window, '#iw-final-text') as HTMLTextAreaElement).value, '我尚未保存的修改');
@@ -1268,7 +1290,7 @@ test('CAS 冲突保留输入并给出刷新入口；reauth 保留历史但禁写
   await flush();
   assert.match($(reauth.window, '#iw-sync-status').textContent || '', /仍需等待平台登录状态确认/);
   assert.match($(reauth.window, '#iw-title').textContent || '', /需要重新登录/);
-  assert.equal(reauth.window.document.querySelectorAll('[data-iw-action="approve"]:not([disabled])').length, 0);
+  assert.equal(reauth.window.document.querySelectorAll('[data-iw-action="approve_send"]:not([disabled])').length, 0);
   assert.equal(reauthList.data.items.length, 2, '登录失效不能清掉历史 fixture');
   assert.match(reopenArgs.idempotencyKey, /^interaction-reauth-/);
 });
@@ -1505,9 +1527,14 @@ test('Cloud 离线局部刷新保留已读历史并标记上次成功数据', as
 });
 
 test('Cloud offline/stale 禁止 save/approve/send，成功刷新后才恢复写动作', async () => {
+  let sendCount = 0;
   const { window, pushFleet, calls } = await boot({
     api: {
       interactionSync: async () => ({ status: 0, ok: false, data: null, error: 'offline' }),
+      interactionSend: async () => {
+        sendCount += 1;
+        return apiError('INTERACTION_RATE_LIMITED', 'rate limited', 429);
+      },
     },
   });
   await openThread(window);
@@ -1522,7 +1549,7 @@ test('Cloud offline/stale 禁止 save/approve/send，成功刷新后才恢复写
   assert.equal(($(window, '#iw-final-text') as HTMLTextAreaElement).disabled, true, 'stale 时编辑器必须锁定');
   assert.match($(window, '#iw-detail').textContent || '', /刷新成功前写操作已禁用/);
   const staleSave = $(window, '[data-iw-action="save"]') as HTMLButtonElement;
-  const staleApprove = $(window, '[data-iw-action="approve"]') as HTMLButtonElement;
+  const staleApprove = $(window, '[data-iw-action="approve_send"]') as HTMLButtonElement;
   assert.equal(staleSave.disabled, true, 'stale 时 save 明确 disabled');
   assert.equal(staleApprove.disabled, true, 'stale 时 approve 不可用');
   staleSave.dispatchEvent(new window.Event('click', { bubbles: true }));
@@ -1534,14 +1561,15 @@ test('Cloud offline/stale 禁止 save/approve/send，成功刷新后才恢复写
   $(window, '[data-iw-action="refresh-detail"]').dispatchEvent(new window.Event('click', { bubbles: true }));
   await flush();
   assert.equal(($(window, '#iw-final-text') as HTMLTextAreaElement).disabled, false, '成功刷新当前详情后恢复编辑');
-  assert.equal(($(window, '[data-iw-action="approve"]') as HTMLButtonElement).disabled, false, '成功刷新后恢复 approve');
+  assert.equal(($(window, '[data-iw-action="approve_send"]') as HTMLButtonElement).disabled, false, '成功刷新后恢复 approve');
   const recoveredTextarea = $(window, '#iw-final-text') as HTMLTextAreaElement;
   recoveredTextarea.value = 'Cloud 恢复后的可提交修改';
   recoveredTextarea.dispatchEvent(new window.Event('input', { bubbles: true }));
-  $(window, '[data-iw-action="approve"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+  $(window, '[data-iw-action="approve_send"]').dispatchEvent(new window.Event('click', { bubbles: true }));
   await flush();
   assert.equal(calls.save.length, 1, '恢复后保存修改可正常发出');
   assert.equal(calls.approve.length, 1, '恢复后批准可正常发出');
+  assert.equal(sendCount, 1, '恢复后的组合动作会继续尝试发送');
 
   const disconnected = status('env_wc_demo', '轻享生活号');
   disconnected.cloud = 'disconnected';
@@ -1554,7 +1582,7 @@ test('Cloud offline/stale 禁止 save/approve/send，成功刷新后才恢复写
   assert.equal(send.disabled, true, '显式 Cloud disconnected 时 send 不可用');
   send.dispatchEvent(new window.Event('click', { bubbles: true }));
   await flush();
-  assert.equal(calls.send.length, 0, 'disabled 之外 handler guard 也必须拦 send');
+  assert.equal(sendCount, 1, 'disabled 之外 handler guard 也必须拦 send');
 });
 
 test('双列主从布局：不默认选中或预取，右列显示选择提示且每一条都点得开', async () => {

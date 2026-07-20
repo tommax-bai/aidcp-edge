@@ -786,9 +786,10 @@
       return `<section class="iw-send-state ${label[1]}"><strong>${escapeHtml(label[0])}</strong><span>${escapeHtml(detail)}</span></section>`;
     }
 
-    function actionButtonModel(job) {
+    function actionButtonModel(job, capabilityBlocked) {
       if (!job) return null;
-      if (job.state === 'approval_required') return { action: 'approve', label: state.draftDirty ? '保存并批准' : '批准回复' };
+      if (job.state === 'approval_required' && capabilityBlocked) return { action: 'approve', label: state.draftDirty ? '保存并批准' : '批准回复' };
+      if (job.state === 'approval_required') return { action: 'approve_send', label: state.draftDirty ? '保存并审核发送' : '审核并发送' };
       if (job.state === 'approved') return { action: 'send', label: '发送回复' };
       if (job.state === 'queued') return { action: '', label: '已进入发送队列', disabled: true };
       if (job.state === 'sending') return { action: '', label: '等待平台确认', disabled: true };
@@ -843,7 +844,7 @@
       const configBlocked = !replyConfigReady();
       const textLocked = textStateLocked || writeBlocked() || configBlocked;
       const capabilityBlocked = channelCapabilityBlocked(thread.channel);
-      const primary = actionButtonModel(job);
+      const primary = actionButtonModel(job, capabilityBlocked);
       const busy = Boolean(state.actionBusy);
 
       dom.detail.innerHTML = `<div class="iw-detail-scroll">
@@ -879,7 +880,7 @@
             </div>
             <div>
               ${!textStateLocked ? `<button class="iw-button secondary" type="button" data-iw-action="save" ${busy || !state.draftDirty || writeBlocked() || configBlocked ? 'disabled' : ''}>${state.actionBusy === 'save' ? '保存中' : '保存修改'}</button>` : ''}
-              ${primary ? `<button class="iw-button primary" type="button" data-iw-action="${primary.action}" ${busy || primary.disabled || writeBlocked() || configBlocked || (primary.action === 'send' && capabilityBlocked) ? 'disabled' : ''}>${state.actionBusy === primary.action ? '处理中' : primary.label}</button>` : ''}
+              ${primary ? `<button class="iw-button primary" type="button" data-iw-action="${primary.action}" ${busy || primary.disabled || writeBlocked() || configBlocked || ((primary.action === 'send' || primary.action === 'approve_send') && capabilityBlocked) ? 'disabled' : ''}>${state.actionBusy === primary.action ? '处理中' : primary.label}</button>` : ''}
             </div>
           </footer>
         </section>` : '<section class="iw-empty-inline">这条互动尚未生成回复任务，可保留查看并等待 Cloud 工作流。</section>'}
@@ -894,6 +895,8 @@
           if (count) count.textContent = `${state.draftText.length}/4000${state.draftDirty ? ' · 尚未保存' : ''}`;
           const save = dom.detail.querySelector('[data-iw-action="save"]');
           if (save) save.disabled = !state.draftDirty || Boolean(state.actionBusy) || writeBlocked() || !replyConfigReady();
+          const approveSend = dom.detail.querySelector('[data-iw-action="approve_send"]');
+          if (approveSend) approveSend.textContent = state.draftDirty ? '保存并审核发送' : '审核并发送';
           const approve = dom.detail.querySelector('[data-iw-action="approve"]');
           if (approve) approve.textContent = state.draftDirty ? '保存并批准' : '批准回复';
         });
@@ -1146,9 +1149,10 @@
         return;
       }
       const job = state.detail && state.detail.replyJob;
-      const configRequired = new Set(['save', 'approve', 'send', 'regenerate']).has(kind);
+      const configRequired = new Set(['save', 'approve', 'approve_send', 'send', 'regenerate']).has(kind);
+      const sendsToPlatform = kind === 'approve_send' || kind === 'send';
       if (!job || state.actionBusy || writeBlocked() || (configRequired && !replyConfigReady())
-        || (kind === 'send' && channelCapabilityBlocked(state.detail.thread.channel))) return;
+        || (sendsToPlatform && channelCapabilityBlocked(state.detail.thread.channel))) return;
       if (kind === 'save' && !state.draftDirty) return;
       const capturedEpoch = epoch;
       const envKey = env.envKey;
@@ -1158,20 +1162,34 @@
       renderAll();
       try {
         let currentJob = job;
-        if (kind === 'approve' && state.draftDirty) {
+        if ((kind === 'approve' || kind === 'approve_send') && state.draftDirty) {
           const draftEnvelope = assertEnvelope(await requestJobAction('save', currentJob.version), envKey);
+          if (!isCurrent(capturedEpoch, envKey)) return;
           currentJob = draftEnvelope.data.job;
           state.detail.replyJob = currentJob;
           state.draftDirty = false;
         }
-        const response = await requestJobAction(kind, currentJob.version);
+        let response;
+        if (kind === 'approve_send') {
+          const approveEnvelope = assertEnvelope(await requestJobAction('approve', currentJob.version), envKey);
+          if (!isCurrent(capturedEpoch, envKey)) return;
+          currentJob = approveEnvelope.data.job;
+          state.detail.replyJob = currentJob;
+          state.draftText = safeText(currentJob.finalText, state.draftText);
+          state.draftDirty = false;
+          updateListJob(currentJob);
+          if (currentJob.state !== 'approved') throw new Error('批准结果未进入已批准状态，已停止发送。');
+          response = await requestJobAction('send', currentJob.version);
+        } else {
+          response = await requestJobAction(kind, currentJob.version);
+        }
         if (!isCurrent(capturedEpoch, envKey)) return;
         const envelope = assertEnvelope(response, envKey);
         state.detail.replyJob = envelope.data.job;
         state.draftText = safeText(envelope.data.job.finalText, state.draftText);
         state.draftDirty = false;
         updateListJob(envelope.data.job);
-        state.actionNotice = kind === 'send'
+        state.actionNotice = kind === 'send' || kind === 'approve_send'
           ? envelope.data.job.state === 'sent' ? '平台已确认发送。' : '已提交到发送流程，正在等待平台确认。'
           : kind === 'approve' ? '回复已批准，尚未发送。'
             : kind === 'save' ? '最终文字已保存。'
