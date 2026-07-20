@@ -1832,7 +1832,7 @@ function renderPresence(status, nowMs) {
   fields.presenceFresh.textContent = view.fresh || '';
 }
 
-// ─── 发布卡（常驻三态：flow 进行中 / last 上次发布 / empty 从未发布；审批在预览内完成）───
+// ─── 发布卡（常驻四态：flow 进行中 / submitted 平台确认中 / last 上次发布 / empty 从未发布）───
 // 终态折流的去重签名按 envId 分桶（多环境下 A 的终态签名绝不吞掉 B 的折流）。
 const lastPublishSigByEnv = new Map();
 // 用户点薄条的临时展开（进行中审批到来 / 会话停止 / 切换环境时自动复位）。
@@ -1848,9 +1848,9 @@ function renderPublish(status, nowMs) {
   fields.pubCard.classList.toggle('empty', view.mode === 'empty');
   fields.pubCard.dataset.pubMode = view.mode;
   fields.pubCard.dataset.pubState = status.publish && status.publish.state ? status.publish.state : view.mode;
-  // 收展：flow 永远展开；已发布历史与空态默认收起（点击薄条可临时展开）。
+  // 收展：flow / submitted 永远展开；已发布历史与空态默认收起（点击薄条可临时展开）。
   const dock = uiLogic.publishDock(view, status, pubManualOpen);
-  if (view.mode === 'flow') pubManualOpen = false; // 新审批到来自动展开并复位手动态
+  if (view.mode === 'flow' || view.mode === 'submitted') pubManualOpen = false; // 新流程状态到来自动展开并复位手动态
   fields.pubCard.classList.toggle('collapsed', dock.collapsed);
   fields.pubBar.classList.toggle('hidden', !dock.collapsed);
   fields.pubMain.classList.toggle('folded', dock.collapsed);
@@ -1879,6 +1879,8 @@ function renderPublish(status, nowMs) {
     const el = steps[i];
     if (!el) return;
     el.className = `j-step ${state}${state === 'cur' && view.curCalm ? ' calm' : ''}`;
+    const label = el.querySelector('.j-lab');
+    if (label && Array.isArray(view.steps) && view.steps[i]) label.textContent = view.steps[i];
   });
 }
 

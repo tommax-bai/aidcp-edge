@@ -560,8 +560,9 @@
     };
   }
 
-  // ── 发布卡（常驻，三个内容态，只读投影）──
+  // ── 发布卡（常驻，四个内容态，只读投影）──
   // flow：进行中（pending →(30min 琥珀化)→ [reminded 仅收到明确事件] → approved）
+  // submitted：提交动作已被接受、公开结果未确认（绝不冒充 published / last）
   // last：上次已确认发布（published / 本地或云端带回的最近发布记录），四节点全勾
   // empty：从未发布，幽灵旅程 + 空态文案
   // 终态另产 collapsed（折进活动流一条记录，渲染层按签名去重）。
@@ -614,12 +615,30 @@
       };
     }
 
+    if (state === 'submitted') {
+      const submittedAt = Date.parse(publish.at || '');
+      return {
+        ...base,
+        mode: 'submitted',
+        collapsed: {
+          type: 'submitted',
+          sentence: title ? `笔记「${title}」已提交，待链接确认` : '一条笔记已提交，待链接确认',
+        },
+        steps: ['写好内容', '发到飞书', '等你确认', '确认结果'],
+        head: '已提交，平台确认中',
+        corner: Number.isFinite(submittedAt) ? relTime(submittedAt, nowMs) : '',
+        cornerHot: false,
+        title: title || '一条新笔记',
+        stepStates: ['done', 'done', 'done', 'cur'],
+        curCalm: true,
+        foot: '**无需重复操作** · 发布请求已提交，正在确认公开结果',
+      };
+    }
+
     // 终态：折一条进活动流；卡片本体转入「上次发布 / 空态」。
     let collapsed = null;
     let last = lastPublish || null;
-    if (state === 'submitted') {
-      collapsed = { type: 'submitted', sentence: title ? `笔记「${title}」已提交，待链接确认` : '一条笔记已提交，待链接确认' };
-    } else if (state === 'published') {
+    if (state === 'published') {
       collapsed = { type: 'published', sentence: title ? `笔记「${title}」已发布` : '一条笔记已发布' };
       last = { title, at: publish.at }; // 刚发布的就是最近一次（主进程同时落盘持久化）
     } else if (state === 'rejected') {
@@ -659,10 +678,10 @@
     };
   }
 
-  // 发布卡收展（dock）：进行中审批永远展开；已发布历史与空态默认收起成薄条；
+  // 发布卡收展（dock）：进行中审批与已提交待确认永远展开；已发布历史与空态默认收起成薄条；
   // manualOpen 为用户点薄条的临时展开，空态不因引擎 / 会话运行状态改变默认收展。
   function publishDock(view, _status, manualOpen) {
-    if (view.mode === 'flow') return { collapsed: false, label: '', summary: '' };
+    if (view.mode === 'flow' || view.mode === 'submitted') return { collapsed: false, label: '', summary: '' };
     if (view.mode === 'last') {
       return {
         collapsed: !manualOpen,

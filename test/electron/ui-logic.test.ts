@@ -24,6 +24,7 @@ interface RuntimeGuidanceV {
 interface PublishV {
   mode: string;
   collapsed: { type: string; sentence: string } | null;
+  steps?: string[];
   showLink?: boolean;
   title?: string;
   head?: string;
@@ -644,12 +645,47 @@ test('发布卡：已发布 → 折进活动流 + 卡片转「上次发布」（
   assert.equal(pub.showLink, false, '卡片不再展示打开飞书入口');
 });
 
-test('发布卡：已提交但链接待确认 → 折进活动流，不伪造为上次发布', () => {
+test('发布卡：已提交但链接待确认 → 独立展开显示，不伪造为上次发布', () => {
   const now = Date.now();
   const submitted = uiLogic.publishView({ state: 'submitted', title: '秋日漫步', at: new Date(now).toISOString() }, null, now);
   assert.match(submitted.collapsed?.sentence ?? '', /已提交，待链接确认/);
-  assert.equal(submitted.mode, 'empty');
-  assert.ok(!(submitted.collapsed?.sentence ?? '').includes('已发布'));
+  assert.equal(submitted.mode, 'submitted');
+  assert.equal(submitted.head, '已提交，平台确认中');
+  assert.equal(submitted.title, '秋日漫步');
+  assert.deepEqual(submitted.stepStates, ['done', 'done', 'done', 'cur']);
+  assert.equal(submitted.steps?.[3], '确认结果');
+  assert.equal(submitted.curCalm, true);
+  assert.match(submitted.foot ?? '', /无需重复操作/);
+  assert.doesNotMatch(`${submitted.head} ${submitted.foot}`, /已发布/);
+  assert.equal(uiLogic.publishDock(submitted, { edge: 'running', session: 'running' }, false).collapsed, false);
+});
+
+test('发布卡：submitted 优先显示本次稿件，不被旧 lastPublish 覆盖', () => {
+  const now = Date.now();
+  const submitted = uiLogic.publishView(
+    { state: 'submitted', title: '新稿', code: '#160', at: new Date(now - 90_000).toISOString() },
+    { title: '旧稿', at: new Date(now - 7 * 86_400_000).toISOString() },
+    now,
+  );
+  assert.equal(submitted.mode, 'submitted');
+  assert.equal(submitted.title, '新稿');
+  assert.equal(submitted.head, '已提交，平台确认中');
+  assert.match(submitted.corner ?? '', /分钟前/);
+  assert.notEqual(submitted.title, '旧稿');
+});
+
+test('发布卡：submitted 后收到 published → 转为上次发布并完成全部节点', () => {
+  const now = Date.now();
+  const published = uiLogic.publishView(
+    { state: 'published', title: '新稿', code: '#160', at: new Date(now).toISOString() },
+    { title: '旧稿', at: new Date(now - 7 * 86_400_000).toISOString() },
+    now,
+  );
+  assert.equal(published.mode, 'last');
+  assert.equal(published.title, '新稿');
+  assert.equal(published.head, '上次发布');
+  assert.deepEqual(published.stepStates, ['done', 'done', 'done', 'done']);
+  assert.match(published.foot ?? '', /已发布/);
 });
 
 test('发布卡：拒绝 → 折进活动流（不渲染成失败）+ 回落上次发布/空态', () => {
