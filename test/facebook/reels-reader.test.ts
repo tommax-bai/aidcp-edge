@@ -2,7 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
-import { buildNextTargetJs, buildReelProbeJs, FacebookReelsReader } from '../../src/facebook/reels-reader.js';
+import {
+  buildNextTargetJs,
+  buildReelFollowTargetJs,
+  buildReelProbeJs,
+  FacebookReelsReader,
+} from '../../src/facebook/reels-reader.js';
 
 const REEL_1 = {
   ok: true,
@@ -14,11 +19,25 @@ const REEL_1 = {
   videoRect: { left: 557, top: 72, right: 959, bottom: 786 },
 };
 const REEL_2 = { ...REEL_1, noteId: 'https://www.facebook.com/reel/222', summary: 'Second reel', videoKey: 'video-222' };
+const REEL_1_FOLLOW = {
+  ok: true,
+  noteId: REEL_1.noteId,
+  found: true,
+  ambiguous: false,
+  author: 'Salon de Comolis',
+  authorMatches: 1,
+  state: 'follow' as const,
+  cx: 720,
+  cy: 690,
+  label: '关注Salon de Comolis',
+  text: '关注',
+};
 
 function scriptedCdp(options: {
   probes?: unknown[];
   likeTarget?: unknown;
   likeVerify?: unknown[];
+  followTargets?: unknown[];
   nextTarget?: unknown;
 }): {
   cdp: BrowseCdp;
@@ -29,6 +48,7 @@ function scriptedCdp(options: {
 } {
   let probeIndex = 0;
   let verifyIndex = 0;
+  let followIndex = 0;
   const clicks: Array<Record<string, unknown>> = [];
   const keys: Array<Record<string, unknown>> = [];
   const navigations: string[] = [];
@@ -55,6 +75,12 @@ function scriptedCdp(options: {
         const values = options.likeVerify ?? [];
         const value = values[Math.min(verifyIndex, Math.max(0, values.length - 1))];
         verifyIndex += 1;
+        return { result: { value: JSON.stringify(value) } } as never;
+      }
+      if (expression.includes('__AIDCP_REEL_FOLLOW_TARGET__')) {
+        const values = options.followTargets ?? [];
+        const value = values[Math.min(followIndex, Math.max(0, values.length - 1))];
+        followIndex += 1;
         return { result: { value: JSON.stringify(value) } } as never;
       }
       if (expression.includes('__AIDCP_REEL_NEXT_TARGET__')) return { result: { value: JSON.stringify(options.nextTarget) } } as never;
@@ -109,6 +135,68 @@ test('Reels 点赞：结构候选歧义时不点击', async () => {
   const result = await new FacebookReelsReader({ cdp: scripted.cdp, sleep: async () => {} }).like(REEL_1.noteId, false);
   assert.equal(result.reason, 'ambiguous_target');
   assert.equal(scripted.clicks.length, 0);
+});
+
+test('Reels 关注：命令 noteId 与活动 Reel 不同则零点击 fail-closed', async () => {
+  const scripted = scriptedCdp({ followTargets: [REEL_1_FOLLOW] });
+  const result = await new FacebookReelsReader({ cdp: scripted.cdp, sleep: async () => {} }).follow(REEL_2.noteId, false);
+  assert.deepEqual(result, { ok: false, reason: 'no_target', executed: false });
+  assert.equal(scripted.clicks.length, 0);
+});
+
+test('Reels 关注：一次可信点击 + 同 Reel 同作者已关注态才成功', async () => {
+  const scripted = scriptedCdp({
+    followTargets: [REEL_1_FOLLOW, REEL_1_FOLLOW, { ...REEL_1_FOLLOW, state: 'following', label: '已关注Salon de Comolis', text: '已关注' }],
+  });
+  const result = await new FacebookReelsReader({ cdp: scripted.cdp, sleep: async () => {} }).follow(REEL_1.noteId, false);
+  assert.deepEqual(result, { ok: true, executed: true });
+  assert.deepEqual(scripted.clicks.map((event) => event.type), ['mouseMoved', 'mousePressed', 'mouseReleased']);
+});
+
+test('Reels 关注：已关注与 shadow 都不点击并回传真实终态', async () => {
+  const already = scriptedCdp({ followTargets: [{ ...REEL_1_FOLLOW, state: 'following' }] });
+  assert.deepEqual(
+    await new FacebookReelsReader({ cdp: already.cdp, sleep: async () => {} }).follow(REEL_1.noteId, false),
+    { ok: true, reason: 'already_followed', executed: false },
+  );
+  assert.equal(already.clicks.length, 0);
+
+  const shadow = scriptedCdp({ followTargets: [REEL_1_FOLLOW] });
+  assert.deepEqual(
+    await new FacebookReelsReader({ cdp: shadow.cdp, sleep: async () => {} }).follow(REEL_1.noteId, true),
+    { ok: false, reason: 'shadow', executed: false },
+  );
+  assert.equal(shadow.clicks.length, 0);
+});
+
+test('Reels 关注：缺失或歧义候选始终零点击', async () => {
+  for (const target of [
+    { ok: true, noteId: REEL_1.noteId, found: false },
+    { ok: true, noteId: REEL_1.noteId, found: false, ambiguous: true },
+  ]) {
+    const scripted = scriptedCdp({ followTargets: [target] });
+    const result = await new FacebookReelsReader({ cdp: scripted.cdp, sleep: async () => {} }).follow(REEL_1.noteId, false);
+    assert.equal(result.reason, target.ambiguous ? 'ambiguous_target' : 'no_target');
+    assert.equal(scripted.clicks.length, 0);
+  }
+});
+
+test('Reels 关注：点击后状态不变不报成功', async () => {
+  const scripted = scriptedCdp({ followTargets: [REEL_1_FOLLOW, REEL_1_FOLLOW, REEL_1_FOLLOW] });
+  const reader = new FacebookReelsReader(
+    { cdp: scripted.cdp, sleep: async () => {} },
+    { verifyRounds: 1, verifyMs: 1 },
+  );
+  assert.deepEqual(await reader.follow(REEL_1.noteId, false), { ok: false, reason: 'state_unchanged', executed: true });
+  assert.equal(scripted.clicks.length, 3);
+});
+
+test('Reels 关注：点击后 Reel 或作者漂移回 verify_indeterminate', async () => {
+  const scripted = scriptedCdp({
+    followTargets: [REEL_1_FOLLOW, REEL_1_FOLLOW, { ...REEL_1_FOLLOW, noteId: REEL_2.noteId, state: 'following' }],
+  });
+  const result = await new FacebookReelsReader({ cdp: scripted.cdp, sleep: async () => {} }).follow(REEL_1.noteId, false);
+  assert.deepEqual(result, { ok: false, reason: 'verify_indeterminate', executed: true });
 });
 
 test('Reels 下一条：ArrowDown 成功后停止，不再滚轮或点按钮', async () => {
@@ -205,6 +293,43 @@ function setRect(element: Element, rect: { left: number; top: number; right: num
     value: () => ({ ...rect, width, height, x: rect.left, y: rect.top, toJSON: () => ({}) }),
   });
 }
+
+test('Reels 关注定位[jsdom]：无空格 aria-label 仍由可见作者和活动视频唯一绑定', () => {
+  const dom = new JSDOM(
+    '<video id="video"></video><a id="author">Salon de Comolis</a><button id="follow" aria-label="关注Salon de Comolis">关注</button>',
+    { url: REEL_1.noteId, runScripts: 'outside-only' },
+  );
+  Object.defineProperty(dom.window, 'innerWidth', { value: 1440 });
+  Object.defineProperty(dom.window, 'innerHeight', { value: 802 });
+  setRect(dom.window.document.querySelector('#video')!, { left: 557, top: 72, right: 959, bottom: 786 });
+  setRect(dom.window.document.querySelector('#author')!, { left: 580, top: 640, right: 700, bottom: 670 });
+  setRect(dom.window.document.querySelector('#follow')!, { left: 715, top: 638, right: 775, bottom: 672 });
+
+  const result = JSON.parse(String(dom.window.eval(buildReelFollowTargetJs()))) as Record<string, unknown>;
+  assert.equal(result.noteId, REEL_1.noteId);
+  assert.equal(result.found, true);
+  assert.equal(result.ambiguous, false);
+  assert.equal(result.author, 'Salon de Comolis');
+  assert.equal(result.state, 'follow');
+  assert.equal(result.label, '关注Salon de Comolis');
+});
+
+test('Reels 关注定位[jsdom]：同作者两个可信控件保持歧义', () => {
+  const dom = new JSDOM(
+    '<video id="video"></video><a id="author">Salon de Comolis</a><button id="follow1" aria-label="关注Salon de Comolis">关注</button><button id="follow2" aria-label="Follow Salon de Comolis">Follow</button>',
+    { url: REEL_1.noteId, runScripts: 'outside-only' },
+  );
+  Object.defineProperty(dom.window, 'innerWidth', { value: 1440 });
+  Object.defineProperty(dom.window, 'innerHeight', { value: 802 });
+  setRect(dom.window.document.querySelector('#video')!, { left: 557, top: 72, right: 959, bottom: 786 });
+  setRect(dom.window.document.querySelector('#author')!, { left: 580, top: 640, right: 700, bottom: 670 });
+  setRect(dom.window.document.querySelector('#follow1')!, { left: 715, top: 630, right: 775, bottom: 662 });
+  setRect(dom.window.document.querySelector('#follow2')!, { left: 715, top: 666, right: 775, bottom: 698 });
+
+  const result = JSON.parse(String(dom.window.eval(buildReelFollowTargetJs()))) as Record<string, unknown>;
+  assert.equal(result.found, false);
+  assert.equal(result.ambiguous, true);
+});
 
 test('Reels 活动视频身份[jsdom]：同一 video 元素仅发生位移动画时 key 保持稳定', () => {
   const dom = new JSDOM('<video></video>', { url: REEL_1.noteId, runScripts: 'outside-only' });

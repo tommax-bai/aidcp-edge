@@ -67,6 +67,36 @@ interface ActionTarget extends ReelProbe {
   label?: string;
 }
 
+export type FacebookReelFollowReason =
+  | 'no_target'
+  | 'ambiguous_target'
+  | 'already_followed'
+  | 'shadow'
+  | 'state_unchanged'
+  | 'verify_indeterminate'
+  | 'nav_error';
+
+export interface FacebookReelFollowResult {
+  ok: boolean;
+  reason?: FacebookReelFollowReason;
+  /** Whether a trusted pointer click was actually dispatched. */
+  executed: boolean;
+}
+
+export interface FacebookReelFollowTarget {
+  ok: boolean;
+  noteId?: string;
+  found?: boolean;
+  ambiguous?: boolean;
+  author?: string;
+  authorMatches?: number;
+  state?: 'follow' | 'following';
+  cx?: number;
+  cy?: number;
+  label?: string;
+  text?: string;
+}
+
 function cleanSummary(value: string | undefined): string {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 1_500);
 }
@@ -133,6 +163,38 @@ const LIKE_VERIFY_JS = String.raw`(function(){/*__AIDCP_REEL_LIKE_VERIFY__*/
   var unlike=/(unlike|gỡ thích|go thich|取消赞|收回赞|bỏ thích|bo thich)/i;var candidates=Array.from(document.querySelectorAll('[role="button"],button')).filter(function(b){var q=b.getBoundingClientRect(),lab=(b.getAttribute('aria-label')||txt(b)).trim();if(q.width<32||q.width>84||q.height<32||q.height>90||q.left<r.right-20||q.left>r.right+125||q.top<r.top-10||q.bottom>r.bottom+20)return false;return unlike.test(lab)||b.getAttribute('aria-pressed')==='true'||(!!b.querySelector('img')&&/(like|thich|thích|赞|喜欢)/i.test(lab));});
   return JSON.stringify({noteId:canon(),selected:candidates.length===1,label:candidates.length===1?(candidates[0].getAttribute('aria-label')||txt(candidates[0])):'',ambiguous:candidates.length>1});
 })()`;
+
+/**
+ * Resolve the active Reel's inline author Follow control without relying on DOM order.
+ * The accessible label is authoritative for today's Facebook markup (for example
+ * `关注Salon de Comolis` / `已关注Salon de Comolis`); the matching visible author text
+ * and active-video geometry provide the independent association witness.
+ */
+export function buildReelFollowTargetJs(): string {
+  return String.raw`(function(){/*__AIDCP_REEL_FOLLOW_TARGET__*/
+  function text(el){return String((el&&el.innerText)||(el&&el.textContent)||'').replace(/\s+/g,' ').trim();}
+  function label(el){return String((el&&el.getAttribute&&el.getAttribute('aria-label'))||'').replace(/\s+/g,' ').trim();}
+  function visible(el){if(!el||!el.getBoundingClientRect)return false;var r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>1&&r.height>1&&r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden';}
+  function canonical(){try{var u=new URL(location.href),m=u.pathname.match(/^\/reel\/([^/?#]+)/i);return /(^|\.)facebook\.com$/i.test(u.hostname)&&m?'https://www.facebook.com/reel/'+m[1]:'';}catch(e){return '';}}
+  function area(r){var l=Math.max(0,r.left),t=Math.max(0,r.top),rr=Math.min(innerWidth,r.right),b=Math.min(innerHeight,r.bottom);return Math.max(0,rr-l)*Math.max(0,b-t);}
+  function distance(a,b){var dx=Math.max(0,a.left-b.right,b.left-a.right),dy=Math.max(0,a.top-b.bottom,b.top-a.bottom);return Math.sqrt(dx*dx+dy*dy);}
+  function leafExact(value){return Array.from(document.querySelectorAll('a,span,div')).filter(function(el){if(!visible(el)||text(el)!==value)return false;return !Array.from(el.children||[]).some(function(c){return text(c)===value;});});}
+  function parseControl(el){var t=text(el),l=label(el),source=l||t,m=source.match(/^(following|follow|已关注|关注|đang theo dõi|theo dõi|dang theo doi|theo doi)\s*(.*)$/i);if(!m)return null;var token=m[1].toLowerCase(),author=String(m[2]||'').trim();var state=/^(following|已关注|đang theo dõi|dang theo doi)$/i.test(token)?'following':'follow';return {el:el,t:t,l:l,state:state,author:author};}
+  var id=canonical();if(!id)return JSON.stringify({ok:false,found:false});
+  var videos=Array.from(document.querySelectorAll('video')).map(function(v){var r=v.getBoundingClientRect();return {v:v,r:r,a:area(r),d:Math.abs((r.top+r.bottom)/2-innerHeight/2)};}).filter(function(x){return x.a>0;}).sort(function(a,b){return b.a-a.a||a.d-b.d;});
+  if(!videos.length)return JSON.stringify({ok:false,noteId:id,found:false});
+  if(videos.length>1&&Math.abs(videos[0].a-videos[1].a)<1&&Math.abs(videos[0].d-videos[1].d)<1)return JSON.stringify({ok:true,noteId:id,found:false,ambiguous:true});
+  var vr=videos[0].r;
+  var controls=Array.from(document.querySelectorAll('button,[role="button"]')).filter(visible).map(parseControl).filter(Boolean).filter(function(x){var q=x.el.getBoundingClientRect();return q.top>=vr.top-30&&q.bottom<=vr.bottom+30&&q.left>=vr.left-80&&q.right<=vr.right+180;});
+  var qualified=[];
+  controls.forEach(function(x){var author=x.author;if(!author)return;var authors=leafExact(author),q=x.el.getBoundingClientRect(),near=authors.filter(function(a){return distance(a.getBoundingClientRect(),q)<=260;});if(near.length!==1)return;qualified.push({control:x,author:author,authorMatches:near.length});});
+  if(qualified.length!==1)return JSON.stringify({ok:true,noteId:id,found:false,ambiguous:qualified.length>1});
+  var selected=qualified[0],control=selected.control,q=control.el.getBoundingClientRect();
+  return JSON.stringify({ok:true,noteId:id,found:true,ambiguous:false,author:selected.author,authorMatches:selected.authorMatches,state:control.state,cx:q.left+q.width/2,cy:q.top+q.height/2,label:control.l,text:control.t});
+  })()`;
+}
+
+const REEL_FOLLOW_TARGET_JS = buildReelFollowTargetJs();
 
 export function buildNextTargetJs(): string {
   return String.raw`(function(){/*__AIDCP_REEL_NEXT_TARGET__*/
@@ -270,6 +332,61 @@ export class FacebookReelsReader {
       if (round < this.opts.verifyRounds - 1) await this.sleep(this.opts.verifyMs);
     }
     return { ok: false, reason: 'state_unchanged', executed: true };
+  }
+
+  async follow(noteId: string, shadow: boolean): Promise<FacebookReelFollowResult> {
+    let target: FacebookReelFollowTarget;
+    try {
+      target = await evalJson<FacebookReelFollowTarget>(this.cdp, REEL_FOLLOW_TARGET_JS);
+    } catch {
+      return { ok: false, reason: 'nav_error', executed: false };
+    }
+    const invalid = this.followTargetFailure(target, noteId);
+    if (invalid) return invalid;
+    if (target.state === 'following') return { ok: true, reason: 'already_followed', executed: false };
+    if (shadow) return { ok: false, reason: 'shadow', executed: false };
+
+    // Fresh re-probe at the commit boundary: late Reel movement or markup ambiguity wins over the write.
+    let fresh: FacebookReelFollowTarget;
+    try {
+      fresh = await evalJson<FacebookReelFollowTarget>(this.cdp, REEL_FOLLOW_TARGET_JS);
+    } catch {
+      return { ok: false, reason: 'nav_error', executed: false };
+    }
+    const freshInvalid = this.followTargetFailure(fresh, noteId);
+    if (freshInvalid) return freshInvalid;
+    if (fresh.author !== target.author) return { ok: false, reason: 'no_target', executed: false };
+    if (fresh.state === 'following') return { ok: true, reason: 'already_followed', executed: false };
+    if (!Number.isFinite(fresh.cx) || !Number.isFinite(fresh.cy)) return { ok: false, reason: 'no_target', executed: false };
+
+    await trustedClick(this.cdp, Number(fresh.cx), Number(fresh.cy));
+    for (let round = 0; round < this.opts.verifyRounds; round++) {
+      try {
+        const verify = await evalJson<FacebookReelFollowTarget>(this.cdp, REEL_FOLLOW_TARGET_JS);
+        if (verify.noteId !== noteId || verify.author !== target.author || verify.ambiguous) {
+          return { ok: false, reason: 'verify_indeterminate', executed: true };
+        }
+        if (verify.found && verify.authorMatches === 1 && verify.state === 'following') {
+          return { ok: true, executed: true };
+        }
+      } catch {
+        // bounded retry
+      }
+      if (round < this.opts.verifyRounds - 1) await this.sleep(this.opts.verifyMs);
+    }
+    return { ok: false, reason: 'state_unchanged', executed: true };
+  }
+
+  private followTargetFailure(
+    target: FacebookReelFollowTarget,
+    noteId: string,
+  ): FacebookReelFollowResult | null {
+    if (!target.ok || target.noteId !== noteId) return { ok: false, reason: 'no_target', executed: false };
+    if (target.ambiguous) return { ok: false, reason: 'ambiguous_target', executed: false };
+    if (!target.found || !target.author || target.authorMatches !== 1) {
+      return { ok: false, reason: 'no_target', executed: false };
+    }
+    return null;
   }
 
   async next(): Promise<FacebookReelCard | null> {

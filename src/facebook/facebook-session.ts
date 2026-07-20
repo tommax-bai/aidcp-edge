@@ -16,7 +16,8 @@
  *    绝不静默丢弃 / 假成功（否则云端 sendAndAwait + idle 看门狗挂死）。
  *  - kill switch `AIDCP_FB_BROWSE_AUTO`（三态 off/shadow/on）：off=不自动浏览/点赞（评论/加群仍服务）；
  *    shadow=浏览+上报但点赞只记不执行；on=真点赞。默认 off。
- *  - FB 无收藏/关注/看图（v1）：这些命令诚实回 capability_unsupported，绝不臆造。
+ *  - FB 无收藏/看图；关注只在 Reels 当前作者区具备 note-bound 执行器，其它 FB surface 仍诚实回
+ *    capability_unsupported，绝不臆造。
  */
 
 import { type BrowseCdp } from '../browse/cdp-util.js';
@@ -31,6 +32,7 @@ import type {
   NoteDetailPayload,
   NoteOpenPayload,
   InteractionLikePayload,
+  InteractionFollowPayload,
   PageCardsPayload,
   PageScrollPayload,
   SearchExecutePayload,
@@ -526,6 +528,18 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         });
         return;
       }
+      case 'interaction.follow': {
+        if (this.listMode !== 'reels') {
+          this.reportUnsupportedCommand(env.type);
+          return;
+        }
+        const payload = env.payload as InteractionFollowPayload;
+        await this.runBrowseCommand('follow', async () => {
+          await this.thinkBefore(payload?.thinkMs);
+          return this.followCurrentReel(payload);
+        });
+        return;
+      }
       case 'navigation.back':
         await this.runBrowseCommand('back', () => this.backToFeed());
         return;
@@ -556,7 +570,6 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       // FB 还未具备这些原子实现，但它们是云端可下发的正式命令。必须保留规范
       // action 名称，让 DeepReader / CommentReviewer / 通知恢复链能消费失败并退出详情页。
       case 'interaction.collect':
-      case 'interaction.follow':
       case 'interaction.like_comment':
       case 'note.browse_images':
       case 'note.scroll_comments':
@@ -892,6 +905,20 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         ...(r.reason ? { reason: r.reason } : {}),
         ...(attachWitness && obs?.noteId ? { noteId: obs.noteId } : {}),
         ...(attachWitness && obs ? { observation: obs } : {}),
+      },
+    };
+  }
+
+  /** Reels only: bind follow to the commanded canonical Reel and forward the reader's terminal truth. */
+  private async followCurrentReel(payload: InteractionFollowPayload): Promise<TerminalReport> {
+    const noteId = String(payload?.noteId ?? '').trim();
+    const result = await this.reelsReader.follow(noteId, this.mode === 'shadow');
+    return {
+      type: 'action',
+      payload: {
+        action: 'follow',
+        ok: result.ok,
+        ...(result.reason ? { reason: result.reason } : {}),
       },
     };
   }

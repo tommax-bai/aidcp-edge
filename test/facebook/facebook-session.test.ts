@@ -19,7 +19,11 @@ import type {
 } from '../../src/facebook/feed-reader.js';
 import type { FacebookPostReader, FacebookPostDetail } from '../../src/facebook/post-reader.js';
 import type { FacebookLikeExecutor, FacebookLikeResult } from '../../src/facebook/like-executor.js';
-import type { FacebookReelsReader, FacebookReelCard } from '../../src/facebook/reels-reader.js';
+import type {
+  FacebookReelsReader,
+  FacebookReelCard,
+  FacebookReelFollowResult,
+} from '../../src/facebook/reels-reader.js';
 import { selectPlatformDriver } from '../../src/platform/index.js';
 import type { Envelope, ActionCompletedPayload, NoteDetailPayload, PageCardsPayload, ProfileDetailPayload } from '../../src/comm/protocol.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
@@ -41,6 +45,7 @@ interface Harness {
   scanCalls: number;
   scrollCalls: number;
   likeShadowFlags: Array<boolean | undefined>;
+  reelFollowCalls: Array<{ noteId: string; shadow: boolean }>;
 }
 
 function makeSession(opts: {
@@ -62,6 +67,7 @@ function makeSession(opts: {
   commentHandler?: FacebookCommentHandler;
   homeState?: { state: 'cards_ready' | 'empty_feed_confirmed' | 'feed_still_loading' | 'feed_unknown' | 'login_required' | 'blocked_by_captcha'; generation?: string };
   reelCards?: FacebookReelCard[];
+  reelFollow?: (noteId: string, shadow: boolean) => FacebookReelFollowResult;
 } = {}): Harness {
   const cards: PageCardsPayload[] = [];
   const details: NoteDetailPayload[] = [];
@@ -70,6 +76,7 @@ function makeSession(opts: {
   const logs: string[] = [];
   const delegated: Envelope[] = [];
   const likeShadowFlags: Array<boolean | undefined> = [];
+  const reelFollowCalls: Array<{ noteId: string; shadow: boolean }> = [];
   const state = { ensureCalls: 0, ensureUrls: [] as string[], scanCalls: 0, scrollCalls: 0 };
 
   const card: FacebookFeedCard = opts.card ?? {
@@ -172,6 +179,14 @@ function makeSession(opts: {
         ? { ok: false, reason: 'shadow', executed: false, observation: { noteId, surface: 'feed', textPreviewHead: activeReel.summary } }
         : { ok: true, executed: true, observation: { noteId, surface: 'feed', textPreviewHead: activeReel.summary } };
     },
+    follow: async (noteId: string, shadow: boolean): Promise<FacebookReelFollowResult> => {
+      reelFollowCalls.push({ noteId, shadow });
+      if (opts.reelFollow) return opts.reelFollow(noteId, shadow);
+      if (!activeReel || activeReel.noteId !== noteId) return { ok: false, reason: 'no_target', executed: false };
+      return shadow
+        ? { ok: false, reason: 'shadow', executed: false }
+        : { ok: true, executed: true };
+    },
   } as unknown as FacebookReelsReader;
 
   const deps: FacebookBrowseSessionDeps = {
@@ -199,6 +214,7 @@ function makeSession(opts: {
     logs,
     delegated,
     likeShadowFlags,
+    reelFollowCalls,
     get ensureCalls() {
       return state.ensureCalls;
     },
@@ -506,6 +522,7 @@ test('FB v1 不支持的命令 → capability_unsupported（绝不静默丢弃�
   await h.session.onCloudCommand(makeEnv('profile.open', { authorId: 'a' }));
   assert.equal(h.actions.length, 3);
   assert.ok(h.actions.every((a) => a.reason === 'capability_unsupported'));
+  assert.equal(h.reelFollowCalls.length, 0, '普通 Feed 不能误路由到 Reel 关注执行器');
 });
 
 test('FB 云端命令回执使用规范动作名，深读失败不会退化为未知动作', async () => {
@@ -749,8 +766,59 @@ test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，�
   assert.equal(h.actions.at(-1)?.ok, true);
   assert.equal(h.actions.at(-1)?.noteId, first.noteId);
 
+  await h.session.onCloudCommand(makeEnv('interaction.follow', { authorId: 'Bao', noteId: first.noteId }));
+  assert.equal(h.actions.at(-1)?.action, 'follow');
+  assert.equal(h.actions.at(-1)?.ok, true);
+  assert.deepEqual(h.reelFollowCalls, [{ noteId: first.noteId, shadow: false }]);
+
   await h.session.onCloudCommand(makeEnv('page.scroll', {}));
   assert.equal(h.cards.at(-1)?.cards[0].noteId, second.noteId);
+});
+
+test('Reels 关注：shadow 标志与 reader 的真实终态原样回执', async () => {
+  const reel: FacebookReelCard = {
+    noteId: 'https://www.facebook.com/reel/111',
+    summary: 'reel summary',
+    author: 'Salon de Comolis',
+    videoKey: 'video-111',
+  };
+  const h = makeSession({
+    mode: 'shadow',
+    settleBatches: [{ cards: [], degraded: false, reason: 'no_feed' }],
+    homeState: { state: 'empty_feed_confirmed', generation: 'g1' },
+    reelCards: [reel],
+    reelFollow: () => ({ ok: false, reason: 'shadow', executed: false }),
+  });
+  await h.session.start();
+  await h.session.onCloudCommand(makeEnv('page.scroll', { reason: 'empty_feed_reels_fallback' }));
+  await h.session.onCloudCommand(makeEnv('interaction.follow', { authorId: reel.author, noteId: reel.noteId }));
+
+  assert.deepEqual(h.reelFollowCalls, [{ noteId: reel.noteId, shadow: true }]);
+  assert.deepEqual(h.actions.at(-1), { action: 'follow', ok: false, reason: 'shadow' });
+});
+
+test('Reels 关注：already_followed 是已满足的幂等终态，缺 noteId 则 fail-closed', async () => {
+  const reel: FacebookReelCard = {
+    noteId: 'https://www.facebook.com/reel/111',
+    summary: 'reel summary',
+    videoKey: 'video-111',
+  };
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [{ cards: [], degraded: false, reason: 'no_feed' }],
+    homeState: { state: 'empty_feed_confirmed', generation: 'g1' },
+    reelCards: [reel],
+    reelFollow: (noteId) => noteId
+      ? { ok: true, reason: 'already_followed', executed: false }
+      : { ok: false, reason: 'no_target', executed: false },
+  });
+  await h.session.start();
+  await h.session.onCloudCommand(makeEnv('page.scroll', { reason: 'empty_feed_reels_fallback' }));
+
+  await h.session.onCloudCommand(makeEnv('interaction.follow', { authorId: 'Salon de Comolis', noteId: reel.noteId }));
+  assert.deepEqual(h.actions.at(-1), { action: 'follow', ok: true, reason: 'already_followed' });
+  await h.session.onCloudCommand(makeEnv('interaction.follow', { authorId: 'Salon de Comolis' }));
+  assert.deepEqual(h.actions.at(-1), { action: 'follow', ok: false, reason: 'no_target' });
 });
 
 test('Reels 全部导航方式均未证明下一条时，session 诚实回 scroll/no_target', async () => {
