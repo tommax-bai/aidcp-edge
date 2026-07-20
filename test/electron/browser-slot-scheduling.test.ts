@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const fleet = require('../../src/electron/fleet.cjs');
+const uiLogic = require('../../src/electron/renderer/ui-logic.js');
 
 // ---------------------------------------------------------------------------
 // change browser-slot-scheduling：槽位池 + 串行启动队列
@@ -36,6 +37,12 @@ test('启动排队准入：未满可加入、满时拒绝、同一环境重复�
   assert.deepEqual(fleet.startQueueAdmission({ queuedCount: 4, limit: 4, alreadyQueued: true }), {
     ok: true, queued: 4, limit: 4, added: false,
   });
+});
+
+test('客户端将等待浏览器执行位统一显示为“排队中”', () => {
+  const status = { automationState: 'waiting_resource' };
+  assert.equal(uiLogic.synthesizeHealth(status).label, '排队中');
+  assert.equal(uiLogic.fleetLevel(status, Date.now()).label, '排队中');
 });
 
 test('单环境内存估值默认取实测口径 700MB（旧的 1GB 是没量过的设计缺省）', () => {
