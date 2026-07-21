@@ -9,6 +9,7 @@ test('cta-labels: 中性点赞按钮 aria-label 多语言命中', () => {
   assert.equal(isNeutralLikeLabel('Like'), true);
   assert.equal(isNeutralLikeLabel('React'), true);
   assert.equal(isNeutralLikeLabel('Me gusta'), true);
+  assert.equal(isNeutralLikeLabel('Thích'), true);
   // 反应计数汇总按钮 aria-label「赞」（带数字文案）不是中性点赞按钮——不命中。
   assert.equal(isNeutralLikeLabel('赞：3,706位用户'), false);
   // 反应项/已反应展示不是中性 toggle，不能抢在真 toggle 前面被选中。
@@ -21,6 +22,7 @@ test('cta-labels: 帖级「评论」按钮标签命中（排除评论级 react �
   assert.equal(isCommentLabel('发表评论：66'), true);
   assert.equal(isCommentLabel('评论Oi Fong的帖子'), true);
   assert.equal(isCommentLabel('Comment'), true);
+  assert.equal(isCommentLabel('Viết bình luận'), true);
   assert.equal(isCommentLabel('回复'), false, '回复/Reply 不算帖级评论按钮');
   assert.equal(isCommentLabel('Reply'), false);
 });
@@ -31,6 +33,9 @@ test('cta-labels: 已反应态判定（正向信号才算，绝不「变了就�
   // 撤销串（最可靠跨语言已赞信号）。
   assert.equal(isReactedState('取消赞', ''), true);
   assert.equal(isReactedState('Remove Like', ''), true);
+  assert.equal(isReactedState('Gỡ Thích', ''), true);
+  assert.equal(isReactedState('Bỏ thích', ''), true);
+  assert.equal(isReactedState('Thích', 'Thích'), true);
   // 仍是中性、文案空 → 未反应。
   assert.equal(isReactedState('留下心情', ''), false);
   assert.equal(isReactedState('Like', ''), false);
@@ -41,6 +46,7 @@ test('cta-labels: 反应【计数汇总】按钮（aria-label=赞 + 数字文案
   assert.equal(isReactedState('赞', '3,829'), false);
   assert.equal(isReactedState('赞', '1.2万'), false);
   assert.equal(isReactedState('Like', '3,706'), false);
+  assert.equal(isReactedState('Thích', '27K'), false);
   // 撤销串即使带数字仍算已赞（撤销优先）。
   assert.equal(isReactedState('取消赞', '3,829'), true);
 });

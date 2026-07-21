@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canonicalPostId, POST_IDENTITY_JS } from '../../src/facebook/post-identity.js';
+import { JSDOM } from 'jsdom';
+import { canonicalPostId, FB_TARGET_HELPERS_JS, POST_IDENTITY_JS } from '../../src/facebook/post-identity.js';
 
 /**
  * 规范帖子身份 `fb:<postId>`（change facebook-note-scoped-targeting）。
@@ -131,4 +132,25 @@ test('POST_IDENTITY_JS: 页内实现与 TS 实现逐条对拍（结构上不可�
   for (const href of fixtures) {
     assert.equal(inPage(href), canonicalPostId(href), `页内/Node 实现必须逐条一致：${href}`);
   }
+});
+
+test('FB_TARGET_HELPERS_JS: 相邻轻量视频按同一 data-video-id 精确解析，冲突卡不回落 DOM 序', () => {
+  const card = (id: string, explicit = '') =>
+    `<section id="card-${id}"><h4><a href="/author-${id}">Author ${id}</a></h4>${explicit}` +
+    `<div data-ad-rendering-role="story_message">video ${id}</div><div data-video-id="${id}"><video></video></div>` +
+    '<div role="button" aria-label="Thích"></div><div role="button" aria-label="Viết bình luận"></div></section>';
+  const dom = new JSDOM(
+    `<!doctype html><body><div role="feed">${card('101')}${card('202')}${card('303', '<a href="/watch/?v=999">time</a>')}</div></body>`,
+    { runScripts: 'outside-only', url: 'https://www.facebook.com/' },
+  );
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value() { return { left: 10, top: 100, right: 690, bottom: 500, width: 680, height: 400 }; },
+  });
+  const result = JSON.parse(String(dom.window.eval(`(function(){${FB_TARGET_HELPERS_JS}
+    var one=fbTgtResolve('fb:101'), two=fbTgtResolve('fb:202'), mismatch=fbTgtResolve('fb:303');
+    return JSON.stringify({one:one.status==='ok'?one.el.id:one.status,two:two.status==='ok'?two.el.id:two.status,mismatch:mismatch.status});
+  })()`)));
+
+  assert.deepEqual(result, { one: 'card-101', two: 'card-202', mismatch: 'no_target' });
 });

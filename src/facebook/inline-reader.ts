@@ -334,13 +334,8 @@ const INLINE_HELPERS = `${FB_TARGET_HELPERS_JS}
   }
   /** 卡内 own-level permalink 候选（页面派生 noteId；与 feed 扫卡同源谓词）。 */
   function fbInlPermalinks(article){
-    var links=article.querySelectorAll('a[href]'); var out=[];
-    for(var i=0;i<links.length && out.length<8;i++){ var el=links[i];
-      if(fbTgtClosestArticle(el)!==article) continue;
-      var h=''; try{ h=new URL(el.getAttribute('href')||el.href||'', location.href).href; }catch(e){ h=''; }
-      if(h && fbCanonicalPostId(h)) out.push(h);
-    }
-    return out;
+    var permalink=fbFeedCardPermalink(article);
+    return permalink?[permalink]:[];
   }
   function fbInlTagged(run){ return document.querySelector('[data-aidcp-inline="'+run+'"]'); }
 `;

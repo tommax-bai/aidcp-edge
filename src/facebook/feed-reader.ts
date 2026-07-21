@@ -3,8 +3,8 @@
  *
  * 选择器全部由真机探针钉死（docs/facebook-browse-and-like-loop-probe-findings.md）：
  *  - feed 容器 `div[role="feed"]`，卡片 `[role="article"]`；window/document 滚动（非内层容器）。
- *  - FB **虚拟化** feed：视口外 article 是空壳（无作者/permalink/按钮）——**抽取必须跳过空壳**
- *    （无作者链接即跳过，绝不臆造），水合判据 = 存在 `h2/h3/h4 a` 作者链接。
+ *  - FB **虚拟化** feed：视口外 article 是空壳（无作者/正文/permalink/按钮）——**抽取必须跳过空壳**。
+ *    水合判据 = 存在 `h2/h3/h4 a` 作者链接或结构化 story-message；两者皆无时绝不臆造。
  *  - 作者名/主页 `article :is(h2,h3,h4) a`；permalink `a[href*="/posts/"|"/permalink"|"story_fbid"|"/videos/"|"/reel/"|"/watch/?v="]`；
  *    正文预览 `[data-ad-comet-preview="message"]|[data-ad-preview="message"]|div[dir="auto"]`；
  *    反应数取「赞」计数汇总按钮（带数字，非 toggle）。
@@ -169,6 +169,8 @@ interface RawFeedArticle {
   reactionText?: string | null;
   permalinkHrefs?: string[];
   hasVideo?: boolean;
+  videoEligible?: boolean;
+  videoCenterDistance?: number;
 }
 
 /**
@@ -177,43 +179,53 @@ interface RawFeedArticle {
  */
 const FEED_SCAN_JS = String.raw`(function(){${POST_IDENTITY_JS}${FB_FEED_LAYOUT_HELPERS_JS}
   function txt(el){ return String((el&&el.innerText)||(el&&el.textContent)||'').replace(/\s+/g,' ').trim(); }
-  function href(a){ try{ return new URL(a.getAttribute('href')||a.href||'', location.href).href; }catch(e){ return ''; } }
   var arts = fbFeedTopCards(document);
   var out = [];
   for(var i=0;i<arts.length;i++){
     var a = arts[i];
     if(!fbFeedVisible(a)) continue;
-    // 水合判据：存在作者链接（h2/h3/h4 a）。虚拟化空壳无之 → 跳过（绝不臆造）。
+    // 水合判据：作者或结构化正文至少一个；虚拟化空壳二者皆无 → 跳过（绝不臆造）。
     var authorLink = a.querySelector('h2 a, h3 a, h4 a');
-    if(!authorLink){ out.push({ hydrated:false }); continue; }
+    var storyWitness=a.querySelector(fbFeedStorySelector);
+    if(!authorLink&&!storyWitness){ out.push({ hydrated:false }); continue; }
     var author = txt(authorLink);
-    // permalink 候选：卡内 own-level 且通过唯一规范身份白名单的 a[href]。
-    var links = a.querySelectorAll('a[href]');
-    var perms = [];
-    for(var j=0;j<links.length && perms.length<8;j++){
-      if(fbFeedClosestCard(links[j])!==a) continue;
-      var h=href(links[j]); if(h&&fbCanonicalPostId(h)) perms.push(h); }
+    // 身份与动作链同源：普通卡取首个 canonical permalink；严格轻量视频可安全合成 watch?v=。
+    var cardPermalink=fbFeedCardPermalink(a); var perms=cardPermalink?[cardPermalink]:[];
     // 正文预览：story_message / message 优先，否则首个非空 div[dir=auto]。
-    var msg = a.querySelector('[data-ad-comet-preview="message"], [data-ad-preview="message"], [data-ad-rendering-role="story_message"]');
+    var msg = storyWitness;
     var preview = msg ? txt(msg) : '';
     if(!preview){ var das = a.querySelectorAll('div[dir="auto"]'); for(var k=0;k<das.length;k++){ var t=txt(das[k]); if(t && t.length>=2){ preview=t; break; } } }
     // 反应计数：帖级动作栏「赞」计数汇总按钮（aria-label 以 赞/Like 开头且带数字文案）。
     var reactionText = '';
     var btns = a.querySelectorAll('[role="button"][aria-label]');
-    for(var b=0;b<btns.length;b++){ var lab=(btns[b].getAttribute('aria-label')||'').replace(/\s+/g,' ').trim(); var bt=txt(btns[b]); if(/^(赞|讚|Like|Me gusta)/i.test(lab) && /\d/.test(bt)){ reactionText=bt; break; } }
+    for(var b=0;b<btns.length;b++){ var lab=(btns[b].getAttribute('aria-label')||'').replace(/\s+/g,' ').trim(); var bt=txt(btns[b]); if(/^(赞|讚|Like|Me gusta|Thích)/i.test(lab) && /\d/.test(lab+' '+bt)){ reactionText=bt||lab; break; } }
     var hasVideo = !!(a.querySelector('video') || perms.some(function(h){ return /\/videos\/|\/reel\/|\/watch\/?\?/i.test(h); }));
-    out.push({ hydrated:true, author:author||null, textPreview:(preview||'').slice(0,180)||null, reactionText:reactionText||null, permalinkHrefs:perms, hasVideo:hasVideo });
+    var videoEligible=true, videoCenterDistance=0;
+    if(hasVideo){ var video=a.querySelector('video'); videoEligible=false; videoCenterDistance=Number.MAX_SAFE_INTEGER;
+      if(video&&fbFeedVisible(video)){ var vr=video.getBoundingClientRect(), vw=window.innerWidth||0, vh=window.innerHeight||0;
+        var hOverlap=Math.max(0,Math.min(vr.right,vw)-Math.max(vr.left,0));
+        var vOverlap=Math.max(0,Math.min(vr.bottom,vh)-Math.max(vr.top,0));
+        var hRatio=vr.width>0?hOverlap/vr.width:0, vRatio=vr.height>0?vOverlap/vr.height:0;
+        videoEligible=hRatio>=0.1&&vRatio>=0.35;
+        videoCenterDistance=Math.abs((vr.top+vr.height/2)-(vh/2));
+      }
+    }
+    out.push({ hydrated:true, author:author||null, textPreview:(preview||'').slice(0,180)||null, reactionText:reactionText||null, permalinkHrefs:perms, hasVideo:hasVideo, videoEligible:videoEligible, videoCenterDistance:videoCenterDistance });
   }
-  return JSON.stringify(out);
+  var primary=-1, distance=Number.MAX_SAFE_INTEGER;
+  for(var p=0;p<out.length;p++){ if(out[p].hydrated&&out[p].hasVideo&&out[p].videoEligible&&out[p].permalinkHrefs&&out[p].permalinkHrefs.length>0&&out[p].videoCenterDistance<distance){ primary=p; distance=out[p].videoCenterDistance; } }
+  var filtered=[];
+  for(var q=0;q<out.length;q++){ if(out[q].hasVideo&&q!==primary) continue; filtered.push(out[q]); }
+  return JSON.stringify(filtered);
 })()`;
 
 /** 探测当前 surface：URL / 是否有任一受支持 feed 布局 / 已水合卡数 / dialog。用于幂等 ensureFeed。 */
-const SURFACE_PROBE_JS = String.raw`(function(){${FB_FEED_LAYOUT_HELPERS_JS}
+const SURFACE_PROBE_JS = String.raw`(function(){${POST_IDENTITY_JS}${FB_FEED_LAYOUT_HELPERS_JS}
   var feed=document.querySelector('div[role="feed"]');
   var fallback=!feed&&fbFeedFallbackCards(document,false);
-  var arts=feed?fbFeedSemanticCards(feed,false):(fallback||[]);
+  var arts=feed?fbFeedTopCards(feed):(fallback||[]);
   var hydrated=0;
-  for(var i=0;i<arts.length;i++){ if(arts[i].querySelector('h2 a, h3 a, h4 a')) hydrated++; }
+  for(var i=0;i<arts.length;i++){ if(arts[i].querySelector('h2 a, h3 a, h4 a,'+fbFeedStorySelector)) hydrated++; }
   var hostOk=/(^|\.)facebook\.com$/i.test(location.hostname||'');
   var topLevel=false; try{ topLevel=window.top===window; }catch(e){}
   var main=!!document.querySelector('[role="main"],main');
@@ -236,15 +248,15 @@ interface RawHomeState {
 }
 
 /** 首页空态完整样本：卡片、loading、generation 与同容器成对空态文字一次性同源读取。 */
-const HOME_STATE_JS = String.raw`(function(){/*__AIDCP_FB_HOME_STATE__*/${FB_FEED_LAYOUT_HELPERS_JS}
+const HOME_STATE_JS = String.raw`(function(){/*__AIDCP_FB_HOME_STATE__*/${POST_IDENTITY_JS}${FB_FEED_LAYOUT_HELPERS_JS}
   function norm(v){return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim().toLowerCase();}
   var href=location.href, hostOk=/(^|\.)facebook\.com$/i.test(location.hostname||''), topLevel=false;try{topLevel=window.top===window;}catch(e){}
   var main=document.querySelector('[role="main"],main'), shell=document.querySelector('[role="banner"],nav[aria-label]');
   var loginLike=!!document.querySelector('input[type="password"],form[action*="login"]');
   var checkpointLike=/\/checkpoint|\/recover/i.test(location.pathname)||!!document.querySelector('form[action*="checkpoint"]');
   var ready=document.readyState==='interactive'||document.readyState==='complete';
-  var feed=document.querySelector('div[role="feed"]'), fallback=!feed&&fbFeedFallbackCards(document,false), arts=feed?fbFeedSemanticCards(feed,false):(fallback||[]), hasCards=false;
-  for(var i=0;i<arts.length;i++){if(arts[i].querySelector('h2 a,h3 a,h4 a')&&fbFeedVisible(arts[i])){hasCards=true;break;}}
+  var feed=document.querySelector('div[role="feed"]'), fallback=!feed&&fbFeedFallbackCards(document,false), arts=feed?fbFeedTopCards(feed):(fallback||[]), hasCards=false;
+  for(var i=0;i<arts.length;i++){if(arts[i].querySelector('h2 a,h3 a,h4 a,'+fbFeedStorySelector)&&fbFeedVisible(arts[i])){hasCards=true;break;}}
   var scope=main||document.body, loading=!!(scope&&scope.querySelector('[role="progressbar"],[aria-busy="true"]'));
   var explicitEmpty=false, nodes=scope?scope.querySelectorAll('div,section'):[];
   for(var n=0;n<nodes.length;n++){var raw=String(nodes[n].innerText||nodes[n].textContent||'').replace(/\s+/g,' ').trim();if(raw.length<15||raw.length>600)continue;var t=norm(raw);

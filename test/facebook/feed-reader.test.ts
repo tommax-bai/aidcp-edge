@@ -194,6 +194,63 @@ test('fb-feed[jsdom]: 越南语媒体-only 视频首卡跳过；exact-card watch
   ]);
 });
 
+test('fb-feed[jsdom]: 真 feed 内轻量视频用唯一 data-video-id 合成身份，并解析作者、摘要和越南语反应数', async () => {
+  const dom = layoutDom(
+    '<div role="feed"><section id="mi-video">' +
+      '<h4><a href="/sang-vlog">Sang Vlog</a></h4>' +
+      '<div data-ad-rendering-role="story_message">Cách nấu cá niêng trong ống tre ngon đến mức ăn quên no #SANGVLOG</div>' +
+      '<div data-video-id="1632570071375207"><video></video></div>' +
+      '<div role="button" aria-label="Thích"></div>' +
+      '<div role="button" aria-label="Thích: 27K người">27K</div>' +
+      '<div role="button" aria-label="Viết bình luận"></div>' +
+      '</section></div>',
+  );
+  const reader = new FacebookFeedReader({ cdp: layoutCdp(dom), sleep: async () => {} });
+
+  assert.deepEqual(await reader.scanCards(), [
+    {
+      index: 0,
+      noteId: 'https://www.facebook.com/watch?v=1632570071375207',
+      author: 'Sang Vlog',
+      textPreview: 'Cách nấu cá niêng trong ống tre ngon đến mức ăn quên no #SANGVLOG',
+      reactionCount: 27_000,
+      isVideo: true,
+    },
+  ]);
+});
+
+test('fb-feed[jsdom]: 多个可见视频只上报视口中心最近者，屏外视频保留到后续扫描', async () => {
+  const card = (id: string) =>
+    `<section id="card-${id}"><h4><a href="/author-${id}">Author ${id}</a></h4>` +
+    `<div data-ad-rendering-role="story_message">video ${id}</div>` +
+    `<div data-video-id="${id}"><video id="video-${id}"></video></div>` +
+    '<div role="button" aria-label="Thích"></div><div role="button" aria-label="Viết bình luận"></div></section>';
+  const dom = layoutDom(`<div role="feed">${card('101')}${card('202')}${card('303')}</div>`);
+  const rect = (top: number, bottom: number) => ({ left: 20, right: 680, top, bottom, width: 660, height: bottom - top });
+  Object.defineProperty(dom.window.document.getElementById('video-101'), 'getBoundingClientRect', { value: () => rect(20, 420) });
+  Object.defineProperty(dom.window.document.getElementById('video-202'), 'getBoundingClientRect', { value: () => rect(250, 650) });
+  Object.defineProperty(dom.window.document.getElementById('video-303'), 'getBoundingClientRect', { value: () => rect(900, 1_300) });
+  const reader = new FacebookFeedReader({ cdp: layoutCdp(dom), sleep: async () => {} });
+
+  const cards = await reader.scanCards();
+  assert.deepEqual(cards.map((item) => item.noteId), ['https://www.facebook.com/watch?v=202']);
+});
+
+test('fb-feed[jsdom]: 显式 watch 身份与 data-video-id 冲突时失败关闭；无 id 的嵌入 Reels rail 不借邻卡动作', async () => {
+  const dom = layoutDom(
+    '<div role="feed">' +
+      '<section id="mismatch"><h4><a href="/author">Author</a></h4><a href="/watch/?v=111">time</a>' +
+      '<div data-ad-rendering-role="story_message">mismatch</div><div data-video-id="222"><video></video></div>' +
+      '<div role="button" aria-label="Thích"></div><div role="button" aria-label="Viết bình luận"></div></section>' +
+      '<section id="rail"><h4><a href="/rail">Reels</a></h4><div data-ad-rendering-role="story_message">rail</div>' +
+      '<video></video><video></video><video></video></section>' +
+      '</div>',
+  );
+  const reader = new FacebookFeedReader({ cdp: layoutCdp(dom), sleep: async () => {} });
+
+  assert.deepEqual(await reader.scanCards(), []);
+});
+
 test('fb-feed: 默认滚动走 650px 多帧手势，wheel 生效后不再补 scrollBy', async () => {
   let scrollY = 0;
   const wheels: Array<Record<string, unknown>> = [];

@@ -1,3 +1,10 @@
+import {
+  COMMENT_LABEL_SOURCE,
+  NEUTRAL_LIKE_LABEL_SOURCE,
+  REACTED_WORD_SOURCE,
+  UNREACT_LABEL_SOURCE,
+} from './cta-labels.js';
+
 /**
  * Facebook 规范帖子身份（canonical post identity）+ 三段式目标解析的**唯一**来源。
  *
@@ -106,18 +113,81 @@ export const POST_IDENTITY_JS = `var fbCanonicalPostId = ${canonicalPostId.toStr
 /**
  * Facebook feed 的页内多布局抽象（扫描 / 就地深读 / 点赞 / 评论共用）。
  *
- * 语义化布局仍优先使用 `[role=feed] > [role=article]`；只有页面没有真 feed 容器时才从
- * locale-neutral 的 story-message 锚向上寻找「首个带作者标题链接」的轻量卡片根。轻量布局里同一正文
- * 常同时出现外层 + 内层两个 story-message 节点，故必须按 DOM 节点去重并丢掉嵌套候选。
- *
- * ⚠️ 本 helper **只定义卡片边界，不定义帖子身份**。调用方仍必须用 fbCanonicalPostId 做身份硬闸；
- * photo/video 资源 id 绝不能因结构命中就被抬升成 post id。
+ * 语义化布局仍优先使用 `[role=feed] > [role=article]`；轻量正文卡沿用 story-message 边界。轻量视频
+ * 则从数字 `data-video-id` 向上做有界查找，只有同一最小根内恰好一个视频、作者/正文和一组帖级
+ * 点赞/评论动作时才成立。该 helper 同时拥有卡边界与身份，扫描、深读、动作和验证不可各自猜测。
  */
 export const FB_FEED_LAYOUT_HELPERS_JS = `
   var fbFeedStorySelector='[data-ad-comet-preview="message"],[data-ad-preview="message"],[data-ad-rendering-role="story_message"]';
   var fbFeedAuthorSelector='h2 a[href],h3 a[href],h4 a[href]';
+  var fbFeedNeutralLikeRe=new RegExp(${JSON.stringify(NEUTRAL_LIKE_LABEL_SOURCE)},'i');
+  var fbFeedCommentRe=new RegExp(${JSON.stringify(COMMENT_LABEL_SOURCE)},'i');
+  var fbFeedReactedWordRe=new RegExp(${JSON.stringify(REACTED_WORD_SOURCE)},'i');
+  var fbFeedUnreactRe=new RegExp(${JSON.stringify(UNREACT_LABEL_SOURCE)},'i');
   function fbFeedVisible(el){ if(!el||!el.getBoundingClientRect) return false; var r=el.getBoundingClientRect(); if(r.width<=0||r.height<=0) return false; var s=window.getComputedStyle?getComputedStyle(el):null; return !s||(s.visibility!=='hidden'&&s.display!=='none'&&Number(s.opacity||'1')>0.01); }
   function fbFeedContains(root,el){ return root===document ? !!(document.documentElement&&document.documentElement.contains(el)) : !!(root&&root.contains&&root.contains(el)); }
+  function fbFeedText(el){ return String((el&&el.innerText)||(el&&el.textContent)||'').replace(/\\s+/g,' ').trim(); }
+  function fbFeedVideoIds(card){
+    if(!card||!card.querySelectorAll) return [];
+    var nodes=Array.prototype.slice.call(card.querySelectorAll('[data-video-id]'));
+    if(card.matches&&card.matches('[data-video-id]')) nodes.unshift(card);
+    var ids=[];
+    for(var i=0;i<nodes.length;i++){ var id=String(nodes[i].getAttribute('data-video-id')||'').trim();
+      if(!/^\\d+$/.test(id)||ids.indexOf(id)>=0) continue; ids.push(id); }
+    return ids;
+  }
+  function fbFeedOwnControl(card,el){
+    var nested=el&&el.closest?el.closest('[role="article"],article'):null;
+    return !nested||nested===card;
+  }
+  function fbFeedPostActionCounts(card){
+    var controls=card&&card.querySelectorAll?card.querySelectorAll('[role="button"],[role="radio"],button'):[];
+    var likes=0, comments=0;
+    for(var i=0;i<controls.length;i++){ var el=controls[i]; if(!fbFeedOwnControl(card,el)||!fbFeedVisible(el)) continue;
+      var label=String(el.getAttribute&&el.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
+      var text=fbFeedText(el); var numeric=/\\d/.test(text);
+      var like=fbFeedNeutralLikeRe.test(label)||fbFeedUnreactRe.test(label)||fbFeedUnreactRe.test(text)||
+        (!numeric&&fbFeedReactedWordRe.test(text))||(!numeric&&!fbFeedNeutralLikeRe.test(label)&&fbFeedReactedWordRe.test(label));
+      if(like&&!numeric) likes++;
+      if(fbFeedCommentRe.test(label)) comments++;
+    }
+    return {likes:likes,comments:comments};
+  }
+  /** 严格视频证据只描述同一卡片内的事实；不按祖先顺序借用邻卡作者或动作。 */
+  function fbFeedStrictVideoEvidence(card){
+    if(!card||!card.querySelectorAll) return null;
+    var ids=fbFeedVideoIds(card); if(ids.length!==1) return null;
+    var videos=card.querySelectorAll('video'); if(videos.length!==1) return null;
+    var author=card.querySelector(fbFeedAuthorSelector), story=card.querySelector(fbFeedStorySelector);
+    if(!author&&!story) return null;
+    var actions=fbFeedPostActionCounts(card); if(actions.likes!==1||actions.comments!==1) return null;
+    return {videoId:ids[0],video:videos[0]};
+  }
+  function fbFeedOwnCanonicalLinks(card){
+    if(!card||!card.querySelectorAll) return [];
+    var links=card.querySelectorAll('a[href]'), out=[];
+    for(var i=0;i<links.length;i++){ var el=links[i];
+      var nested=el.closest?el.closest('[role="article"],article'):null; if(nested&&nested!==card) continue;
+      var raw=String(el.getAttribute('href')||'').trim(); if(!raw) continue;
+      var id=fbCanonicalPostId(raw); if(!id) continue;
+      var absolute=''; try{ absolute=new URL(raw,location.href).href; }catch(e){ continue; }
+      out.push({id:id,href:absolute});
+    }
+    return out;
+  }
+  /** 卡身份/可开链接同源：严格视频可用 data-video-id 补齐，但显式身份冲突时失败关闭。 */
+  function fbFeedCardIdentity(card){
+    var links=fbFeedOwnCanonicalLinks(card), strict=fbFeedStrictVideoEvidence(card);
+    if(!strict) return links.length>0?{postId:links[0].id,noteId:links[0].href,isStrictVideo:false,video:null}:null;
+    var ids=[]; for(var i=0;i<links.length;i++){ if(ids.indexOf(links[i].id)<0) ids.push(links[i].id); }
+    var videoPostId='fb:'+strict.videoId;
+    if(ids.length>1||(ids.length===1&&ids[0]!==videoPostId)) return null;
+    var noteId='https://www.facebook.com/watch?v='+encodeURIComponent(strict.videoId);
+    if(ids.length===1){ for(var j=0;j<links.length;j++){ if(links[j].id===videoPostId){ noteId=links[j].href; break; } } }
+    return {postId:videoPostId,noteId:noteId,isStrictVideo:true,video:strict.video};
+  }
+  function fbFeedCardPostId(card){ var identity=fbFeedCardIdentity(card); return identity?identity.postId:null; }
+  function fbFeedCardPermalink(card){ var identity=fbFeedCardIdentity(card); return identity?identity.noteId:null; }
   function fbFeedSemanticCards(root,includeHidden){
     var base=root||document; var arts=base.querySelectorAll('[role="article"],article'); var out=[];
     for(var i=0;i<arts.length;i++){ var a=arts[i]; if(!includeHidden&&!fbFeedVisible(a)) continue;
@@ -145,26 +215,61 @@ export const FB_FEED_LAYOUT_HELPERS_JS = `
       if(!nested) top.push(found[j]); }
     top.sort(function(a,b){ if(a===b) return 0; var p=a.compareDocumentPosition(b); return (p&Node.DOCUMENT_POSITION_FOLLOWING)?-1:1; });
     return top; }
+  function fbFeedVideoCards(root,includeHidden){
+    var base=root||document, seeds=base.querySelectorAll('[data-video-id]'), found=[];
+    for(var i=0;i<seeds.length;i++){ var seed=seeds[i], raw=String(seed.getAttribute('data-video-id')||'').trim(); if(!/^\\d+$/.test(raw)) continue;
+      var semantic=seed.closest?seed.closest('[role="article"],article'):null;
+      if(semantic&&fbFeedContains(base,semantic)) continue;                         // 已由语义卡路径承载
+      var cur=seed, depth=0, hit=null;
+      while(cur&&cur!==base&&cur!==document.body&&cur!==document.documentElement&&depth<24){
+        if(cur.matches&&cur.matches('[role="main"],main,[role="feed"]')) break;
+        if(cur.querySelector&&cur.querySelector('[role="article"],article')) break; // 不跨入邻接语义卡容器借证据
+        var evidence=fbFeedStrictVideoEvidence(cur);
+        if(evidence&&evidence.videoId===raw){ hit=cur; break; }
+        cur=cur.parentElement; depth++;
+      }
+      if(!hit||(!includeHidden&&!fbFeedVisible(hit))||found.indexOf(hit)>=0) continue;
+      found.push(hit);
+    }
+    found.sort(function(a,b){ if(a===b) return 0; var p=a.compareDocumentPosition(b); return (p&Node.DOCUMENT_POSITION_FOLLOWING)?-1:1; });
+    return found;
+  }
+  function fbFeedMergeCards(primary,secondary){
+    var out=primary.slice();
+    for(var i=0;i<secondary.length;i++){ var card=secondary[i], overlap=false;
+      for(var j=0;j<out.length;j++){ if(out[j]===card||out[j].contains(card)||card.contains(out[j])){ overlap=true; break; } }
+      if(!overlap) out.push(card);
+    }
+    out.sort(function(a,b){ if(a===b) return 0; var p=a.compareDocumentPosition(b); return (p&Node.DOCUMENT_POSITION_FOLLOWING)?-1:1; });
+    return out;
+  }
   function fbFeedTopCards(root){
     var base=root||document;
     if(base===document){
       var feeds=document.querySelectorAll('div[role="feed"]');
-      for(var i=0;i<feeds.length;i++){ if(!fbFeedVisible(feeds[i])) continue; return fbFeedSemanticCards(feeds[i],false); }
-      var fallback=fbFeedFallbackCards(document,false); if(fallback.length>0) return fallback;
+      for(var i=0;i<feeds.length;i++){ if(!fbFeedVisible(feeds[i])) continue;
+        return fbFeedMergeCards(fbFeedSemanticCards(feeds[i],false),fbFeedVideoCards(feeds[i],false)); }
+      var videos=fbFeedVideoCards(document,false), fallback=fbFeedFallbackCards(document,false);
+      var light=fbFeedMergeCards(videos,fallback); if(light.length>0) return light;
       return fbFeedSemanticCards(document,false);                                      // permalink 单帖页
     }
-    var semantic=fbFeedSemanticCards(base,false); if(semantic.length>0) return semantic;
+    var semantic=fbFeedSemanticCards(base,false), videos=fbFeedVideoCards(base,false);
+    var merged=fbFeedMergeCards(semantic,videos); if(merged.length>0) return merged;
     return fbFeedFallbackCards(base,false); }
   function fbFeedClosestCard(el){
     if(!el) return null;
     var semantic=el.closest?el.closest('[role="article"],article'):null; if(semantic) return semantic;
+    var videos=fbFeedVideoCards(document,true), videoHit=null;
+    for(var v=0;v<videos.length;v++){ if(videos[v]===el||videos[v].contains(el)){ if(!videoHit||videoHit.contains(videos[v])) videoHit=videos[v]; } }
+    if(videoHit) return videoHit;
     var fallback=fbFeedFallbackCards(document,true); var hit=null;
     for(var i=0;i<fallback.length;i++){ if(fallback[i]===el||fallback[i].contains(el)){ if(!hit||hit.contains(fallback[i])) hit=fallback[i]; } }
     return hit; }
-  function fbFeedHasFallbackCard(root){ return fbFeedFallbackCards(root||document,false).length>0; }
-  function fbFeedIsFallbackCard(el){ return fbFeedFallbackCards(document,true).indexOf(el)>=0; }
+  function fbFeedHasFallbackCard(root){ var base=root||document; return fbFeedVideoCards(base,false).length>0||fbFeedFallbackCards(base,false).length>0; }
+  function fbFeedIsFallbackCard(el){ return fbFeedVideoCards(document,true).indexOf(el)>=0||fbFeedFallbackCards(document,true).indexOf(el)>=0; }
   function fbFeedAllPhysicalCards(root){
     var base=root||document; var out=Array.prototype.slice.call(base.querySelectorAll('[role="article"],article'));
+    var videos=fbFeedVideoCards(base,true); for(var v=0;v<videos.length;v++){ if(out.indexOf(videos[v])<0) out.push(videos[v]); }
     var fallback=fbFeedFallbackCards(base,true); for(var i=0;i<fallback.length;i++){ if(out.indexOf(fallback[i])<0) out.push(fallback[i]); }
     return out; }
 `;
@@ -190,14 +295,7 @@ export const FB_TARGET_HELPERS_JS = `${POST_IDENTITY_JS}${FB_FEED_LAYOUT_HELPERS
   function fbTgtVisible(el){ return fbFeedVisible(el); }
   function fbTgtClosestArticle(el){ return fbFeedClosestCard(el); }
   /** 卡身份：DOM 序首个 own-level（不在嵌套评论 article 内）且可派生 id 的锚。派生不出 → null。 */
-  function fbTgtArticlePostId(a){ if(!a||!a.querySelectorAll) return null;
-    var links=a.querySelectorAll('a[href]');
-    for(var i=0;i<links.length;i++){ var el=links[i];
-      if(fbTgtClosestArticle(el)!==a) continue;                       // 嵌套评论 article 里的链接不参与卡身份
-      var raw=String(el.getAttribute('href')||'').trim(); if(!raw) continue;
-      var id=fbCanonicalPostId(raw); if(id) return id;
-    }
-    return null; }
+  function fbTgtArticlePostId(a){ return fbFeedCardPostId(a); }
   function fbTgtTopArticles(root){ return fbFeedTopCards(root||document); }
   /**
    * 作用域根：最后打开的、**且真的含帖**的可见 dialog → 否则含帖的可见 feed → 否则 document。
@@ -227,14 +325,7 @@ export const FB_TARGET_HELPERS_JS = `${POST_IDENTITY_JS}${FB_FEED_LAYOUT_HELPERS
     }
     return {status:'no_target', el:null}; }
   /** 该 article 是否**携带**目标身份（own-level 锚里有任一锚派生出 targetId）。 */
-  function fbTgtArticleCarriesId(article, targetId){
-    if(!article||!targetId||!article.querySelectorAll) return false;
-    var links=article.querySelectorAll('a[href]');
-    for(var i=0;i<links.length;i++){ var el=links[i];
-      if(fbTgtClosestArticle(el)!==article) continue;
-      if(fbCanonicalPostId(String(el.getAttribute('href')||'').trim())===targetId) return true;
-    }
-    return false; }
+  function fbTgtArticleCarriesId(article, targetId){ return !!targetId&&fbFeedCardPostId(article)===targetId; }
   /**
    * 目标帖的**排他区域**：从目标 article 向上爬，直到祖先里混进**任何别的顶层帖**（按**整个 document** 算，
    * 不只是作用域内）或爬到作用域根为止。该区域内、不属于任何 article 的节点（典型：帖子的评论输入框被 FB

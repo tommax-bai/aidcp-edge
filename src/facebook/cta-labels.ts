@@ -17,13 +17,13 @@
 
 /** 中性「点赞动作」按钮的 aria-label（点它 = 赞）。锚点，不含数字计数串，也不含「：赞」反应项后缀。 */
 export const NEUTRAL_LIKE_LABEL_SOURCE =
-  '^\\s*(?:给.+的帖子)?\\s*(留下心情|赞一个|点赞|讚|Like|React|Reaccionar|Me gusta)\\s*$';
+  '^\\s*(?:给.+的帖子)?\\s*(留下心情|赞一个|点赞|讚|Like|React|Reaccionar|Me gusta|Thích)\\s*$';
 /** 帖级动作栏里的「评论」按钮 aria-label（前缀匹配）：帖级 react 按钮的同栏必含它，评论级 react 无。 */
-export const COMMENT_LABEL_SOURCE = '(发表评论|發表評論|写评论|寫留言|评论.+帖子|Comment|Write a comment|Comment.+post|Comentar)';
+export const COMMENT_LABEL_SOURCE = '(发表评论|發表評論|写评论|寫留言|评论.+帖子|Comment|Write a comment|Comment.+post|Comentar|Viết bình luận)';
 /** 已反应后按钮呈现的「反应词」文案（空→非空，蓝字激活）。 */
-export const REACTED_WORD_SOURCE = '^\\s*(赞|讚|大赞|超赞|Like|Love|Care|Haha|Wow|Me gusta|Me encanta)\\s*$';
+export const REACTED_WORD_SOURCE = '^\\s*(赞|讚|大赞|超赞|Like|Love|Care|Haha|Wow|Me gusta|Me encanta|Thích)\\s*$';
 /** 「撤销反应」串（其存在 = 当前已赞，最可靠的跨语言已赞信号）。 */
-export const UNREACT_LABEL_SOURCE = '(取消赞|收回赞|收回|移除心情|移除赞|已赞|Remove Like|Unlike|Undo)';
+export const UNREACT_LABEL_SOURCE = '(取消赞|收回赞|收回|移除心情|移除赞|已赞|Remove Like|Unlike|Undo|Gỡ Thích|Bỏ thích)';
 
 const NEUTRAL_LIKE_RE = new RegExp(NEUTRAL_LIKE_LABEL_SOURCE, 'i');
 const COMMENT_RE = new RegExp(COMMENT_LABEL_SOURCE, 'i');

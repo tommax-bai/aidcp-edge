@@ -360,6 +360,30 @@ test('fb-like[jsdom]: 无 feed/article 的轻量布局仍按规范身份锁定�
   assert.equal(r.observation?.noteId, 'fb:BBB');
 });
 
+test('fb-like[jsdom]: 无 permalink 的越南语轻量视频按 data-video-id 精确点赞并由同卡 Gỡ Thích 验证', async () => {
+  const videoCard = (id: string, author: string) =>
+    `<section id="video-${id}"><h4><a href="/${author}">${author}</a></h4>` +
+    `<div data-ad-rendering-role="story_message">video ${id}</div><div data-video-id="${id}"><video></video></div>` +
+    '<div class="action-bar"><div role="button" aria-label="Thích"></div>' +
+    '<div role="button" aria-label="Thích: 27K người">27K</div>' +
+    '<div role="button" aria-label="Viết bình luận"></div></div></section>';
+  const dom = feedDom(videoCard('101', 'Ann') + videoCard('202', 'Bob'));
+  const first = dom.window.document.querySelector('#video-101 [aria-label="Thích"]') as HTMLElement;
+  const target = dom.window.document.querySelector('#video-202 [aria-label="Thích"]') as HTMLElement;
+  let firstClicked = false;
+  first.addEventListener('click', () => { firstClicked = true; first.setAttribute('aria-label', 'Gỡ Thích'); });
+  target.addEventListener('click', () => { target.setAttribute('aria-label', 'Gỡ Thích'); });
+
+  const exec = new FacebookLikeExecutor({ cdp: jsdomCdp(dom), ...noSleep }, fastOpts);
+  const result = await exec.like({ noteId: 'https://www.facebook.com/watch?v=202' });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.executed, true);
+  assert.equal(target.getAttribute('aria-label'), 'Gỡ Thích');
+  assert.equal(firstClicked, false, '同层第一张轻量视频不能被 DOM 序回落误点');
+  assert.equal(result.observation?.noteId, 'fb:202');
+});
+
 test('fb-like[jsdom]: 目标帖不在页面上 → no_target，DOM 序第一张卡一动不动', async () => {
   const dom = feedDom(card('c1', 'Ann', A) + card('c2', 'Bob', B));
   let anyClick = false;
