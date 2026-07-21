@@ -1176,10 +1176,15 @@ function quotaWindowView(item, window, now) {
     if (hasCap) capped.push(row);
   }
   if (rows.length === 0) return null;
-  const completed = rows.filter((entry) => entry.complete).length;
+  const completedRows = rows.filter((entry) => entry.complete);
+  const completed = completedRows.length;
+  const viewComplete = completedRows.some((entry) => entry.action === 'view');
   const worst = capped.reduce((best, entry) => (!best || entry.ratio > best.ratio ? entry : best), null);
-  const ratio = !expired && active ? (worst?.ratio ?? 0) : 0;
-  const tone = expired || !active ? 'idle' : completed > 0 ? 'complete' : ratio >= 0.8 ? 'near' : 'ok';
+  const incompleteWorst = capped
+    .filter((entry) => !entry.complete)
+    .reduce((best, entry) => (!best || entry.ratio > best.ratio ? entry : best), null);
+  const ratio = !expired && active ? (incompleteWorst?.ratio ?? 0) : 0;
+  const tone = expired || !active ? 'idle' : viewComplete ? 'complete' : ratio >= 0.8 ? 'near' : 'ok';
   const hasSessionTiming = item.key === 'session'
     && active
     && startedAt !== null
@@ -1190,10 +1195,10 @@ function quotaWindowView(item, window, now) {
     ? '准备下一轮'
     : !active
       ? '等待开始'
-      : sessionRemaining
-        ?? (completed > 0
-          ? `完成 ${completed}项`
-          : ratio >= 0.8
+      : completed > 0
+        ? `完成 ${completed}项`
+        : sessionRemaining
+          ?? (ratio >= 0.8
             ? (item.key === 'minute' || item.key === 'hour' ? '接近休息' : '接近完成')
             : (item.key === 'minute' || item.key === 'hour' ? '节奏正常' : '进行中'));
   const baseMeta = worst ? `${worst.label} ${worst.used} · 最多 ${worst.cap}` : '持续记录中';
@@ -1246,8 +1251,13 @@ function renderQuotaWindows(usage) {
       const pct = entry.cap !== null ? Math.round(entry.ratio * 100) : 0;
       const cap = entry.cap !== null ? `<small>最多 ${escapeHtml(entry.cap)}</small>` : '';
       const progress = entry.cap !== null ? `<i><em style="width:${pct}%"></em></i>` : '';
+      const rowTone = entry.complete && entry.action === 'view'
+        ? 'complete'
+        : !entry.complete && entry.ratio >= 0.8 && entry.cap !== null
+          ? 'near'
+          : '';
       return `
-        <div class="qwd-row ${entry.complete ? 'complete' : entry.ratio >= 0.8 && entry.cap !== null ? 'near' : ''}">
+        <div class="qwd-row ${rowTone}">
           <span>${escapeHtml(entry.label)}</span>
           <b>${escapeHtml(entry.used)}${cap}</b>
           ${progress}
@@ -1257,7 +1267,7 @@ function renderQuotaWindows(usage) {
       <div class="quota-window-detail ${window.tone}" title="${escapeHtml(window.title)}">
         <div class="qwd-head">
           <span>${escapeHtml(window.label)}</span>
-          <strong>${escapeHtml(window.state)}</strong>
+          <strong class="${window.completed > 0 ? 'has-completions' : ''}">${escapeHtml(window.state)}</strong>
         </div>
         <small>${escapeHtml(window.meta)}</small>
         <div class="qwd-rows">${rows}</div>

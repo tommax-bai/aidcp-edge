@@ -1472,18 +1472,33 @@ test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并�
   assert.match(windowDetails[2].textContent ?? '', /近 1 小时/);
   assert.match(windowDetails[3].textContent ?? '', /今日计划/);
   assert.doesNotMatch($(w, '#quota-windows').textContent ?? '', /当前节奏|阶段节奏/);
+  assert.ok(!windowDetails[1].classList.contains('complete'), 'like completion should not complete the minute card');
+  assert.ok(!windowDetails[3].classList.contains('complete'), 'supporting action completion should not complete the day card');
+  const minuteState = windowDetails[1].querySelector('.qwd-head strong') as HTMLElement;
+  const dayState = windowDetails[3].querySelector('.qwd-head strong') as HTMLElement;
+  assert.equal(minuteState.textContent, '完成 1项');
+  assert.equal(dayState.textContent, '完成 2项');
+  assert.ok(minuteState.classList.contains('has-completions'));
+  assert.ok(dayState.classList.contains('has-completions'));
   const sessionRows = Array.from(windowDetails[0].querySelectorAll('.qwd-row')) as unknown as HTMLElement[];
+  const minuteRows = Array.from(windowDetails[1].querySelectorAll('.qwd-row')) as unknown as HTMLElement[];
+  const dayRows = Array.from(windowDetails[3].querySelectorAll('.qwd-row')) as unknown as HTMLElement[];
   assert.match(sessionRows[0].textContent ?? '', /浏览\s*2/);
   assert.doesNotMatch(sessionRows[0].textContent ?? '', /最多|\//);
   assert.equal(sessionRows[0].querySelector('i'), null, 'uncapped session row should not render cap progress');
   assert.match(sessionRows[1].textContent ?? '', /点赞\s*1\s*最多 10/);
   assert.ok(sessionRows[1].querySelector('i'), 'capped session row should keep supplied progress');
+  assert.ok(!minuteRows[1].classList.contains('complete'), 'completed like row should stay neutral');
+  assert.ok(!minuteRows[1].classList.contains('near'), 'completed like row should not create a near-limit cue');
+  assert.ok(!dayRows[1].classList.contains('complete'), 'completed like row should stay neutral');
+  assert.ok(!dayRows[5].classList.contains('complete'), 'completed publish row should stay neutral');
   assert.match(windowDetails[1].textContent ?? '', /点赞\s*3\s*最多 3/);
   assert.doesNotMatch(windowDetails[1].textContent ?? '', /\d+\/\d+/);
   assert.match(windowDetails[2].textContent ?? '', /浏览\s*10\s*最多 60/);
   assert.match($(w, '#quota-windows').textContent ?? '', /继续/);
   assert.match(rendererCss, /\.quota-windows\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(rendererCss, /@media \(max-width: 620px\)[\s\S]*?\.quota-windows\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)/);
+  assert.match(rendererCss, /\.qwd-head strong\.has-completions[\s\S]*?color:\s*var\(--good-fg\)/);
   // 慢启动问号中的数据表是用户明确请求的「曲线限额」说明；陪伴式用语红线仍约束卡片常驻文案，
   // 不把按需展开的数值帮助表算进来。
   const summaryCopy = $(w, '#daily-summary').cloneNode(true) as HTMLElement;
@@ -1497,6 +1512,46 @@ test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并�
   assert.ok($(w, '#likes').closest('.kpi')?.classList.contains('complete'));
   assert.ok($(w, '#publishes').closest('.kpi')?.classList.contains('complete'));
   w.Date.now = originalNow;
+});
+
+test('今日进展：只有浏览完成时窗口卡片和浏览行进入完成态', async () => {
+  const { w, pushStatus } = await boot();
+  const originalNow = w.Date.now;
+  const now = 1730000002000;
+  w.Date.now = () => now;
+  try {
+    pushStatus(makeStatus({
+      dailyUsage: {
+        asOf: now,
+        quotaLevel: 'normal',
+        totals: { view: 8, like: 0 },
+        quotas: { view: 8, like: 3 },
+        saturated: ['view'],
+        windows: {
+          day: {
+            startedAt: now - 3600000,
+            expiresAt: now + 3600000,
+            totals: { view: 8, like: 0 },
+            quotas: { view: 8, like: 3 },
+            saturated: ['view'],
+          },
+        },
+      },
+    }));
+    $(w, '#daily-summary').click();
+    await tick();
+
+    const dayDetail = w.document.querySelector('.quota-window-detail') as HTMLElement;
+    const dayState = dayDetail.querySelector('.qwd-head strong') as HTMLElement;
+    const rows = Array.from(dayDetail.querySelectorAll('.qwd-row')) as unknown as HTMLElement[];
+    assert.ok(dayDetail.classList.contains('complete'));
+    assert.equal(dayState.textContent, '完成 1项');
+    assert.ok(dayState.classList.contains('has-completions'));
+    assert.ok(rows[0].classList.contains('complete'), 'completed view row should use completion styling');
+    assert.ok(!rows[1].classList.contains('complete'), 'incomplete supporting row should remain neutral');
+  } finally {
+    w.Date.now = originalNow;
+  }
 });
 
 test('今日进展：本轮未开始或缺少时间时不编造剩余时间和结束时间', async () => {

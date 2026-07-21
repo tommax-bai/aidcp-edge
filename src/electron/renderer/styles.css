@@ -1608,7 +1608,7 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   border-color: var(--complete-border);
   background: linear-gradient(180deg, rgba(237, 250, 244, 0.94), rgba(255, 255, 255, 0.68));
 }
-.quota-window-detail.complete .qwd-head strong,
+.qwd-head strong.has-completions,
 .qwd-row.complete span,
 .qwd-row.complete b { color: var(--good-fg); }
 .qwd-row.near i em { background: linear-gradient(90deg, #3b6ff0, #48a9ff); }
