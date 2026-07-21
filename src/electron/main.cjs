@@ -16,10 +16,6 @@ const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
 const { createAdsLocalApi } = require('./ads-local-api.cjs');
 const { readWithRuntimeRecovery } = require('./ads-read-runtime.cjs');
 const { createAdsWriteApi } = require('./ads-write-api.cjs');
-const {
-  createEnvironmentMaintenance,
-  createFileMaintenanceStateStore,
-} = require('./environment-maintenance.cjs');
 const adsRuntime = require('./ads-runtime.cjs');
 const adsRuntimeStage = require('./ads-runtime-stage.cjs');
 const adsFingerprint = require('./ads-fingerprint.cjs');
@@ -384,8 +380,6 @@ let allowedProfileIds = null; // Set<profileId> | null（null = 未 gated，不�
 let allowedEnvironmentPlatforms = new Map(); // envKey -> Cloud 权威 platform；绝不采信 renderer 自报
 let allowedEnvironmentControlStates = new Map(); // envKey -> Cloud 权威 binding/persona 投影；不含 accountId
 let sessionTimer = null;
-let environmentMaintenanceTimer = null;
-let environmentMaintenance = null;
 let proceededOnce = false;
 const CLIENT_SESSION_REFRESH_WINDOW_MS = 5 * 60_000;
 // Ordinary Edge children are on-demand automation engines. This supervisor remains only for the
@@ -1061,96 +1055,6 @@ function startSessionMaintenance() {
     enforceOwnedAutomationEngines();
     void retryPendingInteractionOffboards();
   }, 4 * 60_000);
-  void runEnvironmentMaintenance();
-  scheduleEnvironmentMaintenance();
-}
-
-function scheduleEnvironmentMaintenance() {
-  if (environmentMaintenanceTimer || isQuitting) return;
-  const delayMs = 25_000 + Math.floor(Math.random() * 10_001);
-  environmentMaintenanceTimer = setTimeout(async () => {
-    environmentMaintenanceTimer = null;
-    await runEnvironmentMaintenance();
-    scheduleEnvironmentMaintenance();
-  }, delayMs);
-  environmentMaintenanceTimer.unref?.();
-}
-
-function environmentMaintenanceStateFile() {
-  return path.join(app.getPath('userData'), 'environment-maintenance.json');
-}
-
-async function stopEnvironmentForDeletion(envKey) {
-  const handle = envs.get(fleet.envIdForProfile(envKey));
-  if (handle) {
-    coreBootstrapSupervisor.remove(handle.envId);
-    handle.removed = true;
-    handle.stopRequested = true;
-    releaseStartQueue(handle);
-    clearRespawnTimer(handle);
-    if (handle.child) {
-      try { handle.child.kill('SIGTERM'); } catch { /* exit wait below remains authoritative */ }
-      const deadline = Date.now() + 20_000;
-      while (handle.child && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      if (handle.child) throw new Error('local_core_stop_timeout');
-    }
-    envs.delete(handle.envId);
-  }
-  const active = await adsApi.listActiveProfiles({ ...resolveAdsOpts({}), profileIds: [envKey] });
-  if (!active.ok || !active.listWellFormed) throw new Error(active.error || 'adspower_active_state_unavailable');
-  if (active.activeUserIds.includes(envKey)) throw new Error('adspower_browser_still_running');
-}
-
-async function deleteAdsEnvironment(envKey) {
-  const ads = resolveAdsOpts({});
-  const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
-  let result = await writeApi.deleteProfile(envKey, ads);
-  if (!result.ok) {
-    // 崩溃恢复可能重放 user/delete；只有完整、未截断的 user/list 明确证明目标已不存在时才算已达成。
-    const verified = await adsApi.listProfiles(ads);
-    const absent = verified.ok && !verified.truncated
-      && !verified.profiles.some((profile) => profile.userId === envKey);
-    if (!absent) throw new Error(result.error || 'adspower_delete_failed');
-    result = { ok: true, alreadyAbsent: true };
-  }
-  const environments = fleet.normalizeEnvironments(settings.environments || [])
-    .filter((environment) => environment.profileId !== envKey);
-  const saved = saveSettings({ environments });
-  if (!saved.ok) {
-    console.warn(`[aidcp-edge] AdsPower 已删除环境 ${envKey}，但本地花名册持久化失败：${saved.error || '未知错误'}`);
-  }
-  return result;
-}
-
-function ensureEnvironmentMaintenance() {
-  if (environmentMaintenance) return environmentMaintenance;
-  environmentMaintenance = createEnvironmentMaintenance({
-    stateStore: createFileMaintenanceStateStore(environmentMaintenanceStateFile()),
-    clientFetch: (pathname, options = {}) => clientAuthFetch(pathname, {
-      ...options,
-      token: clientSession && clientSession.token,
-    }),
-    listEnvironments: async () => fleet.normalizeEnvironments(settings.environments || []).map((environment) => ({
-      envKey: environment.profileId,
-      environmentName: environment.name || environment.systemName || environment.profileId,
-    })),
-    stopEnvironment: stopEnvironmentForDeletion,
-    deleteEnvironment: deleteAdsEnvironment,
-    onUnauthorized: onSessionInvalid,
-    logger: console,
-  });
-  return environmentMaintenance;
-}
-
-async function runEnvironmentMaintenance() {
-  if (!clientAuthEnabled() || !hasValidSession() || settings.provider !== 'adspower') return;
-  try {
-    await ensureEnvironmentMaintenance().runOnce();
-  } catch (error) {
-    console.warn(`[aidcp-edge] 环境维护轮询失败：${(error && error.message) || String(error)}`);
-  }
 }
 
 // 把花名册首成员镜像回旧单值字段（回滚兼容）。**platform 只在 adspower 模式镜像**：self（本机 Chrome）

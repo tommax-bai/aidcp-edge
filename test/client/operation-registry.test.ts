@@ -91,14 +91,8 @@ test('client operations declare transport, identity, and browser requirements ex
   assert.deepEqual(CLIENT_OPERATION_REGISTRY['automation.start'], {
     category: 'page_automation', transport: 'electron_ipc', identity: 'page_account', browser: 'required',
   });
-  assert.deepEqual(CLIENT_OPERATION_REGISTRY['environment.maintenance.poll'], {
-    category: 'cloud_data', transport: 'customer_auth_http', identity: 'customer_environment', browser: 'forbidden',
-  });
   assert.deepEqual(CLIENT_OPERATION_REGISTRY['environment.delete.adspower'], {
     category: 'local', transport: 'local', identity: 'local_environment', browser: 'forbidden',
-  });
-  assert.deepEqual(CLIENT_OPERATION_REGISTRY['environment.delete.receipt'], {
-    category: 'cloud_data', transport: 'customer_auth_http', identity: 'customer_environment', browser: 'forbidden',
   });
 });
 
@@ -109,8 +103,6 @@ test('every client-owned data surface is request-scoped HTTP and browser-forbidd
     'environment.provision',
     'environment.operator_alias',
     'environment.offboard',
-    'environment.maintenance.poll',
-    'environment.delete.receipt',
     'persona.read',
     'persona.generate',
     'persona.persist',
