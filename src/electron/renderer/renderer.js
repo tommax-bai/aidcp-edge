@@ -130,6 +130,8 @@ const fields = {
   pubBar: document.querySelector('#pub-bar'),
   pubBarLabel: document.querySelector('#pub-bar-label'),
   pubBarSum: document.querySelector('#pub-bar-sum'),
+  pubCarouselPrev: document.querySelector('#pub-carousel-prev'),
+  pubCarouselNext: document.querySelector('#pub-carousel-next'),
   pubQueueLink: document.querySelector('#pub-queue-link'),
   pubPreviewLink: document.querySelector('#pub-preview-link'),
   publishPreviewPanel: document.querySelector('#publish-preview-panel'),
@@ -2139,6 +2141,89 @@ function renderPresence(status, nowMs) {
 const lastPublishSigByEnv = new Map();
 // 用户点薄条的临时展开（进行中审批到来 / 会话停止 / 切换环境时自动复位）。
 let pubManualOpen = false;
+let pubCarouselEnvId = null;
+let pubCarouselItemKey = null;
+
+function resetPubCarouselSelection() {
+  pubCarouselEnvId = null;
+  pubCarouselItemKey = null;
+}
+
+function pubCarouselEntries(data) {
+  const active = Array.isArray(data?.active) ? data.active : [];
+  const waiting = active.filter((item) => item?.status === 'waiting_approval');
+  const otherActive = active.filter((item) => item?.status !== 'waiting_approval');
+  const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+  const inProgress = [
+    ...waiting.map((item) => ({ key: `active:${item.id}`, kind: 'active', item })),
+    ...otherActive.map((item) => ({ key: `active:${item.id}`, kind: 'active', item })),
+    ...tasks.map((item) => ({ key: `task:${item.id}`, kind: 'task', item })),
+  ];
+  if (inProgress.length > 0) return inProgress;
+  const recent = Array.isArray(data?.recent) ? data.recent : [];
+  return recent.map((item) => ({ key: `recent:${item.id}`, kind: 'recent', item }));
+}
+
+function resolvePubCarousel(queueState) {
+  const envId = String(queueState?.envId || '');
+  if (pubCarouselEnvId !== envId) {
+    pubCarouselEnvId = envId;
+    pubCarouselItemKey = null;
+  }
+  const entries = pubCarouselEntries(queueState?.data);
+  let index = entries.findIndex((entry) => entry.key === pubCarouselItemKey);
+  if (index < 0) index = 0;
+  const selected = entries[index] || null;
+  pubCarouselItemKey = selected?.key || null;
+  return { entries, index: selected ? index : -1, selected };
+}
+
+function pubCarouselEntryTitle(entry) {
+  return String(entry?.item?.title || '未命名内容');
+}
+
+function hidePubCarouselControls() {
+  const controls = [fields.pubCarouselPrev, fields.pubCarouselNext].filter(Boolean);
+  if (controls.includes(document.activeElement)) fields.pubHeadRow?.focus();
+  fields.pubMain?.classList.remove('has-carousel');
+  for (const button of controls) {
+    button.hidden = true;
+    button.disabled = true;
+    button.removeAttribute('title');
+  }
+}
+
+function syncPubCarouselControls(entries, index, collapsed) {
+  if (!Array.isArray(entries) || entries.length <= 1 || index < 0 || collapsed) {
+    hidePubCarouselControls();
+    return;
+  }
+  const previous = entries[(index - 1 + entries.length) % entries.length];
+  const next = entries[(index + 1) % entries.length];
+  const previousLabel = `上一条发布内容：${pubCarouselEntryTitle(previous)}`;
+  const nextLabel = `下一条发布内容：${pubCarouselEntryTitle(next)}`;
+  fields.pubMain?.classList.add('has-carousel');
+  for (const [button, label] of [
+    [fields.pubCarouselPrev, previousLabel],
+    [fields.pubCarouselNext, nextLabel],
+  ]) {
+    if (!button) continue;
+    button.hidden = false;
+    button.disabled = false;
+    button.setAttribute('aria-label', label);
+    button.title = label;
+  }
+}
+
+function movePubCarousel(delta) {
+  if (!Number.isInteger(delta) || delta === 0 || selectedEnvPlatform() !== 'xiaohongshu') return;
+  const queueState = contentWorkspace?.publishQueueSnapshot?.();
+  if (!queueState?.data) return;
+  const { entries, index } = resolvePubCarousel(queueState);
+  if (entries.length <= 1 || index < 0) return;
+  pubCarouselItemKey = entries[(index + delta + entries.length) % entries.length].key;
+  if (currentStatus) renderPublish(currentStatus, Date.now());
+}
 
 function renderXhsPublishQueueDock(status) {
   if (selectedEnvPlatform() !== 'xiaohongshu' || !contentWorkspace?.publishQueueSnapshot) return false;
@@ -2149,6 +2234,7 @@ function renderXhsPublishQueueDock(status) {
   fields.pubQueueLink?.classList.add('hidden');
   fields.pubPreviewLink.classList.add('hidden');
   if (queueState.kind === 'loading' || queueState.kind === 'idle') {
+    hidePubCarouselControls();
     fields.pubCard.classList.remove('collapsed');
     fields.pubCard.dataset.pubMode = 'loading';
     fields.pubCard.dataset.pubState = 'loading';
@@ -2164,6 +2250,7 @@ function renderXhsPublishQueueDock(status) {
     return true;
   }
   if (queueState.kind === 'error' || !queueState.data) {
+    hidePubCarouselControls();
     fields.pubCard.classList.remove('collapsed');
     fields.pubCard.dataset.pubMode = 'loading';
     fields.pubCard.dataset.pubState = 'error';
@@ -2180,11 +2267,11 @@ function renderXhsPublishQueueDock(status) {
   }
 
   const data = queueState.data;
-  const waiting = data.active.find((journey) => journey.status === 'waiting_approval');
-  const active = waiting || data.active[0] || null;
-  const task = !active ? data.tasks[0] || null : null;
-  const recent = !active && !task ? data.recent[0] || null : null;
-  const priority = active || task || recent;
+  const carousel = resolvePubCarousel(queueState);
+  const priority = carousel.selected?.item || null;
+  const active = carousel.selected?.kind === 'active' ? priority : null;
+  const task = carousel.selected?.kind === 'task' ? priority : null;
+  const recent = carousel.selected?.kind === 'recent' ? priority : null;
   const hasWork = data.summary.inProgress > 0;
   const waitingCount = data.summary.waitingForYou;
   // 只有系统处理中时默认显示紧凑摘要；一旦需要客户处理立即展开。
@@ -2210,7 +2297,9 @@ function renderXhsPublishQueueDock(status) {
       : recent
         ? '最近一条发布结果'
         : '发布进度';
-  fields.pubCorner.textContent = queueState.refreshing ? '同步中' : queueState.stale ? '稍早数据' : '';
+  const freshness = queueState.refreshing ? '同步中' : queueState.stale ? '稍早数据' : '';
+  const position = carousel.entries.length > 1 ? `${carousel.index + 1} / ${carousel.entries.length}` : '';
+  fields.pubCorner.textContent = [freshness, position].filter(Boolean).join(' · ');
   fields.pubCorner.classList.toggle('hot', waitingCount > 0);
   fields.pubTitle.textContent = priority?.title || '暂无进行中的发布任务';
   fields.pubTitle.classList.toggle('muted', !priority);
@@ -2232,7 +2321,7 @@ function renderXhsPublishQueueDock(status) {
           : '当前账号暂时没有进行中的发布任务。';
 
   const defaultLabels = ['开始创作', '正文与配图', '发布确认', '发布结果'];
-  const stages = Array.isArray(active?.stages) ? active.stages : [];
+  const stages = Array.isArray((active || recent)?.stages) ? (active || recent).stages : [];
   fields.pubSteps.querySelectorAll('.j-step').forEach((step, index) => {
     const stage = stages[index];
     const state = !stage
@@ -2249,12 +2338,14 @@ function renderXhsPublishQueueDock(status) {
   fields.pubQueueLink?.classList.remove('hidden');
   fields.pubPreviewLink.classList.toggle('hidden', waitingCount === 0 || !publishDraftQueueSupported());
   fields.pubPreviewLink.textContent = '审核稿件 ↗';
+  syncPubCarouselControls(carousel.entries, carousel.index, collapsed);
   syncPublishPreviewActions(status);
   return true;
 }
 
 function renderPublish(status, nowMs) {
   if (renderXhsPublishQueueDock(status)) return;
+  hidePubCarouselControls();
   fields.pubQueueLink?.classList.add('hidden');
   const overview = status && status.environmentOverview;
   if (overview && !overview.confirmed) {
@@ -3282,6 +3373,8 @@ fields.pubQueueLink?.addEventListener('keydown', (e) => {
     openFullPublishQueue();
   }
 });
+fields.pubCarouselPrev?.addEventListener('click', () => movePubCarousel(-1));
+fields.pubCarouselNext?.addEventListener('click', () => movePubCarousel(1));
 async function submitPublishPreviewAction(approved) {
   const preview = activePublishPreview(currentStatus);
   if (!preview || publishPreviewActionBusy) return;
@@ -4126,6 +4219,7 @@ function applyFleetSnapshot(snap) {
   }
   if (fleetView.selected && fleetView.selected !== prevSelected) {
     pubManualOpen = false;
+    resetPubCarouselSelection();
     closePublishPreview();
     resetPersonaDraft();
     const env = fleetView.envs.get(fleetView.selected);
@@ -4134,6 +4228,7 @@ function applyFleetSnapshot(snap) {
     void refreshDelegatedTasks(true, fleetView.selected);
     void ensureEnvironmentOverview(fleetView.selected, { force: true });
   } else if (selectedEnvPlatform() !== prevSelectedPlat) {
+    resetPubCarouselSelection();
     // 选中未变但其平台变了（如「改平台」落盘回推）：立即刷标题带等平台标识，不等下一次状态心跳。
     const env = fleetView.envs.get(fleetView.selected);
     if (env && env.status) render(env.status);
@@ -4155,6 +4250,7 @@ function selectEnv(envId) {
   fleetView.selected = envId;
   fleetView.shownEnv = null; // 切到另一个环境：头像三态从头开始，绝不留着旧环境的「已显示」指针
   pubManualOpen = false;
+  resetPubCarouselSelection();
   closePublishPreview();
   resetPersonaDraft(); // 人设向导每环境独立：切换即清草稿，绝不把 A 的草稿误确认到 B
   syncInteractionWorkspace();

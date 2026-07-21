@@ -1019,8 +1019,27 @@ body::-webkit-scrollbar:vertical,
 }
 .pub-preview-link:hover { text-decoration: underline; }
 
+.pub-carousel-content { min-width: 0; transition: padding .16s ease; }
+.pub-main.has-carousel .pub-carousel-content { padding-inline: 34px; }
+.pub-carousel-nav {
+  position: absolute; z-index: 3; top: 50%; display: grid; width: 34px; height: 58px; place-items: center;
+  padding: 0; border: 0; border-radius: 12px; color: rgba(91, 108, 137, .38); background: transparent;
+  opacity: .78; transform: translateY(-50%); cursor: pointer;
+  transition: color .14s ease, background-color .14s ease, opacity .14s ease;
+}
+.pub-carousel-prev { left: 0; }
+.pub-carousel-next { right: 0; }
+.pub-carousel-nav svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.pub-carousel-nav[hidden] { display: none; }
+.pub-carousel-nav:hover:not(:disabled) { color: rgba(66, 83, 112, .78); background: rgba(83, 105, 139, .065); opacity: 1; }
+.pub-carousel-nav:focus-visible {
+  color: #526784; outline: 2px solid rgba(82, 103, 132, .28); outline-offset: -2px;
+  background: rgba(83, 105, 139, .08); opacity: 1;
+}
+.pub-carousel-nav:disabled { cursor: default; opacity: 0; }
+
 /* 发布卡收展：主体折叠动画 + 收起薄条（同设计语言：白卡内一行、小封面记号 + 摘要 + 折角） */
-.pub-main { overflow: hidden; max-height: 400px; opacity: 1; transition: max-height 0.28s ease, opacity 0.2s ease; }
+.pub-main { position: relative; overflow: hidden; max-height: 400px; opacity: 1; transition: max-height 0.28s ease, opacity 0.2s ease; }
 .pub-main.folded { max-height: 0; opacity: 0; }
 .pub.collapsed { padding-top: 10px; padding-bottom: 10px; }
 .pub-bar { display: flex; align-items: center; gap: 11px; min-height: 30px; cursor: pointer; user-select: none; }
@@ -1051,7 +1070,15 @@ body::-webkit-scrollbar:vertical,
   text-overflow: ellipsis;
 }
 .pub-bar-chev { font-size: 10px; color: var(--faint); }
-@media (prefers-reduced-motion: reduce) { .pub-main { transition: none; } }
+@media (max-width: 430px) {
+  .pub-main.has-carousel .pub-carousel-content { padding-inline: 28px; }
+  .pub-carousel-nav { width: 30px; height: 52px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pub-main,
+  .pub-carousel-content,
+  .pub-carousel-nav { transition: none; }
+}
 
 /* ═══ 活动流 ═══ */
 .stream-h {

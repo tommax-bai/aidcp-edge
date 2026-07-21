@@ -264,30 +264,40 @@
           <span class="pub-bar-chev">▾</span>
         </div>
         <div class="pub-main" id="pub-main">
-        <div class="pub-head" id="pub-head-row" role="button" tabindex="0" aria-label="收起发布卡">
-          <span class="pub-evt" id="pub-head">AI 写好了一条新笔记</span>
-          <span class="pub-time" id="pub-corner"></span>
-        </div>
-        <div class="pub-body">
-          <div class="pub-thumb" id="pub-thumb"></div>
-          <div>
-            <div class="pub-title" id="pub-title"></div>
-            <div class="pub-meta" id="pub-meta">图文笔记</div>
+          <button id="pub-carousel-prev" class="pub-carousel-nav pub-carousel-prev nodrag" type="button"
+            aria-controls="pub-carousel-content" aria-label="上一条发布内容" hidden disabled>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12.5 4.5-5 5.5 5 5.5"></path></svg>
+          </button>
+          <div id="pub-carousel-content" class="pub-carousel-content">
+            <div class="pub-head" id="pub-head-row" role="button" tabindex="0" aria-label="收起发布卡">
+              <span class="pub-evt" id="pub-head">AI 写好了一条新笔记</span>
+              <span class="pub-time" id="pub-corner"></span>
+            </div>
+            <div class="pub-body">
+              <div class="pub-thumb" id="pub-thumb"></div>
+              <div>
+                <div class="pub-title" id="pub-title" aria-live="polite"></div>
+                <div class="pub-meta" id="pub-meta">图文笔记</div>
+              </div>
+            </div>
+            <div class="journey">
+              <div class="j-steps" id="pub-steps">
+                <div class="j-step"><span class="j-dot"></span><span class="j-lab">写好内容</span></div>
+                <div class="j-step"><span class="j-dot"></span><span class="j-lab">发到飞书</span></div>
+                <div class="j-step"><span class="j-dot"></span><span class="j-lab">等你确认</span></div>
+                <div class="j-step"><span class="j-dot"></span><span class="j-lab">择时发布</span></div>
+              </div>
+            </div>
+            <div class="pub-foot">
+              <p id="pub-foot">全文和「通过 / 驳回」按钮在飞书里，审批结果会自动同步到这里。</p>
+              <span id="pub-queue-link" class="pub-preview-link hidden" role="button" tabindex="0">查看全部进度 →</span>
+              <span id="pub-preview-link" class="pub-preview-link hidden" role="button" tabindex="0">查看稿件 ↗</span>
+            </div>
           </div>
-        </div>
-        <div class="journey">
-          <div class="j-steps" id="pub-steps">
-            <div class="j-step"><span class="j-dot"></span><span class="j-lab">写好内容</span></div>
-            <div class="j-step"><span class="j-dot"></span><span class="j-lab">发到飞书</span></div>
-            <div class="j-step"><span class="j-dot"></span><span class="j-lab">等你确认</span></div>
-            <div class="j-step"><span class="j-dot"></span><span class="j-lab">择时发布</span></div>
-          </div>
-        </div>
-        <div class="pub-foot">
-          <p id="pub-foot">全文和「通过 / 驳回」按钮在飞书里，审批结果会自动同步到这里。</p>
-          <span id="pub-queue-link" class="pub-preview-link hidden" role="button" tabindex="0">查看全部进度 →</span>
-          <span id="pub-preview-link" class="pub-preview-link hidden" role="button" tabindex="0">查看稿件 ↗</span>
-        </div>
+          <button id="pub-carousel-next" class="pub-carousel-nav pub-carousel-next nodrag" type="button"
+            aria-controls="pub-carousel-content" aria-label="下一条发布内容" hidden disabled>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.5 4.5 5 5.5-5 5.5"></path></svg>
+          </button>
         </div>
       </section>
 

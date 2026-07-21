@@ -543,7 +543,10 @@ test('发布卡候审：可见、第三节点琥珀，提示从稿件预览处�
   assert.equal(hidden(card), false);
   assert.equal(card.dataset.pubMode, 'flow');
   assert.equal(card.dataset.pubState, 'pending');
-  assert.equal(card.querySelectorAll('button').length, 0, '发布卡 MUST 零按钮');
+  assert.ok(
+    Array.from(card.querySelectorAll('button')).every((button) => button.hidden && button.disabled),
+    '旧发布卡没有可操作按钮，轮播箭头也必须保持隐藏',
+  );
   assert.match($(w, '#pub-title').textContent ?? '', /秋日城市漫步/);
   assert.match($(w, '#pub-corner').textContent ?? '', /已等 3 分钟/);
   const steps = Array.from(card.querySelectorAll('.j-step'));
@@ -1247,7 +1250,10 @@ test('发布卡常驻：从未发布 → 空态幽灵旅程（同设计语言、
   assert.equal(card.dataset.pubMode, 'empty');
   assert.ok(card.classList.contains('empty'));
   assert.match($(w, '#pub-title').textContent ?? '', /还没有发布过/);
-  assert.equal(card.querySelectorAll('button').length, 0, '空态同样零按钮');
+  assert.ok(
+    Array.from(card.querySelectorAll('button')).every((button) => button.hidden && button.disabled),
+    '空态同样没有可操作按钮',
+  );
   assert.equal(w.document.querySelector('#pub-link'), null, '空态也不展示打开飞书入口');
   assert.ok(card.querySelector('#pub-thumb'), '封面占位常在（空态为淡化默认形态）');
   assert.match($(w, '#pub-meta').textContent ?? '', /编号 —/, '编号默认形态');
@@ -2147,12 +2153,132 @@ test('小红书首页用发布进度摘要替代单稿卡，待确认优先并�
   assert.match(card.textContent ?? '', /先确认这条城市散步笔记/);
   assert.match($(w, '#pub-queue-link').textContent ?? '', /查看全部进度/);
   assert.equal(hidden($(w, '#pub-queue-link')), false);
+  assert.equal($(w, '#pub-title').getAttribute('aria-live'), 'polite');
+
+  const previous = $(w, '#pub-carousel-prev') as unknown as HTMLButtonElement;
+  const next = $(w, '#pub-carousel-next') as unknown as HTMLButtonElement;
+  assert.equal(previous.tagName, 'BUTTON', '原生按钮保留 Enter / Space 键盘激活语义');
+  assert.equal(previous.type, 'button');
+  assert.equal(next.tagName, 'BUTTON', '原生按钮保留 Enter / Space 键盘激活语义');
+  assert.equal(next.type, 'button');
+  assert.equal(previous.hidden, false);
+  assert.equal(previous.disabled, false);
+  assert.equal(next.hidden, false);
+  assert.equal(next.disabled, false);
+  assert.equal(previous.getAttribute('aria-controls'), 'pub-carousel-content');
+  assert.match(previous.getAttribute('aria-label') ?? '', /下一条排队笔记/);
+  assert.match(next.getAttribute('aria-label') ?? '', /正在写的咖啡地图/);
+  assert.equal($(w, '#pub-corner').textContent, '1 / 3');
+
+  next.click();
+  assert.equal($(w, '#pub-title').textContent, '正在写的咖啡地图');
+  assert.equal($(w, '#pub-meta').textContent, '创作中');
+  assert.equal($(w, '#pub-corner').textContent, '2 / 3');
+
+  next.click();
+  assert.equal($(w, '#pub-title').textContent, '下一条排队笔记');
+  assert.equal($(w, '#pub-meta').textContent, '参考创作 · 排队中');
+  assert.equal($(w, '#pub-corner').textContent, '3 / 3');
+  assert.equal(w.document.querySelectorAll('#pub-steps .j-step.todo').length, 4, '排队任务不应伪造详细阶段');
+
+  next.click();
+  assert.equal($(w, '#pub-title').textContent, '先确认这条城市散步笔记', '末项向右应循环到首项');
+  previous.click();
+  assert.equal($(w, '#pub-title').textContent, '下一条排队笔记', '首项向左应循环到末项');
+  assert.match(rendererCss, /\.pub-carousel-prev\s*\{\s*left:\s*0/);
+  assert.match(rendererCss, /\.pub-carousel-next\s*\{\s*right:\s*0/);
+  assert.match(rendererCss, /\.pub-carousel-nav:hover:not\(:disabled\)/);
+  assert.match(rendererCss, /\.pub-carousel-nav:focus-visible/);
+  assert.match(rendererCss, /\.pub-carousel-nav\[hidden\]\s*\{\s*display:\s*none/);
 
   $(w, '#pub-queue-link').click();
   await tick(); await tick();
   assert.equal(hidden($(w, '#content-workspace')), false);
   assert.equal(hidden($(w, '#publish-queue-view')), false);
   assert.match($(w, '#publish-queue-content').textContent ?? '', /3 条内容正在路上/);
+});
+
+test('小红书首页发布稿切换按稳定身份保持，切换账号复位，单稿时移除箭头焦点', async () => {
+  const stages = [
+    { key: 'source', label: '开始创作', state: 'completed', summary: '开始创作：已完成' },
+    { key: 'content', label: '正文与配图', state: 'running', summary: '正文与配图：创作中' },
+    { key: 'approval', label: '发布确认', state: 'pending', summary: '发布确认：未开始' },
+    { key: 'dispatch', label: '发布结果', state: 'pending', summary: '发布结果：未开始' },
+  ];
+  const journey = (id: string, title: string, status: string, statusLabel: string) => ({
+    id, recordId: null, title, sourceTitle: null, kind: 'autonomous', startedAt: Date.now(),
+    status, statusLabel, stages,
+  });
+  const task = (id: string, title: string) => ({
+    id, title, action: '参考创作', status: 'queued', statusLabel: '排队中', cancelRequested: false,
+    version: 1, createdAt: Date.now(), updatedAt: Date.now(), notBefore: Date.now(),
+  });
+  const queues: Record<string, { summary: Record<string, number>; tasks: unknown[]; active: unknown[]; recent: unknown[] }> = {
+    u1: {
+      summary: { inProgress: 3, waitingForYou: 1, cancellable: 1 },
+      active: [
+        journey('publish:a1', '账号 A 待确认稿', 'waiting_approval', '等待你确认'),
+        journey('run:a2', '账号 A 创作稿', 'generating', '创作中'),
+      ],
+      tasks: [task('task:a3', '账号 A 排队稿')],
+      recent: [],
+    },
+    u2: {
+      summary: { inProgress: 2, waitingForYou: 1, cancellable: 1 },
+      active: [journey('publish:b1', '账号 B 待确认稿', 'waiting_approval', '等待你确认')],
+      tasks: [task('task:b2', '账号 B 排队稿')],
+      recent: [],
+    },
+  };
+  const statusA = makeStatus({ envId: 'u1', account: { id: 'u1', name: '账号 A' } });
+  const statusB = makeStatus({ envId: 'u2', account: { id: 'u2', name: '账号 B' } });
+  const { w } = await boot({}, {
+    fleetGet: async () => ({
+      environments: [
+        { envId: 'u1', name: '账号 A', platform: 'xiaohongshu', status: statusA },
+        { envId: 'u2', name: '账号 B', platform: 'xiaohongshu', status: statusB },
+      ],
+      selectedEnvId: 'u1',
+    }),
+    publishQueueGet: async (envId: string) => ({
+      ok: true,
+      data: { data: queues[envId], meta: { requestId: `queue-${envId}`, asOf: Date.now() } },
+    }),
+  });
+
+  const previous = $(w, '#pub-carousel-prev') as unknown as HTMLButtonElement;
+  const next = $(w, '#pub-carousel-next') as unknown as HTMLButtonElement;
+  assert.equal($(w, '#pub-title').textContent, '账号 A 待确认稿');
+  next.click();
+  assert.equal($(w, '#pub-title').textContent, '账号 A 创作稿');
+
+  ($(w, '[data-env-id="u2"]') as unknown as HTMLElement).click();
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.equal($(w, '#pub-title').textContent, '账号 B 待确认稿');
+  ($(w, '[data-env-id="u1"]') as unknown as HTMLElement).click();
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.equal($(w, '#pub-title').textContent, '账号 A 待确认稿', '切回账号后应从该账号优先项开始');
+
+  next.click();
+  queues.u1.active[1] = journey('run:a2', '账号 A 创作稿（已刷新）', 'generating', '创作中');
+  w.dispatchEvent(new w.Event('focus'));
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.equal($(w, '#pub-title').textContent, '账号 A 创作稿（已刷新）', '刷新后按稳定任务身份保留当前项');
+  assert.equal($(w, '#pub-corner').textContent, '2 / 3');
+
+  next.focus();
+  assert.equal(w.document.activeElement, next);
+  queues.u1.active = [journey('publish:a1', '账号 A 待确认稿', 'waiting_approval', '等待你确认')];
+  queues.u1.tasks = [];
+  queues.u1.summary = { inProgress: 1, waitingForYou: 1, cancellable: 0 };
+  w.dispatchEvent(new w.Event('focus'));
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.equal($(w, '#pub-title').textContent, '账号 A 待确认稿', '当前项离队后回到真实首项');
+  assert.equal(previous.hidden, true);
+  assert.equal(previous.disabled, true);
+  assert.equal(next.hidden, true);
+  assert.equal(next.disabled, true);
+  assert.equal(w.document.activeElement, $(w, '#pub-head-row'), '箭头消失时焦点回到仍可操作的卡片标题');
 });
 
 test('供给的 0 照显，缺席才隐藏（两者是两件事）', async () => {
