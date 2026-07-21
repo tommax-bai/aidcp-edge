@@ -59,14 +59,14 @@
     const s = lifecycleView(status);
     const edgeFailure = s.edgeFailure && typeof s.edgeFailure.summary === 'string' ? s.edgeFailure.summary.trim() : '';
     if (s.clientSessionState === 'signed_out' || s.clientSessionState === 'expired') {
-      return { code: 'attention', label: '需要登录客户端', detail: '登录后即可继续数据管理；不会自动启动浏览器' };
+      return { code: 'attention', label: '需登录', detail: '需要登录客户端；登录后即可继续数据管理，不会自动启动浏览器' };
     }
-    if (s.risk === 'frozen') return { code: 'error', label: '账号已暂停', detail: '账号当前无法继续操作，请查看详情' };
-    if (s.risk === 'restricted') return { code: 'attention', label: '账号受限', detail: '自动运营已暂停；确认 Facebook 可正常使用后可解除受限' };
+    if (s.risk === 'frozen') return { code: 'error', label: '已暂停', detail: '账号已暂停，当前无法继续操作，请查看详情' };
+    if (s.risk === 'restricted') return { code: 'attention', label: '受限制', detail: '账号受限，自动运营已暂停；确认 Facebook 可正常使用后可解除受限' };
     if (s.automationState === 'error' || ((s.coreState === 'error' || s.edge === 'warning') && s.automationState !== 'stopped')) {
       return { code: 'error', label: '异常', detail: edgeFailure || '自动化引擎未能继续运行，请查看详情' };
     }
-    if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需要协助', detail: AUTH_ATTENTION[s.auth] };
+    if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需处理', detail: AUTH_ATTENTION[s.auth] };
     if (s.automationState === 'pausing') return { code: 'paused', label: '暂停中', detail: '正在断开引擎并释放浏览器；数据管理仍可用' };
     if (s.automationState === 'stopping') return { code: 'paused', label: '关闭中', detail: '数据管理仍可用' };
     if (s.automationState === 'waiting_resource') return { code: 'ready', label: '排队中', detail: '轮到当前环境后会自动继续' };
@@ -75,14 +75,14 @@
       return { code: 'attention', label: '重连中', detail: '数据管理不受影响；连接恢复后会自动继续' };
     }
     if (s.browserState === 'error') {
-      return { code: 'attention', label: '浏览器异常', detail: '数据管理仍可用；可重新打开浏览器恢复页面操作' };
+      return { code: 'attention', label: '异常', detail: '浏览器异常；数据管理仍可用，可重新打开浏览器恢复页面操作' };
     }
     if (s.automationState === 'paused') return { code: 'paused', label: '已暂停', detail: '引擎已断开；数据管理仍可继续使用' };
     if (s.automationState === 'running') {
-      return { code: 'running', label: s.risk === 'warned' ? '运行中 · 放慢节奏' : '运行中 · 一切正常', detail: '' };
+      return { code: 'running', label: '运行中', detail: s.risk === 'warned' ? '账号保护已要求放慢节奏' : '自动化正在执行任务' };
     }
-    if (s.automationState === 'ready') return { code: 'ready', label: '已就绪', detail: '引擎已连接，等待下一项任务' };
-    return { code: 'ready', label: '已就绪', detail: '数据管理可直接使用；启动自动化时才会连接引擎和打开浏览器' };
+    if (s.automationState === 'ready') return { code: 'ready', label: '待任务', detail: '引擎已连接，等待下一项任务' };
+    return { code: 'ready', label: '未启动', detail: '数据管理可直接使用；启动自动化时才会连接引擎和打开浏览器' };
   }
 
   // 标题带色调：可恢复的节奏调整用琥珀，只有冻结使用红色。
@@ -96,7 +96,7 @@
   // 用户可见明细只展示产品概念；coreState/cloudState 保留在诊断快照，不进入这里。
   const DETAIL_LABELS = {
     clientSessionState: { label: '客户会话', values: { ready: '已登录', signed_out: '未登录', expired: '已过期' } },
-    automationState: { label: '自动化', values: { stopped: '未启动', starting: '启动中', ready: '已就绪', running: '运行中', waiting_resource: '排队中', pausing: '暂停中', paused: '已暂停', stopping: '关闭中', error: '异常' } },
+    automationState: { label: '自动化', values: { stopped: '未启动', starting: '启动中', ready: '待任务', running: '运行中', waiting_resource: '排队中', pausing: '暂停中', paused: '已暂停', stopping: '关闭中', error: '异常' } },
     engineLinkState: { label: '引擎连接', values: { disconnected: '未连接', connecting: '连接中', connected: '已连接', reconnecting: '重连中', error: '异常' } },
     browserState: { label: '浏览器', values: { closed: '已关闭', queued: '等待槽位', starting: '启动中', ready: '已就绪', blocked: '等待人工处理', closing: '关闭中', error: '异常' } },
     risk: { label: '账号保护', values: { normal: '正常', warned: '谨慎放慢', restricted: '账号受限', frozen: '已暂停' } },
@@ -701,8 +701,8 @@
     };
   }
 
-  // ── 多环境 fleet（edge-multi-environment-fleet）：环境栏状态环分级 / 紧迫度排序 / 待处理计数 ──
-  // 分级（收起态由头像外圈色环承担）：
+  // ── 多环境 fleet（edge-multi-environment-fleet）：环境栏状态分级 / 分组 / 待处理计数 ──
+  // 分级（状态点承担运行类别，平台头像与交互侧标保持正交）：
   //   error(红,需处理)     放弃重启终态 / 引擎异常
   //   attention(琥珀,需处理) 需登录 / 待配置 / 风控受限 / 账号重复运行 / 云端**断线**重连（连上过才算）
   //   launching(蓝)        启动中（含「本轮核心还没连上过云端」的首次连接窗口——那是启动，不是断线）
@@ -713,37 +713,59 @@
 
   function fleetLevel(status, nowMs) {
     const s = lifecycleView(status);
-    if (s.respawnGaveUp) return { level: 'error', needsAction: true, label: '错误 · 已放弃重启' };
-    if (s.automationState === 'error' || ((s.coreState === 'error' || s.edge === 'warning') && s.automationState !== 'stopped')) return { level: 'error', needsAction: true, label: '异常' };
-    if (s.cloudRebind && s.cloudRebind.state === 'failed') return { level: 'attention', needsAction: true, label: '引擎重绑失败' };
+    const result = (level, needsAction, label, state, railGroup, detail = '') => (
+      { level, needsAction, label, state, railGroup, detail }
+    );
+    const edgeFailure = s.edgeFailure && typeof s.edgeFailure.summary === 'string' ? s.edgeFailure.summary.trim() : '';
+    if (s.respawnGaveUp) return result('error', true, '已停机', 'error', 'attention', '错误 · 已放弃重启');
+    if (s.automationState === 'error' || ((s.coreState === 'error' || s.edge === 'warning') && s.automationState !== 'stopped')) {
+      return result('error', true, '异常', 'error', 'attention', edgeFailure || '自动化引擎异常');
+    }
+    if (s.cloudRebind && s.cloudRebind.state === 'failed') return result('attention', true, '需重绑', 'attention', 'attention', '引擎重绑失败');
     // 阻断浮层待人工（登录/验证码/未知阻断，核心已本地暂停）：即便 edge 仍 running 也 MUST 浮顶为需处理，
     // 绝不呈现为绿色在线（多环境跨窗盯验证码是本控制台核心目的）。置于 running 判定之前。
-    if (s.overlayBlocked) return { level: 'attention', needsAction: true, label: '等待你处理' };
-    if (s.auth === 'login required') return { level: 'attention', needsAction: true, label: '需要登录平台' };
-    if (s.auth === 'config required') return { level: 'attention', needsAction: true, label: '待配置' };
-    if (s.auth === 'chrome missing') return { level: 'attention', needsAction: true, label: '缺少 Chrome' };
-    if (s.clientSessionState === 'signed_out' || s.clientSessionState === 'expired') return { level: 'attention', needsAction: true, label: '需要登录客户端' };
-    if (s.risk === 'frozen') return { level: 'error', needsAction: true, label: '账号已暂停' };
-    if (s.risk === 'restricted') return { level: 'attention', needsAction: true, label: '账号受限' };
-    if (s.sameAccountWarning) return { level: 'attention', needsAction: true, label: '账号重复运行' };
-    if (s.automationState === 'starting' || s.automationState === 'waiting_resource' || s.automationState === 'pausing' || s.automationState === 'stopping') {
-      return { level: 'launching', needsAction: false, label: s.automationState === 'waiting_resource' ? '排队中' : '处理中' };
+    if (s.overlayBlocked) return result('attention', true, '需处理', 'attention', 'attention', '等待你处理');
+    if (s.auth === 'login required') return result('attention', true, '需登录', 'attention', 'attention', '需要登录平台');
+    if (s.auth === 'config required') return result('attention', true, '待配置', 'attention', 'attention', '需要完成初始设置');
+    if (s.auth === 'chrome missing') return result('attention', true, '待配置', 'attention', 'attention', '缺少 Chrome');
+    if (s.clientSessionState === 'signed_out' || s.clientSessionState === 'expired') return result('attention', true, '需登录', 'attention', 'attention', '需要登录客户端');
+    if (s.risk === 'frozen') return result('error', true, '已暂停', 'error', 'attention', '账号已暂停');
+    if (s.risk === 'restricted') return result('attention', true, '受限制', 'attention', 'attention', '账号受限');
+    if (s.sameAccountWarning) return result('attention', true, '有冲突', 'attention', 'attention', '账号重复运行');
+    if (s.browserState === 'error') return result('attention', true, '异常', 'attention', 'attention', '浏览器异常');
+    if (s.automationState === 'waiting_resource') {
+      return result('launching', false, '排队中', 'queued', 'queued', '等待浏览器执行位');
+    }
+    if (s.automationState === 'pausing') {
+      return result('launching', false, '暂停中', 'starting', 'paused', '正在暂停自动化');
+    }
+    if (s.automationState === 'stopping') {
+      return result('launching', false, '关闭中', 'starting', 'offline', '正在关闭自动化引擎');
+    }
+    if (s.automationState === 'starting') {
+      const connecting = s.browserState === 'ready' && s.engineLinkState === 'connecting';
+      return result('launching', false, connecting ? '连接中' : '启动中', 'starting', 'starting', connecting ? '浏览器已就绪，正在连接引擎' : '正在启动自动化');
     }
     if (s.automationState === 'ready' || s.automationState === 'running') {
       const at = Date.parse(s.updatedAt || '');
       if (Number.isFinite(at) && Number.isFinite(nowMs) && nowMs - at > FLEET_STALE_MS) {
-        return { level: 'stale', needsAction: false, label: '失联' };
+        return result('stale', false, '失联', 'stale', 'offline', '状态长时间没有更新');
       }
-      if (s.engineLinkState === 'connecting') return { level: 'launching', needsAction: false, label: '连接中' };
-      if (s.engineLinkState === 'reconnecting') return { level: 'attention', needsAction: true, label: '重连中' };
-      return { level: 'running', needsAction: false, label: s.automationState === 'running' ? '运行中' : '已就绪' };
+      if (s.engineLinkState === 'connecting') return result('launching', false, '连接中', 'starting', 'starting', '正在连接引擎');
+      if (s.engineLinkState === 'reconnecting') return result('attention', true, '重连中', 'attention', 'attention', '引擎连接正在恢复');
+      if (s.automationState === 'running') return result('running', false, '运行中', 'running', 'running', '正在执行任务');
+      if (s.browserState === 'closed') return result('running', false, '待机中', 'standby', 'standby', '引擎在线，浏览器已关闭且不占槽位');
+      if (s.browserState === 'ready') return result('running', false, '待任务', 'ready', 'ready', '引擎和浏览器已就绪，等待任务');
+      if (s.browserState === 'queued') return result('launching', false, '排队中', 'queued', 'queued', '等待浏览器执行位');
+      return result('launching', false, '启动中', 'starting', 'starting', '正在准备浏览器');
     }
-    if (s.automationState === 'paused') return { level: 'offline', needsAction: false, label: '已暂停' };
-    return { level: 'offline', needsAction: false, label: '已就绪' };
+    if (s.automationState === 'paused') return result('offline', false, '已暂停', 'paused', 'paused', '自动化已暂停');
+    return result('offline', false, '未启动', 'offline', 'offline', '自动化尚未启动');
   }
 
-  // 紧迫度排序：需处理（error→attention）浮顶，其后 launching/stale/running，再 offline；同级保持花名册序。
+  // 需处理浮顶；普通环境按用户可理解的运行阶段分组，同组保持花名册序。
   const FLEET_LEVEL_RANK = { error: 0, attention: 1, launching: 2, stale: 3, running: 4, offline: 5 };
+  const FLEET_GROUP_RANK = { attention: 0, running: 1, ready: 2, starting: 3, queued: 4, standby: 5, paused: 6, offline: 7 };
 
   // 全客户端唯一规则位于 environment-display-name.cjs；uiLogic 只兼容既有消费入口。
   const resolveEnvironmentDisplayName = displayNameApi.resolveEnvironmentDisplayName;
@@ -769,12 +791,27 @@
         level: lv.level,
         needsAction: lv.needsAction,
         label: lv.label,
+        detail: lv.detail,
+        state: lv.state,
+        railGroup: lv.railGroup,
+        queuePosition: Number.isInteger(e && e.status && e.status.queuePosition) && e.status.queuePosition > 0
+          ? e.status.queuePosition
+          : null,
         rosterIndex: i,
         status: e && e.status,
       };
     });
-    rows.sort((a, b) => (FLEET_LEVEL_RANK[a.level] - FLEET_LEVEL_RANK[b.level]) || (a.rosterIndex - b.rosterIndex));
+    rows.sort((a, b) => (FLEET_GROUP_RANK[a.railGroup] - FLEET_GROUP_RANK[b.railGroup])
+      || (FLEET_LEVEL_RANK[a.level] - FLEET_LEVEL_RANK[b.level])
+      || (a.rosterIndex - b.rosterIndex));
     return { rows, pendingCount: rows.filter((r) => r.needsAction).length };
+  }
+
+  /** Batch start is complete only when automation is executing, or can execute immediately with a ready browser. */
+  function batchStartReady(status) {
+    const s = lifecycleView(status);
+    return s.automationState === 'running'
+      || (s.automationState === 'ready' && s.engineLinkState === 'connected' && s.browserState === 'ready');
   }
 
   // ── 环境级慢启动脚注行（change environment-level-slow-start）──
@@ -916,5 +953,5 @@
     };
   }
 
-  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, resolveEnvironmentDisplayName, railDisplayName, slowStartLine, formatReceivedBytes, proxyRuntimeView, FLEET_STALE_MS };
+  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, batchStartReady, resolveEnvironmentDisplayName, railDisplayName, slowStartLine, formatReceivedBytes, proxyRuntimeView, FLEET_STALE_MS };
 });

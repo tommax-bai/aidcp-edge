@@ -369,13 +369,13 @@ const STATUS_LABELS = {
   },
   cloud: { disconnected: '未连接', connected: '已连接' },
   session: { idle: '待命', running: '进行中', resting: '等待下一轮', paused: '已暂停', closed: '已关闭' },
-  risk: { normal: '正常', warned: '谨慎放慢', restricted: '账号受限', frozen: '已冻结' },
+  risk: { normal: '正常', warned: '需放慢', restricted: '受限制', frozen: '已冻结' },
   edge: { stopped: '已停止', starting: '启动中', running: '运行中', warning: '异常' },
   core: { stopped: '未连接', starting: '启动中', online: '在线', restarting: '重启中', error: '异常' },
   engineLink: { disconnected: '未连接', connecting: '连接中', connected: '已连接', reconnecting: '重连中', error: '异常' },
   cloudAxis: { connecting: '连接中', connected: '已连接', reconnecting: '重连中', offline: '离线' },
-  automation: { stopped: '未启动', starting: '启动中', ready: '已就绪', running: '运行中', waiting_resource: '排队中', pausing: '暂停中', paused: '已暂停', stopping: '关闭中', error: '异常' },
-  browser: { closed: '已关闭', queued: '排队中', starting: '启动中', ready: '已就绪', blocked: '等待人工处理', closing: '关闭中', releasing: '关闭中', error: '异常' },
+  automation: { stopped: '未启动', starting: '启动中', ready: '待任务', running: '运行中', waiting_resource: '排队中', pausing: '暂停中', paused: '已暂停', stopping: '关闭中', error: '异常' },
+  browser: { closed: '已关闭', queued: '排队中', starting: '启动中', ready: '已就绪', blocked: '需处理', closing: '关闭中', releasing: '关闭中', error: '异常' },
 };
 
 const SUBTITLE = {
@@ -4068,15 +4068,17 @@ function filteredRailEnvList() {
   return list.filter((env) => normPlatform(env && env.platform) === fleetView.platformFilter);
 }
 
-// 需处理浮顶，其后普通状态明确分为运行中 / 暂停 / 离线。级别归组一处收口。
-const isPausedRailRow = (r) => !r.needsAction && r.status && r.status.session === 'paused';
-const isRunningRailRow = (r) => !r.needsAction && !isPausedRailRow(r) && (r.level === 'running' || r.level === 'launching');
-const isOfflineRailRow = (r) => !r.needsAction && !isPausedRailRow(r) && (r.level === 'offline' || r.level === 'stale');
+// 保留现有左栏分组框架，只按 ui-logic 的单一 railGroup 真相归组；不再从 level/session 二次猜测。
+const isRailGroup = (key) => (row) => !row.needsAction && row.railGroup === key;
 const RAIL_GROUPS = [
   { key: 'attn', title: '需要处理', crit: true, has: (r) => r.needsAction },
-  { key: 'run', title: '运行中', crit: false, has: isRunningRailRow },
-  { key: 'paused', title: '暂停', crit: false, has: isPausedRailRow },
-  { key: 'offline', title: '离线', crit: false, has: isOfflineRailRow },
+  { key: 'running', title: '运行中', crit: false, has: isRailGroup('running') },
+  { key: 'ready', title: '待任务', crit: false, has: isRailGroup('ready') },
+  { key: 'starting', title: '启动中', crit: false, has: isRailGroup('starting') },
+  { key: 'queued', title: '排队中', crit: false, has: isRailGroup('queued') },
+  { key: 'standby', title: '待机中', crit: false, has: isRailGroup('standby') },
+  { key: 'paused', title: '暂停', crit: false, has: isRailGroup('paused') },
+  { key: 'offline', title: '离线', crit: false, has: isRailGroup('offline') },
 ];
 
 // 当前环境身份锚点统一从这里取「显示名 + 来源」。ui-logic.js 是可单测的唯一规则实现；
@@ -4129,9 +4131,9 @@ function renderRail() {
     if (!edgeAlive) fleetView.shownEnv = null;
   }
   const counts = {
-    run: model.rows.filter(isRunningRailRow).length,
+    run: model.rows.filter(isRailGroup('running')).length,
     attn: model.pendingCount,
-    idle: model.rows.filter((r) => isPausedRailRow(r) || isOfflineRailRow(r)).length,
+    idle: model.rows.filter((r) => !r.needsAction && r.railGroup !== 'running').length,
   };
   // 变更签名：每秒 stale 重估会反复调本函数，但只有模型真变时才重建 DOM——否则 innerHTML='' 会每秒
   // 打断 1.6s 脉冲动画（视觉抖动）、把行焦点甩回 <body>、并吞掉跨 tick 的点击手势。
@@ -4147,8 +4149,8 @@ function renderRail() {
     globalPendingCount: fullModel.pendingCount,
     counts,
     // platform 必须进签名：改平台后行才会重建上色（漏掉则签名未变、UI 停留旧平台）。
-    rows: model.rows.map((r) => [r.envId, r.level, r.needsAction, railDisplayName(r), r.nameSource,
-      r.nameSyncState, manualNicknamePendingEnvIds.has(r.envId), r.label,
+    rows: model.rows.map((r) => [r.envId, r.level, r.state, r.railGroup, r.needsAction, railDisplayName(r), r.nameSource,
+      r.nameSyncState, manualNicknamePendingEnvIds.has(r.envId), r.label, r.detail, r.queuePosition,
       Boolean(r.status && r.status.personaBound), normPlatform(r.platform)]),
   });
   if (sig === fleetView.lastRailSig) return;
@@ -4171,7 +4173,9 @@ function renderRail() {
   if (fields.railSum) fields.railSum.classList.toggle('hidden', collapsed);
   if (fields.railSumRun) fields.railSumRun.textContent = `▶ ${counts.run}`;
   if (fields.railSumAttn) fields.railSumAttn.textContent = `⚠ ${counts.attn}`;
-  if (fields.railSumIdle) fields.railSumIdle.textContent = `⏸ ${counts.idle}`;
+  if (fields.railSumIdle) fields.railSumIdle.textContent = `○ ${counts.idle}`;
+  if (fields.railSumRun) fields.railSumRun.title = '正在执行任务';
+  if (fields.railSumIdle) fields.railSumIdle.title = '当前未执行任务（含待任务、启动、排队、待机、暂停和离线）';
   if (fields.railBadge) {
     fields.railBadge.textContent = String(fullModel.pendingCount);
     fields.railBadge.classList.toggle('hidden', fullModel.pendingCount === 0);
@@ -4251,7 +4255,7 @@ function makeRailRow(row) {
   const btn = document.createElement('div');
   const isSelected = row.envId === fleetView.selected;
   const isShown = row.envId === fleetView.shownEnv;
-  btn.className = `rail-row lv-${row.level} plat-${normPlatform(row.platform)}${row.needsAction ? ' pulse' : ''}${isSelected ? ' selected' : ''}${isShown ? ' shown' : ''}`;
+  btn.className = `rail-row lv-${row.level} state-${row.state} plat-${normPlatform(row.platform)}${row.needsAction ? ' pulse' : ''}${isSelected ? ' selected' : ''}${isShown ? ' shown' : ''}`;
   btn.dataset.envId = row.envId;
   btn.tabIndex = 0;
   btn.setAttribute('role', 'button');
@@ -4262,10 +4266,19 @@ function makeRailRow(row) {
     : isShown
       ? '再次点击：浏览器归位'
       : '再次点击：把浏览器抬到主屏前台';
-  btn.title = `${displayName} · ${row.label} · ${nextHint}`;
+  const queueText = row.state === 'queued' && Number.isInteger(row.queuePosition) ? ` #${row.queuePosition}` : '';
+  const reasonText = row.detail && row.detail !== row.label ? ` · ${row.detail}` : '';
+  btn.title = `${displayName} · ${row.label}${queueText}${reasonText} · ${nextHint}`;
   const ava = document.createElement('span');
   ava.className = 'rail-ava';
   ava.textContent = displayName.slice(0, 1);
+  if (row.state === 'queued' && Number.isInteger(row.queuePosition)) {
+    const queueBadge = document.createElement('span');
+    queueBadge.className = 'rail-queue-badge';
+    queueBadge.textContent = String(row.queuePosition);
+    queueBadge.setAttribute('aria-label', `排队第 ${row.queuePosition} 位`);
+    ava.appendChild(queueBadge);
+  }
   btn.appendChild(ava);
   const meta = document.createElement('span');
   meta.className = 'rail-meta';
@@ -4322,6 +4335,14 @@ function makeRailRow(row) {
   dot.className = 'rail-dot';
   stateEl.appendChild(dot);
   stateEl.appendChild(document.createTextNode(row.label));
+  if (row.state === 'queued' && Number.isInteger(row.queuePosition)) {
+    const queuePosition = document.createElement('span');
+    queuePosition.className = 'rail-queue-position';
+    queuePosition.textContent = `#${row.queuePosition}`;
+    queuePosition.setAttribute('aria-label', `排队第 ${row.queuePosition} 位`);
+    stateEl.appendChild(queuePosition);
+  }
+  if (row.detail) stateEl.title = row.detail;
   meta.appendChild(stateEl);
   btn.appendChild(meta);
   btn.addEventListener('click', (e) => {
@@ -4639,7 +4660,7 @@ function updateStartAllProgress() {
   if (!sa) return;
   const launched = sa.ids.filter((id) => {
     const e = fleetView.envs.get(id);
-    return e && e.status && e.status.edge === 'running';
+    return e && e.status && typeof uiLogic.batchStartReady === 'function' && uiLogic.batchStartReady(e.status);
   }).length;
   if (launched >= sa.total) {
     const suffix = sa.controlOnly > 0
@@ -4651,7 +4672,7 @@ function updateStartAllProgress() {
     fleetView.startAll = null;
     return;
   }
-  setRailMsg(`自动化启动中 ${launched}/${sa.total} · 其余 ${sa.total - launched} 个浏览器错峰排队${sa.controlOnly > 0 ? ` · ${sa.controlOnly} 个自动化引擎已连接` : ''}${sa.rejected > 0 ? ` · ${sa.rejected} 个未加入` : ''}…`);
+  setRailMsg(`自动化启动中 ${launched}/${sa.total} · 其余 ${sa.total - launched} 个正在启动或排队${sa.controlOnly > 0 ? ` · ${sa.controlOnly} 个自动化引擎已连接` : ''}${sa.rejected > 0 ? ` · ${sa.rejected} 个未加入` : ''}…`);
 }
 fields.railStartAll?.addEventListener('click', () => { void doStartAll(); });
 fields.railCloseAll?.addEventListener('click', () => { void doCloseAll(); });

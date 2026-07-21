@@ -1466,7 +1466,7 @@ function stoppedRestrictedFbEnv(overrides: Partial<Stub> = {}): Stub {
   });
 }
 
-test('解除受限：停止的 Facebook 环境经 env-scoped Cloud 读仍显示账号受限', async () => {
+test('解除受限：停止的 Facebook 环境显示三字主状态并保留完整账号受限原因', async () => {
   const riskReads: unknown[] = [];
   const w = await boot(stoppedRestrictedFbEnv({
     getEnvironmentRisk: async (args) => {
@@ -1478,9 +1478,12 @@ test('解除受限：停止的 Facebook 环境经 env-scoped Cloud 读仍显示�
   assert.equal(riskReads.length, 1);
   assert.equal((riskReads[0] as { envKey?: string }).envKey, 'fb_env');
   assert.ok(!hidden($(w, '#risk-recovery-row')));
-  assert.equal($(w, '#health-label').textContent, '账号受限');
-  assert.match($(w, '#risk-status').textContent || '', /账号受限/);
-  assert.match($(w, '.rail-row.selected').textContent || '', /账号受限/);
+  assert.equal($(w, '#health-label').textContent, '受限制');
+  assert.equal($(w, '#risk-status').textContent, '受限制');
+  assert.match($(w, '#health-detail').textContent || '', /账号受限/, '主状态缩短后完整原因仍在独立详情');
+  const railRow = $(w, '.rail-row.selected');
+  assert.match(railRow.textContent || '', /受限制/, '左栏主状态遵守三字上限');
+  assert.match(railRow.getAttribute('title') || '', /账号受限/, '完整原因仍可读取，不因缩短主状态而丢失');
 });
 
 test('解除受限：应用弹层展示环境；取消/关闭/Escape 不请求；确认后等 Cloud normal 才隐藏', async () => {

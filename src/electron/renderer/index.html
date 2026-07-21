@@ -71,9 +71,9 @@
 
     <div class="fleet-row" id="fleet-row">
       <!-- ═══ 环境栏：运行态留在栏内，配置动作由「环境管理」浮层统一承载。
-           栏头「环境 N」+「管理」+ 收起钮（红色待处理徽标）；汇总 chip「▶运行 ⚠需处理 ⏸离线」；
+           栏头「环境 N」+「管理」+ 收起钮（红色待处理徽标）；汇总 chip「▶运行 ⚠需处理 ○未执行」；
            按紧迫度分组列全部环境（含未启动的离线行）；每行昵称后一个人设图标（点击弹独立浮层）。
-           默认收起为窄图标条：头像退安静样式、状态由外圈色环承担、需处理脉冲。 ═══ -->
+           默认收起为窄图标条：头像保持平台色、状态由右下角独立状态点承担、需处理脉冲。 ═══ -->
       <aside id="env-rail" class="env-rail collapsed hidden" aria-label="环境栏">
         <div class="rail-head">
           <span class="rail-title">环境 <span id="rail-count">0</span></span>
@@ -98,7 +98,7 @@
         <div id="rail-sum" class="rail-sum hidden">
           <span class="sum-chip run" id="rail-sum-run">▶ 0</span>
           <span class="sum-chip attn" id="rail-sum-attn">⚠ 0</span>
-          <span class="sum-chip idle" id="rail-sum-idle">⏸ 0</span>
+          <span class="sum-chip idle" id="rail-sum-idle">○ 0</span>
         </div>
         <div id="rail-list" class="rail-list"></div>
         <button id="rail-foot-add" class="rail-foot-add" type="button" title="环境管理" aria-label="环境管理"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.5 4h4M9.5 4h4M7.5 2.5v3M2.5 8h7M12.5 8h1M10.5 6.5v3M2.5 12h2M7.5 12h6M5.5 10.5v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg></button>

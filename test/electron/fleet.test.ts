@@ -229,6 +229,25 @@ test('createStaggerQueue：相邻任务开始间隔 ≥ spacing；单任务失�
   assert.equal(sleeps.length >= 2, true);
 });
 
+test('createStaggerQueue：带 key 的前置准备项暴露当前等待位次，执行项不冒充排队', async () => {
+  const queue = fleet.createStaggerQueue({ spacingMs: 0 });
+  let releaseHead!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseHead = resolve; });
+  const head = queue.enqueue(async () => {
+    await gate;
+    return true;
+  }, 'head');
+  await Promise.resolve();
+  const second = queue.enqueue(async () => true, 'second');
+  const third = queue.enqueue(async () => true, 'third');
+  assert.equal(queue.pendingPosition('head'), null);
+  assert.equal(queue.pendingPosition('second'), 1);
+  assert.equal(queue.pendingPosition('third'), 2);
+  releaseHead();
+  await Promise.all([head, second, third]);
+  assert.equal(queue.pendingPosition('second'), null);
+});
+
 // ── 同账号铺多环境检测 ──
 
 test('duplicateAccountGroups：同账号两环境成组；无账号/单环境不报', () => {

@@ -10,8 +10,9 @@ import { createRequire } from 'node:module';
 // 引导处理流 / 全部启动内存拦阻 —— 用真实 index.html + ui-logic.js + renderer.js 在 jsdom 里驱动。
 const require = createRequire(import.meta.url);
 const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
-  fleetLevel: (s: unknown, now: number) => { level: string; needsAction: boolean; label: string };
-  fleetRailModel: (l: unknown[], now: number) => { rows: Array<{ envId: string; level: string; needsAction: boolean }>; pendingCount: number };
+  fleetLevel: (s: unknown, now: number) => { level: string; needsAction: boolean; label: string; state: string; railGroup: string; detail: string };
+  fleetRailModel: (l: unknown[], now: number) => { rows: Array<{ envId: string; level: string; state: string; railGroup: string; needsAction: boolean }>; pendingCount: number };
+  batchStartReady: (s: unknown) => boolean;
   synthesizeHealth: (s: unknown) => { label: string; detail: string };
   detailRows: (s: unknown) => Array<{ key: string; value: string }>;
   FLEET_STALE_MS: number;
@@ -224,10 +225,42 @@ test('fleetLevel：冷启动窗口留在 launching，绝不冒充需要人工', 
 test('fleetLevel：自动化状态统一使用无重复主体的短标签', () => {
   const now = Date.now();
   const updatedAt = new Date(now).toISOString();
-  assert.equal(uiLogic.fleetLevel({ automationState: 'starting', updatedAt }, now).label, '处理中');
-  assert.equal(uiLogic.fleetLevel({ automationState: 'ready', engineLinkState: 'connected', updatedAt }, now).label, '已就绪');
+  assert.equal(uiLogic.fleetLevel({ automationState: 'starting', updatedAt }, now).label, '启动中');
+  assert.equal(uiLogic.fleetLevel({ automationState: 'ready', engineLinkState: 'connected', browserState: 'ready', updatedAt }, now).label, '待任务');
   assert.equal(uiLogic.fleetLevel({ automationState: 'running', engineLinkState: 'connected', updatedAt }, now).label, '运行中');
   assert.equal(uiLogic.fleetLevel({ automationState: 'error', updatedAt }, now).label, '异常');
+});
+
+test('fleetLevel：待任务与待机按浏览器占位区分，主状态最多三个汉字', () => {
+  const now = Date.now();
+  const updatedAt = new Date(now).toISOString();
+  const ready = uiLogic.fleetLevel({ automationState: 'ready', engineLinkState: 'connected', browserState: 'ready', updatedAt }, now);
+  const standby = uiLogic.fleetLevel({ automationState: 'ready', engineLinkState: 'connected', browserState: 'closed', updatedAt }, now);
+  assert.deepEqual({ label: ready.label, state: ready.state, group: ready.railGroup }, { label: '待任务', state: 'ready', group: 'ready' });
+  assert.deepEqual({ label: standby.label, state: standby.state, group: standby.railGroup }, { label: '待机中', state: 'standby', group: 'standby' });
+
+  const statuses = [
+    { automationState: 'running', engineLinkState: 'connected', browserState: 'ready' },
+    { automationState: 'starting', engineLinkState: 'connecting', browserState: 'starting' },
+    { automationState: 'waiting_resource', browserState: 'queued' },
+    { automationState: 'paused', browserState: 'closed' },
+    { automationState: 'stopped', browserState: 'closed' },
+    { automationState: 'running', overlayBlocked: true },
+    { automationState: 'stopped', auth: 'login required' },
+    { automationState: 'stopped', sameAccountWarning: { message: 'duplicate' } },
+  ];
+  for (const status of statuses) {
+    const label = uiLogic.fleetLevel({ ...status, updatedAt }, now).label;
+    assert.ok([...label].length <= 3, `${label} 不得超过三个汉字`);
+  }
+});
+
+test('batchStartReady：核心存活不等于启动完成，只认运行或可立即接任务', () => {
+  assert.equal(uiLogic.batchStartReady({ edge: 'running', automationState: 'starting', engineLinkState: 'connecting', browserState: 'starting' }), false);
+  assert.equal(uiLogic.batchStartReady({ edge: 'running', automationState: 'waiting_resource', engineLinkState: 'connected', browserState: 'queued' }), false);
+  assert.equal(uiLogic.batchStartReady({ edge: 'running', automationState: 'ready', engineLinkState: 'connected', browserState: 'closed' }), false, '待机不占浏览器槽位，不冒充全部启动完成');
+  assert.equal(uiLogic.batchStartReady({ edge: 'running', automationState: 'ready', engineLinkState: 'connected', browserState: 'ready' }), true);
+  assert.equal(uiLogic.batchStartReady({ edge: 'running', automationState: 'running', engineLinkState: 'connected', browserState: 'closed' }), true, '浏览器无关任务运行时仍是真运行');
 });
 
 test('fleetLevel：连上过之后掉线才升为需处理的「重连中」', () => {
@@ -248,15 +281,18 @@ test('fleetLevel：放弃重启和冻结为 error；账号重复运行为 attent
   const warn = uiLogic.fleetLevel({ edge: 'stopped', session: 'idle', sameAccountWarning: { message: 'x' } }, now);
   assert.equal(warn.level, 'attention');
   assert.equal(warn.needsAction, true);
-  assert.equal(warn.label, '账号重复运行');
+  assert.equal(warn.label, '有冲突');
+  assert.equal(warn.detail, '账号重复运行');
 });
 
-test('restricted 在健康、风险明细和环境栏统一明确显示「账号受限」', () => {
+test('restricted 在完整明细保留账号受限，环境栏使用三字主状态并保留原因', () => {
   const now = Date.now();
   const status = { risk: 'restricted', edge: 'stopped', session: 'idle', cloud: 'disconnected' };
-  assert.equal(uiLogic.synthesizeHealth(status).label, '账号受限');
+  assert.equal(uiLogic.synthesizeHealth(status).label, '受限制');
+  assert.match(uiLogic.synthesizeHealth(status).detail, /账号受限/);
   assert.equal(uiLogic.detailRows(status).find((row) => row.key === 'risk')?.value, '账号受限');
-  assert.equal(uiLogic.fleetLevel(status, now).label, '账号受限');
+  assert.equal(uiLogic.fleetLevel(status, now).label, '受限制');
+  assert.equal(uiLogic.fleetLevel(status, now).detail, '账号受限');
 });
 
 test('fleetLevel：暂停与关闭共享 offline 级别但标签明确区分，供渲染层拆组', () => {
@@ -266,7 +302,7 @@ test('fleetLevel：暂停与关闭共享 offline 级别但标签明确区分，�
   assert.equal(paused.level, 'offline');
   assert.equal(paused.label, '已暂停');
   assert.equal(closed.level, 'offline');
-  assert.equal(closed.label, '已就绪');
+  assert.equal(closed.label, '未启动');
 });
 
 test('红线：阻断浮层（验证码/登录墙）即便 edge 仍 running 也判需处理，绝不呈现为绿色在线', () => {
@@ -314,12 +350,16 @@ test('环境栏：fleet 快照建行、默认收起、点选切换主区域并�
   );
 });
 
-test('环境栏：普通状态拆成运行中、暂停、离线三组，需处理仍浮顶且每行只出现一次', async () => {
+test('环境栏：现有框架按运行阶段分组，排队位次独立展示且每行只出现一次', async () => {
   const environments = [
     { envId: 'env-attn', name: '需处理环境', status: makeStatus({ envId: 'env-attn', overlayBlocked: true }) },
-    { envId: 'env-running', name: '运行环境', status: makeStatus({ envId: 'env-running' }) },
-    { envId: 'env-paused', name: '暂停环境', status: makeStatus({ envId: 'env-paused', session: 'paused' }) },
-    { envId: 'env-offline', name: '离线环境', status: makeStatus({ envId: 'env-offline', edge: 'stopped', session: 'closed' }) },
+    { envId: 'env-running', name: '运行环境', status: makeStatus({ envId: 'env-running', automationState: 'running', engineLinkState: 'connected', browserState: 'ready' }) },
+    { envId: 'env-ready', name: '待任务环境', status: makeStatus({ envId: 'env-ready', automationState: 'ready', engineLinkState: 'connected', browserState: 'ready' }) },
+    { envId: 'env-starting', name: '启动环境', status: makeStatus({ envId: 'env-starting', automationState: 'starting', engineLinkState: 'connecting', browserState: 'starting' }) },
+    { envId: 'env-queued', name: '排队环境', status: makeStatus({ envId: 'env-queued', automationState: 'waiting_resource', engineLinkState: 'disconnected', browserState: 'queued', queuePosition: 2 }) },
+    { envId: 'env-standby', name: '待机环境', status: makeStatus({ envId: 'env-standby', automationState: 'ready', engineLinkState: 'connected', browserState: 'closed' }) },
+    { envId: 'env-paused', name: '暂停环境', status: makeStatus({ envId: 'env-paused', session: 'paused', automationState: 'paused', browserState: 'closed' }) },
+    { envId: 'env-offline', name: '离线环境', status: makeStatus({ envId: 'env-offline', edge: 'stopped', session: 'closed', automationState: 'stopped', engineLinkState: 'disconnected', browserState: 'closed' }) },
   ];
   const { w } = await boot({
     fleetGet: async () => ({
@@ -335,7 +375,7 @@ test('环境栏：普通状态拆成运行中、暂停、离线三组，需处�
 
   const list = w.document.querySelector('#rail-list')!;
   const groupTitles = [...list.querySelectorAll('.rail-group')].map((group) => group.firstChild?.textContent?.trim());
-  assert.deepEqual(groupTitles, ['需要处理', '运行中', '暂停', '离线']);
+  assert.deepEqual(groupTitles, ['需要处理', '运行中', '待任务', '启动中', '排队中', '待机中', '暂停', '离线']);
   assert.doesNotMatch(list.textContent || '', /暂停\s*·\s*离线/);
 
   const sequence = [...list.children].map((node) =>
@@ -346,12 +386,24 @@ test('环境栏：普通状态拆成运行中、暂停、离线三组，需处�
   assert.deepEqual(sequence, [
     'group:需要处理', 'row:env-attn',
     'group:运行中', 'row:env-running',
+    'group:待任务', 'row:env-ready',
+    'group:启动中', 'row:env-starting',
+    'group:排队中', 'row:env-queued',
+    'group:待机中', 'row:env-standby',
     'group:暂停', 'row:env-paused',
     'group:离线', 'row:env-offline',
   ]);
   for (const env of environments) {
     assert.equal(list.querySelectorAll(`.rail-row[data-env-id="${env.envId}"]`).length, 1, `${env.name} 只属于一个分组`);
   }
+  const queued = list.querySelector('.rail-row[data-env-id="env-queued"]') as HTMLElement;
+  assert.equal(queued.classList.contains('state-queued'), true);
+  assert.equal(queued.querySelector('.rail-queue-position')?.textContent, '#2', '展开态位次与三字状态分开显示');
+  assert.equal(queued.querySelector('.rail-queue-badge')?.textContent, '2', '收起态复用同一结构化位次徽标');
+  assert.match(queued.title, /排队中 #2/);
+  assert.equal((list.querySelector('.rail-row[data-env-id="env-standby"]') as HTMLElement).classList.contains('state-standby'), true);
+  assert.match(rendererCss, /\.rail-row\.state-queued \.rail-dot\s*\{[^}]*background:\s*transparent;[^}]*border:\s*1\.5px solid #3b6ff0;/s);
+  assert.match(rendererCss, /\.rail-row\.state-standby \.rail-dot\s*\{[^}]*background:\s*transparent;[^}]*border:\s*1\.5px solid #16a34a;/s);
 });
 
 test('环境头像三态：①未选中→选中 ②再点→抬前显示（shown 态）③再点→归位（撤 shown）', async () => {
@@ -1065,6 +1117,39 @@ test('全部启动：启动排队有界接收，超出部分如实提示且不�
   assert.equal(callCount, 1, '只发一次可审计的启动请求，不做 force 重试');
   assert.equal(w.document.querySelector('#rail-ram-confirm'), null, '动态内存确认与 force 入口应移除');
   assert.match(w.document.querySelector('#rail-msg')!.textContent!, /2 个未加入|另 2 个/);
+});
+
+test('全部启动进度：edge running 不提前计数，待任务或运行才完成', async () => {
+  const starting = (envId: string) => makeStatus({
+    envId,
+    edge: 'running',
+    automationState: 'starting',
+    engineLinkState: 'connecting',
+    browserState: 'starting',
+  });
+  const environments = [
+    { envId: 'env-a', profileId: 'a', name: '环境 A', platform: 'xiaohongshu', status: starting('env-a') },
+    { envId: 'env-b', profileId: 'b', name: '环境 B', platform: 'xiaohongshu', status: starting('env-b') },
+  ];
+  const { w, pushStatus } = await boot({
+    fleetGet: async () => ({ provider: 'adspower', selectedEnvId: 'env-a', railCollapsed: false, environments }),
+    fleetStartAll: async () => ({ ok: true, queued: 2, envIds: ['env-a', 'env-b'] }),
+  }, {
+    railCollapsed: false,
+    environments: environments.map((env) => ({ profileId: env.profileId, name: env.name, platform: env.platform })),
+  });
+
+  (w.document.querySelector('#rail-start-all') as HTMLButtonElement).click();
+  await tick();
+  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /0\/2/, '核心虽存活，启动/连接阶段仍是 0/2');
+
+  pushStatus(makeStatus({ envId: 'env-a', automationState: 'ready', engineLinkState: 'connected', browserState: 'ready' }));
+  await tick();
+  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /1\/2/, '浏览器就绪的待任务环境计入完成');
+
+  pushStatus(makeStatus({ envId: 'env-b', automationState: 'running', engineLinkState: 'connected', browserState: 'closed' }));
+  await tick();
+  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /2 个环境开始自动化/, '真实运行完成批次');
 });
 
 test('平台筛选：默认全部；切换后列表、计数、选中环境与全部启动范围同步', async () => {

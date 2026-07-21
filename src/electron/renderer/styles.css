@@ -2617,6 +2617,43 @@ body::-webkit-scrollbar:vertical,
 .rail-row.lv-launching .rail-ava { --rail-state: #3b6ff0; }
 .rail-row.lv-offline .rail-ava { --rail-state: #94a3b8; }
 .rail-row.lv-stale .rail-ava { --rail-state: #ca8a04; }
+/* 运行类别由 state-* 一处定义；level 仍只承担严重度/兼容上色。 */
+.rail-row.state-running .rail-ava,
+.rail-row.state-ready .rail-ava { --rail-state: #16a34a; }
+.rail-row.state-starting .rail-ava,
+.rail-row.state-queued .rail-ava { --rail-state: #3b6ff0; }
+.rail-row.state-standby .rail-ava { --rail-state: #16a34a; }
+.rail-row.state-paused .rail-ava,
+.rail-row.state-offline .rail-ava { --rail-state: #94a3b8; }
+.env-rail.collapsed .rail-row.state-queued .rail-ava::after {
+  background: #fff;
+  border-color: #3b6ff0;
+}
+.env-rail.collapsed .rail-row.state-standby .rail-ava::after {
+  background: #fff;
+  border-color: #16a34a;
+}
+.rail-queue-badge { display: none; }
+.env-rail.collapsed .rail-row.state-queued .rail-queue-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  display: inline-flex;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #fff;
+  border-radius: 999px;
+  background: #3b6ff0;
+  color: #fff;
+  font-size: 8px;
+  font-weight: 750;
+  line-height: 1;
+  box-shadow: 0 1px 3px rgba(37, 99, 235, .28);
+}
 /* 平台标识与运行状态正交：头像底色表平台（FB 蓝），右下角小圆点表状态。 */
 .rail-row.plat-facebook .rail-ava { background: linear-gradient(135deg, #4a99ff, var(--plat-fb)); }
 .env-rail.collapsed .rail-row.plat-facebook .rail-ava { background: linear-gradient(135deg, #4a99ff, var(--plat-fb)); color: #fff; }
@@ -2657,6 +2694,27 @@ body::-webkit-scrollbar:vertical,
 .rail-row.lv-error .rail-dot { background: #dc2626; }
 .rail-row.lv-launching .rail-dot { background: #3b6ff0; }
 .rail-row.lv-stale .rail-dot { background: #ca8a04; }
+.rail-row.state-running .rail-dot,
+.rail-row.state-ready .rail-dot { background: #16a34a; }
+.rail-row.state-starting .rail-dot { background: #3b6ff0; }
+.rail-row.state-paused .rail-dot,
+.rail-row.state-offline .rail-dot { background: #94a3b8; }
+.rail-row.state-queued .rail-dot {
+  box-sizing: border-box;
+  background: transparent;
+  border: 1.5px solid #3b6ff0;
+}
+.rail-row.state-standby .rail-dot {
+  box-sizing: border-box;
+  background: transparent;
+  border: 1.5px solid #16a34a;
+}
+.rail-queue-position {
+  color: #3b6ff0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  letter-spacing: .01em;
+}
 .rail-row.lv-attention .rail-state { color: #b45309; font-weight: 600; }
 .rail-row.lv-error .rail-state { color: #b91c1c; font-weight: 650; }
 

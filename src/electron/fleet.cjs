@@ -220,10 +220,16 @@ function createStaggerQueue(opts = {}) {
   let lastStartAt = -Infinity;
   let chain = Promise.resolve();
   let pending = 0;
+  const items = [];
 
-  function enqueue(fn) {
+  function enqueue(fn, key = null) {
     pending += 1;
+    const item = { key, started: false };
+    items.push(item);
     const run = chain.then(async () => {
+      // Once chain ownership passes to this item it is executing (including the
+      // spacing gate), so it no longer has a waiting position.
+      item.started = true;
       const wait = lastStartAt + spacingMs - now();
       if (wait > 0) await sleep(wait);
       lastStartAt = now();
@@ -233,6 +239,8 @@ function createStaggerQueue(opts = {}) {
         return { ok: false, error: (e && e.message) || String(e) };
       } finally {
         pending -= 1;
+        const index = items.indexOf(item);
+        if (index >= 0) items.splice(index, 1);
       }
     });
     chain = run.then(
@@ -242,7 +250,14 @@ function createStaggerQueue(opts = {}) {
     return run;
   }
 
-  return { enqueue, pendingCount: () => pending };
+  return {
+    enqueue,
+    pendingCount: () => pending,
+    pendingPosition: (key) => {
+      const index = items.filter((item) => !item.started).findIndex((item) => item.key === key);
+      return index >= 0 ? index + 1 : null;
+    },
+  };
 }
 
 /**
@@ -461,6 +476,7 @@ function createSerialLaunchQueue(opts = {}) {
   let running = false;
   let lastStartAt = -Infinity;
   let order = 0;
+  const comparePending = (a, b) => b.priority - a.priority || a.order - b.order;
 
   function enqueue({ key, kind = 'resume', deadlineAt, run }) {
     return new Promise((resolve) => {
@@ -482,7 +498,7 @@ function createSerialLaunchQueue(opts = {}) {
     running = true;
     try {
       while (queue.length > 0) {
-        queue.sort((a, b) => b.priority - a.priority || a.order - b.order);
+        queue.sort(comparePending);
         const item = queue.shift();
         // 死线已过：绝不再启动一个没人等的浏览器（它会白占一个槽位）。
         if (now() >= item.deadlineAt) {
@@ -512,6 +528,12 @@ function createSerialLaunchQueue(opts = {}) {
   return {
     enqueue,
     pendingCount: () => queue.length,
+    // One-based position among items that are still pending. The currently executing
+    // item has already left this array and therefore has no queue position.
+    pendingPosition: (key) => {
+      const index = [...queue].sort(comparePending).findIndex((item) => item.key === key);
+      return index >= 0 ? index + 1 : null;
+    },
     isRunning: () => running,
   };
 }

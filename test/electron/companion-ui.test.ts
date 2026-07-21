@@ -122,7 +122,7 @@ test('风控警戒与登录协助用琥珀；真正异常使用独立错误态',
   pushStatus(makeStatus({ risk: 'warned' }));
   assert.ok($(w, '#titlebar').classList.contains('tone-warned'));
   pushStatus(makeStatus({ auth: 'login required', edge: 'stopped', session: 'idle' }));
-  assert.equal($(w, '#health-label').textContent, '需要协助');
+  assert.equal($(w, '#health-label').textContent, '需处理');
   assert.ok($(w, '#health-pill').classList.contains('attention'));
   pushStatus(makeStatus({ edge: 'warning' }));
   assert.equal($(w, '#health-label').textContent, '异常');

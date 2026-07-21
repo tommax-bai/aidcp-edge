@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const fleet = require('../../src/electron/fleet.cjs');
 const uiLogic = require('../../src/electron/renderer/ui-logic.js');
+const mainSource = readFileSync(new URL('../../src/electron/main.cjs', import.meta.url), 'utf8');
 
 // ---------------------------------------------------------------------------
 // change browser-slot-scheduling：槽位池 + 串行启动队列
@@ -43,6 +45,18 @@ test('客户端将等待浏览器执行位统一显示为“排队中”', () =>
   const status = { automationState: 'waiting_resource' };
   assert.equal(uiLogic.synthesizeHealth(status).label, '排队中');
   assert.equal(uiLogic.fleetLevel(status, Date.now()).label, '排队中');
+});
+
+test('主进程从权威调度器结构化投影位次，不解析状态文案', () => {
+  const start = mainSource.indexOf('function lifecycleQueueProjection(handle)');
+  const end = mainSource.indexOf('\nfunction statusOf(handle)', start);
+  assert.ok(start >= 0 && end > start, '主进程应存在独立队列投影函数');
+  const block = mainSource.slice(start, end);
+  assert.match(block, /slotWaiters\(\)\.findIndex/);
+  assert.match(block, /launchQueue\.pendingPosition\(handle\.envId\)/);
+  assert.match(block, /queueStage:\s*'preparing',\s*queuePosition:\s*lifecycleQueue\.pendingPosition\(handle\.envId\)/);
+  assert.doesNotMatch(block, /lastMessage|match\(|parseInt|正则/, '位次不得从文案或日志解析');
+  assert.match(mainSource, /\.\.\.lifecycleQueueProjection\(handle\)/, '结构化字段必须进入 statusOf 快照');
 });
 
 test('单环境内存估值默认取实测口径 700MB（旧的 1GB 是没量过的设计缺省）', () => {
@@ -93,6 +107,36 @@ test('优先级：手动任务 > 带任务的唤醒 > 普通续场恢复', async
   await Promise.all([head, rest]);
 
   assert.deepEqual(order, ['head', 'manual-1', 'task-1', 'resume-1']);
+});
+
+test('串行启动队列只投影当前可证明的待处理位次，并随优先级实时重排', async () => {
+  const queue = fleet.createSerialLaunchQueue({ spacingMs: 0 });
+  let releaseHead!: () => void;
+  const headGate = new Promise<void>((resolve) => { releaseHead = resolve; });
+  const head = queue.enqueue({
+    key: 'head',
+    kind: 'resume',
+    run: async () => {
+      await headGate;
+      return true;
+    },
+  });
+  const resume = queue.enqueue({ key: 'resume', kind: 'resume', run: async () => true });
+  assert.equal(queue.pendingPosition('resume'), 1, '当前执行项已经出队，待处理项从 #1 开始');
+
+  const task = queue.enqueue({ key: 'task', kind: 'task', run: async () => true });
+  assert.equal(queue.pendingPosition('task'), 1, '任务唤醒按现有优先级排到普通续场前');
+  assert.equal(queue.pendingPosition('resume'), 2);
+
+  const manual = queue.enqueue({ key: 'manual', kind: 'manual', run: async () => true });
+  assert.equal(queue.pendingPosition('manual'), 1);
+  assert.equal(queue.pendingPosition('task'), 2);
+  assert.equal(queue.pendingPosition('resume'), 3);
+  assert.equal(queue.pendingPosition('head'), null, '正在执行的项不是排队项，不伪造 #0/#1');
+  assert.equal(queue.pendingPosition('missing'), null);
+
+  releaseHead();
+  await Promise.all([head, manual, task, resume]);
 });
 
 test('一个环境启动失败绝不阻塞队列里其余环境', async () => {

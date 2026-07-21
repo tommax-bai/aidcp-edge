@@ -101,7 +101,8 @@ test('健康合成：可恢复状态需要协助，真正中断状态为错误',
   assert.equal(uiLogic.synthesizeHealth(st({ risk: 'restricted' })).code, 'attention');
   const executorError = uiLogic.synthesizeHealth(st({ browserState: 'error', coreState: 'online', cloudState: 'connected' }));
   assert.equal(executorError.code, 'attention');
-  assert.equal(executorError.label, '浏览器异常');
+  assert.equal(executorError.label, '异常');
+  assert.match(executorError.detail, /浏览器异常/);
   assert.match(executorError.detail, /数据管理仍可用/);
 });
 
@@ -146,16 +147,32 @@ test('健康合成：状态标签省略重复主体，详情仍说明真实阶�
   assert.equal(paused.code, 'paused');
   assert.equal(paused.label, '已暂停');
   const closed = uiLogic.synthesizeHealth(st({ automationState: 'stopped', engineLinkState: 'disconnected', browserState: 'closed' }));
-  assert.equal(closed.label, '已就绪');
+  assert.equal(closed.label, '未启动');
   assert.match(closed.detail, /数据管理可直接使用/);
   const starting = uiLogic.synthesizeHealth(st({ automationState: 'starting', engineLinkState: 'connecting' }));
   assert.equal(starting.code, 'ready');
   assert.equal(starting.label, '启动中');
   assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'pausing' })).label, '暂停中');
   assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'stopping' })).label, '关闭中');
-  assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'ready', engineLinkState: 'connected' })).label, '已就绪');
+  assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'ready', engineLinkState: 'connected' })).label, '待任务');
   assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'error' })).label, '异常');
   assert.equal(uiLogic.synthesizeHealth(st({ automationState: 'stopped', engineLinkState: 'disconnected' })).code, 'ready');
+});
+
+test('健康合成：主状态最多三个汉字，具体对象和原因留在详情', () => {
+  const cases = [
+    st({ automationState: 'running' }),
+    st({ clientSessionState: 'signed_out' }),
+    st({ risk: 'frozen' }),
+    st({ risk: 'restricted' }),
+    st({ auth: 'login required', automationState: 'stopped' }),
+    st({ browserState: 'error', automationState: 'ready' }),
+  ];
+  for (const status of cases) {
+    const view = uiLogic.synthesizeHealth(status);
+    assert.ok([...view.label].length <= 3, `${view.label} 不得超过三个汉字`);
+    assert.ok(view.detail, `${view.label} 应保留独立详情`);
+  }
 });
 
 test('标题带色调随风控状态', () => {

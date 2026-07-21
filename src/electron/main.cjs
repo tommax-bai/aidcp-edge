@@ -1766,8 +1766,8 @@ function broadcastFleet() {
 const lifecycleQueue = fleet.createStaggerQueue({
   spacingMs: Number(process.env.AIDCP_FLEET_STAGGER_MS) > 0 ? Number(process.env.AIDCP_FLEET_STAGGER_MS) : undefined,
 });
-function queueLifecycle(fn) {
-  return lifecycleQueue.enqueue(fn);
+function queueLifecycle(fn, key = null) {
+  return lifecycleQueue.enqueue(fn, key);
 }
 
 // ── 浏览器执行槽位 + 有界串行启动队列（change browser-slot-scheduling）──
@@ -4226,7 +4226,7 @@ function enqueueStartFlow(handle) {
         releaseStartQueue(handle);
       }
     }
-  });
+  }, handle.envId);
   return true;
 }
 
@@ -4998,6 +4998,26 @@ function lifecycleAxes(handle) {
   return { clientSessionState, engineLinkState, automationState, browserState, coreState, cloudState };
 }
 
+/**
+ * The renderer may show an exact queue number only when the scheduler that owns
+ * the current stage can prove it. An item already taken by a queue for execution
+ * intentionally has no numeric waiting position.
+ */
+function lifecycleQueueProjection(handle) {
+  if (!handle) return { queueStage: null, queuePosition: null };
+  if (handle.slotWaitingSince) {
+    const position = slotWaiters().findIndex((waiting) => waiting === handle);
+    return { queueStage: 'slot', queuePosition: position >= 0 ? position + 1 : null };
+  }
+  if (handle.launchQueued) {
+    return { queueStage: 'launch', queuePosition: launchQueue.pendingPosition(handle.envId) };
+  }
+  if (handle.startFlowQueued) {
+    return { queueStage: 'preparing', queuePosition: lifecycleQueue.pendingPosition(handle.envId) };
+  }
+  return { queueStage: null, queuePosition: null };
+}
+
 function statusOf(handle) {
   if (!handle) {
     return {
@@ -5010,6 +5030,8 @@ function statusOf(handle) {
       cloudState: 'offline',
       automationState: 'stopped',
       browserState: 'closed',
+      queueStage: null,
+      queuePosition: null,
     };
   }
   handle.status.commandDiagnostics = commandDiagnostics.pruneCommandDiagnostics(
@@ -5019,6 +5041,7 @@ function statusOf(handle) {
   return {
     ...handle.status,
     ...lifecycleAxes(handle),
+    ...lifecycleQueueProjection(handle),
     targetCloudKey: handle.status.targetCloudKey || cloudSelectionView().key,
     envId: handle.envId,
     envName: handle.name,
