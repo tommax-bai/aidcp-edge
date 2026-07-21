@@ -67,7 +67,7 @@ async function boot(
   let pushStatus: (s: unknown) => void = () => undefined;
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], closeAll: [], personaPreview: [], personaFill: [], select: [], close: [], browserOpen: [], browserClose: [], notify: [], start: [], resume: [], saveNickname: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], closeAll: [], personaPreview: [], personaFill: [], select: [], close: [], browserOpen: [], browserClose: [], notify: [], start: [], resume: [], saveNickname: [], updateProxies: [] };
   const personaStatusByEnv = new Map<string, Record<string, unknown>>();
   const settings = {
     provider: 'adspower',
@@ -162,6 +162,21 @@ async function boot(
     restart: async () => makeStatus(),
     adsStatus: async () => ({ ok: false, error: 'not running' }),
     adsListProfiles: async () => ({ ok: true, profiles: [] }),
+    adsGetEnvProxy: async () => ({ ok: true, noProxy: true, proxy: { proxyType: 'no_proxy' } }),
+    adsParseProxyLines: async ({ proxyType, proxyText }: { proxyType?: string; proxyText?: string }) => {
+      if (proxyType === 'no_proxy') return { ok: true, noProxy: true, proxies: [] };
+      const proxies = String(proxyText || '').split(/\r?\n/).filter(Boolean).map((line) => {
+        const [proxyHost, proxyPort, proxyUser = '', ...password] = line.split(':');
+        return { proxyType, proxyHost, proxyPort, proxyUser, proxyPassword: password.join(':') };
+      });
+      return proxies.length > 0 ? { ok: true, noProxy: false, proxies } : { ok: false, error: '请至少粘贴一条代理资料' };
+    },
+    adsUpdateEnvProxy: async () => ({ ok: true }),
+    adsUpdateEnvProxies: async (args: unknown) => {
+      calls.updateProxies.push(args);
+      const count = ((args as { userIds?: unknown[] }).userIds || []).length;
+      return { ok: true, updatedCount: count };
+    },
     adsTemplates: async () => [],
     openFeishu: async () => ({ ok: true }),
     ...apiOver,
@@ -1272,7 +1287,7 @@ test('同账号告警：选中环境带 sameAccountWarning → 主区域出告�
 
 // ── 花名册多选（adspower-desktop-env-picker MODIFIED）──
 
-test('花名册：点选多个环境累积加入、重复点选诚实提示已加入、可移出', async () => {
+test('环境管理：点选多个环境累积加入、重复点选提示已加入、可移出', async () => {
   const { w } = await boot({
     adsStatus: async () => ({ ok: true }),
     adsListProfiles: async () => ({
@@ -1298,7 +1313,8 @@ test('花名册：点选多个环境累积加入、重复点选诚实提示已�
   // 重复点选 p3 → 诚实提示已在花名册、不重复加入
   (w.document.querySelectorAll('.ads-env-item')[2] as HTMLElement).click();
   await tick();
-  assert.match(w.document.querySelector('#ads-env-msg')!.textContent!, /已在运行花名册/);
+  assert.match(w.document.querySelector('#ads-env-msg')!.textContent!, /已加入/);
+  assert.doesNotMatch(w.document.querySelector('#ads-env-msg')!.textContent!, /客户端|花名册/);
   // 移出 p3
   const removeBtn = w.document.querySelectorAll('.ads-env-item')[2].querySelector('.ads-env-remove') as HTMLElement;
   removeBtn.click();
@@ -1323,13 +1339,16 @@ test('根治 #1：加入环境即时落盘（saveSettings 带 environments），
   assert.ok(envSave, '加入环境必须立即 saveSettings 带 environments（含 pX）');
 });
 
-test('环境栏「＋」打开添加面板；设置抽屉已精简（环境列表 / 人设向导不在抽屉里）', async () => {
+test('环境栏「管理」打开环境管理；设置抽屉已精简', async () => {
   const { w } = await boot();
-  // 左栏「＋ 添加环境」拉起独立浮层
+  // 左栏「管理」拉起独立浮层。
   assert.equal(w.document.querySelector('#env-add-panel')!.classList.contains('open'), false);
   (w.document.querySelector('#rail-add') as HTMLElement).click();
   const panel = w.document.querySelector('#env-add-panel')!;
-  assert.equal(panel.classList.contains('open'), true, '「＋」打开添加环境面板');
+  assert.equal(panel.classList.contains('open'), true, '「管理」打开环境管理');
+  assert.equal(panel.getAttribute('aria-label'), '环境管理');
+  assert.equal(w.document.querySelector('#env-tab-join')!.textContent!.trim(), '环境');
+  assert.equal(w.document.querySelector('#env-tab-create')!.textContent!.trim(), '新建环境');
   assert.equal(panel.classList.contains('hidden'), false, '打开必须移除 hidden（.hidden 是 !important，否则只见遮罩不见内容）');
   // 环境列表与人设向导都在左栏浮层里，不在设置抽屉 #drawer 里
   const drawer = w.document.querySelector('#drawer')!;
@@ -1337,6 +1356,146 @@ test('环境栏「＋」打开添加面板；设置抽屉已精简（环境列�
   assert.equal(drawer.contains(w.document.querySelector('#persona-wizard-body')), false, '人设向导不在设置抽屉');
   // 人设向导在人设浮层里
   assert.equal(w.document.querySelector('#persona-pop')!.contains(w.document.querySelector('#persona-wizard-body')), true);
+});
+
+test('环境管理：默认无复选框，批量代理按勾选顺序冻结目标并去密预览', async () => {
+  const profiles = [
+    { userId: 'p1', name: '环境一', serialNumber: '1', groupName: '', proxy: 'old:1', platform: 'xiaohongshu' },
+    { userId: 'p2', name: '环境二', serialNumber: '2', groupName: '', proxy: 'old:2', platform: 'xiaohongshu' },
+    { userId: 'p3', name: '环境三', serialNumber: '3', groupName: '', proxy: '无代理配置', platform: 'facebook' },
+  ];
+  const { w, calls } = await boot({
+    adsStatus: async () => ({ ok: true }),
+    adsListProfiles: async () => ({ ok: true, profiles }),
+    adsParseProxyLines: async () => ({
+      ok: true,
+      noProxy: false,
+      proxies: [
+        { proxyType: 'https', proxyHost: 'a.example', proxyPort: '8001', proxyUser: 'user-a', proxyPassword: 'secret-a' },
+        { proxyType: 'https', proxyHost: 'b.example', proxyPort: '8002', proxyUser: 'user-b', proxyPassword: 'secret-b' },
+      ],
+    }),
+  });
+  (w.document.querySelector('#rail-add') as HTMLElement).click();
+  await tick();
+  await tick();
+  assert.equal(w.document.querySelectorAll('.ads-env-check').length, 0, '普通管理态不常驻复选框');
+  const normalText = w.document.querySelector('#ads-env-list')!.textContent || '';
+  assert.match(normalText, /已加入/);
+  assert.match(normalText, /未加入/);
+  assert.doesNotMatch(normalText, /已加入客户端|花名册/);
+
+  (w.document.querySelector('#ads-batch-proxy-toggle') as HTMLElement).click();
+  const draft = w.document.querySelector('#ads-batch-proxy-text') as HTMLTextAreaElement;
+  draft.value = 'temporary.example:8000';
+  (w.document.querySelector('#ads-batch-proxy-toggle') as HTMLElement).click();
+  assert.equal(w.document.querySelectorAll('.ads-env-check').length, 0, '取消后复选框消失');
+  assert.equal(draft.value, '', '取消后清空临时代理输入');
+  assert.equal(w.document.querySelector('#ads-batch-proxy-panel')!.classList.contains('hidden'), true);
+
+  (w.document.querySelector('#ads-batch-proxy-toggle') as HTMLElement).click();
+  const rows = [...w.document.querySelectorAll('.ads-env-item')] as HTMLElement[];
+  const checkFor = (name: string) => rows.find((row) => row.textContent?.includes(name))!.querySelector('.ads-env-check') as HTMLInputElement;
+  assert.equal(checkFor('环境一').disabled, true, '运行中环境不可勾选');
+  checkFor('环境三').click();
+  checkFor('环境二').click();
+  const proxyText = w.document.querySelector('#ads-batch-proxy-text') as HTMLTextAreaElement;
+  proxyText.value = 'a.example:8001:user-a:secret-a\nb.example:8002:user-b:secret-b';
+  proxyText.dispatchEvent(new w.Event('input'));
+  await tick();
+  await tick();
+  const preview = w.document.querySelector('#ads-batch-proxy-preview')!.textContent || '';
+  assert.match(preview, /2 个环境 · 2 条代理/);
+  assert.ok(preview.indexOf('环境三 → a.example:8001') < preview.indexOf('环境二 → b.example:8002'), '映射顺序来自勾选顺序');
+  assert.doesNotMatch(preview, /user-a|secret-a|user-b|secret-b/);
+
+  (w.document.querySelector('#ads-batch-proxy-save') as HTMLButtonElement).click();
+  for (let i = 0; i < 4; i += 1) await tick();
+  assert.deepEqual(Array.from((calls.updateProxies[0] as { userIds: string[] }).userIds), ['p3', 'p2']);
+  assert.equal(w.document.querySelectorAll('.ads-env-check').length, 0, '全部成功后退出批量态');
+  assert.equal(proxyText.value, '', '全部成功后清空一次性代理输入');
+  assert.match(w.document.querySelector('#ads-env-msg')!.textContent || '', /已更新 2 个环境.*下次启动生效/);
+});
+
+test('环境管理：批量代理部分失败保留选择和输入', async () => {
+  const profiles = [
+    { userId: 'p2', name: '环境二', serialNumber: '2', groupName: '', proxy: 'old:2', platform: 'xiaohongshu' },
+    { userId: 'p3', name: '环境三', serialNumber: '3', groupName: '', proxy: 'old:3', platform: 'facebook' },
+  ];
+  const secretInput = 'a.example:8001:user-a:secret-a';
+  const { w } = await boot({
+    adsStatus: async () => ({ ok: true }),
+    adsListProfiles: async () => ({ ok: true, profiles }),
+    adsParseProxyLines: async () => ({
+      ok: true,
+      noProxy: false,
+      proxies: [{ proxyType: 'http', proxyHost: 'a.example', proxyPort: '8001', proxyUser: 'user-a', proxyPassword: 'secret-a' }],
+    }),
+    adsUpdateEnvProxies: async () => ({
+      ok: false,
+      error: '第 2 个环境修改失败：AdsPower 拒绝',
+      updatedCount: 1,
+      failedIndex: 2,
+      notAttemptedCount: 0,
+      partial: true,
+    }),
+  });
+  (w.document.querySelector('#rail-add') as HTMLElement).click();
+  await tick();
+  await tick();
+  (w.document.querySelector('#ads-batch-proxy-toggle') as HTMLElement).click();
+  for (const check of [...w.document.querySelectorAll('.ads-env-check')] as HTMLInputElement[]) check.click();
+  const proxyText = w.document.querySelector('#ads-batch-proxy-text') as HTMLTextAreaElement;
+  proxyText.value = secretInput;
+  proxyText.dispatchEvent(new w.Event('input'));
+  await tick();
+  (w.document.querySelector('#ads-batch-proxy-save') as HTMLButtonElement).click();
+  for (let i = 0; i < 4; i += 1) await tick();
+  assert.equal(proxyText.value, secretInput, '部分失败不清空输入');
+  assert.equal(w.document.querySelectorAll('.ads-env-check:checked').length, 2, '部分失败保留目标');
+  const msg = w.document.querySelector('#ads-batch-proxy-msg')!.textContent || '';
+  assert.match(msg, /已更新 1 个/);
+  assert.doesNotMatch(msg, /user-a|secret-a|a\.example/);
+});
+
+test('单环境代理：快速粘贴经共享解析后回填，不自动保存', async () => {
+  let parseInput: unknown;
+  let saveCalls = 0;
+  const { w } = await boot({
+    adsStatus: async () => ({ ok: true }),
+    adsListProfiles: async () => ({
+      ok: true,
+      profiles: [{ userId: 'p2', name: '环境二', serialNumber: '2', groupName: '', proxy: '无代理配置', platform: 'xiaohongshu', proxyConfig: { noProxy: true } }],
+    }),
+    adsParseProxyLines: async (input: unknown) => {
+      parseInput = input;
+      return {
+        ok: true,
+        noProxy: false,
+        proxies: [{ proxyType: 'https', proxyHost: '171.236.167.102', proxyPort: '37900', proxyUser: 'gyGn1', proxyPassword: 'pw:tail' }],
+      };
+    },
+    adsUpdateEnvProxy: async () => { saveCalls += 1; return { ok: true }; },
+  });
+  (w.document.querySelector('#rail-add') as HTMLElement).click();
+  await tick();
+  await tick();
+  (w.document.querySelector('.ads-env-proxy') as HTMLElement).click();
+  await tick();
+  const type = w.document.querySelector('#proxy-pop-type') as HTMLSelectElement;
+  type.value = 'https';
+  type.dispatchEvent(new w.Event('change'));
+  const quick = w.document.querySelector('#proxy-pop-quick') as HTMLTextAreaElement;
+  quick.value = '171.236.167.102:37900:gyGn1:pw:tail';
+  quick.dispatchEvent(new w.Event('change'));
+  await tick();
+  assert.equal((parseInput as { proxyType: string }).proxyType, 'https');
+  assert.equal((parseInput as { proxyText: string }).proxyText, '171.236.167.102:37900:gyGn1:pw:tail');
+  assert.equal((w.document.querySelector('#proxy-pop-host') as HTMLInputElement).value, '171.236.167.102');
+  assert.equal((w.document.querySelector('#proxy-pop-port') as HTMLInputElement).value, '37900');
+  assert.equal((w.document.querySelector('#proxy-pop-user') as HTMLInputElement).value, 'gyGn1');
+  assert.equal((w.document.querySelector('#proxy-pop-pass') as HTMLInputElement).value, 'pw:tail');
+  assert.equal(saveCalls, 0, '解析只回填，仍须用户显式保存');
 });
 
 test('人设图标：点击左栏行内人设图标 → 选中该环境并打开人设浮层', async () => {

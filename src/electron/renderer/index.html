@@ -70,16 +70,15 @@
     </div>
 
     <div class="fleet-row" id="fleet-row">
-      <!-- ═══ 环境栏（edge-fleet-rail-env-management）：环境管理收口于此。
-           栏头「环境 N」+「＋ 添加环境」+ 收起钮（红色待处理徽标）；汇总 chip「▶运行 ⚠需处理 ⏸离线」；
+      <!-- ═══ 环境栏：运行态留在栏内，配置动作由「环境管理」浮层统一承载。
+           栏头「环境 N」+「管理」+ 收起钮（红色待处理徽标）；汇总 chip「▶运行 ⚠需处理 ⏸离线」；
            按紧迫度分组列全部环境（含未启动的离线行）；每行昵称后一个人设图标（点击弹独立浮层）。
            默认收起为窄图标条：头像退安静样式、状态由外圈色环承担、需处理脉冲。 ═══ -->
       <aside id="env-rail" class="env-rail collapsed hidden" aria-label="环境栏">
         <div class="rail-head">
           <span class="rail-title">环境 <span id="rail-count">0</span></span>
           <span class="rail-head-ctl">
-            <!-- 加号/箭头用内联 SVG：全角「＋」字形在 CJK 字体里天然偏移、书名号「‹›」在 24px 钮里偏小（问题 7/8） -->
-            <button id="rail-add" class="rail-add nodrag" type="button" title="添加环境" aria-label="添加环境"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" fill="none"/></svg></button>
+            <button id="rail-add" class="rail-manage nodrag" type="button" title="环境管理" aria-label="环境管理"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2.5 4h4M9.5 4h4M7.5 2.5v3M2.5 8h7M12.5 8h1M10.5 6.5v3M2.5 12h2M7.5 12h6M5.5 10.5v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg><span>管理</span></button>
             <span class="rail-toggle-wrap">
               <button id="rail-toggle" class="rail-toggle nodrag" type="button" title="展开 / 收起环境栏" aria-label="展开 / 收起环境栏"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M10.2 3.2 5.4 8l4.8 4.8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></button>
               <span id="rail-badge" class="rail-badge hidden">0</span>
@@ -102,7 +101,7 @@
           <span class="sum-chip idle" id="rail-sum-idle">⏸ 0</span>
         </div>
         <div id="rail-list" class="rail-list"></div>
-        <button id="rail-foot-add" class="rail-foot-add" type="button" title="添加环境" aria-label="添加环境"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" fill="none"/></svg></button>
+        <button id="rail-foot-add" class="rail-foot-add" type="button" title="环境管理" aria-label="环境管理"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.5 4h4M9.5 4h4M7.5 2.5v3M2.5 8h7M12.5 8h1M10.5 6.5v3M2.5 12h2M7.5 12h6M5.5 10.5v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg></button>
         <div class="rail-foot">
           <button id="rail-guide" class="rail-btn hidden" type="button">引导处理</button>
           <button id="rail-start-all" class="rail-btn" type="button">全部启动</button>
@@ -142,7 +141,7 @@
           <strong id="notice-title">需要登录</strong>
           <span id="notice-body">请在刚打开的 Chrome 窗口中登录 xiaohongshu.com，检测到登录后会自动继续。</span>
         </div>
-        <button id="notice-action" class="setup-btn hidden" type="button">添加环境</button>
+        <button id="notice-action" class="setup-btn hidden" type="button">环境管理</button>
       </section>
 
       <!-- 在场感行：当前动作 + 呼吸点 + 新鲜度走字（动效只由真实事件驱动） -->
@@ -683,32 +682,58 @@
       </form>
     </dialog>
 
-    <!-- ═══ 添加/创建环境面板（edge-fleet-rail-env-management）：由左栏「＋」拉起的独立浮层，
-         集中做「加入现有 AdsPower 环境（多选）」与「新建指纹环境（操作系统 + 平台）」；
-         加入即落盘并作为离线行出现在左栏（根治「加入后左栏不显示」）。 ═══ -->
+    <!-- ═══ 环境管理：环境列表承载加入/移出/代理等日常动作，新建环境保持独立页。 ═══ -->
     <div id="env-add-mask" class="pop-mask hidden"></div>
-    <aside id="env-add-panel" class="env-add-panel hidden" aria-hidden="true" aria-label="添加环境">
+    <aside id="env-add-panel" class="env-add-panel hidden" aria-hidden="true" aria-label="环境管理">
       <div class="pop-head">
-        <span>添加环境</span>
+        <span>环境管理</span>
         <button id="env-add-close" class="drawer-x nodrag" type="button" aria-label="关闭">×</button>
       </div>
       <div class="env-add-tabs">
-        <button id="env-tab-join" class="env-add-tab active" type="button" data-tab="join">加入现有环境</button>
+        <button id="env-tab-join" class="env-add-tab active" type="button" data-tab="join">环境</button>
         <button id="env-tab-create" class="env-add-tab" type="button" data-tab="create">新建环境</button>
       </div>
 
-      <!-- 加入现有环境：AdsPower 环境列表，点选加入运行花名册（多选累积） -->
+      <!-- 环境列表：普通态无复选框；显式点击批量代理后才进入临时多选。 -->
       <div id="env-tab-join-body" class="env-add-body">
         <div class="ads-env-head">
-          <span class="field-label">选择要并行运行的环境</span>
-          <button id="ads-refresh" class="seg" type="button">刷新</button>
+          <span class="field-label">环境列表</span>
+          <span class="ads-env-head-actions">
+            <button id="ads-batch-proxy-toggle" class="seg" type="button">批量代理</button>
+            <button id="ads-refresh" class="seg" type="button">刷新</button>
+          </span>
         </div>
         <div id="ads-env-list" class="ads-env-list">
           <p class="ads-env-empty">（就绪后自动列出，或点「刷新」）</p>
         </div>
         <span id="ads-env-msg" class="ads-env-msg"></span>
+        <section id="ads-batch-proxy-panel" class="batch-proxy-panel hidden" aria-label="批量代理">
+          <div class="batch-proxy-head">
+            <strong>批量代理</strong>
+            <span id="ads-batch-proxy-count">已选择 0 个环境</span>
+          </div>
+          <div class="proxy-row">
+            <span class="field-label">代理类型</span>
+            <select id="ads-batch-proxy-type" class="ads-template proxy-type" aria-label="批量代理类型">
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+              <option value="socks5">SOCKS5</option>
+              <option value="no_proxy">无代理</option>
+            </select>
+          </div>
+          <label class="field batch-proxy-input">
+            <span class="field-label">一行一个代理</span>
+            <textarea id="ads-batch-proxy-text" rows="4" spellcheck="false" autocomplete="off" placeholder="1.2.3.4:8000&#10;proxy.example:8080:user:password&#10;proxy.example----8080----user----password"></textarea>
+          </label>
+          <p id="ads-batch-proxy-preview" class="subtle batch-proxy-preview">选择环境并输入代理后显示分配摘要。</p>
+          <span id="ads-batch-proxy-msg" class="ads-env-msg"></span>
+          <div class="batch-proxy-actions">
+            <button id="ads-batch-proxy-cancel" class="seg" type="button">取消</button>
+            <button id="ads-batch-proxy-save" class="setup-btn" type="button" disabled>确认修改</button>
+          </div>
+        </section>
         <div>
-          <button id="ads-advanced-toggle" class="link ads-adv-toggle" type="button">手动填分身 ID ▾</button>
+          <button id="ads-advanced-toggle" class="link ads-adv-toggle" type="button">手动填写分身 ID ▾</button>
           <div id="ads-advanced" class="ads-advanced hidden">
             <div class="field">
               <div class="ads-id-head">
@@ -771,13 +796,13 @@
           </label>
         </div>
         <span id="ads-create-msg" class="ads-env-msg"></span>
-        <p id="ads-single-proxy-help" class="subtle">不填代理则默认为空；之后可在「加入现有环境」列表中该环境行的「代理」按钮补配或修改。</p>
+        <p id="ads-single-proxy-help" class="subtle">不填代理则默认为空；之后可在“环境”列表中通过“代理”补配或修改。</p>
         <p id="ads-batch-proxy-help" class="subtle hidden">选择“无代理”会为本批全部账号创建无代理环境；选择 HTTP / HTTPS / SOCKS5 后，在「批量代理资料」里多行粘贴即可批量添加代理。</p>
       </div>
     </aside>
 
     <!-- ═══ 环境代理编辑浮层：按环境改 user_proxy_config（受限 user/update）。
-         密码仅经精确目标读取后在本浮层内存态回显；保存 = 整体替换该环境代理配置；下次启动该环境生效。 ═══ -->
+         密码仅经精确目标读取后填入内存态遮罩输入；保存 = 整体替换该环境代理配置；下次启动该环境生效。 ═══ -->
     <div id="proxy-mask" class="pop-mask hidden"></div>
     <aside id="proxy-pop" class="proxy-pop hidden" aria-hidden="true" role="dialog" aria-label="环境代理">
       <div class="pop-head">
@@ -796,11 +821,16 @@
           </select>
         </div>
         <div id="proxy-pop-detail" class="proxy-detail hidden">
+          <label class="field proxy-quick-paste">
+            <span class="field-label">快速粘贴</span>
+            <textarea id="proxy-pop-quick" rows="2" spellcheck="false" autocomplete="off" placeholder="host:port:username:password"></textarea>
+            <span class="subtle">兼容 host:port、冒号账密和 ---- 分隔格式；解析后仍可修改下方字段。</span>
+          </label>
           <div class="proxy-grid">
             <input id="proxy-pop-host" type="text" placeholder="代理地址（IP / 域名）" autocomplete="off" />
             <input id="proxy-pop-port" type="text" placeholder="端口" inputmode="numeric" autocomplete="off" />
             <input id="proxy-pop-user" type="text" placeholder="用户名（可选）" autocomplete="off" />
-            <input id="proxy-pop-pass" type="text" placeholder="密码（可直接修改或清空）" autocomplete="off" />
+            <input id="proxy-pop-pass" type="password" placeholder="密码（可直接修改或清空）" autocomplete="new-password" />
           </div>
           <p class="subtle proxy-warn">提示：给已在运营的账号更换代理会改变出口 IP 与时区画像，可能引起平台风控注意，请谨慎操作。</p>
         </div>

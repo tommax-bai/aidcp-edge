@@ -204,6 +204,15 @@ const fields = {
   envTabCreate: document.querySelector('#env-tab-create'),
   envTabJoinBody: document.querySelector('#env-tab-join-body'),
   envTabCreateBody: document.querySelector('#env-tab-create-body'),
+  adsBatchProxyToggle: document.querySelector('#ads-batch-proxy-toggle'),
+  adsBatchProxyPanel: document.querySelector('#ads-batch-proxy-panel'),
+  adsBatchProxyCount: document.querySelector('#ads-batch-proxy-count'),
+  adsBatchProxyType: document.querySelector('#ads-batch-proxy-type'),
+  adsBatchProxyText: document.querySelector('#ads-batch-proxy-text'),
+  adsBatchProxyPreview: document.querySelector('#ads-batch-proxy-preview'),
+  adsBatchProxyMsg: document.querySelector('#ads-batch-proxy-msg'),
+  adsBatchProxyCancel: document.querySelector('#ads-batch-proxy-cancel'),
+  adsBatchProxySave: document.querySelector('#ads-batch-proxy-save'),
   adsManualAdd: document.querySelector('#ads-manual-add'),
   // 账号人设浮层（edge-fleet-rail-env-management；重设计于 edge-client-proxy-platform-persona-ux）
   personaPop: document.querySelector('#persona-pop'),
@@ -225,6 +234,7 @@ const fields = {
   proxyPopPort: document.querySelector('#proxy-pop-port'),
   proxyPopUser: document.querySelector('#proxy-pop-user'),
   proxyPopPass: document.querySelector('#proxy-pop-pass'),
+  proxyPopQuick: document.querySelector('#proxy-pop-quick'),
   proxyPopMsg: document.querySelector('#proxy-pop-msg'),
   proxySave: document.querySelector('#proxy-save'),
 };
@@ -436,6 +446,10 @@ let clientRosterExcludedEnvIds = new Set();
 let lastAssignmentScoped = false;
 // 最近一次拉取的环境列表（roster 变更后就地重刷成员标记，无需重新拉取）。
 let lastProfiles = [];
+let batchProxyMode = false;
+let batchProxySelectedIds = new Set();
+let batchProxyPreviewEpoch = 0;
+let proxyQuickParseEpoch = 0;
 function normalizeRosterList(list) {
   const out = [];
   const seen = new Set();
@@ -3626,7 +3640,7 @@ fields.gear.addEventListener('click', openDrawer);
 fields.drawerClose.addEventListener('click', closeDrawer);
 fields.drawerMask.addEventListener('click', closeDrawer);
 
-// ─── 添加/创建环境面板（左栏「＋」拉起）───
+// ─── 环境管理（左栏管理入口拉起）───
 function openEnvAddPanel(tab) {
   if (!fields.envAddPanel) return;
   // 必须移除 hidden（.hidden 是 !important、否则面板被钉死 display:none，只见遮罩不见内容）。
@@ -3641,6 +3655,7 @@ function openEnvAddPanel(tab) {
 }
 function closeEnvAddPanel() {
   if (!fields.envAddPanel) return;
+  exitBatchProxyMode({ clearText: true });
   fields.envAddPanel.classList.remove('open');
   fields.envAddPanel.classList.add('hidden');
   fields.envAddPanel.setAttribute('aria-hidden', 'true');
@@ -3648,6 +3663,7 @@ function closeEnvAddPanel() {
 }
 function switchEnvTab(tab) {
   const join = tab !== 'create';
+  if (!join && batchProxyMode) exitBatchProxyMode({ clearText: true });
   fields.envTabJoin?.classList.toggle('active', join);
   fields.envTabCreate?.classList.toggle('active', !join);
   fields.envTabJoinBody?.classList.toggle('hidden', !join);
@@ -3659,7 +3675,7 @@ fields.envAddClose?.addEventListener('click', closeEnvAddPanel);
 fields.envAddMask?.addEventListener('click', closeEnvAddPanel);
 fields.envTabJoin?.addEventListener('click', () => switchEnvTab('join'));
 fields.envTabCreate?.addEventListener('click', () => switchEnvTab('create'));
-// 待配置引导的「添加环境」按钮直达左栏加环境面板（不再去设置抽屉）。
+// 待配置引导直达环境管理（不再去设置抽屉）。
 fields.noticeAction.addEventListener('click', () => openEnvAddPanel('join'));
 
 // ─── 账号人设浮层（左栏行内人设图标拉起，对「该行环境」做人设）───
@@ -4354,7 +4370,7 @@ function beginRailNameEdit(row, nameEl) {
   const profileId = String((row && row.profileId) || '').trim();
   const member = roster.find((item) => item.profileId === profileId);
   if (!member) {
-    setRailMsg('该环境尚未进入运行花名册，暂不能修改昵称。');
+    setRailMsg('该环境尚未加入，暂不能修改昵称。');
     return;
   }
   const input = document.createElement('input');
@@ -4812,8 +4828,8 @@ function applyParkingSelection(mode) {
 }
 
 function promptMissingAdsProfile() {
-  settingsUi.msg.textContent = '请先在左栏「＋ 添加环境」加入至少一个环境。';
-  setRailMsg('请先「＋ 添加环境」加入至少一个环境。');
+  settingsUi.msg.textContent = '请先打开左栏“环境管理”并加入至少一个环境。';
+  setRailMsg('请先在“环境管理”中加入至少一个环境。');
   openEnvAddPanel('join'); // 环境管理已搬到左栏：直达添加面板，不再去设置抽屉
 }
 
@@ -5086,7 +5102,7 @@ settingsUi.adsProfile.addEventListener('input', () => {
 settingsUi.adsManualAdd?.addEventListener('click', () => {
   const id = settingsUi.adsProfile.value.trim();
   if (!id) { setEnvMsg('请先填写分身 ID。', true); return; }
-  if (rosterHas(id)) { setEnvMsg(`「${id}」已在运行花名册中。`, false); return; }
+  if (rosterHas(id)) { setEnvMsg(`「${id}」已加入。`, false); return; }
   roster.push({ profileId: id, name: '', platform: 'xiaohongshu' });
   settingsUi.adsProfile.value = '';
   refreshRosterMarks();
@@ -5143,7 +5159,7 @@ async function probeAds() {
       refreshEnvs(); // 就绪即自动列出环境，无需先点刷新
     } else {
       setEnvMsg(
-        `暂未连接到本地指纹浏览器服务${r && r.error ? '（' + r.error + '）' : ''}。启动后应用会自动拉起内置运行时；也可在「高级设置」打开「手动填写」直接填分身 ID。`,
+        `暂未连接到本地指纹浏览器服务${r && r.error ? '（' + r.error + '）' : ''}。启动后应用会自动拉起内置运行时；也可在下方手动填写分身 ID。`,
         true,
       );
       openAdvanced();
@@ -5167,7 +5183,7 @@ function selectProfile(userId, itemEl, profileName, platform) {
     if (lastAssignmentScoped) clientRosterExcludedEnvIds.delete(userId);
     added = true;
   } else if (userId) {
-    setEnvMsg(`「${profileName || userId}」已在运行花名册中。`, false);
+    setEnvMsg(`「${profileName || userId}」已加入。`, false);
   }
   updateProfileDisplay();
   settingsUi.adsEnvList.querySelectorAll('.ads-env-item').forEach((el) => el.classList.remove('selected'));
@@ -5202,7 +5218,7 @@ function removeFromRoster(profileId, { remember = true } = {}) {
     updateProfileDisplay();
   }
   refreshRosterMarks();
-  if (remember) setEnvMsg('已移出运行环境；归属不变，可随时再次点选移入。', false);
+  if (remember) setEnvMsg('已移出；环境归属不变，可随时再次加入。', false);
   const persisted = persistRoster(); // 移出即落盘：main 有序停止并摘除该环境、左栏随即撤下
   if (remember) {
     void persisted.then((saved) => {
@@ -5349,6 +5365,169 @@ function coreRunning() {
   return Boolean(currentStatus) && currentStatus.edge !== 'stopped' && currentStatus.edge !== 'warning';
 }
 
+function profileRuntimeForManagement(userId) {
+  const env = [...fleetView.envs.values()].find((item) => item && item.profileId === userId);
+  const status = env && env.status;
+  if (!status) return { active: false, label: '状态未知' };
+  const automation = status.automationState;
+  const browser = status.browserState;
+  const active = (automation && !['stopped', 'error'].includes(automation))
+    || (browser && !['closed', 'error'].includes(browser))
+    || ['running', 'starting'].includes(status.edge);
+  if (active) {
+    const starting = ['starting', 'waiting_resource'].includes(automation) || status.edge === 'starting';
+    return { active: true, label: starting ? '启动中' : '运行中' };
+  }
+  if (status.edge === 'stopped' || automation === 'stopped' || browser === 'closed') {
+    return { active: false, label: '已关闭' };
+  }
+  return { active: false, label: '状态未知' };
+}
+
+function profileActiveForProxy(userId) {
+  return profileRuntimeForManagement(userId).active;
+}
+
+function selectedBatchProxyIds() {
+  // Set 保留用户勾选顺序；不从可能随状态分组或刷新重排的视图重新推导。
+  return Array.from(batchProxySelectedIds);
+}
+
+function setBatchProxyMsg(text, isError) {
+  if (!fields.adsBatchProxyMsg) return;
+  fields.adsBatchProxyMsg.textContent = text || '';
+  fields.adsBatchProxyMsg.classList.toggle('error', Boolean(isError));
+}
+
+function exitBatchProxyMode({ clearText = false } = {}) {
+  batchProxyMode = false;
+  batchProxySelectedIds = new Set();
+  batchProxyPreviewEpoch += 1;
+  fields.adsBatchProxyPanel?.classList.add('hidden');
+  if (fields.adsBatchProxyToggle) fields.adsBatchProxyToggle.textContent = '批量代理';
+  if (fields.adsBatchProxyCount) fields.adsBatchProxyCount.textContent = '已选择 0 个环境';
+  if (fields.adsBatchProxyPreview) fields.adsBatchProxyPreview.textContent = '选择环境并输入代理后显示分配摘要。';
+  if (fields.adsBatchProxySave) {
+    fields.adsBatchProxySave.disabled = true;
+    fields.adsBatchProxySave.textContent = '确认修改';
+  }
+  setBatchProxyMsg('', false);
+  if (clearText && fields.adsBatchProxyText) fields.adsBatchProxyText.value = '';
+  if (lastProfiles.length > 0) populateEnvs(lastProfiles);
+}
+
+function enterBatchProxyMode() {
+  batchProxyMode = true;
+  batchProxySelectedIds = new Set();
+  fields.adsBatchProxyPanel?.classList.remove('hidden');
+  if (fields.adsBatchProxyToggle) fields.adsBatchProxyToggle.textContent = '取消批量';
+  if (fields.adsBatchProxyType && fields.adsBatchProxyType.value === 'no_proxy') {
+    fields.adsBatchProxyText.value = '';
+    fields.adsBatchProxyText.disabled = true;
+  }
+  populateEnvs(lastProfiles);
+  void refreshBatchProxyPreview();
+}
+
+async function refreshBatchProxyPreview() {
+  if (!batchProxyMode) return;
+  const epoch = ++batchProxyPreviewEpoch;
+  const userIds = selectedBatchProxyIds();
+  const type = fields.adsBatchProxyType ? fields.adsBatchProxyType.value : 'http';
+  const text = fields.adsBatchProxyText ? fields.adsBatchProxyText.value : '';
+  if (fields.adsBatchProxyCount) fields.adsBatchProxyCount.textContent = `已选择 ${userIds.length} 个环境`;
+  if (fields.adsBatchProxySave) {
+    fields.adsBatchProxySave.disabled = true;
+    fields.adsBatchProxySave.textContent = userIds.length > 0 ? `确认修改 ${userIds.length} 个` : '确认修改';
+  }
+  setBatchProxyMsg('', false);
+  if (userIds.length === 0) {
+    if (fields.adsBatchProxyPreview) fields.adsBatchProxyPreview.textContent = '请先选择环境；运行中的环境不可修改。';
+    return;
+  }
+  if (type !== 'no_proxy' && !text.trim()) {
+    if (fields.adsBatchProxyPreview) fields.adsBatchProxyPreview.textContent = '粘贴代理后显示分配摘要。';
+    return;
+  }
+  if (!window.aidcpEdge || typeof window.aidcpEdge.adsParseProxyLines !== 'function') {
+    setBatchProxyMsg('当前客户端未加载代理解析能力，请重启后重试。', true);
+    return;
+  }
+  const parsed = await window.aidcpEdge.adsParseProxyLines({ proxyType: type, proxyText: text });
+  if (epoch !== batchProxyPreviewEpoch || !batchProxyMode) return;
+  if (!parsed || !parsed.ok) {
+    if (fields.adsBatchProxyPreview) fields.adsBatchProxyPreview.textContent = '代理资料尚未通过校验。';
+    setBatchProxyMsg((parsed && parsed.error) || '代理格式不正确。', true);
+    return;
+  }
+  if (parsed.noProxy) {
+    if (fields.adsBatchProxyPreview) fields.adsBatchProxyPreview.textContent = `将清除 ${userIds.length} 个环境的代理配置。`;
+  } else {
+    const proxies = Array.isArray(parsed.proxies) ? parsed.proxies : [];
+    if (proxies.length === 0) {
+      if (fields.adsBatchProxyPreview) fields.adsBatchProxyPreview.textContent = '代理资料尚未通过校验。';
+      setBatchProxyMsg('代理解析结果不完整，请重试。', true);
+      return;
+    }
+    const profileById = new Map(lastProfiles.map((profile) => [profile.userId, profile]));
+    const sample = userIds.slice(0, 4).map((userId, index) => {
+      const profile = profileById.get(userId);
+      const proxy = proxies[index % proxies.length];
+      return `${profile && profile.name ? profile.name : userId} → ${proxy.proxyHost}:${proxy.proxyPort}`;
+    });
+    const reusedCount = Math.max(0, userIds.length - proxies.length);
+    const reuse = reusedCount > 0 ? ` · 循环复用 ${reusedCount} 次` : '';
+    if (fields.adsBatchProxyPreview) {
+      fields.adsBatchProxyPreview.textContent = `${userIds.length} 个环境 · ${proxies.length} 条代理${reuse}\n${sample.join('\n')}${userIds.length > sample.length ? '\n…' : ''}`;
+    }
+  }
+  if (fields.adsBatchProxySave) fields.adsBatchProxySave.disabled = false;
+}
+
+fields.adsBatchProxyToggle?.addEventListener('click', () => {
+  if (batchProxyMode) exitBatchProxyMode({ clearText: true });
+  else enterBatchProxyMode();
+});
+fields.adsBatchProxyCancel?.addEventListener('click', () => exitBatchProxyMode({ clearText: true }));
+fields.adsBatchProxyType?.addEventListener('change', () => {
+  const noProxy = fields.adsBatchProxyType.value === 'no_proxy';
+  fields.adsBatchProxyText.disabled = noProxy;
+  if (noProxy) fields.adsBatchProxyText.value = '';
+  void refreshBatchProxyPreview();
+});
+fields.adsBatchProxyText?.addEventListener('input', () => { void refreshBatchProxyPreview(); });
+fields.adsBatchProxySave?.addEventListener('click', async () => {
+  if (!batchProxyMode || !window.aidcpEdge || typeof window.aidcpEdge.adsUpdateEnvProxies !== 'function') return;
+  const userIds = selectedBatchProxyIds();
+  if (userIds.length === 0) return;
+  fields.adsBatchProxySave.disabled = true;
+  setBatchProxyMsg('正在按顺序修改…', false);
+  try {
+    const result = await window.aidcpEdge.adsUpdateEnvProxies({
+      ...formAdsOpts(),
+      userIds,
+      proxyType: fields.adsBatchProxyType.value,
+      proxyText: fields.adsBatchProxyText.value,
+    });
+    if (result && result.ok) {
+      const count = result.updatedCount || userIds.length;
+      exitBatchProxyMode({ clearText: true });
+      await refreshEnvs({ suppressAutoJoin: true });
+      setEnvMsg(`已更新 ${count} 个环境的代理配置，下次启动生效。`, false);
+      return;
+    }
+    const counts = result && Number.isInteger(result.updatedCount) && Number.isInteger(result.notAttemptedCount)
+      ? `；已更新 ${result.updatedCount} 个，${result.notAttemptedCount} 个未执行。`
+      : '';
+    setBatchProxyMsg(`修改失败：${(result && result.error) || '未知错误'}${counts}`, true);
+    if (result && result.updatedCount > 0) await refreshEnvs({ suppressAutoJoin: true });
+  } catch (error) {
+    setBatchProxyMsg(`修改失败：${(error && error.message) || error}`, true);
+  } finally {
+    if (fields.adsBatchProxySave && batchProxyMode) fields.adsBatchProxySave.disabled = false;
+  }
+});
+
 // 每行删除按钮：点两次确认（第一次「删」→「确认删除?」armed 态，4s 自动收回；第二次才真删）。
 // 删除不可恢复（若已登录账号其登录态一并丢失）——故绝不一次点就删、绝不自动/批量（C3 放宽为 UI 确认删）。
 function makeDeleteBtn(prof) {
@@ -5420,7 +5599,7 @@ function populateEnvs(profiles, allowAutoJoin = false) {
   if (!profiles.length) {
     const empty = document.createElement('p');
     empty.className = 'ads-env-empty';
-    empty.textContent = '（未找到环境，可在「高级设置」打开「手动填写」填分身 ID）';
+    empty.textContent = '未找到环境，可手动填写分身 ID 或新建环境。';
     list.appendChild(empty);
     return { autoSelected: null };
   }
@@ -5431,8 +5610,28 @@ function populateEnvs(profiles, allowAutoJoin = false) {
     const member = roster.find((m) => m.profileId === prof.userId);
     const displayPlat = normPlatform(member ? member.platform : prof.platform);
     const inferred = !member && prof.platformSource && prof.platformSource !== 'remark';
+    const runtime = profileRuntimeForManagement(prof.userId);
     const item = document.createElement('div');
     item.className = 'ads-env-item';
+    const batchDisabled = Boolean(prof.offboardPending) || runtime.active;
+    if (batchProxyMode) {
+      item.classList.add('batch-select');
+      if (batchDisabled) item.classList.add('batch-disabled');
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      check.className = 'ads-env-check';
+      check.setAttribute('aria-label', `选择 ${prof.name || prof.userId}`);
+      check.checked = batchProxySelectedIds.has(prof.userId);
+      check.disabled = batchDisabled;
+      check.title = batchDisabled ? '该环境正在使用或清理中，请先关闭后再修改代理' : '选择该环境';
+      check.addEventListener('click', (event) => event.stopPropagation());
+      check.addEventListener('change', () => {
+        if (check.checked) batchProxySelectedIds.add(prof.userId);
+        else batchProxySelectedIds.delete(prof.userId);
+        void refreshBatchProxyPreview();
+      });
+      item.appendChild(check);
+    }
     const text = document.createElement('div');
     text.className = 'env-text';
     const name = document.createElement('div');
@@ -5452,13 +5651,19 @@ function populateEnvs(profiles, allowAutoJoin = false) {
     const bits = [];
     if (prof.serialNumber) bits.push('#' + prof.serialNumber);
     if (prof.groupName) bits.push(prof.groupName);
+    bits.push(runtime.label);
     bits.push(prof.proxy || '无代理配置');
     bits.push(prof.userId);
     meta.textContent = bits.join(' · ');
     text.appendChild(name);
     text.appendChild(meta);
     item.appendChild(text);
-    if (prof.offboardPending) {
+    if (batchProxyMode) {
+      const state = document.createElement('span');
+      state.className = 'env-member-badge';
+      state.textContent = batchDisabled ? '请先关闭' : (rosterHas(prof.userId) ? '已加入' : '未加入');
+      item.appendChild(state);
+    } else if (prof.offboardPending) {
       const badge = document.createElement('span');
       badge.className = 'env-member-badge';
       badge.textContent = prof.offboardPending.state === 'tombstoned' ? '待物理清理' : '已撤权·清理中';
@@ -5472,20 +5677,34 @@ function populateEnvs(profiles, allowAutoJoin = false) {
       removeBtn.type = 'button';
       removeBtn.className = 'ads-env-remove';
       removeBtn.textContent = '移出';
-      removeBtn.title = '从运行花名册移出（不删除环境本身）';
+      removeBtn.title = '移出环境列表（不删除环境本身）';
       removeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         removeFromRoster(prof.userId);
       });
       item.appendChild(removeBtn);
+    } else {
+      const badge = document.createElement('span');
+      badge.className = 'env-member-badge unjoined';
+      badge.textContent = '未加入';
+      item.appendChild(badge);
+      const joinBtn = document.createElement('button');
+      joinBtn.type = 'button';
+      joinBtn.className = 'ads-env-join';
+      joinBtn.textContent = '加入';
+      joinBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void selectProfile(prof.userId, item, prof.name, prof.platform);
+      });
+      item.appendChild(joinBtn);
     }
-    if (!prof.offboardPending) item.appendChild(makePlatformBtn(prof, displayPlat));
-    if (!prof.offboardPending) item.appendChild(makeProxyBtn(prof));
-    item.appendChild(makeDeleteBtn(prof));
-    if (!prof.offboardPending) {
+    if (!batchProxyMode && !prof.offboardPending) item.appendChild(makePlatformBtn(prof, displayPlat));
+    if (!batchProxyMode && !prof.offboardPending) item.appendChild(makeProxyBtn(prof));
+    if (!batchProxyMode) item.appendChild(makeDeleteBtn(prof));
+    if (!batchProxyMode && !prof.offboardPending) {
       item.addEventListener('click', () => { void selectProfile(prof.userId, item, prof.name, member ? member.platform : prof.platform); });
     }
-    if (prof.userId && prof.userId === current) {
+    if (!batchProxyMode && prof.userId && prof.userId === current) {
       item.classList.add('selected');
       currentSelected = prof.name || prof.userId;
     }
@@ -5494,7 +5713,7 @@ function populateEnvs(profiles, allowAutoJoin = false) {
   }
   // 唯一环境自动加入（首次列出的便利）：仅当调用方 allowAutoJoin 放行。删除/剔孤儿后触发的刷新绝不放行，
   // 否则会把一个无关的剩余环境静默拉进运行队列（评审 Finding 1 回归）。
-  if (!lastAssignmentScoped && allowAutoJoin && profiles.length === 1 && !profiles[0].offboardPending
+  if (!batchProxyMode && !lastAssignmentScoped && allowAutoJoin && profiles.length === 1 && !profiles[0].offboardPending
     && !current && roster.length === 0 && profiles[0].userId && !coreRunning()) {
     void selectProfile(profiles[0].userId, firstItem, profiles[0].name, profiles[0].platform);
     return { autoSelected: profiles[0].name || profiles[0].userId };
@@ -5520,7 +5739,7 @@ function makePlatformBtn(prof, displayPlat) {
     if (member) { member.platform = next; void persistRoster(); }
     if (settingsUi.adsProfile.value.trim() === prof.userId) selectedPlatform = next;
     refreshRosterMarks(); // lastProfiles 就地更新，重绘列表行
-    setEnvMsg(`已把「${prof.name || prof.userId}」标为 ${platformLabel(next)}${member ? '（已保存，下次启动生效）' : '（加入花名册后随启动生效）'}。`, false);
+    setEnvMsg(`已把「${prof.name || prof.userId}」标为 ${platformLabel(next)}${member ? '（已保存，下次启动生效）' : '（加入后随启动生效）'}。`, false);
   });
   return btn;
 }
@@ -5572,7 +5791,7 @@ async function refreshEnvs(opts) {
       const authHint = r && r.authLikely
         ? '：疑似开启了 API 校验；若已在「高级设置」里填了 API Key，本次刷新已用当前填写值，请确认 Key 正确后重试'
         : '';
-      setEnvMsg(`拉取环境失败${r && r.error ? '（' + r.error + '）' : ''}${authHint}。可在「高级设置」打开「手动填写」填分身 ID。`, true);
+      setEnvMsg(`拉取环境失败${r && r.error ? '（' + r.error + '）' : ''}${authHint}。可在下方手动填写分身 ID。`, true);
       openAdvanced();
       return;
     }
@@ -5603,18 +5822,18 @@ async function refreshEnvs(opts) {
     const cleaned = prunedCount > 0 ? `已清理 ${prunedCount} 个云端已删除的残留环境。` : '';
     const autoHint = assigned.added.length > 0
       ? saved && saved.saveOk === false
-        ? `已默认移入 ${assigned.added.length} 个归属环境（本次展示、未自动启动），但写盘失败：${saved.saveError || '未知错误'}。`
-        : `已默认移入 ${assigned.added.length} 个归属环境（仅展示，未自动启动）。`
+        ? `已加入 ${assigned.added.length} 个环境（未自动启动），但写盘失败：${saved.saveError || '未知错误'}。`
+        : `已加入 ${assigned.added.length} 个环境（未自动启动）。`
       : autoSelected
         ? `已自动加入唯一环境「${autoSelected}」。`
       : currentSelected
         ? `已选中「${currentSelected}」。`
         : lastAssignmentScoped
-          ? '已手动移出的归属环境可再次点选移入。'
-          : '点选环境即加入运行花名册（可多选并行运行）。';
+          ? '已移出的环境可再次加入。'
+          : '点选或点击“加入”即可加入环境。';
     setEnvMsg(`已加载 ${profiles.length} 个环境${extra}。${cleaned}${autoHint}`, false);
   } catch (e) {
-    setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可在「高级设置」打开「手动填写」填分身 ID。`, true);
+    setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可在下方手动填写分身 ID。`, true);
     openAdvanced();
   } finally {
     settingsUi.adsRefresh.disabled = false;
@@ -5746,7 +5965,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       const selectedHint = r.rosterJoinedByMain
         ? '已分配到当前账号并加入运行环境；需要启动时请在环境栏操作。'
         : r.requiresAdminAssignment
-        ? '管理员分配前不会加入运行花名册。'
+        ? '管理员分配前不会加入环境。'
         : r.assignmentHandledByMain
           ? '已分配到当前账号，但本次未加入运行环境，请按提示处理。'
           : r.userId && !coreRunning() ? '已自动选中，可直接点「启动」。' : '点上方「刷新」可看到它。';
@@ -5792,8 +6011,42 @@ function setProxyPopMsg(text, isError) {
 function syncProxyPopDetail() {
   fields.proxyPopDetail?.classList.toggle('hidden', fields.proxyPopType && fields.proxyPopType.value === 'no_proxy');
 }
+async function parseProxyQuickPaste() {
+  const proxyText = fields.proxyPopQuick ? fields.proxyPopQuick.value.trim() : '';
+  if (!proxyText) return;
+  const epoch = ++proxyQuickParseEpoch;
+  if (!fields.proxyPopType || fields.proxyPopType.value === 'no_proxy') {
+    setProxyPopMsg('请先选择 HTTP、HTTPS 或 SOCKS5。', true);
+    return;
+  }
+  if (!window.aidcpEdge || typeof window.aidcpEdge.adsParseProxyLines !== 'function') {
+    setProxyPopMsg('当前客户端未加载代理解析能力，请重启后重试。', true);
+    return;
+  }
+  const parsed = await window.aidcpEdge.adsParseProxyLines({
+    proxyType: fields.proxyPopType.value,
+    proxyText,
+  });
+  if (epoch !== proxyQuickParseEpoch || !proxyPopTarget
+    || fields.proxyPopQuick.value.trim() !== proxyText) return;
+  if (!parsed || !parsed.ok) {
+    setProxyPopMsg((parsed && parsed.error) || '代理格式不正确。', true);
+    return;
+  }
+  if (!Array.isArray(parsed.proxies) || parsed.proxies.length !== 1) {
+    setProxyPopMsg('单个环境请只粘贴一条代理。', true);
+    return;
+  }
+  const proxy = parsed.proxies[0];
+  fields.proxyPopHost.value = proxy.proxyHost || '';
+  fields.proxyPopPort.value = proxy.proxyPort || '';
+  fields.proxyPopUser.value = proxy.proxyUser || '';
+  fields.proxyPopPass.value = proxy.proxyPassword || '';
+  setProxyPopMsg('已解析并填入，可继续修改后保存。', false);
+}
 function openProxyPop(prof, proxyConfig) {
   if (!fields.proxyPop) return;
+  proxyQuickParseEpoch += 1;
   proxyPopTarget = { userId: prof.userId, name: prof.name || prof.userId };
   if (fields.proxyPopEnv) fields.proxyPopEnv.textContent = `· ${proxyPopTarget.name}`;
   // 当前配置如实呈现（含 UI 下拉表达不了的代理厂商类型——保存会整体替换，这行让用户知道在替换什么）。
@@ -5806,6 +6059,7 @@ function openProxyPop(prof, proxyConfig) {
   if (fields.proxyPopPort) fields.proxyPopPort.value = cfg.noProxy ? '' : (cfg.proxyPort || '');
   if (fields.proxyPopUser) fields.proxyPopUser.value = cfg.noProxy ? '' : (cfg.proxyUser || '');
   if (fields.proxyPopPass) fields.proxyPopPass.value = cfg.noProxy ? '' : (cfg.proxyPassword || '');
+  if (fields.proxyPopQuick) fields.proxyPopQuick.value = '';
   syncProxyPopDetail();
   setProxyPopMsg('', false);
   fields.proxyPop.classList.remove('hidden');
@@ -5815,7 +6069,9 @@ function openProxyPop(prof, proxyConfig) {
 }
 function closeProxyPop() {
   if (!fields.proxyPop) return;
+  proxyQuickParseEpoch += 1;
   proxyPopTarget = null;
+  if (fields.proxyPopQuick) fields.proxyPopQuick.value = '';
   fields.proxyPop.classList.remove('open');
   fields.proxyPop.classList.add('hidden');
   fields.proxyPop.setAttribute('aria-hidden', 'true');
@@ -5823,7 +6079,12 @@ function closeProxyPop() {
 }
 fields.proxyClose?.addEventListener('click', closeProxyPop);
 fields.proxyMask?.addEventListener('click', closeProxyPop);
-fields.proxyPopType?.addEventListener('change', syncProxyPopDetail);
+fields.proxyPopType?.addEventListener('change', () => {
+  syncProxyPopDetail();
+  if (fields.proxyPopQuick && fields.proxyPopQuick.value.trim()) void parseProxyQuickPaste();
+});
+fields.proxyPopQuick?.addEventListener('paste', () => setTimeout(() => { void parseProxyQuickPaste(); }, 0));
+fields.proxyPopQuick?.addEventListener('change', () => { void parseProxyQuickPaste(); });
 fields.proxySave?.addEventListener('click', async () => {
   if (!proxyPopTarget || !window.aidcpEdge || typeof window.aidcpEdge.adsUpdateEnvProxy !== 'function') return;
   const proxy = readProxyForm({
@@ -5840,9 +6101,10 @@ fields.proxySave?.addEventListener('click', async () => {
   try {
     const r = await window.aidcpEdge.adsUpdateEnvProxy({ ...formAdsOpts(), userId: proxyPopTarget.userId, proxy });
     if (r && r.ok) {
-      setEnvMsg(`已更新「${proxyPopTarget.name}」的代理（${proxy.proxyType === 'no_proxy' ? '已清除代理' : proxy.proxyType}），下次启动该环境生效。`, false);
+      const targetName = proxyPopTarget.name;
       closeProxyPop();
-      refreshEnvs();
+      await refreshEnvs({ suppressAutoJoin: true });
+      setEnvMsg(`已更新「${targetName}」的代理（${proxy.proxyType === 'no_proxy' ? '已清除代理' : proxy.proxyType}），下次启动该环境生效。`, false);
     } else {
       setProxyPopMsg(`保存失败：${(r && r.error) || '未知错误'}`, true);
     }

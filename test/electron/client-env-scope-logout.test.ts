@@ -60,10 +60,10 @@ test('ads:getEnvProxy 只按精确 userId 读取完整代理，并受当前客�
   const block = handlerBlock(main, 'ads:getEnvProxy');
   assert.ok(block, 'ads:getEnvProxy handler 必须存在');
   assert.match(preload, /adsGetEnvProxy: \(opts\) => ipcRenderer\.invoke\('ads:getEnvProxy', opts\)/);
-  assert.match(block, /const userId = String\(\(opts && opts\.userId\) \|\| ''\)\.trim\(\)/);
-  assert.match(block, /if \(!hasValidSession\(\)\) \{ onSessionInvalid\(\)/, '失效会话不得读取代理密码');
-  assert.match(block, /!\(allowedProfileIds instanceof Set\) \|\| !allowedProfileIds\.has\(userId\)/,
-    '客户模式必须按权威环境范围拒绝任意 userId');
+  assert.match(block, /const scope = await proxyTargetScope\(\[opts && opts\.userId\]\)/,
+    '精确读与代理写入共用会话刷新和客户范围门禁');
+  assert.match(block, /if \(!scope\.ok\) return/, '失效会话或非当前客户目标不得读取代理密码');
+  assert.match(block, /const userId = scope\.userIds\[0\]/, '只使用门禁归一后的精确目标');
   assert.match(block, /adsApi\.getProfileProxyConfig\(\{[\s\S]*profileId: userId/,
     '只复用精确 profile 读取，不得回退全量列表或任意本地 API');
   assert.doesNotMatch(block, /listProfiles\(/);

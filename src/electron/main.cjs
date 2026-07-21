@@ -24,7 +24,13 @@ const adsRuntime = require('./ads-runtime.cjs');
 const adsRuntimeStage = require('./ads-runtime-stage.cjs');
 const adsFingerprint = require('./ads-fingerprint.cjs');
 const { normalizePlatform } = require('./ads-create-flow.cjs');
-const { normalizeProxyInput } = require('./ads-proxy-config.cjs');
+const { normalizeProxyInput, parseProxyLines } = require('./ads-proxy-config.cjs');
+const {
+  createProxyReassignmentPlan,
+  proxyReassignmentFailure,
+  validateProxyTargetScope,
+  executeProxyReassignmentPlan,
+} = require('./ads-proxy-reassignment.cjs');
 const {
   ENV_GROUP_NAME,
   createEnvGroupResolver,
@@ -6090,6 +6096,7 @@ ipcMain.handle('ads:openCreate', () => openAdsClient());
 // ── 「创建环境」程序化建号（change adspower-auto-create-env）：写客户端 allowlist + 指纹引擎 + 编排 ──
 const envGroupResolver = createEnvGroupResolver({ adsApi, groupName: ENV_GROUP_NAME });
 let adsCreateInFlight = false; // 进程级单飞互斥（防连点双建）
+let adsProxyWriteInFlight = false; // 单项/批量改代理共用单飞；不与创建交错写 AdsPower
 
 function osFamilyLabel(t) {
   return t.label || (t.os === 'windows' ? 'Windows' : t.os === 'macos' ? 'macOS' : t.os);
@@ -6121,7 +6128,7 @@ function safeCreatedEnvironment(finalized) {
 // 程序化建指纹环境。单建 opts: { osFamilyKey, platform, proxy?, facebookAccountImport? }；
 // Facebook 批量另带 { creationMode:'batch', batchProxyType, facebookProxyBatch }。
 ipcMain.handle('ads:createEnv', async (_event, opts) => {
-  if (adsCreateInFlight) return { ok: false, error: '创建进行中，请等当前创建完成' };
+  if (adsCreateInFlight || adsProxyWriteInFlight) return { ok: false, error: '环境写入进行中，请等当前操作完成' };
   adsCreateInFlight = true;
   try {
     const platform = normalizePlatform(opts && opts.platform);
@@ -6257,46 +6264,180 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
 // 精确读取一个环境的完整代理配置供编辑浮层回填。全量 ads:listProfiles 继续不含密码；客户模式
 // 必须在当前有效会话的权威环境范围内，避免 renderer 用任意 userId 读取他人代理凭据。
 ipcMain.handle('ads:getEnvProxy', async (_event, opts) => {
-  const userId = String((opts && opts.userId) || '').trim();
-  if (!userId) return { ok: false, error: '缺 userId' };
-  if (clientAuthEnabled()) {
-    if (!hasValidSession()) { onSessionInvalid(); return { ok: false, error: '登录已失效，请重新登录客户端。' }; }
-    if (!(allowedProfileIds instanceof Set) || !allowedProfileIds.has(userId)) {
-      return { ok: false, status: 403, error: '该环境不属于当前客户，已拒绝读取代理配置。' };
-    }
-  }
+  const scope = await proxyTargetScope([opts && opts.userId]);
+  if (!scope.ok) return { ...scope, status: scope.error && scope.error.includes('不属于') ? 403 : undefined };
+  const userId = scope.userIds[0];
   return readAdsWithRuntime(opts, (resolved) => adsApi.getProfileProxyConfig({
     ...resolved,
     profileId: userId,
   }));
 });
 
-// 改已有环境代理（edge-client-proxy-platform-persona-ux）：归一层校验 → 写客户端受限 user/update
-// （body 只含 user_id + user_proxy_config 两键）。密码只内存流转、不落盘、日志已脱敏。
+async function proxyTargetScope(userIds) {
+  const initial = validateProxyTargetScope({ userIds, authEnabled: false });
+  if (!initial.ok || !clientAuthEnabled()) return initial;
+  if (!hasValidSession()) {
+    onSessionInvalid();
+    return { ok: false, error: '登录已失效，请重新登录客户端。' };
+  }
+  const refreshed = await refreshAllowedEnvironments();
+  if (!refreshed || !(allowedProfileIds instanceof Set)) {
+    onSessionInvalid();
+    return { ok: false, error: '登录已失效，请重新登录客户端。' };
+  }
+  return validateProxyTargetScope({
+    userIds: initial.userIds,
+    authEnabled: true,
+    sessionValid: hasValidSession(),
+    allowedProfileIds,
+  });
+}
+
+function proxyTargetActive(userId) {
+  const handle = envs.get(fleet.envIdForProfile(String(userId)));
+  return Boolean(handle && !handle.removed && (
+    handle.child
+    || handle.startQueueReserved
+    || handle.startFlowQueued
+    || handle.launchQueued
+    || handle.slotWaitingSince
+    || handle.controlPlaneStarting
+    || handle.browserOpenPending
+    || handle.coldStandbyWaking
+  ));
+}
+
+function proxyUpdateError(result) {
+  if (result && result.ok === false && /being used|being opened|is open|正在使用|已打开/i.test(String(result.error || ''))) {
+    return '该环境正在使用中，无法修改代理；请先关闭该环境后重试。';
+  }
+  return (result && result.error) || '未知错误';
+}
+
+function batchProxyUpdateError(result) {
+  const friendly = proxyUpdateError(result);
+  if (/being used|being opened|is open|正在使用|已打开/i.test(friendly)) return friendly;
+  if (result && result.code != null) return `AdsPower 拒绝代理更新（code=${result.code}）`;
+  if (/服务不可达|响应非 JSON|HTTP\s*\d+/i.test(friendly)) return friendly;
+  // AdsPower msg 是外部字符串，不能假设它绝不回显请求内容；批量回执宁可收窄为通用原因。
+  return 'AdsPower 未接受代理更新';
+}
+
+function invalidateProxyEvidence(userId) {
+  const envId = fleet.envIdForProfile(String(userId));
+  proxyPreflight.invalidate(envId);
+  const handle = envs.get(envId);
+  if (handle && selectedEnvId === envId) scheduleSelectedProxyPreflight(handle);
+}
+
+// 快速粘贴只走具名纯解析 IPC；结果仍须经保存/批量写入口重新校验，绝不把 preview 当授权。
+ipcMain.handle('ads:parseProxyLines', (_event, input) => parseProxyLines({
+  proxyType: input && input.proxyType,
+  proxyText: input && input.proxyText,
+}));
+
+// 改已有环境代理（edge-client-proxy-platform-persona-ux）：归属门禁 + 归一层校验 → 受限 user/update。
 ipcMain.handle('ads:updateEnvProxy', async (_event, opts) => {
-  const userId = opts && opts.userId;
-  if (!userId) return { ok: false, error: '缺 userId' };
   const norm = normalizeProxyInput((opts && opts.proxy) || {});
   if (!norm.ok) return { ok: false, error: `代理输入不合法：${norm.error}` };
+  if (adsProxyWriteInFlight || adsCreateInFlight) {
+    return { ok: false, error: '环境写入进行中，请等当前操作完成。' };
+  }
+  adsProxyWriteInFlight = true;
   try {
+    const scope = await proxyTargetScope([opts && opts.userId]);
+    if (!scope.ok) return scope;
+    const userId = scope.userIds[0];
+    if (proxyTargetActive(userId)) {
+      return { ok: false, error: '该环境正在使用中，无法修改代理；请先关闭该环境后重试。' };
+    }
     const svc = await ensureAdsServiceOnce(null);
     if (!svc.ok) return { ok: false, error: `指纹浏览器运行时未就绪：${svc.error || '未知错误'}`, retryable: true };
     const ads = resolveAdsOpts(opts);
     const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
     const r = await writeApi.updateProfileProxy({ userId: String(userId), proxyConfig: norm.proxyConfig }, ads);
-    if (r && r.ok === false && /being used|being opened|is open|正在使用|已打开/i.test(String(r.error || ''))) {
-      return { ok: false, error: '该环境正在使用中，无法修改代理；请先关闭该环境后重试。' };
-    }
+    if (r && r.ok === false) return { ...r, error: proxyUpdateError(r) };
     if (r && r.ok) {
-      const envId = fleet.envIdForProfile(String(userId));
-      proxyPreflight.invalidate(envId);
-      const handle = envs.get(envId);
-      if (handle && selectedEnvId === envId) scheduleSelectedProxyPreflight(handle);
+      invalidateProxyEvidence(userId);
       return { ok: true, noProxy: norm.noProxy };
     }
     return r;
   } catch (e) {
     return { ok: false, error: `修改代理失败：${(e && e.message) || String(e)}` };
+  } finally {
+    adsProxyWriteInFlight = false;
+  }
+});
+
+ipcMain.handle('ads:updateEnvProxies', async (_event, opts) => {
+  const plan = createProxyReassignmentPlan({
+    userIds: opts && opts.userIds,
+    proxyType: opts && opts.proxyType,
+    proxyText: opts && opts.proxyText,
+  });
+  if (!plan.ok) return plan;
+  if (adsProxyWriteInFlight || adsCreateInFlight) {
+    return { ok: false, error: '环境写入进行中，请等当前操作完成。' };
+  }
+  // 在第一个 await 之前占有锁；否则两个 IPC 可在权威范围刷新期间同时通过前置检查。
+  adsProxyWriteInFlight = true;
+  const updatedUserIds = [];
+  try {
+    const scope = await proxyTargetScope(plan.plan.map((item) => item.userId));
+    if (!scope.ok) return scope;
+    const activeIndex = plan.plan.findIndex((item) => proxyTargetActive(item.userId));
+    if (activeIndex >= 0) {
+      return proxyReassignmentFailure(
+        [], activeIndex + 1, '该环境正在使用中；请先关闭后重试。', plan.plan.length,
+      );
+    }
+    const svc = await ensureAdsServiceOnce(null);
+    if (!svc.ok) {
+      return {
+        ok: false,
+        error: `指纹浏览器运行时未就绪：${svc.error || '未知错误'}`,
+        updatedUserIds: [],
+        updatedCount: 0,
+        notAttemptedCount: plan.plan.length,
+        partial: false,
+        retryable: true,
+      };
+    }
+    const ads = resolveAdsOpts(opts);
+    const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
+    const executed = await executeProxyReassignmentPlan({
+      plan: plan.plan,
+      // 写前逐项复核竞态；起点完整预校验不能替代状态随后变化。
+      isActive: (userId) => proxyTargetActive(userId),
+      updateOne: async (item) => {
+        const norm = normalizeProxyInput(item.proxy);
+        if (!norm.ok) return { ok: false, error: `代理输入不合法：${norm.error}` };
+        const result = await writeApi.updateProfileProxy({ userId: item.userId, proxyConfig: norm.proxyConfig }, ads);
+        if (!result || !result.ok) return { ok: false, error: batchProxyUpdateError(result) };
+        return { ok: true };
+      },
+    });
+    for (const userId of executed.updatedUserIds || []) {
+      try { invalidateProxyEvidence(userId); } catch { /* 配置写入真相不因本地证据刷新失败被改写 */ }
+    }
+    if (!executed.ok) return executed;
+    updatedUserIds.push(...executed.updatedUserIds);
+    return {
+      ok: true,
+      updatedUserIds,
+      updatedCount: updatedUserIds.length,
+      proxyCount: plan.proxyCount,
+      noProxy: plan.noProxy,
+    };
+  } catch {
+    return proxyReassignmentFailure(
+      updatedUserIds,
+      updatedUserIds.length + 1,
+      '代理更新遇到内部错误',
+      plan.plan.length,
+    );
+  } finally {
+    adsProxyWriteInFlight = false;
   }
 });
 

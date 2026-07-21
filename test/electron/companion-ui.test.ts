@@ -185,12 +185,12 @@ test('配置表单收进抽屉：稳态首屏不见「必填」，齿轮开合',
   assert.equal(drawer.classList.contains('open'), false);
 });
 
-test('待配置 → 首屏主动步骤，点「添加环境」直达左栏添加面板', async () => {
+test('待配置 → 首屏主动步骤，点「环境管理」直达左栏管理面板', async () => {
   const { w } = await boot({ auth: 'config required', edge: 'stopped', session: 'idle' });
   assert.equal(hidden($(w, '#login-guide')), false, '待配置应出主动步骤');
   assert.equal(hidden($(w, '#notice-action')), false);
+  assert.equal($(w, '#notice-action').textContent?.trim(), '环境管理');
   $(w, '#notice-action').dispatchEvent(new w.Event('click'));
-  // 环境管理已搬到左栏：主动步骤直达「添加环境」面板，不再去设置抽屉。
   assert.equal($(w, '#env-add-panel').classList.contains('open'), true);
 });
 

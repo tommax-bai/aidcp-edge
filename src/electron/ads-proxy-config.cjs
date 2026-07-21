@@ -44,4 +44,88 @@ function normalizeProxyInput(input = {}) {
   return { ok: true, proxyConfig, noProxy: false };
 }
 
-module.exports = { normalizeProxyInput, PROXY_TYPES, NO_PROXY_CONFIG };
+function nonBlankProxyLines(raw) {
+  return String(raw || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function proxyFieldsForLine(line, index) {
+  const lineNo = index + 1;
+  const delimiter = line.includes('----') ? '----' : ':';
+  const parts = line.split(delimiter);
+  if (parts.length !== 2 && parts.length < 4) {
+    return {
+      ok: false,
+      error: `第 ${lineNo} 条代理格式错误，请使用 host:port 或 host:port:username:password`,
+    };
+  }
+  return {
+    ok: true,
+    lineNo,
+    host: parts[0].trim(),
+    port: parts[1].trim(),
+    user: parts.length >= 4 ? parts[2].trim() : '',
+    password: parts.length >= 4 ? parts.slice(3).join(delimiter) : '',
+  };
+}
+
+function canonicalProxyInput(proxyConfig) {
+  return {
+    proxyType: proxyConfig.proxy_type,
+    proxyHost: proxyConfig.proxy_host,
+    proxyPort: proxyConfig.proxy_port,
+    proxyUser: proxyConfig.proxy_user || '',
+    proxyPassword: proxyConfig.proxy_password || '',
+  };
+}
+
+/**
+ * Parse one or more newline-delimited proxies through the same normalization truth source.
+ * Errors expose only a safe line number and field reason, never the original credential line.
+ */
+function parseProxyLines({ proxyType, proxyText } = {}) {
+  const type = String(proxyType || 'no_proxy').trim().toLowerCase();
+  const lines = nonBlankProxyLines(proxyText);
+  if (type === 'no_proxy') {
+    if (lines.length > 0) {
+      return { ok: false, error: '选择「无代理」时请清空代理资料' };
+    }
+    return { ok: true, noProxy: true, proxies: [] };
+  }
+  if (!PROXY_TYPES.includes(type)) {
+    return { ok: false, error: `代理类型须为 ${PROXY_TYPES.join('/')} 或选择「无代理」` };
+  }
+  if (lines.length === 0) {
+    return { ok: false, error: '已选择代理类型，请至少粘贴一条代理资料' };
+  }
+
+  const proxies = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const fields = proxyFieldsForLine(lines[i], i);
+    if (!fields.ok) return fields;
+    const normalized = normalizeProxyInput({
+      proxyType: type,
+      proxyHost: fields.host,
+      proxyPort: fields.port,
+      proxyUser: fields.user,
+      proxyPassword: fields.password,
+    });
+    if (!normalized.ok) {
+      return { ok: false, error: `第 ${fields.lineNo} 条代理${normalized.error}` };
+    }
+    proxies.push(canonicalProxyInput(normalized.proxyConfig));
+  }
+  return { ok: true, noProxy: false, proxies };
+}
+
+module.exports = {
+  normalizeProxyInput,
+  parseProxyLines,
+  nonBlankProxyLines,
+  proxyFieldsForLine,
+  canonicalProxyInput,
+  PROXY_TYPES,
+  NO_PROXY_CONFIG,
+};

@@ -78,6 +78,8 @@ interface Stub {
   resetBrowserParking: () => Promise<{ ok: boolean; error?: string }>;
   adsStatus: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
   adsListProfiles: (opts?: unknown) => Promise<unknown>;
+  adsParseProxyLines: (opts?: unknown) => Promise<unknown>;
+  adsUpdateEnvProxies: (opts?: unknown) => Promise<unknown>;
   adsOpenCreate: () => { launched: boolean } | Promise<{ launched: boolean }>;
   adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
   adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; osFamily?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string; requiresAdminAssignment?: boolean; assignmentHandledByMain?: boolean; rosterJoinedByMain?: boolean }>;
@@ -223,6 +225,8 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     resetBrowserParking: async () => ({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' }),
     adsStatus: async () => ({ ok: true }),
     adsListProfiles: async () => ({ ok: true, profiles: [] }),
+    adsParseProxyLines: async () => ({ ok: false, error: '测试桩未配置代理解析' }),
+    adsUpdateEnvProxies: async () => ({ ok: true, updatedCount: 0 }),
     adsOpenCreate: () => ({ launched: true }),
     adsTemplates: async () => [{ key: 'windows', label: 'Windows' }, { key: 'macos', label: 'macOS' }],
     adsCreateEnv: async () => ({ ok: true, osFamily: 'windows' }),
@@ -266,7 +270,7 @@ const hidden = (el: HTMLElement) => el.classList.contains('hidden');
 
 test('中文化：新增控件文案齐全', () => {
   // 环境管理与人设已搬到左栏浮层；设置抽屉只剩浏览器引擎 + 窗口停放 + 开发者开关。
-  for (const s of ['浏览器引擎', '本机 Chrome', '添加环境', '加入现有环境', '新建环境', '刷新', '手动填写', '创建环境', '账号人设', '窗口停放', '主屏停放', '副屏停放', '边缘停放', '完全移出', '指纹浏览器高级设置']) {
+  for (const s of ['浏览器引擎', '本机 Chrome', '环境管理', '新建环境', '批量代理', '刷新', '手动填写', '创建环境', '账号人设', '窗口停放', '主屏停放', '副屏停放', '边缘停放', '完全移出', '指纹浏览器高级设置']) {
     assert.ok(html.includes(s), `index.html 应含「${s}」`);
   }
 });
@@ -357,7 +361,7 @@ test('探测就绪 → 静默自动列出环境（无徽标、无需先点刷新
   assert.match(items[0].textContent ?? '', /甲/);
 });
 
-test('环境代理编辑：明文回显现有密码，只改 host 后仍原样提交密码', async () => {
+test('环境代理编辑：遮罩预填现有密码，只改 host 后仍原样提交密码', async () => {
   let readArgs: Record<string, unknown> | undefined;
   let submitted: Record<string, unknown> | undefined;
   const w = await boot(makeStub({
@@ -398,7 +402,7 @@ test('环境代理编辑：明文回显现有密码，只改 host 后仍原样�
   await tick();
   assert.equal(readArgs?.userId, 'u1', '必须按点击行的精确 userId 读取密码');
   const password = $(w, '#proxy-pop-pass') as HTMLInputElement;
-  assert.equal(password.type, 'text', '密码应直接可见而不是掩码显示');
+  assert.equal(password.type, 'password', '密码应预填但保持遮罩显示');
   assert.equal(password.value, 'S3cr3t!');
 
   ($(w, '#proxy-pop-host') as HTMLInputElement).value = 'new.example';
@@ -512,9 +516,8 @@ test('启动前未选环境/未填分身 → 诚实提示，不 save 不 start',
   $(w, '#session-fab').dispatchEvent(new w.Event('click'));
   await tick();
   assert.deepEqual(calls, []);
-  assert.match($(w, '#settings-msg').textContent ?? '', /添加环境/);
-  // 环境管理已搬到左栏：诚实提示直达「添加环境」面板（不再打开设置抽屉）。
-  assert.equal($(w, '#env-add-panel').classList.contains('open'), true, '提示应打开添加环境面板，避免启动按钮像没反应');
+  assert.match($(w, '#settings-msg').textContent ?? '', /环境管理/);
+  assert.equal($(w, '#env-add-panel').classList.contains('open'), true, '提示应打开环境管理，避免启动按钮像没反应');
 });
 
 test('运行中改设置（窗口停放）→ 出现「按新设置重启」，点击先存再重启', async () => {
@@ -1078,7 +1081,7 @@ test('客户归属环境默认全部移入且不启动；手动移出持久保�
   const latestEnvs = state.environments as Array<{ profileId: string }>;
   assert.deepEqual(Array.from(latestEnvs, (e) => e.profileId), ['owned-1', 'owned-2'], '完整权威归属列表默认全部移入');
   assert.equal(starts, 0, '默认移入只建离线行，绝不自动启动');
-  assert.match($(w, '#ads-env-msg').textContent ?? '', /已默认移入 2 个归属环境.*未自动启动/);
+  assert.match($(w, '#ads-env-msg').textContent ?? '', /已加入 2 个环境.*未自动启动/);
 
   const secondRemove = $$(w, '.ads-env-item')[1].querySelector('.ads-env-remove') as HTMLElement;
   secondRemove.click();

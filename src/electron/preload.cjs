@@ -46,7 +46,9 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   // 精确读取一个可见环境的完整代理配置；主进程按客户环境范围校验，不暴露任意本地 API。
   adsGetEnvProxy: (opts) => ipcRenderer.invoke('ads:getEnvProxy', opts),
   // 改已有环境代理（仅改 user_proxy_config，受限 user/update）：opts { userId, proxy, apiKey?, apiBase? }。
+  adsParseProxyLines: (input) => ipcRenderer.invoke('ads:parseProxyLines', input),
   adsUpdateEnvProxy: (opts) => ipcRenderer.invoke('ads:updateEnvProxy', opts),
+  adsUpdateEnvProxies: (opts) => ipcRenderer.invoke('ads:updateEnvProxies', opts),
   // 账号人设（change offline-account-persona-management）：只交本地 envId，main 权威换成 envKey 后直连
   // customer-auth。读取 / 生成 / 保存均不依赖该环境的 core 或浏览器是否运行。
   personaGet: (envId) => ipcRenderer.invoke('persona:get', envId),
