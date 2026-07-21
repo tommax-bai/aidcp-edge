@@ -202,9 +202,9 @@ test('灵感入口只在小红书环境展示，非 XHS 不取数、不打开且
 });
 
 test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async () => {
-  const listCalls: Array<{ envId: string; options: { mode: string; limit: number; offset: number } }> = [];
+  const listCalls: Array<{ envId: string; options: { mode: string; sort: string; limit: number; offset: number } }> = [];
   const { window, controller } = boot({
-    curatedList: async (envId: string, options: { mode: string; limit: number; offset: number }) => {
+    curatedList: async (envId: string, options: { mode: string; sort: string; limit: number; offset: number }) => {
       listCalls.push({ envId, options: JSON.parse(JSON.stringify(options)) });
       return { ok: true, data: { items: [listItem({ id: options.offset + 7, title: `第 ${options.offset / 12 + 1} 页灵感` })], total: 25 } };
     },
@@ -218,7 +218,7 @@ test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async
   assert.equal(hidden($(window, '#legacy-workspace')), true);
   assert.match($(window, '#content-workspace-meta').textContent ?? '', /晚风手作/);
   assert.match($(window, '#curated-list').textContent ?? '', /第 1 页灵感/);
-  assert.deepEqual(listCalls[0], { envId: 'env-a', options: { mode: 'uncreated', limit: 12, offset: 0 } });
+  assert.deepEqual(listCalls[0], { envId: 'env-a', options: { mode: 'uncreated', sort: 'weighted', limit: 12, offset: 0 } });
 
   $(window, '#curated-next').dispatchEvent(new window.Event('click'));
   await flush();
@@ -245,11 +245,124 @@ test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async
 
   ($(window, '[data-curated-mode="created"]')).dispatchEvent(new window.Event('click'));
   await flush();
-  assert.deepEqual(listCalls.at(-1)?.options, { mode: 'created', limit: 12, offset: 0 });
+  assert.deepEqual(listCalls.at(-1)?.options, { mode: 'created', sort: 'weighted', limit: 12, offset: 0 });
 
   ($(window, '[data-curated-mode="all"]')).dispatchEvent(new window.Event('click'));
   await flush();
-  assert.deepEqual(listCalls.at(-1)?.options, { mode: 'all', limit: 12, offset: 0 });
+  assert.deepEqual(listCalls.at(-1)?.options, { mode: 'all', sort: 'weighted', limit: 12, offset: 0 });
+});
+
+test('排序由服务端执行，切换时保留旧卡片并在成功后原子替换第一页', async () => {
+  let resolveCollects: ((value: unknown) => void) | undefined;
+  const pendingCollects = new Promise((resolve) => { resolveCollects = resolve; });
+  const calls: Array<{ envId: string; options: Record<string, unknown> }> = [];
+  const { window, controller } = boot({
+    curatedList: async (envId: string, options: Record<string, unknown>) => {
+      calls.push({ envId, options: JSON.parse(JSON.stringify(options)) });
+      if (options.sort === 'collects') return pendingCollects;
+      return { ok: true, data: { items: [listItem({ title: '原综合热度第一名' })], total: 25 } };
+    },
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  controller.openLibrary();
+  await flush();
+  $(window, '#curated-next').click();
+  await flush();
+  assert.match($(window, '#curated-page').textContent ?? '', /第 2 \/ 3 页/);
+
+  $(window, '#curated-sort-trigger').click();
+  assert.equal($(window, '#curated-sort-trigger').getAttribute('aria-expanded'), 'true');
+  ($(window, '[data-curated-sort="collects"]') as HTMLButtonElement).click();
+  await flush(2);
+
+  assert.deepEqual(calls.at(-1), {
+    envId: 'env-a', options: { mode: 'uncreated', sort: 'collects', limit: 12, offset: 0 },
+  });
+  assert.match($(window, '#curated-list').textContent ?? '', /原综合热度第一名/, '排序在途必须保留已确认卡片');
+  assert.equal($(window, '#curated-list').getAttribute('aria-busy'), 'true');
+  assert.equal($(window, '#curated-library-view').classList.contains('is-reordering'), true);
+  assert.equal(($(window, '#curated-sort-trigger') as HTMLButtonElement).disabled, true);
+
+  resolveCollects?.({ ok: true, data: { items: [listItem({ id: 9, title: '收藏第一名' })], total: 25 } });
+  await flush();
+  assert.match($(window, '#curated-list').textContent ?? '', /收藏第一名/);
+  assert.doesNotMatch($(window, '#curated-list').textContent ?? '', /原综合热度第一名/);
+  assert.match($(window, '#curated-page').textContent ?? '', /第 1 \/ 3 页/);
+  assert.equal($(window, '#curated-sort-label').textContent, '收藏最多');
+  assert.equal($(window, '#curated-library-view').classList.contains('is-reordering'), false);
+});
+
+test('瞬时排序失败回退旧状态，身份归属失败则清除缓存内容', async () => {
+  let failure: 'transient' | 'binding' | null = null;
+  const { window, controller } = boot({
+    curatedList: async (_envId: string, options: { sort: string }) => {
+      if (options.sort === 'likes' && failure === 'transient') return { ok: false, error: 'request_failed' };
+      if (options.sort === 'collects' && failure === 'binding') return { ok: false, error: 'binding_conflict' };
+      return { ok: true, data: { items: [listItem({ title: '已确认的灵感' })], total: 1 } };
+    },
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  controller.openLibrary();
+  await flush();
+
+  failure = 'transient';
+  $(window, '#curated-sort-trigger').click();
+  ($(window, '[data-curated-sort="likes"]') as HTMLButtonElement).click();
+  await flush();
+  assert.match($(window, '#curated-list').textContent ?? '', /已确认的灵感/);
+  assert.equal($(window, '#curated-sort-label').textContent, '综合热度');
+  assert.match($(window, '#curated-sort-feedback').textContent ?? '', /排序未更新/);
+  assert.equal(hidden($(window, '#curated-sort-feedback')), false);
+
+  failure = 'binding';
+  $(window, '#curated-sort-trigger').click();
+  ($(window, '[data-curated-sort="collects"]') as HTMLButtonElement).click();
+  await flush();
+  assert.doesNotMatch($(window, '#curated-list').textContent ?? '', /已确认的灵感/);
+  assert.match($(window, '#curated-list').textContent ?? '', /同时出现在多个客户的环境/);
+  assert.equal(hidden($(window, '#curated-sort-feedback')), true);
+});
+
+test('排序状态按环境恢复，菜单支持方向键、Enter 与 Escape', async () => {
+  const calls: Array<{ envId: string; sort: string }> = [];
+  const { window, controller } = boot({
+    curatedList: async (envId: string, options: { sort: string }) => {
+      calls.push({ envId, sort: options.sort });
+      return { ok: true, data: { items: [listItem({ title: `${envId}-${options.sort}` })], total: 1 } };
+    },
+    curatedGet: async () => ({ ok: true, data: { item: detail() } }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '账号 A', platform: 'xiaohongshu' });
+  controller.openLibrary();
+  await flush();
+
+  const trigger = $(window, '#curated-sort-trigger');
+  trigger.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  assert.equal(trigger.getAttribute('aria-expanded'), 'true');
+  assert.equal((window.document.activeElement as HTMLElement)?.dataset.curatedSort, 'weighted');
+  $(window, '#curated-sort-menu').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  assert.equal((window.document.activeElement as HTMLElement)?.dataset.curatedSort, 'collects');
+  $(window, '#curated-sort-menu').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await flush();
+  assert.equal($(window, '#curated-sort-label').textContent, '收藏最多');
+
+  $(window, '.curated-card').click();
+  await flush();
+  $(window, '#content-workspace-close').click();
+  assert.equal($(window, '#curated-sort-label').textContent, '收藏最多', '详情返回必须保留排序');
+
+  controller.setEnvironment({ envId: 'env-b', label: '账号 B', platform: 'xiaohongshu' });
+  await flush();
+  assert.equal($(window, '#curated-sort-label').textContent, '综合热度');
+  controller.setEnvironment({ envId: 'env-a', label: '账号 A', platform: 'xiaohongshu' });
+  await flush();
+  assert.equal($(window, '#curated-sort-label').textContent, '收藏最多');
+  assert.deepEqual(calls.slice(-2), [{ envId: 'env-b', sort: 'weighted' }, { envId: 'env-a', sort: 'collects' }]);
+
+  trigger.click();
+  assert.equal(trigger.getAttribute('aria-expanded'), 'true');
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false');
 });
 
 test('精选详情双栏保留彼此独立的滚动位置，窄屏交回单列文档流', async () => {

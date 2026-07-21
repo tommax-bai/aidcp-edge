@@ -6113,13 +6113,23 @@ ipcMain.handle('curated:list', (_event, envId, options) => {
       : raw.mode === 'uncreated' || raw.mode === undefined
         ? 'uncreated'
         : null;
+  const sort = raw.sort === 'weighted'
+    ? 'weighted'
+    : raw.sort === 'collects'
+      ? 'collects'
+      : raw.sort === 'likes'
+        ? 'likes'
+        : raw.sort === 'recent' || raw.sort === undefined
+          ? (raw.sort || 'weighted')
+          : null;
   const limit = raw.limit === undefined ? 20 : raw.limit;
   const offset = raw.offset === undefined ? 0 : raw.offset;
+  if (!sort) return { ok: false, status: 400, error: 'invalid_curated_sort' };
   if (!mode || !Number.isInteger(limit) || limit < 1 || limit > 50
     || !Number.isInteger(offset) || offset < 0 || offset > 1_000_000) {
     return { ok: false, status: 400, error: 'invalid_curated_pagination' };
   }
-  const pathname = `/curated-contents?mode=${mode}&limit=${limit}&offset=${offset}`;
+  const pathname = `/curated-contents?mode=${mode}&sort=${sort}&limit=${limit}&offset=${offset}`;
   return delegatedTaskRequest(envId, pathname, { includeEnvQuery: true });
 });
 

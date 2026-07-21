@@ -35,13 +35,20 @@ test('main 固定 customer-auth 路径、方法和参数白名单，并从所选
   }
   assert.match(main, /raw\.mode === 'all'[\s\S]*raw\.mode === 'created'[\s\S]*raw\.mode === 'uncreated'/);
   assert.doesNotMatch(main.slice(main.indexOf("ipcMain.handle('curated:list'"), main.indexOf("ipcMain.handle('curated:get'")), /raw\.mode === 'creatable'/);
+  const listBlock = main.slice(main.indexOf("ipcMain.handle('curated:list'"), main.indexOf("ipcMain.handle('curated:get'"));
+  for (const sort of ['weighted', 'collects', 'likes', 'recent']) {
+    assert.match(listBlock, new RegExp(`raw\\.sort === '${sort}'`), `main 必须显式白名单排序 ${sort}`);
+  }
+  assert.match(listBlock, /error: 'invalid_curated_sort'/);
+  assert.doesNotMatch(listBlock, /sortField|sortBy|direction|accountId|envKey|authorization|token/i,
+    '排序 IPC 不得接受字段、方向、账号、envKey 或认证材料');
   // 边界值必须右锚（\b）：不加的话 `limit > 50` 也匹配放宽后的 `limit > 5000`，护栏形同虚设。
   assert.match(main, /limit < 1 \|\| limit > 50\b/, 'limit 上界必须仍是 50');
   assert.match(main, /Number\.isInteger\(offset\)/, 'offset 必须整数校验（原先根本没断言）');
   assert.match(main, /offset < 0 \|\| offset > 1_000_000\b/, 'offset 边界必须仍收口');
   assert.match(main, /Number\.isInteger\(id\)[\s\S]*id <= 0/);
   assert.match(main, /typeof useReferenceImages !== 'boolean'/);
-  assert.match(main, /`\/curated-contents\?mode=\$\{mode\}&limit=\$\{limit\}&offset=\$\{offset\}`/);
+  assert.match(main, /`\/curated-contents\?mode=\$\{mode\}&sort=\$\{sort\}&limit=\$\{limit\}&offset=\$\{offset\}`/);
   assert.match(main, /'\/curated-contents\?mode=all&limit=1&offset=0'/);
   assert.match(main, /`\/curated-contents\/\$\{id\}\/create-post`[\s\S]*method: 'POST'[\s\S]*body: \{ useReferenceImages \}/);
   assert.match(main, /body: \{ \.\.\.options\.body, envKey: handle\.profileId \}/, 'envKey 只能由 main 从所选环境注入');
@@ -51,6 +58,22 @@ test('main 固定 customer-auth 路径、方法和参数白名单，并从所选
 test('灵感库列表隐藏视觉滚动条但保留原生纵向滚动', () => {
   assert.match(styles, /\.curated-list\s*\{[\s\S]*overflow-y:\s*auto;[\s\S]*scrollbar-width:\s*none;/);
   assert.match(styles, /\.curated-list::\-webkit-scrollbar\s*\{\s*display:\s*none;/);
+});
+
+test('客户排序控件位于列表工具栏右侧并在窄窗口有序换行', () => {
+  const tabsIndex = html.indexOf('id="curated-mode-tabs"');
+  const totalIndex = html.indexOf('id="curated-list-total"');
+  const sortIndex = html.indexOf('id="curated-sort-control"');
+  assert.ok(tabsIndex >= 0 && tabsIndex < totalIndex && totalIndex < sortIndex, '筛选在左，总数与排序在右');
+  for (const [value, label] of [['weighted', '综合热度'], ['collects', '收藏最多'], ['likes', '点赞最多'], ['recent', '最近更新']]) {
+    assert.match(html, new RegExp(`data-curated-sort="${value}"[\\s\\S]*${label}`));
+  }
+  assert.match(html, /点赞 \+ 收藏 × 1\.43/);
+  assert.match(html, /最近一次采集的赞藏数据排序，不代表平台实时热度/);
+  assert.match(styles, /\.cw-sort-trigger\s*\{[\s\S]*height:\s*32px;[\s\S]*background:\s*#fff;/);
+  assert.match(styles, /@media \(max-width:\s*680px\)[\s\S]*\.cw-toolbar\s*\{[^}]*flex-wrap:\s*wrap;[\s\S]*\.cw-toolbar-side\s*\{[^}]*width:\s*100%;/);
+  assert.match(styles, /\.cw-heading\s*\{[^}]*grid-column:\s*2;/, '返回按钮隐藏时标题仍须留在中间弹性列');
+  assert.match(styles, /\.cw-header > \.cw-icon-button:last-child\s*\{[^}]*grid-column:\s*3;/, '关闭按钮须固定在右列');
 });
 
 test('待审批稿只经具名 IPC 读取，路径和环境范围由 main 固定', () => {

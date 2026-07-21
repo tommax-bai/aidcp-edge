@@ -3,6 +3,17 @@
 
   const PAGE_SIZE = 12;
   const INSPIRATION_SATURATION_COUNT = 30;
+  const CURATED_SORT_LABELS = Object.freeze({
+    weighted: '综合热度',
+    collects: '收藏最多',
+    likes: '点赞最多',
+    recent: '最近更新',
+  });
+  const CURATED_SORTS = new Set(Object.keys(CURATED_SORT_LABELS));
+  const CURATED_FAIL_CLOSED_REASONS = new Set([
+    'environment_not_owned', 'client_session_expired', 'client_session_required',
+    'binding_unknown', 'binding_conflict', 'binding_unverified',
+  ]);
   const PUBLISH_QUEUE_POLL_MS = 20_000;
   const QUEUE_TASK_STATUSES = new Set(['queued', 'planning', 'deferred']);
   const QUEUE_JOURNEY_STATUSES = new Set([
@@ -209,6 +220,12 @@
       draft: root.querySelector('#publish-preview-panel'),
       list: root.querySelector('#curated-list'),
       total: root.querySelector('#curated-list-total'),
+      sortControl: root.querySelector('#curated-sort-control'),
+      sortTrigger: root.querySelector('#curated-sort-trigger'),
+      sortLabel: root.querySelector('#curated-sort-label'),
+      sortMenu: root.querySelector('#curated-sort-menu'),
+      sortOptions: Array.from(root.querySelectorAll('[data-curated-sort]')),
+      sortFeedback: root.querySelector('#curated-sort-feedback'),
       page: root.querySelector('#curated-page'),
       prev: root.querySelector('#curated-prev'),
       next: root.querySelector('#curated-next'),
@@ -242,6 +259,9 @@
       if (!states.has(environment.envId)) {
         states.set(environment.envId, {
           mode: 'uncreated',
+          sort: 'weighted',
+          sortLoading: false,
+          sortFeedback: null,
           page: 1,
           total: 0,
           items: [],
@@ -340,6 +360,7 @@
     }
 
     function showPage(page, pushCurrent) {
+      if (page !== 'library') closeSortMenu();
       if (pushCurrent && currentPage !== 'home') backStack.push(currentPage);
       currentPage = page;
       root.classList.toggle('curated-detail-mode', page === 'detail');
@@ -363,6 +384,7 @@
 
     function close() {
       const leavingPage = currentPage;
+      closeSortMenu();
       requestEpoch += 1;
       queueEpoch += 1;
       if (queuePollTimer) {
@@ -508,6 +530,64 @@
       fields.list.appendChild(state);
     }
 
+    function closeSortMenu(focusTrigger = false) {
+      if (!fields.sortMenu || !fields.sortTrigger) return;
+      fields.sortMenu.classList.add('hidden');
+      fields.sortTrigger.setAttribute('aria-expanded', 'false');
+      if (focusTrigger) fields.sortTrigger.focus();
+    }
+
+    function renderSortControl() {
+      const state = envState();
+      const sort = state && CURATED_SORTS.has(state.sort) ? state.sort : 'weighted';
+      const label = CURATED_SORT_LABELS[sort] || CURATED_SORT_LABELS.weighted;
+      if (fields.sortLabel) fields.sortLabel.textContent = label;
+      if (fields.sortTrigger) {
+        fields.sortTrigger.disabled = Boolean(state?.sortLoading);
+        fields.sortTrigger.setAttribute('aria-label', `灵感排序：${label}`);
+      }
+      fields.sortOptions.forEach((option) => {
+        const selected = option.dataset.curatedSort === sort;
+        option.classList.toggle('selected', selected);
+        option.setAttribute('aria-checked', selected ? 'true' : 'false');
+        option.tabIndex = selected ? 0 : -1;
+      });
+      fields.library?.classList.toggle('is-reordering', Boolean(state?.sortLoading));
+      if (fields.sortFeedback) {
+        const feedback = typeof state?.sortFeedback === 'string' ? state.sortFeedback : '';
+        fields.sortFeedback.textContent = feedback;
+        fields.sortFeedback.classList.toggle('hidden', !feedback);
+      }
+    }
+
+    function openSortMenu(preferredDirection = 0) {
+      const state = envState();
+      if (!state || state.sortLoading || currentPage !== 'library' || !fields.sortMenu || !fields.sortTrigger) return;
+      fields.sortMenu.classList.remove('hidden');
+      fields.sortTrigger.setAttribute('aria-expanded', 'true');
+      const options = fields.sortOptions;
+      const selectedIndex = Math.max(0, options.findIndex((option) => option.dataset.curatedSort === state.sort));
+      const index = preferredDirection < 0 ? options.length - 1 : selectedIndex;
+      options[index]?.focus();
+    }
+
+    function selectSort(nextSort) {
+      const state = envState();
+      if (!state || state.sortLoading || !CURATED_SORTS.has(nextSort) || state.sort === nextSort) {
+        closeSortMenu(true);
+        return;
+      }
+      const rollback = { sort: state.sort, page: state.page, scrollTop: state.scrollTop };
+      state.sort = nextSort;
+      state.page = 1;
+      state.scrollTop = 0;
+      state.sortLoading = true;
+      state.sortFeedback = null;
+      closeSortMenu();
+      renderSortControl();
+      void loadList({ preserveConfirmed: true, rollback, sortRequest: true });
+    }
+
     function renderStats(parent, item) {
       const stats = createElement(document, 'div', 'curated-stats');
       stats.appendChild(createElement(document, 'span', '', `赞 ${countText(item.likeCount)}`));
@@ -519,6 +599,7 @@
     function renderList() {
       const state = envState();
       if (!state || !fields.list) return;
+      renderSortControl();
       fields.list.replaceChildren();
       fields.list.setAttribute('aria-busy', 'false');
       const totalPages = Math.max(1, Math.ceil(state.total / PAGE_SIZE));
@@ -577,15 +658,24 @@
       }
     }
 
-    async function loadList() {
+    async function loadList(loadOptions = {}) {
       const state = envState();
       if (!state || !environment) return;
+      const preserveConfirmed = Boolean(loadOptions.preserveConfirmed && state.loaded && state.items.length > 0);
+      const rollback = loadOptions.rollback && typeof loadOptions.rollback === 'object' ? loadOptions.rollback : null;
       const capturedEnvId = environment.envId;
       const capturedEpoch = ++requestEpoch;
+      if (!loadOptions.sortRequest) state.sortLoading = false;
+      state.sortFeedback = null;
+      renderSortControl();
       fields.list.setAttribute('aria-busy', 'true');
       fields.total.textContent = '正在读取…';
-      renderListMessage('正在读取这个账号的灵感', '只会显示当前账号进入精选池的内容。', false);
+      if (!preserveConfirmed) {
+        renderListMessage('正在读取这个账号的灵感', '只会显示当前账号进入精选池的内容。', false);
+      }
       if (typeof api.curatedList !== 'function') {
+        state.sortLoading = false;
+        renderSortControl();
         renderListMessage('当前版本暂不支持灵感库', '请升级客户端后重试。', false);
         return;
       }
@@ -593,6 +683,7 @@
       try {
         response = await api.curatedList(capturedEnvId, {
           mode: state.mode,
+          sort: state.sort,
           limit: PAGE_SIZE,
           offset: (state.page - 1) * PAGE_SIZE,
         });
@@ -601,10 +692,27 @@
       }
       if (capturedEpoch !== requestEpoch || environment?.envId !== capturedEnvId || currentPage !== 'library') return;
       if (!response?.ok || !response.data || !Array.isArray(response.data.items)) {
+        const failReason = response?.reason || response?.error;
+        const failClosed = CURATED_FAIL_CLOSED_REASONS.has(failReason);
+        if (rollback) {
+          state.sort = rollback.sort;
+          state.page = rollback.page;
+          state.scrollTop = rollback.scrollTop;
+        }
+        state.sortLoading = false;
+        if (preserveConfirmed && !failClosed) {
+          state.sortFeedback = '排序未更新，请重试。原列表已保留。';
+          renderList();
+          fields.list.scrollTop = state.scrollTop;
+          return;
+        }
+        state.items = [];
+        state.loaded = false;
+        state.sortFeedback = null;
+        renderSortControl();
         // 「还不知道这个环境上是谁」是一等可见状态，MUST NOT 复用「精选池还是空的」空态（那是谎）：
         // 上线当日多数环境都是这个态，画成通用失败会让运营把正常的自愈期误报为故障（change
         // curated-envkey-account-binding）。连一次云端即自愈，故给重新加载按钮。
-        const failReason = response?.reason || response?.error;
         if (failReason === 'binding_unknown') {
           fields.total.textContent = '尚未识别账号';
           renderListMessage('还不知道这个环境上是谁',
@@ -615,6 +723,8 @@
         renderListMessage('暂时没能读取灵感库', responseFailureMessage(response), true);
         return;
       }
+      state.sortLoading = false;
+      state.sortFeedback = null;
       state.items = response.data.items;
       state.total = finiteCount(response.data.total) ?? 0;
       if (state.mode === 'all') state.inspirationCount = finiteCount(response.data.total);
@@ -1235,8 +1345,11 @@
         if (previousState) {
           previousState.summaryLoading = false;
           previousState.summaryRequestId = 0;
+          previousState.sortLoading = false;
+          previousState.sortFeedback = null;
         }
       }
+      if (changed) closeSortMenu();
       environment = normalized;
       updateEntry();
       if (!changed) {
@@ -1285,10 +1398,54 @@
     fields.entry?.addEventListener('click', openLibrary);
     fields.close?.addEventListener('click', handleCloseControl);
     fields.back?.addEventListener('click', goBack);
+    fields.sortTrigger?.addEventListener('click', () => {
+      if (fields.sortMenu?.classList.contains('hidden')) openSortMenu();
+      else closeSortMenu(true);
+    });
+    fields.sortTrigger?.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      event.preventDefault();
+      openSortMenu(event.key === 'ArrowUp' ? -1 : 1);
+    });
+    fields.sortOptions.forEach((option) => option.addEventListener('click', () => {
+      selectSort(option.dataset.curatedSort);
+    }));
+    fields.sortMenu?.addEventListener('keydown', (event) => {
+      const options = fields.sortOptions;
+      const activeIndex = Math.max(0, options.indexOf(document.activeElement));
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeSortMenu(true);
+        return;
+      }
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        selectSort(options[activeIndex]?.dataset.curatedSort);
+        return;
+      }
+      let nextIndex = null;
+      if (event.key === 'ArrowDown') nextIndex = (activeIndex + 1) % options.length;
+      if (event.key === 'ArrowUp') nextIndex = (activeIndex - 1 + options.length) % options.length;
+      if (event.key === 'Home') nextIndex = 0;
+      if (event.key === 'End') nextIndex = options.length - 1;
+      if (nextIndex === null) return;
+      event.preventDefault();
+      options[nextIndex]?.focus();
+    });
+    document.addEventListener('click', (event) => {
+      if (!fields.sortControl?.contains(event.target)) closeSortMenu();
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && !fields.sortMenu?.classList.contains('hidden')) {
+        event.preventDefault();
+        closeSortMenu(true);
+      }
+    });
     fields.modeButtons.forEach((button) => button.addEventListener('click', () => {
       const state = envState();
       const mode = button.dataset.curatedMode;
       if (!state || (mode !== 'uncreated' && mode !== 'created' && mode !== 'all') || state.mode === mode) return;
+      closeSortMenu();
       state.mode = mode;
       state.page = 1;
       state.scrollTop = 0;
@@ -1297,6 +1454,7 @@
     fields.prev?.addEventListener('click', () => {
       const state = envState();
       if (!state || state.page <= 1) return;
+      closeSortMenu();
       state.page -= 1;
       state.scrollTop = 0;
       void loadList();
@@ -1304,6 +1462,7 @@
     fields.next?.addEventListener('click', () => {
       const state = envState();
       if (!state || state.page >= Math.ceil(state.total / PAGE_SIZE)) return;
+      closeSortMenu();
       state.page += 1;
       state.scrollTop = 0;
       void loadList();
@@ -1320,6 +1479,7 @@
     });
 
     updateEntry();
+    renderSortControl();
     return {
       setEnvironment,
       openLibrary,

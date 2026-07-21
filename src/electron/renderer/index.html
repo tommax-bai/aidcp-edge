@@ -529,8 +529,40 @@
               <button type="button" data-curated-mode="created" aria-pressed="false">已创作</button>
               <button type="button" data-curated-mode="all" aria-pressed="false">全部</button>
             </div>
-            <span id="curated-list-total" class="cw-total">正在读取…</span>
+            <div class="cw-toolbar-side">
+              <span id="curated-list-total" class="cw-total">正在读取…</span>
+              <div id="curated-sort-control" class="cw-sort-control">
+                <button id="curated-sort-trigger" class="cw-sort-trigger" type="button"
+                  aria-haspopup="menu" aria-expanded="false" aria-controls="curated-sort-menu"
+                  aria-label="灵感排序：综合热度">
+                  <span class="cw-sort-glyph" aria-hidden="true">⇅</span>
+                  <span id="curated-sort-label">综合热度</span>
+                  <span class="cw-sort-chevron" aria-hidden="true">⌄</span>
+                </button>
+                <div id="curated-sort-menu" class="cw-sort-menu hidden" role="menu" aria-label="灵感排序方式">
+                  <button class="cw-sort-option selected" type="button" role="menuitemradio" data-curated-sort="weighted" aria-checked="true">
+                    <span class="cw-sort-check" aria-hidden="true">✓</span>
+                    <span><strong>综合热度</strong><small>点赞 + 收藏 × 1.43</small></span>
+                  </button>
+                  <button class="cw-sort-option" type="button" role="menuitemradio" data-curated-sort="collects" aria-checked="false">
+                    <span class="cw-sort-check" aria-hidden="true">✓</span>
+                    <span><strong>收藏最多</strong><small>优先查看高收藏内容</small></span>
+                  </button>
+                  <button class="cw-sort-option" type="button" role="menuitemradio" data-curated-sort="likes" aria-checked="false">
+                    <span class="cw-sort-check" aria-hidden="true">✓</span>
+                    <span><strong>点赞最多</strong><small>优先查看高点赞内容</small></span>
+                  </button>
+                  <button class="cw-sort-option" type="button" role="menuitemradio" data-curated-sort="recent" aria-checked="false">
+                    <span class="cw-sort-check" aria-hidden="true">✓</span>
+                    <span><strong>最近更新</strong><small>按进入系统后的更新时间</small></span>
+                  </button>
+                  <p class="cw-sort-note">依据系统最近一次采集的赞藏数据排序，不代表平台实时热度。</p>
+                </div>
+              </div>
+            </div>
           </div>
+          <div id="curated-sort-progress" class="cw-sort-progress" aria-hidden="true"><span></span></div>
+          <p id="curated-sort-feedback" class="cw-sort-feedback hidden" role="status"></p>
           <div id="curated-list" class="curated-list" aria-live="polite" aria-busy="true"></div>
           <div class="cw-pagination">
             <button id="curated-prev" type="button">上一页</button>
