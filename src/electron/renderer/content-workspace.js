@@ -864,15 +864,22 @@
 
     function renderQueueStages(parent, stages) {
       const rail = createElement(document, 'div', 'publish-queue-stages');
+      rail.setAttribute('role', 'list');
+      rail.setAttribute('aria-label', '发布进度');
       stages.forEach((stage) => {
         const item = createElement(document, 'div', `publish-queue-stage is-${stage.state}`);
-        item.appendChild(createElement(document, 'span', 'publish-queue-stage-dot'));
+        item.setAttribute('role', 'listitem');
+        const dot = createElement(document, 'span', 'publish-queue-stage-dot');
+        dot.setAttribute('aria-hidden', 'true');
+        item.appendChild(dot);
         const copy = createElement(document, 'div', 'publish-queue-stage-copy');
         copy.appendChild(createElement(document, 'strong', '', stage.label));
         const progress = stage.progress
           ? ` · ${Math.max(0, stage.progress.current)}/${Math.max(0, stage.progress.total)}`
           : '';
-        copy.appendChild(createElement(document, 'span', '', `${stage.summary.replace(`${stage.label}：`, '')}${progress}`));
+        const statusText = `${stage.summary.replace(`${stage.label}：`, '')}${progress}`;
+        copy.appendChild(createElement(document, 'span', '', statusText));
+        item.setAttribute('aria-label', `${stage.label}，${statusText}`);
         item.appendChild(copy);
         rail.appendChild(item);
       });

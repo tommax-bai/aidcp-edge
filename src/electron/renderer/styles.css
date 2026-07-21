@@ -3813,13 +3813,20 @@ body::-webkit-scrollbar:vertical,
 .cw-button.compact { flex: 0 0 auto; min-height: 30px; padding: 6px 11px; font-size: 11px; }
 .cw-button.danger { border-color: #efc5c5; color: #a23838; background: #fff8f8; }
 .cw-button.danger:hover:not(:disabled), .cw-button.danger:focus-visible { border-color: #cb6c6c; outline: none; background: #fff0f0; }
-.publish-queue-stages { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin-top: 14px; }
-.publish-queue-stage { position: relative; display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 6px; min-width: 0; padding-right: 8px; }
-.publish-queue-stage:not(:last-child)::after {
-  content: ""; position: absolute; z-index: 0; top: 5px; left: 10px; right: -2px; height: 1px; background: #dbe3ee;
+.publish-queue-stages { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin-top: 16px; }
+.publish-queue-stage {
+  position: relative; display: grid; grid-template-rows: 12px auto; gap: 7px; min-width: 0; justify-items: center;
+  padding: 0 6px; text-align: center;
 }
-.publish-queue-stage-dot { position: relative; z-index: 1; width: 10px; height: 10px; border: 2px solid #d3dce8; border-radius: 50%; background: #fff; }
-.publish-queue-stage-copy { position: relative; z-index: 1; min-width: 0; padding-right: 3px; background: #fff; }
+.publish-queue-stage:not(:last-child)::after {
+  content: ""; position: absolute; z-index: 0; top: 6px; left: calc(50% + 6px); width: calc(100% - 12px);
+  height: 1px; background: #dbe3ee; pointer-events: none;
+}
+.publish-queue-stage-dot {
+  position: relative; z-index: 1; box-sizing: border-box; width: 12px; height: 12px;
+  border: 2px solid #d3dce8; border-radius: 50%; background: #fff;
+}
+.publish-queue-stage-copy { position: relative; z-index: 1; width: 100%; min-width: 0; }
 .publish-queue-stage-copy strong { display: block; overflow: hidden; color: #758197; font-size: 10px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
 .publish-queue-stage-copy span { display: block; margin-top: 2px; overflow: hidden; color: #a0aaba; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .publish-queue-stage.is-completed .publish-queue-stage-dot { border-color: #4caf86; background: #4caf86; }
@@ -3867,9 +3874,14 @@ body::-webkit-scrollbar:vertical,
   .publish-queue-metric { min-height: 62px; }
   .publish-queue-card-head { flex-wrap: wrap; }
   .publish-queue-card-head .cw-button { width: 100%; }
-  .publish-queue-stages { grid-template-columns: 1fr; gap: 8px; }
-  .publish-queue-stage { grid-template-columns: 13px minmax(0, 1fr); padding: 0; }
-  .publish-queue-stage:not(:last-child)::after { top: 9px; bottom: -9px; left: 5px; right: auto; width: 1px; height: auto; }
+  .publish-queue-stages { grid-template-columns: 1fr; gap: 0; }
+  .publish-queue-stage {
+    grid-template: auto / 13px minmax(0, 1fr); gap: 9px; justify-items: stretch; padding: 0 0 11px; text-align: left;
+  }
+  .publish-queue-stage:last-child { padding-bottom: 0; }
+  .publish-queue-stage:not(:last-child)::after {
+    top: 12px; bottom: 0; left: 5.5px; width: 1px; height: auto;
+  }
   .publish-queue-stage-copy strong,
   .publish-queue-stage-copy span { overflow: visible; text-overflow: clip; white-space: normal; }
   .publish-queue-cancel-confirm form { padding: 20px 17px 17px; }

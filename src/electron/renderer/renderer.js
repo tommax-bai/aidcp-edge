@@ -2129,7 +2129,7 @@ function renderXhsPublishQueueDock(status) {
           ? '这是 Cloud 最近确认的结果，点击可查看完整发布进度。'
           : '当前账号暂时没有进行中的发布任务。';
 
-  const defaultLabels = ['开始创作', '正文与配图', '你来确认', '发布结果'];
+  const defaultLabels = ['开始创作', '正文与配图', '发布确认', '发布结果'];
   const stages = Array.isArray(active?.stages) ? active.stages : [];
   fields.pubSteps.querySelectorAll('.j-step').forEach((step, index) => {
     const stage = stages[index];

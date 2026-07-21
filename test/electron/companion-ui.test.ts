@@ -2035,8 +2035,8 @@ test('小红书首页用发布进度摘要替代单稿卡，待确认优先并�
   const stages = [
     { key: 'source', label: '开始创作', state: 'completed', summary: '开始创作：已完成' },
     { key: 'content', label: '正文与配图', state: 'completed', summary: '正文与配图：已完成', progress: { current: 3, total: 3 } },
-    { key: 'approval', label: '你来确认', state: 'waiting_human', summary: '你来确认：等待你的确认' },
-    { key: 'dispatch', label: '发布结果', state: 'pending', summary: '发布结果：未开始' },
+    { key: 'approval', label: '发布确认', state: 'waiting_human', summary: '发布确认：待你确认' },
+    { key: 'dispatch', label: '发布结果', state: 'pending', summary: '发布结果：等待发布' },
   ];
   const { w, pushStatus } = await boot({ envId: 'env-home' }, {
     publishQueueGet: async () => {
