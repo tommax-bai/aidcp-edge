@@ -700,17 +700,14 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 }
 .presence-main { min-width: 0; flex: 1 1 auto; }
 .presence-txt { font-size: 15.5px; line-height: 1.42; font-weight: 720; }
-#presence-text.shimmer,
 #runtime-guidance-title.shimmer {
-  --text-shimmer-base: var(--ink);
-  background: linear-gradient(100deg, var(--text-shimmer-base) 40%, #9db8ff 50%, var(--text-shimmer-base) 60%);
+  background: linear-gradient(100deg, #1f2f4d 40%, #9db8ff 50%, #1f2f4d 60%);
   background-size: 220% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
   animation: sweep 3.4s linear infinite;
 }
-#runtime-guidance-title.shimmer { --text-shimmer-base: #1f2f4d; }
 .fresh { font-size: 11.5px; color: var(--faint); margin-top: 4px; font-variant-numeric: tabular-nums; min-height: 14px; }
 
 /* 运行价值说明：嵌入主运行区，不改变发布卡和今日进展的层级。 */
@@ -2895,9 +2892,8 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   * { animation: none !important; }
   .quota-toggle,
   .quota-toggle-icon { transition: none; }
-  #presence-text.shimmer,
   #runtime-guidance-title.shimmer {
-    color: var(--text-shimmer-base);
+    color: #1f2f4d;
     background: none;
     -webkit-background-clip: border-box;
     background-clip: border-box;

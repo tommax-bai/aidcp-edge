@@ -195,15 +195,15 @@ test('待配置 → 首屏主动步骤，点「环境管理」直达左栏管理
 });
 
 // ── 在场感：动效只由真实事件驱动 ──
-test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async () => {
+test('运行中 + 新鲜事件 → 顶部无流光、下方标题流光开、新鲜度走字', async () => {
   const { w } = await boot({
     dailyUsage: {
       totals: { view: 3, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
       quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
     },
   });
-  assert.ok($(w, '#presence-text').classList.contains('shimmer'));
-  assert.equal($(w, '#runtime-guidance-title').classList.contains('shimmer'), false);
+  assert.equal($(w, '#presence-text').classList.contains('shimmer'), false);
+  assert.equal($(w, '#runtime-guidance-title').classList.contains('shimmer'), true);
   assert.match($(w, '#presence-text').textContent ?? '', /正在认真读/);
   assert.match($(w, '#presence-fresh').textContent ?? '', /刚刚更新/);
   assert.equal(hidden($(w, '#runtime-guidance')), false);
@@ -281,9 +281,10 @@ test('返回推荐流时文字保持不变，流光移到创作方向标题', as
   assert.equal($(w, '#runtime-guidance-title').classList.contains('shimmer'), true);
   assert.equal($(w, '#presence-core').classList.contains('live'), true);
   assert.match($(w, '#presence-fresh').textContent ?? '', /刚刚更新/);
-  assert.match(rendererCss, /#presence-text\.shimmer,\s*#runtime-guidance-title\.shimmer\s*\{/);
-  assert.match(rendererCss, /#runtime-guidance-title\.shimmer\s*\{ --text-shimmer-base: #1f2f4d; \}/);
-  assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)[\s\S]*#presence-text\.shimmer,\s*#runtime-guidance-title\.shimmer\s*\{[\s\S]*color: var\(--text-shimmer-base\);/);
+  assert.doesNotMatch(rendererCss, /#presence-text\.shimmer/);
+  assert.match(rendererCss, /#runtime-guidance-title\.shimmer\s*\{[\s\S]*background: linear-gradient\(100deg, #1f2f4d 40%, #9db8ff 50%, #1f2f4d 60%\);/);
+  assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)[\s\S]*#runtime-guidance-title\.shimmer\s*\{[\s\S]*color: #1f2f4d;/);
+  assert.doesNotMatch(rendererSrc, /presence\?\.text === '返回推荐流，继续逛…'/);
 
   pushStatus(makeStatus({
     presence: { text: '返回推荐流，继续逛…', at: new Date(Date.now() - 2 * 60_000).toISOString() },
