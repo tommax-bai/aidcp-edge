@@ -282,7 +282,8 @@ function createAdsLocalApi(deps = {}) {
    * 精确读取一个 profile 的代理配置，供 Electron 主进程在浏览器启动前做一次性预检。
    *
    * 与 listProfiles 的边界不同：这里会把 proxy_password 返回给主进程调用方，但只挑代理所需字段，
-   * 不返回 profile 其余原始数据。该方法不得暴露给 preload/renderer；现有 normalizeProfile 仍剥离密码。
+   * 不返回 profile 其余原始数据。该方法只允许由主进程内部能力或具名、客户范围校验后的 IPC 调用；
+   * 不得把原始本地 API 能力暴露给 preload/renderer，现有 normalizeProfile 仍剥离密码。
    */
   async function getProfileProxyConfig(opts = {}) {
     const profileId = String(opts.profileId || '').trim();
@@ -558,7 +559,7 @@ function normalizeProfile(it) {
     platform, // 每环境平台（展示 + 选中时同步进 settings 供启动注入）
     platformSource, // remark|domain|urls|keyword|fallback——UI 对非 remark 来源标注「推断」
     proxy: summarizeProxy(it), // 代理**配置**摘要（非实测出口 IP）
-    proxyConfig: structuredProxy(it), // 代理编辑内存态字段（含 AdsPower 已返回的密码，不落盘/不进摘要）
+    proxyConfig: structuredProxy(it), // 全量列表只投影非敏感代理字段；密码须经精确 profile 读取
   };
 }
 
@@ -617,8 +618,7 @@ function summarizeProxy(it) {
   return parts.length ? parts.join(' · ') : '无代理配置';
 }
 
-// 结构化代理透传（编辑浮层预填用）。AdsPower 返回密码时仅以内存态透传给对应环境的编辑框，
-// 使修改其他字段时能原样提交；不写 settings/花名册、不进代理摘要或日志。字段缺失仍如实为空。
+// 全量列表的结构化代理投影。密码只允许经 getProfileProxyConfig 精确读取，绝不随列表批量进入 renderer。
 function structuredProxy(it) {
   const cfg = (it && (it.user_proxy_config || it.proxy_config)) || {};
   const type = cfg.proxy_type || cfg.proxy_soft || '';
@@ -629,7 +629,6 @@ function structuredProxy(it) {
     proxyHost: cfg.proxy_host != null ? String(cfg.proxy_host) : '',
     proxyPort: cfg.proxy_port != null ? String(cfg.proxy_port) : '',
     proxyUser: cfg.proxy_user != null ? String(cfg.proxy_user) : '',
-    proxyPassword: !noProxy && cfg.proxy_password != null ? String(cfg.proxy_password) : '',
   };
 }
 

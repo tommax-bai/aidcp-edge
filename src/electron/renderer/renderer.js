@@ -5387,16 +5387,38 @@ function makePlatformBtn(prof, displayPlat) {
   return btn;
 }
 
-// 每行「代理」编辑入口：读回代理字段预填（密码仅当前内存态），保存经受限 user/update 下发（详见 openProxyPop）。
+// 每行「代理」编辑入口：点击后只按该环境精确读取完整配置（密码仅当前内存态），再经受限 user/update 保存。
 function makeProxyBtn(prof) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'ads-env-proxy';
   btn.textContent = '代理';
   btn.title = `查看 / 修改该环境的代理（当前：${prof.proxy || '无代理配置'}）`;
-  btn.addEventListener('click', (e) => {
+  btn.addEventListener('click', async (e) => {
     e.stopPropagation(); // 不触发行选中
-    openProxyPop(prof);
+    if (!window.aidcpEdge || typeof window.aidcpEdge.adsGetEnvProxy !== 'function') {
+      setEnvMsg('当前客户端不支持读取完整代理配置，请升级后重试。', true);
+      return;
+    }
+    btn.disabled = true;
+    setEnvMsg(`正在读取「${prof.name || prof.userId}」的代理配置…`, false);
+    try {
+      const r = await window.aidcpEdge.adsGetEnvProxy({ ...formAdsOpts(), userId: prof.userId });
+      if (!r || !r.ok) {
+        setEnvMsg(`读取代理配置失败：${(r && r.error) || '未知错误'}`, true);
+        return;
+      }
+      if (!lastProfiles.some((item) => item && item.userId === prof.userId)) {
+        setEnvMsg('目标环境已不在当前列表，已丢弃本次代理读取结果。', true);
+        return;
+      }
+      openProxyPop(prof, { ...(r.proxy || {}), noProxy: r.noProxy === true });
+      setEnvMsg('', false);
+    } catch (err) {
+      setEnvMsg(`读取代理配置失败：${(err && err.message) || err}`, true);
+    } finally {
+      btn.disabled = false;
+    }
   });
   return btn;
 }
@@ -5621,7 +5643,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
   }
 });
 
-// ── 环境代理编辑浮层：预填 AdsPower 已返回字段（含内存态密码），保存 = 整体替换、下次启动生效 ──
+// ── 环境代理编辑浮层：预填精确目标读取结果（含内存态密码），保存 = 整体替换、下次启动生效 ──
 const PROXY_TYPE_OPTIONS = new Set(['http', 'https', 'socks5']);
 let proxyPopTarget = null; // { userId, name }
 function setProxyPopMsg(text, isError) {
@@ -5632,13 +5654,13 @@ function setProxyPopMsg(text, isError) {
 function syncProxyPopDetail() {
   fields.proxyPopDetail?.classList.toggle('hidden', fields.proxyPopType && fields.proxyPopType.value === 'no_proxy');
 }
-function openProxyPop(prof) {
+function openProxyPop(prof, proxyConfig) {
   if (!fields.proxyPop) return;
   proxyPopTarget = { userId: prof.userId, name: prof.name || prof.userId };
   if (fields.proxyPopEnv) fields.proxyPopEnv.textContent = `· ${proxyPopTarget.name}`;
   // 当前配置如实呈现（含 UI 下拉表达不了的代理厂商类型——保存会整体替换，这行让用户知道在替换什么）。
   if (fields.proxyPopCurrent) fields.proxyPopCurrent.textContent = `当前：${prof.proxy || '无代理配置'}`;
-  const cfg = prof.proxyConfig || {};
+  const cfg = proxyConfig || {};
   if (fields.proxyPopType) {
     fields.proxyPopType.value = !cfg.noProxy && PROXY_TYPE_OPTIONS.has(cfg.proxyType) ? cfg.proxyType : 'no_proxy';
   }

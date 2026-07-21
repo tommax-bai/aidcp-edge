@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   adsCreateEnv: (opts) => ipcRenderer.invoke('ads:createEnv', opts),
   // 删除环境（仅由界面逐个二次确认触发）：opts { userId, apiKey?, apiBase? }。
   adsDeleteEnv: (opts) => ipcRenderer.invoke('ads:deleteEnv', opts),
+  // 精确读取一个可见环境的完整代理配置；主进程按客户环境范围校验，不暴露任意本地 API。
+  adsGetEnvProxy: (opts) => ipcRenderer.invoke('ads:getEnvProxy', opts),
   // 改已有环境代理（仅改 user_proxy_config，受限 user/update）：opts { userId, proxy, apiKey?, apiBase? }。
   adsUpdateEnvProxy: (opts) => ipcRenderer.invoke('ads:updateEnvProxy', opts),
   // 账号人设（change offline-account-persona-management）：只交本地 envId，main 权威换成 envKey 后直连

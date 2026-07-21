@@ -82,6 +82,7 @@ interface Stub {
   adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
   adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; osFamily?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string; requiresAdminAssignment?: boolean; assignmentHandledByMain?: boolean; rosterJoinedByMain?: boolean }>;
   adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string; cleanupPending?: boolean; message?: string }>;
+  adsGetEnvProxy: (opts?: unknown) => Promise<{ ok: boolean; noProxy?: boolean; proxy?: Record<string, unknown>; error?: string }>;
   adsUpdateEnvProxy: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
   setSlowStart: (opts: { envKey: string; enabled: boolean }) => Promise<unknown>;
   // 不依赖边缘的慢启动读（change slow-start-offline-toggle）：可选——不提供即模拟老客户端退化路径。
@@ -226,6 +227,7 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     adsTemplates: async () => [{ key: 'windows', label: 'Windows' }, { key: 'macos', label: 'macOS' }],
     adsCreateEnv: async () => ({ ok: true, osFamily: 'windows' }),
     adsDeleteEnv: async () => ({ ok: true }),
+    adsGetEnvProxy: async () => ({ ok: false, error: '测试桩未配置精确代理读取' }),
     adsUpdateEnvProxy: async () => ({ ok: true }),
     setSlowStart: async () => ({ ok: false, data: { message: '测试桩未配置慢启动写入' } }),
     ...overrides,
@@ -356,6 +358,7 @@ test('探测就绪 → 静默自动列出环境（无徽标、无需先点刷新
 });
 
 test('环境代理编辑：明文回显现有密码，只改 host 后仍原样提交密码', async () => {
+  let readArgs: Record<string, unknown> | undefined;
   let submitted: Record<string, unknown> | undefined;
   const w = await boot(makeStub({
     adsListProfiles: async () => ({
@@ -368,10 +371,23 @@ test('环境代理编辑：明文回显现有密码，只改 host 后仍原样�
           proxyHost: 'old.example',
           proxyPort: '1080',
           proxyUser: 'alice',
-          proxyPassword: 'S3cr3t!',
         },
       }],
     }),
+    adsGetEnvProxy: async (opts) => {
+      readArgs = opts as Record<string, unknown>;
+      return {
+        ok: true,
+        noProxy: false,
+        proxy: {
+          proxyType: 'socks5',
+          proxyHost: 'old.example',
+          proxyPort: '1080',
+          proxyUser: 'alice',
+          proxyPassword: 'S3cr3t!',
+        },
+      };
+    },
     adsUpdateEnvProxy: async (opts) => {
       submitted = opts as Record<string, unknown>;
       return { ok: true };
@@ -379,6 +395,8 @@ test('环境代理编辑：明文回显现有密码，只改 host 后仍原样�
   }));
 
   $$(w, '.ads-env-proxy')[0].click();
+  await tick();
+  assert.equal(readArgs?.userId, 'u1', '必须按点击行的精确 userId 读取密码');
   const password = $(w, '#proxy-pop-pass') as HTMLInputElement;
   assert.equal(password.type, 'text', '密码应直接可见而不是掩码显示');
   assert.equal(password.value, 'S3cr3t!');
@@ -395,6 +413,20 @@ test('环境代理编辑：明文回显现有密码，只改 host 后仍原样�
     proxyUser: 'alice',
     proxyPassword: 'S3cr3t!',
   });
+});
+
+test('环境代理编辑：精确读取失败时保持浮层关闭并展示真实原因', async () => {
+  const w = await boot(makeStub({
+    adsListProfiles: async () => ({
+      ok: true,
+      profiles: [{ userId: 'u1', serialNumber: '1', name: '甲', groupName: 'g', proxy: 'socks5 · old.example' }],
+    }),
+    adsGetEnvProxy: async () => ({ ok: false, error: '该环境不属于当前客户，已拒绝读取代理配置。' }),
+  }));
+  $$(w, '.ads-env-proxy')[0].click();
+  await tick();
+  assert.ok($(w, '#proxy-pop').classList.contains('hidden'));
+  assert.match($(w, '#ads-env-msg').textContent || '', /不属于当前客户/);
 });
 
 test('探测不可达 → 环境行诚实提示（无徽标），不禁死', async () => {

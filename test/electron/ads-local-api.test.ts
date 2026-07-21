@@ -207,6 +207,22 @@ test('getProfileProxyConfig: 不存在的 profile 和 API 异常均不回显服�
   assert.equal(JSON.stringify(result).includes('password=secret'), false);
 });
 
+test('getProfileProxyConfig: 精确环境未返回密码时如实投影空值', async () => {
+  const api = createAdsLocalApi({
+    ...noThrottle,
+    fetchImpl: stubFetch([['/api/v1/user/list', () => res(true, 200, {
+      code: 0,
+      data: { list: [{
+        user_id: 'profile-no-password',
+        user_proxy_config: { proxy_type: 'http', proxy_host: 'proxy.example', proxy_port: '8000', proxy_user: 'operator' },
+      }] },
+    })]]),
+  });
+  const result = await api.getProfileProxyConfig({ profileId: 'profile-no-password' });
+  assert.equal(result.ok, true);
+  assert.equal(result.proxy?.proxyPassword, '');
+});
+
 test('listProfiles: code≠0 → ok:false 诚实回报', async () => {
   const api = createAdsLocalApi({
     ...noThrottle,
@@ -483,25 +499,25 @@ test('inferPlatform: 表驱动优先级 remark > domain > urls > 关键词 > 回
   }
 });
 
-test('normalizeProfile: 结构化 proxyConfig 以内存态透传 AdsPower 返回的代理密码，摘要仍不含敏感值', () => {
+test('normalizeProfile: 全量列表只投影非敏感代理字段，密码必须走精确 profile 读取', () => {
   const p = normalizeProfile({
     user_id: 'u',
     user_proxy_config: { proxy_soft: 'other', proxy_type: 'socks5', proxy_host: '1.2.3.4', proxy_port: 1080, proxy_user: 'alice', proxy_password: 'S3cr3t!' },
   }) as unknown as { proxy: string; proxyConfig: Record<string, unknown> };
-  assert.deepEqual(p.proxyConfig, { noProxy: false, proxyType: 'socks5', proxyHost: '1.2.3.4', proxyPort: '1080', proxyUser: 'alice', proxyPassword: 'S3cr3t!' });
-  assert.equal('proxy_password' in p.proxyConfig, false, 'IPC 投影只使用 renderer 约定字段名');
+  assert.deepEqual(p.proxyConfig, { noProxy: false, proxyType: 'socks5', proxyHost: '1.2.3.4', proxyPort: '1080', proxyUser: 'alice' });
+  assert.equal('proxyPassword' in p.proxyConfig || 'proxy_password' in p.proxyConfig, false, '全量列表不得含任何密码字段');
   assert.doesNotMatch(p.proxy, /alice|S3cr3t!/, '环境列表摘要不得包含代理用户名或密码');
 
   const withoutPassword = normalizeProfile({
     user_id: 'u2',
     user_proxy_config: { proxy_soft: 'other', proxy_type: 'http', proxy_host: 'proxy.example', proxy_port: 8080, proxy_user: 'bob' },
-  }) as unknown as { proxyConfig: { proxyPassword: string } };
-  assert.equal(withoutPassword.proxyConfig.proxyPassword, '', 'AdsPower 未返回密码时必须如实为空');
+  }) as unknown as { proxyConfig: Record<string, unknown> };
+  assert.equal('proxyPassword' in withoutPassword.proxyConfig, false);
 
-  const noProxy = normalizeProfile({ user_id: 'u', user_proxy_config: { proxy_type: 'no_proxy', proxy_password: 'stale' } }) as unknown as { proxyConfig: { noProxy: boolean; proxyType: string; proxyPassword: string } };
+  const noProxy = normalizeProfile({ user_id: 'u', user_proxy_config: { proxy_type: 'no_proxy', proxy_password: 'stale' } }) as unknown as { proxyConfig: { noProxy: boolean; proxyType: string } };
   assert.equal(noProxy.proxyConfig.noProxy, true);
   assert.equal(noProxy.proxyConfig.proxyType, '');
-  assert.equal(noProxy.proxyConfig.proxyPassword, '', '无代理配置不得透传残留密码');
+  assert.equal('proxyPassword' in noProxy.proxyConfig, false, '无代理配置不得透传残留密码');
 });
 
 test('listGroups: 精确查询预置分组并归一化 groupId/groupName', async () => {

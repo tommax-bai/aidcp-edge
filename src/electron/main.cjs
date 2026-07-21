@@ -6224,6 +6224,23 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
   }
 });
 
+// 精确读取一个环境的完整代理配置供编辑浮层回填。全量 ads:listProfiles 继续不含密码；客户模式
+// 必须在当前有效会话的权威环境范围内，避免 renderer 用任意 userId 读取他人代理凭据。
+ipcMain.handle('ads:getEnvProxy', async (_event, opts) => {
+  const userId = String((opts && opts.userId) || '').trim();
+  if (!userId) return { ok: false, error: '缺 userId' };
+  if (clientAuthEnabled()) {
+    if (!hasValidSession()) { onSessionInvalid(); return { ok: false, error: '登录已失效，请重新登录客户端。' }; }
+    if (!(allowedProfileIds instanceof Set) || !allowedProfileIds.has(userId)) {
+      return { ok: false, status: 403, error: '该环境不属于当前客户，已拒绝读取代理配置。' };
+    }
+  }
+  return readAdsWithRuntime(opts, (resolved) => adsApi.getProfileProxyConfig({
+    ...resolved,
+    profileId: userId,
+  }));
+});
+
 // 改已有环境代理（edge-client-proxy-platform-persona-ux）：归一层校验 → 写客户端受限 user/update
 // （body 只含 user_id + user_proxy_config 两键）。密码只内存流转、不落盘、日志已脱敏。
 ipcMain.handle('ads:updateEnvProxy', async (_event, opts) => {

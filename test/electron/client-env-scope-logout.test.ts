@@ -56,6 +56,19 @@ test('ads:listProfiles 绝不 fail-open：gated 且无有效会话 / 刷新失�
   );
 });
 
+test('ads:getEnvProxy 只按精确 userId 读取完整代理，并受当前客户环境范围约束', () => {
+  const block = handlerBlock(main, 'ads:getEnvProxy');
+  assert.ok(block, 'ads:getEnvProxy handler 必须存在');
+  assert.match(preload, /adsGetEnvProxy: \(opts\) => ipcRenderer\.invoke\('ads:getEnvProxy', opts\)/);
+  assert.match(block, /const userId = String\(\(opts && opts\.userId\) \|\| ''\)\.trim\(\)/);
+  assert.match(block, /if \(!hasValidSession\(\)\) \{ onSessionInvalid\(\)/, '失效会话不得读取代理密码');
+  assert.match(block, /!\(allowedProfileIds instanceof Set\) \|\| !allowedProfileIds\.has\(userId\)/,
+    '客户模式必须按权威环境范围拒绝任意 userId');
+  assert.match(block, /adsApi\.getProfileProxyConfig\(\{[\s\S]*profileId: userId/,
+    '只复用精确 profile 读取，不得回退全量列表或任意本地 API');
+  assert.doesNotMatch(block, /listProfiles\(/);
+});
+
 test('ads:listProfiles 只收窄显示、physicalUserIds 收窄到 roster∪allowed（绝不泄漏他人 id）；孤儿剔除按物理存在', () => {
   const block = handlerBlock(main, 'ads:listProfiles');
   assert.match(block, /const knownIds = new Set\(allowedProfileIds\)/, 'physicalUserIds 收窄基准含归属集(allowed)');
