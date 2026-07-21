@@ -10,6 +10,10 @@
     <!-- ═══ 自定义标题带：账号身份 + 综合健康（可拖拽；控件岛 no-drag）═══ -->
     <header class="titlebar tone-normal" id="titlebar">
       <div class="tb-lights-pad"></div>
+      <div id="first-use-brand" class="first-use-brand" aria-label="开始使用 AIDCP">
+        <span class="first-use-brand-mark" aria-hidden="true">环</span>
+        <span class="first-use-brand-copy"><strong>开始使用</strong><small>创建运行环境</small></span>
+      </div>
       <div class="acct">
         <div class="ava" id="acct-ava">书</div>
         <div class="acct-h" id="acct-name">小红书账号</div>
@@ -111,6 +115,49 @@
       </aside>
 
       <main class="shell">
+      <section id="environment-onboarding" class="environment-onboarding" aria-labelledby="environment-onboarding-title" aria-hidden="true">
+        <div class="environment-onboarding-card">
+          <div class="environment-onboarding-hero">
+            <div class="environment-onboarding-mark" aria-hidden="true">
+              <svg viewBox="0 0 64 64" focusable="false">
+                <rect x="9" y="12" width="46" height="38" rx="9"></rect>
+                <path d="M9 23h46"></path>
+                <circle cx="17" cy="18" r="1.7"></circle>
+                <circle cx="23" cy="18" r="1.7"></circle>
+                <path d="M32 30v14M25 37h14"></path>
+              </svg>
+            </div>
+            <div class="environment-onboarding-copy">
+              <span class="environment-onboarding-kicker">第一步 · 准备独立浏览器空间</span>
+              <h1 id="environment-onboarding-title">创建你的第一个运行环境</h1>
+              <p>每个运行环境会独立保存浏览器账号、代理和运行状态。创建后即可启动浏览器，登录平台账号并开始使用。</p>
+            </div>
+          </div>
+
+          <ol class="environment-onboarding-steps" aria-label="开始使用的三个步骤">
+            <li class="is-current">
+              <span class="environment-onboarding-step-number">1</span>
+              <span><strong>创建环境</strong><small>选择平台和浏览器系统</small></span>
+            </li>
+            <li>
+              <span class="environment-onboarding-step-number">2</span>
+              <span><strong>登录账号</strong><small>启动浏览器后完成平台登录</small></span>
+            </li>
+            <li>
+              <span class="environment-onboarding-step-number">3</span>
+              <span><strong>开始运行</strong><small>进展和真实状态会显示在这里</small></span>
+            </li>
+          </ol>
+
+          <div class="environment-onboarding-actions">
+            <button id="environment-onboarding-create" class="environment-onboarding-create" type="button">
+              <span>创建运行环境</span>
+              <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M4 10h11M11 6l4 4-4 4"></path></svg>
+            </button>
+            <p>只需选择平台和浏览器系统，代理可以稍后配置</p>
+          </div>
+        </div>
+      </section>
       <div id="legacy-workspace" class="legacy-workspace">
       <!-- 引导式登录/验证码流：把全部待处理环境排队、一次引导一个 -->
       <section id="guide-panel" class="setup guide hidden">

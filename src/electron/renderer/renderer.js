@@ -74,6 +74,9 @@ const fields = {
   subtitle: document.querySelector('#subtitle'),
   // 陪伴式新增
   titlebar: document.querySelector('#titlebar'),
+  environmentOnboarding: document.querySelector('#environment-onboarding'),
+  environmentOnboardingCreate: document.querySelector('#environment-onboarding-create'),
+  environmentWorkspaces: Array.from(document.querySelectorAll('#legacy-workspace, #interaction-workspace, #content-workspace')),
   acctAva: document.querySelector('#acct-ava'),
   acctName: document.querySelector('#acct-name'),
   acctPlat: document.querySelector('#acct-plat'),
@@ -3882,6 +3885,7 @@ function defaultEnvironmentManagementTab() {
 }
 fields.railAdd?.addEventListener('click', () => openEnvAddPanel(defaultEnvironmentManagementTab()));
 fields.railFootAdd?.addEventListener('click', () => openEnvAddPanel('join'));
+fields.environmentOnboardingCreate?.addEventListener('click', () => openEnvAddPanel('create'));
 fields.envAddClose?.addEventListener('click', closeEnvAddPanel);
 fields.envAddMask?.addEventListener('click', closeEnvAddPanel);
 fields.envTabJoin?.addEventListener('click', () => switchEnvTab('join'));
@@ -4316,6 +4320,40 @@ function railDisplayName(row) {
   return resolveEnvironmentDisplayName(row).name;
 }
 
+let environmentOnboardingActive = null;
+function syncEnvironmentOnboarding(rosterEmpty) {
+  const active = Boolean(rosterEmpty);
+  document.body.classList.toggle('environment-roster-empty', active);
+  fields.environmentOnboarding?.setAttribute('aria-hidden', active ? 'false' : 'true');
+  for (const workspace of fields.environmentWorkspaces || []) {
+    workspace.classList.toggle('environment-roster-suppressed', active);
+  }
+  if (environmentOnboardingActive === active) return;
+  const wasActive = environmentOnboardingActive;
+  environmentOnboardingActive = active;
+  if (active) {
+    // CSS 负责整块隐藏；这里同步环境级浮层的可访问状态，避免恢复后重现旧环境上下文。
+    fields.healthPop?.classList.add('hidden');
+    fields.proxyRuntimePop?.classList.add('hidden');
+    fields.proxyRuntimePop?.setAttribute('aria-hidden', 'true');
+    fields.proxyRuntimeChip?.setAttribute('aria-expanded', 'false');
+    closeDelegatedPopover(false);
+    closePublishPreview();
+    if (fields.personaPop?.classList.contains('open')) closePersonaPop(true);
+    if (fields.proxyPop?.classList.contains('open')) closeProxyPop();
+    contentWorkspace?.close?.();
+    return;
+  }
+  // 第一个环境可能先进入花名册、稍后才收到状态。退出引导时至少用真实环境身份和保守离线态
+  // 覆盖旧环境残影，等该环境自己的快照到达后再按正常 render() 更新。
+  if (wasActive && fleetView.selected) {
+    const selected = fleetView.envs.get(fleetView.selected);
+    if (selected && !selected.status) {
+      renderTitlebar({ auth: 'checking', cloud: 'disconnected', session: 'idle', risk: 'normal', edge: 'stopped' });
+    }
+  }
+}
+
 function renderRail() {
   if (!fields.envRail || !window.uiLogic || typeof uiLogic.fleetRailModel !== 'function') return;
   const allList = railEnvList();
@@ -4324,6 +4362,7 @@ function renderRail() {
   // 不再按有无环境显隐（此前空名册整栏 hidden，新实例进来完全看不到添加入口）。
   const show = true;
   const rosterEmpty = allList.length === 0;
+  syncEnvironmentOnboarding(rosterEmpty);
   const empty = list.length === 0;
   // 名册空时本次渲染强制展开（把空态提示与添加入口露出来），但不落库、不覆盖用户已保存的收起偏好；
   // 一旦有环境即回落 fleetView.collapsed（默认收起为窄图标条）。

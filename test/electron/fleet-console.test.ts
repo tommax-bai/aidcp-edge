@@ -996,7 +996,17 @@ test('无 envId 的旧形状 / 空名册 → 环境栏进入专用创建空态�
   }, { environments: [], adsProfileId: 'u1' });
   pushStatus(makeStatus({ stats: { views: 7, likes: 0, collects: 0, comments: 0, follows: 0, publishes: 0 } }));
   await tick();
-  assert.equal(w.document.querySelector('#views')!.textContent, '7', '单环境统计不变');
+  assert.equal(w.document.body.classList.contains('environment-roster-empty'), true, '右侧工作区必须与左栏共享零环境真态');
+  const onboarding = w.document.querySelector('#environment-onboarding')!;
+  assert.equal(onboarding.getAttribute('aria-hidden'), 'false');
+  assert.match(onboarding.textContent || '', /创建环境[\s\S]*登录账号[\s\S]*开始运行/);
+  assert.equal(onboarding.querySelectorAll('.environment-onboarding-steps > li').length, 3);
+  const primary = w.document.querySelector('#environment-onboarding-create') as HTMLButtonElement;
+  assert.equal(primary.tagName, 'BUTTON', '创建主操作使用原生按钮，键盘语义不另造');
+  assert.equal(primary.type, 'button');
+  for (const id of ['#legacy-workspace', '#interaction-workspace', '#content-workspace']) {
+    assert.equal(w.document.querySelector(id)!.classList.contains('environment-roster-suppressed'), true, `${id} 由同一零环境状态原子收口`);
+  }
   const rail = w.document.querySelector('#env-rail')!;
   // 环境栏常驻显示（用户要求「左边栏默认展示」）：空名册也保留栏、强制展开、露出添加入口。
   assert.equal(rail.classList.contains('hidden'), false, '空名册也常驻显示环境栏');
@@ -1008,10 +1018,38 @@ test('无 envId 的旧形状 / 空名册 → 环境栏进入专用创建空态�
   assert.match(empty.textContent || '', /创建第一个运行环境/);
   assert.equal(empty.querySelector('.rail-dot'), null, '创建占位卡不伪装真实状态点');
   assert.equal(empty.querySelector('.env-ava'), null, '创建占位卡不伪装平台头像');
-  empty.click();
+  primary.click();
   assert.equal(w.document.querySelector('#env-add-panel')!.classList.contains('open'), true);
-  assert.equal(w.document.querySelector('#env-tab-create')!.classList.contains('active'), true, '首次入口直达新建环境');
+  assert.equal(w.document.querySelector('#env-tab-create')!.classList.contains('active'), true, '右侧主按钮直达新建环境');
   assert.equal(w.document.querySelector('#env-tab-create-body')!.classList.contains('hidden'), false);
+});
+
+test('第一个真实环境进入权威花名册后退出整页引导并恢复环境身份', async () => {
+  const { w, pushFleet } = await boot({
+    fleetGet: async () => ({ provider: 'adspower', selectedEnvId: null, railCollapsed: false, environments: [] }),
+    getStatus: async () => makeStatus({ lastMessage: 'environment_not_owned' }),
+  }, { environments: [], adsProfileId: '' });
+  assert.equal(w.document.body.classList.contains('environment-roster-empty'), true);
+  assert.equal(w.document.querySelector('#environment-onboarding')!.getAttribute('aria-hidden'), 'false');
+
+  pushFleet({
+    provider: 'adspower',
+    selectedEnvId: 'ads-first',
+    railCollapsed: false,
+    environments: [{
+      envId: 'ads-first', profileId: 'first', name: '第一个环境', platform: 'facebook',
+      status: makeStatus({ envId: 'ads-first', envName: '第一个环境', edge: 'stopped', session: 'idle' }),
+    }],
+  });
+  await tick();
+  assert.equal(w.document.body.classList.contains('environment-roster-empty'), false, '只在真实花名册出现环境后退出引导');
+  assert.equal(w.document.querySelector('#environment-onboarding')!.getAttribute('aria-hidden'), 'true');
+  for (const id of ['#legacy-workspace', '#interaction-workspace', '#content-workspace']) {
+    assert.equal(w.document.querySelector(id)!.classList.contains('environment-roster-suppressed'), false, `${id} 恢复自己的正常显示状态`);
+  }
+  assert.match(w.document.querySelector('#acct-name')!.textContent || '', /第一个环境/);
+  assert.equal(w.document.querySelector('#acct-plat')!.textContent, 'Facebook');
+  assert.equal(w.document.querySelectorAll('.rail-row[data-env-id="ads-first"]').length, 1);
 });
 
 test('待处理徽标 + 需处理浮顶：需登录环境脉冲并计入徽标', async () => {
@@ -2249,6 +2287,28 @@ test('首次空态样式：隐藏无意义筛选、汇总和批量运行区，�
   empty.className = 'rail-empty';
   d.querySelector('#rail-list')!.appendChild(empty);
   assert.notEqual(w.getComputedStyle(empty).display, 'none', '创建占位卡仍可见');
+});
+
+test('完整首次引导样式：旧环境工作区与身份不可见，只保留全局能力和创建主路径', () => {
+  const w = cssWindow();
+  const d = w.document;
+  d.body.classList.add('environment-roster-empty');
+  for (const workspace of d.querySelectorAll('#legacy-workspace, #interaction-workspace, #content-workspace')) {
+    workspace.classList.add('environment-roster-suppressed');
+  }
+  assert.equal(w.getComputedStyle(d.querySelector('.acct') as HTMLElement).display, 'none', '旧环境身份不得显示');
+  assert.equal(w.getComputedStyle(d.querySelector('#health-pill') as HTMLElement).display, 'none', '环境生命周期状态不得显示');
+  assert.equal(w.getComputedStyle(d.querySelector('#legacy-workspace') as HTMLElement).display, 'none', '零值进展和内部原因码所在工作区整块隐藏');
+  assert.equal(w.getComputedStyle(d.querySelector('#interaction-workspace') as HTMLElement).display, 'none');
+  assert.equal(w.getComputedStyle(d.querySelector('#content-workspace') as HTMLElement).display, 'none');
+  assert.equal(w.getComputedStyle(d.querySelector('#first-use-brand') as HTMLElement).display, 'flex', '标题栏改为中性首次使用身份');
+  assert.equal(w.getComputedStyle(d.querySelector('#environment-onboarding') as HTMLElement).display, 'flex');
+  assert.equal(w.getComputedStyle(d.querySelector('#cloud-env-chip') as HTMLElement).display === 'none', false, 'Cloud 环境仍是全局能力');
+  assert.equal(w.getComputedStyle(d.querySelector('#gear') as HTMLElement).display === 'none', false, '设置仍可达');
+  const create = d.querySelector('#environment-onboarding-create') as HTMLButtonElement;
+  assert.equal(w.getComputedStyle(create).cursor, 'pointer');
+  assert.match(rendererCss, /\.environment-onboarding-create:focus-visible\s*\{[^}]*outline:/s, '键盘焦点必须清晰可见');
+  assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)/, '减弱动态效果继续由全局规则保证');
 });
 
 test('环境栏结构：只有环境列表是滚动容器，栏头与栏尾不落进去（永远够得着）', async () => {
