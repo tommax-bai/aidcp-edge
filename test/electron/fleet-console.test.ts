@@ -1675,16 +1675,36 @@ test('新建环境：创建中锁住切页与关闭，失败后保留输入和�
 });
 
 test('新建环境：单个创建成功并进入花名册后切回环境列表，提示真实离线边界', async () => {
+  const existingStatus = makeStatus({
+    envId: 'ads-existing-1', envName: '已有环境', edge: 'stopped', session: 'idle',
+    automationState: 'stopped', browserState: 'closed',
+  });
   const { w } = await boot({
-    fleetGet: async () => ({ provider: 'adspower', selectedEnvId: null, railCollapsed: true, environments: [] }),
+    fleetGet: async () => ({
+      provider: 'adspower',
+      selectedEnvId: 'ads-existing-1',
+      railCollapsed: false,
+      environments: [{
+        envId: 'ads-existing-1', profileId: 'existing-1', name: '已有环境',
+        platform: 'facebook', status: existingStatus,
+      }],
+    }),
     getStatus: async () => makeStatus({ edge: 'stopped', session: 'idle' }),
     adsStatus: async () => ({ ok: true }),
     adsCreateEnv: async () => ({ ok: true, userId: 'new-1', name: '新环境', platform: 'xiaohongshu', osFamily: 'Windows', createdCount: 1 }),
-    adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'new-1', name: '新环境', serialNumber: '1', groupName: '', proxy: '', platform: 'xiaohongshu' }] }),
+    adsListProfiles: async () => ({ ok: true, profiles: [
+      { userId: 'existing-1', name: '已有环境', serialNumber: '9', groupName: '', proxy: '', platform: 'facebook' },
+      { userId: 'new-1', name: '新环境', serialNumber: '1', groupName: '', proxy: '', platform: 'xiaohongshu' },
+    ] }),
     adsTemplates: async () => [{ key: 'windows', label: 'Windows' }],
-  }, { environments: [], adsProfileId: '', adsProfileName: '' });
-  (w.document.querySelector('.rail-empty') as HTMLButtonElement).click();
+  }, {
+    environments: [{ profileId: 'existing-1', name: '已有环境', platform: 'facebook' }],
+    adsProfileId: 'existing-1',
+    adsProfileName: '已有环境',
+  });
+  (w.document.querySelector('#rail-add') as HTMLButtonElement).click();
   await tick();
+  (w.document.querySelector('#env-tab-create') as HTMLButtonElement).click();
   const template = w.document.querySelector('#ads-template') as HTMLSelectElement;
   template.value = 'windows';
   (w.document.querySelector('#ads-create') as HTMLButtonElement).click();
@@ -1700,6 +1720,18 @@ test('新建环境：单个创建成功并进入花名册后切回环境列表�
 
 test('首次创建：双重权威确认后直接回主界面，并把一次性引导绑定到精确启动按钮', async () => {
   let created = false;
+  const staleLocalEnvironment = { profileId: 'stale-local-1', name: '历史环境', platform: 'facebook' };
+  const createdLocalEnvironment = { profileId: 'new-1', name: '第一个环境', platform: 'xiaohongshu' };
+  const localSettings = () => ({
+    provider: 'adspower',
+    adsProfileId: 'stale-local-1',
+    adsProfileName: '历史环境',
+    environments: created ? [staleLocalEnvironment, createdLocalEnvironment] : [staleLocalEnvironment],
+    adsApiKey: '',
+    adsApiBase: '',
+    railCollapsed: false,
+    adsDownloadUrl: 'https://x',
+  });
   let fleetSnapshot: Record<string, unknown> = {
     provider: 'adspower', selectedEnvId: null, railCollapsed: false, environments: [],
   };
@@ -1708,12 +1740,16 @@ test('首次创建：双重权威确认后直接回主界面，并把一次性�
     automationState: 'stopped', browserState: 'closed',
   });
   const { w, calls } = await boot({
+    getSettings: async () => localSettings(),
     fleetGet: async () => fleetSnapshot,
     getStatus: async () => makeStatus({ edge: 'stopped', session: 'idle' }),
     adsStatus: async () => ({ ok: true }),
     adsListProfiles: async () => ({
       ok: true,
-      profiles: created ? [{ userId: 'new-1', name: '第一个环境', serialNumber: '1', groupName: '', proxy: '', platform: 'xiaohongshu' }] : [],
+      profiles: [
+        { userId: 'stale-local-1', name: '历史环境', serialNumber: '9', groupName: '', proxy: '', platform: 'facebook' },
+        ...(created ? [{ userId: 'new-1', name: '第一个环境', serialNumber: '1', groupName: '', proxy: '', platform: 'xiaohongshu' }] : []),
+      ],
     }),
     adsCreateEnv: async () => {
       created = true;
@@ -1721,10 +1757,19 @@ test('首次创建：双重权威确认后直接回主界面，并把一次性�
         provider: 'adspower', selectedEnvId: 'ads-new-1', railCollapsed: false,
         environments: [{ envId: 'ads-new-1', profileId: 'new-1', name: '第一个环境', platform: 'xiaohongshu', status: firstStatus }],
       };
-      return { ok: true, userId: 'new-1', name: '第一个环境', platform: 'xiaohongshu', osFamily: 'Windows', createdCount: 1 };
+      return {
+        ok: true,
+        userId: 'new-1',
+        name: '第一个环境',
+        platform: 'xiaohongshu',
+        osFamily: 'Windows',
+        createdCount: 1,
+        assignmentHandledByMain: true,
+        rosterJoinedByMain: true,
+      };
     },
     adsTemplates: async () => [{ key: 'windows', label: 'Windows' }],
-  }, { environments: [], adsProfileId: '', adsProfileName: '' });
+  });
 
   (w.document.querySelector('.rail-empty') as HTMLButtonElement).click();
   await tick();

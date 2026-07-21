@@ -6568,11 +6568,11 @@ settingsUi.adsCreate.addEventListener('click', async () => {
   const batch = platform === 'facebook'
     && settingsUi.adsFbCreateMode
     && settingsUi.adsFbCreateMode.value === 'batch';
-  // 只在已取得权威空快照、设置花名册也为空时记录首次候选。未知 / 失败状态绝不冒充新用户。
+  // 当前账号的权威 fleet 已确认为空，就属于首次引导候选。本机 settings 可能保留其他账号的
+  // 历史环境，不能用它否定当前账号的零环境状态；未知 / 失败状态仍绝不冒充新用户。
   const firstEnvironmentCreationCandidate = !batch
     && fleetView.rosterPhase === 'ready'
-    && railEnvList().length === 0
-    && roster.length === 0;
+    && railEnvList().length === 0;
   const osFamilyKey = settingsUi.adsTemplate && settingsUi.adsTemplate.value;
   if (!batch && !osFamilyKey) return setCreateMsg('请先选择操作系统', true);
   if (!window.aidcpEdge || typeof window.aidcpEdge.adsCreateEnv !== 'function') return;
