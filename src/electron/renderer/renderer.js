@@ -5387,7 +5387,7 @@ function makePlatformBtn(prof, displayPlat) {
   return btn;
 }
 
-// 每行「代理」编辑入口：读回非密字段预填，保存经受限 user/update 下发（详见 openProxyPop）。
+// 每行「代理」编辑入口：读回代理字段预填（密码仅当前内存态），保存经受限 user/update 下发（详见 openProxyPop）。
 function makeProxyBtn(prof) {
   const btn = document.createElement('button');
   btn.type = 'button';
@@ -5621,7 +5621,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
   }
 });
 
-// ── 环境代理编辑浮层：预填非密字段（list 不回传密码），保存 = 整体替换、下次启动生效 ──
+// ── 环境代理编辑浮层：预填 AdsPower 已返回字段（含内存态密码），保存 = 整体替换、下次启动生效 ──
 const PROXY_TYPE_OPTIONS = new Set(['http', 'https', 'socks5']);
 let proxyPopTarget = null; // { userId, name }
 function setProxyPopMsg(text, isError) {
@@ -5645,7 +5645,7 @@ function openProxyPop(prof) {
   if (fields.proxyPopHost) fields.proxyPopHost.value = cfg.noProxy ? '' : (cfg.proxyHost || '');
   if (fields.proxyPopPort) fields.proxyPopPort.value = cfg.noProxy ? '' : (cfg.proxyPort || '');
   if (fields.proxyPopUser) fields.proxyPopUser.value = cfg.noProxy ? '' : (cfg.proxyUser || '');
-  if (fields.proxyPopPass) fields.proxyPopPass.value = ''; // 密码绝不回显
+  if (fields.proxyPopPass) fields.proxyPopPass.value = cfg.noProxy ? '' : (cfg.proxyPassword || '');
   syncProxyPopDetail();
   setProxyPopMsg('', false);
   fields.proxyPop.classList.remove('hidden');
