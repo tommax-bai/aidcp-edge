@@ -210,18 +210,17 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.equal($(w, '#runtime-guidance-kicker').textContent, '正在理解目标人群喜欢什么');
   assert.equal($(w, '#runtime-guidance-title').textContent, '正在缩小创作方向。');
   assert.match($(w, '#runtime-guidance-value').textContent ?? '', /刷首页不是漫无目的/);
-  assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /浏览与互动/);
-  assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /正在查看第 3 条/);
+  assert.equal(hidden($(w, '#runtime-guidance-flow')), true, '普通运行态隐藏重复的三段流程');
+  assert.equal($(w, '#runtime-guidance-flow').textContent, '');
   const runningSteps = Array.from(w.document.querySelectorAll('#runtime-guidance-flow .rg-flow-step')) as HTMLElement[];
   const runningConnectors = Array.from(w.document.querySelectorAll('#runtime-guidance-flow .rg-flow-connector')) as HTMLElement[];
-  assert.equal(runningSteps.length, 3);
-  assert.equal(runningConnectors.length, 2);
-  assert.ok(runningConnectors[0].classList.contains('flow-active'), '运行态：浏览与互动 → 判断匹配度需要动态推进');
-  assert.ok(runningConnectors[1].classList.contains('flow-active'), '运行态：判断匹配度 → 继续寻找灵感需要动态推进');
-  assert.equal(runningConnectors[1].dataset.toState, 'next', '第二条连接器显式关联继续寻找灵感阶段');
+  assert.equal(runningSteps.length, 0);
+  assert.equal(runningConnectors.length, 0);
   assert.equal(hidden($(w, '#runtime-guidance-progress')), false);
   assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /正在查看第 3 条推荐内容/);
   assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /3\/150/);
+  assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /进展实时记录/);
+  assert.equal($(w, '#runtime-guidance-progress .rg-progress-meta').classList.contains('has-outcome'), false);
   assert.equal($(w, '#runtime-guidance-progress .rg-progress-track').getAttribute('aria-valuenow'), '3');
   assert.equal(($(w, '#runtime-guidance-progress .rg-progress-fill') as HTMLElement).style.width, '2%');
   assert.equal(w.document.querySelector('#loop'), null, '运行态不保留七段详细步骤');
@@ -232,11 +231,14 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-mascot\s*\{[^}]*display:\s*none/s);
   assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-main::before/);
   assert.match(rendererCss, /\.rg-progress\s*\{/);
+  assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-progress\s*\{[\s\S]*border-top: 1px solid rgba\(156, 178, 205, 0\.28\);/);
+  assert.match(rendererCss, /\.rg-progress-meta\.has-outcome \{ color: #22805c; \}/);
+  assert.match(rendererCss, /@media \(max-width: 620px\) \{[\s\S]*\.rg-progress-head \{ align-items: flex-start; flex-wrap: wrap; \}[\s\S]*\.rg-progress-meta \{ width: 100%; justify-content: flex-start; text-align: left; \}/);
   assert.match(rendererSrc, /browse: '<svg[\s\S]*<path d="M9 9 5 5l1\.8 11\.7/);
   assert.match(rendererSrc, /match: '<svg[\s\S]*<path d="M7 3H5/);
   assert.doesNotMatch(rendererSrc, /browse: '<svg[\s\S]*m4 4 7\.1 17/);
   assert.doesNotMatch(rendererSrc, /match: '<svg[\s\S]*m8\.5 12\.2 2\.2 2\.2 4\.8-5\.1/);
-  assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-flow-step\s*\{\s*--rg-step-color: var\(--rg-step-current\);/);
+  assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-flow-step/);
   assert.match(rendererSrc, /connector\.className = 'rg-flow-connector';/);
   assert.match(rendererCss, /\.rg-flow-connector\.flow-active::before/);
   assert.match(rendererCss, /\.rg-flow-connector\.flow-active::after/);
@@ -264,11 +266,12 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.doesNotMatch(rendererCss, /rg-loop-toggle|\.loop-step|\.loop-sep/);
 });
 
-test('获得感周期刷新原位更新内容，不重建连接器打断圆点行程', async () => {
+test('首帖流程周期刷新原位更新内容，不重建连接器打断圆点行程', async () => {
+  const now = Date.now();
   const { w, pushStatus } = await boot({
     dailyUsage: {
-      totals: { view: 3, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
-      quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+      totals: { view: 3 },
+      firstPost: { state: 'searching', viewed: 3, target: 20, startedAt: now },
     },
   });
   const flow = $(w, '#runtime-guidance-flow');
@@ -276,10 +279,9 @@ test('获得感周期刷新原位更新内容，不重建连接器打断圆点�
   const connectorsBefore = Array.from(flow.querySelectorAll('.rg-flow-connector'));
 
   pushStatus(makeStatus({
-    stats: { views: 4, likes: 1, collects: 0, comments: 0, follows: 0, publishes: 0 },
     dailyUsage: {
-      totals: { view: 4, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
-      quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+      totals: { view: 4 },
+      firstPost: { state: 'searching', viewed: 4, target: 20, startedAt: now },
     },
   }));
 
@@ -290,8 +292,9 @@ test('获得感周期刷新原位更新内容，不重建连接器打断圆点�
   assert.strictEqual(stepsAfter[0], stepsBefore[0], '阶段节点应原位更新');
   assert.strictEqual(connectorsAfter[0], connectorsBefore[0], '第一条连接器不得因状态刷新重建');
   assert.strictEqual(connectorsAfter[1], connectorsBefore[1], '第二条连接器不得因状态刷新重建');
-  assert.match(flow.textContent ?? '', /正在查看第 4 条/, '原节点仍需刷新实时文案');
-  assert.ok(connectorsAfter.every((connector) => connector.classList.contains('flow-active')));
+  assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /正在观察第 4 条推荐内容/);
+  assert.ok(connectorsAfter[0].classList.contains('flow-active'));
+  assert.equal(connectorsAfter[1].classList.contains('flow-active'), false);
   assert.match(rendererSrc, /const canReuseFlowNodes = existingFlowNodes\.length === expectedFlowNodeCount/);
   assert.match(rendererSrc, /if \(!canReuseFlowNodes\) \{\s*fields\.runtimeGuidanceFlow\.replaceChildren\(\);/);
   assert.match(rendererSrc, /connector\.classList\.toggle\('flow-active', activeFlow \|\| activeDayFlow\);/);
@@ -331,6 +334,7 @@ test('运行中 + 今日已有浏览累计 → 获得感进度使用账号今日
     dailyUsage: {
       totals: { view: 95, like: 4, collect: 2, comment: 0, follow: 0, publish: 0 },
       quotas: { view: 120, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+      inspirationSummary: { count: 3 },
       windows: {
         session: {
           active: true,
@@ -342,10 +346,12 @@ test('运行中 + 今日已有浏览累计 → 获得感进度使用账号今日
   });
   assert.equal(hidden($(w, '#runtime-guidance')), false);
   assert.equal($(w, '#runtime-guidance').dataset.mode, 'running');
-  assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /正在查看第 95 条/);
-  assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /2 条进入候选/);
+  assert.equal(hidden($(w, '#runtime-guidance-flow')), true);
+  assert.equal($(w, '#runtime-guidance-flow').textContent, '');
   assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /正在查看第 95 条推荐内容/);
   assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /95\/120/);
+  assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /已记录 3 条创作灵感/);
+  assert.ok($(w, '#runtime-guidance-progress .rg-progress-meta').classList.contains('has-outcome'));
   assert.doesNotMatch($(w, '#runtime-guidance-progress').textContent ?? '', /0\/120/);
   assert.equal($(w, '#runtime-guidance-progress .rg-progress-track').getAttribute('aria-valuenow'), '95');
   assert.equal(($(w, '#runtime-guidance-progress .rg-progress-fill') as HTMLElement).style.width, '79%');

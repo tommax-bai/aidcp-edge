@@ -1878,6 +1878,7 @@ function renderRuntimeGuidanceProgress(progress) {
   title.textContent = progress.title || '';
   const meta = document.createElement('span');
   meta.className = 'rg-progress-meta';
+  meta.classList.toggle('has-outcome', Boolean(progress.hasOutcome));
   meta.textContent = [progress.counter, progress.meta].filter(Boolean).join(' · ');
   head.append(title, meta);
 

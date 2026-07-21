@@ -676,14 +676,16 @@ body::-webkit-scrollbar:vertical,
 .rg-flow-step.done { --rg-step-color: var(--rg-step-done); }
 .rg-flow-step.current { --rg-step-color: var(--rg-step-current); }
 .rg-flow-step.next { --rg-step-color: var(--rg-step-next); }
-.runtime-guidance[data-mode="running"] .rg-flow-step {
-  --rg-step-color: var(--rg-step-current);
-}
 .rg-progress {
   margin-top: 9px;
   padding: 2px 0 1px;
   border: 0;
   background: transparent;
+}
+.runtime-guidance[data-mode="running"] .rg-progress {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(156, 178, 205, 0.28);
 }
 .runtime-guidance[data-mode="session"] .rg-progress,
 .runtime-guidance[data-mode="hour"] .rg-progress {
@@ -714,6 +716,7 @@ body::-webkit-scrollbar:vertical,
   text-align: right;
   white-space: nowrap;
 }
+.rg-progress-meta.has-outcome { color: #22805c; }
 .rg-progress-track {
   position: relative;
   height: 5px;
