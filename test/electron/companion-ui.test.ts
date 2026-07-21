@@ -1438,7 +1438,7 @@ test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并�
   assert.match($(w, '#usage-source').textContent ?? '', /账号今日/);
   assert.match($(w, '#usage-source').textContent ?? '', /均衡节奏/);
   assert.equal($(w, '#usage-limit').textContent, '今日点赞计划已完成');
-  assert.match($(w, '#usage-limit').title ?? '', /点赞：当前节奏、今日计划已完成/);
+  assert.match($(w, '#usage-limit').title ?? '', /点赞：近 1 分钟、今日计划已完成/);
   assert.doesNotMatch($(w, '#usage-limit').title ?? '', /发帖/);
   assert.ok($(w, '#usage-limit').classList.contains('complete'));
   assert.ok(!$(w, '#usage-limit').classList.contains('hit'));
@@ -1458,11 +1458,26 @@ test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并�
   assert.ok(!$(w, '#quota-windows').classList.contains('hidden'));
   assert.equal(w.document.querySelectorAll('.quota-window-detail').length, 4);
   assert.equal(w.document.querySelectorAll('.qwd-row').length, 24);
-  assert.match($(w, '#quota-windows').textContent ?? '', /本轮计划/);
-  assert.match($(w, '#quota-windows').textContent ?? '', /阶段节奏/);
-  assert.match($(w, '#quota-windows').textContent ?? '', /2\/-/);
-  assert.match($(w, '#quota-windows').textContent ?? '', /10\/60/);
+  const windowDetails = Array.from(w.document.querySelectorAll('.quota-window-detail')) as unknown as HTMLElement[];
+  assert.match(windowDetails[0].textContent ?? '', /本轮计划/);
+  assert.match(windowDetails[0].textContent ?? '', /剩余 10 分钟/);
+  assert.match(windowDetails[0].textContent ?? '', /11:33 开始 · 预计 11:43 结束/);
+  assert.match(windowDetails[1].textContent ?? '', /近 1 分钟/);
+  assert.match(windowDetails[2].textContent ?? '', /近 1 小时/);
+  assert.match(windowDetails[3].textContent ?? '', /今日计划/);
+  assert.doesNotMatch($(w, '#quota-windows').textContent ?? '', /当前节奏|阶段节奏/);
+  const sessionRows = Array.from(windowDetails[0].querySelectorAll('.qwd-row')) as unknown as HTMLElement[];
+  assert.match(sessionRows[0].textContent ?? '', /浏览\s*2/);
+  assert.doesNotMatch(sessionRows[0].textContent ?? '', /最多|\//);
+  assert.equal(sessionRows[0].querySelector('i'), null, 'uncapped session row should not render cap progress');
+  assert.match(sessionRows[1].textContent ?? '', /点赞\s*1\s*最多 10/);
+  assert.ok(sessionRows[1].querySelector('i'), 'capped session row should keep supplied progress');
+  assert.match(windowDetails[1].textContent ?? '', /点赞\s*3\s*最多 3/);
+  assert.doesNotMatch(windowDetails[1].textContent ?? '', /\d+\/\d+/);
+  assert.match(windowDetails[2].textContent ?? '', /浏览\s*10\s*最多 60/);
   assert.match($(w, '#quota-windows').textContent ?? '', /继续/);
+  assert.match(rendererCss, /\.quota-windows\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(rendererCss, /@media \(max-width: 620px\)[\s\S]*?\.quota-windows\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)/);
   // 慢启动问号中的数据表是用户明确请求的「曲线限额」说明；陪伴式用语红线仍约束卡片常驻文案，
   // 不把按需展开的数值帮助表算进来。
   const summaryCopy = $(w, '#daily-summary').cloneNode(true) as HTMLElement;
@@ -1476,6 +1491,61 @@ test('今日进展：收到账号 dailyUsage 后优先显示账号今日，并�
   assert.ok($(w, '#likes').closest('.kpi')?.classList.contains('complete'));
   assert.ok($(w, '#publishes').closest('.kpi')?.classList.contains('complete'));
   w.Date.now = originalNow;
+});
+
+test('今日进展：本轮未开始或缺少时间时不编造剩余时间和结束时间', async () => {
+  const now = 1730000002000;
+  const { w, pushStatus } = await boot();
+  const originalNow = w.Date.now;
+  w.Date.now = () => now;
+  try {
+    const dailyBase = {
+      asOf: now,
+      totals: { view: 2, like: 0 },
+      quotas: { view: 150, like: 50 },
+      saturated: [],
+    };
+    pushStatus(makeStatus({
+      dailyUsage: {
+        ...dailyBase,
+        windows: {
+          session: {
+            active: false,
+            startedAt: now - 120000,
+            expiresAt: now + 480000,
+            totals: { view: 2, like: 0 },
+            quotas: { like: 5 },
+            saturated: [],
+          },
+        },
+      },
+    }));
+    $(w, '#daily-summary').click();
+    await tick();
+    let sessionDetail = w.document.querySelector('.quota-window-detail') as HTMLElement;
+    assert.match(sessionDetail.textContent ?? '', /等待开始/);
+    assert.doesNotMatch(sessionDetail.textContent ?? '', /剩余|预计.*结束/);
+
+    pushStatus(makeStatus({
+      dailyUsage: {
+        ...dailyBase,
+        windows: {
+          session: {
+            active: true,
+            expiresAt: now + 480000,
+            totals: { view: 2, like: 0 },
+            quotas: { like: 5 },
+            saturated: [],
+          },
+        },
+      },
+    }));
+    sessionDetail = w.document.querySelector('.quota-window-detail') as HTMLElement;
+    assert.match(sessionDetail.textContent ?? '', /进行中/);
+    assert.doesNotMatch(sessionDetail.textContent ?? '', /剩余|预计.*结束/);
+  } finally {
+    w.Date.now = originalNow;
+  }
 });
 
 test('今日进展：多个完成项只按浏览、点赞、收藏、评论、关注、发帖的顺序展示一个', async () => {

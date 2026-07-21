@@ -949,8 +949,8 @@ const USAGE_ITEMS = [
 
 const QUOTA_WINDOWS = [
   { key: 'session', label: '本轮计划' },
-  { key: 'minute', label: '当前节奏' },
-  { key: 'hour', label: '阶段节奏' },
+  { key: 'minute', label: '近 1 分钟' },
+  { key: 'hour', label: '近 1 小时' },
   { key: 'day', label: '今日计划' },
 ];
 
@@ -992,6 +992,18 @@ function refreshMeta(refreshAt, now) {
   if (refreshAt === null) return '等待下一轮';
   if (refreshAt > now) return `${timeHint(refreshAt, now)}进入下一轮`;
   return '正在准备下一轮';
+}
+
+function clockTime(at) {
+  const date = new Date(at);
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function sessionRemainingState(expiresAt, now) {
+  if (expiresAt === null || expiresAt <= now) return null;
+  const seconds = Math.ceil((expiresAt - now) / 1000);
+  if (seconds < 90) return `剩余 ${seconds} 秒`;
+  return `剩余 ${Math.ceil(seconds / 60)} 分钟`;
 }
 
 function usageView(status) {
@@ -1139,6 +1151,7 @@ function quotaWindowView(item, window, now) {
   const quotas = window.quotas && typeof window.quotas === 'object' ? window.quotas : {};
   const saturated = new Set(Array.isArray(window.saturated) ? window.saturated : []);
   const active = item.key === 'session' ? window.active !== false : true;
+  const startedAt = parseOptionalTime(window.startedAt);
   const expiresAt = parseOptionalTime(window.expiresAt);
   const refreshAt = parseOptionalTime(window.refreshAt);
   const releaseAt = parseOptionalTime(window.releaseAt);
@@ -1162,11 +1175,36 @@ function quotaWindowView(item, window, now) {
   const worst = capped.reduce((best, entry) => (!best || entry.ratio > best.ratio ? entry : best), null);
   const ratio = !expired && active ? (worst?.ratio ?? 0) : 0;
   const tone = expired || !active ? 'idle' : completed > 0 ? 'complete' : ratio >= 0.8 ? 'near' : 'ok';
-  const state = expired ? '准备下一轮' : !active ? '等待开始' : completed > 0 ? `完成 ${completed}项` : ratio >= 0.8 ? '接近完成' : '进行中';
-  const baseMeta = worst ? `${worst.label} ${worst.used}/${worst.cap}` : '持续记录中';
+  const hasSessionTiming = item.key === 'session'
+    && active
+    && startedAt !== null
+    && expiresAt !== null
+    && expiresAt > now;
+  const sessionRemaining = hasSessionTiming ? sessionRemainingState(expiresAt, now) : null;
+  const state = expired
+    ? '准备下一轮'
+    : !active
+      ? '等待开始'
+      : sessionRemaining
+        ?? (completed > 0
+          ? `完成 ${completed}项`
+          : ratio >= 0.8
+            ? (item.key === 'minute' || item.key === 'hour' ? '接近休息' : '接近完成')
+            : (item.key === 'minute' || item.key === 'hour' ? '节奏正常' : '进行中'));
+  const baseMeta = worst ? `${worst.label} ${worst.used} · 最多 ${worst.cap}` : '持续记录中';
+  const sessionMeta = hasSessionTiming
+    ? `${clockTime(startedAt)} 开始 · 预计 ${clockTime(expiresAt)} 结束`
+    : null;
+  const scopeMeta = item.key === 'minute' || item.key === 'hour'
+    ? '随时间滚动更新'
+    : item.key === 'day'
+      ? '今天 00:00 至今'
+      : null;
   const meta = expired
     ? refreshMeta(refreshAt, now)
-    : (completed > 0 && releaseAt !== null && releaseAt > now ? `${baseMeta} · ${timeHint(releaseAt, now)}继续` : baseMeta);
+    : (completed > 0 && releaseAt !== null && releaseAt > now
+      ? `${baseMeta} · ${timeHint(releaseAt, now)}继续`
+      : sessionMeta ?? scopeMeta ?? baseMeta);
   return {
     key: item.key,
     label: item.label,
@@ -1177,7 +1215,7 @@ function quotaWindowView(item, window, now) {
     completed,
     expired,
     rows,
-    title: `${item.label}: ${state}${rows.length > 0 ? ` · ${rows.map((entry) => `${entry.label} ${entry.used}/${entry.cap ?? '-'}`).join(' · ')}` : ''}`,
+    title: `${item.label}: ${state}${rows.length > 0 ? ` · ${rows.map((entry) => `${entry.label} ${entry.used}${entry.cap === null ? '' : `，最多 ${entry.cap}`}`).join(' · ')}` : ''}`,
   };
 }
 
@@ -1201,12 +1239,13 @@ function renderQuotaWindows(usage) {
   fields.quotaWindows.innerHTML = windows.map((window) => {
     const rows = window.rows.map((entry) => {
       const pct = entry.cap !== null ? Math.round(entry.ratio * 100) : 0;
-      const value = entry.cap !== null ? `${entry.used}/${entry.cap}` : `${entry.used}/-`;
+      const cap = entry.cap !== null ? `<small>最多 ${escapeHtml(entry.cap)}</small>` : '';
+      const progress = entry.cap !== null ? `<i><em style="width:${pct}%"></em></i>` : '';
       return `
         <div class="qwd-row ${entry.complete ? 'complete' : entry.ratio >= 0.8 && entry.cap !== null ? 'near' : ''}">
           <span>${escapeHtml(entry.label)}</span>
-          <b>${escapeHtml(value)}</b>
-          <i><em style="width:${pct}%"></em></i>
+          <b>${escapeHtml(entry.used)}${cap}</b>
+          ${progress}
         </div>`;
     }).join('');
     return `

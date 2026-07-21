@@ -1245,7 +1245,7 @@ body::-webkit-scrollbar:vertical,
 .kpi.complete .usage-bar em { background: linear-gradient(90deg, #22a875, #57c99c); }
 .quota-windows {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 7px;
   min-width: 0;
 }
@@ -1360,7 +1360,7 @@ body::-webkit-scrollbar:vertical,
 }
 .qwd-row {
   display: grid;
-  grid-template-columns: 28px 42px minmax(0, 1fr);
+  grid-template-columns: 28px minmax(72px, auto) minmax(0, 1fr);
   align-items: center;
   gap: 5px;
   min-width: 0;
@@ -1371,12 +1371,22 @@ body::-webkit-scrollbar:vertical,
   white-space: nowrap;
 }
 .qwd-row b {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
   justify-self: end;
   color: #26324a;
   font-size: 10px;
   font-weight: 760;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+.qwd-row b small {
+  display: inline;
+  margin: 0;
+  color: #8794a9;
+  font-size: 9.5px;
+  font-weight: 650;
 }
 .qwd-row i {
   display: block;
@@ -2416,7 +2426,7 @@ body::-webkit-scrollbar:vertical,
      且与「隐藏了几格」无关（原来的 :nth-child(4) 边框规则在隐藏格子后会错位，已删）。 */
   .kpi { flex-basis: 30%; }
   .quota-windows {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
   .summary-time { padding-top: 1px; }
   .slow-start-help-panel { left: -120px; }
