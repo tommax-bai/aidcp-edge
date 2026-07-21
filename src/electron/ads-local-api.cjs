@@ -279,6 +279,62 @@ function createAdsLocalApi(deps = {}) {
   }
 
   /**
+   * 精确读取一个 profile 的代理配置，供 Electron 主进程在浏览器启动前做一次性预检。
+   *
+   * 与 listProfiles 的边界不同：这里会把 proxy_password 返回给主进程调用方，但只挑代理所需字段，
+   * 不返回 profile 其余原始数据。该方法不得暴露给 preload/renderer；现有 normalizeProfile 仍剥离密码。
+   */
+  async function getProfileProxyConfig(opts = {}) {
+    const profileId = String(opts.profileId || '').trim();
+    if (!profileId) return { ok: false, error: '缺少 profileId' };
+    const base = baseOf(opts);
+    const qs = new URLSearchParams({ user_id: profileId, page: '1', page_size: '10' });
+    const url = `${base}/api/v1/user/list?${qs.toString()}`;
+    let res;
+    try {
+      res = await throttledFetch(url, authHeaders(opts));
+    } catch {
+      return { ok: false, error: '读取代理配置失败：本地 API 不可达' };
+    }
+    if (!res.ok) {
+      const authLikely = res.status === 401 || res.status === 403;
+      return {
+        ok: false,
+        authLikely,
+        error: `读取代理配置失败（HTTP ${res.status}）${authLikely ? '：疑似开启了 API 校验' : ''}`,
+      };
+    }
+    let body;
+    try {
+      body = await res.json();
+    } catch {
+      return { ok: false, error: '读取代理配置失败：本地 API 响应非 JSON' };
+    }
+    if (typeof body.code === 'number' && body.code !== 0) {
+      const authLikely = /token|auth|api\s*key|校验|鉴权/i.test(body.msg || '');
+      return { ok: false, authLikely, error: '读取代理配置失败：本地 API 拒绝请求' };
+    }
+    const data = body.data || {};
+    const list = Array.isArray(data.list) ? data.list : Array.isArray(data.data) ? data.data : [];
+    const item = list.find((candidate) => String(candidate && candidate.user_id || '') === profileId);
+    if (!item) return { ok: false, error: '读取代理配置失败：未找到该环境' };
+    const cfg = item.user_proxy_config || item.proxy_config || {};
+    const proxyType = String(cfg.proxy_type || cfg.proxy_soft || '').trim().toLowerCase();
+    const noProxy = isNoProxyType(proxyType);
+    return {
+      ok: true,
+      noProxy,
+      proxy: {
+        proxyType: noProxy ? 'no_proxy' : proxyType,
+        proxyHost: cfg.proxy_host != null ? String(cfg.proxy_host) : '',
+        proxyPort: cfg.proxy_port != null ? String(cfg.proxy_port) : '',
+        proxyUser: cfg.proxy_user != null ? String(cfg.proxy_user) : '',
+        proxyPassword: cfg.proxy_password != null ? String(cfg.proxy_password) : '',
+      },
+    };
+  }
+
+  /**
    * 拉取分组：GET {base}/api/v1/group/list（只读，供「创建环境」精确定位预置分组）。
    * 不 throw：成功 { ok:true, groups:[{groupId, groupName}] }，失败 { ok:false, error }。
    */
@@ -480,6 +536,7 @@ function createAdsLocalApi(deps = {}) {
   return {
     status,
     listProfiles,
+    getProfileProxyConfig,
     listGroups,
     listActiveProfiles,
     openProfileForInspection,

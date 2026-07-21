@@ -108,7 +108,9 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
+    "https-proxy-agent": "^7.0.6",
     "jsdom": "^25.0.1",
+    "socks-proxy-agent": "^8.0.5",
     "ws": "^8.21.0"
   }
 }

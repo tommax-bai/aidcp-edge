@@ -866,12 +866,14 @@
     return `${amount.toFixed(digits)} ${units[index]}`;
   }
 
-  /** 代理配置是辅助语境；“已验证”只可能来自当前浏览器运行证据。 */
-  function proxyRuntimeView(runtime, configuration) {
+  /** 代理配置/启动前预检是辅助语境；“已验证”只可能来自当前浏览器运行证据。 */
+  function proxyRuntimeView(runtime, configuration, preflight) {
     const evidence = runtime && typeof runtime === 'object' ? runtime : {};
     const config = configuration && typeof configuration === 'object' ? configuration : {};
+    const early = preflight && typeof preflight === 'object' ? preflight : {};
     const noProxy = config.known === true && config.noProxy === true;
     const bytes = formatReceivedBytes(evidence.sessionReceivedBytes);
+    const currentRuntime = ['pending', 'verified', 'same_as_host', 'unavailable'].includes(evidence.state);
     let label = '待验证';
     let tone = 'pending';
     if (noProxy) {
@@ -886,6 +888,18 @@
     } else if (evidence.state === 'unavailable') {
       label = '无法确认';
       tone = 'unknown';
+    } else if (!currentRuntime && early.state === 'checking') {
+      label = '代理检测中';
+      tone = 'pending';
+    } else if (!currentRuntime && early.state === 'available') {
+      label = '代理可用';
+      tone = 'verified';
+    } else if (!currentRuntime && early.state === 'unavailable') {
+      label = '代理不可用';
+      tone = 'danger';
+    } else if (!currentRuntime && early.state === 'unknown') {
+      label = '无法确认';
+      tone = 'unknown';
     } else if (evidence.state === 'stale') {
       label = evidence.generation > 0 ? '验证已失效' : '待验证';
       tone = evidence.generation > 0 ? 'danger' : 'pending';
@@ -898,7 +912,7 @@
       configuration: config.summary || (config.known ? '无代理配置' : '配置待读取'),
       browserIp: evidence.browserIp || '未取得',
       directIp: evidence.directIp || '未取得',
-      checkedAt: evidence.checkedAt || '',
+      checkedAt: currentRuntime ? (evidence.checkedAt || '') : (early.checkedAt || evidence.checkedAt || ''),
     };
   }
 

@@ -46,6 +46,7 @@ const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
 const commandDiagnostics = require('./command-diagnostics.cjs');
 const { normalizeProxyRuntime } = require('./proxy-runtime.cjs');
+const { createProxyPreflightController } = require('./proxy-preflight.cjs');
 const {
   DEFAULT_PARKING_MODE,
   normalizeParkingMode,
@@ -1405,6 +1406,8 @@ function makeStatus(provider) {
     presence: { text: '数据管理可用，等待开始自动化', at: new Date().toISOString() },
     publish: null,
     publishPreview: null,
+    // 浏览器启动前的短时代理可用性预检；与 proxyRuntime（浏览器实际出口证据）严格分开。
+    proxyPreflight: null,
     kernelPrep: null,
     lastPublish: null,
     // 多环境新增（旧渲染层忽略即可）：有界重起放弃终态 + 同账号铺多环境告警 + 阻断浮层待人工。
@@ -1431,6 +1434,80 @@ function makeStatus(provider) {
 /** envId -> EnvHandle。EnvHandle 持子进程句柄 + 冻结身份 + 状态投影 + 每环境解析器/意图标志/重起计数。 */
 const envs = new Map();
 let selectedEnvId = '';
+let selectedProxyPreflightTimer = null;
+
+const proxyPreflight = createProxyPreflightController({
+  readProxy: (profileId) => readAdsWithRuntime({}, (resolved) => adsApi.getProfileProxyConfig({
+    ...resolved,
+    profileId,
+  })),
+  onUpdate: (envId, snapshot) => {
+    const handle = envs.get(envId);
+    if (!handle || handle.removed) return;
+    updateStatus(handle, { proxyPreflight: snapshot });
+  },
+});
+
+function browserAbsentForProxyPreflight(handle) {
+  return Boolean(handle && (!handle.child
+    || handle.coldStandbyActive
+    || handle.coldStandbyPending
+    || handle.controlPlaneOnly));
+}
+
+function eligibleForProxyPreflight(handle) {
+  return Boolean(handle
+    && !handle.removed
+    && !isQuitting
+    && handle.kind === 'adspower'
+    && normalizePlatform(handle.platform) === 'facebook'
+    && handle.profileId
+    && browserAbsentForProxyPreflight(handle));
+}
+
+function ensureProxyPreflight(handle) {
+  if (!eligibleForProxyPreflight(handle)) {
+    return Promise.resolve({ state: 'skipped', reason: 'not_applicable' });
+  }
+  return proxyPreflight.ensure({ envId: handle.envId, profileId: handle.profileId });
+}
+
+function scheduleSelectedProxyPreflight(handle) {
+  if (selectedProxyPreflightTimer) clearTimeout(selectedProxyPreflightTimer);
+  selectedProxyPreflightTimer = null;
+  if (!eligibleForProxyPreflight(handle)) return;
+  const envId = handle.envId;
+  selectedProxyPreflightTimer = setTimeout(() => {
+    selectedProxyPreflightTimer = null;
+    const current = envs.get(envId);
+    if (selectedEnvId !== envId || !eligibleForProxyPreflight(current)) return;
+    void ensureProxyPreflight(current);
+  }, 300);
+  selectedProxyPreflightTimer.unref?.();
+}
+
+function proxyPreflightFailureText(reason) {
+  switch (reason) {
+    case 'protocol_mismatch': return '代理类型可能配置错误';
+    case 'authentication_failed': return '代理账号或密码未通过认证';
+    case 'timeout': return '代理连接超时';
+    case 'connection_refused': return '代理拒绝连接';
+    case 'host_unresolved': return '代理地址无法解析';
+    case 'config_invalid': return '代理配置不完整';
+    default: return '代理当前不可用';
+  }
+}
+
+function stopStartForProxyFailure(handle, result) {
+  const reason = proxyPreflightFailureText(result && result.reason);
+  updateStatus(handle, {
+    edge: 'stopped',
+    session: 'idle',
+    lastMessage: `自动化未启动：${reason}。请修改代理后重试。`,
+    ...edgeFailurePatch(reason),
+    ...presencePatch('代理不可用，自动化未启动'),
+  });
+}
 
 function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, nameSyncState, platform, cascadeIndex }) {
   return {
@@ -1561,6 +1638,7 @@ function syncEnvHandles() {
     if (handle.child) {
       queueLifecycle(() => { try { handle.child?.kill('SIGTERM'); } catch { /* ignore */ } });
     }
+    proxyPreflight.invalidate(envId);
     envs.delete(envId);
   }
   // 建新 / 更新元数据（既有 handle 的运行态保留）。
@@ -2907,8 +2985,13 @@ function wakeColdStandby(handle, reason) {
     void launchQueue.enqueue({
       key: `${handle.envId}:wake`,
       kind,
-      run: () =>
-        new Promise((resolve) => {
+      run: async () => {
+        const preflight = await ensureProxyPreflight(handle);
+        if (preflight && preflight.state === 'unavailable') {
+          onColdStandbyWakeFailed(handle, `代理预检未通过：${proxyPreflightFailureText(preflight.reason)}`);
+          return false;
+        }
+        return new Promise((resolve) => {
           if (handle.child !== child || handle.removed || isQuitting) {
             handle.coldStandbyWaking = false;
             releaseStartQueue(handle);
@@ -2953,7 +3036,8 @@ function wakeColdStandby(handle, reason) {
             onColdStandbyWakeFailed(handle, '核心进程 IPC 不可用');
             finish(false);
           }
-        }),
+        });
+      },
     });
     return;
   }
@@ -4096,6 +4180,12 @@ async function startAdsPowerFlow(handle) {
   // 运行时/内核准备可长达数分钟（首启下载）；这期间被暂停/移出/退出则诚实放弃，不再拉起子进程。
   // （startEdge 亦有同一取消闸兜底；此处提前返回避免多余「正在启动」状态残留。）
   if (handle.removed || handle.stopRequested || isQuitting || handle.status.session === 'paused') return;
+  const preflight = await ensureProxyPreflight(handle);
+  if (handle.removed || handle.stopRequested || isQuitting || handle.status.session === 'paused') return;
+  if (preflight && preflight.state === 'unavailable') {
+    stopStartForProxyFailure(handle, preflight);
+    return;
+  }
   startEdge(handle);
 }
 
@@ -4789,6 +4879,8 @@ async function gracefulStopAllAndQuit() {
   if (quitStopAllInFlight) return;
   quitStopAllInFlight = true;
   isQuitting = true;
+  if (selectedProxyPreflightTimer) clearTimeout(selectedProxyPreflightTimer);
+  selectedProxyPreflightTimer = null;
   stopLoginPoller();
   for (const handle of envs.values()) {
     clearRespawnTimer(handle);
@@ -5487,6 +5579,7 @@ ipcMain.handle('fleet:select', (_event, envId) => {
     saveSettings({ selectedEnvId: envId });
     applyOverlayTone(selectedHandle()?.status.risk || 'normal');
     broadcastFleet();
+    scheduleSelectedProxyPreflight(envs.get(envId));
   }
   return fleetSnapshot();
 });
@@ -6147,7 +6240,13 @@ ipcMain.handle('ads:updateEnvProxy', async (_event, opts) => {
     if (r && r.ok === false && /being used|being opened|is open|正在使用|已打开/i.test(String(r.error || ''))) {
       return { ok: false, error: '该环境正在使用中，无法修改代理；请先关闭该环境后重试。' };
     }
-    if (r && r.ok) return { ok: true, noProxy: norm.noProxy };
+    if (r && r.ok) {
+      const envId = fleet.envIdForProfile(String(userId));
+      proxyPreflight.invalidate(envId);
+      const handle = envs.get(envId);
+      if (handle && selectedEnvId === envId) scheduleSelectedProxyPreflight(handle);
+      return { ok: true, noProxy: norm.noProxy };
+    }
     return r;
   } catch (e) {
     return { ok: false, error: `修改代理失败：${(e && e.message) || String(e)}` };

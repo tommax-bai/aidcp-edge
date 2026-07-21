@@ -11,8 +11,8 @@ const { normalizeProxyRuntime } = require('../../src/electron/proxy-runtime.cjs'
 };
 const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   formatReceivedBytes(value: unknown): string;
-  proxyRuntimeView(runtime: unknown, configuration: unknown): {
-    label: string; tone: string; compact: string; configuration: string; browserIp: string; directIp: string;
+  proxyRuntimeView(runtime: unknown, configuration: unknown, preflight?: unknown): {
+    label: string; tone: string; compact: string; configuration: string; browserIp: string; directIp: string; checkedAt: string;
   };
 };
 const here = dirname(fileURLToPath(import.meta.url));
@@ -65,6 +65,29 @@ test('视图只有运行证据能给“代理已验证”，配置存在但证�
   assert.equal(uiLogic.formatReceivedBytes(1024 * 1024), '1.00 MB');
 });
 
+test('浏览器证据缺失时展示预检状态，当前运行证据始终优先', () => {
+  const config = { known: true, noProxy: false, summary: 'http · proxy.example' };
+  const available = uiLogic.proxyRuntimeView(
+    { state: 'stale', generation: 1, sessionReceivedBytes: 0 },
+    config,
+    { state: 'available', checkedAt: '2026-07-21T01:02:03.000Z' },
+  );
+  assert.equal(available.label, '代理可用');
+  assert.equal(available.browserIp, '未取得');
+  assert.equal(available.checkedAt, '2026-07-21T01:02:03.000Z');
+
+  const failed = uiLogic.proxyRuntimeView(null, config, { state: 'unavailable' });
+  assert.equal(failed.label, '代理不可用');
+  assert.equal(failed.tone, 'danger');
+
+  const runtimeWins = uiLogic.proxyRuntimeView(
+    { state: 'same_as_host', browserIp: '198.51.100.4', directIp: '198.51.100.4' },
+    config,
+    { state: 'available' },
+  );
+  assert.equal(runtimeWins.label, '疑似直连');
+});
+
 test('装配契约：仅 Facebook AdsPower 启用 Network，注入 /egress，IP 事件落盘前脱敏', () => {
   assert.match(sessionSource, /if \(opts\.network\) await cdp\.send\('Network\.enable'\)/);
   assert.match(coreSource, /provider\.kind === 'adspower' && platformDriver\.platform === 'facebook'/);
@@ -72,4 +95,13 @@ test('装配契约：仅 Facebook AdsPower 启用 Network，注入 /egress，IP 
   assert.match(mainSource, /proxyRuntime updated \(redacted\)/);
   assert.match(html, /本次会话接收流量/);
   assert.match(html, /不是代理商计费流量/);
+});
+
+test('预检装配契约：选择时预热，启动与唤醒复用，代理修改后失效且不新建重试器', () => {
+  assert.match(mainSource, /ipcMain\.handle\('fleet:select'[\s\S]*scheduleSelectedProxyPreflight\(envs\.get\(envId\)\)/);
+  assert.match(mainSource, /const preflight = await ensureProxyPreflight\(handle\);[\s\S]*preflight\.state === 'unavailable'[\s\S]*startEdge\(handle\)/);
+  assert.match(mainSource, /launchQueue\.enqueue\(\{[\s\S]*run: async \(\) => \{[\s\S]*await ensureProxyPreflight\(handle\)[\s\S]*admitBrowserSlot\(handle\)/);
+  assert.match(mainSource, /onColdStandbyWakeFailed\(handle, `代理预检未通过/);
+  assert.match(mainSource, /proxyPreflight\.invalidate\(envId\)/);
+  assert.doesNotMatch(mainSource, /proxyPreflightRetry|proxyRetryTimer/);
 });

@@ -12,9 +12,21 @@ const { createAdsLocalApi, normalizeProfile } = require('../../src/electron/ads-
     status: (opts?: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
     listProfiles: (opts?: Record<string, unknown>) => Promise<{
       ok: boolean;
-      profiles?: Array<{ userId: string; serialNumber: string; name: string; groupName: string; proxy: string }>;
+      profiles?: Array<{ userId: string; serialNumber: string; name: string; groupName: string; proxy: string; proxyConfig?: Record<string, unknown> }>;
       truncated?: boolean;
       authLikely?: boolean;
+      error?: string;
+    }>;
+    getProfileProxyConfig: (opts?: Record<string, unknown>) => Promise<{
+      ok: boolean;
+      noProxy?: boolean;
+      proxy?: {
+        proxyType: string;
+        proxyHost: string;
+        proxyPort: string;
+        proxyUser: string;
+        proxyPassword: string;
+      };
       error?: string;
     }>;
     openProfileForInspection: (opts?: Record<string, unknown>) => Promise<{
@@ -137,6 +149,62 @@ test('listProfiles: 分页拼接（首页满 page_size、次页短即止）', as
   assert.equal(r.profiles?.length, 101);
   assert.equal(r.profiles?.at(-1)?.userId, 'last');
   assert.equal(r.truncated, false);
+});
+
+test('getProfileProxyConfig: 精确读取完整认证配置但现有列表投影仍不含密码', async () => {
+  const calls: Array<{ url: string }> = [];
+  const item = {
+    user_id: 'profile-secret',
+    serial_number: '321',
+    user_proxy_config: {
+      proxy_type: 'http',
+      proxy_host: 'proxy.example',
+      proxy_port: '8000',
+      proxy_user: 'operator',
+      proxy_password: 'never-render-this',
+    },
+  };
+  const api = createAdsLocalApi({
+    ...noThrottle,
+    fetchImpl: stubFetch([['/api/v1/user/list', () => res(true, 200, { code: 0, data: { list: [item] } })]], calls),
+  });
+
+  const privateResult = await api.getProfileProxyConfig({ profileId: 'profile-secret' });
+  assert.deepEqual(privateResult, {
+    ok: true,
+    noProxy: false,
+    proxy: {
+      proxyType: 'http',
+      proxyHost: 'proxy.example',
+      proxyPort: '8000',
+      proxyUser: 'operator',
+      proxyPassword: 'never-render-this',
+    },
+  });
+  assert.match(calls[0].url, /user_id=profile-secret/);
+
+  const publicResult = await api.listProfiles();
+  assert.equal(JSON.stringify(publicResult).includes('never-render-this'), false);
+  assert.equal(Object.hasOwn(publicResult.profiles?.[0]?.proxyConfig ?? {}, 'proxyPassword'), false);
+});
+
+test('getProfileProxyConfig: 不存在的 profile 和 API 异常均不回显服务端内容', async () => {
+  const missing = createAdsLocalApi({
+    ...noThrottle,
+    fetchImpl: stubFetch([['/api/v1/user/list', () => res(true, 200, { code: 0, data: { list: [] } })]]),
+  });
+  assert.deepEqual(await missing.getProfileProxyConfig({ profileId: 'missing' }), {
+    ok: false,
+    error: '读取代理配置失败：未找到该环境',
+  });
+
+  const rejected = createAdsLocalApi({
+    ...noThrottle,
+    fetchImpl: stubFetch([['/api/v1/user/list', () => res(true, 200, { code: -1, msg: 'password=secret' })]]),
+  });
+  const result = await rejected.getProfileProxyConfig({ profileId: 'profile-secret' });
+  assert.equal(result.ok, false);
+  assert.equal(JSON.stringify(result).includes('password=secret'), false);
 });
 
 test('listProfiles: code≠0 → ok:false 诚实回报', async () => {

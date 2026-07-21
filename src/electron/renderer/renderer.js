@@ -1799,7 +1799,11 @@ function renderProxyRuntime(status, facebook) {
     fields.proxyRuntimeChip.setAttribute('aria-expanded', 'false');
     return;
   }
-  const view = uiLogic.proxyRuntimeView(status && status.proxyRuntime, selectedProxyConfiguration());
+  const view = uiLogic.proxyRuntimeView(
+    status && status.proxyRuntime,
+    selectedProxyConfiguration(),
+    status && status.proxyPreflight,
+  );
   fields.proxyRuntimeChip.className = `proxy-runtime-chip nodrag ${view.tone}`;
   fields.proxyRuntimeLabel.textContent = view.compact;
   fields.proxyRuntimeChip.title = `${view.label}；本次会话接收流量 ${view.bytes}`;
