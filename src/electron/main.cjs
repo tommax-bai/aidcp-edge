@@ -6323,6 +6323,20 @@ function batchProxyUpdateError(result) {
   return 'AdsPower 未接受代理更新';
 }
 
+function batchProxyProgressRequestId(opts) {
+  const value = String((opts && opts.requestId) || '').trim();
+  return /^[a-zA-Z0-9_-]{8,80}$/.test(value) ? value : '';
+}
+
+function emitBatchProxyProgress(event, requestId, completedCount, totalCount) {
+  try {
+    if (!event || !event.sender || event.sender.isDestroyed()) return;
+    event.sender.send('ads:envProxyBatchProgress', { requestId, completedCount, totalCount });
+  } catch {
+    // renderer 关闭或订阅失败不改变已经确认的代理写入结果。
+  }
+}
+
 function invalidateProxyEvidence(userId) {
   const envId = fleet.envIdForProfile(String(userId));
   proxyPreflight.invalidate(envId);
@@ -6369,7 +6383,9 @@ ipcMain.handle('ads:updateEnvProxy', async (_event, opts) => {
   }
 });
 
-ipcMain.handle('ads:updateEnvProxies', async (_event, opts) => {
+ipcMain.handle('ads:updateEnvProxies', async (event, opts) => {
+  const requestId = batchProxyProgressRequestId(opts);
+  if (!requestId) return { ok: false, error: '批量请求标识不合法，请重试。' };
   const plan = createProxyReassignmentPlan({
     userIds: opts && opts.userIds,
     proxyType: opts && opts.proxyType,
@@ -6415,6 +6431,9 @@ ipcMain.handle('ads:updateEnvProxies', async (_event, opts) => {
         const result = await writeApi.updateProfileProxy({ userId: item.userId, proxyConfig: norm.proxyConfig }, ads);
         if (!result || !result.ok) return { ok: false, error: batchProxyUpdateError(result) };
         return { ok: true };
+      },
+      onProgress: ({ completedCount, totalCount }) => {
+        emitBatchProxyProgress(event, requestId, completedCount, totalCount);
       },
     });
     for (const userId of executed.updatedUserIds || []) {

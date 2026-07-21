@@ -1822,6 +1822,8 @@ body::-webkit-scrollbar:vertical,
   font-size: 12px;
 }
 .batch-proxy-preview { margin: 0; line-height: 1.55; white-space: pre-line; }
+.batch-proxy-progress { display: grid; gap: 5px; color: var(--mute); font-size: 11.5px; }
+.batch-proxy-progress progress { width: 100%; height: 5px; accent-color: var(--accent); }
 .batch-proxy-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .ads-create-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 /* 平台下拉按内容收窄，操作系统下拉占满余量。 */

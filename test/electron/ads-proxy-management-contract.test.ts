@@ -18,6 +18,7 @@ test('preload 只暴露具名代理解析、单项更新和批量更新 IPC', ()
   assert.match(preload, /adsParseProxyLines:\s*\(input\)\s*=>\s*ipcRenderer\.invoke\('ads:parseProxyLines', input\)/);
   assert.match(preload, /adsUpdateEnvProxy:\s*\(opts\)\s*=>\s*ipcRenderer\.invoke\('ads:updateEnvProxy', opts\)/);
   assert.match(preload, /adsUpdateEnvProxies:\s*\(opts\)\s*=>\s*ipcRenderer\.invoke\('ads:updateEnvProxies', opts\)/);
+  assert.match(preload, /onEnvProxyBatchProgress:\s*\(callback\)\s*=>\s*\{[\s\S]*ipcRenderer\.on\('ads:envProxyBatchProgress', listener\)[\s\S]*removeListener\('ads:envProxyBatchProgress', listener\)/);
 });
 
 test('AdsPower 代理写边界只构造 user_id + user_proxy_config 两键 body', () => {
@@ -31,18 +32,29 @@ test('AdsPower 代理写边界只构造 user_id + user_proxy_config 两键 body'
 test('ads:updateEnvProxies 在任何写入前完成整批计划、客户范围和运行状态复核', () => {
   const block = handlerBlock(main, 'ads:updateEnvProxies');
   assert.ok(block);
+  const request = block.indexOf('batchProxyProgressRequestId(opts)');
   const plan = block.indexOf('createProxyReassignmentPlan({');
   const scope = block.indexOf('await proxyTargetScope(');
   const active = block.indexOf('plan.plan.findIndex((item) => proxyTargetActive(item.userId))');
   const writeClient = block.indexOf('createAdsWriteApi({');
   const firstWrite = block.indexOf('updateProfileProxy({');
+  assert.ok(request >= 0 && request < plan, '一次性请求标识在计划和写入前校验');
   assert.ok(plan >= 0 && plan < scope);
   assert.ok(scope < active && active < writeClient);
   assert.ok(writeClient < firstWrite);
   assert.match(block, /executeProxyReassignmentPlan\(\{/, '使用可单测的逐项串行执行器');
   assert.match(block, /return proxyReassignmentFailure\(/, '任一失败立即返回部分回执');
   assert.match(block, /batchProxyUpdateError\(result\)/, '外部 AdsPower msg 经批量安全原因收窄后才进回执');
+  assert.match(block, /onProgress:\s*\(\{ completedCount, totalCount \}\)\s*=>\s*\{[\s\S]*emitBatchProxyProgress\(event, requestId, completedCount, totalCount\)/);
   assert.doesNotMatch(block, /Promise\.all/, '批量代理不并发扩大写入面');
+});
+
+test('批量代理进度事件只携带请求标识与真实计数', () => {
+  const start = main.indexOf('function emitBatchProxyProgress');
+  const end = main.indexOf('function invalidateProxyEvidence', start);
+  const block = main.slice(start, end);
+  assert.match(block, /sender\.send\('ads:envProxyBatchProgress',\s*\{ requestId, completedCount, totalCount \}\)/);
+  assert.doesNotMatch(block, /userId|proxyText|proxyPassword|updatedUserIds/);
 });
 
 test('单项与批量代理写入都重新拉取客户可见范围并拒绝已知运行目标', () => {

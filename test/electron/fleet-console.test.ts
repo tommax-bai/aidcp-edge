@@ -53,6 +53,7 @@ interface BootHandles {
   pushStatus: (s: unknown) => void;
   pushActivity: (e: unknown) => void;
   pushFleet: (snap: unknown) => void;
+  pushBatchProxyProgress: (progress: unknown) => void;
   calls: Record<string, unknown[]>;
 }
 
@@ -67,6 +68,7 @@ async function boot(
   let pushStatus: (s: unknown) => void = () => undefined;
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
+  let pushBatchProxyProgress: (progress: unknown) => void = () => undefined;
   const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], closeAll: [], personaPreview: [], personaFill: [], select: [], close: [], browserOpen: [], browserClose: [], notify: [], start: [], resume: [], saveNickname: [], updateProxies: [] };
   const personaStatusByEnv = new Map<string, Record<string, unknown>>();
   const settings = {
@@ -96,6 +98,7 @@ async function boot(
     },
     onActivity: (cb: (e: unknown) => void) => { pushActivity = cb; },
     onFleetUpdate: (cb: (snap: unknown) => void) => { pushFleet = cb; },
+    onEnvProxyBatchProgress: (cb: (progress: unknown) => void) => { pushBatchProxyProgress = cb; },
     getStatus: async () => makeStatus({ envId: 'ads-p1', envName: '环境一' }),
     getSettings: async () => settings,
     saveSettings: async (patch: Record<string, unknown>) => ({ ...settings, ...patch, saveOk: true }),
@@ -191,7 +194,7 @@ async function boot(
   window.eval(rendererSrc);
   await tick();
   await tick();
-  return { w: window, pushStatus, pushActivity, pushFleet, calls };
+  return { w: window, pushStatus, pushActivity, pushFleet, pushBatchProxyProgress, calls };
 }
 
 // ── 纯逻辑：状态环分级 / 排序 / 失联 ──
@@ -1363,6 +1366,7 @@ test('环境管理：默认无复选框，批量代理按勾选顺序冻结目�
     { userId: 'p1', name: '环境一', serialNumber: '1', groupName: '', proxy: 'old:1', platform: 'xiaohongshu' },
     { userId: 'p2', name: '环境二', serialNumber: '2', groupName: '', proxy: 'old:2', platform: 'xiaohongshu' },
     { userId: 'p3', name: '环境三', serialNumber: '3', groupName: '', proxy: '无代理配置', platform: 'facebook' },
+    { userId: 'p4', name: '环境四', serialNumber: '4', groupName: '', proxy: '无代理配置', platform: 'facebook' },
   ];
   const { w, calls } = await boot({
     adsStatus: async () => ({ ok: true }),
@@ -1399,22 +1403,89 @@ test('环境管理：默认无复选框，批量代理按勾选顺序冻结目�
   assert.equal(checkFor('环境一').disabled, true, '运行中环境不可勾选');
   checkFor('环境三').click();
   checkFor('环境二').click();
+  checkFor('环境四').click();
   const proxyText = w.document.querySelector('#ads-batch-proxy-text') as HTMLTextAreaElement;
   proxyText.value = 'a.example:8001:user-a:secret-a\nb.example:8002:user-b:secret-b';
   proxyText.dispatchEvent(new w.Event('input'));
   await tick();
   await tick();
   const preview = w.document.querySelector('#ads-batch-proxy-preview')!.textContent || '';
-  assert.match(preview, /2 个环境 · 2 条代理/);
+  assert.match(preview, /3 个环境 · 2 条代理 · 其中 1 个环境复用代理/);
+  assert.doesNotMatch(preview, /循环复用/);
   assert.ok(preview.indexOf('环境三 → a.example:8001') < preview.indexOf('环境二 → b.example:8002'), '映射顺序来自勾选顺序');
   assert.doesNotMatch(preview, /user-a|secret-a|user-b|secret-b/);
 
   (w.document.querySelector('#ads-batch-proxy-save') as HTMLButtonElement).click();
   for (let i = 0; i < 4; i += 1) await tick();
-  assert.deepEqual(Array.from((calls.updateProxies[0] as { userIds: string[] }).userIds), ['p3', 'p2']);
+  assert.deepEqual(Array.from((calls.updateProxies[0] as { userIds: string[] }).userIds), ['p3', 'p2', 'p4']);
   assert.equal(w.document.querySelectorAll('.ads-env-check').length, 0, '全部成功后退出批量态');
   assert.equal(proxyText.value, '', '全部成功后清空一次性代理输入');
-  assert.match(w.document.querySelector('#ads-env-msg')!.textContent || '', /已更新 2 个环境.*下次启动生效/);
+  assert.match(w.document.querySelector('#ads-env-msg')!.textContent || '', /已更新 3 个环境.*下次启动生效/);
+});
+
+test('环境管理：批量代理进度只接受当前请求的单调成功计数，失败后保留真实进度', async () => {
+  const profiles = [
+    { userId: 'p2', name: '环境二', serialNumber: '2', groupName: '', proxy: 'old:2', platform: 'xiaohongshu' },
+    { userId: 'p3', name: '环境三', serialNumber: '3', groupName: '', proxy: 'old:3', platform: 'facebook' },
+  ];
+  let submitted: Record<string, unknown> | undefined;
+  let finishUpdate!: (value: unknown) => void;
+  const pendingUpdate = new Promise((resolve) => { finishUpdate = resolve; });
+  const { w, pushBatchProxyProgress } = await boot({
+    adsStatus: async () => ({ ok: true }),
+    adsListProfiles: async () => ({ ok: true, profiles }),
+    adsParseProxyLines: async () => ({
+      ok: true,
+      noProxy: false,
+      proxies: [{ proxyType: 'http', proxyHost: 'a.example', proxyPort: '8001', proxyUser: '', proxyPassword: '' }],
+    }),
+    adsUpdateEnvProxies: async (args: Record<string, unknown>) => {
+      submitted = args;
+      return pendingUpdate;
+    },
+  });
+  (w.document.querySelector('#rail-add') as HTMLElement).click();
+  await tick();
+  await tick();
+  (w.document.querySelector('#ads-batch-proxy-toggle') as HTMLElement).click();
+  for (const check of [...w.document.querySelectorAll('.ads-env-check')] as HTMLInputElement[]) check.click();
+  const proxyText = w.document.querySelector('#ads-batch-proxy-text') as HTMLTextAreaElement;
+  proxyText.value = 'a.example:8001';
+  proxyText.dispatchEvent(new w.Event('input'));
+  await tick();
+  await tick();
+  (w.document.querySelector('#ads-batch-proxy-save') as HTMLButtonElement).click();
+  await tick();
+  const requestId = String(submitted?.requestId || '');
+  assert.match(requestId, /^proxy-[a-z0-9]+-[a-z0-9]+$/);
+  const label = w.document.querySelector('#ads-batch-proxy-progress-label')!;
+  const bar = w.document.querySelector('#ads-batch-proxy-progress-bar') as HTMLProgressElement;
+  assert.equal(label.textContent, '正在按顺序修改… 已完成 0/2');
+  assert.equal((w.document.querySelector('#ads-batch-proxy-cancel') as HTMLButtonElement).disabled, true);
+  assert.equal(proxyText.disabled, true, '执行中冻结一次性输入，避免可见内容与已提交计划不一致');
+
+  pushBatchProxyProgress({ requestId: 'proxy-old-1', completedCount: 2, totalCount: 2 });
+  assert.equal(label.textContent, '正在按顺序修改… 已完成 0/2', '旧请求进度不覆盖当前操作');
+  pushBatchProxyProgress({ requestId, completedCount: 1, totalCount: 2 });
+  assert.equal(label.textContent, '正在按顺序修改… 已完成 1/2');
+  assert.equal(bar.value, 1);
+  assert.equal(bar.max, 2);
+  pushBatchProxyProgress({ requestId, completedCount: 0, totalCount: 2 });
+  assert.equal(label.textContent, '正在按顺序修改… 已完成 1/2', '倒退计数被忽略');
+
+  finishUpdate({
+    ok: false,
+    error: '第 2 个环境修改失败：AdsPower 拒绝',
+    updatedCount: 1,
+    failedIndex: 2,
+    notAttemptedCount: 0,
+    partial: true,
+  });
+  for (let i = 0; i < 4; i += 1) await tick();
+  assert.equal(label.textContent, '已完成 1/2');
+  assert.equal((w.document.querySelector('#ads-batch-proxy-cancel') as HTMLButtonElement).disabled, false);
+  assert.equal(proxyText.disabled, false);
+  assert.match(w.document.querySelector('#ads-batch-proxy-msg')!.textContent || '', /已完成 1\/2/);
 });
 
 test('环境管理：批量代理部分失败保留选择和输入', async () => {

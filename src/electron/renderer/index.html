@@ -726,6 +726,10 @@
             <textarea id="ads-batch-proxy-text" rows="4" spellcheck="false" autocomplete="off" placeholder="1.2.3.4:8000&#10;proxy.example:8080:user:password&#10;proxy.example----8080----user----password"></textarea>
           </label>
           <p id="ads-batch-proxy-preview" class="subtle batch-proxy-preview">选择环境并输入代理后显示分配摘要。</p>
+          <div id="ads-batch-proxy-progress" class="batch-proxy-progress hidden" aria-live="polite">
+            <span id="ads-batch-proxy-progress-label">已完成 0/0</span>
+            <progress id="ads-batch-proxy-progress-bar" max="1" value="0"></progress>
+          </div>
           <span id="ads-batch-proxy-msg" class="ads-env-msg"></span>
           <div class="batch-proxy-actions">
             <button id="ads-batch-proxy-cancel" class="seg" type="button">取消</button>

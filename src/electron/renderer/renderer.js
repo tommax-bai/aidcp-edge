@@ -210,6 +210,9 @@ const fields = {
   adsBatchProxyType: document.querySelector('#ads-batch-proxy-type'),
   adsBatchProxyText: document.querySelector('#ads-batch-proxy-text'),
   adsBatchProxyPreview: document.querySelector('#ads-batch-proxy-preview'),
+  adsBatchProxyProgress: document.querySelector('#ads-batch-proxy-progress'),
+  adsBatchProxyProgressLabel: document.querySelector('#ads-batch-proxy-progress-label'),
+  adsBatchProxyProgressBar: document.querySelector('#ads-batch-proxy-progress-bar'),
   adsBatchProxyMsg: document.querySelector('#ads-batch-proxy-msg'),
   adsBatchProxyCancel: document.querySelector('#ads-batch-proxy-cancel'),
   adsBatchProxySave: document.querySelector('#ads-batch-proxy-save'),
@@ -449,6 +452,8 @@ let lastProfiles = [];
 let batchProxyMode = false;
 let batchProxySelectedIds = new Set();
 let batchProxyPreviewEpoch = 0;
+let batchProxyRequestSequence = 0;
+let batchProxyActiveRequest = null;
 let proxyQuickParseEpoch = 0;
 function normalizeRosterList(list) {
   const out = [];
@@ -5399,6 +5404,57 @@ function setBatchProxyMsg(text, isError) {
   fields.adsBatchProxyMsg.classList.toggle('error', Boolean(isError));
 }
 
+function resetBatchProxyProgress() {
+  batchProxyActiveRequest = null;
+  fields.adsBatchProxyProgress?.classList.add('hidden');
+  if (fields.adsBatchProxyProgressLabel) fields.adsBatchProxyProgressLabel.textContent = '已完成 0/0';
+  if (fields.adsBatchProxyProgressBar) {
+    fields.adsBatchProxyProgressBar.max = 1;
+    fields.adsBatchProxyProgressBar.value = 0;
+  }
+}
+
+function renderBatchProxyProgress(completedCount, totalCount, { running = false } = {}) {
+  const total = Math.max(1, Number(totalCount) || 1);
+  const completed = Math.min(total, Math.max(0, Number(completedCount) || 0));
+  fields.adsBatchProxyProgress?.classList.remove('hidden');
+  if (fields.adsBatchProxyProgressLabel) {
+    fields.adsBatchProxyProgressLabel.textContent = `${running ? '正在按顺序修改… ' : ''}已完成 ${completed}/${total}`;
+  }
+  if (fields.adsBatchProxyProgressBar) {
+    fields.adsBatchProxyProgressBar.max = total;
+    fields.adsBatchProxyProgressBar.value = completed;
+  }
+}
+
+function setBatchProxyBusy(busy) {
+  if (fields.adsBatchProxyToggle) fields.adsBatchProxyToggle.disabled = busy;
+  if (fields.adsBatchProxyCancel) fields.adsBatchProxyCancel.disabled = busy;
+  if (fields.adsBatchProxyType) fields.adsBatchProxyType.disabled = busy;
+  if (fields.adsBatchProxyText) {
+    fields.adsBatchProxyText.disabled = busy || (fields.adsBatchProxyType && fields.adsBatchProxyType.value === 'no_proxy');
+  }
+  for (const check of document.querySelectorAll('.ads-env-check')) {
+    if (busy) check.disabled = true;
+  }
+}
+
+function nextBatchProxyRequestId() {
+  batchProxyRequestSequence += 1;
+  return `proxy-${Date.now().toString(36)}-${batchProxyRequestSequence.toString(36)}`;
+}
+
+function handleBatchProxyProgress(progress) {
+  const active = batchProxyActiveRequest;
+  if (!active || !progress || progress.requestId !== active.requestId) return;
+  const completed = Number(progress.completedCount);
+  const total = Number(progress.totalCount);
+  if (!Number.isInteger(completed) || !Number.isInteger(total)
+    || total !== active.total || completed <= active.completed || completed > total) return;
+  active.completed = completed;
+  renderBatchProxyProgress(completed, total, { running: true });
+}
+
 function exitBatchProxyMode({ clearText = false } = {}) {
   batchProxyMode = false;
   batchProxySelectedIds = new Set();
@@ -5411,6 +5467,8 @@ function exitBatchProxyMode({ clearText = false } = {}) {
     fields.adsBatchProxySave.disabled = true;
     fields.adsBatchProxySave.textContent = '确认修改';
   }
+  setBatchProxyBusy(false);
+  resetBatchProxyProgress();
   setBatchProxyMsg('', false);
   if (clearText && fields.adsBatchProxyText) fields.adsBatchProxyText.value = '';
   if (lastProfiles.length > 0) populateEnvs(lastProfiles);
@@ -5425,12 +5483,15 @@ function enterBatchProxyMode() {
     fields.adsBatchProxyText.value = '';
     fields.adsBatchProxyText.disabled = true;
   }
+  resetBatchProxyProgress();
   populateEnvs(lastProfiles);
   void refreshBatchProxyPreview();
 }
 
 async function refreshBatchProxyPreview() {
   if (!batchProxyMode) return;
+  if (batchProxyActiveRequest) return;
+  resetBatchProxyProgress();
   const epoch = ++batchProxyPreviewEpoch;
   const userIds = selectedBatchProxyIds();
   const type = fields.adsBatchProxyType ? fields.adsBatchProxyType.value : 'http';
@@ -5476,7 +5537,7 @@ async function refreshBatchProxyPreview() {
       return `${profile && profile.name ? profile.name : userId} → ${proxy.proxyHost}:${proxy.proxyPort}`;
     });
     const reusedCount = Math.max(0, userIds.length - proxies.length);
-    const reuse = reusedCount > 0 ? ` · 循环复用 ${reusedCount} 次` : '';
+    const reuse = reusedCount > 0 ? ` · 其中 ${reusedCount} 个环境复用代理` : '';
     if (fields.adsBatchProxyPreview) {
       fields.adsBatchProxyPreview.textContent = `${userIds.length} 个环境 · ${proxies.length} 条代理${reuse}\n${sample.join('\n')}${userIds.length > sample.length ? '\n…' : ''}`;
     }
@@ -5500,11 +5561,16 @@ fields.adsBatchProxySave?.addEventListener('click', async () => {
   if (!batchProxyMode || !window.aidcpEdge || typeof window.aidcpEdge.adsUpdateEnvProxies !== 'function') return;
   const userIds = selectedBatchProxyIds();
   if (userIds.length === 0) return;
+  const requestId = nextBatchProxyRequestId();
+  batchProxyActiveRequest = { requestId, total: userIds.length, completed: 0 };
+  setBatchProxyBusy(true);
   fields.adsBatchProxySave.disabled = true;
-  setBatchProxyMsg('正在按顺序修改…', false);
+  renderBatchProxyProgress(0, userIds.length, { running: true });
+  setBatchProxyMsg('', false);
   try {
     const result = await window.aidcpEdge.adsUpdateEnvProxies({
       ...formAdsOpts(),
+      requestId,
       userIds,
       proxyType: fields.adsBatchProxyType.value,
       proxyText: fields.adsBatchProxyText.value,
@@ -5516,15 +5582,30 @@ fields.adsBatchProxySave?.addEventListener('click', async () => {
       setEnvMsg(`已更新 ${count} 个环境的代理配置，下次启动生效。`, false);
       return;
     }
+    const completed = result && Number.isInteger(result.updatedCount)
+      ? result.updatedCount
+      : batchProxyActiveRequest && batchProxyActiveRequest.requestId === requestId
+        ? batchProxyActiveRequest.completed
+        : 0;
+    renderBatchProxyProgress(completed, userIds.length);
     const counts = result && Number.isInteger(result.updatedCount) && Number.isInteger(result.notAttemptedCount)
       ? `；已更新 ${result.updatedCount} 个，${result.notAttemptedCount} 个未执行。`
       : '';
-    setBatchProxyMsg(`修改失败：${(result && result.error) || '未知错误'}${counts}`, true);
+    setBatchProxyMsg(`修改失败：${(result && result.error) || '未知错误'}；已完成 ${completed}/${userIds.length}${counts}`, true);
     if (result && result.updatedCount > 0) await refreshEnvs({ suppressAutoJoin: true });
   } catch (error) {
-    setBatchProxyMsg(`修改失败：${(error && error.message) || error}`, true);
+    const completed = batchProxyActiveRequest && batchProxyActiveRequest.requestId === requestId
+      ? batchProxyActiveRequest.completed
+      : 0;
+    renderBatchProxyProgress(completed, userIds.length);
+    setBatchProxyMsg(`修改失败：${(error && error.message) || error}；已完成 ${completed}/${userIds.length}`, true);
   } finally {
-    if (fields.adsBatchProxySave && batchProxyMode) fields.adsBatchProxySave.disabled = false;
+    if (batchProxyActiveRequest && batchProxyActiveRequest.requestId === requestId) batchProxyActiveRequest = null;
+    if (batchProxyMode) {
+      setBatchProxyBusy(false);
+      populateEnvs(lastProfiles);
+      if (fields.adsBatchProxySave) fields.adsBatchProxySave.disabled = false;
+    }
   }
 });
 
@@ -7334,6 +7415,8 @@ window.aidcpEdge.onStatusUpdate(routeStatus);
 window.aidcpEdge.onActivity?.(routeActivity);
 // fleet 快照通道（多环境花名册 / 选中项 / 收展；旧主进程无此通道时安全跳过）。
 window.aidcpEdge.onFleetUpdate?.(applyFleetSnapshot);
+// 批量代理进度只接受当前请求；main 仅在逐项写入明确成功后发送。
+window.aidcpEdge.onEnvProxyBatchProgress?.(handleBatchProxyProgress);
 window.aidcpEdge.getSettings().then((s) => {
   applySettings(s);
   // 面板加载时若为 AdsPower 模式即探一次并自动列环境（真实事件，低频；非「打开设置面板」）。

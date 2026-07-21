@@ -120,6 +120,7 @@ test('validateProxyTargetScope: 过期会话不复用旧范围，外部目标整
 
 test('executeProxyReassignmentPlan: 串行到首个失败即停止并返回真实部分回执', async () => {
   const calls: string[] = [];
+  const progress: Array<{ completedCount: number; totalCount: number }> = [];
   let concurrent = 0;
   let maxConcurrent = 0;
   const result = await executeProxyReassignmentPlan({
@@ -133,6 +134,7 @@ test('executeProxyReassignmentPlan: 串行到首个失败即停止并返回真�
       concurrent -= 1;
       return item.userId === 'u3' ? { ok: false, error: 'AdsPower 拒绝' } : { ok: true };
     },
+    onProgress: (value: { completedCount: number; totalCount: number }) => progress.push(value),
   });
   assert.deepEqual(calls, ['u1', 'u2', 'u3']);
   assert.equal(maxConcurrent, 1);
@@ -140,6 +142,20 @@ test('executeProxyReassignmentPlan: 串行到首个失败即停止并返回真�
   assert.equal(result.failedIndex, 3);
   assert.equal(result.notAttemptedCount, 1);
   assert.equal(result.partial, true);
+  assert.deepEqual(progress, [
+    { completedCount: 1, totalCount: 4 },
+    { completedCount: 2, totalCount: 4 },
+  ], '只在逐项写入明确成功后推进，失败项不得提前计数');
+});
+
+test('executeProxyReassignmentPlan: 进度观察异常不改写已经成功的代理结果', async () => {
+  const result = await executeProxyReassignmentPlan({
+    plan: [{ userId: 'u1', proxy: { proxyType: 'http' } }],
+    updateOne: async () => ({ ok: true }),
+    onProgress: () => { throw new Error('renderer closed'); },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.updatedCount, 1);
 });
 
 test('executeProxyReassignmentPlan: 后置目标变为运行时不写它及后续项', async () => {

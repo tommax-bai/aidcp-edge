@@ -65,7 +65,7 @@ function validateProxyTargetScope({ userIds, authEnabled, sessionValid, allowedP
   return targets;
 }
 
-async function executeProxyReassignmentPlan({ plan, isActive, updateOne } = {}) {
+async function executeProxyReassignmentPlan({ plan, isActive, updateOne, onProgress } = {}) {
   if (!Array.isArray(plan) || plan.length === 0 || typeof updateOne !== 'function') {
     return { ok: false, error: '批量代理计划不合法' };
   }
@@ -90,6 +90,13 @@ async function executeProxyReassignmentPlan({ plan, isActive, updateOne } = {}) 
       );
     }
     updatedUserIds.push(item.userId);
+    if (typeof onProgress === 'function') {
+      try {
+        onProgress({ completedCount: updatedUserIds.length, totalCount: plan.length });
+      } catch {
+        // 进度只是观察信号；渲染窗口关闭等订阅异常不能改写已完成的 AdsPower 写入真相。
+      }
+    }
   }
   return { ok: true, updatedUserIds, updatedCount: updatedUserIds.length };
 }

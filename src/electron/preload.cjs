@@ -49,6 +49,11 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   adsParseProxyLines: (input) => ipcRenderer.invoke('ads:parseProxyLines', input),
   adsUpdateEnvProxy: (opts) => ipcRenderer.invoke('ads:updateEnvProxy', opts),
   adsUpdateEnvProxies: (opts) => ipcRenderer.invoke('ads:updateEnvProxies', opts),
+  onEnvProxyBatchProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on('ads:envProxyBatchProgress', listener);
+    return () => ipcRenderer.removeListener('ads:envProxyBatchProgress', listener);
+  },
   // 账号人设（change offline-account-persona-management）：只交本地 envId，main 权威换成 envKey 后直连
   // customer-auth。读取 / 生成 / 保存均不依赖该环境的 core 或浏览器是否运行。
   personaGet: (envId) => ipcRenderer.invoke('persona:get', envId),
