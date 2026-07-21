@@ -61,6 +61,8 @@ const fields = {
   commandDiagnosticList: document.querySelector('#command-diagnostic-list'),
   commandDiagnosticEmpty: document.querySelector('#command-diagnostic-empty'),
   sessionFab: document.querySelector('#session-fab'),
+  firstEnvironmentStartGuide: document.querySelector('#first-environment-start-guide'),
+  firstEnvironmentStartGuideClose: document.querySelector('#first-environment-start-guide-close'),
   sessionClose: document.querySelector('#session-close'),
   clientSessionFoot: document.querySelector('#client-session-foot'),
   clientSessionName: document.querySelector('#client-session-name'),
@@ -74,6 +76,12 @@ const fields = {
   subtitle: document.querySelector('#subtitle'),
   // 陪伴式新增
   titlebar: document.querySelector('#titlebar'),
+  firstUseBrandTitle: document.querySelector('#first-use-brand-title'),
+  firstUseBrandSubtitle: document.querySelector('#first-use-brand-subtitle'),
+  environmentRosterLoading: document.querySelector('#environment-roster-loading'),
+  environmentRosterLoadingTitle: document.querySelector('#environment-roster-loading-title'),
+  environmentRosterLoadingCopy: document.querySelector('#environment-roster-loading-copy'),
+  environmentRosterRetry: document.querySelector('#environment-roster-retry'),
   environmentOnboarding: document.querySelector('#environment-onboarding'),
   environmentOnboardingCreate: document.querySelector('#environment-onboarding-create'),
   environmentWorkspaces: Array.from(document.querySelectorAll('#legacy-workspace, #interaction-workspace, #content-workspace')),
@@ -426,6 +434,8 @@ let targetCloud = { key: '', label: '默认', url: '' };
 // 状态 / 活动按 envId 归属；右侧主区域只呈现「当前选中环境」的投影（内容与交互不变）。
 // 无 envId 的旧形状（单环境主进程 / 测试桩）归 '__local__'，环境栏对其隐藏——零回归。
 const fleetView = {
+  rosterPhase: 'loading', // loading / ready / error；只有全量 fleet 快照可把未知收敛成空或非空
+  authoritativeEnvIds: new Set(), // 最近一次全量快照中的精确 envId；状态推送不能替代首次创建交接证据
   envs: new Map(), // envId -> { envId, name, platform, status }
   order: [], // 花名册顺序
   selected: null, // 当前选中 envId
@@ -470,6 +480,8 @@ let batchProxyRequestSequence = 0;
 let batchProxyActiveRequest = null;
 let proxyQuickParseEpoch = 0;
 let environmentCreateInFlight = false;
+let pendingFirstEnvironmentHandoff = null; // { profileId }；设置花名册 + fleet 双重确认后才关环境管理
+let firstEnvironmentStartGuideEnvId = null; // renderer 会话内一次性态，不持久化、不跨环境
 function normalizeRosterList(list) {
   const out = [];
   const seen = new Set();
@@ -4038,6 +4050,47 @@ devToggle.addEventListener('change', () => {
 });
 
 // 主控制只表达自动化生命周期；手动浏览器仅在自动化未启动时作为登录/检查入口。
+let renderedFabEnvId = null;
+function clearFirstEnvironmentStartGuide() {
+  firstEnvironmentStartGuideEnvId = null;
+  fields.firstEnvironmentStartGuide?.classList.add('hidden');
+  fields.sessionFab?.classList.remove('first-environment-start-target');
+  fields.sessionFab?.removeAttribute('aria-describedby');
+}
+
+function syncFirstEnvironmentStartGuide() {
+  const guideEnvId = firstEnvironmentStartGuideEnvId;
+  if (!guideEnvId) {
+    clearFirstEnvironmentStartGuide();
+    return;
+  }
+  const selectedMatches = currentEnvId() === guideEnvId;
+  const renderedMatches = renderedFabEnvId === guideEnvId;
+  if (!selectedMatches) {
+    clearFirstEnvironmentStartGuide();
+    return;
+  }
+  // 新环境可能已进 fleet、但自己的首个 status 尚未到。此时保留候选但不复用上一环境的按钮动作。
+  if (!renderedMatches) {
+    fields.firstEnvironmentStartGuide?.classList.add('hidden');
+    fields.sessionFab?.classList.remove('first-environment-start-target');
+    fields.sessionFab?.removeAttribute('aria-describedby');
+    return;
+  }
+  if (fields.sessionFab?.dataset.action !== 'start') {
+    clearFirstEnvironmentStartGuide();
+    return;
+  }
+  fields.firstEnvironmentStartGuide?.classList.remove('hidden');
+  fields.sessionFab?.classList.add('first-environment-start-target');
+  fields.sessionFab?.setAttribute('aria-describedby', 'first-environment-start-guide');
+}
+
+function armFirstEnvironmentStartGuide(envId) {
+  firstEnvironmentStartGuideEnvId = envId || null;
+  syncFirstEnvironmentStartGuide();
+}
+
 function renderFab(status) {
   const fab = fields.sessionFab;
   const automation = status.automationState
@@ -4048,10 +4101,13 @@ function renderFab(status) {
   const text = running ? '暂停' : paused ? '恢复' : '启动';
   const cls = running ? 'pause' : 'start';
   const action = running ? 'pause' : paused ? 'resume' : 'start';
+  const preserveFirstStartTarget = fab.classList.contains('first-environment-start-target');
   fab.textContent = text;
   fab.setAttribute('aria-label', `${text}自动化`);
-  fab.className = `fab ${cls}`;
+  // 普通状态重绘不移除再添加引导 class，避免有限三次的光环动画被无意义地重新计时。
+  fab.className = `fab ${cls}${preserveFirstStartTarget ? ' first-environment-start-target' : ''}`;
   fab.dataset.action = action;
+  renderedFabEnvId = currentEnvId() || (status && status.envId) || null;
   fab.disabled = pending;
   if (fields.sessionClose) {
     const browser = status.browserState || (status.browserStandby ? 'closed' : status.edge === 'running' ? 'ready' : 'closed');
@@ -4074,6 +4130,7 @@ function renderFab(status) {
     fields.sessionClose.dataset.browserAction = automationActive ? '' : (closed ? 'open' : 'close');
     fields.sessionClose.disabled = pending || (!automationActive && browserPending);
   }
+  syncFirstEnvironmentStartGuide();
 }
 
 // 内嵌运行时首启内核准备进度条：仅在 kernelPrep 处于下载/安装态时显示；null/完成/失败态隐藏（失败走 edge-failure 呈现）。
@@ -4214,6 +4271,7 @@ function absorbPublishTerminal(envKey, status) {
 /** fleet 快照（花名册 + 各环境状态 + 选中项）全量对齐：建行 / 摘行 / 同步选中与收展。 */
 function applyFleetSnapshot(snap) {
   if (!snap || !Array.isArray(snap.environments)) return;
+  fleetView.rosterPhase = 'ready';
   const prevSelectedPlat = selectedEnvPlatform();
   const known = new Set();
   fleetView.order = [];
@@ -4271,11 +4329,15 @@ function applyFleetSnapshot(snap) {
     lastPublishSigByEnv.delete(key);
     if (fleetView.shownEnv === key) fleetView.shownEnv = null;
   }
+  fleetView.authoritativeEnvIds = known;
   if (typeof snap.railCollapsed === 'boolean') fleetView.collapsed = snap.railCollapsed;
   const prevSelected = fleetView.selected;
   if (snap.selectedEnvId && fleetView.envs.has(snap.selectedEnvId)) fleetView.selected = snap.selectedEnvId;
   if (!fleetView.selected || !fleetView.envs.has(fleetView.selected)) fleetView.selected = fleetView.order[0] || null;
   if (fleetView.selected !== prevSelected) {
+    if (firstEnvironmentStartGuideEnvId && firstEnvironmentStartGuideEnvId !== fleetView.selected) {
+      clearFirstEnvironmentStartGuide();
+    }
     closeDelegatedPopover(false);
     syncDelegatedTriggerTasks([]);
   }
@@ -4302,11 +4364,40 @@ function applyFleetSnapshot(snap) {
   if (snap.cloudEnv) targetCloud = snap.cloudEnv;
   updateCloudPending();
   renderRail();
+  completePendingFirstEnvironmentHandoff();
 }
+
+async function refreshAuthoritativeFleet(options) {
+  if (!window.aidcpEdge || typeof window.aidcpEdge.fleetGet !== 'function') return false;
+  const showLoading = Boolean(options && options.showLoading);
+  if (showLoading) {
+    fleetView.rosterPhase = 'loading';
+    fleetView.lastRailSig = '';
+    renderRail();
+  }
+  try {
+    const snapshot = await window.aidcpEdge.fleetGet();
+    if (!snapshot || !Array.isArray(snapshot.environments)) throw new Error('invalid_fleet_snapshot');
+    applyFleetSnapshot(snapshot);
+    return true;
+  } catch {
+    if (showLoading) {
+      fleetView.rosterPhase = 'error';
+      fleetView.lastRailSig = '';
+      renderRail();
+    }
+    return false;
+  }
+}
+
+fields.environmentRosterRetry?.addEventListener('click', () => {
+  void refreshAuthoritativeFleet({ showLoading: true });
+});
 
 /** 点选环境：右侧主区域整体切到该环境的陪伴视图（状态 + 活动流 + 发布卡投影一起换，绝不残留）。 */
 function selectEnv(envId) {
   if (!envId || !fleetView.envs.has(envId) || envId === fleetView.selected) return;
+  if (firstEnvironmentStartGuideEnvId && firstEnvironmentStartGuideEnvId !== envId) clearFirstEnvironmentStartGuide();
   closeDelegatedPopover(false);
   syncDelegatedTriggerTasks([]);
   fleetView.selected = envId;
@@ -4324,6 +4415,30 @@ function selectEnv(envId) {
   renderRail();
   void refreshDelegatedTasks(true, envId);
   void ensureEnvironmentOverview(envId, { force: true });
+}
+
+function authoritativeFleetEnvironmentForProfile(profileId) {
+  const target = String(profileId || '').trim();
+  if (!target) return null;
+  for (const env of fleetView.envs.values()) {
+    if (!env || !fleetView.authoritativeEnvIds.has(env.envId)) continue;
+    if (env.profileId === target || env.envId === target || env.envId === `ads-${target}`) return env;
+  }
+  return null;
+}
+
+function completePendingFirstEnvironmentHandoff() {
+  const pending = pendingFirstEnvironmentHandoff;
+  if (!pending || environmentCreateInFlight || fleetView.rosterPhase !== 'ready') return false;
+  if (!rosterHas(pending.profileId)) return false;
+  const env = authoritativeFleetEnvironmentForProfile(pending.profileId);
+  if (!env) return false;
+  pendingFirstEnvironmentHandoff = null;
+  if (fleetView.selected !== env.envId) selectEnv(env.envId);
+  if (!env.status) renderedFabEnvId = null;
+  closeEnvAddPanel();
+  armFirstEnvironmentStartGuide(env.envId);
+  return true;
 }
 
 function railEnvList() {
@@ -4378,18 +4493,39 @@ function railDisplayName(row) {
   return resolveEnvironmentDisplayName(row).name;
 }
 
-let environmentOnboardingActive = null;
-function syncEnvironmentOnboarding(rosterEmpty) {
-  const active = Boolean(rosterEmpty);
-  document.body.classList.toggle('environment-roster-empty', active);
-  fields.environmentOnboarding?.setAttribute('aria-hidden', active ? 'false' : 'true');
+let environmentShellState = null;
+function syncEnvironmentShellState(state) {
+  const loading = state === 'loading';
+  const error = state === 'error';
+  const empty = state === 'empty';
+  const environmentScopedSuppressed = state !== 'ready';
+  document.body.classList.toggle('environment-roster-loading', loading);
+  document.body.classList.toggle('environment-roster-error', error);
+  document.body.classList.toggle('environment-roster-empty', empty);
+  fields.environmentRosterLoading?.setAttribute('aria-hidden', loading || error ? 'false' : 'true');
+  fields.environmentOnboarding?.setAttribute('aria-hidden', empty ? 'false' : 'true');
   for (const workspace of fields.environmentWorkspaces || []) {
-    workspace.classList.toggle('environment-roster-suppressed', active);
+    workspace.classList.toggle('environment-roster-suppressed', environmentScopedSuppressed);
   }
-  if (environmentOnboardingActive === active) return;
-  const wasActive = environmentOnboardingActive;
-  environmentOnboardingActive = active;
-  if (active) {
+  if (fields.firstUseBrandTitle) {
+    fields.firstUseBrandTitle.textContent = loading ? '正在准备' : error ? '读取失败' : '开始使用';
+  }
+  if (fields.firstUseBrandSubtitle) {
+    fields.firstUseBrandSubtitle.textContent = loading ? '读取运行环境' : error ? '请重新读取' : '创建运行环境';
+  }
+  if (fields.environmentRosterLoadingTitle) {
+    fields.environmentRosterLoadingTitle.textContent = error ? '暂时无法读取运行环境' : '正在读取运行环境';
+  }
+  if (fields.environmentRosterLoadingCopy) {
+    fields.environmentRosterLoadingCopy.textContent = error
+      ? '当前无法确认账号下有哪些环境。请重新读取，系统不会把未知状态显示成空环境。'
+      : '正在确认你的环境与运行状态，请稍候。';
+  }
+  fields.environmentRosterRetry?.classList.toggle('hidden', !error);
+  if (environmentShellState === state) return;
+  const previousState = environmentShellState;
+  environmentShellState = state;
+  if (environmentScopedSuppressed) {
     // CSS 负责整块隐藏；这里同步环境级浮层的可访问状态，避免恢复后重现旧环境上下文。
     fields.healthPop?.classList.add('hidden');
     fields.proxyRuntimePop?.classList.add('hidden');
@@ -4404,7 +4540,7 @@ function syncEnvironmentOnboarding(rosterEmpty) {
   }
   // 第一个环境可能先进入花名册、稍后才收到状态。退出引导时至少用真实环境身份和保守离线态
   // 覆盖旧环境残影，等该环境自己的快照到达后再按正常 render() 更新。
-  if (wasActive && fleetView.selected) {
+  if (previousState && previousState !== 'ready' && fleetView.selected) {
     const selected = fleetView.envs.get(fleetView.selected);
     if (selected && !selected.status) {
       renderTitlebar({ auth: 'checking', cloud: 'disconnected', session: 'idle', risk: 'normal', edge: 'stopped' });
@@ -4419,13 +4555,43 @@ function renderRail() {
   // 环境栏常驻显示（用户要求「左边栏默认展示」）：名册为空也保留栏、露出「＋ 添加环境」入口，
   // 不再按有无环境显隐（此前空名册整栏 hidden，新实例进来完全看不到添加入口）。
   const show = true;
+  if (fleetView.rosterPhase !== 'ready') {
+    const rosterState = fleetView.rosterPhase === 'error' ? 'error' : 'loading';
+    syncEnvironmentShellState(rosterState);
+    fields.envRail.classList.remove('hidden', 'collapsed', 'empty-roster');
+    fields.envRail.classList.add('expanded', 'roster-loading');
+    fields.fleetRow?.classList.add('with-rail');
+    if (fields.railCount) fields.railCount.textContent = '';
+    const sig = `roster:${rosterState}`;
+    if (fleetView.lastRailSig === sig) return;
+    fleetView.lastRailSig = sig;
+    fields.railList.replaceChildren();
+    if (rosterState === 'error') {
+      const message = document.createElement('p');
+      message.className = 'rail-roster-error';
+      message.textContent = '暂时无法读取环境';
+      fields.railList.appendChild(message);
+    } else {
+      const skeleton = document.createElement('div');
+      skeleton.className = 'rail-roster-skeleton';
+      skeleton.setAttribute('aria-hidden', 'true');
+      for (let index = 0; index < 3; index += 1) {
+        const row = document.createElement('span');
+        row.className = 'rail-roster-skeleton-row';
+        skeleton.appendChild(row);
+      }
+      fields.railList.appendChild(skeleton);
+    }
+    return;
+  }
   const rosterEmpty = allList.length === 0;
-  syncEnvironmentOnboarding(rosterEmpty);
+  syncEnvironmentShellState(rosterEmpty ? 'empty' : 'ready');
   const empty = list.length === 0;
   // 名册空时本次渲染强制展开（把空态提示与添加入口露出来），但不落库、不覆盖用户已保存的收起偏好；
   // 一旦有环境即回落 fleetView.collapsed（默认收起为窄图标条）。
   const collapsed = rosterEmpty ? false : fleetView.collapsed;
   fields.envRail.classList.toggle('hidden', !show);
+  fields.envRail.classList.remove('roster-loading');
   fields.fleetRow?.classList.toggle('with-rail', show);
   const model = uiLogic.fleetRailModel(list, Date.now());
   const fullModel = fleetView.platformFilter === 'all' ? model : uiLogic.fleetRailModel(allList, Date.now());
@@ -6346,6 +6512,11 @@ settingsUi.adsCreate.addEventListener('click', async () => {
   const batch = platform === 'facebook'
     && settingsUi.adsFbCreateMode
     && settingsUi.adsFbCreateMode.value === 'batch';
+  // 只在已取得权威空快照、设置花名册也为空时记录首次候选。未知 / 失败状态绝不冒充新用户。
+  const firstEnvironmentCreationCandidate = !batch
+    && fleetView.rosterPhase === 'ready'
+    && railEnvList().length === 0
+    && roster.length === 0;
   const osFamilyKey = settingsUi.adsTemplate && settingsUi.adsTemplate.value;
   if (!batch && !osFamilyKey) return setCreateMsg('请先选择操作系统', true);
   if (!window.aidcpEdge || typeof window.aidcpEdge.adsCreateEnv !== 'function') return;
@@ -6397,6 +6568,14 @@ settingsUi.adsCreate.addEventListener('click', async () => {
         await selectProfile(r.userId, null, r.name || '', r.platform || platform);
       }
       if (r.rosterJoinedByMain) await syncRosterFromMainSettings();
+      if (
+        firstEnvironmentCreationCandidate
+        && r.userId
+        && !r.requiresAdminAssignment
+        && (r.rosterJoinedByMain || !r.assignmentHandledByMain)
+      ) {
+        pendingFirstEnvironmentHandoff = { profileId: r.userId };
+      }
       const selectedHint = r.rosterJoinedByMain
         ? '已分配到当前账号并加入运行环境；需要启动时请在环境栏操作。'
         : r.requiresAdminAssignment
@@ -6426,8 +6605,13 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       if (!batch && r.userId && rosterHas(r.userId)) {
         const createdProfile = lastProfiles.find((profile) => profile && profile.userId === r.userId);
         const createdName = r.name || (createdProfile && createdProfile.name) || r.userId;
-        setEnvMsg(`已选中「${createdName}」。环境已创建并加入环境栏，未启动前显示为离线。`, false);
-        switchEnvTab('join', true);
+        if (pendingFirstEnvironmentHandoff && pendingFirstEnvironmentHandoff.profileId === r.userId) {
+          setCreateMsg(`已自动选中「${createdName}」，正在同步到主界面…`, false);
+          await refreshAuthoritativeFleet({ showLoading: false });
+        } else {
+          setEnvMsg(`已选中「${createdName}」。环境已创建并加入环境栏，未启动前显示为离线。`, false);
+          switchEnvTab('join', true);
+        }
       }
     } else {
       const extra = r && r.violations && r.violations.length ? '（' + r.violations.join('；') + '）' : '';
@@ -6440,6 +6624,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
     setCreateMsg(`创建失败：${(error && error.message) || error || '未知错误'}。`, true);
   } finally {
     setEnvironmentCreateBusy(false);
+    completePendingFirstEnvironmentHandoff();
   }
 });
 
@@ -6598,8 +6783,10 @@ async function runSessionLifecycle(action, envId = currentEnvId()) {
 }
 
 // 今日进展会话按钮：三态触发 恢复 / 启动（=先保存再启动） / 暂停。无独立「保存」按钮。
+fields.firstEnvironmentStartGuideClose?.addEventListener('click', clearFirstEnvironmentStartGuide);
 fields.sessionFab.addEventListener('click', async () => {
   const action = fields.sessionFab.dataset.action;
+  if (action === 'start') clearFirstEnvironmentStartGuide();
   fields.sessionFab.disabled = true;
   try {
     const next = await runSessionLifecycle(action, currentEnvId());
@@ -7786,5 +7973,10 @@ window.aidcpEdge.getSettings().then((s) => {
 });
 window.aidcpEdge.getStatus().then(routeStatus);
 if (typeof window.aidcpEdge.fleetGet === 'function') {
-  window.aidcpEdge.fleetGet().then(applyFleetSnapshot).catch(() => undefined);
+  void refreshAuthoritativeFleet({ showLoading: true });
+} else {
+  // 旧主进程没有 fleet API：保留原有单环境兼容路径，不让它永久卡在新版 loading。
+  fleetView.rosterPhase = 'ready';
+  fleetView.lastRailSig = '';
+  renderRail();
 }

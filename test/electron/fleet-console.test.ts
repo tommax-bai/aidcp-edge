@@ -1091,6 +1091,58 @@ test('无 envId 的旧形状 / 空名册 → 环境栏进入专用创建空态�
   assert.equal(w.document.querySelector('#env-tab-create-body')!.classList.contains('hidden'), false);
 });
 
+test('启动加载态：老用户等待权威 fleet 快照时不闪现新用户空态', async () => {
+  let resolveFleet: ((value: unknown) => void) | undefined;
+  const pendingFleet = new Promise((resolve) => { resolveFleet = resolve; });
+  const { w } = await boot({
+    fleetGet: async () => pendingFleet,
+    getStatus: async () => makeStatus({ envId: 'ads-old', envName: '老用户环境' }),
+  });
+  assert.equal(w.document.body.classList.contains('environment-roster-loading'), true);
+  assert.equal(w.document.body.classList.contains('environment-roster-empty'), false, '未知时不能先画成新用户');
+  assert.match(w.document.querySelector('#environment-roster-loading')!.textContent || '', /正在读取运行环境/);
+  assert.equal(w.document.querySelector('.rail-empty'), null, '加载中不能提供创建第一个环境入口');
+  assert.ok(w.document.querySelector('.rail-roster-skeleton'));
+
+  resolveFleet?.({
+    provider: 'adspower', selectedEnvId: 'ads-old', railCollapsed: true,
+    environments: [{
+      envId: 'ads-old', profileId: 'old', name: '老用户环境', platform: 'xiaohongshu',
+      status: makeStatus({ envId: 'ads-old', envName: '老用户环境' }),
+    }],
+  });
+  await tick();
+  await tick();
+  assert.equal(w.document.body.classList.contains('environment-roster-loading'), false);
+  assert.equal(w.document.body.classList.contains('environment-roster-empty'), false, '非空快照直接进入日常态');
+  assert.match(w.document.querySelector('#acct-name')!.textContent || '', /老用户环境/);
+  assert.equal(w.document.querySelector('#environment-onboarding')!.getAttribute('aria-hidden'), 'true');
+});
+
+test('启动加载态：读取失败保持未知并可重试，空快照确认后才进入空态', async () => {
+  let attempts = 0;
+  const { w } = await boot({
+    fleetGet: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('temporary');
+      return { provider: 'adspower', selectedEnvId: null, railCollapsed: false, environments: [] };
+    },
+    getStatus: async () => makeStatus(),
+  }, { environments: [], adsProfileId: '' });
+  assert.equal(w.document.body.classList.contains('environment-roster-error'), true);
+  assert.equal(w.document.body.classList.contains('environment-roster-empty'), false);
+  assert.match(w.document.querySelector('#environment-roster-loading')!.textContent || '', /暂时无法读取运行环境/);
+  assert.equal(w.document.querySelector('.rail-empty'), null, '读取失败不是环境 0');
+  const retry = w.document.querySelector('#environment-roster-retry') as HTMLButtonElement;
+  assert.equal(retry.classList.contains('hidden'), false);
+  retry.click();
+  await tick();
+  await tick();
+  assert.equal(attempts, 2);
+  assert.equal(w.document.body.classList.contains('environment-roster-error'), false);
+  assert.equal(w.document.body.classList.contains('environment-roster-empty'), true, '只在成功空快照后进入首次引导');
+});
+
 test('第一个真实环境进入权威花名册后退出整页引导并恢复环境身份', async () => {
   const { w, pushFleet } = await boot({
     fleetGet: async () => ({ provider: 'adspower', selectedEnvId: null, railCollapsed: false, environments: [] }),
@@ -1643,6 +1695,98 @@ test('新建环境：单个创建成功并进入花名册后切回环境列表�
   assert.equal(w.document.querySelector('#env-tab-join-body')!.classList.contains('hidden'), false);
   assert.match(w.document.querySelector('#ads-env-msg')!.textContent || '', /已创建并加入环境栏.*离线/);
   assert.match(w.document.querySelector('#ads-env-list')!.textContent || '', /新环境/);
+  assert.equal(w.document.querySelector('#first-environment-start-guide')!.classList.contains('hidden'), true, '后续创建不展示首次启动引导');
+});
+
+test('首次创建：双重权威确认后直接回主界面，并把一次性引导绑定到精确启动按钮', async () => {
+  let created = false;
+  let fleetSnapshot: Record<string, unknown> = {
+    provider: 'adspower', selectedEnvId: null, railCollapsed: false, environments: [],
+  };
+  const firstStatus = makeStatus({
+    envId: 'ads-new-1', envName: '第一个环境', edge: 'stopped', session: 'idle',
+    automationState: 'stopped', browserState: 'closed',
+  });
+  const { w, calls } = await boot({
+    fleetGet: async () => fleetSnapshot,
+    getStatus: async () => makeStatus({ edge: 'stopped', session: 'idle' }),
+    adsStatus: async () => ({ ok: true }),
+    adsListProfiles: async () => ({
+      ok: true,
+      profiles: created ? [{ userId: 'new-1', name: '第一个环境', serialNumber: '1', groupName: '', proxy: '', platform: 'xiaohongshu' }] : [],
+    }),
+    adsCreateEnv: async () => {
+      created = true;
+      fleetSnapshot = {
+        provider: 'adspower', selectedEnvId: 'ads-new-1', railCollapsed: false,
+        environments: [{ envId: 'ads-new-1', profileId: 'new-1', name: '第一个环境', platform: 'xiaohongshu', status: firstStatus }],
+      };
+      return { ok: true, userId: 'new-1', name: '第一个环境', platform: 'xiaohongshu', osFamily: 'Windows', createdCount: 1 };
+    },
+    adsTemplates: async () => [{ key: 'windows', label: 'Windows' }],
+  }, { environments: [], adsProfileId: '', adsProfileName: '' });
+
+  (w.document.querySelector('.rail-empty') as HTMLButtonElement).click();
+  await tick();
+  (w.document.querySelector('#ads-template') as HTMLSelectElement).value = 'windows';
+  (w.document.querySelector('#ads-create') as HTMLButtonElement).click();
+  for (let index = 0; index < 6; index += 1) await tick();
+
+  const panel = w.document.querySelector('#env-add-panel')!;
+  assert.equal(panel.classList.contains('open'), false, '首次创建完成后不再停留在环境管理');
+  assert.equal(panel.classList.contains('hidden'), true);
+  assert.equal(w.document.body.classList.contains('environment-roster-empty'), false);
+  assert.ok(w.document.querySelector('.rail-row[data-env-id="ads-new-1"].selected'));
+  const guide = w.document.querySelector('#first-environment-start-guide')!;
+  const start = w.document.querySelector('#session-fab') as HTMLButtonElement;
+  assert.equal(guide.classList.contains('hidden'), false);
+  assert.match(guide.textContent || '', /下一步[\s\S]*启动运行环境[\s\S]*完成平台登录/);
+  assert.equal(start.dataset.action, 'start');
+  assert.equal(start.classList.contains('first-environment-start-target'), true);
+  assert.equal(start.getAttribute('aria-describedby'), 'first-environment-start-guide');
+  assert.notEqual(w.document.activeElement, start, '引导不自动抢焦点');
+
+  start.click();
+  for (let index = 0; index < 3; index += 1) await tick();
+  assert.equal(calls.start[0], 'ads-new-1', '启动必须绑定刚创建的精确环境');
+  assert.equal(guide.classList.contains('hidden'), true);
+  assert.equal(start.classList.contains('first-environment-start-target'), false);
+});
+
+test('首次创建：fleet 快照未包含精确环境时保留管理窗口，延迟到达后才交接', async () => {
+  let created = false;
+  const { w, pushFleet } = await boot({
+    fleetGet: async () => ({ provider: 'adspower', selectedEnvId: null, railCollapsed: false, environments: [] }),
+    getStatus: async () => makeStatus({ edge: 'stopped', session: 'idle' }),
+    adsStatus: async () => ({ ok: true }),
+    adsListProfiles: async () => ({
+      ok: true,
+      profiles: created ? [{ userId: 'late-1', name: '延迟环境', serialNumber: '1', groupName: '', proxy: '', platform: 'facebook' }] : [],
+    }),
+    adsCreateEnv: async () => {
+      created = true;
+      return { ok: true, userId: 'late-1', name: '延迟环境', platform: 'facebook', osFamily: 'Windows', createdCount: 1 };
+    },
+    adsTemplates: async () => [{ key: 'windows', label: 'Windows' }],
+  }, { environments: [], adsProfileId: '', adsProfileName: '' });
+  (w.document.querySelector('.rail-empty') as HTMLButtonElement).click();
+  await tick();
+  (w.document.querySelector('#ads-template') as HTMLSelectElement).value = 'windows';
+  (w.document.querySelector('#ads-create') as HTMLButtonElement).click();
+  for (let index = 0; index < 5; index += 1) await tick();
+  assert.equal(w.document.querySelector('#env-add-panel')!.classList.contains('open'), true, '只有设置花名册证据时不得提前关窗');
+  assert.equal(w.document.querySelector('#first-environment-start-guide')!.classList.contains('hidden'), true);
+
+  pushFleet({
+    provider: 'adspower', selectedEnvId: 'ads-late-1', railCollapsed: false,
+    environments: [{
+      envId: 'ads-late-1', profileId: 'late-1', name: '延迟环境', platform: 'facebook',
+      status: makeStatus({ envId: 'ads-late-1', envName: '延迟环境', edge: 'stopped', session: 'idle', automationState: 'stopped', browserState: 'closed' }),
+    }],
+  });
+  await tick();
+  assert.equal(w.document.querySelector('#env-add-panel')!.classList.contains('open'), false);
+  assert.equal(w.document.querySelector('#first-environment-start-guide')!.classList.contains('hidden'), false);
 });
 
 test('环境管理：默认无复选框，批量代理按勾选顺序冻结目标并去密预览', async () => {
@@ -2361,6 +2505,7 @@ test('首次空态样式：隐藏无意义筛选、汇总和批量运行区，�
 test('完整首次引导样式：旧环境工作区与身份不可见，只保留全局能力和创建主路径', () => {
   const w = cssWindow();
   const d = w.document;
+  d.body.classList.remove('environment-roster-loading');
   d.body.classList.add('environment-roster-empty');
   for (const workspace of d.querySelectorAll('#legacy-workspace, #interaction-workspace, #content-workspace')) {
     workspace.classList.add('environment-roster-suppressed');
@@ -2374,14 +2519,28 @@ test('完整首次引导样式：旧环境工作区与身份不可见，只保�
   const onboarding = d.querySelector('#environment-onboarding') as HTMLElement;
   assert.equal(w.getComputedStyle(onboarding).display, 'flex');
   assert.equal(w.getComputedStyle(onboarding).alignItems, 'flex-start', '主卡靠近内容区上方，不垂直居中制造大段留白');
-  assert.match(rendererCss, /\.environment-onboarding\s*\{[^}]*padding-top:\s*clamp\(44px, 7vh, 76px\)/s, '主卡顶部距离随窗口收敛，不写死也不垂直居中');
+  assert.match(rendererCss, /\.environment-onboarding\s*\{[^}]*padding:\s*clamp\(28px, 4\.8vh, 52px\)/s, '主卡顶部距离随窗口收敛，不写死也不垂直居中');
   assert.equal(w.getComputedStyle(d.querySelector('#cloud-env-chip') as HTMLElement).display === 'none', false, 'Cloud 环境仍是全局能力');
   assert.equal(w.getComputedStyle(d.querySelector('#gear') as HTMLElement).display === 'none', false, '设置仍可达');
   const create = d.querySelector('#environment-onboarding-create') as HTMLButtonElement;
   assert.equal(w.getComputedStyle(create).cursor, 'pointer');
   assert.match(rendererCss, /\.environment-onboarding-create:focus-visible\s*\{[^}]*outline:/s, '键盘焦点必须清晰可见');
   assert.doesNotMatch(rendererCss, /\.environment-onboarding-card::before/, '没有真实进度依据时不得显示分段进度装饰');
+  assert.match(rendererCss, /\.environment-onboarding::before[\s\S]*radial-gradient/s, '大窗口余量只使用不承载状态语义的低对比环境光');
   assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)/, '减弱动态效果继续由全局规则保证');
+});
+
+test('加载态与启动引导样式：骨架无环境语义、按钮强调有限且可关闭', () => {
+  const w = cssWindow();
+  const d = w.document;
+  assert.equal(w.getComputedStyle(d.querySelector('#environment-roster-loading') as HTMLElement).display, 'flex');
+  assert.equal(w.getComputedStyle(d.querySelector('.acct') as HTMLElement).display, 'none');
+  assert.match(rendererCss, /\.rail-roster-skeleton-row\s*\{[^}]*animation:\s*sweep 1\.6s linear infinite/s);
+  assert.match(rendererCss, /\.fab\.start\.first-environment-start-target\s*\{[^}]*animation:\s*first-environment-start-pulse 1\.8s ease-out 3/s, '光环只播放有限三次');
+  const close = d.querySelector('#first-environment-start-guide-close') as HTMLButtonElement;
+  assert.equal(close.tagName, 'BUTTON');
+  assert.equal(close.getAttribute('aria-label'), '关闭启动引导');
+  assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)\s*\{[^}]*\*\s*\{\s*animation:\s*none !important/s, '减弱动态偏好会停止骨架和光环动画');
 });
 
 test('环境栏结构：只有环境列表是滚动容器，栏头与栏尾不落进去（永远够得着）', async () => {

@@ -230,17 +230,33 @@ body::-webkit-scrollbar:vertical,
 }
 
 /* ═══ 零环境首次引导：与左栏共享 rosterEmpty，只保留可信全局能力。 ═══ */
+body.environment-roster-loading .titlebar,
+body.environment-roster-error .titlebar,
 body.environment-roster-empty .titlebar {
   background: rgba(255, 255, 255, .96);
 }
+body.environment-roster-loading .titlebar .acct,
+body.environment-roster-loading .titlebar .content-library-entry,
+body.environment-roster-loading .titlebar .health-pill,
+body.environment-roster-error .titlebar .acct,
+body.environment-roster-error .titlebar .content-library-entry,
+body.environment-roster-error .titlebar .health-pill,
 body.environment-roster-empty .titlebar .acct,
 body.environment-roster-empty .titlebar .content-library-entry,
 body.environment-roster-empty .titlebar .health-pill {
   display: none !important;
 }
+body.environment-roster-loading .titlebar .first-use-brand,
+body.environment-roster-error .titlebar .first-use-brand,
 body.environment-roster-empty .titlebar .first-use-brand { display: flex; }
+body.environment-roster-loading #health-pop,
+body.environment-roster-loading #proxy-runtime-pop,
+body.environment-roster-error #health-pop,
+body.environment-roster-error #proxy-runtime-pop,
 body.environment-roster-empty #health-pop,
 body.environment-roster-empty #proxy-runtime-pop { display: none !important; }
+body.environment-roster-loading .fleet-row.with-rail > .shell,
+body.environment-roster-error .fleet-row.with-rail > .shell,
 body.environment-roster-empty .fleet-row.with-rail > .shell {
   width: auto;
   max-width: 860px;
@@ -254,17 +270,131 @@ body.environment-roster-empty .shell > #content-workspace {
 }
 .environment-roster-suppressed { display: none !important; }
 
-.environment-onboarding {
+.environment-roster-loading-state {
   display: none;
   flex: 1 1 auto;
   align-items: flex-start;
   justify-content: center;
   min-height: 0;
-  padding-top: clamp(44px, 7vh, 76px);
+  padding-top: clamp(38px, 6vh, 68px);
+}
+body.environment-roster-loading .environment-roster-loading-state,
+body.environment-roster-error .environment-roster-loading-state { display: flex; }
+.environment-roster-loading-card {
+  width: min(100%, 690px);
+  padding: 30px;
+  border: 1px solid #d9e4f3;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, .88);
+  box-shadow: 0 18px 46px rgba(42, 66, 102, .08);
+}
+.environment-roster-loading-head { display: flex; align-items: flex-start; gap: 18px; }
+.environment-roster-loading-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  flex: 0 0 56px;
+  border-radius: 18px;
+  color: #4f83dc;
+  background: #edf4ff;
+}
+.environment-roster-loading-mark::before,
+.environment-roster-loading-mark::after,
+.environment-roster-loading-mark i {
+  content: "";
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: .4;
+  animation: environment-loading-dot 1.2s ease-in-out infinite;
+}
+.environment-roster-loading-mark::before { transform: translateX(-12px); animation-delay: -.24s; }
+.environment-roster-loading-mark i { transform: translateX(0); animation-delay: -.12s; }
+.environment-roster-loading-mark::after { transform: translateX(12px); }
+.environment-roster-loading-kicker { display: block; margin: 2px 0 6px; color: #5878ad; font-size: 11px; font-weight: 720; letter-spacing: .04em; }
+.environment-roster-loading-head h1 { margin: 0; color: #1f2d45; font-size: 22px; line-height: 1.25; }
+.environment-roster-loading-head p { margin: 8px 0 0; color: #718096; font-size: 12.5px; line-height: 1.65; }
+.environment-roster-loading-preview { display: grid; gap: 10px; margin-top: 25px; }
+.environment-roster-loading-line,
+.environment-roster-loading-tiles i {
+  display: block;
+  overflow: hidden;
+  border-radius: 9px;
+  background: linear-gradient(100deg, #edf2f8 38%, #f8fafc 50%, #edf2f8 62%);
+  background-size: 220% 100%;
+  animation: sweep 1.6s linear infinite;
+}
+.environment-roster-loading-line { width: 58%; height: 12px; }
+.environment-roster-loading-line.is-wide { width: 82%; height: 16px; }
+.environment-roster-loading-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 7px; }
+.environment-roster-loading-tiles i { height: 76px; }
+.environment-roster-retry {
+  margin-top: 22px;
+  min-height: 38px;
+  padding: 0 16px;
+  border: 1px solid #b9cdf0;
+  border-radius: 10px;
+  color: #2f66c4;
+  background: #f5f9ff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 720;
+  cursor: pointer;
+}
+.environment-roster-retry:hover { border-color: #8fb2ea; background: #eef5ff; }
+.environment-roster-retry:focus-visible { outline: 3px solid rgba(52, 120, 246, .22); outline-offset: 3px; }
+body.environment-roster-error .environment-roster-loading-mark { color: #9a6a19; background: #fff6df; }
+body.environment-roster-error .environment-roster-loading-mark::before,
+body.environment-roster-error .environment-roster-loading-mark::after,
+body.environment-roster-error .environment-roster-loading-mark i { animation: none; opacity: .65; }
+body.environment-roster-error .environment-roster-loading-preview { display: none; }
+
+.environment-onboarding {
+  position: relative;
+  display: none;
+  flex: 1 1 auto;
+  align-items: flex-start;
+  justify-content: center;
+  min-height: 0;
+  padding: clamp(28px, 4.8vh, 52px) 0 clamp(56px, 10vh, 120px);
+  isolation: isolate;
 }
 body.environment-roster-empty .environment-onboarding { display: flex; }
+.environment-onboarding::before,
+.environment-onboarding::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  pointer-events: none;
+}
+.environment-onboarding::before {
+  width: min(78vw, 760px);
+  height: min(38vh, 340px);
+  right: -8%;
+  bottom: 1%;
+  opacity: .62;
+  background:
+    radial-gradient(circle at 58% 42%, rgba(92, 146, 238, .12), transparent 48%),
+    radial-gradient(circle at 82% 68%, rgba(115, 190, 178, .08), transparent 38%);
+  filter: blur(3px);
+}
+.environment-onboarding::after {
+  width: min(64vw, 620px);
+  height: 180px;
+  left: 14%;
+  bottom: 0;
+  opacity: .18;
+  background-image: radial-gradient(circle, #8aa8d6 1px, transparent 1.2px);
+  background-size: 18px 18px;
+  mask-image: linear-gradient(to bottom, transparent, #000 34%, transparent 100%);
+}
 .environment-onboarding-card {
   position: relative;
+  z-index: 1;
   width: min(100%, 760px);
   overflow: hidden;
   padding: 34px;
@@ -361,7 +491,13 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .environment-onboarding-actions p { margin: 0; color: #8391a7; font-size: 11px; line-height: 1.5; }
 
 @media (max-width: 700px) {
+  body.environment-roster-loading .fleet-row.with-rail > .shell,
+  body.environment-roster-error .fleet-row.with-rail > .shell,
   body.environment-roster-empty .fleet-row.with-rail > .shell { padding: 16px 12px 26px; }
+  .environment-roster-loading-state { padding-top: 26px; }
+  .environment-roster-loading-card { padding: 24px 20px; }
+  .environment-roster-loading-tiles { grid-template-columns: 1fr; }
+  .environment-roster-loading-tiles i:nth-child(n + 2) { display: none; }
   .environment-onboarding { padding-top: 28px; }
   .environment-onboarding-card { padding: 26px 22px; border-radius: 20px; }
   .environment-onboarding-steps { grid-template-columns: 1fr; }
@@ -1720,10 +1856,65 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 }
 
 .summary-actions {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 7px;
   margin-left: auto;
+}
+
+.first-environment-start-guide {
+  position: relative;
+  justify-self: end;
+  display: grid;
+  width: 218px;
+  margin-left: auto;
+  gap: 3px;
+  padding: 12px 34px 12px 13px;
+  border: 1px solid #b8d0f8;
+  border-radius: 13px;
+  color: #4c607d;
+  background: rgba(255, 255, 255, .98);
+  box-shadow: 0 12px 30px rgba(35, 65, 112, .17);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+.first-environment-start-guide::after {
+  content: "";
+  position: absolute;
+  right: 20px;
+  bottom: -6px;
+  width: 10px;
+  height: 10px;
+  border-right: 1px solid #b8d0f8;
+  border-bottom: 1px solid #b8d0f8;
+  background: #fff;
+  transform: rotate(45deg);
+}
+.first-environment-start-guide-kicker { color: #3478f6; font-size: 9.5px; font-weight: 800; letter-spacing: .08em; }
+.first-environment-start-guide strong { color: #20304a; font-size: 12.5px; line-height: 1.35; }
+.first-environment-start-guide-close {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 7px;
+  color: #8694a8;
+  background: transparent;
+  font: inherit;
+  font-size: 16px;
+  cursor: pointer;
+}
+.first-environment-start-guide-close:hover { color: #41536e; background: #f0f5fc; }
+.first-environment-start-guide-close:focus-visible { outline: 2px solid rgba(52, 120, 246, .32); outline-offset: 1px; }
+.fab.start.first-environment-start-target {
+  border-color: #75c6a5;
+  box-shadow: 0 0 0 4px rgba(35, 175, 114, .13);
+  animation: first-environment-start-pulse 1.8s ease-out 3;
 }
 
 /* 开发者详情（原始日志折叠） */
@@ -2689,6 +2880,14 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   from { opacity: 0; transform: translateY(-5px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+@keyframes environment-loading-dot {
+  0%, 100% { opacity: .28; }
+  50% { opacity: .82; }
+}
+@keyframes first-environment-start-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(35, 175, 114, .13); }
+  50% { box-shadow: 0 0 0 10px rgba(35, 175, 114, 0); }
+}
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; }
   .quota-toggle,
@@ -2712,6 +2911,7 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   }
   .summary-head { min-width: 0; }
   .summary-actions { width: 100%; margin-left: 0; justify-content: flex-end; }
+  .first-environment-start-guide { width: min(218px, calc(100vw - 56px)); }
   .summary-actions .summary-time { margin-right: auto; }
   /* 窄窗每行最多 3 格：靠 flex-basis 而非固定列数 —— 末行不足 3 格时自动拉伸填满，
      且与「隐藏了几格」无关（原来的 :nth-child(4) 边框规则在隐藏格子后会错位，已删）。 */
@@ -2900,8 +3100,28 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .env-rail.empty-roster .rail-sum,
 .env-rail.empty-roster .rail-toggle-wrap,
 .env-rail.empty-roster .rail-foot-add,
-.env-rail.empty-roster .rail-foot { display: none !important; }
+.env-rail.empty-roster .rail-foot,
+.env-rail.roster-loading .rail-platform-filter,
+.env-rail.roster-loading .rail-facebook-persona-fill,
+.env-rail.roster-loading .rail-sum,
+.env-rail.roster-loading .rail-toggle-wrap,
+.env-rail.roster-loading .rail-foot-add,
+.env-rail.roster-loading .rail-foot { display: none !important; }
 .env-rail.empty-roster .rail-list { padding-top: 6px; }
+.env-rail.roster-loading .rail-manage { visibility: hidden; }
+.env-rail.roster-loading #rail-count { display: none; }
+.env-rail.roster-loading .rail-list { padding: 12px 8px; }
+.rail-roster-skeleton { display: grid; gap: 11px; }
+.rail-roster-skeleton-row {
+  position: relative;
+  height: 42px;
+  overflow: hidden;
+  border-radius: 12px;
+  background: linear-gradient(100deg, #edf2f8 38%, #f8fafc 50%, #edf2f8 62%);
+  background-size: 220% 100%;
+  animation: sweep 1.6s linear infinite;
+}
+.rail-roster-error { padding: 18px 8px; color: #7c6950; font-size: 11px; line-height: 1.6; text-align: center; }
 .rail-empty {
   margin: 10px; padding: 13px 10px; width: calc(100% - 20px);
   border: 1px dashed #c2d0e6; border-radius: 12px; background: rgba(247, 250, 255, .58);

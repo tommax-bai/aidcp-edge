@@ -6,13 +6,13 @@
     <title>AIDCP Edge</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
-  <body>
+  <body class="environment-roster-loading">
     <!-- ═══ 自定义标题带：账号身份 + 综合健康（可拖拽；控件岛 no-drag）═══ -->
     <header class="titlebar tone-normal" id="titlebar">
       <div class="tb-lights-pad"></div>
       <div id="first-use-brand" class="first-use-brand" aria-label="开始使用 AIDCP">
         <span class="first-use-brand-mark" aria-hidden="true">环</span>
-        <span class="first-use-brand-copy"><strong>开始使用</strong><small>创建运行环境</small></span>
+        <span class="first-use-brand-copy"><strong id="first-use-brand-title">正在准备</strong><small id="first-use-brand-subtitle">读取运行环境</small></span>
       </div>
       <div class="acct">
         <div class="ava" id="acct-ava">书</div>
@@ -115,6 +115,24 @@
       </aside>
 
       <main class="shell">
+      <section id="environment-roster-loading" class="environment-roster-loading-state" role="status" aria-live="polite" aria-labelledby="environment-roster-loading-title">
+        <div class="environment-roster-loading-card">
+          <div class="environment-roster-loading-head">
+            <span class="environment-roster-loading-mark" aria-hidden="true"><i></i></span>
+            <div>
+              <span class="environment-roster-loading-kicker">正在准备工作区</span>
+              <h1 id="environment-roster-loading-title">正在读取运行环境</h1>
+              <p id="environment-roster-loading-copy">正在确认你的环境与运行状态，请稍候。</p>
+            </div>
+          </div>
+          <div class="environment-roster-loading-preview" aria-hidden="true">
+            <span class="environment-roster-loading-line is-wide"></span>
+            <span class="environment-roster-loading-line"></span>
+            <div class="environment-roster-loading-tiles"><i></i><i></i><i></i></div>
+          </div>
+          <button id="environment-roster-retry" class="environment-roster-retry hidden" type="button">重新读取</button>
+        </div>
+      </section>
       <section id="environment-onboarding" class="environment-onboarding" aria-labelledby="environment-onboarding-title" aria-hidden="true">
         <div class="environment-onboarding-card">
           <div class="environment-onboarding-hero">
@@ -360,6 +378,12 @@
 
       <!-- 今日进展条（计数从门面降级至此） -->
       <section class="summary" id="daily-summary">
+        <div id="first-environment-start-guide" class="first-environment-start-guide hidden" role="status" aria-live="polite">
+          <button id="first-environment-start-guide-close" class="first-environment-start-guide-close" type="button" aria-label="关闭启动引导">×</button>
+          <span class="first-environment-start-guide-kicker">下一步</span>
+          <strong>启动运行环境</strong>
+          <span>系统会打开浏览器，请完成平台登录</span>
+        </div>
         <div class="summary-head">
           <div class="summary-title">
             <span class="lbl">今日进展</span>
