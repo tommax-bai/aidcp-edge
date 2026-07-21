@@ -364,9 +364,9 @@ test('fb-like[jsdom]: 无 permalink 的越南语轻量视频按 data-video-id �
   const videoCard = (id: string, author: string) =>
     `<section id="video-${id}"><h4><a href="/${author}">${author}</a></h4>` +
     `<div data-ad-rendering-role="story_message">video ${id}</div><div data-video-id="${id}"><video></video></div>` +
-    '<div class="action-bar"><div role="button" aria-label="Thích"></div>' +
-    '<div role="button" aria-label="Thích: 27K người">27K</div>' +
-    '<div role="button" aria-label="Viết bình luận"></div></div></section>';
+    '<div class="action-bar"><div role="button" aria-label="Thích">866</div>' +
+    '<div role="button" aria-label="Viết bình luận">66</div></div>' +
+    '<div role="toolbar"><div role="button" aria-label="Thích">825</div></div></section>';
   const dom = feedDom(videoCard('101', 'Ann') + videoCard('202', 'Bob'));
   const first = dom.window.document.querySelector('#video-101 [aria-label="Thích"]') as HTMLElement;
   const target = dom.window.document.querySelector('#video-202 [aria-label="Thích"]') as HTMLElement;

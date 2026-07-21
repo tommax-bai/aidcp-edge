@@ -25,12 +25,6 @@
 import { dispatchClick, evalJson, type BrowseCdp } from '../browse/cdp-util.js';
 import type { OverlayKind, OverlayMonitor } from '../browse/overlay-monitor.js';
 import { defaultRandom, type RandomFn } from '../humanize/index.js';
-import {
-  NEUTRAL_LIKE_LABEL_SOURCE,
-  COMMENT_LABEL_SOURCE,
-  REACTED_WORD_SOURCE,
-  UNREACT_LABEL_SOURCE,
-} from './cta-labels.js';
 import { canonicalPostId, FB_TARGET_HELPERS_JS } from './post-identity.js';
 import { scrollFacebookViewport } from './viewport-scroll.js';
 
@@ -440,52 +434,12 @@ export class FacebookLikeExecutor {
 
 /** 帖级 react 控件识别助手（作用域**始终**是已解析并打标的目标 article）。 */
 const REACT_HELPERS = `${FB_TARGET_HELPERS_JS}
-  function fbLabel(el){ return String((el&&el.getAttribute&&el.getAttribute('aria-label'))||'').replace(/\\s+/g,' ').trim(); }
-  function fbText(el){ return String((el&&el.innerText)||(el&&el.textContent)||'').replace(/\\s+/g,' ').trim(); }
-  var NEUTRAL=new RegExp(${JSON.stringify(NEUTRAL_LIKE_LABEL_SOURCE)},'i');
-  var COMMENT=new RegExp(${JSON.stringify(COMMENT_LABEL_SOURCE)},'i');
-  var REACTED=new RegExp(${JSON.stringify(REACTED_WORD_SOURCE)},'i');
-  var UNREACT=new RegExp(${JSON.stringify(UNREACT_LABEL_SOURCE)},'i');
-  // 该控件当前反应态：'reacted'（已赞）/ 'neutral'（可点）/ ''（非 react 控件）。
-  // 【关键】反应【计数汇总】按钮 aria-label 亦是「赞/Like」但带**数字文案**（如「3,829」）——它不是 toggle
-  // （探针 §Action bar item①，DOM 序在 留下心情 toggle 之前）。必须用数字守卫排除（同 feed-reader 的 /\\d/ 守卫），
-  // 否则会把它误当「已赞」→ 选它 → 每条已有反应的帖子都误报 already_liked、真 toggle 永不被点（红线：绝不假成功）。
-  function reactState(el){ var lab=fbLabel(el), txt=fbText(el); var numeric=/\\d/.test(txt);
-    if(UNREACT.test(lab)||UNREACT.test(txt)) return 'reacted';          // 撤销串（最可靠跨语言已赞信号）
-    if(numeric && REACTED.test(lab)) return '';                          // 反应计数汇总按钮（数字文案）→ 非 toggle，跳过
-    if(NEUTRAL.test(lab)) return (!numeric && REACTED.test(txt)) ? 'reacted' : 'neutral'; // 中性 toggle：空→反应词=已赞
-    if(!numeric && REACTED.test(lab)) return 'reacted';                  // aria-label 由中性翻成反应词、文案非数字 → 已赞 toggle
-    return ''; }
-  /**
-   * 帖级判定（结构化）：react 控件必须与「发表评论/Comment」按钮**同一动作栏**（有界上溯 5 层内的共同容器），
-   * 且该动作栏**不在嵌套 [role=article]（评论条目）里**——评论级 react 同栏只有「回复」，据此排除。
-   */
-  function fbSharesActionBarWithComment(btn, article){
-    var p=btn;
-    for(var d=0; d<5 && p; d++){
-      p=p.parentElement;
-      if(!p || !article.contains(p)) return false;                      // 上溯已越出目标卡
-      if(fbTgtClosestArticle(p)!==article) return false;                // 动作栏落在嵌套评论 article 内
-      var cbtns=p.querySelectorAll('[role="button"][aria-label]');
-      for(var i=0;i<cbtns.length;i++){
-        var c=cbtns[i];
-        if(fbTgtClosestArticle(c)!==article) continue;                  // 评论条目里的「回复/评论」按钮不算
-        if(COMMENT.test(String(c.getAttribute('aria-label')||''))) return true;
-      }
-    }
-    return false; }
-  /** 目标卡内的帖级 react 控件（只在该 article 子树内找，绝不出界）。返回 {el, state}。 */
+  function fbLabel(el){ return fbCtaLabel(el); }
+  function fbText(el){ return fbCtaText(el); }
+  /** 目标卡内必须恰好一个结构化帖级 react 控件；多候选同样失败关闭。 */
   function fbPostReactControl(article){
-    if(!article||!article.querySelectorAll) return null;
-    var btns=article.querySelectorAll('[role="button"][aria-label]');
-    for(var i=0;i<btns.length;i++){ var el=btns[i];
-      if(!fbTgtVisible(el)) continue;
-      if(fbTgtClosestArticle(el)!==article) continue;                   // 嵌套评论 article 里的 react
-      var st=reactState(el); if(!st) continue;
-      if(!fbSharesActionBarWithComment(el, article)) continue;
-      return {el:el, state:st};
-    }
-    return null; }
+    var controls=fbCtaPostReactionControls(article);
+    return controls.length===1?controls[0]:null; }
   function fbTaggedTarget(run){ return document.querySelector('[data-aidcp-target="'+run+'"]'); }
 `;
 
@@ -590,7 +544,6 @@ function buildClearTagJs(runId: string): string {
  */
 function buildPickerLocateJs(runId: string): string {
   return `(function(){/*aidcp:picker-commit*/${REACT_HELPERS}
-  var LIKEITEM=/(?:^|[:：]\\s*)(赞|讚|Like|Me gusta)$/i;
   var REACTIONISH=/(赞|讚|Like|大爱|Love|哈哈|Haha|哇|Wow|加油|Care|怒|Angry|悲伤|Sad|Me gusta)/i;
   var dls=document.querySelectorAll('[role="dialog"],[aria-label*="反应"],[aria-label*="Reaction"],[aria-label*="心情"]');
   var cx=0, cy=0, found=false;
@@ -601,7 +554,7 @@ function buildPickerLocateJs(runId: string): string {
     if(reactionCount<2) continue;                                    // 不是反应选择器浮层（含 <2 反应项）→ 跳过（如反应人数查看 toolbar）
     for(var i=0;i<items.length;i++){ var el=items[i]; if(!fbTgtVisible(el)) continue;
       var l=String(el.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
-      if(LIKEITEM.test(l)){ var r=el.getBoundingClientRect(); cx=Math.round(r.left+r.width/2); cy=Math.round(r.top+r.height/2); found=true; break; }
+      if(fbCtaReactedWordRe.test(l)||fbCtaNeutralLikeRe.test(l)){ var r=el.getBoundingClientRect(); cx=Math.round(r.left+r.width/2); cy=Math.round(r.top+r.height/2); found=true; break; }
     }
   }
   if(!found) return JSON.stringify({found:false, cx:0, cy:0, fromX:null, fromY:null});

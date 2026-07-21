@@ -1,9 +1,4 @@
-import {
-  COMMENT_LABEL_SOURCE,
-  NEUTRAL_LIKE_LABEL_SOURCE,
-  REACTED_WORD_SOURCE,
-  UNREACT_LABEL_SOURCE,
-} from './cta-labels.js';
+import { FACEBOOK_REACTION_CONTROL_HELPERS_JS } from './cta-labels.js';
 
 /**
  * Facebook 规范帖子身份（canonical post identity）+ 三段式目标解析的**唯一**来源。
@@ -118,12 +113,9 @@ export const POST_IDENTITY_JS = `var fbCanonicalPostId = ${canonicalPostId.toStr
  * 点赞/评论动作时才成立。该 helper 同时拥有卡边界与身份，扫描、深读、动作和验证不可各自猜测。
  */
 export const FB_FEED_LAYOUT_HELPERS_JS = `
+  ${FACEBOOK_REACTION_CONTROL_HELPERS_JS}
   var fbFeedStorySelector='[data-ad-comet-preview="message"],[data-ad-preview="message"],[data-ad-rendering-role="story_message"]';
   var fbFeedAuthorSelector='h2 a[href],h3 a[href],h4 a[href]';
-  var fbFeedNeutralLikeRe=new RegExp(${JSON.stringify(NEUTRAL_LIKE_LABEL_SOURCE)},'i');
-  var fbFeedCommentRe=new RegExp(${JSON.stringify(COMMENT_LABEL_SOURCE)},'i');
-  var fbFeedReactedWordRe=new RegExp(${JSON.stringify(REACTED_WORD_SOURCE)},'i');
-  var fbFeedUnreactRe=new RegExp(${JSON.stringify(UNREACT_LABEL_SOURCE)},'i');
   function fbFeedVisible(el){ if(!el||!el.getBoundingClientRect) return false; var r=el.getBoundingClientRect(); if(r.width<=0||r.height<=0) return false; var s=window.getComputedStyle?getComputedStyle(el):null; return !s||(s.visibility!=='hidden'&&s.display!=='none'&&Number(s.opacity||'1')>0.01); }
   function fbFeedContains(root,el){ return root===document ? !!(document.documentElement&&document.documentElement.contains(el)) : !!(root&&root.contains&&root.contains(el)); }
   function fbFeedText(el){ return String((el&&el.innerText)||(el&&el.textContent)||'').replace(/\\s+/g,' ').trim(); }
@@ -136,22 +128,8 @@ export const FB_FEED_LAYOUT_HELPERS_JS = `
       if(!/^\\d+$/.test(id)||ids.indexOf(id)>=0) continue; ids.push(id); }
     return ids;
   }
-  function fbFeedOwnControl(card,el){
-    var nested=el&&el.closest?el.closest('[role="article"],article'):null;
-    return !nested||nested===card;
-  }
   function fbFeedPostActionCounts(card){
-    var controls=card&&card.querySelectorAll?card.querySelectorAll('[role="button"],[role="radio"],button'):[];
-    var likes=0, comments=0;
-    for(var i=0;i<controls.length;i++){ var el=controls[i]; if(!fbFeedOwnControl(card,el)||!fbFeedVisible(el)) continue;
-      var label=String(el.getAttribute&&el.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
-      var text=fbFeedText(el); var numeric=/\\d/.test(text);
-      var like=fbFeedNeutralLikeRe.test(label)||fbFeedUnreactRe.test(label)||fbFeedUnreactRe.test(text)||
-        (!numeric&&fbFeedReactedWordRe.test(text))||(!numeric&&!fbFeedNeutralLikeRe.test(label)&&fbFeedReactedWordRe.test(label));
-      if(like&&!numeric) likes++;
-      if(fbFeedCommentRe.test(label)) comments++;
-    }
-    return {likes:likes,comments:comments};
+    return {likes:fbCtaPostReactionControls(card).length,comments:fbCtaPostCommentControls(card).length};
   }
   /** 严格视频证据只描述同一卡片内的事实；不按祖先顺序借用邻卡作者或动作。 */
   function fbFeedStrictVideoEvidence(card){

@@ -25,6 +25,74 @@ export const REACTED_WORD_SOURCE = '^\\s*(赞|讚|大赞|超赞|Like|Love|Care|H
 /** 「撤销反应」串（其存在 = 当前已赞，最可靠的跨语言已赞信号）。 */
 export const UNREACT_LABEL_SOURCE = '(取消赞|收回赞|收回|移除心情|移除赞|已赞|Remove Like|Unlike|Undo|Gỡ Thích|Bỏ thích)';
 
+/**
+ * 页内共享的帖级反应控件分类器。
+ *
+ * Facebook 的本地化 UI 有两种都真实存在的计数布局：汇总按钮自己显示数字，或真正的点赞动作
+ * 按钮在同一按钮内显示数字。因此数字只能描述呈现，不能单独决定“动作/汇总”。Feed 身份与 like
+ * 执行器注入同一份 helper，避免扫描能认、执行器不能点（或反之）的漂移。
+ */
+export const FACEBOOK_REACTION_CONTROL_HELPERS_JS = `
+  var fbCtaNeutralLikeRe=new RegExp(${JSON.stringify(NEUTRAL_LIKE_LABEL_SOURCE)},'i');
+  var fbCtaCommentRe=new RegExp(${JSON.stringify(COMMENT_LABEL_SOURCE)},'i');
+  var fbCtaReactedWordRe=new RegExp(${JSON.stringify(REACTED_WORD_SOURCE)},'i');
+  var fbCtaUnreactRe=new RegExp(${JSON.stringify(UNREACT_LABEL_SOURCE)},'i');
+  function fbCtaLabel(el){ return String((el&&el.getAttribute&&el.getAttribute('aria-label'))||'').replace(/\\s+/g,' ').trim(); }
+  function fbCtaText(el){ return String((el&&el.innerText)||(el&&el.textContent)||'').replace(/\\s+/g,' ').trim(); }
+  function fbCtaVisible(el){ if(!el||!el.getBoundingClientRect) return false; var r=el.getBoundingClientRect();
+    if(r.width<=0||r.height<=0) return false; var s=window.getComputedStyle?getComputedStyle(el):null;
+    return !s||(s.visibility!=='hidden'&&s.display!=='none'&&Number(s.opacity||'1')>0.01); }
+  function fbCtaBelongsToCard(card,el){
+    if(!card||!el||!card.contains(el)) return false;
+    var nested=el.closest?el.closest('[role="article"],article'):null;
+    if(card.matches&&card.matches('[role="article"],article')) return nested===card;
+    return !nested;
+  }
+  function fbCtaInsideSummaryToolbar(card,el){
+    var toolbar=el&&el.closest?el.closest('[role="toolbar"]'):null;
+    return !!(toolbar&&card&&card.contains(toolbar));
+  }
+  function fbCtaPostCommentControls(card){
+    var out=[], controls=card&&card.querySelectorAll?card.querySelectorAll('[role="button"][aria-label],button[aria-label]'):[];
+    for(var i=0;i<controls.length;i++){ var el=controls[i];
+      if(!fbCtaBelongsToCard(card,el)||!fbCtaVisible(el)||fbCtaInsideSummaryToolbar(card,el)) continue;
+      if(fbCtaCommentRe.test(fbCtaLabel(el))) out.push(el);
+    }
+    return out;
+  }
+  function fbCtaSharesPostCommentBar(card,btn){
+    if(!card||!btn||fbCtaInsideSummaryToolbar(card,btn)) return false;
+    var p=btn.parentElement;
+    for(var depth=0;depth<6&&p;depth++,p=p.parentElement){
+      if(!card.contains(p)) return false;
+      var controls=p.querySelectorAll('[role="button"][aria-label],button[aria-label]'), comments=0;
+      for(var i=0;i<controls.length;i++){ var el=controls[i];
+        if(!fbCtaBelongsToCard(card,el)||!fbCtaVisible(el)||fbCtaInsideSummaryToolbar(card,el)) continue;
+        if(fbCtaCommentRe.test(fbCtaLabel(el))) comments++;
+      }
+      if(comments===1) return true;
+      if(p===card) break;
+    }
+    return false;
+  }
+  function fbCtaReactionState(card,el){
+    if(!fbCtaBelongsToCard(card,el)||!fbCtaVisible(el)||fbCtaInsideSummaryToolbar(card,el)) return '';
+    var label=fbCtaLabel(el), text=fbCtaText(el), numeric=/\\d/.test(text), state='';
+    var selected=String(el.getAttribute&&el.getAttribute('aria-pressed')||'')==='true'||String(el.getAttribute&&el.getAttribute('aria-checked')||'')==='true';
+    if(fbCtaUnreactRe.test(label)||fbCtaUnreactRe.test(text)) state='reacted';
+    else if(fbCtaNeutralLikeRe.test(label)) state=(selected||(!numeric&&fbCtaReactedWordRe.test(text)))?'reacted':'neutral';
+    else if(!numeric&&fbCtaReactedWordRe.test(label)) state='reacted';
+    if(!state||!fbCtaSharesPostCommentBar(card,el)) return '';
+    return state;
+  }
+  function fbCtaPostReactionControls(card){
+    var out=[], controls=card&&card.querySelectorAll?card.querySelectorAll('[role="button"][aria-label],[role="radio"][aria-label],button[aria-label]'):[];
+    for(var i=0;i<controls.length;i++){ var state=fbCtaReactionState(card,controls[i]);
+      if(state) out.push({el:controls[i],state:state}); }
+    return out;
+  }
+`;
+
 const NEUTRAL_LIKE_RE = new RegExp(NEUTRAL_LIKE_LABEL_SOURCE, 'i');
 const COMMENT_RE = new RegExp(COMMENT_LABEL_SOURCE, 'i');
 const REACTED_WORD_RE = new RegExp(REACTED_WORD_SOURCE, 'i');

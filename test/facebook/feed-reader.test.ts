@@ -194,15 +194,15 @@ test('fb-feed[jsdom]: 越南语媒体-only 视频首卡跳过；exact-card watch
   ]);
 });
 
-test('fb-feed[jsdom]: 真 feed 内轻量视频用唯一 data-video-id 合成身份，并解析作者、摘要和越南语反应数', async () => {
+test('fb-feed[jsdom]: 真 feed 内轻量视频允许动作按钮内含数字，并排除越南语汇总 toolbar', async () => {
   const dom = layoutDom(
     '<div role="feed"><section id="mi-video">' +
       '<h4><a href="/sang-vlog">Sang Vlog</a></h4>' +
       '<div data-ad-rendering-role="story_message">Cách nấu cá niêng trong ống tre ngon đến mức ăn quên no #SANGVLOG</div>' +
       '<div data-video-id="1632570071375207"><video></video></div>' +
-      '<div role="button" aria-label="Thích"></div>' +
-      '<div role="button" aria-label="Thích: 27K người">27K</div>' +
-      '<div role="button" aria-label="Viết bình luận"></div>' +
+      '<div class="action-bar"><div role="button" aria-label="Thích">866</div>' +
+      '<div role="button" aria-label="Viết bình luận">66</div></div>' +
+      '<div role="toolbar"><div role="button" aria-label="Thích: 825 người"></div></div>' +
       '</section></div>',
   );
   const reader = new FacebookFeedReader({ cdp: layoutCdp(dom), sleep: async () => {} });
@@ -213,10 +213,44 @@ test('fb-feed[jsdom]: 真 feed 内轻量视频用唯一 data-video-id 合成身�
       noteId: 'https://www.facebook.com/watch?v=1632570071375207',
       author: 'Sang Vlog',
       textPreview: 'Cách nấu cá niêng trong ống tre ngon đến mức ăn quên no #SANGVLOG',
-      reactionCount: 27_000,
+      reactionCount: 866,
       isVideo: true,
     },
   ]);
+});
+
+test('fb-feed[jsdom]: 支持语言共用动作栏分类，数字汇总 toolbar 不成为第二个 react 控件', async () => {
+  const locales = [
+    { like: '点赞', comment: '发表评论' },
+    { like: 'Like', comment: 'Comment' },
+    { like: 'Me gusta', comment: 'Comentar' },
+    { like: 'Thích', comment: 'Viết bình luận' },
+  ];
+  for (const [index, locale] of locales.entries()) {
+    const id = String(900 + index);
+    const dom = layoutDom(
+      `<div role="feed"><section><h4><a href="/author-${id}">Author ${id}</a></h4>` +
+        `<div data-ad-rendering-role="story_message">video ${id}</div><div data-video-id="${id}"><video></video></div>` +
+        `<div class="action-bar"><div role="button" aria-label="${locale.like}">123</div>` +
+        `<div role="button" aria-label="${locale.comment}">45</div></div>` +
+        `<div role="toolbar"><div role="button" aria-label="${locale.like}">999</div></div></section></div>`,
+    );
+    const reader = new FacebookFeedReader({ cdp: layoutCdp(dom), sleep: async () => {} });
+    assert.deepEqual((await reader.scanCards()).map((card) => card.noteId), [
+      `https://www.facebook.com/watch?v=${id}`,
+    ], locale.like);
+  }
+});
+
+test('fb-feed[jsdom]: 数字 reaction word 只有汇总结构时不证明视频卡动作边界', async () => {
+  const dom = layoutDom(
+    '<div role="feed"><section><h4><a href="/author">Author</a></h4>' +
+      '<div data-ad-rendering-role="story_message">ambiguous video</div><div data-video-id="777"><video></video></div>' +
+      '<div role="toolbar"><div role="button" aria-label="Thích">866</div></div>' +
+      '<div role="button" aria-label="Viết bình luận">66</div></section></div>',
+  );
+  const reader = new FacebookFeedReader({ cdp: layoutCdp(dom), sleep: async () => {} });
+  assert.deepEqual(await reader.scanCards(), []);
 });
 
 test('fb-feed[jsdom]: 多个可见视频只上报视口中心最近者，屏外视频保留到后续扫描', async () => {
