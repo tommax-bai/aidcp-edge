@@ -2157,8 +2157,12 @@ function renderRuntimeGuidance(status, nowMs) {
 function renderPresence(status, nowMs) {
   fields.presence?.classList.remove('hidden');
   const view = uiLogic.presenceView(status, nowMs);
+  const guidanceOwnsShimmer = view.animate
+    && status?.presence?.text === '返回推荐流，继续逛…'
+    && fields.runtimeGuidance?.dataset.mode === 'running';
   fields.presenceText.textContent = view.text;
-  fields.presenceText.classList.toggle('shimmer', view.animate);
+  fields.presenceText.classList.toggle('shimmer', view.animate && !guidanceOwnsShimmer);
+  fields.runtimeGuidanceTitle?.classList.toggle('shimmer', guidanceOwnsShimmer);
   fields.presenceCore.classList.toggle('live', view.animate);
   fields.presenceFresh.textContent = view.fresh || '';
 }

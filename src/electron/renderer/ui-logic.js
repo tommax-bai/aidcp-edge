@@ -537,15 +537,12 @@
     }
 
     if (p && p.text && hasFresh) {
-      const text = p.text === '返回推荐流，继续逛…'
-        ? '正在缩小创作方向。'
-        : p.text;
       // 一分钟内才算「此刻正在做」；之后动作文案照留，但动效与「刚刚更新」撤掉、改说等了多久。
       // 这一格正是「执行端已做完、球在云端」（如进主页后要过一次大模型决定是否关注）的真实处境。
       if (nowMs - at < PRESENCE_LIVE_MS) {
-        return { text, animate: true, fresh: `刚刚更新 · ${relTime(at, nowMs)}` };
+        return { text: p.text, animate: true, fresh: `刚刚更新 · ${relTime(at, nowMs)}` };
       }
-      return { text, animate: false, fresh: `已等待 · ${waitedText(at, nowMs)}` };
+      return { text: p.text, animate: false, fresh: `已等待 · ${waitedText(at, nowMs)}` };
     }
     // 在跑但事件已不新鲜：如实说「没有新动态」，绝不假装仍在忙。
     return {

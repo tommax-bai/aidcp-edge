@@ -203,6 +203,7 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
     },
   });
   assert.ok($(w, '#presence-text').classList.contains('shimmer'));
+  assert.equal($(w, '#runtime-guidance-title').classList.contains('shimmer'), false);
   assert.match($(w, '#presence-text').textContent ?? '', /正在认真读/);
   assert.match($(w, '#presence-fresh').textContent ?? '', /刚刚更新/);
   assert.equal(hidden($(w, '#runtime-guidance')), false);
@@ -270,13 +271,27 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.doesNotMatch(rendererCss, /rg-loop-toggle|\.loop-step|\.loop-sep/);
 });
 
-test('返回推荐流时顶部流光显示创作方向，真实更新时间保持不变', async () => {
-  const { w } = await boot({
+test('返回推荐流时文字保持不变，流光移到创作方向标题', async () => {
+  const { w, pushStatus } = await boot({
     presence: { text: '返回推荐流，继续逛…', at: new Date().toISOString() },
   });
-  assert.equal($(w, '#presence-text').textContent, '正在缩小创作方向。');
-  assert.equal($(w, '#presence-text').classList.contains('shimmer'), true);
+  assert.equal($(w, '#presence-text').textContent, '返回推荐流，继续逛…');
+  assert.equal($(w, '#presence-text').classList.contains('shimmer'), false);
+  assert.equal($(w, '#runtime-guidance-title').textContent, '正在缩小创作方向。');
+  assert.equal($(w, '#runtime-guidance-title').classList.contains('shimmer'), true);
+  assert.equal($(w, '#presence-core').classList.contains('live'), true);
   assert.match($(w, '#presence-fresh').textContent ?? '', /刚刚更新/);
+  assert.match(rendererCss, /#presence-text\.shimmer,\s*#runtime-guidance-title\.shimmer\s*\{/);
+  assert.match(rendererCss, /#runtime-guidance-title\.shimmer\s*\{ --text-shimmer-base: #1f2f4d; \}/);
+  assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)[\s\S]*#presence-text\.shimmer,\s*#runtime-guidance-title\.shimmer\s*\{[\s\S]*color: var\(--text-shimmer-base\);/);
+
+  pushStatus(makeStatus({
+    presence: { text: '返回推荐流，继续逛…', at: new Date(Date.now() - 2 * 60_000).toISOString() },
+  }));
+  assert.equal($(w, '#presence-text').textContent, '返回推荐流，继续逛…');
+  assert.equal($(w, '#presence-text').classList.contains('shimmer'), false);
+  assert.equal($(w, '#runtime-guidance-title').classList.contains('shimmer'), false);
+  assert.match($(w, '#presence-fresh').textContent ?? '', /已等待/);
 });
 
 test('首帖流程周期刷新原位更新内容，不重建连接器打断圆点行程', async () => {

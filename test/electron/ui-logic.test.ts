@@ -201,12 +201,12 @@ test('在场感：运行中 + 事件新鲜 → 动效开、文案为当前动作
   assert.match(v.fresh, /秒前/);
 });
 
-test('在场感：返回推荐流事件 → 流光改为创作方向且保留真实新鲜度', () => {
+test('在场感：返回推荐流事件 → 保留真实动作文字与新鲜度', () => {
   const now = Date.now();
   const v = uiLogic.presenceView(st({
     presence: { text: '返回推荐流，继续逛…', at: new Date(now - 10_000).toISOString() },
   }), now);
-  assert.equal(v.text, '正在缩小创作方向。');
+  assert.equal(v.text, '返回推荐流，继续逛…');
   assert.equal(v.animate, true);
   assert.match(v.fresh, /秒前/);
 });
