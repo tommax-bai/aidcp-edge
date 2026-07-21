@@ -1453,6 +1453,13 @@ function stoppedRestrictedFbEnv(overrides: Partial<Stub> = {}): Stub {
       environments: [{ profileId: 'fb_env', name: 'FB 环境', platform: 'facebook' }],
     }),
     getStatus: async () => status,
+    adsListProfiles: async () => ({
+      ok: true,
+      physicalUserIds: ['fb_env'],
+      profiles: [{
+        userId: 'fb_env', serialNumber: '1', name: 'FB 环境', groupName: '', proxy: '', platform: 'facebook',
+      }],
+    }),
     fleetGet: async () => ({
       selectedEnvId: 'fb_env', railCollapsed: false,
       environments: [{ envId: 'fb_env', profileId: 'fb_env', name: 'FB 环境', platform: 'facebook', status }],

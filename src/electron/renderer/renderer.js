@@ -452,6 +452,11 @@ const fleetView = {
   lastRailCollapsed: null, // 上次渲染时的收 / 展态：行高体系不同，旧滚动位在新布局里没有意义
   slots: null,
 };
+// 登录后的环境列表要先按当前账号完成本地花名册同步，再允许 fleet 快照决定 empty / ready。
+// 启动同步期间收到的推送只保留最后一份；同步完成后主动 fleetGet，避免采纳登录初期的空快照。
+let environmentRosterBootstrapPending = true;
+let bufferedEnvironmentRosterSnapshot = null;
+let environmentRosterBootstrapEpoch = 0;
 function currentEnvId() {
   return fleetView.selected && fleetView.selected !== '__local__' ? fleetView.selected : undefined;
 }
@@ -4415,6 +4420,7 @@ function applyFleetSnapshot(snap) {
 async function refreshAuthoritativeFleet(options) {
   if (!window.aidcpEdge || typeof window.aidcpEdge.fleetGet !== 'function') return false;
   const showLoading = Boolean(options && options.showLoading);
+  const allowEmpty = !options || options.allowEmpty !== false;
   if (showLoading) {
     fleetView.rosterPhase = 'loading';
     fleetView.lastRailSig = '';
@@ -4423,6 +4429,8 @@ async function refreshAuthoritativeFleet(options) {
   try {
     const snapshot = await window.aidcpEdge.fleetGet();
     if (!snapshot || !Array.isArray(snapshot.environments)) throw new Error('invalid_fleet_snapshot');
+    // 账号环境同步未成功时，本地空花名册仍是未知态，不能冒充“当前账号确实没有环境”。
+    if (!allowEmpty && snapshot.environments.length === 0) throw new Error('environment_roster_unresolved');
     applyFleetSnapshot(snapshot);
     return true;
   } catch {
@@ -4435,8 +4443,60 @@ async function refreshAuthoritativeFleet(options) {
   }
 }
 
+function routeFleetSnapshot(snapshot) {
+  if (environmentRosterBootstrapPending) {
+    if (snapshot && Array.isArray(snapshot.environments)) bufferedEnvironmentRosterSnapshot = snapshot;
+    return;
+  }
+  applyFleetSnapshot(snapshot);
+}
+
+async function bootstrapEnvironmentRoster() {
+  const epoch = ++environmentRosterBootstrapEpoch;
+  let accountRosterResolved = true;
+  let initialStatusRequested = false;
+  const requestInitialStatus = () => {
+    if (initialStatusRequested) return;
+    initialStatusRequested = true;
+    void window.aidcpEdge.getStatus().then(routeStatus).catch(() => {});
+  };
+  environmentRosterBootstrapPending = true;
+  bufferedEnvironmentRosterSnapshot = null;
+  fleetView.rosterPhase = 'loading';
+  fleetView.lastRailSig = '';
+  renderRail();
+
+  try {
+    const settings = await window.aidcpEdge.getSettings();
+    if (epoch !== environmentRosterBootstrapEpoch) return;
+    applySettings(settings);
+    // 首个状态投影必须晚于 settings（平台 / 环境身份），但无需阻塞账号环境同步。
+    requestInitialStatus();
+    // 客户归属环境会在完整 AdsPower 列表返回后进入本地运行花名册。必须等这一步完成，
+    // 才能用 fleet 空数组判断新用户；探测失败时，最终非空 fleet 仍可恢复日常态，空 fleet 则保持未知。
+    if (selectedProvider() === 'adspower') accountRosterResolved = await probeAds();
+  } catch {
+    // 设置 / 本地探测失败不在这里猜空态；下面仍读取 fleet，由现有 error 路径决定是否可重试。
+    accountRosterResolved = false;
+    requestInitialStatus();
+  }
+  if (epoch !== environmentRosterBootstrapEpoch) return;
+
+  // 丢弃账号环境同步前的缓存；fleetGet 返回的是同步完成后的当前全量快照。
+  bufferedEnvironmentRosterSnapshot = null;
+  const resolved = await refreshAuthoritativeFleet({ showLoading: true, allowEmpty: accountRosterResolved });
+  if (epoch !== environmentRosterBootstrapEpoch) return;
+  const buffered = bufferedEnvironmentRosterSnapshot;
+  environmentRosterBootstrapPending = false;
+  bufferedEnvironmentRosterSnapshot = null;
+  // fleetGet 在途期间到达的推送更新更晚，最后应用；读取失败则保持既有 error 状态。
+  if (buffered && Array.isArray(buffered.environments)
+    && (accountRosterResolved || buffered.environments.length > 0)) applyFleetSnapshot(buffered);
+  else if (!resolved) renderRail();
+}
+
 fields.environmentRosterRetry?.addEventListener('click', () => {
-  void refreshAuthoritativeFleet({ showLoading: true });
+  void bootstrapEnvironmentRoster();
 });
 
 /** 点选环境：右侧主区域整体切到该环境的陪伴视图（状态 + 活动流 + 发布卡投影一起换，绝不残留）。 */
@@ -5714,16 +5774,18 @@ async function probeAds() {
     const r = await window.aidcpEdge.adsStatus(formAdsOpts());
     if (r && r.ok) {
       if (settingsUi.adsEnvMsg.classList.contains('error')) setEnvMsg('', false);
-      refreshEnvs(); // 就绪即自动列出环境，无需先点刷新
+      return await refreshEnvs(); // 就绪即自动列出环境；启动判空必须等待当前账号花名册同步完成
     } else {
       setEnvMsg(
         `暂未连接到本地指纹浏览器服务${r && r.error ? '（' + r.error + '）' : ''}。启动后应用会自动拉起内置运行时；也可在下方手动填写分身 ID。`,
         true,
       );
       openAdvanced();
+      return false;
     }
   } catch {
     setEnvMsg('检测本地指纹浏览器服务失败。', true);
+    return false;
   }
 }
 
@@ -6427,7 +6489,7 @@ async function refreshEnvs(opts) {
         : '';
       setEnvMsg(`拉取环境失败${r && r.error ? '（' + r.error + '）' : ''}${authHint}。可在下方手动填写分身 ID。`, true);
       openAdvanced();
-      return;
+      return false;
     }
     const profiles = r.profiles || [];
     lastAssignmentScoped = Boolean(r.assignmentScoped);
@@ -6466,9 +6528,11 @@ async function refreshEnvs(opts) {
           ? '已移出的环境可再次加入。'
           : '点选或点击“加入”即可加入环境。';
     setEnvMsg(`已加载 ${profiles.length} 个环境${extra}。${cleaned}${autoHint}`, false);
+    return true;
   } catch (e) {
     setEnvMsg(`拉取环境失败（${e && e.message ? e.message : e}）。可在下方手动填写分身 ID。`, true);
     openAdvanced();
+    return false;
   } finally {
     settingsUi.adsRefresh.disabled = false;
   }
@@ -8020,19 +8084,19 @@ window.aidcpEdge.onStatusUpdate(routeStatus);
 // 活动流条目（旧版主进程无此通道时安全跳过——渲染层对旧形状降级不炸）。
 window.aidcpEdge.onActivity?.(routeActivity);
 // fleet 快照通道（多环境花名册 / 选中项 / 收展；旧主进程无此通道时安全跳过）。
-window.aidcpEdge.onFleetUpdate?.(applyFleetSnapshot);
+window.aidcpEdge.onFleetUpdate?.(routeFleetSnapshot);
 // 批量代理进度只接受当前请求；main 仅在逐项写入明确成功后发送。
 window.aidcpEdge.onEnvProxyBatchProgress?.(handleBatchProxyProgress);
-window.aidcpEdge.getSettings().then((s) => {
-  applySettings(s);
-  // 面板加载时若为 AdsPower 模式即探一次并自动列环境（真实事件，低频；非「打开设置面板」）。
-  if (selectedProvider() === 'adspower') probeAds();
-});
-window.aidcpEdge.getStatus().then(routeStatus);
 if (typeof window.aidcpEdge.fleetGet === 'function') {
-  void refreshAuthoritativeFleet({ showLoading: true });
+  void bootstrapEnvironmentRoster();
 } else {
-  // 旧主进程没有 fleet API：保留原有单环境兼容路径，不让它永久卡在新版 loading。
+  // 旧主进程没有 fleet API：逐字保留原有单环境启动顺序，不让兼容路径永久卡在 loading。
+  window.aidcpEdge.getSettings().then((settings) => {
+    applySettings(settings);
+    if (selectedProvider() === 'adspower') probeAds();
+  });
+  window.aidcpEdge.getStatus().then(routeStatus);
+  environmentRosterBootstrapPending = false;
   fleetView.rosterPhase = 'ready';
   fleetView.lastRailSig = '';
   renderRail();

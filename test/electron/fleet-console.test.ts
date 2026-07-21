@@ -1119,9 +1119,79 @@ test('启动加载态：老用户等待权威 fleet 快照时不闪现新用户�
   assert.equal(w.document.querySelector('#environment-onboarding')!.getAttribute('aria-hidden'), 'true');
 });
 
+test('登录加载态：账号环境同步完成前保持 loading，不接受登录初期的空 fleet', async () => {
+  let resolveProfiles: ((value: unknown) => void) | undefined;
+  const pendingProfiles = new Promise((resolve) => { resolveProfiles = resolve; });
+  let fleetResolved = false;
+  let fleetReads = 0;
+  const oldStatus = makeStatus({
+    envId: 'ads-old-login', envName: '老用户环境', edge: 'stopped', session: 'idle',
+    automationState: 'stopped', browserState: 'closed',
+  });
+  const { w } = await boot({
+    adsStatus: async () => ({ ok: true }),
+    adsListProfiles: async () => pendingProfiles,
+    fleetGet: async () => {
+      fleetReads += 1;
+      return fleetResolved
+        ? {
+            provider: 'adspower', selectedEnvId: 'ads-old-login', railCollapsed: false,
+            environments: [{
+              envId: 'ads-old-login', profileId: 'old-login', name: '老用户环境',
+              platform: 'xiaohongshu', status: oldStatus,
+            }],
+          }
+        : { provider: 'adspower', selectedEnvId: null, railCollapsed: false, environments: [] };
+    },
+    getStatus: async () => oldStatus,
+  }, { environments: [], adsProfileId: '', adsProfileName: '' });
+
+  assert.equal(fleetReads, 0, '账号环境同步完成前不得读取并采纳空 fleet');
+  assert.equal(w.document.body.classList.contains('environment-roster-loading'), true);
+  assert.equal(w.document.body.classList.contains('environment-roster-empty'), false);
+  assert.equal(w.document.querySelector('.rail-empty'), null, '登录同步中不能出现创建第一个环境入口');
+
+  fleetResolved = true;
+  resolveProfiles?.({
+    ok: true,
+    assignmentScoped: true,
+    physicalUserIds: ['old-login'],
+    profiles: [{
+      userId: 'old-login', name: '老用户环境', serialNumber: '1', groupName: '',
+      proxy: '', platform: 'xiaohongshu',
+    }],
+  });
+  for (let index = 0; index < 6; index += 1) await tick();
+
+  assert.equal(fleetReads, 1);
+  assert.equal(w.document.body.classList.contains('environment-roster-loading'), false);
+  assert.equal(w.document.body.classList.contains('environment-roster-empty'), false, '老用户应从 loading 直接进入日常态');
+  assert.match(w.document.querySelector('#acct-name')!.textContent || '', /老用户环境/);
+});
+
+test('登录加载态：账号环境同步失败时空 fleet 保持未知，不误判新用户', async () => {
+  let fleetReads = 0;
+  const { w } = await boot({
+    adsStatus: async () => ({ ok: true }),
+    adsListProfiles: async () => ({ ok: false, error: 'temporary' }),
+    fleetGet: async () => {
+      fleetReads += 1;
+      return { provider: 'adspower', selectedEnvId: null, railCollapsed: false, environments: [] };
+    },
+  }, { environments: [], adsProfileId: '', adsProfileName: '' });
+
+  assert.equal(fleetReads, 1, '同步失败后可读取现有 fleet，但不能把空数组当作权威零环境');
+  assert.equal(w.document.body.classList.contains('environment-roster-loading'), false);
+  assert.equal(w.document.body.classList.contains('environment-roster-error'), true);
+  assert.equal(w.document.body.classList.contains('environment-roster-empty'), false);
+  assert.equal(w.document.querySelector('.rail-empty'), null);
+  assert.match(w.document.querySelector('#environment-roster-loading')!.textContent || '', /暂时无法读取运行环境/);
+});
+
 test('启动加载态：读取失败保持未知并可重试，空快照确认后才进入空态', async () => {
   let attempts = 0;
   const { w } = await boot({
+    adsStatus: async () => ({ ok: true }),
     fleetGet: async () => {
       attempts += 1;
       if (attempts === 1) throw new Error('temporary');
@@ -1145,6 +1215,7 @@ test('启动加载态：读取失败保持未知并可重试，空快照确认�
 
 test('第一个真实环境进入权威花名册后退出整页引导并恢复环境身份', async () => {
   const { w, pushFleet } = await boot({
+    adsStatus: async () => ({ ok: true }),
     fleetGet: async () => ({ provider: 'adspower', selectedEnvId: null, railCollapsed: false, environments: [] }),
     getStatus: async () => makeStatus({ lastMessage: 'environment_not_owned' }),
   }, { environments: [], adsProfileId: '' });
