@@ -1292,6 +1292,7 @@ function renderQuotaWindows(usage) {
 }
 
 function renderUsageSummary(status) {
+  if (fields.dailySummary) fields.dailySummary.dataset.platform = selectedEnvPlatform() || 'unknown';
   const usage = usageView(status);
   fields.usageSource.textContent = usage.hasDaily
     ? `${usage.overview?.stale ? '账号今日 · 缓存' : '账号今日'}${usage.quotaLevel ? ` · ${QUOTA_LEVEL_LABELS[usage.quotaLevel] || usage.quotaLevel}` : ''}`
@@ -2274,7 +2275,8 @@ function renderXhsPublishQueueDock(status) {
   const queueState = contentWorkspace.publishQueueSnapshot();
   if (!queueState || queueState.kind === 'unsupported') return false;
 
-  fields.pubCard.classList.remove('hidden', 'empty');
+  fields.pubCard.dataset.platform = 'xiaohongshu';
+  fields.pubCard.classList.remove('hidden', 'empty', 'single-surface');
   fields.pubCard.classList.add('queue-surface');
   fields.pubKicker.classList.remove('hidden');
   fields.pubKicker.textContent = '发布进度';
@@ -2430,10 +2432,22 @@ function renderXhsPublishQueueDock(status) {
   return true;
 }
 
+function facebookPublishMetaLabel(view, status) {
+  if (view.mode === 'flow') return status.publish?.state === 'approved' ? '等待提交' : '等待发布审批';
+  if (view.mode === 'submitted') return '平台确认中';
+  if (view.mode === 'last') return '已发布';
+  return '尚无内容';
+}
+
 function renderPublish(status, nowMs) {
+  const platform = selectedEnvPlatform();
+  const facebook = platform === 'facebook';
+  fields.pubCard.dataset.platform = platform || 'unknown';
   if (renderXhsPublishQueueDock(status)) return;
   fields.pubCard.classList.remove('queue-surface');
-  fields.pubKicker.classList.add('hidden');
+  fields.pubCard.classList.toggle('single-surface', facebook);
+  fields.pubKicker.classList.toggle('hidden', !facebook);
+  fields.pubKicker.textContent = facebook ? '内容发布' : '发布进度';
   fields.pubCount.classList.add('hidden');
   fields.pubCount.classList.remove('attention');
   fields.pubMeta.classList.remove('chip', 'attention');
@@ -2453,13 +2467,14 @@ function renderPublish(status, nowMs) {
     fields.pubCorner.classList.remove('hot');
     fields.pubTitle.textContent = '—';
     fields.pubTitle.classList.add('muted');
-    fields.pubMeta.textContent = '尚未取得云端确认数据';
+    fields.pubMeta.textContent = facebook ? '状态暂未确认' : '尚未取得云端确认数据';
+    fields.pubMeta.classList.toggle('chip', facebook);
     fields.pubFoot.textContent = loading ? '正在从云端获取' : '请稍后重试，当前不会把未知显示成未发布';
     setPubActionVisibility(fields.pubPreviewLink, false);
     fields.pubSteps.querySelectorAll('.j-step').forEach((step) => { step.className = 'j-step todo'; });
     return;
   }
-  const view = uiLogic.publishView(status.publish, status.lastPublish, nowMs);
+  const view = uiLogic.publishView(status.publish, status.lastPublish, nowMs, platform);
   const preview = status && status.publishPreview && typeof status.publishPreview === 'object'
     ? status.publishPreview
     : null;
@@ -2475,27 +2490,32 @@ function renderPublish(status, nowMs) {
   fields.pubCard.classList.toggle('collapsed', dock.collapsed);
   fields.pubBar.classList.toggle('hidden', !dock.collapsed);
   fields.pubMain.classList.toggle('folded', dock.collapsed);
-  fields.pubBarLabel.textContent = dock.label || '发布过的 AI 写好的笔记';
+  fields.pubBarLabel.textContent = dock.label || (facebook ? 'Facebook 内容发布' : '发布过的 AI 写好的笔记');
   fields.pubBarSum.textContent = dock.summary || '';
   fields.pubHead.textContent = view.head;
   fields.pubCorner.textContent = view.corner;
   fields.pubCorner.classList.toggle('hot', Boolean(view.cornerHot));
-  fields.pubTitle.textContent = view.title || (preview && preview.title) || '（新笔记）';
+  fields.pubTitle.textContent = view.title || (preview && preview.title) || (facebook ? '一条待发布内容' : '（新笔记）');
   fields.pubTitle.classList.toggle('muted', view.mode === 'empty');
   // 编号默认形态：无真编号时以「—」占位（云端飞书卡印上 requestId 后自动点亮真编号）；编号值带灰底小片（设计稿）。
   fields.pubMeta.textContent = '';
-  const previewMeta = preview && view.mode === 'flow'
-    ? `${preview.kind === 'rewrite' ? '洗稿稿件' : 'AI 稿件'} · 正文 ${String(preview.content || '').length} 字 · 配图 ${Array.isArray(preview.images) ? preview.images.length : 0} 张 · 编号 `
-    : (view.mode === 'empty' ? '等待第一条笔记 · 编号 ' : '图文笔记 · 编号 ');
-  fields.pubMeta.appendChild(document.createTextNode(previewMeta));
-  const codeChip = document.createElement('span');
-  codeChip.className = 'no';
-  codeChip.textContent = view.code || (preview && preview.code) || '—';
-  fields.pubMeta.appendChild(codeChip);
+  if (facebook) {
+    fields.pubMeta.textContent = facebookPublishMetaLabel(view, status);
+    fields.pubMeta.classList.add('chip');
+  } else {
+    const previewMeta = preview && view.mode === 'flow'
+      ? `${preview.kind === 'rewrite' ? '洗稿稿件' : 'AI 稿件'} · 正文 ${String(preview.content || '').length} 字 · 配图 ${Array.isArray(preview.images) ? preview.images.length : 0} 张 · 编号 `
+      : (view.mode === 'empty' ? '等待第一条笔记 · 编号 ' : '图文笔记 · 编号 ');
+    fields.pubMeta.appendChild(document.createTextNode(previewMeta));
+    const codeChip = document.createElement('span');
+    codeChip.className = 'no';
+    codeChip.textContent = view.code || (preview && preview.code) || '—';
+    fields.pubMeta.appendChild(codeChip);
+  }
   renderFootRich(fields.pubFoot, view.foot); // 固定模板内 **…** 加粗，破掉整片灰
   const previewEntryVisible = view.mode === 'flow' && publishDraftEntryAvailable(status);
   setPubActionVisibility(fields.pubPreviewLink, previewEntryVisible);
-  fields.pubPreviewLink.textContent = '查看稿件 ↗';
+  fields.pubPreviewLink.textContent = facebook ? '查看内容 ↗' : '查看稿件 ↗';
   syncPublishPreviewActions(status);
   const steps = fields.pubSteps.querySelectorAll('.j-step');
   view.stepStates.forEach((state, i) => {
@@ -4273,7 +4293,9 @@ function routeStatus(status) {
 // 覆盖未选中环境（渲染层的 renderPublish 只跑选中环境，会漏掉后台环境的发布叙述）。
 function absorbPublishTerminal(envKey, status) {
   if (!status || !status.publish || !window.uiLogic) return;
-  const view = uiLogic.publishView(status.publish, status.lastPublish, Date.now());
+  const env = fleetView.envs.get(envKey);
+  const platform = normPlatform((env && env.platform) || (envKey === fleetView.selected ? selectedPlatform : ''));
+  const view = uiLogic.publishView(status.publish, status.lastPublish, Date.now(), platform);
   if (!view.collapsed) { lastPublishSigByEnv.set(envKey, `${status.publish.state}:${status.publish.title || ''}`); return; }
   const sig = `${status.publish.state}:${status.publish.title || ''}`;
   if (sig === (lastPublishSigByEnv.get(envKey) || '')) return;

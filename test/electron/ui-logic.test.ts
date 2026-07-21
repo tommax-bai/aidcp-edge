@@ -43,7 +43,12 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   detailRows: (s: Record<string, unknown>) => Array<{ key: string; label: string; value: string }>;
   presenceView: (s: Record<string, unknown>, now: number) => PresenceV;
   runtimeGuidanceView: (s: Record<string, unknown>, now: number) => RuntimeGuidanceV | null;
-  publishView: (p: Record<string, unknown> | null, last: Record<string, unknown> | null, now: number) => PublishV;
+  publishView: (
+    p: Record<string, unknown> | null,
+    last: Record<string, unknown> | null,
+    now: number,
+    platform?: string,
+  ) => PublishV;
   publishDock: (v: PublishV, s: Record<string, unknown>, manualOpen: boolean) => PublishDockV;
   resolveEnvironmentDisplayName: (row: Record<string, unknown>) => {
     name: string;
@@ -669,6 +674,45 @@ test('发布卡：已通过 → 第四节点平静色 + 明示无需操作', () 
   assert.deepEqual(v.stepStates, ['done', 'done', 'done', 'cur']);
   assert.equal(v.curCalm, true);
   assert.match(v.foot ?? '', /无需操作/);
+});
+
+test('Facebook 发布卡：使用单稿四阶段语义，submitted 仍不冒充已发布', () => {
+  const now = Date.now();
+  const pending = uiLogic.publishView(
+    { state: 'pending', title: '周末咖啡馆', at: new Date(now - 60_000).toISOString() },
+    null,
+    now,
+    'facebook',
+  );
+  assert.equal(pending.head, '一条 Facebook 内容等你确认');
+  assert.deepEqual(pending.steps, ['准备内容', '发布审批', '提交平台', '发布结果']);
+  assert.deepEqual(pending.stepStates, ['done', 'cur', 'todo', 'todo']);
+  assert.match(pending.foot ?? '', /内容可在预览中/);
+
+  const approved = uiLogic.publishView(
+    { state: 'approved', title: '周末咖啡馆', at: new Date(now).toISOString() },
+    null,
+    now,
+    'facebook',
+  );
+  assert.deepEqual(approved.stepStates, ['done', 'done', 'cur', 'todo']);
+  assert.equal(approved.corner, '等待提交');
+  assert.match(approved.foot ?? '', /Facebook/);
+
+  const submitted = uiLogic.publishView(
+    { state: 'submitted', title: '周末咖啡馆', at: new Date(now).toISOString() },
+    null,
+    now,
+    'facebook',
+  );
+  assert.equal(submitted.head, '已提交 Facebook，等待确认');
+  assert.deepEqual(submitted.stepStates, ['done', 'done', 'done', 'cur']);
+  assert.doesNotMatch(`${submitted.head} ${submitted.foot}`, /已发布/);
+
+  const empty = uiLogic.publishView(null, null, now, 'facebook');
+  assert.equal(empty.head, 'Facebook 内容发布');
+  assert.equal(uiLogic.publishDock(empty, {}, false).label, 'Facebook 内容发布');
+  assert.deepEqual(empty.stepStates, ['todo', 'todo', 'todo', 'todo']);
 });
 
 test('发布卡：已发布 → 折进活动流 + 卡片转「上次发布」（常驻）', () => {

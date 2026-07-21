@@ -560,20 +560,23 @@
   // 终态另产 collapsed（折进活动流一条记录，渲染层按签名去重）。
   const PUBLISH_WAIT_HOT_MS = 30 * 60_000;
   const PUBLISH_STEPS = ['写好内容', '发到飞书', '等你确认', '择时发布'];
+  const FACEBOOK_PUBLISH_STEPS = ['准备内容', '发布审批', '提交平台', '发布结果'];
 
-  function publishView(publish, lastPublish, nowMs) {
+  function publishView(publish, lastPublish, nowMs, platform = 'xiaohongshu') {
     const at = publish && publish.at ? Date.parse(publish.at) : nowMs;
     const waitedMs = Math.max(0, nowMs - (Number.isFinite(at) ? at : nowMs));
     const waitedMin = Math.floor(waitedMs / 60_000);
     const title = (publish && publish.title) || '';
     const state = publish ? publish.state : null;
+    const facebook = platform === 'facebook';
 
     const base = {
-      steps: PUBLISH_STEPS,
+      steps: facebook ? FACEBOOK_PUBLISH_STEPS : PUBLISH_STEPS,
       title,
       code: (publish && publish.code) || '',
       collapsed: null,
       showLink: false,
+      platform: facebook ? 'facebook' : 'xiaohongshu',
     };
 
     if (state === 'pending' || state === 'reminded') {
@@ -582,15 +585,19 @@
         ...base,
         mode: 'flow',
         showLink: false,
-        head: 'AI 写好了一条新笔记',
+        head: facebook ? '一条 Facebook 内容等你确认' : 'AI 写好了一条新笔记',
         corner: waitedMin < 1 ? '刚刚发出' : `已等 ${waitedMin} 分钟`,
         cornerHot: hot,
-        stepStates: ['done', 'done', 'cur', 'todo'],
+        stepStates: facebook ? ['done', 'cur', 'todo', 'todo'] : ['done', 'done', 'cur', 'todo'],
         curCalm: false,
         // 红线：只有收到明确的「已再提醒」事件才这么说；单纯等得久绝不谎称已提醒。
-        foot: state === 'reminded'
-          ? '稿件仍待确认 · 可在稿件预览里**发布 / 取消**'
-          : '全文在稿件预览里，可直接**发布 / 取消**，审批结果会自动同步到这里。',
+        foot: facebook
+          ? (state === 'reminded'
+            ? '内容仍待确认 · 可在内容预览里**发布 / 取消**'
+            : '内容可在预览中直接**发布 / 取消**，审批结果会自动同步到这里。')
+          : (state === 'reminded'
+            ? '稿件仍待确认 · 可在稿件预览里**发布 / 取消**'
+            : '全文在稿件预览里，可直接**发布 / 取消**，审批结果会自动同步到这里。'),
       };
     }
     if (state === 'approved') {
@@ -598,12 +605,14 @@
         ...base,
         mode: 'flow',
         showLink: false,
-        head: '已确认发布',
-        corner: '将择时发布',
+        head: facebook ? '内容已确认，等待提交' : '已确认发布',
+        corner: facebook ? '等待提交' : '将择时发布',
         cornerHot: false,
-        stepStates: ['done', 'done', 'done', 'cur'],
+        stepStates: facebook ? ['done', 'done', 'cur', 'todo'] : ['done', 'done', 'done', 'cur'],
         curCalm: true,
-        foot: '**无需操作** · 系统会挑一个自然时段发出，发完这里会记一笔',
+        foot: facebook
+          ? '**无需操作** · 系统会按当前发布计划提交到 Facebook'
+          : '**无需操作** · 系统会挑一个自然时段发出，发完这里会记一笔',
       };
     }
 
@@ -614,16 +623,20 @@
         mode: 'submitted',
         collapsed: {
           type: 'submitted',
-          sentence: title ? `笔记「${title}」已提交，待链接确认` : '一条笔记已提交，待链接确认',
+          sentence: title
+            ? `${facebook ? '内容' : '笔记'}「${title}」已提交，待链接确认`
+            : `一条${facebook ? '内容' : '笔记'}已提交，待链接确认`,
         },
-        steps: ['写好内容', '发到飞书', '等你确认', '确认结果'],
-        head: '已提交，平台确认中',
+        steps: facebook ? FACEBOOK_PUBLISH_STEPS : ['写好内容', '发到飞书', '等你确认', '确认结果'],
+        head: facebook ? '已提交 Facebook，等待确认' : '已提交，平台确认中',
         corner: Number.isFinite(submittedAt) ? relTime(submittedAt, nowMs) : '',
         cornerHot: false,
-        title: title || '一条新笔记',
+        title: title || (facebook ? '一条 Facebook 内容' : '一条新笔记'),
         stepStates: ['done', 'done', 'done', 'cur'],
         curCalm: true,
-        foot: '**无需重复操作** · 发布请求已提交，正在确认公开结果',
+        foot: facebook
+          ? '**无需重复操作** · 已提交 Facebook，正在确认公开结果'
+          : '**无需重复操作** · 发布请求已提交，正在确认公开结果',
       };
     }
 
@@ -631,12 +644,22 @@
     let collapsed = null;
     let last = lastPublish || null;
     if (state === 'published') {
-      collapsed = { type: 'published', sentence: title ? `笔记「${title}」已发布` : '一条笔记已发布' };
+      collapsed = {
+        type: 'published',
+        sentence: title
+          ? `${facebook ? '内容' : '笔记'}「${title}」已发布`
+          : `一条${facebook ? '内容' : '笔记'}已发布`,
+      };
       last = { title, at: publish.at }; // 刚发布的就是最近一次（主进程同时落盘持久化）
     } else if (state === 'rejected') {
       collapsed = { type: 'rejected', sentence: '你选择了取消发布 · 内容已留档' };
     } else if (state === 'failed') {
-      collapsed = { type: 'failed', sentence: title ? `笔记「${title}」发布未成功，已如实记录` : '发布未成功，已如实记录' };
+      collapsed = {
+        type: 'failed',
+        sentence: title
+          ? `${facebook ? '内容' : '笔记'}「${title}」发布未成功，已如实记录`
+          : '发布未成功，已如实记录',
+      };
     }
 
     if (last && last.title) {
@@ -646,13 +669,15 @@
         mode: 'last',
         collapsed,
         showLink: false,
-        head: '上次发布',
+        head: facebook ? '最近一次 Facebook 发布' : '上次发布',
         corner: Number.isFinite(lastAt) ? relTime(lastAt, nowMs) : '',
         cornerHot: false,
         title: last.title,
         stepStates: ['done', 'done', 'done', 'done'],
         curCalm: false,
-        foot: '**已发布** · 新笔记写好后会在这里等你确认',
+        foot: facebook
+          ? '**已发布** · 下一条内容准备好后会在这里等待发布审批'
+          : '**已发布** · 新笔记写好后会在这里等你确认',
       };
     }
     return {
@@ -660,13 +685,15 @@
       mode: 'empty',
       collapsed,
       showLink: false,
-      head: '发布过的 AI 写好的笔记',
+      head: facebook ? 'Facebook 内容发布' : '发布过的 AI 写好的笔记',
       corner: '',
       cornerHot: false,
       title: '还没有发布过内容',
       stepStates: ['todo', 'todo', 'todo', 'todo'],
       curCalm: false,
-      foot: 'AI 写好笔记后会先在这里等你**发布 / 取消**，确认后才会发布。',
+      foot: facebook
+        ? 'AI 准备好 Facebook 内容后会先在这里等待**发布 / 取消**。'
+        : 'AI 写好笔记后会先在这里等你**发布 / 取消**，确认后才会发布。',
     };
   }
 
@@ -683,7 +710,7 @@
     }
     return {
       collapsed: !manualOpen,
-      label: '发布过的 AI 写好的笔记',
+      label: view.platform === 'facebook' ? 'Facebook 内容发布' : '发布过的 AI 写好的笔记',
       summary: '还没有发布过内容',
     };
   }

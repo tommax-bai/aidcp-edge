@@ -2037,6 +2037,108 @@ test('Facebook 当前环境明确禁用今日灵感快捷入口，不暗示已�
   assert.match(inspiration.title, /尚未完成平台化创作模板/);
 });
 
+test('Facebook 首页卡使用共享层级与单稿语义，不出现小红书队列能力', async () => {
+  const pendingStatus = makeStatus({
+    envId: 'fb1',
+    account: { id: 'fb1', name: 'FB Beta' },
+    dailyUsage: {
+      totals: { view: 12, like: 3, comment: 1, publish: 0, join_group: 2 },
+      quotas: { view: 150, like: 50, comment: 8, publish: 1, join_group: 3 },
+    },
+    publish: { state: 'pending', title: '周末咖啡馆', at: new Date().toISOString() },
+    publishPreview: {
+      recordId: 207,
+      platform: 'facebook',
+      title: '周末咖啡馆',
+      content: '在街角找到一家安静的咖啡馆。',
+      images: ['https://cdn.example.com/fb-207.jpg'],
+      contentVersion: 0,
+    },
+  });
+  const { w, pushStatus } = await boot({}, {
+    fleetGet: async () => ({
+      environments: [{ envId: 'fb1', name: 'FB Beta', platform: 'facebook', status: pendingStatus }],
+      selectedEnvId: 'fb1',
+    }),
+    delegatedTaskList: async () => ({ ok: true, data: { tasks: [] } }),
+  });
+
+  const card = $(w, '#pub-card');
+  assert.equal($(w, '#daily-summary').dataset.platform, 'facebook');
+  assert.equal(card.dataset.platform, 'facebook');
+  assert.ok(card.classList.contains('single-surface'));
+  assert.equal(card.classList.contains('queue-surface'), false);
+  assert.equal($(w, '#pub-kicker').textContent, '内容发布');
+  assert.equal($(w, '#pub-meta').textContent, '等待发布审批');
+  assert.equal($(w, '#pub-preview-link').textContent, '查看内容 ↗');
+  assert.deepEqual(
+    Array.from(card.querySelectorAll('.j-lab')).map((node) => node.textContent),
+    ['准备内容', '发布审批', '提交平台', '发布结果'],
+  );
+  assert.deepEqual(
+    Array.from(card.querySelectorAll('.j-step')).map((node) =>
+      (node as HTMLElement).classList.contains('done') ? 'done'
+        : (node as HTMLElement).classList.contains('cur') ? 'cur' : 'todo'),
+    ['done', 'cur', 'todo', 'todo'],
+  );
+  assert.equal(hidden($(w, '#pub-count')), true);
+  assert.equal(hidden($(w, '#pub-queue-link')), true);
+  assert.ok(Array.from(card.querySelectorAll('.pub-carousel-nav')).every((node) => {
+    const button = node as HTMLButtonElement;
+    return button.hidden && button.disabled;
+  }));
+  assert.doesNotMatch(card.textContent ?? '', /发到飞书/);
+
+  pushStatus(makeStatus({
+    ...pendingStatus,
+    publish: { state: 'approved', title: '周末咖啡馆', at: new Date().toISOString() },
+  }));
+  await tick();
+  assert.equal($(w, '#pub-meta').textContent, '等待提交');
+  assert.ok((card.querySelectorAll('.j-step')[2] as HTMLElement).classList.contains('cur'));
+
+  pushStatus(makeStatus({
+    ...pendingStatus,
+    publish: { state: 'submitted', title: '周末咖啡馆', at: new Date().toISOString() },
+    publishPreview: null,
+  }));
+  await tick();
+  assert.equal($(w, '#pub-meta').textContent, '平台确认中');
+  assert.match($(w, '#pub-head').textContent ?? '', /已提交 Facebook/);
+  assert.doesNotMatch(`${$(w, '#pub-head').textContent} ${$(w, '#pub-foot').textContent}`, /已发布/);
+
+  pushStatus(makeStatus({ ...pendingStatus, publish: null, publishPreview: null, lastPublish: null }));
+  await tick();
+  assert.ok(card.classList.contains('collapsed'));
+  assert.equal($(w, '#pub-bar-label').textContent, 'Facebook 内容发布');
+
+  assert.match(rendererCss, /\.pub\.single-surface\s*\{/);
+  assert.match(rendererCss, /\.pub\.single-surface \.pub-item\s*\{/);
+  assert.match(rendererCss, /\.pub\.single-surface \.pub-action\.is-primary:hover:not\(:disabled\)/);
+});
+
+test('Facebook 切到小红书时清除单稿表面和平台标记残留', async () => {
+  const facebook = makeStatus({ envId: 'fb1', account: { id: 'fb1', name: 'FB Beta' } });
+  const xhs = makeStatus({ envId: 'xhs1', account: { id: 'xhs1', name: '小红书账号' } });
+  const { w } = await boot({}, {
+    fleetGet: async () => ({
+      environments: [
+        { envId: 'fb1', name: 'FB Beta', platform: 'facebook', status: facebook },
+        { envId: 'xhs1', name: '小红书账号', platform: 'xiaohongshu', status: xhs },
+      ],
+      selectedEnvId: 'fb1',
+    }),
+    delegatedTaskList: async () => ({ ok: true, data: { tasks: [] } }),
+  });
+  assert.ok($(w, '#pub-card').classList.contains('single-surface'));
+  ($(w, '[data-env-id="xhs1"]') as HTMLElement).click();
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.equal($(w, '#daily-summary').dataset.platform, 'xiaohongshu');
+  assert.equal($(w, '#pub-card').dataset.platform, 'xiaohongshu');
+  assert.equal($(w, '#pub-card').classList.contains('single-surface'), false);
+  assert.equal(hidden($(w, '#pub-kicker')), true);
+});
+
 // ── 三段价值流程不再附带七段详细步骤 ──
 test('运行步骤入口与七段详细步骤从 DOM、脚本和样式中彻底移除', async () => {
   const { w } = await boot();
