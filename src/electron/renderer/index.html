@@ -317,28 +317,38 @@
           </button>
           <div id="pub-carousel-content" class="pub-carousel-content">
             <div class="pub-head" id="pub-head-row" role="button" tabindex="0" aria-label="收起发布卡">
-              <span class="pub-evt" id="pub-head">AI 写好了一条新笔记</span>
-              <span class="pub-time" id="pub-corner"></span>
-            </div>
-            <div class="pub-body">
-              <div class="pub-thumb" id="pub-thumb"></div>
-              <div>
-                <div class="pub-title" id="pub-title" aria-live="polite"></div>
-                <div class="pub-meta" id="pub-meta">图文笔记</div>
+              <div class="pub-head-copy">
+                <span class="pub-kicker hidden" id="pub-kicker">发布进度</span>
+                <span class="pub-evt" id="pub-head">AI 写好了一条新笔记</span>
+              </div>
+              <div class="pub-head-aside">
+                <span class="pub-count hidden" id="pub-count"></span>
+                <span class="pub-time" id="pub-corner"></span>
               </div>
             </div>
-            <div class="journey">
-              <div class="j-steps" id="pub-steps">
-                <div class="j-step"><span class="j-dot"></span><span class="j-lab">写好内容</span></div>
-                <div class="j-step"><span class="j-dot"></span><span class="j-lab">发到飞书</span></div>
-                <div class="j-step"><span class="j-dot"></span><span class="j-lab">等你确认</span></div>
-                <div class="j-step"><span class="j-dot"></span><span class="j-lab">择时发布</span></div>
+            <article class="pub-item" id="pub-item">
+              <div class="pub-body">
+                <div class="pub-thumb" id="pub-thumb"></div>
+                <div class="pub-item-copy">
+                  <div class="pub-title" id="pub-title" aria-live="polite"></div>
+                  <div class="pub-meta" id="pub-meta">图文笔记</div>
+                </div>
               </div>
-            </div>
+              <div class="journey">
+                <div class="j-steps" id="pub-steps" role="list" aria-label="发布进度">
+                  <div class="j-step" role="listitem"><span class="j-dot"></span><span class="j-lab">写好内容</span><span class="j-state"></span></div>
+                  <div class="j-step" role="listitem"><span class="j-dot"></span><span class="j-lab">发到飞书</span><span class="j-state"></span></div>
+                  <div class="j-step" role="listitem"><span class="j-dot"></span><span class="j-lab">等你确认</span><span class="j-state"></span></div>
+                  <div class="j-step" role="listitem"><span class="j-dot"></span><span class="j-lab">择时发布</span><span class="j-state"></span></div>
+                </div>
+              </div>
+            </article>
             <div class="pub-foot">
               <p id="pub-foot">全文和「通过 / 驳回」按钮在飞书里，审批结果会自动同步到这里。</p>
-              <span id="pub-queue-link" class="pub-preview-link hidden" role="button" tabindex="0">查看全部进度 →</span>
-              <span id="pub-preview-link" class="pub-preview-link hidden" role="button" tabindex="0">查看稿件 ↗</span>
+              <div class="pub-actions">
+                <button id="pub-queue-link" class="pub-action is-secondary hidden" type="button" hidden disabled>查看全部进度</button>
+                <button id="pub-preview-link" class="pub-action is-primary hidden" type="button" hidden disabled>审核稿件</button>
+              </div>
             </div>
           </div>
           <button id="pub-carousel-next" class="pub-carousel-nav pub-carousel-next nodrag" type="button"

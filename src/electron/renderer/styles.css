@@ -1100,10 +1100,20 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   padding: 15px 17px 14px;
 }
 .pub-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pub-head-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.pub-head-aside { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.pub-kicker { color: #70819a; font-size: 9.5px; font-weight: 780; letter-spacing: .06em; }
+.pub-count {
+  display: inline-flex; align-items: center; min-height: 22px; padding: 0 8px; border-radius: 999px;
+  color: #52647e; background: #eaf0f8; font-size: 10px; font-weight: 750; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.pub-count.attention { color: #8d5a12; background: #fff1d7; }
 .pub-evt { font-size: 13px; font-weight: 650; }
 .pub-time { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .pub-time.hot { color: var(--amber-deep); font-weight: 650; }
 .pub-body { display: flex; gap: 12px; margin-top: 12px; align-items: center; }
+.pub-item-copy { min-width: 0; }
 /* 发布占位封面：同一封面记号，按阶段换色（蓝=待确认，琥珀=等待发布，绿=已发布，灰=未开始）。 */
 .pub-thumb {
   width: 54px; height: 54px; border-radius: 10px; flex-shrink: 0;
@@ -1156,6 +1166,7 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .j-step.cur .j-dot { background: var(--amber); border: 0; animation: halo 2s ease-in-out infinite; }
 .j-step.cur.calm .j-dot { background: #7f9ac4; animation: halocalm 2.4s ease-in-out infinite; }
 .j-lab { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+.j-state { display: none; }
 .j-step.done .j-lab { color: #8b95a9; }
 .j-step.cur .j-lab { color: var(--amber-deep); font-weight: 650; }
 .j-step.cur.calm .j-lab { color: #51648a; font-weight: 650; }
@@ -1166,16 +1177,93 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .pub .j-step.cur .j-lab { color: #a46112; }
 .pub .j-step.cur.calm .j-dot { background: #5d83d8; }
 .pub .j-step.cur.calm .j-lab { color: #4967a8; }
-.pub-foot { display: flex; align-items: baseline; gap: 14px; margin-top: 14px; }
+.pub-foot { display: flex; align-items: center; gap: 14px; margin-top: 14px; }
 .pub-foot p { flex: 1; margin: 0; font-size: 12.5px; color: #8b95a9; line-height: 1.55; }
 .pub-foot p b { color: #48526b; font-weight: 650; }
-.pub-preview-link {
-  font-size: 12.5px; color: var(--accent); font-weight: 650; white-space: nowrap; cursor: pointer;
+.pub-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.pub-action {
+  min-height: 32px; padding: 0 11px; border: 1px solid transparent; border-radius: 9px;
+  color: var(--accent); background: transparent; font: inherit; font-size: 11.5px; font-weight: 700;
+  white-space: nowrap; cursor: pointer; transition: border-color .14s ease, background-color .14s ease, color .14s ease;
 }
-.pub-preview-link:hover { text-decoration: underline; }
+.pub-action:hover:not(:disabled) { background: rgba(52, 120, 246, .06); }
+.pub-action:focus-visible { outline: 2px solid rgba(52, 120, 246, .3); outline-offset: 2px; }
+.pub-action:disabled { cursor: default; opacity: .55; }
+
+/* XHS 首页摘要复用完整发布队列的层级：摘要壳 + 当前任务卡 + 明确主次操作。 */
+.pub.queue-surface {
+  overflow: hidden; padding: 14px; border-color: #cfe0f4;
+  background:
+    radial-gradient(circle at 94% 0, rgba(62, 183, 161, .1), transparent 34%),
+    linear-gradient(135deg, #f9fbff 0%, #f2f7fd 58%, #f3fbf8 100%);
+  box-shadow: 0 9px 26px rgba(49, 92, 151, .075);
+}
+.pub.queue-surface .pub-head { align-items: center; padding: 0 2px 10px; }
+.pub.queue-surface .pub-kicker { display: block; }
+.pub.queue-surface .pub-evt { color: #32445f; font-size: 14px; font-weight: 760; line-height: 1.35; }
+.pub.queue-surface .pub-time { color: #7f8ca0; font-size: 10.5px; font-weight: 680; }
+.pub.queue-surface .pub-time.hot { color: #7f8ca0; }
+.pub.queue-surface .pub-item {
+  min-width: 0; padding: 14px 15px 13px; border: 1px solid #dce5f0; border-radius: 14px;
+  background: rgba(255, 255, 255, .96); box-shadow: 0 4px 14px rgba(35, 60, 96, .045);
+}
+.pub.queue-surface[data-pub-state="pending"] .pub-item {
+  border-color: #bdd2ee; box-shadow: 0 7px 20px rgba(52, 120, 246, .075);
+}
+.pub.queue-surface .pub-body { margin-top: 0; }
+.pub.queue-surface .pub-thumb { display: none; }
+.pub.queue-surface .pub-item-copy { display: flex; flex-direction: column; align-items: flex-start; }
+.pub.queue-surface .pub-title {
+  order: 2; margin-top: 6px; overflow-wrap: anywhere; color: #2f3f58;
+  font-size: 14.5px; font-weight: 720; line-height: 1.42;
+}
+.pub.queue-surface .pub-title.muted { color: #69778d; }
+.pub.queue-surface .pub-meta { order: 1; margin-top: 0; color: #758197; font-size: 10.5px; line-height: 1.4; }
+.pub.queue-surface .pub-meta.chip {
+  display: inline-flex; max-width: 100%; align-items: center; padding: 3px 7px; border-radius: 999px;
+  color: #3168b6; background: #edf4ff; font-size: 9.5px; font-weight: 760;
+}
+.pub.queue-surface .pub-meta.chip.attention { color: #8f5e18; background: #fff3df; }
+.pub.queue-surface .journey {
+  margin-top: 12px; padding: 12px 13px 11px; border: 1px solid #e3eaf3; border-radius: 11px;
+  background: #f8fafc;
+}
+.pub.queue-surface .j-steps { max-width: none; }
+.pub.queue-surface .j-step {
+  display: grid; grid-template-rows: 12px auto auto; gap: 4px; min-width: 0; justify-items: center;
+  padding: 0 6px; text-align: center;
+}
+.pub.queue-surface .j-step:not(:last-child)::after {
+  top: 6px; left: calc(50% + 6px); width: calc(100% - 12px); height: 1px; border-radius: 0;
+  background: #dbe3ee;
+}
+.pub.queue-surface .j-step.done:not(:last-child)::after { background: #a9dbc8; }
+.pub.queue-surface .j-dot { width: 12px; height: 12px; border-width: 2px; }
+.pub.queue-surface .j-lab {
+  display: block; width: 100%; overflow: hidden; color: #758197; font-size: 10px; line-height: 1.25;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.pub.queue-surface .j-state {
+  display: block; width: 100%; overflow: hidden; color: #a0aaba; font-size: 9px; line-height: 1.3;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.pub.queue-surface .j-step.done .j-lab { color: #397a64; }
+.pub.queue-surface .j-step.cur .j-lab { color: #2d67bd; }
+.pub.queue-surface .j-step.cur.is-waiting_human .j-dot { background: #e39a2d; box-shadow: 0 0 0 4px rgba(227, 154, 45, .12); }
+.pub.queue-surface .j-step.cur.is-waiting_human .j-lab { color: #9a6416; }
+.pub.queue-surface .j-step.cur.is-failed .j-dot,
+.pub.queue-surface .j-step.cur.is-partial .j-dot { border: 2px solid #c85858; background: #fff; box-shadow: none; }
+.pub.queue-surface .j-step.cur.is-failed .j-lab,
+.pub.queue-surface .j-step.cur.is-partial .j-lab { color: #a13f3f; }
+.pub.queue-surface .pub-foot { align-items: center; gap: 12px; margin-top: 11px; padding: 0 2px; }
+.pub.queue-surface .pub-foot p { color: #74839a; font-size: 11.5px; line-height: 1.5; }
+.pub.queue-surface .pub-action.is-secondary { border-color: #ccd9e8; color: #526986; background: rgba(255, 255, 255, .82); }
+.pub.queue-surface .pub-action.is-secondary:hover:not(:disabled) { border-color: #aebfd4; background: #fff; }
+.pub.queue-surface .pub-action.is-primary { border-color: #3478f6; color: #fff; background: #3478f6; box-shadow: 0 3px 9px rgba(52, 120, 246, .18); }
+.pub.queue-surface .pub-action.is-primary:hover:not(:disabled) { border-color: #2869dc; background: #2869dc; }
 
 .pub-carousel-content { min-width: 0; transition: padding .16s ease; }
-.pub-main.has-carousel .pub-carousel-content { padding-inline: 34px; }
+.pub-main.has-carousel .pub-carousel-content { padding-inline: 36px; }
 .pub-carousel-nav {
   position: absolute; z-index: 3; top: 50%; display: grid; width: 34px; height: 58px; place-items: center;
   padding: 0; border: 0; border-radius: 12px; color: rgba(91, 108, 137, .38); background: transparent;
@@ -1194,7 +1282,7 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .pub-carousel-nav:disabled { cursor: default; opacity: 0; }
 
 /* 发布卡收展：主体折叠动画 + 收起薄条（同设计语言：白卡内一行、小封面记号 + 摘要 + 折角） */
-.pub-main { position: relative; overflow: hidden; max-height: 400px; opacity: 1; transition: max-height 0.28s ease, opacity 0.2s ease; }
+.pub-main { position: relative; overflow: hidden; max-height: 620px; opacity: 1; transition: max-height 0.28s ease, opacity 0.2s ease; }
 .pub-main.folded { max-height: 0; opacity: 0; }
 .pub.collapsed { padding-top: 10px; padding-bottom: 10px; }
 .pub-bar { display: flex; align-items: center; gap: 11px; min-height: 30px; cursor: pointer; user-select: none; }
@@ -1226,13 +1314,34 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 }
 .pub-bar-chev { font-size: 10px; color: var(--faint); }
 @media (max-width: 430px) {
-  .pub-main.has-carousel .pub-carousel-content { padding-inline: 28px; }
+  .pub.queue-surface { padding: 12px; }
+  .pub-main.has-carousel .pub-carousel-content { padding-inline: 25px; }
   .pub-carousel-nav { width: 30px; height: 52px; }
+  .pub.queue-surface .pub-head { align-items: flex-start; gap: 8px; }
+  .pub.queue-surface .pub-head-aside { flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+  .pub.queue-surface .pub-item { padding: 13px 12px 12px; }
+  .pub.queue-surface .journey { padding: 11px 12px; }
+  .pub.queue-surface .j-steps { grid-template-columns: 1fr; gap: 0; }
+  .pub.queue-surface .j-step {
+    grid-template: auto auto / 13px minmax(0, 1fr); gap: 2px 9px; justify-items: stretch;
+    padding: 0 0 11px; text-align: left;
+  }
+  .pub.queue-surface .j-step:last-child { padding-bottom: 0; }
+  .pub.queue-surface .j-step:not(:last-child)::after {
+    top: 12px; bottom: 0; left: 5.5px; width: 1px; height: auto;
+  }
+  .pub.queue-surface .j-dot { grid-row: 1 / span 2; }
+  .pub.queue-surface .j-lab,
+  .pub.queue-surface .j-state { grid-column: 2; overflow: visible; text-overflow: clip; white-space: normal; }
+  .pub.queue-surface .pub-foot { align-items: stretch; flex-direction: column; gap: 9px; }
+  .pub.queue-surface .pub-actions { width: 100%; }
+  .pub.queue-surface .pub-action { flex: 1; min-width: 0; padding-inline: 8px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .pub-main,
   .pub-carousel-content,
-  .pub-carousel-nav { transition: none; }
+  .pub-carousel-nav,
+  .pub-action { transition: none; }
 }
 
 /* ═══ 活动流 ═══ */

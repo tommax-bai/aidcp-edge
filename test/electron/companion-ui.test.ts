@@ -556,10 +556,12 @@ test('发布卡候审：可见、第三节点琥珀，提示从稿件预览处�
   assert.equal(hidden(card), false);
   assert.equal(card.dataset.pubMode, 'flow');
   assert.equal(card.dataset.pubState, 'pending');
+  assert.equal(card.classList.contains('queue-surface'), false, '旧发布快照不得继承 XHS 队列摘要外观');
   assert.ok(
-    Array.from(card.querySelectorAll('button')).every((button) => button.hidden && button.disabled),
-    '旧发布卡没有可操作按钮，轮播箭头也必须保持隐藏',
+    Array.from(card.querySelectorAll('.pub-carousel-nav')).every((button) => (button as HTMLButtonElement).hidden && (button as HTMLButtonElement).disabled),
+    '旧发布卡的轮播箭头必须保持隐藏',
   );
+  assert.equal($(w, '#pub-preview-link').tagName, 'BUTTON', '稿件入口升级为原生键盘按钮');
   assert.match($(w, '#pub-title').textContent ?? '', /秋日城市漫步/);
   assert.match($(w, '#pub-corner').textContent ?? '', /已等 3 分钟/);
   const steps = Array.from(card.querySelectorAll('.j-step'));
@@ -1262,6 +1264,7 @@ test('发布卡常驻：从未发布 → 空态幽灵旅程（同设计语言、
   assert.equal(hidden(card), false, '空态也常驻');
   assert.equal(card.dataset.pubMode, 'empty');
   assert.ok(card.classList.contains('empty'));
+  assert.equal(card.classList.contains('queue-surface'), false, '旧空态继续使用原有发布卡样式');
   assert.match($(w, '#pub-title').textContent ?? '', /还没有发布过/);
   assert.ok(
     Array.from(card.querySelectorAll('button')).every((button) => button.hidden && button.disabled),
@@ -2217,11 +2220,27 @@ test('小红书首页用发布进度摘要替代单稿卡，待确认优先并�
   assert.ok(queueCalls > 0, '首页初始化应读取当前小红书环境队列');
   const card = $(w, '#pub-card');
   assert.equal(card.dataset.pubState, 'pending');
-  assert.match(card.textContent ?? '', /1 条笔记等你确认/);
+  assert.ok(card.classList.contains('queue-surface'));
+  assert.equal($(w, '#pub-kicker').textContent, '发布进度');
+  assert.equal($(w, '#pub-head').textContent, '需要你确认');
+  assert.equal($(w, '#pub-count').textContent, '1 条待确认');
   assert.match(card.textContent ?? '', /先确认这条城市散步笔记/);
   assert.match($(w, '#pub-queue-link').textContent ?? '', /查看全部进度/);
   assert.equal(hidden($(w, '#pub-queue-link')), false);
+  assert.equal(($(w, '#pub-queue-link') as unknown as HTMLButtonElement).disabled, false);
+  assert.equal($(w, '#pub-preview-link').textContent, '审核稿件');
+  assert.equal(hidden($(w, '#pub-preview-link')), false);
+  assert.equal(($(w, '#pub-preview-link') as unknown as HTMLButtonElement).disabled, false);
   assert.equal($(w, '#pub-title').getAttribute('aria-live'), 'polite');
+  assert.ok($(w, '#pub-item').contains($(w, '#pub-steps')), '当前项与阶段轨道应收进同一任务卡');
+  assert.deepEqual(
+    Array.from(w.document.querySelectorAll('#pub-steps .j-state')).map((node) => node.textContent),
+    ['已完成', '已完成 · 3/3', '待你确认', '等待发布'],
+  );
+  assert.match(rendererCss, /\.pub\.queue-surface \.pub-thumb\s*\{\s*display:\s*none/);
+  assert.match(rendererCss, /\.pub\.queue-surface \.pub-item\s*\{/);
+  assert.match(rendererCss, /\.pub\.queue-surface \.pub-action\.is-primary/);
+  assert.match(rendererCss, /\.pub\.queue-surface \.pub-action\.is-secondary/);
 
   const previous = $(w, '#pub-carousel-prev') as unknown as HTMLButtonElement;
   const next = $(w, '#pub-carousel-next') as unknown as HTMLButtonElement;
@@ -2241,6 +2260,9 @@ test('小红书首页用发布进度摘要替代单稿卡，待确认优先并�
   next.click();
   assert.equal($(w, '#pub-title').textContent, '正在写的咖啡地图');
   assert.equal($(w, '#pub-meta').textContent, '创作中');
+  assert.equal(card.dataset.pubState, 'processing');
+  assert.equal(hidden($(w, '#pub-preview-link')), true, '创作中的当前项不得显示审核主按钮');
+  assert.equal(($(w, '#pub-preview-link') as unknown as HTMLButtonElement).disabled, true);
   assert.equal($(w, '#pub-corner').textContent, '2 / 3');
 
   next.click();
@@ -2248,6 +2270,10 @@ test('小红书首页用发布进度摘要替代单稿卡，待确认优先并�
   assert.equal($(w, '#pub-meta').textContent, '参考创作 · 排队中');
   assert.equal($(w, '#pub-corner').textContent, '3 / 3');
   assert.equal(w.document.querySelectorAll('#pub-steps .j-step.todo').length, 4, '排队任务不应伪造详细阶段');
+  assert.deepEqual(
+    Array.from(w.document.querySelectorAll('#pub-steps .j-state')).map((node) => node.textContent),
+    ['未开始', '未开始', '未开始', '未开始'],
+  );
 
   next.click();
   assert.equal($(w, '#pub-title').textContent, '先确认这条城市散步笔记', '末项向右应循环到首项');

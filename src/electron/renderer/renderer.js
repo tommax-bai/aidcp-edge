@@ -122,7 +122,9 @@ const fields = {
   streamEmpty: document.querySelector('#stream-empty'),
   pubCard: document.querySelector('#pub-card'),
   pubHeadRow: document.querySelector('#pub-head-row'),
+  pubKicker: document.querySelector('#pub-kicker'),
   pubHead: document.querySelector('#pub-head'),
+  pubCount: document.querySelector('#pub-count'),
   pubCorner: document.querySelector('#pub-corner'),
   pubTitle: document.querySelector('#pub-title'),
   pubThumb: document.querySelector('#pub-thumb'),
@@ -2195,6 +2197,13 @@ function pubCarouselEntryTitle(entry) {
   return String(entry?.item?.title || '未命名内容');
 }
 
+function setPubActionVisibility(button, visible) {
+  if (!button) return;
+  button.classList.toggle('hidden', !visible);
+  button.hidden = !visible;
+  button.disabled = !visible;
+}
+
 function hidePubCarouselControls() {
   const controls = [fields.pubCarouselPrev, fields.pubCarouselNext].filter(Boolean);
   if (controls.includes(document.activeElement)) fields.pubHeadRow?.focus();
@@ -2244,8 +2253,14 @@ function renderXhsPublishQueueDock(status) {
   if (!queueState || queueState.kind === 'unsupported') return false;
 
   fields.pubCard.classList.remove('hidden', 'empty');
-  fields.pubQueueLink?.classList.add('hidden');
-  fields.pubPreviewLink.classList.add('hidden');
+  fields.pubCard.classList.add('queue-surface');
+  fields.pubKicker.classList.remove('hidden');
+  fields.pubKicker.textContent = '发布进度';
+  fields.pubCount.classList.add('hidden');
+  fields.pubCount.classList.remove('attention');
+  fields.pubMeta.classList.remove('chip', 'attention');
+  setPubActionVisibility(fields.pubQueueLink, false);
+  setPubActionVisibility(fields.pubPreviewLink, false);
   if (queueState.kind === 'loading' || queueState.kind === 'idle') {
     hidePubCarouselControls();
     fields.pubCard.classList.remove('collapsed');
@@ -2259,7 +2274,11 @@ function renderXhsPublishQueueDock(status) {
     fields.pubTitle.classList.remove('muted');
     fields.pubMeta.textContent = '排队、创作和发布结果均以 Cloud 真态为准';
     fields.pubFoot.textContent = '浏览器未启动也可以读取，稍候会自动更新。';
-    fields.pubSteps.querySelectorAll('.j-step').forEach((step) => { step.className = 'j-step todo'; });
+    fields.pubSteps.querySelectorAll('.j-step').forEach((step) => {
+      step.className = 'j-step todo';
+      const detail = step.querySelector('.j-state');
+      if (detail) detail.textContent = '';
+    });
     return true;
   }
   if (queueState.kind === 'error' || !queueState.data) {
@@ -2275,7 +2294,11 @@ function renderXhsPublishQueueDock(status) {
     fields.pubTitle.classList.add('muted');
     fields.pubMeta.textContent = '当前不会把未知状态显示成空队列';
     fields.pubFoot.textContent = queueState.error || '请稍后重试。';
-    fields.pubSteps.querySelectorAll('.j-step').forEach((step) => { step.className = 'j-step todo'; });
+    fields.pubSteps.querySelectorAll('.j-step').forEach((step) => {
+      step.className = 'j-step todo';
+      const detail = step.querySelector('.j-state');
+      if (detail) detail.textContent = '';
+    });
     return true;
   }
 
@@ -2292,7 +2315,11 @@ function renderXhsPublishQueueDock(status) {
   fields.pubCard.classList.toggle('collapsed', collapsed);
   fields.pubCard.classList.toggle('empty', !hasWork && !recent);
   fields.pubCard.dataset.pubMode = hasWork ? 'queue' : recent ? 'last' : 'empty';
-  fields.pubCard.dataset.pubState = waitingCount > 0 ? 'pending' : hasWork ? 'processing' : recent?.status || 'empty';
+  fields.pubCard.dataset.pubState = active?.status === 'waiting_approval'
+    ? 'pending'
+    : active || task
+      ? 'processing'
+      : recent?.status || 'empty';
   fields.pubBar.classList.toggle('hidden', !collapsed);
   fields.pubMain.classList.toggle('folded', collapsed);
   fields.pubBarLabel.textContent = '发布进度';
@@ -2303,13 +2330,23 @@ function renderXhsPublishQueueDock(status) {
       : recent
         ? recent.statusLabel
         : '暂无进行中';
-  fields.pubHead.textContent = waitingCount > 0
-    ? `${waitingCount} 条笔记等你确认`
+  fields.pubHead.textContent = active?.status === 'waiting_approval'
+    ? '需要你确认'
+    : active
+      ? 'AI 正在处理'
+      : task
+        ? '等待开始创作'
+        : recent
+          ? '最近发布结果'
+          : '暂无进行中';
+  const summaryCount = waitingCount > 0
+    ? `${waitingCount} 条待确认`
     : hasWork
-      ? 'AI 正在处理发布任务'
-      : recent
-        ? '最近一条发布结果'
-        : '发布进度';
+      ? `${data.summary.inProgress} 条进行中`
+      : '';
+  fields.pubCount.textContent = summaryCount;
+  fields.pubCount.classList.toggle('hidden', !summaryCount);
+  fields.pubCount.classList.toggle('attention', waitingCount > 0);
   const freshness = queueState.refreshing ? '同步中' : queueState.stale ? '稍早数据' : '';
   const position = carousel.entries.length > 1 ? `${carousel.index + 1} / ${carousel.entries.length}` : '';
   fields.pubCorner.textContent = [freshness, position].filter(Boolean).join(' · ');
@@ -2323,6 +2360,8 @@ function renderXhsPublishQueueDock(status) {
       : recent
         ? recent.statusLabel
         : '开始一次创作后，进度会显示在这里';
+  fields.pubMeta.classList.toggle('chip', Boolean(priority));
+  fields.pubMeta.classList.toggle('attention', active?.status === 'waiting_approval');
   fields.pubFoot.textContent = waitingCount > 0
     ? '先确认内容，再进入发布；其它任务会继续在后台处理。'
     : hasWork
@@ -2344,13 +2383,26 @@ function renderXhsPublishQueueDock(status) {
         : ['running', 'retrying', 'waiting_human', 'failed', 'partial'].includes(stage.state)
           ? 'cur'
           : 'todo';
-    step.className = `j-step ${state}${stage?.state === 'running' ? ' calm' : ''}`;
+    step.className = `j-step ${state}${stage?.state === 'running' ? ' calm' : ''} is-${stage?.state || 'pending'}`;
     const label = step.querySelector('.j-lab');
-    if (label) label.textContent = stage?.label || defaultLabels[index];
+    const stageLabel = stage?.label || defaultLabels[index];
+    if (label) label.textContent = stageLabel;
+    const progress = stage?.progress
+      ? ` · ${Math.max(0, stage.progress.current)}/${Math.max(0, stage.progress.total)}`
+      : '';
+    const stateText = stage
+      ? `${String(stage.summary || '').replace(`${stageLabel}：`, '') || '状态未知'}${progress}`
+      : '未开始';
+    const detail = step.querySelector('.j-state');
+    if (detail) detail.textContent = stateText;
+    step.setAttribute('aria-label', `${stageLabel}，${stateText}`);
   });
-  fields.pubQueueLink?.classList.remove('hidden');
-  fields.pubPreviewLink.classList.toggle('hidden', waitingCount === 0 || !publishDraftQueueSupported());
-  fields.pubPreviewLink.textContent = '审核稿件 ↗';
+  setPubActionVisibility(fields.pubQueueLink, true);
+  setPubActionVisibility(
+    fields.pubPreviewLink,
+    active?.status === 'waiting_approval' && publishDraftQueueSupported(),
+  );
+  fields.pubPreviewLink.textContent = '审核稿件';
   syncPubCarouselControls(carousel.entries, carousel.index, collapsed);
   syncPublishPreviewActions(status);
   return true;
@@ -2358,8 +2410,14 @@ function renderXhsPublishQueueDock(status) {
 
 function renderPublish(status, nowMs) {
   if (renderXhsPublishQueueDock(status)) return;
+  fields.pubCard.classList.remove('queue-surface');
+  fields.pubKicker.classList.add('hidden');
+  fields.pubCount.classList.add('hidden');
+  fields.pubCount.classList.remove('attention');
+  fields.pubMeta.classList.remove('chip', 'attention');
+  fields.pubSteps.querySelectorAll('.j-state').forEach((detail) => { detail.textContent = ''; });
   hidePubCarouselControls();
-  fields.pubQueueLink?.classList.add('hidden');
+  setPubActionVisibility(fields.pubQueueLink, false);
   const overview = status && status.environmentOverview;
   if (overview && !overview.confirmed) {
     const loading = Boolean(overview.loading);
@@ -2375,7 +2433,7 @@ function renderPublish(status, nowMs) {
     fields.pubTitle.classList.add('muted');
     fields.pubMeta.textContent = '尚未取得云端确认数据';
     fields.pubFoot.textContent = loading ? '正在从云端获取' : '请稍后重试，当前不会把未知显示成未发布';
-    fields.pubPreviewLink.classList.add('hidden');
+    setPubActionVisibility(fields.pubPreviewLink, false);
     fields.pubSteps.querySelectorAll('.j-step').forEach((step) => { step.className = 'j-step todo'; });
     return;
   }
@@ -2413,7 +2471,9 @@ function renderPublish(status, nowMs) {
   codeChip.textContent = view.code || (preview && preview.code) || '—';
   fields.pubMeta.appendChild(codeChip);
   renderFootRich(fields.pubFoot, view.foot); // 固定模板内 **…** 加粗，破掉整片灰
-  fields.pubPreviewLink.classList.toggle('hidden', !(view.mode === 'flow' && publishDraftEntryAvailable(status)));
+  const previewEntryVisible = view.mode === 'flow' && publishDraftEntryAvailable(status);
+  setPubActionVisibility(fields.pubPreviewLink, previewEntryVisible);
+  fields.pubPreviewLink.textContent = '查看稿件 ↗';
   syncPublishPreviewActions(status);
   const steps = fields.pubSteps.querySelectorAll('.j-step');
   view.stepStates.forEach((state, i) => {
@@ -3373,19 +3433,7 @@ function closePublishPreview() {
 }
 
 fields.pubPreviewLink.addEventListener('click', () => openPublishPreview(false));
-fields.pubPreviewLink.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' || e.key === ' ') {
-    e.preventDefault();
-    openPublishPreview();
-  }
-});
 fields.pubQueueLink?.addEventListener('click', openFullPublishQueue);
-fields.pubQueueLink?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' || e.key === ' ') {
-    e.preventDefault();
-    openFullPublishQueue();
-  }
-});
 fields.pubCarouselPrev?.addEventListener('click', () => movePubCarousel(-1));
 fields.pubCarouselNext?.addEventListener('click', () => movePubCarousel(1));
 async function submitPublishPreviewAction(approved) {
