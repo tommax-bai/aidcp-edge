@@ -568,12 +568,13 @@ export function buildChromeArgs(opts: {
     // 注意：刻意不加 --enable-automation（它会让 UA 暴露调试态、弹出自动化提示）。
     // —— 固定桌面视口：优先进小红书【宽布局】（左侧栏），避免落入【窄布局】（底部图标栏）
     //    导致 self-id/通知/滚动等选择器与滚动机制错位（见 docs/xhs-layout-states.md）。
-    //    --window-size 作兜底；--start-maximized 覆盖 profile 记忆的小窗口（多数平台优先生效）。
+    //    --window-size 作兜底；有 Electron 启动暂存坐标时不再同时最大化，避免首帧先铺满主屏。
+    //    裸启动没有坐标时仍用 --start-maximized 覆盖 profile 记忆的小窗口。
     //    注：代码仍按两布局健壮，不只依赖此处把窗口撑宽。
     '--window-size=1440,980',
-    '--start-maximized',
     `--user-data-dir=${opts.profileDir}`,
   ];
+  if (!opts.windowPosition) args.push('--start-maximized');
   if (opts.windowPosition) {
     args.push(`--window-position=${Math.floor(opts.windowPosition.left)},${Math.floor(opts.windowPosition.top)}`);
   }

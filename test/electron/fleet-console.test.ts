@@ -70,7 +70,7 @@ async function boot(
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
   let pushBatchProxyProgress: (progress: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], resetParking: [], startAll: [], closeAll: [], personaPreview: [], personaFill: [], select: [], close: [], browserOpen: [], browserClose: [], notify: [], start: [], resume: [], saveNickname: [], updateProxies: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], showDrivenOptions: [], resetParking: [], startAll: [], closeAll: [], personaPreview: [], personaFill: [], select: [], close: [], browserOpen: [], browserClose: [], notify: [], start: [], resume: [], saveNickname: [], updateProxies: [] };
   const personaStatusByEnv = new Map<string, Record<string, unknown>>();
   const settings = {
     provider: 'adspower',
@@ -149,7 +149,7 @@ async function boot(
     },
     relogin: async (envId: string) => { calls.relogin.push(envId); return makeStatus({ envId }); },
     notify: async (payload: unknown) => { calls.notify.push(payload); return { ok: true }; },
-    showDrivenBrowser: async (envId: string) => { calls.showDriven.push(envId); return { ok: true }; },
+    showDrivenBrowser: async (envId: string, opts?: unknown) => { calls.showDriven.push(envId); calls.showDrivenOptions.push(opts); return { ok: true }; },
     resetBrowserParking: async (envId: string) => { calls.resetParking.push(envId); return { ok: true }; },
     pause: async () => makeStatus(),
     resume: async (envId: string) => { calls.resume.push(envId); return makeStatus({ envId }); },
@@ -422,6 +422,12 @@ test('环境头像三态：①未选中→选中 ②再点→抬前显示（show
   rowOf('ads-p2').click();
   await tick();
   assert.deepEqual(calls.showDriven, ['ads-p2'], '第二次点击抬前该环境浏览器');
+  assert.equal(
+    (calls.showDrivenOptions[0] as { keepClientForeground?: boolean } | undefined)
+      ?.keepClientForeground,
+    true,
+    '头像显示必须要求 AIDCP 最终保持在前',
+  );
   assert.equal(rowOf('ads-p2').classList.contains('shown'), true, '抬前后行进入 shown 态');
   assert.equal(w.document.querySelector('#rail-msg')!.textContent, '', '窗口前置成功不展示说明文案');
   // ③ 已显示 → 归位，撤 shown
@@ -1030,6 +1036,7 @@ test('引导处理流：排队一次一个、窗口前置成功静默、恢复�
   (w.document.querySelector('#guide-open') as HTMLElement).click();
   await tick();
   assert.equal(calls.showDriven.length, 1);
+  assert.equal(calls.showDrivenOptions[0], undefined, '登录引导仍需浏览器自身保持前台');
   assert.equal(w.document.querySelector('#guide-hint')!.textContent, '');
   assert.equal(w.document.querySelector('#guide-hint')!.classList.contains('hidden'), true);
   // 完成 · 重检 → 触发该环境 relogin

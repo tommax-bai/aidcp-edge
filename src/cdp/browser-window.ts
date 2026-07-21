@@ -36,6 +36,17 @@ export interface BrowserPersonaNoticeController {
   dispose(): void;
 }
 
+interface BrowserShowControlPayload {
+  requestId?: string;
+}
+
+type BrowserParkingControlMessage = {
+  type?: string;
+  payload?: BrowserPersonaNotice | BrowserShowControlPayload;
+};
+
+export const BROWSER_PARKING_REPLY_PREFIX = '[browser-parking-reply]';
+
 const VALID_MODES = new Set(['primary-screen', 'parking-display', 'edge-strip', 'offscreen']);
 const MIN_VIEWPORT_WIDTH = 1000;
 const MIN_VIEWPORT_HEIGHT = 600;
@@ -272,20 +283,66 @@ export function installBrowserParkingStdinControl(
   const rl = createInterface({ input: process.stdin });
   logger('[browser-parking] control-ready');
   rl.on('line', (line) => {
-    let msg: { type?: string; payload?: BrowserPersonaNotice };
-    try {
-      msg = JSON.parse(line) as { type?: string; payload?: BrowserPersonaNotice };
-    } catch {
-      return;
-    }
-    if (msg.type === 'browser.show' && config) {
-      void showBrowserWindow(cdp, config, logger).catch((e) => logger(`[browser-parking] browser.show failed: ${(e as Error).message}`));
-    } else if (msg.type === 'browser.park' && config) {
-      void applyBrowserParking(cdp, config, logger).catch((e) => logger(`[browser-parking] browser.park failed: ${(e as Error).message}`));
-    } else if (msg.type === 'browser.personaNotice') {
-      void personaNotice.update(msg.payload || { active: false })
-        .catch((e) => logger(`[browser-persona-notice] update failed: ${(e as Error).message}`));
-    }
+    void handleBrowserParkingControlLine(cdp, config, personaNotice, line, logger);
   });
   rl.on('close', () => personaNotice.dispose());
+}
+
+function browserShowRequestId(payload: BrowserParkingControlMessage['payload']): string {
+  if (!payload || typeof payload !== 'object' || !('requestId' in payload)) return '';
+  const id = String(payload.requestId || '').trim();
+  return /^[a-zA-Z0-9_-]{1,120}$/.test(id) ? id : '';
+}
+
+function emitBrowserParkingReply(
+  requestId: string,
+  ok: boolean,
+  logger: (message: string) => void,
+  error?: string,
+): void {
+  if (!requestId) return;
+  logger(`${BROWSER_PARKING_REPLY_PREFIX} ${JSON.stringify({
+    id: requestId,
+    ok,
+    ...(error ? { error: error.slice(0, 240) } : {}),
+  })}`);
+}
+
+/** 单行控制处理单独导出，便于用真实异步顺序测试 show 完成回执；stdin 只负责逐行投递。 */
+export async function handleBrowserParkingControlLine(
+  cdp: CdpClient,
+  config: BrowserParkingConfig | null,
+  personaNotice: BrowserPersonaNoticeController,
+  line: string,
+  logger: (message: string) => void = console.log,
+): Promise<void> {
+  let msg: BrowserParkingControlMessage;
+  try {
+    msg = JSON.parse(line) as BrowserParkingControlMessage;
+  } catch {
+    return;
+  }
+  if (msg.type === 'browser.show') {
+    const requestId = browserShowRequestId(msg.payload);
+    try {
+      await showBrowserWindow(cdp, config, logger);
+      emitBrowserParkingReply(requestId, true, logger);
+    } catch (e) {
+      const error = (e as Error).message;
+      logger(`[browser-parking] browser.show failed: ${error}`);
+      emitBrowserParkingReply(requestId, false, logger, error);
+    }
+  } else if (msg.type === 'browser.park' && config) {
+    try {
+      await applyBrowserParking(cdp, config, logger);
+    } catch (e) {
+      logger(`[browser-parking] browser.park failed: ${(e as Error).message}`);
+    }
+  } else if (msg.type === 'browser.personaNotice') {
+    try {
+      await personaNotice.update((msg.payload as BrowserPersonaNotice) || { active: false });
+    } catch (e) {
+      logger(`[browser-persona-notice] update failed: ${(e as Error).message}`);
+    }
+  }
 }
