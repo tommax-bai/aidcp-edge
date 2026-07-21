@@ -13,6 +13,7 @@ const parking = require('../../src/electron/browser-parking.cjs') as {
     bounds: { left: number; top: number; width: number; height: number };
     fallbackBounds: { left: number; top: number; width: number; height: number };
     visibleBounds: { left: number; top: number; width: number; height: number };
+    launchPosition: { left: number; top: number };
   };
   parkingEnv: (plan: unknown) => Record<string, string>;
 };
@@ -42,6 +43,7 @@ test('parking-display targets a secondary display when available', () => {
   const plan = parking.computeBrowserParkingPlan('parking-display', [primary, secondary], primary);
   assert.equal(plan.effectiveMode, 'parking-display');
   assert.deepEqual(plan.bounds, { left: 1920, top: 0, width: 1440, height: 980 });
+  assert.deepEqual(plan.launchPosition, { left: 3600, top: 0 }, '启动暂存位必须越过最右侧副屏');
 });
 
 test('parking-display falls back to the default (primary-screen) without a secondary display', () => {
@@ -62,6 +64,7 @@ test('parkingEnv serializes bounds and launch position', () => {
   const plan = parking.computeBrowserParkingPlan('edge-strip', [primary], primary);
   const env = parking.parkingEnv(plan);
   assert.equal(env.AIDCP_BROWSER_PARKING_MODE, 'edge-strip');
-  assert.equal(env.AIDCP_BROWSER_PARKING_LAUNCH_POSITION, '1902,0');
+  assert.equal(env.AIDCP_BROWSER_PARKING_LAUNCH_POSITION, '2000,0');
   assert.deepEqual(JSON.parse(env.AIDCP_BROWSER_PARKING_BOUNDS), plan.bounds);
+  assert.equal(plan.bounds.left, 1902, '最终 edge-strip 停放位与屏外启动暂存位保持独立');
 });

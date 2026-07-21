@@ -94,7 +94,7 @@ test('AdsPowerProvider.launch 成功 → 端点带 debug_port、实例非 reused
   assert.ok(payload.launch_args?.includes('--window-size=1440,980'));
   assert.ok(payload.launch_args?.includes('--deny-permission-prompts'));
   assert.ok(payload.launch_args?.includes('--lang=en-US')); // C1: 界面语言钉英文（兜登出 chrome，见 facebook-locale-pin-en-us）
-  assert.ok(payload.launch_args?.includes('--start-maximized')); // 覆盖 AdsPower profile 记忆的窄窗 → 强制 PC 布局（FB 无 role=feed/article 兜底）
+  assert.ok(!payload.launch_args?.includes('--start-maximized'), '有启动暂存坐标时不得先最大化造成主屏闪现');
   assert.ok(payload.launch_args?.includes('--window-position=1902,0'));
   assert.ok(payload.launch_args?.some((arg) => /xiaohongshu\.com/.test(arg)));
   assert.equal(startCall.headers?.Authorization, 'Bearer secret');
@@ -124,6 +124,7 @@ test('AdsPowerProvider.launch 支持平台 driver 注入起始页', async () => 
   assert.ok(startCall);
   const payload = JSON.parse(startCall.body || '{}') as { launch_args?: string[] };
   assert.ok(payload.launch_args?.includes('https://example.test/home'));
+  assert.ok(payload.launch_args?.includes('--start-maximized'), '裸启动无暂存坐标时保留历史窄窗兜底');
 });
 
 test('AdsPowerProvider.launch：V2 Active 返回有效端点时直接接管，不重复 start', async () => {

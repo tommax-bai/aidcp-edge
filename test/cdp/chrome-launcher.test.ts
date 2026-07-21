@@ -96,6 +96,7 @@ test('buildChromeArgs 含全部硬性调试参数', () => {
   assert.ok(args.includes('--user-data-dir=/tmp/p'));
   assert.equal(args[args.length - 1], 'https://www.xiaohongshu.com/explore');
   assert.ok(!args.includes('--headless=new'));
+  assert.ok(args.includes('--start-maximized'), '无启动暂存坐标时保留最大化兜底');
 });
 
 test('buildChromeArgs headless 时追加 --headless=new', () => {
@@ -112,6 +113,7 @@ test('buildChromeArgs 带窗口位置提示', () => {
     startUrl: 'u',
   });
   assert.ok(args.includes('--window-position=1902,0'));
+  assert.ok(!args.includes('--start-maximized'), '有启动暂存坐标时不得同时最大化');
 });
 
 test('buildChromeArgs 含反检测启动参数且不含 --enable-automation', () => {

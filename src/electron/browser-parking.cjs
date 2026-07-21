@@ -105,6 +105,20 @@ function chooseSecondaryDisplay(displays, primary) {
     })[0] || null;
 }
 
+// 冷启动暂存位与最终停放位必须解耦：取所有已知显示器工作区的最右边界，再向右留出间隔。
+// AdsPower/Chrome 在 CDP 端口可用前就会创建原生窗口；这个 best-effort 坐标让首帧尽量出现在
+// 整个虚拟桌面之外。窗口管理器仍可能夹回屏内，故 attach 后的 bounds + 可见性探针仍是权威。
+function startupStagingPosition(displays, primary) {
+  const list = Array.isArray(displays) && displays.length > 0
+    ? displays
+    : [primary].filter(Boolean);
+  const right = list.reduce((max, display) => {
+    const r = rectOf(display);
+    return Math.max(max, r.x + r.width);
+  }, rectOf(primary).x + rectOf(primary).width);
+  return { left: right + OFFSCREEN_GAP_PX, top: rectOf(primary).y };
+}
+
 // 单一入口把模式解析成停放 bounds，让「无副屏降级到默认」与「默认模式本身」用同一处逻辑，
 // 绝不出现 effectiveMode 与 bounds 各说各话（改默认模式时这里自动跟随）。
 function boundsForMode(mode, primary) {
@@ -144,7 +158,8 @@ function computeBrowserParkingPlan(requestedMode, displays, primaryDisplay) {
     bounds,
     fallbackBounds,
     visibleBounds: showBounds,
-    launchPosition: { left: bounds.left, top: bounds.top },
+    // 启动暂存永远在所有已知显示器之外；最终停放仍由 bounds 独立表达。
+    launchPosition: startupStagingPosition(displays, primary),
   };
 }
 
@@ -167,5 +182,6 @@ module.exports = {
   PARKING_WINDOW_HEIGHT,
   normalizeParkingMode,
   computeBrowserParkingPlan,
+  startupStagingPosition,
   parkingEnv,
 };

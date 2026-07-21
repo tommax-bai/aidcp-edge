@@ -105,6 +105,11 @@ let personaSeq = 0;
 // 稿件预览审批桥：渲染层动作经目标环境 core stdin → cloud WS → stdout 回执。
 const publishApprovalPending = new Map(); // id -> { resolve, timer }
 let publishApprovalSeq = 0;
+// 环境头像“显示在 AIDCP 下方”桥：core 完成 setBounds + bringToFront 后回一条关联回执，
+// Electron 再把自己的主窗抬回最前。固定 sleep 会与不同机器/CDP 时序竞态，故只认具名完成回执。
+const browserShowPending = new Map(); // id -> { envId, resolve, timer }
+const BROWSER_PARKING_REPLY_PREFIX = '[browser-parking-reply]';
+const BROWSER_SHOW_COMPLETION_TIMEOUT_MS = 3000;
 let isQuitting = false;
 // 优雅全停已完成、允许本次 quit 直落（before-quit 二次进入不再拦截）。
 let quitFinal = false;
@@ -2480,6 +2485,61 @@ function sendBrowserParkingCommand(handle, type) {
   return { ok: true };
 }
 
+function focusAidcpAboveDrivenBrowser() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { ok: false, error: 'AIDCP 主窗口已关闭，无法把它恢复到浏览器上方' };
+  }
+  try {
+    if (typeof mainWindow.isMinimized === 'function' && mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    if (typeof mainWindow.moveTop === 'function') mainWindow.moveTop();
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error?.message || 'AIDCP 主窗口恢复前台失败' };
+  }
+}
+
+function handleBrowserParkingReply(handle, raw) {
+  let reply;
+  try {
+    reply = JSON.parse(String(raw || ''));
+  } catch {
+    return false;
+  }
+  const id = reply && typeof reply.id === 'string' ? reply.id : '';
+  const pending = id ? browserShowPending.get(id) : null;
+  if (!pending || pending.envId !== handle?.envId) return false;
+  browserShowPending.delete(id);
+  clearTimeout(pending.timer);
+  if (reply.ok !== true) {
+    pending.resolve({ ok: false, error: String(reply.error || '浏览器窗口移动失败') });
+    return true;
+  }
+  pending.resolve(focusAidcpAboveDrivenBrowser());
+  return true;
+}
+
+function showDrivenBrowserBelowClient(handle) {
+  if (!handle || !handle.child || !handle.browserParkingReady || !handle.child.stdin || handle.child.stdin.destroyed) {
+    return Promise.resolve({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' });
+  }
+  const id = `browser-show-${crypto.randomUUID()}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      browserShowPending.delete(id);
+      resolve({ ok: false, error: '浏览器窗口移动超时，AIDCP 未收到完成确认' });
+    }, BROWSER_SHOW_COMPLETION_TIMEOUT_MS);
+    browserShowPending.set(id, { envId: handle.envId, resolve, timer });
+    const sent = writeBrowserControlCommand(handle, 'browser.show', { requestId: id });
+    if (!sent.ok) {
+      browserShowPending.delete(id);
+      clearTimeout(timer);
+      resolve(sent);
+    }
+  });
+}
+
 // 建号自助人设：把带 correlation id 的 persona 命令写进**目标环境**（envId 路由，缺省选中环境）的 core stdin，
 // 返回按 [persona-reply] 命中的 Promise。不 gate 在 browserParkingReady（persona 与 parking 独立）。
 // 红线（跨账号误绑）：persist 必须打到「草稿所属环境」的子进程，不能因中途切换环境把 A 的人设写进 B 的账号。
@@ -4295,6 +4355,11 @@ function handleEdgeLogLine(handle, message, isError = false) {
     handlePublishApprovalReply(message.slice('[publish-approval-reply]'.length).trim());
     return;
   }
+  // 浏览器窗口完成回执只用于关联“浏览器先抬前 → AIDCP 再抬前”的顺序，不进入普通日志/UI 状态。
+  if (message.startsWith(BROWSER_PARKING_REPLY_PREFIX)) {
+    handleBrowserParkingReply(handle, message.slice(BROWSER_PARKING_REPLY_PREFIX.length).trim());
+    return;
+  }
   // 引擎命令诊断是核心本地生成的白名单结构化行：主进程再验一次形状，按环境合并进内存态。
   // 无论解析成功与否，原始 JSON 都不得进入 edge.log / renderer 原始日志；只留下固定安全痕迹。
   if (message.startsWith(commandDiagnostics.PREFIX)) {
@@ -5704,7 +5769,12 @@ ipcMain.handle('browser:openAdsDownload', () => {
   void shell.openExternal(ADS_DOWNLOAD_URL);
   return true;
 });
-ipcMain.handle('browser:showDriven', (_event, envId) => sendBrowserParkingCommand(resolveHandle(envId), 'browser.show'));
+ipcMain.handle('browser:showDriven', (_event, envId, opts) => {
+  const handle = resolveHandle(envId);
+  return opts && opts.keepClientForeground === true
+    ? showDrivenBrowserBelowClient(handle)
+    : sendBrowserParkingCommand(handle, 'browser.show');
+});
 ipcMain.handle('browser:resetParking', (_event, envId) => sendBrowserParkingCommand(resolveHandle(envId), 'browser.park'));
 // 账号人设（change offline-account-persona-management）：这三条具名 IPC 只接收本地 envId，并在 main
 // 权威换成 profileId/envKey 后直连 customer-auth。浏览器与环境 core 不参与，因此停止状态也能读写；

@@ -74,7 +74,7 @@ interface Stub {
   restart: () => Promise<unknown>;
   relogin: () => Promise<unknown>;
   openAdsDownload: () => void;
-  showDrivenBrowser: () => Promise<{ ok: boolean; error?: string }>;
+  showDrivenBrowser: (envId?: string, opts?: { keepClientForeground?: boolean }) => Promise<{ ok: boolean; error?: string }>;
   resetBrowserParking: () => Promise<{ ok: boolean; error?: string }>;
   adsStatus: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
   adsListProfiles: (opts?: unknown) => Promise<unknown>;

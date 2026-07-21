@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (patch) => ipcRenderer.invoke('settings:save', patch),
   openAdsDownload: () => ipcRenderer.invoke('browser:openAdsDownload'),
-  showDrivenBrowser: (envId) => ipcRenderer.invoke('browser:showDriven', envId),
+  showDrivenBrowser: (envId, opts) => ipcRenderer.invoke('browser:showDriven', envId, opts),
   resetBrowserParking: (envId) => ipcRenderer.invoke('browser:resetParking', envId),
   // 多环境 fleet 控制面：花名册快照 / 选中环境 / 全部启动（内存预检，force 放行）/ 全部停止 / 环境栏收展持久化。
   fleetGet: () => ipcRenderer.invoke('fleet:get'),

@@ -4256,7 +4256,7 @@ function makeRailRow(row) {
     ? '点击选中'
     : isShown
       ? '再次点击：浏览器归位'
-      : '再次点击：把浏览器抬到主屏前台';
+      : '再次点击：显示浏览器（AIDCP 保持在前）';
   btn.title = `${displayName} · ${row.label} · ${nextHint}`;
   const ava = document.createElement('span');
   ava.className = 'rail-ava';
@@ -4510,8 +4510,9 @@ function beginRailNameEdit(row, nameEl) {
   input.addEventListener('blur', () => { void commit(); });
 }
 
-// 环境头像三态（用户要求）：①未选中→选中（红高亮）②已选中且浏览器未抬前→把浏览器抬到主屏前台并聚焦
-// ③已抬前→让浏览器归位（回背景停放位）。②③复用既有 showDrivenBrowser / resetBrowserParking 通道。
+// 环境头像三态（用户要求）：①未选中→选中（红高亮）②已选中且浏览器未显示→先把浏览器抬到可见位，
+// 再由主进程把 AIDCP 抬回最前，使浏览器落在客户端下方；③已显示→让浏览器归位（回背景停放位）。
+// 引导登录仍调用不带 keepClientForeground 的 showDrivenBrowser，浏览器保持前台供人工处理。
 // 诚实边界：指令失败（引擎未起 / 浏览器未就绪）绝不推进相位，把回执文案如实显示在环境栏消息位。
 // 人设 ✦ 图标自带 stopPropagation（见 makeRailRow），不会误触发本三态。
 async function onRailRowActivate(envId) {
@@ -4522,7 +4523,7 @@ async function onRailRowActivate(envId) {
   if (typeof api !== 'function') return;
   const label = showing ? '显示浏览器' : '浏览器归位';
   try {
-    const r = await api(envId);
+    const r = await api(envId, showing ? { keepClientForeground: true } : undefined);
     if (r && r.ok) {
       fleetView.shownEnv = showing ? envId : null; // 仅成功才推进相位
       setRailMsg('');

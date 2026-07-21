@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
   applyBrowserParking,
+  BROWSER_PARKING_REPLY_PREFIX,
   browserParkingConfigFromEnv,
   createBrowserPersonaNoticeController,
+  handleBrowserParkingControlLine,
   setBrowserPersonaNotice,
   showBrowserWindow,
 } from '../../src/cdp/index.js';
@@ -65,6 +67,67 @@ test('showBrowserWindow moves to visible bounds and raises the window', async ()
   const set = page.calls.find((c) => c.method === 'Browser.setWindowBounds');
   assert.deepEqual((set?.params.bounds as Record<string, unknown>).left, 80);
   assert.ok(page.calls.some((c) => c.method === 'Page.bringToFront'), '抬前需把窗口带到最前并聚焦');
+});
+
+test('correlated browser.show replies only after visible move and browser raise complete', async () => {
+  const cfg = browserParkingConfigFromEnv(env);
+  const page = fakeCdp([]);
+  const logs: string[] = [];
+  const persona = { update: async () => undefined, dispose: () => undefined };
+  await handleBrowserParkingControlLine(
+    page.cdp,
+    cfg,
+    persona,
+    JSON.stringify({ type: 'browser.show', payload: { requestId: 'browser-show-test-1' } }),
+    (line) => logs.push(line),
+  );
+  assert.deepEqual(page.calls.map((call) => call.method).slice(0, 3), [
+    'Browser.getWindowForTarget',
+    'Browser.setWindowBounds',
+    'Page.bringToFront',
+  ]);
+  assert.equal(logs.at(-1), `${BROWSER_PARKING_REPLY_PREFIX} {"id":"browser-show-test-1","ok":true}`);
+});
+
+test('correlated browser.show reports failure while uncorrelated show emits no reply', async () => {
+  const cfg = browserParkingConfigFromEnv(env);
+  const persona = { update: async () => undefined, dispose: () => undefined };
+  const failedLogs: string[] = [];
+  const failedCdp = {
+    send: async (method: string) => {
+      if (method === 'Browser.getWindowForTarget') return { windowId: 7 };
+      if (method === 'Browser.setWindowBounds') throw new Error('set bounds denied');
+      return {};
+    },
+  };
+  await handleBrowserParkingControlLine(
+    failedCdp as never,
+    cfg,
+    persona,
+    JSON.stringify({ type: 'browser.show', payload: { requestId: 'browser-show-test-2' } }),
+    (line) => failedLogs.push(line),
+  );
+  assert.match(failedLogs.at(-1) || '', /\[browser-parking-reply\].*"ok":false.*set bounds denied/);
+
+  const missingConfigLogs: string[] = [];
+  await handleBrowserParkingControlLine(
+    fakeCdp([]).cdp,
+    null,
+    persona,
+    JSON.stringify({ type: 'browser.show', payload: { requestId: 'browser-show-test-3' } }),
+    (line) => missingConfigLogs.push(line),
+  );
+  assert.match(missingConfigLogs.at(-1) || '', /\[browser-parking-reply\].*"ok":false.*未配置浏览器窗口位置/);
+
+  const plainLogs: string[] = [];
+  await handleBrowserParkingControlLine(
+    fakeCdp([]).cdp,
+    cfg,
+    persona,
+    JSON.stringify({ type: 'browser.show' }),
+    (line) => plainLogs.push(line),
+  );
+  assert.equal(plainLogs.some((line) => line.startsWith(BROWSER_PARKING_REPLY_PREFIX)), false);
 });
 
 test('browserParkingConfigFromEnv accepts the primary-screen mode', () => {
