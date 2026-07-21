@@ -406,6 +406,71 @@ test('环境栏：现有框架按运行阶段分组，排队位次独立展示�
   assert.match(rendererCss, /\.rail-row\.state-standby \.rail-dot\s*\{[^}]*background:\s*transparent;[^}]*border:\s*1\.5px solid #16a34a;/s);
 });
 
+test('增量心跳保留完整投影，待机与真实排队不会退化为运行或启动', async () => {
+  const environments = [
+    { envId: 'env-standby', name: '待机环境', status: makeStatus({
+      envId: 'env-standby',
+      session: 'resting',
+      automationState: 'ready',
+      engineLinkState: 'connected',
+      browserState: 'closed',
+      queueStage: null,
+      queuePosition: null,
+    }) },
+    { envId: 'env-queued', name: '排队环境', status: makeStatus({
+      envId: 'env-queued',
+      automationState: 'waiting_resource',
+      engineLinkState: 'connected',
+      browserState: 'queued',
+      queueStage: 'slot',
+      queuePosition: 2,
+    }) },
+  ];
+  const { w, pushStatus } = await boot({
+    fleetGet: async () => ({
+      provider: 'adspower',
+      selectedEnvId: 'env-standby',
+      railCollapsed: false,
+      environments,
+    }),
+  }, {
+    railCollapsed: false,
+    environments: environments.map((env) => ({ profileId: env.envId, name: env.name, platform: 'xiaohongshu' })),
+  });
+
+  pushStatus(makeStatus({
+    envId: 'env-standby',
+    envName: '待机环境',
+    edge: 'running',
+    session: 'resting',
+    automationState: 'ready',
+    engineLinkState: 'connected',
+    browserState: 'closed',
+    queueStage: null,
+    queuePosition: null,
+  }));
+  pushStatus(makeStatus({
+    envId: 'env-queued',
+    envName: '排队环境',
+    edge: 'running',
+    session: 'running',
+    automationState: 'waiting_resource',
+    engineLinkState: 'connected',
+    browserState: 'queued',
+    queueStage: 'slot',
+    queuePosition: 3,
+  }));
+  await tick();
+
+  const standby = w.document.querySelector('.rail-row[data-env-id="env-standby"]') as HTMLElement;
+  const queued = w.document.querySelector('.rail-row[data-env-id="env-queued"]') as HTMLElement;
+  assert.equal(standby.classList.contains('state-standby'), true, 'browser-absent 心跳仍显示待机中');
+  assert.match(standby.title, /待机中/);
+  assert.equal(queued.classList.contains('state-queued'), true, '槽位 FIFO 心跳仍显示排队中');
+  assert.equal(queued.querySelector('.rail-queue-position')?.textContent, '#3', '位次跟随权威增量投影更新');
+  assert.match(queued.title, /排队中 #3/);
+});
+
 test('环境头像三态：①未选中→选中 ②再点→抬前显示（shown 态）③再点→归位（撤 shown）', async () => {
   const { w, calls, pushStatus } = await boot();
   // 抬前/归位只对在跑环境有意义（离线环境的显示态会被清）：先让环境二在运行。

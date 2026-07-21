@@ -59,6 +59,15 @@ test('主进程从权威调度器结构化投影位次，不解析状态文案',
   assert.match(mainSource, /\.\.\.lifecycleQueueProjection\(handle\)/, '结构化字段必须进入 statusOf 快照');
 });
 
+test('增量状态与 fleet 快照共用完整生命周期投影', () => {
+  const start = mainSource.indexOf('function updateStatus(handle, patch)');
+  const end = mainSource.indexOf('\nfunction presencePatch', start);
+  assert.ok(start >= 0 && end > start, '主进程应存在独立增量状态出口');
+  const block = mainSource.slice(start, end);
+  assert.match(block, /const payload = statusOf\(handle\);/, '每次 status:update 都必须重算四轴与权威队列位次');
+  assert.doesNotMatch(block, /const payload = \{\s*\.\.\.handle\.status/, '不得再推送缺少生命周期投影的原始状态');
+});
+
 test('单环境内存估值默认取实测口径 700MB（旧的 1GB 是没量过的设计缺省）', () => {
   assert.equal(fleet.PER_ENV_BYTES_DEFAULT, 700 * 1024 * 1024);
 });

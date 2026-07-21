@@ -2252,7 +2252,10 @@ function updateStatus(handle, patch) {
   syncBrowserPersonaNotice(handle);
   if (patch.risk && handle.envId === selectedEnvId) applyOverlayTone(patch.risk);
   if (full.lastPublish) saveUiState();
-  const payload = { ...handle.status, envId: handle.envId, envName: handle.name };
+  // 增量状态与 fleet 全量快照必须共用同一份完整投影。渲染层会按 envId 整体替换
+  // status；若这里仅展开原始 handle.status，下一次普通心跳就会丢掉四轴与权威
+  // 队列位次，把正确的待机/排队状态重新兼容推断成运行/启动。
+  const payload = statusOf(handle);
   BrowserWindow.getAllWindows().forEach((window) => {
     window.webContents.send('status:update', payload);
   });
