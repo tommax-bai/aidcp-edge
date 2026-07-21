@@ -396,8 +396,11 @@
     ];
   }
 
-  function runtimeGuidanceView(status, nowMs) {
+  function runtimeGuidanceView(status, nowMs, platform) {
     const s = status || {};
+    // Facebook 未启动时，缓存的首帖 / 窗口 / 今日成果不代表自动化仍在推进。
+    // 只匹配标准化后的 stopped；待机、暂停、排队、启动与异常继续走既有证据规则。
+    if (platform === 'facebook' && lifecycleView(s).automationState === 'stopped') return null;
     const firstPost = firstPostGuidance(s);
     if (firstPost) return firstPost;
     const p = s.presence || null;

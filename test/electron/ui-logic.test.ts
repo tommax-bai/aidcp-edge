@@ -42,7 +42,7 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   bandTone: (s: Record<string, unknown>) => string;
   detailRows: (s: Record<string, unknown>) => Array<{ key: string; label: string; value: string }>;
   presenceView: (s: Record<string, unknown>, now: number) => PresenceV;
-  runtimeGuidanceView: (s: Record<string, unknown>, now: number) => RuntimeGuidanceV | null;
+  runtimeGuidanceView: (s: Record<string, unknown>, now: number, platform?: string) => RuntimeGuidanceV | null;
   publishView: (
     p: Record<string, unknown> | null,
     last: Record<string, unknown> | null,
@@ -375,6 +375,47 @@ test('第一篇作品引导：首轮单独显示 0/20，不从今日计划推断
     counter: '0/20',
     meta: '通常筛出 1 条灵感',
   });
+});
+
+test('运行价值说明：Facebook 未启动优先隐藏缓存进度，并兼容旧状态投影', () => {
+  const now = Date.now();
+  const retainedProgress = {
+    totals: { view: 20 },
+    firstPost: { state: 'searching', viewed: 20, target: 20, startedAt: now - 60_000 },
+    windows: {
+      day: {
+        active: true,
+        releaseAt: now + 3_600_000,
+        totals: { view: 20 },
+        quotas: { view: 20 },
+        saturated: ['view'],
+      },
+    },
+  };
+  const structuredStopped = st({ automationState: 'stopped', dailyUsage: retainedProgress });
+  assert.equal(uiLogic.runtimeGuidanceView(structuredStopped, now, 'facebook'), null);
+  assert.equal(uiLogic.runtimeGuidanceView(structuredStopped, now, 'xiaohongshu')?.mode, 'first-post');
+
+  const legacyStopped = st({
+    automationState: undefined,
+    edge: 'stopped',
+    coreState: 'stopped',
+    session: 'idle',
+    dailyUsage: retainedProgress,
+  });
+  assert.equal(uiLogic.runtimeGuidanceView(legacyStopped, now, 'facebook'), null);
+  assert.equal(uiLogic.runtimeGuidanceView(legacyStopped, now)?.mode, 'first-post', '未知平台不得按 Facebook 隐藏');
+});
+
+test('运行价值说明：Facebook 仅精确隐藏 stopped，其他生命周期继续按现有证据显示', () => {
+  const now = Date.now();
+  const dailyUsage = {
+    firstPost: { state: 'searching', viewed: 4, target: 20, startedAt: now - 60_000 },
+  };
+  for (const automationState of ['starting', 'waiting_resource', 'ready', 'running', 'paused', 'pausing', 'stopping', 'error']) {
+    const view = uiLogic.runtimeGuidanceView(st({ automationState, dailyUsage }), now, 'facebook');
+    assert.equal(view?.mode, 'first-post', `${automationState} 不得被当成未启动`);
+  }
 });
 
 test('第一篇作品引导：命中灵感后进入一次性生成态，不承诺浏览 20 条必定成功', () => {

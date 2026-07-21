@@ -2068,7 +2068,7 @@ function renderRuntimeGuidanceHarvest(harvest) {
 }
 
 function renderRuntimeGuidance(status, nowMs) {
-  const view = uiLogic.runtimeGuidanceView(status, nowMs);
+  const view = uiLogic.runtimeGuidanceView(status, nowMs, selectedEnvPlatform());
   if (!fields.runtimeGuidance) return view;
   if (!view) {
     fields.runtimeGuidance.className = 'runtime-guidance hidden';

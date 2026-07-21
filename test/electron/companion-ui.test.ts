@@ -2139,6 +2139,67 @@ test('Facebook 切到小红书时清除单稿表面和平台标记残留', async
   assert.equal(hidden($(w, '#pub-kicker')), true);
 });
 
+test('Facebook 未启动时隐藏缓存获得感卡片，切换平台不残留且数据卡继续展示', async () => {
+  const now = Date.now();
+  const cachedProgress = {
+    totals: { view: 20, like: 2, comment: 1, publish: 0 },
+    quotas: { view: 20, like: 5, comment: 3, publish: 1 },
+    firstPost: { state: 'searching', viewed: 20, target: 20, startedAt: now - 60_000 },
+    windows: {
+      day: {
+        active: true,
+        releaseAt: now + 3_600_000,
+        totals: { view: 20 },
+        quotas: { view: 20 },
+        saturated: ['view'],
+      },
+    },
+  };
+  const xhs = makeStatus({
+    envId: 'xhs1',
+    account: { id: 'xhs1', name: '小红书账号' },
+    dailyUsage: cachedProgress,
+  });
+  const facebookStopped = makeStatus({
+    envId: 'fb1',
+    account: { id: 'fb1', name: 'FB Beta' },
+    automationState: 'stopped',
+    engineLinkState: 'disconnected',
+    browserState: 'closed',
+    edge: 'stopped',
+    cloud: 'disconnected',
+    session: 'idle',
+    dailyUsage: cachedProgress,
+  });
+  const { w } = await boot({}, {
+    fleetGet: async () => ({
+      environments: [
+        { envId: 'xhs1', name: '小红书账号', platform: 'xiaohongshu', status: xhs },
+        { envId: 'fb1', name: 'FB Beta', platform: 'facebook', status: facebookStopped },
+      ],
+      selectedEnvId: 'xhs1',
+    }),
+    delegatedTaskList: async () => ({ ok: true, data: { tasks: [] } }),
+  });
+
+  assert.equal(hidden($(w, '#runtime-guidance')), false);
+  assert.equal($(w, '#runtime-guidance').dataset.mode, 'first-post');
+  ($(w, '[data-env-id="fb1"]') as HTMLElement).click();
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.equal($(w, '#daily-summary').dataset.platform, 'facebook');
+  assert.equal(hidden($(w, '#runtime-guidance')), true);
+  assert.equal($(w, '#runtime-guidance').hasAttribute('data-mode'), false);
+  assert.equal($(w, '#runtime-guidance-progress').textContent, '');
+  assert.equal(hidden($(w, '#daily-summary')), false, '今日进展仍按独立数据真源展示');
+  assert.equal(hidden($(w, '#pub-card')), false, '内容发布卡不受获得感隐藏规则影响');
+
+  ($(w, '[data-env-id="xhs1"]') as HTMLElement).click();
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.equal($(w, '#daily-summary').dataset.platform, 'xiaohongshu');
+  assert.equal(hidden($(w, '#runtime-guidance')), false);
+  assert.equal($(w, '#runtime-guidance').dataset.mode, 'first-post');
+});
+
 // ── 三段价值流程不再附带七段详细步骤 ──
 test('运行步骤入口与七段详细步骤从 DOM、脚本和样式中彻底移除', async () => {
   const { w } = await boot();
