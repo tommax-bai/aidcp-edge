@@ -1335,11 +1335,14 @@ test('回归：今日进展数字永不为空（缺字段兜 0 + 零值弱化）
   assert.ok(!$(w, '#views').classList.contains('zero'), '非零值不弱化');
 });
 
-test('今日进展位于「今天做了这些」活动流标题上方', async () => {
+test('首页顺序为今日进展、内容发布、今天做了这些', async () => {
   const { w } = await boot();
   const summary = $(w, '#daily-summary');
+  const publish = $(w, '#pub-card');
   const streamHead = $(w, '.stream-h');
   assert.equal(streamHead.textContent, '今天做了这些');
+  assert.ok(summary.compareDocumentPosition(publish) & w.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.ok(publish.compareDocumentPosition(streamHead) & w.Node.DOCUMENT_POSITION_FOLLOWING);
   assert.ok(summary.compareDocumentPosition(streamHead) & w.Node.DOCUMENT_POSITION_FOLLOWING);
 });
 

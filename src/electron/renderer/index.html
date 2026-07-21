@@ -319,63 +319,6 @@
         </div>
       </section>
 
-      <!-- 发布等待卡：稿件从这里查看，审批动作在稿件预览抽屉内完成。 -->
-      <section id="pub-card" class="pub hidden">
-        <!-- 收起态薄条：已发布历史与空态默认收起（点击可展开查看） -->
-        <div class="pub-bar hidden" id="pub-bar" role="button" tabindex="0">
-          <span class="pub-bar-thumb"></span>
-          <span class="pub-bar-label" id="pub-bar-label">发布过的 AI 写好的笔记</span>
-          <span class="pub-bar-sum" id="pub-bar-sum"></span>
-          <span class="pub-bar-chev">▾</span>
-        </div>
-        <div class="pub-main" id="pub-main">
-          <button id="pub-carousel-prev" class="pub-carousel-nav pub-carousel-prev nodrag" type="button"
-            aria-controls="pub-carousel-content" aria-label="上一条发布内容" hidden disabled>
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12.5 4.5-5 5.5 5 5.5"></path></svg>
-          </button>
-          <div id="pub-carousel-content" class="pub-carousel-content">
-            <div class="pub-head" id="pub-head-row" role="button" tabindex="0" aria-label="收起发布卡">
-              <div class="pub-head-copy">
-                <span class="pub-kicker hidden" id="pub-kicker">发布进度</span>
-                <span class="pub-evt" id="pub-head">AI 写好了一条新笔记</span>
-              </div>
-              <div class="pub-head-aside">
-                <span class="pub-count hidden" id="pub-count"></span>
-                <span class="pub-time" id="pub-corner"></span>
-              </div>
-            </div>
-            <article class="pub-item" id="pub-item">
-              <div class="pub-body">
-                <div class="pub-thumb" id="pub-thumb"></div>
-                <div class="pub-item-copy">
-                  <div class="pub-title" id="pub-title" aria-live="polite"></div>
-                  <div class="pub-meta" id="pub-meta">图文笔记</div>
-                </div>
-              </div>
-              <div class="journey">
-                <div class="j-steps" id="pub-steps" role="list" aria-label="发布进度">
-                  <div class="j-step" role="listitem"><span class="j-dot"></span><span class="j-lab">写好内容</span><span class="j-state"></span></div>
-                  <div class="j-step" role="listitem"><span class="j-dot"></span><span class="j-lab">发到飞书</span><span class="j-state"></span></div>
-                  <div class="j-step" role="listitem"><span class="j-dot"></span><span class="j-lab">等你确认</span><span class="j-state"></span></div>
-                  <div class="j-step" role="listitem"><span class="j-dot"></span><span class="j-lab">择时发布</span><span class="j-state"></span></div>
-                </div>
-              </div>
-            </article>
-            <div class="pub-foot">
-              <p id="pub-foot">全文和「通过 / 驳回」按钮在飞书里，审批结果会自动同步到这里。</p>
-              <div class="pub-actions">
-                <button id="pub-queue-link" class="pub-action is-secondary hidden" type="button" hidden disabled>查看全部进度</button>
-                <button id="pub-preview-link" class="pub-action is-primary hidden" type="button" hidden disabled>审核稿件</button>
-              </div>
-            </div>
-          </div>
-          <button id="pub-carousel-next" class="pub-carousel-nav pub-carousel-next nodrag" type="button"
-            aria-controls="pub-carousel-content" aria-label="下一条发布内容" hidden disabled>
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.5 4.5 5 5.5-5 5.5"></path></svg>
-          </button>
-        </div>
-      </section>
-
       <!-- 今日进展条（计数从门面降级至此） -->
       <section class="summary" id="daily-summary">
         <div id="first-environment-start-guide" class="first-environment-start-guide hidden" role="status" aria-live="polite">
@@ -484,6 +427,63 @@
             </div>
           </div>
           <span id="risk-recovery-feedback" class="risk-recovery-feedback hidden" aria-live="polite"></span>
+        </div>
+      </section>
+
+      <!-- 发布等待卡：稿件从这里查看，审批动作在稿件预览抽屉内完成。 -->
+      <section id="pub-card" class="pub hidden">
+        <!-- 收起态薄条：已发布历史与空态默认收起（点击可展开查看） -->
+        <div class="pub-bar hidden" id="pub-bar" role="button" tabindex="0">
+          <span class="pub-bar-thumb"></span>
+          <span class="pub-bar-label" id="pub-bar-label">发布过的 AI 写好的笔记</span>
+          <span class="pub-bar-sum" id="pub-bar-sum"></span>
+          <span class="pub-bar-chev">▾</span>
+        </div>
+        <div class="pub-main" id="pub-main">
+          <button id="pub-carousel-prev" class="pub-carousel-nav pub-carousel-prev nodrag" type="button"
+            aria-controls="pub-carousel-content" aria-label="上一条发布内容" hidden disabled>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12.5 4.5-5 5.5 5 5.5"></path></svg>
+          </button>
+          <div id="pub-carousel-content" class="pub-carousel-content">
+            <div class="pub-head" id="pub-head-row" role="button" tabindex="0" aria-label="收起发布卡">
+              <div class="pub-head-copy">
+                <span class="pub-kicker hidden" id="pub-kicker">发布进度</span>
+                <span class="pub-evt" id="pub-head">AI 写好了一条新笔记</span>
+              </div>
+              <div class="pub-head-aside">
+                <span class="pub-count hidden" id="pub-count"></span>
+                <span class="pub-time" id="pub-corner"></span>
+              </div>
+            </div>
+            <article class="pub-item" id="pub-item">
+              <div class="pub-body">
+                <div class="pub-thumb" id="pub-thumb"></div>
+                <div class="pub-item-copy">
+                  <div class="pub-title" id="pub-title" aria-live="polite"></div>
+                  <div class="pub-meta" id="pub-meta">图文笔记</div>
+                </div>
+              </div>
+              <div class="journey">
+                <div class="j-steps" id="pub-steps" role="list" aria-label="发布进度">
+                  <div class="j-step" role="listitem"><span class="j-dot"></span><span class="j-lab">写好内容</span><span class="j-state"></span></div>
+                  <div class="j-step" role="listitem"><span class="j-dot"></span><span class="j-lab">发到飞书</span><span class="j-state"></span></div>
+                  <div class="j-step" role="listitem"><span class="j-dot"></span><span class="j-lab">等你确认</span><span class="j-state"></span></div>
+                  <div class="j-step" role="listitem"><span class="j-dot"></span><span class="j-lab">择时发布</span><span class="j-state"></span></div>
+                </div>
+              </div>
+            </article>
+            <div class="pub-foot">
+              <p id="pub-foot">全文和「通过 / 驳回」按钮在飞书里，审批结果会自动同步到这里。</p>
+              <div class="pub-actions">
+                <button id="pub-queue-link" class="pub-action is-secondary hidden" type="button" hidden disabled>查看全部进度</button>
+                <button id="pub-preview-link" class="pub-action is-primary hidden" type="button" hidden disabled>审核稿件</button>
+              </div>
+            </div>
+          </div>
+          <button id="pub-carousel-next" class="pub-carousel-nav pub-carousel-next nodrag" type="button"
+            aria-controls="pub-carousel-content" aria-label="下一条发布内容" hidden disabled>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.5 4.5 5 5.5-5 5.5"></path></svg>
+          </button>
         </div>
       </section>
 
