@@ -55,6 +55,58 @@ function detail(overrides: Record<string, unknown> = {}) {
   return { ...listItem(), body: '第一段正文\n第二段正文', firstSeenAt: 1, countsCapturedAt: null, ...overrides };
 }
 
+test('灵感列表与详情展示来源发布时间，未知或不可解析时绝不回落精选更新时间', async () => {
+  const impossibleUpdatedAt = Date.parse('2099-12-31T23:59:00.000Z');
+  const list = listItem({
+    updatedAt: impossibleUpdatedAt,
+    sourcePublishedAtText: '07-20',
+    sourcePublishedAt: Date.parse('2026-07-19T16:00:00.000Z'),
+    sourcePublishedAtPrecision: 'day',
+    sourcePublishedAtStatus: 'parsed',
+    sourcePublishedAtObservedAt: Date.parse('2026-07-21T07:30:00.000Z'),
+  });
+  const { window, controller } = boot({
+    curatedList: async () => ({ ok: true, data: { items: [list], total: 1 } }),
+    curatedGet: async () => ({
+      ok: true,
+      data: {
+        item: detail({
+          updatedAt: impossibleUpdatedAt,
+          sourcePublishedAtText: '平台新格式',
+          sourcePublishedAt: null,
+          sourcePublishedAtPrecision: null,
+          sourcePublishedAtStatus: 'unparseable',
+          sourcePublishedAtObservedAt: Date.parse('2026-07-21T07:30:00.000Z'),
+        }),
+      },
+    }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  controller.openLibrary();
+  await flush();
+  const listMeta = $(window, '.curated-card-meta').textContent ?? '';
+  assert.match(listMeta, /作者甲 · 发布于 2026\/7\/20/);
+  assert.doesNotMatch(listMeta, /2099/);
+
+  $(window, '.curated-card').dispatchEvent(new window.Event('click'));
+  await flush();
+  const detailMeta = $(window, '.curated-detail-author').textContent ?? '';
+  assert.match(detailMeta, /作者甲 · 发布于 平台新格式（未转换）/);
+  assert.doesNotMatch(detailMeta, /2099/);
+});
+
+test('旧 Cloud 灵感响应缺少来源发布时间时明确显示未知', async () => {
+  const { window, controller } = boot({
+    curatedList: async () => ({ ok: true, data: { items: [listItem({ updatedAt: Date.parse('2099-12-31T23:59:00.000Z') })], total: 1 } }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  controller.openLibrary();
+  await flush();
+  const meta = $(window, '.curated-card-meta').textContent ?? '';
+  assert.match(meta, /发布时间未知/);
+  assert.doesNotMatch(meta, /2099/);
+});
+
 function queueStage(key: string, label: string, state: string, progress?: { current: number; total: number }) {
   const status = key === 'approval' && state === 'completed'
     ? '已确认'
