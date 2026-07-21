@@ -248,6 +248,25 @@ test('createStaggerQueue：带 key 的前置准备项暴露当前等待位次，
   assert.equal(queue.pendingPosition('second'), null);
 });
 
+test('createStaggerQueue：关闭操作可按环境取消尚未执行的旧准备项', async () => {
+  const queue = fleet.createStaggerQueue({ spacingMs: 0 });
+  let releaseHead!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseHead = resolve; });
+  let staleRan = false;
+  const head = queue.enqueue(async () => { await gate; return true; }, 'head');
+  await Promise.resolve();
+  const stale = queue.enqueue(async () => { staleRan = true; return true; }, 'env-a');
+  const current = queue.enqueue(async () => true, 'env-b');
+  assert.equal(queue.cancel('env-a'), 1);
+  assert.equal(queue.pendingPosition('env-a'), null);
+  assert.equal(queue.pendingPosition('env-b'), 1, '取消项立即退出权威位次投影');
+  releaseHead();
+  const [, staleResult, currentResult] = await Promise.all([head, stale, current]);
+  assert.deepEqual(staleResult, { ok: false, reason: 'cancelled' });
+  assert.equal(currentResult, true);
+  assert.equal(staleRan, false, '被关闭代取消的准备函数不得执行');
+});
+
 // ── 同账号铺多环境检测 ──
 
 test('duplicateAccountGroups：同账号两环境成组；无账号/单环境不报', () => {

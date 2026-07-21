@@ -224,16 +224,17 @@ function createStaggerQueue(opts = {}) {
 
   function enqueue(fn, key = null) {
     pending += 1;
-    const item = { key, started: false };
+    const item = { key, started: false, cancelled: false };
     items.push(item);
     const run = chain.then(async () => {
-      // Once chain ownership passes to this item it is executing (including the
-      // spacing gate), so it no longer has a waiting position.
-      item.started = true;
-      const wait = lastStartAt + spacingMs - now();
-      if (wait > 0) await sleep(wait);
-      lastStartAt = now();
       try {
+        if (item.cancelled) return { ok: false, reason: 'cancelled' };
+        // Once chain ownership passes to this item it is executing (including the
+        // spacing gate), so it no longer has a waiting position.
+        item.started = true;
+        const wait = lastStartAt + spacingMs - now();
+        if (wait > 0) await sleep(wait);
+        lastStartAt = now();
         return await fn();
       } catch (e) {
         return { ok: false, error: (e && e.message) || String(e) };
@@ -250,11 +251,22 @@ function createStaggerQueue(opts = {}) {
     return run;
   }
 
+  function cancel(key) {
+    let cancelled = 0;
+    for (const item of items) {
+      if (item.started || item.cancelled || item.key !== key) continue;
+      item.cancelled = true;
+      cancelled += 1;
+    }
+    return cancelled;
+  }
+
   return {
     enqueue,
-    pendingCount: () => pending,
+    cancel,
+    pendingCount: () => items.filter((item) => !item.cancelled).length,
     pendingPosition: (key) => {
-      const index = items.filter((item) => !item.started).findIndex((item) => item.key === key);
+      const index = items.filter((item) => !item.started && !item.cancelled).findIndex((item) => item.key === key);
       return index >= 0 ? index + 1 : null;
     },
   };
@@ -493,6 +505,18 @@ function createSerialLaunchQueue(opts = {}) {
     });
   }
 
+  function cancel(key) {
+    let cancelled = 0;
+    for (let index = queue.length - 1; index >= 0; index -= 1) {
+      const item = queue[index];
+      if (item.key !== key) continue;
+      queue.splice(index, 1);
+      item.resolve({ ok: false, reason: 'cancelled' });
+      cancelled += 1;
+    }
+    return cancelled;
+  }
+
   async function drain() {
     if (running) return;
     running = true;
@@ -527,6 +551,7 @@ function createSerialLaunchQueue(opts = {}) {
 
   return {
     enqueue,
+    cancel,
     pendingCount: () => queue.length,
     // One-based position among items that are still pending. The currently executing
     // item has already left this array and therefore has no queue position.

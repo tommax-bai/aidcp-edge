@@ -12,6 +12,7 @@ interface UiEvent {
   sentence?: string;
   presence?: string;
   loopStage?: string | null;
+  browserIndependent?: boolean;
   statsDelta?: { views?: number; likes?: number; collects?: number; comments?: number; follows?: number; publishes?: number };
   publish?: { state: string; title?: string; code?: string };
   account?: { id: string; name?: string };
@@ -28,6 +29,13 @@ test('结构化 [ui-event] 行优先直接采用', () => {
   assert.equal(evt.kind, 'publish');
   assert.equal(evt.publish?.state, 'pending');
   assert.match(evt.publish?.title ?? '', /秋日城市漫步/);
+});
+
+test('结构化事件只在显式声明时保留浏览器无关执行证据', () => {
+  const s = createUiEventStream();
+  const evt = s.push('[ui-event] {"kind":"presence","loopStage":"control","browserIndependent":true}');
+  assert.equal(evt?.loopStage, 'control');
+  assert.equal(evt?.browserIndependent, true);
 });
 
 test('结构化 publish 行 → 同步在场感，进度区跟随发布状态刷新', () => {

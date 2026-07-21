@@ -155,7 +155,7 @@ test('契约：日志文件仍按真实输出通道留痕（传输事实要如�
     '日志文件必须继续按真实通道记 ERR 前缀——排障回溯要靠它。',
   );
   assert.ok(
-    /child\.stderr\.on\('data', \(chunk\) => handleEdgeOutput\(handle, chunk\.toString\(\), true\)\)/.test(main),
+    /child\.stderr\.on\('data', \(chunk\) => handleEdgeOutput\(handle, chunk\.toString\(\), true, generation\)\)/.test(main),
     'stderr 通道仍如实标记 isError=true（供日志留痕），只是状态投影不再据它判定语义。',
   );
 });

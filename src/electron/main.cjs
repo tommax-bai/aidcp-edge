@@ -1407,6 +1407,9 @@ function makeStatus(provider) {
     stats: { views: 0, likes: 0, collects: 0, comments: 0, follows: 0, publishes: 0 },
     dailyUsage: null,
     browserStandby: null,
+    loopStage: null,
+    loopStageGeneration: 0,
+    loopStageBrowserIndependent: false,
     risk: 'normal',
     edge: 'stopped',
     lastMessage: '客户端已就绪；自动化尚未启动。',
@@ -1562,8 +1565,13 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     stopRequested: false,
     // 已获准进入启动调度、但尚未进入浏览器执行态。它是有界「启动排队」的唯一成员资格标记；
     // 与已创建多少环境无关，同一环境重复请求也不会重复占排队名额。
+    lifecycleGeneration: 0,
+    lifecycleGenerationReason: 'initial',
     startQueueReserved: false,
     startFlowQueued: false,
+    startFlowGeneration: 0,
+    launchGeneration: 0,
+    wakeGeneration: 0,
     lastEdgeFailureLine: '',
     respawnStreak: 0,
     respawnTimer: null,
@@ -1787,6 +1795,49 @@ const launchQueue = fleet.createSerialLaunchQueue({
   spacingMs: Number(process.env.AIDCP_FLEET_STAGGER_MS) > 0 ? Number(process.env.AIDCP_FLEET_STAGGER_MS) : undefined,
   logger: (m) => console.log(m),
 });
+
+function isCurrentLifecycleGeneration(handle, generation) {
+  return Boolean(handle && Number.isInteger(generation) && handle.lifecycleGeneration === generation);
+}
+
+/**
+ * 显式开始/暂停/关闭推进每环境操作代。尚未执行的旧队列项直接取消；已经执行的异步项在自己的
+ * generation 闸处收尾，绝不能跨代清标记、重挂唤醒或再次打开浏览器。
+ */
+function advanceLifecycleGeneration(handle, reason) {
+  if (!handle) return 0;
+  handle.lifecycleGeneration = (Number(handle.lifecycleGeneration) || 0) + 1;
+  handle.lifecycleGenerationReason = reason || 'unknown';
+  if (handle.status) {
+    handle.status.loopStage = null;
+    handle.status.loopStageGeneration = handle.lifecycleGeneration;
+    handle.status.loopStageBrowserIndependent = false;
+  }
+  lifecycleQueue.cancel?.(handle.envId);
+  launchQueue.cancel?.(handle.envId);
+  launchQueue.cancel?.(`${handle.envId}:wake`);
+  if (typeof handle.wakeSettle === 'function') handle.wakeSettle(false);
+  settleLaunchReady(handle, false);
+  handle.startFlowQueued = false;
+  handle.startFlowGeneration = 0;
+  handle.launchQueued = false;
+  handle.launchGeneration = 0;
+  handle.controlPlaneStarting = false;
+  handle.coldStandbyWaking = false;
+  handle.wakeGeneration = 0;
+  releaseStartQueue(handle);
+  clearWakeDeadline(handle);
+  return handle.lifecycleGeneration;
+}
+
+function ensureEnabledLifecycleGeneration(handle, reason) {
+  if (!handle) return 0;
+  if (handle.automationIntent !== 'enabled' || handle.stopRequested || handle.engineStopReason) {
+    return advanceLifecycleGeneration(handle, reason);
+  }
+  return handle.lifecycleGeneration;
+}
+
 const PER_ENV_BYTES = Number(process.env.AIDCP_PER_ENV_MB) > 0
   ? Number(process.env.AIDCP_PER_ENV_MB) * 1024 * 1024
   : fleet.PER_ENV_BYTES_DEFAULT;
@@ -2017,7 +2068,11 @@ function denyWakeNow(handle, detail) {
   if (!handle.child) return;
   try {
     handle.child.send({ type: 'lifecycle.wake_denied', detail });
-    console.log(`[slots] ${handle.envId} 告知核心「这次没轮到」（${detail}）：仍在队列中，浏览器继续起`);
+    const retained = Boolean(handle.slotWaitingSince || handle.startQueueReserved
+      || handle.startFlowQueued || handle.launchQueued);
+    console.log(retained
+      ? `[slots] ${handle.envId} 告知核心「这次没轮到」（${detail}）：仍在权威队列中，浏览器轮到后继续起`
+      : `[slots] ${handle.envId} 告知核心「这次没轮到」（${detail}）：本次未入队，将按退避计划重试`);
   } catch (error) {
     console.warn(`[slots] ${handle.envId} wake_denied 未送达：${error.message}`);
   }
@@ -2189,7 +2244,10 @@ function statsFromDailyUsage(usage) {
 function updateStatus(handle, patch) {
   // 计数补丁先跟现值合并成**完整** stats 再落（修老 bug：Object.assign 先把 stats 整体
   // 替换成局部补丁，随后的合并对象已被替换 → 未提及的计数被清空、渲染层出现空数字）。
-  const full = patch.stats ? { ...patch, stats: mergeStats(handle.status.stats, patch.stats) } : patch;
+  let full = patch.stats ? { ...patch, stats: mergeStats(handle.status.stats, patch.stats) } : patch;
+  if (full.loopStage === null && full.loopStageBrowserIndependent === undefined) {
+    full = { ...full, loopStageBrowserIndependent: false };
+  }
   Object.assign(handle.status, full, { updatedAt: new Date().toISOString() });
   syncBrowserPersonaNotice(handle);
   if (patch.risk && handle.envId === selectedEnvId) applyOverlayTone(patch.risk);
@@ -2789,6 +2847,7 @@ function clearColdStandbyTimer(handle) {
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = false;
   handle.coldStandbyWaking = false;
+  handle.wakeGeneration = 0;
   clearColdStandbyHoldTimer(handle);
 }
 
@@ -2933,6 +2992,7 @@ function onColdStandbyAck(handle) {
     edge: 'running',
     cloud: 'connected',
     session: handle.automationPaused ? 'paused' : 'resting',
+    loopStage: null,
     overlayBlocked: false,
     browserStandby: coldStandbyStatus('sleeping', hint, decision.ok ? {
       wakeDelayMs: decision.wakeDelayMs,
@@ -2970,10 +3030,12 @@ function updateColdStandbyCloudRecovery(handle, state, reason) {
 
 function scheduleColdStandbyWake(handle, decision) {
   if (!handle || !decision.ok) return;
+  const generation = handle.lifecycleGeneration;
   if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
   handle.coldStandbyWakeAt = decision.hint.wakeAt;
   handle.coldStandbyTimer = setTimeout(() => {
     handle.coldStandbyTimer = null;
+    if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return;
     wakeColdStandby(handle, 'scheduled_wake');
   }, decision.wakeDelayMs);
   if (handle.coldStandbyTimer && typeof handle.coldStandbyTimer.unref === 'function') handle.coldStandbyTimer.unref();
@@ -2986,13 +3048,15 @@ function scheduleColdStandbyWake(handle, decision) {
  * 它既没有自唤醒定时器，核心那边的唤醒闩也永久置位（再不会向外壳请求），云端的任务全部打空。
  * 退避是刚性的：AdsPower 真坏掉时，绝不 60s 一次地无限重敲它。
  */
-function rearmWakeAfterFailure(handle) {
-  if (!handle || handle.removed || isQuitting) return;
+function rearmWakeAfterFailure(handle, generation = handle && handle.lifecycleGeneration) {
+  if (!handle || handle.removed || handle.stopRequested || isQuitting
+    || !isCurrentLifecycleGeneration(handle, generation)) return;
   if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
   handle.wakeRetryStreak = Math.min((handle.wakeRetryStreak || 0) + 1, 3);
   const delayMs = [60_000, 120_000, 300_000][handle.wakeRetryStreak - 1];
   handle.coldStandbyTimer = setTimeout(() => {
     handle.coldStandbyTimer = null;
+    if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return;
     wakeColdStandby(handle, 'wake_retry');
   }, delayMs);
   if (typeof handle.coldStandbyTimer.unref === 'function') handle.coldStandbyTimer.unref();
@@ -3009,8 +3073,9 @@ function rearmWakeAfterFailure(handle) {
  * 核心不在（IPC 不可用）才退回 stopAndRestart：那时确实只能冷启。
  */
 function wakeColdStandby(handle, reason) {
-  if (!handle || (!handle.coldStandbyActive && !handle.coldStandbyPending)) return;
+  if (!handle || handle.stopRequested || (!handle.coldStandbyActive && !handle.coldStandbyPending)) return;
   if (handle.coldStandbyWaking) return; // 幂等：已在唤醒中，绝不重开第二个浏览器
+  const generation = handle.lifecycleGeneration;
   const queueAdmission = reserveStartQueue(handle);
   if (!queueAdmission.ok) {
     handle.wakeReason = reason;
@@ -3022,7 +3087,7 @@ function wakeColdStandby(handle, reason) {
       lastMessage: `${queueAdmission.message}，本次唤醒未加入；稍后自动重试。`,
       ...presencePatch('待机中（启动排队已满）'),
     });
-    rearmWakeAfterFailure(handle);
+    rearmWakeAfterFailure(handle, generation);
     return;
   }
   if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
@@ -3045,6 +3110,7 @@ function wakeColdStandby(handle, reason) {
   // 这里用确定性的串行队列达到同样的削峰效果：逐个唤醒，起完一个再叫下一个。
   if (handle.child && (handle.coldStandbyActive || handle.coldStandbyPending)) {
     handle.coldStandbyWaking = true;
+    handle.wakeGeneration = generation;
     const child = handle.child;
     // 带任务的唤醒（云端有活等着）优先于到点的普通唤醒。
     const kind = reason === 'cloud_command' ? 'task' : 'resume';
@@ -3052,15 +3118,21 @@ function wakeColdStandby(handle, reason) {
       key: `${handle.envId}:wake`,
       kind,
       run: async () => {
+        if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
         const preflight = await ensureProxyPreflight(handle);
+        if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
         if (preflight && preflight.state === 'unavailable') {
-          onColdStandbyWakeFailed(handle, `代理预检未通过：${proxyPreflightFailureText(preflight.reason)}`);
+          onColdStandbyWakeFailed(handle, `代理预检未通过：${proxyPreflightFailureText(preflight.reason)}`, generation);
           return false;
         }
         return new Promise((resolve) => {
-          if (handle.child !== child || handle.removed || isQuitting) {
-            handle.coldStandbyWaking = false;
-            releaseStartQueue(handle);
+          if (!isCurrentLifecycleGeneration(handle, generation) || handle.child !== child
+            || handle.removed || handle.stopRequested || isQuitting) {
+            if (isCurrentLifecycleGeneration(handle, generation)) {
+              handle.coldStandbyWaking = false;
+              handle.wakeGeneration = 0;
+              releaseStartQueue(handle);
+            }
             resolve(false);
             return;
           }
@@ -3088,18 +3160,18 @@ function wakeColdStandby(handle, reason) {
             resolve(ok);
           };
           const timer = setTimeout(() => {
-            onColdStandbyWakeFailed(handle, `唤醒超时（${LAUNCH_READY_TIMEOUT_MS}ms）`);
+            onColdStandbyWakeFailed(handle, `唤醒超时（${LAUNCH_READY_TIMEOUT_MS}ms）`, generation);
             finish(false);
           }, LAUNCH_READY_TIMEOUT_MS);
           if (typeof timer.unref === 'function') timer.unref();
           handle.wakeSettle = finish;
           const sent = sendCoreLifecycle(handle, 'wake', (error) => {
-            if (handle.child !== child) return;
-            onColdStandbyWakeFailed(handle, `唤醒指令未送达：${error.message}`);
+            if (handle.child !== child || !isCurrentLifecycleGeneration(handle, generation)) return;
+            onColdStandbyWakeFailed(handle, `唤醒指令未送达：${error.message}`, generation);
             finish(false);
           });
           if (!sent) {
-            onColdStandbyWakeFailed(handle, '核心进程 IPC 不可用');
+            onColdStandbyWakeFailed(handle, '核心进程 IPC 不可用', generation);
             finish(false);
           }
         });
@@ -3117,17 +3189,21 @@ function wakeColdStandby(handle, reason) {
 /** 核心已完成原地重建：解除待机态。 */
 function onColdStandbyWoken(handle) {
   if (!handle) return;
+  const generation = handle.wakeGeneration;
+  if (!isCurrentLifecycleGeneration(handle, generation)) return;
   // 批量 / 单环境关闭可能与已送达的 wake 回执竞态；关闭意图优先，迟到的 woken 不得把状态翻回已打开。
   if (handle.stopRequested || handle.removed || isQuitting) {
     handle.browserOpenPending = false;
     releaseStartQueue(handle);
     handle.coldStandbyWaking = false;
+    handle.wakeGeneration = 0;
     if (typeof handle.wakeSettle === 'function') handle.wakeSettle(false);
     return;
   }
   handle.browserOpenPending = false;
   releaseStartQueue(handle);
   handle.coldStandbyWaking = false;
+  handle.wakeGeneration = 0;
   if (typeof handle.wakeSettle === 'function') handle.wakeSettle(true); // 放行启动队列的下一个
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = false;
@@ -3163,11 +3239,13 @@ function onColdStandbyWoken(handle) {
  * 唤醒失败：**留在待机态**（可再次唤醒），并如实告知。
  * 绝不把一个没起来的浏览器标成已就绪——那正是「静默假成功」。
  */
-function onColdStandbyWakeFailed(handle, reason) {
-  if (!handle) return;
+function onColdStandbyWakeFailed(handle, reason, expectedGeneration = handle && handle.wakeGeneration) {
+  if (!handle || handle.stopRequested || !isCurrentLifecycleGeneration(handle, expectedGeneration)
+    || handle.wakeGeneration !== expectedGeneration) return;
   handle.browserOpenPending = false;
   releaseStartQueue(handle);
   handle.coldStandbyWaking = false;
+  handle.wakeGeneration = 0;
   if (typeof handle.wakeSettle === 'function') handle.wakeSettle(false); // 放行启动队列的下一个
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = true; // 仍在待机：浏览器没起来
@@ -3175,7 +3253,7 @@ function onColdStandbyWakeFailed(handle, reason) {
   denyWakeNow(handle, `wake_failed:${reason}`);
   // 待机定时器在 wakeColdStandby 里被清掉了，这里**必须还回去**——不还，这个环境此后再无任何
   // 自唤醒路径，会一直待机到天荒地老（一次唤醒失败 = 永久停摆）。
-  rearmWakeAfterFailure(handle);
+  rearmWakeAfterFailure(handle, expectedGeneration);
   // 这次浏览器没有起来，执行槽仍是空的：立即放行 FIFO 下一项。只靠 15s 重扫虽最终会恢复，
   // 但会把“第 5 个分身被占用”表现成后续环境长时间没有回复，正是启动调度需要消掉的空窗。
   setTimeout(() => drainSlotWaiters(), 0);
@@ -3183,6 +3261,7 @@ function onColdStandbyWakeFailed(handle, reason) {
     browserStandby: coldStandbyStatus('sleeping', handle.status.browserStandby && handle.status.browserStandby.hint, {
       reason: `wake_failed:${reason}`,
     }),
+    loopStage: null,
     lastMessage: `唤醒失败：${reason}。仍保持待机，可再次唤醒。`,
     ...presencePatch('待机中（唤醒失败）'),
   });
@@ -3196,12 +3275,15 @@ async function startBrowserAbsentCore(handle, {
   retainStartQueueReservation = false,
   slotAdmission = null,
   queueAdmission = null,
+  generation = handle && handle.lifecycleGeneration,
 } = {}) {
-  if (!handle || handle.child || handle.controlPlaneStarting || handle.removed || handle.stopRequested || isQuitting) return false;
+  if (!handle || !isCurrentLifecycleGeneration(handle, generation) || handle.child || handle.controlPlaneStarting
+    || handle.removed || handle.stopRequested || isQuitting) return false;
   handle.controlPlaneStarting = true;
   try {
     const coreOnlyBootstrap = !slotAdmission && !queueAdmission;
     const bootstrap = await resolveControlBootstrap(handle);
+    if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
     if (!bootstrap.ok) {
       // 首次未绑定环境无法在浏览器缺席时可信确定平台账号，但这不改变已经取得的槽位排队资格。
       // 等槽位后走真实浏览器启动与身份确认；此刻只呈现排队，绝不把正常前置条件写成引擎异常。
@@ -3221,6 +3303,7 @@ async function startBrowserAbsentCore(handle, {
         edge: 'idle',
         cloud: 'disconnected',
         session: 'idle',
+        loopStage: null,
         lastMessage: `${browserState}；自动化引擎未连接：${bootstrap.message}。`,
         ...edgeFailurePatch(`自动化引擎未连接：${bootstrap.message}`),
         ...presencePatch('自动化引擎未连接，浏览器保持关闭'),
@@ -3238,6 +3321,7 @@ async function startBrowserAbsentCore(handle, {
       updateStatus(handle, {
         edge: 'starting',
         session: 'resting',
+        loopStage: null,
         browserStandby: coldStandbyStatus('scheduled', null, { reason: 'start_queue_full' }),
         lastMessage: coreOnlyBootstrap
           ? '正在连接自动化引擎；浏览器保持关闭。'
@@ -3249,6 +3333,7 @@ async function startBrowserAbsentCore(handle, {
     const started = spawnEdgeChild(handle, {
       controlBootstrap: bootstrap,
       retainStartQueueReservation,
+      generation,
     });
     if (!started) {
       handle.coldStandbyPending = false;
@@ -3259,7 +3344,7 @@ async function startBrowserAbsentCore(handle, {
     }
     return await started;
   } finally {
-    handle.controlPlaneStarting = false;
+    if (isCurrentLifecycleGeneration(handle, generation)) handle.controlPlaneStarting = false;
   }
 }
 
@@ -3338,8 +3423,9 @@ async function startRestrictedOffboardCleanupCore(handle) {
  *
  * kind 决定队列优先级：manual（手动任务）> task（带任务的唤醒）> resume（普通续场恢复）。
  */
-function startEdge(handle, { kind = 'resume' } = {}) {
-  if (!handle || handle.child || handle.removed || handle.stopRequested || isQuitting) return;
+function startEdge(handle, { kind = 'resume', generation = handle && handle.lifecycleGeneration } = {}) {
+  if (!handle || !isCurrentLifecycleGeneration(handle, generation) || handle.child
+    || handle.removed || handle.stopRequested || isQuitting) return;
   if (handle.status.session === 'paused') return;
   if (handle.launchQueued) return; // 已在队列里：绝不重复入队、绝不开出第二个浏览器
   const queueAdmission = reserveStartQueue(handle);
@@ -3348,11 +3434,13 @@ function startEdge(handle, { kind = 'resume' } = {}) {
     return false;
   }
   handle.launchQueued = true;
+  handle.launchGeneration = generation;
   clearRespawnTimer(handle);
   clearColdStandbyTimer(handle);
   const cap = slotCapacity();
   updateStatus(handle, {
     edge: 'starting',
+    loopStage: null,
     lastMessage: `排队等待启动槽位（当前 ${occupiedSlots()}/${cap} 个浏览器在跑）…`,
     ...presencePatch('排队等待启动…'),
   });
@@ -3360,9 +3448,14 @@ function startEdge(handle, { kind = 'resume' } = {}) {
     key: handle.envId,
     kind,
     run: async () => {
-      handle.launchQueued = false;
+      if (!isCurrentLifecycleGeneration(handle, generation)) return false;
+      if (handle.launchGeneration === generation) {
+        handle.launchQueued = false;
+        handle.launchGeneration = 0;
+      }
       // 轮到它时再复核取消闸：排队期间可能已被暂停 / 移出 / 退出。
-      if (!handle || handle.child || handle.removed || handle.stopRequested || isQuitting) {
+      if (!handle || !isCurrentLifecycleGeneration(handle, generation) || handle.child
+        || handle.removed || handle.stopRequested || isQuitting) {
         releaseStartQueue(handle);
         return false;
       }
@@ -3380,11 +3473,12 @@ function startEdge(handle, { kind = 'resume' } = {}) {
         return await startBrowserAbsentCore(handle, {
           retainStartQueueReservation: true,
           slotAdmission: admitted,
+          generation,
         });
       }
       clearSlotWaiting(handle);
       clearWakeDeadline(handle);
-      return await spawnEdgeChild(handle);
+      return await spawnEdgeChild(handle, { generation });
     },
   });
 }
@@ -3399,8 +3493,10 @@ function spawnEdgeChild(handle, {
   controlBootstrap = null,
   cleanupBootstrap = null,
   retainStartQueueReservation = false,
+  generation = handle && handle.lifecycleGeneration,
 } = {}) {
-  if (!handle || handle.child || handle.removed || handle.stopRequested || isQuitting) return false;
+  if (!handle || !isCurrentLifecycleGeneration(handle, generation) || handle.child
+    || handle.removed || handle.stopRequested || isQuitting) return false;
   if (handle.status.session === 'paused' && !controlBootstrap) return false;
   if (!controlBootstrap) {
     handle.controlPlaneOnly = false;
@@ -3550,10 +3646,18 @@ function spawnEdgeChild(handle, {
     ...clearEdgeFailurePatch(handle),
   });
 
-  child.stdout.on('data', (chunk) => handleEdgeOutput(handle, chunk.toString()));
-  child.stderr.on('data', (chunk) => handleEdgeOutput(handle, chunk.toString(), true));
+  child.stdout.on('data', (chunk) => handleEdgeOutput(handle, chunk.toString(), false, generation));
+  child.stderr.on('data', (chunk) => handleEdgeOutput(handle, chunk.toString(), true, generation));
   child.on('message', (message) => {
     if (handle.child !== child || !message || typeof message !== 'object') return;
+    const currentGeneration = isCurrentLifecycleGeneration(handle, generation);
+    // 暂停/关闭先推进操作代，再把终止指令交给旧代子进程。因此只放行与当前停止意图严格匹配的终局回执；
+    // 其它旧代消息（任务阶段、唤醒、Cloud 状态等）仍一律丢弃，不能污染新一轮启动。
+    const currentStopReply = !currentGeneration && handle.stopRequested && (
+      (message.type === 'lifecycle.close_failed' && handle.engineStopReason === 'user_close')
+      || (message.type === 'lifecycle.paused' && handle.engineStopReason === 'user_pause')
+    );
+    if (!currentGeneration && !currentStopReply) return;
     if (message.type === 'lifecycle.cloud_rebound' || message.type === 'lifecycle.cloud_rebind_failed') {
       const pending = handle.cloudRebindPending;
       if (!pending || message.requestId !== pending.requestId || message.targetKey !== pending.targetKey) return;
@@ -3634,6 +3738,7 @@ function spawnEdgeChild(handle, {
     if (message.type === 'lifecycle.task_idle') {
       // 核心只证明任务/发布写者已在安全边界收敛；外壳重新走完整待机判定，绝不直接 close。
       // 无最新提示即 no-op；提示过时、最短持有未满、验证码/认证/新任务等均由既有双层安全闸拦截。
+      updateStatus(handle, { loopStage: null });
       const standbyHint = handle.status.browserStandby && handle.status.browserStandby.hint;
       if (standbyHint) applyBrowserStandbyHint(handle, standbyHint);
       return;
@@ -3689,14 +3794,25 @@ function spawnEdgeChild(handle, {
       return;
     }
     if (message.type === 'lifecycle.close_failed') {
+      const cancelledResume = handle.resumeAfterStop && handle.automationIntent === 'enabled';
       clearColdStandbyTimer(handle);
       handle.coldStandbyPending = false;
       handle.closePending = false;
       handle.pausePending = false;
+      // 核心已经停止自动化，只是浏览器关闭无法确认；结束“关闭中”而进入可重试的真实失败态。
+      // 旧浏览器未确认关闭时绝不开新一代浏览器，因此“关闭后再启动”也在这里取消。
+      handle.stopRequested = false;
+      handle.engineStopReason = '';
+      handle.resumeAfterStop = false;
+      handle.automationIntent = 'stopped';
+      handle.automationPaused = true;
       updateStatus(handle, {
-        edge: 'running',
-        session: handle.automationPaused ? 'paused' : 'running',
-        lastMessage: '浏览器关闭状态未能确认；自动化引擎仍连接，可重试关闭。',
+        edge: 'warning',
+        session: 'paused',
+        loopStage: null,
+        lastMessage: cancelledResume
+          ? '浏览器关闭状态未能确认，本次重新启动已取消；请重试关闭。'
+          : '浏览器关闭状态未能确认；自动化引擎仍连接，可重试关闭。',
         ...edgeFailurePatch('浏览器关闭状态未能确认'),
         ...presencePatch('浏览器关闭未确认'),
       });
@@ -3710,6 +3826,7 @@ function spawnEdgeChild(handle, {
   // 互斥，谁先触发谁处理、另一个 no-op。
   child.on('error', (err) => {
     if (handle.child !== child) return;
+    const staleGeneration = !isCurrentLifecycleGeneration(handle, generation);
     failPendingCoreRebind(handle, `core_spawn_error:${(err && err.message) || String(err)}`);
     settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
     handle.child = undefined;
@@ -3723,6 +3840,43 @@ function spawnEdgeChild(handle, {
     const msg = (err && err.message) || String(err);
     appendEdgeLog(handle.envId, `spawn error: ${msg}`, true);
     if (handle.removed) return;
+    if (staleGeneration) {
+      // 旧代 spawn 的迟到失败只代表旧子进程已收尾，不得消耗新代失败预算或挂自动重启。
+      const shouldStartCurrent = !isQuitting && handle.automationIntent === 'enabled'
+        && (handle.resumeAfterStop || handle.restartPending);
+      handle.pausePending = false;
+      handle.closePending = false;
+      handle.restartPending = false;
+      handle.resumeAfterStop = false;
+      handle.browserStateUnconfirmed = false;
+      if (shouldStartCurrent) {
+        handle.stopRequested = false;
+        handle.engineStopReason = '';
+      }
+      updateStatus(handle, {
+        edge: shouldStartCurrent ? 'starting' : 'stopped',
+        cloud: 'disconnected',
+        session: shouldStartCurrent
+          ? 'idle'
+          : handle.automationIntent === 'paused' ? 'paused' : handle.automationIntent === 'stopped' ? 'closed' : 'idle',
+        loopStage: null,
+        risk: 'normal',
+        ...(handle.kind === 'adspower' ? { auth: 'checking' } : {}),
+        overlayBlocked: false,
+        respawnGaveUp: false,
+        lastMessage: shouldStartCurrent
+          ? '上一轮启动已收尾，正在按当前操作重新启动…'
+          : handle.automationIntent === 'paused'
+            ? '自动化已暂停，引擎和浏览器已关闭；数据管理仍可继续使用。'
+            : '自动化已关闭，引擎和浏览器已关闭；数据管理仍可继续使用。',
+        ...presencePatch(shouldStartCurrent ? '正在重新启动…'
+          : handle.automationIntent === 'paused' ? '自动化已暂停' : '自动化已关闭'),
+        ...clearEdgeFailurePatch(handle),
+      });
+      setTimeout(() => drainSlotWaiters(), 0);
+      if (shouldStartCurrent) queueStartEnv(handle);
+      return;
+    }
     const decision = isQuitting
       ? { action: 'stop', streak: handle.respawnStreak }
       : fleet.decideRespawn(
@@ -3737,6 +3891,7 @@ function spawnEdgeChild(handle, {
       edge: 'warning',
       cloud: 'disconnected',
       session: 'idle',
+      loopStage: null,
       risk: 'normal',
       // adspower 的登录态由身份确立事件写入（本次进程已死）→ 诚实复位待检测；self 由 cookie 门自管。
       ...(handle.kind === 'adspower' ? { auth: 'checking' } : {}),
@@ -3817,6 +3972,7 @@ function spawnEdgeChild(handle, {
       updateStatus(handle, {
         edge: 'stopped',
         session: 'resting',
+        loopStage: null,
         overlayBlocked: false,
         browserStandby: coldStandbyStatus('sleeping', handle.status.browserStandby && handle.status.browserStandby.hint, {
           reason: 'core_exited_during_standby',
@@ -3877,6 +4033,7 @@ function spawnEdgeChild(handle, {
     updateStatus(handle, {
       edge: exitedAbnormally ? 'warning' : 'stopped',
       cloud: 'disconnected',
+      loopStage: null,
       session: stopReason === 'user_pause'
         ? 'paused'
         : stopReason === 'user_close' || stopReason === 'binding_untrusted'
@@ -4217,7 +4374,8 @@ async function ensureAdsRuntimeAndKernel(handle) {
 
 // adspower（AdsPower 指纹浏览器）路径：不自起本机 Chrome、不做 9222 cookie 轮询；
 // 浏览器启动 / 登录态 / 身份确立全由核心进程经 AdsPower 本地 API 完成（未登录 → 核心诚实非零退出并弹窗）。
-async function startAdsPowerFlow(handle) {
+async function startAdsPowerFlow(handle, generation = handle && handle.lifecycleGeneration) {
+  if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
   updateStatus(handle, { provider: 'adspower', ...clearEdgeFailurePatch(handle) });
   if (!handle.profileId || !handle.profileId.trim()) {
     // 缺分身 ID 无法启动：诚实提示待配置，不静默假装在跑。
@@ -4242,48 +4400,55 @@ async function startAdsPowerFlow(handle) {
   // 起核心前确保运行时 + 内核就绪；失败已诚实呈现，绝不带核心进注定失败的启动。
   // 服务全局单飞 + 内核按版本单飞（见 ensureAdsServiceOnce / ensureKernelOnce），无需再叠一层全局 once。
   const prep = await ensureAdsRuntimeAndKernel(handle);
+  if (!isCurrentLifecycleGeneration(handle, generation)) return false;
   if (!prep.ok) return;
   // 运行时/内核准备可长达数分钟（首启下载）；这期间被暂停/移出/退出则诚实放弃，不再拉起子进程。
   // （startEdge 亦有同一取消闸兜底；此处提前返回避免多余「正在启动」状态残留。）
   if (handle.removed || handle.stopRequested || isQuitting || handle.status.session === 'paused') return;
   const preflight = await ensureProxyPreflight(handle);
-  if (handle.removed || handle.stopRequested || isQuitting || handle.status.session === 'paused') return;
+  if (!isCurrentLifecycleGeneration(handle, generation) || handle.removed || handle.stopRequested
+    || isQuitting || handle.status.session === 'paused') return;
   if (preflight && preflight.state === 'unavailable') {
     stopStartForProxyFailure(handle, preflight);
     return;
   }
-  startEdge(handle);
+  startEdge(handle, { generation });
 }
 
 // 按环境分派启动流程（不做队列；调用方决定是否经错峰队列进入）。
-function startFlowForEnv(handle) {
-  if (!handle) return;
+function startFlowForEnv(handle, generation = handle && handle.lifecycleGeneration) {
+  if (!handle || !isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return;
   if (handle.kind === 'self') {
     return launchChromeAndGateEdge(handle);
   }
-  return startAdsPowerFlow(handle);
+  return startAdsPowerFlow(handle, generation);
 }
 
 /** 手动/排队启动入口：清放弃终态（人工重试口）+ 清取消闸 + 错峰入队。 */
-function enqueueStartFlow(handle) {
-  if (!handle || handle.startFlowQueued) return Boolean(handle);
+function enqueueStartFlow(handle, generation = handle && handle.lifecycleGeneration) {
+  if (!handle || !isCurrentLifecycleGeneration(handle, generation) || handle.startFlowQueued) return Boolean(handle);
   const admission = reserveStartQueue(handle);
   if (!admission.ok) {
     showStartQueueFull(handle, admission);
     // 浏览器启动队列容量只限制浏览器等待者，不限制 Cloud 控制面数。未进浏览器队列的环境仍尝试
     // 用客户 ownership + persistent binding 启动 browser-absent 核心；失败也只保持诚实离线，绝不猜账号。
-    void startBrowserAbsentCore(handle, { queueAdmission: admission });
+    void startBrowserAbsentCore(handle, { queueAdmission: admission, generation });
     return 'control-only';
   }
   handle.startFlowQueued = true;
+  handle.startFlowGeneration = generation;
   void queueLifecycle(async () => {
     try {
-      return await startFlowForEnv(handle);
+      if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
+      return await startFlowForEnv(handle, generation);
     } finally {
-      handle.startFlowQueued = false;
-      // startEdge 已接手时 launchQueued/slotWaiting 会保留名额；前置准备失败或取消则归还排队容量。
-      if (!handle.child && !handle.launchQueued && !handle.slotWaitingSince && !handle.coldStandbyWaking) {
-        releaseStartQueue(handle);
+      if (isCurrentLifecycleGeneration(handle, generation) && handle.startFlowGeneration === generation) {
+        handle.startFlowQueued = false;
+        handle.startFlowGeneration = 0;
+        // startEdge 已接手时 launchQueued/slotWaiting 会保留名额；前置准备失败或取消则归还排队容量。
+        if (!handle.child && !handle.launchQueued && !handle.slotWaitingSince && !handle.coldStandbyWaking) {
+          releaseStartQueue(handle);
+        }
       }
     }
   }, handle.envId);
@@ -4293,6 +4458,7 @@ function enqueueStartFlow(handle) {
 /** 手动/排队启动入口：清放弃终态（人工重试口）+ 清取消闸 + 有界错峰入队。 */
 function queueStartEnv(handle, queuePosition) {
   if (!handle || handle.child) return false;
+  const generation = ensureEnabledLifecycleGeneration(handle, 'user_start');
   if (handle.startFlowQueued || handle.launchQueued || handle.slotWaitingSince) return true;
   handle.automationIntent = 'enabled';
   handle.engineStopReason = '';
@@ -4303,12 +4469,13 @@ function queueStartEnv(handle, queuePosition) {
   handle.stopRequested = false; // 显式启动意图：解除任何在途取消闸
   clearRespawnTimer(handle);
   clearColdStandbyTimer(handle);
-  const queued = enqueueStartFlow(handle);
+  const queued = enqueueStartFlow(handle, generation);
   if (!queued) return false;
   if (queued === 'control-only') return queued;
   updateStatus(handle, {
     edge: 'starting',
     closeScope: null,
+    loopStage: null,
     respawnGaveUp: false,
     lastMessage: queuePosition ? `已排队错峰启动（第 ${queuePosition} 位，相邻间隔约 1.1s）…` : '已排队错峰启动…',
     ...presencePatch('排队启动中…'),
@@ -4321,6 +4488,7 @@ function queueStartEnv(handle, queuePosition) {
 function stopAndRestart(handle, message, patch = {}) {
   if (!handle) return;
   stopLoginPoller();
+  advanceLifecycleGeneration(handle, 'restart');
   handle.automationIntent = 'enabled';
   handle.engineStopReason = '';
   handle.resumeAfterStop = false;
@@ -4339,7 +4507,8 @@ function stopAndRestart(handle, message, patch = {}) {
   }
 }
 
-function handleEdgeOutput(handle, text, isError = false) {
+function handleEdgeOutput(handle, text, isError = false, generation = handle && handle.lifecycleGeneration) {
+  if (!isCurrentLifecycleGeneration(handle, generation)) return;
   // 一个 chunk 可能带多行：逐行处理，让活动流 / 计数按真实行数走（旧法整块只算一次）。
   const lines = String(text).split('\n').map((l) => l.trim()).filter(Boolean);
   for (const line of lines) handleEdgeLogLine(handle, line, isError);
@@ -4595,7 +4764,13 @@ function handleEdgeLogLine(handle, message, isError = false) {
         ...(evt.loopStage !== undefined ? { loopStage: evt.loopStage } : {}),
       });
     }
-    if (evt.loopStage !== undefined) next.loopStage = evt.loopStage;
+    if (evt.loopStage !== undefined) {
+      next.loopStage = evt.loopStage;
+      next.loopStageGeneration = handle.lifecycleGeneration;
+      // loopStage 默认来自浏览器 feed/read/write/interact 阶段；只有结构化事件显式声明时才允许
+      // 浏览器关闭仍投影为运行，不能把“任务正在等浏览器”冒充为执行中。
+      next.loopStageBrowserIndependent = evt.loopStage !== null && evt.browserIndependent === true;
+    }
     // 阻断浮层（登录/验证码/未知阻断）待人工处理：核心成对信号驱动（`popup` 置真 / `popup_cleared`
     // 或会话结束 置假），使该环境在环境栏浮顶为「需人工」而非绿色在线（红线：多环境跨窗盯验证码正是
     // 本控制台的核心目的）。
@@ -4615,6 +4790,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
 function pauseEdge(handle) {
   if (!handle) return;
   if (handle.automationIntent === 'paused' || handle.pausePending) return;
+  advanceLifecycleGeneration(handle, 'user_pause');
   // 暂停属于自动化通道生命周期：停止任务、断开引擎连接，并释放当前浏览器执行器。
   // 客户会话和所有 request-scoped HTTP 数据管理能力保持可用。
   handle.automationIntent = 'paused';
@@ -4633,6 +4809,7 @@ function pauseEdge(handle) {
     updateStatus(handle, {
       edge: 'stopping',
       session: 'paused',
+      loopStage: null,
       overlayBlocked: false,
       lastMessage: '正在暂停自动化并断开引擎；数据管理不受影响…',
       ...presencePatch('正在暂停并断开引擎…'),
@@ -4656,6 +4833,7 @@ function pauseEdge(handle) {
     edge: 'stopped',
     cloud: 'disconnected',
     session: 'paused',
+    loopStage: null,
     overlayBlocked: false,
     lastMessage: '自动化已暂停，引擎未连接；数据管理仍可继续使用。',
     ...presencePatch('自动化已暂停'),
@@ -4665,21 +4843,25 @@ function pauseEdge(handle) {
 
 function resumeEdge(handle) {
   if (!handle) return;
+  const closingBeforeResume = Boolean(handle.child
+    && (handle.pausePending || handle.stopRequested || handle.engineStopReason === 'user_close'));
+  ensureEnabledLifecycleGeneration(handle, 'user_start');
   handle.automationIntent = 'enabled';
-  handle.engineStopReason = '';
   handle.automationPaused = false;
-  if (handle.child && handle.pausePending) {
-    // pause_and_exit 已进入安全退出，不尝试把同一进程“拉回来”；待 close 后按新意图重新启动。
+  if (closingBeforeResume) {
+    // pause/close 已进入安全退出，不尝试把同一进程“拉回来”；保持 stopRequested，待 close 后从新操作代启动。
     handle.resumeAfterStop = true;
     updateStatus(handle, {
       edge: 'starting',
       session: 'idle',
-      lastMessage: '暂停收尾中；引擎断开后将重新连接并自动准备浏览器…',
-      ...presencePatch('等待引擎断开后恢复…'),
+      loopStage: null,
+      lastMessage: '关闭收尾中；引擎和浏览器关闭后将重新启动…',
+      ...presencePatch('等待关闭收尾后重新启动…'),
       ...clearEdgeFailurePatch(handle),
     });
     return;
   }
+  handle.engineStopReason = '';
   handle.stopRequested = false;
   handle.resumeAfterStop = false;
   if (handle.child && (handle.coldStandbyActive || handle.coldStandbyPending || handle.controlPlaneOnly)) {
@@ -4775,6 +4957,7 @@ function stopAutomation(handle) {
   // 外部占用拒启发生在 browser-profile/start 返回句柄之前：本机从未拥有该浏览器。
   // 先冻结本轮事实，随后只收敛本机自动化意图；绝不能把远端 active 当成本机遗留浏览器去确认/接管/关闭。
   const externallyOccupiedBeforeAcquire = !handle.child && handle.envInUseThisRun === true;
+  advanceLifecycleGeneration(handle, 'user_close');
   handle.automationIntent = 'stopped';
   handle.engineStopReason = 'user_close';
   handle.resumeAfterStop = false;
@@ -4797,6 +4980,7 @@ function stopAutomation(handle) {
       edge: 'stopped',
       cloud: 'disconnected',
       session: 'closed',
+      loopStage: null,
       closeScope: externallyOccupiedBeforeAcquire ? 'local_automation_only' : null,
       overlayBlocked: false,
       lastMessage: externallyOccupiedBeforeAcquire
@@ -4821,6 +5005,7 @@ function stopAutomation(handle) {
   updateStatus(handle, {
     edge: 'stopping',
     session: 'closed',
+    loopStage: null,
     overlayBlocked: false,
     lastMessage: '正在关闭自动化引擎和浏览器；数据管理不受影响…',
     ...presencePatch('正在关闭自动化…'),
@@ -4884,13 +5069,15 @@ function startAllEnvs({ envIds } = {}) {
   // renderer 的筛选只决定“请求哪些”；主进程仍以实时句柄表求交集，已移出/伪造 ID 不能扩大启动范围。
   // envIds 未提供时兼容旧版 renderer 的全量调用；显式空数组则是零目标。
   const scoped = fleet.scopeFleetHandles([...envs.values()], envIds);
-  const paused = scoped.filter((h) => h.child && h.status.session === 'paused');
-  const standby = scoped.filter((h) => h.child && h.status.session !== 'paused'
+  const closing = scoped.filter((h) => h.child && (h.stopRequested || h.engineStopReason === 'user_close'));
+  const paused = scoped.filter((h) => h.child && !closing.includes(h) && h.status.session === 'paused');
+  const standby = scoped.filter((h) => h.child && !closing.includes(h) && h.status.session !== 'paused'
     && (h.coldStandbyActive || h.coldStandbyPending || h.controlPlaneOnly));
   const targets = scoped.filter((h) => !h.child);
-  if (targets.length === 0 && paused.length === 0 && standby.length === 0) return { ok: true, queued: 0 };
-  paused.forEach((h) => resumeEdge(h));
-  standby.forEach((h) => wakeColdStandby(h, 'user_start_all'));
+  if (targets.length === 0 && closing.length === 0 && paused.length === 0 && standby.length === 0) {
+    return { ok: true, queued: 0 };
+  }
+  [...closing, ...paused, ...standby].forEach((h) => resumeEdge(h));
   const accepted = [];
   const controlOnly = [];
   const rejected = [];
@@ -4900,7 +5087,7 @@ function startAllEnvs({ envIds } = {}) {
     else if (result) accepted.push(handle);
     else rejected.push(handle);
   });
-  const all = [...paused, ...standby, ...accepted];
+  const all = [...closing, ...paused, ...standby, ...accepted];
   return {
     ok: true,
     queued: all.length,
@@ -5022,25 +5209,6 @@ function lifecycleAxes(handle) {
   // not a global client-to-cloud connection or a prerequisite for HTTP data management.
   const cloudState = engineLinkState === 'disconnected' ? 'offline' : engineLinkState;
   const waitingForResource = handle.launchQueued || handle.startFlowQueued || handle.slotWaitingSince;
-  const automationState = handle.pausePending && handle.automationIntent === 'enabled'
-    ? 'starting'
-    : handle.pausePending
-      ? 'pausing'
-      : handle.engineStopReason === 'user_close' && handle.child
-        ? 'stopping'
-        : handle.automationIntent === 'paused'
-          ? 'paused'
-          : handle.automationIntent === 'stopped'
-            ? 'stopped'
-            : waitingForResource
-              ? 'waiting_resource'
-              : (handle.gaveUp || status.respawnGaveUp || (status.edgeFailure && !handle.child))
-                ? 'error'
-                : handle.child && status.cloud === 'connected'
-                  ? (status.loopStage ? 'running' : 'ready')
-                  : handle.child
-                    ? 'starting'
-                    : 'stopped';
   const browserState = status.overlayBlocked
     ? 'blocked'
     : handle.browserStateUnconfirmed
@@ -5060,6 +5228,31 @@ function lifecycleAxes(handle) {
         : handle.child
           ? (handle.browserParkingReady ? 'ready' : 'starting')
           : 'closed';
+  const currentLoopRunning = Boolean(status.loopStage
+    && status.loopStageGeneration === handle.lifecycleGeneration);
+  const currentLoopExecutable = currentLoopRunning
+    && (browserState === 'ready' || status.loopStageBrowserIndependent === true);
+  const automationState = handle.resumeAfterStop && handle.child
+    ? 'starting'
+    : handle.pausePending && handle.automationIntent === 'enabled'
+      ? 'starting'
+      : handle.pausePending
+        ? 'pausing'
+        : handle.engineStopReason === 'user_close' && handle.child
+          ? 'stopping'
+          : handle.automationIntent === 'paused'
+            ? 'paused'
+            : handle.automationIntent === 'stopped'
+              ? 'stopped'
+              : waitingForResource
+                ? 'waiting_resource'
+                : (handle.gaveUp || status.respawnGaveUp || (status.edgeFailure && !handle.child))
+                  ? 'error'
+                  : handle.child && status.cloud === 'connected'
+                    ? (currentLoopExecutable ? 'running' : 'ready')
+                    : handle.child
+                      ? 'starting'
+                      : 'stopped';
   return { clientSessionState, engineLinkState, automationState, browserState, coreState, cloudState };
 }
 

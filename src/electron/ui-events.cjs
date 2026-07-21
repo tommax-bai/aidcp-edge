@@ -38,6 +38,7 @@ const UI_EVENT_PREFIX = '[ui-event]';
 //   sentence: string,                 // 活动流一句话（人话）
 //   presence: string,                 // 在场感行文案（当前正在做什么）
 //   loopStage: 'feed'|'select'|'read'|'write'|'comment'|'interact'|'return'|null,
+//   browserIndependent: true,         // 仅浏览器无关任务显式携带；缺省 loopStage 一律视为需要浏览器
 //   statsDelta: { views?, likes?, collects?, comments? },
 //   publish: { state:'pending'|'reminded'|'approved'|'published'|'rejected'|'failed', title?, code? },
 //   publishPreview: { recordId, code, kind, title, content, topics, images, contentVersion, updatedAt },

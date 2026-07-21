@@ -139,6 +139,47 @@ test('串行启动队列只投影当前可证明的待处理位次，并随优�
   await Promise.all([head, manual, task, resume]);
 });
 
+test('串行启动队列可取消尚未执行的同环境旧代启动与唤醒项', async () => {
+  const queue = fleet.createSerialLaunchQueue({ spacingMs: 0 });
+  let releaseHead!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseHead = resolve; });
+  const ran: string[] = [];
+  const head = queue.enqueue({ key: 'head', run: async () => { await gate; return true; } });
+  const staleStart = queue.enqueue({ key: 'env-a', run: async () => { ran.push('start'); return true; } });
+  const staleWake = queue.enqueue({ key: 'env-a:wake', run: async () => { ran.push('wake'); return true; } });
+  assert.equal(queue.cancel('env-a'), 1);
+  assert.equal(queue.cancel('env-a:wake'), 1);
+  assert.equal(queue.pendingPosition('env-a'), null);
+  assert.equal(queue.pendingPosition('env-a:wake'), null);
+  releaseHead();
+  const [, startResult, wakeResult] = await Promise.all([head, staleStart, staleWake]);
+  assert.equal(startResult.reason, 'cancelled');
+  assert.equal(wakeResult.reason, 'cancelled');
+  assert.deepEqual(ran, [], '旧代队列项不得打开浏览器');
+});
+
+test('主进程把执行阶段绑定当前操作代，旧核心输出、唤醒和退避不得跨代写状态', () => {
+  assert.match(mainSource, /lifecycleGeneration:\s*0/);
+  assert.match(mainSource, /function advanceLifecycleGeneration\([\s\S]*lifecycleQueue\.cancel\?\.\(handle\.envId\)[\s\S]*launchQueue\.cancel\?\.\(`\$\{handle\.envId\}:wake`\)/);
+  assert.match(mainSource, /handleEdgeOutput\(handle, chunk\.toString\(\), false, generation\)/);
+  assert.match(mainSource, /if \(!isCurrentLifecycleGeneration\(handle, generation\)\) return;/);
+  assert.match(mainSource, /next\.loopStageGeneration = handle\.lifecycleGeneration/);
+  assert.match(mainSource, /status\.loopStageGeneration === handle\.lifecycleGeneration/);
+  assert.match(mainSource, /next\.loopStageBrowserIndependent = evt\.loopStage !== null && evt\.browserIndependent === true/);
+  assert.match(mainSource, /currentLoopExecutable = currentLoopRunning[\s\S]*browserState === 'ready'[\s\S]*loopStageBrowserIndependent === true/,
+    '浏览器阶段只有在浏览器真实就绪时才是运行中，显式浏览器无关任务除外');
+  assert.match(mainSource, /rearmWakeAfterFailure\(handle, generation = handle && handle\.lifecycleGeneration\)[\s\S]*handle\.stopRequested[\s\S]*isCurrentLifecycleGeneration/);
+});
+
+test('start_queue_full 是未入队退避，不再谎称仍在队列中', () => {
+  const start = mainSource.indexOf('function denyWakeNow(handle, detail)');
+  const end = mainSource.indexOf('\nfunction armWakeDeadline', start);
+  const block = mainSource.slice(start, end);
+  assert.match(block, /本次未入队，将按退避计划重试/);
+  assert.match(block, /仍在权威队列中/);
+  assert.doesNotMatch(block, /仍在队列中，浏览器继续起/);
+});
+
 test('一个环境启动失败绝不阻塞队列里其余环境', async () => {
   const queue = fleet.createSerialLaunchQueue({ spacingMs: 0 });
   const done: string[] = [];

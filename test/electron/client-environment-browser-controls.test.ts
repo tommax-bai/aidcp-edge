@@ -32,6 +32,35 @@ test('filtered close-all scopes live handles and reuses single-environment close
     'a late wake acknowledgement must not undo a batch or single close');
 });
 
+test('rapid close then start waits for the closing core and starts exactly from the new lifecycle generation', () => {
+  const stop = functionBlock('stopAutomation', 'closeBrowserExecutor');
+  assert.match(stop, /advanceLifecycleGeneration\(handle, 'user_close'\)/);
+  assert.match(stop, /handle\.stopRequested = true/);
+  assert.match(stop, /loopStage: null/);
+
+  const resume = functionBlock('resumeEdge', 'confirmOwnedProfileClosedFromShell');
+  const barrierAt = resume.indexOf('if (closingBeforeResume)');
+  const restartIntentAt = resume.indexOf('handle.resumeAfterStop = true', barrierAt);
+  const releaseStopAt = resume.indexOf('handle.stopRequested = false', restartIntentAt);
+  assert.ok(barrierAt >= 0 && restartIntentAt > barrierAt && releaseStopAt > restartIntentAt,
+    '关闭中的新启动先记录 resumeAfterStop，返回后才允许普通路径复位 stopRequested');
+  assert.match(resume, /关闭收尾中；引擎和浏览器关闭后将重新启动/);
+
+  const startAll = functionBlock('startAllEnvs', 'stopAllEnvs');
+  assert.match(startAll, /const closing = scoped\.filter/);
+  assert.match(startAll, /\[\.\.\.closing, \.\.\.paused, \.\.\.standby\]\.forEach\(\(h\) => resumeEdge\(h\)\)/);
+  assert.doesNotMatch(startAll, /standby\.forEach\(\(h\) => wakeColdStandby/);
+
+  assert.match(main, /if \(shouldResumeAfterStop && !isQuitting\)[\s\S]*queueStartEnv\(handle\)/,
+    '旧核心真实退出后才进入统一启动队列');
+  assert.match(main, /const currentStopReply = !currentGeneration[\s\S]*lifecycle\.close_failed[\s\S]*lifecycle\.paused/,
+    '旧子进程只可回报与当前停止意图匹配的终局结果');
+  assert.match(main, /if \(staleGeneration\)[\s\S]*shouldStartCurrent[\s\S]*queueStartEnv\(handle\)/,
+    '旧代 spawn 的迟到失败不得挂自动重启，只能按当前代意图收尾或重启');
+  assert.match(main, /本次重新启动已取消；请重试关闭/,
+    '浏览器未确认关闭时不得继续开启新一代浏览器');
+});
+
 test('closed-task browser open returns a pending projection before bootstrap settles', () => {
   const start = main.indexOf("ipcMain.handle('browser:open'");
   const end = main.indexOf("ipcMain.handle('edge:start'", start);

@@ -20,7 +20,7 @@ test('browser slot and start-queue rejection both keep a path to browser-absent 
   assert.match(startEdge, /retainStartQueueReservation:\s*true/);
 
   const enqueue = blockBetween(electronMain, 'function enqueueStartFlow(', 'function queueStartEnv(');
-  assert.match(enqueue, /if \(!admission\.ok\)[\s\S]*startBrowserAbsentCore\(handle, \{ queueAdmission: admission \}\)/);
+  assert.match(enqueue, /if \(!admission\.ok\)[\s\S]*startBrowserAbsentCore\(handle, \{ queueAdmission: admission, generation \}\)/);
 });
 
 test('binding_unknown while browser slots are full remains queued instead of becoming an engine error', () => {
