@@ -488,7 +488,14 @@ export class WechatAuthCoordinator {
       return this.authInFlight;
     }
     this.log(`[wechat-channels] auth decision: browser=required trigger=${trigger} reason=${this.reasonCode ?? 'WECHAT_AUTH_REQUIRED'}; opening for login or reauthorization`);
-    this.authInFlight = this.runBrowserAuthentication().finally(() => {
+    this.authInFlight = this.runBrowserAuthentication().finally(async () => {
+      // Failed QR/challenge/identity flows must not leave a physical browser holding the machine-wide
+      // transient lane forever. Successful API-only auth already closes it in runBrowserAuthentication.
+      if (!this.manualBrowserVisible && this.sidecar.getState() === 'open') {
+        await this.sidecar.close().catch(() => {
+          this.log('[wechat-channels] browser authentication cleanup failed; transient lane remains held for bounded shell recovery');
+        });
+      }
       this.authInFlight = undefined;
     });
     return this.authInFlight;

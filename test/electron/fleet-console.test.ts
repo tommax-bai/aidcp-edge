@@ -2092,6 +2092,48 @@ test('平台标识：添加环境列表中的视频号标签复用状态栏绿�
   );
 });
 
+test('视频号行不显示人设入口、不触发人设弹窗，并分开展示公共槽位与临时通道', async () => {
+  const { w, calls, pushFleet, pushStatus } = await boot();
+  const videoStatus = makeStatus({
+    envId: 'ads-wx1',
+    envName: '视频号环境',
+    personaApplicable: false,
+    personaBound: false,
+    browserUsageMode: 'transient',
+    automationState: 'waiting_resource',
+    browserState: 'closed',
+    queueStage: 'transient',
+    queuePosition: 2,
+  });
+  pushFleet({
+    provider: 'adspower',
+    selectedEnvId: 'ads-wx1',
+    railCollapsed: false,
+    slots: {
+      public: { capacity: 2, occupied: 2, queued: 0 },
+      transient: { capacity: 1, occupied: 1, queued: 2, ownerEnvId: 'ads-wx0' },
+    },
+    environments: [{
+      envId: 'ads-wx1',
+      kind: 'adspower',
+      profileId: 'wx1',
+      name: '视频号环境',
+      platform: 'wechat_channels',
+      status: videoStatus,
+    }],
+  });
+  pushStatus(videoStatus);
+  await tick();
+
+  const row = w.document.querySelector('.rail-row[data-env-id="ads-wx1"]') as HTMLElement;
+  assert.ok(row);
+  assert.equal(row.querySelector('.rail-persona'), null, '视频号行不得渲染人设图标');
+  assert.equal(row.querySelector('.rail-state')?.textContent?.replace(/\s+/g, ''), '排队中#2');
+  assert.equal(w.document.querySelector('#rail-capacity')?.textContent, '公共浏览器 2/2 · 临时通道 1/1');
+  assert.equal(w.document.querySelector('#persona-pop')?.classList.contains('open'), false);
+  assert.equal(calls.notify.length, 0, 'personaBound=false 不得对视频号触发人设检测通知或自动弹窗');
+});
+
 test('人设浮层：引擎停止仍可读写；生成后进预览页、「改关键词」回第一步草稿保留', async () => {
   const calls: Record<string, unknown[]> = { persist: [] };
   const { w, pushStatus } = await boot({

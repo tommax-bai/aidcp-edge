@@ -93,7 +93,28 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
       this.state = 'open';
       this.log('[wechat-channels] browser login sidecar is open');
     } catch (error) {
-      this.state = 'unavailable';
+      // A provider may have opened the physical browser before attach/capture failed. Rejecting open()
+      // without closing it would let the shell release the transient lane while an orphan browser is
+      // still alive. Always perform bounded teardown first; close confirmation remains authoritative.
+      const session = this.session;
+      const browser = this.browser;
+      this.session = undefined;
+      this.browser = undefined;
+      this.stopRequestCapture?.();
+      this.stopRequestCapture = undefined;
+      try {
+        session?.close();
+        if (browser && !(await browser.killAndConfirmDead())) {
+          throw new Error('browser sidecar open cleanup was not confirmed');
+        }
+      } catch (cleanupError) {
+        this.state = 'unavailable';
+        this.log(`[wechat-channels] browser login sidecar cleanup unavailable: ${safeBrowserSidecarDiagnostic(cleanupError)}`);
+        throw cleanupError;
+      }
+      // The authentication attempt failed, but the physical browser is confirmed gone. Expose
+      // `closed` so the lease decorator may safely release the transient lane.
+      this.state = 'closed';
       this.log(`[wechat-channels] browser login sidecar unavailable: ${safeBrowserSidecarDiagnostic(error)}`);
       throw error;
     }

@@ -78,11 +78,15 @@ test('browser-absent core does not consume a browser slot and real wake clears t
   assert.match(wakeFailed, /setTimeout\(\(\) => drainSlotWaiters\(\), 0\)/);
 });
 
-test('wechat interaction runtime also keeps its browser sidecar closed until a slot-backed wake', () => {
-  assert.match(wechatRuntime, /const startBrowserAbsent = env\.AIDCP_START_BROWSER_ABSENT === '1'/);
-  assert.match(wechatRuntime, /startBrowserAbsent \? controlAccountId! : \(accountId \|\| envKey\)/);
-  assert.match(wechatRuntime, /Cloud control plane online; browser sidecar remains absent/);
-  assert.match(wechatRuntime, /process\.send\(\{ type: 'lifecycle\.standby' \}\)/);
-  assert.match(wechatRuntime, /if \(type === 'lifecycle\.wake'\)[\s\S]*await auth\.initialize\(\)/);
-  assert.match(wechatRuntime, /auth reopen deferred: browser slot unavailable/);
+test('wechat interaction runtime uses an independent transient lane and API/Cloud running proof', () => {
+  assert.match(wechatRuntime, /new TransientBrowserLeaseClient\(\{/);
+  assert.match(wechatRuntime, /initiallyHeld: env\.AIDCP_TRANSIENT_BROWSER_LEASE === '1'/);
+  assert.match(wechatRuntime, /new LeasedWechatChannelsBrowserSidecar\(rawSidecar, transientLease\)/);
+  assert.match(wechatRuntime, /onApiCloudRoundTrip: \(at\) => \{[\s\S]{0,100}runtimeProofAt = at/);
+  assert.match(wechatRuntime, /type: 'lifecycle\.interaction_runtime'/);
+  assert.match(wechatRuntime, /identityMatches: authSnapshot\.identityMatches/);
+  assert.match(wechatRuntime, /connectorStarted: connector!\.isStarted\(\)/);
+  assert.match(wechatRuntime, /cloudNegotiated: client\.isInteractionInboxNegotiated\(\)/);
+  assert.match(wechatRuntime, /proofAt: runtimeProofAt/);
+  assert.match(wechatRuntime, /sidecar\.releaseIfBrowserClosed\('startup_initialization_complete'\)/);
 });

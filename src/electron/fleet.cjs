@@ -139,6 +139,15 @@ function nicknameSourceForPlatform(platform) {
   return 'xhs';
 }
 
+/** Platform capabilities used by the shell; interaction runtimes do not consume persistent browser slots or personas. */
+function browserUsageModeForPlatform(platform) {
+  return nicknameSourceForPlatform(platform) === 'wechat_channels' ? 'transient' : 'persistent';
+}
+
+function personaApplicableForPlatform(platform) {
+  return nicknameSourceForPlatform(platform) !== 'wechat_channels';
+}
+
 /**
  * Facebook 自动浏览策略：只允许已解析为 dev 的 Facebook 子进程真浏览/点赞。
  * 此处刻意不读取 process.env，调用方会把结果写入最终 spawn env，以阻断外壳残留值泄漏到 ol/custom。
@@ -701,6 +710,8 @@ module.exports = {
   legacyMirrorOf,
   scopeFleetHandles,
   nicknameSourceForPlatform,
+  browserUsageModeForPlatform,
+  personaApplicableForPlatform,
   facebookBrowseModeFor,
   WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
   wechatUnverifiedWriteTestModeFor,

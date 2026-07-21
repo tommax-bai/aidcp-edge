@@ -24,7 +24,10 @@ import type { InteractionPlatformDriver } from '../platform/driver.js';
 import type { InteractionTransport } from '../platform/interaction-connector.js';
 import { WechatChannelsApiClient } from './api-client.js';
 import { WechatAuthCoordinator } from './auth-session.js';
-import { CdpWechatChannelsBrowserSidecar } from './browser-sidecar.js';
+import {
+  CdpWechatChannelsBrowserSidecar,
+  type WechatChannelsBrowserSidecar,
+} from './browser-sidecar.js';
 import { wireWechatIdentityUiEvents } from './companion-ui.js';
 import { WechatChannelsConnector } from './connector.js';
 import {
@@ -49,6 +52,10 @@ import {
   DEFAULT_WECHAT_CONTROL_PLANE_HEARTBEAT_TIMEOUT_MS,
   WechatControlPlaneHeartbeat,
 } from './control-plane-heartbeat.js';
+import {
+  LeasedWechatChannelsBrowserSidecar,
+  TransientBrowserLeaseClient,
+} from './transient-browser-lease.js';
 
 export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver): Promise<void> {
   if (driver.platform !== 'wechat_channels') throw new Error('interaction runtime only supports wechat_channels');
@@ -73,6 +80,9 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   const breaker = new WechatEndpointCircuitBreaker();
   const capabilities = new WechatCapabilityState(flags, breaker);
   let connector: WechatChannelsConnector | undefined;
+  let runtimeProofAt = 0;
+  let automationPaused = startAutomationPaused;
+  let publishRuntimeState = (): void => undefined;
   const api = new WechatChannelsApiClient({
     timeoutMs: envMs(env.AIDCP_WECHAT_API_TIMEOUT_MS, 15_000),
     maxRetries: envInt(env.AIDCP_WECHAT_API_MAX_RETRIES, 2),
@@ -83,7 +93,13 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
       connector?.reportStatus();
     },
   });
-  const sidecar = new CdpWechatChannelsBrowserSidecar({ env, logImpl: safeLog });
+  const transientLease = new TransientBrowserLeaseClient({
+    initiallyHeld: env.AIDCP_TRANSIENT_BROWSER_LEASE === '1',
+    lifecycleGeneration: envInt(env.AIDCP_LIFECYCLE_GENERATION, 0),
+    acquireTimeoutMs: envMs(env.AIDCP_TRANSIENT_BROWSER_ACQUIRE_TIMEOUT_MS, 180_000),
+  });
+  const rawSidecar = new CdpWechatChannelsBrowserSidecar({ env, logImpl: safeLog });
+  const sidecar = new LeasedWechatChannelsBrowserSidecar(rawSidecar, transientLease);
   const probeRunner = new WechatChannelsProbeRunner({
     api,
     flags,
@@ -140,6 +156,10 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     commentSyncIntervalMs: envMs(env.AIDCP_WECHAT_COMMENT_SYNC_INTERVAL_MS, 60_000),
     dmSyncIntervalMs: envMs(env.AIDCP_WECHAT_DM_SYNC_INTERVAL_MS, 30_000),
     logImpl: safeLog,
+    onApiCloudRoundTrip: (at) => {
+      runtimeProofAt = at;
+      publishRuntimeState();
+    },
   });
 
   client = new EdgeClient({
@@ -173,6 +193,24 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     ),
     logImpl: safeLog,
   });
+  publishRuntimeState = (): void => {
+    if (typeof process.send !== 'function' || !process.connected) return;
+    const authSnapshot = auth.getSnapshot();
+    const effectiveCapabilities = connector!.getAuthStatus().capabilities;
+    process.send({
+      type: 'lifecycle.interaction_runtime',
+      authStatus: authSnapshot.status,
+      identityMatches: authSnapshot.identityMatches,
+      connectorStarted: connector!.isStarted(),
+      cloudNegotiated: client.isInteractionInboxNegotiated(),
+      paused: automationPaused,
+      offboardPending: client.hasPendingInteractionOffboard(),
+      dataCapable: effectiveCapabilities.commentsRead || effectiveCapabilities.dmRead,
+      browserState: authSnapshot.browserState,
+      proofAt: runtimeProofAt,
+    });
+  };
+  auth.onChange(() => publishRuntimeState());
 
   let browserAbsent = startBrowserAbsent;
   let wakeWaiters: Array<(ok: boolean) => void> = [];
@@ -314,6 +352,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     capabilities.resetRemoteControls();
     connector!.reportStatus();
     void connector!.stop();
+    publishRuntimeState();
   });
   client.on('cloud.reconnected', () => {
     void (async () => {
@@ -324,6 +363,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
       if (!cleanupOnly && !browserAbsent && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
           !(await state.isOffboarded())) await connector!.start();
       else await connector!.stop();
+      publishRuntimeState();
     })();
   });
 
@@ -345,9 +385,9 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
       ? '[wechat-channels] restricted offboard cleanup core online; all ordinary interaction operations disabled'
       : '[wechat-channels] Cloud did not negotiate interaction_inbox_v1; sync/send remain disabled without retries');
   }
+  publishRuntimeState();
 
   let shuttingDown = false;
-  let automationPaused = startAutomationPaused;
   const shutdown = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -367,6 +407,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   let cloudRebindChain = Promise.resolve();
   process.on('message', (message: unknown) => {
     if (!message || typeof message !== 'object') return;
+    if (transientLease.handleMessage(message)) return;
     const raw = message as { type?: unknown; requestId?: unknown; url?: unknown; targetKey?: unknown };
     const type = raw.type;
     if (type === 'lifecycle.cloud_rebind') {
@@ -388,6 +429,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
           await applyRuntimeControls(client.getInteractionRuntimeControls());
           if (!cleanupOnly && !automationPaused && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard()
               && !(await state.isOffboarded())) await connector!.start();
+          publishRuntimeState();
           send({ type: 'lifecycle.cloud_rebound', ok: true, browserAbsent });
         } catch (error) {
           send({
@@ -416,6 +458,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
           settleWake(true);
           if (!automationPaused && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard() &&
               !(await state.isOffboarded())) await connector!.start();
+          publishRuntimeState();
           if (typeof process.send === 'function' && process.connected) process.send({ type: 'lifecycle.woken' });
         } catch (error) {
           const reason = safeCode(error);
@@ -430,6 +473,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     if (type === 'lifecycle.pause' || type === 'lifecycle.pause_and_exit') {
       void connector!.stop().then(() => {
         automationPaused = true;
+        publishRuntimeState();
         if (typeof process.send === 'function' && process.connected) process.send({ type: 'lifecycle.paused' });
         if (type === 'lifecycle.pause_and_exit') terminate(String(type));
       });
@@ -440,6 +484,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
         automationPaused = false;
         if (!browserAbsent && client.isInteractionInboxNegotiated() && !client.hasPendingInteractionOffboard()
             && !(await state.isOffboarded())) await connector!.start();
+        publishRuntimeState();
         if (typeof process.send === 'function' && process.connected) process.send({ type: 'lifecycle.resumed' });
       })();
       return;
@@ -455,12 +500,19 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   } else if (!flags.interactionEnabled || flags.accountKillSwitch) {
     auth.disable();
     connector.reportStatus();
+    sidecar.releaseIfBrowserClosed('interaction_disabled');
+    publishRuntimeState();
   } else {
     try {
       await auth.initialize();
     } catch (error) {
       safeLog(`[wechat-channels] authentication remains fail-closed: ${safeCode(error)}`);
       connector.reportStatus();
+    } finally {
+      // A valid stored session never opens a browser, but its startup validation still owns the
+      // machine-wide FIFO lease. Browser-backed auth releases through sidecar.close().
+      sidecar.releaseIfBrowserClosed('startup_initialization_complete');
+      publishRuntimeState();
     }
   }
 }
@@ -471,7 +523,7 @@ export async function handleInteractionCommand(
     connector: WechatChannelsConnector;
     state: WechatRuntimeStateStore;
     auth: WechatAuthCoordinator;
-    sidecar: CdpWechatChannelsBrowserSidecar;
+    sidecar: WechatChannelsBrowserSidecar;
     ensureBrowserAwake?: () => Promise<boolean>;
     flushReplyResultOutbox: () => Promise<void>;
     flushOffboardResultOutbox: () => Promise<void>;

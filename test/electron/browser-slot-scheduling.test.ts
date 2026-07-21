@@ -47,6 +47,15 @@ test('客户端将等待浏览器执行位统一显示为“排队中”', () =>
   assert.equal(uiLogic.fleetLevel(status, Date.now()).label, '排队中');
 });
 
+test('平台能力：视频号使用独立临时通道且不适用人设，其他平台保持公共浏览器与人设', () => {
+  assert.equal(fleet.browserUsageModeForPlatform('wechat_channels'), 'transient');
+  assert.equal(fleet.personaApplicableForPlatform('wechat_channels'), false);
+  assert.equal(fleet.browserUsageModeForPlatform('xiaohongshu'), 'persistent');
+  assert.equal(fleet.personaApplicableForPlatform('xiaohongshu'), true);
+  assert.equal(fleet.browserUsageModeForPlatform('facebook'), 'persistent');
+  assert.equal(fleet.personaApplicableForPlatform('facebook'), true);
+});
+
 test('主进程从权威调度器结构化投影位次，不解析状态文案', () => {
   const start = mainSource.indexOf('function lifecycleQueueProjection(handle)');
   const end = mainSource.indexOf('\nfunction statusOf(handle)', start);
@@ -57,6 +66,50 @@ test('主进程从权威调度器结构化投影位次，不解析状态文案',
   assert.match(block, /queueStage:\s*'preparing',\s*queuePosition:\s*lifecycleQueue\.pendingPosition\(handle\.envId\)/);
   assert.doesNotMatch(block, /lastMessage|match\(|parseInt|正则/, '位次不得从文案或日志解析');
   assert.match(mainSource, /\.\.\.lifecycleQueueProjection\(handle\)/, '结构化字段必须进入 statusOf 快照');
+});
+
+test('视频号临时通道与公共槽位分池，并投影容量 1 与精确 FIFO 位次', () => {
+  const occupied = mainSource.slice(
+    mainSource.indexOf('function occupiedSlots()'),
+    mainSource.indexOf('\nfunction queuedStartCount()', mainSource.indexOf('function occupiedSlots()')),
+  );
+  assert.match(occupied, /!usesTransientBrowserLane\(h\)/, '视频号/API-only 核心不得占公共浏览器槽位');
+
+  const snapshot = mainSource.slice(
+    mainSource.indexOf('function fleetSnapshot()'),
+    mainSource.indexOf('\nfunction broadcastFleet()', mainSource.indexOf('function fleetSnapshot()')),
+  );
+  assert.match(snapshot, /public:\s*\{[\s\S]*capacity: slotCapacity\(\)[\s\S]*occupied: occupiedSlots\(\)/);
+  assert.match(snapshot, /transient: transientQueueSnapshot\(\)/);
+  assert.match(mainSource, /function transientQueueSnapshot\(\)[\s\S]{0,220}capacity: 1/);
+
+  const projection = mainSource.slice(
+    mainSource.indexOf('function lifecycleQueueProjection(handle)'),
+    mainSource.indexOf('\nfunction statusOf(handle)', mainSource.indexOf('function lifecycleQueueProjection(handle)')),
+  );
+  assert.match(projection, /queueStage: 'transient'/);
+  assert.match(projection, /transientBrowserQueue\.pendingPosition\(handle\.transientBrowserQueueKey\)/);
+  assert.match(mainSource, /if \(usesTransientBrowserLane\(handle\)\) return startTransientEnvironment\(handle, generation\);/,
+    '视频号启动必须在公共 start/slot 准入之前分流');
+});
+
+test('视频号运行中只认当前进程内完整数据面证据，浏览器状态独立为关闭', () => {
+  const axes = mainSource.slice(
+    mainSource.indexOf('function lifecycleAxes(handle)'),
+    mainSource.indexOf('\nfunction lifecycleQueueProjection(handle)', mainSource.indexOf('function lifecycleAxes(handle)')),
+  );
+  assert.match(axes, /transientRuntime\.authStatus === 'active'/);
+  assert.match(axes, /transientRuntime\.identityMatches/);
+  assert.match(axes, /transientRuntime\.connectorStarted/);
+  assert.match(axes, /transientRuntime\.cloudNegotiated/);
+  assert.match(axes, /!transientRuntime\.paused/);
+  assert.match(axes, /!transientRuntime\.offboardPending/);
+  assert.match(axes, /transientRuntime\.dataCapable/);
+  assert.match(axes, /transientRuntime\.proofAt >= handle\.spawnedAtMs/,
+    '历史登录或旧进程 ACK 不得证明当前进程运行中');
+  assert.match(axes, /sidecarState === 'open'[\s\S]{0,100}\? 'ready'[\s\S]{0,180}: 'closed'/,
+    'API-only 运行态不得反向伪造浏览器为打开');
+  assert.match(axes, /interactionProvenRunning \? 'running' : 'ready'/);
 });
 
 test('增量状态与 fleet 快照共用完整生命周期投影', () => {

@@ -197,6 +197,7 @@ const fields = {
   railSumRun: document.querySelector('#rail-sum-run'),
   railSumAttn: document.querySelector('#rail-sum-attn'),
   railSumIdle: document.querySelector('#rail-sum-idle'),
+  railCapacity: document.querySelector('#rail-capacity'),
   railGuide: document.querySelector('#rail-guide'),
   railStartAll: document.querySelector('#rail-start-all'),
   railCloseAll: document.querySelector('#rail-close-all'),
@@ -449,6 +450,7 @@ const fleetView = {
   lastRailSig: '', // 环境栏 DOM 变更签名（每秒 stale 重估时避免无谓重建，见 renderRail）
   lastRailSel: null, // 上次渲染时的选中 envId：只有「选中真的变了」才把选中行滚进视野，绝不与用户手滚打架
   lastRailCollapsed: null, // 上次渲染时的收 / 展态：行高体系不同，旧滚动位在新布局里没有意义
+  slots: null,
 };
 function currentEnvId() {
   return fleetView.selected && fleetView.selected !== '__local__' ? fleetView.selected : undefined;
@@ -1851,6 +1853,12 @@ fields.delegatedConfirm?.addEventListener('close', () => {
 function selectedEnvPlatform() {
   const env = fleetView.envs.get(fleetView.selected);
   return normPlatform((env && env.platform) || selectedPlatform);
+}
+
+function personaAppliesToEnvironment(env) {
+  if (!env) return true;
+  if (env.status && env.status.personaApplicable === false) return false;
+  return normPlatform(env.platform) !== 'wechat_channels';
 }
 
 function syncDelegatedActionAvailability() {
@@ -3975,6 +3983,10 @@ function openPersonaPop(envId, reason = 'manual') {
   if (!fields.personaPop) return;
   if (envId && envId !== fleetView.selected && fleetView.envs.has(envId)) selectEnv(envId);
   const env = fleetView.envs.get(fleetView.selected);
+  if (reason !== 'bulk' && !personaAppliesToEnvironment(env)) {
+    closePersonaPop(true);
+    return;
+  }
   const label = resolveEnvironmentDisplayName(env).name;
   const bulk = reason === 'bulk';
   if (fields.personaHeadTitle) fields.personaHeadTitle.textContent = bulk ? '批量设置人设' : '账号人设';
@@ -4198,7 +4210,13 @@ function render(status) {
   if (status.provider && SUBTITLE[status.provider]) fields.subtitle.textContent = SUBTITLE[status.provider];
   // 表单未在编辑时，让 provider 分段跟随实际运行 provider。
   if (status.provider && !editingProvider) applyProviderSelection(status.provider);
-  updatePersonaGate(status); // 建号人设只依赖客户会话与 HTTP 权威绑定，不依赖自动化引擎/浏览器
+  const selectedPersonaApplicable = personaAppliesToEnvironment(fleetView.envs.get(fleetView.selected));
+  if (selectedPersonaApplicable) {
+    updatePersonaGate(status); // 建号人设只依赖客户会话与 HTTP 权威绑定，不依赖自动化引擎/浏览器
+  } else {
+    clearPersonaPromptForCurrentEnv();
+    if (fields.personaPop?.classList.contains('open') && personaPopOpenReason !== 'bulk') closePersonaPop(true);
+  }
   syncInteractionWorkspace();
   syncContentWorkspace(status);
 }
@@ -4335,6 +4353,7 @@ function applyFleetSnapshot(snap) {
   }
   fleetView.authoritativeEnvIds = known;
   if (typeof snap.railCollapsed === 'boolean') fleetView.collapsed = snap.railCollapsed;
+  if (snap.slots && typeof snap.slots === 'object') fleetView.slots = snap.slots;
   const prevSelected = fleetView.selected;
   if (snap.selectedEnvId && fleetView.envs.has(snap.selectedEnvId)) fleetView.selected = snap.selectedEnvId;
   if (!fleetView.selected || !fleetView.envs.has(fleetView.selected)) fleetView.selected = fleetView.order[0] || null;
@@ -4344,6 +4363,8 @@ function applyFleetSnapshot(snap) {
     }
     closeDelegatedPopover(false);
     syncDelegatedTriggerTasks([]);
+    const nextEnv = fleetView.envs.get(fleetView.selected);
+    if (!personaAppliesToEnvironment(nextEnv) && fields.personaPop?.classList.contains('open')) closePersonaPop(true);
   }
   if (fleetView.selected && fleetView.selected !== prevSelected) {
     pubManualOpen = false;
@@ -4410,6 +4431,7 @@ function selectEnv(envId) {
   resetPubCarouselSelection();
   closePublishPreview();
   resetPersonaDraft(); // 人设向导每环境独立：切换即清草稿，绝不把 A 的草稿误确认到 B
+  if (!personaAppliesToEnvironment(fleetView.envs.get(envId)) && fields.personaPop?.classList.contains('open')) closePersonaPop(true);
   syncInteractionWorkspace();
   syncContentWorkspace(fleetView.envs.get(envId)?.status);
   window.aidcpEdge.fleetSelect?.(envId);
@@ -4626,6 +4648,7 @@ function renderRail() {
     closeAllPending: fleetView.closeAllPending,
     globalPendingCount: fullModel.pendingCount,
     counts,
+    slots: fleetView.slots,
     // platform 必须进签名：改平台后行才会重建上色（漏掉则签名未变、UI 停留旧平台）。
     rows: model.rows.map((r) => [r.envId, r.level, r.state, r.railGroup, r.needsAction, railDisplayName(r), r.nameSource,
       r.nameSyncState, manualNicknamePendingEnvIds.has(r.envId), r.label, r.detail, r.queuePosition,
@@ -4643,6 +4666,13 @@ function renderRail() {
     fields.railToggle.setAttribute('aria-label', fields.railToggle.title);
   }
   if (fields.railCount) fields.railCount.textContent = String(list.length);
+  if (fields.railCapacity) {
+    const publicSlots = fleetView.slots && fleetView.slots.public;
+    const transient = fleetView.slots && fleetView.slots.transient;
+    fields.railCapacity.textContent = publicSlots && transient
+      ? `公共浏览器 ${publicSlots.occupied}/${publicSlots.capacity} · 临时通道 ${transient.occupied}/${transient.capacity}`
+      : '';
+  }
   for (const button of fields.railPlatformFilters || []) {
     const active = button.dataset.railPlatform === fleetView.platformFilter;
     button.classList.toggle('active', active);
@@ -4797,15 +4827,17 @@ function makeRailRow(row) {
     beginRailNameEdit(row, nameEl);
   });
   nameLine.appendChild(nameEl);
-  const bound = Boolean(row.status && row.status.personaBound);
-  const pIcon = document.createElement('button');
-  pIcon.type = 'button';
-  pIcon.className = `rail-persona${bound ? ' set' : ''}`;
-  pIcon.textContent = '✦';
-  pIcon.title = bound ? '账号人设：已设置（点击查看 / 调整）' : '账号人设：未设置（点击设置）';
-  pIcon.setAttribute('aria-label', pIcon.title);
-  pIcon.addEventListener('click', (e) => { e.stopPropagation(); openPersonaPop(row.envId); });
-  nameLine.appendChild(pIcon);
+  if (personaAppliesToEnvironment(row)) {
+    const bound = Boolean(row.status && row.status.personaBound);
+    const pIcon = document.createElement('button');
+    pIcon.type = 'button';
+    pIcon.className = `rail-persona${bound ? ' set' : ''}`;
+    pIcon.textContent = '✦';
+    pIcon.title = bound ? '账号人设：已设置（点击查看 / 调整）' : '账号人设：未设置（点击设置）';
+    pIcon.setAttribute('aria-label', pIcon.title);
+    pIcon.addEventListener('click', (e) => { e.stopPropagation(); openPersonaPop(row.envId); });
+    nameLine.appendChild(pIcon);
+  }
   meta.appendChild(nameLine);
   // 状态行：状态点 + 文案
   const stateEl = document.createElement('span');
@@ -7412,6 +7444,7 @@ function clearPersonaPromptForCurrentEnv() {
 
 // 只在云端权威地说「这个账号没有人设」时才弹。调用方已保证 status.personaBound === false。
 function maybePromptPersonaSetup(status) {
+  if (!personaAppliesToEnvironment(fleetView.envs.get(currentEnvId()))) return;
   const key = personaPromptKey(status);
   if (personaPrompted.has(key)) return;
   personaPrompted.add(key);

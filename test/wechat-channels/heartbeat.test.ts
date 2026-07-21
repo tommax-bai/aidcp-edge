@@ -76,6 +76,7 @@ async function withConnector(
     logs: string[];
     setClock: (ms: number) => void;
     beats: () => number;
+    proofs: number[];
   }) => Promise<void>,
   opts: { publishSyncBatch?: InteractionTransport['publishSyncBatch'] } = {},
 ): Promise<void> {
@@ -83,6 +84,7 @@ async function withConnector(
   try {
     let clock = T0;
     const logs: string[] = [];
+    const proofs: number[] = [];
     const state = new WechatRuntimeStateStore(SCOPE, root);
     const connector = new WechatChannelsConnector({
       envKey: SCOPE.envKey,
@@ -103,12 +105,14 @@ async function withConnector(
       // No repeating timers: start() still runs one scheduled comment+dm pass, which is all we drive.
       commentSyncIntervalMs: 0,
       dmSyncIntervalMs: 0,
+      onApiCloudRoundTrip: (at) => proofs.push(at),
     });
     await run({
       connector,
       logs,
       setClock: (ms) => { clock = ms; },
       beats: () => logs.filter((line) => line === HEARTBEAT_LINE).length,
+      proofs,
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -116,21 +120,24 @@ async function withConnector(
 }
 
 test('api-sync heartbeat: a proven Cloud round-trip beats once, throttled well under the stale window', async () => {
-  await withConnector(async ({ connector, setClock, beats }) => {
+  await withConnector(async ({ connector, setClock, beats, proofs }) => {
     // start() runs the initial scheduled dm sync -> idle checkpoint publish -> matched ack -> first beat.
     await connector.start();
     assert.equal(beats(), 1, 'first proven round-trip must beat immediately');
+    assert.deepEqual(proofs, [T0], '结构化运行证据与首个匹配 ACK 同时产生');
 
     // A second round-trip 30s later is inside the throttle window -> no extra beat.
     setClock(T0 + 30_000);
     await connector.sync(dmRequest());
     assert.equal(beats(), 1, 'a round-trip inside the throttle window must not add a beat');
+    assert.deepEqual(proofs, [T0], '节流窗口内不得伪造更新更鲜的证据时间');
 
     // Past the throttle interval (60s) the next round-trip beats again — cadence stays far under the
     // renderer's 5-minute stale threshold, so the fleet projection never goes stale while alive.
     setClock(T0 + 61_000);
     await connector.sync(dmRequest());
     assert.equal(beats(), 2, 'a round-trip past the throttle window must beat again');
+    assert.deepEqual(proofs, [T0, T0 + 61_000]);
 
     await connector.stop();
   });
@@ -139,9 +146,10 @@ test('api-sync heartbeat: a proven Cloud round-trip beats once, throttled well u
 test('api-sync heartbeat: a failed Cloud round-trip (half-open link) does NOT beat', async () => {
   // The batch ack times out / never returns: publishBatch throws before emitHeartbeat, so no beat is
   // logged. This is the honesty backstop — a link that cannot round-trip must not read as alive.
-  await withConnector(async ({ connector, logs, beats }) => {
+  await withConnector(async ({ connector, logs, beats, proofs }) => {
     await connector.start();
     assert.equal(beats(), 0, 'no matched ack -> no liveness beat');
+    assert.deepEqual(proofs, [], 'Cloud 未回 ACK 时不得产生运行证据');
     // The failure still surfaces as the safe scheduled-sync diagnostic, keeping the path observable.
     assert.ok(logs.some((line) => line.includes('scheduled dm sync stopped safely')));
     await connector.stop();

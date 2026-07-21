@@ -1502,6 +1502,17 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     // 正在原地重建浏览器（change browser-slot-scheduling）。唤醒是异步有界的：待机态只在核心回报
     // lifecycle.woken 后才解除，绝不在下发唤醒的那一刻就乐观标成已醒。
     coldStandbyWaking: false,
+    // Capacity-1 machine-wide lane for short-lived browser sidecars. This is orthogonal to the
+    // persistent execution-slot pool and guarded by lifecycle generation.
+    transientBrowserQueued: false,
+    transientBrowserQueueKey: null,
+    transientBrowserActive: false,
+    transientBrowserLeaseGeneration: 0,
+    transientBrowserRequestId: null,
+    transientBrowserLeaseSettle: null,
+    transientBrowserLeaseTimer: null,
+    // Structured interaction-runtime truth; never infer API-only running from a historical login.
+    interactionRuntime: null,
   };
 }
 
@@ -1557,6 +1568,7 @@ function syncEnvHandles() {
     coreBootstrapSupervisor.remove(envId);
     handle.removed = true;
     handle.stopRequested = true;
+    cancelQueuedTransientBrowser(handle, 'environment_removed');
     releaseStartQueue(handle);
     clearRespawnTimer(handle);
     if (handle.child) {
@@ -1578,8 +1590,10 @@ function syncEnvHandles() {
       existing.cascadeIndex = spec.cascadeIndex;
       existing.offboardCleanup = Boolean(spec.offboardCleanup);
       const controlState = allowedEnvironmentControlStates.get(spec.profileId);
-      if (controlState && typeof controlState.personaBound === 'boolean') {
+      if (personaApplicable(existing) && controlState && typeof controlState.personaBound === 'boolean') {
         existing.status.personaBound = controlState.personaBound;
+      } else if (!personaApplicable(existing)) {
+        existing.status.personaBound = null;
       }
     } else {
       const handle = makeEnvHandle(spec);
@@ -1589,7 +1603,7 @@ function syncEnvHandles() {
         handle.status.account = { id: spec.profileId, name: spec.name || '', source: 'env' };
       }
       const controlState = allowedEnvironmentControlStates.get(spec.profileId);
-      if (controlState && typeof controlState.personaBound === 'boolean') {
+      if (personaApplicable(handle) && controlState && typeof controlState.personaBound === 'boolean') {
         handle.status.personaBound = controlState.personaBound;
       }
       envs.set(envId, handle);
@@ -1660,6 +1674,14 @@ function fleetSnapshot() {
     railCollapsed: Boolean(settings.railCollapsed),
     cloudEnv: cloudSelectionView(), // compatibility: automation WebSocket target
     cloudTarget: cloudTargetView(), // structured data API + automation WebSocket target
+    slots: {
+      public: {
+        capacity: slotCapacity(),
+        occupied: occupiedSlots(),
+        queued: queuedStartCount(),
+      },
+      transient: transientQueueSnapshot(),
+    },
     environments: [...envs.values()].map((h) => ({
       envId: h.envId,
       kind: h.kind,
@@ -1701,6 +1723,186 @@ const launchQueue = fleet.createSerialLaunchQueue({
   logger: (m) => console.log(m),
 });
 
+// Machine-wide capacity-1 lane for short-lived browser sidecars. It is intentionally separate from
+// the persistent execution-slot pool: API-only interaction runtimes may be running while their
+// browser is closed, but every startup/auth sidecar workflow is still deterministic FIFO.
+const transientBrowserQueue = fleet.createSerialLaunchQueue({
+  spacingMs: 0,
+  logger: (m) => console.log(m.replace('[launch-queue]', '[transient-browser]')),
+});
+const TRANSIENT_BROWSER_LEASE_TIMEOUT_MS = Math.max(
+  60_000,
+  Number(process.env.AIDCP_TRANSIENT_BROWSER_LEASE_TIMEOUT_MS) || 7 * 60_000,
+);
+
+function usesTransientBrowserLane(handle) {
+  return Boolean(handle && fleet.browserUsageModeForPlatform(handle.platform) === 'transient');
+}
+
+function personaApplicable(handle) {
+  return Boolean(handle && fleet.personaApplicableForPlatform(handle.platform));
+}
+
+function transientQueueSnapshot() {
+  const owner = [...envs.values()].find((handle) => handle.transientBrowserActive && !handle.removed);
+  return {
+    capacity: 1,
+    occupied: owner ? 1 : 0,
+    queued: [...envs.values()].filter((handle) => handle.transientBrowserQueued && !handle.removed).length,
+    ownerEnvId: owner ? owner.envId : null,
+  };
+}
+
+function sendTransientMessage(handle, payload) {
+  const child = handle && handle.child;
+  if (!child || !child.connected) return false;
+  try {
+    child.send(payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function settleTransientBrowserLease(handle, reason, ok = true) {
+  if (!handle || !handle.transientBrowserActive) return false;
+  if (handle.transientBrowserLeaseTimer) clearTimeout(handle.transientBrowserLeaseTimer);
+  handle.transientBrowserLeaseTimer = null;
+  const settle = handle.transientBrowserLeaseSettle;
+  handle.transientBrowserLeaseSettle = null;
+  handle.transientBrowserActive = false;
+  handle.transientBrowserLeaseGeneration = 0;
+  handle.transientBrowserRequestId = null;
+  if (typeof settle === 'function') settle(ok);
+  console.log(`[transient-browser] 释放 ${handle.envId}（${reason}）`);
+  broadcastFleet();
+  return true;
+}
+
+function cancelQueuedTransientBrowser(handle, reason) {
+  if (!handle || !handle.transientBrowserQueued) return false;
+  const key = handle.transientBrowserQueueKey;
+  const requestId = handle.transientBrowserRequestId;
+  if (key) transientBrowserQueue.cancel(key);
+  handle.transientBrowserQueued = false;
+  handle.transientBrowserQueueKey = null;
+  handle.transientBrowserRequestId = null;
+  if (requestId && requestId !== 'startup') {
+    sendTransientMessage(handle, {
+      type: 'lifecycle.transient_browser_denied',
+      requestId,
+      generation: handle.lifecycleGeneration,
+      reason,
+    });
+  }
+  broadcastFleet();
+  return true;
+}
+
+function awaitTransientBrowserRelease(handle, generation) {
+  return new Promise((resolve) => {
+    handle.transientBrowserLeaseSettle = resolve;
+    handle.transientBrowserLeaseTimer = setTimeout(() => {
+      if (!handle.transientBrowserActive || handle.transientBrowserLeaseGeneration !== generation) return;
+      updateStatus(handle, {
+        edge: 'warning',
+        lastMessage: '临时浏览器通道占用超时；正在停止本环境并回收通道。',
+        ...edgeFailurePatch('临时浏览器通道占用超时'),
+        ...presencePatch('临时浏览器通道回收中'),
+      });
+      if (handle.child) {
+        try { handle.child.kill('SIGTERM'); } catch { /* child close/exit owns final release */ }
+      } else {
+        settleTransientBrowserLease(handle, 'lease_timeout_without_child', false);
+      }
+    }, TRANSIENT_BROWSER_LEASE_TIMEOUT_MS);
+    handle.transientBrowserLeaseTimer.unref?.();
+  });
+}
+
+function enqueueTransientBrowserLane(handle, {
+  generation = handle && handle.lifecycleGeneration,
+  requestId = 'startup',
+  startCore = false,
+  reason = 'startup',
+} = {}) {
+  if (!handle || !isCurrentLifecycleGeneration(handle, generation) || handle.removed || handle.stopRequested || isQuitting) {
+    return false;
+  }
+  if (handle.transientBrowserQueued || handle.transientBrowserActive) return true;
+  const key = `${handle.envId}:transient:${generation}:${requestId}`;
+  handle.transientBrowserQueued = true;
+  handle.transientBrowserQueueKey = key;
+  handle.transientBrowserRequestId = requestId;
+  updateStatus(handle, {
+    edge: handle.child ? 'running' : 'starting',
+    loopStage: null,
+    lastMessage: '排队等待临时浏览器通道…',
+    ...presencePatch('排队中'),
+    ...clearEdgeFailurePatch(handle),
+  });
+  broadcastFleet();
+  void transientBrowserQueue.enqueue({
+    key,
+    kind: 'resume',
+    run: async () => {
+      if (!isCurrentLifecycleGeneration(handle, generation) || handle.removed || handle.stopRequested || isQuitting) {
+        return false;
+      }
+      handle.transientBrowserQueued = false;
+      handle.transientBrowserQueueKey = null;
+      handle.transientBrowserActive = true;
+      handle.transientBrowserLeaseGeneration = generation;
+      handle.transientBrowserRequestId = requestId;
+      updateStatus(handle, {
+        edge: handle.child ? 'running' : 'starting',
+        lastMessage: startCore ? '正在初始化视频号数据连接…' : '临时浏览器通道已取得，正在处理鉴权…',
+        ...presencePatch(startCore ? '正在连接视频号…' : '正在处理视频号鉴权…'),
+        ...clearEdgeFailurePatch(handle),
+      });
+      broadcastFleet();
+      const released = awaitTransientBrowserRelease(handle, generation);
+      if (startCore) {
+        const started = spawnEdgeChild(handle, { generation, transientBrowserLease: true });
+        if (!started) {
+          settleTransientBrowserLease(handle, 'core_start_rejected', false);
+          return false;
+        }
+        void Promise.resolve(started).catch(() => settleTransientBrowserLease(handle, 'core_start_failed', false));
+      } else if (!sendTransientMessage(handle, {
+        type: 'lifecycle.transient_browser_granted',
+        requestId,
+        generation,
+      })) {
+        settleTransientBrowserLease(handle, 'grant_send_failed', false);
+        return false;
+      }
+      return await released;
+    },
+  }).then((result) => {
+    if (handle.transientBrowserQueueKey === key) {
+      handle.transientBrowserQueued = false;
+      handle.transientBrowserQueueKey = null;
+      handle.transientBrowserRequestId = null;
+    }
+    if (!result.ok && requestId !== 'startup') {
+      sendTransientMessage(handle, {
+        type: 'lifecycle.transient_browser_denied',
+        requestId,
+        generation,
+        reason: result.reason || reason || 'cancelled',
+      });
+    }
+    broadcastFleet();
+  });
+  return true;
+}
+
+function startTransientEnvironment(handle, generation = handle && handle.lifecycleGeneration) {
+  if (!handle || handle.child || !usesTransientBrowserLane(handle)) return false;
+  return enqueueTransientBrowserLane(handle, { generation, requestId: 'startup', startCore: true, reason: 'startup' });
+}
+
 function isCurrentLifecycleGeneration(handle, generation) {
   return Boolean(handle && Number.isInteger(generation) && handle.lifecycleGeneration === generation);
 }
@@ -1721,6 +1923,10 @@ function advanceLifecycleGeneration(handle, reason) {
   lifecycleQueue.cancel?.(handle.envId);
   launchQueue.cancel?.(handle.envId);
   launchQueue.cancel?.(`${handle.envId}:wake`);
+  cancelQueuedTransientBrowser(handle, reason || 'generation_changed');
+  if (handle.transientBrowserActive && !handle.child) {
+    settleTransientBrowserLease(handle, 'generation_changed_without_child', false);
+  }
   if (typeof handle.wakeSettle === 'function') handle.wakeSettle(false);
   settleLaunchReady(handle, false);
   handle.startFlowQueued = false;
@@ -1784,7 +1990,7 @@ function occupiedSlots() {
   let n = 0;
   for (const h of envs.values()) {
     // 初始 browser-absent 核心从未打开浏览器；coldStandbyPending 期间也不能虚占一个执行槽。
-    if (h.child && !h.coldStandbyActive && !h.controlPlaneOnly && !h.removed) n += 1;
+    if (h.child && !usesTransientBrowserLane(h) && !h.coldStandbyActive && !h.controlPlaneOnly && !h.removed) n += 1;
   }
   return n;
 }
@@ -2419,6 +2625,11 @@ function resetPersonaNoticeGrace(handle) {
 
 function syncBrowserPersonaNotice(handle, force = false) {
   if (!handle || !handle.browserParkingReady) return;
+  if (!personaApplicable(handle)) {
+    resetPersonaNoticeGrace(handle);
+    handle.browserPersonaNoticeState = browserPersonaNoticeKey({ active: false });
+    return;
+  }
   const ready = personaNoticeReady(handle);
   if (!ready) handle.personaNoticeReadySince = 0;
   else if (!handle.personaNoticeReadySince) handle.personaNoticeReadySince = Date.now();
@@ -3415,6 +3626,7 @@ function spawnEdgeChild(handle, {
   controlBootstrap = null,
   cleanupBootstrap = null,
   retainStartQueueReservation = false,
+  transientBrowserLease = false,
   generation = handle && handle.lifecycleGeneration,
 } = {}) {
   if (!handle || !isCurrentLifecycleGeneration(handle, generation) || handle.child
@@ -3502,6 +3714,10 @@ function spawnEdgeChild(handle, {
     spawnEnv.AIDCP_OFFBOARD_CLEANUP_ONLY = '1';
     spawnEnv.AIDCP_OFFBOARD_CLEANUP_ID = cleanupBootstrap.offboardId;
   }
+  if (transientBrowserLease) {
+    spawnEnv.AIDCP_TRANSIENT_BROWSER_LEASE = '1';
+    spawnEnv.AIDCP_LIFECYCLE_GENERATION = String(generation);
+  }
   if (handle.automationPaused) {
     spawnEnv.AIDCP_AUTOMATION_PAUSED_AT_START = '1';
   }
@@ -3526,6 +3742,7 @@ function spawnEdgeChild(handle, {
   // 的根因（每次冷待机唤醒都会重启核心、走到这一行）。重置成 null=未知，等新会话的权威信号重建。
   handle.status.personaBound = null;
   handle.status.personaWritingLanguage = undefined;
+  handle.interactionRuntime = null;
   const child = spawn(process.execPath, [edgeEntry], {
     cwd: edgeCwd,
     env: spawnEnv,
@@ -3559,11 +3776,14 @@ function spawnEdgeChild(handle, {
     cloudRebind: null,
     lastMessage: cleanupBootstrap
       ? '正在启动受限离场清理核心；浏览器保持关闭。'
+      : transientBrowserLease
+      ? '正在校验视频号会话并连接数据服务；仅在需要重新登录时打开浏览器。'
       : controlBootstrap
       ? '正在连接自动化引擎；浏览器保持关闭，等待执行槽位。'
       : '正在启动 aidcp-edge…',
     ...presencePatch(cleanupBootstrap
       ? '正在连接离场清理核心…'
+      : transientBrowserLease ? '正在连接视频号…'
       : controlBootstrap ? '正在连接云端，浏览器等待槽位' : '正在启动引擎…'),
     ...clearEdgeFailurePatch(handle),
   });
@@ -3608,6 +3828,79 @@ function spawnEdgeChild(handle, {
         });
         pending.resolve({ ok: false, reason });
       }
+      return;
+    }
+    if (message.type === 'lifecycle.transient_browser_requested') {
+      const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+      const requestedGeneration = Number(message.generation);
+      if (!usesTransientBrowserLane(handle) || !requestId || requestedGeneration !== generation) {
+        sendTransientMessage(handle, {
+          type: 'lifecycle.transient_browser_denied',
+          requestId,
+          generation,
+          reason: 'not_applicable_or_stale',
+        });
+        return;
+      }
+      enqueueTransientBrowserLane(handle, {
+        generation,
+        requestId,
+        startCore: false,
+        reason: typeof message.reason === 'string' ? message.reason : 'browser_sidecar_open',
+      });
+      return;
+    }
+    if (message.type === 'lifecycle.transient_browser_released') {
+      if (Number(message.generation) !== generation
+          || handle.transientBrowserLeaseGeneration !== generation) return;
+      settleTransientBrowserLease(
+        handle,
+        typeof message.reason === 'string' ? message.reason : 'child_released',
+        true,
+      );
+      return;
+    }
+    if (message.type === 'lifecycle.interaction_runtime') {
+      if (!usesTransientBrowserLane(handle)) return;
+      const authStatus = ['active', 'login_required', 'reauth_required', 'challenge_required', 'degraded', 'disabled']
+        .includes(message.authStatus) ? message.authStatus : 'disabled';
+      const browserState = ['closed', 'opening', 'open', 'closing', 'unavailable']
+        .includes(message.browserState) ? message.browserState : 'unavailable';
+      const proofAt = Number(message.proofAt) || 0;
+      handle.interactionRuntime = {
+        authStatus,
+        identityMatches: message.identityMatches === true,
+        connectorStarted: message.connectorStarted === true,
+        cloudNegotiated: message.cloudNegotiated === true,
+        paused: message.paused === true,
+        offboardPending: message.offboardPending === true,
+        dataCapable: message.dataCapable === true,
+        browserState,
+        proofAt,
+        updatedAt: Date.now(),
+      };
+      const provenRunning = authStatus === 'active'
+        && handle.interactionRuntime.identityMatches
+        && handle.interactionRuntime.connectorStarted
+        && handle.interactionRuntime.cloudNegotiated
+        && !handle.interactionRuntime.paused
+        && !handle.interactionRuntime.offboardPending
+        && handle.interactionRuntime.dataCapable
+        && proofAt >= handle.spawnedAtMs;
+      updateStatus(handle, {
+        edge: 'running',
+        auth: authStatus === 'active'
+          ? 'logged in'
+          : ['login_required', 'reauth_required', 'challenge_required'].includes(authStatus)
+            ? 'login required'
+            : 'checking',
+        session: handle.interactionRuntime.paused ? 'paused' : 'running',
+        ...(provenRunning ? {
+          lastMessage: '视频号数据连接运行中；浏览器已关闭，不占公共浏览器槽位。',
+          ...presencePatch('视频号运行中'),
+          ...clearEdgeFailurePatch(handle),
+        } : {}),
+      });
       return;
     }
     if (message.type === 'lifecycle.standby') {
@@ -3752,6 +4045,7 @@ function spawnEdgeChild(handle, {
     failPendingCoreRebind(handle, `core_spawn_error:${(err && err.message) || String(err)}`);
     settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
     handle.child = undefined;
+    settleTransientBrowserLease(handle, 'core_spawn_error', false);
     handle.browserOpenPending = false;
     handle.coldStandbyPending = false;
     handle.controlPlaneOnly = false;
@@ -3851,6 +4145,7 @@ function spawnEdgeChild(handle, {
     const controlPlaneNeverEstablished = handle.controlPlaneOnly && !handle.controlPlaneBootstrapped;
     const wasColdStandby = !controlPlaneNeverEstablished && (handle.coldStandbyPending || handle.coldStandbyActive);
     handle.child = undefined;
+    settleTransientBrowserLease(handle, 'core_closed', false);
     handle.browserOpenPending = false;
     if (controlPlaneNeverEstablished) {
       handle.coldStandbyPending = false;
@@ -4343,12 +4638,14 @@ function startFlowForEnv(handle, generation = handle && handle.lifecycleGenerati
   if (handle.kind === 'self') {
     return launchChromeAndGateEdge(handle);
   }
+  if (usesTransientBrowserLane(handle)) return startTransientEnvironment(handle, generation);
   return startAdsPowerFlow(handle, generation);
 }
 
 /** 手动/排队启动入口：清放弃终态（人工重试口）+ 清取消闸 + 错峰入队。 */
 function enqueueStartFlow(handle, generation = handle && handle.lifecycleGeneration) {
   if (!handle || !isCurrentLifecycleGeneration(handle, generation) || handle.startFlowQueued) return Boolean(handle);
+  if (usesTransientBrowserLane(handle)) return startTransientEnvironment(handle, generation);
   const admission = reserveStartQueue(handle);
   if (!admission.ok) {
     showStartQueueFull(handle, admission);
@@ -4381,7 +4678,8 @@ function enqueueStartFlow(handle, generation = handle && handle.lifecycleGenerat
 function queueStartEnv(handle, queuePosition) {
   if (!handle || handle.child) return false;
   const generation = ensureEnabledLifecycleGeneration(handle, 'user_start');
-  if (handle.startFlowQueued || handle.launchQueued || handle.slotWaitingSince) return true;
+  if (handle.startFlowQueued || handle.launchQueued || handle.slotWaitingSince
+      || handle.transientBrowserQueued || handle.transientBrowserActive) return true;
   handle.automationIntent = 'enabled';
   handle.engineStopReason = '';
   handle.resumeAfterStop = false;
@@ -4394,7 +4692,14 @@ function queueStartEnv(handle, queuePosition) {
   const queued = enqueueStartFlow(handle, generation);
   if (!queued) return false;
   if (queued === 'control-only') return queued;
-  updateStatus(handle, {
+  updateStatus(handle, usesTransientBrowserLane(handle) ? {
+    edge: 'starting',
+    closeScope: null,
+    loopStage: null,
+    respawnGaveUp: false,
+    lastMessage: '已进入临时通道队列；视频号将按顺序校验会话并连接数据服务。',
+    ...presencePatch('排队中'),
+  } : {
     edge: 'starting',
     closeScope: null,
     loopStage: null,
@@ -4614,8 +4919,8 @@ function handleEdgeLogLine(handle, message, isError = false) {
     }
     // 人设绑定态（change persona-bound-tristate）：云端 true / false 都下发，双向采纳——云端是单写方，
     // 解绑必须能传下来（否则客户端会一直显示「已设置」，而云端早已按未绑停了这个号）。
-    if (typeof evt.personaBound === 'boolean') next.personaBound = evt.personaBound;
-    if (Object.prototype.hasOwnProperty.call(evt, 'personaWritingLanguage')) {
+    if (personaApplicable(handle) && typeof evt.personaBound === 'boolean') next.personaBound = evt.personaBound;
+    if (personaApplicable(handle) && Object.prototype.hasOwnProperty.call(evt, 'personaWritingLanguage')) {
       next.personaWritingLanguage = evt.personaWritingLanguage;
     }
     if (evt.proxyRuntime) {
@@ -5130,8 +5435,19 @@ function lifecycleAxes(handle) {
   // compatibility only: old renderers may still consume cloudState, but it is the automation-engine link,
   // not a global client-to-cloud connection or a prerequisite for HTTP data management.
   const cloudState = engineLinkState === 'disconnected' ? 'offline' : engineLinkState;
-  const waitingForResource = handle.launchQueued || handle.startFlowQueued || handle.slotWaitingSince;
-  const browserState = status.overlayBlocked
+  const transientRuntime = usesTransientBrowserLane(handle) ? handle.interactionRuntime : null;
+  const interactionProvenRunning = Boolean(transientRuntime
+    && transientRuntime.authStatus === 'active'
+    && transientRuntime.identityMatches
+    && transientRuntime.connectorStarted
+    && transientRuntime.cloudNegotiated
+    && !transientRuntime.paused
+    && !transientRuntime.offboardPending
+    && transientRuntime.dataCapable
+    && transientRuntime.proofAt >= handle.spawnedAtMs);
+  const waitingForResource = handle.launchQueued || handle.startFlowQueued || handle.slotWaitingSince
+    || handle.transientBrowserQueued;
+  let browserState = status.overlayBlocked
     ? 'blocked'
     : handle.browserStateUnconfirmed
       ? 'error'
@@ -5150,11 +5466,25 @@ function lifecycleAxes(handle) {
         : handle.child
           ? (handle.browserParkingReady ? 'ready' : 'starting')
           : 'closed';
+  if (usesTransientBrowserLane(handle)) {
+    const sidecarState = transientRuntime && transientRuntime.browserState;
+    browserState = handle.transientBrowserQueued
+      ? 'queued'
+      : sidecarState === 'opening'
+        ? 'starting'
+        : sidecarState === 'open'
+          ? 'ready'
+          : sidecarState === 'closing'
+            ? 'closing'
+            : sidecarState === 'unavailable'
+              ? 'error'
+              : 'closed';
+  }
   const currentLoopRunning = Boolean(status.loopStage
     && status.loopStageGeneration === handle.lifecycleGeneration);
   const currentLoopExecutable = currentLoopRunning
     && (browserState === 'ready' || status.loopStageBrowserIndependent === true);
-  const automationState = handle.resumeAfterStop && handle.child
+  let automationState = handle.resumeAfterStop && handle.child
     ? 'starting'
     : handle.pausePending && handle.automationIntent === 'enabled'
       ? 'starting'
@@ -5175,6 +5505,31 @@ function lifecycleAxes(handle) {
                     : handle.child
                       ? 'starting'
                       : 'stopped';
+  if (usesTransientBrowserLane(handle)) {
+    automationState = handle.resumeAfterStop && handle.child
+      ? 'starting'
+      : handle.pausePending && handle.automationIntent === 'enabled'
+        ? 'starting'
+        : handle.pausePending
+          ? 'pausing'
+          : handle.engineStopReason === 'user_close' && handle.child
+            ? 'stopping'
+            : handle.automationIntent === 'paused' || (transientRuntime && transientRuntime.paused)
+              ? 'paused'
+              : handle.automationIntent === 'stopped'
+                ? 'stopped'
+                : handle.transientBrowserQueued
+                  ? 'waiting_resource'
+                  : handle.transientBrowserActive
+                    ? 'starting'
+                    : (handle.gaveUp || status.respawnGaveUp || (status.edgeFailure && !handle.child))
+                      ? 'error'
+                      : handle.child && status.cloud === 'connected'
+                        ? (interactionProvenRunning ? 'running' : 'ready')
+                        : handle.child
+                          ? 'starting'
+                          : 'stopped';
+  }
   return { clientSessionState, engineLinkState, automationState, browserState, coreState, cloudState };
 }
 
@@ -5185,6 +5540,12 @@ function lifecycleAxes(handle) {
  */
 function lifecycleQueueProjection(handle) {
   if (!handle) return { queueStage: null, queuePosition: null };
+  if (handle.transientBrowserQueued && handle.transientBrowserQueueKey) {
+    return {
+      queueStage: 'transient',
+      queuePosition: transientBrowserQueue.pendingPosition(handle.transientBrowserQueueKey),
+    };
+  }
   if (handle.slotWaitingSince) {
     const position = slotWaiters().findIndex((waiting) => waiting === handle);
     return { queueStage: 'slot', queuePosition: position >= 0 ? position + 1 : null };
@@ -5212,6 +5573,8 @@ function statusOf(handle) {
       browserState: 'closed',
       queueStage: null,
       queuePosition: null,
+      personaApplicable: true,
+      browserUsageMode: 'persistent',
     };
   }
   handle.status.commandDiagnostics = commandDiagnostics.pruneCommandDiagnostics(
@@ -5222,6 +5585,8 @@ function statusOf(handle) {
     ...handle.status,
     ...lifecycleAxes(handle),
     ...lifecycleQueueProjection(handle),
+    personaApplicable: personaApplicable(handle),
+    browserUsageMode: fleet.browserUsageModeForPlatform(handle.platform),
     targetCloudKey: handle.status.targetCloudKey || cloudSelectionView().key,
     envId: handle.envId,
     envName: handle.name,
@@ -5334,6 +5699,7 @@ ipcMain.handle('settings:get', () => ({
     occupied: occupiedSlots(),
     queued: queuedStartCount(),
     configured: [...envs.values()].filter((h) => !h.removed).length,
+    transient: transientQueueSnapshot(),
   },
   appVersion: app.getVersion(),
 }));
@@ -5727,6 +6093,7 @@ ipcMain.handle('settings:save', async (_event, patch) => {
       occupied: occupiedSlots(),
       queued: queuedStartCount(),
       configured: [...envs.values()].filter((h) => !h.removed).length,
+      transient: transientQueueSnapshot(),
     },
     saveOk: res.ok && !scopeError,
     saveError: res.error || scopeError,
@@ -5921,6 +6288,11 @@ function personaIpcEnv(envId) {
   const requestedEnvId = envId == null || envId === '' ? null : interactionId(envId, 'envId');
   const handle = requestedEnvId ? envs.get(requestedEnvId) : selectedHandle();
   if (!handle || handle.removed || handle.kind !== 'adspower') throw new Error('当前环境不支持人设管理');
+  if (!personaApplicable(handle)) {
+    const error = new Error('视频号不适用账号人设');
+    error.code = 'not_applicable';
+    throw error;
+  }
   const envKey = interactionId(handle.profileId, 'envKey');
   return { handle, envKey };
 }
@@ -5945,7 +6317,11 @@ async function handlePersonaIpc(handler) {
   try {
     return await handler();
   } catch (error) {
-    return { ok: false, reason: 'invalid_request', message: String((error && error.message) || error || '参数不合法') };
+    return {
+      ok: false,
+      reason: error && error.code === 'not_applicable' ? 'not_applicable' : 'invalid_request',
+      message: String((error && error.message) || error || '参数不合法'),
+    };
   }
 }
 

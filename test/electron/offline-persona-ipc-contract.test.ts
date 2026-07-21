@@ -46,6 +46,16 @@ test('人设 IPC 固定 customer-auth 路径与方法，停止状态不经过环
   assert.doesNotMatch(personaBlock, /sendPersonaCommand|\.child\b|queueStartEnv|startEdge|resumeEdge/, '人设读写不得依赖 core/浏览器运行');
 });
 
+test('视频号人设能力为不适用，旧 IPC fail-closed 返回 not_applicable', () => {
+  const personaBlock = main.slice(
+    main.indexOf('// 账号人设（change offline-account-persona-management）'),
+    main.indexOf("ipcMain.handle('publish:approval'"),
+  );
+  assert.match(personaBlock, /if \(!personaApplicable\(handle\)\)/);
+  assert.match(personaBlock, /error\.code = 'not_applicable'/);
+  assert.match(personaBlock, /error && error\.code === 'not_applicable' \? 'not_applicable' : 'invalid_request'/);
+});
+
 test('人设 IPC 本地白名单、幂等键和体积上限保持 fail-closed', () => {
   const personaBlock = main.slice(
     main.indexOf('// 账号人设（change offline-account-persona-management）'),

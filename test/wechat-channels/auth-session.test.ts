@@ -276,6 +276,34 @@ test('wechat auth: browser login closes only after identity, encrypted save, and
   });
 });
 
+test('wechat auth: timed-out QR login closes the browser before returning login_required', async () => {
+  let now = 0;
+  const sidecar = new FakeSidecar(null);
+  const auth = new WechatAuthCoordinator({
+    envKey: SCOPE.envKey,
+    expectedAccountId: SCOPE.envKey,
+    api: apiReturning(IDENTITY),
+    sidecar,
+    store: emptyMemoryStore(),
+    probeEnabledReads: async () => ({ ok: true }),
+    loginTimeoutMs: 2,
+    pollIntervalMs: 1,
+    nowImpl: () => now++,
+    sleepImpl: async () => {},
+    logImpl: () => {},
+  });
+
+  await assert.rejects(
+    () => auth.initialize(),
+    (error: unknown) => error instanceof WechatChannelsError && error.category === 'auth_expired',
+  );
+
+  assert.equal(auth.getSnapshot().status, 'login_required');
+  assert.equal(auth.getSnapshot().browserState, 'closed');
+  assert.equal(sidecar.opens, 1);
+  assert.equal(sidecar.closes, 1, '鉴权失败也必须确认关闭，避免占住临时通道');
+});
+
 test('wechat auth: stored encrypted session resumes API-only without opening browser', async () => {
   await withTempDir(async (root) => {
     const logs: string[] = [];
@@ -606,7 +634,7 @@ test('wechat auth: a finder identity change fails closed and never replaces the 
   });
 });
 
-test('wechat auth: a failed read probe keeps the browser open and exposes schema degradation', async () => {
+test('wechat auth: a failed read probe closes the transient browser and exposes schema degradation', async () => {
   await withTempDir(async (root) => {
     const sidecar = new FakeSidecar(SESSION);
     const auth = new WechatAuthCoordinator({
@@ -628,8 +656,8 @@ test('wechat auth: a failed read probe keeps the browser open and exposes schema
     );
     assert.equal(auth.getSnapshot().status, 'degraded');
     assert.equal(auth.getSnapshot().reasonCode, 'WECHAT_SCHEMA_CHANGED');
-    assert.equal(sidecar.state, 'open');
-    assert.equal(sidecar.closes, 0);
+    assert.equal(sidecar.state, 'closed');
+    assert.equal(sidecar.closes, 1, 'schema degradation must not hold the machine-wide transient lane');
   });
 });
 

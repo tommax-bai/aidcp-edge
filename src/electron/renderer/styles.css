@@ -2961,6 +2961,8 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .rail-title { font-size: 12px; font-weight: 700; color: #1a2233; }
 .env-rail.collapsed .rail-title { display: none; }
 .rail-head-ctl { display: flex; align-items: center; gap: 6px; }
+.rail-capacity { padding: 0 8px 5px; color: var(--muted); font-size: 10px; line-height: 1.35; white-space: nowrap; }
+.env-rail.collapsed .rail-capacity { display: none; }
 .rail-manage {
   border: 1px dashed #bdd0f7; background: var(--surface-blue); color: var(--accent); border-radius: 8px;
   height: 24px; padding: 0 6px; cursor: pointer; display: inline-flex; align-items: center; gap: 3px;
@@ -3102,6 +3104,7 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .env-rail.empty-roster .rail-platform-filter,
 .env-rail.empty-roster .rail-facebook-persona-fill,
 .env-rail.empty-roster .rail-sum,
+.env-rail.empty-roster .rail-capacity,
 .env-rail.empty-roster .rail-toggle-wrap,
 .env-rail.empty-roster .rail-foot-add,
 .env-rail.empty-roster .rail-foot,

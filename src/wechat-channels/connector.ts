@@ -45,6 +45,7 @@ export interface WechatChannelsConnectorOptions {
   dmSyncIntervalMs?: number;
   nowImpl?: () => number;
   logImpl?: (message: string) => void;
+  onApiCloudRoundTrip?: (at: number) => void;
 }
 
 export class WechatChannelsConnector implements InteractionConnector {
@@ -111,6 +112,10 @@ export class WechatChannelsConnector implements InteractionConnector {
     this.unsubscribeAuth = undefined;
     for (const timer of this.timers.splice(0)) clearInterval(timer);
     await Promise.allSettled([...this.syncLocks.values(), ...this.replyLocks]);
+  }
+
+  isStarted(): boolean {
+    return this.started;
   }
 
   getAuthStatus(): InteractionAuthStatusPayload {
@@ -238,6 +243,7 @@ export class WechatChannelsConnector implements InteractionConnector {
     if (this.lastHeartbeatAt !== 0 && now - this.lastHeartbeatAt < API_SYNC_HEARTBEAT_MIN_INTERVAL_MS) return;
     this.lastHeartbeatAt = now;
     this.log(API_SYNC_HEARTBEAT_LINE);
+    this.options.onApiCloudRoundTrip?.(now);
   }
 
   private async publishBatch(batch: InteractionSyncBatchPayload): Promise<InteractionSyncAckPayload> {
