@@ -1797,10 +1797,13 @@ test('活动流条目带类型记号（治纯文字墙）', async () => {
   const { w, pushActivity } = await boot();
   pushActivity({ ts: new Date().toISOString(), type: 'like', sentence: '点了个赞' });
   pushActivity({ ts: new Date().toISOString(), type: 'collect', sentence: '收藏了' });
+  pushActivity({ ts: new Date().toISOString(), type: 'reel_view', sentence: '看了一个 Reel' });
   const ics = Array.from(w.document.querySelectorAll('#activity-stream .ev-ic'));
-  assert.equal(ics.length, 2);
-  assert.ok((ics[0] as HTMLElement).classList.contains('ic-collect'), '最新在上=收藏');
-  assert.equal((ics[0] as HTMLElement).textContent, '藏');
+  assert.equal(ics.length, 3);
+  assert.ok((ics[0] as HTMLElement).classList.contains('ic-read'), '最新在上=Reel 浏览');
+  assert.equal((ics[0] as HTMLElement).textContent, '读');
+  assert.ok((ics[1] as HTMLElement).classList.contains('ic-collect'));
+  assert.equal((ics[1] as HTMLElement).textContent, '藏');
 });
 
 // ── 发布卡收展（dock）──

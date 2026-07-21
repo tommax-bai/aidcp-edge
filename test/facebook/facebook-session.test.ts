@@ -757,10 +757,23 @@ test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，�
   await h.session.onCloudCommand(makeEnv('page.scroll', { reason: 'empty_feed_reels_fallback' }));
   assert.equal(h.cards[1].listKind, 'reels');
   assert.equal(h.cards[1].cards[0].noteId, first.noteId);
+  let uiEvents = h.logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string; sentence?: string; statsDelta?: { views?: number } });
+  assert.deepEqual(
+    uiEvents.filter((event) => event.type === 'reel_view'),
+    [{ kind: 'activity', type: 'reel_view', sentence: '看了「first reel summary」 · Bao', loopStage: 'read', statsDelta: { views: 1 } }],
+    '首条已确认 Reel 应立即投影为一条可读浏览活动',
+  );
 
   await h.session.onCloudCommand(makeEnv('note.open', { noteId: first.noteId, surface: 'feed' }));
   assert.equal(h.details.at(-1)?.content, first.summary);
   assert.equal(h.details.at(-1)?.mediaType, 'video');
+  uiEvents = h.logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string; sentence?: string; statsDelta?: { views?: number } });
+  assert.equal(uiEvents.filter((event) => event.type === 'reel_view').length, 1);
+  assert.equal(uiEvents.filter((event) => event.type === 'note_open').length, 0, '同一 Reel 的后续详情仍上报，但不重复计读');
 
   await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: first.noteId }));
   assert.equal(h.actions.at(-1)?.ok, true);
@@ -773,6 +786,14 @@ test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，�
 
   await h.session.onCloudCommand(makeEnv('page.scroll', {}));
   assert.equal(h.cards.at(-1)?.cards[0].noteId, second.noteId);
+  uiEvents = h.logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string; sentence?: string; statsDelta?: { views?: number } });
+  assert.deepEqual(
+    uiEvents.filter((event) => event.type === 'reel_view').map((event) => event.sentence),
+    ['看了「first reel summary」 · Bao', '看了「second reel summary」 · Lan'],
+    '每次已确认的新 Reel 切卡各有一条读活动',
+  );
 });
 
 test('Reels 关注：shadow 标志与 reader 的真实终态原样回执', async () => {
@@ -839,6 +860,11 @@ test('Reels 全部导航方式均未证明下一条时，session 诚实回 scrol
   assert.equal(h.actions.at(-1)?.action, 'scroll');
   assert.equal(h.actions.at(-1)?.ok, false);
   assert.equal(h.actions.at(-1)?.reason, 'no_target');
+  const reelViews = h.logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string })
+    .filter((event) => event.type === 'reel_view');
+  assert.equal(reelViews.length, 1, '未证明切到下一条时不能伪造第二条读活动');
 });
 
 test('Reels 视频已切但路由尚未水合时，route+videoKey 新身份仍可进入下一轮', async () => {

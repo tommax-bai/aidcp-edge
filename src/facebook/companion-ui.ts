@@ -21,6 +21,7 @@ export interface FacebookCompanionUiEvent {
   type:
     | 'session_start'
     | 'feed'
+    | 'reel_view'
     | 'note_open'
     | 'like'
     // —— 写动作（change facebook-write-action-visibility）——
@@ -73,6 +74,22 @@ export function facebookReadUiText(payload: {
   if (excerpt) return { sentence: `打开「${excerpt}」`, presence: `正在认真阅读「${excerpt}」…` };
   if (author) return { sentence: `打开了 ${author} 的一条内容`, presence: `正在认真阅读 ${author} 的一条内容…` };
   return { sentence: '打开了一条内容', presence: '正在认真阅读一条内容…' };
+}
+
+/**
+ * Reel 切卡已被 reader 证明后才会调用这里；措辞只表达“看到了/浏览了”，不暗示已经看完或深读。
+ * 与普通详情阅读一样，只展示一手摘要和作者，缺失时回退人话，绝不泄露 URL / noteId。
+ */
+export function facebookReelViewUiText(payload: {
+  title?: string;
+  author?: string;
+}): Pick<FacebookCompanionUiEvent, 'sentence'> {
+  const excerpt = clipFacebookUiText(payload.title, 24);
+  const author = clipFacebookUiText(payload.author, 18);
+  if (excerpt && author) return { sentence: `看了「${excerpt}」 · ${author}` };
+  if (excerpt) return { sentence: `看了「${excerpt}」` };
+  if (author) return { sentence: `看了 ${author} 的一个 Reel` };
+  return { sentence: '看了一个 Reel' };
 }
 
 /**

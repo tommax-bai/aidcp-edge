@@ -3593,7 +3593,7 @@ const EV_ICONS = [
   [/^(comment|comment_pending|comment_failed)$/, ['评', 'ic-comment']],
   [/^(join_group|join_pending|join_failed)$/, ['群', 'ic-join']],
   [/^(search|search_failed)$/, ['搜', 'ic-search']],
-  [/^(note_open|images|profile_read)$/, ['读', 'ic-read']],
+  [/^(note_open|reel_view|images|profile_read)$/, ['读', 'ic-read']],
   [/^popup/, ['注', 'ic-warn']],
   [/^publish/, ['发', 'ic-pub']],
 ];

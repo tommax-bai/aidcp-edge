@@ -56,6 +56,7 @@ import {
   emitCompanionUiEvent as emitCompanionUiEventLine,
   facebookLikeUiText,
   facebookReadUiText,
+  facebookReelViewUiText,
   isAttempted,
   reasonText,
   type FacebookCompanionUiEvent,
@@ -238,6 +239,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private seenPostIds = new Set<string>();
   /** Reels 路由可能晚于视频切换；用 route+videoKey 去重，不能只按暂未更新的地址栏拒绝新视频。 */
   private seenReelIdentities = new Set<string>();
+  /** 已投影为“读”的 Reel postId；随后打开同一详情仍上报 Cloud，但不重复生成活动或本地浏览数。 */
+  private reelViewActivityPostIds = new Set<string>();
   /** 最近一次就地读的时刻 + 读地板（毫秒）：inline read 停留兜底（task 4.2），下一条 scroll 前 max（不累加）。 */
   private inlineReadStartedAt = 0;
   private inlineReadFloorMs = 0;
@@ -685,6 +688,20 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (r.type === 'cards') {
       this.lastCardsAt = Date.now();
       this.client.reportPageCards(r.payload);
+      if (r.payload.listKind === 'reels' && r.payload.cards.length === 1) {
+        const card = r.payload.cards[0];
+        const postId = canonicalPostId(card.noteId);
+        if (postId) {
+          this.reelViewActivityPostIds.add(postId);
+          this.emitCompanionUiEvent({
+            kind: 'activity',
+            type: 'reel_view',
+            ...facebookReelViewUiText(card),
+            loopStage: 'read',
+            statsDelta: { views: 1 },
+          });
+        }
+      }
       this.emitCompanionUiEvent({
         kind: 'presence',
         type: 'feed',
@@ -694,14 +711,17 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     }
     else if (r.type === 'detail') {
       this.client.reportNoteDetail(r.payload);
-      const readText = facebookReadUiText(r.payload);
-      this.emitCompanionUiEvent({
-        kind: 'activity',
-        type: 'note_open',
-        ...readText,
-        loopStage: 'read',
-        statsDelta: { views: 1 },
-      });
+      const postId = canonicalPostId(r.payload.noteId);
+      if (!postId || !this.reelViewActivityPostIds.has(postId)) {
+        const readText = facebookReadUiText(r.payload);
+        this.emitCompanionUiEvent({
+          kind: 'activity',
+          type: 'note_open',
+          ...readText,
+          loopStage: 'read',
+          statsDelta: { views: 1 },
+        });
+      }
     }
     else if (r.type === 'profile') this.client.reportProfileDetail(r.payload);
     else {
@@ -1241,6 +1261,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private resetCursor(): void {
     this.seenPostIds.clear();
     this.seenReelIdentities.clear();
+    this.reelViewActivityPostIds.clear();
   }
 
   /** 播种：把整批卡标记为已上报并连续重排 index（不过滤）。首屏/刷新/返回用——保证云端总有候选。 */
