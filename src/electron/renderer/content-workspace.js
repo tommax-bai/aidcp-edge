@@ -3,6 +3,15 @@
 
   const PAGE_SIZE = 12;
   const INSPIRATION_SATURATION_COUNT = 30;
+  const PUBLISH_QUEUE_POLL_MS = 20_000;
+  const QUEUE_TASK_STATUSES = new Set(['queued', 'planning', 'deferred']);
+  const QUEUE_JOURNEY_STATUSES = new Set([
+    'generating', 'waiting_approval', 'dispatching', 'scheduled', 'published',
+    'submitted', 'failed', 'rejected', 'draft', 'skipped',
+  ]);
+  const QUEUE_STAGE_STATES = new Set([
+    'pending', 'running', 'retrying', 'waiting_human', 'completed', 'partial', 'failed', 'skipped',
+  ]);
 
   function createElement(document, tag, className, text) {
     const element = document.createElement(tag);
@@ -28,6 +37,75 @@
     } catch {
       return '时间未知';
     }
+  }
+
+  function normalizePublishQueueResponse(response) {
+    const data = response?.ok && response.data && response.data.data;
+    const meta = response?.data && response.data.meta;
+    if (!data || !data.summary || !Array.isArray(data.tasks)
+        || !Array.isArray(data.active) || !Array.isArray(data.recent)) return null;
+    const summary = {
+      inProgress: finiteCount(data.summary.inProgress),
+      waitingForYou: finiteCount(data.summary.waitingForYou),
+      cancellable: finiteCount(data.summary.cancellable),
+    };
+    if (Object.values(summary).some((value) => value === null)) return null;
+    const tasks = data.tasks.map((task) => {
+      if (!task || typeof task.id !== 'string' || !task.id.trim() || typeof task.title !== 'string'
+          || typeof task.action !== 'string' || !QUEUE_TASK_STATUSES.has(task.status)
+          || typeof task.statusLabel !== 'string' || typeof task.cancelRequested !== 'boolean'
+          || !Number.isInteger(task.version) || task.version < 0) return null;
+      return {
+        id: task.id,
+        title: task.title || 'AI 创作任务',
+        action: task.action,
+        status: task.status,
+        statusLabel: task.statusLabel,
+        cancelRequested: task.cancelRequested,
+        version: task.version,
+        createdAt: Number(task.createdAt),
+        updatedAt: Number(task.updatedAt),
+        notBefore: Number(task.notBefore),
+      };
+    });
+    if (tasks.some((task) => task === null)) return null;
+    const normalizeJourney = (journey) => {
+      if (!journey || typeof journey.id !== 'string' || typeof journey.title !== 'string'
+          || !QUEUE_JOURNEY_STATUSES.has(journey.status) || typeof journey.statusLabel !== 'string'
+          || !Array.isArray(journey.stages)) return null;
+      const stages = journey.stages.map((stage) => {
+        if (!stage || typeof stage.key !== 'string' || typeof stage.label !== 'string'
+            || !QUEUE_STAGE_STATES.has(stage.state) || typeof stage.summary !== 'string') return null;
+        const progress = stage.progress;
+        if (progress !== undefined && (!progress || !Number.isFinite(progress.current)
+            || !Number.isFinite(progress.total) || progress.total <= 0)) return null;
+        return {
+          key: stage.key,
+          label: stage.label,
+          state: stage.state,
+          summary: stage.summary,
+          ...(progress ? { progress: { current: progress.current, total: progress.total } } : {}),
+        };
+      });
+      if (stages.some((stage) => stage === null)) return null;
+      return {
+        id: journey.id,
+        recordId: Number.isInteger(journey.recordId) ? journey.recordId : null,
+        title: journey.title || '未命名笔记',
+        sourceTitle: typeof journey.sourceTitle === 'string' && journey.sourceTitle.trim() ? journey.sourceTitle.trim() : null,
+        kind: journey.kind,
+        startedAt: Number(journey.startedAt),
+        status: journey.status,
+        statusLabel: journey.statusLabel,
+        stages,
+      };
+    };
+    const active = data.active.map(normalizeJourney);
+    const recent = data.recent.map(normalizeJourney);
+    if (active.some((journey) => journey === null) || recent.some((journey) => journey === null)) return null;
+    const asOf = Number(meta && meta.asOf);
+    if (!Number.isFinite(asOf)) return null;
+    return { summary, tasks, active, recent, asOf };
   }
 
   function referenceImageUrl(image) {
@@ -126,6 +204,8 @@
       library: root.querySelector('#curated-library-view'),
       detailView: root.querySelector('#curated-detail-view'),
       createView: root.querySelector('#curated-create-view'),
+      queueView: root.querySelector('#publish-queue-view'),
+      queueContent: root.querySelector('#publish-queue-content'),
       draft: root.querySelector('#publish-preview-panel'),
       list: root.querySelector('#curated-list'),
       total: root.querySelector('#curated-list-total'),
@@ -135,12 +215,21 @@
       modeButtons: Array.from(root.querySelectorAll('[data-curated-mode]')),
       detail: root.querySelector('#curated-detail'),
       create: root.querySelector('#curated-create'),
+      queueCancelDialog: document.querySelector('#publish-queue-cancel-confirm'),
+      queueCancelClose: document.querySelector('#publish-queue-cancel-close'),
+      queueCancelBack: document.querySelector('#publish-queue-cancel-back'),
+      queueCancelSubmit: document.querySelector('#publish-queue-cancel-submit'),
+      queueCancelTitle: document.querySelector('#publish-queue-cancel-title'),
+      queueCancelDetail: document.querySelector('#publish-queue-cancel-detail'),
     };
 
     const states = new Map();
     let environment = null;
     let requestEpoch = 0;
     let summaryEpoch = 0;
+    let queueEpoch = 0;
+    let queuePollTimer = null;
+    let queueCancelContext = null;
     let currentPage = 'home';
     let backStack = [];
     let sourceWorkspace = 'legacy';
@@ -164,6 +253,16 @@
           summaryLoading: false,
           summaryFailed: false,
           summaryRequestId: 0,
+          publishQueue: {
+            kind: 'idle',
+            data: null,
+            error: null,
+            stale: false,
+            refreshing: false,
+            requestedAt: 0,
+          },
+          queueFeedback: null,
+          queueCancelBusyId: null,
         });
       }
       return states.get(environment.envId);
@@ -175,6 +274,10 @@
 
     function inspirationAvailable() {
       return environment?.platform === 'xiaohongshu';
+    }
+
+    function publishQueueAvailable() {
+      return inspirationAvailable() && typeof api.publishQueueGet === 'function';
     }
 
     function captureSourceWorkspace() {
@@ -200,7 +303,7 @@
     }
 
     function hideViews() {
-      for (const view of [fields.library, fields.detailView, fields.createView, fields.draft]) {
+      for (const view of [fields.library, fields.detailView, fields.createView, fields.queueView, fields.draft]) {
         view?.classList.add('hidden');
       }
       fields.draft?.classList.remove('open');
@@ -229,6 +332,10 @@
         fields.kicker.textContent = '待你确认';
         fields.title.textContent = '稿件审核';
         fields.meta.textContent = `${account} · 发布与取消仍以云端回执为准`;
+      } else if (page === 'queue') {
+        fields.kicker.textContent = '小红书发布';
+        fields.title.textContent = '发布进度';
+        fields.meta.textContent = `${account} · 只展示这个账号的排队与发布真态`;
       }
     }
 
@@ -243,7 +350,9 @@
           ? fields.detailView
           : page === 'create'
             ? fields.createView
-            : fields.draft;
+            : page === 'queue'
+              ? fields.queueView
+              : fields.draft;
       view?.classList.remove('hidden');
       if (page === 'draft') {
         fields.draft?.classList.add('open');
@@ -255,6 +364,12 @@
     function close() {
       const leavingPage = currentPage;
       requestEpoch += 1;
+      queueEpoch += 1;
+      if (queuePollTimer) {
+        global.clearTimeout(queuePollTimer);
+        queuePollTimer = null;
+      }
+      closeQueueCancelDialog();
       currentPage = 'home';
       backStack = [];
       currentDetail = null;
@@ -262,6 +377,7 @@
       root.classList.remove('curated-detail-mode');
       hideViews();
       setWorkspaceVisible(false);
+      schedulePublishQueuePoll();
       if (leavingPage !== 'home') {
         root.dispatchEvent(new global.CustomEvent('content-workspace:leave', { detail: { page: leavingPage } }));
       }
@@ -289,6 +405,9 @@
         }
       } else if (previous === 'detail') {
         renderDetail(currentDetail);
+      } else if (previous === 'queue') {
+        renderPublishQueue();
+        schedulePublishQueuePoll();
       }
     }
 
@@ -698,6 +817,400 @@
       fields.create.appendChild(submit);
     }
 
+    function publishQueueSnapshot() {
+      if (!environment || !inspirationAvailable()) return null;
+      const state = envState();
+      if (!state) return null;
+      if (!publishQueueAvailable()) return { kind: 'unsupported', envId: environment.envId };
+      return {
+        envId: environment.envId,
+        kind: state.publishQueue.kind,
+        data: state.publishQueue.data,
+        error: state.publishQueue.error,
+        stale: state.publishQueue.stale,
+        refreshing: state.publishQueue.refreshing,
+        feedback: state.queueFeedback,
+      };
+    }
+
+    function notifyPublishQueueChange() {
+      root.dispatchEvent(new global.CustomEvent('publish-queue:update', { detail: publishQueueSnapshot() }));
+    }
+
+    function publishQueueFailureMessage(response) {
+      const reason = response?.reason || response?.error;
+      if (reason === 'version_conflict') return '任务状态已经变化，已为你刷新当前队列。';
+      if (reason === 'task_cancel_pending') return '这条任务已经在取消中，无需重复操作。';
+      if (reason === 'task_not_cancellable') return '这条任务已经进入下一阶段，不能再从队列取消。';
+      if (reason === 'publish_queue_unavailable') return '发布进度暂时不可用，请稍后重试。';
+      if (reason === 'unsupported_platform') return '当前环境不是小红书，未读取发布队列。';
+      return rejectionMessage(reason, response?.error);
+    }
+
+    function renderQueueState(title, detail, retry) {
+      fields.queueContent.replaceChildren();
+      const block = createElement(document, 'div', 'cw-state publish-queue-state');
+      block.appendChild(createElement(document, 'span', 'publish-queue-state-mark', '!'));
+      block.appendChild(createElement(document, 'strong', '', title));
+      block.appendChild(createElement(document, 'span', '', detail));
+      if (retry) {
+        const button = createElement(document, 'button', 'cw-button secondary', '重新读取');
+        button.type = 'button';
+        button.addEventListener('click', () => { void loadPublishQueue(true); });
+        block.appendChild(button);
+      }
+      fields.queueContent.appendChild(block);
+    }
+
+    function renderQueueStages(parent, stages) {
+      const rail = createElement(document, 'div', 'publish-queue-stages');
+      stages.forEach((stage) => {
+        const item = createElement(document, 'div', `publish-queue-stage is-${stage.state}`);
+        item.appendChild(createElement(document, 'span', 'publish-queue-stage-dot'));
+        const copy = createElement(document, 'div', 'publish-queue-stage-copy');
+        copy.appendChild(createElement(document, 'strong', '', stage.label));
+        const progress = stage.progress
+          ? ` · ${Math.max(0, stage.progress.current)}/${Math.max(0, stage.progress.total)}`
+          : '';
+        copy.appendChild(createElement(document, 'span', '', `${stage.summary.replace(`${stage.label}：`, '')}${progress}`));
+        item.appendChild(copy);
+        rail.appendChild(item);
+      });
+      parent.appendChild(rail);
+    }
+
+    function renderJourneyCard(journey, recent = false) {
+      const card = createElement(document, 'article', `publish-queue-card journey status-${journey.status}`);
+      const head = createElement(document, 'div', 'publish-queue-card-head');
+      const copy = createElement(document, 'div');
+      copy.appendChild(createElement(document, 'span', 'publish-queue-badge', journey.statusLabel));
+      copy.appendChild(createElement(document, 'h3', '', journey.title || '未命名笔记'));
+      const meta = journey.sourceTitle
+        ? `参考「${journey.sourceTitle}」 · ${relativeDate(journey.startedAt)}`
+        : relativeDate(journey.startedAt);
+      copy.appendChild(createElement(document, 'p', '', meta));
+      head.appendChild(copy);
+      if (!recent && journey.status === 'waiting_approval' && Number.isInteger(journey.recordId)) {
+        const review = createElement(document, 'button', 'cw-button primary compact', '审核稿件');
+        review.type = 'button';
+        review.addEventListener('click', () => {
+          root.dispatchEvent(new global.CustomEvent('publish-queue:review', { detail: { recordId: journey.recordId } }));
+        });
+        head.appendChild(review);
+      }
+      card.appendChild(head);
+      renderQueueStages(card, journey.stages);
+      return card;
+    }
+
+    function openQueueCancelDialog(task) {
+      if (!task || task.cancelRequested || !environment) return;
+      queueCancelContext = {
+        envId: environment.envId,
+        taskId: task.id,
+        version: task.version,
+        title: task.title,
+      };
+      fields.queueCancelTitle.textContent = `确定取消「${task.title}」？`;
+      fields.queueCancelDetail.textContent = `只会取消这条${task.action}任务，不影响当前账号的其它内容。`;
+      fields.queueCancelSubmit.disabled = false;
+      fields.queueCancelSubmit.textContent = '确认取消任务';
+      if (typeof fields.queueCancelDialog.showModal === 'function') {
+        if (!fields.queueCancelDialog.open) fields.queueCancelDialog.showModal();
+      } else {
+        fields.queueCancelDialog.setAttribute('open', '');
+      }
+    }
+
+    function closeQueueCancelDialog() {
+      queueCancelContext = null;
+      if (!fields.queueCancelDialog) return;
+      if (typeof fields.queueCancelDialog.close === 'function' && fields.queueCancelDialog.open) {
+        fields.queueCancelDialog.close();
+      } else {
+        fields.queueCancelDialog.removeAttribute('open');
+      }
+    }
+
+    function renderTaskCard(task) {
+      const state = envState();
+      const busy = state?.queueCancelBusyId === task.id;
+      const card = createElement(document, 'article', `publish-queue-card task status-${task.status}`);
+      const head = createElement(document, 'div', 'publish-queue-card-head');
+      const copy = createElement(document, 'div');
+      copy.appendChild(createElement(document, 'span', `publish-queue-badge ${task.cancelRequested ? 'stopping' : ''}`, task.statusLabel));
+      copy.appendChild(createElement(document, 'h3', '', task.title || task.action));
+      copy.appendChild(createElement(
+        document,
+        'p',
+        '',
+        task.status === 'queued'
+          ? `尚未进入创作流程 · ${relativeDate(task.createdAt)}`
+          : task.status === 'planning'
+            ? '正在准备所需素材与执行条件'
+            : '暂未满足安全执行条件',
+      ));
+      head.appendChild(copy);
+      if (!task.cancelRequested) {
+        const cancel = createElement(document, 'button', 'cw-button danger compact', busy ? '正在取消…' : '取消任务');
+        cancel.type = 'button';
+        cancel.disabled = busy;
+        cancel.dataset.queueTaskId = task.id;
+        cancel.addEventListener('click', () => openQueueCancelDialog(task));
+        head.appendChild(cancel);
+      }
+      card.appendChild(head);
+      if (task.cancelRequested) {
+        card.appendChild(createElement(document, 'div', 'publish-queue-safe-stop', '取消请求已送达，将在安全边界停止；这里暂不宣称任务已经停止。'));
+      }
+      return card;
+    }
+
+    function appendQueueSection(parent, kicker, title, items, renderItem, emptyText) {
+      const section = createElement(document, 'section', 'publish-queue-section');
+      const header = createElement(document, 'header', 'publish-queue-section-head');
+      const copy = createElement(document, 'div');
+      copy.appendChild(createElement(document, 'span', 'cw-kicker', kicker));
+      copy.appendChild(createElement(document, 'h2', '', title));
+      header.appendChild(copy);
+      header.appendChild(createElement(document, 'span', 'publish-queue-section-count', String(items.length)));
+      section.appendChild(header);
+      if (items.length === 0) {
+        section.appendChild(createElement(document, 'p', 'publish-queue-section-empty', emptyText));
+      } else {
+        const list = createElement(document, 'div', 'publish-queue-list');
+        items.forEach((item) => list.appendChild(renderItem(item)));
+        section.appendChild(list);
+      }
+      parent.appendChild(section);
+    }
+
+    function renderPublishQueue() {
+      if (!fields.queueContent) return;
+      const state = envState();
+      if (!state || !publishQueueAvailable()) {
+        renderQueueState('当前环境没有发布队列', '发布队列只在已识别的小红书环境中提供。', false);
+        return;
+      }
+      const queue = state.publishQueue;
+      fields.queueContent.setAttribute('aria-busy', queue.kind === 'loading' || queue.refreshing ? 'true' : 'false');
+      if (!queue.data && queue.kind === 'loading') {
+        renderQueueState('正在整理发布进度', '从 Cloud 读取当前账号的排队、创作和发布真态。', false);
+        return;
+      }
+      if (!queue.data && queue.kind === 'error') {
+        renderQueueState('暂时无法读取发布进度', queue.error || '当前不会把未知状态显示成空队列。', true);
+        return;
+      }
+      if (!queue.data) {
+        renderQueueState('发布进度尚未读取', '点击重新读取当前账号的发布队列。', true);
+        return;
+      }
+
+      const data = queue.data;
+      fields.queueContent.replaceChildren();
+      const hero = createElement(document, 'section', 'publish-queue-hero');
+      const heroCopy = createElement(document, 'div', 'publish-queue-hero-copy');
+      heroCopy.appendChild(createElement(document, 'span', 'cw-kicker', '当前账号'));
+      heroCopy.appendChild(createElement(
+        document,
+        'h2',
+        '',
+        data.summary.inProgress > 0 ? `${data.summary.inProgress} 条内容正在路上` : '目前没有进行中的内容',
+      ));
+      heroCopy.appendChild(createElement(
+        document,
+        'p',
+        '',
+        data.summary.waitingForYou > 0
+          ? `其中 ${data.summary.waitingForYou} 条正在等你确认。`
+          : data.summary.inProgress > 0
+            ? 'AI 正在处理，你可以离开此页，进度会继续。'
+            : '最近结果仍保留在下方，方便核对。',
+      ));
+      hero.appendChild(heroCopy);
+      const metrics = createElement(document, 'div', 'publish-queue-metrics');
+      [
+        ['进行中', data.summary.inProgress],
+        ['待你确认', data.summary.waitingForYou],
+        ['可取消', data.summary.cancellable],
+      ].forEach(([label, value]) => {
+        const metric = createElement(document, 'div', 'publish-queue-metric');
+        metric.appendChild(createElement(document, 'strong', '', String(value)));
+        metric.appendChild(createElement(document, 'span', '', label));
+        metrics.appendChild(metric);
+      });
+      hero.appendChild(metrics);
+      fields.queueContent.appendChild(hero);
+
+      if (state.queueFeedback) {
+        const feedback = createElement(document, 'div', `publish-queue-feedback ${state.queueFeedback.kind}`);
+        feedback.setAttribute('role', state.queueFeedback.kind === 'error' ? 'alert' : 'status');
+        feedback.textContent = state.queueFeedback.message;
+        fields.queueContent.appendChild(feedback);
+      }
+      if (queue.stale || queue.refreshing) {
+        fields.queueContent.appendChild(createElement(
+          document,
+          'div',
+          `publish-queue-sync ${queue.stale ? 'stale' : ''}`,
+          queue.stale ? `刷新未完成，正在保留 ${relativeDate(data.asOf)} 的已确认进度。` : '正在同步最新进度…',
+        ));
+      }
+
+      const waiting = data.active.filter((journey) => journey.status === 'waiting_approval');
+      const processing = data.active.filter((journey) => journey.status !== 'waiting_approval');
+      appendQueueSection(
+        fields.queueContent,
+        '需要你处理',
+        '待确认稿件',
+        waiting,
+        (journey) => renderJourneyCard(journey, false),
+        '现在没有等待你确认的稿件。',
+      );
+
+      const systemSection = createElement(document, 'section', 'publish-queue-section');
+      const systemHead = createElement(document, 'header', 'publish-queue-section-head');
+      const systemCopy = createElement(document, 'div');
+      systemCopy.appendChild(createElement(document, 'span', 'cw-kicker', '系统处理中'));
+      systemCopy.appendChild(createElement(document, 'h2', '', '排队与创作'));
+      systemHead.appendChild(systemCopy);
+      systemHead.appendChild(createElement(document, 'span', 'publish-queue-section-count', String(processing.length + data.tasks.length)));
+      systemSection.appendChild(systemHead);
+      const systemList = createElement(document, 'div', 'publish-queue-list');
+      processing.forEach((journey) => systemList.appendChild(renderJourneyCard(journey, false)));
+      data.tasks.forEach((task) => systemList.appendChild(renderTaskCard(task)));
+      if (systemList.childElementCount === 0) {
+        systemSection.appendChild(createElement(document, 'p', 'publish-queue-section-empty', '现在没有排队或创作中的任务。'));
+      } else {
+        systemSection.appendChild(systemList);
+      }
+      fields.queueContent.appendChild(systemSection);
+
+      appendQueueSection(
+        fields.queueContent,
+        '最近完成',
+        '发布结果',
+        data.recent,
+        (journey) => renderJourneyCard(journey, true),
+        '暂时没有可以核对的最近结果。',
+      );
+    }
+
+    async function loadPublishQueue(force = false) {
+      const state = envState();
+      if (!state || !publishQueueAvailable()) return;
+      const existing = state.publishQueue;
+      if (existing.kind === 'loading' || existing.refreshing) return;
+      if (!force && existing.data && Date.now() - Number(existing.requestedAt || 0) < 5_000) return;
+      const capturedEnvId = environment.envId;
+      const capturedEpoch = ++queueEpoch;
+      state.publishQueue = existing.data
+        ? { ...existing, refreshing: true, requestedAt: Date.now() }
+        : { kind: 'loading', data: null, error: null, stale: false, refreshing: false, requestedAt: Date.now() };
+      if (currentPage === 'queue') renderPublishQueue();
+      notifyPublishQueueChange();
+      let response;
+      try {
+        response = await api.publishQueueGet(capturedEnvId);
+      } catch {
+        response = { ok: false, error: 'request_failed' };
+      }
+      if (capturedEpoch !== queueEpoch || environment?.envId !== capturedEnvId) return;
+      const normalized = normalizePublishQueueResponse(response);
+      if (normalized) {
+        state.publishQueue = {
+          kind: 'ok', data: normalized, error: null, stale: false, refreshing: false, requestedAt: Date.now(),
+        };
+      } else if (existing.data) {
+        state.publishQueue = {
+          ...existing,
+          kind: 'ok',
+          stale: true,
+          refreshing: false,
+          error: publishQueueFailureMessage(response),
+          requestedAt: Date.now(),
+        };
+      } else {
+        state.publishQueue = {
+          kind: 'error', data: null, error: publishQueueFailureMessage(response), stale: false,
+          refreshing: false, requestedAt: Date.now(),
+        };
+      }
+      if (currentPage === 'queue') renderPublishQueue();
+      notifyPublishQueueChange();
+      schedulePublishQueuePoll();
+    }
+
+    function schedulePublishQueuePoll() {
+      if (queuePollTimer) global.clearTimeout(queuePollTimer);
+      queuePollTimer = null;
+      if (!publishQueueAvailable()) return;
+      queuePollTimer = global.setTimeout(() => {
+        queuePollTimer = null;
+        void loadPublishQueue(true);
+      }, PUBLISH_QUEUE_POLL_MS);
+    }
+
+    function openPublishQueue() {
+      if (!environment || !publishQueueAvailable()) return;
+      if (!visible()) {
+        captureSourceWorkspace();
+        setWorkspaceVisible(true);
+        backStack = ['home'];
+      } else if (currentPage !== 'queue') {
+        backStack.push(currentPage);
+      }
+      showPage('queue', false);
+      renderPublishQueue();
+      void loadPublishQueue(true);
+      schedulePublishQueuePoll();
+    }
+
+    async function confirmQueueCancellation() {
+      const context = queueCancelContext;
+      const state = envState();
+      if (!context || !state || !environment || environment.envId !== context.envId
+          || typeof api.publishQueueCancel !== 'function') return;
+      const liveTask = state.publishQueue.data?.tasks.find((task) => task.id === context.taskId);
+      if (!liveTask || liveTask.version !== context.version || liveTask.cancelRequested) {
+        closeQueueCancelDialog();
+        state.queueFeedback = { kind: 'error', message: '任务状态已经变化，已为你刷新当前队列。' };
+        renderPublishQueue();
+        void loadPublishQueue(true);
+        return;
+      }
+      fields.queueCancelSubmit.disabled = true;
+      fields.queueCancelSubmit.textContent = '正在取消…';
+      state.queueCancelBusyId = context.taskId;
+      renderPublishQueue();
+      let response;
+      try {
+        response = await api.publishQueueCancel(context.envId, context.taskId, context.version);
+      } catch {
+        response = { ok: false, error: 'request_failed' };
+      }
+      state.queueCancelBusyId = null;
+      if (!environment || environment.envId !== context.envId) return;
+      const receipt = response?.ok && response.data && response.data.data;
+      if (receipt && receipt.id === context.taskId && typeof receipt.terminal === 'boolean'
+          && typeof receipt.cancelRequested === 'boolean') {
+        state.queueFeedback = {
+          kind: 'success',
+          message: receipt.terminal
+            ? `「${context.title}」已取消。`
+            : `「${context.title}」正在取消，将在安全边界停止。`,
+        };
+      } else {
+        state.queueFeedback = { kind: 'error', message: publishQueueFailureMessage(response) };
+      }
+      const refreshForConflict = response?.reason === 'version_conflict' || response?.error === 'version_conflict';
+      closeQueueCancelDialog();
+      renderPublishQueue();
+      await loadPublishQueue(true);
+      if (refreshForConflict) renderPublishQueue();
+    }
+
     function openDraft() {
       if (!environment) return;
       if (!visible()) {
@@ -737,10 +1250,29 @@
       }
       requestEpoch += 1;
       summaryEpoch += 1;
+      queueEpoch += 1;
+      if (queuePollTimer) {
+        global.clearTimeout(queuePollTimer);
+        queuePollTimer = null;
+      }
+      closeQueueCancelDialog();
+      fields.queueContent?.replaceChildren();
       currentDetail = null;
       createBusy = false;
       if (inspirationAvailable()) void loadSummary(true);
+      if (publishQueueAvailable()) void loadPublishQueue(true);
       if (!visible()) return;
+      if (currentPage === 'queue') {
+        if (!publishQueueAvailable()) {
+          close();
+          return;
+        }
+        backStack = ['home'];
+        showPage('queue', false);
+        renderPublishQueue();
+        schedulePublishQueuePoll();
+        return;
+      }
       if (!environment || currentPage === 'draft' || !inspirationAvailable()) {
         close();
         return;
@@ -776,14 +1308,27 @@
       state.scrollTop = 0;
       void loadList();
     });
+    fields.queueCancelClose?.addEventListener('click', closeQueueCancelDialog);
+    fields.queueCancelBack?.addEventListener('click', closeQueueCancelDialog);
+    fields.queueCancelSubmit?.addEventListener('click', () => { void confirmQueueCancellation(); });
+    fields.queueCancelDialog?.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      closeQueueCancelDialog();
+    });
+    global.addEventListener('focus', () => {
+      if (publishQueueAvailable()) void loadPublishQueue(true);
+    });
 
     updateEntry();
     return {
       setEnvironment,
       openLibrary,
+      openPublishQueue,
       openDraft,
       close,
       goBack,
+      publishQueueSnapshot,
+      refreshPublishQueue: () => loadPublishQueue(true),
       isDraftOpen: () => visible() && currentPage === 'draft',
       currentPage: () => currentPage,
     };

@@ -72,6 +72,10 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   publishScheduleOccupiedHours: (envId) => ipcRenderer.invoke('publish-schedule:occupied-hours', envId),
   // 今日进展与最近发布：始终由 main 通过 customer-auth HTTP 拉取，不依赖自动化引擎或浏览器。
   getEnvironmentOverview: (envId) => ipcRenderer.invoke('environment-overview:get', envId),
+  // 小红书发布队列：renderer 只交本地 envId、任务 id 和所见版本；路径/envKey/token 均由 main 持有。
+  publishQueueGet: (envId) => ipcRenderer.invoke('publish-queue:get', envId),
+  publishQueueCancel: (envId, taskId, version) =>
+    ipcRenderer.invoke('publish-queue:cancel', envId, taskId, version),
   // 稿件预览内删除某张配图（同一条链路；云端持权限 / 版本 / 只删不注入 / 最后一张不可删的权威）。
   publishImageRemove: (envId, payload) => ipcRenderer.invoke('publish:image-remove', envId, payload),
   // 用户委托任务：主进程把 envId 收口成该环境的 profileId；渲染层拿不到客户令牌、也不能改 accountId。

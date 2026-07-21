@@ -55,6 +55,49 @@ function detail(overrides: Record<string, unknown> = {}) {
   return { ...listItem(), body: '第一段正文\n第二段正文', firstSeenAt: 1, countsCapturedAt: null, ...overrides };
 }
 
+function queueStage(key: string, label: string, state: string, progress?: { current: number; total: number }) {
+  return { key, label, state, summary: `${label}：${state === 'completed' ? '已完成' : state === 'waiting_human' ? '等待你的确认' : '未开始'}`, ...(progress ? { progress } : {}) };
+}
+
+function queueJourney(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'publish:21', recordId: 21, title: '周末城市散步指南', sourceTitle: '下班后的二十分钟',
+    kind: 'rewrite', startedAt: Date.now(), status: 'waiting_approval', statusLabel: '等待你确认',
+    stages: [
+      queueStage('source', '开始创作', 'completed'),
+      queueStage('content', '正文与配图', 'completed', { current: 2, total: 4 }),
+      queueStage('approval', '你来确认', 'waiting_human'),
+      queueStage('dispatch', '发布结果', 'pending'),
+    ],
+    ...overrides,
+  };
+}
+
+function queueTask(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'task-queue-1', title: '夏日通勤穿搭', action: '参考创作', status: 'queued', statusLabel: '排队中',
+    cancelRequested: false, version: 3, createdAt: Date.now(), updatedAt: Date.now(), notBefore: Date.now(),
+    ...overrides,
+  };
+}
+
+function queueResponse(overrides: Record<string, unknown> = {}) {
+  const data = {
+    envKey: 'profile-a',
+    summary: { inProgress: 2, waitingForYou: 1, cancellable: 1 },
+    tasks: [queueTask()],
+    active: [queueJourney()],
+    recent: [queueJourney({
+      id: 'publish:20', recordId: 20, title: '上一条平台已受理笔记', sourceTitle: null,
+      status: 'submitted', statusLabel: '平台确认中，请勿重复操作',
+      stages: [queueStage('source', '开始创作', 'completed'), queueStage('content', '正文与配图', 'completed'),
+        queueStage('approval', '你来确认', 'completed'), queueStage('dispatch', '发布结果', 'completed')],
+    })],
+    ...overrides,
+  };
+  return { ok: true, data: { data, meta: { requestId: 'queue-request', asOf: Date.now() } } };
+}
+
 function boot(api: Record<string, unknown>) {
   const dom = new JSDOM(html, { runScripts: 'dangerously' });
   const { window } = dom;
@@ -531,4 +574,146 @@ test('状态心跳不得把首页从开着的灵感库底下掀出来（两个�
     assert.equal(hidden($(window, '#legacy-workspace')), true, `第 ${i + 1} 次心跳后首页仍必须藏着`);
     assert.equal(hidden($(window, '#content-workspace')), false, '内容工作区必须仍开着');
   }
+});
+
+test('小红书发布队列按三段呈现四阶段真态，非小红书切换立即关闭且不取数', async () => {
+  const calls: string[] = [];
+  const { window, controller } = boot({
+    publishQueueGet: async (envId: string) => {
+      calls.push(envId);
+      return queueResponse();
+    },
+    publishQueueCancel: async () => ({ ok: false, error: 'not_used' }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  await flush();
+  controller.openPublishQueue();
+  await flush();
+
+  assert.equal(controller.currentPage(), 'queue');
+  assert.equal(hidden($(window, '#content-workspace')), false);
+  const text = $(window, '#publish-queue-content').textContent ?? '';
+  assert.match(text, /2 条内容正在路上/);
+  assert.match(text, /需要你处理.*待确认稿件/s);
+  assert.match(text, /系统处理中.*排队与创作/s);
+  assert.match(text, /最近完成.*平台确认中，请勿重复操作/s);
+  assert.match(text, /正文与配图.*2\/4/s);
+  assert.equal(window.document.querySelectorAll('[data-queue-task-id="task-queue-1"]').length, 1);
+  assert.ok(calls.every((envId) => envId === 'env-a'));
+
+  const callCount = calls.length;
+  controller.setEnvironment({ envId: 'env-fb', label: 'Facebook 账号', platform: 'facebook' });
+  await flush();
+  assert.equal(controller.currentPage(), 'home');
+  assert.equal(hidden($(window, '#content-workspace')), true);
+  assert.equal(controller.publishQueueSnapshot(), null);
+  assert.equal(calls.length, callCount, '非小红书环境不得请求发布队列');
+});
+
+test('发布队列切换账号后丢弃旧环境迟到响应', async () => {
+  let resolveA: ((value: unknown) => void) | undefined;
+  const pendingA = new Promise((resolve) => { resolveA = resolve; });
+  const { controller } = boot({
+    publishQueueGet: async (envId: string) => envId === 'env-a'
+      ? pendingA
+      : queueResponse({
+        summary: { inProgress: 1, waitingForYou: 0, cancellable: 1 }, active: [], recent: [],
+        tasks: [queueTask({ id: 'task-b', title: '账号 B 的任务' })],
+      }),
+    publishQueueCancel: async () => ({ ok: false, error: 'not_used' }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '账号 A', platform: 'xiaohongshu' });
+  controller.setEnvironment({ envId: 'env-b', label: '账号 B', platform: 'xiaohongshu' });
+  await flush();
+  assert.equal(controller.publishQueueSnapshot().data.tasks[0].title, '账号 B 的任务');
+  resolveA?.(queueResponse({
+    summary: { inProgress: 1, waitingForYou: 0, cancellable: 1 }, active: [], recent: [],
+    tasks: [queueTask({ id: 'task-a', title: '账号 A 的迟到任务' })],
+  }));
+  await flush();
+  assert.equal(controller.publishQueueSnapshot().data.tasks[0].title, '账号 B 的任务');
+});
+
+test('取消 queued 任务不乐观移除，只提交精确 id/version 并在 Cloud 刷新后消失', async () => {
+  let queueRead = 0;
+  let resolveCancel: ((value: unknown) => void) | undefined;
+  const cancelPending = new Promise((resolve) => { resolveCancel = resolve; });
+  const cancelCalls: unknown[][] = [];
+  const { window, controller } = boot({
+    publishQueueGet: async () => {
+      queueRead += 1;
+      return queueRead >= 3
+        ? queueResponse({ summary: { inProgress: 0, waitingForYou: 0, cancellable: 0 }, tasks: [], active: [] })
+        : queueResponse({ summary: { inProgress: 1, waitingForYou: 0, cancellable: 1 }, active: [], recent: [] });
+    },
+    publishQueueCancel: async (...args: unknown[]) => {
+      cancelCalls.push(args);
+      return cancelPending;
+    },
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  await flush();
+  controller.openPublishQueue();
+  await flush();
+  const cancelButton = window.document.querySelector('[data-queue-task-id="task-queue-1"]') as HTMLButtonElement;
+  cancelButton.click();
+  assert.equal($(window, '#publish-queue-cancel-confirm').hasAttribute('open'), true);
+  $(window, '#publish-queue-cancel-submit').click();
+  await flush(2);
+  assert.deepEqual(cancelCalls, [['env-a', 'task-queue-1', 3]]);
+  assert.equal(window.document.querySelectorAll('[data-queue-task-id="task-queue-1"]').length, 1, 'Cloud 回包前不得乐观删除');
+
+  resolveCancel?.({ ok: true, data: { data: { id: 'task-queue-1', status: 'cancelled', cancelRequested: false, version: 4, terminal: true } } });
+  await flush(8);
+  assert.equal(window.document.querySelectorAll('[data-queue-task-id="task-queue-1"]').length, 0);
+  assert.match($(window, '#publish-queue-content').textContent ?? '', /夏日通勤穿搭.*已取消/s);
+});
+
+test('planning 取消显示安全收口且禁用重复取消；版本冲突只刷新不自动重试', async () => {
+  let mode: 'planning' | 'conflict' = 'planning';
+  let reads = 0;
+  const cancelCalls: unknown[][] = [];
+  const { window, controller } = boot({
+    publishQueueGet: async () => {
+      reads += 1;
+      if (mode === 'planning' && reads >= 3) {
+        return queueResponse({
+          summary: { inProgress: 1, waitingForYou: 0, cancellable: 0 }, active: [], recent: [],
+          tasks: [queueTask({ status: 'planning', statusLabel: '取消中，将在安全边界停止', cancelRequested: true, version: 4 })],
+        });
+      }
+      return queueResponse({
+        summary: { inProgress: 1, waitingForYou: 0, cancellable: 1 }, active: [], recent: [],
+        tasks: [queueTask({ status: 'planning', statusLabel: '正在准备创作' })],
+      });
+    },
+    publishQueueCancel: async (...args: unknown[]) => {
+      cancelCalls.push(args);
+      return mode === 'planning'
+        ? { ok: true, data: { data: { id: 'task-queue-1', status: 'planning', cancelRequested: true, version: 4, terminal: false } } }
+        : { ok: false, status: 409, reason: 'version_conflict', error: '任务状态已经变化' };
+    },
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  await flush();
+  controller.openPublishQueue();
+  await flush();
+  (window.document.querySelector('[data-queue-task-id="task-queue-1"]') as HTMLButtonElement).click();
+  $(window, '#publish-queue-cancel-submit').click();
+  await flush(8);
+  assert.match($(window, '#publish-queue-content').textContent ?? '', /取消中.*安全边界停止/s);
+  assert.equal(window.document.querySelectorAll('[data-queue-task-id="task-queue-1"]').length, 0, '取消中不得再出现取消入口');
+
+  mode = 'conflict';
+  reads = 0;
+  controller.setEnvironment({ envId: 'env-b', label: '晨光记录', platform: 'xiaohongshu' });
+  await flush();
+  controller.openPublishQueue();
+  await flush();
+  (window.document.querySelector('[data-queue-task-id="task-queue-1"]') as HTMLButtonElement).click();
+  $(window, '#publish-queue-cancel-submit').click();
+  await flush(8);
+  assert.equal(cancelCalls.filter((args) => args[0] === 'env-b').length, 1, '版本冲突不得使用新版本自动重试');
+  assert.match($(window, '#publish-queue-content').textContent ?? '', /任务状态已经变化/);
+  assert.equal(window.document.querySelectorAll('[data-queue-task-id="task-queue-1"]').length, 1, '失败后保留任务');
 });

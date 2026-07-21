@@ -3648,6 +3648,144 @@ body::-webkit-scrollbar:vertical,
   .content-workspace .publish-preview-images { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
+/* ═══ 小红书发布进度：摘要 → 待处理 / 系统处理中 / 最近结果 ═══ */
+.publish-queue-view { background: linear-gradient(180deg, #f7fbff 0, #fff 210px); }
+.publish-queue-content { width: min(880px, 100%); margin: 0 auto; }
+.publish-queue-hero {
+  position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; align-items: center;
+  overflow: hidden; padding: 22px 24px; border: 1px solid #cfe0f4; border-radius: 18px;
+  background:
+    radial-gradient(circle at 92% 0, rgba(62, 183, 161, .16), transparent 38%),
+    linear-gradient(135deg, #f8fbff 0%, #edf6ff 52%, #effbf8 100%);
+  box-shadow: 0 13px 34px rgba(49, 92, 151, .09);
+}
+.publish-queue-hero::after {
+  content: ""; position: absolute; right: -22px; bottom: -44px; width: 150px; height: 150px;
+  border: 22px solid rgba(52, 120, 246, .055); border-radius: 50%; pointer-events: none;
+}
+.publish-queue-hero-copy { position: relative; z-index: 1; min-width: 0; }
+.publish-queue-hero h2 { margin: 4px 0 7px; color: #263e63; font-size: clamp(19px, 2.6vw, 25px); line-height: 1.25; letter-spacing: -.025em; }
+.publish-queue-hero p { margin: 0; color: #61718a; font-size: 12.5px; line-height: 1.65; }
+.publish-queue-metrics { position: relative; z-index: 1; display: grid; grid-template-columns: repeat(3, 76px); gap: 7px; }
+.publish-queue-metric {
+  display: flex; min-height: 70px; align-items: center; justify-content: center; flex-direction: column;
+  border: 1px solid rgba(168, 193, 224, .6); border-radius: 13px; background: rgba(255, 255, 255, .72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .9);
+}
+.publish-queue-metric strong { color: #2d68c4; font-size: 22px; line-height: 1; font-variant-numeric: tabular-nums; }
+.publish-queue-metric span { margin-top: 6px; color: #718099; font-size: 10px; font-weight: 650; }
+.publish-queue-feedback,
+.publish-queue-sync,
+.publish-queue-safe-stop {
+  margin-top: 11px; padding: 9px 12px; border: 1px solid #d4e1f2; border-radius: 10px;
+  color: #496587; background: #f5f9ff; font-size: 11.5px; line-height: 1.55;
+}
+.publish-queue-feedback.success { border-color: #bde3d5; color: #1f715a; background: #f1fbf7; }
+.publish-queue-feedback.error,
+.publish-queue-sync.stale { border-color: #eed4ab; color: #855e20; background: #fff9ee; }
+.publish-queue-section { margin-top: 24px; }
+.publish-queue-section-head { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin-bottom: 9px; padding: 0 3px; }
+.publish-queue-section-head .cw-kicker { margin-bottom: 2px; }
+.publish-queue-section-head h2 { margin: 0; color: #33445f; font-size: 16px; line-height: 1.3; }
+.publish-queue-section-count {
+  display: grid; min-width: 25px; height: 25px; place-items: center; padding: 0 7px; border-radius: 999px;
+  color: #52647e; background: #eaf0f8; font-size: 11px; font-weight: 750; font-variant-numeric: tabular-nums;
+}
+.publish-queue-list { display: grid; gap: 9px; }
+.publish-queue-section-empty {
+  margin: 0; padding: 16px; border: 1px dashed #d7e0ec; border-radius: 12px;
+  color: #8793a5; background: rgba(255, 255, 255, .7); font-size: 11.5px; text-align: center;
+}
+.publish-queue-card {
+  min-width: 0; overflow: hidden; padding: 14px 15px; border: 1px solid #dce5f0; border-radius: 14px;
+  background: rgba(255, 255, 255, .96); box-shadow: 0 4px 14px rgba(35, 60, 96, .045);
+}
+.publish-queue-card.status-waiting_approval { border-color: #b8d0f0; box-shadow: 0 7px 22px rgba(52, 120, 246, .08); }
+.publish-queue-card.status-planning,
+.publish-queue-card.status-generating { border-left: 3px solid #5f8edc; }
+.publish-queue-card.status-queued,
+.publish-queue-card.status-deferred { border-left: 3px solid #8c9bb0; }
+.publish-queue-card.status-published { border-left: 3px solid #45aa83; }
+.publish-queue-card.status-submitted { border-left: 3px solid #d69b38; }
+.publish-queue-card-head { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.publish-queue-card-head > div { min-width: 0; }
+.publish-queue-card h3 { margin: 6px 0 3px; overflow-wrap: anywhere; color: #2f3f58; font-size: 14px; line-height: 1.42; }
+.publish-queue-card p { margin: 0; color: #7a879b; font-size: 10.5px; line-height: 1.5; }
+.publish-queue-badge {
+  display: inline-flex; max-width: 100%; align-items: center; padding: 3px 7px; border-radius: 999px;
+  color: #3168b6; background: #edf4ff; font-size: 9.5px; font-weight: 760; line-height: 1.3;
+}
+.publish-queue-badge.stopping { color: #8a6221; background: #fff3d9; }
+.cw-button.compact { flex: 0 0 auto; min-height: 30px; padding: 6px 11px; font-size: 11px; }
+.cw-button.danger { border-color: #efc5c5; color: #a23838; background: #fff8f8; }
+.cw-button.danger:hover:not(:disabled), .cw-button.danger:focus-visible { border-color: #cb6c6c; outline: none; background: #fff0f0; }
+.publish-queue-stages { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin-top: 14px; }
+.publish-queue-stage { position: relative; display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 6px; min-width: 0; padding-right: 8px; }
+.publish-queue-stage:not(:last-child)::after {
+  content: ""; position: absolute; z-index: 0; top: 5px; left: 10px; right: -2px; height: 1px; background: #dbe3ee;
+}
+.publish-queue-stage-dot { position: relative; z-index: 1; width: 10px; height: 10px; border: 2px solid #d3dce8; border-radius: 50%; background: #fff; }
+.publish-queue-stage-copy { position: relative; z-index: 1; min-width: 0; padding-right: 3px; background: #fff; }
+.publish-queue-stage-copy strong { display: block; overflow: hidden; color: #758197; font-size: 10px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.publish-queue-stage-copy span { display: block; margin-top: 2px; overflow: hidden; color: #a0aaba; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.publish-queue-stage.is-completed .publish-queue-stage-dot { border-color: #4caf86; background: #4caf86; }
+.publish-queue-stage.is-completed:not(:last-child)::after { background: #a9dbc8; }
+.publish-queue-stage.is-completed .publish-queue-stage-copy strong { color: #397a64; }
+.publish-queue-stage.is-running .publish-queue-stage-dot,
+.publish-queue-stage.is-retrying .publish-queue-stage-dot { border-color: #3478f6; background: #3478f6; box-shadow: 0 0 0 4px rgba(52, 120, 246, .11); }
+.publish-queue-stage.is-running .publish-queue-stage-copy strong,
+.publish-queue-stage.is-retrying .publish-queue-stage-copy strong { color: #2d67bd; }
+.publish-queue-stage.is-waiting_human .publish-queue-stage-dot { border-color: #e39a2d; background: #e39a2d; box-shadow: 0 0 0 4px rgba(227, 154, 45, .12); }
+.publish-queue-stage.is-waiting_human .publish-queue-stage-copy strong { color: #9a6416; }
+.publish-queue-stage.is-failed .publish-queue-stage-dot,
+.publish-queue-stage.is-partial .publish-queue-stage-dot { border-color: #c85858; background: #fff; }
+.publish-queue-safe-stop { margin-bottom: 0; }
+.publish-queue-state-mark {
+  display: grid; width: 38px; height: 38px; place-items: center; margin-bottom: 3px; border-radius: 13px;
+  color: #5978a6; background: #edf4fd; font-size: 17px; font-weight: 800;
+}
+
+.publish-queue-cancel-confirm {
+  width: min(430px, calc(100vw - 28px)); margin: auto; padding: 0; overflow: hidden;
+  border: 1px solid rgba(155, 47, 47, .15); border-radius: 18px; color: var(--ink); background: #fff;
+  box-shadow: 0 28px 80px rgba(15, 23, 42, .28), 0 4px 16px rgba(15, 23, 42, .08);
+}
+.publish-queue-cancel-confirm::backdrop { background: rgba(18, 28, 45, .48); backdrop-filter: blur(3px); }
+.publish-queue-cancel-confirm[open] { animation: risk-confirm-in 160ms cubic-bezier(.2, .8, .2, 1); }
+.publish-queue-cancel-confirm form { position: relative; display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 13px; padding: 23px; }
+.publish-queue-cancel-mark { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 14px; color: #a13e3e; background: #fff0f0; font-size: 18px; font-weight: 800; }
+.publish-queue-cancel-confirm h2 { margin: 0; font-size: 17px; line-height: 1.35; overflow-wrap: anywhere; }
+.publish-queue-cancel-confirm p,
+.publish-queue-cancel-boundary,
+.publish-queue-cancel-actions { grid-column: 1 / -1; }
+.publish-queue-cancel-confirm p { margin: 3px 0 0; color: #65738a; font-size: 12px; line-height: 1.6; }
+.publish-queue-cancel-boundary { padding: 10px 11px; border: 1px solid #eed6aa; border-radius: 10px; color: #805b20; background: #fff9ee; font-size: 11px; line-height: 1.55; }
+.publish-queue-cancel-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 3px; }
+.publish-queue-cancel-close {
+  position: absolute; top: 12px; right: 12px; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 9px;
+  color: var(--faint); background: transparent; font: 22px/1 inherit; cursor: pointer;
+}
+.publish-queue-cancel-close:hover { color: var(--ink); background: var(--surface-soft); }
+
+@media (max-width: 680px) {
+  .publish-queue-hero { grid-template-columns: 1fr; gap: 16px; padding: 18px; }
+  .publish-queue-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .publish-queue-metric { min-height: 62px; }
+  .publish-queue-card-head { flex-wrap: wrap; }
+  .publish-queue-card-head .cw-button { width: 100%; }
+  .publish-queue-stages { grid-template-columns: 1fr; gap: 8px; }
+  .publish-queue-stage { grid-template-columns: 13px minmax(0, 1fr); padding: 0; }
+  .publish-queue-stage:not(:last-child)::after { top: 9px; bottom: -9px; left: 5px; right: auto; width: 1px; height: auto; }
+  .publish-queue-stage-copy strong,
+  .publish-queue-stage-copy span { overflow: visible; text-overflow: clip; white-space: normal; }
+  .publish-queue-cancel-confirm form { padding: 20px 17px 17px; }
+  .publish-queue-cancel-actions .cw-button { flex: 1; min-width: 0; padding-inline: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .publish-queue-cancel-confirm[open] { animation: none; }
+}
+
 /* 环境级慢启动脚注行：常驻「今日节奏」卡内、#quota-windows 之后。
    块级独占一行，不与标题区争空间 → Windows @640 窄窗不破版。 */
 .slow-start-row {

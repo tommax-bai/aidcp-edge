@@ -2024,6 +2024,61 @@ test('小红书形状：六格逐位如常，且 MUST NOT 长出加群格（首�
   assert.equal($(w, '#collects-cap').textContent, '/25');
 });
 
+test('小红书首页用发布进度摘要替代单稿卡，待确认优先并可进入完整队列', async () => {
+  let queueCalls = 0;
+  const stages = [
+    { key: 'source', label: '开始创作', state: 'completed', summary: '开始创作：已完成' },
+    { key: 'content', label: '正文与配图', state: 'completed', summary: '正文与配图：已完成', progress: { current: 3, total: 3 } },
+    { key: 'approval', label: '你来确认', state: 'waiting_human', summary: '你来确认：等待你的确认' },
+    { key: 'dispatch', label: '发布结果', state: 'pending', summary: '发布结果：未开始' },
+  ];
+  const { w, pushStatus } = await boot({ envId: 'env-home' }, {
+    publishQueueGet: async () => {
+      queueCalls += 1;
+      return ({
+      ok: true,
+      data: {
+        data: {
+          envKey: 'u1',
+          summary: { inProgress: 3, waitingForYou: 1, cancellable: 1 },
+          tasks: [{
+            id: 'task-home', title: '下一条排队笔记', action: '参考创作', status: 'queued', statusLabel: '排队中',
+            cancelRequested: false, version: 2, createdAt: Date.now(), updatedAt: Date.now(), notBefore: Date.now(),
+          }],
+          active: [{
+            id: 'publish:88', recordId: 88, title: '先确认这条城市散步笔记', sourceTitle: null,
+            kind: 'persisted', startedAt: Date.now(), status: 'waiting_approval', statusLabel: '等待你确认', stages,
+          }, {
+            id: 'run:89', recordId: null, title: '正在写的咖啡地图', sourceTitle: null,
+            kind: 'autonomous', startedAt: Date.now(), status: 'generating', statusLabel: '创作中', stages: stages.map((stage) => ({ ...stage, state: stage.key === 'content' ? 'running' : stage.key === 'source' ? 'completed' : 'pending' })),
+          }],
+          recent: [],
+        },
+        meta: { requestId: 'home-queue', asOf: Date.now() },
+      },
+      });
+    },
+    publishQueueCancel: async () => ({ ok: false, error: 'not_used' }),
+    publishDraftList: async () => ({ ok: true, data: { items: [], total: 0 } }),
+    publishDraftGet: async () => ({ ok: false, error: 'not_used' }),
+  });
+  pushStatus(makeStatus({ envId: 'env-home' }));
+  await tick(); await tick(); await tick();
+  assert.ok(queueCalls > 0, '首页初始化应读取当前小红书环境队列');
+  const card = $(w, '#pub-card');
+  assert.equal(card.dataset.pubState, 'pending');
+  assert.match(card.textContent ?? '', /1 条笔记等你确认/);
+  assert.match(card.textContent ?? '', /先确认这条城市散步笔记/);
+  assert.match($(w, '#pub-queue-link').textContent ?? '', /查看全部进度/);
+  assert.equal(hidden($(w, '#pub-queue-link')), false);
+
+  $(w, '#pub-queue-link').click();
+  await tick(); await tick();
+  assert.equal(hidden($(w, '#content-workspace')), false);
+  assert.equal(hidden($(w, '#publish-queue-view')), false);
+  assert.match($(w, '#publish-queue-content').textContent ?? '', /3 条内容正在路上/);
+});
+
 test('供给的 0 照显，缺席才隐藏（两者是两件事）', async () => {
   const { w } = await boot({
     dailyUsage: { totals: { view: 0, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 } },

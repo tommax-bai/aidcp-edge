@@ -5892,7 +5892,12 @@ async function delegatedTaskRequest(envId, pathname, options = {}) {
   const r = await clientAuthFetch(scopedPath, {
     method: options.method || 'GET',
     token: clientSession.token,
-    ...(options.body ? { body: { ...options.body, envKey: handle.profileId } } : {}),
+    ...(options.body && options.includeEnvBody !== false
+      ? { body: { ...options.body, envKey: handle.profileId } }
+      : {}),
+    ...(options.body && options.includeEnvBody === false
+      ? { body: { ...options.body } }
+      : {}),
   });
   if (r.status === 401) {
     onSessionInvalid();
@@ -5967,6 +5972,31 @@ ipcMain.handle('environment-overview:get', (_event, envId) => {
   return delegatedTaskRequest(
     envId,
     `/environments/${encodeURIComponent(handle.profileId)}/overview`,
+  );
+});
+
+// 小红书发布队列走固定的 env-scoped customer-auth 路径；普通读取和取消均不依赖 core/浏览器在线。
+ipcMain.handle('publish-queue:get', (_event, envId) => {
+  const handle = resolveHandle(envId);
+  if (!handle || !handle.profileId) return { ok: false, status: 400, error: 'selected_environment_required' };
+  return delegatedTaskRequest(
+    envId,
+    `/environments/${encodeURIComponent(handle.profileId)}/publish-queue`,
+  );
+});
+
+ipcMain.handle('publish-queue:cancel', (_event, envId, taskId, version) => {
+  const handle = resolveHandle(envId);
+  const normalizedTaskId = String(taskId || '').trim();
+  if (!handle || !handle.profileId) return { ok: false, status: 400, error: 'selected_environment_required' };
+  if (!normalizedTaskId || normalizedTaskId.length > 256 || /[\u0000-\u001f\u007f]/.test(normalizedTaskId)
+      || !Number.isInteger(version) || version < 0) {
+    return { ok: false, status: 400, error: 'invalid_publish_queue_cancel' };
+  }
+  return delegatedTaskRequest(
+    envId,
+    `/environments/${encodeURIComponent(handle.profileId)}/publish-queue/tasks/${encodeURIComponent(normalizedTaskId)}/cancel`,
+    { method: 'POST', body: { version }, includeEnvBody: false },
   );
 });
 

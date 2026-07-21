@@ -286,6 +286,7 @@
         </div>
         <div class="pub-foot">
           <p id="pub-foot">全文和「通过 / 驳回」按钮在飞书里，审批结果会自动同步到这里。</p>
+          <span id="pub-queue-link" class="pub-preview-link hidden" role="button" tabindex="0">查看全部进度 →</span>
           <span id="pub-preview-link" class="pub-preview-link hidden" role="button" tabindex="0">查看稿件 ↗</span>
         </div>
         </div>
@@ -547,6 +548,10 @@
           <div id="curated-create" class="curated-create" aria-live="polite"></div>
         </section>
 
+        <section id="publish-queue-view" class="publish-queue-view cw-view hidden" aria-label="发布队列">
+          <div id="publish-queue-content" class="publish-queue-content" aria-live="polite" aria-busy="false"></div>
+        </section>
+
         <!-- 稿件审核：复用既有审批与删图 DOM id，只把窄抽屉迁移为主内容区全页。 -->
         <section id="publish-preview-panel" class="publish-preview-panel cw-view hidden" aria-hidden="true" aria-label="稿件审核">
           <div class="publish-preview-head">
@@ -562,6 +567,27 @@
           </div>
         </section>
       </section>
+
+      <dialog id="publish-queue-cancel-confirm" class="publish-queue-cancel-confirm"
+        aria-labelledby="publish-queue-cancel-title" aria-describedby="publish-queue-cancel-detail">
+        <form method="dialog">
+          <button id="publish-queue-cancel-close" class="publish-queue-cancel-close nodrag"
+            type="button" aria-label="关闭取消任务确认">×</button>
+          <span class="publish-queue-cancel-mark" aria-hidden="true">!</span>
+          <div>
+            <span class="cw-kicker">取消发布任务</span>
+            <h2 id="publish-queue-cancel-title">确定取消这条任务？</h2>
+          </div>
+          <p id="publish-queue-cancel-detail">只会取消所选任务，不影响同一账号的其它内容。</p>
+          <div class="publish-queue-cancel-boundary">
+            已经开始准备的任务会在安全边界停止，因此可能短暂显示“取消中”。
+          </div>
+          <div class="publish-queue-cancel-actions">
+            <button id="publish-queue-cancel-back" class="cw-button secondary" type="button">继续保留</button>
+            <button id="publish-queue-cancel-submit" class="cw-button danger" type="button">确认取消任务</button>
+          </div>
+        </form>
+      </dialog>
 
       <!-- 共享原始日志：位于 legacy / 视频号 / 内容工作区切换之外，设置开关打开后始终跟随当前环境。 -->
       <details class="dev hidden" id="dev-section">
