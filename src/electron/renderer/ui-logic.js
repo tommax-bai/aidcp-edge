@@ -239,10 +239,6 @@
     return usageCount(status, window, ['inspiration', 'inspirations', 'candidate', 'candidates', 'collect', 'collects']);
   }
 
-  function dailyInspirationCount(status, dayWindow) {
-    return dailyUsageCount(status, dayWindow, ['inspiration', 'inspirations', 'candidate', 'candidates', 'collect', 'collects']);
-  }
-
   function explorationWindow(status, nowMs) {
     for (const key of ['session', 'hour']) {
       const window = guidanceWindow(status, key, nowMs);
@@ -272,14 +268,6 @@
       counter: hasTarget ? `${observed}/${target}` : '',
       meta: resting ? '进展已记录' : '进展实时记录',
     };
-  }
-
-  function runningGuidanceSteps(observed, inspirations) {
-    return [
-      { icon: 'browse', state: 'current', label: '浏览与互动', detail: observed > 0 ? `正在查看第 ${observed} 条` : '正在观察推荐流' },
-      { icon: 'match', state: inspirations > 0 ? 'done' : 'current', label: '判断匹配度', detail: inspirations > 0 ? `${inspirations} 条进入候选` : '持续判断中' },
-      { icon: 'search', state: 'next', label: '继续寻找灵感', detail: '持续筛选中' },
-    ];
   }
 
   function firstPostGuidance(status) {
@@ -439,10 +427,10 @@
     if (running && p && p.text && fresh) {
       const window = explorationWindow(s, nowMs);
       const progress = explorationProgress(s, window, false, day);
-      const observed = progress.current;
-      const daily = objectOrEmpty(objectOrEmpty(s).dailyUsage);
-      const useDailyProgress = firstPositiveCount([day && day.view, daily.quotas], ['cap', 'view', 'views']) > 0;
-      const inspirations = useDailyProgress ? dailyInspirationCount(s, day) : inspirationCount(s, window);
+      if (harvest) {
+        progress.meta = `已记录 ${harvest.countText}`;
+        progress.hasOutcome = true;
+      }
       return {
         mode: 'running',
         mascot: 'task-execution',
@@ -451,7 +439,6 @@
         title: '正在缩小创作方向。',
         value: '刷首页不是漫无目的，而是在寻找目标人群已经验证过的方向。',
         detail: '',
-        steps: runningGuidanceSteps(observed, inspirations),
         progress,
         resume: '',
       };

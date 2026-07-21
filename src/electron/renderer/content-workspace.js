@@ -50,6 +50,42 @@
     }
   }
 
+  function sourcePublishedText(item) {
+    const rawText = typeof item?.sourcePublishedAtText === 'string'
+      ? item.sourcePublishedAtText.trim()
+      : '';
+    if (item?.sourcePublishedAtStatus === 'parsed' && Number.isFinite(item.sourcePublishedAt)) {
+      const precision = item.sourcePublishedAtPrecision;
+      try {
+        if (precision === 'day') {
+          const formatted = new Intl.DateTimeFormat('zh-CN', {
+            timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric', day: 'numeric',
+          }).format(new Date(item.sourcePublishedAt));
+          return `发布于 ${formatted}`;
+        }
+        if (precision === 'hour') {
+          const formatted = new Intl.DateTimeFormat('zh-CN', {
+            timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', hour12: false,
+          }).format(new Date(item.sourcePublishedAt));
+          return `发布于 ${formatted}时左右`;
+        }
+        if (precision === 'minute') {
+          const formatted = new Intl.DateTimeFormat('zh-CN', {
+            timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric', day: 'numeric',
+            hour: '2-digit', minute: '2-digit', hour12: false,
+          }).format(new Date(item.sourcePublishedAt));
+          return `发布于 ${formatted}`;
+        }
+      } catch {
+        // Fall through to retained raw evidence or the explicit unknown state.
+      }
+    }
+    if (item?.sourcePublishedAtStatus === 'unparseable' && rawText) {
+      return `发布于 ${rawText}（未转换）`;
+    }
+    return '发布时间未知';
+  }
+
   function normalizePublishQueueResponse(response) {
     const data = response?.ok && response.data && response.data.data;
     const meta = response?.data && response.data.meta;
@@ -647,7 +683,7 @@
         top.appendChild(createElement(document, 'em', item.creatable ? 'ready' : '', item.creatable ? '可创作' : '仅查看'));
         copy.appendChild(top);
         copy.appendChild(createElement(document, 'span', 'curated-card-body', item.bodyPreview || '暂无正文摘要'));
-        copy.appendChild(createElement(document, 'span', 'curated-card-meta', `${item.author || '作者未知'} · ${relativeDate(item.updatedAt)}`));
+        copy.appendChild(createElement(document, 'span', 'curated-card-meta', `${item.author || '作者未知'} · ${sourcePublishedText(item)}`));
         renderStats(copy, item);
         card.appendChild(copy);
         card.addEventListener('click', () => {
@@ -788,7 +824,7 @@
       const type = item.contentType === 'image_text' ? '图文' : item.contentType === 'video' ? '视频' : '评论';
       content.appendChild(createElement(document, 'span', `curated-detail-badge ${item.creatable ? 'ready' : ''}`, item.creatable ? '可参考创作' : `${type} · 仅查看`));
       content.appendChild(createElement(document, 'h2', '', item.title || '未命名内容'));
-      content.appendChild(createElement(document, 'p', 'curated-detail-author', `${item.author || '作者未知'} · ${relativeDate(item.updatedAt)}`));
+      content.appendChild(createElement(document, 'p', 'curated-detail-author', `${item.author || '作者未知'} · ${sourcePublishedText(item)}`));
       renderStats(content, item);
       content.appendChild(createElement(document, 'div', 'curated-detail-body', item.body || '暂无正文'));
       if (Array.isArray(item.topics) && item.topics.length > 0) {
@@ -974,15 +1010,22 @@
 
     function renderQueueStages(parent, stages) {
       const rail = createElement(document, 'div', 'publish-queue-stages');
+      rail.setAttribute('role', 'list');
+      rail.setAttribute('aria-label', '发布进度');
       stages.forEach((stage) => {
         const item = createElement(document, 'div', `publish-queue-stage is-${stage.state}`);
-        item.appendChild(createElement(document, 'span', 'publish-queue-stage-dot'));
+        item.setAttribute('role', 'listitem');
+        const dot = createElement(document, 'span', 'publish-queue-stage-dot');
+        dot.setAttribute('aria-hidden', 'true');
+        item.appendChild(dot);
         const copy = createElement(document, 'div', 'publish-queue-stage-copy');
         copy.appendChild(createElement(document, 'strong', '', stage.label));
         const progress = stage.progress
           ? ` · ${Math.max(0, stage.progress.current)}/${Math.max(0, stage.progress.total)}`
           : '';
-        copy.appendChild(createElement(document, 'span', '', `${stage.summary.replace(`${stage.label}：`, '')}${progress}`));
+        const statusText = `${stage.summary.replace(`${stage.label}：`, '')}${progress}`;
+        copy.appendChild(createElement(document, 'span', '', statusText));
+        item.setAttribute('aria-label', `${stage.label}，${statusText}`);
         item.appendChild(copy);
         rail.appendChild(item);
       });

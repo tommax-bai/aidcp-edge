@@ -18,8 +18,8 @@ interface RuntimeGuidanceV {
   resume: string;
   note?: string;
   harvest?: { title: string; countText: string; heatText: string; hasHeat: boolean } | null;
-  progress?: { current: number; target: number; percent: number; title: string; counter: string; meta: string } | null;
-  steps: Array<{ label: string; detail: string; state: string }>;
+  progress?: { current: number; target: number; percent: number; title: string; counter: string; meta: string; hasOutcome?: boolean } | null;
+  steps?: Array<{ label: string; detail: string; state: string }>;
 }
 interface PublishV {
   mode: string;
@@ -290,11 +290,7 @@ test('运行价值说明：新鲜浏览事件先说明正在寻找内容灵感',
   assert.equal(v?.kicker, '正在理解目标人群喜欢什么');
   assert.equal(v?.title, '正在缩小创作方向。');
   assert.equal(v?.value, '刷首页不是漫无目的，而是在寻找目标人群已经验证过的方向。');
-  assert.deepEqual(v?.steps.map((step) => [step.label, step.detail]), [
-    ['浏览与互动', '正在查看第 12 条'],
-    ['判断匹配度', '2 条进入候选'],
-    ['继续寻找灵感', '持续筛选中'],
-  ]);
+  assert.equal(v?.steps, undefined, '普通运行态不再重复展示三段机制流程');
   assert.deepEqual(v?.progress, {
     current: 12,
     target: 150,
@@ -312,6 +308,7 @@ test('运行价值说明：日常进度分母来自今日目标时，分子也�
     dailyUsage: {
       totals: { view: 95, collect: 2 },
       quotas: { view: 120 },
+      inspirationSummary: { count: 3 },
       windows: {
         session: {
           active: true,
@@ -322,18 +319,15 @@ test('运行价值说明：日常进度分母来自今日目标时，分子也�
     },
   }), now);
   assert.equal(v?.mode, 'running');
-  assert.deepEqual(v?.steps.map((step) => [step.label, step.detail]), [
-    ['浏览与互动', '正在查看第 95 条'],
-    ['判断匹配度', '2 条进入候选'],
-    ['继续寻找灵感', '持续筛选中'],
-  ]);
+  assert.equal(v?.steps, undefined);
   assert.deepEqual(v?.progress, {
     current: 95,
     target: 120,
     percent: 79,
     title: '正在查看第 95 条推荐内容',
     counter: '95/120',
-    meta: '进展实时记录',
+    meta: '已记录 3 条创作灵感',
+    hasOutcome: true,
   });
 });
 
@@ -357,7 +351,7 @@ test('第一篇作品引导：首轮单独显示 0/20，不从今日计划推断
   assert.equal(v?.mode, 'first-post');
   assert.equal(v?.animate, false);
   assert.match(v?.value ?? '', /不是漫无目的/);
-  assert.deepEqual(v?.steps.map((step) => step.label), ['看趋势', '找匹配', '开始创作']);
+  assert.deepEqual(v?.steps?.map((step) => step.label), ['看趋势', '找匹配', '开始创作']);
   assert.deepEqual(v?.progress, {
     current: 0,
     target: 20,
@@ -380,7 +374,7 @@ test('第一篇作品引导：命中灵感后进入一次性生成态，不承�
   assert.equal(v?.mascot, 'celebration');
   assert.equal(v?.animate, true);
   assert.match(v?.title ?? '', /正在生成/);
-  assert.deepEqual(v?.steps.map((step) => step.state), ['done', 'done', 'current']);
+  assert.deepEqual(v?.steps?.map((step) => step.state), ['done', 'done', 'current']);
   assert.deepEqual(v?.progress, {
     current: 14,
     target: 20,
@@ -414,8 +408,8 @@ test('运行价值说明：本轮浏览完成才展示自然间隔与三步说�
   assert.equal(v?.animate, false);
   assert.match(v?.title ?? '', /整理/);
   assert.match(v?.value ?? '', /自然节奏/);
-  assert.deepEqual(v?.steps.map((step) => step.label), ['浏览与互动', '留出自然间隔', '继续寻找灵感']);
-  assert.equal(v?.steps[0].detail, '2 条灵感已记录');
+  assert.deepEqual(v?.steps?.map((step) => step.label), ['浏览与互动', '留出自然间隔', '继续寻找灵感']);
+  assert.equal(v?.steps?.[0].detail, '2 条灵感已记录');
   assert.deepEqual(v?.progress, {
     current: 12,
     target: 12,
@@ -447,7 +441,7 @@ test('运行价值说明：本轮等待缺少浏览配额字段时仍展示完�
   assert.equal(v?.mode, 'session');
   assert.equal(v?.title, '先整理一下刚才发现的方向。');
   assert.equal(v?.value, '停一停不是失去进度，而是为下一轮寻找留出自然节奏。');
-  assert.deepEqual(v?.steps.map((step) => [step.label, step.detail]), [
+  assert.deepEqual(v?.steps?.map((step) => [step.label, step.detail]), [
     ['浏览与互动', '2 条灵感已记录'],
     ['留出自然间隔', '让账号信号更清晰'],
     ['继续寻找灵感', '推荐内容更聚焦'],
@@ -506,7 +500,7 @@ test('运行价值说明：今日浏览计划完成后展示今日成果', () =>
   assert.equal(v?.mascot, 'celebration');
   assert.equal(v?.kicker, '探索完成');
   assert.match(v?.title ?? '', /明天继续/);
-  assert.equal(v?.steps[0].detail, '今日浏览计划已完成');
+  assert.equal(v?.steps?.[0].detail, '今日浏览计划已完成');
   assert.equal(v?.resume, '');
   assert.deepEqual(v?.harvest, {
     title: '本轮收获已保存',

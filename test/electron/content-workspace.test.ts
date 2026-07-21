@@ -55,8 +55,69 @@ function detail(overrides: Record<string, unknown> = {}) {
   return { ...listItem(), body: '第一段正文\n第二段正文', firstSeenAt: 1, countsCapturedAt: null, ...overrides };
 }
 
+test('灵感列表与详情展示来源发布时间，未知或不可解析时绝不回落精选更新时间', async () => {
+  const impossibleUpdatedAt = Date.parse('2099-12-31T23:59:00.000Z');
+  const list = listItem({
+    updatedAt: impossibleUpdatedAt,
+    sourcePublishedAtText: '07-20',
+    sourcePublishedAt: Date.parse('2026-07-19T16:00:00.000Z'),
+    sourcePublishedAtPrecision: 'day',
+    sourcePublishedAtStatus: 'parsed',
+    sourcePublishedAtObservedAt: Date.parse('2026-07-21T07:30:00.000Z'),
+  });
+  const { window, controller } = boot({
+    curatedList: async () => ({ ok: true, data: { items: [list], total: 1 } }),
+    curatedGet: async () => ({
+      ok: true,
+      data: {
+        item: detail({
+          updatedAt: impossibleUpdatedAt,
+          sourcePublishedAtText: '平台新格式',
+          sourcePublishedAt: null,
+          sourcePublishedAtPrecision: null,
+          sourcePublishedAtStatus: 'unparseable',
+          sourcePublishedAtObservedAt: Date.parse('2026-07-21T07:30:00.000Z'),
+        }),
+      },
+    }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  controller.openLibrary();
+  await flush();
+  const listMeta = $(window, '.curated-card-meta').textContent ?? '';
+  assert.match(listMeta, /作者甲 · 发布于 2026\/7\/20/);
+  assert.doesNotMatch(listMeta, /2099/);
+
+  $(window, '.curated-card').dispatchEvent(new window.Event('click'));
+  await flush();
+  const detailMeta = $(window, '.curated-detail-author').textContent ?? '';
+  assert.match(detailMeta, /作者甲 · 发布于 平台新格式（未转换）/);
+  assert.doesNotMatch(detailMeta, /2099/);
+});
+
+test('旧 Cloud 灵感响应缺少来源发布时间时明确显示未知', async () => {
+  const { window, controller } = boot({
+    curatedList: async () => ({ ok: true, data: { items: [listItem({ updatedAt: Date.parse('2099-12-31T23:59:00.000Z') })], total: 1 } }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  controller.openLibrary();
+  await flush();
+  const meta = $(window, '.curated-card-meta').textContent ?? '';
+  assert.match(meta, /发布时间未知/);
+  assert.doesNotMatch(meta, /2099/);
+});
+
 function queueStage(key: string, label: string, state: string, progress?: { current: number; total: number }) {
-  return { key, label, state, summary: `${label}：${state === 'completed' ? '已完成' : state === 'waiting_human' ? '等待你的确认' : '未开始'}`, ...(progress ? { progress } : {}) };
+  const status = key === 'approval' && state === 'completed'
+    ? '已确认'
+    : key === 'approval' && state === 'waiting_human'
+      ? '待你确认'
+      : key === 'dispatch' && state === 'pending'
+        ? '等待发布'
+        : state === 'completed'
+          ? '已完成'
+          : '未开始';
+  return { key, label, state, summary: `${label}：${status}`, ...(progress ? { progress } : {}) };
 }
 
 function queueJourney(overrides: Record<string, unknown> = {}) {
@@ -66,7 +127,7 @@ function queueJourney(overrides: Record<string, unknown> = {}) {
     stages: [
       queueStage('source', '开始创作', 'completed'),
       queueStage('content', '正文与配图', 'completed', { current: 2, total: 4 }),
-      queueStage('approval', '你来确认', 'waiting_human'),
+      queueStage('approval', '发布确认', 'waiting_human'),
       queueStage('dispatch', '发布结果', 'pending'),
     ],
     ...overrides,
@@ -91,7 +152,7 @@ function queueResponse(overrides: Record<string, unknown> = {}) {
       id: 'publish:20', recordId: 20, title: '上一条平台已受理笔记', sourceTitle: null,
       status: 'submitted', statusLabel: '平台确认中，请勿重复操作',
       stages: [queueStage('source', '开始创作', 'completed'), queueStage('content', '正文与配图', 'completed'),
-        queueStage('approval', '你来确认', 'completed'), queueStage('dispatch', '发布结果', 'completed')],
+        queueStage('approval', '发布确认', 'completed'), queueStage('dispatch', '发布结果', 'completed')],
     })],
     ...overrides,
   };
@@ -711,6 +772,11 @@ test('小红书发布队列按三段呈现四阶段真态，非小红书切换�
   assert.match(text, /系统处理中.*排队与创作/s);
   assert.match(text, /最近完成.*平台确认中，请勿重复操作/s);
   assert.match(text, /正文与配图.*2\/4/s);
+  assert.match(text, /发布确认.*待你确认/s);
+  assert.match(text, /发布结果.*等待发布/s);
+  assert.equal(window.document.querySelectorAll('.publish-queue-stages[role="list"]').length, 2);
+  assert.equal(window.document.querySelectorAll('.publish-queue-stage[role="listitem"]').length, 8);
+  assert.equal(window.document.querySelector('.publish-queue-stage.is-waiting_human')?.getAttribute('aria-label'), '发布确认，待你确认');
   assert.equal(window.document.querySelectorAll('[data-queue-task-id="task-queue-1"]').length, 1);
   assert.ok(calls.every((envId) => envId === 'env-a'));
 

@@ -52,11 +52,15 @@ test('发布队列 renderer 只经具名 IPC，按 XHS 门禁并丢弃旧环境�
 test('发布队列页面包含可访问取消确认、四阶段与窄屏无横向布局', () => {
   assert.match(html, /id="publish-queue-view"/);
   assert.match(html, /id="publish-queue-cancel-confirm"[\s\S]*aria-labelledby="publish-queue-cancel-title"/);
-  for (const label of ['开始创作', '正文与配图', '你来确认', '发布结果']) {
+  for (const label of ['开始创作', '正文与配图', '发布确认', '发布结果']) {
     assert.match(renderer, new RegExp(label));
   }
   assert.match(styles, /\.publish-queue-content\s*\{[^}]*width:\s*min\(880px, 100%\)/s);
   assert.match(styles, /@media \(max-width: 680px\)[\s\S]*\.publish-queue-stages\s*\{\s*grid-template-columns:\s*1fr/s);
   assert.match(styles, /\.publish-queue-card\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden/s);
+  assert.match(styles, /\.publish-queue-stage:not\(:last-child\)::after\s*\{[^}]*left:\s*calc\(50% \+ 6px\);[^}]*width:\s*calc\(100% - 12px\)/s);
+  assert.match(styles, /@media \(max-width: 680px\)[\s\S]*\.publish-queue-stage:not\(:last-child\)::after\s*\{[^}]*top:\s*12px;[^}]*bottom:\s*0;[^}]*left:\s*5\.5px/s);
+  assert.doesNotMatch(styles, /\.publish-queue-stage:(?:first-child|last-child)::(?:before|after)/);
+  assert.doesNotMatch(styles, /\.publish-queue-stage(?::[^,{]+)?\s*:\s*(?:hover|active)/);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.publish-queue-cancel-confirm\[open\]/s);
 });
