@@ -201,6 +201,16 @@ test('在场感：运行中 + 事件新鲜 → 动效开、文案为当前动作
   assert.match(v.fresh, /秒前/);
 });
 
+test('在场感：返回推荐流事件 → 流光改为创作方向且保留真实新鲜度', () => {
+  const now = Date.now();
+  const v = uiLogic.presenceView(st({
+    presence: { text: '返回推荐流，继续逛…', at: new Date(now - 10_000).toISOString() },
+  }), now);
+  assert.equal(v.text, '正在缩小创作方向。');
+  assert.equal(v.animate, true);
+  assert.match(v.fresh, /秒前/);
+});
+
 // 用户实况（change presence-terminal-honesty）：会话仍报运行中、动作文案还在新鲜期内、当日浏览额度已跑满。
 // 修前这一格里在场感照播「顺路去作者主页看看…」+「刚刚更新」，同屏的探索进度卡却已经在说「今天先到这里」。
 test('在场感：运行中 + 动作文案仍新鲜 + 当日额度已满 → 终态压过中途动作文案', () => {
@@ -286,7 +296,7 @@ test('运行价值说明：新鲜浏览事件先说明正在寻找内容灵感',
   }), now);
   assert.equal(v?.mode, 'running');
   assert.equal(v?.mascot, 'task-execution');
-  assert.equal(v?.animate, true);
+  assert.equal(v?.animate, false);
   assert.equal(v?.kicker, '正在理解目标人群喜欢什么');
   assert.equal(v?.title, '正在缩小创作方向。');
   assert.equal(v?.value, '刷首页不是漫无目的，而是在寻找目标人群已经验证过的方向。');
@@ -372,7 +382,7 @@ test('第一篇作品引导：命中灵感后进入一次性生成态，不承�
   }), now);
   assert.equal(v?.mode, 'first-post');
   assert.equal(v?.mascot, 'celebration');
-  assert.equal(v?.animate, true);
+  assert.equal(v?.animate, false);
   assert.match(v?.title ?? '', /正在生成/);
   assert.deepEqual(v?.steps?.map((step) => step.state), ['done', 'done', 'current']);
   assert.deepEqual(v?.progress, {

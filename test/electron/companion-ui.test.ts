@@ -226,9 +226,13 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.equal(w.document.querySelector('#loop'), null, '运行态不保留七段详细步骤');
   assert.equal(w.document.querySelector('.rg-loop-toggle'), null, '运行态不提供查看运行步骤入口');
   assert.match($(w, '#runtime-guidance-mascot').getAttribute('src') ?? '', /mascot-task-execution/);
+  assert.equal($(w, '#runtime-guidance-mascot').classList.contains('animate'), false);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-main/);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-mascot/);
   assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-mascot\s*\{[^}]*display:\s*none/s);
+  assert.doesNotMatch(rendererCss, /\.rg-mascot\.animate\s*\{[^}]*animation:/s);
+  assert.doesNotMatch(rendererCss, /@keyframes rg-mascot-/);
+  assert.match(rendererCss, /\.persona-growth\.play \.pg-mascot\s*\{\s*animation:\s*pg-mascot-scale/);
   assert.doesNotMatch(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-main::before/);
   assert.match(rendererCss, /\.rg-progress\s*\{/);
   assert.match(rendererCss, /\.runtime-guidance\[data-mode="running"\] \.rg-progress\s*\{[\s\S]*border-top: 1px solid rgba\(156, 178, 205, 0\.28\);/);
@@ -264,6 +268,15 @@ test('运行中 + 新鲜事件 → 在场感动效开、新鲜度走字', async 
   assert.doesNotMatch(rendererCss, /--rg-step-(?:line-width|line-right|spark-right|spark-travel):/);
   assert.doesNotMatch(rendererSrc, /查看运行步骤|收起运行步骤|loopDetailsOpen|renderLoop/);
   assert.doesNotMatch(rendererCss, /rg-loop-toggle|\.loop-step|\.loop-sep/);
+});
+
+test('返回推荐流时顶部流光显示创作方向，真实更新时间保持不变', async () => {
+  const { w } = await boot({
+    presence: { text: '返回推荐流，继续逛…', at: new Date().toISOString() },
+  });
+  assert.equal($(w, '#presence-text').textContent, '正在缩小创作方向。');
+  assert.equal($(w, '#presence-text').classList.contains('shimmer'), true);
+  assert.match($(w, '#presence-fresh').textContent ?? '', /刚刚更新/);
 });
 
 test('首帖流程周期刷新原位更新内容，不重建连接器打断圆点行程', async () => {

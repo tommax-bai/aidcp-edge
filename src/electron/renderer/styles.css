@@ -696,11 +696,6 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   justify-self: center;
   filter: drop-shadow(0 6px 8px rgba(31, 47, 77, 0.13));
 }
-.rg-mascot.animate { animation: rg-mascot-work 4.2s ease-in-out infinite; }
-.runtime-guidance[data-mode="first-post"] .rg-mascot.animate {
-  transform-origin: center bottom;
-  animation: rg-mascot-hit 820ms cubic-bezier(.2,.82,.24,1) both;
-}
 .rg-flow {
   --rg-step-current: #346ee8;
   --rg-step-done: #22966a;
@@ -985,15 +980,6 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   font-weight: 650;
 }
 .runtime-guidance[data-mode="day"] .rg-resume { color: #4c8069; }
-@keyframes rg-mascot-work {
-  0%, 100% { transform: translateY(0); }
-  45% { transform: translateY(-2px); }
-  55% { transform: translateY(0); }
-}
-@keyframes rg-mascot-hit {
-  0%, 100% { transform: scale(1); }
-  52% { transform: scale(1.12); }
-}
 @keyframes rg-value-line {
   0%, 100% { transform: scaleX(.34); opacity: .34; }
   50% { transform: scaleX(1); opacity: .72; }
@@ -1029,7 +1015,6 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 }
 @media (prefers-reduced-motion: reduce) {
   .runtime-guidance::after,
-  .rg-mascot.animate,
   .rg-flow-connector.flow-active::before,
   .rg-flow-connector.flow-active::after { animation: none; }
   .rg-flow-connector.flow-active::after { opacity: 0; }
