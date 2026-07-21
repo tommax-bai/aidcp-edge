@@ -78,7 +78,13 @@ test('correlated browser.show replies only after visible move and browser raise 
     page.cdp,
     cfg,
     persona,
-    JSON.stringify({ type: 'browser.show', payload: { requestId: 'browser-show-test-1' } }),
+    JSON.stringify({
+      type: 'browser.show',
+      payload: {
+        requestId: 'browser-show-test-1',
+        bounds: { left: 34, top: 104, width: 1440, height: 980 },
+      },
+    }),
     (line) => logs.push(line),
   );
   assert.deepEqual(page.calls.map((call) => call.method).slice(0, 3), [
@@ -86,6 +92,14 @@ test('correlated browser.show replies only after visible move and browser raise 
     'Browser.setWindowBounds',
     'Page.bringToFront',
   ]);
+  const set = page.calls.find((call) => call.method === 'Browser.setWindowBounds');
+  assert.deepEqual(set?.params.bounds, {
+    left: 34,
+    top: 104,
+    width: 1440,
+    height: 980,
+    windowState: 'normal',
+  });
   assert.equal(logs.at(-1), `${BROWSER_PARKING_REPLY_PREFIX} {"id":"browser-show-test-1","ok":true}`);
 });
 
@@ -118,6 +132,16 @@ test('correlated browser.show reports failure while uncorrelated show emits no r
     (line) => missingConfigLogs.push(line),
   );
   assert.match(missingConfigLogs.at(-1) || '', /\[browser-parking-reply\].*"ok":false.*未配置浏览器窗口位置/);
+
+  const invalidBoundsLogs: string[] = [];
+  await handleBrowserParkingControlLine(
+    fakeCdp([]).cdp,
+    cfg,
+    persona,
+    JSON.stringify({ type: 'browser.show', payload: { requestId: 'browser-show-test-4', bounds: { left: 0 } } }),
+    (line) => invalidBoundsLogs.push(line),
+  );
+  assert.match(invalidBoundsLogs.at(-1) || '', /\[browser-parking-reply\].*"ok":false.*浏览器显示位置无效/);
 
   const plainLogs: string[] = [];
   await handleBrowserParkingControlLine(

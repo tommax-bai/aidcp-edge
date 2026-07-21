@@ -57,6 +57,7 @@ const {
   DEFAULT_PARKING_MODE,
   normalizeParkingMode,
   computeBrowserParkingPlan,
+  clientAlignedBrowserBounds,
   parkingEnv,
 } = require('./browser-parking.cjs');
 const {
@@ -2585,6 +2586,20 @@ function showDrivenBrowserBelowClient(handle) {
   if (!handle || !handle.child || !handle.browserParkingReady || !handle.child.stdin || handle.child.stdin.destroyed) {
     return Promise.resolve({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' });
   }
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return Promise.resolve({ ok: false, error: 'AIDCP 主窗口已关闭，无法计算浏览器正后方位置' });
+  }
+  let targetBounds;
+  try {
+    const clientBounds = mainWindow.getBounds();
+    const display = screen.getDisplayMatching(clientBounds);
+    targetBounds = clientAlignedBrowserBounds(clientBounds, display);
+  } catch (error) {
+    return Promise.resolve({ ok: false, error: error?.message || '读取 AIDCP 窗口位置失败' });
+  }
+  if (!targetBounds) {
+    return Promise.resolve({ ok: false, error: 'AIDCP 窗口位置无效，未移动浏览器' });
+  }
   const id = `browser-show-${crypto.randomUUID()}`;
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -2592,7 +2607,7 @@ function showDrivenBrowserBelowClient(handle) {
       resolve({ ok: false, error: '浏览器窗口移动超时，AIDCP 未收到完成确认' });
     }, BROWSER_SHOW_COMPLETION_TIMEOUT_MS);
     browserShowPending.set(id, { envId: handle.envId, resolve, timer });
-    const sent = writeBrowserControlCommand(handle, 'browser.show', { requestId: id });
+    const sent = writeBrowserControlCommand(handle, 'browser.show', { requestId: id, bounds: targetBounds });
     if (!sent.ok) {
       browserShowPending.delete(id);
       clearTimeout(timer);

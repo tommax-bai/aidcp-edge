@@ -84,6 +84,32 @@ function visibleBounds(primary) {
   };
 }
 
+// 环境头像“显示在 AIDCP 后方”使用客户端的实时窗口矩形，而不是启动时计算的主屏居中位。
+// 浏览器尺寸仍按目标显示器工作区夹取，避免为了贴合客户端而改变固定桌面布局；位置按两窗中心
+// 重合计算，并只在客户端靠近屏幕边缘时做必要夹取。
+function clientAlignedBrowserBounds(clientBounds, display) {
+  const client = clientBounds || {};
+  const x = Number(client.x);
+  const y = Number(client.y);
+  const clientWidth = Number(client.width);
+  const clientHeight = Number(client.height);
+  if (![x, y, clientWidth, clientHeight].every(Number.isFinite) || clientWidth <= 0 || clientHeight <= 0) {
+    return null;
+  }
+  const r = rectOf(display);
+  const { width, height } = fittedSize(r);
+  const centeredLeft = Math.floor(x + ((clientWidth - width) / 2));
+  const centeredTop = Math.floor(y + ((clientHeight - height) / 2));
+  const maxLeft = r.x + Math.max(0, r.width - width);
+  const maxTop = r.y + Math.max(0, r.height - height);
+  return {
+    left: Math.max(r.x, Math.min(centeredLeft, maxLeft)),
+    top: Math.max(r.y, Math.min(centeredTop, maxTop)),
+    width,
+    height,
+  };
+}
+
 function parkingDisplayBounds(display) {
   const r = rectOf(display);
   return {
@@ -183,5 +209,6 @@ module.exports = {
   normalizeParkingMode,
   computeBrowserParkingPlan,
   startupStagingPosition,
+  clientAlignedBrowserBounds,
   parkingEnv,
 };

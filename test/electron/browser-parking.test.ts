@@ -15,6 +15,10 @@ const parking = require('../../src/electron/browser-parking.cjs') as {
     visibleBounds: { left: number; top: number; width: number; height: number };
     launchPosition: { left: number; top: number };
   };
+  clientAlignedBrowserBounds: (
+    clientBounds: { x: number; y: number; width: number; height: number },
+    display: unknown,
+  ) => { left: number; top: number; width: number; height: number } | null;
   parkingEnv: (plan: unknown) => Record<string, string>;
 };
 
@@ -37,6 +41,20 @@ test('primary-screen parks fully on the primary display and shows centered', () 
   // 抬前/兜底位：居中于主屏工作区。
   assert.deepEqual(plan.visibleBounds, { left: 240, top: 50, width: 1440, height: 980 });
   assert.deepEqual(plan.fallbackBounds, plan.visibleBounds);
+});
+
+test('avatar show centers the fixed browser rectangle on the live AIDCP window', () => {
+  assert.deepEqual(
+    parking.clientAlignedBrowserBounds({ x: 38, y: 22, width: 1432, height: 1145 }, primary),
+    { left: 34, top: 100, width: 1440, height: 980 },
+  );
+});
+
+test('client-aligned bounds use the matching display and clamp only at its work-area edge', () => {
+  assert.deepEqual(
+    parking.clientAlignedBrowserBounds({ x: 2000, y: 20, width: 1200, height: 800 }, secondary),
+    { left: 1920, top: 0, width: 1440, height: 900 },
+  );
 });
 
 test('parking-display targets a secondary display when available', () => {

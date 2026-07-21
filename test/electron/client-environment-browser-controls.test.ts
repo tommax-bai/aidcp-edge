@@ -92,7 +92,10 @@ test('environment-avatar show waits for core completion then restores AIDCP abov
   assert.match(preload, /showDrivenBrowser: \(envId, opts\) => ipcRenderer\.invoke\('browser:showDriven', envId, opts\)/);
   assert.match(renderer, /showDrivenBrowser[\s\S]{0,260}keepClientForeground: true/);
   assert.match(main, /const browserShowPending = new Map\(\)/);
-  assert.match(main, /writeBrowserControlCommand\(handle, 'browser\.show', \{ requestId: id \}\)/);
+  assert.match(main, /mainWindow\.getBounds\(\)/);
+  assert.match(main, /screen\.getDisplayMatching\(clientBounds\)/);
+  assert.match(main, /clientAlignedBrowserBounds\(clientBounds, display\)/);
+  assert.match(main, /writeBrowserControlCommand\(handle, 'browser\.show', \{ requestId: id, bounds: targetBounds \}\)/);
   assert.match(main, /message\.startsWith\(BROWSER_PARKING_REPLY_PREFIX\)/);
   const focus = functionBlock('focusAidcpAboveDrivenBrowser', 'handleBrowserParkingReply');
   assert.match(focus, /mainWindow\.show\(\)/);

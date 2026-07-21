@@ -38,6 +38,7 @@ export interface BrowserPersonaNoticeController {
 
 interface BrowserShowControlPayload {
   requestId?: string;
+  bounds?: BrowserWindowBounds;
 }
 
 type BrowserParkingControlMessage = {
@@ -51,16 +52,20 @@ const VALID_MODES = new Set(['primary-screen', 'parking-display', 'edge-strip', 
 const MIN_VIEWPORT_WIDTH = 1000;
 const MIN_VIEWPORT_HEIGHT = 600;
 
+function normalizeBounds(value: Partial<BrowserWindowBounds> | null | undefined): BrowserWindowBounds | null {
+  if (!value || typeof value !== 'object') return null;
+  const left = Number(value.left);
+  const top = Number(value.top);
+  const width = Number(value.width);
+  const height = Number(value.height);
+  if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+  return { left: Math.floor(left), top: Math.floor(top), width: Math.floor(width), height: Math.floor(height) };
+}
+
 function parseBounds(raw: string | undefined): BrowserWindowBounds | null {
   if (!raw) return null;
   try {
-    const value = JSON.parse(raw) as Partial<BrowserWindowBounds>;
-    const left = Number(value.left);
-    const top = Number(value.top);
-    const width = Number(value.width);
-    const height = Number(value.height);
-    if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
-    return { left: Math.floor(left), top: Math.floor(top), width: Math.floor(width), height: Math.floor(height) };
+    return normalizeBounds(JSON.parse(raw) as Partial<BrowserWindowBounds>);
   } catch {
     return null;
   }
@@ -145,9 +150,10 @@ export async function showBrowserWindow(
   cdp: CdpClient,
   config: BrowserParkingConfig | null,
   logger: (message: string) => void = console.log,
+  requestedBounds?: BrowserWindowBounds,
 ): Promise<void> {
   if (!config) throw new Error('未配置浏览器窗口位置');
-  await setWindowBounds(cdp, config.visibleBounds);
+  await setWindowBounds(cdp, requestedBounds || config.visibleBounds);
   // 抬前：把标签页/窗口带到最前并聚焦（诚实边界：系统层焦点无法 100% 保证，故仍 best-effort、不抛断流程）。
   try {
     await cdp.send('Page.bringToFront', {});
@@ -294,6 +300,13 @@ function browserShowRequestId(payload: BrowserParkingControlMessage['payload']):
   return /^[a-zA-Z0-9_-]{1,120}$/.test(id) ? id : '';
 }
 
+function browserShowBounds(payload: BrowserParkingControlMessage['payload']): BrowserWindowBounds | undefined {
+  if (!payload || typeof payload !== 'object' || !('bounds' in payload)) return undefined;
+  const bounds = normalizeBounds(payload.bounds as Partial<BrowserWindowBounds> | undefined);
+  if (!bounds) throw new Error('浏览器显示位置无效');
+  return bounds;
+}
+
 function emitBrowserParkingReply(
   requestId: string,
   ok: boolean,
@@ -325,7 +338,8 @@ export async function handleBrowserParkingControlLine(
   if (msg.type === 'browser.show') {
     const requestId = browserShowRequestId(msg.payload);
     try {
-      await showBrowserWindow(cdp, config, logger);
+      const requestedBounds = browserShowBounds(msg.payload);
+      await showBrowserWindow(cdp, config, logger, requestedBounds);
       emitBrowserParkingReply(requestId, true, logger);
     } catch (e) {
       const error = (e as Error).message;
