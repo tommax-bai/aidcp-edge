@@ -4459,7 +4459,7 @@ function renderRail() {
     const cta = document.createElement('button');
     cta.type = 'button';
     cta.className = 'rail-empty';
-    cta.innerHTML = '<span class="rail-empty-icon" aria-hidden="true">＋</span><span class="rail-empty-title">创建第一个运行环境</span><span class="rail-empty-copy">创建后可在这里切换账号并查看真实运行状态</span>';
+    cta.innerHTML = '<span class="rail-empty-icon" aria-hidden="true">＋</span><span class="rail-empty-title">创建第一个运行环境</span><span class="rail-empty-copy">创建后可在这里切换环境并查看状态</span>';
     cta.addEventListener('click', () => openEnvAddPanel('create'));
     fields.railList.appendChild(cta);
     return; // 空态无可滚内容，滚动位天然为 0

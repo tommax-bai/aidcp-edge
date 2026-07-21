@@ -1001,6 +1001,7 @@ test('无 envId 的旧形状 / 空名册 → 环境栏进入专用创建空态�
   assert.equal(onboarding.getAttribute('aria-hidden'), 'false');
   assert.match(onboarding.textContent || '', /创建环境[\s\S]*登录账号[\s\S]*开始运行/);
   assert.equal(onboarding.querySelectorAll('.environment-onboarding-steps > li').length, 3);
+  assert.match(onboarding.querySelector('.environment-onboarding-steps > li:last-child small')!.textContent || '', /^查看进展与真实状态$/);
   const primary = w.document.querySelector('#environment-onboarding-create') as HTMLButtonElement;
   assert.equal(primary.tagName, 'BUTTON', '创建主操作使用原生按钮，键盘语义不另造');
   assert.equal(primary.type, 'button');
@@ -1016,6 +1017,7 @@ test('无 envId 的旧形状 / 空名册 → 环境栏进入专用创建空态�
   const empty = w.document.querySelector('#rail-list .rail-empty') as HTMLButtonElement;
   assert.ok(empty, '空态给「创建第一个运行环境」入口');
   assert.match(empty.textContent || '', /创建第一个运行环境/);
+  assert.match(empty.textContent || '', /切换环境并查看状态/);
   assert.equal(empty.querySelector('.rail-dot'), null, '创建占位卡不伪装真实状态点');
   assert.equal(empty.querySelector('.env-ava'), null, '创建占位卡不伪装平台头像');
   primary.click();
@@ -2287,6 +2289,8 @@ test('首次空态样式：隐藏无意义筛选、汇总和批量运行区，�
   empty.className = 'rail-empty';
   d.querySelector('#rail-list')!.appendChild(empty);
   assert.notEqual(w.getComputedStyle(empty).display, 'none', '创建占位卡仍可见');
+  assert.match(rendererCss, /\.rail-empty\s*\{[^}]*background:\s*rgba\(247, 250, 255, \.58\)/s, '左栏创建入口保持低强调背景');
+  assert.match(rendererCss, /\.rail-empty-icon\s*\{[^}]*width:\s*32px/s, '左栏图形尺寸不得重新与右侧主操作竞争');
 });
 
 test('完整首次引导样式：旧环境工作区与身份不可见，只保留全局能力和创建主路径', () => {
@@ -2302,12 +2306,16 @@ test('完整首次引导样式：旧环境工作区与身份不可见，只保�
   assert.equal(w.getComputedStyle(d.querySelector('#interaction-workspace') as HTMLElement).display, 'none');
   assert.equal(w.getComputedStyle(d.querySelector('#content-workspace') as HTMLElement).display, 'none');
   assert.equal(w.getComputedStyle(d.querySelector('#first-use-brand') as HTMLElement).display, 'flex', '标题栏改为中性首次使用身份');
-  assert.equal(w.getComputedStyle(d.querySelector('#environment-onboarding') as HTMLElement).display, 'flex');
+  const onboarding = d.querySelector('#environment-onboarding') as HTMLElement;
+  assert.equal(w.getComputedStyle(onboarding).display, 'flex');
+  assert.equal(w.getComputedStyle(onboarding).alignItems, 'flex-start', '主卡靠近内容区上方，不垂直居中制造大段留白');
+  assert.match(rendererCss, /\.environment-onboarding\s*\{[^}]*padding-top:\s*clamp\(44px, 7vh, 76px\)/s, '主卡顶部距离随窗口收敛，不写死也不垂直居中');
   assert.equal(w.getComputedStyle(d.querySelector('#cloud-env-chip') as HTMLElement).display === 'none', false, 'Cloud 环境仍是全局能力');
   assert.equal(w.getComputedStyle(d.querySelector('#gear') as HTMLElement).display === 'none', false, '设置仍可达');
   const create = d.querySelector('#environment-onboarding-create') as HTMLButtonElement;
   assert.equal(w.getComputedStyle(create).cursor, 'pointer');
   assert.match(rendererCss, /\.environment-onboarding-create:focus-visible\s*\{[^}]*outline:/s, '键盘焦点必须清晰可见');
+  assert.doesNotMatch(rendererCss, /\.environment-onboarding-card::before/, '没有真实进度依据时不得显示分段进度装饰');
   assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)/, '减弱动态效果继续由全局规则保证');
 });
 
