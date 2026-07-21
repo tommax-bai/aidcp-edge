@@ -750,8 +750,8 @@
       </div>
     </aside>
 
-    <!-- ═══ 环境代理编辑浮层：按环境改 user_proxy_config（受限 user/update）。
-         AdsPower 返回的密码仅在本浮层内存态回显；保存 = 整体替换该环境代理配置；下次启动该环境生效。 ═══ -->
+    <!-- ═══ 环境代理编辑浮层（edge-client-proxy-platform-persona-ux）：按环境改 user_proxy_config（受限 user/update）。
+         密码不回显（list 不回传密码），保存 = 整体替换该环境代理配置；下次启动该环境生效。 ═══ -->
     <div id="proxy-mask" class="pop-mask hidden"></div>
     <aside id="proxy-pop" class="proxy-pop hidden" aria-hidden="true" role="dialog" aria-label="环境代理">
       <div class="pop-head">
@@ -774,7 +774,7 @@
             <input id="proxy-pop-host" type="text" placeholder="代理地址（IP / 域名）" autocomplete="off" />
             <input id="proxy-pop-port" type="text" placeholder="端口" inputmode="numeric" autocomplete="off" />
             <input id="proxy-pop-user" type="text" placeholder="用户名（可选）" autocomplete="off" />
-            <input id="proxy-pop-pass" type="text" placeholder="密码（可直接修改或清空）" autocomplete="off" />
+            <input id="proxy-pop-pass" type="password" placeholder="密码（不回显，带鉴权代理需重填）" autocomplete="new-password" />
           </div>
           <p class="subtle proxy-warn">提示：给已在运营的账号更换代理会改变出口 IP 与时区画像，可能引起平台风控注意，请谨慎操作。</p>
         </div>
