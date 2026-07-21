@@ -15,6 +15,7 @@ import type {
   FacebookFeedReader,
   FacebookFeedCard,
   FacebookFeedSettleResult,
+  FacebookHomeFeedStateResult,
   FacebookHomeRefreshResult,
 } from '../../src/facebook/feed-reader.js';
 import type { FacebookPostReader, FacebookPostDetail } from '../../src/facebook/post-reader.js';
@@ -65,7 +66,7 @@ function makeSession(opts: {
   hangOpenUntil?: Promise<void>;
   cdpSend?: BrowseCdp['send'];
   commentHandler?: FacebookCommentHandler;
-  homeState?: { state: 'cards_ready' | 'empty_feed_confirmed' | 'feed_still_loading' | 'feed_unknown' | 'login_required' | 'blocked_by_captcha'; generation?: string };
+  homeState?: FacebookHomeFeedStateResult;
   reelCards?: FacebookReelCard[];
   reelFollow?: (noteId: string, shadow: boolean) => FacebookReelFollowResult;
 } = {}): Harness {
@@ -714,22 +715,44 @@ test('start(): 不可上报首卡立即有界续滚，只上报后续 canonical 
   assert.ok(h.logs.some((line) => line.includes('跳过不可上报首卡后已上报 1 张')));
 });
 
-test('start(): 连续不可上报卡片耗尽有界续滚后静默等待，不伪造 cards 或 action', async () => {
+test('start(): 连续不可上报卡片 8 轮后上报独立结构态，不伪造内容卡或 action', async () => {
   const h = makeSession({
     mode: 'on',
     settleBatches: [
       { cards: [], degraded: false, reason: 'no_feed' },
       ...Array.from({ length: 8 }, () => ({ cards: [], degraded: false, reason: 'no_feed' as const })),
     ],
-    homeState: { state: 'cards_ready' },
+    homeState: { state: 'cards_ready', generation: 'doc-1', loading: false },
   });
 
   await h.session.start();
 
   assert.equal(h.scrollCalls, 8, 'bootstrap 续滚必须受既有最大轮次约束');
-  assert.equal(h.cards.length, 0, '没有可信 canonical 身份就不伪造 page.cards');
+  assert.deepEqual(h.cards, [{
+    cards: [],
+    listKind: 'feed',
+    listState: 'present_unreportable',
+    documentGeneration: 'doc-1',
+  }], '只报告物理卡在场但不可上报，不伪造帖子身份');
   assert.equal(h.actions.length, 0, 'bootstrap 没有对应 Cloud 命令就不伪造 action.completed');
-  assert.ok(h.logs.some((line) => line.includes('有界续滚未找到可上报卡片')));
+  assert.ok(h.logs.some((line) => line.includes('8 轮后确认首页仍有物理卡但不可上报')));
+});
+
+test('start(): 8 轮后物理卡仍伴随 loading 时失败关闭，不切 Reels', async () => {
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [
+      { cards: [], degraded: false, reason: 'no_feed' },
+      ...Array.from({ length: 8 }, () => ({ cards: [], degraded: false, reason: 'no_feed' as const })),
+    ],
+    homeState: { state: 'cards_ready', generation: 'doc-loading', loading: true },
+  });
+
+  await h.session.start();
+
+  assert.equal(h.scrollCalls, 8);
+  assert.equal(h.cards.length, 0, 'loading 样本不得上报 present_unreportable');
+  assert.equal(h.actions.length, 0, 'bootstrap 仍不得伪造 action.completed');
 });
 
 test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，摘要/点赞/下一条走独立列表路径', async () => {
@@ -752,7 +775,9 @@ test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，�
     reelCards: [first, second],
   });
   await h.session.start();
-  assert.deepEqual(h.cards[0], { cards: [], listKind: 'feed', listState: 'empty' }, 'Edge 只报告空态，不自行导航');
+  assert.deepEqual(h.cards[0], {
+    cards: [], listKind: 'feed', listState: 'empty', documentGeneration: 'g1',
+  }, 'Edge 只报告空态，不自行导航');
 
   await h.session.onCloudCommand(makeEnv('page.scroll', { reason: 'empty_feed_reels_fallback' }));
   assert.equal(h.cards[1].listKind, 'reels');
@@ -912,7 +937,9 @@ test('首页从未出现真卡时 page.scroll 不得误报 feed_exhausted，并�
   });
   await h.session.onCloudCommand(makeEnv('page.scroll', {}));
   assert.equal(h.actions.some((action) => action.reason === 'feed_exhausted'), false, '从未见卡不能声称刷到底');
-  assert.deepEqual(h.cards[0], { cards: [], listKind: 'feed', listState: 'empty' });
+  assert.deepEqual(h.cards[0], {
+    cards: [], listKind: 'feed', listState: 'empty', documentGeneration: 'g-scroll',
+  });
 });
 
 // ─────────────────────────── split-brain：返回落回当前列表面（task 1.4/1.5）───────────────────────────

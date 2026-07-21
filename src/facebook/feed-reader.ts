@@ -61,11 +61,14 @@ export type FacebookHomeFeedState =
   | 'feed_still_loading'
   | 'feed_unknown'
   | 'login_required'
-  | 'blocked_by_captcha';
+  | 'blocked_by_captcha'
+  | 'blocked_by_consent';
 
 export interface FacebookHomeFeedStateResult {
   state: FacebookHomeFeedState;
   generation?: string;
+  /** 同一完整样本里的 loading 信号；present-unreportable 只接受明确 false。 */
+  loading?: boolean;
 }
 
 export interface FacebookHomeEmptyOptions {
@@ -395,6 +398,15 @@ export class FacebookFeedReader {
     for (let round = 0; round < maxRounds; round++) {
       const blocked = await this.blockingReason();
       if (blocked) return { state: blocked };
+      if (this.acceptConsent) {
+        try {
+          const consent = await this.acceptConsent(this.cdp);
+          if (consent.handled && !consent.cleared) return { state: 'blocked_by_consent' };
+        } catch (err) {
+          this.log(`[fb-feed] 首页状态复检 consent 失败：${(err as Error).message}`);
+          return { state: 'blocked_by_consent' };
+        }
+      }
       let sample: RawHomeState;
       try {
         sample = await evalJson<RawHomeState>(this.cdp, HOME_STATE_JS);
@@ -405,7 +417,7 @@ export class FacebookFeedReader {
       if (surface === 'login' || sample.loginLike) return { state: 'login_required' };
       if (surface === 'checkpoint' || sample.checkpointLike) return { state: 'blocked_by_captcha' };
       if (surface !== 'home' || !sample.homeReady) return { state: 'feed_unknown' };
-      if (sample.hasCards) return { state: 'cards_ready', generation: sample.generation };
+      if (sample.hasCards) return { state: 'cards_ready', generation: sample.generation, loading: sample.loading };
       lastLoading = sample.loading;
       const nextKey = `${sample.href}|${sample.generation}`;
       if (nextKey !== generationKey) {
@@ -421,13 +433,22 @@ export class FacebookFeedReader {
         // 动作前最终完整复检：不复用上一样本；任何卡/loading/generation/阻断变化都取消确认。
         const finalBlocked = await this.blockingReason();
         if (finalBlocked) return { state: finalBlocked };
+        if (this.acceptConsent) {
+          try {
+            const consent = await this.acceptConsent(this.cdp);
+            if (consent.handled && !consent.cleared) return { state: 'blocked_by_consent' };
+          } catch (err) {
+            this.log(`[fb-feed] 首页最终复检 consent 失败：${(err as Error).message}`);
+            return { state: 'blocked_by_consent' };
+          }
+        }
         let finalSample: RawHomeState;
         try {
           finalSample = await evalJson<RawHomeState>(this.cdp, HOME_STATE_JS);
         } catch {
           return { state: 'feed_unknown' };
         }
-        if (finalSample.hasCards) return { state: 'cards_ready', generation: finalSample.generation };
+        if (finalSample.hasCards) return { state: 'cards_ready', generation: finalSample.generation, loading: finalSample.loading };
         const finalKey = `${finalSample.href}|${finalSample.generation}`;
         if (
           classifyFacebookSurface(finalSample.href) === 'home' &&

@@ -128,6 +128,9 @@ test('Reels 点赞：一次可信点击 + 同 Reel 已选中态才成功，圆�
   assert.equal(result.executed, true);
   assert.equal(result.observation?.reactionText, '5.8K');
   assert.deepEqual(scripted.clicks.map((event) => event.type), ['mouseMoved', 'mousePressed', 'mouseReleased']);
+  const targetExpression = scripted.evaluations.find((value) => value.includes('__AIDCP_REEL_LIKE_TARGET__')) ?? '';
+  assert.match(targetExpression, /Bày tỏ cảm xúc Thích/, 'Reels 复用 Feed 的越南语 CTA 词表');
+  assert.match(targetExpression, /getBoundingClientRect/, '词表复用不能替代 Reels 自己的活动视频几何绑定');
 });
 
 test('Reels 点赞：结构候选歧义时不点击', async () => {

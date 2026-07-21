@@ -55,7 +55,10 @@ const DO_LIKE = process.env.AIDCP_FB_PROBE_LIKE === '1';
 const DO_STOP = process.env.AIDCP_FB_PROBE_STOP === '1';
 /** 把 P4 目标钉死到某条 permalink（按规范身份匹配）。设了就绝不点替代卡：钉的帖不在当前 feed ⇒ 跳过。 */
 const PINNED_TARGET = process.env.AIDCP_FB_PROBE_TARGET ?? '';
-const SCROLL_ROUNDS = Number(process.env.AIDCP_FB_PROBE_SCROLL ?? '8') || 8;
+const configuredScrollRounds = Number(process.env.AIDCP_FB_PROBE_SCROLL ?? '8');
+const SCROLL_ROUNDS = Number.isFinite(configuredScrollRounds) && configuredScrollRounds >= 0
+  ? Math.floor(configuredScrollRounds)
+  : 8;
 
 interface AdsResp<T> {
   code: number;

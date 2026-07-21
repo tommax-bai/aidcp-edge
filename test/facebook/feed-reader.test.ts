@@ -219,6 +219,28 @@ test('fb-feed[jsdom]: 真 feed 内轻量视频允许动作按钮内含数字，�
   ]);
 });
 
+test('fb-feed[jsdom]: Re Su 越南语完整动作标签仍绑定同一卡的视频身份、作者与摘要', async () => {
+  const dom = layoutDom(
+    '<div role="feed"><section id="re-su-video">' +
+      '<h4><a href="/profile.php?id=100044564370592">Diệp Lâm Anh</a></h4>' +
+      '<div data-ad-rendering-role="story_message">Mở mắt thấy biển khơi 🌊💗</div>' +
+      '<div data-video-id="1781943466124275"><video></video></div>' +
+      '<div class="action-bar"><div role="button" aria-label="Bày tỏ cảm xúc Thích về bài viết của Diệp Lâm Anh">Thích</div>' +
+      '<div role="button" aria-label="Bình luận về bài viết của Diệp Lâm Anh">Bình luận</div></div>' +
+      '</section></div>',
+  );
+  const reader = new FacebookFeedReader({ cdp: layoutCdp(dom), sleep: async () => {} });
+
+  assert.deepEqual(await reader.scanCards(), [{
+    index: 0,
+    noteId: 'https://www.facebook.com/watch?v=1781943466124275',
+    author: 'Diệp Lâm Anh',
+    textPreview: 'Mở mắt thấy biển khơi 🌊💗',
+    reactionCount: 0,
+    isVideo: true,
+  }]);
+});
+
 test('fb-feed[jsdom]: 支持语言共用动作栏分类，数字汇总 toolbar 不成为第二个 react 控件', async () => {
   const locales = [
     { like: '点赞', comment: '发表评论' },
@@ -588,6 +610,18 @@ test('confirmHomeEmpty：about:blank/login/checkpoint/未知 0 卡均不算首�
     const result = await reader.confirmHomeEmpty({ stableSamples: 3, roundMs: 1, wallClockMs: 3 });
     assert.equal(result.state, expected);
   }
+});
+
+test('confirmHomeEmpty：consent 未清除时失败关闭，不报告 cards_ready/empty', async () => {
+  const reader = new FacebookFeedReader({
+    cdp: homeStateCdp([{ ...EMPTY_HOME, hasCards: true }]),
+    acceptConsent: async () => ({ handled: true, cleared: false, attempts: 1, reason: 'blocked_by_consent' }),
+    sleep: async () => {},
+  });
+
+  assert.deepEqual(await reader.confirmHomeEmpty({ minDocumentAgeMs: 0, stableSamples: 1, roundMs: 1, wallClockMs: 1 }), {
+    state: 'blocked_by_consent',
+  });
 });
 
 // ─────────────────────────── 首页图标点击换批（Q3）───────────────────────────

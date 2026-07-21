@@ -760,7 +760,13 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         if (empty.state === 'empty_feed_confirmed') {
           this.emit({
             type: 'cards',
-            payload: { cards: [], listKind: 'feed', listState: 'empty', ...(this.startupId ? { startupId: this.startupId } : {}) },
+            payload: {
+              cards: [],
+              listKind: 'feed',
+              listState: 'empty',
+              ...(this.startupId ? { startupId: this.startupId } : {}),
+              ...(empty.generation ? { documentGeneration: empty.generation } : {}),
+            },
             presence: '首页暂时没有可浏览的帖子…',
           });
           this.log(`[fb-session] 首页显式空态已确认 generation=${empty.generation ?? '-'} → 等 Cloud 授权 Reels fallback`);
@@ -776,6 +782,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
             this.emit(continued);
             if (continued.payload.listState === 'empty') {
               this.log('[fb-session] 跳过不可上报首卡后确认首页显式空态 → 等 Cloud 授权 Reels fallback');
+            } else if (continued.payload.listState === 'present_unreportable') {
+              this.log('[fb-session] 8 轮后确认首页仍有物理卡但不可上报 → 等 Cloud 单次授权 Reels fallback');
             } else {
               this.log(`[fb-session] 跳过不可上报首卡后已上报 ${continued.payload.cards.length} 张 feed 卡片`);
             }
@@ -994,20 +1002,40 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'feed_exhausted' } };
       }
     }
-    // 轮次耗尽：从没扫到任何卡=「没内容」（loading/no_feed，照实回、不当到底）；扫到过卡但一直没新的=「没新内容」→ 兜底换批。
+    // 轮次耗尽：从没扫到任何可上报卡时做一次新的首页完整样本。只有“首页壳就绪 + 无阻断/loading +
+    // 可见物理卡仍在场”才上报 present_unreportable，交给 Cloud 单次授权 Reels；未知/加载/登录/检查点继续失败关闭。
     if (!sawAnyCard) {
       // 首次 empty 观察若因连接时序未被 Cloud 消费，后续 watchdog/redrive 仍可重新做同一套严格确认并重报；
-      // 仅首页 + no_feed 可达，搜索/群组/unknown 绝不套用。
-      if (lastEmptyReason === 'no_feed' && canonicalHomeUrl(this.activeFeedUrl)) {
-        const empty = await this.feedReader.confirmHomeEmpty();
-        if (empty.state === 'empty_feed_confirmed') {
+      // 仅 canonical 首页可达，搜索/群组/unknown 绝不套用。
+      if (canonicalHomeUrl(this.activeFeedUrl)) {
+        const home = await this.feedReader.confirmHomeEmpty();
+        if (home.state === 'empty_feed_confirmed') {
           return {
             type: 'cards',
-            payload: { cards: [], listKind: 'feed', listState: 'empty', ...(this.startupId ? { startupId: this.startupId } : {}) },
+            payload: {
+              cards: [],
+              listKind: 'feed',
+              listState: 'empty',
+              ...(this.startupId ? { startupId: this.startupId } : {}),
+              ...(home.generation ? { documentGeneration: home.generation } : {}),
+            },
             presence: '首页暂时没有可浏览的帖子…',
           };
         }
-        lastEmptyReason = empty.state === 'feed_still_loading' ? 'feed_still_loading' : 'no_feed';
+        if (home.state === 'cards_ready' && home.loading === false) {
+          return {
+            type: 'cards',
+            payload: {
+              cards: [],
+              listKind: 'feed',
+              listState: 'present_unreportable',
+              ...(this.startupId ? { startupId: this.startupId } : {}),
+              ...(home.generation ? { documentGeneration: home.generation } : {}),
+            },
+            presence: '首页有内容，但当前卡片暂时无法可靠解析…',
+          };
+        }
+        lastEmptyReason = home.state === 'feed_still_loading' || home.loading === true ? 'feed_still_loading' : 'no_feed';
       }
       return { type: 'action', payload: { action: 'scroll', ok: false, reason: lastEmptyReason ?? 'no_target' } };
     }

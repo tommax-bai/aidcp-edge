@@ -384,6 +384,28 @@ test('fb-like[jsdom]: 无 permalink 的越南语轻量视频按 data-video-id �
   assert.equal(result.observation?.noteId, 'fb:202');
 });
 
+test('fb-like[jsdom]: Re Su 越南语完整动作标签按目标视频精确点赞，短词 Thích 不冒充已赞', async () => {
+  const videoCard = (id: string, author: string) =>
+    `<section id="video-${id}"><h4><a href="/${author}">${author}</a></h4>` +
+    `<div data-ad-rendering-role="story_message">video ${id}</div><div data-video-id="${id}"><video></video></div>` +
+    `<div class="action-bar"><div role="button" aria-label="Bày tỏ cảm xúc Thích về bài viết của ${author}">Thích</div>` +
+    `<div role="button" aria-label="Bình luận về bài viết của ${author}">Bình luận</div></div></section>`;
+  const dom = feedDom(videoCard('101', 'Ann') + videoCard('202', 'Diệp Lâm Anh'));
+  const first = dom.window.document.querySelector('#video-101 [aria-label^="Bày tỏ"]') as HTMLElement;
+  const target = dom.window.document.querySelector('#video-202 [aria-label^="Bày tỏ"]') as HTMLElement;
+  let firstClicked = false;
+  first.addEventListener('click', () => { firstClicked = true; });
+  target.addEventListener('click', () => { target.setAttribute('aria-label', 'Gỡ Thích'); });
+
+  const exec = new FacebookLikeExecutor({ cdp: jsdomCdp(dom), ...noSleep }, fastOpts);
+  const result = await exec.like({ noteId: 'https://www.facebook.com/watch?v=202' });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.executed, true);
+  assert.equal(target.getAttribute('aria-label'), 'Gỡ Thích');
+  assert.equal(firstClicked, false);
+});
+
 test('fb-like[jsdom]: 目标帖不在页面上 → no_target，DOM 序第一张卡一动不动', async () => {
   const dom = feedDom(card('c1', 'Ann', A) + card('c2', 'Bob', B));
   let anyClick = false;
