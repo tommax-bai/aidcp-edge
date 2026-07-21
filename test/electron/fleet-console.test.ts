@@ -988,7 +988,7 @@ test('红线：并发环境的状态与活动按 envId 归属，切换环境不�
   assert.doesNotMatch(stream2, /环境一给/, '切换后环境一的活动 MUST NOT 残留');
 });
 
-test('无 envId 的旧形状 / 空名册 → 单环境统计不变、环境栏常驻显示并给添加入口', async () => {
+test('无 envId 的旧形状 / 空名册 → 环境栏进入专用创建空态并直达新建环境', async () => {
   const { w, pushStatus } = await boot({
     fleetGet: undefined,
     onFleetUpdate: undefined,
@@ -1001,8 +1001,17 @@ test('无 envId 的旧形状 / 空名册 → 单环境统计不变、环境栏�
   // 环境栏常驻显示（用户要求「左边栏默认展示」）：空名册也保留栏、强制展开、露出添加入口。
   assert.equal(rail.classList.contains('hidden'), false, '空名册也常驻显示环境栏');
   assert.equal(rail.classList.contains('expanded'), true, '空名册强制展开露出空态');
+  assert.equal(rail.classList.contains('empty-roster'), true, '只有权威全量花名册为空才进入首次空态');
   assert.equal(w.document.querySelectorAll('.rail-row').length, 0, '空名册无环境行');
-  assert.ok(w.document.querySelector('#rail-list .rail-empty'), '空态给「添加第一个环境」入口');
+  const empty = w.document.querySelector('#rail-list .rail-empty') as HTMLButtonElement;
+  assert.ok(empty, '空态给「创建第一个运行环境」入口');
+  assert.match(empty.textContent || '', /创建第一个运行环境/);
+  assert.equal(empty.querySelector('.rail-dot'), null, '创建占位卡不伪装真实状态点');
+  assert.equal(empty.querySelector('.env-ava'), null, '创建占位卡不伪装平台头像');
+  empty.click();
+  assert.equal(w.document.querySelector('#env-add-panel')!.classList.contains('open'), true);
+  assert.equal(w.document.querySelector('#env-tab-create')!.classList.contains('active'), true, '首次入口直达新建环境');
+  assert.equal(w.document.querySelector('#env-tab-create-body')!.classList.contains('hidden'), false);
 });
 
 test('待处理徽标 + 需处理浮顶：需登录环境脉冲并计入徽标', async () => {
@@ -1291,6 +1300,7 @@ test('平台筛选：空分类显示空态并禁用全部启动，不发无目�
   });
   (w.document.querySelector('[data-rail-platform="wechat_channels"]') as HTMLButtonElement).click();
   await tick();
+  assert.equal(w.document.querySelector('#env-rail')!.classList.contains('empty-roster'), false, '局部筛选空不是首次零环境');
   assert.equal(w.document.querySelectorAll('.rail-row').length, 0);
   assert.match(w.document.querySelector('.rail-filter-empty')!.textContent!, /暂无视频号环境/);
   const startAll = w.document.querySelector('#rail-start-all') as HTMLButtonElement;
@@ -1444,6 +1454,8 @@ test('环境栏「管理」打开环境管理；设置抽屉已精简', async ()
   assert.equal(panel.getAttribute('aria-label'), '环境管理');
   assert.equal(w.document.querySelector('#env-tab-join')!.textContent!.trim(), '环境');
   assert.equal(w.document.querySelector('#env-tab-create')!.textContent!.trim(), '新建环境');
+  assert.equal(w.document.querySelector('#env-tab-join')!.getAttribute('role'), 'tab');
+  assert.equal(w.document.querySelector('#env-tab-join')!.getAttribute('aria-selected'), 'true', '有环境时管理入口默认打开环境列表');
   assert.equal(panel.classList.contains('hidden'), false, '打开必须移除 hidden（.hidden 是 !important，否则只见遮罩不见内容）');
   // 环境列表与人设向导都在左栏浮层里，不在设置抽屉 #drawer 里
   const drawer = w.document.querySelector('#drawer')!;
@@ -1451,6 +1463,81 @@ test('环境栏「管理」打开环境管理；设置抽屉已精简', async ()
   assert.equal(drawer.contains(w.document.querySelector('#persona-wizard-body')), false, '人设向导不在设置抽屉');
   // 人设向导在人设浮层里
   assert.equal(w.document.querySelector('#persona-pop')!.contains(w.document.querySelector('#persona-wizard-body')), true);
+});
+
+test('新建环境：平台卡片驱动既有平台真源，代理详细字段默认折叠且可按需展开', async () => {
+  const { w } = await boot();
+  (w.document.querySelector('#env-tab-create') as HTMLButtonElement).click();
+  const platform = w.document.querySelector('#ads-platform') as HTMLSelectElement;
+  const facebook = w.document.querySelector('[data-create-platform="facebook"]') as HTMLButtonElement;
+  assert.equal(platform.value, 'xiaohongshu');
+  assert.equal(w.document.querySelector('[data-create-platform="xiaohongshu"]')!.getAttribute('aria-checked'), 'true');
+  facebook.click();
+  assert.equal(platform.value, 'facebook', '视觉卡片只写回既有 #ads-platform 真源');
+  assert.equal(facebook.getAttribute('aria-checked'), 'true');
+  assert.equal(w.document.querySelector('#ads-fb-create-mode-field')!.classList.contains('hidden'), false, 'FB 才展示创建方式');
+  const proxyConfig = w.document.querySelector('#ads-proxy-config')!;
+  const proxyToggle = w.document.querySelector('#ads-proxy-toggle') as HTMLButtonElement;
+  assert.equal(proxyConfig.classList.contains('hidden'), true, '首次主路径不常驻空代理字段');
+  proxyToggle.click();
+  assert.equal(proxyConfig.classList.contains('hidden'), false);
+  assert.equal(proxyToggle.getAttribute('aria-expanded'), 'true');
+});
+
+test('新建环境：创建中锁住切页与关闭，失败后保留输入和错误', async () => {
+  let settle: ((value: unknown) => void) | undefined;
+  const pending = new Promise((resolve) => { settle = resolve; });
+  const { w } = await boot({
+    fleetGet: async () => ({ provider: 'adspower', selectedEnvId: null, railCollapsed: true, environments: [] }),
+    getStatus: async () => makeStatus({ edge: 'stopped', session: 'idle' }),
+    adsStatus: async () => ({ ok: true }),
+    adsCreateEnv: async () => pending,
+    adsTemplates: async () => [{ key: 'windows', label: 'Windows' }],
+  }, { environments: [], adsProfileId: '', adsProfileName: '' });
+  (w.document.querySelector('.rail-empty') as HTMLButtonElement).click();
+  await tick();
+  const template = w.document.querySelector('#ads-template') as HTMLSelectElement;
+  template.value = 'windows';
+  const create = w.document.querySelector('#ads-create') as HTMLButtonElement;
+  create.click();
+  await tick();
+  const panel = w.document.querySelector('#env-add-panel')!;
+  assert.equal(panel.classList.contains('is-creating'), true);
+  assert.equal(create.disabled, true);
+  assert.match(create.textContent || '', /正在创建/);
+  assert.equal((w.document.querySelector('#env-tab-join') as HTMLButtonElement).disabled, true);
+  (w.document.querySelector('#env-add-mask') as HTMLElement).click();
+  assert.equal(panel.classList.contains('open'), true, '不可取消请求在途时遮罩不得丢失上下文');
+  settle?.({ ok: false, error: '本地环境服务暂不可用' });
+  await tick();
+  await tick();
+  assert.equal(panel.classList.contains('is-creating'), false);
+  assert.equal(template.value, 'windows', '失败保留用户输入');
+  assert.match(w.document.querySelector('#ads-create-msg')!.textContent || '', /创建失败.*本地环境服务暂不可用/);
+  assert.equal(w.document.querySelector('#env-tab-create')!.classList.contains('active'), true, '失败不切走创建页');
+});
+
+test('新建环境：单个创建成功并进入花名册后切回环境列表，提示真实离线边界', async () => {
+  const { w } = await boot({
+    fleetGet: async () => ({ provider: 'adspower', selectedEnvId: null, railCollapsed: true, environments: [] }),
+    getStatus: async () => makeStatus({ edge: 'stopped', session: 'idle' }),
+    adsStatus: async () => ({ ok: true }),
+    adsCreateEnv: async () => ({ ok: true, userId: 'new-1', name: '新环境', platform: 'xiaohongshu', osFamily: 'Windows', createdCount: 1 }),
+    adsListProfiles: async () => ({ ok: true, profiles: [{ userId: 'new-1', name: '新环境', serialNumber: '1', groupName: '', proxy: '', platform: 'xiaohongshu' }] }),
+    adsTemplates: async () => [{ key: 'windows', label: 'Windows' }],
+  }, { environments: [], adsProfileId: '', adsProfileName: '' });
+  (w.document.querySelector('.rail-empty') as HTMLButtonElement).click();
+  await tick();
+  const template = w.document.querySelector('#ads-template') as HTMLSelectElement;
+  template.value = 'windows';
+  (w.document.querySelector('#ads-create') as HTMLButtonElement).click();
+  await tick();
+  await tick();
+  await tick();
+  assert.equal(w.document.querySelector('#env-tab-join')!.classList.contains('active'), true);
+  assert.equal(w.document.querySelector('#env-tab-join-body')!.classList.contains('hidden'), false);
+  assert.match(w.document.querySelector('#ads-env-msg')!.textContent || '', /已创建并加入环境栏.*离线/);
+  assert.match(w.document.querySelector('#ads-env-list')!.textContent || '', /新环境/);
 });
 
 test('环境管理：默认无复选框，批量代理按勾选顺序冻结目标并去密预览', async () => {
@@ -2146,6 +2233,22 @@ test('环境栏定高：有高度上限，环境多了只在列表区滚（不�
   // min-height:0 是红线：列表宁可被压到 0，也绝不能把栏尾挤到 sticky 栏的底边以下——
   // 那片区域滚多少页都够不着（「全部启动」「引导处理」永久失联）。
   assert.ok(['0', '0px'].includes(listCs.minHeight), '列表须 min-height:0，否则不收缩、滚不起来，且会把栏尾顶出视口');
+});
+
+test('首次空态样式：隐藏无意义筛选、汇总和批量运行区，但保留创建入口', () => {
+  const w = cssWindow();
+  const d = w.document;
+  const rail = d.querySelector('#env-rail') as HTMLElement;
+  rail.classList.remove('collapsed', 'hidden');
+  rail.classList.add('expanded', 'empty-roster');
+  d.querySelector('#rail-sum')!.classList.remove('hidden');
+  assert.equal(w.getComputedStyle(d.querySelector('#rail-platform-filter') as HTMLElement).display, 'none');
+  assert.equal(w.getComputedStyle(d.querySelector('#rail-sum') as HTMLElement).display, 'none');
+  assert.equal(w.getComputedStyle(d.querySelector('.rail-foot') as HTMLElement).display, 'none');
+  const empty = d.createElement('button');
+  empty.className = 'rail-empty';
+  d.querySelector('#rail-list')!.appendChild(empty);
+  assert.notEqual(w.getComputedStyle(empty).display, 'none', '创建占位卡仍可见');
 });
 
 test('环境栏结构：只有环境列表是滚动容器，栏头与栏尾不落进去（永远够得着）', async () => {

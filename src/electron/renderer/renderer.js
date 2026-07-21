@@ -204,6 +204,7 @@ const fields = {
   envTabCreate: document.querySelector('#env-tab-create'),
   envTabJoinBody: document.querySelector('#env-tab-join-body'),
   envTabCreateBody: document.querySelector('#env-tab-create-body'),
+  envCreateCancel: document.querySelector('#env-create-cancel'),
   adsBatchProxyToggle: document.querySelector('#ads-batch-proxy-toggle'),
   adsBatchProxyPanel: document.querySelector('#ads-batch-proxy-panel'),
   adsBatchProxyCount: document.querySelector('#ads-batch-proxy-count'),
@@ -315,8 +316,11 @@ const settingsUi = {
   adsEnvMsg: document.querySelector('#ads-env-msg'),
   adsCreate: document.querySelector('#ads-create'),
   adsTemplate: document.querySelector('#ads-template'),
+  adsTemplateField: document.querySelector('#ads-template-field'),
   adsPlatform: document.querySelector('#ads-platform'),
+  adsPlatformButtons: Array.from(document.querySelectorAll('[data-create-platform]')),
   adsFbCreateMode: document.querySelector('#ads-fb-create-mode'),
+  adsFbCreateModeField: document.querySelector('#ads-fb-create-mode-field'),
   adsFbImportWrap: document.querySelector('#ads-fb-import-wrap'),
   adsFbImport: document.querySelector('#ads-fb-import'),
   adsFbImportRequirement: document.querySelector('#ads-fb-import-requirement'),
@@ -324,6 +328,9 @@ const settingsUi = {
   adsCreateMsg: document.querySelector('#ads-create-msg'),
   // 新建环境的可选代理区块（edge-client-proxy-platform-persona-ux）
   adsProxyType: document.querySelector('#ads-proxy-type'),
+  adsProxyToggle: document.querySelector('#ads-proxy-toggle'),
+  adsProxyConfig: document.querySelector('#ads-proxy-config'),
+  adsProxySummary: document.querySelector('#ads-proxy-summary'),
   adsProxyDetail: document.querySelector('#ads-proxy-detail'),
   adsProxyHost: document.querySelector('#ads-proxy-host'),
   adsProxyPort: document.querySelector('#ads-proxy-port'),
@@ -455,6 +462,7 @@ let batchProxyPreviewEpoch = 0;
 let batchProxyRequestSequence = 0;
 let batchProxyActiveRequest = null;
 let proxyQuickParseEpoch = 0;
+let environmentCreateInFlight = false;
 function normalizeRosterList(list) {
   const out = [];
   const seen = new Set();
@@ -492,8 +500,10 @@ function updateFacebookImportVisibility() {
   const facebook = normPlatform(settingsUi.adsPlatform && settingsUi.adsPlatform.value) === 'facebook';
   if (!facebook && settingsUi.adsFbCreateMode) settingsUi.adsFbCreateMode.value = 'single';
   const batch = facebook && settingsUi.adsFbCreateMode && settingsUi.adsFbCreateMode.value === 'batch';
+  settingsUi.adsFbCreateModeField?.classList.toggle('hidden', !facebook);
   settingsUi.adsFbCreateMode?.classList.toggle('hidden', !facebook);
   settingsUi.adsFbImportWrap?.classList.toggle('hidden', !facebook);
+  settingsUi.adsTemplateField?.classList.toggle('hidden', Boolean(batch));
   settingsUi.adsTemplate?.classList.toggle('hidden', Boolean(batch));
   settingsUi.adsFbBatchAccountHelp?.classList.toggle('hidden', !batch);
   settingsUi.adsSingleProxyHelp?.classList.toggle('hidden', Boolean(batch));
@@ -504,10 +514,63 @@ function updateFacebookImportVisibility() {
     settingsUi.adsFbImportRequirement.classList.toggle('opt', !batch);
   }
   if (settingsUi.adsFbImport) settingsUi.adsFbImport.rows = batch ? 7 : 4;
-  if (settingsUi.adsCreate) settingsUi.adsCreate.textContent = batch ? '批量创建' : '创建环境';
   const noProxy = !settingsUi.adsProxyType || settingsUi.adsProxyType.value === 'no_proxy';
   settingsUi.adsProxyDetail?.classList.toggle('hidden', Boolean(batch) || noProxy);
   settingsUi.adsProxyBatchWrap?.classList.toggle('hidden', !batch || noProxy);
+  syncCreatePlatformCards();
+  syncCreateProxySummary();
+  syncCreateButtonLabel();
+}
+
+function syncCreatePlatformCards() {
+  const selected = normPlatform(settingsUi.adsPlatform && settingsUi.adsPlatform.value);
+  for (const button of settingsUi.adsPlatformButtons || []) {
+    const active = button.dataset.createPlatform === selected;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-checked', active ? 'true' : 'false');
+    button.tabIndex = active ? 0 : -1;
+  }
+}
+
+function setCreateProxyExpanded(expanded) {
+  if (!settingsUi.adsProxyConfig || !settingsUi.adsProxyToggle) return;
+  settingsUi.adsProxyConfig.classList.toggle('hidden', !expanded);
+  settingsUi.adsProxyToggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  const action = settingsUi.adsProxyToggle.querySelector('.create-proxy-action');
+  if (action) action.textContent = expanded ? '收起⌃' : '配置 ›';
+}
+
+function syncCreateProxySummary() {
+  if (!settingsUi.adsProxySummary) return;
+  const type = settingsUi.adsProxyType ? settingsUi.adsProxyType.value : 'no_proxy';
+  const labels = { http: 'HTTP', https: 'HTTPS', socks5: 'SOCKS5' };
+  settingsUi.adsProxySummary.textContent = type === 'no_proxy'
+    ? '默认无代理；创建后也可以在环境列表中配置'
+    : `已选择 ${labels[type] || type} 代理；请在下方填写连接信息`;
+}
+
+function createUsesBatchMode() {
+  return normPlatform(settingsUi.adsPlatform && settingsUi.adsPlatform.value) === 'facebook'
+    && settingsUi.adsFbCreateMode && settingsUi.adsFbCreateMode.value === 'batch';
+}
+
+function syncCreateButtonLabel() {
+  if (!settingsUi.adsCreate) return;
+  const batch = createUsesBatchMode();
+  settingsUi.adsCreate.textContent = environmentCreateInFlight
+    ? batch ? '正在批量创建…' : '正在创建…'
+    : batch ? '批量创建' : '创建环境';
+}
+
+function setEnvironmentCreateBusy(busy) {
+  environmentCreateInFlight = Boolean(busy);
+  fields.envAddPanel?.classList.toggle('is-creating', environmentCreateInFlight);
+  if (fields.envAddClose) fields.envAddClose.disabled = environmentCreateInFlight;
+  if (fields.envTabJoin) fields.envTabJoin.disabled = environmentCreateInFlight;
+  if (fields.envTabCreate) fields.envTabCreate.disabled = environmentCreateInFlight;
+  if (fields.envCreateCancel) fields.envCreateCancel.disabled = environmentCreateInFlight;
+  if (settingsUi.adsCreate) settingsUi.adsCreate.disabled = environmentCreateInFlight;
+  syncCreateButtonLabel();
 }
 const LOG_RETENTION_MS = 2 * 60 * 1000; // 开发者详情原始日志保留 2 分钟
 let quotaDetailsOpen = false;
@@ -3661,26 +3724,37 @@ function openEnvAddPanel(tab) {
 }
 function closeEnvAddPanel() {
   if (!fields.envAddPanel) return;
+  if (environmentCreateInFlight) {
+    setCreateMsg('正在创建环境，请勿关闭客户端…', false);
+    return;
+  }
   exitBatchProxyMode({ clearText: true });
   fields.envAddPanel.classList.remove('open');
   fields.envAddPanel.classList.add('hidden');
   fields.envAddPanel.setAttribute('aria-hidden', 'true');
   fields.envAddMask?.classList.add('hidden');
 }
-function switchEnvTab(tab) {
+function switchEnvTab(tab, force) {
+  if (environmentCreateInFlight && force !== true) return;
   const join = tab !== 'create';
   if (!join && batchProxyMode) exitBatchProxyMode({ clearText: true });
   fields.envTabJoin?.classList.toggle('active', join);
   fields.envTabCreate?.classList.toggle('active', !join);
+  fields.envTabJoin?.setAttribute('aria-selected', join ? 'true' : 'false');
+  fields.envTabCreate?.setAttribute('aria-selected', join ? 'false' : 'true');
   fields.envTabJoinBody?.classList.toggle('hidden', !join);
   fields.envTabCreateBody?.classList.toggle('hidden', join);
 }
-fields.railAdd?.addEventListener('click', () => openEnvAddPanel('join'));
+function defaultEnvironmentManagementTab() {
+  return railEnvList().length === 0 ? 'create' : 'join';
+}
+fields.railAdd?.addEventListener('click', () => openEnvAddPanel(defaultEnvironmentManagementTab()));
 fields.railFootAdd?.addEventListener('click', () => openEnvAddPanel('join'));
 fields.envAddClose?.addEventListener('click', closeEnvAddPanel);
 fields.envAddMask?.addEventListener('click', closeEnvAddPanel);
 fields.envTabJoin?.addEventListener('click', () => switchEnvTab('join'));
 fields.envTabCreate?.addEventListener('click', () => switchEnvTab('create'));
+fields.envCreateCancel?.addEventListener('click', closeEnvAddPanel);
 // 待配置引导直达环境管理（不再去设置抽屉）。
 fields.noticeAction.addEventListener('click', () => openEnvAddPanel('join'));
 
@@ -4140,6 +4214,7 @@ function renderRail() {
   // 打断 1.6s 脉冲动画（视觉抖动）、把行焦点甩回 <body>、并吞掉跨 tick 的点击手势。
   const sig = JSON.stringify({
     show,
+    rosterEmpty,
     empty,
     collapsed,
     selected: fleetView.selected,
@@ -4158,6 +4233,7 @@ function renderRail() {
   fleetView.lastRailSig = sig;
   fields.envRail.classList.toggle('collapsed', collapsed);
   fields.envRail.classList.toggle('expanded', !collapsed);
+  fields.envRail.classList.toggle('empty-roster', rosterEmpty);
   if (fields.railToggle) {
     // 箭头是内联 SVG（默认朝左=收起方向）；收起态水平翻转指向展开方向，不再切字符。
     fields.railToggle.classList.toggle('flip', collapsed);
@@ -4205,12 +4281,12 @@ function renderRail() {
   fleetView.lastRailSel = fleetView.selected;
   fields.railList.innerHTML = '';
   if (rosterEmpty) {
-    // 空名册空态：直接给一个「添加第一个环境」按钮（点开加入 / 新建面板），别让用户找那个小「＋」。
+    // 空名册空态：这是创建按钮，不是假环境；不挂 envId / 平台头像 / 状态点，也不冒充离线行。
     const cta = document.createElement('button');
     cta.type = 'button';
     cta.className = 'rail-empty';
-    cta.textContent = '＋ 添加第一个环境';
-    cta.addEventListener('click', () => openEnvAddPanel('join'));
+    cta.innerHTML = '<span class="rail-empty-icon" aria-hidden="true">＋</span><span class="rail-empty-title">创建第一个运行环境</span><span class="rail-empty-copy">创建后可在这里切换账号并查看真实运行状态</span>';
+    cta.addEventListener('click', () => openEnvAddPanel('create'));
     fields.railList.appendChild(cta);
     return; // 空态无可滚内容，滚动位天然为 0
   }
@@ -5973,6 +6049,27 @@ populateTemplates();
 updateFacebookImportVisibility();
 if (settingsUi.adsPlatform) settingsUi.adsPlatform.addEventListener('change', updateFacebookImportVisibility);
 if (settingsUi.adsFbCreateMode) settingsUi.adsFbCreateMode.addEventListener('change', updateFacebookImportVisibility);
+for (const button of settingsUi.adsPlatformButtons || []) {
+  button.addEventListener('click', () => {
+    if (environmentCreateInFlight || !settingsUi.adsPlatform) return;
+    settingsUi.adsPlatform.value = button.dataset.createPlatform || 'xiaohongshu';
+    settingsUi.adsPlatform.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  button.addEventListener('keydown', (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault();
+    const buttons = settingsUi.adsPlatformButtons || [];
+    const index = buttons.indexOf(button);
+    const delta = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
+    const next = buttons[(index + delta + buttons.length) % buttons.length];
+    next?.click();
+    next?.focus();
+  });
+}
+settingsUi.adsProxyToggle?.addEventListener('click', () => {
+  if (environmentCreateInFlight) return;
+  setCreateProxyExpanded(settingsUi.adsProxyToggle.getAttribute('aria-expanded') !== 'true');
+});
 
 // ── 代理表单（edge-client-proxy-platform-persona-ux）：新建可选区块 + 已有环境编辑浮层共用读值/校验 ──
 // 主校验在主进程归一层（ads-proxy-config），前端只做「选了类型必须填 host/port」的即时反馈。
@@ -6003,9 +6100,11 @@ function resetCreateProxyForm() {
   if (createProxyUi.type) createProxyUi.type.value = 'no_proxy';
   for (const k of ['host', 'port', 'user', 'pass']) if (createProxyUi[k]) createProxyUi[k].value = '';
   if (settingsUi.adsProxyBatch) settingsUi.adsProxyBatch.value = '';
+  setCreateProxyExpanded(false);
   updateFacebookImportVisibility();
 }
 settingsUi.adsProxyType?.addEventListener('change', () => {
+  if (settingsUi.adsProxyType.value !== 'no_proxy') setCreateProxyExpanded(true);
   updateFacebookImportVisibility();
 });
 
@@ -6035,7 +6134,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
     return setCreateMsg('已选择代理类型，请至少粘贴一条代理资料。', true);
   }
   const withProxy = proxyType !== 'no_proxy';
-  settingsUi.adsCreate.disabled = true;
+  setEnvironmentCreateBusy(true);
   const batchCount = facebookAccountImport.split(/\r?\n/).filter((line) => line.trim()).length;
   setCreateMsg(batch ? `正在批量创建 ${batchCount} 个环境，请勿关闭客户端…` : '正在创建环境…', false);
   try {
@@ -6092,6 +6191,12 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       );
       resetCreateProxyForm();
       await refreshEnvs();
+      if (!batch && r.userId && rosterHas(r.userId)) {
+        const createdProfile = lastProfiles.find((profile) => profile && profile.userId === r.userId);
+        const createdName = r.name || (createdProfile && createdProfile.name) || r.userId;
+        setEnvMsg(`已选中「${createdName}」。环境已创建并加入环境栏，未启动前显示为离线。`, false);
+        switchEnvTab('join', true);
+      }
     } else {
       const extra = r && r.violations && r.violations.length ? '（' + r.violations.join('；') + '）' : '';
       const createdCount = Number(r && (r.createdCount || (Array.isArray(r.created) ? r.created.length : 0)) || 0);
@@ -6099,8 +6204,10 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       setCreateMsg(`${prefix}：${(r && r.error) || '未知错误'}${extra}。`, true);
       if (createdCount > 0) await refreshEnvs();
     }
+  } catch (error) {
+    setCreateMsg(`创建失败：${(error && error.message) || error || '未知错误'}。`, true);
   } finally {
-    settingsUi.adsCreate.disabled = false;
+    setEnvironmentCreateBusy(false);
   }
 });
 

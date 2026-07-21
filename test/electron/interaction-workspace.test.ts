@@ -1593,7 +1593,7 @@ test('双列主从布局：不默认选中或预取，右列显示选择提示�
   assert.equal(detail.hasAttribute('hidden'), false, '双列布局右侧详情列必须常驻');
   assert.match(detail.textContent || '', /选择一条互动查看详情/);
   assert.equal(calls.detail.length, 0, '没点开就不该请求详情');
-  assert.equal(window.document.querySelectorAll('[aria-selected="true"]').length, 0);
+  assert.equal($(window, '#interaction-workspace').querySelectorAll('[aria-selected="true"]').length, 0);
 
   const list = $(window, '#iw-list');
   list.scrollTop = 42;
@@ -1625,7 +1625,7 @@ test('关闭图标与 Esc 都回到列表级并清空选中；列表只呈现摘
   await flush();
   assert.equal($(window, '#iw-detail').hasAttribute('hidden'), false, 'Esc 后右侧详情列仍应保留');
   assert.match($(window, '#iw-detail').textContent || '', /选择一条互动查看详情/);
-  assert.equal(window.document.querySelectorAll('[aria-selected="true"]').length, 0, 'Esc 后不应残留选中');
+  assert.equal($(window, '#interaction-workspace').querySelectorAll('[aria-selected="true"]').length, 0, 'Esc 后不应残留选中');
 
   // 列表只呈现摘要：昵称/时间/来源在，消息正文只在详情级
   const list = $(window, '#iw-list');

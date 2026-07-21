@@ -717,17 +717,20 @@
     <!-- ═══ 环境管理：环境列表承载加入/移出/代理等日常动作，新建环境保持独立页。 ═══ -->
     <div id="env-add-mask" class="pop-mask hidden"></div>
     <aside id="env-add-panel" class="env-add-panel hidden" aria-hidden="true" aria-label="环境管理">
-      <div class="pop-head">
-        <span>环境管理</span>
+      <div class="pop-head env-add-head">
+        <span class="env-add-heading">
+          <strong>环境管理</strong>
+          <small>添加已有环境，或创建新的独立浏览器环境</small>
+        </span>
         <button id="env-add-close" class="drawer-x nodrag" type="button" aria-label="关闭">×</button>
       </div>
-      <div class="env-add-tabs">
-        <button id="env-tab-join" class="env-add-tab active" type="button" data-tab="join">环境</button>
-        <button id="env-tab-create" class="env-add-tab" type="button" data-tab="create">新建环境</button>
+      <div class="env-add-tabs" role="tablist" aria-label="环境管理页面">
+        <button id="env-tab-join" class="env-add-tab active" type="button" role="tab" aria-selected="true" aria-controls="env-tab-join-body" data-tab="join">环境</button>
+        <button id="env-tab-create" class="env-add-tab" type="button" role="tab" aria-selected="false" aria-controls="env-tab-create-body" data-tab="create">新建环境</button>
       </div>
 
       <!-- 环境列表：普通态无复选框；显式点击批量代理后才进入临时多选。 -->
-      <div id="env-tab-join-body" class="env-add-body">
+      <div id="env-tab-join-body" class="env-add-body" role="tabpanel" aria-labelledby="env-tab-join">
         <div class="ads-env-head">
           <span class="field-label">环境列表</span>
           <span class="ads-env-head-actions">
@@ -787,53 +790,103 @@
       </div>
 
       <!-- 新建环境：程序化建一个指纹环境（代理可选：填了随建号下发，不填默认 no_proxy） -->
-      <div id="env-tab-create-body" class="env-add-body hidden">
-        <div class="ads-create-row">
-          <select id="ads-platform" class="ads-template" aria-label="平台">
+      <div id="env-tab-create-body" class="env-add-body env-create-body hidden" role="tabpanel" aria-labelledby="env-tab-create">
+        <div class="env-create-form">
+          <section class="env-create-section" aria-labelledby="create-platform-title">
+            <div class="env-create-section-head">
+              <strong id="create-platform-title">选择平台</strong>
+              <span>创建后仍可在环境列表中查看平台信息</span>
+            </div>
+            <div id="create-platform-options" class="create-platform-options" role="radiogroup" aria-label="选择平台">
+              <button class="create-platform-card active" type="button" role="radio" aria-checked="true" data-create-platform="xiaohongshu">
+                <span class="create-platform-icon plat-xhs">小红书</span>
+                <span class="create-platform-copy"><strong>小红书</strong><small>独立指纹环境</small></span>
+                <span class="create-platform-check" aria-hidden="true">✓</span>
+              </button>
+              <button class="create-platform-card" type="button" role="radio" aria-checked="false" data-create-platform="facebook">
+                <span class="create-platform-icon plat-facebook">f</span>
+                <span class="create-platform-copy"><strong>Facebook</strong><small>支持单个与批量</small></span>
+                <span class="create-platform-check" aria-hidden="true">✓</span>
+              </button>
+              <button class="create-platform-card" type="button" role="radio" aria-checked="false" data-create-platform="wechat_channels">
+                <span class="create-platform-icon plat-wechat_channels">视频号</span>
+                <span class="create-platform-copy"><strong>视频号</strong><small>独立指纹环境</small></span>
+                <span class="create-platform-check" aria-hidden="true">✓</span>
+              </button>
+            </div>
+            <select id="ads-platform" class="hidden" aria-hidden="true" tabindex="-1">
             <option value="xiaohongshu">小红书</option>
             <option value="facebook">Facebook</option>
             <option value="wechat_channels">视频号</option>
-          </select>
-          <select id="ads-fb-create-mode" class="ads-template hidden" aria-label="Facebook 创建方式">
-            <option value="single">单个新建</option>
-            <option value="batch">批量新建</option>
-          </select>
-          <select id="ads-template" class="ads-template" aria-label="操作系统"></select>
+            </select>
+          </section>
+
+          <div class="env-create-fields">
+            <label id="ads-fb-create-mode-field" class="create-field hidden">
+              <span>创建方式</span>
+              <select id="ads-fb-create-mode" class="ads-template" aria-label="Facebook 创建方式">
+                <option value="single">单个新建</option>
+                <option value="batch">批量新建</option>
+              </select>
+            </label>
+            <label id="ads-template-field" class="create-field">
+              <span>浏览器系统</span>
+              <select id="ads-template" class="ads-template" aria-label="操作系统"></select>
+            </label>
+          </div>
+
+          <label id="ads-fb-import-wrap" class="field ads-fb-import hidden">
+            <span class="field-label">Facebook 账号资料 <em id="ads-fb-import-requirement" class="opt">可选</em></span>
+            <textarea id="ads-fb-import" rows="5" spellcheck="false" autocomplete="off" placeholder="每行自动识别一种受支持格式：&#10;email----password----2FA----cookie&#10;uid|password|cookie|access_token|email|timestamp&#10;uid|password|2FA|email|cookie|access_token"></textarea>
+            <span id="ads-fb-account-format-help" class="subtle">自动识别以上三种常见格式；未知或有歧义的格式会拒绝，不会猜测字段。Access Token 与时间仅用于识别边界，不会导入或保存。Facebook 单个、批量新建环境均默认开启慢启动；它只收紧每日操作额度，不改变操作速度。</span>
+            <span id="ads-fb-batch-account-help" class="subtle hidden">每行一个账号；每个账号将独立随机分配操作系统，其余指纹由 AdsPower 生成。</span>
+          </label>
+
+          <section class="create-proxy-card" aria-labelledby="ads-proxy-toggle">
+            <button id="ads-proxy-toggle" class="create-proxy-toggle" type="button" aria-expanded="false" aria-controls="ads-proxy-config">
+              <span class="create-proxy-plus" aria-hidden="true">＋</span>
+              <span class="create-proxy-copy"><strong>代理设置 <em>可选</em></strong><small id="ads-proxy-summary">默认无代理；创建后也可以在环境列表中配置</small></span>
+              <span class="create-proxy-action">配置 ›</span>
+            </button>
+            <div id="ads-proxy-config" class="proxy-form create-proxy-config hidden">
+              <div class="proxy-row">
+                <span class="field-label">代理类型</span>
+                <select id="ads-proxy-type" class="ads-template proxy-type" aria-label="代理类型">
+                  <option value="no_proxy">无代理</option>
+                  <option value="http">HTTP</option>
+                  <option value="https">HTTPS</option>
+                  <option value="socks5">SOCKS5</option>
+                </select>
+              </div>
+              <div id="ads-proxy-detail" class="proxy-detail hidden">
+                <div class="proxy-grid">
+                  <input id="ads-proxy-host" type="text" placeholder="代理地址（IP / 域名）" autocomplete="off" />
+                  <input id="ads-proxy-port" type="text" placeholder="端口" inputmode="numeric" autocomplete="off" />
+                  <input id="ads-proxy-user" type="text" placeholder="用户名（可选）" autocomplete="off" />
+                  <input id="ads-proxy-pass" type="password" placeholder="密码（可选）" autocomplete="new-password" />
+                </div>
+              </div>
+              <label id="ads-proxy-batch-wrap" class="field ads-proxy-batch hidden">
+                <span class="field-label">批量代理资料 <em class="req">必填</em></span>
+                <textarea id="ads-proxy-batch" rows="5" spellcheck="false" autocomplete="off" placeholder="一行一个代理，直接整批粘贴：&#10;1.2.3.4:8000&#10;proxy.example:8080:user:password&#10;proxy.example----8080----user----password"></textarea>
+                <span class="subtle">支持一次粘贴多行代理；每行分给一个账号，代理数量少于账号数时按粘贴顺序循环使用。全部使用上方选定的同一代理类型。</span>
+              </label>
+              <p id="ads-single-proxy-help" class="subtle">选择代理类型后填写连接信息；创建后仍可在“环境”列表中修改。</p>
+              <p id="ads-batch-proxy-help" class="subtle hidden">选择“无代理”会为本批全部账号创建无代理环境；选择 HTTP / HTTPS / SOCKS5 后，在「批量代理资料」里多行粘贴即可批量添加代理。</p>
+            </div>
+          </section>
+
+          <div class="env-create-truth-note">
+            <span aria-hidden="true">i</span>
+            <p>创建成功后会自动加入左侧环境栏，并如实显示为“离线”。<br />启动并登录后，才会进入可运行状态。</p>
+          </div>
+          <span id="ads-create-msg" class="ads-env-msg create-result" aria-live="polite"></span>
+        </div>
+
+        <div class="env-create-actions">
+          <button id="env-create-cancel" class="env-create-cancel" type="button">取消</button>
           <button id="ads-create" class="ads-create-btn" type="button">创建环境</button>
         </div>
-        <label id="ads-fb-import-wrap" class="field ads-fb-import hidden">
-          <span class="field-label">Facebook 账号资料 <em id="ads-fb-import-requirement" class="opt">可选</em></span>
-          <textarea id="ads-fb-import" rows="5" spellcheck="false" autocomplete="off" placeholder="每行自动识别一种受支持格式：&#10;email----password----2FA----cookie&#10;uid|password|cookie|access_token|email|timestamp&#10;uid|password|2FA|email|cookie|access_token"></textarea>
-          <span id="ads-fb-account-format-help" class="subtle">自动识别以上三种常见格式；未知或有歧义的格式会拒绝，不会猜测字段。Access Token 与时间仅用于识别边界，不会导入或保存。Facebook 单个、批量新建环境均默认开启慢启动；它只收紧每日操作额度，不改变操作速度。</span>
-          <span id="ads-fb-batch-account-help" class="subtle hidden">每行一个账号；每个账号将独立随机分配操作系统，其余指纹由 AdsPower 生成。</span>
-        </label>
-        <div class="proxy-form">
-          <div class="proxy-row">
-            <span class="field-label">代理 <em class="opt">可选</em></span>
-            <select id="ads-proxy-type" class="ads-template proxy-type" aria-label="代理类型">
-              <option value="no_proxy">无代理</option>
-              <option value="http">HTTP</option>
-              <option value="https">HTTPS</option>
-              <option value="socks5">SOCKS5</option>
-            </select>
-          </div>
-          <div id="ads-proxy-detail" class="proxy-detail hidden">
-            <div class="proxy-grid">
-              <input id="ads-proxy-host" type="text" placeholder="代理地址（IP / 域名）" autocomplete="off" />
-              <input id="ads-proxy-port" type="text" placeholder="端口" inputmode="numeric" autocomplete="off" />
-              <input id="ads-proxy-user" type="text" placeholder="用户名（可选）" autocomplete="off" />
-              <input id="ads-proxy-pass" type="password" placeholder="密码（可选）" autocomplete="new-password" />
-            </div>
-          </div>
-          <label id="ads-proxy-batch-wrap" class="field ads-proxy-batch hidden">
-            <span class="field-label">批量代理资料 <em class="req">必填</em></span>
-            <textarea id="ads-proxy-batch" rows="5" spellcheck="false" autocomplete="off" placeholder="一行一个代理，直接整批粘贴：&#10;1.2.3.4:8000&#10;proxy.example:8080:user:password&#10;proxy.example----8080----user----password"></textarea>
-            <span class="subtle">支持一次粘贴多行代理；每行分给一个账号，代理数量少于账号数时按粘贴顺序循环使用。全部使用上方选定的同一代理类型。</span>
-          </label>
-        </div>
-        <span id="ads-create-msg" class="ads-env-msg"></span>
-        <p id="ads-single-proxy-help" class="subtle">不填代理则默认为空；之后可在“环境”列表中通过“代理”补配或修改。</p>
-        <p id="ads-batch-proxy-help" class="subtle hidden">选择“无代理”会为本批全部账号创建无代理环境；选择 HTTP / HTTPS / SOCKS5 后，在「批量代理资料」里多行粘贴即可批量添加代理。</p>
       </div>
     </aside>
 
