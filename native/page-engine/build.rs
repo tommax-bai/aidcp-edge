@@ -11,6 +11,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/xhs-page-probe.js");
     println!("cargo:rerun-if-changed=src/xhs-command-router.js");
     println!("cargo:rerun-if-changed=src/xhs-file-input-selector.txt");
+    println!("cargo:rerun-if-changed=src/xhs-search-input-geometry.js");
     println!("cargo:rerun-if-changed=command-manifest.json");
     let command_manifest = fs::read("command-manifest.json").expect("read command manifest");
     let capability_digest = format!("{:x}", Sha256::digest(&command_manifest));
@@ -65,4 +66,23 @@ fn main() {
     let selector_output_path = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"))
         .join("xhs_file_input_selector_bytes.rs");
     fs::write(selector_output_path, selector_output).expect("write encoded native file selector");
+
+    let search_geometry_source = fs::read("src/xhs-search-input-geometry.js")
+        .expect("read native search input geometry source");
+    let search_geometry_encoded: Vec<u8> = search_geometry_source
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .collect();
+    let search_geometry_bytes = search_geometry_encoded
+        .iter()
+        .map(|byte| format!("0x{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let search_geometry_output =
+        format!("pub const XHS_SEARCH_INPUT_GEOMETRY_BYTES: &[u8] = &[{search_geometry_bytes}];\n");
+    let search_geometry_output_path = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"))
+        .join("xhs_search_input_geometry_bytes.rs");
+    fs::write(search_geometry_output_path, search_geometry_output)
+        .expect("write encoded native search input geometry");
 }

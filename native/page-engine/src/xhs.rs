@@ -14,6 +14,10 @@ include!(concat!(
     env!("OUT_DIR"),
     "/xhs_file_input_selector_bytes.rs"
 ));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/xhs_search_input_geometry_bytes.rs"
+));
 
 const ROUTER_KEY: &[u8] = &[
     0x91, 0x2f, 0xc4, 0x6a, 0x5d, 0xe3, 0x18, 0xb7, 0x42, 0x0d, 0xfa,
@@ -39,6 +43,17 @@ pub fn command_expression(command: &NativeCommand) -> Result<String, EngineError
 
 pub fn file_input_selector() -> Result<String, EngineError> {
     let decoded: Vec<u8> = XHS_FILE_INPUT_SELECTOR_BYTES
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])
+        .collect();
+    String::from_utf8(decoded)
+        .map(|value| value.trim().to_owned())
+        .map_err(|_| invalid_result())
+}
+
+pub fn search_input_geometry_expression() -> Result<String, EngineError> {
+    let decoded: Vec<u8> = XHS_SEARCH_INPUT_GEOMETRY_BYTES
         .iter()
         .enumerate()
         .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])

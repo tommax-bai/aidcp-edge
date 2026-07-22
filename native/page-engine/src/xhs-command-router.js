@@ -165,13 +165,21 @@ async function(input){
     click(refresh);await sleep(900);return done(cards());
   }
   if(kind==='search_execute'){
-    const inputEl=first(['input[type="search"]','input[placeholder*="搜索"]','input[placeholder*="search"]']);
-    if(!inputEl)return fail('search','search_input_not_found');
-    dispatchInput(inputEl,norm(p.keyword,512));
-    inputEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
-    inputEl.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
-    await sleep(1500);
-    if(!/\/(search|search_result|search_result_ai)/.test(location.pathname))return ambiguous('search','search_navigation_unconfirmed');
+    const decodeKeyword=(value)=>{let decoded=String(value||'');for(let i=0;i<2;i++){try{const next=decodeURIComponent(decoded);if(next===decoded)break;decoded=next;}catch{break;}}return norm(decoded,512);};
+    const onRequestedResults=()=>{
+      if(!/\/(search|search_result\w*)/.test(location.pathname))return false;
+      const current=new URL(location.href).searchParams.get('keyword')||'';
+      return decodeKeyword(current)===norm(p.keyword,512);
+    };
+    if(!onRequestedResults()){
+      const inputEl=first(['textarea[name="aiSearchTextarea"]','textarea[placeholder*="搜索"]','textarea[placeholder*="search"]','input[type="search"]','input[placeholder*="搜索"]','input[placeholder*="search"]']);
+      if(!inputEl)return fail('search','search_input_not_found');
+      dispatchInput(inputEl,norm(p.keyword,512));
+      inputEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+      inputEl.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+      await sleep(1500);
+      if(!onRequestedResults())return ambiguous('search','search_navigation_unconfirmed');
+    }
     const filters=[p.sort&&{words:{latest:['最新','latest'],most_liked:['最多点赞','点赞最多','most liked'],most_collected:['最多收藏','收藏最多','most collected'],most_commented:['最多评论','评论最多','most commented']}[p.sort]},p.timeWindow&&{words:{one_day:['一天内','24小时','one day'],one_week:['一周内','one week'],half_year:['半年内','half year']}[p.timeWindow]}].filter((item)=>item&&item.words);
     for(const filter of filters){const opener=findByWords(['筛选','filter']);if(!opener)return fail('search','search_filter_control_not_found');click(opener);await sleep(200);const target=findByWords(filter.words);if(!target)return fail('search','search_filter_value_not_found');if(!selected(target))click(target);await sleep(250);if(!selected(target))return ambiguous('search','search_filter_unconfirmed');}
     return done(cards());

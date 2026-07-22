@@ -484,6 +484,7 @@ async fn execute_xhs_command_once(
             }
             evaluate_router(session, command).await
         }
+        SearchExecute(params) => execute_search(session, params, command).await,
         PublishUploadImage(params) => {
             validate_publish_file(&params.path)?;
             let selector = xhs::file_input_selector()?;
@@ -538,6 +539,119 @@ async fn execute_xhs_command_once(
         }
         _ => evaluate_router(session, command).await,
     }
+}
+
+async fn execute_search(
+    session: &mut EngineSession,
+    params: &crate::command::SearchExecuteParams,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let search_input_geometry = xhs::search_input_geometry_expression()?;
+    let geometry = session.cdp.evaluate(&search_input_geometry, false).await?;
+    let Some(x) = geometry
+        .pointer("/result/value/x")
+        .and_then(serde_json::Value::as_f64)
+    else {
+        return Ok(search_receipt(
+            EffectPhase::NotStarted,
+            "search_input_not_found",
+        ));
+    };
+    let Some(y) = geometry
+        .pointer("/result/value/y")
+        .and_then(serde_json::Value::as_f64)
+    else {
+        return Ok(search_receipt(
+            EffectPhase::NotStarted,
+            "search_input_not_found",
+        ));
+    };
+    session
+        .cdp
+        .dispatch_mouse("mouseMoved", x, y, "none", 0)
+        .await?;
+    session
+        .cdp
+        .dispatch_mouse("mousePressed", x, y, "left", 1)
+        .await?;
+    session
+        .cdp
+        .dispatch_mouse("mouseReleased", x, y, "left", 1)
+        .await?;
+    let modifier = if cfg!(target_os = "macos") { 4 } else { 2 };
+    session
+        .cdp
+        .dispatch_key_with_modifiers("keyDown", "a", "KeyA", 65, modifier)
+        .await?;
+    session
+        .cdp
+        .dispatch_key_with_modifiers("keyUp", "a", "KeyA", 65, modifier)
+        .await?;
+    session
+        .cdp
+        .dispatch_key("keyDown", "Backspace", "Backspace", 8)
+        .await?;
+    session
+        .cdp
+        .dispatch_key("keyUp", "Backspace", "Backspace", 8)
+        .await?;
+    session.cdp.insert_text(&params.keyword).await?;
+    let readback = session.cdp.evaluate(
+        "(()=>{const e=document.activeElement;if(!e)return '';return String('value' in e?e.value:e.textContent||'')})()",
+        false,
+    ).await?;
+    if readback
+        .pointer("/result/value")
+        .and_then(serde_json::Value::as_str)
+        != Some(params.keyword.as_str())
+    {
+        return Ok(search_receipt(
+            EffectPhase::NotStarted,
+            "search_input_readback_mismatch",
+        ));
+    }
+    for attempt in 0..2 {
+        session
+            .cdp
+            .dispatch_key_with_text("keyDown", "Enter", "Enter", 13, "\r")
+            .await?;
+        session
+            .cdp
+            .dispatch_key("keyUp", "Enter", "Enter", 13)
+            .await?;
+        if wait_for_page_kind(session, PageKind::Search, Duration::from_secs(3)).await? {
+            let mut latest = evaluate_router(session, command).await?;
+            for _ in 0..12 {
+                if matches!(&latest.1, CommandOutput::PageCards(cards) if !cards.cards.is_empty()) {
+                    return Ok(latest);
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                latest = evaluate_router(session, command).await?;
+            }
+            return Ok(latest);
+        }
+        if attempt == 0 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    Ok(search_receipt(
+        EffectPhase::Ambiguous,
+        "search_navigation_unconfirmed",
+    ))
+}
+
+fn search_receipt(phase: EffectPhase, reason: &str) -> (EffectPhase, CommandOutput) {
+    (
+        phase,
+        CommandOutput::ActionReceipt(ActionReceipt {
+            action: "search".to_owned(),
+            ok: false,
+            reason: Some(reason.to_owned()),
+            note_id: None,
+            observation: None,
+            candidates: Vec::new(),
+        }),
+    )
 }
 
 async fn wait_for_document_ready(

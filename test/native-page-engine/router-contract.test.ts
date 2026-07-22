@@ -46,6 +46,18 @@ test('extracts bounded feed cards without accepting a selector from the caller',
   assert.equal(cards[0]?.likeCount, 12_000);
 });
 
+test('accepts search_result_ai for the requested keyword and reads cards without resubmitting', async () => {
+  install(
+    '<main><section class="note-item"><a href="/explore/searchn1"><span class="title">AI Agent result</span></a></section></main>',
+    'https://www.xiaohongshu.com/search_result_ai?keyword=AI%20Agent%E5%AE%9E%E6%88%98',
+  );
+  const result = await run({ kind: 'search_execute', params: { keyword: 'AI Agent实战' } });
+  assert.equal(result.effectPhase, 'confirmed');
+  assert.equal(result.output.kind, 'page_cards');
+  const cards = result.output.value.cards as Array<Record<string, unknown>>;
+  assert.equal(cards[0]?.noteId, 'searchn1');
+});
+
 test('binds an interaction to the current note and verifies the changed state', async () => {
   const dom = install('<main><div class="note-detail-mask"><button id="like">点赞</button></div></main>', 'https://www.xiaohongshu.com/explore/n1');
   dom.window.document.querySelector('#like')?.addEventListener('click', (event) => {
