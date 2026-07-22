@@ -6,9 +6,14 @@ import {
   waitForPublishApproval,
 } from '../../src/publish/approval-gate.js';
 
+// change publish-approval-signal-to-database：本闸已降级为**必须显式启用**的本机开发夹具。
+// 这些用例验的是夹具自身的判定逻辑，故绕过启用门；「未启用即拒」由 AC-PUB-03 单独守。
+const devFixture = { forceEnabledForTest: true as const };
+
 test('approval gate: approved true resolves and consumes signal', async () => {
   const removed: string[] = [];
   const result = await waitForPublishApproval({
+    ...devFixture,
     requestId: 'req-1',
     signalDir: '/tmp',
     now: () => 0,
@@ -43,6 +48,7 @@ test('approval gate: approved true resolves and consumes signal', async () => {
 
 test('approval gate: approved false rejects explicitly', async () => {
   const result = await waitForPublishApproval({
+    ...devFixture,
     requestId: 'req-2',
     now: () => 0,
     timeoutMs: 5_000,
@@ -66,6 +72,7 @@ test('approval gate: missing signal times out', async () => {
   let nowValue = 0;
   const sleeps: number[] = [];
   const result = await waitForPublishApproval({
+    ...devFixture,
     requestId: 'req-3',
     timeoutMs: 250,
     pollIntervalMs: 100,
@@ -88,6 +95,7 @@ test('approval gate: missing signal times out', async () => {
 
 test('approval gate: invalid signal fails fast', async () => {
   const result = await waitForPublishApproval({
+    ...devFixture,
     requestId: 'req-4',
     timeoutMs: 5_000,
     pollIntervalMs: 100,

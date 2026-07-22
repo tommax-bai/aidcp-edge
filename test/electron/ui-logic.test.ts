@@ -717,6 +717,38 @@ test('发布卡：已通过 → 第四节点平静色 + 明示无需操作', () 
   assert.match(v.foot ?? '', /无需操作/);
 });
 
+// change publish-approval-signal-to-database：已批准但尚未下发是独立可见状态。
+test('发布卡：已批准·待下发 → 与「已确认发布」可区分，带阻塞原因', () => {
+  const v = uiLogic.publishView(
+    {
+      state: 'approved',
+      title: 't',
+      at: new Date().toISOString(),
+      dispatchState: 'blocked',
+      dispatchBlockedReason: 'edge_offline_waiting',
+    },
+    null,
+    Date.now(),
+  );
+  assert.equal(v.head, '已批准，待下发');
+  assert.equal(v.corner, '待下发');
+  assert.match(v.foot ?? '', /客户端核心暂时离线/);
+  assert.match(v.foot ?? '', /无需重新批准/);
+});
+
+test('发布卡：下发态字段缺省 → 与今天逐字一致（旧云端不显示为失败）', () => {
+  const now = Date.now();
+  const withoutFields = uiLogic.publishView({ state: 'approved', title: 't', at: new Date(now).toISOString() }, null, now);
+  const withUnknownState = uiLogic.publishView(
+    { state: 'approved', title: 't', at: new Date(now).toISOString(), dispatchState: 'consumed' },
+    null,
+    now,
+  );
+  assert.equal(withoutFields.head, '已确认发布');
+  assert.deepEqual(withUnknownState.stepStates, withoutFields.stepStates);
+  assert.equal(withUnknownState.foot, withoutFields.foot);
+});
+
 test('Facebook 发布卡：使用单稿四阶段语义，submitted 仍不冒充已发布', () => {
   const now = Date.now();
   const pending = uiLogic.publishView(

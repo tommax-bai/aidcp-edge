@@ -3946,6 +3946,10 @@ async function submitPublishPreviewAction(approved) {
       publish: {
         ...(currentStatus.publish || {}),
         state: nextState,
+        // 授权的下发进度（change publish-approval-signal-to-database）：让稿件卡把「已批准·待下发」
+        // 与「待审批」区分开。旧云端不带这两个字段 → 保持缺省，卡片行为与今天完全一致。
+        dispatchState: typeof result.dispatchState === 'string' ? result.dispatchState : undefined,
+        dispatchBlockedReason: typeof result.dispatchBlockedReason === 'string' ? result.dispatchBlockedReason : undefined,
         title: currentStatus.publish?.title || preview.title,
         at: new Date().toISOString(),
       },

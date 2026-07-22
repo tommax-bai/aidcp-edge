@@ -78,6 +78,8 @@ test('publish-post: approval gate blocks submit before click', async () => {
     {},
     payload,
     {
+      // 夹具自测：绕过显式启用门（生产路径没有本闸的调用者）。
+      forceEnabledForTest: true,
       requestId: 'req-block',
       now: () => 0,
       timeoutMs: 1_000,
@@ -96,4 +98,34 @@ test('publish-post: approval gate blocks submit before click', async () => {
   assert.equal(result.ok, false);
   assert.equal(result.error, '[approval_gate] approval_rejected requestId=req-block');
   assert.ok(!executor.calls.includes('note.publish_submit'));
+});
+
+test('publish-post: 开发夹具未显式启用时闸不放行、提交按钮绝不被点', async () => {
+  const doc = buildDom(html());
+  const executor = new Executor(doc);
+  delete process.env.AIDCP_PUBLISH_APPROVAL_SIGNAL_DIR;
+  delete process.env.AIDCP_DEV_PUBLISH;
+  const result = await publishPost(
+    { dom: new LiveDom(doc), executor, selector: new Selector(), cache: new AnchorCache() },
+    {},
+    payload,
+    {
+      requestId: 'req-disabled',
+      now: () => 0,
+      timeoutMs: 1_000,
+      pollIntervalMs: 100,
+      readSignal: async () =>
+        JSON.stringify({
+          requestId: 'req-disabled',
+          approved: true,
+          ts: 1,
+          payload: { title: '标题', content: '正文', tags: ['AI'] },
+        }),
+      removeSignal: async () => undefined,
+    },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, '[approval_gate] approval_gate_disabled requestId=req-disabled');
+  assert.ok(!executor.calls.includes('note.publish_submit'), '闸未启用绝不静默放行');
 });

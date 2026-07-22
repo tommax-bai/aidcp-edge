@@ -564,6 +564,21 @@
   const PUBLISH_WAIT_HOT_MS = 30 * 60_000;
   const PUBLISH_STEPS = ['写好内容', '发到飞书', '等你确认', '择时发布'];
   const FACEBOOK_PUBLISH_STEPS = ['准备内容', '发布审批', '提交平台', '发布结果'];
+  /**
+   * 下发阻塞原因 → 人话（change publish-approval-signal-to-database）。
+   * 未知原因**原样透出**，绝不吞成「无原因」——没有原因恰恰是最需要被看见的那种情形。
+   */
+  const DISPATCH_BLOCKED_LABELS = {
+    edge_offline_waiting: '客户端核心暂时离线',
+    browser_slot_waiting: '浏览器在等本机可用槽位',
+    breaker_open: '该账号下发暂停，待人工确认',
+    captcha_paused: '账号正处于验证码 / 风控暂停',
+    approval_unreadable: '授权状态暂时读不到（不会误发）',
+  };
+  function dispatchBlockedLabel(reason) {
+    if (typeof reason !== 'string' || !reason) return '';
+    return DISPATCH_BLOCKED_LABELS[reason] || reason;
+  }
 
   function publishView(publish, lastPublish, nowMs, platform = 'xiaohongshu') {
     const at = publish && publish.at ? Date.parse(publish.at) : nowMs;
@@ -604,6 +619,25 @@
       };
     }
     if (state === 'approved') {
+      // 「已批准·待下发」（change publish-approval-signal-to-database）：批准之后、真正开始下发之前
+      // 是一个独立可见的状态。字段缺省（旧云端）时**行为与今天完全一致**，绝不显示为失败。
+      const dispatchState = typeof publish.dispatchState === 'string' ? publish.dispatchState : '';
+      if (dispatchState === 'pending_dispatch' || dispatchState === 'blocked') {
+        const blocked = dispatchBlockedLabel(publish.dispatchBlockedReason);
+        return {
+          ...base,
+          mode: 'flow',
+          showLink: false,
+          head: facebook ? '内容已批准，待下发' : '已批准，待下发',
+          corner: '待下发',
+          cornerHot: false,
+          stepStates: facebook ? ['done', 'done', 'cur', 'todo'] : ['done', 'done', 'done', 'cur'],
+          curCalm: true,
+          foot: blocked
+            ? `**已批准，尚未开始下发** · ${blocked}；恢复后会自动继续，无需重新批准`
+            : '**已批准，尚未开始下发** · 正在排队等待执行，无需重新批准',
+        };
+      }
       return {
         ...base,
         mode: 'flow',
