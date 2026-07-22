@@ -15,6 +15,7 @@
     "build:dist": "npm run clean:dist && tsc -p tsconfig.build.json",
     "build:ads-runtime": "node scripts/stage-ads-runtime.mjs",
     "build:native-page-engine": "node scripts/build-native-page-engine.mjs",
+    "build:native-page-engines-for-package": "node scripts/build-native-page-engines-for-package.mjs",
     "verify:native-page-engine": "node scripts/build-native-page-engine.mjs --verify",
     "probe:native-page-engine": "tsx scripts/native-page-engine-probe.ts",
     "verify:desktop-build-input": "node scripts/verify-desktop-build-input.mjs",
@@ -23,11 +24,11 @@
     "electron:dev": "electron .",
     "preelectron:ol": "node scripts/ensure-electron-dev-signature.mjs",
     "electron:ol": "AIDCP_USER_DATA_DIR=\"$HOME/.aidcp-edge/ol\" AIDCP_CLOUD_URL=ws://123.56.253.183:8787 electron .",
-    "electron:build": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js",
-    "electron:build:win": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --win",
-    "electron:build:mac": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac",
-    "electron:build:mac:dev": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=dev -c.extraMetadata.aidcpClientAuthUrl=http://121.89.85.150:8088/capi",
-    "electron:build:mac:ol": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=ol -c.extraMetadata.aidcpClientAuthUrl=https://aidcp.tommax.cc/capi",
+    "electron:build": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:native-page-engines-for-package && node ./node_modules/electron-builder/cli.js",
+    "electron:build:win": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:native-page-engines-for-package -- x64 && node ./node_modules/electron-builder/cli.js --win",
+    "electron:build:mac": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:native-page-engines-for-package -- x64 arm64 && node ./node_modules/electron-builder/cli.js --mac",
+    "electron:build:mac:dev": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:native-page-engines-for-package -- x64 arm64 && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=dev -c.extraMetadata.aidcpClientAuthUrl=http://121.89.85.150:8088/capi",
+    "electron:build:mac:ol": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:native-page-engines-for-package -- x64 arm64 && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=ol -c.extraMetadata.aidcpClientAuthUrl=https://aidcp.tommax.cc/capi",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "test:acceptance": "tsx --test test/acceptance/*.test.ts",
@@ -61,6 +62,10 @@
       {
         "from": "build/icon.png",
         "to": "tray-icon.png"
+      },
+      {
+        "from": "build/native-page-engine/${platform}-${arch}",
+        "to": "native-page-engine"
       }
     ],
     "extraMetadata": {

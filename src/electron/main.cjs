@@ -72,6 +72,7 @@ const {
 } = require('./persona-notice.cjs');
 const { validatePersonaKeywordSelections } = require('./persona-request-validation.cjs');
 const { resolveTrayIconPath } = require('./tray-icon.cjs');
+const { verifyNativePageEngineArtifact } = require('./native-page-engine-artifact.cjs');
 
 // ── 实例级 userData 隔离（change edge-multi-instance-userdata-isolation）──────
 // 同机并行多个监督者（如一个连 dev、一个连 ol）时，各实例需独立的单实例锁 /
@@ -3678,6 +3679,28 @@ function spawnEdgeChild(handle, {
   } else {
     // self 遗留路径：维持旧合并次序（provider env 在前、被 ...process.env 覆盖 → 外部显式设置仍是逃生阀）。
     spawnEnv = { ...buildSelfProviderEnv(), ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+  }
+
+  if (normalizePlatform(handle.platform) === 'xiaohongshu') {
+    const nativeResourceDir = app.isPackaged
+      ? path.join(process.resourcesPath, 'native-page-engine')
+      : path.join(app.getAppPath(), 'build', 'native-page-engine', `${process.platform}-${process.arch}`);
+    if (app.isPackaged || fs.existsSync(nativeResourceDir)) {
+      try {
+        const artifact = verifyNativePageEngineArtifact(nativeResourceDir);
+        spawnEnv.AIDCP_NATIVE_PAGE_ENGINE_BINARY = artifact.binaryPath;
+      } catch (error) {
+        const reason = `Native Page Engine 包校验失败：${error instanceof Error ? error.message : String(error)}`;
+        updateStatus(handle, {
+          edge: 'stopped',
+          session: 'idle',
+          lastMessage: reason,
+          ...edgeFailurePatch(reason),
+          ...presencePatch('页面引擎不可用'),
+        });
+        return;
+      }
+    }
   }
 
   // 云端环境注入（change edge-cloud-env-selector）：界面已显式选择时，在**合并之后**覆盖继承来的

@@ -102,6 +102,8 @@ echo "Building signed macOS app bundles for: $arch_list"
 npm run build:dist
 # 自包含指纹浏览器运行时（随包 AdsPower CLI），与本机 electron:build:mac 一致：先编译，再 stage 运行时。
 npm run build:ads-runtime
+# 客户包按目标架构携带 Native Page Engine；任一架构缺失或校验失败都禁止继续打包。
+npm run build:native-page-engines-for-package -- $arch_list
 
 # baked key（resources/ads-runtime.json）是 gitignored、不随仓库进 CI，但 extraResources 引用它——
 # 缺失会让打包失败或出无 key 包。CI 必须在此之前从 ADS_RUNTIME_JSON_BASE64 secret 还原它

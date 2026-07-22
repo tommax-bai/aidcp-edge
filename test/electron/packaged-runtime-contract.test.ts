@@ -21,7 +21,7 @@ const afterPack = require('../../scripts/after-pack.cjs') as {
     electronPlatformName: string;
     appOutDir: string;
     packager: { appInfo: { productFilename: string } };
-  }) => { executable: string; asarPath: string; smokeEntry: string };
+  }) => { executable: string; asarPath: string; nativeResourceDir: string; smokeEntry: string };
 };
 
 test('desktop builds run the packaged runtime smoke hook', () => {
@@ -40,6 +40,10 @@ test('afterPack resolves the smoke entry inside the generated macOS app.asar', (
   });
   assert.equal(paths.executable, join('dist-electron', 'mac-arm64', 'AIDCP.app', 'Contents', 'MacOS', 'AIDCP'));
   assert.equal(paths.asarPath, join('dist-electron', 'mac-arm64', 'AIDCP.app', 'Contents', 'Resources', 'app.asar'));
+  assert.equal(
+    paths.nativeResourceDir,
+    join('dist-electron', 'mac-arm64', 'AIDCP.app', 'Contents', 'Resources', 'native-page-engine'),
+  );
   assert.equal(
     paths.smokeEntry,
     join('dist-electron', 'mac-arm64', 'AIDCP.app', 'Contents', 'Resources', 'app.asar', 'src', 'electron', 'packaged-runtime-smoke.cjs'),

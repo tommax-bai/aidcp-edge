@@ -4,6 +4,7 @@ const { execFileSync } = require('node:child_process');
 const { readFileSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 const asar = require('@electron/asar');
+const { verifyNativePageEngineArtifact } = require('../src/electron/native-page-engine-artifact.cjs');
 
 const ARCH_NAMES = Object.freeze({
   0: 'ia32',
@@ -23,6 +24,7 @@ function resolvePackagedSmokePaths(context) {
     return {
       executable: join(appRoot, 'MacOS', productFilename),
       asarPath: join(appRoot, 'Resources', 'app.asar'),
+      nativeResourceDir: join(appRoot, 'Resources', 'native-page-engine'),
       smokeEntry: join(appRoot, 'Resources', 'app.asar', 'src', 'electron', 'packaged-runtime-smoke.cjs'),
     };
   }
@@ -30,12 +32,14 @@ function resolvePackagedSmokePaths(context) {
     return {
       executable: join(appOutDir, `${productFilename}.exe`),
       asarPath: join(appOutDir, 'resources', 'app.asar'),
+      nativeResourceDir: join(appOutDir, 'resources', 'native-page-engine'),
       smokeEntry: join(appOutDir, 'resources', 'app.asar', 'src', 'electron', 'packaged-runtime-smoke.cjs'),
     };
   }
   return {
     executable: join(appOutDir, productFilename),
     asarPath: join(appOutDir, 'resources', 'app.asar'),
+    nativeResourceDir: join(appOutDir, 'resources', 'native-page-engine'),
     smokeEntry: join(appOutDir, 'resources', 'app.asar', 'src', 'electron', 'packaged-runtime-smoke.cjs'),
   };
 }
@@ -72,9 +76,14 @@ function verifyPackagedDependencyClosure(asarPath, packageLockPath) {
 }
 
 async function afterPack(context) {
-  const { asarPath, executable, smokeEntry } = resolvePackagedSmokePaths(context);
+  const { asarPath, executable, nativeResourceDir, smokeEntry } = resolvePackagedSmokePaths(context);
   const packageCount = verifyPackagedDependencyClosure(asarPath, resolve(__dirname, '..', 'package-lock.json'));
   const targetArch = normalizeTargetArch(context.arch) || 'unknown';
+  verifyNativePageEngineArtifact(nativeResourceDir, {
+    platform: context.electronPlatformName,
+    arch: targetArch,
+  });
+  console.log(`Native Page Engine artifact verified for ${context.electronPlatformName}/${targetArch}.`);
 
   if (!canExecutePackagedBinary(context)) {
     console.log(

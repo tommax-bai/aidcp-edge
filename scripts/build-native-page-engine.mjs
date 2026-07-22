@@ -13,8 +13,21 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const crateDir = join(repoRoot, 'native', 'page-engine');
 const executableName = process.platform === 'win32' ? 'aidcp-page-engine.exe' : 'aidcp-page-engine';
-const sourceBinary = join(crateDir, 'target', 'release', executableName);
-const stageDir = join(repoRoot, 'build', 'native-page-engine', `${process.platform}-${process.arch}`);
+const targetArchFlagIndex = process.argv.indexOf('--target-arch');
+const targetArch = targetArchFlagIndex >= 0 ? process.argv[targetArchFlagIndex + 1] : process.arch;
+if (!targetArch || !['x64', 'arm64'].includes(targetArch)) {
+  throw new Error(`Unsupported or missing --target-arch value: ${targetArch ?? ''}`);
+}
+const rustTarget = {
+  'darwin-arm64': 'aarch64-apple-darwin',
+  'darwin-x64': 'x86_64-apple-darwin',
+  'win32-x64': 'x86_64-pc-windows-msvc',
+}[`${process.platform}-${targetArch}`];
+if (!rustTarget) {
+  throw new Error(`Native Page Engine packaging is unsupported for ${process.platform}-${targetArch}`);
+}
+const sourceBinary = join(crateDir, 'target', rustTarget, 'release', executableName);
+const stageDir = join(repoRoot, 'build', 'native-page-engine', `${process.platform}-${targetArch}`);
 const stagedBinary = join(stageDir, executableName);
 const checksumPath = `${stagedBinary}.sha256`;
 const manifestPath = join(stageDir, 'manifest.json');
@@ -56,11 +69,11 @@ async function verify() {
     || manifest.platformAdapterVersion !== platformAdapterVersion
     || manifest.capabilityDigest !== capabilityDigest
     || manifest.platform !== process.platform
-    || manifest.arch !== process.arch
+    || manifest.arch !== targetArch
     || manifest.executable !== executableName
     || manifest.sha256 !== actual
   ) {
-    throw new Error('Native Page Engine staged manifest does not match the artifact or host target');
+    throw new Error('Native Page Engine staged manifest does not match the artifact or package target');
   }
   if (!stagedBinary.startsWith(join(repoRoot, 'build', 'native-page-engine'))) {
     throw new Error('Native Page Engine must be staged outside ASAR inputs');
@@ -71,7 +84,7 @@ async function verify() {
     }
   }
   process.stdout.write(
-    `OK: unsigned host artifact verified with encoded page rules ${process.platform}-${process.arch} ${actual}\n`,
+    `OK: unsigned target artifact verified with encoded page rules ${process.platform}-${targetArch} ${actual}\n`,
   );
 }
 
@@ -83,7 +96,7 @@ async function build() {
     : process.env.PATH;
   const outcome = spawnSync(
     cargo,
-    ['build', '--release', '--locked'],
+    ['build', '--release', '--locked', '--target', rustTarget],
     { cwd: crateDir, stdio: 'inherit', env: { ...process.env, PATH: executablePath } },
   );
   if (outcome.error) throw outcome.error;
@@ -106,7 +119,7 @@ async function build() {
     platformAdapterVersion,
     capabilityDigest,
     platform: process.platform,
-    arch: process.arch,
+    arch: targetArch,
     executable: executableName,
     sha256: checksum,
   }, null, 2)}\n`, 'utf8');
