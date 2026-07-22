@@ -21,6 +21,7 @@ export interface FacebookCompanionUiEvent {
   type:
     | 'session_start'
     | 'feed'
+    | 'feed_video_view'
     | 'reel_view'
     | 'note_open'
     | 'like'
@@ -91,6 +92,22 @@ export function facebookReelViewUiText(payload: {
   if (excerpt) return { sentence: `看了「${excerpt}」` };
   if (author) return { sentence: `看了 ${author} 的一个 Reel` };
   return { sentence: '看了一个 Reel' };
+}
+
+/**
+ * Feed 主视频已被 reader 以单视频卡证明后才会调用这里。只展示页面现读到的摘要和作者；
+ * 元数据缺失时回退为普通视频文案，绝不把 permalink / noteId 当成人类可读内容。
+ */
+export function facebookFeedVideoViewUiText(payload: {
+  title?: string;
+  author?: string;
+}): Pick<FacebookCompanionUiEvent, 'sentence'> {
+  const excerpt = clipFacebookUiText(payload.title, 24);
+  const author = clipFacebookUiText(payload.author, 18);
+  if (excerpt && author) return { sentence: `看了「${excerpt}」 · ${author}` };
+  if (excerpt) return { sentence: `看了「${excerpt}」` };
+  if (author) return { sentence: `看了 ${author} 的一个视频` };
+  return { sentence: '看了一个视频' };
 }
 
 /**

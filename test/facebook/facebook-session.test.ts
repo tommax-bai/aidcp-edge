@@ -716,6 +716,114 @@ test('start(): 不可上报首卡立即有界续滚，只上报后续 canonical 
   assert.ok(h.logs.some((line) => line.includes('跳过不可上报首卡后已上报 1 张')));
 });
 
+test('Feed 单视频卡一经呈现即投影一条可读活动与本地浏览兜底', async () => {
+  const video: FacebookFeedCard = {
+    index: 0,
+    noteId: 'https://www.facebook.com/watch?v=1547652190157533',
+    author: 'BHD Movies',
+    textPreview: 'Hành trình đi tìm vợ con…',
+    reactionCount: 12,
+    isVideo: true,
+  };
+  const h = makeSession({ mode: 'on', settleBatches: [{ cards: [video], degraded: false }] });
+
+  await h.session.start();
+
+  const events = h.logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as Record<string, unknown>);
+  assert.deepEqual(
+    events.filter((event) => event.type === 'feed_video_view'),
+    [{
+      kind: 'activity',
+      type: 'feed_video_view',
+      sentence: '看了「Hành trình đi tìm vợ con…」 · BHD Movies',
+      loopStage: 'read',
+      statsDelta: { views: 1 },
+    }],
+  );
+});
+
+test('Feed 视频活动跨刷新按 canonical postId 去重，随后同帖详情仍上报但不重复投影', async () => {
+  const video: FacebookFeedCard = {
+    index: 0,
+    noteId: 'https://www.facebook.com/watch?v=1547652190157533',
+    author: 'BHD Movies',
+    textPreview: 'Hành trình đi tìm vợ con…',
+    reactionCount: 12,
+    isVideo: true,
+  };
+  const refreshedLead: FacebookFeedCard = {
+    index: 0,
+    noteId: 'https://www.facebook.com/example/posts/pfbid0NEW',
+    author: 'New',
+    textPreview: 'new lead card',
+    reactionCount: 0,
+    isVideo: false,
+  };
+  const h = makeSession({
+    mode: 'on',
+    cardBatches: [[video]],
+    settleBatches: [
+      { cards: [video], degraded: false },
+      { cards: [refreshedLead, video], degraded: false },
+    ],
+  });
+
+  await h.session.start();
+  await h.session.onCloudCommand(makeEnv('feed.refresh', {}));
+  await h.session.onCloudCommand(makeEnv('note.open', { noteId: video.noteId }));
+
+  const events = h.logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string });
+  assert.equal(events.filter((event) => event.type === 'feed_video_view').length, 1);
+  assert.equal(events.filter((event) => event.type === 'note_open').length, 0, '同一 Feed 视频详情不重复生成“读”或本地浏览数');
+  assert.equal(h.details.length, 1, '详情仍须上报 Cloud，去重只作用于客户端活动投影');
+});
+
+test('Feed 非视频、多视频、非规范身份和 Reel 身份均不投影视频浏览活动', async () => {
+  const video = (noteId: string, index = 0): FacebookFeedCard => ({
+    index,
+    noteId,
+    author: 'A',
+    textPreview: 'video',
+    reactionCount: 0,
+    isVideo: true,
+  });
+  const cases: Array<{ name: string; cards: FacebookFeedCard[] }> = [
+    {
+      name: 'non-video',
+      cards: [{ ...video('https://www.facebook.com/watch?v=1'), isVideo: false }],
+    },
+    {
+      name: 'multiple videos',
+      cards: [
+        video('https://www.facebook.com/watch?v=2'),
+        video('https://www.facebook.com/watch?v=3', 1),
+      ],
+    },
+    {
+      name: 'malformed identity',
+      cards: [video('https://evil.example/watch?v=4')],
+    },
+    {
+      name: 'Reel identity',
+      cards: [video('https://www.facebook.com/reel/5')],
+    },
+  ];
+
+  for (const fixture of cases) {
+    const h = makeSession({ mode: 'on', settleBatches: [{ cards: fixture.cards, degraded: false }] });
+    await h.session.start();
+    assert.equal(
+      h.logs.some((line) => line.includes('"type":"feed_video_view"')),
+      false,
+      fixture.name,
+    );
+  }
+});
+
 test('start(): 连续不可上报卡片 8 轮后上报独立结构态，不伪造内容卡或 action', async () => {
   const h = makeSession({
     mode: 'on',

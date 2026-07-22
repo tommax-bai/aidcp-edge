@@ -1800,14 +1800,46 @@ test('活动流条目带类型记号（治纯文字墙）', async () => {
   pushActivity({ ts: new Date().toISOString(), type: 'collect', sentence: '收藏了' });
   pushActivity({ ts: new Date().toISOString(), type: 'reel_view', sentence: '看了一个 Reel' });
   pushActivity({ ts: new Date().toISOString(), type: 'follow', sentence: '关注了一位 Reel 作者' });
+  pushActivity({ ts: new Date().toISOString(), type: 'feed_video_view', sentence: '看了一个视频' });
   const ics = Array.from(w.document.querySelectorAll('#activity-stream .ev-ic'));
-  assert.equal(ics.length, 4);
-  assert.ok((ics[0] as HTMLElement).classList.contains('ic-follow'), '最新在上=Reel 关注');
-  assert.equal((ics[0] as HTMLElement).textContent, '关');
-  assert.ok((ics[1] as HTMLElement).classList.contains('ic-read'));
-  assert.equal((ics[1] as HTMLElement).textContent, '读');
-  assert.ok((ics[2] as HTMLElement).classList.contains('ic-collect'));
-  assert.equal((ics[2] as HTMLElement).textContent, '藏');
+  assert.equal(ics.length, 5);
+  assert.ok((ics[0] as HTMLElement).classList.contains('ic-read'), '最新在上=Feed 视频浏览');
+  assert.equal((ics[0] as HTMLElement).textContent, '读');
+  assert.ok((ics[1] as HTMLElement).classList.contains('ic-follow'), 'Reel 关注仍使用关记号');
+  assert.equal((ics[1] as HTMLElement).textContent, '关');
+  assert.ok((ics[2] as HTMLElement).classList.contains('ic-read'), 'Reel 浏览仍使用读记号');
+  assert.ok((ics[3] as HTMLElement).classList.contains('ic-collect'));
+  assert.equal((ics[3] as HTMLElement).textContent, '藏');
+});
+
+test('Feed 视频浏览活动只进入所属环境缓冲，切换后显示读记号', async () => {
+  const statusA = makeStatus({ envId: 'u1', account: { id: 'u1', name: '账号 A' } });
+  const statusB = makeStatus({ envId: 'u2', account: { id: 'u2', name: '账号 B' } });
+  const { w, pushActivity } = await boot({}, {
+    fleetGet: async () => ({
+      environments: [
+        { envId: 'u1', name: '账号 A', platform: 'facebook', status: statusA },
+        { envId: 'u2', name: '账号 B', platform: 'facebook', status: statusB },
+      ],
+      selectedEnvId: 'u1',
+    }),
+    delegatedTaskList: async () => ({ ok: true, data: { tasks: [] } }),
+  });
+
+  pushActivity({
+    envId: 'u2',
+    ts: new Date().toISOString(),
+    type: 'feed_video_view',
+    sentence: '看了「账号 B 的视频」',
+  });
+  assert.equal(w.document.querySelectorAll('#activity-stream .ev').length, 0, '非选中环境只入缓冲，不串到账号 A');
+
+  ($(w, '[data-env-id="u2"]') as HTMLElement).click();
+  for (let i = 0; i < 5; i += 1) await tick();
+  const row = w.document.querySelector('#activity-stream .ev') as HTMLElement;
+  assert.match(row.textContent ?? '', /账号 B 的视频/);
+  assert.ok((row.querySelector('.ev-ic') as HTMLElement).classList.contains('ic-read'));
+  assert.equal((row.querySelector('.ev-ic') as HTMLElement).textContent, '读');
 });
 
 // ── 发布卡收展（dock）──

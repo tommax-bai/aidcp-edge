@@ -54,6 +54,7 @@ import { canonicalPostId } from './post-identity.js';
 import { defaultFacebookConsentAccepter, type FacebookConsentAccepter } from './consent.js';
 import {
   emitCompanionUiEvent as emitCompanionUiEventLine,
+  facebookFeedVideoViewUiText,
   facebookLikeUiText,
   facebookReadUiText,
   facebookReelViewUiText,
@@ -164,6 +165,37 @@ const FEED_SETTLE_NAV_MS = 6_000;
 const FEED_SETTLE_INPLACE_MS = 3_500;
 /** refresh 的 Page.reload 兜底频率下限（毫秒）。 */
 const REFRESH_RELOAD_FLOOR_MS = 3 * 60_000;
+
+/**
+ * 与 Cloud `isCanonicalFacebookFeedVideoNoteId` 保持同一 fail-closed 边界：只接受
+ * www.facebook.com 的规范 Feed 帖/视频身份，并显式排除 Reels。`isVideo:true` 是另一条独立见证。
+ */
+function canonicalFacebookFeedVideoPostId(noteId: string | undefined): string | null {
+  if (!noteId) return null;
+  try {
+    const url = new URL(noteId);
+    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'www.facebook.com' || url.hash) return null;
+    const path = url.pathname;
+    if (/^\/reel\//i.test(path)) return null;
+    if (/^\/watch\/?$/i.test(path)) {
+      const keys = [...url.searchParams.keys()];
+      if (keys.length !== 1 || keys[0] !== 'v' || !/^\d+$/.test(url.searchParams.get('v') ?? '')) return null;
+    } else if (
+      /\/(?:videos|posts|permalink)\/[^/?#]+\/?$/i.test(path)
+    ) {
+      if (url.search) return null;
+    } else if (/^\/(?:permalink|story)\.php$/i.test(path)) {
+      const id = url.searchParams.get('story_fbid');
+      if (!id || ![...url.searchParams.keys()].every((key) => key === 'story_fbid' || key === 'id')) return null;
+    } else {
+      const multi = url.searchParams.get('multi_permalinks');
+      if (!multi || ![...url.searchParams.keys()].every((key) => key === 'multi_permalinks')) return null;
+    }
+    return canonicalPostId(noteId);
+  } catch {
+    return null;
+  }
+}
 /**
  * page.scroll 单条命令内有界续滚上限：本次 0 新卡时最多再滚几次找下沉的新卡（FB 懒加载 + 虚拟化需要时间渲染下一批）。
  * 从旧值 2 提到 8——给懒加载足够时间把下一批渲染出来，避免「滚两下没冒新卡就误判到底、立刻刷新回顶」的换批抖动。
@@ -241,6 +273,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private seenReelIdentities = new Set<string>();
   /** 已投影为“读”的 Reel postId；随后打开同一详情仍上报 Cloud，但不重复生成活动或本地浏览数。 */
   private reelViewActivityPostIds = new Set<string>();
+  /** 已投影为“读”的 Feed 视频 postId；与 Cloud 一样覆盖整个连接，不随刷新/返回的新批重置。 */
+  private feedVideoViewActivityPostIds = new Set<string>();
   /** 最近一次就地读的时刻 + 读地板（毫秒）：inline read 停留兜底（task 4.2），下一条 scroll 前 max（不累加）。 */
   private inlineReadStartedAt = 0;
   private inlineReadFloorMs = 0;
@@ -702,6 +736,21 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
           });
         }
       }
+      if (r.payload.listKind === 'feed') {
+        const videos = r.payload.cards.filter((card) => card.isVideo === true);
+        const card = videos.length === 1 ? videos[0] : undefined;
+        const postId = canonicalFacebookFeedVideoPostId(card?.noteId);
+        if (card && postId && !this.feedVideoViewActivityPostIds.has(postId)) {
+          this.feedVideoViewActivityPostIds.add(postId);
+          this.emitCompanionUiEvent({
+            kind: 'activity',
+            type: 'feed_video_view',
+            ...facebookFeedVideoViewUiText(card),
+            loopStage: 'read',
+            statsDelta: { views: 1 },
+          });
+        }
+      }
       this.emitCompanionUiEvent({
         kind: 'presence',
         type: 'feed',
@@ -712,7 +761,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     else if (r.type === 'detail') {
       this.client.reportNoteDetail(r.payload);
       const postId = canonicalPostId(r.payload.noteId);
-      if (!postId || !this.reelViewActivityPostIds.has(postId)) {
+      if (!postId || (!this.reelViewActivityPostIds.has(postId) && !this.feedVideoViewActivityPostIds.has(postId))) {
         const readText = facebookReadUiText(r.payload);
         this.emitCompanionUiEvent({
           kind: 'activity',
