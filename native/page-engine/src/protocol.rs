@@ -1,3 +1,4 @@
+pub use crate::command::{NativeCommand, PageProbeParams};
 use crate::error::{EngineError, ErrorCode};
 use serde::{Deserialize, Serialize};
 
@@ -51,17 +52,7 @@ pub struct SessionCloseRecord {
     pub session_id: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct PageProbeParams {}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(tag = "kind", content = "params", rename_all = "snake_case")]
-pub enum NativeCommand {
-    PageProbe(PageProbeParams),
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CommandRecord {
     pub protocol_version: u32,
@@ -92,7 +83,7 @@ pub struct ShutdownRecord {
     pub id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputRecord {
     SessionOpen(SessionOpenRecord),
@@ -157,6 +148,7 @@ impl InputRecord {
                 if record.deadline_unix_ms == 0 {
                     return Err(invalid_request("invalid command deadline"));
                 }
+                record.command.validate()?;
             }
             Self::Cancel(record) => {
                 validate_identifier(&record.session_id, "invalid session id")?;

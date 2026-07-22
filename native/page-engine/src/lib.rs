@@ -1,8 +1,10 @@
 pub mod cdp;
+pub mod command;
 pub mod effect;
 pub mod endpoint;
 pub mod engine;
 pub mod error;
+pub mod model;
 pub mod probe;
 pub mod protocol;
 

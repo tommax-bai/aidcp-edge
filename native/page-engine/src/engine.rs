@@ -265,6 +265,10 @@ impl Engine {
                     Err(error) => StoredCommandResult::failed(error),
                 }
             }
+            _ => StoredCommandResult::failed(EngineError::new(
+                ErrorCode::UnsupportedCommand,
+                "native page command is not implemented by this engine build",
+            )),
         };
         session.active_command_id = None;
         session.remember(request.command_id, outcome.clone());
