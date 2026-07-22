@@ -21,6 +21,7 @@ if (mode === 'malformed') {
   })}\n`);
 
   let activeTaskId = 'probe-task';
+  let pendingCommand;
   const lines = createInterface({ input: process.stdin });
   lines.on('line', (line) => {
     const request = JSON.parse(line);
@@ -69,6 +70,10 @@ if (mode === 'malformed') {
       return;
     }
     if (request.type === 'command') {
+      if (mode === 'cancel') {
+        pendingCommand = request;
+        return;
+      }
       process.stdout.write(`${JSON.stringify({
         type: 'command_result',
         protocolVersion: 2,
@@ -105,11 +110,43 @@ if (mode === 'malformed') {
               loginWallCount: 0,
               dialogCount: 0,
               profileSignalCount: 0,
+              notificationSignalCount: 0,
+              publishSignalCount: 0,
+              errorSignalCount: 0,
               mainCount: 1,
             },
           },
         },
       })}\n`);
+      return;
+    }
+    if (request.type === 'cancel' && mode === 'cancel') {
+      process.stdout.write(`${JSON.stringify({
+        type: 'response',
+        protocolVersion: 2,
+        id: request.id,
+        ok: true,
+        result: {
+          accepted: true,
+          state: 'cancellation_requested',
+          commandId: request.commandId,
+        },
+      })}\n`);
+      if (pendingCommand) {
+        process.stdout.write(`${JSON.stringify({
+          type: 'command_result',
+          protocolVersion: 2,
+          id: pendingCommand.id,
+          sessionId: pendingCommand.sessionId,
+          taskId: pendingCommand.taskId,
+          commandId: pendingCommand.commandId,
+          ok: false,
+          effectPhase: 'not_started',
+          reasonCode: 'cancelled',
+          error: { code: 'cancelled', message: 'native page command cancelled before dispatch' },
+        })}\n`);
+        pendingCommand = undefined;
+      }
       return;
     }
     if (request.type === 'session_close') {

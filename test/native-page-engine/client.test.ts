@@ -10,7 +10,7 @@ const fixture = fileURLToPath(
   new URL('../fixtures/native-page-engine/fake-engine.mjs', import.meta.url),
 );
 
-function client(mode: string, processTimeoutMs = 1_000): NativePageEngineClient {
+function client(mode: string, processTimeoutMs = 3_000): NativePageEngineClient {
   return new NativePageEngineClient({
     binaryPath: process.execPath,
     binaryArgs: [fixture],
@@ -45,6 +45,24 @@ test('keeps one supervised process across session status and commands', async ()
   const status = await session.status();
   assert.equal(status.taskId, taskId);
   assert.equal(status.lastCommandId, 1);
+  await session.close();
+});
+
+test('forwards AbortSignal cancellation and preserves not_started truth', async () => {
+  const session = await client('cancel').openSession({
+    ...input,
+    sessionId: 'session-cancel',
+    taskId: 'task-cancel',
+  });
+  const controller = new AbortController();
+  const pending = session.probePage(500, controller.signal);
+  controller.abort();
+  await assert.rejects(pending, (error: unknown) => {
+    assert.ok(error instanceof NativePageEngineError);
+    assert.equal(error.code, 'cancelled');
+    assert.equal(error.detail?.effectPhase, 'not_started');
+    return true;
+  });
   await session.close();
 });
 

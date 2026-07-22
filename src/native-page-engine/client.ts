@@ -17,7 +17,10 @@ export type NativePageKind =
   | 'search'
   | 'note_detail'
   | 'profile'
+  | 'notification'
+  | 'publish'
   | 'login'
+  | 'error'
   | 'unknown';
 
 export interface NativePageStructuralSignals {
@@ -26,6 +29,9 @@ export interface NativePageStructuralSignals {
   loginWallCount: number;
   dialogCount: number;
   profileSignalCount: number;
+  notificationSignalCount: number;
+  publishSignalCount: number;
+  errorSignalCount: number;
   mainCount: number;
 }
 
@@ -64,6 +70,12 @@ export interface NativePageSessionInfo {
   targetId: string;
   lastCommandId: number;
   activeCommandId?: number;
+}
+
+export interface NativeCancelResult {
+  accepted: boolean;
+  state: 'cancellation_requested' | 'terminal' | 'not_found';
+  commandId: number;
 }
 
 export type NativeEffectPhase = 'not_started' | 'dispatched' | 'confirmed' | 'ambiguous';
@@ -408,12 +420,20 @@ export class NativePageEngineSession {
     private readonly processTimeoutMs: number,
   ) {}
 
-  async probePage(timeoutMs = DEFAULT_NATIVE_TIMEOUT_MS): Promise<NativePageProbeResult> {
+  async probePage(
+    timeoutMs = DEFAULT_NATIVE_TIMEOUT_MS,
+    signal?: AbortSignal,
+  ): Promise<NativePageProbeResult> {
     this.assertOpen();
     validateTimeout(timeoutMs);
+    if (signal?.aborted) {
+      throw new NativePageEngineError('cancelled', 'Native page command cancelled before dispatch', {
+        effectPhase: 'not_started',
+      });
+    }
     const id = requestId('command');
     const commandId = ++this.commandId;
-    const raw = await this.transport.request(id, {
+    const pending = this.transport.request(id, {
       type: 'command',
       protocolVersion: NATIVE_PAGE_ENGINE_PROTOCOL_VERSION,
       id,
@@ -423,6 +443,16 @@ export class NativePageEngineSession {
       deadlineUnixMs: Date.now() + timeoutMs,
       command: { kind: 'page_probe', params: {} },
     }, Math.max(this.processTimeoutMs, timeoutMs + 250));
+    const abort = (): void => {
+      void this.cancel(commandId, 'caller_aborted').catch(() => undefined);
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    let raw: unknown;
+    try {
+      raw = await pending;
+    } finally {
+      signal?.removeEventListener('abort', abort);
+    }
     const response = parseCommandResponse(raw, id, this.sessionId, this.taskId, commandId);
     if (!response.ok || response.effectPhase !== 'confirmed') {
       throw nativeResponseError(response);
@@ -435,6 +465,24 @@ export class NativePageEngineSession {
       throw new NativePageEngineError('invalid_protocol', 'Native Page Engine emitted an invalid probe result');
     }
     return result;
+  }
+
+  async cancel(commandId: number, reason = 'caller_cancelled'): Promise<NativeCancelResult> {
+    this.assertOpen();
+    if (!Number.isSafeInteger(commandId) || commandId < 1) {
+      throw new NativePageEngineError('invalid_request', 'Invalid Native commandId');
+    }
+    const id = requestId('cancel');
+    const raw = await this.transport.request(id, {
+      type: 'cancel',
+      protocolVersion: NATIVE_PAGE_ENGINE_PROTOCOL_VERSION,
+      id,
+      sessionId: this.sessionId,
+      taskId: this.taskId,
+      commandId,
+      reason: reason.slice(0, 256),
+    });
+    return parseLifecycle(raw, id, parseCancelResult);
   }
 
   async status(): Promise<NativePageSessionInfo> {
@@ -603,6 +651,18 @@ function parseSessionInfo(value: unknown): NativePageSessionInfo {
   return value as unknown as NativePageSessionInfo;
 }
 
+function parseCancelResult(value: unknown): NativeCancelResult {
+  if (
+    !isRecord(value)
+    || typeof value.accepted !== 'boolean'
+    || !['cancellation_requested', 'terminal', 'not_found'].includes(String(value.state))
+    || !Number.isSafeInteger(value.commandId)
+  ) {
+    throw new NativePageEngineError('invalid_protocol', 'Native Page Engine cancel result is invalid');
+  }
+  return value as unknown as NativeCancelResult;
+}
+
 function isLifecycleResponse(value: unknown): value is LifecycleResponse {
   return isRecord(value)
     && value.type === 'response'
@@ -653,7 +713,10 @@ function parseProbeResult(value: unknown): NativePageProbeResult | undefined {
     'search',
     'note_detail',
     'profile',
+    'notification',
+    'publish',
     'login',
+    'error',
     'unknown',
   ];
   const readyStates: readonly string[] = ['loading', 'interactive', 'complete', 'unknown'];
@@ -663,6 +726,9 @@ function parseProbeResult(value: unknown): NativePageProbeResult | undefined {
     'loginWallCount',
     'dialogCount',
     'profileSignalCount',
+    'notificationSignalCount',
+    'publishSignalCount',
+    'errorSignalCount',
     'mainCount',
   ] as const;
   if (

@@ -40,6 +40,24 @@ async fn long_lived_engine_uses_correlated_fake_cdp_and_deduplicates_commands() 
     server.await.expect("fake CDP server");
 }
 
+#[tokio::test]
+async fn read_only_command_reconnects_once_without_replaying_a_write() {
+    let (port, server) = spawn_disconnect_then_recover_cdp().await;
+    let mut engine = Engine::default();
+    engine
+        .open(&session_open(port))
+        .await
+        .expect("open session");
+    let outcome = engine
+        .execute(&page_probe_command(1))
+        .await
+        .expect("reconnected probe");
+    let CommandOutput::PageProbe(probe) = outcome.output.expect("probe output");
+    assert_eq!(probe.page_kind, aidcp_page_engine::probe::PageKind::Explore);
+    engine.shutdown().await;
+    server.await.expect("reconnect server");
+}
+
 fn session_open(port: u16) -> SessionOpenRecord {
     SessionOpenRecord {
         protocol_version: 2,
@@ -123,6 +141,68 @@ async fn spawn_fake_cdp() -> (u16, tokio::task::JoinHandle<()>) {
         let _ = websocket.close(None).await;
     });
     (port, server)
+}
+
+async fn spawn_disconnect_then_recover_cdp() -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing(&listener, port).await;
+        let (first_stream, _) = listener.accept().await.expect("first WebSocket request");
+        let mut first = accept_async(first_stream)
+            .await
+            .expect("first WebSocket handshake");
+        respond_to_call(&mut first, json!({})).await;
+        let _ = first.next().await.expect("first evaluate request");
+        first.close(None).await.expect("first close");
+
+        serve_target_listing(&listener, port).await;
+        let (second_stream, _) = listener.accept().await.expect("second WebSocket request");
+        let mut second = accept_async(second_stream)
+            .await
+            .expect("second WebSocket handshake");
+        respond_to_call(&mut second, json!({})).await;
+        respond_to_call(
+            &mut second,
+            json!({
+                "result": {
+                    "value": {
+                        "href": "https://www.xiaohongshu.com/explore",
+                        "readyState": "complete",
+                        "feedCardCount": 6,
+                        "noteDetailCount": 0,
+                        "loginWallCount": 0,
+                        "dialogCount": 0,
+                        "profileSignalCount": 0,
+                        "mainCount": 1
+                    }
+                }
+            }),
+        )
+        .await;
+        let _ = second.close(None).await;
+    });
+    (port, server)
+}
+
+async fn serve_target_listing(listener: &TcpListener, port: u16) {
+    let (mut http, _) = listener.accept().await.expect("HTTP target request");
+    let mut request = [0_u8; 2048];
+    let _ = http.read(&mut request).await.expect("read target request");
+    let body = json!([{
+        "id": "target-1",
+        "type": "page",
+        "url": "https://www.xiaohongshu.com/explore",
+        "webSocketDebuggerUrl": format!("ws://127.0.0.1:{port}/devtools/page/target-1")
+    }])
+    .to_string();
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    http.write_all(headers.as_bytes()).await.expect("headers");
+    http.write_all(body.as_bytes()).await.expect("body");
+    http.shutdown().await.expect("HTTP shutdown");
 }
 
 async fn respond_to_call<S>(websocket: &mut tokio_tungstenite::WebSocketStream<S>, result: Value)

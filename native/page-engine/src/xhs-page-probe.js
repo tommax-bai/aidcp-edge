@@ -26,6 +26,9 @@
     loginWallCount:loginWallCount,
     dialogCount:cap(Array.prototype.slice.call(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).filter(visible).length),
     profileSignalCount:cap(document.querySelectorAll('.user-page,.user-info,[class*="userPage"],[class*="userInfo"],a[href*="/user/profile/"]').length),
+    notificationSignalCount:cap(document.querySelectorAll('a[href*="/notification"],a[href*="/notice"],[class*="notification"],[class*="notice"]').length),
+    publishSignalCount:cap(document.querySelectorAll('input[type="file"],[contenteditable="true"],xhs-publish-btn').length),
+    errorSignalCount:cap(document.querySelectorAll('[class*="not-found"],[class*="notFound"],[class*="error-page"],[class*="errorPage"]').length),
     mainCount:cap(document.querySelectorAll('main,#app,[role="main"]').length)
   };
 })()

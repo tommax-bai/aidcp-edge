@@ -25,7 +25,10 @@ pub enum PageKind {
     Search,
     NoteDetail,
     Profile,
+    Notification,
+    Publish,
     Login,
+    Error,
     Unknown,
 }
 
@@ -39,6 +42,12 @@ pub struct RawPageSignals {
     pub login_wall_count: u32,
     pub dialog_count: u32,
     pub profile_signal_count: u32,
+    #[serde(default)]
+    pub notification_signal_count: u32,
+    #[serde(default)]
+    pub publish_signal_count: u32,
+    #[serde(default)]
+    pub error_signal_count: u32,
     pub main_count: u32,
 }
 
@@ -50,6 +59,9 @@ pub struct StructuralSignals {
     pub login_wall_count: u32,
     pub dialog_count: u32,
     pub profile_signal_count: u32,
+    pub notification_signal_count: u32,
+    pub publish_signal_count: u32,
+    pub error_signal_count: u32,
     pub main_count: u32,
 }
 
@@ -99,9 +111,12 @@ pub fn build_result(target_id: String, raw: RawPageSignals) -> Result<ProbeResul
         login_wall_count: raw.login_wall_count.min(1),
         dialog_count: raw.dialog_count.min(999),
         profile_signal_count: raw.profile_signal_count.min(999),
+        notification_signal_count: raw.notification_signal_count.min(999),
+        publish_signal_count: raw.publish_signal_count.min(999),
+        error_signal_count: raw.error_signal_count.min(999),
         main_count: raw.main_count.min(999),
     };
-    let page_kind = classify_page(&path, &signals);
+    let page_kind = classify_page(host, &path, &signals);
     Ok(ProbeResult {
         target_id,
         origin,
@@ -119,9 +134,22 @@ fn normalize_ready_state(value: &str) -> String {
     }
 }
 
-pub fn classify_page(path: &str, signals: &StructuralSignals) -> PageKind {
+pub fn classify_page(host: &str, path: &str, signals: &StructuralSignals) -> PageKind {
     if signals.login_wall_count > 0 {
         return PageKind::Login;
+    }
+    if path == "/404" || path.starts_with("/404/") || signals.error_signal_count > 0 {
+        return PageKind::Error;
+    }
+    if host == "creator.xiaohongshu.com"
+        && (path.starts_with("/publish/") || signals.publish_signal_count > 0)
+    {
+        return PageKind::Publish;
+    }
+    if (path.starts_with("/notification") || path.starts_with("/notice"))
+        && (signals.notification_signal_count > 0 || signals.main_count > 0)
+    {
+        return PageKind::Notification;
     }
     let segments: Vec<_> = path
         .split('/')
@@ -171,6 +199,9 @@ mod tests {
             login_wall_count: 0,
             dialog_count: 0,
             profile_signal_count: 0,
+            notification_signal_count: 0,
+            publish_signal_count: 0,
+            error_signal_count: 0,
             main_count: 1,
         }
     }
@@ -208,6 +239,36 @@ mod tests {
                 .expect("login")
                 .page_kind,
             PageKind::Login
+        );
+    }
+
+    #[test]
+    fn classifies_notification_publish_and_error_states() {
+        let mut notification = raw("https://www.xiaohongshu.com/notification");
+        notification.notification_signal_count = 2;
+        assert_eq!(
+            build_result("notification".to_owned(), notification)
+                .expect("notification")
+                .page_kind,
+            PageKind::Notification
+        );
+
+        let mut publish = raw("https://creator.xiaohongshu.com/publish/publish?source=official");
+        publish.publish_signal_count = 3;
+        assert_eq!(
+            build_result("publish".to_owned(), publish)
+                .expect("publish")
+                .page_kind,
+            PageKind::Publish
+        );
+
+        let mut error = raw("https://www.xiaohongshu.com/404");
+        error.error_signal_count = 1;
+        assert_eq!(
+            build_result("error".to_owned(), error)
+                .expect("error")
+                .page_kind,
+            PageKind::Error
         );
     }
 
