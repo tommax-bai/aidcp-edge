@@ -13,6 +13,8 @@ resources/ads-runtime.json
 build/ads-prefix/
 build/ads-runtime/
 build/ads-install.log
+build/native-page-engine/
+native/page-engine/target/
 
 # 并行开发 worktree 会把 node_modules 软链到主 checkout 复用依赖。
 # 上面的 `node_modules/` 带斜杠、只匹配目录——软链在 git 眼里是符号链接文件、匹配不上，
