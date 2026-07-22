@@ -68,6 +68,27 @@ import {
 import { operationDescriptorFor } from './operation-registry.js';
 
 /** 最小 WebSocket 抽象（与 cdp/client.ts 同形，便于测试注入） */
+/**
+ * 云端**拒绝**了本节点的握手（change risk-state-cross-process-integrity，task 9.1）。
+ *
+ * 与「连不上云端」是两件不同的事，MUST 可区分：连不上是网络 / 云端不在，重试有意义；
+ * 被拒是云端看清了本节点是谁之后作出的裁决（账号归属另一个 target、平台不一致、缺 accountId 等），
+ * 重试一万次也还是同一个答案。把后者渲染成「云端离线 / 连接失败」，运营会一直去查网络，
+ * 而真正要做的是把这个节点接到正确的云端、或改归属。
+ *
+ * 拒绝码与人话说明都来自云端，边缘 MUST 原样呈现、MUST NOT 改写成通用文案。
+ */
+export class CloudHandshakeRejectedError extends Error {
+  override readonly name = 'CloudHandshakeRejectedError';
+
+  constructor(
+    readonly code: string,
+    readonly detail: string,
+  ) {
+    super(`Cloud 握手失败 [${code}]: ${detail}`);
+  }
+}
+
 export interface CloudWebSocket {
   send(data: string): void;
   close(): void;
@@ -322,7 +343,7 @@ export class EdgeClient {
       const message = typeof payload?.message === 'string' && payload.message.trim()
         ? payload.message.trim()
         : 'Cloud 拒绝 hello';
-      const error = new Error(`Cloud 握手失败 [${code}]: ${message}`);
+      const error = new CloudHandshakeRejectedError(code, message);
       this.failHandshake(error);
       throw error;
     }

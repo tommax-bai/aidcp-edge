@@ -673,7 +673,9 @@ function isFailureShapedLine(line) {
     /给不出浏览器槽位/.test(raw) ||
     /租约抑制/.test(raw);
   if (benign) return false;
-  return /(启动失败|失败|不可达|not allowed|being used|no_target|code=-?\d+)/i.test(raw);
+  // 「云端拒绝本节点握手」是失败形状但不含「失败」二字（change risk-state-cross-process-integrity）：
+  // 不收进来，界面上显示的失败归因会是它前面那条无关的良性行。
+  return /(启动失败|失败|云端拒绝|不可达|not allowed|being used|no_target|code=-?\d+)/i.test(raw);
 }
 
 /** 配图临时目录命名空间（与 src/main.ts 的 imageTempPrefix 同公式；见 fleet.test.ts 契约用例）。 */

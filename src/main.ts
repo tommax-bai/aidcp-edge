@@ -63,7 +63,7 @@ import {
   facebookActionNameForCommand,
   usesFacebookBrowseSession,
 } from './facebook/index.js';
-import { EdgeClient } from './client/edge-client.js';
+import { EdgeClient, CloudHandshakeRejectedError } from './client/edge-client.js';
 import { automationUiSnapshot, operationDescriptorFor } from './client/operation-registry.js';
 import { registerPersonaStdinCommands } from './client/persona-onboarding.js';
 import { registerPublishApprovalStdinCommands } from './client/publish-approval-onboarding.js';
@@ -1619,6 +1619,21 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
+  // 云端**拒绝**握手 ≠ 连不上云端（change risk-state-cross-process-integrity，task 9.1）。
+  // 拒绝是云端看清了本节点是谁之后作出的裁决，重试一万次答案不变；渲染成「云端离线 / 连接失败」
+  // 会把运营推去查网络，而真正要做的是把这个节点接到正确的云端、或改账号归属。
+  // 故这里原样呈现云端给的拒绝码与人话说明，并对 execution_target_mismatch 追加处理办法。
+  if (err instanceof CloudHandshakeRejectedError) {
+    console.error(`[aidcp-edge] 云端拒绝本节点握手 [${err.code}]：${err.detail}`);
+    if (err.code === 'execution_target_mismatch') {
+      console.error(
+        '[aidcp-edge]   这不是网络问题，也不是云端离线：该账号当前归属另一套云端的自动化。' +
+          '重试不会改变结果。请把本节点的 AIDCP_CLOUD_URL 指向说明里那套云端；' +
+          '确需换归属，先在原属主那边停止该账号的自动化，再到后台「改风控归属」。',
+      );
+    }
+    process.exit(1);
+  }
   console.error('[aidcp-edge] 启动失败:', err);
   // 红线「快速失败 + 可见」：致命启动失败（含 client.connect() 连云失败）立即非零退出，
   // 让桌面外壳的 edgeProcess.on('exit') 立刻看见并弹窗 + 通知；绝不退避重试掩盖未连通。

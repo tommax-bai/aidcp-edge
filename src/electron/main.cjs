@@ -4877,7 +4877,16 @@ function handleEdgeLogLine(handle, message, isError = false) {
     // 到此才放行队列里的下一个环境；不等就绪就放行，10 个环境仍会几乎同时冷启、把内存打爆。
     settleLaunchReady(handle, true);
   }
-  if (message.includes('连接失败') || message.includes('WS 已关闭') || message.includes('启动失败')) next.cloud = 'disconnected';
+  // 云端**拒绝**握手（change risk-state-cross-process-integrity，task 9.1）：与「离线 / 连不上」
+  // 是两回事，MUST 可区分呈现。连不上是网络或云端不在，重试有意义；被拒是云端看清本节点身份后的裁决
+  // （账号归属另一套云端、平台不一致等），重试一万次答案不变。渲染成「与云端连接中断，正在重连…」
+  // 会把运营推去查网络，而真正要做的事在别处。故这里单独一条分支，且**先于**下面的断连规则匹配。
+  if (message.includes('云端拒绝本节点握手')) {
+    next.cloud = 'disconnected';
+    next.edge = 'warning';
+    next.session = 'idle';
+    next.presence = { text: '云端拒绝了这个节点，请看下方原因', at: new Date().toISOString() };
+  } else if (message.includes('连接失败') || message.includes('WS 已关闭') || message.includes('启动失败')) next.cloud = 'disconnected';
   if (message.includes('云端重连中')) next.cloud = 'disconnected';
   // 断连时把在场感一起翻掉（change presence-terminal-honesty）：此前只翻云端徽标，在场感行仍挂着断连前
   // 的中途动作文案（如「顺路去作者主页看看…」）继续演——云端都断了，决策端不可能再推进任何一步。
