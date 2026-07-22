@@ -27,6 +27,11 @@ test('native staging is explicit, locked, outside ASAR, and unsigned', async () 
   assert.match(script, /--release/);
   assert.match(script, /--locked/);
   assert.match(script, /build', 'native-page-engine/);
+  assert.match(script, /manifest\.json/);
+  assert.match(script, /protocolVersion/);
+  assert.match(script, /capabilityDigest/);
+  assert.match(script, /process\.platform/);
+  assert.match(script, /process\.arch/);
   assert.match(script, /forbiddenCleartextMarkers/);
   assert.match(script, /unsigned host artifact verified with encoded page rules/);
   assert.doesNotMatch(main, /native-page-engine|NativePageEngineClient/);
