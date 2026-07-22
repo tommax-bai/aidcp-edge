@@ -16,7 +16,7 @@
 - **分发用的 mac 包走 CI 签名 + 公证**（Developer ID 签名 + Apple notarytool 公证 + staple）：这样用户下载安装**不会被 Gatekeeper 拦成「非法软件 / 无法验证开发者」**。签名凭据只在 GitHub Actions 里（仓库 secret），**本机没有证书、本机打的包仍是 unsigned**（只适合本机自测，下载分发会被拦）。所需 secret 见第 1 步。
 - **无自动更新**：没接 electron-updater → 用户升级要 **重新下载安装**。
 - **红线**：生产机上 **只碰 `/opt/aidcp/downloads` 和 `/opt/aidcp/console`，绝不碰同机 isales**。
-- **SSH**：`ssh -i ~/codes/isales-4.pem root@121.89.85.150`（私钥须存在；在 harness 里跑 ssh/scp 命令要 `dangerouslyDisableSandbox`，且可能被 auto-mode 分类器要二次确认，正常放行）。
+- **SSH**：`ssh -i ~/codes/dev-0722.pem root@121.89.85.150`（私钥须存在；在 harness 里跑 ssh/scp 命令要 `dangerouslyDisableSandbox`，且可能被 auto-mode 分类器要二次确认，正常放行）。
 
 下面以发布 `<版本>`（示例 `0.2.0`）为例。
 
@@ -73,10 +73,10 @@ npm run electron:build:win
 
 ## 3. 上传安装包到服务器
 
-- [ ] 确认私钥在位：`ls -l ~/codes/isales-4.pem`。
+- [ ] 确认私钥在位：`ls -l ~/codes/dev-0722.pem`。
 - [ ] 上传（文件名按实际版本；exe 名里有空格，记得整体加引号）：
       ```bash
-      scp -i ~/codes/isales-4.pem \
+      scp -i ~/codes/dev-0722.pem \
         "<...>/AIDCP Setup <版本>.exe" \
         "<...>/AIDCP-<版本>-arm64.dmg" \
         "<...>/AIDCP-<版本>.dmg" \
@@ -97,7 +97,7 @@ npm run electron:build:win
 ## 6. 验活（HTTP，在 ECS 本机 curl :8088）
 
 ```bash
-ssh -i ~/codes/isales-4.pem root@121.89.85.150 '
+ssh -i ~/codes/dev-0722.pem root@121.89.85.150 '
   echo "-- 后台首页 --"; curl -sS -o /dev/null -w "http=%{http_code}\n" http://127.0.0.1:8088/;
   echo "-- win exe --"; curl -sSI "http://127.0.0.1:8088/downloads/AIDCP%20Setup%20<版本>.exe" | grep -iE "HTTP/|content-length";
   echo "-- mac arm64 --"; curl -sSI "http://127.0.0.1:8088/downloads/AIDCP-<版本>-arm64.dmg" | grep -iE "HTTP/|content-length";

@@ -17,7 +17,7 @@
 # 注意：只读云端日志（journalctl -f），不触发任何云端写操作；只碰 aidcp-cloud，不碰 isales。
 set -uo pipefail
 
-PEM="${AIDCP_PEM:-$HOME/codes/isales-4.pem}"
+PEM="${AIDCP_PEM:-$HOME/codes/dev-0722.pem}"
 ECS="${AIDCP_ECS:-root@121.89.85.150}"
 SVC="${AIDCP_CLOUD_SVC:-aidcp-cloud.service}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
