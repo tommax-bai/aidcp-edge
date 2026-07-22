@@ -18,11 +18,11 @@ const dailyUsage = require_(
 
 const { DAILY_USAGE_ACTIONS, cleanSuppliedCounts, normalizeDailyUsage, bumpDailyUsage } = dailyUsage;
 
-/** 云端投影给 FB 的形状：无 collect；Reel follow 与 join_group 真实存在。 */
-const FB_TOTALS = { view: 12, like: 3, comment: 1, follow: 2, publish: 0, join_group: 2 };
+/** 云端投影给 FB 的形状：无 collect；search、Reel follow 与 join_group 真实存在。 */
+const FB_TOTALS = { view: 12, search: 0, like: 3, comment: 1, follow: 2, publish: 0, join_group: 2 };
 
 test('键清单与 protocol.ts 的单一来源一致（本文件是纯 JS、typecheck 抓不到这条漂移）', () => {
-  assert.deepEqual(DAILY_USAGE_ACTIONS, ['view', 'like', 'collect', 'comment', 'follow', 'publish', 'join_group']);
+  assert.deepEqual(DAILY_USAGE_ACTIONS, ['view', 'search', 'like', 'collect', 'comment', 'follow', 'publish', 'join_group']);
 });
 
 test('join_group 穿透清洗后仍在（漏加键的症状是「云端发了、界面不显示、没有任何报错」）', () => {
@@ -40,10 +40,37 @@ test('缺席的键 MUST NOT 被物化成 0（这是「云端摘掉 → 客户端
 });
 
 test('供给的 0 是真实观测、必须留下（与「缺席」是两件事）', () => {
-  const out = normalizeDailyUsage({ asOf: Date.now(), totals: { view: 0 } });
+  const out = normalizeDailyUsage({ asOf: Date.now(), totals: { view: 0, search: 0 } });
   assert.ok(out);
   assert.ok('view' in out.totals, '0 = 今天还没浏览，必须照显');
   assert.equal(out.totals.view, 0);
+  assert.equal(out.totals.search, 0, 'Cloud 明确供给 0 次搜索时必须显示，不能当字段缺席');
+});
+
+test('search 在 daily alias 与四窗口逐位穿透，旧载荷缺键时不凭空补 0', () => {
+  const out = normalizeDailyUsage({
+    asOf: Date.now(),
+    totals: { search: 2 },
+    quotas: { search: 10 },
+    saturated: [],
+    windows: {
+      session: { active: true, totals: { search: 1 }, quotas: { search: 3 }, saturated: [] },
+      minute: { totals: { search: 1 }, quotas: { search: 1 }, saturated: ['search'] },
+      hour: { totals: { search: 2 }, quotas: { search: 4 }, saturated: [] },
+      day: { totals: { search: 2 }, quotas: { search: 10 }, saturated: [] },
+    },
+  });
+  assert.ok(out);
+  assert.equal(out.totals.search, 2);
+  const windows = out.windows as Record<string, { totals: Record<string, number>; quotas: Record<string, number> }>;
+  assert.equal(windows.session.totals.search, 1);
+  assert.equal(windows.minute.quotas.search, 1);
+  assert.equal(windows.hour.totals.search, 2);
+  assert.equal(windows.day.quotas.search, 10);
+
+  const legacy = normalizeDailyUsage({ asOf: Date.now(), totals: { view: 1 }, quotas: { view: 35 } });
+  assert.ok(legacy);
+  assert.ok(!('search' in legacy.totals));
 });
 
 test('乐观累加 MUST NOT 把云端摘掉的键建回来（症状是收藏格闪回，≤60s 后又消失）', () => {

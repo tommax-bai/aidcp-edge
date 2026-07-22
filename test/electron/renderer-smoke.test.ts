@@ -106,7 +106,11 @@ test('客户首页概览：自动化与浏览器均停止时仍通过 HTTP 展�
       data: {
         data: {
           envKey: envId,
-          dailyUsage: { asOf: 1_721_277_200_000, totals: { view: 17, like: 2, collect: 1, comment: 3, follow: 0, publish: 1 } },
+          dailyUsage: {
+            asOf: 1_721_277_200_000,
+            totals: { view: 17, search: 2, like: 2, collect: 1, comment: 3, follow: 0, publish: 1 },
+            quotas: { view: 35, search: 10, like: 6, collect: 3, comment: 1, follow: 2, publish: 1 },
+          },
           currentPublishState: null,
           lastPublished: { title: '云端确认的上一篇', at: 1_721_200_000_000 },
         },
@@ -116,6 +120,8 @@ test('客户首页概览：自动化与浏览器均停止时仍通过 HTTP 展�
   }));
   for (let i = 0; i < 4; i++) await tick();
   assert.equal($(w, '#views').textContent, '17', '不得回落本机事件计数 999');
+  assert.equal($(w, '#searches').textContent, '2', '浏览器/引擎停止时仍展示 HTTP 确认搜索次数');
+  assert.equal($(w, '#searches-cap').textContent, '/10');
   assert.match($(w, '#usage-source').textContent || '', /账号今日/);
   assert.match($(w, '#pub-card').textContent || '', /云端确认的上一篇/);
 });

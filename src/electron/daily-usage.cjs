@@ -15,7 +15,7 @@
  *
  * `join_group` 与风控动作名逐字同名——不是笔误，别「顺手」改成 join。
  */
-const DAILY_USAGE_ACTIONS = ['view', 'like', 'collect', 'comment', 'follow', 'publish', 'join_group'];
+const DAILY_USAGE_ACTIONS = ['view', 'search', 'like', 'collect', 'comment', 'follow', 'publish', 'join_group'];
 const DAILY_USAGE_WINDOWS = ['session', 'minute', 'hour', 'day'];
 
 function cleanCount(value) {

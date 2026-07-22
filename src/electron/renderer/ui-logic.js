@@ -120,7 +120,7 @@
   // 有上限的动作按此序参与「配额休息 / 计划完成」判定。**漏一个键的后果不是报错**，是该动作的上限对
   // 这套逻辑完全不可见（加群满了也不会被算作在等配额）。与 protocol.ts 的 UI_DAILY_USAGE_ACTIONS 同集，
   // 只是这里额外承载优先级顺序（本文件是纯 JS、import 不了那张表，改动时须手工对齐）。
-  const QUOTA_ACTION_PRIORITY = ['view', 'like', 'collect', 'comment', 'follow', 'publish', 'join_group'];
+  const QUOTA_ACTION_PRIORITY = ['view', 'search', 'like', 'collect', 'comment', 'follow', 'publish', 'join_group'];
 
   function finiteNumber(value) {
     return typeof value === 'number' && Number.isFinite(value) ? value : null;

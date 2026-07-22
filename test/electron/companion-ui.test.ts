@@ -1644,13 +1644,14 @@ test('今日进展：本轮未开始或缺少时间时不编造剩余时间和�
   }
 });
 
-test('今日进展：多个完成项只按浏览、点赞、收藏、评论、关注、发帖的顺序展示一个', async () => {
+test('今日进展：多个完成项只按浏览、搜索、点赞、收藏、评论、关注、发帖的顺序展示一个', async () => {
   const { w, pushStatus } = await boot();
   const originalNow = w.Date.now;
   const now = 1730000002000;
   w.Date.now = () => now;
   const actions = [
     { action: 'view', label: '浏览', text: '今日任务已完成' },
+    { action: 'search', label: '搜索', text: '今日搜索计划已完成' },
     { action: 'like', label: '点赞', text: '今日点赞计划已完成' },
     { action: 'collect', label: '收藏', text: '今日收藏计划已完成' },
     { action: 'comment', label: '评论', text: '今日评论计划已完成' },
@@ -2364,23 +2365,29 @@ test('删配图：云端拒绝 → 该张仍在界面上 + 诚实拒因，绝无
 const kpi = (w: DOMWindow, action: string) => $(w, `.kpi[data-action="${action}"]`);
 const kpiVisible = (w: DOMWindow, action: string) => !kpi(w, action).classList.contains('hidden');
 
-test('FB 形状：收藏整格不渲染；Reel 关注按云端配额真值展示；加群格出现', async () => {
+test('FB 形状：搜索在浏览后显示；收藏缺席；Reel 关注和加群如实显示', async () => {
   const { w } = await boot({
     dailyUsage: {
-      // 云端按平台投影后的真实形状：无 collect；Reel follow 与普通 follow 共用配额；有 join_group。
-      totals: { view: 12, like: 3, comment: 1, follow: 2, publish: 0, join_group: 2 },
-      quotas: { view: 150, like: 50, comment: 8, follow: 15, publish: 1, join_group: 3 },
+      // 云端按平台投影后的真实形状：有 search，无 collect；Reel follow 共用 follow；有 join_group。
+      totals: { view: 12, search: 0, like: 3, comment: 1, follow: 2, publish: 0, join_group: 2 },
+      quotas: { view: 150, search: 10, like: 50, comment: 8, follow: 15, publish: 1, join_group: 3 },
       windows: {
         day: {
           active: true,
-          totals: { view: 12, like: 3, comment: 1, follow: 2, publish: 0, join_group: 2 },
-          quotas: { view: 150, like: 50, comment: 8, follow: 15, publish: 1, join_group: 3 },
+          totals: { view: 12, search: 0, like: 3, comment: 1, follow: 2, publish: 0, join_group: 2 },
+          quotas: { view: 150, search: 10, like: 50, comment: 8, follow: 15, publish: 1, join_group: 3 },
           saturated: [],
         },
       },
     },
   });
   assert.equal(kpiVisible(w, 'collect'), false, 'FB 没有收藏这个概念 ⇒ 整格不画');
+  assert.equal(kpiVisible(w, 'search'), true, 'FB 全站/容器搜索真烧 search 配额');
+  assert.equal($(w, '#searches').textContent, '0', '供给的零次搜索必须显示');
+  assert.equal($(w, '#searches-cap').textContent, '/10');
+  const visibleOrder = Array.from(w.document.querySelectorAll('.usage-grid .kpi:not(.hidden)'))
+    .map((node) => (node as HTMLElement).dataset.action);
+  assert.deepEqual(visibleOrder.slice(0, 3), ['view', 'search', 'like']);
   assert.equal(kpiVisible(w, 'follow'), true, 'FB Reel 存在关注执行器 ⇒ 展示云端确认的今日关注');
   assert.equal($(w, '#follows').textContent, '2');
   assert.equal($(w, '#follows-cap').textContent, '/15');
@@ -2390,25 +2397,40 @@ test('FB 形状：收藏整格不渲染；Reel 关注按云端配额真值展示
   $(w, '#daily-summary').click();
   await tick();
   assert.match($(w, '#quota-windows').textContent ?? '', /关注/);
+  assert.match($(w, '#quota-windows').textContent ?? '', /搜索/);
   assert.doesNotMatch($(w, '#quota-windows').textContent ?? '', /收藏/);
   for (const action of ['view', 'like', 'comment', 'publish']) {
     assert.equal(kpiVisible(w, action), true, `${action} 照常显示`);
   }
 });
 
-test('小红书形状：六格逐位如常，且 MUST NOT 长出加群格（首要回归判据）', async () => {
+test('小红书形状：搜索及既有六格逐位如常，且 MUST NOT 长出加群格', async () => {
   const { w } = await boot({
     dailyUsage: {
-      totals: { view: 12, like: 3, collect: 2, comment: 1, follow: 1, publish: 0 },
-      quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+      totals: { view: 12, search: 2, like: 3, collect: 2, comment: 1, follow: 1, publish: 0 },
+      quotas: { view: 150, search: 10, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
     },
   });
-  for (const action of ['view', 'like', 'collect', 'comment', 'follow', 'publish']) {
+  for (const action of ['view', 'search', 'like', 'collect', 'comment', 'follow', 'publish']) {
     assert.equal(kpiVisible(w, action), true, `${action} 必须照常显示`);
   }
   assert.equal(kpiVisible(w, 'join_group'), false, '小红书没有群 ⇒ 绝不出现加群格');
   assert.equal($(w, '#collects').textContent, '2');
   assert.equal($(w, '#collects-cap').textContent, '/25');
+  assert.equal($(w, '#searches').textContent, '2');
+  assert.equal($(w, '#searches-cap').textContent, '/10');
+});
+
+test('旧 Cloud 不供给 search 时保持缺席，不用静态节点补成 0/0', async () => {
+  const { w } = await boot({
+    dailyUsage: {
+      totals: { view: 12, like: 3, comment: 1, follow: 2, publish: 0 },
+      quotas: { view: 150, like: 50, comment: 8, follow: 15, publish: 1 },
+    },
+  });
+  assert.equal(kpiVisible(w, 'search'), false);
+  assert.equal(kpiVisible(w, 'view'), true);
+  assert.equal(kpiVisible(w, 'like'), true);
 });
 
 test('小红书首页用发布进度摘要替代单稿卡，待确认优先并可进入完整队列', async () => {

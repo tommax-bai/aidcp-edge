@@ -27,6 +27,7 @@ const fields = {
   risk: document.querySelector('#risk-status'),
   edge: document.querySelector('#edge-state'),
   views: document.querySelector('#views'),
+  searches: document.querySelector('#searches'),
   likes: document.querySelector('#likes'),
   collects: document.querySelector('#collects'),
   comments: document.querySelector('#comments'),
@@ -41,6 +42,7 @@ const fields = {
   updatedAt: document.querySelector('#updated-at'),
   usageCaps: {
     view: document.querySelector('#views-cap'),
+    search: document.querySelector('#searches-cap'),
     like: document.querySelector('#likes-cap'),
     collect: document.querySelector('#collects-cap'),
     comment: document.querySelector('#comments-cap'),
@@ -50,6 +52,7 @@ const fields = {
   },
   usageBars: {
     view: document.querySelector('#views-bar'),
+    search: document.querySelector('#searches-bar'),
     like: document.querySelector('#likes-bar'),
     collect: document.querySelector('#collects-bar'),
     comment: document.querySelector('#comments-bar'),
@@ -965,6 +968,8 @@ function setBadge(element, field, value) {
  */
 const USAGE_ITEMS = [
   { action: 'view', stat: 'views', value: fields.views, label: '浏览' },
+  // 搜索只有 Cloud 消费 actuated=true 终态后才是真事实；绝不从本机日志回落补数。
+  { action: 'search', stat: null, value: fields.searches, label: '搜索' },
   { action: 'like', stat: 'likes', value: fields.likes, label: '点赞' },
   { action: 'collect', stat: 'collects', value: fields.collects, label: '收藏' },
   { action: 'comment', stat: 'comments', value: fields.comments, label: '评论' },
