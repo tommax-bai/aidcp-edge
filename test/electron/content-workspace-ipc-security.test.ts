@@ -97,6 +97,38 @@ test('待审批稿只经具名 IPC 读取，路径和环境范围由 main 固定
   assert.doesNotMatch(executable, /authorization|cookie|jwt|token|headers|accountId|\burl\b/i);
 });
 
+test('稿件编辑与五类 AI 调整只经具名白名单 IPC，renderer 不接触环境键或客户令牌', () => {
+  for (const channel of ['publish-draft:edit', 'publish-draft:refine', 'publish-draft:refinement-get']) {
+    const escaped = channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(preload, new RegExp(`ipcRenderer\\.invoke\\('${escaped}'`));
+    assert.match(main, new RegExp(`ipcMain\\.handle\\('${escaped}'`));
+  }
+  const start = main.indexOf("ipcMain.handle('publish-draft:edit'");
+  const end = main.indexOf("ipcMain.handle('publish-schedule:occupied-hours'", start);
+  const block = main.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(block, /new Set\(\['expectedVersion', 'title', 'content', 'topics'\]\)/);
+  assert.match(block, /new Set\(\['whole', 'body', 'images', 'selected_image', 'selected_text'\]\)/);
+  assert.match(block, /instruction\.length > 1000/);
+  assert.match(block, /selection\.start >= 0 && selection\.end > selection\.start/);
+  assert.match(block, /Object\.keys\(selection\)\.length === 1[\s\S]*selection\.imageUrl/);
+  assert.match(block, /`\/environments\/\$\{encodeURIComponent\(handle\.profileId\)\}\/publish-drafts\/\$\{id\}`/);
+  assert.match(block, /\/refinements\/\$\{encodeURIComponent\(key\)\}/);
+  assert.doesNotMatch(renderer, /\/environments\/[^'"`]*\/publish-drafts|authorization|cookie|jwt|clientSession\.token/i);
+  const preloadBlock = preload.slice(preload.indexOf('// 待审批稿列表/详情'), preload.indexOf('// 稿件预览内删除某张配图'));
+  for (const method of ['publishDraftEdit', 'publishDraftRefine', 'publishDraftRefinementGet']) assert.match(preloadBlock, new RegExp(`${method}:`));
+  const executable = preloadBlock.split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+  assert.doesNotMatch(executable, /authorization|cookie|jwt|token|headers|accountId|envKey|\burl\b/i);
+});
+
+test('内容首页工作面板桌面总高 240px，窄屏无横向溢出且减弱动画', () => {
+  assert.match(styles, /\.content-work-card\s*\{[\s\S]*height:\s*240px;[\s\S]*box-sizing:\s*border-box;/);
+  assert.match(styles, /\.content-home-view\s*\{[^}]*overflow-x:\s*hidden;/);
+  assert.match(styles, /@media \(max-width:\s*680px\)[\s\S]*\.content-work-card\s*\{[^}]*height:\s*auto;/);
+  assert.match(styles, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*\.content-work-card\.is-active \.content-work-status::after/);
+  assert.match(html, /id="content-runtime-guide"[\s\S]*首次使用请先启动当前环境/);
+});
+
 test('审批 IPC 允许旧客户端省略计划，新计划须成对且取消不得夹带', () => {
   const start = main.indexOf("ipcMain.handle('publish:approval'");
   const end = main.indexOf("ipcMain.handle('publish:image-remove'", start);

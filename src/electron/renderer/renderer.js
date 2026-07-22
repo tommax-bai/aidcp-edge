@@ -288,6 +288,37 @@ contentWorkspaceRoot?.addEventListener('publish-queue:update', () => {
 contentWorkspaceRoot?.addEventListener('publish-queue:review', () => {
   openPublishPreview(true);
 });
+contentWorkspaceRoot?.addEventListener('content-workspace:draft', (event) => {
+  openPublishPreview(true);
+  const recordId = Number(event.detail?.recordId);
+  if (Number.isInteger(recordId) && recordId > 0) void selectPublishDraft(recordId);
+});
+contentWorkspaceRoot?.addEventListener('content-workspace:runtime-action', async (event) => {
+  const action = event.detail?.action;
+  if (action === 'start') {
+    // 复用真实启动按钮：保存、首次引导清理、平台闸与在途锁均保持单一实现。
+    fields.sessionFab?.click();
+    return;
+  }
+  if (action === 'close') {
+    if (fields.sessionClose?.dataset.lifecycleAction === 'close') fields.sessionClose.click();
+    else {
+      const next = await runSessionLifecycle('close', currentEnvId());
+      if (next) routeStatus(next);
+    }
+    return;
+  }
+  if (action !== 'browser-open' && action !== 'browser-close') return;
+  const expected = action === 'browser-open' ? 'open' : 'close';
+  if (fields.sessionClose?.dataset.browserAction === expected) {
+    fields.sessionClose.click();
+    return;
+  }
+  const next = action === 'browser-open'
+    ? await window.aidcpEdge.browserOpen?.(currentEnvId())
+    : await window.aidcpEdge.browserClose?.(currentEnvId());
+  if (next) routeStatus(next);
+});
 
 function syncInteractionWorkspace() {
   if (!interactionWorkspace) return;
@@ -314,6 +345,13 @@ function syncContentWorkspace(status = currentStatus) {
     label: display.name || '当前账号',
     platform: selectedEnvPlatform(),
   } : null);
+  contentWorkspace.setRuntime?.({
+    automationState: status?.automationState || status?.automation || 'stopped',
+    browserState: status?.browserState || 'closed',
+    dailyUsage: status?.dailyUsage || null,
+    guideActive: Boolean(fields.firstEnvironmentStartGuide
+      && !fields.firstEnvironmentStartGuide.classList.contains('hidden')),
+  });
 }
 
 const settingsUi = {
@@ -426,11 +464,20 @@ const publishDraftReview = {
   planRecordId: null,
   publishMode: 'immediate',
   publishTimeInput: '',
+  editing: false,
+  editFeedback: '',
+  refinementScope: 'whole',
+  refinementInstruction: '',
+  selectedImageUrl: '',
+  selectedTextSelection: null,
+  activeRefinement: null,
+  mutationBusy: false,
   handledByEnv: new Map(),
   scheduleAvailabilityByEnv: new Map(),
   scheduleAvailabilityEpochByEnv: new Map(),
   scheduleReservationsByAccount: new Map(),
 };
+let publishDraftRefinementPollTimer = null;
 // 云端环境（change edge-cloud-env-selector）：本地已选 key + 主进程解析出的目标云端视图（含友好名）。
 let cloudSelKey = '';
 let targetCloud = { key: '', label: '默认', url: '' };
@@ -2596,6 +2643,10 @@ document.querySelector('#content-workspace')?.addEventListener('content-workspac
   publishDraftReview.selected = null;
   publishDraftReview.planRecordId = null;
   publishDraftReview.requestEpoch += 1;
+  publishDraftReview.activeRefinement = null;
+  publishDraftReview.mutationBusy = false;
+  if (publishDraftRefinementPollTimer) clearTimeout(publishDraftRefinementPollTimer);
+  publishDraftRefinementPollTimer = null;
 });
 
 function normalizePublishDraft(raw) {
@@ -2699,6 +2750,16 @@ function resetPublishDraftReview(envId) {
   publishDraftReview.planRecordId = null;
   publishDraftReview.publishMode = 'immediate';
   publishDraftReview.publishTimeInput = '';
+  publishDraftReview.editing = false;
+  publishDraftReview.editFeedback = '';
+  publishDraftReview.refinementScope = 'whole';
+  publishDraftReview.refinementInstruction = '';
+  publishDraftReview.selectedImageUrl = '';
+  publishDraftReview.selectedTextSelection = null;
+  publishDraftReview.activeRefinement = null;
+  publishDraftReview.mutationBusy = false;
+  if (publishDraftRefinementPollTimer) clearTimeout(publishDraftRefinementPollTimer);
+  publishDraftRefinementPollTimer = null;
 }
 
 function activePublishPreview(status = currentStatus) {
@@ -2751,7 +2812,7 @@ function syncPublishPreviewActions(status) {
       )
     : null;
   fields.publishPreviewActions.classList.toggle('hidden', !pending && !publishPreviewActionBusy);
-  const disabled = publishPreviewActionBusy || !pending;
+  const disabled = publishPreviewActionBusy || publishDraftReview.mutationBusy || !pending;
   fields.publishPreviewApprove.disabled = disabled || Boolean(plan && !plan.ok);
   fields.publishPreviewCancel.disabled = disabled;
   fields.publishPreviewApprove.textContent = publishDraftReview.publishMode === 'scheduled' ? '批准并定时发布' : '批准并发布';
@@ -2771,6 +2832,306 @@ function appendPreviewText(parent, text, className) {
   el.textContent = text;
   parent.appendChild(el);
   return el;
+}
+
+function publishDraftMutationMessage(response, fallback = '操作没有完成，原稿未变化。') {
+  const reason = response?.reason || response?.error;
+  if (reason === 'version_conflict') return '稿件已经有新版本，已为你刷新，请在最新内容上继续。';
+  if (reason === 'refinement_already_active') return '这份稿件已有一个调整任务正在进行，请等待它完成。';
+  if (reason === 'invalid_selection') return '所选内容已经变化，请重新选择后再试。';
+  if (reason === 'not_pending') return '这份稿件已不再等待确认，不能继续修改。';
+  return typeof response?.error === 'string' && response.error !== 'request_failed' ? response.error : fallback;
+}
+
+function publishDraftScopeLabel(scope) {
+  return ({
+    whole: '全局调整', body: '只改正文', images: '全部图片', selected_image: '选中图片', selected_text: '选中文字',
+  })[scope] || '调整';
+}
+
+function capturePublishDraftTextSelection(bodyElement, preview) {
+  const selection = window.getSelection?.();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  const range = selection.getRangeAt(0);
+  if (!bodyElement.contains(range.commonAncestorContainer)) return null;
+  const prefixRange = range.cloneRange();
+  prefixRange.selectNodeContents(bodyElement);
+  prefixRange.setEnd(range.startContainer, range.startOffset);
+  const start = prefixRange.toString().length;
+  const text = range.toString();
+  const end = start + text.length;
+  if (!text || preview.content.slice(start, end) !== text) return null;
+  return { start, end, text };
+}
+
+function schedulePublishDraftRefinementPoll(recordId, jobId, delay = 1_800) {
+  if (publishDraftRefinementPollTimer) clearTimeout(publishDraftRefinementPollTimer);
+  publishDraftRefinementPollTimer = setTimeout(() => {
+    publishDraftRefinementPollTimer = null;
+    void loadPublishDraftRefinement(recordId, jobId);
+  }, delay);
+}
+
+async function loadPublishDraftRefinement(recordId, jobId) {
+  const envId = publishDraftReview.envId;
+  if (!envId || !Number.isInteger(recordId) || typeof window.aidcpEdge?.publishDraftRefinementGet !== 'function') return;
+  let response;
+  try {
+    response = await window.aidcpEdge.publishDraftRefinementGet(envId, recordId, jobId || 'latest');
+  } catch {
+    response = { ok: false, error: 'request_failed' };
+  }
+  if (envId !== publishDraftReview.envId || publishDraftReview.selected?.recordId !== recordId) return;
+  const job = response?.ok ? response.data?.data?.job : null;
+  if (!job || job.recordId !== recordId) {
+    publishDraftReview.editFeedback = publishDraftMutationMessage(response, '暂时无法刷新调整过程，原稿未变化。');
+    renderPublishPreviewContent(currentStatus);
+    return;
+  }
+  publishDraftReview.activeRefinement = job;
+  renderPublishPreviewContent(currentStatus);
+  if (job.status === 'queued' || job.status === 'running') {
+    schedulePublishDraftRefinementPoll(recordId, job.id);
+    return;
+  }
+  if (job.status === 'completed') {
+    publishDraftReview.editFeedback = '调整已完成，已写回新的可编辑版本。';
+    await selectPublishDraft(recordId);
+    contentWorkspace?.refreshHome?.();
+  } else {
+    publishDraftReview.editFeedback = job.error?.message || '调整没有完成，原稿保持不变。';
+  }
+}
+
+async function submitPublishDraftEdit(preview, values) {
+  if (publishDraftReview.mutationBusy || typeof window.aidcpEdge?.publishDraftEdit !== 'function') return;
+  publishDraftReview.mutationBusy = true;
+  publishDraftReview.editFeedback = '正在保存修改…';
+  renderPublishPreviewContent(currentStatus);
+  let response;
+  try {
+    response = await window.aidcpEdge.publishDraftEdit(publishDraftReview.envId, preview.recordId, {
+      expectedVersion: preview.contentVersion,
+      title: values.title,
+      content: values.content,
+      topics: values.topics,
+    });
+  } catch {
+    response = { ok: false, error: 'request_failed' };
+  }
+  publishDraftReview.mutationBusy = false;
+  if (!response?.ok) {
+    publishDraftReview.editFeedback = publishDraftMutationMessage(response, '保存失败，原稿未变化。');
+    if (response?.reason === 'version_conflict') await selectPublishDraft(preview.recordId);
+    else renderPublishPreviewContent(currentStatus);
+    return;
+  }
+  const item = response.data?.data?.item;
+  if (!item || item.id !== preview.recordId || !Number.isInteger(item.contentVersion)) {
+    publishDraftReview.editFeedback = 'Cloud 返回的稿件状态不完整，已重新读取。';
+    await selectPublishDraft(preview.recordId);
+    return;
+  }
+  publishDraftReview.selected = normalizePublishDraft({ ...preview, ...item, recordId: item.id });
+  publishDraftReview.editing = false;
+  publishDraftReview.editFeedback = '修改已保存；仍是草稿，不会自动发布。';
+  renderPublishPreviewContent(currentStatus);
+  contentWorkspace?.refreshHome?.();
+}
+
+async function submitPublishDraftRefinement(preview) {
+  if (publishDraftReview.mutationBusy || typeof window.aidcpEdge?.publishDraftRefine !== 'function') return;
+  const scope = publishDraftReview.refinementScope;
+  const instruction = publishDraftReview.refinementInstruction.trim();
+  let selection = null;
+  if (scope === 'selected_image') {
+    if (!publishDraftReview.selectedImageUrl) {
+      publishDraftReview.editFeedback = '请先在上方配图区选择一张图片。';
+      renderPublishPreviewContent(currentStatus);
+      return;
+    }
+    selection = { imageUrl: publishDraftReview.selectedImageUrl };
+  } else if (scope === 'selected_text') {
+    if (!publishDraftReview.selectedTextSelection) {
+      publishDraftReview.editFeedback = '请先在正文中选中要调整的文字。';
+      renderPublishPreviewContent(currentStatus);
+      return;
+    }
+    selection = publishDraftReview.selectedTextSelection;
+  }
+  if (!instruction) {
+    publishDraftReview.editFeedback = '请写下希望如何调整。';
+    renderPublishPreviewContent(currentStatus);
+    return;
+  }
+  publishDraftReview.mutationBusy = true;
+  publishDraftReview.editFeedback = '正在创建调整任务…';
+  renderPublishPreviewContent(currentStatus);
+  let response;
+  try {
+    response = await window.aidcpEdge.publishDraftRefine(publishDraftReview.envId, preview.recordId, {
+      expectedVersion: preview.contentVersion,
+      scope,
+      instruction,
+      ...(selection ? { selection } : {}),
+    });
+  } catch {
+    response = { ok: false, error: 'request_failed' };
+  }
+  publishDraftReview.mutationBusy = false;
+  if (!response?.ok) {
+    publishDraftReview.editFeedback = publishDraftMutationMessage(response, '调整任务没有创建，原稿未变化。');
+    if (response?.reason === 'version_conflict') await selectPublishDraft(preview.recordId);
+    else renderPublishPreviewContent(currentStatus);
+    return;
+  }
+  const job = response.data?.data?.job;
+  if (!job || job.recordId !== preview.recordId || !job.id) {
+    publishDraftReview.editFeedback = '调整任务回执不完整，原稿尚未变化。';
+    renderPublishPreviewContent(currentStatus);
+    return;
+  }
+  publishDraftReview.activeRefinement = job;
+  publishDraftReview.editFeedback = '调整任务已开始；过程中仍可查看原稿，但暂不能提交其它修改。';
+  renderPublishPreviewContent(currentStatus);
+  schedulePublishDraftRefinementPoll(preview.recordId, job.id, 900);
+  contentWorkspace?.refreshHome?.();
+}
+
+function appendPublishDraftRefinementProgress(parent, job) {
+  if (!job) return;
+  const section = document.createElement('section');
+  section.className = 'draft-refinement-progress';
+  const head = document.createElement('div');
+  head.className = 'draft-refinement-progress-head';
+  appendPreviewText(head, '实时工作过程');
+  appendPreviewText(head, job.status === 'completed' ? '调整完成' : job.status === 'failed' ? '调整未完成' : '持续更新中');
+  section.appendChild(head);
+  const list = document.createElement('div');
+  list.className = 'draft-refinement-timeline';
+  const progress = Array.isArray(job.progress) ? job.progress : [];
+  progress.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = `draft-refinement-step ${item.status === 'running' ? 'current' : 'completed'}`;
+    appendPreviewText(row, item.status === 'running' ? '●' : '✓', 'draft-refinement-step-mark');
+    const copy = document.createElement('div');
+    const base = String(item.stage || '处理').replace(/(?:中|完成)$/, '');
+    appendPreviewText(copy, item.status === 'running' ? `${base}中...` : `${base}完成`, 'draft-refinement-step-label');
+    appendPreviewText(copy, item.summary || '正在处理当前调整要求。', 'draft-refinement-step-summary');
+    row.appendChild(copy);
+    list.appendChild(row);
+  });
+  if (progress.length === 0) appendPreviewText(list, '任务已进入队列，正在准备第一步。', 'publish-preview-empty');
+  section.appendChild(list);
+  parent.appendChild(section);
+}
+
+function appendPublishDraftEditing(parent, preview) {
+  const section = document.createElement('section');
+  section.className = 'draft-edit-panel';
+  const heading = document.createElement('div');
+  heading.className = 'draft-edit-heading';
+  appendPreviewText(heading, '编辑当前草稿');
+  appendPreviewText(heading, '保存后生成一个新版本，仍不会自动发布');
+  section.appendChild(heading);
+  const title = document.createElement('input');
+  title.type = 'text';
+  title.value = preview.title || '';
+  title.maxLength = 100;
+  title.setAttribute('aria-label', '稿件标题');
+  const content = document.createElement('textarea');
+  content.value = preview.content || '';
+  content.setAttribute('aria-label', '稿件正文');
+  const topics = document.createElement('input');
+  topics.type = 'text';
+  topics.value = (preview.topics || []).map((topic) => `#${String(topic).replace(/^#/, '')}`).join(' ');
+  topics.setAttribute('aria-label', '稿件话题');
+  topics.placeholder = '#话题一 #话题二';
+  section.append(title, content, topics);
+  const actions = document.createElement('div');
+  actions.className = 'draft-edit-actions';
+  const cancel = document.createElement('button');
+  cancel.type = 'button'; cancel.className = 'cw-button secondary'; cancel.textContent = '取消编辑';
+  cancel.disabled = publishDraftReview.mutationBusy;
+  cancel.addEventListener('click', () => { publishDraftReview.editing = false; renderPublishPreviewContent(currentStatus); });
+  const save = document.createElement('button');
+  save.type = 'button'; save.className = 'cw-button primary'; save.textContent = publishDraftReview.mutationBusy ? '保存中…' : '保存修改';
+  save.disabled = publishDraftReview.mutationBusy;
+  save.addEventListener('click', () => {
+    const nextTopics = topics.value.split(/[\s,，#]+/).map((item) => item.trim()).filter(Boolean);
+    if (!title.value.trim() || !content.value.trim()) {
+      publishDraftReview.editFeedback = '标题和正文不能为空。';
+      renderPublishPreviewContent(currentStatus);
+      return;
+    }
+    void submitPublishDraftEdit(preview, { title: title.value.trim(), content: content.value.trim(), topics: nextTopics });
+  });
+  actions.append(cancel, save);
+  section.appendChild(actions);
+  parent.appendChild(section);
+}
+
+function appendPublishDraftControls(parent, preview) {
+  if (!publishPreviewIsPending(currentStatus)) return;
+  const section = document.createElement('section');
+  section.className = 'draft-refinement-panel';
+  const head = document.createElement('div');
+  head.className = 'draft-refinement-head';
+  const copy = document.createElement('span');
+  appendPreviewText(copy, '继续调整这份草稿');
+  appendPreviewText(copy, '可以直接编辑，也可以给 AI 一个明确范围的指令');
+  const edit = document.createElement('button');
+  edit.type = 'button'; edit.className = 'cw-button secondary'; edit.textContent = '直接编辑';
+  edit.disabled = publishDraftReview.mutationBusy || Boolean(publishDraftReview.activeRefinement && ['queued', 'running'].includes(publishDraftReview.activeRefinement.status));
+  edit.addEventListener('click', () => { publishDraftReview.editing = true; renderPublishPreviewContent(currentStatus); });
+  head.append(copy, edit);
+  section.appendChild(head);
+  const scopes = document.createElement('div');
+  scopes.className = 'draft-refinement-scopes';
+  for (const scope of ['whole', 'body', 'images', 'selected_image', 'selected_text']) {
+    const button = document.createElement('button');
+    button.type = 'button'; button.textContent = publishDraftScopeLabel(scope);
+    button.classList.toggle('active', publishDraftReview.refinementScope === scope);
+    button.disabled = publishDraftReview.mutationBusy;
+    button.addEventListener('click', () => {
+      publishDraftReview.refinementScope = scope;
+      publishDraftReview.editFeedback = '';
+      renderPublishPreviewContent(currentStatus);
+    });
+    scopes.appendChild(button);
+  }
+  section.appendChild(scopes);
+  const instruction = document.createElement('textarea');
+  instruction.className = 'draft-refinement-instruction';
+  instruction.placeholder = publishDraftReview.refinementScope === 'selected_text'
+    ? '例如：这段更口语一些，保留原意'
+    : publishDraftReview.refinementScope === 'selected_image'
+      ? '例如：这张图更生活化，减少棚拍感'
+      : '告诉 AI 希望如何调整…';
+  instruction.maxLength = 1000;
+  instruction.value = publishDraftReview.refinementInstruction;
+  instruction.disabled = publishDraftReview.mutationBusy;
+  instruction.addEventListener('input', () => { publishDraftReview.refinementInstruction = instruction.value; });
+  section.appendChild(instruction);
+  if (publishDraftReview.refinementScope === 'selected_image') {
+    appendPreviewText(section, publishDraftReview.selectedImageUrl ? '已选择 1 张图片；再次点击其它图片可切换。' : '请先点击上方要调整的那张图片。', 'draft-refinement-selection');
+  } else if (publishDraftReview.refinementScope === 'selected_text') {
+    const selected = publishDraftReview.selectedTextSelection;
+    appendPreviewText(section, selected ? `已选择：${selected.text.slice(0, 48)}${selected.text.length > 48 ? '…' : ''}` : '请在上方正文中拖选要调整的文字。', 'draft-refinement-selection');
+  }
+  const actions = document.createElement('div');
+  actions.className = 'draft-edit-actions';
+  appendPreviewText(actions, '只会写回当前待审稿 · 不会自动发布', 'draft-refinement-boundary');
+  const submit = document.createElement('button');
+  submit.type = 'button'; submit.className = 'cw-button primary';
+  submit.textContent = publishDraftReview.mutationBusy ? '正在提交…' : '开始调整';
+  submit.disabled = publishDraftReview.mutationBusy || Boolean(publishDraftReview.activeRefinement && ['queued', 'running'].includes(publishDraftReview.activeRefinement.status));
+  submit.addEventListener('click', () => { void submitPublishDraftRefinement(preview); });
+  actions.appendChild(submit);
+  section.appendChild(actions);
+  if (publishDraftReview.editFeedback) appendPreviewText(section, publishDraftReview.editFeedback, 'draft-refinement-feedback');
+  parent.appendChild(section);
+  appendPublishDraftRefinementProgress(parent, publishDraftReview.activeRefinement);
 }
 
 // 上一次删配图失败的原因（诚实呈现；成功后清空）。同样存模块级——抽屉每帧重建。
@@ -3031,6 +3392,18 @@ function renderPublishDraftList() {
 async function selectPublishDraft(recordId) {
   const envId = publishDraftReview.envId;
   if (!envId || !Number.isInteger(recordId) || recordId <= 0) return;
+  const changedRecord = publishDraftReview.selected?.recordId !== recordId;
+  if (changedRecord) {
+    publishDraftReview.editing = false;
+    publishDraftReview.editFeedback = '';
+    publishDraftReview.refinementScope = 'whole';
+    publishDraftReview.refinementInstruction = '';
+    publishDraftReview.selectedImageUrl = '';
+    publishDraftReview.selectedTextSelection = null;
+    publishDraftReview.activeRefinement = null;
+    if (publishDraftRefinementPollTimer) clearTimeout(publishDraftRefinementPollTimer);
+    publishDraftRefinementPollTimer = null;
+  }
   const epoch = ++publishDraftReview.requestEpoch;
   publishDraftReview.loading = true;
   publishDraftReview.error = '';
@@ -3052,6 +3425,8 @@ async function selectPublishDraft(recordId) {
   publishDraftReview.planRecordId = null;
   initializePublishPlan(publishDraftReview.selected);
   renderPublishPreviewContent(currentStatus);
+  const summary = publishDraftReview.items.find((item) => item.recordId === recordId)?.refinement;
+  if (summary?.id && changedRecord) void loadPublishDraftRefinement(recordId, summary.id);
 }
 
 function useSinglePreviewFallback() {
@@ -3343,6 +3718,8 @@ function renderPublishPreviewContent(status) {
     images.forEach((url, index) => {
       const item = document.createElement('div');
       item.className = 'publish-preview-image';
+      item.classList.toggle('refinement-selectable', publishDraftReview.refinementScope === 'selected_image');
+      item.classList.toggle('refinement-selected', publishDraftReview.selectedImageUrl === String(url));
       const img = document.createElement('img');
       img.src = String(url);
       img.alt = `配图 ${index + 1}，双击查看大图`;
@@ -3351,6 +3728,12 @@ function renderPublishPreviewContent(status) {
       img.setAttribute('role', 'button');
       img.addEventListener('dblclick', () => {
         openPublishPreviewImageLightbox(String(url), index, preview);
+      });
+      img.addEventListener('click', () => {
+        if (publishDraftReview.refinementScope !== 'selected_image' || publishDraftReview.mutationBusy) return;
+        publishDraftReview.selectedImageUrl = String(url);
+        publishDraftReview.editFeedback = '';
+        renderPublishPreviewContent(currentStatus);
       });
       img.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -3409,7 +3792,18 @@ function renderPublishPreviewContent(status) {
   const bodySection = document.createElement('section');
   bodySection.className = 'publish-preview-section';
   appendPreviewText(bodySection, '正文', 'publish-preview-label');
-  appendPreviewText(bodySection, typeof preview.content === 'string' && preview.content ? preview.content : '暂无正文', 'publish-preview-body');
+  const bodyContent = appendPreviewText(bodySection, typeof preview.content === 'string' && preview.content ? preview.content : '暂无正文', 'publish-preview-body');
+  bodyContent.classList.toggle('refinement-selectable', publishDraftReview.refinementScope === 'selected_text');
+  const captureText = () => {
+    if (publishDraftReview.refinementScope !== 'selected_text') return;
+    const selected = capturePublishDraftTextSelection(bodyContent, preview);
+    if (selected) {
+      publishDraftReview.selectedTextSelection = selected;
+      publishDraftReview.editFeedback = '';
+    }
+  };
+  bodyContent.addEventListener('mouseup', captureText);
+  bodyContent.addEventListener('keyup', captureText);
   fields.publishPreviewContent.appendChild(bodySection);
 
   const topicsSection = document.createElement('section');
@@ -3440,6 +3834,8 @@ function renderPublishPreviewContent(status) {
     appendPreviewText(auditSection, `配图说明：参考图 ${audit.requestedCount} 张；${statusLabel}。`, 'publish-preview-empty');
     fields.publishPreviewContent.appendChild(auditSection);
   }
+  if (publishDraftReview.editing) appendPublishDraftEditing(fields.publishPreviewContent, preview);
+  else appendPublishDraftControls(fields.publishPreviewContent, preview);
   if (publishPreviewIsPending(status)) appendPublishPlanControls(fields.publishPreviewContent, preview);
   syncPublishPreviewActions(status);
 }

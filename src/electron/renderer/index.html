@@ -613,6 +613,87 @@
           <button id="content-workspace-close" class="cw-icon-button" type="button" aria-label="关闭内容工作区">×</button>
         </header>
 
+        <nav id="content-home-nav" class="content-home-nav" aria-label="内容工作区导航">
+          <button class="active" type="button" data-content-page="home" aria-current="page">内容首页</button>
+          <button type="button" data-content-page="library">精选灵感</button>
+          <button type="button" data-content-page="draft">我的内容</button>
+        </nav>
+
+        <section id="content-home-view" class="content-home-view cw-view" aria-label="内容首页">
+          <div class="content-value-intro">
+            <div>
+              <span>今天的内容成果</span>
+              <h2 id="content-home-heading">正在读取这个账号的内容成果</h2>
+              <p id="content-home-description">灵感、创作过程和可编辑草稿会在这里建立清晰关系。</p>
+            </div>
+            <div class="content-value-summary" aria-label="内容成果摘要">
+              <div><b id="content-home-inspiration-count">—</b><span>精选灵感</span></div>
+              <div><b id="content-home-draft-count">—</b><span>我的内容</span></div>
+              <div><b id="content-home-active-count">—</b><span>进行中</span></div>
+            </div>
+          </div>
+
+          <section id="content-work-card" class="content-work-card is-idle" aria-label="当前环境的实时工作过程">
+            <div class="content-work-brief">
+              <div class="content-work-agent">
+                <span class="content-work-avatar"><img src="./assets/environment-loading-wireframe-execute.webp" alt="小萝北"></span>
+                <span><small id="content-work-account">小萝北 · 当前环境</small><strong id="content-work-title">AI 已准备好为你工作</strong></span>
+              </div>
+              <span id="content-work-status" class="content-work-status">当前空闲</span>
+              <div class="content-work-goal">
+                <h3 id="content-work-goal">当前没有正在进行的任务</h3>
+                <p id="content-work-goal-copy">从一条灵感发起创作后，计划、实时过程和可编辑草稿都会出现在这里。</p>
+              </div>
+              <div id="content-work-plan" class="content-work-plan" aria-label="本次计划"></div>
+              <div class="content-work-foot">
+                <span>仅生成草稿 · 不会自动发布</span>
+                <button id="content-work-primary" class="cw-button secondary" type="button">查看灵感</button>
+              </div>
+            </div>
+            <div class="content-work-stream">
+              <header><span><strong>实时工作过程</strong><small>持续说明系统正在做什么</small></span><button id="content-work-collapse" type="button">收起</button></header>
+              <div id="content-work-timeline" class="content-work-timeline" role="log" aria-live="polite" aria-relevant="additions"></div>
+              <div id="content-work-empty" class="content-work-empty">
+                <b>✦</b><strong>还没有工作过程</strong><span>任务开始后，这里会逐步展示计划、判断、生成、检查和确认。</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="content-home-section" aria-labelledby="content-featured-heading">
+            <div class="content-home-section-head">
+              <span><strong id="content-featured-heading">最值得看的灵感</strong><small>把价值证据和由它产生的成稿放在一起</small></span>
+              <button type="button" data-content-home-action="library">查看全部灵感 →</button>
+            </div>
+            <div id="content-featured" class="content-featured" aria-live="polite"></div>
+          </section>
+
+          <div class="content-home-grid">
+            <section class="content-home-section" aria-labelledby="content-reference-heading">
+              <div class="content-home-section-head">
+                <span><strong id="content-reference-heading">值得参考的内容</strong><small>按综合热度排序，赞藏缺失不会被画成 0</small></span>
+              </div>
+              <div id="content-reference-list" class="content-reference-list" aria-live="polite"></div>
+            </section>
+            <section class="content-home-section" aria-labelledby="content-mine-heading">
+              <div class="content-home-section-head">
+                <span><strong id="content-mine-heading">我的内容</strong><small>正在创作、待调整与已安排</small></span>
+                <button type="button" data-content-home-action="draft">全部 →</button>
+              </div>
+              <div id="content-mine-list" class="content-mine-list" aria-live="polite"></div>
+            </section>
+          </div>
+
+          <details id="content-runtime-detail" class="content-runtime-detail">
+            <summary><span><strong>系统运行详情</strong><small id="content-runtime-summary">正在读取今天的操作数据</small></span><em>展开数据</em></summary>
+            <div id="content-runtime-metrics" class="content-runtime-metrics"></div>
+            <div class="content-runtime-actions">
+              <button id="content-runtime-browser" class="cw-button secondary" type="button">浏览器</button>
+              <button id="content-runtime-toggle" class="cw-button primary" type="button">启动</button>
+            </div>
+            <p id="content-runtime-guide" class="content-runtime-guide hidden">首次使用请先启动当前环境。这里与上方真实启动按钮是同一个动作，启动后才会开始浏览并寻找灵感。</p>
+          </details>
+        </section>
+
         <section id="curated-library-view" class="cw-view" aria-label="灵感库">
           <div class="cw-toolbar">
             <div id="curated-mode-tabs" class="cw-tabs" role="group" aria-label="灵感筛选">

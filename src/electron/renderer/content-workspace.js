@@ -15,6 +15,8 @@
     'binding_unknown', 'binding_conflict', 'binding_unverified',
   ]);
   const PUBLISH_QUEUE_POLL_MS = 20_000;
+  const HOME_DRAFT_LIMIT = 6;
+  const HOME_REFERENCE_LIMIT = 4;
   const QUEUE_TASK_STATUSES = new Set(['queued', 'planning', 'deferred']);
   const QUEUE_JOURNEY_STATUSES = new Set([
     'generating', 'waiting_approval', 'dispatching', 'scheduled', 'published',
@@ -248,6 +250,34 @@
       kicker: root.querySelector('#content-workspace-kicker'),
       title: root.querySelector('#content-workspace-title'),
       meta: root.querySelector('#content-workspace-meta'),
+      homeNav: root.querySelector('#content-home-nav'),
+      homeNavButtons: Array.from(root.querySelectorAll('[data-content-page]')),
+      home: root.querySelector('#content-home-view'),
+      homeHeading: root.querySelector('#content-home-heading'),
+      homeDescription: root.querySelector('#content-home-description'),
+      homeInspirationCount: root.querySelector('#content-home-inspiration-count'),
+      homeDraftCount: root.querySelector('#content-home-draft-count'),
+      homeActiveCount: root.querySelector('#content-home-active-count'),
+      workCard: root.querySelector('#content-work-card'),
+      workAccount: root.querySelector('#content-work-account'),
+      workTitle: root.querySelector('#content-work-title'),
+      workStatus: root.querySelector('#content-work-status'),
+      workGoal: root.querySelector('#content-work-goal'),
+      workGoalCopy: root.querySelector('#content-work-goal-copy'),
+      workPlan: root.querySelector('#content-work-plan'),
+      workTimeline: root.querySelector('#content-work-timeline'),
+      workPrimary: root.querySelector('#content-work-primary'),
+      workCollapse: root.querySelector('#content-work-collapse'),
+      featured: root.querySelector('#content-featured'),
+      referenceList: root.querySelector('#content-reference-list'),
+      mineList: root.querySelector('#content-mine-list'),
+      homeActionButtons: Array.from(root.querySelectorAll('[data-content-home-action]')),
+      runtimeDetail: root.querySelector('#content-runtime-detail'),
+      runtimeSummary: root.querySelector('#content-runtime-summary'),
+      runtimeMetrics: root.querySelector('#content-runtime-metrics'),
+      runtimeBrowser: root.querySelector('#content-runtime-browser'),
+      runtimeToggle: root.querySelector('#content-runtime-toggle'),
+      runtimeGuide: root.querySelector('#content-runtime-guide'),
       library: root.querySelector('#curated-library-view'),
       detailView: root.querySelector('#curated-detail-view'),
       createView: root.querySelector('#curated-create-view'),
@@ -289,6 +319,11 @@
     let currentDetail = null;
     let createMode = false;
     let createBusy = false;
+    let runtime = null;
+    let homeEpoch = 0;
+    let homePollTimer = null;
+    let typeTimer = null;
+    let typedMessageKey = '';
 
     function envState() {
       if (!environment) return null;
@@ -319,6 +354,8 @@
           },
           queueFeedback: null,
           queueCancelBusyId: null,
+          homeCurated: { kind: 'idle', items: [], total: null, error: null },
+          homeDrafts: { kind: 'idle', items: [], total: null, error: null },
         });
       }
       return states.get(environment.envId);
@@ -359,7 +396,7 @@
     }
 
     function hideViews() {
-      for (const view of [fields.library, fields.detailView, fields.createView, fields.queueView, fields.draft]) {
+      for (const view of [fields.home, fields.library, fields.detailView, fields.createView, fields.queueView, fields.draft]) {
         view?.classList.add('hidden');
       }
       fields.draft?.classList.remove('open');
@@ -372,7 +409,11 @@
       const returnsToLibrary = isDetail || page === 'create';
       fields.back?.classList.toggle('hidden', backStack.length === 0 || isDetail);
       fields.close?.setAttribute('aria-label', returnsToLibrary ? '返回灵感库' : '关闭内容工作区');
-      if (page === 'library') {
+      if (page === 'home') {
+        fields.kicker.textContent = '内容成果';
+        fields.title.textContent = '内容首页';
+        fields.meta.textContent = `${account} · 灵感、过程与成稿都属于当前环境`;
+      } else if (page === 'library') {
         fields.kicker.textContent = '精选内容';
         fields.title.textContent = '灵感库';
         fields.meta.textContent = `${account} · 只展示这个账号进入精选池的内容`;
@@ -393,6 +434,14 @@
         fields.title.textContent = '发布进度';
         fields.meta.textContent = `${account} · 只展示这个账号的排队与发布真态`;
       }
+      fields.homeNavButtons.forEach((button) => {
+        const target = button.dataset.contentPage;
+        const active = target === page || (target === 'draft' && page === 'queue');
+        button.classList.toggle('active', active);
+        if (active) button.setAttribute('aria-current', 'page');
+        else button.removeAttribute('aria-current');
+      });
+      fields.homeNav?.classList.toggle('hidden', page === 'detail' || page === 'create');
     }
 
     function showPage(page, pushCurrent) {
@@ -401,8 +450,10 @@
       currentPage = page;
       root.classList.toggle('curated-detail-mode', page === 'detail');
       hideViews();
-      const view = page === 'library'
-        ? fields.library
+      const view = page === 'home'
+        ? fields.home
+        : page === 'library'
+          ? fields.library
         : page === 'detail'
           ? fields.detailView
           : page === 'create'
@@ -423,15 +474,23 @@
       closeSortMenu();
       requestEpoch += 1;
       queueEpoch += 1;
+      homeEpoch += 1;
       if (queuePollTimer) {
         global.clearTimeout(queuePollTimer);
         queuePollTimer = null;
+      }
+      if (homePollTimer) {
+        global.clearTimeout(homePollTimer);
+        homePollTimer = null;
       }
       closeQueueCancelDialog();
       currentPage = 'home';
       backStack = [];
       currentDetail = null;
       createBusy = false;
+      if (typeTimer) global.clearTimeout(typeTimer);
+      typeTimer = null;
+      typedMessageKey = '';
       root.classList.remove('curated-detail-mode');
       hideViews();
       setWorkspaceVisible(false);
@@ -443,7 +502,7 @@
 
     function goBack() {
       const previous = backStack.pop();
-      if (!previous || previous === 'home') {
+      if (!previous) {
         close();
         return;
       }
@@ -461,6 +520,9 @@
           renderList();
           if (state && fields.list) fields.list.scrollTop = state.scrollTop;
         }
+      } else if (previous === 'home') {
+        renderHome();
+        void loadHome(true);
       } else if (previous === 'detail') {
         renderDetail(currentDetail);
       } else if (previous === 'queue') {
@@ -550,6 +612,447 @@
       state.inspirationCount = response?.ok ? finiteCount(response.data?.total) : null;
       state.referenceDraftCount = response?.ok ? finiteCount(response.data?.referenceDraftCount) : null;
       updateEntry();
+      if (currentPage === 'home') renderHome();
+    }
+
+    function homeStateElement(mark, title, detail, retry) {
+      const state = createElement(document, 'div', 'content-section-empty');
+      state.appendChild(createElement(document, 'b', '', mark));
+      const copy = createElement(document, 'span');
+      copy.appendChild(createElement(document, 'strong', '', title));
+      copy.appendChild(createElement(document, 'p', '', detail));
+      state.appendChild(copy);
+      if (retry) {
+        const button = createElement(document, 'button', 'cw-button secondary', '重新加载');
+        button.type = 'button';
+        button.addEventListener('click', () => { void loadHome(true); });
+        state.appendChild(button);
+      }
+      return state;
+    }
+
+    function appendHomeImage(parent, url, label, className = 'content-card-thumb') {
+      if (url) {
+        const image = createElement(document, 'img', className);
+        image.src = String(url);
+        image.alt = '';
+        image.referrerPolicy = 'no-referrer';
+        parent.appendChild(image);
+        return;
+      }
+      parent.appendChild(createElement(document, 'span', className, label));
+    }
+
+    function homeCuratedImage(item) {
+      return Array.isArray(item?.referenceImages)
+        ? item.referenceImages.map(referenceImageUrl).find(Boolean) || ''
+        : '';
+    }
+
+    function homeDraftImage(item) {
+      return Array.isArray(item?.images) ? String(item.images.find((url) => typeof url === 'string' && url.trim()) || '') : '';
+    }
+
+    function typeHomeCurrent(element, text, key) {
+      if (!element) return;
+      if (global.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+        element.textContent = text;
+        return;
+      }
+      if (typedMessageKey === key && element.textContent) return;
+      if (typeTimer) global.clearTimeout(typeTimer);
+      typeTimer = null;
+      typedMessageKey = key;
+      element.textContent = '';
+      let cursor = 0;
+      const tick = () => {
+        if (typedMessageKey !== key || !visible() || currentPage !== 'home') return;
+        cursor = Math.min(text.length, cursor + 1);
+        element.textContent = text.slice(0, cursor);
+        if (cursor < text.length) typeTimer = global.setTimeout(tick, 28);
+        else typeTimer = null;
+      };
+      tick();
+    }
+
+    function refinementActive(status) {
+      return status === 'queued' || status === 'running';
+    }
+
+    function homeWorkModel(state) {
+      const drafts = state?.homeDrafts?.items || [];
+      const activeDraft = drafts.find((item) => refinementActive(item?.refinement?.status));
+      if (activeDraft) {
+        const job = state.homeRefinement?.recordId === activeDraft.id ? state.homeRefinement : null;
+        const progress = Array.isArray(job?.progress) && job.progress.length > 0
+          ? job.progress
+          : activeDraft.refinement?.current ? [activeDraft.refinement.current] : [];
+        return {
+          kind: 'refinement', title: activeDraft.title || '未命名稿件', recordId: activeDraft.id,
+          status: '调整中', goal: '按你的要求重新调整可编辑草稿',
+          detail: '调整只会写回当前待审稿，不会自动发布。',
+          stages: progress.map((item, index) => ({
+            key: `${item.stage}-${index}`, label: String(item.stage || '处理'), status: item.status,
+            summary: String(item.summary || '正在处理当前调整要求。'),
+          })),
+        };
+      }
+      const queue = state?.publishQueue?.data;
+      const active = Array.isArray(queue?.active) ? queue.active[0] : null;
+      if (active) {
+        return {
+          kind: 'queue', title: active.title || 'AI 创作任务', recordId: active.recordId,
+          status: active.statusLabel || '创作中', goal: `创作《${active.title || '未命名内容'}》`,
+          detail: active.sourceTitle ? `正在把《${active.sourceTitle}》转成符合当前人设的可编辑草稿。` : '正在生成符合当前人设的可编辑草稿。',
+          stages: active.stages.map((item) => ({ key: item.key, label: item.label, status: item.state, summary: item.summary })),
+        };
+      }
+      const queued = Array.isArray(queue?.tasks) ? queue.tasks[0] : null;
+      if (queued) {
+        return {
+          kind: 'queue', title: queued.title || 'AI 创作任务', recordId: null,
+          status: queued.statusLabel || '计划中', goal: queued.title || '准备新的创作任务',
+          detail: '任务已经进入当前账号队列，系统会在可执行时继续。',
+          stages: [{ key: 'queue', label: '计划', status: 'running', summary: '正在核对任务范围和当前账号的执行条件。' }],
+        };
+      }
+      return null;
+    }
+
+    function stageLabel(stage) {
+      const label = String(stage.label || '处理').replace(/(?:中|完成)$/, '');
+      return stage.status === 'completed' || stage.status === 'partial' || stage.status === 'skipped'
+        ? `${label}完成`
+        : `${label}中...`;
+    }
+
+    function renderHomeWork(state) {
+      if (!fields.workCard) return;
+      const model = homeWorkModel(state);
+      fields.workAccount.textContent = `小萝北 · ${environment?.label || '当前环境'}`;
+      fields.workCard.classList.toggle('is-idle', !model);
+      fields.workCard.classList.toggle('is-active', Boolean(model));
+      fields.workCard.classList.toggle('has-process', Boolean(model?.stages?.length));
+      fields.workPlan.replaceChildren();
+      fields.workTimeline.replaceChildren();
+      if (!model) {
+        fields.workTitle.textContent = runtime && runtime.automationActive ? 'AI 已准备好为你工作' : '当前环境尚未启动';
+        fields.workStatus.textContent = runtime && runtime.automationActive ? '当前空闲' : '环境未启动';
+        fields.workGoal.textContent = runtime && runtime.automationActive ? '当前没有正在进行的任务' : '启动当前环境后，可以开始寻找灵感';
+        fields.workGoalCopy.textContent = runtime && runtime.automationActive
+          ? '从一条灵感发起创作后，计划、实时过程和可编辑草稿都会出现在这里。'
+          : '启动后会浏览推荐内容；是否显示浏览器不影响内容数据读取。';
+        fields.workPrimary.textContent = runtime && runtime.automationActive ? '查看灵感' : '启动环境';
+        return;
+      }
+      fields.workTitle.textContent = 'AI 正在为你工作';
+      fields.workStatus.textContent = model.status;
+      fields.workGoal.textContent = model.goal;
+      fields.workGoalCopy.textContent = model.detail;
+      fields.workPrimary.textContent = model.recordId ? '查看内容' : '查看进度';
+      let currentIndex = model.stages.findIndex((stage) => ['running', 'retrying', 'waiting_human'].includes(stage.status));
+      if (currentIndex < 0) currentIndex = model.stages.length - 1;
+      model.stages.forEach((stage, index) => {
+        const chip = createElement(document, 'span', index < currentIndex ? 'done' : index === currentIndex ? 'current' : '', stage.label);
+        fields.workPlan.appendChild(chip);
+        const completed = index < currentIndex || ['completed', 'partial', 'skipped'].includes(stage.status);
+        const row = createElement(document, 'article', `content-work-message ${completed ? 'completed' : 'current'}`);
+        row.appendChild(createElement(document, 'i', '', completed ? '✓' : '●'));
+        const copy = createElement(document, 'div');
+        copy.appendChild(createElement(document, 'b', '', stageLabel({ ...stage, status: completed ? 'completed' : stage.status })));
+        const paragraph = createElement(document, 'p');
+        copy.appendChild(paragraph);
+        row.appendChild(copy);
+        fields.workTimeline.appendChild(row);
+        if (completed) paragraph.textContent = stage.summary;
+        else typeHomeCurrent(paragraph, stage.summary, `${environment?.envId}:${model.kind}:${model.recordId || model.title}:${stage.key}:${stage.summary}`);
+      });
+      fields.workTimeline.scrollTop = fields.workTimeline.scrollHeight;
+    }
+
+    function renderFeatured(state) {
+      if (!fields.featured) return;
+      fields.featured.replaceChildren();
+      const sourceState = state.homeCurated;
+      const draftState = state.homeDrafts;
+      if (sourceState.kind === 'loading' || draftState.kind === 'loading') {
+        fields.featured.appendChild(homeStateElement('✦', '正在核对灵感与成稿关系', '只会把同一账号、带有真实来源关联的内容放在一起。', false));
+        return;
+      }
+      if (sourceState.kind === 'error' && draftState.kind === 'error') {
+        fields.featured.appendChild(homeStateElement('!', '暂时无法读取内容成果', '灵感和稿件都没有读到，当前不会展示推测结果。', true));
+        return;
+      }
+      const source = sourceState.items[0] || null;
+      if (!source) {
+        fields.featured.appendChild(homeStateElement('✦', '暂时还没有一条灵感值得放在这里', '只有赞藏表现和内容证据完整、可以提炼表达结构的灵感，才会进入这个位置。', false));
+        return;
+      }
+      const draft = draftState.items.find((item) => item.sourceCuratedId === source.id) || null;
+      const lineage = createElement(document, 'div', 'content-featured-lineage');
+      const sourceCard = createElement(document, 'div', 'content-featured-card');
+      appendHomeImage(sourceCard, homeCuratedImage(source), '灵感');
+      const sourceCopy = createElement(document, 'div', 'content-featured-copy');
+      sourceCopy.appendChild(createElement(document, 'em', '', '综合热度靠前'));
+      sourceCopy.appendChild(createElement(document, 'h3', '', source.title || '未命名灵感'));
+      sourceCopy.appendChild(createElement(document, 'p', '', source.bodyPreview || '这条内容具备可参考的表达结构。'));
+      sourceCopy.appendChild(createElement(document, 'span', '', `赞 ${countText(source.likeCount)} · 藏 ${countText(source.collectCount)}`));
+      sourceCard.appendChild(sourceCopy);
+      sourceCard.addEventListener('click', () => { void openDetail(source.id); });
+      lineage.appendChild(sourceCard);
+      const arrow = createElement(document, 'div', 'content-featured-arrow');
+      arrow.appendChild(createElement(document, 'b', '', '→'));
+      arrow.appendChild(createElement(document, 'span', '', draft ? 'AI 已基于它完成参考创作' : '尚未基于它生成成稿'));
+      lineage.appendChild(arrow);
+      const draftCard = createElement(document, 'div', 'content-featured-card');
+      appendHomeImage(draftCard, homeDraftImage(draft), draft ? '草稿' : '待创作');
+      const draftCopy = createElement(document, 'div', 'content-featured-copy');
+      draftCopy.appendChild(createElement(document, 'em', '', draft ? (draft.refinement?.status === 'completed' ? '已调整' : '可继续编辑') : '等待发起'));
+      draftCopy.appendChild(createElement(document, 'h3', '', draft?.title || '还没有关联草稿'));
+      draftCopy.appendChild(createElement(document, 'p', '', draft?.contentPreview || '从这条灵感发起参考创作后，可编辑稿件会出现在这里。'));
+      draftCopy.appendChild(createElement(document, 'span', '', draft ? `v${draft.contentVersion} · ${draft.images?.length || 0} 张配图` : '仅生成草稿，不会自动发布'));
+      draftCard.appendChild(draftCopy);
+      if (draft) draftCard.addEventListener('click', () => openHomeDraft(draft.id));
+      lineage.appendChild(draftCard);
+      fields.featured.appendChild(lineage);
+    }
+
+    function renderHomeReferences(state) {
+      fields.referenceList?.replaceChildren();
+      if (!fields.referenceList) return;
+      if (state.homeCurated.kind === 'loading') {
+        fields.referenceList.appendChild(homeStateElement('✦', '正在读取精选内容', '会保留现有框架，读到结果后在这里更新。', false));
+        return;
+      }
+      if (state.homeCurated.kind === 'error') {
+        fields.referenceList.appendChild(homeStateElement('!', '暂时无法读取精选内容', '其它区域仍可使用；这里不会把读取失败画成空池。', true));
+        return;
+      }
+      if (state.homeCurated.items.length === 0) {
+        fields.referenceList.appendChild(homeStateElement('✦', '还没有筛选出值得参考的内容', '赞藏数据不完整、与当前人设无关或价值证据不足的内容不会出现在这里。', false));
+        return;
+      }
+      state.homeCurated.items.slice(0, HOME_REFERENCE_LIMIT).forEach((item) => {
+        const card = createElement(document, 'button', 'content-reference-item');
+        card.type = 'button';
+        appendHomeImage(card, homeCuratedImage(item), '灵感');
+        const copy = createElement(document, 'span', 'content-card-copy');
+        copy.appendChild(createElement(document, 'strong', '', item.title || '未命名内容'));
+        copy.appendChild(createElement(document, 'p', '', item.bodyPreview || '暂无内容摘要'));
+        copy.appendChild(createElement(document, 'span', '', `赞 ${countText(item.likeCount)} · 藏 ${countText(item.collectCount)}`));
+        card.appendChild(copy);
+        card.addEventListener('click', () => { void openDetail(item.id); });
+        fields.referenceList.appendChild(card);
+      });
+    }
+
+    function openHomeDraft(recordId) {
+      root.dispatchEvent(new global.CustomEvent('content-workspace:draft', { detail: { recordId } }));
+    }
+
+    function renderHomeDrafts(state) {
+      fields.mineList?.replaceChildren();
+      if (!fields.mineList) return;
+      if (state.homeDrafts.kind === 'loading') {
+        fields.mineList.appendChild(homeStateElement('稿', '正在读取我的内容', '草稿与调整状态会从 Cloud 读取。', false));
+        return;
+      }
+      if (state.homeDrafts.kind === 'error') {
+        fields.mineList.appendChild(homeStateElement('!', '暂时无法读取我的内容', '当前不会把未知状态画成“没有内容”。', true));
+        return;
+      }
+      if (state.homeDrafts.items.length === 0) {
+        fields.mineList.appendChild(homeStateElement('稿', '还没有保存的创作内容', '从一条灵感开始创作后，草稿会出现在这里；可以继续编辑，系统也不会自动发布。', false));
+        return;
+      }
+      state.homeDrafts.items.slice(0, 3).forEach((item) => {
+        const card = createElement(document, 'button', 'content-mine-item');
+        card.type = 'button';
+        appendHomeImage(card, homeDraftImage(item), '稿');
+        const copy = createElement(document, 'span', 'content-card-copy');
+        copy.appendChild(createElement(document, 'strong', '', item.title || '未命名稿件'));
+        const refinement = item.refinement;
+        copy.appendChild(createElement(document, 'p', '', refinementActive(refinement?.status)
+          ? (refinement.current?.summary || '正在按你的要求调整')
+          : `${item.images?.length || 0} 张配图 · v${item.contentVersion}`));
+        card.appendChild(copy);
+        card.appendChild(createElement(document, 'em', '', refinementActive(refinement?.status) ? '调整中' : '待确认'));
+        card.addEventListener('click', () => openHomeDraft(item.id));
+        fields.mineList.appendChild(card);
+      });
+    }
+
+    function renderRuntimeDetails(state) {
+      if (!fields.runtimeMetrics) return;
+      const totals = runtime?.dailyUsage?.totals && typeof runtime.dailyUsage.totals === 'object'
+        ? runtime.dailyUsage.totals : null;
+      const metrics = [
+        ['view', '浏览'], ['like', '点赞'], ['collect', '收藏'], ['comment', '评论'],
+        ['inspiration', '精选灵感'], ['draft', '我的内容'],
+      ];
+      const inspiration = finiteCount(state.inspirationCount ?? state.homeCurated.total);
+      const drafts = finiteCount(state.homeDrafts.total ?? state.referenceDraftCount);
+      fields.runtimeMetrics.replaceChildren();
+      const readable = [];
+      metrics.forEach(([key, label]) => {
+        const value = key === 'inspiration' ? inspiration : key === 'draft' ? drafts
+          : totals && Object.prototype.hasOwnProperty.call(totals, key) ? finiteCount(totals[key]) : null;
+        const item = createElement(document, 'div');
+        item.appendChild(createElement(document, 'b', '', value === null ? '—' : String(value)));
+        item.appendChild(createElement(document, 'span', '', label));
+        fields.runtimeMetrics.appendChild(item);
+        if (value !== null && ['view', 'like', 'collect'].includes(key)) readable.push(`${label} ${value} 条`);
+      });
+      fields.runtimeSummary.textContent = readable.length > 0 ? `今天${readable.join(' · ')}` : '今天的详细操作数据暂未确认';
+      const automation = runtime?.automationState || 'stopped';
+      const browser = runtime?.browserState || 'closed';
+      const active = !['stopped'].includes(automation);
+      const pending = ['starting', 'stopping', 'pausing', 'waiting_resource'].includes(automation);
+      fields.runtimeToggle.textContent = automation === 'starting' ? '启动中' : automation === 'stopping' ? '关闭中' : active ? '关闭环境' : '启动环境';
+      fields.runtimeToggle.disabled = pending;
+      fields.runtimeBrowser.textContent = ['ready'].includes(browser) ? '收起浏览器'
+        : ['queued', 'starting'].includes(browser) ? '浏览器开启中'
+          : ['closing', 'releasing'].includes(browser) ? '浏览器关闭中' : '显示浏览器';
+      fields.runtimeBrowser.disabled = ['queued', 'starting', 'closing', 'releasing'].includes(browser);
+      const guided = Boolean(runtime?.guideActive && !active);
+      fields.runtimeDetail?.classList.toggle('is-guided', guided);
+      fields.runtimeGuide?.classList.toggle('hidden', !guided);
+      if (guided && fields.runtimeDetail) fields.runtimeDetail.open = true;
+    }
+
+    function renderHome() {
+      const state = envState();
+      if (!state || currentPage !== 'home') return;
+      const inspiration = finiteCount(state.inspirationCount ?? state.homeCurated.total);
+      const drafts = finiteCount(state.homeDrafts.total ?? state.referenceDraftCount);
+      const active = finiteCount(state.publishQueue.data?.summary?.inProgress);
+      fields.homeInspirationCount.textContent = inspiration === null ? '—' : String(inspiration);
+      fields.homeDraftCount.textContent = drafts === null ? '—' : String(drafts);
+      fields.homeActiveCount.textContent = active === null ? '—' : String(active);
+      if (state.homeCurated.kind === 'loading' || state.homeDrafts.kind === 'loading') {
+        fields.homeHeading.textContent = '正在整理这个账号的内容成果';
+        fields.homeDescription.textContent = '每个区域会独立更新，不会用未知数据拼出结论。';
+      } else if ((inspiration || 0) === 0 && (drafts || 0) === 0) {
+        fields.homeHeading.textContent = '还在寻找新灵感，暂无待处理内容';
+        fields.homeDescription.textContent = runtime?.automationActive
+          ? '当前环境仍在浏览推荐内容；发现有价值的灵感后会出现在下面。'
+          : '启动当前环境后会开始浏览推荐内容并寻找值得参考的灵感。';
+      } else {
+        fields.homeHeading.textContent = '灵感价值与创作成果，已经放在一起';
+        fields.homeDescription.textContent = '先看哪些内容值得参考，再看系统基于它产生了什么可编辑成果。';
+      }
+      renderHomeWork(state);
+      renderFeatured(state);
+      renderHomeReferences(state);
+      renderHomeDrafts(state);
+      renderRuntimeDetails(state);
+    }
+
+    async function loadHomeCurated(capturedEnvId, capturedEpoch) {
+      const state = envState();
+      if (!state || typeof api.curatedList !== 'function') {
+        if (state) state.homeCurated = { kind: 'error', items: [], total: null, error: 'unsupported' };
+        return;
+      }
+      state.homeCurated = { ...state.homeCurated, kind: 'loading', error: null };
+      renderHome();
+      let response;
+      try {
+        response = await api.curatedList(capturedEnvId, { mode: 'all', sort: 'weighted', limit: HOME_REFERENCE_LIMIT, offset: 0 });
+      } catch {
+        response = { ok: false, error: 'request_failed' };
+      }
+      if (capturedEpoch !== homeEpoch || environment?.envId !== capturedEnvId) return;
+      state.homeCurated = response?.ok && Array.isArray(response.data?.items)
+        ? { kind: 'ready', items: response.data.items, total: finiteCount(response.data.total) ?? 0, error: null }
+        : { kind: 'error', items: state.homeCurated.items || [], total: null, error: responseFailureMessage(response) };
+      renderHome();
+    }
+
+    async function loadHomeDrafts(capturedEnvId, capturedEpoch) {
+      const state = envState();
+      if (!state || typeof api.publishDraftList !== 'function') {
+        if (state) state.homeDrafts = { kind: 'error', items: [], total: null, error: 'unsupported' };
+        return;
+      }
+      state.homeDrafts = { ...state.homeDrafts, kind: 'loading', error: null };
+      renderHome();
+      let response;
+      try {
+        response = await api.publishDraftList(capturedEnvId, { limit: HOME_DRAFT_LIMIT, offset: 0 });
+      } catch {
+        response = { ok: false, error: 'request_failed' };
+      }
+      if (capturedEpoch !== homeEpoch || environment?.envId !== capturedEnvId) return;
+      if (!response?.ok || !Array.isArray(response.data?.items)) {
+        state.homeDrafts = { kind: 'error', items: state.homeDrafts.items || [], total: null, error: responseFailureMessage(response) };
+        renderHome();
+        return;
+      }
+      state.homeDrafts = {
+        kind: 'ready', items: response.data.items, total: finiteCount(response.data.total) ?? response.data.items.length, error: null,
+      };
+      const activeDraft = response.data.items.find((item) => refinementActive(item?.refinement?.status));
+      state.homeRefinement = null;
+      if (activeDraft && typeof api.publishDraftRefinementGet === 'function') {
+        try {
+          const detail = await api.publishDraftRefinementGet(capturedEnvId, activeDraft.id, activeDraft.refinement.id);
+          if (capturedEpoch === homeEpoch && environment?.envId === capturedEnvId && detail?.ok) {
+            state.homeRefinement = detail.data?.data?.job || null;
+          }
+        } catch {
+          // 列表摘要仍是真态；详情失败只降级为摘要，不覆盖成失败或完成。
+        }
+      }
+      renderHome();
+    }
+
+    function scheduleHomePoll() {
+      if (homePollTimer) global.clearTimeout(homePollTimer);
+      homePollTimer = null;
+      const state = envState();
+      if (!visible() || currentPage !== 'home' || !state) return;
+      const activeRefinement = state.homeDrafts.items.some((item) => refinementActive(item?.refinement?.status));
+      const activeQueue = (state.publishQueue.data?.summary?.inProgress || 0) > 0;
+      const delay = activeRefinement ? 1_800 : activeQueue ? 5_000 : 20_000;
+      homePollTimer = global.setTimeout(() => {
+        homePollTimer = null;
+        void loadHome(true);
+      }, delay);
+    }
+
+    async function loadHome(force = false) {
+      const state = envState();
+      if (!state || !environment || !inspirationAvailable()) return;
+      if (!force && state.homeCurated.kind === 'ready' && state.homeDrafts.kind === 'ready') {
+        renderHome();
+        scheduleHomePoll();
+        return;
+      }
+      const capturedEnvId = environment.envId;
+      const capturedEpoch = ++homeEpoch;
+      await Promise.all([
+        loadSummary(true),
+        loadHomeCurated(capturedEnvId, capturedEpoch),
+        loadHomeDrafts(capturedEnvId, capturedEpoch),
+        publishQueueAvailable() ? loadPublishQueue(true) : Promise.resolve(),
+      ]);
+      if (capturedEpoch !== homeEpoch || environment?.envId !== capturedEnvId) return;
+      renderHome();
+      scheduleHomePoll();
+    }
+
+    function openHome() {
+      if (!inspirationAvailable()) return;
+      if (!visible()) {
+        captureSourceWorkspace();
+        setWorkspaceVisible(true);
+      }
+      backStack = [];
+      currentDetail = null;
+      showPage('home', false);
+      renderHome();
+      void loadHome(true);
     }
 
     function renderListMessage(title, detail, retry) {
@@ -1262,6 +1765,7 @@
         ? { ...existing, refreshing: true, requestedAt: Date.now() }
         : { kind: 'loading', data: null, error: null, stale: false, refreshing: false, requestedAt: Date.now() };
       if (currentPage === 'queue') renderPublishQueue();
+      if (currentPage === 'home') renderHome();
       notifyPublishQueueChange();
       let response;
       try {
@@ -1291,6 +1795,7 @@
         };
       }
       if (currentPage === 'queue') renderPublishQueue();
+      if (currentPage === 'home') renderHome();
       notifyPublishQueueChange();
       schedulePublishQueuePoll();
     }
@@ -1376,6 +1881,18 @@
       showPage('draft', false);
     }
 
+    function setRuntime(next) {
+      const automationState = String(next?.automationState || next?.automation || 'stopped');
+      runtime = {
+        ...(next && typeof next === 'object' ? next : {}),
+        automationState,
+        browserState: String(next?.browserState || 'closed'),
+        automationActive: automationState !== 'stopped',
+        guideActive: Boolean(next?.guideActive),
+      };
+      if (currentPage === 'home') renderHome();
+    }
+
     function setEnvironment(next) {
       const normalized = next && next.envId ? {
         envId: String(next.envId),
@@ -1407,9 +1924,14 @@
       requestEpoch += 1;
       summaryEpoch += 1;
       queueEpoch += 1;
+      homeEpoch += 1;
       if (queuePollTimer) {
         global.clearTimeout(queuePollTimer);
         queuePollTimer = null;
+      }
+      if (homePollTimer) {
+        global.clearTimeout(homePollTimer);
+        homePollTimer = null;
       }
       closeQueueCancelDialog();
       fields.queueContent?.replaceChildren();
@@ -1433,14 +1955,69 @@
         close();
         return;
       }
-      backStack = ['home'];
-      showPage('library', false);
-      void loadList();
+      if (currentPage === 'library') {
+        backStack = ['home'];
+        showPage('library', false);
+        void loadList();
+        return;
+      }
+      backStack = [];
+      showPage('home', false);
+      renderHome();
+      void loadHome(true);
     }
 
-    fields.entry?.addEventListener('click', openLibrary);
+    fields.entry?.addEventListener('click', openHome);
     fields.close?.addEventListener('click', handleCloseControl);
     fields.back?.addEventListener('click', goBack);
+    fields.homeNavButtons.forEach((button) => button.addEventListener('click', () => {
+      const page = button.dataset.contentPage;
+      if (page === 'home') openHome();
+      else if (page === 'library') openLibrary();
+      else if (page === 'draft') openHomeDraft(null);
+    }));
+    fields.homeActionButtons.forEach((button) => button.addEventListener('click', () => {
+      if (button.dataset.contentHomeAction === 'library') openLibrary();
+      else if (button.dataset.contentHomeAction === 'draft') openHomeDraft(null);
+    }));
+    fields.workCollapse?.addEventListener('click', () => {
+      fields.workCard?.classList.add('is-collapsed');
+      fields.workCard?.setAttribute('role', 'button');
+      fields.workCard?.setAttribute('tabindex', '0');
+      fields.workCard?.setAttribute('aria-label', '展开实时工作过程');
+    });
+    const expandWorkCard = () => {
+      if (!fields.workCard?.classList.contains('is-collapsed')) return;
+      fields.workCard.classList.remove('is-collapsed');
+      fields.workCard.removeAttribute('role');
+      fields.workCard.removeAttribute('tabindex');
+      fields.workCard.removeAttribute('aria-label');
+    };
+    fields.workCard?.addEventListener('click', (event) => {
+      if (event.target === fields.workCollapse || event.target === fields.workPrimary) return;
+      expandWorkCard();
+    });
+    fields.workCard?.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      expandWorkCard();
+    });
+    fields.workPrimary?.addEventListener('click', () => {
+      const state = envState();
+      const model = homeWorkModel(state);
+      if (model?.recordId) openHomeDraft(model.recordId);
+      else if (model) openPublishQueue();
+      else if (runtime?.automationActive) openLibrary();
+      else root.dispatchEvent(new global.CustomEvent('content-workspace:runtime-action', { detail: { action: 'start' } }));
+    });
+    fields.runtimeToggle?.addEventListener('click', () => {
+      const action = runtime?.automationActive ? 'close' : 'start';
+      root.dispatchEvent(new global.CustomEvent('content-workspace:runtime-action', { detail: { action } }));
+    });
+    fields.runtimeBrowser?.addEventListener('click', () => {
+      const action = runtime?.browserState === 'ready' ? 'browser-close' : 'browser-open';
+      root.dispatchEvent(new global.CustomEvent('content-workspace:runtime-action', { detail: { action } }));
+    });
     fields.sortTrigger?.addEventListener('click', () => {
       if (fields.sortMenu?.classList.contains('hidden')) openSortMenu();
       else closeSortMenu(true);
@@ -1525,6 +2102,8 @@
     renderSortControl();
     return {
       setEnvironment,
+      setRuntime,
+      openHome,
       openLibrary,
       openPublishQueue,
       openDraft,
@@ -1532,6 +2111,7 @@
       goBack,
       publishQueueSnapshot,
       refreshPublishQueue: () => loadPublishQueue(true),
+      refreshHome: () => loadHome(true),
       isDraftOpen: () => visible() && currentPage === 'draft',
       currentPage: () => currentPage,
     };

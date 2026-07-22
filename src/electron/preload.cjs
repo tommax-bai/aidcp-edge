@@ -76,6 +76,9 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   // 待审批稿列表/详情：main 固定客户接口路径并注入当前环境，renderer 不能提交 URL/token/accountId。
   publishDraftList: (envId, options) => ipcRenderer.invoke('publish-draft:list', envId, options),
   publishDraftGet: (envId, id) => ipcRenderer.invoke('publish-draft:get', envId, id),
+  publishDraftEdit: (envId, id, payload) => ipcRenderer.invoke('publish-draft:edit', envId, id, payload),
+  publishDraftRefine: (envId, id, payload) => ipcRenderer.invoke('publish-draft:refine', envId, id, payload),
+  publishDraftRefinementGet: (envId, id, jobId) => ipcRenderer.invoke('publish-draft:refinement-get', envId, id, jobId),
   publishScheduleOccupiedHours: (envId) => ipcRenderer.invoke('publish-schedule:occupied-hours', envId),
   // 今日进展与最近发布：始终由 main 通过 customer-auth HTTP 拉取，不依赖自动化引擎或浏览器。
   getEnvironmentOverview: (envId) => ipcRenderer.invoke('environment-overview:get', envId),

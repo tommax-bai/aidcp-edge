@@ -246,7 +246,7 @@ test('灵感入口只在小红书环境展示，非 XHS 不取数、不打开且
   assert.deepEqual(summaryCalls, ['env-xhs']);
   entry.dispatchEvent(new window.Event('click'));
   await flush();
-  assert.equal(controller.currentPage(), 'library');
+  assert.equal(controller.currentPage(), 'home');
   assert.equal(hidden($(window, '#content-workspace')), false);
   assert.ok(summaryCalls.length >= 1);
   assert.equal(summaryCalls.every((envId) => envId === 'env-xhs'), true);
@@ -262,6 +262,47 @@ test('灵感入口只在小红书环境展示，非 XHS 不取数、不打开且
   assert.equal(summaryCalls.every((envId) => envId === 'env-xhs'), true);
 });
 
+test('内容首页把真实灵感、来源成稿、工作过程和系统运行详情放在同一账号框架中', async () => {
+  const source = listItem({ id: 7, title: '通勤显瘦穿搭公式', likeCount: 18_000, collectCount: 3_298 });
+  const draft = {
+    id: 42, platform: 'xiaohongshu', kind: 'rewrite', title: '梨形身材这样穿',
+    contentPreview: '按当前人设重新表达的可编辑正文。', topics: ['通勤穿搭'], images: ['https://img.test/draft.jpg'],
+    contentVersion: 3, updatedAt: Date.now(), publishMode: 'immediate', publishTime: null, sourceCuratedId: 7,
+    refinement: { id: '00000000-0000-4000-8000-000000000057', scope: 'body', status: 'running', current: { stage: '判断', status: 'running', summary: '正在核对正文与当前人设的表达差异。' }, resultVersion: null, error: null },
+  };
+  const { window, controller } = boot({
+    curatedSummary: async () => ({ ok: true, data: { total: 4, referenceDraftCount: 1 } }),
+    curatedList: async () => ({ ok: true, data: { items: [source], total: 4 } }),
+    publishDraftList: async () => ({ ok: true, data: { items: [draft], total: 1 } }),
+    publishDraftRefinementGet: async () => ({
+      ok: true,
+      data: { data: { job: { id: draft.refinement.id, recordId: 42, expectedVersion: 3, scope: 'body', status: 'running', resultVersion: null, error: null,
+        progress: [
+          { seq: 1, stage: '计划', status: 'completed', summary: '已确认只调整正文。', at: 1 },
+          { seq: 2, stage: '判断', status: 'running', summary: '正在核对正文与当前人设的表达差异。', at: 2 },
+        ] } } },
+    }),
+    publishQueueGet: async () => queueResponse({ summary: { inProgress: 1, waitingForYou: 1, cancellable: 0 }, tasks: [], active: [], recent: [] }),
+  });
+  controller.setRuntime({
+    automationState: 'running', browserState: 'ready', guideActive: false,
+    dailyUsage: { totals: { view: 28, like: 4, collect: 2, comment: 1 } },
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '小萝北', platform: 'xiaohongshu' });
+  $(window, '#content-library-entry').click();
+  await flush(8);
+
+  assert.equal(controller.currentPage(), 'home');
+  assert.equal($(window, '#content-home-inspiration-count').textContent, '4');
+  assert.equal($(window, '#content-home-draft-count').textContent, '1');
+  assert.match($(window, '#content-featured').textContent ?? '', /通勤显瘦穿搭公式.*AI 已基于它完成参考创作.*梨形身材这样穿/s);
+  assert.match($(window, '#content-work-timeline').textContent ?? '', /计划完成.*已确认只调整正文.*判断中\.\.\./s);
+  assert.match($(window, '#content-runtime-summary').textContent ?? '', /浏览 28 条.*点赞 4 条.*收藏 2 条/s);
+  assert.equal($(window, '#content-runtime-browser').textContent, '收起浏览器');
+  assert.equal($(window, '#content-runtime-toggle').textContent, '关闭环境');
+  assert.equal(window.document.querySelectorAll('.content-work-message').length, 2);
+});
+
 test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async () => {
   const listCalls: Array<{ envId: string; options: { mode: string; sort: string; limit: number; offset: number } }> = [];
   const { window, controller } = boot({
@@ -272,7 +313,7 @@ test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async
     curatedGet: async (_envId: string, id: number) => ({ ok: true, data: { item: detail({ id, title: `详情 ${id}` }) } }),
   });
   controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu', inspirationCount: 25 });
-  $(window, '#content-library-entry').dispatchEvent(new window.Event('click'));
+  controller.openLibrary();
   await flush();
 
   assert.equal(hidden($(window, '#content-workspace')), false);

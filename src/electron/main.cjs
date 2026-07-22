@@ -6562,6 +6562,75 @@ ipcMain.handle('publish-draft:get', (_event, envId, id) => {
   return delegatedTaskRequest(envId, `/publish-drafts/${id}`, { includeEnvQuery: true });
 });
 
+// 待审稿编辑与 AI 调整只接受白名单 DTO。路径、envKey、客户令牌与账号绑定仍由 main/Cloud 权威注入。
+ipcMain.handle('publish-draft:edit', (_event, envId, id, payload) => {
+  if (!Number.isInteger(id) || id <= 0) return { ok: false, status: 400, error: 'invalid_publish_draft_id' };
+  const raw = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : null;
+  const allowed = new Set(['expectedVersion', 'title', 'content', 'topics']);
+  const keys = raw ? Object.keys(raw) : [];
+  const patchKeys = keys.filter((key) => key !== 'expectedVersion');
+  if (!raw || keys.some((key) => !allowed.has(key)) || patchKeys.length === 0
+      || !Number.isInteger(raw.expectedVersion) || raw.expectedVersion < 0
+      || (raw.title !== undefined && (typeof raw.title !== 'string' || !raw.title.trim()))
+      || (raw.content !== undefined && (typeof raw.content !== 'string' || !raw.content.trim()))
+      || (raw.topics !== undefined && (!Array.isArray(raw.topics) || !raw.topics.every((topic) => typeof topic === 'string')))) {
+    return { ok: false, status: 400, error: 'invalid_publish_draft_edit' };
+  }
+  const handle = resolveHandle(envId);
+  if (!handle || !handle.profileId) return { ok: false, status: 400, error: 'selected_environment_required' };
+  return delegatedTaskRequest(
+    envId,
+    `/environments/${encodeURIComponent(handle.profileId)}/publish-drafts/${id}`,
+    { method: 'PATCH', body: raw, includeEnvBody: false },
+  );
+});
+
+ipcMain.handle('publish-draft:refine', (_event, envId, id, payload) => {
+  if (!Number.isInteger(id) || id <= 0) return { ok: false, status: 400, error: 'invalid_publish_draft_id' };
+  const raw = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : null;
+  const allowed = new Set(['expectedVersion', 'scope', 'instruction', 'selection']);
+  const scopes = new Set(['whole', 'body', 'images', 'selected_image', 'selected_text']);
+  const instruction = typeof raw?.instruction === 'string' ? raw.instruction.trim() : '';
+  const selection = raw?.selection;
+  const selectedTextValid = raw?.scope !== 'selected_text'
+    || (selection && typeof selection === 'object' && !Array.isArray(selection)
+      && Object.keys(selection).every((key) => ['start', 'end', 'text'].includes(key))
+      && Number.isInteger(selection.start) && Number.isInteger(selection.end)
+      && selection.start >= 0 && selection.end > selection.start && typeof selection.text === 'string');
+  const selectedImageValid = raw?.scope !== 'selected_image'
+    || (selection && typeof selection === 'object' && !Array.isArray(selection)
+      && Object.keys(selection).length === 1 && typeof selection.imageUrl === 'string' && Boolean(selection.imageUrl.trim()));
+  const selectionForbidden = raw && raw.scope !== 'selected_text' && raw.scope !== 'selected_image'
+    && raw.selection !== undefined && raw.selection !== null;
+  if (!raw || Object.keys(raw).some((key) => !allowed.has(key))
+      || !Number.isInteger(raw.expectedVersion) || raw.expectedVersion < 0
+      || !scopes.has(raw.scope) || !instruction || instruction.length > 1000
+      || !selectedTextValid || !selectedImageValid || selectionForbidden) {
+    return { ok: false, status: 400, error: 'invalid_publish_draft_refinement' };
+  }
+  const handle = resolveHandle(envId);
+  if (!handle || !handle.profileId) return { ok: false, status: 400, error: 'selected_environment_required' };
+  return delegatedTaskRequest(
+    envId,
+    `/environments/${encodeURIComponent(handle.profileId)}/publish-drafts/${id}/refinements`,
+    { method: 'POST', body: { ...raw, instruction }, includeEnvBody: false },
+  );
+});
+
+ipcMain.handle('publish-draft:refinement-get', (_event, envId, id, jobId = 'latest') => {
+  const key = String(jobId || '').trim();
+  if (!Number.isInteger(id) || id <= 0
+      || (key !== 'latest' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(key))) {
+    return { ok: false, status: 400, error: 'invalid_publish_draft_refinement_target' };
+  }
+  const handle = resolveHandle(envId);
+  if (!handle || !handle.profileId) return { ok: false, status: 400, error: 'selected_environment_required' };
+  return delegatedTaskRequest(
+    envId,
+    `/environments/${encodeURIComponent(handle.profileId)}/publish-drafts/${id}/refinements/${encodeURIComponent(key)}`,
+  );
+});
+
 // 当前账号已被平台接受的定时小时；路径、客户令牌、envKey 与账号绑定均由 main/Cloud 收口。
 ipcMain.handle('publish-schedule:occupied-hours', (_event, envId) =>
   delegatedTaskRequest(envId, '/publish-schedule/occupied-hours', { includeEnvQuery: true }));

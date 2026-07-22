@@ -906,6 +906,73 @@ test('洗稿稿件审核：点击取消直接提交驳回决定并携带当前�
   assert.equal($(w, '#pub-card').dataset.pubState, 'rejected');
 });
 
+test('待审稿可直接编辑，并按正文范围创建持久 AI 调整任务且不触发发布', async () => {
+  let current = {
+    id: 91, platform: 'xiaohongshu', kind: 'rewrite', title: '原稿标题', contentPreview: '原稿正文', content: '原稿正文',
+    topics: ['原话题'], images: ['https://cdn.example.com/91.jpg'], contentVersion: 3, updatedAt: Date.now(),
+    publishMode: 'immediate', publishTime: null,
+  };
+  const editCalls: unknown[][] = [];
+  const refineCalls: unknown[][] = [];
+  const approvalCalls: unknown[][] = [];
+  const job = {
+    id: '00000000-0000-4000-8000-000000000091', recordId: 91, expectedVersion: 4, scope: 'body', status: 'queued',
+    progress: [{ seq: 1, stage: '计划', status: 'running', summary: '核对只调整正文的要求。', at: 1 }],
+    resultVersion: null, error: null, createdAt: 1, updatedAt: 1,
+  };
+  const { w } = await boot({
+    envId: 'u1',
+    publish: { state: 'pending', title: current.title, code: '#91', at: new Date().toISOString() },
+    publishPreview: { recordId: 91, ...current },
+  }, {
+    publishDraftList: async () => ({ ok: true, data: { items: [current], total: 1, limit: 12, offset: 0 } }),
+    publishDraftGet: async () => ({ ok: true, data: { item: current } }),
+    publishDraftEdit: async (...args: unknown[]) => {
+      editCalls.push(args);
+      const payload = args[2] as Record<string, unknown>;
+      current = { ...current, title: String(payload.title), content: String(payload.content), topics: payload.topics as string[], contentVersion: 4 };
+      return { ok: true, data: { data: { item: current } } };
+    },
+    publishDraftRefine: async (...args: unknown[]) => {
+      refineCalls.push(args);
+      return { ok: true, data: { data: { job } } };
+    },
+    publishDraftRefinementGet: async () => ({ ok: true, data: { data: { job: { ...job, status: 'running' } } } }),
+    publishApproval: async (...args: unknown[]) => { approvalCalls.push(args); return { ok: false, reason: 'not_used' }; },
+  });
+
+  $(w, '#pub-preview-link').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 5; i++) await tick();
+  const editButton = Array.from(w.document.querySelectorAll('.draft-refinement-head button'))
+    .find((button) => button.textContent === '直接编辑') as HTMLButtonElement;
+  editButton.click();
+  const title = w.document.querySelector('.draft-edit-panel input[aria-label="稿件标题"]') as HTMLInputElement;
+  const content = w.document.querySelector('.draft-edit-panel textarea[aria-label="稿件正文"]') as HTMLTextAreaElement;
+  const topics = w.document.querySelector('.draft-edit-panel input[aria-label="稿件话题"]') as HTMLInputElement;
+  title.value = '编辑后的标题';
+  content.value = '编辑后的正文';
+  topics.value = '#新话题 #可编辑';
+  (Array.from(w.document.querySelectorAll('.draft-edit-actions button')).find((button) => button.textContent === '保存修改') as HTMLButtonElement).click();
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(editCalls.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(editCalls[0])), ['u1', 91, { expectedVersion: 3, title: '编辑后的标题', content: '编辑后的正文', topics: ['新话题', '可编辑'] }]);
+  assert.equal($(w, '#publish-preview-title').textContent, '编辑后的标题');
+  assert.match($(w, '#publish-preview-content').textContent ?? '', /修改已保存；仍是草稿，不会自动发布/);
+
+  const bodyScope = Array.from(w.document.querySelectorAll('.draft-refinement-scopes button'))
+    .find((button) => button.textContent === '只改正文') as HTMLButtonElement;
+  bodyScope.click();
+  const instruction = w.document.querySelector('.draft-refinement-instruction') as HTMLTextAreaElement;
+  instruction.value = '表达更口语，保留原意';
+  instruction.dispatchEvent(new w.Event('input'));
+  (Array.from(w.document.querySelectorAll('.draft-edit-actions button')).find((button) => button.textContent === '开始调整') as HTMLButtonElement).click();
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(refineCalls.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(refineCalls[0])), ['u1', 91, { expectedVersion: 4, scope: 'body', instruction: '表达更口语，保留原意' }]);
+  assert.match($(w, '.draft-refinement-progress').textContent ?? '', /实时工作过程.*计划中\.\.\..*核对只调整正文的要求/s);
+  assert.equal(approvalCalls.length, 0, '编辑与调整都不得触发发布');
+});
+
 test('多条待审批稿按灵感池卡片展示，批准时可定时发布并继续处理剩余稿件', async () => {
   const now = Date.parse('2026-07-20T20:00:00+08:00');
   const scheduledInput = '2026-07-21T08:00';
