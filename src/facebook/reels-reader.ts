@@ -28,6 +28,11 @@ export interface FacebookReelCard {
   videoKey: string;
 }
 
+export type FacebookReelsEntryResult =
+  | { state: 'ready'; card: FacebookReelCard }
+  | { state: 'route_ready'; href: string }
+  | { state: 'failed'; reason: 'navigation_error' | 'route_unconfirmed' };
+
 export interface FacebookReelsReaderDeps {
   cdp: BrowseCdp;
   sleep?: (ms: number) => Promise<void>;
@@ -55,6 +60,18 @@ const DEFAULTS: Required<FacebookReelsReaderOptions> = {
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 export const FACEBOOK_REELS_ENTRY_URL = 'https://www.facebook.com/reel/?s=tab';
+
+const REEL_ROUTE_PROBE_JS = `(() => {
+  /* __AIDCP_REEL_ROUTE_PROBE__ */
+  try {
+    const url = new URL(location.href);
+    const hostOk = /(^|\\.)facebook\\.com$/i.test(url.hostname);
+    const routeOk = /^\\/reel(?:\\/|$)/i.test(url.pathname);
+    return JSON.stringify({ ok: hostOk && routeOk, href: url.href });
+  } catch {
+    return JSON.stringify({ ok: false, href: '' });
+  }
+})()`;
 
 interface ReelProbe {
   ok: boolean;
@@ -374,14 +391,25 @@ export class FacebookReelsReader {
     this.opts = { ...DEFAULTS, ...options };
   }
 
-  async enter(): Promise<FacebookReelCard | null> {
+  async enter(): Promise<FacebookReelsEntryResult> {
     try {
       await this.cdp.send('Page.navigate', { url: FACEBOOK_REELS_ENTRY_URL });
     } catch (error) {
       this.log(`[fb-reels] 导航失败：${(error as Error).message}`);
-      return null;
+      return { state: 'failed', reason: 'navigation_error' };
     }
-    return this.settleActive();
+    const card = await this.settleActive();
+    if (card) return { state: 'ready', card };
+    try {
+      const route = await evalJson<{ ok?: boolean; href?: string }>(this.cdp, REEL_ROUTE_PROBE_JS);
+      if (route?.ok && typeof route.href === 'string' && route.href) {
+        this.log(`[fb-reels] Reels 路由已就绪，首卡仍在水合：${route.href}`);
+        return { state: 'route_ready', href: route.href };
+      }
+    } catch (error) {
+      this.log(`[fb-reels] Reels 路由复验失败：${(error as Error).message}`);
+    }
+    return { state: 'failed', reason: 'route_unconfirmed' };
   }
 
   async readActive(): Promise<FacebookReelCard | null> {

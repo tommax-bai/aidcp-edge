@@ -24,6 +24,7 @@ import type {
   FacebookReelsReader,
   FacebookReelCard,
   FacebookReelFollowResult,
+  FacebookReelsEntryResult,
 } from '../../src/facebook/reels-reader.js';
 import { selectPlatformDriver } from '../../src/platform/index.js';
 import type { Envelope, ActionCompletedPayload, NoteDetailPayload, PageCardsPayload, ProfileDetailPayload } from '../../src/comm/protocol.js';
@@ -47,6 +48,7 @@ interface Harness {
   scrollCalls: number;
   likeShadowFlags: Array<boolean | undefined>;
   reelFollowCalls: Array<{ noteId: string; shadow: boolean }>;
+  reelNextCalls: string[];
 }
 
 function makeSession(opts: {
@@ -68,6 +70,8 @@ function makeSession(opts: {
   commentHandler?: FacebookCommentHandler;
   homeState?: FacebookHomeFeedStateResult;
   reelCards?: FacebookReelCard[];
+  reelEntry?: FacebookReelsEntryResult;
+  reelSettles?: Array<FacebookReelCard | null>;
   reelFollow?: (noteId: string, shadow: boolean) => FacebookReelFollowResult;
 } = {}): Harness {
   const cards: PageCardsPayload[] = [];
@@ -172,14 +176,26 @@ function makeSession(opts: {
     },
   } as unknown as FacebookLikeExecutor;
   const reelQueue = [...(opts.reelCards ?? [])];
+  const reelNextCalls: string[] = [];
   let activeReel: FacebookReelCard | undefined;
   const reelsReader = {
     enter: async () => {
+      if (opts.reelEntry) {
+        if (opts.reelEntry.state === 'ready') activeReel = opts.reelEntry.card;
+        return opts.reelEntry;
+      }
       activeReel = reelQueue.shift();
-      return activeReel ?? null;
+      return activeReel
+        ? { state: 'ready' as const, card: activeReel }
+        : { state: 'failed' as const, reason: 'route_unconfirmed' as const };
     },
     readActive: async () => activeReel ?? null,
+    settleActive: async () => {
+      if (opts.reelSettles?.length) activeReel = opts.reelSettles.shift() ?? undefined;
+      return activeReel ?? null;
+    },
     next: async () => {
+      reelNextCalls.push('next');
       activeReel = reelQueue.shift();
       return activeReel ?? null;
     },
@@ -225,6 +241,7 @@ function makeSession(opts: {
     delegated,
     likeShadowFlags,
     reelFollowCalls,
+    reelNextCalls,
     get ensureCalls() {
       return state.ensureCalls;
     },
@@ -971,6 +988,45 @@ test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，�
     ['看了「first reel summary」 · Bao', '看了「second reel summary」 · Lan'],
     '每次已确认的新 Reel 切卡各有一条读活动',
   );
+});
+
+test('Reels 路由先到、首卡晚到时保持 pending，恢复当前卡前不切下一条也不退回 Feed', async () => {
+  const first: FacebookReelCard = {
+    noteId: 'https://www.facebook.com/reel/333',
+    summary: 'late hydrated reel',
+    author: 'Ming',
+    videoKey: 'video-333',
+  };
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [{ cards: [], degraded: false, reason: 'no_feed' }],
+    homeState: { state: 'empty_feed_confirmed', generation: 'g-late' },
+    reelEntry: { state: 'route_ready', href: 'https://www.facebook.com/reel/?s=tab' },
+    reelSettles: [null, first],
+  });
+  await h.session.start();
+  const initialEnsureCalls = h.ensureCalls;
+
+  await h.session.onCloudCommand(makeEnv('page.scroll', { reason: 'empty_feed_reels_fallback' }));
+  assert.deepEqual(h.actions.at(-1), { action: 'scroll', ok: false, reason: 'reels_pending' });
+  assert.equal(h.cards.length, 1, 'route_ready 不是卡片证据，不得上报 Reels 卡');
+  assert.equal(h.logs.some((line) => line.includes('"type":"reel_view"')), false, 'route_ready 不得伪计一次浏览');
+
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  assert.deepEqual(h.actions.at(-1), { action: 'scroll', ok: false, reason: 'reels_pending' });
+  assert.equal(h.reelNextCalls.length, 0, '首卡未恢复前不得执行 next');
+  assert.equal(h.ensureCalls, initialEnsureCalls, 'pending Reels 不得重新导航 Feed/home');
+
+  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  assert.equal(h.cards.at(-1)?.listKind, 'reels');
+  assert.equal(h.cards.at(-1)?.cards[0]?.noteId, first.noteId);
+  assert.equal(h.reelNextCalls.length, 0, '首张可读卡应原地恢复，不能被当成下一条越过');
+  assert.equal(h.ensureCalls, initialEnsureCalls);
+  const reelViews = h.logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string })
+    .filter((event) => event.type === 'reel_view');
+  assert.equal(reelViews.length, 1, '只有首卡实际可读后才计一次浏览');
 });
 
 test('Reels 关注：shadow 标志与 reader 的真实终态原样回执', async () => {

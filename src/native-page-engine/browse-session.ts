@@ -48,19 +48,19 @@ export class NativeBrowseSession implements EdgeBrowseSession {
 
   async onCloudCommand(env: Envelope): Promise<void> {
     if (env.type === 'pacing.update') return;
-    if (this.closed || this.blocked) {
-      this.options.client.reportActionCompleted({ action: env.type, ok: false, reason: 'native_session_quiesced' });
+    const ownedTaskId = this.ownedTaskId(env);
+    if (this.closed || (this.blocked && !ownedTaskId)) {
+      this.reportFailure(env, 'native_session_quiesced', 'not_started');
       return;
     }
     const command = nativeCommandForEnvelope(env);
     if (!command) {
-      this.options.client.reportActionCompleted({ action: env.type, ok: false, reason: 'native_command_not_mapped' });
+      this.reportFailure(env, 'native_command_not_mapped', 'not_started');
       return;
     }
-    const taskId = this.taskId(env);
     const controller = new AbortController();
     this.activeAbort = controller;
-    const active = this.executeAndReport(command, taskId, controller.signal, env);
+    const active = this.executeAndReport(command, ownedTaskId ?? this.ownerId, controller.signal, env);
     this.active = active;
     try {
       await active;
@@ -68,11 +68,13 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     } catch (error) {
       const detail = error as { code?: string; detail?: { effectPhase?: string; reasonCode?: string } };
       const phase = detail.detail?.effectPhase;
-      this.options.client.reportActionCompleted({
-        action: env.type,
-        ok: false,
-        reason: phase === 'ambiguous' ? 'native_effect_ambiguous' : detail.code ?? 'native_command_failed',
-      });
+      this.reportFailure(
+        env,
+        phase === 'ambiguous' ? 'native_effect_ambiguous' : detail.code ?? 'native_command_failed',
+        phase === 'not_started' || phase === 'dispatched' || phase === 'confirmed' || phase === 'ambiguous'
+          ? phase
+          : 'ambiguous',
+      );
       this.logger(`[native-page] ${env.type} failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       if (this.active === active) this.active = undefined;
@@ -151,6 +153,17 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     switch (output.kind) {
       case 'page_cards':
         this.options.client.reportPageCards({ ...(value as unknown as PageCardsPayload), startupId: this.options.startupId });
+        if (env?.type === 'search.execute') {
+          const cards = Array.isArray(value.cards) ? value.cards : [];
+          this.options.client.reportActionCompleted({
+            action: 'search',
+            ok: true,
+            ...this.searchContext(env),
+            actuated: true,
+            searchOutcome: cards.length > 0 ? 'results_ready' : 'no_results',
+            resultCount: cards.length,
+          });
+        }
         return;
       case 'note_detail':
         this.options.client.reportNoteDetail(value as unknown as NoteDetailPayload);
@@ -166,6 +179,24 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         return;
       case 'action_receipt': {
         const receipt = value as { action: string; ok: boolean; reason?: string };
+        if (env?.type === 'search.execute') {
+          const ok = receipt.ok && execution.effectPhase === 'confirmed';
+          if (!ok) {
+            this.reportFailure(env, receipt.reason ?? execution.reasonCode, execution.effectPhase);
+            return;
+          }
+          this.options.client.reportActionCompleted({
+            action: 'search',
+            ok: true,
+            ...this.searchContext(env),
+            actuated: true,
+            searchOutcome: 'results_ready',
+            resultCount: Number.isInteger(value.resultCount) && Number(value.resultCount) >= 0
+              ? Number(value.resultCount)
+              : undefined,
+          });
+          return;
+        }
         this.options.client.reportActionCompleted({
           ...receipt,
           ok: receipt.ok && execution.effectPhase === 'confirmed',
@@ -182,9 +213,51 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     }
   }
 
-  private taskId(env: Envelope): string {
+  private ownedTaskId(env: Envelope): string | undefined {
     const payload = env.payload as { taskId?: unknown } | undefined;
-    return typeof payload?.taskId === 'string' && payload.taskId ? payload.taskId : this.ownerId;
+    return typeof payload?.taskId === 'string' && payload.taskId.trim() ? payload.taskId.trim() : undefined;
+  }
+
+  private searchContext(env: Envelope): Pick<
+    ActionCompletedPayload,
+    'activityId' | 'purpose' | 'scope'
+  > {
+    const payload = (env.payload ?? {}) as {
+      activityId?: unknown;
+      purpose?: unknown;
+      scope?: unknown;
+      taskId?: unknown;
+    };
+    const activityId = typeof payload.activityId === 'string' && payload.activityId.trim()
+      ? payload.activityId.trim()
+      : env.id;
+    const purpose = payload.purpose === 'discovery' || payload.purpose === 'task_targeting' || payload.purpose === 'operator'
+      ? payload.purpose
+      : typeof payload.taskId === 'string' && payload.taskId.trim()
+        ? 'task_targeting'
+        : 'discovery';
+    const scope = payload.scope === 'container' ? 'container' : 'global';
+    return { activityId, purpose, scope };
+  }
+
+  private reportFailure(
+    env: Envelope,
+    reason: string,
+    effectPhase: NativePageCommandExecution['effectPhase'],
+  ): void {
+    if (env.type !== 'search.execute') {
+      this.options.client.reportActionCompleted({ action: env.type, ok: false, reason });
+      return;
+    }
+    const actuated = effectPhase !== 'not_started';
+    this.options.client.reportActionCompleted({
+      action: 'search',
+      ok: false,
+      reason,
+      ...this.searchContext(env),
+      actuated,
+      searchOutcome: actuated ? 'failed_after_submit' : 'not_submitted',
+    });
   }
 
   private async waitActive(timeoutMs: number): Promise<boolean> {

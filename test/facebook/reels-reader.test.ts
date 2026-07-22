@@ -43,6 +43,7 @@ function scriptedCdp(options: {
   likeVerify?: unknown[];
   followTargets?: unknown[];
   nextTarget?: unknown;
+  routes?: unknown[];
 }): {
   cdp: BrowseCdp;
   clicks: Array<Record<string, unknown>>;
@@ -54,6 +55,7 @@ function scriptedCdp(options: {
   let verifyIndex = 0;
   let pickerIndex = 0;
   let followIndex = 0;
+  let routeIndex = 0;
   const clicks: Array<Record<string, unknown>> = [];
   const keys: Array<Record<string, unknown>> = [];
   const navigations: string[] = [];
@@ -98,6 +100,12 @@ function scriptedCdp(options: {
         return { result: { value: JSON.stringify(value) } } as never;
       }
       if (expression.includes('__AIDCP_REEL_NEXT_TARGET__')) return { result: { value: JSON.stringify(options.nextTarget) } } as never;
+      if (expression.includes('__AIDCP_REEL_ROUTE_PROBE__')) {
+        const values = options.routes ?? [];
+        const value = values[Math.min(routeIndex, Math.max(0, values.length - 1))];
+        routeIndex += 1;
+        return { result: { value: JSON.stringify(value) } } as never;
+      }
       if (expression.includes('__AIDCP_REEL_PROBE__')) {
         const values = options.probes ?? [];
         const value = values[Math.min(probeIndex, Math.max(0, values.length - 1))];
@@ -120,6 +128,20 @@ test('Reels：活动视频摘要映射为唯一当前卡', async () => {
     reactionText: '5.8K',
     videoKey: 'video-111',
   });
+});
+
+test('Reels：导航后首卡超时但 canonical Reel 路由已确认时保留 route_ready 中间态', async () => {
+  const scripted = scriptedCdp({
+    probes: [{ ok: false, reason: 'no_active_video' }],
+    routes: [{ ok: true, href: 'https://www.facebook.com/reel/?s=tab' }],
+  });
+  const result = await new FacebookReelsReader(
+    { cdp: scripted.cdp, sleep: async () => {} },
+    { settleRounds: 2, settleMs: 1 },
+  ).enter();
+
+  assert.deepEqual(result, { state: 'route_ready', href: 'https://www.facebook.com/reel/?s=tab' });
+  assert.deepEqual(scripted.navigations, ['https://www.facebook.com/reel/?s=tab']);
 });
 
 test('Reels 点赞：命令 noteId 与活动 Reel 不同则零点击 fail-closed', async () => {

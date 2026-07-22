@@ -289,6 +289,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private activeFeedUrl: string;
   /** 当前列表形态；只有 Cloud 的 empty_feed_reels_fallback 授权可以把 feed 切成 reels。 */
   private listMode: 'feed' | 'reels' = 'feed';
+  /** 已进入 Reels 路由但首卡还未完成水合；恢复前绝不切下一条，也不退回 Feed。 */
+  private reelsTransitionPending = false;
   /** 最近一次 page.cards 到达时间；用于吸收云端评估耗时，避免 dwellMs 变成额外固定等待。 */
   private lastCardsAt = 0;
   /** 最近一次 refresh 的 Page.reload 兜底时刻；配 REFRESH_RELOAD_FLOOR_MS 做频率下限。 */
@@ -1490,11 +1492,20 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   /** Cloud 授权后的唯一 Reels 入口；普通 0 卡/滚动命令不可达。 */
   private async enterReels(): Promise<TerminalReport> {
     if (this.listMode === 'reels') return this.scrollReels();
-    const card = await this.reelsReader.enter();
-    if (!card) return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'no_target' } };
+    const result = await this.reelsReader.enter();
+    if (result.state === 'failed') {
+      return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'no_target' } };
+    }
     this.listMode = 'reels';
     this.activeFeedUrl = FACEBOOK_REELS_ENTRY_URL;
     this.resetCursor();
+    if (result.state === 'route_ready') {
+      this.reelsTransitionPending = true;
+      this.log(`[fb-session] Cloud 已授权首页空态 fallback，Reels 路由已确认、首卡待水合`);
+      return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'reels_pending' } };
+    }
+    const card = result.card;
+    this.reelsTransitionPending = false;
     this.seedReel(card);
     this.log(`[fb-session] Cloud 已授权首页空态 fallback → Reels ${card.noteId}`);
     return { type: 'cards', payload: this.toReelPageCards(card), presence: '正在浏览 Reels 视频流…' };
@@ -1523,6 +1534,16 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   }
 
   private async scrollReels(): Promise<TerminalReport> {
+    if (this.reelsTransitionPending) {
+      const card = await this.reelsReader.settleActive();
+      if (!card) {
+        return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'reels_pending' } };
+      }
+      this.reelsTransitionPending = false;
+      this.seedReel(card);
+      this.log(`[fb-session] Reels 首卡完成水合 → ${card.noteId}`);
+      return { type: 'cards', payload: this.toReelPageCards(card), presence: '正在浏览 Reels 视频流…' };
+    }
     const card = await this.reelsReader.next();
     if (!card) return { type: 'action', payload: { action: 'scroll', ok: false, reason: 'no_target' } };
     const identity = this.reelIdentity(card);
