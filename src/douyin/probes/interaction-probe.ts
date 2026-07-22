@@ -38,6 +38,7 @@ export interface DouyinPageSnapshot {
   blockReason: DouyinBlockReason;
   loginState: DouyinLoginState;
   card?: { awemeId: string; centerX: number; centerY: number };
+  like: PointTarget;
   follow: PointTarget;
   collect: PointTarget;
   interactionPrompt: PointTarget;
@@ -51,6 +52,7 @@ export interface DouyinSafeSnapshot {
   blockReason: DouyinBlockReason;
   loginState: DouyinLoginState;
   cardId?: string;
+  like: Pick<PointTarget, 'found' | 'ambiguous' | 'state' | 'evidence'>;
   follow: Pick<PointTarget, 'found' | 'ambiguous' | 'state' | 'evidence'>;
   collect: Pick<PointTarget, 'found' | 'ambiguous' | 'state' | 'evidence'>;
   interactionPrompt: Pick<PointTarget, 'found' | 'ambiguous'>;
@@ -65,6 +67,7 @@ export const DOUYIN_PAGE_SNAPSHOT_JS = String.raw`(function(){/*aidcp:douyin-pag
   function label(el){return [el.getAttribute('aria-label')||'',el.getAttribute('title')||'',el.getAttribute('data-e2e')||'',String(el.innerText||el.textContent||'').trim().slice(0,80)].join(' ').trim();}
   function exactNodes(selector){return Array.prototype.slice.call(document.querySelectorAll(selector)).filter(function(el){var r=effectiveRect(el);return !!(r&&r.width>=2&&r.height>=2&&r.bottom>0&&r.top<vh&&r.right>0&&r.left<vw);});}
   function colors(el){var nodes=[el].concat(Array.prototype.slice.call(el.querySelectorAll('svg,path')).slice(0,48)),out=[];nodes.forEach(function(n){try{var c=getComputedStyle(n);out.push(c.color||'',c.fill||'',c.stroke||'',n.getAttribute('fill')||'',n.getAttribute('stroke')||'');}catch(e){}});return out.join(' ');}
+  function likeState(el){if(!el)return {state:'unknown',evidence:'missing'};var p=el.getAttribute('aria-pressed'),e=el.getAttribute('data-e2e-state'),c=colors(el),svg=el.querySelector('svg[viewBox="0 0 24 24"]'),paths=svg?Array.prototype.slice.call(svg.querySelectorAll('path')):[],heart=paths.length===1&&/^M2\.00534 9C2\.00179 8\.91711/.test(paths[0].getAttribute('d')||''),active=/(rgb\(254\s*,\s*44\s*,\s*85\)|#fe2c55)/i.test(c),neutral=/(rgb\(255\s*,\s*255\s*,\s*255\)|#fff(?:fff)?\b)/i.test(c);if(p==='true'||e==='video-player-is-digged'||(heart&&active))return {state:'active',evidence:p==='true'?'aria_pressed':(e==='video-player-is-digged'?'digged_state':'heart_active')};if(p==='false'||(heart&&neutral&&!active))return {state:'inactive',evidence:p==='false'?'aria_pressed_false':'heart_inactive'};return {state:'unknown',evidence:heart?'heart_color_unclassified':'heart_structure_unclassified'};}
   function followState(el){if(!el)return {state:'unknown',evidence:'missing'};var l=label(el),p=el.getAttribute('aria-pressed'),c=colors(el),animated=!!el.querySelector('svg[viewBox="0 0 90 90"]');if(p==='true'||animated||/(已关注|互相关注|取消关注)/.test(l))return {state:'active',evidence:p==='true'?'aria_pressed':(animated?'follow_animation':'label_following')};if(p==='false'||/(^|\s)关注(\s|$)/.test(l)||/(rgb\(254\s*,\s*44\s*,\s*85\)|#fe2c55)/i.test(c))return {state:'inactive',evidence:p==='false'?'aria_pressed_false':(/关注/.test(l)?'label_follow':'icon_plus')};return {state:'unknown',evidence:'unclassified'};}
   function collectState(el){if(!el)return {state:'unknown',evidence:'missing'};var l=label(el),p=el.getAttribute('aria-pressed'),c=colors(el);if(p==='true'||/(取消收藏|已收藏)/.test(l)||/(rgb\(250\s*,\s*206\s*,\s*21\)|#face15|rgb\(255\s*,\s*211\s*,\s*0\))/i.test(c))return {state:'active',evidence:p==='true'?'aria_pressed':(/取消收藏|已收藏/.test(l)?'label_collected':'icon_active')};if(p==='false'||/(^|\s)收藏(\s|$)/.test(l)||/(rgb\(255\s*,\s*255\s*,\s*255\)|#fff(?:fff)?\b)/i.test(c))return {state:'inactive',evidence:p==='false'?'aria_pressed_false':(/(^|\s)收藏(\s|$)/.test(l)?'label_collect':'icon_neutral')};return {state:'unknown',evidence:'unclassified'};}
   function control(selector,stateFn){var nodes=exactNodes(selector),out={found:nodes.length===1,ambiguous:nodes.length>1};if(nodes.length===1){var p=point(nodes[0]),s=stateFn(nodes[0]),top=document.elementFromPoint?document.elementFromPoint(p.centerX,p.centerY):nodes[0];out.centerX=p.centerX;out.centerY=p.centerY;out.state=s.state;out.evidence=s.evidence;out.hitReady=!!(top&&(top===nodes[0]||nodes[0].contains(top)));}return out;}
@@ -81,7 +84,7 @@ export const DOUYIN_PAGE_SNAPSHOT_JS = String.raw`(function(){/*aidcp:douyin-pag
   var follow=control('[data-e2e="feed-follow-icon"]',followState),activeVideo=exactNodes('[data-e2e="feed-active-video"]').length===1;
   if(modalId&&activeVideo&&!follow.found&&!follow.ambiguous)follow={found:true,ambiguous:false,state:'active',evidence:'follow_control_absent'};
   var prompts=Array.prototype.slice.call(document.querySelectorAll('button')).filter(function(el){return visible(el)&&String(el.innerText||el.textContent||'').trim()==='我知道了';}),interactionPrompt={found:prompts.length===1,ambiguous:prompts.length>1};if(prompts.length===1)Object.assign(interactionPrompt,point(prompts[0]));
-  return JSON.stringify({host:host,path:path,modalId:modalId||undefined,modalReady:!!(modalId&&activeVideo),blockReason:blockReason,loginState:loginState,card:card,follow:follow,collect:control('[data-e2e="video-player-collect"]',collectState),interactionPrompt:interactionPrompt});
+  return JSON.stringify({host:host,path:path,modalId:modalId||undefined,modalReady:!!(modalId&&activeVideo),blockReason:blockReason,loginState:loginState,card:card,like:control('[data-e2e="video-player-digg"]',likeState),follow:follow,collect:control('[data-e2e="video-player-collect"]',collectState),interactionPrompt:interactionPrompt});
 })()`;
 
 export interface DmSnapshot {
@@ -89,8 +92,11 @@ export interface DmSnapshot {
   blockReason: DouyinBlockReason;
   entry: PointTarget;
   dialogOpen: boolean;
-  inboundConversation?: { centerX: number; centerY: number; proof: 'unread_badge' | 'sender_prefix' };
+  inboundConversation?: { centerX: number; centerY: number; proof: 'unread_badge' | 'sender_prefix'; fingerprint: string };
   inboundAmbiguous: boolean;
+  selectedFingerprint?: string;
+  conversationKind: 'group' | 'private' | 'unknown';
+  latestDirection: 'inbound' | 'outbound' | 'unknown';
   editor: PointTarget & { empty?: boolean };
   send: PointTarget;
 }
@@ -101,6 +107,7 @@ export const DOUYIN_DM_SNAPSHOT_JS = String.raw`(function(){/*aidcp:douyin-dm-sn
   function visible(el){var r=rect(el);if(!r||r.width<2||r.height<2||r.bottom<=0||r.top>=vh||r.right<=0||r.left>=vw)return false;var s=getComputedStyle(el);return s.display!=='none'&&s.visibility!=='hidden'&&s.opacity!=='0';}
   function pt(el){var r=rect(el);return r?{centerX:Math.round(r.left+r.width/2),centerY:Math.round(r.top+r.height/2)}:{};}
   function target(nodes){nodes=nodes.filter(visible);var out={found:nodes.length===1,ambiguous:nodes.length>1};if(nodes.length===1)Object.assign(out,pt(nodes[0]));return out;}
+  function fingerprint(value){var text=String(value||''),hash=2166136261;for(var i=0;i<text.length;i++)hash=Math.imul(hash^text.charCodeAt(i),16777619);return (hash>>>0).toString(16);}
   var host=String(location.hostname||'').toLowerCase(),body=String((document.body&&document.body.innerText)||'').slice(0,5000),isDouyin=host==='douyin.com'||host.endsWith('.douyin.com');
   var blockReason=!isDouyin?'not_douyin':(/安全验证|完成验证|拖动滑块|访问过于频繁/.test(body)?'challenge':'none');
   var entry=target(Array.prototype.slice.call(document.querySelectorAll('[data-e2e="im-entry"]'))),dialog=Array.prototype.slice.call(document.querySelectorAll('[data-e2e="im-dialog"]')).filter(visible);
@@ -108,13 +115,17 @@ export const DOUYIN_DM_SNAPSHOT_JS = String.raw`(function(){/*aidcp:douyin-dm-sn
   if(dialog.length===1){Array.prototype.slice.call(dialog[0].querySelectorAll('[data-e2e="conversation-item"]')).filter(visible).forEach(function(item){
     var preview=item.querySelector('pre[class*="ConversationItemHint"],pre'),text=String(preview&&preview.textContent||'').trim(),unread=item.querySelector('[class*="UnReadCount"] [class*="badge-count"],[class*="UnreadCount"] [class*="badge-count"],[class*="UnReadCount"][class*="badge"]'),sender=text.match(/^([^:：]{1,40})[:：]/);
     var system=/(授权|系统通知|账号主体|服务通知)/.test(text),outbound=/^我[:：]/.test(text),proof=(unread&&visible(unread))?'unread_badge':((sender&&sender[1]!=='我')?'sender_prefix':'');
-    if(proof&&!system&&!outbound){var p=pt(item);inbound.push({centerX:p.centerX,centerY:p.centerY,proof:proof});}
+    var title=item.querySelector('.conversationConversationItemtitle'),titleText=String(title&&title.textContent||'').trim();
+    if(proof&&!system&&!outbound&&titleText){var p=pt(item);inbound.push({centerX:p.centerX,centerY:p.centerY,proof:proof,fingerprint:fingerprint(titleText)});}
   });}
+  var right=dialog.length===1?dialog[0].querySelector('.componentsRightPanelwrapper'):null,selectedTitle=right&&right.querySelector('.RightPanelHeadertitle'),selectedTitleText=String(selectedTitle&&selectedTitle.textContent||'').trim(),selectedFingerprint=selectedTitleText?fingerprint(selectedTitleText):undefined;
+  var messageBoxes=right?Array.prototype.slice.call(right.querySelectorAll('[class*="messageMessageBoxmessageBox"]')):[],senderTitles=right?right.querySelectorAll('.MessageBoxMessageTitleavatarName').length:0,groupSignals=right?right.querySelectorAll('.ContentBottomHasReadisGroup,.MessageItemGroupNoticeGroupNoticeBox').length:0;
+  var conversationKind=(groupSignals>0||senderTitles>0)?'group':(messageBoxes.length>0?'private':'unknown'),messageContents=messageBoxes.map(function(box){return box.querySelector('[class*="messageMessageBoxcontentBox"]');}).filter(Boolean),latestContent=messageContents[messageContents.length-1],latestDirection=latestContent?(String(latestContent.className||'').indexOf('messageMessageBoxisFromMe')>=0?'outbound':'inbound'):'unknown';
   var editorNodes=Array.prototype.slice.call(document.querySelectorAll('[data-e2e="msg-input"] textarea,[data-e2e="msg-input"] [contenteditable="true"]')).filter(function(el){var r=rect(el),container=el.closest('[data-e2e="msg-input"]');if(!r||r.height<2||!visible(container))return false;var p=[el.getAttribute('placeholder')||'',el.getAttribute('data-placeholder')||'',el.getAttribute('aria-label')||'',String(el.className||'')].join(' ');return !/搜索/.test(p);});
   var editor={found:editorNodes.length===1,ambiguous:editorNodes.length>1};
   if(editorNodes.length===1){var v='value' in editorNodes[0]?String(editorNodes[0].value||''):String(editorNodes[0].textContent||'');editor.empty=v.replace(/[\u200b\u200c\u200d\ufeff]/g,'').length===0;}
   var sends=Array.prototype.slice.call(document.querySelectorAll('[data-e2e="msg-input"] .e2e-send-msg-btn,[data-e2e="im-dialog"] button,[data-e2e="im-dialog"] [role="button"]')).filter(function(el){return visible(el)&&(/e2e-send-msg-btn/.test(String(el.className&&el.className.baseVal||el.className||''))||/^(发送|Send)$/i.test(String(el.innerText||el.getAttribute('aria-label')||'').trim()));});
-  return JSON.stringify({host:host,blockReason:blockReason,entry:entry,dialogOpen:dialog.length===1,inboundConversation:inbound[0]||undefined,inboundAmbiguous:false,editor:editor,send:target(sends)});
+  return JSON.stringify({host:host,blockReason:blockReason,entry:entry,dialogOpen:dialog.length===1,inboundConversation:inbound.length===1?inbound[0]:undefined,inboundAmbiguous:inbound.length>1,selectedFingerprint:selectedFingerprint,conversationKind:conversationKind,latestDirection:latestDirection,editor:editor,send:target(sends)});
 })()`;
 
 const DOUYIN_DM_FOCUS_JS = String.raw`(function(){/*aidcp:douyin-dm-focus*/
@@ -179,7 +190,10 @@ export type ActionStatus =
   | 'gate_rejected'
   | 'budget_exhausted'
   | 'postcondition_unknown'
-  | 'prompt_absent';
+  | 'prompt_absent'
+  | 'group_chat'
+  | 'conversation_type_unknown'
+  | 'inbound_unconfirmed';
 
 export interface ActionResult {
   status: ActionStatus;
@@ -243,6 +257,12 @@ export function toDouyinSafeSnapshot(snapshot: DouyinPageSnapshot): DouyinSafeSn
     blockReason: snapshot.blockReason,
     loginState: snapshot.loginState,
     cardId: snapshot.card?.awemeId,
+    like: {
+      found: snapshot.like.found,
+      ambiguous: snapshot.like.ambiguous,
+      state: snapshot.like.state,
+      evidence: snapshot.like.evidence,
+    },
     follow: {
       found: snapshot.follow.found,
       ambiguous: snapshot.follow.ambiguous,
@@ -266,7 +286,7 @@ export class DouyinInteractionProbe {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: RandomFn;
   private readonly settleRounds: number;
-  private budgets = { follow: 1, collect: 1, dm: 1, liveChat: 1, liveReply: 1 };
+  private budgets = { like: 1, follow: 1, collect: 1, dm: 1, liveChat: 1, liveReply: 1 };
 
   constructor(private readonly cdp: BrowseCdp, options: DouyinProbeOptions = {}) {
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -328,7 +348,7 @@ export class DouyinInteractionProbe {
       : { status: 'postcondition_unknown', executed: true, targetId: before.card.awemeId, confirmation: 'none', reason: 'modal_id_not_confirmed' };
   }
 
-  private async activateToggle(kind: 'follow' | 'collect', options: { profileId: string; execute: boolean; confirmedProfile?: string }): Promise<ActionResult> {
+  private async activateToggle(kind: 'like' | 'follow' | 'collect', options: { profileId: string; execute: boolean; confirmedProfile?: string }): Promise<ActionResult> {
     const before = await this.inspect();
     const control = before[kind];
     if (before.blockReason !== 'none') return { status: 'blocked', executed: false, confirmation: 'none', reason: before.blockReason };
@@ -352,6 +372,10 @@ export class DouyinInteractionProbe {
     return afterState === 'active'
       ? { status: 'ui_confirmed', executed: true, targetId: before.modalId, beforeState: 'inactive', afterState, confirmation: 'ui_only' }
       : { status: 'postcondition_unknown', executed: true, targetId: before.modalId, beforeState: 'inactive', afterState, confirmation: 'none', reason: 'active_state_not_confirmed' };
+  }
+
+  likeCurrent(options: { profileId: string; execute: boolean; confirmedProfile?: string }): Promise<ActionResult> {
+    return this.activateToggle('like', options);
   }
 
   followCurrent(options: { profileId: string; execute: boolean; confirmedProfile?: string }): Promise<ActionResult> {
@@ -378,8 +402,16 @@ export class DouyinInteractionProbe {
     if (!state.dialogOpen) return { ...base, status: 'postcondition_unknown', executed: false, reason: 'dm_dialog_not_open' };
     if (state.inboundAmbiguous) return { ...base, status: 'ambiguous', executed: false, reason: 'inbound_conversation_ambiguous' };
     if (!state.inboundConversation) return { ...base, status: 'target_missing', executed: false, reason: 'unique_unread_inbound_conversation_missing' };
+    const targetFingerprint = state.inboundConversation.fingerprint;
     await dispatchClick(this.cdp, state.inboundConversation.centerX, state.inboundConversation.centerY, { random: this.random, sleep: this.sleep });
-    state = await this.waitFor(() => this.inspectDm(), (value) => value.editor.found && !value.editor.ambiguous);
+    state = await this.waitFor(
+      () => this.inspectDm(),
+      (value) => value.selectedFingerprint === targetFingerprint && value.conversationKind !== 'unknown' && value.editor.found && !value.editor.ambiguous,
+    );
+    if (state.selectedFingerprint !== targetFingerprint) return { ...base, status: 'ambiguous', executed: false, reason: 'selected_conversation_not_confirmed' };
+    if (state.conversationKind === 'group') return { ...base, status: 'group_chat', executed: false, reason: 'group_conversation_forbidden' };
+    if (state.conversationKind !== 'private') return { ...base, status: 'conversation_type_unknown', executed: false, reason: 'private_conversation_unconfirmed' };
+    if (state.latestDirection !== 'inbound') return { ...base, status: 'inbound_unconfirmed', executed: false, reason: `latest_direction_${state.latestDirection}` };
     if (!state.editor.found || state.editor.ambiguous || state.editor.empty !== true) return { ...base, status: state.editor.ambiguous ? 'ambiguous' : 'target_missing', executed: false, reason: 'unique_empty_dm_editor_missing' };
     const focused = await evalJson<{ ok: boolean; reason?: string }>(this.cdp, DOUYIN_DM_FOCUS_JS);
     if (!focused.ok) return { ...base, status: 'target_missing', executed: false, reason: focused.reason ?? 'dm_focus_failed' };

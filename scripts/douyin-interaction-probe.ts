@@ -3,6 +3,7 @@
  * Bounded Douyin web probe for one explicitly named local AdsPower profile.
  *
  * Every real external side effect requires its own action flag plus an exact profile confirmation:
+ *   AIDCP_DOUYIN_PROBE_LIKE=1
  *   AIDCP_DOUYIN_PROBE_FOLLOW=1
  *   AIDCP_DOUYIN_PROBE_COLLECT=1
  *   AIDCP_DOUYIN_PROBE_DM_REPLY=1             (body fixed to 好的)
@@ -10,7 +11,7 @@
  *   AIDCP_DOUYIN_PROBE_LIVE_COMMENT_REPLY=1   (body fixed to 666)
  *   AIDCP_DOUYIN_PROBE_CONFIRM_PROFILE=<exact profile id>
  *
- * The probe never likes, submits an ordinary post comment, uploads, or publishes.
+ * The probe never submits an ordinary post comment, uploads, or publishes.
  */
 import process from 'node:process';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -63,6 +64,7 @@ interface ProbeReport {
   initial?: DouyinSafeSnapshot;
   open?: ActionResult;
   prompt?: ActionResult;
+  like?: ActionResult;
   follow?: ActionResult;
   collect?: ActionResult;
   dm?: MessageResult;
@@ -87,6 +89,7 @@ async function main(): Promise<void> {
   if (!isDouyinTargetUrl(START_URL)) throw new Error('AIDCP_DOUYIN_START_URL 必须是 douyin.com 网页');
 
   const flags = {
+    like: boolEnv('AIDCP_DOUYIN_PROBE_LIKE'),
     follow: boolEnv('AIDCP_DOUYIN_PROBE_FOLLOW'),
     collect: boolEnv('AIDCP_DOUYIN_PROBE_COLLECT'),
     dm: boolEnv('AIDCP_DOUYIN_PROBE_DM_REPLY'),
@@ -136,7 +139,7 @@ async function main(): Promise<void> {
     await session.cdp.send('Page.bringToFront');
     const probe = new DouyinInteractionProbe(session.cdp);
 
-    if (flags.follow || flags.collect) {
+    if (flags.like || flags.follow || flags.collect) {
       await navigateAndSettle(session, START_URL);
       report.initial = toDouyinSafeSnapshot(await probe.inspect());
       console.log(`[douyin-probe] initial host=${report.initial.host} path=${report.initial.path} block=${report.initial.blockReason} login=${report.initial.loginState}`);
@@ -144,6 +147,10 @@ async function main(): Promise<void> {
       logAction('open', report.open);
       report.prompt = await probe.dismissKnownInteractionPrompt();
       logAction('interaction-prompt', report.prompt);
+      if (flags.like) {
+        report.like = await probe.likeCurrent({ profileId: PROFILE_ID, execute: true, confirmedProfile });
+        logAction('like', report.like);
+      }
       if (flags.follow) {
         report.follow = await probe.followCurrent({ profileId: PROFILE_ID, execute: true, confirmedProfile });
         logAction('follow', report.follow);
@@ -180,7 +187,7 @@ async function main(): Promise<void> {
     }
 
     console.log(`[douyin-probe] report=${JSON.stringify(report)}`);
-    const results = [report.follow, report.collect, report.dm, report.liveChat, report.liveReply].filter((value): value is ActionResult | MessageResult => Boolean(value));
+    const results = [report.like, report.follow, report.collect, report.dm, report.liveChat, report.liveReply].filter((value): value is ActionResult | MessageResult => Boolean(value));
     if (results.some((value) => !['ui_confirmed', 'already_active'].includes(value.status))) process.exitCode = 1;
   } finally {
     try { session?.close(); } catch { /* disconnect only; keep AdsPower open */ }

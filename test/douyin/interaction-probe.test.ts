@@ -7,6 +7,7 @@ import { JSDOM } from 'jsdom';
 
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import {
+  DOUYIN_DM_SNAPSHOT_JS,
   DOUYIN_PAGE_SNAPSHOT_JS,
   DouyinInteractionProbe,
   hasExactAdsPowerProfileMarker,
@@ -36,6 +37,12 @@ function evaluatePage(html: string, url = 'https://www.douyin.com/jingxuan'): Do
   return JSON.parse(dom.window.eval(DOUYIN_PAGE_SNAPSHOT_JS) as string) as DouyinPageSnapshot;
 }
 
+function evaluateDm(html: string, url = 'https://www.douyin.com/jingxuan'): DmSnapshot {
+  const dom = new JSDOM(html, { url, runScripts: 'outside-only' });
+  installGeometry(dom);
+  return JSON.parse(dom.window.eval(DOUYIN_DM_SNAPSHOT_JS) as string) as DmSnapshot;
+}
+
 function pageSnapshot(overrides: Partial<DouyinPageSnapshot> = {}): DouyinPageSnapshot {
   return {
     host: 'www.douyin.com',
@@ -44,6 +51,7 @@ function pageSnapshot(overrides: Partial<DouyinPageSnapshot> = {}): DouyinPageSn
     modalReady: true,
     blockReason: 'none',
     loginState: 'logged_in',
+    like: { found: true, ambiguous: false, centerX: 1040, centerY: 350, state: 'inactive', evidence: 'heart_inactive' },
     follow: { found: true, ambiguous: false, centerX: 1040, centerY: 250, state: 'inactive', evidence: 'label_follow' },
     collect: { found: true, ambiguous: false, centerX: 1040, centerY: 450, state: 'inactive', evidence: 'label_collect' },
     interactionPrompt: { found: false, ambiguous: false },
@@ -57,8 +65,11 @@ function dmSnapshot(overrides: Partial<DmSnapshot> = {}): DmSnapshot {
     blockReason: 'none',
     entry: { found: true, ambiguous: false, centerX: 1080, centerY: 40 },
     dialogOpen: true,
-    inboundConversation: { centerX: 900, centerY: 160, proof: 'sender_prefix' },
+    inboundConversation: { centerX: 900, centerY: 160, proof: 'unread_badge', fingerprint: 'private-fixture' },
     inboundAmbiguous: false,
+    selectedFingerprint: 'private-fixture',
+    conversationKind: 'private',
+    latestDirection: 'inbound',
     editor: { found: true, ambiguous: false, centerX: 990, centerY: 700, empty: true },
     send: { found: true, ambiguous: false, centerX: 1160, centerY: 700 },
     ...overrides,
@@ -107,10 +118,11 @@ function fakeCdp(options: { pages?: DouyinPageSnapshot[]; dms?: DmSnapshot[]; li
   return { cdp, calls };
 }
 
-test('page snapshot binds a stable modal and one-way follow/collect controls', () => {
+test('page snapshot binds a stable modal and one-way like/follow/collect controls', () => {
   const snapshot = evaluatePage(`<!doctype html><html><body>
     <a href="/user/self" data-rect="10,10,40,40"></a>
     <div data-e2e="feed-active-video" data-rect="100,80,900,650"></div>
+    <button data-e2e="video-player-digg" data-rect="1030,320,60,60"><svg viewBox="0 0 24 24" style="color:rgb(255,255,255)" data-rect="1040,330,28,28"><path fill="currentColor" d="M2.00534 9C2.00179 8.91711 2 8.83376 2 8.75"></path></svg></button>
     <button data-e2e="feed-follow-icon" data-rect="1030,220,60,40">关注</button>
     <button data-e2e="video-player-collect" aria-pressed="false" data-rect="1030,420,60,60">收藏</button>
   </body></html>`, 'https://www.douyin.com/jingxuan?modal_id=7657570185380990235');
@@ -118,6 +130,7 @@ test('page snapshot binds a stable modal and one-way follow/collect controls', (
   assert.equal(snapshot.loginState, 'logged_in');
   assert.equal(snapshot.modalId, '7657570185380990235');
   assert.equal(snapshot.modalReady, true);
+  assert.equal(snapshot.like.state, 'inactive');
   assert.equal(snapshot.follow.state, 'inactive');
   assert.equal(snapshot.collect.state, 'inactive');
 });
@@ -152,6 +165,45 @@ test('follow defaults to shadow and never toggles state', async () => {
   const result = await probe.followCurrent({ profileId: 'k1evgky5', execute: false });
   assert.equal(result.status, 'shadow');
   assert.equal(calls.some((call) => call.method === 'Input.dispatchMouseEvent'), false);
+});
+
+test('sanitized like fixtures require the stable inactive heart or exact positive digged state', () => {
+  const shell = (color: string, path: string, state = '') => `<!doctype html><html><body><a href="/user/self"></a><div data-e2e="feed-active-video" data-rect="100,80,900,650"></div><button data-e2e="video-player-digg" ${state} data-rect="1030,320,60,60"><svg viewBox="0 0 24 24" style="color:${color}" data-rect="1040,330,28,28"><path fill="currentColor" d="${path}"></path></svg></button></body></html>`;
+  const url = 'https://www.douyin.com/jingxuan?modal_id=7657570185380990235';
+  const heart = 'M2.00534 9C2.00179 8.91711 2 8.83376 2 8.75';
+  assert.equal(evaluatePage(shell('rgb(255,255,255)', heart), url).like.state, 'inactive');
+  assert.equal(evaluatePage(shell('rgb(31,35,41)', 'M0 0', 'data-e2e-state="video-player-is-digged"'), url).like.state, 'active');
+  assert.equal(evaluatePage(shell('rgb(254,44,85)', heart), url).like.state, 'active');
+  assert.equal(evaluatePage(shell('rgb(255,255,255)', 'M0 0'), url).like.state, 'unknown');
+});
+
+test('like is default-shadow, exact-profile gated, one-way, and single-dispatch', async () => {
+  const active = pageSnapshot({ like: { ...pageSnapshot().like, state: 'active', evidence: 'heart_active' } });
+  const { cdp, calls } = fakeCdp({ pages: [pageSnapshot(), pageSnapshot(), pageSnapshot(), active, pageSnapshot()] });
+  const probe = new DouyinInteractionProbe(cdp, { sleep: async () => {}, random: () => 0.5, settleRounds: 1 });
+  assert.equal((await probe.likeCurrent({ profileId: 'k1evgky5', execute: false })).status, 'shadow');
+  assert.equal((await probe.likeCurrent({ profileId: 'k1evgky5', execute: true, confirmedProfile: 'wrong' })).status, 'gate_rejected');
+  assert.equal((await probe.likeCurrent({ profileId: 'k1evgky5', execute: true, confirmedProfile: 'k1evgky5' })).status, 'ui_confirmed');
+  assert.equal((await probe.likeCurrent({ profileId: 'k1evgky5', execute: true, confirmedProfile: 'k1evgky5' })).status, 'budget_exhausted');
+  assert.equal(calls.filter((call) => call.method === 'Input.dispatchMouseEvent' && call.params.type === 'mousePressed').length, 1);
+});
+
+test('already-liked, unreadable, logged-out, ambiguous, and target-changing likes never retry', async () => {
+  const active = pageSnapshot({ like: { ...pageSnapshot().like, state: 'active', evidence: 'heart_active' } });
+  const unknown = pageSnapshot({ like: { ...pageSnapshot().like, state: 'unknown', evidence: 'heart_structure_unclassified' } });
+  const loggedOut = pageSnapshot({ loginState: 'logged_out' });
+  const ambiguous = pageSnapshot({ like: { found: false, ambiguous: true, state: 'unknown' } });
+  const changed = pageSnapshot({ modalId: '7657570185380990999', like: active.like });
+  const { cdp, calls } = fakeCdp({ pages: [active, unknown, loggedOut, ambiguous, pageSnapshot(), changed] });
+  const probe = new DouyinInteractionProbe(cdp, { sleep: async () => {}, random: () => 0.5, settleRounds: 1 });
+  assert.equal((await probe.likeCurrent({ profileId: 'k1evgky5', execute: true, confirmedProfile: 'k1evgky5' })).status, 'already_active');
+  assert.equal((await probe.likeCurrent({ profileId: 'k1evgky5', execute: true, confirmedProfile: 'k1evgky5' })).status, 'state_unknown');
+  assert.equal((await probe.likeCurrent({ profileId: 'k1evgky5', execute: true, confirmedProfile: 'k1evgky5' })).status, 'blocked');
+  assert.equal((await probe.likeCurrent({ profileId: 'k1evgky5', execute: true, confirmedProfile: 'k1evgky5' })).status, 'ambiguous');
+  const targetChanged = await probe.likeCurrent({ profileId: 'k1evgky5', execute: true, confirmedProfile: 'k1evgky5' });
+  assert.equal(targetChanged.status, 'postcondition_unknown');
+  assert.equal(targetChanged.executed, true);
+  assert.equal(calls.filter((call) => call.method === 'Input.dispatchMouseEvent' && call.params.type === 'mousePressed').length, 1);
 });
 
 test('follow and collect each dispatch at most one click and require active post-state', async () => {
@@ -204,6 +256,50 @@ test('DM reply requires one uniquely proven unread inbound conversation and an a
   assert.equal(calls.filter((call) => call.method === 'Input.dispatchMouseEvent' && call.params.type === 'mousePressed').length, 2);
 });
 
+test('DM snapshot distinguishes sanitized group and private structures without identities', () => {
+  const commonStart = '<!doctype html><html><body><div data-e2e="im-dialog" data-rect="800,0,460,780"><div class="componentsRightPanelwrapper"><div class="RightPanelHeadertitle">fixture</div>';
+  const commonEnd = '<div data-e2e="msg-input" data-rect="900,700,300,50"><div contenteditable="true" data-rect="920,705,180,40">\u200b</div><svg class="e2e-send-msg-btn" data-rect="1150,705,36,36"></svg></div></div></div></body></html>';
+  const group = evaluateDm(`${commonStart}<div class="ContentBottomHasReadisGroup"></div><div class="messageMessageBoxmessageBox"><div class="MessageBoxMessageTitleavatarName"></div><div class="messageMessageBoxcontentBox"></div></div>${commonEnd}`);
+  const privateInbound = evaluateDm(`${commonStart}<div class="messageMessageBoxmessageBox"><div class="messageMessageBoxcontentBox"></div></div>${commonEnd}`);
+  const privateOutbound = evaluateDm(`${commonStart}<div class="messageMessageBoxmessageBox"><div class="messageMessageBoxcontentBox messageMessageBoxisFromMe"></div></div>${commonEnd}`);
+  const unknown = evaluateDm(`${commonStart}${commonEnd}`);
+  assert.equal(group.conversationKind, 'group');
+  assert.equal(privateInbound.conversationKind, 'private');
+  assert.equal(privateInbound.latestDirection, 'inbound');
+  assert.equal(privateOutbound.conversationKind, 'private');
+  assert.equal(privateOutbound.latestDirection, 'outbound');
+  assert.equal(unknown.conversationKind, 'unknown');
+});
+
+test('group DM is rejected before focus, input, or submit', async () => {
+  const group = dmSnapshot({ conversationKind: 'group', latestDirection: 'inbound' });
+  const { cdp, calls } = fakeCdp({ dms: [group, group] });
+  const probe = new DouyinInteractionProbe(cdp, { sleep: async () => {}, random: () => 0.5, settleRounds: 1 });
+  const result = await probe.replyLatestInboundDm({ profileId: 'k1evgky5', execute: true, confirmedProfile: 'k1evgky5', text: '好的' });
+  assert.equal(result.status, 'group_chat');
+  assert.equal(calls.some((call) => call.method === 'Input.insertText' || call.method === 'Input.dispatchKeyEvent'), false);
+  assert.equal(calls.filter((call) => call.method === 'Input.dispatchMouseEvent' && call.params.type === 'mousePressed').length, 1);
+});
+
+test('private DM with outbound or unknown latest direction is rejected before input', async () => {
+  const outbound = dmSnapshot({ latestDirection: 'outbound' });
+  const { cdp, calls } = fakeCdp({ dms: [outbound, outbound] });
+  const probe = new DouyinInteractionProbe(cdp, { sleep: async () => {}, random: () => 0.5, settleRounds: 1 });
+  const result = await probe.replyLatestInboundDm({ profileId: 'k1evgky5', execute: true, confirmedProfile: 'k1evgky5', text: 'ok' });
+  assert.equal(result.status, 'inbound_unconfirmed');
+  assert.equal(calls.some((call) => call.method === 'Input.insertText' || call.method === 'Input.dispatchKeyEvent'), false);
+});
+
+test('unknown conversation type is rejected before focus, input, or submit', async () => {
+  const unknown = dmSnapshot({ conversationKind: 'unknown', latestDirection: 'unknown' });
+  const { cdp, calls } = fakeCdp({ dms: [unknown, unknown, unknown] });
+  const probe = new DouyinInteractionProbe(cdp, { sleep: async () => {}, random: () => 0.5, settleRounds: 1 });
+  const result = await probe.replyLatestInboundDm({ profileId: 'k1evgky5', execute: true, confirmedProfile: 'k1evgky5', text: 'ok' });
+  assert.equal(result.status, 'conversation_type_unknown');
+  assert.equal(calls.some((call) => call.method === 'Input.insertText' || call.method === 'Input.dispatchKeyEvent'), false);
+  assert.equal(calls.filter((call) => call.method === 'Input.dispatchMouseEvent' && call.params.type === 'mousePressed').length, 1);
+});
+
 test('ambiguous DM candidates stop before typing or sending', async () => {
   const { cdp, calls } = fakeCdp({ dms: [dmSnapshot({ inboundConversation: undefined, inboundAmbiguous: true })] });
   const probe = new DouyinInteractionProbe(cdp, { sleep: async () => {}, random: () => 0.5 });
@@ -237,5 +333,4 @@ test('source has no ordinary post-comment or publishing submit path', async () =
   const sourcePath = fileURLToPath(new URL('../../src/douyin/probes/interaction-probe.ts', import.meta.url));
   const source = await readFile(sourcePath, 'utf8');
   assert.doesNotMatch(source, /data-e2e[^\n]*(?:comment-submit|comment-post|publish-submit|upload-submit)/i);
-  assert.doesNotMatch(source, /video-player-digg[^\n]*(?:dispatchClick|mousePressed)/i);
 });
