@@ -812,10 +812,15 @@ test('browse-session: search.execute 命令触发搜索', async () => {
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('search.execute', 'se1', 0, { keyword: '奶茶' }),
+    makeEnvelope('search.execute', 'se1', 0, { keyword: '奶茶', activityId: 'activity-xhs-1', purpose: 'discovery', scope: 'global' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.ok(calls.includes('Input.dispatchKeyEvent'), '应触发键盘输入搜索');
+  const receipt = h.completedActions.find((a) => a.action === 'search');
+  assert.deepEqual(receipt, {
+    action: 'search', ok: true, activityId: 'activity-xhs-1', purpose: 'discovery', scope: 'global',
+    actuated: true, searchOutcome: 'results_ready', resultCount: 1,
+  });
 });
 
 test('browse-session: search.execute 上报前等待搜索卡片 noteId 水合', async () => {
@@ -854,6 +859,10 @@ test('browse-session: search.execute 上报前等待搜索卡片 noteId 水合',
   const last = h.reportedCards[h.reportedCards.length - 1];
   assert.ok(scansAfterSearch >= 3, '应等待到搜索卡片 noteId 水合后再上报');
   assert.equal(last.cards[0].noteId, 'target-note');
+  const receipt = h.completedActions.find((a) => a.action === 'search');
+  assert.equal(receipt?.actuated, true);
+  assert.equal(receipt?.searchOutcome, 'results_ready');
+  assert.equal(receipt?.resultCount, 1);
 });
 
 // 核心回归（change comment-search-nav-confirm）：搜索未导航到结果页（仍在 feed）时，
@@ -888,6 +897,23 @@ test('browse-session: search.execute 未到结果页（恒停 /explore）→ 不
   const searchFail = h.completedActions.find((a) => a.action === 'search' && a.ok === false);
   assert.ok(searchFail, '未到结果页 MUST 发 action.completed{search, ok:false}');
   assert.equal(searchFail?.reason, 'not_on_search_page', 'reason MUST 为 not_on_search_page（诚实归因，非离线/无结果）');
+  assert.equal(searchFail?.activityId, 'se1', '旧 Cloud 命令缺 activityId 时回退 envelope id');
+  assert.equal(searchFail?.actuated, true, 'Enter 已派发，平台已观察到本次搜索尝试');
+  assert.equal(searchFail?.searchOutcome, 'failed_after_submit');
+});
+
+test('browse-session: search.execute 空关键词 → not_submitted，绝不把当前搜索页当本次成功', async () => {
+  const h = makeHarness();
+  const sess = new BrowseSession(h.deps, noOpts());
+  await startAndPush(sess, [
+    makeEnvelope('search.execute', 'empty-search', 0, { keyword: '' }),
+    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
+  ]);
+  const receipt = h.completedActions.find((a) => a.action === 'search');
+  assert.equal(receipt?.ok, false);
+  assert.equal(receipt?.reason, 'no_target');
+  assert.equal(receipt?.actuated, false);
+  assert.equal(receipt?.searchOutcome, 'not_submitted');
 });
 
 test('browse-session: note.browse_images 命中轮播 → 如实回报 browsed=N', async () => {

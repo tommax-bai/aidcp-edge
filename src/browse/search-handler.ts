@@ -412,6 +412,8 @@ export interface ExecuteSearchDeps {
    * 残留是可见的、非半截提交，下一次搜索会重新清空并重打，故不另加清场。
    */
   checkpoint?: () => void;
+  /** Called once a submit key/button gesture has actually been dispatched to the page. */
+  onSubmit?: () => void;
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -625,7 +627,7 @@ export async function executeSearch(
   // 输入完到回车的停顿：既有 action 抖动与一个停顿地板取 max——AI 搜索框需内部状态就绪，
   // 输入后立即回车会被忽略（真机实证）。
   await sleep(Math.max(SEARCH_SUBMIT_SETTLE_FLOOR_MS, sampleDelay(TIMING_PRESETS.action, random)));
-  await pressEnter(cdp);
+  await pressEnter(cdp, deps.onSubmit);
 
   // 4. 等待导航到结果页；未确认则有界重试回车。AI 搜索框回车提交本身时灵时不灵，真人也会再按一次；
   //    提交按钮仅在其【确可见】时作附加尝试——AI 框上 .bottom-box-right-submit-button 常不可见(0×0)、
@@ -635,7 +637,8 @@ export async function executeSearch(
     const submitSelector = deps.searchSubmitSelector ?? XHS_SEARCH_SUBMIT_SELECTOR;
     for (let attempt = 1; attempt <= SEARCH_SUBMIT_MAX_RETRY && !navigated; attempt++) {
       const clicked = await clickSearchSubmit(cdp, submitSelector, { random, sleep });
-      await pressEnter(cdp);
+      if (clicked) deps.onSubmit?.();
+      await pressEnter(cdp, deps.onSubmit);
       logger(
         `[search] Enter 未跳转，重试提交（第 ${attempt}/${SEARCH_SUBMIT_MAX_RETRY} 次；提交按钮${clicked ? '已点' : '不可见/未点'}）`,
       );

@@ -25,9 +25,11 @@ class FakeExecutor {
       submit?: FacebookSubmitResult;
     } = {},
   ) {}
-  async searchInContainer(keyword: string, container: string): Promise<FacebookSearchResult> {
+  async searchInContainer(keyword: string, container: string, onActuated?: () => void): Promise<FacebookSearchResult> {
     this.searchArg = { keyword, container };
-    return this.cfg.search ?? { ok: true, candidates: [] };
+    const result = this.cfg.search ?? { ok: true, actuated: true, candidates: [] };
+    if (result.actuated) onActuated?.();
+    return result;
   }
   async openPost(url: string): Promise<FacebookOpenResult> {
     this.openArg = url;
@@ -101,16 +103,23 @@ test('fb-handler: search.execute 命中候选 → page.cards（permalink 放 not
   const exec = new FakeExecutor({
     search: {
       ok: true,
+      actuated: true,
       candidates: [{ index: 0, permalink: 'https://www.facebook.com/groups/1/posts/2', kind: 'group_post', hasCommentRegion: true }],
       containerName: 'Puerto Rico Y Sus Encantos e Historia',
     },
   });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('search.execute', 'c1', 1, { keyword: '咖啡', container: 'https://www.facebook.com/groups/1' } as never));
+  await handler.handle(makeEnvelope('search.execute', 'c1', 1, {
+    keyword: '咖啡', container: 'https://www.facebook.com/groups/1',
+    activityId: 'fb-container-1', purpose: 'task_targeting', scope: 'container',
+  } as never));
   assert.equal(cap.cards.length, 1);
   assert.equal(cap.cards[0].cards[0].noteId, 'https://www.facebook.com/groups/1/posts/2');
   assert.equal(cap.cards[0].containerName, 'Puerto Rico Y Sus Encantos e Historia');
-  assert.equal(cap.actions.length, 0);
+  assert.deepEqual(cap.actions, [{
+    action: 'search', ok: true, activityId: 'fb-container-1', purpose: 'task_targeting', scope: 'container',
+    actuated: true, searchOutcome: 'results_ready', resultCount: 1,
+  }]);
   assert.deepEqual(exec.searchArg, { keyword: '咖啡', container: 'https://www.facebook.com/groups/1' });
 });
 
@@ -122,14 +131,19 @@ test('fb-handler: search.execute 无容器 → permission_gated（绝不全站�
   assert.equal(cap.actions[0].action, 'search');
   assert.equal(cap.actions[0].ok, false);
   assert.equal(cap.actions[0].reason, 'permission_gated');
+  assert.equal(cap.actions[0].activityId, 'c1');
+  assert.equal(cap.actions[0].actuated, false);
+  assert.equal(cap.actions[0].searchOutcome, 'not_submitted');
 });
 
-test('fb-handler: search 被阻断 → action.completed{action:search,ok:false}', async () => {
-  const exec = new FakeExecutor({ search: { ok: false, reason: 'login_required', candidates: [] } });
+test('fb-handler: search 导航后被阻断 → failed_after_submit 且 actuated=true', async () => {
+  const exec = new FakeExecutor({ search: { ok: false, actuated: true, reason: 'login_required', candidates: [] } });
   const { handler, cap } = makeHandler(exec);
   await handler.handle(makeEnvelope('search.execute', 'c1', 1, { keyword: '咖啡', container: 'https://www.facebook.com/groups/1' } as never));
   assert.equal(cap.actions[0].action, 'search');
   assert.equal(cap.actions[0].reason, 'login_required');
+  assert.equal(cap.actions[0].actuated, true);
+  assert.equal(cap.actions[0].searchOutcome, 'failed_after_submit');
   assert.equal(cap.cards.length, 0);
 });
 
@@ -398,14 +412,16 @@ test('fb-ui: 群名读不到 → 回落通用文案，绝不用 URL 顶替', asy
 });
 
 test('fb-ui: 搜索零结果与搜索失败可区分', async () => {
-  const ok0 = new FakeExecutor({ search: { ok: true, candidates: [], containerName: '越南招工群' } });
+  const ok0 = new FakeExecutor({ search: { ok: true, actuated: true, candidates: [], containerName: '越南招工群' } });
   const { handler: h1, cap: c1 } = makeHandler(ok0);
   await h1.handle(makeEnvelope('search.execute', 'c1', 1, { keyword: 'tuyển dụng', container: 'https://www.facebook.com/groups/1' } as never));
   const e1 = c1.ui.filter((e) => e.kind === 'activity');
   assert.equal(e1[0].type, 'search');
   assert.match(e1[0].sentence ?? '', /没有匹配的帖子/);
+  assert.equal(c1.actions[0].searchOutcome, 'no_results');
+  assert.equal(c1.actions[0].actuated, true);
 
-  const failed = new FakeExecutor({ search: { ok: false, reason: 'login_required', candidates: [] } });
+  const failed = new FakeExecutor({ search: { ok: false, actuated: true, reason: 'login_required', candidates: [] } });
   const { handler: h2, cap: c2 } = makeHandler(failed);
   await h2.handle(makeEnvelope('search.execute', 'c1', 1, { keyword: 'tuyển dụng', container: 'https://www.facebook.com/groups/1' } as never));
   const e2 = c2.ui.filter((e) => e.kind === 'activity');

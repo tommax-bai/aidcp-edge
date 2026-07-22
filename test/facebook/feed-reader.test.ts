@@ -421,6 +421,39 @@ test('ensureFeed 幂等：搜索页放行搜索、不被带回首页', async () 
   assert.deepEqual(navs, [], '搜索页 surface 匹配则不导航');
 });
 
+test('ensureFeed 搜索关键词变化时必须重新导航，并在 Page.navigate 成功后标记 actuated', async () => {
+  const navs: string[] = [];
+  const reader = new FacebookFeedReader({
+    cdp: surfaceCdp({
+      href: 'https://www.facebook.com/search/posts/?q=old',
+      hasFeed: true,
+      hydratedArticles: 1,
+      dialogOpen: false,
+    }, navs),
+    sleep: async () => {},
+  });
+  let actuated = 0;
+  const target = 'https://www.facebook.com/search/posts/?q=new';
+  const result = await reader.ensureFeed(target, () => { actuated += 1; });
+  assert.deepEqual(navs, [target]);
+  assert.equal(result.navigated, true);
+  assert.equal(actuated, 1);
+});
+
+test('ensureFeed 显式搜索活动在同关键词页仍重新导航并标记 actuated', async () => {
+  const navs: string[] = [];
+  const target = 'https://www.facebook.com/search/posts/?q=coffee';
+  const reader = new FacebookFeedReader({
+    cdp: surfaceCdp({ href: target, hasFeed: true, hydratedArticles: 1, dialogOpen: false }, navs),
+    sleep: async () => {},
+  });
+  let actuated = 0;
+  const result = await reader.ensureFeed(target, () => { actuated += 1; }, { forceNavigate: true });
+  assert.deepEqual(navs, [target]);
+  assert.equal(result.navigated, true);
+  assert.equal(actuated, 1);
+});
+
 test('ensureFeed 红线：已在首页但验证码浮层在 → blocked_by_captcha 且不导航（fail-closed 不因省导航而漏）', async () => {
   const navs: string[] = [];
   const overlayMonitor = { probeNow: async () => 'captcha' } as unknown as OverlayMonitor;

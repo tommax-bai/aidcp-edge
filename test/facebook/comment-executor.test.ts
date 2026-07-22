@@ -228,6 +228,7 @@ test('fb-executor: 非白名单容器 → permission_gated，绝不导航（不�
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'permission_gated');
   assert.equal(cdp.navigations.length, 0);
+  assert.equal(r.actuated, undefined);
 });
 
 test('fb-executor: 群容器 → 站内搜 URL + 候选帖 permalink', async () => {
@@ -238,6 +239,7 @@ test('fb-executor: 群容器 → 站内搜 URL + 候选帖 permalink', async () 
   const ex = makeExecutor(cdp);
   const r = await ex.searchInContainer('咖啡', 'https://www.facebook.com/groups/123456');
   assert.equal(r.ok, true);
+  assert.equal(r.actuated, true);
   assert.equal(r.candidates.length, 1);
   // permalink 经 sanitize 归一（去尾斜杠/追踪参数）——候选帖链接为规范化后的形态。
   assert.equal(r.candidates[0].permalink, 'https://www.facebook.com/groups/123456/posts/999');
@@ -252,6 +254,7 @@ test('fb-executor: 登录失效浮层 → login_required（不返回候选）', 
   const r = await ex.searchInContainer('咖啡', 'https://www.facebook.com/groups/1');
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'login_required');
+  assert.equal(r.actuated, true);
 });
 
 test('fb-executor: cookie 同意浮层清不掉 → blocked_by_consent（先于阻断判定）', async () => {
@@ -285,6 +288,7 @@ test('fb-executor: 容器内无候选 → ok:true 空候选（云端映射 no_st
   const r = await ex.searchInContainer('咖啡', 'https://www.facebook.com/groups/1');
   assert.equal(r.ok, true);
   assert.equal(r.candidates.length, 0);
+  assert.equal(r.actuated, true);
   assert.equal(r.containerName, 'Puerto Rico Y Sus Encantos e Historia');
 });
 

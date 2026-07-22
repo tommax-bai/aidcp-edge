@@ -41,6 +41,35 @@ export interface FacebookCommentHandlerDeps {
   logger?: (msg: string) => void;
 }
 
+interface SearchReceiptContext {
+  activityId: string;
+  purpose: NonNullable<SearchExecutePayload['purpose']>;
+  scope: NonNullable<SearchExecutePayload['scope']>;
+  actuated: boolean;
+}
+
+function makeSearchReceiptContext(payload: SearchExecutePayload, envelopeId: string): SearchReceiptContext {
+  return {
+    activityId: payload.activityId?.trim() || envelopeId,
+    purpose: payload.purpose ?? (payload.taskId || payload.container ? 'task_targeting' : 'discovery'),
+    scope: payload.scope ?? (payload.container ? 'container' : 'global'),
+    actuated: false,
+  };
+}
+
+function searchReceiptFields(context: SearchReceiptContext): Pick<
+  ActionCompletedPayload,
+  'activityId' | 'purpose' | 'scope' | 'actuated' | 'searchOutcome'
+> {
+  return {
+    activityId: context.activityId,
+    purpose: context.purpose,
+    scope: context.scope,
+    actuated: context.actuated,
+    searchOutcome: context.actuated ? 'failed_after_submit' : 'not_submitted',
+  };
+}
+
 export class FacebookCommentHandler {
   private readonly executor: FacebookCommentExecutor;
   private readonly joinExecutor?: FacebookJoinExecutor;
@@ -78,10 +107,13 @@ export class FacebookCommentHandler {
    * 空闲看门狗把整会话杀掉。
    */
   async handle(env: Envelope, checkpoint?: () => void): Promise<void> {
+    const searchContext = env.type === 'search.execute'
+      ? makeSearchReceiptContext((env.payload ?? {}) as SearchExecutePayload, env.id)
+      : undefined;
     try {
       switch (env.type) {
         case 'search.execute':
-          await this.onSearch(env.payload as SearchExecutePayload);
+          await this.onSearch((env.payload ?? {}) as SearchExecutePayload, searchContext!);
           return;
         case 'note.open':
           await this.onOpen(env.payload as NoteOpenPayload);
@@ -104,25 +136,36 @@ export class FacebookCommentHandler {
       if (err instanceof TaskTakeoverError) {
         // 被接管 = **未开始 / 已作废**，不是一次业务失败。绝不降级成 handler_error。
         this.log(`[fb-comment] 命令 ${env.type} 在安全取消点被独占任务接管 → 零页面副作用作废`);
-        this.client.reportActionCompleted({ action, ok: false, reason: 'preempted_by_task' });
+        this.client.reportActionCompleted({
+          action,
+          ok: false,
+          ...(searchContext ? searchReceiptFields(searchContext) : {}),
+          reason: 'preempted_by_task',
+        });
         return;
       }
       const message = err instanceof Error ? err.message : String(err);
       this.log(`[fb-comment] 处理命令 ${env.type} 异常：${message}`);
-      this.client.reportActionCompleted({ action, ok: false, reason: `handler_error:${message}` });
+      this.client.reportActionCompleted({
+        action,
+        ok: false,
+        ...(searchContext ? searchReceiptFields(searchContext) : {}),
+        reason: `handler_error:${message}`,
+      });
     }
   }
 
-  private async onSearch(payload: SearchExecutePayload): Promise<void> {
+  private async onSearch(payload: SearchExecutePayload, context: SearchReceiptContext): Promise<void> {
     const keyword = payload.keyword ?? '';
     const container = payload.container ?? '';
     if (!container) {
       // 无容器 = 绝不全站搜（红线）：诚实非成功。
       // 不产活动条目：这是配置问题（没给容器），不是一次真发生过的搜索动作。
-      this.client.reportActionCompleted({ action: 'search', ok: false, reason: 'permission_gated' });
+      this.client.reportActionCompleted({ action: 'search', ok: false, ...searchReceiptFields(context), reason: 'permission_gated' });
       return;
     }
-    const r = await this.executor.searchInContainer(keyword, container);
+    const r = await this.executor.searchInContainer(keyword, container, () => { context.actuated = true; });
+    context.actuated ||= r.actuated === true;
     if (!r.ok) {
       const reason = r.reason ?? 'no_candidates';
       if (isAttempted(reason)) {
@@ -133,14 +176,14 @@ export class FacebookCommentHandler {
           loopStage: 'feed',
         });
       }
-      this.client.reportActionCompleted({ action: 'search', ok: false, reason });
+      this.client.reportActionCompleted({ action: 'search', ok: false, ...searchReceiptFields(context), reason });
       return;
     }
     // 群名用执行器现读回传的真名（读不出为 undefined → 回落「群」），绝不把容器 id / URL 当群名展示。
     const where = clipFacebookUiText(r.containerName, 18) || '群';
     const kw = clipFacebookUiText(keyword, 20);
     // 零候选是「搜索成功执行、但没有匹配」——与「搜索失败」是两回事，MUST NOT 混为一谈。
-    // 无 statsDelta：搜索在云端既不进 interaction.occurred 也不进 dailyUsage。
+    // 风险计数由 Cloud 消费统一搜索终态；本地不另造 statsDelta。
     this.emitUi({
       kind: 'activity',
       type: 'search',
@@ -159,6 +202,16 @@ export class FacebookCommentHandler {
       noteId: c.permalink,
     }));
     this.client.reportPageCards({ cards, ...(r.containerName ? { containerName: r.containerName } : {}) });
+    this.client.reportActionCompleted({
+      action: 'search',
+      ok: true,
+      activityId: context.activityId,
+      purpose: context.purpose,
+      scope: context.scope,
+      actuated: context.actuated,
+      searchOutcome: cards.length > 0 ? 'results_ready' : 'no_results',
+      resultCount: cards.length,
+    });
   }
 
   private async onOpen(payload: NoteOpenPayload): Promise<void> {

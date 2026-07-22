@@ -184,6 +184,8 @@ export interface FacebookCandidatePost {
 
 export interface FacebookSearchResult {
   ok: boolean;
+  /** True once Page.navigate for this search was dispatched successfully. */
+  actuated?: boolean;
   reason?: FacebookCommentStepReason;
   candidates: FacebookCandidatePost[];
   surface?: string;
@@ -376,8 +378,9 @@ export class FacebookCommentExecutor {
     return isUrlAllowedByTargetDescriptor(url, FACEBOOK_TARGET);
   }
 
-  private async navigate(url: string): Promise<void> {
+  private async navigate(url: string, onNavigated?: () => void): Promise<void> {
     await this.cdp.send('Page.navigate', { url });
+    onNavigated?.();
     await this.sleep(this.opts.settleMs);
   }
 
@@ -452,7 +455,11 @@ export class FacebookCommentExecutor {
    * 容器内关键词搜索 → 有界抽取候选帖 permalink。
    * 绝不全站搜：容器非法/无法归类/非成员 → honest permission_gated。
    */
-  async searchInContainer(keyword: string, container: string): Promise<FacebookSearchResult> {
+  async searchInContainer(
+    keyword: string,
+    container: string,
+    onActuated?: () => void,
+  ): Promise<FacebookSearchResult> {
     const kw = (keyword ?? '').trim();
     if (!kw) return { ok: false, reason: 'no_candidates', candidates: [] };
     if (!this.isAllowed(container)) {
@@ -465,13 +472,13 @@ export class FacebookCommentExecutor {
       return { ok: false, reason: 'permission_gated', candidates: [] };
     }
     try {
-      await this.navigate(searchUrl);
+      await this.navigate(searchUrl, onActuated);
     } catch (err) {
       this.log(`[fb-comment] 导航容器搜索失败：${(err as Error).message}`);
       return { ok: false, reason: 'nav_error', candidates: [] };
     }
     const blocked = await this.blockingReason();
-    if (blocked) return { ok: false, reason: blocked, candidates: [] };
+    if (blocked) return { ok: false, actuated: true, reason: blocked, candidates: [] };
 
     // 读容器真实名称（人只看群名、不看 id）——导航到容器搜索面后即可读，与候选无关，尽早捕获。
     const containerName = await this.readContainerName();
@@ -486,17 +493,17 @@ export class FacebookCommentExecutor {
       await this.scrollViewport(this.opts.editorScrollDistancePx);
       structure = await this.probeStructureUntil(hasPermalink);
     }
-    if (!structure) return { ok: false, reason: 'nav_error', candidates: [], containerName };
+    if (!structure) return { ok: false, actuated: true, reason: 'nav_error', candidates: [], containerName };
 
     // 非成员 / 待批准 / 群问答门槛 → 绝不评论，honest permission_gated。
     const m = structure.membership;
     if ((m.joinVisible && !m.joinedVisible) || m.pendingVisible || m.questionVisible) {
-      return { ok: false, reason: 'permission_gated', candidates: [], surface: structure.surface, containerName };
+      return { ok: false, actuated: true, reason: 'permission_gated', candidates: [], surface: structure.surface, containerName };
     }
     // 结果面应是站内搜索面；落到 login/checkpoint（surface 归类）→ 登录失效。
-    if (structure.surface === 'login') return { ok: false, reason: 'login_required', candidates: [], surface: 'login', containerName };
+    if (structure.surface === 'login') return { ok: false, actuated: true, reason: 'login_required', candidates: [], surface: 'login', containerName };
     if (structure.surface === 'checkpoint')
-      return { ok: false, reason: 'blocked_by_captcha', candidates: [], surface: 'checkpoint', containerName };
+      return { ok: false, actuated: true, reason: 'blocked_by_captcha', candidates: [], surface: 'checkpoint', containerName };
 
     const candidates: FacebookCandidatePost[] = [];
     for (const post of structure.postCandidates) {
@@ -510,8 +517,8 @@ export class FacebookCommentExecutor {
       });
       if (candidates.length >= this.opts.maxCandidates) break;
     }
-    if (candidates.length === 0) return { ok: true, reason: 'no_candidates', candidates: [], surface: structure.surface, containerName };
-    return { ok: true, candidates, surface: structure.surface, containerName };
+    if (candidates.length === 0) return { ok: true, actuated: true, reason: 'no_candidates', candidates: [], surface: structure.surface, containerName };
+    return { ok: true, actuated: true, candidates, surface: structure.surface, containerName };
   }
 
   /**

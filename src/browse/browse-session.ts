@@ -34,6 +34,7 @@ import type {
   InteractionFollowPayload,
   InteractionCommentPayload,
   InteractionLikeCommentPayload,
+  SearchExecutePayload,
   NavigationBackPayload,
   NoteBrowseImagesPayload,
   NoteScrollCommentsPayload,
@@ -1349,7 +1350,21 @@ export class BrowseSession {
         // 漂移点，typecheck 抓不到，回错名的后果是角色永远等不到回执）。
         if (err instanceof TaskTakeoverError) {
           this.logger(`[browse] 命令 ${cmd.type} 在安全取消点被独占任务接管 → 零副作用作废`);
-          this.deps.client.reportActionCompleted?.({ action: cmd.type, ok: false, reason: 'preempted_by_task' });
+          if (cmd.type === 'search.execute') {
+            const payload = (cmd.payload ?? {}) as SearchExecutePayload;
+            this.deps.client.reportActionCompleted?.({
+              action: 'search',
+              ok: false,
+              reason: 'preempted_by_task',
+              activityId: payload.activityId?.trim() || cmd.id,
+              purpose: payload.purpose ?? (payload.taskId || payload.container ? 'task_targeting' : 'discovery'),
+              scope: payload.scope ?? (payload.container ? 'container' : 'global'),
+              actuated: false,
+              searchOutcome: 'not_submitted',
+            });
+          } else {
+            this.deps.client.reportActionCompleted?.({ action: cmd.type, ok: false, reason: 'preempted_by_task' });
+          }
           continue;
         }
         // CDP 断线：不当业务失败，等有界重连；成功→续跑重报，耗尽→已请求停止退出。
@@ -1531,71 +1546,106 @@ export class BrowseSession {
         break;
       }
       case 'search.execute': {
-        const payload = env.payload as { keyword?: string; maxResults?: number; sort?: string; timeWindow?: string };
-        const kw = payload.keyword ?? '';
+        const payload = (env.payload ?? {}) as SearchExecutePayload;
+        const kw = String(payload.keyword ?? '').trim();
+        const activityId = payload.activityId?.trim() || env.id;
+        const purpose = payload.purpose ?? (payload.taskId || payload.container ? 'task_targeting' : 'discovery');
+        const scope = payload.scope ?? (payload.container ? 'container' : 'global');
+        let actuated = false;
+        const reportSearch = (result: Omit<ActionCompletedPayload, 'action'>): void => {
+          this.deps.client.reportActionCompleted?.({
+            action: 'search',
+            activityId,
+            purpose,
+            scope,
+            ...result,
+          });
+        };
         this.logger(`[browse] 命令: search.execute「${kw}」${payload.sort ? ` sort=${payload.sort}` : ''}${payload.timeWindow ? ` time=${payload.timeWindow}` : ''}`);
         // 安全取消点（change lease-strict-preemption 4.1）：search.execute 是唯一不走动作前统一闸的
         // 浏览命令，今天完全没有取消点。safeCloseModal 已经是页面写 ⇒ 必须查在它之前。
         this.throwIfTakeover();
         await this.safeCloseModal();
+        if (!kw) {
+          reportSearch({ ok: false, reason: 'no_target', actuated: false, searchOutcome: 'not_submitted' });
+          break;
+        }
         // 诚实闸（change comment-search-nav-confirm）：采卡前必须确认真到达搜索结果页。
         // 判据是「采卡时刻的实时 URL」——不与 executeSearch 的布尔取 AND（布尔可能滞后，
         // AND 会把「其实已到结果页但确认稍慢」误杀成不上报，制造新的静默不上报回归）。
         let onSearch = false;
-        if (kw) {
-          try {
-            await executeSearch(kw, {
-              cdp: this.deps.cdp,
-              random: this.random,
-              // sleep 保持 this.sleep（**不换可打断版**）：waitForSearchNavigation 按「已等时长 += 间隔」
-              // 记账，被唤醒后会空转到迭代耗尽、再谎报一句「没导航到搜索页」。让路由 checkpoint 负责。
-              sleep: this.sleep,
-              logger: this.logger,
-              checkpoint: () => this.throwIfTakeover(),
-            });
-            // 权威判据（采卡时刻实时 URL）：既是搜索结果页，且结果页关键词与本次搜索词一致（change
-            // comment-keep-open-through-approval，关 Bug C）——提交失败时浏览器赖在旧关键词结果页上，
-            // 只验页型会把旧页当本次成功、采错词的卡；核对 keyword 参数杜绝。
-            {
-              const nowUrl = await this.evalUrl();
-              onSearch = this.isSearchListUrl(nowUrl) && searchResultMatchesKeyword(nowUrl, kw);
-            }
-            // 按需评论任务（change comment-search-command）：仅在**确认已到结果页**时应用原生「排序 + 发布时间」筛选。
-            // 自治浏览不带 sort/timeWindow → 跳过，行为不变。控件未生效 honest 降级（不冒充已筛）。
-            if (onSearch && (payload.sort || payload.timeWindow)) {
-              const filterRes = await applySearchFilters(
-                { sort: payload.sort, timeWindow: payload.timeWindow },
-                { cdp: this.deps.cdp, random: this.random, sleep: this.sleep, logger: this.logger },
-              );
-              // honest：控件未生效如实记录（云端暂不消费此信号，仅供边缘日志/最近状态追溯；绝不据此冒充已筛）。
-              // 不用 ⚠ 前缀——main.cjs 见 ⚠ 会把风控置 warned，筛选未命中不应触发风控。
-              if ((payload.sort && !filterRes.sortApplied) || (payload.timeWindow && !filterRes.timeApplied)) {
-                this.logger(
-                  `[browse] 搜索原生筛选未完全生效（sort=${filterRes.sortApplied} time=${filterRes.timeApplied}）：结果非严格「最近一天·最多收藏」`,
-                );
-              }
-            }
-          } catch (err) {
-            // 被接管 MUST 原样抛出：吞成一次普通「搜索失败」会让命令**继续往下跑**（读 URL、采卡、上报），
-            // 既撒了谎，又在抢占方的页面上继续动作。冒到主循环 → 诚实回执 preempted_by_task。
-            if (err instanceof TaskTakeoverError) throw err;
-            // 抛错（搜索框未找到等）→ 视为未到结果页，走诚实失败分支，绝不 fall through 去报当前页。
-            this.logger(`[browse] 搜索执行失败：${(err as Error).message}`);
-            onSearch = false;
+        try {
+          await executeSearch(kw, {
+            cdp: this.deps.cdp,
+            random: this.random,
+            // sleep 保持 this.sleep（**不换可打断版**）：waitForSearchNavigation 按「已等时长 += 间隔」
+            // 记账，被唤醒后会空转到迭代耗尽、再谎报一句「没导航到搜索页」。让路由 checkpoint 负责。
+            sleep: this.sleep,
+            logger: this.logger,
+            checkpoint: () => this.throwIfTakeover(),
+            onSubmit: () => { actuated = true; },
+          });
+          // 权威判据（采卡时刻实时 URL）：既是搜索结果页，且结果页关键词与本次搜索词一致（change
+          // comment-keep-open-through-approval，关 Bug C）——提交失败时浏览器赖在旧关键词结果页上，
+          // 只验页型会把旧页当本次成功、采错词的卡；核对 keyword 参数杜绝。
+          {
+            const nowUrl = await this.evalUrl();
+            onSearch = this.isSearchListUrl(nowUrl) && searchResultMatchesKeyword(nowUrl, kw);
           }
-        } else {
-          // 无关键词：仅当已在搜索结果页才认，绝不主动把当前页当搜索结果。
-          onSearch = this.isSearchListUrl(await this.evalUrl());
+          // 按需评论任务（change comment-search-command）：仅在**确认已到结果页**时应用原生「排序 + 发布时间」筛选。
+          // 自治浏览不带 sort/timeWindow → 跳过，行为不变。控件未生效 honest 降级（不冒充已筛）。
+          if (onSearch && (payload.sort || payload.timeWindow)) {
+            const filterRes = await applySearchFilters(
+              { sort: payload.sort, timeWindow: payload.timeWindow },
+              { cdp: this.deps.cdp, random: this.random, sleep: this.sleep, logger: this.logger },
+            );
+            // honest：控件未生效如实记录（云端暂不消费此信号，仅供边缘日志/最近状态追溯；绝不据此冒充已筛）。
+            // 不用 ⚠ 前缀——main.cjs 见 ⚠ 会把风控置 warned，筛选未命中不应触发风控。
+            if ((payload.sort && !filterRes.sortApplied) || (payload.timeWindow && !filterRes.timeApplied)) {
+              this.logger(
+                `[browse] 搜索原生筛选未完全生效（sort=${filterRes.sortApplied} time=${filterRes.timeApplied}）：结果非严格「最近一天·最多收藏」`,
+              );
+            }
+          }
+        } catch (err) {
+          // 被接管 MUST 原样抛出：吞成一次普通「搜索失败」会让命令**继续往下跑**（读 URL、采卡、上报），
+          // 既撒了谎，又在抢占方的页面上继续动作。冒到主循环 → 诚实回执 preempted_by_task。
+          if (err instanceof TaskTakeoverError) throw err;
+          // 抛错（搜索框未找到等）→ 视为未到结果页，走诚实失败分支，绝不 fall through 去报当前页。
+          this.logger(`[browse] 搜索执行失败：${(err as Error).message}`);
+          onSearch = false;
         }
         if (!onSearch) {
           // 红线（MUST NOT 静默假成功）：未确认到达结果页时绝不采/报当前页 feed；诚实回失败回执供云端消费。
           this.logger('[browse] 搜索未到达结果页（未确认导航/仍在 feed）→ 诚实回 search ok:false，不把当前页当搜索结果上报');
-          this.deps.client.reportActionCompleted?.({ action: 'search', ok: false, reason: 'not_on_search_page' });
+          reportSearch({
+            ok: false,
+            reason: 'not_on_search_page',
+            actuated,
+            searchOutcome: actuated ? 'failed_after_submit' : 'not_submitted',
+          });
           break;
         }
-        await this.waitForCards(5000);
-        await this.waitForSearchResultNoteIds();
-        await this.reportVisibleCards();
+        try {
+          await this.waitForCards(5000);
+          await this.waitForSearchResultNoteIds();
+          const resultCount = await this.reportVisibleCards();
+          reportSearch({
+            ok: true,
+            actuated,
+            searchOutcome: resultCount > 0 ? 'results_ready' : 'no_results',
+            resultCount,
+          });
+        } catch (err) {
+          if (err instanceof TaskTakeoverError) throw err;
+          this.logger(`[browse] 搜索结果采集失败：${(err as Error).message}`);
+          reportSearch({
+            ok: false,
+            reason: 'result_collection_failed',
+            actuated,
+            searchOutcome: actuated ? 'failed_after_submit' : 'not_submitted',
+          });
+        }
         break;
       }
       case 'navigation.back': {
@@ -1702,7 +1752,7 @@ export class BrowseSession {
    * 获取当前可见卡片，以结构化 page.cards 协议上报给云端。
    * 包含 title, author, likeCount, collectCount, isVideo, position 等完整信息供 Cloud 决策。
    */
-  private async reportVisibleCards(): Promise<void> {
+  private async reportVisibleCards(): Promise<number> {
     let cards = await this.deps.scroller.getVisibleCards();
     if (cards.length === 0) {
       // 不立即放弃：再轮询一轮等 feed 水合（back 后 / 慢渲染），避免静默吞 0 卡 → 边-云互等死锁。
@@ -1711,7 +1761,7 @@ export class BrowseSession {
     }
     if (cards.length === 0) {
       this.logger('[browse] 无可见卡片可上报');
-      return;
+      return 0;
     }
     // 近重复折叠（change dedup）：同一快照里「同标题+同作者」只保留首张——小红书会把同一创作者近乎一样的
     // 系列帖（不同 noteId）混进瀑布流,否则云端会对内容几乎相同的两条各开一次（真机实测「第7集 Harness」连开两次）。
@@ -1763,6 +1813,7 @@ export class BrowseSession {
       .map((c) => `[${c.index}]“${(c.title ?? '').slice(0, 18)}”${c.author ? '@' + c.author : ''}${c.likeCount ? ' 👍' + c.likeCount : ''}`)
       .join(' / ');
     this.logger(`[browse] 已上报 ${cards.length} 张可见卡片 (page.cards): ${cardSummary}`);
+    return cards.length;
   }
 
   /**

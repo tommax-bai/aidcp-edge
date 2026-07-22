@@ -154,10 +154,39 @@ export interface FacebookBrowseSessionOptions {
 
 type TerminalReport =
   // presence：列表面不都是推荐流——搜索结果页说「正在浏览推荐流」是假话。带上就用，不带回落推荐流。
-  | { type: 'cards'; payload: PageCardsPayload; presence?: string }
+  | { type: 'cards'; payload: PageCardsPayload; presence?: string; activity?: ActionCompletedPayload }
   | { type: 'detail'; payload: NoteDetailPayload }
   | { type: 'profile'; payload: ProfileDetailPayload }
   | { type: 'action'; payload: ActionCompletedPayload; companionLikeObservation?: FacebookLikeObservation };
+
+interface SearchExecutionContext {
+  activityId: string;
+  purpose: NonNullable<SearchExecutePayload['purpose']>;
+  scope: NonNullable<SearchExecutePayload['scope']>;
+  actuated: boolean;
+}
+
+function searchExecutionContext(payload: SearchExecutePayload, envelopeId: string): SearchExecutionContext {
+  return {
+    activityId: payload.activityId?.trim() || envelopeId,
+    purpose: payload.purpose ?? (payload.taskId || payload.container ? 'task_targeting' : 'discovery'),
+    scope: payload.scope ?? (payload.container ? 'container' : 'global'),
+    actuated: false,
+  };
+}
+
+function searchFailureFields(context: SearchExecutionContext): Pick<
+  ActionCompletedPayload,
+  'activityId' | 'purpose' | 'scope' | 'actuated' | 'searchOutcome'
+> {
+  return {
+    activityId: context.activityId,
+    purpose: context.purpose,
+    scope: context.scope,
+    actuated: context.actuated,
+    searchOutcome: context.actuated ? 'failed_after_submit' : 'not_submitted',
+  };
+}
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 /** feed 判稳 wall-clock：导航类（首屏/返回/搜索）给足页面加载；原地类（滚动/刷新换批）更短。 */
@@ -520,7 +549,12 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       case 'search.execute': {
         const payload = (env.payload ?? {}) as SearchExecutePayload;
         if (!payload.taskId && !payload.container) {
-          await this.runBrowseCommand('search', () => this.searchBrowse(payload));
+          const context = searchExecutionContext(payload, env.id);
+          await this.runBrowseCommand(
+            'search',
+            () => this.searchBrowse(payload, context),
+            () => searchFailureFields(context),
+          );
           return;
         }
         await this.trackWriter(() => this.commentHandler.handle(env, () => this.throwIfTakeover())); // 委托执行体同样是页面写者：让位必须等它真停
@@ -634,9 +668,13 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
    * 执行一条浏览命令：kill switch off → 诚实 browse_disabled；否则跑 fn（返回终态报文），
    * 有界超时兜底 timeout。保证恰好一个终态上报。
    */
-  private async runBrowseCommand(action: string, fn: () => Promise<TerminalReport>): Promise<void> {
+  private async runBrowseCommand(
+    action: string,
+    fn: () => Promise<TerminalReport>,
+    failureDetails?: () => Partial<ActionCompletedPayload>,
+  ): Promise<void> {
     if (this.mode === 'off') {
-      this.client.reportActionCompleted({ action, ok: false, reason: 'browse_disabled' });
+      this.client.reportActionCompleted({ action, ok: false, ...failureDetails?.(), reason: 'browse_disabled' });
       return;
     }
     let settled = false;
@@ -661,7 +699,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
           `[fb-session] 命令 ${action} 超时（${this.commandTimeoutMs}ms），回诚实 timeout 并放行链；` +
             `执行体仍可能在写页面 → 登记孤儿写者（当前 ${this.orphanWriters}）`,
         );
-        emitOnce({ type: 'action', payload: { action, ok: false, reason: 'timeout' } });
+        emitOnce({ type: 'action', payload: { action, ok: false, ...failureDetails?.(), reason: 'timeout' } });
         resolve();
       }, this.commandTimeoutMs);
       running
@@ -675,11 +713,11 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
           // 安全取消点上被独占任务接管：零页面副作用作废，回诚实失败回执，绝不重放、绝不假成功。
           if (err instanceof TaskTakeoverError) {
             this.log(`[fb-session] 命令 ${action} 在安全取消点被独占任务接管 → 零副作用作废`);
-            emitOnce({ type: 'action', payload: { action, ok: false, reason: 'preempted_by_task' } });
+            emitOnce({ type: 'action', payload: { action, ok: false, ...failureDetails?.(), reason: 'preempted_by_task' } });
             resolve();
             return;
           }
-          emitOnce({ type: 'action', payload: { action, ok: false, reason: `handler_error:${(err as Error).message}` } });
+          emitOnce({ type: 'action', payload: { action, ok: false, ...failureDetails?.(), reason: `handler_error:${(err as Error).message}` } });
           resolve();
         });
     });
@@ -722,6 +760,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     if (r.type === 'cards') {
       this.lastCardsAt = Date.now();
       this.client.reportPageCards(r.payload);
+      if (r.activity) this.client.reportActionCompleted(r.activity);
       if (r.payload.listKind === 'reels' && r.payload.cards.length === 1) {
         const card = r.payload.cards[0];
         const postId = canonicalPostId(card.noteId);
@@ -1117,9 +1156,14 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     });
   }
 
-  private async searchBrowse(payload: SearchExecutePayload): Promise<TerminalReport> {
+  private async searchBrowse(payload: SearchExecutePayload, context: SearchExecutionContext): Promise<TerminalReport> {
     const keyword = String(payload.keyword ?? '').trim();
-    if (!keyword) return { type: 'action', payload: { action: 'search', ok: false, reason: 'no_target' } };
+    if (!keyword) {
+      return {
+        type: 'action',
+        payload: { action: 'search', ok: false, ...searchFailureFields(context), reason: 'no_target' },
+      };
+    }
 
     let searchUrl: string;
     try {
@@ -1128,31 +1172,72 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       searchUrl = url.toString();
     } catch {
       this.emitSearchFailed(keyword, 'nav_error');
-      return { type: 'action', payload: { action: 'search', ok: false, reason: 'nav_error' } };
+      return {
+        type: 'action',
+        payload: { action: 'search', ok: false, ...searchFailureFields(context), reason: 'nav_error' },
+      };
     }
 
-    const ensure = await this.feedReader.ensureFeed(searchUrl);
+    // search.execute 是一次显式平台活动：即使当前恰好已在同关键词页，也重新派发目标搜索导航，
+    // 让 actuated 边界与本条命令一一对应；普通 scroll/back 的 ensureFeed 仍保持幂等不重载。
+    const ensure = await this.feedReader.ensureFeed(searchUrl, () => { context.actuated = true; }, { forceNavigate: true });
+    context.actuated ||= ensure.navigated === true;
     if (!ensure.ok) {
       const reason = ensure.reason ?? 'search_unavailable';
       this.emitSearchFailed(keyword, reason);
-      return { type: 'action', payload: { action: 'search', ok: false, reason } };
+      return {
+        type: 'action',
+        payload: { action: 'search', ok: false, ...searchFailureFields(context), reason },
+      };
+    }
+    const surface = await this.feedReader.probeSurface();
+    if (surface.surface !== 'search') {
+      this.emitSearchFailed(keyword, 'not_on_search_page');
+      return {
+        type: 'action',
+        payload: { action: 'search', ok: false, ...searchFailureFields(context), reason: 'not_on_search_page' },
+      };
     }
     this.activeFeedUrl = searchUrl;
     this.listMode = 'feed';
     const settle = await this.feedReader.settleCards({ wallClockMs: FEED_SETTLE_NAV_MS });
     const cards = settle.cards;
     if (cards.length === 0) {
-      const reason = settle.reason ?? 'no_candidates';
-      this.emitSearchFailed(keyword, reason);
-      return { type: 'action', payload: { action: 'search', ok: false, reason } };
+      if (settle.reason && settle.reason !== 'no_feed') {
+        this.emitSearchFailed(keyword, settle.reason);
+        return {
+          type: 'action',
+          payload: { action: 'search', ok: false, ...searchFailureFields(context), reason: settle.reason },
+        };
+      }
+      this.emitCompanionUiEvent({
+        kind: 'activity',
+        type: 'search',
+        sentence: `搜索「${keyword}」，没有匹配的帖子`,
+        loopStage: 'feed',
+      });
+      return {
+        type: 'cards',
+        payload: this.toPageCards([]),
+        presence: `正在看「${keyword}」的搜索结果…`,
+        activity: {
+          action: 'search',
+          ok: true,
+          activityId: context.activityId,
+          purpose: context.purpose,
+          scope: context.scope,
+          actuated: context.actuated,
+          searchOutcome: 'no_results',
+          resultCount: 0,
+        },
+      };
     }
     const maxResults = Number.isFinite(payload.maxResults) && (payload.maxResults ?? 0) > 0
       ? Math.floor(payload.maxResults as number)
       : cards.length;
     this.resetCursor(); // 搜索结果 = 全新一批，重置游标后按本批播种
     const shown = cards.slice(0, maxResults);
-    // 成功条目就地发：`cards` 分支只发 presence（无 sentence）故不产条目。关键词与卡数此刻均为一手，
-    // 绝不猜。无 statsDelta：搜索在云端既不进 interaction.occurred 也不进 dailyUsage，本地不得凭空计数。
+    // 成功条目就地发：关键词与卡数此刻均为一手。风险计数由 Cloud 消费统一终态，本地不另造 statsDelta。
     this.emitCompanionUiEvent({
       kind: 'activity',
       type: 'search',
@@ -1164,6 +1249,16 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       type: 'cards',
       payload: this.toPageCards(this.seedCursor(shown)),
       presence: `正在看「${keyword}」的搜索结果…`,
+      activity: {
+        action: 'search',
+        ok: true,
+        activityId: context.activityId,
+        purpose: context.purpose,
+        scope: context.scope,
+        actuated: context.actuated,
+        searchOutcome: 'results_ready',
+        resultCount: shown.length,
+      },
     };
   }
 

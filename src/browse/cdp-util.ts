@@ -271,6 +271,7 @@ export async function dispatchKey(
   code: string,
   windowsVirtualKeyCode?: number,
   text?: string,
+  onKeyDownDispatched?: () => void,
 ): Promise<void> {
   const common: Record<string, unknown> = { key, code };
   if (windowsVirtualKeyCode !== undefined) {
@@ -279,6 +280,7 @@ export async function dispatchKey(
   }
   const keyDown = text !== undefined ? { ...common, text, unmodifiedText: text } : common;
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', ...keyDown });
+  onKeyDownDispatched?.();
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common });
 }
 
@@ -288,8 +290,8 @@ export function pressEscape(cdp: BrowseCdp): Promise<void> {
 }
 
 /** 派发 Enter 键（携带 '\r' 产生真实 keypress——AI 搜索框回车导航需要，见 dispatchKey 注释）。 */
-export function pressEnter(cdp: BrowseCdp): Promise<void> {
-  return dispatchKey(cdp, 'Enter', 'Enter', 13, '\r');
+export function pressEnter(cdp: BrowseCdp, onKeyDownDispatched?: () => void): Promise<void> {
+  return dispatchKey(cdp, 'Enter', 'Enter', 13, '\r', onKeyDownDispatched);
 }
 
 /** 把一段文本一次性插入（Input.insertText，简单可靠；仅在不需要拟人节奏时用）。 */

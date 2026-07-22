@@ -42,6 +42,8 @@ export interface FacebookFeedCard {
 export interface FacebookFeedEnsureResult {
   ok: boolean;
   reason?: 'login_required' | 'blocked_by_captcha' | 'blocked_by_consent' | 'no_feed' | 'nav_error';
+  /** True only when this call successfully dispatched Page.navigate to the requested list URL. */
+  navigated?: boolean;
 }
 
 /** 当前页面 surface 探测结果（幂等 ensureFeed 的判据）。 */
@@ -323,19 +325,38 @@ export class FacebookFeedReader {
    * 红线（fail-closed）：无论是否导航，consent 预清理 + 登录/验证码复检都必须跑——它们现搭在导航步骤里，
    * 绝不因省导航而漏掉。等 feed 水合的耗时改由 settleCards 承担（三段合一，避免逼近命令超时）。
    */
-  async ensureFeed(feedUrl: string): Promise<FacebookFeedEnsureResult> {
+  async ensureFeed(
+    feedUrl: string,
+    onNavigate?: () => void,
+    options: { forceNavigate?: boolean } = {},
+  ): Promise<FacebookFeedEnsureResult> {
     let onTarget = false;
+    let navigated = false;
     let probe: FacebookFeedSurface | undefined;
     try {
       probe = await this.probeSurface();
       const want = classifyFacebookSurface(feedUrl);
+      let exactSearch = true;
+      if (want === 'search') {
+        try {
+          const current = new URL(probe.href);
+          const target = new URL(feedUrl);
+          exactSearch = current.pathname === target.pathname && current.searchParams.get('q') === target.searchParams.get('q');
+        } catch {
+          exactSearch = false;
+        }
+      }
       // dialogOpen 不再作为「非目标」判据（change facebook-feed-lazyload-exhaustion-fix）：FB 首页常挂**瞬时/良性**
       // [role=dialog]（聊天弹窗、加载态、通知提示浮层，来了又走）。旧判据「只要存在任意 dialog 就判非目标」→ 每条
       // scroll 命令开头都整页 Page.navigate（经 fbsbx/maw_proxy_page 重定向链回首页）→ 真机上看着就是「一直刷新」、
       // feed 被反复钉回第一屏、永远下不去（真机 CDP 取证：timeOrigin 每 ~8s 重置一次）。FB 就地读不弹模态，dialogOpen
       // 对 FB 恒为良性浮层。既已在正确列表面且任一受支持 feed 结构在场，就是在目标——良性浮层绝不该触发整页重载；真正的
       // 登录/验证码阻断由下方 blockingReason 单独 fail-closed 兜底（不受此变更影响）。
-      onTarget = isFacebookListSurface(probe.surface) && probe.surface === want && (want === 'home' ? probe.homeReady : probe.hasFeed);
+      onTarget = !options.forceNavigate
+        && isFacebookListSurface(probe.surface)
+        && probe.surface === want
+        && exactSearch
+        && (want === 'home' ? probe.homeReady : probe.hasFeed);
     } catch (err) {
       this.log(`[fb-feed] surface 探测失败，按需导航：${(err as Error).message}`);
       onTarget = false;
@@ -347,9 +368,11 @@ export class FacebookFeedReader {
       );
       try {
         await this.cdp.send('Page.navigate', { url: feedUrl });
+        navigated = true;
+        onNavigate?.();
       } catch (err) {
         this.log(`[fb-feed] 导航 feed 失败：${(err as Error).message}`);
-        return { ok: false, reason: 'nav_error' };
+        return { ok: false, reason: 'nav_error', ...(navigated ? { navigated: true } : {}) };
       }
       await this.sleep(this.opts.pollMs);
     }
@@ -357,14 +380,14 @@ export class FacebookFeedReader {
     if (this.acceptConsent) {
       try {
         const consent = await this.acceptConsent(this.cdp);
-        if (consent.handled && !consent.cleared) return { ok: false, reason: 'blocked_by_consent' };
+        if (consent.handled && !consent.cleared) return { ok: false, reason: 'blocked_by_consent', ...(navigated ? { navigated: true } : {}) };
       } catch (err) {
         this.log(`[fb-feed] consent accept error: ${(err as Error).message}`);
       }
     }
     const blocked = await this.blockingReason();
-    if (blocked) return { ok: false, reason: blocked };
-    return { ok: true };
+    if (blocked) return { ok: false, reason: blocked, ...(navigated ? { navigated: true } : {}) };
+    return { ok: true, ...(navigated ? { navigated: true } : {}) };
   }
 
   /** 探测当前页 surface（URL 归类 + feed/dialog/水合数）。 */

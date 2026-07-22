@@ -111,11 +111,20 @@ function makeSession(opts: {
       },
     } as unknown as FacebookCommentHandler);
   const feedReader = {
-    ensureFeed: async (url: string) => {
+    ensureFeed: async (url: string, onNavigate?: () => void) => {
       state.ensureCalls++;
       state.ensureUrls.push(url);
-      return { ok: true as const };
+      if (url.includes('/search/')) onNavigate?.();
+      return { ok: true as const, navigated: url.includes('/search/') };
     },
+    probeSurface: async () => ({
+      href: state.ensureUrls.at(-1) ?? 'https://www.facebook.com/',
+      surface: state.ensureUrls.at(-1)?.includes('/search/') ? 'search' : 'home',
+      hasFeed: true,
+      hydratedArticles: 1,
+      dialogOpen: false,
+      homeReady: true,
+    }),
     scanCards: async () => {
       state.scanCalls++;
       if (opts.cardBatches) return opts.cardBatches.shift() ?? [];
@@ -448,6 +457,25 @@ test('普通浏览 search.execute（无 taskId/container）→ FB 搜索页读�
   assert.equal(h.cards[0].cards.length, 1);
   assert.match(h.ensureUrls[0], /\/search\/posts\/\?q=/);
   assert.match(h.ensureUrls[0], /%E6%84%8F%E5%A4%A7%E5%88%A9/);
+  assert.deepEqual(h.actions, [{
+    action: 'search', ok: true, activityId: 'cmd-search.execute', purpose: 'discovery', scope: 'global',
+    actuated: true, searchOutcome: 'results_ready', resultCount: 1,
+  }]);
+});
+
+test('普通浏览 search.execute 搜索页无卡 → no_results 成功终态', async () => {
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [{ cards: [], degraded: false, reason: 'no_feed' }],
+  });
+  await h.session.onCloudCommand(makeEnv('search.execute', {
+    keyword: '不存在的主题', activityId: 'fb-global-empty', purpose: 'operator', scope: 'global',
+  }));
+  assert.equal(h.cards.at(-1)?.cards.length, 0);
+  assert.deepEqual(h.actions, [{
+    action: 'search', ok: true, activityId: 'fb-global-empty', purpose: 'operator', scope: 'global',
+    actuated: true, searchOutcome: 'no_results', resultCount: 0,
+  }]);
 });
 
 test('评论/搜索/加群/按url开帖 → 委托 commentHandler（不走浏览路径）', async () => {

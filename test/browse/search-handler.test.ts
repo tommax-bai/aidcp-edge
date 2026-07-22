@@ -33,6 +33,23 @@ test('executeSearch: 聚焦 → 逐字符输入 → 回车', async () => {
   assert.ok(keys.some((k) => k.params.key === 'Enter'));
 });
 
+test('executeSearch: Enter keyDown 已派发后触发 onSubmit 事实钩子', async () => {
+  const { cdp } = fakeCdp((method) => {
+    if (method === 'Runtime.evaluate') {
+      return { result: { value: true } };
+    }
+    return {};
+  });
+  let submitted = 0;
+  await executeSearch('奶茶', {
+    cdp,
+    sleep: async () => {},
+    random: () => 0.5,
+    onSubmit: () => { submitted += 1; },
+  });
+  assert.ok(submitted >= 1, '至少一次真实提交手势应被观测');
+});
+
 test('executeSearch: 搜索框未找到时抛错', async () => {
   const { cdp } = fakeCdp((method) => {
     if (method === 'Runtime.evaluate') return { result: { value: false } };
