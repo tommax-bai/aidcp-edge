@@ -17,6 +17,10 @@ test('ordinary TypeScript builds remain independent while every Electron package
   for (const script of ['electron:build', 'electron:build:mac', 'electron:build:win']) {
     assert.match(packageJson.scripts[script] ?? '', /build:native-page-engines-for-package/);
   }
+  assert.match(packageJson.scripts['ensure:native-page-engine'] ?? '', /ensure-native-page-engine-dev/);
+  for (const script of ['preelectron:dev', 'preelectron:ol']) {
+    assert.match(packageJson.scripts[script] ?? '', /ensure:native-page-engine/);
+  }
   assert.match(JSON.stringify(packageJson.build.extraResources ?? []), /build\/native-page-engine\/\$\{platform\}-\$\{arch\}/);
 });
 
@@ -37,6 +41,8 @@ test('native staging is explicit, locked, outside ASAR, and unsigned', async () 
   assert.match(script, /process\.platform/);
   assert.match(script, /targetArch/);
   assert.match(script, /forbiddenCleartextMarkers/);
+  assert.match(script, /rustup', \['which', 'cargo'\]/);
+  assert.match(script, /cwd: crateDir/);
   assert.match(script, /unsigned target artifact verified with encoded page rules/);
   assert.doesNotMatch(main, /NativePageEngineClient/);
 });

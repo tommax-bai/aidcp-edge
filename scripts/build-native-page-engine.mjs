@@ -46,6 +46,21 @@ function digest(contents) {
   return createHash('sha256').update(contents).digest('hex');
 }
 
+function resolveCargoBinary() {
+  const configured = String(process.env.AIDCP_CARGO_BIN || '').trim();
+  if (configured) return configured;
+
+  const direct = spawnSync('cargo', ['--version'], { encoding: 'utf8' });
+  if (!direct.error && direct.status === 0) return 'cargo';
+
+  const rustup = spawnSync('rustup', ['which', 'cargo'], { cwd: crateDir, encoding: 'utf8' });
+  const rustupCargo = String(rustup.stdout || '').trim();
+  if (!rustup.error && rustup.status === 0 && isAbsolute(rustupCargo)) {
+    return rustupCargo;
+  }
+  return 'cargo';
+}
+
 async function verify() {
   const [binary, checksumRecord, manifestRecord, cargoToml, commandManifest] = await Promise.all([
     readFile(stagedBinary),
@@ -89,7 +104,7 @@ async function verify() {
 }
 
 async function build() {
-  const cargo = process.env.AIDCP_CARGO_BIN || 'cargo';
+  const cargo = resolveCargoBinary();
   const cargoDirectory = isAbsolute(cargo) ? dirname(cargo) : undefined;
   const executablePath = cargoDirectory
     ? [cargoDirectory, process.env.PATH].filter(Boolean).join(delimiter)
