@@ -230,7 +230,7 @@ test('主进程把执行阶段绑定当前操作代，旧核心输出、唤醒�
   assert.match(mainSource, /next\.loopStageBrowserIndependent = evt\.loopStage !== null && evt\.browserIndependent === true/);
   assert.match(mainSource, /currentLoopExecutable = currentLoopRunning[\s\S]*browserState === 'ready'[\s\S]*loopStageBrowserIndependent === true/,
     '浏览器阶段只有在浏览器真实就绪时才是运行中，显式浏览器无关任务除外');
-  assert.match(mainSource, /rearmWakeAfterFailure\(handle, generation = handle && handle\.lifecycleGeneration\)[\s\S]*handle\.stopRequested[\s\S]*isCurrentLifecycleGeneration/);
+  assert.match(mainSource, /rearmWakeRetry\(handle, generation = handle && handle\.lifecycleGeneration, retryCause = 'wake_failed'\)[\s\S]*handle\.stopRequested[\s\S]*isCurrentLifecycleGeneration/);
 });
 
 test('start_queue_full 是未入队退避，不再谎称仍在队列中', () => {
@@ -240,6 +240,23 @@ test('start_queue_full 是未入队退避，不再谎称仍在队列中', () => 
   assert.match(block, /本次未入队，将按退避计划重试/);
   assert.match(block, /仍在权威队列中/);
   assert.doesNotMatch(block, /仍在队列中，浏览器继续起/);
+});
+
+test('启动排队已满与真实唤醒失败使用不同退避文案', () => {
+  const retryStart = mainSource.indexOf('function rearmWakeRetry(');
+  const retryEnd = mainSource.indexOf('\nfunction wakeColdStandby', retryStart);
+  const retryBlock = mainSource.slice(retryStart, retryEnd);
+  assert.match(retryBlock, /retryCause === 'start_queue_full' \? '启动排队已满' : '唤醒失败'/);
+
+  const queueFullStart = mainSource.indexOf('function wakeColdStandby(');
+  const queueFullEnd = mainSource.indexOf('\nfunction onColdStandbyWakeFailed', queueFullStart);
+  const queueFullBlock = mainSource.slice(queueFullStart, queueFullEnd);
+  assert.match(queueFullBlock, /denyWakeNow\(handle, 'start_queue_full'\)[\s\S]*rearmWakeRetry\(handle, generation, 'start_queue_full'\)/);
+
+  const failureStart = mainSource.indexOf('function onColdStandbyWakeFailed(');
+  const failureEnd = mainSource.indexOf('\nfunction startControlPlaneOnly', failureStart);
+  const failureBlock = mainSource.slice(failureStart, failureEnd);
+  assert.match(failureBlock, /denyWakeNow\(handle, `wake_failed:\$\{reason\}`\)[\s\S]*rearmWakeRetry\(handle, expectedGeneration, 'wake_failed'\)/);
 });
 
 test('一个环境启动失败绝不阻塞队列里其余环境', async () => {

@@ -3175,13 +3175,13 @@ function scheduleColdStandbyWake(handle, decision) {
 }
 
 /**
- * 唤醒失败后重挂自唤醒定时器（退避 1min → 2min → 5min 封顶）。
+ * 唤醒未完成后重挂自唤醒定时器（退避 1min → 2min → 5min 封顶）。
  *
  * `wakeColdStandby` 一进门就把待机定时器清了。旧版失败时不还——于是**一次唤醒失败 = 这个环境永久停摆**：
  * 它既没有自唤醒定时器，核心那边的唤醒闩也永久置位（再不会向外壳请求），云端的任务全部打空。
  * 退避是刚性的：AdsPower 真坏掉时，绝不 60s 一次地无限重敲它。
  */
-function rearmWakeAfterFailure(handle, generation = handle && handle.lifecycleGeneration) {
+function rearmWakeRetry(handle, generation = handle && handle.lifecycleGeneration, retryCause = 'wake_failed') {
   if (!handle || handle.removed || handle.stopRequested || isQuitting
     || !isCurrentLifecycleGeneration(handle, generation)) return;
   if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
@@ -3193,7 +3193,8 @@ function rearmWakeAfterFailure(handle, generation = handle && handle.lifecycleGe
     wakeColdStandby(handle, 'wake_retry');
   }, delayMs);
   if (typeof handle.coldStandbyTimer.unref === 'function') handle.coldStandbyTimer.unref();
-  console.log(`[standby] ${handle.envId} 唤醒失败，${Math.round(delayMs / 1000)}s 后自动重试（仍保持待机）`);
+  const retryLabel = retryCause === 'start_queue_full' ? '启动排队已满' : '唤醒失败';
+  console.log(`[standby] ${handle.envId} ${retryLabel}，${Math.round(delayMs / 1000)}s 后自动重试（仍保持待机）`);
 }
 
 /**
@@ -3220,7 +3221,7 @@ function wakeColdStandby(handle, reason) {
       lastMessage: `${queueAdmission.message}，本次唤醒未加入；稍后自动重试。`,
       ...presencePatch('待机中（启动排队已满）'),
     });
-    rearmWakeAfterFailure(handle, generation);
+    rearmWakeRetry(handle, generation, 'start_queue_full');
     return;
   }
   if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
@@ -3386,7 +3387,7 @@ function onColdStandbyWakeFailed(handle, reason, expectedGeneration = handle && 
   denyWakeNow(handle, `wake_failed:${reason}`);
   // 待机定时器在 wakeColdStandby 里被清掉了，这里**必须还回去**——不还，这个环境此后再无任何
   // 自唤醒路径，会一直待机到天荒地老（一次唤醒失败 = 永久停摆）。
-  rearmWakeAfterFailure(handle, expectedGeneration);
+  rearmWakeRetry(handle, expectedGeneration, 'wake_failed');
   // 这次浏览器没有起来，执行槽仍是空的：立即放行 FIFO 下一项。只靠 15s 重扫虽最终会恢复，
   // 但会把“第 5 个分身被占用”表现成后续环境长时间没有回复，正是启动调度需要消掉的空窗。
   setTimeout(() => drainSlotWaiters(), 0);
