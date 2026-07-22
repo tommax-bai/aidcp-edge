@@ -24,6 +24,7 @@ export interface FacebookCompanionUiEvent {
     | 'reel_view'
     | 'note_open'
     | 'like'
+    | 'follow'
     // —— 写动作（change facebook-write-action-visibility）——
     | 'comment'
     | 'comment_pending'
@@ -39,7 +40,7 @@ export interface FacebookCompanionUiEvent {
   sentence?: string;
   presence?: string;
   loopStage?: 'feed' | 'read' | 'interact';
-  statsDelta?: { views?: number; likes?: number; comments?: number };
+  statsDelta?: { views?: number; likes?: number; comments?: number; follows?: number };
 }
 
 /** 核心 → 桌面壳的唯一发射口：壳侧 `ui-events.cjs` 按 `[ui-event]` 前缀解析结构化行。 */

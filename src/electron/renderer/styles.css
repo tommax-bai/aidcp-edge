@@ -1588,6 +1588,7 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   background: #eef2f9; color: #6b7794;
 }
 .ev-ic.ic-like { background: #ffeef1; color: #d02f4d; }
+.ev-ic.ic-follow { background: #e9f6ee; color: #1f7a44; }
 .ev-ic.ic-collect { background: #fdf1dc; color: #9a6413; }
 .ev-ic.ic-comment { background: #e8f0ff; color: #2c5dd4; }
 .ev-ic.ic-join { background: #e9f6ee; color: #1f7a44; }

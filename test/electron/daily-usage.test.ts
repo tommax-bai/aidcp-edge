@@ -18,8 +18,8 @@ const dailyUsage = require_(
 
 const { DAILY_USAGE_ACTIONS, cleanSuppliedCounts, normalizeDailyUsage, bumpDailyUsage } = dailyUsage;
 
-/** 云端投影给 FB 的形状：无 collect / follow（结构不支持），有 join_group。 */
-const FB_TOTALS = { view: 12, like: 3, comment: 1, publish: 0, join_group: 2 };
+/** 云端投影给 FB 的形状：无 collect；Reel follow 与 join_group 真实存在。 */
+const FB_TOTALS = { view: 12, like: 3, comment: 1, follow: 2, publish: 0, join_group: 2 };
 
 test('键清单与 protocol.ts 的单一来源一致（本文件是纯 JS、typecheck 抓不到这条漂移）', () => {
   assert.deepEqual(DAILY_USAGE_ACTIONS, ['view', 'like', 'collect', 'comment', 'follow', 'publish', 'join_group']);
@@ -35,7 +35,7 @@ test('缺席的键 MUST NOT 被物化成 0（这是「云端摘掉 → 客户端
   const out = normalizeDailyUsage({ asOf: Date.now(), totals: FB_TOTALS });
   assert.ok(out);
   assert.ok(!('collect' in out.totals), 'collect 缺席 = FB 没有收藏这个概念，必须保持缺席');
-  assert.ok(!('follow' in out.totals), 'follow 缺席同理');
+  assert.equal(out.totals.follow, 2, 'Reel 关注共用 follow 指标，必须保留');
   assert.deepEqual(out.totals, FB_TOTALS);
 });
 
@@ -52,7 +52,14 @@ test('乐观累加 MUST NOT 把云端摘掉的键建回来（症状是收藏格�
   assert.ok(bumped);
   assert.equal(bumped.totals.like, 4, '点赞照常 +1');
   assert.ok(!('collect' in bumped.totals), '收藏 MUST NOT 被 like 事件顺手物化回来');
-  assert.ok(!('follow' in bumped.totals), 'follow 同理');
+  assert.equal(bumped.totals.follow, 2, '点赞事件不得改写关注计数');
+});
+
+test('已存在的 Reel 关注指标可由新关注成功事件即时 +1', () => {
+  const usage = normalizeDailyUsage({ asOf: Date.now(), totals: FB_TOTALS });
+  const bumped = bumpDailyUsage(usage, 'follow', 1);
+  assert.ok(bumped);
+  assert.equal(bumped.totals.follow, 3);
 });
 
 test('乐观累加对「云端没给的那个动作本身」是 no-op，不新建键', () => {

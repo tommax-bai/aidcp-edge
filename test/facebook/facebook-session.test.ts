@@ -241,6 +241,7 @@ test('co-landing: 声明 browse 的 Facebook driver 解析到 FacebookBrowseSess
   assert.equal(usesFacebookBrowseSession(fb), true);
   assert.equal(usesFacebookBrowseSession(xhs), false);
   assert.equal(fb.capabilities.includes('browse'), true, 'FB 声明 browse');
+  assert.equal(fb.edgeCapabilities.includes('facebook_reel_follow_v1'), true, '本构建声明 Reel 关注执行器，供 Cloud 做版本闸');
 });
 
 test('co-landing: FacebookBrowseSession 满足 EdgeBrowseSession 契约（9 方法）', async () => {
@@ -784,7 +785,7 @@ test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，�
   assert.equal(h.cards[1].cards[0].noteId, first.noteId);
   let uiEvents = h.logs
     .filter((line) => line.startsWith('[ui-event] '))
-    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string; sentence?: string; statsDelta?: { views?: number } });
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string; sentence?: string; statsDelta?: { views?: number; follows?: number } });
   assert.deepEqual(
     uiEvents.filter((event) => event.type === 'reel_view'),
     [{ kind: 'activity', type: 'reel_view', sentence: '看了「first reel summary」 · Bao', loopStage: 'read', statsDelta: { views: 1 } }],
@@ -796,7 +797,7 @@ test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，�
   assert.equal(h.details.at(-1)?.mediaType, 'video');
   uiEvents = h.logs
     .filter((line) => line.startsWith('[ui-event] '))
-    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string; sentence?: string; statsDelta?: { views?: number } });
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string; sentence?: string; statsDelta?: { views?: number; follows?: number } });
   assert.equal(uiEvents.filter((event) => event.type === 'reel_view').length, 1);
   assert.equal(uiEvents.filter((event) => event.type === 'note_open').length, 0, '同一 Reel 的后续详情仍上报，但不重复计读');
 
@@ -808,12 +809,27 @@ test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，�
   assert.equal(h.actions.at(-1)?.action, 'follow');
   assert.equal(h.actions.at(-1)?.ok, true);
   assert.deepEqual(h.reelFollowCalls, [{ noteId: first.noteId, shadow: false }]);
+  uiEvents = h.logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string; sentence?: string; presence?: string; statsDelta?: { views?: number; follows?: number } });
+  assert.deepEqual(
+    uiEvents.filter((event) => event.type === 'follow'),
+    [{
+      kind: 'activity',
+      type: 'follow',
+      sentence: '关注了一位 Reel 作者',
+      presence: '刚关注了一位 Reel 作者',
+      loopStage: 'interact',
+      statsDelta: { follows: 1 },
+    }],
+    '只有验证为新关注成功时，客户端活动与本地即时计数才增加',
+  );
 
   await h.session.onCloudCommand(makeEnv('page.scroll', {}));
   assert.equal(h.cards.at(-1)?.cards[0].noteId, second.noteId);
   uiEvents = h.logs
     .filter((line) => line.startsWith('[ui-event] '))
-    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string; sentence?: string; statsDelta?: { views?: number } });
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as { type: string; sentence?: string; statsDelta?: { views?: number; follows?: number } });
   assert.deepEqual(
     uiEvents.filter((event) => event.type === 'reel_view').map((event) => event.sentence),
     ['看了「first reel summary」 · Bao', '看了「second reel summary」 · Lan'],
@@ -841,6 +857,7 @@ test('Reels 关注：shadow 标志与 reader 的真实终态原样回执', async
 
   assert.deepEqual(h.reelFollowCalls, [{ noteId: reel.noteId, shadow: true }]);
   assert.deepEqual(h.actions.at(-1), { action: 'follow', ok: false, reason: 'shadow' });
+  assert.equal(h.logs.some((line) => line.includes('"type":"follow"')), false, 'shadow 不得伪报关注活动或计数');
 });
 
 test('Reels 关注：already_followed 是已满足的幂等终态，缺 noteId 则 fail-closed', async () => {
@@ -863,6 +880,7 @@ test('Reels 关注：already_followed 是已满足的幂等终态，缺 noteId �
 
   await h.session.onCloudCommand(makeEnv('interaction.follow', { authorId: 'Salon de Comolis', noteId: reel.noteId }));
   assert.deepEqual(h.actions.at(-1), { action: 'follow', ok: true, reason: 'already_followed' });
+  assert.equal(h.logs.some((line) => line.includes('"type":"follow"')), false, 'already_followed 未发生新关注，不得计入今日进展');
   await h.session.onCloudCommand(makeEnv('interaction.follow', { authorId: 'Salon de Comolis' }));
   assert.deepEqual(h.actions.at(-1), { action: 'follow', ok: false, reason: 'no_target' });
 });

@@ -306,7 +306,7 @@ test('ui-event-lines: personaWritingLanguage 显式值/null 出行，缺省不�
   assert.equal(uiSnapshotToLines({}).some((line) => line.includes('personaWritingLanguage')), false);
 });
 
-test('ui-event-lines: FB 投影后的载荷穿透——收藏/关注保持缺席、加群 MUST NOT 被这道白名单吃掉', () => {
+test('ui-event-lines: FB 投影后的载荷穿透——收藏保持缺席，Reel 关注与加群不得被白名单吃掉', () => {
   // 本条钉的是 change platform-honest-usage-metrics 首跑真机的实际故障：云端已按平台正确投影，
   // 但本文件那张手写六键表把 join_group 过滤掉了 ⇒ 屏幕上只有 4 格、加群怎么也不出现、全链路零报错。
   // 键清单现已从 protocol 的单一来源派生；这条断言防它被写回本地常量。
@@ -314,15 +314,15 @@ test('ui-event-lines: FB 投影后的载荷穿透——收藏/关注保持缺席
     dailyUsage: {
       asOf: 1730000001000,
       quotaLevel: 'normal',
-      // 云端为 FB 投影后的真实形状：无 collect / follow，有 join_group。
-      totals: { view: 40, like: 6, comment: 1, publish: 1, join_group: 2 },
-      quotas: { view: 20, like: 2, comment: 0, publish: 0, join_group: 3 },
-      saturated: ['view', 'like', 'join_group'],
+      // 云端为 FB 投影后的真实形状：无 collect；Reel follow 与 join_group 均真实存在。
+      totals: { view: 40, like: 6, comment: 1, follow: 2, publish: 1, join_group: 2 },
+      quotas: { view: 20, like: 2, comment: 0, follow: 3, publish: 0, join_group: 3 },
+      saturated: ['view', 'like', 'follow', 'join_group'],
       windows: {
         day: {
           startedAt: 1729999941000,
-          totals: { view: 40, like: 6, comment: 1, publish: 1, join_group: 2 },
-          quotas: { view: 20, like: 2, comment: 0, publish: 0, join_group: 3 },
+          totals: { view: 40, like: 6, comment: 1, follow: 2, publish: 1, join_group: 2 },
+          quotas: { view: 20, like: 2, comment: 0, follow: 3, publish: 0, join_group: 3 },
           saturated: ['view'],
         },
       },
@@ -339,7 +339,10 @@ test('ui-event-lines: FB 投影后的载荷穿透——收藏/关注保持缺席
   assert.equal(daily.quotas.join_group, 3, '加群上限同理');
   assert.equal(daily.windows.day.totals.join_group, 2, '窗口面也不得吃掉它');
   assert.equal(daily.windows.day.quotas.join_group, 3);
+  assert.equal(daily.totals.follow, 2, 'Reel 关注今日计数必须活着走到界面');
+  assert.equal(daily.quotas.follow, 3, '关注配额必须同路穿透');
+  assert.equal(daily.windows.day.totals.follow, 2, '窗口面也必须保留关注计数');
   assert.ok(daily.saturated.includes('join_group'), 'saturated 白名单同样按单一来源过滤');
+  assert.ok(daily.saturated.includes('follow'));
   assert.ok(!('collect' in daily.totals), '云端摘掉的键必须保持缺席，绝不物化成 0');
-  assert.ok(!('follow' in daily.totals), '同上');
 });

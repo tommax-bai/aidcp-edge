@@ -31,7 +31,8 @@ export const facebookPlatformDriver: PlatformDriver = {
   // 'inline_targeting'：本构建能处理 note.open{surface:'feed'} 就地读 + feed 两段点赞（change
   //   facebook-feed-inline-browse）。云端**版本偏斜闸**（change platform-browse-protocol）只对声明此位的边缘
   //   开 inline 旗标；声明它只表示「我能」，真开与否由云端旗标 gate（默认全关 = 逐位等于今天）。
-  edgeCapabilities: ['locating', 'cdp', 'inline_targeting'],
+  // 'facebook_reel_follow_v1'：本构建含同 Reel/作者后置验证的关注执行器；Cloud 只对声明此位的连接启用自动关注。
+  edgeCapabilities: ['locating', 'cdp', 'inline_targeting', 'facebook_reel_follow_v1'],
   target: FACEBOOK_TARGET,
   defaultStartUrl: FACEBOOK_TARGET.startUrl,
   attachUrlIncludes: FACEBOOK_TARGET.attachUrlIncludes,

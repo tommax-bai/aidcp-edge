@@ -1799,12 +1799,15 @@ test('活动流条目带类型记号（治纯文字墙）', async () => {
   pushActivity({ ts: new Date().toISOString(), type: 'like', sentence: '点了个赞' });
   pushActivity({ ts: new Date().toISOString(), type: 'collect', sentence: '收藏了' });
   pushActivity({ ts: new Date().toISOString(), type: 'reel_view', sentence: '看了一个 Reel' });
+  pushActivity({ ts: new Date().toISOString(), type: 'follow', sentence: '关注了一位 Reel 作者' });
   const ics = Array.from(w.document.querySelectorAll('#activity-stream .ev-ic'));
-  assert.equal(ics.length, 3);
-  assert.ok((ics[0] as HTMLElement).classList.contains('ic-read'), '最新在上=Reel 浏览');
-  assert.equal((ics[0] as HTMLElement).textContent, '读');
-  assert.ok((ics[1] as HTMLElement).classList.contains('ic-collect'));
-  assert.equal((ics[1] as HTMLElement).textContent, '藏');
+  assert.equal(ics.length, 4);
+  assert.ok((ics[0] as HTMLElement).classList.contains('ic-follow'), '最新在上=Reel 关注');
+  assert.equal((ics[0] as HTMLElement).textContent, '关');
+  assert.ok((ics[1] as HTMLElement).classList.contains('ic-read'));
+  assert.equal((ics[1] as HTMLElement).textContent, '读');
+  assert.ok((ics[2] as HTMLElement).classList.contains('ic-collect'));
+  assert.equal((ics[2] as HTMLElement).textContent, '藏');
 });
 
 // ── 发布卡收展（dock）──
@@ -2329,19 +2332,33 @@ test('删配图：云端拒绝 → 该张仍在界面上 + 诚实拒因，绝无
 const kpi = (w: DOMWindow, action: string) => $(w, `.kpi[data-action="${action}"]`);
 const kpiVisible = (w: DOMWindow, action: string) => !kpi(w, action).classList.contains('hidden');
 
-test('FB 形状：收藏 / 关注整格不渲染（不是渲染一个诚实的 0），加群格出现', async () => {
+test('FB 形状：收藏整格不渲染；Reel 关注按云端配额真值展示；加群格出现', async () => {
   const { w } = await boot({
     dailyUsage: {
-      // 云端按平台投影后的真实形状：无 collect / follow，有 join_group。
-      totals: { view: 12, like: 3, comment: 1, publish: 0, join_group: 2 },
-      quotas: { view: 150, like: 50, comment: 8, publish: 1, join_group: 3 },
+      // 云端按平台投影后的真实形状：无 collect；Reel follow 与普通 follow 共用配额；有 join_group。
+      totals: { view: 12, like: 3, comment: 1, follow: 2, publish: 0, join_group: 2 },
+      quotas: { view: 150, like: 50, comment: 8, follow: 15, publish: 1, join_group: 3 },
+      windows: {
+        day: {
+          active: true,
+          totals: { view: 12, like: 3, comment: 1, follow: 2, publish: 0, join_group: 2 },
+          quotas: { view: 150, like: 50, comment: 8, follow: 15, publish: 1, join_group: 3 },
+          saturated: [],
+        },
+      },
     },
   });
   assert.equal(kpiVisible(w, 'collect'), false, 'FB 没有收藏这个概念 ⇒ 整格不画');
-  assert.equal(kpiVisible(w, 'follow'), false, 'FB 没有关注执行器 ⇒ 整格不画');
+  assert.equal(kpiVisible(w, 'follow'), true, 'FB Reel 存在关注执行器 ⇒ 展示云端确认的今日关注');
+  assert.equal($(w, '#follows').textContent, '2');
+  assert.equal($(w, '#follows-cap').textContent, '/15');
   assert.equal(kpiVisible(w, 'join_group'), true, '加群是 FB 真做、真烧配额的动作');
   assert.equal($(w, '#joins').textContent, '2');
   assert.equal($(w, '#joins-cap').textContent, '/3');
+  $(w, '#daily-summary').click();
+  await tick();
+  assert.match($(w, '#quota-windows').textContent ?? '', /关注/);
+  assert.doesNotMatch($(w, '#quota-windows').textContent ?? '', /收藏/);
   for (const action of ['view', 'like', 'comment', 'publish']) {
     assert.equal(kpiVisible(w, action), true, `${action} 照常显示`);
   }

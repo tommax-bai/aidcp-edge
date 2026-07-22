@@ -957,7 +957,7 @@ function setBadge(element, field, value) {
  * 客户端指标表（change platform-honest-usage-metrics）。
  *
  * 这里列的是「**可能**出现的格子」，不是「一定出现的格子」——**哪些真出现由云端投影决定**：云端按平台
- * 声明摘掉该平台结构上做不到的动作（FB 没有收藏、没有关注执行器），客户端只渲染云端真给了的键。
+ * 声明摘掉该平台结构上做不到的动作（例如 FB 没有收藏），客户端只渲染云端真给了的键。
  * 客户端 MUST NOT 自己按平台判：它拿不到权威平台值（本地环境标签会错标，见 backlog 90.8）。
  *
  * `stat` = 无云端用量载荷时的本机回落来源。`join_group` 是 null：加群没有本机计数来源，故在「云端还没
@@ -3619,7 +3619,8 @@ const STREAM_MAX = 200;
 // 未命中回落 ['·','ic-sys']——这里**不是**过滤器，新类型少了记号只是掉成灰点、条目照常上屏。
 // `_pending` / `_failed` 变体**有意与本族共用记号**：句子已经承载真相，逐档换记号只是噪声。
 const EV_ICONS = [
-  [/^(like|comment_like|follow)$/, ['赞', 'ic-like']],
+  [/^(like|comment_like)$/, ['赞', 'ic-like']],
+  [/^follow$/, ['关', 'ic-follow']],
   [/^collect$/, ['藏', 'ic-collect']],
   [/^(comment|comment_pending|comment_failed)$/, ['评', 'ic-comment']],
   [/^(join_group|join_pending|join_failed)$/, ['群', 'ic-join']],

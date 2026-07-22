@@ -736,6 +736,16 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
           statsDelta: { likes: 1 },
         });
       }
+      if (r.payload.action === 'follow' && r.payload.ok && r.payload.reason !== 'already_followed') {
+        this.emitCompanionUiEvent({
+          kind: 'activity',
+          type: 'follow',
+          sentence: '关注了一位 Reel 作者',
+          presence: '刚关注了一位 Reel 作者',
+          loopStage: 'interact',
+          statsDelta: { follows: 1 },
+        });
+      }
     }
   }
 
