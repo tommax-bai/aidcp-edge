@@ -228,10 +228,9 @@ test('wechat api: captured comment write and candidate DM stay explicit, non-ret
       },
     },
   );
-  assert.throws(
-    () => serializeWechatRequest('dmSendText', {}, SESSION),
-    (error: unknown) => error instanceof WechatChannelsError &&
-      error.category === 'schema_changed' && !error.requestDispatched,
+  assert.equal(
+    new URL(serializeWechatRequest('dmSendText', {}, SESSION).url).pathname,
+    '/micro/interaction/cgi-bin/mmfinderassistant-bin/private-msg/send-private-msg',
   );
 
   const candidate = serializeWechatRequest('commentCreate', {
@@ -264,7 +263,6 @@ test('wechat api: captured comment write and candidate DM stay explicit, non-ret
 
   const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
   const api = new WechatChannelsApiClient({
-    allowUnverifiedWrites: true,
     maxRetries: 3,
     nowImpl: () => 123,
     clientIdImpl: () => 'client-test',
@@ -317,7 +315,6 @@ test('wechat api: captured comment write and candidate DM stay explicit, non-ret
 
   const changed: WechatChannelsEndpoint[] = [];
   const missingServerId = new WechatChannelsApiClient({
-    allowUnverifiedWrites: true,
     maxRetries: 3,
     onSchemaChanged: (endpoint) => changed.push(endpoint),
     fetchImpl: (async () => json({ errCode: 0, data: { comment: {} } })) as typeof fetch,
@@ -416,16 +413,22 @@ test('wechat api: retries only bounded read calls and never retries writes', asy
   const writeApi = new WechatChannelsApiClient({
     maxRetries: 3,
     sleepImpl: async () => {},
-    fetchImpl: (async () => {
+    fetchImpl: (async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path.endsWith('/private-msg/get-session-info')) {
+        return json({ errCode: 0, data: { sessionInfo: [{
+          sessionId: 'thread-1', username: 'peer-1', nickname: 'Peer', headImgUrl: '',
+        }] } });
+      }
       writeCalls++;
       throw new Error('response lost');
     }) as typeof fetch,
   });
   await assert.rejects(
     () => writeApi.sendDmText(SESSION, { threadExternalId: 'thread-1', fromUsername: 'finder-self', text: 'hello' }),
-    (error: unknown) => error instanceof WechatChannelsError && error.category === 'schema_changed' && !error.requestDispatched,
+    (error: unknown) => error instanceof WechatChannelsError && error.category === 'transient_network' && error.requestDispatched,
   );
-  assert.equal(writeCalls, 0);
+  assert.equal(writeCalls, 1);
 });
 
 test('wechat api: one deadline covers response body reads and returns a redacted transient category', async () => {
@@ -641,12 +644,21 @@ test('wechat api: missing pagination/direction fields trip schema circuit and ex
   let writeFetches = 0;
   const rejectedWrite = new WechatChannelsApiClient({
     onSchemaChanged: (endpoint) => changed.push(endpoint),
-    fetchImpl: (async () => { writeFetches++; return json({ errCode: 0, data: { accepted: false } }); }) as typeof fetch,
+    fetchImpl: (async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path.endsWith('/private-msg/get-session-info')) {
+        return json({ errCode: 0, data: { sessionInfo: [{
+          sessionId: 'thread-1', username: 'peer-1', nickname: 'Peer', headImgUrl: '',
+        }] } });
+      }
+      writeFetches++;
+      return json({ errCode: 0, data: { baseResp: { errcode: 400 }, svrMsgId: '' } });
+    }) as typeof fetch,
   });
   await assert.rejects(
     () => rejectedWrite.sendDmText(SESSION, { threadExternalId: 'thread-1', fromUsername: 'finder-self', text: 'hello' }),
-    (error: unknown) => error instanceof WechatChannelsError && error.category === 'schema_changed' && !error.requestDispatched,
+    (error: unknown) => error instanceof WechatChannelsError && error.category === 'platform_rejected' && error.requestDispatched,
   );
-  assert.equal(writeFetches, 0);
-  assert.deepEqual(changed, ['postList', 'dmHistory', 'dmSendText']);
+  assert.equal(writeFetches, 1);
+  assert.deepEqual(changed, ['postList', 'dmHistory']);
 });

@@ -52,33 +52,9 @@ test('顺序不变量：覆盖发生在 spawnEnv 合并之后（否则被继承�
   assert.ok(injectIdx < spawnCallIdx, '覆盖必须在 spawn 调用之前生效');
 });
 
-test('Facebook 浏览模式由最终云端 key 统一注入，且只发生在启动子进程前', () => {
-  const cloudResolveIdx = code.indexOf('const cloudSel = resolveCloudUrl();');
-  const browseInjectIdx = code.indexOf('spawnEnv.AIDCP_FB_BROWSE_AUTO = fleet.facebookBrowseModeFor');
-  const spawnCallIdx = code.indexOf('spawn(process.execPath');
-  assert.ok(cloudResolveIdx >= 0, '必须先解析实际云端');
-  assert.ok(browseInjectIdx > cloudResolveIdx, '浏览模式必须使用解析后的云端 key');
-  assert.ok(browseInjectIdx < spawnCallIdx, '浏览模式必须在子进程启动前注入');
-  assert.match(
-    code,
-    /const resolvedCloudKey = cloudSel\.fromSelection[\s\S]*?spawnEnv\.AIDCP_FB_BROWSE_AUTO = fleet\.facebookBrowseModeFor\([\s\S]*?cloudEnvKey: resolvedCloudKey/,
-    'Facebook 模式必须取同一条实际连接的 resolvedCloudKey',
-  );
-});
-
-test('WeChat unverified-write test token is injected only after the final cloud selection and before spawn', () => {
-  const cloudResolveIdx = code.indexOf('const cloudSel = resolveCloudUrl();');
-  const writeInjectIdx = code.indexOf(
-    'spawnEnv.AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE = fleet.wechatUnverifiedWriteTestModeFor',
-  );
-  const spawnCallIdx = code.indexOf('spawn(process.execPath');
-  assert.ok(writeInjectIdx > cloudResolveIdx, 'the dev override must use the resolved cloud key');
-  assert.ok(writeInjectIdx < spawnCallIdx, 'the dev override must be injected before spawning the child');
-  assert.match(
-    code,
-    /spawnEnv\.AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE = fleet\.wechatUnverifiedWriteTestModeFor\([\s\S]*?cloudEnvKey: resolvedCloudKey[\s\S]*?isPackaged: app\.isPackaged/,
-    'the helper must receive the actual environment, platform, and packaging state',
-  );
+test('Cloud selection does not inject hidden Facebook or WeChat product authorization', () => {
+  assert.doesNotMatch(code, /spawnEnv\.AIDCP_FB_BROWSE_AUTO/);
+  assert.doesNotMatch(code, /spawnEnv\.AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE/);
 });
 
 test('custom 必须同时提供 HTTP 数据地址与自动化 WebSocket，否则降级为未选择', () => {

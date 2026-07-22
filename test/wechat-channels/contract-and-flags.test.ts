@@ -6,11 +6,8 @@ import assert from 'node:assert/strict';
 import type { InteractionReplySendPayload, InteractionSyncBatchPayload } from '../../src/comm/protocol.js';
 import type { WechatChannelsApiClient } from '../../src/wechat-channels/api-client.js';
 import {
-  DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS,
-  WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
   WechatCapabilityState,
   WechatEndpointCircuitBreaker,
-  wechatChannelsFeatureFlagsFromEnv,
 } from '../../src/wechat-channels/feature-flags.js';
 import {
   InteractionProtocolValidationError,
@@ -29,13 +26,10 @@ import { assertWriteProbeGate, WechatChannelsProbeRunner } from '../../src/wecha
 import { WechatRuntimeStateStore } from '../../src/wechat-channels/state-store.js';
 import type { WechatSessionMaterial } from '../../src/wechat-channels/types.js';
 
-test('wechat flags: missing Cloud controls keeps every effective capability off', () => {
-  assert.deepEqual(wechatChannelsFeatureFlagsFromEnv({}), DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS);
-  const state = new WechatCapabilityState(DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS, new WechatEndpointCircuitBreaker());
+test('wechat capabilities: missing Cloud controls keeps every effective capability off', () => {
+  const state = new WechatCapabilityState(new WechatEndpointCircuitBreaker());
   state.markProbePassed('commentsRead');
-  state.markProbePassed('commentsReply');
   state.markProbePassed('dmRead');
-  state.markProbePassed('dmSendText');
   assert.deepEqual(state.effective({ authActive: true, identityMatches: true }), {
     commentsRead: false,
     commentsReply: false,
@@ -45,17 +39,9 @@ test('wechat flags: missing Cloud controls keeps every effective capability off'
   });
 });
 
-test('wechat flags: the exact dev test token bypasses per-channel write controls and prior probe evidence', () => {
-  const parsed = wechatChannelsFeatureFlagsFromEnv({
-    AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE: WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
-  });
-  assert.equal(parsed.unverifiedWriteTestMode, true);
-  assert.equal(wechatChannelsFeatureFlagsFromEnv({
-    AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE: '1',
-  }).unverifiedWriteTestMode, false);
-
+test('wechat capabilities: Cloud channel controls cannot be bypassed by stale local environment grants', () => {
   const breaker = new WechatEndpointCircuitBreaker();
-  const state = new WechatCapabilityState(parsed, breaker);
+  const state = new WechatCapabilityState(breaker);
   state.applyRemoteControls({
     accountId: 'env-a', envKey: 'env-a', version: 1,
     commentsReadEnabled: true, commentsReplyEnabled: false,
@@ -66,51 +52,31 @@ test('wechat flags: the exact dev test token bypasses per-channel write controls
 
   assert.deepEqual(state.effective({ authActive: true, identityMatches: true }), {
     commentsRead: true,
-    commentsReply: true,
+    commentsReply: false,
     dmRead: true,
-    dmSendText: true,
+    dmSendText: false,
     dmSendImage: false,
   });
   assert.equal(state.effective({ authActive: false, identityMatches: true }).commentsReply, false);
   assert.equal(state.effective({ authActive: true, identityMatches: false }).dmSendText, false);
   state.applyRemoteControls({
     accountId: 'env-a', envKey: 'env-a', version: 2,
-    commentsReadEnabled: false, commentsReplyEnabled: false,
-    dmReadEnabled: false, dmSendTextEnabled: false, dmSendImageEnabled: false,
-  }, { accountId: 'env-a', envKey: 'env-a' });
-  assert.equal(state.effective({ authActive: true, identityMatches: true }).commentsReply, false);
-  assert.equal(state.effective({ authActive: true, identityMatches: true }).dmSendText, false);
-
-  state.applyRemoteControls({
-    accountId: 'env-a', envKey: 'env-a', version: 3,
-    commentsReadEnabled: true, commentsReplyEnabled: false,
-    dmReadEnabled: true, dmSendTextEnabled: false, dmSendImageEnabled: false,
+    commentsReadEnabled: true, commentsReplyEnabled: true,
+    dmReadEnabled: true, dmSendTextEnabled: true, dmSendImageEnabled: false,
   }, { accountId: 'env-a', envKey: 'env-a' });
   breaker.open('commentCreate');
   assert.equal(state.effective({ authActive: true, identityMatches: true }).commentsReply, false);
 });
 
-test('wechat flags: build, auth, identity, probes, kill switches, and endpoint breaker all gate effective capability', () => {
-  const flags = {
-    ...DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS,
-    interactionEnabled: true,
-    writeEnabled: true,
-    accountWriteEnabled: true,
-    commentsReadEnabled: true,
-    commentsReplyEnabled: true,
-    dmReadEnabled: true,
-    dmSendTextEnabled: true,
-    commentWriteProbeVerified: true,
-    dmWriteProbeVerified: true,
-  };
+test('wechat capabilities: Cloud controls, auth, identity, read evidence and endpoint breakers gate capability', () => {
   const breaker = new WechatEndpointCircuitBreaker();
-  const state = new WechatCapabilityState(flags, breaker);
+  const state = new WechatCapabilityState(breaker);
   assert.equal(state.applyRemoteControls({
     accountId: 'env-a', envKey: 'env-a', version: 3,
     commentsReadEnabled: true, commentsReplyEnabled: true,
     dmReadEnabled: true, dmSendTextEnabled: true, dmSendImageEnabled: false,
   }, { accountId: 'env-a', envKey: 'env-a' }), true);
-  for (const capability of ['commentsRead', 'commentsReply', 'dmRead', 'dmSendText'] as const) {
+  for (const capability of ['commentsRead', 'dmRead'] as const) {
     state.markProbePassed(capability);
   }
   assert.deepEqual(state.effective({ authActive: true, identityMatches: true }), {
@@ -131,18 +97,10 @@ test('wechat flags: build, auth, identity, probes, kill switches, and endpoint b
   });
   assert.equal(state.effective({ authActive: true, identityMatches: false }).commentsRead, false);
 
-  const killed = new WechatCapabilityState({ ...flags, accountKillSwitch: true }, new WechatEndpointCircuitBreaker());
-  killed.applyRemoteControls({
-    accountId: 'env-a', envKey: 'env-a', version: 3,
-    commentsReadEnabled: true, commentsReplyEnabled: true,
-    dmReadEnabled: true, dmSendTextEnabled: true, dmSendImageEnabled: false,
-  }, { accountId: 'env-a', envKey: 'env-a' });
-  killed.markProbePassed('commentsRead');
-  assert.equal(killed.effective({ authActive: true, identityMatches: true }).commentsRead, false);
 });
 
 test('wechat runtime controls: wrong scope and stale versions never change the accepted snapshot', () => {
-  const state = new WechatCapabilityState(DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS, new WechatEndpointCircuitBreaker());
+  const state = new WechatCapabilityState(new WechatEndpointCircuitBreaker());
   const v4 = {
     accountId: 'env-a', envKey: 'env-a', version: 4,
     commentsReadEnabled: true, commentsReplyEnabled: false,
@@ -342,19 +300,11 @@ test('wechat write probes: exact disposable target approval is mandatory and no 
   );
 });
 
-test('wechat read probes: capabilities open independently while unverified writes remain gated', async () => {
-  const flags = {
-    ...DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS,
-    interactionEnabled: true,
-    commentsReadEnabled: true,
-    commentsReplyEnabled: true,
-    dmReadEnabled: true,
-    dmSendTextEnabled: true,
-  };
+test('wechat read probes: successful read evidence opens the configured adjacent text-write capability', async () => {
   const breaker = new WechatEndpointCircuitBreaker();
   breaker.open('postList');
   breaker.open('commentList');
-  const state = new WechatCapabilityState(flags, breaker);
+  const state = new WechatCapabilityState(breaker);
   state.applyRemoteControls({
     accountId: 'env-a', envKey: 'env-a', version: 1,
     commentsReadEnabled: true, commentsReplyEnabled: true,
@@ -369,7 +319,7 @@ test('wechat read probes: capabilities open independently while unverified write
     listComments: async () => ({ items: [], nextCursor: null, hasMore: false }),
     listDmSessions: async () => { throw new Error('DM schema unavailable'); },
   } as unknown as WechatChannelsApiClient;
-  const runner = new WechatChannelsProbeRunner({ api, flags, capabilityState: state });
+  const runner = new WechatChannelsProbeRunner({ api, capabilityState: state });
   const session: WechatSessionMaterial = {
     cookies: [{ name: 'session', value: 'secret', domain: '.channels.weixin.qq.com' }],
     userAgent: 'ua',
@@ -382,14 +332,14 @@ test('wechat read probes: capabilities open independently while unverified write
   assert.equal(breaker.isOpen('commentList'), false);
   assert.deepEqual(state.effective({ authActive: true, identityMatches: true }), {
     commentsRead: true,
-    commentsReply: false,
+    commentsReply: true,
     dmRead: false,
     dmSendText: false,
     dmSendImage: false,
   });
   assert.deepEqual(runner.snapshot().map((result) => [result.capability, result.status]), [
     ['commentsRead', 'passed'],
-    ['commentsReply', 'gated'],
+    ['commentsReply', 'passed'],
     ['dmRead', 'failed'],
   ]);
 });

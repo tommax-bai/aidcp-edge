@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
   FacebookBrowseSession,
   facebookActionNameForCommand,
-  parseFacebookBrowseMode,
   usesFacebookBrowseSession,
   refreshReloadAllowed,
   type FacebookBrowseSessionDeps,
@@ -276,16 +275,6 @@ test('co-landing: FacebookBrowseSession 满足 EdgeBrowseSession 契约（9 方�
     assert.equal(typeof (session as unknown as Record<string, unknown>)[m], 'function', `缺方法 ${m}`);
   }
   assert.equal(await session.quiesceForTask(), 0);
-});
-
-// ─────────────────────────── kill switch 解析 ───────────────────────────
-
-test('parseFacebookBrowseMode: 默认 off；shadow/on 三态', () => {
-  assert.equal(parseFacebookBrowseMode({}), 'off');
-  assert.equal(parseFacebookBrowseMode({ AIDCP_FB_BROWSE_AUTO: 'shadow' }), 'shadow');
-  assert.equal(parseFacebookBrowseMode({ AIDCP_FB_BROWSE_AUTO: 'on' }), 'on');
-  assert.equal(parseFacebookBrowseMode({ AIDCP_FB_BROWSE_AUTO: 'true' }), 'on');
-  assert.equal(parseFacebookBrowseMode({ AIDCP_FB_BROWSE_AUTO: 'garbage' }), 'off');
 });
 
 // ─────────────────────────── 浏览命令 dispatch（mode=on）───────────────────────────

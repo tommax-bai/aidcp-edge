@@ -51,7 +51,6 @@ export interface WechatChannelsApiClientOptions {
   nowImpl?: () => number;
   clientIdImpl?: () => string;
   onSchemaChanged?: (endpoint: WechatChannelsEndpoint, error: WechatChannelsError) => void;
-  allowUnverifiedWrites?: boolean;
 }
 
 interface PlatformEnvelope {
@@ -69,7 +68,6 @@ export class WechatChannelsApiClient {
   private readonly now: () => number;
   private readonly clientId: () => string;
   private readonly onSchemaChanged?: (endpoint: WechatChannelsEndpoint, error: WechatChannelsError) => void;
-  private readonly allowUnverifiedWrites: boolean;
 
   constructor(options: WechatChannelsApiClientOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
@@ -80,7 +78,6 @@ export class WechatChannelsApiClient {
     this.now = options.nowImpl ?? Date.now;
     this.clientId = options.clientIdImpl ?? randomUUID;
     this.onSchemaChanged = options.onSchemaChanged;
-    this.allowUnverifiedWrites = options.allowUnverifiedWrites === true;
     if (new URL(WECHAT_CHANNELS_API_BASE_URL).protocol !== 'https:') {
       throw new Error('WeChat Channels API base URL must use TLS');
     }
@@ -212,7 +209,7 @@ export class WechatChannelsApiClient {
     input: { threadExternalId: string; fromUsername: string; text: string },
   ): Promise<WechatSendAck> {
     try {
-      assertWechatRequestDescriptorAvailable('dmSendText', this.allowUnverifiedWrites);
+      assertWechatRequestDescriptorAvailable('dmSendText');
     } catch (error) {
       this.throwEndpointError('dmSendText', error, false);
     }
@@ -315,10 +312,7 @@ export class WechatChannelsApiClient {
     if (!session) {
       throw new WechatChannelsError('auth_expired', endpoint, 'Authorized session is required', false, null, false);
     }
-    const serialized = serializeWechatRequest(endpoint, payload, session, {
-      now: this.now,
-      allowUnverifiedWrite: this.allowUnverifiedWrites,
-    });
+    const serialized = serializeWechatRequest(endpoint, payload, session, { now: this.now });
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {

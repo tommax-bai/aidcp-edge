@@ -3,66 +3,6 @@ import type { WechatChannelsEndpoint } from './api-client.js';
 
 export type WechatCapability = 'commentsRead' | 'commentsReply' | 'dmRead' | 'dmSendText';
 
-export interface WechatChannelsFeatureFlags {
-  interactionEnabled: boolean;
-  accountKillSwitch: boolean;
-  writeEnabled: boolean;
-  accountWriteEnabled: boolean;
-  accountWriteKillSwitch: boolean;
-  commentsReadEnabled: boolean;
-  commentsReplyEnabled: boolean;
-  dmReadEnabled: boolean;
-  dmSendTextEnabled: boolean;
-  commentWriteProbeVerified: boolean;
-  dmWriteProbeVerified: boolean;
-  unverifiedWriteTestMode: boolean;
-}
-
-export const WECHAT_DEV_UNVERIFIED_WRITE_TOKEN = 'dev-unverified-write-test-acknowledged';
-
-export const DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS: WechatChannelsFeatureFlags = {
-  interactionEnabled: true,
-  accountKillSwitch: false,
-  writeEnabled: true,
-  accountWriteEnabled: true,
-  accountWriteKillSwitch: false,
-  commentsReadEnabled: false,
-  commentsReplyEnabled: false,
-  dmReadEnabled: false,
-  dmSendTextEnabled: false,
-  commentWriteProbeVerified: false,
-  dmWriteProbeVerified: false,
-  unverifiedWriteTestMode: false,
-};
-
-function enabled(value: string | undefined): boolean {
-  return ['1', 'true', 'yes', 'on'].includes((value ?? '').trim().toLowerCase());
-}
-
-function enabledByDefault(value: string | undefined): boolean {
-  if (value === undefined || !value.trim()) return true;
-  return enabled(value);
-}
-
-export function wechatChannelsFeatureFlagsFromEnv(env: NodeJS.ProcessEnv = process.env): WechatChannelsFeatureFlags {
-  return {
-    interactionEnabled: enabledByDefault(env.AIDCP_WECHAT_INTERACTION_ENABLED),
-    accountKillSwitch: enabled(env.AIDCP_WECHAT_ACCOUNT_KILL_SWITCH),
-    writeEnabled: enabledByDefault(env.AIDCP_WECHAT_WRITE_ENABLED),
-    // Deprecated as an authorization grant. Cloud account controls are authoritative.
-    accountWriteEnabled: true,
-    accountWriteKillSwitch: enabled(env.AIDCP_WECHAT_ACCOUNT_WRITE_KILL_SWITCH),
-    commentsReadEnabled: enabled(env.AIDCP_WECHAT_COMMENTS_READ_ENABLED),
-    commentsReplyEnabled: enabled(env.AIDCP_WECHAT_COMMENTS_REPLY_ENABLED),
-    dmReadEnabled: enabled(env.AIDCP_WECHAT_DM_READ_ENABLED),
-    dmSendTextEnabled: enabled(env.AIDCP_WECHAT_DM_SEND_TEXT_ENABLED),
-    commentWriteProbeVerified: enabled(env.AIDCP_WECHAT_COMMENT_WRITE_PROBE_VERIFIED),
-    dmWriteProbeVerified: enabled(env.AIDCP_WECHAT_DM_WRITE_PROBE_VERIFIED),
-    unverifiedWriteTestMode:
-      env.AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE === WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
-  };
-}
-
 const ENDPOINT_CAPABILITIES: Record<WechatChannelsEndpoint, readonly WechatCapability[]> = {
   authLoginCode: [],
   authLoginStatus: [],
@@ -125,10 +65,7 @@ export class WechatCapabilityState {
   private readonly passedProbes = new Set<WechatCapability>();
   private remoteControls?: InteractionRuntimeControlsPayload;
 
-  constructor(
-    readonly flags: WechatChannelsFeatureFlags,
-    readonly breaker: WechatEndpointCircuitBreaker,
-  ) {}
+  constructor(readonly breaker: WechatEndpointCircuitBreaker) {}
 
   markProbePassed(capability: WechatCapability): void {
     this.passedProbes.add(capability);
@@ -174,8 +111,6 @@ export class WechatCapabilityState {
   effective(params: { authActive: boolean; identityMatches: boolean }): InteractionEffectiveCapabilities {
     const remote = this.remoteControls;
     const base =
-      this.flags.interactionEnabled &&
-      !this.flags.accountKillSwitch &&
       !!remote &&
       params.authActive &&
       params.identityMatches;
@@ -189,33 +124,18 @@ export class WechatCapabilityState {
       !!remote?.dmReadEnabled &&
       this.passedProbes.has('dmRead') &&
       this.breaker.capabilityAvailable('dmRead');
-    const writeBase = base && this.flags.writeEnabled && !this.flags.accountWriteKillSwitch;
-    const commentWriteEvidence = this.flags.unverifiedWriteTestMode || (
-      this.flags.commentWriteProbeVerified && this.passedProbes.has('commentsReply')
-    );
-    const dmWriteEvidence = this.flags.unverifiedWriteTestMode || (
-      this.flags.dmWriteProbeVerified && this.passedProbes.has('dmSendText')
-    );
-    // The exact token is injected only by the unpackaged Electron client for the named dev Cloud
-    // environment. In that bounded runtime it is also the explicit operator grant for exercising
-    // both real text-write paths while Cloud's ordinary per-channel write booleans remain false.
-    // A valid scoped/versioned control snapshot and a healthy enabled read are still mandatory.
-    const commentsReplyControlEnabled = this.flags.unverifiedWriteTestMode || !!remote?.commentsReplyEnabled;
-    const dmSendTextControlEnabled = this.flags.unverifiedWriteTestMode || !!remote?.dmSendTextEnabled;
     return {
       commentsRead,
       commentsReply:
-        writeBase &&
+        base &&
         commentsRead &&
-        commentsReplyControlEnabled &&
-        commentWriteEvidence &&
+        !!remote?.commentsReplyEnabled &&
         this.breaker.capabilityAvailable('commentsReply'),
       dmRead,
       dmSendText:
-        writeBase &&
+        base &&
         dmRead &&
-        dmSendTextControlEnabled &&
-        dmWriteEvidence &&
+        !!remote?.dmSendTextEnabled &&
         this.breaker.capabilityAvailable('dmSendText'),
       dmSendImage: false,
     };

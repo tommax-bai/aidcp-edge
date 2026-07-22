@@ -207,23 +207,36 @@ test('wechat reply: unresolved comment context fails before comment-create dispa
   }
 });
 
-test('wechat reply: a pre-dispatch schema failure is failed without any platform or verification request', async () => {
+test('wechat reply: the built-in DM candidate dispatches without a hidden local-write gate', async () => {
   await withState(async (state) => {
     let fetches = 0;
+    let writeFetches = 0;
     const api = new WechatChannelsApiClient({
-      fetchImpl: (async () => {
+      fetchImpl: (async (url) => {
         fetches++;
-        throw new Error('fetch must not run for an uncaptured write endpoint');
+        const path = new URL(String(url)).pathname;
+        if (path.endsWith('/private-msg/get-session-info')) {
+          return new Response(JSON.stringify({
+            errCode: 0,
+            data: {
+              sessionInfo: [{ sessionId: 'dm-thread-1', username: 'peer-1', nickname: 'Peer', headImgUrl: '' }],
+              baseResp: { errcode: 0 },
+            },
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (path.endsWith('/private-msg/send-private-msg')) writeFetches++;
+        throw new Error('write response lost');
       }) as typeof fetch,
     });
 
     const result = await sender(state, api).send(command('dm', '0'));
 
-    assert.equal(result.status, 'failed');
-    assert.equal(result.errorCategory, 'schema_changed');
-    assert.equal(result.errorCode, 'WECHAT_SCHEMA_CHANGED');
+    assert.equal(result.status, 'ambiguous', JSON.stringify(result));
+    assert.equal(result.errorCategory, 'transient_network');
+    assert.equal(result.errorCode, 'INTERACTION_UPSTREAM_UNAVAILABLE');
     assert.equal(result.verification, 'not_verified');
-    assert.equal(fetches, 0);
+    assert.equal(writeFetches, 1);
+    assert.ok(fetches >= 3);
   });
 });
 

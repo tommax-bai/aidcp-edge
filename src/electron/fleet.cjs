@@ -148,34 +148,6 @@ function personaApplicableForPlatform(platform) {
   return nicknameSourceForPlatform(platform) !== 'wechat_channels';
 }
 
-/**
- * Facebook 自动浏览策略：只允许已解析为 dev 的 Facebook 子进程真浏览/点赞。
- * 此处刻意不读取 process.env，调用方会把结果写入最终 spawn env，以阻断外壳残留值泄漏到 ol/custom。
- */
-function facebookBrowseModeFor({ platform, cloudEnvKey } = {}) {
-  const normalizedPlatform = String(platform ?? '').trim().toLowerCase();
-  const normalizedCloudEnvKey = String(cloudEnvKey ?? '').trim().toLowerCase();
-  return (normalizedPlatform === 'facebook' || normalizedPlatform === 'fb') && normalizedCloudEnvKey === 'dev'
-    ? 'on'
-    : 'off';
-}
-
-const WECHAT_DEV_UNVERIFIED_WRITE_TOKEN = 'dev-unverified-write-test-acknowledged';
-
-/**
- * Unverified WeChat writes are deliberately limited to an unpackaged client connected to named dev.
- * The final spawn env always receives either the exact token or an empty value so inherited values
- * cannot leak across platform or Cloud-environment boundaries.
- */
-function wechatUnverifiedWriteTestModeFor({ platform, cloudEnvKey, isPackaged } = {}) {
-  const normalizedPlatform = String(platform ?? '').trim().toLowerCase();
-  const normalizedCloudEnvKey = String(cloudEnvKey ?? '').trim().toLowerCase();
-  const isWechat = normalizedPlatform === 'wechat_channels' || normalizedPlatform === 'wechat-channels';
-  return !isPackaged && isWechat && normalizedCloudEnvKey === 'dev'
-    ? WECHAT_DEV_UNVERIFIED_WRITE_TOKEN
-    : '';
-}
-
 /** spawn 时必须从继承环境里剔除的键：任何一个泄漏进多环境子进程都会让身份/端口被钉死而串号。 */
 const ENV_KEYS_MUST_DROP = [
   'AIDCP_ACCOUNT_ID', // 身份由登录读出，绝不由启动方指派
@@ -187,6 +159,18 @@ const ENV_KEYS_MUST_DROP = [
   'AIDCP_CDP_ALLOW_REUSE',
   'AIDCP_START_BROWSER_ABSENT', // 仅主进程在可信 control bootstrap 成功后逐环境注入
   'AIDCP_CONTROL_ACCOUNT_ID', // 不得从外壳继承，避免跨环境串用陈旧绑定
+  'AIDCP_FB_BROWSE_AUTO',
+  'AIDCP_WECHAT_INTERACTION_ENABLED',
+  'AIDCP_WECHAT_ACCOUNT_KILL_SWITCH',
+  'AIDCP_WECHAT_WRITE_ENABLED',
+  'AIDCP_WECHAT_ACCOUNT_WRITE_ENABLED',
+  'AIDCP_WECHAT_ACCOUNT_WRITE_KILL_SWITCH',
+  'AIDCP_WECHAT_COMMENTS_READ_ENABLED',
+  'AIDCP_WECHAT_COMMENTS_REPLY_ENABLED',
+  'AIDCP_WECHAT_DM_READ_ENABLED',
+  'AIDCP_WECHAT_DM_SEND_TEXT_ENABLED',
+  'AIDCP_WECHAT_COMMENT_WRITE_PROBE_VERIFIED',
+  'AIDCP_WECHAT_DM_WRITE_PROBE_VERIFIED',
   'AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE',
 ];
 
@@ -712,9 +696,6 @@ module.exports = {
   nicknameSourceForPlatform,
   browserUsageModeForPlatform,
   personaApplicableForPlatform,
-  facebookBrowseModeFor,
-  WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
-  wechatUnverifiedWriteTestModeFor,
   buildEnvSpawnEnv,
   createStaggerQueue,
   createSerialLaunchQueue,

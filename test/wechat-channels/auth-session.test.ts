@@ -14,7 +14,6 @@ import {
 import { EncryptedWechatSessionStore } from '../../src/wechat-channels/encrypted-session-store.js';
 import { WechatChannelsError } from '../../src/wechat-channels/error-classifier.js';
 import {
-  DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS,
   WechatCapabilityState,
   WechatEndpointCircuitBreaker,
 } from '../../src/wechat-channels/feature-flags.js';
@@ -879,8 +878,7 @@ test('wechat auth: probe failure keeps its rate-limit reason instead of reportin
 });
 
 test('wechat auth: an account with no posts stays active while comments remain fail-closed', async () => {
-  const flags = { ...DEFAULT_WECHAT_CHANNELS_FEATURE_FLAGS, commentsReadEnabled: true };
-  const capabilityState = new WechatCapabilityState(flags, new WechatEndpointCircuitBreaker());
+  const capabilityState = new WechatCapabilityState(new WechatEndpointCircuitBreaker());
   capabilityState.applyRemoteControls({
     accountId: SCOPE.envKey,
     envKey: SCOPE.envKey,
@@ -895,7 +893,7 @@ test('wechat auth: an account with no posts stays active while comments remain f
     getIdentity: async () => IDENTITY,
     listPosts: async () => ({ items: [], nextCursor: null, hasMore: false }),
   } as unknown as WechatChannelsApiClient;
-  const runner = new WechatChannelsProbeRunner({ api, flags, capabilityState });
+  const runner = new WechatChannelsProbeRunner({ api, capabilityState });
   const auth = new WechatAuthCoordinator({
     envKey: SCOPE.envKey,
     expectedAccountId: SCOPE.envKey,

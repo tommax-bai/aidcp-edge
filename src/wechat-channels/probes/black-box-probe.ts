@@ -1,7 +1,7 @@
 import type { InteractionAuthReasonCode } from '../../comm/protocol.js';
 import type { WechatChannelsApiClient } from '../api-client.js';
 import { WechatChannelsError } from '../error-classifier.js';
-import type { WechatChannelsFeatureFlags, WechatCapabilityState } from '../feature-flags.js';
+import type { WechatCapabilityState } from '../feature-flags.js';
 import type { WechatSessionMaterial } from '../types.js';
 
 export type ProbeEvidenceMode = 'mock' | 'read_only' | 'gated_write';
@@ -20,7 +20,6 @@ export interface ProbeResult {
 
 export interface ProbeRunnerOptions {
   api: WechatChannelsApiClient;
-  flags: WechatChannelsFeatureFlags;
   capabilityState: WechatCapabilityState;
   commentProbePostId?: string;
   dmProbeThreadId?: string;
@@ -41,8 +40,8 @@ export class WechatChannelsProbeRunner {
 
   async probeEnabledReads(session: WechatSessionMaterial): Promise<WechatProbeOutcome> {
     const remote = this.options.capabilityState.getRemoteControls();
-    const commentsEnabled = this.options.flags.interactionEnabled && remote?.commentsReadEnabled === true;
-    const dmEnabled = this.options.flags.interactionEnabled && remote?.dmReadEnabled === true;
+    const commentsEnabled = remote?.commentsReadEnabled === true;
+    const dmEnabled = remote?.dmReadEnabled === true;
     if (!commentsEnabled && !dmEnabled) return { ok: true };
     let passed = false;
     let failureReason: WechatProbeReasonCode | null = null;
@@ -73,18 +72,13 @@ export class WechatChannelsProbeRunner {
       await this.options.api.listComments(session, postId, null, 1);
       this.options.capabilityState.breaker.close('commentList');
       this.options.capabilityState.markProbePassed('commentsRead');
-      if (this.options.flags.commentWriteProbeVerified) this.options.capabilityState.markProbePassed('commentsReply');
       this.record({ capability: 'commentsRead', mode: 'read_only', status: 'passed', endpoint: 'postList+commentList', reasonCode: null });
       this.record({
         capability: 'commentsReply',
-        mode: 'gated_write',
-        status: this.options.flags.commentWriteProbeVerified
-          ? 'passed'
-          : this.options.flags.unverifiedWriteTestMode ? 'bypassed' : 'gated',
-        endpoint: 'commentCreate',
-        reasonCode: this.options.flags.commentWriteProbeVerified
-          ? null
-          : this.options.flags.unverifiedWriteTestMode ? 'DEV_UNVERIFIED_WRITE_TEST_MODE' : 'WRITE_PROBE_NOT_APPROVED',
+        mode: 'read_only',
+        status: 'passed',
+        endpoint: 'postList+commentList',
+        reasonCode: 'WRITE_ADMISSION_FROM_READ_EVIDENCE',
       });
       return { ok: true };
     } catch (error) {
@@ -106,18 +100,13 @@ export class WechatChannelsProbeRunner {
         return { ok: true };
       }
       this.options.capabilityState.markProbePassed('dmRead');
-      if (this.options.flags.dmWriteProbeVerified) this.options.capabilityState.markProbePassed('dmSendText');
       this.record({ capability: 'dmRead', mode: 'read_only', status: 'passed', endpoint: 'dmHistory', reasonCode: null });
       this.record({
         capability: 'dmSendText',
-        mode: 'gated_write',
-        status: this.options.flags.dmWriteProbeVerified
-          ? 'passed'
-          : this.options.flags.unverifiedWriteTestMode ? 'bypassed' : 'gated',
-        endpoint: 'dmSendText',
-        reasonCode: this.options.flags.dmWriteProbeVerified
-          ? null
-          : this.options.flags.unverifiedWriteTestMode ? 'DEV_UNVERIFIED_WRITE_TEST_MODE' : 'WRITE_PROBE_NOT_APPROVED',
+        mode: 'read_only',
+        status: 'passed',
+        endpoint: 'dmHistory',
+        reasonCode: 'WRITE_ADMISSION_FROM_READ_EVIDENCE',
       });
       return { ok: true };
     } catch (error) {

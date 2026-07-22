@@ -17,7 +17,7 @@ export type DelegatedAction =
 
 export type DelegatedActionSupport =
   | { level: 'supported' }
-  | { level: 'beta' | 'unsupported'; reason: string; runtimeGate?: string };
+  | { level: 'beta' | 'unsupported'; reason: string };
 
 const XHS_DELEGATED_ACTIONS: Record<DelegatedAction, DelegatedActionSupport> = {
   comment_batch: { level: 'supported' },
@@ -35,12 +35,10 @@ const FACEBOOK_DELEGATED_ACTIONS: Record<DelegatedAction, DelegatedActionSupport
   comment_batch: {
     level: 'beta',
     reason: 'configured_targets_only',
-    runtimeGate: 'AIDCP_FB_COMMENT_AUTO',
   },
   publish_post: {
     level: 'beta',
     reason: 'real_machine_and_client_capability_gate',
-    runtimeGate: 'facebook_publish_capability',
   },
   publish_from_inspiration: {
     level: 'unsupported',
@@ -54,7 +52,6 @@ const FACEBOOK_DELEGATED_ACTIONS: Record<DelegatedAction, DelegatedActionSupport
   facebook_group_comment: {
     level: 'beta',
     reason: 'configured_or_owned_group_targets_only',
-    runtimeGate: 'AIDCP_FB_GROUP_JOIN_AUTO',
   },
 };
 

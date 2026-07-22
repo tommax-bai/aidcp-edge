@@ -61,7 +61,6 @@ import {
   FacebookOverlayMonitor,
   FacebookPublishExecutor,
   facebookActionNameForCommand,
-  parseFacebookBrowseMode,
   usesFacebookBrowseSession,
 } from './facebook/index.js';
 import { EdgeClient } from './client/edge-client.js';
@@ -120,7 +119,6 @@ async function main(): Promise<void> {
     requestId: string;
     url: string;
     targetKey: string;
-    facebookBrowseMode?: 'off' | 'shadow' | 'on';
   };
   const pendingCloudRebindRequests: CloudRebindRequest[] = [];
   let dispatchCloudRebind: ((request: CloudRebindRequest) => void) | undefined;
@@ -131,7 +129,6 @@ async function main(): Promise<void> {
         || typeof raw.requestId !== 'string' || !raw.requestId
         || typeof raw.url !== 'string' || !/^wss?:\/\//i.test(raw.url)
         || typeof raw.targetKey !== 'string' || !raw.targetKey) return null;
-    if (raw.facebookBrowseMode !== undefined && !['off', 'shadow', 'on'].includes(raw.facebookBrowseMode)) return null;
     return raw as CloudRebindRequest;
   };
   /**
@@ -742,7 +739,6 @@ async function main(): Promise<void> {
           quiesced = true;
         }
         await client.rebind(request.url);
-        if (request.facebookBrowseMode) process.env.AIDCP_FB_BROWSE_AUTO = request.facebookBrowseMode;
         if (quiesced) await browse?.resumeAfterTask();
         sendResult({ type: 'lifecycle.cloud_rebound', ok: true, browserAbsent: coldStandbyActive });
       } catch (error) {
@@ -1123,7 +1119,7 @@ async function main(): Promise<void> {
   if (useFacebookBrowse) {
     // —— Facebook 浏览+点赞闭环（change facebook-browse-and-like-loop）——
     // FacebookBrowseSession 独占单槽 browseHandler，【内含】评论/加群委托（声明 browse 后旧 comment-only 注册闸
-    // `(comment||join)&&!browse` 不再触发）。浏览/点赞由 AIDCP_FB_BROWSE_AUTO（off/shadow/on）门控，评论/加群始终服务。
+    // `(comment||join)&&!browse` 不再触发）。浏览/点赞服从 Cloud 生命周期与风险控制，评论/加群始终服务。
     overlayMonitor = platformDriver.createOverlayMonitor(session.cdp);
     // FB 浏览高危动作会触发验证码 / FB 软限流（overlay.ts 归类 unknown）。把 captcha/unknown 翻转上报云端
     // （risk.captcha_detected/cleared）：驱动远程验证码协助 + FB 限流退避（account-nurture-discipline-spine 云端
@@ -1278,13 +1274,13 @@ async function main(): Promise<void> {
         console.warn(`[aidcp-edge] 注册 Facebook 会话时交接未收敛：${(err as Error).message}`);
       });
     }
-    // 不 await：会话长跑，与命令收发并行。start() 内部据 AIDCP_FB_BROWSE_AUTO 决定是否自动进 feed。
+    // 不 await：会话长跑，与命令收发并行。Cloud 生命周期决定是否启动/暂停自动进 feed。
     if (!coldStandbyActive && !startAutomationPaused) {
       browse.start().catch((err) => {
         console.error('[aidcp-edge] Facebook 浏览会话异常:', err);
       });
     }
-    console.log(`[aidcp-edge] Facebook 浏览会话已注册（mode=${parseFacebookBrowseMode()}，含评论/加群委托）`);
+    console.log('[aidcp-edge] Facebook 浏览会话已注册（由 Cloud 生命周期控制，含评论/加群委托）');
   }
   if (autoBrowse && nativePageRuntime) {
     browse = new NativeBrowseSession({

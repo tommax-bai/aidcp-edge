@@ -2947,7 +2947,6 @@ function requestCoreCloudRebind(handle, target) {
         requestId,
         url: target.url,
         targetKey: target.key,
-        facebookBrowseMode: fleet.facebookBrowseModeFor({ platform: handle.platform, cloudEnvKey: target.key }),
       }, (error) => {
         if (!error || handle.child !== child || handle.cloudRebindPending?.requestId !== requestId) return;
         clearTimeout(timer);
@@ -3718,17 +3717,6 @@ function spawnEdgeChild(handle, {
   const explicitEgressProbe = normalizeClientAuthUrl(process.env.AIDCP_EGRESS_PROBE_URL || '');
   if (explicitEgressProbe) spawnEnv.AIDCP_EGRESS_PROBE_URL = explicitEgressProbe;
   else if (clientAuthBase) spawnEnv.AIDCP_EGRESS_PROBE_URL = `${clientAuthBase}/egress`;
-  // Facebook 真浏览/点赞只对 dev 生效。必须放在两路 env 合并与云端解析之后，避免外壳遗留 on/shadow
-  // 泄漏到 ol/custom；所有 Facebook 分身共享此策略，不再按分身单独放行。
-  spawnEnv.AIDCP_FB_BROWSE_AUTO = fleet.facebookBrowseModeFor({
-    platform: handle.platform,
-    cloudEnvKey: resolvedCloudKey,
-  });
-  spawnEnv.AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE = fleet.wechatUnverifiedWriteTestModeFor({
-    platform: handle.platform,
-    cloudEnvKey: resolvedCloudKey,
-    isPackaged: app.isPackaged,
-  });
   if (controlBootstrap) {
     // 与 AIDCP_ACCOUNT_ID 严格分离：后者会覆盖页面真实身份，绝不能承载可能陈旧的启动引导。
     spawnEnv.AIDCP_START_BROWSER_ABSENT = '1';

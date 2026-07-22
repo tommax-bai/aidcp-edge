@@ -14,8 +14,7 @@
  * 红线：
  *  - 每条命令恰好一个诚实回执（page.cards / note.detail / action.completed）；有界超时兜底 timeout 回执，
  *    绝不静默丢弃 / 假成功（否则云端 sendAndAwait + idle 看门狗挂死）。
- *  - kill switch `AIDCP_FB_BROWSE_AUTO`（三态 off/shadow/on）：off=不自动浏览/点赞（评论/加群仍服务）；
- *    shadow=浏览+上报但点赞只记不执行；on=真点赞。默认 off。
+ *  - 生产装配默认真浏览；账号生命周期、排期与风险控制负责启动/暂停。off/shadow 仅供显式测试依赖注入。
  *  - FB 无收藏/看图；关注只在 Reels 当前作者区具备 note-bound 执行器，其它 FB surface 仍诚实回
  *    capability_unsupported，绝不臆造。
  */
@@ -65,14 +64,6 @@ import {
 } from './companion-ui.js';
 
 export type FacebookBrowseMode = 'off' | 'shadow' | 'on';
-
-/** 解析 kill switch：默认 off。'shadow' → 浏览但点赞只记不执行；'on'/'true'/'1' → 真点赞。 */
-export function parseFacebookBrowseMode(env: Record<string, string | undefined> = process.env): FacebookBrowseMode {
-  const v = String(env.AIDCP_FB_BROWSE_AUTO ?? '').trim().toLowerCase();
-  if (v === 'shadow') return 'shadow';
-  if (v === 'on' || v === 'true' || v === '1' || v === 'yes') return 'on';
-  return 'off';
-}
 
 /**
  * 协变落地判定（co-landing）：声明 'browse' 的 Facebook edge 解析到 FacebookBrowseSession（绝不小红书）。
@@ -348,7 +339,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     this.log = deps.logger ?? ((m) => console.log(m));
     this.feedUrl = options.feedUrl ?? FACEBOOK_DEFAULT_START_URL;
     this.activeFeedUrl = this.feedUrl;
-    this.mode = options.mode ?? parseFacebookBrowseMode();
+    this.mode = options.mode ?? 'on';
     this.commandTimeoutMs = options.commandTimeoutMs ?? 90_000;
     this.tempo = options.tempo && options.tempo > 0 ? options.tempo : 1.0;
     this.startupId = options.startupId;
@@ -371,14 +362,13 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   }
 
   /**
-   * 启动会话。mode==='off' → 不自动浏览（评论/加群仍按命令服务）；否则导航 feed → 上报首屏 page.cards
-   * 以驱动云端浏览闭环。仅在 kill switch 开启时才有自动浏览行为。
+   * 启动会话。测试注入 mode==='off' 时不自动浏览；生产装配由生命周期决定是否调用 start。
    */
   async start(): Promise<void> {
     this.running = true;
     if (this.closing) return;
     if (this.mode === 'off') {
-      this.log('[fb-session] AIDCP_FB_BROWSE_AUTO=off：不自动浏览/点赞（评论/加群仍按命令服务）');
+      this.log('[fb-session] test mode=off：不自动浏览/点赞（评论/加群仍按命令服务）');
       return;
     }
     this.log(`[fb-session] 启动自动浏览（mode=${this.mode}）→ 导航 feed ${this.feedUrl}`);

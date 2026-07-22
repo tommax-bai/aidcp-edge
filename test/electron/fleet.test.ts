@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { decideRespawn as decideRespawnTs } from '../../src/supervise/respawn-policy.js';
 import { imageTempPrefixFor } from '../../src/flows/image-uploader.js';
-import { WECHAT_DEV_UNVERIFIED_WRITE_TOKEN as featureFlagToken } from '../../src/wechat-channels/feature-flags.js';
 
 // fleet.cjs（多环境外壳纯决策层）单测：设置迁移 / 冻结 env 身份闸 / 错峰队列 / 内存预检 / 同账号检测。
 const require = createRequire(import.meta.url);
@@ -117,30 +116,6 @@ test('nicknameSourceForPlatform：视频号真实昵称保留平台来源，环�
   assert.equal(fleet.nicknameSourceForPlatform('xiaohongshu'), 'xhs');
 });
 
-test('facebookBrowseModeFor：仅 dev 的 Facebook 分身真浏览，其他环境显式关闭', () => {
-  assert.equal(fleet.facebookBrowseModeFor({ platform: 'facebook', cloudEnvKey: 'dev' }), 'on');
-  assert.equal(fleet.facebookBrowseModeFor({ platform: 'fb', cloudEnvKey: 'DEV' }), 'on');
-  assert.equal(fleet.facebookBrowseModeFor({ platform: 'facebook', cloudEnvKey: 'ol' }), 'off');
-  assert.equal(fleet.facebookBrowseModeFor({ platform: 'facebook', cloudEnvKey: 'custom' }), 'off');
-  assert.equal(fleet.facebookBrowseModeFor({ platform: 'xiaohongshu', cloudEnvKey: 'dev' }), 'off');
-  assert.equal(fleet.facebookBrowseModeFor({}), 'off');
-});
-
-test('wechatUnverifiedWriteTestModeFor: only unpackaged named-dev WeChat receives the exact token', () => {
-  assert.equal(fleet.WECHAT_DEV_UNVERIFIED_WRITE_TOKEN, featureFlagToken);
-  assert.equal(
-    fleet.wechatUnverifiedWriteTestModeFor({ platform: 'wechat_channels', cloudEnvKey: 'dev', isPackaged: false }),
-    fleet.WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
-  );
-  assert.equal(
-    fleet.wechatUnverifiedWriteTestModeFor({ platform: 'wechat-channels', cloudEnvKey: 'DEV', isPackaged: false }),
-    fleet.WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
-  );
-  assert.equal(fleet.wechatUnverifiedWriteTestModeFor({ platform: 'wechat_channels', cloudEnvKey: 'dev', isPackaged: true }), '');
-  assert.equal(fleet.wechatUnverifiedWriteTestModeFor({ platform: 'wechat_channels', cloudEnvKey: 'ol', isPackaged: false }), '');
-  assert.equal(fleet.wechatUnverifiedWriteTestModeFor({ platform: 'facebook', cloudEnvKey: 'dev', isPackaged: false }), '');
-});
-
 // ── 冻结 spawn env + 身份闸 ──
 
 test('buildEnvSpawnEnv：注入 AIDCP_ADS_USER_ID、剔除继承的身份/端口键（防串号）', () => {
@@ -153,7 +128,11 @@ test('buildEnvSpawnEnv：注入 AIDCP_ADS_USER_ID、剔除继承的身份/端口
       AIDCP_ADS_USER_ID: 'poisoned-profile',
       AIDCP_CDP_PORT: '9222',
       AIDCP_CHROME_PROFILE: '/tmp/x',
-      AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE: fleet.WECHAT_DEV_UNVERIFIED_WRITE_TOKEN,
+      AIDCP_FB_BROWSE_AUTO: 'off',
+      AIDCP_WECHAT_WRITE_ENABLED: 'false',
+      AIDCP_WECHAT_COMMENTS_REPLY_ENABLED: 'false',
+      AIDCP_WECHAT_DM_SEND_TEXT_ENABLED: 'false',
+      AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE: 'legacy-token',
     },
     providerEnv: { AIDCP_ADS_API_KEY: 'k' },
   });
@@ -168,6 +147,10 @@ test('buildEnvSpawnEnv：注入 AIDCP_ADS_USER_ID、剔除继承的身份/端口
     'AIDCP_EDGE_ID',
     'AIDCP_CDP_PORT',
     'AIDCP_CHROME_PROFILE',
+    'AIDCP_FB_BROWSE_AUTO',
+    'AIDCP_WECHAT_WRITE_ENABLED',
+    'AIDCP_WECHAT_COMMENTS_REPLY_ENABLED',
+    'AIDCP_WECHAT_DM_SEND_TEXT_ENABLED',
     'AIDCP_WECHAT_UNVERIFIED_WRITE_TEST_MODE',
   ]) {
     assert.equal(key in built.env, false, `${key} 不应泄漏进子进程 env`);

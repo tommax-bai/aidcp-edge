@@ -81,10 +81,9 @@ export interface SerializedWechatRequest {
 
 export function assertWechatRequestDescriptorAvailable(
   endpoint: WechatChannelsEndpoint,
-  allowUnverifiedWrite = false,
 ): WechatRequestDescriptor {
   const descriptor = WECHAT_CHANNELS_REQUEST_DESCRIPTORS[endpoint];
-  const candidateAllowed = allowUnverifiedWrite &&
+  const candidateAllowed =
     endpoint === 'dmSendText' &&
     descriptor.evidence === 'official_bundle_candidate';
   if ((!descriptor.captureBacked && !candidateAllowed) || !descriptor.path) {
@@ -99,9 +98,9 @@ export function serializeWechatRequest(
   endpoint: WechatChannelsEndpoint,
   businessBody: Record<string, unknown>,
   session: WechatSessionMaterial,
-  options: { now?: () => number; requestId?: () => string; allowUnverifiedWrite?: boolean } = {},
+  options: { now?: () => number; requestId?: () => string } = {},
 ): SerializedWechatRequest {
-  const descriptor = assertWechatRequestDescriptorAvailable(endpoint, options.allowUnverifiedWrite);
+  const descriptor = assertWechatRequestDescriptorAvailable(endpoint);
   const context = session.requestContext;
   if (!context || context.version !== 1) {
     throw new WechatChannelsError('auth_expired', endpoint, 'Authorized request context is missing', false, null, false);

@@ -33,7 +33,6 @@ import { WechatChannelsConnector } from './connector.js';
 import {
   WechatCapabilityState,
   WechatEndpointCircuitBreaker,
-  wechatChannelsFeatureFlagsFromEnv,
 } from './feature-flags.js';
 import { resolveWechatStateRoot } from './local-paths.js';
 import {
@@ -76,9 +75,8 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   const accountId = env.AIDCP_WECHAT_ACCOUNT_ID?.trim() || env.AIDCP_ACCOUNT_ID?.trim();
   const logicalAccountId = startBrowserAbsent ? controlAccountId! : (accountId || envKey);
 
-  const flags = wechatChannelsFeatureFlagsFromEnv(env);
   const breaker = new WechatEndpointCircuitBreaker();
-  const capabilities = new WechatCapabilityState(flags, breaker);
+  const capabilities = new WechatCapabilityState(breaker);
   let connector: WechatChannelsConnector | undefined;
   let runtimeProofAt = 0;
   let automationPaused = startAutomationPaused;
@@ -87,7 +85,6 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     timeoutMs: envMs(env.AIDCP_WECHAT_API_TIMEOUT_MS, 15_000),
     maxRetries: envInt(env.AIDCP_WECHAT_API_MAX_RETRIES, 2),
     maxResponseBytes: envInt(env.AIDCP_WECHAT_API_MAX_RESPONSE_BYTES, 2 * 1024 * 1024),
-    allowUnverifiedWrites: flags.unverifiedWriteTestMode,
     onSchemaChanged: (endpoint) => {
       breaker.open(endpoint);
       connector?.reportStatus();
@@ -102,7 +99,6 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   const sidecar = new LeasedWechatChannelsBrowserSidecar(rawSidecar, transientLease);
   const probeRunner = new WechatChannelsProbeRunner({
     api,
-    flags,
     capabilityState: capabilities,
     commentProbePostId: env.AIDCP_WECHAT_COMMENT_PROBE_POST_ID?.trim(),
     dmProbeThreadId: env.AIDCP_WECHAT_DM_PROBE_THREAD_ID?.trim(),
@@ -119,10 +115,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   });
   wireWechatIdentityUiEvents(auth, safeLog);
 
-  safeLog(
-    `[wechat-channels] local gates interaction=${flags.interactionEnabled} writes=${flags.writeEnabled} ` +
-    `unverified_write_test=${flags.unverifiedWriteTestMode}; account grants await Cloud snapshot`,
-  );
+  safeLog('[wechat-channels] product controls await the scoped Cloud snapshot; local environment grants are ignored');
   const state = new WechatRuntimeStateStore(
     { envKey, accountId: logicalAccountId, browserProfileId: sidecar.browserProfileId },
     resolveWechatStateRoot(env),
@@ -316,8 +309,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     connector!.reportStatus();
     safeLog(
       `[wechat-channels] applied Cloud runtime controls version=${payload.version} ` +
-      `comment_write=${payload.commentsReplyEnabled} dm_write=${payload.dmSendTextEnabled} ` +
-      `dev_write_controls_bypassed=${flags.unverifiedWriteTestMode}`,
+      `comment_write=${payload.commentsReplyEnabled} dm_write=${payload.dmSendTextEnabled}`,
     );
     return true;
   };
@@ -497,11 +489,6 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   if (startBrowserAbsent) {
     safeLog('[wechat-channels] Cloud control plane online; browser sidecar remains absent until a slot-backed wake');
     if (typeof process.send === 'function' && process.connected) process.send({ type: 'lifecycle.standby' });
-  } else if (!flags.interactionEnabled || flags.accountKillSwitch) {
-    auth.disable();
-    connector.reportStatus();
-    sidecar.releaseIfBrowserClosed('interaction_disabled');
-    publishRuntimeState();
   } else {
     try {
       await auth.initialize();

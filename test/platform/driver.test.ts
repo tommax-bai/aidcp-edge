@@ -78,7 +78,6 @@ test('delegated actions: Facebook remains beta and does not advertise unsupporte
   assert.deepEqual(delegatedActionSupportForPlatform('facebook', 'publish_post'), {
     level: 'beta',
     reason: 'real_machine_and_client_capability_gate',
-    runtimeGate: 'facebook_publish_capability',
   });
   assert.equal(delegatedActionSupportForPlatform('facebook', 'facebook_group_comment').level, 'beta');
   assert.deepEqual(delegatedActionSupportForPlatform('facebook', 'publish_from_inspiration'), {
