@@ -4618,15 +4618,15 @@ function syncEnvironmentShellState(state) {
     fields.firstUseBrandTitle.textContent = loading ? '正在准备' : error ? '读取失败' : '开始使用';
   }
   if (fields.firstUseBrandSubtitle) {
-    fields.firstUseBrandSubtitle.textContent = loading ? '读取运行环境' : error ? '请重新读取' : '创建运行环境';
+    fields.firstUseBrandSubtitle.textContent = loading ? '同步运行环境' : error ? '请重新读取' : '创建运行环境';
   }
   if (fields.environmentRosterLoadingTitle) {
-    fields.environmentRosterLoadingTitle.textContent = error ? '暂时无法读取运行环境' : '正在读取运行环境';
+    fields.environmentRosterLoadingTitle.textContent = error ? '暂时无法读取运行环境' : '正在准备你的工作区';
   }
   if (fields.environmentRosterLoadingCopy) {
     fields.environmentRosterLoadingCopy.textContent = error
       ? '当前无法确认账号下有哪些环境。请重新读取，系统不会把未知状态显示成空环境。'
-      : '正在确认你的环境与运行状态，请稍候。';
+      : '正在同步当前账号的运行环境，请稍候。';
   }
   fields.environmentRosterRetry?.classList.toggle('hidden', !error);
   if (environmentShellState === state) return;
@@ -4665,30 +4665,16 @@ function renderRail() {
   if (fleetView.rosterPhase !== 'ready') {
     const rosterState = fleetView.rosterPhase === 'error' ? 'error' : 'loading';
     syncEnvironmentShellState(rosterState);
-    fields.envRail.classList.remove('hidden', 'collapsed', 'empty-roster');
-    fields.envRail.classList.add('expanded', 'roster-loading');
-    fields.fleetRow?.classList.add('with-rail');
+    // 名册未决时不能展示环境数量、占位行或管理入口：这些都会被误读为真实花名册。
+    // 整栏隐藏，待账号同步与权威 fleet 快照完成后再原子恢复为空态或日常态。
+    fields.envRail.classList.add('hidden');
+    fields.envRail.classList.remove('collapsed', 'expanded', 'empty-roster', 'roster-loading');
+    fields.fleetRow?.classList.remove('with-rail');
     if (fields.railCount) fields.railCount.textContent = '';
     const sig = `roster:${rosterState}`;
     if (fleetView.lastRailSig === sig) return;
     fleetView.lastRailSig = sig;
     fields.railList.replaceChildren();
-    if (rosterState === 'error') {
-      const message = document.createElement('p');
-      message.className = 'rail-roster-error';
-      message.textContent = '暂时无法读取环境';
-      fields.railList.appendChild(message);
-    } else {
-      const skeleton = document.createElement('div');
-      skeleton.className = 'rail-roster-skeleton';
-      skeleton.setAttribute('aria-hidden', 'true');
-      for (let index = 0; index < 3; index += 1) {
-        const row = document.createElement('span');
-        row.className = 'rail-roster-skeleton-row';
-        skeleton.appendChild(row);
-      }
-      fields.railList.appendChild(skeleton);
-    }
     return;
   }
   const rosterEmpty = allList.length === 0;

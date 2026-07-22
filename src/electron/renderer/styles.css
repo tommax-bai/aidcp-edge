@@ -255,8 +255,18 @@ body.environment-roster-error #health-pop,
 body.environment-roster-error #proxy-runtime-pop,
 body.environment-roster-empty #health-pop,
 body.environment-roster-empty #proxy-runtime-pop { display: none !important; }
-body.environment-roster-loading .fleet-row.with-rail > .shell,
-body.environment-roster-error .fleet-row.with-rail > .shell,
+body.environment-roster-loading #env-rail,
+body.environment-roster-error #env-rail { display: none !important; }
+body.environment-roster-loading .fleet-row,
+body.environment-roster-error .fleet-row { min-height: calc(100vh - 46px); }
+body.environment-roster-loading .fleet-row > .shell,
+body.environment-roster-error .fleet-row > .shell {
+  width: 100%;
+  max-width: none;
+  min-height: calc(100vh - 46px);
+  padding: 0;
+  gap: 0;
+}
 body.environment-roster-empty .fleet-row.with-rail > .shell {
   width: auto;
   max-width: 860px;
@@ -273,67 +283,84 @@ body.environment-roster-empty .shell > #content-workspace {
 .environment-roster-loading-state {
   display: none;
   flex: 1 1 auto;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
-  min-height: 0;
-  padding-top: clamp(38px, 6vh, 68px);
+  min-height: calc(100vh - 46px);
+  padding: clamp(28px, 5vh, 56px) 24px clamp(46px, 8vh, 92px);
+  overflow: hidden;
+  background: #fff;
 }
 body.environment-roster-loading .environment-roster-loading-state,
 body.environment-roster-error .environment-roster-loading-state { display: flex; }
 .environment-roster-loading-card {
-  width: min(100%, 690px);
-  padding: 30px;
-  border: 1px solid #d9e4f3;
-  border-radius: 22px;
-  background: rgba(255, 255, 255, .88);
-  box-shadow: 0 18px 46px rgba(42, 66, 102, .08);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: min(100%, 720px);
+  color: #172238;
+  text-align: center;
 }
-.environment-roster-loading-head { display: flex; align-items: flex-start; gap: 18px; }
-.environment-roster-loading-mark {
+.environment-roster-loading-visual {
   position: relative;
-  display: grid;
-  place-items: center;
-  width: 56px;
-  height: 56px;
-  flex: 0 0 56px;
-  border-radius: 18px;
-  color: #4f83dc;
-  background: #edf4ff;
+  width: clamp(218px, 26vw, 306px);
+  aspect-ratio: 1;
+  margin-bottom: clamp(14px, 2.4vh, 24px);
 }
-.environment-roster-loading-mark::before,
-.environment-roster-loading-mark::after,
-.environment-roster-loading-mark i {
+.environment-roster-loading-visual::after {
   content: "";
   position: absolute;
-  width: 7px;
-  height: 7px;
+  left: 25%;
+  right: 25%;
+  bottom: 5%;
+  height: 8%;
+  border-radius: 50%;
+  background: rgba(64, 78, 102, .10);
+  filter: blur(12px);
+}
+.environment-roster-loading-mascot {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  mix-blend-mode: multiply;
+  opacity: .91;
+  filter: contrast(1.1) brightness(1.04);
+}
+.environment-roster-loading-copy h1 {
+  margin: 0;
+  color: #172238;
+  font-size: clamp(24px, 2.25vw, 30px);
+  line-height: 1.25;
+  letter-spacing: -.025em;
+}
+.environment-roster-loading-copy p {
+  margin: 10px 0 0;
+  color: #78869b;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.environment-roster-loading-dots {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 8px;
+  margin-top: 22px;
+  color: #7186a6;
+}
+.environment-roster-loading-dots i {
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: currentColor;
-  opacity: .4;
-  animation: environment-loading-dot 1.2s ease-in-out infinite;
+  opacity: .24;
+  animation: environment-loading-dot 1.35s ease-in-out infinite;
 }
-.environment-roster-loading-mark::before { transform: translateX(-12px); animation-delay: -.24s; }
-.environment-roster-loading-mark i { transform: translateX(0); animation-delay: -.12s; }
-.environment-roster-loading-mark::after { transform: translateX(12px); }
-.environment-roster-loading-kicker { display: block; margin: 2px 0 6px; color: #5878ad; font-size: 11px; font-weight: 720; letter-spacing: .04em; }
-.environment-roster-loading-head h1 { margin: 0; color: #1f2d45; font-size: 22px; line-height: 1.25; }
-.environment-roster-loading-head p { margin: 8px 0 0; color: #718096; font-size: 12.5px; line-height: 1.65; }
-.environment-roster-loading-preview { display: grid; gap: 10px; margin-top: 25px; }
-.environment-roster-loading-line,
-.environment-roster-loading-tiles i {
-  display: block;
-  overflow: hidden;
-  border-radius: 9px;
-  background: linear-gradient(100deg, #edf2f8 38%, #f8fafc 50%, #edf2f8 62%);
-  background-size: 220% 100%;
-  animation: sweep 1.6s linear infinite;
-}
-.environment-roster-loading-line { width: 58%; height: 12px; }
-.environment-roster-loading-line.is-wide { width: 82%; height: 16px; }
-.environment-roster-loading-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 7px; }
-.environment-roster-loading-tiles i { height: 76px; }
+.environment-roster-loading-dots i:nth-child(2) { animation-delay: .14s; }
+.environment-roster-loading-dots i:nth-child(3) { animation-delay: .28s; }
 .environment-roster-retry {
-  margin-top: 22px;
+  margin-top: 24px;
   min-height: 38px;
   padding: 0 16px;
   border: 1px solid #b9cdf0;
@@ -347,11 +374,8 @@ body.environment-roster-error .environment-roster-loading-state { display: flex;
 }
 .environment-roster-retry:hover { border-color: #8fb2ea; background: #eef5ff; }
 .environment-roster-retry:focus-visible { outline: 3px solid rgba(52, 120, 246, .22); outline-offset: 3px; }
-body.environment-roster-error .environment-roster-loading-mark { color: #9a6a19; background: #fff6df; }
-body.environment-roster-error .environment-roster-loading-mark::before,
-body.environment-roster-error .environment-roster-loading-mark::after,
-body.environment-roster-error .environment-roster-loading-mark i { animation: none; opacity: .65; }
-body.environment-roster-error .environment-roster-loading-preview { display: none; }
+body.environment-roster-error .environment-roster-loading-mascot { opacity: .48; filter: grayscale(1) contrast(1.1) brightness(1.04); }
+body.environment-roster-error .environment-roster-loading-dots { display: none; }
 
 .environment-onboarding {
   position: relative;
@@ -491,13 +515,10 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .environment-onboarding-actions p { margin: 0; color: #8391a7; font-size: 11px; line-height: 1.5; }
 
 @media (max-width: 700px) {
-  body.environment-roster-loading .fleet-row.with-rail > .shell,
-  body.environment-roster-error .fleet-row.with-rail > .shell,
   body.environment-roster-empty .fleet-row.with-rail > .shell { padding: 16px 12px 26px; }
-  .environment-roster-loading-state { padding-top: 26px; }
-  .environment-roster-loading-card { padding: 24px 20px; }
-  .environment-roster-loading-tiles { grid-template-columns: 1fr; }
-  .environment-roster-loading-tiles i:nth-child(n + 2) { display: none; }
+  .environment-roster-loading-state { padding: 24px 18px 44px; }
+  .environment-roster-loading-visual { width: clamp(188px, 52vw, 244px); }
+  .environment-roster-loading-copy h1 { font-size: 24px; }
   .environment-onboarding { padding-top: 28px; }
   .environment-onboarding-card { padding: 26px 22px; border-radius: 20px; }
   .environment-onboarding-steps { grid-template-columns: 1fr; }
@@ -3193,28 +3214,8 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .env-rail.empty-roster .rail-capacity,
 .env-rail.empty-roster .rail-toggle-wrap,
 .env-rail.empty-roster .rail-foot-add,
-.env-rail.empty-roster .rail-foot,
-.env-rail.roster-loading .rail-platform-filter,
-.env-rail.roster-loading .rail-facebook-persona-fill,
-.env-rail.roster-loading .rail-sum,
-.env-rail.roster-loading .rail-toggle-wrap,
-.env-rail.roster-loading .rail-foot-add,
-.env-rail.roster-loading .rail-foot { display: none !important; }
+.env-rail.empty-roster .rail-foot { display: none !important; }
 .env-rail.empty-roster .rail-list { padding-top: 6px; }
-.env-rail.roster-loading .rail-manage { visibility: hidden; }
-.env-rail.roster-loading #rail-count { display: none; }
-.env-rail.roster-loading .rail-list { padding: 12px 8px; }
-.rail-roster-skeleton { display: grid; gap: 11px; }
-.rail-roster-skeleton-row {
-  position: relative;
-  height: 42px;
-  overflow: hidden;
-  border-radius: 12px;
-  background: linear-gradient(100deg, #edf2f8 38%, #f8fafc 50%, #edf2f8 62%);
-  background-size: 220% 100%;
-  animation: sweep 1.6s linear infinite;
-}
-.rail-roster-error { padding: 18px 8px; color: #7c6950; font-size: 11px; line-height: 1.6; text-align: center; }
 .rail-empty {
   margin: 10px; padding: 13px 10px; width: calc(100% - 20px);
   border: 1px dashed #c2d0e6; border-radius: 12px; background: rgba(247, 250, 255, .58);

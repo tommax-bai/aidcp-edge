@@ -1,6 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM, type DOMWindow } from 'jsdom';
@@ -22,6 +22,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
 const rendererCss = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
+const environmentLoadingAsset = join(electronDir, 'renderer/assets/environment-loading-wireframe-execute.webp');
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -1100,9 +1101,15 @@ test('启动加载态：老用户等待权威 fleet 快照时不闪现新用户�
   });
   assert.equal(w.document.body.classList.contains('environment-roster-loading'), true);
   assert.equal(w.document.body.classList.contains('environment-roster-empty'), false, '未知时不能先画成新用户');
-  assert.match(w.document.querySelector('#environment-roster-loading')!.textContent || '', /正在读取运行环境/);
+  assert.match(w.document.querySelector('#environment-roster-loading')!.textContent || '', /正在准备你的工作区/);
   assert.equal(w.document.querySelector('.rail-empty'), null, '加载中不能提供创建第一个环境入口');
-  assert.ok(w.document.querySelector('.rail-roster-skeleton'));
+  assert.equal(w.document.querySelector('#env-rail')!.classList.contains('hidden'), true, '名册未决时整栏隐藏');
+  assert.equal(w.document.querySelector('.fleet-row')!.classList.contains('with-rail'), false, '全屏加载不预留环境栏宽度');
+  assert.equal(w.document.querySelector('.rail-roster-skeleton'), null, '不使用会伪造环境结构的骨架');
+  assert.equal(
+    w.document.querySelector('.environment-roster-loading-mascot')!.getAttribute('src'),
+    './assets/environment-loading-wireframe-execute.webp',
+  );
 
   resolveFleet?.({
     provider: 'adspower', selectedEnvId: 'ads-old', railCollapsed: true,
@@ -1117,6 +1124,7 @@ test('启动加载态：老用户等待权威 fleet 快照时不闪现新用户�
   assert.equal(w.document.body.classList.contains('environment-roster-empty'), false, '非空快照直接进入日常态');
   assert.match(w.document.querySelector('#acct-name')!.textContent || '', /老用户环境/);
   assert.equal(w.document.querySelector('#environment-onboarding')!.getAttribute('aria-hidden'), 'true');
+  assert.equal(w.document.querySelector('#env-rail')!.classList.contains('hidden'), false, '权威快照完成后原子恢复环境栏');
 });
 
 test('登录加载态：账号环境同步完成前保持 loading，不接受登录初期的空 fleet', async () => {
@@ -2688,17 +2696,22 @@ test('完整首次引导样式：旧环境工作区与身份不可见，只保�
   assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)/, '减弱动态效果继续由全局规则保证');
 });
 
-test('加载态与启动引导样式：骨架无环境语义、按钮强调有限且可关闭', () => {
+test('加载态与启动引导样式：全宽线框吉祥物不伪造环境、按钮强调有限且可关闭', () => {
   const w = cssWindow();
   const d = w.document;
   assert.equal(w.getComputedStyle(d.querySelector('#environment-roster-loading') as HTMLElement).display, 'flex');
   assert.equal(w.getComputedStyle(d.querySelector('.acct') as HTMLElement).display, 'none');
-  assert.match(rendererCss, /\.rail-roster-skeleton-row\s*\{[^}]*animation:\s*sweep 1\.6s linear infinite/s);
+  assert.equal(w.getComputedStyle(d.querySelector('#env-rail') as HTMLElement).display, 'none', 'Loading 与错误态不保留环境栏');
+  assert.match(rendererCss, /body\.environment-roster-loading \.fleet-row > \.shell[\s\S]*width:\s*100%;[\s\S]*max-width:\s*none;/s, 'Loading 画布占满标题栏以下区域');
+  assert.match(rendererCss, /\.environment-roster-loading-mascot\s*\{[^}]*mix-blend-mode:\s*multiply;/s, '白底线框图自然融入中性画布');
+  assert.match(rendererCss, /\.environment-roster-loading-dots i\s*\{[^}]*animation:\s*environment-loading-dot 1\.35s ease-in-out infinite;/s, '呼吸点只表达仍在同步，不伪装百分比进度');
+  assert.doesNotMatch(html, /environment-roster-loading-preview|rail-roster-skeleton/, 'Loading 不再输出页面骨架');
+  assert.ok(statSync(environmentLoadingAsset).size < 100 * 1024, '页面派生资产需保持轻量');
   assert.match(rendererCss, /\.fab\.start\.first-environment-start-target\s*\{[^}]*animation:\s*first-environment-start-pulse 1\.8s ease-out 3/s, '光环只播放有限三次');
   const close = d.querySelector('#first-environment-start-guide-close') as HTMLButtonElement;
   assert.equal(close.tagName, 'BUTTON');
   assert.equal(close.getAttribute('aria-label'), '关闭启动引导');
-  assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)\s*\{[^}]*\*\s*\{\s*animation:\s*none !important/s, '减弱动态偏好会停止骨架和光环动画');
+  assert.match(rendererCss, /@media \(prefers-reduced-motion: reduce\)\s*\{[^}]*\*\s*\{\s*animation:\s*none !important/s, '减弱动态偏好会停止呼吸点和光环动画');
 });
 
 test('环境栏结构：只有环境列表是滚动容器，栏头与栏尾不落进去（永远够得着）', async () => {

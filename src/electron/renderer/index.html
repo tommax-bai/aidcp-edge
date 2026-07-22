@@ -12,7 +12,7 @@
       <div class="tb-lights-pad"></div>
       <div id="first-use-brand" class="first-use-brand" aria-label="开始使用 AIDCP">
         <span class="first-use-brand-mark" aria-hidden="true">环</span>
-        <span class="first-use-brand-copy"><strong id="first-use-brand-title">正在准备</strong><small id="first-use-brand-subtitle">读取运行环境</small></span>
+        <span class="first-use-brand-copy"><strong id="first-use-brand-title">正在准备</strong><small id="first-use-brand-subtitle">同步运行环境</small></span>
       </div>
       <div class="acct">
         <div class="ava" id="acct-ava">书</div>
@@ -118,19 +118,14 @@
       <main class="shell">
       <section id="environment-roster-loading" class="environment-roster-loading-state" role="status" aria-live="polite" aria-labelledby="environment-roster-loading-title">
         <div class="environment-roster-loading-card">
-          <div class="environment-roster-loading-head">
-            <span class="environment-roster-loading-mark" aria-hidden="true"><i></i></span>
-            <div>
-              <span class="environment-roster-loading-kicker">正在准备工作区</span>
-              <h1 id="environment-roster-loading-title">正在读取运行环境</h1>
-              <p id="environment-roster-loading-copy">正在确认你的环境与运行状态，请稍候。</p>
-            </div>
+          <div class="environment-roster-loading-visual" aria-hidden="true">
+            <img class="environment-roster-loading-mascot" src="./assets/environment-loading-wireframe-execute.webp" alt="" />
           </div>
-          <div class="environment-roster-loading-preview" aria-hidden="true">
-            <span class="environment-roster-loading-line is-wide"></span>
-            <span class="environment-roster-loading-line"></span>
-            <div class="environment-roster-loading-tiles"><i></i><i></i><i></i></div>
+          <div class="environment-roster-loading-copy">
+            <h1 id="environment-roster-loading-title">正在准备你的工作区</h1>
+            <p id="environment-roster-loading-copy">正在同步当前账号的运行环境，请稍候。</p>
           </div>
+          <span class="environment-roster-loading-dots" aria-hidden="true"><i></i><i></i><i></i></span>
           <button id="environment-roster-retry" class="environment-roster-retry hidden" type="button">重新读取</button>
         </div>
       </section>
