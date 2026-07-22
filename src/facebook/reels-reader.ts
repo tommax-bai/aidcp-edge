@@ -3,14 +3,22 @@
  *
  * Reels is not an article/feed DOM. The page keeps neighbouring videos mounted, so every read/write
  * starts by resolving the single video with the largest viewport intersection and binding it to the
- * canonical `/reel/<id>` route. All writes use trusted CDP mouse events and require a same-Reel
- * post-condition; rounded counters never prove success. Forward navigation prefers trusted keyboard
- * and wheel input before the DOM button fallback, and every method must prove route/video movement.
+ * canonical `/reel/<id>` route. Writes use the event mechanism proven for each Facebook control:
+ * the primary React reaction control is activated against the freshly resolved in-page element, while
+ * a reaction-picker item uses trusted CDP pointer input. Every write requires a same-Reel post-condition;
+ * rounded counters never prove success. Forward navigation prefers trusted keyboard and wheel input
+ * before the DOM button fallback, and every method must prove route/video movement.
  */
 
-import { evalJson, type BrowseCdp } from '../browse/cdp-util.js';
+import { dispatchClick, evalJson, type BrowseCdp } from '../browse/cdp-util.js';
 import type { FacebookLikeObservation, FacebookLikeResult } from './like-executor.js';
-import { COMMENT_LABEL_SOURCE, NEUTRAL_LIKE_LABEL_SOURCE, UNREACT_LABEL_SOURCE } from './cta-labels.js';
+import {
+  COMMENT_LABEL_SOURCE,
+  NEUTRAL_LIKE_LABEL_SOURCE,
+  REACTED_WORD_SOURCE,
+  REACTION_PICKER_LABEL_SOURCE,
+  UNREACT_LABEL_SOURCE,
+} from './cta-labels.js';
 
 export interface FacebookReelCard {
   noteId: string;
@@ -66,6 +74,36 @@ interface ActionTarget extends ReelProbe {
   cx?: number;
   cy?: number;
   label?: string;
+  selected?: boolean;
+  witness?: string;
+}
+
+interface ReelLikePrimaryCommit {
+  ok?: boolean;
+  noteId?: string;
+  found?: boolean;
+  ambiguous?: boolean;
+  moved?: boolean;
+  already?: boolean;
+  clicked?: boolean;
+}
+
+interface ReelLikeVerify {
+  ok?: boolean;
+  noteId?: string;
+  found?: boolean;
+  ambiguous?: boolean;
+  selected?: boolean;
+  witness?: string;
+}
+
+interface ReelLikePickerTarget {
+  status?: 'found' | 'missing' | 'ambiguous' | 'offscreen' | 'reel_moved' | 'target_lost' | 'target_ambiguous';
+  noteId?: string;
+  cx?: number;
+  cy?: number;
+  fromX?: number;
+  fromY?: number;
 }
 
 export type FacebookReelFollowReason =
@@ -145,26 +183,109 @@ export function buildReelProbeJs(): string {
 
 const REEL_PROBE_JS = buildReelProbeJs();
 
-function buildLikeTargetJs(): string {
-  return String.raw`(function(){/*__AIDCP_REEL_LIKE_TARGET__*/
-    function txt(e){return String((e&&e.innerText)||(e&&e.textContent)||'').replace(/\s+/g,' ').trim();}
-    function canon(){try{var u=new URL(location.href),m=u.pathname.match(/^\/reel\/([^/?#]+)/i);return /(^|\.)facebook\.com$/i.test(u.hostname)&&m?'https://www.facebook.com/reel/'+m[1]:'';}catch(e){return '';}}
-    function ar(r){return Math.max(0,Math.min(innerWidth,r.right)-Math.max(0,r.left))*Math.max(0,Math.min(innerHeight,r.bottom)-Math.max(0,r.top));}
-    var vs=Array.from(document.querySelectorAll('video')).map(function(v,i){var r=v.getBoundingClientRect();return {v:v,i:i,r:r,a:ar(r),d:Math.abs((r.top+r.bottom)/2-innerHeight/2)};}).filter(function(x){return x.a>0;}).sort(function(a,b){return b.a-a.a||a.d-b.d;});var id=canon();if(!id||!vs.length)return JSON.stringify({ok:false,found:false,reason:!id?'not_reel':'no_active_video'});if(vs.length>1&&Math.abs(vs[0].a-vs[1].a)<1&&Math.abs(vs[0].d-vs[1].d)<1)return JSON.stringify({ok:true,noteId:id,found:false,ambiguous:true});var r=vs[0].r;
-    var commentLabel=new RegExp(${JSON.stringify(COMMENT_LABEL_SOURCE)},'i'), excluded=/(share|chia se|分享|menu|更多|next|previous|下一|上一|pause|play|播放|暂停)/i;
-    var like=new RegExp(${JSON.stringify(NEUTRAL_LIKE_LABEL_SOURCE)},'i'), unlike=new RegExp(${JSON.stringify(UNREACT_LABEL_SOURCE)},'i');
-    var all=Array.from(document.querySelectorAll('[role="button"],button')).map(function(b){var q=b.getBoundingClientRect(),lab=(b.getAttribute('aria-label')||txt(b)).trim();return {b:b,q:q,lab:lab};}).filter(function(x){return x.q.width>=32&&x.q.width<=84&&x.q.height>=32&&x.q.height<=90&&x.q.left>=r.right-20&&x.q.left<=r.right+125&&x.q.top>=r.top-10&&x.q.bottom<=r.bottom+20&&!commentLabel.test(x.lab)&&!excluded.test(x.lab);});
-    var labelled=all.filter(function(x){return like.test(x.lab)||unlike.test(x.lab);});var pool=labelled.length?labelled:all.sort(function(a,b){return a.q.top-b.q.top;}).slice(0,1);if(pool.length!==1)return JSON.stringify({ok:true,noteId:id,found:false,ambiguous:pool.length>1});var x=pool[0],selected=unlike.test(x.lab)||x.b.getAttribute('aria-pressed')==='true'||!!x.b.querySelector('img');
-    return JSON.stringify({ok:true,noteId:id,found:true,already:selected,cx:x.q.left+x.q.width/2,cy:x.q.top+x.q.height/2,label:x.lab,videoKey:(vs[0].v.currentSrc||vs[0].v.src||'')+'@'+vs[0].i+'@'+Math.round(r.top)+':'+Math.round(r.left)});
+const REEL_LIKE_HELPERS_JS = String.raw`
+  var aidcpReelNeutralLike=new RegExp(${JSON.stringify(NEUTRAL_LIKE_LABEL_SOURCE)},'i');
+  var aidcpReelUnlike=new RegExp(${JSON.stringify(UNREACT_LABEL_SOURCE)},'i');
+  var aidcpReelReactedWord=new RegExp(${JSON.stringify(REACTED_WORD_SOURCE)},'i');
+  var aidcpReelPickerLabel=new RegExp(${JSON.stringify(REACTION_PICKER_LABEL_SOURCE)},'i');
+  var aidcpReelComment=new RegExp(${JSON.stringify(COMMENT_LABEL_SOURCE)},'i');
+  var aidcpReelExcluded=/(share|chia se|分享|menu|更多|next|previous|下一|上一|pause|play|播放|暂停)/i;
+  function aidcpReelText(e){return String((e&&e.innerText)||(e&&e.textContent)||'').replace(/\s+/g,' ').trim();}
+  function aidcpReelLabel(e){return String((e&&e.getAttribute&&e.getAttribute('aria-label'))||'').replace(/\s+/g,' ').trim();}
+  function aidcpReelCanon(){try{var u=new URL(location.href),m=u.pathname.match(/^\/reel\/([^/?#]+)/i);return /(^|\.)facebook\.com$/i.test(u.hostname)&&m?'https://www.facebook.com/reel/'+m[1]:'';}catch(e){return '';}}
+  function aidcpReelArea(r){return Math.max(0,Math.min(innerWidth,r.right)-Math.max(0,r.left))*Math.max(0,Math.min(innerHeight,r.bottom)-Math.max(0,r.top));}
+  function aidcpReelVisible(el){if(!el||!el.getBoundingClientRect)return false;var r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>1&&r.height>1&&r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity||'1')>.01;}
+  function aidcpReelSelectedWitness(el,label,text){
+    if(aidcpReelUnlike.test(label)||aidcpReelUnlike.test(text))return 'unlike_label';
+    if(String(el.getAttribute('aria-pressed')||'')==='true')return 'aria_pressed';
+    if(String(el.getAttribute('aria-checked')||'')==='true')return 'aria_checked';
+    var numeric=/\d/.test(text);
+    if(!numeric&&aidcpReelPickerLabel.test(label)&&aidcpReelReactedWord.test(text))return 'reacted_text';
+    if(!numeric&&!aidcpReelNeutralLike.test(label)&&aidcpReelReactedWord.test(label))return 'reacted_label';
+    return '';
+  }
+  function aidcpReelActiveContext(){
+    var id=aidcpReelCanon();if(!id)return {ok:false,noteId:'',found:false,reason:'not_reel'};
+    var vs=Array.from(document.querySelectorAll('video')).map(function(v,i){var r=v.getBoundingClientRect();return {v:v,i:i,r:r,a:aidcpReelArea(r),d:Math.abs((r.top+r.bottom)/2-innerHeight/2)};}).filter(function(x){return x.a>0;}).sort(function(a,b){return b.a-a.a||a.d-b.d;});
+    if(!vs.length)return {ok:false,noteId:id,found:false,reason:'no_active_video'};
+    if(vs.length>1&&Math.abs(vs[0].a-vs[1].a)<1&&Math.abs(vs[0].d-vs[1].d)<1)return {ok:true,noteId:id,found:false,ambiguous:true};
+    return {ok:true,noteId:id,found:true,ambiguous:false,active:vs[0]};
+  }
+  function aidcpReelTagged(runId){var tagged=Array.from(document.querySelectorAll('[data-aidcp-reel-like-target]')).filter(function(el){return el.getAttribute('data-aidcp-reel-like-target')===runId;});return tagged.length===1?tagged[0]:null;}
+  function aidcpReelLikeContext(){
+    var base=aidcpReelActiveContext();if(!base.ok||!base.found||base.ambiguous)return base;
+    var id=base.noteId,active=base.active,r=active.r;
+    var controls=Array.from(document.querySelectorAll('[role="button"],button')).map(function(el){var q=el.getBoundingClientRect(),label=aidcpReelLabel(el),text=aidcpReelText(el),source=label||text;return {el:el,q:q,label:label,text:text,source:source};}).filter(function(x){return aidcpReelVisible(x.el)&&x.q.width>=32&&x.q.width<=84&&x.q.height>=32&&x.q.height<=90&&x.q.left>=r.right-20&&x.q.left<=r.right+125&&x.q.top>=r.top-10&&x.q.bottom<=r.bottom+20&&!aidcpReelComment.test(x.source)&&!aidcpReelExcluded.test(x.source);});
+    var supported=controls.filter(function(x){var witness=aidcpReelSelectedWitness(x.el,x.label,x.text);return !!witness||aidcpReelNeutralLike.test(x.label)||aidcpReelNeutralLike.test(x.text);});
+    if(supported.length!==1)return {ok:true,noteId:id,found:false,ambiguous:supported.length>1,active:active};
+    var x=supported[0],witness=aidcpReelSelectedWitness(x.el,x.label,x.text);
+    return {ok:true,noteId:id,found:true,ambiguous:false,active:active,el:x.el,q:x.q,label:x.label,text:x.text,selected:!!witness,witness:witness,cx:x.q.left+x.q.width/2,cy:x.q.top+x.q.height/2};
+  }
+`;
+
+export function buildReelLikeTargetJs(): string {
+  return `(function(){/*__AIDCP_REEL_LIKE_TARGET__*/${REEL_LIKE_HELPERS_JS}
+    var x=aidcpReelLikeContext();
+    return JSON.stringify({ok:x.ok,noteId:x.noteId,found:x.found,ambiguous:!!x.ambiguous,already:!!x.selected,selected:!!x.selected,witness:x.witness||'',cx:x.cx,cy:x.cy});
   })()`;
 }
 
-const LIKE_VERIFY_JS = String.raw`(function(){/*__AIDCP_REEL_LIKE_VERIFY__*/
-  function txt(e){return String((e&&e.innerText)||(e&&e.textContent)||'').replace(/\s+/g,' ').trim();}function canon(){try{var u=new URL(location.href),m=u.pathname.match(/^\/reel\/([^/?#]+)/i);return m?'https://www.facebook.com/reel/'+m[1]:'';}catch(e){return '';}}function ar(r){return Math.max(0,Math.min(innerWidth,r.right)-Math.max(0,r.left))*Math.max(0,Math.min(innerHeight,r.bottom)-Math.max(0,r.top));}
-  var vs=Array.from(document.querySelectorAll('video')).map(function(v){var r=v.getBoundingClientRect();return {r:r,a:ar(r),d:Math.abs((r.top+r.bottom)/2-innerHeight/2)};}).filter(function(x){return x.a>0;}).sort(function(a,b){return b.a-a.a||a.d-b.d;});if(!vs.length)return JSON.stringify({noteId:canon(),selected:false});if(vs.length>1&&Math.abs(vs[0].a-vs[1].a)<1&&Math.abs(vs[0].d-vs[1].d)<1)return JSON.stringify({noteId:canon(),selected:false,ambiguous:true});var r=vs[0].r;
-  var unlike=new RegExp(${JSON.stringify(UNREACT_LABEL_SOURCE)},'i'),neutralLike=new RegExp(${JSON.stringify(NEUTRAL_LIKE_LABEL_SOURCE)},'i');var candidates=Array.from(document.querySelectorAll('[role="button"],button')).filter(function(b){var q=b.getBoundingClientRect(),lab=(b.getAttribute('aria-label')||txt(b)).trim();if(q.width<32||q.width>84||q.height<32||q.height>90||q.left<r.right-20||q.left>r.right+125||q.top<r.top-10||q.bottom>r.bottom+20)return false;return unlike.test(lab)||b.getAttribute('aria-pressed')==='true'||(!!b.querySelector('img')&&neutralLike.test(lab));});
-  return JSON.stringify({noteId:canon(),selected:candidates.length===1,label:candidates.length===1?(candidates[0].getAttribute('aria-label')||txt(candidates[0])):'',ambiguous:candidates.length>1});
-})()`;
+function buildReelLikePrimaryCommitJs(expectedNoteId: string, runId: string): string {
+  return `(function(){/*__AIDCP_REEL_LIKE_PRIMARY_COMMIT__*/${REEL_LIKE_HELPERS_JS}
+    var x=aidcpReelLikeContext();
+    if(x.noteId!==${JSON.stringify(expectedNoteId)})return JSON.stringify({ok:false,noteId:x.noteId,found:false,moved:true});
+    if(!x.ok||!x.found||x.ambiguous||!x.el)return JSON.stringify({ok:!!x.ok,noteId:x.noteId,found:false,ambiguous:!!x.ambiguous});
+    if(x.selected)return JSON.stringify({ok:true,noteId:x.noteId,found:true,already:true,clicked:false});
+    try{Array.from(document.querySelectorAll('[data-aidcp-reel-like-target]')).forEach(function(el){el.removeAttribute('data-aidcp-reel-like-target');});x.el.setAttribute('data-aidcp-reel-like-target',${JSON.stringify(runId)});x.el.click();return JSON.stringify({ok:true,noteId:x.noteId,found:true,already:false,clicked:true});}
+    catch(e){return JSON.stringify({ok:true,noteId:x.noteId,found:true,already:false,clicked:false});}
+  })()`;
+}
+
+function buildReelLikeVerifyJs(expectedNoteId: string, runId: string): string {
+  return `(function(){/*__AIDCP_REEL_LIKE_VERIFY__*/${REEL_LIKE_HELPERS_JS}
+    var base=aidcpReelActiveContext();
+    if(base.noteId!==${JSON.stringify(expectedNoteId)})return JSON.stringify({ok:false,noteId:base.noteId,found:false,moved:true});
+    if(!base.ok||!base.found||base.ambiguous||!base.active)return JSON.stringify({ok:!!base.ok,noteId:base.noteId,found:false,ambiguous:!!base.ambiguous});
+    var el=aidcpReelTagged(${JSON.stringify(runId)});if(!el||!aidcpReelVisible(el))return JSON.stringify({ok:true,noteId:base.noteId,found:false});
+    var q=el.getBoundingClientRect(),r=base.active.r;
+    if(q.width<32||q.width>84||q.height<32||q.height>90||q.left<r.right-20||q.left>r.right+125||q.top<r.top-10||q.bottom>r.bottom+20)return JSON.stringify({ok:true,noteId:base.noteId,found:false});
+    var label=aidcpReelLabel(el),text=aidcpReelText(el),witness=aidcpReelSelectedWitness(el,label,text);
+    return JSON.stringify({ok:true,noteId:base.noteId,found:true,ambiguous:false,selected:!!witness,witness:witness});
+  })()`;
+}
+
+export function buildReelLikePickerTargetJs(expectedNoteId: string, runId: string): string {
+  return `(function(){/*__AIDCP_REEL_LIKE_PICKER_TARGET__*/${REEL_LIKE_HELPERS_JS}
+    var base=aidcpReelActiveContext();
+    if(base.noteId!==${JSON.stringify(expectedNoteId)})return JSON.stringify({status:'reel_moved',noteId:base.noteId});
+    if(!base.ok||!base.found||base.ambiguous||!base.active)return JSON.stringify({status:base.ambiguous?'target_ambiguous':'target_lost',noteId:base.noteId});
+    var primary=aidcpReelTagged(${JSON.stringify(runId)});if(!primary||!aidcpReelVisible(primary))return JSON.stringify({status:'target_lost',noteId:base.noteId});
+    var primaryRect=primary.getBoundingClientRect(),activeRect=base.active.r;
+    if(primaryRect.left<activeRect.right-20||primaryRect.left>activeRect.right+125||primaryRect.top<activeRect.top-10||primaryRect.bottom>activeRect.bottom+20)return JSON.stringify({status:'target_lost',noteId:base.noteId});
+    var reactionish=/(赞|讚|Like|Thích|Me gusta|Love|大爱|Care|加油|Haha|哈哈|Wow|哇|Sad|悲伤|Angry|怒)/i;
+    var likeItem=/(?:^|[:：]\\s*)(赞|讚|Like|Thích|Me gusta)$/i;
+    var vr=base.active.r,containers=Array.from(document.querySelectorAll('[role="dialog"],[role="menu"],[role="listbox"],[aria-label*="Reaction" i],[aria-label*="反应"],[aria-label*="心情"]')).filter(aidcpReelVisible);
+    var qualified=[];
+    containers.forEach(function(container){
+      var cr=container.getBoundingClientRect();
+      if(cr.right<vr.left-180||cr.left>vr.right+260||cr.bottom<vr.top-120||cr.top>vr.bottom+120)return;
+      var items=Array.from(container.querySelectorAll('[role="button"][aria-label],[role="radio"][aria-label],button[aria-label]')).filter(aidcpReelVisible);
+      var reactions=items.filter(function(el){return reactionish.test(aidcpReelLabel(el));});
+      var likes=items.filter(function(el){return likeItem.test(aidcpReelLabel(el));});
+      if(reactions.length>=2&&likes.length===1)qualified.push({container:container,item:likes[0]});
+    });
+    qualified=qualified.filter(function(candidate){return !qualified.some(function(other){return other!==candidate&&candidate.container.contains(other.container);});});
+    if(qualified.length===0)return JSON.stringify({status:'missing',noteId:base.noteId});
+    if(qualified.length!==1)return JSON.stringify({status:'ambiguous',noteId:base.noteId});
+    var q=qualified[0].item.getBoundingClientRect(),cx=Math.round(q.left+q.width/2),cy=Math.round(q.top+q.height/2),vw=innerWidth||0,vh=innerHeight||0;
+    if(cx<0||cy<0||cx>vw||cy>vh)return JSON.stringify({status:'offscreen',noteId:base.noteId});
+    return JSON.stringify({status:'found',noteId:base.noteId,cx:cx,cy:cy,fromX:Math.round(primaryRect.left+primaryRect.width/2),fromY:Math.round(primaryRect.top+primaryRect.height/2)});
+  })()`;
+}
+
+function buildClearReelLikeTargetJs(runId: string): string {
+  return `(function(){Array.from(document.querySelectorAll('[data-aidcp-reel-like-target]')).forEach(function(el){if(el.getAttribute('data-aidcp-reel-like-target')===${JSON.stringify(runId)})el.removeAttribute('data-aidcp-reel-like-target');});return JSON.stringify({ok:true});})()`;
+}
 
 /**
  * Resolve the active Reel's inline author Follow control without relying on DOM order.
@@ -306,34 +427,110 @@ export class FacebookReelsReader {
   async like(noteId: string, shadow: boolean): Promise<FacebookLikeResult> {
     let target: ActionTarget;
     try {
-      target = await evalJson<ActionTarget>(this.cdp, buildLikeTargetJs());
+      target = await evalJson<ActionTarget>(this.cdp, buildReelLikeTargetJs());
     } catch {
       return { ok: false, reason: 'nav_error', executed: false };
     }
     if (!target.ok || !target.noteId || target.noteId !== noteId) return { ok: false, reason: 'no_target', executed: false };
     if (target.ambiguous) return { ok: false, reason: 'ambiguous_target', executed: false };
-    if (!target.found || !Number.isFinite(target.cx) || !Number.isFinite(target.cy)) return { ok: false, reason: 'no_target', executed: false };
+    if (!target.found) return { ok: false, reason: 'no_target', executed: false };
     const active = await this.readActive();
     if (!active || active.noteId !== noteId) return { ok: false, reason: 'no_target', executed: false };
     const obs = observation(active);
     if (target.already) return { ok: false, reason: 'already_liked', executed: false, observation: obs };
     if (shadow) return { ok: false, reason: 'shadow', executed: false, observation: obs };
-    await trustedClick(this.cdp, Number(target.cx), Number(target.cy));
-    for (let round = 0; round < this.opts.verifyRounds; round++) {
-      try {
-        const verify = await evalJson<{ noteId?: string; selected?: boolean; ambiguous?: boolean }>(this.cdp, LIKE_VERIFY_JS);
-        if (verify.noteId !== noteId) return { ok: false, reason: 'verify_indeterminate', executed: true };
-        if (verify.ambiguous) return { ok: false, reason: 'verify_indeterminate', executed: true };
-        if (verify.selected) {
-          const after = await this.readActive();
-          return { ok: true, executed: true, observation: observation(after && after.noteId === noteId ? after : active) };
-        }
-      } catch {
-        // bounded retry
-      }
-      if (round < this.opts.verifyRounds - 1) await this.sleep(this.opts.verifyMs);
+
+    // Commit boundary: repeat active-Reel + supported-control resolution and activate that fresh DOM element.
+    // Consuming the earlier probe's coordinates is unsafe: React hydration/layout may drift between probe and write,
+    // and Facebook's primary reaction control accepts in-page activation more reliably than a raw pointer trio.
+    const runId = `reel-like-${Date.now().toString(36)}-${Math.floor(this.random() * 1_000_000).toString(36)}`;
+    let commit: ReelLikePrimaryCommit;
+    try {
+      commit = await evalJson<ReelLikePrimaryCommit>(this.cdp, buildReelLikePrimaryCommitJs(noteId, runId));
+    } catch {
+      return { ok: false, reason: 'nav_error', executed: false };
     }
-    return { ok: false, reason: 'state_unchanged', executed: true };
+    if (commit.moved || commit.noteId !== noteId) return { ok: false, reason: 'no_target', executed: false };
+    if (commit.ambiguous) return { ok: false, reason: 'ambiguous_target', executed: false };
+    if (commit.already) return { ok: false, reason: 'already_liked', executed: false, observation: obs };
+    if (!commit.ok || !commit.found || !commit.clicked) return { ok: false, reason: 'no_target', executed: false };
+    this.log('[fb-reels][like] commit=primary_dom_click');
+
+    try {
+      let pickerCommitted = false;
+      let lastPickerStatus: ReelLikePickerTarget['status'] = 'missing';
+      let verifyAfterPickerCommit = false;
+      let round = 0;
+      while (round < this.opts.verifyRounds || verifyAfterPickerCommit) {
+        verifyAfterPickerCommit = false;
+        try {
+          const verify = await evalJson<ReelLikeVerify>(this.cdp, buildReelLikeVerifyJs(noteId, runId));
+          if (verify.noteId !== noteId) {
+            this.log('[fb-reels][like] terminal=verify_indeterminate detail=reel_moved');
+            return { ok: false, reason: 'verify_indeterminate', executed: true };
+          }
+          if (!verify.ok || !verify.found || verify.ambiguous) {
+            this.log(`[fb-reels][like] terminal=verify_indeterminate detail=${verify.ambiguous ? 'target_ambiguous' : 'target_lost'}`);
+            return { ok: false, reason: 'verify_indeterminate', executed: true };
+          }
+          if (verify.selected) {
+            const after = await this.readActive();
+            this.log(`[fb-reels][like] success=${pickerCommitted ? 'picker_selected' : 'direct_selected'} witness=${verify.witness || 'selected'}`);
+            return { ok: true, executed: true, observation: observation(after && after.noteId === noteId ? after : active) };
+          }
+        } catch {
+          // bounded retry
+        }
+
+        // Some Reel layouts open the reaction picker instead of selecting Like. Commit its unique scoped
+        // Like item at most once; never search the document for a bare Like control.
+        if (!pickerCommitted) {
+          try {
+            const picker = await evalJson<ReelLikePickerTarget>(this.cdp, buildReelLikePickerTargetJs(noteId, runId));
+            lastPickerStatus = picker.status ?? 'missing';
+            if (picker.status === 'reel_moved' || picker.status === 'target_lost' || picker.status === 'target_ambiguous') {
+              this.log(`[fb-reels][like] terminal=verify_indeterminate detail=picker_${picker.status}`);
+              return { ok: false, reason: 'verify_indeterminate', executed: true };
+            }
+            if (
+              picker.status === 'found' &&
+              Number.isFinite(picker.cx) &&
+              Number.isFinite(picker.cy) &&
+              Number.isFinite(picker.fromX) &&
+              Number.isFinite(picker.fromY)
+            ) {
+              try {
+                await dispatchClick(this.cdp, Number(picker.cx), Number(picker.cy), {
+                  from: { x: Number(picker.fromX), y: Number(picker.fromY) },
+                  overshoot: false,
+                  random: this.random,
+                  sleep: this.sleep,
+                });
+              } catch {
+                this.log('[fb-reels][like] terminal=verify_indeterminate detail=picker_dispatch_error');
+                return { ok: false, reason: 'verify_indeterminate', executed: true };
+              }
+              pickerCommitted = true;
+              verifyAfterPickerCommit = true;
+              this.log('[fb-reels][like] commit=picker_pointer_click');
+            }
+          } catch {
+            // Picker observation is optional and bounded; selected-state verification remains authoritative.
+          }
+        }
+
+        round += 1;
+        if (round < this.opts.verifyRounds || verifyAfterPickerCommit) await this.sleep(this.opts.verifyMs);
+      }
+      this.log(`[fb-reels][like] terminal=state_unchanged picker=${lastPickerStatus ?? 'missing'}`);
+      return { ok: false, reason: 'state_unchanged', executed: true };
+    } finally {
+      try {
+        await evalJson(this.cdp, buildClearReelLikeTargetJs(runId));
+      } catch {
+        // Best-effort transient marker cleanup; the unique run id prevents cross-command reuse.
+      }
+    }
   }
 
   async follow(noteId: string, shadow: boolean): Promise<FacebookReelFollowResult> {

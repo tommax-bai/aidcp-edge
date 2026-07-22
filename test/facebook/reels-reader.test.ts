@@ -5,6 +5,8 @@ import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import {
   buildNextTargetJs,
   buildReelFollowTargetJs,
+  buildReelLikePickerTargetJs,
+  buildReelLikeTargetJs,
   buildReelProbeJs,
   FacebookReelsReader,
 } from '../../src/facebook/reels-reader.js';
@@ -36,6 +38,8 @@ const REEL_1_FOLLOW = {
 function scriptedCdp(options: {
   probes?: unknown[];
   likeTarget?: unknown;
+  likePrimaryCommit?: unknown;
+  likePickers?: unknown[];
   likeVerify?: unknown[];
   followTargets?: unknown[];
   nextTarget?: unknown;
@@ -48,6 +52,7 @@ function scriptedCdp(options: {
 } {
   let probeIndex = 0;
   let verifyIndex = 0;
+  let pickerIndex = 0;
   let followIndex = 0;
   const clicks: Array<Record<string, unknown>> = [];
   const keys: Array<Record<string, unknown>> = [];
@@ -71,10 +76,19 @@ function scriptedCdp(options: {
       const expression = String(params.expression ?? '');
       evaluations.push(expression);
       if (expression.includes('__AIDCP_REEL_LIKE_TARGET__')) return { result: { value: JSON.stringify(options.likeTarget) } } as never;
+      if (expression.includes('__AIDCP_REEL_LIKE_PRIMARY_COMMIT__')) {
+        return { result: { value: JSON.stringify(options.likePrimaryCommit) } } as never;
+      }
       if (expression.includes('__AIDCP_REEL_LIKE_VERIFY__')) {
         const values = options.likeVerify ?? [];
         const value = values[Math.min(verifyIndex, Math.max(0, values.length - 1))];
         verifyIndex += 1;
+        return { result: { value: JSON.stringify(value) } } as never;
+      }
+      if (expression.includes('__AIDCP_REEL_LIKE_PICKER_TARGET__')) {
+        const values = options.likePickers ?? [];
+        const value = values[Math.min(pickerIndex, Math.max(0, values.length - 1))];
+        pickerIndex += 1;
         return { result: { value: JSON.stringify(value) } } as never;
       }
       if (expression.includes('__AIDCP_REEL_FOLLOW_TARGET__')) {
@@ -117,20 +131,23 @@ test('Reels 点赞：命令 noteId 与活动 Reel 不同则零点击 fail-closed
   assert.equal(scripted.clicks.length, 0);
 });
 
-test('Reels 点赞：一次可信点击 + 同 Reel 已选中态才成功，圆整计数不作证明', async () => {
+test('Reels 点赞：fresh DOM 主控件激活 + 同 Reel 已选中态才成功，圆整计数不作证明', async () => {
   const scripted = scriptedCdp({
     probes: [REEL_1, REEL_1],
-    likeTarget: { ...REEL_1, found: true, already: false, cx: 800, cy: 300 },
-    likeVerify: [{ noteId: REEL_1.noteId, selected: true }],
+    likeTarget: { ...REEL_1, found: true, already: false },
+    likePrimaryCommit: { ok: true, noteId: REEL_1.noteId, found: true, clicked: true },
+    likeVerify: [{ ok: true, noteId: REEL_1.noteId, found: true, selected: true, witness: 'aria_pressed' }],
   });
   const result = await new FacebookReelsReader({ cdp: scripted.cdp, sleep: async () => {} }).like(REEL_1.noteId, false);
   assert.equal(result.ok, true);
   assert.equal(result.executed, true);
   assert.equal(result.observation?.reactionText, '5.8K');
-  assert.deepEqual(scripted.clicks.map((event) => event.type), ['mouseMoved', 'mousePressed', 'mouseReleased']);
+  assert.deepEqual(scripted.clicks, [], 'direct Reel like must not consume a stale pointer coordinate');
   const targetExpression = scripted.evaluations.find((value) => value.includes('__AIDCP_REEL_LIKE_TARGET__')) ?? '';
   assert.match(targetExpression, /Bày tỏ cảm xúc Thích/, 'Reels 复用 Feed 的越南语 CTA 词表');
   assert.match(targetExpression, /getBoundingClientRect/, '词表复用不能替代 Reels 自己的活动视频几何绑定');
+  const commitExpression = scripted.evaluations.find((value) => value.includes('__AIDCP_REEL_LIKE_PRIMARY_COMMIT__')) ?? '';
+  assert.match(commitExpression, /\.click\(\)/, 'primary React control is activated against the fresh in-page element');
 });
 
 test('Reels 点赞：结构候选歧义时不点击', async () => {
@@ -138,6 +155,64 @@ test('Reels 点赞：结构候选歧义时不点击', async () => {
   const result = await new FacebookReelsReader({ cdp: scripted.cdp, sleep: async () => {} }).like(REEL_1.noteId, false);
   assert.equal(result.reason, 'ambiguous_target');
   assert.equal(scripted.clicks.length, 0);
+});
+
+test('Reels 点赞：第一段只开反应浮层时 scoped 坐标点一次 Like 并复验', async () => {
+  const logs: string[] = [];
+  const scripted = scriptedCdp({
+    probes: [REEL_1, REEL_1],
+    likeTarget: { ...REEL_1, found: true, already: false },
+    likePrimaryCommit: { ok: true, noteId: REEL_1.noteId, found: true, clicked: true },
+    likeVerify: [
+      { ok: true, noteId: REEL_1.noteId, found: true, selected: false },
+      { ok: true, noteId: REEL_1.noteId, found: true, selected: true, witness: 'unlike_label' },
+    ],
+    likePickers: [{ status: 'found', noteId: REEL_1.noteId, cx: 1010, cy: 360, fromX: 995, fromY: 420 }],
+  });
+  const reader = new FacebookReelsReader(
+    { cdp: scripted.cdp, sleep: async () => {}, random: () => 0.5, logger: (line) => logs.push(line) },
+    { verifyRounds: 2, verifyMs: 1 },
+  );
+  const result = await reader.like(REEL_1.noteId, false);
+  assert.equal(result.ok, true);
+  assert.equal(scripted.clicks.filter((event) => event.type === 'mousePressed').length, 1);
+  assert.equal(scripted.clicks.filter((event) => event.type === 'mouseReleased').length, 1);
+  assert.match(logs.join('\n'), /commit=primary_dom_click/);
+  assert.match(logs.join('\n'), /commit=picker_pointer_click/);
+  assert.match(logs.join('\n'), /success=picker_selected witness=unlike_label/);
+});
+
+test('Reels 点赞：浮层歧义或屏外不点第二段，状态不变诚实失败', async () => {
+  for (const status of ['ambiguous', 'offscreen'] as const) {
+    const scripted = scriptedCdp({
+      probes: [REEL_1],
+      likeTarget: { ...REEL_1, found: true, already: false },
+      likePrimaryCommit: { ok: true, noteId: REEL_1.noteId, found: true, clicked: true },
+      likeVerify: [{ ok: true, noteId: REEL_1.noteId, found: true, selected: false }],
+      likePickers: [{ status, noteId: REEL_1.noteId }],
+    });
+    const reader = new FacebookReelsReader(
+      { cdp: scripted.cdp, sleep: async () => {} },
+      { verifyRounds: 1, verifyMs: 1 },
+    );
+    assert.deepEqual(await reader.like(REEL_1.noteId, false), { ok: false, reason: 'state_unchanged', executed: true });
+    assert.equal(scripted.clicks.length, 0);
+  }
+});
+
+test('Reels 点赞：第一段后 Reel 漂移不补点并回 verify_indeterminate', async () => {
+  const scripted = scriptedCdp({
+    probes: [REEL_1],
+    likeTarget: { ...REEL_1, found: true, already: false },
+    likePrimaryCommit: { ok: true, noteId: REEL_1.noteId, found: true, clicked: true },
+    likeVerify: [{ ok: true, noteId: REEL_2.noteId, found: true, selected: false }],
+  });
+  assert.deepEqual(
+    await new FacebookReelsReader({ cdp: scripted.cdp, sleep: async () => {} }).like(REEL_1.noteId, false),
+    { ok: false, reason: 'verify_indeterminate', executed: true },
+  );
+  assert.equal(scripted.clicks.length, 0);
+  assert.equal(scripted.evaluations.some((value) => value.includes('__AIDCP_REEL_LIKE_PICKER_TARGET__')), false);
 });
 
 test('Reels 关注：命令 noteId 与活动 Reel 不同则零点击 fail-closed', async () => {
@@ -296,6 +371,100 @@ function setRect(element: Element, rect: { left: number; top: number; right: num
     value: () => ({ ...rect, width, height, x: rect.left, y: rect.top, toJSON: () => ({}) }),
   });
 }
+
+function reelLikeDom(markup: string): JSDOM {
+  const dom = new JSDOM(markup, { url: REEL_1.noteId, runScripts: 'outside-only' });
+  Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: 1440 });
+  Object.defineProperty(dom.window, 'innerHeight', { configurable: true, value: 900 });
+  return dom;
+}
+
+test('Reels 点赞状态[jsdom]：中性控件里的通用图片不证明已赞，显式 pressed 才证明', () => {
+  const dom = reelLikeDom('<video id="video"></video><button id="primary" aria-label="Like"><img alt="icon"></button>');
+  const doc = dom.window.document;
+  const primary = doc.querySelector('#primary')!;
+  setRect(doc.querySelector('#video')!, { left: 500, top: 60, right: 940, bottom: 820 });
+  setRect(primary, { left: 955, top: 280, right: 1005, bottom: 330 });
+
+  const neutral = JSON.parse(String(dom.window.eval(buildReelLikeTargetJs()))) as { found?: boolean; already?: boolean; witness?: string };
+  assert.deepEqual(neutral, {
+    ok: true,
+    noteId: REEL_1.noteId,
+    found: true,
+    ambiguous: false,
+    already: false,
+    selected: false,
+    witness: '',
+    cx: 980,
+    cy: 305,
+  });
+
+  primary.setAttribute('aria-pressed', 'true');
+  const selected = JSON.parse(String(dom.window.eval(buildReelLikeTargetJs()))) as { already?: boolean; witness?: string };
+  assert.equal(selected.already, true);
+  assert.equal(selected.witness, 'aria_pressed');
+});
+
+test('Reels 点赞浮层定位[jsdom]：只取 scoped picker 的 Like，忽略文档外部同名按钮', () => {
+  const dom = reelLikeDom(`
+    <video id="video"></video>
+    <button id="primary" aria-label="Like" data-aidcp-reel-like-target="test-run"></button>
+    <button id="decoy" aria-label="Like"></button>
+    <div id="picker" role="dialog" aria-label="Reactions">
+      <button id="picker-like" role="button" aria-label="Like"></button>
+      <button id="picker-love" role="button" aria-label="Love"></button>
+    </div>
+  `);
+  const doc = dom.window.document;
+  setRect(doc.querySelector('#video')!, { left: 500, top: 60, right: 940, bottom: 820 });
+  setRect(doc.querySelector('#primary')!, { left: 955, top: 280, right: 1005, bottom: 330 });
+  setRect(doc.querySelector('#decoy')!, { left: 80, top: 80, right: 130, bottom: 130 });
+  setRect(doc.querySelector('#picker')!, { left: 920, top: 250, right: 1120, bottom: 390 });
+  setRect(doc.querySelector('#picker-like')!, { left: 940, top: 280, right: 980, bottom: 320 });
+  setRect(doc.querySelector('#picker-love')!, { left: 990, top: 280, right: 1030, bottom: 320 });
+
+  const result = JSON.parse(String(dom.window.eval(buildReelLikePickerTargetJs(REEL_1.noteId, 'test-run')))) as Record<string, unknown>;
+  assert.deepEqual(result, {
+    status: 'found',
+    noteId: REEL_1.noteId,
+    cx: 960,
+    cy: 300,
+    fromX: 980,
+    fromY: 305,
+  });
+});
+
+test('Reels 点赞浮层定位[jsdom]：多个 scoped picker 歧义，部分屏外 Like 拒绝坐标提交', () => {
+  const ambiguous = reelLikeDom(`
+    <video id="video"></video><button id="primary" aria-label="Like" data-aidcp-reel-like-target="test-run"></button>
+    <div id="picker-a" role="dialog"><button id="a-like" aria-label="Like"></button><button id="a-love" aria-label="Love"></button></div>
+    <div id="picker-b" role="dialog"><button id="b-like" aria-label="Like"></button><button id="b-love" aria-label="Love"></button></div>
+  `);
+  const ambiguousDoc = ambiguous.window.document;
+  setRect(ambiguousDoc.querySelector('#video')!, { left: 500, top: 60, right: 940, bottom: 820 });
+  setRect(ambiguousDoc.querySelector('#primary')!, { left: 955, top: 280, right: 1005, bottom: 330 });
+  for (const [pickerId, left] of [['#picker-a', 920], ['#picker-b', 1040]] as const) {
+    setRect(ambiguousDoc.querySelector(pickerId)!, { left, top: 250, right: left + 100, bottom: 380 });
+  }
+  for (const [id, left] of [['#a-like', 930], ['#a-love', 970], ['#b-like', 1050], ['#b-love', 1090]] as const) {
+    setRect(ambiguousDoc.querySelector(id)!, { left, top: 280, right: left + 30, bottom: 320 });
+  }
+  const ambiguousResult = JSON.parse(String(ambiguous.window.eval(buildReelLikePickerTargetJs(REEL_1.noteId, 'test-run')))) as { status?: string };
+  assert.equal(ambiguousResult.status, 'ambiguous');
+
+  const offscreen = reelLikeDom(`
+    <video id="video"></video><button id="primary" aria-label="Like" data-aidcp-reel-like-target="test-run"></button>
+    <div id="picker" role="dialog"><button id="like" aria-label="Like"></button><button id="love" aria-label="Love"></button></div>
+  `);
+  const offscreenDoc = offscreen.window.document;
+  setRect(offscreenDoc.querySelector('#video')!, { left: 500, top: 60, right: 940, bottom: 820 });
+  setRect(offscreenDoc.querySelector('#primary')!, { left: 955, top: 760, right: 1005, bottom: 810 });
+  setRect(offscreenDoc.querySelector('#picker')!, { left: 920, top: 790, right: 1120, bottom: 960 });
+  setRect(offscreenDoc.querySelector('#like')!, { left: 940, top: 880, right: 980, bottom: 940 });
+  setRect(offscreenDoc.querySelector('#love')!, { left: 990, top: 840, right: 1030, bottom: 880 });
+  const offscreenResult = JSON.parse(String(offscreen.window.eval(buildReelLikePickerTargetJs(REEL_1.noteId, 'test-run')))) as { status?: string };
+  assert.equal(offscreenResult.status, 'offscreen');
+});
 
 test('Reels 关注定位[jsdom]：无空格 aria-label 仍由可见作者和活动视频唯一绑定', () => {
   const dom = new JSDOM(
