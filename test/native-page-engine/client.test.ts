@@ -26,10 +26,26 @@ const input = {
   timeoutMs: 500,
 };
 
-test('resolves only the correlated protocol-v1 result', async () => {
+test('resolves only the correlated protocol-v2 command result', async () => {
   const result = await client('success').probePage(input);
   assert.equal(result.pageKind, 'explore');
   assert.equal(result.signals.feedCardCount, 12);
+});
+
+test('keeps one supervised process across session status and commands', async () => {
+  const taskId = 'task-1';
+  const session = await client('success').openSession({
+    ...input,
+    sessionId: 'session-1',
+    taskId,
+  });
+  assert.equal(session.manifest.platformAdapterVersion, 'xiaohongshu-test');
+  const result = await session.probePage(500);
+  assert.equal(result.pageKind, 'explore');
+  const status = await session.status();
+  assert.equal(status.taskId, taskId);
+  assert.equal(status.lastCommandId, 1);
+  await session.close();
 });
 
 test('preserves native stable errors', async () => {

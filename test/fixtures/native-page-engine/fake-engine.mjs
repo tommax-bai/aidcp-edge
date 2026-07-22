@@ -12,54 +12,130 @@ if (mode === 'malformed') {
 } else {
   process.stdout.write(`${JSON.stringify({
     type: 'ready',
-    protocolVersion: 1,
-    engineVersion: 'test',
+    protocolVersion: 2,
+    manifest: {
+      engineVersion: 'test',
+      platformAdapterVersion: 'xiaohongshu-test',
+      capabilityDigest: 'a'.repeat(64),
+    },
   })}\n`);
 
+  let activeTaskId = 'probe-task';
   const lines = createInterface({ input: process.stdin });
-  lines.once('line', (line) => {
+  lines.on('line', (line) => {
     const request = JSON.parse(line);
-    if (mode === 'hang') {
-      setInterval(() => undefined, 1000);
-      return;
-    }
-    if (mode === 'native-error') {
+    if (mode === 'hang') return;
+    if (request.type === 'session_open') {
+      if (mode === 'native-error') {
+        process.stdout.write(`${JSON.stringify({
+          type: 'response',
+          protocolVersion: 2,
+          id: request.id,
+          ok: false,
+          error: { code: 'no_matching_target', message: 'no matching page target was found' },
+        })}\n`);
+        return;
+      }
+      activeTaskId = request.taskId;
       process.stdout.write(`${JSON.stringify({
         type: 'response',
-        protocolVersion: 1,
+        protocolVersion: 2,
         id: request.id,
-        ok: false,
-        error: { code: 'no_matching_target', message: 'no matching page target was found' },
+        ok: true,
+        result: {
+          sessionId: request.sessionId,
+          taskId: request.taskId,
+          state: 'ready',
+          targetId: 'target-1',
+          lastCommandId: 0,
+        },
       })}\n`);
       return;
     }
-    process.stdout.write(`${JSON.stringify({
-      type: 'response',
-      protocolVersion: 1,
-      id: 'probe_unrelated',
-      ok: true,
-      result: {},
-    })}\n`);
-    process.stdout.write(`${JSON.stringify({
-      type: 'response',
-      protocolVersion: 1,
-      id: request.id,
-      ok: true,
-      result: {
-        targetId: 'target-1',
-        origin: 'https://www.xiaohongshu.com',
-        path: '/explore',
-        readyState: 'complete',
-        pageKind: 'explore',
-        signals: {
-          feedCardCount: 12,
-          noteDetailCount: 0,
-          loginWallCount: 0,
-          dialogCount: 0,
-          profileSignalCount: 0,
-          mainCount: 1,
+    if (request.type === 'session_status') {
+      process.stdout.write(`${JSON.stringify({
+        type: 'response',
+        protocolVersion: 2,
+        id: request.id,
+        ok: true,
+        result: {
+          sessionId: request.sessionId,
+          taskId: activeTaskId,
+          state: 'ready',
+          targetId: 'target-1',
+          lastCommandId: 1,
         },
-      },
-    })}\n`);
+      })}\n`);
+      return;
+    }
+    if (request.type === 'command') {
+      process.stdout.write(`${JSON.stringify({
+        type: 'command_result',
+        protocolVersion: 2,
+        id: 'command_unrelated',
+        sessionId: request.sessionId,
+        taskId: request.taskId,
+        commandId: request.commandId,
+        ok: true,
+        effectPhase: 'confirmed',
+        reasonCode: 'confirmed',
+        result: {},
+      })}\n`);
+      process.stdout.write(`${JSON.stringify({
+        type: 'command_result',
+        protocolVersion: 2,
+        id: request.id,
+        sessionId: request.sessionId,
+        taskId: request.taskId,
+        commandId: request.commandId,
+        ok: true,
+        effectPhase: 'confirmed',
+        reasonCode: 'confirmed',
+        result: {
+          kind: 'page_probe',
+          value: {
+            targetId: 'target-1',
+            origin: 'https://www.xiaohongshu.com',
+            path: '/explore',
+            readyState: 'complete',
+            pageKind: 'explore',
+            signals: {
+              feedCardCount: 12,
+              noteDetailCount: 0,
+              loginWallCount: 0,
+              dialogCount: 0,
+              profileSignalCount: 0,
+              mainCount: 1,
+            },
+          },
+        },
+      })}\n`);
+      return;
+    }
+    if (request.type === 'session_close') {
+      process.stdout.write(`${JSON.stringify({
+        type: 'response',
+        protocolVersion: 2,
+        id: request.id,
+        ok: true,
+        result: {
+          sessionId: request.sessionId,
+          taskId: activeTaskId,
+          state: 'closed',
+          targetId: 'target-1',
+          lastCommandId: 1,
+        },
+      })}\n`);
+      return;
+    }
+    if (request.type === 'shutdown') {
+      process.stdout.write(`${JSON.stringify({
+        type: 'response',
+        protocolVersion: 2,
+        id: request.id,
+        ok: true,
+        result: { state: 'shutting_down' },
+      })}\n`, () => process.exit(0));
+    }
   });
 }

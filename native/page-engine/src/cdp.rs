@@ -1,3 +1,4 @@
+use crate::endpoint::CdpTarget;
 use crate::error::{EngineError, ErrorCode};
 use crate::probe::{ProbeResult, result_from_cdp, xhs_page_probe_expression};
 use futures_util::{SinkExt, StreamExt};
@@ -39,8 +40,77 @@ pub fn allowlisted_operation(method: &str) -> Result<CdpOperation, EngineError> 
         "Runtime.evaluate" => Ok(CdpOperation::RuntimeEvaluatePageProbe),
         _ => Err(EngineError::new(
             ErrorCode::CdpError,
-            "CDP operation is not allowed by the native probe",
+            "CDP operation is not allowed by the native page engine",
         )),
+    }
+}
+
+pub struct CdpSession {
+    websocket: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    target_id: String,
+    next_call_id: u64,
+}
+
+impl CdpSession {
+    pub async fn connect(target: &CdpTarget) -> Result<Self, EngineError> {
+        let (websocket, _) = connect_async(&target.web_socket_debugger_url)
+            .await
+            .map_err(|_| {
+                EngineError::new(
+                    ErrorCode::CdpConnectFailed,
+                    "native page engine could not connect to CDP",
+                )
+            })?;
+        let mut session = Self {
+            websocket,
+            target_id: target.id.clone(),
+            next_call_id: 1,
+        };
+        session.call(CdpOperation::RuntimeEnable).await?;
+        Ok(session)
+    }
+
+    pub fn target_id(&self) -> &str {
+        &self.target_id
+    }
+
+    pub async fn probe_page(&mut self) -> Result<ProbeResult, EngineError> {
+        let result = self.call(CdpOperation::RuntimeEvaluatePageProbe).await?;
+        result_from_cdp(self.target_id.clone(), &result)
+    }
+
+    pub async fn close(&mut self) {
+        let _ = self.websocket.close(None).await;
+    }
+
+    async fn call(&mut self, operation: CdpOperation) -> Result<Value, EngineError> {
+        let id = self.next_call_id;
+        self.next_call_id = self.next_call_id.checked_add(1).unwrap_or(1);
+        let method = operation.method();
+        let operation = allowlisted_operation(method)?;
+        let payload = json!({
+            "id": id,
+            "method": operation.method(),
+            "params": operation.params()?
+        });
+        self.websocket
+            .send(Message::Text(payload.to_string().into()))
+            .await
+            .map_err(|_| cdp_transport_error())?;
+
+        while let Some(message) = self.websocket.next().await {
+            let message = message.map_err(|_| cdp_transport_error())?;
+            let parsed = match message {
+                Message::Text(text) => parse_correlated_response(text.as_bytes(), id)?,
+                Message::Binary(bytes) => parse_correlated_response(bytes.as_ref(), id)?,
+                Message::Close(_) => return Err(cdp_transport_error()),
+                _ => None,
+            };
+            if let Some(result) = parsed {
+                return Ok(result);
+            }
+        }
+        Err(cdp_transport_error())
     }
 }
 
@@ -48,48 +118,16 @@ pub async fn run_page_probe(
     websocket_url: &str,
     target_id: String,
 ) -> Result<ProbeResult, EngineError> {
-    let (mut websocket, _) = connect_async(websocket_url).await.map_err(|_| {
-        EngineError::new(
-            ErrorCode::CdpConnectFailed,
-            "native page engine could not connect to CDP",
-        )
-    })?;
-    call(&mut websocket, 1, CdpOperation::RuntimeEnable).await?;
-    let result = call(&mut websocket, 2, CdpOperation::RuntimeEvaluatePageProbe).await?;
-    let _ = websocket.close(None).await;
-    result_from_cdp(target_id, &result)
-}
-
-async fn call(
-    websocket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
-    id: u64,
-    operation: CdpOperation,
-) -> Result<Value, EngineError> {
-    let method = operation.method();
-    let operation = allowlisted_operation(method)?;
-    let payload = json!({
-        "id": id,
-        "method": operation.method(),
-        "params": operation.params()?
-    });
-    websocket
-        .send(Message::Text(payload.to_string().into()))
-        .await
-        .map_err(|_| cdp_transport_error())?;
-
-    while let Some(message) = websocket.next().await {
-        let message = message.map_err(|_| cdp_transport_error())?;
-        let parsed = match message {
-            Message::Text(text) => parse_correlated_response(text.as_bytes(), id)?,
-            Message::Binary(bytes) => parse_correlated_response(bytes.as_ref(), id)?,
-            Message::Close(_) => return Err(cdp_transport_error()),
-            _ => None,
-        };
-        if let Some(result) = parsed {
-            return Ok(result);
-        }
-    }
-    Err(cdp_transport_error())
+    let target = CdpTarget {
+        id: target_id,
+        target_type: "page".to_owned(),
+        url: "https://www.xiaohongshu.com/".to_owned(),
+        web_socket_debugger_url: websocket_url.to_owned(),
+    };
+    let mut session = CdpSession::connect(&target).await?;
+    let result = session.probe_page().await;
+    session.close().await;
+    result
 }
 
 pub fn parse_correlated_response(
@@ -106,7 +144,7 @@ pub fn parse_correlated_response(
     if message.get("error").is_some() {
         return Err(EngineError::new(
             ErrorCode::CdpError,
-            "CDP returned an error for the native page probe",
+            "CDP returned an error for the native page engine",
         ));
     }
     message.get("result").cloned().map(Some).ok_or_else(|| {
@@ -117,7 +155,7 @@ pub fn parse_correlated_response(
 fn cdp_transport_error() -> EngineError {
     EngineError::new(
         ErrorCode::CdpError,
-        "CDP transport failed during the native page probe",
+        "CDP transport failed during the native page command",
     )
 }
 
@@ -126,7 +164,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_non_read_only_cdp_operations() {
+    fn rejects_operations_outside_the_explicit_allowlist() {
         for method in [
             "Input.dispatchMouseEvent",
             "Page.navigate",

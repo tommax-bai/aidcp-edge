@@ -4,8 +4,18 @@ use std::fmt::{Display, Formatter};
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
+    Confirmed,
     InvalidRequest,
     UnsupportedProtocol,
+    SessionAlreadyOpen,
+    SessionNotOpen,
+    SessionMismatch,
+    TaskMismatch,
+    DuplicateCommand,
+    CommandInProgress,
+    DeadlineExpired,
+    Cancelled,
+    UnsupportedCommand,
     EndpointNotLoopback,
     EndpointUnreachable,
     NoMatchingTarget,
@@ -13,6 +23,7 @@ pub enum ErrorCode {
     CdpTimeout,
     CdpError,
     ProbeFailed,
+    EngineInternal,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

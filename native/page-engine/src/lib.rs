@@ -1,15 +1,16 @@
 pub mod cdp;
 pub mod endpoint;
+pub mod engine;
 pub mod error;
 pub mod probe;
 pub mod protocol;
 
 use crate::error::{EngineError, ErrorCode};
 use crate::probe::ProbeResult;
-use crate::protocol::ProbeParams;
+use crate::protocol::SessionOpenParams;
 use std::time::Duration;
 
-pub async fn execute_probe(params: &ProbeParams) -> Result<ProbeResult, EngineError> {
+pub async fn execute_probe(params: &SessionOpenParams) -> Result<ProbeResult, EngineError> {
     endpoint::validate_loopback_host(&params.host)?;
     let operation = async {
         let targets = endpoint::list_targets(&params.host, params.port).await?;
@@ -40,7 +41,7 @@ mod tests {
             let (_socket, _) = listener.accept().await.expect("accept");
             tokio::time::sleep(Duration::from_secs(1)).await;
         });
-        let params = ProbeParams {
+        let params = SessionOpenParams {
             host: "127.0.0.1".to_owned(),
             port,
             platform: Platform::Xiaohongshu,

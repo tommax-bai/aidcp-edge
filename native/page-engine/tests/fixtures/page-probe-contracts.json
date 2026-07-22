@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "sourceContract": "src/native-page-engine/client.ts#NativePageProbeResult",
+  "cases": [
+    {
+      "name": "explore_feed",
+      "command": { "kind": "page_probe", "params": {} },
+      "targetId": "target-explore",
+      "signals": {
+        "href": "https://www.xiaohongshu.com/explore",
+        "readyState": "complete",
+        "feedCardCount": 12,
+        "noteDetailCount": 0,
+        "loginWallCount": 0,
+        "dialogCount": 0,
+        "profileSignalCount": 0,
+        "mainCount": 1
+      },
+      "expected": {
+        "targetId": "target-explore",
+        "origin": "https://www.xiaohongshu.com",
+        "path": "/explore",
+        "readyState": "complete",
+        "pageKind": "explore",
+        "signals": {
+          "feedCardCount": 12,
+          "noteDetailCount": 0,
+          "loginWallCount": 0,
+          "dialogCount": 0,
+          "profileSignalCount": 0,
+          "mainCount": 1
+        }
+      }
+    },
+    {
+      "name": "search_result_ai_compatibility",
+      "command": { "kind": "page_probe", "params": {} },
+      "targetId": "target-search",
+      "signals": {
+        "href": "https://www.xiaohongshu.com/search_result_ai?keyword=%E5%92%96%E5%95%A1&source=web_explore_feed",
+        "readyState": "interactive",
+        "feedCardCount": 9,
+        "noteDetailCount": 0,
+        "loginWallCount": 0,
+        "dialogCount": 0,
+        "profileSignalCount": 0,
+        "mainCount": 1
+      },
+      "expected": {
+        "targetId": "target-search",
+        "origin": "https://www.xiaohongshu.com",
+        "path": "/search_result_ai",
+        "readyState": "interactive",
+        "pageKind": "search",
+        "signals": {
+          "feedCardCount": 9,
+          "noteDetailCount": 0,
+          "loginWallCount": 0,
+          "dialogCount": 0,
+          "profileSignalCount": 0,
+          "mainCount": 1
+        }
+      }
+    },
+    {
+      "name": "note_detail_redacts_query",
+      "command": { "kind": "page_probe", "params": {} },
+      "targetId": "target-note",
+      "signals": {
+        "href": "https://www.xiaohongshu.com/explore/note-1?xsec_token=must-not-leak",
+        "readyState": "complete",
+        "feedCardCount": 0,
+        "noteDetailCount": 1,
+        "loginWallCount": 0,
+        "dialogCount": 1,
+        "profileSignalCount": 0,
+        "mainCount": 1
+      },
+      "expected": {
+        "targetId": "target-note",
+        "origin": "https://www.xiaohongshu.com",
+        "path": "/explore/note-1",
+        "readyState": "complete",
+        "pageKind": "note_detail",
+        "signals": {
+          "feedCardCount": 0,
+          "noteDetailCount": 1,
+          "loginWallCount": 0,
+          "dialogCount": 1,
+          "profileSignalCount": 0,
+          "mainCount": 1
+        }
+      }
+    },
+    {
+      "name": "login_wins_over_feed",
+      "command": { "kind": "page_probe", "params": {} },
+      "targetId": "target-login",
+      "signals": {
+        "href": "https://www.xiaohongshu.com/explore",
+        "readyState": "complete",
+        "feedCardCount": 12,
+        "noteDetailCount": 0,
+        "loginWallCount": 1,
+        "dialogCount": 1,
+        "profileSignalCount": 0,
+        "mainCount": 1
+      },
+      "expected": {
+        "targetId": "target-login",
+        "origin": "https://www.xiaohongshu.com",
+        "path": "/explore",
+        "readyState": "complete",
+        "pageKind": "login",
+        "signals": {
+          "feedCardCount": 12,
+          "noteDetailCount": 0,
+          "loginWallCount": 1,
+          "dialogCount": 1,
+          "profileSignalCount": 0,
+          "mainCount": 1
+        }
+      }
+    }
+  ]
+}

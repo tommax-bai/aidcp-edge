@@ -1,0 +1,420 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 2,
+  "platform": "xiaohongshu",
+  "duplicatePolicy": "return_recorded_terminal_without_redispatch",
+  "commands": [
+    {
+      "routeKey": "plan.response",
+      "edgeType": "plan.response",
+      "nativeKind": "plan_execute",
+      "family": "legacy_plan",
+      "requestContract": "PlanResponsePayloadAllowlistedProjection",
+      "receipts": ["action.completed"],
+      "effect": "mixed",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "session.end",
+      "edgeType": "session.end",
+      "nativeKind": "session_stop",
+      "family": "session_control",
+      "requestContract": "SessionEndPayload",
+      "receipts": [],
+      "effect": "coordination",
+      "cancellation": "immediate_before_next_dispatch"
+    },
+    {
+      "routeKey": "browse.next",
+      "edgeType": "browse.next",
+      "nativeKind": "browse_next",
+      "family": "browse",
+      "requestContract": "BrowseNextPayload",
+      "receipts": ["page.cards"],
+      "effect": "navigation",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "browse.scroll",
+      "edgeType": "browse.scroll",
+      "nativeKind": "browse_scroll",
+      "family": "browse",
+      "requestContract": "BrowseScrollPayload",
+      "receipts": ["page.cards"],
+      "effect": "navigation",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "page.scroll",
+      "edgeType": "page.scroll",
+      "nativeKind": "page_scroll",
+      "family": "browse",
+      "requestContract": "PageScrollPayload",
+      "receipts": ["page.cards", "action.completed"],
+      "effect": "navigation",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "feed.refresh",
+      "edgeType": "feed.refresh",
+      "nativeKind": "feed_refresh",
+      "family": "browse",
+      "requestContract": "FeedRefreshPayload",
+      "receipts": ["page.cards", "action.completed"],
+      "effect": "navigation",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "search.execute",
+      "edgeType": "search.execute",
+      "nativeKind": "search_execute",
+      "family": "search",
+      "requestContract": "SearchExecutePayload",
+      "receipts": ["page.cards", "action.completed"],
+      "effect": "navigation",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "note.open",
+      "edgeType": "note.open",
+      "nativeKind": "note_open",
+      "family": "note",
+      "requestContract": "NoteOpenPayload",
+      "receipts": ["note.detail", "action.completed"],
+      "effect": "navigation",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "note.close",
+      "edgeType": "note.close",
+      "nativeKind": "note_close",
+      "family": "note",
+      "requestContract": "NoteClosePayload",
+      "receipts": ["action.completed", "page.cards"],
+      "effect": "navigation",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "navigation.back",
+      "edgeType": "navigation.back",
+      "nativeKind": "navigation_back",
+      "family": "note",
+      "requestContract": "NavigationBackPayload",
+      "receipts": ["action.completed", "page.cards"],
+      "effect": "navigation",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "note.browse_images",
+      "edgeType": "note.browse_images",
+      "nativeKind": "note_browse_images",
+      "family": "note",
+      "requestContract": "NoteBrowseImagesPayload",
+      "receipts": ["note.detail", "action.completed"],
+      "effect": "navigation",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "note.scroll_comments",
+      "edgeType": "note.scroll_comments",
+      "nativeKind": "note_scroll_comments",
+      "family": "note",
+      "requestContract": "NoteScrollCommentsPayload",
+      "receipts": ["action.completed"],
+      "effect": "navigation",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "profile.open",
+      "edgeType": "profile.open",
+      "nativeKind": "profile_open",
+      "family": "profile",
+      "requestContract": "ProfileOpenPayload",
+      "receipts": ["profile.detail", "action.completed"],
+      "effect": "navigation",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "notification.open",
+      "edgeType": "notification.open",
+      "nativeKind": "notification_open",
+      "family": "notification",
+      "requestContract": "NotificationOpenPayload",
+      "receipts": ["notification.home", "action.completed"],
+      "effect": "navigation",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "notification.browse_comments",
+      "edgeType": "notification.browse_comments",
+      "nativeKind": "notification_browse_comments",
+      "family": "notification",
+      "requestContract": "NotificationBrowseCommentsPayload",
+      "receipts": ["notification.items", "action.completed"],
+      "effect": "navigation",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "notification.browse_likes",
+      "edgeType": "notification.browse_likes",
+      "nativeKind": "notification_browse_likes",
+      "family": "notification",
+      "requestContract": "NotificationBrowseLikesPayload",
+      "receipts": ["action.completed"],
+      "effect": "navigation",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "notification.browse_follows",
+      "edgeType": "notification.browse_follows",
+      "nativeKind": "notification_browse_follows",
+      "family": "notification",
+      "requestContract": "NotificationBrowseFollowsPayload",
+      "receipts": ["action.completed"],
+      "effect": "navigation",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "notification.back_home",
+      "edgeType": "notification.back_home",
+      "nativeKind": "notification_back_home",
+      "family": "notification",
+      "requestContract": "NotificationBackHomePayload",
+      "receipts": ["notification.home", "action.completed"],
+      "effect": "navigation",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "interaction.like",
+      "edgeType": "interaction.like",
+      "nativeKind": "interaction_like",
+      "family": "interaction",
+      "requestContract": "InteractionLikePayload",
+      "receipts": ["action.completed"],
+      "effect": "platform_write",
+      "cancellation": "atomic_dispatch_then_verify"
+    },
+    {
+      "routeKey": "interaction.collect",
+      "edgeType": "interaction.collect",
+      "nativeKind": "interaction_collect",
+      "family": "interaction",
+      "requestContract": "InteractionCollectPayload",
+      "receipts": ["action.completed"],
+      "effect": "platform_write",
+      "cancellation": "atomic_dispatch_then_verify"
+    },
+    {
+      "routeKey": "interaction.follow",
+      "edgeType": "interaction.follow",
+      "nativeKind": "interaction_follow",
+      "family": "interaction",
+      "requestContract": "InteractionFollowPayload",
+      "receipts": ["action.completed"],
+      "effect": "platform_write",
+      "cancellation": "atomic_dispatch_then_verify"
+    },
+    {
+      "routeKey": "interaction.comment",
+      "edgeType": "interaction.comment",
+      "nativeKind": "interaction_comment",
+      "family": "interaction",
+      "requestContract": "InteractionCommentPayload",
+      "receipts": ["action.completed"],
+      "effect": "platform_write",
+      "cancellation": "atomic_dispatch_then_verify"
+    },
+    {
+      "routeKey": "interaction.like_comment",
+      "edgeType": "interaction.like_comment",
+      "nativeKind": "interaction_like_comment",
+      "family": "interaction",
+      "requestContract": "InteractionLikeCommentPayload",
+      "receipts": ["action.completed"],
+      "effect": "platform_write",
+      "cancellation": "atomic_dispatch_then_verify"
+    },
+    {
+      "routeKey": "captcha.assist.capture",
+      "edgeType": "captcha.assist.capture",
+      "nativeKind": "captcha_capture",
+      "family": "captcha_assist",
+      "requestContract": "CaptchaAssistCapturePayload",
+      "receipts": ["captcha.assist.snapshot"],
+      "effect": "read",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "captcha.assist.click",
+      "edgeType": "captcha.assist.click",
+      "nativeKind": "captcha_click",
+      "family": "captcha_assist",
+      "requestContract": "CaptchaAssistClickPayload",
+      "receipts": ["captcha.assist.click_result", "captcha.assist.snapshot"],
+      "effect": "platform_write",
+      "cancellation": "atomic_dispatch_then_verify"
+    },
+    {
+      "routeKey": "publish.request",
+      "edgeType": "publish.request",
+      "nativeKind": "publish_transaction",
+      "family": "publish",
+      "requestContract": "PublishRequestPayload",
+      "receipts": ["publish.result"],
+      "effect": "platform_write",
+      "cancellation": "atomic_dispatch_then_verify"
+    },
+    {
+      "routeKey": "publish.command:navigate_entry",
+      "edgeType": "publish.command",
+      "publishKind": "navigate_entry",
+      "nativeKind": "publish_navigate_entry",
+      "family": "publish",
+      "requestContract": "PublishCommandPayload",
+      "receipts": ["publish.command.result"],
+      "effect": "navigation",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "publish.command:select_mode",
+      "edgeType": "publish.command",
+      "publishKind": "select_mode",
+      "nativeKind": "publish_select_mode",
+      "family": "publish",
+      "requestContract": "PublishCommandPayload",
+      "receipts": ["publish.command.result"],
+      "effect": "navigation",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "publish.command:upload_image",
+      "edgeType": "publish.command",
+      "publishKind": "upload_image",
+      "nativeKind": "publish_upload_image",
+      "family": "publish",
+      "requestContract": "PublishCommandPayload",
+      "receipts": ["publish.command.result"],
+      "effect": "draft_write",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "publish.command:set_cover",
+      "edgeType": "publish.command",
+      "publishKind": "set_cover",
+      "nativeKind": "publish_set_cover",
+      "family": "publish",
+      "requestContract": "PublishCommandPayload",
+      "receipts": ["publish.command.result"],
+      "effect": "draft_write",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "publish.command:fill_field",
+      "edgeType": "publish.command",
+      "publishKind": "fill_field",
+      "nativeKind": "publish_fill_field",
+      "family": "publish",
+      "requestContract": "PublishCommandPayload",
+      "receipts": ["publish.command.result"],
+      "effect": "draft_write",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "publish.command:add_with_candidate",
+      "edgeType": "publish.command",
+      "publishKind": "add_with_candidate",
+      "nativeKind": "publish_add_with_candidate",
+      "family": "publish",
+      "requestContract": "PublishCommandPayload",
+      "receipts": ["publish.command.result"],
+      "effect": "draft_write",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "publish.command:set_option",
+      "edgeType": "publish.command",
+      "publishKind": "set_option",
+      "nativeKind": "publish_set_option",
+      "family": "publish",
+      "requestContract": "PublishCommandPayload",
+      "receipts": ["publish.command.result"],
+      "effect": "draft_write",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "publish.command:set_schedule",
+      "edgeType": "publish.command",
+      "publishKind": "set_schedule",
+      "nativeKind": "publish_set_schedule",
+      "family": "publish",
+      "requestContract": "PublishCommandPayload",
+      "receipts": ["publish.command.result"],
+      "effect": "draft_write",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
+      "routeKey": "publish.command:submit_publish",
+      "edgeType": "publish.command",
+      "publishKind": "submit_publish",
+      "nativeKind": "publish_submit",
+      "family": "publish",
+      "requestContract": "PublishCommandPayload",
+      "receipts": ["publish.command.result"],
+      "effect": "platform_write",
+      "cancellation": "atomic_dispatch_then_verify"
+    },
+    {
+      "routeKey": "publish.command:capture_postId",
+      "edgeType": "publish.command",
+      "publishKind": "capture_postId",
+      "nativeKind": "publish_capture_post_id",
+      "family": "publish",
+      "requestContract": "PublishCommandPayload",
+      "receipts": ["publish.command.result"],
+      "effect": "read",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "publish.command:capture_scheduled",
+      "edgeType": "publish.command",
+      "publishKind": "capture_scheduled",
+      "nativeKind": "publish_capture_scheduled",
+      "family": "publish",
+      "requestContract": "PublishCommandPayload",
+      "receipts": ["publish.command.result"],
+      "effect": "read",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "publish.command:reconcile_scheduled",
+      "edgeType": "publish.command",
+      "publishKind": "reconcile_scheduled",
+      "nativeKind": "publish_reconcile_scheduled",
+      "family": "publish",
+      "requestContract": "PublishCommandPayload",
+      "receipts": ["publish.command.result"],
+      "effect": "read",
+      "cancellation": "safe_points"
+    }
+  ],
+  "sessionControls": [
+    {
+      "edgeType": "edge.task.acquire",
+      "nativeKind": "task_bind",
+      "requestContract": "EdgeTaskAcquirePayload",
+      "receipt": "edge.task.acquired"
+    },
+    {
+      "edgeType": "edge.task.release",
+      "nativeKind": "task_unbind",
+      "requestContract": "EdgeTaskReleasePayload",
+      "receipt": "edge.task.released"
+    },
+    {
+      "edgeType": "pacing.update",
+      "nativeKind": "session_configure_pacing",
+      "requestContract": "PacingUpdatePayload",
+      "receipt": null
+    }
+  ]
+}

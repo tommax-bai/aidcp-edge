@@ -1,20 +1,24 @@
 use crate::error::{EngineError, ErrorCode};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const PLATFORM_ADAPTER_VERSION: &str = "xiaohongshu-v1";
+pub const CAPABILITY_DIGEST: &str = env!("AIDCP_PAGE_ENGINE_CAPABILITY_DIGEST");
+pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 const MIN_TIMEOUT_MS: u64 = 50;
 const MAX_TIMEOUT_MS: u64 = 30_000;
+const MAX_IDENTIFIER_BYTES: usize = 128;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Platform {
     Xiaohongshu,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ProbeParams {
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SessionOpenParams {
     pub host: String,
     pub port: u16,
     pub platform: Platform,
@@ -22,80 +26,204 @@ pub struct ProbeParams {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Request {
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SessionOpenRecord {
     pub protocol_version: u32,
     pub id: String,
-    pub method: String,
-    pub params: ProbeParams,
+    pub session_id: String,
+    pub task_id: String,
+    pub params: SessionOpenParams,
 }
 
-impl Request {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SessionStatusRecord {
+    pub protocol_version: u32,
+    pub id: String,
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SessionCloseRecord {
+    pub protocol_version: u32,
+    pub id: String,
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PageProbeParams {}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(tag = "kind", content = "params", rename_all = "snake_case")]
+pub enum NativeCommand {
+    PageProbe(PageProbeParams),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CommandRecord {
+    pub protocol_version: u32,
+    pub id: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub command_id: u64,
+    pub deadline_unix_ms: u64,
+    pub command: NativeCommand,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CancelRecord {
+    pub protocol_version: u32,
+    pub id: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub command_id: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ShutdownRecord {
+    pub protocol_version: u32,
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InputRecord {
+    SessionOpen(SessionOpenRecord),
+    SessionStatus(SessionStatusRecord),
+    SessionClose(SessionCloseRecord),
+    Command(CommandRecord),
+    Cancel(CancelRecord),
+    Shutdown(ShutdownRecord),
+}
+
+impl InputRecord {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::SessionOpen(record) => &record.id,
+            Self::SessionStatus(record) => &record.id,
+            Self::SessionClose(record) => &record.id,
+            Self::Command(record) => &record.id,
+            Self::Cancel(record) => &record.id,
+            Self::Shutdown(record) => &record.id,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), EngineError> {
-        if self.protocol_version != PROTOCOL_VERSION {
+        let protocol_version = match self {
+            Self::SessionOpen(record) => record.protocol_version,
+            Self::SessionStatus(record) => record.protocol_version,
+            Self::SessionClose(record) => record.protocol_version,
+            Self::Command(record) => record.protocol_version,
+            Self::Cancel(record) => record.protocol_version,
+            Self::Shutdown(record) => record.protocol_version,
+        };
+        if protocol_version != PROTOCOL_VERSION {
             return Err(EngineError::new(
                 ErrorCode::UnsupportedProtocol,
                 "unsupported native page engine protocol",
             ));
         }
-        if self.method != "probe_page" {
-            return Err(EngineError::new(
-                ErrorCode::InvalidRequest,
-                "unsupported native page engine method",
-            ));
-        }
-        if self.id.is_empty()
-            || self.id.len() > 128
-            || !self.id.chars().all(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
-            })
-        {
-            return Err(EngineError::new(
-                ErrorCode::InvalidRequest,
-                "invalid request id",
-            ));
-        }
-        if self.params.host.is_empty() || self.params.host.len() > 255 {
-            return Err(EngineError::new(
-                ErrorCode::InvalidRequest,
-                "invalid DevTools host",
-            ));
-        }
-        if !(MIN_TIMEOUT_MS..=MAX_TIMEOUT_MS).contains(&self.params.timeout_ms) {
-            return Err(EngineError::new(
-                ErrorCode::InvalidRequest,
-                "invalid probe timeout",
-            ));
+        validate_identifier(self.id(), "invalid request id")?;
+        match self {
+            Self::SessionOpen(record) => {
+                validate_identifier(&record.session_id, "invalid session id")?;
+                validate_identifier(&record.task_id, "invalid task id")?;
+                if record.params.host.is_empty() || record.params.host.len() > 255 {
+                    return Err(invalid_request("invalid DevTools host"));
+                }
+                if !(MIN_TIMEOUT_MS..=MAX_TIMEOUT_MS).contains(&record.params.timeout_ms) {
+                    return Err(invalid_request("invalid session timeout"));
+                }
+            }
+            Self::SessionStatus(record) => {
+                validate_identifier(&record.session_id, "invalid session id")?;
+            }
+            Self::SessionClose(record) => {
+                validate_identifier(&record.session_id, "invalid session id")?;
+            }
+            Self::Command(record) => {
+                validate_identifier(&record.session_id, "invalid session id")?;
+                validate_identifier(&record.task_id, "invalid task id")?;
+                if record.command_id == 0 {
+                    return Err(invalid_request("invalid command id"));
+                }
+                if record.deadline_unix_ms == 0 {
+                    return Err(invalid_request("invalid command deadline"));
+                }
+            }
+            Self::Cancel(record) => {
+                validate_identifier(&record.session_id, "invalid session id")?;
+                validate_identifier(&record.task_id, "invalid task id")?;
+                if record.command_id == 0 {
+                    return Err(invalid_request("invalid command id"));
+                }
+                if record
+                    .reason
+                    .as_ref()
+                    .is_some_and(|reason| reason.len() > 256)
+                {
+                    return Err(invalid_request(
+                        "cancellation reason exceeds protocol limit",
+                    ));
+                }
+            }
+            Self::Shutdown(_) => {}
         }
         Ok(())
     }
 }
 
-pub fn parse_request(line: &str) -> Result<Request, EngineError> {
-    if line.len() > 64 * 1024 {
-        return Err(EngineError::new(
-            ErrorCode::InvalidRequest,
-            "request exceeds protocol limit",
-        ));
+pub fn parse_input(line: &str) -> Result<InputRecord, EngineError> {
+    if line.len() > MAX_RECORD_BYTES {
+        return Err(invalid_request("request exceeds protocol limit"));
     }
-    let request = serde_json::from_str::<Request>(line)
-        .map_err(|_| EngineError::new(ErrorCode::InvalidRequest, "invalid request record"))?;
-    request.validate()?;
-    Ok(request)
+    let record = serde_json::from_str::<InputRecord>(line)
+        .map_err(|_| invalid_request("invalid request record"))?;
+    record.validate()?;
+    Ok(record)
 }
 
 pub fn recover_request_id(line: &str) -> String {
     serde_json::from_str::<serde_json::Value>(line)
         .ok()
         .and_then(|value| value.get("id")?.as_str().map(str::to_owned))
-        .filter(|id| {
-            !id.is_empty()
-                && id.len() <= 128
-                && id.chars().all(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
-                })
-        })
+        .filter(|id| is_safe_identifier(id))
         .unwrap_or_default()
+}
+
+fn validate_identifier(value: &str, message: &'static str) -> Result<(), EngineError> {
+    if is_safe_identifier(value) {
+        Ok(())
+    } else {
+        Err(invalid_request(message))
+    }
+}
+
+fn is_safe_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_IDENTIFIER_BYTES
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+        })
+}
+
+fn invalid_request(message: &'static str) -> EngineError {
+    EngineError::new(ErrorCode::InvalidRequest, message)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineManifestRecord<'a> {
+    pub engine_version: &'a str,
+    pub platform_adapter_version: &'a str,
+    pub capability_digest: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,7 +232,7 @@ pub struct ReadyRecord<'a> {
     #[serde(rename = "type")]
     pub record_type: &'static str,
     pub protocol_version: u32,
-    pub engine_version: &'a str,
+    pub manifest: EngineManifestRecord<'a>,
 }
 
 impl Default for ReadyRecord<'static> {
@@ -112,12 +240,16 @@ impl Default for ReadyRecord<'static> {
         Self {
             record_type: "ready",
             protocol_version: PROTOCOL_VERSION,
-            engine_version: ENGINE_VERSION,
+            manifest: EngineManifestRecord {
+                engine_version: ENGINE_VERSION,
+                platform_adapter_version: PLATFORM_ADAPTER_VERSION,
+                capability_digest: CAPABILITY_DIGEST,
+            },
         }
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorRecord {
     pub code: ErrorCode,
@@ -133,9 +265,18 @@ impl From<EngineError> for ErrorRecord {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectPhase {
+    NotStarted,
+    Dispatched,
+    Confirmed,
+    Ambiguous,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResponseRecord<'a, T: Serialize> {
+pub struct LifecycleResponse<'a, T: Serialize> {
     #[serde(rename = "type")]
     pub record_type: &'static str,
     pub protocol_version: u32,
@@ -147,7 +288,7 @@ pub struct ResponseRecord<'a, T: Serialize> {
     pub error: Option<ErrorRecord>,
 }
 
-impl<'a, T: Serialize> ResponseRecord<'a, T> {
+impl<'a, T: Serialize> LifecycleResponse<'a, T> {
     pub fn success(id: &'a str, result: &'a T) -> Self {
         Self {
             record_type: "response",
@@ -171,38 +312,139 @@ impl<'a, T: Serialize> ResponseRecord<'a, T> {
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandResultRecord<'a, T: Serialize> {
+    #[serde(rename = "type")]
+    pub record_type: &'static str,
+    pub protocol_version: u32,
+    pub id: &'a str,
+    pub session_id: &'a str,
+    pub task_id: &'a str,
+    pub command_id: u64,
+    pub ok: bool,
+    pub effect_phase: EffectPhase,
+    pub reason_code: ErrorCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<&'a T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorRecord>,
+}
+
+impl<'a, T: Serialize> CommandResultRecord<'a, T> {
+    pub fn success(request: &'a CommandRecord, effect_phase: EffectPhase, result: &'a T) -> Self {
+        Self {
+            record_type: "command_result",
+            protocol_version: PROTOCOL_VERSION,
+            id: &request.id,
+            session_id: &request.session_id,
+            task_id: &request.task_id,
+            command_id: request.command_id,
+            ok: effect_phase == EffectPhase::Confirmed,
+            effect_phase,
+            reason_code: ErrorCode::Confirmed,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    pub fn failure(
+        request: &'a CommandRecord,
+        effect_phase: EffectPhase,
+        error: EngineError,
+    ) -> Self {
+        Self {
+            record_type: "command_result",
+            protocol_version: PROTOCOL_VERSION,
+            id: &request.id,
+            session_id: &request.session_id,
+            task_id: &request.task_id,
+            command_id: request.command_id,
+            ok: false,
+            effect_phase,
+            reason_code: error.code,
+            result: None,
+            error: Some(error.into()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn valid_request() -> String {
-        r#"{"protocolVersion":1,"id":"probe_1","method":"probe_page","params":{"host":"127.0.0.1","port":9222,"platform":"xiaohongshu","timeoutMs":5000}}"#.to_owned()
+    fn valid_session_open() -> String {
+        r#"{"type":"session_open","protocolVersion":2,"id":"open_1","sessionId":"session-1","taskId":"browse-1","params":{"host":"127.0.0.1","port":9222,"platform":"xiaohongshu","timeoutMs":5000}}"#.to_owned()
+    }
+
+    fn valid_command() -> String {
+        r#"{"type":"command","protocolVersion":2,"id":"request-2","sessionId":"session-1","taskId":"browse-1","commandId":1,"deadlineUnixMs":4102444800000,"command":{"kind":"page_probe","params":{}}}"#.to_owned()
     }
 
     #[test]
-    fn parses_valid_request() {
-        let request = parse_request(&valid_request()).expect("valid request");
-        assert_eq!(request.id, "probe_1");
-        assert_eq!(request.params.platform, Platform::Xiaohongshu);
+    fn parses_valid_session_and_command_records() {
+        let open = parse_input(&valid_session_open()).expect("session open");
+        assert!(matches!(open, InputRecord::SessionOpen(_)));
+        let command = parse_input(&valid_command()).expect("command");
+        let InputRecord::Command(command) = command else {
+            panic!("expected command");
+        };
+        assert_eq!(command.command_id, 1);
+        assert_eq!(command.task_id, "browse-1");
     }
 
     #[test]
     fn rejects_protocol_drift() {
-        let line = valid_request().replace("\"protocolVersion\":1", "\"protocolVersion\":2");
-        let error = parse_request(&line).expect_err("protocol drift");
+        let line = valid_session_open().replace("\"protocolVersion\":2", "\"protocolVersion\":1");
+        let error = parse_input(&line).expect_err("protocol drift");
         assert_eq!(error.code, ErrorCode::UnsupportedProtocol);
     }
 
     #[test]
-    fn rejects_raw_method_surface() {
-        let line = valid_request().replace("probe_page", "Runtime.evaluate");
-        let error = parse_request(&line).expect_err("raw CDP must be rejected");
-        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    fn rejects_generic_browser_surface_and_unknown_fields() {
+        for command in [
+            r#"{"kind":"runtime_evaluate","params":{"script":"document.body"}}"#,
+            r#"{"kind":"page_probe","params":{"selector":"body"}}"#,
+        ] {
+            let line = valid_command().replace(r#"{"kind":"page_probe","params":{}}"#, command);
+            let error = parse_input(&line).expect_err("generic browser surface");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_identity_and_deadline() {
+        let unsafe_id = valid_command().replace("browse-1", "unsafe task");
+        assert_eq!(
+            parse_input(&unsafe_id).expect_err("unsafe task").code,
+            ErrorCode::InvalidRequest
+        );
+        let missing_deadline = valid_command().replace("4102444800000", "0");
+        assert_eq!(
+            parse_input(&missing_deadline)
+                .expect_err("missing deadline")
+                .code,
+            ErrorCode::InvalidRequest
+        );
     }
 
     #[test]
     fn recovers_only_safe_request_ids() {
-        assert_eq!(recover_request_id(r#"{"id":"probe-2"}"#), "probe-2");
+        assert_eq!(recover_request_id(r#"{"id":"command:2"}"#), "command:2");
         assert_eq!(recover_request_id(r#"{"id":"unsafe id"}"#), "");
+    }
+
+    #[test]
+    fn serializes_all_effect_phases_stably() {
+        assert_eq!(
+            serde_json::to_string(&[
+                EffectPhase::NotStarted,
+                EffectPhase::Dispatched,
+                EffectPhase::Confirmed,
+                EffectPhase::Ambiguous,
+            ])
+            .expect("effect phases"),
+            r#"["not_started","dispatched","confirmed","ambiguous"]"#
+        );
     }
 }

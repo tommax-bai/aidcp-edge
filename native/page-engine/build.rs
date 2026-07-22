@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -8,6 +9,10 @@ const KEY: &[u8] = &[
 
 fn main() {
     println!("cargo:rerun-if-changed=src/xhs-page-probe.js");
+    println!("cargo:rerun-if-changed=command-manifest.json");
+    let command_manifest = fs::read("command-manifest.json").expect("read command manifest");
+    let capability_digest = format!("{:x}", Sha256::digest(&command_manifest));
+    println!("cargo:rustc-env=AIDCP_PAGE_ENGINE_CAPABILITY_DIGEST={capability_digest}");
     let source = fs::read("src/xhs-page-probe.js").expect("read native page probe source");
     let encoded: Vec<u8> = source
         .iter()
