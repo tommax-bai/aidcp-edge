@@ -9,6 +9,8 @@ const KEY: &[u8] = &[
 
 fn main() {
     println!("cargo:rerun-if-changed=src/xhs-page-probe.js");
+    println!("cargo:rerun-if-changed=src/xhs-command-router.js");
+    println!("cargo:rerun-if-changed=src/xhs-file-input-selector.txt");
     println!("cargo:rerun-if-changed=command-manifest.json");
     let command_manifest = fs::read("command-manifest.json").expect("read command manifest");
     let capability_digest = format!("{:x}", Sha256::digest(&command_manifest));
@@ -28,4 +30,39 @@ fn main() {
     let output_path =
         PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("xhs_page_probe_bytes.rs");
     fs::write(output_path, output).expect("write encoded native page probe");
+
+    let router_source =
+        fs::read("src/xhs-command-router.js").expect("read native command router source");
+    let router_encoded: Vec<u8> = router_source
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .collect();
+    let router_bytes = router_encoded
+        .iter()
+        .map(|byte| format!("0x{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let router_output = format!("pub const XHS_COMMAND_ROUTER_BYTES: &[u8] = &[{router_bytes}];\n");
+    let router_output_path =
+        PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("xhs_command_router_bytes.rs");
+    fs::write(router_output_path, router_output).expect("write encoded native command router");
+
+    let selector_source =
+        fs::read("src/xhs-file-input-selector.txt").expect("read native file selector");
+    let selector_encoded: Vec<u8> = selector_source
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .collect();
+    let selector_bytes = selector_encoded
+        .iter()
+        .map(|byte| format!("0x{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let selector_output =
+        format!("pub const XHS_FILE_INPUT_SELECTOR_BYTES: &[u8] = &[{selector_bytes}];\n");
+    let selector_output_path = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"))
+        .join("xhs_file_input_selector_bytes.rs");
+    fs::write(selector_output_path, selector_output).expect("write encoded native file selector");
 }

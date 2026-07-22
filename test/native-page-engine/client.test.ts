@@ -48,6 +48,40 @@ test('keeps one supervised process across session status and commands', async ()
   await session.close();
 });
 
+test('executes only a typed high-level command and preserves the tagged result', async () => {
+  const session = await client('success').openSession({
+    ...input,
+    sessionId: 'session-command',
+    taskId: 'task-command',
+  });
+  const execution = await session.execute({ kind: 'browse_scroll', params: { reason: 'test' } }, 500);
+  assert.equal(execution.effectPhase, 'confirmed');
+  assert.equal(execution.output?.kind, 'page_cards');
+  assert.deepEqual(execution.output?.value, {
+    cards: [{ index: 0, title: 'Native card', likeCount: 1, collectCount: 2 }],
+  });
+  await session.close();
+});
+
+test('rejects a ready engine whose capability manifest differs from the packaged contract', async () => {
+  const strict = new NativePageEngineClient({
+    binaryPath: process.execPath,
+    binaryArgs: [fixture],
+    processTimeoutMs: 500,
+    env: { AIDCP_FAKE_ENGINE_MODE: 'success' },
+    expectedManifest: {
+      engineVersion: 'test',
+      platformAdapterVersion: 'xiaohongshu-test',
+      capabilityDigest: 'b'.repeat(64),
+    },
+  });
+  await assert.rejects(strict.probePage(input), (error: unknown) => {
+    assert.ok(error instanceof NativePageEngineError);
+    assert.equal(error.code, 'invalid_protocol');
+    return true;
+  });
+});
+
 test('forwards AbortSignal cancellation and preserves not_started truth', async () => {
   const session = await client('cancel').openSession({
     ...input,

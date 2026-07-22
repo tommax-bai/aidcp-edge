@@ -100,6 +100,8 @@ export const CLOUD_OPERATION_REGISTRY = {
   'notification.browse_likes': pageAutomation(),
   'notification.browse_follows': pageAutomation(),
   'notification.back_home': pageAutomation(),
+  // Protocol-compatible tombstone: EdgeClient still recognizes the legacy envelope, but main has
+  // no onPublishCommand handler. Only publish.command atoms are executable in production.
   'publish.request': pageAutomation(),
   'publish.command': pageAutomation(),
   'edge.task.acquire': pageAutomation(),

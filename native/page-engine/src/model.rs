@@ -32,6 +32,18 @@ pub struct PageCard {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PageCards {
     pub cards: Vec<PageCard>,
+    #[serde(default)]
+    pub movement: Option<PageMovement>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PageMovement {
+    pub before: f64,
+    pub after: f64,
+    pub moved: bool,
+    #[serde(default)]
+    pub at_bottom: Option<bool>,
 }
 
 impl PageCards {
@@ -276,12 +288,62 @@ pub struct PublishReceipt {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PlanActionResult {
+    pub action_id: String,
+    pub ok: bool,
+    pub outcome: String,
+    pub attempts: u32,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PlanResults {
+    pub results: Vec<PlanActionResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CaptchaSnapshot {
+    pub incident_id: String,
+    pub snapshot_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub jpeg_base64: String,
+}
+
+impl CaptchaSnapshot {
+    pub fn bounded(mut self) -> Self {
+        truncate(&mut self.incident_id, MAX_ID_CHARS);
+        truncate(&mut self.snapshot_id, MAX_ID_CHARS);
+        if self.jpeg_base64.len() > 56 * 1024 {
+            self.jpeg_base64.clear();
+        }
+        self
+    }
+}
+
 impl PublishReceipt {
     pub fn bounded(mut self) -> Self {
         truncate(&mut self.kind, 64);
         truncate_optional(&mut self.value, MAX_ID_CHARS);
         truncate_optional(&mut self.post_url, MAX_URL_CHARS);
         truncate_optional(&mut self.error, MAX_REASON_CHARS);
+        self
+    }
+}
+
+impl PlanResults {
+    pub fn bounded(mut self) -> Self {
+        self.results.truncate(100);
+        for result in &mut self.results {
+            truncate(&mut result.action_id, 128);
+            truncate(&mut result.outcome, 64);
+            truncate(&mut result.reason, MAX_REASON_CHARS);
+            result.attempts = result.attempts.min(10);
+        }
         self
     }
 }
@@ -318,6 +380,7 @@ mod tests {
                     is_video: Some(false),
                 })
                 .collect(),
+            movement: None,
         }
         .bounded();
         assert_eq!(cards.cards.len(), MAX_CARDS);

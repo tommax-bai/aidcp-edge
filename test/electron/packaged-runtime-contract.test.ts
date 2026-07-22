@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -17,12 +17,14 @@ const afterPack = require('../../scripts/after-pack.cjs') as {
   ) => boolean;
   normalizeTargetArch: (arch: number | string) => string;
   productionPackageEntries: (packageLockPath: string) => string[];
+  verifyPackagedXiaohongshuLeakage: (asarPath: string) => number;
   resolvePackagedSmokePaths: (context: {
     electronPlatformName: string;
     appOutDir: string;
     packager: { appInfo: { productFilename: string } };
   }) => { executable: string; asarPath: string; nativeResourceDir: string; smokeEntry: string };
 };
+const asar = require('@electron/asar') as { createPackage(source: string, destination: string): Promise<void> };
 
 test('desktop builds run the packaged runtime smoke hook', () => {
   assert.equal(packageJson.build.afterPack, 'scripts/after-pack.cjs');
@@ -67,6 +69,32 @@ test('static packaged closure covers every non-dev non-optional production packa
   assert.ok(entries.includes('/node_modules/tldts/package.json'));
   assert.ok(entries.includes('/node_modules/ws/package.json'));
   assert.ok(!entries.includes('/node_modules/electron/package.json'), 'dev-only Electron must not be required inside app.asar');
+});
+
+test('final ASAR scan accepts the Native facade and rejects a migrated Xiaohongshu module', async () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'aidcp-asar-leakage-'));
+  try {
+    const input = join(fixture, 'input');
+    const nativeDir = join(input, 'dist', 'native-page-engine');
+    mkdirSync(nativeDir, { recursive: true });
+    writeFileSync(join(input, 'dist', 'main.js'), 'import "./native-page-engine/runtime.js";');
+    writeFileSync(join(nativeDir, 'runtime.js'), 'export const nativeOnly = true;');
+    const cleanAsar = join(fixture, 'clean.asar');
+    await asar.createPackage(input, cleanAsar);
+    assert.equal(afterPack.verifyPackagedXiaohongshuLeakage(cleanAsar), 2);
+
+    const legacyDir = join(input, 'dist', 'browse');
+    mkdirSync(legacyDir, { recursive: true });
+    writeFileSync(join(legacyDir, 'browse-session.js'), 'export const legacy = true;');
+    const leakedAsar = join(fixture, 'leaked.asar');
+    await asar.createPackage(input, leakedAsar);
+    assert.throws(
+      () => afterPack.verifyPackagedXiaohongshuLeakage(leakedAsar),
+      /migrated Xiaohongshu JavaScript is forbidden/,
+    );
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test('desktop build input rejects a top-level node_modules self-link', async () => {

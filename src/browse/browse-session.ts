@@ -58,6 +58,7 @@ import { NOTE_BODY_SELECTORS, parseCount } from './note-extractor.js';
 import { executeSearch, applySearchFilters, SEARCH_RESULT_URL_RE, searchResultMatchesKeyword } from './search-handler.js';
 import { evalRaw, InputDispatchDeadlineError, type RandomFn, type BrowseCdp } from './cdp-util.js';
 import { TaskTakeoverError } from '../execution/takeover.js';
+import { BrowseQuiesceTimeoutError, DEFAULT_TASK_QUIESCE_MS } from '../execution/browse-quiesce.js';
 import type { CommitWindowGuard } from '../execution/commit-window.js';
 import { CdpDisconnectedError } from '../cdp/client.js';
 import { buildNotificationHomeJs, buildNotificationItemsJs, buildNotificationCategoryItemsJs } from './notification-monitor.js';
@@ -332,18 +333,13 @@ export { TaskTakeoverError };
  * 交接（quiesce）在预算内未能等到真写段收敛（change lease-strict-preemption）。
  * 协调器据此 MUST NOT 授予租约、MUST NOT 谎称已收敛、MUST NOT 停在让位态。
  */
-export class BrowseQuiesceTimeoutError extends Error {
-  constructor(public readonly timeoutMs: number) {
-    super(`浏览交接未在 ${timeoutMs}ms 内收敛`);
-    this.name = 'BrowseQuiesceTimeoutError';
-  }
-}
+export { BrowseQuiesceTimeoutError };
 
 /**
  * 交接上界：只覆盖「真正在改写页面」的动作（纯等待已由安全取消点当场让路）。
  * 云端的受理预算 MUST 大于本值 + 一个消息往返余量，否则边缘按时交接了、云端已判死走人。
  */
-export const DEFAULT_TASK_QUIESCE_MS = Number(process.env.AIDCP_TASK_QUIESCE_MS ?? 30_000);
+export { DEFAULT_TASK_QUIESCE_MS };
 
 /**
  * 关注按钮选择器（笔记 modal 作者区 + 作者主页两种上下文）。

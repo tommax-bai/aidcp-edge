@@ -6,9 +6,8 @@
  *  - 连接本机 Chrome CDP（默认 127.0.0.1:9222），附着到一个 page，
  *    得到 DomProvider / ActionExecutor；
  *  - 连接云端 WS（默认 ws://127.0.0.1:8787），握手上线；
- *  - 元素选择委托云端（CloudElementSelector）；
- *  - 用 LikeStepRunner 执行云端下发的命令，结果回传云端；
- *  - 对支持 browse 的平台，登录完成后创建 BrowseSession 并 start()：自动浏览 explore feed、
+ *  - 小红书页面命令只交给 Native Page Engine，Facebook 保持现有执行器；
+ *  - 对支持 browse 的平台，登录完成后创建对应的 EdgeBrowseSession 并 start()：自动浏览 feed、
  *    打开笔记、提取内容上报云端、按云端决策（like / browse.next / search / session.end）动作。
  *
  * 环境变量：
@@ -63,7 +62,6 @@ import {
   FacebookPublishExecutor,
   facebookActionNameForCommand,
   parseFacebookBrowseMode,
-  readFacebookIdentityPageContext,
   usesFacebookBrowseSession,
 } from './facebook/index.js';
 import { EdgeClient } from './client/edge-client.js';
@@ -76,58 +74,34 @@ import {
   type CoreLifecycleCommand,
 } from './client/core-lifecycle.js';
 import { deriveEdgeId } from './client/edge-id.js';
-import { CloudElementSelector } from './client/cloud-selector.js';
-import { LikeStepRunner } from './client/like-runner.js';
-import { PublishCommandDispatcher } from './flows/publish-command-handlers.js';
 import { EdgeTaskCoordinator } from './execution/edge-task-coordinator.js';
 import { CommitWindowGuard, combineCommitWindows } from './execution/commit-window.js';
 import { abortForTakeover, TaskTakeoverError, type TakeoverCtx } from './execution/takeover.js';
 import { PublishUiEventTracker, uiSnapshotToLines, writeNoteStageLine } from './flows/ui-event-lines.js';
 import { ImageUploader, imageTempPrefixFor, sweepImageTempDirs } from './flows/image-uploader.js';
 import { CdpFileInputSetter } from './cdp/file-input-setter.js';
-import { AnchorCache } from './locating/cache.js';
-import type { EngineOptions } from './locating/engine.js';
 import type {
   PublishCommandResultPayload,
   EdgeTaskAcquirePayload,
   EdgeTaskReleasePayload,
   Envelope,
 } from './comm/protocol.js';
+import { WatcherSupervisor } from './browse/watcher-supervisor.js';
+import { evalRaw } from './browse/cdp-util.js';
 import {
-  BrowseSession,
-  CdpFeedScroller,
-  CdpModalController,
-  CdpNotificationMonitor,
-  WatcherSupervisor,
-  IdentityWatcher,
-  CdpLoginModalWatcher,
-  evalRaw,
-  extractNoteContent,
   captureBlockingOverlaySnapshot,
-  CaptchaAssistHandler,
-  createOverlayReportGate,
   type BlockingOverlaySnapshot,
-  type BrowseSessionOptions,
   type OverlayMonitor,
-  type EdgeBrowseSession,
-} from './browse/index.js';
+} from './browse/overlay-monitor.js';
+import { CaptchaAssistHandler } from './browse/captcha-assist.js';
+import { createOverlayReportGate } from './browse/overlay-report-gate.js';
+import type { EdgeBrowseSession } from './browse/edge-browse-session.js';
 import type { IdentityDecision, SelfIdentityResult } from './cdp/self-identity.js';
-
-/**
- * 发布路径的定位引擎参数（change lease-strict-preemption 4.3）。
- *
- * **值 = 今天的默认值，行为逐字节不变**。意义在于把这条路径的等待上界从「两处默认值意外相乘」
- * （引擎默认最多 3 轮 × 云端选元素默认 200s 上限）变成**发布路径自己写下的一个数**，给后续的
- * 边-云预算对齐留一个单点。
- *
- * selectTimeoutMs MUST > 云端单次模型调用天花板 180s：压小了会把一次尚在进行的合法 thinking 选择
- * 误判成 llm_error，而引擎见 llm_error 立刻升级上报、不再重试 ⇒ 一条本可成功的发布指令被判失败，
- * 而发布失败在云端是不可逆终态。
- *
- * 注：真实等待上界并非 3×200s——云端挂起时选择器转 llm_error、引擎立刻停手不进第 2 轮，所以
- * 「云端不回话」这一档的上界是 1×200s；三轮相乘只在「每轮都在 200s 内成功回一个没匹配上」时才凑得齐。
- */
-const PUBLISH_ENGINE_OPTIONS: EngineOptions = { maxAttempts: 3, selectTimeoutMs: 200_000 };
+import {
+  NativeBrowseSession,
+  NativePageRuntime,
+  NativePublishExecutor,
+} from './native-page-engine/index.js';
 
 function verifiedAccountNickname(idRes: SelfIdentityResult, decision: IdentityDecision): string | undefined {
   if (!idRes.ok || decision.kind !== 'use') return undefined;
@@ -405,9 +379,6 @@ async function main(): Promise<void> {
     }
   }
 
-  // 先声明 runner（延迟赋值），打破 client/selector/runner 的相互依赖
-  let runner: LikeStepRunner | undefined;
-
   const client = new EdgeClient({
     url: cloudUrl,
     edgeId,
@@ -421,26 +392,40 @@ async function main(): Promise<void> {
     ...(accountNickname ? { accountNickname } : {}),
     ...(machineLabel ? { machineLabel } : {}),
     runner: {
-      run: (step) => {
-        if (!runner) throw new Error('runner 尚未就绪');
-        return runner.run(step);
-      },
+      run: async (step) => ({
+        actionId: step.actionId,
+        ok: false,
+        outcome: 'escalated',
+        attempts: 0,
+        reason: 'platform_plan_handler_unavailable',
+      }),
     },
   });
+  const pendingPageCommands: Envelope[] = [];
+  let pageCommandHandler: ((env: Envelope) => void) | undefined;
+  const dispatchOrQueuePageCommand = (env: Envelope): void => {
+    if (pageCommandHandler) {
+      pageCommandHandler(env);
+      return;
+    }
+    if (pendingPageCommands.length >= 100) {
+      client.reportActionCompleted({ action: env.type, ok: false, reason: 'page_executor_startup_queue_full' });
+      return;
+    }
+    pendingPageCommands.push(env);
+  };
+  const installPageCommandHandler = (handler: (env: Envelope) => void): void => {
+    pageCommandHandler = handler;
+    for (const env of pendingPageCommands.splice(0)) handler(env);
+  };
+  client.onBrowseCommand(dispatchOrQueuePageCommand);
+  if (platformDriver.platform === 'xiaohongshu') client.onPlanCommand(dispatchOrQueuePageCommand);
   const browserStartupId = `${edgeId}:${process.pid}:${Date.now().toString(36)}`;
 
   // 建号自助人设 stdin 桥（change edge-persona-keyword-generation）：身份已确立、client 就绪后装上，
   // 桌面壳经 stdin 下发 persona.generate/persist → 打到云端 → stdout [persona-reply] 回桥。
   registerPersonaStdinCommands(client, (m) => console.log(m));
   registerPublishApprovalStdinCommands(client, (m) => console.log(m));
-
-  const selector = new CloudElementSelector(client);
-  runner = new LikeStepRunner({
-    dom: session.dom,
-    executor: session.executor,
-    selector,
-  });
-  const publishCache = new AnchorCache();
 
   // §7 在途发布追踪：回收若撞上在途发布，先把它诚实判失败（让审批/通知侧看到失败而非半成品），
   // 绝不静默丢弃让其跨重起被重复触发 → 真账号重复发帖。值为「按各自结果形状诚实判失败」的闭包。
@@ -475,7 +460,6 @@ async function main(): Promise<void> {
   };
   let overlayMonitor: OverlayMonitor | undefined;
   let watcherSupervisor: WatcherSupervisor | undefined;
-  let identityWatcher: IdentityWatcher | undefined;
   let requestShutdown: ((reason: string) => void) | undefined;
   let coldStandbyActive = startBrowserAbsent;
   let coldStandbyWakeRequested = false;
@@ -686,6 +670,15 @@ async function main(): Promise<void> {
   });
   session.cdp.on('cdp.control_recovered', () => taskCoordinator.resumeAfterControlRecovery());
 
+  // 小红书客户运行时的唯一页面执行入口。这里只解析并校验包内 Native 工件，进程仍按需延迟到
+  // 首个已准入页面命令才启动；Facebook/其它 provider 完全不触碰该运行时。
+  const nativePageRuntime = platformDriver.platform === 'xiaohongshu'
+    ? NativePageRuntime.fromEnvironment(() => ({ host: endpoint.host, port: endpoint.port }))
+    : undefined;
+  const nativePublishExecutor = nativePageRuntime
+    ? new NativePublishExecutor(nativePageRuntime, imageTempPrefix)
+    : undefined;
+
   // §7 回收契约：把全部在途发布诚实判失败（须在关闭云端连接之前发，确保失败回执发得出去）。
   // 云端 WS 已断时 send 会 best-effort 失败，但本地 in-flight 必须立刻清掉，避免重连后重放旧发布。
   const failInFlightPublishesHonestly = (reason: string): void => {
@@ -775,26 +768,6 @@ async function main(): Promise<void> {
   // 指令驱动发布：云端逐条下发 publish.command，边缘逐条执行 + 后置校验 + 如实回报（onPublishAtomCommand，见下）。
   // 遗留整页发布处理器 client.onPublishCommand（publish.request）已删除（change lease-strict-preemption 5.8）：
   //   全程不过租约闸、云端已无发送方（只发 publish.command），保留只会绕过抢占/租约在途发布假成功修复链。
-  // 配图收口：CDP 文件输入桥 + 上传器（复用 session.cdp 单例，绝不重建）。
-  // task-0 实机校准（小红书创作平台发布页，图文模式）注入真实选择器：
-  // - 文件输入：图文模式下页面唯一 input[type=file] 是 input.upload-input（accept jpg/png/webp）。
-  // - 成功态：上传后预览区出现带 src 的缩略图（.img-preview-area img）；input.files 被 XHS 清零，绝不以 files.length 判定。
-  const imageUploader = new ImageUploader({
-    fileInputSetter: new CdpFileInputSetter(session.cdp, {
-      inputSelector: "document.querySelector('input.upload-input[type=file]') || document.querySelector('input[type=file]')",
-    }),
-    dom: session.dom,
-    tempDirPrefix: imageTempPrefix,
-    hasThumbnail: (root) => {
-      try {
-        return Array.from(root.querySelectorAll('.img-preview-area img, img#creator-preview-image-0')).some(
-          (img) => (img.getAttribute('src') || '').length > 0,
-        );
-      } catch {
-        return false;
-      }
-    },
-  });
   const facebookImageUploader = new ImageUploader({
     fileInputSetter: new CdpFileInputSetter(session.cdp, {
       inputSelector: String.raw`(() => {
@@ -831,22 +804,6 @@ async function main(): Promise<void> {
     uploader: facebookImageUploader,
     commitWindow: publishGuard, // 5.1：FB 发布提交窗口与 XHS 共用同一 publishGuard
   });
-  const publishDispatcher = new PublishCommandDispatcher(
-    {
-      dom: session.dom,
-      executor: session.executor,
-      selector,
-      cache: publishCache,
-    },
-    PUBLISH_ENGINE_OPTIONS,
-    Date.now,
-    imageUploader,
-    // 注入原始 CDP：navigate_entry 直达发布页 + select_mode 直驱点「上传图文」（发布页特殊 UI，通用选择器不可靠）。
-    session.cdp,
-    undefined,
-    facebookPublishExecutor,
-    publishGuard, // 5.1：XHS runSubmit 提交窗口
-  );
   // 陪伴界面事件（edge-companion-ui 6.4）：发布终态的本地事实经 [ui-event] 行直达桌面壳。
   const publishUiEvents = new PublishUiEventTracker();
   client.onPublishAtomCommand((env) => {
@@ -901,7 +858,20 @@ async function main(): Promise<void> {
       });
       let result: PublishCommandResultPayload;
       try {
-        result = await publishDispatcher.dispatch(env.payload, takeoverCtx);
+        const publishPlatform = env.payload.platform ?? 'xiaohongshu';
+        if (nativePublishExecutor && publishPlatform === 'xiaohongshu') {
+          result = await nativePublishExecutor.dispatch(env.payload, takeoverCtx.signal);
+        } else if (publishPlatform === 'facebook') {
+          result = await facebookPublishExecutor.dispatch(env.payload, takeoverCtx);
+        } else {
+          result = {
+            recordId: env.payload.recordId,
+            seq: env.payload.seq,
+            kind: env.payload.kind,
+            ok: false,
+            error: 'platform_publish_executor_unavailable',
+          };
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         result = {
@@ -935,7 +905,7 @@ async function main(): Promise<void> {
     for (const uiLine of uiSnapshotToLines(automationUiSnapshot(env.payload))) console.log(uiLine);
   });
 
-  const captchaAssist = new CaptchaAssistHandler({
+  const captchaAssist = nativePageRuntime ? undefined : new CaptchaAssistHandler({
     cdp: session.cdp,
     client,
     edgeId,
@@ -948,6 +918,45 @@ async function main(): Promise<void> {
     checkTaskLease: (taskId) => taskCoordinator.canExecute(taskId),
     touchTaskLease: (taskId) => taskCoordinator.touch(taskId),
   });
+  const nativeCaptchaLive = new Map<string, symbol>();
+  const clampCaptchaHint = (value: unknown, fallback: number, min: number, max: number): number => {
+    const parsed = typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+    return Math.max(min, Math.min(max, Math.round(parsed)));
+  };
+  const captureNativeCaptcha = async (
+    ownerId: string,
+    incidentId: string,
+    payload: Record<string, unknown>,
+    previousSnapshotId?: string,
+  ): Promise<{ snapshotId: string; jpegBase64: string }> => {
+    const execution = await nativePageRuntime!.execute(ownerId, {
+      kind: 'captcha_capture',
+      params: {
+        incidentId,
+        ...(typeof payload.maxImageWidth === 'number' ? { maxImageWidth: payload.maxImageWidth } : {}),
+        ...(typeof payload.maxImageHeight === 'number' ? { maxImageHeight: payload.maxImageHeight } : {}),
+        ...(typeof payload.quality === 'number' ? { quality: payload.quality } : {}),
+      },
+    });
+    if (execution.output?.kind !== 'captcha_snapshot') throw new Error('native captcha snapshot result mismatch');
+    const snapshot = execution.output.value as {
+      incidentId: string; snapshotId: string; width: number; height: number; jpegBase64: string;
+    };
+    if (snapshot.snapshotId !== previousSnapshotId) {
+      client.send('captcha.assist.snapshot', {
+        incidentId: snapshot.incidentId,
+        edgeId,
+        ...(accountId ? { accountId } : {}),
+        snapshotId: snapshot.snapshotId,
+        capturedAt: Date.now(),
+        kind: 'captcha',
+        viewport: { width: snapshot.width, height: snapshot.height },
+        crop: { x: 0, y: 0, width: snapshot.width, height: snapshot.height },
+        image: { mime: 'image/jpeg', data: snapshot.jpegBase64, width: snapshot.width, height: snapshot.height },
+      });
+    }
+    return { snapshotId: snapshot.snapshotId, jpegBase64: snapshot.jpegBase64 };
+  };
   client.onCaptchaAssistCommand((env) => {
     if (env.type !== 'captcha.assist.capture' && env.type !== 'captcha.assist.click') return;
     if (env.type === 'captcha.assist.click') {
@@ -966,9 +975,85 @@ async function main(): Promise<void> {
         return;
       }
       taskCoordinator.touch(taskId);
+      nativeCaptchaLive.delete(clickPayload.incidentId);
     }
-    captchaAssist.handle(env.type, env.payload).catch((err) => {
-      console.error(`[aidcp-edge] 验证码协助指令 ${env.type} 处理失败:`, err);
+    if (!nativePageRuntime) {
+      captchaAssist!.handle(env.type, env.payload).catch((err) => {
+        console.error(`[aidcp-edge] 验证码协助指令 ${env.type} 处理失败:`, err);
+      });
+      return;
+    }
+    const payload = env.payload as unknown as Record<string, unknown>;
+    const incidentId = String(payload.incidentId ?? '');
+    const ownerId = `captcha:${incidentId}`;
+    void (async () => {
+      if (env.type === 'captcha.assist.capture') {
+        nativeCaptchaLive.delete(incidentId);
+        const first = await captureNativeCaptcha(ownerId, incidentId, payload);
+        const live = payload.live && typeof payload.live === 'object' ? payload.live as Record<string, unknown> : undefined;
+        if (live) {
+          const token = Symbol(incidentId);
+          nativeCaptchaLive.set(incidentId, token);
+          const intervalMs = clampCaptchaHint(live.intervalMs, 1_000, 600, 2_000);
+          const maxDurationMs = clampCaptchaHint(live.maxDurationMs, 30_000, 3_000, 60_000);
+          const maxFrames = clampCaptchaHint(live.maxFrames, Math.ceil(maxDurationMs / intervalMs), 1, 50);
+          void (async () => {
+            const startedAt = Date.now();
+            let lastSnapshotId = first.snapshotId;
+            for (let index = 1; index < maxFrames && Date.now() - startedAt < maxDurationMs; index += 1) {
+              await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
+              if (nativeCaptchaLive.get(incidentId) !== token) return;
+              try {
+                const next = await captureNativeCaptcha(ownerId, incidentId, { ...payload, quality: 35 }, lastSnapshotId);
+                if (next.snapshotId === lastSnapshotId) continue;
+                lastSnapshotId = next.snapshotId;
+              } catch (error) {
+                console.warn(`[aidcp-edge] Native 验证码实时抓帧失败 incident=${incidentId}:`, error);
+              }
+            }
+            if (nativeCaptchaLive.get(incidentId) === token) nativeCaptchaLive.delete(incidentId);
+          })();
+        }
+        return;
+      }
+      const execution = await nativePageRuntime.execute(ownerId, {
+        kind: 'captcha_click',
+        params: {
+          incidentId,
+          snapshotId: String(payload.snapshotId ?? ''),
+          points: Array.isArray(payload.points) ? payload.points : [],
+          ...(typeof payload.settleMs === 'number' ? { settleMs: payload.settleMs } : {}),
+          ...(typeof payload.text === 'string' ? { text: payload.text } : {}),
+          ...(payload.submit === 'enter' ? { submit: 'enter' } : {}),
+        },
+      });
+      const receipt = execution.output?.kind === 'action_receipt'
+        ? execution.output.value as { ok: boolean; reason?: string }
+        : undefined;
+      client.send('captcha.assist.click_result', {
+        incidentId,
+        snapshotId: String(payload.snapshotId ?? ''),
+        edgeId,
+        ...(accountId ? { accountId } : {}),
+        status: receipt?.reason === 'cleared' ? 'cleared' : receipt?.reason === 'still_blocked' ? 'still_blocked' : 'failed',
+        ...(receipt?.reason ? { reason: receipt.reason } : {}),
+        checkedAt: Date.now(),
+        replayMode: 'synthetic',
+        inputMode: typeof payload.text === 'string' ? 'click_type' : 'click',
+      });
+    })().catch((err) => {
+      console.error(`[aidcp-edge] Native 验证码协助 ${env.type} 失败:`, err);
+      if (env.type === 'captcha.assist.click') {
+        client.send('captcha.assist.click_result', {
+          incidentId,
+          snapshotId: String(payload.snapshotId ?? ''),
+          edgeId,
+          ...(accountId ? { accountId } : {}),
+          status: 'failed',
+          reason: err instanceof Error ? err.message : String(err),
+          checkedAt: Date.now(),
+        });
+      }
     });
   });
 
@@ -1006,7 +1091,7 @@ async function main(): Promise<void> {
       client,
       logger: (m) => console.log(m),
     });
-    client.onBrowseCommand((env) => {
+    installPageCommandHandler((env) => {
       if (handleBrowserAbsentCommand(env)) return;
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
       const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
@@ -1027,66 +1112,6 @@ async function main(): Promise<void> {
   console.log(`[aidcp-edge] 已连接云端 ${cloudUrl}，等待命令 ...`);
 
   // —— 自动浏览会话 ——
-  // 身份失效 → 退回无身份态、重新确立、按新 id 重连（account-identity-from-login 1.3/1.4）。
-  // 复用同一 session.cdp（浏览器不重启、端口/目录不重分 = 节点初始化不动），只重跑「身份确立」。
-  // 重新确立前先回到能读出身份的消费端首页（触发失效时可能停在创作发布页/弹层态、无「我」锚点）。
-  const reestablishHomeUrl = process.env.AIDCP_EXPLORE_URL ?? platformDriver.defaultStartUrl;
-  let reestablishing = false;
-  const reestablishIdentity = async (): Promise<void> => {
-    if (reestablishing) return;
-    reestablishing = true;
-    try {
-      const r = identityWatcher?.lastReason;
-      const reasonStr = r ? (r.kind === 'changed' ? `换号→${r.newId}` : '登出/过期') : '未知';
-      console.warn(
-        `[aidcp-edge] 身份失效（${reasonStr}）→ 退回无身份态：停账号作用域操作 + 断开云端，重新确立身份（浏览器不重启、端口/目录不重分）...`,
-      );
-      watcherSupervisor?.stopAll();
-      browse?.stop();
-      // 断连前先把在途发布诚实判失败（须在关 WS 之前，失败回执才发得出去），云端不被无限期挂起等结果。
-      failInFlightPublishesHonestly(`identity_flip:${reasonStr}`);
-      client.close();
-      // 先回到消费端首页再判身份：触发失效时可能停在创作发布页/弹层态（无「我」锚点），直接原地读会无谓停摆。
-      // readSelfIdentity 的 hydrate 有界重试会等锚点渲染出来；导航失败则退回原地读（与旧行为同、不更坏）。
-      try {
-        await session.cdp.send('Page.navigate', { url: reestablishHomeUrl });
-      } catch {
-        /* best-effort */
-      }
-      const idRes = await platformDriver.readIdentity(session.cdp, {
-        allowNavigate: false,
-        logger: (m) => console.log(m),
-      });
-      const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
-      if (decision.kind === 'halt') {
-        console.error(
-          `[aidcp-edge] ✗ 重新确立身份失败（${decision.reason}）：停在无身份态、不重连云端、绝不回落 default。请在该节点重新登录目标账号后重启。`,
-        );
-        return; // 留在无身份态，不静默以默认账号开跑（红线）
-      }
-      accountId = decision.accountId;
-      accountNickname = verifiedAccountNickname(idRes, decision);
-      client.setAccountIdentity(accountId, accountNickname);
-      await client.connect();
-      const display = accountNickname ? ` (${accountNickname})` : '';
-      console.log(
-        `[aidcp-edge] 身份重新确立: ${accountId}${display}，已按新 id 重连云端（云端按新账号拆旧会话 + 重过就绪闸）`,
-      );
-      identityWatcher?.rebaseline(accountId);
-      // 重连重注入节奏快照（pacing-floor-config-min-interval 设计 §4.3 最严重缺口）：BrowseSession 只构造一次，
-      // identity 翻转复用同一对象；须在 connect()（新 welcome 已到）之后、start() 之前把新 floors/tempo 灌进去，
-      // 否则连接级快照在唯一原地重连路径上退化成进程级、风控升级到不了边缘节奏层。
-      const reconnPacing = client.getPacing();
-      browse?.applyPacingSnapshot(reconnPacing?.opFloorsMs, reconnPacing?.tempo);
-      browse?.start().catch((err) => console.error('[aidcp-edge] 浏览会话异常:', err));
-      watcherSupervisor?.startAll();
-    } catch (err) {
-      console.error('[aidcp-edge] 重新确立身份过程出错:', err);
-    } finally {
-      reestablishing = false;
-    }
-  };
-
   const wantsAutoBrowse = process.env.AIDCP_AUTO_BROWSE !== 'false';
   const supportsBrowse = platformDriver.capabilities.includes('browse');
   // Facebook 声明 browse → 装配闸解析到 FacebookBrowseSession（绝不小红书 BrowseSession；co-landing 不变量）。
@@ -1231,7 +1256,7 @@ async function main(): Promise<void> {
       },
     );
     const fbSession = browse;
-    client.onBrowseCommand((env) => {
+    installPageCommandHandler((env) => {
       if (handleBrowserAbsentCommand(env)) return;
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
       const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
@@ -1261,208 +1286,40 @@ async function main(): Promise<void> {
     }
     console.log(`[aidcp-edge] Facebook 浏览会话已注册（mode=${parseFacebookBrowseMode()}，含评论/加群委托）`);
   }
-  if (autoBrowse) {
-    const browseOpts: BrowseSessionOptions = {};
-    browseOpts.exploreUrl = process.env.AIDCP_EXPLORE_URL ?? platformDriver.defaultStartUrl;
-    browseOpts.startupId = browserStartupId;
-    // 节奏快照（pacing-floor-config-min-interval 设计 §4.3）：welcome 下发的每类操作 floor 区间 + tempo
-    // 透传进 BrowseSession；detail_dwell 区间复活死参数 dwellFloorMs（详情页停留兜底 floor 源）。
-    // 缺省（旧云端未下发）→ 全用内置默认、非零降级、无回归。
-    const initialPacing = client.getPacing();
-    if (initialPacing) {
-      browseOpts.opFloorsMs = initialPacing.opFloorsMs;
-      browseOpts.tempo = initialPacing.tempo;
-      const dd = initialPacing.opFloorsMs?.detail_dwell;
-      if (dd && typeof dd.minMs === 'number' && typeof dd.maxMs === 'number') {
-        browseOpts.dwellFloorMs = { min: dd.minMs, max: dd.maxMs };
-      }
-    }
-    // 旁路弹窗监测体：后台持续判类（登录/验证码/运营/未知），闸门读其缓存状态停手。
-    overlayMonitor = platformDriver.createOverlayMonitor(session.cdp);
-    browse = new BrowseSession(
-      {
-        dom: session.dom,
-        cdp: session.cdp,
-        client,
-        scroller: new CdpFeedScroller(session.cdp),
-        noteExtractor: extractNoteContent,
-        modalCtrl: new CdpModalController(session.cdp),
-        overlayMonitor,
-        stepRunner: runner,
-        commitWindow: browseGuard, // 5.1：XHS 评论提交 + 通知分类栏目点击窗口
-      },
-      browseOpts,
-    );
-    // 云端异步推送的浏览控制命令统一转发到 BrowseSession 执行
-    client.onBrowseCommand((env) => {
+  if (autoBrowse && nativePageRuntime) {
+    browse = new NativeBrowseSession({
+      runtime: nativePageRuntime,
+      client,
+      startupId: browserStartupId,
+      logger: (message) => console.log(message),
+    });
+    const nativeBrowse = browse;
+    const routeNativeCommand = (env: Envelope): void => {
       if (handleBrowserAbsentCommand(env)) return;
-      if (!browse) {
-        console.log(`[aidcp-edge] 收到云端命令 ${env.type} 但浏览会话未创建，忽略`);
-        return;
-      }
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
       const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
-      // pacing.update 是轻量档位刷新（change pacing-fallback-hardening）：不触碰页面 / 不入队 / 不唤醒，
-      // MUST 穿透任务租约闸——否则独占任务（发布 / 评论 / 验证码恢复）窗口内的升档会被丢弃，
-      // 而云端乐观推送不重发同值 → 边缘永停在旧档。onCloudCommand 顶端会即时应用并返回。
       if (env.type !== 'pacing.update' && !taskCoordinator.canExecute(ownedTaskId)) {
         console.warn(
-          `[aidcp-edge] 任务租约抑制命令 type=${env.type} taskId=${ownedTaskId ?? '-'} current=${taskCoordinator.currentTaskId ?? '-'}`,
+          `[aidcp-edge] Native 命令被任务租约抑制 type=${env.type} taskId=${ownedTaskId ?? '-'} current=${taskCoordinator.currentTaskId ?? '-'}`,
         );
         return;
       }
       if (ownedTaskId) taskCoordinator.touch(ownedTaskId);
-      browse.onCloudCommand(env).catch((err) => {
-        console.error(`[aidcp-edge] 执行云端命令 ${env.type} 失败:`, err);
+      nativeBrowse.onCloudCommand(env).catch((err) => {
+        console.error(`[aidcp-edge] 执行 Native 命令 ${env.type} 失败:`, err);
       });
-    });
-    // 同上：全新会话必然瞬时收敛，catch 只为不让诚实异常炸掉装配流程。
+    };
+    installPageCommandHandler(routeNativeCommand);
     if (taskCoordinator.blocksBrowse) {
       await browse.quiesceForTask().catch((err) => {
-        console.warn(`[aidcp-edge] 注册浏览会话时交接未收敛：${(err as Error).message}`);
+        console.warn(`[aidcp-edge] 注册 Native 会话时交接未收敛：${(err as Error).message}`);
       });
     }
-    // 不 await：浏览循环长跑，与命令收发并行
     if (!coldStandbyActive && !startAutomationPaused) {
-      browse.start().catch((err) => {
-        console.error('[aidcp-edge] 浏览会话异常:', err);
-      });
+      browse.start().catch((err) => console.error('[aidcp-edge] Native 浏览会话异常:', err));
     }
-
-    // 启动旁路监测：类别翻转进 captcha/unknown 时上报云端（人工升级）；离开时上报已清除。
-    // 仅 captcha/unknown 上报（login 只本地暂停、沿用现状不打扰云端）。判定逻辑抽在 overlay-report-gate：
-    // 低置信 unknown → 延后一轮确认仍在才报（滤掉离页返回途中 token 失效详情 300031 墙这类瞬时坏页误报）；
-    // captcha 指纹 → 即时 fail-CLOSED（绝不弱化真验证码）；detected/cleared 严格配对、杜绝孤儿 cleared。
-    const overlayConfirmMs = Number(process.env.AIDCP_OVERLAY_CONFIRM_MS ?? 2000);
-    const isCloudBlockingOverlay = (kind: string): kind is 'captcha' | 'unknown' =>
-      kind === 'captcha' || kind === 'unknown';
-    let overlaySnapshotPromise: Promise<BlockingOverlaySnapshot | undefined> | undefined;
-
-    const resetOverlaySnapshot = (): void => {
-      overlaySnapshotPromise = undefined;
-    };
-    const primeOverlaySnapshot = (kind: 'captcha' | 'unknown'): void => {
-      if (overlaySnapshotPromise) return;
-      overlaySnapshotPromise = captureBlockingOverlaySnapshot(session.cdp, kind).catch((err) => {
-        console.warn('[aidcp-edge] 阻断遮罩现场快照采集失败:', err instanceof Error ? err.message : String(err));
-        return undefined;
-      });
-    };
-    const readPrimedOverlaySnapshot = async (kind: 'captcha' | 'unknown'): Promise<BlockingOverlaySnapshot | undefined> => {
-      primeOverlaySnapshot(kind);
-      return overlaySnapshotPromise;
-    };
-    const sendOverlayDetected = (kind: 'captcha' | 'unknown'): void => {
-      void (async () => {
-        const overlay = await readPrimedOverlaySnapshot(kind);
-        let url = '';
-        if (overlay?.firstDetectedUrl) {
-          url = overlay.firstDetectedUrl;
-        }
-        try {
-          if (!url) url = await evalRaw<string>(session.cdp, 'location.href');
-        } catch {
-          /* best-effort，URL 取不到不影响上报 */
-        }
-        try {
-          client.send('risk.captcha_detected', {
-            edgeId,
-            kind,
-            url,
-            ...(overlay ? { overlay } : {}),
-            ...(accountId ? { accountId } : {}),
-          });
-        } catch (err) {
-          console.error('[aidcp-edge] risk.captcha_detected 上报失败:', err);
-        }
-        console.warn('[aidcp-edge] 阻断遮罩现场快照:', {
-          kind,
-          firstDetectedUrl: overlay?.firstDetectedUrl ?? url,
-          text: overlay?.text,
-          dom: overlay?.dom,
-        });
-        console.warn(
-          `[aidcp-edge] ⚠ 检测到${kind === 'captcha' ? '验证码' : '未知阻断'}弹窗，已本地暂停并上报云端，等待人工处理`,
-        );
-      })();
-    };
-    const overlayReportGate = createOverlayReportGate({
-      sendDetected: sendOverlayDetected,
-      sendCleared: () => {
-        try {
-          client.send('risk.captcha_cleared', { edgeId, ...(accountId ? { accountId } : {}) });
-        } catch (err) {
-          console.error('[aidcp-edge] risk.captcha_cleared 上报失败:', err);
-        }
-        resetOverlaySnapshot();
-        console.log('[aidcp-edge] 阻断弹窗已清除，恢复浏览');
-      },
-      isStillUnknown: () => overlayMonitor?.state === 'unknown',
-      schedule: (fn, ms) => {
-        setTimeout(fn, ms);
-      },
-      confirmMs: overlayConfirmMs,
-    });
-    watcherSupervisor = new WatcherSupervisor();
-    // ① 弹窗监测：类别翻转交上报闸决策（unknown 延后确认、captcha 即时、cleared 配对）。login 只本地暂停、不打扰云端。
-    watcherSupervisor.register(overlayMonitor, (from, to) => {
-      if (isCloudBlockingOverlay(to) && !isCloudBlockingOverlay(from)) primeOverlaySnapshot(to);
-      if (!isCloudBlockingOverlay(to)) resetOverlaySnapshot();
-      overlayReportGate.onTransition(from, to);
-    });
-    // ② 通知未读监测：无→有 上报 notification.detected（云端协调器据此巡视「评论和@」）。
-    const notificationMonitor = new CdpNotificationMonitor(session.cdp);
-    watcherSupervisor.register(notificationMonitor, (from, to) => {
-      if (to === true && from === false) {
-        const epoch = notificationMonitor.nextEpoch();
-        const unreadCount = notificationMonitor.lastCount;
-        try {
-          client.send('notification.detected', { edgeId, epoch, unreadCount, ...(accountId ? { accountId } : {}) });
-          console.log(`[aidcp-edge] 检测到「消息」未读(epoch=${epoch}, count=${unreadCount})，已上报云端`);
-        } catch (err) {
-          console.error('[aidcp-edge] notification.detected 上报失败:', err);
-        }
-      }
-    });
-    // ③ 身份持续校验（account-identity-from-login 1.4）：周期就地重读自己的稳定 id，
-    //    连续判失效（登出/过期/换号）→ 退回无身份态、重新确立、按新 id 重连。
-    // 正向登出探针：消费页读不出本人锚点时，用登录浮层是否可见区分「真登出」与「无侧栏页/弹层态」。
-    // 复用已校准的登录弹窗检测（排除笔记详情容器、不锁混淆 class）。
-    const loginWall = new CdpLoginModalWatcher(session.cdp);
-    const confirmLoggedOut = platformDriver.platform === 'facebook'
-      ? async () => overlayMonitor?.state === 'login' || (await readFacebookIdentityPageContext(session.cdp)) === 'creator-login'
-      : () => loginWall.isOpen();
-    identityWatcher = new IdentityWatcher(session.cdp, accountId!, {
-      intervalMs: Number(process.env.AIDCP_IDENTITY_CHECK_MS ?? 30_000),
-      threshold: Number(process.env.AIDCP_IDENTITY_FAIL_THRESHOLD ?? 2),
-      logger: (m) => console.log(m),
-      readIdentity: platformDriver.readIdentity,
-      ...(platformDriver.platform === 'facebook' ? { pageContext: () => readFacebookIdentityPageContext(session.cdp) } : {}),
-      confirmLoggedOut,
-    });
-    watcherSupervisor.register(identityWatcher, (from, to) => {
-      if (from === 'healthy' && to === 'invalid') void reestablishIdentity();
-    });
-    // CDP 重连联动：不可恢复（重连耗尽、终态）→ 停掉全部后台监测体。否则它们继续对已死的 client 空轮询、
-    // 每 pollMs 刷一行「探测失败(保持上一状态)」僵尸日志直到进程退出（旧码只有 SIGINT 才 stopAll）。
-    // 重连成功 → 重启（start() 幂等：未停则 no-op；曾停则干净恢复，避免恢复的 session 后台盲跑/停摆）。
-    const supervisor = watcherSupervisor; // 闭包内捕获已窄化的非空引用
-    session.cdp.on('cdp.unrecoverable', () => {
-      console.warn('[aidcp-edge] CDP 重连不可恢复，停止后台监测体（避免僵尸轮询）');
-      supervisor.stopAll();
-    });
-    session.cdp.on('cdp.reconnected', () => {
-      console.log('[aidcp-edge] CDP 已重连，重启后台监测体');
-      supervisor.startAll();
-    });
-    if (!coldStandbyActive && !startAutomationPaused) {
-      supervisor.startAll();
-      console.log('[aidcp-edge] 自动浏览已启动（含弹窗 + 通知未读旁路监测）');
-    } else {
-      console.log('[aidcp-edge] 控制面待机：自动浏览与后台监测体已装配但暂不启动');
-    }
+    console.log('[aidcp-edge] 小红书页面执行已切换为 Native-only（无 shadow、无 JavaScript fallback）');
   }
-
   // —— 退出 / 回收统一路径（节点终态诚实下线 + 看护可重起；真关机干净退出）——
   let recycleRequested = false;
   const lifecycle = new CoreLifecycleController({
@@ -1497,6 +1354,9 @@ async function main(): Promise<void> {
       } catch {
         /* best-effort */
       }
+      await nativePageRuntime?.shutdown().catch((error) => {
+        console.warn('[aidcp-edge] Native Page Engine 关闭失败:', error);
+      });
       session.close();
     },
     closeOwnedBrowser: async () => {
@@ -1628,7 +1488,6 @@ async function main(): Promise<void> {
         coldStandbyActive = false;
         clearColdStandbyWakeLatch();
         clearColdStandbyCloudRetry();
-        identityWatcher?.rebaseline(accountId!);
         if (resumeAutomation) watcherSupervisor?.startAll();
         const wakePacing = client.getPacing();
         browse?.applyPacingSnapshot(wakePacing?.opFloorsMs, wakePacing?.tempo);

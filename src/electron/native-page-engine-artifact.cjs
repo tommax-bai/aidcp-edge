@@ -6,7 +6,7 @@ const path = require('node:path');
 
 const EXPECTED_PROTOCOL_VERSION = 2;
 const EXPECTED_PLATFORM_ADAPTER_VERSION = 'xiaohongshu-v1';
-const EXPECTED_CAPABILITY_DIGEST = '3867dff401e1b611cf628040681f20996925dce36182136c48fb6201f078e8eb';
+const EXPECTED_CAPABILITY_DIGEST = '21f514595106b0b3e21e3a53e9d788d702227c1d754d2af90e753152f7af64cd';
 
 function executableName(platform) {
   return platform === 'win32' ? 'aidcp-page-engine.exe' : 'aidcp-page-engine';

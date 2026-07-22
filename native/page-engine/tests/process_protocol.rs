@@ -141,6 +141,23 @@ async fn spawn_stalling_cdp() -> (u16, tokio::task::JoinHandle<()>) {
             ))
             .await
             .expect("enable response");
+        for _ in 0..2 {
+            let enable = websocket
+                .next()
+                .await
+                .expect("domain enable request")
+                .expect("domain enable message");
+            let Message::Text(enable) = enable else {
+                panic!("expected text enable");
+            };
+            let enable: Value = serde_json::from_str(&enable).expect("enable JSON");
+            websocket
+                .send(Message::Text(
+                    json!({"id":enable["id"],"result":{}}).to_string().into(),
+                ))
+                .await
+                .expect("enable response");
+        }
         let _evaluate = websocket.next().await;
         while let Some(message) = websocket.next().await {
             if matches!(message, Ok(Message::Close(_))) {

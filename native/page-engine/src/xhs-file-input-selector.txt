@@ -1,0 +1,1 @@
+input.upload-input[type="file"],input[type="file"]

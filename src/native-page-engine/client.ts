@@ -20,6 +20,7 @@ export type NativePageKind =
   | 'notification'
   | 'publish'
   | 'login'
+  | 'captcha'
   | 'error'
   | 'unknown';
 
@@ -27,6 +28,7 @@ export interface NativePageStructuralSignals {
   feedCardCount: number;
   noteDetailCount: number;
   loginWallCount: number;
+  captchaSignalCount: number;
   dialogCount: number;
   profileSignalCount: number;
   notificationSignalCount: number;
@@ -61,6 +63,30 @@ export interface NativePageEngineManifest {
   engineVersion: string;
   platformAdapterVersion: string;
   capabilityDigest: string;
+}
+
+export type NativePageCommandKind =
+  | 'page_probe' | 'plan_execute' | 'session_stop' | 'browse_next' | 'browse_scroll' | 'page_scroll'
+  | 'feed_refresh' | 'search_execute' | 'note_open' | 'note_close' | 'navigation_back'
+  | 'note_browse_images' | 'note_scroll_comments' | 'profile_open' | 'notification_open'
+  | 'notification_browse_comments' | 'notification_browse_likes' | 'notification_browse_follows'
+  | 'notification_back_home' | 'interaction_like' | 'interaction_collect' | 'interaction_follow'
+  | 'interaction_comment' | 'interaction_like_comment' | 'captcha_capture' | 'captcha_click'
+  | 'publish_navigate_entry' | 'publish_select_mode' | 'publish_upload_image'
+  | 'publish_set_cover' | 'publish_fill_field' | 'publish_add_with_candidate' | 'publish_set_option'
+  | 'publish_set_schedule' | 'publish_submit' | 'publish_capture_post_id'
+  | 'publish_capture_scheduled' | 'publish_reconcile_scheduled';
+
+export interface NativePageCommand {
+  kind: NativePageCommandKind;
+  params: Record<string, unknown>;
+}
+
+export interface NativePageCommandExecution {
+  ok: boolean;
+  effectPhase: NativeEffectPhase;
+  reasonCode: string;
+  output?: { kind: string; value: unknown };
 }
 
 export interface NativePageSessionInfo {
@@ -137,6 +163,8 @@ export interface NativePageEngineClientOptions {
   processTimeoutMs?: number;
   env?: NodeJS.ProcessEnv;
   spawnImpl?: SpawnEngine;
+  /** Production package contract. Tests may omit it for fixture engines. */
+  expectedManifest?: NativePageEngineManifest;
 }
 
 interface ReadyRecord {
@@ -199,6 +227,7 @@ class NativeProcessTransport {
   private constructor(
     private readonly child: ChildProcessWithoutNullStreams,
     processTimeoutMs: number,
+    private readonly expectedManifest?: NativePageEngineManifest,
   ) {
     this.processTimeoutMs = processTimeoutMs;
     this.readyPromise = new Promise((resolve, reject) => {
@@ -237,7 +266,7 @@ class NativeProcessTransport {
         `Native Page Engine could not start: ${describeError(error)}`,
       );
     }
-    const transport = new NativeProcessTransport(child, processTimeoutMs);
+    const transport = new NativeProcessTransport(child, processTimeoutMs, options.expectedManifest);
     await transport.readyPromise;
     return transport;
   }
@@ -366,6 +395,14 @@ class NativeProcessTransport {
         return;
       }
       this.ready = true;
+      if (this.expectedManifest && (
+        ready.manifest.engineVersion !== this.expectedManifest.engineVersion
+        || ready.manifest.platformAdapterVersion !== this.expectedManifest.platformAdapterVersion
+        || ready.manifest.capabilityDigest !== this.expectedManifest.capabilityDigest
+      )) {
+        this.failProtocol('Native Page Engine readiness manifest does not match the packaged artifact');
+        return;
+      }
       this.manifest = ready.manifest;
       this.settledReady = true;
       clearTimeout(this.readyTimer);
@@ -424,6 +461,25 @@ export class NativePageEngineSession {
     timeoutMs = DEFAULT_NATIVE_TIMEOUT_MS,
     signal?: AbortSignal,
   ): Promise<NativePageProbeResult> {
+    const execution = await this.execute({ kind: 'page_probe', params: {} }, timeoutMs, signal);
+    if (!execution.ok || execution.effectPhase !== 'confirmed') {
+      throw new NativePageEngineError('invalid_protocol', 'Native page probe did not confirm');
+    }
+    if (!execution.output || execution.output.kind !== 'page_probe') {
+      throw new NativePageEngineError('invalid_protocol', 'Native page probe result kind mismatch');
+    }
+    const result = parseProbeResult(execution.output.value);
+    if (!result) {
+      throw new NativePageEngineError('invalid_protocol', 'Native Page Engine emitted an invalid probe result');
+    }
+    return result;
+  }
+
+  async execute(
+    command: NativePageCommand,
+    timeoutMs = DEFAULT_NATIVE_TIMEOUT_MS,
+    signal?: AbortSignal,
+  ): Promise<NativePageCommandExecution> {
     this.assertOpen();
     validateTimeout(timeoutMs);
     if (signal?.aborted) {
@@ -434,37 +490,23 @@ export class NativePageEngineSession {
     const id = requestId('command');
     const commandId = ++this.commandId;
     const pending = this.transport.request(id, {
-      type: 'command',
-      protocolVersion: NATIVE_PAGE_ENGINE_PROTOCOL_VERSION,
-      id,
-      sessionId: this.sessionId,
-      taskId: this.taskId,
-      commandId,
-      deadlineUnixMs: Date.now() + timeoutMs,
-      command: { kind: 'page_probe', params: {} },
+      type: 'command', protocolVersion: NATIVE_PAGE_ENGINE_PROTOCOL_VERSION, id,
+      sessionId: this.sessionId, taskId: this.taskId, commandId,
+      deadlineUnixMs: Date.now() + timeoutMs, command,
     }, Math.max(this.processTimeoutMs, timeoutMs + 250));
-    const abort = (): void => {
-      void this.cancel(commandId, 'caller_aborted').catch(() => undefined);
-    };
+    const abort = (): void => { void this.cancel(commandId, 'caller_aborted').catch(() => undefined); };
     signal?.addEventListener('abort', abort, { once: true });
     let raw: unknown;
-    try {
-      raw = await pending;
-    } finally {
-      signal?.removeEventListener('abort', abort);
-    }
+    try { raw = await pending; } finally { signal?.removeEventListener('abort', abort); }
     const response = parseCommandResponse(raw, id, this.sessionId, this.taskId, commandId);
-    if (!response.ok || response.effectPhase !== 'confirmed') {
-      throw nativeResponseError(response);
-    }
-    if (!isRecord(response.result) || response.result.kind !== 'page_probe') {
-      throw new NativePageEngineError('invalid_protocol', 'Native page probe result kind mismatch');
-    }
-    const result = parseProbeResult(response.result.value);
-    if (!result) {
-      throw new NativePageEngineError('invalid_protocol', 'Native Page Engine emitted an invalid probe result');
-    }
-    return result;
+    if (response.error || (!response.result && !response.ok)) throw nativeResponseError(response);
+    const output = isRecord(response.result)
+      && typeof response.result.kind === 'string'
+      && 'value' in response.result
+      ? response.result as { kind: string; value: unknown }
+      : undefined;
+    if (!output) throw new NativePageEngineError('invalid_protocol', 'Native page command output is invalid');
+    return { ok: response.ok, effectPhase: response.effectPhase, reasonCode: response.reasonCode, output };
   }
 
   async cancel(commandId: number, reason = 'caller_cancelled'): Promise<NativeCancelResult> {
@@ -716,6 +758,7 @@ function parseProbeResult(value: unknown): NativePageProbeResult | undefined {
     'notification',
     'publish',
     'login',
+    'captcha',
     'error',
     'unknown',
   ];
@@ -724,6 +767,7 @@ function parseProbeResult(value: unknown): NativePageProbeResult | undefined {
     'feedCardCount',
     'noteDetailCount',
     'loginWallCount',
+    'captchaSignalCount',
     'dialogCount',
     'profileSignalCount',
     'notificationSignalCount',

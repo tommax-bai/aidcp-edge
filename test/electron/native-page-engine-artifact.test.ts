@@ -38,7 +38,7 @@ test('rejects a manifest that lies about the binary architecture', async () => {
     engineVersion: '0.1.0',
     protocolVersion: 2,
     platformAdapterVersion: 'xiaohongshu-v1',
-    capabilityDigest: '3867dff401e1b611cf628040681f20996925dce36182136c48fb6201f078e8eb',
+    capabilityDigest: '21f514595106b0b3e21e3a53e9d788d702227c1d754d2af90e753152f7af64cd',
     platform: 'darwin',
     arch: 'x64',
     executable: 'aidcp-page-engine',

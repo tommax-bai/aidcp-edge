@@ -1,7 +1,8 @@
+use aidcp_page_engine::command::ReasonParams;
 use aidcp_page_engine::engine::{CommandOutput, Engine};
 use aidcp_page_engine::protocol::{
-    CommandRecord, NativeCommand, PageProbeParams, Platform, SessionCloseRecord, SessionOpenParams,
-    SessionOpenRecord,
+    CommandRecord, EffectPhase, NativeCommand, PageProbeParams, Platform, SessionCloseRecord,
+    SessionOpenParams, SessionOpenRecord,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -21,11 +22,16 @@ async fn long_lived_engine_uses_correlated_fake_cdp_and_deduplicates_commands() 
 
     let command = page_probe_command(1);
     let first = engine.execute(&command).await.expect("first probe");
-    let CommandOutput::PageProbe(first_probe) = first.output.expect("first output");
+    let CommandOutput::PageProbe(first_probe) = first.output.expect("first output") else {
+        panic!("expected page probe output")
+    };
     assert_eq!(first_probe.path, "/search_result_ai");
 
     let duplicate = engine.execute(&command).await.expect("deduplicated probe");
-    let CommandOutput::PageProbe(duplicate_probe) = duplicate.output.expect("duplicate output");
+    let CommandOutput::PageProbe(duplicate_probe) = duplicate.output.expect("duplicate output")
+    else {
+        panic!("expected duplicate page probe output")
+    };
     assert_eq!(duplicate_probe, first_probe);
 
     let closed = engine
@@ -52,10 +58,53 @@ async fn read_only_command_reconnects_once_without_replaying_a_write() {
         .execute(&page_probe_command(1))
         .await
         .expect("reconnected probe");
-    let CommandOutput::PageProbe(probe) = outcome.output.expect("probe output");
+    let CommandOutput::PageProbe(probe) = outcome.output.expect("probe output") else {
+        panic!("expected reconnected page probe output")
+    };
     assert_eq!(probe.page_kind, aidcp_page_engine::probe::PageKind::Explore);
     engine.shutdown().await;
     server.await.expect("reconnect server");
+}
+
+#[tokio::test]
+async fn high_level_command_returns_a_bounded_typed_projection() {
+    let (port, server) = spawn_router_result_cdp(false).await;
+    let mut engine = Engine::default();
+    engine
+        .open(&session_open(port))
+        .await
+        .expect("open session");
+    let outcome = engine
+        .execute(&browse_command(1))
+        .await
+        .expect("browse command");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::PageCards(cards) = outcome.output.expect("cards output") else {
+        panic!("expected page cards output")
+    };
+    assert_eq!(cards.cards.len(), 1);
+    assert_eq!(cards.cards[0].note_id.as_deref(), Some("n1"));
+    engine.shutdown().await;
+    server.await.expect("router result server");
+}
+
+#[tokio::test]
+async fn dispatched_write_disconnect_is_ambiguous_and_is_not_replayed() {
+    let (port, server) = spawn_router_result_cdp(true).await;
+    let mut engine = Engine::default();
+    engine
+        .open(&session_open(port))
+        .await
+        .expect("open session");
+    let outcome = engine
+        .execute(&browse_command(1))
+        .await
+        .expect("write result");
+    assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
+    assert!(outcome.output.is_none());
+    assert!(outcome.error.is_some());
+    engine.shutdown().await;
+    server.await.expect("write disconnect server");
 }
 
 fn session_open(port: u16) -> SessionOpenRecord {
@@ -85,6 +134,58 @@ fn page_probe_command(command_id: u64) -> CommandRecord {
     }
 }
 
+fn browse_command(command_id: u64) -> CommandRecord {
+    CommandRecord {
+        protocol_version: 2,
+        id: format!("command-{command_id}"),
+        session_id: "session-1".to_owned(),
+        task_id: "browse-1".to_owned(),
+        command_id,
+        deadline_unix_ms: unix_time_ms() + 2_000,
+        command: NativeCommand::BrowseScroll(ReasonParams {
+            reason: Some("initial_scan".to_owned()),
+        }),
+    }
+}
+
+async fn spawn_router_result_cdp(
+    disconnect_after_dispatch: bool,
+) -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing(&listener, port).await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        for _ in 0..3 {
+            respond_to_call(&mut websocket, json!({})).await;
+        }
+        if disconnect_after_dispatch {
+            let _ = websocket.next().await.expect("write dispatch");
+            websocket
+                .close(None)
+                .await
+                .expect("disconnect after dispatch");
+            return;
+        }
+        respond_to_call(
+            &mut websocket,
+            json!({
+                "result": { "value": {
+                    "effectPhase": "confirmed",
+                    "output": { "kind": "page_cards", "value": { "cards": [{
+                        "index": 0, "title": "Native card", "likeCount": 1,
+                        "collectCount": 2, "noteId": "n1"
+                    }] } }
+                } }
+            }),
+        )
+        .await;
+        let _ = websocket.close(None).await;
+    });
+    (port, server)
+}
+
 async fn spawn_fake_cdp() -> (u16, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
@@ -112,6 +213,8 @@ async fn spawn_fake_cdp() -> (u16, tokio::task::JoinHandle<()>) {
             .await
             .expect("WebSocket handshake");
         respond_to_call(&mut websocket, json!({})).await;
+        respond_to_call(&mut websocket, json!({})).await;
+        respond_to_call(&mut websocket, json!({})).await;
         websocket
             .send(Message::Text(
                 json!({"method":"Runtime.executionContextCreated","params":{}})
@@ -130,6 +233,7 @@ async fn spawn_fake_cdp() -> (u16, tokio::task::JoinHandle<()>) {
                         "feedCardCount": 8,
                         "noteDetailCount": 0,
                         "loginWallCount": 0,
+                        "captchaSignalCount": 0,
                         "dialogCount": 0,
                         "profileSignalCount": 0,
                         "mainCount": 1
@@ -153,6 +257,8 @@ async fn spawn_disconnect_then_recover_cdp() -> (u16, tokio::task::JoinHandle<()
             .await
             .expect("first WebSocket handshake");
         respond_to_call(&mut first, json!({})).await;
+        respond_to_call(&mut first, json!({})).await;
+        respond_to_call(&mut first, json!({})).await;
         let _ = first.next().await.expect("first evaluate request");
         first.close(None).await.expect("first close");
 
@@ -161,6 +267,8 @@ async fn spawn_disconnect_then_recover_cdp() -> (u16, tokio::task::JoinHandle<()
         let mut second = accept_async(second_stream)
             .await
             .expect("second WebSocket handshake");
+        respond_to_call(&mut second, json!({})).await;
+        respond_to_call(&mut second, json!({})).await;
         respond_to_call(&mut second, json!({})).await;
         respond_to_call(
             &mut second,
@@ -172,6 +280,7 @@ async fn spawn_disconnect_then_recover_cdp() -> (u16, tokio::task::JoinHandle<()
                         "feedCardCount": 6,
                         "noteDetailCount": 0,
                         "loginWallCount": 0,
+                        "captchaSignalCount": 0,
                         "dialogCount": 0,
                         "profileSignalCount": 0,
                         "mainCount": 1

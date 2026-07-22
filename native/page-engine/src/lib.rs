@@ -7,6 +7,7 @@ pub mod error;
 pub mod model;
 pub mod probe;
 pub mod protocol;
+pub mod xhs;
 
 use crate::error::{EngineError, ErrorCode};
 use crate::probe::ProbeResult;

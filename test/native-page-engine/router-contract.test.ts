@@ -1,0 +1,127 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { JSDOM } from 'jsdom';
+import test from 'node:test';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const source = await readFile(resolve(repoRoot, 'native/page-engine/src/xhs-command-router.js'), 'utf8');
+const run = Function(`return (${source})`)() as (
+  input: { kind: string; params: Record<string, unknown> },
+) => Promise<{ effectPhase: string; output: { kind: string; value: Record<string, unknown> } }>;
+
+function install(html: string, url = 'https://www.xiaohongshu.com/explore'): JSDOM {
+  const dom = new JSDOM(html, { url });
+  const win = dom.window as unknown as Record<string, unknown>;
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    location: dom.window.location,
+    history: dom.window.history,
+    Event: dom.window.Event,
+    MouseEvent: dom.window.MouseEvent,
+    KeyboardEvent: dom.window.KeyboardEvent,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+    innerHeight: 800,
+  });
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
+    value: () => ({ x: 0, y: 0, top: 0, left: 0, right: 100, bottom: 40, width: 100, height: 40 }),
+  });
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'scrollIntoView', { value: () => undefined });
+  win.scrollBy = () => undefined;
+  return dom;
+}
+
+test('extracts bounded feed cards without accepting a selector from the caller', async () => {
+  install('<main><section class="note-item"><a href="/explore/n1"><span class="title"> Coffee   walk </span></a><span class="author">Alice</span><span class="like">1.2万</span></section></main>');
+  const result = await run({ kind: 'browse_scroll', params: { reason: 'initial_scan' } });
+  assert.equal(result.effectPhase, 'confirmed');
+  assert.equal(result.output.kind, 'page_cards');
+  const cards = result.output.value.cards as Array<Record<string, unknown>>;
+  assert.equal(cards[0]?.noteId, 'n1');
+  assert.equal(cards[0]?.title, 'Coffee walk');
+  assert.equal(cards[0]?.likeCount, 12_000);
+});
+
+test('binds an interaction to the current note and verifies the changed state', async () => {
+  const dom = install('<main><div class="note-detail-mask"><button id="like">点赞</button></div></main>', 'https://www.xiaohongshu.com/explore/n1');
+  dom.window.document.querySelector('#like')?.addEventListener('click', (event) => {
+    (event.currentTarget as Element).classList.add('liked');
+  });
+  const result = await run({ kind: 'interaction_like', params: { noteId: 'n1' } });
+  assert.equal(result.effectPhase, 'confirmed');
+  assert.deepEqual(result.output.value, { action: 'like', ok: true, noteId: 'n1' });
+
+  const mismatch = await run({ kind: 'interaction_like', params: { noteId: 'another' } });
+  assert.equal(mismatch.effectPhase, 'not_started');
+  assert.equal(mismatch.output.value.reason, 'note_page_mismatch');
+});
+
+test('fails closed when publish field readback does not have a target', async () => {
+  install('<main><div>creator</div></main>', 'https://creator.xiaohongshu.com/publish/publish');
+  const result = await run({
+    kind: 'publish_fill_field',
+    params: { recordId: 1, seq: 2, fieldType: 'title', value: 'Bound title' },
+  });
+  assert.equal(result.effectPhase, 'not_started');
+  assert.equal(result.output.value.ok, false);
+  assert.equal(result.output.value.reason, 'publish_field_not_found');
+});
+
+test('selects the exact uploaded preview index and requires cover-active evidence', async () => {
+  const dom = install(`
+    <main>
+      <div class="preview-item"><img src="one.jpg"></div>
+      <div class="preview-item" id="target"><img src="two.jpg"></div>
+      <button>设为封面</button>
+    </main>
+  `, 'https://creator.xiaohongshu.com/publish/publish');
+  dom.window.document.querySelector('#target')?.addEventListener('click', (event) => {
+    (event.currentTarget as Element).setAttribute('data-active', 'true');
+  });
+  const result = await run({
+    kind: 'publish_set_cover',
+    params: { recordId: 1, seq: 4, imageIndex: 1 },
+  });
+  assert.equal(result.effectPhase, 'confirmed');
+  assert.equal(result.output.value.action, 'set_cover');
+  assert.equal(result.output.value.ok, true);
+
+  const missing = await run({
+    kind: 'publish_set_cover',
+    params: { recordId: 1, seq: 5, imageIndex: 3 },
+  });
+  assert.equal(missing.effectPhase, 'not_started');
+  assert.equal(missing.output.value.reason, 'preview_not_found');
+});
+
+test('scheduled capture requires one exact title, scheduled state, platform id, and target time', async () => {
+  const publishTime = new Date(2026, 6, 22, 18, 45).getTime();
+  install(`
+    <main>
+      <div class="note-card" data-note-id="scheduled-1">
+        <span class="title">Exact title</span><span>定时发布 18:45</span>
+      </div>
+      <div class="note-card" data-note-id="scheduled-2">
+        <span class="title">Other title</span><span>定时发布 18:45</span>
+      </div>
+    </main>
+  `, 'https://creator.xiaohongshu.com/new/note-manager');
+  const result = await run({
+    kind: 'publish_capture_scheduled',
+    params: { recordId: 1, seq: 8, scheduledTitle: 'Exact title', publishTime },
+  });
+  assert.equal(result.effectPhase, 'confirmed');
+  assert.equal(result.output.value.ok, true);
+  assert.equal(result.output.value.value, 'scheduled-1');
+
+  const missing = await run({
+    kind: 'publish_capture_scheduled',
+    params: { recordId: 1, seq: 9, scheduledTitle: 'Missing title', publishTime },
+  });
+  assert.equal(missing.effectPhase, 'not_started');
+  assert.equal(missing.output.value.error, 'scheduled_record_not_found');
+});

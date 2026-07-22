@@ -89,6 +89,7 @@ export interface StepRunner {
  * 典型用于 session.end / browse.next 这类云端可主动推送的控制信令。
  */
 export type BrowseCommandHandler = (env: Envelope) => void;
+export type PlanCommandHandler = (env: Envelope<PlanResponsePayload>) => void;
 export type PublishCommandHandler = (env: Envelope<PublishRequestPayload>) => void;
 /** A 阶段1 指令驱动发布：单条参数化原子指令处理器（publish.command）。 */
 export type PublishAtomCommandHandler = (env: Envelope<PublishCommandPayload>) => void;
@@ -207,6 +208,7 @@ export class EdgeClient {
   private readonly reconnectOpts?: CloudReconnectOptions;
   private readonly listeners = new Map<CloudConnectionEvent, Set<CloudConnectionListener>>();
   private browseHandler?: BrowseCommandHandler;
+  private planHandler?: PlanCommandHandler;
   private publishHandler?: PublishCommandHandler;
   private publishAtomHandler?: PublishAtomCommandHandler;
   private edgeTaskHandler?: EdgeTaskCommandHandler;
@@ -418,6 +420,14 @@ export class EdgeClient {
     this.browseHandler = handler;
     return () => {
       if (this.browseHandler === handler) this.browseHandler = undefined;
+    };
+  }
+
+  /** Register a whole-plan executor. Native Xiaohongshu uses this to keep plan DOM rules out of JS. */
+  onPlanCommand(handler: PlanCommandHandler): () => void {
+    this.planHandler = handler;
+    return () => {
+      if (this.planHandler === handler) this.planHandler = undefined;
     };
   }
 
@@ -721,6 +731,11 @@ export class EdgeClient {
     // 3) 云端主动下发的命令（以 plan.response 承载有序步骤）
     if (env.type === 'plan.response') {
       this.emitCommandDiagnostic(env, 'received');
+      if (this.planHandler) {
+        this.emitCommandDiagnostic(env, 'dispatched');
+        this.planHandler(env as Envelope<PlanResponsePayload>);
+        return;
+      }
       void this.onCommand(env);
       return;
     }

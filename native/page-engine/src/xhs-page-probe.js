@@ -18,12 +18,14 @@
     var text=(element.textContent||'').replace(/\s+/g,'');
     return loginPhrases.some(function(phrase){return text.indexOf(phrase)>=0;});
   })?1:0;
+  var captchaSignalCount=cap(Array.prototype.slice.call(document.querySelectorAll('[class*="captcha"],[class*="Captcha"],[class*="geetest"],iframe[src*="captcha"],iframe[src*="verify"]')).filter(visible).length);
   return {
     href:String(location.href||''),
     readyState:String(document.readyState||''),
     feedCardCount:cap(document.querySelectorAll(feedSelector).length),
     noteDetailCount:cap(Array.prototype.slice.call(document.querySelectorAll(noteSelector)).filter(visible).length),
     loginWallCount:loginWallCount,
+    captchaSignalCount:captchaSignalCount,
     dialogCount:cap(Array.prototype.slice.call(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).filter(visible).length),
     profileSignalCount:cap(document.querySelectorAll('.user-page,.user-info,[class*="userPage"],[class*="userInfo"],a[href*="/user/profile/"]').length),
     notificationSignalCount:cap(document.querySelectorAll('a[href*="/notification"],a[href*="/notice"],[class*="notification"],[class*="notice"]').length),

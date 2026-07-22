@@ -75,15 +75,53 @@ function verifyPackagedDependencyClosure(asarPath, packageLockPath) {
   return requiredEntries.length - 1;
 }
 
+function verifyPackagedXiaohongshuLeakage(asarPath) {
+  const entries = asar.listPackage(asarPath);
+  const forbiddenEntries = [
+    '/dist/browse/browse-session.js',
+    '/dist/browse/feed-scroller.js',
+    '/dist/browse/modal-controller.js',
+    '/dist/browse/note-extractor.js',
+    '/dist/browse/search-handler.js',
+    '/dist/browse/notification-monitor.js',
+    '/dist/flows/publish-command-handlers.js',
+    '/dist/client/cloud-selector.js',
+    '/dist/client/like-runner.js',
+    '/dist/locating/engine.js',
+    '/dist/locating/cache.js',
+  ];
+  const leakedPath = forbiddenEntries.find((entry) => entries.includes(entry));
+  if (leakedPath) throw new Error(`Packaged migrated Xiaohongshu JavaScript is forbidden: ${leakedPath}`);
+  const sourceMap = entries.find((entry) => entry.startsWith('/dist/') && entry.endsWith('.map'));
+  if (sourceMap) throw new Error(`Packaged source map is forbidden: ${sourceMap}`);
+  const markers = [
+    'FOLLOW_BUTTON_SELECTORS',
+    'note.publish_set_cover',
+    'creator-preview-image-0',
+    'input.upload-input[type=file]',
+  ];
+  for (const entry of entries.filter((value) => value.startsWith('/dist/') && value.endsWith('.js'))) {
+    const source = asar.extractFile(asarPath, entry.slice(1)).toString('utf8');
+    const marker = markers.find((value) => source.includes(value));
+    if (marker) throw new Error(`Packaged migrated Xiaohongshu rule marker is forbidden in ${entry}: ${marker}`);
+  }
+  if (!entries.includes('/dist/native-page-engine/runtime.js')) {
+    throw new Error('Packaged selector-free Native Page Engine facade is missing');
+  }
+  return entries.filter((entry) => entry.startsWith('/dist/') && entry.endsWith('.js')).length;
+}
+
 async function afterPack(context) {
   const { asarPath, executable, nativeResourceDir, smokeEntry } = resolvePackagedSmokePaths(context);
   const packageCount = verifyPackagedDependencyClosure(asarPath, resolve(__dirname, '..', 'package-lock.json'));
+  const runtimeModuleCount = verifyPackagedXiaohongshuLeakage(asarPath);
   const targetArch = normalizeTargetArch(context.arch) || 'unknown';
   verifyNativePageEngineArtifact(nativeResourceDir, {
     platform: context.electronPlatformName,
     arch: targetArch,
   });
   console.log(`Native Page Engine artifact verified for ${context.electronPlatformName}/${targetArch}.`);
+  console.log(`Packaged Xiaohongshu JavaScript leakage scan passed across ${runtimeModuleCount} runtime modules.`);
 
   if (!canExecutePackagedBinary(context)) {
     console.log(
@@ -107,3 +145,4 @@ module.exports.normalizeTargetArch = normalizeTargetArch;
 module.exports.productionPackageEntries = productionPackageEntries;
 module.exports.resolvePackagedSmokePaths = resolvePackagedSmokePaths;
 module.exports.verifyPackagedDependencyClosure = verifyPackagedDependencyClosure;
+module.exports.verifyPackagedXiaohongshuLeakage = verifyPackagedXiaohongshuLeakage;

@@ -25,7 +25,8 @@ import type { OverlayMonitor } from '../browse/overlay-monitor.js';
 import { jitterAround } from '../humanize/index.js';
 import type { EdgeBrowseSession } from '../browse/edge-browse-session.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { TaskTakeoverError, BrowseQuiesceTimeoutError, DEFAULT_TASK_QUIESCE_MS } from '../browse/browse-session.js';
+import { TaskTakeoverError } from '../execution/takeover.js';
+import { BrowseQuiesceTimeoutError, DEFAULT_TASK_QUIESCE_MS } from '../execution/browse-quiesce.js';
 import type {
   Envelope,
   ActionCompletedPayload,

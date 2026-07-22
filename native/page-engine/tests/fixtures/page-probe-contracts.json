@@ -12,6 +12,7 @@
         "feedCardCount": 12,
         "noteDetailCount": 0,
         "loginWallCount": 0,
+        "captchaSignalCount": 0,
         "dialogCount": 0,
         "profileSignalCount": 0,
         "mainCount": 1
@@ -26,6 +27,7 @@
           "feedCardCount": 12,
           "noteDetailCount": 0,
           "loginWallCount": 0,
+          "captchaSignalCount": 0,
           "dialogCount": 0,
           "profileSignalCount": 0,
           "notificationSignalCount": 0,
@@ -45,6 +47,7 @@
         "feedCardCount": 9,
         "noteDetailCount": 0,
         "loginWallCount": 0,
+        "captchaSignalCount": 0,
         "dialogCount": 0,
         "profileSignalCount": 0,
         "mainCount": 1
@@ -59,6 +62,7 @@
           "feedCardCount": 9,
           "noteDetailCount": 0,
           "loginWallCount": 0,
+          "captchaSignalCount": 0,
           "dialogCount": 0,
           "profileSignalCount": 0,
           "notificationSignalCount": 0,
@@ -78,6 +82,7 @@
         "feedCardCount": 0,
         "noteDetailCount": 1,
         "loginWallCount": 0,
+        "captchaSignalCount": 0,
         "dialogCount": 1,
         "profileSignalCount": 0,
         "mainCount": 1
@@ -92,6 +97,7 @@
           "feedCardCount": 0,
           "noteDetailCount": 1,
           "loginWallCount": 0,
+          "captchaSignalCount": 0,
           "dialogCount": 1,
           "profileSignalCount": 0,
           "notificationSignalCount": 0,
@@ -111,6 +117,7 @@
         "feedCardCount": 12,
         "noteDetailCount": 0,
         "loginWallCount": 1,
+        "captchaSignalCount": 0,
         "dialogCount": 1,
         "profileSignalCount": 0,
         "mainCount": 1
@@ -125,6 +132,7 @@
           "feedCardCount": 12,
           "noteDetailCount": 0,
           "loginWallCount": 1,
+          "captchaSignalCount": 0,
           "dialogCount": 1,
           "profileSignalCount": 0,
           "notificationSignalCount": 0,

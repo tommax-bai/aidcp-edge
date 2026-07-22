@@ -74,6 +74,31 @@ if (mode === 'malformed') {
         pendingCommand = request;
         return;
       }
+      const result = request.command?.kind === 'browse_scroll'
+        ? { kind: 'page_cards', value: { cards: [{ index: 0, title: 'Native card', likeCount: 1, collectCount: 2 }] } }
+        : {
+          kind: 'page_probe',
+          value: {
+            targetId: 'target-1',
+            origin: 'https://www.xiaohongshu.com',
+            path: '/explore',
+            readyState: 'complete',
+            pageKind: 'explore',
+            signals: {
+              feedCardCount: 12,
+              noteDetailCount: 0,
+              loginWallCount: 0,
+              captchaSignalCount: 0,
+              captchaSignalCount: 0,
+              dialogCount: 0,
+              profileSignalCount: 0,
+              notificationSignalCount: 0,
+              publishSignalCount: 0,
+              errorSignalCount: 0,
+              mainCount: 1,
+            },
+          },
+        };
       process.stdout.write(`${JSON.stringify({
         type: 'command_result',
         protocolVersion: 2,
@@ -96,27 +121,7 @@ if (mode === 'malformed') {
         ok: true,
         effectPhase: 'confirmed',
         reasonCode: 'confirmed',
-        result: {
-          kind: 'page_probe',
-          value: {
-            targetId: 'target-1',
-            origin: 'https://www.xiaohongshu.com',
-            path: '/explore',
-            readyState: 'complete',
-            pageKind: 'explore',
-            signals: {
-              feedCardCount: 12,
-              noteDetailCount: 0,
-              loginWallCount: 0,
-              dialogCount: 0,
-              profileSignalCount: 0,
-              notificationSignalCount: 0,
-              publishSignalCount: 0,
-              errorSignalCount: 0,
-              mainCount: 1,
-            },
-          },
-        },
+        result,
       })}\n`);
       return;
     }

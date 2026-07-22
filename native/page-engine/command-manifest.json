@@ -255,16 +255,6 @@
       "cancellation": "atomic_dispatch_then_verify"
     },
     {
-      "routeKey": "publish.request",
-      "edgeType": "publish.request",
-      "nativeKind": "publish_transaction",
-      "family": "publish",
-      "requestContract": "PublishRequestPayload",
-      "receipts": ["publish.result"],
-      "effect": "platform_write",
-      "cancellation": "atomic_dispatch_then_verify"
-    },
-    {
       "routeKey": "publish.command:navigate_entry",
       "edgeType": "publish.command",
       "publishKind": "navigate_entry",

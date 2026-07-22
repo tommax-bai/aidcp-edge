@@ -1,5 +1,5 @@
 use crate::error::{EngineError, ErrorCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const MAX_REASON_BYTES: usize = 512;
 const MAX_ID_BYTES: usize = 256;
@@ -33,7 +33,6 @@ pub const PRODUCTION_COMMAND_KINDS: &[&str] = &[
     "interaction_like_comment",
     "captcha_capture",
     "captcha_click",
-    "publish_transaction",
     "publish_navigate_entry",
     "publish_select_mode",
     "publish_upload_image",
@@ -48,20 +47,20 @@ pub const PRODUCTION_COMMAND_KINDS: &[&str] = &[
     "publish_reconcile_scheduled",
 ];
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct EmptyParams {}
 
 pub type PageProbeParams = EmptyParams;
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ReasonParams {
     #[serde(default)]
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TimingParams {
     #[serde(default)]
@@ -72,7 +71,7 @@ pub struct TimingParams {
     pub dwell_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanOperation {
     Click,
@@ -80,7 +79,7 @@ pub enum PlanOperation {
     Scroll,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PlanStep {
     pub action_id: String,
@@ -89,13 +88,13 @@ pub struct PlanStep {
     pub value: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PlanExecuteParams {
     pub steps: Vec<PlanStep>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PageScrollParams {
     #[serde(default)]
@@ -104,7 +103,7 @@ pub struct PageScrollParams {
     pub dwell_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FeedRefreshParams {
     #[serde(default)]
@@ -113,7 +112,7 @@ pub struct FeedRefreshParams {
     pub think_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchSource {
     ExtractFromLiked,
@@ -122,7 +121,7 @@ pub enum SearchSource {
     Manager,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchSort {
     Comprehensive,
@@ -132,7 +131,7 @@ pub enum SearchSort {
     MostCommented,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchTimeWindow {
     All,
@@ -141,7 +140,7 @@ pub enum SearchTimeWindow {
     HalfYear,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SearchExecuteParams {
     pub keyword: String,
@@ -155,21 +154,21 @@ pub struct SearchExecuteParams {
     pub time_window: Option<SearchTimeWindow>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoteSurface {
     Feed,
     Detail,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotePurpose {
     Read,
     Navigate,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NoteOpenParams {
     #[serde(default)]
@@ -188,14 +187,14 @@ pub struct NoteOpenParams {
     pub think_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NavigationTarget {
     Feed,
     Search,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NavigationBackParams {
     #[serde(default)]
@@ -206,7 +205,7 @@ pub struct NavigationBackParams {
     pub dwell_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NoteTraverseParams {
     pub note_id: String,
@@ -218,7 +217,7 @@ pub struct NoteTraverseParams {
     pub dwell_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProfileOpenParams {
     #[serde(default)]
@@ -231,7 +230,7 @@ pub struct ProfileOpenParams {
     pub direct: Option<bool>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NotificationParams {
     #[serde(default)]
@@ -240,7 +239,7 @@ pub struct NotificationParams {
     pub scroll_max: Option<u32>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NoteInteractionParams {
     pub note_id: String,
@@ -250,7 +249,7 @@ pub struct NoteInteractionParams {
     pub think_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FollowParams {
     #[serde(default)]
@@ -263,7 +262,7 @@ pub struct FollowParams {
     pub think_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CommentParams {
     pub note_id: String,
@@ -278,7 +277,7 @@ pub struct CommentParams {
     pub think_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct LikeCommentParams {
     pub comment_anchor_id: String,
@@ -289,7 +288,7 @@ pub struct LikeCommentParams {
     pub think_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CaptchaCaptureParams {
     pub incident_id: String,
@@ -301,7 +300,7 @@ pub struct CaptchaCaptureParams {
     pub quality: Option<u8>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CaptchaPoint {
     pub x: f64,
@@ -310,7 +309,7 @@ pub struct CaptchaPoint {
     pub label: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CaptchaClickParams {
     pub incident_id: String,
@@ -324,24 +323,14 @@ pub struct CaptchaClickParams {
     pub submit: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct PublishTransactionParams {
-    pub title: String,
-    pub content: String,
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub images: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PublishIdentity {
     pub record_id: u64,
     pub seq: u32,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PublishFieldParams {
     pub record_id: u64,
@@ -350,7 +339,7 @@ pub struct PublishFieldParams {
     pub value: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PublishCandidateParams {
     pub record_id: u64,
@@ -360,15 +349,24 @@ pub struct PublishCandidateParams {
     pub candidates: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PublishFileParams {
     pub record_id: u64,
     pub seq: u32,
     pub path: String,
+    pub image_index: u32,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PublishCoverParams {
+    pub record_id: u64,
+    pub seq: u32,
+    pub image_index: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PublishOptionParams {
     pub record_id: u64,
@@ -377,7 +375,7 @@ pub struct PublishOptionParams {
     pub option_value: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PublishScheduleParams {
     pub record_id: u64,
@@ -385,7 +383,7 @@ pub struct PublishScheduleParams {
     pub publish_time: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PublishCaptureParams {
     pub record_id: u64,
@@ -398,7 +396,7 @@ pub struct PublishCaptureParams {
     pub publish_time: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "params", rename_all = "snake_case")]
 pub enum NativeCommand {
     PageProbe(PageProbeParams),
@@ -427,11 +425,10 @@ pub enum NativeCommand {
     InteractionLikeComment(LikeCommentParams),
     CaptchaCapture(CaptchaCaptureParams),
     CaptchaClick(CaptchaClickParams),
-    PublishTransaction(PublishTransactionParams),
     PublishNavigateEntry(PublishIdentity),
     PublishSelectMode(PublishIdentity),
     PublishUploadImage(PublishFileParams),
-    PublishSetCover(PublishFileParams),
+    PublishSetCover(PublishCoverParams),
     PublishFillField(PublishFieldParams),
     PublishAddWithCandidate(PublishCandidateParams),
     PublishSetOption(PublishOptionParams),
@@ -443,6 +440,17 @@ pub enum NativeCommand {
 }
 
 impl NativeCommand {
+    pub fn may_write(&self) -> bool {
+        !matches!(
+            self,
+            Self::PageProbe(_)
+                | Self::PublishCapturePostId(_)
+                | Self::PublishCaptureScheduled(_)
+                | Self::PublishReconcileScheduled(_)
+                | Self::CaptchaCapture(_)
+        )
+    }
+
     pub fn validate(&self) -> Result<(), EngineError> {
         match self {
             Self::PageProbe(_)
@@ -616,14 +624,18 @@ impl NativeCommand {
                 }
                 Ok(())
             }
-            Self::PublishTransaction(params) => {
-                validate_required(&params.title, 2_000, "invalid publish title")?;
-                validate_required(&params.content, MAX_TEXT_BYTES, "invalid publish content")?;
-                validate_string_list(&params.tags, 20, 512, "invalid publish tags")?;
-                validate_string_list(&params.images, 20, MAX_URL_BYTES, "invalid publish images")
+            Self::PublishUploadImage(params) => {
+                validate_required(&params.path, MAX_URL_BYTES, "invalid authorized file path")?;
+                if params.image_index > 99 {
+                    return Err(invalid("invalid publish image index"));
+                }
+                Ok(())
             }
-            Self::PublishUploadImage(params) | Self::PublishSetCover(params) => {
-                validate_required(&params.path, MAX_URL_BYTES, "invalid authorized file path")
+            Self::PublishSetCover(params) => {
+                if params.image_index > 99 {
+                    return Err(invalid("invalid publish cover image index"));
+                }
+                Ok(())
             }
             Self::PublishFillField(params) => {
                 if !matches!(params.field_type.as_str(), "title" | "content") {

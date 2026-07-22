@@ -28,6 +28,7 @@ pub enum PageKind {
     Notification,
     Publish,
     Login,
+    Captcha,
     Error,
     Unknown,
 }
@@ -40,6 +41,8 @@ pub struct RawPageSignals {
     pub feed_card_count: u32,
     pub note_detail_count: u32,
     pub login_wall_count: u32,
+    #[serde(default)]
+    pub captcha_signal_count: u32,
     pub dialog_count: u32,
     pub profile_signal_count: u32,
     #[serde(default)]
@@ -57,6 +60,7 @@ pub struct StructuralSignals {
     pub feed_card_count: u32,
     pub note_detail_count: u32,
     pub login_wall_count: u32,
+    pub captcha_signal_count: u32,
     pub dialog_count: u32,
     pub profile_signal_count: u32,
     pub notification_signal_count: u32,
@@ -109,6 +113,7 @@ pub fn build_result(target_id: String, raw: RawPageSignals) -> Result<ProbeResul
         feed_card_count: raw.feed_card_count.min(999),
         note_detail_count: raw.note_detail_count.min(999),
         login_wall_count: raw.login_wall_count.min(1),
+        captcha_signal_count: raw.captcha_signal_count.min(1),
         dialog_count: raw.dialog_count.min(999),
         profile_signal_count: raw.profile_signal_count.min(999),
         notification_signal_count: raw.notification_signal_count.min(999),
@@ -137,6 +142,9 @@ fn normalize_ready_state(value: &str) -> String {
 pub fn classify_page(host: &str, path: &str, signals: &StructuralSignals) -> PageKind {
     if signals.login_wall_count > 0 {
         return PageKind::Login;
+    }
+    if signals.captcha_signal_count > 0 {
+        return PageKind::Captcha;
     }
     if path == "/404" || path.starts_with("/404/") || signals.error_signal_count > 0 {
         return PageKind::Error;
@@ -197,6 +205,7 @@ mod tests {
             feed_card_count: 0,
             note_detail_count: 0,
             login_wall_count: 0,
+            captcha_signal_count: 0,
             dialog_count: 0,
             profile_signal_count: 0,
             notification_signal_count: 0,
