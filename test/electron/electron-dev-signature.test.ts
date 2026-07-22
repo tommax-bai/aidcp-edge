@@ -13,6 +13,11 @@ const signer = await import(scriptUrl) as {
     options: {
       platform: string;
       approvedHashes?: Record<string, readonly string[]>;
+      approvedLocalSignatures?: Record<string, readonly {
+        originalExecutableSha256: string;
+        signedExecutableSha256: string;
+        codeResourcesSha256: string;
+      }[]>;
       run?: (command: string, args: string[], options?: { quiet?: boolean }) => string;
     },
   ) => { status: string };
@@ -54,6 +59,9 @@ test('known official Electron is locally signed and then skipped idempotently', 
     if (command.endsWith('codesign') && args[0] === '--force') {
       signed = true;
       writeFileSync(fixture.executablePath, 'locally-signed-electron-binary');
+      const signatureRoot = join(fixture.appPath, 'Contents', '_CodeSignature');
+      mkdirSync(signatureRoot, { recursive: true });
+      writeFileSync(join(signatureRoot, 'CodeResources'), 'locally-signed-code-resources');
     }
     return '';
   };
@@ -72,12 +80,44 @@ test('known official Electron is locally signed and then skipped idempotently', 
     ));
     assert.equal(marker.originalExecutableSha256, sha256('official-electron-binary'));
     assert.equal(marker.signedExecutableSha256, sha256('locally-signed-electron-binary'));
+    assert.equal(marker.signedCodeResourcesSha256, sha256('locally-signed-code-resources'));
 
     calls.length = 0;
     const second = signer.ensureElectronDevSignature(fixture.root, {
       platform: 'darwin', approvedHashes, run,
     });
     assert.equal(second.status, 'already-signed-local');
+    assert.ok(!calls.some((call) => call.includes('--force --deep --sign -')));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('a recognized markerless local signature is adopted without being replaced', () => {
+  const fixture = makeFixture('locally-signed-electron-binary');
+  const signatureRoot = join(fixture.appPath, 'Contents', '_CodeSignature');
+  mkdirSync(signatureRoot, { recursive: true });
+  writeFileSync(join(signatureRoot, 'CodeResources'), 'locally-signed-code-resources');
+  const calls: string[] = [];
+  const run = (command: string, args: string[]): string => {
+    calls.push(`${command} ${args.join(' ')}`);
+    return '';
+  };
+
+  try {
+    const result = signer.ensureElectronDevSignature(fixture.root, {
+      platform: 'darwin',
+      approvedHashes: { '31.7.7': [sha256('official-electron-binary')] },
+      approvedLocalSignatures: {
+        '31.7.7': [{
+          originalExecutableSha256: sha256('official-electron-binary'),
+          signedExecutableSha256: sha256('locally-signed-electron-binary'),
+          codeResourcesSha256: sha256('locally-signed-code-resources'),
+        }],
+      },
+      run,
+    });
+    assert.equal(result.status, 'adopted-local-signature');
     assert.ok(!calls.some((call) => call.includes('--force --deep --sign -')));
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
