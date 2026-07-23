@@ -3,6 +3,8 @@ use crate::error::{EngineError, ErrorCode};
 use crate::probe::{ProbeResult, result_from_cdp, xhs_page_probe_expression};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
@@ -13,6 +15,7 @@ pub enum CdpMethod {
     PageEnable,
     PageNavigate,
     PageReload,
+    PageBringToFront,
     PageCaptureScreenshot,
     PageGetLayoutMetrics,
     DomEnable,
@@ -22,6 +25,8 @@ pub enum CdpMethod {
     InputDispatchMouseEvent,
     InputDispatchKeyEvent,
     InputInsertText,
+    NetworkEnable,
+    NetworkGetAllCookies,
 }
 
 impl CdpMethod {
@@ -32,6 +37,7 @@ impl CdpMethod {
             Self::PageEnable => ("Page", "enable"),
             Self::PageNavigate => ("Page", "navigate"),
             Self::PageReload => ("Page", "reload"),
+            Self::PageBringToFront => ("Page", "bringToFront"),
             Self::PageCaptureScreenshot => ("Page", "captureScreenshot"),
             Self::PageGetLayoutMetrics => ("Page", "getLayoutMetrics"),
             Self::DomEnable => ("DOM", "enable"),
@@ -41,6 +47,8 @@ impl CdpMethod {
             Self::InputDispatchMouseEvent => ("Input", "dispatchMouseEvent"),
             Self::InputDispatchKeyEvent => ("Input", "dispatchKeyEvent"),
             Self::InputInsertText => ("Input", "insertText"),
+            Self::NetworkEnable => ("Network", "enable"),
+            Self::NetworkGetAllCookies => ("Network", "getAllCookies"),
         };
         [domain, operation].join(".")
     }
@@ -53,6 +61,7 @@ pub fn allowlisted_method(method: &str) -> Result<CdpMethod, EngineError> {
         CdpMethod::PageEnable,
         CdpMethod::PageNavigate,
         CdpMethod::PageReload,
+        CdpMethod::PageBringToFront,
         CdpMethod::PageCaptureScreenshot,
         CdpMethod::PageGetLayoutMetrics,
         CdpMethod::DomEnable,
@@ -62,6 +71,8 @@ pub fn allowlisted_method(method: &str) -> Result<CdpMethod, EngineError> {
         CdpMethod::InputDispatchMouseEvent,
         CdpMethod::InputDispatchKeyEvent,
         CdpMethod::InputInsertText,
+        CdpMethod::NetworkEnable,
+        CdpMethod::NetworkGetAllCookies,
     ];
     allowed
         .into_iter()
@@ -78,6 +89,7 @@ pub struct CdpSession {
     websocket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     target_id: String,
     next_call_id: u64,
+    network_request_events: VecDeque<Value>,
 }
 
 impl CdpSession {
@@ -94,6 +106,7 @@ impl CdpSession {
             websocket,
             target_id: target.id.clone(),
             next_call_id: 1,
+            network_request_events: VecDeque::new(),
         };
         for method in [
             CdpMethod::RuntimeEnable,
@@ -140,6 +153,48 @@ impl CdpSession {
     pub async fn reload(&mut self) -> Result<Value, EngineError> {
         self.call(CdpMethod::PageReload, json!({ "ignoreCache": false }))
             .await
+    }
+
+    pub async fn bring_to_front(&mut self) -> Result<Value, EngineError> {
+        self.call(CdpMethod::PageBringToFront, json!({})).await
+    }
+
+    pub async fn enable_network(&mut self) -> Result<Value, EngineError> {
+        self.call(CdpMethod::NetworkEnable, json!({})).await
+    }
+
+    pub async fn all_cookies(&mut self) -> Result<Value, EngineError> {
+        self.call(CdpMethod::NetworkGetAllCookies, json!({})).await
+    }
+
+    pub async fn next_network_request(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<Value>, EngineError> {
+        if let Some(event) = self.network_request_events.pop_front() {
+            return Ok(Some(event));
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            let message = match tokio::time::timeout(remaining, self.websocket.next()).await {
+                Ok(Some(message)) => message.map_err(|_| cdp_transport_error())?,
+                Ok(None) => return Err(cdp_transport_error()),
+                Err(_) => return Ok(None),
+            };
+            let payload = match message {
+                Message::Text(text) => text.as_bytes().to_vec(),
+                Message::Binary(bytes) => bytes.to_vec(),
+                Message::Close(_) => return Err(cdp_transport_error()),
+                _ => continue,
+            };
+            if let Some(event) = parse_network_request_event(&payload)? {
+                return Ok(Some(event));
+            }
+        }
     }
 
     pub async fn capture_screenshot(
@@ -311,18 +366,37 @@ impl CdpSession {
 
         while let Some(message) = self.websocket.next().await {
             let message = message.map_err(|_| cdp_transport_error())?;
-            let parsed = match message {
-                Message::Text(text) => parse_correlated_response(text.as_bytes(), id)?,
-                Message::Binary(bytes) => parse_correlated_response(bytes.as_ref(), id)?,
+            let payload = match message {
+                Message::Text(text) => text.as_bytes().to_vec(),
+                Message::Binary(bytes) => bytes.to_vec(),
                 Message::Close(_) => return Err(cdp_transport_error()),
-                _ => None,
+                _ => continue,
             };
+            if let Some(event) = parse_network_request_event(&payload)? {
+                if self.network_request_events.len() >= 128 {
+                    self.network_request_events.pop_front();
+                }
+                self.network_request_events.push_back(event);
+                continue;
+            }
+            let parsed = parse_correlated_response(&payload, id)?;
             if let Some(result) = parsed {
                 return Ok(result);
             }
         }
         Err(cdp_transport_error())
     }
+}
+
+fn parse_network_request_event(payload: &[u8]) -> Result<Option<Value>, EngineError> {
+    if payload.len() > 64 * 1024 {
+        return Ok(None);
+    }
+    let message = serde_json::from_slice::<Value>(payload).map_err(|_| cdp_transport_error())?;
+    if message.get("method").and_then(Value::as_str) != Some("Network.requestWillBeSent") {
+        return Ok(None);
+    }
+    Ok(message.get("params").cloned())
 }
 
 pub async fn run_page_probe(
@@ -385,11 +459,7 @@ mod tests {
 
     #[test]
     fn rejects_operations_outside_the_explicit_allowlist() {
-        for method in [
-            "Network.getAllCookies",
-            "Browser.close",
-            "Runtime.compileScript",
-        ] {
+        for method in ["Browser.close", "Runtime.compileScript"] {
             assert_eq!(
                 allowlisted_method(method)
                     .expect_err("operation must be rejected")
@@ -402,6 +472,8 @@ mod tests {
             CdpMethod::PageNavigate,
             CdpMethod::DomSetFileInputFiles,
             CdpMethod::InputDispatchMouseEvent,
+            CdpMethod::NetworkEnable,
+            CdpMethod::NetworkGetAllCookies,
         ] {
             assert_eq!(
                 allowlisted_method(&method.name()).expect("allowlisted"),
@@ -437,5 +509,30 @@ mod tests {
         .expect_err("CDP error");
         assert_eq!(error.code, ErrorCode::CdpError);
         assert!(!error.message.contains("sensitive"));
+    }
+
+    #[test]
+    fn retains_only_bounded_network_request_events() {
+        assert!(
+            parse_network_request_event(
+                br#"{"method":"Runtime.executionContextCreated","params":{"secret":"ignored"}}"#
+            )
+            .expect("runtime event")
+            .is_none()
+        );
+        let event = parse_network_request_event(
+            br#"{"method":"Network.requestWillBeSent","params":{"request":{"url":"https://channels.weixin.qq.com/"}}}"#,
+        )
+        .expect("network event")
+        .expect("request event");
+        assert_eq!(
+            event.pointer("/request/url").and_then(Value::as_str),
+            Some("https://channels.weixin.qq.com/")
+        );
+        assert!(
+            parse_network_request_event(&vec![b'x'; 64 * 1024 + 1])
+                .expect("oversized")
+                .is_none()
+        );
     }
 }

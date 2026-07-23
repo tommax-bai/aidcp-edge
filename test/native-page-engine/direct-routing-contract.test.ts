@@ -34,11 +34,12 @@ test('maps every publish atom to one fixed Native command without a fallback sur
   }
 });
 
-test('main wires every Xiaohongshu page path to Native-only and has no legacy dispatch branch', async () => {
+test('main wires every browser-platform page path to Native-only and has no legacy dispatch branch', async () => {
   const main = await readFile(resolve(repoRoot, 'src/main.ts'), 'utf8');
   const runtime = await readFile(resolve(repoRoot, 'src/native-page-engine/runtime.ts'), 'utf8');
-  assert.match(main, /小红书页面执行已切换为 Native-only/);
-  assert.match(main, /if \(autoBrowse && nativePageRuntime\)/);
+  assert.match(main, /\$\{platformDriver\.platform\} 页面执行已切换为 Native-only/);
+  assert.match(main, /const nativePageRuntime = NativePageRuntime\.fromEnvironment/);
+  assert.match(main, /if \(autoBrowse\) \{[\s\S]*new NativeBrowseSession/);
   assert.match(main, /nativePublishExecutor\.dispatch/);
   assert.match(main, /client\.onPlanCommand\(dispatchOrQueuePageCommand\)/);
   assert.match(main, /installPageCommandHandler\(routeNativeCommand\)/);

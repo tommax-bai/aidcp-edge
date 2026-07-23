@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { collectFacebookFingerprintSummary } from '../../src/facebook/probes/fingerprint.js';
 import {
-  collectFacebookFingerprintSummary,
   collectFacebookStorageSummary,
   summarizeCookies,
   summarizeStorageNames,
-} from '../../src/facebook/index.js';
+} from '../../src/facebook/probes/storage-summary.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
 function fakeCdpForProbes(): BrowseCdp {

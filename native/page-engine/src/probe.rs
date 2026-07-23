@@ -17,7 +17,7 @@ pub fn xhs_page_probe_expression() -> Result<String, EngineError> {
     String::from_utf8(decoded).map_err(|_| invalid_probe_result())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PageKind {
     Home,
@@ -54,7 +54,8 @@ pub struct RawPageSignals {
     pub main_count: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuralSignals {
     pub feed_card_count: u32,
@@ -69,7 +70,8 @@ pub struct StructuralSignals {
     pub main_count: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeResult {
     pub target_id: String,

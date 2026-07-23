@@ -49,7 +49,7 @@ export interface NativePageProbeResult {
 export interface NativePageProbeInput {
   host: string;
   port: number;
-  platform: 'xiaohongshu';
+  platform: NativePagePlatform;
   /** Native CDP/HTTP operation deadline. */
   timeoutMs?: number;
 }
@@ -62,7 +62,15 @@ export interface NativePageSessionInput extends NativePageProbeInput {
 export interface NativePageEngineManifest {
   engineVersion: string;
   platformAdapterVersion: string;
+  platformAdapters: NativePagePlatformAdapter[];
   capabilityDigest: string;
+}
+
+export type NativePagePlatform = 'xiaohongshu' | 'facebook' | 'wechat_channels';
+
+export interface NativePagePlatformAdapter {
+  platform: NativePagePlatform;
+  adapterVersion: string;
 }
 
 export type NativePageCommandKind =
@@ -71,7 +79,8 @@ export type NativePageCommandKind =
   | 'note_browse_images' | 'note_scroll_comments' | 'profile_open' | 'notification_open'
   | 'notification_browse_comments' | 'notification_browse_likes' | 'notification_browse_follows'
   | 'notification_back_home' | 'interaction_like' | 'interaction_collect' | 'interaction_follow'
-  | 'interaction_comment' | 'interaction_like_comment' | 'captcha_capture' | 'captcha_click'
+  | 'interaction_comment' | 'interaction_like_comment' | 'group_join'
+  | 'wechat_capture_session' | 'identity_read' | 'captcha_capture' | 'captcha_click'
   | 'publish_navigate_entry' | 'publish_select_mode' | 'publish_upload_image'
   | 'publish_set_cover' | 'publish_fill_field' | 'publish_add_with_candidate' | 'publish_set_option'
   | 'publish_set_schedule' | 'publish_submit' | 'publish_capture_post_id'
@@ -398,6 +407,7 @@ class NativeProcessTransport {
       if (this.expectedManifest && (
         ready.manifest.engineVersion !== this.expectedManifest.engineVersion
         || ready.manifest.platformAdapterVersion !== this.expectedManifest.platformAdapterVersion
+        || JSON.stringify(ready.manifest.platformAdapters) !== JSON.stringify(this.expectedManifest.platformAdapters)
         || ready.manifest.capabilityDigest !== this.expectedManifest.capabilityDigest
       )) {
         this.failProtocol('Native Page Engine readiness manifest does not match the packaged artifact');
@@ -636,10 +646,29 @@ function parseReadyRecord(value: unknown): ReadyRecord | undefined {
     || !manifest.engineVersion
     || typeof manifest.platformAdapterVersion !== 'string'
     || !manifest.platformAdapterVersion
+    || !isPlatformAdapters(manifest.platformAdapters)
     || typeof manifest.capabilityDigest !== 'string'
     || !/^[a-f0-9]{64}$/i.test(manifest.capabilityDigest)
   ) return undefined;
   return value as unknown as ReadyRecord;
+}
+
+function isPlatformAdapters(value: unknown): value is NativePagePlatformAdapter[] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  const seen = new Set<string>();
+  for (const adapter of value) {
+    if (
+      !isRecord(adapter)
+      || !['xiaohongshu', 'facebook', 'wechat_channels'].includes(String(adapter.platform))
+      || typeof adapter.adapterVersion !== 'string'
+      || !adapter.adapterVersion
+      || seen.has(String(adapter.platform))
+    ) {
+      return false;
+    }
+    seen.add(String(adapter.platform));
+  }
+  return true;
 }
 
 function parseLifecycle<T>(

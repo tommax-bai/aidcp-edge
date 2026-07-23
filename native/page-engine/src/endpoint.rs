@@ -216,20 +216,33 @@ pub fn select_target(
     platform: Platform,
     endpoint_port: u16,
 ) -> Result<CdpTarget, EngineError> {
-    targets
+    let matched = targets
         .iter()
         .find(|target| {
             target.target_type == "page"
                 && is_allowed_page_url(&target.url, platform)
                 && is_allowed_debugger_url(&target.web_socket_debugger_url, endpoint_port)
         })
-        .cloned()
-        .ok_or_else(|| {
-            EngineError::new(
-                ErrorCode::NoMatchingTarget,
-                "no matching page target was found",
-            )
-        })
+        .cloned();
+    if let Some(target) = matched {
+        return Ok(target);
+    }
+    if platform == Platform::Facebook {
+        let mut blank = targets.iter().filter(|target| {
+            target.target_type == "page"
+                && target.url == "about:blank"
+                && is_allowed_debugger_url(&target.web_socket_debugger_url, endpoint_port)
+        });
+        if let Some(target) = blank.next()
+            && blank.next().is_none()
+        {
+            return Ok(target.clone());
+        }
+    }
+    Err(EngineError::new(
+        ErrorCode::NoMatchingTarget,
+        "no matching page target was found",
+    ))
 }
 
 fn is_allowed_page_url(raw_url: &str, platform: Platform) -> bool {
@@ -244,6 +257,12 @@ fn is_allowed_page_url(raw_url: &str, platform: Platform) -> bool {
     };
     match platform {
         Platform::Xiaohongshu => host == "xiaohongshu.com" || host.ends_with(".xiaohongshu.com"),
+        Platform::Facebook => {
+            host == "facebook.com"
+                || host.ends_with(".facebook.com")
+                || host == "facebookcorewwwi.onion"
+        }
+        Platform::WechatChannels => host == "channels.weixin.qq.com",
     }
 }
 
@@ -312,6 +331,98 @@ mod tests {
         ];
         let selected = select_target(&targets, Platform::Xiaohongshu, 9222).expect("target");
         assert_eq!(selected.id, "xhs");
+    }
+
+    #[test]
+    fn selects_only_the_bound_platform_target() {
+        let targets = vec![
+            target(
+                "xhs",
+                "page",
+                "https://www.xiaohongshu.com/explore",
+                "ws://127.0.0.1:9222/devtools/page/xhs",
+            ),
+            target(
+                "facebook",
+                "page",
+                "https://www.facebook.com/",
+                "ws://127.0.0.1:9222/devtools/page/facebook",
+            ),
+            target(
+                "wechat",
+                "page",
+                "https://channels.weixin.qq.com/platform/post/list",
+                "ws://127.0.0.1:9222/devtools/page/wechat",
+            ),
+        ];
+        assert_eq!(
+            select_target(&targets, Platform::Facebook, 9222)
+                .expect("facebook")
+                .id,
+            "facebook"
+        );
+        assert_eq!(
+            select_target(&targets, Platform::WechatChannels, 9222)
+                .expect("wechat")
+                .id,
+            "wechat"
+        );
+    }
+
+    #[test]
+    fn facebook_accepts_one_exact_blank_bootstrap_target_only() {
+        let blank = target(
+            "blank",
+            "page",
+            "about:blank",
+            "ws://127.0.0.1:9222/devtools/page/blank",
+        );
+        assert_eq!(
+            select_target(std::slice::from_ref(&blank), Platform::Facebook, 9222)
+                .expect("single blank bootstrap")
+                .id,
+            "blank",
+        );
+        assert!(
+            select_target(
+                &[
+                    blank,
+                    target(
+                        "blank-2",
+                        "page",
+                        "about:blank",
+                        "ws://127.0.0.1:9222/devtools/page/blank-2",
+                    ),
+                ],
+                Platform::Facebook,
+                9222,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_lookalike_platform_hosts() {
+        for (platform, url) in [
+            (Platform::Facebook, "https://www.facebook.com.evil.test/"),
+            (
+                Platform::WechatChannels,
+                "https://channels.weixin.qq.com.evil.test/platform/post/list",
+            ),
+        ] {
+            let targets = vec![target(
+                "lookalike",
+                "page",
+                url,
+                "ws://127.0.0.1:9222/devtools/page/lookalike",
+            )];
+            assert_eq!(
+                select_target(&targets, platform, 9222)
+                    .expect_err("lookalike host")
+                    .code,
+                ErrorCode::NoMatchingTarget
+            );
+        }
     }
 
     #[test]

@@ -84,7 +84,7 @@ test('quiesced Native session rejects ordinary browse without touching runtime',
   await h.session.onCloudCommand(envelope('page.scroll', { reason: 'ordinary' }));
 
   assert.equal(h.executions.length, 0);
-  assert.deepEqual(h.actions, [{ action: 'page.scroll', ok: false, reason: 'native_session_quiesced' }]);
+  assert.deepEqual(h.actions, [{ action: 'scroll', ok: false, reason: 'native_session_quiesced' }]);
 });
 
 test('pre-actuation Native search rejection keeps one valid correlated terminal', async () => {

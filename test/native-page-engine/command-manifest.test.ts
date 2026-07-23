@@ -26,7 +26,7 @@ interface SessionControl {
 interface CommandManifest {
   schemaVersion: number;
   protocolVersion: number;
-  platform: string;
+  platforms: Array<{ platform: string; adapterVersion: string }>;
   duplicatePolicy: string;
   commands: ManifestCommand[];
   sessionControls: SessionControl[];
@@ -93,7 +93,11 @@ test('freezes every publish.command kind exactly once', async () => {
 test('manifest route and Native command identities are unique and bounded', async () => {
   const manifest = await loadManifest();
   assert.equal(manifest.protocolVersion, 2);
-  assert.equal(manifest.platform, 'xiaohongshu');
+  assert.deepEqual(manifest.platforms, [
+    { platform: 'xiaohongshu', adapterVersion: 'xiaohongshu-v1' },
+    { platform: 'facebook', adapterVersion: 'facebook-v1' },
+    { platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' },
+  ]);
 
   const routeKeys = manifest.commands.map((command) => command.routeKey);
   const nativeKinds = [

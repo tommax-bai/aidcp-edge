@@ -7,7 +7,7 @@ import { BrowserProfileInUseError } from '../../src/cdp/browser-provider.js';
 import type { WechatChannelsApiClient } from '../../src/wechat-channels/api-client.js';
 import { WechatAuthCoordinator } from '../../src/wechat-channels/auth-session.js';
 import {
-  captureRequestContext,
+  parseNativeWechatSessionCandidate,
   safeBrowserSidecarDiagnostic,
   type WechatChannelsBrowserSidecar,
 } from '../../src/wechat-channels/browser-sidecar.js';
@@ -175,27 +175,22 @@ test('wechat session store: AES-GCM round-trip keeps cookies out of plaintext an
   });
 });
 
-test('wechat auth capture: accepts observed empty finder uin and raw key strings', () => {
-  const captured = captureRequestContext({
-    request: {
-      url: 'https://channels.weixin.qq.com/cgi-bin/mmfinderassistant-bin/auth/auth_data?_aid=aid-test&_pageUrl=https%3A%2F%2Fchannels.weixin.qq.com%2Fplatform%2Fpost%2Flist&_rid=rid-test',
-      postData: JSON.stringify({
-        _log_finder_id: 'finder-test',
-        _log_finder_uin: '',
+test('wechat auth capture: accepts Native candidate with observed empty finder uin and raw key strings', () => {
+  const captured = parseNativeWechatSessionCandidate({
+    cookies: SESSION.cookies.map((cookie) => ({ ...cookie, httpOnly: false, secure: true })),
+    userAgent: SESSION.userAgent,
+    acquiredAt: SESSION.acquiredAt,
+    requestContext: {
+      ...SESSION.requestContext,
+      commonBody: {
+        ...SESSION.requestContext.commonBody,
+        logFinderUin: '',
         rawKeyBuff: '',
-        timestamp: '123',
-        scene: 7,
-        reqScene: 7,
-        pluginSessionId: null,
-      }),
-      headers: {
-        'finger-print-device-id': 'device-test',
-        'X-WECHAT-UIN': 'uin-test',
       },
     },
   });
 
-  assert.deepEqual(captured?.commonBody, {
+  assert.deepEqual(captured?.requestContext.commonBody, {
     logFinderId: 'finder-test',
     logFinderUin: '',
     rawKeyBuff: '',

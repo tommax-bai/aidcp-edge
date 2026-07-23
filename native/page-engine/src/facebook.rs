@@ -1,22 +1,20 @@
-use crate::command::NativeCommand;
-use crate::engine::CommandOutput;
 use crate::error::{EngineError, ErrorCode};
 use crate::model::{
-    ActionReceipt, NoteDetail, NotificationHome, NotificationItems, PageCards, PlanResults,
-    ProfileDetail, PublishReceipt,
+    ActionReceipt, FacebookIdentityReceipt, NoteDetail, PageCards, ProfileDetail, PublishReceipt,
 };
-use crate::protocol::EffectPhase;
+use crate::probe::ProbeResult;
+use crate::protocol::{EffectPhase, NativeCommand};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
+use url::Url;
 
-include!(concat!(env!("OUT_DIR"), "/xhs_command_router_bytes.rs"));
 include!(concat!(
     env!("OUT_DIR"),
-    "/xhs_file_input_selector_bytes.rs"
+    "/facebook_command_router_bytes.rs"
 ));
 include!(concat!(
     env!("OUT_DIR"),
-    "/xhs_search_input_geometry_bytes.rs"
+    "/facebook_file_input_selector_bytes.rs"
 ));
 
 const ROUTER_KEY: &[u8] = &[
@@ -31,29 +29,35 @@ pub struct BrowserCommandResult {
 }
 
 pub fn command_expression(command: &NativeCommand) -> Result<String, EngineError> {
-    let decoded: Vec<u8> = XHS_COMMAND_ROUTER_BYTES
+    router_expression(serde_json::to_value(command).map_err(|_| invalid_result())?)
+}
+
+pub fn identity_expression(cookie_user_id: Option<&str>) -> Result<String, EngineError> {
+    router_expression(json!({
+        "kind": "identity_read",
+        "params": {
+            "cookieUserId": cookie_user_id.unwrap_or_default()
+        }
+    }))
+}
+
+pub fn page_probe_expression() -> Result<String, EngineError> {
+    router_expression(json!({ "kind": "page_probe", "params": {} }))
+}
+
+fn router_expression(input: Value) -> Result<String, EngineError> {
+    let decoded: Vec<u8> = FACEBOOK_COMMAND_ROUTER_BYTES
         .iter()
         .enumerate()
         .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])
         .collect();
     let source = String::from_utf8(decoded).map_err(|_| invalid_result())?;
-    let command = serde_json::to_string(command).map_err(|_| invalid_result())?;
-    Ok(format!("({source})({command})"))
+    let input = serde_json::to_string(&input).map_err(|_| invalid_result())?;
+    Ok(format!("({source})({input})"))
 }
 
 pub fn file_input_selector() -> Result<String, EngineError> {
-    let decoded: Vec<u8> = XHS_FILE_INPUT_SELECTOR_BYTES
-        .iter()
-        .enumerate()
-        .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])
-        .collect();
-    String::from_utf8(decoded)
-        .map(|value| value.trim().to_owned())
-        .map_err(|_| invalid_result())
-}
-
-pub fn search_input_geometry_expression() -> Result<String, EngineError> {
-    let decoded: Vec<u8> = XHS_SEARCH_INPUT_GEOMETRY_BYTES
+    let decoded: Vec<u8> = FACEBOOK_FILE_INPUT_SELECTOR_BYTES
         .iter()
         .enumerate()
         .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])
@@ -71,13 +75,31 @@ pub fn result_from_cdp(result: &Value) -> Result<BrowserCommandResult, EngineErr
     serde_json::from_value(value.clone()).map_err(|_| invalid_result())
 }
 
-pub fn typed_output(command: &NativeCommand, output: Value) -> Result<CommandOutput, EngineError> {
+pub fn typed_output(
+    command: &NativeCommand,
+    output: Value,
+    target_id: &str,
+) -> Result<crate::engine::CommandOutput, EngineError> {
+    use crate::engine::CommandOutput;
     let kind = output
         .get("kind")
         .and_then(Value::as_str)
         .ok_or_else(invalid_result)?;
     let value = output.get("value").cloned().ok_or_else(invalid_result)?;
     match kind {
+        "page_probe" => {
+            let mut probe =
+                serde_json::from_value::<ProbeResult>(value).map_err(|_| invalid_result())?;
+            let origin = Url::parse(&probe.origin).map_err(|_| invalid_result())?;
+            let host = origin.host_str().ok_or_else(invalid_result)?;
+            if origin.scheme() != "https"
+                || !(host == "facebook.com" || host.ends_with(".facebook.com"))
+            {
+                return Err(invalid_result());
+            }
+            probe.target_id = target_id.to_owned();
+            Ok(CommandOutput::PageProbe(probe))
+        }
         "page_cards" => Ok(CommandOutput::PageCards(
             serde_json::from_value::<PageCards>(value)
                 .map_err(|_| invalid_result())?
@@ -93,16 +115,8 @@ pub fn typed_output(command: &NativeCommand, output: Value) -> Result<CommandOut
                 .map_err(|_| invalid_result())?
                 .bounded(),
         )),
-        "notification_items" => Ok(CommandOutput::NotificationItems(
-            serde_json::from_value::<NotificationItems>(value)
-                .map_err(|_| invalid_result())?
-                .bounded(),
-        )),
-        "notification_home" => Ok(CommandOutput::NotificationHome(
-            serde_json::from_value::<NotificationHome>(value).map_err(|_| invalid_result())?,
-        )),
-        "plan_results" => Ok(CommandOutput::PlanResults(
-            serde_json::from_value::<PlanResults>(value)
+        "identity_receipt" => Ok(CommandOutput::FacebookIdentity(
+            serde_json::from_value::<FacebookIdentityReceipt>(value)
                 .map_err(|_| invalid_result())?
                 .bounded(),
         )),
@@ -165,7 +179,7 @@ fn publish_identity(command: &NativeCommand) -> Option<(u64, u32, String)> {
 fn invalid_result() -> EngineError {
     EngineError::new(
         ErrorCode::CdpError,
-        "native Xiaohongshu command returned an invalid bounded result",
+        "native Facebook command returned an invalid bounded result",
     )
 }
 
@@ -174,13 +188,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embeds_only_typed_command_json_into_the_encoded_router() {
-        let command: NativeCommand =
-            serde_json::from_str(r#"{"kind":"search_execute","params":{"keyword":"coffee"}}"#)
-                .expect("command");
+    fn embeds_only_typed_inputs_into_the_encoded_router() {
+        let command: NativeCommand = serde_json::from_str(
+            r#"{"kind":"group_join","params":{"groupUrl":"https://www.facebook.com/groups/123","click":false}}"#,
+        )
+        .expect("command");
         let expression = command_expression(&command).expect("expression");
-        assert!(expression.contains("search_execute"));
-        assert!(expression.contains("coffee"));
+        assert!(expression.contains("group_join"));
+        assert!(expression.contains("groups/123"));
         assert!(!expression.contains("runtime_evaluate"));
+    }
+
+    #[test]
+    fn identity_cookie_is_internal_to_native_expression() {
+        let expression = identity_expression(Some("123456789")).expect("expression");
+        assert!(expression.contains("identity_read"));
+        assert!(expression.contains("123456789"));
     }
 }

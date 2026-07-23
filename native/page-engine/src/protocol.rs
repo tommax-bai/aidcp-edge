@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const PLATFORM_ADAPTER_VERSION: &str = "xiaohongshu-v1";
+pub const PLATFORM_ADAPTER_VERSION: &str = "multi-platform-v1";
 pub const CAPABILITY_DIGEST: &str = env!("AIDCP_PAGE_ENGINE_CAPABILITY_DIGEST");
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 const MIN_TIMEOUT_MS: u64 = 50;
@@ -15,6 +15,18 @@ const MAX_IDENTIFIER_BYTES: usize = 128;
 #[serde(rename_all = "snake_case")]
 pub enum Platform {
     Xiaohongshu,
+    Facebook,
+    WechatChannels,
+}
+
+impl Platform {
+    pub const fn adapter_version(self) -> &'static str {
+        match self {
+            Self::Xiaohongshu => "xiaohongshu-v1",
+            Self::Facebook => "facebook-v1",
+            Self::WechatChannels => "wechat-channels-v1",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -215,7 +227,15 @@ fn invalid_request(message: &'static str) -> EngineError {
 pub struct EngineManifestRecord<'a> {
     pub engine_version: &'a str,
     pub platform_adapter_version: &'a str,
+    pub platform_adapters: [PlatformAdapterRecord<'a>; 3],
     pub capability_digest: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformAdapterRecord<'a> {
+    pub platform: Platform,
+    pub adapter_version: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -235,6 +255,20 @@ impl Default for ReadyRecord<'static> {
             manifest: EngineManifestRecord {
                 engine_version: ENGINE_VERSION,
                 platform_adapter_version: PLATFORM_ADAPTER_VERSION,
+                platform_adapters: [
+                    PlatformAdapterRecord {
+                        platform: Platform::Xiaohongshu,
+                        adapter_version: Platform::Xiaohongshu.adapter_version(),
+                    },
+                    PlatformAdapterRecord {
+                        platform: Platform::Facebook,
+                        adapter_version: Platform::Facebook.adapter_version(),
+                    },
+                    PlatformAdapterRecord {
+                        platform: Platform::WechatChannels,
+                        adapter_version: Platform::WechatChannels.adapter_version(),
+                    },
+                ],
                 capability_digest: CAPABILITY_DIGEST,
             },
         }

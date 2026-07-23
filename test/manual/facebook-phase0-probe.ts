@@ -33,26 +33,36 @@ import {
   selectBrowserProvider,
   type BrowserProvider,
 } from '../../src/cdp/index.js';
+import { facebookPlatformDriver } from '../../src/facebook/driver.js';
+import { readFacebookIdentity } from '../../src/facebook/identity.js';
+import { classifyFacebookOverlay } from '../../src/facebook/overlay.js';
+import {
+  probeFacebookCommentEditorReadOnly,
+  type FacebookEditorProbeResult,
+} from '../../src/facebook/probes/editor-probe.js';
 import {
   collectFacebookFingerprintSummary,
-  collectFacebookPageStructure,
-  collectFacebookStorageSummary,
+  type FacebookFingerprintSummary,
+} from '../../src/facebook/probes/fingerprint.js';
+import {
   facebookGatedSubmitPreflight,
-  facebookPlatformDriver,
-  probeFacebookCommentEditorReadOnly,
-  probeFacebookPostComposerReadOnly,
-  probeFacebookPostMediaReadOnly,
-  readFacebookIdentity,
-  classifyFacebookOverlay,
   runFacebookGatedSubmitProbe,
-  type FacebookEditorProbeResult,
   type FacebookGatedSubmitPreflightResult,
   type FacebookGatedSubmitProbeResult,
-  type FacebookPostComposerProbeResult,
+} from '../../src/facebook/probes/gated-submit.js';
+import {
+  collectFacebookPageStructure,
   type FacebookPageStructureSummary,
+} from '../../src/facebook/probes/page-structure.js';
+import {
+  probeFacebookPostComposerReadOnly,
+  type FacebookPostComposerProbeResult,
+} from '../../src/facebook/probes/post-composer-probe.js';
+import { probeFacebookPostMediaReadOnly } from '../../src/facebook/probes/post-media-probe.js';
+import {
+  collectFacebookStorageSummary,
   type FacebookStorageSummary,
-  type FacebookFingerprintSummary,
-} from '../../src/facebook/index.js';
+} from '../../src/facebook/probes/storage-summary.js';
 import { CdpFileInputSetter } from '../../src/cdp/file-input-setter.js';
 import { ImageUploader } from '../../src/flows/image-uploader.js';
 

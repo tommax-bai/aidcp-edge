@@ -7,7 +7,7 @@ import {
   backfillOverlayEvidenceText,
   classifyFacebookOverlay,
   classifyFacebookOverlayFromSignals,
-} from '../../src/facebook/index.js';
+} from '../../src/facebook/overlay.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import type { BlockingOverlaySnapshot } from '../../src/browse/overlay-monitor.js';
 

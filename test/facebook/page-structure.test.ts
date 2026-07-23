@@ -6,7 +6,7 @@ import {
   collectFacebookPageStructure,
   normalizeFacebookPageStructure,
   sanitizeFacebookPermalinkHref,
-} from '../../src/facebook/index.js';
+} from '../../src/facebook/probes/page-structure.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
 function fakeCdp(raw: unknown): BrowseCdp {

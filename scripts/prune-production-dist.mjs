@@ -56,10 +56,33 @@ const forbiddenPaths = [
   'client/like-runner.js',
   'locating/engine.js',
   'locating/cache.js',
+  'facebook/identity.js',
+  'facebook/overlay.js',
+  'facebook/consent.js',
+  'facebook/cta-labels.js',
+  'facebook/feed-reader.js',
+  'facebook/inline-reader.js',
+  'facebook/post-reader.js',
+  'facebook/reels-reader.js',
+  'facebook/viewport-scroll.js',
+  'facebook/like-executor.js',
+  'facebook/facebook-session.js',
+  'facebook/comment-executor.js',
+  'facebook/comment-handler.js',
+  'facebook/join-executor.js',
+  'facebook/join-handler.js',
+  'facebook/publish-executor.js',
+  'facebook/probes/editor-probe.js',
+  'facebook/probes/fingerprint.js',
+  'facebook/probes/gated-submit.js',
+  'facebook/probes/page-structure.js',
+  'facebook/probes/post-composer-probe.js',
+  'facebook/probes/post-media-probe.js',
+  'facebook/probes/storage-summary.js',
 ];
 for (const path of forbiddenPaths) {
   if (existsSync(join(distRoot, path))) {
-    throw new Error(`migrated Xiaohongshu JavaScript module remains in production dist: ${path}`);
+    throw new Error(`migrated page-engine JavaScript module remains in production dist: ${path}`);
   }
 }
 
@@ -68,6 +91,10 @@ const forbiddenMarkers = [
   'note.publish_set_cover',
   'creator-preview-image-0',
   "input.upload-input[type=file]",
+  'facebook stable numeric id candidate was not found',
+  'facebook identity candidates conflict',
+  'facebook-comment-lifecycle-verify',
+  'target_not_facebook',
 ];
 for (const file of reachable) {
   const source = readFileSync(file, 'utf8');
@@ -78,10 +105,20 @@ for (const file of reachable) {
   }
 }
 
+const wechatSidecar = join(distRoot, 'wechat-channels/browser-sidecar.js');
+if (existsSync(wechatSidecar)) {
+  const source = readFileSync(wechatSidecar, 'utf8');
+  for (const marker of ['Network.getAllCookies', 'Network.requestWillBeSent', 'Runtime.evaluate']) {
+    if (source.includes(marker)) {
+      throw new Error(`migrated WeChat browser-session rule remains in production dist: ${marker}`);
+    }
+  }
+}
+
 for (const file of allFiles) {
   if (/\.map$/i.test(file) && existsSync(file)) {
     throw new Error(`source map is forbidden in production dist: ${relative(distRoot, file)}`);
   }
 }
 
-console.log(`[production-dist] reachable=${reachable.size} removed=${removed} legacy_xhs=absent source_maps=absent`);
+console.log(`[production-dist] reachable=${reachable.size} removed=${removed} legacy_page_rules=absent source_maps=absent`);

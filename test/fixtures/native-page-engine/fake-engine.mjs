@@ -15,7 +15,12 @@ if (mode === 'malformed') {
     protocolVersion: 2,
     manifest: {
       engineVersion: 'test',
-      platformAdapterVersion: 'xiaohongshu-test',
+      platformAdapterVersion: 'multi-platform-test',
+      platformAdapters: [
+        { platform: 'xiaohongshu', adapterVersion: 'xiaohongshu-test' },
+        { platform: 'facebook', adapterVersion: 'facebook-test' },
+        { platform: 'wechat_channels', adapterVersion: 'wechat-channels-test' },
+      ],
       capabilityDigest: 'a'.repeat(64),
     },
   })}\n`);

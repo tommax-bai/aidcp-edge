@@ -6,7 +6,7 @@
  *  - 连接本机 Chrome CDP（默认 127.0.0.1:9222），附着到一个 page，
  *    得到 DomProvider / ActionExecutor；
  *  - 连接云端 WS（默认 ws://127.0.0.1:8787），握手上线；
- *  - 小红书页面命令只交给 Native Page Engine，Facebook 保持现有执行器；
+ *  - 小红书与 Facebook 页面命令只交给 Native Page Engine；
  *  - 对支持 browse 的平台，登录完成后创建对应的 EdgeBrowseSession 并 start()：自动浏览 feed、
  *    打开笔记、提取内容上报云端、按云端决策（like / browse.next / search / session.end）动作。
  *
@@ -51,18 +51,6 @@ import {
 } from './cdp/index.js';
 import { selectPlatformDriver, startupIdentityReadPolicy } from './platform/index.js';
 import { runWechatChannelsRuntime } from './wechat-channels/runtime.js';
-import {
-  backfillOverlayEvidenceText,
-  emitCompanionUiEvent,
-  FacebookBrowseSession,
-  FacebookCommentExecutor,
-  FacebookCommentHandler,
-  FacebookJoinExecutor,
-  FacebookOverlayMonitor,
-  FacebookPublishExecutor,
-  facebookActionNameForCommand,
-  usesFacebookBrowseSession,
-} from './facebook/index.js';
 import { EdgeClient, CloudHandshakeRejectedError } from './client/edge-client.js';
 import { automationUiSnapshot, operationDescriptorFor } from './client/operation-registry.js';
 import { registerPersonaStdinCommands } from './client/persona-onboarding.js';
@@ -77,30 +65,42 @@ import { EdgeTaskCoordinator } from './execution/edge-task-coordinator.js';
 import { CommitWindowGuard, combineCommitWindows } from './execution/commit-window.js';
 import { abortForTakeover, TaskTakeoverError, type TakeoverCtx } from './execution/takeover.js';
 import { PublishUiEventTracker, uiSnapshotToLines, writeNoteStageLine } from './flows/ui-event-lines.js';
-import { ImageUploader, imageTempPrefixFor, sweepImageTempDirs } from './flows/image-uploader.js';
-import { CdpFileInputSetter } from './cdp/file-input-setter.js';
+import { imageTempPrefixFor, sweepImageTempDirs } from './flows/image-uploader.js';
 import type {
   PublishCommandResultPayload,
   EdgeTaskAcquirePayload,
   EdgeTaskReleasePayload,
   Envelope,
 } from './comm/protocol.js';
-import { WatcherSupervisor } from './browse/watcher-supervisor.js';
-import { evalRaw } from './browse/cdp-util.js';
-import {
-  captureBlockingOverlaySnapshot,
-  type BlockingOverlaySnapshot,
-  type OverlayMonitor,
-} from './browse/overlay-monitor.js';
-import { CaptchaAssistHandler } from './browse/captcha-assist.js';
-import { createOverlayReportGate } from './browse/overlay-report-gate.js';
+import type { BlockingOverlaySnapshot } from './browse/overlay-monitor.js';
 import type { EdgeBrowseSession } from './browse/edge-browse-session.js';
 import type { IdentityDecision, SelfIdentityResult } from './cdp/self-identity.js';
 import {
   NativeBrowseSession,
   NativePageRuntime,
   NativePublishExecutor,
+  nativeActionNameForCommand,
+  readNativeFacebookIdentity,
 } from './native-page-engine/index.js';
+
+// Review-only declarations for the compile-time-unreachable legacy assembly below. `import()`
+// appears only in type positions and is erased by TypeScript, so none of these modules enters
+// the production dependency graph or provides a runtime fallback.
+type FacebookOverlayMonitor = import('./facebook/overlay.js').FacebookOverlayMonitor;
+type FacebookBrowseSession = import('./facebook/facebook-session.js').FacebookBrowseSession;
+declare const backfillOverlayEvidenceText: typeof import('./facebook/overlay.js').backfillOverlayEvidenceText;
+declare const FacebookOverlayMonitor: typeof import('./facebook/overlay.js').FacebookOverlayMonitor;
+declare const emitCompanionUiEvent: typeof import('./facebook/companion-ui.js').emitCompanionUiEvent;
+declare const FacebookBrowseSession: typeof import('./facebook/facebook-session.js').FacebookBrowseSession;
+declare const usesFacebookBrowseSession: typeof import('./facebook/facebook-session.js').usesFacebookBrowseSession;
+declare const FacebookCommentExecutor: typeof import('./facebook/comment-executor.js').FacebookCommentExecutor;
+declare const FacebookCommentHandler: typeof import('./facebook/comment-handler.js').FacebookCommentHandler;
+declare const FacebookJoinExecutor: typeof import('./facebook/join-executor.js').FacebookJoinExecutor;
+declare const WatcherSupervisor: typeof import('./browse/watcher-supervisor.js').WatcherSupervisor;
+declare const evalRaw: typeof import('./browse/cdp-util.js').evalRaw;
+declare const createOverlayReportGate: typeof import('./browse/overlay-report-gate.js').createOverlayReportGate;
+declare const captureBlockingOverlaySnapshot:
+  typeof import('./browse/overlay-monitor.js').captureBlockingOverlaySnapshot;
 
 function verifiedAccountNickname(idRes: SelfIdentityResult, decision: IdentityDecision): string | undefined {
   if (!idRes.ok || decision.kind !== 'use') return undefined;
@@ -284,6 +284,18 @@ async function main(): Promise<void> {
   }
   // Runtime/Page/Input 域启用 + 反检测注入均在 attachToPage 内（reEnableAndInject，与断线重连共用）。
 
+  // 浏览器平台的页面理解与执行统一由 Native Page Engine 持有。运行时在身份首读前建立，
+  // 因为 Facebook 身份本身也是页面/登录态派生能力，不能再穿过 TypeScript CDP 边界。
+  const nativePageRuntime = NativePageRuntime.fromEnvironment(
+    () => ({ host: endpoint.host, port: endpoint.port }),
+    platformDriver.platform,
+  );
+  const readPlatformIdentity = (options: ReadSelfIdentityOptions): Promise<SelfIdentityResult> => (
+    platformDriver.platform === 'facebook'
+      ? readNativeFacebookIdentity(nativePageRuntime, options)
+      : platformDriver.readIdentity(session.cdp, options)
+  );
+
   // 收口真退出端点（change adspower-first-login-wait-gate）：本进程带 IPC 通道 + stdin 控制读取器两个常驻句柄，
   // 仅置 process.exitCode 后 return 会钉死事件循环、挂成存活僵尸（看护的 child-exit 永不触发→有界重起不 engage；
   // 外壳「启动」因僵尸 child 仍在而空操作）。process.exit 硬终止、无视常驻句柄（与 main.ts 尾部 catch、lifecycle exit 同款）。
@@ -310,7 +322,7 @@ async function main(): Promise<void> {
       ...startupIdentityReadPolicy(platformDriver.platform, provider.kind),
       logger: (m) => console.log(m),
     };
-    const idRes = await platformDriver.readIdentity(session.cdp, firstReadOpts);
+    const idRes = await readPlatformIdentity(firstReadOpts);
     const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
 
     const action = await resolveStartupIdentity({
@@ -329,8 +341,8 @@ async function main(): Promise<void> {
           timeoutMs: loginWaitMs,
           logger: (m) => console.log(m),
           // 平台无关就地重读（allowNavigate=false、单次扫描）：不 hammer CDP、不骚扰二维码页。
-          readIdentity: (cdp) =>
-            platformDriver.readIdentity(cdp, { allowNavigate: false, hydrateTimeoutMs: 0, logger: () => undefined }),
+          readIdentity: () =>
+            readPlatformIdentity({ allowNavigate: false, hydrateTimeoutMs: 1_000, logger: () => undefined }),
           // 中断：等待早窗唯一被搁置的中断路径是经 IPC 堆进 pendingLifecycleCommands 的暂停/关闭；非破坏性探测（find 不 splice），
           // 成功续跑后仍由下方 dispatchLifecycleCommand 一次性派发这些排队命令（不双派发）。
           pollInterrupt: () => {
@@ -455,8 +467,7 @@ async function main(): Promise<void> {
         '在途动作会被中止并如实回执（不伪造成功）。',
     );
   };
-  let overlayMonitor: OverlayMonitor | undefined;
-  let watcherSupervisor: WatcherSupervisor | undefined;
+  let overlayMonitor: FacebookOverlayMonitor | undefined;
   let requestShutdown: ((reason: string) => void) | undefined;
   let coldStandbyActive = startBrowserAbsent;
   let coldStandbyWakeRequested = false;
@@ -553,7 +564,7 @@ async function main(): Promise<void> {
       return true;
     }
     requestColdStandbyWake(`cloud_command:${env.type}`);
-    const action = facebookActionNameForCommand(env.type);
+    const action = nativeActionNameForCommand(env.type);
     console.warn(`[aidcp-edge] 浏览器尚未启动，命令 ${env.type} 回执 ${action}:browser_absent_wake_requested`);
     client.reportActionCompleted({ action, ok: false, reason: 'browser_absent_wake_requested' });
     return true;
@@ -667,14 +678,8 @@ async function main(): Promise<void> {
   });
   session.cdp.on('cdp.control_recovered', () => taskCoordinator.resumeAfterControlRecovery());
 
-  // 小红书客户运行时的唯一页面执行入口。这里只解析并校验包内 Native 工件，进程仍按需延迟到
-  // 首个已准入页面命令才启动；Facebook/其它 provider 完全不触碰该运行时。
-  const nativePageRuntime = platformDriver.platform === 'xiaohongshu'
-    ? NativePageRuntime.fromEnvironment(() => ({ host: endpoint.host, port: endpoint.port }))
-    : undefined;
-  const nativePublishExecutor = nativePageRuntime
-    ? new NativePublishExecutor(nativePageRuntime, imageTempPrefix)
-    : undefined;
+  // 发布原子与浏览命令复用同一个 Native 会话串行边界；切换 owner 时旧会话先有界关闭。
+  const nativePublishExecutor = new NativePublishExecutor(nativePageRuntime, imageTempPrefix);
 
   // §7 回收契约：把全部在途发布诚实判失败（须在关闭云端连接之前发，确保失败回执发得出去）。
   // 云端 WS 已断时 send 会 best-effort 失败，但本地 in-flight 必须立刻清掉，避免重连后重放旧发布。
@@ -764,42 +769,6 @@ async function main(): Promise<void> {
   // 指令驱动发布：云端逐条下发 publish.command，边缘逐条执行 + 后置校验 + 如实回报（onPublishAtomCommand，见下）。
   // 遗留整页发布处理器 client.onPublishCommand（publish.request）已删除（change lease-strict-preemption 5.8）：
   //   全程不过租约闸、云端已无发送方（只发 publish.command），保留只会绕过抢占/租约在途发布假成功修复链。
-  const facebookImageUploader = new ImageUploader({
-    fileInputSetter: new CdpFileInputSetter(session.cdp, {
-      inputSelector: String.raw`(() => {
-        const visible = (el) => {
-          if (!el || !el.getBoundingClientRect) return false;
-          const r = el.getBoundingClientRect();
-          const s = window.getComputedStyle ? getComputedStyle(el) : null;
-          return r.width > 0 && r.height > 0 && (!s || (s.display !== 'none' && s.visibility !== 'hidden'));
-        };
-        const dialogs = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).filter(visible);
-        const root = dialogs[0] || document;
-        const inputs = Array.from(root.querySelectorAll('input[type=file]'));
-        return inputs.find((input) => /image|jpg|jpeg|png|webp|gif/i.test(input.getAttribute('accept') || '')) || inputs[0] || null;
-      })()`,
-    }),
-    dom: session.dom,
-    tempDirPrefix: imageTempPrefix,
-    hasThumbnail: (root) => {
-      try {
-        const labels = Array.from(root.querySelectorAll('[aria-label],[title]')).map((el) =>
-          `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`,
-        );
-        if (labels.some((label) => /(remove|delete|移除|删除|刪除).{0,12}(photo|image|attachment|照片|图片|圖片|附件)/i.test(label))) return true;
-        const docBody = 'body' in root ? root.body : null;
-        const text = (docBody?.innerText ?? root.textContent ?? '').replace(/\s+/g, ' ');
-        return /(photo attached|image attached|attachment attached|已添加照片|已加入照片|已添加图片|已添加附件|đã thêm ảnh)/i.test(text);
-      } catch {
-        return false;
-      }
-    },
-  });
-  const facebookPublishExecutor = new FacebookPublishExecutor({
-    cdp: session.cdp,
-    uploader: facebookImageUploader,
-    commitWindow: publishGuard, // 5.1：FB 发布提交窗口与 XHS 共用同一 publishGuard
-  });
   // 陪伴界面事件（edge-companion-ui 6.4）：发布终态的本地事实经 [ui-event] 行直达桌面壳。
   const publishUiEvents = new PublishUiEventTracker();
   client.onPublishAtomCommand((env) => {
@@ -855,10 +824,8 @@ async function main(): Promise<void> {
       let result: PublishCommandResultPayload;
       try {
         const publishPlatform = env.payload.platform ?? 'xiaohongshu';
-        if (nativePublishExecutor && publishPlatform === 'xiaohongshu') {
+        if (publishPlatform === platformDriver.platform) {
           result = await nativePublishExecutor.dispatch(env.payload, takeoverCtx.signal);
-        } else if (publishPlatform === 'facebook') {
-          result = await facebookPublishExecutor.dispatch(env.payload, takeoverCtx);
         } else {
           result = {
             recordId: env.payload.recordId,
@@ -901,19 +868,6 @@ async function main(): Promise<void> {
     for (const uiLine of uiSnapshotToLines(automationUiSnapshot(env.payload))) console.log(uiLine);
   });
 
-  const captchaAssist = nativePageRuntime ? undefined : new CaptchaAssistHandler({
-    cdp: session.cdp,
-    client,
-    edgeId,
-    getAccountId: () => accountId,
-    getOverlayMonitor: () => overlayMonitor,
-    logger: (m) => console.log(m),
-    // 键入序列中途的租约取消点 + 续租（change captcha-assist-text-answer，design D12）：checkpoint 逐字符
-    // 查 canExecute（被更高优先级任务接管即 false → 抛 TaskTakeoverError、清场、如实回报 typed）；
-    // touch 在聚焦后/清空后/键入后续租，避免 ~8s 键入窗口内租约到期。
-    checkTaskLease: (taskId) => taskCoordinator.canExecute(taskId),
-    touchTaskLease: (taskId) => taskCoordinator.touch(taskId),
-  });
   const nativeCaptchaLive = new Map<string, symbol>();
   const clampCaptchaHint = (value: unknown, fallback: number, min: number, max: number): number => {
     const parsed = typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -972,12 +926,6 @@ async function main(): Promise<void> {
       }
       taskCoordinator.touch(taskId);
       nativeCaptchaLive.delete(clickPayload.incidentId);
-    }
-    if (!nativePageRuntime) {
-      captchaAssist!.handle(env.type, env.payload).catch((err) => {
-        console.error(`[aidcp-edge] 验证码协助指令 ${env.type} 处理失败:`, err);
-      });
-      return;
     }
     const payload = env.payload as unknown as Record<string, unknown>;
     const incidentId = String(payload.incidentId ?? '');
@@ -1053,56 +1001,6 @@ async function main(): Promise<void> {
     });
   });
 
-  // —— Facebook 定向评论处理器（change facebook-scheduled-comment，静默丢弃坑修复）——
-  // comment-only 平台（声明 'comment' 但不声明 'browse'，如 Facebook）：注册独立评论处理器，
-  // 把云端 search.execute/note.open/interaction.comment 翻成 FacebookCommentExecutor 调用并诚实回执。
-  // 绝不锁在 if(autoBrowse) 内——否则 Facebook（无 browse 能力）永不注册 browseHandler，
-  // 这三条已在白名单的命令会被 `browseHandler?.()` 可选链静默吞、零回执 → 云端干等超时挂死。
-  // 与小红书（browse+comment）的 BrowseSession 单槽 browseHandler 互斥：仅 comment-only 平台走这里。
-  const facebookCommandDriver =
-    (platformDriver.capabilities.includes('comment') || platformDriver.capabilities.includes('join')) &&
-    !platformDriver.capabilities.includes('browse');
-  if (facebookCommandDriver) {
-    // 该平台的旁路弹窗监测体后台常开：执行器每步操作前 fresh 复检登录/验证码（fail-closed）。
-    overlayMonitor = platformDriver.createOverlayMonitor(session.cdp);
-    if (!coldStandbyActive && !startAutomationPaused) overlayMonitor.start();
-    const fbCommentExecutor = new FacebookCommentExecutor({
-      cdp: session.cdp,
-      getAccountId: () => accountId,
-      overlayMonitor,
-      logger: (m) => console.log(m),
-      commitWindow: browseGuard, // 5.1：FB 评论回车提交窗口
-    });
-    const fbJoinExecutor = platformDriver.capabilities.includes('join')
-      ? new FacebookJoinExecutor({
-          cdp: session.cdp,
-          overlayMonitor,
-          logger: (m) => console.log(m),
-          commitWindow: browseGuard, // 5.1/5.10b：FB 加群短确认窗口
-        })
-      : undefined;
-    const fbCommentHandler = new FacebookCommentHandler({
-      executor: fbCommentExecutor,
-      ...(fbJoinExecutor ? { joinExecutor: fbJoinExecutor } : {}),
-      client,
-      logger: (m) => console.log(m),
-    });
-    installPageCommandHandler((env) => {
-      if (handleBrowserAbsentCommand(env)) return;
-      const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
-      const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
-      if (!taskCoordinator.canExecute(ownedTaskId)) {
-        console.warn(
-          `[aidcp-edge] Facebook 命令被任务租约抑制 type=${env.type} taskId=${ownedTaskId ?? '-'} current=${taskCoordinator.currentTaskId ?? '-'}`,
-        );
-        return;
-      }
-      if (ownedTaskId) taskCoordinator.touch(ownedTaskId);
-      void fbCommentHandler.handle(env);
-    });
-    console.log(`[aidcp-edge] Facebook 定向评论处理器已注册（platform=${platformDriver.platform}）`);
-  }
-
   // 处理器全部就位后才握手（见上方红线注释：hello 快照紧随 welcome，注册晚一步就漏帧）。
   await client.connect();
   console.log(`[aidcp-edge] 已连接云端 ${cloudUrl}，等待命令 ...`);
@@ -1110,9 +1008,11 @@ async function main(): Promise<void> {
   // —— 自动浏览会话 ——
   const wantsAutoBrowse = process.env.AIDCP_AUTO_BROWSE !== 'false';
   const supportsBrowse = platformDriver.capabilities.includes('browse');
-  // Facebook 声明 browse → 装配闸解析到 FacebookBrowseSession（绝不小红书 BrowseSession；co-landing 不变量）。
+  const autoBrowse = wantsAutoBrowse && supportsBrowse;
+  // Historical JavaScript Facebook assembly is compile-time unreachable during the cutover.
+  // The dist verifier rejects its selectors/modules, so this cannot become a packaged fallback.
+  if (false && platformDriver.runtimeKind === 'browser') {
   const useFacebookBrowse = usesFacebookBrowseSession(platformDriver);
-  const autoBrowse = wantsAutoBrowse && supportsBrowse && !useFacebookBrowse;
   if (wantsAutoBrowse && !supportsBrowse) {
     console.warn(`[aidcp-edge] platform=${platformDriver.platform} does not support browse; BrowseSession will not start.`);
   }
@@ -1120,7 +1020,7 @@ async function main(): Promise<void> {
     // —— Facebook 浏览+点赞闭环（change facebook-browse-and-like-loop）——
     // FacebookBrowseSession 独占单槽 browseHandler，【内含】评论/加群委托（声明 browse 后旧 comment-only 注册闸
     // `(comment||join)&&!browse` 不再触发）。浏览/点赞服从 Cloud 生命周期与风险控制，评论/加群始终服务。
-    overlayMonitor = platformDriver.createOverlayMonitor(session.cdp);
+    overlayMonitor = new FacebookOverlayMonitor(session.cdp);
     // FB 浏览高危动作会触发验证码 / FB 软限流（overlay.ts 归类 unknown）。把 captcha/unknown 翻转上报云端
     // （risk.captcha_detected/cleared）：驱动远程验证码协助 + FB 限流退避（account-nurture-discipline-spine 云端
     // facebook-throttle-signals 依赖此信号把账号迁至 restricted）。复用小红书同一套上报闸（unknown 延后确认 /
@@ -1208,8 +1108,7 @@ async function main(): Promise<void> {
       // 用 WatcherSupervisor 托管 overlayMonitor 生命周期（CDP 不可恢复→停避免僵尸轮询；重连→重启），
       // 取代裸 overlayMonitor.start()（否则会话失联后监测体空轮询到进程退出）。
       const fbSupervisor = new WatcherSupervisor();
-      watcherSupervisor = fbSupervisor;
-      fbSupervisor.register(overlayMonitor, (from, to) => {
+      fbSupervisor.register(overlayMonitor!, (from, to) => {
         if (isCloudBlockingOverlay(to) && !isCloudBlockingOverlay(from)) primeOverlaySnapshot(to);
         if (!isCloudBlockingOverlay(to)) resetOverlaySnapshot();
         overlayReportGate.onTransition(from, to);
@@ -1251,7 +1150,7 @@ async function main(): Promise<void> {
         tempo: client.getPacing()?.tempo,
       },
     );
-    const fbSession = browse;
+    const fbSession = browse as FacebookBrowseSession;
     installPageCommandHandler((env) => {
       if (handleBrowserAbsentCommand(env)) return;
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
@@ -1270,23 +1169,30 @@ async function main(): Promise<void> {
     // 交接现在有界且会诚实抛出（change lease-strict-preemption）。此处是**全新会话**（零在飞写者），
     // 必然瞬时收敛；catch 只为不让一个诚实异常炸掉装配流程。
     if (taskCoordinator.blocksBrowse) {
-      await browse.quiesceForTask().catch((err) => {
+      await browse!.quiesceForTask().catch((err) => {
         console.warn(`[aidcp-edge] 注册 Facebook 会话时交接未收敛：${(err as Error).message}`);
       });
     }
     // 不 await：会话长跑，与命令收发并行。Cloud 生命周期决定是否启动/暂停自动进 feed。
     if (!coldStandbyActive && !startAutomationPaused) {
-      browse.start().catch((err) => {
+      browse!.start().catch((err) => {
         console.error('[aidcp-edge] Facebook 浏览会话异常:', err);
       });
     }
     console.log('[aidcp-edge] Facebook 浏览会话已注册（由 Cloud 生命周期控制，含评论/加群委托）');
   }
-  if (autoBrowse && nativePageRuntime) {
+  }
+  if (wantsAutoBrowse && !supportsBrowse) {
+    console.warn(`[aidcp-edge] platform=${platformDriver.platform} does not support browse; NativeBrowseSession will not start.`);
+  }
+  if (autoBrowse) {
     browse = new NativeBrowseSession({
       runtime: nativePageRuntime,
       client,
       startupId: browserStartupId,
+      platform: platformDriver.platform === 'facebook' ? 'facebook' : 'xiaohongshu',
+      edgeId,
+      getAccountId: () => accountId,
       logger: (message) => console.log(message),
     });
     const nativeBrowse = browse;
@@ -1314,7 +1220,7 @@ async function main(): Promise<void> {
     if (!coldStandbyActive && !startAutomationPaused) {
       browse.start().catch((err) => console.error('[aidcp-edge] Native 浏览会话异常:', err));
     }
-    console.log('[aidcp-edge] 小红书页面执行已切换为 Native-only（无 shadow、无 JavaScript fallback）');
+    console.log(`[aidcp-edge] ${platformDriver.platform} 页面执行已切换为 Native-only（无 shadow、无 JavaScript fallback）`);
   }
   // —— 退出 / 回收统一路径（节点终态诚实下线 + 看护可重起；真关机干净退出）——
   let recycleRequested = false;
@@ -1323,12 +1229,10 @@ async function main(): Promise<void> {
       console.log('\n[aidcp-edge] 正在暂停自动化：客户端核心、Cloud 连接与浏览器资源保持不变...');
       failInFlightPublishesHonestly('user_pause');
       taskCoordinator.reset('user_pause');
-      watcherSupervisor?.stopAll();
       reportBrowseDrainTimeout((await browse?.stopAndWait(BROWSE_DRAIN_MS)) ?? true, 'user_pause');
     },
     resumeAutomation: async () => {
       if (coldStandbyActive) throw new Error('browser_absent_use_wake');
-      watcherSupervisor?.startAll();
       browse?.start().catch((error) => {
         console.error('[aidcp-edge] 恢复自动化失败:', error);
       });
@@ -1339,7 +1243,6 @@ async function main(): Promise<void> {
       console.log(`\n[aidcp-edge] 自动运营停用流程启动（reason=${reason}）...`);
       // 暂停/关闭/回收都先诚实终止在途发布，绝不让半截命令跨恢复重放。
       failInFlightPublishesHonestly(reason);
-      watcherSupervisor?.stopAll();
       // 终态关闭：用 closeAndWait()（非 close()/stop()）——置 closing 使停用窗口内迟到的云端命令绝不唤醒
       // 浏览循环，并**等循环真正退出原子区再往下走**。下面 session.close() 会切 CDP、随后 closeOwnedBrowser()
       // 杀浏览器；若不等排空，循环醒来还会摸页面，调用直接打在死 CDP 上（同冷待机那条 bug）。
@@ -1392,7 +1295,6 @@ async function main(): Promise<void> {
       coldStandbyActive = true;
       clearColdStandbyWakeLatch();
       failInFlightPublishesHonestly('cold_standby');
-      watcherSupervisor?.stopAll();
       // 关浏览器前必须等浏览循环真正退出原子区（红线）：stop() 只是请求停止，循环可能正卡在首屏扫描 /
       // 停留等待里，醒来后照样摸页面——那时浏览器已被下面 killAndConfirmDead() 杀掉，调用直接打在死 CDP 上。
       // 用 stopAndWait（非 closeAndWait）：待机是**可回来的**，close() 的 closing 是终态、唤醒后就再也起不来了。
@@ -1452,7 +1354,7 @@ async function main(): Promise<void> {
         }
 
         // 4) 重新确认登录态与身份（红线：新一代浏览器，绝不假设还登着）。
-        const idRes = await platformDriver.readIdentity(session.cdp, {
+        const idRes = await readPlatformIdentity({
           ...startupIdentityReadPolicy(platformDriver.platform, provider.kind),
           logger: (m) => console.log(m),
         });
@@ -1484,7 +1386,6 @@ async function main(): Promise<void> {
         coldStandbyActive = false;
         clearColdStandbyWakeLatch();
         clearColdStandbyCloudRetry();
-        if (resumeAutomation) watcherSupervisor?.startAll();
         const wakePacing = client.getPacing();
         browse?.applyPacingSnapshot(wakePacing?.opFloorsMs, wakePacing?.tempo);
         if (resumeAutomation) {

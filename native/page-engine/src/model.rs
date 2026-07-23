@@ -34,6 +34,29 @@ pub struct PageCards {
     pub cards: Vec<PageCard>,
     #[serde(default)]
     pub movement: Option<PageMovement>,
+    #[serde(default)]
+    pub document_generation: Option<String>,
+    #[serde(default)]
+    pub container_name: Option<String>,
+    #[serde(default)]
+    pub list_kind: Option<FacebookListKind>,
+    #[serde(default)]
+    pub list_state: Option<FacebookListState>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FacebookListKind {
+    Feed,
+    Reels,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FacebookListState {
+    Ready,
+    Empty,
+    PresentUnreportable,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -55,6 +78,8 @@ impl PageCards {
             truncate_optional(&mut card.cover_desc, MAX_TITLE_CHARS);
             truncate_optional(&mut card.note_id, MAX_ID_CHARS);
         }
+        truncate_optional(&mut self.document_generation, MAX_ID_CHARS);
+        truncate_optional(&mut self.container_name, MAX_NAME_CHARS);
         self
     }
 }
@@ -246,7 +271,71 @@ pub struct ActionReceipt {
     #[serde(default)]
     pub observation: Option<ActionEvidence>,
     #[serde(default)]
+    pub post_observation: Option<FacebookGroupJoinObservation>,
+    #[serde(default)]
+    pub group_observation: Option<FacebookGroupJoinObservation>,
+    #[serde(default)]
+    pub group_url: Option<String>,
+    #[serde(default)]
+    pub clicked: Option<bool>,
+    #[serde(default)]
     pub candidates: Vec<CommentCandidate>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookGroupCtaCandidate {
+    #[serde(default)]
+    pub text: Option<String>,
+    pub kind: String,
+    pub in_target_scope: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookGroupJoinObservation {
+    #[serde(default)]
+    pub group_url: Option<String>,
+    #[serde(default)]
+    pub page_url: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub main_cta_text: Option<String>,
+    #[serde(default)]
+    pub main_cta_aria: Option<String>,
+    #[serde(default)]
+    pub header_text: Option<String>,
+    #[serde(default)]
+    pub modal_text: Option<String>,
+    #[serde(default)]
+    pub membership_signals: Vec<String>,
+    #[serde(default)]
+    pub login_required: Option<bool>,
+    #[serde(default)]
+    pub captcha_detected: Option<bool>,
+    #[serde(default)]
+    pub questionnaire_required: Option<bool>,
+    #[serde(default)]
+    pub pending_request: Option<bool>,
+    #[serde(default)]
+    pub nav_error: Option<String>,
+    #[serde(default)]
+    pub action_node_count: Option<u32>,
+    #[serde(default)]
+    pub document_ready: Option<String>,
+    #[serde(default)]
+    pub composer_present: Option<bool>,
+    #[serde(default)]
+    pub join_cta_present: Option<bool>,
+    #[serde(default)]
+    pub target_group_id: Option<String>,
+    #[serde(default)]
+    pub scope_resolved: Option<bool>,
+    #[serde(default)]
+    pub out_of_scope_join_count: Option<u32>,
+    #[serde(default)]
+    pub cta_candidates: Vec<FacebookGroupCtaCandidate>,
 }
 
 impl ActionReceipt {
@@ -261,6 +350,13 @@ impl ActionReceipt {
             truncate_optional(&mut observation.text_preview_head, 500);
             truncate_optional(&mut observation.reaction_text, 128);
         }
+        truncate_optional(&mut self.group_url, MAX_URL_CHARS);
+        if let Some(observation) = &mut self.group_observation {
+            observation.bound();
+        }
+        if let Some(observation) = &mut self.post_observation {
+            observation.bound();
+        }
         self.candidates.truncate(MAX_COMMENT_CANDIDATES);
         for candidate in &mut self.candidates {
             truncate(&mut candidate.anchor_id, MAX_ID_CHARS);
@@ -268,6 +364,30 @@ impl ActionReceipt {
             truncate(&mut candidate.text, 1_000);
         }
         self
+    }
+}
+
+impl FacebookGroupJoinObservation {
+    fn bound(&mut self) {
+        truncate_optional(&mut self.group_url, MAX_URL_CHARS);
+        truncate_optional(&mut self.page_url, MAX_URL_CHARS);
+        truncate_optional(&mut self.title, MAX_TITLE_CHARS);
+        truncate_optional(&mut self.main_cta_text, 256);
+        truncate_optional(&mut self.main_cta_aria, 256);
+        truncate_optional(&mut self.header_text, 1_000);
+        truncate_optional(&mut self.modal_text, 1_000);
+        truncate_optional(&mut self.nav_error, MAX_REASON_CHARS);
+        truncate_optional(&mut self.document_ready, 32);
+        truncate_optional(&mut self.target_group_id, MAX_ID_CHARS);
+        self.membership_signals.truncate(32);
+        for signal in &mut self.membership_signals {
+            truncate(signal, 256);
+        }
+        self.cta_candidates.truncate(50);
+        for candidate in &mut self.cta_candidates {
+            truncate_optional(&mut candidate.text, 256);
+            truncate(&mut candidate.kind, 64);
+        }
     }
 }
 
@@ -286,6 +406,30 @@ pub struct PublishReceipt {
     pub post_url: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookIdentityReceipt {
+    pub ok: bool,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl FacebookIdentityReceipt {
+    pub fn bounded(mut self) -> Self {
+        truncate_optional(&mut self.account_id, MAX_ID_CHARS);
+        truncate_optional(&mut self.display_name, MAX_NAME_CHARS);
+        truncate_optional(&mut self.source, 64);
+        truncate_optional(&mut self.reason, MAX_REASON_CHARS);
+        self
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -381,6 +525,10 @@ mod tests {
                 })
                 .collect(),
             movement: None,
+            document_generation: None,
+            container_name: None,
+            list_kind: None,
+            list_state: None,
         }
         .bounded();
         assert_eq!(cards.cards.len(), MAX_CARDS);

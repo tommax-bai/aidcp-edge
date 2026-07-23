@@ -1,0 +1,1 @@
+[role="dialog"] input[type="file"], input[type="file"][accept*="image"], input[type="file"][accept*="video"]

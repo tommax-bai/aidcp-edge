@@ -6,6 +6,7 @@ import {
   type NativePageCommandExecution,
   type NativePageEngineManifest,
   type NativePageEngineSession,
+  type NativePagePlatform,
 } from './client.js';
 
 export interface NativePageEndpoint { host: string; port: number }
@@ -14,6 +15,7 @@ export interface NativePageRuntimeOptions {
   binaryPath: string;
   getEndpoint(): NativePageEndpoint;
   expectedManifest: NativePageEngineManifest;
+  platform?: NativePagePlatform;
   processTimeoutMs?: number;
 }
 
@@ -36,15 +38,25 @@ export class NativePageRuntime {
     });
   }
 
-  static fromEnvironment(getEndpoint: () => NativePageEndpoint): NativePageRuntime {
+  static fromEnvironment(
+    getEndpoint: () => NativePageEndpoint,
+    platform: NativePagePlatform = 'xiaohongshu',
+  ): NativePageRuntime {
     const binaryPath = String(process.env.AIDCP_NATIVE_PAGE_ENGINE_BINARY ?? '').trim();
     if (!binaryPath || !isAbsolute(binaryPath)) {
-      throw new Error('AIDCP_NATIVE_PAGE_ENGINE_BINARY is required for Xiaohongshu Native-only runtime');
+      throw new Error(`AIDCP_NATIVE_PAGE_ENGINE_BINARY is required for ${platform} Native-only runtime`);
     }
     const manifest = JSON.parse(readFileSync(join(dirname(binaryPath), 'manifest.json'), 'utf8')) as Record<string, unknown>;
     if (
       typeof manifest.engineVersion !== 'string'
-      || manifest.platformAdapterVersion !== 'xiaohongshu-v1'
+      || manifest.platformAdapterVersion !== 'multi-platform-v1'
+      || !Array.isArray(manifest.platformAdapters)
+      || !manifest.platformAdapters.some((adapter) => (
+        adapter
+        && typeof adapter === 'object'
+        && (adapter as { platform?: unknown }).platform === platform
+        && typeof (adapter as { adapterVersion?: unknown }).adapterVersion === 'string'
+      ))
       || typeof manifest.capabilityDigest !== 'string'
       || !/^[a-f0-9]{64}$/.test(manifest.capabilityDigest)
     ) {
@@ -53,9 +65,11 @@ export class NativePageRuntime {
     return new NativePageRuntime({
       binaryPath,
       getEndpoint,
+      platform,
       expectedManifest: {
         engineVersion: manifest.engineVersion,
         platformAdapterVersion: manifest.platformAdapterVersion,
+        platformAdapters: manifest.platformAdapters as NativePageEngineManifest['platformAdapters'],
         capabilityDigest: manifest.capabilityDigest,
       },
     });
@@ -79,6 +93,12 @@ export class NativePageRuntime {
         signal?.removeEventListener('abort', forwardAbort);
         if (this.activeAbort === controller) this.activeAbort = undefined;
       }
+    });
+  }
+
+  openOwner(ownerId: string): Promise<void> {
+    return this.serial(async () => {
+      await this.sessionFor(ownerId);
     });
   }
 
@@ -112,8 +132,8 @@ export class NativePageRuntime {
     const suffix = ownerId.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 80) || 'page';
     const session = await this.client.openSession({
       ...endpoint,
-      platform: 'xiaohongshu',
-      sessionId: `xhs_${process.pid}_${Date.now().toString(36)}`,
+      platform: this.options.platform ?? 'xiaohongshu',
+      sessionId: `${this.options.platform ?? 'xiaohongshu'}_${process.pid}_${Date.now().toString(36)}`,
       taskId: suffix,
       timeoutMs: 30_000,
     });

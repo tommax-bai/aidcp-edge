@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  facebookGatedSubmitPreflight,
   probeFacebookCommentEditorReadOnly,
+} from '../../src/facebook/probes/editor-probe.js';
+import {
+  facebookGatedSubmitPreflight,
   runFacebookGatedSubmitProbe,
-} from '../../src/facebook/index.js';
+} from '../../src/facebook/probes/gated-submit.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
 interface Call {

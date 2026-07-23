@@ -1,11 +1,10 @@
-import { decideHandshakeIdentity } from '../cdp/self-identity.js';
 import {
   isUrlAllowedByTargetDescriptor,
   type PlatformDriver,
   type PlatformTargetDescriptor,
 } from '../platform/driver.js';
-import { readFacebookIdentity } from './identity.js';
-import { FacebookOverlayMonitor } from './overlay.js';
+import { decideHandshakeIdentity, type SelfIdentityResult } from '../cdp/self-identity.js';
+import type { OverlayMonitor } from '../browse/overlay-monitor.js';
 
 export const FACEBOOK_DEFAULT_START_URL = 'https://www.facebook.com/';
 
@@ -14,6 +13,14 @@ export const FACEBOOK_TARGET: PlatformTargetDescriptor = {
   attachUrlIncludes: 'facebook.com',
   allowedHostSuffixes: ['facebook.com', 'facebookcorewwwi.onion'],
 };
+
+async function nativeOnlyIdentity(): Promise<SelfIdentityResult> {
+  return { ok: false, reason: 'facebook_identity_requires_native_page_engine' };
+}
+
+function nativeOnlyOverlay(): OverlayMonitor {
+  throw new Error('facebook_overlay_requires_native_page_engine');
+}
 
 export const facebookPlatformDriver: PlatformDriver = {
   platform: 'facebook',
@@ -37,7 +44,9 @@ export const facebookPlatformDriver: PlatformDriver = {
   defaultStartUrl: FACEBOOK_TARGET.startUrl,
   attachUrlIncludes: FACEBOOK_TARGET.attachUrlIncludes,
   isAllowedTargetUrl: (url) => isUrlAllowedByTargetDescriptor(url, FACEBOOK_TARGET),
-  readIdentity: readFacebookIdentity,
+  // Main routes Facebook identity and overlay probes through Native Page Engine. These
+  // interface sentinels prevent a future generic call from silently restoring JS CDP logic.
+  readIdentity: nativeOnlyIdentity,
   decideIdentity: decideHandshakeIdentity,
-  createOverlayMonitor: (cdp) => new FacebookOverlayMonitor(cdp),
+  createOverlayMonitor: nativeOnlyOverlay,
 };

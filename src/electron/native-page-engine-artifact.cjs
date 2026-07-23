@@ -5,8 +5,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const EXPECTED_PROTOCOL_VERSION = 2;
-const EXPECTED_PLATFORM_ADAPTER_VERSION = 'xiaohongshu-v1';
-const EXPECTED_CAPABILITY_DIGEST = '21f514595106b0b3e21e3a53e9d788d702227c1d754d2af90e753152f7af64cd';
+const EXPECTED_PLATFORM_ADAPTER_VERSION = 'multi-platform-v1';
+const EXPECTED_PLATFORM_ADAPTERS = Object.freeze([
+  Object.freeze({ platform: 'xiaohongshu', adapterVersion: 'xiaohongshu-v1' }),
+  Object.freeze({ platform: 'facebook', adapterVersion: 'facebook-v1' }),
+  Object.freeze({ platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' }),
+]);
+const EXPECTED_CAPABILITY_DIGEST = '8ec2b0281599d863e250398c598d41ac8ed233e57764fa61513abb898fc8a8a3';
 
 function executableName(platform) {
   return platform === 'win32' ? 'aidcp-page-engine.exe' : 'aidcp-page-engine';
@@ -46,6 +51,7 @@ function verifyNativePageEngineArtifact(resourceDir, target = { platform: proces
     manifest.schemaVersion !== 1
     || manifest.protocolVersion !== EXPECTED_PROTOCOL_VERSION
     || manifest.platformAdapterVersion !== EXPECTED_PLATFORM_ADAPTER_VERSION
+    || JSON.stringify(manifest.platformAdapters) !== JSON.stringify(EXPECTED_PLATFORM_ADAPTERS)
     || manifest.capabilityDigest !== EXPECTED_CAPABILITY_DIGEST
     || manifest.platform !== target.platform
     || manifest.arch !== target.arch
@@ -72,6 +78,7 @@ function verifyNativePageEngineArtifact(resourceDir, target = { platform: proces
 module.exports = {
   EXPECTED_CAPABILITY_DIGEST,
   EXPECTED_PLATFORM_ADAPTER_VERSION,
+  EXPECTED_PLATFORM_ADAPTERS,
   EXPECTED_PROTOCOL_VERSION,
   binaryArch,
   executableName,

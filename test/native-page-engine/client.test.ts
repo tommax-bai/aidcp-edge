@@ -39,7 +39,12 @@ test('keeps one supervised process across session status and commands', async ()
     sessionId: 'session-1',
     taskId,
   });
-  assert.equal(session.manifest.platformAdapterVersion, 'xiaohongshu-test');
+  assert.equal(session.manifest.platformAdapterVersion, 'multi-platform-test');
+  assert.deepEqual(session.manifest.platformAdapters.map(({ platform }) => platform), [
+    'xiaohongshu',
+    'facebook',
+    'wechat_channels',
+  ]);
   const result = await session.probePage(500);
   assert.equal(result.pageKind, 'explore');
   const status = await session.status();
@@ -71,7 +76,12 @@ test('rejects a ready engine whose capability manifest differs from the packaged
     env: { AIDCP_FAKE_ENGINE_MODE: 'success' },
     expectedManifest: {
       engineVersion: 'test',
-      platformAdapterVersion: 'xiaohongshu-test',
+      platformAdapterVersion: 'multi-platform-test',
+      platformAdapters: [
+        { platform: 'xiaohongshu', adapterVersion: 'xiaohongshu-test' },
+        { platform: 'facebook', adapterVersion: 'facebook-test' },
+        { platform: 'wechat_channels', adapterVersion: 'wechat-channels-test' },
+      ],
       capabilityDigest: 'b'.repeat(64),
     },
   });

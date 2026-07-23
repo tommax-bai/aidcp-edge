@@ -32,7 +32,12 @@ const stagedBinary = join(stageDir, executableName);
 const checksumPath = `${stagedBinary}.sha256`;
 const manifestPath = join(stageDir, 'manifest.json');
 const protocolVersion = 2;
-const platformAdapterVersion = 'xiaohongshu-v1';
+const platformAdapterVersion = 'multi-platform-v1';
+const platformAdapters = [
+  { platform: 'xiaohongshu', adapterVersion: 'xiaohongshu-v1' },
+  { platform: 'facebook', adapterVersion: 'facebook-v1' },
+  { platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' },
+];
 const forbiddenCleartextMarkers = [
   'document.querySelectorAll',
   '.note-detail-mask',
@@ -82,6 +87,7 @@ async function verify() {
     || manifest.engineVersion !== cargoVersion
     || manifest.protocolVersion !== protocolVersion
     || manifest.platformAdapterVersion !== platformAdapterVersion
+    || JSON.stringify(manifest.platformAdapters) !== JSON.stringify(platformAdapters)
     || manifest.capabilityDigest !== capabilityDigest
     || manifest.platform !== process.platform
     || manifest.arch !== targetArch
@@ -132,6 +138,7 @@ async function build() {
     engineVersion,
     protocolVersion,
     platformAdapterVersion,
+    platformAdapters,
     capabilityDigest,
     platform: process.platform,
     arch: targetArch,

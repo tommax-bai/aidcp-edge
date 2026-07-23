@@ -1,7 +1,12 @@
 import type { ChromeInstance } from '../cdp/chrome-launcher.js';
-import { attachToPage, selectBrowserProvider, type BrowserProvider, type EdgeSession } from '../cdp/index.js';
-import type { WechatCookie, WechatRequestContext, WechatSessionMaterial } from './types.js';
-import { WECHAT_CHANNELS_DEFAULT_START_URL, WECHAT_CHANNELS_TARGET } from './driver.js';
+import { selectBrowserProvider, type BrowserProvider } from '../cdp/index.js';
+import {
+  NativePageRuntime,
+  type NativePageEndpoint,
+} from '../native-page-engine/runtime.js';
+import type { NativePageCommandExecution } from '../native-page-engine/client.js';
+import type { WechatCookie, WechatSessionMaterial } from './types.js';
+import { WECHAT_CHANNELS_DEFAULT_START_URL } from './driver.js';
 
 export type BrowserSidecarState = 'closed' | 'opening' | 'open' | 'closing' | 'unavailable';
 
@@ -18,6 +23,17 @@ export interface BrowserSidecarOptions {
   provider?: BrowserProvider;
   logImpl?: (message: string) => void;
   nowImpl?: () => number;
+  createNativeRuntime?: (getEndpoint: () => NativePageEndpoint) => WechatNativeCaptureRuntime;
+}
+
+export interface WechatNativeCaptureRuntime {
+  openOwner(ownerId: string): Promise<void>;
+  execute(
+    ownerId: string,
+    command: { kind: 'wechat_capture_session'; params: Record<string, never> },
+    timeoutMs?: number,
+  ): Promise<NativePageCommandExecution>;
+  shutdown(): Promise<void>;
 }
 
 export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSidecar {
@@ -25,12 +41,11 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
   private readonly env: NodeJS.ProcessEnv;
   private readonly provider: BrowserProvider;
   private readonly log: (message: string) => void;
-  private readonly now: () => number;
-  private session?: EdgeSession;
   private browser?: ChromeInstance;
+  private nativeRuntime?: WechatNativeCaptureRuntime;
   private state: BrowserSidecarState = 'closed';
-  private requestContext?: WechatRequestContext;
-  private stopRequestCapture?: () => void;
+  private readonly ownerId: string;
+  private readonly createNativeRuntime: (getEndpoint: () => NativePageEndpoint) => WechatNativeCaptureRuntime;
 
   constructor(options: BrowserSidecarOptions = {}) {
     this.env = options.env ?? process.env;
@@ -40,7 +55,6 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
       throw new Error('wechat_channels requires AIDCP_ADS_USER_ID or AIDCP_WECHAT_BROWSER_PROFILE_ID');
     }
     this.log = options.logImpl ?? ((message) => console.log(message));
-    this.now = options.nowImpl ?? Date.now;
     this.provider =
       options.provider ??
       selectBrowserProvider({
@@ -48,6 +62,10 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
         startUrl: WECHAT_CHANNELS_DEFAULT_START_URL,
         logImpl: this.log,
       });
+    this.ownerId = `wechat-auth:${this.browserProfileId}`;
+    this.createNativeRuntime =
+      options.createNativeRuntime
+      ?? ((getEndpoint) => NativePageRuntime.fromEnvironment(getEndpoint, 'wechat_channels'));
   }
 
   getState(): BrowserSidecarState {
@@ -68,42 +86,22 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
         readyTimeoutMs: positiveMs(this.env.AIDCP_WECHAT_BROWSER_READY_TIMEOUT_MS, 20_000),
       });
       this.browser = launched.instance;
-      this.session = await attachToPage({
-        host: launched.endpoint.host,
-        port: launched.endpoint.port,
-        stealth: this.provider.kind !== 'adspower',
-        targetPredicate: (target) => {
-          try {
-            const host = new URL(target.url).hostname.toLowerCase();
-            return WECHAT_CHANNELS_TARGET.allowedHostSuffixes.some(
-              (suffix) => host === suffix || host.endsWith(`.${suffix}`),
-            );
-          } catch {
-            return false;
-          }
-        },
-      });
-      await this.session.cdp.send('Network.enable');
-      await this.session.cdp.send('Page.bringToFront').catch(() => undefined);
-      this.stopRequestCapture = this.session.cdp.on('Network.requestWillBeSent', (params) => {
-        const captured = captureRequestContext(params);
-        if (captured) this.requestContext = captured;
-      });
-      await this.session.cdp.send('Page.reload', { ignoreCache: false }).catch(() => undefined);
+      const endpoint = { host: launched.endpoint.host, port: launched.endpoint.port };
+      const nativeRuntime = this.createNativeRuntime(() => endpoint);
+      this.nativeRuntime = nativeRuntime;
+      await nativeRuntime.openOwner(this.ownerId);
       this.state = 'open';
       this.log('[wechat-channels] browser login sidecar is open');
     } catch (error) {
       // A provider may have opened the physical browser before attach/capture failed. Rejecting open()
       // without closing it would let the shell release the transient lane while an orphan browser is
       // still alive. Always perform bounded teardown first; close confirmation remains authoritative.
-      const session = this.session;
+      const nativeRuntime = this.nativeRuntime;
       const browser = this.browser;
-      this.session = undefined;
+      this.nativeRuntime = undefined;
       this.browser = undefined;
-      this.stopRequestCapture?.();
-      this.stopRequestCapture = undefined;
       try {
-        session?.close();
+        await nativeRuntime?.shutdown();
         if (browser && !(await browser.killAndConfirmDead())) {
           throw new Error('browser sidecar open cleanup was not confirmed');
         }
@@ -121,50 +119,31 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
   }
 
   async readSessionCandidate(): Promise<WechatSessionMaterial | null> {
-    const cdp = this.session?.cdp;
-    if (!cdp || this.state !== 'open') return null;
-    const response = await cdp.send<{ cookies?: WechatCookie[] }>('Network.getAllCookies').catch(() => ({ cookies: [] }));
-    const cookies = (response.cookies ?? []).filter((cookie) => {
-      const domain = String(cookie.domain ?? '').replace(/^\./, '').toLowerCase();
-      return domain === 'weixin.qq.com' || domain.endsWith('.weixin.qq.com');
-    });
-    if (cookies.length === 0 || !this.requestContext) return null;
-    const userAgentResponse = await cdp
-      .send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
-        expression: 'navigator.userAgent',
-        returnByValue: true,
-      })
-      .catch(() => ({ result: { value: '' } }));
-    const userAgent = String(userAgentResponse.result?.value ?? '').trim();
-    if (!userAgent) return null;
-    return {
-      cookies: cookies.map((cookie) => ({
-        name: String(cookie.name),
-        value: String(cookie.value),
-        domain: String(cookie.domain),
-        path: cookie.path ? String(cookie.path) : '/',
-        expires: typeof cookie.expires === 'number' ? cookie.expires : undefined,
-        httpOnly: Boolean(cookie.httpOnly),
-        secure: Boolean(cookie.secure),
-        sameSite: cookie.sameSite ? String(cookie.sameSite) : undefined,
-      })),
-      userAgent,
-      acquiredAt: this.now(),
-      requestContext: this.requestContext,
-    };
+    const nativeRuntime = this.nativeRuntime;
+    if (!nativeRuntime || this.state !== 'open') return null;
+    const execution = await nativeRuntime.execute(
+      this.ownerId,
+      { kind: 'wechat_capture_session', params: {} },
+      5_000,
+    );
+    if (
+      execution.effectPhase !== 'confirmed'
+      || execution.output?.kind !== 'wechat_session_candidate'
+    ) {
+      throw new Error('Native WeChat session capture returned an invalid result');
+    }
+    return parseNativeWechatSessionCandidate(execution.output.value);
   }
 
   async close(): Promise<void> {
     if (this.state === 'closed') return;
     this.state = 'closing';
-    const session = this.session;
+    const nativeRuntime = this.nativeRuntime;
     const browser = this.browser;
-    this.session = undefined;
+    this.nativeRuntime = undefined;
     this.browser = undefined;
-    this.stopRequestCapture?.();
-    this.stopRequestCapture = undefined;
     try {
-      session?.close();
+      await nativeRuntime?.shutdown();
       if (browser) {
         const confirmed = await browser.killAndConfirmDead();
         if (!confirmed) throw new Error('browser sidecar close was not confirmed');
@@ -213,59 +192,92 @@ function safeToken(value: unknown): string | null {
   return /^[A-Za-z0-9_.:/-]{1,64}$/.test(token) ? token : null;
 }
 
-export function captureRequestContext(value: unknown): WechatRequestContext | null {
-  if (!value || typeof value !== 'object') return null;
-  const request = (value as { request?: unknown }).request;
-  if (!request || typeof request !== 'object') return null;
-  const raw = request as { url?: unknown; postData?: unknown; headers?: unknown };
-  if (typeof raw.url !== 'string' || typeof raw.postData !== 'string') return null;
-  let url: URL;
-  let body: Record<string, unknown>;
-  try {
-    url = new URL(raw.url);
-    body = JSON.parse(raw.postData) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-  if (url.hostname !== 'channels.weixin.qq.com' || !url.pathname.endsWith('/auth/auth_data')) return null;
-  const headers = raw.headers && typeof raw.headers === 'object'
-    ? Object.fromEntries(Object.entries(raw.headers as Record<string, unknown>).map(([key, item]) => [key.toLowerCase(), item]))
-    : {};
-  const aid = url.searchParams.get('_aid');
-  const pageUrl = url.searchParams.get('_pageUrl');
-  const logFinderId = body._log_finder_id;
-  const logFinderUin = body._log_finder_uin;
-  const rawKeyBuff = body.rawKeyBuff;
-  const reqScene = body.reqScene;
-  const scene = body.scene;
-  const fingerprintDeviceId = headers['finger-print-device-id'];
-  const wechatUin = headers['x-wechat-uin'];
-  if (![aid, pageUrl, logFinderId, fingerprintDeviceId, wechatUin]
-      .every((item) => typeof item === 'string' && item.length > 0) ||
-      typeof logFinderUin !== 'string' || typeof rawKeyBuff !== 'string' ||
-      typeof reqScene !== 'number' || typeof scene !== 'number') return null;
-  const pluginSessionId = body.pluginSessionId;
-  if (pluginSessionId !== null && typeof pluginSessionId !== 'string') return null;
-  return {
-    version: 1,
-    aid: aid!,
-    pageUrl: pageUrl!,
-    commonBody: {
-      logFinderId: logFinderId as string,
-      logFinderUin: logFinderUin as string,
-      rawKeyBuff: rawKeyBuff as string,
-      pluginSessionId,
-      reqScene,
-      scene,
-    },
-    headers: {
-      fingerprintDeviceId: fingerprintDeviceId as string,
-      wechatUin: wechatUin as string,
-    },
-  };
-}
-
 function positiveMs(raw: string | undefined, fallback: number): number {
   const value = Number(raw);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+export function parseNativeWechatSessionCandidate(value: unknown): WechatSessionMaterial | null {
+  if (value === null) return null;
+  if (!isRecord(value) || !hasOnlyKeys(value, ['cookies', 'userAgent', 'acquiredAt', 'requestContext'])) return null;
+  if (
+    !Array.isArray(value.cookies)
+    || value.cookies.length === 0
+    || value.cookies.length > 128
+    || typeof value.userAgent !== 'string'
+    || !boundedNonempty(value.userAgent, 1_024)
+    || !Number.isSafeInteger(value.acquiredAt)
+    || Number(value.acquiredAt) < 0
+  ) return null;
+  const cookies: WechatCookie[] = [];
+  for (const raw of value.cookies) {
+    if (
+      !isRecord(raw)
+      || !hasOnlyKeys(raw, ['name', 'value', 'domain', 'path', 'expires', 'httpOnly', 'secure', 'sameSite'])
+      || typeof raw.name !== 'string' || !boundedNonempty(raw.name, 256)
+      || typeof raw.value !== 'string' || !boundedNonempty(raw.value, 8 * 1024)
+      || typeof raw.domain !== 'string' || !boundedNonempty(raw.domain, 255)
+      || typeof raw.path !== 'string' || raw.path.length > 1_024
+      || (raw.expires !== undefined && typeof raw.expires !== 'number')
+      || typeof raw.httpOnly !== 'boolean'
+      || typeof raw.secure !== 'boolean'
+      || (raw.sameSite !== undefined && (typeof raw.sameSite !== 'string' || raw.sameSite.length > 32))
+    ) return null;
+    const domain = raw.domain.replace(/^\./, '').toLowerCase();
+    if (domain !== 'weixin.qq.com' && !domain.endsWith('.weixin.qq.com')) return null;
+    cookies.push({
+      name: raw.name,
+      value: raw.value,
+      domain: raw.domain,
+      path: raw.path,
+      ...(typeof raw.expires === 'number' ? { expires: raw.expires } : {}),
+      httpOnly: raw.httpOnly,
+      secure: raw.secure,
+      ...(typeof raw.sameSite === 'string' ? { sameSite: raw.sameSite } : {}),
+    });
+  }
+  const requestContext = parseRequestContext(value.requestContext);
+  if (!requestContext) return null;
+  return {
+    cookies,
+    userAgent: value.userAgent,
+    acquiredAt: Number(value.acquiredAt),
+    requestContext,
+  };
+}
+
+function parseRequestContext(value: unknown): WechatSessionMaterial['requestContext'] | null {
+  if (
+    !isRecord(value)
+    || !hasOnlyKeys(value, ['version', 'aid', 'pageUrl', 'commonBody', 'headers'])
+    || value.version !== 1
+    || typeof value.aid !== 'string' || !boundedNonempty(value.aid, 1_024)
+    || typeof value.pageUrl !== 'string' || !boundedNonempty(value.pageUrl, 8 * 1024)
+    || !isRecord(value.commonBody)
+    || !hasOnlyKeys(value.commonBody, ['logFinderId', 'logFinderUin', 'rawKeyBuff', 'pluginSessionId', 'reqScene', 'scene'])
+    || typeof value.commonBody.logFinderId !== 'string' || !boundedNonempty(value.commonBody.logFinderId, 1_024)
+    || typeof value.commonBody.logFinderUin !== 'string' || value.commonBody.logFinderUin.length > 1_024
+    || typeof value.commonBody.rawKeyBuff !== 'string' || value.commonBody.rawKeyBuff.length > 16 * 1024
+    || (value.commonBody.pluginSessionId !== null && typeof value.commonBody.pluginSessionId !== 'string')
+    || typeof value.commonBody.reqScene !== 'number' || !Number.isSafeInteger(value.commonBody.reqScene)
+    || typeof value.commonBody.scene !== 'number' || !Number.isSafeInteger(value.commonBody.scene)
+    || !isRecord(value.headers)
+    || !hasOnlyKeys(value.headers, ['fingerprintDeviceId', 'wechatUin'])
+    || typeof value.headers.fingerprintDeviceId !== 'string' || !boundedNonempty(value.headers.fingerprintDeviceId, 1_024)
+    || typeof value.headers.wechatUin !== 'string' || !boundedNonempty(value.headers.wechatUin, 1_024)
+  ) return null;
+  return value as unknown as WechatSessionMaterial['requestContext'];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.every((key) => allowed.includes(key)) && allowed.every((key) => key in value || ['expires', 'sameSite'].includes(key));
+}
+
+function boundedNonempty(value: string, max: number): boolean {
+  return value.length > 0 && value.length <= max;
 }

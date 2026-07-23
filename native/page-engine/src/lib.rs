@@ -4,9 +4,11 @@ pub mod effect;
 pub mod endpoint;
 pub mod engine;
 pub mod error;
+pub mod facebook;
 pub mod model;
 pub mod probe;
 pub mod protocol;
+pub mod wechat;
 pub mod xhs;
 
 use crate::error::{EngineError, ErrorCode};

@@ -8,7 +8,7 @@ import {
   extractNameFromAvatarAria,
   readFacebookIdentity,
   type FacebookIdentitySignals,
-} from '../../src/facebook/index.js';
+} from '../../src/facebook/identity.js';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 
 type CookieLike = { name?: string; value?: string; domain?: string };

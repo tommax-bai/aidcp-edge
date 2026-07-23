@@ -1,4 +1,5 @@
 use crate::error::{EngineError, ErrorCode};
+use crate::protocol::Platform;
 use serde::{Deserialize, Serialize};
 
 const MAX_REASON_BYTES: usize = 512;
@@ -31,6 +32,9 @@ pub const PRODUCTION_COMMAND_KINDS: &[&str] = &[
     "interaction_follow",
     "interaction_comment",
     "interaction_like_comment",
+    "group_join",
+    "wechat_capture_session",
+    "identity_read",
     "captcha_capture",
     "captcha_click",
     "publish_navigate_entry",
@@ -144,6 +148,8 @@ pub enum SearchTimeWindow {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SearchExecuteParams {
     pub keyword: String,
+    #[serde(default)]
+    pub container: Option<String>,
     #[serde(default)]
     pub source: Option<SearchSource>,
     #[serde(default)]
@@ -290,6 +296,18 @@ pub struct LikeCommentParams {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct GroupJoinParams {
+    pub group_url: String,
+    #[serde(default)]
+    pub click: Option<bool>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub think_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CaptchaCaptureParams {
     pub incident_id: String,
     #[serde(default)]
@@ -328,6 +346,17 @@ pub struct CaptchaClickParams {
 pub struct PublishIdentity {
     pub record_id: u64,
     pub seq: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PublishSelectModeParams {
+    pub record_id: u64,
+    pub seq: u32,
+    #[serde(default)]
+    pub option_kind: Option<String>,
+    #[serde(default)]
+    pub option_value: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -423,10 +452,13 @@ pub enum NativeCommand {
     InteractionFollow(FollowParams),
     InteractionComment(CommentParams),
     InteractionLikeComment(LikeCommentParams),
+    GroupJoin(GroupJoinParams),
+    WechatCaptureSession(EmptyParams),
+    IdentityRead(EmptyParams),
     CaptchaCapture(CaptchaCaptureParams),
     CaptchaClick(CaptchaClickParams),
     PublishNavigateEntry(PublishIdentity),
-    PublishSelectMode(PublishIdentity),
+    PublishSelectMode(PublishSelectModeParams),
     PublishUploadImage(PublishFileParams),
     PublishSetCover(PublishCoverParams),
     PublishFillField(PublishFieldParams),
@@ -440,6 +472,53 @@ pub enum NativeCommand {
 }
 
 impl NativeCommand {
+    pub fn supports_platform(&self, platform: Platform) -> bool {
+        use NativeCommand::*;
+        match platform {
+            Platform::Xiaohongshu => !matches!(
+                self,
+                GroupJoin(_) | WechatCaptureSession(_) | IdentityRead(_)
+            ),
+            Platform::Facebook => matches!(
+                self,
+                PageProbe(_)
+                    | SessionStop(_)
+                    | BrowseNext(_)
+                    | BrowseScroll(_)
+                    | PageScroll(_)
+                    | FeedRefresh(_)
+                    | SearchExecute(_)
+                    | NoteOpen(_)
+                    | NoteClose(_)
+                    | NavigationBack(_)
+                    | NoteBrowseImages(_)
+                    | NoteScrollComments(_)
+                    | ProfileOpen(_)
+                    | InteractionLike(_)
+                    | InteractionFollow(_)
+                    | InteractionComment(_)
+                    | InteractionLikeComment(_)
+                    | GroupJoin(_)
+                    | PublishNavigateEntry(_)
+                    | PublishSelectMode(_)
+                    | PublishUploadImage(_)
+                    | PublishSetCover(_)
+                    | PublishFillField(_)
+                    | PublishAddWithCandidate(_)
+                    | PublishSetOption(_)
+                    | PublishSetSchedule(_)
+                    | PublishSubmit(_)
+                    | PublishCapturePostId(_)
+                    | PublishCaptureScheduled(_)
+                    | PublishReconcileScheduled(_)
+                    | IdentityRead(_)
+                    | CaptchaCapture(_)
+                    | CaptchaClick(_)
+            ),
+            Platform::WechatChannels => matches!(self, WechatCaptureSession(_)),
+        }
+    }
+
     pub fn may_write(&self) -> bool {
         !matches!(
             self,
@@ -448,6 +527,8 @@ impl NativeCommand {
                 | Self::PublishCaptureScheduled(_)
                 | Self::PublishReconcileScheduled(_)
                 | Self::CaptchaCapture(_)
+                | Self::WechatCaptureSession(_)
+                | Self::IdentityRead(_)
         )
     }
 
@@ -455,8 +536,9 @@ impl NativeCommand {
         match self {
             Self::PageProbe(_)
             | Self::PublishNavigateEntry(_)
-            | Self::PublishSelectMode(_)
-            | Self::PublishSubmit(_) => Ok(()),
+            | Self::PublishSubmit(_)
+            | Self::WechatCaptureSession(_) => Ok(()),
+            Self::IdentityRead(_) => Ok(()),
             Self::PlanExecute(params) => {
                 validate_list(&params.steps)?;
                 for step in &params.steps {
@@ -488,6 +570,11 @@ impl NativeCommand {
             ),
             Self::SearchExecute(params) => {
                 validate_required(&params.keyword, 512, "invalid search keyword")?;
+                validate_optional(
+                    &params.container,
+                    MAX_URL_BYTES,
+                    "search container exceeds protocol limit",
+                )?;
                 if params
                     .max_results
                     .is_some_and(|value| value == 0 || value > 100)
@@ -597,6 +684,18 @@ impl NativeCommand {
                     "invalid comment anchor id",
                 )
             }
+            Self::GroupJoin(params) => {
+                validate_required(
+                    &params.group_url,
+                    MAX_URL_BYTES,
+                    "invalid Facebook group URL",
+                )?;
+                validate_optional(
+                    &params.reason,
+                    MAX_REASON_BYTES,
+                    "reason exceeds protocol limit",
+                )
+            }
             Self::CaptchaCapture(params) => {
                 validate_required(&params.incident_id, MAX_ID_BYTES, "invalid incident id")
             }
@@ -647,6 +746,18 @@ impl NativeCommand {
                 validate_required(&params.candidate_kind, 64, "invalid publish candidate kind")?;
                 validate_required(&params.value, 2_000, "invalid publish candidate value")?;
                 validate_string_list(&params.candidates, 50, 2_000, "invalid publish candidates")
+            }
+            Self::PublishSelectMode(params) => {
+                validate_optional(
+                    &params.option_kind,
+                    128,
+                    "invalid publish select-mode option kind",
+                )?;
+                validate_optional(
+                    &params.option_value,
+                    512,
+                    "invalid publish select-mode option value",
+                )
             }
             Self::PublishSetOption(params) => {
                 validate_required(&params.option_kind, 128, "invalid publish option kind")?;

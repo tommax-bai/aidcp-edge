@@ -66,7 +66,11 @@ test('browser-absent page commands request a wake and return an explicit failure
   assert.match(handler, /requestColdStandbyWake\(`cloud_command:\$\{env\.type\}`\)/);
   assert.match(handler, /reportActionCompleted\(\{ action, ok: false, reason: 'browser_absent_wake_requested' \}\)/);
   assert.match(handler, /operation\.browser === 'forbidden'[\s\S]*env\.type !== 'pacing\.update'[\s\S]*applyPacingSnapshot/);
-  assert.equal(edgeMain.match(/if \(handleBrowserAbsentCommand\(env\)\) return;/g)?.length, 3);
+  assert.equal(
+    edgeMain.match(/if \(handleBrowserAbsentCommand\(env\)\) return;/g)?.length,
+    2,
+    'publish and browse share the two Native-only ingress paths; the removed JavaScript page route must not return',
+  );
 });
 
 test('browser-absent core does not consume a browser slot and real wake clears the marker', () => {

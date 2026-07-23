@@ -1,7 +1,20 @@
 {
   "schemaVersion": 1,
   "protocolVersion": 2,
-  "platform": "xiaohongshu",
+  "platforms": [
+    {
+      "platform": "xiaohongshu",
+      "adapterVersion": "xiaohongshu-v1"
+    },
+    {
+      "platform": "facebook",
+      "adapterVersion": "facebook-v1"
+    },
+    {
+      "platform": "wechat_channels",
+      "adapterVersion": "wechat-channels-v1"
+    }
+  ],
   "duplicatePolicy": "return_recorded_terminal_without_redispatch",
   "commands": [
     {
@@ -233,6 +246,36 @@
       "receipts": ["action.completed"],
       "effect": "platform_write",
       "cancellation": "atomic_dispatch_then_verify"
+    },
+    {
+      "routeKey": "group.join",
+      "edgeType": "group.join",
+      "nativeKind": "group_join",
+      "family": "group",
+      "requestContract": "GroupJoinPayload",
+      "receipts": ["action.completed"],
+      "effect": "platform_write",
+      "cancellation": "atomic_dispatch_then_verify"
+    },
+    {
+      "routeKey": "internal.wechat_capture_session",
+      "edgeType": "internal.wechat_capture_session",
+      "nativeKind": "wechat_capture_session",
+      "family": "wechat_auth",
+      "requestContract": "EmptyParams",
+      "receipts": ["wechat_session_candidate"],
+      "effect": "read",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "internal.identity_read",
+      "edgeType": "internal.identity_read",
+      "nativeKind": "identity_read",
+      "family": "identity",
+      "requestContract": "EmptyParams",
+      "receipts": ["identity_receipt"],
+      "effect": "read",
+      "cancellation": "safe_points"
     },
     {
       "routeKey": "captcha.assist.capture",

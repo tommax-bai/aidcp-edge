@@ -12,12 +12,42 @@ const nativeKinds = {
   'notification.back_home': 'notification_back_home', 'interaction.like': 'interaction_like',
   'interaction.collect': 'interaction_collect', 'interaction.follow': 'interaction_follow',
   'interaction.comment': 'interaction_comment', 'interaction.like_comment': 'interaction_like_comment',
+  'group.join': 'group_join',
 } as const;
+
+const actionNames: Readonly<Record<string, string>> = {
+  'page.scroll': 'scroll',
+  'feed.refresh': 'refresh',
+  'interaction.like': 'like',
+  'interaction.collect': 'collect',
+  'interaction.follow': 'follow',
+  'interaction.comment': 'comment',
+  'interaction.like_comment': 'comment_like',
+  'search.execute': 'search',
+  'note.open': 'open_note',
+  'note.close': 'close',
+  'note.browse_images': 'browse_images',
+  'note.scroll_comments': 'scroll_comments',
+  'navigation.back': 'back',
+  'profile.open': 'profile_open',
+  'group.join': 'join_group',
+  'notification.open': 'open_notifications',
+  'notification.browse_comments': 'browse_notification_comments',
+  'notification.browse_likes': 'browse_notification_likes',
+  'notification.browse_follows': 'browse_notification_follows',
+  'notification.back_home': 'notification_back_home',
+  'pacing.update': 'pacing_update',
+  'session.end': 'session.end',
+};
+
+export function nativeActionNameForCommand(type: string): string {
+  return actionNames[type] ?? type;
+}
 
 const allowedByKind: Record<string, readonly string[]> = {
   plan_execute: ['steps'], session_stop: ['reason'], browse_next: ['reason'], browse_scroll: ['reason'],
   page_scroll: ['reason', 'dwellMs'], feed_refresh: ['reason', 'thinkMs'],
-  search_execute: ['keyword', 'source', 'maxResults', 'sort', 'timeWindow'],
+  search_execute: ['keyword', 'container', 'source', 'maxResults', 'sort', 'timeWindow'],
   note_open: ['noteId', 'index', 'reason', 'url', 'surface', 'purpose', 'thinkMs'],
   note_close: ['reason', 'dwellMs'], navigation_back: ['reason', 'targetPage', 'dwellMs'],
   note_browse_images: ['noteId', 'count', 'thinkMs', 'dwellMs'],
@@ -30,6 +60,7 @@ const allowedByKind: Record<string, readonly string[]> = {
   interaction_follow: ['authorId', 'noteId', 'reason', 'thinkMs'],
   interaction_comment: ['noteId', 'text', 'groupChatCode', 'fastReturnToFeed', 'reason', 'thinkMs'],
   interaction_like_comment: ['commentAnchorId', 'noteId', 'reason', 'thinkMs'],
+  group_join: ['groupUrl', 'click', 'reason', 'thinkMs'],
 };
 
 function project(payload: unknown, allowed: readonly string[]): Record<string, unknown> {
@@ -54,7 +85,14 @@ export function nativePublishCommand(
   const common = { recordId: payload.recordId, seq: payload.seq };
   switch (payload.kind) {
     case 'navigate_entry': return { kind: 'publish_navigate_entry', params: common };
-    case 'select_mode': return { kind: 'publish_select_mode', params: common };
+    case 'select_mode': return {
+      kind: 'publish_select_mode',
+      params: {
+        ...common,
+        ...(payload.params.optionKind !== undefined ? { optionKind: payload.params.optionKind } : {}),
+        ...(payload.params.optionValue !== undefined ? { optionValue: payload.params.optionValue } : {}),
+      },
+    };
     case 'upload_image': return { kind: 'publish_upload_image', params: { ...common, path: media?.localImagePath ?? '', imageIndex: media?.imageIndex ?? 0 } };
     case 'set_cover': return { kind: 'publish_set_cover', params: { ...common, imageIndex: media?.imageIndex ?? -1 } };
     case 'fill_field': return { kind: 'publish_fill_field', params: { ...common, fieldType: payload.params.fieldType, value: payload.params.value } };

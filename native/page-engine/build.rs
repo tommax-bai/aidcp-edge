@@ -12,6 +12,8 @@ fn main() {
     println!("cargo:rerun-if-changed=src/xhs-command-router.js");
     println!("cargo:rerun-if-changed=src/xhs-file-input-selector.txt");
     println!("cargo:rerun-if-changed=src/xhs-search-input-geometry.js");
+    println!("cargo:rerun-if-changed=src/facebook-command-router.js");
+    println!("cargo:rerun-if-changed=src/facebook-file-input-selector.txt");
     println!("cargo:rerun-if-changed=command-manifest.json");
     let command_manifest = fs::read("command-manifest.json").expect("read command manifest");
     let capability_digest = format!("{:x}", Sha256::digest(&command_manifest));
@@ -85,4 +87,43 @@ fn main() {
         .join("xhs_search_input_geometry_bytes.rs");
     fs::write(search_geometry_output_path, search_geometry_output)
         .expect("write encoded native search input geometry");
+
+    let facebook_router_source =
+        fs::read("src/facebook-command-router.js").expect("read Facebook command router source");
+    let facebook_router_encoded: Vec<u8> = facebook_router_source
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .collect();
+    let facebook_router_bytes = facebook_router_encoded
+        .iter()
+        .map(|byte| format!("0x{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let facebook_router_output =
+        format!("pub const FACEBOOK_COMMAND_ROUTER_BYTES: &[u8] = &[{facebook_router_bytes}];\n");
+    let facebook_router_output_path = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"))
+        .join("facebook_command_router_bytes.rs");
+    fs::write(facebook_router_output_path, facebook_router_output)
+        .expect("write encoded Facebook command router");
+
+    let facebook_selector_source = fs::read("src/facebook-file-input-selector.txt")
+        .expect("read Facebook file input selector");
+    let facebook_selector_encoded: Vec<u8> = facebook_selector_source
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .collect();
+    let facebook_selector_bytes = facebook_selector_encoded
+        .iter()
+        .map(|byte| format!("0x{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let facebook_selector_output = format!(
+        "pub const FACEBOOK_FILE_INPUT_SELECTOR_BYTES: &[u8] = &[{facebook_selector_bytes}];\n"
+    );
+    let facebook_selector_output_path = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"))
+        .join("facebook_file_input_selector_bytes.rs");
+    fs::write(facebook_selector_output_path, facebook_selector_output)
+        .expect("write encoded Facebook file input selector");
 }

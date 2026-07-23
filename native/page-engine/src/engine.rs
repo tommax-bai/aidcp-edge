@@ -1,9 +1,10 @@
 use crate::cdp::CdpSession;
 use crate::endpoint;
 use crate::error::{EngineError, ErrorCode};
+use crate::facebook;
 use crate::model::{
-    ActionReceipt, CaptchaSnapshot, NoteDetail, NotificationHome, NotificationItems, PageCards,
-    PlanResults, ProfileDetail, PublishReceipt,
+    ActionReceipt, CaptchaSnapshot, FacebookIdentityReceipt, NoteDetail, NotificationHome,
+    NotificationItems, PageCards, PlanResults, ProfileDetail, PublishReceipt,
 };
 use crate::probe::PageKind;
 use crate::probe::ProbeResult;
@@ -11,6 +12,7 @@ use crate::protocol::{
     CancelRecord, CommandRecord, EffectPhase, NativeCommand, Platform, SessionCloseRecord,
     SessionOpenRecord, SessionStatusRecord,
 };
+use crate::wechat;
 use crate::xhs;
 use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
@@ -44,10 +46,12 @@ pub enum CommandOutput {
     ProfileDetail(ProfileDetail),
     NotificationItems(NotificationItems),
     NotificationHome(NotificationHome),
-    ActionReceipt(ActionReceipt),
+    ActionReceipt(Box<ActionReceipt>),
     PlanResults(PlanResults),
     PublishReceipt(PublishReceipt),
     CaptchaSnapshot(CaptchaSnapshot),
+    WechatSessionCandidate(Option<wechat::WechatSessionCandidate>),
+    FacebookIdentity(FacebookIdentityReceipt),
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +108,8 @@ struct EngineSession {
     active_command_id: Option<u64>,
     completed: BTreeMap<u64, StoredCommandResult>,
     captcha_snapshots: VecDeque<CaptchaSnapshotState>,
+    wechat_capture_initialized: bool,
+    wechat_request_context: Option<wechat::WechatRequestContext>,
 }
 
 #[derive(Clone)]
@@ -214,6 +220,8 @@ impl Engine {
             active_command_id: None,
             completed: BTreeMap::new(),
             captcha_snapshots: VecDeque::new(),
+            wechat_capture_initialized: false,
+            wechat_request_context: None,
         };
         let info = session.info();
         self.session = Some(session);
@@ -294,15 +302,23 @@ impl Engine {
             session.remember(request.command_id, result.clone());
             return Ok(result);
         }
+        if !request.command.supports_platform(session.platform) {
+            let result = StoredCommandResult::failed(EngineError::new(
+                ErrorCode::UnsupportedCommand,
+                "native page command is not supported by the bound platform adapter",
+            ));
+            session.remember(request.command_id, result.clone());
+            return Ok(result);
+        }
         session.active_command_id = Some(request.command_id);
         let outcome = match &request.command {
-            NativeCommand::PageProbe(_) => {
+            NativeCommand::PageProbe(_) if session.platform == Platform::Xiaohongshu => {
                 match execute_page_probe(session, request.deadline_unix_ms, &cancellation).await {
                     Ok(result) => StoredCommandResult::confirmed(CommandOutput::PageProbe(result)),
                     Err(error) => StoredCommandResult::failed(error),
                 }
             }
-            _ => execute_xhs_command(session, request, &cancellation).await,
+            _ => execute_platform_command(session, request, &cancellation).await,
         };
         session.active_command_id = None;
         session.remember(request.command_id, outcome.clone());
@@ -368,7 +384,7 @@ impl Engine {
     }
 }
 
-async fn execute_xhs_command(
+async fn execute_platform_command(
     session: &mut EngineSession,
     request: &CommandRecord,
     cancellation: &AtomicBool,
@@ -381,7 +397,7 @@ async fn execute_xhs_command(
         Ok(value) => value,
         Err(error) => return StoredCommandResult::failed(error),
     };
-    let operation = execute_xhs_command_once(session, &request.command);
+    let operation = execute_platform_command_once(session, &request.command);
     let result = if write {
         tokio::time::timeout(remaining, operation)
             .await
@@ -421,7 +437,7 @@ async fn execute_xhs_command(
                 .reconnect(request.deadline_unix_ms, cancellation)
                 .await
             {
-                Ok(()) => match execute_xhs_command_once(session, &request.command).await {
+                Ok(()) => match execute_platform_command_once(session, &request.command).await {
                     Ok((phase, output)) => StoredCommandResult {
                         effect_phase: phase,
                         output: Some(output),
@@ -449,6 +465,314 @@ async fn execute_xhs_command(
             error,
         ),
     }
+}
+
+async fn execute_platform_command_once(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    match session.platform {
+        Platform::Xiaohongshu => execute_xhs_command_once(session, command).await,
+        Platform::WechatChannels => match command {
+            NativeCommand::WechatCaptureSession(_) => {
+                let candidate = wechat::capture_session(
+                    &mut session.cdp,
+                    &mut session.wechat_capture_initialized,
+                    &mut session.wechat_request_context,
+                )
+                .await?;
+                Ok((
+                    EffectPhase::Confirmed,
+                    CommandOutput::WechatSessionCandidate(candidate),
+                ))
+            }
+            _ => Err(EngineError::new(
+                ErrorCode::UnsupportedCommand,
+                "native WeChat adapter does not support this command",
+            )),
+        },
+        Platform::Facebook => execute_facebook_command_once(session, command).await,
+    }
+}
+
+async fn execute_facebook_command_once(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    use NativeCommand::*;
+    match command {
+        CaptchaCapture(params) => capture_captcha(session, params).await,
+        CaptchaClick(params) => click_captcha(session, params).await,
+        IdentityRead(_) => execute_facebook_identity(session).await,
+        SearchExecute(params) => {
+            let Some(container) = params.container.as_deref() else {
+                return evaluate_facebook_router(session, command).await;
+            };
+            let url = validated_facebook_search_url(container, &params.keyword)?;
+            session.cdp.navigate(url.as_str()).await?;
+            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+            evaluate_facebook_router_until_cards(session, command, Duration::from_secs(5)).await
+        }
+        NoteOpen(params) if params.url.is_some() => {
+            let url = validated_facebook_content_url(
+                params.url.as_deref().unwrap_or_default(),
+                params.note_id.as_deref(),
+            )?;
+            session.cdp.navigate(url.as_str()).await?;
+            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+            evaluate_facebook_router(session, command).await
+        }
+        ProfileOpen(params) if params.direct == Some(true) => {
+            let id = params.author_id.as_deref().ok_or_else(|| {
+                EngineError::new(
+                    ErrorCode::InvalidRequest,
+                    "direct Facebook profile navigation requires an author id",
+                )
+            })?;
+            if id.len() < 5 || !id.chars().all(|character| character.is_ascii_digit()) {
+                return Err(invalid_facebook_navigation_target());
+            }
+            let mut url = Url::parse("https://www.facebook.com/profile.php")
+                .map_err(|_| invalid_facebook_navigation_target())?;
+            url.query_pairs_mut().append_pair("id", id);
+            session.cdp.navigate(url.as_str()).await?;
+            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+            evaluate_facebook_router(session, command).await
+        }
+        GroupJoin(params) => {
+            let url = validated_facebook_group_url(&params.group_url)?;
+            session.cdp.navigate(url.as_str()).await?;
+            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+            evaluate_facebook_router(session, command).await
+        }
+        PageScroll(params) if params.reason.as_deref() == Some("empty_feed_reels_fallback") => {
+            session
+                .cdp
+                .navigate("https://www.facebook.com/reels/")
+                .await?;
+            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+            evaluate_facebook_router_until_cards(session, command, Duration::from_secs(5)).await
+        }
+        FeedRefresh(_) => {
+            session.cdp.reload().await?;
+            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+            evaluate_facebook_router_until_cards(session, command, Duration::from_secs(5)).await
+        }
+        PublishNavigateEntry(_) => {
+            session.cdp.navigate("https://www.facebook.com/").await?;
+            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+            evaluate_facebook_router(session, command).await
+        }
+        PublishUploadImage(params) => {
+            validate_publish_file(&params.path)?;
+            let selector = facebook::file_input_selector()?;
+            let node_id = session.cdp.query_selector_node(&selector).await?;
+            session
+                .cdp
+                .set_file_input_files(node_id, std::slice::from_ref(&params.path))
+                .await?;
+            verify_facebook_uploaded_preview(session, command).await
+        }
+        _ => evaluate_facebook_router(session, command).await,
+    }
+}
+
+async fn execute_facebook_identity(
+    session: &mut EngineSession,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let location = session
+        .cdp
+        .evaluate("location.href", true)
+        .await?
+        .pointer("/result/value")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if !location.starts_with("https://www.facebook.com/")
+        && !location.starts_with("https://facebook.com/")
+    {
+        session.cdp.navigate("https://www.facebook.com/").await?;
+        wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    }
+    session.cdp.enable_network().await?;
+    let cookies = session.cdp.all_cookies().await?;
+    let cookie_user_id = cookies
+        .get("cookies")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|cookie| cookie.get("name").and_then(serde_json::Value::as_str) == Some("c_user"))
+        .filter(|cookie| {
+            cookie
+                .get("domain")
+                .and_then(serde_json::Value::as_str)
+                .map(|domain| {
+                    let host = domain.trim_start_matches('.').to_ascii_lowercase();
+                    host == "facebook.com" || host.ends_with(".facebook.com")
+                })
+                .unwrap_or(false)
+        })
+        .filter_map(|cookie| cookie.get("value").and_then(serde_json::Value::as_str))
+        .find(|value| {
+            value.len() >= 5 && value.chars().all(|character| character.is_ascii_digit())
+        });
+    let expression = facebook::identity_expression(cookie_user_id)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    let result = facebook::result_from_cdp(&raw)?;
+    let command = NativeCommand::IdentityRead(crate::command::EmptyParams::default());
+    let output = facebook::typed_output(&command, result.output, session.cdp.target_id())?;
+    Ok((result.effect_phase, output))
+}
+
+async fn evaluate_facebook_router(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let expression = facebook::command_expression(command)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    let result = facebook::result_from_cdp(&raw)?;
+    let output = facebook::typed_output(command, result.output, session.cdp.target_id())?;
+    Ok((result.effect_phase, output))
+}
+
+async fn evaluate_facebook_router_until_cards(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+    timeout: Duration,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let latest = evaluate_facebook_router(session, command).await?;
+        if matches!(&latest.1, CommandOutput::PageCards(cards) if !cards.cards.is_empty())
+            || tokio::time::Instant::now() >= deadline
+        {
+            return Ok(latest);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+async fn wait_for_facebook_ready(
+    session: &mut EngineSession,
+    timeout: Duration,
+) -> Result<(), EngineError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let expression = facebook::page_probe_expression()?;
+        let raw = session.cdp.evaluate(&expression, true).await?;
+        let result = facebook::result_from_cdp(&raw)?;
+        let ready = result
+            .output
+            .pointer("/value/readyState")
+            .and_then(serde_json::Value::as_str);
+        if matches!(ready, Some("interactive" | "complete")) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(EngineError::new(
+                ErrorCode::ProbeFailed,
+                "native Facebook navigation did not reach a ready document",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn verify_facebook_uploaded_preview(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let output = evaluate_facebook_router(session, command).await?;
+        let confirmed = matches!(&output.1, CommandOutput::PublishReceipt(receipt) if receipt.ok);
+        if confirmed {
+            return Ok(output);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok((EffectPhase::Ambiguous, output.1));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn validated_facebook_content_url(raw: &str, expected: Option<&str>) -> Result<Url, EngineError> {
+    let url = Url::parse(raw).map_err(|_| invalid_facebook_navigation_target())?;
+    validate_facebook_origin(&url)?;
+    let path = url.path().to_ascii_lowercase();
+    let is_content = path.contains("/posts/")
+        || path.contains("/videos/")
+        || path.starts_with("/reel/")
+        || path.contains("/permalink.php")
+        || path.starts_with("/groups/")
+        || url
+            .query_pairs()
+            .any(|(key, _)| matches!(key.as_ref(), "story_fbid" | "multi_permalinks" | "v"));
+    if !is_content || expected.is_some_and(|value| value != raw && !raw.contains(value)) {
+        return Err(invalid_facebook_navigation_target());
+    }
+    Ok(url)
+}
+
+fn validated_facebook_group_url(raw: &str) -> Result<Url, EngineError> {
+    let url = Url::parse(raw).map_err(|_| invalid_facebook_navigation_target())?;
+    validate_facebook_origin(&url)?;
+    let parts: Vec<_> = url
+        .path_segments()
+        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
+        .unwrap_or_default();
+    if parts.first() != Some(&"groups") || parts.get(1).is_none_or(|value| value.is_empty()) {
+        return Err(invalid_facebook_navigation_target());
+    }
+    Url::parse(&format!("https://www.facebook.com/groups/{}", parts[1]))
+        .map_err(|_| invalid_facebook_navigation_target())
+}
+
+fn validated_facebook_search_url(raw: &str, keyword: &str) -> Result<Url, EngineError> {
+    let url = Url::parse(raw).map_err(|_| invalid_facebook_navigation_target())?;
+    validate_facebook_origin(&url)?;
+    let parts: Vec<_> = url
+        .path_segments()
+        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
+        .unwrap_or_default();
+    let path = if parts.first() == Some(&"groups") {
+        let group = parts
+            .get(1)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(invalid_facebook_navigation_target)?;
+        format!("/groups/{group}/search/")
+    } else if parts.len() == 1 {
+        format!("/{}/search/", parts[0])
+    } else {
+        return Err(invalid_facebook_navigation_target());
+    };
+    let mut target =
+        Url::parse("https://www.facebook.com").map_err(|_| invalid_facebook_navigation_target())?;
+    target.set_path(&path);
+    target.query_pairs_mut().append_pair("q", keyword);
+    Ok(target)
+}
+
+fn validate_facebook_origin(url: &Url) -> Result<(), EngineError> {
+    let host = url
+        .host_str()
+        .ok_or_else(invalid_facebook_navigation_target)?;
+    if url.scheme() != "https"
+        || !(host == "facebook.com" || host.ends_with(".facebook.com"))
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(invalid_facebook_navigation_target());
+    }
+    Ok(())
+}
+
+fn invalid_facebook_navigation_target() -> EngineError {
+    EngineError::new(
+        ErrorCode::InvalidRequest,
+        "native navigation target is not an allowlisted Facebook page",
+    )
 }
 
 async fn execute_xhs_command_once(
@@ -643,14 +967,18 @@ async fn execute_search(
 fn search_receipt(phase: EffectPhase, reason: &str) -> (EffectPhase, CommandOutput) {
     (
         phase,
-        CommandOutput::ActionReceipt(ActionReceipt {
+        CommandOutput::ActionReceipt(Box::new(ActionReceipt {
             action: "search".to_owned(),
             ok: false,
             reason: Some(reason.to_owned()),
             note_id: None,
             observation: None,
+            post_observation: None,
+            group_observation: None,
+            group_url: None,
+            clicked: None,
             candidates: Vec::new(),
-        }),
+        })),
     )
 }
 
@@ -926,14 +1254,18 @@ async fn click_captcha(
         {
             return Ok((
                 EffectPhase::Ambiguous,
-                CommandOutput::ActionReceipt(ActionReceipt {
+                CommandOutput::ActionReceipt(Box::new(ActionReceipt {
                     action: "captcha_click".to_owned(),
                     ok: false,
                     reason: Some("text_readback_mismatch".to_owned()),
                     note_id: None,
                     observation: None,
+                    post_observation: None,
+                    group_observation: None,
+                    group_url: None,
+                    clicked: None,
                     candidates: Vec::new(),
-                }),
+                })),
             ));
         }
     }
@@ -958,14 +1290,18 @@ async fn click_captcha(
     );
     Ok((
         EffectPhase::Confirmed,
-        CommandOutput::ActionReceipt(ActionReceipt {
+        CommandOutput::ActionReceipt(Box::new(ActionReceipt {
             action: "captcha_click".to_owned(),
             ok: !blocked,
             reason: Some(if blocked { "still_blocked" } else { "cleared" }.to_owned()),
             note_id: None,
             observation: None,
+            post_observation: None,
+            group_observation: None,
+            group_url: None,
+            clicked: None,
             candidates: Vec::new(),
-        }),
+        })),
     ))
 }
 
