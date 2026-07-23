@@ -1848,6 +1848,32 @@ test('首次创建：双重权威确认后直接回主界面，并把一次性�
       };
     },
     adsTemplates: async () => [{ key: 'windows', label: 'Windows' }],
+  }, {}, {
+    ContentWorkspace: {
+      create: (options: {
+        root: HTMLElement;
+        dashboardRoot: HTMLElement;
+        legacyRuntimeRoot: HTMLElement;
+      }) => {
+        options.root.ownerDocument.querySelector('#content-runtime-toggle')?.addEventListener('click', () => {
+          options.root.dispatchEvent(new options.root.ownerDocument.defaultView!.CustomEvent(
+            'content-workspace:runtime-action',
+            { detail: { action: 'start' } },
+          ));
+        });
+        return {
+          setEnvironment: (environment: { platform?: string } | null) => {
+            const xhs = environment?.platform === 'xiaohongshu';
+            options.dashboardRoot.classList.toggle('hidden', !xhs);
+            options.legacyRuntimeRoot.classList.toggle('hidden', xhs);
+          },
+          setRuntime: () => undefined,
+          isDraftOpen: () => false,
+          openDraft: () => undefined,
+          close: () => undefined,
+        };
+      },
+    },
   });
 
   (w.document.querySelector('.rail-empty') as HTMLButtonElement).click();
@@ -1863,18 +1889,24 @@ test('首次创建：双重权威确认后直接回主界面，并把一次性�
   assert.ok(w.document.querySelector('.rail-row[data-env-id="ads-new-1"].selected'));
   const guide = w.document.querySelector('#first-environment-start-guide')!;
   const start = w.document.querySelector('#session-fab') as HTMLButtonElement;
+  const dashboardStart = w.document.querySelector('#content-runtime-toggle') as HTMLButtonElement;
+  assert.equal(w.document.querySelector('#xhs-environment-dashboard')!.classList.contains('hidden'), false);
+  assert.equal(w.document.querySelector('#legacy-runtime-body')!.classList.contains('hidden'), true);
   assert.equal(guide.classList.contains('hidden'), false);
   assert.match(guide.textContent || '', /下一步[\s\S]*启动运行环境[\s\S]*完成平台登录/);
   assert.equal(start.dataset.action, 'start');
   assert.equal(start.classList.contains('first-environment-start-target'), true);
   assert.equal(start.getAttribute('aria-describedby'), 'first-environment-start-guide');
+  assert.equal(dashboardStart.classList.contains('first-environment-start-target'), true);
+  assert.equal(dashboardStart.getAttribute('aria-describedby'), 'first-environment-start-guide');
   assert.notEqual(w.document.activeElement, start, '引导不自动抢焦点');
 
-  start.click();
+  dashboardStart.click();
   for (let index = 0; index < 3; index += 1) await tick();
   assert.equal(calls.start[0], 'ads-new-1', '启动必须绑定刚创建的精确环境');
   assert.equal(guide.classList.contains('hidden'), true);
   assert.equal(start.classList.contains('first-environment-start-target'), false);
+  assert.equal(dashboardStart.classList.contains('first-environment-start-target'), false);
 });
 
 test('首次创建：fleet 快照未包含精确环境时保留管理窗口，延迟到达后才交接', async () => {

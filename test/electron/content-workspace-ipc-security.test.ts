@@ -183,6 +183,27 @@ test('应用壳把当前平台交给内容工作区，由内容控制器执行 X
   assert.match(appRenderer, /contentWorkspace\?\.setEnvironment\(environment\)/);
 });
 
+test('完整价值面板属于小红书环境首页，内容工作区不再保留第二个首页', () => {
+  const dashboardStart = html.indexOf('id="xhs-environment-dashboard"');
+  const homeStart = html.indexOf('id="content-home-view"');
+  const scheduleStart = html.indexOf('id="environment-schedule-entry"');
+  const workspaceStart = html.indexOf('id="content-workspace"');
+  assert.ok(dashboardStart >= 0 && dashboardStart < homeStart && homeStart < scheduleStart && scheduleStart < workspaceStart);
+  assert.equal((html.match(/id="content-home-view"/g) ?? []).length, 1);
+  assert.equal((html.match(/id="environment-schedule-entry"/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /data-content-page="home"/);
+  for (const id of [
+    'content-value-intro', 'content-work-card', 'content-featured', 'content-reference-list',
+    'content-mine-list', 'content-runtime-detail',
+  ]) {
+    assert.match(html, new RegExp(`(?:id|class)="${id}`));
+  }
+  assert.match(renderer, /dashboardRoot[\s\S]*legacyRuntimeRoot[\s\S]*syncEnvironmentLanding/);
+  assert.match(styles, /\.xhs-environment-dashboard[\s\S]*min-width:\s*0/);
+  assert.match(styles, /\.legacy-runtime-body\.hidden\s*\{\s*display:\s*none\s*!important;/);
+  assert.match(styles, /\.fleet-row\.with-rail > \.shell\.xhs-dashboard-mode\s*\{[^}]*max-width:\s*1040px;/);
+});
+
 // 注：陈旧响应丢弃、账号切换失效、排队回执诚实性等**行为**一律由 content-workspace.test.ts
 // 在 jsdom 里真的执行控制器来验证。这里只留「源码文本」层面挡不住也测不出的静态约束
 // （IPC 通道白名单、路径/方法固定、envKey/token 只由 main 注入）。

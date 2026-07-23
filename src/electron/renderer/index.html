@@ -205,6 +205,126 @@
         <button id="notice-action" class="setup-btn hidden" type="button">环境管理</button>
       </section>
 
+      <!-- 真实准备/异常证据在两种环境首页正文之外，切到 XHS 价值面板时仍然可见。 -->
+      <section id="kernel-prep" class="kernel-prep hidden" aria-live="polite">
+        <div class="kp-head">
+          <span id="kernel-prep-label">正在准备浏览器内核…</span>
+          <span id="kernel-prep-pct">0%</span>
+        </div>
+        <div class="kp-track"><div id="kernel-prep-bar" class="kp-bar"></div></div>
+        <div class="kp-note">约 750MB，仅首次下载，完成后即可正常使用。</div>
+      </section>
+
+      <section id="edge-failure" class="edge-failure hidden" aria-live="polite">
+        <span class="ef-mark">!</span>
+        <div class="ef-main">
+          <strong>异常</strong>
+          <span id="edge-failure-text"></span>
+        </div>
+      </section>
+
+      <!-- 首个环境的启动引导由环境页持有；XHS 模式会同时高亮价值首页里的可见代理按钮。 -->
+      <div id="first-environment-start-guide" class="first-environment-start-guide hidden" role="status" aria-live="polite">
+        <button id="first-environment-start-guide-close" class="first-environment-start-guide-close" type="button" aria-label="关闭启动引导">×</button>
+        <span class="first-environment-start-guide-kicker">下一步</span>
+        <strong>启动运行环境</strong>
+        <span>系统会打开浏览器，请完成平台登录</span>
+      </div>
+
+      <!-- 小红书环境的唯一首屏：复用既有内容价值首页，不再藏在第二个“内容首页”中。 -->
+      <section id="xhs-environment-dashboard" class="xhs-environment-dashboard hidden" aria-label="小红书环境价值首页">
+        <section id="content-home-view" class="content-home-view" aria-label="当前小红书环境首页">
+          <div class="content-value-intro">
+            <div>
+              <span>今天的内容成果</span>
+              <h2 id="content-home-heading">正在读取这个账号的内容成果</h2>
+              <p id="content-home-description">灵感、创作过程和可编辑草稿会在这里建立清晰关系。</p>
+            </div>
+            <div class="content-value-summary" aria-label="内容成果摘要">
+              <div><b id="content-home-inspiration-count">—</b><span>精选灵感</span></div>
+              <div><b id="content-home-draft-count">—</b><span>我的内容</span></div>
+              <div><b id="content-home-active-count">—</b><span>进行中</span></div>
+            </div>
+          </div>
+
+          <!-- 排期是完整环境面板中的账号模块，不是整个首页的替代品。 -->
+          <button id="environment-schedule-entry" class="environment-schedule-entry hidden" type="button" aria-label="查看当前环境本周安排">
+            <span class="ese-calendar" aria-hidden="true">
+              <span id="environment-schedule-entry-day">今</span>
+            </span>
+            <span class="ese-copy">
+              <span class="ese-title-row">
+                <strong>账号安排</strong>
+                <em id="environment-schedule-entry-badge">正在读取</em>
+              </span>
+              <span id="environment-schedule-entry-summary" class="ese-summary">正在读取这个账号的可工作时间</span>
+            </span>
+            <span class="ese-next" aria-hidden="true">›</span>
+          </button>
+
+          <section id="content-work-card" class="content-work-card is-idle" aria-label="当前环境的实时工作过程">
+            <div class="content-work-brief">
+              <div class="content-work-agent">
+                <span class="content-work-avatar"><img src="./assets/environment-loading-wireframe-execute.webp" alt="小萝北"></span>
+                <span><small id="content-work-account">小萝北 · 当前环境</small><strong id="content-work-title">AI 已准备好为你工作</strong></span>
+              </div>
+              <span id="content-work-status" class="content-work-status">当前空闲</span>
+              <div class="content-work-goal">
+                <h3 id="content-work-goal">当前没有正在进行的任务</h3>
+                <p id="content-work-goal-copy">从一条灵感发起创作后，计划、实时过程和可编辑草稿都会出现在这里。</p>
+              </div>
+              <div id="content-work-plan" class="content-work-plan" aria-label="本次计划"></div>
+              <div class="content-work-foot">
+                <span>仅生成草稿 · 不会自动发布</span>
+                <button id="content-work-primary" class="cw-button secondary" type="button">查看灵感</button>
+              </div>
+            </div>
+            <div class="content-work-stream">
+              <header><span><strong>实时工作过程</strong><small>持续说明系统正在做什么</small></span><button id="content-work-collapse" type="button">收起</button></header>
+              <div id="content-work-timeline" class="content-work-timeline" role="log" aria-live="polite" aria-relevant="additions"></div>
+              <div id="content-work-empty" class="content-work-empty">
+                <b>✦</b><strong>还没有工作过程</strong><span>任务开始后，这里会逐步展示计划、判断、生成、检查和确认。</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="content-home-section" aria-labelledby="content-featured-heading">
+            <div class="content-home-section-head">
+              <span><strong id="content-featured-heading">最值得看的灵感</strong><small>把价值证据和由它产生的成稿放在一起</small></span>
+              <button type="button" data-content-home-action="library">查看全部灵感 →</button>
+            </div>
+            <div id="content-featured" class="content-featured" aria-live="polite"></div>
+          </section>
+
+          <div class="content-home-grid">
+            <section class="content-home-section" aria-labelledby="content-reference-heading">
+              <div class="content-home-section-head">
+                <span><strong id="content-reference-heading">值得参考的内容</strong><small>按综合热度排序，赞藏缺失不会被画成 0</small></span>
+              </div>
+              <div id="content-reference-list" class="content-reference-list" aria-live="polite"></div>
+            </section>
+            <section class="content-home-section" aria-labelledby="content-mine-heading">
+              <div class="content-home-section-head">
+                <span><strong id="content-mine-heading">我的内容</strong><small>正在创作、待调整与已安排</small></span>
+                <button type="button" data-content-home-action="draft">全部 →</button>
+              </div>
+              <div id="content-mine-list" class="content-mine-list" aria-live="polite"></div>
+            </section>
+          </div>
+
+          <details id="content-runtime-detail" class="content-runtime-detail">
+            <summary><span><strong>系统运行详情</strong><small id="content-runtime-summary">正在读取今天的操作数据</small></span><em>展开数据</em></summary>
+            <div id="content-runtime-metrics" class="content-runtime-metrics"></div>
+            <div class="content-runtime-actions">
+              <button id="content-runtime-browser" class="cw-button secondary" type="button">浏览器</button>
+              <button id="content-runtime-toggle" class="cw-button primary" type="button">启动</button>
+            </div>
+            <p id="content-runtime-guide" class="content-runtime-guide hidden">首次使用请先启动当前环境。这里与真实启动按钮是同一个动作，启动后才会开始浏览并寻找灵感。</p>
+          </details>
+        </section>
+      </section>
+
+      <div id="legacy-runtime-body" class="legacy-runtime-body">
       <!-- 在场感行：当前动作 + 呼吸点 + 新鲜度走字（动效只由真实事件驱动） -->
       <section class="presence">
         <div class="presence-ic"><span class="core" id="presence-core"></span></div>
@@ -297,47 +417,8 @@
         <div id="runtime-guidance-note" class="rg-note hidden"></div>
       </section>
 
-      <!-- 当前小红书环境的客户排期入口：只展示可理解的有效安排，不暴露后台掩码或继承来源。 -->
-      <button id="environment-schedule-entry" class="environment-schedule-entry hidden" type="button" aria-label="查看当前环境本周安排">
-        <span class="ese-calendar" aria-hidden="true">
-          <span id="environment-schedule-entry-day">今</span>
-        </span>
-        <span class="ese-copy">
-          <span class="ese-title-row">
-            <strong>本周安排</strong>
-            <em id="environment-schedule-entry-badge">正在读取</em>
-          </span>
-          <span id="environment-schedule-entry-summary" class="ese-summary">正在读取这个账号的可工作时间</span>
-        </span>
-        <span class="ese-next" aria-hidden="true">›</span>
-      </button>
-
-      <!-- 内嵌运行时首启内核准备进度（仅缺内核时显示；下完自动隐藏） -->
-      <section id="kernel-prep" class="kernel-prep hidden" aria-live="polite">
-        <div class="kp-head">
-          <span id="kernel-prep-label">正在准备浏览器内核…</span>
-          <span id="kernel-prep-pct">0%</span>
-        </div>
-        <div class="kp-track"><div id="kernel-prep-bar" class="kp-bar"></div></div>
-        <div class="kp-note">约 750MB，仅首次下载，完成后即可正常使用。</div>
-      </section>
-
-      <section id="edge-failure" class="edge-failure hidden" aria-live="polite">
-        <span class="ef-mark">!</span>
-        <div class="ef-main">
-          <strong>异常</strong>
-          <span id="edge-failure-text"></span>
-        </div>
-      </section>
-
       <!-- 今日进展条（计数从门面降级至此） -->
       <section class="summary" id="daily-summary">
-        <div id="first-environment-start-guide" class="first-environment-start-guide hidden" role="status" aria-live="polite">
-          <button id="first-environment-start-guide-close" class="first-environment-start-guide-close" type="button" aria-label="关闭启动引导">×</button>
-          <span class="first-environment-start-guide-kicker">下一步</span>
-          <strong>启动运行环境</strong>
-          <span>系统会打开浏览器，请完成平台登录</span>
-        </div>
         <div class="summary-head">
           <div class="summary-title">
             <span class="lbl">今日进展</span>
@@ -515,6 +596,7 @@
       </section>
 
       </div>
+      </div>
 
       <!-- 当前环境排期：环境首页的下钻子页，不进入内容工作区或全局导航。 -->
       <section id="environment-schedule-workspace" class="environment-schedule-workspace hidden" aria-label="当前环境排期">
@@ -683,85 +765,9 @@
         </header>
 
         <nav id="content-home-nav" class="content-home-nav" aria-label="内容工作区导航">
-          <button class="active" type="button" data-content-page="home" aria-current="page">内容首页</button>
-          <button type="button" data-content-page="library">精选灵感</button>
+          <button class="active" type="button" data-content-page="library" aria-current="page">精选灵感</button>
           <button type="button" data-content-page="draft">我的内容</button>
         </nav>
-
-        <section id="content-home-view" class="content-home-view cw-view" aria-label="内容首页">
-          <div class="content-value-intro">
-            <div>
-              <span>今天的内容成果</span>
-              <h2 id="content-home-heading">正在读取这个账号的内容成果</h2>
-              <p id="content-home-description">灵感、创作过程和可编辑草稿会在这里建立清晰关系。</p>
-            </div>
-            <div class="content-value-summary" aria-label="内容成果摘要">
-              <div><b id="content-home-inspiration-count">—</b><span>精选灵感</span></div>
-              <div><b id="content-home-draft-count">—</b><span>我的内容</span></div>
-              <div><b id="content-home-active-count">—</b><span>进行中</span></div>
-            </div>
-          </div>
-
-          <section id="content-work-card" class="content-work-card is-idle" aria-label="当前环境的实时工作过程">
-            <div class="content-work-brief">
-              <div class="content-work-agent">
-                <span class="content-work-avatar"><img src="./assets/environment-loading-wireframe-execute.webp" alt="小萝北"></span>
-                <span><small id="content-work-account">小萝北 · 当前环境</small><strong id="content-work-title">AI 已准备好为你工作</strong></span>
-              </div>
-              <span id="content-work-status" class="content-work-status">当前空闲</span>
-              <div class="content-work-goal">
-                <h3 id="content-work-goal">当前没有正在进行的任务</h3>
-                <p id="content-work-goal-copy">从一条灵感发起创作后，计划、实时过程和可编辑草稿都会出现在这里。</p>
-              </div>
-              <div id="content-work-plan" class="content-work-plan" aria-label="本次计划"></div>
-              <div class="content-work-foot">
-                <span>仅生成草稿 · 不会自动发布</span>
-                <button id="content-work-primary" class="cw-button secondary" type="button">查看灵感</button>
-              </div>
-            </div>
-            <div class="content-work-stream">
-              <header><span><strong>实时工作过程</strong><small>持续说明系统正在做什么</small></span><button id="content-work-collapse" type="button">收起</button></header>
-              <div id="content-work-timeline" class="content-work-timeline" role="log" aria-live="polite" aria-relevant="additions"></div>
-              <div id="content-work-empty" class="content-work-empty">
-                <b>✦</b><strong>还没有工作过程</strong><span>任务开始后，这里会逐步展示计划、判断、生成、检查和确认。</span>
-              </div>
-            </div>
-          </section>
-
-          <section class="content-home-section" aria-labelledby="content-featured-heading">
-            <div class="content-home-section-head">
-              <span><strong id="content-featured-heading">最值得看的灵感</strong><small>把价值证据和由它产生的成稿放在一起</small></span>
-              <button type="button" data-content-home-action="library">查看全部灵感 →</button>
-            </div>
-            <div id="content-featured" class="content-featured" aria-live="polite"></div>
-          </section>
-
-          <div class="content-home-grid">
-            <section class="content-home-section" aria-labelledby="content-reference-heading">
-              <div class="content-home-section-head">
-                <span><strong id="content-reference-heading">值得参考的内容</strong><small>按综合热度排序，赞藏缺失不会被画成 0</small></span>
-              </div>
-              <div id="content-reference-list" class="content-reference-list" aria-live="polite"></div>
-            </section>
-            <section class="content-home-section" aria-labelledby="content-mine-heading">
-              <div class="content-home-section-head">
-                <span><strong id="content-mine-heading">我的内容</strong><small>正在创作、待调整与已安排</small></span>
-                <button type="button" data-content-home-action="draft">全部 →</button>
-              </div>
-              <div id="content-mine-list" class="content-mine-list" aria-live="polite"></div>
-            </section>
-          </div>
-
-          <details id="content-runtime-detail" class="content-runtime-detail">
-            <summary><span><strong>系统运行详情</strong><small id="content-runtime-summary">正在读取今天的操作数据</small></span><em>展开数据</em></summary>
-            <div id="content-runtime-metrics" class="content-runtime-metrics"></div>
-            <div class="content-runtime-actions">
-              <button id="content-runtime-browser" class="cw-button secondary" type="button">浏览器</button>
-              <button id="content-runtime-toggle" class="cw-button primary" type="button">启动</button>
-            </div>
-            <p id="content-runtime-guide" class="content-runtime-guide hidden">首次使用请先启动当前环境。这里与上方真实启动按钮是同一个动作，启动后才会开始浏览并寻找灵感。</p>
-          </details>
-        </section>
 
         <section id="curated-library-view" class="cw-view" aria-label="灵感库">
           <div class="cw-toolbar">

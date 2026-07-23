@@ -66,6 +66,7 @@ const fields = {
   sessionFab: document.querySelector('#session-fab'),
   firstEnvironmentStartGuide: document.querySelector('#first-environment-start-guide'),
   firstEnvironmentStartGuideClose: document.querySelector('#first-environment-start-guide-close'),
+  contentRuntimeToggle: document.querySelector('#content-runtime-toggle'),
   sessionClose: document.querySelector('#session-close'),
   clientSessionFoot: document.querySelector('#client-session-foot'),
   clientSessionName: document.querySelector('#client-session-name'),
@@ -279,6 +280,8 @@ const interactionWorkspace = window.InteractionWorkspace?.create({
 const contentWorkspace = window.ContentWorkspace?.create({
   root: document.querySelector('#content-workspace'),
   legacyRoot: document.querySelector('#legacy-workspace'),
+  dashboardRoot: document.querySelector('#xhs-environment-dashboard'),
+  legacyRuntimeRoot: document.querySelector('#legacy-runtime-body'),
   interactionRoot: document.querySelector('#interaction-workspace'),
   shell: document.querySelector('.shell'),
   api: window.aidcpEdge,
@@ -364,6 +367,8 @@ function syncContentWorkspace(status = currentStatus) {
     platform: selectedEnvPlatform(),
   } : null;
   contentWorkspace?.setEnvironment(environment);
+  // 环境首页模式已确定后再同步首启高亮，确保它落在 XHS 价值首页的可见代理按钮上。
+  syncFirstEnvironmentStartGuide();
   contentWorkspace?.setRuntime?.({
     automationState: status?.automationState || status?.automation || 'stopped',
     browserState: status?.browserState || 'closed',
@@ -4528,6 +4533,8 @@ function clearFirstEnvironmentStartGuide() {
   fields.firstEnvironmentStartGuide?.classList.add('hidden');
   fields.sessionFab?.classList.remove('first-environment-start-target');
   fields.sessionFab?.removeAttribute('aria-describedby');
+  fields.contentRuntimeToggle?.classList.remove('first-environment-start-target');
+  fields.contentRuntimeToggle?.removeAttribute('aria-describedby');
 }
 
 function syncFirstEnvironmentStartGuide() {
@@ -4547,6 +4554,8 @@ function syncFirstEnvironmentStartGuide() {
     fields.firstEnvironmentStartGuide?.classList.add('hidden');
     fields.sessionFab?.classList.remove('first-environment-start-target');
     fields.sessionFab?.removeAttribute('aria-describedby');
+    fields.contentRuntimeToggle?.classList.remove('first-environment-start-target');
+    fields.contentRuntimeToggle?.removeAttribute('aria-describedby');
     return;
   }
   if (fields.sessionFab?.dataset.action !== 'start') {
@@ -4556,6 +4565,11 @@ function syncFirstEnvironmentStartGuide() {
   fields.firstEnvironmentStartGuide?.classList.remove('hidden');
   fields.sessionFab?.classList.add('first-environment-start-target');
   fields.sessionFab?.setAttribute('aria-describedby', 'first-environment-start-guide');
+  const xhsDashboardVisible = selectedEnvPlatform() === 'xiaohongshu'
+    && !document.querySelector('#xhs-environment-dashboard')?.classList.contains('hidden');
+  fields.contentRuntimeToggle?.classList.toggle('first-environment-start-target', xhsDashboardVisible);
+  if (xhsDashboardVisible) fields.contentRuntimeToggle?.setAttribute('aria-describedby', 'first-environment-start-guide');
+  else fields.contentRuntimeToggle?.removeAttribute('aria-describedby');
 }
 
 function armFirstEnvironmentStartGuide(envId) {

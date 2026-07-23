@@ -239,8 +239,16 @@
     const shell = options && options.shell;
     const api = (options && options.api) || {};
     if (!root || !legacyRoot) return null;
-
     const document = root.ownerDocument;
+    const dashboardRoot = (options && options.dashboardRoot)
+      || document.querySelector('#xhs-environment-dashboard')
+      || root;
+    const legacyRuntimeRoot = (options && options.legacyRuntimeRoot)
+      || document.querySelector('#legacy-runtime-body')
+      || legacyRoot;
+    const homeRoot = dashboardRoot.querySelector('#content-home-view') || root.querySelector('#content-home-view');
+    const environmentHomeMode = dashboardRoot !== root;
+    if (!homeRoot) return null;
     const fields = {
       entry: document.querySelector('#content-library-entry'),
       entryCount: document.querySelector('#content-library-entry-count'),
@@ -252,32 +260,32 @@
       meta: root.querySelector('#content-workspace-meta'),
       homeNav: root.querySelector('#content-home-nav'),
       homeNavButtons: Array.from(root.querySelectorAll('[data-content-page]')),
-      home: root.querySelector('#content-home-view'),
-      homeHeading: root.querySelector('#content-home-heading'),
-      homeDescription: root.querySelector('#content-home-description'),
-      homeInspirationCount: root.querySelector('#content-home-inspiration-count'),
-      homeDraftCount: root.querySelector('#content-home-draft-count'),
-      homeActiveCount: root.querySelector('#content-home-active-count'),
-      workCard: root.querySelector('#content-work-card'),
-      workAccount: root.querySelector('#content-work-account'),
-      workTitle: root.querySelector('#content-work-title'),
-      workStatus: root.querySelector('#content-work-status'),
-      workGoal: root.querySelector('#content-work-goal'),
-      workGoalCopy: root.querySelector('#content-work-goal-copy'),
-      workPlan: root.querySelector('#content-work-plan'),
-      workTimeline: root.querySelector('#content-work-timeline'),
-      workPrimary: root.querySelector('#content-work-primary'),
-      workCollapse: root.querySelector('#content-work-collapse'),
-      featured: root.querySelector('#content-featured'),
-      referenceList: root.querySelector('#content-reference-list'),
-      mineList: root.querySelector('#content-mine-list'),
-      homeActionButtons: Array.from(root.querySelectorAll('[data-content-home-action]')),
-      runtimeDetail: root.querySelector('#content-runtime-detail'),
-      runtimeSummary: root.querySelector('#content-runtime-summary'),
-      runtimeMetrics: root.querySelector('#content-runtime-metrics'),
-      runtimeBrowser: root.querySelector('#content-runtime-browser'),
-      runtimeToggle: root.querySelector('#content-runtime-toggle'),
-      runtimeGuide: root.querySelector('#content-runtime-guide'),
+      home: homeRoot,
+      homeHeading: homeRoot.querySelector('#content-home-heading'),
+      homeDescription: homeRoot.querySelector('#content-home-description'),
+      homeInspirationCount: homeRoot.querySelector('#content-home-inspiration-count'),
+      homeDraftCount: homeRoot.querySelector('#content-home-draft-count'),
+      homeActiveCount: homeRoot.querySelector('#content-home-active-count'),
+      workCard: homeRoot.querySelector('#content-work-card'),
+      workAccount: homeRoot.querySelector('#content-work-account'),
+      workTitle: homeRoot.querySelector('#content-work-title'),
+      workStatus: homeRoot.querySelector('#content-work-status'),
+      workGoal: homeRoot.querySelector('#content-work-goal'),
+      workGoalCopy: homeRoot.querySelector('#content-work-goal-copy'),
+      workPlan: homeRoot.querySelector('#content-work-plan'),
+      workTimeline: homeRoot.querySelector('#content-work-timeline'),
+      workPrimary: homeRoot.querySelector('#content-work-primary'),
+      workCollapse: homeRoot.querySelector('#content-work-collapse'),
+      featured: homeRoot.querySelector('#content-featured'),
+      referenceList: homeRoot.querySelector('#content-reference-list'),
+      mineList: homeRoot.querySelector('#content-mine-list'),
+      homeActionButtons: Array.from(homeRoot.querySelectorAll('[data-content-home-action]')),
+      runtimeDetail: homeRoot.querySelector('#content-runtime-detail'),
+      runtimeSummary: homeRoot.querySelector('#content-runtime-summary'),
+      runtimeMetrics: homeRoot.querySelector('#content-runtime-metrics'),
+      runtimeBrowser: homeRoot.querySelector('#content-runtime-browser'),
+      runtimeToggle: homeRoot.querySelector('#content-runtime-toggle'),
+      runtimeGuide: homeRoot.querySelector('#content-runtime-guide'),
       library: root.querySelector('#curated-library-view'),
       detailView: root.querySelector('#curated-detail-view'),
       createView: root.querySelector('#curated-create-view'),
@@ -324,6 +332,7 @@
     let homePollTimer = null;
     let typeTimer = null;
     let typedMessageKey = '';
+    const dashboardScrollByEnv = new Map();
 
     function envState() {
       if (!environment) return null;
@@ -365,6 +374,13 @@
       return !root.classList.contains('hidden');
     }
 
+    function homeVisible() {
+      if (!environmentHomeMode) return visible() && currentPage === 'home';
+      return inspirationAvailable()
+        && !legacyRoot.classList.contains('hidden')
+        && !dashboardRoot.classList.contains('hidden');
+    }
+
     function inspirationAvailable() {
       return environment?.platform === 'xiaohongshu';
     }
@@ -375,6 +391,25 @@
 
     function captureSourceWorkspace() {
       sourceWorkspace = interactionRoot && !interactionRoot.classList.contains('hidden') ? 'interaction' : 'legacy';
+      if (sourceWorkspace === 'legacy' && environment?.envId && homeVisible()) {
+        const scrolling = document.scrollingElement || document.documentElement;
+        dashboardScrollByEnv.set(environment.envId, Number(scrolling?.scrollTop) || 0);
+      }
+    }
+
+    function syncEnvironmentLanding() {
+      if (!environmentHomeMode) return;
+      const showDashboard = inspirationAvailable() && !visible();
+      dashboardRoot.classList.toggle('hidden', !showDashboard);
+      legacyRuntimeRoot.classList.toggle('hidden', showDashboard);
+      legacyRoot.classList.toggle('xhs-value-dashboard-mode', showDashboard);
+      shell?.classList.toggle('xhs-dashboard-mode', showDashboard);
+      if (showDashboard) {
+        fields.home.classList.remove('hidden');
+        renderHome();
+      } else {
+        fields.home.classList.add('hidden');
+      }
     }
 
     function setWorkspaceVisible(show) {
@@ -383,6 +418,8 @@
         legacyRoot.classList.add('hidden');
         interactionRoot?.classList.add('hidden');
         shell?.classList.add('content-mode');
+        shell?.classList.remove('xhs-dashboard-mode');
+        if (environmentHomeMode) dashboardRoot.classList.add('hidden');
       } else {
         shell?.classList.remove('content-mode');
         if (sourceWorkspace === 'interaction' && interactionRoot) {
@@ -392,11 +429,22 @@
           legacyRoot.classList.remove('hidden');
           interactionRoot?.classList.add('hidden');
         }
+        syncEnvironmentLanding();
+        if (sourceWorkspace === 'legacy' && environment?.envId && homeVisible()) {
+          const top = dashboardScrollByEnv.get(environment.envId) || 0;
+          global.requestAnimationFrame?.(() => {
+            const scrolling = document.scrollingElement || document.documentElement;
+            if (scrolling) scrolling.scrollTop = top;
+          });
+        }
       }
     }
 
     function hideViews() {
-      for (const view of [fields.home, fields.library, fields.detailView, fields.createView, fields.queueView, fields.draft]) {
+      const views = environmentHomeMode
+        ? [fields.library, fields.detailView, fields.createView, fields.queueView, fields.draft]
+        : [fields.home, fields.library, fields.detailView, fields.createView, fields.queueView, fields.draft];
+      for (const view of views) {
         view?.classList.add('hidden');
       }
       fields.draft?.classList.remove('open');
@@ -445,6 +493,10 @@
     }
 
     function showPage(page, pushCurrent) {
+      if (environmentHomeMode && page === 'home') {
+        close();
+        return;
+      }
       if (page !== 'library') closeSortMenu();
       if (pushCurrent && currentPage !== 'home') backStack.push(currentPage);
       currentPage = page;
@@ -495,6 +547,10 @@
       hideViews();
       setWorkspaceVisible(false);
       schedulePublishQueuePoll();
+      if (environmentHomeMode && inspirationAvailable()) {
+        renderHome();
+        void loadHome(true);
+      }
       if (leavingPage !== 'home') {
         root.dispatchEvent(new global.CustomEvent('content-workspace:leave', { detail: { page: leavingPage } }));
       }
@@ -507,6 +563,10 @@
         return;
       }
       const leavingPage = currentPage;
+      if (environmentHomeMode && previous === 'home') {
+        close();
+        return;
+      }
       showPage(previous, false);
       if (leavingPage !== previous) {
         root.dispatchEvent(new global.CustomEvent('content-workspace:leave', { detail: { page: leavingPage } }));
@@ -520,11 +580,11 @@
           renderList();
           if (state && fields.list) fields.list.scrollTop = state.scrollTop;
         }
+      } else if (previous === 'detail') {
+        renderDetail(currentDetail);
       } else if (previous === 'home') {
         renderHome();
         void loadHome(true);
-      } else if (previous === 'detail') {
-        renderDetail(currentDetail);
       } else if (previous === 'queue') {
         renderPublishQueue();
         schedulePublishQueuePoll();
@@ -666,7 +726,7 @@
       element.textContent = '';
       let cursor = 0;
       const tick = () => {
-        if (typedMessageKey !== key || !visible() || currentPage !== 'home') return;
+        if (typedMessageKey !== key || !homeVisible() || currentPage !== 'home') return;
         cursor = Math.min(text.length, cursor + 1);
         element.textContent = text.slice(0, cursor);
         if (cursor < text.length) typeTimer = global.setTimeout(tick, 28);
@@ -1011,7 +1071,7 @@
       if (homePollTimer) global.clearTimeout(homePollTimer);
       homePollTimer = null;
       const state = envState();
-      if (!visible() || currentPage !== 'home' || !state) return;
+      if (!homeVisible() || currentPage !== 'home' || !state) return;
       const activeRefinement = state.homeDrafts.items.some((item) => refinementActive(item?.refinement?.status));
       const activeQueue = (state.publishQueue.data?.summary?.inProgress || 0) > 0;
       const delay = activeRefinement ? 1_800 : activeQueue ? 5_000 : 20_000;
@@ -1044,13 +1104,20 @@
 
     function openHome() {
       if (!inspirationAvailable()) return;
-      if (!visible()) {
-        captureSourceWorkspace();
-        setWorkspaceVisible(true);
+      if (!environmentHomeMode) {
+        if (!visible()) {
+          captureSourceWorkspace();
+          setWorkspaceVisible(true);
+        }
+        backStack = [];
+        currentDetail = null;
+        showPage('home', false);
+        renderHome();
+        void loadHome(true);
+        return;
       }
-      backStack = [];
-      currentDetail = null;
-      showPage('home', false);
+      if (visible()) close();
+      else syncEnvironmentLanding();
       renderHome();
       void loadHome(true);
     }
@@ -1890,7 +1957,7 @@
         automationActive: automationState !== 'stopped',
         guideActive: Boolean(next?.guideActive),
       };
-      if (currentPage === 'home') renderHome();
+      if (homeVisible()) renderHome();
     }
 
     function setEnvironment(next) {
@@ -1918,6 +1985,9 @@
         if (visible()) {
           setWorkspaceVisible(true);
           configureHeader(currentPage);
+        } else {
+          syncEnvironmentLanding();
+          if (homeVisible()) renderHome();
         }
         return;
       }
@@ -1939,7 +2009,16 @@
       createBusy = false;
       if (inspirationAvailable()) void loadSummary(true);
       if (publishQueueAvailable()) void loadPublishQueue(true);
-      if (!visible()) return;
+      syncEnvironmentLanding();
+      if (!visible()) {
+        currentPage = 'home';
+        backStack = [];
+        if (inspirationAvailable()) {
+          renderHome();
+          void loadHome(true);
+        }
+        return;
+      }
       if (currentPage === 'queue') {
         if (!publishQueueAvailable()) {
           close();
@@ -1961,19 +2040,21 @@
         void loadList();
         return;
       }
-      backStack = [];
-      showPage('home', false);
-      renderHome();
-      void loadHome(true);
+      if (environmentHomeMode) close();
+      else {
+        backStack = [];
+        showPage('home', false);
+        renderHome();
+        void loadHome(true);
+      }
     }
 
-    fields.entry?.addEventListener('click', openHome);
+    fields.entry?.addEventListener('click', environmentHomeMode ? openLibrary : openHome);
     fields.close?.addEventListener('click', handleCloseControl);
     fields.back?.addEventListener('click', goBack);
     fields.homeNavButtons.forEach((button) => button.addEventListener('click', () => {
       const page = button.dataset.contentPage;
-      if (page === 'home') openHome();
-      else if (page === 'library') openLibrary();
+      if (page === 'library') openLibrary();
       else if (page === 'draft') openHomeDraft(null);
     }));
     fields.homeActionButtons.forEach((button) => button.addEventListener('click', () => {

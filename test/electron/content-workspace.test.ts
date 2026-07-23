@@ -217,7 +217,7 @@ test('标题栏普通储备为蓝色区间，成稿数不驱动条宽', async ()
   assert.equal($(window, '#content-library-entry-draft-count').textContent, '700');
 });
 
-test('灵感入口只在小红书环境展示，非 XHS 不取数、不打开且切换时关闭旧页面', async () => {
+test('小红书环境直接展示价值首页，灵感入口只打开二级页且其它平台恢复旧环境正文', async () => {
   const summaryCalls: string[] = [];
   const { window, controller } = boot({
     curatedSummary: async (envId: string) => {
@@ -231,6 +231,8 @@ test('灵感入口只在小红书环境展示，非 XHS 不取数、不打开且
   controller.setEnvironment({ envId: 'env-fb', label: 'Facebook 账号', platform: 'facebook' });
   await flush();
   assert.equal(hidden(entry), true);
+  assert.equal(hidden($(window, '#xhs-environment-dashboard')), true);
+  assert.equal(hidden($(window, '#legacy-runtime-body')), false);
   assert.deepEqual(summaryCalls, []);
   entry.dispatchEvent(new window.Event('click'));
   assert.equal(controller.currentPage(), 'home');
@@ -243,11 +245,17 @@ test('灵感入口只在小红书环境展示，非 XHS 不取数、不打开且
   controller.setEnvironment({ envId: 'env-xhs', label: '小红书账号', platform: 'xiaohongshu' });
   await flush();
   assert.equal(hidden(entry), false);
+  assert.equal(hidden($(window, '#xhs-environment-dashboard')), false);
+  assert.equal(hidden($(window, '#legacy-runtime-body')), true);
+  assert.equal(hidden($(window, '#content-workspace')), true);
+  assert.equal($(window, '.shell').classList.contains('xhs-dashboard-mode'), true);
   assert.deepEqual(summaryCalls, ['env-xhs']);
   entry.dispatchEvent(new window.Event('click'));
   await flush();
-  assert.equal(controller.currentPage(), 'home');
+  assert.equal(controller.currentPage(), 'library');
   assert.equal(hidden($(window, '#content-workspace')), false);
+  assert.equal($(window, '.shell').classList.contains('xhs-dashboard-mode'), false);
+  assert.equal($(window, '.shell').classList.contains('content-mode'), true);
   assert.ok(summaryCalls.length >= 1);
   assert.equal(summaryCalls.every((envId) => envId === 'env-xhs'), true);
   const xhsSummaryCallCount = summaryCalls.length;
@@ -258,11 +266,14 @@ test('灵感入口只在小红书环境展示，非 XHS 不取数、不打开且
   assert.equal(controller.currentPage(), 'home');
   assert.equal(hidden($(window, '#content-workspace')), true);
   assert.equal(hidden($(window, '#legacy-workspace')), false);
+  assert.equal(hidden($(window, '#xhs-environment-dashboard')), true);
+  assert.equal(hidden($(window, '#legacy-runtime-body')), false);
+  assert.equal($(window, '.shell').classList.contains('xhs-dashboard-mode'), false);
   assert.equal(summaryCalls.length, xhsSummaryCallCount);
   assert.equal(summaryCalls.every((envId) => envId === 'env-xhs'), true);
 });
 
-test('内容首页把真实灵感、来源成稿、工作过程和系统运行详情放在同一账号框架中', async () => {
+test('环境价值首页把排期入口、真实灵感、来源成稿、工作过程和系统运行详情放在同一账号框架中', async () => {
   const source = listItem({ id: 7, title: '通勤显瘦穿搭公式', likeCount: 18_000, collectCount: 3_298 });
   const draft = {
     id: 42, platform: 'xiaohongshu', kind: 'rewrite', title: '梨形身材这样穿',
@@ -289,10 +300,12 @@ test('内容首页把真实灵感、来源成稿、工作过程和系统运行�
     dailyUsage: { totals: { view: 28, like: 4, collect: 2, comment: 1 } },
   });
   controller.setEnvironment({ envId: 'env-a', label: '小萝北', platform: 'xiaohongshu' });
-  $(window, '#content-library-entry').click();
   await flush(8);
 
   assert.equal(controller.currentPage(), 'home');
+  assert.equal(hidden($(window, '#xhs-environment-dashboard')), false);
+  assert.equal(hidden($(window, '#content-workspace')), true);
+  assert.equal($(window, '#environment-schedule-entry').closest('#content-home-view') !== null, true);
   assert.equal($(window, '#content-home-inspiration-count').textContent, '4');
   assert.equal($(window, '#content-home-draft-count').textContent, '1');
   assert.match($(window, '#content-featured').textContent ?? '', /通勤显瘦穿搭公式.*AI 已基于它完成参考创作.*梨形身材这样穿/s);
@@ -320,12 +333,13 @@ test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async
   assert.equal(hidden($(window, '#legacy-workspace')), true);
   assert.match($(window, '#content-workspace-meta').textContent ?? '', /晚风手作/);
   assert.match($(window, '#curated-list').textContent ?? '', /第 1 页灵感/);
-  assert.deepEqual(listCalls[0], { envId: 'env-a', options: { mode: 'uncreated', sort: 'weighted', limit: 12, offset: 0 } });
+  const libraryCalls = () => listCalls.filter((call) => call.options.limit === 12);
+  assert.deepEqual(libraryCalls()[0], { envId: 'env-a', options: { mode: 'uncreated', sort: 'weighted', limit: 12, offset: 0 } });
 
   $(window, '#curated-next').dispatchEvent(new window.Event('click'));
   await flush();
   assert.match($(window, '#curated-page').textContent ?? '', /第 2 \/ 3 页/);
-  assert.equal(listCalls[1].options.offset, 12);
+  assert.equal(libraryCalls()[1].options.offset, 12);
   const list = $(window, '#curated-list');
   list.scrollTop = 73;
   (list.querySelector('.curated-card') as HTMLElement).dispatchEvent(new window.Event('click'));
@@ -352,6 +366,14 @@ test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async
   ($(window, '[data-curated-mode="all"]')).dispatchEvent(new window.Event('click'));
   await flush();
   assert.deepEqual(listCalls.at(-1)?.options, { mode: 'all', sort: 'weighted', limit: 12, offset: 0 });
+
+  $(window, '#content-workspace-close').dispatchEvent(new window.Event('click'));
+  await flush();
+  assert.equal(controller.currentPage(), 'home');
+  assert.equal(hidden($(window, '#content-workspace')), true);
+  assert.equal(hidden($(window, '#legacy-workspace')), false);
+  assert.equal(hidden($(window, '#xhs-environment-dashboard')), false);
+  assert.equal(window.document.querySelectorAll('[data-content-page="home"]').length, 0);
 });
 
 test('排序由服务端执行，切换时保留旧卡片并在成功后原子替换第一页', async () => {
@@ -559,6 +581,7 @@ test('洗稿任务一经受理，返回未创作列表时立即向服务端重�
   const item = listItem({ referenceImages: [] });
   const { window, controller } = boot({
     curatedList: async (_envId: string, options: { mode: string }) => {
+      if (options.mode === 'all') return { ok: true, data: { items: [], total: 0 } };
       listReads += 1;
       assert.equal(options.mode, 'uncreated');
       return listReads === 1
@@ -721,7 +744,9 @@ test('切账号时详情页与创作页的迟到回包一律丢弃（不只列�
   detailDeferred.resolve?.({ ok: true, data: { item: detail({ title: 'A 账号的私有灵感' }) } });
   await flush();
   assert.doesNotMatch(window.document.body.textContent ?? '', /A 账号的私有灵感/, '旧账号详情绝不能渲染到新账号下');
-  assert.match($(window, '#content-workspace-meta').textContent ?? '', /账号 B/);
+  assert.equal(hidden($(window, '#content-workspace')), true);
+  assert.equal(hidden($(window, '#xhs-environment-dashboard')), false);
+  assert.match($(window, '#content-work-account').textContent ?? '', /账号 B/);
 });
 
 test('汇总读失败时标题栏说失败而不是永远「加载中」，储备条与真实 0 条可区分', async () => {

@@ -2027,6 +2027,11 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   box-shadow: 0 0 0 4px rgba(35, 175, 114, .13);
   animation: first-environment-start-pulse 1.8s ease-out 3;
 }
+#content-runtime-toggle.first-environment-start-target {
+  border-color: #75c6a5;
+  box-shadow: 0 0 0 4px rgba(35, 175, 114, .13);
+  animation: first-environment-start-pulse 1.8s ease-out 3;
+}
 
 /* 开发者详情（原始日志折叠） */
 .dev { border: 1px dashed var(--hair); border-radius: 11px; padding: 8px 14px; background: #fafbfe; }
@@ -3037,6 +3042,9 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 /* ═══ 多环境 fleet（edge-fleet-rail-env-management：环境管理收口于左栏）═══ */
 .fleet-row { display: flex; align-items: stretch; min-height: 0; }
 .fleet-row.with-rail > .shell { width: auto; max-width: 720px; flex: 1; min-width: 0; padding-left: 14px; padding-right: 14px; }
+.fleet-row.with-rail > .shell.xhs-dashboard-mode {
+  max-width: 1040px;
+}
 
 /* 环境栏：默认收起为 ~56px 窄图标条；展开出名字/人设图标/状态文字 + 环境管理 */
 /* 定高（曾是 min-height：无上界 → 环境一多整栏撑高整页、.rail-list 的 overflow 永不生效、栏尾被顶出折叠线）。
@@ -3644,6 +3652,27 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 /* ═══ 视频号互动工作区（右侧 workspace；现有标题栏与环境栏保持不变）═══ */
 .legacy-workspace { display: contents; }
 .legacy-workspace.hidden { display: none !important; }
+.legacy-runtime-body { display: contents; }
+.legacy-runtime-body.hidden { display: none !important; }
+.xhs-environment-dashboard {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+.xhs-environment-dashboard.hidden { display: none !important; }
+.xhs-environment-dashboard .content-home-view {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+}
+.legacy-workspace.xhs-value-dashboard-mode > .first-environment-start-guide {
+  width: min(360px, 100%);
+  justify-self: stretch;
+  margin: 0 0 2px auto;
+}
+.legacy-workspace.xhs-value-dashboard-mode > .first-environment-start-guide::after {
+  display: none;
+}
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
@@ -3670,6 +3699,10 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   box-shadow: 0 8px 22px rgba(50, 86, 139, .055);
   cursor: pointer;
   transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+.xhs-environment-dashboard .environment-schedule-entry {
+  min-height: 64px;
+  box-shadow: 0 6px 18px rgba(50, 86, 139, .045);
 }
 .environment-schedule-entry:hover {
   border-color: #b9cee9;

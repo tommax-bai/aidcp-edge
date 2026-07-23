@@ -646,9 +646,12 @@ test('HTTP overview 候审摘要：无内联 preview 仍显示审批入口并拉
   for (let i = 0; i < 5; i++) await tick();
 
   assert.equal($(w, '#publish-preview-panel').classList.contains('open'), true);
-  assert.equal(listCalls[0][0], 'u1');
-  assert.equal((listCalls[0][1] as { limit: number }).limit, 12);
-  assert.equal((listCalls[0][1] as { offset: number }).offset, 0);
+  const previewListCall = listCalls.find((call) => {
+    const query = call[1] as { limit?: number; offset?: number } | undefined;
+    return query?.limit === 12 && query?.offset === 0;
+  });
+  assert.ok(previewListCall, '稿件预览应发起 12 条第一页请求；环境首页的 6 条摘要请求不应改变该契约');
+  assert.equal(previewListCall[0], 'u1');
   assert.equal(detailCalls[0][0], 'u1');
   assert.equal(detailCalls[0][1], 161);
   assert.equal($(w, '#publish-preview-title').textContent, '商汤开源全能视觉模型MoT架构解析');
