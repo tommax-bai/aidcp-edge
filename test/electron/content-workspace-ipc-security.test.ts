@@ -178,8 +178,9 @@ test('标题栏只保留紧凑灵感入口，并锁定低干扰蓝色与高储�
 test('应用壳把当前平台交给内容工作区，由内容控制器执行 XHS 门禁', () => {
   assert.match(
     appRenderer,
-    /contentWorkspace\.setEnvironment\(envId \? \{[\s\S]*?platform: selectedEnvPlatform\(\),[\s\S]*?\} : null\)/,
+    /const environment = envId \? \{[\s\S]*?platform: selectedEnvPlatform\(\),[\s\S]*?\} : null/,
   );
+  assert.match(appRenderer, /contentWorkspace\?\.setEnvironment\(environment\)/);
 });
 
 // 注：陈旧响应丢弃、账号切换失效、排队回执诚实性等**行为**一律由 content-workspace.test.ts

@@ -87,7 +87,9 @@ const fields = {
   environmentRosterRetry: document.querySelector('#environment-roster-retry'),
   environmentOnboarding: document.querySelector('#environment-onboarding'),
   environmentOnboardingCreate: document.querySelector('#environment-onboarding-create'),
-  environmentWorkspaces: Array.from(document.querySelectorAll('#legacy-workspace, #interaction-workspace, #content-workspace')),
+  environmentWorkspaces: Array.from(document.querySelectorAll(
+    '#legacy-workspace, #interaction-workspace, #content-workspace, #environment-schedule-workspace',
+  )),
   acctAva: document.querySelector('#acct-ava'),
   acctName: document.querySelector('#acct-name'),
   acctPlat: document.querySelector('#acct-plat'),
@@ -282,19 +284,8 @@ const contentWorkspace = window.ContentWorkspace?.create({
   api: window.aidcpEdge,
 }) || null;
 const contentWorkspaceRoot = document.querySelector('#content-workspace');
-contentWorkspaceRoot?.addEventListener('publish-queue:update', () => {
-  if (currentStatus) renderPublish(currentStatus, Date.now());
-});
-contentWorkspaceRoot?.addEventListener('publish-queue:review', () => {
-  openPublishPreview(true);
-});
-contentWorkspaceRoot?.addEventListener('content-workspace:draft', (event) => {
-  openPublishPreview(true);
-  const recordId = Number(event.detail?.recordId);
-  if (Number.isInteger(recordId) && recordId > 0) void selectPublishDraft(recordId);
-});
-contentWorkspaceRoot?.addEventListener('content-workspace:runtime-action', async (event) => {
-  const action = event.detail?.action;
+
+async function handleWorkspaceRuntimeAction(action) {
   if (action === 'start') {
     // 复用真实启动按钮：保存、首次引导清理、平台闸与在途锁均保持单一实现。
     fields.sessionFab?.click();
@@ -318,7 +309,35 @@ contentWorkspaceRoot?.addEventListener('content-workspace:runtime-action', async
     ? await window.aidcpEdge.browserOpen?.(currentEnvId())
     : await window.aidcpEdge.browserClose?.(currentEnvId());
   if (next) routeStatus(next);
+}
+
+// 排期属于当前小红书环境首页：入口与详情都不挂到内容首页，也不创建全局导航项。
+const environmentSchedule = window.EnvironmentSchedule?.create({
+  root: document.querySelector('#environment-schedule-workspace'),
+  entry: document.querySelector('#environment-schedule-entry'),
+  legacyRoot: document.querySelector('#legacy-workspace'),
+  interactionRoot: document.querySelector('#interaction-workspace'),
+  contentRoot: contentWorkspaceRoot,
+  shell: document.querySelector('.shell'),
+  api: window.aidcpEdge,
+  onRuntimeAction: (action) => { void handleWorkspaceRuntimeAction(action); },
+}) || null;
+
+contentWorkspaceRoot?.addEventListener('publish-queue:update', () => {
+  if (currentStatus) renderPublish(currentStatus, Date.now());
 });
+contentWorkspaceRoot?.addEventListener('publish-queue:review', () => {
+  openPublishPreview(true);
+});
+contentWorkspaceRoot?.addEventListener('content-workspace:draft', (event) => {
+  openPublishPreview(true);
+  const recordId = Number(event.detail?.recordId);
+  if (Number.isInteger(recordId) && recordId > 0) void selectPublishDraft(recordId);
+});
+contentWorkspaceRoot?.addEventListener('content-workspace:runtime-action', async (event) => {
+  await handleWorkspaceRuntimeAction(event.detail?.action);
+});
+document.querySelector('#content-library-entry')?.addEventListener('click', () => environmentSchedule?.close(), true);
 
 function syncInteractionWorkspace() {
   if (!interactionWorkspace) return;
@@ -336,21 +355,27 @@ function syncInteractionWorkspace() {
 }
 
 function syncContentWorkspace(status = currentStatus) {
-  if (!contentWorkspace) return;
   const selected = fleetView.envs.get(fleetView.selected);
   const envId = currentEnvId() || (status && status.envId);
   const display = resolveEnvironmentDisplayName(selected, status);
-  contentWorkspace.setEnvironment(envId ? {
+  const environment = envId ? {
     envId,
     label: display.name || '当前账号',
     platform: selectedEnvPlatform(),
-  } : null);
-  contentWorkspace.setRuntime?.({
+  } : null;
+  contentWorkspace?.setEnvironment(environment);
+  contentWorkspace?.setRuntime?.({
     automationState: status?.automationState || status?.automation || 'stopped',
     browserState: status?.browserState || 'closed',
     dailyUsage: status?.dailyUsage || null,
     guideActive: Boolean(fields.firstEnvironmentStartGuide
       && !fields.firstEnvironmentStartGuide.classList.contains('hidden')),
+  });
+  environmentSchedule?.setEnvironment(environment);
+  environmentSchedule?.setRuntime({
+    automationState: status?.automationState || status?.automation || 'stopped',
+    browserState: status?.browserState || 'closed',
+    dailyUsage: status?.dailyUsage || null,
   });
 }
 
@@ -3843,6 +3868,7 @@ function renderPublishPreviewContent(status) {
 function openPublishPreview(fromQueue = false) {
   const queueWaiting = contentWorkspace?.publishQueueSnapshot?.()?.data?.summary?.waitingForYou > 0;
   if (!currentStatus || (!fromQueue && !queueWaiting && !publishDraftEntryAvailable(currentStatus))) return;
+  environmentSchedule?.close();
   syncContentWorkspace(currentStatus);
   resetPublishDraftReview(currentStatus.envId || currentEnvId());
   if (contentWorkspace) {
@@ -3861,6 +3887,7 @@ function openPublishPreview(fromQueue = false) {
 
 function openFullPublishQueue() {
   if (!currentStatus || selectedEnvPlatform() !== 'xiaohongshu' || !contentWorkspace?.openPublishQueue) return;
+  environmentSchedule?.close();
   syncContentWorkspace(currentStatus);
   contentWorkspace.openPublishQueue();
 }

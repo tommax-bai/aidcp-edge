@@ -6691,6 +6691,17 @@ ipcMain.handle('environment-overview:get', (_event, envId) => {
   );
 });
 
+// 当前小红书环境账号的只读生效排期。renderer 只能给本地 envId；main 固定 customer-auth 路径，
+// 不接受 URL/token/accountId，也不检查浏览器/core/自动化连接是否在线。
+ipcMain.handle('environment-schedule:get', (_event, envId) => {
+  const handle = resolveHandle(envId);
+  if (!handle || !handle.profileId) return { ok: false, status: 400, error: 'selected_environment_required' };
+  return delegatedTaskRequest(
+    envId,
+    `/environments/${encodeURIComponent(handle.profileId)}/schedule`,
+  );
+});
+
 // 小红书发布队列走固定的 env-scoped customer-auth 路径；普通读取和取消均不依赖 core/浏览器在线。
 ipcMain.handle('publish-queue:get', (_event, envId) => {
   const handle = resolveHandle(envId);

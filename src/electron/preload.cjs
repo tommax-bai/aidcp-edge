@@ -82,6 +82,8 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   publishScheduleOccupiedHours: (envId) => ipcRenderer.invoke('publish-schedule:occupied-hours', envId),
   // 今日进展与最近发布：始终由 main 通过 customer-auth HTTP 拉取，不依赖自动化引擎或浏览器。
   getEnvironmentOverview: (envId) => ipcRenderer.invoke('environment-overview:get', envId),
+  // 当前小红书环境的账号排期：固定 env-scoped customer-auth 读，renderer 不持有路径/token/accountId。
+  getEnvironmentSchedule: (envId) => ipcRenderer.invoke('environment-schedule:get', envId),
   // 小红书发布队列：renderer 只交本地 envId、任务 id 和所见版本；路径/envKey/token 均由 main 持有。
   publishQueueGet: (envId) => ipcRenderer.invoke('publish-queue:get', envId),
   publishQueueCancel: (envId, taskId, version) =>

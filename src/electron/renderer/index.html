@@ -297,6 +297,21 @@
         <div id="runtime-guidance-note" class="rg-note hidden"></div>
       </section>
 
+      <!-- 当前小红书环境的客户排期入口：只展示可理解的有效安排，不暴露后台掩码或继承来源。 -->
+      <button id="environment-schedule-entry" class="environment-schedule-entry hidden" type="button" aria-label="查看当前环境本周安排">
+        <span class="ese-calendar" aria-hidden="true">
+          <span id="environment-schedule-entry-day">今</span>
+        </span>
+        <span class="ese-copy">
+          <span class="ese-title-row">
+            <strong>本周安排</strong>
+            <em id="environment-schedule-entry-badge">正在读取</em>
+          </span>
+          <span id="environment-schedule-entry-summary" class="ese-summary">正在读取这个账号的可工作时间</span>
+        </span>
+        <span class="ese-next" aria-hidden="true">›</span>
+      </button>
+
       <!-- 内嵌运行时首启内核准备进度（仅缺内核时显示；下完自动隐藏） -->
       <section id="kernel-prep" class="kernel-prep hidden" aria-live="polite">
         <div class="kp-head">
@@ -500,6 +515,60 @@
       </section>
 
       </div>
+
+      <!-- 当前环境排期：环境首页的下钻子页，不进入内容工作区或全局导航。 -->
+      <section id="environment-schedule-workspace" class="environment-schedule-workspace hidden" aria-label="当前环境排期">
+        <header class="esw-header">
+          <button id="environment-schedule-back" class="esw-back" type="button" aria-label="返回当前环境">‹</button>
+          <div class="esw-heading">
+            <span>当前小红书环境</span>
+            <h1>我的安排</h1>
+            <p id="environment-schedule-account">当前账号 · 本周有效安排</p>
+          </div>
+          <div class="esw-runtime-actions" aria-label="当前环境控制">
+            <button id="environment-schedule-browser" class="esw-action secondary" type="button">打开浏览器</button>
+            <button id="environment-schedule-lifecycle" class="esw-action primary" type="button">启动当前环境</button>
+          </div>
+        </header>
+
+        <section id="environment-schedule-now" class="esw-now" aria-live="polite">
+          <span id="environment-schedule-now-mark" class="esw-now-mark" aria-hidden="true"></span>
+          <div>
+            <span id="environment-schedule-now-kicker">正在读取本周安排</span>
+            <strong id="environment-schedule-now-title">请稍候</strong>
+            <p id="environment-schedule-now-detail">安排属于当前账号，浏览器关闭时也可以查看。</p>
+          </div>
+          <button id="environment-schedule-retry" class="esw-retry hidden" type="button">重新读取</button>
+        </section>
+
+        <nav id="environment-schedule-days" class="esw-days" aria-label="选择星期"></nav>
+
+        <div class="esw-layout">
+          <section class="esw-day-card" aria-labelledby="environment-schedule-day-title">
+            <header>
+              <div>
+                <span id="environment-schedule-day-kicker">本周</span>
+                <h2 id="environment-schedule-day-title">今天</h2>
+              </div>
+              <span id="environment-schedule-day-summary" class="esw-day-summary">—</span>
+            </header>
+            <div id="environment-schedule-ranges" class="esw-ranges"></div>
+          </section>
+
+          <aside class="esw-side">
+            <section class="esw-side-card">
+              <span class="esw-side-kicker">会为你做什么</span>
+              <div id="environment-schedule-actions" class="esw-action-list"></div>
+            </section>
+            <section class="esw-side-card">
+              <span class="esw-side-kicker">今天已完成</span>
+              <div id="environment-schedule-usage" class="esw-usage"></div>
+            </section>
+          </aside>
+        </div>
+
+        <p class="esw-note">这里展示当前账号实际生效的安排；“可工作”表示允许工作的时间，不代表任务已经执行。</p>
+      </section>
 
       <!-- 视频号互动工作区：只替换右侧当前环境内容，标题栏与环境栏继续复用现有应用壳。 -->
       <section id="interaction-workspace" class="interaction-workspace hidden" aria-label="视频号互动工作区">
@@ -1413,6 +1482,7 @@
     <script src="./ui-logic.js"></script>
     <script src="./interaction-workspace.js"></script>
     <script src="./content-workspace.js"></script>
+    <script src="./environment-schedule.js"></script>
     <script src="./publish-review-logic.js"></script>
     <script src="./renderer.js"></script>
   </body>
