@@ -691,16 +691,34 @@
       return state;
     }
 
-    function appendHomeImage(parent, url, label, className = 'content-card-thumb') {
+    function coverTone(seed) {
+      const value = String(seed || 'content');
+      let hash = 0;
+      for (let index = 0; index < value.length; index += 1) hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+      return Math.abs(hash) % 4;
+    }
+
+    function homeCoverFallback(label, className, seed, title) {
+      const fallback = createElement(document, 'span', `${className} content-cover-fallback tone-${coverTone(seed)}`);
+      fallback.setAttribute('aria-hidden', 'true');
+      fallback.appendChild(createElement(document, 'small', '', label));
+      fallback.appendChild(createElement(document, 'strong', '', String(title || label).slice(0, 18)));
+      return fallback;
+    }
+
+    function appendHomeImage(parent, url, label, className = 'content-card-thumb', seed = label, title = label) {
       if (url) {
         const image = createElement(document, 'img', className);
         image.src = String(url);
         image.alt = '';
         image.referrerPolicy = 'no-referrer';
+        image.addEventListener('error', () => {
+          image.replaceWith(homeCoverFallback(label, className, seed, title));
+        }, { once: true });
         parent.appendChild(image);
         return;
       }
-      parent.appendChild(createElement(document, 'span', className, label));
+      parent.appendChild(homeCoverFallback(label, className, seed, title));
     }
 
     function homeCuratedImage(item) {
@@ -796,7 +814,7 @@
       fields.workPlan.replaceChildren();
       fields.workTimeline.replaceChildren();
       if (!model) {
-        fields.workTitle.textContent = runtime && runtime.automationActive ? 'AI 已准备好为你工作' : '当前环境尚未启动';
+        fields.workTitle.textContent = 'AI 已准备好为你工作';
         fields.workStatus.textContent = runtime && runtime.automationActive ? '当前空闲' : '环境未启动';
         fields.workGoal.textContent = runtime && runtime.automationActive ? '当前没有正在进行的任务' : '启动当前环境后，可以开始寻找灵感';
         fields.workGoalCopy.textContent = runtime && runtime.automationActive
@@ -850,29 +868,54 @@
       }
       const draft = draftState.items.find((item) => item.sourceCuratedId === source.id) || null;
       const lineage = createElement(document, 'div', 'content-featured-lineage');
-      const sourceCard = createElement(document, 'div', 'content-featured-card');
-      appendHomeImage(sourceCard, homeCuratedImage(source), '灵感');
+      const sourceCard = createElement(document, 'div', 'content-featured-card source');
+      appendHomeImage(sourceCard, homeCuratedImage(source), '灵感', 'content-card-thumb content-featured-thumb', source.id, source.title);
       const sourceCopy = createElement(document, 'div', 'content-featured-copy');
-      sourceCopy.appendChild(createElement(document, 'em', '', '综合热度靠前'));
+      sourceCopy.appendChild(createElement(document, 'em', '', '✦ 综合热度靠前'));
       sourceCopy.appendChild(createElement(document, 'h3', '', source.title || '未命名灵感'));
       sourceCopy.appendChild(createElement(document, 'p', '', source.bodyPreview || '这条内容具备可参考的表达结构。'));
-      sourceCopy.appendChild(createElement(document, 'span', '', `赞 ${countText(source.likeCount)} · 藏 ${countText(source.collectCount)}`));
+      const sourceMetrics = createElement(document, 'div', 'content-featured-metrics');
+      sourceMetrics.appendChild(createElement(document, 'span', 'primary', `♥ 赞 ${countText(source.likeCount)}`));
+      sourceMetrics.appendChild(createElement(document, 'span', 'primary', `★ 藏 ${countText(source.collectCount)}`));
+      sourceCopy.appendChild(sourceMetrics);
+      const sourceActions = createElement(document, 'div', 'content-featured-actions');
+      const viewSource = createElement(document, 'button', 'cw-button secondary', '查看灵感');
+      viewSource.type = 'button';
+      viewSource.addEventListener('click', () => { void openDetail(source.id); });
+      sourceActions.appendChild(viewSource);
+      if (source.creatable) {
+        const createFromSource = createElement(document, 'button', 'cw-button secondary', '开始创作');
+        createFromSource.type = 'button';
+        createFromSource.addEventListener('click', () => { void openDetail(source.id, { startCreate: true }); });
+        sourceActions.appendChild(createFromSource);
+      }
+      sourceCopy.appendChild(sourceActions);
       sourceCard.appendChild(sourceCopy);
-      sourceCard.addEventListener('click', () => { void openDetail(source.id); });
       lineage.appendChild(sourceCard);
       const arrow = createElement(document, 'div', 'content-featured-arrow');
       arrow.appendChild(createElement(document, 'b', '', '→'));
       arrow.appendChild(createElement(document, 'span', '', draft ? 'AI 已基于它完成参考创作' : '尚未基于它生成成稿'));
       lineage.appendChild(arrow);
-      const draftCard = createElement(document, 'div', 'content-featured-card');
-      appendHomeImage(draftCard, homeDraftImage(draft), draft ? '草稿' : '待创作');
+      const draftCard = createElement(document, 'div', `content-featured-card output ${draft ? '' : 'is-empty'}`);
+      appendHomeImage(draftCard, homeDraftImage(draft), draft ? '草稿' : '待创作', 'content-card-thumb content-featured-thumb', draft?.id || `${source.id}-pending`, draft?.title || '等待发起创作');
       const draftCopy = createElement(document, 'div', 'content-featured-copy');
-      draftCopy.appendChild(createElement(document, 'em', '', draft ? (draft.refinement?.status === 'completed' ? '已调整' : '可继续编辑') : '等待发起'));
+      draftCopy.appendChild(createElement(document, 'em', '', draft ? (draft.refinement?.status === 'completed' ? `已调整 · v${draft.contentVersion}` : `待你调整 · v${draft.contentVersion}`) : '等待发起'));
       draftCopy.appendChild(createElement(document, 'h3', '', draft?.title || '还没有关联草稿'));
       draftCopy.appendChild(createElement(document, 'p', '', draft?.contentPreview || '从这条灵感发起参考创作后，可编辑稿件会出现在这里。'));
-      draftCopy.appendChild(createElement(document, 'span', '', draft ? `v${draft.contentVersion} · ${draft.images?.length || 0} 张配图` : '仅生成草稿，不会自动发布'));
+      const draftMetrics = createElement(document, 'div', 'content-featured-metrics');
+      draftMetrics.appendChild(createElement(document, 'span', draft ? 'warn' : '', draft ? `${draft.images?.length || 0} 张配图` : '仅生成草稿'));
+      draftMetrics.appendChild(createElement(document, 'span', '', draft ? '可继续编辑' : '不会自动发布'));
+      draftCopy.appendChild(draftMetrics);
+      const draftActions = createElement(document, 'div', 'content-featured-actions');
+      const draftAction = createElement(document, 'button', `cw-button ${draft ? 'primary' : 'secondary'}`, draft ? '编辑成稿' : '从它开始创作');
+      draftAction.type = 'button';
+      draftAction.addEventListener('click', () => {
+        if (draft) openHomeDraft(draft.id);
+        else void openDetail(source.id, { startCreate: Boolean(source.creatable) });
+      });
+      draftActions.appendChild(draftAction);
+      draftCopy.appendChild(draftActions);
       draftCard.appendChild(draftCopy);
-      if (draft) draftCard.addEventListener('click', () => openHomeDraft(draft.id));
       lineage.appendChild(draftCard);
       fields.featured.appendChild(lineage);
     }
@@ -895,7 +938,7 @@
       state.homeCurated.items.slice(0, HOME_REFERENCE_LIMIT).forEach((item) => {
         const card = createElement(document, 'button', 'content-reference-item');
         card.type = 'button';
-        appendHomeImage(card, homeCuratedImage(item), '灵感');
+        appendHomeImage(card, homeCuratedImage(item), '灵感', 'content-card-thumb content-reference-thumb', item.id, item.title);
         const copy = createElement(document, 'span', 'content-card-copy');
         copy.appendChild(createElement(document, 'strong', '', item.title || '未命名内容'));
         copy.appendChild(createElement(document, 'p', '', item.bodyPreview || '暂无内容摘要'));
@@ -928,7 +971,7 @@
       state.homeDrafts.items.slice(0, 3).forEach((item) => {
         const card = createElement(document, 'button', 'content-mine-item');
         card.type = 'button';
-        appendHomeImage(card, homeDraftImage(item), '稿');
+        appendHomeImage(card, homeDraftImage(item), '稿', 'content-card-thumb', item.id, item.title);
         const copy = createElement(document, 'span', 'content-card-copy');
         copy.appendChild(createElement(document, 'strong', '', item.title || '未命名稿件'));
         const refinement = item.refinement;
@@ -997,9 +1040,14 @@
         fields.homeDescription.textContent = runtime?.automationActive
           ? '当前环境仍在浏览推荐内容；发现有价值的灵感后会出现在下面。'
           : '启动当前环境后会开始浏览推荐内容并寻找值得参考的灵感。';
+      } else if ((drafts || 0) === 0) {
+        fields.homeHeading.textContent = `已收集 ${inspiration || 0} 条精选灵感，等待发起创作`;
+        fields.homeDescription.textContent = '先看赞藏证据和可复用结构，再从其中一条开始创作。';
       } else {
-        fields.homeHeading.textContent = '灵感价值与创作成果，已经放在一起';
-        fields.homeDescription.textContent = '先看哪些内容值得参考，再看系统基于它产生了什么可编辑成果。';
+        fields.homeHeading.textContent = `已收集 ${inspiration || 0} 条精选灵感，形成 ${drafts || 0} 篇可编辑内容`;
+        fields.homeDescription.textContent = active
+          ? `当前还有 ${active} 个创作任务在进行，新的过程会持续更新。`
+          : '灵感、赞藏证据和由它产生的可编辑内容已经放在一起。';
       }
       renderHomeWork(state);
       renderFeatured(state);
@@ -1421,7 +1469,7 @@
       fields.detail.appendChild(layout);
     }
 
-    async function openDetail(id) {
+    async function openDetail(id, options = {}) {
       if (!environment || !Number.isInteger(id)) return;
       const capturedEnvId = environment.envId;
       const capturedEpoch = ++requestEpoch;
@@ -1443,6 +1491,11 @@
         return;
       }
       renderDetail(response.data.item);
+      if (options.startCreate && response.data.item.creatable) {
+        createMode = hasReferenceImages(response.data.item);
+        showPage('create', true);
+        renderCreate();
+      }
     }
 
     function renderCreate() {

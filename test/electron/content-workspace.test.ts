@@ -314,6 +314,42 @@ test('环境价值首页把排期入口、真实灵感、来源成稿、工作�
   assert.equal($(window, '#content-runtime-browser').textContent, '收起浏览器');
   assert.equal($(window, '#content-runtime-toggle').textContent, '关闭环境');
   assert.equal(window.document.querySelectorAll('.content-work-message').length, 2);
+  assert.equal(window.document.querySelectorAll('.content-featured-metrics').length, 2);
+  assert.match($(window, '.content-featured-card.source .content-featured-actions').textContent ?? '', /查看灵感.*开始创作/s);
+  assert.match($(window, '.content-featured-card.output .content-featured-actions').textContent ?? '', /编辑成稿/);
+});
+
+test('价值首页保持视觉优先层级：无图用装饰封面，参考卡不退化成数据行，空闲过程仍有阶段预告', async () => {
+  const source = listItem({
+    id: 17,
+    title: '无参考图但证据完整的灵感',
+    bodyPreview: '标题、摘要和互动数字仍来自真实精选响应。',
+    likeCount: 8932,
+    collectCount: 2106,
+    referenceImages: [],
+  });
+  const { window, controller } = boot({
+    curatedSummary: async () => ({ ok: true, data: { total: 1, referenceDraftCount: 0 } }),
+    curatedList: async () => ({ ok: true, data: { items: [source], total: 1 } }),
+    curatedGet: async () => ({ ok: true, data: { item: detail({ ...source, body: '可用于参考创作的完整正文。' }) } }),
+    publishDraftList: async () => ({ ok: true, data: { items: [], total: 0 } }),
+    publishQueueGet: async () => queueResponse({ summary: { inProgress: 0, waitingForYou: 0, cancellable: 0 }, tasks: [], active: [], recent: [] }),
+  });
+  controller.setRuntime({ automationState: 'stopped', browserState: 'closed', guideActive: false });
+  controller.setEnvironment({ envId: 'env-a', label: '小萝北', platform: 'xiaohongshu' });
+  await flush(8);
+
+  assert.match($(window, '#content-home-heading').textContent ?? '', /已收集 1 条精选灵感，等待发起创作/);
+  assert.equal(window.document.querySelectorAll('.content-featured-card .content-cover-fallback').length, 2);
+  assert.match($(window, '.content-featured-card.source').textContent ?? '', /赞 8932.*藏 2106.*查看灵感.*开始创作/s);
+  assert.match($(window, '.content-featured-card.output').textContent ?? '', /还没有关联草稿.*从它开始创作/s);
+  assert.equal(window.document.querySelectorAll('.content-reference-item .content-reference-thumb.content-cover-fallback').length, 1);
+  assert.match($(window, '.content-reference-item').textContent ?? '', /标题、摘要和互动数字仍来自真实精选响应。.*赞 8932.*藏 2106/s);
+  assert.match($(window, '#content-work-empty').textContent ?? '', /计划与判断.*生成与调整.*检查与确认/s);
+  assert.ok($(window, '#content-work-primary').classList.contains('primary'));
+  ($(window, '.content-featured-card.source .content-featured-actions .cw-button:last-child')).dispatchEvent(new window.Event('click'));
+  await flush();
+  assert.equal(controller.currentPage(), 'create');
 });
 
 test('同窗口灵感库分页、筛选与详情返回恢复列表状态', async () => {

@@ -276,7 +276,10 @@
               <div id="content-work-plan" class="content-work-plan" aria-label="本次计划"></div>
               <div class="content-work-foot">
                 <span>仅生成草稿 · 不会自动发布</span>
-                <button id="content-work-primary" class="cw-button secondary" type="button">查看灵感</button>
+                <div class="content-work-foot-actions">
+                  <button class="cw-button secondary" type="button" data-content-home-action="draft">我的内容</button>
+                  <button id="content-work-primary" class="cw-button primary" type="button">查看灵感</button>
+                </div>
               </div>
             </div>
             <div class="content-work-stream">
@@ -284,6 +287,11 @@
               <div id="content-work-timeline" class="content-work-timeline" role="log" aria-live="polite" aria-relevant="additions"></div>
               <div id="content-work-empty" class="content-work-empty">
                 <b>✦</b><strong>还没有工作过程</strong><span>任务开始后，这里会逐步展示计划、判断、生成、检查和确认。</span>
+                <div class="content-work-empty-stages" aria-label="任务开始后会展示的过程">
+                  <span>计划与判断</span>
+                  <span>生成与调整</span>
+                  <span>检查与确认</span>
+                </div>
               </div>
             </div>
           </section>

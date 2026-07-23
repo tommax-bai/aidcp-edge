@@ -129,6 +129,15 @@ test('内容首页工作面板桌面总高 240px，窄屏无横向溢出且减�
   assert.match(html, /id="content-runtime-guide"[\s\S]*首次使用请先启动当前环境/);
 });
 
+test('价值首页保留设计稿的视觉证据层级，不把精选内容压成后台数据行', () => {
+  assert.match(styles, /\.content-featured-lineage\s*\{[^}]*min-height:\s*202px;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*88px\s*minmax\(0,\s*1fr\);/s);
+  assert.match(styles, /\.content-featured-card\s*\{[^}]*grid-template-columns:\s*132px\s*minmax\(0,1fr\);/s);
+  assert.match(styles, /\.content-reference-item\s*\{[^}]*min-height:\s*176px;[^}]*grid-template-columns:\s*104px\s*minmax\(0,1fr\);/s);
+  assert.match(styles, /\.content-cover-fallback\.tone-3\s*\{/);
+  assert.match(styles, /\.content-work-empty-stages\s*\{/);
+  assert.match(styles, /\.xhs-environment-dashboard \.environment-schedule-entry\s*\{[^}]*min-height:\s*52px;/s);
+});
+
 test('审批 IPC 允许旧客户端省略计划，新计划须成对且取消不得夹带', () => {
   const start = main.indexOf("ipcMain.handle('publish:approval'");
   const end = main.indexOf("ipcMain.handle('publish:image-remove'", start);
