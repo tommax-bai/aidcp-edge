@@ -69,24 +69,17 @@ async function handshakeWith(reply: Envelope): Promise<unknown> {
   return connecting;
 }
 
-test('execution_target_mismatch：拒绝码与真实归属说明原样带出，绝不吞成通用连接失败', async () => {
-  const message =
-    '账号 acc-1 归属 ol 的自动化，本云端是 dev，拒绝派活。处理办法：把该边缘节点接到 ol 的云端。';
+test('拒绝码与人话说明原样带出，绝不吞成通用连接失败', async () => {
+  // 账号归属已改为「跟随当次会话」，云端不再产生 execution_target_mismatch 拒绝
+  // （change risk-target-follows-active-session）。任一仍在的拒绝码（此处以 platform_mismatch 为例）
+  // 都 MUST 原样透传其码与人话说明，不新增分支语义。
+  const message = '账号 acc-1 平台不一致：本云端只接 xhs，节点声明的是 facebook。';
   const err = await handshakeWith(
-    makeEnvelope('error', 'hello-1', 1, { code: 'execution_target_mismatch', message }),
+    makeEnvelope('error', 'hello-1', 1, { code: 'platform_mismatch', message }),
   );
   assert.ok(err instanceof CloudHandshakeRejectedError, '被拒 MUST 是一个可区分的错误类型');
-  assert.equal(err.code, 'execution_target_mismatch');
-  assert.equal(err.detail, message, '说明 MUST 原样透传：真实归属 target 与处理办法都在里面');
-  assert.match(err.message, /归属 ol/);
-});
-
-test('与既有 platform_mismatch 同形（不新增分支语义）', async () => {
-  const err = await handshakeWith(
-    makeEnvelope('error', 'hello-1', 1, { code: 'platform_mismatch', message: '平台不一致' }),
-  );
-  assert.ok(err instanceof CloudHandshakeRejectedError);
   assert.equal(err.code, 'platform_mismatch');
+  assert.equal(err.detail, message, '说明 MUST 原样透传');
 });
 
 test('云端没给码 → 诚实回落 cloud_rejected，MUST NOT 冒充某个具体原因', async () => {
@@ -98,6 +91,6 @@ test('云端没给码 → 诚实回落 cloud_rejected，MUST NOT 冒充某个具
 });
 
 test('外壳把「云端拒绝」认作失败形状（否则界面显示的归因会是前一条无关行）', () => {
-  assert.equal(isFailureShapedLine('[aidcp-edge] 云端拒绝本节点握手 [execution_target_mismatch]：账号归属 ol'), true);
+  assert.equal(isFailureShapedLine('[aidcp-edge] 云端拒绝本节点握手 [platform_mismatch]：平台不一致'), true);
   assert.equal(isFailureShapedLine('[aidcp-edge] 给不出浏览器槽位，排队中'), false, '良性行仍不算失败');
 });

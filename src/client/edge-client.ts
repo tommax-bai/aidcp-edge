@@ -72,9 +72,12 @@ import { operationDescriptorFor } from './operation-registry.js';
  * 云端**拒绝**了本节点的握手（change risk-state-cross-process-integrity，task 9.1）。
  *
  * 与「连不上云端」是两件不同的事，MUST 可区分：连不上是网络 / 云端不在，重试有意义；
- * 被拒是云端看清了本节点是谁之后作出的裁决（账号归属另一个 target、平台不一致、缺 accountId 等），
+ * 被拒是云端看清了本节点是谁之后作出的裁决（平台不一致、缺 accountId 等），
  * 重试一万次也还是同一个答案。把后者渲染成「云端离线 / 连接失败」，运营会一直去查网络，
- * 而真正要做的是把这个节点接到正确的云端、或改归属。
+ * 而真正要做的是把这个节点接到正确的云端、或改配置。
+ *
+ * 注：账号归属已改为「跟随当次会话」（change risk-target-follows-active-session），
+ * 云端不再因归属不符而拒绝握手，故此处不再有「归属另一个 target」这类拒绝。
  *
  * 拒绝码与人话说明都来自云端，边缘 MUST 原样呈现、MUST NOT 改写成通用文案。
  */
