@@ -34,15 +34,17 @@ test('restored near-expiry session refreshes before authenticated startup procee
 });
 
 test('shared refresh helper invalidates local expiry and refresh 401 without destroying a valid session on transient failure', () => {
-  const helper = blockBetween('async function refreshClientSessionIfNeeded()', 'async function clientAuthFetch(');
-  assert.match(helper, /if \(!hasValidSession\(\)\) \{ onSessionInvalid\(\); return false; \}/,
+  const helper = blockBetween('async function refreshClientSessionInternal(invalidateOnFailure)', 'async function clientAuthFetch(');
+  assert.match(helper, /if \(!hasValidSession\(\)\) \{[\s\S]*if \(invalidateOnFailure\) onSessionInvalid\(\);[\s\S]*return false;/,
     'local expiry must use the unified invalidation path');
   assert.match(helper, /CLIENT_SESSION_REFRESH_WINDOW_MS/);
   assert.match(helper, /clientAuthFetch\('\/auth\/refresh', \{ method: 'POST', token: clientSession\.token \}\)/);
   assert.match(helper, /saveClientSession\(\{/,
     'successful refresh must persist the replacement session');
-  assert.match(helper, /if \(rr\.status === 401 \|\| !hasValidSession\(\)\) \{[\s\S]*onSessionInvalid\(\);[\s\S]*return false;/,
+  assert.match(helper, /if \(rr\.status === 401 \|\| !hasValidSession\(\)\) \{[\s\S]*if \(invalidateOnFailure\) onSessionInvalid\(\);[\s\S]*return false;/,
     'server invalidation or expiry during refresh must return to login');
+  assert.match(helper, /async function refreshClientSessionIfNeeded\(\) \{[\s\S]*return refreshClientSessionInternal\(true\);/,
+    'normal runtime callers must retain fail-closed invalidation');
   assert.match(helper, /return true;\s*\}/,
     'a non-401 transient failure may preserve a session that is still locally valid');
 });

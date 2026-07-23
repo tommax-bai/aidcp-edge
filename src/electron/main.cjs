@@ -12,6 +12,7 @@ const {
   isEncryptedClientSessionRecord,
   writePrivateJsonAtomic,
 } = require('./customer-auth-security.cjs');
+const { restoreClientAuthAtStartup } = require('./client-startup-auth.cjs');
 const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
 const { createAdsLocalApi } = require('./ads-local-api.cjs');
 const { readWithRuntimeRecovery } = require('./ads-read-runtime.cjs');
@@ -477,9 +478,12 @@ function saveClientSession(s) {
   clientSession = s;
   try { writePrivateJsonAtomic(clientSessionFile(), sealClientSession(s, safeStorage)); } catch { /* best-effort */ }
 }
-function clearClientSession() {
+function clearClientSessionRecord() {
   clientSession = null;
   try { fs.unlinkSync(clientSessionFile()); } catch { /* ignore */ }
+}
+function clearClientSession() {
+  clearClientSessionRecord();
   clearClientLoginPrefill();
 }
 function hasValidSession() {
@@ -487,9 +491,12 @@ function hasValidSession() {
 }
 // 启动恢复与定时维护共用同一续签闸：缓存令牌可能在启动时仍有效，却早于首次 4 分钟维护到期。
 // 非 401 的瞬时失败不销毁仍有效的会话；若请求返回时本地已过期，则立即走统一失效流程。
-async function refreshClientSessionIfNeeded() {
+async function refreshClientSessionInternal(invalidateOnFailure) {
   if (!clientAuthEnabled()) return true;
-  if (!hasValidSession()) { onSessionInvalid(); return false; }
+  if (!hasValidSession()) {
+    if (invalidateOnFailure) onSessionInvalid();
+    return false;
+  }
   if (!clientSession.expiresAt
     || clientSession.expiresAt - Date.now() >= CLIENT_SESSION_REFRESH_WINDOW_MS) return true;
   const rr = await clientAuthFetch('/auth/refresh', { method: 'POST', token: clientSession.token });
@@ -502,10 +509,13 @@ async function refreshClientSessionIfNeeded() {
     return true;
   }
   if (rr.status === 401 || !hasValidSession()) {
-    onSessionInvalid();
+    if (invalidateOnFailure) onSessionInvalid();
     return false;
   }
   return true;
+}
+async function refreshClientSessionIfNeeded() {
+  return refreshClientSessionInternal(true);
 }
 async function clientAuthFetch(pathname, {
   method = 'GET', token, body, idempotencyKey, signal, timeoutMs = 12000,
@@ -560,6 +570,23 @@ async function clientAuthFetch(pathname, {
   } catch (e) {
     return { status: 0, ok: false, data: null, error: String((e && e.message) || e) };
   }
+}
+
+async function establishClientSession(creds) {
+  const name = String((creds && creds.name) || '').trim();
+  const key = String((creds && creds.key) || '');
+  if (!name || !key) return { ok: false, reason: 'invalid_credentials' };
+  const r = await clientAuthFetch('/login', { method: 'POST', body: { name, key } });
+  if (r.status === 200 && r.data && r.data.token) {
+    const ttl = Number(r.data.expiresIn) || 900;
+    saveClientLoginPrefill({ name, key });
+    saveClientSession({ token: r.data.token, name, expiresAt: Date.now() + ttl * 1000 });
+    return { ok: true };
+  }
+  if (r.status === 429) return { ok: false, reason: 'rate_limited', retryAfter: (r.data && r.data.retryAfter) || 30 };
+  if (r.status === 0) return { ok: false, reason: 'network' };
+  // 登录侧 401 一律不可区分（防枚举）；停用同样只表现为凭据拒绝。
+  return { ok: false, reason: 'invalid_credentials' };
 }
 
 const CONTROL_BOOTSTRAP_REASON_ZH = {
@@ -924,9 +951,27 @@ async function finalizeCreatedEnvironmentAssignment(result, intent, { slowStartE
     rosterJoinedByMain: true,
   };
 }
-// 会话失效（登出 / 被停用 / 令牌过期）：清会话 + 拆掉所有环境 handle（停在跑子进程）+ 关主窗 + 回登录门。
-function onSessionInvalid() {
-  clearClientSession();
+async function validateExistingClientSessionForStartup() {
+  const sessionReady = await refreshClientSessionInternal(false);
+  if (!sessionReady || !hasValidSession()) return false;
+  const scopeReady = await refreshAllowedEnvironments();
+  return scopeReady && hasValidSession();
+}
+async function prepareClientAuthForStartup() {
+  return restoreClientAuthAtStartup({
+    enabled: clientAuthEnabled(),
+    hasValidSession,
+    validateExistingSession: validateExistingClientSessionForStartup,
+    loadSavedCredentials: loadClientLoginPrefill,
+    clearSessionPreservingCredentials: clearClientSessionRecord,
+    clearSessionAndCredentials: clearClientSession,
+    loginWithCredentials: establishClientSession,
+  });
+}
+// 会话失效：清短期 session、拆掉环境并回登录门；显式退出才同时忘记加密登录凭据。
+function onSessionInvalid({ forgetCredentials = false } = {}) {
+  if (forgetCredentials) clearClientSession();
+  else clearClientSessionRecord();
   allowedProfileIds = new Set();
   allowedEnvironmentPlatforms = new Map();
   allowedEnvironmentControlStates = new Map();
@@ -1000,7 +1045,7 @@ async function proceedAfterAuth() {
     const sessionReady = await refreshClientSessionIfNeeded();
     if (!sessionReady) return;
     const ok = await refreshAllowedEnvironments();
-    if (!ok) { clearClientSession(); allowedProfileIds = new Set(); createLoginWindow(); return; }
+    if (!ok) { onSessionInvalid(); return; }
     const owner = String((clientSession && clientSession.name) || '').trim();
     if (settings.clientRosterExclusionOwner !== owner) {
       // 同机切换客户时绝不继承上一客户的手动移出选择；首次升级也在此把排除集合绑定到当前客户。
@@ -2576,7 +2621,7 @@ function createTray() {
     ];
     // 对外客户登录态下提供「退出登录」（change edge-client-customer-auth）：停所有环境、回登录门,不改主界面。
     if (clientAuthEnabled()) {
-      trayTemplate.push({ label: '退出登录', click: () => { if (clientSession && clientSession.token) void clientAuthFetch('/logout', { method: 'POST', token: clientSession.token }); onSessionInvalid(); } });
+      trayTemplate.push({ label: '退出登录', click: () => { if (clientSession && clientSession.token) void clientAuthFetch('/logout', { method: 'POST', token: clientSession.token }); onSessionInvalid({ forgetCredentials: true }); } });
     }
     trayTemplate.push({ label: '退出', click: quitApp });
     tray.setContextMenu(Menu.buildFromTemplate(trayTemplate));
@@ -5727,28 +5772,19 @@ ipcMain.handle('settings:get', () => ({
 
 // 对外客户鉴权（change edge-client-customer-auth）：登录窗口调 login；主进程做 HTTP，成功后拉可见环境 + 建主窗 + 关登录窗。
 ipcMain.handle('client-auth:login', async (_event, creds) => {
-  const name = String((creds && creds.name) || '').trim();
-  const key = String((creds && creds.key) || '');
-  if (!name || !key) return { ok: false, reason: 'invalid_credentials' };
-  const r = await clientAuthFetch('/login', { method: 'POST', body: { name, key } });
-  if (r.status === 200 && r.data && r.data.token) {
-    const ttl = Number(r.data.expiresIn) || 900;
-    saveClientLoginPrefill({ name, key });
-    saveClientSession({ token: r.data.token, name, expiresAt: Date.now() + ttl * 1000 });
+  const result = await establishClientSession(creds);
+  if (result.ok) {
     await proceedAfterAuth();
     if (loginWindow) { try { loginWindow.close(); } catch { /* ignore */ } loginWindow = null; }
-    return { ok: true };
+    return result;
   }
-  if (r.status === 429) return { ok: false, reason: 'rate_limited', retryAfter: (r.data && r.data.retryAfter) || 30 };
-  if (r.status === 0) return { ok: false, reason: 'network' };
-  // 登录侧 401 一律不可区分（防枚举）；停用在受保护请求侧才显现。
-  return { ok: false, reason: 'invalid_credentials' };
+  return result;
 });
 ipcMain.handle('client-auth:logout', async () => {
   if (clientSession && clientSession.token) {
     void clientAuthFetch('/logout', { method: 'POST', token: clientSession.token });
   }
-  onSessionInvalid();
+  onSessionInvalid({ forgetCredentials: true });
   return { ok: true };
 });
 ipcMain.handle('client-auth:session', () => ({
@@ -7307,9 +7343,10 @@ if (!app.requestSingleInstanceLock()) {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
       else mainWindow?.show();
     });
-    // 登录门前置门控（change edge-client-customer-auth）：启用且无有效会话 → 只显示登录门，
-    // 不连云、不建主窗、不 syncEnvHandles；登录成功由 IPC 回调走 proceedAfterAuth()。未 gated 或已登录 → 正常流程。
-    if (clientAuthEnabled() && !hasValidSession()) {
+    // 启动鉴权只执行一次：有效 session 继续；无效 session 用 safeStorage 凭据自动登录一次；
+    // 无凭据或失败才显示登录门。任何路径都在主窗和环境句柄建立前收口。
+    const startupAuth = await prepareClientAuthForStartup();
+    if (!startupAuth.ready) {
       createLoginWindow();
       return;
     }

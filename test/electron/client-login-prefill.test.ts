@@ -27,9 +27,12 @@ test('成功登录保存完整输入，session 文件仍只承载会话', () => 
   assert.doesNotMatch(main, /writeFileSync\(clientSessionFile\(\)/, '不得再直接明文 writeFile 会话');
 });
 
-test('退出或会话失效统一清除凭据记忆', () => {
+test('令牌失效保留凭据记忆，显式退出清除全部', () => {
   assert.match(main, /function clearClientSession\(\)[\s\S]*?clearClientLoginPrefill\(\)/, '清 session 的统一路径必须清记忆');
-  assert.match(main, /ipcMain\.handle\(['"]client-auth:logout['"][\s\S]*?onSessionInvalid\(\)/, '显式退出必须复用会话失效路径');
+  assert.match(main, /function onSessionInvalid\(\{ forgetCredentials = false \} = \{\}\)[\s\S]*?if \(forgetCredentials\) clearClientSession\(\);[\s\S]*?else clearClientSessionRecord\(\)/,
+    '普通令牌失效只能清 session，不能丢掉下次启动所需的加密凭据');
+  assert.match(main, /ipcMain\.handle\(['"]client-auth:logout['"][\s\S]*?onSessionInvalid\(\{ forgetCredentials: true \}\)/,
+    '显式退出必须明确清除 session 与凭据记忆');
 });
 
 test('preload 只暴露读取和清除记忆的窄 IPC', () => {
