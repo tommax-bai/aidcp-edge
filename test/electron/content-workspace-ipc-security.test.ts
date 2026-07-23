@@ -133,9 +133,24 @@ test('价值首页保留设计稿的视觉证据层级，不把精选内容压�
   assert.match(styles, /\.content-featured-lineage\s*\{[^}]*min-height:\s*202px;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*88px\s*minmax\(0,\s*1fr\);/s);
   assert.match(styles, /\.content-featured-card\s*\{[^}]*grid-template-columns:\s*132px\s*minmax\(0,1fr\);/s);
   assert.match(styles, /\.content-reference-item\s*\{[^}]*min-height:\s*176px;[^}]*grid-template-columns:\s*104px\s*minmax\(0,1fr\);/s);
+  assert.match(styles, /\.content-card-thumb\.content-cover-fallback\s*\{/);
   assert.match(styles, /\.content-cover-fallback\.tone-3\s*\{/);
   assert.match(styles, /\.content-work-empty-stages\s*\{/);
   assert.match(styles, /\.xhs-environment-dashboard \.environment-schedule-entry\s*\{[^}]*min-height:\s*52px;/s);
+});
+
+test('价值首页按环境内容容器调整层级，中等宽度不缩成桌面数据列', () => {
+  assert.match(styles, /\.xhs-environment-dashboard\s*\{[^}]*container-name:\s*xhs-dashboard;[^}]*container-type:\s*inline-size;/s);
+  const medium = styles.slice(
+    styles.indexOf('@container xhs-dashboard (max-width: 980px)'),
+    styles.indexOf('@container xhs-dashboard (max-width: 620px)'),
+  );
+  assert.match(medium, /\.content-featured-lineage\s*\{[^}]*grid-template-columns:\s*1fr;/s);
+  assert.match(medium, /\.content-home-grid\s*\{[^}]*grid-template-columns:\s*1fr;/s);
+  assert.match(medium, /\.content-mine-list\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
+  assert.match(medium, /\.content-home-grid \.content-section-empty\s*\{[^}]*min-height:\s*190px;[^}]*grid-column:\s*1\s*\/\s*-1;/s);
+  assert.match(styles, /\.content-home-section-head strong\s*\{[^}]*font-size:\s*16px;/s);
+  assert.match(styles, /\.content-featured-copy p\s*\{[^}]*font-size:\s*11\.5px;/s);
 });
 
 test('审批 IPC 允许旧客户端省略计划，新计划须成对且取消不得夹带', () => {

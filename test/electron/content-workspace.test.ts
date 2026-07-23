@@ -345,6 +345,13 @@ test('价值首页保持视觉优先层级：无图用装饰封面，参考卡�
   assert.match($(window, '.content-featured-card.output').textContent ?? '', /还没有关联草稿.*从它开始创作/s);
   assert.equal(window.document.querySelectorAll('.content-reference-item .content-reference-thumb.content-cover-fallback').length, 1);
   assert.match($(window, '.content-reference-item').textContent ?? '', /标题、摘要和互动数字仍来自真实精选响应。.*赞 8932.*藏 2106/s);
+  const emptyDraftAction = $(window, '#content-mine-list .content-section-empty .cw-button');
+  assert.equal(emptyDraftAction.textContent, '去看看灵感');
+  emptyDraftAction.dispatchEvent(new window.Event('click'));
+  await flush();
+  assert.equal(controller.currentPage(), 'library');
+  controller.openHome();
+  await flush();
   assert.match($(window, '#content-work-empty').textContent ?? '', /计划与判断.*生成与调整.*检查与确认/s);
   assert.ok($(window, '#content-work-primary').classList.contains('primary'));
   ($(window, '.content-featured-card.source .content-featured-actions .cw-button:last-child')).dispatchEvent(new window.Event('click'));

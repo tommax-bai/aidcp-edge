@@ -965,7 +965,12 @@
         return;
       }
       if (state.homeDrafts.items.length === 0) {
-        fields.mineList.appendChild(homeStateElement('稿', '还没有保存的创作内容', '从一条灵感开始创作后，草稿会出现在这里；可以继续编辑，系统也不会自动发布。', false));
+        const empty = homeStateElement('稿', '还没有保存的创作内容', '从一条灵感开始创作后，草稿会出现在这里；可以继续编辑，系统也不会自动发布。', false);
+        const action = createElement(document, 'button', 'cw-button secondary', '去看看灵感');
+        action.type = 'button';
+        action.addEventListener('click', openLibrary);
+        empty.appendChild(action);
+        fields.mineList.appendChild(empty);
         return;
       }
       state.homeDrafts.items.slice(0, 3).forEach((item) => {
