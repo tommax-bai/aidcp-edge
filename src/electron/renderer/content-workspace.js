@@ -675,14 +675,18 @@
       if (currentPage === 'home') renderHome();
     }
 
-    function homeStateElement(mark, title, detail, retry) {
-      const state = createElement(document, 'div', 'content-section-empty');
+    function homeStateElement(mark, title, detail, options = {}) {
+      const config = typeof options === 'boolean' ? { retry: options } : options;
+      const state = createElement(document, 'div', `content-section-empty is-${config.kind || 'idle'}`);
       state.appendChild(createElement(document, 'b', '', mark));
       const copy = createElement(document, 'span');
       copy.appendChild(createElement(document, 'strong', '', title));
       copy.appendChild(createElement(document, 'p', '', detail));
+      if (config.liveText) {
+        copy.appendChild(createElement(document, 'small', `content-section-empty-live ${config.live ? 'is-live' : 'is-idle'}`, config.liveText));
+      }
       state.appendChild(copy);
-      if (retry) {
+      if (config.retry) {
         const button = createElement(document, 'button', 'cw-button secondary', '重新加载');
         button.type = 'button';
         button.addEventListener('click', () => { void loadHome(true); });
@@ -810,6 +814,7 @@
       fields.workAccount.textContent = `小萝北 · ${environment?.label || '当前环境'}`;
       fields.workCard.classList.toggle('is-idle', !model);
       fields.workCard.classList.toggle('is-active', Boolean(model));
+      fields.workCard.classList.toggle('is-waiting', Boolean(model?.stages?.some((stage) => stage.status === 'waiting_human')));
       fields.workCard.classList.toggle('has-process', Boolean(model?.stages?.length));
       fields.workPlan.replaceChildren();
       fields.workTimeline.replaceChildren();
@@ -854,16 +859,31 @@
       const sourceState = state.homeCurated;
       const draftState = state.homeDrafts;
       if (sourceState.kind === 'loading' || draftState.kind === 'loading') {
-        fields.featured.appendChild(homeStateElement('✦', '正在核对灵感与成稿关系', '只会把同一账号、带有真实来源关联的内容放在一起。', false));
+        fields.featured.appendChild(featuredStateElement(
+          'loading',
+          '正在核对灵感与成稿关系',
+          '只会把同一账号、带有真实来源关联的内容放在一起。',
+          { liveText: '正在读取价值证据与关联草稿' },
+        ));
         return;
       }
       if (sourceState.kind === 'error' && draftState.kind === 'error') {
-        fields.featured.appendChild(homeStateElement('!', '暂时无法读取内容成果', '灵感和稿件都没有读到，当前不会展示推测结果。', true));
+        fields.featured.appendChild(featuredStateElement(
+          'error',
+          '暂时无法读取内容成果',
+          '灵感和稿件都没有读到，当前不会展示推测结果。',
+          { retry: true },
+        ));
         return;
       }
       const source = sourceState.items[0] || null;
       if (!source) {
-        fields.featured.appendChild(homeStateElement('✦', '暂时还没有一条灵感值得放在这里', '只有赞藏表现和内容证据完整、可以提炼表达结构的灵感，才会进入这个位置。', false));
+        fields.featured.appendChild(featuredStateElement(
+          'idle',
+          '暂时还没有一条灵感值得放在这里',
+          '只有赞藏表现和内容证据完整、可以提炼表达结构的灵感，才会进入这个位置。',
+          { liveText: runtime?.automationActive ? '小萝北正在继续寻找' : '启动环境后继续寻找', live: Boolean(runtime?.automationActive) },
+        ));
         return;
       }
       const draft = draftState.items.find((item) => item.sourceCuratedId === source.id) || null;
@@ -920,19 +940,56 @@
       fields.featured.appendChild(lineage);
     }
 
+    function featuredStateElement(kind, title, detail, options = {}) {
+      const state = createElement(document, 'article', `content-featured-empty is-${kind}`);
+      const copy = createElement(document, 'div', 'content-featured-empty-copy');
+      if (options.liveText) {
+        copy.appendChild(createElement(document, 'span', `content-section-empty-live ${options.live === false ? 'is-idle' : 'is-live'}`, options.liveText));
+      }
+      copy.appendChild(createElement(document, 'h3', '', title));
+      copy.appendChild(createElement(document, 'p', '', detail));
+      if (options.retry) {
+        const retry = createElement(document, 'button', 'cw-button secondary', '重新加载');
+        retry.type = 'button';
+        retry.addEventListener('click', () => { void loadHome(true); });
+        copy.appendChild(retry);
+      }
+      state.appendChild(copy);
+      const preview = createElement(document, 'div', 'content-featured-empty-preview');
+      const source = createElement(document, 'span', 'content-featured-empty-node');
+      source.appendChild(createElement(document, 'small', '', '灵感'));
+      source.appendChild(createElement(document, 'strong', '', kind === 'error' ? '等待重新读取' : '等待价值证据'));
+      preview.appendChild(source);
+      preview.appendChild(createElement(document, 'b', '', '→'));
+      const output = createElement(document, 'span', 'content-featured-empty-node output');
+      output.appendChild(createElement(document, 'small', '', '可编辑草稿'));
+      output.appendChild(createElement(document, 'strong', '', '由灵感发起后出现在这里'));
+      preview.appendChild(output);
+      state.appendChild(preview);
+      return state;
+    }
+
     function renderHomeReferences(state) {
       fields.referenceList?.replaceChildren();
       if (!fields.referenceList) return;
       if (state.homeCurated.kind === 'loading') {
-        fields.referenceList.appendChild(homeStateElement('✦', '正在读取精选内容', '会保留现有框架，读到结果后在这里更新。', false));
+        fields.referenceList.appendChild(homeStateElement('✦', '正在读取精选内容', '会保留现有框架，读到结果后在这里更新。', {
+          kind: 'loading', live: true, liveText: '正在同步赞藏证据',
+        }));
         return;
       }
       if (state.homeCurated.kind === 'error') {
-        fields.referenceList.appendChild(homeStateElement('!', '暂时无法读取精选内容', '其它区域仍可使用；这里不会把读取失败画成空池。', true));
+        fields.referenceList.appendChild(homeStateElement('!', '暂时无法读取精选内容', '其它区域仍可使用；这里不会把读取失败画成空池。', {
+          kind: 'error', retry: true,
+        }));
         return;
       }
       if (state.homeCurated.items.length === 0) {
-        fields.referenceList.appendChild(homeStateElement('✦', '还没有筛选出值得参考的内容', '赞藏数据不完整、与当前人设无关或价值证据不足的内容不会出现在这里。', false));
+        fields.referenceList.appendChild(homeStateElement('✦', '还没有筛选出值得参考的内容', '赞藏数据不完整、与当前人设无关或价值证据不足的内容不会出现在这里。', {
+          kind: 'idle',
+          live: Boolean(runtime?.automationActive),
+          liveText: runtime?.automationActive ? '正在继续浏览推荐内容' : '启动环境后继续寻找',
+        }));
         return;
       }
       state.homeCurated.items.slice(0, HOME_REFERENCE_LIMIT).forEach((item) => {
@@ -940,7 +997,10 @@
         card.type = 'button';
         appendHomeImage(card, homeCuratedImage(item), '灵感', 'content-card-thumb content-reference-thumb', item.id, item.title);
         const copy = createElement(document, 'span', 'content-card-copy');
-        copy.appendChild(createElement(document, 'strong', '', item.title || '未命名内容'));
+        const top = createElement(document, 'span', 'content-card-top');
+        top.appendChild(createElement(document, 'strong', '', item.title || '未命名内容'));
+        top.appendChild(createElement(document, 'em', item.creatable ? 'ready' : 'created', item.creatable ? '可创作' : '已创作'));
+        copy.appendChild(top);
         copy.appendChild(createElement(document, 'p', '', item.bodyPreview || '暂无内容摘要'));
         copy.appendChild(createElement(document, 'span', '', `赞 ${countText(item.likeCount)} · 藏 ${countText(item.collectCount)}`));
         card.appendChild(copy);
@@ -957,15 +1017,21 @@
       fields.mineList?.replaceChildren();
       if (!fields.mineList) return;
       if (state.homeDrafts.kind === 'loading') {
-        fields.mineList.appendChild(homeStateElement('稿', '正在读取我的内容', '草稿与调整状态会从 Cloud 读取。', false));
+        fields.mineList.appendChild(homeStateElement('稿', '正在读取我的内容', '草稿与调整状态会从 Cloud 读取。', {
+          kind: 'loading', live: true, liveText: '正在同步可编辑草稿',
+        }));
         return;
       }
       if (state.homeDrafts.kind === 'error') {
-        fields.mineList.appendChild(homeStateElement('!', '暂时无法读取我的内容', '当前不会把未知状态画成“没有内容”。', true));
+        fields.mineList.appendChild(homeStateElement('!', '暂时无法读取我的内容', '当前不会把未知状态画成“没有内容”。', {
+          kind: 'error', retry: true,
+        }));
         return;
       }
       if (state.homeDrafts.items.length === 0) {
-        const empty = homeStateElement('稿', '还没有保存的创作内容', '从一条灵感开始创作后，草稿会出现在这里；可以继续编辑，系统也不会自动发布。', false);
+        const empty = homeStateElement('稿', '还没有保存的创作内容', '从一条灵感开始创作后，草稿会出现在这里；可以继续编辑，系统也不会自动发布。', {
+          kind: 'idle', live: false, liveText: '暂无正在进行的创作',
+        });
         const action = createElement(document, 'button', 'cw-button secondary', '去看看灵感');
         action.type = 'button';
         action.addEventListener('click', openLibrary);

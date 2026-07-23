@@ -130,12 +130,17 @@ test('内容首页工作面板桌面总高 240px，窄屏无横向溢出且减�
 });
 
 test('价值首页保留设计稿的视觉证据层级，不把精选内容压成后台数据行', () => {
-  assert.match(styles, /\.content-featured-lineage\s*\{[^}]*min-height:\s*202px;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*88px\s*minmax\(0,\s*1fr\);/s);
-  assert.match(styles, /\.content-featured-card\s*\{[^}]*grid-template-columns:\s*132px\s*minmax\(0,1fr\);/s);
-  assert.match(styles, /\.content-reference-item\s*\{[^}]*min-height:\s*176px;[^}]*grid-template-columns:\s*104px\s*minmax\(0,1fr\);/s);
+  assert.match(styles, /\.content-featured-lineage\s*\{[^}]*min-height:\s*218px;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*118px\s*minmax\(0,\s*1fr\);/s);
+  assert.match(styles, /\.content-featured-card\s*\{[^}]*grid-template-columns:\s*142px\s*minmax\(0,1fr\);/s);
+  assert.match(styles, /\.content-featured-copy em\s*\{[^}]*width:\s*fit-content;[^}]*align-self:\s*flex-start;/s);
+  assert.match(styles, /\.content-reference-item\s*\{[^}]*min-height:\s*204px;[^}]*grid-template-columns:\s*104px\s*minmax\(0,1fr\);/s);
+  assert.match(styles, /\.content-reference-item img,\s*\.content-reference-item \.content-reference-thumb\s*\{[^}]*height:\s*184px;/s);
+  assert.match(styles, /\.content-card-top em\.created\s*\{/);
   assert.match(styles, /\.content-card-thumb\.content-cover-fallback\s*\{/);
   assert.match(styles, /\.content-cover-fallback\.tone-3\s*\{/);
   assert.match(styles, /\.content-work-empty-stages\s*\{/);
+  assert.match(styles, /\.content-section-empty\s*\{[\s\S]*min-height:\s*218px;/);
+  assert.match(styles, /\.content-featured-empty-preview\s*\{/);
   assert.match(styles, /\.xhs-environment-dashboard \.environment-schedule-entry\s*\{[^}]*min-height:\s*52px;/s);
 });
 
@@ -146,9 +151,9 @@ test('价值首页按环境内容容器调整层级，中等宽度不缩成桌�
     styles.indexOf('@container xhs-dashboard (max-width: 620px)'),
   );
   assert.match(medium, /\.content-featured-lineage\s*\{[^}]*grid-template-columns:\s*1fr;/s);
+  assert.match(medium, /\.content-featured-empty\s*\{[^}]*grid-template-columns:\s*1fr;/s);
   assert.match(medium, /\.content-home-grid\s*\{[^}]*grid-template-columns:\s*1fr;/s);
-  assert.match(medium, /\.content-mine-list\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
-  assert.match(medium, /\.content-home-grid \.content-section-empty\s*\{[^}]*min-height:\s*190px;[^}]*grid-column:\s*1\s*\/\s*-1;/s);
+  assert.match(medium, /\.content-home-grid \.content-section-empty\s*\{[^}]*min-height:\s*218px;[^}]*grid-column:\s*1\s*\/\s*-1;/s);
   assert.match(styles, /\.content-home-section-head strong\s*\{[^}]*font-size:\s*16px;/s);
   assert.match(styles, /\.content-featured-copy p\s*\{[^}]*font-size:\s*11\.5px;/s);
 });

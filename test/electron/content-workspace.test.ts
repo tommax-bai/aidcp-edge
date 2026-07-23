@@ -290,7 +290,7 @@ test('环境价值首页把排期入口、真实灵感、来源成稿、工作�
       data: { data: { job: { id: draft.refinement.id, recordId: 42, expectedVersion: 3, scope: 'body', status: 'running', resultVersion: null, error: null,
         progress: [
           { seq: 1, stage: '计划', status: 'completed', summary: '已确认只调整正文。', at: 1 },
-          { seq: 2, stage: '判断', status: 'running', summary: '正在核对正文与当前人设的表达差异。', at: 2 },
+          { seq: 2, stage: '判断', status: 'waiting_human', summary: '正在核对正文与当前人设的表达差异。', at: 2 },
         ] } } },
     }),
     publishQueueGet: async () => queueResponse({ summary: { inProgress: 1, waitingForYou: 1, cancellable: 0 }, tasks: [], active: [], recent: [] }),
@@ -314,7 +314,9 @@ test('环境价值首页把排期入口、真实灵感、来源成稿、工作�
   assert.equal($(window, '#content-runtime-browser').textContent, '收起浏览器');
   assert.equal($(window, '#content-runtime-toggle').textContent, '关闭环境');
   assert.equal(window.document.querySelectorAll('.content-work-message').length, 2);
+  assert.equal($(window, '#content-work-card').classList.contains('is-waiting'), true);
   assert.equal(window.document.querySelectorAll('.content-featured-metrics').length, 2);
+  assert.equal($(window, '.content-reference-item .content-card-top em').textContent, '可创作');
   assert.match($(window, '.content-featured-card.source .content-featured-actions').textContent ?? '', /查看灵感.*开始创作/s);
   assert.match($(window, '.content-featured-card.output .content-featured-actions').textContent ?? '', /编辑成稿/);
 });
@@ -345,8 +347,11 @@ test('价值首页保持视觉优先层级：无图用装饰封面，参考卡�
   assert.match($(window, '.content-featured-card.output').textContent ?? '', /还没有关联草稿.*从它开始创作/s);
   assert.equal(window.document.querySelectorAll('.content-reference-item .content-reference-thumb.content-cover-fallback').length, 1);
   assert.match($(window, '.content-reference-item').textContent ?? '', /标题、摘要和互动数字仍来自真实精选响应。.*赞 8932.*藏 2106/s);
+  assert.equal($(window, '.content-reference-item .content-card-top em').textContent, '可创作');
   const emptyDraftAction = $(window, '#content-mine-list .content-section-empty .cw-button');
   assert.equal(emptyDraftAction.textContent, '去看看灵感');
+  assert.match($(window, '#content-mine-list .content-section-empty').textContent ?? '', /暂无正在进行的创作/);
+  assert.ok($(window, '#content-mine-list .content-section-empty-live').classList.contains('is-idle'));
   emptyDraftAction.dispatchEvent(new window.Event('click'));
   await flush();
   assert.equal(controller.currentPage(), 'library');
