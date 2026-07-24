@@ -340,8 +340,6 @@ contentWorkspaceRoot?.addEventListener('content-workspace:draft', (event) => {
 contentWorkspaceRoot?.addEventListener('content-workspace:runtime-action', async (event) => {
   await handleWorkspaceRuntimeAction(event.detail?.action);
 });
-document.querySelector('#content-library-entry')?.addEventListener('click', () => environmentSchedule?.close(), true);
-
 function syncInteractionWorkspace() {
   if (!interactionWorkspace) return;
   const selected = fleetView.envs.get(fleetView.selected);

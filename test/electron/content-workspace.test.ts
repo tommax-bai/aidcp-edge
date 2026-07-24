@@ -175,7 +175,7 @@ function boot(api: Record<string, unknown>) {
   return { window, controller };
 }
 
-test('标题栏灵感入口显示权威汇总，储备条只按精选总数并丢弃旧账号迟到回包', async () => {
+test('环境价值首页显示权威灵感汇总，并丢弃旧账号迟到回包', async () => {
   let resolveA: ((value: unknown) => void) | undefined;
   const pendingA = new Promise((resolve) => { resolveA = resolve; });
   const summaryCalls: string[] = [];
@@ -185,39 +185,24 @@ test('标题栏灵感入口显示权威汇总，储备条只按精选总数并�
       if (envId === 'env-a') return pendingA;
       return { ok: true, data: { total: 36, referenceDraftCount: 7 } };
     },
+    curatedList: async () => ({ ok: true, data: { items: [], total: 0, referenceDraftCount: 0 } }),
+    publishDraftList: async () => ({ ok: true, data: { items: [], total: 0 } }),
   });
 
   controller.setEnvironment({ envId: 'env-a', label: '账号 A', platform: 'xiaohongshu' });
-  assert.equal($(window, '#content-library-entry-count').textContent, '—');
-  assert.equal($(window, '#content-library-entry-draft-count').textContent, '—');
+  assert.equal($(window, '#content-home-inspiration-count').textContent, '—');
   controller.setEnvironment({ envId: 'env-b', label: '账号 B', platform: 'xiaohongshu' });
   await flush();
   assert.deepEqual(summaryCalls, ['env-a', 'env-b']);
-  assert.equal($(window, '#content-library-entry-count').textContent, '36');
-  assert.equal($(window, '#content-library-entry-draft-count').textContent, '7');
-  assert.equal($(window, '#content-library-entry').style.getPropertyValue('--inspiration-fill'), '100%');
-  assert.ok($(window, '#content-library-entry').classList.contains('is-rich'));
-  assert.match($(window, '#content-library-entry').getAttribute('aria-label') ?? '', /灵感 36.*已成稿 7/);
+  assert.equal($(window, '#content-home-inspiration-count').textContent, '36');
+  assert.equal(window.document.querySelector('#content-library-entry'), null, '标题栏不再重复显示灵感池入口');
 
   resolveA?.({ ok: true, data: { total: 24, referenceDraftCount: 99 } });
   await flush();
-  assert.equal($(window, '#content-library-entry-count').textContent, '36');
-  assert.equal($(window, '#content-library-entry-draft-count').textContent, '7');
-  assert.equal($(window, '#content-library-entry').parentElement?.id, 'titlebar');
+  assert.equal($(window, '#content-home-inspiration-count').textContent, '36');
 });
 
-test('标题栏普通储备为蓝色区间，成稿数不驱动条宽', async () => {
-  const { window, controller } = boot({
-    curatedSummary: async () => ({ ok: true, data: { total: 24, referenceDraftCount: 700 } }),
-  });
-  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
-  await flush();
-  assert.equal($(window, '#content-library-entry').style.getPropertyValue('--inspiration-fill'), '80%');
-  assert.equal($(window, '#content-library-entry').classList.contains('is-rich'), false);
-  assert.equal($(window, '#content-library-entry-draft-count').textContent, '700');
-});
-
-test('小红书环境直接展示价值首页，灵感入口只打开二级页且其它平台恢复旧环境正文', async () => {
+test('小红书环境直接展示价值首页，页内入口打开灵感二级页且其它平台恢复旧环境正文', async () => {
   const summaryCalls: string[] = [];
   const { window, controller } = boot({
     curatedSummary: async (envId: string) => {
@@ -226,31 +211,28 @@ test('小红书环境直接展示价值首页，灵感入口只打开二级页�
     },
     curatedList: async () => ({ ok: true, data: { items: [], total: 0, referenceDraftCount: 2 } }),
   });
-  const entry = $(window, '#content-library-entry');
 
   controller.setEnvironment({ envId: 'env-fb', label: 'Facebook 账号', platform: 'facebook' });
   await flush();
-  assert.equal(hidden(entry), true);
+  assert.equal(window.document.querySelector('#content-library-entry'), null);
   assert.equal(hidden($(window, '#xhs-environment-dashboard')), true);
   assert.equal(hidden($(window, '#legacy-runtime-body')), false);
   assert.deepEqual(summaryCalls, []);
-  entry.dispatchEvent(new window.Event('click'));
+  controller.openLibrary();
   assert.equal(controller.currentPage(), 'home');
 
   controller.setEnvironment({ envId: 'env-wechat', label: '视频号账号', platform: 'wechat_channels' });
   await flush();
-  assert.equal(hidden(entry), true);
   assert.deepEqual(summaryCalls, []);
 
   controller.setEnvironment({ envId: 'env-xhs', label: '小红书账号', platform: 'xiaohongshu' });
   await flush();
-  assert.equal(hidden(entry), false);
   assert.equal(hidden($(window, '#xhs-environment-dashboard')), false);
   assert.equal(hidden($(window, '#legacy-runtime-body')), true);
   assert.equal(hidden($(window, '#content-workspace')), true);
   assert.equal($(window, '.shell').classList.contains('xhs-dashboard-mode'), true);
   assert.deepEqual(summaryCalls, ['env-xhs']);
-  entry.dispatchEvent(new window.Event('click'));
+  controller.openLibrary();
   await flush();
   assert.equal(controller.currentPage(), 'library');
   assert.equal(hidden($(window, '#content-workspace')), false);
@@ -262,7 +244,6 @@ test('小红书环境直接展示价值首页，灵感入口只打开二级页�
 
   controller.setEnvironment({ envId: 'env-fb', label: 'Facebook 账号', platform: 'facebook' });
   await flush();
-  assert.equal(hidden(entry), true);
   assert.equal(controller.currentPage(), 'home');
   assert.equal(hidden($(window, '#content-workspace')), true);
   assert.equal(hidden($(window, '#legacy-workspace')), false);
@@ -805,31 +786,29 @@ test('切账号时详情页与创作页的迟到回包一律丢弃（不只列�
   assert.match($(window, '#content-work-account').textContent ?? '', /账号 B/);
 });
 
-test('汇总读失败时标题栏说失败而不是永远「加载中」，储备条与真实 0 条可区分', async () => {
+test('汇总读失败时环境首页保留未知值，并在内容区明确呈现读取失败', async () => {
   const { window, controller } = boot({
     curatedSummary: async () => ({ ok: false, status: 503, error: 'curated_content_unavailable', reason: 'curated_content_unavailable' }),
+    curatedList: async () => ({ ok: false, status: 503, error: 'curated_content_unavailable', reason: 'curated_content_unavailable' }),
+    publishDraftList: async () => ({ ok: false, status: 503, error: 'publish_drafts_unavailable' }),
   });
   controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
   await flush();
-  const entry = $(window, '#content-library-entry');
-  const label = entry.getAttribute('aria-label') ?? '';
-  assert.doesNotMatch(label, /加载中/, '读失败后不得永远宣称加载中');
-  assert.match(label, /读取失败/);
-  assert.equal(entry.getAttribute('aria-busy'), 'false');
-  assert.equal(entry.classList.contains('is-unknown'), true, '未知必须与真实 0 条可区分');
-  assert.equal($(window, '#content-library-entry-count').textContent, '—');
+  assert.equal($(window, '#content-home-inspiration-count').textContent, '—');
+  assert.match(window.document.body.textContent ?? '', /暂时无法读取精选内容/);
+  assert.doesNotMatch($(window, '#content-home-heading').textContent ?? '', /0 条精选灵感/);
 });
 
-test('真实 0 条精选不得被画成「未知」', async () => {
+test('真实 0 条精选在环境首页显示为已知零值', async () => {
   const { window, controller } = boot({
     curatedSummary: async () => ({ ok: true, data: { total: 0, referenceDraftCount: 0 } }),
+    curatedList: async () => ({ ok: true, data: { items: [], total: 0, referenceDraftCount: 0 } }),
+    publishDraftList: async () => ({ ok: true, data: { items: [], total: 0 } }),
   });
   controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
   await flush();
-  const entry = $(window, '#content-library-entry');
-  assert.equal(entry.classList.contains('is-unknown'), false, '真实 0 是已知值，不是未知');
-  assert.match(entry.getAttribute('aria-label') ?? '', /灵感 0/);
-  assert.equal($(window, '#content-library-entry-count').textContent, '0');
+  assert.equal($(window, '#content-home-inspiration-count').textContent, '0');
+  assert.match($(window, '#content-home-heading').textContent ?? '', /还在寻找新灵感/);
 });
 
 test('状态心跳不得把首页从开着的灵感库底下掀出来（两个工作区共享首页显隐）', async () => {

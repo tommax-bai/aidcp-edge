@@ -199,23 +199,20 @@ test('审批与删图 IPC 直连 customer-auth，停止状态不经过环境 cor
     'Cloud 决策写不得依赖 core、浏览器或槽位');
 });
 
-test('标题栏只保留紧凑灵感入口，并锁定低干扰蓝色与高储备蓝绿色', () => {
+test('标题栏移除重复灵感入口，环境与健康控件自然靠右', () => {
   const accountIndex = html.indexOf('id="acct-plat"');
   const spacerIndex = html.indexOf('class="tb-spacer"');
-  const entryIndex = html.indexOf('id="content-library-entry"');
   const environmentIndex = html.indexOf('id="cloud-env-chip"');
   const healthIndex = html.indexOf('id="health-pill"');
   assert.ok(accountIndex < spacerIndex, '账号身份应留在标题栏左侧');
-  assert.ok(spacerIndex < entryIndex, '弹性留白应把灵感入口推到标题栏右侧');
-  assert.ok(entryIndex < environmentIndex, '灵感入口应紧邻环境名左侧');
+  assert.ok(spacerIndex < environmentIndex, '弹性留白应把环境控件推到标题栏右侧');
   assert.ok(environmentIndex < healthIndex, '环境名后仍保持健康状态顺序');
   assert.match(styles, /\.tb-spacer\s*\{[^}]*flex:\s*1/s);
-  assert.equal((html.match(/id="content-library-entry"/g) ?? []).length, 1, '运行首页不得再保留大卡入口');
-  for (const color of ['#eef5ff', '#d7e5ff', '#526a87', '#2f6fe4', '#dce8f7', '#4f83e8', '#3f7ce0', '#2aa57a']) {
-    assert.match(styles.toLowerCase(), new RegExp(color));
-  }
-  assert.match(styles, /height:\s*28px/);
-  assert.match(styles, /\.cle-track\s*\{[^}]*height:\s*3px/s);
+  assert.doesNotMatch(html, /id="content-library-entry"/);
+  assert.doesNotMatch(styles, /\.content-library-entry|\.cle-/);
+  assert.doesNotMatch(renderer, /content-library-entry|INSPIRATION_SATURATION_COUNT/);
+  assert.doesNotMatch(appRenderer, /content-library-entry/);
+  assert.match(html, /data-content-home-action="library"/, '环境首页仍保留进入灵感库的页内动作');
 });
 
 test('应用壳把当前平台交给内容工作区，由内容控制器执行 XHS 门禁', () => {

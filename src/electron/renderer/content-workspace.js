@@ -2,7 +2,6 @@
   'use strict';
 
   const PAGE_SIZE = 12;
-  const INSPIRATION_SATURATION_COUNT = 30;
   const CURATED_SORT_LABELS = Object.freeze({
     weighted: '综合热度',
     collects: '收藏最多',
@@ -250,9 +249,6 @@
     const environmentHomeMode = dashboardRoot !== root;
     if (!homeRoot) return null;
     const fields = {
-      entry: document.querySelector('#content-library-entry'),
-      entryCount: document.querySelector('#content-library-entry-count'),
-      entryDraftCount: document.querySelector('#content-library-entry-draft-count'),
       back: root.querySelector('#content-workspace-back'),
       close: root.querySelector('#content-workspace-close'),
       kicker: root.querySelector('#content-workspace-kicker'),
@@ -609,43 +605,6 @@
       close();
     }
 
-    function updateEntry() {
-      const state = envState();
-      const available = inspirationAvailable();
-      const count = finiteCount(state?.inspirationCount);
-      const draftCount = finiteCount(state?.referenceDraftCount);
-      const loading = Boolean(state?.summaryLoading);
-      const failed = Boolean(state?.summaryFailed);
-      const fill = count === null ? 0 : Math.min(100, (count / INSPIRATION_SATURATION_COUNT) * 100);
-      if (fields.entry) {
-        fields.entry.classList.toggle('hidden', !available);
-        fields.entry.disabled = !available;
-      }
-      if (fields.entryCount) fields.entryCount.textContent = count === null ? '—' : String(count);
-      if (fields.entryDraftCount) fields.entryDraftCount.textContent = draftCount === null ? '—' : String(draftCount);
-      if (fields.entry) {
-        fields.entry.style.setProperty('--inspiration-fill', `${fill}%`);
-        fields.entry.classList.toggle('is-rich', count !== null && count >= INSPIRATION_SATURATION_COUNT);
-        // 数值未知时储备条必须与「真的 0 条」不同：0% 宽度和真实零值像素级等同，会把「没读到」画成「没有」。
-        fields.entry.classList.toggle('is-unknown', available && count === null);
-        fields.entry.setAttribute('aria-busy', loading ? 'true' : 'false');
-        // 「加载中」只在真的在加载时说；读失败必须说失败，不能永远停在加载中。
-        const unknownLabel = loading ? '数据加载中' : failed ? '数据读取失败' : '数据暂缺';
-        const countLabel = count === null ? `灵感${unknownLabel}` : `灵感 ${count}`;
-        const draftLabel = draftCount === null ? `成稿${unknownLabel}` : `已成稿 ${draftCount}`;
-        const action = failed && !loading ? '点击重试' : '点击进入';
-        fields.entry.setAttribute(
-          'aria-label',
-          environment ? `灵感库，${countLabel}，${draftLabel}，${action}` : '灵感库，请先选择账号',
-        );
-        fields.entry.title = !environment
-          ? '请先选择一个账号环境'
-          : failed && !loading
-            ? '灵感数据没读到，点击进入并重试'
-            : '点击进入灵感库';
-      }
-    }
-
     async function loadSummary(force = false) {
       const state = envState();
       if (!state || !inspirationAvailable() || typeof api.curatedSummary !== 'function') return;
@@ -654,7 +613,6 @@
       const capturedEpoch = ++summaryEpoch;
       state.summaryLoading = true;
       state.summaryRequestId = capturedEpoch;
-      updateEntry();
       let response;
       try {
         response = await api.curatedSummary(capturedEnvId);
@@ -671,7 +629,6 @@
       state.summaryFailed = !response?.ok;
       state.inspirationCount = response?.ok ? finiteCount(response.data?.total) : null;
       state.referenceDraftCount = response?.ok ? finiteCount(response.data?.referenceDraftCount) : null;
-      updateEntry();
       if (currentPage === 'home') renderHome();
     }
 
@@ -1502,7 +1459,6 @@
       const referenceDraftCount = finiteCount(response.data.referenceDraftCount);
       if (referenceDraftCount !== null) state.referenceDraftCount = referenceDraftCount;
       state.loaded = true;
-      updateEntry();
       const lastPage = Math.max(1, Math.ceil(state.total / PAGE_SIZE));
       if (state.page > lastPage) {
         state.page = lastPage;
@@ -2148,7 +2104,6 @@
       }
       if (changed) closeSortMenu();
       environment = normalized;
-      updateEntry();
       if (!changed) {
         // 账号没变也必须重新主张自己的可见性：首页显隐是与互动工作区共享的状态，
         // 对方每次状态心跳都会归还首页；只有本工作区开着时再压一次，才不会被掀开。
@@ -2219,7 +2174,6 @@
       }
     }
 
-    fields.entry?.addEventListener('click', environmentHomeMode ? openLibrary : openHome);
     fields.close?.addEventListener('click', handleCloseControl);
     fields.back?.addEventListener('click', goBack);
     fields.homeNavButtons.forEach((button) => button.addEventListener('click', () => {
@@ -2349,7 +2303,6 @@
       if (publishQueueAvailable()) void loadPublishQueue(true);
     });
 
-    updateEntry();
     renderSortControl();
     return {
       setEnvironment,

@@ -122,47 +122,6 @@ body::-webkit-scrollbar:vertical,
 .proxy-runtime-chip.pending .proxy-runtime-dot, .proxy-runtime-chip.unknown .proxy-runtime-dot { background: #d89b2b; }
 .tb-spacer { flex: 1; }
 
-/* 标题栏灵感储备入口：低频能力保持安静；蓝绿只在储备达到视觉饱和阈值后出现。 */
-.content-library-entry {
-  --inspiration-fill: 0%;
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 5px;
-  height: 28px;
-  padding: 0 9px;
-  border: 1px solid #d7e5ff;
-  border-radius: 8px;
-  color: #526a87;
-  background: #eef5ff;
-  font: inherit;
-  font-size: 10.5px;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: border-color .16s, background .16s, box-shadow .16s;
-}
-.content-library-entry:hover:not(:disabled) {
-  border-color: #c5d9fb;
-  background: #e6f0ff;
-  box-shadow: 0 3px 10px rgba(47, 111, 228, .10);
-}
-.content-library-entry:focus-visible { outline: 2px solid rgba(47, 111, 228, .38); outline-offset: 2px; }
-.content-library-entry:disabled { cursor: default; opacity: .55; }
-.cle-star { color: #4f83e8; font-size: 11px; }
-.cle-label { font-weight: 600; }
-.cle-value { color: #526a87; font-size: 11px; font-weight: 760; font-variant-numeric: tabular-nums; }
-.cle-value.primary { color: #2f6fe4; }
-.cle-divider { color: #8fa4bf; }
-.cle-track { width: 54px; height: 3px; overflow: hidden; border-radius: 999px; background: #dce8f7; }
-.cle-bar { display: block; width: var(--inspiration-fill); height: 100%; border-radius: inherit; background: #4f83e8; transition: width .24s ease; }
-.content-library-entry.is-rich .cle-bar { background: linear-gradient(90deg, #3f7ce0, #2aa57a); }
-/* 数值未知（尚未读到 / 读失败）：0% 宽度与「真的 0 条」像素级等同，会把「没读到」画成「没有」。
-   未知一律画成待定虚底纹，与真实零值的空槽区分开。 */
-.content-library-entry.is-unknown .cle-track {
-  background: repeating-linear-gradient(90deg, #dce8f7 0 3px, transparent 3px 6px);
-}
-
 .health-pill {
   display: inline-flex; align-items: center; gap: 7px;
   font-size: 12px; font-weight: 650; font-family: inherit;
@@ -236,13 +195,10 @@ body.environment-roster-empty .titlebar {
   background: rgba(255, 255, 255, .96);
 }
 body.environment-roster-loading .titlebar .acct,
-body.environment-roster-loading .titlebar .content-library-entry,
 body.environment-roster-loading .titlebar .health-pill,
 body.environment-roster-error .titlebar .acct,
-body.environment-roster-error .titlebar .content-library-entry,
 body.environment-roster-error .titlebar .health-pill,
 body.environment-roster-empty .titlebar .acct,
-body.environment-roster-empty .titlebar .content-library-entry,
 body.environment-roster-empty .titlebar .health-pill {
   display: none !important;
 }
@@ -3018,7 +2974,6 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 
 @media (max-width: 620px) {
   .acct-p { display: none; }
-  .cle-track { width: 34px; }
   .delegated-popover { right: 3px; width: min(430px, calc(100vw - 34px)); }
   .rg-progress-head { align-items: flex-start; flex-wrap: wrap; }
   .rg-progress-meta { width: 100%; justify-content: flex-start; text-align: left; }
