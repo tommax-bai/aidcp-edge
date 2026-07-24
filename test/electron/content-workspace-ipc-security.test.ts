@@ -121,8 +121,10 @@ test('稿件编辑与五类 AI 调整只经具名白名单 IPC，renderer 不接
   assert.doesNotMatch(executable, /authorization|cookie|jwt|token|headers|accountId|envKey|\burl\b/i);
 });
 
-test('内容首页工作面板桌面总高 240px，窄屏无横向溢出且减弱动画', () => {
+test('内容首页工作面板按任务状态控制首屏密度，窄屏无横向溢出且减弱动画', () => {
   assert.match(styles, /\.content-work-card\s*\{[\s\S]*height:\s*240px;[\s\S]*box-sizing:\s*border-box;/);
+  assert.match(styles, /\.content-work-card\.is-idle:not\(\.is-collapsed\)\s*\{[^}]*height:\s*168px;/);
+  assert.match(styles, /\.content-work-card\.is-idle \.content-work-empty\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*34px\s*minmax\(0,\s*1fr\);/);
   assert.match(styles, /\.content-home-view\s*\{[^}]*overflow-x:\s*hidden;/);
   assert.match(styles, /@media \(max-width:\s*680px\)[\s\S]*\.content-work-card\s*\{[^}]*height:\s*auto;/);
   assert.match(styles, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*\.content-work-message\.current b/);
