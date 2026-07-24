@@ -11,14 +11,14 @@ const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
 const interaction = readFileSync(join(electronDir, 'renderer/interaction-workspace.js'), 'utf8');
 const styles = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 
-test('login and authenticated client windows start at 900px wide', () => {
+test('login stays compact while the authenticated client starts at 1080px wide', () => {
   assert.match(
     main,
     /function createLoginWindow\(\)[\s\S]*?new BrowserWindow\(\{\s*width: 900,\s*height: 720,\s*minWidth: 640,/,
   );
   assert.match(
     main,
-    /function createWindow\(\)[\s\S]*?new BrowserWindow\(\{\s*width: 900,\s*height: 720,\s*minWidth: 640,/,
+    /function createWindow\(\)[\s\S]*?new BrowserWindow\(\{\s*width: 1080,\s*height: 720,\s*minWidth: 640,/,
   );
 });
 

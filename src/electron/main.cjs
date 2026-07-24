@@ -2569,7 +2569,7 @@ function frameOptions() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 900,
+    width: 1080,
     height: 720,
     minWidth: 640,
     minHeight: 520,

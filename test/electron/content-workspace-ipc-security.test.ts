@@ -124,7 +124,8 @@ test('稿件编辑与五类 AI 调整只经具名白名单 IPC，renderer 不接
 test('内容首页工作面板按任务状态控制首屏密度，窄屏无横向溢出且减弱动画', () => {
   assert.match(styles, /\.content-work-card\s*\{[\s\S]*height:\s*240px;[\s\S]*box-sizing:\s*border-box;/);
   assert.match(styles, /\.content-work-card\.is-idle:not\(\.is-collapsed\)\s*\{[^}]*height:\s*168px;/);
-  assert.match(styles, /\.content-work-card\.is-idle \.content-work-empty\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*34px\s*minmax\(0,\s*1fr\);/);
+  assert.match(styles, /\.content-work-card\.is-idle \.content-work-empty\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*34px\s*minmax\(0,\s*1fr\);[^}]*align-content:\s*start;/);
+  assert.match(styles, /\.content-work-stream header button\s*\{[^}]*font-family:\s*inherit;[^}]*font-size:\s*8\.5px;[^}]*font-weight:\s*680;/);
   assert.match(styles, /\.content-home-view\s*\{[^}]*overflow-x:\s*hidden;/);
   assert.match(styles, /@media \(max-width:\s*680px\)[\s\S]*\.content-work-card\s*\{[^}]*height:\s*auto;/);
   assert.match(styles, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*\.content-work-message\.current b/);
@@ -145,6 +146,9 @@ test('价值首页保留设计稿的视觉证据层级，不把精选内容压�
   assert.match(styles, /\.content-featured-empty-preview\s*\{/);
   assert.match(styles, /\.xhs-environment-dashboard \.environment-schedule-entry\s*\{[^}]*min-height:\s*52px;/s);
   assert.match(styles, /\.content-value-intro h2\s*\{[^}]*color:\s*#263750;[^}]*font-size:\s*20px;/s);
+  assert.match(styles, /\.content-value-intro h2 em\s*\{[^}]*color:\s*#2f6fe4;/s);
+  assert.match(styles, /\.content-home-section-head button\s*\{[^}]*font-family:\s*inherit;[^}]*font-size:\s*10\.5px;[^}]*font-weight:\s*680;/s);
+  assert.match(styles, /\.content-featured-card img,[\s\S]*\.content-mine-item \.content-card-thumb\s*\{[^}]*box-shadow:\s*0 1px 2px rgba\(38,\s*55,\s*79,\s*\.06\),\s*0 5px 14px rgba\(38,\s*55,\s*79,\s*\.1\);/s);
   assert.match(styles, /\.content-home-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1\.3fr\)\s*minmax\(310px,\s*\.7fr\);/s);
 });
 

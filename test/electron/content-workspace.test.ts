@@ -343,6 +343,8 @@ test('价值首页保持视觉优先层级：无图用装饰封面，参考卡�
   await flush(8);
 
   assert.match($(window, '#content-home-heading').textContent ?? '', /已收集 1 条精选灵感，等待发起创作/);
+  assert.equal($(window, '#content-home-heading em').textContent, '1 条精选灵感');
+  assert.equal($(window, '#content-work-status').textContent, '未启动');
   assert.equal(window.document.querySelectorAll('.content-featured-card .content-cover-fallback').length, 2);
   assert.match($(window, '.content-featured-card.source').textContent ?? '', /赞 8932.*藏 2106.*查看灵感.*开始创作/s);
   assert.match($(window, '.content-featured-card.output').textContent ?? '', /还没有关联草稿.*从它开始创作/s);

@@ -820,7 +820,7 @@
       fields.workTimeline.replaceChildren();
       if (!model) {
         fields.workTitle.textContent = 'AI 已准备好为你工作';
-        fields.workStatus.textContent = runtime && runtime.automationActive ? '当前空闲' : '环境未启动';
+        fields.workStatus.textContent = runtime && runtime.automationActive ? '当前空闲' : '未启动';
         fields.workGoal.textContent = runtime && runtime.automationActive ? '当前没有正在进行的任务' : '启动当前环境后，可以开始寻找灵感';
         fields.workGoalCopy.textContent = runtime && runtime.automationActive
           ? '从一条灵感发起创作后，计划、实时过程和可编辑草稿都会出现在这里。'
@@ -1113,10 +1113,18 @@
           ? '当前环境仍在浏览推荐内容；发现有价值的灵感后会出现在下面。'
           : '启动当前环境后会开始浏览推荐内容并寻找值得参考的灵感。';
       } else if ((drafts || 0) === 0) {
-        fields.homeHeading.textContent = `已收集 ${inspiration || 0} 条精选灵感，等待发起创作`;
+        fields.homeHeading.replaceChildren(
+          document.createTextNode('已收集 '),
+          createElement(document, 'em', '', `${inspiration || 0} 条精选灵感`),
+          document.createTextNode('，等待发起创作'),
+        );
         fields.homeDescription.textContent = '先看赞藏证据和可复用结构，再从其中一条开始创作。';
       } else {
-        fields.homeHeading.textContent = `已收集 ${inspiration || 0} 条精选灵感，形成 ${drafts || 0} 篇可编辑内容`;
+        fields.homeHeading.replaceChildren(
+          document.createTextNode('已收集 '),
+          createElement(document, 'em', '', `${inspiration || 0} 条精选灵感`),
+          document.createTextNode(`，形成 ${drafts || 0} 篇可编辑内容`),
+        );
         fields.homeDescription.textContent = active
           ? `当前还有 ${active} 个创作任务在进行，新的过程会持续更新。`
           : '灵感、赞藏证据和由它产生的可编辑内容已经放在一起。';
