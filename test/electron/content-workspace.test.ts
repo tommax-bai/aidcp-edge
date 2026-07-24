@@ -310,6 +310,7 @@ test('环境价值首页把排期入口、真实灵感、来源成稿、工作�
   assert.equal($(window, '#content-home-draft-count').textContent, '1');
   assert.match($(window, '#content-featured').textContent ?? '', /通勤显瘦穿搭公式.*AI 已基于它完成参考创作.*梨形身材这样穿/s);
   assert.match($(window, '#content-work-timeline').textContent ?? '', /计划完成.*已确认只调整正文.*判断中\.\.\./s);
+  assert.doesNotMatch($(window, '#content-work-timeline').textContent ?? '', /生成中|确认中/);
   assert.match($(window, '#content-runtime-summary').textContent ?? '', /浏览 28 条.*点赞 4 条.*收藏 2 条/s);
   assert.equal($(window, '#content-runtime-browser').textContent, '收起浏览器');
   assert.equal($(window, '#content-runtime-toggle').textContent, '关闭环境');
@@ -875,6 +876,9 @@ test('小红书发布队列按三段呈现四阶段真态，非小红书切换�
   });
   controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
   await flush();
+  const homeProcess = $(window, '#content-work-timeline').textContent ?? '';
+  assert.match(homeProcess, /开始创作完成.*正文与配图完成.*发布确认中\.\.\./s);
+  assert.doesNotMatch(homeProcess, /发布结果中/, '未来步骤只留在计划中，不得提前显示成正在进行');
   controller.openPublishQueue();
   await flush();
 

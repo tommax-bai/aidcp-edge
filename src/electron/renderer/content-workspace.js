@@ -785,7 +785,7 @@
         return {
           kind: 'queue', title: active.title || 'AI 创作任务', recordId: active.recordId,
           status: active.statusLabel || '创作中', goal: `创作《${active.title || '未命名内容'}》`,
-          detail: active.sourceTitle ? `正在把《${active.sourceTitle}》转成符合当前人设的可编辑草稿。` : '正在生成符合当前人设的可编辑草稿。',
+          detail: '把高赞灵感转成符合人设的表达、你可编辑草稿...',
           stages: active.stages.map((item) => ({ key: item.key, label: item.label, status: item.state, summary: item.summary })),
         };
       }
@@ -838,6 +838,7 @@
       model.stages.forEach((stage, index) => {
         const chip = createElement(document, 'span', index < currentIndex ? 'done' : index === currentIndex ? 'current' : '', stage.label);
         fields.workPlan.appendChild(chip);
+        if (index > currentIndex) return;
         const completed = index < currentIndex || ['completed', 'partial', 'skipped'].includes(stage.status);
         const row = createElement(document, 'article', `content-work-message ${completed ? 'completed' : 'current'}`);
         row.appendChild(createElement(document, 'i', '', completed ? '✓' : '●'));
