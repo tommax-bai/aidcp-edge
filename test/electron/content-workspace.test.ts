@@ -312,6 +312,11 @@ test('环境价值首页把排期入口、真实灵感、来源成稿、工作�
   assert.match($(window, '#content-work-timeline').textContent ?? '', /计划完成.*已确认只调整正文.*判断中\.\.\./s);
   assert.doesNotMatch($(window, '#content-work-timeline').textContent ?? '', /生成中|确认中/);
   assert.match($(window, '#content-runtime-summary').textContent ?? '', /浏览 28 条.*点赞 4 条.*收藏 2 条/s);
+  assert.equal(window.document.querySelectorAll('.content-runtime-stage').length, 4);
+  assert.match($(window, '#content-runtime-metrics').textContent ?? '', /01.*发现内容.*28.*今日浏览.*—.*今日搜索/s);
+  assert.match($(window, '#content-runtime-metrics').textContent ?? '', /02.*互动判断.*4.*今日点赞.*2.*今日收藏.*1.*今日评论/s);
+  assert.match($(window, '#content-runtime-metrics').textContent ?? '', /03.*沉淀灵感.*4.*当前精选/s);
+  assert.match($(window, '#content-runtime-metrics').textContent ?? '', /04.*内容创作.*1.*当前内容.*1.*进行中/s);
   assert.equal($(window, '#content-runtime-browser').textContent, '收起浏览器');
   assert.equal($(window, '#content-runtime-toggle').textContent, '关闭环境');
   assert.equal(window.document.querySelectorAll('.content-work-message').length, 2);

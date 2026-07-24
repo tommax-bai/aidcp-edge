@@ -1061,35 +1061,72 @@
       if (!fields.runtimeMetrics) return;
       const totals = runtime?.dailyUsage?.totals && typeof runtime.dailyUsage.totals === 'object'
         ? runtime.dailyUsage.totals : null;
-      const metrics = [
-        ['view', '浏览'], ['like', '点赞'], ['collect', '收藏'], ['comment', '评论'],
-        ['inspiration', '精选灵感'], ['draft', '我的内容'],
-      ];
       const inspiration = finiteCount(state.inspirationCount ?? state.homeCurated.total);
       const drafts = finiteCount(state.homeDrafts.total ?? state.referenceDraftCount);
+      const active = finiteCount(state.publishQueue.data?.summary?.inProgress);
+      const dailyCount = (key) => totals && Object.prototype.hasOwnProperty.call(totals, key)
+        ? finiteCount(totals[key]) : null;
+      const stages = [
+        {
+          index: '01',
+          title: '发现内容',
+          description: '从推荐与搜索中找到素材',
+          metrics: [['今日浏览', dailyCount('view')], ['今日搜索', dailyCount('search')]],
+        },
+        {
+          index: '02',
+          title: '互动判断',
+          description: '用真实互动留下价值信号',
+          metrics: [['今日点赞', dailyCount('like')], ['今日收藏', dailyCount('collect')], ['今日评论', dailyCount('comment')]],
+        },
+        {
+          index: '03',
+          title: '沉淀灵感',
+          description: '筛选为可继续创作的参考',
+          metrics: [['当前精选', inspiration]],
+        },
+        {
+          index: '04',
+          title: '内容创作',
+          description: '转成可编辑、可调整的内容',
+          metrics: [['当前内容', drafts], ['进行中', active]],
+        },
+      ];
       fields.runtimeMetrics.replaceChildren();
-      const readable = [];
-      metrics.forEach(([key, label]) => {
-        const value = key === 'inspiration' ? inspiration : key === 'draft' ? drafts
-          : totals && Object.prototype.hasOwnProperty.call(totals, key) ? finiteCount(totals[key]) : null;
-        const item = createElement(document, 'div');
-        item.appendChild(createElement(document, 'b', '', value === null ? '—' : String(value)));
-        item.appendChild(createElement(document, 'span', '', label));
+      stages.forEach((stage) => {
+        const item = createElement(document, 'section', 'content-runtime-stage');
+        const heading = createElement(document, 'span', 'content-runtime-stage-heading');
+        heading.appendChild(createElement(document, 'b', '', stage.index));
+        heading.appendChild(createElement(document, 'strong', '', stage.title));
+        item.appendChild(heading);
+        item.appendChild(createElement(document, 'p', '', stage.description));
+        const metricList = createElement(document, 'div', 'content-runtime-stage-values');
+        stage.metrics.forEach(([label, value]) => {
+          const metric = createElement(document, 'span', value === null ? 'is-unknown' : '');
+          metric.appendChild(createElement(document, 'b', '', value === null ? '—' : String(value)));
+          metric.appendChild(createElement(document, 'small', '', label));
+          metricList.appendChild(metric);
+        });
+        item.appendChild(metricList);
         fields.runtimeMetrics.appendChild(item);
-        if (value !== null && ['view', 'like', 'collect'].includes(key)) readable.push(`${label} ${value} 条`);
       });
+      const readable = [
+        ['浏览', dailyCount('view')],
+        ['点赞', dailyCount('like')],
+        ['收藏', dailyCount('collect')],
+      ].filter(([, value]) => value !== null).map(([label, value]) => `${label} ${value} 条`);
       fields.runtimeSummary.textContent = readable.length > 0 ? `今天${readable.join(' · ')}` : '今天的详细操作数据暂未确认';
       const automation = runtime?.automationState || 'stopped';
       const browser = runtime?.browserState || 'closed';
-      const active = !['stopped'].includes(automation);
+      const automationActive = !['stopped'].includes(automation);
       const pending = ['starting', 'stopping', 'pausing', 'waiting_resource'].includes(automation);
-      fields.runtimeToggle.textContent = automation === 'starting' ? '启动中' : automation === 'stopping' ? '关闭中' : active ? '关闭环境' : '启动环境';
+      fields.runtimeToggle.textContent = automation === 'starting' ? '启动中' : automation === 'stopping' ? '关闭中' : automationActive ? '关闭环境' : '启动环境';
       fields.runtimeToggle.disabled = pending;
       fields.runtimeBrowser.textContent = ['ready'].includes(browser) ? '收起浏览器'
         : ['queued', 'starting'].includes(browser) ? '浏览器开启中'
           : ['closing', 'releasing'].includes(browser) ? '浏览器关闭中' : '显示浏览器';
       fields.runtimeBrowser.disabled = ['queued', 'starting', 'closing', 'releasing'].includes(browser);
-      const guided = Boolean(runtime?.guideActive && !active);
+      const guided = Boolean(runtime?.guideActive && !automationActive);
       fields.runtimeDetail?.classList.toggle('is-guided', guided);
       fields.runtimeGuide?.classList.toggle('hidden', !guided);
       if (guided && fields.runtimeDetail) fields.runtimeDetail.open = true;

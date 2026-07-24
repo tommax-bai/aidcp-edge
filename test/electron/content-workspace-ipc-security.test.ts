@@ -150,6 +150,12 @@ test('价值首页保留设计稿的视觉证据层级，不把精选内容压�
   assert.match(styles, /\.content-home-section-head button\s*\{[^}]*font-family:\s*inherit;[^}]*font-size:\s*10\.5px;[^}]*font-weight:\s*680;/s);
   assert.match(styles, /\.content-featured-card img,[\s\S]*\.content-mine-item \.content-card-thumb\s*\{[^}]*box-shadow:\s*0 1px 2px rgba\(38,\s*55,\s*79,\s*\.06\),\s*0 5px 14px rgba\(38,\s*55,\s*79,\s*\.1\);/s);
   assert.match(styles, /\.content-home-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1\.3fr\)\s*minmax\(310px,\s*\.7fr\);/s);
+  assert.match(styles, /\.xhs-environment-dashboard \.content-home-view\s*\{[^}]*padding:\s*0 10px 20px;/s);
+  assert.match(styles, /\.content-reference-list:not\(:has\(\.content-section-empty\)\),\s*\.content-mine-list:not\(:has\(\.content-section-empty\)\)\s*\{[^}]*height:\s*328px;/s);
+  assert.match(styles, /\.content-mine-list:not\(:has\(\.content-section-empty\)\)\s*\{[^}]*grid-template-rows:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);/s);
+  assert.match(styles, /\.content-mine-item\s*\{[^}]*min-height:\s*104px;/s);
+  assert.match(styles, /\.content-runtime-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\);/s);
+  assert.match(styles, /\.content-runtime-stage\s*\{[^}]*border:\s*1px solid #e0e7f1;/s);
 });
 
 test('价值首页按环境内容容器调整层级，中等宽度不缩成桌面数据列', () => {
