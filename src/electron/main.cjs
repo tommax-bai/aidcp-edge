@@ -3725,25 +3725,26 @@ function spawnEdgeChild(handle, {
     spawnEnv = { ...buildSelfProviderEnv(), ...process.env, ELECTRON_RUN_AS_NODE: '1' };
   }
 
-  if (normalizePlatform(handle.platform) === 'xiaohongshu') {
-    const nativeResourceDir = app.isPackaged
-      ? path.join(process.resourcesPath, 'native-page-engine')
-      : path.join(app.getAppPath(), 'build', 'native-page-engine', `${process.platform}-${process.arch}`);
-    if (app.isPackaged || fs.existsSync(nativeResourceDir)) {
-      try {
-        const artifact = verifyNativePageEngineArtifact(nativeResourceDir);
-        spawnEnv.AIDCP_NATIVE_PAGE_ENGINE_BINARY = artifact.binaryPath;
-      } catch (error) {
-        const reason = `Native Page Engine 包校验失败：${error instanceof Error ? error.message : String(error)}`;
-        updateStatus(handle, {
-          edge: 'stopped',
-          session: 'idle',
-          lastMessage: reason,
-          ...edgeFailurePatch(reason),
-          ...presencePatch('页面引擎不可用'),
-        });
-        return;
-      }
+  const nativeResourceDir = app.isPackaged
+    ? path.join(process.resourcesPath, 'native-page-engine')
+    : path.join(app.getAppPath(), 'build', 'native-page-engine', `${process.platform}-${process.arch}`);
+  // XHS/Facebook 的常驻浏览器核心启动即需要 Native；WeChat API-only 核心可在开发态无 artifact 时运行，
+  // 但 preelectron/package 路径有 artifact 时仍注入，供后续按需浏览器鉴权会话使用。
+  const nativeArtifactRequiredAtSpawn = normalizePlatform(handle.platform) !== 'wechat_channels';
+  if (nativeArtifactRequiredAtSpawn || app.isPackaged || fs.existsSync(nativeResourceDir)) {
+    try {
+      const artifact = verifyNativePageEngineArtifact(nativeResourceDir);
+      spawnEnv.AIDCP_NATIVE_PAGE_ENGINE_BINARY = artifact.binaryPath;
+    } catch (error) {
+      const reason = `Native Page Engine 包校验失败：${error instanceof Error ? error.message : String(error)}`;
+      updateStatus(handle, {
+        edge: 'stopped',
+        session: 'idle',
+        lastMessage: reason,
+        ...edgeFailurePatch(reason),
+        ...presencePatch('页面引擎不可用'),
+      });
+      return;
     }
   }
 

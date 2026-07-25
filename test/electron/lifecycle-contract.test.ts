@@ -157,3 +157,26 @@ test('core child spawn cwd is asar-guarded and never the raw app.asar appRoot', 
     'core spawn cwd must never be the raw appRoot (app.asar file → spawn ENOTDIR)',
   );
 });
+
+test('every platform core receives the verified Native Page Engine artifact before spawn', () => {
+  const spawnEdgeChild = functionSource('spawnEdgeChild', 'stopLoginPoller');
+  assert.doesNotMatch(
+    spawnEdgeChild,
+    /normalizePlatform\(handle\.platform\)\s*===\s*['"]xiaohongshu['"]/,
+    'Native artifact injection must not remain limited to Xiaohongshu after the Facebook/WeChat cutover',
+  );
+  assert.match(
+    spawnEdgeChild,
+    /verifyNativePageEngineArtifact\(nativeResourceDir\)[\s\S]*spawnEnv\.AIDCP_NATIVE_PAGE_ENGINE_BINARY = artifact\.binaryPath/,
+  );
+  assert.match(
+    spawnEdgeChild,
+    /const nativeArtifactRequiredAtSpawn = normalizePlatform\(handle\.platform\) !== 'wechat_channels'/,
+    'XHS and Facebook must fail closed at spawn while WeChat may remain API-only in artifact-less direct development runs',
+  );
+  assert.ok(
+    spawnEdgeChild.indexOf('spawnEnv.AIDCP_NATIVE_PAGE_ENGINE_BINARY = artifact.binaryPath')
+      < spawnEdgeChild.indexOf('const child = spawn('),
+    'the verified artifact path must be frozen into the child environment before spawn',
+  );
+});
