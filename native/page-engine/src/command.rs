@@ -34,7 +34,9 @@ pub const PRODUCTION_COMMAND_KINDS: &[&str] = &[
     "interaction_like_comment",
     "group_join",
     "wechat_capture_session",
-    "identity_read",
+    "identity_bootstrap",
+    "identity_read_current",
+    "identity_read_self_profile",
     "captcha_capture",
     "captcha_click",
     "publish_navigate_entry",
@@ -232,8 +234,13 @@ pub struct ProfileOpenParams {
     pub reason: Option<String>,
     #[serde(default)]
     pub think_ms: Option<u64>,
-    #[serde(default)]
-    pub direct: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct IdentityCaptureParams {
+    pub capture_id: String,
+    pub account_id: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -454,7 +461,9 @@ pub enum NativeCommand {
     InteractionLikeComment(LikeCommentParams),
     GroupJoin(GroupJoinParams),
     WechatCaptureSession(EmptyParams),
-    IdentityRead(EmptyParams),
+    IdentityBootstrap(EmptyParams),
+    IdentityReadCurrent(IdentityCaptureParams),
+    IdentityReadSelfProfile(IdentityCaptureParams),
     CaptchaCapture(CaptchaCaptureParams),
     CaptchaClick(CaptchaClickParams),
     PublishNavigateEntry(PublishIdentity),
@@ -477,7 +486,10 @@ impl NativeCommand {
         match platform {
             Platform::Xiaohongshu => !matches!(
                 self,
-                GroupJoin(_) | WechatCaptureSession(_) | IdentityRead(_)
+                GroupJoin(_)
+                    | WechatCaptureSession(_)
+                    | IdentityBootstrap(_)
+                    | IdentityReadCurrent(_)
             ),
             Platform::Facebook => matches!(
                 self,
@@ -493,7 +505,6 @@ impl NativeCommand {
                     | NavigationBack(_)
                     | NoteBrowseImages(_)
                     | NoteScrollComments(_)
-                    | ProfileOpen(_)
                     | InteractionLike(_)
                     | InteractionFollow(_)
                     | InteractionComment(_)
@@ -511,7 +522,8 @@ impl NativeCommand {
                     | PublishCapturePostId(_)
                     | PublishCaptureScheduled(_)
                     | PublishReconcileScheduled(_)
-                    | IdentityRead(_)
+                    | IdentityBootstrap(_)
+                    | IdentityReadCurrent(_)
                     | CaptchaCapture(_)
                     | CaptchaClick(_)
             ),
@@ -528,7 +540,8 @@ impl NativeCommand {
                 | Self::PublishReconcileScheduled(_)
                 | Self::CaptchaCapture(_)
                 | Self::WechatCaptureSession(_)
-                | Self::IdentityRead(_)
+                | Self::IdentityBootstrap(_)
+                | Self::IdentityReadCurrent(_)
         )
     }
 
@@ -538,7 +551,19 @@ impl NativeCommand {
             | Self::PublishNavigateEntry(_)
             | Self::PublishSubmit(_)
             | Self::WechatCaptureSession(_) => Ok(()),
-            Self::IdentityRead(_) => Ok(()),
+            Self::IdentityBootstrap(_) => Ok(()),
+            Self::IdentityReadCurrent(params) | Self::IdentityReadSelfProfile(params) => {
+                validate_required(
+                    &params.capture_id,
+                    MAX_ID_BYTES,
+                    "invalid identity capture id",
+                )?;
+                validate_required(
+                    &params.account_id,
+                    MAX_ID_BYTES,
+                    "invalid identity account id",
+                )
+            }
             Self::PlanExecute(params) => {
                 validate_list(&params.steps)?;
                 for step in &params.steps {
@@ -897,6 +922,35 @@ mod tests {
             captcha.validate().expect_err("point bounds").code,
             ErrorCode::InvalidRequest
         );
+    }
+
+    #[test]
+    fn identity_commands_are_platform_specific_and_legacy_direct_is_rejected() {
+        let current: NativeCommand = serde_json::from_str(
+            r#"{"kind":"identity_read_current","params":{"captureId":"c1","accountId":"61591824155856"}}"#,
+        )
+        .expect("current identity command");
+        assert!(current.supports_platform(Platform::Facebook));
+        assert!(!current.supports_platform(Platform::Xiaohongshu));
+
+        let self_profile: NativeCommand = serde_json::from_str(
+            r#"{"kind":"identity_read_self_profile","params":{"captureId":"c2","accountId":"author_123"}}"#,
+        )
+        .expect("self profile identity command");
+        assert!(self_profile.supports_platform(Platform::Xiaohongshu));
+        assert!(!self_profile.supports_platform(Platform::Facebook));
+
+        assert!(
+            serde_json::from_str::<NativeCommand>(
+                r#"{"kind":"profile_open","params":{"authorId":"author_123","direct":true}}"#,
+            )
+            .is_err()
+        );
+        let ordinary_profile: NativeCommand =
+            serde_json::from_str(r#"{"kind":"profile_open","params":{"authorId":"author_123"}}"#)
+                .expect("ordinary profile command");
+        assert!(ordinary_profile.supports_platform(Platform::Xiaohongshu));
+        assert!(!ordinary_profile.supports_platform(Platform::Facebook));
     }
 
     #[test]

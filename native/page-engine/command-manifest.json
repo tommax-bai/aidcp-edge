@@ -4,15 +4,18 @@
   "platforms": [
     {
       "platform": "xiaohongshu",
-      "adapterVersion": "xiaohongshu-v1"
+      "adapterVersion": "xiaohongshu-v1",
+      "identityCommands": ["identity_read_self_profile"]
     },
     {
       "platform": "facebook",
-      "adapterVersion": "facebook-v1"
+      "adapterVersion": "facebook-v1",
+      "identityCommands": ["identity_bootstrap", "identity_read_current"]
     },
     {
       "platform": "wechat_channels",
-      "adapterVersion": "wechat-channels-v1"
+      "adapterVersion": "wechat-channels-v1",
+      "identityCommands": []
     }
   ],
   "duplicatePolicy": "return_recorded_terminal_without_redispatch",
@@ -148,6 +151,26 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
+      "routeKey": "identity.read_current",
+      "edgeType": "identity.read_current",
+      "nativeKind": "identity_read_current",
+      "family": "identity",
+      "requestContract": "IdentityReadPayloadWithEdgeBoundAccount",
+      "receipts": ["identity.observed"],
+      "effect": "read",
+      "cancellation": "safe_points"
+    },
+    {
+      "routeKey": "identity.read_self_profile",
+      "edgeType": "identity.read_self_profile",
+      "nativeKind": "identity_read_self_profile",
+      "family": "identity",
+      "requestContract": "IdentityReadPayloadWithEdgeBoundAccount",
+      "receipts": ["identity.observed"],
+      "effect": "navigation",
+      "cancellation": "atomic_input_then_safe_point"
+    },
+    {
       "routeKey": "notification.open",
       "edgeType": "notification.open",
       "nativeKind": "notification_open",
@@ -268,9 +291,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "internal.identity_read",
-      "edgeType": "internal.identity_read",
-      "nativeKind": "identity_read",
+      "routeKey": "internal.identity_bootstrap",
+      "edgeType": "internal.identity_bootstrap",
+      "nativeKind": "identity_bootstrap",
       "family": "identity",
       "requestContract": "EmptyParams",
       "receipts": ["identity_receipt"],

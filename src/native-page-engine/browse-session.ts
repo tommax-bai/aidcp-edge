@@ -4,6 +4,7 @@ import type {
   ActionCompletedPayload,
   ActionResultPayload,
   Envelope,
+  IdentityObservedPayload,
   NoteDetailPayload,
   PageCardsPayload,
   PacingFloorPayload,
@@ -59,7 +60,14 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       this.reportFailure(env, 'native_session_quiesced', 'not_started');
       return;
     }
-    const command = nativeCommandForEnvelope(env);
+    const payload = env.payload && typeof env.payload === 'object'
+      ? env.payload as Record<string, unknown>
+      : {};
+    if (env.type === 'profile.open' && Object.prototype.hasOwnProperty.call(payload, 'direct')) {
+      this.reportFailure(env, 'legacy_profile_direct_unsupported', 'not_started');
+      return;
+    }
+    const command = nativeCommandForEnvelope(env, this.options.getAccountId?.());
     if (!command) {
       this.reportFailure(env, 'native_command_not_mapped', 'not_started');
       return;
@@ -193,6 +201,9 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         return;
       case 'profile_detail':
         this.options.client.reportProfileDetail(value as unknown as ProfileDetailPayload);
+        return;
+      case 'identity_observation':
+        this.options.client.send('identity.observed', value as unknown as IdentityObservedPayload, env?.id);
         return;
       case 'notification_home':
         this.options.client.send('notification.home', value as never);

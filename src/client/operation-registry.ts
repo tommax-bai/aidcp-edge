@@ -95,6 +95,8 @@ export const CLOUD_OPERATION_REGISTRY = {
   'note.browse_images': pageAutomation(),
   'note.scroll_comments': pageAutomation(),
   'profile.open': pageAutomation(),
+  'identity.read_current': pageAutomation(),
+  'identity.read_self_profile': pageAutomation(),
   'notification.open': pageAutomation(),
   'notification.browse_comments': pageAutomation(),
   'notification.browse_likes': pageAutomation(),

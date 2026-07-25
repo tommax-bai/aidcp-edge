@@ -175,6 +175,40 @@ impl ProfileDetail {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum IdentityObservationSource {
+    CurrentPage,
+    SelfProfile,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityPageEffect {
+    None,
+    NavigatedSelfProfile,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct IdentityObservation {
+    pub capture_id: String,
+    pub account_id: String,
+    #[serde(default)]
+    pub nickname: Option<String>,
+    pub source: IdentityObservationSource,
+    pub page_effect: IdentityPageEffect,
+}
+
+impl IdentityObservation {
+    pub fn bounded(mut self) -> Self {
+        truncate(&mut self.capture_id, MAX_ID_CHARS);
+        truncate(&mut self.account_id, MAX_ID_CHARS);
+        truncate_optional(&mut self.nickname, MAX_NAME_CHARS);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NotificationKind {
     Comment,
     Mention,

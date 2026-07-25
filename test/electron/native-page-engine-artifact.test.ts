@@ -43,7 +43,7 @@ test('rejects a manifest that lies about the binary architecture', async () => {
       { platform: 'facebook', adapterVersion: 'facebook-v1' },
       { platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' },
     ],
-    capabilityDigest: '8ec2b0281599d863e250398c598d41ac8ed233e57764fa61513abb898fc8a8a3',
+    capabilityDigest: '89c8488c1e475780b6b9fedde8b14fcb06d5285884e5bda1d325ef26da4b1c71',
     platform: 'darwin',
     arch: 'x64',
     executable: 'aidcp-page-engine',

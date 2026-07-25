@@ -1,6 +1,7 @@
 import { isUrlAllowedByTargetDescriptor, type PlatformDriver } from '../platform/driver.js';
 import { CdpOverlayMonitor } from '../browse/overlay-monitor.js';
 import { decideHandshakeIdentity, readSelfIdentity } from '../cdp/self-identity.js';
+import { IDENTITY_READ_SELF_PROFILE_CAPABILITY } from '../comm/protocol.js';
 
 export const XHS_DEFAULT_START_URL = 'https://www.xiaohongshu.com/explore';
 const XHS_TARGET = {
@@ -14,7 +15,7 @@ export const xhsPlatformDriver: PlatformDriver = {
   runtimeKind: 'browser',
   app: 'xhs',
   capabilities: ['identity', 'overlay', 'browse', 'comment', 'publish', 'interact', 'patrol'],
-  edgeCapabilities: ['locating', 'cdp', 'like', 'browse'],
+  edgeCapabilities: ['locating', 'cdp', 'like', 'browse', IDENTITY_READ_SELF_PROFILE_CAPABILITY],
   target: XHS_TARGET,
   defaultStartUrl: XHS_TARGET.startUrl,
   attachUrlIncludes: XHS_TARGET.attachUrlIncludes,

@@ -26,7 +26,7 @@ interface SessionControl {
 interface CommandManifest {
   schemaVersion: number;
   protocolVersion: number;
-  platforms: Array<{ platform: string; adapterVersion: string }>;
+  platforms: Array<{ platform: string; adapterVersion: string; identityCommands: string[] }>;
   duplicatePolicy: string;
   commands: ManifestCommand[];
   sessionControls: SessionControl[];
@@ -94,9 +94,21 @@ test('manifest route and Native command identities are unique and bounded', asyn
   const manifest = await loadManifest();
   assert.equal(manifest.protocolVersion, 2);
   assert.deepEqual(manifest.platforms, [
-    { platform: 'xiaohongshu', adapterVersion: 'xiaohongshu-v1' },
-    { platform: 'facebook', adapterVersion: 'facebook-v1' },
-    { platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' },
+    {
+      platform: 'xiaohongshu',
+      adapterVersion: 'xiaohongshu-v1',
+      identityCommands: ['identity_read_self_profile'],
+    },
+    {
+      platform: 'facebook',
+      adapterVersion: 'facebook-v1',
+      identityCommands: ['identity_bootstrap', 'identity_read_current'],
+    },
+    {
+      platform: 'wechat_channels',
+      adapterVersion: 'wechat-channels-v1',
+      identityCommands: [],
+    },
   ]);
 
   const routeKeys = manifest.commands.map((command) => command.routeKey);

@@ -37,13 +37,11 @@ import type {
   PageScrollPayload,
   SearchExecutePayload,
   ProfileDetailPayload,
-  ProfileOpenPayload,
   PacingOp,
   PacingFloorPayload,
 } from '../comm/protocol.js';
 import type { PlatformDriver } from '../platform/driver.js';
 import { FACEBOOK_DEFAULT_START_URL } from './driver.js';
-import { readFacebookIdentity } from './identity.js';
 import { FacebookFeedReader, type FacebookFeedCard, type FacebookFeedSettleResult } from './feed-reader.js';
 import { FacebookPostReader } from './post-reader.js';
 import { FacebookLikeExecutor, type FacebookLikeObservation } from './like-executor.js';
@@ -611,12 +609,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         await this.runBrowseCommand('close', () => this.closeNote());
         return;
       case 'profile.open': {
-        const payload = (env.payload ?? {}) as ProfileOpenPayload;
-        if (payload.direct) {
-          await this.runProfileCommand(payload);
-          return;
-        }
-        this.log('[fb-session] profile.open 非 direct 路径 FB v1 不支持，回 capability_unsupported');
+        this.log('[fb-session] profile.open 在 Facebook runtime 不支持，回 capability_unsupported');
         this.client.reportActionCompleted({ action: 'profile_open', ok: false, reason: 'capability_unsupported' });
         return;
       }
@@ -1325,102 +1318,6 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       this.log(`[fb-session] refresh reload 兜底失败：${(err as Error).message}`);
       return false;
     }
-  }
-
-  /**
-   * Facebook 本人昵称采集：云端会在首个 page.cards 后下发 profile.open{direct:true}。
-   * v1 只支持 direct 自己主页采集，回 profile.detail 解除云端 nickname-enricher 等待；
-   * 不支持普通作者主页/关注链路，避免扩大自动行为面。
-   */
-  private async runProfileCommand(payload: ProfileOpenPayload): Promise<void> {
-    let settled = false;
-    const emitOnce = (report: TerminalReport): void => {
-      if (settled) return;
-      settled = true;
-      this.emit(report);
-    };
-    const running = this.trackWriter(() => this.openDirectProfile(payload));
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        this.orphanWriters++;
-        void running.finally(() => {
-          this.orphanWriters--;
-        });
-        this.log(
-          `[fb-session] profile.open direct 超时（${this.commandTimeoutMs}ms），回 extracted:false；` +
-            `执行体仍可能在写页面 → 登记孤儿写者（当前 ${this.orphanWriters}）`,
-        );
-        emitOnce({ type: 'profile', payload: this.profileFallback(payload.authorId) });
-        resolve();
-      }, this.commandTimeoutMs);
-      running
-        .then((report) => {
-          clearTimeout(timer);
-          emitOnce(report);
-          resolve();
-        })
-        .catch((err) => {
-          clearTimeout(timer);
-          if (err instanceof TaskTakeoverError) {
-            this.log('[fb-session] profile.open direct 在安全取消点被独占任务接管 → 零副作用作废');
-            emitOnce({ type: 'action', payload: { action: 'profile_open', ok: false, reason: 'preempted_by_task' } });
-            resolve();
-            return;
-          }
-          this.log(`[fb-session] profile.open direct 失败：${(err as Error).message}`);
-          emitOnce({ type: 'profile', payload: this.profileFallback(payload.authorId) });
-          resolve();
-        });
-    });
-  }
-
-  private async openDirectProfile(payload: ProfileOpenPayload): Promise<TerminalReport> {
-    const requestedAuthorId = String(payload.authorId ?? '').trim();
-    await this.thinkBefore(payload.thinkMs);
-    // change facebook-nickname-capture-timing：本人昵称采集**就地读**（id 锚定顶栏头像标签），
-    // 绝不为取昵称导航 profile.php / /me（与 facebook-identity「取昵称绝不导航」契约一致）。
-    // 就地读从不离开 feed → 采集完的 back 经幂等 ensureFeed 变空操作、不整页重载。
-    // 上报按【就地读到的】数字 id 自校验：读到不匹配的 id → authorId≠连接 accountId，云端按「非本人」安全忽略（绝不写错账号）。
-    // 措辞刻意不带「命令: profile.open」——那会命中壳侧中文兜底表里的小红书专属规则
-    // （ui-events.cjs 的 /命令: profile\.open/ → 在场感「顺路去作者主页看看…」），而 FB 是**就地读、从不跳转**，
-    // 那句在 FB 上是假话。兜底表是小红书会话专属的，FB 一律走结构化 [ui-event] 行。
-    this.log(`[fb-session] profile.open direct（就地读, authorId=${requestedAuthorId || '<self>'}）`);
-    const idRes = await readFacebookIdentity(this.cdp, {
-      allowNavigate: false,
-      logger: (m) => this.log(m),
-      sleep: this.sleep,
-    });
-    if (!idRes.ok) {
-      this.log(`[fb-session] profile.detail direct 就地读身份失败（${idRes.reason}）→ 空昵称回执（不导航、不猜）`);
-      return { type: 'profile', payload: this.profileFallback(requestedAuthorId) };
-    }
-    const authorId = idRes.identity.accountId;
-    const nickname = (idRes.identity.displayName ?? '').trim();
-    this.log(
-      `[fb-session] profile.detail direct authorId=${authorId}` +
-        `${nickname ? ` nickname="${nickname}"` : ' nickname=<empty>'} extracted=false（就地读、无导航）`,
-    );
-    return {
-      type: 'profile',
-      payload: {
-        authorId,
-        postsCount: 0,
-        followersCount: 0,
-        likesCollects: 0,
-        extracted: false,
-        ...(nickname ? { nickname } : {}),
-      },
-    };
-  }
-
-  private profileFallback(authorId?: string): ProfileDetailPayload {
-    return {
-      authorId: authorId ?? '',
-      postsCount: 0,
-      followersCount: 0,
-      likesCollects: 0,
-      extracted: false,
-    };
   }
 
   private async navigateFeedBestEffort(): Promise<void> {

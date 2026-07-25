@@ -3,8 +3,9 @@ use crate::endpoint;
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
 use crate::model::{
-    ActionReceipt, CaptchaSnapshot, FacebookIdentityReceipt, NoteDetail, NotificationHome,
-    NotificationItems, PageCards, PlanResults, ProfileDetail, PublishReceipt,
+    ActionReceipt, CaptchaSnapshot, FacebookIdentityReceipt, IdentityObservation,
+    IdentityObservationSource, IdentityPageEffect, NoteDetail, NotificationHome, NotificationItems,
+    PageCards, PlanResults, ProfileDetail, PublishReceipt,
 };
 use crate::probe::PageKind;
 use crate::probe::ProbeResult;
@@ -52,6 +53,7 @@ pub enum CommandOutput {
     CaptchaSnapshot(CaptchaSnapshot),
     WechatSessionCandidate(Option<wechat::WechatSessionCandidate>),
     FacebookIdentity(FacebookIdentityReceipt),
+    IdentityObservation(IdentityObservation),
 }
 
 #[derive(Clone, Debug)]
@@ -503,7 +505,34 @@ async fn execute_facebook_command_once(
     match command {
         CaptchaCapture(params) => capture_captcha(session, params).await,
         CaptchaClick(params) => click_captcha(session, params).await,
-        IdentityRead(_) => execute_facebook_identity(session).await,
+        IdentityBootstrap(_) => execute_facebook_identity(session, true).await,
+        IdentityReadCurrent(params) => {
+            let (phase, output) = execute_facebook_identity(session, false).await?;
+            let CommandOutput::FacebookIdentity(receipt) = output else {
+                return Err(invalid_facebook_identity_output());
+            };
+            let account_id = receipt
+                .account_id
+                .unwrap_or_else(|| params.account_id.clone());
+            let nickname = if receipt.ok {
+                receipt.display_name
+            } else {
+                None
+            };
+            Ok((
+                phase,
+                CommandOutput::IdentityObservation(
+                    IdentityObservation {
+                        capture_id: params.capture_id.clone(),
+                        account_id,
+                        nickname,
+                        source: IdentityObservationSource::CurrentPage,
+                        page_effect: IdentityPageEffect::None,
+                    }
+                    .bounded(),
+                ),
+            ))
+        }
         SearchExecute(params) => {
             let Some(container) = params.container.as_deref() else {
                 return evaluate_facebook_router(session, command).await;
@@ -518,23 +547,6 @@ async fn execute_facebook_command_once(
                 params.url.as_deref().unwrap_or_default(),
                 params.note_id.as_deref(),
             )?;
-            session.cdp.navigate(url.as_str()).await?;
-            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
-            evaluate_facebook_router(session, command).await
-        }
-        ProfileOpen(params) if params.direct == Some(true) => {
-            let id = params.author_id.as_deref().ok_or_else(|| {
-                EngineError::new(
-                    ErrorCode::InvalidRequest,
-                    "direct Facebook profile navigation requires an author id",
-                )
-            })?;
-            if id.len() < 5 || !id.chars().all(|character| character.is_ascii_digit()) {
-                return Err(invalid_facebook_navigation_target());
-            }
-            let mut url = Url::parse("https://www.facebook.com/profile.php")
-                .map_err(|_| invalid_facebook_navigation_target())?;
-            url.query_pairs_mut().append_pair("id", id);
             session.cdp.navigate(url.as_str()).await?;
             wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
             evaluate_facebook_router(session, command).await
@@ -579,6 +591,7 @@ async fn execute_facebook_command_once(
 
 async fn execute_facebook_identity(
     session: &mut EngineSession,
+    allow_navigate: bool,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let location = session
         .cdp
@@ -588,7 +601,8 @@ async fn execute_facebook_identity(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    if !location.starts_with("https://www.facebook.com/")
+    if allow_navigate
+        && !location.starts_with("https://www.facebook.com/")
         && !location.starts_with("https://facebook.com/")
     {
         session.cdp.navigate("https://www.facebook.com/").await?;
@@ -619,9 +633,16 @@ async fn execute_facebook_identity(
     let expression = facebook::identity_expression(cookie_user_id)?;
     let raw = session.cdp.evaluate(&expression, true).await?;
     let result = facebook::result_from_cdp(&raw)?;
-    let command = NativeCommand::IdentityRead(crate::command::EmptyParams::default());
+    let command = NativeCommand::IdentityBootstrap(crate::command::EmptyParams::default());
     let output = facebook::typed_output(&command, result.output, session.cdp.target_id())?;
     Ok((result.effect_phase, output))
+}
+
+fn invalid_facebook_identity_output() -> EngineError {
+    EngineError::new(
+        ErrorCode::CdpError,
+        "native Facebook identity command returned an invalid output",
+    )
 }
 
 async fn evaluate_facebook_router(
@@ -794,19 +815,37 @@ async fn execute_xhs_command_once(
             }
             evaluate_router(session, command).await
         }
-        ProfileOpen(params) if params.direct == Some(true) => {
-            let author_id = params.author_id.as_deref().ok_or_else(|| {
-                EngineError::new(
-                    ErrorCode::InvalidRequest,
-                    "direct profile navigation requires an author id",
-                )
-            })?;
-            let url = direct_profile_url(author_id)?;
+        IdentityReadSelfProfile(params) => {
+            let url = direct_profile_url(&params.account_id)?;
             session.cdp.navigate(url.as_str()).await?;
             if !wait_for_page_kind(session, PageKind::Profile, Duration::from_secs(5)).await? {
                 return Err(navigation_postcondition_failed());
             }
-            evaluate_router(session, command).await
+            let profile_command = NativeCommand::ProfileOpen(crate::command::ProfileOpenParams {
+                author_id: Some(params.account_id.clone()),
+                reason: None,
+                think_ms: None,
+            });
+            let (phase, output) = evaluate_router(session, &profile_command).await?;
+            let CommandOutput::ProfileDetail(profile) = output else {
+                return Err(EngineError::new(
+                    ErrorCode::CdpError,
+                    "native Xiaohongshu identity command returned an invalid output",
+                ));
+            };
+            Ok((
+                phase,
+                CommandOutput::IdentityObservation(
+                    IdentityObservation {
+                        capture_id: params.capture_id.clone(),
+                        account_id: profile.author_id,
+                        nickname: profile.nickname,
+                        source: IdentityObservationSource::SelfProfile,
+                        page_effect: IdentityPageEffect::NavigatedSelfProfile,
+                    }
+                    .bounded(),
+                ),
+            ))
         }
         SearchExecute(params) => execute_search(session, params, command).await,
         PublishUploadImage(params) => {

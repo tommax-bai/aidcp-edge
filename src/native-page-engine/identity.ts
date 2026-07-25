@@ -15,7 +15,7 @@ export async function readNativeFacebookIdentity(
   try {
     const execution = await runtime.execute(
       'startup-identity',
-      { kind: 'identity_read', params: {} },
+      { kind: 'identity_bootstrap', params: {} },
       timeoutMs,
     );
     if (execution.effectPhase !== 'confirmed' || execution.output?.kind !== 'facebook_identity') {

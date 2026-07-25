@@ -11,7 +11,7 @@ const EXPECTED_PLATFORM_ADAPTERS = Object.freeze([
   Object.freeze({ platform: 'facebook', adapterVersion: 'facebook-v1' }),
   Object.freeze({ platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' }),
 ]);
-const EXPECTED_CAPABILITY_DIGEST = '8ec2b0281599d863e250398c598d41ac8ed233e57764fa61513abb898fc8a8a3';
+const EXPECTED_CAPABILITY_DIGEST = '89c8488c1e475780b6b9fedde8b14fcb06d5285884e5bda1d325ef26da4b1c71';
 
 function executableName(platform) {
   return platform === 'win32' ? 'aidcp-page-engine.exe' : 'aidcp-page-engine';

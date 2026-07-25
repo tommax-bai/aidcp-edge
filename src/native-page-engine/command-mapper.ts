@@ -7,6 +7,8 @@ const nativeKinds = {
   'search.execute': 'search_execute', 'note.open': 'note_open', 'note.close': 'note_close',
   'navigation.back': 'navigation_back', 'note.browse_images': 'note_browse_images',
   'note.scroll_comments': 'note_scroll_comments', 'profile.open': 'profile_open',
+  'identity.read_current': 'identity_read_current',
+  'identity.read_self_profile': 'identity_read_self_profile',
   'notification.open': 'notification_open', 'notification.browse_comments': 'notification_browse_comments',
   'notification.browse_likes': 'notification_browse_likes', 'notification.browse_follows': 'notification_browse_follows',
   'notification.back_home': 'notification_back_home', 'interaction.like': 'interaction_like',
@@ -30,6 +32,8 @@ const actionNames: Readonly<Record<string, string>> = {
   'note.scroll_comments': 'scroll_comments',
   'navigation.back': 'back',
   'profile.open': 'profile_open',
+  'identity.read_current': 'identity_read_current',
+  'identity.read_self_profile': 'identity_read_self_profile',
   'group.join': 'join_group',
   'notification.open': 'open_notifications',
   'notification.browse_comments': 'browse_notification_comments',
@@ -52,7 +56,9 @@ const allowedByKind: Record<string, readonly string[]> = {
   note_close: ['reason', 'dwellMs'], navigation_back: ['reason', 'targetPage', 'dwellMs'],
   note_browse_images: ['noteId', 'count', 'thinkMs', 'dwellMs'],
   note_scroll_comments: ['noteId', 'count', 'thinkMs', 'dwellMs'],
-  profile_open: ['authorId', 'reason', 'thinkMs', 'direct'],
+  profile_open: ['authorId', 'reason', 'thinkMs'],
+  identity_read_current: ['captureId'],
+  identity_read_self_profile: ['captureId'],
   notification_open: ['thinkMs', 'scrollMax'], notification_browse_comments: ['thinkMs', 'scrollMax'],
   notification_browse_likes: ['thinkMs', 'scrollMax'], notification_browse_follows: ['thinkMs', 'scrollMax'],
   notification_back_home: ['thinkMs', 'scrollMax'],
@@ -68,12 +74,18 @@ function project(payload: unknown, allowed: readonly string[]): Record<string, u
   return Object.fromEntries(allowed.filter((key) => source[key] !== undefined).map((key) => [key, source[key]]));
 }
 
-export function nativeCommandForEnvelope(env: Envelope): NativePageCommand | undefined {
+export function nativeCommandForEnvelope(
+  env: Envelope,
+  accountId?: string,
+): NativePageCommand | undefined {
   const kind = nativeKinds[env.type as keyof typeof nativeKinds];
   if (!kind) return undefined;
   const params = project(env.payload, allowedByKind[kind]);
   if (kind === 'plan_execute' && Array.isArray(params.steps)) {
     params.steps = params.steps.map((step) => project(step, ['actionId', 'op', 'value']));
+  }
+  if (kind === 'identity_read_current' || kind === 'identity_read_self_profile') {
+    params.accountId = accountId ?? '';
   }
   return { kind, params };
 }

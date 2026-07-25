@@ -1669,10 +1669,19 @@ export class BrowseSession {
         break;
       }
       case 'profile.open': {
-        const payload = env.payload as ProfileOpenPayload;
+        const rawPayload = (env.payload ?? {}) as Record<string, unknown>;
+        if (Object.prototype.hasOwnProperty.call(rawPayload, 'direct')) {
+          this.deps.client.reportActionCompleted?.({
+            action: 'profile_open',
+            ok: false,
+            reason: 'legacy_profile_direct_unsupported',
+          });
+          break;
+        }
+        const payload = rawPayload as ProfileOpenPayload;
         this.logger(`[browse] 命令: profile.open (authorId=${payload.authorId ?? '?'})`);
         if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 开主页前最小间隔（action 档）
-        await this.openAuthorProfile(payload.authorId, payload.direct);
+        await this.openAuthorProfile(payload.authorId);
         break;
       }
       case 'notification.open': {
@@ -3210,32 +3219,24 @@ export class BrowseSession {
    * 抽取失败/超时仍上报（extracted:false），让云端 FollowAgent 保守 skip 而非把缺失当真 0 粉丝；
    * 并兜底返回信息流不卡死。选择器需本地核对校准（见 tasks 6.5）。
    */
-  private async openAuthorProfile(authorId?: string, direct?: boolean): Promise<void> {
+  private async openAuthorProfile(authorId?: string): Promise<void> {
     const { evalRaw: evalRawFn } = await import('./cdp-util.js');
     try {
-      let url: string;
-      if (direct && authorId) {
-        // 云端直驱（change account-real-nickname）：直接导航到指定 profile id、不抓取当前页第一个作者链。
-        // 边缘纯执行——不判定「这是不是自己」（云端独知）；下游 waitForProfile/抽取/上报与点头像进入完全一致。
-        url = `https://www.xiaohongshu.com/user/profile/${authorId}`;
-      } else {
-        // 1) 在详情页定位作者主页链接 a[href*="/user/profile/"]（真实小红书 a.link-wrapper）。
-        // 合成点击不一定触发 SPA 路由跳转，故读出 href 后用 Page.navigate 直达主页
-        // （手动核对该 URL 能正常渲染 .user-interactions）。
-        const probe = `(function(){
+      // 1) 在详情页定位作者主页链接 a[href*="/user/profile/"]（真实小红书 a.link-wrapper）。
+      // 合成点击不一定触发 SPA 路由跳转，故读出 href 后用 Page.navigate 直达主页。
+      const probe = `(function(){
           var sels = ['.note-detail-mask a[href*="/user/profile/"]', '.author-wrapper a[href*="/user/profile/"]', 'a[href*="/user/profile/"]'];
           for (var i=0;i<sels.length;i++){ var el=document.querySelector(sels[i]); if(el){ var h=el.getAttribute('href'); if(h) return JSON.stringify({href:h}); } }
           return JSON.stringify({error:'no_author'});
         })()`;
-        const raw = await evalRawFn<string>(this.deps.cdp, probe);
-        const info = typeof raw === 'string' ? JSON.parse(raw) : { error: 'no_author' };
-        if (info.error || !info.href) {
-          this.logger('[browse] profile.open: 未找到作者主页链接');
-          this.reportProfileFallback(authorId);
-          return;
-        }
-        url = String(info.href).startsWith('http') ? String(info.href) : `https://www.xiaohongshu.com${info.href}`;
+      const raw = await evalRawFn<string>(this.deps.cdp, probe);
+      const info = typeof raw === 'string' ? JSON.parse(raw) : { error: 'no_author' };
+      if (info.error || !info.href) {
+        this.logger('[browse] profile.open: 未找到作者主页链接');
+        this.reportProfileFallback(authorId);
+        return;
       }
+      const url = String(info.href).startsWith('http') ? String(info.href) : `https://www.xiaohongshu.com${info.href}`;
       await this.humanPause(this.actionTiming);
       await this.deps.cdp.send('Page.navigate', { url });
 

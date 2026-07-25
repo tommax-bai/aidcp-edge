@@ -5,6 +5,7 @@ import {
 } from '../platform/driver.js';
 import { decideHandshakeIdentity, type SelfIdentityResult } from '../cdp/self-identity.js';
 import type { OverlayMonitor } from '../browse/overlay-monitor.js';
+import { IDENTITY_READ_CURRENT_CAPABILITY } from '../comm/protocol.js';
 
 export const FACEBOOK_DEFAULT_START_URL = 'https://www.facebook.com/';
 
@@ -39,7 +40,13 @@ export const facebookPlatformDriver: PlatformDriver = {
   //   facebook-feed-inline-browse）。云端**版本偏斜闸**（change platform-browse-protocol）只对声明此位的边缘
   //   开 inline 旗标；声明它只表示「我能」，真开与否由云端旗标 gate（默认全关 = 逐位等于今天）。
   // 'facebook_reel_follow_v1'：本构建含同 Reel/作者后置验证的关注执行器；Cloud 只对声明此位的连接启用自动关注。
-  edgeCapabilities: ['locating', 'cdp', 'inline_targeting', 'facebook_reel_follow_v1'],
+  edgeCapabilities: [
+    'locating',
+    'cdp',
+    'inline_targeting',
+    'facebook_reel_follow_v1',
+    IDENTITY_READ_CURRENT_CAPABILITY,
+  ],
   target: FACEBOOK_TARGET,
   defaultStartUrl: FACEBOOK_TARGET.startUrl,
   attachUrlIncludes: FACEBOOK_TARGET.attachUrlIncludes,

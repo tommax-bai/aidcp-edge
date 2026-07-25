@@ -18,6 +18,32 @@ test('projects Edge coordination fields out of the Native command envelope', () 
   });
 });
 
+test('identity commands preserve Cloud correlation but inject only the Edge-bound account', () => {
+  const current = nativeCommandForEnvelope({
+    v: 2,
+    id: 'identity-current',
+    ts: Date.now(),
+    type: 'identity.read_current',
+    payload: { captureId: 'capture-1', accountId: 'cloud-must-not-choose' },
+  } as never, 'edge-bound-account');
+  assert.deepEqual(current, {
+    kind: 'identity_read_current',
+    params: { captureId: 'capture-1', accountId: 'edge-bound-account' },
+  });
+
+  const selfProfile = nativeCommandForEnvelope({
+    v: 2,
+    id: 'identity-self',
+    ts: Date.now(),
+    type: 'identity.read_self_profile',
+    payload: { captureId: 'capture-2' },
+  } as never, 'edge-bound-account');
+  assert.deepEqual(selfProfile, {
+    kind: 'identity_read_self_profile',
+    params: { captureId: 'capture-2', accountId: 'edge-bound-account' },
+  });
+});
+
 test('maps every publish atom to one fixed Native command without a fallback surface', () => {
   const kinds = [
     'navigate_entry', 'select_mode', 'upload_image', 'set_cover', 'fill_field',

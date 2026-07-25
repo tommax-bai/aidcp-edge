@@ -21,11 +21,15 @@ function envelope<T extends MessageType>(type: T, payload: Record<string, unknow
 function harness(execute: (
   ownerId: string,
   command: NativePageCommand,
-) => Promise<NativePageCommandExecution>) {
+) => Promise<NativePageCommandExecution>, options: {
+  platform?: 'xiaohongshu' | 'facebook';
+  accountId?: string;
+} = {}) {
   const executions: Array<{ ownerId: string; command: NativePageCommand }> = [];
   const actions: ActionCompletedPayload[] = [];
   const cards: PageCardsPayload[] = [];
   const closedOwners: string[] = [];
+  const sent: Array<{ type: string; payload: unknown; replyTo?: string }> = [];
   const runtime = {
     async execute(ownerId: string, command: NativePageCommand) {
       executions.push({ ownerId, command });
@@ -36,9 +40,16 @@ function harness(execute: (
   const client = {
     reportActionCompleted(payload: ActionCompletedPayload) { actions.push(payload); },
     reportPageCards(payload: PageCardsPayload) { cards.push(payload); },
+    send(type: string, payload: unknown, replyTo?: string) { sent.push({ type, payload, replyTo }); },
   } as unknown as EdgeClient;
-  const session = new NativeBrowseSession({ runtime, client, startupId: 'startup-native-test' });
-  return { session, executions, actions, cards, closedOwners };
+  const session = new NativeBrowseSession({
+    runtime,
+    client,
+    startupId: 'startup-native-test',
+    platform: options.platform,
+    getAccountId: () => options.accountId,
+  });
+  return { session, executions, actions, cards, closedOwners, sent };
 }
 
 const searchPayload = {
@@ -48,6 +59,59 @@ const searchPayload = {
   scope: 'global',
   keyword: 'AI Agent实战',
 };
+
+test('Native identity current read injects bound account and reports correlated observation', async () => {
+  const h = harness(async (_ownerId, command) => ({
+    ok: true,
+    effectPhase: 'confirmed',
+    reasonCode: 'confirmed',
+    output: {
+      kind: 'identity_observation',
+      value: {
+        captureId: command.params.captureId,
+        accountId: command.params.accountId,
+        nickname: 'Gi Vo',
+        source: 'current_page',
+        pageEffect: 'none',
+      },
+    },
+  }), { platform: 'facebook', accountId: '61591824155856' });
+
+  await h.session.onCloudCommand(envelope('identity.read_current', {
+    captureId: 'capture-fb-1',
+    accountId: 'cloud-injected-id',
+  }));
+
+  assert.deepEqual(h.executions[0]?.command, {
+    kind: 'identity_read_current',
+    params: { captureId: 'capture-fb-1', accountId: '61591824155856' },
+  });
+  assert.deepEqual(h.sent, [{
+    type: 'identity.observed',
+    payload: {
+      captureId: 'capture-fb-1',
+      accountId: '61591824155856',
+      nickname: 'Gi Vo',
+      source: 'current_page',
+      pageEffect: 'none',
+    },
+    replyTo: 'env-identity.read_current',
+  }]);
+});
+
+test('legacy profile.open{direct} is rejected before Native/CDP dispatch', async () => {
+  const h = harness(async () => assert.fail('legacy direct must not reach Native runtime'));
+  await h.session.onCloudCommand(envelope('profile.open', {
+    authorId: '61591824155856',
+    direct: true,
+  }));
+  assert.equal(h.executions.length, 0);
+  assert.deepEqual(h.actions, [{
+    action: 'profile_open',
+    ok: false,
+    reason: 'legacy_profile_direct_unsupported',
+  }]);
+});
 
 test('quiesced Native session admits the coordinator-owned task command', async () => {
   const h = harness(async () => ({

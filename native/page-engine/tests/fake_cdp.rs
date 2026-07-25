@@ -1,4 +1,4 @@
-use aidcp_page_engine::command::ReasonParams;
+use aidcp_page_engine::command::{IdentityCaptureParams, ReasonParams};
 use aidcp_page_engine::engine::{CommandOutput, Engine};
 use aidcp_page_engine::protocol::{
     CommandRecord, EffectPhase, NativeCommand, PageProbeParams, Platform, SessionCloseRecord,
@@ -105,6 +105,90 @@ async fn dispatched_write_disconnect_is_ambiguous_and_is_not_replayed() {
     assert!(outcome.error.is_some());
     engine.shutdown().await;
     server.await.expect("write disconnect server");
+}
+
+#[tokio::test]
+async fn facebook_current_identity_read_never_navigates() {
+    let (port, server) = spawn_facebook_identity_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "identity-current-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 2_000,
+            command: NativeCommand::IdentityReadCurrent(IdentityCaptureParams {
+                capture_id: "capture-1".to_owned(),
+                account_id: "61591824155856".to_owned(),
+            }),
+        })
+        .await
+        .expect("current identity");
+    let CommandOutput::IdentityObservation(observation) =
+        outcome.output.expect("identity observation")
+    else {
+        panic!("expected identity observation")
+    };
+    assert_eq!(observation.capture_id, "capture-1");
+    assert_eq!(observation.account_id, "61591824155856");
+    assert_eq!(observation.nickname.as_deref(), Some("Gi Vo"));
+
+    engine.shutdown().await;
+    let methods = server.await.expect("Facebook identity fake CDP");
+    assert!(!methods.iter().any(|method| method == "Page.navigate"));
+}
+
+#[tokio::test]
+async fn xhs_self_identity_uses_only_the_bound_canonical_profile() {
+    let (port, server) = spawn_xhs_self_identity_cdp().await;
+    let mut engine = Engine::default();
+    engine
+        .open(&session_open(port))
+        .await
+        .expect("open XHS session");
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "identity-self-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 2_000,
+            command: NativeCommand::IdentityReadSelfProfile(IdentityCaptureParams {
+                capture_id: "capture-xhs-1".to_owned(),
+                account_id: "author_123".to_owned(),
+            }),
+        })
+        .await
+        .expect("self profile identity");
+    let CommandOutput::IdentityObservation(observation) =
+        outcome.output.expect("identity observation")
+    else {
+        panic!("expected identity observation")
+    };
+    assert_eq!(observation.capture_id, "capture-xhs-1");
+    assert_eq!(observation.account_id, "author_123");
+    assert_eq!(observation.nickname.as_deref(), Some("工程师大白"));
+
+    engine.shutdown().await;
+    let requests = server.await.expect("XHS identity fake CDP");
+    let navigations: Vec<&Value> = requests
+        .iter()
+        .filter(|request| request["method"] == "Page.navigate")
+        .collect();
+    assert_eq!(navigations.len(), 1);
+    assert_eq!(
+        navigations[0]
+            .pointer("/params/url")
+            .and_then(Value::as_str),
+        Some("https://www.xiaohongshu.com/user/profile/author_123")
+    );
 }
 
 fn session_open(port: u16) -> SessionOpenRecord {
@@ -247,6 +331,109 @@ async fn spawn_fake_cdp() -> (u16, tokio::task::JoinHandle<()>) {
     (port, server)
 }
 
+async fn spawn_facebook_identity_cdp() -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut methods = Vec::new();
+        for _ in 0..3 {
+            methods.push(respond_to_call_record(&mut websocket, json!({})).await);
+        }
+        methods.push(
+            respond_to_call_record(
+                &mut websocket,
+                json!({"result":{"value":"https://www.facebook.com/"}}),
+            )
+            .await,
+        );
+        methods.push(respond_to_call_record(&mut websocket, json!({})).await);
+        methods.push(
+            respond_to_call_record(
+                &mut websocket,
+                json!({"cookies":[{
+                    "name":"c_user",
+                    "value":"61591824155856",
+                    "domain":".facebook.com"
+                }]}),
+            )
+            .await,
+        );
+        methods.push(
+            respond_to_call_record(
+                &mut websocket,
+                json!({"result":{"value":{
+                    "effectPhase":"confirmed",
+                    "output":{"kind":"identity_receipt","value":{
+                        "ok":true,
+                        "accountId":"61591824155856",
+                        "displayName":"Gi Vo",
+                        "source":"facebook-cookie"
+                    }}
+                }}}),
+            )
+            .await,
+        );
+        let _ = websocket.close(None).await;
+        methods
+    });
+    (port, server)
+}
+
+async fn spawn_xhs_self_identity_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing(&listener, port).await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                json!({"result":{"value":{
+                    "href":"https://www.xiaohongshu.com/user/profile/author_123",
+                    "readyState":"complete",
+                    "feedCardCount":0,
+                    "noteDetailCount":0,
+                    "loginWallCount":0,
+                    "captchaSignalCount":0,
+                    "dialogCount":0,
+                    "profileSignalCount":2,
+                    "mainCount":1
+                }}}),
+            )
+            .await,
+        );
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                json!({"result":{"value":{
+                    "effectPhase":"confirmed",
+                    "output":{"kind":"profile_detail","value":{
+                        "authorId":"author_123",
+                        "postsCount":5,
+                        "followersCount":100,
+                        "extracted":true,
+                        "nickname":"工程师大白",
+                        "url":"https://www.xiaohongshu.com/user/profile/author_123"
+                    }}
+                }}}),
+            )
+            .await,
+        );
+        let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
 async fn spawn_disconnect_then_recover_cdp() -> (u16, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
@@ -295,13 +482,17 @@ async fn spawn_disconnect_then_recover_cdp() -> (u16, tokio::task::JoinHandle<()
 }
 
 async fn serve_target_listing(listener: &TcpListener, port: u16) {
+    serve_target_listing_for(listener, port, "https://www.xiaohongshu.com/explore").await;
+}
+
+async fn serve_target_listing_for(listener: &TcpListener, port: u16, url: &str) {
     let (mut http, _) = listener.accept().await.expect("HTTP target request");
     let mut request = [0_u8; 2048];
     let _ = http.read(&mut request).await.expect("read target request");
     let body = json!([{
         "id": "target-1",
         "type": "page",
-        "url": "https://www.xiaohongshu.com/explore",
+        "url": url,
         "webSocketDebuggerUrl": format!("ws://127.0.0.1:{port}/devtools/page/target-1")
     }])
     .to_string();
@@ -312,6 +503,58 @@ async fn serve_target_listing(listener: &TcpListener, port: u16) {
     http.write_all(headers.as_bytes()).await.expect("headers");
     http.write_all(body.as_bytes()).await.expect("body");
     http.shutdown().await.expect("HTTP shutdown");
+}
+
+async fn respond_to_call_record<S>(
+    websocket: &mut tokio_tungstenite::WebSocketStream<S>,
+    result: Value,
+) -> String
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let message = websocket
+        .next()
+        .await
+        .expect("CDP request")
+        .expect("valid CDP request");
+    let Message::Text(text) = message else {
+        panic!("expected text request");
+    };
+    let request: Value = serde_json::from_str(&text).expect("request JSON");
+    let id = request["id"].as_u64().expect("request id");
+    websocket
+        .send(Message::Text(
+            json!({"id":id,"result":result}).to_string().into(),
+        ))
+        .await
+        .expect("CDP response");
+    request["method"].as_str().unwrap_or_default().to_owned()
+}
+
+async fn respond_to_call_capture<S>(
+    websocket: &mut tokio_tungstenite::WebSocketStream<S>,
+    result: Value,
+) -> Value
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let message = websocket
+        .next()
+        .await
+        .expect("CDP request")
+        .expect("valid CDP request");
+    let Message::Text(text) = message else {
+        panic!("expected text request");
+    };
+    let request: Value = serde_json::from_str(&text).expect("request JSON");
+    let id = request["id"].as_u64().expect("request id");
+    websocket
+        .send(Message::Text(
+            json!({"id":id,"result":result}).to_string().into(),
+        ))
+        .await
+        .expect("CDP response");
+    request
 }
 
 async fn respond_to_call<S>(websocket: &mut tokio_tungstenite::WebSocketStream<S>, result: Value)
