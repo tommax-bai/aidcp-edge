@@ -104,6 +104,52 @@ test('Facebook Reels probe and cards bind to one active video identity', async (
   assert.equal(cards[0]?.title, 'Active Reel summary');
 });
 
+test('Facebook Reels route identity projects one card without a permalink-bearing article', async () => {
+  const dom = install(`
+    <main>
+      <div id="active-reel">
+        <video src="https://cdn.example/reel-1528556722142425.mp4"></video>
+        <a href="/reel/hashtag/?q=%23agents">#agents</a>
+        <a href="/reel/hashtag/?q=%23automation">#automation</a>
+        <a href="/reel/hashtag/?q=%23agents">#agents duplicate</a>
+      </div>
+    </main>
+  `, 'https://www.facebook.com/reel/1528556722142425');
+  setRect(dom.window.document.querySelector('video')!, { left: 557, top: 72, right: 959, bottom: 786 });
+
+  const probe = await run({ kind: 'reel_probe', params: {} });
+  assert.equal(probe.output.value.ok, true);
+  assert.equal(probe.output.value.noteId, 'https://www.facebook.com/reel/1528556722142425');
+
+  const cardsResult = await run({ kind: 'reel_cards', params: {} });
+  assert.equal(cardsResult.output.value.listKind, 'reels');
+  assert.equal(cardsResult.output.value.listState, 'ready');
+  const cards = cardsResult.output.value.cards as Array<Record<string, unknown>>;
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]?.noteId, 'https://www.facebook.com/reel/1528556722142425');
+  assert.equal(cards[0]?.isVideo, true);
+});
+
+test('Facebook Reels hashtag navigation is not a post identity', async () => {
+  const dom = install(`
+    <main>
+      <div>
+        <video src="https://cdn.example/unknown-reel.mp4"></video>
+        <a href="/reel/hashtag/?q=%23agents">#agents</a>
+        <a href="/reel/hashtag/?q=%23automation">#automation</a>
+      </div>
+    </main>
+  `, 'https://www.facebook.com/reels/');
+  setRect(dom.window.document.querySelector('video')!, { left: 557, top: 72, right: 959, bottom: 786 });
+
+  const probe = await run({ kind: 'reel_probe', params: {} });
+  assert.deepEqual(probe.output.value, { ok: false, reason: 'no_active_identity' });
+
+  const cardsResult = await run({ kind: 'reel_cards', params: {} });
+  assert.deepEqual(cardsResult.output.value.cards, []);
+  assert.equal(cardsResult.output.value.listState, 'present_unreportable');
+});
+
 test('Facebook Reels probe fails closed when the active video is ambiguous', async () => {
   const dom = install(`
     <main>

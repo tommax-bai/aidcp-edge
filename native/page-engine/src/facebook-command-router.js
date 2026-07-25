@@ -72,10 +72,16 @@ async function(input){
       const url=new URL(href,location.origin);
       const path=url.pathname.toLowerCase();
       if(/^\/groups\/[^/]+\/posts\/[^/]+/.test(path)||(path.startsWith('/groups/')&&url.searchParams.has('multi_permalinks')))return 'group_post';
-      if(/\/posts\/[^/]+/.test(path)||path.includes('/permalink.php')||/\/videos\/[^/]+/.test(path)||/^\/reel\/[^/]+/.test(path)||((path==='/watch'||path==='/watch/')&&url.searchParams.has('v')))return 'page_post';
+      if(/\/posts\/[^/]+/.test(path)||path.includes('/permalink.php')||/\/videos\/[^/]+/.test(path)||reelIdFromPath(path)||((path==='/watch'||path==='/watch/')&&url.searchParams.has('v')))return 'page_post';
       if(url.searchParams.has('story_fbid'))return 'story';
     }catch{}
     return 'unknown';
+  };
+  const reelIdFromPath=(pathname)=>{
+    const hit=String(pathname||'').match(/^\/reel\/([^/]+)/i);
+    if(!hit)return '';
+    const id=hit[1];
+    return /^(?:hashtag|audio|music|topics?)$/i.test(id)?'':id;
   };
   const cleanPermalink=(href)=>{
     try{
@@ -99,7 +105,7 @@ async function(input){
       if(url.pathname.startsWith('/groups/')&&url.searchParams.get('multi_permalinks'))return `group:${url.pathname.split('/')[2]}:${url.searchParams.get('multi_permalinks')}`;
       hit=url.pathname.match(/\/posts\/([^/]+)/i);if(hit)return `post:${hit[1]}`;
       hit=url.pathname.match(/\/videos\/([^/]+)/i);if(hit)return `video:${hit[1]}`;
-      hit=url.pathname.match(/^\/reel\/([^/]+)/i);if(hit)return `reel:${hit[1]}`;
+      const reelId=reelIdFromPath(url.pathname);if(reelId)return `reel:${reelId}`;
       if(url.searchParams.get('story_fbid'))return `story:${url.searchParams.get('story_fbid')}`;
       if(url.searchParams.get('v'))return `video:${url.searchParams.get('v')}`;
     }catch{}
@@ -164,7 +170,7 @@ async function(input){
       return {ok:false,reason:'ambiguous_target'};
     }
     const active=videos[0];
-    let root=active.video.closest('[role="article"],article');
+    let root=active.video.closest('[role="article"],article')||active.video.parentElement||active.video;
     let noteId=root&&reelPermalinkOf(root);
     for(let candidate=active.video.parentElement,depth=0;!noteId&&candidate&&depth<8;candidate=candidate.parentElement,depth++){
       const candidateId=reelPermalinkOf(candidate);
@@ -273,12 +279,12 @@ async function(input){
     if(classify()==='checkpoint'||/security check|captcha|验证码|安全检查/i.test(body))return 'blocked_by_captcha';
     return '';
   };
-  const cardOf=(article,index)=>{
-    const href=permalinkOf(article);
+  const cardOf=(article,index,preferredHref='')=>{
+    const href=cleanPermalink(preferredHref)||permalinkOf(article);
     const id=postId(href);
     if(!href||!id)return null;
     const author=articleAuthor(article);
-    const body=articleBody(article);
+    const body=articleBody(article)||(preferredHref?text(article,12000):'');
     const reaction=reactionButton(article);
     return {
       index,
@@ -297,7 +303,7 @@ async function(input){
     const active=reelSurface()?activeReel():null;
     const articles=active&&active.ok&&active.root?[active.root]:reelSurface()?[]:topArticles();
     for(const article of articles){
-      const card=cardOf(article,cards.length);
+      const card=cardOf(article,cards.length,active&&active.ok?active.noteId:'');
       const id=card&&postId(card.noteId);
       if(!card||!id||seen.has(id))continue;
       seen.add(id);
