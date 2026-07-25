@@ -24,6 +24,9 @@ function harness(execute: (
 ) => Promise<NativePageCommandExecution>, options: {
   platform?: 'xiaohongshu' | 'facebook';
   accountId?: string;
+  clock?: () => number;
+  random?: () => number;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 } = {}) {
   const executions: Array<{ ownerId: string; command: NativePageCommand }> = [];
   const actions: ActionCompletedPayload[] = [];
@@ -48,6 +51,9 @@ function harness(execute: (
     startupId: 'startup-native-test',
     platform: options.platform,
     getAccountId: () => options.accountId,
+    clock: options.clock,
+    random: options.random,
+    sleep: options.sleep,
   });
   return { session, executions, actions, cards, closedOwners, sent };
 }
@@ -218,4 +224,98 @@ test('Native search execution error preserves effect-phase honesty and correlati
     actuated: true,
     searchOutcome: 'failed_after_submit',
   });
+});
+
+function cardsExecution(listKind: 'feed' | 'reels' = 'feed'): NativePageCommandExecution {
+  return {
+    ok: true,
+    effectPhase: 'confirmed',
+    reasonCode: 'confirmed',
+    output: {
+      kind: 'page_cards',
+      value: {
+        cards: [{ index: 0, title: 'visible card', likeCount: 0, collectCount: 0 }],
+        listKind,
+      },
+    },
+  };
+}
+
+test('Native Facebook page.scroll waits only the remaining jittered dwell', async () => {
+  let now = 1_000;
+  const waits: number[] = [];
+  const h = harness(async () => cardsExecution('reels'), {
+    platform: 'facebook',
+    clock: () => now,
+    random: () => 0.25,
+    sleep: async (ms) => {
+      waits.push(ms);
+      now += ms;
+    },
+  });
+  await h.session.start();
+  now = 2_000;
+
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
+
+  assert.deepEqual(waits, [6_000]);
+  assert.equal(h.executions.at(-1)?.command.kind, 'page_scroll');
+});
+
+test('Native Facebook page.scroll absorbs elapsed evaluation time and ignores missing dwell', async () => {
+  let now = 1_000;
+  const waits: number[] = [];
+  const h = harness(async () => cardsExecution(), {
+    platform: 'facebook',
+    clock: () => now,
+    random: () => 0.25,
+    sleep: async (ms) => { waits.push(ms); },
+  });
+  await h.session.start();
+  now = 9_000;
+
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+
+  assert.deepEqual(waits, []);
+  assert.equal(h.executions.length, 3);
+});
+
+test('Native Xiaohongshu page.scroll does not use the Facebook dwell anchor', async () => {
+  const waits: number[] = [];
+  const h = harness(async () => cardsExecution(), {
+    platform: 'xiaohongshu',
+    clock: () => 1_000,
+    random: () => 0.25,
+    sleep: async (ms) => { waits.push(ms); },
+  });
+  await h.session.start();
+
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
+
+  assert.deepEqual(waits, []);
+});
+
+test('Native Facebook dwell wait is cancelled before runtime actuation', async () => {
+  let releaseWait: (() => void) | undefined;
+  const enteredWait = new Promise<void>((resolve) => { releaseWait = resolve; });
+  const h = harness(async () => cardsExecution('reels'), {
+    platform: 'facebook',
+    clock: () => 1_000,
+    random: () => 0.25,
+    sleep: (_ms, signal) => new Promise((_resolve, reject) => {
+      releaseWait?.();
+      signal?.addEventListener('abort', () => reject(Object.assign(new Error('cancelled'), { code: 'aborted' })), { once: true });
+      if (signal?.aborted) reject(Object.assign(new Error('cancelled'), { code: 'aborted' }));
+    }),
+  });
+  await h.session.start();
+
+  const pending = h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
+  await enteredWait;
+  h.session.stop();
+  await pending;
+
+  assert.equal(h.executions.length, 1);
+  assert.deepEqual(h.actions.at(-1), { action: 'scroll', ok: false, reason: 'aborted' });
 });

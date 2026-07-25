@@ -13,6 +13,8 @@ const run = Function(`return (${source})`)() as (
 
 function install(html: string, url = 'https://www.facebook.com/'): JSDOM {
   const dom = new JSDOM(html, { url });
+  Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: 1_440 });
+  Object.defineProperty(dom.window, 'innerHeight', { configurable: true, value: 800 });
   Object.assign(globalThis, {
     window: dom.window,
     document: dom.window.document,
@@ -25,6 +27,7 @@ function install(html: string, url = 'https://www.facebook.com/'): JSDOM {
     HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
     getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
     innerHeight: 800,
+    innerWidth: 1_440,
   });
   Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
     value: () => ({ x: 0, y: 0, top: 0, left: 0, right: 100, bottom: 40, width: 100, height: 40 }),
@@ -32,6 +35,24 @@ function install(html: string, url = 'https://www.facebook.com/'): JSDOM {
   Object.defineProperty(dom.window.HTMLElement.prototype, 'scrollIntoView', { value: () => undefined });
   Object.defineProperty(dom.window, 'scrollBy', { value: () => undefined });
   return dom;
+}
+
+function setRect(element: Element, rect: {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}): void {
+  Object.defineProperty(element, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => ({
+      ...rect,
+      x: rect.left,
+      y: rect.top,
+      width: rect.right - rect.left,
+      height: rect.bottom - rect.top,
+    }),
+  });
 }
 
 test('Facebook feed projection keeps canonical permalink identity and bounded page facts', async () => {
@@ -53,6 +74,86 @@ test('Facebook feed projection keeps canonical permalink identity and bounded pa
   assert.equal(cards[0]?.noteId, 'https://www.facebook.com/Alice/posts/pfbidABC');
   assert.equal(cards[0]?.author, 'Alice');
   assert.equal(cards[0]?.likeCount, 1_200);
+});
+
+test('Facebook Reels probe and cards bind to one active video identity', async () => {
+  const dom = install(`
+    <main>
+      <article role="article">
+        <h2><a href="/people/Alice/123456/">Alice</a></h2>
+        <div data-ad-rendering-role="story_message">Active Reel summary</div>
+        <a href="/reel/777/">timestamp</a>
+        <video src="https://cdn.example/reel-777.mp4"></video>
+      </article>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  const video = dom.window.document.querySelector('video')!;
+  setRect(video, { left: 280, top: 80, right: 980, bottom: 760 });
+
+  const probe = await run({ kind: 'reel_probe', params: {} });
+  assert.equal(probe.output.kind, 'reel_probe');
+  assert.equal(probe.output.value.ok, true);
+  assert.equal(probe.output.value.noteId, 'https://www.facebook.com/reel/777');
+  assert.match(String(probe.output.value.videoKey), /reel-777\.mp4@element:1$/);
+
+  const cardsResult = await run({ kind: 'reel_cards', params: {} });
+  assert.equal(cardsResult.output.value.listKind, 'reels');
+  const cards = cardsResult.output.value.cards as Array<Record<string, unknown>>;
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]?.noteId, 'https://www.facebook.com/reel/777');
+  assert.equal(cards[0]?.title, 'Active Reel summary');
+});
+
+test('Facebook Reels probe fails closed when the active video is ambiguous', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <article role="article"><a href="/reel/778/">two</a><video src="two.mp4"></video></article>
+    </main>
+  `, 'https://www.facebook.com/reels/');
+  for (const video of dom.window.document.querySelectorAll('video')) {
+    setRect(video, { left: 280, top: 80, right: 980, bottom: 760 });
+  }
+
+  const probe = await run({ kind: 'reel_probe', params: {} });
+
+  assert.deepEqual(probe.output.value, { ok: false, reason: 'ambiguous_target' });
+});
+
+test('Facebook Reels next target is constrained beside the active video', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <button id="previous" aria-label="Previous"></button>
+      <button id="next" aria-label="Next"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('video')!, { left: 220, top: 80, right: 980, bottom: 760 });
+  setRect(dom.window.document.querySelector('#previous')!, { left: 1_230, top: 280, right: 1_278, bottom: 328 });
+  setRect(dom.window.document.querySelector('#next')!, { left: 1_230, top: 360, right: 1_278, bottom: 408 });
+
+  const target = await run({ kind: 'reel_next_target', params: {} });
+
+  assert.equal(target.output.value.ok, true);
+  assert.equal(target.output.value.found, true);
+  assert.equal(target.output.value.ambiguous, false);
+  assert.equal(target.output.value.label, 'Next');
+  assert.equal(target.output.value.noteId, 'https://www.facebook.com/reel/777');
+});
+
+test('Facebook Reels page.scroll refuses the document-scroll fallback', async () => {
+  const dom = install(`
+    <main><article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article></main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('video')!, { left: 280, top: 80, right: 980, bottom: 760 });
+  let documentScrolls = 0;
+  Object.defineProperty(dom.window, 'scrollBy', { value: () => { documentScrolls += 1; } });
+
+  const result = await run({ kind: 'page_scroll', params: { reason: 'feed_scroll' } });
+
+  assert.equal(result.effectPhase, 'not_started');
+  assert.equal(result.output.value.reason, 'native_reels_actuator_required');
+  assert.equal(documentScrolls, 0);
 });
 
 test('Facebook Native identity treats c_user as authoritative over other feed profile links', async () => {

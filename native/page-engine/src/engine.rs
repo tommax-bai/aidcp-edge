@@ -565,6 +565,7 @@ async fn execute_facebook_command_once(
             wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
             evaluate_facebook_router_until_cards(session, command, Duration::from_secs(5)).await
         }
+        PageScroll(_) => execute_facebook_page_scroll(session, command).await,
         FeedRefresh(_) => {
             session.cdp.reload().await?;
             wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
@@ -587,6 +588,182 @@ async fn execute_facebook_command_once(
         }
         _ => evaluate_facebook_router(session, command).await,
     }
+}
+
+async fn execute_facebook_page_scroll(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let before = probe_facebook_reel(session).await?;
+    if !before.is_reels_surface() {
+        return evaluate_facebook_router(session, command).await;
+    }
+    if !before.ok || before.note_id.is_none() || before.video_key.is_none() {
+        return Ok(facebook_scroll_failure(
+            EffectPhase::NotStarted,
+            "no_target",
+        ));
+    }
+
+    session
+        .cdp
+        .dispatch_key("rawKeyDown", "ArrowDown", "ArrowDown", 40)
+        .await?;
+    session
+        .cdp
+        .dispatch_key("keyUp", "ArrowDown", "ArrowDown", 40)
+        .await?;
+    if wait_for_facebook_reel_movement(session, &before)
+        .await?
+        .is_some()
+    {
+        return read_facebook_reel_cards(session, command).await;
+    }
+
+    let before_wheel = probe_facebook_reel(session).await?;
+    if before_wheel.moved_from(&before) {
+        return read_facebook_reel_cards(session, command).await;
+    }
+    let Some(rect) = before_wheel.video_rect.as_ref().filter(|_| before_wheel.ok) else {
+        return Ok(facebook_scroll_failure(EffectPhase::Confirmed, "no_target"));
+    };
+    let delta_y = 70.0 + (unix_time_ms() % 31) as f64;
+    session
+        .cdp
+        .dispatch_wheel(
+            (rect.left + rect.right) / 2.0,
+            (rect.top + rect.bottom) / 2.0,
+            delta_y,
+        )
+        .await?;
+    if wait_for_facebook_reel_movement(session, &before)
+        .await?
+        .is_some()
+    {
+        return read_facebook_reel_cards(session, command).await;
+    }
+
+    let target = probe_facebook_reel_next_target(session).await?;
+    if reel_identity_moved(
+        target.note_id.as_deref(),
+        target.video_key.as_deref(),
+        &before,
+    ) {
+        return read_facebook_reel_cards(session, command).await;
+    }
+    if !target.ok || !target.found || target.ambiguous {
+        return Ok(facebook_scroll_failure(EffectPhase::Confirmed, "no_target"));
+    }
+    if target.note_id != before.note_id || target.video_key != before.video_key {
+        return Ok(facebook_scroll_failure(EffectPhase::Confirmed, "no_target"));
+    }
+    let (Some(x), Some(y)) = (target.cx, target.cy) else {
+        return Ok(facebook_scroll_failure(EffectPhase::Confirmed, "no_target"));
+    };
+    session
+        .cdp
+        .dispatch_mouse("mouseMoved", x, y, "none", 0)
+        .await?;
+    session
+        .cdp
+        .dispatch_mouse("mousePressed", x, y, "left", 1)
+        .await?;
+    session
+        .cdp
+        .dispatch_mouse("mouseReleased", x, y, "left", 1)
+        .await?;
+    if wait_for_facebook_reel_movement(session, &before)
+        .await?
+        .is_some()
+    {
+        return read_facebook_reel_cards(session, command).await;
+    }
+
+    Ok(facebook_scroll_failure(EffectPhase::Confirmed, "no_target"))
+}
+
+async fn probe_facebook_reel(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookReelProbe, EngineError> {
+    let expression = facebook::reel_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::reel_probe_from_cdp(&raw)
+}
+
+async fn probe_facebook_reel_next_target(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookReelNextTarget, EngineError> {
+    let expression = facebook::reel_next_target_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::reel_next_target_from_cdp(&raw)
+}
+
+async fn wait_for_facebook_reel_movement(
+    session: &mut EngineSession,
+    previous: &facebook::FacebookReelProbe,
+) -> Result<Option<facebook::FacebookReelProbe>, EngineError> {
+    let mut video_moved = None;
+    for round in 0..6 {
+        let current = probe_facebook_reel(session).await?;
+        if current.moved_from(previous) {
+            if current.note_id != previous.note_id {
+                return Ok(Some(current));
+            }
+            video_moved = Some(current);
+        }
+        if round < 5 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    Ok(video_moved)
+}
+
+async fn read_facebook_reel_cards(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let expression = facebook::reel_cards_expression()?;
+        let raw = session.cdp.evaluate(&expression, true).await?;
+        let result = facebook::result_from_cdp(&raw)?;
+        let output = facebook::typed_output(command, result.output, session.cdp.target_id())?;
+        if matches!(&output, CommandOutput::PageCards(cards) if !cards.cards.is_empty()) {
+            return Ok((EffectPhase::Confirmed, output));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(facebook_scroll_failure(EffectPhase::Confirmed, "no_target"));
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+fn reel_identity_moved(
+    note_id: Option<&str>,
+    video_key: Option<&str>,
+    previous: &facebook::FacebookReelProbe,
+) -> bool {
+    note_id.is_some()
+        && video_key.is_some()
+        && (note_id != previous.note_id.as_deref() || video_key != previous.video_key.as_deref())
+}
+
+fn facebook_scroll_failure(phase: EffectPhase, reason: &str) -> (EffectPhase, CommandOutput) {
+    (
+        phase,
+        CommandOutput::ActionReceipt(Box::new(ActionReceipt {
+            action: "scroll".to_owned(),
+            ok: false,
+            reason: Some(reason.to_owned()),
+            note_id: None,
+            observation: None,
+            post_observation: None,
+            group_observation: None,
+            group_url: None,
+            clicked: None,
+            candidates: Vec::new(),
+        })),
+    )
 }
 
 async fn execute_facebook_identity(
@@ -1507,5 +1684,43 @@ mod tests {
         );
         assert!(direct_profile_url("../notification").is_err());
         assert!(direct_profile_url("author?redirect=evil").is_err());
+    }
+
+    #[test]
+    fn reel_target_movement_uses_note_and_video_identity() {
+        let before = facebook::FacebookReelProbe {
+            ok: true,
+            reason: None,
+            note_id: Some("https://www.facebook.com/reel/1".to_owned()),
+            video_key: Some("video-1@element:1".to_owned()),
+            video_rect: None,
+        };
+        assert!(!reel_identity_moved(
+            Some("https://www.facebook.com/reel/1"),
+            Some("video-1@element:1"),
+            &before
+        ));
+        assert!(reel_identity_moved(
+            Some("https://www.facebook.com/reel/2"),
+            Some("video-2@element:2"),
+            &before
+        ));
+        assert!(!reel_identity_moved(
+            None,
+            Some("video-2@element:2"),
+            &before
+        ));
+    }
+
+    #[test]
+    fn unchanged_reel_returns_one_honest_scroll_terminal() {
+        let (phase, output) = facebook_scroll_failure(EffectPhase::Confirmed, "no_target");
+        assert_eq!(phase, EffectPhase::Confirmed);
+        let CommandOutput::ActionReceipt(receipt) = output else {
+            panic!("scroll failure must be an action receipt");
+        };
+        assert_eq!(receipt.action, "scroll");
+        assert!(!receipt.ok);
+        assert_eq!(receipt.reason.as_deref(), Some("no_target"));
     }
 }

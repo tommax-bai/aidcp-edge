@@ -288,6 +288,19 @@ impl CdpSession {
         .await
     }
 
+    pub async fn dispatch_wheel(
+        &mut self,
+        x: f64,
+        y: f64,
+        delta_y: f64,
+    ) -> Result<Value, EngineError> {
+        self.call(
+            CdpMethod::InputDispatchMouseEvent,
+            wheel_event_params(x, y, delta_y),
+        )
+        .await
+    }
+
     pub async fn insert_text(&mut self, text: &str) -> Result<Value, EngineError> {
         self.call(CdpMethod::InputInsertText, json!({ "text": text }))
             .await
@@ -386,6 +399,16 @@ impl CdpSession {
         }
         Err(cdp_transport_error())
     }
+}
+
+fn wheel_event_params(x: f64, y: f64, delta_y: f64) -> Value {
+    json!({
+        "type": "mouseWheel",
+        "x": x,
+        "y": y,
+        "deltaX": 0,
+        "deltaY": delta_y,
+    })
 }
 
 fn parse_network_request_event(payload: &[u8]) -> Result<Option<Value>, EngineError> {
@@ -533,6 +556,20 @@ mod tests {
             parse_network_request_event(&vec![b'x'; 64 * 1024 + 1])
                 .expect("oversized")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn builds_a_single_trusted_wheel_event_over_the_active_surface() {
+        assert_eq!(
+            wheel_event_params(320.0, 410.0, 84.0),
+            json!({
+                "type": "mouseWheel",
+                "x": 320.0,
+                "y": 410.0,
+                "deltaX": 0,
+                "deltaY": 84.0,
+            })
         );
     }
 }

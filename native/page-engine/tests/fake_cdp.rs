@@ -1,4 +1,4 @@
-use aidcp_page_engine::command::{IdentityCaptureParams, ReasonParams};
+use aidcp_page_engine::command::{IdentityCaptureParams, PageScrollParams, ReasonParams};
 use aidcp_page_engine::engine::{CommandOutput, Engine};
 use aidcp_page_engine::protocol::{
     CommandRecord, EffectPhase, NativeCommand, PageProbeParams, Platform, SessionCloseRecord,
@@ -142,6 +142,157 @@ async fn facebook_current_identity_read_never_navigates() {
     engine.shutdown().await;
     let methods = server.await.expect("Facebook identity fake CDP");
     assert!(!methods.iter().any(|method| method == "Page.navigate"));
+}
+
+#[tokio::test]
+async fn facebook_reel_scroll_uses_trusted_arrow_and_requires_identity_movement() {
+    let (port, server) = spawn_facebook_reel_arrow_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "reel-scroll-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 5_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("feed_scroll".to_owned()),
+                dwell_ms: Some(7_000),
+            }),
+        })
+        .await
+        .expect("Reel scroll");
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::PageCards(cards) = outcome.output.expect("Reel cards") else {
+        panic!("expected Reel cards")
+    };
+    assert_eq!(cards.cards.len(), 1);
+    assert_eq!(
+        cards.cards[0].note_id.as_deref(),
+        Some("https://www.facebook.com/reel/2")
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook Reel fake CDP");
+    let input_requests = requests
+        .iter()
+        .filter(|request| request["method"] == "Input.dispatchKeyEvent")
+        .collect::<Vec<_>>();
+    assert_eq!(input_requests.len(), 2);
+    assert_eq!(input_requests[0]["params"]["type"], "rawKeyDown");
+    assert_eq!(input_requests[0]["params"]["key"], "ArrowDown");
+    assert_eq!(input_requests[1]["params"]["type"], "keyUp");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Input.dispatchMouseEvent")
+    );
+}
+
+#[tokio::test]
+async fn facebook_reel_scroll_uses_one_active_video_wheel_after_unchanged_arrow() {
+    let (port, server) = spawn_facebook_reel_wheel_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "reel-scroll-wheel-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 8_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("feed_scroll".to_owned()),
+                dwell_ms: None,
+            }),
+        })
+        .await
+        .expect("Reel wheel fallback");
+    let CommandOutput::PageCards(cards) = outcome.output.expect("Reel cards") else {
+        panic!("expected Reel cards")
+    };
+    assert_eq!(
+        cards.cards[0].note_id.as_deref(),
+        Some("https://www.facebook.com/reel/2")
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook Reel wheel fake CDP");
+    let wheel_requests = requests
+        .iter()
+        .filter(|request| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseWheel"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(wheel_requests.len(), 1);
+    assert_eq!(wheel_requests[0]["params"]["x"], 590.0);
+    assert_eq!(wheel_requests[0]["params"]["y"], 420.0);
+    let delta = wheel_requests[0]["params"]["deltaY"]
+        .as_f64()
+        .expect("wheel delta");
+    assert!((70.0..=100.0).contains(&delta));
+}
+
+#[tokio::test]
+async fn facebook_reel_scroll_returns_no_target_without_fabricated_cards() {
+    let (port, server) = spawn_facebook_reel_no_target_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 8_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "reel-scroll-no-target-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 8_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("feed_scroll".to_owned()),
+                dwell_ms: None,
+            }),
+        })
+        .await
+        .expect("Reel no-target terminal");
+
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("scroll receipt") else {
+        panic!("expected scroll action receipt")
+    };
+    assert_eq!(receipt.action, "scroll");
+    assert!(!receipt.ok);
+    assert_eq!(receipt.reason.as_deref(), Some("no_target"));
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook Reel no-target fake CDP");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Page.navigate")
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                request["method"] == "Input.dispatchMouseEvent"
+                    && request["params"]["type"] == "mouseWheel"
+            })
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -380,6 +531,209 @@ async fn spawn_facebook_identity_cdp() -> (u16, tokio::task::JoinHandle<Vec<Stri
         methods
     });
     (port, server)
+}
+
+async fn spawn_facebook_reel_arrow_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/1").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
+            )
+            .await,
+        );
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2"),
+            )
+            .await,
+        );
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_cards_cdp("https://www.facebook.com/reel/2"),
+            )
+            .await,
+        );
+        let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_reel_wheel_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/1").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
+            )
+            .await,
+        );
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        for _ in 0..6 {
+            requests.push(
+                respond_to_call_capture(
+                    &mut websocket,
+                    reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
+                )
+                .await,
+            );
+        }
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
+            )
+            .await,
+        );
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2"),
+            )
+            .await,
+        );
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_cards_cdp("https://www.facebook.com/reel/2"),
+            )
+            .await,
+        );
+        let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_reel_no_target_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/1").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
+            )
+            .await,
+        );
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        for _ in 0..6 {
+            requests.push(
+                respond_to_call_capture(
+                    &mut websocket,
+                    reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
+                )
+                .await,
+            );
+        }
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
+            )
+            .await,
+        );
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        for _ in 0..6 {
+            requests.push(
+                respond_to_call_capture(
+                    &mut websocket,
+                    reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
+                )
+                .await,
+            );
+        }
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                json!({"result":{"value":router_result(
+                    "reel_next_target",
+                    json!({
+                        "ok": true,
+                        "noteId": "https://www.facebook.com/reel/1",
+                        "videoKey": "video-1@element:1",
+                        "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
+                        "found": false,
+                        "ambiguous": false
+                    })
+                )}}),
+            )
+            .await,
+        );
+        let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
+fn reel_probe_cdp(note_id: &str, video_key: &str) -> Value {
+    json!({"result":{"value":router_result(
+        "reel_probe",
+        json!({
+            "ok": true,
+            "noteId": note_id,
+            "videoKey": video_key,
+            "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0}
+        })
+    )}})
+}
+
+fn reel_cards_cdp(note_id: &str) -> Value {
+    json!({"result":{"value":router_result(
+        "page_cards",
+        json!({
+            "cards": [{
+                "index": 0,
+                "title": "Moved Reel",
+                "likeCount": 0,
+                "collectCount": 0,
+                "noteId": note_id,
+                "isVideo": true
+            }],
+            "listKind": "reels",
+            "listState": "ready"
+        })
+    )}})
+}
+
+fn router_result(kind: &str, value: Value) -> Value {
+    json!({
+        "effectPhase": "confirmed",
+        "output": {"kind": kind, "value": value}
+    })
 }
 
 async fn spawn_xhs_self_identity_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {

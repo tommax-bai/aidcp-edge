@@ -28,6 +28,67 @@ pub struct BrowserCommandResult {
     pub output: Value,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookReelRect {
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookReelProbe {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub note_id: Option<String>,
+    #[serde(default)]
+    pub video_key: Option<String>,
+    #[serde(default)]
+    pub video_rect: Option<FacebookReelRect>,
+}
+
+impl FacebookReelProbe {
+    pub fn moved_from(&self, previous: &Self) -> bool {
+        self.ok
+            && previous.ok
+            && self.note_id.is_some()
+            && self.video_key.is_some()
+            && (self.note_id != previous.note_id || self.video_key != previous.video_key)
+    }
+
+    pub fn is_reels_surface(&self) -> bool {
+        self.reason.as_deref() != Some("not_reel")
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookReelNextTarget {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub note_id: Option<String>,
+    #[serde(default)]
+    pub video_key: Option<String>,
+    #[serde(default)]
+    pub video_rect: Option<FacebookReelRect>,
+    #[serde(default)]
+    pub found: bool,
+    #[serde(default)]
+    pub ambiguous: bool,
+    #[serde(default)]
+    pub cx: Option<f64>,
+    #[serde(default)]
+    pub cy: Option<f64>,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 pub fn command_expression(command: &NativeCommand) -> Result<String, EngineError> {
     router_expression(serde_json::to_value(command).map_err(|_| invalid_result())?)
 }
@@ -43,6 +104,18 @@ pub fn identity_expression(cookie_user_id: Option<&str>) -> Result<String, Engin
 
 pub fn page_probe_expression() -> Result<String, EngineError> {
     router_expression(json!({ "kind": "page_probe", "params": {} }))
+}
+
+pub fn reel_probe_expression() -> Result<String, EngineError> {
+    router_expression(json!({ "kind": "reel_probe", "params": {} }))
+}
+
+pub fn reel_next_target_expression() -> Result<String, EngineError> {
+    router_expression(json!({ "kind": "reel_next_target", "params": {} }))
+}
+
+pub fn reel_cards_expression() -> Result<String, EngineError> {
+    router_expression(json!({ "kind": "reel_cards", "params": {} }))
 }
 
 fn router_expression(input: Value) -> Result<String, EngineError> {
@@ -73,6 +146,27 @@ pub fn result_from_cdp(result: &Value) -> Result<BrowserCommandResult, EngineErr
     }
     let value = result.pointer("/result/value").ok_or_else(invalid_result)?;
     serde_json::from_value(value.clone()).map_err(|_| invalid_result())
+}
+
+pub fn reel_probe_from_cdp(result: &Value) -> Result<FacebookReelProbe, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "reel_probe")
+}
+
+pub fn reel_next_target_from_cdp(result: &Value) -> Result<FacebookReelNextTarget, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "reel_next_target")
+}
+
+fn typed_internal_value<T: for<'de> Deserialize<'de>>(
+    output: Value,
+    expected_kind: &str,
+) -> Result<T, EngineError> {
+    if output.get("kind").and_then(Value::as_str) != Some(expected_kind) {
+        return Err(invalid_result());
+    }
+    serde_json::from_value(output.get("value").cloned().ok_or_else(invalid_result)?)
+        .map_err(|_| invalid_result())
 }
 
 pub fn typed_output(
@@ -204,5 +298,46 @@ mod tests {
         let expression = identity_expression(Some("123456789")).expect("expression");
         assert!(expression.contains("identity_read"));
         assert!(expression.contains("123456789"));
+    }
+
+    #[test]
+    fn reel_probe_requires_the_stable_identity_pair_to_move() {
+        let before = FacebookReelProbe {
+            ok: true,
+            reason: None,
+            note_id: Some("https://www.facebook.com/reel/1".to_owned()),
+            video_key: Some("video-1@element:1".to_owned()),
+            video_rect: None,
+        };
+        assert!(!before.moved_from(&before));
+
+        let video_moved = FacebookReelProbe {
+            video_key: Some("video-2@element:2".to_owned()),
+            ..before.clone()
+        };
+        assert!(video_moved.moved_from(&before));
+
+        let missing_identity = FacebookReelProbe {
+            note_id: None,
+            ..video_moved
+        };
+        assert!(!missing_identity.moved_from(&before));
+    }
+
+    #[test]
+    fn reel_probe_distinguishes_other_surfaces_from_unreadable_reels() {
+        let feed = FacebookReelProbe {
+            ok: false,
+            reason: Some("not_reel".to_owned()),
+            note_id: None,
+            video_key: None,
+            video_rect: None,
+        };
+        let ambiguous_reel = FacebookReelProbe {
+            reason: Some("ambiguous_target".to_owned()),
+            ..feed.clone()
+        };
+        assert!(!feed.is_reels_surface());
+        assert!(ambiguous_reel.is_reels_surface());
     }
 }

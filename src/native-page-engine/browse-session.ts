@@ -1,5 +1,7 @@
+import { performance } from 'node:perf_hooks';
 import type { EdgeBrowseSession } from '../browse/edge-browse-session.js';
 import type { EdgeClient } from '../client/edge-client.js';
+import { jitterAround, type RandomFn } from '../humanize/timing.js';
 import type {
   ActionCompletedPayload,
   ActionResultPayload,
@@ -23,7 +25,30 @@ export interface NativeBrowseSessionOptions {
   edgeId?: string;
   getAccountId?: () => string | undefined;
   logger?: (message: string) => void;
+  clock?: () => number;
+  random?: RandomFn;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.reject(Object.assign(new Error('Native pacing wait aborted'), { code: 'aborted' }));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(Object.assign(new Error('Native pacing wait aborted'), { code: 'aborted' }));
+    };
+    function done(): void {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+const monotonicNow = (): number => performance.now();
 
 export class NativeBrowseSession implements EdgeBrowseSession {
   private readonly ownerId: string;
@@ -35,6 +60,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private activeAbort?: AbortController;
   private probeTimer?: NodeJS.Timeout;
   private facebookCaptchaActive = false;
+  private lastFacebookCardsAt = 0;
 
   constructor(private readonly options: NativeBrowseSessionOptions) {
     this.ownerId = `browse:${options.startupId}`;
@@ -160,8 +186,23 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     signal?: AbortSignal,
     env?: Envelope,
   ): Promise<void> {
+    await this.ensureFacebookScrollDwell(command, signal);
     const result = await this.options.runtime.execute(ownerId, command, 30_000, signal);
     this.report(result, env);
+  }
+
+  private async ensureFacebookScrollDwell(
+    command: Parameters<NativePageRuntime['execute']>[1],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (this.options.platform !== 'facebook' || command.kind !== 'page_scroll' || this.lastFacebookCardsAt <= 0) return;
+    const centerMs = Number(command.params.dwellMs);
+    if (!Number.isFinite(centerMs) || centerMs <= 0) return;
+    const targetMs = jitterAround(centerMs, 0.2, this.options.random);
+    const elapsedMs = Math.max(0, (this.options.clock ?? monotonicNow)() - this.lastFacebookCardsAt);
+    const remainingMs = Math.max(0, targetMs - elapsedMs);
+    if (remainingMs <= 0) return;
+    await (this.options.sleep ?? abortableSleep)(remainingMs, signal);
   }
 
   private report(execution: NativePageCommandExecution, env?: Envelope): void {
@@ -172,7 +213,16 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       case 'page_cards':
         this.options.client.reportPageCards({ ...(value as unknown as PageCardsPayload), startupId: this.options.startupId });
         if (this.options.platform === 'facebook') {
-          this.emitUi({ kind: 'presence', type: 'feed', presence: '正在浏览推荐流…', loopStage: 'feed' });
+          if (env?.type !== 'search.execute') {
+            this.lastFacebookCardsAt = (this.options.clock ?? monotonicNow)();
+          }
+          const reels = value.listKind === 'reels';
+          this.emitUi({
+            kind: 'presence',
+            type: 'feed',
+            presence: reels ? '正在浏览 Reels 视频流…' : '正在浏览推荐流…',
+            loopStage: 'feed',
+          });
         }
         if (env?.type === 'search.execute') {
           const cards = Array.isArray(value.cards) ? value.cards : [];
