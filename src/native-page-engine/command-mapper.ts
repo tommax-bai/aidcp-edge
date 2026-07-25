@@ -86,6 +86,8 @@ export function nativeCommandForEnvelope(
   }
   if (kind === 'identity_read_current' || kind === 'identity_read_self_profile') {
     params.accountId = accountId ?? '';
+  } else if (kind === 'interaction_comment') {
+    params.accountId = accountId ?? '';
   }
   return { kind, params };
 }

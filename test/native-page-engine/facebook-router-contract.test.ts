@@ -76,6 +76,26 @@ test('Facebook feed projection keeps canonical permalink identity and bounded pa
   assert.equal(cards[0]?.likeCount, 1_200);
 });
 
+test('Facebook Feed probe distinguishes loading and visible unreportable articles from explicit empty', async () => {
+  install(`
+    <main>
+      <div role="feed" aria-busy="true">
+        <article role="article">
+          <h2><a href="/people/Alice/123456/">Alice</a></h2>
+          <div data-ad-rendering-role="story_message">Visible but permalink not hydrated yet</div>
+        </article>
+        <div role="progressbar"></div>
+      </div>
+    </main>
+  `);
+  const result = await run({ kind: 'feed_probe', params: {} });
+  assert.equal(result.output.kind, 'feed_probe');
+  assert.equal(result.output.value.loading, true);
+  assert.equal(result.output.value.articleCount, 1);
+  assert.equal(result.output.value.explicitEmpty, false);
+  assert.deepEqual(result.output.value.cards, []);
+});
+
 test('Facebook Reels probe and cards bind to one active video identity', async () => {
   const dom = install(`
     <main>
@@ -267,6 +287,190 @@ test('Facebook comment requires readback and a server-acknowledged visible postc
   assert.equal(result.output.value.ok, true);
 });
 
+test('Facebook ambiguous comment keeps the Cloud idempotency reason', async () => {
+  install(`
+    <main>
+      <article role="article">
+        <a href="/Alice/posts/pfbidABC/">permalink</a>
+        <div role="textbox" contenteditable="true" aria-label="Write a comment"></div>
+      </article>
+    </main>
+  `, 'https://www.facebook.com/Alice/posts/pfbidABC');
+  const result = await run({
+    kind: 'interaction_comment',
+    params: { noteId: 'https://www.facebook.com/Alice/posts/pfbidABC', text: 'Unacknowledged reply' },
+  });
+  assert.equal(result.effectPhase, 'ambiguous');
+  assert.equal(result.output.value.reason, 'verification_ambiguous');
+});
+
+test('Facebook exact-target like never falls back to the first visible post', async () => {
+  const dom = install(`
+    <main>
+      <article role="article">
+        <a href="/Alice/posts/pfbidOTHER/">permalink</a>
+        <button aria-label="Like">Like</button>
+      </article>
+    </main>
+  `);
+  let clicks = 0;
+  dom.window.document.querySelector('button')?.addEventListener('click', () => { clicks += 1; });
+  const result = await run({
+    kind: 'interaction_like',
+    params: { noteId: 'https://www.facebook.com/Alice/posts/pfbidMISSING' },
+  });
+  assert.equal(result.effectPhase, 'not_started');
+  assert.equal(result.output.value.reason, 'target_not_found');
+  assert.equal(clicks, 0);
+});
+
+test('Facebook Native action probes return only exact trusted targets', async () => {
+  install(`
+    <main>
+      <article role="article">
+        <a href="/Alice/posts/pfbidABC/">permalink</a>
+        <button aria-label="Like">Like</button>
+        <div role="textbox" contenteditable="true" aria-label="Write a comment"></div>
+      </article>
+    </main>
+  `);
+  const like = await run({
+    kind: 'like_probe',
+    params: { noteId: 'https://www.facebook.com/Alice/posts/pfbidABC' },
+  });
+  assert.equal(like.output.kind, 'like_probe');
+  assert.equal(like.output.value.ok, true);
+  assert.equal(like.output.value.cx, 50);
+  assert.equal(like.output.value.cy, 20);
+
+  const editor = await run({
+    kind: 'comment_editor_probe',
+    params: { noteId: 'https://www.facebook.com/Alice/posts/pfbidABC' },
+  });
+  assert.equal(editor.output.kind, 'text_target');
+  assert.equal(editor.output.value.ok, true);
+  assert.equal(editor.output.value.value, '');
+});
+
+test('Facebook reaction picker ignores the original post Like control', async () => {
+  install(`
+    <main>
+      <article role="article">
+        <a href="/Alice/posts/pfbidABC/">permalink</a>
+        <button aria-label="Like">Like</button>
+      </article>
+      <div role="dialog" aria-label="Reactions">
+        <button role="menuitemradio" aria-label="Like">Like</button>
+        <button role="menuitemradio" aria-label="Love">Love</button>
+      </div>
+    </main>
+  `);
+  const picker = await run({ kind: 'like_picker_probe', params: {} });
+  assert.equal(picker.output.value.ok, true);
+  assert.equal(picker.output.value.cx, 50);
+  assert.equal(picker.output.value.cy, 20);
+});
+
+test('Facebook comment editor accepts one exclusive sibling editor and rejects nested reply editors', async () => {
+  const dom = install(`
+    <main>
+      <section class="post-container">
+        <article role="article">
+          <a href="/Alice/posts/pfbidABC/">permalink</a>
+          <article role="article">
+            <a href="/Alice/posts/pfbidABC/?comment_id=9">comment</a>
+            <div id="reply" role="textbox" contenteditable="true" aria-label="Write a comment"></div>
+          </article>
+        </article>
+        <div id="composer" role="textbox" contenteditable="true" aria-label="Write a comment"></div>
+      </section>
+    </main>
+  `);
+  setRect(dom.window.document.querySelector('#reply')!, { left: 10, top: 10, right: 110, bottom: 50 });
+  setRect(dom.window.document.querySelector('#composer')!, { left: 200, top: 100, right: 500, bottom: 140 });
+  const editor = await run({
+    kind: 'comment_editor_probe',
+    params: { noteId: 'https://www.facebook.com/Alice/posts/pfbidABC' },
+  });
+  assert.equal(editor.output.value.ok, true);
+  assert.equal(editor.output.value.cx, 350);
+  assert.equal(editor.output.value.cy, 120);
+});
+
+test('Facebook comment editor reports a visible participation gate before typing', async () => {
+  install(`
+    <main>
+      <article role="article">
+        <a href="/Alice/posts/pfbidABC/">permalink</a>
+        <div role="textbox" contenteditable="true" aria-label="Comentar"></div>
+      </article>
+      <div role="dialog">Answer questions to participate</div>
+    </main>
+  `);
+  const editor = await run({
+    kind: 'comment_editor_probe',
+    params: { noteId: 'https://www.facebook.com/Alice/posts/pfbidABC' },
+  });
+  assert.equal(editor.output.value.ok, false);
+  assert.equal(editor.output.value.reason, 'pending_group_approval');
+});
+
+test('Facebook comment acknowledgement is scoped to the bound account and server evidence', async () => {
+  install(`
+    <main>
+      <article role="article">
+        <a href="/Alice/posts/pfbidABC/">permalink</a>
+        <article role="article">
+          <a href="/profile.php?id=61591824155856">Gi Vo</a>
+          <span>Thoughtful reply</span>
+          <a href="?comment_id=Y29tbWVudDoxMjM=">timestamp</a>
+        </article>
+      </article>
+    </main>
+  `);
+  const own = await run({
+    kind: 'comment_ack_probe',
+    params: {
+      noteId: 'https://www.facebook.com/Alice/posts/pfbidABC',
+      text: 'Thoughtful reply',
+      accountId: '61591824155856',
+    },
+  });
+  assert.equal(own.output.value.confirmed, true);
+
+  const other = await run({
+    kind: 'comment_ack_probe',
+    params: {
+      noteId: 'https://www.facebook.com/Alice/posts/pfbidABC',
+      text: 'Thoughtful reply',
+      accountId: '99999999999999',
+    },
+  });
+  assert.equal(other.output.value.confirmed, false);
+});
+
+test('Facebook comment acknowledgement ignores lifecycle words outside the own scoped row', async () => {
+  install(`
+    <main>
+      <article role="article">
+        <a href="/Alice/posts/pfbidABC/">permalink</a>
+      </article>
+      <aside>Another comment was rejected. View feedback.</aside>
+    </main>
+  `);
+  const result = await run({
+    kind: 'comment_ack_probe',
+    params: {
+      noteId: 'https://www.facebook.com/Alice/posts/pfbidABC',
+      text: 'Thoughtful reply',
+      accountId: '61591824155856',
+    },
+  });
+  assert.equal(result.output.value.confirmed, false);
+  assert.equal(result.output.value.rejected, false);
+  assert.equal(result.output.value.pending, false);
+});
+
 test('Facebook page probe reports captcha from semantic page evidence', async () => {
   install('<main><div>Security check — please complete captcha</div></main>');
   const result = await run({ kind: 'page_probe', params: {} });
@@ -274,10 +478,43 @@ test('Facebook page probe reports captcha from semantic page evidence', async ()
   assert.equal(result.output.value.pageKind, 'captcha');
 });
 
+test('Facebook page probe distinguishes generic checkpoint and throttle from captcha', async () => {
+  install('<main><div>Security checkpoint: confirm this login</div></main>', 'https://www.facebook.com/checkpoint/123');
+  const checkpoint = await run({ kind: 'page_probe', params: {} });
+  assert.equal(checkpoint.output.value.pageKind, 'unknown');
+  assert.equal(checkpoint.output.value.blockingKind, 'unknown');
+  assert.match(String(checkpoint.output.value.blockingText), /Security checkpoint/);
+  assert.equal((checkpoint.output.value.signals as Record<string, unknown>).captchaSignalCount, 0);
+
+  install('<main><div>We limit how often you can do this. Please try again later.</div></main>');
+  const throttle = await run({ kind: 'page_probe', params: {} });
+  assert.equal(throttle.output.value.blockingKind, 'unknown');
+  assert.match(String(throttle.output.value.blockingText), /limit how often/);
+});
+
+test('Facebook consent probe preserves accept-all and necessary-only as distinct unique targets', async () => {
+  install(`
+    <main>
+      <div role="dialog">
+        <p>We use cookies. Read our Cookie Policy.</p>
+        <button aria-label="Allow all cookies">Allow all cookies</button>
+        <button aria-label="Only allow essential cookies">Only allow essential cookies</button>
+      </div>
+    </main>
+  `);
+  const result = await run({ kind: 'consent_probe', params: {} });
+  assert.equal(result.output.kind, 'consent_probe');
+  assert.equal(result.output.value.present, true);
+  assert.deepEqual(result.output.value.acceptAll, { cx: 50, cy: 20 });
+  assert.deepEqual(result.output.value.necessaryOnly, { cx: 50, cy: 20 });
+  assert.equal(result.output.value.acceptAllAmbiguous, false);
+  assert.equal(result.output.value.necessaryOnlyAmbiguous, false);
+});
+
 test('Facebook group join clicks only one in-scope CTA and verifies membership afterwards', async () => {
   const dom = install(`
     <nav><button aria-label="Join">navigation decoy</button></nav>
-    <main><h1>Agent Builders</h1><button id="join" aria-label="Join">Join</button></main>
+    <main><section><h1>Agent Builders</h1><button id="join" aria-label="Join">Join</button></section></main>
   `, 'https://www.facebook.com/groups/42');
   dom.window.document.querySelector('#join')?.addEventListener('click', (event) => {
     (event.currentTarget as Element).setAttribute('aria-label', 'Joined');
@@ -291,6 +528,43 @@ test('Facebook group join clicks only one in-scope CTA and verifies membership a
   assert.equal(result.output.value.ok, true);
   assert.equal(result.output.value.clicked, true);
   assert.equal((result.output.value.postObservation as Record<string, unknown>).targetGroupId, '42');
+});
+
+test('Facebook group join never selects a recommended-group CTA when the target group is pending', async () => {
+  install(`
+    <main>
+      <section id="target-group">
+        <h1>Agent Builders</h1>
+        <button aria-label="Pending">Pending</button>
+      </section>
+      <section id="recommended-group">
+        <h2>Suggested Group</h2>
+        <a href="/groups/99"><span>Suggested Group</span></a>
+        <button id="wrong-join" aria-label="Join">Join</button>
+      </section>
+    </main>
+  `, 'https://www.facebook.com/groups/42');
+  const probe = await run({ kind: 'join_probe', params: {} });
+  assert.equal(probe.output.value.pending, true);
+  assert.equal(probe.output.value.found, false);
+  assert.equal((probe.output.value.observation as Record<string, unknown>).outOfScopeJoinCount, 1);
+});
+
+test('Facebook join probe does not treat a pre-existing public composer as membership', async () => {
+  install(`
+    <main>
+      <section>
+        <h1>Public Agent Builders</h1>
+        <button aria-label="Join">Join</button>
+        <div role="textbox" contenteditable="true" aria-label="Write a comment"></div>
+      </section>
+    </main>
+  `, 'https://www.facebook.com/groups/42');
+  const result = await run({ kind: 'join_probe', params: {} });
+  assert.equal(result.output.kind, 'join_probe');
+  assert.equal(result.output.value.joined, false);
+  assert.equal(result.output.value.found, true);
+  assert.equal((result.output.value.observation as Record<string, unknown>).composerPresent, true);
 });
 
 test('Facebook publish submit is confirmed only after the composer closes', async () => {

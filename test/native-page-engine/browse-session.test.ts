@@ -27,6 +27,7 @@ function harness(execute: (
   clock?: () => number;
   random?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  overlayConfirmMs?: number;
 } = {}) {
   const executions: Array<{ ownerId: string; command: NativePageCommand }> = [];
   const actions: ActionCompletedPayload[] = [];
@@ -54,6 +55,7 @@ function harness(execute: (
     clock: options.clock,
     random: options.random,
     sleep: options.sleep,
+    overlayConfirmMs: options.overlayConfirmMs,
   });
   return { session, executions, actions, cards, closedOwners, sent };
 }
@@ -105,18 +107,71 @@ test('Native identity current read injects bound account and reports correlated 
   }]);
 });
 
-test('legacy profile.open{direct} is rejected before Native/CDP dispatch', async () => {
-  const h = harness(async () => assert.fail('legacy direct must not reach Native runtime'));
+test('unsupported Facebook commands are rejected before Native/CDP dispatch', async () => {
+  const h = harness(async () => assert.fail('unsupported command must not reach Native runtime'), {
+    platform: 'facebook',
+  });
   await h.session.onCloudCommand(envelope('profile.open', {
     authorId: '61591824155856',
     direct: true,
   }));
+  await h.session.onCloudCommand(envelope('interaction.like_comment', {
+    noteId: 'post-1',
+    commentAnchorId: 'comment-1',
+  }));
+  await h.session.onCloudCommand(envelope('note.browse_images', { noteId: 'post-1', count: 2 }));
+  await h.session.onCloudCommand(envelope('note.scroll_comments', { noteId: 'post-1' }));
   assert.equal(h.executions.length, 0);
-  assert.deepEqual(h.actions, [{
-    action: 'profile_open',
-    ok: false,
-    reason: 'legacy_profile_direct_unsupported',
-  }]);
+  assert.deepEqual(h.actions, [
+    { action: 'profile_open', ok: false, reason: 'capability_unsupported' },
+    { action: 'comment_like', ok: false, reason: 'capability_unsupported' },
+    { action: 'browse_images', ok: false, reason: 'capability_unsupported' },
+    { action: 'scroll_comments', ok: false, reason: 'capability_unsupported' },
+  ]);
+});
+
+test('Native Facebook probe reports sustained unknown blockers with same-source evidence', async () => {
+  const h = harness(async () => assert.fail('probe transition test does not execute runtime'), {
+    platform: 'facebook',
+    accountId: '61591824155856',
+    overlayConfirmMs: 0,
+  });
+  const observe = (h.session as unknown as {
+    observeFacebookProbe(value: Record<string, unknown>): void;
+  }).observeFacebookProbe.bind(h.session);
+
+  observe({
+    origin: 'https://www.facebook.com',
+    path: '/',
+    pageKind: 'unknown',
+    blockingKind: 'unknown',
+    blockingText: 'We limit how often you can do this.',
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const detected = h.sent.find((entry) => entry.type === 'risk.captcha_detected');
+  assert.deepEqual(detected?.payload, {
+    edgeId: undefined,
+    accountId: '61591824155856',
+    kind: 'unknown',
+    url: 'https://www.facebook.com/',
+    overlay: {
+      kind: 'unknown',
+      firstDetectedUrl: 'https://www.facebook.com/',
+      capturedAt: (detected?.payload as { overlay?: { capturedAt?: number } })?.overlay?.capturedAt,
+      text: 'We limit how often you can do this.',
+      candidates: [],
+    },
+    reason: 'native_page_probe',
+  });
+
+  observe({
+    origin: 'https://www.facebook.com',
+    path: '/',
+    pageKind: 'home',
+    blockingKind: 'none',
+  });
+  assert.equal(h.sent.filter((entry) => entry.type === 'risk.captcha_cleared').length, 1);
 });
 
 test('quiesced Native session admits the coordinator-owned task command', async () => {

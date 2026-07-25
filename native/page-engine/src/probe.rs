@@ -79,6 +79,10 @@ pub struct ProbeResult {
     pub path: String,
     pub ready_state: String,
     pub page_kind: PageKind,
+    #[serde(default)]
+    pub blocking_kind: Option<String>,
+    #[serde(default)]
+    pub blocking_text: Option<String>,
     pub signals: StructuralSignals,
 }
 
@@ -130,6 +134,8 @@ pub fn build_result(target_id: String, raw: RawPageSignals) -> Result<ProbeResul
         path,
         ready_state: normalize_ready_state(&raw.ready_state),
         page_kind,
+        blocking_kind: None,
+        blocking_text: None,
         signals,
     })
 }

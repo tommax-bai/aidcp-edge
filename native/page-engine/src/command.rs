@@ -281,6 +281,8 @@ pub struct CommentParams {
     pub note_id: String,
     pub text: String,
     #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
     pub group_chat_code: Option<String>,
     #[serde(default)]
     pub fast_return_to_feed: Option<bool>,
@@ -503,12 +505,9 @@ impl NativeCommand {
                     | NoteOpen(_)
                     | NoteClose(_)
                     | NavigationBack(_)
-                    | NoteBrowseImages(_)
-                    | NoteScrollComments(_)
                     | InteractionLike(_)
                     | InteractionFollow(_)
                     | InteractionComment(_)
-                    | InteractionLikeComment(_)
                     | GroupJoin(_)
                     | PublishNavigateEntry(_)
                     | PublishSelectMode(_)
@@ -695,6 +694,11 @@ impl NativeCommand {
             Self::InteractionComment(params) => {
                 validate_required(&params.note_id, MAX_ID_BYTES, "invalid note id")?;
                 validate_required(&params.text, MAX_TEXT_BYTES, "invalid comment text")?;
+                validate_optional(
+                    &params.account_id,
+                    MAX_ID_BYTES,
+                    "comment account id exceeds protocol limit",
+                )?;
                 validate_optional(
                     &params.group_chat_code,
                     1_024,

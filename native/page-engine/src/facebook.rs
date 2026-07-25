@@ -1,6 +1,8 @@
 use crate::error::{EngineError, ErrorCode};
 use crate::model::{
-    ActionReceipt, FacebookIdentityReceipt, NoteDetail, PageCards, ProfileDetail, PublishReceipt,
+    ActionEvidence, ActionReceipt, FacebookGroupJoinObservation, FacebookIdentityReceipt,
+    FacebookListKind, FacebookListState, NoteDetail, PageCard, PageCards, ProfileDetail,
+    PublishReceipt,
 };
 use crate::probe::ProbeResult;
 use crate::protocol::{EffectPhase, NativeCommand};
@@ -89,6 +91,150 @@ pub struct FacebookReelNextTarget {
     pub label: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookFeedProbe {
+    pub cards: Vec<PageCard>,
+    #[serde(default)]
+    pub document_generation: Option<String>,
+    pub list_kind: FacebookListKind,
+    pub list_state: FacebookListState,
+    pub loading: bool,
+    pub article_count: u32,
+    pub explicit_empty: bool,
+    pub url: String,
+    pub surface: String,
+    pub scroll_y: f64,
+    pub inner_width: f64,
+    pub inner_height: f64,
+    pub scroll_height: f64,
+    pub document_age_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookPointTarget {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub cx: Option<f64>,
+    #[serde(default)]
+    pub cy: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookConsentPoint {
+    pub cx: f64,
+    pub cy: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookConsentProbe {
+    pub present: bool,
+    #[serde(default)]
+    pub accept_all: Option<FacebookConsentPoint>,
+    #[serde(default)]
+    pub necessary_only: Option<FacebookConsentPoint>,
+    pub accept_all_ambiguous: bool,
+    pub necessary_only_ambiguous: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookLikeProbe {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub note_id: Option<String>,
+    #[serde(default)]
+    pub already: bool,
+    #[serde(default)]
+    pub cx: Option<f64>,
+    #[serde(default)]
+    pub cy: Option<f64>,
+    #[serde(default)]
+    pub observation: Option<ActionEvidence>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookFollowProbe {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub note_id: Option<String>,
+    #[serde(default)]
+    pub already: bool,
+    #[serde(default)]
+    pub cx: Option<f64>,
+    #[serde(default)]
+    pub cy: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookTextTarget {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub note_id: Option<String>,
+    #[serde(default)]
+    pub cx: Option<f64>,
+    #[serde(default)]
+    pub cy: Option<f64>,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookCommentAckProbe {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub confirmed: bool,
+    pub pending: bool,
+    pub rejected: bool,
+    #[serde(default)]
+    pub in_flight: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookJoinProbe {
+    pub observation: FacebookGroupJoinObservation,
+    pub joined: bool,
+    pub pending: bool,
+    pub questionnaire: bool,
+    pub found: bool,
+    pub ambiguous: bool,
+    #[serde(default)]
+    pub cx: Option<f64>,
+    #[serde(default)]
+    pub cy: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookPublishSubmitProbe {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub composer_open: bool,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub cx: Option<f64>,
+    #[serde(default)]
+    pub cy: Option<f64>,
+}
+
 pub fn command_expression(command: &NativeCommand) -> Result<String, EngineError> {
     router_expression(serde_json::to_value(command).map_err(|_| invalid_result())?)
 }
@@ -104,6 +250,68 @@ pub fn identity_expression(cookie_user_id: Option<&str>) -> Result<String, Engin
 
 pub fn page_probe_expression() -> Result<String, EngineError> {
     router_expression(json!({ "kind": "page_probe", "params": {} }))
+}
+
+pub fn feed_probe_expression() -> Result<String, EngineError> {
+    router_expression(json!({ "kind": "feed_probe", "params": {} }))
+}
+
+pub fn feed_home_target_expression() -> Result<String, EngineError> {
+    router_expression(json!({ "kind": "feed_home_target", "params": {} }))
+}
+
+pub fn consent_probe_expression() -> Result<String, EngineError> {
+    router_expression(json!({ "kind": "consent_probe", "params": {} }))
+}
+
+pub fn like_probe_expression(note_id: &str) -> Result<String, EngineError> {
+    internal_expression("like_probe", json!({ "noteId": note_id }))
+}
+
+pub fn like_picker_probe_expression() -> Result<String, EngineError> {
+    internal_expression("like_picker_probe", json!({}))
+}
+
+pub fn follow_probe_expression(note_id: Option<&str>) -> Result<String, EngineError> {
+    internal_expression(
+        "follow_probe",
+        json!({ "noteId": note_id.unwrap_or_default() }),
+    )
+}
+
+pub fn comment_editor_probe_expression(note_id: &str) -> Result<String, EngineError> {
+    internal_expression("comment_editor_probe", json!({ "noteId": note_id }))
+}
+
+pub fn comment_ack_probe_expression(
+    note_id: &str,
+    text: &str,
+    account_id: &str,
+) -> Result<String, EngineError> {
+    internal_expression(
+        "comment_ack_probe",
+        json!({ "noteId": note_id, "text": text, "accountId": account_id }),
+    )
+}
+
+pub fn join_probe_expression() -> Result<String, EngineError> {
+    internal_expression("join_probe", json!({}))
+}
+
+pub fn publish_entry_probe_expression() -> Result<String, EngineError> {
+    internal_expression("publish_entry_probe", json!({}))
+}
+
+pub fn publish_editor_probe_expression() -> Result<String, EngineError> {
+    internal_expression("publish_editor_probe", json!({}))
+}
+
+pub fn publish_submit_probe_expression() -> Result<String, EngineError> {
+    internal_expression("publish_submit_probe", json!({}))
+}
+
+fn internal_expression(kind: &str, params: Value) -> Result<String, EngineError> {
+    router_expression(json!({ "kind": kind, "params": params }))
 }
 
 pub fn reel_probe_expression() -> Result<String, EngineError> {
@@ -156,6 +364,73 @@ pub fn reel_probe_from_cdp(result: &Value) -> Result<FacebookReelProbe, EngineEr
 pub fn reel_next_target_from_cdp(result: &Value) -> Result<FacebookReelNextTarget, EngineError> {
     let result = result_from_cdp(result)?;
     typed_internal_value(result.output, "reel_next_target")
+}
+
+pub fn feed_probe_from_cdp(result: &Value) -> Result<FacebookFeedProbe, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "feed_probe")
+}
+
+pub fn point_target_from_cdp(result: &Value) -> Result<FacebookPointTarget, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "point_target")
+}
+
+pub fn consent_probe_from_cdp(result: &Value) -> Result<FacebookConsentProbe, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "consent_probe")
+}
+
+pub fn like_probe_from_cdp(result: &Value) -> Result<FacebookLikeProbe, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "like_probe")
+}
+
+pub fn follow_probe_from_cdp(result: &Value) -> Result<FacebookFollowProbe, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "follow_probe")
+}
+
+pub fn text_target_from_cdp(result: &Value) -> Result<FacebookTextTarget, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "text_target")
+}
+
+pub fn comment_ack_probe_from_cdp(result: &Value) -> Result<FacebookCommentAckProbe, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "comment_ack_probe")
+}
+
+pub fn join_probe_from_cdp(result: &Value) -> Result<FacebookJoinProbe, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "join_probe")
+}
+
+pub fn publish_submit_probe_from_cdp(
+    result: &Value,
+) -> Result<FacebookPublishSubmitProbe, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "publish_submit_probe")
+}
+
+pub fn failure_output(
+    command: &NativeCommand,
+    action: &str,
+    reason: &str,
+    target_id: &str,
+) -> Result<crate::engine::CommandOutput, EngineError> {
+    typed_output(
+        command,
+        json!({
+            "kind": "action_receipt",
+            "value": {
+                "action": action,
+                "ok": false,
+                "reason": reason
+            }
+        }),
+        target_id,
+    )
 }
 
 fn typed_internal_value<T: for<'de> Deserialize<'de>>(

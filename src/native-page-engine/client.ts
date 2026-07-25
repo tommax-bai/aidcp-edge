@@ -43,6 +43,8 @@ export interface NativePageProbeResult {
   path: string;
   readyState: 'loading' | 'interactive' | 'complete' | 'unknown';
   pageKind: NativePageKind;
+  blockingKind?: 'none' | 'login' | 'captcha' | 'unknown';
+  blockingText?: string;
   signals: NativePageStructuralSignals;
 }
 

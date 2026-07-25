@@ -5,7 +5,7 @@ use crate::facebook;
 use crate::model::{
     ActionReceipt, CaptchaSnapshot, FacebookIdentityReceipt, IdentityObservation,
     IdentityObservationSource, IdentityPageEffect, NoteDetail, NotificationHome, NotificationItems,
-    PageCards, PlanResults, ProfileDetail, PublishReceipt,
+    PageCards, PageMovement, PlanResults, ProfileDetail, PublishReceipt,
 };
 use crate::probe::PageKind;
 use crate::probe::ProbeResult;
@@ -16,7 +16,7 @@ use crate::protocol::{
 use crate::wechat;
 use crate::xhs;
 use serde::Serialize;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +27,10 @@ const MAX_RECORDED_COMMANDS: usize = 128;
 const MAX_CAPTCHA_SNAPSHOTS: usize = 8;
 const FACEBOOK_HOME_URL: &str = "https://www.facebook.com/";
 const FACEBOOK_DETAIL_HYDRATION_TIMEOUT: Duration = Duration::from_secs(15);
+const FACEBOOK_FEED_SETTLE_NAV: Duration = Duration::from_secs(6);
+const FACEBOOK_FEED_SETTLE_IN_PLACE: Duration = Duration::from_millis(3_500);
+const FACEBOOK_FEED_SCROLL_ROUNDS: usize = 8;
+const FACEBOOK_REFRESH_RELOAD_FLOOR_MS: u64 = 180_000;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +118,23 @@ struct EngineSession {
     captcha_snapshots: VecDeque<CaptchaSnapshotState>,
     wechat_capture_initialized: bool,
     wechat_request_context: Option<wechat::WechatRequestContext>,
+    facebook: FacebookSessionState,
+}
+
+struct FacebookSessionState {
+    active_list_url: String,
+    seen_post_ids: HashSet<String>,
+    last_refresh_reload_at_ms: u64,
+}
+
+impl Default for FacebookSessionState {
+    fn default() -> Self {
+        Self {
+            active_list_url: FACEBOOK_HOME_URL.to_owned(),
+            seen_post_ids: HashSet::new(),
+            last_refresh_reload_at_ms: 0,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -226,6 +247,7 @@ impl Engine {
             captcha_snapshots: VecDeque::new(),
             wechat_capture_initialized: false,
             wechat_request_context: None,
+            facebook: FacebookSessionState::default(),
         };
         let info = session.info();
         self.session = Some(session);
@@ -536,18 +558,10 @@ async fn execute_facebook_command_once(
             ))
         }
         BrowseScroll(params) if params.reason.as_deref() == Some("initial_scan") => {
-            session.cdp.navigate(FACEBOOK_HOME_URL).await?;
-            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
-            evaluate_facebook_router_until_cards(session, command, Duration::from_secs(5)).await
+            execute_facebook_initial_feed(session).await
         }
-        SearchExecute(params) => {
-            let Some(container) = params.container.as_deref() else {
-                return evaluate_facebook_router(session, command).await;
-            };
-            let url = validated_facebook_search_url(container, &params.keyword)?;
-            session.cdp.navigate(url.as_str()).await?;
-            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
-            evaluate_facebook_router_until_cards(session, command, Duration::from_secs(5)).await
+        SearchExecute(params) if params.container.is_some() => {
+            execute_facebook_search(session, params, command).await
         }
         NoteOpen(params) if params.url.is_some() => {
             let url = validated_facebook_content_url(
@@ -570,7 +584,7 @@ async fn execute_facebook_command_once(
             let url = validated_facebook_group_url(&params.group_url)?;
             session.cdp.navigate(url.as_str()).await?;
             wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
-            evaluate_facebook_router(session, command).await
+            execute_facebook_group_join(session, params, command).await
         }
         PageScroll(params) if params.reason.as_deref() == Some("empty_feed_reels_fallback") => {
             session
@@ -581,15 +595,12 @@ async fn execute_facebook_command_once(
             evaluate_facebook_router_until_cards(session, command, Duration::from_secs(5)).await
         }
         PageScroll(_) => execute_facebook_page_scroll(session, command).await,
-        FeedRefresh(_) => {
-            session.cdp.reload().await?;
-            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
-            evaluate_facebook_router_until_cards(session, command, Duration::from_secs(5)).await
-        }
+        FeedRefresh(_) => execute_facebook_feed_refresh(session).await,
+        NoteClose(_) | NavigationBack(_) => execute_facebook_back_to_list(session).await,
         PublishNavigateEntry(_) => {
             session.cdp.navigate("https://www.facebook.com/").await?;
             wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
-            evaluate_facebook_router(session, command).await
+            execute_facebook_publish_entry(session, command).await
         }
         PublishUploadImage(params) => {
             validate_publish_file(&params.path)?;
@@ -601,7 +612,1447 @@ async fn execute_facebook_command_once(
                 .await?;
             verify_facebook_uploaded_preview(session, command).await
         }
+        InteractionLike(params) => execute_facebook_like(session, params, command).await,
+        InteractionFollow(params) => execute_facebook_follow(session, params, command).await,
+        InteractionComment(params) => execute_facebook_comment(session, params, command).await,
+        PublishFillField(params) => execute_facebook_publish_fill(session, params, command).await,
+        PublishSubmit(params) => execute_facebook_publish_submit(session, params, command).await,
         _ => evaluate_facebook_router(session, command).await,
+    }
+}
+
+async fn execute_facebook_like(
+    session: &mut EngineSession,
+    params: &crate::command::NoteInteractionParams,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    let before = probe_facebook_like(session, &params.note_id).await?;
+    if !before.ok {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "like",
+            false,
+            before.reason.as_deref().unwrap_or("target_not_found"),
+            Some(params.note_id.clone()),
+            before.observation,
+        ));
+    }
+    if before.already {
+        return Ok(facebook_action_result(
+            EffectPhase::Confirmed,
+            "like",
+            true,
+            "already_liked",
+            before.note_id,
+            before.observation,
+        ));
+    }
+    let (Some(x), Some(y)) = (before.cx, before.cy) else {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "like",
+            false,
+            "like_button_not_found",
+            before.note_id,
+            before.observation,
+        ));
+    };
+    dispatch_facebook_click(session, x, y).await?;
+    if wait_for_facebook_like(session, &params.note_id, Duration::from_secs(2)).await? {
+        return Ok(facebook_action_result(
+            EffectPhase::Confirmed,
+            "like",
+            true,
+            "",
+            before.note_id,
+            before.observation,
+        ));
+    }
+
+    let picker = probe_facebook_like_picker(session).await?;
+    if picker.ok {
+        if let (Some(x), Some(y)) = (picker.cx, picker.cy) {
+            dispatch_facebook_click(session, x, y).await?;
+        }
+    }
+    if wait_for_facebook_like(session, &params.note_id, Duration::from_secs(3)).await? {
+        return Ok(facebook_action_result(
+            EffectPhase::Confirmed,
+            "like",
+            true,
+            "",
+            before.note_id,
+            before.observation,
+        ));
+    }
+    Ok(facebook_action_result(
+        EffectPhase::Ambiguous,
+        "like",
+        false,
+        "like_unconfirmed",
+        before.note_id,
+        before.observation,
+    ))
+}
+
+async fn execute_facebook_follow(
+    session: &mut EngineSession,
+    params: &crate::command::FollowParams,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    if !probe_facebook_reel(session).await?.is_reels_surface() {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "follow",
+            false,
+            "capability_unsupported",
+            params.note_id.clone(),
+            None,
+        ));
+    }
+    let before = probe_facebook_follow(session, params.note_id.as_deref()).await?;
+    if !before.ok {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "follow",
+            false,
+            before.reason.as_deref().unwrap_or("target_not_found"),
+            before.note_id,
+            None,
+        ));
+    }
+    if before.already {
+        return Ok(facebook_action_result(
+            EffectPhase::Confirmed,
+            "follow",
+            true,
+            "already_following",
+            before.note_id,
+            None,
+        ));
+    }
+    let (Some(x), Some(y)) = (before.cx, before.cy) else {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "follow",
+            false,
+            "follow_button_not_found",
+            before.note_id,
+            None,
+        ));
+    };
+    dispatch_facebook_click(session, x, y).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    loop {
+        let after = probe_facebook_follow(session, params.note_id.as_deref()).await?;
+        if after.ok && after.already {
+            return Ok(facebook_action_result(
+                EffectPhase::Confirmed,
+                "follow",
+                true,
+                "",
+                after.note_id,
+                None,
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(facebook_action_result(
+                EffectPhase::Ambiguous,
+                "follow",
+                false,
+                "follow_unconfirmed",
+                before.note_id,
+                None,
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+}
+
+async fn execute_facebook_comment(
+    session: &mut EngineSession,
+    params: &crate::command::CommentParams,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let account_id = params.account_id.as_deref().unwrap_or_default();
+    if account_id.len() < 5 || !account_id.chars().all(|value| value.is_ascii_digit()) {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            "identity_unknown",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    let body = params.text.trim();
+    if body.is_empty() {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            "comment_text_empty",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    let full_text = match params
+        .group_chat_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(code) => format!("{body}\n{code}"),
+        None => body.to_owned(),
+    };
+
+    let mut editor = probe_facebook_comment_editor(session, &params.note_id).await?;
+    for _ in 0..6 {
+        if editor.ok {
+            break;
+        }
+        if editor.reason.as_deref() == Some("target_not_found") {
+            break;
+        }
+        session.cdp.dispatch_wheel(720.0, 440.0, 560.0).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        editor = probe_facebook_comment_editor(session, &params.note_id).await?;
+    }
+    if !editor.ok {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            editor.reason.as_deref().unwrap_or("editor_not_found"),
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    let (Some(x), Some(y)) = (editor.cx, editor.cy) else {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            "editor_not_found",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    };
+    dispatch_facebook_click(session, x, y).await?;
+    replace_focused_text(session, &full_text).await?;
+    let readback = probe_facebook_comment_editor(session, &params.note_id).await?;
+    if readback
+        .value
+        .as_deref()
+        .is_none_or(|value| normalize_facebook_text(value) != normalize_facebook_text(&full_text))
+    {
+        replace_focused_text(session, "").await?;
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            "marker_not_accepted",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        replace_focused_text(session, "").await?;
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    session
+        .cdp
+        .dispatch_key("rawKeyDown", "Enter", "Enter", 13)
+        .await?;
+    session
+        .cdp
+        .dispatch_key("keyUp", "Enter", "Enter", 13)
+        .await?;
+
+    if params.fast_return_to_feed == Some(true) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        session.cdp.navigate(FACEBOOK_HOME_URL).await?;
+        session.facebook.active_list_url = FACEBOOK_HOME_URL.to_owned();
+        return Ok(facebook_action_result(
+            EffectPhase::Ambiguous,
+            "comment",
+            false,
+            "verification_ambiguous",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
+    loop {
+        let ack =
+            probe_facebook_comment_ack(session, &params.note_id, &full_text, account_id).await?;
+        if ack.confirmed {
+            return Ok(facebook_action_result(
+                EffectPhase::Confirmed,
+                "comment",
+                true,
+                "",
+                Some(params.note_id.clone()),
+                None,
+            ));
+        }
+        if ack.rejected {
+            return Ok(facebook_action_result(
+                EffectPhase::Confirmed,
+                "comment",
+                false,
+                "comment_rejected",
+                Some(params.note_id.clone()),
+                None,
+            ));
+        }
+        if ack.pending {
+            return Ok(facebook_action_result(
+                EffectPhase::Confirmed,
+                "comment",
+                false,
+                "pending_group_approval",
+                Some(params.note_id.clone()),
+                None,
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(facebook_action_result(
+                EffectPhase::Ambiguous,
+                "comment",
+                false,
+                "verification_ambiguous",
+                Some(params.note_id.clone()),
+                None,
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn execute_facebook_group_join(
+    session: &mut EngineSession,
+    params: &crate::command::GroupJoinParams,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    let readiness_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let before = loop {
+        let probe = probe_facebook_join(session).await?;
+        if probe.joined
+            || probe.pending
+            || probe.questionnaire
+            || probe.found
+            || probe.ambiguous
+            || tokio::time::Instant::now() >= readiness_deadline
+        {
+            break probe;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    if before.joined {
+        return Ok(facebook_join_result(
+            EffectPhase::Confirmed,
+            false,
+            "already_member",
+            false,
+            before.observation,
+            None,
+        ));
+    }
+    if before.pending {
+        return Ok(facebook_join_result(
+            EffectPhase::Confirmed,
+            false,
+            "pending",
+            false,
+            before.observation,
+            None,
+        ));
+    }
+    if before.questionnaire {
+        return Ok(facebook_join_result(
+            EffectPhase::NotStarted,
+            false,
+            "questionnaire_required",
+            false,
+            before.observation,
+            None,
+        ));
+    }
+    if params.click != Some(true) {
+        return Ok(facebook_join_result(
+            EffectPhase::Confirmed,
+            false,
+            "observation_only",
+            false,
+            before.observation,
+            None,
+        ));
+    }
+    if before.ambiguous || !before.found {
+        return Ok(facebook_join_result(
+            EffectPhase::NotStarted,
+            false,
+            "not_ready",
+            false,
+            before.observation,
+            None,
+        ));
+    }
+    let (Some(x), Some(y)) = (before.cx, before.cy) else {
+        return Ok(facebook_join_result(
+            EffectPhase::NotStarted,
+            false,
+            "no_button",
+            false,
+            before.observation,
+            None,
+        ));
+    };
+    dispatch_facebook_click(session, x, y).await?;
+    let initial_observation = before.observation;
+    let verify_deadline = tokio::time::Instant::now() + Duration::from_millis(18_500);
+    loop {
+        let after = probe_facebook_join(session).await?;
+        let structural_transition = initial_observation.composer_present != Some(true)
+            && after.observation.composer_present == Some(true)
+            && after.observation.join_cta_present != Some(true);
+        if after.joined || structural_transition {
+            return Ok(facebook_join_result(
+                EffectPhase::Confirmed,
+                true,
+                "",
+                true,
+                initial_observation,
+                Some(after.observation),
+            ));
+        }
+        if after.pending {
+            return Ok(facebook_join_result(
+                EffectPhase::Confirmed,
+                false,
+                "pending",
+                true,
+                initial_observation,
+                Some(after.observation),
+            ));
+        }
+        if after.questionnaire {
+            return Ok(facebook_join_result(
+                EffectPhase::Confirmed,
+                false,
+                "questionnaire_required",
+                true,
+                initial_observation,
+                Some(after.observation),
+            ));
+        }
+        if tokio::time::Instant::now() >= verify_deadline {
+            return Ok(facebook_join_result(
+                EffectPhase::Ambiguous,
+                false,
+                "join_verification_ambiguous",
+                true,
+                initial_observation,
+                Some(after.observation),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn execute_facebook_publish_entry(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let NativeCommand::PublishNavigateEntry(params) = command else {
+        unreachable!("publish entry handler requires publish navigate command");
+    };
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    let target = probe_facebook_publish_entry(session).await?;
+    if !target.ok {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "navigate_entry",
+            false,
+            false,
+            target
+                .reason
+                .as_deref()
+                .unwrap_or("composer_entry_not_found"),
+        ));
+    }
+    let (Some(x), Some(y)) = (target.cx, target.cy) else {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "navigate_entry",
+            false,
+            false,
+            "composer_entry_not_found",
+        ));
+    };
+    dispatch_facebook_click(session, x, y).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let editor = probe_facebook_publish_editor(session).await?;
+        if editor.ok {
+            return Ok(facebook_publish_result(
+                EffectPhase::Confirmed,
+                params.record_id,
+                params.seq,
+                "navigate_entry",
+                true,
+                true,
+                "",
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(facebook_publish_result(
+                EffectPhase::Ambiguous,
+                params.record_id,
+                params.seq,
+                "navigate_entry",
+                false,
+                true,
+                "composer_unconfirmed",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+}
+
+async fn execute_facebook_publish_fill(
+    session: &mut EngineSession,
+    params: &crate::command::PublishFieldParams,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    if params.field_type == "title" {
+        return Ok(facebook_publish_result(
+            EffectPhase::Confirmed,
+            params.record_id,
+            params.seq,
+            "fill_field",
+            true,
+            false,
+            "",
+        ));
+    }
+    let value = params.value.trim();
+    if value.is_empty() {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "fill_field",
+            false,
+            false,
+            "empty_content",
+        ));
+    }
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    let editor = probe_facebook_publish_editor(session).await?;
+    if !editor.ok {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "fill_field",
+            false,
+            false,
+            editor
+                .reason
+                .as_deref()
+                .unwrap_or("composer_editor_not_found"),
+        ));
+    }
+    let (Some(x), Some(y)) = (editor.cx, editor.cy) else {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "fill_field",
+            false,
+            false,
+            "composer_editor_not_found",
+        ));
+    };
+    dispatch_facebook_click(session, x, y).await?;
+    replace_focused_text(session, value).await?;
+    let readback = probe_facebook_publish_editor(session).await?;
+    if readback
+        .value
+        .as_deref()
+        .is_none_or(|readback| normalize_facebook_text(readback) != normalize_facebook_text(value))
+    {
+        replace_focused_text(session, "").await?;
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "fill_field",
+            false,
+            false,
+            "composer_readback_mismatch",
+        ));
+    }
+    Ok(facebook_publish_result(
+        EffectPhase::Confirmed,
+        params.record_id,
+        params.seq,
+        "fill_field",
+        true,
+        true,
+        "",
+    ))
+}
+
+async fn execute_facebook_publish_submit(
+    session: &mut EngineSession,
+    params: &crate::command::PublishIdentity,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    let target = probe_facebook_publish_submit(session).await?;
+    if !target.ok {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "submit",
+            false,
+            false,
+            target.reason.as_deref().unwrap_or("submit_not_found"),
+        ));
+    }
+    let (Some(x), Some(y)) = (target.cx, target.cy) else {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "submit",
+            false,
+            false,
+            "submit_not_found",
+        ));
+    };
+    dispatch_facebook_click(session, x, y).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let after = probe_facebook_publish_submit(session).await?;
+        if !after.composer_open {
+            return Ok(facebook_publish_result(
+                EffectPhase::Confirmed,
+                params.record_id,
+                params.seq,
+                "submit",
+                true,
+                true,
+                "",
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(facebook_publish_result(
+                EffectPhase::Ambiguous,
+                params.record_id,
+                params.seq,
+                "submit",
+                false,
+                true,
+                "submit_verification_ambiguous",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+}
+
+async fn execute_facebook_initial_feed(
+    session: &mut EngineSession,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    session.cdp.navigate(FACEBOOK_HOME_URL).await?;
+    session.facebook.active_list_url = FACEBOOK_HOME_URL.to_owned();
+    session.facebook.seen_post_ids.clear();
+    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    let command = NativeCommand::BrowseScroll(crate::command::ReasonParams {
+        reason: Some("initial_scan".to_owned()),
+    });
+    if let Some(output) = ensure_facebook_action_gate(session, &command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+
+    let mut last = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_NAV).await?;
+    for round in 0..FACEBOOK_FEED_SCROLL_ROUNDS {
+        if !last.cards.is_empty() {
+            let cards = facebook_page_cards(session, last, false, None);
+            return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(cards)));
+        }
+        if round + 1 >= FACEBOOK_FEED_SCROLL_ROUNDS || last.explicit_empty {
+            break;
+        }
+        dispatch_facebook_feed_wheel(session, &last).await?;
+        last = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
+    }
+
+    if last.article_count > 0 {
+        let cards = facebook_page_cards(session, last, false, None);
+        return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(cards)));
+    }
+    if confirm_facebook_home_empty(session, &last).await? {
+        let cards = facebook_page_cards(session, last, false, None);
+        return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(cards)));
+    }
+    let reason = if last.loading {
+        "feed_still_loading"
+    } else {
+        "no_target"
+    };
+    Ok(facebook_scroll_failure(EffectPhase::NotStarted, reason))
+}
+
+async fn execute_facebook_search(
+    session: &mut EngineSession,
+    params: &crate::command::SearchExecuteParams,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let container = params
+        .container
+        .as_deref()
+        .expect("search handler requires a validated container");
+    let url = validated_facebook_search_url(container, &params.keyword)?;
+    session.cdp.navigate(url.as_str()).await?;
+    session.facebook.active_list_url = url.to_string();
+    session.facebook.seen_post_ids.clear();
+    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+
+    let mut last = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_NAV).await?;
+    for round in 0..FACEBOOK_FEED_SCROLL_ROUNDS {
+        if !last.cards.is_empty() {
+            let mut cards = facebook_page_cards(session, last, false, None);
+            if let Some(max_results) = params.max_results.filter(|value| *value > 0) {
+                cards.cards.truncate(max_results as usize);
+            }
+            return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(cards)));
+        }
+        if last.article_count == 0 && !last.loading {
+            let cards = facebook_page_cards(session, last, false, None);
+            return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(cards)));
+        }
+        if round + 1 >= FACEBOOK_FEED_SCROLL_ROUNDS {
+            break;
+        }
+        dispatch_facebook_feed_wheel(session, &last).await?;
+        last = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
+    }
+
+    Ok(facebook_action_result(
+        EffectPhase::Confirmed,
+        "search",
+        false,
+        if last.loading {
+            "feed_still_loading"
+        } else {
+            "search_unavailable"
+        },
+        None,
+        None,
+    ))
+}
+
+async fn execute_facebook_feed_scroll(
+    session: &mut EngineSession,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    ensure_facebook_active_list(session).await?;
+    let command = NativeCommand::PageScroll(crate::command::PageScrollParams {
+        reason: None,
+        dwell_ms: None,
+    });
+    if let Some(output) = ensure_facebook_action_gate(session, &command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    let mut current = probe_facebook_feed(session).await?;
+    let start_y = current.scroll_y;
+    let mut saw_any_card = !current.cards.is_empty();
+    let mut bottom_dry_rounds = 0usize;
+
+    for _ in 0..FACEBOOK_FEED_SCROLL_ROUNDS {
+        let before = current;
+        dispatch_facebook_feed_wheel(session, &before).await?;
+        let after = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
+        saw_any_card |= !after.cards.is_empty();
+        let movement = PageMovement {
+            before: start_y,
+            after: after.scroll_y,
+            moved: after.scroll_y != start_y,
+            at_bottom: Some(facebook_near_bottom(&after)),
+        };
+        let fresh = facebook_page_cards(session, after.clone(), true, Some(movement));
+        if !fresh.cards.is_empty() {
+            return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(fresh)));
+        }
+
+        let grew = after.scroll_height > before.scroll_height + 1.0;
+        if !grew && facebook_near_bottom(&after) {
+            bottom_dry_rounds += 1;
+            if bottom_dry_rounds >= 2 {
+                return Ok(facebook_scroll_failure(
+                    EffectPhase::Confirmed,
+                    "feed_exhausted",
+                ));
+            }
+        } else {
+            bottom_dry_rounds = 0;
+        }
+        current = after;
+    }
+
+    Ok(facebook_scroll_failure(
+        EffectPhase::Confirmed,
+        if saw_any_card {
+            "feed_exhausted"
+        } else if current.loading {
+            "feed_still_loading"
+        } else {
+            "no_target"
+        },
+    ))
+}
+
+async fn execute_facebook_back_to_list(
+    session: &mut EngineSession,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let target = session.facebook.active_list_url.clone();
+    let current = probe_facebook_feed(session).await?;
+    if current.url != target || !matches!(current.surface.as_str(), "home" | "search" | "group") {
+        session.cdp.navigate(&target).await?;
+        wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    }
+    let command = NativeCommand::NavigationBack(crate::command::NavigationBackParams {
+        reason: None,
+        target_page: None,
+        dwell_ms: None,
+    });
+    if let Some(output) = ensure_facebook_action_gate(session, &command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    let probe = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_NAV).await?;
+    if probe.cards.is_empty() {
+        return Ok(facebook_scroll_failure(
+            EffectPhase::NotStarted,
+            if probe.loading {
+                "feed_still_loading"
+            } else {
+                "no_feed"
+            },
+        ));
+    }
+    let cards = facebook_page_cards(session, probe, false, None);
+    Ok((EffectPhase::Confirmed, CommandOutput::PageCards(cards)))
+}
+
+async fn execute_facebook_feed_refresh(
+    session: &mut EngineSession,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    if session.facebook.active_list_url != FACEBOOK_HOME_URL {
+        session.cdp.navigate(FACEBOOK_HOME_URL).await?;
+        session.facebook.active_list_url = FACEBOOK_HOME_URL.to_owned();
+        wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    }
+    let command = NativeCommand::FeedRefresh(crate::command::FeedRefreshParams {
+        reason: None,
+        think_ms: None,
+    });
+    if let Some(output) = ensure_facebook_action_gate(session, &command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    let before = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
+    let before_top = before
+        .cards
+        .first()
+        .and_then(|card| card.note_id.as_deref())
+        .and_then(canonical_facebook_post_id);
+
+    let target = probe_facebook_home_target(session).await?;
+    let clicked = if target.ok {
+        if let (Some(x), Some(y)) = (target.cx, target.cy) {
+            dispatch_facebook_click(session, x, y).await?;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if !clicked {
+        let now = unix_time_ms();
+        if session.facebook.last_refresh_reload_at_ms != 0
+            && now.saturating_sub(session.facebook.last_refresh_reload_at_ms)
+                < FACEBOOK_REFRESH_RELOAD_FLOOR_MS
+        {
+            return Ok(facebook_scroll_failure(
+                EffectPhase::NotStarted,
+                target.reason.as_deref().unwrap_or("no_home_link"),
+            ));
+        }
+        session.facebook.last_refresh_reload_at_ms = now;
+        session.cdp.reload().await?;
+    }
+    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    let after = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
+    let after_top = after
+        .cards
+        .first()
+        .and_then(|card| card.note_id.as_deref())
+        .and_then(canonical_facebook_post_id);
+    if after.cards.is_empty() || after_top.is_none() || after_top == before_top {
+        return Ok(facebook_scroll_failure(
+            if clicked {
+                EffectPhase::Confirmed
+            } else {
+                EffectPhase::Ambiguous
+            },
+            if after.loading {
+                "feed_still_loading"
+            } else {
+                "not_refreshed"
+            },
+        ));
+    }
+    session.facebook.seen_post_ids.clear();
+    let cards = facebook_page_cards(session, after, false, None);
+    Ok((EffectPhase::Confirmed, CommandOutput::PageCards(cards)))
+}
+
+async fn ensure_facebook_active_list(session: &mut EngineSession) -> Result<(), EngineError> {
+    let probe = probe_facebook_feed(session).await?;
+    let on_list = matches!(probe.surface.as_str(), "home" | "search" | "group");
+    if !on_list || probe.url != session.facebook.active_list_url {
+        let target = session.facebook.active_list_url.clone();
+        session.cdp.navigate(&target).await?;
+        wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    }
+    Ok(())
+}
+
+async fn settle_facebook_feed(
+    session: &mut EngineSession,
+    timeout: Duration,
+) -> Result<facebook::FacebookFeedProbe, EngineError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut previous: Option<(Vec<String>, u32, bool)> = None;
+    loop {
+        let current = probe_facebook_feed(session).await?;
+        let key = (
+            current
+                .cards
+                .iter()
+                .filter_map(|card| card.note_id.clone())
+                .collect::<Vec<_>>(),
+            current.article_count,
+            current.explicit_empty,
+        );
+        let stable = previous.as_ref() == Some(&key);
+        if stable && !current.loading {
+            return Ok(current);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(current);
+        }
+        previous = Some(key);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn confirm_facebook_home_empty(
+    session: &mut EngineSession,
+    initial: &facebook::FacebookFeedProbe,
+) -> Result<bool, EngineError> {
+    if initial.surface != "home" || initial.article_count > 0 || initial.loading {
+        return Ok(false);
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let generation = (
+        initial.url.clone(),
+        initial.document_generation.clone().unwrap_or_default(),
+    );
+    let mut stable = 0usize;
+    loop {
+        let current = probe_facebook_feed(session).await?;
+        let current_generation = (
+            current.url.clone(),
+            current.document_generation.clone().unwrap_or_default(),
+        );
+        if current.surface != "home"
+            || !current.cards.is_empty()
+            || current.article_count > 0
+            || current.loading
+            || !current.explicit_empty
+            || current.document_age_ms < 8_000
+            || current_generation != generation
+        {
+            stable = 0;
+        } else {
+            stable += 1;
+            if stable >= 3 {
+                let final_probe = probe_facebook_feed(session).await?;
+                return Ok(final_probe.surface == "home"
+                    && final_probe.cards.is_empty()
+                    && final_probe.article_count == 0
+                    && !final_probe.loading
+                    && final_probe.explicit_empty
+                    && final_probe.document_age_ms >= 8_000
+                    && (
+                        final_probe.url,
+                        final_probe.document_generation.unwrap_or_default(),
+                    ) == generation);
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn probe_facebook_feed(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookFeedProbe, EngineError> {
+    let expression = facebook::feed_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::feed_probe_from_cdp(&raw)
+}
+
+async fn probe_facebook_home_target(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookPointTarget, EngineError> {
+    let expression = facebook::feed_home_target_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::point_target_from_cdp(&raw)
+}
+
+async fn dispatch_facebook_feed_wheel(
+    session: &mut EngineSession,
+    probe: &facebook::FacebookFeedProbe,
+) -> Result<(), EngineError> {
+    let x = (probe.inner_width / 2.0).max(1.0);
+    let y = (probe.inner_height * 0.55).max(1.0);
+    let delta_y = 560.0 + (unix_time_ms() % 151) as f64;
+    session.cdp.dispatch_wheel(x, y, delta_y).await.map(|_| ())
+}
+
+async fn dispatch_facebook_click(
+    session: &mut EngineSession,
+    x: f64,
+    y: f64,
+) -> Result<(), EngineError> {
+    session
+        .cdp
+        .dispatch_mouse("mouseMoved", x, y, "none", 0)
+        .await?;
+    session
+        .cdp
+        .dispatch_mouse("mousePressed", x, y, "left", 1)
+        .await?;
+    session
+        .cdp
+        .dispatch_mouse("mouseReleased", x, y, "left", 1)
+        .await
+        .map(|_| ())
+}
+
+fn facebook_page_cards(
+    session: &mut EngineSession,
+    probe: facebook::FacebookFeedProbe,
+    only_new: bool,
+    movement: Option<PageMovement>,
+) -> PageCards {
+    let mut cards = Vec::new();
+    for mut card in probe.cards {
+        let Some(identity) = card.note_id.as_deref().and_then(canonical_facebook_post_id) else {
+            continue;
+        };
+        let is_new = session.facebook.seen_post_ids.insert(identity);
+        if only_new && !is_new {
+            continue;
+        }
+        card.index = cards.len() as u32;
+        cards.push(card);
+    }
+    PageCards {
+        cards,
+        movement,
+        document_generation: probe.document_generation,
+        container_name: None,
+        list_kind: Some(probe.list_kind),
+        list_state: Some(
+            if probe.list_state == crate::model::FacebookListState::Ready {
+                crate::model::FacebookListState::Ready
+            } else {
+                probe.list_state
+            },
+        ),
+    }
+    .bounded()
+}
+
+fn facebook_near_bottom(probe: &facebook::FacebookFeedProbe) -> bool {
+    probe.scroll_height > 0.0
+        && probe.inner_height > 0.0
+        && probe.scroll_height - probe.scroll_y - probe.inner_height <= probe.inner_height.max(1.0)
+}
+
+async fn probe_facebook_like(
+    session: &mut EngineSession,
+    note_id: &str,
+) -> Result<facebook::FacebookLikeProbe, EngineError> {
+    let expression = facebook::like_probe_expression(note_id)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::like_probe_from_cdp(&raw)
+}
+
+async fn probe_facebook_like_picker(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookPointTarget, EngineError> {
+    let expression = facebook::like_picker_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::point_target_from_cdp(&raw)
+}
+
+async fn wait_for_facebook_like(
+    session: &mut EngineSession,
+    note_id: &str,
+    timeout: Duration,
+) -> Result<bool, EngineError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let probe = probe_facebook_like(session, note_id).await?;
+        if probe.ok && probe.already {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+async fn probe_facebook_follow(
+    session: &mut EngineSession,
+    note_id: Option<&str>,
+) -> Result<facebook::FacebookFollowProbe, EngineError> {
+    let expression = facebook::follow_probe_expression(note_id)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::follow_probe_from_cdp(&raw)
+}
+
+async fn probe_facebook_comment_editor(
+    session: &mut EngineSession,
+    note_id: &str,
+) -> Result<facebook::FacebookTextTarget, EngineError> {
+    let expression = facebook::comment_editor_probe_expression(note_id)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::text_target_from_cdp(&raw)
+}
+
+async fn probe_facebook_comment_ack(
+    session: &mut EngineSession,
+    note_id: &str,
+    text: &str,
+    account_id: &str,
+) -> Result<facebook::FacebookCommentAckProbe, EngineError> {
+    let expression = facebook::comment_ack_probe_expression(note_id, text, account_id)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::comment_ack_probe_from_cdp(&raw)
+}
+
+async fn probe_facebook_join(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookJoinProbe, EngineError> {
+    let expression = facebook::join_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::join_probe_from_cdp(&raw)
+}
+
+async fn probe_facebook_publish_entry(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookPointTarget, EngineError> {
+    let expression = facebook::publish_entry_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::point_target_from_cdp(&raw)
+}
+
+async fn probe_facebook_publish_editor(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookTextTarget, EngineError> {
+    let expression = facebook::publish_editor_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::text_target_from_cdp(&raw)
+}
+
+async fn probe_facebook_publish_submit(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookPublishSubmitProbe, EngineError> {
+    let expression = facebook::publish_submit_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::publish_submit_probe_from_cdp(&raw)
+}
+
+async fn replace_focused_text(session: &mut EngineSession, value: &str) -> Result<(), EngineError> {
+    let modifier = if cfg!(target_os = "macos") { 4 } else { 2 };
+    session
+        .cdp
+        .dispatch_key_with_modifiers("keyDown", "a", "KeyA", 65, modifier)
+        .await?;
+    session
+        .cdp
+        .dispatch_key_with_modifiers("keyUp", "a", "KeyA", 65, modifier)
+        .await?;
+    session
+        .cdp
+        .dispatch_key("keyDown", "Backspace", "Backspace", 8)
+        .await?;
+    session
+        .cdp
+        .dispatch_key("keyUp", "Backspace", "Backspace", 8)
+        .await?;
+    if !value.is_empty() {
+        session.cdp.insert_text(value).await?;
+    }
+    Ok(())
+}
+
+fn normalize_facebook_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn facebook_action_result(
+    phase: EffectPhase,
+    action: &str,
+    ok: bool,
+    reason: &str,
+    note_id: Option<String>,
+    observation: Option<crate::model::ActionEvidence>,
+) -> (EffectPhase, CommandOutput) {
+    (
+        phase,
+        CommandOutput::ActionReceipt(Box::new(ActionReceipt {
+            action: action.to_owned(),
+            ok,
+            reason: (!reason.is_empty()).then(|| reason.to_owned()),
+            note_id,
+            observation,
+            post_observation: None,
+            group_observation: None,
+            group_url: None,
+            clicked: None,
+            candidates: Vec::new(),
+        })),
+    )
+}
+
+fn facebook_join_result(
+    phase: EffectPhase,
+    ok: bool,
+    reason: &str,
+    clicked: bool,
+    observation: crate::model::FacebookGroupJoinObservation,
+    post_observation: Option<crate::model::FacebookGroupJoinObservation>,
+) -> (EffectPhase, CommandOutput) {
+    let group_url = observation.group_url.clone();
+    (
+        phase,
+        CommandOutput::ActionReceipt(Box::new(ActionReceipt {
+            action: "join_group".to_owned(),
+            ok,
+            reason: (!reason.is_empty()).then(|| reason.to_owned()),
+            note_id: None,
+            observation: None,
+            post_observation,
+            group_observation: Some(observation),
+            group_url,
+            clicked: Some(clicked),
+            candidates: Vec::new(),
+        })),
+    )
+}
+
+fn facebook_publish_result(
+    phase: EffectPhase,
+    record_id: u64,
+    seq: u32,
+    kind: &str,
+    ok: bool,
+    dispatched: bool,
+    error: &str,
+) -> (EffectPhase, CommandOutput) {
+    (
+        phase,
+        CommandOutput::PublishReceipt(
+            PublishReceipt {
+                record_id,
+                seq,
+                kind: kind.to_owned(),
+                ok,
+                submit_dispatched: (kind == "submit").then_some(dispatched),
+                value: None,
+                post_url: None,
+                error: (!error.is_empty()).then(|| error.to_owned()),
+            }
+            .bounded(),
+        ),
+    )
+}
+
+async fn ensure_facebook_action_gate(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+) -> Result<Option<CommandOutput>, EngineError> {
+    let probe = probe_facebook_page(session).await?;
+    let reason = match probe.blocking_kind.as_deref() {
+        Some("login") => Some("login_required"),
+        Some("captcha") => Some("blocked_by_captcha"),
+        Some("unknown") => Some("blocked_by_unknown"),
+        _ => None,
+    };
+    if let Some(reason) = reason {
+        return facebook_gate_failure(session, command, reason).map(Some);
+    }
+
+    for _ in 0..3 {
+        let consent = probe_facebook_consent(session).await?;
+        if !consent.present {
+            return Ok(None);
+        }
+        let necessary_only = matches!(
+            std::env::var("AIDCP_FB_COOKIE_CONSENT")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "necessary_only" | "necessary" | "essential"
+        );
+        let point = if necessary_only {
+            if consent.necessary_only_ambiguous {
+                None
+            } else {
+                consent.necessary_only
+            }
+        } else if consent.accept_all_ambiguous {
+            None
+        } else {
+            consent.accept_all
+        };
+        let Some(point) = point else {
+            return facebook_gate_failure(session, command, "blocked_by_consent").map(Some);
+        };
+        dispatch_facebook_click(session, point.cx, point.cy).await?;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
+    if probe_facebook_consent(session).await?.present {
+        return facebook_gate_failure(session, command, "blocked_by_consent").map(Some);
+    }
+    Ok(None)
+}
+
+async fn probe_facebook_page(session: &mut EngineSession) -> Result<ProbeResult, EngineError> {
+    let expression = facebook::page_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    let result = facebook::result_from_cdp(&raw)?;
+    let command = NativeCommand::PageProbe(crate::command::EmptyParams::default());
+    let output = facebook::typed_output(&command, result.output, session.cdp.target_id())?;
+    let CommandOutput::PageProbe(probe) = output else {
+        return Err(EngineError::new(
+            ErrorCode::ProbeFailed,
+            "native Facebook blocker probe returned an invalid output",
+        ));
+    };
+    Ok(probe)
+}
+
+async fn probe_facebook_consent(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookConsentProbe, EngineError> {
+    let expression = facebook::consent_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::consent_probe_from_cdp(&raw)
+}
+
+fn facebook_gate_failure(
+    session: &EngineSession,
+    command: &NativeCommand,
+    reason: &str,
+) -> Result<CommandOutput, EngineError> {
+    facebook::failure_output(
+        command,
+        facebook_action_name(command),
+        reason,
+        session.cdp.target_id(),
+    )
+}
+
+fn facebook_command_requires_gate(command: &NativeCommand) -> bool {
+    !matches!(
+        command,
+        NativeCommand::PageProbe(_)
+            | NativeCommand::SessionStop(_)
+            | NativeCommand::IdentityBootstrap(_)
+            | NativeCommand::IdentityReadCurrent(_)
+            | NativeCommand::CaptchaCapture(_)
+            | NativeCommand::CaptchaClick(_)
+    )
+}
+
+fn facebook_action_name(command: &NativeCommand) -> &'static str {
+    match command {
+        NativeCommand::BrowseNext(_)
+        | NativeCommand::BrowseScroll(_)
+        | NativeCommand::PageScroll(_) => "scroll",
+        NativeCommand::FeedRefresh(_) => "refresh",
+        NativeCommand::SearchExecute(_) => "search",
+        NativeCommand::NoteOpen(_) => "open_note",
+        NativeCommand::NoteClose(_) => "close",
+        NativeCommand::NavigationBack(_) => "back",
+        NativeCommand::InteractionLike(_) => "like",
+        NativeCommand::InteractionFollow(_) => "follow",
+        NativeCommand::InteractionComment(_) => "comment",
+        NativeCommand::GroupJoin(_) => "join_group",
+        NativeCommand::PublishNavigateEntry(_) => "navigate_entry",
+        NativeCommand::PublishSelectMode(_) => "select_mode",
+        NativeCommand::PublishUploadImage(_) => "upload_image",
+        NativeCommand::PublishSetCover(_) => "set_cover",
+        NativeCommand::PublishFillField(_) => "fill_field",
+        NativeCommand::PublishAddWithCandidate(_) => "add_with_candidate",
+        NativeCommand::PublishSetOption(_) => "set_option",
+        NativeCommand::PublishSetSchedule(_) => "set_schedule",
+        NativeCommand::PublishSubmit(_) => "submit",
+        NativeCommand::PublishCapturePostId(_) => "capture_post_id",
+        NativeCommand::PublishCaptureScheduled(_) => "capture_scheduled",
+        NativeCommand::PublishReconcileScheduled(_) => "reconcile_scheduled",
+        _ => "page",
     }
 }
 
@@ -611,7 +2062,7 @@ async fn execute_facebook_page_scroll(
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let before = probe_facebook_reel(session).await?;
     if !before.is_reels_surface() {
-        return evaluate_facebook_router(session, command).await;
+        return execute_facebook_feed_scroll(session).await;
     }
     if !before.ok || before.note_id.is_none() || before.video_key.is_none() {
         return Ok(facebook_scroll_failure(
@@ -841,6 +2292,11 @@ async fn evaluate_facebook_router(
     session: &mut EngineSession,
     command: &NativeCommand,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    if facebook_command_requires_gate(command) {
+        if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+            return Ok((EffectPhase::NotStarted, output));
+        }
+    }
     let expression = facebook::command_expression(command)?;
     let raw = session.cdp.evaluate(&expression, true).await?;
     let result = facebook::result_from_cdp(&raw)?;

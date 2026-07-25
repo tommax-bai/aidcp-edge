@@ -49,6 +49,11 @@ async function(input){
     for(const event of ['input','change'])el.dispatchEvent(new Event(event,{bubbles:true,composed:true}));
     return true;
   };
+  const point=(el)=>{
+    if(!visible(el))return null;
+    const rect=el.getBoundingClientRect();
+    return {cx:rect.left+rect.width/2,cy:rect.top+rect.height/2};
+  };
   const pressed=(el)=>Boolean(el&&(
     el.getAttribute('aria-pressed')==='true'
     || el.getAttribute('aria-checked')==='true'
@@ -249,6 +254,33 @@ async function(input){
     });
     return matches.length===1?matches[0]:null;
   };
+  const closestArticle=(el)=>el&&el.closest?el.closest('[role="article"],article'):null;
+  const targetScopeRoot=(article)=>{
+    const dialogs=all('[role="dialog"],[aria-modal="true"]').filter(visible);
+    for(let index=dialogs.length-1;index>=0;index--){
+      if(dialogs[index].contains(article))return dialogs[index];
+    }
+    const feed=all('div[role="feed"]').find((candidate)=>candidate.contains(article));
+    return feed||document;
+  };
+  const exclusiveArticleRegion=(article)=>{
+    if(!article)return null;
+    const scope=targetScopeRoot(article);
+    const root=scope===document?(document.body||document.documentElement):scope;
+    if(!root||!root.contains(article))return null;
+    const others=all('[role="article"],article').filter((candidate)=>
+      candidate!==article&&!article.contains(candidate)&&!candidate.contains(article)
+    );
+    let region=article;
+    while(region!==root&&region.parentElement){
+      const parent=region.parentElement;
+      if(parent!==root&&!root.contains(parent))break;
+      if(others.some((candidate)=>parent.contains(candidate)))break;
+      region=parent;
+    }
+    if(others.length&&(region===document.body||region===document.documentElement))return null;
+    return region;
+  };
   const articleAuthor=(root)=>{
     const link=first(['h2 a[href]','h3 a[href]','h4 a[href]','a[role="link"][href*="/people/"]','a[role="link"][href*="profile.php"]'],root);
     return {name:text(link,200),href:link&&link.href||''};
@@ -265,18 +297,65 @@ async function(input){
   };
   const commentEditor=(root=document)=>all('[contenteditable="true"][role="textbox"],textarea[aria-label],textarea',root).filter(visible).find((el)=>{
     const raw=label(el).toLowerCase();
-    return /评论|留言|comment|write a comment|viết bình luận|bình luận/.test(raw)||el.getAttribute('role')==='textbox';
+    return /评论|留言|comment|bình luận|coment|输入回答|answer/.test(raw)||el.getAttribute('role')==='textbox';
   })||null;
-  const acceptConsent=()=>{
-    const scope=first(['[role="dialog"]','[aria-modal="true"]'])||document;
-    const candidates=all('button,[role="button"],a[role="button"]',scope).filter(visible);
-    const target=candidates.find((el)=>/^(allow all cookies|accept all|allow essential and optional cookies|接受所有|允许所有|同意|cho phép tất cả)$/i.test(label(el)));
-    return target?click(target):false;
+  const participationGate=()=>{
+    const dialogs=all('[role="dialog"]').filter(visible);
+    const expression=/申请参与|请求参与|参与此(?:小组|群)|贡献(?:内容)?给?(?:此|这个)?(?:小组|群)|参与问题|同意(?:此|该|小组|群).{0,4}规则|同意群规|request to participate|participation question|answer questions to participate|contribute to (?:this|the) group|agree to the group rules|待审核|pending review/i;
+    return dialogs.some((dialog)=>expression.test(text(dialog,4000)));
   };
-  const blocker=()=>{
+  const consentProbe=()=>{
     const body=text(document.body,5000);
-    if(classify()==='login'||/log in to facebook|登录 facebook|登入 facebook/i.test(body))return 'login_required';
-    if(classify()==='checkpoint'||/security check|captcha|验证码|安全检查/i.test(body))return 'blocked_by_captcha';
+    const path=location.pathname.toLowerCase();
+    const frames=all('iframe').map((frame)=>String(frame.getAttribute('src')||frame.src||'')).join('\n');
+    const captcha=/captcha|recaptcha|fbsbx\.com\/captcha/i.test(frames)
+      ||/进行人机身份验证|人机身份验证|captcha|recaptcha|prove you(?:'|’)re human|confirm you(?:'|’)re human|verify you(?:'|’)re human/i.test(body);
+    const loginPath=/\/login|\/recover|\/two_step_verification/i.test(path);
+    const cookieCopy=/cookie\s*政策|cookie\s*policy|允许\s*facebook\s*使用\s*cookie|允许使用\s*cookie|使用\s*cookie|allow\s+the\s+use\s+of\s+cookies|use\s+of\s+cookies|allow\s+all\s+cookies|允许所有\s*cookie/i.test(body);
+    const scope=first(['[role="dialog"]','[aria-modal="true"]'])||document;
+    const buttons=all('button,[role="button"],a[role="button"],div[aria-label],span[aria-label]',scope).filter(visible);
+    const acceptAll=buttons.filter((el)=>/^(允许所有\s*cookie|允许全部\s*cookie|接受所有\s*cookie|同意所有\s*cookie|允许\s*facebook\s*使用\s*cookie|允许使用\s*cookie|allow\s+all\s+cookies|accept\s+all\s+cookies|allow\s+the\s+use\s+of\s+cookies)$/i.test(label(el)));
+    const necessaryOnly=buttons.filter((el)=>/^(仅允许必要\s*cookie|只允许必要\s*cookie|仅接受必要\s*cookie|拒绝非必要\s*cookie|only\s+allow\s+essential\s+cookies|decline\s+optional\s+cookies|refuse\s+non-?essential\s+cookies)$/i.test(label(el)));
+    const present=cookieCopy&&!captcha&&!loginPath;
+    return {
+      present,
+      acceptAll:present&&acceptAll.length===1?point(acceptAll[0]):null,
+      necessaryOnly:present&&necessaryOnly.length===1?point(necessaryOnly[0]):null,
+      acceptAllAmbiguous:acceptAll.length>1,
+      necessaryOnlyAmbiguous:necessaryOnly.length>1,
+    };
+  };
+  const blockingProbe=()=>{
+    const body=text(document.body,5000);
+    const bodyLower=body.toLowerCase();
+    const href=String(location.href).toLowerCase();
+    const frames=all('iframe').map((frame)=>String(frame.getAttribute('src')||frame.src||'')).join('\n').toLowerCase();
+    if(
+      frames.includes('fbsbx.com/captcha')
+      ||frames.includes('google.com/recaptcha')
+      ||/进行人机身份验证|人机身份验证|captcha|recaptcha|prove you(?:'|’)re human|confirm you(?:'|’)re human|verify you(?:'|’)re human/i.test(body)
+    )return {kind:'captcha',text:body};
+    const consent=consentProbe();
+    if(
+      href.includes('/login')
+      ||href.includes('/recover')
+      ||href.includes('/two_step_verification')
+      ||(!consent.present&&/登录 facebook|登录或注册|log in to facebook|forgot password|account recovery|账号恢复|找回账号/i.test(body))
+    )return {kind:'login',text:body};
+    if(href.includes('/checkpoint')||/security check|security checkpoint|安全检查|安全验证/i.test(body)){
+      return {kind:'unknown',text:body};
+    }
+    if(
+      href.includes('/help/contact')
+      ||/temporarily blocked|action blocked|we limit how often you can do this|misusing this feature|you can.?t use this feature right now|going too fast|this feature is( ?n.?t| not) available|your account is restricted|we restrict certain content and actions|暂时被限制|功能暂时不可用|此功能暂时无法使用|你暂时无法使用|操作被封锁/i.test(bodyLower)
+      ||['我们限制了你发帖','我们限制了您发帖','执行其他操作的频率'].some((phrase)=>body.includes(phrase))
+    )return {kind:'unknown',text:body};
+    return {kind:'none',text:''};
+  };
+  const blocker=(probe)=>{
+    if(probe.kind==='login')return 'login_required';
+    if(probe.kind==='captcha')return 'blocked_by_captcha';
+    if(probe.kind==='unknown')return 'blocked_by_unknown';
     return '';
   };
   const cardOf=(article,index,preferredHref='')=>{
@@ -323,6 +402,49 @@ async function(input){
       listKind,
       listState:cards.length?'ready':(listKind==='reels'?Boolean(active&&active.reason!=='no_active_video'):topArticles().length)?'present_unreportable':'empty',
     }};
+  };
+  const feedProbe=()=>{
+    const output=feedCards();
+    const scope=first(['div[role="feed"]','[role="main"]','main'])||document.body;
+    const loading=Boolean(scope&&scope.querySelector('[role="progressbar"],[aria-busy="true"]'));
+    const articleCount=reelSurface()?0:topArticles().length;
+    let explicitEmpty=false;
+    for(const node of all('div,section',scope||document)){
+      const raw=text(node,600);
+      if(raw.length<15)continue;
+      const clean=raw.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const title=/no more posts|there are no posts|khong con bai viet nao|khong co bai viet nao|没有更多帖子|没有帖子/i.test(clean);
+      const hint=/add friends|them ban be|添加好友/i.test(clean)&&/feed|bang feed|动态消息|信息流/i.test(clean);
+      if(title&&hint){explicitEmpty=true;break;}
+    }
+    return {kind:'feed_probe',value:{
+      cards:output.value.cards,
+      documentGeneration:output.value.documentGeneration,
+      listKind:output.value.listKind,
+      listState:output.value.listState,
+      loading,
+      articleCount,
+      explicitEmpty,
+      url:String(location.href).slice(0,4096),
+      surface:classify(),
+      scrollY:Number(window.scrollY)||0,
+      innerWidth:Number(window.innerWidth)||0,
+      innerHeight:Number(window.innerHeight)||0,
+      scrollHeight:Number(document.documentElement&&document.documentElement.scrollHeight)||0,
+      documentAgeMs:Math.max(0,Date.now()-(Number(performance&&performance.timeOrigin)||Date.now())),
+    }};
+  };
+  const feedHomeTarget=()=>{
+    const banner=first(['[role="banner"]'])||document;
+    const candidates=all('a[href]',banner).filter(visible).filter((anchor)=>{
+      try{
+        const url=new URL(anchor.href||anchor.getAttribute('href')||'',location.origin);
+        return (url.hostname==='facebook.com'||url.hostname.endsWith('.facebook.com'))&&url.pathname==='/'&&!url.search;
+      }catch{return false;}
+    });
+    if(!candidates.length)return {ok:false,reason:'no_home_link'};
+    const rect=candidates[0].getBoundingClientRect();
+    return {ok:true,cx:rect.left+rect.width/2,cy:rect.top+rect.height/2};
   };
   const comments=(root)=>{
     const out=[];
@@ -380,44 +502,216 @@ async function(input){
   };
   const actionRoot=()=>{
     const expected=String(p.noteId||'');
-    return (expected&&exactArticle(expected))||first(['[role="dialog"] [role="article"]','main [role="article"]','main article'])||null;
+    if(expected&&reelSurface()){
+      const active=activeReel();
+      if(active.ok&&postId(active.noteId)===postId(expected))return active.root;
+      return null;
+    }
+    if(expected)return exactArticle(expected);
+    return first(['[role="dialog"] [role="article"]','main [role="article"]','main article'])||null;
+  };
+  const likeProbe=()=>{
+    const root=actionRoot();
+    if(!root)return {ok:false,reason:'target_not_found'};
+    const button=reactionButton(root);
+    if(!button)return {ok:false,reason:'like_button_not_found',noteId:permalinkOf(root)||String(p.noteId||'')};
+    const target=point(button);
+    return {
+      ok:Boolean(target),
+      ...(target||{}),
+      reason:target?undefined:'like_button_not_found',
+      noteId:permalinkOf(root)||String(p.noteId||''),
+      already:pressed(button)||/取消赞|remove like|unlike/i.test(label(button)),
+      observation:actionEvidence(root),
+    };
+  };
+  const likePickerProbe=()=>{
+    const candidates=all('[role="menuitemradio"],[role="menuitem"],[role="option"],button,[role="button"]').filter(visible)
+      .filter((el)=>/^(赞|讚|like|me gusta|thích)$/i.test(label(el)))
+      .filter((el)=>Boolean(el.closest('[role="menu"],[role="listbox"],[role="dialog"]'))||!el.closest('[role="article"],article'));
+    if(candidates.length!==1)return {ok:false,reason:candidates.length?'ambiguous_target':'like_picker_not_found'};
+    const target=point(candidates[0]);
+    return {ok:Boolean(target),...(target||{}),reason:target?undefined:'like_picker_not_found'};
+  };
+  const followProbe=()=>{
+    const root=actionRoot();
+    if(!root)return {ok:false,reason:'target_not_found'};
+    const buttons=all('button,[role="button"]',root).filter(visible);
+    const follows=buttons.filter((el)=>/^(关注|follow|theo dõi)$/i.test(label(el)));
+    const already=buttons.some((el)=>/已关注|following|đang theo dõi/i.test(label(el)));
+    if(already)return {ok:true,already:true,noteId:String(p.noteId||'')};
+    if(follows.length!==1)return {ok:false,reason:follows.length?'ambiguous_target':'follow_button_not_found'};
+    const target=point(follows[0]);
+    return {ok:Boolean(target),...(target||{}),reason:target?undefined:'follow_button_not_found',already:false,noteId:String(p.noteId||'')};
+  };
+  const commentEditorProbe=()=>{
+    const root=actionRoot();
+    if(!root)return {ok:false,reason:'target_not_found'};
+    if(participationGate())return {ok:false,reason:'pending_group_approval'};
+    const allEditors=all('[contenteditable="true"][role="textbox"],textarea[aria-label],textarea').filter(visible).filter((el)=>{
+      const raw=`${label(el)} ${text(el,256)}`.toLowerCase();
+      return /评论|留言|comment|bình luận|coment|输入回答|answer/.test(raw);
+    });
+    let editors=allEditors.filter((el)=>closestArticle(el)===root);
+    if(!editors.length){
+      const region=exclusiveArticleRegion(root);
+      const outside=region?allEditors.filter((el)=>region.contains(el)&&closestArticle(el)===null):[];
+      editors=outside.length===1?outside:[];
+    }
+    if(editors.length!==1)return {ok:false,reason:editors.length?'ambiguous_target':'editor_not_found'};
+    const editor=editors[0];
+    const target=point(editor);
+    const value='value' in editor?String(editor.value||''):norm(editor.innerText||editor.textContent||'',32000);
+    return {ok:Boolean(target),...(target||{}),reason:target?undefined:'editor_not_found',value,noteId:permalinkOf(root)||String(p.noteId||'')};
+  };
+  const commentAckProbe=()=>{
+    const root=actionRoot();
+    if(!root)return {ok:false,reason:'target_not_found',confirmed:false,pending:false,rejected:false,inFlight:false};
+    const value=norm(p.text||'',32000);
+    const ownId=String(p.accountId||'');
+    let pending=false,rejected=false,inFlight=false;
+    for(const row of all('[role="article"],article',root).filter(visible)){
+      if(row===root)continue;
+      const raw=text(row,8000);
+      if(!raw.includes(value))continue;
+      const own=all('a[href]',row).some((link)=>{
+        try{
+          const url=new URL(link.href||link.getAttribute('href')||'',location.origin);
+          const id=url.searchParams.get('id')||(url.pathname.match(/\/people\/[^/]+\/(\d{5,})/)||[])[1]||'';
+          return id===ownId;
+        }catch{return false;}
+      });
+      if(!own)continue;
+      const status=raw.split(value).join(' ');
+      pending=pending||/待审核|待审批|待批准|等待(?:管理员)?(?:审核|审批|批准)|pending review|pending approval|awaiting (?:admin(?:istrator)? )?approval/i.test(status);
+      rejected=rejected||/已拒绝|被拒绝|遭拒绝|已(?:被)?驳回|查看反馈|查看意见反馈|đã từ chối|bị từ chối|xem phản hồi|\brejected\b|\bdeclined\b|was not approved|see feedback|view feedback/i.test(status);
+      inFlight=inFlight||/发布中|發佈中|发送中|發送中|đang đăng|đang gửi|\bposting\b|\bsending\b/i.test(status);
+      const serverId=all('a[href*="comment_id="]',row).some((link)=>{
+        try{
+          const id=new URL(link.href||link.getAttribute('href')||'',location.origin).searchParams.get('comment_id')||'';
+          return /^Y29tbWVudD/.test(id)&&!/^client/i.test(id);
+        }catch{return false;}
+      });
+      const controls=all('button,[role="button"],a[role="button"]',row).filter(visible).map((el)=>label(el));
+      const acknowledged=controls.some((raw)=>/^(赞|讚|点赞|按赞|like|thích)$/i.test(raw))
+        &&controls.some((raw)=>/^(回复|回覆|reply|trả lời|phản hồi)$/i.test(raw));
+      if(!pending&&!rejected&&(serverId||acknowledged))return {ok:true,confirmed:true,pending:false,rejected:false,inFlight:false};
+    }
+    pending=pending||participationGate();
+    return {ok:true,confirmed:false,pending,rejected,inFlight};
+  };
+  const joinProbe=()=>{
+    const observation=joinObservation();
+    const main=first(['[role="main"]','main'])||document.body;
+    const heading=first(['h1','[role="heading"][aria-level="1"]'],main);
+    const targetRegion=targetGroupRegion(observation.targetGroupId,main,heading);
+    const candidates=all('button,[role="button"],a[role="button"]').filter(visible).filter((el)=>
+      /^(?:加入|加入小组|join(?: group)?|tham gia)$/i.test(label(el))&&targetRegion&&targetRegion.contains(el)
+    );
+    const target=candidates.length===1?point(candidates[0]):null;
+    return {
+      observation,
+      joined:observation.membershipSignals.length>0,
+      pending:Boolean(observation.pendingRequest),
+      questionnaire:Boolean(observation.questionnaireRequired),
+      found:Boolean(target),
+      ambiguous:candidates.length>1,
+      ...(target||{}),
+    };
+  };
+  const publishEntryProbe=()=>{
+    const candidates=all('button,[role="button"],div[role="button"]',document).filter(visible).filter((el)=>/what(?:'s| is) on your mind|你在想什么|create post|发帖|tạo bài viết/i.test(label(el)+' '+text(el,256)));
+    if(candidates.length!==1)return {ok:false,reason:candidates.length?'ambiguous_target':'composer_entry_not_found'};
+    const target=point(candidates[0]);
+    return {ok:Boolean(target),...(target||{}),reason:target?undefined:'composer_entry_not_found'};
+  };
+  const publishEditorProbe=()=>{
+    const root=first(['[role="dialog"]','[aria-modal="true"]']);
+    if(!root)return {ok:false,reason:'composer_not_open'};
+    const editors=all('[contenteditable="true"][role="textbox"],[contenteditable="true"],textarea',root).filter(visible);
+    if(editors.length!==1)return {ok:false,reason:editors.length?'ambiguous_target':'composer_editor_not_found'};
+    const editor=editors[0];
+    const target=point(editor);
+    const value='value' in editor?String(editor.value||''):norm(editor.innerText||editor.textContent||'',32000);
+    return {ok:Boolean(target),...(target||{}),reason:target?undefined:'composer_editor_not_found',value};
+  };
+  const publishSubmitProbe=()=>{
+    const root=first(['[role="dialog"]','[aria-modal="true"]']);
+    if(!root)return {ok:false,reason:'composer_not_open',composerOpen:false};
+    const candidates=all('button,[role="button"]',root).filter(visible).filter((el)=>/^(发布|post|发帖|đăng)$/i.test(label(el)));
+    if(candidates.length!==1)return {ok:false,reason:candidates.length?'ambiguous_target':'submit_not_found',composerOpen:true};
+    const button=candidates[0];
+    const target=point(button);
+    const disabled=Boolean(button.disabled||button.getAttribute('aria-disabled')==='true');
+    return {ok:Boolean(target)&&!disabled,...(target||{}),reason:disabled?'submit_disabled':target?undefined:'submit_not_found',composerOpen:true,disabled};
+  };
+  const groupIdFromValue=(value)=>{
+    const raw=String(value||'');
+    const hit=raw.match(/(?:facebook\.com)?\/groups\/([^/?#\s]+)/i);
+    return hit&&hit[1]||'';
+  };
+  const targetGroupRegion=(groupId,main,heading)=>{
+    if(!groupId||!main||!heading||!main.contains(heading))return null;
+    let region=heading;
+    for(let parent=heading.parentElement;parent&&parent!==main;parent=parent.parentElement){
+      const foreign=all('a[href],[role="link"],[data-href],[data-url]',parent).some((node)=>{
+        const values=[
+          node.getAttribute&&node.getAttribute('href'),
+          node.getAttribute&&node.getAttribute('data-href'),
+          node.getAttribute&&node.getAttribute('data-url'),
+        ];
+        return values.some((value)=>{
+          const referenced=groupIdFromValue(value);
+          return referenced&&referenced!==groupId;
+        });
+      });
+      if(foreign)break;
+      region=parent;
+    }
+    return region;
   };
   const joinObservation=()=>{
-    const body=text(document.body,10000);
     const candidates=all('button,[role="button"],a[role="button"]').filter(visible).map((el)=>{
       const raw=label(el,256);
-      const lower=raw.toLowerCase();
-      const joined=/已加入|joined|member|退出小组|leave group|đã tham gia/i.test(raw);
+      const joined=/^(?:已加入|joined|member|退出小组|leave group|đã tham gia)$/i.test(raw);
       const join=!joined&&/^(?:加入|加入小组|join(?: group)?|tham gia)$/i.test(raw);
-      const pending=/待审核|pending|request sent/i.test(raw);
-      return {el,raw,kind:join?'join':joined?'joined':pending?'pending':'other',inTargetScope:!el.closest('nav,header,aside,[role="navigation"],[role="banner"],[role="complementary"]')};
+      const pending=/^(?:待审核|pending|request sent|已申请|requested)$/i.test(raw);
+      return {el,raw,kind:join?'join':joined?'joined':pending?'pending':'other',inTargetScope:false};
     });
     const path=location.pathname.split('/').filter(Boolean);
     const groupId=path[0]&&path[0].toLowerCase()==='groups'?path[1]||null:null;
     const main=first(['[role="main"]','main'])||document.body;
     const heading=first(['h1','[role="heading"][aria-level="1"]'],main);
+    const targetRegion=targetGroupRegion(groupId,main,heading);
+    for(const item of candidates){
+      item.inTargetScope=Boolean(targetRegion&&targetRegion.contains(item.el));
+    }
     const scoped=candidates.filter((item)=>item.inTargetScope);
     const mainCta=scoped.find((item)=>item.kind!=='other');
     const signals=scoped.filter((item)=>item.kind==='joined').map((item)=>item.raw).slice(0,16);
+    const modal=first(['[role="dialog"]','[aria-modal="true"]']);
+    const modalText=text(modal,1000);
+    const headerText=text(heading,1000);
+    const blocking=blockingProbe();
     return {
       groupUrl:groupId?`https://www.facebook.com/groups/${groupId}`:undefined,
       pageUrl:String(location.href).slice(0,4096),
       title:text(heading,200)||undefined,
       mainCtaText:mainCta&&mainCta.raw||null,
       mainCtaAria:mainCta&&label(mainCta.el,256)||null,
-      headerText:text(heading,1000)||null,
-      modalText:text(first(['[role="dialog"]','[aria-modal="true"]']),1000)||null,
+      headerText:headerText||null,
+      modalText:modalText||null,
       membershipSignals:signals,
-      loginRequired:classify()==='login',
-      captchaDetected:classify()==='checkpoint'||/captcha|验证码|安全检查/i.test(body),
-      questionnaireRequired:/回答问题|answer questions|membership questions/i.test(body),
+      loginRequired:blocking.kind==='login',
+      captchaDetected:blocking.kind==='captcha',
+      questionnaireRequired:/回答问题|answer questions|membership questions/i.test(`${modalText} ${headerText}`),
       pendingRequest:scoped.some((item)=>item.kind==='pending'),
       actionNodeCount:candidates.length,
       documentReady:document.readyState,
       composerPresent:Boolean(commentEditor(main)),
       joinCtaPresent:scoped.some((item)=>item.kind==='join'),
       targetGroupId:groupId,
-      scopeResolved:Boolean(groupId&&main),
+      scopeResolved:Boolean(targetRegion),
       outOfScopeJoinCount:candidates.filter((item)=>item.kind==='join'&&!item.inTargetScope).length,
       ctaCandidates:candidates.slice(0,50).map((item)=>({text:item.raw||null,kind:item.kind,inTargetScope:item.inTargetScope})),
     };
@@ -439,26 +733,40 @@ async function(input){
     return {kind:'identity_receipt',value:{ok:true,accountId,displayName:displayName||undefined,source:cookieId?'cookie':'profile-link'}};
   };
 
-  acceptConsent();
-  const blocked=blocker();
-  if(!['identity_read','page_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
+  const blocking=blockingProbe();
+  const blocked=blocker(blocking);
+  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','like_probe','like_picker_probe','follow_probe','comment_editor_probe','comment_ack_probe','join_probe','publish_entry_probe','publish_editor_probe','publish_submit_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
     return fail(kind||'page',blocked);
   }
   if(kind==='identity_read')return done(identity());
+  if(kind==='consent_probe')return done({kind:'consent_probe',value:consentProbe()});
+  if(kind==='feed_probe')return done(feedProbe());
+  if(kind==='feed_home_target')return done({kind:'point_target',value:feedHomeTarget()});
+  if(kind==='like_probe')return done({kind:'like_probe',value:likeProbe()});
+  if(kind==='like_picker_probe')return done({kind:'point_target',value:likePickerProbe()});
+  if(kind==='follow_probe')return done({kind:'follow_probe',value:followProbe()});
+  if(kind==='comment_editor_probe')return done({kind:'text_target',value:commentEditorProbe()});
+  if(kind==='comment_ack_probe')return done({kind:'comment_ack_probe',value:commentAckProbe()});
+  if(kind==='join_probe')return done({kind:'join_probe',value:joinProbe()});
+  if(kind==='publish_entry_probe')return done({kind:'point_target',value:publishEntryProbe()});
+  if(kind==='publish_editor_probe')return done({kind:'text_target',value:publishEditorProbe()});
+  if(kind==='publish_submit_probe')return done({kind:'publish_submit_probe',value:publishSubmitProbe()});
   if(kind==='reel_probe')return done({kind:'reel_probe',value:reelProbeValue(activeReel())});
   if(kind==='reel_next_target')return done({kind:'reel_next_target',value:reelNextTarget()});
   if(kind==='reel_cards')return done(feedCards());
   if(kind==='page_probe'){
     const surface=classify();
     const cards=topArticles().length;
-    const probedKind=blocked==='blocked_by_captcha'?'captcha':blocked==='login_required'?'login':surface==='home'?'home':surface==='search'?'search':surface.endsWith('_post')?'note_detail':surface==='login'?'login':surface==='checkpoint'?'captcha':'unknown';
+    const probedKind=blocking.kind==='captcha'?'captcha':blocking.kind==='login'?'login':blocking.kind==='unknown'?'unknown':surface==='home'?'home':surface==='search'?'search':surface.endsWith('_post')?'note_detail':surface==='login'?'login':'unknown';
     return done({kind:'page_probe',value:{
       targetId:'',
       origin:location.origin,
       path:location.pathname,
       readyState:['loading','interactive','complete'].includes(document.readyState)?document.readyState:'unknown',
       pageKind:probedKind,
-      signals:{feedCardCount:cards,noteDetailCount:surface.endsWith('_post')?1:0,loginWallCount:surface==='login'?1:0,captchaSignalCount:surface==='checkpoint'?1:0,dialogCount:all('[role="dialog"],[aria-modal="true"]').filter(visible).length,profileSignalCount:surface==='page'?1:0,notificationSignalCount:0,publishSignalCount:0,errorSignalCount:0,mainCount:all('main,[role="main"]').length},
+      blockingKind:blocking.kind,
+      blockingText:blocking.text?blocking.text.slice(0,1000):undefined,
+      signals:{feedCardCount:cards,noteDetailCount:surface.endsWith('_post')?1:0,loginWallCount:blocking.kind==='login'?1:0,captchaSignalCount:blocking.kind==='captcha'?1:0,dialogCount:all('[role="dialog"],[aria-modal="true"]').filter(visible).length,profileSignalCount:surface==='page'?1:0,notificationSignalCount:0,publishSignalCount:0,errorSignalCount:blocking.kind==='unknown'?1:0,mainCount:all('main,[role="main"]').length},
     }});
   }
   if(kind==='session_stop')return done(action('session_stop',true));
@@ -566,7 +874,7 @@ async function(input){
         }catch{return false;}
       });
     });
-    return verified?done(action('comment',true,undefined,{noteId:String(p.noteId||'')})):ambiguous('comment','comment_verification_ambiguous',{noteId:String(p.noteId||'')});
+    return verified?done(action('comment',true,undefined,{noteId:String(p.noteId||'')})):ambiguous('comment','verification_ambiguous',{noteId:String(p.noteId||'')});
   }
   if(kind==='interaction_like_comment'){
     const target=document.getElementById(String(p.commentAnchorId||''));if(!target)return fail('comment_like','comment_anchor_not_found');
@@ -578,18 +886,23 @@ async function(input){
   if(kind==='group_join'){
     const before=joinObservation();
     const groupUrl=before.groupUrl||String(p.groupUrl||'');
-    const member=before.membershipSignals.length>0||(before.composerPresent&&!before.joinCtaPresent);
+    const member=before.membershipSignals.length>0;
     if(member)return done(action('join_group',false,'already_member',{groupUrl,clicked:false,groupObservation:before}));
     if(before.questionnaireRequired)return fail('join_group','questionnaire_required');
     if(before.pendingRequest)return done(action('join_group',false,'pending',{groupUrl,clicked:false,groupObservation:before}));
     if(!p.click)return done(action('join_group',false,'observation_only',{groupUrl,clicked:false,groupObservation:before}));
     if(!before.scopeResolved)return fail('join_group','not_ready');
-    const candidates=all('button,[role="button"],a[role="button"]').filter(visible).filter((el)=>/^(?:加入|加入小组|join(?: group)?|tham gia)$/i.test(label(el))&&!el.closest('nav,header,aside,[role="navigation"],[role="banner"],[role="complementary"]'));
+    const main=first(['[role="main"]','main'])||document.body;
+    const heading=first(['h1','[role="heading"][aria-level="1"]'],main);
+    const targetRegion=targetGroupRegion(before.targetGroupId,main,heading);
+    const candidates=all('button,[role="button"],a[role="button"]').filter(visible).filter((el)=>
+      /^(?:加入|加入小组|join(?: group)?|tham gia)$/i.test(label(el))&&targetRegion&&targetRegion.contains(el)
+    );
     if(candidates.length!==1)return fail('join_group',candidates.length?'not_ready':'no_button');
     if(!click(candidates[0]))return fail('join_group','no_button');
     await sleep(900);
     const after=joinObservation();
-    const joined=after.membershipSignals.length>0||(after.composerPresent&&!after.joinCtaPresent);
+    const joined=after.membershipSignals.length>0||(!before.composerPresent&&after.composerPresent&&!after.joinCtaPresent);
     return joined?done(action('join_group',true,undefined,{groupUrl,clicked:true,groupObservation:before,postObservation:after})):ambiguous('join_group','join_verification_ambiguous',{groupUrl,clicked:true,groupObservation:before,postObservation:after});
   }
   if(kind==='publish_navigate_entry'){

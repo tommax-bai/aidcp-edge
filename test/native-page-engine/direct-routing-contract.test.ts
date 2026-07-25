@@ -11,10 +11,15 @@ test('projects Edge coordination fields out of the Native command envelope', () 
   const command = nativeCommandForEnvelope({
     v: 1, id: 'e1', ts: Date.now(), type: 'interaction.comment',
     payload: { taskId: 'lease-secret', noteId: 'n1', text: 'approved', reason: 'commit' },
-  });
+  }, '61591824155856');
   assert.deepEqual(command, {
     kind: 'interaction_comment',
-    params: { noteId: 'n1', text: 'approved', reason: 'commit' },
+    params: {
+      noteId: 'n1',
+      text: 'approved',
+      reason: 'commit',
+      accountId: '61591824155856',
+    },
   });
 });
 

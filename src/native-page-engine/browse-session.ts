@@ -28,6 +28,7 @@ export interface NativeBrowseSessionOptions {
   clock?: () => number;
   random?: RandomFn;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  overlayConfirmMs?: number;
 }
 
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -50,6 +51,19 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 const monotonicNow = (): number => performance.now();
 
+const FACEBOOK_UNSUPPORTED_COMMANDS = new Set<Envelope['type']>([
+  'interaction.collect',
+  'interaction.like_comment',
+  'note.browse_images',
+  'note.scroll_comments',
+  'profile.open',
+  'notification.open',
+  'notification.browse_comments',
+  'notification.browse_likes',
+  'notification.browse_follows',
+  'notification.back_home',
+]);
+
 export class NativeBrowseSession implements EdgeBrowseSession {
   private readonly ownerId: string;
   private readonly logger: (message: string) => void;
@@ -59,7 +73,10 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private active?: Promise<void>;
   private activeAbort?: AbortController;
   private probeTimer?: NodeJS.Timeout;
-  private facebookCaptchaActive = false;
+  private facebookBlockingKind: 'none' | 'login' | 'captcha' | 'unknown' = 'none';
+  private facebookReportedBlockingKind?: 'captcha' | 'unknown';
+  private facebookUnknownTimer?: NodeJS.Timeout;
+  private lastFacebookBlockingEvidence?: { url?: string; text?: string };
   private lastFacebookCardsAt = 0;
 
   constructor(private readonly options: NativeBrowseSessionOptions) {
@@ -86,11 +103,8 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       this.reportFailure(env, 'native_session_quiesced', 'not_started');
       return;
     }
-    const payload = env.payload && typeof env.payload === 'object'
-      ? env.payload as Record<string, unknown>
-      : {};
-    if (env.type === 'profile.open' && Object.prototype.hasOwnProperty.call(payload, 'direct')) {
-      this.reportFailure(env, 'legacy_profile_direct_unsupported', 'not_started');
+    if (this.options.platform === 'facebook' && FACEBOOK_UNSUPPORTED_COMMANDS.has(env.type)) {
+      this.reportFailure(env, 'capability_unsupported', 'not_started');
       return;
     }
     const command = nativeCommandForEnvelope(env, this.options.getAccountId?.());
@@ -380,6 +394,8 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private stopProbe(): void {
     if (this.probeTimer) clearTimeout(this.probeTimer);
     this.probeTimer = undefined;
+    if (this.facebookUnknownTimer) clearTimeout(this.facebookUnknownTimer);
+    this.facebookUnknownTimer = undefined;
   }
 
   private async probeFacebook(): Promise<void> {
@@ -400,27 +416,51 @@ export class NativeBrowseSession implements EdgeBrowseSession {
 
   private observeFacebookProbe(value: Record<string, unknown>): void {
     if (this.options.platform !== 'facebook') return;
-    const blocked = value.pageKind === 'captcha';
+    const blockingKind = value.blockingKind === 'captcha'
+      || value.blockingKind === 'unknown'
+      || value.blockingKind === 'login'
+      ? value.blockingKind
+      : value.pageKind === 'captcha'
+        ? 'captcha'
+        : value.pageKind === 'login'
+          ? 'login'
+          : 'none';
     const url = typeof value.origin === 'string'
       ? `${value.origin}${typeof value.path === 'string' ? value.path : ''}`
       : undefined;
-    if (blocked && !this.facebookCaptchaActive) {
-      this.facebookCaptchaActive = true;
-      this.options.client.send('risk.captcha_detected', {
-        edgeId: this.options.edgeId,
-        accountId: this.options.getAccountId?.(),
-        kind: 'captcha',
-        ...(url ? { url } : {}),
-        reason: 'native_page_probe',
-      });
-      this.emitUi({
-        kind: 'activity',
-        type: 'popup',
-        sentence: '遇到验证码，先停一停等处理',
-        presence: '遇到验证码，暂停操作中…',
-      });
-    } else if (!blocked && this.facebookCaptchaActive) {
-      this.facebookCaptchaActive = false;
+    const evidence = typeof value.blockingText === 'string' && value.blockingText.trim()
+      ? value.blockingText.trim().slice(0, 1_000)
+      : undefined;
+    this.lastFacebookBlockingEvidence = { url, text: evidence };
+    const previous = this.facebookBlockingKind;
+    this.facebookBlockingKind = blockingKind;
+
+    if (blockingKind === 'captcha') {
+      if (this.facebookUnknownTimer) clearTimeout(this.facebookUnknownTimer);
+      this.facebookUnknownTimer = undefined;
+      if (this.facebookReportedBlockingKind !== 'captcha') this.reportFacebookBlocking('captcha');
+      return;
+    }
+    if (blockingKind === 'unknown') {
+      if (previous !== 'unknown' && !this.facebookReportedBlockingKind && !this.facebookUnknownTimer) {
+        const configuredConfirmMs = this.options.overlayConfirmMs ?? Number(process.env.AIDCP_OVERLAY_CONFIRM_MS ?? 2_000);
+        const confirmMs = Number.isFinite(configuredConfirmMs) && configuredConfirmMs >= 0
+          ? configuredConfirmMs
+          : 2_000;
+        this.facebookUnknownTimer = setTimeout(() => {
+          this.facebookUnknownTimer = undefined;
+          if (this.facebookBlockingKind === 'unknown' && !this.facebookReportedBlockingKind) {
+            this.reportFacebookBlocking('unknown');
+          }
+        }, confirmMs);
+        this.facebookUnknownTimer.unref?.();
+      }
+      return;
+    }
+    if (this.facebookUnknownTimer) clearTimeout(this.facebookUnknownTimer);
+    this.facebookUnknownTimer = undefined;
+    if (this.facebookReportedBlockingKind) {
+      this.facebookReportedBlockingKind = undefined;
       this.options.client.send('risk.captcha_cleared', {
         edgeId: this.options.edgeId,
         accountId: this.options.getAccountId?.(),
@@ -433,6 +473,34 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         presence: '继续浏览…',
       });
     }
+  }
+
+  private reportFacebookBlocking(kind: 'captcha' | 'unknown'): void {
+    this.facebookReportedBlockingKind = kind;
+    const evidence = this.lastFacebookBlockingEvidence;
+    this.options.client.send('risk.captcha_detected', {
+      edgeId: this.options.edgeId,
+      accountId: this.options.getAccountId?.(),
+      kind,
+      ...(evidence?.url ? { url: evidence.url } : {}),
+      ...(evidence?.text ? {
+        overlay: {
+          kind,
+          ...(evidence.url ? { firstDetectedUrl: evidence.url } : {}),
+          capturedAt: Date.now(),
+          text: evidence.text,
+          candidates: [],
+        },
+      } : {}),
+      reason: 'native_page_probe',
+    });
+    const what = kind === 'captcha' ? '验证码' : '未知阻断/限流';
+    this.emitUi({
+      kind: 'activity',
+      type: 'popup',
+      sentence: `遇到${what}，先停一停等处理`,
+      presence: `遇到${what}，暂停操作中…`,
+    });
   }
 
   private emitFacebookAction(payload: ActionCompletedPayload): void {
