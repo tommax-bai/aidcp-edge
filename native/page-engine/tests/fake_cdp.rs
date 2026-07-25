@@ -1,5 +1,6 @@
 use aidcp_page_engine::command::{IdentityCaptureParams, PageScrollParams, ReasonParams};
 use aidcp_page_engine::engine::{CommandOutput, Engine};
+use aidcp_page_engine::model::FacebookListKind;
 use aidcp_page_engine::protocol::{
     CommandRecord, EffectPhase, NativeCommand, PageProbeParams, Platform, SessionCloseRecord,
     SessionOpenParams, SessionOpenRecord,
@@ -142,6 +143,84 @@ async fn facebook_current_identity_read_never_navigates() {
     engine.shutdown().await;
     let methods = server.await.expect("Facebook identity fake CDP");
     assert!(!methods.iter().any(|method| method == "Page.navigate"));
+}
+
+#[tokio::test]
+async fn facebook_initial_scan_resets_a_persisted_reel_to_home_feed() {
+    let (port, server) = spawn_facebook_initial_scan_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&browse_command(1))
+        .await
+        .expect("Facebook initial scan");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::PageCards(cards) = outcome.output.expect("Feed cards") else {
+        panic!("expected Feed cards")
+    };
+    assert_eq!(cards.list_kind, Some(FacebookListKind::Feed));
+    assert_eq!(cards.cards.len(), 1);
+    assert_eq!(
+        cards.cards[0].note_id.as_deref(),
+        Some("https://www.facebook.com/Alice/posts/pfbidHOME")
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook initial scan fake CDP");
+    let navigate_index = requests
+        .iter()
+        .position(|request| request["method"] == "Page.navigate")
+        .expect("home navigation");
+    assert_eq!(
+        requests[navigate_index]
+            .pointer("/params/url")
+            .and_then(Value::as_str),
+        Some("https://www.facebook.com/")
+    );
+    let first_evaluate_index = requests
+        .iter()
+        .position(|request| request["method"] == "Runtime.evaluate")
+        .expect("post-navigation probe");
+    assert!(
+        navigate_index < first_evaluate_index,
+        "persisted Reel must not be evaluated before home navigation"
+    );
+}
+
+#[tokio::test]
+async fn facebook_initial_scan_navigation_failure_never_reads_the_persisted_page() {
+    let (port, server) = spawn_facebook_initial_scan_navigation_failure_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&browse_command(1))
+        .await
+        .expect("stored Facebook startup failure");
+    assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
+    assert!(outcome.output.is_none());
+    assert!(outcome.error.is_some());
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook startup failure fake CDP");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "Page.navigate")
+            .count(),
+        1
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Runtime.evaluate"),
+        "navigation failure must stop before the persisted page can be evaluated"
+    );
 }
 
 #[tokio::test]
@@ -533,6 +612,96 @@ async fn spawn_facebook_identity_cdp() -> (u16, tokio::task::JoinHandle<Vec<Stri
     (port, server)
 }
 
+async fn spawn_facebook_initial_scan_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(
+            &listener,
+            port,
+            "https://www.facebook.com/reel/1528556722142425",
+        )
+        .await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                json!({"result":{"value":router_result(
+                    "page_probe",
+                    json!({
+                        "targetId": "",
+                        "origin": "https://www.facebook.com",
+                        "path": "/",
+                        "readyState": "complete",
+                        "pageKind": "home",
+                        "signals": {
+                            "feedCardCount": 1,
+                            "noteDetailCount": 0,
+                            "loginWallCount": 0,
+                            "captchaSignalCount": 0,
+                            "dialogCount": 0,
+                            "profileSignalCount": 0,
+                            "notificationSignalCount": 0,
+                            "publishSignalCount": 0,
+                            "errorSignalCount": 0,
+                            "mainCount": 1
+                        }
+                    })
+                )}}),
+            )
+            .await,
+        );
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                json!({"result":{"value":router_result(
+                    "page_cards",
+                    json!({
+                        "cards": [{
+                            "index": 0,
+                            "title": "Home Feed card",
+                            "likeCount": 0,
+                            "collectCount": 0,
+                            "noteId": "https://www.facebook.com/Alice/posts/pfbidHOME"
+                        }],
+                        "listKind": "feed",
+                        "listState": "ready"
+                    })
+                )}}),
+            )
+            .await,
+        );
+        let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_initial_scan_navigation_failure_cdp()
+-> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/groups/123").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        requests.push(reject_call_capture(&mut websocket, -32000, "navigation failed").await);
+        let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
 async fn spawn_facebook_reel_arrow_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
@@ -908,6 +1077,35 @@ where
         ))
         .await
         .expect("CDP response");
+    request
+}
+
+async fn reject_call_capture<S>(
+    websocket: &mut tokio_tungstenite::WebSocketStream<S>,
+    code: i64,
+    message: &str,
+) -> Value
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let request_message = websocket
+        .next()
+        .await
+        .expect("CDP request")
+        .expect("valid CDP request");
+    let Message::Text(text) = request_message else {
+        panic!("expected text request");
+    };
+    let request: Value = serde_json::from_str(&text).expect("request JSON");
+    let id = request["id"].as_u64().expect("request id");
+    websocket
+        .send(Message::Text(
+            json!({"id":id,"error":{"code":code,"message":message}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .expect("CDP error response");
     request
 }
 

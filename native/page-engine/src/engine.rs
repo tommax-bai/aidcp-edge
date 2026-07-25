@@ -25,6 +25,7 @@ use url::Url;
 
 const MAX_RECORDED_COMMANDS: usize = 128;
 const MAX_CAPTCHA_SNAPSHOTS: usize = 8;
+const FACEBOOK_HOME_URL: &str = "https://www.facebook.com/";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -532,6 +533,11 @@ async fn execute_facebook_command_once(
                     .bounded(),
                 ),
             ))
+        }
+        BrowseScroll(params) if params.reason.as_deref() == Some("initial_scan") => {
+            session.cdp.navigate(FACEBOOK_HOME_URL).await?;
+            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+            evaluate_facebook_router_until_cards(session, command, Duration::from_secs(5)).await
         }
         SearchExecute(params) => {
             let Some(container) = params.container.as_deref() else {
