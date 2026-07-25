@@ -26,6 +26,7 @@ use url::Url;
 const MAX_RECORDED_COMMANDS: usize = 128;
 const MAX_CAPTCHA_SNAPSHOTS: usize = 8;
 const FACEBOOK_HOME_URL: &str = "https://www.facebook.com/";
+const FACEBOOK_DETAIL_HYDRATION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -553,9 +554,17 @@ async fn execute_facebook_command_once(
                 params.url.as_deref().unwrap_or_default(),
                 params.note_id.as_deref(),
             )?;
+            let target_post_id = canonical_facebook_post_id(url.as_str())
+                .ok_or_else(invalid_facebook_navigation_target)?;
             session.cdp.navigate(url.as_str()).await?;
             wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
-            evaluate_facebook_router(session, command).await
+            evaluate_facebook_router_until_requested_detail(
+                session,
+                command,
+                &target_post_id,
+                FACEBOOK_DETAIL_HYDRATION_TIMEOUT,
+            )
+            .await
         }
         GroupJoin(params) => {
             let url = validated_facebook_group_url(&params.group_url)?;
@@ -856,6 +865,32 @@ async fn evaluate_facebook_router_until_cards(
     }
 }
 
+async fn evaluate_facebook_router_until_requested_detail(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+    target_post_id: &str,
+    timeout: Duration,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let latest = evaluate_facebook_router(session, command).await?;
+        if matches!(
+            &latest.1,
+            CommandOutput::NoteDetail(detail)
+                if canonical_facebook_post_id(&detail.note_id).as_deref() == Some(target_post_id)
+        ) {
+            return Ok(latest);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(EngineError::new(
+                ErrorCode::ProbeFailed,
+                "native Facebook target detail identity was not confirmed",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
 async fn wait_for_facebook_ready(
     session: &mut EngineSession,
     timeout: Duration,
@@ -916,6 +951,39 @@ fn validated_facebook_content_url(raw: &str, expected: Option<&str>) -> Result<U
         return Err(invalid_facebook_navigation_target());
     }
     Ok(url)
+}
+
+fn canonical_facebook_post_id(raw: &str) -> Option<String> {
+    let url = Url::parse(raw).ok()?;
+    validate_facebook_origin(&url).ok()?;
+    let path = url.path().to_ascii_lowercase();
+    let query_id = url
+        .query_pairs()
+        .find_map(|(key, value)| match key.as_ref() {
+            "multi_permalinks" | "story_fbid" => Some(value.into_owned()),
+            "v" if path == "/watch" || path == "/watch/" => Some(value.into_owned()),
+            _ => None,
+        })
+        .filter(|value| !value.is_empty());
+    if query_id.is_some() {
+        return query_id;
+    }
+    let segments: Vec<_> = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    for (index, segment) in segments.iter().enumerate() {
+        if matches!(
+            segment.to_ascii_lowercase().as_str(),
+            "posts" | "videos" | "reel" | "permalink"
+        ) {
+            return segments
+                .get(index + 1)
+                .filter(|value| !value.is_empty())
+                .map(|value| (*value).to_owned());
+        }
+    }
+    None
 }
 
 fn validated_facebook_group_url(raw: &str) -> Result<Url, EngineError> {
@@ -1716,6 +1784,35 @@ mod tests {
             Some("video-2@element:2"),
             &before
         ));
+    }
+
+    #[test]
+    fn facebook_post_identity_matches_equivalent_forms_without_accepting_profiles() {
+        let group = canonical_facebook_post_id(
+            "https://www.facebook.com/groups/100/posts/2579243155868042",
+        );
+        let permalink = canonical_facebook_post_id(
+            "https://www.facebook.com/permalink.php?story_fbid=2579243155868042&id=99",
+        );
+        assert_eq!(group.as_deref(), Some("2579243155868042"));
+        assert_eq!(group, permalink);
+        assert_eq!(
+            canonical_facebook_post_id("https://www.facebook.com/watch?v=1632570071375207")
+                .as_deref(),
+            Some("1632570071375207")
+        );
+        assert_eq!(
+            canonical_facebook_post_id("https://www.facebook.com/reel/1234567890").as_deref(),
+            Some("1234567890")
+        );
+        assert_eq!(
+            canonical_facebook_post_id("https://www.facebook.com/profile.php?id=61591824155856"),
+            None
+        );
+        assert_eq!(
+            canonical_facebook_post_id("https://facebook.com.evil.test/groups/1/posts/2"),
+            None
+        );
     }
 
     #[test]

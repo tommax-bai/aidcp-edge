@@ -1,5 +1,8 @@
-use aidcp_page_engine::command::{IdentityCaptureParams, PageScrollParams, ReasonParams};
+use aidcp_page_engine::command::{
+    IdentityCaptureParams, NoteOpenParams, PageScrollParams, ReasonParams,
+};
 use aidcp_page_engine::engine::{CommandOutput, Engine};
+use aidcp_page_engine::error::ErrorCode;
 use aidcp_page_engine::model::FacebookListKind;
 use aidcp_page_engine::protocol::{
     CommandRecord, EffectPhase, NativeCommand, PageProbeParams, Platform, SessionCloseRecord,
@@ -375,6 +378,74 @@ async fn facebook_reel_scroll_returns_no_target_without_fabricated_cards() {
 }
 
 #[tokio::test]
+async fn facebook_note_open_discards_unrelated_detail_until_requested_identity_hydrates() {
+    let (port, server) = spawn_facebook_note_open_hydration_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 20_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let target = "https://www.facebook.com/groups/100/posts/2579243155868042";
+    let outcome = engine
+        .execute(&facebook_note_open_command(1, target, 20_000))
+        .await
+        .expect("Facebook target detail");
+    let CommandOutput::NoteDetail(detail) = outcome.output.expect("target detail output") else {
+        panic!("expected note detail")
+    };
+    assert_eq!(
+        detail.note_id,
+        "https://www.facebook.com/permalink.php?story_fbid=2579243155868042&id=99"
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook note hydration fake CDP");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "Runtime.evaluate")
+            .count(),
+        3,
+        "ready probe, stale detail, then requested detail"
+    );
+}
+
+#[tokio::test]
+async fn facebook_note_open_never_returns_mismatched_detail_as_success() {
+    let (port, server) = spawn_facebook_note_open_mismatch_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 20_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_note_open_command(
+            1,
+            "https://www.facebook.com/groups/100/posts/2579243155868042",
+            20_000,
+        ))
+        .await
+        .expect("stored bounded target failure");
+    assert!(
+        outcome.output.is_none(),
+        "mismatched detail must never escape as output"
+    );
+    assert_eq!(
+        outcome.error.expect("target identity failure").code,
+        ErrorCode::ProbeFailed
+    );
+
+    engine.shutdown().await;
+    let samples = server.await.expect("Facebook note mismatch fake CDP");
+    assert!(
+        samples >= 2,
+        "bounded wait must resample instead of accepting the first mismatch"
+    );
+}
+
+#[tokio::test]
 async fn xhs_self_identity_uses_only_the_bound_canonical_profile() {
     let (port, server) = spawn_xhs_self_identity_cdp().await;
     let mut engine = Engine::default();
@@ -445,6 +516,26 @@ fn page_probe_command(command_id: u64) -> CommandRecord {
         command_id,
         deadline_unix_ms: unix_time_ms() + 2_000,
         command: NativeCommand::PageProbe(PageProbeParams::default()),
+    }
+}
+
+fn facebook_note_open_command(command_id: u64, url: &str, timeout_ms: u64) -> CommandRecord {
+    CommandRecord {
+        protocol_version: 2,
+        id: format!("facebook-note-open-{command_id}"),
+        session_id: "session-1".to_owned(),
+        task_id: "browse-1".to_owned(),
+        command_id,
+        deadline_unix_ms: unix_time_ms() + timeout_ms,
+        command: NativeCommand::NoteOpen(NoteOpenParams {
+            index: None,
+            note_id: None,
+            url: Some(url.to_owned()),
+            reason: None,
+            surface: None,
+            purpose: None,
+            think_ms: None,
+        }),
     }
 }
 
@@ -700,6 +791,143 @@ async fn spawn_facebook_initial_scan_navigation_failure_cdp()
         requests
     });
     (port, server)
+}
+
+async fn spawn_facebook_note_open_hydration_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(
+            &listener,
+            port,
+            "https://www.facebook.com/groups/100/posts/999",
+        )
+        .await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                facebook_ready_cdp("/groups/100/posts/2579243155868042"),
+            )
+            .await,
+        );
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                facebook_note_detail_cdp(
+                    "https://www.facebook.com/groups/100/posts/999",
+                    "stale post",
+                ),
+            )
+            .await,
+        );
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                facebook_note_detail_cdp(
+                    "https://www.facebook.com/permalink.php?story_fbid=2579243155868042&id=99",
+                    "requested post",
+                ),
+            )
+            .await,
+        );
+        let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_note_open_mismatch_cdp() -> (u16, tokio::task::JoinHandle<usize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(
+            &listener,
+            port,
+            "https://www.facebook.com/groups/100/posts/999",
+        )
+        .await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        for _ in 0..3 {
+            respond_to_call(&mut websocket, json!({})).await;
+        }
+        respond_to_call(&mut websocket, json!({})).await;
+        respond_to_call(
+            &mut websocket,
+            facebook_ready_cdp("/groups/100/posts/2579243155868042"),
+        )
+        .await;
+        let mut samples = 0;
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            websocket
+                .send(Message::Text(
+                    json!({
+                        "id": id,
+                        "result": facebook_note_detail_cdp(
+                            "https://www.facebook.com/groups/100/posts/999",
+                            "stale post",
+                        )
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("CDP mismatch response");
+            samples += 1;
+        }
+        samples
+    });
+    (port, server)
+}
+
+fn facebook_ready_cdp(path: &str) -> Value {
+    json!({"result":{"value":router_result(
+        "page_probe",
+        json!({
+            "targetId": "",
+            "origin": "https://www.facebook.com",
+            "path": path,
+            "readyState": "complete",
+            "pageKind": "note_detail",
+            "signals": {
+                "feedCardCount": 0,
+                "noteDetailCount": 1,
+                "loginWallCount": 0,
+                "captchaSignalCount": 0,
+                "dialogCount": 0,
+                "profileSignalCount": 0,
+                "notificationSignalCount": 0,
+                "publishSignalCount": 0,
+                "errorSignalCount": 0,
+                "mainCount": 1
+            }
+        })
+    )}})
+}
+
+fn facebook_note_detail_cdp(note_id: &str, content: &str) -> Value {
+    json!({"result":{"value":router_result(
+        "note_detail",
+        json!({
+            "noteId": note_id,
+            "title": content,
+            "content": content,
+            "likeCount": 0,
+            "collectCount": 0
+        })
+    )}})
 }
 
 async fn spawn_facebook_reel_arrow_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
