@@ -22,7 +22,7 @@ import {
   canonicalFacebookFeedVideoPostId,
   canonicalFacebookReelPostId,
   canonicalPostId,
-} from '../facebook/post-identity.js';
+} from '../facebook/post-identity-core.js';
 import { nativeActionNameForCommand, nativeCommandForEnvelope } from './command-mapper.js';
 import type { NativePageCommandExecution, NativePagePlatform } from './client.js';
 import { NativePageRuntime } from './runtime.js';

@@ -2,11 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
+  canonicalFacebookFeedVideoPostId,
   canonicalFacebookReelPostId,
   canonicalPostId,
   FB_TARGET_HELPERS_JS,
   POST_IDENTITY_JS,
 } from '../../src/facebook/post-identity.js';
+import {
+  canonicalFacebookFeedVideoPostId as coreCanonicalFacebookFeedVideoPostId,
+  canonicalFacebookReelPostId as coreCanonicalFacebookReelPostId,
+  canonicalPostId as coreCanonicalPostId,
+  POST_IDENTITY_JS as CORE_POST_IDENTITY_JS,
+} from '../../src/facebook/post-identity-core.js';
 
 /**
  * 规范帖子身份 `fb:<postId>`（change facebook-note-scoped-targeting）。
@@ -17,6 +24,13 @@ import {
  *  - 派生失败返回 **null**（不是空串——空串对任何坏 href 都相等，会让「匹配不到」退化成「点第一张卡」）。
  *  - 评论 permalink（带 comment_id）不是帖身份；**作者主页 / 图片链接也不是**（形状白名单）。
  */
+
+test('post-identity compatibility façade re-exports the production-safe implementations', () => {
+  assert.equal(canonicalPostId, coreCanonicalPostId);
+  assert.equal(canonicalFacebookReelPostId, coreCanonicalFacebookReelPostId);
+  assert.equal(canonicalFacebookFeedVideoPostId, coreCanonicalFacebookFeedVideoPostId);
+  assert.equal(POST_IDENTITY_JS, CORE_POST_IDENTITY_JS);
+});
 
 test('canonicalPostId: 群帖 posts 形态与 multi_permalinks 形态是同一帖（一帖多形态）', () => {
   const viaPosts = canonicalPostId('https://www.facebook.com/groups/1109299026882957/posts/1769888790823974/');
