@@ -29,6 +29,7 @@ const MAX_CAPTCHA_SNAPSHOTS: usize = 8;
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS: u64 = 40_000;
 const FACEBOOK_GROUP_JOIN_TIMEOUT_MS: u64 = 90_000;
+const FACEBOOK_PUBLISH_FILL_TIMEOUT_MS: u64 = 400_000;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1233,13 +1234,26 @@ fn remaining_budget(
 }
 
 fn command_timeout_ms(session: &EngineSession, command: &NativeCommand) -> u64 {
-    session
-        .timeout_ms
-        .min(command_timeout_ceiling(session.platform, command))
+    command_timeout_ms_for(session.platform, session.timeout_ms, command)
+}
+
+fn command_timeout_ms_for(
+    platform: Platform,
+    session_timeout_ms: u64,
+    command: &NativeCommand,
+) -> u64 {
+    let ceiling = command_timeout_ceiling(platform, command);
+    if platform == Platform::Facebook && matches!(command, NativeCommand::PublishFillField(_)) {
+        ceiling
+    } else {
+        session_timeout_ms.min(ceiling)
+    }
 }
 
 fn command_timeout_ceiling(platform: Platform, command: &NativeCommand) -> u64 {
-    if platform == Platform::Facebook && matches!(command, NativeCommand::GroupJoin(_)) {
+    if platform == Platform::Facebook && matches!(command, NativeCommand::PublishFillField(_)) {
+        FACEBOOK_PUBLISH_FILL_TIMEOUT_MS
+    } else if platform == Platform::Facebook && matches!(command, NativeCommand::GroupJoin(_)) {
         FACEBOOK_GROUP_JOIN_TIMEOUT_MS
     } else if platform == Platform::Facebook
         && matches!(command, NativeCommand::PublishSelectMode(_))
@@ -1304,6 +1318,12 @@ mod tests {
                 option_kind: Some("target".to_owned()),
                 option_value: Some("facebook_personal_timeline".to_owned()),
             });
+        let fill = NativeCommand::PublishFillField(crate::command::PublishFieldParams {
+            record_id: 7,
+            seq: 3,
+            field_type: "content".to_owned(),
+            value: "Vietnamese body".to_owned(),
+        });
         let probe = NativeCommand::PageProbe(crate::command::EmptyParams::default());
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &join),
@@ -1312,6 +1332,10 @@ mod tests {
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &select_mode),
             FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ceiling(Platform::Facebook, &fill),
+            FACEBOOK_PUBLISH_FILL_TIMEOUT_MS
         );
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &probe),
@@ -1324,6 +1348,18 @@ mod tests {
         assert_eq!(
             command_timeout_ceiling(Platform::Xiaohongshu, &select_mode),
             DEFAULT_COMMAND_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ceiling(Platform::Xiaohongshu, &fill),
+            DEFAULT_COMMAND_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ms_for(Platform::Facebook, 90_000, &fill),
+            FACEBOOK_PUBLISH_FILL_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ms_for(Platform::Facebook, 90_000, &join),
+            FACEBOOK_GROUP_JOIN_TIMEOUT_MS
         );
     }
 

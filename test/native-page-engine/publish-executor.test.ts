@@ -59,7 +59,7 @@ test('fails closed when the requested cover was never confirmed as uploaded', as
   assert.equal(result.error, 'cover_source_not_uploaded');
 });
 
-test('passes through the Facebook composer deadline without widening other publish commands', async () => {
+test('passes through the Facebook composer and fill deadlines without widening other publish commands', async () => {
   const timeouts: number[] = [];
   const runtime = {
     execute: async (
@@ -94,6 +94,20 @@ test('passes through the Facebook composer deadline without widening other publi
     optionKind: 'target',
     optionValue: 'facebook_personal_timeline',
   }, 'facebook'));
+  await executor.dispatch({
+    ...command('fill_field', 4, {
+      fieldType: 'content',
+      value: 'Vietnamese body',
+    }, 'facebook'),
+    timeoutMs: 400_000,
+  });
+  await executor.dispatch({
+    ...command('fill_field', 5, {
+      fieldType: 'content',
+      value: 'XHS body',
+    }),
+    timeoutMs: 400_000,
+  });
 
-  assert.deepEqual(timeouts, [40_000, 30_000, 30_000]);
+  assert.deepEqual(timeouts, [40_000, 30_000, 30_000, 400_000, 30_000]);
 });
