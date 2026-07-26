@@ -1368,6 +1368,12 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .pub.queue-surface .j-step.cur.is-partial .j-dot { border: 2px solid #c85858; background: #fff; box-shadow: none; }
 .pub.queue-surface .j-step.cur.is-failed .j-lab,
 .pub.queue-surface .j-step.cur.is-partial .j-lab { color: #a13f3f; }
+.pub.queue-surface .j-step.cur.is-evidence_unavailable .j-dot {
+  border: 2px solid #d18a23;
+  background: #fff;
+  box-shadow: none;
+}
+.pub.queue-surface .j-step.cur.is-evidence_unavailable .j-lab { color: #956018; }
 .pub.queue-surface .pub-foot { align-items: center; gap: 12px; margin-top: 11px; padding: 0 2px; }
 .pub.queue-surface .pub-foot p { color: #74839a; font-size: 11.5px; line-height: 1.5; }
 .pub.queue-surface .pub-action.is-secondary { border-color: #ccd9e8; color: #526986; background: rgba(255, 255, 255, .82); }
@@ -5357,6 +5363,8 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .publish-queue-stage.is-waiting_human .publish-queue-stage-copy strong { color: #9a6416; }
 .publish-queue-stage.is-failed .publish-queue-stage-dot,
 .publish-queue-stage.is-partial .publish-queue-stage-dot { border-color: #c85858; background: #fff; }
+.publish-queue-stage.is-evidence_unavailable .publish-queue-stage-dot { border-color: #d18a23; background: #fff; }
+.publish-queue-stage.is-evidence_unavailable .publish-queue-stage-copy strong { color: #956018; }
 .publish-queue-safe-stop { margin-bottom: 0; }
 .publish-queue-state-mark {
   display: grid; width: 38px; height: 38px; place-items: center; margin-bottom: 3px; border-radius: 13px;

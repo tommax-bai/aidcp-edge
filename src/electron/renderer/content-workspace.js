@@ -23,7 +23,10 @@
   ]);
   const QUEUE_STAGE_STATES = new Set([
     'pending', 'running', 'retrying', 'waiting_human', 'completed', 'partial', 'failed', 'skipped',
+    'evidence_unavailable',
   ]);
+  const IN_FLIGHT_EVIDENCE_STATES = new Set(['fresh', 'unknown', 'stale', 'invalid']);
+  const DURABLE_DISPATCH_STATES = new Set(['pending_dispatch', 'dispatching', 'consumed', 'void']);
 
   function createElement(document, tag, className, text) {
     const element = document.createElement(tag);
@@ -92,6 +95,13 @@
     const meta = response?.data && response.data.meta;
     if (!data || !data.summary || !Array.isArray(data.tasks)
         || !Array.isArray(data.active) || !Array.isArray(data.recent)) return null;
+    let inFlightEvidence = null;
+    if (data.inFlightEvidence !== undefined) {
+      const evidence = data.inFlightEvidence;
+      if (!evidence || !IN_FLIGHT_EVIDENCE_STATES.has(evidence.state)
+          || (evidence.asOf !== null && !Number.isFinite(evidence.asOf))) return null;
+      inFlightEvidence = { state: evidence.state, asOf: evidence.asOf };
+    }
     const summary = {
       inProgress: finiteCount(data.summary.inProgress),
       waitingForYou: finiteCount(data.summary.waitingForYou),
@@ -136,6 +146,22 @@
         };
       });
       if (stages.some((stage) => stage === null)) return null;
+      const dispatchState = typeof journey.dispatchState === 'string' && DURABLE_DISPATCH_STATES.has(journey.dispatchState)
+        ? journey.dispatchState
+        : null;
+      const explicitUnavailable = stages.some(
+        (stage) => stage.key === 'dispatch' && stage.state === 'evidence_unavailable',
+      );
+      const dispatchEvidenceUnavailable = explicitUnavailable
+        || (inFlightEvidence && inFlightEvidence.state !== 'fresh' && !dispatchState
+          && (journey.status === 'waiting_approval' || journey.status === 'dispatching'));
+      const projectedStages = dispatchEvidenceUnavailable
+        ? stages.map((stage) => (
+          stage.key === 'dispatch' || (stage.key === 'approval' && stage.state === 'waiting_human')
+            ? { ...stage, state: 'evidence_unavailable', summary: '下发状态暂不可用' }
+            : stage
+        ))
+        : stages;
       return {
         id: journey.id,
         recordId: Number.isInteger(journey.recordId) ? journey.recordId : null,
@@ -144,16 +170,19 @@
         kind: journey.kind,
         startedAt: Number(journey.startedAt),
         status: journey.status,
-        statusLabel: journey.statusLabel,
-        stages,
+        statusLabel: dispatchEvidenceUnavailable ? '下发状态暂不可用' : journey.statusLabel,
+        stages: projectedStages,
+        ...(dispatchState ? { dispatchState } : {}),
+        dispatchEvidenceUnavailable: Boolean(dispatchEvidenceUnavailable),
       };
     };
     const active = data.active.map(normalizeJourney);
     const recent = data.recent.map(normalizeJourney);
     if (active.some((journey) => journey === null) || recent.some((journey) => journey === null)) return null;
+    if (active.some((journey) => journey.dispatchEvidenceUnavailable)) summary.waitingForYou = null;
     const asOf = Number(meta && meta.asOf);
     if (!Number.isFinite(asOf)) return null;
-    return { summary, tasks, active, recent, asOf };
+    return { summary, tasks, active, recent, asOf, ...(inFlightEvidence ? { inFlightEvidence } : {}) };
   }
 
   function referenceImageUrl(image) {
@@ -1739,7 +1768,8 @@
         : relativeDate(journey.startedAt);
       copy.appendChild(createElement(document, 'p', '', meta));
       head.appendChild(copy);
-      if (!recent && journey.status === 'waiting_approval' && Number.isInteger(journey.recordId)) {
+      if (!recent && journey.status === 'waiting_approval' && !journey.dispatchEvidenceUnavailable
+          && Number.isInteger(journey.recordId)) {
         const review = createElement(document, 'button', 'cw-button primary compact', '审核稿件');
         review.type = 'button';
         review.addEventListener('click', () => {
@@ -1857,6 +1887,7 @@
       }
 
       const data = queue.data;
+      const unavailableCount = data.active.filter((journey) => journey.dispatchEvidenceUnavailable).length;
       fields.queueContent.replaceChildren();
       const hero = createElement(document, 'section', 'publish-queue-hero');
       const heroCopy = createElement(document, 'div', 'publish-queue-hero-copy');
@@ -1871,7 +1902,9 @@
         document,
         'p',
         '',
-        data.summary.waitingForYou > 0
+        unavailableCount > 0
+          ? '下发状态暂不可用；当前不会推断待确认、正在发布或未下发。'
+          : data.summary.waitingForYou > 0
           ? `其中 ${data.summary.waitingForYou} 条正在等你确认。`
           : data.summary.inProgress > 0
             ? 'AI 正在处理，你可以离开此页，进度会继续。'
@@ -1885,7 +1918,7 @@
         ['可取消', data.summary.cancellable],
       ].forEach(([label, value]) => {
         const metric = createElement(document, 'div', 'publish-queue-metric');
-        metric.appendChild(createElement(document, 'strong', '', String(value)));
+        metric.appendChild(createElement(document, 'strong', '', countText(value)));
         metric.appendChild(createElement(document, 'span', '', label));
         metrics.appendChild(metric);
       });
@@ -1906,9 +1939,21 @@
           queue.stale ? `刷新未完成，正在保留 ${relativeDate(data.asOf)} 的已确认进度。` : '正在同步最新进度…',
         ));
       }
+      if (unavailableCount > 0) {
+        fields.queueContent.appendChild(createElement(
+          document,
+          'div',
+          'publish-queue-sync stale',
+          `下发状态暂不可用：${unavailableCount} 条稿件未计入确定的待确认或下发中汇总。`,
+        ));
+      }
 
-      const waiting = data.active.filter((journey) => journey.status === 'waiting_approval');
-      const processing = data.active.filter((journey) => journey.status !== 'waiting_approval');
+      const waiting = data.active.filter(
+        (journey) => journey.status === 'waiting_approval' && !journey.dispatchEvidenceUnavailable,
+      );
+      const processing = data.active.filter(
+        (journey) => journey.status !== 'waiting_approval' || journey.dispatchEvidenceUnavailable,
+      );
       appendQueueSection(
         fields.queueContent,
         '需要你处理',

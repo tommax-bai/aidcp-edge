@@ -893,6 +893,40 @@ test('小红书发布队列按三段呈现四阶段真态，非小红书切换�
   assert.equal(calls.length, callCount, '非小红书环境不得请求发布队列');
 });
 
+test('下发证据 stale 时显示暂不可用，不推断待确认、等待发布或正在发布', async () => {
+  const { window, controller } = boot({
+    publishQueueGet: async () => queueResponse({
+      inFlightEvidence: { state: 'stale', asOf: Date.now() - 60_000 },
+      summary: { inProgress: 1, waitingForYou: 1, cancellable: 0 },
+      tasks: [],
+      active: [queueJourney()],
+      recent: [],
+    }),
+    publishQueueCancel: async () => ({ ok: false, error: 'not_used' }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  await flush();
+  controller.openPublishQueue();
+  await flush();
+
+  const snapshot = controller.publishQueueSnapshot().data;
+  const text = $(window, '#publish-queue-content').textContent ?? '';
+  assert.equal(snapshot.inFlightEvidence.state, 'stale');
+  assert.equal(snapshot.summary.waitingForYou, null, '不确定稿件不得保留确定待确认计数');
+  assert.match(text, /下发状态暂不可用/);
+  assert.equal(window.document.querySelectorAll('.publish-queue-stage.is-evidence_unavailable').length, 2);
+  assert.doesNotMatch(
+    Array.from(window.document.querySelectorAll('.publish-queue-stage-copy span'))
+      .map((node) => node.textContent).join(' '),
+    /待你确认|等待发布|正在发布|未下发/,
+  );
+  assert.equal(
+    Array.from(window.document.querySelectorAll('#publish-queue-content button'))
+      .some((button) => button.textContent === '审核稿件'),
+    false,
+  );
+});
+
 test('发布队列切换账号后丢弃旧环境迟到响应', async () => {
   let resolveA: ((value: unknown) => void) | undefined;
   const pendingA = new Promise((resolve) => { resolveA = resolve; });

@@ -2426,13 +2426,16 @@ function renderXhsPublishQueueDock(status) {
   const task = carousel.selected?.kind === 'task' ? priority : null;
   const recent = carousel.selected?.kind === 'recent' ? priority : null;
   const hasWork = data.summary.inProgress > 0;
-  const waitingCount = data.summary.waitingForYou;
+  const evidenceUnavailable = Boolean(active?.dispatchEvidenceUnavailable);
+  const waitingCount = Number.isFinite(data.summary.waitingForYou) ? data.summary.waitingForYou : null;
   // 只有系统处理中时默认显示紧凑摘要；一旦需要客户处理立即展开。
-  const collapsed = waitingCount === 0 && !pubManualOpen;
+  const collapsed = !evidenceUnavailable && waitingCount === 0 && !pubManualOpen;
   fields.pubCard.classList.toggle('collapsed', collapsed);
   fields.pubCard.classList.toggle('empty', !hasWork && !recent);
   fields.pubCard.dataset.pubMode = hasWork ? 'queue' : recent ? 'last' : 'empty';
-  fields.pubCard.dataset.pubState = active?.status === 'waiting_approval'
+  fields.pubCard.dataset.pubState = evidenceUnavailable
+    ? 'evidence_unavailable'
+    : active?.status === 'waiting_approval'
     ? 'pending'
     : active || task
       ? 'processing'
@@ -2440,14 +2443,18 @@ function renderXhsPublishQueueDock(status) {
   fields.pubBar.classList.toggle('hidden', !collapsed);
   fields.pubMain.classList.toggle('folded', collapsed);
   fields.pubBarLabel.textContent = '发布进度';
-  fields.pubBarSum.textContent = waitingCount > 0
+  fields.pubBarSum.textContent = evidenceUnavailable
+    ? '下发状态暂不可用'
+    : waitingCount > 0
     ? `${hasWork ? `${data.summary.inProgress} 条进行中 · ` : ''}${waitingCount} 条待确认`
     : hasWork
       ? `${data.summary.inProgress} 条进行中`
       : recent
         ? recent.statusLabel
         : '暂无进行中';
-  fields.pubHead.textContent = active?.status === 'waiting_approval'
+  fields.pubHead.textContent = evidenceUnavailable
+    ? '下发状态暂不可用'
+    : active?.status === 'waiting_approval'
     ? '需要你确认'
     : active
       ? 'AI 正在处理'
@@ -2456,18 +2463,20 @@ function renderXhsPublishQueueDock(status) {
         : recent
           ? '最近发布结果'
           : '暂无进行中';
-  const summaryCount = waitingCount > 0
+  const summaryCount = evidenceUnavailable
+    ? '下发状态暂不可用'
+    : waitingCount > 0
     ? `${waitingCount} 条待确认`
     : hasWork
       ? `${data.summary.inProgress} 条进行中`
       : '';
   fields.pubCount.textContent = summaryCount;
   fields.pubCount.classList.toggle('hidden', !summaryCount);
-  fields.pubCount.classList.toggle('attention', waitingCount > 0);
+  fields.pubCount.classList.toggle('attention', evidenceUnavailable || waitingCount > 0);
   const freshness = queueState.refreshing ? '同步中' : queueState.stale ? '稍早数据' : '';
   const position = carousel.entries.length > 1 ? `${carousel.index + 1} / ${carousel.entries.length}` : '';
   fields.pubCorner.textContent = [freshness, position].filter(Boolean).join(' · ');
-  fields.pubCorner.classList.toggle('hot', waitingCount > 0);
+  fields.pubCorner.classList.toggle('hot', evidenceUnavailable || waitingCount > 0);
   fields.pubTitle.textContent = priority?.title || '暂无进行中的发布任务';
   fields.pubTitle.classList.toggle('muted', !priority);
   fields.pubMeta.textContent = task
@@ -2478,8 +2487,10 @@ function renderXhsPublishQueueDock(status) {
         ? recent.statusLabel
         : '开始一次创作后，进度会显示在这里';
   fields.pubMeta.classList.toggle('chip', Boolean(priority));
-  fields.pubMeta.classList.toggle('attention', active?.status === 'waiting_approval');
-  fields.pubFoot.textContent = waitingCount > 0
+  fields.pubMeta.classList.toggle('attention', !evidenceUnavailable && active?.status === 'waiting_approval');
+  fields.pubFoot.textContent = evidenceUnavailable
+    ? 'Cloud 暂时无法确认下发证据；这里不会显示等待发布、正在发布或未下发。'
+    : waitingCount > 0
     ? '先确认内容，再进入发布；其它任务会继续在后台处理。'
     : hasWork
       ? `${data.summary.inProgress} 条内容正在排队或创作，你可以离开此页。`
@@ -2497,7 +2508,7 @@ function renderXhsPublishQueueDock(status) {
       ? 'todo'
       : stage.state === 'completed' || stage.state === 'skipped'
         ? 'done'
-        : ['running', 'retrying', 'waiting_human', 'failed', 'partial'].includes(stage.state)
+        : ['running', 'retrying', 'waiting_human', 'failed', 'partial', 'evidence_unavailable'].includes(stage.state)
           ? 'cur'
           : 'todo';
     step.className = `j-step ${state}${stage?.state === 'running' ? ' calm' : ''} is-${stage?.state || 'pending'}`;
@@ -2517,7 +2528,7 @@ function renderXhsPublishQueueDock(status) {
   setPubActionVisibility(fields.pubQueueLink, true);
   setPubActionVisibility(
     fields.pubPreviewLink,
-    active?.status === 'waiting_approval' && publishDraftQueueSupported(),
+    active?.status === 'waiting_approval' && !evidenceUnavailable && publishDraftQueueSupported(),
   );
   fields.pubPreviewLink.textContent = '审核稿件';
   syncPubCarouselControls(carousel.entries, carousel.index, collapsed);

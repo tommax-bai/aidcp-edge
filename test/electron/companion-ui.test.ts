@@ -2701,6 +2701,55 @@ test('小红书首页发布稿切换按稳定身份保持，切换账号复位�
   assert.equal(w.document.activeElement, $(w, '#pub-head-row'), '箭头消失时焦点回到仍可操作的卡片标题');
 });
 
+test('小红书首页在下发证据不可用时不显示待确认、等待发布或正在发布', async () => {
+  const stages = [
+    { key: 'source', label: '开始创作', state: 'completed', summary: '开始创作：已完成' },
+    { key: 'content', label: '正文与配图', state: 'completed', summary: '正文与配图：已完成' },
+    { key: 'approval', label: '发布确认', state: 'waiting_human', summary: '发布确认：待你确认' },
+    { key: 'dispatch', label: '发布结果', state: 'pending', summary: '发布结果：等待发布' },
+  ];
+  const { w, pushStatus } = await boot({ envId: 'env-evidence' }, {
+    publishQueueGet: async () => ({
+      ok: true,
+      data: {
+        data: {
+          envKey: 'env-evidence',
+          inFlightEvidence: { state: 'invalid', asOf: Date.now() - 60_000 },
+          summary: { inProgress: 1, waitingForYou: 1, cancellable: 0 },
+          tasks: [],
+          active: [{
+            id: 'publish:unavailable',
+            recordId: 91,
+            title: '下发证据待恢复的稿件',
+            sourceTitle: null,
+            kind: 'persisted',
+            startedAt: Date.now(),
+            status: 'waiting_approval',
+            statusLabel: '等待你确认',
+            stages,
+          }],
+          recent: [],
+        },
+        meta: { requestId: 'queue-evidence', asOf: Date.now() },
+      },
+    }),
+  });
+  pushStatus(makeStatus({ envId: 'env-evidence' }));
+  for (let i = 0; i < 5; i += 1) await tick();
+
+  assert.equal($(w, '#pub-head').textContent, '下发状态暂不可用');
+  assert.equal($(w, '#pub-count').textContent, '下发状态暂不可用');
+  assert.equal($(w, '#pub-meta').textContent, '下发状态暂不可用');
+  assert.equal($(w, '#pub-card').dataset.pubState, 'evidence_unavailable');
+  assert.equal(hidden($(w, '#pub-preview-link')), true);
+  assert.match($(w, '#pub-foot').textContent ?? '', /不会显示等待发布、正在发布或未下发/);
+  assert.equal(w.document.querySelectorAll('#pub-steps .is-evidence_unavailable').length, 2);
+  assert.doesNotMatch(
+    Array.from(w.document.querySelectorAll('#pub-steps .j-state')).map((node) => node.textContent).join(' '),
+    /待你确认|等待发布|正在发布|未下发/,
+  );
+});
+
 test('供给的 0 照显，缺席才隐藏（两者是两件事）', async () => {
   const { w } = await boot({
     dailyUsage: { totals: { view: 0, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 } },
