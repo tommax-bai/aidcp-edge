@@ -7,6 +7,7 @@ import { nativePublishCommand } from './command-mapper.js';
 import { NativePageRuntime } from './runtime.js';
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const FACEBOOK_PUBLISH_FILL_MAX_TIMEOUT_MS = 400_000;
 
 export class NativePublishExecutor {
   private readonly drafts = new Map<string, { nextImageIndex: number; imageIndexes: Map<string, number> }>();
@@ -39,8 +40,12 @@ export class NativePublishExecutor {
         imageIndex = imageUrl ? draft.imageIndexes.get(imageUrl) : undefined;
         if (imageIndex === undefined) return this.failed(payload, 'cover_source_not_uploaded');
       }
-      const maxTimeoutMs = payload.platform === 'facebook' && payload.kind === 'select_mode'
-        ? 40_000
+      const maxTimeoutMs = payload.platform === 'facebook'
+        ? payload.kind === 'fill_field'
+          ? FACEBOOK_PUBLISH_FILL_MAX_TIMEOUT_MS
+          : payload.kind === 'select_mode'
+            ? 40_000
+            : 30_000
         : 30_000;
       const timeoutMs = Math.max(50, Math.min(maxTimeoutMs, payload.timeoutMs ?? 30_000));
       const execution = await this.runtime.execute(

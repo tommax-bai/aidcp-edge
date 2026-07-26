@@ -1,6 +1,6 @@
 use super::*;
 use crate::cdp::CdpSession;
-use crate::command::{PublishIdentity, PublishSelectModeParams};
+use crate::command::{PublishFieldParams, PublishIdentity, PublishSelectModeParams};
 use crate::endpoint::CdpTarget;
 use crate::protocol::Platform;
 use futures_util::{SinkExt, StreamExt};
@@ -25,6 +25,9 @@ enum PublishScenario {
     SubmitState,
     SlowSubmitState,
     TransientSubmitProbe,
+    FillAccepted,
+    FillDelayedReadback,
+    FillRejected,
 }
 
 #[derive(Default)]
@@ -36,6 +39,9 @@ struct FakeCalls {
     submitted_probes: usize,
     mouse_releases: usize,
     navigations: usize,
+    inserted_texts: Vec<String>,
+    editor_value: String,
+    backspaces: usize,
 }
 
 fn browser_result(kind: &str, value: Value) -> Value {
@@ -157,7 +163,11 @@ fn evaluated_result(scenario: PublishScenario, calls: &mut FakeCalls, expression
             }
             let open = matches!(
                 scenario,
-                PublishScenario::AlreadyOpen | PublishScenario::SlowAlreadyOpen
+                PublishScenario::AlreadyOpen
+                    | PublishScenario::SlowAlreadyOpen
+                    | PublishScenario::FillAccepted
+                    | PublishScenario::FillDelayedReadback
+                    | PublishScenario::FillRejected
             ) || (matches!(
                 scenario,
                 PublishScenario::LateEntry
@@ -167,7 +177,14 @@ fn evaluated_result(scenario: PublishScenario, calls: &mut FakeCalls, expression
             browser_result(
                 "text_target",
                 if open {
-                    json!({ "ok": true, "cx": 180.0, "cy": 140.0, "value": "" })
+                    let value = if matches!(scenario, PublishScenario::FillDelayedReadback)
+                        && calls.editor_probes == 3
+                    {
+                        String::new()
+                    } else {
+                        calls.editor_value.clone()
+                    };
+                    json!({ "ok": true, "cx": 180.0, "cy": 140.0, "value": value })
                 } else {
                     json!({ "ok": false, "reason": "composer_not_open" })
                 },
@@ -286,6 +303,30 @@ async fn fake_session(
                     }
                     json!({})
                 }
+                "Input.dispatchKeyEvent" => {
+                    if request.pointer("/params/type").and_then(Value::as_str) == Some("keyDown")
+                        && request.pointer("/params/key").and_then(Value::as_str)
+                            == Some("Backspace")
+                    {
+                        let mut calls = server_calls.lock().expect("calls");
+                        calls.backspaces += 1;
+                        calls.editor_value.clear();
+                    }
+                    json!({})
+                }
+                "Input.insertText" => {
+                    let inserted = request
+                        .pointer("/params/text")
+                        .and_then(Value::as_str)
+                        .expect("insert text")
+                        .to_owned();
+                    let mut calls = server_calls.lock().expect("calls");
+                    calls.inserted_texts.push(inserted.clone());
+                    if !matches!(scenario, PublishScenario::FillRejected) {
+                        calls.editor_value.push_str(&inserted);
+                    }
+                    json!({})
+                }
                 _ => json!({}),
             };
             websocket
@@ -324,6 +365,17 @@ fn receipt(output: CommandOutput) -> crate::model::PublishReceipt {
         panic!("expected publish receipt");
     };
     receipt
+}
+
+fn fill_command(value: &str) -> (PublishFieldParams, NativeCommand) {
+    let params = PublishFieldParams {
+        record_id: 7,
+        seq: 3,
+        field_type: "content".to_owned(),
+        value: value.to_owned(),
+    };
+    let command = NativeCommand::PublishFillField(params.clone());
+    (params, command)
 }
 
 #[tokio::test]
@@ -619,6 +671,117 @@ async fn select_mode_tolerates_one_transient_post_click_probe_failure() {
     assert_eq!(phase, EffectPhase::Confirmed);
     assert!(receipt(output).ok);
     assert_eq!(calls.lock().expect("calls").mouse_releases, 1);
+    session.cdp.close().await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn fill_types_one_unicode_scalar_at_a_time_and_preserves_approved_whitespace() {
+    let (mut session, calls, server) = fake_session(PublishScenario::FillAccepted).await;
+    let value = " Việt🙂\n";
+    let (params, command) = fill_command(value);
+
+    let (phase, output) = execute_facebook_publish_fill(
+        &mut session,
+        &params,
+        &command,
+        None,
+        unix_time_ms() + 30_000,
+    )
+    .await
+    .expect("fill content");
+
+    assert_eq!(phase, EffectPhase::Confirmed);
+    assert!(receipt(output).ok);
+    {
+        let calls = calls.lock().expect("calls");
+        let expected = value
+            .chars()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(calls.inserted_texts, expected);
+        assert_eq!(calls.editor_value, value);
+        assert!(calls.backspaces >= 1);
+    }
+    session.cdp.close().await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn fill_polls_until_delayed_lexical_readback_contains_the_full_text() {
+    let (mut session, calls, server) = fake_session(PublishScenario::FillDelayedReadback).await;
+    let value = "Việt";
+    let (params, command) = fill_command(value);
+
+    let (phase, output) = execute_facebook_publish_fill(
+        &mut session,
+        &params,
+        &command,
+        None,
+        unix_time_ms() + 30_000,
+    )
+    .await
+    .expect("fill delayed content");
+
+    assert_eq!(phase, EffectPhase::Confirmed);
+    assert!(receipt(output).ok);
+    assert!(calls.lock().expect("calls").editor_probes >= 4);
+    session.cdp.close().await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn fill_rejection_clears_the_editor_and_never_confirms() {
+    let (mut session, calls, server) = fake_session(PublishScenario::FillRejected).await;
+    let (params, command) = fill_command("Việt");
+
+    let (phase, output) = execute_facebook_publish_fill(
+        &mut session,
+        &params,
+        &command,
+        None,
+        unix_time_ms() + 30_000,
+    )
+    .await
+    .expect("rejected fill");
+    let receipt = receipt(output);
+
+    assert_eq!(phase, EffectPhase::NotStarted);
+    assert_eq!(receipt.error.as_deref(), Some("composer_readback_mismatch"));
+    {
+        let calls = calls.lock().expect("calls");
+        assert!(calls.backspaces >= 2);
+        assert!(calls.editor_value.is_empty());
+        assert_eq!(calls.inserted_texts.len(), "Việt".chars().count());
+    }
+    session.cdp.close().await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn fill_deadline_stops_before_the_next_character_and_clears_partial_text() {
+    let (mut session, calls, server) = fake_session(PublishScenario::FillAccepted).await;
+    let (params, command) = fill_command("abcdef");
+
+    let (phase, output) = execute_facebook_publish_fill(
+        &mut session,
+        &params,
+        &command,
+        None,
+        unix_time_ms() + FACEBOOK_PUBLISH_FILL_RESERVE_MS + 10,
+    )
+    .await
+    .expect("deadline fill");
+    let receipt = receipt(output);
+
+    assert_eq!(phase, EffectPhase::NotStarted);
+    assert_eq!(receipt.error.as_deref(), Some("fill_deadline_exceeded"));
+    {
+        let calls = calls.lock().expect("calls");
+        assert!(calls.inserted_texts.len() < "abcdef".chars().count());
+        assert!(calls.editor_value.is_empty());
+        assert!(calls.backspaces >= 2);
+    }
     session.cdp.close().await;
     server.await.expect("server");
 }

@@ -89,12 +89,21 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
       optionValue: 'facebook_personal_timeline',
     },
   }, 40_000);
+  await session.execute({
+    kind: 'publish_fill_field',
+    params: {
+      recordId: 7,
+      seq: 3,
+      fieldType: 'content',
+      value: 'Vietnamese body',
+    },
+  }, 400_000);
   await assert.rejects(
     session.execute({
       kind: 'publish_select_mode',
       params: {
         recordId: 7,
-        seq: 3,
+        seq: 4,
         optionKind: 'target',
         optionValue: 'facebook_personal_timeline',
       },

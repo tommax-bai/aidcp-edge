@@ -374,7 +374,7 @@ pub const FACEBOOK_PARITY_LEDGER: &[FacebookParityEntry] = &[
         1,
         "field readback",
         "confirmed or not-started",
-        30_000,
+        400_000,
         None
     ),
     entry!(
@@ -539,7 +539,12 @@ mod tests {
             assert!(!entry.commit_primitive.is_empty());
             assert!(!entry.verification_witness.is_empty());
             assert!(!entry.terminal_semantics.is_empty());
-            assert!(entry.deadline_ms == 30_000 || entry.deadline_ms == 90_000);
+            assert!(
+                entry.deadline_ms == 30_000
+                    || entry.deadline_ms == 40_000
+                    || entry.deadline_ms == 90_000
+                    || entry.deadline_ms == 400_000
+            );
             if let Some(window) = entry.commit_window {
                 assert!(window.budget_ms > 0 && window.budget_ms <= entry.deadline_ms);
             }
