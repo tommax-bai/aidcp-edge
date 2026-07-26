@@ -52,7 +52,13 @@ const afterPack = require('../../scripts/after-pack.cjs') as {
     electronPlatformName: string;
     appOutDir: string;
     packager: { appInfo: { productFilename: string } };
-  }) => { executable: string; asarPath: string; nativeResourceDir: string; smokeEntry: string };
+  }) => {
+    executable: string;
+    asarPath: string;
+    nativeResourceDir: string;
+    gostResourceDir: string;
+    smokeEntry: string;
+  };
 };
 const asar = require('@electron/asar') as { createPackage(source: string, destination: string): Promise<void> };
 
@@ -75,6 +81,10 @@ test('afterPack resolves the smoke entry inside the generated macOS app.asar', (
   assert.equal(
     paths.nativeResourceDir,
     join('dist-electron', 'mac-arm64', 'AIDCP.app', 'Contents', 'Resources', 'native-page-engine'),
+  );
+  assert.equal(
+    paths.gostResourceDir,
+    join('dist-electron', 'mac-arm64', 'AIDCP.app', 'Contents', 'Resources', 'gost'),
   );
   assert.equal(
     paths.smokeEntry,

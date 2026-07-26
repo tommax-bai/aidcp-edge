@@ -50,6 +50,9 @@ const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
 const commandDiagnostics = require('./command-diagnostics.cjs');
 const { normalizeProxyRuntime } = require('./proxy-runtime.cjs');
 const { createProxyPreflightController } = require('./proxy-preflight.cjs');
+const { createProxyChainManager } = require('./proxy-chain-manager.cjs');
+const { createProxyChainOrphanRegistry } = require('./proxy-chain-orphans.cjs');
+const { resolveGostBinaryPath } = require('./gost-binary.cjs');
 const {
   DEFAULT_PARKING_MODE,
   normalizeParkingMode,
@@ -225,6 +228,8 @@ const DEFAULT_SETTINGS = {
   adsApiBase: '',
   adsProfileName: '',
   platform: 'xiaohongshu',
+  // 默认关闭。开启后：macOS 固定系统代理 → 环境代理 → 目标站点。
+  systemProxyUpstreamEnabled: false,
   // 云端环境选择（change edge-cloud-env-selector）：'' = 未选择（跟随启动环境变量 / 缺省 dev，零回归）；
   // 'dev' | 'ol' 用映射地址；'custom' 用 cloudUrlCustom。
   cloudEnvKey: '',
@@ -312,6 +317,7 @@ function loadSettings() {
   }
   settings = { ...DEFAULT_SETTINGS, ...parsed };
   if (settings.provider !== 'self' && settings.provider !== 'adspower') settings.provider = 'adspower';
+  settings.systemProxyUpstreamEnabled = settings.systemProxyUpstreamEnabled === true;
   settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
   normalizeColdStandbySettingsIntoSettings();
   normalizeSlotSettingsIntoSettings();
@@ -1130,6 +1136,7 @@ function saveSettings(patch) {
   }
   settings = { ...settings, ...p };
   if (settings.provider !== 'self' && settings.provider !== 'adspower') settings.provider = 'adspower';
+  settings.systemProxyUpstreamEnabled = settings.systemProxyUpstreamEnabled === true;
   settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
   normalizeColdStandbySettingsIntoSettings();
   normalizeSlotSettingsIntoSettings();
@@ -1373,6 +1380,9 @@ function makeStatus(provider) {
     publishPreview: null,
     // 浏览器启动前的短时代理可用性预检；与 proxyRuntime（浏览器实际出口证据）严格分开。
     proxyPreflight: null,
+    proxyMode: systemProxyChainEnabled() ? 'system_then_environment' : 'direct',
+    // 只投影固定状态与原因枚举，不暴露任一跳的地址或认证信息。
+    proxyChain: null,
     kernelPrep: null,
     lastPublish: null,
     // 多环境新增（旧渲染层忽略即可）：有界重起放弃终态 + 同账号铺多环境告警 + 阻断浮层待人工。
@@ -1401,11 +1411,103 @@ const envs = new Map();
 let selectedEnvId = '';
 let selectedProxyPreflightTimer = null;
 
-const proxyPreflight = createProxyPreflightController({
-  readProxy: (profileId) => readAdsWithRuntime({}, (resolved) => adsApi.getProfileProxyConfig({
+function systemProxyChainEnabled() {
+  return settings.provider === 'adspower' && settings.systemProxyUpstreamEnabled === true;
+}
+
+function readAdsProfileProxy(profileId) {
+  return readAdsWithRuntime({}, (resolved) => adsApi.getProfileProxyConfig({
     ...resolved,
     profileId,
-  })),
+  }));
+}
+
+const proxyChainManager = createProxyChainManager({
+  orphanRegistry: createProxyChainOrphanRegistry({
+    registryPath: path.join(app.getPath('userData'), 'proxy-chain-processes.json'),
+  }),
+  resolveBinary: () => resolveGostBinaryPath({
+    appRoot: app.getAppPath(),
+    resourcesPath: process.resourcesPath,
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    arch: process.arch,
+    env: process.env,
+  }),
+  onUpdate: (profileId, snapshot) => {
+    const envId = fleet.envIdForProfile(profileId);
+    const handle = envs.get(envId);
+    if (!handle || handle.removed) return;
+    const {
+      invalidateEvidence = false,
+      ...safeSnapshot
+    } = snapshot || {};
+    updateStatus(handle, { proxyChain: safeSnapshot });
+    if (invalidateEvidence) proxyPreflight.invalidate(envId);
+  },
+});
+
+async function ensureSystemProxyChain(handle) {
+  if (!systemProxyChainEnabled() || !handle || handle.kind !== 'adspower') {
+    return { state: 'skipped', reason: 'not_enabled' };
+  }
+  let config;
+  try {
+    config = await readAdsProfileProxy(handle.profileId);
+  } catch {
+    return { state: 'unavailable', reason: 'profile_config_unavailable' };
+  }
+  if (!config || config.ok !== true) {
+    return { state: 'unavailable', reason: 'profile_config_unavailable' };
+  }
+  if (config.noProxy) {
+    return { state: 'unavailable', reason: 'environment_proxy_missing' };
+  }
+  try {
+    const previousRevision = proxyChainManager.revision(handle.profileId);
+    await proxyChainManager.ensure({
+      profileId: handle.profileId,
+      environmentProxy: config.proxy,
+    });
+    const currentRevision = proxyChainManager.revision(handle.profileId);
+    if (previousRevision > 0 && currentRevision !== previousRevision) {
+      proxyPreflight.invalidate(handle.envId);
+    }
+    return { state: 'available', reason: 'system_proxy_chain_ready' };
+  } catch (error) {
+    return {
+      state: 'unavailable',
+      reason: String((error && error.reason) || 'proxy_chain_unavailable'),
+    };
+  }
+}
+
+async function readProxyForPreflight(profileId) {
+  const config = await readAdsProfileProxy(profileId);
+  if (!systemProxyChainEnabled()) return config;
+  if (!config || config.ok !== true) {
+    return { ok: false, blocking: true, reason: 'profile_config_unavailable' };
+  }
+  if (config.noProxy) {
+    return { ok: false, blocking: true, reason: 'environment_proxy_missing' };
+  }
+  try {
+    const endpoint = await proxyChainManager.ensure({
+      profileId,
+      environmentProxy: config.proxy,
+    });
+    return { ok: true, noProxy: false, proxy: endpoint };
+  } catch (error) {
+    return {
+      ok: false,
+      blocking: true,
+      reason: String((error && error.reason) || 'proxy_chain_unavailable'),
+    };
+  }
+}
+
+const proxyPreflight = createProxyPreflightController({
+  readProxy: readProxyForPreflight,
   onUpdate: (envId, snapshot) => {
     const handle = envs.get(envId);
     if (!handle || handle.removed) return;
@@ -1437,6 +1539,14 @@ function ensureProxyPreflight(handle) {
   return proxyPreflight.ensure({ envId: handle.envId, profileId: handle.profileId });
 }
 
+async function ensureNetworkPreparation(handle) {
+  if (systemProxyChainEnabled() && handle && handle.kind === 'adspower') {
+    const chain = await ensureSystemProxyChain(handle);
+    if (chain.state === 'unavailable') return chain;
+  }
+  return ensureProxyPreflight(handle);
+}
+
 function scheduleSelectedProxyPreflight(handle) {
   if (selectedProxyPreflightTimer) clearTimeout(selectedProxyPreflightTimer);
   selectedProxyPreflightTimer = null;
@@ -1459,6 +1569,25 @@ function proxyPreflightFailureText(reason) {
     case 'connection_refused': return '代理拒绝连接';
     case 'host_unresolved': return '代理地址无法解析';
     case 'config_invalid': return '代理配置不完整';
+    case 'profile_config_unavailable': return '无法读取环境代理配置';
+    case 'environment_proxy_missing': return '该环境未配置第二跳代理';
+    case 'system_proxy_not_configured': return '未检测到可用的系统代理';
+    case 'system_proxy_pac_unsupported':
+    case 'system_proxy_wpad_unsupported':
+    case 'system_proxy_platform_unsupported': return '当前系统代理类型暂不支持';
+    case 'system_proxy_config_invalid':
+    case 'system_proxy_read_failed': return '无法读取有效系统代理';
+    case 'proxy_chain_binary_missing': return '系统代理链组件不可用';
+    case 'proxy_chain_duplicate_hop': return '系统代理与环境代理不能是同一端点';
+    case 'proxy_chain_port_unavailable':
+    case 'proxy_chain_spawn_failed':
+    case 'proxy_chain_config_write_failed':
+    case 'proxy_chain_exited':
+    case 'proxy_chain_orphan_cleanup_failed':
+    case 'proxy_chain_process_untracked':
+    case 'proxy_chain_registry_write_failed':
+    case 'proxy_chain_ready_timeout':
+    case 'proxy_chain_unavailable': return '系统代理链启动失败';
     default: return '代理当前不可用';
   }
 }
@@ -1621,6 +1750,7 @@ function syncEnvHandles() {
       queueLifecycle(() => { try { handle.child?.kill('SIGTERM'); } catch { /* ignore */ } });
     }
     proxyPreflight.invalidate(envId);
+    void proxyChainManager.invalidate(handle.profileId);
     envs.delete(envId);
   }
   // 建新 / 更新元数据（既有 handle 的运行态保留）。
@@ -1909,6 +2039,13 @@ function enqueueTransientBrowserLane(handle, {
       broadcastFleet();
       const released = awaitTransientBrowserRelease(handle, generation);
       if (startCore) {
+        const network = await ensureNetworkPreparation(handle);
+        if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
+        if (network && network.state === 'unavailable') {
+          stopStartForProxyFailure(handle, network);
+          settleTransientBrowserLease(handle, 'proxy_unavailable', false);
+          return false;
+        }
         const started = spawnEdgeChild(handle, { generation, transientBrowserLease: true });
         if (!started) {
           settleTransientBrowserLease(handle, 'core_start_rejected', false);
@@ -3298,7 +3435,7 @@ function wakeColdStandby(handle, reason) {
       kind,
       run: async () => {
         if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
-        const preflight = await ensureProxyPreflight(handle);
+        const preflight = await ensureNetworkPreparation(handle);
         if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
         if (preflight && preflight.state === 'unavailable') {
           onColdStandbyWakeFailed(handle, `代理预检未通过：${proxyPreflightFailureText(preflight.reason)}`, generation);
@@ -3487,6 +3624,14 @@ async function startBrowserAbsentCore(handle, {
         ...edgeFailurePatch(`自动化引擎未连接：${bootstrap.message}`),
         ...presencePatch('自动化引擎未连接，浏览器保持关闭'),
       });
+      return false;
+    }
+
+    const network = await ensureNetworkPreparation(handle);
+    if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
+    if (network && network.state === 'unavailable') {
+      if (!retainStartQueueReservation) releaseStartQueue(handle);
+      stopStartForProxyFailure(handle, network);
       return false;
     }
 
@@ -3720,6 +3865,17 @@ function spawnEdgeChild(handle, {
       return;
     }
     spawnEnv = { ...built.env, ELECTRON_RUN_AS_NODE: '1' };
+    if (systemProxyChainEnabled() && !cleanupBootstrap) {
+      const endpoint = proxyChainManager.endpoint(handle.profileId);
+      if (!endpoint) {
+        stopStartForProxyFailure(handle, { reason: 'proxy_chain_unavailable' });
+        return;
+      }
+      spawnEnv.AIDCP_ADS_PROXY_OVERRIDE = `http://127.0.0.1:${endpoint.proxyPort}`;
+      updateStatus(handle, { proxyMode: 'system_then_environment' });
+    } else if (!cleanupBootstrap) {
+      updateStatus(handle, { proxyMode: 'direct' });
+    }
   } else {
     // self 遗留路径：维持旧合并次序（provider env 在前、被 ...process.env 覆盖 → 外部显式设置仍是逃生阀）。
     spawnEnv = { ...buildSelfProviderEnv(), ...process.env, ELECTRON_RUN_AS_NODE: '1' };
@@ -4680,7 +4836,7 @@ async function startAdsPowerFlow(handle, generation = handle && handle.lifecycle
   // 运行时/内核准备可长达数分钟（首启下载）；这期间被暂停/移出/退出则诚实放弃，不再拉起子进程。
   // （startEdge 亦有同一取消闸兜底；此处提前返回避免多余「正在启动」状态残留。）
   if (handle.removed || handle.stopRequested || isQuitting || handle.status.session === 'paused') return;
-  const preflight = await ensureProxyPreflight(handle);
+  const preflight = await ensureNetworkPreparation(handle);
   if (!isCurrentLifecycleGeneration(handle, generation) || handle.removed || handle.stopRequested
     || isQuitting || handle.status.session === 'paused') return;
   if (preflight && preflight.state === 'unavailable') {
@@ -5451,6 +5607,7 @@ async function gracefulStopAllAndQuit() {
     if (![...envs.values()].some((h) => h.child)) break;
     await new Promise((r) => setTimeout(r, 100));
   }
+  await proxyChainManager.stopAll();
   await stopManagedAdsRuntime();
   quitFinal = true;
   app.quit();
@@ -6111,6 +6268,7 @@ ipcMain.handle('interaction:reads:cancel', (_event, raw) => handleInteractionIpc
 
 ipcMain.handle('settings:save', async (_event, patch) => {
   const safePatch = { ...(patch || {}) };
+  const previousSystemProxyUpstreamEnabled = settings.systemProxyUpstreamEnabled === true;
   // pending offboard 是主进程在 Cloud 202 回执后写入的恢复游标，renderer 不得伪造/覆盖。
   delete safePatch.pendingInteractionOffboards;
   // 排除集合 owner 只由当前有效客户会话派生，renderer 不得伪造身份或把选择带给另一客户。
@@ -6142,6 +6300,19 @@ ipcMain.handle('settings:save', async (_event, patch) => {
   }
   const res = saveSettings(safePatch);
   syncEnvHandles(); // 花名册变更即同步注册表（新环境建行、移出的有序停止）
+  if (previousSystemProxyUpstreamEnabled !== settings.systemProxyUpstreamEnabled) {
+    for (const envHandle of envs.values()) {
+      if (!envHandle.child) {
+        updateStatus(envHandle, {
+          proxyMode: systemProxyChainEnabled() ? 'system_then_environment' : 'direct',
+        });
+      }
+      proxyPreflight.invalidate(envHandle.envId);
+      if (!envHandle.child) void proxyChainManager.invalidate(envHandle.profileId);
+    }
+    const current = selectedHandle();
+    if (current) scheduleSelectedProxyPreflight(current);
+  }
   // 保存只持久化、**不打断**在跑的核心（应用改动经显式 edge:restart「按新设置重启」/「全部重启换云」）。
   const handle = selectedHandle();
   if (handle) {
@@ -7084,6 +7255,7 @@ function invalidateProxyEvidence(userId) {
   const envId = fleet.envIdForProfile(String(userId));
   proxyPreflight.invalidate(envId);
   const handle = envs.get(envId);
+  if (handle && !handle.child) void proxyChainManager.invalidate(handle.profileId);
   if (handle && selectedEnvId === envId) scheduleSelectedProxyPreflight(handle);
 }
 
@@ -7394,11 +7566,12 @@ app.on('before-quit', (event) => {
   isQuitting = true;
   const anyRunning = [...envs.values()].some((h) => h.child);
   const hasManagedAdsRuntime = Boolean(managedAdsRuntime);
-  if (!anyRunning && !hasManagedAdsRuntime) {
+  const hasManagedProxyChains = proxyChainManager.hasActive();
+  if (!anyRunning && !hasManagedAdsRuntime && !hasManagedProxyChains) {
     quitFinal = true;
     return;
   }
-  // 有在跑环境或已管理 Ads CLI：拦下本次退出，完成有界清理后再真正退出。
+  // 有在跑环境、已管理 Ads CLI 或受管双跳代理：拦下本次退出，完成有界清理后再真正退出。
   event.preventDefault();
   void gracefulStopAllAndQuit();
 });

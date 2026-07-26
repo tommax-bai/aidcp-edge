@@ -168,3 +168,16 @@ test('控制器不缓存 unknown，invalidate 使在途旧结果失效', async (
   await unknownController.ensure({ envId: 'env-c', profileId: 'profile-c' });
   assert.equal(reads, 2, 'unknown 不成为阻断启动的陈旧缓存');
 });
+
+test('显式阻断的代理读取失败保留稳定原因并阻止启动', async () => {
+  const controller = createProxyPreflightController({
+    readProxy: async () => ({
+      ok: false,
+      blocking: true,
+      reason: 'system_proxy_not_configured',
+    }),
+  });
+  const result = await controller.ensure({ envId: 'env-chain', profileId: 'profile-chain' });
+  assert.equal(result.state, 'unavailable');
+  assert.equal(result.reason, 'system_proxy_not_configured');
+});

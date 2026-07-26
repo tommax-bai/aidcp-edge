@@ -5,6 +5,7 @@ const { existsSync, readFileSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 const asar = require('@electron/asar');
 const { verifyNativePageEngineArtifact } = require('../src/electron/native-page-engine-artifact.cjs');
+const { verifyGostArtifact } = require('../src/electron/gost-artifact.cjs');
 
 const ARCH_NAMES = Object.freeze({
   0: 'ia32',
@@ -25,6 +26,7 @@ function resolvePackagedSmokePaths(context) {
       executable: join(appRoot, 'MacOS', productFilename),
       asarPath: join(appRoot, 'Resources', 'app.asar'),
       nativeResourceDir: join(appRoot, 'Resources', 'native-page-engine'),
+      gostResourceDir: join(appRoot, 'Resources', 'gost'),
       smokeEntry: join(appRoot, 'Resources', 'app.asar', 'src', 'electron', 'packaged-runtime-smoke.cjs'),
     };
   }
@@ -33,6 +35,7 @@ function resolvePackagedSmokePaths(context) {
       executable: join(appOutDir, `${productFilename}.exe`),
       asarPath: join(appOutDir, 'resources', 'app.asar'),
       nativeResourceDir: join(appOutDir, 'resources', 'native-page-engine'),
+      gostResourceDir: join(appOutDir, 'resources', 'gost'),
       smokeEntry: join(appOutDir, 'resources', 'app.asar', 'src', 'electron', 'packaged-runtime-smoke.cjs'),
     };
   }
@@ -40,6 +43,7 @@ function resolvePackagedSmokePaths(context) {
     executable: join(appOutDir, productFilename),
     asarPath: join(appOutDir, 'resources', 'app.asar'),
     nativeResourceDir: join(appOutDir, 'resources', 'native-page-engine'),
+    gostResourceDir: join(appOutDir, 'resources', 'gost'),
     smokeEntry: join(appOutDir, 'resources', 'app.asar', 'src', 'electron', 'packaged-runtime-smoke.cjs'),
   };
 }
@@ -219,7 +223,12 @@ function verifyPackagedXiaohongshuLeakage(asarPath) {
 }
 
 async function afterPack(context) {
-  const { asarPath, nativeResourceDir, smokeEntry } = resolvePackagedSmokePaths(context);
+  const {
+    asarPath,
+    nativeResourceDir,
+    gostResourceDir,
+    smokeEntry,
+  } = resolvePackagedSmokePaths(context);
   const packageCount = verifyPackagedDependencyClosure(asarPath, resolve(__dirname, '..', 'package-lock.json'));
   const runtimeModuleCount = verifyPackagedXiaohongshuLeakage(asarPath);
   const targetArch = normalizeTargetArch(context.arch) || 'unknown';
@@ -228,6 +237,13 @@ async function afterPack(context) {
     arch: targetArch,
   });
   console.log(`Native Page Engine artifact verified for ${context.electronPlatformName}/${targetArch}.`);
+  if (context.electronPlatformName === 'darwin') {
+    verifyGostArtifact(gostResourceDir, {
+      platform: context.electronPlatformName,
+      arch: targetArch,
+    });
+    console.log(`GOST artifact verified for ${context.electronPlatformName}/${targetArch}.`);
+  }
   console.log(`Packaged Xiaohongshu JavaScript leakage scan passed across ${runtimeModuleCount} runtime modules.`);
 
   const runner = resolvePackagedSmokeRunner(context);

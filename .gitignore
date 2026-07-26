@@ -14,6 +14,7 @@ build/ads-prefix/
 build/ads-runtime/
 build/ads-install.log
 build/native-page-engine/
+build/gost/
 native/page-engine/target/
 
 # 并行开发 worktree 会把 node_modules 软链到主 checkout 复用依赖。

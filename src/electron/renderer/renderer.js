@@ -390,6 +390,8 @@ const settingsUi = {
   adsManual: document.querySelector('#ads-manual'),
   adsApiKey: document.querySelector('#ads-apikey'),
   adsApiBase: document.querySelector('#ads-apibase'),
+  systemProxyUpstream: document.querySelector('#system-proxy-upstream'),
+  systemProxyUpstreamHint: document.querySelector('#system-proxy-upstream-hint'),
   adsAdvancedToggle: document.querySelector('#ads-advanced-toggle'),
   adsAdvanced: document.querySelector('#ads-advanced'),
   // 设置抽屉里的「指纹浏览器高级设置」折叠（API 地址/Key）——与上面 join 面板的手动分身 ID 折叠是两处。
@@ -2032,16 +2034,18 @@ function renderTitlebar(status) {
   fields.titlebar.className = `titlebar tone-${uiLogic.bandTone(status)}`;
 }
 
-function selectedProxyConfiguration() {
+function selectedProxyConfiguration(status) {
   const selected = fleetView.envs.get(fleetView.selected);
   const profileId = String((selected && (selected.profileId || selected.envId)) || '').trim();
   const profile = lastProfiles.find((item) => item && String(item.userId) === profileId);
-  if (!profile) return { known: false, summary: '配置待读取' };
+  const chained = status && status.proxyMode === 'system_then_environment';
+  if (!profile) return { known: false, summary: chained ? '系统代理 → 环境代理（配置待读取）' : '配置待读取' };
   const config = profile.proxyConfig || {};
+  const directSummary = profile.proxy || (config.noProxy ? '无代理配置' : '代理配置已保存');
   return {
     known: true,
     noProxy: config.noProxy === true,
-    summary: profile.proxy || (config.noProxy ? '无代理配置' : '代理配置已保存'),
+    summary: chained ? `系统代理 → ${directSummary}` : directSummary,
   };
 }
 
@@ -2056,7 +2060,7 @@ function renderProxyRuntime(status, facebook) {
   }
   const view = uiLogic.proxyRuntimeView(
     status && status.proxyRuntime,
-    selectedProxyConfiguration(),
+    selectedProxyConfiguration(status),
     status && status.proxyPreflight,
   );
   fields.proxyRuntimeChip.className = `proxy-runtime-chip nodrag ${view.tone}`;
@@ -4738,6 +4742,7 @@ function render(status) {
   renderFab(status);
   renderNotice(status);
   renderSameAccount(status); // 同账号铺多环境告警（多环境 fleet；无告警字段时隐藏，零回归）
+  updateSystemProxyUpstreamHint(status);
   updateApplyRestart(); // 依「dirty && 自动化引擎在跑」决定是否显示「按新设置重启」
   updateCloudPending(); // 云端环境（change edge-cloud-env-selector）：随状态心跳刷「当前云端 / 待重启生效」
   if (status.provider && SUBTITLE[status.provider]) fields.subtitle.textContent = SUBTITLE[status.provider];
@@ -5861,6 +5866,33 @@ function applyProviderSelection(provider) {
   settingsUi.adsConfig.classList.toggle('hidden', isChrome);
 }
 
+function updateSystemProxyUpstreamHint(status = currentStatus) {
+  if (!settingsUi.systemProxyUpstreamHint || !settingsUi.systemProxyUpstream) return;
+  const enabled = settingsUi.systemProxyUpstream.checked;
+  const actualChained = status && status.proxyMode === 'system_then_environment';
+  const running = Boolean(status) && status.edge !== 'stopped' && status.edge !== 'warning';
+  if (running && enabled !== actualChained) {
+    settingsUi.systemProxyUpstreamHint.textContent = enabled
+      ? '已选择双跳；当前运行中的环境仍为直连环境代理，需按新设置重启后生效。'
+      : '已选择直连；当前运行中的环境仍在使用双跳，需按新设置重启后生效。';
+    return;
+  }
+  if (!enabled) {
+    settingsUi.systemProxyUpstreamHint.textContent = '关闭：浏览器直接连接环境代理。';
+    return;
+  }
+  const state = status && status.proxyChain && status.proxyChain.state;
+  if (state === 'starting') {
+    settingsUi.systemProxyUpstreamHint.textContent = '正在建立：系统代理 → 环境代理。';
+  } else if (state === 'ready') {
+    settingsUi.systemProxyUpstreamHint.textContent = '双跳中继已就绪；最终出口仍以浏览器实际出口检测为准。';
+  } else if (state === 'unavailable') {
+    settingsUi.systemProxyUpstreamHint.textContent = '双跳中继不可用；自动化启动会被阻止，请检查系统代理和环境代理。';
+  } else {
+    settingsUi.systemProxyUpstreamHint.textContent = '开启：系统代理 → 环境代理；仅支持 macOS 固定 HTTP/HTTPS/SOCKS5 代理，PAC/WPAD 暂不支持。';
+  }
+}
+
 // dirty 且核心在跑（非停止/异常）时才显示「按新设置重启」——把已改设置显式应用到在跑核心。
 function updateApplyRestart() {
   const running = Boolean(currentStatus) && currentStatus.edge !== 'stopped' && currentStatus.edge !== 'warning';
@@ -5890,6 +5922,7 @@ async function saveCurrentSettings() {
     provider,
     browserParkingMode: selectedParkingMode(),
     browserColdStandbyEnabled: Boolean(settingsUi.browserColdStandby && settingsUi.browserColdStandby.checked),
+    systemProxyUpstreamEnabled: Boolean(settingsUi.systemProxyUpstream && settingsUi.systemProxyUpstream.checked),
     adsProfileId: settingsUi.adsProfile.value.trim(),
     adsProfileName: selectedProfileName,
     platform: selectedPlatform,
@@ -6072,6 +6105,8 @@ function applySettings(s) {
   settingsUi.adsApiBase.value = s.adsApiBase || '';
   applyParkingSelection(s.browserParkingMode || 'primary-screen');
   if (settingsUi.browserColdStandby) settingsUi.browserColdStandby.checked = s.browserColdStandbyEnabled !== false;
+  if (settingsUi.systemProxyUpstream) settingsUi.systemProxyUpstream.checked = s.systemProxyUpstreamEnabled === true;
+  updateSystemProxyUpstreamHint();
   // 浏览器并发（change browser-slot-scheduling）：0 = 自动 → 输入框留空，让占位文案说清自动是怎么算的。
   if (settingsUi.slotLimit) settingsUi.slotLimit.value = Number(s.browserSlotLimit) > 0 ? String(s.browserSlotLimit) : '';
   if (settingsUi.maxQueuedStartLimit) settingsUi.maxQueuedStartLimit.value = Number(s.maxQueuedStartLimit) > 0 ? String(s.maxQueuedStartLimit) : '';
@@ -6247,6 +6282,10 @@ async function runBrowserRecovery(action) {
 settingsUi.browserShow.addEventListener('click', () => runBrowserRecovery('show'));
 settingsUi.browserResetParking.addEventListener('click', () => runBrowserRecovery('reset'));
 settingsUi.browserColdStandby?.addEventListener('change', markDirty);
+settingsUi.systemProxyUpstream?.addEventListener('change', () => {
+  updateSystemProxyUpstreamHint();
+  markDirty();
+});
 
 // ─── AdsPower 探测 / 环境列表 / 新建入口 ───
 

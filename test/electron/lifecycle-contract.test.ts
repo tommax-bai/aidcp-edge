@@ -113,10 +113,13 @@ test('cold standby child close stays in standby rather than respawning as a cras
 test('application quit still uses final SIGTERM for every retained core', () => {
   const quit = functionSource('gracefulStopAllAndQuit', 'quitApp');
   assert.match(quit, /kill\('SIGTERM'\)/);
+  assert.match(quit, /await proxyChainManager\.stopAll\(\)/);
   assert.match(quit, /await stopManagedAdsRuntime\(\)/);
+  assert.ok(quit.indexOf('await proxyChainManager.stopAll()') < quit.indexOf('await stopManagedAdsRuntime()'), 'proxy relays must stop before Ads CLI');
   assert.ok(quit.indexOf("kill('SIGTERM')") < quit.indexOf('await stopManagedAdsRuntime()'), 'core shutdown must precede Ads CLI stop');
   assert.match(main, /const hasManagedAdsRuntime = Boolean\(managedAdsRuntime\)/);
-  assert.match(main, /if \(!anyRunning && !hasManagedAdsRuntime\)/, 'daemon-only quit must still enter cleanup');
+  assert.match(main, /if \(!anyRunning && !hasManagedAdsRuntime && !hasManagedProxyChains\)/,
+    'daemon-only or relay-only quit must still enter cleanup');
 });
 
 test('managed Ads runtime resets once per successful app session and owns the resolved base', () => {

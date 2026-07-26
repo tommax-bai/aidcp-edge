@@ -1397,6 +1397,14 @@
             </label>
           </div>
           <div id="ads-config" class="ads-config">
+            <div class="field system-proxy-chain-field">
+              <label class="switch inline-switch" title="让浏览器先经过 macOS 固定系统代理，再进入环境代理">
+                <input id="system-proxy-upstream" type="checkbox" />
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+                <span class="switch-label">系统代理作为前置跳板</span>
+              </label>
+              <span id="system-proxy-upstream-hint" class="parking-hint">关闭：浏览器直接连接环境代理。</span>
+            </div>
             <button id="ads-advanced2-toggle" class="link ads-adv-toggle" type="button">指纹浏览器高级设置 ▾</button>
             <div id="ads-advanced2" class="ads-advanced hidden">
               <label class="field">

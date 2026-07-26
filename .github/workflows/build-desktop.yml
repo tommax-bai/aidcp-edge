@@ -222,6 +222,7 @@ jobs:
           if ($authUrl -notmatch '^https?://') {
             throw 'client_auth_url must be http(s)://...'
           }
+          npm run build:gost -- x64
           npm run build:native-page-engines-for-package -- x64
           npm run build:dist
           npx electron-builder --win --publish never "-c.extraMetadata.aidcpCloudDefaultEnv=${{ inputs.cloud_default_env }}" "-c.extraMetadata.aidcpClientAuthUrl=$authUrl"

@@ -14,6 +14,7 @@
     "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build:dist": "npm run clean:dist && tsc -p tsconfig.build.json && node scripts/prune-production-dist.mjs",
     "build:ads-runtime": "node scripts/stage-ads-runtime.mjs",
+    "build:gost": "node scripts/stage-gost.mjs",
     "build:native-page-engine": "node scripts/build-native-page-engine.mjs",
     "build:native-page-engines-for-package": "node scripts/build-native-page-engines-for-package.mjs",
     "ensure:native-page-engine": "node scripts/ensure-native-page-engine-dev.mjs",
@@ -25,11 +26,11 @@
     "electron:dev": "electron .",
     "preelectron:ol": "node scripts/ensure-electron-dev-signature.mjs && npm run ensure:native-page-engine",
     "electron:ol": "AIDCP_USER_DATA_DIR=\"$HOME/.aidcp-edge/ol\" AIDCP_CLOUD_URL=ws://123.56.253.183:8787 electron .",
-    "electron:build": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:native-page-engines-for-package && node ./node_modules/electron-builder/cli.js",
-    "electron:build:win": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:native-page-engines-for-package -- x64 && node ./node_modules/electron-builder/cli.js --win",
-    "electron:build:mac": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:native-page-engines-for-package -- x64 arm64 && node ./node_modules/electron-builder/cli.js --mac",
-    "electron:build:mac:dev": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:native-page-engines-for-package -- x64 arm64 && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=dev -c.extraMetadata.aidcpClientAuthUrl=http://121.89.85.150:8088/capi",
-    "electron:build:mac:ol": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:native-page-engines-for-package -- x64 arm64 && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=ol -c.extraMetadata.aidcpClientAuthUrl=https://aidcp.tommax.cc/capi",
+    "electron:build": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:gost && npm run build:native-page-engines-for-package && node ./node_modules/electron-builder/cli.js",
+    "electron:build:win": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:gost -- x64 && npm run build:native-page-engines-for-package -- x64 && node ./node_modules/electron-builder/cli.js --win",
+    "electron:build:mac": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:gost -- x64 arm64 && npm run build:native-page-engines-for-package -- x64 arm64 && node ./node_modules/electron-builder/cli.js --mac",
+    "electron:build:mac:dev": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:gost -- x64 arm64 && npm run build:native-page-engines-for-package -- x64 arm64 && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=dev -c.extraMetadata.aidcpClientAuthUrl=http://121.89.85.150:8088/capi",
+    "electron:build:mac:ol": "npm run verify:desktop-build-input && npm run build:dist && npm run build:ads-runtime && npm run build:gost -- x64 arm64 && npm run build:native-page-engines-for-package -- x64 arm64 && node ./node_modules/electron-builder/cli.js --mac -c.extraMetadata.aidcpCloudDefaultEnv=ol -c.extraMetadata.aidcpClientAuthUrl=https://aidcp.tommax.cc/capi",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "test:acceptance": "tsx --test test/acceptance/*.test.ts",
@@ -67,6 +68,10 @@
       {
         "from": "build/native-page-engine/${platform}-${arch}",
         "to": "native-page-engine"
+      },
+      {
+        "from": "build/gost/${platform}-${arch}",
+        "to": "gost"
       }
     ],
     "extraMetadata": {

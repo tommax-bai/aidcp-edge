@@ -2312,6 +2312,12 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 
 /* .ads-config 现为 .set-card 之一，布局交给卡片的 flex column，自身只保留间距 */
 .ads-config { gap: 12px; }
+.system-proxy-chain-field {
+  padding: 10px 12px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: #f8fafc;
+}
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field-label { color: var(--mute); font-size: 12.5px; font-weight: 600; }
 .field-label .req, .field-label .opt {

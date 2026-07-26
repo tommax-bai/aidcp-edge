@@ -599,6 +599,38 @@ test('冷待机开关：旧设置缺值时默认开启，保存时带 browserCol
   assert.equal(savedPatch.browserColdStandbyEnabled, false);
 });
 
+test('系统代理前置跳板默认关闭，开启后保存并呈现双跳状态', async () => {
+  let savedPatch: { systemProxyUpstreamEnabled?: boolean } = {};
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({ edge: 'stopped', proxyChain: { state: 'ready' } }),
+    getSettings: async () => ({
+      provider: 'adspower',
+      adsProfileId: 'u1',
+      adsProfileName: '测试环境',
+      environments: [{ profileId: 'u1', name: '测试环境', platform: 'xiaohongshu' }],
+      adsApiKey: '',
+      adsApiBase: '',
+      adsDownloadUrl: 'x',
+      systemProxyUpstreamEnabled: false,
+    }),
+    saveSettings: async (patch) => {
+      savedPatch = patch as { systemProxyUpstreamEnabled?: boolean };
+      return { provider: 'adspower', saveOk: true };
+    },
+    start: async () => makeStatus({ provider: 'adspower', edge: 'starting' }),
+  }));
+  const toggle = $(w, '#system-proxy-upstream') as HTMLInputElement;
+  assert.equal(toggle.checked, false);
+  assert.match($(w, '#system-proxy-upstream-hint').textContent ?? '', /直接连接环境代理/);
+  toggle.checked = true;
+  toggle.dispatchEvent(new w.Event('change'));
+  assert.match($(w, '#system-proxy-upstream-hint').textContent ?? '', /双跳中继已就绪/);
+  $(w, '#session-fab').dispatchEvent(new w.Event('click'));
+  await tick();
+  await tick();
+  assert.equal(savedPatch.systemProxyUpstreamEnabled, true);
+});
+
 test('窗口停放：无可控浏览器时显示浏览器诚实失败', async () => {
   const w = await boot(makeStub({
     showDrivenBrowser: async () => ({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' }),

@@ -160,7 +160,13 @@ function createProxyPreflightController(options = {}) {
       try {
         const config = await readProxy(id);
         if (!config || config.ok !== true) {
-          result = { state: 'unknown', checkedAt: new Date(now()).toISOString(), reason: 'profile_config_unavailable' };
+          result = config && config.blocking === true
+            ? {
+                state: 'unavailable',
+                checkedAt: new Date(now()).toISOString(),
+                reason: String(config.reason || 'profile_config_unavailable'),
+              }
+            : { state: 'unknown', checkedAt: new Date(now()).toISOString(), reason: 'profile_config_unavailable' };
         } else if (config.noProxy) {
           result = { state: 'skipped', checkedAt: new Date(now()).toISOString(), reason: 'no_proxy' };
         } else {

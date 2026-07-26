@@ -7,6 +7,8 @@ import {
   SelfChromeProvider,
   AdsPowerProvider,
   BrowserProfileInUseError,
+  AdsPowerProxyOverrideRestartRequiredError,
+  normalizeAdsPowerProxyOverride,
   selectBrowserProvider,
 } from '../../src/cdp/index.js';
 import type { ChromeInstance } from '../../src/cdp/index.js';
@@ -127,6 +129,30 @@ test('AdsPowerProvider.launch 支持平台 driver 注入起始页', async () => 
   assert.ok(payload.launch_args?.includes('--start-maximized'), '裸启动无暂存坐标时保留历史窄窗兜底');
 });
 
+test('AdsPowerProvider.launch 仅为新代际加入受管 loopback proxy override', async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl = routedFetch(
+    [
+      ['/api/v2/browser-profile/start', () => ({ code: 0, data: { debug_port: 61332 } })],
+      ['/json/version', () => ({})],
+    ],
+    calls,
+  );
+  const provider = new AdsPowerProvider(
+    {
+      apiBase: 'http://x:50325',
+      userId: 'k1',
+      proxyServer: 'http://127.0.0.1:18080',
+    },
+    { fetchImpl, ...noopDeps },
+  );
+  await provider.launch({ host: '127.0.0.1', port: 9222 });
+  const startCall = calls.find((call) => call.url.includes('browser-profile/start'));
+  const payload = JSON.parse(startCall?.body || '{}') as { launch_args?: string[] };
+  assert.ok(payload.launch_args?.includes('--proxy-server=http://127.0.0.1:18080'));
+  assert.equal(JSON.stringify(payload).includes('proxy.example'), false);
+});
+
 test('AdsPowerProvider.launch：V2 Active 返回有效端点时直接接管，不重复 start', async () => {
   const calls: FetchCall[] = [];
   const fetchImpl = routedFetch([
@@ -140,6 +166,50 @@ test('AdsPowerProvider.launch：V2 Active 返回有效端点时直接接管，�
   const out = await provider.launch({ host: '127.0.0.1', port: 9222 });
   assert.equal(out.endpoint.port, 59167);
   assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
+});
+
+test('AdsPowerProvider.launch：要求 proxy override 时拒绝接管既有 Active 浏览器', async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl = routedFetch([
+    ['/api/v2/browser-profile/active', () => ({ code: 0, data: { status: 'Active', debug_port: '59167' } })],
+  ], calls);
+  const provider = new AdsPowerProvider(
+    {
+      apiBase: 'http://x:50325',
+      userId: 'k1',
+      proxyServer: 'http://127.0.0.1:18080',
+    },
+    { fetchImpl, ...noopDeps },
+  );
+  await assert.rejects(
+    provider.launch({ host: '127.0.0.1', port: 9222 }),
+    (error) => error instanceof AdsPowerProxyOverrideRestartRequiredError
+      && error.code === 'adspower_proxy_override_restart_required',
+  );
+  assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
+});
+
+test('proxy override 只接受无凭据 HTTP loopback，direct 模式保持空值', () => {
+  assert.equal(normalizeAdsPowerProxyOverride(undefined), undefined);
+  assert.equal(normalizeAdsPowerProxyOverride(' http://127.0.0.1:18080 '), 'http://127.0.0.1:18080');
+  for (const invalid of [
+    'https://127.0.0.1:18080',
+    'http://localhost:18080',
+    'http://10.0.0.1:18080',
+    'http://user:pass@127.0.0.1:18080',
+    'http://127.0.0.1:0',
+    'not-a-url',
+  ]) {
+    assert.throws(() => normalizeAdsPowerProxyOverride(invalid), /AIDCP_ADS_PROXY_OVERRIDE/);
+  }
+  const selected = selectBrowserProvider({
+    env: {
+      AIDCP_BROWSER_PROVIDER: 'adspower',
+      AIDCP_ADS_USER_ID: 'k1',
+      AIDCP_ADS_PROXY_OVERRIDE: 'http://127.0.0.1:18080',
+    },
+  }) as AdsPowerProvider;
+  assert.equal((selected as any).cfg.proxyServer, 'http://127.0.0.1:18080');
 });
 
 test('AdsPowerProvider.launch：V2 Inactive 但 profile marker 与 /json/version 完全匹配时接管失联浏览器', async (t) => {

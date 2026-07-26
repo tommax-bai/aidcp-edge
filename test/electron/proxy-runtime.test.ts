@@ -99,8 +99,8 @@ test('装配契约：仅 Facebook AdsPower 启用 Network，注入 /egress，IP 
 
 test('预检装配契约：选择时预热，启动与唤醒复用，代理修改后失效且不新建重试器', () => {
   assert.match(mainSource, /ipcMain\.handle\('fleet:select'[\s\S]*scheduleSelectedProxyPreflight\(envs\.get\(envId\)\)/);
-  assert.match(mainSource, /const preflight = await ensureProxyPreflight\(handle\);[\s\S]*preflight\.state === 'unavailable'[\s\S]*startEdge\(handle\)/);
-  assert.match(mainSource, /launchQueue\.enqueue\(\{[\s\S]*run: async \(\) => \{[\s\S]*await ensureProxyPreflight\(handle\)[\s\S]*admitBrowserSlot\(handle\)/);
+  assert.match(mainSource, /const preflight = await ensureNetworkPreparation\(handle\);[\s\S]*preflight\.state === 'unavailable'[\s\S]*startEdge\(handle\)/);
+  assert.match(mainSource, /launchQueue\.enqueue\(\{[\s\S]*run: async \(\) => \{[\s\S]*await ensureNetworkPreparation\(handle\)[\s\S]*admitBrowserSlot\(handle\)/);
   assert.match(mainSource, /onColdStandbyWakeFailed\(handle, `代理预检未通过/);
   assert.match(mainSource, /proxyPreflight\.invalidate\(envId\)/);
   assert.doesNotMatch(mainSource, /proxyPreflightRetry|proxyRetryTimer/);

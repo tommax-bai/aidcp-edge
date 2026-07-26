@@ -91,6 +91,8 @@ export interface AdsPowerConfig {
   userId: string;
   /** 启动后打开的页（确保落到小红书，readSelfIdentity 才读得到），默认 explore。 */
   startUrl?: string;
+  /** Electron 主进程准备的无凭据 loopback 代理；只覆盖本次新浏览器代际，不修改 AdsPower profile。 */
+  proxyServer?: string;
 }
 
 export interface AdsPowerDeps {
@@ -137,6 +139,35 @@ const MAX_ORPHAN_CACHE_CANDIDATES = 8;
 const PROFILE_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 const DEVTOOLS_BROWSER_PATH_RE = /^\/devtools\/browser\/[A-Za-z0-9._-]+$/;
 const ADS_PROFILE_IN_USE_RE = /^\s*\[[^\]]+\]\s+is being used by\s+\[([^\]]+)\]\s+and is not allowed to open\s*$/i;
+
+export class AdsPowerProxyOverrideRestartRequiredError extends Error {
+  readonly code = 'adspower_proxy_override_restart_required';
+
+  constructor(readonly profileId: string) {
+    super(
+      `[aidcp-edge] AdsPower profile=${profileId} 已在运行，无法证明当前浏览器应用了系统前置代理；请先关闭该环境后重新启动`,
+    );
+    this.name = 'AdsPowerProxyOverrideRestartRequiredError';
+  }
+}
+
+export function normalizeAdsPowerProxyOverride(raw: string | undefined): string | undefined {
+  const value = String(raw ?? '').trim();
+  if (!value) return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('[aidcp-edge] AIDCP_ADS_PROXY_OVERRIDE 必须是 http://127.0.0.1:<port>');
+  }
+  const port = Number(url.port);
+  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1'
+    || !Number.isInteger(port) || port < 1 || port > 65_535
+    || url.username || url.password || (url.pathname && url.pathname !== '/') || url.search || url.hash) {
+    throw new Error('[aidcp-edge] AIDCP_ADS_PROXY_OVERRIDE 必须是无凭据 http://127.0.0.1:<port>');
+  }
+  return `http://127.0.0.1:${port}`;
+}
 /**
  * 关闭确认：每个阶段（停止 / 重发停止 / OS 杀后）轮询该 profile 调试端点是否变暗的次数与间隔。
  * 每次探测都设**小超时**（closeProbeTimeoutMs），超时/异常一律视为「仍应答」（浏览器可能只是慢/挂，
@@ -272,6 +303,7 @@ export class AdsPowerProvider implements BrowserProvider {
     const launchArgs = ['--window-size=1440,980'];
     if (!opts.windowPosition) launchArgs.push('--start-maximized');
     launchArgs.push('--deny-permission-prompts', '--lang=en-US');
+    if (this.cfg.proxyServer) launchArgs.push(`--proxy-server=${this.cfg.proxyServer}`);
     if (opts.windowPosition) {
       launchArgs.push(`--window-position=${Math.floor(opts.windowPosition.left)},${Math.floor(opts.windowPosition.top)}`);
     }
@@ -283,6 +315,9 @@ export class AdsPowerProvider implements BrowserProvider {
     const activeStatus = String(active?.status ?? '').trim().toLowerCase();
     let port = 0;
     if (activeStatus === 'active') {
+      if (this.cfg.proxyServer) {
+        throw new AdsPowerProxyOverrideRestartRequiredError(this.cfg.userId);
+      }
       port = Number(active?.debug_port);
       if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
         throw new Error(
@@ -616,6 +651,7 @@ export function selectBrowserProvider(
       apiKey: env.AIDCP_ADS_API_KEY,
       userId,
       startUrl: opts.startUrl ?? env.AIDCP_EXPLORE_URL,
+      proxyServer: normalizeAdsPowerProxyOverride(env.AIDCP_ADS_PROXY_OVERRIDE),
     };
     return new AdsPowerProvider(cfg, {
       fetchImpl: opts.fetchImpl,

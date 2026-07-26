@@ -108,6 +108,8 @@ echo "Building signed macOS app bundles for: $arch_list"
 npm run build:dist
 # 自包含指纹浏览器运行时（随包 AdsPower CLI），与本机 electron:build:mac 一致：先编译，再 stage 运行时。
 npm run build:ads-runtime
+# 系统代理前置双跳 sidecar：固定版本/校验和按目标架构 stage，缺失或不匹配即禁止打包。
+npm run build:gost -- $arch_list
 # 客户包按目标架构携带 Native Page Engine；任一架构缺失或校验失败都禁止继续打包。
 npm run build:native-page-engines-for-package -- $arch_list
 
