@@ -13,6 +13,13 @@ test('double-hop setting is default-off, normalized exactly and exposed as safe 
   assert.match(main, /systemProxyUpstreamEnabled:\s*false/);
   assert.match(main, /settings\.systemProxyUpstreamEnabled = settings\.systemProxyUpstreamEnabled === true/g);
   assert.match(main, /proxyMode: systemProxyChainEnabled\(\) \? 'system_then_environment' : 'direct'/);
+  assert.match(
+    main,
+    /function systemProxyChainEnabled\(handle\)[\s\S]{0,500}?handle && handle\.child[\s\S]{0,300}?handle\.status\.proxyMode === 'system_then_environment'/,
+    'running browser generations must keep their effective mode until restart',
+  );
+  assert.match(renderer, /saveSettings\(\{ systemProxyUpstreamEnabled: enabled \}\)/);
+  assert.match(renderer, /proxyModePending[\s\S]{0,300}?currentStatus\.proxyMode === 'system_then_environment'/);
   assert.match(renderer, /status\.proxyMode === 'system_then_environment'/);
 });
 

@@ -1411,7 +1411,12 @@ const envs = new Map();
 let selectedEnvId = '';
 let selectedProxyPreflightTimer = null;
 
-function systemProxyChainEnabled() {
+function systemProxyChainEnabled(handle) {
+  // 目标设置可立即持久化，供尚未启动的环境预检使用；已经运行的子进程必须冻结其启动代际
+  // 实际采用的模式，直到显式重启。否则切开关后一次冷待机唤醒会把旧子进程半热切到新模式。
+  if (handle && handle.child) {
+    return handle.kind === 'adspower' && handle.status.proxyMode === 'system_then_environment';
+  }
   return settings.provider === 'adspower' && settings.systemProxyUpstreamEnabled === true;
 }
 
@@ -1448,7 +1453,7 @@ const proxyChainManager = createProxyChainManager({
 });
 
 async function ensureSystemProxyChain(handle) {
-  if (!systemProxyChainEnabled() || !handle || handle.kind !== 'adspower') {
+  if (!systemProxyChainEnabled(handle) || !handle || handle.kind !== 'adspower') {
     return { state: 'skipped', reason: 'not_enabled' };
   }
   let config;
@@ -1484,7 +1489,8 @@ async function ensureSystemProxyChain(handle) {
 
 async function readProxyForPreflight(profileId) {
   const config = await readAdsProfileProxy(profileId);
-  if (!systemProxyChainEnabled()) return config;
+  const handle = envs.get(fleet.envIdForProfile(profileId));
+  if (!systemProxyChainEnabled(handle)) return config;
   if (!config || config.ok !== true) {
     return { ok: false, blocking: true, reason: 'profile_config_unavailable' };
   }
@@ -1540,7 +1546,7 @@ function ensureProxyPreflight(handle) {
 }
 
 async function ensureNetworkPreparation(handle) {
-  if (systemProxyChainEnabled() && handle && handle.kind === 'adspower') {
+  if (systemProxyChainEnabled(handle) && handle && handle.kind === 'adspower') {
     const chain = await ensureSystemProxyChain(handle);
     if (chain.state === 'unavailable') return chain;
   }
@@ -3865,7 +3871,7 @@ function spawnEdgeChild(handle, {
       return;
     }
     spawnEnv = { ...built.env, ELECTRON_RUN_AS_NODE: '1' };
-    if (systemProxyChainEnabled() && !cleanupBootstrap) {
+    if (systemProxyChainEnabled(handle) && !cleanupBootstrap) {
       const endpoint = proxyChainManager.endpoint(handle.profileId);
       if (!endpoint) {
         stopStartForProxyFailure(handle, { reason: 'proxy_chain_unavailable' });

@@ -546,6 +546,7 @@ function routeSelKey() {
 // 用户正在编辑设置表单时不被状态推送回填覆盖（避免边打字边被清空）。
 let editingProvider = null;
 // 设置是否相对「已应用/已保存」有改动。核心在跑且 dirty 时才显示「按新设置重启」；
+// 系统前置代理开关例外：选择会立即持久化给离线预检，运行代际差异由 proxyMode 单独判断。
 // 「保存」按钮已并入「启动」——启动时先存再起，故无独立保存按钮。
 let dirty = false;
 // 选中环境的 AdsPower 环境名（随设置持久化，作标题带账号标签兜底）。
@@ -5893,10 +5894,14 @@ function updateSystemProxyUpstreamHint(status = currentStatus) {
   }
 }
 
-// dirty 且核心在跑（非停止/异常）时才显示「按新设置重启」——把已改设置显式应用到在跑核心。
+// 普通 dirty 设置或“目标代理模式 != 当前运行代际实际模式”且核心在跑时显示重启入口。
 function updateApplyRestart() {
   const running = Boolean(currentStatus) && currentStatus.edge !== 'stopped' && currentStatus.edge !== 'warning';
-  settingsUi.applyRestart.classList.toggle('hidden', !(dirty && running));
+  const proxyModePending = running
+    && selectedProvider() === 'adspower'
+    && Boolean(settingsUi.systemProxyUpstream)
+    && settingsUi.systemProxyUpstream.checked !== (currentStatus.proxyMode === 'system_then_environment');
+  settingsUi.applyRestart.classList.toggle('hidden', !(running && (dirty || proxyModePending)));
 }
 
 function markDirty() {
@@ -6282,9 +6287,26 @@ async function runBrowserRecovery(action) {
 settingsUi.browserShow.addEventListener('click', () => runBrowserRecovery('show'));
 settingsUi.browserResetParking.addEventListener('click', () => runBrowserRecovery('reset'));
 settingsUi.browserColdStandby?.addEventListener('change', markDirty);
-settingsUi.systemProxyUpstream?.addEventListener('change', () => {
+settingsUi.systemProxyUpstream?.addEventListener('change', async () => {
+  const enabled = settingsUi.systemProxyUpstream.checked;
   updateSystemProxyUpstreamHint();
-  markDirty();
+  updateApplyRestart();
+  settingsUi.systemProxyUpstream.disabled = true;
+  try {
+    const saved = await window.aidcpEdge.saveSettings({ systemProxyUpstreamEnabled: enabled });
+    if (saved && saved.saveOk === false) {
+      settingsUi.msg.textContent =
+        `代理模式本次已应用，但写盘失败：${saved.saveError || '未知错误'}。重启应用后可能恢复原设置。`;
+    }
+  } catch (error) {
+    // IPC 未受理时恢复到变更前的可见选择，避免界面声称一个主进程从未采用的模式。
+    settingsUi.systemProxyUpstream.checked = !enabled;
+    settingsUi.msg.textContent = `代理模式保存失败：${(error && error.message) || error}`;
+  } finally {
+    settingsUi.systemProxyUpstream.disabled = false;
+    updateSystemProxyUpstreamHint();
+    updateApplyRestart();
+  }
 });
 
 // ─── AdsPower 探测 / 环境列表 / 新建入口 ───

@@ -599,8 +599,8 @@ test('冷待机开关：旧设置缺值时默认开启，保存时带 browserCol
   assert.equal(savedPatch.browserColdStandbyEnabled, false);
 });
 
-test('系统代理前置跳板默认关闭，开启后保存并呈现双跳状态', async () => {
-  let savedPatch: { systemProxyUpstreamEnabled?: boolean } = {};
+test('系统代理前置跳板默认关闭，离线切换立即保存并呈现双跳状态', async () => {
+  const savedPatches: Array<{ systemProxyUpstreamEnabled?: boolean }> = [];
   const w = await boot(makeStub({
     getStatus: async () => makeStatus({ edge: 'stopped', proxyChain: { state: 'ready' } }),
     getSettings: async () => ({
@@ -614,7 +614,7 @@ test('系统代理前置跳板默认关闭，开启后保存并呈现双跳状�
       systemProxyUpstreamEnabled: false,
     }),
     saveSettings: async (patch) => {
-      savedPatch = patch as { systemProxyUpstreamEnabled?: boolean };
+      savedPatches.push(patch as { systemProxyUpstreamEnabled?: boolean });
       return { provider: 'adspower', saveOk: true };
     },
     start: async () => makeStatus({ provider: 'adspower', edge: 'starting' }),
@@ -625,10 +625,51 @@ test('系统代理前置跳板默认关闭，开启后保存并呈现双跳状�
   toggle.checked = true;
   toggle.dispatchEvent(new w.Event('change'));
   assert.match($(w, '#system-proxy-upstream-hint').textContent ?? '', /双跳中继已就绪/);
+  await tick();
+  assert.equal(savedPatches.at(-1)?.systemProxyUpstreamEnabled, true, '离线预检前必须先保存可见开关');
   $(w, '#session-fab').dispatchEvent(new w.Event('click'));
   await tick();
   await tick();
-  assert.equal(savedPatch.systemProxyUpstreamEnabled, true);
+  assert.equal(savedPatches.at(-1)?.systemProxyUpstreamEnabled, true);
+});
+
+test('系统代理前置跳板运行中立即保存目标模式，但实际模式保持到显式重启', async () => {
+  const savedModes: boolean[] = [];
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      edge: 'running',
+      session: 'running',
+      proxyMode: 'direct',
+      proxyChain: null,
+    }),
+    getSettings: async () => ({
+      provider: 'adspower',
+      adsProfileId: 'u1',
+      adsProfileName: '测试环境',
+      environments: [{ profileId: 'u1', name: '测试环境', platform: 'facebook' }],
+      adsApiKey: '',
+      adsApiBase: '',
+      adsDownloadUrl: 'x',
+      systemProxyUpstreamEnabled: false,
+    }),
+    saveSettings: async (patch) => {
+      savedModes.push(Boolean((patch as { systemProxyUpstreamEnabled?: boolean }).systemProxyUpstreamEnabled));
+      return { provider: 'adspower', saveOk: true };
+    },
+  }));
+  const toggle = $(w, '#system-proxy-upstream') as HTMLInputElement;
+  toggle.checked = true;
+  toggle.dispatchEvent(new w.Event('change'));
+  await tick();
+  assert.deepEqual(savedModes, [true]);
+  assert.equal(hidden($(w, '#apply-restart')), false, '目标双跳与当前直连代际不同时必须要求重启');
+  assert.match($(w, '#system-proxy-upstream-hint').textContent ?? '', /当前运行中的环境仍为直连环境代理/);
+
+  toggle.checked = false;
+  toggle.dispatchEvent(new w.Event('change'));
+  await tick();
+  assert.deepEqual(savedModes, [true, false]);
+  assert.equal(hidden($(w, '#apply-restart')), true, '切回当前代际实际模式后不应继续伪报待重启');
 });
 
 test('窗口停放：无可控浏览器时显示浏览器诚实失败', async () => {
