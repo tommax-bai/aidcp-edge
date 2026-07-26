@@ -7,7 +7,7 @@ use crate::model::{
 use crate::probe::ProbeResult;
 use crate::protocol::{EffectPhase, NativeCommand};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use url::Url;
 
 include!(concat!(
@@ -162,12 +162,43 @@ pub struct FacebookLikeProbe {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookLikeCommit {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub note_id: Option<String>,
+    #[serde(default)]
+    pub already: bool,
+    #[serde(default)]
+    pub clicked: bool,
+    #[serde(default)]
+    pub observation: Option<ActionEvidence>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookLikeVerify {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub note_id: Option<String>,
+    pub selected: bool,
+    #[serde(default)]
+    pub witness: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FacebookFollowProbe {
     pub ok: bool,
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
     pub note_id: Option<String>,
+    #[serde(default)]
+    pub video_key: Option<String>,
     #[serde(default)]
     pub already: bool,
     #[serde(default)]
@@ -268,8 +299,16 @@ pub fn like_probe_expression(note_id: &str) -> Result<String, EngineError> {
     internal_expression("like_probe", json!({ "noteId": note_id }))
 }
 
-pub fn like_picker_probe_expression() -> Result<String, EngineError> {
-    internal_expression("like_picker_probe", json!({}))
+pub fn like_primary_commit_expression(note_id: &str) -> Result<String, EngineError> {
+    internal_expression("like_primary_commit", json!({ "noteId": note_id }))
+}
+
+pub fn like_verify_expression(note_id: &str) -> Result<String, EngineError> {
+    internal_expression("like_verify", json!({ "noteId": note_id }))
+}
+
+pub fn like_picker_probe_expression(note_id: &str) -> Result<String, EngineError> {
+    internal_expression("like_picker_probe", json!({ "noteId": note_id }))
 }
 
 pub fn follow_probe_expression(note_id: Option<&str>) -> Result<String, EngineError> {
@@ -384,6 +423,16 @@ pub fn consent_probe_from_cdp(result: &Value) -> Result<FacebookConsentProbe, En
 pub fn like_probe_from_cdp(result: &Value) -> Result<FacebookLikeProbe, EngineError> {
     let result = result_from_cdp(result)?;
     typed_internal_value(result.output, "like_probe")
+}
+
+pub fn like_commit_from_cdp(result: &Value) -> Result<FacebookLikeCommit, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "like_commit")
+}
+
+pub fn like_verify_from_cdp(result: &Value) -> Result<FacebookLikeVerify, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "like_verify")
 }
 
 pub fn follow_probe_from_cdp(result: &Value) -> Result<FacebookFollowProbe, EngineError> {

@@ -383,6 +383,195 @@ test('Facebook reaction picker ignores the original post Like control', async ()
   assert.equal(picker.output.value.cy, 20);
 });
 
+test('Facebook Native Reel probes bind sibling multilingual like and author-qualified follow controls', async () => {
+  const dom = install(`
+    <main>
+      <section id="reel-stage">
+        <div id="video-root"><video src="https://cdn.example/reel-777.mp4"></video></div>
+        <div id="action-rail">
+          <button id="like" aria-label="Bày tỏ cảm xúc Thích bài viết của Re Su">Thích</button>
+          <a id="author">Re Su</a>
+          <button id="follow" aria-label="关注Re Su">关注</button>
+        </div>
+      </section>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(dom.window.document.querySelector('#like')!, { left: 980, top: 500, right: 1_040, bottom: 550 });
+  setRect(dom.window.document.querySelector('#author')!, { left: 590, top: 650, right: 680, bottom: 690 });
+  setRect(dom.window.document.querySelector('#follow')!, { left: 690, top: 650, right: 770, bottom: 690 });
+
+  const like = await run({
+    kind: 'like_probe',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(like.output.value.ok, true);
+  assert.equal(like.output.value.noteId, 'https://www.facebook.com/reel/777');
+
+  const follow = await run({
+    kind: 'follow_probe',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(follow.output.value.ok, true);
+  assert.equal(follow.output.value.already, false);
+  assert.equal(follow.output.value.noteId, 'https://www.facebook.com/reel/777');
+});
+
+test('Facebook Native Reel probes reject ambiguous sibling controls', async () => {
+  const dom = install(`
+    <main>
+      <div id="video-root"><video src="https://cdn.example/reel-777.mp4"></video></div>
+      <div id="action-rail">
+        <button id="like-a" aria-label="留下心情">赞</button>
+        <button id="like-b" aria-label="Bày tỏ cảm xúc Thích">Thích</button>
+      </div>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(dom.window.document.querySelector('#like-a')!, { left: 980, top: 500, right: 1_040, bottom: 550 });
+  setRect(dom.window.document.querySelector('#like-b')!, { left: 980, top: 570, right: 1_040, bottom: 620 });
+
+  const like = await run({
+    kind: 'like_probe',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(like.output.value.ok, false);
+  assert.equal(like.output.value.reason, 'ambiguous_target');
+});
+
+test('Facebook Native Reel like fresh commit and verify remain bound to the same Reel', async () => {
+  const dom = install(`
+    <main>
+      <div id="video-root"><video src="https://cdn.example/reel-777.mp4"></video></div>
+      <div id="action-rail">
+        <button id="like" aria-label="留下心情" aria-pressed="false"></button>
+      </div>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  const button = dom.window.document.querySelector('#like')!;
+  setRect(dom.window.document.querySelector('video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(button, { left: 980, top: 500, right: 1_040, bottom: 550 });
+  button.addEventListener('click', () => {
+    button.setAttribute('aria-pressed', 'true');
+    button.setAttribute('aria-label', '取消赞');
+  });
+
+  const committed = await run({
+    kind: 'like_primary_commit',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(committed.output.kind, 'like_commit');
+  assert.equal(committed.output.value.ok, true);
+  assert.equal(committed.output.value.clicked, true);
+  assert.equal(committed.output.value.noteId, 'https://www.facebook.com/reel/777');
+
+  const verified = await run({
+    kind: 'like_verify',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(verified.output.kind, 'like_verify');
+  assert.equal(verified.output.value.ok, true);
+  assert.equal(verified.output.value.selected, true);
+});
+
+test('Facebook Native Reel like verification rejects same-route active video movement', async () => {
+  const dom = install(`
+    <main>
+      <div id="video-root"><video id="before" src="https://cdn.example/reel-777.mp4"></video></div>
+      <button id="like" aria-label="留下心情"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  const before = dom.window.document.querySelector('#before')!;
+  const like = dom.window.document.querySelector('#like')!;
+  setRect(before, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(like, { left: 980, top: 500, right: 1_040, bottom: 550 });
+
+  const committed = await run({
+    kind: 'like_primary_commit',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(committed.output.value.clicked, true);
+
+  const after = dom.window.document.createElement('video');
+  after.src = 'https://cdn.example/reel-777.mp4';
+  before.replaceWith(after);
+  setRect(after, { left: 500, top: 70, right: 940, bottom: 780 });
+
+  const verified = await run({
+    kind: 'like_verify',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(verified.output.value.ok, false);
+  assert.equal(verified.output.value.reason, 'reel_moved');
+  assert.equal(verified.output.value.selected, false);
+});
+
+test('Facebook Native Reel picker probe is scoped to one visible multi-reaction picker', async () => {
+  const dom = install(`
+    <main>
+      <div id="video-root"><video src="https://cdn.example/reel-777.mp4"></video></div>
+      <button id="decoy" aria-label="Like">Like</button>
+      <div id="action-rail">
+        <button id="primary" aria-label="留下心情"></button>
+      </div>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  const primary = dom.window.document.querySelector('#primary')!;
+  setRect(dom.window.document.querySelector('video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(primary, { left: 980, top: 500, right: 1_040, bottom: 550 });
+  setRect(dom.window.document.querySelector('#decoy')!, { left: 100, top: 100, right: 160, bottom: 140 });
+  primary.addEventListener('click', () => {
+    const picker = dom.window.document.createElement('div');
+    picker.id = 'picker';
+    picker.setAttribute('role', 'dialog');
+    picker.setAttribute('aria-label', 'Reactions');
+    picker.innerHTML = `
+      <button id="picker-like" role="menuitemradio" aria-label="Like">Like</button>
+      <button id="picker-love" role="menuitemradio" aria-label="Love">Love</button>
+    `;
+    dom.window.document.querySelector('main')?.append(picker);
+    setRect(picker, { left: 900, top: 420, right: 1_120, bottom: 620 });
+    setRect(picker.querySelector('#picker-like')!, { left: 930, top: 460, right: 980, bottom: 510 });
+    setRect(picker.querySelector('#picker-love')!, { left: 990, top: 460, right: 1_040, bottom: 510 });
+  });
+
+  const committed = await run({
+    kind: 'like_primary_commit',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(committed.output.value.clicked, true);
+
+  const picker = await run({
+    kind: 'like_picker_probe',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(picker.output.value.ok, true);
+  assert.equal(picker.output.value.cx, 955);
+  assert.equal(picker.output.value.cy, 485);
+});
+
+test('Facebook Native Reel follow probe recognizes already-following author labels without clicking', async () => {
+  const dom = install(`
+    <main>
+      <div id="video-root"><video src="https://cdn.example/reel-777.mp4"></video></div>
+      <a id="author">Re Su</a>
+      <button id="following" aria-label="Đang theo dõi Re Su">Đang theo dõi</button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(dom.window.document.querySelector('#author')!, { left: 590, top: 650, right: 680, bottom: 690 });
+  setRect(dom.window.document.querySelector('#following')!, { left: 690, top: 650, right: 800, bottom: 690 });
+
+  const follow = await run({
+    kind: 'follow_probe',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(follow.output.value.ok, true);
+  assert.equal(follow.output.value.already, true);
+  assert.equal(follow.output.value.noteId, 'https://www.facebook.com/reel/777');
+  assert.match(String(follow.output.value.videoKey), /reel-777\.mp4@element:/);
+});
+
 test('Facebook comment editor accepts one exclusive sibling editor and rejects nested reply editors', async () => {
   const dom = install(`
     <main>

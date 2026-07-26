@@ -139,6 +139,11 @@ async function(input){
     const bottom=Math.min(window.innerHeight||0,rect.bottom);
     return Math.max(0,right-left)*Math.max(0,bottom-top);
   };
+  const rectDistance=(left,right)=>{
+    const dx=Math.max(0,left.left-right.right,right.left-left.right);
+    const dy=Math.max(0,left.top-right.bottom,right.top-left.bottom);
+    return Math.sqrt(dx*dx+dy*dy);
+  };
   const reelVideoKey=(video)=>{
     let state=window.__aidcpNativeReelVideoKeys;
     if(!state){
@@ -291,10 +296,30 @@ async function(input){
     const candidates=all('div[dir="auto"]',root).filter(visible).map((el)=>text(el,12000)).filter((value)=>value.length>1);
     return candidates.sort((a,b)=>b.length-a.length)[0]||'';
   };
+  const neutralLike=/^\s*(?:(?:给.+的帖子)?\s*(?:留下心情|赞一个|点赞|讚|like|react|reaccionar|me gusta|thích)|bày tỏ cảm xúc thích(?: về bài viết của .+)?|bay to cam xuc thich(?: ve bai viet cua .+)?)\s*$/i;
+  const unlike=/(取消赞|收回赞|收回|移除心情|移除赞|已赞|remove like|unlike|undo|gỡ thích|bỏ thích)/i;
+  const reactedWord=/^\s*(赞|讚|大赞|超赞|like|love|care|haha|wow|me gusta|me encanta|thích)\s*$/i;
+  const reactionPickerLabel=/^\s*(?:给.+的帖子)?\s*(?:留下心情|react|reaccionar)\s*$/i;
+  const pickerLike=/^\s*(赞|讚|like|me gusta|thích)\s*$/i;
+  const pickerReaction=/^\s*(赞|讚|like|love|care|haha|wow|sad|angry|me gusta|me encanta|thích|yêu thích|thương thương|buồn|phẫn nộ)\s*$/i;
+  const reactionState=(button)=>{
+    if(!button||!visible(button))return '';
+    const accessible=label(button);
+    const rendered=text(button,256);
+    const numeric=/\d/.test(rendered);
+    if(unlike.test(accessible)||unlike.test(rendered)||pressed(button))return 'reacted';
+    if(neutralLike.test(accessible)||neutralLike.test(rendered)){
+      return reactionPickerLabel.test(accessible)&&!numeric&&reactedWord.test(rendered)?'reacted':'neutral';
+    }
+    if(!numeric&&reactedWord.test(accessible))return 'reacted';
+    return '';
+  };
   const reactionButton=(root)=>{
     const buttons=all('button,[role="button"]',root).filter(visible);
     return buttons.find((button)=>/^(赞|讚|like|me gusta|thích)(\b|\s|$)/i.test(label(button)))||null;
   };
+  const reactionActionButton=(root)=>all('button,[role="button"],[role="radio"]',root).filter(visible)
+    .find((button)=>Boolean(reactionState(button)))||null;
   const commentEditor=(root=document)=>all('[contenteditable="true"][role="textbox"],textarea[aria-label],textarea',root).filter(visible).find((el)=>{
     const raw=label(el).toLowerCase();
     return /评论|留言|comment|bình luận|coment|输入回答|answer/.test(raw)||el.getAttribute('role')==='textbox';
@@ -513,10 +538,71 @@ async function(input){
     if(expected)return exactArticle(expected);
     return first(['[role="dialog"] [role="article"]','main [role="article"]','main article'])||null;
   };
+  const expectedActiveReel=()=>{
+    const expected=String(p.noteId||'');
+    const active=activeReel();
+    if(!active.ok)return {ok:false,reason:active.reason==='ambiguous_target'?'ambiguous_target':'target_not_found'};
+    if(!expected||postId(active.noteId)!==postId(expected))return {ok:false,reason:'target_not_found',noteId:active.noteId};
+    return active;
+  };
+  const reelAssociated=(active,element)=>{
+    if(!active||!element||!visible(element))return false;
+    const target=element.getBoundingClientRect();
+    const viewportWidth=window.innerWidth||0;
+    const viewportHeight=window.innerHeight||0;
+    if(target.bottom<=0||target.top>=viewportHeight||target.right<=0||target.left>=viewportWidth)return false;
+    const video=active.videoRect;
+    if(target.top<video.top-60||target.bottom>video.bottom+60||target.left<video.left-180||target.right>video.right+240)return false;
+    const distance=rectDistance(target,video);
+    if(distance>280)return false;
+    const otherDistances=all('video').filter((candidate)=>candidate!==active.video).map((candidate)=>candidate.getBoundingClientRect())
+      .filter((rect)=>viewportArea(rect)>0).map((rect)=>rectDistance(target,rect));
+    return !otherDistances.some((other)=>other+12<distance);
+  };
+  const reelLikeTarget=()=>{
+    const active=expectedActiveReel();
+    if(!active.ok)return active;
+    const matches=all('button,[role="button"],[role="radio"]').filter((button)=>
+      reelAssociated(active,button)&&Boolean(reactionState(button))
+    );
+    if(matches.length!==1)return {
+      ok:false,
+      reason:matches.length?'ambiguous_target':'like_button_not_found',
+      noteId:active.noteId,
+    };
+    const button=matches[0];
+    return {
+      ok:true,
+      active,
+      button,
+      state:reactionState(button),
+      noteId:active.noteId,
+      observation:{
+        ...actionEvidence(active.root),
+        listKey:active.noteId,
+        reactionText:norm(text(button,96)||label(button,96),128)||undefined,
+      },
+    };
+  };
+  const reelLikeMarker='data-aidcp-native-reel-like-target';
+  const reelLikeCommitState='__aidcpNativeReelLikeCommit';
   const likeProbe=()=>{
+    if(String(p.noteId||'')&&reelSurface()){
+      const target=reelLikeTarget();
+      if(!target.ok)return {ok:false,reason:target.reason,noteId:target.noteId};
+      const coordinates=point(target.button);
+      return {
+        ok:Boolean(coordinates),
+        ...(coordinates||{}),
+        reason:coordinates?undefined:'like_button_not_found',
+        noteId:target.noteId,
+        already:target.state==='reacted',
+        observation:target.observation,
+      };
+    }
     const root=actionRoot();
     if(!root)return {ok:false,reason:'target_not_found'};
-    const button=reactionButton(root);
+    const button=reactionActionButton(root);
     if(!button)return {ok:false,reason:'like_button_not_found',noteId:permalinkOf(root)||String(p.noteId||'')};
     const target=point(button);
     return {
@@ -524,19 +610,161 @@ async function(input){
       ...(target||{}),
       reason:target?undefined:'like_button_not_found',
       noteId:permalinkOf(root)||String(p.noteId||''),
-      already:pressed(button)||/取消赞|remove like|unlike/i.test(label(button)),
+      already:reactionState(button)==='reacted',
       observation:actionEvidence(root),
     };
   };
+  const likePrimaryCommit=()=>{
+    window[reelLikeCommitState]=undefined;
+    const target=reelLikeTarget();
+    if(!target.ok)return {ok:false,reason:target.reason,noteId:target.noteId,clicked:false};
+    all(`[${reelLikeMarker}]`).forEach((element)=>element.removeAttribute(reelLikeMarker));
+    target.button.setAttribute(reelLikeMarker,postId(target.noteId));
+    window[reelLikeCommitState]={noteId:target.noteId,videoKey:target.active.videoKey};
+    if(target.state==='reacted')return {
+      ok:true,
+      noteId:target.noteId,
+      already:true,
+      clicked:false,
+      observation:target.observation,
+    };
+    try{
+      target.button.click();
+      return {
+        ok:true,
+        noteId:target.noteId,
+        already:false,
+        clicked:true,
+        observation:target.observation,
+      };
+    }catch{
+      return {
+        ok:false,
+        reason:'like_dispatch_failed',
+        noteId:target.noteId,
+        already:false,
+        clicked:false,
+        observation:target.observation,
+      };
+    }
+  };
+  const likeVerify=()=>{
+    const active=expectedActiveReel();
+    if(!active.ok)return {ok:false,reason:active.reason,noteId:active.noteId,selected:false};
+    const commit=window[reelLikeCommitState];
+    if(!commit||commit.noteId!==active.noteId||commit.videoKey!==active.videoKey){
+      return {ok:false,reason:'reel_moved',noteId:active.noteId,selected:false};
+    }
+    const marker=postId(active.noteId);
+    const marked=all(`[${reelLikeMarker}]`).filter((button)=>
+      button.getAttribute(reelLikeMarker)===marker&&reelAssociated(active,button)
+    );
+    if(marked.length!==1)return {
+      ok:false,
+      reason:marked.length?'ambiguous_target':'target_not_found',
+      noteId:active.noteId,
+      selected:false,
+    };
+    const button=marked[0];
+    const accessible=label(button);
+    const rendered=text(button,256);
+    const selected=reactionState(button)==='reacted';
+    const witness=pressed(button)?'aria_selected':unlike.test(accessible)||unlike.test(rendered)?'unlike_label':selected?'reacted_word':undefined;
+    return {ok:true,noteId:active.noteId,selected,...(witness?{witness}:{})};
+  };
   const likePickerProbe=()=>{
+    if(String(p.noteId||'')&&reelSurface()){
+      const active=expectedActiveReel();
+      if(!active.ok)return {ok:false,reason:active.reason};
+      const commit=window[reelLikeCommitState];
+      if(!commit||commit.noteId!==active.noteId||commit.videoKey!==active.videoKey){
+        return {ok:false,reason:'reel_moved'};
+      }
+      const marker=postId(active.noteId);
+      const primaries=all(`[${reelLikeMarker}]`).filter((button)=>
+        button.getAttribute(reelLikeMarker)===marker&&reelAssociated(active,button)
+      );
+      if(primaries.length!==1)return {ok:false,reason:primaries.length?'ambiguous_target':'like_primary_target_lost'};
+      const primaryRect=primaries[0].getBoundingClientRect();
+      const pickers=all('[role="menu"],[role="listbox"],[role="dialog"]').filter(visible).map((container)=>{
+        const items=all('[role="menuitemradio"],[role="menuitem"],[role="option"],button,[role="button"]',container)
+          .filter(visible).filter((item)=>pickerReaction.test(label(item)));
+        const likes=items.filter((item)=>pickerLike.test(label(item)));
+        return {container,items,likes};
+      }).filter((candidate)=>
+        candidate.items.length>=2
+        && candidate.likes.length===1
+        && rectDistance(candidate.container.getBoundingClientRect(),primaryRect)<=320
+      );
+      if(pickers.length!==1)return {ok:false,reason:pickers.length?'ambiguous_target':'like_picker_not_found'};
+      const target=point(pickers[0].likes[0]);
+      if(!target)return {ok:false,reason:'like_picker_not_found'};
+      const viewportWidth=window.innerWidth||0;
+      const viewportHeight=window.innerHeight||0;
+      if(target.cx<0||target.cy<0||target.cx>viewportWidth||target.cy>viewportHeight){
+        return {ok:false,reason:'like_picker_offscreen'};
+      }
+      return {ok:true,...target};
+    }
     const candidates=all('[role="menuitemradio"],[role="menuitem"],[role="option"],button,[role="button"]').filter(visible)
-      .filter((el)=>/^(赞|讚|like|me gusta|thích)$/i.test(label(el)))
+      .filter((el)=>pickerLike.test(label(el)))
       .filter((el)=>Boolean(el.closest('[role="menu"],[role="listbox"],[role="dialog"]'))||!el.closest('[role="article"],article'));
     if(candidates.length!==1)return {ok:false,reason:candidates.length?'ambiguous_target':'like_picker_not_found'};
     const target=point(candidates[0]);
     return {ok:Boolean(target),...(target||{}),reason:target?undefined:'like_picker_not_found'};
   };
+  const followControl=(element)=>{
+    const rendered=text(element,256);
+    const accessible=label(element);
+    const source=accessible||rendered;
+    const match=source.match(/^(following|follow|已关注|關注中|关注|關注|đang theo dõi|theo dõi|dang theo doi|theo doi)\s*(.*)$/i);
+    if(!match)return null;
+    const token=match[1].toLowerCase();
+    const state=/^(following|已关注|關注中|đang theo dõi|dang theo doi)$/i.test(token)?'following':'follow';
+    return {element,state,author:norm(match[2],200),accessible,rendered};
+  };
+  const exactVisibleText=(value)=>all('a,span,div').filter((element)=>{
+    if(!visible(element)||text(element,200)!==value)return false;
+    return !Array.from(element.children||[]).some((child)=>text(child,200)===value);
+  });
+  const reelFollowTarget=()=>{
+    const active=expectedActiveReel();
+    if(!active.ok)return active;
+    const candidates=all('button,[role="button"]').filter((element)=>reelAssociated(active,element))
+      .map(followControl).filter(Boolean).filter((candidate)=>{
+        if(!candidate.author)return true;
+        const targetRect=candidate.element.getBoundingClientRect();
+        return exactVisibleText(candidate.author).filter((author)=>
+          rectDistance(author.getBoundingClientRect(),targetRect)<=260
+        ).length===1;
+      });
+    if(candidates.length!==1)return {
+      ok:false,
+      reason:candidates.length?'ambiguous_target':'follow_button_not_found',
+      noteId:active.noteId,
+    };
+    return {ok:true,active,candidate:candidates[0],noteId:active.noteId};
+  };
   const followProbe=()=>{
+    if(String(p.noteId||'')&&reelSurface()){
+      const target=reelFollowTarget();
+      if(!target.ok)return {ok:false,reason:target.reason,noteId:target.noteId};
+      if(target.candidate.state==='following')return {
+        ok:true,
+        already:true,
+        noteId:target.noteId,
+        videoKey:target.active.videoKey,
+      };
+      const coordinates=point(target.candidate.element);
+      return {
+        ok:Boolean(coordinates),
+        ...(coordinates||{}),
+        reason:coordinates?undefined:'follow_button_not_found',
+        already:false,
+        noteId:target.noteId,
+        videoKey:target.active.videoKey,
+      };
+    }
     const root=actionRoot();
     if(!root)return {ok:false,reason:'target_not_found'};
     const buttons=all('button,[role="button"]',root).filter(visible);
@@ -738,7 +966,7 @@ async function(input){
 
   const blocking=blockingProbe();
   const blocked=blocker(blocking);
-  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','like_probe','like_picker_probe','follow_probe','comment_editor_probe','comment_ack_probe','join_probe','publish_entry_probe','publish_editor_probe','publish_submit_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
+  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_editor_probe','comment_ack_probe','join_probe','publish_entry_probe','publish_editor_probe','publish_submit_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
     return fail(kind||'page',blocked);
   }
   if(kind==='identity_read')return done(identity());
@@ -746,6 +974,8 @@ async function(input){
   if(kind==='feed_probe')return done(feedProbe());
   if(kind==='feed_home_target')return done({kind:'point_target',value:feedHomeTarget()});
   if(kind==='like_probe')return done({kind:'like_probe',value:likeProbe()});
+  if(kind==='like_primary_commit')return done({kind:'like_commit',value:likePrimaryCommit()});
+  if(kind==='like_verify')return done({kind:'like_verify',value:likeVerify()});
   if(kind==='like_picker_probe')return done({kind:'point_target',value:likePickerProbe()});
   if(kind==='follow_probe')return done({kind:'follow_probe',value:followProbe()});
   if(kind==='comment_editor_probe')return done({kind:'text_target',value:commentEditorProbe()});

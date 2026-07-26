@@ -141,6 +141,37 @@ test('unsupported Facebook commands are rejected before Native/CDP dispatch', as
   ]);
 });
 
+test('Native Facebook action receipt logs bounded terminal phase and reason without payload content', async () => {
+  const h = harness(async () => ({
+    ok: true,
+    effectPhase: 'not_started',
+    reasonCode: 'like_button_not_found',
+    output: {
+      kind: 'action_receipt',
+      value: {
+        action: 'like',
+        ok: false,
+        reason: 'like button not found / secret page text',
+      },
+    },
+  }), { platform: 'facebook' });
+
+  await h.session.onCloudCommand(envelope('interaction.like', {
+    noteId: 'https://www.facebook.com/reel/777',
+  }));
+
+  assert.deepEqual(h.actions, [{
+    action: 'like',
+    ok: false,
+    reason: 'like button not found / secret page text',
+  }]);
+  assert.equal(
+    h.logs.find((line) => line.includes('action.completed')),
+    '[native-page] action.completed action=like ok=false effectPhase=not_started reason=non_token_reason',
+  );
+  assert.equal(h.logs.some((line) => line.includes('https://')), false);
+});
+
 test('Native Facebook probe reports sustained unknown blockers with same-source evidence', async () => {
   const h = harness(async () => assert.fail('probe transition test does not execute runtime'), {
     platform: 'facebook',

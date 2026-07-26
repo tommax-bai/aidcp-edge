@@ -304,6 +304,13 @@ export class NativeBrowseSession implements EdgeBrowseSession {
           groupObservation?: unknown;
           observation?: unknown;
         };
+        if (this.options.platform === 'facebook') {
+          const action = this.diagnosticToken(receipt.action);
+          const reason = this.diagnosticToken(receipt.reason ?? execution.reasonCode ?? 'none');
+          this.logger(
+            `[native-page] action.completed action=${action} ok=${receipt.ok} effectPhase=${execution.effectPhase} reason=${reason}`,
+          );
+        }
         if (env?.type === 'search.execute') {
           const ok = receipt.ok && execution.effectPhase === 'confirmed';
           if (!ok) {
@@ -594,6 +601,11 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       loopStage: 'read',
       statsDelta: { views: 1 },
     });
+  }
+
+  private diagnosticToken(value: unknown): string {
+    const token = typeof value === 'string' ? value : 'unknown';
+    return /^[a-zA-Z0-9_.:-]{1,96}$/.test(token) ? token : 'non_token_reason';
   }
 
   private emitUi(event: Record<string, unknown>): void {

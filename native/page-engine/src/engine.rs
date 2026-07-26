@@ -18,8 +18,8 @@ use crate::xhs;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
@@ -650,6 +650,111 @@ async fn execute_facebook_like(
             before.observation,
         ));
     }
+    if is_facebook_reel_url(&params.note_id) {
+        let commit = commit_facebook_reel_like(session, &params.note_id).await?;
+        if !commit.ok {
+            return Ok(facebook_action_result(
+                EffectPhase::NotStarted,
+                "like",
+                false,
+                commit.reason.as_deref().unwrap_or("like_button_not_found"),
+                commit.note_id,
+                commit.observation.or(before.observation),
+            ));
+        }
+        if commit.already {
+            return Ok(facebook_action_result(
+                EffectPhase::Confirmed,
+                "like",
+                true,
+                "already_liked",
+                commit.note_id,
+                commit.observation.or(before.observation),
+            ));
+        }
+        if !commit.clicked {
+            return Ok(facebook_action_result(
+                EffectPhase::NotStarted,
+                "like",
+                false,
+                commit.reason.as_deref().unwrap_or("like_dispatch_failed"),
+                commit.note_id,
+                commit.observation.or(before.observation),
+            ));
+        }
+        let note_id = commit.note_id.or(before.note_id);
+        let observation = commit.observation.or(before.observation);
+        match wait_for_facebook_reel_like(session, &params.note_id, Duration::from_secs(2)).await? {
+            FacebookReelLikeVerification::Selected => {
+                return Ok(facebook_action_result(
+                    EffectPhase::Confirmed,
+                    "like",
+                    true,
+                    "",
+                    note_id,
+                    observation,
+                ));
+            }
+            FacebookReelLikeVerification::Indeterminate => {
+                return Ok(facebook_action_result(
+                    EffectPhase::Ambiguous,
+                    "like",
+                    false,
+                    "verify_indeterminate",
+                    note_id,
+                    observation,
+                ));
+            }
+            FacebookReelLikeVerification::Unchanged => {}
+        }
+
+        let picker = probe_facebook_like_picker(session, &params.note_id).await?;
+        if picker.ok {
+            if let (Some(x), Some(y)) = (picker.cx, picker.cy) {
+                dispatch_facebook_click(session, x, y).await?;
+            }
+        } else if matches!(
+            picker.reason.as_deref(),
+            Some("target_not_found" | "ambiguous_target" | "like_primary_target_lost")
+        ) {
+            return Ok(facebook_action_result(
+                EffectPhase::Ambiguous,
+                "like",
+                false,
+                "verify_indeterminate",
+                note_id,
+                observation,
+            ));
+        }
+        return match wait_for_facebook_reel_like(session, &params.note_id, Duration::from_secs(3))
+            .await?
+        {
+            FacebookReelLikeVerification::Selected => Ok(facebook_action_result(
+                EffectPhase::Confirmed,
+                "like",
+                true,
+                "",
+                note_id,
+                observation,
+            )),
+            FacebookReelLikeVerification::Indeterminate => Ok(facebook_action_result(
+                EffectPhase::Ambiguous,
+                "like",
+                false,
+                "verify_indeterminate",
+                note_id,
+                observation,
+            )),
+            FacebookReelLikeVerification::Unchanged => Ok(facebook_action_result(
+                EffectPhase::Ambiguous,
+                "like",
+                false,
+                "like_unconfirmed",
+                note_id,
+                observation,
+            )),
+        };
+    }
     let (Some(x), Some(y)) = (before.cx, before.cy) else {
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
@@ -672,7 +777,7 @@ async fn execute_facebook_like(
         ));
     }
 
-    let picker = probe_facebook_like_picker(session).await?;
+    let picker = probe_facebook_like_picker(session, &params.note_id).await?;
     if picker.ok {
         if let (Some(x), Some(y)) = (picker.cx, picker.cy) {
             dispatch_facebook_click(session, x, y).await?;
@@ -751,6 +856,16 @@ async fn execute_facebook_follow(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
     loop {
         let after = probe_facebook_follow(session, params.note_id.as_deref()).await?;
+        if after.note_id != before.note_id || after.video_key != before.video_key {
+            return Ok(facebook_action_result(
+                EffectPhase::Ambiguous,
+                "follow",
+                false,
+                "verify_indeterminate",
+                before.note_id,
+                None,
+            ));
+        }
         if after.ok && after.already {
             return Ok(facebook_action_result(
                 EffectPhase::Confirmed,
@@ -758,6 +873,21 @@ async fn execute_facebook_follow(
                 true,
                 "",
                 after.note_id,
+                None,
+            ));
+        }
+        if !after.ok
+            && matches!(
+                after.reason.as_deref(),
+                Some("target_not_found" | "ambiguous_target")
+            )
+        {
+            return Ok(facebook_action_result(
+                EffectPhase::Ambiguous,
+                "follow",
+                false,
+                "verify_indeterminate",
+                before.note_id,
                 None,
             ));
         }
@@ -1734,12 +1864,51 @@ async fn probe_facebook_like(
     facebook::like_probe_from_cdp(&raw)
 }
 
+async fn commit_facebook_reel_like(
+    session: &mut EngineSession,
+    note_id: &str,
+) -> Result<facebook::FacebookLikeCommit, EngineError> {
+    let expression = facebook::like_primary_commit_expression(note_id)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::like_commit_from_cdp(&raw)
+}
+
 async fn probe_facebook_like_picker(
     session: &mut EngineSession,
+    note_id: &str,
 ) -> Result<facebook::FacebookPointTarget, EngineError> {
-    let expression = facebook::like_picker_probe_expression()?;
+    let expression = facebook::like_picker_probe_expression(note_id)?;
     let raw = session.cdp.evaluate(&expression, true).await?;
     facebook::point_target_from_cdp(&raw)
+}
+
+enum FacebookReelLikeVerification {
+    Selected,
+    Unchanged,
+    Indeterminate,
+}
+
+async fn wait_for_facebook_reel_like(
+    session: &mut EngineSession,
+    note_id: &str,
+    timeout: Duration,
+) -> Result<FacebookReelLikeVerification, EngineError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let expression = facebook::like_verify_expression(note_id)?;
+        let raw = session.cdp.evaluate(&expression, true).await?;
+        let probe = facebook::like_verify_from_cdp(&raw)?;
+        if !probe.ok {
+            return Ok(FacebookReelLikeVerification::Indeterminate);
+        }
+        if probe.selected {
+            return Ok(FacebookReelLikeVerification::Selected);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(FacebookReelLikeVerification::Unchanged);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
 }
 
 async fn wait_for_facebook_like(
@@ -2440,6 +2609,13 @@ fn canonical_facebook_post_id(raw: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn is_facebook_reel_url(raw: &str) -> bool {
+    Url::parse(raw)
+        .ok()
+        .filter(|url| validate_facebook_origin(url).is_ok())
+        .is_some_and(|url| url.path().to_ascii_lowercase().starts_with("/reel/"))
 }
 
 fn validated_facebook_group_url(raw: &str) -> Result<Url, EngineError> {
@@ -3188,20 +3364,16 @@ mod tests {
         .expect("allowlisted note URL");
         assert_eq!(accepted.path(), "/explore/note_123");
         assert!(validated_note_url("https://example.com/explore/note_123", None).is_err());
-        assert!(
-            validated_note_url(
-                "https://www.xiaohongshu.com/explore/another",
-                Some("note_123")
-            )
-            .is_err()
-        );
-        assert!(
-            validated_note_url(
-                "https://www.xiaohongshu.com.evil.test/explore/note_123",
-                None
-            )
-            .is_err()
-        );
+        assert!(validated_note_url(
+            "https://www.xiaohongshu.com/explore/another",
+            Some("note_123")
+        )
+        .is_err());
+        assert!(validated_note_url(
+            "https://www.xiaohongshu.com.evil.test/explore/note_123",
+            None
+        )
+        .is_err());
     }
 
     #[test]
