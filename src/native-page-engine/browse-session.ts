@@ -13,6 +13,12 @@ import type {
   PacingOp,
   ProfileDetailPayload,
 } from '../comm/protocol.js';
+import {
+  facebookFeedVideoViewUiText,
+  facebookReadUiText,
+  facebookReelViewUiText,
+} from '../facebook/companion-ui.js';
+import { canonicalFacebookFeedVideoPostId, canonicalPostId } from '../facebook/post-identity.js';
 import { nativeActionNameForCommand, nativeCommandForEnvelope } from './command-mapper.js';
 import type { NativePageCommandExecution, NativePagePlatform } from './client.js';
 import { NativePageRuntime } from './runtime.js';
@@ -78,6 +84,8 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private facebookUnknownTimer?: NodeJS.Timeout;
   private lastFacebookBlockingEvidence?: { url?: string; text?: string };
   private lastFacebookCardsAt = 0;
+  private readonly facebookReelViewActivityPostIds = new Set<string>();
+  private readonly facebookFeedVideoViewActivityPostIds = new Set<string>();
 
   constructor(private readonly options: NativeBrowseSessionOptions) {
     this.ownerId = `browse:${options.startupId}`;
@@ -230,6 +238,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
           if (env?.type !== 'search.execute') {
             this.lastFacebookCardsAt = (this.options.clock ?? monotonicNow)();
           }
+          this.projectFacebookCardActivity(value as unknown as PageCardsPayload);
           const reels = value.listKind === 'reels';
           this.emitUi({
             kind: 'presence',
@@ -253,14 +262,22 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       case 'note_detail':
         this.options.client.reportNoteDetail(value as unknown as NoteDetailPayload);
         if (this.options.platform === 'facebook') {
-          this.emitUi({
-            kind: 'activity',
-            type: 'note_open',
-            sentence: this.facebookReadSentence(value),
-            presence: '正在认真阅读一条内容…',
-            loopStage: 'read',
-            statsDelta: { views: 1 },
-          });
+          const postId = canonicalPostId(typeof value.noteId === 'string' ? value.noteId : undefined);
+          if (
+            !postId
+            || (
+              !this.facebookReelViewActivityPostIds.has(postId)
+              && !this.facebookFeedVideoViewActivityPostIds.has(postId)
+            )
+          ) {
+            this.emitUi({
+              kind: 'activity',
+              type: 'note_open',
+              ...facebookReadUiText(value as unknown as NoteDetailPayload),
+              loopStage: 'read',
+              statsDelta: { views: 1 },
+            });
+          }
         }
         return;
       case 'profile_detail':
@@ -543,14 +560,36 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     }
   }
 
-  private facebookReadSentence(value: Record<string, unknown>): string {
-    const author = typeof value.author === 'string' ? value.author.trim().slice(0, 18) : '';
-    const raw = typeof value.content === 'string' ? value.content : typeof value.title === 'string' ? value.title : '';
-    const excerpt = raw.replace(/\s+/g, ' ').trim().slice(0, 24);
-    if (author && excerpt) return `打开「${excerpt}」 · ${author}`;
-    if (excerpt) return `打开「${excerpt}」`;
-    if (author) return `打开了 ${author} 的一条内容`;
-    return '打开了一条内容';
+  private projectFacebookCardActivity(payload: PageCardsPayload): void {
+    if (payload.listKind === 'reels' && payload.cards.length === 1) {
+      const card = payload.cards[0];
+      const postId = canonicalPostId(card.noteId);
+      if (postId && !this.facebookReelViewActivityPostIds.has(postId)) {
+        this.facebookReelViewActivityPostIds.add(postId);
+        this.emitUi({
+          kind: 'activity',
+          type: 'reel_view',
+          ...facebookReelViewUiText(card),
+          loopStage: 'read',
+          statsDelta: { views: 1 },
+        });
+      }
+      return;
+    }
+    if (payload.listKind !== 'feed') return;
+
+    const videos = payload.cards.filter((card) => card.isVideo === true);
+    const card = videos.length === 1 ? videos[0] : undefined;
+    const postId = canonicalFacebookFeedVideoPostId(card?.noteId);
+    if (!card || !postId || this.facebookFeedVideoViewActivityPostIds.has(postId)) return;
+    this.facebookFeedVideoViewActivityPostIds.add(postId);
+    this.emitUi({
+      kind: 'activity',
+      type: 'feed_video_view',
+      ...facebookFeedVideoViewUiText(card),
+      loopStage: 'read',
+      statsDelta: { views: 1 },
+    });
   }
 
   private emitUi(event: Record<string, unknown>): void {

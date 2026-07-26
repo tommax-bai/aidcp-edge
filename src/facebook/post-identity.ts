@@ -100,6 +100,37 @@ export function canonicalPostId(href: string | null | undefined): string | null 
 }
 
 /**
+ * A Feed-video presentation needs a stricter URL boundary than general post targeting.
+ * Keep Reels and non-canonical query shapes out even when they can yield a post id.
+ */
+export function canonicalFacebookFeedVideoPostId(noteId: string | undefined): string | null {
+  if (!noteId) return null;
+  try {
+    const url = new URL(noteId);
+    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'www.facebook.com' || url.hash) return null;
+    const path = url.pathname;
+    if (/^\/reel\//i.test(path)) return null;
+    if (/^\/watch\/?$/i.test(path)) {
+      const keys = [...url.searchParams.keys()];
+      if (keys.length !== 1 || keys[0] !== 'v' || !/^\d+$/.test(url.searchParams.get('v') ?? '')) return null;
+    } else if (
+      /\/(?:videos|posts|permalink)\/[^/?#]+\/?$/i.test(path)
+    ) {
+      if (url.search) return null;
+    } else if (/^\/(?:permalink|story)\.php$/i.test(path)) {
+      const id = url.searchParams.get('story_fbid');
+      if (!id || ![...url.searchParams.keys()].every((key) => key === 'story_fbid' || key === 'id')) return null;
+    } else {
+      const multi = url.searchParams.get('multi_permalinks');
+      if (!multi || ![...url.searchParams.keys()].every((key) => key === 'multi_permalinks')) return null;
+    }
+    return canonicalPostId(noteId);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 页内版身份派生：**同一份实现**注入页面（不是第二份拷贝）。
  * 页内以 `fbCanonicalPostId(href)` 调用；派生不出返回 null。
  */

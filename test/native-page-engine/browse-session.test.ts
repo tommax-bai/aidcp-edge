@@ -5,6 +5,7 @@ import type {
   ActionCompletedPayload,
   Envelope,
   MessageType,
+  NoteDetailPayload,
   PageCardsPayload,
 } from '../../src/comm/protocol.js';
 import { NativeBrowseSession } from '../../src/native-page-engine/browse-session.js';
@@ -32,7 +33,9 @@ function harness(execute: (
   const executions: Array<{ ownerId: string; command: NativePageCommand }> = [];
   const actions: ActionCompletedPayload[] = [];
   const cards: PageCardsPayload[] = [];
+  const details: NoteDetailPayload[] = [];
   const closedOwners: string[] = [];
+  const logs: string[] = [];
   const sent: Array<{ type: string; payload: unknown; replyTo?: string }> = [];
   const runtime = {
     async execute(ownerId: string, command: NativePageCommand) {
@@ -44,6 +47,7 @@ function harness(execute: (
   const client = {
     reportActionCompleted(payload: ActionCompletedPayload) { actions.push(payload); },
     reportPageCards(payload: PageCardsPayload) { cards.push(payload); },
+    reportNoteDetail(payload: NoteDetailPayload) { details.push(payload); },
     send(type: string, payload: unknown, replyTo?: string) { sent.push({ type, payload, replyTo }); },
   } as unknown as EdgeClient;
   const session = new NativeBrowseSession({
@@ -56,8 +60,15 @@ function harness(execute: (
     random: options.random,
     sleep: options.sleep,
     overlayConfirmMs: options.overlayConfirmMs,
+    logger: (message) => logs.push(message),
   });
-  return { session, executions, actions, cards, closedOwners, sent };
+  return { session, executions, actions, cards, details, closedOwners, logs, sent };
+}
+
+function uiEvents(logs: string[]): Array<Record<string, unknown>> {
+  return logs
+    .filter((line) => line.startsWith('[ui-event] '))
+    .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as Record<string, unknown>);
 }
 
 const searchPayload = {
@@ -295,6 +306,254 @@ function cardsExecution(listKind: 'feed' | 'reels' = 'feed'): NativePageCommandE
     },
   };
 }
+
+test('Native Facebook projects each canonical single-card Reel once and suppresses matching detail activity', async () => {
+  const reel = {
+    index: 0,
+    title: 'first reel summary',
+    author: 'Bao',
+    likeCount: 0,
+    collectCount: 0,
+    noteId: 'https://www.facebook.com/reel/333',
+    isVideo: true,
+  };
+  const detail: NoteDetailPayload = {
+    noteId: 'https://www.facebook.com/reel/333/',
+    title: '',
+    content: 'first reel summary',
+    author: 'Bao',
+    likeCount: 0,
+    collectCount: 0,
+    mediaType: 'video',
+  };
+  const results: NativePageCommandExecution[] = [
+    {
+      ok: true,
+      effectPhase: 'confirmed',
+      reasonCode: 'confirmed',
+      output: { kind: 'page_cards', value: { cards: [reel], listKind: 'reels' } },
+    },
+    {
+      ok: true,
+      effectPhase: 'confirmed',
+      reasonCode: 'confirmed',
+      output: { kind: 'page_cards', value: { cards: [reel], listKind: 'reels' } },
+    },
+    {
+      ok: true,
+      effectPhase: 'confirmed',
+      reasonCode: 'confirmed',
+      output: { kind: 'note_detail', value: detail },
+    },
+  ];
+  const h = harness(async () => results.shift() ?? assert.fail('unexpected Native execution'), {
+    platform: 'facebook',
+  });
+
+  await h.session.start();
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('note.open', { noteId: reel.noteId }));
+
+  const activities = uiEvents(h.logs).filter((event) => event.kind === 'activity');
+  assert.deepEqual(activities, [{
+    kind: 'activity',
+    type: 'reel_view',
+    sentence: '看了「first reel summary」 · Bao',
+    loopStage: 'read',
+    statsDelta: { views: 1 },
+  }]);
+  assert.deepEqual(h.details, [detail], 'detail data still reaches Cloud');
+});
+
+test('Native Facebook does not project malformed or multi-card Reels batches', async () => {
+  const reel = (noteId: string, index = 0) => ({
+    index,
+    title: 'reel',
+    author: 'A',
+    likeCount: 0,
+    collectCount: 0,
+    noteId,
+    isVideo: true,
+  });
+  const batches = [
+    {
+      cards: [
+        reel('https://www.facebook.com/reel/1'),
+        reel('https://www.facebook.com/reel/2', 1),
+      ],
+      listKind: 'reels' as const,
+    },
+    {
+      cards: [reel('https://www.facebook.com/profile.php?id=3')],
+      listKind: 'reels' as const,
+    },
+  ];
+  const h = harness(async () => ({
+    ok: true,
+    effectPhase: 'confirmed',
+    reasonCode: 'confirmed',
+    output: { kind: 'page_cards', value: batches.shift() ?? assert.fail('unexpected Native execution') },
+  }), { platform: 'facebook' });
+
+  await h.session.start();
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+
+  assert.equal(uiEvents(h.logs).some((event) => event.type === 'reel_view'), false);
+});
+
+test('Native Facebook projects a unique canonical Feed video once even beside non-video cards', async () => {
+  const video = {
+    index: 1,
+    title: 'Hành trình đi tìm vợ con…',
+    author: 'BHD Movies',
+    likeCount: 12,
+    collectCount: 0,
+    noteId: 'https://www.facebook.com/watch?v=1547652190157533',
+    isVideo: true,
+  };
+  const batch = {
+    cards: [
+      {
+        index: 0,
+        title: 'ordinary post',
+        author: 'Text Author',
+        likeCount: 0,
+        collectCount: 0,
+        noteId: 'https://www.facebook.com/Text/posts/111',
+        isVideo: false,
+      },
+      video,
+    ],
+    listKind: 'feed' as const,
+  };
+  const detail: NoteDetailPayload = {
+    noteId: video.noteId,
+    title: '',
+    content: video.title,
+    author: video.author,
+    likeCount: video.likeCount,
+    collectCount: 0,
+    mediaType: 'video',
+  };
+  const results: NativePageCommandExecution[] = [
+    {
+      ok: true,
+      effectPhase: 'confirmed',
+      reasonCode: 'confirmed',
+      output: { kind: 'page_cards', value: batch },
+    },
+    {
+      ok: true,
+      effectPhase: 'confirmed',
+      reasonCode: 'confirmed',
+      output: { kind: 'page_cards', value: batch },
+    },
+    {
+      ok: true,
+      effectPhase: 'confirmed',
+      reasonCode: 'confirmed',
+      output: { kind: 'note_detail', value: detail },
+    },
+  ];
+  const h = harness(async () => results.shift() ?? assert.fail('unexpected Native execution'), {
+    platform: 'facebook',
+  });
+
+  await h.session.start();
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('note.open', { noteId: video.noteId }));
+
+  const activities = uiEvents(h.logs).filter((event) => event.kind === 'activity');
+  assert.deepEqual(
+    activities,
+    [{
+      kind: 'activity',
+      type: 'feed_video_view',
+      sentence: '看了「Hành trình đi tìm vợ con…」 · BHD Movies',
+      loopStage: 'read',
+      statsDelta: { views: 1 },
+    }],
+  );
+  assert.deepEqual(h.details, [detail], 'matching Feed-video detail still reaches Cloud');
+});
+
+test('Native Facebook does not project ordinary or ambiguous Feed batches as video views', async () => {
+  const video = (noteId: string, index = 0) => ({
+    index,
+    title: 'video',
+    author: 'A',
+    likeCount: 0,
+    collectCount: 0,
+    noteId,
+    isVideo: true,
+  });
+  const batches = [
+    {
+      cards: [{ ...video('https://www.facebook.com/watch?v=1'), isVideo: false }],
+      listKind: 'feed' as const,
+    },
+    {
+      cards: [
+        video('https://www.facebook.com/watch?v=2'),
+        video('https://www.facebook.com/watch?v=3', 1),
+      ],
+      listKind: 'feed' as const,
+    },
+    {
+      cards: [video('https://evil.example/watch?v=4')],
+      listKind: 'feed' as const,
+    },
+    {
+      cards: [video('https://www.facebook.com/reel/5')],
+      listKind: 'feed' as const,
+    },
+  ];
+  const h = harness(async () => ({
+    ok: true,
+    effectPhase: 'confirmed',
+    reasonCode: 'confirmed',
+    output: { kind: 'page_cards', value: batches.shift() ?? assert.fail('unexpected Native execution') },
+  }), { platform: 'facebook' });
+
+  await h.session.start();
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+
+  assert.equal(uiEvents(h.logs).some((event) => event.type === 'feed_video_view'), false);
+});
+
+test('Native Facebook keeps the existing local read activity for unmatched detail', async () => {
+  const detail: NoteDetailPayload = {
+    noteId: 'https://www.facebook.com/Example/posts/999',
+    title: '',
+    content: 'ordinary detail',
+    author: 'Lan',
+    likeCount: 1,
+    collectCount: 0,
+  };
+  const h = harness(async () => ({
+    ok: true,
+    effectPhase: 'confirmed',
+    reasonCode: 'confirmed',
+    output: { kind: 'note_detail', value: detail },
+  }), { platform: 'facebook' });
+
+  await h.session.onCloudCommand(envelope('note.open', { noteId: detail.noteId }));
+
+  assert.deepEqual(
+    uiEvents(h.logs).filter((event) => event.type === 'note_open'),
+    [{
+      kind: 'activity',
+      type: 'note_open',
+      sentence: '打开「ordinary detail」 · Lan',
+      presence: '正在读 Lan 的「ordinary detail」…',
+      loopStage: 'read',
+      statsDelta: { views: 1 },
+    }],
+  );
+  assert.deepEqual(h.details, [detail]);
+});
 
 test('Native Facebook page.scroll waits only the remaining jittered dwell', async () => {
   let now = 1_000;
