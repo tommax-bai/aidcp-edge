@@ -88,12 +88,24 @@ test('Facebook Feed probe distinguishes loading and visible unreportable article
       </div>
     </main>
   `);
-  const result = await run({ kind: 'feed_probe', params: {} });
-  assert.equal(result.output.kind, 'feed_probe');
-  assert.equal(result.output.value.loading, true);
-  assert.equal(result.output.value.articleCount, 1);
-  assert.equal(result.output.value.explicitEmpty, false);
-  assert.deepEqual(result.output.value.cards, []);
+  const originalPerformance = Object.getOwnPropertyDescriptor(globalThis, 'performance');
+  Object.defineProperty(globalThis, 'performance', {
+    configurable: true,
+    value: { timeOrigin: Date.now() - 10_000.75 },
+  });
+  try {
+    const result = await run({ kind: 'feed_probe', params: {} });
+    assert.equal(result.output.kind, 'feed_probe');
+    assert.equal(result.output.value.loading, true);
+    assert.equal(result.output.value.articleCount, 1);
+    assert.equal(result.output.value.explicitEmpty, false);
+    assert.deepEqual(result.output.value.cards, []);
+    assert.equal(Number.isSafeInteger(result.output.value.documentAgeMs), true);
+    assert.ok(Number(result.output.value.documentAgeMs) >= 10_000);
+  } finally {
+    assert.ok(originalPerformance);
+    Object.defineProperty(globalThis, 'performance', originalPerformance);
+  }
 });
 
 test('Facebook Reels probe and cards bind to one active video identity', async () => {

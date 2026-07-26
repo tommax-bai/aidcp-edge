@@ -408,6 +408,9 @@ async function(input){
     const scope=first(['div[role="feed"]','[role="main"]','main'])||document.body;
     const loading=Boolean(scope&&scope.querySelector('[role="progressbar"],[aria-busy="true"]'));
     const articleCount=reelSurface()?0:topArticles().length;
+    const timeOrigin=Number(performance&&performance.timeOrigin);
+    const elapsedMs=Number.isFinite(timeOrigin)?Date.now()-timeOrigin:0;
+    const documentAgeMs=Math.min(Number.MAX_SAFE_INTEGER,Math.max(0,Math.floor(Number.isFinite(elapsedMs)?elapsedMs:0)));
     let explicitEmpty=false;
     for(const node of all('div,section',scope||document)){
       const raw=text(node,600);
@@ -431,7 +434,7 @@ async function(input){
       innerWidth:Number(window.innerWidth)||0,
       innerHeight:Number(window.innerHeight)||0,
       scrollHeight:Number(document.documentElement&&document.documentElement.scrollHeight)||0,
-      documentAgeMs:Math.max(0,Date.now()-(Number(performance&&performance.timeOrigin)||Date.now())),
+      documentAgeMs,
     }};
   };
   const feedHomeTarget=()=>{

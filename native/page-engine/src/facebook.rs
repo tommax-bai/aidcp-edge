@@ -615,4 +615,42 @@ mod tests {
         assert!(!feed.is_reels_surface());
         assert!(ambiguous_reel.is_reels_surface());
     }
+
+    #[test]
+    fn feed_probe_decodes_only_the_declared_integer_document_age() {
+        let cdp_result = json!({
+            "result": {
+                "value": {
+                    "effectPhase": "confirmed",
+                    "output": {
+                        "kind": "feed_probe",
+                        "value": {
+                            "cards": [],
+                            "documentGeneration": "/|0",
+                            "listKind": "feed",
+                            "listState": "present_unreportable",
+                            "loading": false,
+                            "articleCount": 2,
+                            "explicitEmpty": false,
+                            "url": "https://www.facebook.com/",
+                            "surface": "home",
+                            "scrollY": 0,
+                            "innerWidth": 1440,
+                            "innerHeight": 801,
+                            "scrollHeight": 2400,
+                            "documentAgeMs": 215964
+                        }
+                    }
+                }
+            }
+        });
+
+        let probe = feed_probe_from_cdp(&cdp_result).expect("bounded feed probe");
+        assert_eq!(probe.document_age_ms, 215_964);
+
+        let mut fractional = cdp_result;
+        fractional["result"]["value"]["output"]["value"]["documentAgeMs"] =
+            json!(215964.39990234375);
+        assert!(feed_probe_from_cdp(&fractional).is_err());
+    }
 }
