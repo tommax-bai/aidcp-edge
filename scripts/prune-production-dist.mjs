@@ -60,6 +60,7 @@ const forbiddenPaths = [
   'facebook/overlay.js',
   'facebook/consent.js',
   'facebook/cta-labels.js',
+  'facebook/post-identity.js',
   'facebook/feed-reader.js',
   'facebook/inline-reader.js',
   'facebook/post-reader.js',

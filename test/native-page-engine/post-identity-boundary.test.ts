@@ -11,6 +11,10 @@ test('Native browse orchestration imports the production-safe post identity modu
     new URL('../../src/facebook/post-identity-core.ts', import.meta.url),
     'utf8',
   );
+  const productionPruner = readFileSync(
+    new URL('../../scripts/prune-production-dist.mjs', import.meta.url),
+    'utf8',
+  );
 
   assert.match(
     browseSession,
@@ -22,4 +26,6 @@ test('Native browse orchestration imports the production-safe post identity modu
   );
   assert.doesNotMatch(identityCore, /\bfrom\s+['"]/);
   assert.doesNotMatch(identityCore, /\b(?:FB_TARGET_HELPERS_JS|FACEBOOK_REACTION_CONTROL_HELPERS_JS)\b/);
+  assert.match(productionPruner, /['"]facebook\/post-identity\.js['"]/);
+  assert.match(productionPruner, /['"]facebook\/cta-labels\.js['"]/);
 });

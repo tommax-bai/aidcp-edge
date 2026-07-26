@@ -3,6 +3,14 @@
  *
  * This module must stay free of DOM helpers and injected page-rule imports because
  * Native orchestration depends on it in the production distribution.
+ *
+ * Identity invariants:
+ * - Failure returns `null`, never an empty identity that could match another bad URL.
+ * - Comment permalinks, author profiles, group roots, and photo links are not post identities.
+ * - Every accepted permalink shape converges on the global post id, without a container
+ *   component that would split vanity and numeric-page URLs for the same post.
+ * - `canonicalPostId` stays self-contained because its function body is injected through
+ *   `POST_IDENTITY_JS`; module-scope dependencies would fail inside the page.
  */
 
 /**
