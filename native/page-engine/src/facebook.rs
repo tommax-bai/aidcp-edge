@@ -200,6 +200,8 @@ pub struct FacebookFollowProbe {
     #[serde(default)]
     pub video_key: Option<String>,
     #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
     pub already: bool,
     #[serde(default)]
     pub cx: Option<f64>,

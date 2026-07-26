@@ -1,5 +1,6 @@
 use aidcp_page_engine::command::{
-    IdentityCaptureParams, NoteOpenParams, PageScrollParams, ReasonParams,
+    FollowParams, IdentityCaptureParams, NoteInteractionParams, NoteOpenParams, PageScrollParams,
+    ReasonParams,
 };
 use aidcp_page_engine::engine::{CommandOutput, Engine};
 use aidcp_page_engine::error::ErrorCode;
@@ -378,6 +379,117 @@ async fn facebook_reel_scroll_returns_no_target_without_fabricated_cards() {
 }
 
 #[tokio::test]
+async fn facebook_reel_like_direct_commit_uses_one_primary_write_and_no_picker_write() {
+    let (port, server) =
+        spawn_facebook_interaction_cdp(FacebookInteractionScenario::LikeDirect).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 8_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_like_command(1))
+        .await
+        .expect("direct Reel like");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("like receipt") else {
+        panic!("expected action receipt")
+    };
+    assert!(receipt.ok);
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook interaction fake CDP");
+    assert_eq!(router_call_count(&requests, "like_primary_commit"), 1);
+    assert_eq!(router_call_count(&requests, "like_picker_probe"), 0);
+    assert_eq!(mouse_dispatch_count(&requests), 0);
+}
+
+#[tokio::test]
+async fn facebook_reel_like_picker_commit_is_bounded_to_one_trusted_pointer_write() {
+    let (port, server) =
+        spawn_facebook_interaction_cdp(FacebookInteractionScenario::LikePicker).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 8_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_like_command(1))
+        .await
+        .expect("picker Reel like");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("like receipt") else {
+        panic!("expected action receipt")
+    };
+    assert!(receipt.ok);
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook interaction fake CDP");
+    assert_eq!(router_call_count(&requests, "like_primary_commit"), 1);
+    assert_eq!(router_call_count(&requests, "like_picker_probe"), 1);
+    assert_eq!(mouse_dispatch_count(&requests), 3);
+}
+
+#[tokio::test]
+async fn facebook_reel_follow_reprobes_before_dispatch_and_rejects_author_movement() {
+    let (port, server) =
+        spawn_facebook_interaction_cdp(FacebookInteractionScenario::FollowMovedBeforeDispatch)
+            .await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 8_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_follow_command(1))
+        .await
+        .expect("moved Reel follow");
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("follow receipt") else {
+        panic!("expected action receipt")
+    };
+    assert!(!receipt.ok);
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("target_moved_before_dispatch")
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook interaction fake CDP");
+    assert_eq!(router_call_count(&requests, "follow_probe"), 2);
+    assert_eq!(mouse_dispatch_count(&requests), 0);
+}
+
+#[tokio::test]
+async fn facebook_reel_follow_uses_one_pointer_write_and_same_author_postcondition() {
+    let (port, server) =
+        spawn_facebook_interaction_cdp(FacebookInteractionScenario::FollowConfirmed).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 8_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_follow_command(1))
+        .await
+        .expect("confirmed Reel follow");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("follow receipt") else {
+        panic!("expected action receipt")
+    };
+    assert!(receipt.ok);
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook interaction fake CDP");
+    assert_eq!(router_call_count(&requests, "follow_probe"), 3);
+    assert_eq!(mouse_dispatch_count(&requests), 3);
+}
+
+#[tokio::test]
 async fn facebook_note_open_discards_unrelated_detail_until_requested_identity_hydrates() {
     let (port, server) = spawn_facebook_note_open_hydration_cdp().await;
     let mut engine = Engine::default();
@@ -553,6 +665,39 @@ fn browse_command(command_id: u64) -> CommandRecord {
     }
 }
 
+fn facebook_like_command(command_id: u64) -> CommandRecord {
+    CommandRecord {
+        protocol_version: 2,
+        id: format!("facebook-like-{command_id}"),
+        session_id: "session-1".to_owned(),
+        task_id: "browse-1".to_owned(),
+        command_id,
+        deadline_unix_ms: unix_time_ms() + 8_000,
+        command: NativeCommand::InteractionLike(NoteInteractionParams {
+            note_id: "https://www.facebook.com/reel/1".to_owned(),
+            reason: None,
+            think_ms: None,
+        }),
+    }
+}
+
+fn facebook_follow_command(command_id: u64) -> CommandRecord {
+    CommandRecord {
+        protocol_version: 2,
+        id: format!("facebook-follow-{command_id}"),
+        session_id: "session-1".to_owned(),
+        task_id: "browse-1".to_owned(),
+        command_id,
+        deadline_unix_ms: unix_time_ms() + 8_000,
+        command: NativeCommand::InteractionFollow(FollowParams {
+            author_id: None,
+            note_id: Some("https://www.facebook.com/reel/1".to_owned()),
+            reason: None,
+            think_ms: None,
+        }),
+    }
+}
+
 async fn spawn_router_result_cdp(
     disconnect_after_dispatch: bool,
 ) -> (u16, tokio::task::JoinHandle<()>) {
@@ -589,6 +734,173 @@ async fn spawn_router_result_cdp(
         let _ = websocket.close(None).await;
     });
     (port, server)
+}
+
+#[derive(Clone, Copy)]
+enum FacebookInteractionScenario {
+    LikeDirect,
+    LikePicker,
+    FollowMovedBeforeDispatch,
+    FollowConfirmed,
+}
+
+async fn spawn_facebook_interaction_cdp(
+    scenario: FacebookInteractionScenario,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/1").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut follow_probes = 0_u32;
+        let mut picker_committed = false;
+
+        while let Some(message) = websocket.next().await {
+            let message = message.expect("valid CDP request");
+            let Message::Text(text) = message else {
+                if matches!(message, Message::Close(_)) {
+                    break;
+                }
+                continue;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let method = request["method"].as_str().unwrap_or_default();
+            let kind = router_kind(&request);
+            if method == "Input.dispatchMouseEvent" && request["params"]["type"] == "mouseReleased"
+            {
+                picker_committed = true;
+            }
+            let result = match kind.as_deref() {
+                Some("page_probe") => facebook_ready_cdp("/reel/1"),
+                Some("consent_probe") => router_cdp(
+                    "consent_probe",
+                    json!({
+                        "present": false,
+                        "acceptAllAmbiguous": false,
+                        "necessaryOnlyAmbiguous": false
+                    }),
+                ),
+                Some("reel_probe") => {
+                    reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1")
+                }
+                Some("like_probe") => router_cdp(
+                    "like_probe",
+                    json!({
+                        "ok": true,
+                        "noteId": "https://www.facebook.com/reel/1",
+                        "already": false,
+                        "cx": 1010.0,
+                        "cy": 525.0
+                    }),
+                ),
+                Some("like_primary_commit") => router_cdp(
+                    "like_commit",
+                    json!({
+                        "ok": true,
+                        "noteId": "https://www.facebook.com/reel/1",
+                        "already": false,
+                        "clicked": true
+                    }),
+                ),
+                Some("like_verify") => router_cdp(
+                    "like_verify",
+                    json!({
+                        "ok": true,
+                        "noteId": "https://www.facebook.com/reel/1",
+                        "selected": matches!(scenario, FacebookInteractionScenario::LikeDirect)
+                            || picker_committed,
+                        "witness": if matches!(scenario, FacebookInteractionScenario::LikeDirect)
+                            || picker_committed
+                        {
+                            Some("aria_pressed")
+                        } else {
+                            None
+                        }
+                    }),
+                ),
+                Some("like_picker_probe") => router_cdp(
+                    "point_target",
+                    json!({"ok": true, "cx": 955.0, "cy": 485.0}),
+                ),
+                Some("follow_probe") => {
+                    follow_probes += 1;
+                    let author = if matches!(
+                        scenario,
+                        FacebookInteractionScenario::FollowMovedBeforeDispatch
+                    ) && follow_probes == 2
+                    {
+                        "Other Author"
+                    } else {
+                        "Re Su"
+                    };
+                    router_cdp(
+                        "follow_probe",
+                        json!({
+                            "ok": true,
+                            "noteId": "https://www.facebook.com/reel/1",
+                            "videoKey": "video-1@element:1",
+                            "author": author,
+                            "already": matches!(
+                                scenario,
+                                FacebookInteractionScenario::FollowConfirmed
+                            ) && follow_probes >= 3,
+                            "cx": 730.0,
+                            "cy": 670.0
+                        }),
+                    )
+                }
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
+fn router_cdp(kind: &str, value: Value) -> Value {
+    json!({"result":{"value":router_result(kind, value)}})
+}
+
+fn router_kind(request: &Value) -> Option<String> {
+    let expression = request["params"]["expression"].as_str()?;
+    let invocation = expression.rsplit_once(")({")?.1;
+    [
+        "page_probe",
+        "consent_probe",
+        "reel_probe",
+        "like_probe",
+        "like_primary_commit",
+        "like_verify",
+        "like_picker_probe",
+        "follow_probe",
+    ]
+    .into_iter()
+    .find(|kind| invocation.contains(&format!("\"kind\":\"{kind}\"")))
+    .map(str::to_owned)
+}
+
+fn router_call_count(requests: &[Value], kind: &str) -> usize {
+    requests
+        .iter()
+        .filter(|request| router_kind(request).as_deref() == Some(kind))
+        .count()
+}
+
+fn mouse_dispatch_count(requests: &[Value]) -> usize {
+    requests
+        .iter()
+        .filter(|request| request["method"] == "Input.dispatchMouseEvent")
+        .count()
 }
 
 async fn spawn_fake_cdp() -> (u16, tokio::task::JoinHandle<()>) {

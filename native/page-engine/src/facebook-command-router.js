@@ -302,24 +302,32 @@ async function(input){
   const reactionPickerLabel=/^\s*(?:给.+的帖子)?\s*(?:留下心情|react|reaccionar)\s*$/i;
   const pickerLike=/^\s*(赞|讚|like|me gusta|thích)\s*$/i;
   const pickerReaction=/^\s*(赞|讚|like|love|care|haha|wow|sad|angry|me gusta|me encanta|thích|yêu thích|thương thương|buồn|phẫn nộ)\s*$/i;
-  const reactionState=(button)=>{
+  const reelComment=/(发表评论|發表評論|写评论|寫留言|评论.+帖子|comment|write a comment|comment.+post|comentar|viết bình luận|bình luận(?: về bài viết của .+)?|binh luan(?: ve bai viet cua .+)?)/i;
+  const reelLikeExcluded=/(share|chia sẻ|chia se|分享|reply|trả lời|tra loi|回复|回覆|menu|更多|next|previous|下一|上一|pause|play|播放|暂停)/i;
+  const explicitReactionWitness=(button)=>{
     if(!button||!visible(button))return '';
     const accessible=label(button);
     const rendered=text(button,256);
     const numeric=/\d/.test(rendered);
-    if(unlike.test(accessible)||unlike.test(rendered)||pressed(button))return 'reacted';
-    if(neutralLike.test(accessible)||neutralLike.test(rendered)){
-      return reactionPickerLabel.test(accessible)&&!numeric&&reactedWord.test(rendered)?'reacted':'neutral';
-    }
-    if(!numeric&&reactedWord.test(accessible))return 'reacted';
+    if(unlike.test(accessible)||unlike.test(rendered))return 'unlike_label';
+    if(button.getAttribute('aria-pressed')==='true')return 'aria_pressed';
+    if(button.getAttribute('aria-checked')==='true')return 'aria_checked';
+    if(!numeric&&reactionPickerLabel.test(accessible)&&reactedWord.test(rendered))return 'reacted_text';
+    if(!neutralLike.test(accessible)&&!numeric&&reactedWord.test(accessible))return 'reacted_label';
+    return '';
+  };
+  const reactionState=(button)=>{
+    if(!button||!visible(button))return '';
+    const accessible=label(button);
+    const rendered=text(button,256);
+    if(explicitReactionWitness(button))return 'reacted';
+    if(neutralLike.test(accessible)||neutralLike.test(rendered))return 'neutral';
     return '';
   };
   const reactionButton=(root)=>{
     const buttons=all('button,[role="button"]',root).filter(visible);
     return buttons.find((button)=>/^(赞|讚|like|me gusta|thích)(\b|\s|$)/i.test(label(button)))||null;
   };
-  const reactionActionButton=(root)=>all('button,[role="button"],[role="radio"]',root).filter(visible)
-    .find((button)=>Boolean(reactionState(button)))||null;
   const commentEditor=(root=document)=>all('[contenteditable="true"][role="textbox"],textarea[aria-label],textarea',root).filter(visible).find((el)=>{
     const raw=label(el).toLowerCase();
     return /评论|留言|comment|bình luận|coment|输入回答|answer/.test(raw)||el.getAttribute('role')==='textbox';
@@ -559,11 +567,26 @@ async function(input){
       .filter((rect)=>viewportArea(rect)>0).map((rect)=>rectDistance(target,rect));
     return !otherDistances.some((other)=>other+12<distance);
   };
+  const reelLikeAssociated=(active,element)=>{
+    if(!reelAssociated(active,element))return false;
+    const target=element.getBoundingClientRect();
+    const video=active.videoRect;
+    if(target.width<32||target.width>84||target.height<32||target.height>90)return false;
+    if(target.left<video.right-20||target.left>video.right+125)return false;
+    if(target.top<video.top-10||target.bottom>video.bottom+20)return false;
+    const source=`${label(element)} ${text(element,256)}`;
+    if(reelComment.test(source)||reelLikeExcluded.test(source))return false;
+    let context='';
+    for(let parent=element.parentElement,depth=0;parent&&depth<4;parent=parent.parentElement,depth++){
+      context+=` ${String(parent.getAttribute&&parent.getAttribute('aria-label')||'')}`;
+    }
+    return !reelComment.test(context)&&!reelLikeExcluded.test(context);
+  };
   const reelLikeTarget=()=>{
     const active=expectedActiveReel();
     if(!active.ok)return active;
     const matches=all('button,[role="button"],[role="radio"]').filter((button)=>
-      reelAssociated(active,button)&&Boolean(reactionState(button))
+      reelLikeAssociated(active,button)&&Boolean(reactionState(button))
     );
     if(matches.length!==1)return {
       ok:false,
@@ -602,7 +625,7 @@ async function(input){
     }
     const root=actionRoot();
     if(!root)return {ok:false,reason:'target_not_found'};
-    const button=reactionActionButton(root);
+    const button=reactionButton(root);
     if(!button)return {ok:false,reason:'like_button_not_found',noteId:permalinkOf(root)||String(p.noteId||'')};
     const target=point(button);
     return {
@@ -610,7 +633,7 @@ async function(input){
       ...(target||{}),
       reason:target?undefined:'like_button_not_found',
       noteId:permalinkOf(root)||String(p.noteId||''),
-      already:reactionState(button)==='reacted',
+      already:pressed(button)||/取消赞|remove like|unlike/i.test(label(button)),
       observation:actionEvidence(root),
     };
   };
@@ -657,7 +680,7 @@ async function(input){
     }
     const marker=postId(active.noteId);
     const marked=all(`[${reelLikeMarker}]`).filter((button)=>
-      button.getAttribute(reelLikeMarker)===marker&&reelAssociated(active,button)
+      button.getAttribute(reelLikeMarker)===marker&&reelLikeAssociated(active,button)
     );
     if(marked.length!==1)return {
       ok:false,
@@ -666,11 +689,8 @@ async function(input){
       selected:false,
     };
     const button=marked[0];
-    const accessible=label(button);
-    const rendered=text(button,256);
-    const selected=reactionState(button)==='reacted';
-    const witness=pressed(button)?'aria_selected':unlike.test(accessible)||unlike.test(rendered)?'unlike_label':selected?'reacted_word':undefined;
-    return {ok:true,noteId:active.noteId,selected,...(witness?{witness}:{})};
+    const witness=explicitReactionWitness(button);
+    return {ok:true,noteId:active.noteId,selected:Boolean(witness),...(witness?{witness}:{})};
   };
   const likePickerProbe=()=>{
     if(String(p.noteId||'')&&reelSurface()){
@@ -682,7 +702,7 @@ async function(input){
       }
       const marker=postId(active.noteId);
       const primaries=all(`[${reelLikeMarker}]`).filter((button)=>
-        button.getAttribute(reelLikeMarker)===marker&&reelAssociated(active,button)
+        button.getAttribute(reelLikeMarker)===marker&&reelLikeAssociated(active,button)
       );
       if(primaries.length!==1)return {ok:false,reason:primaries.length?'ambiguous_target':'like_primary_target_lost'};
       const primaryRect=primaries[0].getBoundingClientRect();
@@ -732,7 +752,7 @@ async function(input){
     if(!active.ok)return active;
     const candidates=all('button,[role="button"]').filter((element)=>reelAssociated(active,element))
       .map(followControl).filter(Boolean).filter((candidate)=>{
-        if(!candidate.author)return true;
+        if(!candidate.author)return false;
         const targetRect=candidate.element.getBoundingClientRect();
         return exactVisibleText(candidate.author).filter((author)=>
           rectDistance(author.getBoundingClientRect(),targetRect)<=260
@@ -754,6 +774,7 @@ async function(input){
         already:true,
         noteId:target.noteId,
         videoKey:target.active.videoKey,
+        author:target.candidate.author,
       };
       const coordinates=point(target.candidate.element);
       return {
@@ -763,6 +784,7 @@ async function(input){
         already:false,
         noteId:target.noteId,
         videoKey:target.active.videoKey,
+        author:target.candidate.author,
       };
     }
     const root=actionRoot();

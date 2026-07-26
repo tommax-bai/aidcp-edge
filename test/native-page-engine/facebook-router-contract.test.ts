@@ -439,6 +439,68 @@ test('Facebook Native Reel probes reject ambiguous sibling controls', async () =
   assert.equal(like.output.value.reason, 'ambiguous_target');
 });
 
+test('Facebook Native Reel like excludes a lone comment reaction and dispatches zero clicks', async () => {
+  const dom = install(`
+    <main>
+      <video id="video" src="https://cdn.example/reel-777.mp4"></video>
+      <section aria-label="Comments">
+        <button id="comment-like" aria-label="Like">Like</button>
+      </section>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  const commentLike = dom.window.document.querySelector('#comment-like')!;
+  let clicks = 0;
+  commentLike.addEventListener('click', () => { clicks += 1; });
+  setRect(dom.window.document.querySelector('#video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(commentLike, { left: 980, top: 500, right: 1_040, bottom: 550 });
+
+  const committed = await run({
+    kind: 'like_primary_commit',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(committed.output.value.ok, false);
+  assert.equal(committed.output.value.reason, 'like_button_not_found');
+  assert.equal(committed.output.value.clicked, false);
+  assert.equal(clicks, 0);
+});
+
+test('Facebook Native Reel like ignores generic active CSS as a selected-state witness', async () => {
+  const dom = install(`
+    <main>
+      <video id="video" src="https://cdn.example/reel-777.mp4"></video>
+      <button id="like" class="active" aria-label="Like">Like</button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  const like = dom.window.document.querySelector('#like')!;
+  let clicks = 0;
+  like.addEventListener('click', () => { clicks += 1; });
+  setRect(dom.window.document.querySelector('#video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(like, { left: 980, top: 500, right: 1_040, bottom: 550 });
+
+  const probe = await run({
+    kind: 'like_probe',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(probe.output.value.ok, true);
+  assert.equal(probe.output.value.already, false);
+
+  const committed = await run({
+    kind: 'like_primary_commit',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(committed.output.value.already, false);
+  assert.equal(committed.output.value.clicked, true);
+  assert.equal(clicks, 1);
+
+  const verified = await run({
+    kind: 'like_verify',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(verified.output.value.ok, true);
+  assert.equal(verified.output.value.selected, false);
+  assert.equal(verified.output.value.witness, undefined);
+});
+
 test('Facebook Native Reel like fresh commit and verify remain bound to the same Reel', async () => {
   const dom = install(`
     <main>
@@ -506,6 +568,39 @@ test('Facebook Native Reel like verification rejects same-route active video mov
   assert.equal(verified.output.value.selected, false);
 });
 
+test('Facebook Native Reel like verification rejects a primary control leaving the action rail', async () => {
+  const dom = install(`
+    <main>
+      <video id="video" src="https://cdn.example/reel-777.mp4"></video>
+      <button id="like" aria-label="留下心情"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  const like = dom.window.document.querySelector('#like')!;
+  setRect(dom.window.document.querySelector('#video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(like, { left: 980, top: 500, right: 1_040, bottom: 550 });
+
+  const committed = await run({
+    kind: 'like_primary_commit',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(committed.output.value.clicked, true);
+
+  setRect(like, { left: 600, top: 500, right: 660, bottom: 550 });
+  const verified = await run({
+    kind: 'like_verify',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(verified.output.value.ok, false);
+  assert.equal(verified.output.value.reason, 'target_not_found');
+
+  const picker = await run({
+    kind: 'like_picker_probe',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(picker.output.value.ok, false);
+  assert.equal(picker.output.value.reason, 'like_primary_target_lost');
+});
+
 test('Facebook Native Reel picker probe is scoped to one visible multi-reaction picker', async () => {
   const dom = install(`
     <main>
@@ -569,7 +664,26 @@ test('Facebook Native Reel follow probe recognizes already-following author labe
   assert.equal(follow.output.value.ok, true);
   assert.equal(follow.output.value.already, true);
   assert.equal(follow.output.value.noteId, 'https://www.facebook.com/reel/777');
+  assert.equal(follow.output.value.author, 'Re Su');
   assert.match(String(follow.output.value.videoKey), /reel-777\.mp4@element:/);
+});
+
+test('Facebook Native Reel follow rejects a bare CTA without a unique author witness', async () => {
+  const dom = install(`
+    <main>
+      <video id="video" src="https://cdn.example/reel-777.mp4"></video>
+      <button id="follow" aria-label="Follow">Follow</button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('#video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(dom.window.document.querySelector('#follow')!, { left: 690, top: 650, right: 770, bottom: 690 });
+
+  const follow = await run({
+    kind: 'follow_probe',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(follow.output.value.ok, false);
+  assert.equal(follow.output.value.reason, 'follow_button_not_found');
 });
 
 test('Facebook comment editor accepts one exclusive sibling editor and rejects nested reply editors', async () => {

@@ -821,13 +821,26 @@ async fn execute_facebook_follow(
             None,
         ));
     }
-    let before = probe_facebook_follow(session, params.note_id.as_deref()).await?;
-    if !before.ok {
+    let Some(expected_note_id) = params.note_id.as_deref() else {
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
             "follow",
             false,
-            before.reason.as_deref().unwrap_or("target_not_found"),
+            "target_not_found",
+            None,
+            None,
+        ));
+    };
+    let before = probe_facebook_follow(session, Some(expected_note_id)).await?;
+    if !before.ok || before.author.as_deref().is_none_or(str::is_empty) {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "follow",
+            false,
+            before
+                .reason
+                .as_deref()
+                .unwrap_or("follow_author_not_found"),
             before.note_id,
             None,
         ));
@@ -842,27 +855,64 @@ async fn execute_facebook_follow(
             None,
         ));
     }
-    let (Some(x), Some(y)) = (before.cx, before.cy) else {
+    let fresh = probe_facebook_follow(session, Some(expected_note_id)).await?;
+    if !fresh.ok || fresh.author.as_deref().is_none_or(str::is_empty) {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "follow",
+            false,
+            fresh.reason.as_deref().unwrap_or("follow_author_not_found"),
+            fresh.note_id.or(before.note_id),
+            None,
+        ));
+    }
+    if fresh.note_id != before.note_id
+        || fresh.video_key != before.video_key
+        || fresh.author != before.author
+    {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "follow",
+            false,
+            "target_moved_before_dispatch",
+            before.note_id,
+            None,
+        ));
+    }
+    if fresh.already {
+        return Ok(facebook_action_result(
+            EffectPhase::Confirmed,
+            "follow",
+            true,
+            "already_following",
+            fresh.note_id,
+            None,
+        ));
+    }
+    let (Some(x), Some(y)) = (fresh.cx, fresh.cy) else {
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
             "follow",
             false,
             "follow_button_not_found",
-            before.note_id,
+            fresh.note_id,
             None,
         ));
     };
     dispatch_facebook_click(session, x, y).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
     loop {
-        let after = probe_facebook_follow(session, params.note_id.as_deref()).await?;
-        if after.note_id != before.note_id || after.video_key != before.video_key {
+        let after = probe_facebook_follow(session, Some(expected_note_id)).await?;
+        if after.note_id != fresh.note_id
+            || after.video_key != fresh.video_key
+            || after.author != fresh.author
+        {
             return Ok(facebook_action_result(
                 EffectPhase::Ambiguous,
                 "follow",
                 false,
                 "verify_indeterminate",
-                before.note_id,
+                fresh.note_id,
                 None,
             ));
         }
@@ -887,7 +937,7 @@ async fn execute_facebook_follow(
                 "follow",
                 false,
                 "verify_indeterminate",
-                before.note_id,
+                fresh.note_id,
                 None,
             ));
         }
@@ -897,7 +947,7 @@ async fn execute_facebook_follow(
                 "follow",
                 false,
                 "follow_unconfirmed",
-                before.note_id,
+                fresh.note_id,
                 None,
             ));
         }
