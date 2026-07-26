@@ -125,6 +125,77 @@ pub struct FacebookPointTarget {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookFeedLikeTarget {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub note_id: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub cx: Option<f64>,
+    #[serde(default)]
+    pub cy: Option<f64>,
+    #[serde(default)]
+    pub top: Option<f64>,
+    #[serde(default)]
+    pub bottom: Option<f64>,
+    #[serde(default)]
+    pub viewport_height: Option<f64>,
+    #[serde(default)]
+    pub in_viewport: bool,
+    #[serde(default)]
+    pub observation: Option<ActionEvidence>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookFeedLikeCommit {
+    pub started: bool,
+    pub already: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub note_id: Option<String>,
+    #[serde(default)]
+    pub observation: Option<ActionEvidence>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookFeedLikeVerification {
+    pub state: String,
+    #[serde(default)]
+    pub note_id: Option<String>,
+    #[serde(default)]
+    pub observation: Option<ActionEvidence>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookFeedLikePicker {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub cx: Option<f64>,
+    #[serde(default)]
+    pub cy: Option<f64>,
+    #[serde(default)]
+    pub from_x: Option<f64>,
+    #[serde(default)]
+    pub from_y: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookFeedLikeClear {
+    pub cleared: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FacebookConsentPoint {
     pub cx: f64,
     pub cy: f64,
@@ -321,6 +392,44 @@ pub fn like_picker_probe_expression(note_id: &str) -> Result<String, EngineError
     internal_expression("like_picker_probe", json!({ "noteId": note_id }))
 }
 
+pub fn feed_like_target_expression(note_id: &str) -> Result<String, EngineError> {
+    internal_expression("feed_like_target_probe", json!({ "noteId": note_id }))
+}
+
+pub fn feed_like_commit_expression(
+    note_id: &str,
+    operation_id: &str,
+) -> Result<String, EngineError> {
+    internal_expression(
+        "feed_like_commit",
+        json!({ "noteId": note_id, "operationId": operation_id }),
+    )
+}
+
+pub fn feed_like_verify_expression(
+    note_id: &str,
+    operation_id: &str,
+) -> Result<String, EngineError> {
+    internal_expression(
+        "feed_like_verify",
+        json!({ "noteId": note_id, "operationId": operation_id }),
+    )
+}
+
+pub fn feed_like_picker_expression(
+    note_id: &str,
+    operation_id: &str,
+) -> Result<String, EngineError> {
+    internal_expression(
+        "feed_like_picker_probe",
+        json!({ "noteId": note_id, "operationId": operation_id }),
+    )
+}
+
+pub fn feed_like_clear_expression(operation_id: &str) -> Result<String, EngineError> {
+    internal_expression("feed_like_clear", json!({ "operationId": operation_id }))
+}
+
 pub fn follow_probe_expression(note_id: Option<&str>) -> Result<String, EngineError> {
     internal_expression(
         "follow_probe",
@@ -447,6 +556,33 @@ pub fn like_commit_from_cdp(result: &Value) -> Result<FacebookLikeCommit, Engine
 pub fn like_verify_from_cdp(result: &Value) -> Result<FacebookLikeVerify, EngineError> {
     let result = result_from_cdp(result)?;
     typed_internal_value(result.output, "like_verify")
+}
+
+pub fn feed_like_target_from_cdp(result: &Value) -> Result<FacebookFeedLikeTarget, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "feed_like_target_probe")
+}
+
+pub fn feed_like_commit_from_cdp(result: &Value) -> Result<FacebookFeedLikeCommit, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "feed_like_commit")
+}
+
+pub fn feed_like_verify_from_cdp(
+    result: &Value,
+) -> Result<FacebookFeedLikeVerification, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "feed_like_verify")
+}
+
+pub fn feed_like_picker_from_cdp(result: &Value) -> Result<FacebookFeedLikePicker, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "feed_like_picker_probe")
+}
+
+pub fn feed_like_clear_from_cdp(result: &Value) -> Result<FacebookFeedLikeClear, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "feed_like_clear")
 }
 
 pub fn follow_probe_from_cdp(result: &Value) -> Result<FacebookFollowProbe, EngineError> {
