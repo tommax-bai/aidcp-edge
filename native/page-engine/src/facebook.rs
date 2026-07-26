@@ -11,6 +11,15 @@ use serde_json::{Value, json};
 use url::Url;
 
 pub mod capability;
+pub mod comment;
+pub mod feed;
+pub mod feed_like;
+pub mod group_join;
+pub mod publish;
+pub mod reels;
+pub mod runtime;
+pub mod session;
+pub mod shared;
 
 include!(concat!(
     env!("OUT_DIR"),

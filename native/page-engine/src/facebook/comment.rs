@@ -1,0 +1,230 @@
+use super::shared::*;
+use crate::commit_window::CommitWindowRequester;
+use crate::engine::{CommandOutput, EngineSession};
+use crate::error::{EngineError, ErrorCode};
+use crate::protocol::{EffectPhase, NativeCommand};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+
+pub(crate) async fn execute(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    commit_windows: &CommitWindowRequester,
+    deadline_unix_ms: u64,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let NativeCommand::InteractionComment(params) = command else {
+        return Err(EngineError::new(
+            ErrorCode::EngineInternal,
+            "native Facebook Comment capability received another owner's command",
+        ));
+    };
+    execute_facebook_comment(
+        session,
+        params,
+        command,
+        cancellation,
+        commit_windows,
+        deadline_unix_ms,
+    )
+    .await
+}
+
+pub(crate) async fn execute_facebook_comment(
+    session: &mut EngineSession,
+    params: &crate::command::CommentParams,
+    command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    commit_windows: &CommitWindowRequester,
+    deadline_unix_ms: u64,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let account_id = params.account_id.as_deref().unwrap_or_default();
+    if account_id.len() < 5 || !account_id.chars().all(|value| value.is_ascii_digit()) {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            "identity_unknown",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    let body = params.text.trim();
+    if body.is_empty() {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            "comment_text_empty",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    let full_text = match params
+        .group_chat_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(code) => format!("{body}\n{code}"),
+        None => body.to_owned(),
+    };
+
+    let mut editor = probe_facebook_comment_editor(session, &params.note_id).await?;
+    for _ in 0..6 {
+        if editor.ok {
+            break;
+        }
+        if editor.reason.as_deref() == Some("target_not_found") {
+            break;
+        }
+        session.cdp.dispatch_wheel(720.0, 440.0, 560.0).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        editor = probe_facebook_comment_editor(session, &params.note_id).await?;
+    }
+    if !editor.ok {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            editor.reason.as_deref().unwrap_or("editor_not_found"),
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    let (Some(x), Some(y)) = (editor.cx, editor.cy) else {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            "editor_not_found",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    };
+    dispatch_facebook_click(session, x, y).await?;
+    replace_focused_text(session, &full_text).await?;
+    let readback = probe_facebook_comment_editor(session, &params.note_id).await?;
+    if readback
+        .value
+        .as_deref()
+        .is_none_or(|value| normalize_facebook_text(value) != normalize_facebook_text(&full_text))
+    {
+        replace_focused_text(session, "").await?;
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            "marker_not_accepted",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        replace_focused_text(session, "").await?;
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    enter_facebook_commit_window(command, commit_windows, deadline_unix_ms, cancellation).await?;
+    let protected_editor = probe_facebook_comment_editor(session, &params.note_id).await?;
+    if !protected_editor.ok
+        || protected_editor.value.as_deref().is_none_or(|value| {
+            normalize_facebook_text(value) != normalize_facebook_text(&full_text)
+        })
+    {
+        replace_focused_text(session, "").await?;
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            "target_moved_before_commit",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    if facebook_command_cancelled(cancellation) {
+        replace_focused_text(session, "").await?;
+        return Err(cancelled_before_dispatch());
+    }
+    session
+        .cdp
+        .dispatch_key("rawKeyDown", "Enter", "Enter", 13)
+        .await?;
+    session
+        .cdp
+        .dispatch_key("keyUp", "Enter", "Enter", 13)
+        .await?;
+
+    if params.fast_return_to_feed == Some(true) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        session.cdp.navigate(FACEBOOK_HOME_URL).await?;
+        session.facebook.active_list_url = FACEBOOK_HOME_URL.to_owned();
+        return Ok(facebook_action_result(
+            EffectPhase::Ambiguous,
+            "comment",
+            false,
+            "verification_ambiguous",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
+    loop {
+        if facebook_command_cancelled(cancellation) {
+            return Ok(facebook_action_result(
+                EffectPhase::Ambiguous,
+                "comment",
+                false,
+                "preempted_by_task",
+                Some(params.note_id.clone()),
+                None,
+            ));
+        }
+        let ack =
+            probe_facebook_comment_ack(session, &params.note_id, &full_text, account_id).await?;
+        if ack.confirmed {
+            return Ok(facebook_action_result(
+                EffectPhase::Confirmed,
+                "comment",
+                true,
+                "",
+                Some(params.note_id.clone()),
+                None,
+            ));
+        }
+        if ack.rejected {
+            return Ok(facebook_action_result(
+                EffectPhase::Confirmed,
+                "comment",
+                false,
+                "comment_rejected",
+                Some(params.note_id.clone()),
+                None,
+            ));
+        }
+        if ack.pending {
+            return Ok(facebook_action_result(
+                EffectPhase::Confirmed,
+                "comment",
+                false,
+                "pending_group_approval",
+                Some(params.note_id.clone()),
+                None,
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(facebook_action_result(
+                EffectPhase::Ambiguous,
+                "comment",
+                false,
+                "verification_ambiguous",
+                Some(params.note_id.clone()),
+                None,
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}

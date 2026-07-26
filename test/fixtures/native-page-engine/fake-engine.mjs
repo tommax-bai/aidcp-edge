@@ -152,19 +152,20 @@ if (mode === 'malformed') {
         && request.commandId === pendingCommand.commandId
         && request.token === `cw_${pendingCommand.commandId}_1`
         && request.label === 'fb_join_click';
+      const accepted = matches && request.accepted === true;
       process.stdout.write(`${JSON.stringify({
         type: 'response',
         protocolVersion: 2,
         id: request.id,
         ok: matches,
-        ...(matches ? { result: { accepted: true } } : {
+        ...(matches ? { result: { accepted } } : {
           error: {
             code: 'commit_window_unavailable',
             message: 'commit window mismatch',
           },
         }),
       })}\n`);
-      if (matches) {
+      if (accepted) {
         process.stdout.write(`${JSON.stringify({
           type: 'command_result',
           protocolVersion: 2,
@@ -178,6 +179,23 @@ if (mode === 'malformed') {
           result: {
             kind: 'action_receipt',
             value: { action: 'join_group', ok: true, clicked: true },
+          },
+        })}\n`);
+        pendingCommand = undefined;
+      } else if (matches) {
+        process.stdout.write(`${JSON.stringify({
+          type: 'command_result',
+          protocolVersion: 2,
+          id: pendingCommand.id,
+          sessionId: pendingCommand.sessionId,
+          taskId: pendingCommand.taskId,
+          commandId: pendingCommand.commandId,
+          ok: false,
+          effectPhase: 'not_started',
+          reasonCode: 'commit_window_unavailable',
+          error: {
+            code: 'commit_window_unavailable',
+            message: 'commit window rejected',
           },
         })}\n`);
         pendingCommand = undefined;

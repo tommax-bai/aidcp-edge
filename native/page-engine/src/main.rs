@@ -229,8 +229,8 @@ async fn main() {
                                 .pending_commit_window
                                 .take()
                                 .expect("matching commit window");
-                            let _ = pending.acknowledgement.send(true);
-                            let result = json!({ "accepted": true });
+                            let _ = pending.acknowledgement.send(request.accepted);
+                            let result = json!({ "accepted": request.accepted });
                             let response = LifecycleResponse::success(&request.id, &result);
                             if write_record(&mut stdout, &response).await.is_err() {
                                 break;

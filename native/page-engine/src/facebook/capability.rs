@@ -22,6 +22,7 @@ pub struct FacebookParityEntry {
     pub command_kind: &'static str,
     pub owner: FacebookCapability,
     pub behavior_oracle: &'static str,
+    pub focused_behavior_suite: &'static str,
     pub target_witness: &'static str,
     pub pre_commit_gates: &'static str,
     pub commit_primitive: &'static str,
@@ -51,6 +52,7 @@ macro_rules! entry {
             command_kind: $kind,
             owner: FacebookCapability::$owner,
             behavior_oracle: $oracle,
+            focused_behavior_suite: focused_suite(FacebookCapability::$owner),
             target_witness: $witness,
             pre_commit_gates: $gates,
             commit_primitive: $commit,
@@ -61,6 +63,18 @@ macro_rules! entry {
             commit_window: $window,
         }
     };
+}
+
+const fn focused_suite(owner: FacebookCapability) -> &'static str {
+    match owner {
+        FacebookCapability::Session
+        | FacebookCapability::Feed
+        | FacebookCapability::Reels
+        | FacebookCapability::GroupJoin
+        | FacebookCapability::Comment
+        | FacebookCapability::Publish => "test/native-page-engine/facebook-router-contract.test.ts",
+        FacebookCapability::FeedLike => "test/native-page-engine/facebook-feed-like-parity.test.ts",
+    }
 }
 
 pub const FACEBOOK_PARITY_LEDGER: &[FacebookParityEntry] = &[
@@ -519,6 +533,7 @@ mod tests {
                 entry.command_kind
             );
             assert!(!entry.behavior_oracle.is_empty());
+            assert!(!entry.focused_behavior_suite.is_empty());
             assert!(!entry.target_witness.is_empty());
             assert!(!entry.pre_commit_gates.is_empty());
             assert!(!entry.commit_primitive.is_empty());

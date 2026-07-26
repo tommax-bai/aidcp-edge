@@ -79,9 +79,9 @@ pub struct ProbeResult {
     pub path: String,
     pub ready_state: String,
     pub page_kind: PageKind,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocking_kind: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocking_text: Option<String>,
     pub signals: StructuralSignals,
 }

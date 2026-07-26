@@ -486,15 +486,18 @@ class NativeProcessTransport {
     request: CommitWindowRequestRecord,
   ): void {
     const pending = this.pending.get(id);
-    if (!pending?.commitWindowHandler || pending.disposeCommitWindow) {
+    if (!pending || pending.disposeCommitWindow) {
       this.failProtocol('Native Page Engine commit window has no matching active command');
       return;
     }
-    try {
-      pending.disposeCommitWindow = pending.commitWindowHandler(request);
-    } catch {
-      this.failProtocol('Native Page Engine commit window was rejected by the active command');
-      return;
+    let accepted = false;
+    if (pending.commitWindowHandler) {
+      try {
+        pending.disposeCommitWindow = pending.commitWindowHandler(request);
+        accepted = true;
+      } catch {
+        accepted = false;
+      }
     }
     const ackId = requestId('commit_window_ack');
     void this.request(ackId, {
@@ -506,6 +509,7 @@ class NativeProcessTransport {
       commandId: request.commandId,
       token: request.token,
       label: request.label,
+      accepted,
     }, Math.min(this.processTimeoutMs, 2_000)).catch((error) => {
       pending.disposeCommitWindow?.();
       pending.disposeCommitWindow = undefined;
@@ -590,7 +594,8 @@ export class NativePageEngineSession {
       type: 'command', protocolVersion: NATIVE_PAGE_ENGINE_PROTOCOL_VERSION, id,
       sessionId: this.sessionId, taskId: this.taskId, commandId,
       deadlineUnixMs: Date.now() + timeoutMs, command,
-    }, Math.max(this.processTimeoutMs, timeoutMs + 250), (request) => {
+    }, Math.max(this.processTimeoutMs, timeoutMs + 250), commitWindowHandler
+      ? (request) => {
       if (
         request.sessionId !== this.sessionId
         || request.taskId !== this.taskId
@@ -601,14 +606,9 @@ export class NativePageEngineSession {
           'Native commit window correlation mismatch',
         );
       }
-      if (!commitWindowHandler) {
-        throw new NativePageEngineError(
-          'commit_window_unavailable',
-          'Native commit window has no host guard',
-        );
-      }
       return commitWindowHandler(request);
-    });
+    }
+      : undefined);
     const abort = (): void => { void this.cancel(commandId, 'caller_aborted').catch(() => undefined); };
     signal?.addEventListener('abort', abort, { once: true });
     let raw: unknown;

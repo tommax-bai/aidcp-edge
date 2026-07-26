@@ -144,10 +144,12 @@ test('refuses an irreversible Native write when no host commit guard is installe
     }, 1_000),
     (error: unknown) => {
       assert.ok(error instanceof NativePageEngineError);
-      assert.equal(error.code, 'invalid_protocol');
+      assert.equal(error.code, 'commit_window_unavailable');
+      assert.equal(error.detail?.effectPhase, 'not_started');
       return true;
     },
   );
+  await session.close();
 });
 
 test('rejects a ready engine whose capability manifest differs from the packaged contract', async () => {

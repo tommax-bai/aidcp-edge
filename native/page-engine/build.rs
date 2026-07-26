@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 
 const KEY: &[u8] = &[
@@ -12,7 +13,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/xhs-command-router.js");
     println!("cargo:rerun-if-changed=src/xhs-file-input-selector.txt");
     println!("cargo:rerun-if-changed=src/xhs-search-input-geometry.js");
-    println!("cargo:rerun-if-changed=src/facebook-command-router.js");
+    println!("cargo:rerun-if-changed=src/facebook-router/manifest.txt");
     println!("cargo:rerun-if-changed=src/facebook-file-input-selector.txt");
     println!("cargo:rerun-if-changed=command-manifest.json");
     let command_manifest = fs::read("command-manifest.json").expect("read command manifest");
@@ -88,8 +89,7 @@ fn main() {
     fs::write(search_geometry_output_path, search_geometry_output)
         .expect("write encoded native search input geometry");
 
-    let facebook_router_source =
-        fs::read("src/facebook-command-router.js").expect("read Facebook command router source");
+    let facebook_router_source = read_ordered_sources("src/facebook-router/manifest.txt");
     let facebook_router_encoded: Vec<u8> = facebook_router_source
         .iter()
         .enumerate()
@@ -126,4 +126,37 @@ fn main() {
         .join("facebook_file_input_selector_bytes.rs");
     fs::write(facebook_selector_output_path, facebook_selector_output)
         .expect("write encoded Facebook file input selector");
+}
+
+fn read_ordered_sources(manifest_path: &str) -> Vec<u8> {
+    let manifest = fs::read_to_string(manifest_path).expect("read ordered source manifest");
+    let directory = Path::new(manifest_path)
+        .parent()
+        .expect("source manifest directory");
+    let mut source = Vec::new();
+    let mut entries = std::collections::HashSet::new();
+    let mut previous: Option<&str> = None;
+    for entry in manifest
+        .lines()
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        assert!(
+            !entry.contains('/') && !entry.contains('\\') && entries.insert(entry),
+            "ordered source manifest entries must be unique local file names"
+        );
+        assert!(
+            previous.is_none_or(|value| value < entry),
+            "ordered source manifest entries must remain in lexical assembly order"
+        );
+        previous = Some(entry);
+        let path = directory.join(entry);
+        println!("cargo:rerun-if-changed={}", path.display());
+        source.extend(fs::read(path).expect("read ordered source fragment"));
+    }
+    assert!(
+        !entries.is_empty(),
+        "ordered source manifest cannot be empty"
+    );
+    source
 }

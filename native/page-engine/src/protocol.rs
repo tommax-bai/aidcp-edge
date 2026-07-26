@@ -99,6 +99,7 @@ pub struct CommitWindowAckRecord {
     pub command_id: u64,
     pub token: String,
     pub label: String,
+    pub accepted: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -478,6 +479,25 @@ mod tests {
         };
         assert_eq!(command.command_id, 1);
         assert_eq!(command.task_id, "browse-1");
+    }
+
+    #[test]
+    fn commit_window_acknowledgement_carries_an_explicit_host_decision() {
+        let accepted = r#"{"type":"commit_window_ack","protocolVersion":2,"id":"ack-1","sessionId":"session-1","taskId":"browse-1","commandId":1,"token":"cw_1_1","label":"fb_join_click","accepted":true}"#;
+        let InputRecord::CommitWindowAck(record) =
+            parse_input(accepted).expect("commit window acknowledgement")
+        else {
+            panic!("expected commit window acknowledgement");
+        };
+        assert!(record.accepted);
+
+        let missing = accepted.replace(",\"accepted\":true", "");
+        assert_eq!(
+            parse_input(&missing)
+                .expect_err("host decision is required")
+                .code,
+            ErrorCode::InvalidRequest
+        );
     }
 
     #[test]

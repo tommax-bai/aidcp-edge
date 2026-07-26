@@ -630,12 +630,9 @@ async fn facebook_note_open_discards_unrelated_detail_until_requested_identity_h
     engine.shutdown().await;
     let requests = server.await.expect("Facebook note hydration fake CDP");
     assert_eq!(
-        requests
-            .iter()
-            .filter(|request| request["method"] == "Runtime.evaluate")
-            .count(),
-        3,
-        "ready probe, stale detail, then requested detail"
+        router_call_count(&requests, "note_open"),
+        2,
+        "stale detail must be resampled until the requested identity hydrates"
     );
 }
 
@@ -993,6 +990,8 @@ fn router_kind(request: &Value) -> Option<String> {
     [
         "page_probe",
         "consent_probe",
+        "feed_probe",
+        "note_open",
         "reel_probe",
         "like_probe",
         "like_primary_commit",
@@ -1003,6 +1002,17 @@ fn router_kind(request: &Value) -> Option<String> {
     .into_iter()
     .find(|kind| invocation.contains(&format!("\"kind\":\"{kind}\"")))
     .map(str::to_owned)
+}
+
+fn facebook_consent_absent_cdp() -> Value {
+    router_cdp(
+        "consent_probe",
+        json!({
+            "present": false,
+            "acceptAllAmbiguous": false,
+            "necessaryOnlyAmbiguous": false
+        }),
+    )
 }
 
 fn router_call_count(requests: &[Value], kind: &str) -> usize {
@@ -1394,40 +1404,17 @@ async fn spawn_facebook_initial_scan_cdp() -> (u16, tokio::task::JoinHandle<Vec<
         for _ in 0..3 {
             requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         }
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                json!({"result":{"value":router_result(
-                    "page_probe",
-                    json!({
-                        "targetId": "",
-                        "origin": "https://www.facebook.com",
-                        "path": "/",
-                        "readyState": "complete",
-                        "pageKind": "home",
-                        "signals": {
-                            "feedCardCount": 1,
-                            "noteDetailCount": 0,
-                            "loginWallCount": 0,
-                            "captchaSignalCount": 0,
-                            "dialogCount": 0,
-                            "profileSignalCount": 0,
-                            "notificationSignalCount": 0,
-                            "publishSignalCount": 0,
-                            "errorSignalCount": 0,
-                            "mainCount": 1
-                        }
-                    })
-                )}}),
-            )
-            .await,
-        );
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                json!({"result":{"value":router_result(
-                    "page_cards",
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let result = match router_kind(&request).as_deref() {
+                Some("page_probe") => facebook_ready_cdp("/"),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("feed_probe") => router_cdp(
+                    "feed_probe",
                     json!({
                         "cards": [{
                             "index": 0,
@@ -1436,14 +1423,31 @@ async fn spawn_facebook_initial_scan_cdp() -> (u16, tokio::task::JoinHandle<Vec<
                             "collectCount": 0,
                             "noteId": "https://www.facebook.com/Alice/posts/pfbidHOME"
                         }],
+                        "documentGeneration": "home-generation",
                         "listKind": "feed",
-                        "listState": "ready"
-                    })
-                )}}),
-            )
-            .await,
-        );
-        let _ = websocket.close(None).await;
+                        "listState": "ready",
+                        "loading": false,
+                        "articleCount": 1,
+                        "explicitEmpty": false,
+                        "url": "https://www.facebook.com/",
+                        "surface": "home",
+                        "scrollY": 0,
+                        "innerWidth": 1440,
+                        "innerHeight": 800,
+                        "scrollHeight": 1600,
+                        "documentAgeMs": 1000
+                    }),
+                ),
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
         requests
     });
     (port, server)
@@ -1481,38 +1485,43 @@ async fn spawn_facebook_note_open_hydration_cdp() -> (u16, tokio::task::JoinHand
         let (stream, _) = listener.accept().await.expect("WebSocket request");
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut requests = Vec::new();
+        let mut detail_samples = 0_u32;
         for _ in 0..3 {
             requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         }
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                facebook_ready_cdp("/groups/100/posts/2579243155868042"),
-            )
-            .await,
-        );
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                facebook_note_detail_cdp(
-                    "https://www.facebook.com/groups/100/posts/999",
-                    "stale post",
-                ),
-            )
-            .await,
-        );
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                facebook_note_detail_cdp(
-                    "https://www.facebook.com/permalink.php?story_fbid=2579243155868042&id=99",
-                    "requested post",
-                ),
-            )
-            .await,
-        );
-        let _ = websocket.close(None).await;
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let result = match router_kind(&request).as_deref() {
+                Some("page_probe") => facebook_ready_cdp("/groups/100/posts/2579243155868042"),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("note_open") => {
+                    detail_samples += 1;
+                    if detail_samples == 1 {
+                        facebook_note_detail_cdp(
+                            "https://www.facebook.com/groups/100/posts/999",
+                            "stale post",
+                        )
+                    } else {
+                        facebook_note_detail_cdp(
+                            "https://www.facebook.com/permalink.php?story_fbid=2579243155868042&id=99",
+                            "requested post",
+                        )
+                    }
+                }
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
         requests
     });
     (port, server)
@@ -1533,12 +1542,6 @@ async fn spawn_facebook_note_open_mismatch_cdp() -> (u16, tokio::task::JoinHandl
         for _ in 0..3 {
             respond_to_call(&mut websocket, json!({})).await;
         }
-        respond_to_call(&mut websocket, json!({})).await;
-        respond_to_call(
-            &mut websocket,
-            facebook_ready_cdp("/groups/100/posts/2579243155868042"),
-        )
-        .await;
         let mut samples = 0;
         while let Some(message) = websocket.next().await {
             let Ok(Message::Text(text)) = message else {
@@ -1546,21 +1549,24 @@ async fn spawn_facebook_note_open_mismatch_cdp() -> (u16, tokio::task::JoinHandl
             };
             let request: Value = serde_json::from_str(&text).expect("request JSON");
             let id = request["id"].as_u64().expect("request id");
+            let result = match router_kind(&request).as_deref() {
+                Some("page_probe") => facebook_ready_cdp("/groups/100/posts/2579243155868042"),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("note_open") => {
+                    samples += 1;
+                    facebook_note_detail_cdp(
+                        "https://www.facebook.com/groups/100/posts/999",
+                        "stale post",
+                    )
+                }
+                _ => json!({}),
+            };
             websocket
                 .send(Message::Text(
-                    json!({
-                        "id": id,
-                        "result": facebook_note_detail_cdp(
-                            "https://www.facebook.com/groups/100/posts/999",
-                            "stale post",
-                        )
-                    })
-                    .to_string()
-                    .into(),
+                    json!({"id":id,"result":result}).to_string().into(),
                 ))
                 .await
                 .expect("CDP mismatch response");
-            samples += 1;
         }
         samples
     });
