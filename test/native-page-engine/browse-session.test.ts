@@ -331,7 +331,13 @@ test('Native Facebook projects each canonical single-card Reel once and suppress
       ok: true,
       effectPhase: 'confirmed',
       reasonCode: 'confirmed',
-      output: { kind: 'page_cards', value: { cards: [reel], listKind: 'reels' } },
+      output: {
+        kind: 'page_cards',
+        value: {
+          cards: [{ ...reel, noteId: 'https://www.facebook.com/reel/333/' }],
+          listKind: 'reels',
+        },
+      },
     },
     {
       ok: true,
@@ -387,6 +393,18 @@ test('Native Facebook does not project malformed or multi-card Reels batches', a
       cards: [reel('https://www.facebook.com/profile.php?id=3')],
       listKind: 'reels' as const,
     },
+    {
+      cards: [reel('https://evil.example/reel/3')],
+      listKind: 'reels' as const,
+    },
+    {
+      cards: [reel('https://www.facebook.com/reel/hashtag')],
+      listKind: 'reels' as const,
+    },
+    {
+      cards: [reel('https://www.facebook.com/Example/posts/3')],
+      listKind: 'reels' as const,
+    },
   ];
   const h = harness(async () => ({
     ok: true,
@@ -396,9 +414,43 @@ test('Native Facebook does not project malformed or multi-card Reels batches', a
   }), { platform: 'facebook' });
 
   await h.session.start();
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  while (batches.length > 0) {
+    await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  }
 
   assert.equal(uiEvents(h.logs).some((event) => event.type === 'reel_view'), false);
+});
+
+test('Native Facebook keeps Reel projection witnesses across task resume and resets them for a new session', async () => {
+  const reel = {
+    index: 0,
+    title: 'session reel',
+    author: 'Bao',
+    likeCount: 0,
+    collectCount: 0,
+    noteId: 'https://www.facebook.com/reel/444',
+    isVideo: true,
+  };
+  const execution: NativePageCommandExecution = {
+    ok: true,
+    effectPhase: 'confirmed',
+    reasonCode: 'confirmed',
+    output: { kind: 'page_cards', value: { cards: [reel], listKind: 'reels' } },
+  };
+  const first = harness(async () => execution, { platform: 'facebook' });
+
+  await first.session.start();
+  await first.session.quiesceForTask();
+  await first.session.resumeAfterTask();
+
+  assert.equal(uiEvents(first.logs).filter((event) => event.type === 'reel_view').length, 1);
+  first.session.close();
+
+  const second = harness(async () => execution, { platform: 'facebook' });
+  await second.session.start();
+
+  assert.equal(uiEvents(second.logs).filter((event) => event.type === 'reel_view').length, 1);
+  second.session.close();
 });
 
 test('Native Facebook projects a unique canonical Feed video once even beside non-video cards', async () => {
@@ -440,7 +492,17 @@ test('Native Facebook projects a unique canonical Feed video once even beside no
       ok: true,
       effectPhase: 'confirmed',
       reasonCode: 'confirmed',
-      output: { kind: 'page_cards', value: batch },
+      output: {
+        kind: 'page_cards',
+        value: {
+          ...batch,
+          cards: batch.cards.map((card) => (
+            card === video
+              ? { ...card, noteId: 'https://www.facebook.com/BHD/videos/1547652190157533' }
+              : card
+          )),
+        },
+      },
     },
     {
       ok: true,

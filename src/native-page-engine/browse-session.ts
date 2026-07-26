@@ -18,7 +18,11 @@ import {
   facebookReadUiText,
   facebookReelViewUiText,
 } from '../facebook/companion-ui.js';
-import { canonicalFacebookFeedVideoPostId, canonicalPostId } from '../facebook/post-identity.js';
+import {
+  canonicalFacebookFeedVideoPostId,
+  canonicalFacebookReelPostId,
+  canonicalPostId,
+} from '../facebook/post-identity.js';
 import { nativeActionNameForCommand, nativeCommandForEnvelope } from './command-mapper.js';
 import type { NativePageCommandExecution, NativePagePlatform } from './client.js';
 import { NativePageRuntime } from './runtime.js';
@@ -563,7 +567,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private projectFacebookCardActivity(payload: PageCardsPayload): void {
     if (payload.listKind === 'reels' && payload.cards.length === 1) {
       const card = payload.cards[0];
-      const postId = canonicalPostId(card.noteId);
+      const postId = canonicalFacebookReelPostId(card.noteId);
       if (postId && !this.facebookReelViewActivityPostIds.has(postId)) {
         this.facebookReelViewActivityPostIds.add(postId);
         this.emitUi({

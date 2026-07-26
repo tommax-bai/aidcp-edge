@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { canonicalPostId, FB_TARGET_HELPERS_JS, POST_IDENTITY_JS } from '../../src/facebook/post-identity.js';
+import {
+  canonicalFacebookReelPostId,
+  canonicalPostId,
+  FB_TARGET_HELPERS_JS,
+  POST_IDENTITY_JS,
+} from '../../src/facebook/post-identity.js';
 
 /**
  * 规范帖子身份 `fb:<postId>`（change facebook-note-scoped-targeting）。
@@ -46,6 +51,21 @@ test('canonicalPostId: pfbid / reel / watch / videos 也可派生（视频帖同
   // 同一条视频帖的两种形态收敛到同一身份（身份不含 container，就没有「主页 slug vs 主页数字 id」这种同帖两身份）。
   assert.equal(canonicalPostId('https://www.facebook.com/Meta/videos/999/'), 'fb:999');
   assert.equal(canonicalPostId('https://www.facebook.com/watch/?v=999'), 'fb:999');
+});
+
+test('canonicalFacebookReelPostId: 只接受精确 Facebook Reel 身份', () => {
+  assert.equal(canonicalFacebookReelPostId('https://www.facebook.com/reel/1234567890/'), 'fb:1234567890');
+  for (const uncanonical of [
+    'https://evil.example/reel/1234567890',
+    'https://www.facebook.com/reel/hashtag',
+    'https://www.facebook.com/reel/audio',
+    'https://www.facebook.com/reel/music',
+    'https://www.facebook.com/reel/topics',
+    'https://www.facebook.com/reel/1234567890?ref=share',
+    'https://www.facebook.com/Example/posts/1234567890',
+  ]) {
+    assert.equal(canonicalFacebookReelPostId(uncanonical), null, uncanonical);
+  }
 });
 
 test('canonicalPostId: 坏 href / 非帖链接 → null（绝不返回空串）', () => {

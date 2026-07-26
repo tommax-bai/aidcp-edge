@@ -99,6 +99,28 @@ export function canonicalPostId(href: string | null | undefined): string | null 
   return 'fb:' + postId;
 }
 
+/** Only accepts the canonical identity emitted by the dedicated Reels reader. */
+export function canonicalFacebookReelPostId(noteId: string | undefined): string | null {
+  if (!noteId) return null;
+  try {
+    const url = new URL(noteId);
+    const match = url.pathname.match(/^\/reel\/([^/?#]+)\/?$/i);
+    if (
+      url.protocol !== 'https:'
+      || url.hostname.toLowerCase() !== 'www.facebook.com'
+      || url.search
+      || url.hash
+      || !match
+      || /^(?:hashtag|audio|music|topics?)$/i.test(match[1])
+    ) {
+      return null;
+    }
+    return canonicalPostId(noteId);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * A Feed-video presentation needs a stricter URL boundary than general post targeting.
  * Keep Reels and non-canonical query shapes out even when they can yield a post id.
