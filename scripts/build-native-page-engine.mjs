@@ -45,6 +45,9 @@ const forbiddenCleartextMarkers = [
   '扫码登录',
   'Input.dispatch',
   'Page.navigate',
+  'data-aidcp-native-feed-like',
+  'data-aidcp-native-reel-like-target',
+  'targetGroupScope',
 ];
 
 function digest(contents) {

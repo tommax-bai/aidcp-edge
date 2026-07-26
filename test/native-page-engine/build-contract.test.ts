@@ -41,6 +41,13 @@ test('native staging is explicit, locked, outside ASAR, and unsigned', async () 
   assert.match(script, /process\.platform/);
   assert.match(script, /targetArch/);
   assert.match(script, /forbiddenCleartextMarkers/);
+  for (const marker of [
+    'data-aidcp-native-feed-like',
+    'data-aidcp-native-reel-like-target',
+    'targetGroupScope',
+  ]) {
+    assert.match(script, new RegExp(marker));
+  }
   assert.match(script, /rustup', \['which', 'cargo'\]/);
   assert.match(script, /cwd: crateDir/);
   assert.match(script, /unsigned target artifact verified with encoded page rules/);

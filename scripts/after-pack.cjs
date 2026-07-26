@@ -78,6 +78,16 @@ function verifyPackagedDependencyClosure(asarPath, packageLockPath) {
 function verifyPackagedXiaohongshuLeakage(asarPath) {
   const entries = asar.listPackage(asarPath);
   const forbiddenEntries = [
+    '/native/page-engine/src/facebook-router/00-shared.js',
+    '/native/page-engine/src/facebook-router/05-session.js',
+    '/native/page-engine/src/facebook-router/10-feed-like.js',
+    '/native/page-engine/src/facebook-router/20-feed.js',
+    '/native/page-engine/src/facebook-router/30-reels.js',
+    '/native/page-engine/src/facebook-router/40-group-join.js',
+    '/native/page-engine/src/facebook-router/50-comment.js',
+    '/native/page-engine/src/facebook-router/60-publish.js',
+    '/native/page-engine/src/facebook-router/70-identity.js',
+    '/native/page-engine/src/facebook-router/90-dispatch.js',
     '/dist/browse/browse-session.js',
     '/dist/browse/feed-scroller.js',
     '/dist/browse/modal-controller.js',
@@ -99,6 +109,10 @@ function verifyPackagedXiaohongshuLeakage(asarPath) {
     'note.publish_set_cover',
     'creator-preview-image-0',
     'input.upload-input[type=file]',
+    'data-aidcp-native-feed-like',
+    'data-aidcp-native-reel-like-target',
+    'targetGroupScope',
+    'composer_editor_not_found',
   ];
   for (const entry of entries.filter((value) => value.startsWith('/dist/') && value.endsWith('.js'))) {
     const source = asar.extractFile(asarPath, entry.slice(1)).toString('utf8');

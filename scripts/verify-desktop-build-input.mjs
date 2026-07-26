@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,12 @@ export function verifyDesktopBuildInput(projectRoot) {
       `Refusing desktop build: unexpected ${kind} ${nestedNodeModules} resolves to ${target}. ` +
       'Recreate this worktree dependency directory with npm ci before packaging.',
     );
+  }
+
+  const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  const packagedInputs = JSON.stringify(packageJson.build?.files ?? []);
+  if (/native[\\/]page-engine|facebook-router/i.test(packagedInputs)) {
+    throw new Error('Refusing desktop build: Facebook router source is included in ASAR inputs.');
   }
 
   const requireFromProject = createRequire(join(root, 'package.json'));

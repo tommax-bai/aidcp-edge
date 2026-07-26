@@ -45,6 +45,16 @@ for (const file of allFiles) {
 }
 
 const forbiddenPaths = [
+  'facebook-router/00-shared.js',
+  'facebook-router/05-session.js',
+  'facebook-router/10-feed-like.js',
+  'facebook-router/20-feed.js',
+  'facebook-router/30-reels.js',
+  'facebook-router/40-group-join.js',
+  'facebook-router/50-comment.js',
+  'facebook-router/60-publish.js',
+  'facebook-router/70-identity.js',
+  'facebook-router/90-dispatch.js',
   'browse/browse-session.js',
   'browse/feed-scroller.js',
   'browse/modal-controller.js',
@@ -96,6 +106,10 @@ const forbiddenMarkers = [
   'facebook identity candidates conflict',
   'facebook-comment-lifecycle-verify',
   'target_not_facebook',
+  'data-aidcp-native-feed-like',
+  'data-aidcp-native-reel-like-target',
+  'targetGroupScope',
+  'composer_editor_not_found',
 ];
 for (const file of reachable) {
   const source = readFileSync(file, 'utf8');
