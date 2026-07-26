@@ -927,6 +927,43 @@ test('下发证据 stale 时显示暂不可用，不推断待确认、等待发�
   );
 });
 
+test('durable dispatching 优先于矛盾的 evidence_unavailable 阶段', async () => {
+  const durableStages = queueJourney().stages.map((stage) => (
+    stage.key === 'approval'
+      ? { ...stage, state: 'completed', summary: '发布确认：已确认' }
+      : stage.key === 'dispatch'
+        ? { ...stage, state: 'evidence_unavailable', summary: '下发状态暂不可用' }
+        : stage
+  ));
+  const { window, controller } = boot({
+    publishQueueGet: async () => queueResponse({
+      inFlightEvidence: { state: 'invalid', asOf: Date.now() - 60_000 },
+      summary: { inProgress: 1, waitingForYou: 0, cancellable: 0 },
+      tasks: [],
+      active: [queueJourney({
+        status: 'dispatching',
+        statusLabel: '正在发布',
+        dispatchState: 'dispatching',
+        stages: durableStages,
+      })],
+      recent: [],
+    }),
+    publishQueueCancel: async () => ({ ok: false, error: 'not_used' }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  await flush();
+  controller.openPublishQueue();
+  await flush();
+
+  const snapshot = controller.publishQueueSnapshot().data;
+  const dispatch = snapshot.active[0].stages.find((stage: { key: string }) => stage.key === 'dispatch');
+  assert.equal(snapshot.active[0].dispatchEvidenceUnavailable, false);
+  assert.equal(dispatch.state, 'running');
+  assert.equal(dispatch.summary, '发布结果：正在发布');
+  assert.match($(window, '#publish-queue-content').textContent ?? '', /正在发布/);
+  assert.doesNotMatch($(window, '#publish-queue-content').textContent ?? '', /下发状态暂不可用/);
+});
+
 test('发布队列切换账号后丢弃旧环境迟到响应', async () => {
   let resolveA: ((value: unknown) => void) | undefined;
   const pendingA = new Promise((resolve) => { resolveA = resolve; });

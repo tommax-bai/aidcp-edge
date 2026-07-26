@@ -152,16 +152,43 @@
       const explicitUnavailable = stages.some(
         (stage) => stage.key === 'dispatch' && stage.state === 'evidence_unavailable',
       );
-      const dispatchEvidenceUnavailable = explicitUnavailable
-        || (inFlightEvidence && inFlightEvidence.state !== 'fresh' && !dispatchState
-          && (journey.status === 'waiting_approval' || journey.status === 'dispatching'));
+      const dispatchEvidenceUnavailable = !dispatchState && (
+        explicitUnavailable
+        || (inFlightEvidence && inFlightEvidence.state !== 'fresh'
+          && (journey.status === 'waiting_approval' || journey.status === 'dispatching'))
+      );
+      const durableStages = dispatchState
+        ? stages.map((stage) => {
+          if (stage.state !== 'evidence_unavailable') return stage;
+          if (stage.key === 'approval') {
+            return { ...stage, state: 'completed', summary: '发布确认：已确认' };
+          }
+          if (stage.key !== 'dispatch') return stage;
+          if (dispatchState === 'pending_dispatch') {
+            return { ...stage, state: 'pending', summary: '发布结果：等待发布' };
+          }
+          if (dispatchState === 'dispatching') {
+            return { ...stage, state: 'running', summary: '发布结果：正在发布' };
+          }
+          if (dispatchState === 'void') {
+            return { ...stage, state: 'skipped', summary: '发布结果：无需发布' };
+          }
+          if (journey.status === 'published') {
+            return { ...stage, state: 'completed', summary: '发布结果：已发布' };
+          }
+          if (journey.status === 'failed') {
+            return { ...stage, state: 'failed', summary: '发布结果：未完成' };
+          }
+          return { ...stage, state: 'partial', summary: '发布结果：平台已受理，等待最终结果' };
+        })
+        : stages;
       const projectedStages = dispatchEvidenceUnavailable
-        ? stages.map((stage) => (
+        ? durableStages.map((stage) => (
           stage.key === 'dispatch' || (stage.key === 'approval' && stage.state === 'waiting_human')
             ? { ...stage, state: 'evidence_unavailable', summary: '下发状态暂不可用' }
             : stage
         ))
-        : stages;
+        : durableStages;
       return {
         id: journey.id,
         recordId: Number.isInteger(journey.recordId) ? journey.recordId : null,
