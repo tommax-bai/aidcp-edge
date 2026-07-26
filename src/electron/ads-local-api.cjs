@@ -279,9 +279,10 @@ function createAdsLocalApi(deps = {}) {
   }
 
   /**
-   * 精确读取一个 profile 的代理配置，供 Electron 主进程在浏览器启动前做一次性预检。
+   * 精确读取一个 profile 的代理配置，供 Electron 主进程首次引导原环境代理权威与编辑回填。
    *
-   * 与 listProfiles 的边界不同：这里会把 proxy_password 返回给主进程调用方，但只挑代理所需字段，
+   * 与 listProfiles 的边界不同：这里会把 proxy_password 返回给主进程调用方，但只挑代理所需字段；
+   * AIDCP 建立加密权威后，预检与每次启动不再把可能暂留 GOST loopback 的 live profile 当作原代理。
    * 不返回 profile 其余原始数据。该方法只允许由主进程内部能力或具名、客户范围校验后的 IPC 调用；
    * 不得把原始本地 API 能力暴露给 preload/renderer，现有 normalizeProfile 仍剥离密码。
    */

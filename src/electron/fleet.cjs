@@ -157,7 +157,8 @@ const ENV_KEYS_MUST_DROP = [
   'AIDCP_CDP_PORT', // AdsPower 每分身动态返回调试端口
   'AIDCP_CHROME_PROFILE', // AdsPower 自管 user-data-dir
   'AIDCP_CDP_ALLOW_REUSE',
-  'AIDCP_ADS_PROXY_OVERRIDE', // 只允许主进程按当前环境的受管回环代理逐次注入
+  'AIDCP_ADS_PROXY_OVERRIDE', // 旧版启动参数覆盖已退役；仍剔除外部残留，避免重新形成双代理权威
+  'AIDCP_ADS_PROXY_AUTHORITY_FD', // 只允许主进程为当前子进程注入匿名 pipe fd
   'AIDCP_START_BROWSER_ABSENT', // 仅主进程在可信 control bootstrap 成功后逐环境注入
   'AIDCP_CONTROL_ACCOUNT_ID', // 不得从外壳继承，避免跨环境串用陈旧绑定
   'AIDCP_FB_BROWSE_AUTO',

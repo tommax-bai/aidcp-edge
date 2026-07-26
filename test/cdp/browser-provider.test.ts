@@ -7,8 +7,8 @@ import {
   SelfChromeProvider,
   AdsPowerProvider,
   BrowserProfileInUseError,
-  AdsPowerProxyOverrideRestartRequiredError,
-  normalizeAdsPowerProxyOverride,
+  AdsPowerProxyAuthorityRestartRequiredError,
+  readAdsPowerProxyAuthority,
   selectBrowserProvider,
 } from '../../src/cdp/index.js';
 import type { ChromeInstance } from '../../src/cdp/index.js';
@@ -32,6 +32,68 @@ interface FetchCall {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
+}
+
+const originalProxy = {
+  proxy_soft: 'other' as const,
+  proxy_type: 'http' as const,
+  proxy_host: 'proxy.example',
+  proxy_port: '51072',
+  proxy_user: 'proxy-user',
+  proxy_password: 'proxy-password',
+};
+
+const doubleHopAuthority = {
+  mode: 'system_then_environment' as const,
+  originalProxy,
+  targetProxy: {
+    proxy_soft: 'other' as const,
+    proxy_type: 'http' as const,
+    proxy_host: '127.0.0.1',
+    proxy_port: '18080',
+  },
+};
+
+function managedProxyFetch({
+  calls = [],
+  initialProxy = originalProxy,
+  readbackTransform = (proxy: typeof originalProxy | typeof doubleHopAuthority.targetProxy) => proxy,
+}: {
+  calls?: FetchCall[];
+  initialProxy?: typeof originalProxy | typeof doubleHopAuthority.targetProxy;
+  readbackTransform?: (proxy: typeof originalProxy | typeof doubleHopAuthority.targetProxy) => Record<string, unknown>;
+} = {}): typeof fetch {
+  let currentProxy: typeof originalProxy | typeof doubleHopAuthority.targetProxy = initialProxy;
+  return (async (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => {
+    const call = { url: String(url), method: init?.method, headers: init?.headers, body: init?.body };
+    calls.push(call);
+    if (call.url.includes('/api/v2/browser-profile/active')) {
+      return { ok: true, json: async () => ({ code: 0, data: { status: 'Inactive' } }) } as unknown;
+    }
+    if (call.url.includes('/api/v1/user/update')) {
+      currentProxy = JSON.parse(call.body || '{}').user_proxy_config;
+      return { ok: true, json: async () => ({ code: 0, data: {} }) } as unknown;
+    }
+    if (call.url.includes('/api/v1/user/list')) {
+      return {
+        ok: true,
+        json: async () => ({
+          code: 0,
+          data: { list: [{ user_id: 'k1', user_proxy_config: readbackTransform(currentProxy) }] },
+        }),
+      } as unknown;
+    }
+    if (call.url.includes('/api/v2/browser-profile/start')) {
+      return { ok: true, json: async () => ({ code: 0, data: { debug_port: 61332 } }) } as unknown;
+    }
+    if (call.url.includes('/api/v2/browser-profile/stop')) {
+      return { ok: true, json: async () => ({ code: 0 }) } as unknown;
+    }
+    if (call.url.includes('/json/version')) {
+      return { ok: true, json: async () => ({}) } as unknown;
+    }
+    throw new Error(`unrouted ${call.url}`);
+  }) as unknown as typeof fetch;
 }
 
 /** 路由式 fetch 桩：按 url 子串返回 {ok,json}；记录每次调用；未显式路由的 V2 active 缺省 Inactive。 */
@@ -106,6 +168,8 @@ test('AdsPowerProvider.launch 成功 → 端点带 debug_port、实例非 reused
   assert.equal(activeCall.method, 'GET');
   assert.equal(new URL(activeCall.url).searchParams.get('profile_id'), 'k1');
   assert.ok(calls.every((call) => !call.url.includes('/api/v1/browser/')));
+  assert.equal(calls.some((call) => call.url.includes('/api/v1/user/update')), false);
+  assert.equal(calls.some((call) => call.url.includes('/api/v1/user/list')), false);
 });
 
 test('AdsPowerProvider.launch 支持平台 driver 注入起始页', async () => {
@@ -129,28 +193,31 @@ test('AdsPowerProvider.launch 支持平台 driver 注入起始页', async () => 
   assert.ok(payload.launch_args?.includes('--start-maximized'), '裸启动无暂存坐标时保留历史窄窗兜底');
 });
 
-test('AdsPowerProvider.launch 仅为新代际加入受管 loopback proxy override', async () => {
+test('AdsPowerProvider.launch 双跳先更新并读回 profile，start 不再含 --proxy-server', async () => {
   const calls: FetchCall[] = [];
-  const fetchImpl = routedFetch(
-    [
-      ['/api/v2/browser-profile/start', () => ({ code: 0, data: { debug_port: 61332 } })],
-      ['/json/version', () => ({})],
-    ],
-    calls,
-  );
+  const fetchImpl = managedProxyFetch({ calls });
   const provider = new AdsPowerProvider(
     {
       apiBase: 'http://x:50325',
       userId: 'k1',
-      proxyServer: 'http://127.0.0.1:18080',
+      proxyAuthority: doubleHopAuthority,
     },
     { fetchImpl, ...noopDeps },
   );
   await provider.launch({ host: '127.0.0.1', port: 9222 });
+  const updateCall = calls.find((call) => call.url.includes('/api/v1/user/update'));
+  assert.ok(updateCall);
+  assert.deepEqual(JSON.parse(updateCall.body || '{}'), {
+    user_id: 'k1',
+    user_proxy_config: doubleHopAuthority.targetProxy,
+  });
+  const readbackIndex = calls.findIndex((call) => call.url.includes('/api/v1/user/list'));
+  const startIndex = calls.findIndex((call) => call.url.includes('browser-profile/start'));
+  assert.ok(readbackIndex >= 0 && readbackIndex < startIndex);
   const startCall = calls.find((call) => call.url.includes('browser-profile/start'));
   const payload = JSON.parse(startCall?.body || '{}') as { launch_args?: string[] };
-  assert.ok(payload.launch_args?.includes('--proxy-server=http://127.0.0.1:18080'));
-  assert.equal(JSON.stringify(payload).includes('proxy.example'), false);
+  assert.equal(payload.launch_args?.some((arg) => arg.startsWith('--proxy-server=')), false);
+  assert.equal(JSON.stringify(payload).includes('proxy-password'), false);
 });
 
 test('AdsPowerProvider.launch：V2 Active 返回有效端点时直接接管，不重复 start', async () => {
@@ -168,7 +235,7 @@ test('AdsPowerProvider.launch：V2 Active 返回有效端点时直接接管，�
   assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
 });
 
-test('AdsPowerProvider.launch：要求 proxy override 时拒绝接管既有 Active 浏览器', async () => {
+test('AdsPowerProvider.launch：已配置代理权威时拒绝接管既有 Active 浏览器', async () => {
   const calls: FetchCall[] = [];
   const fetchImpl = routedFetch([
     ['/api/v2/browser-profile/active', () => ({ code: 0, data: { status: 'Active', debug_port: '59167' } })],
@@ -177,39 +244,82 @@ test('AdsPowerProvider.launch：要求 proxy override 时拒绝接管既有 Acti
     {
       apiBase: 'http://x:50325',
       userId: 'k1',
-      proxyServer: 'http://127.0.0.1:18080',
+      proxyAuthority: doubleHopAuthority,
     },
     { fetchImpl, ...noopDeps },
   );
   await assert.rejects(
     provider.launch({ host: '127.0.0.1', port: 9222 }),
-    (error) => error instanceof AdsPowerProxyOverrideRestartRequiredError
-      && error.code === 'adspower_proxy_override_restart_required',
+    (error) => error instanceof AdsPowerProxyAuthorityRestartRequiredError
+      && error.code === 'adspower_proxy_authority_restart_required',
   );
   assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
 });
 
-test('proxy override 只接受无凭据 HTTP loopback，direct 模式保持空值', () => {
-  assert.equal(normalizeAdsPowerProxyOverride(undefined), undefined);
-  assert.equal(normalizeAdsPowerProxyOverride(' http://127.0.0.1:18080 '), 'http://127.0.0.1:18080');
-  for (const invalid of [
-    'https://127.0.0.1:18080',
-    'http://localhost:18080',
-    'http://10.0.0.1:18080',
-    'http://user:pass@127.0.0.1:18080',
-    'http://127.0.0.1:0',
-    'not-a-url',
-  ]) {
-    assert.throws(() => normalizeAdsPowerProxyOverride(invalid), /AIDCP_ADS_PROXY_OVERRIDE/);
-  }
-  const selected = selectBrowserProvider({
-    env: {
-      AIDCP_BROWSER_PROVIDER: 'adspower',
-      AIDCP_ADS_USER_ID: 'k1',
-      AIDCP_ADS_PROXY_OVERRIDE: 'http://127.0.0.1:18080',
+test('代理权威从匿名 fd 读取，direct 目标严格等于原环境代理且不读取旧 override env', () => {
+  const readFile = (() => JSON.stringify({
+    version: 1,
+    mode: 'direct',
+    originalProxy,
+  })) as any;
+  const authority = readAdsPowerProxyAuthority(
+    {
+      AIDCP_ADS_PROXY_AUTHORITY_FD: '4',
+      AIDCP_ADS_PROXY_OVERRIDE: 'http://127.0.0.1:9999',
     },
-  }) as AdsPowerProvider;
-  assert.equal((selected as any).cfg.proxyServer, 'http://127.0.0.1:18080');
+    readFile,
+  );
+  assert.deepEqual(authority, { mode: 'direct', originalProxy, targetProxy: originalProxy });
+  assert.equal(readAdsPowerProxyAuthority({}), undefined);
+  assert.throws(
+    () => readAdsPowerProxyAuthority(
+      { AIDCP_ADS_PROXY_AUTHORITY_FD: '4' },
+      (() => JSON.stringify({ version: 1, mode: 'system_then_environment', originalProxy, relayPort: 0 })) as any,
+    ),
+    /GOST loopback/,
+  );
+});
+
+test('direct 模式每次 launch 都重写并读回原环境代理，覆盖上次残留 loopback', async () => {
+  const calls: FetchCall[] = [];
+  const directAuthority = {
+    mode: 'direct' as const,
+    originalProxy,
+    targetProxy: originalProxy,
+  };
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1', proxyAuthority: directAuthority },
+    {
+      fetchImpl: managedProxyFetch({ calls, initialProxy: doubleHopAuthority.targetProxy }),
+      ...noopDeps,
+    },
+  );
+  await provider.launch({ host: '127.0.0.1', port: 9222 });
+  await provider.launch({ host: '127.0.0.1', port: 9222 });
+  const updates = calls
+    .filter((call) => call.url.includes('/api/v1/user/update'))
+    .map((call) => JSON.parse(call.body || '{}').user_proxy_config);
+  assert.deepEqual(updates, [originalProxy, originalProxy]);
+  assert.equal(calls.filter((call) => call.url.includes('/api/v2/browser-profile/start')).length, 2);
+});
+
+test('profile 代理读回不一致时在 browser-profile/start 前 fail closed', async () => {
+  const calls: FetchCall[] = [];
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1', proxyAuthority: doubleHopAuthority },
+    {
+      fetchImpl: managedProxyFetch({
+        calls,
+        readbackTransform: (proxy) => ({ ...proxy, proxy_port: '18081' }),
+      }),
+      ...noopDeps,
+    },
+  );
+  await assert.rejects(
+    provider.launch({ host: '127.0.0.1', port: 9222 }),
+    /读回与目标不一致/,
+  );
+  assert.equal(calls.some((call) => call.url.includes('/api/v2/browser-profile/start')), false);
 });
 
 test('AdsPowerProvider.launch：V2 Inactive 但 profile marker 与 /json/version 完全匹配时接管失联浏览器', async (t) => {
@@ -378,6 +488,60 @@ test('killAndConfirmDead：软停止后调试端点变暗 → 确认已关 true'
   assert.ok(stopCall);
   assert.equal(stopCall.method, 'POST');
   assert.deepEqual(JSON.parse(stopCall.body || '{}'), { profile_id: 'k1' });
+});
+
+test('killAndConfirmDead：确认关闭后恢复并读回原环境代理', async () => {
+  const calls: FetchCall[] = [];
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1', proxyAuthority: doubleHopAuthority },
+    {
+      fetchImpl: managedProxyFetch({ calls }),
+      ...noopDeps,
+      ...closeBounds,
+      probeCdpImpl: async () => false,
+      osKillEnabled: false,
+    },
+  );
+  const { instance } = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(await instance.killAndConfirmDead(), true);
+  const updates = calls
+    .filter((call) => call.url.includes('/api/v1/user/update'))
+    .map((call) => JSON.parse(call.body || '{}').user_proxy_config);
+  assert.deepEqual(updates, [doubleHopAuthority.targetProxy, originalProxy]);
+});
+
+test('killAndConfirmDead：恢复失败不推翻已经确认的关闭事实，日志不含凭据', async () => {
+  const calls: FetchCall[] = [];
+  const logs: string[] = [];
+  let updateCount = 0;
+  const baseFetch = managedProxyFetch({ calls });
+  const fetchImpl = (async (url: string, init?: RequestInit) => {
+    if (String(url).includes('/api/v1/user/update') && ++updateCount === 2) {
+      calls.push({
+        url: String(url),
+        method: init?.method,
+        headers: init?.headers as Record<string, string> | undefined,
+        body: init?.body as string | undefined,
+      });
+      return { ok: true, json: async () => ({ code: -1, msg: 'echo proxy-password' }) } as unknown;
+    }
+    return baseFetch(url, init);
+  }) as typeof fetch;
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://x:50325', userId: 'k1', proxyAuthority: doubleHopAuthority },
+    {
+      fetchImpl,
+      ...noopDeps,
+      logImpl: (message) => logs.push(message),
+      ...closeBounds,
+      probeCdpImpl: async () => false,
+      osKillEnabled: false,
+    },
+  );
+  const { instance } = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(await instance.killAndConfirmDead(), true);
+  assert.match(logs.join('\n'), /恢复未确认/);
+  assert.doesNotMatch(logs.join('\n'), /proxy-password|proxy-user/);
 });
 
 test('killAndConfirmDead：软停止未使端点变暗 + OS 级强杀成功 → 升级后 true', async () => {

@@ -23,16 +23,27 @@ test('double-hop setting is default-off, normalized exactly and exposed as safe 
   assert.match(renderer, /status\.proxyMode === 'system_then_environment'/);
 });
 
-test('preflight and child spawn consume only the same prepared loopback relay', () => {
+test('preflight and child spawn consume the same prepared loopback through a private authority pipe', () => {
   assert.match(main, /readProxy:\s*readProxyForPreflight/);
   assert.match(main, /const endpoint = await proxyChainManager\.ensure\(/);
   assert.match(main, /const endpoint = proxyChainManager\.endpoint\(handle\.profileId\)/);
   assert.match(
     main,
-    /if \(handle\.status\.proxyMode === 'system_then_environment'\s*&& handle\.status\.proxyChainApplicable === true\s*&& !cleanupBootstrap\)/,
+    /if \(handle\.proxyAuthority && handle\.status\.proxyMode === 'system_then_environment'\s*&& handle\.status\.proxyChainApplicable === true\s*&& !cleanupBootstrap\)/,
   );
-  assert.match(main, /spawnEnv\.AIDCP_ADS_PROXY_OVERRIDE = `http:\/\/127\.0\.0\.1:\$\{endpoint\.proxyPort\}`/);
+  assert.match(main, /mode: 'system_then_environment'[\s\S]{0,160}?originalProxy: handle\.proxyAuthority[\s\S]{0,100}?relayPort: endpoint\.proxyPort/);
+  assert.match(main, /spawnEnv\.AIDCP_ADS_PROXY_AUTHORITY_FD = '4'/);
+  assert.match(main, /authorityPipe\.end\(JSON\.stringify\(proxyAuthorityPayload\)\)/);
+  assert.doesNotMatch(main, /spawnEnv\.AIDCP_ADS_PROXY_OVERRIDE/);
   assert.match(main, /if \(!endpoint\) \{[\s\S]{0,180}?proxy_chain_unavailable[\s\S]{0,180}?return;/);
+});
+
+test('original proxy authority is encrypted and every configured launch is delegated to provider synchronization', () => {
+  assert.match(main, /createAdsProxyAuthorityStore\(/);
+  assert.match(main, /async function readAuthoritativeProfileProxy\(/);
+  assert.match(main, /persistProxyAuthorityInput\(result\.userId, opts && opts\.proxy\)/);
+  assert.match(main, /proxyAuthorityStore\.save\(userId, norm\.proxyConfig\)/);
+  assert.match(main, /proxyAuthorityStore\.remove\(userId\)/);
 });
 
 test('profiles without an environment proxy stay outside double-hop applicability', () => {

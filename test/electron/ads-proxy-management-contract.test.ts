@@ -75,6 +75,52 @@ test('单项与批量代理写入都重新拉取客户可见范围并拒绝已�
   }
 });
 
+test('创建仍把用户代理传给 AdsPower，成功后才提交加密原代理权威', () => {
+  const block = handlerBlock(main, 'ads:createEnv');
+  assert.match(block, /proxy: opts && opts\.proxy,\s*\/\/ 原始表单输入/);
+  const singleCreate = block.indexOf('createEnvironmentWithGroupRecovery({');
+  const singleAuthority = block.indexOf('persistProxyAuthorityInput(result.userId, opts && opts.proxy)');
+  assert.ok(singleCreate >= 0 && singleCreate < singleAuthority);
+  assert.match(block, /proxy:\s*item\.proxy/);
+  assert.match(block, /persistProxyAuthorityInput\(result\.userId, item\.proxy\)/);
+  assert.doesNotMatch(
+    block.slice(singleCreate, singleAuthority),
+    /relayPort|127\.0\.0\.1|proxyAuthorityPayload/,
+    '创建请求阶段不得把用户代理替换成 GOST',
+  );
+});
+
+test('代理编辑在 AdsPower 成功后更新安全权威，无代理删除权威且不留下陈旧值', () => {
+  const single = handlerBlock(main, 'ads:updateEnvProxy');
+  assert.ok(single.indexOf('updateProfileProxy({') < single.indexOf('proxyAuthorityStore.save(userId, norm.proxyConfig)'));
+  assert.match(single, /norm\.noProxy\s*\?\s*proxyAuthorityStore\.remove\(userId\)/);
+  assert.match(single, /proxyAuthorityStore\.remove\(userId\);\s*invalidateProxyEvidence/);
+
+  const batch = handlerBlock(main, 'ads:updateEnvProxies');
+  assert.match(batch, /updateProfileProxy\(\{ userId: item\.userId, proxyConfig: norm\.proxyConfig \}/);
+  assert.match(batch, /norm\.noProxy\s*\?\s*proxyAuthorityStore\.remove\(item\.userId\)/);
+  assert.match(batch, /proxyAuthorityStore\.save\(item\.userId, norm\.proxyConfig\)/);
+});
+
+test('精确代理编辑读取 AIDCP 原代理权威，而非可能暂留 GOST 的 live profile', () => {
+  const block = handlerBlock(main, 'ads:getEnvProxy');
+  assert.match(block, /return readAuthoritativeProfileProxy\(userId\)/);
+  assert.doesNotMatch(block, /getProfileProxyConfig/);
+});
+
+test('环境列表以原代理权威覆盖 live GOST 摘要，但不批量投影认证字段', () => {
+  const list = handlerBlock(main, 'ads:listProfiles');
+  assert.match(list, /result\.profiles = result\.profiles\.map\(projectAuthoritativeProxySummary\)/);
+  const start = main.indexOf('function projectAuthoritativeProxySummary');
+  const end = main.indexOf('async function ensureProfileProxyAuthority', start);
+  const projection = main.slice(start, end);
+  assert.match(projection, /proxyAuthorityStore\.load\(profile\.userId\)/);
+  assert.match(projection, /proxyType: cfg\.proxy_type/);
+  assert.match(projection, /proxyHost: cfg\.proxy_host/);
+  assert.match(projection, /proxyUser: ''/);
+  assert.doesNotMatch(projection, /proxy_password|proxyPassword/);
+});
+
 test('renderer 以 Set 的勾选顺序提交明确 ID，不从 DOM 或重排后列表重建目标', () => {
   const start = renderer.indexOf('function selectedBatchProxyIds()');
   const end = renderer.indexOf('function setBatchProxyMsg', start);

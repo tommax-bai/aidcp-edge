@@ -21,7 +21,8 @@ const adsRuntime = require('./ads-runtime.cjs');
 const adsRuntimeStage = require('./ads-runtime-stage.cjs');
 const adsFingerprint = require('./ads-fingerprint.cjs');
 const { normalizePlatform } = require('./ads-create-flow.cjs');
-const { normalizeProxyInput, parseProxyLines } = require('./ads-proxy-config.cjs');
+const { normalizeProxyInput, parseProxyLines, canonicalProxyInput } = require('./ads-proxy-config.cjs');
+const { createAdsProxyAuthorityStore } = require('./ads-proxy-authority-store.cjs');
 const {
   createProxyReassignmentPlan,
   proxyReassignmentFailure,
@@ -98,6 +99,10 @@ const {
 // 单例持有本进程内**唯一**串行节流（1req/s）；人工查看只开放 V2 browser-profile/start，不开放 stop / 通用写入口。
 // 与核心子进程内的 AdsPowerProvider 节流各自独立（跨进程无法共享内存队列，见 ads-local-api.cjs 头注）。
 const adsApi = createAdsLocalApi({});
+const proxyAuthorityStore = createAdsProxyAuthorityStore({
+  directory: path.join(app.getPath('userData'), 'proxy-authorities'),
+  safeStorage,
+});
 
 let mainWindow;
 let tray;
@@ -1432,6 +1437,104 @@ function readAdsProfileProxy(profileId) {
   }));
 }
 
+function authorityView(profileId, proxyConfig) {
+  return {
+    ok: true,
+    noProxy: false,
+    profileId: String(profileId),
+    proxyConfig,
+    proxy: canonicalProxyInput(proxyConfig),
+  };
+}
+
+/**
+ * 原环境代理的单一权威：新建/编辑由用户输入写入；存量环境首次使用时从 AdsPower 精确读取并加密引导。
+ * AdsPower profile 随后会在原代理与 GOST loopback 之间切换，不能继续把 live profile 当作第二跳真源。
+ */
+async function readAuthoritativeProfileProxy(profileId) {
+  const stored = proxyAuthorityStore.load(profileId);
+  if (!stored.ok) return { ok: false, blocking: true, reason: 'proxy_authority_unavailable', error: stored.error };
+  if (stored.found) return authorityView(profileId, stored.proxyConfig);
+
+  const live = await readAdsProfileProxy(profileId);
+  if (!live || live.ok !== true) return live;
+  if (live.noProxy) {
+    const removed = proxyAuthorityStore.remove(profileId);
+    if (!removed.ok) {
+      return { ok: false, blocking: true, reason: 'proxy_authority_unavailable', error: removed.error };
+    }
+    return { ...live, proxyConfig: null };
+  }
+  const normalized = normalizeProxyInput(live.proxy);
+  if (!normalized.ok || normalized.noProxy) {
+    return { ok: false, blocking: true, reason: 'profile_config_unavailable', error: '原环境代理配置不合法' };
+  }
+  const saved = proxyAuthorityStore.save(profileId, normalized.proxyConfig);
+  if (!saved.ok) {
+    return { ok: false, blocking: true, reason: 'proxy_authority_unavailable', error: saved.error };
+  }
+  return authorityView(profileId, normalized.proxyConfig);
+}
+
+function persistProxyAuthorityInput(profileId, proxyInput) {
+  const normalized = normalizeProxyInput(proxyInput || {});
+  if (!normalized.ok) return { ok: false, error: `代理输入不合法：${normalized.error}` };
+  if (normalized.noProxy) return proxyAuthorityStore.remove(profileId);
+  return proxyAuthorityStore.save(profileId, normalized.proxyConfig);
+}
+
+function projectAuthoritativeProxySummary(profile) {
+  if (!profile || !profile.userId) return profile;
+  const authority = proxyAuthorityStore.load(profile.userId);
+  if (!authority.ok) {
+    return {
+      ...profile,
+      proxy: '代理配置安全记录不可用',
+      proxyConfig: { noProxy: false, proxyType: '', proxyHost: '', proxyPort: '', proxyUser: '' },
+    };
+  }
+  if (!authority.found) return profile;
+  const cfg = authority.proxyConfig;
+  return {
+    ...profile,
+    proxy: `${cfg.proxy_type} · ${cfg.proxy_host}`,
+    proxyConfig: {
+      noProxy: false,
+      proxyType: cfg.proxy_type,
+      proxyHost: cfg.proxy_host,
+      proxyPort: cfg.proxy_port,
+      // 列表不需要认证身份；完整账号密码只在具名精确编辑入口解密。
+      proxyUser: '',
+    },
+  };
+}
+
+async function ensureProfileProxyAuthority(handle) {
+  if (!handle || handle.kind !== 'adspower' || !handle.profileId) {
+    return { state: 'skipped', reason: 'not_applicable' };
+  }
+  let config;
+  try {
+    config = await readAuthoritativeProfileProxy(handle.profileId);
+  } catch {
+    return { state: 'unavailable', reason: 'proxy_authority_unavailable' };
+  }
+  if (!config || config.ok !== true) {
+    return {
+      state: 'unavailable',
+      reason: String((config && config.reason) || 'proxy_authority_unavailable'),
+    };
+  }
+  if (config.noProxy) {
+    handle.proxyAuthority = null;
+    await skipOfflineSystemProxyChain(handle);
+    return { state: 'skipped', reason: 'no_proxy', config };
+  }
+  handle.proxyAuthority = config.proxyConfig;
+  if (!handle.child) updateStatus(handle, { proxyChainApplicable: true });
+  return { state: 'available', reason: 'proxy_authority_ready', config };
+}
+
 const proxyChainManager = createProxyChainManager({
   orphanRegistry: createProxyChainOrphanRegistry({
     registryPath: path.join(app.getPath('userData'), 'proxy-chain-processes.json'),
@@ -1473,15 +1576,9 @@ async function ensureSystemProxyChain(handle) {
   if (!systemProxyChainEnabled(handle) || !handle || handle.kind !== 'adspower') {
     return { state: 'skipped', reason: 'not_enabled' };
   }
-  let config;
-  try {
-    config = await readAdsProfileProxy(handle.profileId);
-  } catch {
-    return { state: 'unavailable', reason: 'profile_config_unavailable' };
-  }
-  if (!config || config.ok !== true) {
-    return { state: 'unavailable', reason: 'profile_config_unavailable' };
-  }
+  const authority = await ensureProfileProxyAuthority(handle);
+  if (authority.state === 'unavailable') return authority;
+  const config = authority.config;
   if (config.noProxy) {
     await skipOfflineSystemProxyChain(handle);
     return { state: 'skipped', reason: 'no_proxy' };
@@ -1512,8 +1609,8 @@ async function ensureSystemProxyChain(handle) {
 }
 
 async function readProxyForPreflight(profileId) {
-  const config = await readAdsProfileProxy(profileId);
   const handle = envs.get(fleet.envIdForProfile(profileId));
+  const config = await readAuthoritativeProfileProxy(profileId);
   if (!systemProxyChainEnabled(handle)) return config;
   if (!config || config.ok !== true) {
     return { ok: false, blocking: true, reason: 'profile_config_unavailable' };
@@ -1577,6 +1674,9 @@ function ensureProxyPreflight(handle) {
 }
 
 async function ensureNetworkPreparation(handle) {
+  const authority = await ensureProfileProxyAuthority(handle);
+  if (authority.state === 'unavailable') return authority;
+  if (authority.reason === 'no_proxy') return { state: 'skipped', reason: 'no_proxy' };
   if (systemProxyChainEnabled(handle) && handle && handle.kind === 'adspower') {
     const chain = await ensureSystemProxyChain(handle);
     if (chain.state === 'unavailable') return chain;
@@ -1603,6 +1703,7 @@ function proxyPreflightFailureText(reason) {
     case 'protocol_mismatch': return '代理类型可能配置错误';
     case 'authentication_failed': return '代理账号或密码未通过认证';
     case 'timeout': return '代理连接超时';
+    case 'proxy_authority_unavailable': return '原环境代理安全记录不可用';
     case 'connection_refused': return '代理拒绝连接';
     case 'host_unresolved': return '代理地址无法解析';
     case 'config_invalid': return '代理配置不完整';
@@ -2083,12 +2184,11 @@ function enqueueTransientBrowserLane(handle, {
           settleTransientBrowserLease(handle, 'proxy_unavailable', false);
           return false;
         }
-        const started = spawnEdgeChild(handle, { generation, transientBrowserLease: true });
+        const started = await spawnEdgeChild(handle, { generation, transientBrowserLease: true });
         if (!started) {
           settleTransientBrowserLease(handle, 'core_start_rejected', false);
           return false;
         }
-        void Promise.resolve(started).catch(() => settleTransientBrowserLease(handle, 'core_start_failed', false));
       } else if (!sendTransientMessage(handle, {
         type: 'lifecycle.transient_browser_granted',
         requestId,
@@ -3691,7 +3791,7 @@ async function startBrowserAbsentCore(handle, {
         ...clearEdgeFailurePatch(handle),
       });
     }
-    const started = spawnEdgeChild(handle, {
+    const started = await spawnEdgeChild(handle, {
       controlBootstrap: bootstrap,
       retainStartQueueReservation,
       generation,
@@ -3850,7 +3950,7 @@ function startEdge(handle, { kind = 'resume', generation = handle && handle.life
  * 返回一个在环境**真正就绪**（云端已连上）或诚实失败时才 settle 的 promise——串行启动队列靠它
  * 实现「起完一个再起下一个」；不等就绪就放行下一个，10 个环境仍会几乎同时冷启、把内存打爆。
  */
-function spawnEdgeChild(handle, {
+async function spawnEdgeChild(handle, {
   controlBootstrap = null,
   cleanupBootstrap = null,
   retainStartQueueReservation = false,
@@ -3872,7 +3972,15 @@ function spawnEdgeChild(handle, {
   // 核心进程根本起不来、浏览器无法启动（本地 dev 因 appRoot 为真目录不触发）。
   const edgeCwd = appRoot.endsWith('.asar') ? path.dirname(appRoot) : appRoot;
   let spawnEnv;
+  let proxyAuthorityPayload = null;
   if (handle.kind === 'adspower') {
+    if (handle.proxyAuthority === undefined) {
+      const authority = await ensureProfileProxyAuthority(handle);
+      if (authority.state === 'unavailable') {
+        stopStartForProxyFailure(handle, authority);
+        return false;
+      }
+    }
     // 身份闸（红线）：冻结 env 注入唯一稳定身份；无法派生（缺分身 id）则诚实拒绝，绝不回落主机名。
     const built = fleet.buildEnvSpawnEnv({
       environment: { profileId: handle.profileId, name: handle.name, platform: handle.platform },
@@ -3902,7 +4010,7 @@ function spawnEdgeChild(handle, {
       return;
     }
     spawnEnv = { ...built.env, ELECTRON_RUN_AS_NODE: '1' };
-    if (handle.status.proxyMode === 'system_then_environment'
+    if (handle.proxyAuthority && handle.status.proxyMode === 'system_then_environment'
       && handle.status.proxyChainApplicable === true
       && !cleanupBootstrap) {
       const endpoint = proxyChainManager.endpoint(handle.profileId);
@@ -3910,11 +4018,24 @@ function spawnEdgeChild(handle, {
         stopStartForProxyFailure(handle, { reason: 'proxy_chain_unavailable' });
         return;
       }
-      spawnEnv.AIDCP_ADS_PROXY_OVERRIDE = `http://127.0.0.1:${endpoint.proxyPort}`;
+      proxyAuthorityPayload = {
+        version: 1,
+        mode: 'system_then_environment',
+        originalProxy: handle.proxyAuthority,
+        relayPort: endpoint.proxyPort,
+      };
       updateStatus(handle, { proxyMode: 'system_then_environment' });
+    } else if (handle.proxyAuthority) {
+      proxyAuthorityPayload = {
+        version: 1,
+        mode: 'direct',
+        originalProxy: handle.proxyAuthority,
+      };
+      updateStatus(handle, { proxyMode: 'direct' });
     } else if (!cleanupBootstrap) {
       updateStatus(handle, { proxyMode: 'direct' });
     }
+    if (proxyAuthorityPayload) spawnEnv.AIDCP_ADS_PROXY_AUTHORITY_FD = '4';
   } else {
     // self 遗留路径：维持旧合并次序（provider env 在前、被 ...process.env 覆盖 → 外部显式设置仍是逃生阀）。
     spawnEnv = { ...buildSelfProviderEnv(), ...process.env, ELECTRON_RUN_AS_NODE: '1' };
@@ -4003,10 +4124,28 @@ function spawnEdgeChild(handle, {
   const child = spawn(process.execPath, [edgeEntry], {
     cwd: edgeCwd,
     env: spawnEnv,
-    // 第四路 IPC 专用于本地生命周期意图；persona/browser parking 既有 stdin 协议保持不变。
-    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+    // 第四路 IPC 专用于本地生命周期意图；第五路匿名 pipe 只在已配置代理时一次性交付代理权威。
+    stdio: proxyAuthorityPayload
+      ? ['pipe', 'pipe', 'pipe', 'ipc', 'pipe']
+      : ['pipe', 'pipe', 'pipe', 'ipc'],
     windowsHide: true,
   });
+  if (proxyAuthorityPayload) {
+    const authorityPipe = child.stdio[4];
+    if (!authorityPipe || typeof authorityPipe.end !== 'function') {
+      try { child.kill(); } catch { /* best-effort */ }
+      stopStartForProxyFailure(handle, { reason: 'proxy_authority_unavailable' });
+      return false;
+    }
+    authorityPipe.on('error', () => {
+      // 子进程侧读取不到完整 payload 会在 AdsPower start 前 fail closed；这里只投影稳定原因，不打印内容。
+      updateStatus(handle, {
+        lastMessage: '原环境代理安全通道写入失败；浏览器不会启动。',
+        ...edgeFailurePatch('原环境代理安全通道不可用'),
+      });
+    });
+    authorityPipe.end(JSON.stringify(proxyAuthorityPayload));
+  }
   handle.child = child;
   // 核心已进入执行态：从启动排队移出；后续由浏览器并发槽位计数，不再占等待容量。
   if (!retainStartQueueReservation) releaseStartQueue(handle);
@@ -7015,6 +7154,9 @@ ipcMain.handle('ads:status', (_event, opts) => readAdsWithRuntime(opts, (resolve
 // 「选择已有环境」与 status 共享 cached-base fast path；仅冷机/传输失败时启动或重启随包运行时。
 ipcMain.handle('ads:listProfiles', async (_event, opts) => {
   const result = await readAdsWithRuntime(opts, (resolved) => adsApi.listProfiles(resolved));
+  if (result && result.ok && Array.isArray(result.profiles)) {
+    result.profiles = result.profiles.map(projectAuthoritativeProxySummary);
+  }
   // 按登录客户可见范围收窄「加入现有环境」**显示列表**（change edge-client-env-scope-and-logout，补 edge-client-customer-auth
   // 的漏）：此前该列表列出本机全部指纹环境、不分归属，把他人环境的名字/分组/代理/分身 ID 暴露给已登录客户，也让用户误加入
   // 永不启动的非归属环境。
@@ -7142,6 +7284,15 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         groupResolver: envGroupResolver,
       });
       if (result && result.ok) {
+        const authority = persistProxyAuthorityInput(result.userId, opts && opts.proxy);
+        if (!authority.ok) {
+          return {
+            ok: false,
+            partial: true,
+            userId: result.userId,
+            error: `环境已在 AdsPower 创建，但原环境代理安全记录未完成：${authority.error}。请先修复系统安全存储后重试保存代理。`,
+          };
+        }
         return finalizeCreatedEnvironmentAssignment(result, intent, { slowStartEnabled });
       }
       return result;
@@ -7178,6 +7329,14 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       });
       if (!result.ok) {
         return failedFacebookBatchReceipt(created, i + 1, result.error || '未知错误');
+      }
+      const authority = persistProxyAuthorityInput(result.userId, item.proxy);
+      if (!authority.ok) {
+        return failedFacebookBatchReceipt(
+          created,
+          i + 1,
+          `环境已在 AdsPower 创建，但原环境代理安全记录未完成：${authority.error}`,
+        );
       }
       const finalized = await finalizeCreatedEnvironmentAssignment(result, intent, { slowStartEnabled });
       created.push(safeCreatedEnvironment(finalized));
@@ -7225,10 +7384,7 @@ ipcMain.handle('ads:getEnvProxy', async (_event, opts) => {
   const scope = await proxyTargetScope([opts && opts.userId]);
   if (!scope.ok) return { ...scope, status: scope.error && scope.error.includes('不属于') ? 403 : undefined };
   const userId = scope.userIds[0];
-  return readAdsWithRuntime(opts, (resolved) => adsApi.getProfileProxyConfig({
-    ...resolved,
-    profileId: userId,
-  }));
+  return readAuthoritativeProfileProxy(userId);
 });
 
 async function proxyTargetScope(userIds) {
@@ -7299,6 +7455,7 @@ function invalidateProxyEvidence(userId) {
   const envId = fleet.envIdForProfile(String(userId));
   proxyPreflight.invalidate(envId);
   const handle = envs.get(envId);
+  if (handle && !handle.child) handle.proxyAuthority = undefined;
   if (handle && !handle.child) void proxyChainManager.invalidate(handle.profileId);
   if (handle && selectedEnvId === envId) scheduleSelectedProxyPreflight(handle);
 }
@@ -7331,6 +7488,19 @@ ipcMain.handle('ads:updateEnvProxy', async (_event, opts) => {
     const r = await writeApi.updateProfileProxy({ userId: String(userId), proxyConfig: norm.proxyConfig }, ads);
     if (r && r.ok === false) return { ...r, error: proxyUpdateError(r) };
     if (r && r.ok) {
+      const authority = norm.noProxy
+        ? proxyAuthorityStore.remove(userId)
+        : proxyAuthorityStore.save(userId, norm.proxyConfig);
+      if (!authority.ok) {
+        // AdsPower 已接受新值但本地权威未提交：删除旧权威，确保下次从 live profile 重新引导而不是复用陈值。
+        proxyAuthorityStore.remove(userId);
+        invalidateProxyEvidence(userId);
+        return {
+          ok: false,
+          partial: true,
+          error: `AdsPower 已更新代理，但原环境代理安全记录未完成：${authority.error}。请重试保存。`,
+        };
+      }
       invalidateProxyEvidence(userId);
       return { ok: true, noProxy: norm.noProxy };
     }
@@ -7389,6 +7559,13 @@ ipcMain.handle('ads:updateEnvProxies', async (event, opts) => {
         if (!norm.ok) return { ok: false, error: `代理输入不合法：${norm.error}` };
         const result = await writeApi.updateProfileProxy({ userId: item.userId, proxyConfig: norm.proxyConfig }, ads);
         if (!result || !result.ok) return { ok: false, error: batchProxyUpdateError(result) };
+        const authority = norm.noProxy
+          ? proxyAuthorityStore.remove(item.userId)
+          : proxyAuthorityStore.save(item.userId, norm.proxyConfig);
+        if (!authority.ok) {
+          proxyAuthorityStore.remove(item.userId);
+          return { ok: false, error: 'AdsPower 已更新，但原环境代理安全记录未完成；请重试该环境' };
+        }
         return { ok: true };
       },
       onProgress: ({ completedCount, totalCount }) => {
@@ -7469,6 +7646,7 @@ async function deletePhysicalEnvironmentAfterTombstone(envKey, opts) {
   }
   const saved = finishLocalInteractionOffboard(envKey);
   if (!saved.ok) return { ok: false, cleanupPending: true, error: '物理环境已删除，但本地花名册清理未能持久化，请重试。' };
+  proxyAuthorityStore.remove(envKey);
   return { ok: true, cleanupPending: false, deleted: true };
 }
 

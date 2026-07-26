@@ -18,7 +18,7 @@ function functionSource(name: string, nextName: string): string {
 }
 
 test('Electron engine child has IPC and pause disconnects it through lifecycle.pause_and_exit', () => {
-  assert.match(main, /stdio:\s*\['pipe', 'pipe', 'pipe', 'ipc'\]/);
+  assert.match(main, /stdio: proxyAuthorityPayload[\s\S]{0,160}?\['pipe', 'pipe', 'pipe', 'ipc', 'pipe'\][\s\S]{0,100}?\['pipe', 'pipe', 'pipe', 'ipc'\]/);
   const pause = functionSource('pauseEdge', 'resumeEdge');
   assert.match(pause, /sendCoreLifecycle\(handle, 'pause_and_exit'/);
   assert.match(pause, /handle\.automationIntent = 'paused'/);

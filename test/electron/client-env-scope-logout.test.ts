@@ -64,8 +64,8 @@ test('ads:getEnvProxy 只按精确 userId 读取完整代理，并受当前客�
     '精确读与代理写入共用会话刷新和客户范围门禁');
   assert.match(block, /if \(!scope\.ok\) return/, '失效会话或非当前客户目标不得读取代理密码');
   assert.match(block, /const userId = scope\.userIds\[0\]/, '只使用门禁归一后的精确目标');
-  assert.match(block, /adsApi\.getProfileProxyConfig\(\{[\s\S]*profileId: userId/,
-    '只复用精确 profile 读取，不得回退全量列表或任意本地 API');
+  assert.match(block, /readAuthoritativeProfileProxy\(userId\)/,
+    '只读取该环境的加密原代理权威；缺失时由内部精确 reader 引导，不得回退全量列表');
   assert.doesNotMatch(block, /listProfiles\(/);
 });
 

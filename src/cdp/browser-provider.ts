@@ -11,7 +11,7 @@
  * MUST NOT 静默回落 self、MUST NOT 假成功——否则本应用独立指纹 / IP 的账号会偷偷以本机真实指纹起跑。
  */
 import { execFile } from 'node:child_process';
-import type { Dirent } from 'node:fs';
+import { readFileSync, type Dirent } from 'node:fs';
 import { lstat, readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
@@ -91,8 +91,23 @@ export interface AdsPowerConfig {
   userId: string;
   /** 启动后打开的页（确保落到小红书，readSelfIdentity 才读得到），默认 explore。 */
   startUrl?: string;
-  /** Electron 主进程准备的无凭据 loopback 代理；只覆盖本次新浏览器代际，不修改 AdsPower profile。 */
-  proxyServer?: string;
+  /** Electron 主进程经匿名 pipe 交付的原环境代理权威；不含此值即明确无代理/旧的非受管调用方。 */
+  proxyAuthority?: AdsPowerProxyAuthority;
+}
+
+export interface AdsPowerProxyConfig {
+  proxy_soft: 'other';
+  proxy_type: 'http' | 'https' | 'socks5';
+  proxy_host: string;
+  proxy_port: string;
+  proxy_user?: string;
+  proxy_password?: string;
+}
+
+export interface AdsPowerProxyAuthority {
+  mode: 'direct' | 'system_then_environment';
+  originalProxy: AdsPowerProxyConfig;
+  targetProxy: AdsPowerProxyConfig;
 }
 
 export interface AdsPowerDeps {
@@ -140,33 +155,91 @@ const PROFILE_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 const DEVTOOLS_BROWSER_PATH_RE = /^\/devtools\/browser\/[A-Za-z0-9._-]+$/;
 const ADS_PROFILE_IN_USE_RE = /^\s*\[[^\]]+\]\s+is being used by\s+\[([^\]]+)\]\s+and is not allowed to open\s*$/i;
 
-export class AdsPowerProxyOverrideRestartRequiredError extends Error {
-  readonly code = 'adspower_proxy_override_restart_required';
+export class AdsPowerProxyAuthorityRestartRequiredError extends Error {
+  readonly code = 'adspower_proxy_authority_restart_required';
 
   constructor(readonly profileId: string) {
     super(
-      `[aidcp-edge] AdsPower profile=${profileId} 已在运行，无法证明当前浏览器应用了系统前置代理；请先关闭该环境后重新启动`,
+      `[aidcp-edge] AdsPower profile=${profileId} 已在运行，无法证明当前浏览器应用了本代际代理配置；请先关闭该环境后重新启动`,
     );
-    this.name = 'AdsPowerProxyOverrideRestartRequiredError';
+    this.name = 'AdsPowerProxyAuthorityRestartRequiredError';
   }
 }
 
-export function normalizeAdsPowerProxyOverride(raw: string | undefined): string | undefined {
-  const value = String(raw ?? '').trim();
-  if (!value) return undefined;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new Error('[aidcp-edge] AIDCP_ADS_PROXY_OVERRIDE 必须是 http://127.0.0.1:<port>');
+function normalizeAdsPowerProxyConfig(raw: unknown): AdsPowerProxyConfig {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('[aidcp-edge] AdsPower 原环境代理权威格式无效');
   }
-  const port = Number(url.port);
-  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1'
+  const value = raw as Record<string, unknown>;
+  const proxyType = String(value.proxy_type ?? '').trim().toLowerCase();
+  const proxyHost = String(value.proxy_host ?? '').trim();
+  const proxyPort = String(value.proxy_port ?? '').trim();
+  const proxyUser = String(value.proxy_user ?? '').trim();
+  const proxyPassword = String(value.proxy_password ?? '');
+  const port = Number(proxyPort);
+  if (value.proxy_soft !== 'other'
+    || !(['http', 'https', 'socks5'] as const).includes(proxyType as 'http' | 'https' | 'socks5')
+    || !proxyHost || !/^\d+$/.test(proxyPort)
     || !Number.isInteger(port) || port < 1 || port > 65_535
-    || url.username || url.password || (url.pathname && url.pathname !== '/') || url.search || url.hash) {
-    throw new Error('[aidcp-edge] AIDCP_ADS_PROXY_OVERRIDE 必须是无凭据 http://127.0.0.1:<port>');
+    || (proxyPassword && !proxyUser)) {
+    throw new Error('[aidcp-edge] AdsPower 原环境代理权威字段无效');
   }
-  return `http://127.0.0.1:${port}`;
+  return {
+    proxy_soft: 'other',
+    proxy_type: proxyType as AdsPowerProxyConfig['proxy_type'],
+    proxy_host: proxyHost,
+    proxy_port: String(port),
+    ...(proxyUser ? { proxy_user: proxyUser } : {}),
+    ...(proxyPassword ? { proxy_password: proxyPassword } : {}),
+  };
+}
+
+export function readAdsPowerProxyAuthority(
+  env: NodeJS.ProcessEnv,
+  readFile: typeof readFileSync = readFileSync,
+): AdsPowerProxyAuthority | undefined {
+  const fdText = String(env.AIDCP_ADS_PROXY_AUTHORITY_FD ?? '').trim();
+  if (!fdText) return undefined;
+  if (!/^\d+$/.test(fdText)) {
+    throw new Error('[aidcp-edge] AIDCP_ADS_PROXY_AUTHORITY_FD 必须是匿名 pipe 文件描述符');
+  }
+  const fd = Number(fdText);
+  if (!Number.isInteger(fd) || fd < 3 || fd > 255) {
+    throw new Error('[aidcp-edge] AIDCP_ADS_PROXY_AUTHORITY_FD 超出允许范围');
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    const raw = readFile(fd, { encoding: 'utf8' });
+    if (Buffer.byteLength(raw, 'utf8') > 32 * 1024) throw new Error('oversized');
+    parsed = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    throw new Error('[aidcp-edge] 原环境代理安全通道读取失败');
+  }
+  if (!parsed || parsed.version !== 1) throw new Error('[aidcp-edge] 原环境代理安全通道版本无效');
+  const mode = parsed.mode === 'direct'
+    ? 'direct'
+    : parsed.mode === 'system_then_environment'
+      ? 'system_then_environment'
+      : null;
+  if (!mode) throw new Error('[aidcp-edge] 原环境代理安全通道模式无效');
+  const originalProxy = normalizeAdsPowerProxyConfig(parsed.originalProxy);
+  if (mode === 'direct') {
+    return { mode, originalProxy, targetProxy: { ...originalProxy } };
+  }
+  const relayPort = Number(parsed.relayPort);
+  if (!Number.isInteger(relayPort) || relayPort < 1 || relayPort > 65_535) {
+    throw new Error('[aidcp-edge] 受管 GOST loopback 端口无效');
+  }
+  return {
+    mode,
+    originalProxy,
+    targetProxy: {
+      proxy_soft: 'other',
+      proxy_type: 'http',
+      proxy_host: '127.0.0.1',
+      proxy_port: String(relayPort),
+    },
+  };
 }
 /**
  * 关闭确认：每个阶段（停止 / 重发停止 / OS 杀后）轮询该 profile 调试端点是否变暗的次数与间隔。
@@ -303,7 +376,6 @@ export class AdsPowerProvider implements BrowserProvider {
     const launchArgs = ['--window-size=1440,980'];
     if (!opts.windowPosition) launchArgs.push('--start-maximized');
     launchArgs.push('--deny-permission-prompts', '--lang=en-US');
-    if (this.cfg.proxyServer) launchArgs.push(`--proxy-server=${this.cfg.proxyServer}`);
     if (opts.windowPosition) {
       launchArgs.push(`--window-position=${Math.floor(opts.windowPosition.left)},${Math.floor(opts.windowPosition.top)}`);
     }
@@ -315,8 +387,8 @@ export class AdsPowerProvider implements BrowserProvider {
     const activeStatus = String(active?.status ?? '').trim().toLowerCase();
     let port = 0;
     if (activeStatus === 'active') {
-      if (this.cfg.proxyServer) {
-        throw new AdsPowerProxyOverrideRestartRequiredError(this.cfg.userId);
+      if (this.cfg.proxyAuthority) {
+        throw new AdsPowerProxyAuthorityRestartRequiredError(this.cfg.userId);
       }
       port = Number(active?.debug_port);
       if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
@@ -328,11 +400,20 @@ export class AdsPowerProvider implements BrowserProvider {
     } else if (activeStatus === 'inactive') {
       const orphan = await this.findValidatedOrphanCdp();
       if (orphan) {
+        if (this.cfg.proxyAuthority) {
+          throw new AdsPowerProxyAuthorityRestartRequiredError(this.cfg.userId);
+        }
         port = orphan.port;
         this.log(
           `[aidcp-edge] AdsPower V2 registry 未登记但检测到该 profile 的有效 CDP，接管失联浏览器 profile=${this.cfg.userId} → debug_port=${port}`,
         );
       } else {
+        if (this.cfg.proxyAuthority) {
+          await this.synchronizeProfileProxy(
+            this.cfg.proxyAuthority.targetProxy,
+            this.cfg.proxyAuthority.mode === 'system_then_environment' ? 'system_then_environment' : 'direct',
+          );
+        }
         this.log(`[aidcp-edge] 请求 AdsPower V2 browser-profile/start profile=${this.cfg.userId} ...`);
         const data = await this.apiV2<AdsStartData>('POST', 'browser-profile/start', {
           body: {
@@ -359,17 +440,114 @@ export class AdsPowerProvider implements BrowserProvider {
     const host = '127.0.0.1';
     await this.waitCdpReady(host, port, opts.readyTimeoutMs ?? 15_000);
 
+    let closePromise: Promise<boolean> | null = null;
+    const closeAndRestore = () => {
+      if (closePromise) return closePromise;
+      closePromise = (async () => {
+        const closed = await this.closeAndConfirm(host, port);
+        if (closed && this.cfg.proxyAuthority) await this.restoreOriginalProxy();
+        return closed;
+      })();
+      return closePromise;
+    };
     const instance: ChromeInstance = {
       pid: null,
       reused: false, // 由本节点启动或接管 → 退出时均经 V2 stop 回收（ChromeInstance.reused 仅指 self 外部 Chrome）
       kill: () => {
-        void this.stop();
+        void closeAndRestore();
       },
       // 权威关闭：以该 profile 调试端点是否变暗判死活，软停止未生效则升级（重发 + OS 级强杀），
       // 无法确认绝不假成功（红线：绝不静默假成功）。endpoint 端口即此处交付的 debug_port。
-      killAndConfirmDead: async () => this.closeAndConfirm(host, port),
+      killAndConfirmDead: closeAndRestore,
     };
     return { instance, endpoint: { host, port } };
+  }
+
+  private async apiV1<T>(
+    method: 'GET' | 'POST',
+    path: string,
+    request: { query?: Record<string, string>; body?: Record<string, unknown> },
+  ): Promise<T> {
+    if (this.lastApiAt !== 0) {
+      const wait = ADS_MIN_INTERVAL_MS - (this.now() - this.lastApiAt);
+      if (wait > 0) await this.sleep(wait);
+    }
+    const qs = new URLSearchParams(request.query ?? {}).toString();
+    const apiBase = this.cfg.apiBase.replace(/\/+$/, '');
+    const url = `${apiBase}/api/v1/${path}${qs ? `?${qs}` : ''}`;
+    const headers: Record<string, string> = {};
+    if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`;
+    if (method === 'POST') headers['Content-Type'] = 'application/json';
+    let res: Response;
+    try {
+      res = await this.fetchWithTimeout(
+        url,
+        { method, headers, ...(method === 'POST' ? { body: JSON.stringify(request.body ?? {}) } : {}) },
+        this.apiTimeoutMs,
+        path,
+      );
+    } catch (error) {
+      const message = (error as Error).message || String(error);
+      throw new Error(
+        `[aidcp-edge] AdsPower 本地 API 不可达（${path}）：${message}` +
+          '——代理配置未确认，浏览器不会启动。',
+      );
+    } finally {
+      this.lastApiAt = this.now();
+    }
+    if (!res.ok) throw new Error(`[aidcp-edge] AdsPower ${path} 响应异常：HTTP ${res.status}`);
+    let body: { code: number; msg?: string; data?: T };
+    try {
+      body = await this.withTimeout(
+        res.json() as Promise<{ code: number; msg?: string; data?: T }>,
+        this.apiTimeoutMs,
+        `${path} 响应`,
+      );
+    } catch {
+      throw new Error(`[aidcp-edge] AdsPower ${path} 响应非有效 JSON`);
+    }
+    if (body.code !== 0) {
+      throw new Error(`[aidcp-edge] AdsPower ${path} 拒绝代理配置：code=${body.code}`);
+    }
+    return body.data as T;
+  }
+
+  private async readProfileProxy(): Promise<AdsPowerProxyConfig> {
+    const data = await this.apiV1<{ list?: Array<Record<string, unknown>>; data?: Array<Record<string, unknown>> }>(
+      'GET',
+      'user/list',
+      { query: { user_id: this.cfg.userId, page: '1', page_size: '10' } },
+    );
+    const list = Array.isArray(data?.list) ? data.list : Array.isArray(data?.data) ? data.data : [];
+    const profile = list.find((item) => String(item?.user_id ?? '') === this.cfg.userId);
+    if (!profile) throw new Error('[aidcp-edge] AdsPower 代理读回未找到目标环境');
+    const raw = (profile.user_proxy_config ?? profile.proxy_config) as unknown;
+    return normalizeAdsPowerProxyConfig(raw);
+  }
+
+  private async synchronizeProfileProxy(
+    target: AdsPowerProxyConfig,
+    phase: 'direct' | 'system_then_environment' | 'restore',
+  ): Promise<void> {
+    await this.apiV1<unknown>('POST', 'user/update', {
+      body: { user_id: this.cfg.userId, user_proxy_config: target },
+    });
+    const actual = await this.readProfileProxy();
+    if (JSON.stringify(actual) !== JSON.stringify(target)) {
+      throw new Error(`[aidcp-edge] AdsPower profile 代理读回与目标不一致（phase=${phase}）`);
+    }
+    this.log(`[aidcp-edge] AdsPower profile 代理同步已确认 profile=${this.cfg.userId} mode=${phase}`);
+  }
+
+  private async restoreOriginalProxy(): Promise<void> {
+    const original = this.cfg.proxyAuthority?.originalProxy;
+    if (!original) return;
+    try {
+      await this.synchronizeProfileProxy(original, 'restore');
+    } catch {
+      // 浏览器关闭事实与 profile 恢复是两个结果；恢复失败只安全记录，下一次启动前仍会重新同步。
+      this.log(`[aidcp-edge] ⚠ AdsPower profile 原环境代理恢复未确认 profile=${this.cfg.userId}`);
+    }
   }
 
   /** 调 V2 本地 API（带 Bearer + 1req/s 串行节流 + code≠0 诚实报错）。 */
@@ -651,7 +829,7 @@ export function selectBrowserProvider(
       apiKey: env.AIDCP_ADS_API_KEY,
       userId,
       startUrl: opts.startUrl ?? env.AIDCP_EXPLORE_URL,
-      proxyServer: normalizeAdsPowerProxyOverride(env.AIDCP_ADS_PROXY_OVERRIDE),
+      proxyAuthority: readAdsPowerProxyAuthority(env),
     };
     return new AdsPowerProvider(cfg, {
       fetchImpl: opts.fetchImpl,
