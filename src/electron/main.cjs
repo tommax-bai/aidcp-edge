@@ -5899,6 +5899,17 @@ ipcMain.handle('environment-risk:recover', (_event, raw) => handleInteractionIpc
   });
 }));
 
+ipcMain.handle('environment-risk:recovery-result', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'commandId']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const commandId = interactionId(args.commandId, 'commandId');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/risk-state/recovery-commands/${encodeURIComponent(commandId)}`,
+    method: 'GET',
+  });
+}));
+
 for (const action of ['approve', 'regenerate']) {
   ipcMain.handle(`interaction:${action}`, (_event, raw) => handleInteractionIpc(async () => {
     const args = interactionArgs(raw, new Set(['envKey', 'jobId', 'expectedVersion']));

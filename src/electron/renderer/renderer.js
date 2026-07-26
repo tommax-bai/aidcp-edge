@@ -702,6 +702,7 @@ let environmentRiskConfirmContext = null;
 const ENVIRONMENT_RISK_TTL_MS = 15_000;
 const ENVIRONMENT_RISK_RETRY_MS = 5_000;
 const ENVIRONMENT_RISK_STATUSES = new Set(['normal', 'warned', 'restricted', 'frozen']);
+const ENVIRONMENT_RISK_RECOVERY_POLL_DELAYS_MS = [0, 250, 500, 1000, 1500];
 
 // 客户首页业务概览：单一来源为 customer-auth HTTP。自动化状态只用于触发失效重拉，绝不写入本缓存。
 const environmentOverviewByEnv = new Map();
@@ -1462,7 +1463,9 @@ function renderEnvironmentRiskRecovery(status) {
     fields.riskRecoveryButton.textContent = pending ? '解除中…' : '解除受限';
   }
   if (fields.riskRecoveryFeedback) {
-    const message = feedback && feedback.kind === 'error' ? String(feedback.message || '解除失败') : '';
+    const message = feedback && (feedback.kind === 'error' || feedback.kind === 'pending')
+      ? String(feedback.message || '')
+      : '';
     fields.riskRecoveryFeedback.textContent = message;
     fields.riskRecoveryFeedback.classList.toggle('hidden', !message);
   }
@@ -4209,6 +4212,86 @@ fields.riskRecoveryConfirmSubmit?.addEventListener('click', () => {
   void submitEnvironmentRiskRecovery(expected);
 });
 
+function environmentRiskRecoveryError(result, fallback = '解除失败，请确认网络和账号状态后重试') {
+  const payload = result && result.data && result.data.data;
+  if (payload && payload.state === 'refused') return '账号当前已不是受限状态，Cloud 已拒绝本次解除';
+  if (payload && payload.state === 'failed') return `解除执行失败：${payload.reason || 'Cloud 未返回原因'}`;
+  if (payload && payload.state === 'unknown') return 'Cloud 未找到这条解除命令，请刷新账号状态后重试';
+  const rawError = result && result.data && result.data.error;
+  return String((result && result.data && result.data.message)
+    || (rawError && typeof rawError === 'object' && (rawError.message || rawError.code))
+    || (typeof rawError === 'string' && rawError)
+    || (result && result.error)
+    || fallback);
+}
+
+function applyEnvironmentRiskRecoveryReceipt(envKey, env, receipt) {
+  if (!receipt || receipt.envKey !== envKey || receipt.state !== 'applied' || receipt.status !== 'normal') return false;
+  environmentRiskHttpByEnv.set(envKey, {
+    kind: 'ok',
+    status: receipt.status,
+    statusSince: receipt.statusSince,
+    updatedAt: receipt.updatedAt,
+    fetchedAt: Date.now(),
+  });
+  env.status = { ...(env.status || {}), risk: receipt.status };
+  environmentRiskFeedbackByEnv.delete(envKey);
+  return true;
+}
+
+function environmentRiskRecoveryCommandIsPending(envKey, commandId) {
+  const pending = environmentRiskFeedbackByEnv.get(envKey);
+  return Boolean(pending && pending.kind === 'pending' && pending.commandId === commandId);
+}
+
+async function pollEnvironmentRiskRecovery({ selectedKey, env, envKey }, commandId) {
+  if (!window.aidcpEdge || typeof window.aidcpEdge.getEnvironmentRiskRecoveryResult !== 'function') {
+    environmentRiskFeedbackByEnv.set(envKey, {
+      kind: 'error',
+      message: '客户端缺少解除结果查询能力；命令可能仍在 Cloud 处理中，请刷新状态确认',
+    });
+    return;
+  }
+  for (const delayMs of ENVIRONMENT_RISK_RECOVERY_POLL_DELAYS_MS) {
+    if (!environmentRiskRecoveryCommandIsPending(envKey, commandId)) return;
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (!environmentRiskRecoveryCommandIsPending(envKey, commandId)) return;
+    let result;
+    try {
+      result = await window.aidcpEdge.getEnvironmentRiskRecoveryResult({ envKey, commandId });
+    } catch (err) {
+      if (!environmentRiskRecoveryCommandIsPending(envKey, commandId)) return;
+      environmentRiskFeedbackByEnv.set(envKey, {
+        kind: 'error',
+        message: `解除结果查询失败：${(err && err.message) || err}`,
+      });
+      return;
+    }
+    if (!environmentRiskRecoveryCommandIsPending(envKey, commandId)) return;
+    const receipt = result && result.data && result.data.data;
+    if (!receipt || receipt.envKey !== envKey || receipt.commandId !== commandId) {
+      environmentRiskFeedbackByEnv.set(envKey, {
+        kind: 'error',
+        message: 'Cloud 返回了不匹配的解除结果，已拒绝更新当前环境',
+      });
+      return;
+    }
+    if (result.ok && receipt.state === 'processing') continue;
+    if (result.ok && result.status === 200 && applyEnvironmentRiskRecoveryReceipt(envKey, env, receipt)) return;
+    environmentRiskFeedbackByEnv.set(envKey, {
+      kind: 'error',
+      message: environmentRiskRecoveryError(result),
+    });
+    return;
+  }
+  environmentRiskFeedbackByEnv.set(envKey, {
+    kind: 'pending',
+    commandId,
+    message: '解除命令已受理，但 Cloud 尚未确认完成；请稍后刷新账号状态',
+  });
+  if (fleetView.selected === selectedKey) render(env.status || currentStatus);
+}
+
 async function submitEnvironmentRiskRecovery(expected) {
   const context = selectedEnvironmentRiskContext();
   if (!context || !window.aidcpEdge || typeof window.aidcpEdge.recoverEnvironmentRisk !== 'function') return;
@@ -4231,34 +4314,16 @@ async function submitEnvironmentRiskRecovery(expected) {
   try {
     const res = await window.aidcpEdge.recoverEnvironmentRisk({ envKey });
     const receipt = res && res.ok && res.data && res.data.data;
-    if (!receipt || receipt.envKey !== envKey || receipt.status !== 'normal') {
-      // 409 可能携带并发变化后的同环境真态；只在 envKey 严格相等时采用，绝不让失败回包串环境。
-      const refusalTruth = res && res.data && res.data.data;
-      if (refusalTruth && refusalTruth.envKey === envKey && ENVIRONMENT_RISK_STATUSES.has(refusalTruth.status)) {
-        environmentRiskHttpByEnv.set(envKey, {
-          kind: 'ok', status: refusalTruth.status, fetchedAt: Date.now(), updatedAt: Date.now(), statusSince: Date.now(),
-        });
-        env.status = { ...(env.status || {}), risk: refusalTruth.status };
-      }
-      const rawError = res && res.data && res.data.error;
-      settleError((res && res.data && res.data.message)
-        || (rawError && typeof rawError === 'object' && (rawError.message || rawError.code))
-        || (typeof rawError === 'string' && rawError)
-        || (res && res.error)
-        || '解除失败，请确认网络和账号状态后重试');
+    if (res && res.ok && res.status === 202 && receipt && receipt.envKey === envKey
+        && receipt.state === 'processing' && typeof receipt.commandId === 'string' && receipt.commandId) {
+      environmentRiskFeedbackByEnv.set(envKey, { kind: 'pending', commandId: receipt.commandId });
+      await pollEnvironmentRiskRecovery({ selectedKey, env, envKey }, receipt.commandId);
       return;
     }
-
-    // Cloud 写后回执是当前操作的权威终态：立即收敛当前环境，不乐观先改、也不傻等下一次 snapshot。
-    environmentRiskHttpByEnv.set(envKey, {
-      kind: 'ok',
-      status: receipt.status,
-      statusSince: receipt.statusSince,
-      updatedAt: receipt.updatedAt,
-      fetchedAt: Date.now(),
-    });
-    env.status = { ...(env.status || {}), risk: receipt.status };
-    environmentRiskFeedbackByEnv.delete(envKey);
+    if (!res || !res.ok || res.status !== 200 || !applyEnvironmentRiskRecoveryReceipt(envKey, env, receipt)) {
+      settleError(environmentRiskRecoveryError(res));
+      return;
+    }
   } catch (err) {
     settleError(`解除失败：${(err && err.message) || err}`);
   } finally {

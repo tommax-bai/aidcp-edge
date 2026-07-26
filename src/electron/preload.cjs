@@ -132,4 +132,5 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   getSlowStart: (args) => ipcRenderer.invoke('slow-start:get', args),
   getEnvironmentRisk: (args) => ipcRenderer.invoke('environment-risk:get', args),
   recoverEnvironmentRisk: (args) => ipcRenderer.invoke('environment-risk:recover', args),
+  getEnvironmentRiskRecoveryResult: (args) => ipcRenderer.invoke('environment-risk:recovery-result', args),
 });

@@ -62,6 +62,7 @@ function makeStatus(over: Record<string, unknown> = {}) {
 
 interface Stub {
   onStatusUpdate: (cb: (s: unknown) => void) => void;
+  onFleetUpdate?: (cb: (snapshot: unknown) => void) => void;
   getStatus: () => Promise<unknown>;
   getSettings: () => Promise<unknown>;
   saveSettings: (patch: unknown) => Promise<unknown>;
@@ -91,6 +92,7 @@ interface Stub {
   getSlowStart?: (opts: { envKey: string }) => Promise<unknown>;
   getEnvironmentRisk?: (opts: { envKey: string }) => Promise<unknown>;
   recoverEnvironmentRisk?: (opts: { envKey: string }) => Promise<unknown>;
+  getEnvironmentRiskRecoveryResult?: (opts: { envKey: string; commandId: string }) => Promise<unknown>;
   getEnvironmentOverview?: (envId: string) => Promise<unknown>;
   fleetGet?: () => Promise<unknown>;
   fleetSelect?: (envId: string) => Promise<unknown>;
@@ -1541,11 +1543,204 @@ test('解除受限：应用弹层展示环境；取消/关闭/Escape 不请求�
   assert.ok(!hidden($(w, '#risk-recovery-row')), 'Cloud 回执前不得乐观清掉 restricted');
 
   recovery.resolve({
+    status: 200,
     ok: true,
-    data: { data: { envKey: 'fb_env', status: 'normal', statusSince: 3000, updatedAt: 3000, changed: true, resumedEdges: 1 } },
+    data: { data: {
+      envKey: 'fb_env',
+      commandId: 'cmd-direct',
+      state: 'applied',
+      status: 'normal',
+      statusSince: 3000,
+      updatedAt: 3000,
+      changed: true,
+      resumedEdges: 1,
+    } },
   });
   for (let i = 0; i < 4; i++) await tick();
   assert.ok(hidden($(w, '#risk-recovery-row')), 'Cloud 写后 normal 到达后才隐藏');
+});
+
+test('解除受限：202 后只轮询同环境同 command，applied 写后 normal 到达才清除', async () => {
+  const submissions: unknown[] = [];
+  const polls: unknown[] = [];
+  const w = await boot(stoppedRestrictedFbEnv({
+    recoverEnvironmentRisk: async (args) => {
+      submissions.push(args);
+      return {
+        status: 202,
+        ok: true,
+        data: { data: { envKey: 'fb_env', commandId: 'cmd-41', state: 'processing' } },
+      };
+    },
+    getEnvironmentRiskRecoveryResult: async (args) => {
+      polls.push(args);
+      return {
+        status: 200,
+        ok: true,
+        data: { data: {
+          envKey: 'fb_env',
+          commandId: 'cmd-41',
+          state: 'applied',
+          status: 'normal',
+          statusSince: 3000,
+          updatedAt: 3000,
+          changed: true,
+          resumedEdges: 2,
+        } },
+      };
+    },
+  }));
+  for (let i = 0; i < 5; i++) await tick();
+  ($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).click();
+  $(w, '#risk-recovery-confirm-submit').click();
+  for (let i = 0; i < 6; i++) await tick();
+  assert.deepEqual(
+    submissions.map((args) => ({ ...(args as Record<string, unknown>) })),
+    [{ envKey: 'fb_env' }],
+  );
+  assert.deepEqual(
+    polls.map((args) => ({ ...(args as Record<string, unknown>) })),
+    [{ envKey: 'fb_env', commandId: 'cmd-41' }],
+  );
+  assert.ok(hidden($(w, '#risk-recovery-row')), '202 受理本身不清除；同 command 的 applied normal 才清除');
+});
+
+test('解除受限：refused 即使携带 status normal 也不得清除 restricted', async () => {
+  const w = await boot(stoppedRestrictedFbEnv({
+    recoverEnvironmentRisk: async () => ({
+      status: 409,
+      ok: false,
+      data: { data: {
+        envKey: 'fb_env',
+        commandId: 'cmd-refused',
+        state: 'refused',
+        status: 'normal',
+        reason: 'not_restricted',
+      } },
+    }),
+  }));
+  for (let i = 0; i < 5; i++) await tick();
+  ($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).click();
+  $(w, '#risk-recovery-confirm-submit').click();
+  for (let i = 0; i < 3; i++) await tick();
+  assert.ok(!hidden($(w, '#risk-recovery-row')));
+  assert.equal($(w, '#health-label').textContent, '受限制');
+  assert.equal($(w, '#risk-status').textContent, '受限制');
+  assert.match($(w, '#risk-recovery-feedback').textContent || '', /Cloud 已拒绝/);
+  assert.equal(($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).disabled, false);
+});
+
+test('解除受限：环境移除并以同 envKey 启动新命令后，旧轮询回执不得覆盖新 pending', async () => {
+  const oldPoll = deferred<unknown>();
+  const newPoll = deferred<unknown>();
+  let pushFleet: ((snapshot: unknown) => void) | undefined;
+  let submissionCount = 0;
+  const status = makeStatus({
+    envId: 'fb_env', edge: 'stopped', session: 'idle', cloud: 'disconnected', dailyUsage: null,
+  });
+  const fleetSnapshot = {
+    selectedEnvId: 'fb_env',
+    railCollapsed: false,
+    environments: [{
+      envId: 'fb_env', profileId: 'fb_env', name: 'FB 环境', platform: 'facebook', status,
+    }],
+  };
+  const w = await boot(stoppedRestrictedFbEnv({
+    onFleetUpdate: (cb) => { pushFleet = cb; },
+    recoverEnvironmentRisk: async () => {
+      submissionCount += 1;
+      const commandId = submissionCount === 1 ? 'cmd-old' : 'cmd-new';
+      return {
+        status: 202,
+        ok: true,
+        data: { data: { envKey: 'fb_env', commandId, state: 'processing' } },
+      };
+    },
+    getEnvironmentRiskRecoveryResult: async ({ commandId }) => (
+      commandId === 'cmd-old' ? oldPoll.promise : newPoll.promise
+    ),
+  }));
+  for (let i = 0; i < 5; i++) await tick();
+
+  ($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).click();
+  $(w, '#risk-recovery-confirm-submit').click();
+  for (let i = 0; i < 3; i++) await tick();
+  assert.equal(submissionCount, 1);
+
+  pushFleet?.({ selectedEnvId: null, railCollapsed: false, environments: [] });
+  await tick();
+  pushFleet?.(fleetSnapshot);
+  for (let i = 0; i < 4; i++) await tick();
+  assert.ok(!hidden($(w, '#risk-recovery-row')));
+
+  ($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).click();
+  $(w, '#risk-recovery-confirm-submit').click();
+  for (let i = 0; i < 3; i++) await tick();
+  assert.equal(submissionCount, 2);
+  assert.equal(($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).disabled, true);
+
+  oldPoll.resolve({
+    status: 200,
+    ok: true,
+    data: { data: {
+      envKey: 'fb_env',
+      commandId: 'cmd-old',
+      state: 'applied',
+      status: 'normal',
+      changed: true,
+      resumedEdges: 1,
+    } },
+  });
+  for (let i = 0; i < 4; i++) await tick();
+  assert.ok(!hidden($(w, '#risk-recovery-row')), '旧 applied normal 不得写回同 envKey 的新一轮状态');
+  assert.equal($(w, '#health-label').textContent, '受限制');
+  assert.equal($(w, '#risk-status').textContent, '受限制');
+  assert.equal(($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).disabled, true, '新 command pending 不得被旧回执删除');
+  assert.equal($(w, '#risk-recovery-feedback').textContent, '');
+
+  newPoll.resolve({
+    status: 200,
+    ok: true,
+    data: { data: {
+      envKey: 'fb_env',
+      commandId: 'cmd-new',
+      state: 'applied',
+      status: 'normal',
+      changed: true,
+      resumedEdges: 1,
+    } },
+  });
+  for (let i = 0; i < 4; i++) await tick();
+  assert.ok(hidden($(w, '#risk-recovery-row')), '只有当前新 command 的 applied normal 可以清除 restricted');
+});
+
+test('解除受限：不匹配的轮询结果不得清除 restricted', async () => {
+  const w = await boot(stoppedRestrictedFbEnv({
+    recoverEnvironmentRisk: async () => ({
+      status: 202,
+      ok: true,
+      data: { data: { envKey: 'fb_env', commandId: 'cmd-41', state: 'processing' } },
+    }),
+    getEnvironmentRiskRecoveryResult: async () => ({
+      status: 200,
+      ok: true,
+      data: { data: {
+        envKey: 'fb_env',
+        commandId: 'another-command',
+        state: 'applied',
+        status: 'normal',
+        changed: true,
+        resumedEdges: 1,
+      } },
+    }),
+  }));
+  for (let i = 0; i < 5; i++) await tick();
+  ($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).click();
+  $(w, '#risk-recovery-confirm-submit').click();
+  for (let i = 0; i < 6; i++) await tick();
+  assert.ok(!hidden($(w, '#risk-recovery-row')));
+  assert.match($(w, '#risk-recovery-feedback').textContent || '', /不匹配/);
+  assert.equal(($(w, '#risk-recovery-button') as unknown as HTMLButtonElement).disabled, false);
 });
 
 test('解除受限：Cloud 失败保留受限行并展示原位错误', async () => {
@@ -1587,7 +1782,18 @@ test('解除受限：风险读缓存和按钮随环境切换隔离，不从 A �
     },
     recoverEnvironmentRisk: async ({ envKey }) => {
       recoverCalls.push(envKey);
-      return { ok: true, data: { data: { envKey, status: 'normal', changed: true, resumedEdges: 1 } } };
+      return {
+        status: 200,
+        ok: true,
+        data: { data: {
+          envKey,
+          commandId: 'cmd-env-switch',
+          state: 'applied',
+          status: 'normal',
+          changed: true,
+          resumedEdges: 1,
+        } },
+      };
     },
   }));
   for (let i = 0; i < 6; i++) await tick();
