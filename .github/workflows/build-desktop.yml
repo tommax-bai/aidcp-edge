@@ -43,6 +43,13 @@ on:
         description: 'Optional client auth base URL to bake into the app. Empty uses the default for dev/ol.'
         type: string
         default: ''
+      mac_arches:
+        description: 'macOS architectures to build.'
+        type: choice
+        options:
+          - 'x64 arm64'
+          - arm64
+        default: 'x64 arm64'
 
 jobs:
   build-mac:
@@ -153,6 +160,7 @@ jobs:
           NOTARY_POLL_SECONDS: '30'
           # Bake the default cloud env chosen at dispatch (dev|ol) into this build.
           AIDCP_CLOUD_DEFAULT_ENV: ${{ inputs.cloud_default_env }}
+          AIDCP_MAC_ARCHES: ${{ inputs.mac_arches }}
       # Best-effort Actions artifact (kept lean). This can fail with "Artifact storage
       # quota has been hit" — that quota is recalculated only every 6-12h, so freeing space
       # does not immediately unblock it. The GitHub Release step below is the reliable
