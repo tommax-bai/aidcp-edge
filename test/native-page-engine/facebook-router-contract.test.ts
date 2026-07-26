@@ -1596,6 +1596,69 @@ test('Facebook publish entry and submit probes reject decoys, ambiguity, and dis
   assert.equal(disabled.output.value.reason, 'submit_disabled');
 });
 
+test('Facebook publish entry canonicalizes a semantic region to its one real composer control', async () => {
+  const dom = install(`
+    <main>
+      <div role="region" aria-label="创建帖子">
+        <a role="link" aria-label="Tianxing Bai timeline"></a>
+        <div role="button">Tianxing Bai，分享你的新鲜事吧！</div>
+        <div role="button">直播视频</div>
+        <div role="button">照片/视频</div>
+        <div role="button">感受/活动</div>
+      </div>
+    </main>
+  `);
+  const region = dom.window.document.querySelector('[role="region"]')!;
+  const composer = dom.window.document.querySelectorAll('[role="button"]')[0]!;
+  setRect(region, { left: 20, top: 40, right: 1_000, bottom: 240 });
+  setRect(composer, { left: 240, top: 100, right: 840, bottom: 160 });
+
+  const entry = await run({ kind: 'publish_entry_probe', params: {} });
+  assert.equal(entry.output.value.ok, true);
+  assert.equal(entry.output.value.cx, 540);
+  assert.equal(entry.output.value.cy, 130);
+});
+
+test('Facebook publish entry deduplicates matching label evidence inside one actionable control', async () => {
+  const dom = install(`
+    <main>
+      <div role="region" aria-label="创建帖子">
+        <button><span aria-label="Tianxing Bai，分享你的新鲜事吧！"></span></button>
+      </div>
+    </main>
+  `);
+  const button = dom.window.document.querySelector('button')!;
+  setRect(button, { left: 300, top: 80, right: 900, bottom: 140 });
+
+  const entry = await run({ kind: 'publish_entry_probe', params: {} });
+  assert.equal(entry.output.value.ok, true);
+  assert.equal(entry.output.value.cx, 600);
+  assert.equal(entry.output.value.cy, 110);
+});
+
+test('Facebook publish entry preserves ambiguity for multiple real controls in one semantic region', async () => {
+  install(`
+    <main>
+      <div role="region" aria-label="创建帖子">
+        <button aria-label="Create post"></button>
+        <button>Write something</button>
+      </div>
+    </main>
+  `);
+
+  const entry = await run({ kind: 'publish_entry_probe', params: {} });
+  assert.equal(entry.output.value.ok, false);
+  assert.equal(entry.output.value.reason, 'ambiguous_target');
+});
+
+test('Facebook publish entry does not click a matching non-actionable container without a real control', async () => {
+  install('<main><div role="region" aria-label="创建帖子">Tianxing Bai，分享你的新鲜事吧！</div></main>');
+
+  const entry = await run({ kind: 'publish_entry_probe', params: {} });
+  assert.equal(entry.output.value.ok, false);
+  assert.equal(entry.output.value.reason, 'composer_entry_not_found');
+});
+
 test('Facebook publish keeps unsupported generic atoms honest and captures one matching post', async () => {
   install('<main><div role="dialog"><div role="textbox" contenteditable="true"></div></div></main>');
   const wrongTarget = await run({

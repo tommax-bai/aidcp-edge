@@ -3,6 +3,7 @@
   const publishSubmitLabel=/^(post|发布|發佈|发帖|đăng|publicar|compartir)$/i;
   const publishSubmittedLabel=/(your post is being processed|your post has been shared|post shared|已发布|发布中|發佈中|đã đăng|publicación compartida)/i;
   const publishControlNoise=/(comment|评论|reply|回复)/i;
+  const publishEntryActionable='button,[role="button"],a[role="link"]';
   const publishVisible=(el)=>{
     if(!visible(el))return false;
     const rect=el.getBoundingClientRect();
@@ -42,19 +43,32 @@
     const nodes=all('[role="region"][aria-label],button,[role="button"],div[aria-label],span[aria-label],a[role="link"]',document).filter(publishVisible);
     const seen=new Set();
     const candidates=[];
+    const addCandidate=(target)=>{
+      if(!target||!publishVisible(target)||seen.has(target))return;
+      if(target.closest&&target.closest('[role="menu"]'))return;
+      if(publishControlNoise.test(`${publishLabel(target)} ${text(target,512)}`))return;
+      seen.add(target);
+      candidates.push(target);
+    };
     for(const element of nodes){
       if(element.closest&&element.closest('[role="menu"]'))continue;
       const accessible=publishLabel(element);
       const rendered=text(element,512);
       const source=`${accessible} ${rendered}`;
       if(!publishEntryLabel.test(source)||publishControlNoise.test(source))continue;
-      const target=element.matches&&element.matches('button,[role="button"],a[role="link"]')
+      const target=element.matches&&element.matches(publishEntryActionable)
         ?element
-        :(element.closest&&element.closest('button,[role="button"],a[role="link"]'))||element;
-      if(!publishVisible(target)||seen.has(target))continue;
-      if(publishControlNoise.test(`${publishLabel(target)} ${text(target,512)}`))continue;
-      seen.add(target);
-      candidates.push(target);
+        :(element.closest&&element.closest(publishEntryActionable));
+      if(target){
+        addCandidate(target);
+        continue;
+      }
+      for(const descendant of all(publishEntryActionable,element)){
+        const descendantSource=`${publishLabel(descendant)} ${text(descendant,512)}`;
+        if(publishEntryLabel.test(descendantSource)&&!publishControlNoise.test(descendantSource)){
+          addCandidate(descendant);
+        }
+      }
     }
     if(!candidates.length)return {ok:false,reason:'composer_entry_not_found'};
     if(candidates.length!==1)return {ok:false,reason:'ambiguous_target'};
