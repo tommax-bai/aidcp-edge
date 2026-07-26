@@ -3,6 +3,11 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const {
+  requireSuccessfulCommand,
+  runCommand,
+  verifySignedMacArtifact,
+} = require('./macos-signed-artifact.cjs');
 
 const GOST_VERSION = '3.2.6';
 const GOST_ARCHIVE_SHA256 = Object.freeze({
@@ -14,7 +19,7 @@ function sha256(contents) {
   return crypto.createHash('sha256').update(contents).digest('hex');
 }
 
-function verifyGostArtifact(resourceDir, {
+function readGostArtifact(resourceDir, {
   platform = process.platform,
   arch = process.arch,
 } = {}) {
@@ -36,9 +41,6 @@ function verifyGostArtifact(resourceDir, {
   }
   const binaryPath = path.join(resourceDir, manifest.binary);
   fs.accessSync(binaryPath, fs.constants.R_OK | fs.constants.X_OK);
-  if (sha256(fs.readFileSync(binaryPath)) !== manifest.binarySha256) {
-    throw new Error('GOST artifact checksum mismatch');
-  }
   const license = fs.readFileSync(path.join(resourceDir, manifest.license), 'utf8');
   if (!license.startsWith('MIT License\n\nCopyright (c) 2016 ginuerzh')) {
     throw new Error('GOST license is missing or invalid');
@@ -46,9 +48,45 @@ function verifyGostArtifact(resourceDir, {
   return { binaryPath, manifest };
 }
 
+function verifyGostArtifact(resourceDir, target = {}) {
+  const artifact = readGostArtifact(resourceDir, target);
+  if (sha256(fs.readFileSync(artifact.binaryPath)) !== artifact.manifest.binarySha256) {
+    throw new Error('GOST artifact checksum mismatch');
+  }
+  return artifact;
+}
+
+function verifyPackagedGostArtifact(resourceDir, {
+  appBundlePath,
+  platform = process.platform,
+  arch = process.arch,
+  run = runCommand,
+} = {}) {
+  if (platform !== 'darwin') {
+    throw new Error(`signed packaged GOST verification is unsupported on ${platform}`);
+  }
+  const artifact = readGostArtifact(resourceDir, { platform, arch });
+  verifySignedMacArtifact(artifact.binaryPath, {
+    appBundlePath,
+    arch,
+    identifier: 'gost',
+    run,
+  });
+  const versionOutput = requireSuccessfulCommand(
+    run(artifact.binaryPath, ['-V']),
+    'GOST version verification',
+  );
+  if (!new RegExp(`^gost v${GOST_VERSION.replaceAll('.', '\\.')}\\b`, 'm').test(versionOutput)) {
+    throw new Error(`GOST version mismatch: expected ${GOST_VERSION}`);
+  }
+  return artifact;
+}
+
 module.exports = {
   GOST_ARCHIVE_SHA256,
   GOST_VERSION,
+  readGostArtifact,
   sha256,
   verifyGostArtifact,
+  verifyPackagedGostArtifact,
 };

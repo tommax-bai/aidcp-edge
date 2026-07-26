@@ -75,3 +75,17 @@ test('gost binary resolver rejects a tampered staged artifact', async () => {
     env: {},
   }), { ok: false, reason: 'proxy_chain_binary_missing' });
 });
+
+test('packaged resolver ignores an external GOST override', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aidcp-gost-packaged-override-'));
+  const explicit = join(root, 'external-gost');
+  await writeFile(explicit, '#!/bin/sh\nexit 0\n');
+  await chmod(explicit, 0o755);
+  assert.deepEqual(binary.resolveGostBinaryPath({
+    resourcesPath: join(root, 'AIDCP.app', 'Contents', 'Resources'),
+    isPackaged: true,
+    platform: 'darwin',
+    arch: 'arm64',
+    env: { AIDCP_GOST_BINARY: explicit },
+  }), { ok: false, reason: 'proxy_chain_binary_missing' });
+});

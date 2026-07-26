@@ -76,7 +76,10 @@ const {
 } = require('./persona-notice.cjs');
 const { validatePersonaKeywordSelections } = require('./persona-request-validation.cjs');
 const { resolveTrayIconPath } = require('./tray-icon.cjs');
-const { verifyNativePageEngineArtifact } = require('./native-page-engine-artifact.cjs');
+const {
+  verifyNativePageEngineArtifact,
+  verifyPackagedNativePageEngineArtifact,
+} = require('./native-page-engine-artifact.cjs');
 
 // ── 实例级 userData 隔离（change edge-multi-instance-userdata-isolation）──────
 // 同机并行多个监督者（如一个连 dev、一个连 ol）时，各实例需独立的单实例锁 /
@@ -3895,7 +3898,11 @@ function spawnEdgeChild(handle, {
   const nativeArtifactRequiredAtSpawn = normalizePlatform(handle.platform) !== 'wechat_channels';
   if (nativeArtifactRequiredAtSpawn || app.isPackaged || fs.existsSync(nativeResourceDir)) {
     try {
-      const artifact = verifyNativePageEngineArtifact(nativeResourceDir);
+      const artifact = app.isPackaged && process.platform === 'darwin'
+        ? verifyPackagedNativePageEngineArtifact(nativeResourceDir, {
+          appBundlePath: path.resolve(process.resourcesPath, '..', '..'),
+        })
+        : verifyNativePageEngineArtifact(nativeResourceDir);
       spawnEnv.AIDCP_NATIVE_PAGE_ENGINE_BINARY = artifact.binaryPath;
     } catch (error) {
       const reason = `Native Page Engine 包校验失败：${error instanceof Error ? error.message : String(error)}`;

@@ -2,7 +2,10 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { verifyGostArtifact } = require('./gost-artifact.cjs');
+const {
+  verifyGostArtifact,
+  verifyPackagedGostArtifact,
+} = require('./gost-artifact.cjs');
 
 const GOST_EXECUTABLE = process.platform === 'win32' ? 'gost.exe' : 'gost';
 
@@ -14,7 +17,7 @@ function resolveGostBinaryPath({
   arch = process.arch,
   env = process.env,
 } = {}) {
-  const explicit = String((env && env.AIDCP_GOST_BINARY) || '').trim();
+  const explicit = isPackaged ? '' : String((env && env.AIDCP_GOST_BINARY) || '').trim();
   if (explicit) {
     const candidate = path.resolve(explicit);
     try {
@@ -31,10 +34,16 @@ function resolveGostBinaryPath({
       : '';
   if (resourceDir) {
     try {
-      const verified = verifyGostArtifact(resourceDir, { platform, arch });
+      const verified = isPackaged && platform === 'darwin'
+        ? verifyPackagedGostArtifact(resourceDir, {
+          appBundlePath: path.resolve(resourcesPath, '..', '..'),
+          platform,
+          arch,
+        })
+        : verifyGostArtifact(resourceDir, { platform, arch });
       return { ok: true, binaryPath: verified.binaryPath };
     } catch {
-      // Missing, stale, non-executable, or checksum-mismatched artifacts all fail closed.
+      // Missing, stale, non-executable, or untrusted artifacts all fail closed.
     }
   }
   return { ok: false, reason: 'proxy_chain_binary_missing' };

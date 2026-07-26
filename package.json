@@ -43,6 +43,7 @@
     "appId": "com.aidcp.edge",
     "productName": "AIDCP",
     "afterPack": "scripts/after-pack.cjs",
+    "afterSign": "scripts/after-sign.cjs",
     "directories": {
       "output": "dist-electron"
     },

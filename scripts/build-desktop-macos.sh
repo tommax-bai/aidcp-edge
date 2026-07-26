@@ -68,6 +68,7 @@ verify_trust_gates() {
     case "$artifact" in
       *.app)
         echo "Verifying app bundle $artifact"
+        node scripts/verify-signed-macos-artifacts.cjs "$artifact"
         native_engine="$artifact/Contents/Resources/native-page-engine/aidcp-page-engine"
         if [ ! -x "$native_engine" ]; then
           echo "Missing executable Native Page Engine in $artifact" >&2
