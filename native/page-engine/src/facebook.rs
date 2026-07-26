@@ -7,7 +7,7 @@ use crate::model::{
 use crate::probe::ProbeResult;
 use crate::protocol::{EffectPhase, NativeCommand};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use url::Url;
 
 include!(concat!(
@@ -255,6 +255,14 @@ pub struct FacebookJoinProbe {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookJoinClickResult {
+    pub clicked: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FacebookPublishSubmitProbe {
     pub ok: bool,
     #[serde(default)]
@@ -337,6 +345,10 @@ pub fn comment_ack_probe_expression(
 
 pub fn join_probe_expression() -> Result<String, EngineError> {
     internal_expression("join_probe", json!({}))
+}
+
+pub fn join_click_expression() -> Result<String, EngineError> {
+    internal_expression("join_click", json!({}))
 }
 
 pub fn publish_entry_probe_expression() -> Result<String, EngineError> {
@@ -455,6 +467,11 @@ pub fn comment_ack_probe_from_cdp(result: &Value) -> Result<FacebookCommentAckPr
 pub fn join_probe_from_cdp(result: &Value) -> Result<FacebookJoinProbe, EngineError> {
     let result = result_from_cdp(result)?;
     typed_internal_value(result.output, "join_probe")
+}
+
+pub fn join_click_from_cdp(result: &Value) -> Result<FacebookJoinClickResult, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "join_click")
 }
 
 pub fn publish_submit_probe_from_cdp(

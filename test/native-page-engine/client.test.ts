@@ -68,6 +68,40 @@ test('executes only a typed high-level command and preserves the tagged result',
   await session.close();
 });
 
+test('permits 90 seconds only for a Facebook group_join command', async () => {
+  const session = await client('success').openSession({
+    ...input,
+    platform: 'facebook',
+    timeoutMs: 90_000,
+    sessionId: 'session-facebook-join',
+    taskId: 'task-facebook-join',
+  });
+  await session.execute({
+    kind: 'group_join',
+    params: { groupUrl: 'https://www.facebook.com/groups/42', click: true },
+  }, 90_000);
+  await assert.rejects(
+    session.execute({ kind: 'page_probe', params: {} }, 90_000),
+    (error: unknown) => {
+      assert.ok(error instanceof NativePageEngineError);
+      assert.equal(error.code, 'invalid_request');
+      return true;
+    },
+  );
+  await session.close();
+
+  await assert.rejects(client('success').openSession({
+    ...input,
+    timeoutMs: 90_000,
+    sessionId: 'session-xhs-long',
+    taskId: 'task-xhs-long',
+  }), (error: unknown) => {
+    assert.ok(error instanceof NativePageEngineError);
+    assert.equal(error.code, 'invalid_request');
+    return true;
+  });
+});
+
 test('rejects a ready engine whose capability manifest differs from the packaged contract', async () => {
   const strict = new NativePageEngineClient({
     binaryPath: process.execPath,

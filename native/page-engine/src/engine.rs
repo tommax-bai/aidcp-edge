@@ -18,8 +18,8 @@ use crate::xhs;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
@@ -31,6 +31,12 @@ const FACEBOOK_FEED_SETTLE_NAV: Duration = Duration::from_secs(6);
 const FACEBOOK_FEED_SETTLE_IN_PLACE: Duration = Duration::from_millis(3_500);
 const FACEBOOK_FEED_SCROLL_ROUNDS: usize = 8;
 const FACEBOOK_REFRESH_RELOAD_FLOOR_MS: u64 = 180_000;
+const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
+const FACEBOOK_GROUP_JOIN_TIMEOUT_MS: u64 = 90_000;
+const FACEBOOK_JOIN_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const FACEBOOK_JOIN_HYDRATION_SETTLE: Duration = Duration::from_secs(2);
+const FACEBOOK_JOIN_POST_CLICK_SETTLE: Duration = Duration::from_millis(1_500);
+const FACEBOOK_JOIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -419,11 +425,14 @@ async fn execute_platform_command(
     if cancellation.load(Ordering::Acquire) {
         return StoredCommandResult::failed(cancelled_before_dispatch());
     }
-    let remaining = match remaining_budget(request.deadline_unix_ms, session.timeout_ms) {
+    let remaining = match remaining_budget(
+        request.deadline_unix_ms,
+        command_timeout_ms(session, &request.command),
+    ) {
         Ok(value) => value,
         Err(error) => return StoredCommandResult::failed(error),
     };
-    let operation = execute_platform_command_once(session, &request.command);
+    let operation = execute_platform_command_once(session, &request.command, Some(cancellation));
     let result = if write {
         tokio::time::timeout(remaining, operation)
             .await
@@ -463,7 +472,13 @@ async fn execute_platform_command(
                 .reconnect(request.deadline_unix_ms, cancellation)
                 .await
             {
-                Ok(()) => match execute_platform_command_once(session, &request.command).await {
+                Ok(()) => match execute_platform_command_once(
+                    session,
+                    &request.command,
+                    Some(cancellation),
+                )
+                .await
+                {
                     Ok((phase, output)) => StoredCommandResult {
                         effect_phase: phase,
                         output: Some(output),
@@ -475,7 +490,7 @@ async fn execute_platform_command(
             }
         }
         Ok(Err(error)) => StoredCommandResult::failed_at(
-            if write {
+            if write && error.code != ErrorCode::Cancelled {
                 EffectPhase::Ambiguous
             } else {
                 EffectPhase::NotStarted
@@ -496,6 +511,7 @@ async fn execute_platform_command(
 async fn execute_platform_command_once(
     session: &mut EngineSession,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     match session.platform {
         Platform::Xiaohongshu => execute_xhs_command_once(session, command).await,
@@ -517,13 +533,14 @@ async fn execute_platform_command_once(
                 "native WeChat adapter does not support this command",
             )),
         },
-        Platform::Facebook => execute_facebook_command_once(session, command).await,
+        Platform::Facebook => execute_facebook_command_once(session, command, cancellation).await,
     }
 }
 
 async fn execute_facebook_command_once(
     session: &mut EngineSession,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     use NativeCommand::*;
     match command {
@@ -582,9 +599,19 @@ async fn execute_facebook_command_once(
         }
         GroupJoin(params) => {
             let url = validated_facebook_group_url(&params.group_url)?;
-            session.cdp.navigate(url.as_str()).await?;
-            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
-            execute_facebook_group_join(session, params, command).await
+            let reuse_current_page = if params.click == Some(true) {
+                probe_facebook_join(session)
+                    .await
+                    .ok()
+                    .and_then(|probe| probe.observation.group_url)
+                    .is_some_and(|current| current == url.as_str())
+            } else {
+                false
+            };
+            if !reuse_current_page {
+                session.cdp.navigate(url.as_str()).await?;
+            }
+            execute_facebook_group_join(session, params, command, cancellation).await
         }
         PageScroll(params) if params.reason.as_deref() == Some("empty_feed_reels_fallback") => {
             session
@@ -1124,25 +1151,51 @@ async fn execute_facebook_group_join(
     session: &mut EngineSession,
     params: &crate::command::GroupJoinParams,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     if let Some(output) = ensure_facebook_action_gate(session, command).await? {
         return Ok((EffectPhase::NotStarted, output));
     }
-    let readiness_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    if facebook_join_cancelled(cancellation) {
+        return Err(cancelled_before_dispatch());
+    }
+    let readiness_deadline = tokio::time::Instant::now() + FACEBOOK_JOIN_READY_TIMEOUT;
     let before = loop {
+        if facebook_join_cancelled(cancellation) {
+            return Err(cancelled_before_dispatch());
+        }
         let probe = probe_facebook_join(session).await?;
-        if probe.joined
-            || probe.pending
-            || probe.questionnaire
-            || probe.found
-            || probe.ambiguous
-            || tokio::time::Instant::now() >= readiness_deadline
-        {
+        if facebook_join_readiness_decisive(
+            &probe,
+            tokio::time::Instant::now() >= readiness_deadline,
+        ) {
             break probe;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        if facebook_join_sleep_or_cancel(Duration::from_millis(500), cancellation).await {
+            return Err(cancelled_before_dispatch());
+        }
     };
-    if before.joined {
+    if before.observation.login_required == Some(true) {
+        return Ok(facebook_join_result(
+            EffectPhase::NotStarted,
+            false,
+            "login_required",
+            false,
+            before.observation,
+            None,
+        ));
+    }
+    if before.observation.captcha_detected == Some(true) {
+        return Ok(facebook_join_result(
+            EffectPhase::NotStarted,
+            false,
+            "blocked_by_captcha",
+            false,
+            before.observation,
+            None,
+        ));
+    }
+    if before.joined && !before.found {
         return Ok(facebook_join_result(
             EffectPhase::Confirmed,
             false,
@@ -1202,43 +1255,129 @@ async fn execute_facebook_group_join(
             None,
         ));
     };
-    dispatch_facebook_click(session, x, y).await?;
+    if facebook_join_sleep_or_cancel(FACEBOOK_JOIN_HYDRATION_SETTLE, cancellation).await {
+        return Err(cancelled_before_dispatch());
+    }
+    let _ = session
+        .cdp
+        .dispatch_mouse("mouseMoved", x, y, "none", 0)
+        .await;
+    if facebook_join_cancelled(cancellation) {
+        return Err(cancelled_before_dispatch());
+    }
+    let click = execute_facebook_join_click(session).await?;
+    if !click.clicked {
+        let reason = click.reason.as_deref().unwrap_or("no_button");
+        if matches!(
+            reason,
+            "login_required" | "blocked_by_captcha" | "blocked_by_unknown"
+        ) {
+            return Ok(facebook_join_result(
+                EffectPhase::NotStarted,
+                false,
+                reason,
+                false,
+                before.observation,
+                None,
+            ));
+        }
+        let retryable = matches!(
+            reason,
+            "scope_unresolved" | "no_target_in_scope" | "ambiguous_target"
+        );
+        return Ok(facebook_join_result(
+            EffectPhase::NotStarted,
+            false,
+            if retryable { "not_ready" } else { "no_button" },
+            false,
+            before.observation,
+            None,
+        ));
+    }
     let initial_observation = before.observation;
-    let verify_deadline = tokio::time::Instant::now() + Duration::from_millis(18_500);
+    if facebook_join_sleep_or_cancel(FACEBOOK_JOIN_POST_CLICK_SETTLE, cancellation).await {
+        return Ok(facebook_join_result(
+            EffectPhase::Ambiguous,
+            false,
+            "preempted_by_task",
+            true,
+            initial_observation,
+            None,
+        ));
+    }
+    let verify_deadline = tokio::time::Instant::now() + FACEBOOK_JOIN_VERIFY_TIMEOUT;
     loop {
         let after = probe_facebook_join(session).await?;
         let structural_transition = initial_observation.composer_present != Some(true)
             && after.observation.composer_present == Some(true)
-            && after.observation.join_cta_present != Some(true);
-        if after.joined || structural_transition {
-            return Ok(facebook_join_result(
-                EffectPhase::Confirmed,
-                true,
-                "",
-                true,
-                initial_observation,
-                Some(after.observation),
-            ));
-        }
-        if after.pending {
-            return Ok(facebook_join_result(
-                EffectPhase::Confirmed,
-                false,
-                "pending",
-                true,
-                initial_observation,
-                Some(after.observation),
-            ));
-        }
-        if after.questionnaire {
-            return Ok(facebook_join_result(
-                EffectPhase::Confirmed,
-                false,
-                "questionnaire_required",
-                true,
-                initial_observation,
-                Some(after.observation),
-            ));
+            && after.observation.join_cta_present != Some(true)
+            && after.observation.document_ready.as_deref() != Some("loading");
+        match facebook_join_post_decision(
+            &after,
+            structural_transition,
+            facebook_join_cancelled(cancellation),
+        ) {
+            FacebookJoinPostDecision::Login => {
+                return Ok(facebook_join_result(
+                    EffectPhase::Ambiguous,
+                    false,
+                    "login_required",
+                    true,
+                    initial_observation,
+                    Some(after.observation),
+                ));
+            }
+            FacebookJoinPostDecision::Captcha => {
+                return Ok(facebook_join_result(
+                    EffectPhase::Ambiguous,
+                    false,
+                    "blocked_by_captcha",
+                    true,
+                    initial_observation,
+                    Some(after.observation),
+                ));
+            }
+            FacebookJoinPostDecision::Pending => {
+                return Ok(facebook_join_result(
+                    EffectPhase::Confirmed,
+                    false,
+                    "pending",
+                    true,
+                    initial_observation,
+                    Some(after.observation),
+                ));
+            }
+            FacebookJoinPostDecision::Questionnaire => {
+                return Ok(facebook_join_result(
+                    EffectPhase::Confirmed,
+                    false,
+                    "questionnaire_required",
+                    true,
+                    initial_observation,
+                    Some(after.observation),
+                ));
+            }
+            FacebookJoinPostDecision::Joined => {
+                return Ok(facebook_join_result(
+                    EffectPhase::Confirmed,
+                    true,
+                    "",
+                    true,
+                    initial_observation,
+                    Some(after.observation),
+                ));
+            }
+            FacebookJoinPostDecision::Preempted => {
+                return Ok(facebook_join_result(
+                    EffectPhase::Ambiguous,
+                    false,
+                    "preempted_by_task",
+                    true,
+                    initial_observation,
+                    Some(after.observation),
+                ));
+            }
+            FacebookJoinPostDecision::Continue => {}
         }
         if tokio::time::Instant::now() >= verify_deadline {
             return Ok(facebook_join_result(
@@ -1250,7 +1389,84 @@ async fn execute_facebook_group_join(
                 Some(after.observation),
             ));
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        if facebook_join_sleep_or_cancel(Duration::from_millis(500), cancellation).await {
+            return Ok(facebook_join_result(
+                EffectPhase::Ambiguous,
+                false,
+                "preempted_by_task",
+                true,
+                initial_observation,
+                Some(after.observation),
+            ));
+        }
+    }
+}
+
+fn facebook_join_readiness_decisive(
+    probe: &facebook::FacebookJoinProbe,
+    deadline_reached: bool,
+) -> bool {
+    probe.observation.login_required == Some(true)
+        || probe.observation.captcha_detected == Some(true)
+        || probe.joined
+        || probe.pending
+        || probe.questionnaire
+        || probe.ambiguous
+        || (probe.found && probe.observation.document_ready.as_deref() != Some("loading"))
+        || deadline_reached
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FacebookJoinPostDecision {
+    Login,
+    Captcha,
+    Pending,
+    Questionnaire,
+    Joined,
+    Preempted,
+    Continue,
+}
+
+fn facebook_join_post_decision(
+    probe: &facebook::FacebookJoinProbe,
+    structural_transition: bool,
+    cancelled: bool,
+) -> FacebookJoinPostDecision {
+    if probe.observation.login_required == Some(true) {
+        FacebookJoinPostDecision::Login
+    } else if probe.observation.captcha_detected == Some(true) {
+        FacebookJoinPostDecision::Captcha
+    } else if probe.pending {
+        FacebookJoinPostDecision::Pending
+    } else if probe.questionnaire {
+        FacebookJoinPostDecision::Questionnaire
+    } else if probe.joined || structural_transition {
+        FacebookJoinPostDecision::Joined
+    } else if cancelled {
+        FacebookJoinPostDecision::Preempted
+    } else {
+        FacebookJoinPostDecision::Continue
+    }
+}
+
+fn facebook_join_cancelled(cancellation: Option<&AtomicBool>) -> bool {
+    cancellation.is_some_and(|value| value.load(Ordering::Acquire))
+}
+
+async fn facebook_join_sleep_or_cancel(
+    duration: Duration,
+    cancellation: Option<&AtomicBool>,
+) -> bool {
+    let Some(cancellation) = cancellation else {
+        tokio::time::sleep(duration).await;
+        return false;
+    };
+    if cancellation.load(Ordering::Acquire) {
+        return true;
+    }
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => false,
+        _ = wait_for_cancellation(cancellation) => true,
     }
 }
 
@@ -2014,6 +2230,14 @@ async fn probe_facebook_join(
     let expression = facebook::join_probe_expression()?;
     let raw = session.cdp.evaluate(&expression, true).await?;
     facebook::join_probe_from_cdp(&raw)
+}
+
+async fn execute_facebook_join_click(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookJoinClickResult, EngineError> {
+    let expression = facebook::join_click_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::join_click_from_cdp(&raw)
 }
 
 async fn probe_facebook_publish_entry(
@@ -3371,6 +3595,20 @@ fn remaining_budget(
     Ok(Duration::from_millis(remaining_ms.min(session_timeout_ms)))
 }
 
+fn command_timeout_ms(session: &EngineSession, command: &NativeCommand) -> u64 {
+    session
+        .timeout_ms
+        .min(command_timeout_ceiling(session.platform, command))
+}
+
+fn command_timeout_ceiling(platform: Platform, command: &NativeCommand) -> u64 {
+    if platform == Platform::Facebook && matches!(command, NativeCommand::GroupJoin(_)) {
+        FACEBOOK_GROUP_JOIN_TIMEOUT_MS
+    } else {
+        DEFAULT_COMMAND_TIMEOUT_MS
+    }
+}
+
 fn cancelled_before_dispatch() -> EngineError {
     EngineError::new(
         ErrorCode::Cancelled,
@@ -3406,6 +3644,85 @@ mod tests {
     }
 
     #[test]
+    fn long_command_ceiling_is_facebook_group_join_only() {
+        let join = NativeCommand::GroupJoin(crate::command::GroupJoinParams {
+            group_url: "https://www.facebook.com/groups/42".to_owned(),
+            click: Some(true),
+            reason: None,
+            think_ms: None,
+        });
+        let probe = NativeCommand::PageProbe(crate::command::EmptyParams::default());
+        assert_eq!(
+            command_timeout_ceiling(Platform::Facebook, &join),
+            FACEBOOK_GROUP_JOIN_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ceiling(Platform::Facebook, &probe),
+            DEFAULT_COMMAND_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ceiling(Platform::Xiaohongshu, &join),
+            DEFAULT_COMMAND_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn facebook_join_loading_control_is_not_ready_without_a_higher_priority_state() {
+        let mut probe = facebook::FacebookJoinProbe {
+            observation: crate::model::FacebookGroupJoinObservation {
+                document_ready: Some("loading".to_owned()),
+                ..Default::default()
+            },
+            joined: false,
+            pending: false,
+            questionnaire: false,
+            found: true,
+            ambiguous: false,
+            cx: Some(50.0),
+            cy: Some(20.0),
+        };
+        assert!(!facebook_join_readiness_decisive(&probe, false));
+
+        probe.observation.document_ready = Some("interactive".to_owned());
+        assert!(facebook_join_readiness_decisive(&probe, false));
+
+        probe.observation.document_ready = Some("loading".to_owned());
+        probe.pending = true;
+        assert!(facebook_join_readiness_decisive(&probe, false));
+    }
+
+    #[test]
+    fn facebook_join_post_facts_win_over_simultaneous_cancellation() {
+        let mut probe = facebook::FacebookJoinProbe {
+            observation: crate::model::FacebookGroupJoinObservation::default(),
+            joined: true,
+            pending: false,
+            questionnaire: false,
+            found: false,
+            ambiguous: false,
+            cx: None,
+            cy: None,
+        };
+        assert_eq!(
+            facebook_join_post_decision(&probe, false, true),
+            FacebookJoinPostDecision::Joined
+        );
+
+        probe.joined = false;
+        probe.observation.captcha_detected = Some(true);
+        assert_eq!(
+            facebook_join_post_decision(&probe, false, true),
+            FacebookJoinPostDecision::Captcha
+        );
+
+        probe.observation.captcha_detected = Some(false);
+        assert_eq!(
+            facebook_join_post_decision(&probe, false, true),
+            FacebookJoinPostDecision::Preempted
+        );
+    }
+
+    #[test]
     fn direct_navigation_accepts_only_bound_xiaohongshu_targets() {
         let accepted = validated_note_url(
             "https://www.xiaohongshu.com/explore/note_123?xsec_token=opaque",
@@ -3414,16 +3731,20 @@ mod tests {
         .expect("allowlisted note URL");
         assert_eq!(accepted.path(), "/explore/note_123");
         assert!(validated_note_url("https://example.com/explore/note_123", None).is_err());
-        assert!(validated_note_url(
-            "https://www.xiaohongshu.com/explore/another",
-            Some("note_123")
-        )
-        .is_err());
-        assert!(validated_note_url(
-            "https://www.xiaohongshu.com.evil.test/explore/note_123",
-            None
-        )
-        .is_err());
+        assert!(
+            validated_note_url(
+                "https://www.xiaohongshu.com/explore/another",
+                Some("note_123")
+            )
+            .is_err()
+        );
+        assert!(
+            validated_note_url(
+                "https://www.xiaohongshu.com.evil.test/explore/note_123",
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

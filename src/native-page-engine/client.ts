@@ -8,6 +8,8 @@ import { isAbsolute } from 'node:path';
 
 export const NATIVE_PAGE_ENGINE_PROTOCOL_VERSION = 2;
 const DEFAULT_NATIVE_TIMEOUT_MS = 5_000;
+const MAX_NATIVE_TIMEOUT_MS = 30_000;
+const MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 90_000;
 const MAX_STDERR_CHARS = 2_048;
 const MAX_RECORD_CHARS = 64 * 1024;
 
@@ -468,6 +470,7 @@ export class NativePageEngineSession {
     readonly taskId: string,
     readonly info: NativePageSessionInfo,
     private readonly processTimeoutMs: number,
+    readonly platform: NativePagePlatform,
   ) {}
 
   async probePage(
@@ -494,7 +497,7 @@ export class NativePageEngineSession {
     signal?: AbortSignal,
   ): Promise<NativePageCommandExecution> {
     this.assertOpen();
-    validateTimeout(timeoutMs);
+    validateCommandTimeout(this.platform, command, timeoutMs);
     if (signal?.aborted) {
       throw new NativePageEngineError('cancelled', 'Native page command cancelled before dispatch', {
         effectPhase: 'not_started',
@@ -587,7 +590,10 @@ export class NativePageEngineClient {
   }
 
   async openSession(input: NativePageSessionInput): Promise<NativePageEngineSession> {
-    validateProbeInput(input);
+    validateProbeInput(
+      input,
+      input.platform === 'facebook' ? MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS : MAX_NATIVE_TIMEOUT_MS,
+    );
     validateIdentifier(input.sessionId, 'sessionId');
     validateIdentifier(input.taskId, 'taskId');
     const transport = await NativeProcessTransport.start(this.options);
@@ -616,6 +622,7 @@ export class NativePageEngineClient {
         input.taskId,
         info,
         this.options.processTimeoutMs ?? DEFAULT_NATIVE_TIMEOUT_MS + 1_000,
+        input.platform,
       );
     } catch (error) {
       transport.terminate();
@@ -625,6 +632,7 @@ export class NativePageEngineClient {
 
   /** One-shot development probe retained as a wrapper over the production v2 session lifecycle. */
   async probePage(input: NativePageProbeInput): Promise<NativePageProbeResult> {
+    validateProbeInput(input, MAX_NATIVE_TIMEOUT_MS);
     const suffix = randomUUID().replaceAll('-', '');
     const session = await this.openSession({
       ...input,
@@ -756,20 +764,31 @@ function nativeResponseError(value: { error?: ErrorRecord; effectPhase?: NativeE
   );
 }
 
-function validateProbeInput(input: NativePageProbeInput): void {
+function validateProbeInput(input: NativePageProbeInput, maxTimeoutMs = MAX_NATIVE_TIMEOUT_MS): void {
   if (!input.host || input.host.length > 255) {
     throw new NativePageEngineError('invalid_request', 'Invalid DevTools host');
   }
   if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65_535) {
     throw new NativePageEngineError('invalid_request', 'Invalid DevTools port');
   }
-  validateTimeout(input.timeoutMs ?? DEFAULT_NATIVE_TIMEOUT_MS);
+  validateTimeout(input.timeoutMs ?? DEFAULT_NATIVE_TIMEOUT_MS, maxTimeoutMs);
 }
 
-function validateTimeout(timeoutMs: number): void {
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 50 || timeoutMs > 30_000) {
+function validateTimeout(timeoutMs: number, maxTimeoutMs = MAX_NATIVE_TIMEOUT_MS): void {
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 50 || timeoutMs > maxTimeoutMs) {
     throw new NativePageEngineError('invalid_request', 'Invalid native operation timeout');
   }
+}
+
+function validateCommandTimeout(
+  platform: NativePagePlatform,
+  command: NativePageCommand,
+  timeoutMs: number,
+): void {
+  const maxTimeoutMs = platform === 'facebook' && command.kind === 'group_join'
+    ? MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS
+    : MAX_NATIVE_TIMEOUT_MS;
+  validateTimeout(timeoutMs, maxTimeoutMs);
 }
 
 function validateIdentifier(value: string, name: string): void {

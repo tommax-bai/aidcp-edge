@@ -1,6 +1,6 @@
 use aidcp_page_engine::command::{
-    FollowParams, IdentityCaptureParams, NoteInteractionParams, NoteOpenParams, PageScrollParams,
-    ReasonParams,
+    FollowParams, GroupJoinParams, IdentityCaptureParams, NoteInteractionParams, NoteOpenParams,
+    PageScrollParams, ReasonParams,
 };
 use aidcp_page_engine::engine::{CommandOutput, Engine};
 use aidcp_page_engine::error::ErrorCode;
@@ -325,6 +325,122 @@ async fn facebook_reel_scroll_uses_one_active_video_wheel_after_unchanged_arrow(
         .as_f64()
         .expect("wheel delta");
     assert!((70.0..=100.0).contains(&delta));
+}
+
+#[tokio::test]
+async fn facebook_group_join_reuses_the_current_page_and_uses_in_page_actuation() {
+    let (port, server) = spawn_facebook_group_join_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 90_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "facebook-join-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 10_000,
+            command: NativeCommand::GroupJoin(GroupJoinParams {
+                group_url: "https://www.facebook.com/groups/42".to_owned(),
+                click: Some(true),
+                reason: None,
+                think_ms: None,
+            }),
+        })
+        .await
+        .expect("Facebook group join");
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("join receipt") else {
+        panic!("expected join action receipt")
+    };
+    assert!(receipt.ok);
+    assert_eq!(receipt.clicked, Some(true));
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook join fake CDP");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Page.navigate"),
+        "click leg on the canonical group page must reuse the hydrated page"
+    );
+    assert!(requests.iter().any(|request| {
+        request["method"] == "Runtime.evaluate"
+            && request
+                .pointer("/params/expression")
+                .and_then(Value::as_str)
+                .is_some_and(|expression| expression.contains(r#""kind":"join_click""#))
+    }));
+    assert!(requests.iter().all(|request| {
+        request["method"] != "Input.dispatchMouseEvent"
+            || !matches!(
+                request.pointer("/params/type").and_then(Value::as_str),
+                Some("mousePressed" | "mouseReleased")
+            )
+    }));
+}
+
+#[tokio::test]
+async fn facebook_group_join_preserves_post_navigation_login_and_captcha_blockers() {
+    for (blocking_kind, expected_reason) in [
+        ("login", "login_required"),
+        ("captcha", "blocked_by_captcha"),
+    ] {
+        let (port, server) = spawn_facebook_group_blocker_cdp(blocking_kind).await;
+        let mut engine = Engine::default();
+        let mut open = session_open(port);
+        open.params.platform = Platform::Facebook;
+        open.params.timeout_ms = 90_000;
+        engine.open(&open).await.expect("open Facebook session");
+
+        let outcome = engine
+            .execute(&CommandRecord {
+                protocol_version: 2,
+                id: format!("facebook-join-{blocking_kind}"),
+                session_id: "session-1".to_owned(),
+                task_id: "browse-1".to_owned(),
+                command_id: 1,
+                deadline_unix_ms: unix_time_ms() + 5_000,
+                command: NativeCommand::GroupJoin(GroupJoinParams {
+                    group_url: "https://www.facebook.com/groups/42".to_owned(),
+                    click: Some(true),
+                    reason: None,
+                    think_ms: None,
+                }),
+            })
+            .await
+            .expect("blocked Facebook group join");
+
+        assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+        let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("blocked join receipt")
+        else {
+            panic!("expected blocked join action receipt")
+        };
+        assert!(!receipt.ok);
+        assert_eq!(receipt.reason.as_deref(), Some(expected_reason));
+        assert_eq!(receipt.clicked, None);
+
+        engine.shutdown().await;
+        let requests = server.await.expect("Facebook blocker fake CDP");
+        assert!(
+            requests
+                .iter()
+                .any(|request| request["method"] == "Page.navigate"),
+            "observe/current-page mismatch must navigate before blocker classification"
+        );
+        assert!(requests.iter().all(|request| {
+            request["method"] != "Runtime.evaluate"
+                || !request
+                    .pointer("/params/expression")
+                    .and_then(Value::as_str)
+                    .is_some_and(|expression| expression.contains(r#""kind":"join_click""#))
+        }));
+    }
 }
 
 #[tokio::test]
@@ -1013,6 +1129,253 @@ async fn spawn_facebook_identity_cdp() -> (u16, tokio::task::JoinHandle<Vec<Stri
         methods
     });
     (port, server)
+}
+
+async fn spawn_facebook_group_join_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/groups/42").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        let mut join_probes = 0_u32;
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let method = request["method"].as_str().unwrap_or_default();
+            let expression = request
+                .pointer("/params/expression")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let result = if method == "Runtime.evaluate"
+                && expression.contains(r#""kind":"join_probe""#)
+            {
+                join_probes += 1;
+                facebook_join_probe_cdp(join_probes >= 3)
+            } else if method == "Runtime.evaluate" && expression.contains(r#""kind":"page_probe""#)
+            {
+                facebook_join_page_probe_cdp()
+            } else if method == "Runtime.evaluate"
+                && expression.contains(r#""kind":"consent_probe""#)
+            {
+                json!({"result":{"value":router_result(
+                    "consent_probe",
+                    json!({
+                        "present": false,
+                        "acceptAll": null,
+                        "necessaryOnly": null,
+                        "acceptAllAmbiguous": false,
+                        "necessaryOnlyAmbiguous": false
+                    })
+                )}})
+            } else if method == "Runtime.evaluate" && expression.contains(r#""kind":"join_click""#)
+            {
+                json!({"result":{"value":router_result(
+                    "join_click",
+                    json!({"clicked":true})
+                )}})
+            } else {
+                json!({})
+            };
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("join CDP response");
+            requests.push(request);
+            if join_probes >= 3 {
+                break;
+            }
+        }
+        let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_group_blocker_cdp(
+    blocking_kind: &'static str,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let method = request["method"].as_str().unwrap_or_default();
+            let expression = request
+                .pointer("/params/expression")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let is_page_probe =
+                method == "Runtime.evaluate" && expression.contains(r#""kind":"page_probe""#);
+            let result =
+                if method == "Runtime.evaluate" && expression.contains(r#""kind":"join_probe""#) {
+                    facebook_unscoped_join_probe_cdp()
+                } else if is_page_probe {
+                    facebook_join_blocker_page_probe_cdp(blocking_kind)
+                } else {
+                    json!({})
+                };
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("blocker CDP response");
+            requests.push(request);
+            if is_page_probe {
+                break;
+            }
+        }
+        let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
+fn facebook_unscoped_join_probe_cdp() -> Value {
+    json!({"result":{"value":router_result(
+        "join_probe",
+        json!({
+            "observation": {
+                "groupUrl": null,
+                "pageUrl": "https://www.facebook.com/",
+                "membershipSignals": [],
+                "loginRequired": false,
+                "captchaDetected": false,
+                "questionnaireRequired": false,
+                "pendingRequest": false,
+                "actionNodeCount": 0,
+                "documentReady": "complete",
+                "composerPresent": false,
+                "joinCtaPresent": false,
+                "targetGroupId": null,
+                "scopeResolved": false,
+                "outOfScopeJoinCount": 0,
+                "ctaCandidates": []
+            },
+            "joined": false,
+            "pending": false,
+            "questionnaire": false,
+            "found": false,
+            "ambiguous": false
+        })
+    )}})
+}
+
+fn facebook_join_blocker_page_probe_cdp(blocking_kind: &str) -> Value {
+    json!({"result":{"value":router_result(
+        "page_probe",
+        json!({
+            "targetId": "",
+            "origin": "https://www.facebook.com",
+            "path": "/groups/42",
+            "readyState": "complete",
+            "pageKind": blocking_kind,
+            "blockingKind": blocking_kind,
+            "blockingText": if blocking_kind == "login" { "Log in to Facebook" } else { "CAPTCHA" },
+            "signals": {
+                "feedCardCount": 0,
+                "noteDetailCount": 0,
+                "loginWallCount": if blocking_kind == "login" { 1 } else { 0 },
+                "captchaSignalCount": if blocking_kind == "captcha" { 1 } else { 0 },
+                "dialogCount": 1,
+                "profileSignalCount": 0,
+                "notificationSignalCount": 0,
+                "publishSignalCount": 0,
+                "errorSignalCount": 0,
+                "mainCount": 1
+            }
+        })
+    )}})
+}
+
+fn facebook_join_page_probe_cdp() -> Value {
+    json!({"result":{"value":router_result(
+        "page_probe",
+        json!({
+            "targetId": "",
+            "origin": "https://www.facebook.com",
+            "path": "/groups/42",
+            "readyState": "complete",
+            "pageKind": "unknown",
+            "blockingKind": "none",
+            "signals": {
+                "feedCardCount": 0,
+                "noteDetailCount": 0,
+                "loginWallCount": 0,
+                "captchaSignalCount": 0,
+                "dialogCount": 0,
+                "profileSignalCount": 0,
+                "notificationSignalCount": 0,
+                "publishSignalCount": 0,
+                "errorSignalCount": 0,
+                "mainCount": 1
+            }
+        })
+    )}})
+}
+
+fn facebook_join_probe_cdp(joined: bool) -> Value {
+    let label = if joined { "Joined" } else { "Join group" };
+    json!({"result":{"value":router_result(
+        "join_probe",
+        json!({
+            "observation": {
+                "groupUrl": "https://www.facebook.com/groups/42",
+                "pageUrl": "https://www.facebook.com/groups/42",
+                "title": "Agent Builders",
+                "mainCtaText": label,
+                "mainCtaAria": label,
+                "headerText": "Agent Builders",
+                "modalText": null,
+                "membershipSignals": if joined { vec!["Joined"] } else { Vec::<&str>::new() },
+                "loginRequired": false,
+                "captchaDetected": false,
+                "questionnaireRequired": false,
+                "pendingRequest": false,
+                "navError": null,
+                "actionNodeCount": 1,
+                "documentReady": "complete",
+                "composerPresent": joined,
+                "joinCtaPresent": !joined,
+                "targetGroupId": "42",
+                "scopeResolved": true,
+                "outOfScopeJoinCount": 0,
+                "ctaCandidates": [{
+                    "text": label,
+                    "kind": if joined { "joined" } else { "join" },
+                    "inTargetScope": true
+                }]
+            },
+            "joined": joined,
+            "pending": false,
+            "questionnaire": false,
+            "found": !joined,
+            "ambiguous": false,
+            "cx": if joined { Value::Null } else { json!(50.0) },
+            "cy": if joined { Value::Null } else { json!(20.0) }
+        })
+    )}})
 }
 
 async fn spawn_facebook_initial_scan_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {

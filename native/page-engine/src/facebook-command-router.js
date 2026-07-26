@@ -854,21 +854,17 @@ async function(input){
     return {ok:true,confirmed:false,pending,rejected,inFlight};
   };
   const joinProbe=()=>{
-    const observation=joinObservation();
-    const main=first(['[role="main"]','main'])||document.body;
-    const heading=first(['h1','[role="heading"][aria-level="1"]'],main);
-    const targetRegion=targetGroupRegion(observation.targetGroupId,main,heading);
-    const candidates=all('button,[role="button"],a[role="button"]').filter(visible).filter((el)=>
-      /^(?:加入|加入小组|join(?: group)?|tham gia)$/i.test(label(el))&&targetRegion&&targetRegion.contains(el)
-    );
-    const target=candidates.length===1?point(candidates[0]):null;
+    const context=joinContext();
+    const observation=context.observation;
+    const candidates=context.candidates.filter((item)=>item.kind==='join'&&item.inTargetScope);
+    const target=candidates.length===1?point(candidates[0].el):null;
     return {
       observation,
-      joined:observation.membershipSignals.length>0,
+      joined:observation.membershipSignals.length>0&&candidates.length===0,
       pending:Boolean(observation.pendingRequest),
       questionnaire:Boolean(observation.questionnaireRequired),
       found:Boolean(target),
-      ambiguous:candidates.length>1,
+      ambiguous:context.scope.ambiguous||candidates.length>1,
       ...(target||{}),
     };
   };
@@ -900,56 +896,90 @@ async function(input){
   };
   const groupIdFromValue=(value)=>{
     const raw=String(value||'');
-    const hit=raw.match(/(?:facebook\.com)?\/groups\/([^/?#\s]+)/i);
-    return hit&&hit[1]||'';
+    const hit=raw.match(/(?:facebook\.com)?\/groups\/([^/?#\s"'<>]+)/i);
+    if(!hit||!hit[1])return '';
+    try{return decodeURIComponent(hit[1]).trim().toLowerCase();}catch{return String(hit[1]).trim().toLowerCase();}
   };
-  const targetGroupRegion=(groupId,main,heading)=>{
-    if(!groupId||!main||!heading||!main.contains(heading))return null;
-    let region=heading;
-    for(let parent=heading.parentElement;parent&&parent!==main;parent=parent.parentElement){
-      const foreign=all('a[href],[role="link"],[data-href],[data-url]',parent).some((node)=>{
-        const values=[
-          node.getAttribute&&node.getAttribute('href'),
-          node.getAttribute&&node.getAttribute('data-href'),
-          node.getAttribute&&node.getAttribute('data-url'),
-        ];
-        return values.some((value)=>{
-          const referenced=groupIdFromValue(value);
-          return referenced&&referenced!==groupId;
-        });
-      });
-      if(foreign)break;
-      region=parent;
+  const groupIdFromElement=(el)=>{
+    if(!el||!el.attributes)return '';
+    for(const attr of Array.from(el.attributes)){
+      const groupId=groupIdFromValue(attr&&attr.value);
+      if(groupId)return groupId;
     }
-    return region;
+    return '';
   };
-  const joinObservation=()=>{
+  const hasForeignGroupRef=(root,groupId)=>{
+    if(!root||!groupId)return false;
+    return [root,...all('*',root)].some((node)=>{
+      const referenced=groupIdFromElement(node);
+      return Boolean(referenced&&referenced!==groupId);
+    });
+  };
+  const targetGroupScope=(groupId,main)=>{
+    if(!groupId||!main)return {region:null,ambiguous:false,heading:null};
+    const headings=all('h1,[role="heading"][aria-level="1"]',main).filter(visible);
+    const blocks=[];
+    for(const heading of headings){
+      let region=heading;
+      let atMain=false;
+      while(region&&region!==main){
+        const parent=region.parentElement;
+        if(!parent)break;
+        if(hasForeignGroupRef(parent,groupId)){
+          if(parent===main)atMain=true;
+          break;
+        }
+        region=parent;
+      }
+      if(region===main)atMain=true;
+      if(region===heading&&hasForeignGroupRef(region,groupId))continue;
+      blocks.push({region,heading,atMain});
+    }
+    if(blocks.length===1)return {region:blocks[0].region,ambiguous:false,heading:blocks[0].heading};
+    const topLevel=blocks.filter((item)=>item.atMain);
+    if(topLevel.length===1)return {region:topLevel[0].region,ambiguous:false,heading:topLevel[0].heading};
+    return {region:null,ambiguous:blocks.length>1,heading:null};
+  };
+  const JOIN_LABELS=['join group','join','加入小组','加入群组','加入社团','加入','tham gia','únete','unirte','participar','entrar al grupo','entrar no grupo','gabung','bergabung','เข้าร่วม','rejoindre','beitreten','iscriviti','вступить','присоединиться','참여','가입','انضمام','انضم','sertai'];
+  const MEMBER_LABELS=['joined','leave group','已加入','退出小组','退出群组','退出社团','đã tham gia','rời nhóm','salir del grupo','keluar dari grup','quitter le groupe','gruppe verlassen','ออกจากกลุ่ม','已是成员','你已加入'];
+  const PENDING_LABELS=['pending','request sent','cancel request','待批准','已申请','待审批','待审核','取消请求','取消加入请求','取消申请','已发送请求','đang chờ','hủy yêu cầu','solicitud enviada','cancelar solicitud','menunggu','batalkan permintaan','demande envoyée','annuler la demande','anfrage gesendet','รอการอนุมัติ','요청 보냄','요청됨','requested'];
+  const QUESTION_LABELS=['membership questions','answer questions','answer these questions','questions to join','required question','回答问题','入群问题','必答','加入前请回答','trả lời câu hỏi','responde las preguntas','preguntas de membresía','jawab pertanyaan','répondez aux questions','beantworte die fragen','ตอบคำถาม'];
+  const includesAny=(raw,values)=>{
+    const normalized=norm(raw,512).toLowerCase();
+    return Boolean(normalized)&&values.some((value)=>normalized.includes(value));
+  };
+  const joinKind=(raw)=>{
+    if(includesAny(raw,MEMBER_LABELS))return 'joined';
+    if(includesAny(raw,PENDING_LABELS))return 'pending';
+    if(includesAny(raw,JOIN_LABELS))return 'join';
+    return 'other';
+  };
+  const joinContext=()=>{
+    const path=location.pathname.split('/').filter(Boolean);
+    let groupId=path[0]&&path[0].toLowerCase()==='groups'?path[1]||null:null;
+    if(groupId){try{groupId=decodeURIComponent(groupId).trim().toLowerCase();}catch{groupId=String(groupId).trim().toLowerCase();}}
+    const main=first(['[role="main"]','main'])||document.body;
+    const scope=targetGroupScope(groupId,main);
     const candidates=all('button,[role="button"],a[role="button"]').filter(visible).map((el)=>{
       const raw=label(el,256);
-      const joined=/^(?:已加入|joined|member|退出小组|leave group|đã tham gia)$/i.test(raw);
-      const join=!joined&&/^(?:加入|加入小组|join(?: group)?|tham gia)$/i.test(raw);
-      const pending=/^(?:待审核|pending|request sent|已申请|requested)$/i.test(raw);
-      return {el,raw,kind:join?'join':joined?'joined':pending?'pending':'other',inTargetScope:false};
+      return {
+        el,
+        raw,
+        kind:joinKind(raw),
+        inTargetScope:Boolean(scope.region&&scope.region.contains(el)&&!hasForeignGroupRef(el,groupId)),
+      };
     });
-    const path=location.pathname.split('/').filter(Boolean);
-    const groupId=path[0]&&path[0].toLowerCase()==='groups'?path[1]||null:null;
-    const main=first(['[role="main"]','main'])||document.body;
-    const heading=first(['h1','[role="heading"][aria-level="1"]'],main);
-    const targetRegion=targetGroupRegion(groupId,main,heading);
-    for(const item of candidates){
-      item.inTargetScope=Boolean(targetRegion&&targetRegion.contains(item.el));
-    }
     const scoped=candidates.filter((item)=>item.inTargetScope);
-    const mainCta=scoped.find((item)=>item.kind!=='other');
+    const mainCta=scoped.find((item)=>item.kind==='join')||scoped.find((item)=>item.kind!=='other');
     const signals=scoped.filter((item)=>item.kind==='joined').map((item)=>item.raw).slice(0,16);
     const modal=first(['[role="dialog"]','[aria-modal="true"]']);
     const modalText=text(modal,1000);
-    const headerText=text(heading,1000);
+    const headerText=text(scope.heading,1000);
     const blocking=blockingProbe();
-    return {
+    const observation={
       groupUrl:groupId?`https://www.facebook.com/groups/${groupId}`:undefined,
       pageUrl:String(location.href).slice(0,4096),
-      title:text(heading,200)||undefined,
+      title:text(scope.heading,200)||undefined,
       mainCtaText:mainCta&&mainCta.raw||null,
       mainCtaAria:mainCta&&label(mainCta.el,256)||null,
       headerText:headerText||null,
@@ -957,17 +987,33 @@ async function(input){
       membershipSignals:signals,
       loginRequired:blocking.kind==='login',
       captchaDetected:blocking.kind==='captcha',
-      questionnaireRequired:/回答问题|answer questions|membership questions/i.test(`${modalText} ${headerText}`),
+      questionnaireRequired:includesAny(`${modalText} ${headerText}`,QUESTION_LABELS),
       pendingRequest:scoped.some((item)=>item.kind==='pending'),
       actionNodeCount:candidates.length,
       documentReady:document.readyState,
       composerPresent:Boolean(commentEditor(main)),
       joinCtaPresent:scoped.some((item)=>item.kind==='join'),
       targetGroupId:groupId,
-      scopeResolved:Boolean(targetRegion),
+      scopeResolved:Boolean(scope.region),
       outOfScopeJoinCount:candidates.filter((item)=>item.kind==='join'&&!item.inTargetScope).length,
       ctaCandidates:candidates.slice(0,50).map((item)=>({text:item.raw||null,kind:item.kind,inTargetScope:item.inTargetScope})),
     };
+    return {observation,candidates,scope};
+  };
+  const joinObservation=()=>joinContext().observation;
+  const joinActuation=()=>{
+    const blocking=blockingProbe();
+    if(blocking.kind==='login')return {clicked:false,reason:'login_required'};
+    if(blocking.kind==='captcha')return {clicked:false,reason:'blocked_by_captcha'};
+    if(blocking.kind==='unknown')return {clicked:false,reason:'blocked_by_unknown'};
+    const context=joinContext();
+    if(!context.scope.region)return {clicked:false,reason:context.scope.ambiguous?'ambiguous_target':'scope_unresolved'};
+    const candidates=context.candidates.filter((item)=>item.inTargetScope&&item.kind==='join');
+    if(candidates.length===0)return {clicked:false,reason:'no_target_in_scope'};
+    if(candidates.length>1)return {clicked:false,reason:'ambiguous_target'};
+    const target=candidates[0].el;
+    if(target.disabled||target.getAttribute('aria-disabled')==='true'||target.getAttribute('disabled')!==null)return {clicked:false,reason:'disabled'};
+    try{target.click();return {clicked:true};}catch{return {clicked:false,reason:'click_failed'};}
   };
   const identity=()=>{
     const cookieId=/^\d{5,}$/.test(String(p.cookieUserId||''))?String(p.cookieUserId):'';
@@ -988,7 +1034,7 @@ async function(input){
 
   const blocking=blockingProbe();
   const blocked=blocker(blocking);
-  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_editor_probe','comment_ack_probe','join_probe','publish_entry_probe','publish_editor_probe','publish_submit_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
+  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','publish_entry_probe','publish_editor_probe','publish_submit_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
     return fail(kind||'page',blocked);
   }
   if(kind==='identity_read')return done(identity());
@@ -1003,6 +1049,7 @@ async function(input){
   if(kind==='comment_editor_probe')return done({kind:'text_target',value:commentEditorProbe()});
   if(kind==='comment_ack_probe')return done({kind:'comment_ack_probe',value:commentAckProbe()});
   if(kind==='join_probe')return done({kind:'join_probe',value:joinProbe()});
+  if(kind==='join_click')return done({kind:'join_click',value:joinActuation()});
   if(kind==='publish_entry_probe')return done({kind:'point_target',value:publishEntryProbe()});
   if(kind==='publish_editor_probe')return done({kind:'text_target',value:publishEditorProbe()});
   if(kind==='publish_submit_probe')return done({kind:'publish_submit_probe',value:publishSubmitProbe()});
@@ -1147,16 +1194,17 @@ async function(input){
     if(before.pendingRequest)return done(action('join_group',false,'pending',{groupUrl,clicked:false,groupObservation:before}));
     if(!p.click)return done(action('join_group',false,'observation_only',{groupUrl,clicked:false,groupObservation:before}));
     if(!before.scopeResolved)return fail('join_group','not_ready');
-    const main=first(['[role="main"]','main'])||document.body;
-    const heading=first(['h1','[role="heading"][aria-level="1"]'],main);
-    const targetRegion=targetGroupRegion(before.targetGroupId,main,heading);
-    const candidates=all('button,[role="button"],a[role="button"]').filter(visible).filter((el)=>
-      /^(?:加入|加入小组|join(?: group)?|tham gia)$/i.test(label(el))&&targetRegion&&targetRegion.contains(el)
-    );
-    if(candidates.length!==1)return fail('join_group',candidates.length?'not_ready':'no_button');
-    if(!click(candidates[0]))return fail('join_group','no_button');
+    const actuation=joinActuation();
+    if(!actuation.clicked){
+      if(['scope_unresolved','no_target_in_scope','ambiguous_target'].includes(actuation.reason))return fail('join_group','not_ready');
+      return fail('join_group','no_button');
+    }
     await sleep(900);
     const after=joinObservation();
+    if(after.loginRequired)return ambiguous('join_group','login_required',{groupUrl,clicked:true,groupObservation:before,postObservation:after});
+    if(after.captchaDetected)return ambiguous('join_group','blocked_by_captcha',{groupUrl,clicked:true,groupObservation:before,postObservation:after});
+    if(after.pendingRequest)return done(action('join_group',false,'pending',{groupUrl,clicked:true,groupObservation:before,postObservation:after}));
+    if(after.questionnaireRequired)return done(action('join_group',false,'questionnaire_required',{groupUrl,clicked:true,groupObservation:before,postObservation:after}));
     const joined=after.membershipSignals.length>0||(!before.composerPresent&&after.composerPresent&&!after.joinCtaPresent);
     return joined?done(action('join_group',true,undefined,{groupUrl,clicked:true,groupObservation:before,postObservation:after})):ambiguous('join_group','join_verification_ambiguous',{groupUrl,clicked:true,groupObservation:before,postObservation:after});
   }

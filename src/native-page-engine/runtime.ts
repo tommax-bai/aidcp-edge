@@ -24,6 +24,9 @@ interface OpenOwner {
   session: NativePageEngineSession;
 }
 
+const DEFAULT_NATIVE_SESSION_TIMEOUT_MS = 30_000;
+const FACEBOOK_NATIVE_SESSION_TIMEOUT_MS = 90_000;
+
 export class NativePageRuntime {
   private readonly client: NativePageEngineClient;
   private owner?: OpenOwner;
@@ -135,7 +138,9 @@ export class NativePageRuntime {
       platform: this.options.platform ?? 'xiaohongshu',
       sessionId: `${this.options.platform ?? 'xiaohongshu'}_${process.pid}_${Date.now().toString(36)}`,
       taskId: suffix,
-      timeoutMs: 30_000,
+      timeoutMs: (this.options.platform ?? 'xiaohongshu') === 'facebook'
+        ? FACEBOOK_NATIVE_SESSION_TIMEOUT_MS
+        : DEFAULT_NATIVE_SESSION_TIMEOUT_MS,
     });
     this.owner = { ownerId, session };
     return session;

@@ -60,6 +60,8 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 const monotonicNow = (): number => performance.now();
+const DEFAULT_NATIVE_COMMAND_TIMEOUT_MS = 30_000;
+const FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 90_000;
 
 const FACEBOOK_UNSUPPORTED_COMMANDS = new Set<Envelope['type']>([
   'interaction.collect',
@@ -213,7 +215,10 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     env?: Envelope,
   ): Promise<void> {
     await this.ensureFacebookScrollDwell(command, signal);
-    const result = await this.options.runtime.execute(ownerId, command, 30_000, signal);
+    const timeoutMs = this.options.platform === 'facebook' && command.kind === 'group_join'
+      ? FACEBOOK_GROUP_JOIN_TIMEOUT_MS
+      : DEFAULT_NATIVE_COMMAND_TIMEOUT_MS;
+    const result = await this.options.runtime.execute(ownerId, command, timeoutMs, signal);
     this.report(result, env);
   }
 

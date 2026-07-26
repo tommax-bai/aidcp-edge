@@ -865,6 +865,148 @@ test('Facebook group join never selects a recommended-group CTA when the target 
   assert.equal((probe.output.value.observation as Record<string, unknown>).outOfScopeJoinCount, 1);
 });
 
+test('Facebook join scope rejects an attribute-encoded recommendation decoy outside the target header', async () => {
+  install(`
+    <main>
+      <section id="target-group">
+        <h1>Agent Builders</h1>
+        <button aria-label="Pending">Pending</button>
+      </section>
+      <section id="recommended-group" data-navigation-payload="/groups/99">
+        <h2>Suggested Group</h2>
+        <button aria-label="Join group">Join group</button>
+      </section>
+    </main>
+  `, 'https://www.facebook.com/groups/42');
+
+  const probe = await run({ kind: 'join_probe', params: {} });
+
+  assert.equal(probe.output.value.pending, true);
+  assert.equal(probe.output.value.found, false);
+  assert.equal(probe.output.value.ambiguous, false);
+  assert.equal((probe.output.value.observation as Record<string, unknown>).scopeResolved, true);
+  assert.equal((probe.output.value.observation as Record<string, unknown>).outOfScopeJoinCount, 1);
+});
+
+test('Facebook join scope fails closed when symmetric primary headings make the target region ambiguous', async () => {
+  install(`
+    <main>
+      <section><h1>Agent Builders</h1><button aria-label="Join group">Join group</button></section>
+      <section><h1>Agent Builders mirror</h1><button aria-label="Join group">Join group</button></section>
+    </main>
+  `, 'https://www.facebook.com/groups/42');
+
+  const probe = await run({ kind: 'join_probe', params: {} });
+
+  assert.equal(probe.output.value.found, false);
+  assert.equal(probe.output.value.ambiguous, true);
+  assert.equal((probe.output.value.observation as Record<string, unknown>).scopeResolved, false);
+});
+
+test('Facebook join actuation freshly resolves and invokes the React-owned in-scope element', async () => {
+  const dom = install(`
+    <main><section><h1>Agent Builders</h1><button id="join" aria-label="Join group">Join group</button></section></main>
+  `, 'https://www.facebook.com/groups/42');
+  const button = dom.window.document.querySelector('#join')!;
+  let invoked = 0;
+  button.addEventListener('click', () => {
+    invoked += 1;
+    button.setAttribute('aria-label', 'Joined');
+    button.textContent = 'Joined';
+  });
+
+  const initial = await run({ kind: 'join_probe', params: {} });
+  assert.equal(initial.output.value.found, true);
+
+  const clicked = await run({ kind: 'join_click', params: {} });
+
+  assert.equal(clicked.output.kind, 'join_click');
+  assert.equal(clicked.output.value.clicked, true);
+  assert.equal(invoked, 1);
+  const after = await run({ kind: 'join_probe', params: {} });
+  assert.equal(after.output.value.joined, true);
+});
+
+test('Facebook join actuation reports no target and never clicks an out-of-scope recommendation', async () => {
+  const dom = install(`
+    <main>
+      <section><h1>Agent Builders</h1><button aria-label="Pending">Pending</button></section>
+      <section data-navigation-payload="/groups/99">
+        <h2>Suggested Group</h2><button id="wrong" aria-label="Join group">Join group</button>
+      </section>
+    </main>
+  `, 'https://www.facebook.com/groups/42');
+  let wrongClicks = 0;
+  dom.window.document.querySelector('#wrong')?.addEventListener('click', () => { wrongClicks += 1; });
+
+  const result = await run({ kind: 'join_click', params: {} });
+
+  assert.equal(result.output.kind, 'join_click');
+  assert.equal(result.output.value.clicked, false);
+  assert.equal(result.output.value.reason, 'no_target_in_scope');
+  assert.equal(wrongClicks, 0);
+});
+
+test('Facebook join probe does not let a simultaneous in-scope member label override Join', async () => {
+  install(`
+    <main><section>
+      <h1>Agent Builders</h1>
+      <button aria-label="Joined">Joined</button>
+      <button aria-label="Join group">Join group</button>
+    </section></main>
+  `, 'https://www.facebook.com/groups/42');
+
+  const result = await run({ kind: 'join_probe', params: {} });
+
+  assert.equal(result.output.value.joined, false);
+  assert.equal(result.output.value.found, true);
+  assert.equal((result.output.value.observation as Record<string, unknown>).joinCtaPresent, true);
+});
+
+test('Facebook join classifies pending before a structural composer transition', async () => {
+  const dom = install(`
+    <main><section><h1>Agent Builders</h1><button id="join" aria-label="Join group">Join group</button></section></main>
+  `, 'https://www.facebook.com/groups/42');
+  dom.window.document.querySelector('#join')?.addEventListener('click', (event) => {
+    const button = event.currentTarget as Element;
+    button.setAttribute('aria-label', 'Pending');
+    button.textContent = 'Pending';
+    const composer = dom.window.document.createElement('div');
+    composer.setAttribute('role', 'textbox');
+    composer.setAttribute('contenteditable', 'true');
+    dom.window.document.querySelector('section')?.append(composer);
+  });
+
+  const result = await run({
+    kind: 'group_join',
+    params: { groupUrl: 'https://www.facebook.com/groups/42', click: true },
+  });
+
+  assert.equal(result.output.value.ok, false);
+  assert.equal(result.output.value.reason, 'pending');
+  assert.equal(result.output.value.clicked, true);
+});
+
+test('Facebook group join preserves login and captcha blockers without actuation', async () => {
+  install(`
+    <main><form action="/login">Log in to Facebook<input name="email"><input name="pass" type="password"></form></main>
+  `, 'https://www.facebook.com/groups/42');
+  const login = await run({
+    kind: 'group_join',
+    params: { groupUrl: 'https://www.facebook.com/groups/42', click: true },
+  });
+  assert.equal(login.output.value.reason, 'login_required');
+
+  install(`
+    <main><div role="dialog">Security check CAPTCHA</div></main>
+  `, 'https://www.facebook.com/groups/42');
+  const captcha = await run({
+    kind: 'group_join',
+    params: { groupUrl: 'https://www.facebook.com/groups/42', click: true },
+  });
+  assert.equal(captcha.output.value.reason, 'blocked_by_captcha');
+});
+
 test('Facebook join probe does not treat a pre-existing public composer as membership', async () => {
   install(`
     <main>

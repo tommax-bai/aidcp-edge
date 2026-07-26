@@ -9,6 +9,7 @@ pub const CAPABILITY_DIGEST: &str = env!("AIDCP_PAGE_ENGINE_CAPABILITY_DIGEST");
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 const MIN_TIMEOUT_MS: u64 = 50;
 const MAX_TIMEOUT_MS: u64 = 30_000;
+const MAX_FACEBOOK_TIMEOUT_MS: u64 = 90_000;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -141,7 +142,12 @@ impl InputRecord {
                 if record.params.host.is_empty() || record.params.host.len() > 255 {
                     return Err(invalid_request("invalid DevTools host"));
                 }
-                if !(MIN_TIMEOUT_MS..=MAX_TIMEOUT_MS).contains(&record.params.timeout_ms) {
+                let max_timeout_ms = if record.params.platform == Platform::Facebook {
+                    MAX_FACEBOOK_TIMEOUT_MS
+                } else {
+                    MAX_TIMEOUT_MS
+                };
+                if !(MIN_TIMEOUT_MS..=max_timeout_ms).contains(&record.params.timeout_ms) {
                     return Err(invalid_request("invalid session timeout"));
                 }
             }
@@ -417,6 +423,25 @@ mod tests {
         };
         assert_eq!(command.command_id, 1);
         assert_eq!(command.task_id, "browse-1");
+    }
+
+    #[test]
+    fn permits_the_long_session_ceiling_only_for_facebook() {
+        let facebook = valid_session_open()
+            .replace("\"platform\":\"xiaohongshu\"", "\"platform\":\"facebook\"")
+            .replace("\"timeoutMs\":5000", "\"timeoutMs\":90000");
+        assert!(matches!(
+            parse_input(&facebook).expect("Facebook long join session"),
+            InputRecord::SessionOpen(_)
+        ));
+
+        let xiaohongshu = valid_session_open().replace("\"timeoutMs\":5000", "\"timeoutMs\":90000");
+        assert_eq!(
+            parse_input(&xiaohongshu)
+                .expect_err("non-Facebook long session")
+                .code,
+            ErrorCode::InvalidRequest
+        );
     }
 
     #[test]

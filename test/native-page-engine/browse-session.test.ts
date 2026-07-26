@@ -22,6 +22,7 @@ function envelope<T extends MessageType>(type: T, payload: Record<string, unknow
 function harness(execute: (
   ownerId: string,
   command: NativePageCommand,
+  timeoutMs?: number,
 ) => Promise<NativePageCommandExecution>, options: {
   platform?: 'xiaohongshu' | 'facebook';
   accountId?: string;
@@ -30,7 +31,7 @@ function harness(execute: (
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   overlayConfirmMs?: number;
 } = {}) {
-  const executions: Array<{ ownerId: string; command: NativePageCommand }> = [];
+  const executions: Array<{ ownerId: string; command: NativePageCommand; timeoutMs?: number }> = [];
   const actions: ActionCompletedPayload[] = [];
   const cards: PageCardsPayload[] = [];
   const details: NoteDetailPayload[] = [];
@@ -38,9 +39,9 @@ function harness(execute: (
   const logs: string[] = [];
   const sent: Array<{ type: string; payload: unknown; replyTo?: string }> = [];
   const runtime = {
-    async execute(ownerId: string, command: NativePageCommand) {
-      executions.push({ ownerId, command });
-      return execute(ownerId, command);
+    async execute(ownerId: string, command: NativePageCommand, timeoutMs?: number) {
+      executions.push({ ownerId, command, timeoutMs });
+      return execute(ownerId, command, timeoutMs);
     },
     async closeOwner(ownerId: string) { closedOwners.push(ownerId); },
   } as unknown as NativePageRuntime;
@@ -170,6 +171,33 @@ test('Native Facebook action receipt logs bounded terminal phase and reason with
     '[native-page] action.completed action=like ok=false effectPhase=not_started reason=non_token_reason',
   );
   assert.equal(h.logs.some((line) => line.includes('https://')), false);
+});
+
+test('Native Facebook group join alone receives the established 90-second command budget', async () => {
+  const h = harness(async () => ({
+    ok: true,
+    effectPhase: 'confirmed',
+    reasonCode: 'confirmed',
+    output: {
+      kind: 'action_receipt',
+      value: {
+        action: 'join_group',
+        ok: false,
+        reason: 'observation_only',
+        groupUrl: 'https://www.facebook.com/groups/42',
+        clicked: false,
+      },
+    },
+  }), { platform: 'facebook' });
+
+  await h.session.onCloudCommand(envelope('group.join', {
+    groupUrl: 'https://www.facebook.com/groups/42',
+  }));
+  await h.session.onCloudCommand(envelope('feed.refresh', { reason: 'ordinary' }));
+
+  assert.equal(h.executions[0]?.command.kind, 'group_join');
+  assert.equal(h.executions[0]?.timeoutMs, 90_000);
+  assert.equal(h.executions[1]?.timeoutMs, 30_000);
 });
 
 test('Native Facebook probe reports sustained unknown blockers with same-source evidence', async () => {
