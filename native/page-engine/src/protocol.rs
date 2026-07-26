@@ -91,6 +91,18 @@ pub struct CancelRecord {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CommitWindowAckRecord {
+    pub protocol_version: u32,
+    pub id: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub command_id: u64,
+    pub token: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ShutdownRecord {
     pub protocol_version: u32,
     pub id: String,
@@ -104,6 +116,7 @@ pub enum InputRecord {
     SessionClose(SessionCloseRecord),
     Command(CommandRecord),
     Cancel(CancelRecord),
+    CommitWindowAck(CommitWindowAckRecord),
     Shutdown(ShutdownRecord),
 }
 
@@ -115,6 +128,7 @@ impl InputRecord {
             Self::SessionClose(record) => &record.id,
             Self::Command(record) => &record.id,
             Self::Cancel(record) => &record.id,
+            Self::CommitWindowAck(record) => &record.id,
             Self::Shutdown(record) => &record.id,
         }
     }
@@ -126,6 +140,7 @@ impl InputRecord {
             Self::SessionClose(record) => record.protocol_version,
             Self::Command(record) => record.protocol_version,
             Self::Cancel(record) => record.protocol_version,
+            Self::CommitWindowAck(record) => record.protocol_version,
             Self::Shutdown(record) => record.protocol_version,
         };
         if protocol_version != PROTOCOL_VERSION {
@@ -182,6 +197,15 @@ impl InputRecord {
                     return Err(invalid_request(
                         "cancellation reason exceeds protocol limit",
                     ));
+                }
+            }
+            Self::CommitWindowAck(record) => {
+                validate_identifier(&record.session_id, "invalid session id")?;
+                validate_identifier(&record.task_id, "invalid task id")?;
+                validate_identifier(&record.token, "invalid commit window token")?;
+                validate_identifier(&record.label, "invalid commit window label")?;
+                if record.command_id == 0 {
+                    return Err(invalid_request("invalid command id"));
                 }
             }
             Self::Shutdown(_) => {}
@@ -361,6 +385,37 @@ pub struct CommandResultRecord<'a, T: Serialize> {
     pub result: Option<&'a T>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorRecord>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitWindowRequestRecord<'a> {
+    #[serde(rename = "type")]
+    pub record_type: &'static str,
+    pub protocol_version: u32,
+    pub id: &'a str,
+    pub session_id: &'a str,
+    pub task_id: &'a str,
+    pub command_id: u64,
+    pub token: &'a str,
+    pub label: &'a str,
+    pub budget_ms: u64,
+}
+
+impl<'a> CommitWindowRequestRecord<'a> {
+    pub fn new(request: &'a CommandRecord, token: &'a str, label: &'a str, budget_ms: u64) -> Self {
+        Self {
+            record_type: "commit_window_request",
+            protocol_version: PROTOCOL_VERSION,
+            id: &request.id,
+            session_id: &request.session_id,
+            task_id: &request.task_id,
+            command_id: request.command_id,
+            token,
+            label,
+            budget_ms,
+        }
+    }
 }
 
 impl<'a, T: Serialize> CommandResultRecord<'a, T> {

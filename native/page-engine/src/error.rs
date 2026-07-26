@@ -15,6 +15,7 @@ pub enum ErrorCode {
     CommandInProgress,
     DeadlineExpired,
     Cancelled,
+    CommitWindowUnavailable,
     UnsupportedCommand,
     EndpointNotLoopback,
     EndpointUnreachable,

@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import type { EdgeBrowseSession } from '../browse/edge-browse-session.js';
 import type { EdgeClient } from '../client/edge-client.js';
+import type { CommitWindowGuard } from '../execution/commit-window.js';
 import { jitterAround, type RandomFn } from '../humanize/timing.js';
 import type {
   ActionCompletedPayload,
@@ -39,6 +40,7 @@ export interface NativeBrowseSessionOptions {
   random?: RandomFn;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   overlayConfirmMs?: number;
+  commitWindow?: CommitWindowGuard;
 }
 
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -218,7 +220,15 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     const timeoutMs = this.options.platform === 'facebook' && command.kind === 'group_join'
       ? FACEBOOK_GROUP_JOIN_TIMEOUT_MS
       : DEFAULT_NATIVE_COMMAND_TIMEOUT_MS;
-    const result = await this.options.runtime.execute(ownerId, command, timeoutMs, signal);
+    const result = await this.options.runtime.execute(
+      ownerId,
+      command,
+      timeoutMs,
+      signal,
+      this.options.platform === 'facebook' && this.options.commitWindow
+        ? (request) => this.options.commitWindow!.enter(request.budgetMs, request.label)
+        : undefined,
+    );
     this.report(result, env);
   }
 

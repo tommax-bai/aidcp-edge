@@ -120,6 +120,24 @@ export interface NativeCancelResult {
 
 export type NativeEffectPhase = 'not_started' | 'dispatched' | 'confirmed' | 'ambiguous';
 
+export type NativeCommitWindowLabel =
+  | 'fb_join_click'
+  | 'fb_comment_enter'
+  | 'fb_publish_submit';
+
+export interface NativeCommitWindowRequest {
+  sessionId: string;
+  taskId: string;
+  commandId: number;
+  token: string;
+  label: NativeCommitWindowLabel;
+  budgetMs: number;
+}
+
+export type NativeCommitWindowHandler = (
+  request: NativeCommitWindowRequest,
+) => () => void;
+
 export type NativePageEngineErrorCode =
   | 'confirmed'
   | 'invalid_request'
@@ -132,6 +150,7 @@ export type NativePageEngineErrorCode =
   | 'command_in_progress'
   | 'deadline_expired'
   | 'cancelled'
+  | 'commit_window_unavailable'
   | 'unsupported_command'
   | 'endpoint_not_loopback'
   | 'endpoint_unreachable'
@@ -215,10 +234,18 @@ interface CommandResponse {
   error?: ErrorRecord;
 }
 
+interface CommitWindowRequestRecord extends NativeCommitWindowRequest {
+  type: 'commit_window_request';
+  protocolVersion: number;
+  id: string;
+}
+
 interface PendingResponse {
   resolve(value: unknown): void;
   reject(error: NativePageEngineError): void;
   timer: NodeJS.Timeout;
+  commitWindowHandler?: NativeCommitWindowHandler;
+  disposeCommitWindow?: () => void;
 }
 
 class NativeProcessTransport {
@@ -285,7 +312,12 @@ class NativeProcessTransport {
     return transport;
   }
 
-  async request(id: string, record: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
+  async request(
+    id: string,
+    record: Record<string, unknown>,
+    timeoutMs?: number,
+    commitWindowHandler?: NativeCommitWindowHandler,
+  ): Promise<unknown> {
     if (!this.ready || this.exited) {
       throw new NativePageEngineError('engine_exited', 'Native Page Engine is not available', {
         stderr: this.stderr || undefined,
@@ -300,6 +332,8 @@ class NativeProcessTransport {
     }
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
+        pending?.disposeCommitWindow?.();
         this.pending.delete(id);
         reject(new NativePageEngineError(
           'engine_timeout',
@@ -307,12 +341,13 @@ class NativeProcessTransport {
           { stderr: this.stderr || undefined },
         ));
       }, timeoutMs ?? this.processTimeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, commitWindowHandler });
       this.child.stdin.write(serialized, (error) => {
         if (!error) return;
         const pending = this.pending.get(id);
         if (!pending) return;
         clearTimeout(pending.timer);
+        pending.disposeCommitWindow?.();
         this.pending.delete(id);
         pending.reject(new NativePageEngineError(
           'engine_exited',
@@ -428,11 +463,55 @@ class NativeProcessTransport {
       this.failProtocol('Native Page Engine emitted an invalid response record');
       return;
     }
+    const commitWindow = parseCommitWindowRequest(record);
+    if (record.type === 'commit_window_request') {
+      if (!commitWindow) {
+        this.failProtocol('Native Page Engine emitted an invalid commit window request');
+        this.terminate();
+        return;
+      }
+      this.handleCommitWindowRequest(record.id, commitWindow);
+      return;
+    }
     const pending = this.pending.get(record.id);
     if (!pending) return;
     clearTimeout(pending.timer);
+    pending.disposeCommitWindow?.();
     this.pending.delete(record.id);
     pending.resolve(record);
+  }
+
+  private handleCommitWindowRequest(
+    id: string,
+    request: CommitWindowRequestRecord,
+  ): void {
+    const pending = this.pending.get(id);
+    if (!pending?.commitWindowHandler || pending.disposeCommitWindow) {
+      this.failProtocol('Native Page Engine commit window has no matching active command');
+      return;
+    }
+    try {
+      pending.disposeCommitWindow = pending.commitWindowHandler(request);
+    } catch {
+      this.failProtocol('Native Page Engine commit window was rejected by the active command');
+      return;
+    }
+    const ackId = requestId('commit_window_ack');
+    void this.request(ackId, {
+      type: 'commit_window_ack',
+      protocolVersion: NATIVE_PAGE_ENGINE_PROTOCOL_VERSION,
+      id: ackId,
+      sessionId: request.sessionId,
+      taskId: request.taskId,
+      commandId: request.commandId,
+      token: request.token,
+      label: request.label,
+    }, Math.min(this.processTimeoutMs, 2_000)).catch((error) => {
+      pending.disposeCommitWindow?.();
+      pending.disposeCommitWindow = undefined;
+      this.failProcess(error);
+      this.terminate();
+    });
   }
 
   private failProtocol(message: string): void {
@@ -453,6 +532,7 @@ class NativeProcessTransport {
     this.failReady(error);
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
+      pending.disposeCommitWindow?.();
       pending.reject(error);
     }
     this.pending.clear();
@@ -495,6 +575,7 @@ export class NativePageEngineSession {
     command: NativePageCommand,
     timeoutMs = DEFAULT_NATIVE_TIMEOUT_MS,
     signal?: AbortSignal,
+    commitWindowHandler?: NativeCommitWindowHandler,
   ): Promise<NativePageCommandExecution> {
     this.assertOpen();
     validateCommandTimeout(this.platform, command, timeoutMs);
@@ -509,7 +590,25 @@ export class NativePageEngineSession {
       type: 'command', protocolVersion: NATIVE_PAGE_ENGINE_PROTOCOL_VERSION, id,
       sessionId: this.sessionId, taskId: this.taskId, commandId,
       deadlineUnixMs: Date.now() + timeoutMs, command,
-    }, Math.max(this.processTimeoutMs, timeoutMs + 250));
+    }, Math.max(this.processTimeoutMs, timeoutMs + 250), (request) => {
+      if (
+        request.sessionId !== this.sessionId
+        || request.taskId !== this.taskId
+        || request.commandId !== commandId
+      ) {
+        throw new NativePageEngineError(
+          'invalid_protocol',
+          'Native commit window correlation mismatch',
+        );
+      }
+      if (!commitWindowHandler) {
+        throw new NativePageEngineError(
+          'commit_window_unavailable',
+          'Native commit window has no host guard',
+        );
+      }
+      return commitWindowHandler(request);
+    });
     const abort = (): void => { void this.cancel(commandId, 'caller_aborted').catch(() => undefined); };
     signal?.addEventListener('abort', abort, { once: true });
     let raw: unknown;
@@ -718,6 +817,31 @@ function parseCommandResponse(
   return value as unknown as CommandResponse;
 }
 
+const NATIVE_COMMIT_WINDOW_BUDGETS: Readonly<Record<NativeCommitWindowLabel, number>> = {
+  fb_join_click: 18_500,
+  fb_comment_enter: 20_000,
+  fb_publish_submit: 20_000,
+};
+
+function parseCommitWindowRequest(value: unknown): CommitWindowRequestRecord | undefined {
+  if (
+    !isRecord(value)
+    || value.type !== 'commit_window_request'
+    || value.protocolVersion !== NATIVE_PAGE_ENGINE_PROTOCOL_VERSION
+    || typeof value.id !== 'string'
+    || typeof value.sessionId !== 'string'
+    || typeof value.taskId !== 'string'
+    || !Number.isSafeInteger(value.commandId)
+    || typeof value.token !== 'string'
+    || typeof value.label !== 'string'
+    || !Object.hasOwn(NATIVE_COMMIT_WINDOW_BUDGETS, value.label)
+    || value.budgetMs !== NATIVE_COMMIT_WINDOW_BUDGETS[value.label as NativeCommitWindowLabel]
+  ) {
+    return undefined;
+  }
+  return value as unknown as CommitWindowRequestRecord;
+}
+
 function parseSessionInfo(value: unknown): NativePageSessionInfo {
   if (
     !isRecord(value)
@@ -854,6 +978,7 @@ function isKnownErrorCode(value: unknown): value is NativePageEngineErrorCode {
     'command_in_progress',
     'deadline_expired',
     'cancelled',
+    'commit_window_unavailable',
     'unsupported_command',
     'endpoint_not_loopback',
     'endpoint_unreachable',

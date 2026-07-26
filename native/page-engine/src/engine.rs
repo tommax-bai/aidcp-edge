@@ -1,4 +1,5 @@
 use crate::cdp::CdpSession;
+use crate::commit_window::CommitWindowRequester;
 use crate::endpoint;
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
@@ -298,6 +299,20 @@ impl Engine {
         request: &CommandRecord,
         cancellation: Arc<AtomicBool>,
     ) -> Result<StoredCommandResult, EngineError> {
+        self.execute_cancellable_with_commit_windows(
+            request,
+            cancellation,
+            CommitWindowRequester::in_process(request.command_id),
+        )
+        .await
+    }
+
+    pub async fn execute_cancellable_with_commit_windows(
+        &mut self,
+        request: &CommandRecord,
+        cancellation: Arc<AtomicBool>,
+        commit_windows: CommitWindowRequester,
+    ) -> Result<StoredCommandResult, EngineError> {
         let session = self.require_session_mut(&request.session_id)?;
         if session.task_id != request.task_id {
             return Err(EngineError::new(
@@ -351,7 +366,7 @@ impl Engine {
                     Err(error) => StoredCommandResult::failed(error),
                 }
             }
-            _ => execute_platform_command(session, request, &cancellation).await,
+            _ => execute_platform_command(session, request, &cancellation, &commit_windows).await,
         };
         session.active_command_id = None;
         session.remember(request.command_id, outcome.clone());
@@ -421,6 +436,7 @@ async fn execute_platform_command(
     session: &mut EngineSession,
     request: &CommandRecord,
     cancellation: &AtomicBool,
+    commit_windows: &CommitWindowRequester,
 ) -> StoredCommandResult {
     let write = request.command.may_write();
     if cancellation.load(Ordering::Acquire) {
@@ -433,7 +449,13 @@ async fn execute_platform_command(
         Ok(value) => value,
         Err(error) => return StoredCommandResult::failed(error),
     };
-    let operation = execute_platform_command_once(session, &request.command, Some(cancellation));
+    let operation = execute_platform_command_once(
+        session,
+        &request.command,
+        Some(cancellation),
+        commit_windows,
+        request.deadline_unix_ms,
+    );
     let result = if write {
         tokio::time::timeout(remaining, operation)
             .await
@@ -477,6 +499,8 @@ async fn execute_platform_command(
                     session,
                     &request.command,
                     Some(cancellation),
+                    commit_windows,
+                    request.deadline_unix_ms,
                 )
                 .await
                 {
@@ -491,7 +515,12 @@ async fn execute_platform_command(
             }
         }
         Ok(Err(error)) => StoredCommandResult::failed_at(
-            if write && error.code != ErrorCode::Cancelled {
+            if write
+                && !matches!(
+                    error.code,
+                    ErrorCode::Cancelled | ErrorCode::CommitWindowUnavailable
+                )
+            {
                 EffectPhase::Ambiguous
             } else {
                 EffectPhase::NotStarted
@@ -513,6 +542,8 @@ async fn execute_platform_command_once(
     session: &mut EngineSession,
     command: &NativeCommand,
     cancellation: Option<&AtomicBool>,
+    commit_windows: &CommitWindowRequester,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     match session.platform {
         Platform::Xiaohongshu => execute_xhs_command_once(session, command).await,
@@ -534,7 +565,22 @@ async fn execute_platform_command_once(
                 "native WeChat adapter does not support this command",
             )),
         },
-        Platform::Facebook => execute_facebook_command_once(session, command, cancellation).await,
+        Platform::Facebook => {
+            facebook::capability::owner(command).ok_or_else(|| {
+                EngineError::new(
+                    ErrorCode::UnsupportedCommand,
+                    "native Facebook command has no capability owner",
+                )
+            })?;
+            execute_facebook_command_once(
+                session,
+                command,
+                cancellation,
+                commit_windows,
+                deadline_unix_ms,
+            )
+            .await
+        }
     }
 }
 
@@ -542,6 +588,8 @@ async fn execute_facebook_command_once(
     session: &mut EngineSession,
     command: &NativeCommand,
     cancellation: Option<&AtomicBool>,
+    commit_windows: &CommitWindowRequester,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     use NativeCommand::*;
     match command {
@@ -612,7 +660,15 @@ async fn execute_facebook_command_once(
             if !reuse_current_page {
                 session.cdp.navigate(url.as_str()).await?;
             }
-            execute_facebook_group_join(session, params, command, cancellation).await
+            execute_facebook_group_join(
+                session,
+                params,
+                command,
+                cancellation,
+                commit_windows,
+                deadline_unix_ms,
+            )
+            .await
         }
         PageScroll(params) if params.reason.as_deref() == Some("empty_feed_reels_fallback") => {
             session
@@ -642,9 +698,29 @@ async fn execute_facebook_command_once(
         }
         InteractionLike(params) => execute_facebook_like(session, params, command).await,
         InteractionFollow(params) => execute_facebook_follow(session, params, command).await,
-        InteractionComment(params) => execute_facebook_comment(session, params, command).await,
+        InteractionComment(params) => {
+            execute_facebook_comment(
+                session,
+                params,
+                command,
+                cancellation,
+                commit_windows,
+                deadline_unix_ms,
+            )
+            .await
+        }
         PublishFillField(params) => execute_facebook_publish_fill(session, params, command).await,
-        PublishSubmit(params) => execute_facebook_publish_submit(session, params, command).await,
+        PublishSubmit(params) => {
+            execute_facebook_publish_submit(
+                session,
+                params,
+                command,
+                cancellation,
+                commit_windows,
+                deadline_unix_ms,
+            )
+            .await
+        }
         _ => evaluate_facebook_router(session, command).await,
     }
 }
@@ -1235,6 +1311,9 @@ async fn execute_facebook_comment(
     session: &mut EngineSession,
     params: &crate::command::CommentParams,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    commit_windows: &CommitWindowRequester,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let account_id = params.account_id.as_deref().unwrap_or_default();
     if account_id.len() < 5 || !account_id.chars().all(|value| value.is_ascii_digit()) {
@@ -1325,6 +1404,23 @@ async fn execute_facebook_comment(
         replace_focused_text(session, "").await?;
         return Ok((EffectPhase::NotStarted, output));
     }
+    enter_facebook_commit_window(command, commit_windows, deadline_unix_ms, cancellation).await?;
+    let protected_editor = probe_facebook_comment_editor(session, &params.note_id).await?;
+    if !protected_editor.ok
+        || protected_editor.value.as_deref().is_none_or(|value| {
+            normalize_facebook_text(value) != normalize_facebook_text(&full_text)
+        })
+    {
+        replace_focused_text(session, "").await?;
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            "target_moved_before_commit",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
     session
         .cdp
         .dispatch_key("rawKeyDown", "Enter", "Enter", 13)
@@ -1401,6 +1497,8 @@ async fn execute_facebook_group_join(
     params: &crate::command::GroupJoinParams,
     command: &NativeCommand,
     cancellation: Option<&AtomicBool>,
+    commit_windows: &CommitWindowRequester,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     if let Some(output) = ensure_facebook_action_gate(session, command).await? {
         return Ok((EffectPhase::NotStarted, output));
@@ -1514,6 +1612,7 @@ async fn execute_facebook_group_join(
     if facebook_join_cancelled(cancellation) {
         return Err(cancelled_before_dispatch());
     }
+    enter_facebook_commit_window(command, commit_windows, deadline_unix_ms, cancellation).await?;
     let click = execute_facebook_join_click(session).await?;
     if !click.clicked {
         let reason = click.reason.as_deref().unwrap_or("no_button");
@@ -1876,6 +1975,9 @@ async fn execute_facebook_publish_submit(
     session: &mut EngineSession,
     params: &crate::command::PublishIdentity,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    commit_windows: &CommitWindowRequester,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     if let Some(output) = ensure_facebook_action_gate(session, command).await? {
         return Ok((EffectPhase::NotStarted, output));
@@ -1892,7 +1994,7 @@ async fn execute_facebook_publish_submit(
             target.reason.as_deref().unwrap_or("submit_not_found"),
         ));
     }
-    let (Some(x), Some(y)) = (target.cx, target.cy) else {
+    if target.cx.is_none() || target.cy.is_none() {
         return Ok(facebook_publish_result(
             EffectPhase::NotStarted,
             params.record_id,
@@ -1902,7 +2004,34 @@ async fn execute_facebook_publish_submit(
             false,
             "submit_not_found",
         ));
+    }
+    enter_facebook_commit_window(command, commit_windows, deadline_unix_ms, cancellation).await?;
+    let protected_target = probe_facebook_publish_submit(session).await?;
+    let (Some(x), Some(y)) = (protected_target.cx, protected_target.cy) else {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "submit",
+            false,
+            false,
+            "target_moved_before_commit",
+        ));
     };
+    if !protected_target.ok {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "submit",
+            false,
+            false,
+            protected_target
+                .reason
+                .as_deref()
+                .unwrap_or("target_moved_before_commit"),
+        ));
+    }
     dispatch_facebook_click(session, x, y).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     loop {
@@ -2617,6 +2746,30 @@ fn facebook_publish_result(
             .bounded(),
         ),
     )
+}
+
+async fn enter_facebook_commit_window(
+    command: &NativeCommand,
+    requester: &CommitWindowRequester,
+    deadline_unix_ms: u64,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(), EngineError> {
+    let contract = facebook::capability::parity(command)
+        .and_then(|entry| entry.commit_window)
+        .ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::EngineInternal,
+                "native Facebook irreversible write has no commit window contract",
+            )
+        })?;
+    requester
+        .enter(
+            contract.label,
+            contract.budget_ms,
+            deadline_unix_ms,
+            cancellation,
+        )
+        .await
 }
 
 async fn ensure_facebook_action_gate(

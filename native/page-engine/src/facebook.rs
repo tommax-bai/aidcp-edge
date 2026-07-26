@@ -10,6 +10,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
 
+pub mod capability;
+
 include!(concat!(
     env!("OUT_DIR"),
     "/facebook_command_router_bytes.rs"

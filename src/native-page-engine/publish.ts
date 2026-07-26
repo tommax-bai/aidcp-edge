@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PublishCommandPayload, PublishCommandResultPayload } from '../comm/protocol.js';
+import type { CommitWindowGuard } from '../execution/commit-window.js';
 import { nativePublishCommand } from './command-mapper.js';
 import { NativePageRuntime } from './runtime.js';
 
@@ -13,6 +14,7 @@ export class NativePublishExecutor {
   constructor(
     private readonly runtime: NativePageRuntime,
     private readonly tempPrefix: string,
+    private readonly commitWindow?: CommitWindowGuard,
   ) {}
 
   async dispatch(payload: PublishCommandPayload, signal?: AbortSignal): Promise<PublishCommandResultPayload> {
@@ -43,6 +45,9 @@ export class NativePublishExecutor {
         nativePublishCommand(payload, { localImagePath, imageIndex }),
         timeoutMs,
         signal,
+        this.commitWindow
+          ? (request) => this.commitWindow!.enter(request.budgetMs, request.label)
+          : undefined,
       );
       const value = execution.output?.kind === 'publish_receipt'
         ? execution.output.value as Record<string, unknown>

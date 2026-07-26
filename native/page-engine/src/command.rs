@@ -493,39 +493,7 @@ impl NativeCommand {
                     | IdentityBootstrap(_)
                     | IdentityReadCurrent(_)
             ),
-            Platform::Facebook => matches!(
-                self,
-                PageProbe(_)
-                    | SessionStop(_)
-                    | BrowseNext(_)
-                    | BrowseScroll(_)
-                    | PageScroll(_)
-                    | FeedRefresh(_)
-                    | SearchExecute(_)
-                    | NoteOpen(_)
-                    | NoteClose(_)
-                    | NavigationBack(_)
-                    | InteractionLike(_)
-                    | InteractionFollow(_)
-                    | InteractionComment(_)
-                    | GroupJoin(_)
-                    | PublishNavigateEntry(_)
-                    | PublishSelectMode(_)
-                    | PublishUploadImage(_)
-                    | PublishSetCover(_)
-                    | PublishFillField(_)
-                    | PublishAddWithCandidate(_)
-                    | PublishSetOption(_)
-                    | PublishSetSchedule(_)
-                    | PublishSubmit(_)
-                    | PublishCapturePostId(_)
-                    | PublishCaptureScheduled(_)
-                    | PublishReconcileScheduled(_)
-                    | IdentityBootstrap(_)
-                    | IdentityReadCurrent(_)
-                    | CaptchaCapture(_)
-                    | CaptchaClick(_)
-            ),
+            Platform::Facebook => crate::facebook::capability::owner(self).is_some(),
             Platform::WechatChannels => matches!(self, WechatCaptureSession(_)),
         }
     }

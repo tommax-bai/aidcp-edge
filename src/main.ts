@@ -679,7 +679,11 @@ async function main(): Promise<void> {
   session.cdp.on('cdp.control_recovered', () => taskCoordinator.resumeAfterControlRecovery());
 
   // 发布原子与浏览命令复用同一个 Native 会话串行边界；切换 owner 时旧会话先有界关闭。
-  const nativePublishExecutor = new NativePublishExecutor(nativePageRuntime, imageTempPrefix);
+  const nativePublishExecutor = new NativePublishExecutor(
+    nativePageRuntime,
+    imageTempPrefix,
+    publishGuard,
+  );
 
   // §7 回收契约：把全部在途发布诚实判失败（须在关闭云端连接之前发，确保失败回执发得出去）。
   // 云端 WS 已断时 send 会 best-effort 失败，但本地 in-flight 必须立刻清掉，避免重连后重放旧发布。
@@ -1194,6 +1198,7 @@ async function main(): Promise<void> {
       edgeId,
       getAccountId: () => accountId,
       logger: (message) => console.log(message),
+      commitWindow: browseGuard,
     });
     const nativeBrowse = browse;
     const routeNativeCommand = (env: Envelope): void => {

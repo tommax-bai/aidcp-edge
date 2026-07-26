@@ -79,6 +79,21 @@ if (mode === 'malformed') {
         pendingCommand = request;
         return;
       }
+      if (mode === 'commit-window') {
+        pendingCommand = request;
+        process.stdout.write(`${JSON.stringify({
+          type: 'commit_window_request',
+          protocolVersion: 2,
+          id: request.id,
+          sessionId: request.sessionId,
+          taskId: request.taskId,
+          commandId: request.commandId,
+          token: `cw_${request.commandId}_1`,
+          label: 'fb_join_click',
+          budgetMs: 18_500,
+        })}\n`);
+        return;
+      }
       const result = request.command?.kind === 'browse_scroll'
         ? { kind: 'page_cards', value: { cards: [{ index: 0, title: 'Native card', likeCount: 1, collectCount: 2 }] } }
         : {
@@ -128,6 +143,45 @@ if (mode === 'malformed') {
         reasonCode: 'confirmed',
         result,
       })}\n`);
+      return;
+    }
+    if (request.type === 'commit_window_ack' && mode === 'commit-window') {
+      const matches = pendingCommand
+        && request.sessionId === pendingCommand.sessionId
+        && request.taskId === pendingCommand.taskId
+        && request.commandId === pendingCommand.commandId
+        && request.token === `cw_${pendingCommand.commandId}_1`
+        && request.label === 'fb_join_click';
+      process.stdout.write(`${JSON.stringify({
+        type: 'response',
+        protocolVersion: 2,
+        id: request.id,
+        ok: matches,
+        ...(matches ? { result: { accepted: true } } : {
+          error: {
+            code: 'commit_window_unavailable',
+            message: 'commit window mismatch',
+          },
+        }),
+      })}\n`);
+      if (matches) {
+        process.stdout.write(`${JSON.stringify({
+          type: 'command_result',
+          protocolVersion: 2,
+          id: pendingCommand.id,
+          sessionId: pendingCommand.sessionId,
+          taskId: pendingCommand.taskId,
+          commandId: pendingCommand.commandId,
+          ok: true,
+          effectPhase: 'confirmed',
+          reasonCode: 'confirmed',
+          result: {
+            kind: 'action_receipt',
+            value: { action: 'join_group', ok: true, clicked: true },
+          },
+        })}\n`);
+        pendingCommand = undefined;
+      }
       return;
     }
     if (request.type === 'cancel' && mode === 'cancel') {

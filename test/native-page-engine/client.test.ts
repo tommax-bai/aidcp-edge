@@ -102,6 +102,54 @@ test('permits 90 seconds only for a Facebook group_join command', async () => {
   });
 });
 
+test('opens and closes a correlated host commit window before Native write completion', async () => {
+  const session = await client('commit-window').openSession({
+    ...input,
+    platform: 'facebook',
+    sessionId: 'session-facebook-window',
+    taskId: 'task-facebook-window',
+  });
+  let open = false;
+  const seen: Array<{ label: string; budgetMs: number; commandId: number }> = [];
+  const execution = await session.execute({
+    kind: 'group_join',
+    params: { groupUrl: 'https://www.facebook.com/groups/42', click: true },
+  }, 1_000, undefined, (request) => {
+    assert.equal(open, false);
+    open = true;
+    seen.push({
+      label: request.label,
+      budgetMs: request.budgetMs,
+      commandId: request.commandId,
+    });
+    return () => { open = false; };
+  });
+  assert.equal(execution.effectPhase, 'confirmed');
+  assert.deepEqual(seen, [{ label: 'fb_join_click', budgetMs: 18_500, commandId: 1 }]);
+  assert.equal(open, false);
+  await session.close();
+});
+
+test('refuses an irreversible Native write when no host commit guard is installed', async () => {
+  const session = await client('commit-window').openSession({
+    ...input,
+    platform: 'facebook',
+    sessionId: 'session-facebook-window-missing',
+    taskId: 'task-facebook-window-missing',
+  });
+  await assert.rejects(
+    session.execute({
+      kind: 'group_join',
+      params: { groupUrl: 'https://www.facebook.com/groups/42', click: true },
+    }, 1_000),
+    (error: unknown) => {
+      assert.ok(error instanceof NativePageEngineError);
+      assert.equal(error.code, 'invalid_protocol');
+      return true;
+    },
+  );
+});
+
 test('rejects a ready engine whose capability manifest differs from the packaged contract', async () => {
   const strict = new NativePageEngineClient({
     binaryPath: process.execPath,

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   NativePageEngineClient,
+  type NativeCommitWindowHandler,
   type NativePageCommand,
   type NativePageCommandExecution,
   type NativePageEngineManifest,
@@ -83,6 +84,7 @@ export class NativePageRuntime {
     command: NativePageCommand,
     timeoutMs = 30_000,
     signal?: AbortSignal,
+    commitWindowHandler?: NativeCommitWindowHandler,
   ): Promise<NativePageCommandExecution> {
     return this.serial(async () => {
       const session = await this.sessionFor(ownerId);
@@ -91,7 +93,7 @@ export class NativePageRuntime {
       const forwardAbort = (): void => controller.abort();
       signal?.addEventListener('abort', forwardAbort, { once: true });
       try {
-        return await session.execute(command, timeoutMs, controller.signal);
+        return await session.execute(command, timeoutMs, controller.signal, commitWindowHandler);
       } finally {
         signal?.removeEventListener('abort', forwardAbort);
         if (this.activeAbort === controller) this.activeAbort = undefined;

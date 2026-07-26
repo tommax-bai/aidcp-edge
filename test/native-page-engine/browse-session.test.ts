@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { EdgeClient } from '../../src/client/edge-client.js';
+import { CommitWindowGuard } from '../../src/execution/commit-window.js';
 import type {
   ActionCompletedPayload,
   Envelope,
@@ -12,6 +13,7 @@ import { NativeBrowseSession } from '../../src/native-page-engine/browse-session
 import type {
   NativePageCommand,
   NativePageCommandExecution,
+  NativeCommitWindowHandler,
 } from '../../src/native-page-engine/client.js';
 import type { NativePageRuntime } from '../../src/native-page-engine/runtime.js';
 
@@ -23,6 +25,8 @@ function harness(execute: (
   ownerId: string,
   command: NativePageCommand,
   timeoutMs?: number,
+  signal?: AbortSignal,
+  commitWindowHandler?: NativeCommitWindowHandler,
 ) => Promise<NativePageCommandExecution>, options: {
   platform?: 'xiaohongshu' | 'facebook';
   accountId?: string;
@@ -30,6 +34,7 @@ function harness(execute: (
   random?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   overlayConfirmMs?: number;
+  commitWindow?: CommitWindowGuard;
 } = {}) {
   const executions: Array<{ ownerId: string; command: NativePageCommand; timeoutMs?: number }> = [];
   const actions: ActionCompletedPayload[] = [];
@@ -39,9 +44,15 @@ function harness(execute: (
   const logs: string[] = [];
   const sent: Array<{ type: string; payload: unknown; replyTo?: string }> = [];
   const runtime = {
-    async execute(ownerId: string, command: NativePageCommand, timeoutMs?: number) {
+    async execute(
+      ownerId: string,
+      command: NativePageCommand,
+      timeoutMs?: number,
+      signal?: AbortSignal,
+      commitWindowHandler?: NativeCommitWindowHandler,
+    ) {
       executions.push({ ownerId, command, timeoutMs });
-      return execute(ownerId, command, timeoutMs);
+      return execute(ownerId, command, timeoutMs, signal, commitWindowHandler);
     },
     async closeOwner(ownerId: string) { closedOwners.push(ownerId); },
   } as unknown as NativePageRuntime;
@@ -61,6 +72,7 @@ function harness(execute: (
     random: options.random,
     sleep: options.sleep,
     overlayConfirmMs: options.overlayConfirmMs,
+    commitWindow: options.commitWindow,
     logger: (message) => logs.push(message),
   });
   return { session, executions, actions, cards, details, closedOwners, logs, sent };
@@ -198,6 +210,54 @@ test('Native Facebook group join alone receives the established 90-second comman
   assert.equal(h.executions[0]?.command.kind, 'group_join');
   assert.equal(h.executions[0]?.timeoutMs, 90_000);
   assert.equal(h.executions[1]?.timeoutMs, 30_000);
+});
+
+test('Native Facebook forwards the exact Join commit window to the shared coordinator guard', async () => {
+  let now = 1_000;
+  const guard = new CommitWindowGuard(() => now);
+  const h = harness(async (
+    _ownerId,
+    command,
+    _timeoutMs,
+    _signal,
+    commitWindowHandler,
+  ) => {
+    assert.equal(command.kind, 'group_join');
+    assert.ok(commitWindowHandler);
+    const dispose = commitWindowHandler({
+      sessionId: 'facebook-session',
+      taskId: 'task-join-window',
+      commandId: 1,
+      token: 'cw_1_1',
+      label: 'fb_join_click',
+      budgetMs: 18_500,
+    });
+    assert.equal(guard.isOpen(), true);
+    assert.equal(guard.label, 'fb_join_click');
+    assert.equal(guard.remainingMs(), 18_500);
+    now += 500;
+    dispose();
+    assert.equal(guard.isOpen(), false);
+    return {
+      ok: true,
+      effectPhase: 'confirmed',
+      reasonCode: 'confirmed',
+      output: {
+        kind: 'action_receipt',
+        value: { action: 'join_group', ok: true, clicked: true },
+      },
+    };
+  }, {
+    platform: 'facebook',
+    commitWindow: guard,
+  });
+
+  await h.session.onCloudCommand(envelope('group.join', {
+    taskId: 'task-join-window',
+    groupUrl: 'https://www.facebook.com/groups/42',
+    click: true,
+  }));
+  assert.equal(h.actions[0]?.ok, true);
 });
 
 test('Native Facebook probe reports sustained unknown blockers with same-source evidence', async () => {
