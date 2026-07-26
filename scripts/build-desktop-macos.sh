@@ -171,7 +171,7 @@ if [ -n "$client_auth_url" ]; then
   esac
 fi
 
-# forceCodeSigning 只在 CI（此脚本）施加、不写进 package.json：CSC_LINK 在位时 electron-builder 会签名，
+# forceCodeSigning 只在分发签名脚本施加、不写进 package.json：CSC_NAME/CSC_LINK 在位时 electron-builder 会签名，
 # forceCodeSigning=true 让「签不成」直接失败（fail-closed，绝不静默出 unsigned 包）；而本机无证书跑
 # electron:build:mac 时 package.json 不带此项 → 默认跳过签名、照出 unsigned 自测包（本机打包能力零回归）。
 npx electron-builder --mac dir "${builder_dir_args[@]}" --publish never -c.mac.notarize=false -c.mac.forceCodeSigning=true
@@ -189,14 +189,25 @@ done
 echo "Notarizing and stapling app bundles"
 notarize_parallel "${app_artifacts[@]}"
 
-echo "Building macOS dmg/zip distributables"
+echo "Building macOS DMG distributables"
+version="$(node -p "require('./package.json').version")"
+dmg_artifacts=()
 for arch in $arch_list; do
   app_dir="$(app_dir_for_arch "$arch")"
-  npx electron-builder --mac "--$arch" --prepackaged "$app_dir" --publish never -c.mac.notarize=false -c.mac.forceCodeSigning=true
+  case "$arch" in
+    x64) dmg_path="dist-electron/AIDCP-${version}.dmg" ;;
+    arm64) dmg_path="dist-electron/AIDCP-${version}-arm64.dmg" ;;
+  esac
+  rm -f "$dmg_path" "$dmg_path.blockmap"
+  npx electron-builder --mac "--$arch" --prepackaged "$app_dir" --publish never \
+    -c.mac.target=dmg -c.mac.notarize=false -c.mac.forceCodeSigning=true
+  if [ ! -f "$dmg_path" ]; then
+    echo "Missing $arch DMG artifact: $dmg_path" >&2
+    exit 1
+  fi
+  dmg_artifacts+=("$dmg_path")
 done
 
-shopt -s nullglob
-dmg_artifacts=(dist-electron/*.dmg)
 if [ "${#dmg_artifacts[@]}" -eq 0 ]; then
   echo "No DMG artifacts found" >&2
   exit 1

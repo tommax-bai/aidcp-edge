@@ -37,3 +37,11 @@ test('signed macOS builds may use an installed Developer ID identity', () => {
   assert.match(buildScript, /if \[ -z "\$\{CSC_NAME:-\}" \]/);
   assert.match(buildScript, /for name in CSC_LINK CSC_KEY_PASSWORD/);
 });
+
+test('signed macOS builds notarize only explicitly requested architectures', () => {
+  assert.match(buildWorkflow, /mac_arches:/);
+  assert.match(buildScript, /AIDCP_MAC_ARCHES/);
+  assert.match(buildScript, /-c\.mac\.target=dmg/);
+  assert.match(buildScript, /dmg_artifacts\+=\("\$dmg_path"\)/);
+  assert.doesNotMatch(buildScript, /dmg_artifacts=\(dist-electron\/\*\.dmg\)/);
+});
