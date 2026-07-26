@@ -32,3 +32,8 @@ test('desktop build paths fill dev and ol client-auth URLs by default', () => {
   assert.match(buildWorkflow, /\$authUrl = 'http:\/\/121\.89\.85\.150:8088\/capi'/);
   assert.match(buildWorkflow, /\$authUrl = 'https:\/\/aidcp\.tommax\.cc\/capi'/);
 });
+
+test('signed macOS builds may use an installed Developer ID identity', () => {
+  assert.match(buildScript, /if \[ -z "\$\{CSC_NAME:-\}" \]/);
+  assert.match(buildScript, /for name in CSC_LINK CSC_KEY_PASSWORD/);
+});

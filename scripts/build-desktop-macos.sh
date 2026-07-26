@@ -9,12 +9,21 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 2
 fi
 
-for name in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER; do
+for name in APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER; do
   if [ -z "${!name:-}" ]; then
     echo "$name is required for signed macOS release builds" >&2
     exit 2
   fi
 done
+
+if [ -z "${CSC_NAME:-}" ]; then
+  for name in CSC_LINK CSC_KEY_PASSWORD; do
+    if [ -z "${!name:-}" ]; then
+      echo "$name or CSC_NAME is required for signed macOS release builds" >&2
+      exit 2
+    fi
+  done
+fi
 
 arch_list="${AIDCP_MAC_ARCHES:-x64 arm64}"
 notary_script="$repo_root/scripts/notarize-and-staple.sh"
