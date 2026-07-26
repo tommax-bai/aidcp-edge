@@ -364,6 +364,32 @@ test('Facebook Native action probes return only exact trusted targets', async ()
   assert.equal(editor.output.value.value, '');
 });
 
+test('Facebook Feed Like keeps numeric summaries separate from the direct action control', async () => {
+  install(`
+    <main>
+      <article role="article">
+        <a href="/Alice/posts/pfbidABC/">permalink</a>
+        <button role="button" aria-label="1.2K reactions">1.2K</button>
+        <div>
+          <button role="button" aria-label="留下心情">44</button>
+          <button role="button" aria-label="发表评论">9</button>
+        </div>
+      </article>
+    </main>
+  `);
+
+  const target = await run({
+    kind: 'feed_like_target_probe',
+    params: {
+      noteId: 'https://www.facebook.com/Alice/posts/pfbidABC',
+      operationId: 'feed-like-1',
+    },
+  });
+
+  assert.equal(target.output.value.ok, true);
+  assert.equal(target.output.value.state, 'neutral');
+});
+
 test('Facebook reaction picker ignores the original post Like control', async () => {
   install(`
     <main>
@@ -415,6 +441,72 @@ test('Facebook Native Reel probes bind sibling multilingual like and author-qual
   assert.equal(follow.output.value.ok, true);
   assert.equal(follow.output.value.already, false);
   assert.equal(follow.output.value.noteId, 'https://www.facebook.com/reel/777');
+});
+
+test('Facebook Native Reel primary Like accepts the proven localized labels in the active action rail', async () => {
+  for (const [locale, accessibleName, renderedText] of [
+    ['zh-CN', '赞', '44'],
+    ['zh-TW', '讚', '44'],
+    ['en', 'Like', '44'],
+    ['es', 'Me gusta', '44'],
+    ['vi', 'Thích', '44'],
+  ]) {
+    const dom = install(`
+      <main>
+        <video id="video" src="https://cdn.example/reel-777.mp4"></video>
+        <button id="like" aria-label="${accessibleName}">${renderedText}</button>
+      </main>
+    `, 'https://www.facebook.com/reel/777');
+    const video = dom.window.document.querySelector('#video')!;
+    const button = dom.window.document.querySelector('#like')!;
+    setRect(video, { left: 500, top: 70, right: 940, bottom: 780 });
+    setRect(button, { left: 980, top: 500, right: 1_040, bottom: 550 });
+    button.addEventListener('click', () => {
+      button.setAttribute('aria-pressed', 'true');
+    });
+
+    const probe = await run({
+      kind: 'like_probe',
+      params: { noteId: 'https://www.facebook.com/reel/777' },
+    });
+    assert.equal(probe.output.value.ok, true, locale);
+    assert.equal(probe.output.value.already, false, locale);
+
+    const committed = await run({
+      kind: 'like_primary_commit',
+      params: { noteId: 'https://www.facebook.com/reel/777' },
+    });
+    assert.equal(committed.output.value.clicked, true, locale);
+
+    const verified = await run({
+      kind: 'like_verify',
+      params: { noteId: 'https://www.facebook.com/reel/777' },
+    });
+    assert.equal(verified.output.value.selected, true, locale);
+  }
+});
+
+test('Facebook Native Reel bare zh-CN Like needs numeric content and active-video geometry', async () => {
+  const dom = install(`
+    <main>
+      <video id="video" src="https://cdn.example/reel-777.mp4"></video>
+      <button id="no-count" aria-label="赞">赞</button>
+      <button id="off-rail" aria-label="赞">44</button>
+      <button id="unknown" aria-label="支持">44</button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('#video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(dom.window.document.querySelector('#no-count')!, { left: 980, top: 500, right: 1_040, bottom: 550 });
+  setRect(dom.window.document.querySelector('#off-rail')!, { left: 1_180, top: 570, right: 1_240, bottom: 620 });
+  setRect(dom.window.document.querySelector('#unknown')!, { left: 980, top: 640, right: 1_040, bottom: 690 });
+
+  const probe = await run({
+    kind: 'like_probe',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+
+  assert.equal(probe.output.value.ok, false);
+  assert.equal(probe.output.value.reason, 'like_button_not_found');
 });
 
 test('Facebook Native Reel probes reject ambiguous sibling controls', async () => {
@@ -668,6 +760,40 @@ test('Facebook Native Reel follow probe recognizes already-following author labe
   assert.match(String(follow.output.value.videoKey), /reel-777\.mp4@element:/);
 });
 
+test('Facebook Native Reel follow probe retains every author-qualified locale and state family', async () => {
+  for (const [accessibleName, already] of [
+    ['Follow Re Su', false],
+    ['关注Re Su', false],
+    ['關注 Re Su', false],
+    ['Theo dõi Re Su', false],
+    ['Theo doi Re Su', false],
+    ['Following Re Su', true],
+    ['已关注 Re Su', true],
+    ['關注中 Re Su', true],
+    ['Đang theo dõi Re Su', true],
+    ['Dang theo doi Re Su', true],
+  ] as const) {
+    const dom = install(`
+      <main>
+        <video id="video" src="https://cdn.example/reel-777.mp4"></video>
+        <a id="author">Re Su</a>
+        <button id="follow" aria-label="${accessibleName}">${accessibleName}</button>
+      </main>
+    `, 'https://www.facebook.com/reel/777');
+    setRect(dom.window.document.querySelector('#video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+    setRect(dom.window.document.querySelector('#author')!, { left: 590, top: 650, right: 680, bottom: 690 });
+    setRect(dom.window.document.querySelector('#follow')!, { left: 690, top: 650, right: 830, bottom: 690 });
+
+    const result = await run({
+      kind: 'follow_probe',
+      params: { noteId: 'https://www.facebook.com/reel/777' },
+    });
+    assert.equal(result.output.value.ok, true, accessibleName);
+    assert.equal(result.output.value.already, already, accessibleName);
+    assert.equal(result.output.value.author, 'Re Su', accessibleName);
+  }
+});
+
 test('Facebook Native Reel follow rejects a bare CTA without a unique author witness', async () => {
   const dom = install(`
     <main>
@@ -764,6 +890,193 @@ test('Facebook comment acknowledgement is scoped to the bound account and server
   assert.equal(other.output.value.confirmed, false);
 });
 
+test('Facebook comment acknowledgement retains the retired pending-approval vocabulary', async () => {
+  for (const status of [
+    '待审核',
+    '待审批',
+    '待批准',
+    '等待审核',
+    '等待管理员批准',
+    '需管理员批准',
+    '需经管理员审核',
+    '管理员审核后才可见',
+    '管理员批准后可见',
+    '通过后可见',
+    'pending review',
+    'pending approval',
+    'awaiting admin approval',
+    'awaiting administrator approval',
+    'will be visible once approved',
+    'will be visible after',
+    'need admin approval',
+    'needs administrator approval',
+    'visible after approved',
+  ]) {
+    install(`
+      <main>
+        <article role="article">
+          <a href="/Alice/posts/pfbidABC/">permalink</a>
+          <article role="article">
+            <a href="/profile.php?id=61591824155856">Gi Vo</a>
+            <span>Thoughtful reply</span>
+            <span>${status}</span>
+          </article>
+        </article>
+      </main>
+    `);
+    const result = await run({
+      kind: 'comment_ack_probe',
+      params: {
+        noteId: 'https://www.facebook.com/Alice/posts/pfbidABC',
+        text: 'Thoughtful reply',
+        accountId: '61591824155856',
+      },
+    });
+    assert.equal(result.output.value.confirmed, false, status);
+    assert.equal(result.output.value.pending, true, status);
+  }
+});
+
+test('Facebook comment editor and acknowledgement retain localized editor and control families', async () => {
+  for (const editorLabel of [
+    '写评论',
+    '留言',
+    'Write a comment',
+    'Bình luận',
+    'Comentar',
+    '输入回答',
+    'Answer',
+  ]) {
+    install(`
+      <main>
+        <article role="article">
+          <a href="/Alice/posts/pfbidABC/">permalink</a>
+          <div role="textbox" contenteditable="true" aria-label="${editorLabel}"></div>
+        </article>
+      </main>
+    `);
+    const editor = await run({
+      kind: 'comment_editor_probe',
+      params: { noteId: 'https://www.facebook.com/Alice/posts/pfbidABC' },
+    });
+    assert.equal(editor.output.value.ok, true, editorLabel);
+  }
+
+  const likeLabels = ['赞', '讚', '点赞', '按赞', 'Like', 'Thích'];
+  const replyLabels = ['回复', '回覆', 'Reply', 'Trả lời', 'Phản hồi'];
+  for (let index = 0; index < Math.max(likeLabels.length, replyLabels.length); index += 1) {
+    const likeLabel = likeLabels[index % likeLabels.length]!;
+    const replyLabel = replyLabels[index % replyLabels.length]!;
+    install(`
+      <main>
+        <article role="article">
+          <a href="/Alice/posts/pfbidABC/">permalink</a>
+          <article role="article">
+            <a href="/profile.php?id=61591824155856">Gi Vo</a>
+            <span>Thoughtful reply</span>
+            <button aria-label="${likeLabel}"></button>
+            <button aria-label="${replyLabel}"></button>
+          </article>
+        </article>
+      </main>
+    `);
+    const acknowledgement = await run({
+      kind: 'comment_ack_probe',
+      params: {
+        noteId: 'https://www.facebook.com/Alice/posts/pfbidABC',
+        text: 'Thoughtful reply',
+        accountId: '61591824155856',
+      },
+    });
+    assert.equal(acknowledgement.output.value.confirmed, true, `${likeLabel}/${replyLabel}`);
+  }
+});
+
+test('Facebook comment acknowledgement retains rejected and in-flight locale families', async () => {
+  const rejectedLabels = [
+    '已拒绝',
+    '被拒绝',
+    '遭拒绝',
+    '已驳回',
+    '已被驳回',
+    '查看反馈',
+    '查看意见反馈',
+    'Đã từ chối',
+    'Bị từ chối',
+    'Xem phản hồi',
+    'Rejected',
+    'Declined',
+    'was not approved',
+    'See feedback',
+    'View feedback',
+  ];
+  const inFlightLabels = [
+    '发布中',
+    '發佈中',
+    '发送中',
+    '發送中',
+    'Đang đăng',
+    'Đang gửi',
+    'Posting',
+    'Sending',
+  ];
+  for (const [status, expected] of [
+    ...rejectedLabels.map((status) => [status, 'rejected'] as const),
+    ...inFlightLabels.map((status) => [status, 'inFlight'] as const),
+  ]) {
+    install(`
+      <main>
+        <article role="article">
+          <a href="/Alice/posts/pfbidABC/">permalink</a>
+          <article role="article">
+            <a href="/profile.php?id=61591824155856">Gi Vo</a>
+            <span>Thoughtful reply</span>
+            <span>${status}</span>
+          </article>
+        </article>
+      </main>
+    `);
+    const result = await run({
+      kind: 'comment_ack_probe',
+      params: {
+        noteId: 'https://www.facebook.com/Alice/posts/pfbidABC',
+        text: 'Thoughtful reply',
+        accountId: '61591824155856',
+      },
+    });
+    assert.equal(result.output.value.confirmed, false, status);
+    assert.equal(result.output.value[expected], true, status);
+  }
+});
+
+test('Facebook comment acknowledgement does not read pending words from the submitted body', async () => {
+  const submitted = 'A note about pending approval';
+  install(`
+    <main>
+      <article role="article">
+        <a href="/Alice/posts/pfbidABC/">permalink</a>
+        <article role="article">
+          <a href="/profile.php?id=61591824155856">Gi Vo</a>
+          <span>${submitted}</span>
+          <a href="?comment_id=Y29tbWVudDoxMjM=">timestamp</a>
+        </article>
+      </article>
+    </main>
+  `);
+
+  const result = await run({
+    kind: 'comment_ack_probe',
+    params: {
+      noteId: 'https://www.facebook.com/Alice/posts/pfbidABC',
+      text: submitted,
+      accountId: '61591824155856',
+    },
+  });
+
+  assert.equal(result.output.value.confirmed, true);
+  assert.equal(result.output.value.pending, false);
+});
+
 test('Facebook comment acknowledgement ignores lifecycle words outside the own scoped row', async () => {
   install(`
     <main>
@@ -824,6 +1137,52 @@ test('Facebook consent probe preserves accept-all and necessary-only as distinct
   assert.deepEqual(result.output.value.necessaryOnly, { cx: 50, cy: 20 });
   assert.equal(result.output.value.acceptAllAmbiguous, false);
   assert.equal(result.output.value.necessaryOnlyAmbiguous, false);
+});
+
+test('Facebook consent probe retains every evidence-backed action label', async () => {
+  const acceptAllLabels = [
+    '允许所有 Cookie',
+    '允许全部 Cookie',
+    '接受所有 Cookie',
+    '同意所有 Cookie',
+    '允许 Facebook 使用 Cookie',
+    '允许使用 Cookie',
+    'Allow all cookies',
+    'Accept all cookies',
+    'Allow the use of cookies',
+  ];
+  const necessaryOnlyLabels = [
+    '仅允许必要 Cookie',
+    '只允许必要 Cookie',
+    '仅接受必要 Cookie',
+    '拒绝非必要 Cookie',
+    'Only allow essential cookies',
+    'Decline optional cookies',
+    'Refuse non-essential cookies',
+    'Refuse nonessential cookies',
+  ];
+  for (const label of acceptAllLabels) {
+    install(`
+      <main><div role="dialog">
+        <p>Read our Cookie Policy.</p>
+        <button aria-label="${label}">${label}</button>
+      </div></main>
+    `);
+    const result = await run({ kind: 'consent_probe', params: {} });
+    assert.equal(result.output.value.present, true, label);
+    assert.deepEqual(result.output.value.acceptAll, { cx: 50, cy: 20 }, label);
+  }
+  for (const label of necessaryOnlyLabels) {
+    install(`
+      <main><div role="dialog">
+        <p>Read our Cookie Policy.</p>
+        <button aria-label="${label}">${label}</button>
+      </div></main>
+    `);
+    const result = await run({ kind: 'consent_probe', params: {} });
+    assert.equal(result.output.value.present, true, label);
+    assert.deepEqual(result.output.value.necessaryOnly, { cx: 50, cy: 20 }, label);
+  }
 });
 
 test('Facebook group join clicks only one in-scope CTA and verifies membership afterwards', async () => {
@@ -1007,6 +1366,66 @@ test('Facebook group join preserves login and captcha blockers without actuation
   assert.equal(captcha.output.value.reason, 'blocked_by_captcha');
 });
 
+test('Facebook group join retains every localized membership state family', async () => {
+  const joinLabels = [
+    'join group', 'join', '加入小组', '加入群组', '加入社团', '加入', 'tham gia', 'únete',
+    'unirte', 'participar', 'entrar al grupo', 'entrar no grupo', 'gabung', 'bergabung',
+    'เข้าร่วม', 'rejoindre', 'beitreten', 'iscriviti', 'вступить', 'присоединиться', '참여',
+    '가입', 'انضمام', 'انضم', 'sertai',
+  ];
+  const memberLabels = [
+    'joined', 'leave group', '已加入', '退出小组', '退出群组', '退出社团', 'đã tham gia',
+    'rời nhóm', 'salir del grupo', 'keluar dari grup', 'quitter le groupe', 'gruppe verlassen',
+    'ออกจากกลุ่ม', '已是成员', '你已加入',
+  ];
+  const pendingLabels = [
+    'pending', 'request sent', 'cancel request', '待批准', '已申请', '待审批', '待审核',
+    '取消请求', '取消加入请求', '取消申请', '已发送请求', 'đang chờ', 'hủy yêu cầu',
+    'solicitud enviada', 'cancelar solicitud', 'menunggu', 'batalkan permintaan',
+    'demande envoyée', 'annuler la demande', 'anfrage gesendet', 'รอการอนุมัติ', '요청 보냄',
+    '요청됨', 'requested',
+  ];
+  const questionLabels = [
+    'membership questions', 'answer questions', 'answer these questions', 'questions to join',
+    'required question', '回答问题', '入群问题', '必答', '加入前请回答', 'trả lời câu hỏi',
+    'responde las preguntas', 'preguntas de membresía', 'jawab pertanyaan',
+    'répondez aux questions', 'beantworte die fragen', 'ตอบคำถาม',
+  ];
+
+  for (const label of joinLabels) {
+    install(`
+      <main><section><h1>Agent Builders</h1><button aria-label="${label}">${label}</button></section></main>
+    `, 'https://www.facebook.com/groups/42');
+    const result = await run({ kind: 'join_probe', params: {} });
+    assert.equal(result.output.value.found, true, label);
+    assert.equal((result.output.value.observation as Record<string, unknown>).joinCtaPresent, true, label);
+  }
+  for (const label of memberLabels) {
+    install(`
+      <main><section><h1>Agent Builders</h1><button aria-label="${label}">${label}</button></section></main>
+    `, 'https://www.facebook.com/groups/42');
+    const result = await run({ kind: 'join_probe', params: {} });
+    assert.equal(result.output.value.joined, true, label);
+  }
+  for (const label of pendingLabels) {
+    install(`
+      <main><section><h1>Agent Builders</h1><button aria-label="${label}">${label}</button></section></main>
+    `, 'https://www.facebook.com/groups/42');
+    const result = await run({ kind: 'join_probe', params: {} });
+    assert.equal(result.output.value.pending, true, label);
+  }
+  for (const label of questionLabels) {
+    install(`
+      <main>
+        <section><h1>Agent Builders</h1></section>
+        <div role="dialog">${label}</div>
+      </main>
+    `, 'https://www.facebook.com/groups/42');
+    const result = await run({ kind: 'join_probe', params: {} });
+    assert.equal(result.output.value.questionnaire, true, label);
+  }
+});
+
 test('Facebook join probe does not treat a pre-existing public composer as membership', async () => {
   install(`
     <main>
@@ -1024,32 +1443,157 @@ test('Facebook join probe does not treat a pre-existing public composer as membe
   assert.equal((result.output.value.observation as Record<string, unknown>).composerPresent, true);
 });
 
-test('Facebook publish submit is confirmed only after the composer closes', async () => {
-  const dom = install(`
+test('Facebook publish entry probe retains every retired localized label family', async () => {
+  for (const accessibleName of [
+    "What's on your mind",
+    'Create post',
+    'Create a post',
+    'Write something',
+    '写点什么',
+    '你在想什么',
+    '创建帖子',
+    'Tianxing Bai，分享你的新鲜事吧！',
+    'Bạn đang nghĩ gì',
+    'Crear publicación',
+    'Crear una publicación',
+    'Post something',
+  ]) {
+    install(`<main><button aria-label="${accessibleName}"></button></main>`);
+    const result = await run({ kind: 'publish_entry_probe', params: {} });
+    assert.equal(result.output.kind, 'point_target', accessibleName);
+    assert.equal(result.output.value.ok, true, accessibleName);
+  }
+});
+
+test('Facebook publish home probe uses visible structural and blocking state from one snapshot', async () => {
+  install(`
+    <main style="display:none"></main>
+    <div role="dialog">Account notice</div>
+  `);
+  const blocked = await run({ kind: 'publish_home_probe', params: {} });
+  assert.equal(blocked.output.kind, 'publish_home_probe');
+  assert.equal(blocked.output.value.mainVisible, false);
+  assert.equal(blocked.output.value.editorReady, false);
+  assert.equal(blocked.output.value.blockingDialog, true);
+
+  install(`
     <main>
-      <div role="dialog" id="composer">
-        <div role="textbox" contenteditable="true">Ready</div>
-        <button id="submit" aria-label="Post">Post</button>
+      <div role="dialog">
+        <div role="textbox" contenteditable="true" aria-label="写点什么"></div>
       </div>
     </main>
   `);
-  dom.window.document.querySelector('#submit')?.addEventListener('click', () => {
-    dom.window.document.querySelector('#composer')?.remove();
-  });
-  const result = await run({
-    kind: 'publish_submit',
-    params: { recordId: 7, seq: 9 },
-  });
-  assert.equal(result.effectPhase, 'confirmed');
-  assert.equal(result.output.kind, 'publish_receipt');
-  assert.deepEqual(result.output.value, {
-    recordId: 7,
-    seq: 9,
-    kind: 'submit',
-    ok: true,
-    submitDispatched: true,
-    error: undefined,
-  });
+  const composer = await run({ kind: 'publish_home_probe', params: {} });
+  assert.equal(composer.output.value.mainVisible, true);
+  assert.equal(composer.output.value.editorReady, true);
+  assert.equal(composer.output.value.blockingDialog, false);
+});
+
+test('Facebook publish probes keep editor and submit locale families capability-scoped', async () => {
+  for (const editorLabel of [
+    "What's on your mind",
+    'Create a public post',
+    'Write something',
+    '写点什么',
+    '在想什么',
+    'Bạn đang nghĩ gì',
+    'Qué estás pensando',
+    'Publicación',
+  ]) {
+    install(`
+      <main><div role="dialog">
+        <div role="textbox" contenteditable="true" aria-label="${editorLabel}"></div>
+      </div></main>
+    `);
+    const result = await run({ kind: 'publish_editor_probe', params: {} });
+    assert.equal(result.output.value.ok, true, editorLabel);
+  }
+
+  for (const submitLabel of ['Post', '发布', '發佈', '发帖', 'Đăng', 'Publicar', 'Compartir']) {
+    install(`
+      <main><div role="dialog">
+        <div role="textbox" contenteditable="true"></div>
+        <button aria-label="${submitLabel}"></button>
+      </div></main>
+    `);
+    const result = await run({ kind: 'publish_submit_probe', params: {} });
+    assert.equal(result.output.kind, 'publish_submit_probe', submitLabel);
+    assert.equal(result.output.value.ok, true, submitLabel);
+    assert.equal(result.output.value.disabled, false, submitLabel);
+  }
+});
+
+test('Facebook publish submitted probe retains composer-close and localized state witnesses', async () => {
+  for (const submittedState of [
+    'Your post is being processed',
+    'Your post has been shared',
+    'Post shared',
+    '已发布',
+    '发布中',
+    '發佈中',
+    'Đã đăng',
+    'Publicación compartida',
+  ]) {
+    install(`
+      <main>
+        <div role="dialog"><div role="textbox" contenteditable="true"></div></div>
+        <div role="status">${submittedState}</div>
+      </main>
+    `);
+    const result = await run({ kind: 'publish_submitted_probe', params: {} });
+    assert.equal(result.output.value.confirmed, true, submittedState);
+    assert.equal(result.output.value.witness, 'submitted_state', submittedState);
+  }
+
+  install('<main><div role="status">Home feed</div></main>');
+  const closed = await run({ kind: 'publish_submitted_probe', params: {} });
+  assert.equal(closed.output.value.confirmed, true);
+  assert.equal(closed.output.value.witness, 'composer_closed');
+
+  install('<main><div role="dialog"><div role="textbox" contenteditable="true"></div></div></main>');
+  const open = await run({ kind: 'publish_submitted_probe', params: {} });
+  assert.equal(open.output.value.confirmed, false);
+  assert.equal(open.output.value.witness, undefined);
+});
+
+test('Facebook publish entry and submit probes reject decoys, ambiguity, and disabled controls', async () => {
+  install(`
+    <main>
+      <button aria-label="Write a comment">Create post comment</button>
+      <button aria-label="Tianxing Bai，分享你的新鲜事吧！"></button>
+    </main>
+  `);
+  const entry = await run({ kind: 'publish_entry_probe', params: {} });
+  assert.equal(entry.output.value.ok, true);
+
+  install(`
+    <main>
+      <button aria-label="Create post"></button>
+      <button aria-label="Create post"></button>
+    </main>
+  `);
+  const ambiguous = await run({ kind: 'publish_entry_probe', params: {} });
+  assert.equal(ambiguous.output.value.ok, false);
+  assert.equal(ambiguous.output.value.reason, 'ambiguous_target');
+
+  install(`
+    <main>
+      <button aria-label="Create post"></button>
+      <button>Write something with a much longer rendered label</button>
+    </main>
+  `);
+  const differentlyScored = await run({ kind: 'publish_entry_probe', params: {} });
+  assert.equal(differentlyScored.output.value.ok, false);
+  assert.equal(differentlyScored.output.value.reason, 'ambiguous_target');
+
+  install(`
+    <main><div role="dialog">
+      <button aria-label="Publicar" aria-disabled="true"></button>
+    </div></main>
+  `);
+  const disabled = await run({ kind: 'publish_submit_probe', params: {} });
+  assert.equal(disabled.output.value.ok, false);
+  assert.equal(disabled.output.value.reason, 'submit_disabled');
 });
 
 test('Facebook publish keeps unsupported generic atoms honest and captures one matching post', async () => {
@@ -1059,7 +1603,7 @@ test('Facebook publish keeps unsupported generic atoms honest and captures one m
     params: { recordId: 8, seq: 1, optionKind: 'target', optionValue: 'facebook_group' },
   });
   assert.equal(wrongTarget.effectPhase, 'not_started');
-  assert.equal(wrongTarget.output.value.reason, 'unsupported_target');
+  assert.equal(wrongTarget.output.value.reason, 'unsupported_command');
 
   const unsupported = await run({
     kind: 'publish_set_schedule',

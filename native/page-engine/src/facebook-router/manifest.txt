@@ -1,5 +1,6 @@
 00-shared.js
 05-session.js
+08-reaction-semantics.js
 10-feed-like.js
 20-feed.js
 30-reels.js

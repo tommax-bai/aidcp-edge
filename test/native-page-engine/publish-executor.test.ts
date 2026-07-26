@@ -7,8 +7,13 @@ import type { NativePageRuntime } from '../../src/native-page-engine/runtime.js'
 
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]);
 
-function command(kind: PublishCommandPayload['kind'], seq: number, params: PublishCommandPayload['params'] = {}): PublishCommandPayload {
-  return { platform: 'xiaohongshu', taskId: 'task-native', recordId: 9, seq, kind, params };
+function command(
+  kind: PublishCommandPayload['kind'],
+  seq: number,
+  params: PublishCommandPayload['params'] = {},
+  platform: PublishCommandPayload['platform'] = 'xiaohongshu',
+): PublishCommandPayload {
+  return { platform, taskId: 'task-native', recordId: 9, seq, kind, params };
 }
 
 test('tracks confirmed upload order and selects cover by its already-uploaded source', async () => {
@@ -52,4 +57,43 @@ test('fails closed when the requested cover was never confirmed as uploaded', as
   const result = await executor.dispatch(command('set_cover', 1, { imageUrl: 'https://cdn.test/missing.png' }));
   assert.equal(result.ok, false);
   assert.equal(result.error, 'cover_source_not_uploaded');
+});
+
+test('passes through the Facebook composer deadline without widening other publish commands', async () => {
+  const timeouts: number[] = [];
+  const runtime = {
+    execute: async (
+      _owner: string,
+      _nativeCommand: NativePageCommand,
+      timeoutMs: number,
+    ) => {
+      timeouts.push(timeoutMs);
+      return {
+        effectPhase: 'confirmed' as const,
+        output: { kind: 'publish_receipt', value: { ok: true } },
+      };
+    },
+  } as unknown as NativePageRuntime;
+  const executor = new NativePublishExecutor(runtime, 'aidcp-native-publish-test-');
+
+  await executor.dispatch({
+    ...command('select_mode', 1, {
+      optionKind: 'target',
+      optionValue: 'facebook_personal_timeline',
+    }, 'facebook'),
+    timeoutMs: 40_000,
+  });
+  await executor.dispatch({
+    ...command('select_mode', 2, {
+      optionKind: 'target',
+      optionValue: 'xiaohongshu_note',
+    }),
+    timeoutMs: 40_000,
+  });
+  await executor.dispatch(command('select_mode', 3, {
+    optionKind: 'target',
+    optionValue: 'facebook_personal_timeline',
+  }, 'facebook'));
+
+  assert.deepEqual(timeouts, [40_000, 30_000, 30_000]);
 });

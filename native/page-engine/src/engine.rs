@@ -27,6 +27,7 @@ use url::Url;
 const MAX_RECORDED_COMMANDS: usize = 128;
 const MAX_CAPTCHA_SNAPSHOTS: usize = 8;
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
+const FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS: u64 = 40_000;
 const FACEBOOK_GROUP_JOIN_TIMEOUT_MS: u64 = 90_000;
 
 #[derive(Clone, Debug, Serialize)]
@@ -144,6 +145,28 @@ struct CaptchaSnapshotState {
 }
 
 impl EngineSession {
+    #[cfg(test)]
+    pub(crate) fn for_test(cdp: CdpSession, platform: Platform) -> Self {
+        let target_id = cdp.target_id().to_owned();
+        Self {
+            id: "test-session".to_owned(),
+            task_id: "test-task".to_owned(),
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            platform,
+            timeout_ms: DEFAULT_COMMAND_TIMEOUT_MS,
+            target_id,
+            cdp,
+            last_command_id: 0,
+            active_command_id: None,
+            completed: BTreeMap::new(),
+            captcha_snapshots: VecDeque::new(),
+            wechat_capture_initialized: false,
+            wechat_request_context: None,
+            facebook: FacebookSessionState::default(),
+        }
+    }
+
     fn info(&self) -> SessionInfo {
         SessionInfo {
             session_id: self.id.clone(),
@@ -1218,6 +1241,10 @@ fn command_timeout_ms(session: &EngineSession, command: &NativeCommand) -> u64 {
 fn command_timeout_ceiling(platform: Platform, command: &NativeCommand) -> u64 {
     if platform == Platform::Facebook && matches!(command, NativeCommand::GroupJoin(_)) {
         FACEBOOK_GROUP_JOIN_TIMEOUT_MS
+    } else if platform == Platform::Facebook
+        && matches!(command, NativeCommand::PublishSelectMode(_))
+    {
+        FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS
     } else {
         DEFAULT_COMMAND_TIMEOUT_MS
     }
@@ -1263,17 +1290,28 @@ mod tests {
     }
 
     #[test]
-    fn long_command_ceiling_is_facebook_group_join_only() {
+    fn long_command_ceilings_are_capability_specific() {
         let join = NativeCommand::GroupJoin(crate::command::GroupJoinParams {
             group_url: "https://www.facebook.com/groups/42".to_owned(),
             click: Some(true),
             reason: None,
             think_ms: None,
         });
+        let select_mode =
+            NativeCommand::PublishSelectMode(crate::command::PublishSelectModeParams {
+                record_id: 7,
+                seq: 2,
+                option_kind: Some("target".to_owned()),
+                option_value: Some("facebook_personal_timeline".to_owned()),
+            });
         let probe = NativeCommand::PageProbe(crate::command::EmptyParams::default());
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &join),
             FACEBOOK_GROUP_JOIN_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ceiling(Platform::Facebook, &select_mode),
+            FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS
         );
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &probe),
@@ -1281,6 +1319,10 @@ mod tests {
         );
         assert_eq!(
             command_timeout_ceiling(Platform::Xiaohongshu, &join),
+            DEFAULT_COMMAND_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ceiling(Platform::Xiaohongshu, &select_mode),
             DEFAULT_COMMAND_TIMEOUT_MS
         );
     }

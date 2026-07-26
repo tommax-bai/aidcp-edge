@@ -1,40 +1,4 @@
-  const neutralLike=/^\s*(?:(?:给.+的帖子)?\s*(?:留下心情|赞一个|点赞|讚|like|react|reaccionar|me gusta|thích)|bày tỏ cảm xúc thích(?: về bài viết của .+)?|bay to cam xuc thich(?: ve bai viet cua .+)?)\s*$/i;
-  const unlike=/(取消赞|收回赞|收回|移除心情|移除赞|已赞|remove like|unlike|undo|gỡ thích|bỏ thích)/i;
-  const reactedWord=/^\s*(赞|讚|大赞|超赞|like|love|care|haha|wow|me gusta|me encanta|thích)\s*$/i;
-  const reactionPickerLabel=/^\s*(?:给.+的帖子)?\s*(?:留下心情|react|reaccionar)\s*$/i;
-  const pickerLike=/^\s*(赞|讚|like|me gusta|thích)\s*$/i;
-  const pickerReaction=/^\s*(赞|讚|like|love|care|haha|wow|sad|angry|me gusta|me encanta|thích|yêu thích|thương thương|buồn|phẫn nộ)\s*$/i;
-  const reelComment=/(发表评论|發表評論|写评论|寫留言|评论.+帖子|comment|write a comment|comment.+post|comentar|viết bình luận|bình luận(?: về bài viết của .+)?|binh luan(?: ve bai viet cua .+)?)/i;
-  const reelLikeExcluded=/(share|chia sẻ|chia se|分享|reply|trả lời|tra loi|回复|回覆|menu|更多|next|previous|下一|上一|pause|play|播放|暂停)/i;
-  const explicitReactionWitness=(button)=>{
-    if(!button||!visible(button))return '';
-    const accessible=label(button);
-    const rendered=text(button,256);
-    const numeric=/\d/.test(rendered);
-    if(unlike.test(accessible)||unlike.test(rendered))return 'unlike_label';
-    if(button.getAttribute('aria-pressed')==='true')return 'aria_pressed';
-    if(button.getAttribute('aria-checked')==='true')return 'aria_checked';
-    if(!numeric&&reactionPickerLabel.test(accessible)&&reactedWord.test(rendered))return 'reacted_text';
-    if(!neutralLike.test(accessible)&&!numeric&&reactedWord.test(accessible))return 'reacted_label';
-    return '';
-  };
-  const reactionState=(button)=>{
-    if(!button||!visible(button))return '';
-    const accessible=label(button);
-    const rendered=text(button,256);
-    if(explicitReactionWitness(button))return 'reacted';
-    if(neutralLike.test(accessible)||neutralLike.test(rendered))return 'neutral';
-    return '';
-  };
-  const reactionButton=(root)=>{
-    const buttons=all('button,[role="button"]',root).filter(visible);
-    return buttons.find((button)=>/^(赞|讚|like|me gusta|thích)(\b|\s|$)/i.test(label(button)))||null;
-  };
   const feedLikeOperationAttribute='data-aidcp-native-feed-like';
-  const feedLikeNeutral=/^\s*(?:(?:给.+的帖子)?\s*(?:留下心情|赞一个|点赞|讚|Like|React|Reaccionar|Me gusta|Thích)|Bày tỏ cảm xúc Thích(?: về bài viết của .+)?|Bay to cam xuc Thich(?: ve bai viet cua .+)?)\s*$/i;
-  const feedLikeComment=/(发表评论|發表評論|写评论|寫留言|评论.+帖子|Comment|Write a comment|Comment.+post|Comentar|Viết bình luận|Bình luận(?: về bài viết của .+)?|Binh luan(?: ve bai viet cua .+)?)/i;
-  const feedLikeReacted=/^\s*(赞|讚|大赞|超赞|Like|Love|Care|Haha|Wow|Me gusta|Me encanta|Thích)\s*$/i;
-  const feedLikeUnreact=/(取消赞|收回赞|收回|移除心情|移除赞|已赞|Remove Like|Unlike|Undo|Gỡ Thích|Bỏ thích)/i;
   const directCardControl=(card,control)=>Boolean(card&&control&&card.contains(control)&&closestArticle(control)===card);
   const insideReactionSummary=(card,control)=>{
     const toolbar=control&&control.closest&&control.closest('[role="toolbar"]');
@@ -42,7 +6,7 @@
   };
   const feedLikeCommentControls=(card)=>all('[role="button"][aria-label],button[aria-label]',card)
     .filter((control)=>directCardControl(card,control)&&visible(control)&&!insideReactionSummary(card,control))
-    .filter((control)=>feedLikeComment.test(label(control))||feedLikeComment.test(text(control,256)));
+    .filter((control)=>postComment.test(label(control))||postComment.test(text(control,256)));
   const sharesPostCommentBar=(card,control)=>{
     if(!card||!control||insideReactionSummary(card,control))return false;
     for(let parent=control.parentElement,depth=0;parent&&depth<6;parent=parent.parentElement,depth++){
@@ -60,11 +24,10 @@
     const numeric=/\d/.test(rawText);
     const selected=control.getAttribute('aria-pressed')==='true'||control.getAttribute('aria-checked')==='true';
     let state='';
-    if(feedLikeUnreact.test(rawLabel)||feedLikeUnreact.test(rawText))state='reacted';
-    else if(feedLikeNeutral.test(rawLabel)||feedLikeNeutral.test(rawText)){
-      const pickerLabel=/^\s*(?:给.+的帖子)?\s*(?:留下心情|React|Reaccionar)\s*$/i.test(rawLabel);
-      state=selected||(pickerLabel&&!numeric&&feedLikeReacted.test(rawText))?'reacted':'neutral';
-    }else if(!numeric&&feedLikeReacted.test(rawLabel))state='reacted';
+    if(unlike.test(rawLabel)||unlike.test(rawText))state='reacted';
+    else if(neutralLike.test(rawLabel)||neutralLike.test(rawText)){
+      state=selected||(reactionPickerLabel.test(rawLabel)&&!numeric&&reactedWord.test(rawText))?'reacted':'neutral';
+    }else if(!numeric&&reactedWord.test(rawLabel))state='reacted';
     return state&&sharesPostCommentBar(card,control)?state:'';
   };
   const feedLikeReactionControls=(card)=>all('[role="button"][aria-label],[role="radio"][aria-label],button[aria-label]',card)

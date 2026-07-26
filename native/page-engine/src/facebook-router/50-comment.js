@@ -1,3 +1,4 @@
+  const commentPendingApproval=/(待审核|待审批|待批准|等待(?:管理员)?(?:审核|审批|批准)|(?:管理员)?(?:审核|批准)后(?:才)?可见|通过后(?:才)?可见|需(?:要|经)?管理员(?:审核|批准)|pending review|pending approval|awaiting (?:admin(?:istrator)? )?approval|needs? admin(?:istrator)? approval|visible (?:once|after) approved|will be visible (?:once|after))/i;
   const commentEditorProbe=()=>{
     const root=actionRoot();
     if(!root)return {ok:false,reason:'target_not_found'};
@@ -37,7 +38,7 @@
       });
       if(!own)continue;
       const status=raw.split(value).join(' ');
-      pending=pending||/待审核|待审批|待批准|等待(?:管理员)?(?:审核|审批|批准)|pending review|pending approval|awaiting (?:admin(?:istrator)? )?approval/i.test(status);
+      pending=pending||commentPendingApproval.test(status);
       rejected=rejected||/已拒绝|被拒绝|遭拒绝|已(?:被)?驳回|查看反馈|查看意见反馈|đã từ chối|bị từ chối|xem phản hồi|\brejected\b|\bdeclined\b|was not approved|see feedback|view feedback/i.test(status);
       inFlight=inFlight||/发布中|發佈中|发送中|發送中|đang đăng|đang gửi|\bposting\b|\bsending\b/i.test(status);
       const serverId=all('a[href*="comment_id="]',row).some((link)=>{

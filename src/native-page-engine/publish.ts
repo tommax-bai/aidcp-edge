@@ -39,7 +39,10 @@ export class NativePublishExecutor {
         imageIndex = imageUrl ? draft.imageIndexes.get(imageUrl) : undefined;
         if (imageIndex === undefined) return this.failed(payload, 'cover_source_not_uploaded');
       }
-      const timeoutMs = Math.max(50, Math.min(30_000, payload.timeoutMs ?? 30_000));
+      const maxTimeoutMs = payload.platform === 'facebook' && payload.kind === 'select_mode'
+        ? 40_000
+        : 30_000;
+      const timeoutMs = Math.max(50, Math.min(maxTimeoutMs, payload.timeoutMs ?? 30_000));
       const execution = await this.runtime.execute(
         payload.taskId,
         nativePublishCommand(payload, { localImagePath, imageIndex }),

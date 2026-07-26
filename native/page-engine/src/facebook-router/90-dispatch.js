@@ -1,6 +1,6 @@
   const blocking=blockingProbe();
   const blocked=blocker(blocking);
-  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','publish_entry_probe','publish_editor_probe','publish_submit_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
+  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
     return fail(kind||'page',blocked);
   }
   if(kind==='identity_read')return done(identity());
@@ -21,9 +21,11 @@
   if(kind==='comment_ack_probe')return done({kind:'comment_ack_probe',value:commentAckProbe()});
   if(kind==='join_probe')return done({kind:'join_probe',value:joinProbe()});
   if(kind==='join_click')return done({kind:'join_click',value:joinActuation()});
+  if(kind==='publish_home_probe')return done({kind:'publish_home_probe',value:publishHomeProbe()});
   if(kind==='publish_entry_probe')return done({kind:'point_target',value:publishEntryProbe()});
   if(kind==='publish_editor_probe')return done({kind:'text_target',value:publishEditorProbe()});
   if(kind==='publish_submit_probe')return done({kind:'publish_submit_probe',value:publishSubmitProbe()});
+  if(kind==='publish_submitted_probe')return done({kind:'publish_submitted_probe',value:publishSubmittedProbe()});
   if(kind==='reel_probe')return done({kind:'reel_probe',value:reelProbeValue(activeReel())});
   if(kind==='reel_next_target')return done({kind:'reel_next_target',value:reelNextTarget()});
   if(kind==='reel_cards')return done(feedCards());
@@ -179,40 +181,11 @@
     const joined=after.membershipSignals.length>0||(!before.composerPresent&&after.composerPresent&&!after.joinCtaPresent);
     return joined?done(action('join_group',true,undefined,{groupUrl,clicked:true,groupObservation:before,postObservation:after})):ambiguous('join_group','join_verification_ambiguous',{groupUrl,clicked:true,groupObservation:before,postObservation:after});
   }
-  if(kind==='publish_navigate_entry'){
-    const entry=all('button,[role="button"],div[role="button"]',document).filter(visible).find((el)=>/what(?:'s| is) on your mind|你在想什么|create post|发帖|tạo bài viết/i.test(label(el)+' '+text(el,256)));
-    if(!entry)return fail('navigate_entry','composer_entry_not_found');
-    click(entry);await sleep(350);
-    return first(['[role="dialog"] [contenteditable="true"]','[role="dialog"] textarea'])?done(action('navigate_entry',true)):ambiguous('navigate_entry','composer_unconfirmed');
-  }
-  if(kind==='publish_select_mode'){
-    if(p.optionKind!=='target'||p.optionValue!=='facebook_personal_timeline')return fail('select_mode','unsupported_target');
-    return done(action('select_mode',true,'facebook_composer'));
-  }
-  if(kind==='publish_fill_field'){
-    const root=first(['[role="dialog"]','[aria-modal="true"]'])||document;
-    const editor=first(['[contenteditable="true"][role="textbox"]','[contenteditable="true"]','textarea'],root);
-    if(!editor)return fail('fill_field','composer_editor_not_found');
-    if(p.fieldType==='title')return done(action('fill_field',true,'facebook_title_not_separate'));
-    if(!String(p.value||'').trim())return fail('fill_field','empty_content');
-    fill(editor,String(p.value||''));
-    const read='value' in editor?String(editor.value||''):text(editor,32000);
-    return norm(read,32000)===norm(p.value,32000)?done(action('fill_field',true)):ambiguous('fill_field','composer_readback_mismatch');
-  }
   if(kind==='publish_upload_image'){
     const previews=all('[role="dialog"] img,form img').filter(visible).filter((img)=>/^blob:|^https?:/.test(String(img.src||'')));
     return previews.length?done(action('upload_image',true)):ambiguous('upload_image','media_preview_unconfirmed');
   }
   if(kind==='publish_set_cover'||kind==='publish_add_with_candidate'||kind==='publish_set_option'||kind==='publish_set_schedule')return fail(kind.replace('publish_',''),'kind_not_implemented');
-  if(kind==='publish_submit'){
-    const root=first(['[role="dialog"]','[aria-modal="true"]'])||document;
-    const submit=all('button,[role="button"]',root).filter(visible).find((el)=>/^(发布|post|đăng)$/i.test(label(el)));
-    if(!submit||submit.disabled||submit.getAttribute('aria-disabled')==='true')return fail('submit','publish_submit_not_ready');
-    if(!click(submit))return fail('submit','publish_submit_failed');
-    await sleep(900);
-    const closed=!document.contains(root)||!visible(root);
-    return done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:'submit',ok:closed,submitDispatched:true,error:closed?undefined:'publish_submit_unconfirmed'}},closed?'confirmed':'ambiguous');
-  }
   if(kind==='publish_capture_post_id'){
     const current=cleanPermalink(location.href);
     const candidates=topArticles().map((article)=>({href:permalinkOf(article),body:articleBody(article)})).filter((item)=>item.href);

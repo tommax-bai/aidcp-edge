@@ -6,6 +6,20 @@ use crate::error::{EngineError, ErrorCode};
 use crate::protocol::{EffectPhase, NativeCommand};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
+use url::Url;
+
+const FACEBOOK_PUBLISH_NAVIGATION_BUDGET: Duration = Duration::from_secs(20);
+const FACEBOOK_PUBLISH_COMMAND_BUDGET: Duration = Duration::from_secs(40);
+const FACEBOOK_PUBLISH_SUBMIT_VERIFY_BUDGET: Duration = Duration::from_secs(20);
+const FACEBOOK_PUBLISH_TRIGGER_BUDGET: Duration = Duration::from_secs(20);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FacebookPublishHomeState {
+    Ready,
+    Loading,
+    NotHome,
+    Blocked(&'static str),
+}
 
 pub(crate) async fn execute(
     session: &mut EngineSession,
@@ -16,9 +30,10 @@ pub(crate) async fn execute(
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     match command {
         NativeCommand::PublishNavigateEntry(_) => {
-            session.cdp.navigate("https://www.facebook.com/").await?;
-            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
-            execute_facebook_publish_entry(session, command).await
+            execute_facebook_publish_entry(session, command, deadline_unix_ms).await
+        }
+        NativeCommand::PublishSelectMode(params) => {
+            execute_facebook_publish_select_mode(session, params, command, deadline_unix_ms).await
         }
         NativeCommand::PublishUploadImage(params) => {
             validate_publish_file(&params.path)?;
@@ -44,8 +59,7 @@ pub(crate) async fn execute(
             )
             .await
         }
-        NativeCommand::PublishSelectMode(_)
-        | NativeCommand::PublishSetCover(_)
+        NativeCommand::PublishSetCover(_)
         | NativeCommand::PublishAddWithCandidate(_)
         | NativeCommand::PublishSetOption(_)
         | NativeCommand::PublishSetSchedule(_)
@@ -64,6 +78,7 @@ pub(crate) async fn execute(
 pub(crate) async fn execute_facebook_publish_entry(
     session: &mut EngineSession,
     command: &NativeCommand,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let NativeCommand::PublishNavigateEntry(params) = command else {
         unreachable!("publish entry handler requires publish navigate command");
@@ -71,60 +86,323 @@ pub(crate) async fn execute_facebook_publish_entry(
     if let Some(output) = ensure_facebook_action_gate(session, command).await? {
         return Ok((EffectPhase::NotStarted, output));
     }
-    let target = probe_facebook_publish_entry(session).await?;
-    if !target.ok {
+    session.cdp.navigate(FACEBOOK_HOME_URL).await?;
+    let deadline =
+        bounded_facebook_publish_deadline(deadline_unix_ms, FACEBOOK_PUBLISH_NAVIGATION_BUDGET);
+    let mut home_observed = false;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(facebook_publish_result(
+                EffectPhase::NotStarted,
+                params.record_id,
+                params.seq,
+                "navigate_entry",
+                false,
+                false,
+                if home_observed {
+                    "home_not_reached"
+                } else {
+                    "home_probe_failed"
+                },
+            ));
+        }
+        let home = match probe_facebook_publish_home(session).await {
+            Ok(home) => {
+                home_observed = true;
+                home
+            }
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(facebook_publish_result(
+                EffectPhase::NotStarted,
+                params.record_id,
+                params.seq,
+                "navigate_entry",
+                false,
+                false,
+                "home_not_reached",
+            ));
+        }
+        match home {
+            FacebookPublishHomeState::Ready => {
+                if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+                    return Ok((EffectPhase::NotStarted, output));
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Ok(facebook_publish_result(
+                        EffectPhase::NotStarted,
+                        params.record_id,
+                        params.seq,
+                        "navigate_entry",
+                        false,
+                        false,
+                        "home_not_reached",
+                    ));
+                }
+                return Ok(facebook_publish_result(
+                    EffectPhase::Confirmed,
+                    params.record_id,
+                    params.seq,
+                    "navigate_entry",
+                    true,
+                    false,
+                    "",
+                ));
+            }
+            FacebookPublishHomeState::Blocked(reason) => {
+                return Ok(facebook_publish_result(
+                    EffectPhase::NotStarted,
+                    params.record_id,
+                    params.seq,
+                    "navigate_entry",
+                    false,
+                    false,
+                    reason,
+                ));
+            }
+            FacebookPublishHomeState::Loading | FacebookPublishHomeState::NotHome => {}
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn execute_facebook_publish_select_mode(
+    session: &mut EngineSession,
+    params: &crate::command::PublishSelectModeParams,
+    command: &NativeCommand,
+    deadline_unix_ms: u64,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    if params
+        .option_kind
+        .as_deref()
+        .is_some_and(|kind| kind != "target")
+        || params.option_value.as_deref() != Some("facebook_personal_timeline")
+    {
         return Ok(facebook_publish_result(
             EffectPhase::NotStarted,
             params.record_id,
             params.seq,
-            "navigate_entry",
+            "select_mode",
             false,
             false,
-            target
-                .reason
-                .as_deref()
-                .unwrap_or("composer_entry_not_found"),
+            "unsupported_target",
         ));
     }
-    let (Some(x), Some(y)) = (target.cx, target.cy) else {
-        return Ok(facebook_publish_result(
-            EffectPhase::NotStarted,
-            params.record_id,
-            params.seq,
-            "navigate_entry",
-            false,
-            false,
-            "composer_entry_not_found",
-        ));
-    };
-    dispatch_facebook_click(session, x, y).await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    let command_deadline =
+        bounded_facebook_publish_deadline(deadline_unix_ms, FACEBOOK_PUBLISH_COMMAND_BUDGET);
+    let trigger_deadline =
+        bounded_facebook_publish_deadline(deadline_unix_ms, FACEBOOK_PUBLISH_TRIGGER_BUDGET);
     loop {
+        if tokio::time::Instant::now() >= command_deadline {
+            return Ok(facebook_publish_result(
+                EffectPhase::NotStarted,
+                params.record_id,
+                params.seq,
+                "select_mode",
+                false,
+                false,
+                "deadline_expired_before_dispatch",
+            ));
+        }
+        let home = probe_facebook_publish_home(session).await?;
+        if tokio::time::Instant::now() >= command_deadline {
+            return Ok(facebook_publish_result(
+                EffectPhase::NotStarted,
+                params.record_id,
+                params.seq,
+                "select_mode",
+                false,
+                false,
+                "deadline_expired_before_dispatch",
+            ));
+        }
+        match home {
+            FacebookPublishHomeState::Ready => {}
+            FacebookPublishHomeState::Blocked(reason) => {
+                return Ok(facebook_publish_result(
+                    EffectPhase::NotStarted,
+                    params.record_id,
+                    params.seq,
+                    "select_mode",
+                    false,
+                    false,
+                    reason,
+                ));
+            }
+            FacebookPublishHomeState::Loading | FacebookPublishHomeState::NotHome => {
+                return Ok(facebook_publish_result(
+                    EffectPhase::NotStarted,
+                    params.record_id,
+                    params.seq,
+                    "select_mode",
+                    false,
+                    false,
+                    "home_not_reached",
+                ));
+            }
+        }
         let editor = probe_facebook_publish_editor(session).await?;
+        if tokio::time::Instant::now() >= command_deadline {
+            return Ok(facebook_publish_result(
+                EffectPhase::NotStarted,
+                params.record_id,
+                params.seq,
+                "select_mode",
+                false,
+                false,
+                "deadline_expired_before_dispatch",
+            ));
+        }
         if editor.ok {
             return Ok(facebook_publish_result(
                 EffectPhase::Confirmed,
                 params.record_id,
                 params.seq,
-                "navigate_entry",
+                "select_mode",
                 true,
-                true,
+                false,
                 "",
             ));
         }
-        if tokio::time::Instant::now() >= deadline {
+        let target = probe_facebook_publish_entry(session).await?;
+        if tokio::time::Instant::now() >= trigger_deadline {
             return Ok(facebook_publish_result(
-                EffectPhase::Ambiguous,
+                EffectPhase::NotStarted,
                 params.record_id,
                 params.seq,
-                "navigate_entry",
+                "select_mode",
                 false,
-                true,
-                "composer_unconfirmed",
+                false,
+                if target.ok {
+                    "trigger_deadline_expired"
+                } else {
+                    target
+                        .reason
+                        .as_deref()
+                        .unwrap_or("composer_entry_not_found")
+                },
             ));
+        }
+        if target.ok {
+            let fresh = probe_facebook_publish_entry(session).await?;
+            if tokio::time::Instant::now() >= trigger_deadline {
+                return Ok(facebook_publish_result(
+                    EffectPhase::NotStarted,
+                    params.record_id,
+                    params.seq,
+                    "select_mode",
+                    false,
+                    false,
+                    "trigger_deadline_expired",
+                ));
+            }
+            if !fresh.ok {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                continue;
+            }
+            let (Some(x), Some(y)) = (fresh.cx, fresh.cy) else {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                continue;
+            };
+            dispatch_facebook_click(session, x, y).await?;
+            loop {
+                let editor = match probe_facebook_publish_editor(session).await {
+                    Ok(editor) => editor,
+                    Err(_) => {
+                        if tokio::time::Instant::now() >= command_deadline {
+                            return Ok(facebook_publish_result(
+                                EffectPhase::Ambiguous,
+                                params.record_id,
+                                params.seq,
+                                "select_mode",
+                                false,
+                                true,
+                                "composer_unconfirmed",
+                            ));
+                        }
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                        continue;
+                    }
+                };
+                if tokio::time::Instant::now() >= command_deadline {
+                    return Ok(facebook_publish_result(
+                        EffectPhase::Ambiguous,
+                        params.record_id,
+                        params.seq,
+                        "select_mode",
+                        false,
+                        true,
+                        "composer_unconfirmed",
+                    ));
+                }
+                if editor.ok {
+                    return Ok(facebook_publish_result(
+                        EffectPhase::Confirmed,
+                        params.record_id,
+                        params.seq,
+                        "select_mode",
+                        true,
+                        true,
+                        "",
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
+}
+
+fn bounded_facebook_publish_deadline(
+    deadline_unix_ms: u64,
+    maximum: Duration,
+) -> tokio::time::Instant {
+    let remaining = Duration::from_millis(deadline_unix_ms.saturating_sub(unix_time_ms()));
+    tokio::time::Instant::now() + remaining.min(maximum)
+}
+
+async fn probe_facebook_publish_home(
+    session: &mut EngineSession,
+) -> Result<FacebookPublishHomeState, EngineError> {
+    let page = probe_facebook_publish_home_snapshot(session).await?;
+    let Ok(url) = Url::parse(&page.href) else {
+        return Ok(FacebookPublishHomeState::Blocked("not_facebook"));
+    };
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let facebook_host = host == "facebook.com"
+        || host.ends_with(".facebook.com")
+        || host == "facebookcorewwwi.onion"
+        || host.ends_with(".facebookcorewwwi.onion");
+    if !facebook_host {
+        return Ok(FacebookPublishHomeState::Blocked("not_facebook"));
+    }
+    let path = url.path().to_ascii_lowercase();
+    if path.starts_with("/checkpoint") {
+        return Ok(FacebookPublishHomeState::Blocked("checkpoint_detected"));
+    }
+    if path.starts_with("/login") || page.credential_input {
+        return Ok(FacebookPublishHomeState::Blocked("login_required"));
+    }
+    if page.blocking_dialog && !page.editor_ready {
+        return Ok(FacebookPublishHomeState::Blocked("blocked_dialog"));
+    }
+    if !matches!(page.ready_state.as_str(), "interactive" | "complete") {
+        return Ok(FacebookPublishHomeState::Loading);
+    }
+    if path != "/" {
+        return Ok(FacebookPublishHomeState::NotHome);
+    }
+    if page.main_visible || page.editor_ready {
+        return Ok(FacebookPublishHomeState::Ready);
+    }
+    Ok(FacebookPublishHomeState::Loading)
 }
 
 pub(crate) async fn execute_facebook_publish_fill(
@@ -226,6 +504,17 @@ pub(crate) async fn execute_facebook_publish_submit(
         return Ok((EffectPhase::NotStarted, output));
     }
     let target = probe_facebook_publish_submit(session).await?;
+    if unix_time_ms() >= deadline_unix_ms {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "submit",
+            false,
+            false,
+            "deadline_expired_before_dispatch",
+        ));
+    }
     if !target.ok {
         return Ok(facebook_publish_result(
             EffectPhase::NotStarted,
@@ -250,6 +539,17 @@ pub(crate) async fn execute_facebook_publish_submit(
     }
     enter_facebook_commit_window(command, commit_windows, deadline_unix_ms, cancellation).await?;
     let protected_target = probe_facebook_publish_submit(session).await?;
+    if unix_time_ms() >= deadline_unix_ms {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "submit",
+            false,
+            false,
+            "deadline_expired_before_dispatch",
+        ));
+    }
     let (Some(x), Some(y)) = (protected_target.cx, protected_target.cy) else {
         return Ok(facebook_publish_result(
             EffectPhase::NotStarted,
@@ -279,7 +579,8 @@ pub(crate) async fn execute_facebook_publish_submit(
         return Err(cancelled_before_dispatch());
     }
     dispatch_facebook_click(session, x, y).await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline =
+        bounded_facebook_publish_deadline(deadline_unix_ms, FACEBOOK_PUBLISH_SUBMIT_VERIFY_BUDGET);
     loop {
         if facebook_command_cancelled(cancellation) {
             return Ok(facebook_publish_result(
@@ -290,18 +591,6 @@ pub(crate) async fn execute_facebook_publish_submit(
                 false,
                 true,
                 "preempted_by_task",
-            ));
-        }
-        let after = probe_facebook_publish_submit(session).await?;
-        if !after.composer_open {
-            return Ok(facebook_publish_result(
-                EffectPhase::Confirmed,
-                params.record_id,
-                params.seq,
-                "submit",
-                true,
-                true,
-                "",
             ));
         }
         if tokio::time::Instant::now() >= deadline {
@@ -315,6 +604,39 @@ pub(crate) async fn execute_facebook_publish_submit(
                 "submit_verification_ambiguous",
             ));
         }
+        let after = match probe_facebook_publish_submitted(session).await {
+            Ok(after) => after,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                continue;
+            }
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(facebook_publish_result(
+                EffectPhase::Ambiguous,
+                params.record_id,
+                params.seq,
+                "submit",
+                false,
+                true,
+                "submit_verification_ambiguous",
+            ));
+        }
+        if after.confirmed {
+            return Ok(facebook_publish_result(
+                EffectPhase::Confirmed,
+                params.record_id,
+                params.seq,
+                "submit",
+                true,
+                true,
+                "",
+            ));
+        }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
 }
+
+#[cfg(test)]
+#[path = "publish_tests.rs"]
+mod tests;

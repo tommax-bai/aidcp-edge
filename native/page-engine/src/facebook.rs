@@ -345,6 +345,17 @@ pub struct FacebookJoinClickResult {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookPublishHomeProbe {
+    pub href: String,
+    pub ready_state: String,
+    pub main_visible: bool,
+    pub editor_ready: bool,
+    pub blocking_dialog: bool,
+    pub credential_input: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FacebookPublishSubmitProbe {
     pub ok: bool,
     #[serde(default)]
@@ -356,6 +367,14 @@ pub struct FacebookPublishSubmitProbe {
     pub cx: Option<f64>,
     #[serde(default)]
     pub cy: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookPublishSubmittedProbe {
+    pub confirmed: bool,
+    #[serde(default)]
+    pub witness: Option<String>,
 }
 
 pub fn command_expression(command: &NativeCommand) -> Result<String, EngineError> {
@@ -471,6 +490,10 @@ pub fn join_click_expression() -> Result<String, EngineError> {
     internal_expression("join_click", json!({}))
 }
 
+pub fn publish_home_probe_expression() -> Result<String, EngineError> {
+    internal_expression("publish_home_probe", json!({}))
+}
+
 pub fn publish_entry_probe_expression() -> Result<String, EngineError> {
     internal_expression("publish_entry_probe", json!({}))
 }
@@ -481,6 +504,10 @@ pub fn publish_editor_probe_expression() -> Result<String, EngineError> {
 
 pub fn publish_submit_probe_expression() -> Result<String, EngineError> {
     internal_expression("publish_submit_probe", json!({}))
+}
+
+pub fn publish_submitted_probe_expression() -> Result<String, EngineError> {
+    internal_expression("publish_submitted_probe", json!({}))
 }
 
 fn internal_expression(kind: &str, params: Value) -> Result<String, EngineError> {
@@ -621,11 +648,25 @@ pub fn join_click_from_cdp(result: &Value) -> Result<FacebookJoinClickResult, En
     typed_internal_value(result.output, "join_click")
 }
 
+pub fn publish_home_probe_from_cdp(
+    result: &Value,
+) -> Result<FacebookPublishHomeProbe, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "publish_home_probe")
+}
+
 pub fn publish_submit_probe_from_cdp(
     result: &Value,
 ) -> Result<FacebookPublishSubmitProbe, EngineError> {
     let result = result_from_cdp(result)?;
     typed_internal_value(result.output, "publish_submit_probe")
+}
+
+pub fn publish_submitted_probe_from_cdp(
+    result: &Value,
+) -> Result<FacebookPublishSubmittedProbe, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "publish_submitted_probe")
 }
 
 pub fn failure_output(

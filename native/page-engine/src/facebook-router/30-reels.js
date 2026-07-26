@@ -1,3 +1,15 @@
+  const reelLikeExcluded=/(share|chia sẻ|chia se|分享|reply|trả lời|tra loi|回复|回覆|menu|更多|next|previous|下一|上一|pause|play|播放|暂停)/i;
+  const reelReactionState=(button)=>{
+    const accessible=label(button);
+    const rendered=text(button,256);
+    if(/^\s*赞\s*$/.test(accessible)){
+      if(unlike.test(rendered)||button.getAttribute('aria-pressed')==='true'||button.getAttribute('aria-checked')==='true'){
+        return 'reacted';
+      }
+      return /\d/.test(rendered)?'neutral':'';
+    }
+    return reactionState(button);
+  };
   const actionEvidence=(root)=>{
     const author=articleAuthor(root);
     const body=articleBody(root);
@@ -50,18 +62,18 @@
     if(target.left<video.right-20||target.left>video.right+125)return false;
     if(target.top<video.top-10||target.bottom>video.bottom+20)return false;
     const source=`${label(element)} ${text(element,256)}`;
-    if(reelComment.test(source)||reelLikeExcluded.test(source))return false;
+    if(postComment.test(source)||reelLikeExcluded.test(source))return false;
     let context='';
     for(let parent=element.parentElement,depth=0;parent&&depth<4;parent=parent.parentElement,depth++){
       context+=` ${String(parent.getAttribute&&parent.getAttribute('aria-label')||'')}`;
     }
-    return !reelComment.test(context)&&!reelLikeExcluded.test(context);
+    return !postComment.test(context)&&!reelLikeExcluded.test(context);
   };
   const reelLikeTarget=()=>{
     const active=expectedActiveReel();
     if(!active.ok)return active;
     const matches=all('button,[role="button"],[role="radio"]').filter((button)=>
-      reelLikeAssociated(active,button)&&Boolean(reactionState(button))
+      reelLikeAssociated(active,button)&&Boolean(reelReactionState(button))
     );
     if(matches.length!==1)return {
       ok:false,
@@ -73,7 +85,7 @@
       ok:true,
       active,
       button,
-      state:reactionState(button),
+      state:reelReactionState(button),
       noteId:active.noteId,
       observation:{
         ...actionEvidence(active.root),

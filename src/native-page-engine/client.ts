@@ -9,6 +9,7 @@ import { isAbsolute } from 'node:path';
 export const NATIVE_PAGE_ENGINE_PROTOCOL_VERSION = 2;
 const DEFAULT_NATIVE_TIMEOUT_MS = 5_000;
 const MAX_NATIVE_TIMEOUT_MS = 30_000;
+const MAX_FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS = 40_000;
 const MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 90_000;
 const MAX_STDERR_CHARS = 2_048;
 const MAX_RECORD_CHARS = 64 * 1024;
@@ -909,9 +910,13 @@ function validateCommandTimeout(
   command: NativePageCommand,
   timeoutMs: number,
 ): void {
-  const maxTimeoutMs = platform === 'facebook' && command.kind === 'group_join'
-    ? MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS
-    : MAX_NATIVE_TIMEOUT_MS;
+  const maxTimeoutMs = platform !== 'facebook'
+    ? MAX_NATIVE_TIMEOUT_MS
+    : command.kind === 'group_join'
+      ? MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS
+      : command.kind === 'publish_select_mode'
+        ? MAX_FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS
+        : MAX_NATIVE_TIMEOUT_MS;
   validateTimeout(timeoutMs, maxTimeoutMs);
 }
 

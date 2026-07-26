@@ -158,6 +158,14 @@ pub(crate) async fn probe_facebook_join(
     facebook::join_probe_from_cdp(&raw)
 }
 
+pub(crate) async fn probe_facebook_publish_home_snapshot(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookPublishHomeProbe, EngineError> {
+    let expression = facebook::publish_home_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::publish_home_probe_from_cdp(&raw)
+}
+
 pub(crate) async fn probe_facebook_publish_entry(
     session: &mut EngineSession,
 ) -> Result<facebook::FacebookPointTarget, EngineError> {
@@ -180,6 +188,14 @@ pub(crate) async fn probe_facebook_publish_submit(
     let expression = facebook::publish_submit_probe_expression()?;
     let raw = session.cdp.evaluate(&expression, true).await?;
     facebook::publish_submit_probe_from_cdp(&raw)
+}
+
+pub(crate) async fn probe_facebook_publish_submitted(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookPublishSubmittedProbe, EngineError> {
+    let expression = facebook::publish_submitted_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::publish_submitted_probe_from_cdp(&raw)
 }
 
 pub(crate) async fn replace_focused_text(
