@@ -5872,7 +5872,8 @@ function updateSystemProxyUpstreamHint(status = currentStatus) {
   const enabled = settingsUi.systemProxyUpstream.checked;
   const actualChained = status && status.proxyMode === 'system_then_environment';
   const running = Boolean(status) && status.edge !== 'stopped' && status.edge !== 'warning';
-  if (running && enabled !== actualChained) {
+  const chainNotApplicable = status && status.proxyChainApplicable === false;
+  if (running && !chainNotApplicable && enabled !== actualChained) {
     settingsUi.systemProxyUpstreamHint.textContent = enabled
       ? '已选择双跳；当前运行中的环境仍为直连环境代理，需按新设置重启后生效。'
       : '已选择直连；当前运行中的环境仍在使用双跳，需按新设置重启后生效。';
@@ -5880,6 +5881,10 @@ function updateSystemProxyUpstreamHint(status = currentStatus) {
   }
   if (!enabled) {
     settingsUi.systemProxyUpstreamHint.textContent = '关闭：浏览器直接连接环境代理。';
+    return;
+  }
+  if (chainNotApplicable) {
+    settingsUi.systemProxyUpstreamHint.textContent = '开启：当前环境未配置代理，双跳不适用；浏览器按无代理方式连接。';
     return;
   }
   const state = status && status.proxyChain && status.proxyChain.state;
@@ -5900,6 +5905,7 @@ function updateApplyRestart() {
   const proxyModePending = running
     && selectedProvider() === 'adspower'
     && Boolean(settingsUi.systemProxyUpstream)
+    && currentStatus.proxyChainApplicable !== false
     && settingsUi.systemProxyUpstream.checked !== (currentStatus.proxyMode === 'system_then_environment');
   settingsUi.applyRestart.classList.toggle('hidden', !(running && (dirty || proxyModePending)));
 }

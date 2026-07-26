@@ -27,8 +27,35 @@ test('preflight and child spawn consume only the same prepared loopback relay', 
   assert.match(main, /readProxy:\s*readProxyForPreflight/);
   assert.match(main, /const endpoint = await proxyChainManager\.ensure\(/);
   assert.match(main, /const endpoint = proxyChainManager\.endpoint\(handle\.profileId\)/);
+  assert.match(
+    main,
+    /if \(handle\.status\.proxyMode === 'system_then_environment'\s*&& handle\.status\.proxyChainApplicable === true\s*&& !cleanupBootstrap\)/,
+  );
   assert.match(main, /spawnEnv\.AIDCP_ADS_PROXY_OVERRIDE = `http:\/\/127\.0\.0\.1:\$\{endpoint\.proxyPort\}`/);
   assert.match(main, /if \(!endpoint\) \{[\s\S]{0,180}?proxy_chain_unavailable[\s\S]{0,180}?return;/);
+});
+
+test('profiles without an environment proxy stay outside double-hop applicability', () => {
+  assert.match(
+    main,
+    /async function skipOfflineSystemProxyChain\(handle\)[\s\S]{0,500}?proxyChainManager\.invalidate\(handle\.profileId\)[\s\S]{0,300}?proxyMode: 'direct'[\s\S]{0,200}?proxyChainApplicable: false[\s\S]{0,200}?proxyChain: null/,
+  );
+  assert.match(
+    main,
+    /async function ensureSystemProxyChain\(handle\)[\s\S]{0,900}?if \(config\.noProxy\) \{\s*await skipOfflineSystemProxyChain\(handle\);\s*return \{ state: 'skipped', reason: 'no_proxy' \};\s*\}/,
+  );
+  assert.match(
+    main,
+    /async function readProxyForPreflight\(profileId\)[\s\S]{0,700}?if \(config\.noProxy\) \{\s*await skipOfflineSystemProxyChain\(handle\);\s*return config;\s*\}/,
+  );
+  assert.match(
+    renderer,
+    /chainNotApplicable = status && status\.proxyChainApplicable === false[\s\S]{0,800}?当前环境未配置代理，双跳不适用/,
+  );
+  assert.match(
+    renderer,
+    /const proxyModePending = running[\s\S]{0,250}?currentStatus\.proxyChainApplicable !== false/,
+  );
 });
 
 test('relay lifecycle invalidates safe evidence and stops all sidecars before application exit', () => {

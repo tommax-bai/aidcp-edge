@@ -672,6 +672,45 @@ test('系统代理前置跳板运行中立即保存目标模式，但实际模�
   assert.equal(hidden($(w, '#apply-restart')), true, '切回当前代际实际模式后不应继续伪报待重启');
 });
 
+test('系统代理前置跳板对无代理环境不适用且不误报待重启', async () => {
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      edge: 'running',
+      session: 'running',
+      proxyMode: 'direct',
+      proxyChainApplicable: false,
+      proxyChain: null,
+    }),
+    getSettings: async () => ({
+      provider: 'adspower',
+      adsProfileId: 'u1',
+      adsProfileName: '无代理环境',
+      environments: [{ profileId: 'u1', name: '无代理环境', platform: 'facebook' }],
+      adsApiKey: '',
+      adsApiBase: '',
+      adsDownloadUrl: 'x',
+      systemProxyUpstreamEnabled: true,
+    }),
+    adsListProfiles: async () => ({
+      ok: true,
+      profiles: [{
+        userId: 'u1',
+        serialNumber: '1',
+        name: '无代理环境',
+        groupName: 'g',
+        proxy: '无代理配置',
+        proxyConfig: { noProxy: true },
+      }],
+    }),
+  }));
+  assert.equal(($(
+    w,
+    '#system-proxy-upstream',
+  ) as HTMLInputElement).checked, true);
+  assert.equal(hidden($(w, '#apply-restart')), true);
+  assert.match($(w, '#system-proxy-upstream-hint').textContent ?? '', /当前环境未配置代理，双跳不适用/);
+});
+
 test('窗口停放：无可控浏览器时显示浏览器诚实失败', async () => {
   const w = await boot(makeStub({
     showDrivenBrowser: async () => ({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' }),

@@ -181,3 +181,18 @@ test('显式阻断的代理读取失败保留稳定原因并阻止启动', async
   assert.equal(result.state, 'unavailable');
   assert.equal(result.reason, 'system_proxy_not_configured');
 });
+
+test('环境明确未配置代理时跳过检测且不调用探测器', async () => {
+  let probes = 0;
+  const controller = createProxyPreflightController({
+    readProxy: async () => ({ ok: true, noProxy: true }),
+    probe: async () => {
+      probes += 1;
+      return { state: 'available', checkedAt: new Date().toISOString(), reason: 'unexpected_probe' };
+    },
+  });
+  const result = await controller.ensure({ envId: 'env-no-proxy', profileId: 'profile-no-proxy' });
+  assert.equal(result.state, 'skipped');
+  assert.equal(result.reason, 'no_proxy');
+  assert.equal(probes, 0);
+});

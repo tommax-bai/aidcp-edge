@@ -1384,6 +1384,8 @@ function makeStatus(provider) {
     // 浏览器启动前的短时代理可用性预检；与 proxyRuntime（浏览器实际出口证据）严格分开。
     proxyPreflight: null,
     proxyMode: systemProxyChainEnabled() ? 'system_then_environment' : 'direct',
+    // null=尚未读取 profile 代理配置；true=已配置环境代理、双跳适用；false=明确无代理、双跳不适用。
+    proxyChainApplicable: null,
     // 只投影固定状态与原因枚举，不暴露任一跳的地址或认证信息。
     proxyChain: null,
     kernelPrep: null,
@@ -1455,6 +1457,18 @@ const proxyChainManager = createProxyChainManager({
   },
 });
 
+async function skipOfflineSystemProxyChain(handle) {
+  if (!handle || handle.kind !== 'adspower' || handle.child) return;
+  await proxyChainManager.invalidate(handle.profileId);
+  if (!handle.child && !handle.removed) {
+    updateStatus(handle, {
+      proxyMode: 'direct',
+      proxyChainApplicable: false,
+      proxyChain: null,
+    });
+  }
+}
+
 async function ensureSystemProxyChain(handle) {
   if (!systemProxyChainEnabled(handle) || !handle || handle.kind !== 'adspower') {
     return { state: 'skipped', reason: 'not_enabled' };
@@ -1469,7 +1483,8 @@ async function ensureSystemProxyChain(handle) {
     return { state: 'unavailable', reason: 'profile_config_unavailable' };
   }
   if (config.noProxy) {
-    return { state: 'unavailable', reason: 'environment_proxy_missing' };
+    await skipOfflineSystemProxyChain(handle);
+    return { state: 'skipped', reason: 'no_proxy' };
   }
   try {
     const previousRevision = proxyChainManager.revision(handle.profileId);
@@ -1480,6 +1495,12 @@ async function ensureSystemProxyChain(handle) {
     const currentRevision = proxyChainManager.revision(handle.profileId);
     if (previousRevision > 0 && currentRevision !== previousRevision) {
       proxyPreflight.invalidate(handle.envId);
+    }
+    if (!handle.child) {
+      updateStatus(handle, {
+        proxyMode: 'system_then_environment',
+        proxyChainApplicable: true,
+      });
     }
     return { state: 'available', reason: 'system_proxy_chain_ready' };
   } catch (error) {
@@ -1498,13 +1519,20 @@ async function readProxyForPreflight(profileId) {
     return { ok: false, blocking: true, reason: 'profile_config_unavailable' };
   }
   if (config.noProxy) {
-    return { ok: false, blocking: true, reason: 'environment_proxy_missing' };
+    await skipOfflineSystemProxyChain(handle);
+    return config;
   }
   try {
     const endpoint = await proxyChainManager.ensure({
       profileId,
       environmentProxy: config.proxy,
     });
+    if (handle && !handle.child) {
+      updateStatus(handle, {
+        proxyMode: 'system_then_environment',
+        proxyChainApplicable: true,
+      });
+    }
     return { ok: true, noProxy: false, proxy: endpoint };
   } catch (error) {
     return {
@@ -3874,7 +3902,9 @@ function spawnEdgeChild(handle, {
       return;
     }
     spawnEnv = { ...built.env, ELECTRON_RUN_AS_NODE: '1' };
-    if (systemProxyChainEnabled(handle) && !cleanupBootstrap) {
+    if (handle.status.proxyMode === 'system_then_environment'
+      && handle.status.proxyChainApplicable === true
+      && !cleanupBootstrap) {
       const endpoint = proxyChainManager.endpoint(handle.profileId);
       if (!endpoint) {
         stopStartForProxyFailure(handle, { reason: 'proxy_chain_unavailable' });
@@ -6318,6 +6348,7 @@ ipcMain.handle('settings:save', async (_event, patch) => {
       if (!envHandle.child) {
         updateStatus(envHandle, {
           proxyMode: systemProxyChainEnabled() ? 'system_then_environment' : 'direct',
+          proxyChainApplicable: null,
         });
       }
       proxyPreflight.invalidate(envHandle.envId);
