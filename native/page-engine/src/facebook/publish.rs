@@ -3,9 +3,9 @@ use super::shared::*;
 use crate::commit_window::CommitWindowRequester;
 use crate::engine::{CommandOutput, EngineSession, validate_publish_file};
 use crate::error::{EngineError, ErrorCode};
+use crate::input::{TextInputFailure, type_text_humanized};
 use crate::protocol::{EffectPhase, NativeCommand};
-use std::f64::consts::TAU;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use url::Url;
 
@@ -16,7 +16,6 @@ const FACEBOOK_PUBLISH_TRIGGER_BUDGET: Duration = Duration::from_secs(20);
 const FACEBOOK_PUBLISH_FILL_RESERVE_MS: u64 = 8_000;
 const FACEBOOK_PUBLISH_FILL_VERIFY_BUDGET: Duration = Duration::from_secs(5);
 const FACEBOOK_PUBLISH_FILL_EXTRA_CHAR_TOLERANCE: usize = 10;
-static FACEBOOK_PUBLISH_KEYBOARD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FacebookPublishHomeState {
@@ -498,17 +497,22 @@ pub(crate) async fn execute_facebook_publish_fill(
     }
 
     let typing_deadline_unix_ms = deadline_unix_ms.saturating_sub(FACEBOOK_PUBLISH_FILL_RESERVE_MS);
-    let typing =
-        type_facebook_publish_text(session, value, cancellation, typing_deadline_unix_ms).await;
+    let typing = type_text_humanized(
+        &mut session.cdp,
+        value,
+        cancellation,
+        typing_deadline_unix_ms,
+    )
+    .await;
     if let Err(failure) = typing {
         let cleanup = clear_facebook_publish_editor(session).await;
-        if matches!(failure, FacebookPublishTypingFailure::Cancelled) {
+        if matches!(failure, TextInputFailure::Cancelled) {
             return Err(cancelled_before_dispatch());
         }
         let reason = match failure {
-            FacebookPublishTypingFailure::Deadline => "fill_deadline_exceeded",
-            FacebookPublishTypingFailure::Engine => "engine_error",
-            FacebookPublishTypingFailure::Cancelled => unreachable!(),
+            TextInputFailure::Deadline => "fill_deadline_exceeded",
+            TextInputFailure::Engine => "engine_error",
+            TextInputFailure::Cancelled => unreachable!(),
         };
         let error = facebook_publish_fill_cleanup_error(reason, cleanup);
         return Ok(facebook_publish_result(
@@ -574,16 +578,9 @@ enum FacebookPublishCleanup {
     Dirty,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FacebookPublishTypingFailure {
-    Cancelled,
-    Deadline,
-    Engine,
-}
-
 async fn clear_facebook_publish_editor(session: &mut EngineSession) -> FacebookPublishCleanup {
     for _ in 0..2 {
-        if replace_focused_text(session, "").await.is_err() {
+        if clear_focused_text(session).await.is_err() {
             return FacebookPublishCleanup::Dirty;
         }
         match probe_facebook_publish_editor(session).await {
@@ -602,41 +599,6 @@ async fn clear_facebook_publish_editor(session: &mut EngineSession) -> FacebookP
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     FacebookPublishCleanup::Dirty
-}
-
-async fn type_facebook_publish_text(
-    session: &mut EngineSession,
-    value: &str,
-    cancellation: Option<&AtomicBool>,
-    deadline_unix_ms: u64,
-) -> Result<(), FacebookPublishTypingFailure> {
-    let mut random_state = facebook_publish_keyboard_seed();
-    for character in value.chars() {
-        let delay =
-            Duration::from_millis(facebook_publish_key_delay_ms(character, &mut random_state));
-        if let Some(cancellation) = cancellation {
-            tokio::select! {
-                _ = wait_for_cancellation(cancellation) => {
-                    return Err(FacebookPublishTypingFailure::Cancelled);
-                }
-                _ = tokio::time::sleep(delay) => {}
-            }
-        } else {
-            tokio::time::sleep(delay).await;
-        }
-        if facebook_command_cancelled(cancellation) {
-            return Err(FacebookPublishTypingFailure::Cancelled);
-        }
-        if unix_time_ms() >= deadline_unix_ms {
-            return Err(FacebookPublishTypingFailure::Deadline);
-        }
-        session
-            .cdp
-            .insert_text(&character.to_string())
-            .await
-            .map_err(|_| FacebookPublishTypingFailure::Engine)?;
-    }
-    Ok(())
 }
 
 async fn wait_for_facebook_publish_text(
@@ -683,57 +645,6 @@ fn facebook_publish_fill_cleanup_error(reason: &str, cleanup: FacebookPublishCle
         FacebookPublishCleanup::ComposerGone => format!("{reason}_composer_gone"),
         FacebookPublishCleanup::Dirty => format!("{reason}_dirty_composer"),
     }
-}
-
-fn facebook_publish_keyboard_seed() -> u64 {
-    (unix_time_ms()
-        ^ FACEBOOK_PUBLISH_KEYBOARD_SEQUENCE
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15))
-        | 1
-}
-
-fn facebook_publish_random(state: &mut u64) -> f64 {
-    let mut value = *state;
-    value ^= value >> 12;
-    value ^= value << 25;
-    value ^= value >> 27;
-    *state = value;
-    let bits = value.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11;
-    bits as f64 / (1_u64 << 53) as f64
-}
-
-fn facebook_publish_key_delay_ms(character: char, state: &mut u64) -> u64 {
-    let first = facebook_publish_random(state).max(f64::MIN_POSITIVE);
-    let second = facebook_publish_random(state);
-    let gaussian = (-2.0 * first.ln()).sqrt() * (TAU * second).cos();
-    let mut delay = (110_f64.ln() + 0.35 * gaussian).exp();
-    if character.is_whitespace()
-        || matches!(
-            character,
-            '.' | ','
-                | '!'
-                | '?'
-                | ';'
-                | ':'
-                | '，'
-                | '。'
-                | '！'
-                | '？'
-                | '；'
-                | '：'
-                | '、'
-                | '…'
-                | '—'
-        )
-    {
-        delay *= 1.4;
-    }
-    delay = delay.clamp(40.0, 400.0);
-    if facebook_publish_random(state) < 0.08 {
-        delay += 300.0 + facebook_publish_random(state) * 300.0;
-    }
-    delay.round() as u64
 }
 
 pub(crate) async fn execute_facebook_publish_submit(

@@ -3,6 +3,7 @@ use crate::commit_window::CommitWindowRequester;
 use crate::endpoint;
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
+use crate::input::{TextInputFailure, type_captcha_with_key_events, type_text_humanized};
 use crate::model::{
     ActionReceipt, CaptchaSnapshot, FacebookIdentityReceipt, IdentityObservation,
     IdentityObservationSource, IdentityPageEffect, NoteDetail, NotificationHome, NotificationItems,
@@ -28,6 +29,7 @@ const MAX_RECORDED_COMMANDS: usize = 128;
 const MAX_CAPTCHA_SNAPSHOTS: usize = 8;
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS: u64 = 40_000;
+const FACEBOOK_COMMENT_TIMEOUT_MS: u64 = 90_000;
 const FACEBOOK_GROUP_JOIN_TIMEOUT_MS: u64 = 90_000;
 const FACEBOOK_PUBLISH_FILL_TIMEOUT_MS: u64 = 400_000;
 
@@ -559,7 +561,9 @@ async fn execute_platform_command_once(
     deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     match session.platform {
-        Platform::Xiaohongshu => execute_xhs_command_once(session, command).await,
+        Platform::Xiaohongshu => {
+            execute_xhs_command_once(session, command, cancellation, deadline_unix_ms).await
+        }
         Platform::WechatChannels => match command {
             NativeCommand::WechatCaptureSession(_) => {
                 let candidate = wechat::capture_session(
@@ -594,11 +598,15 @@ async fn execute_platform_command_once(
 async fn execute_xhs_command_once(
     session: &mut EngineSession,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     use NativeCommand::*;
     match command {
         CaptchaCapture(params) => capture_captcha(session, params).await,
-        CaptchaClick(params) => click_captcha(session, params).await,
+        CaptchaClick(params) => {
+            click_captcha(session, params, cancellation, deadline_unix_ms).await
+        }
         NoteOpen(params) if params.url.is_some() => {
             let url = validated_note_url(
                 params.url.as_deref().unwrap_or_default(),
@@ -642,7 +650,9 @@ async fn execute_xhs_command_once(
                 ),
             ))
         }
-        SearchExecute(params) => execute_search(session, params, command).await,
+        SearchExecute(params) => {
+            execute_search(session, params, command, cancellation, deadline_unix_ms).await
+        }
         PublishUploadImage(params) => {
             validate_publish_file(&params.path)?;
             let selector = xhs::file_input_selector()?;
@@ -703,6 +713,8 @@ async fn execute_search(
     session: &mut EngineSession,
     params: &crate::command::SearchExecuteParams,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let search_input_geometry = xhs::search_input_geometry_expression()?;
     let geometry = session.cdp.evaluate(&search_input_geometry, false).await?;
@@ -753,19 +765,80 @@ async fn execute_search(
         .cdp
         .dispatch_key("keyUp", "Backspace", "Backspace", 8)
         .await?;
-    session.cdp.insert_text(&params.keyword).await?;
-    let readback = session.cdp.evaluate(
-        "(()=>{const e=document.activeElement;if(!e)return '';return String('value' in e?e.value:e.textContent||'')})()",
-        false,
-    ).await?;
-    if readback
-        .pointer("/result/value")
-        .and_then(serde_json::Value::as_str)
-        != Some(params.keyword.as_str())
+    match focused_text_matches(session, "").await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Ok(search_receipt(
+                EffectPhase::NotStarted,
+                "search_input_not_clean",
+            ));
+        }
+        Err(_) => {
+            clear_active_text_best_effort(session).await;
+            return Ok(search_receipt(
+                EffectPhase::NotStarted,
+                "search_input_readback_failed",
+            ));
+        }
+    }
+    if let Err(failure) = type_text_humanized(
+        &mut session.cdp,
+        &params.keyword,
+        cancellation,
+        deadline_unix_ms.saturating_sub(7_000),
+    )
+    .await
     {
+        clear_active_text_best_effort(session).await;
+        if matches!(failure, TextInputFailure::Cancelled) {
+            return Err(cancelled_before_dispatch());
+        }
         return Ok(search_receipt(
             EffectPhase::NotStarted,
-            "search_input_readback_mismatch",
+            match failure {
+                TextInputFailure::Deadline => "search_input_deadline_exceeded",
+                TextInputFailure::Engine => "search_input_failed",
+                TextInputFailure::Cancelled => unreachable!(),
+            },
+        ));
+    }
+    match focused_text_matches(session, &params.keyword).await {
+        Ok(true) => {}
+        Ok(false) => {
+            clear_active_text_best_effort(session).await;
+            return Ok(search_receipt(
+                EffectPhase::NotStarted,
+                "search_input_readback_mismatch",
+            ));
+        }
+        Err(_) => {
+            clear_active_text_best_effort(session).await;
+            return Ok(search_receipt(
+                EffectPhase::NotStarted,
+                "search_input_readback_failed",
+            ));
+        }
+    }
+    if let Some(cancellation) = cancellation {
+        tokio::select! {
+            _ = wait_for_cancellation(cancellation) => {
+                clear_active_text_best_effort(session).await;
+                return Err(cancelled_before_dispatch());
+            }
+            _ = tokio::time::sleep(Duration::from_millis(700)) => {}
+        }
+    } else {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
+    if cancellation.is_some_and(|value| value.load(Ordering::Acquire)) {
+        clear_active_text_best_effort(session).await;
+        return Err(cancelled_before_dispatch());
+    }
+    if unix_time_ms() >= deadline_unix_ms {
+        clear_active_text_best_effort(session).await;
+        return Ok(search_receipt(
+            EffectPhase::NotStarted,
+            "search_input_deadline_exceeded",
         ));
     }
     for attempt in 0..2 {
@@ -790,12 +863,58 @@ async fn execute_search(
         }
         if attempt == 0 {
             tokio::time::sleep(Duration::from_millis(250)).await;
+            if cancellation.is_some_and(|value| value.load(Ordering::Acquire)) {
+                return Ok(search_receipt(EffectPhase::Ambiguous, "preempted_by_task"));
+            }
+            if unix_time_ms() >= deadline_unix_ms {
+                return Ok(search_receipt(
+                    EffectPhase::Ambiguous,
+                    "search_navigation_unconfirmed",
+                ));
+            }
         }
     }
     Ok(search_receipt(
         EffectPhase::Ambiguous,
         "search_navigation_unconfirmed",
     ))
+}
+
+async fn focused_text_matches(
+    session: &mut EngineSession,
+    expected: &str,
+) -> Result<bool, EngineError> {
+    let readback = session
+        .cdp
+        .evaluate(
+            "(()=>{const e=document.activeElement;if(!e)return null;return String('value' in e?e.value:e.textContent||'')})()",
+            false,
+        )
+        .await?;
+    Ok(readback
+        .pointer("/result/value")
+        .and_then(serde_json::Value::as_str)
+        == Some(expected))
+}
+
+async fn clear_active_text_best_effort(session: &mut EngineSession) {
+    let modifier = if cfg!(target_os = "macos") { 4 } else { 2 };
+    let _ = session
+        .cdp
+        .dispatch_key_with_modifiers("keyDown", "a", "KeyA", 65, modifier)
+        .await;
+    let _ = session
+        .cdp
+        .dispatch_key_with_modifiers("keyUp", "a", "KeyA", 65, modifier)
+        .await;
+    let _ = session
+        .cdp
+        .dispatch_key("keyDown", "Backspace", "Backspace", 8)
+        .await;
+    let _ = session
+        .cdp
+        .dispatch_key("keyUp", "Backspace", "Backspace", 8)
+        .await;
 }
 
 fn search_receipt(phase: EffectPhase, reason: &str) -> (EffectPhase, CommandOutput) {
@@ -1023,6 +1142,8 @@ pub(crate) async fn capture_captcha(
 pub(crate) async fn click_captcha(
     session: &mut EngineSession,
     params: &crate::command::CaptchaClickParams,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let snapshot = session
         .captcha_snapshots
@@ -1038,7 +1159,30 @@ pub(crate) async fn click_captcha(
                 "captcha snapshot identity is stale",
             )
         })?;
-    for point in &params.points {
+    for (clicked, point) in params.points.iter().enumerate() {
+        if cancellation.is_some_and(|value| value.load(Ordering::Acquire)) {
+            if clicked == 0 {
+                return Err(cancelled_before_dispatch());
+            }
+            return Ok(captcha_click_result(
+                EffectPhase::Dispatched,
+                false,
+                "preempted_by_task",
+            ));
+        }
+        if unix_time_ms() >= deadline_unix_ms {
+            if clicked == 0 {
+                return Err(EngineError::new(
+                    ErrorCode::DeadlineExpired,
+                    "native captcha command deadline expired before dispatch",
+                ));
+            }
+            return Ok(captcha_click_result(
+                EffectPhase::Dispatched,
+                false,
+                "captcha_deadline_exceeded",
+            ));
+        }
         let x = point.x * snapshot.width as f64;
         let y = point.y * snapshot.height as f64;
         session
@@ -1073,40 +1217,83 @@ pub(crate) async fn click_captcha(
             .cdp
             .dispatch_key("keyUp", "Backspace", "Backspace", 8)
             .await?;
-        session.cdp.insert_text(text).await?;
-        let readback = session
-            .cdp
-            .evaluate(
-                "(()=>{const e=document.activeElement;if(!e)return '';return String('value' in e?e.value:e.textContent||'')})()",
-                false,
-            )
-            .await?;
-        if readback
-            .pointer("/result/value")
-            .and_then(serde_json::Value::as_str)
-            != Some(text)
+        match focused_text_matches(session, "").await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(captcha_click_result(
+                    EffectPhase::Dispatched,
+                    false,
+                    "captcha_input_not_clean",
+                ));
+            }
+            Err(_) => {
+                return Ok(captcha_click_result(
+                    EffectPhase::Dispatched,
+                    false,
+                    "captcha_input_readback_failed",
+                ));
+            }
+        }
+        let typing_deadline = deadline_unix_ms.saturating_sub(
+            params
+                .settle_ms
+                .unwrap_or(350)
+                .min(3_000)
+                .saturating_add(2_000),
+        );
+        if let Err(failure) =
+            type_captcha_with_key_events(&mut session.cdp, text, cancellation, typing_deadline)
+                .await
         {
-            return Ok((
-                EffectPhase::Ambiguous,
-                CommandOutput::ActionReceipt(Box::new(ActionReceipt {
-                    action: "captcha_click".to_owned(),
-                    ok: false,
-                    reason: Some("text_readback_mismatch".to_owned()),
-                    note_id: None,
-                    observation: None,
-                    post_observation: None,
-                    group_observation: None,
-                    group_url: None,
-                    clicked: None,
-                    candidates: Vec::new(),
-                })),
+            clear_active_text_best_effort(session).await;
+            return Ok(captcha_click_result(
+                EffectPhase::Dispatched,
+                false,
+                match failure {
+                    TextInputFailure::Cancelled => "preempted_by_task",
+                    TextInputFailure::Deadline => "captcha_type_deadline_exceeded",
+                    TextInputFailure::Engine => "captcha_type_failed",
+                },
             ));
+        }
+        match focused_text_matches(session, text).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(captcha_click_result(
+                    EffectPhase::Dispatched,
+                    false,
+                    "text_readback_mismatch",
+                ));
+            }
+            Err(_) => {
+                return Ok(captcha_click_result(
+                    EffectPhase::Dispatched,
+                    false,
+                    "text_readback_failed",
+                ));
+            }
         }
     }
     if params.submit.as_deref() == Some("enter") {
+        if cancellation.is_some_and(|value| value.load(Ordering::Acquire)) {
+            clear_active_text_best_effort(session).await;
+            return Ok(captcha_click_result(
+                EffectPhase::Dispatched,
+                false,
+                "preempted_by_task",
+            ));
+        }
+        if unix_time_ms() >= deadline_unix_ms {
+            clear_active_text_best_effort(session).await;
+            return Ok(captcha_click_result(
+                EffectPhase::Dispatched,
+                false,
+                "captcha_deadline_exceeded",
+            ));
+        }
         session
             .cdp
-            .dispatch_key("keyDown", "Enter", "Enter", 13)
+            .dispatch_key_with_text("keyDown", "Enter", "Enter", 13, "\r")
             .await?;
         session
             .cdp
@@ -1122,12 +1309,24 @@ pub(crate) async fn click_captcha(
         page.page_kind,
         PageKind::Captcha | PageKind::Unknown | PageKind::Login
     );
-    Ok((
+    Ok(captcha_click_result(
         EffectPhase::Confirmed,
+        !blocked,
+        if blocked { "still_blocked" } else { "cleared" },
+    ))
+}
+
+fn captcha_click_result(
+    phase: EffectPhase,
+    ok: bool,
+    reason: &str,
+) -> (EffectPhase, CommandOutput) {
+    (
+        phase,
         CommandOutput::ActionReceipt(Box::new(ActionReceipt {
             action: "captcha_click".to_owned(),
-            ok: !blocked,
-            reason: Some(if blocked { "still_blocked" } else { "cleared" }.to_owned()),
+            ok,
+            reason: Some(reason.to_owned()),
             note_id: None,
             observation: None,
             post_observation: None,
@@ -1136,7 +1335,7 @@ pub(crate) async fn click_captcha(
             clicked: None,
             candidates: Vec::new(),
         })),
-    ))
+    )
 }
 
 pub(crate) fn validate_publish_file(path: &str) -> Result<(), EngineError> {
@@ -1253,6 +1452,10 @@ fn command_timeout_ms_for(
 fn command_timeout_ceiling(platform: Platform, command: &NativeCommand) -> u64 {
     if platform == Platform::Facebook && matches!(command, NativeCommand::PublishFillField(_)) {
         FACEBOOK_PUBLISH_FILL_TIMEOUT_MS
+    } else if platform == Platform::Facebook
+        && matches!(command, NativeCommand::InteractionComment(_))
+    {
+        FACEBOOK_COMMENT_TIMEOUT_MS
     } else if platform == Platform::Facebook && matches!(command, NativeCommand::GroupJoin(_)) {
         FACEBOOK_GROUP_JOIN_TIMEOUT_MS
     } else if platform == Platform::Facebook
@@ -1324,6 +1527,15 @@ mod tests {
             field_type: "content".to_owned(),
             value: "Vietnamese body".to_owned(),
         });
+        let comment = NativeCommand::InteractionComment(crate::command::CommentParams {
+            note_id: "https://www.facebook.com/groups/42/posts/7".to_owned(),
+            text: "Vietnamese comment".to_owned(),
+            account_id: Some("61591824155856".to_owned()),
+            group_chat_code: None,
+            fast_return_to_feed: None,
+            reason: None,
+            think_ms: None,
+        });
         let probe = NativeCommand::PageProbe(crate::command::EmptyParams::default());
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &join),
@@ -1336,6 +1548,10 @@ mod tests {
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &fill),
             FACEBOOK_PUBLISH_FILL_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ceiling(Platform::Facebook, &comment),
+            FACEBOOK_COMMENT_TIMEOUT_MS
         );
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &probe),
@@ -1360,6 +1576,10 @@ mod tests {
         assert_eq!(
             command_timeout_ms_for(Platform::Facebook, 90_000, &join),
             FACEBOOK_GROUP_JOIN_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ms_for(Platform::Facebook, 90_000, &comment),
+            FACEBOOK_COMMENT_TIMEOUT_MS
         );
     }
 

@@ -198,10 +198,7 @@ pub(crate) async fn probe_facebook_publish_submitted(
     facebook::publish_submitted_probe_from_cdp(&raw)
 }
 
-pub(crate) async fn replace_focused_text(
-    session: &mut EngineSession,
-    value: &str,
-) -> Result<(), EngineError> {
+pub(crate) async fn clear_focused_text(session: &mut EngineSession) -> Result<(), EngineError> {
     let modifier = if cfg!(target_os = "macos") { 4 } else { 2 };
     session
         .cdp
@@ -219,9 +216,6 @@ pub(crate) async fn replace_focused_text(
         .cdp
         .dispatch_key("keyUp", "Backspace", "Backspace", 8)
         .await?;
-    if !value.is_empty() {
-        session.cdp.insert_text(value).await?;
-    }
     Ok(())
 }
 

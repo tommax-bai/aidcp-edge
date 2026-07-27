@@ -4,15 +4,20 @@ use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
 use crate::model::{IdentityObservation, IdentityObservationSource, IdentityPageEffect};
 use crate::protocol::{EffectPhase, NativeCommand};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 pub(crate) async fn execute(
     session: &mut EngineSession,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     match command {
         NativeCommand::CaptchaCapture(params) => capture_captcha(session, params).await,
-        NativeCommand::CaptchaClick(params) => click_captcha(session, params).await,
+        NativeCommand::CaptchaClick(params) => {
+            click_captcha(session, params, cancellation, deadline_unix_ms).await
+        }
         NativeCommand::IdentityBootstrap(_) => execute_facebook_identity(session, true).await,
         NativeCommand::IdentityReadCurrent(params) => {
             let (phase, output) = execute_facebook_identity(session, false).await?;

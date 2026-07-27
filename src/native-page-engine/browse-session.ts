@@ -64,6 +64,11 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 const monotonicNow = (): number => performance.now();
 const DEFAULT_NATIVE_COMMAND_TIMEOUT_MS = 30_000;
 const FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 90_000;
+const FACEBOOK_COMMENT_TIMEOUT_FLOOR_MS = 28_000;
+const FACEBOOK_COMMENT_TIMEOUT_BASE_MS = 18_000;
+const FACEBOOK_COMMENT_TIMEOUT_PER_CHAR_MS = 220;
+const FACEBOOK_COMMENT_TIMEOUT_MAX_MS = 90_000;
+const FACEBOOK_COMMENT_RESPONSE_SLACK_MS = 1_000;
 
 const FACEBOOK_UNSUPPORTED_COMMANDS = new Set<Envelope['type']>([
   'interaction.collect',
@@ -217,9 +222,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     env?: Envelope,
   ): Promise<void> {
     await this.ensureFacebookScrollDwell(command, signal);
-    const timeoutMs = this.options.platform === 'facebook' && command.kind === 'group_join'
-      ? FACEBOOK_GROUP_JOIN_TIMEOUT_MS
-      : DEFAULT_NATIVE_COMMAND_TIMEOUT_MS;
+    const timeoutMs = this.facebookCommandTimeoutMs(command);
     const result = await this.options.runtime.execute(
       ownerId,
       command,
@@ -230,6 +233,22 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         : undefined,
     );
     this.report(result, env);
+  }
+
+  private facebookCommandTimeoutMs(command: Parameters<NativePageRuntime['execute']>[1]): number {
+    if (this.options.platform !== 'facebook') return DEFAULT_NATIVE_COMMAND_TIMEOUT_MS;
+    if (command.kind === 'group_join') return FACEBOOK_GROUP_JOIN_TIMEOUT_MS;
+    if (command.kind !== 'interaction_comment') return DEFAULT_NATIVE_COMMAND_TIMEOUT_MS;
+    const text = typeof command.params.text === 'string' ? command.params.text : '';
+    const cloudBudgetMs = Math.min(
+      FACEBOOK_COMMENT_TIMEOUT_MAX_MS,
+      Math.max(
+        FACEBOOK_COMMENT_TIMEOUT_FLOOR_MS,
+        FACEBOOK_COMMENT_TIMEOUT_BASE_MS
+          + FACEBOOK_COMMENT_TIMEOUT_PER_CHAR_MS * Array.from(text).length,
+      ),
+    );
+    return cloudBudgetMs - FACEBOOK_COMMENT_RESPONSE_SLACK_MS;
   }
 
   private async ensureFacebookScrollDwell(

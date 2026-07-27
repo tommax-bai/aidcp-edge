@@ -185,7 +185,7 @@ test('Native Facebook action receipt logs bounded terminal phase and reason with
   assert.equal(h.logs.some((line) => line.includes('https://')), false);
 });
 
-test('Native Facebook group join alone receives the established 90-second command budget', async () => {
+test('Native Facebook assigns only Join and length-aware comments a long command budget', async () => {
   const h = harness(async () => ({
     ok: true,
     effectPhase: 'confirmed',
@@ -205,11 +205,23 @@ test('Native Facebook group join alone receives the established 90-second comman
   await h.session.onCloudCommand(envelope('group.join', {
     groupUrl: 'https://www.facebook.com/groups/42',
   }));
+  await h.session.onCloudCommand(envelope('interaction.comment', {
+    noteId: 'https://www.facebook.com/groups/42/posts/7',
+    text: 'x'.repeat(100),
+  }));
+  await h.session.onCloudCommand(envelope('interaction.comment', {
+    noteId: 'https://www.facebook.com/groups/42/posts/8',
+    text: 'x'.repeat(400),
+  }));
   await h.session.onCloudCommand(envelope('feed.refresh', { reason: 'ordinary' }));
 
   assert.equal(h.executions[0]?.command.kind, 'group_join');
   assert.equal(h.executions[0]?.timeoutMs, 90_000);
-  assert.equal(h.executions[1]?.timeoutMs, 30_000);
+  assert.equal(h.executions[1]?.command.kind, 'interaction_comment');
+  assert.equal(h.executions[1]?.timeoutMs, 39_000);
+  assert.equal(h.executions[2]?.command.kind, 'interaction_comment');
+  assert.equal(h.executions[2]?.timeoutMs, 89_000);
+  assert.equal(h.executions[3]?.timeoutMs, 30_000);
 });
 
 test('Native Facebook forwards the exact Join commit window to the shared coordinator guard', async () => {

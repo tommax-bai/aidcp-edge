@@ -1,7 +1,9 @@
 use aidcp_page_engine::command::{
-    FollowParams, GroupJoinParams, IdentityCaptureParams, NoteInteractionParams, NoteOpenParams,
-    PageScrollParams, ReasonParams,
+    CaptchaCaptureParams, CaptchaClickParams, CaptchaPoint, CommentParams, FollowParams,
+    GroupJoinParams, IdentityCaptureParams, NoteInteractionParams, NoteOpenParams,
+    PageScrollParams, ReasonParams, SearchExecuteParams,
 };
+use aidcp_page_engine::commit_window::CommitWindowRequester;
 use aidcp_page_engine::engine::{CommandOutput, Engine};
 use aidcp_page_engine::error::ErrorCode;
 use aidcp_page_engine::model::FacebookListKind;
@@ -11,6 +13,8 @@ use aidcp_page_engine::protocol::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -717,6 +721,438 @@ async fn xhs_self_identity_uses_only_the_bound_canonical_profile() {
     );
 }
 
+#[tokio::test]
+async fn xiaohongshu_search_types_one_unicode_scalar_per_insert_text_call() {
+    let (port, server) = spawn_xhs_search_input_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open XHS session");
+    let keyword = "AI 实战";
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "search-input-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 15_000,
+            command: NativeCommand::SearchExecute(SearchExecuteParams {
+                keyword: keyword.to_owned(),
+                container: None,
+                source: None,
+                max_results: None,
+                sort: None,
+                time_window: None,
+            }),
+        })
+        .await
+        .expect("search result");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+
+    engine.shutdown().await;
+    let requests = server.await.expect("XHS search input fake CDP");
+    let inserts: Vec<&str> = requests
+        .iter()
+        .filter(|request| request["method"] == "Input.insertText")
+        .filter_map(|request| request.pointer("/params/text").and_then(Value::as_str))
+        .collect();
+    assert_eq!(inserts.concat(), keyword);
+    assert_eq!(inserts.len(), keyword.chars().count());
+    assert!(inserts.iter().all(|part| part.chars().count() == 1));
+}
+
+#[tokio::test]
+async fn xiaohongshu_search_deadline_stops_before_text_and_enter_dispatch() {
+    let (port, server) = spawn_xhs_search_input_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open XHS session");
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "search-deadline-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 1_000,
+            command: NativeCommand::SearchExecute(SearchExecuteParams {
+                keyword: "deadline".to_owned(),
+                container: None,
+                source: None,
+                max_results: None,
+                sort: None,
+                time_window: None,
+            }),
+        })
+        .await
+        .expect("search deadline receipt");
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("search receipt") else {
+        panic!("expected search receipt")
+    };
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("search_input_deadline_exceeded")
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("XHS search deadline fake CDP");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Input.insertText")
+    );
+    assert!(requests.iter().all(|request| {
+        request["method"] != "Input.dispatchKeyEvent" || request["params"]["key"] != "Enter"
+    }));
+}
+
+#[tokio::test]
+async fn captcha_text_uses_real_key_pairs_with_shift_and_zero_insert_text() {
+    let (port, server) = spawn_captcha_text_input_cdp(false).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open XHS session");
+
+    let capture = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "captcha-capture-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 5_000,
+            command: NativeCommand::CaptchaCapture(CaptchaCaptureParams {
+                incident_id: "incident-1".to_owned(),
+                max_image_width: None,
+                max_image_height: None,
+                quality: None,
+            }),
+        })
+        .await
+        .expect("captcha capture");
+    let CommandOutput::CaptchaSnapshot(snapshot) = capture.output.expect("captcha snapshot") else {
+        panic!("expected captcha snapshot")
+    };
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "captcha-click-2".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 2,
+            deadline_unix_ms: unix_time_ms() + 8_000,
+            command: NativeCommand::CaptchaClick(CaptchaClickParams {
+                incident_id: "incident-1".to_owned(),
+                snapshot_id: snapshot.snapshot_id,
+                points: vec![CaptchaPoint {
+                    x: 0.5,
+                    y: 0.5,
+                    label: None,
+                }],
+                settle_ms: Some(10),
+                text: Some("aB!".to_owned()),
+                submit: None,
+            }),
+        })
+        .await
+        .expect("captcha text input");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+
+    engine.shutdown().await;
+    let requests = server.await.expect("captcha input fake CDP");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Input.insertText")
+    );
+    let character_downs: Vec<&Value> = requests
+        .iter()
+        .filter(|request| {
+            request["method"] == "Input.dispatchKeyEvent"
+                && request["params"]["type"] == "keyDown"
+                && request["params"].get("text").is_some()
+        })
+        .collect();
+    let character_ups: Vec<&Value> = requests
+        .iter()
+        .filter(|request| {
+            request["method"] == "Input.dispatchKeyEvent"
+                && request["params"]["type"] == "keyUp"
+                && request["params"]["key"] != "Shift"
+                && request["params"]["key"] != "Backspace"
+                && matches!(request["params"]["modifiers"].as_u64(), Some(0) | Some(8))
+        })
+        .collect();
+    assert_eq!(
+        character_downs
+            .iter()
+            .filter_map(|request| request.pointer("/params/text").and_then(Value::as_str))
+            .collect::<String>(),
+        "aB!"
+    );
+    assert_eq!(character_downs.len(), 3);
+    assert_eq!(character_ups.len(), 3);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                request["method"] == "Input.dispatchKeyEvent"
+                    && request["params"]["key"] == "Shift"
+                    && request["params"]["type"] == "rawKeyDown"
+            })
+            .count(),
+        2
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                request["method"] == "Input.dispatchKeyEvent"
+                    && request["params"]["key"] == "Shift"
+                    && request["params"]["type"] == "keyUp"
+            })
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn captcha_text_releases_the_character_key_after_keydown_failure() {
+    let (port, server) = spawn_captcha_text_input_cdp(true).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open XHS session");
+    let capture = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "captcha-capture-error-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 5_000,
+            command: NativeCommand::CaptchaCapture(CaptchaCaptureParams {
+                incident_id: "incident-error".to_owned(),
+                max_image_width: None,
+                max_image_height: None,
+                quality: None,
+            }),
+        })
+        .await
+        .expect("captcha capture");
+    let CommandOutput::CaptchaSnapshot(snapshot) = capture.output.expect("captcha snapshot") else {
+        panic!("expected captcha snapshot")
+    };
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "captcha-click-error-2".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 2,
+            deadline_unix_ms: unix_time_ms() + 8_000,
+            command: NativeCommand::CaptchaClick(CaptchaClickParams {
+                incident_id: "incident-error".to_owned(),
+                snapshot_id: snapshot.snapshot_id,
+                points: vec![CaptchaPoint {
+                    x: 0.5,
+                    y: 0.5,
+                    label: None,
+                }],
+                settle_ms: Some(10),
+                text: Some("x".to_owned()),
+                submit: None,
+            }),
+        })
+        .await
+        .expect("honest captcha type failure");
+    assert_eq!(outcome.effect_phase, EffectPhase::Dispatched);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("captcha failure receipt")
+    else {
+        panic!("expected captcha action receipt")
+    };
+    assert_eq!(receipt.reason.as_deref(), Some("captcha_type_failed"));
+
+    engine.shutdown().await;
+    let requests = server.await.expect("captcha key failure fake CDP");
+    let x_events: Vec<&Value> = requests
+        .iter()
+        .filter(|request| {
+            request["method"] == "Input.dispatchKeyEvent" && request["params"]["key"] == "x"
+        })
+        .collect();
+    assert_eq!(x_events.len(), 2);
+    assert_eq!(x_events[0]["params"]["type"], "keyDown");
+    assert_eq!(x_events[1]["params"]["type"], "keyUp");
+}
+
+#[tokio::test]
+async fn facebook_comment_types_approved_text_one_unicode_scalar_at_a_time() {
+    let (port, server) = spawn_facebook_comment_input_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 90_000;
+    engine.open(&open).await.expect("open Facebook session");
+    let body = "越南 job";
+    let group_code = "Zalo:123";
+    let expected = format!("{body}\n{group_code}");
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "facebook-comment-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 20_000,
+            command: NativeCommand::InteractionComment(CommentParams {
+                note_id: "https://www.facebook.com/groups/42/posts/7".to_owned(),
+                text: body.to_owned(),
+                account_id: Some("61591824155856".to_owned()),
+                group_chat_code: Some(group_code.to_owned()),
+                fast_return_to_feed: None,
+                reason: None,
+                think_ms: None,
+            }),
+        })
+        .await
+        .expect("Facebook comment");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("comment receipt") else {
+        panic!("expected comment receipt")
+    };
+    assert!(receipt.ok);
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook comment input fake CDP");
+    let inserts: Vec<&str> = requests
+        .iter()
+        .filter(|request| request["method"] == "Input.insertText")
+        .filter_map(|request| request.pointer("/params/text").and_then(Value::as_str))
+        .collect();
+    assert_eq!(inserts.concat(), expected);
+    assert_eq!(inserts.len(), expected.chars().count());
+    assert!(inserts.iter().all(|part| part.chars().count() == 1));
+}
+
+#[tokio::test]
+async fn facebook_comment_deadline_clears_and_never_submits_a_partial_comment() {
+    let (port, server) = spawn_facebook_comment_input_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 90_000;
+    engine.open(&open).await.expect("open Facebook session");
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "facebook-comment-deadline-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 1_000,
+            command: NativeCommand::InteractionComment(CommentParams {
+                note_id: "https://www.facebook.com/groups/42/posts/7".to_owned(),
+                text: "deadline comment".to_owned(),
+                account_id: Some("61591824155856".to_owned()),
+                group_chat_code: None,
+                fast_return_to_feed: None,
+                reason: None,
+                think_ms: None,
+            }),
+        })
+        .await
+        .expect("Facebook comment deadline receipt");
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("comment receipt") else {
+        panic!("expected comment receipt")
+    };
+    assert_eq!(receipt.reason.as_deref(), Some("comment_deadline_exceeded"));
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook comment deadline fake CDP");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Input.insertText")
+    );
+    assert!(requests.iter().all(|request| {
+        request["method"] != "Input.dispatchKeyEvent" || request["params"]["key"] != "Enter"
+    }));
+}
+
+#[tokio::test]
+async fn facebook_comment_commit_window_rejection_clears_and_never_submits() {
+    let (port, server) = spawn_facebook_comment_input_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 90_000;
+    engine.open(&open).await.expect("open Facebook session");
+    let command = CommandRecord {
+        protocol_version: 2,
+        id: "facebook-comment-commit-rejected-1".to_owned(),
+        session_id: "session-1".to_owned(),
+        task_id: "browse-1".to_owned(),
+        command_id: 1,
+        deadline_unix_ms: unix_time_ms() + 20_000,
+        command: NativeCommand::InteractionComment(CommentParams {
+            note_id: "https://www.facebook.com/groups/42/posts/7".to_owned(),
+            text: "approved comment".to_owned(),
+            account_id: Some("61591824155856".to_owned()),
+            group_chat_code: None,
+            fast_return_to_feed: None,
+            reason: None,
+            think_ms: None,
+        }),
+    };
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let execute = engine.execute_cancellable_with_commit_windows(
+        &command,
+        Arc::new(AtomicBool::new(false)),
+        CommitWindowRequester::new(command.command_id, sender),
+    );
+    let reject = async move {
+        let request = receiver.recv().await.expect("commit window request");
+        request
+            .acknowledgement
+            .send(false)
+            .expect("reject commit window");
+    };
+    let (outcome, ()) = tokio::join!(execute, reject);
+    let outcome = outcome.expect("Facebook comment commit rejection");
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    assert_eq!(
+        outcome.error.expect("commit rejection error").code,
+        ErrorCode::CommitWindowUnavailable
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook comment commit fake CDP");
+    assert!(
+        requests
+            .iter()
+            .any(|request| request["method"] == "Input.insertText")
+    );
+    assert!(requests.iter().all(|request| {
+        request["method"] != "Input.dispatchKeyEvent" || request["params"]["key"] != "Enter"
+    }));
+    let last_backspace = requests.iter().rposition(|request| {
+        request["method"] == "Input.dispatchKeyEvent"
+            && request["params"]["key"] == "Backspace"
+            && request["params"]["type"] == "keyDown"
+    });
+    let last_insert = requests
+        .iter()
+        .rposition(|request| request["method"] == "Input.insertText");
+    assert!(last_backspace > last_insert);
+}
+
 fn session_open(port: u16) -> SessionOpenRecord {
     SessionOpenRecord {
         protocol_version: 2,
@@ -1027,6 +1463,259 @@ fn mouse_dispatch_count(requests: &[Value]) -> usize {
         .iter()
         .filter(|request| request["method"] == "Input.dispatchMouseEvent")
         .count()
+}
+
+async fn spawn_xhs_search_input_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing(&listener, port).await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut text = String::new();
+        let mut evaluate_count = 0_u32;
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(raw)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&raw).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let method = request["method"].as_str().unwrap_or_default();
+            let response = if method == "Input.insertText" {
+                text.push_str(
+                    request
+                        .pointer("/params/text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                );
+                json!({})
+            } else if method == "Input.dispatchKeyEvent"
+                && request.pointer("/params/key").and_then(Value::as_str) == Some("Backspace")
+                && request.pointer("/params/type").and_then(Value::as_str) == Some("keyDown")
+            {
+                text.clear();
+                json!({})
+            } else if method == "Runtime.evaluate" {
+                evaluate_count += 1;
+                match evaluate_count {
+                    1 => json!({"result":{"value":{"x":640.0,"y":52.0}}}),
+                    2 => json!({"result":{"value":""}}),
+                    3 => json!({"result":{"value":text}}),
+                    4 => json!({"result":{"value":{
+                        "href":"https://www.xiaohongshu.com/search_result_ai?keyword=AI%20%E5%AE%9E%E6%88%98",
+                        "readyState":"complete",
+                        "feedCardCount":1,
+                        "noteDetailCount":0,
+                        "loginWallCount":0,
+                        "captchaSignalCount":0,
+                        "dialogCount":0,
+                        "profileSignalCount":0,
+                        "notificationSignalCount":0,
+                        "publishSignalCount":0,
+                        "errorSignalCount":0,
+                        "mainCount":1
+                    }}}),
+                    _ => json!({"result":{"value":router_result(
+                        "page_cards",
+                        json!({"cards":[{
+                            "index":0,
+                            "title":"search result",
+                            "likeCount":1,
+                            "collectCount":1,
+                            "noteId":"note-1"
+                        }]})
+                    )}}),
+                }
+            } else {
+                json!({})
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":response}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_captcha_text_input_cdp(
+    fail_character_keydown: bool,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing(&listener, port).await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut text = String::new();
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(raw)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&raw).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let method = request["method"].as_str().unwrap_or_default();
+            if fail_character_keydown
+                && method == "Input.dispatchKeyEvent"
+                && request.pointer("/params/type").and_then(Value::as_str) == Some("keyDown")
+                && request.pointer("/params/text").and_then(Value::as_str) == Some("x")
+            {
+                requests.push(request);
+                websocket
+                    .send(Message::Text(
+                        json!({"id":id,"error":{"code":-32000,"message":"synthetic keydown failure"}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .expect("CDP error response");
+                continue;
+            }
+            let response = match method {
+                "Page.getLayoutMetrics" => {
+                    json!({"cssVisualViewport":{"clientWidth":1000.0,"clientHeight":800.0}})
+                }
+                "Page.captureScreenshot" => json!({"data":"YWJj"}),
+                "Input.dispatchKeyEvent"
+                    if request.pointer("/params/key").and_then(Value::as_str)
+                        == Some("Backspace")
+                        && request.pointer("/params/type").and_then(Value::as_str)
+                            == Some("keyDown") =>
+                {
+                    text.clear();
+                    json!({})
+                }
+                "Input.dispatchKeyEvent"
+                    if request.pointer("/params/type").and_then(Value::as_str)
+                        == Some("keyDown") =>
+                {
+                    if let Some(value) = request.pointer("/params/text").and_then(Value::as_str) {
+                        text.push_str(value);
+                    }
+                    json!({})
+                }
+                "Runtime.evaluate"
+                    if request
+                        .pointer("/params/expression")
+                        .and_then(Value::as_str)
+                        .is_some_and(|expression| expression.contains("'value' in e")) =>
+                {
+                    json!({"result":{"value":text}})
+                }
+                "Runtime.evaluate" => json!({"result":{"value":{
+                    "href":"https://www.xiaohongshu.com/explore",
+                    "readyState":"complete",
+                    "feedCardCount":0,
+                    "noteDetailCount":0,
+                    "loginWallCount":0,
+                    "captchaSignalCount":1,
+                    "dialogCount":1,
+                    "profileSignalCount":0,
+                    "notificationSignalCount":0,
+                    "publishSignalCount":0,
+                    "errorSignalCount":0,
+                    "mainCount":1
+                }}}),
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":response}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_comment_input_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(
+            &listener,
+            port,
+            "https://www.facebook.com/groups/42/posts/7",
+        )
+        .await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut text = String::new();
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(raw)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&raw).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let method = request["method"].as_str().unwrap_or_default();
+            let expression = request
+                .pointer("/params/expression")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let response = if method == "Input.insertText" {
+                text.push_str(
+                    request
+                        .pointer("/params/text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                );
+                json!({})
+            } else if method == "Input.dispatchKeyEvent"
+                && request.pointer("/params/key").and_then(Value::as_str) == Some("Backspace")
+                && request.pointer("/params/type").and_then(Value::as_str) == Some("keyDown")
+            {
+                text.clear();
+                json!({})
+            } else if expression.contains(r#""kind":"page_probe""#) {
+                facebook_ready_cdp("/groups/42/posts/7")
+            } else if expression.contains(r#""kind":"consent_probe""#) {
+                facebook_consent_absent_cdp()
+            } else if expression.contains(r#""kind":"comment_editor_probe""#) {
+                router_cdp(
+                    "text_target",
+                    json!({
+                        "ok":true,
+                        "noteId":"https://www.facebook.com/groups/42/posts/7",
+                        "cx":640.0,
+                        "cy":700.0,
+                        "value":text
+                    }),
+                )
+            } else if expression.contains(r#""kind":"comment_ack_probe""#) {
+                router_cdp(
+                    "comment_ack_probe",
+                    json!({
+                        "ok":true,
+                        "confirmed":true,
+                        "pending":false,
+                        "rejected":false,
+                        "inFlight":false
+                    }),
+                )
+            } else {
+                json!({})
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":response}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
 }
 
 async fn spawn_fake_cdp() -> (u16, tokio::task::JoinHandle<()>) {

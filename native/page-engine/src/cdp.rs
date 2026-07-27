@@ -362,6 +362,31 @@ impl CdpSession {
         .await
     }
 
+    pub async fn dispatch_key_with_text_and_modifiers(
+        &mut self,
+        event_type: &str,
+        key: &str,
+        code: &str,
+        windows_virtual_key_code: u32,
+        text: &str,
+        modifiers: u8,
+    ) -> Result<Value, EngineError> {
+        self.call(
+            CdpMethod::InputDispatchKeyEvent,
+            json!({
+                "type": event_type,
+                "key": key,
+                "code": code,
+                "windowsVirtualKeyCode": windows_virtual_key_code,
+                "nativeVirtualKeyCode": windows_virtual_key_code,
+                "text": text,
+                "unmodifiedText": text,
+                "modifiers": modifiers,
+            }),
+        )
+        .await
+    }
+
     pub async fn close(&mut self) {
         let _ = self.websocket.close(None).await;
     }

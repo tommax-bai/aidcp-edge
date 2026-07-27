@@ -10,6 +10,7 @@ export const NATIVE_PAGE_ENGINE_PROTOCOL_VERSION = 2;
 const DEFAULT_NATIVE_TIMEOUT_MS = 5_000;
 const MAX_NATIVE_TIMEOUT_MS = 30_000;
 const MAX_FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS = 40_000;
+const MAX_FACEBOOK_COMMENT_TIMEOUT_MS = 90_000;
 const MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 90_000;
 const MAX_FACEBOOK_PUBLISH_FILL_TIMEOUT_MS = 400_000;
 const MAX_STDERR_CHARS = 2_048;
@@ -915,11 +916,13 @@ function validateCommandTimeout(
     ? MAX_NATIVE_TIMEOUT_MS
     : command.kind === 'publish_fill_field'
       ? MAX_FACEBOOK_PUBLISH_FILL_TIMEOUT_MS
-      : command.kind === 'group_join'
-        ? MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS
-        : command.kind === 'publish_select_mode'
-          ? MAX_FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS
-          : MAX_NATIVE_TIMEOUT_MS;
+      : command.kind === 'interaction_comment'
+        ? MAX_FACEBOOK_COMMENT_TIMEOUT_MS
+        : command.kind === 'group_join'
+          ? MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS
+          : command.kind === 'publish_select_mode'
+            ? MAX_FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS
+            : MAX_NATIVE_TIMEOUT_MS;
   validateTimeout(timeoutMs, maxTimeoutMs);
 }
 

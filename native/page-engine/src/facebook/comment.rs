@@ -2,9 +2,13 @@ use super::shared::*;
 use crate::commit_window::CommitWindowRequester;
 use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
+use crate::input::{TextInputFailure, type_text_humanized};
 use crate::protocol::{EffectPhase, NativeCommand};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
+
+const FACEBOOK_COMMENT_PRE_SUBMIT_RESERVE_MS: u64 = 12_000;
+const FACEBOOK_COMMENT_READBACK_BUDGET: Duration = Duration::from_secs(3);
 
 pub(crate) async fn execute(
     session: &mut EngineSession,
@@ -106,35 +110,111 @@ pub(crate) async fn execute_facebook_comment(
         ));
     };
     dispatch_facebook_click(session, x, y).await?;
-    replace_focused_text(session, &full_text).await?;
-    let readback = probe_facebook_comment_editor(session, &params.note_id).await?;
-    if readback
-        .value
-        .as_deref()
-        .is_none_or(|value| normalize_facebook_text(value) != normalize_facebook_text(&full_text))
-    {
-        replace_focused_text(session, "").await?;
+    if clear_focused_text(session).await.is_err() {
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
             "comment",
             false,
-            "marker_not_accepted",
+            "comment_editor_clear_failed",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    let clean =
+        facebook_comment_editor_matches(session, &params.note_id, "", Duration::from_secs(1)).await;
+    if !matches!(&clean, Ok(true)) {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            if clean.is_err() {
+                "comment_editor_probe_failed"
+            } else {
+                "comment_editor_not_clean"
+            },
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    let typing_deadline_unix_ms =
+        deadline_unix_ms.saturating_sub(FACEBOOK_COMMENT_PRE_SUBMIT_RESERVE_MS);
+    if let Err(failure) = type_text_humanized(
+        &mut session.cdp,
+        &full_text,
+        cancellation,
+        typing_deadline_unix_ms,
+    )
+    .await
+    {
+        let _ = clear_focused_text(session).await;
+        if matches!(failure, TextInputFailure::Cancelled) {
+            return Err(cancelled_before_dispatch());
+        }
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            match failure {
+                TextInputFailure::Deadline => "comment_deadline_exceeded",
+                TextInputFailure::Engine => "comment_input_failed",
+                TextInputFailure::Cancelled => unreachable!(),
+            },
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    let accepted = facebook_comment_editor_matches(
+        session,
+        &params.note_id,
+        &full_text,
+        FACEBOOK_COMMENT_READBACK_BUDGET,
+    )
+    .await;
+    if !matches!(&accepted, Ok(true)) {
+        let _ = clear_focused_text(session).await;
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            if accepted.is_err() {
+                "comment_readback_failed"
+            } else {
+                "marker_not_accepted"
+            },
             Some(params.note_id.clone()),
             None,
         ));
     }
     if let Some(output) = ensure_facebook_action_gate(session, command).await? {
-        replace_focused_text(session, "").await?;
+        let _ = clear_focused_text(session).await;
         return Ok((EffectPhase::NotStarted, output));
     }
-    enter_facebook_commit_window(command, commit_windows, deadline_unix_ms, cancellation).await?;
-    let protected_editor = probe_facebook_comment_editor(session, &params.note_id).await?;
+    if let Err(error) =
+        enter_facebook_commit_window(command, commit_windows, deadline_unix_ms, cancellation).await
+    {
+        let _ = clear_focused_text(session).await;
+        return Err(error);
+    }
+    let protected_editor = match probe_facebook_comment_editor(session, &params.note_id).await {
+        Ok(editor) => editor,
+        Err(_) => {
+            let _ = clear_focused_text(session).await;
+            return Ok(facebook_action_result(
+                EffectPhase::NotStarted,
+                "comment",
+                false,
+                "target_recheck_failed",
+                Some(params.note_id.clone()),
+                None,
+            ));
+        }
+    };
     if !protected_editor.ok
         || protected_editor.value.as_deref().is_none_or(|value| {
             normalize_facebook_text(value) != normalize_facebook_text(&full_text)
         })
     {
-        replace_focused_text(session, "").await?;
+        let _ = clear_focused_text(session).await;
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
             "comment",
@@ -145,8 +225,19 @@ pub(crate) async fn execute_facebook_comment(
         ));
     }
     if facebook_command_cancelled(cancellation) {
-        replace_focused_text(session, "").await?;
+        let _ = clear_focused_text(session).await;
         return Err(cancelled_before_dispatch());
+    }
+    if unix_time_ms() >= deadline_unix_ms {
+        let _ = clear_focused_text(session).await;
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            "deadline_expired_before_dispatch",
+            Some(params.note_id.clone()),
+            None,
+        ));
     }
     session
         .cdp
@@ -226,5 +317,29 @@ pub(crate) async fn execute_facebook_comment(
             ));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn facebook_comment_editor_matches(
+    session: &mut EngineSession,
+    note_id: &str,
+    expected: &str,
+    timeout: Duration,
+) -> Result<bool, EngineError> {
+    let expected = normalize_facebook_text(expected);
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let editor = probe_facebook_comment_editor(session, note_id).await?;
+        if editor
+            .value
+            .as_deref()
+            .is_some_and(|value| normalize_facebook_text(value) == expected)
+        {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }

@@ -81,6 +81,14 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
     params: { groupUrl: 'https://www.facebook.com/groups/42', click: true },
   }, 90_000);
   await session.execute({
+    kind: 'interaction_comment',
+    params: {
+      noteId: 'https://www.facebook.com/groups/42/posts/7',
+      text: 'Vietnamese comment',
+      accountId: '61591824155856',
+    },
+  }, 90_000);
+  await session.execute({
     kind: 'publish_select_mode',
     params: {
       recordId: 7,
@@ -98,6 +106,21 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
       value: 'Vietnamese body',
     },
   }, 400_000);
+  await assert.rejects(
+    session.execute({
+      kind: 'interaction_comment',
+      params: {
+        noteId: 'https://www.facebook.com/groups/42/posts/7',
+        text: 'Vietnamese comment',
+        accountId: '61591824155856',
+      },
+    }, 90_001),
+    (error: unknown) => {
+      assert.ok(error instanceof NativePageEngineError);
+      assert.equal(error.code, 'invalid_request');
+      return true;
+    },
+  );
   await assert.rejects(
     session.execute({
       kind: 'publish_select_mode',

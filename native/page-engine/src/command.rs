@@ -710,7 +710,13 @@ impl NativeCommand {
                 }) {
                     return Err(invalid("invalid captcha point"));
                 }
-                validate_optional(&params.text, 4_096, "captcha text exceeds protocol limit")?;
+                if params
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| !crate::input::valid_captcha_text(text))
+                {
+                    return Err(invalid("invalid captcha text"));
+                }
                 if params
                     .submit
                     .as_deref()
@@ -892,6 +898,38 @@ mod tests {
         .expect("typed captcha");
         assert_eq!(
             captcha.validate().expect_err("point bounds").code,
+            ErrorCode::InvalidRequest
+        );
+
+        for text in ["", "验证码", "ab\ncd"] {
+            let captcha: NativeCommand = serde_json::from_value(serde_json::json!({
+                "kind": "captcha_click",
+                "params": {
+                    "incidentId": "i",
+                    "snapshotId": "s",
+                    "points": [{"x": 0.5, "y": 0.5}],
+                    "text": text
+                }
+            }))
+            .expect("typed captcha");
+            assert_eq!(
+                captcha.validate().expect_err("captcha text boundary").code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        let too_long = "x".repeat(25);
+        let captcha: NativeCommand = serde_json::from_value(serde_json::json!({
+            "kind": "captcha_click",
+            "params": {
+                "incidentId": "i",
+                "snapshotId": "s",
+                "points": [{"x": 0.5, "y": 0.5}],
+                "text": too_long
+            }
+        }))
+        .expect("typed captcha");
+        assert_eq!(
+            captcha.validate().expect_err("captcha text length").code,
             ErrorCode::InvalidRequest
         );
     }
