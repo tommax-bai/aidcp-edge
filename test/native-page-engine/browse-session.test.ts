@@ -657,6 +657,48 @@ test('Native Facebook keeps Reel projection witnesses across task resume and res
   second.session.close();
 });
 
+test('Native Facebook task resume preserves the current page until the next deliberate command', async () => {
+  const h = harness(async () => ({
+    ok: true,
+    effectPhase: 'confirmed',
+    reasonCode: 'confirmed',
+    output: { kind: 'page_cards', value: { cards: [], listKind: 'feed' } },
+  }), { platform: 'facebook' });
+
+  await h.session.start();
+  await h.session.quiesceForTask();
+  await h.session.resumeAfterTask();
+
+  assert.deepEqual(
+    h.executions.map((execution) => execution.command.kind),
+    ['browse_scroll'],
+    'task release must not issue another initial_scan that navigates Facebook home',
+  );
+
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  assert.equal(h.executions.at(-1)?.command.kind, 'page_scroll', 'resume still unblocks the next explicit command');
+  h.session.close();
+});
+
+test('Native Xiaohongshu task resume keeps the existing initial-scan restart behavior', async () => {
+  const h = harness(async () => ({
+    ok: true,
+    effectPhase: 'confirmed',
+    reasonCode: 'confirmed',
+    output: { kind: 'page_cards', value: { cards: [], listKind: 'feed' } },
+  }), { platform: 'xiaohongshu' });
+
+  await h.session.start();
+  await h.session.quiesceForTask();
+  await h.session.resumeAfterTask();
+
+  assert.deepEqual(
+    h.executions.map((execution) => execution.command.kind),
+    ['browse_scroll', 'browse_scroll'],
+  );
+  h.session.close();
+});
+
 test('Native Facebook projects a unique canonical Feed video once even beside non-video cards', async () => {
   const video = {
     index: 1,

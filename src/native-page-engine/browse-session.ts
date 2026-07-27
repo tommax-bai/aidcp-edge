@@ -197,6 +197,12 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   async resumeAfterTask(): Promise<void> {
     if (this.closed) return;
     this.blocked = false;
+    if (this.options.platform === 'facebook') {
+      // Facebook task legs are command-driven and may intentionally reuse the current group/post page.
+      // Returning home here destroys that handoff; the next explicit feed command restores active_list_url.
+      this.scheduleProbe();
+      return;
+    }
     await this.start();
   }
 
