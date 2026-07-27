@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
@@ -90,6 +91,59 @@ test('Facebook feed projection keeps canonical permalink identity and bounded pa
   assert.equal(cards[0]?.noteId, 'https://www.facebook.com/Alice/posts/pfbidABC');
   assert.equal(cards[0]?.author, 'Alice');
   assert.equal(cards[0]?.likeCount, 1_200);
+});
+
+test('Facebook first-post scroll settles for two seconds before probing hydrated cards', async () => {
+  const dom = install(`
+    <main>
+      <div role="feed"></div>
+    </main>
+  `, 'https://www.facebook.com/groups/945390701793119');
+  const waits: number[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, delay?: number) => {
+    waits.push(Number(delay));
+    if (delay === 2_000) {
+      dom.window.document.querySelector('[role="feed"]')!.innerHTML = `
+        <article role="article">
+          <h2><a href="/people/Alice/123456/">Alice</a></h2>
+          <div data-ad-rendering-role="story_message">Hydrated after scrolling</div>
+          <a href="/groups/945390701793119/posts/333/">2h</a>
+          <button aria-label="Comment">Comment</button>
+        </article>
+      `;
+    }
+    callback();
+    return 0 as unknown as NodeJS.Timeout;
+  }) as typeof setTimeout;
+
+  try {
+    const result = await run({
+      kind: 'browse_scroll',
+      params: { reason: 'first_commentable_group_post_probe' },
+    });
+    assert.deepEqual(waits, [450, 2_000]);
+    const cards = result.output.value.cards as Array<Record<string, unknown>>;
+    assert.equal(cards.length, 1);
+    assert.equal(
+      cards[0]?.noteId,
+      'https://www.facebook.com/groups/945390701793119/posts/333',
+    );
+
+    waits.length = 0;
+    await run({ kind: 'browse_scroll', params: { reason: 'coverage_scan' } });
+    assert.deepEqual(waits, [450]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test('Facebook first-post hydration keeps the existing four-scroll bound', async () => {
+  const runtime = await readFile(
+    resolve(repoRoot, 'native/page-engine/src/facebook/runtime.rs'),
+    'utf8',
+  );
+  assert.match(runtime, /const FIRST_POST_SCROLL_ROUNDS: usize = 4;/);
 });
 
 test('Facebook Feed probe distinguishes loading and visible unreportable articles from explicit empty', async () => {

@@ -56,6 +56,7 @@
       const before=window.scrollY;
       window.scrollBy({top:Math.max(420,Math.round((window.innerHeight||800)*0.8)),behavior:'smooth'});
       await sleep(450);
+      if(p.reason==='first_commentable_group_post_probe')await sleep(2000);
       const output=feedCards();
       output.value.movement={before,after:window.scrollY,moved:window.scrollY!==before,atBottom:window.scrollY+(window.innerHeight||0)>=document.documentElement.scrollHeight-8};
       return done(output);
