@@ -107,10 +107,16 @@ test('代理编辑先 CAS 更新 Cloud 权威，再更新 AdsPower 执行副本'
   assert.match(batch, /partialApplied:\s*true/);
 });
 
-test('精确代理编辑读取 AIDCP 原代理权威，而非可能暂留 GOST 的 live profile', () => {
+test('精确代理编辑仅从 AdsPower 识别 no_proxy，配置代理仍读取 Cloud 权威', () => {
   const block = handlerBlock(main, 'ads:getEnvProxy');
-  assert.match(block, /return readAuthoritativeProfileProxy\(userId\)/);
-  assert.doesNotMatch(block, /getProfileProxyConfig/);
+  assert.match(block, /await readAuthoritativeProfileProxy\(userId\)/);
+  assert.match(block, /error:\s*proxyPreflightFailureText\(authority\.reason\)/);
+  const bypassStart = main.indexOf('async function readAdsNoProxyAuthority');
+  const bypassEnd = main.indexOf('async function writeCloudProxyAuthority', bypassStart);
+  const bypass = main.slice(bypassStart, bypassEnd);
+  assert.match(bypass, /getProfileProxyConfig/);
+  assert.match(bypass, /adsNoProxyAuthorityView\(result,\s*id\)/);
+  assert.doesNotMatch(bypass, /proxyHost|proxyPort|proxyUser|proxyPassword|proxy_host|proxy_port|proxy_user|proxy_password/);
 });
 
 test('环境列表以原代理权威覆盖 live GOST 摘要，但不批量投影认证字段', () => {
@@ -119,7 +125,9 @@ test('环境列表以原代理权威覆盖 live GOST 摘要，但不批量投影
   const start = main.indexOf('async function projectAuthoritativeProxySummary');
   const end = main.indexOf('async function ensureProfileProxyAuthority', start);
   const projection = main.slice(start, end);
-  assert.match(projection, /readAuthoritativeProfileProxy\(profile\.userId,\s*\{ allowMigration: false \}\)/);
+  assert.match(projection, /profile\.proxyConfig\s*&&\s*profile\.proxyConfig\.noProxy === true\)\s*return profile/);
+  assert.match(projection, /allowMigration:\s*false/);
+  assert.match(projection, /allowAdsNoProxyBypass:\s*false/);
   assert.match(projection, /proxyType: cfg\.proxy_type/);
   assert.match(projection, /proxyHost: cfg\.proxy_host/);
   assert.match(projection, /proxyUser: ''/);

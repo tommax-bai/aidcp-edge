@@ -4,16 +4,51 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const {
+  adsNoProxyAuthorityView,
   cloudAuthorityForProxyInput,
   isLoopbackProxyConfig,
   migrationAuthorityFromLocalRecord,
   normalizeCloudProxyAuthorityRecord,
 } = require('../../src/electron/environment-proxy-authority.cjs') as {
+  adsNoProxyAuthorityView: (input: Record<string, unknown>, profileId: string) => Record<string, any> | null;
   cloudAuthorityForProxyInput: (input: Record<string, unknown>) => Record<string, any>;
   isLoopbackProxyConfig: (input: Record<string, unknown>) => boolean;
   migrationAuthorityFromLocalRecord: (input: Record<string, unknown>) => Record<string, any>;
   normalizeCloudProxyAuthorityRecord: (input: Record<string, unknown>, profileId: string) => Record<string, any>;
 };
+
+test('AdsPower exact read may classify only explicit no_proxy without importing route fields', () => {
+  assert.deepEqual(adsNoProxyAuthorityView({
+    ok: true,
+    noProxy: true,
+    proxy: {
+      proxyType: 'no_proxy',
+      proxyHost: 'must-not-project',
+      proxyUser: 'must-not-project',
+      proxyPassword: 'must-not-project',
+    },
+  }, 'profile-1'), {
+    ok: true,
+    noProxy: true,
+    profileId: 'profile-1',
+    revision: null,
+    proxyConfig: null,
+    proxy: { proxyType: 'no_proxy' },
+    source: 'ads_no_proxy',
+  });
+  assert.equal(adsNoProxyAuthorityView({
+    ok: true,
+    noProxy: false,
+    proxy: {
+      proxyType: 'http',
+      proxyHost: 'proxy.example',
+      proxyPort: '8080',
+      proxyUser: 'alice',
+      proxyPassword: 'secret',
+    },
+  }, 'profile-1'), null);
+  assert.equal(adsNoProxyAuthorityView({ ok: false, noProxy: true }, 'profile-1'), null);
+});
 
 test('proxy input maps to explicit Cloud configured/no_proxy authority', () => {
   assert.deepEqual(cloudAuthorityForProxyInput({ proxyType: 'no_proxy' }), {

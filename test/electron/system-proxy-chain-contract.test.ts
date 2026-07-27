@@ -38,16 +38,24 @@ test('preflight and child spawn consume the same prepared loopback through a pri
   assert.match(main, /if \(!endpoint\) \{[\s\S]{0,180}?proxy_chain_unavailable[\s\S]{0,180}?return;/);
 });
 
-test('Cloud owns original proxy authority; local encryption is migration/cache only', () => {
+test('Cloud owns configured proxy authority; AdsPower may only classify explicit no_proxy', () => {
   assert.match(main, /createAdsProxyAuthorityStore\(/);
   assert.match(main, /async function readAuthoritativeProfileProxy\(/);
   assert.match(main, /\/proxy-authority`/);
   assert.match(main, /migrationAuthorityFromLocalRecord\(proxyAuthorityStore\.load\(id\)\)/);
-  assert.doesNotMatch(main, /getProfileProxyConfig/);
+  assert.match(main, /async function readAdsNoProxyAuthority\(profileId\)/);
+  assert.match(main, /adsNoProxyAuthorityView\(result,\s*id\)/);
   assert.match(main, /proxyAuthority:\s*proxyAuthority\.authority/);
 });
 
 test('profiles without an environment proxy stay outside double-hop applicability', () => {
+  const authorityStart = main.indexOf('async function readAuthoritativeProfileProxy');
+  const authorityEnd = main.indexOf('async function projectAuthoritativeProxySummary', authorityStart);
+  const authority = main.slice(authorityStart, authorityEnd);
+  assert.ok(
+    authority.indexOf('await readAdsNoProxyAuthority(id)') < authority.indexOf('clientAuthEnabled()'),
+    'AdsPower explicit no_proxy must bypass Cloud availability and authority checks',
+  );
   assert.match(
     main,
     /async function skipOfflineSystemProxyChain\(handle\)[\s\S]{0,500}?proxyChainManager\.invalidate\(handle\.profileId\)[\s\S]{0,300}?proxyMode: 'direct'[\s\S]{0,200}?proxyChainApplicable: false[\s\S]{0,200}?proxyChain: null/,

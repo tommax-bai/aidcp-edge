@@ -76,6 +76,20 @@ function normalizeCloudProxyAuthorityRecord(value, expectedProfileId) {
   };
 }
 
+function adsNoProxyAuthorityView(value, expectedProfileId) {
+  const profileId = String(expectedProfileId || '').trim();
+  if (!profileId || !value || value.ok !== true || value.noProxy !== true) return null;
+  return {
+    ok: true,
+    noProxy: true,
+    profileId,
+    revision: null,
+    proxyConfig: null,
+    proxy: { proxyType: 'no_proxy' },
+    source: 'ads_no_proxy',
+  };
+}
+
 function normalizeHostForLoopback(host) {
   const value = String(host || '').trim().toLowerCase();
   if (value.startsWith('[') && value.endsWith(']')) return value.slice(1, -1);
@@ -116,6 +130,7 @@ function migrationAuthorityFromLocalRecord(localRecord) {
 }
 
 module.exports = {
+  adsNoProxyAuthorityView,
   cloudAuthorityForProxyInput,
   isLoopbackProxyConfig,
   migrationAuthorityFromLocalRecord,

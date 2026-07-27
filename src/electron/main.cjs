@@ -24,6 +24,7 @@ const { normalizePlatform } = require('./ads-create-flow.cjs');
 const { normalizeProxyInput, parseProxyLines } = require('./ads-proxy-config.cjs');
 const { createAdsProxyAuthorityStore } = require('./ads-proxy-authority-store.cjs');
 const {
+  adsNoProxyAuthorityView,
   cloudAuthorityForProxyInput,
   migrationAuthorityFromLocalRecord,
   normalizeCloudProxyAuthorityRecord,
@@ -1459,6 +1460,21 @@ function cacheCloudProxyAuthority(record) {
   proxyAuthorityStore.save(record.profileId, record.proxyConfig);
 }
 
+async function readAdsNoProxyAuthority(profileId) {
+  const id = String(profileId || '').trim();
+  if (!id) return null;
+  try {
+    const result = await readAdsWithRuntime({}, (resolved) => adsApi.getProfileProxyConfig({
+      ...resolved,
+      profileId: id,
+    }));
+    return adsNoProxyAuthorityView(result, id);
+  } catch {
+    // AdsPower 读取失败不伪造 no_proxy；后续仍按 Cloud configured-authority 路径诚实判定。
+    return null;
+  }
+}
+
 async function writeCloudProxyAuthority(profileId, {
   expectedRevision,
   authority,
@@ -1495,11 +1511,19 @@ async function writeCloudProxyAuthority(profileId, {
 }
 
 /**
- * Cloud 是原环境代理的唯一耐久权威。AdsPower 只在 AIDCP 写后做 readback，绝不再参与原代理引导。
+ * Cloud 是“已配置代理”的唯一耐久权威。AdsPower 只可提供无凭据的 no_proxy 适用性事实，
+ * 以及 AIDCP 写后的 readback；它的 host/port/认证字段绝不参与原代理引导。
  * safeStorage 只允许在 Cloud 明确 uninitialized 时做一次 create-only 迁移，且 loopback 一律拒绝。
  */
-async function readAuthoritativeProfileProxy(profileId, { allowMigration = true } = {}) {
+async function readAuthoritativeProfileProxy(profileId, {
+  allowMigration = true,
+  allowAdsNoProxyBypass = true,
+} = {}) {
   const id = String(profileId || '').trim();
+  if (allowAdsNoProxyBypass) {
+    const noProxy = await readAdsNoProxyAuthority(id);
+    if (noProxy) return noProxy;
+  }
   if (!clientAuthEnabled() || !hasValidSession() || !id) {
     return { ok: false, blocking: true, reason: 'proxy_authority_unavailable' };
   }
@@ -1535,14 +1559,21 @@ async function readAuthoritativeProfileProxy(profileId, { allowMigration = true 
   });
   if (written.ok) return written;
   if (written.status === 409 && written.reason === 'proxy_authority_conflict') {
-    return readAuthoritativeProfileProxy(id, { allowMigration: false });
+    return readAuthoritativeProfileProxy(id, {
+      allowMigration: false,
+      allowAdsNoProxyBypass: false,
+    });
   }
   return { ok: false, blocking: true, reason: written.reason || 'proxy_authority_unavailable' };
 }
 
 async function projectAuthoritativeProxySummary(profile) {
   if (!profile || !profile.userId || !clientAuthEnabled()) return profile;
-  const authority = await readAuthoritativeProfileProxy(profile.userId, { allowMigration: false });
+  if (profile.proxyConfig && profile.proxyConfig.noProxy === true) return profile;
+  const authority = await readAuthoritativeProfileProxy(profile.userId, {
+    allowMigration: false,
+    allowAdsNoProxyBypass: false,
+  });
   if (!authority.ok) {
     return {
       ...profile,
@@ -7450,7 +7481,11 @@ ipcMain.handle('ads:getEnvProxy', async (_event, opts) => {
   const scope = await proxyTargetScope([opts && opts.userId]);
   if (!scope.ok) return { ...scope, status: scope.error && scope.error.includes('不属于') ? 403 : undefined };
   const userId = scope.userIds[0];
-  return readAuthoritativeProfileProxy(userId);
+  const authority = await readAuthoritativeProfileProxy(userId);
+  if (!authority.ok) {
+    return { ...authority, error: proxyPreflightFailureText(authority.reason) };
+  }
+  return authority;
 });
 
 async function proxyTargetScope(userIds) {
@@ -7515,7 +7550,10 @@ function cloudProxyAuthorityError(result) {
 async function saveCloudProxyAuthorityForEdit(userId, proxyInput) {
   const desired = cloudAuthorityForProxyInput(proxyInput);
   if (!desired.ok) return desired;
-  const current = await readAuthoritativeProfileProxy(userId, { allowMigration: false });
+  const current = await readAuthoritativeProfileProxy(userId, {
+    allowMigration: false,
+    allowAdsNoProxyBypass: false,
+  });
   if (!current.ok && current.reason !== 'proxy_authority_uninitialized') {
     return { ok: false, reason: current.reason, error: cloudProxyAuthorityError(current) };
   }
