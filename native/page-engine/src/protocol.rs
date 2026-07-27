@@ -311,6 +311,8 @@ impl Default for ReadyRecord<'static> {
 pub struct ErrorRecord {
     pub code: ErrorCode,
     pub message: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<crate::error::ErrorDiagnostic>,
 }
 
 impl From<EngineError> for ErrorRecord {
@@ -318,6 +320,7 @@ impl From<EngineError> for ErrorRecord {
         Self {
             code: error.code,
             message: error.message,
+            diagnostic: error.diagnostic.map(|diagnostic| *diagnostic),
         }
     }
 }
@@ -590,5 +593,53 @@ mod tests {
         assert_eq!(encoded["ok"], false);
         assert_eq!(encoded["effectPhase"], "not_started");
         assert_eq!(encoded["reasonCode"], "probe_failed");
+    }
+
+    #[test]
+    fn failure_serializes_optional_bounded_diagnostic() {
+        let InputRecord::Command(request) = parse_input(&valid_command()).expect("valid command")
+        else {
+            panic!("expected command");
+        };
+        let error = EngineError::new(
+            ErrorCode::CdpError,
+            "native Facebook command returned an invalid bounded result",
+        )
+        .with_decode_diagnostic(crate::error::ErrorDiagnostic {
+            operation_stage: Some("readiness_probe"),
+            decode_stage: Some(crate::error::DecodeStage::TypedValue),
+            expected_kind: Some("join_probe"),
+            field_path: Some("observation.actionNodeCount".to_owned()),
+            actual_type: Some(crate::error::JsonValueType::Number),
+            exception_class: None,
+            exception_reason: None,
+            exception_token: None,
+            line_number: None,
+            column_number: None,
+        });
+        let encoded = serde_json::to_value(CommandResultRecord::<serde_json::Value>::failure(
+            &request,
+            EffectPhase::NotStarted,
+            error,
+        ))
+        .expect("failure record");
+        assert_eq!(encoded["error"]["code"], "cdp_error");
+        assert_eq!(
+            encoded["error"]["diagnostic"]["operationStage"],
+            "readiness_probe"
+        );
+        assert_eq!(encoded["error"]["diagnostic"]["decodeStage"], "typed_value");
+        assert_eq!(
+            encoded["error"]["diagnostic"]["fieldPath"],
+            "observation.actionNodeCount"
+        );
+
+        let without = serde_json::to_value(CommandResultRecord::<serde_json::Value>::failure(
+            &request,
+            EffectPhase::NotStarted,
+            EngineError::new(ErrorCode::CdpError, "bounded failure"),
+        ))
+        .expect("failure without diagnostic");
+        assert!(without["error"].get("diagnostic").is_none());
     }
 }

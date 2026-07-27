@@ -56,6 +56,21 @@ function setRect(element: Element, rect: {
   });
 }
 
+test('Facebook Group Join probe returns bounded not-ready data while navigation has no body', async () => {
+  const dom = install('', 'https://www.facebook.com/groups/tuyendung.dongvan');
+  dom.window.document.documentElement.remove();
+  assert.equal(dom.window.document.body, null);
+
+  const result = await run({ kind: 'join_probe', params: {} });
+  assert.equal(result.output.kind, 'join_probe');
+  assert.equal(result.output.value.found, false);
+  assert.equal(result.output.value.joined, false);
+  assert.equal(
+    (result.output.value.observation as Record<string, unknown>).composerPresent,
+    false,
+  );
+});
+
 test('Facebook feed projection keeps canonical permalink identity and bounded page facts', async () => {
   install(`
     <main>
@@ -1220,6 +1235,54 @@ test('Facebook group join never selects a recommended-group CTA when the target 
     </main>
   `, 'https://www.facebook.com/groups/42');
   const probe = await run({ kind: 'join_probe', params: {} });
+  assert.equal(probe.output.value.pending, true);
+  assert.equal(probe.output.value.found, false);
+  assert.equal((probe.output.value.observation as Record<string, unknown>).outOfScopeJoinCount, 1);
+});
+
+test('Facebook join scope treats the target header numeric members link as a vanity-group alias', async () => {
+  install(`
+    <main>
+      <section id="target-group">
+        <div>
+          <h1>TUYỂN DỤNG VIỆC LÀM KCN ĐỒNG VĂN</h1>
+          <a href="/groups/1611255345558924/members/">3,902 位成员</a>
+        </div>
+        <div><button aria-label="已加入">已加入</button></div>
+      </section>
+      <section data-navigation-payload="/groups/99">
+        <h2>Suggested Group</h2>
+        <button aria-label="加入小组">加入小组</button>
+      </section>
+    </main>
+  `, 'https://www.facebook.com/groups/tuyendung.dongvan');
+
+  const probe = await run({ kind: 'join_probe', params: {} });
+  const observation = probe.output.value.observation as Record<string, unknown>;
+  const candidates = observation.ctaCandidates as Array<Record<string, unknown>>;
+
+  assert.equal(probe.output.value.joined, true);
+  assert.deepEqual(observation.membershipSignals, ['已加入']);
+  assert.equal(candidates.find((item) => item.text === '已加入')?.inTargetScope, true);
+  assert.equal(candidates.find((item) => item.text === '加入小组')?.inTargetScope, false);
+});
+
+test('Facebook join scope does not learn a numeric alias from a recommendation at main level', async () => {
+  install(`
+    <main>
+      <section id="target-group">
+        <h1>Agent Builders</h1>
+        <button aria-label="Pending">Pending</button>
+      </section>
+      <section id="recommended-group">
+        <a href="/groups/99/members/">99 members</a>
+        <button aria-label="Join group">Join group</button>
+      </section>
+    </main>
+  `, 'https://www.facebook.com/groups/42');
+
+  const probe = await run({ kind: 'join_probe', params: {} });
+
   assert.equal(probe.output.value.pending, true);
   assert.equal(probe.output.value.found, false);
   assert.equal((probe.output.value.observation as Record<string, unknown>).outOfScopeJoinCount, 1);

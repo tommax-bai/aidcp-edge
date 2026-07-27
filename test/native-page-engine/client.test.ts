@@ -255,8 +255,44 @@ test('preserves native stable errors', async () => {
   await assert.rejects(client('native-error').probePage(input), (error: unknown) => {
     assert.ok(error instanceof NativePageEngineError);
     assert.equal(error.code, 'no_matching_target');
+    assert.equal(error.detail?.diagnostic, undefined);
     return true;
   });
+});
+
+test('forwards optional bounded Native decode diagnostics without changing stable error truth', async () => {
+  const session = await client('diagnostic-error').openSession({
+    ...input,
+    platform: 'facebook',
+    sessionId: 'session-diagnostic',
+    taskId: 'task-diagnostic',
+  });
+  await assert.rejects(
+    session.execute({
+      kind: 'group_join',
+      params: { groupUrl: 'https://www.facebook.com/groups/42', click: false },
+    }, 500),
+    (error: unknown) => {
+      assert.ok(error instanceof NativePageEngineError);
+      assert.equal(error.code, 'cdp_error');
+      assert.equal(error.message, 'native Facebook command returned an invalid bounded result');
+      assert.equal(error.detail?.effectPhase, 'not_started');
+      assert.deepEqual(error.detail?.diagnostic, {
+        operationStage: 'readiness_probe',
+        decodeStage: 'typed_value',
+        expectedKind: 'join_probe',
+        fieldPath: 'observation.actionNodeCount',
+        actualType: 'number',
+        exceptionClass: 'type_error',
+        exceptionReason: 'cannot_read_property',
+        exceptionToken: 'querySelectorAll',
+        lineNumber: 13,
+        columnNumber: 55,
+      });
+      return true;
+    },
+  );
+  await session.close();
 });
 
 test('kills a child that exceeds the process deadline', async () => {

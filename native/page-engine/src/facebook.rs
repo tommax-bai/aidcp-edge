@@ -1,4 +1,7 @@
-use crate::error::{EngineError, ErrorCode};
+use crate::error::{
+    CdpExceptionClass, CdpExceptionReason, DecodeStage, EngineError, ErrorCode, ErrorDiagnostic,
+    JsonValueType,
+};
 use crate::model::{
     ActionEvidence, ActionReceipt, FacebookGroupJoinObservation, FacebookIdentityReceipt,
     FacebookListKind, FacebookListState, NoteDetail, PageCard, PageCards, ProfileDetail,
@@ -7,7 +10,9 @@ use crate::model::{
 use crate::probe::ProbeResult;
 use crate::protocol::{EffectPhase, NativeCommand};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use serde_path_to_error::{Path, Segment};
 use url::Url;
 
 pub mod capability;
@@ -595,11 +600,18 @@ pub fn file_input_selector() -> Result<String, EngineError> {
 }
 
 pub fn result_from_cdp(result: &Value) -> Result<BrowserCommandResult, EngineError> {
-    if result.get("exceptionDetails").is_some() {
-        return Err(invalid_result());
+    if let Some(exception) = result.get("exceptionDetails") {
+        return Err(invalid_result().with_decode_diagnostic(exception_diagnostic(exception)));
     }
-    let value = result.pointer("/result/value").ok_or_else(invalid_result)?;
-    serde_json::from_value(value.clone()).map_err(|_| invalid_result())
+    let value = result.pointer("/result/value").ok_or_else(|| {
+        invalid_result_with_diagnostic(
+            DecodeStage::CdpWrapper,
+            None,
+            Some("result.value".to_owned()),
+            JsonValueType::Missing,
+        )
+    })?;
+    deserialize_bounded(value, None, DecodeStage::CdpWrapper)
 }
 
 pub fn reel_probe_from_cdp(result: &Value) -> Result<FacebookReelProbe, EngineError> {
@@ -737,13 +749,25 @@ pub fn failure_output(
 
 fn typed_internal_value<T: for<'de> Deserialize<'de>>(
     output: Value,
-    expected_kind: &str,
+    expected_kind: &'static str,
 ) -> Result<T, EngineError> {
     if output.get("kind").and_then(Value::as_str) != Some(expected_kind) {
-        return Err(invalid_result());
+        return Err(invalid_result_with_diagnostic(
+            DecodeStage::OutputKind,
+            Some(expected_kind),
+            Some("output.kind".to_owned()),
+            json_value_type(output.get("kind")),
+        ));
     }
-    serde_json::from_value(output.get("value").cloned().ok_or_else(invalid_result)?)
-        .map_err(|_| invalid_result())
+    let value = output.get("value").ok_or_else(|| {
+        invalid_result_with_diagnostic(
+            DecodeStage::OutputValue,
+            Some(expected_kind),
+            Some("output.value".to_owned()),
+            JsonValueType::Missing,
+        )
+    })?;
+    deserialize_bounded(value, Some(expected_kind), DecodeStage::TypedValue)
 }
 
 pub fn typed_output(
@@ -752,15 +776,29 @@ pub fn typed_output(
     target_id: &str,
 ) -> Result<crate::engine::CommandOutput, EngineError> {
     use crate::engine::CommandOutput;
-    let kind = output
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(invalid_result)?;
-    let value = output.get("value").cloned().ok_or_else(invalid_result)?;
+    let kind = output.get("kind").and_then(Value::as_str).ok_or_else(|| {
+        invalid_result_with_diagnostic(
+            DecodeStage::OutputKind,
+            None,
+            Some("output.kind".to_owned()),
+            json_value_type(output.get("kind")),
+        )
+    })?;
+    let value = output.get("value").ok_or_else(|| {
+        invalid_result_with_diagnostic(
+            DecodeStage::OutputValue,
+            None,
+            Some("output.value".to_owned()),
+            JsonValueType::Missing,
+        )
+    })?;
     match kind {
         "page_probe" => {
-            let mut probe =
-                serde_json::from_value::<ProbeResult>(value).map_err(|_| invalid_result())?;
+            let mut probe = deserialize_bounded::<ProbeResult>(
+                value,
+                Some("page_probe"),
+                DecodeStage::TypedValue,
+            )?;
             let origin = Url::parse(&probe.origin).map_err(|_| invalid_result())?;
             let host = origin.host_str().ok_or_else(invalid_result)?;
             if origin.scheme() != "https"
@@ -772,36 +810,46 @@ pub fn typed_output(
             Ok(CommandOutput::PageProbe(probe))
         }
         "page_cards" => Ok(CommandOutput::PageCards(
-            serde_json::from_value::<PageCards>(value)
-                .map_err(|_| invalid_result())?
+            deserialize_bounded::<PageCards>(value, Some("page_cards"), DecodeStage::TypedValue)?
                 .bounded(),
         )),
         "note_detail" => Ok(CommandOutput::NoteDetail(
-            serde_json::from_value::<NoteDetail>(value)
-                .map_err(|_| invalid_result())?
+            deserialize_bounded::<NoteDetail>(value, Some("note_detail"), DecodeStage::TypedValue)?
                 .bounded(),
         )),
         "profile_detail" => Ok(CommandOutput::ProfileDetail(
-            serde_json::from_value::<ProfileDetail>(value)
-                .map_err(|_| invalid_result())?
-                .bounded(),
+            deserialize_bounded::<ProfileDetail>(
+                value,
+                Some("profile_detail"),
+                DecodeStage::TypedValue,
+            )?
+            .bounded(),
         )),
         "identity_receipt" => Ok(CommandOutput::FacebookIdentity(
-            serde_json::from_value::<FacebookIdentityReceipt>(value)
-                .map_err(|_| invalid_result())?
-                .bounded(),
+            deserialize_bounded::<FacebookIdentityReceipt>(
+                value,
+                Some("identity_receipt"),
+                DecodeStage::TypedValue,
+            )?
+            .bounded(),
         )),
         "action_receipt" if publish_identity(command).is_none() => {
             Ok(CommandOutput::ActionReceipt(Box::new(
-                serde_json::from_value::<ActionReceipt>(value)
-                    .map_err(|_| invalid_result())?
-                    .bounded(),
+                deserialize_bounded::<ActionReceipt>(
+                    value,
+                    Some("action_receipt"),
+                    DecodeStage::TypedValue,
+                )?
+                .bounded(),
             )))
         }
         "action_receipt" => {
-            let action = serde_json::from_value::<ActionReceipt>(value)
-                .map_err(|_| invalid_result())?
-                .bounded();
+            let action = deserialize_bounded::<ActionReceipt>(
+                value,
+                Some("action_receipt"),
+                DecodeStage::TypedValue,
+            )?
+            .bounded();
             let (record_id, seq, publish_kind) =
                 publish_identity(command).ok_or_else(invalid_result)?;
             Ok(CommandOutput::PublishReceipt(
@@ -819,11 +867,19 @@ pub fn typed_output(
             ))
         }
         "publish_receipt" => Ok(CommandOutput::PublishReceipt(
-            serde_json::from_value::<PublishReceipt>(value)
-                .map_err(|_| invalid_result())?
-                .bounded(),
+            deserialize_bounded::<PublishReceipt>(
+                value,
+                Some("publish_receipt"),
+                DecodeStage::TypedValue,
+            )?
+            .bounded(),
         )),
-        _ => Err(invalid_result()),
+        _ => Err(invalid_result_with_diagnostic(
+            DecodeStage::OutputKind,
+            None,
+            Some("output.kind".to_owned()),
+            JsonValueType::String,
+        )),
     }
 }
 
@@ -852,6 +908,160 @@ fn invalid_result() -> EngineError {
         ErrorCode::CdpError,
         "native Facebook command returned an invalid bounded result",
     )
+}
+
+fn invalid_result_with_diagnostic(
+    decode_stage: DecodeStage,
+    expected_kind: Option<&'static str>,
+    field_path: Option<String>,
+    actual_type: JsonValueType,
+) -> EngineError {
+    invalid_result().with_decode_diagnostic(ErrorDiagnostic {
+        operation_stage: None,
+        decode_stage: Some(decode_stage),
+        expected_kind,
+        field_path,
+        actual_type: Some(actual_type),
+        exception_class: None,
+        exception_reason: None,
+        exception_token: None,
+        line_number: None,
+        column_number: None,
+    })
+}
+
+fn exception_diagnostic(exception: &Value) -> ErrorDiagnostic {
+    let class_name = exception
+        .pointer("/exception/className")
+        .and_then(Value::as_str);
+    let exception_class = match class_name {
+        Some("Error") => Some(CdpExceptionClass::Error),
+        Some("TypeError") => Some(CdpExceptionClass::TypeError),
+        Some("ReferenceError") => Some(CdpExceptionClass::ReferenceError),
+        Some("RangeError") => Some(CdpExceptionClass::RangeError),
+        Some("SyntaxError") => Some(CdpExceptionClass::SyntaxError),
+        Some("EvalError") => Some(CdpExceptionClass::EvalError),
+        Some("URIError") => Some(CdpExceptionClass::UriError),
+        _ => None,
+    };
+    let description = exception
+        .pointer("/exception/description")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .unwrap_or_default();
+    let (exception_reason, exception_token) = classify_exception_description(description);
+    ErrorDiagnostic {
+        operation_stage: None,
+        decode_stage: Some(DecodeStage::CdpException),
+        expected_kind: None,
+        field_path: None,
+        actual_type: Some(json_value_type(Some(exception))),
+        exception_class,
+        exception_reason: Some(exception_reason),
+        exception_token,
+        line_number: exception
+            .get("lineNumber")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        column_number: exception
+            .get("columnNumber")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+    }
+}
+
+fn classify_exception_description(description: &str) -> (CdpExceptionReason, Option<String>) {
+    for quote in ['\'', '"', '`'] {
+        let marker = format!("(reading {quote}");
+        if let Some(rest) = description.split_once(&marker).map(|(_, rest)| rest)
+            && let Some(identifier) = rest.split(quote).next()
+        {
+            return (
+                CdpExceptionReason::CannotReadProperty,
+                Some(identifier.to_owned()),
+            );
+        }
+    }
+    if let Some(identifier) = description
+        .strip_prefix("ReferenceError: ")
+        .and_then(|value| value.strip_suffix(" is not defined"))
+    {
+        return (
+            CdpExceptionReason::ReferenceNotDefined,
+            Some(identifier.to_owned()),
+        );
+    }
+    if description.ends_with(" is not a function") {
+        return (CdpExceptionReason::NotAFunction, None);
+    }
+    (CdpExceptionReason::Other, None)
+}
+
+fn deserialize_bounded<T: DeserializeOwned>(
+    value: &Value,
+    expected_kind: Option<&'static str>,
+    decode_stage: DecodeStage,
+) -> Result<T, EngineError> {
+    serde_path_to_error::deserialize(value.clone()).map_err(|error| {
+        let path = error.path();
+        let missing_field = missing_field_name(&error.inner().to_string());
+        let field_path = diagnostic_field_path(path, missing_field.as_deref());
+        let actual_type = if missing_field.is_some() {
+            JsonValueType::Missing
+        } else {
+            json_value_type(value_at_path(value, path))
+        };
+        invalid_result_with_diagnostic(decode_stage, expected_kind, field_path, actual_type)
+    })
+}
+
+fn diagnostic_field_path(path: &Path, missing_field: Option<&str>) -> Option<String> {
+    let base = path.to_string();
+    let base = (base != ".").then_some(base);
+    match (base, missing_field) {
+        (Some(base), Some(field)) => Some(format!("{base}.{field}")),
+        (Some(base), None) => Some(base),
+        (None, Some(field)) => Some(field.to_owned()),
+        (None, None) => None,
+    }
+}
+
+fn missing_field_name(message: &str) -> Option<String> {
+    let rest = message.strip_prefix("missing field `")?;
+    let field = rest.split('`').next()?;
+    (!field.is_empty()
+        && field.len() <= 64
+        && field
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_'))
+    .then(|| field.to_owned())
+}
+
+fn value_at_path<'a>(value: &'a Value, path: &Path) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in path {
+        current = match segment {
+            Segment::Seq { index } => current.get(*index)?,
+            Segment::Map { key } => current.get(key)?,
+            Segment::Enum { variant } => current.get(variant)?,
+            Segment::Unknown => return None,
+        };
+    }
+    Some(current)
+}
+
+fn json_value_type(value: Option<&Value>) -> JsonValueType {
+    match value {
+        None => JsonValueType::Missing,
+        Some(Value::Null) => JsonValueType::Null,
+        Some(Value::Bool(_)) => JsonValueType::Boolean,
+        Some(Value::Number(_)) => JsonValueType::Number,
+        Some(Value::String(_)) => JsonValueType::String,
+        Some(Value::Array(_)) => JsonValueType::Array,
+        Some(Value::Object(_)) => JsonValueType::Object,
+    }
 }
 
 #[cfg(test)]
@@ -954,5 +1164,118 @@ mod tests {
         fractional["result"]["value"]["output"]["value"]["documentAgeMs"] =
             json!(215964.39990234375);
         assert!(feed_probe_from_cdp(&fractional).is_err());
+    }
+
+    #[test]
+    fn bounded_result_diagnostics_distinguish_wrapper_kind_and_typed_path() {
+        let missing_wrapper =
+            result_from_cdp(&json!({ "result": {} })).expect_err("missing result value");
+        let wrapper_diagnostic = missing_wrapper.diagnostic.expect("wrapper diagnostic");
+        assert_eq!(
+            wrapper_diagnostic.decode_stage,
+            Some(crate::error::DecodeStage::CdpWrapper)
+        );
+        assert_eq!(
+            wrapper_diagnostic.actual_type,
+            Some(crate::error::JsonValueType::Missing)
+        );
+
+        let wrong_kind = join_probe_from_cdp(&json!({
+            "result": {
+                "value": {
+                    "effectPhase": "confirmed",
+                    "output": {
+                        "kind": "consent_probe",
+                        "value": {}
+                    }
+                }
+            }
+        }))
+        .expect_err("unexpected result kind");
+        let kind_diagnostic = wrong_kind.diagnostic.expect("kind diagnostic");
+        assert_eq!(
+            kind_diagnostic.decode_stage,
+            Some(crate::error::DecodeStage::OutputKind)
+        );
+        assert_eq!(kind_diagnostic.expected_kind, Some("join_probe"));
+        assert_eq!(
+            kind_diagnostic.actual_type,
+            Some(crate::error::JsonValueType::String)
+        );
+
+        let secret = "raw-page-secret-must-not-escape";
+        let typed = join_probe_from_cdp(&json!({
+            "result": {
+                "value": {
+                    "effectPhase": "confirmed",
+                    "output": {
+                        "kind": "join_probe",
+                        "value": {
+                            "observation": {
+                                "membershipSignals": [],
+                                "ctaCandidates": [{
+                                    "text": secret,
+                                    "kind": "joined",
+                                    "inTargetScope": secret
+                                }]
+                            },
+                            "joined": false,
+                            "pending": false,
+                            "questionnaire": false,
+                            "found": false,
+                            "ambiguous": false
+                        }
+                    }
+                }
+            }
+        }))
+        .expect_err("nested typed mismatch");
+        let typed_diagnostic = typed.diagnostic.expect("typed diagnostic");
+        assert_eq!(
+            typed_diagnostic.decode_stage,
+            Some(crate::error::DecodeStage::TypedValue)
+        );
+        assert_eq!(typed_diagnostic.expected_kind, Some("join_probe"));
+        assert_eq!(
+            typed_diagnostic.field_path.as_deref(),
+            Some("observation.ctaCandidates[0].inTargetScope")
+        );
+        assert_eq!(
+            typed_diagnostic.actual_type,
+            Some(crate::error::JsonValueType::String)
+        );
+        let encoded = serde_json::to_string(&typed_diagnostic).expect("bounded diagnostic");
+        assert!(!encoded.contains(secret));
+        assert!(!encoded.contains("invalid type"));
+
+        let exception = result_from_cdp(&json!({
+            "exceptionDetails": {
+                "lineNumber": 13,
+                "columnNumber": 55,
+                "exception": {
+                    "className": "TypeError",
+                    "description": "TypeError: Cannot read properties of null (reading 'querySelectorAll')\nraw stack must not escape"
+                }
+            }
+        }))
+        .expect_err("evaluated exception");
+        let exception_diagnostic = exception.diagnostic.expect("exception diagnostic");
+        assert_eq!(
+            exception_diagnostic.exception_class,
+            Some(crate::error::CdpExceptionClass::TypeError)
+        );
+        assert_eq!(
+            exception_diagnostic.exception_reason,
+            Some(crate::error::CdpExceptionReason::CannotReadProperty)
+        );
+        assert_eq!(
+            exception_diagnostic.exception_token.as_deref(),
+            Some("querySelectorAll")
+        );
+        assert_eq!(exception_diagnostic.line_number, Some(13));
+        assert_eq!(exception_diagnostic.column_number, Some(55));
+        let encoded = serde_json::to_string(&exception_diagnostic).expect("exception diagnostic");
+        assert!(!encoded.contains("raw stack"));
+        assert!(!encoded.contains("Cannot read properties"));
     }
 }

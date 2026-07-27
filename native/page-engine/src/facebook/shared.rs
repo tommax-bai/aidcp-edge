@@ -368,7 +368,33 @@ pub(crate) async fn ensure_facebook_action_gate(
     session: &mut EngineSession,
     command: &NativeCommand,
 ) -> Result<Option<CommandOutput>, EngineError> {
-    let probe = probe_facebook_page(session).await?;
+    ensure_facebook_action_gate_inner(session, command, None).await
+}
+
+pub(crate) async fn ensure_facebook_group_join_action_gate(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+) -> Result<Option<CommandOutput>, EngineError> {
+    ensure_facebook_action_gate_inner(
+        session,
+        command,
+        Some((
+            "action_gate_page_probe",
+            "action_gate_consent_probe",
+            "action_gate_result",
+        )),
+    )
+    .await
+}
+
+async fn ensure_facebook_action_gate_inner(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+    operation_stages: Option<(&'static str, &'static str, &'static str)>,
+) -> Result<Option<CommandOutput>, EngineError> {
+    let probe = probe_facebook_page(session)
+        .await
+        .map_err(|error| annotate_operation(error, operation_stages.map(|stages| stages.0)))?;
     let reason = match probe.blocking_kind.as_deref() {
         Some("login") => Some("login_required"),
         Some("captcha") => Some("blocked_by_captcha"),
@@ -376,11 +402,15 @@ pub(crate) async fn ensure_facebook_action_gate(
         _ => None,
     };
     if let Some(reason) = reason {
-        return facebook_gate_failure(session, command, reason).map(Some);
+        return facebook_gate_failure(session, command, reason)
+            .map(Some)
+            .map_err(|error| annotate_operation(error, operation_stages.map(|stages| stages.2)));
     }
 
     for _ in 0..3 {
-        let consent = probe_facebook_consent(session).await?;
+        let consent = probe_facebook_consent(session)
+            .await
+            .map_err(|error| annotate_operation(error, operation_stages.map(|stages| stages.1)))?;
         if !consent.present {
             return Ok(None);
         }
@@ -404,15 +434,32 @@ pub(crate) async fn ensure_facebook_action_gate(
             consent.accept_all
         };
         let Some(point) = point else {
-            return facebook_gate_failure(session, command, "blocked_by_consent").map(Some);
+            return facebook_gate_failure(session, command, "blocked_by_consent")
+                .map(Some)
+                .map_err(|error| {
+                    annotate_operation(error, operation_stages.map(|stages| stages.2))
+                });
         };
         dispatch_facebook_click(session, point.cx, point.cy).await?;
         tokio::time::sleep(Duration::from_millis(700)).await;
     }
-    if probe_facebook_consent(session).await?.present {
-        return facebook_gate_failure(session, command, "blocked_by_consent").map(Some);
+    if probe_facebook_consent(session)
+        .await
+        .map_err(|error| annotate_operation(error, operation_stages.map(|stages| stages.1)))?
+        .present
+    {
+        return facebook_gate_failure(session, command, "blocked_by_consent")
+            .map(Some)
+            .map_err(|error| annotate_operation(error, operation_stages.map(|stages| stages.2)));
     }
     Ok(None)
+}
+
+fn annotate_operation(error: EngineError, operation_stage: Option<&'static str>) -> EngineError {
+    match operation_stage {
+        Some(operation_stage) => error.with_operation_stage(operation_stage),
+        None => error,
+    }
 }
 
 pub(crate) async fn probe_facebook_page(

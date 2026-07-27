@@ -19,45 +19,68 @@
     if(!hit||!hit[1])return '';
     try{return decodeURIComponent(hit[1]).trim().toLowerCase();}catch{return String(hit[1]).trim().toLowerCase();}
   };
-  const groupIdFromElement=(el)=>{
-    if(!el||!el.attributes)return '';
+  const groupIdsFromElement=(el)=>{
+    if(!el||!el.attributes)return [];
+    const ids=[];
     for(const attr of Array.from(el.attributes)){
       const groupId=groupIdFromValue(attr&&attr.value);
-      if(groupId)return groupId;
+      if(groupId&&!ids.includes(groupId))ids.push(groupId);
     }
-    return '';
+    return ids;
   };
-  const hasForeignGroupRef=(root,groupId)=>{
-    if(!root||!groupId)return false;
+  const groupReferenceIds=(root)=>[root,...all('*',root)].flatMap(groupIdsFromElement);
+  const memberReferenceIds=(root)=>[root,...all('a[href],[role="link"]',root)].flatMap((node)=>{
+    if(!node||!node.attributes)return [];
+    const ids=[];
+    for(const attr of Array.from(node.attributes)){
+      const raw=String(attr&&attr.value||'');
+      if(!/\/groups\/[^/?#\s"'<>]+\/members(?:[/?#]|$)/i.test(raw))continue;
+      const groupId=groupIdFromValue(raw);
+      if(groupId&&!ids.includes(groupId))ids.push(groupId);
+    }
+    return ids;
+  });
+  const hasForeignGroupRef=(root,groupIds)=>{
+    if(!root||!groupIds||groupIds.size===0)return false;
     return [root,...all('*',root)].some((node)=>{
-      const referenced=groupIdFromElement(node);
-      return Boolean(referenced&&referenced!==groupId);
+      const referenced=groupIdsFromElement(node);
+      return referenced.some((groupId)=>!groupIds.has(groupId));
     });
   };
   const targetGroupScope=(groupId,main)=>{
-    if(!groupId||!main)return {region:null,ambiguous:false,heading:null};
+    if(!groupId||!main)return {region:null,ambiguous:false,heading:null,groupIds:new Set(groupId?[groupId]:[])};
     const headings=all('h1,[role="heading"][aria-level="1"]',main).filter(visible);
     const blocks=[];
     for(const heading of headings){
+      const groupIds=new Set([groupId]);
       let region=heading;
       let atMain=false;
       while(region&&region!==main){
         const parent=region.parentElement;
         if(!parent)break;
-        if(hasForeignGroupRef(parent,groupId)){
+        if(parent!==main){
+          const references=[...new Set(groupReferenceIds(parent))];
+          const numericMemberAliases=[...new Set(memberReferenceIds(parent))]
+            .filter((candidate)=>candidate!==groupId&&/^\d+$/.test(candidate));
+          if(numericMemberAliases.length===1
+            && references.every((candidate)=>groupIds.has(candidate)||candidate===numericMemberAliases[0])){
+            groupIds.add(numericMemberAliases[0]);
+          }
+        }
+        if(hasForeignGroupRef(parent,groupIds)){
           if(parent===main)atMain=true;
           break;
         }
         region=parent;
       }
       if(region===main)atMain=true;
-      if(region===heading&&hasForeignGroupRef(region,groupId))continue;
-      blocks.push({region,heading,atMain});
+      if(region===heading&&hasForeignGroupRef(region,groupIds))continue;
+      blocks.push({region,heading,atMain,groupIds});
     }
-    if(blocks.length===1)return {region:blocks[0].region,ambiguous:false,heading:blocks[0].heading};
+    if(blocks.length===1)return {region:blocks[0].region,ambiguous:false,heading:blocks[0].heading,groupIds:blocks[0].groupIds};
     const topLevel=blocks.filter((item)=>item.atMain);
-    if(topLevel.length===1)return {region:topLevel[0].region,ambiguous:false,heading:topLevel[0].heading};
-    return {region:null,ambiguous:blocks.length>1,heading:null};
+    if(topLevel.length===1)return {region:topLevel[0].region,ambiguous:false,heading:topLevel[0].heading,groupIds:topLevel[0].groupIds};
+    return {region:null,ambiguous:blocks.length>1,heading:null,groupIds:new Set([groupId])};
   };
   const JOIN_LABELS=['join group','join','加入小组','加入群组','加入社团','加入','tham gia','únete','unirte','participar','entrar al grupo','entrar no grupo','gabung','bergabung','เข้าร่วม','rejoindre','beitreten','iscriviti','вступить','присоединиться','참여','가입','انضمام','انضم','sertai'];
   const MEMBER_LABELS=['joined','leave group','已加入','退出小组','退出群组','退出社团','đã tham gia','rời nhóm','salir del grupo','keluar dari grup','quitter le groupe','gruppe verlassen','ออกจากกลุ่ม','已是成员','你已加入'];
@@ -85,7 +108,7 @@
         el,
         raw,
         kind:joinKind(raw),
-        inTargetScope:Boolean(scope.region&&scope.region.contains(el)&&!hasForeignGroupRef(el,groupId)),
+        inTargetScope:Boolean(scope.region&&scope.region.contains(el)&&!hasForeignGroupRef(el,scope.groupIds)),
       };
     });
     const scoped=candidates.filter((item)=>item.inTargetScope);

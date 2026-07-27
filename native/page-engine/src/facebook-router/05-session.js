@@ -1,7 +1,7 @@
-  const commentEditor=(root=document)=>all('[contenteditable="true"][role="textbox"],textarea[aria-label],textarea',root).filter(visible).find((el)=>{
+  const commentEditor=(root=document)=>root?all('[contenteditable="true"][role="textbox"],textarea[aria-label],textarea',root).filter(visible).find((el)=>{
     const raw=label(el).toLowerCase();
     return /评论|留言|comment|bình luận|coment|输入回答|answer/.test(raw)||el.getAttribute('role')==='textbox';
-  })||null;
+  })||null:null;
   const participationGate=()=>{
     const dialogs=all('[role="dialog"]').filter(visible);
     const expression=/申请参与|请求参与|参与此(?:小组|群)|贡献(?:内容)?给?(?:此|这个)?(?:小组|群)|参与问题|同意(?:此|该|小组|群).{0,4}规则|同意群规|request to participate|participation question|answer questions to participate|contribute to (?:this|the) group|agree to the group rules|待审核|pending review/i;

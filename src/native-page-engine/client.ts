@@ -167,6 +167,35 @@ export type NativePageEngineErrorCode =
   | 'engine_exited'
   | 'invalid_protocol';
 
+export interface NativePageEngineDiagnostic {
+  operationStage?: 'reuse_probe'
+    | 'action_gate_page_probe'
+    | 'action_gate_consent_probe'
+    | 'action_gate_result'
+    | 'readiness_probe'
+    | 'join_click'
+    | 'verification_probe';
+  decodeStage?: 'cdp_exception'
+    | 'cdp_wrapper'
+    | 'output_kind'
+    | 'output_value'
+    | 'typed_value';
+  expectedKind?: string;
+  fieldPath?: string;
+  actualType?: 'missing' | 'null' | 'boolean' | 'number' | 'string' | 'array' | 'object';
+  exceptionClass?: 'error'
+    | 'type_error'
+    | 'reference_error'
+    | 'range_error'
+    | 'syntax_error'
+    | 'eval_error'
+    | 'uri_error';
+  exceptionReason?: 'cannot_read_property' | 'reference_not_defined' | 'not_a_function' | 'other';
+  exceptionToken?: string;
+  lineNumber?: number;
+  columnNumber?: number;
+}
+
 export class NativePageEngineError extends Error {
   constructor(
     readonly code: NativePageEngineErrorCode,
@@ -177,6 +206,7 @@ export class NativePageEngineError extends Error {
       stderr?: string;
       effectPhase?: NativeEffectPhase;
       reasonCode?: string;
+      diagnostic?: NativePageEngineDiagnostic;
     },
   ) {
     super(message);
@@ -212,6 +242,7 @@ interface ReadyRecord {
 interface ErrorRecord {
   code: NativePageEngineErrorCode;
   message: string;
+  diagnostic?: unknown;
 }
 
 interface LifecycleResponse {
@@ -887,8 +918,115 @@ function nativeResponseError(value: { error?: ErrorRecord; effectPhase?: NativeE
   return new NativePageEngineError(
     code,
     value.error?.message ?? 'Native Page Engine returned an invalid failure record',
-    { effectPhase: value.effectPhase, reasonCode: value.reasonCode },
+    {
+      effectPhase: value.effectPhase,
+      reasonCode: value.reasonCode,
+      diagnostic: parseNativeDiagnostic(value.error?.diagnostic),
+    },
   );
+}
+
+function parseNativeDiagnostic(value: unknown): NativePageEngineDiagnostic | undefined {
+  if (!isRecord(value)) return undefined;
+  const operationStages = [
+    'reuse_probe',
+    'action_gate_page_probe',
+    'action_gate_consent_probe',
+    'action_gate_result',
+    'readiness_probe',
+    'join_click',
+    'verification_probe',
+  ] as const;
+  const decodeStages = [
+    'cdp_exception',
+    'cdp_wrapper',
+    'output_kind',
+    'output_value',
+    'typed_value',
+  ] as const;
+  const actualTypes = ['missing', 'null', 'boolean', 'number', 'string', 'array', 'object'] as const;
+  const exceptionClasses = [
+    'error',
+    'type_error',
+    'reference_error',
+    'range_error',
+    'syntax_error',
+    'eval_error',
+    'uri_error',
+  ] as const;
+  const exceptionReasons = [
+    'cannot_read_property',
+    'reference_not_defined',
+    'not_a_function',
+    'other',
+  ] as const;
+  const operationStage = typeof value.operationStage === 'string'
+    && operationStages.includes(value.operationStage as typeof operationStages[number])
+    ? value.operationStage as NativePageEngineDiagnostic['operationStage']
+    : undefined;
+  const decodeStage = typeof value.decodeStage === 'string'
+    && decodeStages.includes(value.decodeStage as typeof decodeStages[number])
+    ? value.decodeStage as NativePageEngineDiagnostic['decodeStage']
+    : undefined;
+  const expectedKind = typeof value.expectedKind === 'string'
+    && /^[a-z][a-z0-9_]{0,63}$/.test(value.expectedKind)
+    ? value.expectedKind
+    : undefined;
+  const fieldPath = typeof value.fieldPath === 'string'
+    && value.fieldPath.length <= 160
+    && /^[A-Za-z0-9_.\[\]-]+$/.test(value.fieldPath)
+    ? value.fieldPath
+    : undefined;
+  const actualType = typeof value.actualType === 'string'
+    && actualTypes.includes(value.actualType as typeof actualTypes[number])
+    ? value.actualType as NativePageEngineDiagnostic['actualType']
+    : undefined;
+  const exceptionClass = typeof value.exceptionClass === 'string'
+    && exceptionClasses.includes(value.exceptionClass as typeof exceptionClasses[number])
+    ? value.exceptionClass as NativePageEngineDiagnostic['exceptionClass']
+    : undefined;
+  const exceptionReason = typeof value.exceptionReason === 'string'
+    && exceptionReasons.includes(value.exceptionReason as typeof exceptionReasons[number])
+    ? value.exceptionReason as NativePageEngineDiagnostic['exceptionReason']
+    : undefined;
+  const exceptionToken = typeof value.exceptionToken === 'string'
+    && /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(value.exceptionToken)
+    ? value.exceptionToken
+    : undefined;
+  const lineNumber = Number.isSafeInteger(value.lineNumber)
+    && Number(value.lineNumber) >= 0
+    && Number(value.lineNumber) <= 0xffff_ffff
+    ? Number(value.lineNumber)
+    : undefined;
+  const columnNumber = Number.isSafeInteger(value.columnNumber)
+    && Number(value.columnNumber) >= 0
+    && Number(value.columnNumber) <= 0xffff_ffff
+    ? Number(value.columnNumber)
+    : undefined;
+  if (
+    !operationStage
+    && !decodeStage
+    && !expectedKind
+    && !fieldPath
+    && !actualType
+    && !exceptionClass
+    && !exceptionReason
+    && !exceptionToken
+    && lineNumber === undefined
+    && columnNumber === undefined
+  ) return undefined;
+  return {
+    ...(operationStage ? { operationStage } : {}),
+    ...(decodeStage ? { decodeStage } : {}),
+    ...(expectedKind ? { expectedKind } : {}),
+    ...(fieldPath ? { fieldPath } : {}),
+    ...(actualType ? { actualType } : {}),
+    ...(exceptionClass ? { exceptionClass } : {}),
+    ...(exceptionReason ? { exceptionReason } : {}),
+    ...(exceptionToken ? { exceptionToken } : {}),
+    ...(lineNumber !== undefined ? { lineNumber } : {}),
+    ...(columnNumber !== undefined ? { columnNumber } : {}),
+  };
 }
 
 function validateProbeInput(input: NativePageProbeInput, maxTimeoutMs = MAX_NATIVE_TIMEOUT_MS): void {

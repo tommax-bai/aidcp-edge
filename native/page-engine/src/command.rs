@@ -499,17 +499,20 @@ impl NativeCommand {
     }
 
     pub fn may_write(&self) -> bool {
-        !matches!(
-            self,
-            Self::PageProbe(_)
-                | Self::PublishCapturePostId(_)
-                | Self::PublishCaptureScheduled(_)
-                | Self::PublishReconcileScheduled(_)
-                | Self::CaptchaCapture(_)
-                | Self::WechatCaptureSession(_)
-                | Self::IdentityBootstrap(_)
-                | Self::IdentityReadCurrent(_)
-        )
+        match self {
+            Self::GroupJoin(params) => params.click == Some(true),
+            command => !matches!(
+                command,
+                Self::PageProbe(_)
+                    | Self::PublishCapturePostId(_)
+                    | Self::PublishCaptureScheduled(_)
+                    | Self::PublishReconcileScheduled(_)
+                    | Self::CaptchaCapture(_)
+                    | Self::WechatCaptureSession(_)
+                    | Self::IdentityBootstrap(_)
+                    | Self::IdentityReadCurrent(_)
+            ),
+        }
     }
 
     pub fn validate(&self) -> Result<(), EngineError> {
@@ -870,6 +873,19 @@ mod tests {
         )
         .expect("publish command");
         publish.validate().expect("valid publish command");
+    }
+
+    #[test]
+    fn group_join_write_intent_follows_the_explicit_click_flag() {
+        for (click, expected) in [(Some(false), false), (None, false), (Some(true), true)] {
+            let command = NativeCommand::GroupJoin(GroupJoinParams {
+                group_url: "https://www.facebook.com/groups/42".to_owned(),
+                click,
+                reason: None,
+                think_ms: None,
+            });
+            assert_eq!(command.may_write(), expected);
+        }
     }
 
     #[test]

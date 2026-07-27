@@ -75,6 +75,36 @@ if (mode === 'malformed') {
       return;
     }
     if (request.type === 'command') {
+      if (mode === 'diagnostic-error') {
+        process.stdout.write(`${JSON.stringify({
+          type: 'command_result',
+          protocolVersion: 2,
+          id: request.id,
+          sessionId: request.sessionId,
+          taskId: request.taskId,
+          commandId: request.commandId,
+          ok: false,
+          effectPhase: 'not_started',
+          reasonCode: 'cdp_error',
+          error: {
+            code: 'cdp_error',
+            message: 'native Facebook command returned an invalid bounded result',
+            diagnostic: {
+              operationStage: 'readiness_probe',
+              decodeStage: 'typed_value',
+              expectedKind: 'join_probe',
+              fieldPath: 'observation.actionNodeCount',
+              actualType: 'number',
+              exceptionClass: 'type_error',
+              exceptionReason: 'cannot_read_property',
+              exceptionToken: 'querySelectorAll',
+              lineNumber: 13,
+              columnNumber: 55,
+            },
+          },
+        })}\n`);
+        return;
+      }
       if (mode === 'cancel') {
         pendingCommand = request;
         return;

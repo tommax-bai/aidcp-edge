@@ -5,7 +5,7 @@ use aidcp_page_engine::command::{
 };
 use aidcp_page_engine::commit_window::CommitWindowRequester;
 use aidcp_page_engine::engine::{CommandOutput, Engine};
-use aidcp_page_engine::error::ErrorCode;
+use aidcp_page_engine::error::{CdpExceptionClass, CdpExceptionReason, ErrorCode};
 use aidcp_page_engine::model::FacebookListKind;
 use aidcp_page_engine::protocol::{
     CommandRecord, EffectPhase, NativeCommand, PageProbeParams, Platform, SessionCloseRecord,
@@ -445,6 +445,63 @@ async fn facebook_group_join_preserves_post_navigation_login_and_captcha_blocker
                     .is_some_and(|expression| expression.contains(r#""kind":"join_click""#))
         }));
     }
+}
+
+#[tokio::test]
+async fn facebook_group_join_observation_exception_is_not_started_and_diagnostic() {
+    let (port, server) = spawn_facebook_group_join_exception_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 90_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "facebook-join-observe-exception".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 5_000,
+            command: NativeCommand::GroupJoin(GroupJoinParams {
+                group_url: "https://www.facebook.com/groups/42".to_owned(),
+                click: Some(false),
+                reason: None,
+                think_ms: None,
+            }),
+        })
+        .await
+        .expect("stored observation failure");
+
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    assert!(outcome.output.is_none());
+    let error = outcome.error.expect("bounded failure");
+    assert_eq!(error.code, ErrorCode::CdpError);
+    let diagnostic = error.diagnostic.expect("decode diagnostic");
+    assert_eq!(diagnostic.operation_stage, Some("readiness_probe"));
+    assert_eq!(
+        diagnostic.exception_class,
+        Some(CdpExceptionClass::TypeError)
+    );
+    assert_eq!(
+        diagnostic.exception_reason,
+        Some(CdpExceptionReason::CannotReadProperty)
+    );
+    assert_eq!(
+        diagnostic.exception_token.as_deref(),
+        Some("querySelectorAll")
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook exception fake CDP");
+    assert!(requests.iter().all(|request| {
+        request["method"] != "Runtime.evaluate"
+            || !request
+                .pointer("/params/expression")
+                .and_then(Value::as_str)
+                .is_some_and(|expression| expression.contains(r#""kind":"join_click""#))
+    }));
 }
 
 #[tokio::test]
@@ -2163,6 +2220,81 @@ async fn spawn_facebook_group_blocker_cdp(
             }
         }
         let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_group_join_exception_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            serve_target_listing_for(&listener, port, "https://www.facebook.com/groups/42").await;
+            let (stream, _) = listener.accept().await.expect("WebSocket request");
+            let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+            for _ in 0..3 {
+                requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+            }
+            while let Some(message) = websocket.next().await {
+                let Ok(Message::Text(text)) = message else {
+                    break;
+                };
+                let request: Value = serde_json::from_str(&text).expect("request JSON");
+                let id = request["id"].as_u64().expect("request id");
+                let method = request["method"].as_str().unwrap_or_default();
+                let expression = request
+                    .pointer("/params/expression")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let is_join_probe =
+                    method == "Runtime.evaluate" && expression.contains(r#""kind":"join_probe""#);
+                let result = if method == "Runtime.evaluate"
+                    && expression.contains(r#""kind":"page_probe""#)
+                {
+                    facebook_join_page_probe_cdp()
+                } else if method == "Runtime.evaluate"
+                    && expression.contains(r#""kind":"consent_probe""#)
+                {
+                    json!({"result":{"value":router_result(
+                        "consent_probe",
+                        json!({
+                            "present": false,
+                            "acceptAll": null,
+                            "necessaryOnly": null,
+                            "acceptAllAmbiguous": false,
+                            "necessaryOnlyAmbiguous": false
+                        })
+                    )}})
+                } else if is_join_probe {
+                    json!({
+                        "result": {"type": "object"},
+                        "exceptionDetails": {
+                            "lineNumber": 13,
+                            "columnNumber": 55,
+                            "exception": {
+                                "className": "TypeError",
+                                "description": "TypeError: Cannot read properties of null (reading 'querySelectorAll')\nraw stack must not escape"
+                            }
+                        }
+                    })
+                } else {
+                    json!({})
+                };
+                websocket
+                    .send(Message::Text(
+                        json!({"id":id,"result":result}).to_string().into(),
+                    ))
+                    .await
+                    .expect("exception CDP response");
+                requests.push(request);
+                if is_join_probe {
+                    break;
+                }
+            }
+            let _ = websocket.close(None).await;
+        }
         requests
     });
     (port, server)

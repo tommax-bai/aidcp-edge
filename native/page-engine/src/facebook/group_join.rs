@@ -22,11 +22,21 @@ pub(crate) async fn execute(
     };
     let url = validated_facebook_group_url(&params.group_url)?;
     let reuse_current_page = if params.click == Some(true) {
-        probe_facebook_join(session)
+        match probe_facebook_join(session)
             .await
-            .ok()
-            .and_then(|probe| probe.observation.group_url)
-            .is_some_and(|current| current == url.as_str())
+            .map_err(|error| error.with_operation_stage("reuse_probe"))
+        {
+            Ok(probe) => probe
+                .observation
+                .group_url
+                .is_some_and(|current| current == url.as_str()),
+            Err(error) => {
+                if let Some(diagnostic) = error.bounded_diagnostic_json() {
+                    eprintln!("native_page_engine_decode_diagnostic:{diagnostic}");
+                }
+                false
+            }
+        }
     } else {
         false
     };
@@ -52,7 +62,7 @@ pub(crate) async fn execute_facebook_group_join(
     commit_windows: &CommitWindowRequester,
     deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
-    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+    if let Some(output) = ensure_facebook_group_join_action_gate(session, command).await? {
         return Ok((EffectPhase::NotStarted, output));
     }
     if facebook_join_cancelled(cancellation) {
@@ -63,7 +73,9 @@ pub(crate) async fn execute_facebook_group_join(
         if facebook_join_cancelled(cancellation) {
             return Err(cancelled_before_dispatch());
         }
-        let probe = probe_facebook_join(session).await?;
+        let probe = probe_facebook_join(session)
+            .await
+            .map_err(|error| error.with_operation_stage("readiness_probe"))?;
         if facebook_join_readiness_decisive(
             &probe,
             tokio::time::Instant::now() >= readiness_deadline,
@@ -165,7 +177,9 @@ pub(crate) async fn execute_facebook_group_join(
         return Err(cancelled_before_dispatch());
     }
     enter_facebook_commit_window(command, commit_windows, deadline_unix_ms, cancellation).await?;
-    let click = execute_facebook_join_click(session).await?;
+    let click = execute_facebook_join_click(session)
+        .await
+        .map_err(|error| error.with_operation_stage("join_click"))?;
     if !click.clicked {
         let reason = click.reason.as_deref().unwrap_or("no_button");
         if matches!(
@@ -207,7 +221,9 @@ pub(crate) async fn execute_facebook_group_join(
     }
     let verify_deadline = tokio::time::Instant::now() + FACEBOOK_JOIN_VERIFY_TIMEOUT;
     loop {
-        let after = probe_facebook_join(session).await?;
+        let after = probe_facebook_join(session)
+            .await
+            .map_err(|error| error.with_operation_stage("verification_probe"))?;
         let structural_transition = initial_observation.composer_present != Some(true)
             && after.observation.composer_present == Some(true)
             && after.observation.join_cta_present != Some(true)
