@@ -217,7 +217,7 @@ pub(crate) async fn execute_facebook_feed_scroll(
         if !fresh.cards.is_empty() {
             return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(fresh)));
         }
-        if let Some(reason) = facebook_bottom_terminal_reason(confirmation) {
+        if let Some(reason) = facebook_bottom_completion_reason(confirmation) {
             return Ok(facebook_scroll_failure(EffectPhase::Confirmed, reason));
         }
         current = confirmed;
@@ -374,8 +374,16 @@ enum FacebookBottomConfirmationState {
     WindowStable,
 }
 
-fn facebook_bottom_terminal_reason(state: FacebookBottomConfirmationState) -> Option<&'static str> {
-    (state == FacebookBottomConfirmationState::ExplicitEnd).then_some("feed_exhausted")
+fn facebook_bottom_completion_reason(
+    state: FacebookBottomConfirmationState,
+) -> Option<&'static str> {
+    match state {
+        FacebookBottomConfirmationState::ExplicitEnd => Some("feed_exhausted"),
+        FacebookBottomConfirmationState::WindowStable => Some("feed_continuation_unconfirmed"),
+        FacebookBottomConfirmationState::Waiting | FacebookBottomConfirmationState::Invalidated => {
+            None
+        }
+    }
 }
 
 fn facebook_feed_card_identities(probe: &facebook::FacebookFeedProbe) -> Vec<String> {
@@ -696,8 +704,8 @@ mod tests {
             FacebookBottomConfirmationState::WindowStable
         );
         assert_eq!(
-            facebook_bottom_terminal_reason(FacebookBottomConfirmationState::WindowStable),
-            None
+            facebook_bottom_completion_reason(FacebookBottomConfirmationState::WindowStable),
+            Some("feed_continuation_unconfirmed")
         );
     }
 
@@ -717,7 +725,7 @@ mod tests {
             FacebookBottomConfirmationState::ExplicitEnd
         );
         assert_eq!(
-            facebook_bottom_terminal_reason(FacebookBottomConfirmationState::ExplicitEnd),
+            facebook_bottom_completion_reason(FacebookBottomConfirmationState::ExplicitEnd),
             Some("feed_exhausted")
         );
     }

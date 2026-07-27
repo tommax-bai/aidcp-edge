@@ -341,6 +341,15 @@ async fn facebook_reel_scroll_uses_trusted_arrow_and_requires_identity_movement(
         .iter()
         .filter(|request| request["method"] == "Input.dispatchKeyEvent")
         .collect::<Vec<_>>();
+    let foreground = requests
+        .iter()
+        .position(|request| request["method"] == "Page.bringToFront")
+        .expect("Facebook page scroll must foreground the exact target");
+    let first_input = requests
+        .iter()
+        .position(|request| request["method"] == "Input.dispatchKeyEvent")
+        .expect("Reel scroll input");
+    assert!(foreground < first_input);
     assert_eq!(input_requests.len(), 2);
     assert_eq!(input_requests[0]["params"]["type"], "rawKeyDown");
     assert_eq!(input_requests[0]["params"]["key"], "ArrowDown");
@@ -2980,6 +2989,7 @@ async fn spawn_facebook_reel_arrow_cdp() -> (u16, tokio::task::JoinHandle<Vec<Va
         for _ in 0..3 {
             requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         }
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         requests.push(
             respond_to_call_capture(
                 &mut websocket,
@@ -3020,6 +3030,7 @@ async fn spawn_facebook_reel_wheel_cdp() -> (u16, tokio::task::JoinHandle<Vec<Va
         for _ in 0..3 {
             requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         }
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         requests.push(
             respond_to_call_capture(
                 &mut websocket,
@@ -3077,6 +3088,7 @@ async fn spawn_facebook_reel_no_target_cdp() -> (u16, tokio::task::JoinHandle<Ve
         for _ in 0..3 {
             requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         }
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         requests.push(
             respond_to_call_capture(
                 &mut websocket,
