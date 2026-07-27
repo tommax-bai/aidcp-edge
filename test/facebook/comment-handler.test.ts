@@ -16,11 +16,13 @@ import type { FacebookJoinResult } from '../../src/facebook/join-executor.js';
 // 最小执行器桩：三个方法各返可配结果。
 class FakeExecutor {
   searchArg?: { keyword: string; container: string };
+  firstOpenArg?: string;
   openArg?: string;
   submitArg?: { url: string; text: string; contactInfo?: string; fastReturnToFeed?: boolean };
   constructor(
     private readonly cfg: {
       search?: FacebookSearchResult;
+      firstOpen?: FacebookOpenResult;
       open?: FacebookOpenResult;
       submit?: FacebookSubmitResult;
     } = {},
@@ -34,6 +36,14 @@ class FakeExecutor {
   async openPost(url: string): Promise<FacebookOpenResult> {
     this.openArg = url;
     return this.cfg.open ?? { ok: true, editorReady: true };
+  }
+  async openFirstCommentablePost(container: string): Promise<FacebookOpenResult> {
+    this.firstOpenArg = container;
+    return this.cfg.firstOpen ?? {
+      ok: true,
+      editorReady: true,
+      permalink: 'https://www.facebook.com/groups/1/posts/first',
+    };
   }
   async submitComment(url: string, text: string, contactInfo?: string, _checkpoint?: () => void, fastReturnToFeed = false): Promise<FacebookSubmitResult> {
     this.submitArg = { url, text, ...(contactInfo ? { contactInfo } : {}), ...(fastReturnToFeed ? { fastReturnToFeed: true } : {}) };
@@ -154,6 +164,36 @@ test('fb-handler: note.open{url} 开帖+评论框就绪 → note.detail', async 
   assert.equal(cap.details.length, 1);
   assert.equal(cap.details[0].noteId, 'https://www.facebook.com/groups/1/posts/2');
   assert.equal(exec.openArg, 'https://www.facebook.com/groups/1/posts/2');
+});
+
+test('fb-handler: note.open{selection,container} 取群内首帖 → 用实际 permalink 回 note.detail', async () => {
+  const permalink = 'https://www.facebook.com/groups/1/posts/first';
+  const exec = new FakeExecutor({
+    firstOpen: { ok: true, editorReady: true, permalink, postText: '首帖正文' },
+  });
+  const { handler, cap } = makeHandler(exec);
+  await handler.handle(makeEnvelope('note.open', 'c1', 1, {
+    selection: 'first_commentable_group_post',
+    container: 'https://www.facebook.com/groups/1',
+  } as never));
+  assert.equal(exec.firstOpenArg, 'https://www.facebook.com/groups/1');
+  assert.equal(exec.openArg, undefined);
+  assert.equal(cap.details.length, 1);
+  assert.equal(cap.details[0].noteId, permalink);
+  assert.equal(cap.details[0].content, '首帖正文');
+});
+
+test('fb-handler: 群内首帖不可评论 → open_note no_candidates', async () => {
+  const exec = new FakeExecutor({
+    firstOpen: { ok: false, editorReady: false, reason: 'no_candidates' },
+  });
+  const { handler, cap } = makeHandler(exec);
+  await handler.handle(makeEnvelope('note.open', 'c1', 1, {
+    selection: 'first_commentable_group_post',
+    container: 'https://www.facebook.com/groups/1',
+  } as never));
+  assert.equal(cap.details.length, 0);
+  assert.deepEqual(cap.actions[0], { action: 'open_note', ok: false, reason: 'no_candidates' });
 });
 
 test('fb-handler: note.open 无 url → open_note no_target', async () => {

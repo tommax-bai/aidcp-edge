@@ -163,6 +163,7 @@ export type FacebookCommentStepReason =
   | 'no_candidates' // 容器内搜索无可评论候选
   | 'not_facebook' // 链接非 Facebook（防御性）
   | 'open_failed' // 开帖后未落到帖子详情面
+  | 'target_context_mismatch' // 详情页无法唯一绑定到请求帖；绝不按 DOM 顺序读取/评论
   | 'identity_unknown' // 本人稳定 id 未知——无法做 own-identity 收窄，绝不提交
   | 'editor_not_found' // 滚动催拉后仍无评论框
   | 'submit_control_not_found' // 无发布按钮
@@ -209,6 +210,10 @@ export interface FacebookOpenResult {
   postText?: string;
   /** 帖子下他人评论正文样本（去作者名/界面词，顶部若干条）。供撰写器顺着讨论、用内容语言写。 */
   comments?: string[];
+  /** 首帖选择路径返回其实际选中的稳定 permalink；显式 url 开帖可省略。 */
+  permalink?: string;
+  /** 首帖选择前在群讨论流读到的真实群名；读不到则省略。 */
+  containerName?: string;
 }
 
 export interface FacebookSubmitResult {
@@ -451,6 +456,20 @@ export class FacebookCommentExecutor {
     return null;
   }
 
+  /** 群链接（含群帖链接）归一到群讨论流根；非群链接返回 null，绝不回落主页/全站。 */
+  private buildGroupFeedUrl(container: string): string | null {
+    let url: URL;
+    try {
+      url = new URL(container);
+    } catch {
+      return null;
+    }
+    const groupMatch = url.pathname.match(/^\/groups\/([^/]+)/);
+    const groupId = groupMatch?.[1]?.trim();
+    if (!groupId) return null;
+    return `${url.origin}/groups/${groupId}`;
+  }
+
   /**
    * 容器内关键词搜索 → 有界抽取候选帖 permalink。
    * 绝不全站搜：容器非法/无法归类/非成员 → honest permission_gated。
@@ -522,11 +541,74 @@ export class FacebookCommentExecutor {
   }
 
   /**
+   * 无关键词路径：打开群讨论流，按 feed/DOM 顺序取第一条「顶层 + 稳定群帖 permalink + 可评论」帖子，
+   * 再复用 openPost 精确开帖/读上下文。无候选诚实结束；绝不发 search.execute、绝不改用第二种定位策略。
+   */
+  async openFirstCommentablePost(container: string): Promise<FacebookOpenResult> {
+    if (!this.isAllowed(container)) {
+      return { ok: false, reason: 'permission_gated', editorReady: false };
+    }
+    const feedUrl = this.buildGroupFeedUrl(container);
+    if (!feedUrl) {
+      return { ok: false, reason: 'permission_gated', editorReady: false };
+    }
+    try {
+      await this.navigate(feedUrl);
+    } catch (err) {
+      this.log(`[fb-comment] 导航群讨论流失败：${(err as Error).message}`);
+      return { ok: false, reason: 'nav_error', editorReady: false };
+    }
+    const blocked = await this.blockingReason();
+    if (blocked) return { ok: false, reason: blocked, editorReady: false };
+
+    const containerName = await this.readContainerName();
+    const eligible = (s: FacebookPageStructureSummary): boolean =>
+      s.postCandidates.some((post) =>
+        post.hasCommentRegion &&
+        post.permalinkCandidates.some((candidate) => candidate.kind === 'group_post'),
+      );
+    const structure = await this.probeStructureUntil(eligible, this.opts.postDetailProbeRounds);
+    if (!structure) {
+      return { ok: false, reason: 'nav_error', editorReady: false, ...(containerName ? { containerName } : {}) };
+    }
+    if (structure.surface === 'login') {
+      return { ok: false, reason: 'login_required', editorReady: false, surface: 'login', ...(containerName ? { containerName } : {}) };
+    }
+    if (structure.surface === 'checkpoint') {
+      return { ok: false, reason: 'blocked_by_captcha', editorReady: false, surface: 'checkpoint', ...(containerName ? { containerName } : {}) };
+    }
+
+    const first = structure.postCandidates.find((post) =>
+      post.hasCommentRegion &&
+      post.permalinkCandidates.some((candidate) => candidate.kind === 'group_post'),
+    );
+    const permalink = first?.permalinkCandidates.find((candidate) => candidate.kind === 'group_post')?.href;
+    if (!permalink) {
+      return {
+        ok: false,
+        reason: 'no_candidates',
+        editorReady: false,
+        surface: structure.surface,
+        ...(containerName ? { containerName } : {}),
+      };
+    }
+
+    const opened = await this.openPost(permalink);
+    return {
+      ...opened,
+      permalink,
+      ...(containerName ? { containerName } : {}),
+    };
+  }
+
+  /**
    * 按 permalink 直驱开帖 + 有界催拉懒加载评论框（F1 补丁①）。
    * 返回 editorReady=true 表示视口内已探到评论框（可进入提交）。
    */
   async openPost(url: string): Promise<FacebookOpenResult> {
     if (!this.isAllowed(url)) return { ok: false, reason: 'not_facebook', editorReady: false };
+    const targetPostId = canonicalPostId(url);
+    if (!targetPostId) return { ok: false, reason: 'target_context_mismatch', editorReady: false };
     try {
       await this.navigate(url);
     } catch (err) {
@@ -536,10 +618,9 @@ export class FacebookCommentExecutor {
     const blocked = await this.blockingReason();
     if (blocked) return { ok: false, reason: blocked, editorReady: false };
 
-    // 等详情 article 水合：用**独立**的 postDetailProbeRounds（不是 surfaceProbeRounds——后者是下面催拉循环的每轮预算）。
-    // FB 详情水合真机实测 7-12s，此处预算须覆盖之，否则慢帖被误报 open_failed（搜索已返回该 permalink ⇒ 帖子存在）。
+    // 先等详情 article 水合；随后正文/评论/编辑框必须按 canonical target 精确绑定，背景 feed 的 article 不算。
     let structure = await this.probeStructureUntil(
-      (s) => s.commentEditorCount > 0 || s.articleCount > 0,
+      (s) => s.articleCount > 0,
       this.opts.postDetailProbeRounds,
     );
     if (!structure) return { ok: false, reason: 'nav_error', editorReady: false };
@@ -547,19 +628,22 @@ export class FacebookCommentExecutor {
     if (structure.surface === 'checkpoint') return { ok: false, reason: 'blocked_by_captcha', editorReady: false, surface: 'checkpoint' };
     if (structure.articleCount === 0) return { ok: false, reason: 'open_failed', editorReady: false, surface: structure.surface };
 
-    // F1 补丁①：评论框常在首屏之下懒渲染——有界滚动催拉，每轮复探评论框计数。
-    let editorReady = structure.commentEditorCount > 0;
-    for (let i = 0; i < this.opts.editorScrollRounds && !editorReady; i++) {
-      await this.scrollViewport(this.opts.editorScrollDistancePx);
-      structure = await this.probeStructureUntil((s) => s.commentEditorCount > 0);
-      editorReady = Boolean(structure && structure.commentEditorCount > 0);
+    // 目标正文读取与评论框 readiness 共用同一个 canonical target resolver，绝不读 document.top[0]。
+    let content = await this.readPostContent(targetPostId);
+    if (content.targetResolution !== 'ok') {
+      return { ok: false, reason: 'target_context_mismatch', editorReady: false, surface: structure.surface };
     }
-    // 读了再写：滚动已催出评论区后，抽帖子正文（图片帖常空）+ 顶部他人评论，供云端撰写器用内容语言顺着讨论写。
-    const content = await this.readPostContent();
+    for (let i = 0; i < this.opts.editorScrollRounds && !content.editorReady; i++) {
+      await this.scrollViewport(this.opts.editorScrollDistancePx);
+      content = await this.readPostContent(targetPostId);
+      if (content.targetResolution !== 'ok') {
+        return { ok: false, reason: 'target_context_mismatch', editorReady: false, surface: structure.surface };
+      }
+    }
     return {
       ok: true,
-      editorReady,
-      surface: structure?.surface,
+      editorReady: content.editorReady,
+      surface: structure.surface,
       ...(content.postText ? { postText: content.postText } : {}),
       ...(content.comments.length > 0 ? { comments: content.comments } : {}),
     };
@@ -570,18 +654,33 @@ export class FacebookCommentExecutor {
    * 正文：主帖 article 的 story_message / 最长非链接文本块，图片帖常为空。
    * 评论：嵌套 article（评论条目）里去作者名/界面词后的正文，顶部 maxComments 条。best-effort、不抛。
    */
-  private async readPostContent(): Promise<{ postText?: string; comments: string[] }> {
+  private async readPostContent(targetPostId: string): Promise<{
+    targetResolution: 'ok' | 'no_target' | 'ambiguous_target' | 'error';
+    editorReady: boolean;
+    postText?: string;
+    comments: string[];
+  }> {
     try {
-      const raw = await evalJson<{ postText: string | null; comments: string[] }>(
+      const raw = await evalJson<{
+        targetResolution: 'ok' | 'no_target' | 'ambiguous_target';
+        editorReady: boolean;
+        postText: string | null;
+        comments: string[];
+      }>(
         this.cdp,
-        buildPostContentJs(this.opts.maxComments),
+        buildPostContentJs(this.opts.maxComments, targetPostId),
       );
       const postText = (raw?.postText ?? '').trim();
       const comments = Array.isArray(raw?.comments) ? raw.comments.map((c) => String(c ?? '').trim()).filter(Boolean) : [];
-      return { ...(postText ? { postText } : {}), comments };
+      return {
+        targetResolution: raw?.targetResolution ?? 'no_target',
+        editorReady: raw?.editorReady === true,
+        ...(postText ? { postText } : {}),
+        comments,
+      };
     } catch (err) {
       this.log(`[fb-comment] 读帖子内容失败：${(err as Error).message}`);
-      return { comments: [] };
+      return { targetResolution: 'error', editorReady: false, comments: [] };
     }
   }
 
@@ -973,8 +1072,8 @@ const CONTAINER_NAME_JS = `(function(){
  * - 评论正文：每条评论 article 里，取最长的「非作者链接、非界面词」文本块（作者名在 <a> 里、界面词是短块）。
  * - 界面词过滤（本号 FB 界面为中文/英文）：赞/回复/分享/查看翻译/关注/时间数字等。
  */
-function buildPostContentJs(maxComments: number): string {
-  return `(function(){
+export function buildPostContentJs(maxComments: number, targetPostId: string): string {
+  return `(function(){${buildScopedEditorHelpersJs(targetPostId)}
     function t(el){return ((el&&el.innerText)||'').replace(/\\s+/g,' ').trim();}
     var CHROME=/^(赞|回复|分享|查看翻译|隐藏|关注|举报|编辑|删除|置顶|Like|Reply|Share|See translation|Follow|Hide|\\d+\\s*(分钟|小时|天|周|年|min|h|d|w|y)?|[·•]|)$/i;
     function isChrome(s){ return !s || s.length<2 || CHROME.test(s); }
@@ -987,11 +1086,13 @@ function buildPostContentJs(maxComments: number): string {
         .map(t).filter(function(s){ return !isChrome(s); });
     }
     function longest(arr){ var best=''; for(var i=0;i<arr.length;i++){ if(arr[i].length>best.length) best=arr[i]; } return best; }
-    var arts=Array.prototype.slice.call(document.querySelectorAll('[role="article"], article'));
-    function isNested(a){ return arts.some(function(b){ return b!==a && b.contains(a); }); }
-    var top=arts.filter(function(a){ return !isNested(a); });
-    var comments=arts.filter(isNested);
-    var post=top[0]||null;
+    var resolved=fbTgtResolve(FB_TARGET_POST_ID);
+    if(resolved.status!=='ok'||!resolved.el){
+      return JSON.stringify({targetResolution:resolved.status,editorReady:false,postText:null,comments:[]});
+    }
+    var post=resolved.el;
+    var comments=Array.prototype.slice.call(post.querySelectorAll('[role="article"], article'))
+      .filter(function(a){ return a!==post; });
     var postText=null;
     if(post){
       var sm=post.querySelector('[data-ad-rendering-role="story_message"],[data-ad-comet-preview="message"]');
@@ -1014,7 +1115,7 @@ function buildPostContentJs(maxComments: number): string {
       if(seen[key]) continue; seen[key]=1;          // 去重
       out.push(body.slice(0,240));
     }
-    return JSON.stringify({postText:postText, comments:out});
+    return JSON.stringify({targetResolution:'ok',editorReady:fbEditors().length>0,postText:postText,comments:out});
   })()`;
 }
 

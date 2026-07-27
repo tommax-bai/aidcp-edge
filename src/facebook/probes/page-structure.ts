@@ -194,11 +194,16 @@ const PAGE_STRUCTURE_SCAN_JS = String.raw`(function(){
     }
     return n;
   }
-  var articles = Array.from(document.querySelectorAll('[role="article"], article')).filter(visible).slice(0, 12);
+  var scanRoot = document.querySelector('[role="main"], main') || document;
+  var allArticles = Array.from(scanRoot.querySelectorAll('[role="article"], article')).filter(visible);
+  // 只保留顶层帖子；嵌套 comment/reply article 不是群讨论流候选，不能抢「第一帖」。
+  var articles = allArticles.filter(function(article){
+    return !allArticles.some(function(other){ return other !== article && other.contains(article); });
+  }).slice(0, 12);
   var postCandidates = articles.map(function(article, index){
     var box = article.getBoundingClientRect();
     var editors = Array.from(article.querySelectorAll('[contenteditable="true"][role="textbox"]')).filter(visible);
-    var commentControls = countTextControls(article, /^(评论|发表评论|回复|Comment|Reply)$/i);
+    var commentControls = countTextControls(article, /^(评论|发表评论|发表公开评论|回复|Comment|Reply|Bình luận|Comentar|Comentario)$/i);
     var expandControls = countTextControls(article, /(查看更多|展开|See more|View more)/i);
     var commentRegion = article.querySelector('[aria-label*="评论"],[aria-label*="Comment"],[role="textbox"]');
     var authorLinks = Array.from(article.querySelectorAll('a[href]')).filter(function(a){

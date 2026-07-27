@@ -215,12 +215,16 @@ export class FacebookCommentHandler {
   }
 
   private async onOpen(payload: NoteOpenPayload): Promise<void> {
+    const firstPostSelection = payload.selection === 'first_commentable_group_post';
     const url = payload.url ?? '';
-    if (!url) {
+    const container = payload.container ?? '';
+    if (!url && !(firstPostSelection && container)) {
       this.client.reportActionCompleted({ action: 'open_note', ok: false, reason: 'no_target' });
       return;
     }
-    const r = await this.executor.openPost(url);
+    const r = firstPostSelection
+      ? await this.executor.openFirstCommentablePost(container)
+      : await this.executor.openPost(url);
     if (!r.ok) {
       this.client.reportActionCompleted({ action: 'open_note', ok: false, reason: r.reason ?? 'open_failed' });
       return;
@@ -234,8 +238,13 @@ export class FacebookCommentHandler {
     }
     // permalink 作为 noteId 回 note.detail；content=帖子正文（图片帖常空）、comments=顶部他人评论——
     // 供云端撰写器「读了再写」（顺着讨论、用内容语言）。计数诚实置零（本流程不做点赞/收藏计数）。
+    const detailNoteId = r.permalink ?? url;
+    if (!detailNoteId) {
+      this.client.reportActionCompleted({ action: 'open_note', ok: false, reason: 'target_context_mismatch' });
+      return;
+    }
     const detail: NoteDetailPayload = {
-      noteId: url,
+      noteId: detailNoteId,
       title: '',
       content: r.postText ?? '',
       likeCount: 0,

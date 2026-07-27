@@ -8,6 +8,7 @@ import type { OverlayKind, OverlayMonitor } from '../../src/browse/overlay-monit
 import {
   FacebookCommentExecutor,
   buildAckVerifyJs,
+  buildPostContentJs,
   isFacebookCommentRejectedText,
   isFacebookCommentInFlightText,
   stripSubmittedText,
@@ -94,6 +95,7 @@ interface FakeConfig {
   ackConfirmAfter?: number;
   containerName?: string | null;
   postContent?: { postText: string | null; comments: string[] };
+  targetResolution?: 'ok' | 'no_target' | 'ambiguous_target';
 }
 
 class FakeCdp implements BrowseCdp {
@@ -148,8 +150,13 @@ class FakeCdp implements BrowseCdp {
         const n = this.cfg.containerName === undefined ? 'Puerto Rico Y Sus Encantos e Historia' : this.cfg.containerName;
         return val(JSON.stringify({ name: n }));
       }
-      if (expr.includes('blockTexts')) {
-        return val(JSON.stringify(this.cfg.postContent ?? { postText: null, comments: [] }));
+      if (expr.includes('targetResolution')) {
+        const s = (this.cfg.structureFor ?? (() => struct()))(this.scrolls);
+        return val(JSON.stringify({
+          targetResolution: this.cfg.targetResolution ?? 'ok',
+          editorReady: s.commentEditorCount > 0,
+          ...(this.cfg.postContent ?? { postText: null, comments: [] }),
+        }));
       }
       if (expr.includes('window.innerWidth')) return val(JSON.stringify({ w: 1280, h: 800 }));
       if (expr.includes('window.scrollY')) return val(JSON.stringify({ y: this.scrollY }));
@@ -246,6 +253,43 @@ test('fb-executor: 群容器 → 站内搜 URL + 候选帖 permalink', async () 
   assert.match(cdp.navigations[0], /\/groups\/123456\/search\/\?q=/);
   // 容器真实群名自动读出回传（人只看群名、不看 id）。
   assert.equal(r.containerName, 'Puerto Rico Y Sus Encantos e Historia');
+});
+
+test('fb-executor: 空关键词首帖路径不搜索，选择第一条可评论群帖并精确开帖', async () => {
+  const first = 'https://www.facebook.com/groups/123456/posts/111/';
+  const second = 'https://www.facebook.com/groups/123456/posts/222/';
+  const cdp = new FakeCdp({
+    structureFor: () => struct({
+      href: 'https://www.facebook.com/groups/123456',
+      articleCount: 2,
+      commentEditorCount: 1,
+      postCandidates: [post(first), { ...post(second), index: 1 }],
+    }),
+    postContent: { postText: '首帖正文', comments: ['首帖评论'] },
+  });
+  const r = await makeExecutor(cdp).openFirstCommentablePost('https://www.facebook.com/groups/123456');
+  assert.equal(r.ok, true);
+  assert.equal(r.permalink, 'https://www.facebook.com/groups/123456/posts/111');
+  assert.deepEqual(cdp.navigations, [
+    'https://www.facebook.com/groups/123456',
+    'https://www.facebook.com/groups/123456/posts/111',
+  ]);
+  assert.equal(cdp.navigations.some((url) => url.includes('/search/')), false);
+  assert.equal(r.postText, '首帖正文');
+});
+
+test('fb-executor: 群讨论流没有稳定可评论首帖 → no_candidates，不改走搜索', async () => {
+  const cdp = new FakeCdp({
+    structureFor: () => struct({
+      href: 'https://www.facebook.com/groups/123456',
+      articleCount: 1,
+      postCandidates: [post('https://www.facebook.com/groups/123456/posts/111/', false)],
+    }),
+  });
+  const r = await makeExecutor(cdp).openFirstCommentablePost('https://www.facebook.com/groups/123456');
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'no_candidates');
+  assert.deepEqual(cdp.navigations, ['https://www.facebook.com/groups/123456']);
 });
 
 test('fb-executor: 登录失效浮层 → login_required（不返回候选）', async () => {
@@ -346,6 +390,18 @@ test('fb-executor: 图片帖无正文 → postText 省略、comments 可空（�
   assert.equal(r.ok, true);
   assert.equal(r.postText, undefined);
   assert.equal(r.comments, undefined);
+});
+
+test('fb-executor: 详情目标无法唯一绑定 → target_context_mismatch，不返回背景帖正文', async () => {
+  const cdp = new FakeCdp({
+    structureFor: () => struct({ href: 'https://www.facebook.com/groups/1/posts/2/', articleCount: 2, commentEditorCount: 1 }),
+    targetResolution: 'ambiguous_target',
+    postContent: { postText: '背景帖正文', comments: [] },
+  });
+  const r = await makeExecutor(cdp).openPost('https://www.facebook.com/groups/1/posts/2/');
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'target_context_mismatch');
+  assert.equal(r.postText, undefined);
 });
 
 test('fb-executor: 评论框始终催不出 → ok:true 但 editorReady:false', async () => {
@@ -588,6 +644,35 @@ function scopedEditorIds(dom: JSDOM, targetPostId: string | null): string[] {
   })()`;
   return JSON.parse(String(dom.window.eval(js))) as string[];
 }
+
+test('fb-context-scope: 详情弹窗覆盖背景 feed 时只读取 canonical 目标帖', () => {
+  const dom = editorScopeDom(
+    '<div role="feed">' +
+      '<div role="article" id="background"><a href="https://www.facebook.com/groups/111/posts/AAA/">1天</a>' +
+        '<div data-ad-rendering-role="story_message" dir="auto">背景水电维修帖</div>' +
+      '</div>' +
+    '</div>' +
+    '<div role="dialog">' +
+      '<div role="article" id="target"><a href="https://www.facebook.com/groups/111/posts/BBB/">2小时</a>' +
+        '<div data-ad-rendering-role="story_message" dir="auto">TOPSUN 招聘正文</div>' +
+        editor('target-editor') +
+        '<div role="article"><div dir="auto">目标帖下的真实讨论</div></div>' +
+      '</div>' +
+    '</div>',
+    'https://www.facebook.com/groups/111/posts/BBB/',
+  );
+  const result = JSON.parse(String(dom.window.eval(buildPostContentJs(6, 'fb:BBB')))) as {
+    targetResolution: string;
+    editorReady: boolean;
+    postText: string | null;
+    comments: string[];
+  };
+  assert.equal(result.targetResolution, 'ok');
+  assert.equal(result.editorReady, true);
+  assert.equal(result.postText, 'TOPSUN 招聘正文');
+  assert.deepEqual(result.comments, ['目标帖下的真实讨论']);
+  assert.equal(JSON.stringify(result).includes('背景水电维修帖'), false);
+});
 
 const editor = (id: string, label = '发表公开评论…') =>
   `<div id="${id}" contenteditable="true" role="textbox" aria-label="${label}"></div>`;
