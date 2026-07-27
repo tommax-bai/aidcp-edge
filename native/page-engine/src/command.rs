@@ -176,6 +176,12 @@ pub enum NotePurpose {
     Navigate,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteOpenSelection {
+    FirstCommentableGroupPost,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NoteOpenParams {
@@ -193,6 +199,10 @@ pub struct NoteOpenParams {
     pub purpose: Option<NotePurpose>,
     #[serde(default)]
     pub think_ms: Option<u64>,
+    #[serde(default)]
+    pub selection: Option<NoteOpenSelection>,
+    #[serde(default)]
+    pub container: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -593,7 +603,21 @@ impl NativeCommand {
                     &params.reason,
                     MAX_REASON_BYTES,
                     "reason exceeds protocol limit",
-                )
+                )?;
+                validate_optional(
+                    &params.container,
+                    MAX_URL_BYTES,
+                    "note container exceeds protocol limit",
+                )?;
+                if params.selection.is_some()
+                    && params
+                        .container
+                        .as_ref()
+                        .is_none_or(|value| value.is_empty())
+                {
+                    return Err(invalid("first-post selection requires a group container"));
+                }
+                Ok(())
             }
             Self::NoteClose(params) => validate_optional(
                 &params.reason,
@@ -873,6 +897,34 @@ mod tests {
         )
         .expect("publish command");
         publish.validate().expect("valid publish command");
+    }
+
+    #[test]
+    fn parses_and_validates_first_commentable_group_post_selection() {
+        let command: NativeCommand = serde_json::from_str(
+            r#"{"kind":"note_open","params":{"selection":"first_commentable_group_post","container":"https://www.facebook.com/groups/945390701793119"}}"#,
+        )
+        .expect("first-post command");
+        command.validate().expect("valid first-post command");
+        assert!(matches!(
+            command,
+            NativeCommand::NoteOpen(NoteOpenParams {
+                selection: Some(NoteOpenSelection::FirstCommentableGroupPost),
+                ..
+            })
+        ));
+
+        let missing_container: NativeCommand = serde_json::from_str(
+            r#"{"kind":"note_open","params":{"selection":"first_commentable_group_post"}}"#,
+        )
+        .expect("typed command");
+        assert_eq!(
+            missing_container
+                .validate()
+                .expect_err("container is required")
+                .code,
+            ErrorCode::InvalidRequest
+        );
     }
 
     #[test]

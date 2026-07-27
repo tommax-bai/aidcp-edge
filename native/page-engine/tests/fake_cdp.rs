@@ -1,7 +1,7 @@
 use aidcp_page_engine::command::{
     CaptchaCaptureParams, CaptchaClickParams, CaptchaPoint, CommentParams, FollowParams,
     GroupJoinParams, IdentityCaptureParams, NoteInteractionParams, NoteOpenParams,
-    PageScrollParams, ReasonParams, SearchExecuteParams,
+    NoteOpenSelection, PageScrollParams, ReasonParams, SearchExecuteParams,
 };
 use aidcp_page_engine::commit_window::CommitWindowRequester;
 use aidcp_page_engine::engine::{CommandOutput, Engine};
@@ -732,6 +732,36 @@ async fn facebook_note_open_never_returns_mismatched_detail_as_success() {
 }
 
 #[tokio::test]
+async fn facebook_first_post_scrolls_until_the_below_fold_candidate_hydrates() {
+    let (port, server) = spawn_facebook_first_post_below_fold_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_first_post_command(1, 30_000))
+        .await
+        .expect("Facebook first-post detail");
+    let CommandOutput::NoteDetail(detail) = outcome.output.expect("first-post detail output")
+    else {
+        panic!("expected note detail")
+    };
+    assert_eq!(
+        detail.note_id,
+        "https://www.facebook.com/groups/945390701793119/posts/333"
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook first-post fake CDP");
+    assert_eq!(router_call_count(&requests, "feed_refresh"), 1);
+    assert_eq!(router_call_count(&requests, "browse_scroll"), 2);
+    assert_eq!(router_call_count(&requests, "comment_editor_probe"), 1);
+    assert_eq!(router_call_count(&requests, "note_open"), 1);
+}
+
+#[tokio::test]
 async fn xhs_self_identity_uses_only_the_bound_canonical_profile() {
     let (port, server) = spawn_xhs_self_identity_cdp().await;
     let mut engine = Engine::default();
@@ -1404,6 +1434,24 @@ fn facebook_note_open_command(command_id: u64, url: &str, timeout_ms: u64) -> Co
             surface: None,
             purpose: None,
             think_ms: None,
+            selection: None,
+            container: None,
+        }),
+    }
+}
+
+fn facebook_first_post_command(command_id: u64, timeout_ms: u64) -> CommandRecord {
+    CommandRecord {
+        protocol_version: 2,
+        id: format!("facebook-first-post-{command_id}"),
+        session_id: "session-1".to_owned(),
+        task_id: "browse-1".to_owned(),
+        command_id,
+        deadline_unix_ms: unix_time_ms() + timeout_ms,
+        command: NativeCommand::NoteOpen(NoteOpenParams {
+            selection: Some(NoteOpenSelection::FirstCommentableGroupPost),
+            container: Some("https://www.facebook.com/groups/945390701793119".to_owned()),
+            ..NoteOpenParams::default()
         }),
     }
 }
@@ -1635,7 +1683,10 @@ fn router_kind(request: &Value) -> Option<String> {
         "page_probe",
         "consent_probe",
         "feed_probe",
+        "feed_refresh",
+        "browse_scroll",
         "note_open",
+        "comment_editor_probe",
         "reel_probe",
         "like_probe",
         "like_primary_commit",
@@ -2551,6 +2602,98 @@ async fn spawn_facebook_note_open_hydration_cdp() -> (u16, tokio::task::JoinHand
                         )
                     }
                 }
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_first_post_below_fold_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(
+            &listener,
+            port,
+            "https://www.facebook.com/groups/945390701793119",
+        )
+        .await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut scrolls = 0_u32;
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let result = match router_kind(&request).as_deref() {
+                Some("page_probe") => facebook_ready_cdp("/groups/945390701793119/posts/333"),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("feed_refresh") => router_cdp(
+                    "page_cards",
+                    json!({
+                        "cards": [],
+                        "listKind": "feed",
+                        "listState": "present_unreportable"
+                    }),
+                ),
+                Some("browse_scroll") => {
+                    scrolls += 1;
+                    let cards = if scrolls < 2 {
+                        json!([])
+                    } else {
+                        json!([{
+                            "index": 0,
+                            "title": "below-fold first post",
+                            "likeCount": 0,
+                            "collectCount": 0,
+                            "noteId": "https://www.facebook.com/groups/945390701793119/posts/333"
+                        }])
+                    };
+                    router_cdp(
+                        "page_cards",
+                        json!({
+                            "cards": cards,
+                            "movement": {
+                                "before": if scrolls == 1 { 0.0 } else { 852.0 },
+                                "after": if scrolls == 1 { 852.0 } else { 1704.0 },
+                                "moved": true,
+                                "atBottom": false
+                            },
+                            "listKind": "feed",
+                            "listState": if scrolls < 2 { "present_unreportable" } else { "ready" }
+                        }),
+                    )
+                }
+                Some("comment_editor_probe") => router_cdp(
+                    "text_target",
+                    json!({
+                        "ok": true,
+                        "noteId": "https://www.facebook.com/groups/945390701793119/posts/333",
+                        "cx": 640.0,
+                        "cy": 700.0,
+                        "focused": false,
+                        "selected": false
+                    }),
+                ),
+                Some("note_open") => facebook_note_detail_cdp(
+                    "https://www.facebook.com/groups/945390701793119/posts/333",
+                    "below-fold first post",
+                ),
                 _ => json!({}),
             };
             requests.push(request);

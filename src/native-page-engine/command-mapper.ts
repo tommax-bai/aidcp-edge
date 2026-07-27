@@ -52,7 +52,7 @@ const allowedByKind: Record<string, readonly string[]> = {
   plan_execute: ['steps'], session_stop: ['reason'], browse_next: ['reason'], browse_scroll: ['reason'],
   page_scroll: ['reason', 'dwellMs'], feed_refresh: ['reason', 'thinkMs'],
   search_execute: ['keyword', 'container', 'source', 'maxResults', 'sort', 'timeWindow'],
-  note_open: ['noteId', 'index', 'reason', 'url', 'surface', 'purpose', 'thinkMs'],
+  note_open: ['noteId', 'index', 'reason', 'url', 'surface', 'purpose', 'thinkMs', 'selection', 'container'],
   note_close: ['reason', 'dwellMs'], navigation_back: ['reason', 'targetPage', 'dwellMs'],
   note_browse_images: ['noteId', 'count', 'thinkMs', 'dwellMs'],
   note_scroll_comments: ['noteId', 'count', 'thinkMs', 'dwellMs'],

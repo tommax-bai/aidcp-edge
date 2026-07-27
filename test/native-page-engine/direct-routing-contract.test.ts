@@ -23,6 +23,27 @@ test('projects Edge coordination fields out of the Native command envelope', () 
   });
 });
 
+test('preserves Facebook first-post selection across the Native command boundary', () => {
+  const command = nativeCommandForEnvelope({
+    v: 1,
+    id: 'first-post-open',
+    ts: Date.now(),
+    type: 'note.open',
+    payload: {
+      taskId: 'lease-secret',
+      selection: 'first_commentable_group_post',
+      container: 'https://www.facebook.com/groups/945390701793119',
+    },
+  } as never);
+  assert.deepEqual(command, {
+    kind: 'note_open',
+    params: {
+      selection: 'first_commentable_group_post',
+      container: 'https://www.facebook.com/groups/945390701793119',
+    },
+  });
+});
+
 test('identity commands preserve Cloud correlation but inject only the Edge-bound account', () => {
   const current = nativeCommandForEnvelope({
     v: 2,
