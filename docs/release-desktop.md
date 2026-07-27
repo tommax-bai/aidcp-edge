@@ -13,7 +13,7 @@
 - **桌面包 = aidcp-edge 的 Electron 应用**。外壳启动后拉起编译产物 `dist/main.js` 跑整个边缘运行时，所以 **任何 edge 源码改动都要重打安装包才进包**，光改代码不重打没用。
 - **下载地址是自有服务器，不是 GitHub**。安装包托管在 ECS `/opt/aidcp/downloads/`，Nginx 以 `/downloads/` 提供。后台「下载客户端」按钮**不再写死版本号**（change `downloads-manifest-from-host`）：云端面板 `GET /api/downloads` **现扫该机的 downloads 目录**得出清单，页面只可能提供确实存在的包。**所以「发布」= 把包放到那台机器上——不改代码、不重新构建 console。**
 - **mac 的 dmg 必须在 macOS 上构建**（依赖 `hdiutil` 等 mac 专有工具），本机 Windows 打不了 → 走 **GitHub Actions** 的 macOS runner。
-- **分发用的 mac 包走 CI 签名 + 公证**（Developer ID 签名 + Apple notarytool 公证 + staple）：这样用户下载安装**不会被 Gatekeeper 拦成「非法软件 / 无法验证开发者」**。签名凭据只在 GitHub Actions 里（仓库 secret），**本机没有证书、本机打的包仍是 unsigned**（只适合本机自测，下载分发会被拦）。所需 secret 见第 1 步。
+- **正式分发默认走 CI 签名 + 公证**（Developer ID 签名 + Apple notarytool 公证 + staple）：这样用户下载安装**不会被 Gatekeeper 拦成「非法软件 / 无法验证开发者」**。仓库也提供本地 arm64 OL 的签名与公证入口；只有显式提供本机 Keychain/p12 和 App Store Connect API 凭据时才可生成对应信任级别的产物，凭据本身不进入仓库。所需 CI secret 见第 1 步。
 - **无自动更新**：没接 electron-updater → 用户升级要 **重新下载安装**。
 - **红线**：生产机上 **只碰 `/opt/aidcp/downloads` 和 `/opt/aidcp/console`，绝不碰同机 isales**。
 - **SSH**：`ssh -i ~/codes/dev-0722.pem root@121.89.85.150`（私钥须存在；在 harness 里跑 ssh/scp 命令要 `dangerouslyDisableSandbox`，且可能被 auto-mode 分类器要二次确认，正常放行）。
@@ -43,9 +43,9 @@ npm run electron:build:win
 # 产物：dist-electron/AIDCP Setup <版本>.exe
 ```
 
-### 2B. macOS（要签名 / 公证 / 分发 → 必须走 CI；本机打只适合自测）
+### 2B. macOS（正式分发默认走 CI；本机可显式签名或公证 arm64 OL 包）
 
-- **签名 + 公证的分发包只能在 CI 出**：证书与公证凭据都在仓库 secret 里、本机没有；本机 `npm run electron:build:mac` 打的是 **unsigned 包**，下载分发会被 Gatekeeper 拦，只能自测。
+- **CI 是正式分发默认入口**：凭据由 GitHub Secrets 注入，流程可复现并保留 Actions 证据。本机普通 `npm run electron:build:mac` 仍可能是 unsigned，只适合自测；不要把它当作下面两个显式本地发布入口。
 - 工作流：`aidcp-edge/.github/workflows/build-desktop.yml`（手动触发；核心脚本 `scripts/build-desktop-macos.sh` 完成签名 → notarytool 公证 → staple → Gatekeeper 校验）。
 
 - [ ] 确保第 1 步已推到 `master`（CI 从 master 拉代码），且第 1 步的 secret 齐全。
@@ -59,6 +59,37 @@ npm run electron:build:win
       得到：`AIDCP-<版本>-arm64.dmg`（Apple 芯片）、`AIDCP-<版本>.dmg`（Intel），外加 zip/blockmap（下载页用不到，忽略）。
 
 > **Windows 默认不出**（`include_windows` 关）：Windows job 尚未接自包含运行时的 staging，开了会因缺 `extraResources` 失败。等 Windows 自包含打包接好再开。
+
+#### 本地 arm64 OL：仅 Developer ID 签名
+
+脚本会自动从 Keychain 选择 Team ID `DK3BYZ9K32` 的 Developer ID Application 身份；也可通过
+`CSC_NAME`，或 `CSC_LINK=/path/to/certificate.p12` 显式选择。使用 p12 且未设置
+`CSC_KEY_PASSWORD` 时，脚本从终端隐式询问密码。
+
+```bash
+./scripts/build-desktop-macos-ol-arm64-signed.sh
+```
+
+该入口完整构建并验证 AdsPower CLI、GOST、Native Page Engine、OL 环境和客户登录 URL，
+但**不调用 Apple 公证**。代码签名有效不等于 Gatekeeper 接受，输出会明确标记 `NOT notarized`。
+
+#### 本地 arm64 OL：Developer ID 签名并公证
+
+```bash
+export APPLE_API_KEY=/absolute/path/to/AuthKey_KEYID.p8
+export APPLE_API_KEY_ID=KEYID
+export APPLE_API_ISSUER=issuer-uuid
+./scripts/build-desktop-macos-ol-arm64-notarized.sh
+```
+
+该入口严格按“签名 App → 公证/staple App → 生成 DMG → 公证/staple DMG”执行，并验证最终
+DMG 内应用的 Gatekeeper、staple、嵌套运行时签名和 arm64 架构。默认登录地址为
+`http://123.56.253.183:8088/capi`；如 OL 地址调整，必须用
+`AIDCP_CLIENT_AUTH_URL=http(s)://.../capi` 显式覆盖，脚本会在最终 `app.asar` 中回读确认。
+
+两个入口都只生成本地文件，不上传、不部署、不发布。产物为
+`dist-electron/AIDCP-<version>-arm64.dmg`；已有 `dist-electron` 会先移动到时间戳备份，
+避免旧架构或旧版本 DMG 混入本次验证/公证。
 
 ### 2C. 打包后本机冒烟（发版前必做，别省）
 
