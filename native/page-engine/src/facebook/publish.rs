@@ -470,6 +470,18 @@ pub(crate) async fn execute_facebook_publish_fill(
         ));
     };
     dispatch_facebook_click(session, x, y).await?;
+    let focused = focus_facebook_publish_editor(session, false).await;
+    if !matches!(&focused, Ok(editor) if editor.ok && editor.focused) {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "fill_field",
+            false,
+            false,
+            "composer_focus_failed",
+        ));
+    }
     match clear_facebook_publish_editor(session).await {
         FacebookPublishCleanup::Cleared => {}
         FacebookPublishCleanup::ComposerGone => {
@@ -494,6 +506,18 @@ pub(crate) async fn execute_facebook_publish_fill(
                 "composer_not_clean",
             ));
         }
+    }
+    let focused = focus_facebook_publish_editor(session, false).await;
+    if !matches!(&focused, Ok(editor) if editor.ok && editor.focused) {
+        return Ok(facebook_publish_result(
+            EffectPhase::NotStarted,
+            params.record_id,
+            params.seq,
+            "fill_field",
+            false,
+            false,
+            "composer_focus_failed",
+        ));
     }
 
     let typing_deadline_unix_ms = deadline_unix_ms.saturating_sub(FACEBOOK_PUBLISH_FILL_RESERVE_MS);
@@ -580,7 +604,15 @@ enum FacebookPublishCleanup {
 
 async fn clear_facebook_publish_editor(session: &mut EngineSession) -> FacebookPublishCleanup {
     for _ in 0..2 {
-        if clear_focused_text(session).await.is_err() {
+        let focused = match focus_facebook_publish_editor(session, true).await {
+            Ok(editor) if !editor.ok => return FacebookPublishCleanup::ComposerGone,
+            Ok(editor) if editor.focused && editor.selected => editor,
+            Ok(_) | Err(_) => return FacebookPublishCleanup::Dirty,
+        };
+        if focused.value.is_none() {
+            return FacebookPublishCleanup::Dirty;
+        }
+        if delete_selected_text(session).await.is_err() {
             return FacebookPublishCleanup::Dirty;
         }
         match probe_facebook_publish_editor(session).await {

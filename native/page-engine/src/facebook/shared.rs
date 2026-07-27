@@ -139,6 +139,16 @@ pub(crate) async fn probe_facebook_comment_editor(
     facebook::text_target_from_cdp(&raw)
 }
 
+pub(crate) async fn focus_facebook_comment_editor(
+    session: &mut EngineSession,
+    note_id: &str,
+    select_contents: bool,
+) -> Result<facebook::FacebookTextTarget, EngineError> {
+    let expression = facebook::comment_editor_focus_expression(note_id, select_contents)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::text_target_from_cdp(&raw)
+}
+
 pub(crate) async fn probe_facebook_comment_ack(
     session: &mut EngineSession,
     note_id: &str,
@@ -182,6 +192,15 @@ pub(crate) async fn probe_facebook_publish_editor(
     facebook::text_target_from_cdp(&raw)
 }
 
+pub(crate) async fn focus_facebook_publish_editor(
+    session: &mut EngineSession,
+    select_contents: bool,
+) -> Result<facebook::FacebookTextTarget, EngineError> {
+    let expression = facebook::publish_editor_focus_expression(select_contents)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::text_target_from_cdp(&raw)
+}
+
 pub(crate) async fn probe_facebook_publish_submit(
     session: &mut EngineSession,
 ) -> Result<facebook::FacebookPublishSubmitProbe, EngineError> {
@@ -198,16 +217,7 @@ pub(crate) async fn probe_facebook_publish_submitted(
     facebook::publish_submitted_probe_from_cdp(&raw)
 }
 
-pub(crate) async fn clear_focused_text(session: &mut EngineSession) -> Result<(), EngineError> {
-    let modifier = if cfg!(target_os = "macos") { 4 } else { 2 };
-    session
-        .cdp
-        .dispatch_key_with_modifiers("keyDown", "a", "KeyA", 65, modifier)
-        .await?;
-    session
-        .cdp
-        .dispatch_key_with_modifiers("keyUp", "a", "KeyA", 65, modifier)
-        .await?;
+pub(crate) async fn delete_selected_text(session: &mut EngineSession) -> Result<(), EngineError> {
     session
         .cdp
         .dispatch_key("keyDown", "Backspace", "Backspace", 8)

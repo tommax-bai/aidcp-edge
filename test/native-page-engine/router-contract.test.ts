@@ -10,6 +10,13 @@ const source = await readFile(resolve(repoRoot, 'native/page-engine/src/xhs-comm
 const run = Function(`return (${source})`)() as (
   input: { kind: string; params: Record<string, unknown> },
 ) => Promise<{ effectPhase: string; output: { kind: string; value: Record<string, unknown> } }>;
+const searchInputSource = await readFile(
+  resolve(repoRoot, 'native/page-engine/src/xhs-search-input-geometry.js'),
+  'utf8',
+);
+const runSearchInput = Function(`return (${searchInputSource})`)() as (
+  mode: 'geometry' | 'focus' | 'focus-clear',
+) => { found: boolean; focused?: boolean; value?: string; x?: number; y?: number };
 
 function install(html: string, url = 'https://www.xiaohongshu.com/explore'): JSDOM {
   const dom = new JSDOM(html, { url });
@@ -56,6 +63,22 @@ test('accepts search_result_ai for the requested keyword and reads cards without
   assert.equal(result.output.kind, 'page_cards');
   const cards = result.output.value.cards as Array<Record<string, unknown>>;
   assert.equal(cards[0]?.noteId, 'searchn1');
+});
+
+test('search input helper selects the visible instance and confirms exact focus before clearing', () => {
+  const dom = install(`
+    <textarea name="aiSearchTextarea" id="hidden" style="display:none">hidden value</textarea>
+    <textarea name="aiSearchTextarea" id="visible">stale query</textarea>
+  `);
+  const geometry = runSearchInput('geometry');
+  assert.equal(geometry.found, true);
+  assert.equal(typeof geometry.x, 'number');
+
+  const cleared = runSearchInput('focus-clear');
+  assert.deepEqual(cleared, { found: true, focused: true, value: '' });
+  assert.equal(dom.window.document.activeElement?.id, 'visible');
+  assert.equal((dom.window.document.querySelector('#visible') as HTMLTextAreaElement).value, '');
+  assert.equal((dom.window.document.querySelector('#hidden') as HTMLTextAreaElement).value, 'hidden value');
 });
 
 test('binds an interaction to the current note and verifies the changed state', async () => {

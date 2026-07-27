@@ -110,28 +110,35 @@ pub(crate) async fn execute_facebook_comment(
         ));
     };
     dispatch_facebook_click(session, x, y).await?;
-    if clear_focused_text(session).await.is_err() {
+    let cleanup = clear_facebook_comment_editor(session, &params.note_id).await;
+    if !matches!(cleanup, FacebookCommentCleanup::Cleared) {
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
             "comment",
             false,
-            "comment_editor_clear_failed",
+            match cleanup {
+                FacebookCommentCleanup::TargetGone => "editor_not_found",
+                FacebookCommentCleanup::FocusFailed => "comment_editor_focus_failed",
+                FacebookCommentCleanup::Dirty => "comment_editor_clear_failed",
+                FacebookCommentCleanup::Cleared => unreachable!(),
+            },
             Some(params.note_id.clone()),
             None,
         ));
     }
-    let clean =
-        facebook_comment_editor_matches(session, &params.note_id, "", Duration::from_secs(1)).await;
-    if !matches!(&clean, Ok(true)) {
+    let focused = focus_facebook_comment_editor(session, &params.note_id, false).await;
+    if !matches!(&focused, Ok(editor)
+    if editor.ok
+        && editor.focused
+        && editor.value.as_deref().is_some_and(|value| {
+            normalize_facebook_text(value).is_empty()
+        }))
+    {
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
             "comment",
             false,
-            if clean.is_err() {
-                "comment_editor_probe_failed"
-            } else {
-                "comment_editor_not_clean"
-            },
+            "comment_editor_focus_failed",
             Some(params.note_id.clone()),
             None,
         ));
@@ -146,7 +153,7 @@ pub(crate) async fn execute_facebook_comment(
     )
     .await
     {
-        let _ = clear_focused_text(session).await;
+        let _ = clear_facebook_comment_editor(session, &params.note_id).await;
         if matches!(failure, TextInputFailure::Cancelled) {
             return Err(cancelled_before_dispatch());
         }
@@ -171,7 +178,7 @@ pub(crate) async fn execute_facebook_comment(
     )
     .await;
     if !matches!(&accepted, Ok(true)) {
-        let _ = clear_focused_text(session).await;
+        let _ = clear_facebook_comment_editor(session, &params.note_id).await;
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
             "comment",
@@ -186,19 +193,19 @@ pub(crate) async fn execute_facebook_comment(
         ));
     }
     if let Some(output) = ensure_facebook_action_gate(session, command).await? {
-        let _ = clear_focused_text(session).await;
+        let _ = clear_facebook_comment_editor(session, &params.note_id).await;
         return Ok((EffectPhase::NotStarted, output));
     }
     if let Err(error) =
         enter_facebook_commit_window(command, commit_windows, deadline_unix_ms, cancellation).await
     {
-        let _ = clear_focused_text(session).await;
+        let _ = clear_facebook_comment_editor(session, &params.note_id).await;
         return Err(error);
     }
     let protected_editor = match probe_facebook_comment_editor(session, &params.note_id).await {
         Ok(editor) => editor,
         Err(_) => {
-            let _ = clear_focused_text(session).await;
+            let _ = clear_facebook_comment_editor(session, &params.note_id).await;
             return Ok(facebook_action_result(
                 EffectPhase::NotStarted,
                 "comment",
@@ -214,7 +221,7 @@ pub(crate) async fn execute_facebook_comment(
             normalize_facebook_text(value) != normalize_facebook_text(&full_text)
         })
     {
-        let _ = clear_focused_text(session).await;
+        let _ = clear_facebook_comment_editor(session, &params.note_id).await;
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
             "comment",
@@ -225,16 +232,34 @@ pub(crate) async fn execute_facebook_comment(
         ));
     }
     if facebook_command_cancelled(cancellation) {
-        let _ = clear_focused_text(session).await;
+        let _ = clear_facebook_comment_editor(session, &params.note_id).await;
         return Err(cancelled_before_dispatch());
     }
     if unix_time_ms() >= deadline_unix_ms {
-        let _ = clear_focused_text(session).await;
+        let _ = clear_facebook_comment_editor(session, &params.note_id).await;
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
             "comment",
             false,
             "deadline_expired_before_dispatch",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    let focused = focus_facebook_comment_editor(session, &params.note_id, false).await;
+    if !matches!(&focused, Ok(editor)
+    if editor.ok
+        && editor.focused
+        && editor.value.as_deref().is_some_and(|value| {
+            normalize_facebook_text(value) == normalize_facebook_text(&full_text)
+        }))
+    {
+        let _ = clear_facebook_comment_editor(session, &params.note_id).await;
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            "comment_editor_focus_failed",
             Some(params.note_id.clone()),
             None,
         ));
@@ -317,6 +342,37 @@ pub(crate) async fn execute_facebook_comment(
             ));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FacebookCommentCleanup {
+    Cleared,
+    TargetGone,
+    FocusFailed,
+    Dirty,
+}
+
+async fn clear_facebook_comment_editor(
+    session: &mut EngineSession,
+    note_id: &str,
+) -> FacebookCommentCleanup {
+    let focused = match focus_facebook_comment_editor(session, note_id, true).await {
+        Ok(editor) => editor,
+        Err(_) => return FacebookCommentCleanup::Dirty,
+    };
+    if !focused.ok {
+        return FacebookCommentCleanup::TargetGone;
+    }
+    if !focused.focused || !focused.selected {
+        return FacebookCommentCleanup::FocusFailed;
+    }
+    if delete_selected_text(session).await.is_err() {
+        return FacebookCommentCleanup::Dirty;
+    }
+    match facebook_comment_editor_matches(session, note_id, "", Duration::from_secs(1)).await {
+        Ok(true) => FacebookCommentCleanup::Cleared,
+        Ok(false) | Err(_) => FacebookCommentCleanup::Dirty,
     }
 }
 

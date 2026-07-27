@@ -26,6 +26,7 @@ function install(html: string, url = 'https://www.facebook.com/'): JSDOM {
     HTMLInputElement: dom.window.HTMLInputElement,
     HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
     getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+    getSelection: dom.window.getSelection.bind(dom.window),
     innerHeight: 800,
     innerWidth: 1_440,
   });
@@ -1690,4 +1691,51 @@ test('Facebook publish keeps unsupported generic atoms honest and captures one m
   assert.equal(capture.output.kind, 'publish_receipt');
   assert.equal(capture.output.value.ok, true);
   assert.equal(capture.output.value.postUrl, 'https://www.facebook.com/Alice/posts/pfbidNew');
+});
+
+test('Facebook publish focus probe binds and selects the exact composer editor', async () => {
+  const dom = install(`
+    <div role="dialog">
+      <div aria-label="Create a post"></div>
+      <div id="composer" contenteditable="true" role="textbox">stale draft</div>
+    </div>
+    <input id="decoy" value="wrong target">
+  `);
+  const result = await run({
+    kind: 'publish_editor_probe',
+    params: { focus: true, selectContents: true },
+  });
+  assert.equal(result.output.value.ok, true);
+  assert.equal(result.output.value.focused, true);
+  assert.equal(result.output.value.selected, true);
+  assert.equal(dom.window.document.activeElement?.id, 'composer');
+  assert.equal(dom.window.getSelection()?.toString(), 'stale draft');
+});
+
+test('Facebook comment focus probe reports failure instead of typing through a wrong active element', async () => {
+  const dom = install(`
+    <article role="article">
+      <a href="/groups/42/posts/7">post</a>
+      <div id="comment" contenteditable="true" role="textbox" aria-label="Write a comment"></div>
+    </article>
+    <input id="decoy">
+  `, 'https://www.facebook.com/groups/42/posts/7');
+  const editor = dom.window.document.querySelector('#comment') as HTMLElement;
+  const decoy = dom.window.document.querySelector('#decoy') as HTMLInputElement;
+  decoy.focus();
+  Object.defineProperty(editor, 'focus', { configurable: true, value: () => undefined });
+  Object.defineProperty(editor, 'click', { configurable: true, value: () => undefined });
+
+  const result = await run({
+    kind: 'comment_editor_probe',
+    params: {
+      noteId: 'https://www.facebook.com/groups/42/posts/7',
+      focus: true,
+      selectContents: true,
+    },
+  });
+  assert.equal(result.output.value.ok, true);
+  assert.equal(result.output.value.focused, false);
+  assert.equal(result.output.value.selected, false);
+  assert.equal(dom.window.document.activeElement?.id, 'decoy');
 });

@@ -52,15 +52,15 @@ pub fn file_input_selector() -> Result<String, EngineError> {
         .map_err(|_| invalid_result())
 }
 
-pub fn search_input_geometry_expression() -> Result<String, EngineError> {
+pub fn search_input_expression(mode: &str) -> Result<String, EngineError> {
     let decoded: Vec<u8> = XHS_SEARCH_INPUT_GEOMETRY_BYTES
         .iter()
         .enumerate()
         .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])
         .collect();
-    String::from_utf8(decoded)
-        .map(|value| value.trim().to_owned())
-        .map_err(|_| invalid_result())
+    let source = String::from_utf8(decoded).map_err(|_| invalid_result())?;
+    let mode = serde_json::to_string(mode).map_err(|_| invalid_result())?;
+    Ok(format!("({})({mode})", source.trim()))
 }
 
 pub fn result_from_cdp(result: &Value) -> Result<BrowserCommandResult, EngineError> {

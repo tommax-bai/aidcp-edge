@@ -83,7 +83,21 @@
     const editor=candidates[0];
     const target=point(editor);
     const value='value' in editor?String(editor.value||''):norm(editor.innerText||editor.textContent||'',32000);
-    return {ok:Boolean(target),...(target||{}),reason:target?undefined:'composer_editor_not_found',value};
+    if(!p.focus)return {ok:Boolean(target),...(target||{}),reason:target?undefined:'composer_editor_not_found',value};
+    editor.scrollIntoView&&editor.scrollIntoView({block:'center',inline:'center'});
+    try{editor.focus();editor.click&&editor.click();editor.focus();}catch{}
+    const focused=document.activeElement===editor;
+    let selected=false;
+    if(focused&&p.selectContents){
+      try{
+        if(typeof editor.select==='function'){editor.select();selected=true;}
+        else{
+          const range=document.createRange();range.selectNodeContents(editor);
+          const selection=getSelection();selection.removeAllRanges();selection.addRange(range);selected=true;
+        }
+      }catch{}
+    }
+    return {ok:Boolean(target),...(target||{}),reason:target?undefined:'composer_editor_not_found',value,focused,selected};
   };
   const publishSubmitProbe=()=>{
     const root=publishDialog();

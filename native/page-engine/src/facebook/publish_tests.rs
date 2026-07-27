@@ -28,6 +28,7 @@ enum PublishScenario {
     FillAccepted,
     FillDelayedReadback,
     FillRejected,
+    FillFocusRejected,
 }
 
 #[derive(Default)]
@@ -42,6 +43,8 @@ struct FakeCalls {
     inserted_texts: Vec<String>,
     editor_value: String,
     backspaces: usize,
+    editor_focused: bool,
+    editor_selected: bool,
 }
 
 fn browser_result(kind: &str, value: Value) -> Value {
@@ -55,10 +58,13 @@ fn browser_result(kind: &str, value: Value) -> Value {
     })
 }
 
-fn expression_kind(expression: &str) -> &str {
+fn expression_input(expression: &str) -> Value {
     let start = expression.rfind(")({").expect("router expression input") + 2;
-    let input: Value =
-        serde_json::from_str(&expression[start..expression.len() - 1]).expect("router input");
+    serde_json::from_str(&expression[start..expression.len() - 1]).expect("router input")
+}
+
+fn expression_kind(expression: &str) -> &str {
+    let input = expression_input(expression);
     match input.get("kind").and_then(Value::as_str) {
         Some("page_probe") => "page_probe",
         Some("consent_probe") => "consent_probe",
@@ -155,6 +161,17 @@ fn evaluated_result(scenario: PublishScenario, calls: &mut FakeCalls, expression
         }
         "publish_editor_probe" => {
             calls.editor_probes += 1;
+            let input = expression_input(expression);
+            let focus_requested =
+                input.pointer("/params/focus").and_then(Value::as_bool) == Some(true);
+            let select_requested = input
+                .pointer("/params/selectContents")
+                .and_then(Value::as_bool)
+                == Some(true);
+            if focus_requested {
+                calls.editor_focused = !matches!(scenario, PublishScenario::FillFocusRejected);
+                calls.editor_selected = calls.editor_focused && select_requested;
+            }
             if matches!(scenario, PublishScenario::TransientPostClickProbe)
                 && calls.mouse_releases > 0
                 && calls.editor_probes == 2
@@ -168,6 +185,7 @@ fn evaluated_result(scenario: PublishScenario, calls: &mut FakeCalls, expression
                     | PublishScenario::FillAccepted
                     | PublishScenario::FillDelayedReadback
                     | PublishScenario::FillRejected
+                    | PublishScenario::FillFocusRejected
             ) || (matches!(
                 scenario,
                 PublishScenario::LateEntry
@@ -184,7 +202,14 @@ fn evaluated_result(scenario: PublishScenario, calls: &mut FakeCalls, expression
                     } else {
                         calls.editor_value.clone()
                     };
-                    json!({ "ok": true, "cx": 180.0, "cy": 140.0, "value": value })
+                    json!({
+                        "ok": true,
+                        "cx": 180.0,
+                        "cy": 140.0,
+                        "value": value,
+                        "focused": calls.editor_focused,
+                        "selected": calls.editor_selected
+                    })
                 } else {
                     json!({ "ok": false, "reason": "composer_not_open" })
                 },
@@ -310,7 +335,10 @@ async fn fake_session(
                     {
                         let mut calls = server_calls.lock().expect("calls");
                         calls.backspaces += 1;
-                        calls.editor_value.clear();
+                        if calls.editor_focused && calls.editor_selected {
+                            calls.editor_value.clear();
+                            calls.editor_selected = false;
+                        }
                     }
                     json!({})
                 }
@@ -321,9 +349,12 @@ async fn fake_session(
                         .expect("insert text")
                         .to_owned();
                     let mut calls = server_calls.lock().expect("calls");
-                    calls.inserted_texts.push(inserted.clone());
-                    if !matches!(scenario, PublishScenario::FillRejected) {
-                        calls.editor_value.push_str(&inserted);
+                    if calls.editor_focused {
+                        calls.inserted_texts.push(inserted.clone());
+                        calls.editor_selected = false;
+                        if !matches!(scenario, PublishScenario::FillRejected) {
+                            calls.editor_value.push_str(&inserted);
+                        }
                     }
                     json!({})
                 }
@@ -754,6 +785,29 @@ async fn fill_rejection_clears_the_editor_and_never_confirms() {
         assert!(calls.editor_value.is_empty());
         assert_eq!(calls.inserted_texts.len(), "Việt".chars().count());
     }
+    session.cdp.close().await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn fill_focus_rejection_stops_before_any_character_dispatch() {
+    let (mut session, calls, server) = fake_session(PublishScenario::FillFocusRejected).await;
+    let (params, command) = fill_command("Việt");
+
+    let (phase, output) = execute_facebook_publish_fill(
+        &mut session,
+        &params,
+        &command,
+        None,
+        unix_time_ms() + 30_000,
+    )
+    .await
+    .expect("focus rejection");
+    let receipt = receipt(output);
+
+    assert_eq!(phase, EffectPhase::NotStarted);
+    assert_eq!(receipt.error.as_deref(), Some("composer_focus_failed"));
+    assert!(calls.lock().expect("calls").inserted_texts.is_empty());
     session.cdp.close().await;
     server.await.expect("server");
 }

@@ -305,6 +305,10 @@ pub struct FacebookTextTarget {
     pub cy: Option<f64>,
     #[serde(default)]
     pub value: Option<String>,
+    #[serde(default)]
+    pub focused: bool,
+    #[serde(default)]
+    pub selected: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -471,6 +475,20 @@ pub fn comment_editor_probe_expression(note_id: &str) -> Result<String, EngineEr
     internal_expression("comment_editor_probe", json!({ "noteId": note_id }))
 }
 
+pub fn comment_editor_focus_expression(
+    note_id: &str,
+    select_contents: bool,
+) -> Result<String, EngineError> {
+    internal_expression(
+        "comment_editor_probe",
+        json!({
+            "noteId": note_id,
+            "focus": true,
+            "selectContents": select_contents
+        }),
+    )
+}
+
 pub fn comment_ack_probe_expression(
     note_id: &str,
     text: &str,
@@ -500,6 +518,13 @@ pub fn publish_entry_probe_expression() -> Result<String, EngineError> {
 
 pub fn publish_editor_probe_expression() -> Result<String, EngineError> {
     internal_expression("publish_editor_probe", json!({}))
+}
+
+pub fn publish_editor_focus_expression(select_contents: bool) -> Result<String, EngineError> {
+    internal_expression(
+        "publish_editor_probe",
+        json!({ "focus": true, "selectContents": select_contents }),
+    )
 }
 
 pub fn publish_submit_probe_expression() -> Result<String, EngineError> {

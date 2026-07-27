@@ -716,7 +716,7 @@ async fn execute_search(
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
-    let search_input_geometry = xhs::search_input_geometry_expression()?;
+    let search_input_geometry = xhs::search_input_expression("geometry")?;
     let geometry = session.cdp.evaluate(&search_input_geometry, false).await?;
     let Some(x) = geometry
         .pointer("/result/value/x")
@@ -748,38 +748,25 @@ async fn execute_search(
         .cdp
         .dispatch_mouse("mouseReleased", x, y, "left", 1)
         .await?;
-    let modifier = if cfg!(target_os = "macos") { 4 } else { 2 };
-    session
-        .cdp
-        .dispatch_key_with_modifiers("keyDown", "a", "KeyA", 65, modifier)
-        .await?;
-    session
-        .cdp
-        .dispatch_key_with_modifiers("keyUp", "a", "KeyA", 65, modifier)
-        .await?;
-    session
-        .cdp
-        .dispatch_key("keyDown", "Backspace", "Backspace", 8)
-        .await?;
-    session
-        .cdp
-        .dispatch_key("keyUp", "Backspace", "Backspace", 8)
-        .await?;
-    match focused_text_matches(session, "").await {
-        Ok(true) => {}
-        Ok(false) => {
-            return Ok(search_receipt(
-                EffectPhase::NotStarted,
-                "search_input_not_clean",
-            ));
-        }
-        Err(_) => {
-            clear_active_text_best_effort(session).await;
-            return Ok(search_receipt(
-                EffectPhase::NotStarted,
-                "search_input_readback_failed",
-            ));
-        }
+    let focused = probe_xhs_search_input(session, "focus-clear").await?;
+    if !xhs_search_input_flag(&focused, "found") {
+        return Ok(search_receipt(
+            EffectPhase::NotStarted,
+            "search_input_not_found",
+        ));
+    }
+    if !xhs_search_input_flag(&focused, "focused") {
+        return Ok(search_receipt(
+            EffectPhase::NotStarted,
+            "search_input_focus_failed",
+        ));
+    }
+    if xhs_search_input_value(&focused) != Some("") {
+        clear_xhs_search_input_best_effort(session).await;
+        return Ok(search_receipt(
+            EffectPhase::NotStarted,
+            "search_input_not_clean",
+        ));
     }
     if let Err(failure) = type_text_humanized(
         &mut session.cdp,
@@ -789,7 +776,7 @@ async fn execute_search(
     )
     .await
     {
-        clear_active_text_best_effort(session).await;
+        clear_xhs_search_input_best_effort(session).await;
         if matches!(failure, TextInputFailure::Cancelled) {
             return Err(cancelled_before_dispatch());
         }
@@ -802,27 +789,34 @@ async fn execute_search(
             },
         ));
     }
-    match focused_text_matches(session, &params.keyword).await {
-        Ok(true) => {}
-        Ok(false) => {
-            clear_active_text_best_effort(session).await;
-            return Ok(search_receipt(
-                EffectPhase::NotStarted,
-                "search_input_readback_mismatch",
-            ));
-        }
+    let focused = match probe_xhs_search_input(session, "focus").await {
+        Ok(value) => value,
         Err(_) => {
-            clear_active_text_best_effort(session).await;
+            clear_xhs_search_input_best_effort(session).await;
             return Ok(search_receipt(
                 EffectPhase::NotStarted,
                 "search_input_readback_failed",
             ));
         }
+    };
+    if !xhs_search_input_flag(&focused, "focused") {
+        clear_xhs_search_input_best_effort(session).await;
+        return Ok(search_receipt(
+            EffectPhase::NotStarted,
+            "search_input_focus_lost",
+        ));
+    }
+    if xhs_search_input_value(&focused) != Some(params.keyword.as_str()) {
+        clear_xhs_search_input_best_effort(session).await;
+        return Ok(search_receipt(
+            EffectPhase::NotStarted,
+            "search_input_readback_mismatch",
+        ));
     }
     if let Some(cancellation) = cancellation {
         tokio::select! {
             _ = wait_for_cancellation(cancellation) => {
-                clear_active_text_best_effort(session).await;
+                clear_xhs_search_input_best_effort(session).await;
                 return Err(cancelled_before_dispatch());
             }
             _ = tokio::time::sleep(Duration::from_millis(700)) => {}
@@ -831,14 +825,24 @@ async fn execute_search(
         tokio::time::sleep(Duration::from_millis(700)).await;
     }
     if cancellation.is_some_and(|value| value.load(Ordering::Acquire)) {
-        clear_active_text_best_effort(session).await;
+        clear_xhs_search_input_best_effort(session).await;
         return Err(cancelled_before_dispatch());
     }
     if unix_time_ms() >= deadline_unix_ms {
-        clear_active_text_best_effort(session).await;
+        clear_xhs_search_input_best_effort(session).await;
         return Ok(search_receipt(
             EffectPhase::NotStarted,
             "search_input_deadline_exceeded",
+        ));
+    }
+    let focused = probe_xhs_search_input(session, "focus").await?;
+    if !xhs_search_input_flag(&focused, "focused")
+        || xhs_search_input_value(&focused) != Some(params.keyword.as_str())
+    {
+        clear_xhs_search_input_best_effort(session).await;
+        return Ok(search_receipt(
+            EffectPhase::NotStarted,
+            "search_input_focus_lost",
         ));
     }
     for attempt in 0..2 {
@@ -880,6 +884,31 @@ async fn execute_search(
     ))
 }
 
+async fn probe_xhs_search_input(
+    session: &mut EngineSession,
+    mode: &str,
+) -> Result<serde_json::Value, EngineError> {
+    let expression = xhs::search_input_expression(mode)?;
+    session.cdp.evaluate(&expression, false).await
+}
+
+fn xhs_search_input_flag(value: &serde_json::Value, name: &str) -> bool {
+    value
+        .pointer(&format!("/result/value/{name}"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn xhs_search_input_value(value: &serde_json::Value) -> Option<&str> {
+    value
+        .pointer("/result/value/value")
+        .and_then(serde_json::Value::as_str)
+}
+
+async fn clear_xhs_search_input_best_effort(session: &mut EngineSession) {
+    let _ = probe_xhs_search_input(session, "focus-clear").await;
+}
+
 async fn focused_text_matches(
     session: &mut EngineSession,
     expected: &str,
@@ -897,24 +926,91 @@ async fn focused_text_matches(
         == Some(expected))
 }
 
-async fn clear_active_text_best_effort(session: &mut EngineSession) {
-    let modifier = if cfg!(target_os = "macos") { 4 } else { 2 };
-    let _ = session
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FocusTier {
+    Editable,
+    Opaque,
+    None,
+}
+
+async fn probe_active_focus_tier(session: &mut EngineSession) -> Result<FocusTier, EngineError> {
+    let result = session
         .cdp
-        .dispatch_key_with_modifiers("keyDown", "a", "KeyA", 65, modifier)
-        .await;
-    let _ = session
-        .cdp
-        .dispatch_key_with_modifiers("keyUp", "a", "KeyA", 65, modifier)
-        .await;
-    let _ = session
+        .evaluate(
+            "(()=>{const e=document.activeElement;if(!e||e===document.body||e===document.documentElement)return 'none';const tag=String(e.tagName||'');const editable=(tag==='INPUT'&&!e.disabled&&!e.readOnly)||(tag==='TEXTAREA'&&!e.disabled&&!e.readOnly)||e.isContentEditable===true;return editable?'editable':'opaque'})()",
+            false,
+        )
+        .await?;
+    Ok(
+        match result
+            .pointer("/result/value")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("editable") => FocusTier::Editable,
+            Some("opaque") => FocusTier::Opaque,
+            _ => FocusTier::None,
+        },
+    )
+}
+
+async fn clear_focused_target(
+    session: &mut EngineSession,
+    focus_tier: FocusTier,
+) -> Result<(), EngineError> {
+    if focus_tier == FocusTier::None {
+        return Err(EngineError::new(
+            ErrorCode::ProbeFailed,
+            "native text input has no focused target",
+        ));
+    }
+    if focus_tier == FocusTier::Editable {
+        let selection = session
+            .cdp
+            .evaluate(
+                "(()=>{const e=document.activeElement;if(!e)return false;try{if(typeof e.select==='function'){e.select();return true}const r=document.createRange();r.selectNodeContents(e);const s=getSelection();s.removeAllRanges();s.addRange(r);return true}catch{return false}})()",
+                false,
+            )
+            .await?;
+        if selection
+            .pointer("/result/value")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            return Err(EngineError::new(
+                ErrorCode::ProbeFailed,
+                "native text input could not select the focused target",
+            ));
+        }
+    } else {
+        let modifier = if cfg!(target_os = "macos") { 4 } else { 2 };
+        session
+            .cdp
+            .dispatch_key_with_modifiers("rawKeyDown", "a", "KeyA", 65, modifier)
+            .await?;
+        session
+            .cdp
+            .dispatch_key_with_modifiers("keyUp", "a", "KeyA", 65, modifier)
+            .await?;
+    }
+    session
         .cdp
         .dispatch_key("keyDown", "Backspace", "Backspace", 8)
-        .await;
-    let _ = session
+        .await?;
+    session
         .cdp
         .dispatch_key("keyUp", "Backspace", "Backspace", 8)
-        .await;
+        .await?;
+    if focus_tier == FocusTier::Editable && !focused_text_matches(session, "").await? {
+        return Err(EngineError::new(
+            ErrorCode::ProbeFailed,
+            "native text input could not clear the focused target",
+        ));
+    }
+    Ok(())
+}
+
+async fn clear_focused_target_best_effort(session: &mut EngineSession, focus_tier: FocusTier) {
+    let _ = clear_focused_target(session, focus_tier).await;
 }
 
 fn search_receipt(phase: EffectPhase, reason: &str) -> (EffectPhase, CommandOutput) {
@@ -1199,40 +1295,36 @@ pub(crate) async fn click_captcha(
             .await?;
         tokio::time::sleep(Duration::from_millis(80)).await;
     }
+    let mut text_focus_tier = None;
     if let Some(text) = &params.text {
-        let modifier = if cfg!(target_os = "macos") { 4 } else { 2 };
-        session
-            .cdp
-            .dispatch_key_with_modifiers("keyDown", "a", "KeyA", 65, modifier)
-            .await?;
-        session
-            .cdp
-            .dispatch_key_with_modifiers("keyUp", "a", "KeyA", 65, modifier)
-            .await?;
-        session
-            .cdp
-            .dispatch_key("keyDown", "Backspace", "Backspace", 8)
-            .await?;
-        session
-            .cdp
-            .dispatch_key("keyUp", "Backspace", "Backspace", 8)
-            .await?;
-        match focused_text_matches(session, "").await {
-            Ok(true) => {}
-            Ok(false) => {
+        let focus_tier = match probe_active_focus_tier(session).await {
+            Ok(FocusTier::None) => {
                 return Ok(captcha_click_result(
                     EffectPhase::Dispatched,
                     false,
-                    "captcha_input_not_clean",
+                    "captcha_input_not_focused",
                 ));
             }
+            Ok(tier) => tier,
             Err(_) => {
                 return Ok(captcha_click_result(
                     EffectPhase::Dispatched,
                     false,
-                    "captcha_input_readback_failed",
+                    "captcha_input_focus_probe_failed",
                 ));
             }
+        };
+        text_focus_tier = Some(focus_tier);
+        if clear_focused_target(session, focus_tier).await.is_err() {
+            return Ok(captcha_click_result(
+                EffectPhase::Dispatched,
+                false,
+                if focus_tier == FocusTier::Editable {
+                    "captcha_input_not_clean"
+                } else {
+                    "captcha_input_clear_failed"
+                },
+            ));
         }
         let typing_deadline = deadline_unix_ms.saturating_sub(
             params
@@ -1245,7 +1337,7 @@ pub(crate) async fn click_captcha(
             type_captcha_with_key_events(&mut session.cdp, text, cancellation, typing_deadline)
                 .await
         {
-            clear_active_text_best_effort(session).await;
+            clear_focused_target_best_effort(session, focus_tier).await;
             return Ok(captcha_click_result(
                 EffectPhase::Dispatched,
                 false,
@@ -1256,27 +1348,33 @@ pub(crate) async fn click_captcha(
                 },
             ));
         }
-        match focused_text_matches(session, text).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return Ok(captcha_click_result(
-                    EffectPhase::Dispatched,
-                    false,
-                    "text_readback_mismatch",
-                ));
-            }
-            Err(_) => {
-                return Ok(captcha_click_result(
-                    EffectPhase::Dispatched,
-                    false,
-                    "text_readback_failed",
-                ));
+        if focus_tier == FocusTier::Editable {
+            match focused_text_matches(session, text).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    clear_focused_target_best_effort(session, focus_tier).await;
+                    return Ok(captcha_click_result(
+                        EffectPhase::Dispatched,
+                        false,
+                        "text_readback_mismatch",
+                    ));
+                }
+                Err(_) => {
+                    clear_focused_target_best_effort(session, focus_tier).await;
+                    return Ok(captcha_click_result(
+                        EffectPhase::Dispatched,
+                        false,
+                        "text_readback_failed",
+                    ));
+                }
             }
         }
     }
     if params.submit.as_deref() == Some("enter") {
         if cancellation.is_some_and(|value| value.load(Ordering::Acquire)) {
-            clear_active_text_best_effort(session).await;
+            if let Some(focus_tier) = text_focus_tier {
+                clear_focused_target_best_effort(session, focus_tier).await;
+            }
             return Ok(captcha_click_result(
                 EffectPhase::Dispatched,
                 false,
@@ -1284,12 +1382,27 @@ pub(crate) async fn click_captcha(
             ));
         }
         if unix_time_ms() >= deadline_unix_ms {
-            clear_active_text_best_effort(session).await;
+            if let Some(focus_tier) = text_focus_tier {
+                clear_focused_target_best_effort(session, focus_tier).await;
+            }
             return Ok(captcha_click_result(
                 EffectPhase::Dispatched,
                 false,
                 "captcha_deadline_exceeded",
             ));
+        }
+        if let Some(expected_tier) = text_focus_tier {
+            let current_tier = probe_active_focus_tier(session)
+                .await
+                .unwrap_or(FocusTier::None);
+            if current_tier != expected_tier {
+                clear_focused_target_best_effort(session, current_tier).await;
+                return Ok(captcha_click_result(
+                    EffectPhase::Dispatched,
+                    false,
+                    "captcha_input_focus_lost",
+                ));
+            }
         }
         session
             .cdp
