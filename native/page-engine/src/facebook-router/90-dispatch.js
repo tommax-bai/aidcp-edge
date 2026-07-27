@@ -1,6 +1,6 @@
   const blocking=blockingProbe();
   const blocked=blocker(blocking);
-  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_bound_editor_probe','publish_upload_target_probe','publish_upload_preview_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
+  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_action_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_bound_editor_probe','publish_upload_target_probe','publish_upload_preview_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
     return fail(kind||'page',blocked);
   }
   if(kind==='identity_read')return done(identity());
@@ -17,6 +17,7 @@
   if(kind==='like_verify')return done({kind:'like_verify',value:likeVerify()});
   if(kind==='like_picker_probe')return done({kind:'point_target',value:likePickerProbe()});
   if(kind==='follow_probe')return done({kind:'follow_probe',value:followProbe()});
+  if(kind==='comment_action_probe')return done({kind:'point_target',value:commentActionProbe()});
   if(kind==='comment_editor_probe')return done({kind:'text_target',value:commentEditorProbe()});
   if(kind==='comment_ack_probe')return done({kind:'comment_ack_probe',value:commentAckProbe()});
   if(kind==='join_probe')return done({kind:'join_probe',value:joinProbe()});

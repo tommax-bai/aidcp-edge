@@ -131,6 +131,15 @@ pub(crate) async fn probe_facebook_follow(
     facebook::follow_probe_from_cdp(&raw)
 }
 
+pub(crate) async fn probe_facebook_comment_action(
+    session: &mut EngineSession,
+    note_id: &str,
+) -> Result<facebook::FacebookPointTarget, EngineError> {
+    let expression = facebook::comment_action_probe_expression(note_id)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::point_target_from_cdp(&raw)
+}
+
 pub(crate) async fn probe_facebook_comment_editor(
     session: &mut EngineSession,
     note_id: &str,

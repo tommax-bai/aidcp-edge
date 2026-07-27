@@ -477,6 +477,10 @@ pub fn follow_probe_expression(note_id: Option<&str>) -> Result<String, EngineEr
     )
 }
 
+pub fn comment_action_probe_expression(note_id: &str) -> Result<String, EngineError> {
+    internal_expression("comment_action_probe", json!({ "noteId": note_id }))
+}
+
 pub fn comment_editor_probe_expression(note_id: &str) -> Result<String, EngineError> {
     internal_expression("comment_editor_probe", json!({ "noteId": note_id }))
 }

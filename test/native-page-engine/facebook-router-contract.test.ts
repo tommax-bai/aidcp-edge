@@ -190,6 +190,61 @@ test('Facebook first-post binds a Vietnamese commentable container without a per
   assert.equal(moved.output.value.reason, 'target_not_found');
 });
 
+test('Facebook first-post returns comment-action coordinates without invoking DOM click', async () => {
+  const dom = install(`
+    <main>
+      <div role="feed">
+        <section id="post">
+          <h2><a href="/groups/718145812202687/user/100014995179767/">Việt Nhật Hà Nam</a></h2>
+          <div data-ad-rendering-role="story_message">Editor requires a trusted pointer gesture</div>
+          <button id="comment-action" aria-label="Viết bình luận">Viết bình luận</button>
+          <button aria-label="Bình luận bằng nhãn dán avatar">Avatar</button>
+          <button aria-label="Bình luận bằng file GIF">GIF</button>
+          <button aria-label="Bình luận bằng nhãn dán">Sticker</button>
+        </section>
+      </div>
+    </main>
+  `, 'https://www.facebook.com/groups/718145812202687');
+  const post = dom.window.document.querySelector('#post')!;
+  const action = dom.window.document.querySelector('#comment-action') as HTMLButtonElement;
+  setRect(post, { left: 120, top: 675, right: 800, bottom: 1_450 });
+  setRect(action, { left: 180, top: 1_320, right: 420, bottom: 1_372 });
+  for (const [index, decoy] of Array.from(post.querySelectorAll('button:not(#comment-action)')).entries()) {
+    setRect(decoy, {
+      left: 440 + index * 60,
+      top: 1_320,
+      right: 490 + index * 60,
+      bottom: 1_372,
+    });
+  }
+  let domClicks = 0;
+  action.click = () => {
+    domClicks += 1;
+  };
+
+  const selected = await run({
+    kind: 'feed_refresh',
+    params: { reason: 'first_commentable_group_post_probe' },
+  });
+  const cards = selected.output.value.cards as Array<Record<string, unknown>>;
+  assert.equal(cards.length, 1);
+  const targetRef = String(cards[0]?.noteId);
+  assert.match(targetRef, /^aidcp:facebook-group-feed-post:v1:[0-9a-f]{64}$/);
+  assert.equal(domClicks, 0);
+
+  const point = await run({
+    kind: 'comment_action_probe',
+    params: { noteId: targetRef },
+  });
+  assert.equal(point.output.kind, 'point_target');
+  assert.deepEqual(point.output.value, {
+    ok: true,
+    cx: 300,
+    cy: 1_346,
+  });
+  assert.equal(domClicks, 0);
+});
+
 test('Facebook first-post rejects an in-place boundary with multiple peer editors', async () => {
   install(`
     <main>

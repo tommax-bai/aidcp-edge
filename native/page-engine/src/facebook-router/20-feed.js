@@ -53,7 +53,15 @@
   const firstPostCommentActions=(root=document)=>all(
     'button,[role="button"],a[role="button"]',
     root,
-  ).filter(visible).filter((button)=>postComment.test(`${label(button)} ${text(button,256)}`));
+  ).filter(visible).filter((button)=>{
+    const raw=`${label(button)} ${text(button,256)}`;
+    if(!postComment.test(raw))return false;
+    return !/(?:avatar|gif|sticker|nhãn dán|nhan dan|emoji|photo|ảnh|anh|video)/i.test(raw);
+  });
+  const associatedFirstPostCommentActions=(root)=>firstPostCommentActions(root).filter((button)=>{
+    const article=closestArticle(button);
+    return !article||article===root;
+  });
   const firstPostBoundary=(control,scope)=>{
     let article=closestArticle(control);
     while(article&&article.parentElement){
@@ -94,16 +102,12 @@
       const card=cardOf(root,0,canonical);
       return card?{card}:{card:null,reason:'target_context_mismatch'};
     }
-    let editors=firstPostCommentEditors(root);
+    const editors=firstPostCommentEditors(root);
     if(editors.length>1)return {card:null,reason:'ambiguous_target'};
     if(editors.length===0){
-      const actions=firstPostCommentActions(root);
+      const actions=associatedFirstPostCommentActions(root);
       if(actions.length!==1)return {card:null,reason:actions.length?'ambiguous_target':'editor_not_found'};
-      if(!click(actions[0]))return {card:null,reason:'editor_not_found'};
-      await sleep(350);
-      editors=firstPostCommentEditors(root);
     }
-    if(editors.length!==1)return {card:null,reason:editors.length?'ambiguous_target':'editor_not_found'};
     const bound=await bindFirstPostTarget(root,evidence);
     if(!bound.ok)return {card:null,reason:bound.reason||'target_context_mismatch'};
     return {card:{

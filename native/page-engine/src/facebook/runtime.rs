@@ -1,8 +1,9 @@
 use super::capability::{self, FacebookCapability};
 use super::shared::{
-    cancelled_before_dispatch, canonical_facebook_post_id, ensure_facebook_action_gate,
-    evaluate_facebook_router, evaluate_facebook_router_until_requested_detail,
-    facebook_action_result, facebook_command_cancelled, probe_facebook_comment_editor,
+    cancelled_before_dispatch, canonical_facebook_post_id, dispatch_facebook_click,
+    ensure_facebook_action_gate, evaluate_facebook_router,
+    evaluate_facebook_router_until_requested_detail, facebook_action_result,
+    facebook_command_cancelled, probe_facebook_comment_action, probe_facebook_comment_editor,
     validate_facebook_origin, validated_facebook_group_url, wait_for_facebook_ready,
 };
 use super::{comment, feed, feed_like, group_join, publish, reels, session};
@@ -164,8 +165,13 @@ async fn execute_first_commentable_group_post(
         wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
     }
 
-    let editor_reason =
-        wait_for_first_post_editor(session, &candidate_id, FIRST_POST_EDITOR_TIMEOUT).await?;
+    let editor_reason = wait_for_first_post_editor(
+        session,
+        &candidate_id,
+        FIRST_POST_EDITOR_TIMEOUT,
+        cancellation,
+    )
+    .await?;
     if let Some(reason) = editor_reason {
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
@@ -333,15 +339,43 @@ async fn wait_for_first_post_editor(
     session: &mut EngineSession,
     note_id: &str,
     timeout: Duration,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<Option<&'static str>, EngineError> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut target_mismatch = false;
+    let mut action_probed = false;
     loop {
+        if facebook_command_cancelled(cancellation) {
+            return Err(cancelled_before_dispatch());
+        }
         let editor = probe_facebook_comment_editor(session, note_id).await?;
         if editor.ok {
             return Ok(None);
         }
-        target_mismatch |= editor.reason.as_deref() == Some("target_context_mismatch");
+        target_mismatch |= matches!(
+            editor.reason.as_deref(),
+            Some("target_context_mismatch" | "target_not_found")
+        );
+        if !action_probed && editor.reason.as_deref() == Some("editor_not_found") {
+            action_probed = true;
+            let action = probe_facebook_comment_action(session, note_id).await?;
+            match action.reason.as_deref() {
+                Some("ambiguous_target") => return Ok(Some("ambiguous_target")),
+                Some("pending_group_approval") => return Ok(Some("pending_group_approval")),
+                Some("target_context_mismatch" | "target_not_found") => target_mismatch = true,
+                _ => {}
+            }
+            if action.ok {
+                let (Some(x), Some(y)) = (action.cx, action.cy) else {
+                    return Ok(Some("editor_not_found"));
+                };
+                if facebook_command_cancelled(cancellation) {
+                    return Err(cancelled_before_dispatch());
+                }
+                dispatch_facebook_click(session, x, y).await?;
+                continue;
+            }
+        }
         if tokio::time::Instant::now() >= deadline {
             return Ok(Some(if target_mismatch {
                 "target_context_mismatch"

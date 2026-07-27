@@ -1,4 +1,19 @@
   const commentPendingApproval=/(待审核|待审批|待批准|等待(?:管理员)?(?:审核|审批|批准)|(?:管理员)?(?:审核|批准)后(?:才)?可见|通过后(?:才)?可见|需(?:要|经)?管理员(?:审核|批准)|pending review|pending approval|awaiting (?:admin(?:istrator)? )?approval|needs? admin(?:istrator)? approval|visible (?:once|after) approved|will be visible (?:once|after))/i;
+  const commentActionProbe=()=>{
+    const root=actionRoot();
+    if(!root)return {ok:false,reason:'target_not_found'};
+    if(participationGate())return {ok:false,reason:'pending_group_approval'};
+    let actions=associatedFirstPostCommentActions(root);
+    if(!actions.length&&!isFirstPostTarget(String(p.noteId||''))){
+      const region=exclusiveArticleRegion(root);
+      actions=region
+        ?firstPostCommentActions(region).filter((button)=>closestArticle(button)===null)
+        :[];
+    }
+    if(actions.length!==1)return {ok:false,reason:actions.length?'ambiguous_target':'editor_not_found'};
+    const target=point(actions[0]);
+    return target?{ok:true,...target}:{ok:false,reason:'editor_not_found'};
+  };
   const commentEditorProbe=()=>{
     const root=actionRoot();
     if(!root)return {ok:false,reason:'target_not_found'};
