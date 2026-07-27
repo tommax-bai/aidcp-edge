@@ -11,9 +11,17 @@ const gostArtifact = require('../../src/electron/gost-artifact.cjs') as {
     resourceDir: string,
     options: Record<string, unknown>,
   ): { binaryPath: string };
+  verifyRuntimeGostArtifact(
+    resourceDir: string,
+    options: Record<string, unknown>,
+  ): { binaryPath: string };
 };
 const nativeArtifact = require('../../src/electron/native-page-engine-artifact.cjs') as {
   verifyPackagedNativePageEngineArtifact(
+    resourceDir: string,
+    options: Record<string, unknown>,
+  ): { binaryPath: string };
+  verifyRuntimeNativePageEngineArtifact(
     resourceDir: string,
     options: Record<string, unknown>,
   ): { binaryPath: string };
@@ -149,4 +157,16 @@ test('signed packaged GOST rejects a mismatched Developer ID Team ID', async () 
     }),
     /Team ID mismatch/,
   );
+});
+
+test('installed runtime checks do not require Developer ID metadata or pre-sign hashes', async () => {
+  const paths = await writeSignedLikeApp();
+  assert.equal(gostArtifact.verifyRuntimeGostArtifact(paths.gostDir, {
+    platform: 'darwin',
+    arch: 'arm64',
+  }).binaryPath, paths.gostPath);
+  assert.equal(nativeArtifact.verifyRuntimeNativePageEngineArtifact(paths.nativeDir, {
+    platform: 'darwin',
+    arch: 'arm64',
+  }).binaryPath, paths.nativePath);
 });

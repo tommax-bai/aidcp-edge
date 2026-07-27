@@ -13,6 +13,10 @@ const artifact = require('../../src/electron/native-page-engine-artifact.cjs') a
     resourceDir: string,
     target: { platform: string; arch: string },
   ): { binaryPath: string; manifest: Record<string, unknown> };
+  verifyRuntimeNativePageEngineArtifact(
+    resourceDir: string,
+    target: { platform: string; arch: string },
+  ): { binaryPath: string; manifest: Record<string, unknown> };
 };
 
 function macho(cpuType: number): Buffer {
@@ -52,5 +56,36 @@ test('rejects a manifest that lies about the binary architecture', async () => {
   assert.throws(
     () => artifact.verifyNativePageEngineArtifact(dir, { platform: 'darwin', arch: 'x64' }),
     /architecture mismatch/,
+  );
+});
+
+test('installed runtime accepts signed-byte drift while retaining manifest and architecture checks', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aidcp-native-runtime-artifact-'));
+  const binary = macho(0x0100000c);
+  const binaryPath = join(dir, 'aidcp-page-engine');
+  await writeFile(binaryPath, binary);
+  await chmod(binaryPath, 0o755);
+  await writeFile(join(dir, 'manifest.json'), JSON.stringify({
+    schemaVersion: 1,
+    engineVersion: '0.1.0',
+    protocolVersion: 2,
+    platformAdapterVersion: 'multi-platform-v1',
+    platformAdapters: [
+      { platform: 'xiaohongshu', adapterVersion: 'xiaohongshu-v1' },
+      { platform: 'facebook', adapterVersion: 'facebook-v1' },
+      { platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' },
+    ],
+    capabilityDigest: '89c8488c1e475780b6b9fedde8b14fcb06d5285884e5bda1d325ef26da4b1c71',
+    platform: 'darwin',
+    arch: 'arm64',
+    executable: 'aidcp-page-engine',
+    sha256: '0'.repeat(64),
+  }));
+  assert.equal(
+    artifact.verifyRuntimeNativePageEngineArtifact(
+      dir,
+      { platform: 'darwin', arch: 'arm64' },
+    ).binaryPath,
+    binaryPath,
   );
 });

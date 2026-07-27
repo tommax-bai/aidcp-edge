@@ -12,6 +12,13 @@ const binary = require('../../src/electron/gost-binary.cjs') as {
 };
 const ARM64_ARCHIVE_SHA256 = 'e54f6c22e81c00650adfbbb23317c74a4dca9b9b73fa28cfa150f5559cc3ff2e';
 
+function arm64MachO(): Buffer {
+  const binary = Buffer.alloc(16);
+  binary.writeUInt32BE(0xcffaedfe, 0);
+  binary.writeUInt32LE(0x0100000c, 4);
+  return binary;
+}
+
 async function writeStagedArtifact(root: string, contents = '#!/bin/sh\nexit 0\n') {
   const staged = join(root, 'build', 'gost', 'darwin-arm64');
   await mkdir(staged, { recursive: true });
@@ -31,6 +38,27 @@ async function writeStagedArtifact(root: string, contents = '#!/bin/sh\nexit 0\n
     license: 'LICENSE',
   }));
   return stagedBinary;
+}
+
+async function writePackagedArtifact(resourcesPath: string) {
+  const packaged = join(resourcesPath, 'gost');
+  await mkdir(packaged, { recursive: true });
+  const packagedBinary = join(packaged, 'gost');
+  await writeFile(packagedBinary, arm64MachO());
+  await chmod(packagedBinary, 0o755);
+  await writeFile(join(packaged, 'LICENSE'), 'MIT License\n\nCopyright (c) 2016 ginuerzh\n');
+  await writeFile(join(packaged, 'manifest.json'), JSON.stringify({
+    schemaVersion: 1,
+    name: 'gost',
+    version: '3.2.6',
+    platform: 'darwin',
+    arch: 'arm64',
+    archiveSha256: ARM64_ARCHIVE_SHA256,
+    binary: 'gost',
+    binarySha256: '0'.repeat(64),
+    license: 'LICENSE',
+  }));
+  return packagedBinary;
 }
 
 test('gost binary resolver prefers explicit executable and otherwise uses staged dev resource', async () => {
@@ -76,16 +104,34 @@ test('gost binary resolver rejects a tampered staged artifact', async () => {
   }), { ok: false, reason: 'proxy_chain_binary_missing' });
 });
 
-test('packaged resolver ignores an external GOST override', async () => {
+test('packaged resolver ignores an external GOST override and accepts signed-byte drift', async () => {
   const root = await mkdtemp(join(tmpdir(), 'aidcp-gost-packaged-override-'));
+  const resourcesPath = join(root, 'AIDCP.app', 'Contents', 'Resources');
+  const packagedBinary = await writePackagedArtifact(resourcesPath);
   const explicit = join(root, 'external-gost');
   await writeFile(explicit, '#!/bin/sh\nexit 0\n');
   await chmod(explicit, 0o755);
   assert.deepEqual(binary.resolveGostBinaryPath({
-    resourcesPath: join(root, 'AIDCP.app', 'Contents', 'Resources'),
+    resourcesPath,
     isPackaged: true,
     platform: 'darwin',
     arch: 'arm64',
     env: { AIDCP_GOST_BINARY: explicit },
+  }), { ok: true, binaryPath: packagedBinary });
+});
+
+test('packaged resolver rejects a wrong-architecture GOST before spawn', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aidcp-gost-packaged-arch-'));
+  const resourcesPath = join(root, 'AIDCP.app', 'Contents', 'Resources');
+  const packagedBinary = await writePackagedArtifact(resourcesPath);
+  const x64 = Buffer.from(arm64MachO());
+  x64.writeUInt32LE(0x01000007, 4);
+  await writeFile(packagedBinary, x64);
+  assert.deepEqual(binary.resolveGostBinaryPath({
+    resourcesPath,
+    isPackaged: true,
+    platform: 'darwin',
+    arch: 'arm64',
+    env: {},
   }), { ok: false, reason: 'proxy_chain_binary_missing' });
 });

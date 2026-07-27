@@ -9,6 +9,8 @@ const root = join(here, '../..');
 const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const stageSource = readFileSync(join(root, 'scripts/stage-gost.mjs'), 'utf8');
 const artifactSource = readFileSync(join(root, 'src/electron/gost-artifact.cjs'), 'utf8');
+const binaryResolverSource = readFileSync(join(root, 'src/electron/gost-binary.cjs'), 'utf8');
+const electronMainSource = readFileSync(join(root, 'src/electron/main.cjs'), 'utf8');
 const afterPackSource = readFileSync(join(root, 'scripts/after-pack.cjs'), 'utf8');
 const afterSignSource = readFileSync(join(root, 'scripts/after-sign.cjs'), 'utf8');
 const signedVerifierSource = readFileSync(join(root, 'scripts/verify-signed-macos-artifacts.cjs'), 'utf8');
@@ -28,6 +30,10 @@ test('macOS desktop builds stage and package a verified GOST resource outside AS
   assert.match(signedVerifierSource, /verifyPackagedGostArtifact\(gostResourceDir/);
   assert.match(signedVerifierSource, /verifyPackagedNativePageEngineArtifact\(nativeResourceDir/);
   assert.match(macBuildSource, /node scripts\/verify-signed-macos-artifacts\.cjs "\$artifact"/);
+  assert.match(binaryResolverSource, /verifyRuntimeGostArtifact\(resourceDir/);
+  assert.doesNotMatch(binaryResolverSource, /verifyPackagedGostArtifact/);
+  assert.match(electronMainSource, /verifyRuntimeNativePageEngineArtifact\(nativeResourceDir\)/);
+  assert.doesNotMatch(electronMainSource, /verifyPackagedNativePageEngineArtifact/);
 });
 
 test('GOST staging pins version and both macOS archive checksums before extraction', () => {

@@ -174,6 +174,16 @@ test('every platform core receives the verified Native Page Engine artifact befo
   );
   assert.match(
     spawnEdgeChild,
+    /verifyRuntimeNativePageEngineArtifact\(nativeResourceDir\)/,
+    'packaged macOS runtime must use the availability verifier rather than repeat release signature checks',
+  );
+  assert.doesNotMatch(
+    spawnEdgeChild,
+    /verifyPackagedNativePageEngineArtifact/,
+    'strict Developer ID verification belongs to afterSign/final release gates, not installed runtime startup',
+  );
+  assert.match(
+    spawnEdgeChild,
     /const nativeArtifactRequiredAtSpawn = normalizePlatform\(handle\.platform\) !== 'wechat_channels'/,
     'XHS and Facebook must fail closed at spawn while WeChat may remain API-only in artifact-less direct development runs',
   );

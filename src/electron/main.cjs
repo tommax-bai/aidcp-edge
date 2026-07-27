@@ -84,7 +84,7 @@ const { validatePersonaKeywordSelections } = require('./persona-request-validati
 const { resolveTrayIconPath } = require('./tray-icon.cjs');
 const {
   verifyNativePageEngineArtifact,
-  verifyPackagedNativePageEngineArtifact,
+  verifyRuntimeNativePageEngineArtifact,
 } = require('./native-page-engine-artifact.cjs');
 
 // ── 实例级 userData 隔离（change edge-multi-instance-userdata-isolation）──────
@@ -4129,9 +4129,7 @@ async function spawnEdgeChild(handle, {
   if (nativeArtifactRequiredAtSpawn || app.isPackaged || fs.existsSync(nativeResourceDir)) {
     try {
       const artifact = app.isPackaged && process.platform === 'darwin'
-        ? verifyPackagedNativePageEngineArtifact(nativeResourceDir, {
-          appBundlePath: path.resolve(process.resourcesPath, '..', '..'),
-        })
+        ? verifyRuntimeNativePageEngineArtifact(nativeResourceDir)
         : verifyNativePageEngineArtifact(nativeResourceDir);
       spawnEnv.AIDCP_NATIVE_PAGE_ENGINE_BINARY = artifact.binaryPath;
     } catch (error) {

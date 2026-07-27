@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { binaryArch } = require('./binary-artifact.cjs');
 const {
   requireSuccessfulCommand,
   runCommand,
@@ -56,6 +57,18 @@ function verifyGostArtifact(resourceDir, target = {}) {
   return artifact;
 }
 
+function verifyRuntimeGostArtifact(resourceDir, {
+  platform = process.platform,
+  arch = process.arch,
+} = {}) {
+  const artifact = readGostArtifact(resourceDir, { platform, arch });
+  const actualArch = binaryArch(fs.readFileSync(artifact.binaryPath), platform);
+  if (actualArch !== arch) {
+    throw new Error(`GOST architecture mismatch: expected ${arch}, got ${actualArch}`);
+  }
+  return artifact;
+}
+
 function verifyPackagedGostArtifact(resourceDir, {
   appBundlePath,
   platform = process.platform,
@@ -89,4 +102,5 @@ module.exports = {
   sha256,
   verifyGostArtifact,
   verifyPackagedGostArtifact,
+  verifyRuntimeGostArtifact,
 };

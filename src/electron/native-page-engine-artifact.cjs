@@ -69,6 +69,13 @@ function verifyNativePageEngineArtifact(
   return artifact;
 }
 
+function verifyRuntimeNativePageEngineArtifact(
+  resourceDir,
+  target = { platform: process.platform, arch: process.arch },
+) {
+  return readNativePageEngineArtifact(resourceDir, target);
+}
+
 function verifyPackagedNativePageEngineArtifact(resourceDir, {
   appBundlePath,
   platform = process.platform,
@@ -98,4 +105,5 @@ module.exports = {
   readNativePageEngineArtifact,
   verifyNativePageEngineArtifact,
   verifyPackagedNativePageEngineArtifact,
+  verifyRuntimeNativePageEngineArtifact,
 };

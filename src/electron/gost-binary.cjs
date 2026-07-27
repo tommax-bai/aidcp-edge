@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   verifyGostArtifact,
-  verifyPackagedGostArtifact,
+  verifyRuntimeGostArtifact,
 } = require('./gost-artifact.cjs');
 
 const GOST_EXECUTABLE = process.platform === 'win32' ? 'gost.exe' : 'gost';
@@ -35,15 +35,11 @@ function resolveGostBinaryPath({
   if (resourceDir) {
     try {
       const verified = isPackaged && platform === 'darwin'
-        ? verifyPackagedGostArtifact(resourceDir, {
-          appBundlePath: path.resolve(resourcesPath, '..', '..'),
-          platform,
-          arch,
-        })
+        ? verifyRuntimeGostArtifact(resourceDir, { platform, arch })
         : verifyGostArtifact(resourceDir, { platform, arch });
       return { ok: true, binaryPath: verified.binaryPath };
     } catch {
-      // Missing, stale, non-executable, or untrusted artifacts all fail closed.
+      // Missing, incompatible, non-executable, or wrong-architecture artifacts all fail closed.
     }
   }
   return { ok: false, reason: 'proxy_chain_binary_missing' };
