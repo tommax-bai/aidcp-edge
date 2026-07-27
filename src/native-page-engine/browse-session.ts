@@ -369,7 +369,9 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         }
         const completed = {
           ...receipt,
-          ...(receipt.observation === undefined && receipt.groupObservation !== undefined
+          ...((receipt.observation === undefined || receipt.observation === null)
+            && receipt.groupObservation !== undefined
+            && receipt.groupObservation !== null
             ? { observation: receipt.groupObservation }
             : {}),
           ok: receipt.ok && execution.effectPhase === 'confirmed',

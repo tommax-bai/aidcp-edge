@@ -185,6 +185,78 @@ test('Native Facebook action receipt logs bounded terminal phase and reason with
   assert.equal(h.logs.some((line) => line.includes('https://')), false);
 });
 
+test('Native Facebook promotes a Rust groupObservation when generic observation is serialized as null', async () => {
+  const groupObservation = {
+    groupUrl: 'https://www.facebook.com/groups/42',
+    title: 'Target group',
+    documentReady: 'complete',
+    scopeResolved: true,
+    joinCtaPresent: true,
+  };
+  const h = harness(async () => ({
+    ok: true,
+    effectPhase: 'confirmed',
+    reasonCode: 'confirmed',
+    output: {
+      kind: 'action_receipt',
+      value: {
+        action: 'join_group',
+        ok: false,
+        reason: 'observation_only',
+        observation: null,
+        groupObservation,
+        groupUrl: groupObservation.groupUrl,
+        clicked: false,
+      },
+    },
+  }), { platform: 'facebook' });
+
+  await h.session.onCloudCommand(envelope('group.join', {
+    taskId: 'task-join-observe',
+    groupUrl: groupObservation.groupUrl,
+    click: false,
+  }));
+
+  assert.deepEqual(h.actions, [{
+    action: 'join_group',
+    ok: false,
+    reason: 'observation_only',
+    observation: groupObservation,
+    groupUrl: groupObservation.groupUrl,
+    clicked: false,
+  }]);
+  assert.equal('groupObservation' in h.actions[0]!, false);
+});
+
+test('Native Facebook keeps an existing generic observation authoritative over groupObservation', async () => {
+  const observation = { source: 'generic' };
+  const h = harness(async () => ({
+    ok: true,
+    effectPhase: 'confirmed',
+    reasonCode: 'confirmed',
+    output: {
+      kind: 'action_receipt',
+      value: {
+        action: 'join_group',
+        ok: false,
+        reason: 'observation_only',
+        observation,
+        groupObservation: { source: 'group' },
+        clicked: false,
+      },
+    },
+  }), { platform: 'facebook' });
+
+  await h.session.onCloudCommand(envelope('group.join', {
+    taskId: 'task-join-observe-existing',
+    groupUrl: 'https://www.facebook.com/groups/42',
+    click: false,
+  }));
+
+  assert.deepEqual(h.actions[0]?.observation, observation);
+  assert.equal('groupObservation' in h.actions[0]!, false);
+});
+
 test('Native Facebook assigns only Join and length-aware comments a long command budget', async () => {
   const h = harness(async () => ({
     ok: true,
