@@ -115,6 +115,7 @@ test('Facebook Feed probe distinguishes loading and visible unreportable article
     assert.equal(result.output.value.loading, true);
     assert.equal(result.output.value.articleCount, 1);
     assert.equal(result.output.value.explicitEmpty, false);
+    assert.equal(result.output.value.explicitEnd, false);
     assert.deepEqual(result.output.value.cards, []);
     assert.equal(Number.isSafeInteger(result.output.value.documentAgeMs), true);
     assert.ok(Number(result.output.value.documentAgeMs) >= 10_000);
@@ -122,6 +123,25 @@ test('Facebook Feed probe distinguishes loading and visible unreportable article
     assert.ok(originalPerformance);
     Object.defineProperty(globalThis, 'performance', originalPerformance);
   }
+});
+
+test('Facebook Feed probe separates a visible end marker from the stronger empty-home marker', async () => {
+  install(`
+    <main>
+      <div role="feed">
+        <article role="article">
+          <h2><a href="/people/Alice/123456/">Alice</a></h2>
+          <div data-ad-rendering-role="story_message">Previously visible Feed content</div>
+          <a href="/Alice/posts/pfbidABC/">2h</a>
+        </article>
+        <section>Không còn bài viết nào trong bảng feed này.</section>
+      </div>
+    </main>
+  `);
+
+  const result = await run({ kind: 'feed_probe', params: {} });
+  assert.equal(result.output.value.explicitEnd, true);
+  assert.equal(result.output.value.explicitEmpty, false);
 });
 
 test('Facebook Reels probe and cards bind to one active video identity', async () => {

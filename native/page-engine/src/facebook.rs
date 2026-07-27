@@ -118,6 +118,7 @@ pub struct FacebookFeedProbe {
     pub loading: bool,
     pub article_count: u32,
     pub explicit_empty: bool,
+    pub explicit_end: bool,
     pub url: String,
     pub surface: String,
     pub scroll_y: f64,
@@ -1144,6 +1145,7 @@ mod tests {
                             "loading": false,
                             "articleCount": 2,
                             "explicitEmpty": false,
+                            "explicitEnd": true,
                             "url": "https://www.facebook.com/",
                             "surface": "home",
                             "scrollY": 0,
@@ -1159,6 +1161,7 @@ mod tests {
 
         let probe = feed_probe_from_cdp(&cdp_result).expect("bounded feed probe");
         assert_eq!(probe.document_age_ms, 215_964);
+        assert!(probe.explicit_end);
 
         let mut fractional = cdp_result;
         fractional["result"]["value"]["output"]["value"]["documentAgeMs"] =

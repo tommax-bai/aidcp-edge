@@ -188,30 +188,52 @@ pub(crate) async fn execute_facebook_feed_scroll(
             return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(fresh)));
         }
 
-        let grew = after.scroll_height > before.scroll_height + 1.0;
-        if !grew && facebook_near_bottom(&after) {
-            bottom_dry_rounds += 1;
-            if bottom_dry_rounds >= 2 {
+        let grew = facebook_feed_height_grew(&before, &after);
+        if grew || !facebook_near_bottom(&after) || after.surface != "home" {
+            bottom_dry_rounds = 0;
+            current = after;
+            continue;
+        }
+
+        let (confirmation, confirmed) = confirm_facebook_feed_bottom(session, &after).await?;
+        saw_any_card |= !confirmed.cards.is_empty();
+        let movement = PageMovement {
+            before: start_y,
+            after: confirmed.scroll_y,
+            moved: confirmed.scroll_y != start_y,
+            at_bottom: Some(facebook_near_bottom(&confirmed)),
+        };
+        let fresh = facebook_page_cards(session, confirmed.clone(), true, Some(movement));
+        if !fresh.cards.is_empty() {
+            return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(fresh)));
+        }
+        match confirmation {
+            FacebookBottomConfirmationState::ExplicitEnd => {
                 return Ok(facebook_scroll_failure(
                     EffectPhase::Confirmed,
                     "feed_exhausted",
                 ));
             }
-        } else {
-            bottom_dry_rounds = 0;
+            FacebookBottomConfirmationState::StructuralStable => {
+                bottom_dry_rounds += 1;
+                if bottom_dry_rounds >= 2 {
+                    return Ok(facebook_scroll_failure(
+                        EffectPhase::Confirmed,
+                        "feed_exhausted",
+                    ));
+                }
+            }
+            FacebookBottomConfirmationState::Invalidated
+            | FacebookBottomConfirmationState::Waiting => {
+                bottom_dry_rounds = 0;
+            }
         }
-        current = after;
+        current = confirmed;
     }
 
     Ok(facebook_scroll_failure(
         EffectPhase::Confirmed,
-        if saw_any_card {
-            "feed_exhausted"
-        } else if current.loading {
-            "feed_still_loading"
-        } else {
-            "no_target"
-        },
+        facebook_unconfirmed_scroll_reason(saw_any_card, &current),
     ))
 }
 
@@ -336,18 +358,10 @@ async fn settle_facebook_feed(
     timeout: Duration,
 ) -> Result<facebook::FacebookFeedProbe, EngineError> {
     let deadline = tokio::time::Instant::now() + timeout;
-    let mut previous: Option<(Vec<String>, u32, bool)> = None;
+    let mut previous = None;
     loop {
         let current = probe_facebook_feed(session).await?;
-        let key = (
-            current
-                .cards
-                .iter()
-                .filter_map(|card| card.note_id.clone())
-                .collect::<Vec<_>>(),
-            current.article_count,
-            current.explicit_empty,
-        );
+        let key = facebook_feed_settle_key(&current);
         let stable = previous.as_ref() == Some(&key);
         if stable && !current.loading {
             return Ok(current);
@@ -357,6 +371,113 @@ async fn settle_facebook_feed(
         }
         previous = Some(key);
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FacebookBottomConfirmationState {
+    Waiting,
+    Invalidated,
+    ExplicitEnd,
+    StructuralStable,
+}
+
+fn facebook_feed_card_identities(probe: &facebook::FacebookFeedProbe) -> Vec<String> {
+    probe
+        .cards
+        .iter()
+        .filter_map(|card| card.note_id.as_deref().and_then(canonical_facebook_post_id))
+        .collect()
+}
+
+fn facebook_feed_settle_key(
+    probe: &facebook::FacebookFeedProbe,
+) -> (Vec<String>, u32, bool, bool, i64) {
+    (
+        facebook_feed_card_identities(probe),
+        probe.article_count,
+        probe.explicit_empty,
+        probe.explicit_end,
+        probe.scroll_height.round() as i64,
+    )
+}
+
+fn facebook_feed_height_grew(
+    before: &facebook::FacebookFeedProbe,
+    after: &facebook::FacebookFeedProbe,
+) -> bool {
+    after.scroll_height > before.scroll_height + 1.0
+}
+
+fn classify_facebook_bottom_confirmation(
+    initial: &facebook::FacebookFeedProbe,
+    current: &facebook::FacebookFeedProbe,
+    explicit_end_samples: usize,
+    elapsed: Duration,
+    confirmation_window: Duration,
+) -> FacebookBottomConfirmationState {
+    let same_generation =
+        current.url == initial.url && current.document_generation == initial.document_generation;
+    let invalidated = initial.surface != "home"
+        || current.surface != "home"
+        || !same_generation
+        || current.loading
+        || !facebook_near_bottom(current)
+        || facebook_feed_height_grew(initial, current)
+        || facebook_feed_card_identities(current) != facebook_feed_card_identities(initial);
+    if invalidated {
+        return FacebookBottomConfirmationState::Invalidated;
+    }
+    if current.explicit_end && explicit_end_samples >= 2 {
+        return FacebookBottomConfirmationState::ExplicitEnd;
+    }
+    if elapsed >= confirmation_window {
+        return FacebookBottomConfirmationState::StructuralStable;
+    }
+    FacebookBottomConfirmationState::Waiting
+}
+
+async fn confirm_facebook_feed_bottom(
+    session: &mut EngineSession,
+    initial: &facebook::FacebookFeedProbe,
+) -> Result<(FacebookBottomConfirmationState, facebook::FacebookFeedProbe), EngineError> {
+    let started = tokio::time::Instant::now();
+    let deadline = started + FACEBOOK_FEED_SETTLE_IN_PLACE;
+    let mut explicit_end_samples = usize::from(initial.explicit_end);
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let current = probe_facebook_feed(session).await?;
+        explicit_end_samples = if current.explicit_end {
+            explicit_end_samples + 1
+        } else {
+            0
+        };
+        let state = classify_facebook_bottom_confirmation(
+            initial,
+            &current,
+            explicit_end_samples,
+            started.elapsed(),
+            FACEBOOK_FEED_SETTLE_IN_PLACE,
+        );
+        if state != FacebookBottomConfirmationState::Waiting {
+            return Ok((state, current));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok((FacebookBottomConfirmationState::StructuralStable, current));
+        }
+    }
+}
+
+fn facebook_unconfirmed_scroll_reason(
+    saw_any_card: bool,
+    current: &facebook::FacebookFeedProbe,
+) -> &'static str {
+    if current.loading {
+        "feed_still_loading"
+    } else if saw_any_card && current.surface == "home" {
+        "feed_continuation_unconfirmed"
+    } else {
+        "no_target"
     }
 }
 
@@ -476,4 +597,125 @@ fn facebook_near_bottom(probe: &facebook::FacebookFeedProbe) -> bool {
     probe.scroll_height > 0.0
         && probe.inner_height > 0.0
         && probe.scroll_height - probe.scroll_y - probe.inner_height <= probe.inner_height.max(1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{FacebookListKind, FacebookListState};
+
+    fn feed_probe(
+        scroll_height: f64,
+        scroll_y: f64,
+        loading: bool,
+        explicit_end: bool,
+    ) -> facebook::FacebookFeedProbe {
+        facebook::FacebookFeedProbe {
+            cards: Vec::new(),
+            document_generation: Some("doc-1".to_owned()),
+            list_kind: FacebookListKind::Feed,
+            list_state: FacebookListState::Ready,
+            loading,
+            article_count: 2,
+            explicit_empty: false,
+            explicit_end,
+            url: FACEBOOK_HOME_URL.to_owned(),
+            surface: "home".to_owned(),
+            scroll_y,
+            inner_width: 1440.0,
+            inner_height: 900.0,
+            scroll_height,
+            document_age_ms: 10_000,
+        }
+    }
+
+    #[test]
+    fn settle_identity_changes_when_document_height_changes() {
+        let before = feed_probe(2_400.0, 1_500.0, false, false);
+        let after = feed_probe(2_900.0, 2_000.0, false, false);
+
+        assert_ne!(
+            facebook_feed_settle_key(&before),
+            facebook_feed_settle_key(&after)
+        );
+    }
+
+    #[test]
+    fn delayed_height_growth_cancels_bottom_confirmation() {
+        let initial = feed_probe(2_400.0, 1_500.0, false, false);
+        let grown = feed_probe(2_900.0, 2_000.0, false, false);
+
+        assert_eq!(
+            classify_facebook_bottom_confirmation(
+                &initial,
+                &grown,
+                0,
+                FACEBOOK_FEED_SETTLE_IN_PLACE,
+                FACEBOOK_FEED_SETTLE_IN_PLACE,
+            ),
+            FacebookBottomConfirmationState::Invalidated
+        );
+    }
+
+    #[test]
+    fn structural_bottom_requires_the_complete_confirmation_window() {
+        let initial = feed_probe(2_400.0, 1_500.0, false, false);
+        let stable = initial.clone();
+
+        assert_eq!(
+            classify_facebook_bottom_confirmation(
+                &initial,
+                &stable,
+                0,
+                FACEBOOK_FEED_SETTLE_IN_PLACE - Duration::from_millis(1),
+                FACEBOOK_FEED_SETTLE_IN_PLACE,
+            ),
+            FacebookBottomConfirmationState::Waiting
+        );
+        assert_eq!(
+            classify_facebook_bottom_confirmation(
+                &initial,
+                &stable,
+                0,
+                FACEBOOK_FEED_SETTLE_IN_PLACE,
+                FACEBOOK_FEED_SETTLE_IN_PLACE,
+            ),
+            FacebookBottomConfirmationState::StructuralStable
+        );
+    }
+
+    #[test]
+    fn stable_explicit_end_marker_is_terminal_on_home_bottom() {
+        let initial = feed_probe(2_400.0, 1_500.0, false, false);
+        let terminal = feed_probe(2_400.0, 1_500.0, false, true);
+
+        assert_eq!(
+            classify_facebook_bottom_confirmation(
+                &initial,
+                &terminal,
+                2,
+                Duration::from_millis(500),
+                FACEBOOK_FEED_SETTLE_IN_PLACE,
+            ),
+            FacebookBottomConfirmationState::ExplicitEnd
+        );
+    }
+
+    #[test]
+    fn round_limit_with_recycled_cards_is_not_feed_exhausted() {
+        let ready = feed_probe(2_400.0, 1_500.0, false, false);
+        let loading = feed_probe(2_400.0, 1_500.0, true, false);
+        assert_eq!(
+            facebook_unconfirmed_scroll_reason(true, &ready),
+            "feed_continuation_unconfirmed"
+        );
+        assert_eq!(
+            facebook_unconfirmed_scroll_reason(false, &loading),
+            "feed_still_loading"
+        );
+        assert_eq!(
+            facebook_unconfirmed_scroll_reason(false, &ready),
+            "no_target"
+        );
+    }
 }

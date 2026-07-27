@@ -2467,6 +2467,7 @@ async fn spawn_facebook_initial_scan_cdp() -> (u16, tokio::task::JoinHandle<Vec<
                         "loading": false,
                         "articleCount": 1,
                         "explicitEmpty": false,
+                        "explicitEnd": false,
                         "url": "https://www.facebook.com/",
                         "surface": "home",
                         "scrollY": 0,

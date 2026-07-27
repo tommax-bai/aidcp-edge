@@ -51,14 +51,17 @@
     const timeOrigin=Number(performance&&performance.timeOrigin);
     const elapsedMs=Number.isFinite(timeOrigin)?Date.now()-timeOrigin:0;
     const documentAgeMs=Math.min(Number.MAX_SAFE_INTEGER,Math.max(0,Math.floor(Number.isFinite(elapsedMs)?elapsedMs:0)));
-    let explicitEmpty=false;
+    let explicitEmpty=false,explicitEnd=false;
     for(const node of all('div,section',scope||document)){
+      if(!visible(node))continue;
       const raw=text(node,600);
       if(raw.length<15)continue;
       const clean=raw.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
       const title=/no more posts|there are no posts|khong con bai viet nao|khong co bai viet nao|没有更多帖子|没有帖子/i.test(clean);
       const hint=/add friends|them ban be|添加好友/i.test(clean)&&/feed|bang feed|动态消息|信息流/i.test(clean);
-      if(title&&hint){explicitEmpty=true;break;}
+      if(title)explicitEnd=true;
+      if(title&&hint)explicitEmpty=true;
+      if(explicitEnd&&explicitEmpty)break;
     }
     return {kind:'feed_probe',value:{
       cards:output.value.cards,
@@ -68,6 +71,7 @@
       loading,
       articleCount,
       explicitEmpty,
+      explicitEnd,
       url:String(location.href).slice(0,4096),
       surface:classify(),
       scrollY:Number(window.scrollY)||0,
