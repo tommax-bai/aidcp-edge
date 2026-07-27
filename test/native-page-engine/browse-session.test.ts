@@ -208,6 +208,7 @@ test('Native Facebook assigns only Join and length-aware comments a long command
   await h.session.onCloudCommand(envelope('interaction.comment', {
     noteId: 'https://www.facebook.com/groups/42/posts/7',
     text: 'x'.repeat(100),
+    groupChatCode: 'Zalo:123',
   }));
   await h.session.onCloudCommand(envelope('interaction.comment', {
     noteId: 'https://www.facebook.com/groups/42/posts/8',
@@ -218,7 +219,7 @@ test('Native Facebook assigns only Join and length-aware comments a long command
   assert.equal(h.executions[0]?.command.kind, 'group_join');
   assert.equal(h.executions[0]?.timeoutMs, 90_000);
   assert.equal(h.executions[1]?.command.kind, 'interaction_comment');
-  assert.equal(h.executions[1]?.timeoutMs, 39_000);
+  assert.equal(h.executions[1]?.timeoutMs, 40_980);
   assert.equal(h.executions[2]?.command.kind, 'interaction_comment');
   assert.equal(h.executions[2]?.timeoutMs, 89_000);
   assert.equal(h.executions[3]?.timeoutMs, 30_000);

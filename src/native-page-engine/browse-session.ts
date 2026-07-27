@@ -239,7 +239,11 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     if (this.options.platform !== 'facebook') return DEFAULT_NATIVE_COMMAND_TIMEOUT_MS;
     if (command.kind === 'group_join') return FACEBOOK_GROUP_JOIN_TIMEOUT_MS;
     if (command.kind !== 'interaction_comment') return DEFAULT_NATIVE_COMMAND_TIMEOUT_MS;
-    const text = typeof command.params.text === 'string' ? command.params.text : '';
+    const body = typeof command.params.text === 'string' ? command.params.text.trim() : '';
+    const groupChatCode = typeof command.params.groupChatCode === 'string'
+      ? command.params.groupChatCode.trim()
+      : '';
+    const text = groupChatCode ? `${body}\n${groupChatCode}` : body;
     const cloudBudgetMs = Math.min(
       FACEBOOK_COMMENT_TIMEOUT_MAX_MS,
       Math.max(
