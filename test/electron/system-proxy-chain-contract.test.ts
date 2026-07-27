@@ -25,25 +25,26 @@ test('double-hop setting is default-off, normalized exactly and exposed as safe 
 
 test('preflight and child spawn consume the same prepared loopback through a private authority pipe', () => {
   assert.match(main, /readProxy:\s*readProxyForPreflight/);
-  assert.match(main, /const endpoint = await proxyChainManager\.ensure\(/);
+  assert.match(main, /await proxyChainManager\.ensure\(/);
   assert.match(main, /const endpoint = proxyChainManager\.endpoint\(handle\.profileId\)/);
   assert.match(
     main,
     /if \(handle\.proxyAuthority && handle\.status\.proxyMode === 'system_then_environment'\s*&& handle\.status\.proxyChainApplicable === true\s*&& !cleanupBootstrap\)/,
   );
-  assert.match(main, /mode: 'system_then_environment'[\s\S]{0,160}?originalProxy: handle\.proxyAuthority[\s\S]{0,100}?relayPort: endpoint\.proxyPort/);
+  assert.match(main, /mode: 'system_then_environment'[\s\S]{0,180}?originalProxy: handle\.proxyAuthority[\s\S]{0,120}?relayPort: endpoint\.proxyPort[\s\S]{0,120}?authorityRevision: handle\.proxyAuthorityRevision/);
   assert.match(main, /spawnEnv\.AIDCP_ADS_PROXY_AUTHORITY_FD = '4'/);
   assert.match(main, /authorityPipe\.end\(JSON\.stringify\(proxyAuthorityPayload\)\)/);
   assert.doesNotMatch(main, /spawnEnv\.AIDCP_ADS_PROXY_OVERRIDE/);
   assert.match(main, /if \(!endpoint\) \{[\s\S]{0,180}?proxy_chain_unavailable[\s\S]{0,180}?return;/);
 });
 
-test('original proxy authority is encrypted and every configured launch is delegated to provider synchronization', () => {
+test('Cloud owns original proxy authority; local encryption is migration/cache only', () => {
   assert.match(main, /createAdsProxyAuthorityStore\(/);
   assert.match(main, /async function readAuthoritativeProfileProxy\(/);
-  assert.match(main, /persistProxyAuthorityInput\(result\.userId, opts && opts\.proxy\)/);
-  assert.match(main, /proxyAuthorityStore\.save\(userId, norm\.proxyConfig\)/);
-  assert.match(main, /proxyAuthorityStore\.remove\(userId\)/);
+  assert.match(main, /\/proxy-authority`/);
+  assert.match(main, /migrationAuthorityFromLocalRecord\(proxyAuthorityStore\.load\(id\)\)/);
+  assert.doesNotMatch(main, /getProfileProxyConfig/);
+  assert.match(main, /proxyAuthority:\s*proxyAuthority\.authority/);
 });
 
 test('profiles without an environment proxy stay outside double-hop applicability', () => {
@@ -53,11 +54,11 @@ test('profiles without an environment proxy stay outside double-hop applicabilit
   );
   assert.match(
     main,
-    /async function ensureSystemProxyChain\(handle\)[\s\S]{0,900}?if \(config\.noProxy\) \{\s*await skipOfflineSystemProxyChain\(handle\);\s*return \{ state: 'skipped', reason: 'no_proxy' \};\s*\}/,
+    /async function ensureSystemProxyChain\(handle, config\)[\s\S]{0,900}?if \(config\.noProxy\) \{\s*await skipOfflineSystemProxyChain\(handle\);\s*return \{ state: 'skipped', reason: 'no_proxy' \};\s*\}/,
   );
   assert.match(
     main,
-    /async function readProxyForPreflight\(profileId\)[\s\S]{0,700}?if \(config\.noProxy\) \{\s*await skipOfflineSystemProxyChain\(handle\);\s*return config;\s*\}/,
+    /async function readProxyForPreflight\(profileId\)[\s\S]{0,700}?if \(!systemProxyChainEnabled\(handle\) \|\| config\.noProxy\) return config;/,
   );
   assert.match(
     renderer,

@@ -6,7 +6,12 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { createProxyPreflightController, preflightFacebookProxy, proxyUrlForConfig, reasonForError } = require('../../src/electron/proxy-preflight.cjs') as {
   createProxyPreflightController: (options: Record<string, unknown>) => {
-    ensure: (input: { envId: string; profileId: string }) => Promise<{ state: string; reason: string; checkedAt: string }>;
+    ensure: (input: {
+      envId: string;
+      profileId: string;
+      authorityRevision?: number;
+      proxyConfig?: Record<string, unknown>;
+    }) => Promise<{ state: string; reason: string; checkedAt: string; authorityRevision?: number }>;
     invalidate: (envId: string) => void;
     snapshot: (envId: string) => { state: string; checkedAt?: string } | null;
   };
@@ -195,4 +200,38 @@ test('环境明确未配置代理时跳过检测且不调用探测器', async ()
   assert.equal(result.state, 'skipped');
   assert.equal(result.reason, 'no_proxy');
   assert.equal(probes, 0);
+});
+
+test('控制器仅在 Cloud 代理权威 revision 相同时复用缓存', async () => {
+  let probes = 0;
+  const controller = createProxyPreflightController({
+    readProxy: async () => assert.fail('已提供冻结快照时不得二次读取代理权威'),
+    probe: async () => {
+      probes += 1;
+      return { state: 'available', checkedAt: new Date().toISOString(), reason: 'facebook_reachable' };
+    },
+  });
+  const snapshot = { ok: true, noProxy: false, proxy: authenticatedHttpProxy };
+  const first = await controller.ensure({
+    envId: 'env-revision',
+    profileId: 'profile-revision',
+    proxyConfig: snapshot,
+    authorityRevision: 3,
+  });
+  const cached = await controller.ensure({
+    envId: 'env-revision',
+    profileId: 'profile-revision',
+    proxyConfig: snapshot,
+    authorityRevision: 3,
+  });
+  const changed = await controller.ensure({
+    envId: 'env-revision',
+    profileId: 'profile-revision',
+    proxyConfig: snapshot,
+    authorityRevision: 4,
+  });
+  assert.equal(first.authorityRevision, 3);
+  assert.equal(cached.authorityRevision, 3);
+  assert.equal(changed.authorityRevision, 4);
+  assert.equal(probes, 2);
 });

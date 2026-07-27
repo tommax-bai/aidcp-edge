@@ -85,9 +85,18 @@ async function executeProxyReassignmentPlan({ plan, isActive, updateOne, onProgr
       result = { ok: false, error: '代理更新遇到内部错误' };
     }
     if (!result || !result.ok) {
-      return proxyReassignmentFailure(
+      const failure = proxyReassignmentFailure(
         updatedUserIds, index + 1, (result && result.error) || 'AdsPower 未接受代理更新', plan.length,
       );
+      if (result && result.partialApplied) {
+        return {
+          ...failure,
+          partial: true,
+          cloudSavedUserIds: [...updatedUserIds, item.userId],
+          cloudSavedCount: updatedUserIds.length + 1,
+        };
+      }
+      return failure;
     }
     updatedUserIds.push(item.userId);
     if (typeof onProgress === 'function') {

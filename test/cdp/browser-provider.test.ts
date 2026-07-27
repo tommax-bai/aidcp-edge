@@ -45,6 +45,7 @@ const originalProxy = {
 
 const doubleHopAuthority = {
   mode: 'system_then_environment' as const,
+  authorityRevision: 7,
   originalProxy,
   targetProxy: {
     proxy_soft: 'other' as const,
@@ -260,6 +261,7 @@ test('代理权威从匿名 fd 读取，direct 目标严格等于原环境代理
   const readFile = (() => JSON.stringify({
     version: 1,
     mode: 'direct',
+    authorityRevision: 7,
     originalProxy,
   })) as any;
   const authority = readAdsPowerProxyAuthority(
@@ -269,12 +271,18 @@ test('代理权威从匿名 fd 读取，direct 目标严格等于原环境代理
     },
     readFile,
   );
-  assert.deepEqual(authority, { mode: 'direct', originalProxy, targetProxy: originalProxy });
+  assert.deepEqual(authority, { mode: 'direct', authorityRevision: 7, originalProxy, targetProxy: originalProxy });
   assert.equal(readAdsPowerProxyAuthority({}), undefined);
   assert.throws(
     () => readAdsPowerProxyAuthority(
       { AIDCP_ADS_PROXY_AUTHORITY_FD: '4' },
-      (() => JSON.stringify({ version: 1, mode: 'system_then_environment', originalProxy, relayPort: 0 })) as any,
+      (() => JSON.stringify({
+        version: 1,
+        mode: 'system_then_environment',
+        authorityRevision: 7,
+        originalProxy,
+        relayPort: 0,
+      })) as any,
     ),
     /GOST loopback/,
   );
@@ -284,6 +292,7 @@ test('direct 模式每次 launch 都重写并读回原环境代理，覆盖上�
   const calls: FetchCall[] = [];
   const directAuthority = {
     mode: 'direct' as const,
+    authorityRevision: 7,
     originalProxy,
     targetProxy: originalProxy,
   };

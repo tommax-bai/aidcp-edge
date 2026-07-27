@@ -23,7 +23,7 @@ test('ads:createEnv: Facebook 批量平台门禁与整批解析早于运行时/�
 test('ads:createEnv: Facebook 单建与批量都请求慢启动，XHS/视频号不提交该概念', () => {
   assert.match(createBlock, /const slowStartEnabled = platform === 'facebook'/);
   assert.equal((createBlock.match(
-    /finalizeCreatedEnvironmentAssignment\(result, intent, \{ slowStartEnabled \}\)/g,
+    /finalizeCreatedEnvironmentAssignment\(result, intent, \{\s*slowStartEnabled,\s*proxyInput:/g,
   ) ?? []).length, 2, '无账号资料单建分支与账号导入/批量分支必须共用 Facebook 默认值');
   assert.match(mainSource, /\.\.\.\(slowStartEnabled \? \{ slowStartEnabled: true \} : \{\}\)/);
   assert.match(mainSource, /slowStartConfigured: finalized\.slowStartConfigured/);

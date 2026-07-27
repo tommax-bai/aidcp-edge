@@ -21,8 +21,13 @@ const adsRuntime = require('./ads-runtime.cjs');
 const adsRuntimeStage = require('./ads-runtime-stage.cjs');
 const adsFingerprint = require('./ads-fingerprint.cjs');
 const { normalizePlatform } = require('./ads-create-flow.cjs');
-const { normalizeProxyInput, parseProxyLines, canonicalProxyInput } = require('./ads-proxy-config.cjs');
+const { normalizeProxyInput, parseProxyLines } = require('./ads-proxy-config.cjs');
 const { createAdsProxyAuthorityStore } = require('./ads-proxy-authority-store.cjs');
+const {
+  cloudAuthorityForProxyInput,
+  migrationAuthorityFromLocalRecord,
+  normalizeCloudProxyAuthorityRecord,
+} = require('./environment-proxy-authority.cjs');
 const {
   createProxyReassignmentPlan,
   proxyReassignmentFailure,
@@ -887,8 +892,16 @@ function addProvisionedEnvironmentToRoster(result) {
   return saved;
 }
 
-async function finalizeCreatedEnvironmentAssignment(result, intent, { slowStartEnabled = false } = {}) {
+async function finalizeCreatedEnvironmentAssignment(
+  result,
+  intent,
+  { slowStartEnabled = false, proxyInput = {} } = {},
+) {
   if (!result || !result.ok) return result;
+  const proxyAuthority = cloudAuthorityForProxyInput(proxyInput);
+  if (!proxyAuthority.ok) {
+    return withAuthoritativeAssignmentNotice(result, '代理权威输入无效');
+  }
   const pendingResult = slowStartEnabled
     ? { ...result, slowStartConfigured: false }
     : result;
@@ -913,6 +926,7 @@ async function finalizeCreatedEnvironmentAssignment(result, intent, { slowStartE
         label: String(result.name || '').trim() || null,
         platform: normalizePlatform(result.platform),
         ...(slowStartEnabled ? { slowStartEnabled: true } : {}),
+        proxyAuthority: proxyAuthority.authority,
       },
     });
     if (response.ok || (response.status > 0 && response.status < 500)) break;
@@ -934,6 +948,11 @@ async function finalizeCreatedEnvironmentAssignment(result, intent, { slowStartE
   const confirmedResult = slowStartEnabled
     ? { ...result, slowStartConfigured: true }
     : result;
+  if (proxyAuthority.noProxy) {
+    proxyAuthorityStore.remove(result.userId);
+  } else {
+    proxyAuthorityStore.save(result.userId, proxyAuthority.proxyConfig);
+  }
 
   const refreshed = await refreshAllowedEnvironments();
   if (!refreshed || !(allowedProfileIds instanceof Set) || !allowedProfileIds.has(String(result.userId || '').trim())) {
@@ -1430,70 +1449,116 @@ function systemProxyChainEnabled(handle) {
   return settings.provider === 'adspower' && settings.systemProxyUpstreamEnabled === true;
 }
 
-function readAdsProfileProxy(profileId) {
-  return readAdsWithRuntime({}, (resolved) => adsApi.getProfileProxyConfig({
-    ...resolved,
-    profileId,
-  }));
+function cacheCloudProxyAuthority(record) {
+  if (!record || record.ok !== true) return;
+  if (record.noProxy) {
+    proxyAuthorityStore.remove(record.profileId);
+    return;
+  }
+  // 本地 safeStorage 只作迁移/cache；写失败不改变已经确认的 Cloud 权威。
+  proxyAuthorityStore.save(record.profileId, record.proxyConfig);
 }
 
-function authorityView(profileId, proxyConfig) {
-  return {
-    ok: true,
-    noProxy: false,
-    profileId: String(profileId),
-    proxyConfig,
-    proxy: canonicalProxyInput(proxyConfig),
-  };
+async function writeCloudProxyAuthority(profileId, {
+  expectedRevision,
+  authority,
+  source,
+} = {}) {
+  const id = String(profileId || '').trim();
+  if (!clientAuthEnabled() || !hasValidSession() || !id) {
+    return { ok: false, reason: 'proxy_authority_unavailable' };
+  }
+  const response = await clientAuthFetch(
+    `/environments/${encodeURIComponent(id)}/proxy-authority`,
+    {
+      method: 'PUT',
+      token: clientSession.token,
+      body: { expectedRevision, authority, source },
+    },
+  );
+  if (response.status === 401) onSessionInvalid();
+  const data = response && response.data && response.data.data;
+  if (!response.ok || !data) {
+    return {
+      ok: false,
+      status: response.status,
+      reason: String((response.data && response.data.error) || 'proxy_authority_unavailable'),
+      ...(Number.isInteger(response.data && response.data.currentRevision)
+        ? { currentRevision: response.data.currentRevision }
+        : {}),
+    };
+  }
+  const normalized = normalizeCloudProxyAuthorityRecord(data, id);
+  if (!normalized.ok) return { ok: false, reason: normalized.reason };
+  cacheCloudProxyAuthority(normalized);
+  return normalized;
 }
 
 /**
- * 原环境代理的单一权威：新建/编辑由用户输入写入；存量环境首次使用时从 AdsPower 精确读取并加密引导。
- * AdsPower profile 随后会在原代理与 GOST loopback 之间切换，不能继续把 live profile 当作第二跳真源。
+ * Cloud 是原环境代理的唯一耐久权威。AdsPower 只在 AIDCP 写后做 readback，绝不再参与原代理引导。
+ * safeStorage 只允许在 Cloud 明确 uninitialized 时做一次 create-only 迁移，且 loopback 一律拒绝。
  */
-async function readAuthoritativeProfileProxy(profileId) {
-  const stored = proxyAuthorityStore.load(profileId);
-  if (!stored.ok) return { ok: false, blocking: true, reason: 'proxy_authority_unavailable', error: stored.error };
-  if (stored.found) return authorityView(profileId, stored.proxyConfig);
+async function readAuthoritativeProfileProxy(profileId, { allowMigration = true } = {}) {
+  const id = String(profileId || '').trim();
+  if (!clientAuthEnabled() || !hasValidSession() || !id) {
+    return { ok: false, blocking: true, reason: 'proxy_authority_unavailable' };
+  }
+  const response = await clientAuthFetch(
+    `/environments/${encodeURIComponent(id)}/proxy-authority`,
+    { token: clientSession.token },
+  );
+  if (response.status === 401) onSessionInvalid();
+  const data = response && response.data && response.data.data;
+  if (response.ok && data) {
+    const normalized = normalizeCloudProxyAuthorityRecord(data, id);
+    if (!normalized.ok) return { ok: false, blocking: true, reason: normalized.reason };
+    cacheCloudProxyAuthority(normalized);
+    return normalized;
+  }
+  const reason = String((response.data && response.data.error) || '');
+  if (response.status !== 404 || reason !== 'uninitialized' || !allowMigration) {
+    return {
+      ok: false,
+      blocking: true,
+      reason: reason === 'uninitialized' ? 'proxy_authority_uninitialized' : 'proxy_authority_unavailable',
+    };
+  }
 
-  const live = await readAdsProfileProxy(profileId);
-  if (!live || live.ok !== true) return live;
-  if (live.noProxy) {
-    const removed = proxyAuthorityStore.remove(profileId);
-    if (!removed.ok) {
-      return { ok: false, blocking: true, reason: 'proxy_authority_unavailable', error: removed.error };
-    }
-    return { ...live, proxyConfig: null };
+  const migration = migrationAuthorityFromLocalRecord(proxyAuthorityStore.load(id));
+  if (!migration.ok) {
+    return { ok: false, blocking: true, reason: migration.reason };
   }
-  const normalized = normalizeProxyInput(live.proxy);
-  if (!normalized.ok || normalized.noProxy) {
-    return { ok: false, blocking: true, reason: 'profile_config_unavailable', error: '原环境代理配置不合法' };
+  const written = await writeCloudProxyAuthority(id, {
+    expectedRevision: null,
+    authority: migration.authority,
+    source: 'local_migration',
+  });
+  if (written.ok) return written;
+  if (written.status === 409 && written.reason === 'proxy_authority_conflict') {
+    return readAuthoritativeProfileProxy(id, { allowMigration: false });
   }
-  const saved = proxyAuthorityStore.save(profileId, normalized.proxyConfig);
-  if (!saved.ok) {
-    return { ok: false, blocking: true, reason: 'proxy_authority_unavailable', error: saved.error };
-  }
-  return authorityView(profileId, normalized.proxyConfig);
+  return { ok: false, blocking: true, reason: written.reason || 'proxy_authority_unavailable' };
 }
 
-function persistProxyAuthorityInput(profileId, proxyInput) {
-  const normalized = normalizeProxyInput(proxyInput || {});
-  if (!normalized.ok) return { ok: false, error: `代理输入不合法：${normalized.error}` };
-  if (normalized.noProxy) return proxyAuthorityStore.remove(profileId);
-  return proxyAuthorityStore.save(profileId, normalized.proxyConfig);
-}
-
-function projectAuthoritativeProxySummary(profile) {
-  if (!profile || !profile.userId) return profile;
-  const authority = proxyAuthorityStore.load(profile.userId);
+async function projectAuthoritativeProxySummary(profile) {
+  if (!profile || !profile.userId || !clientAuthEnabled()) return profile;
+  const authority = await readAuthoritativeProfileProxy(profile.userId, { allowMigration: false });
   if (!authority.ok) {
     return {
       ...profile,
-      proxy: '代理配置安全记录不可用',
+      proxy: authority.reason === 'proxy_authority_uninitialized'
+        ? '代理配置未初始化'
+        : 'Cloud 代理权威不可用',
       proxyConfig: { noProxy: false, proxyType: '', proxyHost: '', proxyPort: '', proxyUser: '' },
     };
   }
-  if (!authority.found) return profile;
+  if (authority.noProxy) {
+    return {
+      ...profile,
+      proxy: '无代理配置',
+      proxyConfig: { noProxy: true, proxyType: '', proxyHost: '', proxyPort: '', proxyUser: '' },
+    };
+  }
   const cfg = authority.proxyConfig;
   return {
     ...profile,
@@ -1503,7 +1568,6 @@ function projectAuthoritativeProxySummary(profile) {
       proxyType: cfg.proxy_type,
       proxyHost: cfg.proxy_host,
       proxyPort: cfg.proxy_port,
-      // 列表不需要认证身份；完整账号密码只在具名精确编辑入口解密。
       proxyUser: '',
     },
   };
@@ -1525,12 +1589,21 @@ async function ensureProfileProxyAuthority(handle) {
       reason: String((config && config.reason) || 'proxy_authority_unavailable'),
     };
   }
+  const previousRevision = handle.proxyAuthorityRevision;
+  if (Number.isInteger(previousRevision) && previousRevision !== config.revision) {
+    proxyPreflight.invalidate(handle.envId);
+    if (handle.child) {
+      return { state: 'unavailable', reason: 'proxy_authority_revision_changed', config };
+    }
+  }
   if (config.noProxy) {
     handle.proxyAuthority = null;
+    handle.proxyAuthorityRevision = config.revision;
     await skipOfflineSystemProxyChain(handle);
     return { state: 'skipped', reason: 'no_proxy', config };
   }
   handle.proxyAuthority = config.proxyConfig;
+  handle.proxyAuthorityRevision = config.revision;
   if (!handle.child) updateStatus(handle, { proxyChainApplicable: true });
   return { state: 'available', reason: 'proxy_authority_ready', config };
 }
@@ -1572,13 +1645,13 @@ async function skipOfflineSystemProxyChain(handle) {
   }
 }
 
-async function ensureSystemProxyChain(handle) {
+async function ensureSystemProxyChain(handle, config) {
   if (!systemProxyChainEnabled(handle) || !handle || handle.kind !== 'adspower') {
     return { state: 'skipped', reason: 'not_enabled' };
   }
-  const authority = await ensureProfileProxyAuthority(handle);
-  if (authority.state === 'unavailable') return authority;
-  const config = authority.config;
+  if (!config || config.ok !== true) {
+    return { state: 'unavailable', reason: 'proxy_authority_unavailable' };
+  }
   if (config.noProxy) {
     await skipOfflineSystemProxyChain(handle);
     return { state: 'skipped', reason: 'no_proxy' };
@@ -1599,7 +1672,16 @@ async function ensureSystemProxyChain(handle) {
         proxyChainApplicable: true,
       });
     }
-    return { state: 'available', reason: 'system_proxy_chain_ready' };
+    return {
+      state: 'available',
+      reason: 'system_proxy_chain_ready',
+      config: {
+        ok: true,
+        noProxy: false,
+        proxy: proxyChainManager.endpoint(handle.profileId),
+        revision: config.revision,
+      },
+    };
   } catch (error) {
     return {
       state: 'unavailable',
@@ -1610,34 +1692,17 @@ async function ensureSystemProxyChain(handle) {
 
 async function readProxyForPreflight(profileId) {
   const handle = envs.get(fleet.envIdForProfile(profileId));
-  const config = await readAuthoritativeProfileProxy(profileId);
-  if (!systemProxyChainEnabled(handle)) return config;
-  if (!config || config.ok !== true) {
-    return { ok: false, blocking: true, reason: 'profile_config_unavailable' };
+  const authority = await ensureProfileProxyAuthority(handle);
+  if (authority.state === 'unavailable') {
+    return { ok: false, blocking: true, reason: authority.reason };
   }
-  if (config.noProxy) {
-    await skipOfflineSystemProxyChain(handle);
-    return config;
+  const config = authority.config;
+  if (!systemProxyChainEnabled(handle) || config.noProxy) return config;
+  const chain = await ensureSystemProxyChain(handle, config);
+  if (chain.state === 'unavailable') {
+    return { ok: false, blocking: true, reason: chain.reason };
   }
-  try {
-    const endpoint = await proxyChainManager.ensure({
-      profileId,
-      environmentProxy: config.proxy,
-    });
-    if (handle && !handle.child) {
-      updateStatus(handle, {
-        proxyMode: 'system_then_environment',
-        proxyChainApplicable: true,
-      });
-    }
-    return { ok: true, noProxy: false, proxy: endpoint };
-  } catch (error) {
-    return {
-      ok: false,
-      blocking: true,
-      reason: String((error && error.reason) || 'proxy_chain_unavailable'),
-    };
-  }
+  return chain.config;
 }
 
 const proxyPreflight = createProxyPreflightController({
@@ -1666,22 +1731,28 @@ function eligibleForProxyPreflight(handle) {
     && browserAbsentForProxyPreflight(handle));
 }
 
-function ensureProxyPreflight(handle) {
+function ensureProxyPreflight(handle, config) {
   if (!eligibleForProxyPreflight(handle)) {
     return Promise.resolve({ state: 'skipped', reason: 'not_applicable' });
   }
-  return proxyPreflight.ensure({ envId: handle.envId, profileId: handle.profileId });
+  return proxyPreflight.ensure({
+    envId: handle.envId,
+    profileId: handle.profileId,
+    ...(config ? { proxyConfig: config, authorityRevision: config.revision } : {}),
+  });
 }
 
 async function ensureNetworkPreparation(handle) {
   const authority = await ensureProfileProxyAuthority(handle);
   if (authority.state === 'unavailable') return authority;
   if (authority.reason === 'no_proxy') return { state: 'skipped', reason: 'no_proxy' };
+  let preflightConfig = authority.config;
   if (systemProxyChainEnabled(handle) && handle && handle.kind === 'adspower') {
-    const chain = await ensureSystemProxyChain(handle);
+    const chain = await ensureSystemProxyChain(handle, authority.config);
     if (chain.state === 'unavailable') return chain;
+    preflightConfig = chain.config;
   }
-  return ensureProxyPreflight(handle);
+  return ensureProxyPreflight(handle, preflightConfig);
 }
 
 function scheduleSelectedProxyPreflight(handle) {
@@ -1693,7 +1764,7 @@ function scheduleSelectedProxyPreflight(handle) {
     selectedProxyPreflightTimer = null;
     const current = envs.get(envId);
     if (selectedEnvId !== envId || !eligibleForProxyPreflight(current)) return;
-    void ensureProxyPreflight(current);
+    void ensureNetworkPreparation(current);
   }, 300);
   selectedProxyPreflightTimer.unref?.();
 }
@@ -1704,6 +1775,11 @@ function proxyPreflightFailureText(reason) {
     case 'authentication_failed': return '代理账号或密码未通过认证';
     case 'timeout': return '代理连接超时';
     case 'proxy_authority_unavailable': return '原环境代理安全记录不可用';
+    case 'proxy_authority_uninitialized': return 'Cloud 尚未保存该环境的原代理，请重新保存代理配置';
+    case 'proxy_authority_revision_changed': return '代理配置已更新，请关闭并重新启动该环境';
+    case 'local_proxy_authority_unavailable': return '本机旧代理记录不可用，请重新保存原代理';
+    case 'local_proxy_authority_loopback_rejected': return '本机旧代理记录是临时回环地址，请重新填写原代理';
+    case 'proxy_authority_malformed': return 'Cloud 代理权威格式无效';
     case 'connection_refused': return '代理拒绝连接';
     case 'host_unresolved': return '代理地址无法解析';
     case 'config_invalid': return '代理配置不完整';
@@ -3974,10 +4050,11 @@ async function spawnEdgeChild(handle, {
   let spawnEnv;
   let proxyAuthorityPayload = null;
   if (handle.kind === 'adspower') {
-    if (handle.proxyAuthority === undefined) {
-      const authority = await ensureProfileProxyAuthority(handle);
-      if (authority.state === 'unavailable') {
-        stopStartForProxyFailure(handle, authority);
+    if (!cleanupBootstrap) {
+      // 真正轮到 spawn 时再读取一次 Cloud revision；排队前的预检只可复用同 revision 的证据。
+      const network = await ensureNetworkPreparation(handle);
+      if (network.state === 'unavailable') {
+        stopStartForProxyFailure(handle, network);
         return false;
       }
     }
@@ -4023,6 +4100,7 @@ async function spawnEdgeChild(handle, {
         mode: 'system_then_environment',
         originalProxy: handle.proxyAuthority,
         relayPort: endpoint.proxyPort,
+        authorityRevision: handle.proxyAuthorityRevision,
       };
       updateStatus(handle, { proxyMode: 'system_then_environment' });
     } else if (handle.proxyAuthority) {
@@ -4030,6 +4108,7 @@ async function spawnEdgeChild(handle, {
         version: 1,
         mode: 'direct',
         originalProxy: handle.proxyAuthority,
+        authorityRevision: handle.proxyAuthorityRevision,
       };
       updateStatus(handle, { proxyMode: 'direct' });
     } else if (!cleanupBootstrap) {
@@ -7154,9 +7233,6 @@ ipcMain.handle('ads:status', (_event, opts) => readAdsWithRuntime(opts, (resolve
 // 「选择已有环境」与 status 共享 cached-base fast path；仅冷机/传输失败时启动或重启随包运行时。
 ipcMain.handle('ads:listProfiles', async (_event, opts) => {
   const result = await readAdsWithRuntime(opts, (resolved) => adsApi.listProfiles(resolved));
-  if (result && result.ok && Array.isArray(result.profiles)) {
-    result.profiles = result.profiles.map(projectAuthoritativeProxySummary);
-  }
   // 按登录客户可见范围收窄「加入现有环境」**显示列表**（change edge-client-env-scope-and-logout，补 edge-client-customer-auth
   // 的漏）：此前该列表列出本机全部指纹环境、不分归属，把他人环境的名字/分组/代理/分身 ID 暴露给已登录客户，也让用户误加入
   // 永不启动的非归属环境。
@@ -7188,6 +7264,9 @@ ipcMain.handle('ads:listProfiles', async (_event, opts) => {
       });
     // 只在有效会话 + 权威归属刷新 + 本机列表收窄完成后给 renderer 这个可信信号。
     result.assignmentScoped = true;
+  }
+  if (result && result.ok && Array.isArray(result.profiles) && clientAuthEnabled()) {
+    result.profiles = await Promise.all(result.profiles.map(projectAuthoritativeProxySummary));
   }
   return result;
 });
@@ -7284,16 +7363,10 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         groupResolver: envGroupResolver,
       });
       if (result && result.ok) {
-        const authority = persistProxyAuthorityInput(result.userId, opts && opts.proxy);
-        if (!authority.ok) {
-          return {
-            ok: false,
-            partial: true,
-            userId: result.userId,
-            error: `环境已在 AdsPower 创建，但原环境代理安全记录未完成：${authority.error}。请先修复系统安全存储后重试保存代理。`,
-          };
-        }
-        return finalizeCreatedEnvironmentAssignment(result, intent, { slowStartEnabled });
+        return finalizeCreatedEnvironmentAssignment(result, intent, {
+          slowStartEnabled,
+          proxyInput: opts && opts.proxy,
+        });
       }
       return result;
     }
@@ -7330,15 +7403,10 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       if (!result.ok) {
         return failedFacebookBatchReceipt(created, i + 1, result.error || '未知错误');
       }
-      const authority = persistProxyAuthorityInput(result.userId, item.proxy);
-      if (!authority.ok) {
-        return failedFacebookBatchReceipt(
-          created,
-          i + 1,
-          `环境已在 AdsPower 创建，但原环境代理安全记录未完成：${authority.error}`,
-        );
-      }
-      const finalized = await finalizeCreatedEnvironmentAssignment(result, intent, { slowStartEnabled });
+      const finalized = await finalizeCreatedEnvironmentAssignment(result, intent, {
+        slowStartEnabled,
+        proxyInput: item.proxy,
+      });
       created.push(safeCreatedEnvironment(finalized));
     }
     const assignmentHandledByMain = clientAuthEnabled();
@@ -7437,6 +7505,31 @@ function batchProxyUpdateError(result) {
   return 'AdsPower 未接受代理更新';
 }
 
+function cloudProxyAuthorityError(result) {
+  const reason = String((result && result.reason) || '');
+  if (reason === 'proxy_authority_conflict') return '代理配置已被另一台客户端更新，请刷新后重试。';
+  if (reason === 'environment_not_owned') return '该环境不属于当前账号或已失去访问权限。';
+  if (reason === 'proxy_authority_uninitialized') return 'Cloud 代理权威尚未初始化。';
+  if (reason === 'proxy_authority_malformed') return 'Cloud 返回的代理权威格式无效。';
+  return 'Cloud 代理权威暂不可用，请稍后重试。';
+}
+
+async function saveCloudProxyAuthorityForEdit(userId, proxyInput) {
+  const desired = cloudAuthorityForProxyInput(proxyInput);
+  if (!desired.ok) return desired;
+  const current = await readAuthoritativeProfileProxy(userId, { allowMigration: false });
+  if (!current.ok && current.reason !== 'proxy_authority_uninitialized') {
+    return { ok: false, reason: current.reason, error: cloudProxyAuthorityError(current) };
+  }
+  const written = await writeCloudProxyAuthority(userId, {
+    expectedRevision: current.ok ? current.revision : null,
+    authority: desired.authority,
+    source: 'edge_edit',
+  });
+  if (!written.ok) return { ...written, error: cloudProxyAuthorityError(written) };
+  return { ...written, desired };
+}
+
 function batchProxyProgressRequestId(opts) {
   const value = String((opts && opts.requestId) || '').trim();
   return /^[a-zA-Z0-9_-]{8,80}$/.test(value) ? value : '';
@@ -7455,7 +7548,10 @@ function invalidateProxyEvidence(userId) {
   const envId = fleet.envIdForProfile(String(userId));
   proxyPreflight.invalidate(envId);
   const handle = envs.get(envId);
-  if (handle && !handle.child) handle.proxyAuthority = undefined;
+  if (handle && !handle.child) {
+    handle.proxyAuthority = undefined;
+    handle.proxyAuthorityRevision = undefined;
+  }
   if (handle && !handle.child) void proxyChainManager.invalidate(handle.profileId);
   if (handle && selectedEnvId === envId) scheduleSelectedProxyPreflight(handle);
 }
@@ -7481,28 +7577,34 @@ ipcMain.handle('ads:updateEnvProxy', async (_event, opts) => {
     if (proxyTargetActive(userId)) {
       return { ok: false, error: '该环境正在使用中，无法修改代理；请先关闭该环境后重试。' };
     }
+    const cloudWrite = await saveCloudProxyAuthorityForEdit(userId, opts && opts.proxy);
+    if (!cloudWrite.ok) return { ok: false, error: cloudWrite.error };
     const svc = await ensureAdsServiceOnce(null);
-    if (!svc.ok) return { ok: false, error: `指纹浏览器运行时未就绪：${svc.error || '未知错误'}`, retryable: true };
+    if (!svc.ok) {
+      invalidateProxyEvidence(userId);
+      return {
+        ok: false,
+        partial: true,
+        cloudSaved: true,
+        error: `Cloud 代理已保存，但指纹浏览器运行时未就绪：${svc.error || '未知错误'}。请重试同步 AdsPower。`,
+        retryable: true,
+      };
+    }
     const ads = resolveAdsOpts(opts);
     const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
     const r = await writeApi.updateProfileProxy({ userId: String(userId), proxyConfig: norm.proxyConfig }, ads);
-    if (r && r.ok === false) return { ...r, error: proxyUpdateError(r) };
-    if (r && r.ok) {
-      const authority = norm.noProxy
-        ? proxyAuthorityStore.remove(userId)
-        : proxyAuthorityStore.save(userId, norm.proxyConfig);
-      if (!authority.ok) {
-        // AdsPower 已接受新值但本地权威未提交：删除旧权威，确保下次从 live profile 重新引导而不是复用陈值。
-        proxyAuthorityStore.remove(userId);
-        invalidateProxyEvidence(userId);
-        return {
-          ok: false,
-          partial: true,
-          error: `AdsPower 已更新代理，但原环境代理安全记录未完成：${authority.error}。请重试保存。`,
-        };
-      }
+    if (r && r.ok === false) {
       invalidateProxyEvidence(userId);
-      return { ok: true, noProxy: norm.noProxy };
+      return {
+        ...r,
+        partial: true,
+        cloudSaved: true,
+        error: `Cloud 代理已保存，但 AdsPower 同步失败：${proxyUpdateError(r)}。请重试；配置代理会在下次启动前重新同步。`,
+      };
+    }
+    if (r && r.ok) {
+      invalidateProxyEvidence(userId);
+      return { ok: true, noProxy: norm.noProxy, revision: cloudWrite.revision };
     }
     return r;
   } catch (e) {
@@ -7557,16 +7659,17 @@ ipcMain.handle('ads:updateEnvProxies', async (event, opts) => {
       updateOne: async (item) => {
         const norm = normalizeProxyInput(item.proxy);
         if (!norm.ok) return { ok: false, error: `代理输入不合法：${norm.error}` };
+        const cloudWrite = await saveCloudProxyAuthorityForEdit(item.userId, item.proxy);
+        if (!cloudWrite.ok) return { ok: false, error: cloudWrite.error };
         const result = await writeApi.updateProfileProxy({ userId: item.userId, proxyConfig: norm.proxyConfig }, ads);
-        if (!result || !result.ok) return { ok: false, error: batchProxyUpdateError(result) };
-        const authority = norm.noProxy
-          ? proxyAuthorityStore.remove(item.userId)
-          : proxyAuthorityStore.save(item.userId, norm.proxyConfig);
-        if (!authority.ok) {
-          proxyAuthorityStore.remove(item.userId);
-          return { ok: false, error: 'AdsPower 已更新，但原环境代理安全记录未完成；请重试该环境' };
+        if (!result || !result.ok) {
+          return {
+            ok: false,
+            partialApplied: true,
+            error: `Cloud 代理已保存，但 ${batchProxyUpdateError(result)}；请重试同步 AdsPower`,
+          };
         }
-        return { ok: true };
+        return { ok: true, revision: cloudWrite.revision };
       },
       onProgress: ({ completedCount, totalCount }) => {
         emitBatchProxyProgress(event, requestId, completedCount, totalCount);

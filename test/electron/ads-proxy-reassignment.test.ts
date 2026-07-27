@@ -158,6 +158,24 @@ test('executeProxyReassignmentPlan: 进度观察异常不改写已经成功的�
   assert.equal(result.updatedCount, 1);
 });
 
+test('executeProxyReassignmentPlan: Cloud 已写而 AdsPower 失败时保留双层部分真相', async () => {
+  const result = await executeProxyReassignmentPlan({
+    plan: [
+      { userId: 'u1', proxy: { proxyType: 'http' } },
+      { userId: 'u2', proxy: { proxyType: 'http' } },
+      { userId: 'u3', proxy: { proxyType: 'http' } },
+    ],
+    updateOne: async (item: { userId: string }) => item.userId === 'u2'
+      ? { ok: false, partialApplied: true, error: 'Cloud 已保存，AdsPower 未同步' }
+      : { ok: true },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.updatedCount, 1);
+  assert.equal(result.partial, true);
+  assert.deepEqual((result as { cloudSavedUserIds?: string[] }).cloudSavedUserIds, ['u1', 'u2']);
+  assert.equal((result as { cloudSavedCount?: number }).cloudSavedCount, 2);
+});
+
 test('executeProxyReassignmentPlan: 后置目标变为运行时不写它及后续项', async () => {
   const calls: string[] = [];
   const result = await executeProxyReassignmentPlan({

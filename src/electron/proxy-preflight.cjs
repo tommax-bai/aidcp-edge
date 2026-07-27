@@ -113,6 +113,9 @@ function publicSnapshot(result) {
   return {
     state: result.state,
     ...(typeof result.checkedAt === 'string' ? { checkedAt: result.checkedAt } : {}),
+    ...(Number.isInteger(result.authorityRevision) && result.authorityRevision > 0
+      ? { authorityRevision: result.authorityRevision }
+      : {}),
   };
 }
 
@@ -137,20 +140,24 @@ function createProxyPreflightController(options = {}) {
     notify(key, null);
   }
 
-  function freshResult(entry) {
+  function freshResult(entry, authorityRevision) {
     if (!entry || !entry.result || entry.result.state === 'unknown') return null;
+    if (Number.isInteger(authorityRevision) && entry.authorityRevision !== authorityRevision) return null;
     return entry.expiresAt > now() ? entry.result : null;
   }
 
-  function ensure({ envId, profileId }) {
+  function ensure({ envId, profileId, proxyConfig, authorityRevision }) {
     const key = String(envId || '').trim();
     const id = String(profileId || '').trim();
+    const requestedRevision = Number.isInteger(authorityRevision) && authorityRevision > 0
+      ? authorityRevision
+      : null;
     if (!key || !id) {
       return Promise.resolve({ state: 'unknown', checkedAt: new Date(now()).toISOString(), reason: 'profile_config_unavailable' });
     }
     const current = entries.get(key);
-    if (current?.promise) return current.promise;
-    const fresh = freshResult(current);
+    if (current?.promise && current.authorityRevision === requestedRevision) return current.promise;
+    const fresh = freshResult(current, requestedRevision);
     if (fresh) return Promise.resolve(fresh);
 
     notify(key, { state: 'checking' });
@@ -158,7 +165,9 @@ function createProxyPreflightController(options = {}) {
     promise = (async () => {
       let result;
       try {
-        const config = await readProxy(id);
+        const config = proxyConfig || await readProxy(id);
+        const resolvedRevision = requestedRevision
+          || (Number.isInteger(config && config.revision) && config.revision > 0 ? config.revision : null);
         if (!config || config.ok !== true) {
           result = config && config.blocking === true
             ? {
@@ -172,6 +181,7 @@ function createProxyPreflightController(options = {}) {
         } else {
           result = await probe(config.proxy, { now });
         }
+        if (resolvedRevision) result = { ...result, authorityRevision: resolvedRevision };
       } catch {
         result = { state: 'unknown', checkedAt: new Date(now()).toISOString(), reason: 'detector_unavailable' };
       }
@@ -180,12 +190,13 @@ function createProxyPreflightController(options = {}) {
       }
       entries.set(key, {
         result,
+        authorityRevision: result.authorityRevision || requestedRevision,
         expiresAt: result.state === 'unknown' ? now() : now() + ttlMs,
       });
       notify(key, result);
       return result;
     })();
-    entries.set(key, { promise });
+    entries.set(key, { promise, authorityRevision: requestedRevision });
     return promise;
   }
 

@@ -106,6 +106,7 @@ export interface AdsPowerProxyConfig {
 
 export interface AdsPowerProxyAuthority {
   mode: 'direct' | 'system_then_environment';
+  authorityRevision: number;
   originalProxy: AdsPowerProxyConfig;
   targetProxy: AdsPowerProxyConfig;
 }
@@ -222,9 +223,13 @@ export function readAdsPowerProxyAuthority(
       ? 'system_then_environment'
       : null;
   if (!mode) throw new Error('[aidcp-edge] 原环境代理安全通道模式无效');
+  const authorityRevision = Number(parsed.authorityRevision);
+  if (!Number.isInteger(authorityRevision) || authorityRevision < 1) {
+    throw new Error('[aidcp-edge] 原环境代理安全通道 Cloud revision 无效');
+  }
   const originalProxy = normalizeAdsPowerProxyConfig(parsed.originalProxy);
   if (mode === 'direct') {
-    return { mode, originalProxy, targetProxy: { ...originalProxy } };
+    return { mode, authorityRevision, originalProxy, targetProxy: { ...originalProxy } };
   }
   const relayPort = Number(parsed.relayPort);
   if (!Number.isInteger(relayPort) || relayPort < 1 || relayPort > 65_535) {
@@ -232,6 +237,7 @@ export function readAdsPowerProxyAuthority(
   }
   return {
     mode,
+    authorityRevision,
     originalProxy,
     targetProxy: {
       proxy_soft: 'other',
