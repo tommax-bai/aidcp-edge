@@ -232,6 +232,76 @@ async fn facebook_initial_scan_navigation_failure_never_reads_the_persisted_page
 }
 
 #[tokio::test]
+async fn facebook_feed_scroll_dispatches_a_humanized_multi_frame_wheel_gesture() {
+    let (port, server) = spawn_facebook_feed_scroll_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "feed-scroll-humanized-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 8_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("feed_scroll".to_owned()),
+                dwell_ms: None,
+            }),
+        })
+        .await
+        .expect("Feed scroll");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::PageCards(cards) = outcome.output.expect("Feed cards") else {
+        panic!("expected Feed cards")
+    };
+    assert_eq!(
+        cards.cards[0].note_id.as_deref(),
+        Some("https://www.facebook.com/Alice/posts/pfbidAFTER")
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook Feed scroll fake CDP");
+    let move_index = requests
+        .iter()
+        .position(|request| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseMoved"
+        })
+        .expect("viewport-centre pointer move");
+    let wheel_requests = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseWheel"
+        })
+        .collect::<Vec<_>>();
+    assert!((8..=15).contains(&wheel_requests.len()));
+    assert!(move_index < wheel_requests[0].0);
+    let deltas = wheel_requests
+        .iter()
+        .map(|(_, request)| {
+            assert_eq!(request["params"]["x"], 720.0);
+            let y = request["params"]["y"].as_f64().expect("wheel y");
+            assert!((y - 440.0).abs() < f64::EPSILON * 512.0);
+            request["params"]["deltaY"].as_f64().expect("wheel delta")
+        })
+        .collect::<Vec<_>>();
+    assert!((520.0..=780.0).contains(&deltas.iter().sum::<f64>()));
+    let peak = deltas
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+        .map(|(index, _)| index)
+        .expect("wheel peak");
+    assert!(peak > 0 && peak + 1 < deltas.len());
+}
+
+#[tokio::test]
 async fn facebook_reel_scroll_uses_trusted_arrow_and_requires_identity_movement() {
     let (port, server) = spawn_facebook_reel_arrow_cdp().await;
     let mut engine = Engine::default();
@@ -2541,6 +2611,112 @@ async fn spawn_facebook_initial_scan_cdp() -> (u16, tokio::task::JoinHandle<Vec<
         requests
     });
     (port, server)
+}
+
+async fn spawn_facebook_feed_scroll_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut feed_probes = 0usize;
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let result = match router_kind(&request).as_deref() {
+                Some("reel_probe") => router_cdp(
+                    "reel_probe",
+                    json!({
+                        "ok": false,
+                        "reason": "not_reel"
+                    }),
+                ),
+                Some("page_probe") => facebook_feed_page_probe_cdp(),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("feed_probe") => {
+                    feed_probes += 1;
+                    facebook_feed_scroll_probe_cdp(feed_probes >= 3)
+                }
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
+fn facebook_feed_page_probe_cdp() -> Value {
+    router_cdp(
+        "page_probe",
+        json!({
+            "targetId": "",
+            "origin": "https://www.facebook.com",
+            "path": "/",
+            "readyState": "complete",
+            "pageKind": "unknown",
+            "blockingKind": "none",
+            "signals": {
+                "feedCardCount": 1,
+                "noteDetailCount": 0,
+                "loginWallCount": 0,
+                "captchaSignalCount": 0,
+                "dialogCount": 0,
+                "profileSignalCount": 0,
+                "notificationSignalCount": 0,
+                "publishSignalCount": 0,
+                "errorSignalCount": 0,
+                "mainCount": 1
+            }
+        }),
+    )
+}
+
+fn facebook_feed_scroll_probe_cdp(after_scroll: bool) -> Value {
+    router_cdp(
+        "feed_probe",
+        json!({
+            "cards": [{
+                "index": 0,
+                "title": if after_scroll { "After scroll" } else { "Before scroll" },
+                "likeCount": 0,
+                "collectCount": 0,
+                "noteId": if after_scroll {
+                    "https://www.facebook.com/Alice/posts/pfbidAFTER"
+                } else {
+                    "https://www.facebook.com/Alice/posts/pfbidBEFORE"
+                }
+            }],
+            "documentGeneration": "home-generation",
+            "listKind": "feed",
+            "listState": "ready",
+            "loading": false,
+            "articleCount": 1,
+            "explicitEmpty": false,
+            "explicitEnd": false,
+            "url": "https://www.facebook.com/",
+            "surface": "home",
+            "scrollY": if after_scroll { 650 } else { 0 },
+            "innerWidth": 1440,
+            "innerHeight": 800,
+            "scrollHeight": 2400,
+            "documentAgeMs": 2000
+        }),
+    )
 }
 
 async fn spawn_facebook_initial_scan_navigation_failure_cdp()

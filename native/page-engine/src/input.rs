@@ -1,11 +1,17 @@
 use crate::cdp::CdpSession;
-use std::f64::consts::TAU;
+use crate::error::EngineError;
+use std::f64::consts::{PI, TAU};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SHIFT_MODIFIER: u8 = 8;
 const CAPTCHA_TEXT_MAX_CHARS: usize = 24;
+const WHEEL_FRAME_COUNT_MIN: usize = 8;
+const WHEEL_FRAME_COUNT_MAX: usize = 15;
+const WHEEL_FRAME_DELAY_MIN_MS: u64 = 16;
+const WHEEL_FRAME_DELAY_MAX_MS: u64 = 60;
 static KEYBOARD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static WHEEL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TextInputFailure {
@@ -13,6 +19,49 @@ pub(crate) enum TextInputFailure {
     Deadline,
     Engine,
     TargetLost,
+}
+
+#[derive(Debug)]
+pub(crate) enum WheelInputFailure {
+    Cancelled,
+    Deadline,
+    Cdp(EngineError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WheelFrame {
+    delta_y: i64,
+    delay_ms: u64,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct WheelGesture {
+    target_distance_px: i64,
+    frames: Vec<WheelFrame>,
+}
+
+pub(crate) async fn dispatch_wheel_humanized(
+    cdp: &mut CdpSession,
+    x: f64,
+    y: f64,
+    baseline_distance_px: f64,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(), WheelInputFailure> {
+    ensure_wheel_input_active(cancellation, deadline_unix_ms)?;
+    let mut rhythm = WheelRhythm::new();
+    let gesture = generate_wheel_gesture(baseline_distance_px, &mut rhythm);
+    cdp.dispatch_mouse("mouseMoved", x, y, "none", 0)
+        .await
+        .map_err(WheelInputFailure::Cdp)?;
+    for frame in gesture.frames {
+        ensure_wheel_input_active(cancellation, deadline_unix_ms)?;
+        cdp.dispatch_wheel(x, y, frame.delta_y as f64)
+            .await
+            .map_err(WheelInputFailure::Cdp)?;
+        wait_before_next_wheel_frame(frame.delay_ms, cancellation, deadline_unix_ms).await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn type_text_humanized(
@@ -149,6 +198,114 @@ async fn wait_before_character(
 async fn wait_for_cancellation(cancellation: &AtomicBool) {
     while !cancellation.load(Ordering::Acquire) {
         tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn ensure_wheel_input_active(
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(), WheelInputFailure> {
+    if cancellation.is_some_and(|value| value.load(Ordering::Acquire)) {
+        return Err(WheelInputFailure::Cancelled);
+    }
+    if unix_time_ms() >= deadline_unix_ms {
+        return Err(WheelInputFailure::Deadline);
+    }
+    Ok(())
+}
+
+async fn wait_before_next_wheel_frame(
+    delay_ms: u64,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(), WheelInputFailure> {
+    let delay = Duration::from_millis(delay_ms);
+    if let Some(cancellation) = cancellation {
+        tokio::select! {
+            _ = wait_for_cancellation(cancellation) => {
+                return Err(WheelInputFailure::Cancelled);
+            }
+            _ = tokio::time::sleep(delay) => {}
+        }
+    } else {
+        tokio::time::sleep(delay).await;
+    }
+    ensure_wheel_input_active(cancellation, deadline_unix_ms)
+}
+
+struct WheelRhythm {
+    state: u64,
+}
+
+impl WheelRhythm {
+    fn new() -> Self {
+        Self::from_seed(
+            unix_time_ms()
+                ^ WHEEL_SEQUENCE
+                    .fetch_add(1, Ordering::Relaxed)
+                    .wrapping_mul(0xD1B5_4A32_D192_ED03),
+        )
+    }
+
+    fn from_seed(seed: u64) -> Self {
+        Self { state: seed | 1 }
+    }
+
+    fn random(&mut self) -> f64 {
+        let mut value = self.state;
+        value ^= value >> 12;
+        value ^= value << 25;
+        value ^= value >> 27;
+        self.state = value;
+        let bits = value.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11;
+        bits as f64 / (1_u64 << 53) as f64
+    }
+
+    fn random_inclusive(&mut self, min: usize, max: usize) -> usize {
+        min + (self.random() * (max - min + 1) as f64).floor() as usize
+    }
+}
+
+fn generate_wheel_gesture(baseline_distance_px: f64, rhythm: &mut WheelRhythm) -> WheelGesture {
+    let direction = if baseline_distance_px < 0.0 { -1 } else { 1 };
+    let baseline = baseline_distance_px.abs().round().max(1.0);
+    let target_distance_px =
+        (baseline * (1.0 + (rhythm.random() - 0.5) * 0.4)).round() as i64 * direction;
+    let frame_count = rhythm.random_inclusive(WHEEL_FRAME_COUNT_MIN, WHEEL_FRAME_COUNT_MAX);
+    let mut weights = Vec::with_capacity(frame_count);
+    let mut total_weight = 0.0;
+    for index in 0..frame_count {
+        let position = index as f64 / (frame_count - 1) as f64;
+        let envelope = (PI * position).sin() * 0.85 + 0.15;
+        let weight = envelope * (0.85 + rhythm.random() * 0.3);
+        weights.push(weight);
+        total_weight += weight;
+    }
+    let mut allocated = 0_i64;
+    let magnitude = target_distance_px.abs();
+    let frames = weights
+        .into_iter()
+        .enumerate()
+        .map(|(index, weight)| {
+            let delta = if index + 1 == frame_count {
+                magnitude - allocated
+            } else {
+                let value = (weight / total_weight * magnitude as f64).round() as i64;
+                allocated += value;
+                value
+            };
+            WheelFrame {
+                delta_y: delta * direction,
+                delay_ms: rhythm.random_inclusive(
+                    WHEEL_FRAME_DELAY_MIN_MS as usize,
+                    WHEEL_FRAME_DELAY_MAX_MS as usize,
+                ) as u64,
+            }
+        })
+        .collect();
+    WheelGesture {
+        target_distance_px,
+        frames,
     }
 }
 
@@ -407,5 +564,52 @@ mod tests {
         assert!(!valid_captcha_text(""));
         assert!(!valid_captcha_text(&"x".repeat(CAPTCHA_TEXT_MAX_CHARS + 1)));
         assert!(!valid_captcha_text("验证码"));
+    }
+
+    #[test]
+    fn wheel_gesture_preserves_humanized_shape_and_exact_distance() {
+        for seed in 1..=64 {
+            let mut rhythm = WheelRhythm::from_seed(seed);
+            let gesture = generate_wheel_gesture(650.0, &mut rhythm);
+            assert!((520..=780).contains(&gesture.target_distance_px));
+            assert!(
+                (WHEEL_FRAME_COUNT_MIN..=WHEEL_FRAME_COUNT_MAX).contains(&gesture.frames.len())
+            );
+            assert_eq!(
+                gesture
+                    .frames
+                    .iter()
+                    .map(|frame| frame.delta_y)
+                    .sum::<i64>(),
+                gesture.target_distance_px
+            );
+            assert!(gesture.frames.iter().all(|frame| {
+                (WHEEL_FRAME_DELAY_MIN_MS..=WHEEL_FRAME_DELAY_MAX_MS).contains(&frame.delay_ms)
+            }));
+            let peak = gesture
+                .frames
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, frame)| frame.delta_y.abs())
+                .map(|(index, _)| index)
+                .expect("wheel frame");
+            assert!(peak > 0 && peak + 1 < gesture.frames.len());
+        }
+    }
+
+    #[test]
+    fn wheel_gesture_preserves_upward_direction() {
+        let mut rhythm = WheelRhythm::from_seed(7);
+        let gesture = generate_wheel_gesture(-650.0, &mut rhythm);
+        assert!(gesture.target_distance_px < 0);
+        assert!(gesture.frames.iter().all(|frame| frame.delta_y <= 0));
+        assert_eq!(
+            gesture
+                .frames
+                .iter()
+                .map(|frame| frame.delta_y)
+                .sum::<i64>(),
+            gesture.target_distance_px
+        );
     }
 }

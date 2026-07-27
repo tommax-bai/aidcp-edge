@@ -3,20 +3,24 @@ use super::shared::*;
 use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
+use crate::input::{WheelInputFailure, dispatch_wheel_humanized};
 use crate::model::{PageCards, PageMovement};
 use crate::protocol::{EffectPhase, NativeCommand};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 pub(crate) async fn execute(
     session: &mut EngineSession,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     match command {
         NativeCommand::BrowseScroll(params) if params.reason.as_deref() == Some("initial_scan") => {
-            execute_facebook_initial_feed(session).await
+            execute_facebook_initial_feed(session, cancellation, deadline_unix_ms).await
         }
         NativeCommand::SearchExecute(params) if params.container.is_some() => {
-            execute_facebook_search(session, params, command).await
+            execute_facebook_search(session, params, command, cancellation, deadline_unix_ms).await
         }
         NativeCommand::NoteOpen(params) if params.url.is_some() => {
             let url = validated_facebook_content_url(
@@ -45,7 +49,9 @@ pub(crate) async fn execute(
             wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
             evaluate_facebook_router_until_cards(session, command, Duration::from_secs(5)).await
         }
-        NativeCommand::PageScroll(_) => execute_facebook_page_scroll(session, command).await,
+        NativeCommand::PageScroll(_) => {
+            execute_facebook_page_scroll(session, command, cancellation, deadline_unix_ms).await
+        }
         NativeCommand::FeedRefresh(_) => execute_facebook_feed_refresh(session).await,
         NativeCommand::NoteClose(_) | NativeCommand::NavigationBack(_) => {
             execute_facebook_back_to_list(session).await
@@ -63,6 +69,8 @@ pub(crate) async fn execute(
 
 pub(crate) async fn execute_facebook_initial_feed(
     session: &mut EngineSession,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     session.cdp.navigate(FACEBOOK_HOME_URL).await?;
     session.facebook.active_list_url = FACEBOOK_HOME_URL.to_owned();
@@ -84,7 +92,7 @@ pub(crate) async fn execute_facebook_initial_feed(
         if round + 1 >= FACEBOOK_FEED_SCROLL_ROUNDS || last.explicit_empty {
             break;
         }
-        dispatch_facebook_feed_wheel(session, &last).await?;
+        dispatch_facebook_feed_wheel(session, &last, cancellation, deadline_unix_ms).await?;
         last = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
     }
 
@@ -108,6 +116,8 @@ pub(crate) async fn execute_facebook_search(
     session: &mut EngineSession,
     params: &crate::command::SearchExecuteParams,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let container = params
         .container
@@ -138,7 +148,7 @@ pub(crate) async fn execute_facebook_search(
         if round + 1 >= FACEBOOK_FEED_SCROLL_ROUNDS {
             break;
         }
-        dispatch_facebook_feed_wheel(session, &last).await?;
+        dispatch_facebook_feed_wheel(session, &last, cancellation, deadline_unix_ms).await?;
         last = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
     }
 
@@ -158,6 +168,8 @@ pub(crate) async fn execute_facebook_search(
 
 pub(crate) async fn execute_facebook_feed_scroll(
     session: &mut EngineSession,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     ensure_facebook_active_list(session).await?;
     let command = NativeCommand::PageScroll(crate::command::PageScrollParams {
@@ -173,7 +185,7 @@ pub(crate) async fn execute_facebook_feed_scroll(
 
     for _ in 0..FACEBOOK_FEED_SCROLL_ROUNDS {
         let before = current;
-        dispatch_facebook_feed_wheel(session, &before).await?;
+        dispatch_facebook_feed_wheel(session, &before, cancellation, deadline_unix_ms).await?;
         let after = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
         saw_any_card |= !after.cards.is_empty();
         let movement = PageMovement {
@@ -535,11 +547,28 @@ async fn probe_facebook_home_target(
 async fn dispatch_facebook_feed_wheel(
     session: &mut EngineSession,
     probe: &facebook::FacebookFeedProbe,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(), EngineError> {
     let x = (probe.inner_width / 2.0).max(1.0);
     let y = (probe.inner_height * 0.55).max(1.0);
-    let delta_y = 560.0 + (unix_time_ms() % 151) as f64;
-    session.cdp.dispatch_wheel(x, y, delta_y).await.map(|_| ())
+    dispatch_wheel_humanized(
+        &mut session.cdp,
+        x,
+        y,
+        650.0,
+        cancellation,
+        deadline_unix_ms,
+    )
+    .await
+    .map_err(|failure| match failure {
+        WheelInputFailure::Cancelled => cancelled_before_dispatch(),
+        WheelInputFailure::Deadline => EngineError::new(
+            ErrorCode::CdpTimeout,
+            "native Facebook wheel gesture exceeded its deadline",
+        ),
+        WheelInputFailure::Cdp(error) => error,
+    })
 }
 
 fn facebook_page_cards(

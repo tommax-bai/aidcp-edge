@@ -2,7 +2,9 @@ use super::shared::*;
 use crate::commit_window::CommitWindowRequester;
 use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
-use crate::input::{TextInputFailure, type_text_humanized};
+use crate::input::{
+    TextInputFailure, WheelInputFailure, dispatch_wheel_humanized, type_text_humanized,
+};
 use crate::protocol::{EffectPhase, NativeCommand};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -85,7 +87,30 @@ pub(crate) async fn execute_facebook_comment(
         if editor.reason.as_deref() == Some("target_not_found") {
             break;
         }
-        session.cdp.dispatch_wheel(720.0, 440.0, 560.0).await?;
+        match dispatch_wheel_humanized(
+            &mut session.cdp,
+            720.0,
+            440.0,
+            650.0,
+            cancellation,
+            deadline_unix_ms,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(WheelInputFailure::Cancelled) => return Err(cancelled_before_dispatch()),
+            Err(WheelInputFailure::Deadline) => {
+                return Ok(facebook_action_result(
+                    EffectPhase::NotStarted,
+                    "comment",
+                    false,
+                    "comment_deadline_exceeded",
+                    Some(params.note_id.clone()),
+                    None,
+                ));
+            }
+            Err(WheelInputFailure::Cdp(error)) => return Err(error),
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
         editor = probe_facebook_comment_editor(session, &params.note_id).await?;
     }

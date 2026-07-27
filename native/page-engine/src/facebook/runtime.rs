@@ -48,7 +48,9 @@ pub(crate) async fn execute(
         FacebookCapability::Session => {
             session::execute(engine_session, command, cancellation, deadline_unix_ms).await
         }
-        FacebookCapability::Feed => feed::execute(engine_session, command).await,
+        FacebookCapability::Feed => {
+            feed::execute(engine_session, command, cancellation, deadline_unix_ms).await
+        }
         FacebookCapability::FeedLike => feed_like::execute(engine_session, command).await,
         FacebookCapability::Reels => reels::execute(engine_session, command).await,
         FacebookCapability::GroupJoin => {

@@ -4,6 +4,7 @@ use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
 use crate::protocol::{EffectPhase, NativeCommand};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 pub(crate) async fn execute(
@@ -174,10 +175,12 @@ pub(crate) async fn execute_facebook_follow(
 pub(crate) async fn execute_facebook_page_scroll(
     session: &mut EngineSession,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let before = probe_facebook_reel(session).await?;
     if !before.is_reels_surface() {
-        return execute_facebook_feed_scroll(session).await;
+        return execute_facebook_feed_scroll(session, cancellation, deadline_unix_ms).await;
     }
     if !before.ok || before.note_id.is_none() || before.video_key.is_none() {
         return Ok(facebook_scroll_failure(
