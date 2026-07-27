@@ -9,12 +9,14 @@ const {
   isLoopbackProxyConfig,
   migrationAuthorityFromLocalRecord,
   normalizeCloudProxyAuthorityRecord,
+  proxyEditorRepairView,
 } = require('../../src/electron/environment-proxy-authority.cjs') as {
   adsNoProxyAuthorityView: (input: Record<string, unknown>, profileId: string) => Record<string, any> | null;
   cloudAuthorityForProxyInput: (input: Record<string, unknown>) => Record<string, any>;
   isLoopbackProxyConfig: (input: Record<string, unknown>) => boolean;
   migrationAuthorityFromLocalRecord: (input: Record<string, unknown>) => Record<string, any>;
   normalizeCloudProxyAuthorityRecord: (input: Record<string, unknown>, profileId: string) => Record<string, any>;
+  proxyEditorRepairView: (input: Record<string, unknown>) => Record<string, any>;
 };
 
 test('AdsPower exact read may classify only explicit no_proxy without importing route fields', () => {
@@ -112,12 +114,36 @@ test('Cloud record validation binds the exact profile and revision', () => {
       proxyHost: 'proxy.example',
       proxyPort: 8080,
     },
-  }, 'profile-1').ok, false);
+  }, 'profile-1').currentRevision, 4);
   assert.equal(normalizeCloudProxyAuthorityRecord({
     envKey: 'profile-1',
     revision: 0,
     authority: { state: 'no_proxy' },
-  }, 'profile-1').ok, false);
+  }, 'profile-1').currentRevision, undefined);
+});
+
+test('proxy editor repair view is blank and preserves only a valid CAS revision', () => {
+  assert.deepEqual(proxyEditorRepairView({
+    currentRevision: 4,
+    authority: {
+      proxyHost: 'must-not-project',
+      proxyUser: 'must-not-project',
+      proxyPassword: 'must-not-project',
+    },
+  }), {
+    ok: true,
+    noProxy: false,
+    repairRequired: true,
+    proxy: {
+      proxyType: 'http',
+      proxyHost: '',
+      proxyPort: '',
+      proxyUser: '',
+      proxyPassword: '',
+    },
+    currentRevision: 4,
+  });
+  assert.equal(proxyEditorRepairView({ currentRevision: 0 }).currentRevision, undefined);
 });
 
 test('local migration accepts only a valid non-loopback original proxy', () => {

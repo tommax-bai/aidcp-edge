@@ -107,16 +107,35 @@ test('代理编辑先 CAS 更新 Cloud 权威，再更新 AdsPower 执行副本'
   assert.match(batch, /partialApplied:\s*true/);
 });
 
-test('精确代理编辑仅从 AdsPower 识别 no_proxy，配置代理仍读取 Cloud 权威', () => {
+test('代理编辑保留为修复入口；AdsPower 仅可识别 no_proxy', () => {
   const block = handlerBlock(main, 'ads:getEnvProxy');
   assert.match(block, /await readAuthoritativeProfileProxy\(userId\)/);
-  assert.match(block, /error:\s*proxyPreflightFailureText\(authority\.reason\)/);
+  assert.match(block, /proxyEditorRepairView\(authority\)/);
+  assert.match(block, /readWarning:/);
+  assert.doesNotMatch(block, /return\s+\{\s*\.\.\.authority,\s*error:/);
   const bypassStart = main.indexOf('async function readAdsNoProxyAuthority');
   const bypassEnd = main.indexOf('async function writeCloudProxyAuthority', bypassStart);
   const bypass = main.slice(bypassStart, bypassEnd);
   assert.match(bypass, /getProfileProxyConfig/);
   assert.match(bypass, /adsNoProxyAuthorityView\(result,\s*id\)/);
   assert.doesNotMatch(bypass, /proxyHost|proxyPort|proxyUser|proxyPassword|proxy_host|proxy_port|proxy_user|proxy_password/);
+});
+
+test('格式错误的 Cloud 权威可按合法 revision 覆盖，读取失败不回填坏字段', () => {
+  const saveStart = main.indexOf('async function saveCloudProxyAuthorityForEdit');
+  const saveEnd = main.indexOf('function batchProxyProgressRequestId', saveStart);
+  const save = main.slice(saveStart, saveEnd);
+  assert.match(save, /current\.reason === 'proxy_authority_malformed'/);
+  assert.match(save, /Number\.isInteger\(current\.currentRevision\)/);
+  assert.match(save, /repairableMalformed \? current\.currentRevision : null/);
+
+  const clickStart = renderer.indexOf('function makeProxyBtn');
+  const clickEnd = renderer.indexOf('async function refreshEnvs', clickStart);
+  const click = renderer.slice(clickStart, clickEnd);
+  assert.match(click, /openProxyPop\(prof,/);
+  assert.match(click, /if \(r\.repairRequired\)/);
+  assert.ok(click.indexOf('openProxyPop(prof,') < click.indexOf('if (r.repairRequired)'));
+  assert.match(click, /setProxyPopMsg\(r\.readWarning/);
 });
 
 test('环境列表以原代理权威覆盖 live GOST 摘要，但不批量投影认证字段', () => {

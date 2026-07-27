@@ -28,6 +28,7 @@ const {
   cloudAuthorityForProxyInput,
   migrationAuthorityFromLocalRecord,
   normalizeCloudProxyAuthorityRecord,
+  proxyEditorRepairView,
 } = require('./environment-proxy-authority.cjs');
 const {
   createProxyReassignmentPlan,
@@ -1535,7 +1536,7 @@ async function readAuthoritativeProfileProxy(profileId, {
   const data = response && response.data && response.data.data;
   if (response.ok && data) {
     const normalized = normalizeCloudProxyAuthorityRecord(data, id);
-    if (!normalized.ok) return { ok: false, blocking: true, reason: normalized.reason };
+    if (!normalized.ok) return { ...normalized, blocking: true };
     cacheCloudProxyAuthority(normalized);
     return normalized;
   }
@@ -7481,9 +7482,17 @@ ipcMain.handle('ads:getEnvProxy', async (_event, opts) => {
   const scope = await proxyTargetScope([opts && opts.userId]);
   if (!scope.ok) return { ...scope, status: scope.error && scope.error.includes('不属于') ? 403 : undefined };
   const userId = scope.userIds[0];
-  const authority = await readAuthoritativeProfileProxy(userId);
+  let authority;
+  try {
+    authority = await readAuthoritativeProfileProxy(userId);
+  } catch {
+    authority = { ok: false, reason: 'proxy_authority_unavailable' };
+  }
   if (!authority.ok) {
-    return { ...authority, error: proxyPreflightFailureText(authority.reason) };
+    return {
+      ...proxyEditorRepairView(authority),
+      readWarning: `${proxyPreflightFailureText(authority.reason)}；可重新填写并覆盖。`,
+    };
   }
   return authority;
 });
@@ -7554,11 +7563,17 @@ async function saveCloudProxyAuthorityForEdit(userId, proxyInput) {
     allowMigration: false,
     allowAdsNoProxyBypass: false,
   });
-  if (!current.ok && current.reason !== 'proxy_authority_uninitialized') {
+  const repairableMalformed = !current.ok
+    && current.reason === 'proxy_authority_malformed'
+    && Number.isInteger(current.currentRevision)
+    && current.currentRevision > 0;
+  if (!current.ok && current.reason !== 'proxy_authority_uninitialized' && !repairableMalformed) {
     return { ok: false, reason: current.reason, error: cloudProxyAuthorityError(current) };
   }
   const written = await writeCloudProxyAuthority(userId, {
-    expectedRevision: current.ok ? current.revision : null,
+    expectedRevision: current.ok
+      ? current.revision
+      : repairableMalformed ? current.currentRevision : null,
     authority: desired.authority,
     source: 'edge_edit',
   });

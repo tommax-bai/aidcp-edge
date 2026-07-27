@@ -32,13 +32,22 @@ function normalizeCloudProxyAuthorityRecord(value, expectedProfileId) {
   const profileId = String(value.envKey || '').trim();
   const expected = String(expectedProfileId || '').trim();
   const revision = Number(value.revision);
+  const recoverableRevision = profileId && profileId === expected
+    && Number.isInteger(revision) && revision > 0
+    ? revision
+    : null;
+  const malformed = () => ({
+    ok: false,
+    reason: 'proxy_authority_malformed',
+    ...(recoverableRevision ? { currentRevision: recoverableRevision } : {}),
+  });
   const authority = value.authority;
   if (!profileId || profileId !== expected || !Number.isInteger(revision) || revision < 1
     || !authority || typeof authority !== 'object' || Array.isArray(authority)) {
-    return { ok: false, reason: 'proxy_authority_malformed' };
+    return malformed();
   }
   if (authority.state === 'no_proxy') {
-    if (Object.keys(authority).length !== 1) return { ok: false, reason: 'proxy_authority_malformed' };
+    if (Object.keys(authority).length !== 1) return malformed();
     return {
       ok: true,
       noProxy: true,
@@ -48,7 +57,7 @@ function normalizeCloudProxyAuthorityRecord(value, expectedProfileId) {
       proxy: { proxyType: 'no_proxy' },
     };
   }
-  if (authority.state !== 'configured') return { ok: false, reason: 'proxy_authority_malformed' };
+  if (authority.state !== 'configured') return malformed();
   const configuredKeys = ['state', 'proxyType', 'proxyHost', 'proxyPort', 'proxyUser', 'proxyPassword'];
   if (Object.keys(authority).some((key) => !configuredKeys.includes(key))
     || typeof authority.proxyType !== 'string'
@@ -56,7 +65,7 @@ function normalizeCloudProxyAuthorityRecord(value, expectedProfileId) {
     || typeof authority.proxyPort !== 'number'
     || typeof authority.proxyUser !== 'string'
     || typeof authority.proxyPassword !== 'string') {
-    return { ok: false, reason: 'proxy_authority_malformed' };
+    return malformed();
   }
   const normalized = normalizeProxyInput({
     proxyType: authority.proxyType,
@@ -65,7 +74,7 @@ function normalizeCloudProxyAuthorityRecord(value, expectedProfileId) {
     proxyUser: authority.proxyUser,
     proxyPassword: authority.proxyPassword,
   });
-  if (!normalized.ok || normalized.noProxy) return { ok: false, reason: 'proxy_authority_malformed' };
+  if (!normalized.ok || normalized.noProxy) return malformed();
   return {
     ok: true,
     noProxy: false,
@@ -87,6 +96,23 @@ function adsNoProxyAuthorityView(value, expectedProfileId) {
     proxyConfig: null,
     proxy: { proxyType: 'no_proxy' },
     source: 'ads_no_proxy',
+  };
+}
+
+function proxyEditorRepairView(value) {
+  const revision = Number(value && value.currentRevision);
+  return {
+    ok: true,
+    noProxy: false,
+    repairRequired: true,
+    proxy: {
+      proxyType: 'http',
+      proxyHost: '',
+      proxyPort: '',
+      proxyUser: '',
+      proxyPassword: '',
+    },
+    ...(Number.isInteger(revision) && revision > 0 ? { currentRevision: revision } : {}),
   };
 }
 
@@ -135,4 +161,5 @@ module.exports = {
   isLoopbackProxyConfig,
   migrationAuthorityFromLocalRecord,
   normalizeCloudProxyAuthorityRecord,
+  proxyEditorRepairView,
 };

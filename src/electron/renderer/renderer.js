@@ -7040,6 +7040,9 @@ function makeProxyBtn(prof) {
         return;
       }
       openProxyPop(prof, { ...(r.proxy || {}), noProxy: r.noProxy === true });
+      if (r.repairRequired) {
+        setProxyPopMsg(r.readWarning || '当前代理配置无法读取，请重新填写并覆盖。', true);
+      }
       setEnvMsg('', false);
     } catch (err) {
       setEnvMsg(`读取代理配置失败：${(err && err.message) || err}`, true);
