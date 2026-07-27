@@ -1,5 +1,8 @@
 import { evalRaw, type BrowseCdp } from '../../browse/cdp-util.js';
 import { canonicalPostId } from '../post-identity.js';
+import {
+  facebookReactDomPermalinkRuntimeSource,
+} from './react-feed-permalink.js';
 
 export type FacebookSurfaceType =
   | 'home'
@@ -160,6 +163,7 @@ export function normalizeFacebookPermalinks(hrefs: string[]): FacebookPermalinkC
 }
 
 const PAGE_STRUCTURE_SCAN_JS = String.raw`(function(){
+  ${facebookReactDomPermalinkRuntimeSource()}
   function visible(el){
     if (!el || !el.getBoundingClientRect) return false;
     var r = el.getBoundingClientRect();
@@ -194,38 +198,96 @@ const PAGE_STRUCTURE_SCAN_JS = String.raw`(function(){
     }
     return n;
   }
+  function buildReactPostEntries(scanRoot){
+    var anchors = Array.from(scanRoot.querySelectorAll('a[href]')).filter(visible).slice(0, 600);
+    var canonicalByAnchor = fbReactGroupPostHrefMap(anchors);
+    canonicalByAnchor.forEach(function(href, anchor){
+      if (!isPermalink(href)) canonicalByAnchor.delete(anchor);
+    });
+    if (canonicalByAnchor.size === 0) return [];
+
+    function canonicalHrefsWithin(root){
+      var hrefs = [];
+      canonicalByAnchor.forEach(function(href, anchor){
+        if (root.contains(anchor) && hrefs.indexOf(href) < 0) hrefs.push(href);
+      });
+      return hrefs;
+    }
+    function cardFor(anchor){
+      var node = anchor;
+      for (var depth = 0; node && node !== scanRoot && depth < 32; depth++, node = node.parentElement) {
+        var hrefs = canonicalHrefsWithin(node);
+        if (hrefs.length !== 1) continue;
+        var editors = Array.from(node.querySelectorAll('[contenteditable="true"][role="textbox"]')).filter(visible);
+        var commentControls = countTextControls(node, /^(评论|发表评论|发表公开评论|回复|Comment|Reply|Bình luận|Comentar|Comentario)$/i);
+        if (editors.length > 0 || commentControls > 0) return { root: node, href: hrefs[0] };
+      }
+      return null;
+    }
+
+    var entries = [];
+    var seenRoots = [];
+    canonicalByAnchor.forEach(function(_href, anchor){
+      var resolved = cardFor(anchor);
+      if (!resolved || seenRoots.indexOf(resolved.root) >= 0) return;
+      seenRoots.push(resolved.root);
+      entries.push(resolved);
+    });
+    return entries;
+  }
+  function candidateFor(root, index, extraPermalinks){
+    var box = root.getBoundingClientRect();
+    var editors = Array.from(root.querySelectorAll('[contenteditable="true"][role="textbox"]')).filter(visible);
+    var commentControls = countTextControls(root, /^(评论|发表评论|发表公开评论|回复|Comment|Reply|Bình luận|Comentar|Comentario)$/i);
+    var expandControls = countTextControls(root, /(查看更多|展开|See more|View more)/i);
+    var commentRegion = root.querySelector('[aria-label*="评论"],[aria-label*="Comment"],[aria-label*="bình luận" i],[role="textbox"]');
+    var authorLinks = Array.from(root.querySelectorAll('a[href]')).filter(function(a){
+      var h = hrefOf(a);
+      return visible(a) && h && !isPermalink(h) && text(a).length > 0;
+    });
+    return {
+      index: index,
+      role: root.getAttribute('role') || null,
+      textLength: text(root).length,
+      authorLinkCount: authorLinks.length,
+      commentEditorCount: editors.length,
+      commentControlCount: commentControls,
+      expandControlCount: expandControls,
+      hasCommentRegion: editors.length > 0 || commentControls > 0 || !!commentRegion,
+      top: Math.round(box.top),
+      bottom: Math.round(box.bottom),
+      permalinkHrefs: Array.from(new Set(collectPermalinks(root).concat(extraPermalinks || [])))
+    };
+  }
   var scanRoot = document.querySelector('[role="main"], main') || document;
   var allArticles = Array.from(scanRoot.querySelectorAll('[role="article"], article')).filter(visible);
   // 只保留顶层帖子；嵌套 comment/reply article 不是群讨论流候选，不能抢「第一帖」。
   var articles = allArticles.filter(function(article){
     return !allArticles.some(function(other){ return other !== article && other.contains(article); });
   }).slice(0, 12);
-  var postCandidates = articles.map(function(article, index){
-    var box = article.getBoundingClientRect();
-    var editors = Array.from(article.querySelectorAll('[contenteditable="true"][role="textbox"]')).filter(visible);
-    var commentControls = countTextControls(article, /^(评论|发表评论|发表公开评论|回复|Comment|Reply|Bình luận|Comentar|Comentario)$/i);
-    var expandControls = countTextControls(article, /(查看更多|展开|See more|View more)/i);
-    var commentRegion = article.querySelector('[aria-label*="评论"],[aria-label*="Comment"],[role="textbox"]');
-    var authorLinks = Array.from(article.querySelectorAll('a[href]')).filter(function(a){
-      var h = hrefOf(a);
-      return visible(a) && h && !isPermalink(h) && text(a).length > 0;
-    });
-    return {
-      index: index,
-      role: article.getAttribute('role') || null,
-      textLength: text(article).length,
-      authorLinkCount: authorLinks.length,
-      commentEditorCount: editors.length,
-      commentControlCount: commentControls,
-      expandControlCount: expandControls,
-      hasCommentRegion: !!commentRegion,
-      top: Math.round(box.top),
-      bottom: Math.round(box.bottom),
-      permalinkHrefs: collectPermalinks(article)
-    };
+  var entries = articles.map(function(article){ return { root: article, candidate: candidateFor(article, 0, []) }; });
+  var reactEntries = buildReactPostEntries(scanRoot);
+  reactEntries.forEach(function(entry){
+    entries.push({ root: entry.root, candidate: candidateFor(entry.root, 0, [entry.href]) });
+  });
+  entries.sort(function(a, b){ return a.candidate.top - b.candidate.top; });
+  var postCandidates = [];
+  var seenRoots = [];
+  var seenPermalinks = new Set();
+  entries.forEach(function(entry){
+    if (seenRoots.indexOf(entry.root) >= 0) return;
+    var stable = entry.candidate.permalinkHrefs.find(isPermalink);
+    if (stable && seenPermalinks.has(stable)) return;
+    seenRoots.push(entry.root);
+    if (stable) seenPermalinks.add(stable);
+    entry.candidate.index = postCandidates.length;
+    postCandidates.push(entry.candidate);
   });
   var bodyText = text(document.body);
-  var hrefs = collectPermalinks(document).slice(0, 50);
+  var hrefs = collectPermalinks(document)
+    .concat(reactEntries.map(function(entry){ return entry.href; }))
+    .filter(function(href, index, all){ return all.indexOf(href) === index; })
+    .slice(0, 50);
   var editorCount = Array.from(document.querySelectorAll('[contenteditable="true"][role="textbox"]')).filter(visible).length;
   return JSON.stringify({
     href: location.href,

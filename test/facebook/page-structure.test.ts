@@ -109,6 +109,36 @@ test('normalizeFacebookPageStructure: summarizes structure without raw post text
   assert.equal(serialized.includes('SECRET_CONTEXT'), false);
 });
 
+test('normalizeFacebookPageStructure: accepts a React-recovered non-article group-post candidate', () => {
+  const summary = normalizeFacebookPageStructure({
+    ...baseRaw,
+    href: 'https://www.facebook.com/groups/1707108103609680',
+    articleCount: 0,
+    postCandidates: [{
+      index: 0,
+      role: null,
+      textLength: 516,
+      authorLinkCount: 1,
+      commentEditorCount: 1,
+      commentControlCount: 1,
+      expandControlCount: 0,
+      hasCommentRegion: true,
+      top: 47,
+      bottom: 273,
+      permalinkHrefs: [
+        'https://www.facebook.com/groups/1707108103609680/posts/1733009847686172/?__cft__[0]=SECRET_CONTEXT#comments',
+      ],
+    }],
+  });
+
+  assert.equal(summary.postCandidates[0].role, null);
+  assert.equal(summary.postCandidates[0].hasCommentRegion, true);
+  assert.deepEqual(summary.postCandidates[0].permalinkCandidates, [{
+    href: 'https://www.facebook.com/groups/1707108103609680/posts/1733009847686172',
+    kind: 'group_post',
+  }]);
+});
+
 test('collectFacebookPageStructure: parses CDP JSON and classifies current surface', async () => {
   const summary = await collectFacebookPageStructure(fakeCdp(baseRaw));
   assert.equal(summary.surface, 'group_post');

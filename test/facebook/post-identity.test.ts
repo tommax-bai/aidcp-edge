@@ -188,3 +188,27 @@ test('FB_TARGET_HELPERS_JS: 相邻轻量视频按同一 data-video-id 精确解�
 
   assert.deepEqual(result, { one: 'card-101', two: 'card-202', mismatch: 'no_target' });
 });
+
+test('FB_TARGET_HELPERS_JS: permalink 卡无 dialog 且挂在背景 feed 外时仍按 URL 身份精确解析', () => {
+  const dom = new JSDOM(
+    `<!doctype html><body>
+      <div role="feed"><article></article><article></article></div>
+      <section id="target">
+        <h4><a href="/author">Author</a></h4>
+        <a href="/groups/1/posts/2">time</a>
+        <div data-ad-rendering-role="story_message">target post</div>
+      </section>
+    </body>`,
+    { runScripts: 'outside-only', url: 'https://www.facebook.com/groups/1/posts/2' },
+  );
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value() { return { left: 10, top: 100, right: 690, bottom: 500, width: 680, height: 400 }; },
+  });
+
+  const result = JSON.parse(String(dom.window.eval(`(function(){${FB_TARGET_HELPERS_JS}
+    var resolved=fbTgtResolve('fb:2');
+    return JSON.stringify({status:resolved.status,id:resolved.el&&resolved.el.id});
+  })()`)));
+  assert.deepEqual(result, { status: 'ok', id: 'target' });
+});

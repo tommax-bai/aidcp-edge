@@ -75,6 +75,8 @@ function post(permalink: string, hasCommentRegion = true) {
 interface FakeConfig {
   // page structure returned per probe, as a function of scroll count (simulate lazy load).
   structureFor?: (scrolls: number) => RawStruct;
+  /** Group navigation leaves loading only on/after this readiness probe. */
+  documentReadyAfter?: number;
   focus?: { found: boolean; focused: boolean; permissionGated: boolean };
   accepted?: boolean;
   contactAccepted?: boolean;
@@ -108,6 +110,7 @@ class FakeCdp implements BrowseCdp {
   backspaces = 0;
   enters = 0;
   verifyCalls = 0;
+  readyChecks = 0;
   scrollY = 0;
   constructor(private readonly cfg: FakeConfig = {}) {}
 
@@ -142,6 +145,10 @@ class FakeCdp implements BrowseCdp {
     if (method === 'Runtime.evaluate') {
       const expr = String(params.expression ?? '');
       const val = (v: unknown) => ({ result: { value: v } }) as unknown as T;
+      if (expr.includes("document.readyState === 'interactive'")) {
+        this.readyChecks++;
+        return val(this.readyChecks >= (this.cfg.documentReadyAfter ?? 1));
+      }
       if (expr.includes('collectPermalinks')) {
         const s = (this.cfg.structureFor ?? (() => struct()))(this.scrolls);
         return val(JSON.stringify(s));
@@ -276,6 +283,28 @@ test('fb-executor: 空关键词首帖路径不搜索，选择第一条可评论�
   ]);
   assert.equal(cdp.navigations.some((url) => url.includes('/search/')), false);
   assert.equal(r.postText, '首帖正文');
+});
+
+test('fb-executor: 群首页先停在封面时有界滚动催拉首帖，不改走搜索', async () => {
+  const permalink = 'https://www.facebook.com/groups/123456/posts/111/';
+  const cdp = new FakeCdp({
+    documentReadyAfter: 3,
+    structureFor: (scrolls) =>
+      struct({
+        href: 'https://www.facebook.com/groups/123456',
+        articleCount: scrolls > 0 ? 1 : 0,
+        commentEditorCount: scrolls > 0 ? 1 : 0,
+        postCandidates: scrolls > 0 ? [post(permalink)] : [],
+      }),
+    postContent: { postText: '滚动后水合的首帖', comments: [] },
+  });
+
+  const r = await makeExecutor(cdp).openFirstCommentablePost('https://www.facebook.com/groups/123456');
+  assert.equal(r.ok, true);
+  assert.equal(r.permalink, 'https://www.facebook.com/groups/123456/posts/111');
+  assert.equal(cdp.readyChecks, 3);
+  assert.equal(cdp.scrolls > 0, true);
+  assert.equal(cdp.navigations.some((url) => url.includes('/search/')), false);
 });
 
 test('fb-executor: 群讨论流没有稳定可评论首帖 → no_candidates，不改走搜索', async () => {
@@ -755,6 +784,39 @@ test('fb-editor-scope: 排他区域里出现多个候选编辑框 → 空（诚�
     'https://www.facebook.com/groups/111/posts/BBB/',
   );
   assert.deepEqual(scopedEditorIds(dom, 'fb:BBB'), []);
+});
+
+test('fb-editor-scope: permalink portal 编辑框只被目标卡视觉覆盖 → 唯一绑定', () => {
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <div role="feed">
+        <article data-box="0,700,680,180"></article>
+        <article data-box="0,900,680,180"></article>
+      </div>
+      <section id="target" data-box="100,100,680,500">
+        <h4><a href="/author">Author</a></h4>
+        <a href="/groups/111/posts/BBB/">time</a>
+        <div data-box="120,140,600,200" data-ad-rendering-role="story_message">target post</div>
+      </section>
+      <div id="portal-editor" data-box="180,500,450,20" contenteditable="true" role="textbox" aria-label="发表公开评论…"></div>
+    </body></html>`,
+    { runScripts: 'outside-only', url: 'https://www.facebook.com/groups/111/posts/BBB/' },
+  );
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value(this: HTMLElement) {
+      const [left, top, width, height] = (this.getAttribute('data-box') ?? '0,0,0,0').split(',').map(Number);
+      return { left, top, right: left + width, bottom: top + height, width, height };
+    },
+  });
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'innerText', {
+    configurable: true,
+    get(this: HTMLElement) {
+      return this.textContent ?? '';
+    },
+  });
+
+  assert.deepEqual(scopedEditorIds(dom, 'fb:BBB'), ['portal-editor']);
 });
 
 // ─── 就地 ack 确认：绝不拿「还在编辑器里没发出去的正文」冒充服务器点头（对抗性评审复现的假成功雷）───

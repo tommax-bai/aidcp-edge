@@ -271,7 +271,7 @@ const DEFAULTS: Required<FacebookCommentExecutorOptions> = {
   editorScrollDistancePx: 700,
   surfaceProbeRounds: 4,
   // 等帖子详情 article 水合的预算。**必须独立于 surfaceProbeRounds**，两者不可合并：
-  // - surfaceProbeRounds 的两个调用点（搜索候选探测 / 评论框催拉）都跑在 editorScrollRounds=6 的循环**内**，
+  // - surfaceProbeRounds 的调用点（搜索候选 / 群首帖 / 评论框催拉）都跑在 editorScrollRounds=6 的循环**内**，
   //   是「每轮」预算；放宽到 22 即 6×22×600ms≈79s，远超开帖步超时 → 只是把 open_failed 换成 timeout。
   // - 本常量的调用点（openPost 等 article）不在循环内，是一次性预算，可安全放宽。
   // 值 22（~12.6s 循环 + 2.5s settle ≈ 15s）对齐 post-reader.ts 的**同源实测依据**：FB 详情 article 水合晚于 feed，
@@ -387,6 +387,24 @@ export class FacebookCommentExecutor {
     await this.cdp.send('Page.navigate', { url });
     onNavigated?.();
     await this.sleep(this.opts.settleMs);
+  }
+
+  /** Wait until navigation no longer resets group-feed scroll gestures. */
+  private async waitForDocumentInteractive(): Promise<boolean> {
+    const rounds = Math.max(1, this.opts.surfaceProbeRounds * this.opts.editorScrollRounds);
+    for (let i = 0; i < rounds; i++) {
+      try {
+        const ready = await evalRaw<boolean>(
+          this.cdp,
+          `(function(){ return document.readyState === 'interactive' || document.readyState === 'complete'; })()`,
+        );
+        if (ready === true) return true;
+      } catch {
+        // Runtime context replacement during navigation is expected; the bounded next round rechecks it.
+      }
+      if (i < rounds - 1) await this.sleep(600);
+    }
+    return false;
   }
 
   /**
@@ -558,6 +576,10 @@ export class FacebookCommentExecutor {
       this.log(`[fb-comment] 导航群讨论流失败：${(err as Error).message}`);
       return { ok: false, reason: 'nav_error', editorReady: false };
     }
+    if (!(await this.waitForDocumentInteractive())) {
+      this.log('[fb-comment] 群讨论流在有界窗口内仍处于 loading，nav_error');
+      return { ok: false, reason: 'nav_error', editorReady: false };
+    }
     const blocked = await this.blockingReason();
     if (blocked) return { ok: false, reason: blocked, editorReady: false };
 
@@ -567,7 +589,13 @@ export class FacebookCommentExecutor {
         post.hasCommentRegion &&
         post.permalinkCandidates.some((candidate) => candidate.kind === 'group_post'),
       );
-    const structure = await this.probeStructureUntil(eligible, this.opts.postDetailProbeRounds);
+    // 群页首屏通常先停在封面/发帖器，feed card 与评论框要经过一次真实滚动才 hydrate。复用搜索结果同一套
+    // 有界催拉预算，不改用第二种定位策略；每轮仍只接受上述 canonical permalink + post-level comment affordance。
+    let structure = await this.probeStructureUntil(eligible);
+    for (let i = 0; i < this.opts.editorScrollRounds && !(structure && eligible(structure)); i++) {
+      await this.scrollViewport(this.opts.editorScrollDistancePx);
+      structure = await this.probeStructureUntil(eligible);
+    }
     if (!structure) {
       return { ok: false, reason: 'nav_error', editorReady: false, ...(containerName ? { containerName } : {}) };
     }
@@ -1023,7 +1051,8 @@ const FB_EXEC_HELPERS_JS = `
  *     （从目标卡向上爬、不混进任何别的顶层帖 article 的最大祖先），只取该区域内**不属于任何 article** 的
  *     评论框——区域内没有第二张帖，故它只可能属于目标帖。这**不是**「取 document 第一个」，而是唯一性可证的作用域；
  *     嵌套评论条目里的**回复框**因 `closest('[role=article]')!==null` 被排除，不会把评论发成回复。
- *  3. 都没有 → 空数组 → 调用方诚实 `editor_not_found`，**绝不回落 `eds[0]`**。
+ *  3. DOM portal 使排他区域不可达时，仅接受视觉中心被**且仅被目标物理卡**覆盖的唯一编辑框；与别卡重叠即拒绝。
+ *  4. 都没有 → 空数组 → 调用方诚实 `editor_not_found`，**绝不回落 `eds[0]`**。
  */
 export function buildScopedEditorHelpersJs(targetPostId: string | null): string {
   return `${FB_TARGET_HELPERS_JS}${FB_EXEC_HELPERS_JS}
@@ -1039,9 +1068,23 @@ export function buildScopedEditorHelpersJs(targetPostId: string | null): string 
     // ② 退到目标帖的排他区域（区域内没有第二张帖）。区域内**必须唯一**——多于一个就诚实拒，
     //    绝不「取第一个」（那正是本 change 要根除的 DOM 序回落）。
     var region=fbTgtExclusiveRegion(target);
-    if(!region) return [];
-    var inRegion=all.filter(function(el){ return region.contains(el) && fbTgtClosestArticle(el)===null; });
-    return inRegion.length===1 ? inRegion : [];
+    if(region){
+      var inRegion=all.filter(function(el){ return region.contains(el) && fbTgtClosestArticle(el)===null; });
+      if(inRegion.length===1) return inRegion;
+      if(inRegion.length>1) return [];
+    }
+    // ③ 真机 permalink 布局把 composer portal 到卡 DOM 外，但视觉上仍严格落在该卡内。只有编辑框中心
+    // 被全文档物理卡集合中的**唯一一张**卡覆盖、且那张就是 target 时才接受；任何重叠/多框都 fail-closed。
+    var physical=fbFeedAllPhysicalCards(document);
+    if(physical.indexOf(target)<0) physical.push(target);
+    function covers(card,x,y){ var r=card.getBoundingClientRect(); return r.width>0&&r.height>0&&x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom; }
+    var visual=all.filter(function(el){
+      var r=el.getBoundingClientRect(), x=r.left+(r.width*0.5), y=r.top+(r.height*0.5);
+      if(r.width<=0||r.height<=0||!covers(target,x,y)) return false;
+      var owners=[]; for(var i=0;i<physical.length;i++){ if(covers(physical[i],x,y)) owners.push(physical[i]); }
+      return owners.length===1&&owners[0]===target;
+    });
+    return visual.length===1 ? visual : [];
   }
 `;
 }

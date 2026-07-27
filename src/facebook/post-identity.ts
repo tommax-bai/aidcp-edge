@@ -1,5 +1,6 @@
 import { FACEBOOK_REACTION_CONTROL_HELPERS_JS } from './cta-labels.js';
 import { POST_IDENTITY_JS } from './post-identity-core.js';
+import { facebookReactDomPermalinkRuntimeSource } from './probes/react-feed-permalink.js';
 
 export {
   canonicalFacebookFeedVideoPostId,
@@ -17,6 +18,7 @@ export {
  */
 export const FB_FEED_LAYOUT_HELPERS_JS = `
   ${FACEBOOK_REACTION_CONTROL_HELPERS_JS}
+  ${facebookReactDomPermalinkRuntimeSource()}
   var fbFeedStorySelector='[data-ad-comet-preview="message"],[data-ad-preview="message"],[data-ad-rendering-role="story_message"]';
   var fbFeedAuthorSelector='h2 a[href],h3 a[href],h4 a[href]';
   function fbFeedVisible(el){ if(!el||!el.getBoundingClientRect) return false; var r=el.getBoundingClientRect(); if(r.width<=0||r.height<=0) return false; var s=window.getComputedStyle?getComputedStyle(el):null; return !s||(s.visibility!=='hidden'&&s.display!=='none'&&Number(s.opacity||'1')>0.01); }
@@ -47,13 +49,19 @@ export const FB_FEED_LAYOUT_HELPERS_JS = `
   function fbFeedOwnCanonicalLinks(card){
     if(!card||!card.querySelectorAll) return [];
     var links=card.querySelectorAll('a[href]'), out=[];
+    function add(id,href){ for(var n=0;n<out.length;n++){ if(out[n].id===id) return; } out.push({id:id,href:href}); }
     for(var i=0;i<links.length;i++){ var el=links[i];
       var nested=el.closest?el.closest('[role="article"],article'):null; if(nested&&nested!==card) continue;
       var raw=String(el.getAttribute('href')||'').trim(); if(!raw) continue;
       var id=fbCanonicalPostId(raw); if(!id) continue;
       var absolute=''; try{ absolute=new URL(raw,location.href).href; }catch(e){ continue; }
-      out.push({id:id,href:absolute});
+      add(id,absolute);
     }
+    var react=fbReactGroupPostHrefMap(links);
+    react.forEach(function(href,el){
+      var nested=el.closest?el.closest('[role="article"],article'):null; if(nested&&nested!==card) return;
+      var id=fbCanonicalPostId(href); if(id) add(id,href);
+    });
     return out;
   }
   /** 卡身份/可开链接同源：严格视频可用 data-video-id 补齐，但显式身份冲突时失败关闭。 */
@@ -127,12 +135,15 @@ export const FB_FEED_LAYOUT_HELPERS_JS = `
   function fbFeedTopCards(root){
     var base=root||document;
     if(base===document){
+      var primary=[];
       var feeds=document.querySelectorAll('div[role="feed"]');
       for(var i=0;i<feeds.length;i++){ if(!fbFeedVisible(feeds[i])) continue;
-        return fbFeedMergeCards(fbFeedSemanticCards(feeds[i],false),fbFeedVideoCards(feeds[i],false)); }
+        primary=fbFeedMergeCards(fbFeedSemanticCards(feeds[i],false),fbFeedVideoCards(feeds[i],false)); break; }
       var videos=fbFeedVideoCards(document,false), fallback=fbFeedFallbackCards(document,false);
-      var light=fbFeedMergeCards(videos,fallback); if(light.length>0) return light;
-      return fbFeedSemanticCards(document,false);                                      // permalink 单帖页
+      var light=fbFeedMergeCards(videos,fallback);
+      if(primary.length>0) return fbFeedMergeCards(primary,light);                    // 背景 feed + 无 dialog 的 permalink 卡
+      if(light.length>0) return light;
+      return fbFeedSemanticCards(document,false);
     }
     var semantic=fbFeedSemanticCards(base,false), videos=fbFeedVideoCards(base,false);
     var merged=fbFeedMergeCards(semantic,videos); if(merged.length>0) return merged;
@@ -201,6 +212,14 @@ export const FB_TARGET_HELPERS_JS = `${POST_IDENTITY_JS}${FB_FEED_LAYOUT_HELPERS
     for(var i=0;i<arts.length;i++){ if(fbTgtArticlePostId(arts[i])===targetId) hits.push(arts[i]); }
     if(hits.length===1) return {status:'ok', el:hits[0]};
     if(hits.length>1) return {status:'ambiguous_target', el:null};
+    // permalink URL 佐证下，目标卡可能无 role=dialog 地挂在背景 feed 之外；仅按相同 canonical identity
+    // 在 document 顶层卡里做第二次精确匹配，绝不取 DOM 第一张。
+    if(root!==document && fbCanonicalPostId(location.href)===targetId){
+      var docArts=fbTgtTopArticles(document), docHits=[];
+      for(var d=0;d<docArts.length;d++){ if(fbTgtArticlePostId(docArts[d])===targetId) docHits.push(docArts[d]); }
+      if(docHits.length===1) return {status:'ok', el:docHits[0]};
+      if(docHits.length>1) return {status:'ambiguous_target', el:null};
+    }
     if(arts.length===1 && fbTgtArticlePostId(arts[0])===null && fbCanonicalPostId(location.href)===targetId){
       return {status:'ok', el:arts[0]};                                                 // URL 佐证的单帖态
     }
