@@ -43,6 +43,101 @@
       listState:cards.length?'ready':(listKind==='reels'?Boolean(active&&active.reason!=='no_active_video'):topArticles().length)?'present_unreportable':'empty',
     }};
   };
+  const firstPostCommentEditors=(root=document)=>all(
+    '[contenteditable="true"][role="textbox"],textarea[aria-label],textarea',
+    root,
+  ).filter(visible).filter((editor)=>{
+    const raw=`${label(editor)} ${text(editor,256)}`;
+    return postComment.test(raw)||editor.getAttribute('role')==='textbox';
+  });
+  const firstPostCommentActions=(root=document)=>all(
+    'button,[role="button"],a[role="button"]',
+    root,
+  ).filter(visible).filter((button)=>postComment.test(`${label(button)} ${text(button,256)}`));
+  const firstPostBoundary=(control,scope)=>{
+    let article=closestArticle(control);
+    while(article&&article.parentElement){
+      const outer=article.parentElement.closest('[role="article"],article');
+      if(!outer)break;
+      article=outer;
+    }
+    if(article&&firstPostEvidence(article))return article;
+    for(let root=control&&control.parentElement;root&&root!==scope&&root!==document.body;root=root.parentElement){
+      if(firstPostEvidence(root))return root;
+    }
+    return null;
+  };
+  const firstPostBoundaryOrder=(left,right)=>{
+    const l=left.getBoundingClientRect();
+    const r=right.getBoundingClientRect();
+    if(l.top!==r.top)return l.top-r.top;
+    const relation=left.compareDocumentPosition(right);
+    return relation&4?-1:relation&2?1:0;
+  };
+  const firstCommentableGroupPostCard=async()=>{
+    if(classify()!=='group')return {card:null};
+    const scope=first(['div[role="feed"]','[role="main"]','main'])||document.body;
+    if(!scope)return {card:null};
+    const controls=[...firstPostCommentEditors(scope),...firstPostCommentActions(scope)];
+    const roots=[];
+    for(const control of controls){
+      const root=firstPostBoundary(control,scope);
+      if(root&&!roots.includes(root))roots.push(root);
+    }
+    roots.sort(firstPostBoundaryOrder);
+    const root=roots[0];
+    if(!root)return {card:null};
+    const evidence=firstPostEvidence(root);
+    if(!evidence)return {card:null,reason:'target_context_mismatch'};
+    const canonical=permalinkOf(root);
+    if(canonical){
+      const card=cardOf(root,0,canonical);
+      return card?{card}:{card:null,reason:'target_context_mismatch'};
+    }
+    let editors=firstPostCommentEditors(root);
+    if(editors.length>1)return {card:null,reason:'ambiguous_target'};
+    if(editors.length===0){
+      const actions=firstPostCommentActions(root);
+      if(actions.length!==1)return {card:null,reason:actions.length?'ambiguous_target':'editor_not_found'};
+      if(!click(actions[0]))return {card:null,reason:'editor_not_found'};
+      await sleep(350);
+      editors=firstPostCommentEditors(root);
+    }
+    if(editors.length!==1)return {card:null,reason:editors.length?'ambiguous_target':'editor_not_found'};
+    const bound=await bindFirstPostTarget(root,evidence);
+    if(!bound.ok)return {card:null,reason:bound.reason||'target_context_mismatch'};
+    return {card:{
+      index:0,
+      title:evidence.body.slice(0,200),
+      author:evidence.author,
+      likeCount:count(text(reactionButton(root),96)||label(reactionButton(root),96)),
+      collectCount:0,
+      coverDesc:evidence.body.slice(0,200)||undefined,
+      noteId:bound.targetRef,
+      isVideo:Boolean(first(['video'],root)),
+    }};
+  };
+  const firstPostCards=async()=>{
+    const base=feedCards();
+    const selected=await firstCommentableGroupPostCard();
+    if(selected.card){
+      base.value.cards=[selected.card];
+      base.value.listState='ready';
+      base.value.documentGeneration=[
+        location.pathname,
+        'first-commentable-group-post',
+        selected.card.noteId,
+      ].join('|').slice(0,256);
+      return base;
+    }
+    if(selected.reason){
+      base.value.cards=[];
+      base.value.selectionReason=selected.reason;
+      base.value.listState='present_unreportable';
+      return base;
+    }
+    return base;
+  };
   const feedProbe=()=>{
     const output=feedCards();
     const scope=first(['div[role="feed"]','[role="main"]','main'])||document.body;

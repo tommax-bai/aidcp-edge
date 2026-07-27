@@ -42,6 +42,8 @@ pub struct PageCards {
     pub list_kind: Option<FacebookListKind>,
     #[serde(default)]
     pub list_state: Option<FacebookListState>,
+    #[serde(default)]
+    pub selection_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -80,6 +82,7 @@ impl PageCards {
         }
         truncate_optional(&mut self.document_generation, MAX_ID_CHARS);
         truncate_optional(&mut self.container_name, MAX_NAME_CHARS);
+        truncate_optional(&mut self.selection_reason, MAX_REASON_CHARS);
         self
     }
 }
@@ -563,6 +566,7 @@ mod tests {
             container_name: None,
             list_kind: None,
             list_state: None,
+            selection_reason: None,
         }
         .bounded();
         assert_eq!(cards.cards.len(), MAX_CARDS);

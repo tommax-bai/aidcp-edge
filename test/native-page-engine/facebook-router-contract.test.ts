@@ -138,6 +138,80 @@ test('Facebook first-post scroll settles for two seconds before probing hydrated
   }
 });
 
+test('Facebook first-post binds a Vietnamese commentable container without a permalink', async () => {
+  const dom = install(`
+    <main>
+      <div role="feed">
+        <section id="post">
+          <h2><a href="/groups/718145812202687/user/100014995179767/">Việt Nhật Hà Nam</a></h2>
+          <a href="/groups/718145812202687?__cft__[0]=tracking#?chc">2 giờ</a>
+          <div data-ad-rendering-role="story_message">HONDA VIỆT NAM TUYỂN DỤNG 100 CÔNG NHÂN</div>
+          <button aria-label="Viết bình luận">Viết bình luận</button>
+          <div id="editor" role="textbox" contenteditable="true" aria-label="Viết bình luận công khai…"></div>
+        </section>
+      </div>
+    </main>
+  `, 'https://www.facebook.com/groups/718145812202687');
+  setRect(dom.window.document.querySelector('#post')!, { left: 120, top: 675, right: 800, bottom: 1_450 });
+  setRect(dom.window.document.querySelector('#editor')!, { left: 175, top: 1_354, right: 760, bottom: 1_398 });
+
+  const selected = await run({
+    kind: 'feed_refresh',
+    params: { reason: 'first_commentable_group_post_probe' },
+  });
+  const cards = selected.output.value.cards as Array<Record<string, unknown>>;
+  assert.equal(cards.length, 1);
+  const targetRef = String(cards[0]?.noteId);
+  assert.match(targetRef, /^aidcp:facebook-group-feed-post:v1:[0-9a-f]{64}$/);
+  assert.doesNotMatch(targetRef, /^https?:/);
+
+  const detail = await run({
+    kind: 'note_open',
+    params: { noteId: targetRef, surface: 'feed' },
+  });
+  assert.equal(detail.output.kind, 'note_detail');
+  assert.equal(detail.output.value.noteId, targetRef);
+  assert.equal(detail.output.value.content, 'HONDA VIỆT NAM TUYỂN DỤNG 100 CÔNG NHÂN');
+
+  const editor = await run({
+    kind: 'comment_editor_probe',
+    params: { noteId: targetRef },
+  });
+  assert.equal(editor.output.value.ok, true);
+  assert.equal(editor.output.value.noteId, targetRef);
+
+  dom.window.document.querySelector('[data-ad-rendering-role="story_message"]')!.textContent =
+    'Facebook recycled this container for another post';
+  const moved = await run({
+    kind: 'comment_editor_probe',
+    params: { noteId: targetRef },
+  });
+  assert.equal(moved.output.value.ok, false);
+  assert.equal(moved.output.value.reason, 'target_not_found');
+});
+
+test('Facebook first-post rejects an in-place boundary with multiple peer editors', async () => {
+  install(`
+    <main>
+      <div role="feed">
+        <section>
+          <h2><a href="/groups/718145812202687/user/100014995179767/">Việt Nhật Hà Nam</a></h2>
+          <div data-ad-rendering-role="story_message">One post body</div>
+          <div role="textbox" contenteditable="true" aria-label="Viết bình luận công khai…"></div>
+          <div role="textbox" contenteditable="true" aria-label="Viết bình luận công khai…"></div>
+        </section>
+      </div>
+    </main>
+  `, 'https://www.facebook.com/groups/718145812202687');
+
+  const selected = await run({
+    kind: 'feed_refresh',
+    params: { reason: 'first_commentable_group_post_probe' },
+  });
+  assert.deepEqual(selected.output.value.cards, []);
+  assert.equal(selected.output.value.selectionReason, 'ambiguous_target');
+});
+
 test('Facebook first-post hydration keeps the existing four-scroll bound', async () => {
   const runtime = await readFile(
     resolve(repoRoot, 'native/page-engine/src/facebook/runtime.rs'),

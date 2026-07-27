@@ -841,6 +841,43 @@ async fn facebook_first_post_scrolls_until_the_below_fold_candidate_hydrates() {
 }
 
 #[tokio::test]
+async fn facebook_first_post_reads_a_bound_container_without_second_navigation() {
+    let target_ref = format!("aidcp:facebook-group-feed-post:v1:{}", "a1".repeat(32));
+    let (port, server) = spawn_facebook_bound_first_post_cdp(target_ref.clone()).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_first_post_command(1, 30_000))
+        .await
+        .expect("Facebook bound first-post detail");
+    let CommandOutput::NoteDetail(detail) = outcome.output.expect("first-post detail output")
+    else {
+        panic!("expected note detail")
+    };
+    assert_eq!(detail.note_id, target_ref);
+    assert_eq!(detail.content, "permalinkless first post");
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook bound first-post fake CDP");
+    assert_eq!(router_call_count(&requests, "feed_refresh"), 1);
+    assert_eq!(router_call_count(&requests, "browse_scroll"), 0);
+    assert_eq!(router_call_count(&requests, "comment_editor_probe"), 1);
+    assert_eq!(router_call_count(&requests, "note_open"), 1);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "Page.navigate")
+            .count(),
+        1,
+        "bound first post must stay on the group page after the initial navigation"
+    );
+}
+
+#[tokio::test]
 async fn xhs_self_identity_uses_only_the_bound_canonical_profile() {
     let (port, server) = spawn_xhs_self_identity_cdp().await;
     let mut engine = Engine::default();
@@ -2879,6 +2916,76 @@ async fn spawn_facebook_first_post_below_fold_cdp() -> (u16, tokio::task::JoinHa
                     "https://www.facebook.com/groups/945390701793119/posts/333",
                     "below-fold first post",
                 ),
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_bound_first_post_cdp(
+    target_ref: String,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(
+            &listener,
+            port,
+            "https://www.facebook.com/groups/945390701793119",
+        )
+        .await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let result = match router_kind(&request).as_deref() {
+                Some("page_probe") => facebook_ready_cdp("/groups/945390701793119"),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("feed_refresh") => router_cdp(
+                    "page_cards",
+                    json!({
+                        "cards": [{
+                            "index": 0,
+                            "title": "permalinkless first post",
+                            "likeCount": 0,
+                            "collectCount": 0,
+                            "noteId": target_ref.clone()
+                        }],
+                        "listKind": "feed",
+                        "listState": "ready"
+                    }),
+                ),
+                Some("comment_editor_probe") => router_cdp(
+                    "text_target",
+                    json!({
+                        "ok": true,
+                        "noteId": target_ref.clone(),
+                        "cx": 640.0,
+                        "cy": 700.0,
+                        "focused": false,
+                        "selected": false
+                    }),
+                ),
+                Some("note_open") => {
+                    facebook_note_detail_cdp(&target_ref, "permalinkless first post")
+                }
                 _ => json!({}),
             };
             requests.push(request);

@@ -57,13 +57,13 @@
       window.scrollBy({top:Math.max(420,Math.round((window.innerHeight||800)*0.8)),behavior:'smooth'});
       await sleep(450);
       if(p.reason==='first_commentable_group_post_probe')await sleep(2000);
-      const output=feedCards();
+      const output=p.reason==='first_commentable_group_post_probe'?await firstPostCards():feedCards();
       output.value.movement={before,after:window.scrollY,moved:window.scrollY!==before,atBottom:window.scrollY+(window.innerHeight||0)>=document.documentElement.scrollHeight-8};
       return done(output);
     }
     return done(feedCards());
   }
-  if(kind==='feed_refresh')return done(feedCards());
+  if(kind==='feed_refresh')return done(p.reason==='first_commentable_group_post_probe'?await firstPostCards():feedCards());
   if(kind==='search_execute'){
     if(!p.container)return fail('search','permission_gated');
     const output=feedCards();

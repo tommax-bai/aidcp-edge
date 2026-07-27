@@ -124,6 +124,122 @@ async function(input){
     }
     return '';
   };
+  const firstPostTargetPrefix='aidcp:facebook-group-feed-post:v1:';
+  const isFirstPostTarget=(value)=>new RegExp(`^${firstPostTargetPrefix}[0-9a-f]{64}$`).test(String(value||''));
+  const firstPostGroupScope=()=>{
+    const hit=location.pathname.match(/^\/groups\/([^/?#]+)/i);
+    return hit?`${location.origin}/groups/${hit[1]}`:'';
+  };
+  const stableFirstPostLinkEvidence=(root)=>{
+    const values=[];
+    for(const link of all('a[href]',root)){
+      try{
+        const url=new URL(link.href||link.getAttribute('href')||'',location.origin);
+        const path=url.pathname.replace(/\/+$/,'');
+        if(/^\/groups\/[^/]+\/user\/[^/]+$/i.test(path)||/\/people\/[^/]+\/\d+$/i.test(path)){
+          values.push(`author:${path.toLowerCase()}`);
+          continue;
+        }
+        const profileId=url.searchParams.get('id');
+        if(path.toLowerCase()==='/profile.php'&&profileId)values.push(`author:id:${profileId}`);
+        const photoId=url.searchParams.get('fbid');
+        if(photoId)values.push(`photo:${photoId}`);
+        const videoId=(path.match(/\/videos\/([^/]+)/i)||[])[1]||url.searchParams.get('v');
+        if(videoId)values.push(`video:${videoId}`);
+      }catch{}
+    }
+    return [...new Set(values)].sort().join('|');
+  };
+  const firstPostBodyEvidence=(root)=>{
+    const witness=first([
+      '[data-ad-rendering-role="story_message"]',
+      '[data-ad-preview="message"]',
+      '[data-ad-comet-preview="message"]',
+    ],root);
+    if(witness)return text(witness,12000);
+    const candidates=all('div[dir="auto"]',root).filter(visible).filter((element)=>{
+      if(element.closest('[contenteditable="true"],textarea'))return false;
+      const owner=closestArticle(element);
+      return !owner||owner===root;
+    }).map((element)=>text(element,12000)).filter((value)=>
+      value.length>1&&!postComment.test(value)
+    );
+    return candidates.sort((left,right)=>right.length-left.length)[0]||'';
+  };
+  const firstPostEvidence=(root)=>{
+    if(!root||!root.isConnected)return null;
+    const scope=firstPostGroupScope();
+    if(!scope)return null;
+    const author=articleAuthor(root);
+    const authorHref=(()=>{
+      try{
+        const url=new URL(author.href||'',location.origin);
+        return `${url.pathname.replace(/\/+$/,'')}${url.searchParams.get('id')?`?id=${url.searchParams.get('id')}`:''}`;
+      }catch{return '';}
+    })();
+    const body=firstPostBodyEvidence(root);
+    const linkEvidence=stableFirstPostLinkEvidence(root);
+    const mediaEvidence=all('img,video',root).filter(visible).map((element)=>{
+      if(element.tagName==='VIDEO')return norm(
+        element.getAttribute('data-video-id')||element.getAttribute('aria-label')||'',
+        256,
+      );
+      return norm(element.alt||'',256);
+    }).filter(Boolean).sort().join('|');
+    const authorEvidence=authorHref||norm(author.name,200);
+    const contentEvidence=body||linkEvidence||mediaEvidence;
+    if(!authorEvidence||!contentEvidence)return null;
+    return {
+      value:[scope,authorEvidence,body,linkEvidence,mediaEvidence].join('\n'),
+      author:author.name||undefined,
+      body,
+    };
+  };
+  const firstPostTargetRef=async(evidence)=>{
+    const bytes=new TextEncoder().encode(evidence);
+    const digest=await crypto.subtle.digest('SHA-256',bytes);
+    const hex=Array.from(new Uint8Array(digest),(value)=>value.toString(16).padStart(2,'0')).join('');
+    return `${firstPostTargetPrefix}${hex}`;
+  };
+  const firstPostTargetState=()=>{
+    const scope=firstPostGroupScope();
+    let state=window.__aidcpNativeFirstPostTargets;
+    if(!state||state.scope!==scope||!(state.targets instanceof Map)){
+      state={scope,targets:new Map()};
+      window.__aidcpNativeFirstPostTargets=state;
+    }
+    return state;
+  };
+  const bindFirstPostTarget=async(root,evidence)=>{
+    const targetRef=await firstPostTargetRef(evidence.value);
+    const state=firstPostTargetState();
+    const existing=state.targets.get(targetRef);
+    if(existing&&existing.root!==root&&existing.root&&existing.root.isConnected){
+      return {ok:false,reason:'ambiguous_target'};
+    }
+    for(const marked of all('[data-aidcp-native-first-post-target]')){
+      if(marked!==root&&marked.getAttribute('data-aidcp-native-first-post-target')===targetRef){
+        return {ok:false,reason:'ambiguous_target'};
+      }
+    }
+    root.setAttribute('data-aidcp-native-first-post-target',targetRef);
+    state.targets.set(targetRef,{root,evidence:evidence.value});
+    return {ok:true,targetRef};
+  };
+  const boundFirstPostRoot=(targetRef)=>{
+    if(!isFirstPostTarget(targetRef))return null;
+    const state=window.__aidcpNativeFirstPostTargets;
+    if(!state||state.scope!==firstPostGroupScope()||!(state.targets instanceof Map))return null;
+    const record=state.targets.get(targetRef);
+    if(!record||!record.root||!record.root.isConnected)return null;
+    if(record.root.getAttribute('data-aidcp-native-first-post-target')!==targetRef)return null;
+    const matches=all('[data-aidcp-native-first-post-target]').filter((root)=>
+      root.isConnected&&root.getAttribute('data-aidcp-native-first-post-target')===targetRef
+    );
+    if(matches.length!==1||matches[0]!==record.root)return null;
+    const current=firstPostEvidence(record.root);
+    return current&&current.value===record.evidence?record.root:null;
+  };
   const topArticles=()=>{
     const nodes=all('[role="article"],article').filter(visible);
     return nodes.filter((node)=>!node.parentElement||!node.parentElement.closest('[role="article"],article'));

@@ -7,8 +7,10 @@
       const raw=`${label(el)} ${text(el,256)}`.toLowerCase();
       return /评论|留言|comment|bình luận|coment|输入回答|answer/.test(raw);
     });
-    let editors=allEditors.filter((el)=>closestArticle(el)===root);
-    if(!editors.length){
+    let editors=isFirstPostTarget(String(p.noteId||''))
+      ?allEditors.filter((el)=>root.contains(el))
+      :allEditors.filter((el)=>closestArticle(el)===root);
+    if(!editors.length&&!isFirstPostTarget(String(p.noteId||''))){
       const region=exclusiveArticleRegion(root);
       const outside=region?allEditors.filter((el)=>region.contains(el)&&closestArticle(el)===null):[];
       editors=outside.length===1?outside:[];

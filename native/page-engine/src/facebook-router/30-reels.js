@@ -25,6 +25,7 @@
   };
   const actionRoot=()=>{
     const expected=String(p.noteId||'');
+    if(isFirstPostTarget(expected))return boundFirstPostRoot(expected);
     if(expected&&reelSurface()){
       const active=activeReel();
       if(active.ok&&postId(active.noteId)===postId(expected))return active.root;

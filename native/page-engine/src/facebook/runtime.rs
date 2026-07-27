@@ -21,6 +21,22 @@ use url::Url;
 const FIRST_POST_SCROLL_ROUNDS: usize = 4;
 const FIRST_POST_EDITOR_TIMEOUT: Duration = Duration::from_secs(4);
 const FIRST_POST_DETAIL_TIMEOUT: Duration = Duration::from_secs(8);
+const FIRST_POST_TARGET_PREFIX: &str = "aidcp:facebook-group-feed-post:v1:";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FirstPostTarget {
+    Permalink(Url),
+    BoundRef(String),
+}
+
+impl FirstPostTarget {
+    fn note_id(&self) -> String {
+        match self {
+            Self::Permalink(url) => url.to_string(),
+            Self::BoundRef(target_ref) => target_ref.clone(),
+        }
+    }
+}
 
 pub(crate) async fn execute(
     engine_session: &mut EngineSession,
@@ -114,17 +130,22 @@ async fn execute_first_commentable_group_post(
         reason: Some("first_commentable_group_post_probe".to_owned()),
     });
     let mut latest = evaluate_facebook_router(session, &probe_command).await?;
-    let mut candidate = first_same_group_post_url(&latest.1, &group_url);
+    let mut candidate = first_same_group_post_target(&latest.1, &group_url);
+    let mut probe_failure = first_post_probe_failure(&latest.1);
 
     for _ in 0..FIRST_POST_SCROLL_ROUNDS {
-        if candidate.is_some() || first_post_probe_is_exhausted(&latest.1) {
+        if candidate.is_some()
+            || probe_failure.is_some()
+            || first_post_probe_is_exhausted(&latest.1)
+        {
             break;
         }
         if facebook_command_cancelled(cancellation) {
             return Err(cancelled_before_dispatch());
         }
         latest = evaluate_facebook_router(session, &scroll_command).await?;
-        candidate = first_same_group_post_url(&latest.1, &group_url);
+        candidate = first_same_group_post_target(&latest.1, &group_url);
+        probe_failure = first_post_probe_failure(&latest.1);
     }
 
     let Some(candidate) = candidate else {
@@ -132,66 +153,123 @@ async fn execute_first_commentable_group_post(
             EffectPhase::NotStarted,
             "open_note",
             false,
-            "no_candidates",
+            probe_failure.unwrap_or("no_candidates"),
             None,
             None,
         ));
     };
-    let candidate_url = candidate.to_string();
-    session.cdp.navigate(candidate.as_str()).await?;
-    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    let candidate_id = candidate.note_id();
+    if let FirstPostTarget::Permalink(candidate_url) = &candidate {
+        session.cdp.navigate(candidate_url.as_str()).await?;
+        wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    }
 
     let editor_reason =
-        wait_for_first_post_editor(session, &candidate_url, FIRST_POST_EDITOR_TIMEOUT).await?;
+        wait_for_first_post_editor(session, &candidate_id, FIRST_POST_EDITOR_TIMEOUT).await?;
     if let Some(reason) = editor_reason {
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
             "open_note",
             false,
             reason,
-            Some(candidate_url),
+            Some(candidate_id),
             None,
         ));
     }
 
     let detail_command = NativeCommand::NoteOpen(NoteOpenParams {
-        note_id: Some(candidate_url.clone()),
-        url: Some(candidate_url),
-        surface: Some(NoteSurface::Detail),
+        note_id: Some(candidate_id.clone()),
+        url: match &candidate {
+            FirstPostTarget::Permalink(url) => Some(url.to_string()),
+            FirstPostTarget::BoundRef(_) => None,
+        },
+        surface: Some(match &candidate {
+            FirstPostTarget::Permalink(_) => NoteSurface::Detail,
+            FirstPostTarget::BoundRef(_) => NoteSurface::Feed,
+        }),
         purpose: Some(NotePurpose::Read),
         ..NoteOpenParams::default()
     });
-    let target_post_id =
-        canonical_facebook_post_id(candidate.as_str()).expect("validated candidate has a post id");
-    match evaluate_facebook_router_until_requested_detail(
-        session,
-        &detail_command,
-        &target_post_id,
-        FIRST_POST_DETAIL_TIMEOUT,
-    )
-    .await
-    {
+    let detail = match &candidate {
+        FirstPostTarget::Permalink(candidate_url) => {
+            let target_post_id = canonical_facebook_post_id(candidate_url.as_str())
+                .expect("validated candidate has a post id");
+            evaluate_facebook_router_until_requested_detail(
+                session,
+                &detail_command,
+                &target_post_id,
+                FIRST_POST_DETAIL_TIMEOUT,
+            )
+            .await
+        }
+        FirstPostTarget::BoundRef(target_ref) => {
+            evaluate_facebook_router_until_bound_detail(
+                session,
+                &detail_command,
+                target_ref,
+                FIRST_POST_DETAIL_TIMEOUT,
+            )
+            .await
+        }
+    };
+    match detail {
         Ok(result) => Ok(result),
         Err(error) if error.code == ErrorCode::ProbeFailed => Ok(facebook_action_result(
             EffectPhase::NotStarted,
             "open_note",
             false,
             "target_context_mismatch",
-            Some(candidate.to_string()),
+            Some(candidate_id),
             None,
         )),
         Err(error) => Err(error),
     }
 }
 
-fn first_same_group_post_url(output: &CommandOutput, group_url: &Url) -> Option<Url> {
+fn first_same_group_post_target(
+    output: &CommandOutput,
+    group_url: &Url,
+) -> Option<FirstPostTarget> {
     let CommandOutput::PageCards(PageCards { cards, .. }) = output else {
         return None;
     };
     cards
         .iter()
         .filter_map(|card| card.note_id.as_deref())
-        .find_map(|raw| canonical_same_group_post_url(raw, group_url))
+        .find_map(|raw| {
+            canonical_same_group_post_url(raw, group_url)
+                .map(FirstPostTarget::Permalink)
+                .or_else(|| {
+                    is_first_post_target_ref(raw).then(|| FirstPostTarget::BoundRef(raw.to_owned()))
+                })
+        })
+}
+
+fn is_first_post_target_ref(value: &str) -> bool {
+    value
+        .strip_prefix(FIRST_POST_TARGET_PREFIX)
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn first_post_probe_failure(output: &CommandOutput) -> Option<&'static str> {
+    let CommandOutput::PageCards(PageCards {
+        selection_reason: Some(reason),
+        ..
+    }) = output
+    else {
+        return None;
+    };
+    match reason.as_str() {
+        "ambiguous_target" => Some("ambiguous_target"),
+        "editor_not_found" => Some("editor_not_found"),
+        "target_context_mismatch" => Some("target_context_mismatch"),
+        _ => Some("target_context_mismatch"),
+    }
 }
 
 fn first_post_probe_is_exhausted(output: &CommandOutput) -> bool {
@@ -275,6 +353,28 @@ async fn wait_for_first_post_editor(
     }
 }
 
+async fn evaluate_facebook_router_until_bound_detail(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+    target_ref: &str,
+    timeout: Duration,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let latest = evaluate_facebook_router(session, command).await?;
+        if matches!(&latest.1, CommandOutput::NoteDetail(detail) if detail.note_id == target_ref) {
+            return Ok(latest);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(EngineError::new(
+                ErrorCode::ProbeFailed,
+                "native Facebook bound first-post detail was not confirmed",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +401,7 @@ mod tests {
             container_name: None,
             list_kind: None,
             list_state: None,
+            selection_reason: None,
         })
     }
 
@@ -318,12 +419,38 @@ mod tests {
             ],
             None,
         );
+        let selected = first_same_group_post_target(&output, &group).expect("same-group post");
         assert_eq!(
-            first_same_group_post_url(&output, &group)
-                .expect("same-group post")
-                .as_str(),
-            "https://www.facebook.com/groups/945390701793119/posts/111"
+            selected,
+            FirstPostTarget::Permalink(
+                Url::parse("https://www.facebook.com/groups/945390701793119/posts/111")
+                    .expect("url")
+            )
         );
+    }
+
+    #[test]
+    fn accepts_only_strict_bound_first_post_references() {
+        let group = validated_facebook_group_url("https://www.facebook.com/groups/945390701793119")
+            .expect("group");
+        let valid = format!("{FIRST_POST_TARGET_PREFIX}{}", "a1".repeat(32));
+        let output = cards(&[&valid], None);
+        assert_eq!(
+            first_same_group_post_target(&output, &group),
+            Some(FirstPostTarget::BoundRef(valid.clone()))
+        );
+        assert!(is_first_post_target_ref(&valid));
+        assert!(!is_first_post_target_ref(&format!(
+            "{FIRST_POST_TARGET_PREFIX}{}",
+            "A1".repeat(32)
+        )));
+        assert!(!is_first_post_target_ref(&format!(
+            "{FIRST_POST_TARGET_PREFIX}{}",
+            "a1".repeat(31)
+        )));
+        assert!(!is_first_post_target_ref(
+            "https://www.facebook.com/groups/945390701793119#opaque"
+        ));
     }
 
     #[test]

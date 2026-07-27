@@ -610,6 +610,7 @@ fn facebook_page_cards(
                 probe.list_state
             },
         ),
+        selection_reason: None,
     }
     .bounded()
 }
