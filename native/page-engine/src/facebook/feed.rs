@@ -170,7 +170,6 @@ pub(crate) async fn execute_facebook_feed_scroll(
     let mut current = probe_facebook_feed(session).await?;
     let start_y = current.scroll_y;
     let mut saw_any_card = !current.cards.is_empty();
-    let mut bottom_dry_rounds = 0usize;
 
     for _ in 0..FACEBOOK_FEED_SCROLL_ROUNDS {
         let before = current;
@@ -190,7 +189,6 @@ pub(crate) async fn execute_facebook_feed_scroll(
 
         let grew = facebook_feed_height_grew(&before, &after);
         if grew || !facebook_near_bottom(&after) || after.surface != "home" {
-            bottom_dry_rounds = 0;
             current = after;
             continue;
         }
@@ -207,26 +205,8 @@ pub(crate) async fn execute_facebook_feed_scroll(
         if !fresh.cards.is_empty() {
             return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(fresh)));
         }
-        match confirmation {
-            FacebookBottomConfirmationState::ExplicitEnd => {
-                return Ok(facebook_scroll_failure(
-                    EffectPhase::Confirmed,
-                    "feed_exhausted",
-                ));
-            }
-            FacebookBottomConfirmationState::StructuralStable => {
-                bottom_dry_rounds += 1;
-                if bottom_dry_rounds >= 2 {
-                    return Ok(facebook_scroll_failure(
-                        EffectPhase::Confirmed,
-                        "feed_exhausted",
-                    ));
-                }
-            }
-            FacebookBottomConfirmationState::Invalidated
-            | FacebookBottomConfirmationState::Waiting => {
-                bottom_dry_rounds = 0;
-            }
+        if let Some(reason) = facebook_bottom_terminal_reason(confirmation) {
+            return Ok(facebook_scroll_failure(EffectPhase::Confirmed, reason));
         }
         current = confirmed;
     }
@@ -379,7 +359,11 @@ enum FacebookBottomConfirmationState {
     Waiting,
     Invalidated,
     ExplicitEnd,
-    StructuralStable,
+    WindowStable,
+}
+
+fn facebook_bottom_terminal_reason(state: FacebookBottomConfirmationState) -> Option<&'static str> {
+    (state == FacebookBottomConfirmationState::ExplicitEnd).then_some("feed_exhausted")
 }
 
 fn facebook_feed_card_identities(probe: &facebook::FacebookFeedProbe) -> Vec<String> {
@@ -432,7 +416,7 @@ fn classify_facebook_bottom_confirmation(
         return FacebookBottomConfirmationState::ExplicitEnd;
     }
     if elapsed >= confirmation_window {
-        return FacebookBottomConfirmationState::StructuralStable;
+        return FacebookBottomConfirmationState::WindowStable;
     }
     FacebookBottomConfirmationState::Waiting
 }
@@ -463,7 +447,7 @@ async fn confirm_facebook_feed_bottom(
             return Ok((state, current));
         }
         if tokio::time::Instant::now() >= deadline {
-            return Ok((FacebookBottomConfirmationState::StructuralStable, current));
+            return Ok((FacebookBottomConfirmationState::WindowStable, current));
         }
     }
 }
@@ -658,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn structural_bottom_requires_the_complete_confirmation_window() {
+    fn stable_bottom_without_a_marker_is_non_terminal_after_the_complete_window() {
         let initial = feed_probe(2_400.0, 1_500.0, false, false);
         let stable = initial.clone();
 
@@ -680,7 +664,11 @@ mod tests {
                 FACEBOOK_FEED_SETTLE_IN_PLACE,
                 FACEBOOK_FEED_SETTLE_IN_PLACE,
             ),
-            FacebookBottomConfirmationState::StructuralStable
+            FacebookBottomConfirmationState::WindowStable
+        );
+        assert_eq!(
+            facebook_bottom_terminal_reason(FacebookBottomConfirmationState::WindowStable),
+            None
         );
     }
 
@@ -698,6 +686,10 @@ mod tests {
                 FACEBOOK_FEED_SETTLE_IN_PLACE,
             ),
             FacebookBottomConfirmationState::ExplicitEnd
+        );
+        assert_eq!(
+            facebook_bottom_terminal_reason(FacebookBottomConfirmationState::ExplicitEnd),
+            Some("feed_exhausted")
         );
     }
 
