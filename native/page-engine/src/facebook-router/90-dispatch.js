@@ -1,6 +1,6 @@
   const blocking=blockingProbe();
   const blocked=blocker(blocking);
-  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
+  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_bound_editor_probe','publish_upload_target_probe','publish_upload_preview_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
     return fail(kind||'page',blocked);
   }
   if(kind==='identity_read')return done(identity());
@@ -24,6 +24,9 @@
   if(kind==='publish_home_probe')return done({kind:'publish_home_probe',value:publishHomeProbe()});
   if(kind==='publish_entry_probe')return done({kind:'point_target',value:publishEntryProbe()});
   if(kind==='publish_editor_probe')return done({kind:'text_target',value:publishEditorProbe()});
+  if(kind==='publish_bound_editor_probe')return done({kind:'text_target',value:publishBoundEditorProbe()});
+  if(kind==='publish_upload_target_probe')return done({kind:'point_target',value:publishUploadTargetProbe()});
+  if(kind==='publish_upload_preview_probe')return done({kind:'point_target',value:publishUploadPreviewProbe()});
   if(kind==='publish_submit_probe')return done({kind:'publish_submit_probe',value:publishSubmitProbe()});
   if(kind==='publish_submitted_probe')return done({kind:'publish_submitted_probe',value:publishSubmittedProbe()});
   if(kind==='reel_probe')return done({kind:'reel_probe',value:reelProbeValue(activeReel())});
@@ -180,10 +183,6 @@
     if(after.questionnaireRequired)return done(action('join_group',false,'questionnaire_required',{groupUrl,clicked:true,groupObservation:before,postObservation:after}));
     const joined=after.membershipSignals.length>0||(!before.composerPresent&&after.composerPresent&&!after.joinCtaPresent);
     return joined?done(action('join_group',true,undefined,{groupUrl,clicked:true,groupObservation:before,postObservation:after})):ambiguous('join_group','join_verification_ambiguous',{groupUrl,clicked:true,groupObservation:before,postObservation:after});
-  }
-  if(kind==='publish_upload_image'){
-    const previews=all('[role="dialog"] img,form img').filter(visible).filter((img)=>/^blob:|^https?:/.test(String(img.src||'')));
-    return previews.length?done(action('upload_image',true)):ambiguous('upload_image','media_preview_unconfirmed');
   }
   if(kind==='publish_set_cover'||kind==='publish_add_with_candidate'||kind==='publish_set_option'||kind==='publish_set_schedule')return fail(kind.replace('publish_',''),'kind_not_implemented');
   if(kind==='publish_capture_post_id'){

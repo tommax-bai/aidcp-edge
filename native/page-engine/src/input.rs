@@ -12,6 +12,7 @@ pub(crate) enum TextInputFailure {
     Cancelled,
     Deadline,
     Engine,
+    TargetLost,
 }
 
 pub(crate) async fn type_text_humanized(
@@ -19,6 +20,33 @@ pub(crate) async fn type_text_humanized(
     value: &str,
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
+) -> Result<usize, TextInputFailure> {
+    type_text_humanized_inner(cdp, value, cancellation, deadline_unix_ms, None).await
+}
+
+pub(crate) async fn type_text_humanized_guarded(
+    cdp: &mut CdpSession,
+    value: &str,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+    target_guard_expression: &str,
+) -> Result<usize, TextInputFailure> {
+    type_text_humanized_inner(
+        cdp,
+        value,
+        cancellation,
+        deadline_unix_ms,
+        Some(target_guard_expression),
+    )
+    .await
+}
+
+async fn type_text_humanized_inner(
+    cdp: &mut CdpSession,
+    value: &str,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+    target_guard_expression: Option<&str>,
 ) -> Result<usize, TextInputFailure> {
     let mut rhythm = KeyboardRhythm::new();
     let mut typed = 0;
@@ -29,6 +57,28 @@ pub(crate) async fn type_text_humanized(
             deadline_unix_ms,
         )
         .await?;
+        if let Some(expression) = target_guard_expression {
+            let result = cdp
+                .evaluate(expression, true)
+                .await
+                .map_err(|_| TextInputFailure::Engine)?;
+            let target_current = result
+                .pointer("/result/value/output")
+                .is_some_and(|output| {
+                    output.get("kind").and_then(serde_json::Value::as_str) == Some("text_target")
+                        && output
+                            .pointer("/value/ok")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                        && output
+                            .pointer("/value/focused")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                });
+            if !target_current {
+                return Err(TextInputFailure::TargetLost);
+            }
+        }
         cdp.insert_text(&character.to_string())
             .await
             .map_err(|_| TextInputFailure::Engine)?;

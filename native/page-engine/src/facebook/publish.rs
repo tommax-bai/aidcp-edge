@@ -3,8 +3,9 @@ use super::shared::*;
 use crate::commit_window::CommitWindowRequester;
 use crate::engine::{CommandOutput, EngineSession, validate_publish_file};
 use crate::error::{EngineError, ErrorCode};
-use crate::input::{TextInputFailure, type_text_humanized};
+use crate::input::{TextInputFailure, type_text_humanized_guarded};
 use crate::protocol::{EffectPhase, NativeCommand};
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use url::Url;
@@ -41,13 +42,41 @@ pub(crate) async fn execute(
         }
         NativeCommand::PublishUploadImage(params) => {
             validate_publish_file(&params.path)?;
+            let target = probe_facebook_publish_upload_target(session).await?;
+            if !target.ok {
+                return Ok(facebook_publish_result(
+                    EffectPhase::NotStarted,
+                    params.record_id,
+                    params.seq,
+                    "upload_image",
+                    false,
+                    false,
+                    target.reason.as_deref().unwrap_or("upload_input_not_found"),
+                ));
+            }
             let selector = file_input_selector()?;
             let node_id = session.cdp.query_selector_node(&selector).await?;
             session
                 .cdp
                 .set_file_input_files(node_id, std::slice::from_ref(&params.path))
                 .await?;
-            verify_facebook_uploaded_preview(session, command).await
+            let file_name = Path::new(&params.path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    EngineError::new(
+                        ErrorCode::InvalidRequest,
+                        "native publish file name is invalid",
+                    )
+                })?;
+            verify_facebook_uploaded_preview(
+                session,
+                params.record_id,
+                params.seq,
+                file_name,
+                deadline_unix_ms,
+            )
+            .await
         }
         NativeCommand::PublishFillField(params) => {
             execute_facebook_publish_fill(session, params, command, cancellation, deadline_unix_ms)
@@ -521,21 +550,24 @@ pub(crate) async fn execute_facebook_publish_fill(
     }
 
     let typing_deadline_unix_ms = deadline_unix_ms.saturating_sub(FACEBOOK_PUBLISH_FILL_RESERVE_MS);
-    let typing = type_text_humanized(
+    let target_guard = crate::facebook::publish_bound_editor_probe_expression(false, false)?;
+    let typing = type_text_humanized_guarded(
         &mut session.cdp,
         value,
         cancellation,
         typing_deadline_unix_ms,
+        &target_guard,
     )
     .await;
     if let Err(failure) = typing {
-        let cleanup = clear_facebook_publish_editor(session).await;
+        let cleanup = clear_bound_facebook_publish_editor(session).await;
         if matches!(failure, TextInputFailure::Cancelled) {
             return Err(cancelled_before_dispatch());
         }
         let reason = match failure {
             TextInputFailure::Deadline => "fill_deadline_exceeded",
             TextInputFailure::Engine => "engine_error",
+            TextInputFailure::TargetLost => "composer_focus_lost",
             TextInputFailure::Cancelled => unreachable!(),
         };
         let error = facebook_publish_fill_cleanup_error(reason, cleanup);
@@ -555,7 +587,7 @@ pub(crate) async fn execute_facebook_publish_fill(
     let accepted = match accepted {
         Ok(value) => value,
         Err(error) => {
-            let cleanup = clear_facebook_publish_editor(session).await;
+            let cleanup = clear_bound_facebook_publish_editor(session).await;
             if error.code == ErrorCode::Cancelled {
                 return Err(error);
             }
@@ -572,7 +604,7 @@ pub(crate) async fn execute_facebook_publish_fill(
         }
     };
     if !accepted {
-        let cleanup = clear_facebook_publish_editor(session).await;
+        let cleanup = clear_bound_facebook_publish_editor(session).await;
         let error = facebook_publish_fill_cleanup_error("composer_readback_mismatch", cleanup);
         return Ok(facebook_publish_result(
             EffectPhase::NotStarted,
@@ -633,6 +665,38 @@ async fn clear_facebook_publish_editor(session: &mut EngineSession) -> FacebookP
     FacebookPublishCleanup::Dirty
 }
 
+async fn clear_bound_facebook_publish_editor(
+    session: &mut EngineSession,
+) -> FacebookPublishCleanup {
+    for _ in 0..2 {
+        let focused = match probe_bound_facebook_publish_editor(session, true, true).await {
+            Ok(editor) if !editor.ok => return FacebookPublishCleanup::Dirty,
+            Ok(editor) if editor.focused && editor.selected => editor,
+            Ok(_) | Err(_) => return FacebookPublishCleanup::Dirty,
+        };
+        if focused.value.is_none() {
+            return FacebookPublishCleanup::Dirty;
+        }
+        if delete_selected_text(session).await.is_err() {
+            return FacebookPublishCleanup::Dirty;
+        }
+        match probe_bound_facebook_publish_editor(session, false, false).await {
+            Ok(editor)
+                if editor
+                    .value
+                    .as_deref()
+                    .is_some_and(|value| normalize_facebook_text(value).is_empty()) =>
+            {
+                return FacebookPublishCleanup::Cleared;
+            }
+            Ok(_) => {}
+            Err(_) => return FacebookPublishCleanup::Dirty,
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    FacebookPublishCleanup::Dirty
+}
+
 async fn wait_for_facebook_publish_text(
     session: &mut EngineSession,
     expected: &str,
@@ -645,7 +709,7 @@ async fn wait_for_facebook_publish_text(
         if facebook_command_cancelled(cancellation) {
             return Err(cancelled_before_dispatch());
         }
-        let editor = probe_facebook_publish_editor(session).await?;
+        let editor = probe_bound_facebook_publish_editor(session, false, false).await?;
         if editor
             .value
             .as_deref()
@@ -690,7 +754,7 @@ pub(crate) async fn execute_facebook_publish_submit(
     if let Some(output) = ensure_facebook_action_gate(session, command).await? {
         return Ok((EffectPhase::NotStarted, output));
     }
-    let target = probe_facebook_publish_submit(session).await?;
+    let target = probe_facebook_publish_submit(session, false).await?;
     if unix_time_ms() >= deadline_unix_ms {
         return Ok(facebook_publish_result(
             EffectPhase::NotStarted,
@@ -725,7 +789,7 @@ pub(crate) async fn execute_facebook_publish_submit(
         ));
     }
     enter_facebook_commit_window(command, commit_windows, deadline_unix_ms, cancellation).await?;
-    let protected_target = probe_facebook_publish_submit(session).await?;
+    let protected_target = probe_facebook_publish_submit(session, true).await?;
     if unix_time_ms() >= deadline_unix_ms {
         return Ok(facebook_publish_result(
             EffectPhase::NotStarted,

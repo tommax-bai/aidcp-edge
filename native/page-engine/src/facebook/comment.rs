@@ -164,6 +164,7 @@ pub(crate) async fn execute_facebook_comment(
             match failure {
                 TextInputFailure::Deadline => "comment_deadline_exceeded",
                 TextInputFailure::Engine => "comment_input_failed",
+                TextInputFailure::TargetLost => "comment_input_focus_lost",
                 TextInputFailure::Cancelled => unreachable!(),
             },
             Some(params.note_id.clone()),

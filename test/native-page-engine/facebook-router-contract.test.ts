@@ -1589,6 +1589,7 @@ test('Facebook publish entry and submit probes reject decoys, ambiguity, and dis
 
   install(`
     <main><div role="dialog">
+      <div role="textbox" contenteditable="true"></div>
       <button aria-label="Publicar" aria-disabled="true"></button>
     </div></main>
   `);
@@ -1710,6 +1711,73 @@ test('Facebook publish focus probe binds and selects the exact composer editor',
   assert.equal(result.output.value.selected, true);
   assert.equal(dom.window.document.activeElement?.id, 'composer');
   assert.equal(dom.window.getSelection()?.toString(), 'stale draft');
+});
+
+test('Facebook publish rebinds upload and text to the foreground composer generation', async () => {
+  const dom = install(`
+    <div id="old" role="dialog">
+      <img alt="profile" src="https://cdn.example/avatar.jpg">
+      <input id="old-file" type="file" accept="image/*">
+      <div id="old-editor" contenteditable="true" role="textbox">old draft</div>
+    </div>
+    <div id="foreground" role="dialog">
+      <img alt="01-d67d8818448efe4c.jpg" src="blob:https://www.facebook.com/new-preview">
+      <input id="foreground-file" type="file" accept="image/*">
+      <div id="foreground-editor" contenteditable="true" role="textbox"></div>
+    </div>
+  `);
+
+  const editor = await run({
+    kind: 'publish_editor_probe',
+    params: { focus: true, selectContents: false },
+  });
+  assert.equal(editor.output.value.ok, true);
+  assert.equal(dom.window.document.activeElement?.id, 'foreground-editor');
+
+  const uploadTarget = await run({ kind: 'publish_upload_target_probe', params: {} });
+  assert.equal(uploadTarget.output.value.ok, true);
+  assert.equal(dom.window.document.querySelector('#old-file')?.hasAttribute('data-aidcp-publish-file-input'), false);
+  assert.equal(
+    dom.window.document.querySelector('#foreground-file')?.getAttribute('data-aidcp-publish-file-input'),
+    'current',
+  );
+
+  const preview = await run({
+    kind: 'publish_upload_preview_probe',
+    params: { fileName: '01-d67d8818448efe4c.jpg' },
+  });
+  assert.equal(preview.output.value.ok, true);
+});
+
+test('Facebook publish never accepts an avatar or another filename as the uploaded preview', async () => {
+  install(`
+    <div role="dialog">
+      <img alt="profile" src="https://cdn.example/avatar.jpg">
+      <img alt="another.jpg" src="blob:https://www.facebook.com/another-preview">
+      <input type="file" accept="image/*">
+      <div contenteditable="true" role="textbox"></div>
+    </div>
+  `);
+
+  const preview = await run({
+    kind: 'publish_upload_preview_probe',
+    params: { fileName: '01-d67d8818448efe4c.jpg' },
+  });
+  assert.equal(preview.output.value.ok, false);
+  assert.equal(preview.output.value.reason, 'media_preview_unconfirmed');
+});
+
+test('Facebook publish refuses two non-overlapping visible composers as ambiguous', async () => {
+  const dom = install(`
+    <div id="left" role="dialog"><div contenteditable="true" role="textbox"></div></div>
+    <div id="right" role="dialog"><div contenteditable="true" role="textbox"></div></div>
+  `);
+  setRect(dom.window.document.querySelector('#left')!, { left: 0, top: 0, right: 500, bottom: 500 });
+  setRect(dom.window.document.querySelector('#right')!, { left: 700, top: 0, right: 1_200, bottom: 500 });
+
+  const result = await run({ kind: 'publish_editor_probe', params: {} });
+  assert.equal(result.output.value.ok, false);
+  assert.equal(result.output.value.reason, 'ambiguous_target');
 });
 
 test('Facebook comment focus probe reports failure instead of typing through a wrong active element', async () => {

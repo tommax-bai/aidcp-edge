@@ -19,6 +19,7 @@ pub(crate) const FACEBOOK_JOIN_READY_TIMEOUT: Duration = Duration::from_secs(30)
 pub(crate) const FACEBOOK_JOIN_HYDRATION_SETTLE: Duration = Duration::from_secs(2);
 pub(crate) const FACEBOOK_JOIN_POST_CLICK_SETTLE: Duration = Duration::from_millis(1_500);
 pub(crate) const FACEBOOK_JOIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(45);
+pub(crate) const FACEBOOK_PUBLISH_UPLOAD_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) static FACEBOOK_FEED_LIKE_OPERATION: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn unix_time_ms() -> u64 {
@@ -201,10 +202,38 @@ pub(crate) async fn focus_facebook_publish_editor(
     facebook::text_target_from_cdp(&raw)
 }
 
+pub(crate) async fn probe_bound_facebook_publish_editor(
+    session: &mut EngineSession,
+    focus: bool,
+    select_contents: bool,
+) -> Result<facebook::FacebookTextTarget, EngineError> {
+    let expression = facebook::publish_bound_editor_probe_expression(focus, select_contents)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::text_target_from_cdp(&raw)
+}
+
+pub(crate) async fn probe_facebook_publish_upload_target(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookPointTarget, EngineError> {
+    let expression = facebook::publish_upload_target_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::point_target_from_cdp(&raw)
+}
+
+pub(crate) async fn probe_facebook_publish_upload_preview(
+    session: &mut EngineSession,
+    file_name: &str,
+) -> Result<facebook::FacebookPointTarget, EngineError> {
+    let expression = facebook::publish_upload_preview_probe_expression(file_name)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::point_target_from_cdp(&raw)
+}
+
 pub(crate) async fn probe_facebook_publish_submit(
     session: &mut EngineSession,
+    bind_target: bool,
 ) -> Result<facebook::FacebookPublishSubmitProbe, EngineError> {
-    let expression = facebook::publish_submit_probe_expression()?;
+    let expression = facebook::publish_submit_probe_expression(bind_target)?;
     let raw = session.cdp.evaluate(&expression, true).await?;
     facebook::publish_submit_probe_from_cdp(&raw)
 }
@@ -553,17 +582,40 @@ pub(crate) async fn wait_for_facebook_ready(
 
 pub(crate) async fn verify_facebook_uploaded_preview(
     session: &mut EngineSession,
-    command: &NativeCommand,
+    record_id: u64,
+    seq: u32,
+    file_name: &str,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let remaining = Duration::from_millis(deadline_unix_ms.saturating_sub(unix_time_ms()));
+    let deadline =
+        tokio::time::Instant::now() + remaining.min(FACEBOOK_PUBLISH_UPLOAD_VERIFY_TIMEOUT);
     loop {
-        let output = evaluate_facebook_router(session, command).await?;
-        let confirmed = matches!(&output.1, CommandOutput::PublishReceipt(receipt) if receipt.ok);
-        if confirmed {
-            return Ok(output);
+        let preview = probe_facebook_publish_upload_preview(session, file_name).await?;
+        if preview.ok {
+            return Ok(facebook_publish_result(
+                EffectPhase::Confirmed,
+                record_id,
+                seq,
+                "upload_image",
+                true,
+                true,
+                "",
+            ));
         }
         if tokio::time::Instant::now() >= deadline {
-            return Ok((EffectPhase::Ambiguous, output.1));
+            return Ok(facebook_publish_result(
+                EffectPhase::Ambiguous,
+                record_id,
+                seq,
+                "upload_image",
+                false,
+                true,
+                preview
+                    .reason
+                    .as_deref()
+                    .unwrap_or("media_preview_unconfirmed"),
+            ));
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }

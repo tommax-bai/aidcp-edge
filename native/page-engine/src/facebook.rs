@@ -527,8 +527,29 @@ pub fn publish_editor_focus_expression(select_contents: bool) -> Result<String, 
     )
 }
 
-pub fn publish_submit_probe_expression() -> Result<String, EngineError> {
-    internal_expression("publish_submit_probe", json!({}))
+pub fn publish_bound_editor_probe_expression(
+    focus: bool,
+    select_contents: bool,
+) -> Result<String, EngineError> {
+    internal_expression(
+        "publish_bound_editor_probe",
+        json!({ "focus": focus, "selectContents": select_contents }),
+    )
+}
+
+pub fn publish_upload_target_probe_expression() -> Result<String, EngineError> {
+    internal_expression("publish_upload_target_probe", json!({}))
+}
+
+pub fn publish_upload_preview_probe_expression(file_name: &str) -> Result<String, EngineError> {
+    internal_expression(
+        "publish_upload_preview_probe",
+        json!({ "fileName": file_name }),
+    )
+}
+
+pub fn publish_submit_probe_expression(bind_target: bool) -> Result<String, EngineError> {
+    internal_expression("publish_submit_probe", json!({ "bindTarget": bind_target }))
 }
 
 pub fn publish_submitted_probe_expression() -> Result<String, EngineError> {

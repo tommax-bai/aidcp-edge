@@ -430,7 +430,11 @@ impl<'a, T: Serialize> CommandResultRecord<'a, T> {
             command_id: request.command_id,
             ok: effect_phase == EffectPhase::Confirmed,
             effect_phase,
-            reason_code: ErrorCode::Confirmed,
+            reason_code: if effect_phase == EffectPhase::Confirmed {
+                ErrorCode::Confirmed
+            } else {
+                ErrorCode::ProbeFailed
+            },
             result: Some(result),
             error: None,
         }
@@ -572,5 +576,19 @@ mod tests {
             .expect("effect phases"),
             r#"["not_started","dispatched","confirmed","ambiguous"]"#
         );
+    }
+
+    #[test]
+    fn structured_non_confirmed_result_never_uses_confirmed_reason_code() {
+        let InputRecord::Command(request) = parse_input(&valid_command()).expect("valid command")
+        else {
+            panic!("expected command");
+        };
+        let output = serde_json::json!({"ok": false});
+        let result = CommandResultRecord::success(&request, EffectPhase::NotStarted, &output);
+        let encoded = serde_json::to_value(result).expect("command result");
+        assert_eq!(encoded["ok"], false);
+        assert_eq!(encoded["effectPhase"], "not_started");
+        assert_eq!(encoded["reasonCode"], "probe_failed");
     }
 }

@@ -785,6 +785,7 @@ async fn execute_search(
             match failure {
                 TextInputFailure::Deadline => "search_input_deadline_exceeded",
                 TextInputFailure::Engine => "search_input_failed",
+                TextInputFailure::TargetLost => "search_input_focus_lost",
                 TextInputFailure::Cancelled => unreachable!(),
             },
         ));
@@ -1345,6 +1346,7 @@ pub(crate) async fn click_captcha(
                     TextInputFailure::Cancelled => "preempted_by_task",
                     TextInputFailure::Deadline => "captcha_type_deadline_exceeded",
                     TextInputFailure::Engine => "captcha_type_failed",
+                    TextInputFailure::TargetLost => "captcha_input_focus_lost",
                 },
             ));
         }

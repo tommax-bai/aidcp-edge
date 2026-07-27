@@ -1,6 +1,8 @@
 use super::*;
 use crate::cdp::CdpSession;
-use crate::command::{PublishFieldParams, PublishIdentity, PublishSelectModeParams};
+use crate::command::{
+    PublishFieldParams, PublishFileParams, PublishIdentity, PublishSelectModeParams,
+};
 use crate::endpoint::CdpTarget;
 use crate::protocol::Platform;
 use futures_util::{SinkExt, StreamExt};
@@ -29,6 +31,8 @@ enum PublishScenario {
     FillDelayedReadback,
     FillRejected,
     FillFocusRejected,
+    FillFocusLost,
+    UploadConfirmed,
 }
 
 #[derive(Default)]
@@ -45,6 +49,11 @@ struct FakeCalls {
     backspaces: usize,
     editor_focused: bool,
     editor_selected: bool,
+    bound_editor_probes: usize,
+    upload_target_probes: usize,
+    upload_preview_probes: usize,
+    file_sets: usize,
+    preview_file_name: String,
 }
 
 fn browser_result(kind: &str, value: Value) -> Value {
@@ -71,6 +80,9 @@ fn expression_kind(expression: &str) -> &str {
         Some("publish_home_probe") => "publish_home_probe",
         Some("publish_entry_probe") => "publish_entry_probe",
         Some("publish_editor_probe") => "publish_editor_probe",
+        Some("publish_bound_editor_probe") => "publish_bound_editor_probe",
+        Some("publish_upload_target_probe") => "publish_upload_target_probe",
+        Some("publish_upload_preview_probe") => "publish_upload_preview_probe",
         Some("publish_submit_probe") => "publish_submit_probe",
         Some("publish_submitted_probe") => "publish_submitted_probe",
         other => panic!("unexpected router input {other:?}"),
@@ -186,6 +198,8 @@ fn evaluated_result(scenario: PublishScenario, calls: &mut FakeCalls, expression
                     | PublishScenario::FillDelayedReadback
                     | PublishScenario::FillRejected
                     | PublishScenario::FillFocusRejected
+                    | PublishScenario::FillFocusLost
+                    | PublishScenario::UploadConfirmed
             ) || (matches!(
                 scenario,
                 PublishScenario::LateEntry
@@ -214,6 +228,51 @@ fn evaluated_result(scenario: PublishScenario, calls: &mut FakeCalls, expression
                     json!({ "ok": false, "reason": "composer_not_open" })
                 },
             )
+        }
+        "publish_bound_editor_probe" => {
+            calls.bound_editor_probes += 1;
+            let input = expression_input(expression);
+            let focus_requested =
+                input.pointer("/params/focus").and_then(Value::as_bool) == Some(true);
+            let select_requested = input
+                .pointer("/params/selectContents")
+                .and_then(Value::as_bool)
+                == Some(true);
+            if matches!(scenario, PublishScenario::FillFocusLost)
+                && !focus_requested
+                && calls.inserted_texts.len() >= 2
+            {
+                calls.editor_focused = false;
+            }
+            if focus_requested {
+                calls.editor_focused = true;
+                calls.editor_selected = select_requested;
+            }
+            browser_result(
+                "text_target",
+                json!({
+                    "ok": true,
+                    "cx": 180.0,
+                    "cy": 140.0,
+                    "value": calls.editor_value,
+                    "focused": calls.editor_focused,
+                    "selected": calls.editor_selected
+                }),
+            )
+        }
+        "publish_upload_target_probe" => {
+            calls.upload_target_probes += 1;
+            browser_result("point_target", json!({ "ok": true }))
+        }
+        "publish_upload_preview_probe" => {
+            calls.upload_preview_probes += 1;
+            let input = expression_input(expression);
+            calls.preview_file_name = input
+                .pointer("/params/fileName")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            browser_result("point_target", json!({ "ok": true }))
         }
         "publish_submit_probe" => browser_result(
             "publish_submit_probe",
@@ -356,6 +415,12 @@ async fn fake_session(
                             calls.editor_value.push_str(&inserted);
                         }
                     }
+                    json!({})
+                }
+                "DOM.getDocument" => json!({ "root": { "nodeId": 1 } }),
+                "DOM.querySelector" => json!({ "nodeId": 2 }),
+                "DOM.setFileInputFiles" => {
+                    server_calls.lock().expect("calls").file_sets += 1;
                     json!({})
                 }
                 _ => json!({}),
@@ -810,6 +875,74 @@ async fn fill_focus_rejection_stops_before_any_character_dispatch() {
     assert!(calls.lock().expect("calls").inserted_texts.is_empty());
     session.cdp.close().await;
     server.await.expect("server");
+}
+
+#[tokio::test]
+async fn fill_focus_loss_stops_before_the_next_character_and_cleans_the_bound_editor() {
+    let (mut session, calls, server) = fake_session(PublishScenario::FillFocusLost).await;
+    let (params, command) = fill_command("abcdef");
+
+    let (phase, output) = execute_facebook_publish_fill(
+        &mut session,
+        &params,
+        &command,
+        None,
+        unix_time_ms() + 30_000,
+    )
+    .await
+    .expect("focus loss");
+    let receipt = receipt(output);
+
+    assert_eq!(phase, EffectPhase::NotStarted);
+    assert_eq!(receipt.error.as_deref(), Some("composer_focus_lost"));
+    {
+        let calls = calls.lock().expect("calls");
+        assert_eq!(calls.inserted_texts, ["a", "b"]);
+        assert!(calls.editor_value.is_empty());
+        assert!(calls.bound_editor_probes >= 3);
+    }
+    session.cdp.close().await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn upload_binds_the_current_file_input_and_confirms_the_exact_file_preview() {
+    let (mut session, calls, server) = fake_session(PublishScenario::UploadConfirmed).await;
+    let path = std::env::temp_dir().join(format!("aidcp-native-upload-{}.jpg", unix_time_ms()));
+    std::fs::write(&path, b"image").expect("write upload fixture");
+    let command = NativeCommand::PublishUploadImage(PublishFileParams {
+        record_id: 7,
+        seq: 3,
+        path: path.to_string_lossy().into_owned(),
+        image_index: 0,
+    });
+
+    let (phase, output) = execute(
+        &mut session,
+        &command,
+        None,
+        &CommitWindowRequester::in_process(3),
+        unix_time_ms() + 10_000,
+    )
+    .await
+    .expect("upload image");
+    let receipt = receipt(output);
+
+    assert_eq!(phase, EffectPhase::Confirmed);
+    assert!(receipt.ok);
+    {
+        let calls = calls.lock().expect("calls");
+        assert_eq!(calls.upload_target_probes, 1);
+        assert_eq!(calls.file_sets, 1);
+        assert_eq!(calls.upload_preview_probes, 1);
+        assert_eq!(
+            calls.preview_file_name,
+            path.file_name().unwrap().to_string_lossy()
+        );
+    }
+    session.cdp.close().await;
+    server.await.expect("server");
+    std::fs::remove_file(path).expect("remove upload fixture");
 }
 
 #[tokio::test]
