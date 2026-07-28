@@ -1,12 +1,12 @@
 use super::reels::execute_facebook_page_scroll;
 use super::shared::*;
+use crate::command::{NoteOpenParams, NotePurpose, NoteSurface};
 use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
 use crate::input::{WheelInputFailure, dispatch_wheel_humanized};
 use crate::model::{PageCards, PageMovement};
 use crate::protocol::{EffectPhase, NativeCommand};
-use crate::command::{NoteOpenParams, NotePurpose, NoteSurface};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
@@ -41,6 +41,11 @@ pub(crate) async fn execute(
     match command {
         NativeCommand::BrowseScroll(params) if params.reason.as_deref() == Some("initial_scan") => {
             execute_facebook_initial_feed(session, cancellation, deadline_unix_ms).await
+        }
+        NativeCommand::NoteOpen(params)
+            if params.purpose == Some(crate::command::NotePurpose::Navigate) =>
+        {
+            execute_facebook_note_navigation(session, params, command).await
         }
         NativeCommand::SearchExecute(params) if params.container.is_some() => {
             execute_facebook_search(session, params, command, cancellation, deadline_unix_ms).await
@@ -134,6 +139,72 @@ pub(crate) async fn execute(
             "native Facebook Feed capability received another owner's command",
         )),
     }
+}
+
+/// 用途为「导航」的开帖：这条命令要的是**账号真的落在那一页**，不是拿一份详情读物。
+/// 迁移后用途字段没人读，命令被当成普通开帖；缺面别参数时页面规则直接把**当前页**的详情
+/// 回上去——页面根本没被动过，回执却像是开成功了。后续所有以「已在目标页」为前提的动作
+/// 都会打在错的页面上。
+async fn execute_facebook_note_navigation(
+    session: &mut EngineSession,
+    params: &crate::command::NoteOpenParams,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    // Facebook 的 noteId 本身就是规范 permalink；显式 url 优先。
+    let requested = params
+        .url
+        .as_deref()
+        .or(params.note_id.as_deref())
+        .unwrap_or_default();
+    let target = validated_facebook_content_url(requested, params.note_id.as_deref())
+        .ok()
+        .and_then(|url| canonical_facebook_post_id(url.as_str()).map(|post_id| (url, post_id)));
+    let Some((url, expected_post_id)) = target else {
+        // 解析不出可导航的规范目标——诚实报「未开始」，绝不退化成读当前页。
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "open_note",
+            false,
+            "target_not_found",
+            params.note_id.clone(),
+            None,
+        ));
+    };
+    session.cdp.navigate(url.as_str()).await?;
+    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+
+    let landed = probe_facebook_feed(session).await?;
+    let observation = crate::model::ActionEvidence {
+        surface: Some(landed.surface.clone()),
+        list_key: None,
+        author: None,
+        text_preview_head: None,
+        reaction_text: None,
+        article_index: None,
+    };
+    // 落地身份由**页面自己**派生，不采信命令里的那一份——否则「导航失败但留在原页」
+    // 会被当成成功。
+    if canonical_facebook_post_id(&landed.url).as_deref() != Some(expected_post_id.as_str()) {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "open_note",
+            false,
+            "target_context_mismatch",
+            Some(url.to_string()),
+            Some(observation),
+        ));
+    }
+    Ok(facebook_action_result(
+        EffectPhase::Confirmed,
+        "open_note",
+        true,
+        "",
+        Some(url.to_string()),
+        Some(observation),
+    ))
 }
 
 pub(crate) async fn execute_facebook_initial_feed(
@@ -280,7 +351,9 @@ pub(crate) async fn execute_facebook_feed_scroll(
         }
 
         let grew = facebook_feed_height_grew(&before, &after);
-        if grew || !facebook_near_bottom(&after) || after.surface != "home" {
+        // 到底确认对**每一个已声明的列表面**开放。首页限定是迁移时新加的：退役实现的滚动逻辑面无关，
+        // 小组页 / 搜索结果页照样会滚到底。把它们永远挡在确认之外，滚满轮次后就只剩「找不到目标」这条死胡同。
+        if grew || !facebook_near_bottom(&after) || !facebook_list_surface(&after.surface) {
             current = after;
             continue;
         }
@@ -298,7 +371,11 @@ pub(crate) async fn execute_facebook_feed_scroll(
             return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(fresh)));
         }
         if let Some(reason) = facebook_bottom_completion_reason(confirmation) {
-            return Ok(facebook_scroll_failure(EffectPhase::Confirmed, reason));
+            return Ok(facebook_scroll_failure_on_surface(
+                EffectPhase::Confirmed,
+                reason,
+                Some(confirmed.surface.as_str()),
+            ));
         }
         current = confirmed;
     }
@@ -311,9 +388,10 @@ pub(crate) async fn execute_facebook_feed_scroll(
         return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(cards)));
     }
 
-    Ok(facebook_scroll_failure(
+    Ok(facebook_scroll_failure_on_surface(
         EffectPhase::Confirmed,
         facebook_unconfirmed_scroll_reason(saw_any_card, &current),
+        Some(current.surface.as_str()),
     ))
 }
 
@@ -422,9 +500,15 @@ pub(crate) async fn execute_facebook_feed_refresh(
     Ok((EffectPhase::Confirmed, CommandOutput::PageCards(cards)))
 }
 
+/// 已声明的列表面。滚动 / 到底确认 / 轮次耗尽分类共用同一份判据，
+/// 免得「哪些面算列表面」在三处各写一遍、各漏一个。
+pub(crate) fn facebook_list_surface(surface: &str) -> bool {
+    matches!(surface, "home" | "search" | "group")
+}
+
 async fn ensure_facebook_active_list(session: &mut EngineSession) -> Result<(), EngineError> {
     let probe = probe_facebook_feed(session).await?;
-    let on_list = matches!(probe.surface.as_str(), "home" | "search" | "group");
+    let on_list = facebook_list_surface(&probe.surface);
     if !on_list || probe.url != session.facebook.active_list_url {
         let target = session.facebook.active_list_url.clone();
         session.cdp.navigate(&target).await?;
@@ -541,11 +625,17 @@ fn facebook_feed_settle_key(
     )
 }
 
+/// 懒加载增高的抗噪阈值（像素）。低于它的高度变化是重排噪声、不算「页面还在长」。
+/// 取值沿用退役实现的 100px：1px 会让任何一次重排都算增长 → 循环永远 continue，
+/// 于是面别守卫放开了、证据链仍然走不到，到底确认在三个列表面上都拿不到。
+/// 语义不变——只要页面还在长就继续下滚、绝不判到底。取值是否仍适用于 Native 版式见真机项 9.12。
+const FACEBOOK_FEED_LAZYLOAD_GROWTH_PX: f64 = 100.0;
+
 fn facebook_feed_height_grew(
     before: &facebook::FacebookFeedProbe,
     after: &facebook::FacebookFeedProbe,
 ) -> bool {
-    after.scroll_height > before.scroll_height + 1.0
+    after.scroll_height > before.scroll_height + FACEBOOK_FEED_LAZYLOAD_GROWTH_PX
 }
 
 fn classify_facebook_bottom_confirmation(
@@ -557,8 +647,10 @@ fn classify_facebook_bottom_confirmation(
 ) -> FacebookBottomConfirmationState {
     let same_generation =
         current.url == initial.url && current.document_generation == initial.document_generation;
-    let invalidated = initial.surface != "home"
-        || current.surface != "home"
+    // 面别条件：两次探测都在**已声明的列表面**上，且确认窗内不许换面。
+    // 只放开循环里的守卫而不动这里，确认会照样判无效 → 到底状态依然不可达。
+    let invalidated = !facebook_list_surface(&initial.surface)
+        || initial.surface != current.surface
         || !same_generation
         || current.loading
         || !facebook_near_bottom(current)
@@ -613,7 +705,10 @@ fn facebook_unconfirmed_scroll_reason(
 ) -> &'static str {
     if current.loading {
         "feed_still_loading"
-    } else if saw_any_card && current.surface == "home" {
+    } else if saw_any_card && facebook_list_surface(&current.surface) {
+        // 任一列表面上见过卡、只是这条命令内没翻出新卡 —— 这是非终态「翻页未确认」。
+        // 报「找不到目标」是把「本批看完」说成「这个面上根本没有东西」，
+        // 云端拿不到任何可执行语义，账号就卡在那儿。
         "feed_continuation_unconfirmed"
     } else {
         "no_target"
@@ -877,6 +972,27 @@ mod tests {
         loading: bool,
         explicit_end: bool,
     ) -> facebook::FacebookFeedProbe {
+        surfaced_feed_probe("home", scroll_height, scroll_y, loading, explicit_end)
+    }
+
+    fn surfaced_feed_probe(
+        surface: &str,
+        scroll_height: f64,
+        scroll_y: f64,
+        loading: bool,
+        explicit_end: bool,
+    ) -> facebook::FacebookFeedProbe {
+        let mut probe = base_feed_probe(scroll_height, scroll_y, loading, explicit_end);
+        probe.surface = surface.to_owned();
+        probe
+    }
+
+    fn base_feed_probe(
+        scroll_height: f64,
+        scroll_y: f64,
+        loading: bool,
+        explicit_end: bool,
+    ) -> facebook::FacebookFeedProbe {
         facebook::FacebookFeedProbe {
             cards: Vec::new(),
             document_generation: Some("doc-1".to_owned()),
@@ -1074,5 +1190,150 @@ mod tests {
             facebook_unconfirmed_scroll_reason(false, &ready),
             "no_target"
         );
+    }
+
+    #[test]
+    fn every_declared_list_surface_can_reach_a_terminal_bottom_state() {
+        for surface in ["home", "search", "group"] {
+            let initial = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, false);
+            let terminal = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, true);
+            assert_eq!(
+                classify_facebook_bottom_confirmation(
+                    &initial,
+                    &terminal,
+                    2,
+                    Duration::from_millis(500),
+                    FACEBOOK_FEED_SETTLE_IN_PLACE,
+                ),
+                FacebookBottomConfirmationState::ExplicitEnd,
+                "{surface} must be able to reach an explicit end"
+            );
+
+            let stable = initial.clone();
+            assert_eq!(
+                classify_facebook_bottom_confirmation(
+                    &initial,
+                    &stable,
+                    0,
+                    FACEBOOK_FEED_SETTLE_IN_PLACE,
+                    FACEBOOK_FEED_SETTLE_IN_PLACE,
+                ),
+                FacebookBottomConfirmationState::WindowStable,
+                "{surface} must be able to reach a stable window"
+            );
+        }
+    }
+
+    #[test]
+    fn a_surface_change_inside_the_confirmation_window_still_invalidates_it() {
+        let initial = surfaced_feed_probe("group", 2_400.0, 1_500.0, false, true);
+        let moved = surfaced_feed_probe("home", 2_400.0, 1_500.0, false, true);
+        assert_eq!(
+            classify_facebook_bottom_confirmation(
+                &initial,
+                &moved,
+                2,
+                Duration::from_millis(500),
+                FACEBOOK_FEED_SETTLE_IN_PLACE,
+            ),
+            FacebookBottomConfirmationState::Invalidated
+        );
+
+        let detail = surfaced_feed_probe("group_post", 2_400.0, 1_500.0, false, true);
+        assert_eq!(
+            classify_facebook_bottom_confirmation(
+                &detail,
+                &detail.clone(),
+                2,
+                Duration::from_millis(500),
+                FACEBOOK_FEED_SETTLE_IN_PLACE,
+            ),
+            FacebookBottomConfirmationState::Invalidated,
+            "非列表面上根本不该做到底确认"
+        );
+    }
+
+    #[test]
+    fn a_seen_card_on_any_list_surface_is_continuation_not_a_missing_target() {
+        for surface in ["home", "search", "group"] {
+            let ready = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, false);
+            assert_eq!(
+                facebook_unconfirmed_scroll_reason(true, &ready),
+                "feed_continuation_unconfirmed",
+                "{surface} 上见过卡就不是「找不到目标」"
+            );
+            assert_eq!(
+                facebook_unconfirmed_scroll_reason(false, &ready),
+                "no_target",
+                "{surface} 上一张卡都没见过才是「找不到目标」"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_terminals_name_the_list_surface_they_came_from() {
+        for (surface, reason) in [
+            ("group", "feed_exhausted"),
+            ("search", "feed_continuation_unconfirmed"),
+            ("home", "no_target"),
+        ] {
+            let (_, output) =
+                facebook_scroll_failure_on_surface(EffectPhase::Confirmed, reason, Some(surface));
+            let CommandOutput::ActionReceipt(receipt) = output else {
+                panic!("scroll failure must be an action receipt");
+            };
+            assert_eq!(receipt.reason.as_deref(), Some(reason));
+            assert_eq!(
+                receipt
+                    .observation
+                    .as_ref()
+                    .and_then(|evidence| evidence.surface.as_deref()),
+                Some(surface)
+            );
+        }
+
+        let (_, output) = facebook_scroll_failure(EffectPhase::Confirmed, "no_target");
+        let CommandOutput::ActionReceipt(receipt) = output else {
+            panic!("scroll failure must be an action receipt");
+        };
+        assert!(receipt.observation.is_none(), "没有面别可报时不得臆造一个");
+    }
+
+    #[test]
+    fn lazyload_growth_needs_to_clear_the_reflow_noise_floor() {
+        let before = feed_probe(2_400.0, 1_500.0, false, false);
+        for jitter in [1.0, 37.0, 99.0] {
+            let after = feed_probe(2_400.0 + jitter, 1_500.0, false, false);
+            assert!(
+                !facebook_feed_height_grew(&before, &after),
+                "{jitter}px 抖动不算「页面还在长」"
+            );
+        }
+        for growth in [100.5, 420.0] {
+            let after = feed_probe(2_400.0 + growth, 1_500.0, false, false);
+            assert!(
+                facebook_feed_height_grew(&before, &after),
+                "{growth}px 懒加载增量必须算「页面还在长」"
+            );
+        }
+    }
+
+    #[test]
+    fn small_reflow_never_blocks_a_group_or_search_bottom_confirmation() {
+        for surface in ["group", "search"] {
+            let initial = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, true);
+            let reflowed = surfaced_feed_probe(surface, 2_460.0, 1_500.0, false, true);
+            assert_eq!(
+                classify_facebook_bottom_confirmation(
+                    &initial,
+                    &reflowed,
+                    2,
+                    Duration::from_millis(500),
+                    FACEBOOK_FEED_SETTLE_IN_PLACE,
+                ),
+                FacebookBottomConfirmationState::ExplicitEnd,
+                "{surface} 上 60px 重排不该把到底确认打掉"
+            );
+        }
     }
 }

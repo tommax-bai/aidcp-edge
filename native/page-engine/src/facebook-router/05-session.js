@@ -7,6 +7,9 @@
     const expression=/申请参与|请求参与|参与此(?:小组|群)|贡献(?:内容)?给?(?:此|这个)?(?:小组|群)|参与问题|同意(?:此|该|小组|群).{0,4}规则|同意群规|request to participate|participation question|answer questions to participate|contribute to (?:this|the) group|agree to the group rules|待审核|pending review/i;
     return dialogs.some((dialog)=>expression.test(text(dialog,4000)));
   };
+  // cookie 政策文案判据。既用于「页面上有没有同意条」，也用于界定按钮采集框——
+  // 采集框必须由同意语义自身界定，不能由「是不是对话框」界定。
+  const consentCookieCopy=/cookie\s*政策|cookie\s*policy|允许\s*facebook\s*使用\s*cookie|允许使用\s*cookie|使用\s*cookie|allow\s+the\s+use\s+of\s+cookies|use\s+of\s+cookies|allow\s+all\s+cookies|允许所有\s*cookie/i;
   const consentProbe=()=>{
     const body=text(document.body,5000);
     const path=location.pathname.toLowerCase();
@@ -14,12 +17,20 @@
     const captcha=/captcha|recaptcha|fbsbx\.com\/captcha/i.test(frames)
       ||/进行人机身份验证|人机身份验证|captcha|recaptcha|prove you(?:'|’)re human|confirm you(?:'|’)re human|verify you(?:'|’)re human/i.test(body);
     const loginPath=/\/login|\/recover|\/two_step_verification/i.test(path);
-    const cookieCopy=/cookie\s*政策|cookie\s*policy|允许\s*facebook\s*使用\s*cookie|允许使用\s*cookie|使用\s*cookie|allow\s+the\s+use\s+of\s+cookies|use\s+of\s+cookies|allow\s+all\s+cookies|允许所有\s*cookie/i.test(body);
-    const scope=first(['[role="dialog"]','[aria-modal="true"]'])||document;
+    const cookieCopy=consentCookieCopy.test(body);
+    // 只有**自身文本命中 cookie 文案**的可见容器才配当采集框；否则在整个 document 上采集。
+    // 真实同意条常是非对话框的底部横幅，而首页常年挂着与同意无关的良性对话框（聊天弹窗 / 加载浮层）——
+    // 按「首个可见对话框」收窄会让两个点位永远采不到，于是「有同意条但按钮都是空」，
+    // 评论 / 点赞 / 发帖 / 加群 / 滚动 / 刷新会被同一条阻断结论全部误杀。
+    const scope=all('[role="dialog"],[aria-modal="true"]').filter(visible)
+      .find((container)=>consentCookieCopy.test(text(container,5000)))||document;
     const buttons=all('button,[role="button"],a[role="button"],div[aria-label],span[aria-label]',scope).filter(visible);
     const acceptAll=buttons.filter((el)=>/^(允许所有\s*cookie|允许全部\s*cookie|接受所有\s*cookie|同意所有\s*cookie|允许\s*facebook\s*使用\s*cookie|允许使用\s*cookie|allow\s+all\s+cookies|accept\s+all\s+cookies|allow\s+the\s+use\s+of\s+cookies)$/i.test(label(el)));
     const necessaryOnly=buttons.filter((el)=>/^(仅允许必要\s*cookie|只允许必要\s*cookie|仅接受必要\s*cookie|拒绝非必要\s*cookie|only\s+allow\s+essential\s+cookies|decline\s+optional\s+cookies|refuse\s+non-?essential\s+cookies)$/i.test(label(el)));
-    const present=cookieCopy&&!captcha&&!loginPath;
+    // 存在性判定的第四条合取项：至少有一个可点的接受按钮。缺了它，
+    // 「cookie 文案在页但按钮词表全 miss」会被判成同意条阻断而不是放行；
+    // 同时带 cookie 文案的登录墙也会因 present 假真而拿不到 login_required。
+    const present=cookieCopy&&(acceptAll.length>0||necessaryOnly.length>0)&&!captcha&&!loginPath;
     return {
       present,
       acceptAll:present&&acceptAll.length===1?point(acceptAll[0]):null,

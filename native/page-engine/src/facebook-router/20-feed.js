@@ -4,12 +4,11 @@
     if(!href||!id)return null;
     const author=articleAuthor(article);
     const body=articleBody(article)||(preferredHref?text(article,12000):'');
-    const reaction=reactionButton(article);
     return {
       index,
       title:body.slice(0,200),
       author:author.name||undefined,
-      likeCount:count(text(reaction,96)||label(reaction,96)),
+      likeCount:count(reactionCountWitness(article)),
       collectCount:0,
       coverDesc:body.slice(0,200)||undefined,
       noteId:href,
@@ -116,7 +115,7 @@
       index:0,
       title:evidence.body.slice(0,200),
       author:evidence.author,
-      likeCount:count(text(reactionButton(root),96)||label(reactionButton(root),96)),
+      likeCount:count(reactionCountWitness(root)),
       collectCount:0,
       coverDesc:evidence.body.slice(0,200)||undefined,
       noteId:bound.targetRef,
@@ -237,7 +236,7 @@
       if(!visible(node))continue;
       const raw=text(node,600);
       if(raw.length<15)continue;
-      const clean=raw.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const clean=fold(raw).toLowerCase();
       const title=/no more posts|there are no posts|khong con bai viet nao|khong co bai viet nao|没有更多帖子|没有帖子/i.test(clean);
       const hint=/add friends|them ban be|添加好友/i.test(clean)&&/feed|bang feed|动态消息|信息流/i.test(clean);
       if(title)explicitEnd=true;
@@ -361,7 +360,6 @@
   const noteDetail=(root,href,bodyOverride)=>{
     const author=articleAuthor(root);
     const body=typeof bodyOverride==='string'&&bodyOverride?bodyOverride:articleBody(root);
-    const reaction=reactionButton(root);
     const images=all('img',root).filter(visible).map((img,index)=>({
       index,
       url:String(img.currentSrc||img.src||'').slice(0,4096),
@@ -376,7 +374,7 @@
       mediaType:first(['video'],root)?'video':'image_text',
       author:author.name||undefined,
       authorId:(author.href.match(/[?&]id=(\d{5,})/)||author.href.match(/\/people\/[^/]+\/(\d{5,})/)||[])[1]||undefined,
-      likeCount:count(text(reaction,96)||label(reaction,96)),
+      likeCount:count(reactionCountWitness(root)),
       collectCount:0,
       url:String(location.href).slice(0,4096),
       images,

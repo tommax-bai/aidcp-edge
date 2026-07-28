@@ -85,6 +85,9 @@
       if(!read.ok)return fail('open_note',read.reason);
       return done(noteDetail(root,permalinkOf(root)||String(p.noteId||''),read.body));
     }
+    // 用途为「导航」的开帖由引擎侧真导航完成，页面规则里不该再有它的归宿。
+    // 缺面别参数就把当前页详情回上去，等于页面没动却报开成功 —— 诚实报找不到目标。
+    if(p.purpose==='navigate')return fail('open','target_not_found');
     return done(currentDetail());
   }
   if(kind==='note_close'||kind==='navigation_back'){

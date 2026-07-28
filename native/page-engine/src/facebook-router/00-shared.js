@@ -18,6 +18,9 @@ async function(input){
     }
     return null;
   };
+  // 去变音符归一（NFD 分解 + 去组合记号）。共享工具位：首页空态文案与反应计数见证共用同一个变换，
+  // 免得同一批越南语文案在两处各写一遍、各漏一种形态。
+  const fold=(value)=>String(value??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
   const text=(el,max=2000)=>norm(el&&(el.innerText||el.textContent||(el.getAttribute&&el.getAttribute('aria-label'))),max);
   const label=(el,max=256)=>norm(el&&((el.getAttribute&&el.getAttribute('aria-label'))||(el.getAttribute&&el.getAttribute('title'))||text(el,max)),max);
   const count=(value)=>{

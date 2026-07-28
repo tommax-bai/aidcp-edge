@@ -21,6 +21,14 @@ pub struct CommitWindowContract {
 pub struct FacebookParityEntry {
     pub command_kind: &'static str,
     pub owner: FacebookCapability,
+    /// Facebook 上到底实现没实现这条命令。没实现的必须在动作之前就显式拒绝——
+    /// 跑到页面规则里才报，等于白起一次导航 / 输入 / 提交窗口，还占着写截止时间。
+    pub supported: bool,
+    /// 不支持的理由。`supported=false` 时必填，`true` 时必须为空。
+    pub unsupported_reason: &'static str,
+    /// 文本接受谓词：把文本打进页面之后凭什么判「进去了」。
+    /// 不涉及文本输入的命令记 `none`；跨写动作若谓词不同，理由必须写在这一维里。
+    pub text_acceptance: &'static str,
     pub behavior_oracle: &'static str,
     pub focused_behavior_suite: &'static str,
     pub target_witness: &'static str,
@@ -32,6 +40,16 @@ pub struct FacebookParityEntry {
     pub deadline_ms: u64,
     pub commit_window: Option<CommitWindowContract>,
 }
+
+/// 评论与发布共用同一条文本接受谓词：规范化（折叠空白 + 剥零宽字符）后**包含**期望正文，
+/// 且多出来的字符数不超过同一个容差常量。
+/// 评论侧另记一条代价：正文与联系方式拼成一串一次打完、不再分两段各自验收——
+/// 红线仍守住（编辑器值不包含整串就拒绝并清场，绝不裸发缺联系方式的正文），
+/// 丢掉的是诊断粒度：退役实现对「正文进去了、联系方式没进去」有独立失败面，
+/// 本实现只会给出一个笼统的「文本未被接受」。要把它做成可区分的原因码，
+/// MUST 先确认云端对它有归宿，MUST NOT 新增无归宿的原因码。
+const TEXT_CONTAINS_WITH_TOLERANCE: &str =
+    "normalized containment within the shared extra-character tolerance";
 
 const JOIN_WINDOW: Option<CommitWindowContract> = Some(CommitWindowContract {
     label: "fb_join_click",
@@ -48,9 +66,18 @@ const PUBLISH_WINDOW: Option<CommitWindowContract> = Some(CommitWindowContract {
 
 macro_rules! entry {
     ($kind:literal, $owner:ident, $oracle:literal, $witness:literal, $gates:literal, $commit:literal, $count:literal, $verify:literal, $terminal:literal, $deadline:literal, $window:expr) => {
+        entry!(
+            $kind, $owner, $oracle, $witness, $gates, $commit, $count, $verify, $terminal,
+            $deadline, $window, "none"
+        )
+    };
+    ($kind:literal, $owner:ident, $oracle:literal, $witness:literal, $gates:literal, $commit:literal, $count:literal, $verify:literal, $terminal:literal, $deadline:literal, $window:expr, $text:expr) => {
         FacebookParityEntry {
             command_kind: $kind,
             owner: FacebookCapability::$owner,
+            supported: true,
+            unsupported_reason: "",
+            text_acceptance: $text,
             behavior_oracle: $oracle,
             focused_behavior_suite: focused_suite(FacebookCapability::$owner),
             target_witness: $witness,
@@ -63,6 +90,32 @@ macro_rules! entry {
             commit_window: $window,
         }
     };
+}
+
+/// 未实现命令的台账条目：不带 oracle / 目标见证 / 提交原语 / 校验见证 / 终态语义——
+/// 它们都是「这条命令会怎么动页面」的承诺，而这条命令根本不动页面。
+const fn unsupported(
+    command_kind: &'static str,
+    owner: FacebookCapability,
+    unsupported_reason: &'static str,
+) -> FacebookParityEntry {
+    FacebookParityEntry {
+        command_kind,
+        owner,
+        supported: false,
+        unsupported_reason,
+        text_acceptance: "none",
+        behavior_oracle: "",
+        focused_behavior_suite: focused_suite(owner),
+        target_witness: "",
+        pre_commit_gates: "",
+        commit_primitive: "",
+        max_dispatch_count: 0,
+        verification_witness: "",
+        terminal_semantics: "",
+        deadline_ms: 30_000,
+        commit_window: None,
+    }
 }
 
 const fn focused_suite(owner: FacebookCapability) -> &'static str {
@@ -297,7 +350,8 @@ pub const FACEBOOK_PARITY_LEDGER: &[FacebookParityEntry] = &[
         "same-account server acknowledgement",
         "confirmed, pending/rejected, ambiguous, or not-started",
         30_000,
-        COMMENT_WINDOW
+        COMMENT_WINDOW,
+        TEXT_CONTAINS_WITH_TOLERANCE
     ),
     entry!(
         "group_join",
@@ -351,18 +405,10 @@ pub const FACEBOOK_PARITY_LEDGER: &[FacebookParityEntry] = &[
         30_000,
         None
     ),
-    entry!(
+    unsupported(
         "publish_set_cover",
-        Publish,
-        "retired Publish executor",
-        "active composer media",
-        "composer generation",
-        "trusted pointer",
-        1,
-        "cover state readback",
-        "confirmed or not-started",
-        30_000,
-        None
+        FacebookCapability::Publish,
+        "Facebook composer has no cover-selection step in this engine",
     ),
     entry!(
         "publish_fill_field",
@@ -375,46 +421,23 @@ pub const FACEBOOK_PARITY_LEDGER: &[FacebookParityEntry] = &[
         "field readback",
         "confirmed or not-started",
         400_000,
-        None
+        None,
+        TEXT_CONTAINS_WITH_TOLERANCE
     ),
-    entry!(
+    unsupported(
         "publish_add_with_candidate",
-        Publish,
-        "retired Publish executor",
-        "composer candidate control",
-        "composer generation and unique candidate",
-        "trusted pointer and keyboard",
-        2,
-        "candidate readback",
-        "confirmed or not-started",
-        30_000,
-        None
+        FacebookCapability::Publish,
+        "Facebook composer exposes no candidate picker in this engine",
     ),
-    entry!(
+    unsupported(
         "publish_set_option",
-        Publish,
-        "retired Publish executor",
-        "composer option control",
-        "composer generation and unique option",
-        "trusted pointer",
-        1,
-        "option readback",
-        "confirmed or not-started",
-        30_000,
-        None
+        FacebookCapability::Publish,
+        "Facebook composer exposes no option control in this engine",
     ),
-    entry!(
+    unsupported(
         "publish_set_schedule",
-        Publish,
-        "retired Publish executor",
-        "composer schedule control",
-        "composer generation and requested time",
-        "trusted pointer and keyboard",
-        2,
-        "schedule readback",
-        "confirmed or not-started",
-        30_000,
-        None
+        FacebookCapability::Publish,
+        "Facebook native scheduling is not implemented in this engine",
     ),
     entry!(
         "publish_submit",
@@ -442,31 +465,15 @@ pub const FACEBOOK_PARITY_LEDGER: &[FacebookParityEntry] = &[
         30_000,
         None
     ),
-    entry!(
+    unsupported(
         "publish_capture_scheduled",
-        Publish,
-        "retired Publish executor",
-        "scheduled post identity",
-        "record and sequence correlation",
-        "read",
-        0,
-        "scheduled post witness",
-        "confirmed or honest absent",
-        30_000,
-        None
+        FacebookCapability::Publish,
+        "Facebook native scheduling is not implemented, so there is nothing to capture",
     ),
-    entry!(
+    unsupported(
         "publish_reconcile_scheduled",
-        Publish,
-        "retired Publish executor",
-        "scheduled post identity",
-        "record and sequence correlation",
-        "read",
-        0,
-        "scheduled post witness",
-        "confirmed or ambiguous",
-        30_000,
-        None
+        FacebookCapability::Publish,
+        "Facebook native scheduling is not implemented, so there is nothing to reconcile",
     ),
 ];
 
@@ -523,6 +530,10 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    /// 会把文本打进页面的写动作。它们的「文本接受谓词」不许缺，
+    /// 谓词不同还不写理由的话，两条链路就会在同一个编辑器上给出两种「进去了」的判据。
+    const TEXT_BEARING_WRITE_KINDS: &[&str] = &["interaction_comment", "publish_fill_field"];
+
     #[test]
     fn ledger_has_one_complete_entry_per_supported_kind() {
         let mut kinds = BTreeSet::new();
@@ -532,13 +543,36 @@ mod tests {
                 "duplicate {}",
                 entry.command_kind
             );
-            assert!(!entry.behavior_oracle.is_empty());
             assert!(!entry.focused_behavior_suite.is_empty());
-            assert!(!entry.target_witness.is_empty());
-            assert!(!entry.pre_commit_gates.is_empty());
-            assert!(!entry.commit_primitive.is_empty());
-            assert!(!entry.verification_witness.is_empty());
-            assert!(!entry.terminal_semantics.is_empty());
+            assert!(!entry.text_acceptance.is_empty(), "{}", entry.command_kind);
+            if entry.supported {
+                assert!(
+                    entry.unsupported_reason.is_empty(),
+                    "{}",
+                    entry.command_kind
+                );
+                assert!(!entry.behavior_oracle.is_empty());
+                assert!(!entry.target_witness.is_empty());
+                assert!(!entry.pre_commit_gates.is_empty());
+                assert!(!entry.commit_primitive.is_empty());
+                assert!(!entry.verification_witness.is_empty());
+                assert!(!entry.terminal_semantics.is_empty());
+            } else {
+                // 不支持的命令若仍声明行为证据，就是在承诺一件它根本不会做的事。
+                assert!(
+                    !entry.unsupported_reason.is_empty(),
+                    "{} must name why it is unsupported",
+                    entry.command_kind
+                );
+                assert_eq!(entry.behavior_oracle, "", "{}", entry.command_kind);
+                assert_eq!(entry.target_witness, "", "{}", entry.command_kind);
+                assert_eq!(entry.pre_commit_gates, "", "{}", entry.command_kind);
+                assert_eq!(entry.commit_primitive, "", "{}", entry.command_kind);
+                assert_eq!(entry.verification_witness, "", "{}", entry.command_kind);
+                assert_eq!(entry.terminal_semantics, "", "{}", entry.command_kind);
+                assert_eq!(entry.max_dispatch_count, 0, "{}", entry.command_kind);
+                assert!(entry.commit_window.is_none(), "{}", entry.command_kind);
+            }
             assert!(
                 entry.deadline_ms == 30_000
                     || entry.deadline_ms == 40_000
@@ -550,6 +584,62 @@ mod tests {
             }
         }
         assert_eq!(kinds.len(), FACEBOOK_PARITY_LEDGER.len());
+    }
+
+    #[test]
+    fn every_text_bearing_write_declares_one_shared_acceptance_predicate() {
+        let mut declared = BTreeSet::new();
+        for kind in TEXT_BEARING_WRITE_KINDS {
+            let entry = entry_for_kind(kind).unwrap_or_else(|| panic!("{kind} must be in ledger"));
+            assert!(entry.supported, "{kind}");
+            assert_ne!(
+                entry.text_acceptance, "none",
+                "{kind} 会把文本打进页面，文本接受谓词不许缺"
+            );
+            declared.insert(entry.text_acceptance);
+        }
+        assert_eq!(
+            declared.len(),
+            1,
+            "跨写动作的文本接受谓词不同却没写理由：{declared:?}"
+        );
+
+        for entry in FACEBOOK_PARITY_LEDGER {
+            if !TEXT_BEARING_WRITE_KINDS.contains(&entry.command_kind) {
+                assert_eq!(
+                    entry.text_acceptance, "none",
+                    "{} 不打文本，不该声明文本接受谓词",
+                    entry.command_kind
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn facebook_publish_declares_six_supported_and_six_unsupported_entries() {
+        let publish: Vec<_> = FACEBOOK_PARITY_LEDGER
+            .iter()
+            .filter(|entry| entry.command_kind.starts_with("publish_"))
+            .collect();
+        assert_eq!(publish.len(), 12);
+        assert_eq!(publish.iter().filter(|entry| entry.supported).count(), 6);
+
+        let unsupported: BTreeSet<_> = publish
+            .iter()
+            .filter(|entry| !entry.supported)
+            .map(|entry| entry.command_kind)
+            .collect();
+        assert_eq!(
+            unsupported,
+            BTreeSet::from([
+                "publish_add_with_candidate",
+                "publish_capture_scheduled",
+                "publish_reconcile_scheduled",
+                "publish_set_cover",
+                "publish_set_option",
+                "publish_set_schedule",
+            ])
+        );
     }
 
     #[test]

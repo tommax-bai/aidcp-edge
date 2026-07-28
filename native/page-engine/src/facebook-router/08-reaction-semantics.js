@@ -29,3 +29,27 @@
     const buttons=all('button,[role="button"]',root).filter(visible);
     return buttons.find((button)=>/^(赞|讚|like|me gusta|thích)(\b|\s|$)/i.test(label(button)))||null;
   };
+  // 反应汇总语义的标签前缀（去变音符后的形态）。与 reactionButton 的锚点分开维护：
+  // 那一个必须继续选中可切换的中性控件（点它 = 赞），这一个只用于读数、绝不派发点击。
+  const reactionCountPrefix=/^(?:赞|讚|like|me gusta|thich|bay to cam xuc thich)/i;
+  /**
+   * 反应计数见证（只读数）。判据是两条**合取**：
+   *   ① accessible label 或渲染文本里至少有一个数字；
+   *   ② accessible label 去变音符后带反应汇总语义。
+   * 只判①会把「3 条评论」「分享 12 次」这类带数字的中性控件误采；
+   * 只判②会选中 DOM 序第一个的无文案纯 toggle（label 就是「赞」、innerText 为空），
+   * 于是取值退回标签、再被计数解析器塌成 0 —— 这正是互动热度恒为 0 的机制。
+   * 两条都不满足就继续往下找；一个都没有就返回空串 = 未观测（绝不臆造 0）。
+   * 取值口径沿用退役实现：渲染文案优先，文案为空才退回标签。
+   */
+  const reactionCountWitness=(root)=>{
+    const buttons=all('[role="button"][aria-label],button[aria-label]',root||document).filter(visible);
+    for(const button of buttons){
+      const accessible=label(button,96);
+      const rendered=text(button,96);
+      if(!/\d/.test(`${accessible} ${rendered}`))continue;
+      if(!reactionCountPrefix.test(fold(accessible)))continue;
+      return rendered||accessible;
+    }
+    return '';
+  };

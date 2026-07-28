@@ -16,7 +16,8 @@ const FACEBOOK_PUBLISH_SUBMIT_VERIFY_BUDGET: Duration = Duration::from_secs(20);
 const FACEBOOK_PUBLISH_TRIGGER_BUDGET: Duration = Duration::from_secs(20);
 const FACEBOOK_PUBLISH_FILL_RESERVE_MS: u64 = 8_000;
 const FACEBOOK_PUBLISH_FILL_VERIFY_BUDGET: Duration = Duration::from_secs(5);
-const FACEBOOK_PUBLISH_FILL_EXTRA_CHAR_TOLERANCE: usize = 10;
+// 发布侧与评论侧的「多余字符容差」是同一个取值，收口在 shared.rs 的一处常量上。
+const FACEBOOK_PUBLISH_FILL_EXTRA_CHAR_TOLERANCE: usize = FACEBOOK_TEXT_EXTRA_CHAR_TOLERANCE;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FacebookPublishHomeState {
@@ -33,6 +34,12 @@ pub(crate) async fn execute(
     commit_windows: &CommitWindowRequester,
     deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    // 能力不支持的命令在这里就收敛：页面规则求值、导航、输入、点击、提交窗口与写截止时间
+    // 一律不发生。让它跑到页面脚本里才报 kind_not_implemented，等于白起一次会话动作、
+    // 还把写截止时间耗在一件注定不做的事上。分片里的同名分支保留作最后防线。
+    if let Some(rejection) = reject_unsupported_facebook_publish(command) {
+        return Ok(rejection);
+    }
     match command {
         NativeCommand::PublishNavigateEntry(_) => {
             execute_facebook_publish_entry(session, command, deadline_unix_ms).await
@@ -93,20 +100,61 @@ pub(crate) async fn execute(
             )
             .await
         }
-        NativeCommand::PublishSetCover(_)
-        | NativeCommand::PublishAddWithCandidate(_)
-        | NativeCommand::PublishSetOption(_)
-        | NativeCommand::PublishSetSchedule(_)
-        | NativeCommand::PublishCapturePostId(_)
-        | NativeCommand::PublishCaptureScheduled(_)
-        | NativeCommand::PublishReconcileScheduled(_) => {
-            evaluate_facebook_router(session, command).await
-        }
+        NativeCommand::PublishCapturePostId(_) => evaluate_facebook_router(session, command).await,
         _ => Err(EngineError::new(
             ErrorCode::EngineInternal,
             "native Facebook Publish capability received another owner's command",
         )),
     }
+}
+
+/// 台账里记为「Facebook 未实现」的发布命令在动作之前的显式拒绝。
+/// 回执形状与页内最后防线逐位一致（动作类回执 vs 发布回执、原因码 `kind_not_implemented`、
+/// 效果阶段 not_started），改的只是**在哪一步**给出这个结论。
+fn reject_unsupported_facebook_publish(
+    command: &NativeCommand,
+) -> Option<(EffectPhase, CommandOutput)> {
+    if super::capability::parity(command).is_none_or(|entry| entry.supported) {
+        return None;
+    }
+    // 页内最后防线对前四条返回**动作类**回执、对后两条返回**发布回执**，这里逐位保持同一形状。
+    let action = match command {
+        NativeCommand::PublishSetCover(_) => "set_cover",
+        NativeCommand::PublishAddWithCandidate(_) => "add_with_candidate",
+        NativeCommand::PublishSetOption(_) => "set_option",
+        NativeCommand::PublishSetSchedule(_) => "set_schedule",
+        NativeCommand::PublishCaptureScheduled(params) => {
+            return Some(facebook_publish_result(
+                EffectPhase::NotStarted,
+                params.record_id,
+                params.seq,
+                "capture_scheduled",
+                false,
+                false,
+                "kind_not_implemented",
+            ));
+        }
+        NativeCommand::PublishReconcileScheduled(params) => {
+            return Some(facebook_publish_result(
+                EffectPhase::NotStarted,
+                params.record_id,
+                params.seq,
+                "reconcile_scheduled",
+                false,
+                false,
+                "kind_not_implemented",
+            ));
+        }
+        _ => return None,
+    };
+    Some(facebook_action_result(
+        EffectPhase::NotStarted,
+        action,
+        false,
+        "kind_not_implemented",
+        None,
+        None,
+    ))
 }
 
 pub(crate) async fn execute_facebook_publish_entry(

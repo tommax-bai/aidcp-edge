@@ -80,12 +80,51 @@ pub(crate) async fn execute_facebook_comment(
     };
 
     let mut editor = probe_facebook_comment_editor(session, &params.note_id).await?;
+    // 折叠态是就地评论才有的形态：编辑框还没渲染出来，光滚屏永远催不出来。
+    // 退役实现靠「先按 permalink 整页导航到详情页」绕开它，本引擎在列表 / 就地上下文里评论，
+    // 没有那条豁免，必须自己把入口点开。每条命令最多点一次。
+    let mut entry_probed = false;
     for _ in 0..6 {
         if editor.ok {
             break;
         }
         if editor.reason.as_deref() == Some("target_not_found") {
             break;
+        }
+        if !entry_probed && editor.reason.as_deref() == Some("editor_not_found") {
+            entry_probed = true;
+            let entry = probe_facebook_comment_action(session, &params.note_id).await?;
+            // 入口探针自己说不清目标时，按对应终态直接收敛，一次点击都不派发——
+            // 作用域内不唯一 / 上下文不符时点下去就是往别人的帖子里打字。
+            if let Some(reason) = entry.reason.as_deref()
+                && matches!(
+                    reason,
+                    "ambiguous_target"
+                        | "pending_group_approval"
+                        | "target_context_mismatch"
+                        | "target_not_found"
+                )
+            {
+                return Ok(facebook_action_result(
+                    EffectPhase::NotStarted,
+                    "comment",
+                    false,
+                    reason,
+                    Some(params.note_id.clone()),
+                    None,
+                ));
+            }
+            if entry.ok
+                && let (Some(x), Some(y)) = (entry.cx, entry.cy)
+            {
+                if facebook_command_cancelled(cancellation) {
+                    return Err(cancelled_before_dispatch());
+                }
+                dispatch_facebook_click(session, x, y).await?;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                editor = probe_facebook_comment_editor(session, &params.note_id).await?;
+                continue;
+            }
         }
         match dispatch_wheel_humanized(
             &mut session.cdp,
@@ -196,7 +235,7 @@ pub(crate) async fn execute_facebook_comment(
             None,
         ));
     }
-    let accepted = facebook_comment_editor_matches(
+    let accepted = facebook_comment_editor_accepts(
         session,
         &params.note_id,
         &full_text,
@@ -243,9 +282,10 @@ pub(crate) async fn execute_facebook_comment(
         }
     };
     if !protected_editor.ok
-        || protected_editor.value.as_deref().is_none_or(|value| {
-            normalize_facebook_text(value) != normalize_facebook_text(&full_text)
-        })
+        || protected_editor
+            .value
+            .as_deref()
+            .is_none_or(|value| !facebook_comment_text_accepted(value, &full_text))
     {
         let _ = clear_facebook_comment_editor(session, &params.note_id).await;
         return Ok(facebook_action_result(
@@ -276,9 +316,10 @@ pub(crate) async fn execute_facebook_comment(
     if !matches!(&focused, Ok(editor)
     if editor.ok
         && editor.focused
-        && editor.value.as_deref().is_some_and(|value| {
-            normalize_facebook_text(value) == normalize_facebook_text(&full_text)
-        }))
+        && editor
+            .value
+            .as_deref()
+            .is_some_and(|value| facebook_comment_text_accepted(value, &full_text)))
     {
         let _ = clear_facebook_comment_editor(session, &params.note_id).await;
         return Ok(facebook_action_result(
@@ -396,32 +437,141 @@ async fn clear_facebook_comment_editor(
     if delete_selected_text(session).await.is_err() {
         return FacebookCommentCleanup::Dirty;
     }
-    match facebook_comment_editor_matches(session, note_id, "", Duration::from_secs(1)).await {
+    match facebook_comment_editor_cleared(session, note_id, Duration::from_secs(1)).await {
         Ok(true) => FacebookCommentCleanup::Cleared,
         Ok(false) | Err(_) => FacebookCommentCleanup::Dirty,
     }
 }
 
-async fn facebook_comment_editor_matches(
+/// 编辑器回读归一：在既有空白折叠之上再剥掉零宽字符。
+/// Facebook 的富文本编辑器会自己往正文里塞零宽字符 / 不间断空格——
+/// 「归一后逐字相等」会被这些无害残留直接判失败，正文明明进去了却报「文本未被接受」。
+fn normalize_facebook_comment_text(value: &str) -> String {
+    normalize_facebook_text(
+        &value
+            .chars()
+            .filter(|value| !matches!(value, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}'))
+            .collect::<String>(),
+    )
+}
+
+/// 评论文本接受判据。三处回读（打字后、进提交窗口后、回车前聚焦时）共用它，
+/// 判据是「规范化后**包含**命令文本 + 多余字符不超过容差」：
+/// 纯相等会被编辑器残留误杀，纯包含又会放过打字途中被 typeahead 塞进来的 @提及。
+/// 注意：正文与联系方式是拼成一串一次打完的，所以「只有正文进去、联系方式没进去」
+/// 在这条判据下同样不成立 —— 拒绝并清场，绝不裸发缺联系方式的正文。
+fn facebook_comment_text_accepted(actual: &str, expected: &str) -> bool {
+    let actual = normalize_facebook_comment_text(actual);
+    let expected = normalize_facebook_comment_text(expected);
+    actual.contains(&expected)
+        && actual
+            .chars()
+            .count()
+            .saturating_sub(expected.chars().count())
+            <= FACEBOOK_TEXT_EXTRA_CHAR_TOLERANCE
+}
+
+async fn facebook_comment_editor_accepts(
     session: &mut EngineSession,
     note_id: &str,
     expected: &str,
     timeout: Duration,
 ) -> Result<bool, EngineError> {
-    let expected = normalize_facebook_text(expected);
+    facebook_comment_editor_settles(session, note_id, timeout, |value| {
+        facebook_comment_text_accepted(value, expected)
+    })
+    .await
+}
+
+/// 清场确认必须是**逐字相等的空**，绝不能借用包含判据——任何串都包含空串，
+/// 那会让「没清干净」被判成「已清干净」，正是静默假成功。
+async fn facebook_comment_editor_cleared(
+    session: &mut EngineSession,
+    note_id: &str,
+    timeout: Duration,
+) -> Result<bool, EngineError> {
+    facebook_comment_editor_settles(session, note_id, timeout, |value| {
+        normalize_facebook_comment_text(value).is_empty()
+    })
+    .await
+}
+
+async fn facebook_comment_editor_settles(
+    session: &mut EngineSession,
+    note_id: &str,
+    timeout: Duration,
+    accepts: impl Fn(&str) -> bool,
+) -> Result<bool, EngineError> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let editor = probe_facebook_comment_editor(session, note_id).await?;
-        if editor
-            .value
-            .as_deref()
-            .is_some_and(|value| normalize_facebook_text(value) == expected)
-        {
+        if editor.value.as_deref().is_some_and(&accepts) {
             return Ok(true);
         }
         if tokio::time::Instant::now() >= deadline {
             return Ok(false);
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harmless_editor_residue_no_longer_fails_an_accepted_comment() {
+        let expected = "有用的回复";
+        assert!(facebook_comment_text_accepted(
+            "\u{200b}有用的回复\u{feff}",
+            expected
+        ));
+        assert!(facebook_comment_text_accepted(" 有用的回复 ", expected));
+        assert!(facebook_comment_text_accepted("有用的回复 ", expected));
+    }
+
+    #[test]
+    fn a_truncated_comment_is_never_accepted() {
+        assert!(!facebook_comment_text_accepted("有用的回", "有用的回复"));
+        assert!(!facebook_comment_text_accepted("", "有用的回复"));
+    }
+
+    #[test]
+    fn typeahead_pollution_beyond_the_tolerance_is_rejected() {
+        let expected = "有用的回复";
+        let within = format!(
+            "{expected}{}",
+            "x".repeat(FACEBOOK_TEXT_EXTRA_CHAR_TOLERANCE)
+        );
+        let beyond = format!(
+            "{expected}{}",
+            "x".repeat(FACEBOOK_TEXT_EXTRA_CHAR_TOLERANCE + 1)
+        );
+        assert!(facebook_comment_text_accepted(&within, expected));
+        assert!(
+            !facebook_comment_text_accepted(&beyond, expected),
+            "被 typeahead 塞进整个 @提及的正文 MUST NOT 发出去"
+        );
+    }
+
+    #[test]
+    fn a_body_without_its_contact_line_is_rejected_as_one_string() {
+        // 正文与联系方式拼成一串一次打完，所以「只有正文进去、联系方式没进去」
+        // 在包含判据下同样不成立：拒绝并清场，绝不裸发缺联系方式的正文。
+        // 代价是诊断粒度——这一档与其他文本未被接受合并成同一个原因码（见台账里的记载）。
+        let full = "有用的回复\ngroup-chat-code-42";
+        assert!(!facebook_comment_text_accepted("有用的回复", full));
+        assert!(facebook_comment_text_accepted(
+            "有用的回复 group-chat-code-42",
+            full
+        ));
+    }
+
+    #[test]
+    fn the_clear_check_is_exact_emptiness_not_containment() {
+        assert!(normalize_facebook_comment_text("\u{200b} \u{feff}").is_empty());
+        assert!(!normalize_facebook_comment_text("leftover").is_empty());
+        // 若清场借用包含判据，任何残留都会被判成「已清干净」——那是静默假成功。
+        assert!(facebook_comment_text_accepted("leftover", ""));
     }
 }

@@ -271,6 +271,14 @@ pub(crate) fn normalize_facebook_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// 写动作回读的「多出来的字符数」容差。
+/// 编辑器会带入零宽字符 / 不间断空格之类的无害残留；超出这个容差就是真被塞了东西
+/// （最常见的是打字途中被 typeahead 劫持插入了 @提及），那样的正文 MUST NOT 发出去。
+/// 评论侧与发布侧共用同一个取值——两条链路面对的是同一个富文本编辑器。
+/// 取值本身仍待真机采样定论（见 change 的真机项 9.8：退役实现取 4 且有成文立论，
+/// Native 迁移改成 10 无对应记录；本轮只做收口到一处，不替真机结论下判断）。
+pub(crate) const FACEBOOK_TEXT_EXTRA_CHAR_TOLERANCE: usize = 10;
+
 pub(crate) fn facebook_action_result(
     phase: EffectPhase,
     action: &str,
@@ -417,9 +425,11 @@ async fn ensure_facebook_action_gate_inner(
     }
 
     for _ in 0..3 {
-        let consent = probe_facebook_consent(session)
-            .await
-            .map_err(|error| annotate_operation(error, operation_stages.map(|stages| stages.1)))?;
+        // 探测本身失败：既不假设有同意条、也不假成功——当作「无同意条」让既有闸继续处置。
+        // 把错误上抛会让整条命令变成引擎错误，等于把一次探测抖动升级成动作失败。
+        let Ok(consent) = probe_facebook_consent(session).await else {
+            return Ok(None);
+        };
         if !consent.present {
             return Ok(None);
         }
@@ -443,7 +453,10 @@ async fn ensure_facebook_action_gate_inner(
             consent.accept_all
         };
         let Some(point) = point else {
-            return facebook_gate_failure(session, command, "blocked_by_consent")
+            // 认出了同意条，但**策略所需**的按钮定位不到（文案 / 布局漂移，或同文案按钮不唯一）。
+            // 诚实停手：绝不改点另一个按钮。这一档与「点满三次仍清不掉」是两回事——
+            // 前者一次都没动过页面（clicked=false），后者是升级停手（clicked=true）。
+            return facebook_consent_gate_failure(session, command, false)
                 .map(Some)
                 .map_err(|error| {
                     annotate_operation(error, operation_stages.map(|stages| stages.2))
@@ -452,16 +465,33 @@ async fn ensure_facebook_action_gate_inner(
         dispatch_facebook_click(session, point.cx, point.cy).await?;
         tokio::time::sleep(Duration::from_millis(700)).await;
     }
-    if probe_facebook_consent(session)
-        .await
-        .map_err(|error| annotate_operation(error, operation_stages.map(|stages| stages.1)))?
-        .present
-    {
-        return facebook_gate_failure(session, command, "blocked_by_consent")
+    let Ok(final_probe) = probe_facebook_consent(session).await else {
+        return Ok(None);
+    };
+    if final_probe.present {
+        // 有界重试到上限仍在——停手升级，绝不静默假成功。
+        return facebook_consent_gate_failure(session, command, true)
             .map(Some)
             .map_err(|error| annotate_operation(error, operation_stages.map(|stages| stages.2)));
     }
     Ok(None)
+}
+
+/// 同意闸失败回执。原因码保持既有的 `blocked_by_consent`（云端无第二个归宿，
+/// 新造原因码只会多一条没人接的字符串）；两档失败靠回执上的「有没有真点过」区分：
+/// `clicked=false` = 探到同意条但策略按钮定位不到（可诊断的文案 / 布局漂移，页面未被动过）；
+/// `clicked=true` = 点过仍未清掉（升级停手）。
+/// 「探到没探到」由回执本身表达：探不到时闸直接放行、根本不产出这条回执。
+fn facebook_consent_gate_failure(
+    session: &EngineSession,
+    command: &NativeCommand,
+    clicked: bool,
+) -> Result<CommandOutput, EngineError> {
+    let mut output = facebook_gate_failure(session, command, "blocked_by_consent")?;
+    if let CommandOutput::ActionReceipt(receipt) = &mut output {
+        receipt.clicked = Some(clicked);
+    }
+    Ok(output)
 }
 
 fn annotate_operation(error: EngineError, operation_stage: Option<&'static str>) -> EngineError {
@@ -823,6 +853,16 @@ pub(crate) fn facebook_scroll_failure(
     phase: EffectPhase,
     reason: &str,
 ) -> (EffectPhase, CommandOutput) {
+    facebook_scroll_failure_on_surface(phase, reason, None)
+}
+
+/// 带列表面观测的滚动失败回执。「本批看完」的处置在首页与小组页 / 搜索页上并不相同，
+/// 云端要按面分流就必须知道这条回执来自哪个面。不新增协议字段——复用既有观测里的面别位。
+pub(crate) fn facebook_scroll_failure_on_surface(
+    phase: EffectPhase,
+    reason: &str,
+    surface: Option<&str>,
+) -> (EffectPhase, CommandOutput) {
     (
         phase,
         CommandOutput::ActionReceipt(Box::new(ActionReceipt {
@@ -830,7 +870,16 @@ pub(crate) fn facebook_scroll_failure(
             ok: false,
             reason: Some(reason.to_owned()),
             note_id: None,
-            observation: None,
+            observation: surface.filter(|value| !value.is_empty()).map(|value| {
+                crate::model::ActionEvidence {
+                    surface: Some(value.to_owned()),
+                    list_key: None,
+                    author: None,
+                    text_preview_head: None,
+                    reaction_text: None,
+                    article_index: None,
+                }
+            }),
             post_observation: None,
             group_observation: None,
             group_url: None,
