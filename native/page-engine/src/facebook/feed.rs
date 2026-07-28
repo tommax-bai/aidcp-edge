@@ -96,11 +96,7 @@ pub(crate) async fn execute_facebook_initial_feed(
         last = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
     }
 
-    if last.article_count > 0 {
-        let cards = facebook_page_cards(session, last, false, None);
-        return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(cards)));
-    }
-    if confirm_facebook_home_empty(session, &last).await? {
+    if facebook_zero_card_terminal(session, &last).await? != FacebookZeroCardTerminal::None {
         let cards = facebook_page_cards(session, last, false, None);
         return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(cards)));
     }
@@ -221,6 +217,14 @@ pub(crate) async fn execute_facebook_feed_scroll(
             return Ok(facebook_scroll_failure(EffectPhase::Confirmed, reason));
         }
         current = confirmed;
+    }
+
+    // 轮次耗尽仍无新卡：先走与启动首扫**共用**的零卡证据阶梯，再落原因码分类。
+    // 缺这一步就是 2026-07-28 线上 17 分钟空转的成因——裸 no_target 在云端没有归宿，
+    // 账号被钉在同一屏，只剩 240s 闲置看门狗每 4 分钟补一次注定同样失败的滚动。
+    if facebook_zero_card_terminal(session, &current).await? != FacebookZeroCardTerminal::None {
+        let cards = facebook_page_cards(session, current, false, None);
+        return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(cards)));
     }
 
     Ok(facebook_scroll_failure(
@@ -345,6 +349,13 @@ async fn ensure_facebook_active_list(session: &mut EngineSession) -> Result<(), 
     Ok(())
 }
 
+/// 判稳扫卡。**零卡视口不算稳定**——Facebook 的 feed 是懒加载的，下一批要时间渲染，
+/// 两次探测都读到 0 卡只说明「还没长出来」，不说明「没有」。所以早退需要三条同时成立：
+/// 卡集合与上一轮一致、不在 loading、且**本轮至少扫到一张卡**。零卡时一律轮询到预算耗尽，
+/// 让懒加载有机会出批（退役实现 src/facebook/feed-reader.ts 的 settleCards 即此口径）。
+///
+/// 少掉「至少一张卡」这一条的后果：零卡页面约 500ms 就返回，八轮在约 10 秒内跑完，
+/// 每一轮都在页面还没渲染时判零卡——等于把八轮压缩成一轮有效。
 async fn settle_facebook_feed(
     session: &mut EngineSession,
     timeout: Duration,
@@ -355,7 +366,7 @@ async fn settle_facebook_feed(
         let current = probe_facebook_feed(session).await?;
         let key = facebook_feed_settle_key(&current);
         let stable = previous.as_ref() == Some(&key);
-        if stable && !current.loading {
+        if facebook_feed_settled(stable, &current) {
             return Ok(current);
         }
         if tokio::time::Instant::now() >= deadline {
@@ -364,6 +375,46 @@ async fn settle_facebook_feed(
         previous = Some(key);
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+/// 判稳早退的判据本体（抽成纯函数以便单测）：稳定 + 不 loading + **本轮至少一张卡**。
+fn facebook_feed_settled(stable: bool, probe: &facebook::FacebookFeedProbe) -> bool {
+    stable && !probe.loading && !probe.cards.is_empty()
+}
+
+/// 零卡时的终态证据阶梯（启动首扫与云端命令驱动的常规滚动共用，绝不各写一份）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FacebookZeroCardTerminal {
+    /// 首页确实有物理卡、只是读不出可信身份 ⇒ 交云端单点授权切 Reels。
+    PresentUnreportable,
+    /// 首页确认空态 ⇒ 交云端单点授权切 Reels。
+    Empty,
+    /// 阶梯都不成立 ⇒ 由调用方落各自的诚实失败原因码。
+    None,
+}
+
+/// 准入判据严格照已合并规格 facebook-feed-browse 的最后一条 Scenario：
+/// loading / 登录 / 同意浮层 / checkpoint / 未知 / 非首页 / 无物理卡，一律不得走这条兜底。
+/// 判据只读探测事实，不做任何补偿性推断——报错方向永远偏诚实失败，绝不偏「有内容」。
+fn facebook_present_unreportable_home(probe: &facebook::FacebookFeedProbe) -> bool {
+    probe.surface == "home"
+        && !probe.loading
+        && probe.article_count > 0
+        && probe.cards.is_empty()
+        && probe.list_state == crate::model::FacebookListState::PresentUnreportable
+}
+
+async fn facebook_zero_card_terminal(
+    session: &mut EngineSession,
+    probe: &facebook::FacebookFeedProbe,
+) -> Result<FacebookZeroCardTerminal, EngineError> {
+    if facebook_present_unreportable_home(probe) {
+        return Ok(FacebookZeroCardTerminal::PresentUnreportable);
+    }
+    if confirm_facebook_home_empty(session, probe).await? {
+        return Ok(FacebookZeroCardTerminal::Empty);
+    }
+    Ok(FacebookZeroCardTerminal::None)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -649,6 +700,87 @@ mod tests {
             scroll_height,
             document_age_ms: 10_000,
         }
+    }
+
+    /// 「首页有物理卡但读不出可信身份」的探测样本：滚动兜底阶梯的唯一准入形态。
+    fn unreportable_home_probe() -> facebook::FacebookFeedProbe {
+        let mut probe = feed_probe(2_400.0, 1_500.0, false, false);
+        probe.list_state = FacebookListState::PresentUnreportable;
+        probe
+    }
+
+    fn probe_with_one_card(loading: bool) -> facebook::FacebookFeedProbe {
+        let mut probe = feed_probe(2_400.0, 1_500.0, loading, false);
+        probe.list_state = FacebookListState::Ready;
+        probe.cards = vec![crate::model::PageCard {
+            index: 0,
+            title: "card".to_owned(),
+            author: None,
+            like_count: 0,
+            collect_count: 0,
+            cover_desc: None,
+            note_id: Some("https://www.facebook.com/watch?v=1".to_owned()),
+            is_video: None,
+        }];
+        probe
+    }
+
+    #[test]
+    fn unreportable_home_is_admitted_to_the_zero_card_ladder() {
+        assert!(facebook_present_unreportable_home(
+            &unreportable_home_probe()
+        ));
+    }
+
+    #[test]
+    fn zero_card_ladder_refuses_loading_blocked_and_non_home_pages() {
+        // loading：下一批可能正在渲染，说成「有内容读不出来」就是替平台下结论。
+        let mut loading = unreportable_home_probe();
+        loading.loading = true;
+        assert!(!facebook_present_unreportable_home(&loading));
+
+        // 非首页（登录 / checkpoint / 群组 / Reels 都归此类）：兜底通道只对首页开放。
+        for surface in ["login", "checkpoint", "group", "reels", "search", "unknown"] {
+            let mut off_home = unreportable_home_probe();
+            off_home.surface = surface.to_owned();
+            assert!(
+                !facebook_present_unreportable_home(&off_home),
+                "surface {surface} must not be admitted"
+            );
+        }
+
+        // 无物理卡：那是空态的判据，走空态确认那一级，不许借这一级。
+        let mut cardless = unreportable_home_probe();
+        cardless.article_count = 0;
+        assert!(!facebook_present_unreportable_home(&cardless));
+
+        // 探测自己没判「有卡读不出来」时，不许由上层补一个结论出来。
+        let mut ready = unreportable_home_probe();
+        ready.list_state = FacebookListState::Ready;
+        assert!(!facebook_present_unreportable_home(&ready));
+
+        // 已经有可上报卡：本来就该走正常上报路径，不是零卡终态。
+        let mut with_cards = unreportable_home_probe();
+        with_cards.cards = probe_with_one_card(false).cards;
+        assert!(!facebook_present_unreportable_home(&with_cards));
+    }
+
+    #[test]
+    fn zero_card_viewport_is_not_settled_by_stability_alone() {
+        // 懒加载还没出批时两次探测当然一致——那不是「稳定」，是「还没长出来」。
+        let zero_cards = feed_probe(2_400.0, 1_500.0, false, false);
+        assert!(zero_cards.cards.is_empty());
+        assert!(!facebook_feed_settled(true, &zero_cards));
+    }
+
+    #[test]
+    fn settled_non_empty_card_set_still_returns_early() {
+        // 正常路径不许变慢：扫到卡且稳定且不 loading，立刻早退。
+        assert!(facebook_feed_settled(true, &probe_with_one_card(false)));
+        // loading 期间即便有卡也不算判稳（保持既有口径）。
+        assert!(!facebook_feed_settled(true, &probe_with_one_card(true)));
+        // 未稳定就更不能早退。
+        assert!(!facebook_feed_settled(false, &probe_with_one_card(false)));
     }
 
     #[test]
