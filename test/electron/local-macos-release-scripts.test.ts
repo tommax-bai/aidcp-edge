@@ -60,6 +60,27 @@ test('shared release implementation isolates output and validates the mounted DM
   assert.match(common, /codesign --verify --deep --strict/);
 });
 
+test('checkout gate preserves unrelated untracked files but rejects build inputs', () => {
+  assert.match(common, /git status --porcelain --untracked-files=no/);
+  assert.match(
+    common,
+    /git ls-files --others --exclude-standard -- src native scripts/,
+  );
+  assert.match(
+    common,
+    /Preserving unrelated untracked paths outside packaged source inputs/,
+  );
+  assert.match(common, /untracked build-related source files must be committed or moved/);
+  assert.doesNotMatch(common, /git status --porcelain"\)/);
+});
+
+test('signed-only mode skips notary credentials without failing the build', () => {
+  assert.match(
+    common,
+    /\[ "\$MODE" = "notarized" \] \|\| return 0/,
+  );
+});
+
 test('notarized mode orders app notarization before DMG creation and notarization', () => {
   const appNotary = common.indexOf('notarize-and-staple.sh" "$app"');
   const prepackaged = common.indexOf('--prepackaged "$app_dir"');

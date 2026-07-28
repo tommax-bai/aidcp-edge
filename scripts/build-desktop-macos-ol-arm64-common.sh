@@ -127,7 +127,7 @@ prepare_signing_credentials() {
 }
 
 prepare_notary_credentials() {
-  [ "$MODE" = "notarized" ] || return
+  [ "$MODE" = "notarized" ] || return 0
 
   local name
   for name in APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER; do
@@ -142,6 +142,35 @@ prepare_notary_credentials() {
     export NOTARY_TEMP_DIR
   fi
   echo "Notary temporary files: $NOTARY_TEMP_DIR"
+}
+
+verify_checkout_inputs() {
+  local tracked_changes
+  local untracked_build_inputs
+  local unrelated_untracked
+
+  tracked_changes="$(git status --porcelain --untracked-files=no)"
+  if [ -n "$tracked_changes" ]; then
+    printf '%s\n' "$tracked_changes" >&2
+    die "aidcp-edge tracked files must be clean before packaging"
+  fi
+
+  untracked_build_inputs="$(
+    git ls-files --others --exclude-standard -- src native scripts
+  )"
+  if [ -n "$untracked_build_inputs" ]; then
+    printf '%s\n' "$untracked_build_inputs" >&2
+    die "untracked build-related source files must be committed or moved before packaging"
+  fi
+
+  unrelated_untracked="$(
+    git status --short --untracked-files=normal |
+      sed -n 's/^?? //p'
+  )"
+  if [ -n "$unrelated_untracked" ]; then
+    echo "Preserving unrelated untracked paths outside packaged source inputs:"
+    printf '  %s\n' "$unrelated_untracked"
+  fi
 }
 
 run_source_and_packaging_checks() {
@@ -259,10 +288,7 @@ main() {
     die "control repo task-preflight is unavailable; set AIDCP_CONTROL_ROOT"
   "$control_root/scripts/task-preflight"
 
-  if [ -n "$(git status --porcelain)" ]; then
-    git status --short
-    die "aidcp-edge checkout must be clean before packaging"
-  fi
+  verify_checkout_inputs
 
   require_file "$REPO_ROOT/resources/ads-runtime.json"
   version="$(node -p "require('./package.json').version")"

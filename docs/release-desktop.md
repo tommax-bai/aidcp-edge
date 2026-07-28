@@ -91,6 +91,9 @@ DMG 内应用的 Gatekeeper、staple、嵌套运行时签名和 arm64 架构。�
 `dist-electron/AIDCP-<version>-arm64.dmg`；已有 `dist-electron` 会先移动到时间戳备份，
 避免旧架构或旧版本 DMG 混入本次验证/公证。
 
+脚本会拒绝已跟踪文件改动，以及 `src/`、`native/`、`scripts/` 下未提交的构建相关源码。
+根目录临时探针和历史 `dist-electron.backup-*` 不属于打包输入，只会提示并原样保留，不阻塞出包。
+
 ### 2C. 打包后本机冒烟（发版前必做，别省）
 
 > **为什么必做**：有一类只在打包态才犯的 bug——核心子进程 spawn 的工作目录落进 `app.asar`（一个文件、非目录），macOS 抛 `spawn ENOTDIR`，核心起不来、浏览器无法启动。**本地 `electron .`、`npm run typecheck`、单测全抓不到**，只有跑打包产物才暴露。已复发过两次（`0.3.5` 又发出去一次）。详见 `aidcp-edge/CLAUDE.md`「打包红线」。
