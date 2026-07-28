@@ -137,13 +137,19 @@ fn count_expressions(requests: &[Value], needle: &str) -> usize {
         .count()
 }
 
+/// 落点带 ±3px 抖动（真实落点绝不每次都精确命中几何中心），所以按点位归属计数时要给容差。
+/// 入口 (300,460) 与编辑框 (300,500) 相距 40px，容差 8px 仍分得开。
+const POINT_TOLERANCE_PX: f64 = 8.0;
+
 fn count_mouse_at(requests: &[Value], kind: &str, y: f64) -> usize {
     requests
         .iter()
         .filter(|request| {
             request["method"] == "Input.dispatchMouseEvent"
                 && request["params"]["type"] == kind
-                && request["params"]["y"].as_f64() == Some(y)
+                && request["params"]["y"]
+                    .as_f64()
+                    .is_some_and(|value| (value - y).abs() <= POINT_TOLERANCE_PX)
         })
         .count()
 }

@@ -3,9 +3,17 @@ use super::shared::*;
 use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
+use crate::input::{
+    PointerClickOptions, PointerPoint, WheelInputFailure, dispatch_wheel_humanized, sample_pause_ms,
+};
 use crate::protocol::{EffectPhase, NativeCommand};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+
+/// 对齐滚动把控件带到视口的这个纵向比例处（与改动前一致）。
+const FACEBOOK_ALIGN_SCROLL_VIEW_RATIO: f64 = 0.55;
+/// 对齐滚动后重新解析目标的间隔中心值（改动前是固定 250ms）。
+const FACEBOOK_ALIGN_SCROLL_REPROBE_CENTER_MS: f64 = 250.0;
 
 pub(crate) async fn execute(
     session: &mut EngineSession,
@@ -262,16 +270,33 @@ async fn execute_facebook_feed_like_inner(
         }
         let viewport_height = target.viewport_height.unwrap_or(800.0).max(1.0);
         let control_top = target.top.unwrap_or(viewport_height);
-        let delta_y = (control_top - viewport_height * 0.55).clamp(-620.0, 620.0);
-        session
-            .cdp
-            .dispatch_wheel(
-                target.cx.unwrap_or(720.0).max(1.0),
-                (viewport_height * 0.55).max(1.0),
-                delta_y,
-            )
-            .await?;
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        // 基线位移仍按控件偏移算，但交给共享惯性手势去采样：手势自带 ±20% 抖动，把
+        // 「位移 = 位置的确定函数」打散成「位移 ≈ 位置的带噪估计」——人手滚不出与目标位置
+        // 精确相关的位移量（design D5）。轮次结构与每轮重解析保持不变。
+        let baseline_distance_px =
+            (control_top - viewport_height * FACEBOOK_ALIGN_SCROLL_VIEW_RATIO).clamp(-620.0, 620.0);
+        dispatch_wheel_humanized(
+            &mut session.cdp,
+            target.cx.unwrap_or(720.0).max(1.0),
+            (viewport_height * FACEBOOK_ALIGN_SCROLL_VIEW_RATIO).max(1.0),
+            baseline_distance_px,
+            None,
+            u64::MAX,
+        )
+        .await
+        .map_err(|failure| match failure {
+            WheelInputFailure::Cancelled => cancelled_before_dispatch(),
+            WheelInputFailure::Deadline => EngineError::new(
+                ErrorCode::CdpTimeout,
+                "native Facebook align scroll exceeded its deadline",
+            ),
+            WheelInputFailure::Cdp(error) => error,
+        })?;
+        // 固定 250ms 重探间隔本身是机器特征，改为围绕同一中心值的对数正态采样。
+        tokio::time::sleep(Duration::from_millis(sample_pause_ms(
+            FACEBOOK_ALIGN_SCROLL_REPROBE_CENTER_MS,
+        )))
+        .await;
         target = probe_facebook_feed_like_target(session, &params.note_id).await?;
     }
 
@@ -418,6 +443,8 @@ async fn probe_facebook_feed_like_picker(
     facebook::feed_like_picker_from_cdp(&raw)
 }
 
+/// 反应浮层「赞」项的提交：起点显式取帖级 react 控件坐标、禁用过冲——路径必须紧贴
+/// 「控件 → 浮层」走廊，过冲会甩出浮层 hover 区致其收起（见 design D3 与本轮的走廊断言）。
 async fn dispatch_facebook_picker_click(
     session: &mut EngineSession,
     from_x: f64,
@@ -425,26 +452,15 @@ async fn dispatch_facebook_picker_click(
     x: f64,
     y: f64,
 ) -> Result<(), EngineError> {
-    for step in 0..=4 {
-        let progress = step as f64 / 4.0;
-        let eased = progress * progress * (3.0 - 2.0 * progress);
-        let current_x = from_x + (x - from_x) * eased;
-        let current_y = from_y + (y - from_y) * eased;
-        session
-            .cdp
-            .dispatch_mouse("mouseMoved", current_x, current_y, "none", 0)
-            .await?;
-        if step < 4 {
-            tokio::time::sleep(Duration::from_millis(18)).await;
-        }
-    }
-    session
-        .cdp
-        .dispatch_mouse("mousePressed", x, y, "left", 1)
-        .await?;
-    session
-        .cdp
-        .dispatch_mouse("mouseReleased", x, y, "left", 1)
-        .await
-        .map(|_| ())
+    dispatch_facebook_click_with(
+        session,
+        x,
+        y,
+        PointerClickOptions::from_corridor(PointerPoint {
+            x: from_x,
+            y: from_y,
+        }),
+    )
+    .await
+    .map(|_| ())
 }

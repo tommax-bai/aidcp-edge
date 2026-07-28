@@ -346,22 +346,10 @@ async fn facebook_feed_recovery_uses_one_trusted_cdp_click_before_returning_card
     );
 
     assert_eq!(router_call_count(&requests, "feed_recovery_target"), 1);
-    let mouse = requests
-        .iter()
-        .filter(|request| request["method"] == "Input.dispatchMouseEvent")
-        .collect::<Vec<_>>();
-    assert_eq!(
-        mouse
-            .iter()
-            .filter_map(|request| request["params"]["type"].as_str())
-            .collect::<Vec<_>>(),
-        vec!["mouseMoved", "mousePressed", "mouseReleased"]
-    );
-    assert!(
-        mouse
-            .iter()
-            .all(|request| request["params"]["x"] == 540.0 && request["params"]["y"] == 330.0)
-    );
+    assert_humanized_single_click(&requests);
+    // 落点判据从「所有鼠标事件都恰在目标坐标」改为「按下 / 抬起落在目标的有界抖动内且同点」：
+    // 移动帧本来就沿轨迹分布，逐帧钉死目标坐标等于要求瞬移。抖动上限与原语的落点抖动同源。
+    assert_pointer_commit_near(&requests, 540.0, 330.0);
 }
 
 #[tokio::test]
@@ -400,15 +388,7 @@ async fn facebook_feed_recovery_click_without_home_postcondition_is_ambiguous() 
         Some("feed_recovery_navigation_unconfirmed")
     );
 
-    let mouse_types = requests
-        .iter()
-        .filter(|request| request["method"] == "Input.dispatchMouseEvent")
-        .filter_map(|request| request["params"]["type"].as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        mouse_types,
-        vec!["mouseMoved", "mousePressed", "mouseReleased"]
-    );
+    assert_humanized_single_click(&requests);
 }
 
 #[tokio::test]
@@ -562,13 +542,37 @@ async fn facebook_reel_scroll_uses_one_active_video_wheel_after_unchanged_arrow(
                 && request["params"]["type"] == "mouseWheel"
         })
         .collect::<Vec<_>>();
-    assert_eq!(wheel_requests.len(), 1);
-    assert_eq!(wheel_requests[0]["params"]["x"], 590.0);
-    assert_eq!(wheel_requests[0]["params"]["y"], 420.0);
-    let delta = wheel_requests[0]["params"]["deltaY"]
-        .as_f64()
-        .expect("wheel delta");
-    assert!((70.0..=100.0).contains(&delta));
+    // 兜底滚轮走共享惯性手势：8~15 帧、滚前先把光标移到可滚区中心、总位移在基线 ±20% 内。
+    // 单帧精确位移与「墙钟毫秒取模」的伪随机都不再允许。
+    assert!((8..=15).contains(&wheel_requests.len()));
+    assert!(
+        wheel_requests
+            .iter()
+            .all(|request| { request["params"]["x"] == 590.0 && request["params"]["y"] == 420.0 })
+    );
+    let total: f64 = wheel_requests
+        .iter()
+        .map(|request| request["params"]["deltaY"].as_f64().expect("wheel delta"))
+        .sum();
+    assert!(
+        (68.0..=102.0).contains(&total),
+        "总位移 {total} 越出基线 ±20%"
+    );
+    let first_wheel = requests
+        .iter()
+        .position(|request| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseWheel"
+        })
+        .expect("wheel frame");
+    let first_move = requests
+        .iter()
+        .position(|request| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseMoved"
+        })
+        .expect("pointer move before the wheel");
+    assert!(first_move < first_wheel);
 }
 
 #[tokio::test]
@@ -788,15 +792,17 @@ async fn facebook_reel_scroll_returns_ambiguous_after_dispatched_methods_without
             .iter()
             .all(|request| request["method"] != "Page.navigate")
     );
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|request| {
-                request["method"] == "Input.dispatchMouseEvent"
-                    && request["params"]["type"] == "mouseWheel"
-            })
-            .count(),
-        1
+    // 兜底滚轮已是多帧惯性手势，帧数按分布采样；可断言的是「确实滚了一次手势」而非帧数常量。
+    assert!(
+        (8..=15).contains(
+            &requests
+                .iter()
+                .filter(|request| {
+                    request["method"] == "Input.dispatchMouseEvent"
+                        && request["params"]["type"] == "mouseWheel"
+                })
+                .count()
+        )
     );
 }
 
@@ -851,7 +857,9 @@ async fn facebook_reel_like_picker_commit_is_bounded_to_one_trusted_pointer_writ
     let requests = server.await.expect("Facebook interaction fake CDP");
     assert_eq!(router_call_count(&requests, "like_primary_commit"), 1);
     assert_eq!(router_call_count(&requests, "like_picker_probe"), 1);
-    assert_eq!(mouse_dispatch_count(&requests), 3);
+    assert_eq!(pointer_event_count(&requests, "mousePressed"), 1);
+    assert_eq!(pointer_event_count(&requests, "mouseReleased"), 1);
+    assert!(mouse_dispatch_count(&requests) > 3, "点击必须逐帧移动");
 }
 
 #[tokio::test]
@@ -908,7 +916,9 @@ async fn facebook_reel_follow_uses_one_pointer_write_and_same_author_postconditi
     engine.shutdown().await;
     let requests = server.await.expect("Facebook interaction fake CDP");
     assert_eq!(router_call_count(&requests, "follow_probe"), 3);
-    assert_eq!(mouse_dispatch_count(&requests), 3);
+    assert_eq!(pointer_event_count(&requests, "mousePressed"), 1);
+    assert_eq!(pointer_event_count(&requests, "mouseReleased"), 1);
+    assert!(mouse_dispatch_count(&requests) > 3, "点击必须逐帧移动");
 }
 
 #[tokio::test]
@@ -1073,15 +1083,9 @@ async fn facebook_first_post_hydrates_the_editor_with_one_native_cdp_click() {
     assert_eq!(router_call_count(&requests, "comment_action_probe"), 1);
     assert_eq!(router_call_count(&requests, "comment_editor_probe"), 2);
     assert_eq!(router_call_count(&requests, "note_open"), 1);
-    let mouse_types = requests
-        .iter()
-        .filter(|request| request["method"] == "Input.dispatchMouseEvent")
-        .filter_map(|request| request["params"]["type"].as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        mouse_types,
-        vec!["mouseMoved", "mousePressed", "mouseReleased"]
-    );
+    // 点击是「逐帧移动 → 按下 → 抬起」：帧数按距离与分布采样，不是可断言的常数；
+    // 可断言的是形状——移动帧不止一帧（不得瞬移），按下 / 抬起各恰好一次且成对。
+    assert_humanized_single_click(&requests);
 }
 
 #[tokio::test]
@@ -2047,6 +2051,71 @@ fn mouse_dispatch_count(requests: &[Value]) -> usize {
         .iter()
         .filter(|request| request["method"] == "Input.dispatchMouseEvent")
         .count()
+}
+
+/// 一次提交式左键 = 一次按下 + 一次抬起。轨迹帧数按分布采样、**不是**可断言的常数，
+/// 所以「只写一次」的判据是提交次数而不是鼠标事件总数。
+fn pointer_event_count(requests: &[Value], kind: &str) -> usize {
+    requests
+        .iter()
+        .filter(|request| {
+            request["method"] == "Input.dispatchMouseEvent" && request["params"]["type"] == kind
+        })
+        .count()
+}
+
+/// 一次拟人点击的**可断言形状**：逐帧移动（帧数按距离与分布采样、不是常数）→ 按下 → 抬起，
+/// 按下与抬起各恰好一次且相邻成对。
+///
+/// MUST NOT 退回 `vec!["mouseMoved", "mousePressed", "mouseReleased"]` 这种整串相等断言：
+/// 那锁死的是「瞬移到目标再按下」这个**被本批修掉的缺陷形态**，一旦有人为了让它变绿去改实现，
+/// 就等于把机器特征原样种回去。要防的是「不逐帧」和「按下没配平抬起」，不是帧数。
+fn assert_humanized_single_click(requests: &[Value]) {
+    let mouse_types = requests
+        .iter()
+        .filter(|request| request["method"] == "Input.dispatchMouseEvent")
+        .filter_map(|request| request["params"]["type"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        mouse_types.len() > 2,
+        "点击必须是「逐帧移动 + 按下 + 抬起」，实测事件：{mouse_types:?}"
+    );
+    let (moves, commit) = mouse_types.split_at(mouse_types.len() - 2);
+    assert!(moves.len() > 1, "点击必须逐帧移动，不得瞬移到目标坐标");
+    assert!(moves.iter().all(|kind| *kind == "mouseMoved"));
+    assert_eq!(commit, ["mousePressed", "mouseReleased"]);
+    assert_eq!(pointer_event_count(requests, "mousePressed"), 1);
+    assert_eq!(pointer_event_count(requests, "mouseReleased"), 1);
+}
+
+/// 按下 / 抬起必须落在同一点，且该点在目标坐标的有界落点抖动内（原语上限 3px，留 1px 取整余量）。
+///
+/// MUST NOT 断言「每一个鼠标事件都恰在目标坐标」——移动帧沿轨迹分布，那条断言等于要求瞬移。
+fn assert_pointer_commit_near(requests: &[Value], x: f64, y: f64) {
+    const TOLERANCE_PX: f64 = 4.0;
+    let commits = requests
+        .iter()
+        .filter(|request| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && matches!(
+                    request["params"]["type"].as_str(),
+                    Some("mousePressed" | "mouseReleased")
+                )
+        })
+        .map(|request| {
+            (
+                request["params"]["x"].as_f64().expect("pointer x"),
+                request["params"]["y"].as_f64().expect("pointer y"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(commits.len(), 2, "提交式左键必须恰好一次按下 + 一次抬起");
+    assert_eq!(commits[0], commits[1], "按下与抬起必须落在同一点");
+    assert!(
+        (commits[0].0 - x).abs() <= TOLERANCE_PX && (commits[0].1 - y).abs() <= TOLERANCE_PX,
+        "落点 {:?} 偏离目标 ({x}, {y}) 超过 {TOLERANCE_PX}px",
+        commits[0]
+    );
 }
 
 async fn spawn_xhs_search_input_cdp(
@@ -3604,18 +3673,18 @@ async fn spawn_facebook_reel_wheel_cdp() -> (u16, tokio::task::JoinHandle<Vec<Va
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut requests = Vec::new();
         for _ in 0..3 {
-            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+            requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
         }
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        requests.push(
-            respond_to_call_capture(
+        requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
+        requests.extend(
+            respond_to_call_capture_all(
                 &mut websocket,
                 reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
             )
             .await,
         );
-        requests.push(
-            respond_to_call_capture(
+        requests.extend(
+            respond_to_call_capture_all(
                 &mut websocket,
                 reel_next_target_cdp(
                     "https://www.facebook.com/reel/1",
@@ -3626,34 +3695,35 @@ async fn spawn_facebook_reel_wheel_cdp() -> (u16, tokio::task::JoinHandle<Vec<Va
             )
             .await,
         );
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
+        requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
         for _ in 0..6 {
-            requests.push(
-                respond_to_call_capture(
+            requests.extend(
+                respond_to_call_capture_all(
                     &mut websocket,
                     reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
                 )
                 .await,
             );
         }
-        requests.push(
-            respond_to_call_capture(
+        requests.extend(
+            respond_to_call_capture_all(
                 &mut websocket,
                 reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
             )
             .await,
         );
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        requests.push(
-            respond_to_call_capture(
+        // 兜底滚轮已改为多帧惯性手势，其帧数不固定：滚轮事件由上面的应答器透明放行，
+        // 脚本这里不再为「单帧滚轮」预留一格。
+        requests.extend(
+            respond_to_call_capture_all(
                 &mut websocket,
                 reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2"),
             )
             .await,
         );
-        requests.push(
-            respond_to_call_capture(
+        requests.extend(
+            respond_to_call_capture_all(
                 &mut websocket,
                 reel_cards_cdp("https://www.facebook.com/reel/2"),
             )
@@ -3674,18 +3744,18 @@ async fn spawn_facebook_reel_no_target_cdp() -> (u16, tokio::task::JoinHandle<Ve
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut requests = Vec::new();
         for _ in 0..3 {
-            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+            requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
         }
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        requests.push(
-            respond_to_call_capture(
+        requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
+        requests.extend(
+            respond_to_call_capture_all(
                 &mut websocket,
                 reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
             )
             .await,
         );
-        requests.push(
-            respond_to_call_capture(
+        requests.extend(
+            respond_to_call_capture_all(
                 &mut websocket,
                 reel_next_target_cdp(
                     "https://www.facebook.com/reel/1",
@@ -3696,36 +3766,36 @@ async fn spawn_facebook_reel_no_target_cdp() -> (u16, tokio::task::JoinHandle<Ve
             )
             .await,
         );
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
+        requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
         for _ in 0..6 {
-            requests.push(
-                respond_to_call_capture(
+            requests.extend(
+                respond_to_call_capture_all(
                     &mut websocket,
                     reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
                 )
                 .await,
             );
         }
-        requests.push(
-            respond_to_call_capture(
+        requests.extend(
+            respond_to_call_capture_all(
                 &mut websocket,
                 reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
             )
             .await,
         );
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        // 同上：多帧惯性手势的滚轮事件透明放行，脚本不再为单帧滚轮预留一格。
         for _ in 0..6 {
-            requests.push(
-                respond_to_call_capture(
+            requests.extend(
+                respond_to_call_capture_all(
                     &mut websocket,
                     reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
                 )
                 .await,
             );
         }
-        requests.push(
-            respond_to_call_capture(
+        requests.extend(
+            respond_to_call_capture_all(
                 &mut websocket,
                 reel_next_target_cdp(
                     "https://www.facebook.com/reel/1",
@@ -3996,6 +4066,48 @@ where
         .await
         .expect("CDP response");
     request
+}
+
+/// 应答一条脚本化的 CDP 请求；沿途出现的指针 / 滚轮事件先就地应答并一并记录。
+///
+/// 拟人化输入是**多帧**的（轨迹帧数、滚轮帧数都按分布采样），一问一答的脚本对不上号——
+/// 这里让输入事件透明通过并保留在记录里，脚本只对下一条非输入请求生效。
+async fn respond_to_call_capture_all<S>(
+    websocket: &mut tokio_tungstenite::WebSocketStream<S>,
+    result: Value,
+) -> Vec<Value>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut captured = Vec::new();
+    loop {
+        let message = websocket
+            .next()
+            .await
+            .expect("CDP request")
+            .expect("valid CDP request");
+        let Message::Text(text) = message else {
+            panic!("expected text request");
+        };
+        let request: Value = serde_json::from_str(&text).expect("request JSON");
+        let id = request["id"].as_u64().expect("request id");
+        let pointer_frame = request["method"] == "Input.dispatchMouseEvent";
+        let payload = if pointer_frame {
+            json!({})
+        } else {
+            result.clone()
+        };
+        websocket
+            .send(Message::Text(
+                json!({"id":id,"result":payload}).to_string().into(),
+            ))
+            .await
+            .expect("CDP response");
+        captured.push(request);
+        if !pointer_frame {
+            return captured;
+        }
+    }
 }
 
 async fn reject_call_capture<S>(

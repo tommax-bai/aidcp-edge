@@ -7,6 +7,7 @@ pub mod engine;
 pub mod error;
 pub mod facebook;
 mod input;
+pub mod locating;
 pub mod model;
 pub mod probe;
 pub mod protocol;

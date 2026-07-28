@@ -2,6 +2,9 @@ use crate::commit_window::CommitWindowRequester;
 use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
+use crate::input::{
+    PointerClickOptions, PointerInputFailure, PointerPoint, dispatch_pointer_click,
+};
 use crate::model::{ActionReceipt, PublishReceipt};
 use crate::probe::ProbeResult;
 use crate::protocol::{EffectPhase, NativeCommand};
@@ -834,19 +837,41 @@ pub(crate) async fn dispatch_facebook_click(
     x: f64,
     y: f64,
 ) -> Result<(), EngineError> {
-    session
-        .cdp
-        .dispatch_mouse("mouseMoved", x, y, "none", 0)
-        .await?;
-    session
-        .cdp
-        .dispatch_mouse("mousePressed", x, y, "left", 1)
-        .await?;
-    session
-        .cdp
-        .dispatch_mouse("mouseReleased", x, y, "left", 1)
+    dispatch_facebook_click_with(session, x, y, PointerClickOptions::default())
         .await
         .map(|_| ())
+}
+
+/// 带形状的点击出口：调用方可指定起步点与是否允许过冲，其余与两参形态等价。
+/// 返回**真实落点**，供多点循环把上一落点当作下一点的起步点（保光标连续）。
+pub(crate) async fn dispatch_facebook_click_with(
+    session: &mut EngineSession,
+    x: f64,
+    y: f64,
+    options: PointerClickOptions,
+) -> Result<PointerPoint, EngineError> {
+    // 说明：Facebook 的点击调用点目前拿不到取消信号与绝对截止（它们止步于命令分发层，
+    // 而那几个文件不在本次改动面内），故此处传 None / 无截止；原语内部的取消与截止检查仍
+    // 全部落在按下之前，按下 / 抬起配平不受影响。
+    dispatch_pointer_click(&mut session.cdp, x, y, options, None, u64::MAX)
+        .await
+        .map_err(pointer_failure_to_engine_error)
+}
+
+pub(crate) fn pointer_failure_to_engine_error(failure: PointerInputFailure) -> EngineError {
+    match failure {
+        PointerInputFailure::CancelledBeforePress => cancelled_before_dispatch(),
+        PointerInputFailure::DeadlineBeforePress => EngineError::new(
+            ErrorCode::CdpTimeout,
+            "native pointer click exceeded its deadline before the submit press",
+        ),
+        PointerInputFailure::MoveFailed(error) => error,
+        // 诚实红线：按下已经派发出去了，点击可能已生效。绝不能让上游把它读成「压根没点」而重投。
+        PointerInputFailure::SubmitDispatched(error) => EngineError::new(
+            error.code,
+            "native pointer submit press was already dispatched before the failure; the click may have taken effect and MUST NOT be replayed as not started",
+        ),
+    }
 }
 
 pub(crate) fn facebook_scroll_failure(

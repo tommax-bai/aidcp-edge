@@ -3,9 +3,13 @@ use super::shared::*;
 use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
+use crate::input::{WheelInputFailure, dispatch_wheel_humanized};
 use crate::protocol::{EffectPhase, NativeCommand};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
+
+/// 短视频兜底滚轮的基线位移。共享手势会在此基线上下 ±20% 采样，落在改动前的 70~100px 区间内。
+const FACEBOOK_REEL_FALLBACK_WHEEL_BASELINE_PX: f64 = 85.0;
 
 pub(crate) async fn execute(
     session: &mut EngineSession,
@@ -234,15 +238,26 @@ pub(crate) async fn execute_facebook_page_scroll(
                 "reels_navigation_unconfirmed",
             ));
         };
-        let delta_y = 70.0 + (unix_time_ms() % 31) as f64;
-        session
-            .cdp
-            .dispatch_wheel(
-                (rect.left + rect.right) / 2.0,
-                (rect.top + rect.bottom) / 2.0,
-                delta_y,
-            )
-            .await?;
+        // 兜底滚轮改走共享惯性手势：手势自身在基线附近采样位移（±20%）并逐帧派发，滚前先把
+        // 光标移到可滚区中心。原实现用「当前毫秒时间戳对 31 取模」当随机源——同一毫秒内多次
+        // 调用完全相同、分布还与墙钟耦合，那不是随机。
+        dispatch_wheel_humanized(
+            &mut session.cdp,
+            (rect.left + rect.right) / 2.0,
+            (rect.top + rect.bottom) / 2.0,
+            FACEBOOK_REEL_FALLBACK_WHEEL_BASELINE_PX,
+            cancellation,
+            deadline_unix_ms,
+        )
+        .await
+        .map_err(|failure| match failure {
+            WheelInputFailure::Cancelled => cancelled_before_dispatch(),
+            WheelInputFailure::Deadline => EngineError::new(
+                ErrorCode::CdpTimeout,
+                "native Facebook Reel wheel gesture exceeded its deadline",
+            ),
+            WheelInputFailure::Cdp(error) => error,
+        })?;
         if wait_for_facebook_reel_movement(session, &before)
             .await?
             .is_some()
@@ -271,18 +286,9 @@ pub(crate) async fn execute_facebook_page_scroll(
             "reels_navigation_unconfirmed",
         ));
     };
-    session
-        .cdp
-        .dispatch_mouse("mouseMoved", x, y, "none", 0)
-        .await?;
-    session
-        .cdp
-        .dispatch_mouse("mousePressed", x, y, "left", 1)
-        .await?;
-    session
-        .cdp
-        .dispatch_mouse("mouseReleased", x, y, "left", 1)
-        .await?;
+    // 「下一个」按钮改走共享指针原语：多帧轨迹 + 落点抖动 + 按下 / 抬起配平，
+    // 不再是三条裸事件（裸事件形态下按下失败即早返回、抬起永不发出）。
+    dispatch_facebook_click(session, x, y).await?;
     if wait_for_facebook_reel_movement(session, &before)
         .await?
         .is_some()
