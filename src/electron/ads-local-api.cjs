@@ -1,10 +1,8 @@
-// AdsPower 本地 API 的**主进程侧只读客户端**（探测可用性 + 拉取浏览器环境列表）。
+// AdsPower 本地 API 的主进程侧客户端与托管子进程 broker。
 //
 // 为什么单独一份（不复用核心 src/cdp/browser-provider.ts 的 api<T>()）：
-//  - 进程边界：面板探测/拉取在 Electron 主进程（main.cjs）发起，而核心 AdsPowerProvider 及其 1req/s 节流
-//    （实例私有字段 lastApiAt）跑在 main.cjs 用 spawn 拉起的**独立子进程**里——两进程堆内存不通，无法共享节流；
-//    且 main.cjs 是 CommonJS、核心产物是 ESM，require 也复用不了（比照 chrome-launcher.cjs 与 cdp/chrome-launcher.ts 并存）。
-//    更何况探测常发生在核心尚未 spawn 之时（分身 ID 为空则根本不起核心）。故本模块**自持一套独立节流**，这是唯一可行形态。
+//  - 进程边界：面板探测/拉取在 Electron 主进程发起，托管核心在独立子进程。子进程经私有 IPC
+//    把受限 AdsPower 请求交回本模块，使两侧共享同一条 FIFO；非 Electron/CLI 调用仍由核心自行节流。
 //  - URL 契约：健康检查在根级 `/status`，元数据仍有 V1，而浏览器生命周期是 V2；若套用统一前缀会
 //    打到错误端点并谎报「不可达」。故本模块**逐端点显式拼 URL**。
 //
@@ -18,7 +16,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const ADS_MIN_INTERVAL_MS = 1100; // 本地 API 限速 1req/s，留余量串行节流（与核心同规格、但独立实例）
+const ADS_MIN_INTERVAL_MS = 1100; // 本地 API 限速 1req/s，主进程与 managed child 共用并留余量
 const DEFAULT_ADS_BASE = 'http://local.adspower.net:50325';
 const DEFAULT_PAGE_SIZE = 100;
 const DEFAULT_MAX_PAGES = 10; // 上限，避免超大环境量拉不停；超限如实标 truncated
@@ -27,11 +25,22 @@ const MAX_ORPHAN_CACHE_CANDIDATES = 8;
 const ORPHAN_PROBE_TIMEOUT_MS = 2_000;
 const PROFILE_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 const DEVTOOLS_BROWSER_PATH_RE = /^\/devtools\/browser\/[A-Za-z0-9._-]+$/;
+const BROKER_MAX_BATCH_SIZE = 2;
+const BROKER_REQUEST_TIMEOUT_MS = 30_000;
+const BROKER_OPERATION_KEYS = new Set(['version', 'method', 'path', 'query', 'body']);
+const PROXY_CONFIG_KEYS = new Set([
+  'proxy_soft',
+  'proxy_type',
+  'proxy_host',
+  'proxy_port',
+  'proxy_user',
+  'proxy_password',
+]);
 
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * 创建一个主进程侧的 AdsPower LocalAPI 客户端（单例持有一条串行节流）。
+ * 创建一个主进程侧的 AdsPower LocalAPI 协调器（桌面运行时单例持有统一 FIFO）。
  * 除具名人工查看 openProfileForInspection 外，其余能力均为只读。
  * @param {{ apiBase?: string, apiKey?: string, fetchImpl?: typeof fetch, nowImpl?: () => number, sleepImpl?: (ms:number)=>Promise<void>, adsCacheRoot?: string, orphanProbeTimeoutMs?: number, logImpl?: (msg:string)=>void }} deps
  */
@@ -44,7 +53,7 @@ function createAdsLocalApi(deps = {}) {
   const orphanProbeTimeoutMs = Number(deps.orphanProbeTimeoutMs) > 0
     ? Math.floor(Number(deps.orphanProbeTimeoutMs))
     : ORPHAN_PROBE_TIMEOUT_MS;
-  // 主进程内**唯一**串行节流闸门：所有只读请求经 throttledFetch 排进同一条链，
+  // 主进程内**唯一**串行节流闸门：所有只读、受限写入及 managed child 请求排进同一条链，
   // 把「等间隔 → fetch → 记时」作为**不可重入单元**串行执行。
   // 为什么要队列而非仅一个时间戳：面板「检测」「刷新」是两个独立按钮、各自的 in-flight 禁用管不到对方，
   // 自动探测（加载/切分段/保存前）也会与手动刷新并发；若只读 lastApiAt 决定等多久，两个并发调用会同读旧值、
@@ -85,6 +94,138 @@ function createAdsLocalApi(deps = {}) {
   function authHeaders(opts) {
     const key = opts && Object.prototype.hasOwnProperty.call(opts, 'apiKey') ? opts.apiKey : deps.apiKey;
     return key ? { Authorization: `Bearer ${key}` } : {};
+  }
+
+  function isRecord(value) {
+    return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+  }
+
+  function hasOnlyKeys(value, allowed) {
+    return isRecord(value) && Object.keys(value).every((key) => allowed.has(key));
+  }
+
+  function exactProfile(value, profileId) {
+    return typeof value === 'string' && value === profileId;
+  }
+
+  function validProxyConfig(value) {
+    if (!hasOnlyKeys(value, PROXY_CONFIG_KEYS)) return false;
+    const port = String(value.proxy_port || '');
+    const user = value.proxy_user == null ? '' : String(value.proxy_user);
+    const password = value.proxy_password == null ? '' : String(value.proxy_password);
+    return value.proxy_soft === 'other'
+      && ['http', 'https', 'socks5'].includes(value.proxy_type)
+      && typeof value.proxy_host === 'string' && value.proxy_host.length > 0 && value.proxy_host.length <= 1024
+      && /^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65_535
+      && user.length <= 2048 && password.length <= 4096
+      && (!password || Boolean(user));
+  }
+
+  function validateBrokerOperation(raw, profileId) {
+    if (!hasOnlyKeys(raw, BROKER_OPERATION_KEYS)) return null;
+    const version = raw.version;
+    const method = raw.method;
+    const requestPath = raw.path;
+    const query = raw.query == null ? {} : raw.query;
+    const body = raw.body == null ? {} : raw.body;
+    if (!isRecord(query) || !isRecord(body)) return null;
+
+    if (version === 'v2' && method === 'GET' && requestPath === 'browser-profile/active') {
+      if (Object.keys(query).length !== 1 || !exactProfile(query.profile_id, profileId)
+        || Object.keys(body).length !== 0) return null;
+    } else if (version === 'v2' && method === 'POST' && requestPath === 'browser-profile/start') {
+      const allowed = new Set(['profile_id', 'last_opened_tabs', 'ip_tab', 'headless', 'launch_args']);
+      if (!hasOnlyKeys(body, allowed) || Object.keys(query).length !== 0
+        || !exactProfile(body.profile_id, profileId)
+        || !['0', '1'].includes(body.last_opened_tabs)
+        || !['0', '1'].includes(body.ip_tab)
+        || !['0', '1'].includes(body.headless)
+        || !Array.isArray(body.launch_args) || body.launch_args.length > 32
+        || body.launch_args.some((arg) => typeof arg !== 'string' || arg.length > 4096)) return null;
+    } else if (version === 'v2' && method === 'POST' && requestPath === 'browser-profile/stop') {
+      if (Object.keys(query).length !== 0 || Object.keys(body).length !== 1
+        || !exactProfile(body.profile_id, profileId)) return null;
+    } else if (version === 'v1' && method === 'POST' && requestPath === 'user/update') {
+      if (Object.keys(query).length !== 0 || Object.keys(body).length !== 2
+        || !exactProfile(body.user_id, profileId) || !validProxyConfig(body.user_proxy_config)) return null;
+    } else if (version === 'v1' && method === 'GET' && requestPath === 'user/list') {
+      const allowed = new Set(['user_id', 'page', 'page_size']);
+      if (!hasOnlyKeys(query, allowed) || Object.keys(query).length !== 3
+        || !exactProfile(query.user_id, profileId)
+        || query.page !== '1' || query.page_size !== '10'
+        || Object.keys(body).length !== 0) return null;
+    } else {
+      return null;
+    }
+    return { version, method, path: requestPath, query: { ...query }, body: { ...body } };
+  }
+
+  async function fetchBrokerOperation(operation, opts) {
+    const qs = new URLSearchParams(operation.query).toString();
+    const url = `${baseOf(opts)}/api/${operation.version}/${operation.path}${qs ? `?${qs}` : ''}`;
+    const headers = {
+      ...authHeaders(opts),
+      ...(operation.method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
+    };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), BROKER_REQUEST_TIMEOUT_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+    try {
+      const response = await fetchImpl(url, {
+        method: operation.method,
+        headers,
+        ...(operation.method === 'POST' ? { body: JSON.stringify(operation.body) } : {}),
+        signal: controller.signal,
+      });
+      let body = null;
+      try {
+        body = await response.json();
+      } catch {
+        // Child classifies invalid JSON without exposing raw response text.
+      }
+      return { status: response.status, body };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Private managed-child broker. Validation happens before the shared FIFO and never accepts a
+   * child-supplied base/key. A two-operation proxy update/readback batch remains one queue item.
+   */
+  async function brokerBatch(opts = {}) {
+    const profileId = String(opts.profileId || '').trim();
+    const operations = Array.isArray(opts.operations) ? opts.operations : [];
+    if (!PROFILE_ID_RE.test(profileId) || operations.length < 1 || operations.length > BROKER_MAX_BATCH_SIZE) {
+      return { ok: false, reason: 'invalid_broker_request' };
+    }
+    const validated = operations.map((operation) => validateBrokerOperation(operation, profileId));
+    if (validated.some((operation) => !operation)) {
+      return { ok: false, reason: 'invalid_broker_request' };
+    }
+    try {
+      const responses = await throttledCore(async () => {
+        if (typeof opts.isCancelled === 'function' && opts.isCancelled()) return null;
+        const completed = [];
+        for (let index = 0; index < validated.length; index += 1) {
+          if (index > 0) await sleep(ADS_MIN_INTERVAL_MS);
+          const response = await fetchBrokerOperation(validated[index], opts);
+          completed.push(response);
+          const body = isRecord(response.body) ? response.body : null;
+          if (response.status < 200 || response.status >= 300 || typeof body?.code !== 'number' || body.code !== 0) {
+            while (completed.length < validated.length) {
+              completed.push({ status: 424, body: { code: -1, msg: 'batch_aborted' } });
+            }
+            break;
+          }
+        }
+        return completed;
+      });
+      if (!responses) return { ok: false, reason: 'broker_cancelled' };
+      return { ok: true, responses };
+    } catch {
+      return { ok: false, reason: 'ads_api_unavailable' };
+    }
   }
 
   async function withTimeout(promise, timeoutMs, label) {
@@ -544,6 +685,8 @@ function createAdsLocalApi(deps = {}) {
     openProfileForInspection,
     kernels,
     downloadKernel,
+    brokerBatch,
+    enqueueRequest: throttledRequest,
     ADS_MIN_INTERVAL_MS,
   };
 }

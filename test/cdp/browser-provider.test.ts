@@ -12,6 +12,7 @@ import {
   selectBrowserProvider,
 } from '../../src/cdp/index.js';
 import type { ChromeInstance } from '../../src/cdp/index.js';
+import type { AdsPowerApiBroker, AdsPowerApiOperation } from '../../src/cdp/index.js';
 
 const fakeInstance: ChromeInstance = {
   pid: 4321,
@@ -219,6 +220,70 @@ test('AdsPowerProvider.launch 双跳先更新并读回 profile，start 不再含
   const payload = JSON.parse(startCall?.body || '{}') as { launch_args?: string[] };
   assert.equal(payload.launch_args?.some((arg) => arg.startsWith('--proxy-server=')), false);
   assert.equal(JSON.stringify(payload).includes('proxy-password'), false);
+});
+
+test('AdsPowerProvider managed broker 将 proxy update/readback 作为同一批次且 Local API 不再直连', async () => {
+  const batches: AdsPowerApiOperation[][] = [];
+  let currentProxy: Record<string, unknown> = {};
+  const apiBroker: AdsPowerApiBroker = {
+    async request(operations) {
+      batches.push(operations);
+      return operations.map((operation) => {
+        if (operation.path === 'browser-profile/active') {
+          return { status: 200, body: { code: 0, data: { status: 'Inactive' } } };
+        }
+        if (operation.path === 'user/update') {
+          currentProxy = operation.body?.user_proxy_config as Record<string, unknown>;
+          return { status: 200, body: { code: 0 } };
+        }
+        if (operation.path === 'user/list') {
+          return {
+            status: 200,
+            body: { code: 0, data: { list: [{ user_id: 'k1', user_proxy_config: currentProxy }] } },
+          };
+        }
+        if (operation.path === 'browser-profile/start') {
+          return { status: 200, body: { code: 0, data: { debug_port: 61332 } } };
+        }
+        throw new Error(`unexpected broker operation ${operation.path}`);
+      });
+    },
+  };
+  const directCalls: FetchCall[] = [];
+  const fetchImpl = routedFetch([['/json/version', () => ({})]], directCalls);
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://must-not-be-used:50325', userId: 'k1', proxyAuthority: doubleHopAuthority },
+    { apiBroker, fetchImpl, ...noopDeps },
+  );
+  const launched = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(launched.endpoint.port, 61332);
+  assert.deepEqual(batches.map((batch) => batch.map((operation) => operation.path)), [
+    ['browser-profile/active'],
+    ['user/update', 'user/list'],
+    ['browser-profile/start'],
+  ]);
+  assert.equal(directCalls.some((call) => call.url.includes('/api/')), false);
+});
+
+test('AdsPowerProvider broker 安全分类限频且不回显任意服务端消息', async () => {
+  const apiBroker: AdsPowerApiBroker = {
+    async request() {
+      return [{ status: 200, body: { code: -1, msg: 'Too many requests; password=private' } }];
+    },
+  };
+  const provider = new AdsPowerProvider(
+    { apiBase: 'http://unused:50325', userId: 'k1' },
+    { apiBroker, ...noopDeps },
+  );
+  await assert.rejects(
+    provider.launch({ host: '127.0.0.1', port: 9222 }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /reason=rate_limited/);
+      assert.doesNotMatch(error.message, /password|private|Too many/);
+      return true;
+    },
+  );
 });
 
 test('AdsPowerProvider.launch：V2 Active 返回有效端点时直接接管，不重复 start', async () => {

@@ -12,12 +12,13 @@
 //    `{ user_id, user_proxy_config }` 两键、`renameProfile` 的 body 只构造 `{ user_id, name }` 两键；
 //    fingerprint / remark / 分组一概不经此口，代理与名字亦互不混入对方 body
 //    （放行 update ≠ 打开整张写面，回归断言分别覆盖两个封装的两键约束）。
-//  - 节流：复用与只读侧同规格的 ≥1.1s **串行节流单链**（独立实例；跨进程无法共享，故各自一条）。
+//  - 节流：Electron 主进程注入 ads-local-api 单例的 requestImpl，与只读/managed child 共用 FIFO；
+//    独立使用本模块（测试或非 Electron 调用）时才回落到本模块自己的 ≥1.1s 串行链。
 //  - 凭据（H3/D9）：POST body **绝不整体 stringify 进日志/错误**；不可达 / code≠0 的错误**不含 body**；
 //    另导出 `redactSensitive()` 供调用方（main.cjs）在打印前脱敏 `proxy_user/proxy_password/Authorization`。
 //  - 诚实失败：不可达 / 响应非 JSON / `code!==0` 一律返回 `{ ok:false, ... }`，MUST NOT 假成功。
 
-const ADS_MIN_INTERVAL_MS = 1100; // 本地 API 限速 1req/s，留余量（与只读侧同规格、独立实例）
+const ADS_MIN_INTERVAL_MS = 1100; // 本地 API 限速 1req/s，留余量
 const DEFAULT_ADS_BASE = 'http://local.adspower.net:50325';
 
 // 硬编码写 allowlist。新增写端点须显式加入并补回归断言。
@@ -54,11 +55,12 @@ function redactSensitive(value) {
 }
 
 /**
- * 创建主进程侧 AdsPower 写客户端（单例持有一条串行节流）。
- * @param {{ apiBase?: string, apiKey?: string, fetchImpl?: typeof fetch, nowImpl?: () => number, sleepImpl?: (ms:number)=>Promise<void> }} deps
+ * 创建受限 AdsPower 写客户端；Electron 注入统一 FIFO，独立调用则自持节流链。
+ * @param {{ apiBase?: string, apiKey?: string, fetchImpl?: typeof fetch, requestImpl?: (url:string, init:object)=>Promise<any>, nowImpl?: () => number, sleepImpl?: (ms:number)=>Promise<void> }} deps
  */
 function createAdsWriteApi(deps = {}) {
   const fetchImpl = deps.fetchImpl || globalThis.fetch;
+  const requestImpl = typeof deps.requestImpl === 'function' ? deps.requestImpl : null;
   const now = deps.nowImpl || (() => Date.now());
   const sleep = deps.sleepImpl || defaultSleep;
 
@@ -66,6 +68,7 @@ function createAdsWriteApi(deps = {}) {
   let lastApiAt = 0;
   let chain = Promise.resolve();
   function throttledRequest(url, init) {
+    if (requestImpl) return requestImpl(url, init);
     const run = chain.then(async () => {
       if (lastApiAt !== 0) {
         const wait = ADS_MIN_INTERVAL_MS - (now() - lastApiAt);

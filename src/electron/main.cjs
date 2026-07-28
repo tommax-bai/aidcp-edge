@@ -102,9 +102,8 @@ const {
   }
 }
 
-// 主进程侧 AdsPower 客户端（探测 + 环境列表 + 在跑分身对账 + 具名人工查看打开）。
-// 单例持有本进程内**唯一**串行节流（1req/s）；人工查看只开放 V2 browser-profile/start，不开放 stop / 通用写入口。
-// 与核心子进程内的 AdsPowerProvider 节流各自独立（跨进程无法共享内存队列，见 ads-local-api.cjs 头注）。
+// 主进程侧 AdsPower 客户端（探测 + 环境列表 + 在跑分身对账 + 具名人工查看 + 托管子进程 broker）。
+// 单例持有本桌面运行时内唯一 FIFO；managed child 不直连 Local API，私有 IPC 请求也排入这条链。
 const adsApi = createAdsLocalApi({});
 const proxyAuthorityStore = createAdsProxyAuthorityStore({
   directory: path.join(app.getPath('userData'), 'proxy-authorities'),
@@ -1302,6 +1301,28 @@ function resolveAdsOpts(formOpts) {
   return out;
 }
 
+async function handleAdsApiBrokerRequest(handle, child, message) {
+  const requestId = typeof message.requestId === 'string' && /^ads-api-\d+-\d+$/.test(message.requestId)
+    ? message.requestId
+    : '';
+  if (!requestId || !Array.isArray(message.operations)) return;
+  const result = await adsApi.brokerBatch({
+    ...resolveAdsOpts(),
+    profileId: handle.profileId,
+    operations: message.operations,
+    isCancelled: () => handle.child !== child || child.connected === false,
+  });
+  if (handle.child !== child || child.connected === false) return;
+  const payload = result.ok
+    ? { type: 'ads-api.response', requestId, ok: true, responses: result.responses }
+    : { type: 'ads-api.response', requestId, ok: false, reason: result.reason || 'broker_rejected' };
+  try {
+    child.send(payload);
+  } catch {
+    // Child exit is authoritative cancellation; never retry or log request contents.
+  }
+}
+
 // 环境名跟随真实昵称（change edge-adspower-name-follows-nickname）：某 adspower 环境登录读出真实平台昵称后，
 // 若其 AdsPower 环境名与昵称不一致，则经写客户端改名封装把 AdsPower 名改成昵称，让左栏 / 添加面板 / 直接打开
 // 指纹浏览器客户端三处显示名一致（存量环境随下次登录渐进改到位）。铁律：
@@ -1310,7 +1331,7 @@ function resolveAdsOpts(formOpts) {
 //  - **在途去重**：同名改名在飞时不重复发（handle.renamingTo 标记）。
 //  - **诚实降级**：写失败（不可达 / code≠0 / 撞限速）保持原名、记一次可观测日志、不重试风暴、不阻塞浏览闭环；
 //    下次该环境再产生身份事件时自然再试。绝不把改名失败伪装成成功。
-//  - fire-and-forget：调用方不 await；写客户端 ≥1.1s 串行节流保证不与核心本地 API 同秒并发。
+//  - fire-and-forget：调用方不 await；主进程统一 FIFO 保证不与 managed child 本地 API 调用同秒并发。
 async function maybeRenameEnvToNickname(handle, nickname) {
   if (!handle || handle.kind !== 'adspower') return;
   const userId = handle.profileId && String(handle.profileId).trim();
@@ -1337,7 +1358,11 @@ async function maybeRenameEnvToNickname(handle, nickname) {
   handle.renamingTo = nick;
   try {
     const ads = resolveAdsOpts({});
-    const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
+    const writeApi = createAdsWriteApi({
+      apiBase: ads.apiBase,
+      apiKey: ads.apiKey,
+      requestImpl: adsApi.enqueueRequest,
+    });
     const r = await writeApi.renameProfile({ userId, name: nick }, ads);
     if (r && r.ok) {
       // 请求在人工编辑前已经发出也不能回头覆盖本地人工名；外部写已无法撤销，但左栏/花名册仍以人工名为准。
@@ -4118,7 +4143,9 @@ async function spawnEdgeChild(handle, {
       });
       return;
     }
-    spawnEnv = { ...built.env, ELECTRON_RUN_AS_NODE: '1' };
+    spawnEnv = { ...built.env, ELECTRON_RUN_AS_NODE: '1', AIDCP_ADS_API_BROKER: 'ipc' };
+    // Broker injects the runtime-owned key inside Electron. Managed children never receive it.
+    delete spawnEnv.AIDCP_ADS_API_KEY;
     if (handle.proxyAuthority && handle.status.proxyMode === 'system_then_environment'
       && handle.status.proxyChainApplicable === true
       && !cleanupBootstrap) {
@@ -4298,6 +4325,12 @@ async function spawnEdgeChild(handle, {
   child.on('message', (message) => {
     if (handle.child !== child || !message || typeof message !== 'object') return;
     const currentGeneration = isCurrentLifecycleGeneration(handle, generation);
+    // Close/pause advances the lifecycle generation before the still-current child stops/restores AdsPower.
+    // Broker scope is bound by handle.child/profile, so those teardown calls remain valid for that child.
+    if (message.type === 'ads-api.request') {
+      void handleAdsApiBrokerRequest(handle, child, message);
+      return;
+    }
     // 暂停/关闭先推进操作代，再把终止指令交给旧代子进程。因此只放行与当前停止意图严格匹配的终局回执；
     // 其它旧代消息（任务阶段、唤醒、Cloud 状态等）仍一律丢弃，不能污染新一轮启动。
     const currentStopReply = !currentGeneration && handle.stopRequested && (
@@ -5428,7 +5461,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
       // 环境名跟随真实昵称（changes edge-adspower-name-follows-nickname / wechat-channels-env-name-follows-nickname）：
       // 读到非空平台真实昵称且与 AdsPower 环境名不一致时，经写客户端改名封装把该环境名改成昵称。
       // 幂等去抖（名已一致不发）+ 诚实降级（写失败保持原名、不重试风暴、不阻塞浏览闭环）；fire-and-forget，
-      // 不 await（受写客户端 ≥1.1s 串行节流，不阻塞消息处理）。
+      // 不 await（请求进入主进程统一 FIFO，不阻塞消息处理）。
       if (evt.account.name) maybeRenameEnvToNickname(handle, evt.account.name);
     }
     // 人设绑定态（change persona-bound-tristate）：云端 true / false 都下发，双向采纳——云端是单写方，
@@ -7400,7 +7433,11 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     }
     const ads = resolveAdsOpts(opts);
     // 凭据只内存（deps），绝不落 settings；写客户端错误层已脱敏。
-    const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
+    const writeApi = createAdsWriteApi({
+      apiBase: ads.apiBase,
+      apiKey: ads.apiKey,
+      requestImpl: adsApi.enqueueRequest,
+    });
     if (creationMode === 'single' && entries.length === 0) {
       const intent = await createEnvironmentProvisioningIntent();
       if (!intent.ok) return { ok: false, error: `${intent.error}，本次尚未创建本地环境。` };
@@ -7666,7 +7703,11 @@ ipcMain.handle('ads:updateEnvProxy', async (_event, opts) => {
       };
     }
     const ads = resolveAdsOpts(opts);
-    const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
+    const writeApi = createAdsWriteApi({
+      apiBase: ads.apiBase,
+      apiKey: ads.apiKey,
+      requestImpl: adsApi.enqueueRequest,
+    });
     const r = await writeApi.updateProfileProxy({ userId: String(userId), proxyConfig: norm.proxyConfig }, ads);
     if (r && r.ok === false) {
       invalidateProxyEvidence(userId);
@@ -7726,7 +7767,11 @@ ipcMain.handle('ads:updateEnvProxies', async (event, opts) => {
       };
     }
     const ads = resolveAdsOpts(opts);
-    const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
+    const writeApi = createAdsWriteApi({
+      apiBase: ads.apiBase,
+      apiKey: ads.apiKey,
+      requestImpl: adsApi.enqueueRequest,
+    });
     const executed = await executeProxyReassignmentPlan({
       plan: plan.plan,
       // 写前逐项复核竞态；起点完整预校验不能替代状态随后变化。
@@ -7813,7 +7858,11 @@ async function deletePhysicalEnvironmentAfterTombstone(envKey, opts) {
   const svc = await ensureAdsServiceOnce(null);
   if (!svc.ok) return { ok: false, cleanupPending: true, error: `设备清理待重试：指纹浏览器运行时未就绪（${svc.error || '未知错误'}）。` };
   const ads = resolveAdsOpts(opts);
-  const writeApi = createAdsWriteApi({ apiBase: ads.apiBase, apiKey: ads.apiKey });
+  const writeApi = createAdsWriteApi({
+    apiBase: ads.apiBase,
+    apiKey: ads.apiKey,
+    requestImpl: adsApi.enqueueRequest,
+  });
   const result = await writeApi.deleteProfile(envKey, ads);
   const alreadyMissing = result && result.ok === false && /not found|not exist|does not exist|不存在/i.test(String(result.error || ''));
   if (result && result.ok === false && !alreadyMissing) {

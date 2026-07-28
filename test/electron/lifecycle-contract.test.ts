@@ -28,6 +28,30 @@ test('Electron engine child has IPC and pause disconnects it through lifecycle.p
     'manual browser sessions must remain paused even when bootstrapped browser-absent');
 });
 
+test('managed AdsPower child uses the parent FIFO without receiving the API key', () => {
+  assert.match(main, /AIDCP_ADS_API_BROKER: 'ipc'/);
+  assert.match(main, /delete spawnEnv\.AIDCP_ADS_API_KEY/);
+  const broker = functionSource('handleAdsApiBrokerRequest', 'maybeRenameEnvToNickname');
+  assert.match(broker, /adsApi\.brokerBatch\(\{/);
+  assert.match(broker, /profileId: handle\.profileId/);
+  assert.match(broker, /\.\.\.resolveAdsOpts\(\)/);
+  assert.doesNotMatch(broker, /message\.(apiKey|apiBase)/);
+
+  const spawn = functionSource('spawnEdgeChild', 'stopLoginPoller');
+  const brokerBranch = spawn.indexOf("message.type === 'ads-api.request'");
+  const staleGenerationGate = spawn.indexOf('if (!currentGeneration && !currentStopReply) return;');
+  assert.ok(brokerBranch >= 0 && staleGenerationGate > brokerBranch,
+    'the still-current child must retain broker access while close/restore advances lifecycle generation');
+});
+
+test('every Electron AdsPower write client uses the same parent FIFO', () => {
+  const constructors = main.match(/createAdsWriteApi\(\{[\s\S]*?\}\)/g) ?? [];
+  assert.ok(constructors.length > 0, 'main process should construct managed write clients');
+  for (const constructor of constructors) {
+    assert.match(constructor, /requestImpl:\s*adsApi\.enqueueRequest/);
+  }
+});
+
 // change presence-terminal-honesty：断连时只翻云端徽标、不翻在场感，那一行会挂着断连前的中途动作文案
 // （如「顺路去作者主页看看…」）继续演——云端都断了，决策端不可能再推进任何一步。Electron 起不来，
 // 按本文件既有做法对源码设契约。

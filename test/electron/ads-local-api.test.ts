@@ -34,9 +34,20 @@ const { createAdsLocalApi, normalizeProfile } = require('../../src/electron/ads-
       debugPort?: number;
       error?: string;
     }>;
+    brokerBatch: (opts?: Record<string, unknown>) => Promise<{
+      ok: boolean;
+      reason?: string;
+      responses?: Array<{ status: number; body: unknown }>;
+    }>;
+    enqueueRequest: (url: string, init?: Record<string, unknown>) => Promise<unknown>;
     ADS_MIN_INTERVAL_MS: number;
   };
   normalizeProfile: (it: Record<string, unknown>) => { userId: string; serialNumber: string; proxy: string; platform: string };
+};
+const { createAdsWriteApi } = require('../../src/electron/ads-write-api.cjs') as {
+  createAdsWriteApi: (deps?: Record<string, unknown>) => {
+    renameProfile: (args: { userId: string; name: string }) => Promise<{ ok: boolean }>;
+  };
 };
 
 interface StubRes {
@@ -265,7 +276,7 @@ test('调用级 apiKey 覆盖：传入表单当前 key → Authorization 用之'
   assert.equal(calls[0].headers?.Authorization, 'Bearer FORM_CURRENT');
 });
 
-test('本进程内串行节流：相邻只读调用间隔 ≥1s（跨进程碰撞另走诚实降级，本测仅覆盖单进程）', async () => {
+test('本进程内串行节流：相邻只读调用间隔 ≥1s', async () => {
   // 起点非零，贴合生产 now()=Date.now()（大数）；若从 0 起，首次 markCalled 后 lastApiAt 仍为 0、
   // 会被 `lastApiAt !== 0` 守卫当成「从未调用」（与核心 provider 同款语义）——那是零时钟测试假象、非真缺陷。
   let clock = 1_000_000;
@@ -298,6 +309,120 @@ test('并发串行化：两个调用同时进入也按 ≥1s 串行（防两独�
   await Promise.all([api.status(), api.listProfiles()]);
   assert.equal(order.length, 2);
   assert.ok(sleeps.some((s) => s >= 1000), `并发调用应被串行节流，实测 sleeps=${JSON.stringify(sleeps)}`);
+});
+
+test('managed child proxy update/readback 与主进程调用共用 FIFO，批次中间不可插入', async () => {
+  let clock = 1;
+  const sleeps: number[] = [];
+  const calls: Array<{ url: string; method?: string; headers?: Record<string, string>; body?: string }> = [];
+  let profileProxy: Record<string, unknown> = {};
+  const fetchImpl = (async (url: string, init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  }) => {
+    calls.push({ url: String(url), method: init?.method, headers: init?.headers, body: init?.body });
+    if (String(url).includes('/api/v1/user/update')) {
+      profileProxy = JSON.parse(init?.body || '{}').user_proxy_config;
+      return res(true, 200, { code: 0 });
+    }
+    const targetId = new URL(String(url)).searchParams.get('user_id');
+    return res(true, 200, {
+      code: 0,
+      data: {
+        list: targetId === 'k1'
+          ? [{ user_id: 'k1', user_proxy_config: profileProxy }]
+          : [],
+      },
+    });
+  }) as unknown as typeof fetch;
+  const api = createAdsLocalApi({
+    nowImpl: () => clock,
+    sleepImpl: async (ms: number) => { sleeps.push(ms); clock += ms; },
+    fetchImpl,
+  });
+  const proxy = {
+    proxy_soft: 'other',
+    proxy_type: 'http',
+    proxy_host: 'proxy.example',
+    proxy_port: '8080',
+    proxy_user: 'operator',
+    proxy_password: 'private',
+  };
+
+  const mainRead = api.listProfiles({ pageSize: 100 });
+  const childBatch = api.brokerBatch({
+    profileId: 'k1',
+    apiKey: 'parent-owned-key',
+    operations: [
+      { version: 'v1', method: 'POST', path: 'user/update', body: { user_id: 'k1', user_proxy_config: proxy } },
+      { version: 'v1', method: 'GET', path: 'user/list', query: { user_id: 'k1', page: '1', page_size: '10' } },
+    ],
+  });
+  assert.equal((await mainRead).ok, true);
+  const batchResult = await childBatch;
+  assert.equal(batchResult.ok, true);
+  assert.deepEqual(
+    calls.map((call) => `${call.method || 'GET'} ${new URL(call.url).pathname}`),
+    [
+      'GET /api/v1/user/list',
+      'POST /api/v1/user/update',
+      'GET /api/v1/user/list',
+    ],
+  );
+  assert.ok(sleeps.filter((ms) => ms >= 1000).length >= 2, JSON.stringify(sleeps));
+  assert.equal(calls[1].headers?.Authorization, 'Bearer parent-owned-key');
+  assert.equal(JSON.stringify(batchResult.responses).includes('private'), true, 'private IPC readback remains exact');
+});
+
+test('managed child broker rejects other-profile and unapproved endpoint requests before fetch', async () => {
+  const calls: Array<{ url: string }> = [];
+  const api = createAdsLocalApi({
+    ...noThrottle,
+    fetchImpl: stubFetch([], calls),
+  });
+  const otherProfile = await api.brokerBatch({
+    profileId: 'k1',
+    operations: [
+      { version: 'v2', method: 'GET', path: 'browser-profile/active', query: { profile_id: 'k2' } },
+    ],
+  });
+  const unapproved = await api.brokerBatch({
+    profileId: 'k1',
+    operations: [
+      { version: 'v1', method: 'POST', path: 'user/delete', body: { user_id: 'k1' } },
+    ],
+  });
+  assert.deepEqual(otherProfile, { ok: false, reason: 'invalid_broker_request' });
+  assert.deepEqual(unapproved, { ok: false, reason: 'invalid_broker_request' });
+  assert.equal(calls.length, 0);
+});
+
+test('主进程受限写客户端与只读请求共用同一 FIFO', async () => {
+  let clock = 1;
+  const sleeps: number[] = [];
+  const order: string[] = [];
+  const fetchImpl = (async (url: string) => {
+    order.push(String(url).includes('/user/update') ? 'write' : 'read');
+    return res(true, 200, { code: 0, data: { list: [] } });
+  }) as unknown as typeof fetch;
+  const api = createAdsLocalApi({
+    nowImpl: () => clock,
+    sleepImpl: async (ms: number) => { sleeps.push(ms); clock += ms; },
+    fetchImpl,
+  });
+  const writeApi = createAdsWriteApi({
+    apiBase: 'http://local.adspower.net:50325',
+    requestImpl: api.enqueueRequest,
+  });
+
+  await Promise.all([
+    api.listProfiles(),
+    writeApi.renameProfile({ userId: 'k1', name: 'managed' }),
+  ]);
+
+  assert.deepEqual(order, ['read', 'write']);
+  assert.ok(sleeps.some((ms) => ms >= 1000), `主进程读写应共享限速 FIFO，实测 sleeps=${JSON.stringify(sleeps)}`);
 });
 
 test('只读边界：探测与列表仍不构造 browser/start|stop|active URL', async () => {

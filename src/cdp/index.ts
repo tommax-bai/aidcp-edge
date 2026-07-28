@@ -8,6 +8,7 @@ export * from './action-executor.js';
 export * from './session.js';
 export * from './chrome-launcher.js';
 export * from './browser-provider.js';
+export * from './ads-api-broker.js';
 export * from './browser-window.js';
 export * from './stealth-injector.js';
 export * from './self-identity.js';

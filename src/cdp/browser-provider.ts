@@ -15,6 +15,12 @@ import { readFileSync, type Dirent } from 'node:fs';
 import { lstat, readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
+import {
+  createProcessAdsPowerApiBroker,
+  type AdsPowerApiBroker,
+  type AdsPowerApiOperation,
+  type AdsPowerApiResponse,
+} from './ads-api-broker.js';
 import { launchChrome, type ChromeInstance } from './chrome-launcher.js';
 
 export type BrowserProviderKind = 'self' | 'adspower';
@@ -113,6 +119,8 @@ export interface AdsPowerProxyAuthority {
 
 export interface AdsPowerDeps {
   fetchImpl?: typeof fetch;
+  /** Electron-managed children use the parent broker; direct/CLI callers omit it and self-throttle. */
+  apiBroker?: AdsPowerApiBroker;
   sleepImpl?: (ms: number) => Promise<void>;
   logImpl?: (msg: string) => void;
   nowImpl?: () => number;
@@ -155,6 +163,7 @@ const MAX_ORPHAN_CACHE_CANDIDATES = 8;
 const PROFILE_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 const DEVTOOLS_BROWSER_PATH_RE = /^\/devtools\/browser\/[A-Za-z0-9._-]+$/;
 const ADS_PROFILE_IN_USE_RE = /^\s*\[[^\]]+\]\s+is being used by\s+\[([^\]]+)\]\s+and is not allowed to open\s*$/i;
+const ADS_RATE_LIMIT_RE = /too\s+many|rate.?limit|frequen|requests?\s+per\s+second|请求过快|请求频繁|频率|限频/i;
 
 export class AdsPowerProxyAuthorityRestartRequiredError extends Error {
   readonly code = 'adspower_proxy_authority_restart_required';
@@ -266,6 +275,8 @@ const positiveMs = (value: number | undefined, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 const positiveInt = (value: number | undefined, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+const responseStatus = (response: Response): number =>
+  Number.isInteger(response.status) ? response.status : (response.ok ? 200 : 500);
 
 function envOsKillEnabled(): boolean {
   const v = (process.env.AIDCP_ADS_CLOSE_OS_KILL ?? '').trim().toLowerCase();
@@ -337,6 +348,7 @@ async function defaultOsKill(host: string, port: number, log: (m: string) => voi
 export class AdsPowerProvider implements BrowserProvider {
   readonly kind = 'adspower' as const;
   private readonly fetchImpl: typeof fetch;
+  private readonly apiBroker?: AdsPowerApiBroker;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: (msg: string) => void;
   private readonly now: () => number;
@@ -356,6 +368,7 @@ export class AdsPowerProvider implements BrowserProvider {
     deps: AdsPowerDeps = {},
   ) {
     this.fetchImpl = deps.fetchImpl ?? globalThis.fetch;
+    this.apiBroker = deps.apiBroker;
     this.sleep = deps.sleepImpl ?? defaultSleep;
     this.log = deps.logImpl ?? ((m) => console.log(m));
     this.now = deps.nowImpl ?? (() => Date.now());
@@ -474,6 +487,15 @@ export class AdsPowerProvider implements BrowserProvider {
     path: string,
     request: { query?: Record<string, string>; body?: Record<string, unknown> },
   ): Promise<T> {
+    if (this.apiBroker) {
+      const [response] = await this.apiBroker.request([{
+        version: 'v1',
+        method,
+        path,
+        ...request,
+      }]);
+      return this.unwrapApiResponse<T>('v1', path, response);
+    }
     if (this.lastApiAt !== 0) {
       const wait = ADS_MIN_INTERVAL_MS - (this.now() - this.lastApiAt);
       if (wait > 0) await this.sleep(wait);
@@ -501,21 +523,28 @@ export class AdsPowerProvider implements BrowserProvider {
     } finally {
       this.lastApiAt = this.now();
     }
-    if (!res.ok) throw new Error(`[aidcp-edge] AdsPower ${path} 响应异常：HTTP ${res.status}`);
-    let body: { code: number; msg?: string; data?: T };
+    if (!res.ok) return this.unwrapApiResponse<T>('v1', path, { status: responseStatus(res), body: null });
+    let body: unknown;
     try {
       body = await this.withTimeout(
-        res.json() as Promise<{ code: number; msg?: string; data?: T }>,
+        res.json() as Promise<unknown>,
         this.apiTimeoutMs,
         `${path} 响应`,
       );
     } catch {
       throw new Error(`[aidcp-edge] AdsPower ${path} 响应非有效 JSON`);
     }
-    if (body.code !== 0) {
-      throw new Error(`[aidcp-edge] AdsPower ${path} 拒绝代理配置：code=${body.code}`);
-    }
-    return body.data as T;
+    return this.unwrapApiResponse<T>('v1', path, { status: responseStatus(res), body });
+  }
+
+  private profileProxyFromList(
+    data: { list?: Array<Record<string, unknown>>; data?: Array<Record<string, unknown>> },
+  ): AdsPowerProxyConfig {
+    const list = Array.isArray(data?.list) ? data.list : Array.isArray(data?.data) ? data.data : [];
+    const profile = list.find((item) => String(item?.user_id ?? '') === this.cfg.userId);
+    if (!profile) throw new Error('[aidcp-edge] AdsPower 代理读回未找到目标环境');
+    const raw = (profile.user_proxy_config ?? profile.proxy_config) as unknown;
+    return normalizeAdsPowerProxyConfig(raw);
   }
 
   private async readProfileProxy(): Promise<AdsPowerProxyConfig> {
@@ -524,21 +553,42 @@ export class AdsPowerProvider implements BrowserProvider {
       'user/list',
       { query: { user_id: this.cfg.userId, page: '1', page_size: '10' } },
     );
-    const list = Array.isArray(data?.list) ? data.list : Array.isArray(data?.data) ? data.data : [];
-    const profile = list.find((item) => String(item?.user_id ?? '') === this.cfg.userId);
-    if (!profile) throw new Error('[aidcp-edge] AdsPower 代理读回未找到目标环境');
-    const raw = (profile.user_proxy_config ?? profile.proxy_config) as unknown;
-    return normalizeAdsPowerProxyConfig(raw);
+    return this.profileProxyFromList(data);
   }
 
   private async synchronizeProfileProxy(
     target: AdsPowerProxyConfig,
     phase: 'direct' | 'system_then_environment' | 'restore',
   ): Promise<void> {
-    await this.apiV1<unknown>('POST', 'user/update', {
-      body: { user_id: this.cfg.userId, user_proxy_config: target },
-    });
-    const actual = await this.readProfileProxy();
+    let actual: AdsPowerProxyConfig;
+    if (this.apiBroker) {
+      const operations: AdsPowerApiOperation[] = [
+        {
+          version: 'v1',
+          method: 'POST',
+          path: 'user/update',
+          body: { user_id: this.cfg.userId, user_proxy_config: target },
+        },
+        {
+          version: 'v1',
+          method: 'GET',
+          path: 'user/list',
+          query: { user_id: this.cfg.userId, page: '1', page_size: '10' },
+        },
+      ];
+      const responses = await this.apiBroker.request(operations);
+      this.unwrapApiResponse<unknown>('v1', 'user/update', responses[0]);
+      const data = this.unwrapApiResponse<{
+        list?: Array<Record<string, unknown>>;
+        data?: Array<Record<string, unknown>>;
+      }>('v1', 'user/list', responses[1]);
+      actual = this.profileProxyFromList(data);
+    } else {
+      await this.apiV1<unknown>('POST', 'user/update', {
+        body: { user_id: this.cfg.userId, user_proxy_config: target },
+      });
+      actual = await this.readProfileProxy();
+    }
     if (JSON.stringify(actual) !== JSON.stringify(target)) {
       throw new Error(`[aidcp-edge] AdsPower profile 代理读回与目标不一致（phase=${phase}）`);
     }
@@ -562,6 +612,15 @@ export class AdsPowerProvider implements BrowserProvider {
     path: string,
     request: { query?: Record<string, string>; body?: Record<string, unknown> },
   ): Promise<T> {
+    if (this.apiBroker) {
+      const [response] = await this.apiBroker.request([{
+        version: 'v2',
+        method,
+        path,
+        ...request,
+      }]);
+      return this.unwrapApiResponse<T>('v2', path, response);
+    }
     if (this.lastApiAt !== 0) {
       const wait = ADS_MIN_INTERVAL_MS - (this.now() - this.lastApiAt);
       if (wait > 0) await this.sleep(wait);
@@ -589,13 +648,11 @@ export class AdsPowerProvider implements BrowserProvider {
     } finally {
       this.lastApiAt = this.now();
     }
-    if (!res.ok) {
-      throw new Error(`[aidcp-edge] AdsPower ${path} 响应异常：HTTP ${res.status}（诚实失败，不回落 self）`);
-    }
-    let body: { code: number; msg?: string; data?: T };
+    if (!res.ok) return this.unwrapApiResponse<T>('v2', path, { status: responseStatus(res), body: null });
+    let body: unknown;
     try {
       body = await this.withTimeout(
-        res.json() as Promise<{ code: number; msg?: string; data?: T }>,
+        res.json() as Promise<unknown>,
         this.apiTimeoutMs,
         `${path} 响应`,
       );
@@ -603,16 +660,37 @@ export class AdsPowerProvider implements BrowserProvider {
       const message = (e as Error).message || String(e);
       throw new Error(`[aidcp-edge] AdsPower ${path} 响应异常：${message}（诚实失败，不回落 self）`);
     }
+    return this.unwrapApiResponse<T>('v2', path, { status: responseStatus(res), body });
+  }
+
+  private unwrapApiResponse<T>(
+    version: 'v1' | 'v2',
+    path: string,
+    response: AdsPowerApiResponse | undefined,
+  ): T {
+    if (!response || !Number.isInteger(response.status)) {
+      throw new Error(`[aidcp-edge] AdsPower ${path} 响应无效`);
+    }
+    if (response.status < 200 || response.status >= 300) {
+      const suffix = version === 'v2' ? '（诚实失败，不回落 self）' : '';
+      throw new Error(`[aidcp-edge] AdsPower ${path} 响应异常：HTTP ${response.status}${suffix}`);
+    }
+    const body = response.body && typeof response.body === 'object' && !Array.isArray(response.body)
+      ? response.body as { code?: unknown; msg?: unknown; data?: T }
+      : null;
+    if (!body || typeof body.code !== 'number') {
+      throw new Error(`[aidcp-edge] AdsPower ${path} 响应非有效 JSON`);
+    }
     if (body.code !== 0) {
-      if (path === 'browser-profile/start') {
-        const occupied = ADS_PROFILE_IN_USE_RE.exec(body.msg ?? '');
+      const rawMessage = typeof body.msg === 'string' ? body.msg : '';
+      if (version === 'v2' && path === 'browser-profile/start') {
+        const occupied = ADS_PROFILE_IN_USE_RE.exec(rawMessage);
         if (occupied) {
           throw new BrowserProfileInUseError(this.cfg.userId, maskOwnerHint(occupied[1]));
         }
       }
-      throw new Error(
-        `[aidcp-edge] AdsPower ${path} 失败：code=${body.code} msg=${body.msg ?? ''}（诚实失败，不回落 self）`,
-      );
+      const reason = ADS_RATE_LIMIT_RE.test(rawMessage) ? 'rate_limited' : 'api_rejected';
+      throw new Error(`[aidcp-edge] AdsPower ${path} 拒绝请求：code=${body.code} reason=${reason}`);
     }
     return body.data as T;
   }
@@ -839,6 +917,7 @@ export function selectBrowserProvider(
     };
     return new AdsPowerProvider(cfg, {
       fetchImpl: opts.fetchImpl,
+      apiBroker: env.AIDCP_ADS_API_BROKER === 'ipc' ? createProcessAdsPowerApiBroker() : undefined,
       sleepImpl: opts.sleepImpl,
       logImpl: opts.logImpl,
     });
