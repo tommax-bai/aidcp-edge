@@ -3175,13 +3175,22 @@ function syncBrowserPersonaNotice(handle, force = false) {
 
   const envKey = String(handle.profileId || '').trim();
   const isFacebook = normalizePlatform(handle.platform) === 'facebook';
-  const fact = isFacebook ? freshFacebookRuleModeFact(envKey) : null;
-  let notice = browserPersonaNoticeForStatus(handle.status, handle, fact && typeof fact.enabled === 'boolean'
-    ? { platform: 'facebook', enabled: fact.enabled }
+  // 呈现用**最后一次读到的**事实（哪怕已过期）。过期只该触发一次后台复读，绝不能把判据清空：清空后这一格
+  // 会先按「未知」推一版横幅状态、复读回来再推一版，于是未绑人设且规则模式关闭的账号每到 TTL 就闪一次横幅。
+  const known = isFacebook && envKey ? (facebookRuleModeFacts.get(envKey) || null) : null;
+  let notice = browserPersonaNoticeForStatus(handle.status, handle, known && typeof known.enabled === 'boolean'
+    ? { platform: 'facebook', enabled: known.enabled }
     : null);
+  // 这一格的横幅判定是否依赖规则模式事实：平台确认 Facebook + 人设横幅原判据（登录 + 连云 + 云端确认未绑）成立。
+  // 与 notice.active 分开算：规则模式已开启时 notice 本来就是不推，但事实照样要按期复读，
+  // 否则规则模式在别处关掉之后，这一格会一直吃着「已开启」的旧事实、横幅再也回不来。
+  const dependsOnRuleMode = isFacebook && envKey
+    && browserPersonaNoticeForStatus(handle.status, handle, null).active;
+  let graceHeld = false;
   if (notice.active && ready) {
     const elapsed = Date.now() - handle.personaNoticeReadySince;
     if (elapsed < PERSONA_NOTICE_GRACE_MS) {
+      graceHeld = true;
       notice = { active: false }; // 宽限内先不推横幅（已设置账号会在此窗口内翻成已绑而永不被推）
       if (!handle.personaNoticeTimer) {
         handle.personaNoticeTimer = setTimeout(() => {
@@ -3192,11 +3201,13 @@ function syncBrowserPersonaNotice(handle, force = false) {
       }
     }
   }
-  // 规则模式事实完全未知时先不推：这个未绑人设的 Facebook 账号可能正按规则运行，宁可晚推也不误推。
-  // 排在人设宽限之后：宽限内本来就不推，那段时间还不需要这个事实，也就不必为随后会翻成「已绑」的账号白读一次。
-  // 发一次权威读，成功或失败都会落成已知结论并回到这里重评——读不到即按未启用处理，横幅照常推出。
-  if (notice.active && isFacebook && envKey && !fact) {
-    notice = { active: false };
+  // 事实不新鲜就复读一次。排在人设宽限之后：宽限内本来就不推，那段时间还不需要这个事实，
+  // 也就不必为随后会翻成「已绑」的账号白读一次。
+  // 成功或失败都会落成已知结论并回到这里重评——读不到即按未启用处理，横幅照常推出。
+  if (dependsOnRuleMode && !graceHeld && !freshFacebookRuleModeFact(envKey)) {
+    // 从未读到过任何事实才按住不推：这个未绑人设的 Facebook 账号可能正按规则运行，宁可晚推也不误推。
+    // 已有旧事实的（只是过期）继续沿用旧结论呈现，复读在后台进行——不闪。
+    if (!known) notice = { active: false };
     void readFacebookRuleModeFact(envKey).then(() => {
       if (handle.removed || !handle.child) return;
       syncBrowserPersonaNotice(handle);
