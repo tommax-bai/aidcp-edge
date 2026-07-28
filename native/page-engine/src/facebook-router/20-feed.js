@@ -147,19 +147,78 @@
   // 真正的滚动条在 feed 的一个祖先 div 上（overflow-y:auto，scrollHeight 2511 / clientHeight 803）。
   // 照读窗口坐标 ⇒ moved 恒 false、near_bottom 恒 true（scrollHeight-scrollY-innerHeight = 0 ≤ innerHeight），
   // 引擎从第一次探测起就认为"feed 已到底"、滚动回报 no_target。窗口真的会滚时行为不变。
-  const feedScrollMetrics=()=>{
+  // 返回承担滚动的那个元素；null 表示由窗口/文档承担（绝大多数版式）。
+  const feedScrollNode=()=>{
     const doc=document.scrollingElement||document.documentElement;
-    const windowMetrics={scrollY:Number(window.scrollY)||0,scrollHeight:Number(doc&&doc.scrollHeight)||0};
-    if(doc&&doc.scrollHeight-doc.clientHeight>1)return windowMetrics;
+    if(doc&&doc.scrollHeight-doc.clientHeight>1)return null;
     const anchor=first(['div[role="feed"]','[role="main"]','main'])||document.body;
     for(let node=anchor;node&&node!==document.documentElement;node=node.parentElement){
       if(node.scrollHeight-node.clientHeight<=1)continue;
       let overflowY='';
       try{overflowY=getComputedStyle(node).overflowY||'';}catch{}
       if(!/(auto|scroll|overlay)/.test(overflowY))continue;
-      return {scrollY:Number(node.scrollTop)||0,scrollHeight:Number(node.scrollHeight)||0};
+      return node;
     }
-    return windowMetrics;
+    return null;
+  };
+  const feedScrollMetrics=()=>{
+    const node=feedScrollNode();
+    if(node)return {scrollY:Number(node.scrollTop)||0,scrollHeight:Number(node.scrollHeight)||0};
+    const doc=document.scrollingElement||document.documentElement;
+    return {scrollY:Number(window.scrollY)||0,scrollHeight:Number(doc&&doc.scrollHeight)||0};
+  };
+  // 实际滚动也必须落在同一个元素上：只改测量口径而仍然滚窗口，位移依旧恒 0。
+  // 返回滚动前的位置，供随后的位移/到底回报使用。
+  const feedScrollBy=(delta)=>{
+    const node=feedScrollNode();
+    if(node){
+      const before=Number(node.scrollTop)||0;
+      if(typeof node.scrollBy==='function')node.scrollBy({top:delta,behavior:'smooth'});
+      else node.scrollTop=before+delta;
+      return before;
+    }
+    const before=Number(window.scrollY)||0;
+    window.scrollBy({top:delta,behavior:'smooth'});
+    return before;
+  };
+  const feedScrollMovement=(before)=>{
+    const node=feedScrollNode();
+    if(node){
+      const after=Number(node.scrollTop)||0;
+      return {
+        before,
+        after,
+        moved:after!==before,
+        atBottom:after+(Number(node.clientHeight)||0)>=(Number(node.scrollHeight)||0)-8,
+      };
+    }
+    const after=Number(window.scrollY)||0;
+    return {
+      before,
+      after,
+      moved:after!==before,
+      atBottom:after+(Number(window.innerHeight)||0)>=document.documentElement.scrollHeight-8,
+    };
+  };
+  // 越南语空白/阻塞页实测恢复入口。这里只做唯一目标定位；真实点击必须由 Native CDP 完成。
+  const feedRecoveryTarget=()=>{
+    const actionText=(value)=>norm(value,256)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g,'')
+      .replace(/[đĐ]/g,'d')
+      .toLowerCase();
+    const candidates=all('a[href],button,[role="button"]')
+      .filter(visible)
+      .filter((node)=>[label(node,256),text(node,256)].some((value)=>actionText(value)==='di den bang feed'));
+    if(!candidates.length)return {ok:false,reason:'no_feed_recovery_target'};
+    if(candidates.length!==1)return {ok:false,reason:'ambiguous_feed_recovery_target'};
+    const rect=candidates[0].getBoundingClientRect();
+    const cx=rect.left+rect.width/2;
+    const cy=rect.top+rect.height/2;
+    if(cx<0||cy<0||cx>Number(window.innerWidth)||cy>Number(window.innerHeight)){
+      return {ok:false,reason:'feed_recovery_target_out_of_view'};
+    }
+    return {ok:true,cx,cy};
   };
   const feedProbe=()=>{
     const output=feedCards();
@@ -193,6 +252,7 @@
       explicitEnd,
       url:String(location.href).slice(0,4096),
       surface:classify(),
+      feedRecoveryTarget:feedRecoveryTarget(),
       scrollY:scrollMetrics.scrollY,
       innerWidth:Number(window.innerWidth)||0,
       innerHeight:Number(window.innerHeight)||0,

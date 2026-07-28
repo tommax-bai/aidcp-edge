@@ -1,12 +1,13 @@
   const blocking=blockingProbe();
   const blocked=blocker(blocking);
-  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_action_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_bound_editor_probe','publish_upload_target_probe','publish_upload_preview_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
+  if(!['identity_read','page_probe','consent_probe','feed_probe','feed_home_target','feed_recovery_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_action_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_bound_editor_probe','publish_upload_target_probe','publish_upload_preview_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
     return fail(kind||'page',blocked);
   }
   if(kind==='identity_read')return done(identity());
   if(kind==='consent_probe')return done({kind:'consent_probe',value:consentProbe()});
   if(kind==='feed_probe')return done(feedProbe());
   if(kind==='feed_home_target')return done({kind:'point_target',value:feedHomeTarget()});
+  if(kind==='feed_recovery_target')return done({kind:'point_target',value:feedRecoveryTarget()});
   if(kind==='feed_like_target_probe')return done({kind:'feed_like_target_probe',value:feedLikeTargetValue(feedLikeTarget())});
   if(kind==='feed_like_commit')return done({kind:'feed_like_commit',value:feedLikeCommit()});
   if(kind==='feed_like_verify')return done({kind:'feed_like_verify',value:feedLikeVerify()});
@@ -54,12 +55,14 @@
       return fail('scroll','native_reels_actuator_required');
     }
     if(p.reason!=='initial_scan'){
-      const before=window.scrollY;
-      window.scrollBy({top:Math.max(420,Math.round((window.innerHeight||800)*0.8)),behavior:'smooth'});
+      // 滚动与位移/到底回报都必须落在**真正在滚的那个元素**上（20-feed.js `feedScrollNode`）。
+      // 群页有一类版式文档本身不滚，照滚窗口 ⇒ 位移恒 0、到底恒真，Native 的「没动且到底」判据
+      // 从第一轮起就成立，四轮下滚预算实际只跑一轮——首帖没找到就直接放弃。窗口真的会滚时行为不变。
+      const before=feedScrollBy(Math.max(420,Math.round((window.innerHeight||800)*0.8)));
       await sleep(450);
       if(p.reason==='first_commentable_group_post_probe')await sleep(2000);
       const output=p.reason==='first_commentable_group_post_probe'?await firstPostCards():feedCards();
-      output.value.movement={before,after:window.scrollY,moved:window.scrollY!==before,atBottom:window.scrollY+(window.innerHeight||0)>=document.documentElement.scrollHeight-8};
+      output.value.movement=feedScrollMovement(before);
       return done(output);
     }
     return done(feedCards());

@@ -297,6 +297,33 @@ test('Native Facebook assigns only Join and length-aware comments a long command
   assert.equal(h.executions[3]?.timeoutMs, 30_000);
 });
 
+test('Native Facebook gives the first-post open its own long budget; 普通开帖仍取默认', async () => {
+  // 首帖开帖内部是一串串行有界窗（就绪 8s + 四轮下滚 + 可选二次导航就绪 8s + 绑定 12s + 身份回读 20s）。
+  // 沿用默认 30s ⇒ 外层先到点，把边端一个具名失败改判成合成失败：只放宽内层窗口等于没改。
+  const h = harness(async () => ({
+    ok: false,
+    effectPhase: 'not_started',
+    reasonCode: 'target_context_mismatch',
+    output: {
+      kind: 'action_receipt',
+      value: { action: 'open_note', ok: false, reason: 'target_context_mismatch' },
+    },
+  }), { platform: 'facebook' });
+
+  await h.session.onCloudCommand(envelope('note.open', {
+    selection: 'first_commentable_group_post',
+    container: 'https://www.facebook.com/groups/42',
+  }));
+  await h.session.onCloudCommand(envelope('note.open', {
+    url: 'https://www.facebook.com/groups/42/posts/7',
+  }));
+
+  assert.equal(h.executions[0]?.command.kind, 'note_open');
+  assert.equal(h.executions[0]?.timeoutMs, 90_000, '首帖开帖必须拿到长预算');
+  assert.equal(h.executions[1]?.command.kind, 'note_open');
+  assert.equal(h.executions[1]?.timeoutMs, 30_000, '按 URL 开帖预算未变，不得跟着放宽');
+});
+
 test('Native Facebook forwards the exact Join commit window to the shared coordinator guard', async () => {
   let now = 1_000;
   const guard = new CommitWindowGuard(() => now);

@@ -142,6 +142,8 @@ pub struct FacebookFeedProbe {
     pub explicit_end: bool,
     pub url: String,
     pub surface: String,
+    #[serde(default)]
+    pub feed_recovery_target: Option<FacebookPointTarget>,
     pub scroll_y: f64,
     pub inner_width: f64,
     pub inner_height: f64,
@@ -431,6 +433,10 @@ pub fn feed_probe_expression() -> Result<String, EngineError> {
 
 pub fn feed_home_target_expression() -> Result<String, EngineError> {
     router_expression(json!({ "kind": "feed_home_target", "params": {} }))
+}
+
+pub fn feed_recovery_target_expression() -> Result<String, EngineError> {
+    router_expression(json!({ "kind": "feed_recovery_target", "params": {} }))
 }
 
 pub fn consent_probe_expression() -> Result<String, EngineError> {

@@ -308,6 +308,70 @@ test('Facebook Feed probe distinguishes loading and visible unreportable article
   }
 });
 
+test('Facebook Feed probe locates the exact Vietnamese recovery control without DOM click', async () => {
+  const dom = install(`
+    <main>
+      <button id="feed-recovery">Đi đến Bảng feed</button>
+      <button>Đi đến Bảng feed khác</button>
+    </main>
+  `);
+  const recovery = dom.window.document.querySelector('#feed-recovery') as HTMLButtonElement;
+  setRect(recovery, { left: 420, top: 300, right: 660, bottom: 360 });
+  let domClicks = 0;
+  recovery.click = () => {
+    domClicks += 1;
+  };
+
+  const feed = await run({ kind: 'feed_probe', params: {} });
+  assert.deepEqual(feed.output.value.feedRecoveryTarget, {
+    ok: true,
+    cx: 540,
+    cy: 330,
+  });
+  const refreshed = await run({ kind: 'feed_recovery_target', params: {} });
+  assert.equal(refreshed.output.kind, 'point_target');
+  assert.deepEqual(refreshed.output.value, {
+    ok: true,
+    cx: 540,
+    cy: 330,
+  });
+  assert.equal(domClicks, 0);
+});
+
+test('Facebook Feed recovery target rejects near text, duplicate exact controls, and offscreen points', async () => {
+  install('<main><button>Đi đến Bảng feed khác</button></main>');
+  const nearResult = await run({ kind: 'feed_recovery_target', params: {} });
+  assert.deepEqual(nearResult.output.value, {
+    ok: false,
+    reason: 'no_feed_recovery_target',
+  });
+
+  install(`
+    <main>
+      <button>Đi đến Bảng feed</button>
+      <a href="/">Đi đến Bảng feed</a>
+    </main>
+  `);
+  const duplicateResult = await run({ kind: 'feed_recovery_target', params: {} });
+  assert.deepEqual(duplicateResult.output.value, {
+    ok: false,
+    reason: 'ambiguous_feed_recovery_target',
+  });
+
+  const offscreen = install('<main><button id="offscreen">Đi đến Bảng feed</button></main>');
+  setRect(offscreen.window.document.querySelector('#offscreen')!, {
+    left: 420,
+    top: 900,
+    right: 660,
+    bottom: 960,
+  });
+  const offscreenResult = await run({ kind: 'feed_recovery_target', params: {} });
+  assert.deepEqual(offscreenResult.output.value, {
+    ok: false,
+    reason: 'feed_recovery_target_out_of_view',
+  });
+});
+
 test('Facebook Feed probe separates a visible end marker from the stronger empty-home marker', async () => {
   install(`
     <main>
@@ -2181,4 +2245,104 @@ test('Facebook feed probe measures scroll from the element that actually scrolls
   const probe = await run({ kind: 'feed_probe', params: {} });
   assert.equal(probe.output.value.scrollY, 316, 'scrollY 必须来自真正在滚的容器');
   assert.equal(probe.output.value.scrollHeight, 2511, 'scrollHeight 必须来自真正在滚的容器');
+});
+
+test('Facebook first-post probe scrolls and measures the element that actually scrolls', async () => {
+  // 与上一条同源（change restore-facebook-post-join-comment-continuity）：位移**测量**已改读真正在滚的
+  // 容器，但首帖探测走的滚动分支当时仍在滚窗口 + 读窗口坐标，于是 moved 恒 false、atBottom 恒真，
+  // Native 的「没动且到底」判据从第一轮起就成立 —— 四轮下滚预算实际只跑一轮，首帖找不到就放弃。
+  const dom = install(`
+    <main>
+      <div id="scroller" style="overflow-y: auto">
+        <div role="feed"><div role="article"><a href="/Alice/posts/pfbidABC/">p</a></div></div>
+      </div>
+    </main>
+  `, 'https://www.facebook.com/groups/945390701793119');
+  const scroller = document.getElementById('scroller') as HTMLElement;
+  Object.defineProperty(scroller, 'scrollHeight', { value: 2511, configurable: true });
+  Object.defineProperty(scroller, 'clientHeight', { value: 803, configurable: true });
+  let windowScrolls = 0;
+  Object.defineProperty(dom.window, 'scrollBy', { value: () => { windowScrolls += 1; } });
+
+  const result = await run({
+    kind: 'browse_scroll',
+    params: { reason: 'first_commentable_group_post_probe' },
+  });
+
+  const movement = result.output.value.movement as {
+    before: number; after: number; moved: boolean; atBottom: boolean;
+  };
+  assert.equal(windowScrolls, 0, '文档不滚时绝不滚窗口');
+  assert.equal(movement.before, 0);
+  assert.ok(movement.after > 0, '位移必须来自真正在滚的容器');
+  assert.equal(movement.moved, true);
+  assert.equal(movement.atBottom, false, '容器远未到底时不得判到底');
+});
+
+test('Facebook scroll keeps window coordinates when the document itself scrolls', async () => {
+  const dom = install(`
+    <main><div role="feed"><div role="article"><a href="/Alice/posts/pfbidXYZ/">p</a></div></div></main>
+  `, 'https://www.facebook.com/groups/945390701793119');
+  Object.defineProperty(document.documentElement, 'scrollHeight', { value: 5_000, configurable: true });
+  Object.defineProperty(document.documentElement, 'clientHeight', { value: 800, configurable: true });
+  let windowScrolls = 0;
+  Object.defineProperty(dom.window, 'scrollBy', { value: () => { windowScrolls += 1; } });
+
+  const result = await run({ kind: 'browse_scroll', params: { reason: 'coverage_scan' } });
+
+  const movement = result.output.value.movement as { before: number; moved: boolean; atBottom: boolean };
+  assert.equal(windowScrolls, 1, '文档可滚时仍走窗口分支');
+  assert.equal(movement.before, 0);
+  assert.equal(movement.moved, false, 'window.scrollY 未变 ⇒ 如实回报没动');
+  assert.equal(movement.atBottom, false);
+});
+
+test('Facebook feed recovery target is located without DOM actuation', async () => {
+  const dom = install(`
+    <main>
+      <div role="main"><span>Trang chủ</span><button id="go">Đi đến Bảng feed</button></div>
+    </main>
+  `);
+  let domClicks = 0;
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'click', {
+    configurable: true,
+    value: () => { domClicks += 1; },
+  });
+  setRect(document.getElementById('go')!, { left: 600, top: 400, right: 760, bottom: 440 });
+
+  const result = await run({ kind: 'feed_recovery_target', params: {} });
+
+  assert.equal(result.output.kind, 'point_target');
+  assert.equal(result.output.value.ok, true);
+  assert.equal(result.output.value.cx, 680);
+  assert.equal(result.output.value.cy, 420);
+  assert.equal(domClicks, 0, 'JS 只给坐标，真实点击必须由 Native CDP 完成');
+});
+
+test('Facebook feed recovery target fails closed on近似文案/多目标/离屏', async () => {
+  // 近似但不等值的文案：规范化后必须不匹配，绝不放宽成模糊命中。
+  install('<main><div role="main"><button>Đi đến Bảng tin</button></div></main>');
+  assert.equal(
+    (await run({ kind: 'feed_recovery_target', params: {} })).output.value.reason,
+    'no_feed_recovery_target',
+  );
+
+  const many = install(`
+    <main><div role="main">
+      <button id="a">Đi đến Bảng feed</button><button id="b">Đi đến Bảng feed</button>
+    </div></main>
+  `);
+  setRect(many.window.document.getElementById('a')!, { left: 10, top: 10, right: 90, bottom: 40 });
+  setRect(many.window.document.getElementById('b')!, { left: 10, top: 60, right: 90, bottom: 90 });
+  assert.equal(
+    (await run({ kind: 'feed_recovery_target', params: {} })).output.value.reason,
+    'ambiguous_feed_recovery_target',
+  );
+
+  const off = install('<main><div role="main"><button id="c">Đi đến Bảng feed</button></div></main>');
+  setRect(off.window.document.getElementById('c')!, { left: 10, top: 4_000, right: 90, bottom: 4_040 });
+  assert.equal(
+    (await run({ kind: 'feed_recovery_target', params: {} })).output.value.reason,
+    'feed_recovery_target_out_of_view',
+  );
 });

@@ -64,6 +64,17 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 const monotonicNow = (): number => performance.now();
 const DEFAULT_NATIVE_COMMAND_TIMEOUT_MS = 30_000;
 const FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 90_000;
+/**
+ * 空关键词首帖开帖的原子上限（change restore-facebook-post-join-comment-continuity）。
+ *
+ * 该命令内部是一串**串行**有界窗口，最坏路径：群页导航后就绪 8s + 首次探测约 2s +
+ * 四轮下滚约 12s + 可选固链导航后就绪 8s + 评论框绑定 12s + 身份回读 20s ≈ 62s。
+ * 默认 30s 会在内层窗口跑完之前先到点，把边端一个具名失败改判成外层合成失败——
+ * 只放宽内层而不抬这一层等于没改。取值与加群命令同为 90s，避免上限种类膨胀。
+ * 普通开帖（带 url / noteId）不受影响，仍取默认值。
+ */
+const FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS = 90_000;
+const FACEBOOK_FIRST_POST_SELECTION = 'first_commentable_group_post';
 const FACEBOOK_COMMENT_TIMEOUT_FLOOR_MS = 28_000;
 const FACEBOOK_COMMENT_TIMEOUT_BASE_MS = 18_000;
 const FACEBOOK_COMMENT_TIMEOUT_PER_CHAR_MS = 220;
@@ -244,6 +255,12 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private facebookCommandTimeoutMs(command: Parameters<NativePageRuntime['execute']>[1]): number {
     if (this.options.platform !== 'facebook') return DEFAULT_NATIVE_COMMAND_TIMEOUT_MS;
     if (command.kind === 'group_join') return FACEBOOK_GROUP_JOIN_TIMEOUT_MS;
+    if (
+      command.kind === 'note_open'
+      && command.params.selection === FACEBOOK_FIRST_POST_SELECTION
+    ) {
+      return FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS;
+    }
     if (command.kind !== 'interaction_comment') return DEFAULT_NATIVE_COMMAND_TIMEOUT_MS;
     const body = typeof command.params.text === 'string' ? command.params.text.trim() : '';
     const groupChatCode = typeof command.params.groupChatCode === 'string'

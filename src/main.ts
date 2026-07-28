@@ -703,6 +703,22 @@ async function main(): Promise<void> {
   });
   session.cdp.on('cdp.control_recovered', () => taskCoordinator.resumeAfterControlRecovery());
 
+  /**
+   * 被任务租约抑制的命令必须**回执**，不得只打日志就 return（change
+   * restore-facebook-post-join-comment-continuity；前置登记见 facebook-first-post-comment-confirmation 5.6）。
+   *
+   * 真机实例：一条 page.scroll 与其所属任务的 release 在同一毫秒到达，命令被丢弃、云端毫无信号，
+   * 只能等满自己的步超时。这正是本项目禁止的「静默丢弃」形状——云端分不清「命令没触达页面」
+   * 与「命令执行了但页面没结果」。回执沿用 browser_absent 那条既有形状：成功位为假 + 具名原因。
+   */
+  const reportLeaseSuppressed = (env: Envelope, ownedTaskId: string | undefined, lane: string): void => {
+    const action = nativeActionNameForCommand(env.type);
+    console.warn(
+      `[aidcp-edge] ${lane} 命令被任务租约抑制 type=${env.type} taskId=${ownedTaskId ?? '-'} current=${taskCoordinator.currentTaskId ?? '-'} 回执 ${action}:task_lease_suppressed`,
+    );
+    client.reportActionCompleted({ action, ok: false, reason: 'task_lease_suppressed' });
+  };
+
   // 发布原子与浏览命令复用同一个 Native 会话串行边界；切换 owner 时旧会话先有界关闭。
   const nativePublishExecutor = new NativePublishExecutor(
     nativePageRuntime,
@@ -1185,9 +1201,7 @@ async function main(): Promise<void> {
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
       const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
       if (!taskCoordinator.canExecute(ownedTaskId)) {
-        console.warn(
-          `[aidcp-edge] Facebook 命令被任务租约抑制 type=${env.type} taskId=${ownedTaskId ?? '-'} current=${taskCoordinator.currentTaskId ?? '-'}`,
-        );
+        reportLeaseSuppressed(env, ownedTaskId, 'Facebook');
         return;
       }
       if (ownedTaskId) taskCoordinator.touch(ownedTaskId);
@@ -1231,9 +1245,7 @@ async function main(): Promise<void> {
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
       const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
       if (env.type !== 'pacing.update' && !taskCoordinator.canExecute(ownedTaskId)) {
-        console.warn(
-          `[aidcp-edge] Native 命令被任务租约抑制 type=${env.type} taskId=${ownedTaskId ?? '-'} current=${taskCoordinator.currentTaskId ?? '-'}`,
-        );
+        reportLeaseSuppressed(env, ownedTaskId, 'Native');
         return;
       }
       if (ownedTaskId) taskCoordinator.touch(ownedTaskId);

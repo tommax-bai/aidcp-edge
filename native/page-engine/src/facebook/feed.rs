@@ -9,6 +9,15 @@ use crate::protocol::{EffectPhase, NativeCommand};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+const FACEBOOK_FEED_RECOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+/// 恢复等待必须给「把诚实回执交出去」留出的余量。
+///
+/// 这一层是本 change 的核心命题在小尺度上的复现：**外层原子上限先到点，会把一个具名回执
+/// （feed_recovery_navigation_unconfirmed）改判成信息量更低的合成 CdpTimeout。**
+/// 250ms 只够无争用时的一次返回；机器有负载时（并发跑测试、生产上多环境并行）光调度抖动
+/// 就能吃掉它，于是「偶发」退化成合成失败。取 1s：相对 8s 恢复窗仍是小头，却扛得住抖动。
+const FACEBOOK_FEED_RECOVERY_RECEIPT_MARGIN: Duration = Duration::from_millis(1_000);
+
 pub(crate) async fn execute(
     session: &mut EngineSession,
     command: &NativeCommand,
@@ -84,6 +93,13 @@ pub(crate) async fn execute_facebook_initial_feed(
     }
 
     let mut last = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_NAV).await?;
+    last = match recover_facebook_feed_prompt(session, last, cancellation, deadline_unix_ms).await?
+    {
+        FacebookFeedRecovery::Continue(probe) => probe,
+        FacebookFeedRecovery::Failure(phase, reason) => {
+            return Ok(facebook_scroll_failure(phase, reason));
+        }
+    };
     for round in 0..FACEBOOK_FEED_SCROLL_ROUNDS {
         if !last.cards.is_empty() {
             let cards = facebook_page_cards(session, last, false, None);
@@ -176,6 +192,14 @@ pub(crate) async fn execute_facebook_feed_scroll(
         return Ok((EffectPhase::NotStarted, output));
     }
     let mut current = probe_facebook_feed(session).await?;
+    current = match recover_facebook_feed_prompt(session, current, cancellation, deadline_unix_ms)
+        .await?
+    {
+        FacebookFeedRecovery::Continue(probe) => probe,
+        FacebookFeedRecovery::Failure(phase, reason) => {
+            return Ok(facebook_scroll_failure(phase, reason));
+        }
+    };
     let start_y = current.scroll_y;
     let mut saw_any_card = !current.cards.is_empty();
 
@@ -603,6 +627,116 @@ async fn probe_facebook_home_target(
     facebook::point_target_from_cdp(&raw)
 }
 
+enum FacebookFeedRecovery {
+    Continue(facebook::FacebookFeedProbe),
+    Failure(EffectPhase, &'static str),
+}
+
+async fn recover_facebook_feed_prompt(
+    session: &mut EngineSession,
+    current: facebook::FacebookFeedProbe,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<FacebookFeedRecovery, EngineError> {
+    let Some(observed) = current.feed_recovery_target.as_ref() else {
+        return Ok(FacebookFeedRecovery::Continue(current));
+    };
+    if !observed.ok {
+        return Ok(match observed.reason.as_deref() {
+            None | Some("no_feed_recovery_target") => FacebookFeedRecovery::Continue(current),
+            Some("ambiguous_feed_recovery_target") => FacebookFeedRecovery::Failure(
+                EffectPhase::NotStarted,
+                "feed_recovery_target_ambiguous",
+            ),
+            Some("feed_recovery_target_out_of_view") => FacebookFeedRecovery::Failure(
+                EffectPhase::NotStarted,
+                "feed_recovery_target_out_of_view",
+            ),
+            Some(_) => FacebookFeedRecovery::Failure(
+                EffectPhase::NotStarted,
+                "feed_recovery_target_unavailable",
+            ),
+        });
+    }
+
+    if facebook_command_cancelled(cancellation) {
+        return Err(cancelled_before_dispatch());
+    }
+    if unix_time_ms() >= deadline_unix_ms {
+        return Ok(FacebookFeedRecovery::Failure(
+            EffectPhase::NotStarted,
+            "feed_recovery_deadline",
+        ));
+    }
+
+    // 前台化可能引发布局重排，因此坐标必须在 bringToFront 之后重新读取，不能使用 feed_probe 的旧点位。
+    session.cdp.bring_to_front().await?;
+    let target = probe_facebook_feed_recovery_target(session).await?;
+    if !target.ok {
+        return Ok(match target.reason.as_deref() {
+            None | Some("no_feed_recovery_target") => {
+                FacebookFeedRecovery::Failure(EffectPhase::NotStarted, "feed_recovery_target_stale")
+            }
+            Some("ambiguous_feed_recovery_target") => FacebookFeedRecovery::Failure(
+                EffectPhase::NotStarted,
+                "feed_recovery_target_ambiguous",
+            ),
+            Some("feed_recovery_target_out_of_view") => FacebookFeedRecovery::Failure(
+                EffectPhase::NotStarted,
+                "feed_recovery_target_out_of_view",
+            ),
+            Some(_) => FacebookFeedRecovery::Failure(
+                EffectPhase::NotStarted,
+                "feed_recovery_target_unavailable",
+            ),
+        });
+    }
+    let (Some(x), Some(y)) = (target.cx, target.cy) else {
+        return Ok(FacebookFeedRecovery::Failure(
+            EffectPhase::NotStarted,
+            "feed_recovery_target_invalid",
+        ));
+    };
+
+    dispatch_facebook_click(session, x, y).await?;
+    let remaining = deadline_unix_ms.saturating_sub(unix_time_ms());
+    let wait_for = FACEBOOK_FEED_RECOVERY_TIMEOUT.min(
+        Duration::from_millis(remaining).saturating_sub(FACEBOOK_FEED_RECOVERY_RECEIPT_MARGIN),
+    );
+    let deadline = tokio::time::Instant::now() + wait_for;
+    loop {
+        if facebook_command_cancelled(cancellation) {
+            return Ok(FacebookFeedRecovery::Failure(
+                EffectPhase::Ambiguous,
+                "feed_recovery_navigation_unconfirmed",
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(FacebookFeedRecovery::Failure(
+                EffectPhase::Ambiguous,
+                "feed_recovery_navigation_unconfirmed",
+            ));
+        }
+        let probe = probe_facebook_feed(session).await?;
+        let recovery_gone = probe.feed_recovery_target.as_ref().is_none_or(|target| {
+            !target.ok && target.reason.as_deref() == Some("no_feed_recovery_target")
+        });
+        if recovery_gone && probe.surface == "home" {
+            session.facebook.active_list_url = FACEBOOK_HOME_URL.to_owned();
+            return Ok(FacebookFeedRecovery::Continue(probe));
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+}
+
+async fn probe_facebook_feed_recovery_target(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookPointTarget, EngineError> {
+    let expression = facebook::feed_recovery_target_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::point_target_from_cdp(&raw)
+}
+
 async fn dispatch_facebook_feed_wheel(
     session: &mut EngineSession,
     probe: &facebook::FacebookFeedProbe,
@@ -699,6 +833,7 @@ mod tests {
             inner_height: 900.0,
             scroll_height,
             document_age_ms: 10_000,
+            feed_recovery_target: None,
         }
     }
 

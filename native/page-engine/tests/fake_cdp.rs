@@ -302,6 +302,110 @@ async fn facebook_feed_scroll_dispatches_a_humanized_multi_frame_wheel_gesture()
 }
 
 #[tokio::test]
+async fn facebook_feed_recovery_uses_one_trusted_cdp_click_before_returning_cards() {
+    let (port, server) = spawn_facebook_feed_recovery_cdp(true).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+    let mut command = browse_command(1);
+    command.deadline_unix_ms = unix_time_ms() + 4_000;
+
+    let outcome = engine
+        .execute(&command)
+        .await
+        .expect("Facebook Feed recovery");
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook Feed recovery fake CDP");
+    let trace = requests
+        .iter()
+        .map(|request| {
+            (
+                request["method"].as_str().unwrap_or_default(),
+                router_kind(request),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outcome.effect_phase,
+        EffectPhase::Confirmed,
+        "unexpected recovery outcome: {outcome:?}; requests={trace:?}"
+    );
+    let CommandOutput::PageCards(cards) = outcome.output.expect("Feed cards") else {
+        panic!("expected Feed cards")
+    };
+    assert_eq!(
+        cards.cards[0].note_id.as_deref(),
+        Some("https://www.facebook.com/Alice/posts/pfbidRECOVERED")
+    );
+
+    assert_eq!(router_call_count(&requests, "feed_recovery_target"), 1);
+    let mouse = requests
+        .iter()
+        .filter(|request| request["method"] == "Input.dispatchMouseEvent")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        mouse
+            .iter()
+            .filter_map(|request| request["params"]["type"].as_str())
+            .collect::<Vec<_>>(),
+        vec!["mouseMoved", "mousePressed", "mouseReleased"]
+    );
+    assert!(
+        mouse
+            .iter()
+            .all(|request| request["params"]["x"] == 540.0 && request["params"]["y"] == 330.0)
+    );
+}
+
+#[tokio::test]
+async fn facebook_feed_recovery_click_without_home_postcondition_is_ambiguous() {
+    let (port, server) = spawn_facebook_feed_recovery_cdp(false).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    // 命令原子预算 = min(会话 timeout_ms, 命令种类上限)，而 `session_open` 的默认 timeout_ms 只有 2s，
+    // 比 8s 恢复窗还短。沿用默认值时外层必先到点，诚实回执（feed_recovery_navigation_unconfirmed）
+    // 被改判成合成的 CdpTimeout；改 deadline_unix_ms 对此**无效**——绑定项从来不是它。
+    // 与本文件其它长流程用例一致取 90s，让恢复窗成为唯一约束项，判定与机器负载无关。
+    open.params.timeout_ms = 90_000;
+    engine.open(&open).await.expect("open Facebook session");
+    let mut command = browse_command(1);
+    command.deadline_unix_ms = unix_time_ms() + 30_000;
+
+    let outcome = engine
+        .execute(&command)
+        .await
+        .expect("Facebook Feed recovery without postcondition");
+    engine.shutdown().await;
+    let requests = server
+        .await
+        .expect("Facebook Feed unconfirmed recovery fake CDP");
+    assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
+    let Some(output) = outcome.output.as_ref() else {
+        panic!("expected scroll receipt, got {outcome:?}");
+    };
+    let CommandOutput::ActionReceipt(receipt) = output else {
+        panic!("expected scroll receipt")
+    };
+    assert!(!receipt.ok);
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("feed_recovery_navigation_unconfirmed")
+    );
+
+    let mouse_types = requests
+        .iter()
+        .filter(|request| request["method"] == "Input.dispatchMouseEvent")
+        .filter_map(|request| request["params"]["type"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        mouse_types,
+        vec!["mouseMoved", "mousePressed", "mouseReleased"]
+    );
+}
+
+#[tokio::test]
 async fn facebook_reel_scroll_uses_trusted_arrow_and_requires_identity_movement() {
     let (port, server) = spawn_facebook_reel_arrow_cdp().await;
     let mut engine = Engine::default();
@@ -1896,6 +2000,7 @@ fn router_kind(request: &Value) -> Option<String> {
         "page_probe",
         "consent_probe",
         "feed_probe",
+        "feed_recovery_target",
         "feed_refresh",
         "browse_scroll",
         "note_open",
@@ -2802,6 +2907,113 @@ async fn spawn_facebook_feed_scroll_cdp() -> (u16, tokio::task::JoinHandle<Vec<V
         requests
     });
     (port, server)
+}
+
+async fn spawn_facebook_feed_recovery_cdp(
+    confirm_home: bool,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut clicked = false;
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            if request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseReleased"
+            {
+                clicked = true;
+            }
+            let result = match router_kind(&request).as_deref() {
+                Some("page_probe") => facebook_feed_page_probe_cdp(),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("feed_probe") => {
+                    facebook_feed_recovery_probe_cdp(!clicked, clicked && confirm_home)
+                }
+                Some("feed_recovery_target") => router_cdp(
+                    "point_target",
+                    json!({
+                        "ok": true,
+                        "cx": 540.0,
+                        "cy": 330.0
+                    }),
+                ),
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
+fn facebook_feed_recovery_probe_cdp(prompt: bool, confirmed_home: bool) -> Value {
+    router_cdp(
+        "feed_probe",
+        json!({
+            "cards": if confirmed_home {
+                json!([{
+                    "index": 0,
+                    "title": "Recovered Feed card",
+                    "likeCount": 0,
+                    "collectCount": 0,
+                    "noteId": "https://www.facebook.com/Alice/posts/pfbidRECOVERED"
+                }])
+            } else {
+                json!([])
+            },
+            "documentGeneration": if confirmed_home {
+                "recovered-home-generation"
+            } else {
+                "feed-recovery-generation"
+            },
+            "listKind": "feed",
+            "listState": if confirmed_home { "ready" } else { "empty" },
+            "loading": false,
+            "articleCount": if confirmed_home { 1 } else { 0 },
+            "explicitEmpty": false,
+            "explicitEnd": false,
+            "url": if prompt || confirmed_home {
+                "https://www.facebook.com/"
+            } else {
+                "https://www.facebook.com/recovery-pending"
+            },
+            "surface": if prompt || confirmed_home { "home" } else { "unknown" },
+            "feedRecoveryTarget": if prompt {
+                json!({
+                    "ok": true,
+                    "cx": 540.0,
+                    "cy": 330.0
+                })
+            } else {
+                json!({
+                    "ok": false,
+                    "reason": "no_feed_recovery_target"
+                })
+            },
+            "scrollY": 0,
+            "innerWidth": 1440,
+            "innerHeight": 800,
+            "scrollHeight": 800,
+            "documentAgeMs": 2000
+        }),
+    )
 }
 
 fn facebook_feed_page_probe_cdp() -> Value {

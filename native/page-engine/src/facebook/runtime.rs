@@ -20,8 +20,13 @@ use std::time::Duration;
 use url::Url;
 
 const FIRST_POST_SCROLL_ROUNDS: usize = 4;
-const FIRST_POST_EDITOR_TIMEOUT: Duration = Duration::from_secs(4);
-const FIRST_POST_DETAIL_TIMEOUT: Duration = Duration::from_secs(8);
+// 首帖这两个窗口是本链的实测失败边界（change restore-facebook-post-join-comment-continuity）：
+// 近两日全部首帖失败耗时 9.8–15.8s、全部成功 ≤7s，判别量是页面水合速度而非账号 / 版面 / 群。
+// 绑定窗从「文档可交互」起算，而这类群页的内容水合发生在其后，4s 过紧；身份回读窗原为普通读
+// 路径同一件事所给窗口（15s）的一半。放宽后外层原子上限必须同步抬（src/native-page-engine/
+// browse-session.ts），否则外层先到点、产出的是信息量更低的合成失败。加群侧预算不在本次范围内。
+const FIRST_POST_EDITOR_TIMEOUT: Duration = Duration::from_secs(12);
+const FIRST_POST_DETAIL_TIMEOUT: Duration = Duration::from_secs(20);
 const FIRST_POST_TARGET_PREFIX: &str = "aidcp:facebook-group-feed-post:v1:";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
