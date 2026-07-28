@@ -55,6 +55,22 @@ async function(input){
   const done=(output,effectPhase='confirmed')=>({effectPhase,output});
   const fail=(name,reason)=>done(action(name,false,reason),'not_started');
   const ambiguous=(name,reason)=>done(action(name,false,reason),'ambiguous');
+  // 编辑器读写口径：受控框读 value，contenteditable 读文本节点（与 dispatchInput 的两条分支一一对应）。
+  const readEditor=(el)=>'value' in el?String(el.value||''):String((el&&(el.innerText||el.textContent))||'');
+  // 清场闸：输入是在光标处追加，上一次留下的残文不清干净就会与本条拼在一起发出去。
+  const clearEditor=(el)=>{dispatchInput(el,'');return norm(readEditor(el),32000)==='';};
+  // 分段写入：正文一段、联系方式串码另起一段，各自整段写入（段界保留，便于后续换成逐字/整段插入两条通道）。
+  const appendEditor=(el,segment)=>{dispatchInput(el,readEditor(el)+segment);};
+  // 笔记级访问限制 / 错误页判据：容器机械信号（与页型分类 PageKind::Error 同一组类名）+ 退役实现的词库。
+  // 错误页地址同样是 /explore/<id>，所以「地址里解析得出笔记 id」永远不能当成打开成功。
+  const ERROR_PAGE_SELECTOR='[class*="not-found"],[class*="notFound"],[class*="error-page"],[class*="errorPage"]';
+  const ACCESS_LIMIT_PHRASES=['当前笔记暂时无法浏览','请打开小红书App扫码查看','小红书如何扫码'];
+  const noteUnavailable=(root)=>{
+    if(all(ERROR_PAGE_SELECTOR).some(visible))return true;
+    const scope=root&&root!==document?root:(document.body||document);
+    const body=text(scope,6000);
+    return ACCESS_LIMIT_PHRASES.some((phrase)=>body.includes(phrase));
+  };
 
   const cardNodes=()=>all('section.note-item,[class*="note-item"],a[href*="/explore/"],a[href*="/discovery/item/"]').filter(visible);
   const cards=()=>{
@@ -113,8 +129,17 @@ async function(input){
       authorId:(authorHref.match(/\/user\/profile\/([A-Za-z0-9]+)/)||[])[1]||undefined,
       likeCount:count(text(likes,64)),collectCount:count(text(collects,64)),
       authorFollowed:active(first(['[class*="follow"]','button'],root)),
-      url:String(location.href).slice(0,4096),images,comments,
+      // 诚实置空：仅当地址栏确含访问令牌时才作为真实可点链接上报，否则不带——绝不用打不开的裸链充数。
+      url:String(location.href).includes('xsec_token=')?String(location.href).slice(0,4096):undefined,images,comments,
     }};
+  };
+  // 正面详情证据：详情容器存在 + 标题 / 正文 / 图片至少一项非空。三项皆空 = 空壳，不算打开成功。
+  const confirmedDetail=()=>{
+    const root=detailRoot();
+    if(!root||noteUnavailable(root))return null;
+    const output=detail();
+    const value=output.value;
+    return value.title||value.content||(value.images&&value.images.length)?output:null;
   };
   const profile=()=>{
     const id=(location.pathname.match(/\/user\/profile\/([A-Za-z0-9]+)/)||[])[1]||norm(p.authorId||'',256);
@@ -185,14 +210,23 @@ async function(input){
     return done(cards());
   }
   if(kind==='note_open'){
-    if((detailRoot()||noteIdFrom(location.href))&&exactNote())return done(detail());
+    // ① 幂等早退（已有详情容器，或地址就是被点名的那条笔记）：同样要过正面详情证据这一关，
+    // 否则停在错误页 / 空壳页时会被当成「已在目标笔记」直接回详情——而详情上报即云端浏览计数。
+    if((detailRoot()||(p.noteId&&noteIdFrom(location.href)===p.noteId))&&exactNote()){
+      if(noteUnavailable(detailRoot()))return fail('open_note','note_unavailable');
+      const already=confirmedDetail();
+      return already?done(already):ambiguous('open_note','detail_evidence_missing');
+    }
     if(p.surface==='feed')return fail('open_note','capability_unsupported');
     const candidates=cardNodes();
     const hit=p.noteId?candidates.find((node)=>noteIdFrom((node.matches('a')?node:first(['a[href]'],node)||{}).href)===p.noteId):candidates[Number(p.index)||0];
     if(!hit)return fail('open_note','target_not_found');
     click(hit.matches('a')?hit:(first(['a[href]'],hit)||hit));await sleep(900);
-    if(!detailRoot()&&!noteIdFrom(location.href))return ambiguous('open_note','detail_not_confirmed');
-    return done(detail());
+    // ② 点击后的判据同样只认正面证据：错误页语义命中即诚实失败，未确认打开一律不产出 note_detail。
+    if(noteUnavailable(detailRoot()))return ambiguous('open_note','note_unavailable');
+    if(!detailRoot())return ambiguous('open_note','detail_not_confirmed');
+    const opened=confirmedDetail();
+    return opened?done(opened):ambiguous('open_note','detail_evidence_missing');
   }
   if(kind==='note_close'){
     const root=detailRoot();if(!root)return fail('close','detail_not_open');
@@ -233,7 +267,35 @@ async function(input){
     const control=findByWords(words,root);if(!control)return fail(name,'control_not_found');if(active(control))return done(action(name,true,'already_active',{noteId:p.noteId}));click(control);await sleep(450);return active(control)||text(control,100).includes('已')?done(action(name,true,undefined,{noteId:p.noteId})):ambiguous(name,'postcondition_unconfirmed');
   }
   if(kind==='interaction_comment'){
-    if(!exactNote())return fail('comment','note_page_mismatch');const root=detailRoot()||document;const editor=first(['textarea','[contenteditable="true"]','input[placeholder*="评论"]'],root);if(!editor)return fail('comment','comment_editor_not_found');dispatchInput(editor,norm(p.text,32000));await sleep(100);if(!text(editor,32000).includes(norm(p.text,100))&&String(editor.value||'')!==String(p.text))return fail('comment','comment_readback_mismatch');const submit=findByWords(['发送','发布','submit'],root);if(!submit)return fail('comment','comment_submit_not_found');click(submit);await sleep(800);const appeared=all('[class*="comment"]',root).some((el)=>text(el,32000).includes(norm(p.text,500)));return appeared?done(action('comment',true,undefined,{noteId:p.noteId})):ambiguous('comment','comment_submit_unconfirmed');
+    if(!exactNote())return fail('comment','note_page_mismatch');
+    const root=detailRoot()||document;
+    const editor=first(['textarea','[contenteditable="true"]','input[placeholder*="评论"]'],root);
+    if(!editor)return fail('comment','comment_editor_not_found');
+    const body=norm(p.text,32000);
+    if(!body)return fail('comment','comment_text_empty');
+    const contactCode=norm(p.groupChatCode,2000);
+    // 清场闸：残文清不干净就诚实终止，绝不带着上一条的半截评论拼接发出。
+    if(!clearEditor(editor))return fail('comment','editor_not_clean');
+    // 审=发：人审看到的终稿是「正文 + 换行 + 联系方式串码」。两段分别写入，段界即两段的分工
+    // （后续换成「正文逐字派发 + 串码整段插入」两条通道时，段界不变）。
+    for(const segment of contactCode?[body,'\n'+contactCode]:[body]){appendEditor(editor,segment);await sleep(60);}
+    await sleep(100);
+    // 回读校验覆盖合成后的完整文本：正文与串码都必须在，且串码在正文之后（不许丢、不许换序）。
+    // 只比两段各自的存在与先后、不比分隔符的渲染形态（contenteditable 可能把换行渲染成 <br>）。
+    const readBack=norm(readEditor(editor),32000);
+    const bodyAt=readBack.indexOf(body);
+    const codeAt=contactCode?readBack.indexOf(contactCode):bodyAt;
+    if(bodyAt<0)return fail('comment','comment_readback_mismatch');
+    if(codeAt<0)return fail('comment','comment_contact_code_missing');
+    if(codeAt<bodyAt)return fail('comment','comment_readback_mismatch');
+    const submit=findByWords(['发送','发布','submit'],root);
+    if(!submit)return fail('comment','comment_submit_not_found');
+    // click 在控件不可见时什么都不做——那是「未提交」，必须与「已提交、结果未知」区分开。
+    if(!click(submit))return fail('comment','comment_submit_not_actuated');
+    await sleep(800);
+    const appeared=all('[class*="comment"]',root).some((el)=>text(el,32000).includes(norm(body,500)));
+    // 提交动作已派发：分不清就报「已提交、结果未知」，绝不谎报未提交（上游据此写去重、不重投，防重复评论）。
+    return appeared?done(action('comment',true,undefined,{noteId:p.noteId})):ambiguous('comment','submitted_unconfirmed');
   }
   if(kind==='interaction_like_comment'){
     if(!exactNote())return fail('like_comment','note_page_mismatch');const anchor=all('[data-comment-id],[data-id],[id]',detailRoot()||document).find((el)=>String(el.getAttribute('data-comment-id')||el.getAttribute('data-id')||el.id||'')===String(p.commentAnchorId||''));if(!anchor)return fail('like_comment','comment_target_not_found');const control=findByWords(['赞','like'],anchor);if(!control)return fail('like_comment','control_not_found');if(active(control))return done(action('like_comment',true,'already_active',{noteId:p.noteId}));click(control);await sleep(350);return active(control)?done(action('like_comment',true,undefined,{noteId:p.noteId})):ambiguous('like_comment','postcondition_unconfirmed');
