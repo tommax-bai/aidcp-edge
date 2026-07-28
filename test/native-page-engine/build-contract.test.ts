@@ -24,6 +24,11 @@ test('ordinary TypeScript builds remain independent while every Electron package
   assert.match(JSON.stringify(packageJson.build.extraResources ?? []), /build\/native-page-engine\/\$\{platform\}-\$\{arch\}/);
 });
 
+// 注意：本文件里「断言脚本文本包含某标识符 / 某字面量」的用例一律是**存在性断言**，
+// 不构成「这道闸会判定」的证据 —— 闸门指向一个任何构建都产不出的位置时，
+// 这类断言同样全绿（本仓两道恒不触发的泄漏闸就是在这类断言下绿了很久）。
+// 判定型证据在 test/native-page-engine/artifact-gates.test.ts：
+// 每道否定式闸门都被植入违规内容并观察到拒绝。
 test('native staging is explicit, locked, outside ASAR, and unsigned', async () => {
   const packageJson = JSON.parse(await readFile(resolve(repoRoot, 'package.json'), 'utf8')) as {
     scripts: Record<string, string>;
@@ -52,6 +57,23 @@ test('native staging is explicit, locked, outside ASAR, and unsigned', async () 
   assert.match(script, /cwd: crateDir/);
   assert.match(script, /unsigned target artifact verified with encoded page rules/);
   assert.doesNotMatch(main, /NativePageEngineClient/);
+});
+
+test('the repository exposes native toolchain gates next to the TypeScript gates', async () => {
+  const packageJson = JSON.parse(await readFile(resolve(repoRoot, 'package.json'), 'utf8')) as {
+    scripts: Record<string, string>;
+  };
+  for (const script of ['gate:native', 'gate:native:fmt', 'gate:native:clippy', 'gate:native:test']) {
+    assert.match(packageJson.scripts[script] ?? '', /gate-native/, `${script} must be a repository-level command`);
+  }
+  const gate = await readFile(resolve(repoRoot, 'scripts/gate-native.mjs'), 'utf8');
+  // 工具链解析必须锚在 crate 目录：从仓根敲 cargo 会落到默认工具链。
+  assert.match(gate, /cwd: crateDir/);
+  assert.match(gate, /rust-toolchain\.toml/);
+  // 缺组件必须失败，不得记为跳过或非阻断。
+  assert.match(gate, /rustup component add/);
+  assert.doesNotMatch(gate, /skip(ped|ping)/i);
+  assert.doesNotMatch(gate, /non-blocking/i);
 });
 
 test('packaged artifact verifier pins the production protocol and capability set', async () => {

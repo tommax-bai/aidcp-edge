@@ -1,0 +1,60 @@
+name: Checks
+
+# 日常改动的机械门禁。
+#
+# 为什么单独一条：仓内唯一的既有工作流 build-desktop.yml 是**手动触发的出包**流水线，
+# 既不跑单测也不跑 Rust 检查 —— 于是近两万行 Rust 与全部构建脚本从来不在任何自动
+# 流程里执行。出包职责留在那条工作流不动，这条只负责 push / PR 上的检查。
+#
+# 跑在 macOS 上的原因：Native 引擎的构建脚本只支持 darwin/win32 目标，
+# 页面引擎相关用例会解析这些目标目录。
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: TypeScript + Native gates
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        working-directory: native/page-engine
+        run: |
+          set -euo pipefail
+          channel="$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml | head -n 1)"
+          [ -n "$channel" ] || { echo 'rust-toolchain.toml declares no channel' >&2; exit 1; }
+          # components 必须显式带上：只装 --profile minimal 会得到一个没有
+          # clippy / rustfmt 的工具链，门禁随后会以「缺组件」失败。
+          rustup toolchain install "$channel" --component clippy --component rustfmt
+          # 记录本次运行实际生效的编译器版本，使「CI 上跑的到底是不是钉死的那个」可事后对账。
+          rustup show
+          rustup run "$channel" rustc --version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Acceptance tests
+        run: npm run test:acceptance
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Native gates (fmt / clippy / test)
+        run: npm run gate:native

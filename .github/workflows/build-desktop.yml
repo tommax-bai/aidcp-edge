@@ -59,9 +59,20 @@ jobs:
         with:
           node-version: '20'
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      # 工具链取 native/page-engine/rust-toolchain.toml 钉死的版本。
+      # 旧写法 dtolnay/rust-toolchain@stable 会导出 RUSTUP_TOOLCHAIN=stable，
+      # 反过来盖掉那份 pin —— 发版产物于是用了一个事后无从对账的编译器版本。
+      - name: Install pinned Rust toolchain
+        shell: bash
+        working-directory: native/page-engine
+        run: |
+          set -euo pipefail
+          channel="$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml | head -n 1)"
+          [ -n "$channel" ] || { echo 'rust-toolchain.toml declares no channel' >&2; exit 1; }
+          rustup toolchain install "$channel" --component clippy --component rustfmt
+          rustup target add --toolchain "$channel" x86_64-apple-darwin aarch64-apple-darwin
+          rustup show
+          rustup run "$channel" rustc --version
       - name: Install dependencies
         run: npm ci
       - name: Check macOS signing secrets
@@ -201,9 +212,18 @@ jobs:
         with:
           node-version: '20'
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
+      # 与 macOS 作业同口径：工具链取 rust-toolchain.toml 钉死的版本，不被 @stable 盖掉。
+      - name: Install pinned Rust toolchain
+        shell: bash
+        working-directory: native/page-engine
+        run: |
+          set -euo pipefail
+          channel="$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml | head -n 1)"
+          [ -n "$channel" ] || { echo 'rust-toolchain.toml declares no channel' >&2; exit 1; }
+          rustup toolchain install "$channel" --component clippy --component rustfmt
+          rustup target add --toolchain "$channel" x86_64-pc-windows-msvc
+          rustup show
+          rustup run "$channel" rustc --version
       - name: Install dependencies
         run: npm ci
       - name: Build Windows installer

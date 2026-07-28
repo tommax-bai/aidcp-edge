@@ -27,7 +27,13 @@ export function ensureNativePageEngineDev(projectRoot, options = {}) {
     return { status: 'verified', platform, arch };
   }
 
-  write(`Native Page Engine ${platform}-${arch} artifact is missing or stale; rebuilding.\n`);
+  // 5.3：verify 已由源码摘要决定成败（build-native-page-engine.mjs 的 sourceDigest），
+  // 所以这条分支现在同时覆盖「产物缺失」与「源码改了但没重建」。
+  // 判定理由必须原样带出来，MUST NOT 把「为什么要重建」吞掉。
+  const reason = String(verify.stderr || '').trim()
+    || (verify.error ? String(verify.error.message || verify.error) : '')
+    || 'verification exited non-zero without a message';
+  write(`Native Page Engine ${platform}-${arch} artifact is missing or stale; rebuilding. Reason: ${reason}\n`);
   const build = run(process.execPath, [builder, '--target-arch', arch], {
     cwd: root,
     env: process.env,

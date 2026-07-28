@@ -4,6 +4,12 @@ const { execFileSync } = require('node:child_process');
 const { existsSync, readFileSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 const asar = require('@electron/asar');
+const {
+  PRODUCTION_FORBIDDEN_MARKERS,
+  RETIRED_DIST_MODULES,
+  assertPackagingAllowListExcludesFragments,
+  packagedFragmentEntries,
+} = require('./native-engine-inventory.cjs');
 const { verifyNativePageEngineArtifact } = require('../src/electron/native-page-engine-artifact.cjs');
 const { verifyGostArtifact } = require('../src/electron/gost-artifact.cjs');
 
@@ -172,49 +178,48 @@ function verifyPackagedDependencyClosure(asarPath, packageLockPath) {
   return requiredEntries.length - 1;
 }
 
-function verifyPackagedXiaohongshuLeakage(asarPath) {
-  const entries = asar.listPackage(asarPath);
-  const forbiddenEntries = [
-    '/native/page-engine/src/facebook-router/00-shared.js',
-    '/native/page-engine/src/facebook-router/05-session.js',
-    '/native/page-engine/src/facebook-router/10-feed-like.js',
-    '/native/page-engine/src/facebook-router/20-feed.js',
-    '/native/page-engine/src/facebook-router/30-reels.js',
-    '/native/page-engine/src/facebook-router/40-group-join.js',
-    '/native/page-engine/src/facebook-router/50-comment.js',
-    '/native/page-engine/src/facebook-router/60-publish.js',
-    '/native/page-engine/src/facebook-router/70-identity.js',
-    '/native/page-engine/src/facebook-router/90-dispatch.js',
-    '/dist/browse/browse-session.js',
-    '/dist/browse/feed-scroller.js',
-    '/dist/browse/modal-controller.js',
-    '/dist/browse/note-extractor.js',
-    '/dist/browse/search-handler.js',
-    '/dist/browse/notification-monitor.js',
-    '/dist/flows/publish-command-handlers.js',
-    '/dist/client/cloud-selector.js',
-    '/dist/client/like-runner.js',
-    '/dist/locating/engine.js',
-    '/dist/locating/cache.js',
+/**
+ * 打包禁止条目 = 由页面规则清单派生的明文分片条目 + 已退役的 TypeScript 模块产物。
+ * 分片这半边 MUST 派生，MUST NOT 手抄：手抄的那版停在 10 条、漏掉
+ * 08-reaction-semantics.js（承载点赞状态识别与反应控件定位），而事实源是 11 条。
+ */
+function packagedForbiddenEntries(projectRoot) {
+  return [
+    ...packagedFragmentEntries(projectRoot),
+    ...RETIRED_DIST_MODULES.map((path) => `/dist/${path}`),
   ];
-  const leakedPath = forbiddenEntries.find((entry) => entries.includes(entry));
+}
+
+function verifyPackagedXiaohongshuLeakage(asarPath, options = {}) {
+  const projectRoot = options.projectRoot ?? resolve(__dirname, '..');
+  const archive = options.asar ?? asar;
+  const readPackageJson = options.readPackageJson
+    ?? (() => JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')));
+
+  // 今天真正在挡明文分片的是 electron-builder 的 files 允许清单（默认拒绝），
+  // 不是下面那份禁止清单。允许清单一旦被放宽到能覆盖 native/page-engine/src/**，
+  // 明文分片就可以进归档 —— 所以这里先对允许清单本身断言，而不是只等禁止清单命中。
+  const packageJson = readPackageJson();
+  assertPackagingAllowListExcludesFragments((packageJson.build && packageJson.build.files) || []);
+
+  const entries = archive.listPackage(asarPath);
+  // 两类泄漏各自报各自的名字：明文页面规则分片进归档，与退役 TypeScript 模块进归档，
+  // 成因与处置完全不同，合成一句话会让报错指不到真因。
+  const fragmentEntries = new Set(packagedFragmentEntries(projectRoot));
+  const leakedFragment = entries.find((entry) => fragmentEntries.has(entry));
+  if (leakedFragment) {
+    throw new Error(`Packaged cleartext page-rule fragment is forbidden: ${leakedFragment}`);
+  }
+  const leakedPath = RETIRED_DIST_MODULES
+    .map((path) => `/dist/${path}`)
+    .find((entry) => entries.includes(entry));
   if (leakedPath) throw new Error(`Packaged migrated Xiaohongshu JavaScript is forbidden: ${leakedPath}`);
   const sourceMap = entries.find((entry) => entry.startsWith('/dist/') && entry.endsWith('.map'));
   if (sourceMap) throw new Error(`Packaged source map is forbidden: ${sourceMap}`);
-  const markers = [
-    'FOLLOW_BUTTON_SELECTORS',
-    'note.publish_set_cover',
-    'creator-preview-image-0',
-    'input.upload-input[type=file]',
-    'data-aidcp-native-feed-like',
-    'data-aidcp-native-reel-like-target',
-    'targetGroupScope',
-    'composer_editor_not_found',
-  ];
   for (const entry of entries.filter((value) => value.startsWith('/dist/') && value.endsWith('.js'))) {
-    const source = asar.extractFile(asarPath, entry.slice(1)).toString('utf8');
-    const marker = markers.find((value) => source.includes(value));
-    if (marker) throw new Error(`Packaged migrated Xiaohongshu rule marker is forbidden in ${entry}: ${marker}`);
+    const source = archive.extractFile(asarPath, entry.slice(1)).toString('utf8');
+    const marker = PRODUCTION_FORBIDDEN_MARKERS.find((value) => source.includes(value));
+    if (marker) throw new Error(`Packaged migrated page-rule marker is forbidden in ${entry}: ${marker}`);
   }
   if (!entries.includes('/dist/native-page-engine/runtime.js')) {
     throw new Error('Packaged selector-free Native Page Engine facade is missing');
@@ -244,7 +249,7 @@ async function afterPack(context) {
     });
     console.log(`GOST artifact verified for ${context.electronPlatformName}/${targetArch}.`);
   }
-  console.log(`Packaged Xiaohongshu JavaScript leakage scan passed across ${runtimeModuleCount} runtime modules.`);
+  console.log(`Packaged page-rule JavaScript leakage scan passed across ${runtimeModuleCount} runtime modules.`);
 
   const runner = resolvePackagedSmokeRunner(context);
   if (!runner) {
@@ -269,3 +274,4 @@ module.exports.runPackagedRuntimeSmoke = runPackagedRuntimeSmoke;
 module.exports.verifyPackagedSmokeRunner = verifyPackagedSmokeRunner;
 module.exports.verifyPackagedDependencyClosure = verifyPackagedDependencyClosure;
 module.exports.verifyPackagedXiaohongshuLeakage = verifyPackagedXiaohongshuLeakage;
+module.exports.packagedForbiddenEntries = packagedForbiddenEntries;

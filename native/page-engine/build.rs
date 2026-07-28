@@ -129,10 +129,17 @@ fn main() {
 }
 
 fn read_ordered_sources(manifest_path: &str) -> Vec<u8> {
+    let manifest_file_name = Path::new(manifest_path)
+        .file_name()
+        .expect("source manifest file name")
+        .to_owned();
     let manifest = fs::read_to_string(manifest_path).expect("read ordered source manifest");
     let directory = Path::new(manifest_path)
         .parent()
         .expect("source manifest directory");
+    // 目录本身也要 rerun：否则新增一个未登记的分片不会触发 build.rs 重跑，
+    // 下面的反向对账就永远看不到它。
+    println!("cargo:rerun-if-changed={}", directory.display());
     let mut source = Vec::new();
     let mut entries = std::collections::HashSet::new();
     let mut previous: Option<&str> = None;
@@ -152,11 +159,46 @@ fn read_ordered_sources(manifest_path: &str) -> Vec<u8> {
         previous = Some(entry);
         let path = directory.join(entry);
         println!("cargo:rerun-if-changed={}", path.display());
-        source.extend(fs::read(path).expect("read ordered source fragment"));
+        let fragment = fs::read(&path).unwrap_or_else(|_| {
+            panic!("ordered source manifest names a missing fragment: {entry}")
+        });
+        // 拼接不变量：每片必须以换行结尾。
+        // 选「断言尾随换行」而不是「片间插显式分隔字节」，理由是后者会改变已编入
+        // 二进制的字节序列（属行为变更，本 change 明确不改分片内容与产物语义）；
+        // 断言式在当前 11 片（末字节实测均为 0x0a）下零行为差异。
+        // 不做这条断言时，某片丢掉尾随换行且末行是行注释，会把下一片首行注释掉 ——
+        // 结果仍是合法脚本，只是某个函数凭空消失，跑到那条路径才报未定义。
+        assert!(
+            fragment.last() == Some(&b'\n'),
+            "ordered source fragment must end with a newline before concatenation: {entry}"
+        );
+        source.extend(fragment);
     }
     assert!(
         !entries.is_empty(),
         "ordered source manifest cannot be empty"
     );
+    // 反向对账：目录里出现未登记的分片即失败并指名它。
+    // 只做正向断言时，新增分片却忘记登记会构建照过、二进制里没有它、
+    // 运行时静默走缺失逻辑 —— 本地全绿、只有真跑页面命令才现形。
+    for item in fs::read_dir(directory).expect("read ordered source directory") {
+        let item = item.expect("read ordered source directory entry");
+        if !item
+            .file_type()
+            .expect("ordered source entry type")
+            .is_file()
+        {
+            continue;
+        }
+        let name = item.file_name();
+        if name == manifest_file_name {
+            continue;
+        }
+        let name = name.to_string_lossy().into_owned();
+        assert!(
+            entries.contains(name.as_str()),
+            "page-rule fragment is not registered in the ordered source manifest: {name}"
+        );
+    }
     source
 }
